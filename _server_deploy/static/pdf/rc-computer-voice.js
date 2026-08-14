@@ -11,7 +11,7 @@
   var RC = window.RC = window.RC || {};
   var BRIDGE_CONTRACT = "reader-computer-voice-bridge/1";
   var DIRECT_CONTRACT = "reader-computer-voice-direct/1";
-  var MAX_MESSAGE_BYTES = 65536;
+  var MAX_MESSAGE_BYTES = 262144;
   var PCM_FRAME_BYTES = 1956;
   var PCM_HEADER_BYTES = 36;
   var PCM_SAMPLES = 960;
@@ -58,6 +58,9 @@
   var ACTIVE_READING_HEARTBEAT_MS = 60000;
   var LOCAL_PAGE_CONTEXT_POLL_MS = 1500;
   var LOCAL_PAGE_TEXT_WAIT_MS = 1200;
+  var LOCAL_HIGHLIGHT_SOURCE_REFRESH_MS = 30000;
+  var LOCAL_HIGHLIGHT_SOURCE_RETRY_MS = 5000;
+  var LOCAL_HIGHLIGHT_SOURCE_TTL_MARGIN_MS = 30000;
   var SNAPSHOT_RECONNECT_MS = 1000;
   var SNAPSHOT_RECONNECT_MAX_MS = 15000;
   var CONTEXT_BOOTSTRAP_LIMIT = 500;
@@ -148,6 +151,7 @@
   var nativeContextHandoffPending = false;
   var nativeContextRequestSequence = 0;
   var nativeContextPending = Object.create(null);
+  var localHighlightSourceCache = null;
   var readerVisualCache = null;
   var readerVisualCaptureKey = null;
   var readerVisualCapturePromise = null;
@@ -622,6 +626,81 @@
     return normalized;
   }
 
+  function normalizeReaderHighlightRangeRef(value) {
+    exactObject(
+      value,
+      [
+        "contract", "snapshotId", "documentId", "target",
+        "sourceDigest", "revision", "startMarker", "endMarker",
+      ],
+      [],
+      "Reader 范围高亮引用"
+    );
+    if (value.contract !== "reader-source-range/1") {
+      throw directError(
+        "Reader 范围高亮合同无效",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    }
+    var snapshotId = safeId(
+      value.snapshotId,
+      "Reader 范围高亮 snapshotId"
+    );
+    var documentId = safeText(
+      value.documentId,
+      "Reader 范围高亮 documentId",
+      4096,
+      false
+    );
+    var sourceDigest = safeText(
+      value.sourceDigest,
+      "Reader 范围高亮 sourceDigest",
+      30,
+      false
+    );
+    var revision = safeText(
+      value.revision,
+      "Reader 范围高亮 revision",
+      160,
+      false
+    );
+    var startMarker = safeId(
+      value.startMarker,
+      "Reader 范围高亮 startMarker"
+    );
+    var endMarker = safeId(
+      value.endMarker,
+      "Reader 范围高亮 endMarker"
+    );
+    if (
+      !/^hrs_[0-9a-f]{24}$/.test(snapshotId) ||
+      /[\u0000-\u001f\u007f-\u009f]/.test(documentId) ||
+      !/^rsd1_[0-9a-f]{8}_[0-9a-f]{16}$/.test(sourceDigest) ||
+      (/\s/.test(revision) ||
+        /[\u0000-\u001f\u007f-\u009f]/.test(revision)) ||
+      !/^m_[0-9a-z]{1,4}$/.test(startMarker) ||
+      !/^m_[0-9a-z]{1,4}$/.test(endMarker) ||
+      startMarker === endMarker
+    ) {
+      throw directError(
+        "Reader 范围高亮身份无效",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    }
+    return {
+      contract: "reader-source-range/1",
+      snapshotId: snapshotId,
+      documentId: documentId,
+      target: normalizeReaderOutputTarget(value.target),
+      sourceDigest: sourceDigest,
+      revision: revision,
+      startMarker: startMarker,
+      endMarker: endMarker,
+    };
+  }
+
   function normalizeReaderAnkiDraftCards(cards) {
     if (!Array.isArray(cards) || cards.length < 1 || cards.length > 12) {
       throw directError(
@@ -978,6 +1057,47 @@
         note: p.note === null
           ? null
           : safeText(p.note, "Reader 精确高亮 note", 2000, true),
+      };
+    } else if (kind === "highlight-range") {
+      exactObject(
+        p,
+        ["mutationId", "rangeRef", "color", "note"],
+        [],
+        "Reader 范围高亮输出"
+      );
+      var rangeMutationId = safeText(
+        p.mutationId,
+        "Reader 范围高亮 mutationId",
+        34,
+        false
+      );
+      if (!/^c_[a-f0-9]{8,32}$/.test(rangeMutationId)) {
+        throw directError(
+          "Reader 范围高亮 mutationId 无效",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
+      }
+      var rangeColor = safeText(
+        p.color,
+        "Reader 范围高亮 color",
+        16,
+        false
+      );
+      if (["yellow", "green", "blue", "pink"].indexOf(rangeColor) < 0) {
+        throw directError(
+          "Reader 范围高亮颜色无效",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
+      }
+      payload = {
+        mutationId: rangeMutationId,
+        rangeRef: normalizeReaderHighlightRangeRef(p.rangeRef),
+        color: rangeColor,
+        note: p.note === null
+          ? null
+          : safeText(p.note, "Reader 范围高亮 note", 2000, true),
       };
     } else if (kind === "anki-draft") {
       var hasDraftFile = Object.prototype.hasOwnProperty.call(p, "file");
@@ -5391,11 +5511,304 @@
         });
       }
     } catch (_) {}
+    var highlightSource = currentLocalHighlightSource(activeReading);
+    if (highlightSource) {
+      activeReading.highlightSource = highlightSource;
+    }
     if (isView) {
       activeReading.viewFile = sourceFile;
       activeReading.viewPage = source.pos;
     }
     return activeReading;
+  }
+
+  function localHighlightTarget(current) {
+    var location = Number(current && current.page);
+    if (!Number.isSafeInteger(location)) return null;
+    if (current.kind === "pdf" && location >= 1) {
+      return { kind: "pdf", page: location };
+    }
+    if (current.kind === "epub" && location >= 0) {
+      return { kind: "epub", section: location };
+    }
+    return null;
+  }
+
+  function sameLocalHighlightTarget(left, right) {
+    if (!left || !right || left.kind !== right.kind) return false;
+    return left.kind === "pdf"
+      ? left.page === right.page
+      : left.section === right.section;
+  }
+
+  function localHighlightTargetKey(current, target) {
+    if (!current || !target) return "";
+    return String(current.file) + "\n" + target.kind + "\n" + String(
+      target.kind === "pdf" ? target.page : target.section
+    );
+  }
+
+  function normalizeLocalHighlightSource(value, current) {
+    exactObject(
+      value,
+      [
+        "contract", "snapshotId", "documentId", "target",
+        "sourceDigest", "revision", "expiresAt", "markers",
+      ],
+      [],
+      "Reader 高亮来源"
+    );
+    if (value.contract !== "reader-highlight-source/1") {
+      throw directError(
+        "Reader 高亮来源合同无效",
+        "BW_READER_HIGHLIGHT_SOURCE_SCHEMA",
+        false
+      );
+    }
+    var snapshotId = safeId(value.snapshotId, "Reader 高亮 snapshotId");
+    if (!/^hrs_[0-9a-f]{24}$/.test(snapshotId)) {
+      throw directError(
+        "Reader 高亮 snapshotId 无效",
+        "BW_READER_HIGHLIGHT_SOURCE_SCHEMA",
+        false
+      );
+    }
+    var documentId = safeText(
+      value.documentId,
+      "Reader 高亮 documentId",
+      4096,
+      false
+    );
+    if (
+      documentId !== current.file ||
+      /[\u0000-\u001f\u007f-\u009f]/.test(documentId)
+    ) {
+      throw directError(
+        "Reader 高亮文档身份不匹配",
+        "BW_READER_HIGHLIGHT_SOURCE_SCHEMA",
+        false
+      );
+    }
+    var target = normalizeReaderOutputTarget(value.target);
+    var expectedTarget = localHighlightTarget(current);
+    if (!sameLocalHighlightTarget(target, expectedTarget)) {
+      throw directError(
+        "Reader 高亮目标不匹配",
+        "BW_READER_HIGHLIGHT_SOURCE_SCHEMA",
+        false
+      );
+    }
+    var sourceDigest = safeText(
+      value.sourceDigest,
+      "Reader 高亮 sourceDigest",
+      30,
+      false
+    );
+    if (!/^rsd1_[0-9a-f]{8}_[0-9a-f]{16}$/.test(sourceDigest)) {
+      throw directError(
+        "Reader 高亮来源摘要无效",
+        "BW_READER_HIGHLIGHT_SOURCE_SCHEMA",
+        false
+      );
+    }
+    var revision = safeText(
+      value.revision,
+      "Reader 高亮 revision",
+      160,
+      false
+    );
+    if (/\s/.test(revision) ||
+        /[\u0000-\u001f\u007f-\u009f]/.test(revision)) {
+      throw directError(
+        "Reader 高亮 revision 无效",
+        "BW_READER_HIGHLIGHT_SOURCE_SCHEMA",
+        false
+      );
+    }
+    var now = Date.now();
+    if (
+      !Number.isSafeInteger(value.expiresAt) ||
+      value.expiresAt <= now ||
+      value.expiresAt > now + 300000
+    ) {
+      throw directError(
+        "Reader 高亮来源已过期或时钟无效",
+        "BW_READER_HIGHLIGHT_SOURCE_SCHEMA",
+        false
+      );
+    }
+    if (
+      !Array.isArray(value.markers) ||
+      value.markers.length < 2 ||
+      value.markers.length > 2048
+    ) {
+      throw directError(
+        "Reader 高亮 marker 数量无效",
+        "BW_READER_HIGHLIGHT_SOURCE_SCHEMA",
+        false
+      );
+    }
+    var seen = Object.create(null);
+    var totalText = 0;
+    var markers = value.markers.map(function (item, index) {
+      exactObject(
+        item,
+        ["marker", "text"],
+        [],
+        "Reader 高亮 marker[" + index + "]"
+      );
+      var marker = safeId(
+        item.marker,
+        "Reader 高亮 marker[" + index + "].marker"
+      );
+      var text = safeText(
+        item.text,
+        "Reader 高亮 marker[" + index + "].text",
+        512,
+        true
+      );
+      var finalMarker = index === value.markers.length - 1;
+      if (
+        !/^m_[0-9a-z]{1,4}$/.test(marker) ||
+        seen[marker] ||
+        (finalMarker ? text.length !== 0 : text.length === 0) ||
+        /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)
+      ) {
+        throw directError(
+          "Reader 高亮 marker 无效",
+          "BW_READER_HIGHLIGHT_SOURCE_SCHEMA",
+          false
+        );
+      }
+      seen[marker] = true;
+      totalText += text.length;
+      return { marker: marker, text: text };
+    });
+    if (totalText < 1 || totalText > 16384) {
+      throw directError(
+        "Reader 高亮正文长度无效",
+        "BW_READER_HIGHLIGHT_SOURCE_SCHEMA",
+        false
+      );
+    }
+    return {
+      contract: "reader-highlight-source/1",
+      snapshotId: snapshotId,
+      documentId: documentId,
+      target: target,
+      sourceDigest: sourceDigest,
+      revision: revision,
+      expiresAt: value.expiresAt,
+      markers: markers,
+    };
+  }
+
+  function currentLocalHighlightSource(current) {
+    var cached = localHighlightSourceCache;
+    var target = localHighlightTarget(current);
+    if (
+      !cached || !target || cached.documentId !== current.file ||
+      !sameLocalHighlightTarget(cached.target, target) ||
+      cached.expiresAt <= Date.now()
+    ) {
+      return null;
+    }
+    return cached;
+  }
+
+  function maybeRefreshLocalHighlightSource(state, pump, current) {
+    var target = localHighlightTarget(current);
+    var provider = window.__bwReaderHighlightSource;
+    var now = Date.now();
+    if (typeof provider !== "function") {
+      localHighlightSourceCache = null;
+      pump.highlightSourceTargetKey = "";
+      pump.nextHighlightSourceCheckAt = 0;
+      return;
+    }
+    if (!target) return;
+    var targetKey = localHighlightTargetKey(current, target);
+    var targetChanged = pump.highlightSourceTargetKey !== targetKey;
+    if (targetChanged) {
+      pump.highlightSourceTargetKey = targetKey;
+      pump.nextHighlightSourceCheckAt = 0;
+      pump.lastHighlightSourceError = "";
+    }
+    var cached = currentLocalHighlightSource(current);
+    var expiresSoon = !!(
+      cached && cached.expiresAt - now <=
+        LOCAL_HIGHLIGHT_SOURCE_TTL_MARGIN_MS
+    );
+    if (
+      pump.highlightSourceInFlight ||
+      (
+        !targetChanged && !expiresSoon &&
+        now < pump.nextHighlightSourceCheckAt
+      )
+    ) {
+      return;
+    }
+    pump.nextHighlightSourceCheckAt =
+      now + LOCAL_HIGHLIGHT_SOURCE_REFRESH_MS;
+    pump.highlightSourceInFlight = true;
+    boundedLocalPageTask(
+      Promise.resolve().then(function () {
+        return provider({ file: current.file, target: target });
+      }),
+      null
+    ).then(function (value) {
+      if (!activeReadingPumpAlive(state)) return;
+      var latest = localActiveReadingSnapshot();
+      if (
+        !latest || latest.file !== current.file ||
+        !sameLocalHighlightTarget(localHighlightTarget(latest), target)
+      ) {
+        return;
+      }
+      if (!value) {
+        localHighlightSourceCache = null;
+        pump.lastSignature = null;
+        pump.nextHighlightSourceCheckAt =
+          Date.now() + LOCAL_HIGHLIGHT_SOURCE_RETRY_MS;
+        return;
+      }
+      var normalized = normalizeLocalHighlightSource(
+        value,
+        current
+      );
+      var prior = localHighlightSourceCache;
+      var sameSource = !!(
+        prior && prior.documentId === normalized.documentId &&
+        sameLocalHighlightTarget(prior.target, normalized.target) &&
+        prior.sourceDigest === normalized.sourceDigest &&
+        prior.revision === normalized.revision &&
+        prior.expiresAt - Date.now() > 30000
+      );
+      if (!sameSource) {
+        localHighlightSourceCache = normalized;
+        // Force the next active-reading tick to publish a changed source. A
+        // provider may mint a fresh snapshotId on every read, so an unchanged
+        // digest+revision deliberately retains the earlier identity.
+        pump.lastSignature = null;
+      }
+      pump.lastHighlightSourceError = "";
+      pump.nextHighlightSourceCheckAt =
+        Date.now() + LOCAL_HIGHLIGHT_SOURCE_REFRESH_MS;
+    }).catch(function (error) {
+      pump.nextHighlightSourceCheckAt =
+        Date.now() + LOCAL_HIGHLIGHT_SOURCE_RETRY_MS;
+      var message = String(
+        error && error.message || error || "本机高亮来源读取失败"
+      );
+      if (message !== pump.lastHighlightSourceError) {
+        pump.lastHighlightSourceError = message;
+        try {
+          if (window.dlog) window.dlog("本机高亮来源失败: " + message);
+        } catch (_) {}
+      }
+    }).finally(function () {
+      pump.highlightSourceInFlight = false;
+    });
   }
 
   function sameActiveScalar(left, right) {
@@ -5668,6 +6081,7 @@
       return;
     }
     observeReaderVisualPage(current);
+    maybeRefreshLocalHighlightSource(state, pump, current);
     maybePublishLocalPageContext(state, pump, current);
     var signature = JSON.stringify(current);
     var now = Date.now();
@@ -5728,6 +6142,10 @@
       lastPageContextCheckAt: 0,
       lastPageContextSignature: null,
       lastPageContextError: "",
+      highlightSourceInFlight: false,
+      highlightSourceTargetKey: "",
+      nextHighlightSourceCheckAt: 0,
+      lastHighlightSourceError: "",
     };
     runActiveReadingPump(state);
   }

@@ -16,7 +16,11 @@ internal static class DirectBridgeContract
         "reader-computer-voice-direct-runtime-status/2";
     internal const string ListenHost = "127.0.0.1";
     internal const int DefaultListenPort = 43128;
-    internal const int MaximumMessageBytes = 64 * 1024;
+    // A marker-bound Reader page can legitimately carry up to 16 KiB of
+    // source plus opaque boundaries. Keep the WSS envelope bounded, but large
+    // enough for that typed snapshot; NativeMessagingHost retains its own
+    // unrelated 64 KiB limit.
+    internal const int MaximumMessageBytes = 256 * 1024;
     internal const int PcmFrameHeaderBytes = 36;
     internal const int PcmPayloadBytes =
         Pcm48kMonoFramer.BytesPerChunk;

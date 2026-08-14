@@ -16,7 +16,8 @@ internal sealed record DirectActiveReading(
     string? ViewFile = null,
     JsonElement? ViewPage = null,
     string? SourceInstanceId = null,
-    JsonElement? SelectionRegions = null);
+    JsonElement? SelectionRegions = null,
+    JsonElement? HighlightSource = null);
 
 internal sealed record DirectViewportContext(
     string SourceInstanceId,
@@ -109,7 +110,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
     internal const string MarkdownFileName =
         "reader-context-live.md";
 
-    private const int MaximumSnapshotBytes = 128 * 1024;
+    internal const int MaximumSnapshotBytes = 512 * 1024;
     private const int RecentEventLimit = 256;
     private static readonly UTF8Encoding Utf8WithoutBom = new(
         encoderShouldEmitUTF8Identifier: false);
@@ -212,6 +213,22 @@ internal sealed class FileDirectSnapshotContextAdapter :
             AdapterState before = CaptureState();
             try
             {
+                long receivedAt = _utcNow().ToUnixTimeMilliseconds();
+                if (
+                    activeReading.HighlightSource
+                        is JsonElement receivedSource
+                    && (
+                        !receivedSource.TryGetProperty(
+                            "expiresAt",
+                            out JsonElement expiry)
+                        || !expiry.TryGetInt64(out long expiresAt)
+                        || expiresAt <= receivedAt
+                        || expiresAt > receivedAt + 300_000
+                    )
+                )
+                {
+                    throw ActiveReadingInvalid();
+                }
                 JsonObject next = new()
                 {
                     ["kind"] = activeReading.Kind,
@@ -224,7 +241,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     ["observedAtEpochMs"] =
                         activeReading.ObservedAtEpochMilliseconds,
                     ["receivedAtEpochMs"] =
-                        _utcNow().ToUnixTimeMilliseconds(),
+                        receivedAt,
                 };
                 if (
                     activeReading.ViewFile is not null
@@ -245,11 +262,17 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     next["selectionRegions"] = JsonNode.Parse(
                         regions.GetRawText());
                 }
+                if (activeReading.HighlightSource is JsonElement source)
+                {
+                    next["highlightSource"] = JsonNode.Parse(
+                        source.GetRawText());
+                }
                 if (_activeReading is JsonObject priorActive)
                 {
                     PreserveActiveReadingContinuity(
                         priorActive,
-                        next);
+                        next,
+                        preserveHighlightSource: false);
                 }
                 bool changedPage = _activeReading is not null
                     && !SameActiveReadingIdentity(_activeReading, next);
@@ -470,6 +493,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             .Append("viewPage")
             .Append("sourceInstanceId")
             .Append("selectionRegions")
+            .Append("highlightSource")
             .ToHashSet(StringComparer.Ordinal);
         if (
             requiredKeys.Any(key => !keys.Contains(key))
@@ -581,6 +605,16 @@ internal sealed class FileDirectSnapshotContextAdapter :
             selectionRegions = ValidateSelectionRegions(
                 value.GetProperty("selectionRegions"));
         }
+        JsonElement? highlightSource = null;
+        if (keys.Contains("highlightSource"))
+        {
+            highlightSource = ValidateHighlightSource(
+                value.GetProperty("highlightSource"),
+                kind,
+                file,
+                page,
+                observedAt);
+        }
         JsonElement selectionValue = value.GetProperty("selection");
         string? selection = selectionValue.ValueKind switch
         {
@@ -613,7 +647,214 @@ internal sealed class FileDirectSnapshotContextAdapter :
             viewFile,
             viewPage,
             sourceInstanceId,
-            selectionRegions);
+            selectionRegions,
+            highlightSource);
+    }
+
+    private static JsonElement ValidateHighlightSource(
+        JsonElement value,
+        string kind,
+        string file,
+        JsonElement page,
+        long observedAt)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            throw ActiveReadingInvalid();
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(value);
+        }
+        catch (DirectProtocolException exception)
+        {
+            throw ActiveReadingInvalid(exception);
+        }
+        HashSet<string> fields = value.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        if (!fields.SetEquals(new[]
+            {
+                "contract",
+                "snapshotId",
+                "documentId",
+                "target",
+                "sourceDigest",
+                "revision",
+                "expiresAt",
+                "markers",
+            }))
+        {
+            throw ActiveReadingInvalid();
+        }
+        if (
+            value.GetProperty("contract").ValueKind
+                != JsonValueKind.String
+            || value.GetProperty("snapshotId").ValueKind
+                != JsonValueKind.String
+            || value.GetProperty("documentId").ValueKind
+                != JsonValueKind.String
+            || value.GetProperty("sourceDigest").ValueKind
+                != JsonValueKind.String
+            || value.GetProperty("revision").ValueKind
+                != JsonValueKind.String
+        )
+        {
+            throw ActiveReadingInvalid();
+        }
+        string? contract = value.GetProperty("contract").GetString();
+        string? snapshotId = value.GetProperty("snapshotId").GetString();
+        string? documentId = value.GetProperty("documentId").GetString();
+        string? digest = value.GetProperty("sourceDigest").GetString();
+        string? revision = value.GetProperty("revision").GetString();
+        if (
+            contract != "reader-highlight-source/1"
+            || snapshotId is null
+            || !ReaderRealtimeOutputProtocol
+                .IsHighlightSourceSnapshotId(snapshotId)
+            || documentId != file
+            || documentId.Length is < 1 or > 4096
+            || documentId.Any(char.IsControl)
+            || digest is null
+            || !ReaderRealtimeOutputProtocol
+                .IsHighlightSourceDigest(digest)
+            || string.IsNullOrEmpty(revision)
+            || revision.Length > 160
+            || revision.Any(character =>
+                char.IsControl(character)
+                || char.IsWhiteSpace(character))
+            || !value.GetProperty("expiresAt")
+                .TryGetInt64(out long expiresAt)
+            || expiresAt <= observedAt
+            || expiresAt > observedAt + 300_000
+            || !HighlightTargetMatches(
+                value.GetProperty("target"),
+                kind,
+                page)
+        )
+        {
+            throw ActiveReadingInvalid();
+        }
+        JsonElement markers = value.GetProperty("markers");
+        if (markers.ValueKind != JsonValueKind.Array)
+        {
+            throw ActiveReadingInvalid();
+        }
+        int count = markers.GetArrayLength();
+        if (count is < 2 or > 2048)
+        {
+            throw ActiveReadingInvalid();
+        }
+        HashSet<string> ids = new(StringComparer.Ordinal);
+        int totalText = 0;
+        for (int index = 0; index < count; index += 1)
+        {
+            JsonElement marker = markers[index];
+            if (marker.ValueKind != JsonValueKind.Object)
+            {
+                throw ActiveReadingInvalid();
+            }
+            try
+            {
+                DirectJsonValidation.RequireNoDuplicateKeys(marker);
+            }
+            catch (DirectProtocolException exception)
+            {
+                throw ActiveReadingInvalid(exception);
+            }
+            HashSet<string> markerFields = marker.EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal);
+            string? id = marker.TryGetProperty(
+                "marker",
+                out JsonElement markerValue)
+                && markerValue.ValueKind == JsonValueKind.String
+                    ? markerValue.GetString()
+                    : null;
+            string? text = marker.TryGetProperty(
+                "text",
+                out JsonElement textValue)
+                && textValue.ValueKind == JsonValueKind.String
+                    ? textValue.GetString()
+                    : null;
+            bool final = index == count - 1;
+            if (
+                !markerFields.SetEquals(new[] { "marker", "text" })
+                || id is null
+                || !ReaderRealtimeOutputProtocol
+                    .IsHighlightSourceMarker(id)
+                || !ids.Add(id)
+                || text is null
+                || text.Length > 512
+                || text.Any(character =>
+                    char.IsControl(character)
+                    && character is not ('\r' or '\n' or '\t'))
+                || (final ? text.Length != 0 : text.Length == 0)
+            )
+            {
+                throw ActiveReadingInvalid();
+            }
+            totalText = checked(totalText + text.Length);
+        }
+        if (totalText is < 1 or > 16_384)
+        {
+            throw ActiveReadingInvalid();
+        }
+        return value.Clone();
+    }
+
+    private static bool HighlightTargetMatches(
+        JsonElement target,
+        string kind,
+        JsonElement page)
+    {
+        if (
+            target.ValueKind != JsonValueKind.Object
+            || page.ValueKind != JsonValueKind.Number
+            || !page.TryGetInt64(out long current)
+        )
+        {
+            return false;
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(target);
+        }
+        catch (DirectProtocolException)
+        {
+            return false;
+        }
+        HashSet<string> fields = target.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        if (
+            !target.TryGetProperty("kind", out JsonElement targetKind)
+            || targetKind.ValueKind != JsonValueKind.String
+        )
+        {
+            return false;
+        }
+        if (kind == "pdf")
+        {
+            return fields.SetEquals(new[] { "kind", "page" })
+                && targetKind.GetString() == "pdf"
+                && target.TryGetProperty("page", out JsonElement location)
+                && location.TryGetInt64(out long value)
+                && value >= 1
+                && value == current;
+        }
+        if (kind == "epub")
+        {
+            return fields.SetEquals(new[] { "kind", "section" })
+                && targetKind.GetString() == "epub"
+                && target.TryGetProperty(
+                    "section",
+                    out JsonElement location)
+                && location.TryGetInt64(out long value)
+                && value >= 0
+                && value == current;
+        }
+        return false;
     }
 
     private static JsonElement ValidateSelectionRegions(
@@ -985,7 +1226,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
             {
                 PreserveActiveReadingContinuity(
                     priorActive,
-                    activeReading);
+                    activeReading,
+                    preserveHighlightSource: true);
             }
             _stablePage = stablePage;
             _activeReading = activeReading;
@@ -2100,7 +2342,21 @@ internal sealed class FileDirectSnapshotContextAdapter :
             {
                 effectivePage["selectionRegions"] = regions.DeepClone();
             }
+            if (
+                _activeReading["highlightSource"]
+                    is JsonObject highlightSource
+            )
+            {
+                effectivePage["highlightSource"] =
+                    highlightSource.DeepClone();
+            }
         }
+        JsonObject? publicActiveReading = _activeReading?.DeepClone()
+            as JsonObject;
+        // The range source belongs to currentPage. Keep the internal copy for
+        // continuity/joining, but do not serialize the same bounded source a
+        // second time under activeReading.
+        publicActiveReading?.Remove("highlightSource");
         return new JsonObject
         {
             ["schema"] = SnapshotContract,
@@ -2112,7 +2368,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["updatedAtUtc"] = _utcNow()
                 .ToString("O"),
             ["latestEvent"] = _latestEvent?.DeepClone(),
-            ["activeReading"] = _activeReading?.DeepClone(),
+            ["activeReading"] = publicActiveReading,
             ["contextStatus"] = contextStatus,
             ["currentPage"] = effectivePage,
             ["selection"] = _selection.DeepClone(),
@@ -2238,6 +2494,25 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 root["activeReading"] as JsonObject);
             JsonObject? currentPage = root["currentPage"]
                 as JsonObject;
+            if (
+                _activeReading is JsonObject restoredActive
+                && currentPage?["highlightSource"] is JsonNode source
+            )
+            {
+                JsonObject? restoredSource = RestoreHighlightSource(
+                    source,
+                    StringValue(restoredActive["kind"])
+                        ?? throw JournalInvalid(),
+                    StringValue(restoredActive["file"])
+                        ?? throw JournalInvalid(),
+                    restoredActive["page"]?.DeepClone(),
+                    restoredActive["observedAtEpochMs"]
+                        ?.GetValue<long?>());
+                if (restoredSource is not null)
+                {
+                    restoredActive["highlightSource"] = restoredSource;
+                }
+            }
             if (
                 currentPage?["stable"]?.GetValue<bool?>() == true
             )
@@ -2366,7 +2641,57 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             restored["selectionRegions"] = selectionRegions;
         }
+        JsonObject? highlightSource = RestoreHighlightSource(
+            source["highlightSource"],
+            kind,
+            file,
+            page,
+            restored["observedAtEpochMs"]?.GetValue<long?>());
+        if (highlightSource is not null)
+        {
+            restored["highlightSource"] = highlightSource;
+        }
         return restored;
+    }
+
+    private static JsonObject? RestoreHighlightSource(
+        JsonNode? source,
+        string kind,
+        string file,
+        JsonNode? page,
+        long? observedAt)
+    {
+        if (source is null)
+        {
+            return null;
+        }
+        if (page is null || observedAt is null)
+        {
+            throw JournalInvalid();
+        }
+        try
+        {
+            using JsonDocument sourceDocument = JsonDocument.Parse(
+                source.ToJsonString(DirectBridgeContract.JsonOptions));
+            using JsonDocument pageDocument = JsonDocument.Parse(
+                page.ToJsonString(DirectBridgeContract.JsonOptions));
+            JsonElement validated = ValidateHighlightSource(
+                sourceDocument.RootElement,
+                kind,
+                file,
+                pageDocument.RootElement,
+                observedAt.Value);
+            return JsonNode.Parse(validated.GetRawText()) as JsonObject
+                ?? throw JournalInvalid();
+        }
+        catch (DirectProtocolException)
+        {
+            throw JournalInvalid();
+        }
+        catch (JsonException)
+        {
+            throw JournalInvalid();
+        }
     }
 
     private static JsonObject? RestoreSelectionRegions(JsonNode? source)
@@ -2623,7 +2948,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
     // highlighter, browser-control, or on-demand visual commands.
     private static void PreserveActiveReadingContinuity(
         JsonObject prior,
-        JsonObject next)
+        JsonObject next,
+        bool preserveHighlightSource)
     {
         if (!SamePageEquivalent(prior, next))
         {
@@ -2658,6 +2984,15 @@ internal sealed class FileDirectSnapshotContextAdapter :
         )
         {
             next["selectionRegions"] = priorRegions.DeepClone();
+        }
+        if (
+            preserveHighlightSource
+            && next["highlightSource"] is null
+            && prior["highlightSource"]
+                is JsonObject priorHighlightSource
+        )
+        {
+            next["highlightSource"] = priorHighlightSource.DeepClone();
         }
     }
 

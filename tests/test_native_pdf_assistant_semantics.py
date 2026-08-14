@@ -500,6 +500,43 @@ class NativePDFAssistantSemanticsTests(unittest.TestCase):
         self.assertEqual(data["items"][0]["pdf_page"], 2)
         self.assertEqual(data["items"][0]["rects"], [[10.0, 20.0, 80.0, 42.0]])
 
+    def test_pi_never_reinterprets_an_app_range_as_a_text_search(self):
+        range_ref = {
+            "contract": "reader-source-range/1",
+            "snapshotId": "hrs_0123456789abcdef01234567",
+            "documentId": LOCAL_FILE,
+            "target": {"kind": "pdf", "page": 2},
+            "sourceDigest": "rsd1_00000008_0123456789abcdef",
+            "revision": "provider-rev-2",
+            "startMarker": "m_0",
+            "endMarker": "m_2",
+        }
+        with patch.object(
+            assistant,
+            "_native_pdf_state",
+            side_effect=AssertionError("range must be rejected before any lookup"),
+        ):
+            for payload in (
+                {"rangeRef": range_ref, "text": "legacy quote must be ignored"},
+                {"rangeRef": "malformed", "text": "must not become a quote search"},
+                {"range_ref": None, "text": "presence alone selects the App contract"},
+            ):
+                with self.subTest(payload=payload):
+                    self.assertEqual(
+                        assistant._t_highlight(payload, native_context()),
+                        {"error": "BW_READER_HIGHLIGHT_RANGE_REQUIRES_APP"},
+                    )
+
+    def test_highlight_range_prompt_defines_the_exclusive_end_marker(self):
+        tool_description = assistant.TOOLS["highlight"][0]
+        range_description = assistant._TOOL_SCHEMA_OVERRIDES["highlight"][
+            "properties"
+        ]["rangeRef"]["description"]
+        for text in (tool_description, range_description):
+            self.assertIn("endMarker", text)
+            self.assertIn("排他边界", text)
+            self.assertIn("text 为空的 terminal marker", text)
+
     def test_native_notes_and_undo_are_client_commits_not_pi_mutations(self):
         forbidden_pdf = types.SimpleNamespace(
             _notes_edit=lambda *_args, **_kwargs: (_ for _ in ()).throw(

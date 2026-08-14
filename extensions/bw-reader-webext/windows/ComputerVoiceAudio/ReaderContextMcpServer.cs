@@ -10,6 +10,8 @@ internal sealed class ReaderContextMcpServer
     internal const string VisualToolName = "reader_visual_image";
     internal const string BrowserControlToolName = "reader_browser_control";
     internal const string HighlightTextToolName = "reader_highlight_text";
+    internal const string HighlightRangeToolName =
+        "reader_highlight_range";
     internal const string AnkiDraftToolName = "reader_anki_draft";
     internal const string CardToolName = "reader_card";
     internal const string CommandToolName = "reader_command";
@@ -17,12 +19,13 @@ internal sealed class ReaderContextMcpServer
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
-    internal const string ServerVersion = "1.5.0";
+    internal const string ServerVersion = "1.6.0";
     internal static readonly TimeSpan FreshnessWindow =
         TimeSpan.FromMinutes(3);
 
     private const int MaximumMessageCharacters = 1024 * 1024;
-    private const int MaximumSnapshotBytes = 128 * 1024;
+    private const int MaximumSnapshotBytes =
+        FileDirectSnapshotContextAdapter.MaximumSnapshotBytes;
     private static readonly UTF8Encoding Utf8WithoutBom = new(
         encoderShouldEmitUTF8Identifier: false);
 
@@ -400,12 +403,17 @@ internal sealed class ReaderContextMcpServer
                     + "subagents instead of starting a nested CLI worker. "
                     + "Use reader_card or reader_command with the same typed "
                     + "{card:{kind,title,data}} input. "
-                    + "For an exact source-text highlight or a book-referencing "
-                    + "Anki draft, call reader_context_snapshot first, copy "
-                    + "the exact current file identity and verbatim source "
-                    + "text, confirm outputAccess.available is true, then "
-                    + "use reader_highlight_text or "
-                    + "reader_anki_draft. A normal non-reference Anki draft "
+                    + "For a source highlight, call "
+                    + "reader_context_snapshot first. When "
+                    + "currentPage.highlightSource is present, copy its "
+                    + "exact identity and choose two published markers for "
+                    + "reader_highlight_range; never echo or search a long "
+                    + "quote. reader_highlight_text remains only for an old "
+                    + "client that has no marker source. For a "
+                    + "book-referencing Anki draft, copy the exact current "
+                    + "file identity and verbatim source text. Confirm "
+                    + "outputAccess.available before either mutation. A "
+                    + "normal non-reference Anki draft "
                     + "passes cards only and does not claim the current page "
                     + "as its source. Source-bound calls reject a wrong book, "
                     + "wrong page or section, missing text, or text that is "
@@ -611,17 +619,22 @@ internal sealed class ReaderContextMcpServer
         {
             tools.Add(new JsonObject
             {
-                ["name"] = HighlightTextToolName,
+                ["name"] = HighlightRangeToolName,
                 ["description"] =
-                    "Persist one highlight on an exact verbatim source span "
-                    + "in the currently open book, including a specified PDF "
-                    + "page or EPUB section that is not the current selection. "
-                    + "Call reader_context_snapshot first and copy its exact "
-                    + "file identity; proceed only when outputAccess.available "
-                    + "is true. The Reader rejects a wrong book, wrong "
-                    + "page or section, missing text, or more than one match. "
-                    + "Do not retry a timeout or unknown outcome blindly.",
-                ["inputSchema"] = BuildExactSourceArgumentsSchema(false),
+                    "Persist one highlight from the App-owned marker range "
+                    + "published in currentPage.highlightSource. Call "
+                    + "reader_context_snapshot first, copy the exact source "
+                    + "identity fields, and choose startMarker/endMarker "
+                    + "from that source in document order. Every marker is "
+                    + "the boundary before its text: startMarker is the first "
+                    + "included segment, while endMarker is the first excluded "
+                    + "segment (exclusive). To include through source end, "
+                    + "use the final marker whose text is empty. Never return or "
+                    + "search an entire source quote. The Reader rejects "
+                    + "invented, reversed, expired, stale-book, stale-page "
+                    + "or stale-revision ranges and never falls back to text "
+                    + "search. Do not retry an unknown mutation outcome.",
+                ["inputSchema"] = BuildHighlightRangeArgumentsSchema(),
                 ["annotations"] = new JsonObject
                 {
                     ["readOnlyHint"] = false,
@@ -979,6 +992,138 @@ internal sealed class ReaderContextMcpServer
         return schema;
     }
 
+    private static JsonObject BuildHighlightRangeArgumentsSchema() => new()
+    {
+        ["type"] = "object",
+        ["additionalProperties"] = false,
+        ["required"] = new JsonArray("rangeRef", "color", "note"),
+        ["properties"] = new JsonObject
+        {
+            ["rangeRef"] = new JsonObject
+            {
+                ["type"] = "object",
+                ["description"] =
+                    "Marker boundaries copied from one currentPage.highlightSource. "
+                    + "Each marker precedes its text; endMarker is exclusive.",
+                ["additionalProperties"] = false,
+                ["required"] = new JsonArray(
+                    "contract",
+                    "snapshotId",
+                    "documentId",
+                    "target",
+                    "sourceDigest",
+                    "revision",
+                    "startMarker",
+                    "endMarker"),
+                ["properties"] = new JsonObject
+                {
+                    ["contract"] = new JsonObject
+                    {
+                        ["const"] = "reader-source-range/1",
+                    },
+                    ["snapshotId"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["pattern"] = "^hrs_[0-9a-f]{24}$",
+                    },
+                    ["documentId"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["minLength"] = 1,
+                        ["maxLength"] = 4_096,
+                    },
+                    ["target"] = BuildDocumentTargetSchema(),
+                    ["sourceDigest"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["pattern"] =
+                            "^rsd1_[0-9a-f]{8}_[0-9a-f]{16}$",
+                    },
+                    ["revision"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["minLength"] = 1,
+                        ["maxLength"] = 160,
+                    },
+                    ["startMarker"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["pattern"] = "^m_[0-9a-z]{1,4}$",
+                        ["description"] =
+                            "Boundary before the first included text segment.",
+                    },
+                    ["endMarker"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["pattern"] = "^m_[0-9a-z]{1,4}$",
+                        ["description"] =
+                            "Exclusive boundary before the first excluded segment; use the final empty-text marker to include through source end.",
+                    },
+                },
+            },
+            ["color"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["enum"] = new JsonArray(
+                    "yellow",
+                    "green",
+                    "blue",
+                    "pink"),
+            },
+            ["note"] = new JsonObject
+            {
+                ["anyOf"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["maxLength"] = 2_000,
+                    },
+                    new JsonObject { ["type"] = "null" },
+                },
+            },
+        },
+    };
+
+    private static JsonObject BuildDocumentTargetSchema() => new()
+    {
+        ["oneOf"] = new JsonArray
+        {
+            new JsonObject
+            {
+                ["type"] = "object",
+                ["additionalProperties"] = false,
+                ["required"] = new JsonArray("kind", "page"),
+                ["properties"] = new JsonObject
+                {
+                    ["kind"] = new JsonObject { ["const"] = "pdf" },
+                    ["page"] = new JsonObject
+                    {
+                        ["type"] = "integer",
+                        ["minimum"] = 1,
+                        ["maximum"] = 10_000_000,
+                    },
+                },
+            },
+            new JsonObject
+            {
+                ["type"] = "object",
+                ["additionalProperties"] = false,
+                ["required"] = new JsonArray("kind", "section"),
+                ["properties"] = new JsonObject
+                {
+                    ["kind"] = new JsonObject { ["const"] = "epub" },
+                    ["section"] = new JsonObject
+                    {
+                        ["type"] = "integer",
+                        ["minimum"] = 0,
+                        ["maximum"] = 10_000_000,
+                    },
+                },
+            },
+        },
+    };
+
     private static JsonObject SourceTextSchema() => new()
     {
         ["type"] = "string",
@@ -1056,6 +1201,19 @@ internal sealed class ReaderContextMcpServer
                 cancellationToken).ConfigureAwait(false);
             return;
         }
+        if (
+            toolName == HighlightRangeToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            await HandleHighlightRangeToolCallAsync(
+                id,
+                arguments,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        // Legacy compatibility only: old clients may still call this exact
+        // name, but tools/list intentionally advertises marker ranges instead.
         if (
             toolName == HighlightTextToolName
             && _sendOutputAsync is not null
@@ -1257,11 +1415,50 @@ internal sealed class ReaderContextMcpServer
                 cancellationToken).ConfigureAwait(false);
             return;
         }
+        if (kind == "highlight-text")
+        {
+            await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
+            JsonObject current = BuildToolPayload();
+            if (current["currentPage"]?["highlightSource"] is JsonObject)
+            {
+                await WriteReaderOutputToolErrorAsync(
+                    id,
+                    "BW_READER_HIGHLIGHT_RANGE_REQUIRED",
+                    "当前书页已提供 marker 范围；旧全文反查高亮已拒绝。请重新读取 Reader 上下文并调用 reader_highlight_range。",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+        }
         await SendReaderOutputAsync(
             id,
             kind,
             payload,
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleHighlightRangeToolCallAsync(
+        JsonNode id,
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        if (!TryReadHighlightRangeOutput(
+            arguments,
+            out JsonNode payload,
+            out JsonObject rangeRef))
+        {
+            await WriteErrorAsync(
+                id,
+                -32602,
+                "Invalid Reader marker-range highlight",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        await SendReaderOutputAsync(
+            id,
+            "highlight-range",
+            payload,
+            cancellationToken,
+            rangeRef).ConfigureAwait(false);
     }
 
     private async Task HandleUndoLastToolCallAsync(
@@ -1298,10 +1495,26 @@ internal sealed class ReaderContextMcpServer
         JsonNode id,
         string kind,
         JsonNode payload,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        JsonObject? expectedRangeRef = null)
     {
         await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
         JsonObject current = BuildToolPayload();
+        if (
+            expectedRangeRef is not null
+            && !HighlightRangeMatchesSnapshot(
+                current,
+                expectedRangeRef,
+                _utcNow())
+        )
+        {
+            await WriteReaderOutputToolErrorAsync(
+                id,
+                "BW_READER_HIGHLIGHT_RANGE_STALE",
+                "高亮 marker 范围已过期、顺序无效或不再属于当前书页。请重新读取 Reader 上下文；不会回退全文搜索。",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
         ReaderRealtimeOutputRequest? request = BuildRealtimeOutputRequest(
             current,
             kind,
@@ -1402,6 +1615,7 @@ internal sealed class ReaderContextMcpServer
                             {
                                 "anki-draft" => "draft_delivered",
                                 "highlight-text" => "highlight_saved",
+                                "highlight-range" => "highlight_saved",
                                 _ => "delivered",
                             },
                             ["anki_written"] = request.Kind == "anki-draft"
@@ -1543,6 +1757,123 @@ internal sealed class ReaderContextMcpServer
         }
     }
 
+    internal static bool HighlightRangeMatchesSnapshot(
+        JsonObject snapshot,
+        JsonObject rangeRef,
+        DateTimeOffset now)
+    {
+        if (
+            StringValue(snapshot["contextStatus"]) != "ready"
+            || snapshot["activeReading"] is not JsonObject active
+            || active["fresh"]?.GetValue<bool?>() != true
+            || snapshot["currentPage"] is not JsonObject page
+            || page["stable"]?.GetValue<bool?>() != true
+            || page["highlightSource"] is not JsonObject source
+            || source["markers"] is not JsonArray markers
+            || LongValue(source["expiresAt"]) is not long expiresAt
+            || expiresAt <= now.ToUnixTimeMilliseconds()
+            || StringValue(active["sourceInstanceId"])
+                is not string activeSource
+            || !string.Equals(
+                activeSource,
+                StringValue(page["sourceInstanceId"]),
+                StringComparison.Ordinal)
+            || StringValue(page["file"]) is not string file
+            || !string.Equals(
+                file,
+                StringValue(active["file"]),
+                StringComparison.Ordinal)
+            || !string.Equals(
+                file,
+                StringValue(source["documentId"]),
+                StringComparison.Ordinal)
+            || !string.Equals(
+                file,
+                StringValue(rangeRef["documentId"]),
+                StringComparison.Ordinal)
+        )
+        {
+            return false;
+        }
+        foreach (string field in new[]
+            {
+                "snapshotId",
+                "documentId",
+                "sourceDigest",
+                "revision",
+            })
+        {
+            if (!string.Equals(
+                StringValue(source[field]),
+                StringValue(rangeRef[field]),
+                StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+        if (
+            StringValue(rangeRef["contract"])
+                != "reader-source-range/1"
+            || StringValue(source["contract"])
+                != "reader-highlight-source/1"
+            || !JsonNode.DeepEquals(
+                source["target"],
+                rangeRef["target"])
+            || !HighlightRangeTargetMatchesPage(
+                rangeRef["target"] as JsonObject,
+                page)
+        )
+        {
+            return false;
+        }
+        string? start = StringValue(rangeRef["startMarker"]);
+        string? end = StringValue(rangeRef["endMarker"]);
+        if (start is null || end is null || start == end)
+        {
+            return false;
+        }
+        int startIndex = -1;
+        int endIndex = -1;
+        for (int index = 0; index < markers.Count; index += 1)
+        {
+            if (markers[index] is not JsonObject marker)
+            {
+                return false;
+            }
+            string? markerId = StringValue(marker["marker"]);
+            if (markerId == start)
+            {
+                startIndex = index;
+            }
+            if (markerId == end)
+            {
+                endIndex = index;
+            }
+        }
+        return startIndex >= 0 && endIndex > startIndex;
+    }
+
+    private static bool HighlightRangeTargetMatchesPage(
+        JsonObject? target,
+        JsonObject page)
+    {
+        if (
+            target is null
+            || StringValue(page["kind"]) is not string kind
+            || LongValue(page["page"]) is not long current
+            || StringValue(target["kind"]) != kind
+        )
+        {
+            return false;
+        }
+        return kind switch
+        {
+            "pdf" => LongValue(target["page"]) == current,
+            "epub" => LongValue(target["section"]) == current,
+            _ => false,
+        };
+    }
+
     private static bool TryReadExactSourceOutput(
         JsonElement arguments,
         string kind,
@@ -1598,6 +1929,55 @@ internal sealed class ReaderContextMcpServer
             or DirectProtocolException
             or ReaderRealtimeOutputException)
         {
+            return false;
+        }
+    }
+
+    private static bool TryReadHighlightRangeOutput(
+        JsonElement arguments,
+        out JsonNode payload,
+        out JsonObject rangeRef)
+    {
+        payload = new JsonObject();
+        rangeRef = new JsonObject();
+        if (arguments.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(arguments);
+            JsonProperty[] fields = arguments.EnumerateObject().ToArray();
+            if (
+                fields.Length != 3
+                || !fields.Select(field => field.Name).ToHashSet(
+                    StringComparer.Ordinal).SetEquals(
+                        new[] { "rangeRef", "color", "note" })
+                || arguments.GetProperty("rangeRef").ValueKind
+                    != JsonValueKind.Object
+            )
+            {
+                return false;
+            }
+            JsonObject normalized = JsonNode.Parse(arguments.GetRawText())
+                as JsonObject
+                ?? throw new JsonException("Reader range source is empty");
+            normalized["mutationId"] =
+                "c_" + Guid.NewGuid().ToString("N");
+            payload = ReaderRealtimeOutputProtocol.ValidatePayload(
+                "highlight-range",
+                normalized);
+            rangeRef = payload["rangeRef"]?.DeepClone() as JsonObject
+                ?? throw new JsonException("Reader range reference is empty");
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is JsonException
+            or DirectProtocolException
+            or ReaderRealtimeOutputException)
+        {
+            payload = new JsonObject();
+            rangeRef = new JsonObject();
             return false;
         }
     }

@@ -1750,6 +1750,11 @@ if (window.__bwPwaProviderOnly) return;
           throw new Error('BW_READER_HIGHLIGHT_TEXT_UNAVAILABLE');
         }
         work = window.__bwReaderHighlightExactText(p);
+      } else if (delivery.kind === 'highlight-range') {
+        if (typeof window.__bwReaderHighlightRange !== 'function') {
+          throw new Error('BW_READER_HIGHLIGHT_RANGE_UNAVAILABLE');
+        }
+        work = window.__bwReaderHighlightRange(p);
       } else if (delivery.kind === 'anki-draft') {
         if (!(RC.flashcard && typeof RC.flashcard.presentDraft === 'function')) {
           throw new Error('BW_READER_ANKI_DRAFT_UNAVAILABLE');
@@ -6681,6 +6686,48 @@ if (window.__bwPwaProviderOnly) return;
     };
   }
 
+  function _nativeRealtimeHighlightTarget(snapshot) {
+    var adapter = null, context = null;
+    try {
+      adapter = window.RC && RC.adapter ? RC.adapter() : null;
+      context = adapter && typeof adapter.getContext === 'function'
+        ? adapter.getContext() : null;
+    } catch (e) {}
+    context = context || {};
+    if (adapter && adapter.config && adapter.config.isPDF === false) {
+      var section = Number(context.current_section_idx);
+      if (!Number.isInteger(section) || section < 0) section = Math.max(0, (Number(snapshot.page) || 1) - 1);
+      return { kind: 'epub', section: section };
+    }
+    return { kind: 'pdf', page: Number(snapshot.page) || Number(_rtc.ctxPage) || 0 };
+  }
+
+  async function _nativeRealtimeHighlightSource(snapshot) {
+    if (typeof window.__bwReaderHighlightSource !== 'function') return null;
+    var fallback = null;
+    return _nativeRealtimeBounded(
+      Promise.resolve(window.__bwReaderHighlightSource({
+        file: String(snapshot.file || _rtc.ctxFile || ''),
+        target: _nativeRealtimeHighlightTarget(snapshot)
+      })),
+      3500,
+      fallback
+    );
+  }
+
+  function _nativeRealtimeRangeMatchesCurrent(rangeRef, snapshot) {
+    if (!rangeRef || rangeRef.contract !== 'reader-source-range/1' ||
+        rangeRef.documentId !== String(snapshot.file || _rtc.ctxFile || '')) {
+      return false;
+    }
+    var currentTarget = _nativeRealtimeHighlightTarget(snapshot);
+    var target = rangeRef.target;
+    if (!target || target.kind !== currentTarget.kind) return false;
+    return currentTarget.kind === 'pdf'
+      ? Number(target.page) === currentTarget.page
+      : Number(target.section) === currentTarget.section;
+  }
+
   async function _rtcTool(name, args, callId) {   // 工具循环(本地):与 relay WS 版同语义,tool_status 卡/client_action 全复用
     if (name === 'wait_for_user') {   // 静音 no-op:回空 output、不 response.create=安静
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{}' } });
@@ -6930,6 +6977,8 @@ if (window.__bwPwaProviderOnly) return;
         var localPageContext = await _nativeRealtimePageContext(
           readPageSnapshot.page, readPageSnapshot
         );
+        var localHighlightSource = await _nativeRealtimeHighlightSource(readPageSnapshot);
+        if (localHighlightSource) localPageContext.highlight_source = localHighlightSource;
         var localPageText = String(
           localPageContext.current_page_text || localPageContext.visible_text || ''
         );
@@ -6944,9 +6993,46 @@ if (window.__bwPwaProviderOnly) return;
           title: readPageSnapshot.title || '',
           text: localPageText || '',
           page_context: localPageContext,
-          note: localPageText ? '当前页文字来自 App 原生/预处理字符层；结合前后页与当前选区回答。'
-            : '当前页字符层确实未返回文字；只有在问题需要版面或图像证据时才调用 see_page。',
-          source: localPageContext.source || 'app-current-visible-text'
+           note: localPageText ? '当前页文字来自 App 原生/预处理字符层；结合前后页与当前选区回答。'
+             : '当前页字符层确实未返回文字；只有在问题需要版面或图像证据时才调用 see_page。',
+           source: localPageContext.source || 'app-current-visible-text',
+           highlight_source: localHighlightSource || undefined
+         });
+      } else if (_rtc.nativeDirect && name === 'highlight') {
+        var localRangeRef = args && (args.rangeRef || args.range_ref);
+        if (!localRangeRef || typeof localRangeRef !== 'object') {
+          throw new Error('BW_READER_HIGHLIGHT_RANGE_REQUIRED:请先调用 read_page，并从 highlight_source 选择开始和结束 marker');
+        }
+        var currentRangeSnapshot = _nativeRealtimeContextSnapshot(_rtc.ctxPage);
+        if (!_nativeRealtimeRangeMatchesCurrent(localRangeRef, currentRangeSnapshot)) {
+          throw new Error('BW_READER_RANGE_SOURCE_STALE:当前书页已变化，请重新调用 read_page 取得 marker');
+        }
+        if (typeof window.__bwReaderHighlightRange !== 'function') {
+          throw new Error('BW_READER_HIGHLIGHT_RANGE_UNAVAILABLE');
+        }
+        var localRangeColors = {
+          '#fff59d': 'yellow', '#a7f3d0': 'green',
+          '#a3d4ff': 'blue', '#fda4af': 'pink'
+        };
+        var localRangeColor = String(args.color || 'yellow').toLowerCase();
+        localRangeColor = localRangeColors[localRangeColor] || localRangeColor;
+        var localHighlightResult = await Promise.resolve(window.__bwReaderHighlightRange({
+          rangeRef: localRangeRef,
+          color: localRangeColor,
+          note: String(args.note || '').slice(0, 1000)
+        }));
+        if (!localHighlightResult || localHighlightResult.ok !== true) {
+          throw new Error('BW_READER_HIGHLIGHT_RANGE_NOT_CONFIRMED');
+        }
+        label = '本机范围高亮';
+        res = Object.assign({ local_direct: true }, localHighlightResult);
+        out = JSON.stringify({
+          ok: true,
+          highlighted: 1,
+          id: localHighlightResult.id || '',
+          target: localHighlightResult.target || localRangeRef.target,
+          text: String(localHighlightResult.text || '').slice(0, 1000),
+          source: 'app-authoritative-range'
         });
       } else if (_rtc.nativeDirect && name === 'read_selection') {
         label = '读取选中';

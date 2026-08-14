@@ -52,6 +52,7 @@ internal static class ReaderRealtimeOutputProtocol
         or "navigate"
         or "highlight"
         or "highlight-text"
+        or "highlight-range"
         or "anki-draft"
         or "client-action";
 
@@ -193,6 +194,24 @@ internal static class ReaderRealtimeOutputProtocol
                 }
                 NullableText(root, "note", 2_000);
                 break;
+            case "highlight-range":
+                Exact(
+                    root,
+                    "mutationId",
+                    "rangeRef",
+                    "color",
+                    "note");
+                ValidateClientMutationId(root, "mutationId");
+                ValidateHighlightRangeReference(
+                    root.GetProperty("rangeRef"));
+                string rangeColor = Text(root, "color", 16);
+                if (rangeColor is not (
+                    "yellow" or "green" or "blue" or "pink"))
+                {
+                    throw Invalid("Reader 高亮颜色无效");
+                }
+                NullableText(root, "note", 2_000);
+                break;
             case "anki-draft":
                 bool hasFile = root.TryGetProperty("file", out _);
                 bool hasTarget = root.TryGetProperty("target", out _);
@@ -238,6 +257,76 @@ internal static class ReaderRealtimeOutputProtocol
         return JsonNode.Parse(root.GetRawText())
             ?? throw Invalid("Reader 输出 payload 无效");
     }
+
+    private static void ValidateHighlightRangeReference(JsonElement value)
+    {
+        Exact(
+            value,
+            "contract",
+            "snapshotId",
+            "documentId",
+            "target",
+            "sourceDigest",
+            "revision",
+            "startMarker",
+            "endMarker");
+        if (Text(value, "contract", 64) != "reader-source-range/1")
+        {
+            throw Invalid("Reader 范围高亮合同无效");
+        }
+        string snapshotId = SafeId(value, "snapshotId");
+        if (!IsHighlightSourceSnapshotId(snapshotId))
+        {
+            throw Invalid("Reader 高亮来源 snapshotId 无效");
+        }
+        FileText(value, "documentId", 4_096);
+        ValidateDocumentTarget(value.GetProperty("target"));
+        string digest = Text(value, "sourceDigest", 30);
+        if (!IsHighlightSourceDigest(digest))
+        {
+            throw Invalid("Reader 高亮来源摘要无效");
+        }
+        string revision = Text(value, "revision", 160);
+        if (
+            revision.Any(character =>
+                char.IsControl(character)
+                || char.IsWhiteSpace(character))
+        )
+        {
+            throw Invalid("Reader 高亮来源 revision 无效");
+        }
+        string start = SafeId(value, "startMarker");
+        string end = SafeId(value, "endMarker");
+        if (
+            !IsHighlightSourceMarker(start)
+            || !IsHighlightSourceMarker(end)
+            || string.Equals(start, end, StringComparison.Ordinal)
+        )
+        {
+            throw Invalid("Reader 范围高亮不能为空");
+        }
+    }
+
+    internal static bool IsHighlightSourceSnapshotId(string value) =>
+        value.Length == 28
+        && value.StartsWith("hrs_", StringComparison.Ordinal)
+        && value[4..].All(character => character is
+            >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    internal static bool IsHighlightSourceDigest(string value) =>
+        value.Length == 30
+        && value.StartsWith("rsd1_", StringComparison.Ordinal)
+        && value[13] == '_'
+        && value[5..13].All(character => character is
+            >= '0' and <= '9' or >= 'a' and <= 'f')
+        && value[14..].All(character => character is
+            >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    internal static bool IsHighlightSourceMarker(string value) =>
+        value.Length is >= 3 and <= 6
+        && value.StartsWith("m_", StringComparison.Ordinal)
+        && value[2..].All(character => character is
+            >= '0' and <= '9' or >= 'a' and <= 'z');
 
     // 桥接只用这一种输出承载 Reader 本机撤销。助手高亮的卡片条由本地落库成功
     // 分支直接产生，不走跨进程动态函数通道。这里因此只允许一个受信语义入口；

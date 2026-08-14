@@ -1882,6 +1882,292 @@
     if (!Number.isInteger(rawStart) || !Number.isInteger(rawEndAt)) throw new Error('BW_READER_SOURCE_TEXT_RANGE_INVALID');
     return { start: rawStart, end: rawEndAt + 1 };
   }
+
+  // ── reader-highlight-source/1 ────────────────────────────────────────────
+  // The assistant selects opaque boundaries from this short-lived projection.
+  // Real EPUB offsets never leave this page realm, and the book DOM is never
+  // rewritten with marker nodes.  The projection deliberately uses
+  // _countableText (not _sectionRawText), so injected furigana, translations
+  // and sticky-note controls cannot shift a persisted anchor.
+  var _READER_HIGHLIGHT_SOURCE_CONTRACT = 'reader-highlight-source/1';
+  var _READER_SOURCE_RANGE_CONTRACT = 'reader-source-range/1';
+  var _READER_SOURCE_TTL_MS = 5 * 60 * 1000;
+  var _READER_RANGE_WRITE_TIMEOUT_MS = 6000;
+  var _READER_SOURCE_MAX_TEXT = 16384;
+  var _READER_SOURCE_MAX_MARKERS = 2048;
+  var _epubReaderSourceSnapshots = new Map();
+  var _epubReaderSourceFallbackNonce = 0;
+
+  function _readerSourceDigest(value) {
+    var text = String(value || ''), a = 0x811c9dc5, b = 0x9e3779b9;
+    for (var i = 0; i < text.length; i++) {
+      var code = text.charCodeAt(i);
+      a ^= code; a = Math.imul(a, 0x01000193) >>> 0;
+      b ^= code + ((i + 1) * 0x45d9f3b); b = Math.imul(b, 0x27d4eb2d) >>> 0;
+    }
+    return 'rsd1_' + text.length.toString(16).padStart(8, '0') + '_' +
+      a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0');
+  }
+
+  function _readerSourceSnapshotId() {
+    try {
+      var bytes = new Uint8Array(12);
+      window.crypto.getRandomValues(bytes);
+      return 'hrs_' + Array.from(bytes, function (v) { return v.toString(16).padStart(2, '0'); }).join('');
+    } catch (e) {
+      _epubReaderSourceFallbackNonce += 1;
+      var seed = Date.now().toString(16).padStart(12, '0') + ':' +
+        _epubReaderSourceFallbackNonce + ':' + Math.random();
+      return 'hrs_' + _readerSourceDigest(seed).slice(-16) +
+        (Date.now() >>> 0).toString(16).padStart(8, '0');
+    }
+  }
+
+  function _readerSourcePieces(text) {
+    text = String(text || '');
+    if (!text) throw new Error('BW_READER_SOURCE_EMPTY');
+    if (text.length > _READER_SOURCE_MAX_TEXT) throw new Error('BW_READER_SOURCE_TOO_LARGE');
+    var pieces = [];
+    try {
+      if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+        var segments = new Intl.Segmenter(undefined, { granularity: 'word' }).segment(text);
+        Array.from(segments).forEach(function (item) {
+          var segment = String(item && item.segment || '');
+          for (var i = 0; i < segment.length;) {
+            var segmentEnd = Math.min(segment.length, i + 512);
+            if (segmentEnd < segment.length && /[\uD800-\uDBFF]/.test(segment[segmentEnd - 1]) &&
+                /[\uDC00-\uDFFF]/.test(segment[segmentEnd])) segmentEnd += 1;
+            pieces.push(segment.slice(i, segmentEnd));
+            i = segmentEnd;
+          }
+        });
+      }
+    } catch (e) { pieces.length = 0; }
+    if (!pieces.length || pieces.join('') !== text) {
+      pieces.length = 0;
+      for (var fallbackIndex = 0; fallbackIndex < text.length;) {
+        var cp = text.codePointAt(fallbackIndex), unit = String.fromCodePoint(cp);
+        var asciiWord = /[A-Za-z0-9_'\u2019\-]/.test(unit), whitespace = /\s/.test(unit);
+        var end = fallbackIndex + unit.length;
+        if (asciiWord || whitespace) {
+          while (end < text.length && end - fallbackIndex < 512) {
+            var next = String.fromCodePoint(text.codePointAt(end));
+            if ((asciiWord && !/[A-Za-z0-9_'\u2019\-]/.test(next)) ||
+                (whitespace && !/\s/.test(next))) break;
+            end += next.length;
+          }
+        }
+        pieces.push(text.slice(fallbackIndex, end));
+        fallbackIndex = end;
+      }
+    }
+    if (pieces.length + 1 > _READER_SOURCE_MAX_MARKERS) {
+      var compact = [], chunkSize = Math.ceil(text.length / (_READER_SOURCE_MAX_MARKERS - 1));
+      for (var j = 0; j < text.length;) {
+        var chunkEnd = Math.min(text.length, j + chunkSize);
+        if (chunkEnd < text.length && /[\uD800-\uDBFF]/.test(text[chunkEnd - 1]) &&
+            /[\uDC00-\uDFFF]/.test(text[chunkEnd])) chunkEnd += 1;
+        compact.push(text.slice(j, chunkEnd));
+        j = chunkEnd;
+      }
+      return compact;
+    }
+    return pieces;
+  }
+
+  function _readerSourceMarkerBundle(text) {
+    var pieces = _readerSourcePieces(text), markers = [], offsets = Object.create(null), offset = 0;
+    for (var i = 0; i < pieces.length; i++) {
+      var marker = 'm_' + i.toString(36);
+      offsets[marker] = offset;
+      markers.push({ marker: marker, text: pieces[i] });
+      offset += pieces[i].length;
+    }
+    var terminal = 'm_' + pieces.length.toString(36);
+    offsets[terminal] = offset;
+    markers.push({ marker: terminal, text: '' });
+    return { markers: markers, offsets: offsets };
+  }
+
+  function _readerSourceRemember(cache, snapshot) {
+    var now = Date.now();
+    cache.forEach(function (value, id) {
+      if (!value || value.expiresAt <= now) cache.delete(id);
+    });
+    while (cache.size >= 12) cache.delete(cache.keys().next().value);
+    cache.set(snapshot.snapshotId, snapshot);
+  }
+
+  function _readerSourceExisting(cache, documentId, target, sourceDigest, revision, text,
+      baseOffset, fullTextDigest, viewportKey, sectionGeneration) {
+    var now = Date.now(), found = null;
+    cache.forEach(function (value, id) {
+      if (!value || value.expiresAt <= now) { cache.delete(id); return; }
+      if (value.expiresAt - now <= 30000) { cache.delete(id); return; }
+      if (!found && value.documentId === documentId && value.target &&
+          value.target.kind === target.kind &&
+          Number(value.target.section) === Number(target.section) &&
+          value.sourceDigest === sourceDigest && value.revision === revision &&
+          value.text === text && value.baseOffset === baseOffset &&
+          value.fullTextDigest === fullTextDigest && value.viewportKey === viewportKey &&
+          value.sectionGeneration === sectionGeneration) found = value;
+    });
+    return found;
+  }
+
+  function _readerSourceMutationId(request, ref) {
+    if (request.mutationId != null && request.mutationId !== '') {
+      if (!/^c_[a-f0-9]{8,32}$/.test(request.mutationId)) {
+        throw new Error('BW_READER_HIGHLIGHT_MUTATION_ID');
+      }
+      return request.mutationId;
+    }
+    return 'c_' + _readerSourceDigest(
+      ref.snapshotId + ':' + ref.startMarker + ':' + ref.endMarker
+    ).slice(-16);
+  }
+
+  function _epubSourceNodeInside(el, node) {
+    if (!el || !node) return false;
+    try { if (typeof el.contains === 'function') return el.contains(node); } catch (e) {}
+    var curNode = node.nodeType === 3 ? node.parentElement : node;
+    while (curNode) {
+      if (curNode === el) return true;
+      curNode = curNode.parentElement;
+    }
+    return false;
+  }
+
+  function _epubSourceViewport(section, el, fullLength) {
+    var offset = null, ratio = null;
+    try {
+      var cr = content && content.getBoundingClientRect ? content.getBoundingClientRect() : null;
+      var x = cr ? cr.left + cr.width / 2 : (Number(window.innerWidth) || 0) / 2;
+      var viewportHeight = Number(window.innerHeight) || (cr && cr.bottom) || 0;
+      var visibleTop = cr ? Math.max(cr.top, 0) : 0;
+      var visibleBottom = cr ? Math.min(cr.bottom == null ? cr.top + cr.height : cr.bottom, viewportHeight) : 0;
+      var y = cr && visibleBottom > visibleTop ? (visibleTop + visibleBottom) / 2 : viewportHeight / 2;
+      var caretNode = null, caretOffset = 0;
+      if (document.caretRangeFromPoint) {
+        var caretRange = document.caretRangeFromPoint(x, y);
+        if (caretRange) { caretNode = caretRange.startContainer; caretOffset = caretRange.startOffset; }
+      } else if (document.caretPositionFromPoint) {
+        var caretPosition = document.caretPositionFromPoint(x, y);
+        if (caretPosition) { caretNode = caretPosition.offsetNode; caretOffset = caretPosition.offset; }
+      }
+      if (caretNode && (caretNode.nodeType === 3 || typeof caretNode.nodeValue === 'string') &&
+          _epubSourceNodeInside(el, caretNode) && _countable(caretNode)) {
+        offset = offsetOf(el, caretNode, Number(caretOffset) || 0);
+      }
+    } catch (e) { offset = null; }
+    try {
+      if (typeof _viewportRatio === 'function') ratio = _viewportRatio(section);
+    } catch (e) { ratio = null; }
+    if (!(typeof ratio === 'number' && isFinite(ratio))) {
+      try {
+        var contentRect = content && content.getBoundingClientRect ? content.getBoundingClientRect() : null;
+        var sectionRect = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+        if (contentRect && sectionRect && sectionRect.height > 0) {
+          ratio = ((contentRect.top + contentRect.height / 2) - sectionRect.top) / sectionRect.height;
+          ratio = Math.max(0, Math.min(1, ratio));
+        }
+      } catch (e) { ratio = null; }
+    }
+    if (!Number.isInteger(offset) && typeof ratio === 'number' && isFinite(ratio)) {
+      offset = Math.round(fullLength * ratio);
+    }
+    if (!Number.isInteger(offset)) offset = 0;
+    offset = Math.max(0, Math.min(fullLength, offset));
+    var offsetBucket = Math.floor(offset / 128);
+    var ratioBucket = typeof ratio === 'number' && isFinite(ratio) ? Math.round(ratio * 1000) : 'na';
+    return { offset: offset, key: 'epub-view/1:' + offsetBucket + ':' + ratioBucket };
+  }
+
+  function _epubSourceState(section, el) {
+    var fullText = _countableText(el);
+    if (!fullText) throw new Error('BW_READER_SOURCE_EMPTY');
+    var viewport = _epubSourceViewport(section, el, fullText.length);
+    var baseOffset = 0;
+    if (fullText.length > _READER_SOURCE_MAX_TEXT) {
+      baseOffset = Math.max(0, Math.min(
+        fullText.length - _READER_SOURCE_MAX_TEXT,
+        viewport.offset - Math.floor(_READER_SOURCE_MAX_TEXT / 2)
+      ));
+      if (baseOffset > 0 && /[\uDC00-\uDFFF]/.test(fullText.charAt(baseOffset)) &&
+          /[\uD800-\uDBFF]/.test(fullText.charAt(baseOffset - 1))) baseOffset += 1;
+    }
+    var windowEnd = Math.min(fullText.length, baseOffset + _READER_SOURCE_MAX_TEXT);
+    if (windowEnd < fullText.length && /[\uD800-\uDBFF]/.test(fullText.charAt(windowEnd - 1)) &&
+        /[\uDC00-\uDFFF]/.test(fullText.charAt(windowEnd))) windowEnd -= 1;
+    var text = fullText.slice(baseOffset, windowEnd);
+    var fullTextDigest = _readerSourceDigest(fullText);
+    var sectionGeneration = String(_secGen);
+    var sourceDigest = _readerSourceDigest([
+      'epub-source-window/1', section, sectionGeneration, viewport.key,
+      baseOffset, fullTextDigest, text
+    ].join('\u001f'));
+    var revision = _epubSourceRevision(
+      section, sourceDigest, fullTextDigest, baseOffset, viewport.key, sectionGeneration
+    );
+    return {
+      fullText: fullText,
+      text: text,
+      baseOffset: baseOffset,
+      fullTextDigest: fullTextDigest,
+      viewportKey: viewport.key,
+      sectionGeneration: sectionGeneration,
+      sourceDigest: sourceDigest,
+      revision: revision
+    };
+  }
+
+  function _epubSourceRevision(section, sourceDigest, fullTextDigest, baseOffset, viewportKey,
+      sectionGeneration) {
+    return ('epub:' + sectionGeneration + ':' + section + ':' + baseOffset + ':' +
+      _readerSourceDigest(viewportKey).slice(-16) + ':' + sourceDigest + ':' + fullTextDigest).slice(0, 160);
+  }
+
+  function _epubRangeRef(request) {
+    var ref = request && request.rangeRef;
+    var refKeys = ref && typeof ref === 'object' ? Object.keys(ref).sort() : [];
+    var exactRefKeys = [
+      'contract', 'documentId', 'endMarker', 'revision', 'snapshotId',
+      'sourceDigest', 'startMarker', 'target'
+    ];
+    if (!ref || ref.contract !== _READER_SOURCE_RANGE_CONTRACT ||
+        refKeys.length !== exactRefKeys.length ||
+        refKeys.some(function (key, index) { return key !== exactRefKeys[index]; })) {
+      throw new Error('BW_READER_RANGE_CONTRACT_INVALID');
+    }
+    if (!/^hrs_[0-9a-f]{24}$/.test(String(ref.snapshotId || ''))) {
+      throw new Error('BW_READER_RANGE_SNAPSHOT_STALE');
+    }
+    var snapshot = _epubReaderSourceSnapshots.get(ref.snapshotId);
+    if (!snapshot || snapshot.expiresAt <= Date.now()) {
+      _epubReaderSourceSnapshots.delete(ref.snapshotId);
+      throw new Error('BW_READER_RANGE_SNAPSHOT_STALE');
+    }
+    var targetKeys = ref.target && typeof ref.target === 'object'
+      ? Object.keys(ref.target).sort() : [];
+    if (ref.documentId !== FREL || snapshot.documentId !== FREL ||
+        !ref.target || ref.target.kind !== 'epub' ||
+        targetKeys.length !== 2 || targetKeys[0] !== 'kind' || targetKeys[1] !== 'section' ||
+        Number(ref.target.section) !== snapshot.target.section) {
+      throw new Error('BW_READER_RANGE_SOURCE_STALE');
+    }
+    if (ref.sourceDigest !== snapshot.sourceDigest || ref.revision !== snapshot.revision) {
+      throw new Error('BW_READER_RANGE_SOURCE_STALE');
+    }
+    var start = snapshot.offsets[String(ref.startMarker || '')];
+    var end = snapshot.offsets[String(ref.endMarker || '')];
+    if (!Number.isInteger(start) || !Number.isInteger(end)) {
+      throw new Error('BW_READER_RANGE_MARKER_INVALID');
+    }
+    if (start < 0 || end > snapshot.text.length || start >= end) {
+      throw new Error('BW_READER_RANGE_INVALID');
+    }
+    return { ref: ref, snapshot: snapshot, start: start, end: end };
+  }
   // 确保某 section 已渲染(没渲染就 loadSection 再轮询)→ resolve(loaded?)。
   function _ensureLoaded(section) {
     return new Promise(function (resolve) {
@@ -1989,6 +2275,148 @@
     var task = _epubHighlightTransaction(arg);
     task.catch(function () {});   // old action dispatchers intentionally ignore returns
     return task;
+  };
+
+  window.__bwReaderHighlightSource = function (request) {
+    request = request || {};
+    if (request.file !== FREL) return Promise.reject(new Error('BW_READER_SOURCE_WRONG_BOOK'));
+    if (!request.target || request.target.kind !== 'epub') return Promise.reject(new Error('BW_READER_SOURCE_TARGET_KIND'));
+    var section = Number(request.target.section);
+    if (!Number.isInteger(section) || section < 0 || section >= COUNT) {
+      return Promise.reject(new Error('BW_READER_SOURCE_SECTION_INVALID'));
+    }
+    return _ensureLoaded(section).then(function (ok) {
+      var el = secEls[section];
+      if (!ok || !el) throw new Error('BW_READER_SOURCE_SECTION_UNAVAILABLE');
+      var state = _epubSourceState(section, el);
+      var existing = _readerSourceExisting(
+        _epubReaderSourceSnapshots, FREL, { kind: 'epub', section: section },
+        state.sourceDigest, state.revision, state.text, state.baseOffset, state.fullTextDigest,
+        state.viewportKey, state.sectionGeneration
+      );
+      if (existing) {
+        return {
+          contract: _READER_HIGHLIGHT_SOURCE_CONTRACT,
+          snapshotId: existing.snapshotId,
+          documentId: existing.documentId,
+          target: { kind: 'epub', section: section },
+          sourceDigest: existing.sourceDigest,
+          revision: existing.revision,
+          expiresAt: existing.expiresAt,
+          markers: existing.markers.map(function (item) { return { marker: item.marker, text: item.text }; })
+        };
+      }
+      var snapshotId = _readerSourceSnapshotId();
+      var expiresAt = Date.now() + _READER_SOURCE_TTL_MS;
+      var bundle = _readerSourceMarkerBundle(state.text);
+      _readerSourceRemember(_epubReaderSourceSnapshots, {
+        snapshotId: snapshotId,
+        documentId: FREL,
+        target: { kind: 'epub', section: section },
+        sourceDigest: state.sourceDigest,
+        revision: state.revision,
+        expiresAt: expiresAt,
+        text: state.text,
+        baseOffset: state.baseOffset,
+        fullTextDigest: state.fullTextDigest,
+        viewportKey: state.viewportKey,
+        sectionGeneration: state.sectionGeneration,
+        offsets: bundle.offsets,
+        markers: bundle.markers.map(function (item) { return { marker: item.marker, text: item.text }; })
+      });
+      return {
+        contract: _READER_HIGHLIGHT_SOURCE_CONTRACT,
+        snapshotId: snapshotId,
+        documentId: FREL,
+        target: { kind: 'epub', section: section },
+        sourceDigest: state.sourceDigest,
+        revision: state.revision,
+        expiresAt: expiresAt,
+        markers: bundle.markers.map(function (item) { return { marker: item.marker, text: item.text }; })
+      };
+    });
+  };
+
+  window.__bwReaderHighlightRange = function (request) {
+    request = request || {};
+    var colors = { yellow:'#fff59d', green:'#a7f3d0', blue:'#a3d4ff', pink:'#fda4af' };
+    if (!colors[request.color]) return Promise.reject(new Error('BW_READER_HIGHLIGHT_COLOR_INVALID'));
+    var resolved;
+    try { resolved = _epubRangeRef(request); }
+    catch (error) { return Promise.reject(error); }
+    var section = resolved.snapshot.target.section;
+    return _ensureLoaded(section).then(function (ok) {
+      var el = secEls[section];
+      if (!ok || !el) throw new Error('BW_READER_RANGE_SOURCE_STALE');
+      var currentState = _epubSourceState(section, el);
+      if (currentState.sourceDigest !== resolved.snapshot.sourceDigest ||
+          currentState.revision !== resolved.snapshot.revision ||
+          currentState.text !== resolved.snapshot.text ||
+          currentState.baseOffset !== resolved.snapshot.baseOffset ||
+          currentState.fullTextDigest !== resolved.snapshot.fullTextDigest ||
+          currentState.viewportKey !== resolved.snapshot.viewportKey ||
+          currentState.sectionGeneration !== resolved.snapshot.sectionGeneration) {
+        throw new Error('BW_READER_RANGE_SOURCE_STALE');
+      }
+      var absoluteStart = resolved.snapshot.baseOffset + resolved.start;
+      var absoluteEnd = resolved.snapshot.baseOffset + resolved.end;
+      if (absoluteStart < 0 || absoluteEnd > currentState.fullText.length || absoluteStart >= absoluteEnd) {
+        throw new Error('BW_READER_RANGE_INVALID');
+      }
+      var selectedText = currentState.fullText.slice(absoluteStart, absoluteEnd);
+      if (!selectedText.trim()) throw new Error('BW_READER_RANGE_INVALID');
+      var mutationId = _readerSourceMutationId(request, resolved.ref);
+      var body = {
+        file: FREL,
+        id: mutationId,
+        anchor: { section: section, start: absoluteStart, end: absoluteEnd },
+        text: selectedText,
+        color: colors[request.color],
+        note: request.note || '',
+        kind: 'note'
+      };
+      return new Promise(function (resolve, reject) {
+        var settled = false;
+        var finish = function (callback, value) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          callback(value);
+        };
+        var timer = setTimeout(function () {
+          finish(reject, new Error('BW_READER_HIGHLIGHT_WRITE_TIMEOUT_UNKNOWN'));
+        }, _READER_RANGE_WRITE_TIMEOUT_MS);
+        reqJson('POST', '/pdf/api/epub-highlights', body, function (data) {
+          if (settled) return;
+          var h = data && data.highlight;
+          if (!h || !h.id) {
+            finish(reject, new Error('BW_READER_HIGHLIGHT_SAVE_INVALID'));
+            return;
+          }
+          _hls[h.id] = h;
+          try { applyHl(el, h); } catch (e) {}
+          var action = data.action || {
+            id: 'direct-highlight:' + h.id,
+            kind: 'epub_highlight',
+            title: '高亮:1处',
+            detail: '· ' + selectedText.slice(0, 120),
+            undo: { op: 'hl_delete', file: FREL, ids: [h.id] },
+            redo: { op: 'hl_create', file: FREL, items: [h] },
+            state: 'done', ts: Number(h.time) || Math.floor(Date.now() / 1000)
+          };
+          try { _epShowAction(action); } catch (e) {}
+          finish(resolve, {
+            ok: true,
+            status: 'highlight_saved',
+            id: h.id,
+            target: { kind: 'epub', section: section },
+            text: selectedText
+          });
+        }, function (error) {
+          finish(reject, new Error('BW_READER_HIGHLIGHT_SAVE_REJECTED:' + error));
+        });
+      });
+    });
   };
 
   function _epubExactSource(request) {

@@ -3781,6 +3781,12 @@ def _hl_char_match(pdf, ap, rel, pg, needle):
 
 def _t_highlight(args, ctx):
     """把原文句子在 PDF 上画高亮:PyMuPDF search_for 文字→rects(同 char 层坐标系)→写高亮 sidecar。可撤销。"""
+    # reader-source-range/1 is an App-owned, short-lived capability.  The Pi
+    # cannot resolve its opaque markers and must never silently reinterpret it
+    # as a quote search: doing so would recreate the long-text mis-highlighting
+    # this contract was introduced to remove.
+    if "rangeRef" in args or "range_ref" in args:
+        return {"error": "BW_READER_HIGHLIGHT_RANGE_REQUIRES_APP"}
     file_rel = ctx.get("file_rel", "")
     native_pdf = _native_pdf_state(ctx) is not None
     if not file_rel:
@@ -5427,8 +5433,11 @@ TOOLS = {
     "search_video": ("搜教学视频(YouTube)并在对话里渲染**可播放**的视频卡片。用户明确要『找/看视频、有没有视频讲解、放个视频』时用,"
                      "别对每个概念都配视频(大多数回答不需要)。拿到结果只需简短说一句『给你找到这些视频』,"
                      "**别复述标题/链接**(卡片已经显示了、能直接点开播放)。args {query?}(不传用选中/焦点)", _t_search_video),
-    "highlight": ("在 PDF 上把**你已经选定的**重点句子画高亮(可撤销)。args {texts:[\"原句1\",\"原句2\"], color?, page?}。"
-                  "texts 必须是页面上的**原文逐字**(从 read_page 结果照抄,别改写/别翻译),否则定位不到。"
+    "highlight": ("在当前 Reader 页面把**你已经选定的**内容画高亮(可撤销)。read_page 若返回 highlight_source，"
+                  "必须从其中选择已有 startMarker/endMarker，并把 source 身份逐字段复制进 rangeRef；每个 marker 位于它的 text 之前，"
+                  "startMarker 是第一个要包含的片段，endMarker 是第一个不包含的片段(排他边界)；要包含来源末尾时必须选最后一个 text 为空的 terminal marker。"
+                  "不要再抄整段原文让页面反查。"
+                  "旧客户端没有 highlight_source 时才使用 texts 原文兼容参数。"
                   "page 不传=当前页。**适合标当前页你已读到的几句**;要标整章/多页用 auto_highlight(别自己逐页 read+highlight)", _t_highlight),
     "auto_highlight": ("**整章/多页『自动标重点』专用**(『把这一章/第X-Y页的重点都高亮』就用它)。它内部逐页把正文外包给挑句专家、"
                        "画好高亮,只回简报——**正文不进你的上下文,省大量 token**。范围:from+to(印刷页区间,配合 toc 拿章的起止页)/ pages[列表] / page。"
@@ -5669,13 +5678,56 @@ _TOOL_SCHEMA_OVERRIDES = {
         "page": dict(_PAGE_VALUE_SCHEMA, description="要查看的页；不给则当前页"),
     }),
     "highlight": _tool_object_schema({
-        "text": {"type": "string", "description": "要高亮的原文；不给则用当前选中"},
+        "rangeRef": {
+            "type": "object",
+            "description": ("read_page.highlight_source 派生的可信范围身份；字段逐项照抄。每个 marker 位于其 text 之前；"
+                            "startMarker 是第一个要包含的片段，endMarker 是第一个不包含的片段(排他边界)；"
+                            "若范围包含来源末尾，endMarker 必须使用最后一个 text 为空的 terminal marker"),
+            "properties": {
+                "contract": {"type": "string", "enum": ["reader-source-range/1"]},
+                "snapshotId": {"type": "string"},
+                "documentId": {"type": "string"},
+                "target": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"type": "string", "enum": ["pdf"]},
+                                "page": {"type": "integer", "minimum": 1},
+                            },
+                            "required": ["kind", "page"],
+                            "additionalProperties": False,
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"type": "string", "enum": ["epub"]},
+                                "section": {"type": "integer", "minimum": 0},
+                            },
+                            "required": ["kind", "section"],
+                            "additionalProperties": False,
+                        },
+                    ],
+                },
+                "sourceDigest": {"type": "string"},
+                "revision": {"type": "string"},
+                "startMarker": {"type": "string"},
+                "endMarker": {"type": "string"},
+            },
+            "required": [
+                "contract", "snapshotId", "documentId", "target",
+                "sourceDigest", "revision", "startMarker", "endMarker",
+            ],
+            "additionalProperties": False,
+        },
+        "text": {"type": "string", "description": "仅旧客户端兼容：要高亮的逐字原文"},
         "texts": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "批量高亮多段原文",
+            "description": "仅旧客户端兼容：批量高亮多段逐字原文",
         },
         "color": {"type": "string", "description": "颜色 hex，如 #fff59d"},
+        "note": {"type": "string", "description": "可选高亮备注"},
         "page": dict(_PAGE_VALUE_SCHEMA, description="印刷页码；不给则当前页"),
     }),
     "make_anki": _tool_object_schema({
@@ -6288,8 +6340,10 @@ def _sys_prompt(ctx):
         "  第2步(拿到正文后)→ {\"tool\":\"make_anki\",\"args\":{\"text\":\"<你总结出的要点>\"}}\n"
         "  第3步(制卡已提交后)→ 才给最终回答:「总结好了:…;卡也在做了,完成会通知你」。\n"
         "  ——这里第2步不能省,**是因为用户带了『做成卡』**;若用户只说「总结这页」(没提卡),就**只做第1步 read_page + 给文字总结**,到此为止,绝不 make_anki。\n"
-        "★高亮重点:先 read_page 拿到正文,再把要强调的几句**原句逐字**(从正文照抄,不要改写/翻译)"
-        "**一次性**放进 highlight 的 texts 数组(一次调用搞定,别一句一调),否则在 PDF 上定位不到。\n"
+        "★高亮重点:先 read_page。若结果带 highlight_source，必须从 markers 选起止边界，逐字段复制身份并调用"
+        " highlight(rangeRef=...)。每个 marker 位于其 text 之前；startMarker 是首个包含片段，endMarker 是首个不包含片段的排他边界；"
+        "要包含来源末尾就用最后一个 text 为空的 terminal marker。不要再照抄长原文反查。只有旧客户端没有 highlight_source 时，才把几句原文逐字放进"
+        " texts 兼容参数。\n"
         "★**批量标注整章/多页重点**(如『把这一章/第X-Y页的重点都高亮』)→ **直接用 auto_highlight**(它内部逐页把正文外包给挑句专家、画好高亮、只回简报,正文不进你的上下文,省大量 token):"
         "说『这一章』先 **toc** 查目录拿到该章起止印刷页 → auto_highlight(from=起, to=止);用户直接给了页就传 pages=[...] 或 from/to。"
         "**别自己逐页 read_page+highlight**(那会把每页正文反复灌进上下文,又慢又贵)。auto_highlight 回来后,把『标了哪些页、共多少句』简洁告诉用户即可。\n"

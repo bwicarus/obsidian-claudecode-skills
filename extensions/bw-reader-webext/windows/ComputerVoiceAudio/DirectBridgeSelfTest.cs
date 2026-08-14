@@ -282,7 +282,7 @@ internal static class DirectBridgeSelfTest
         JsonElement limits = helloPayload.GetProperty("limits");
         Require(
             helloPayload.GetProperty("protocolVersion").GetInt32() == 3
-            && limits.GetProperty("maxMessageBytes").GetInt32() == 65536
+            && limits.GetProperty("maxMessageBytes").GetInt32() == 262144
             && limits.GetProperty("pcmFrameBytes").GetInt32() == 1956
             && limits.GetProperty("pcmQueueLimitMs").GetInt32() == 400
             && limits.GetProperty("uplinkTrack").GetInt32() == 3
@@ -6257,11 +6257,77 @@ internal static class DirectBridgeSelfTest
                                 },
                             },
                         },
+                        highlightSource = new
+                        {
+                            contract = "reader-highlight-source/1",
+                            snapshotId =
+                                "hrs_abcdef0123456789abcdef01",
+                            documentId = "book.pdf",
+                            target = new { kind = "pdf", page = 5 },
+                            sourceDigest =
+                                "rsd1_89abcdef_fedcba9876543210",
+                            revision = "pdf-rev-5",
+                            expiresAt = 1_750_000_300_000L,
+                            markers = new[]
+                            {
+                                new { marker = "m_0", text = "selected " },
+                                new { marker = "m_1", text = "words" },
+                                new { marker = "m_2", text = "" },
+                            },
+                        },
                     },
                 },
                 events,
                 frames).ConfigureAwait(false),
             "active-reading");
+        JsonElement receiverClockExpiry = await SendAsync(
+            contextSession,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "active-reading",
+                requestId = "request-active-reading-future-expiry",
+                sessionId = contextSessionId,
+                activeContract =
+                    FileDirectSnapshotContextAdapter.ActiveReadingContract,
+                active = new
+                {
+                    kind = "pdf",
+                    file = "book.pdf",
+                    title = "Test Book",
+                    page = 5,
+                    selectionState = "unknown",
+                    selection = (string?)null,
+                    observedAtEpochMs = 1_750_000_010_000L,
+                    sourceInstanceId = "source-selection-test",
+                    highlightSource = new
+                    {
+                        contract = "reader-highlight-source/1",
+                        snapshotId =
+                            "hrs_111111111111111111111111",
+                        documentId = "book.pdf",
+                        target = new { kind = "pdf", page = 5 },
+                        sourceDigest =
+                            "rsd1_11111111_1111111111111111",
+                        revision = "pdfrev_1111111111111111",
+                        expiresAt = 1_750_000_310_000L,
+                        markers = new[]
+                        {
+                            new { marker = "m_0", text = "x" },
+                            new { marker = "m_1", text = "" },
+                        },
+                    },
+                },
+            },
+            events,
+            frames).ConfigureAwait(false);
+        Require(
+            !receiverClockExpiry.GetProperty("ok").GetBoolean()
+            && receiverClockExpiry.GetProperty("error")
+                .GetProperty("code").GetString()
+                == "BW_READER_ACTIVE_READING_SCHEMA_INVALID",
+            "direct-highlight-source-expiry-is-bound-to-receiver-clock",
+            checks);
         DirectActiveReading stableOrdinalReading =
             FileDirectSnapshotContextAdapter.ValidateActiveReading(
                 JsonSerializer.SerializeToElement(new
@@ -6500,6 +6566,8 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("items")[0]
                 .GetProperty("selectionId").GetString()
                 == "selection-1"
+            && !snapshotRoot.GetProperty("activeReading")
+                .TryGetProperty("highlightSource", out _)
             && snapshotRoot.GetProperty("currentPage")
                 .GetProperty("text").GetString()
                 == "Windows local snapshot text"
@@ -6511,6 +6579,14 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("items")[0]
                 .GetProperty("selectionId").GetString()
                 == "selection-1"
+            && snapshotRoot.GetProperty("currentPage")
+                .GetProperty("highlightSource")
+                .GetProperty("snapshotId").GetString()
+                == "hrs_abcdef0123456789abcdef01"
+            && snapshotRoot.GetProperty("currentPage")
+                .GetProperty("highlightSource")
+                .GetProperty("revision").GetString()
+                == "pdf-rev-5"
             && snapshotRoot.GetProperty("selection")
                 .GetProperty("state").GetString() == "active"
             && snapshotRoot.GetProperty("selection")
@@ -6573,6 +6649,182 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("sourceInstanceId").GetString()
                 == "source-selection-test",
             "direct-snapshot-source-survives-same-page-content-only-update",
+            checks);
+
+        JsonArray denseMarkers = [];
+        for (int index = 0; index < 2_047; index += 1)
+        {
+            denseMarkers.Add(new JsonObject
+            {
+                ["marker"] = "m_" + index.ToString(
+                    "x",
+                    System.Globalization.CultureInfo.InvariantCulture),
+                ["text"] = "日本語断片",
+            });
+        }
+        denseMarkers.Add(new JsonObject
+        {
+            ["marker"] = "m_7ff",
+            ["text"] = "",
+        });
+        JsonObject denseActiveRequest = new()
+        {
+            ["contract"] = DirectBridgeContract.Contract,
+            ["type"] = "active-reading",
+            ["requestId"] = "request-active-reading-dense-cjk",
+            ["sessionId"] = contextSessionId,
+            ["activeContract"] =
+                FileDirectSnapshotContextAdapter.ActiveReadingContract,
+            ["active"] = new JsonObject
+            {
+                ["kind"] = "pdf",
+                ["file"] = "book.pdf",
+                ["title"] = "密集日文",
+                ["page"] = 5,
+                ["selectionState"] = "unknown",
+                ["selection"] = null,
+                ["observedAtEpochMs"] = 1_750_000_004_000L,
+                ["sourceInstanceId"] = "source-dense-test",
+                ["highlightSource"] = new JsonObject
+                {
+                    ["contract"] = "reader-highlight-source/1",
+                    ["snapshotId"] =
+                        "hrs_fedcba9876543210fedcba98",
+                    ["documentId"] = "book.pdf",
+                    ["target"] = new JsonObject
+                    {
+                        ["kind"] = "pdf",
+                        ["page"] = 5,
+                    },
+                    ["sourceDigest"] =
+                        "rsd1_fedcba98_0123456789abcdef",
+                    ["revision"] = "pdfrev_fedcba9876543210",
+                    ["expiresAt"] = 1_750_000_304_000L,
+                    ["markers"] = denseMarkers,
+                },
+            },
+        };
+        int denseActiveBytes = JsonSerializer.SerializeToUtf8Bytes(
+            denseActiveRequest,
+            DirectBridgeContract.JsonOptions).Length;
+        JsonElement denseActiveAck = RequireSuccess(
+            await SendAsync(
+                contextSession,
+                denseActiveRequest,
+                events,
+                frames).ConfigureAwait(false),
+            "active-reading");
+        string densePageText = new('x', 48_000);
+        JsonObject densePageRequest = new()
+        {
+            ["contract"] = DirectBridgeContract.Contract,
+            ["type"] = "context",
+            ["requestId"] = "request-snapshot-dense-page",
+            ["sessionId"] = contextSessionId,
+            ["contextContract"] =
+                NamedPipeDirectContextAdapter.ContextContract,
+            ["event"] = new JsonObject
+            {
+                ["v"] = 1,
+                ["seq"] = 6,
+                ["type"] = "page.context",
+                ["ts"] = 1_750_000_004,
+                ["id"] = "0000000000000006",
+                ["kind"] = "pdf",
+                ["file"] = "book.pdf",
+                ["title"] = "密集日文",
+                ["page"] = 5,
+                ["stable"] = true,
+                ["page_context"] = new JsonObject
+                {
+                    ["reason"] = "stable",
+                    ["text"] = densePageText,
+                    ["text_available"] = true,
+                    ["text_source"] = "pdf-text",
+                    ["truncated"] = false,
+                },
+            },
+        };
+        _ = RequireSuccess(
+            await SendAsync(
+                contextSession,
+                densePageRequest,
+                events,
+                frames).ConfigureAwait(false),
+            "context");
+        long denseSnapshotBytes = new FileInfo(snapshotPath).Length;
+        string denseMcpInput = string.Join(
+            "\n",
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 1,
+                method = "initialize",
+                @params = new
+                {
+                    protocolVersion = "2025-06-18",
+                    capabilities = new { },
+                    clientInfo = new
+                    {
+                        name = "dense-self-test",
+                        version = "1",
+                    },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 2,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.ToolName,
+                    arguments = new { },
+                },
+            }),
+            "");
+        StringWriter denseMcpOutput = new();
+        ReaderContextMcpServer denseMcp = new(
+            snapshotPath,
+            new StringReader(denseMcpInput),
+            denseMcpOutput,
+            utcNow: () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_750_000_005_000L));
+        _ = await denseMcp.RunAsync(CancellationToken.None)
+            .ConfigureAwait(false);
+        string[] denseMcpLines = denseMcpOutput.ToString().Split(
+            new[] { "\r\n", "\n" },
+            StringSplitOptions.RemoveEmptyEntries);
+        using JsonDocument denseMcpResponse = JsonDocument.Parse(
+            denseMcpLines[1]);
+        using JsonDocument denseMcpSnapshot = JsonDocument.Parse(
+            denseMcpResponse.RootElement.GetProperty("result")
+                .GetProperty("content")[0].GetProperty("text")
+                .GetString()!);
+        Require(
+            denseActiveBytes > 64 * 1024
+            && denseActiveBytes < DirectBridgeContract.MaximumMessageBytes
+            && denseActiveAck.GetProperty("outcome").GetString()
+                == "accepted",
+            "direct-dense-cjk-range-crosses-64k-within-256k",
+            checks);
+        Require(
+            denseSnapshotBytes > 128 * 1024
+            && denseSnapshotBytes
+                < FileDirectSnapshotContextAdapter.MaximumSnapshotBytes
+            ,
+            "direct-dense-cjk-snapshot-crosses-128k-within-512k",
+            checks);
+        Require(
+            !denseMcpSnapshot.RootElement.GetProperty("activeReading")
+                .TryGetProperty("highlightSource", out _)
+            && denseMcpSnapshot.RootElement.GetProperty("currentPage")
+                .GetProperty("highlightSource")
+                .GetProperty("markers").GetArrayLength() == 2_048
+            && denseMcpSnapshot.RootElement.GetProperty("currentPage")
+                .GetProperty("text").GetString()
+                == densePageText,
+            "direct-dense-cjk-source-is-single-copy-and-reaches-mcp",
             checks);
 
         DirectBridgeProtocolSession voiceSession = new(
@@ -7065,7 +7317,7 @@ internal static class DirectBridgeSelfTest
                 && responses[0].RootElement.GetProperty("result")
                     .GetProperty("serverInfo")
                     .GetProperty("version").GetString()
-                    == "1.5.0"
+                    == ReaderContextMcpServer.ServerVersion
                 && tools.GetArrayLength() == 2
                 && tools[0].GetProperty("name").GetString()
                     == ReaderContextMcpServer.ToolName
@@ -7185,6 +7437,46 @@ internal static class DirectBridgeSelfTest
             "direct-reader-context-mcp-recomputes-drawing-freshness",
             checks);
     }
+
+    private static JsonObject HighlightSourceFixture(long observedAt) =>
+        new()
+        {
+            ["contract"] = "reader-highlight-source/1",
+            ["snapshotId"] = "hrs_0123456789abcdef01234567",
+            ["documentId"] = "library/output-book.pdf",
+            ["target"] = new JsonObject
+            {
+                ["kind"] = "pdf",
+                ["page"] = 4,
+            },
+            ["sourceDigest"] =
+                "rsd1_01234567_0123456789abcdef",
+            ["revision"] = "pdf-rev-4",
+            ["expiresAt"] = observedAt + 300_000,
+            ["markers"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["marker"] = "m_0",
+                    ["text"] = "current ",
+                },
+                new JsonObject
+                {
+                    ["marker"] = "m_1",
+                    ["text"] = "reading ",
+                },
+                new JsonObject
+                {
+                    ["marker"] = "m_2",
+                    ["text"] = "window",
+                },
+                new JsonObject
+                {
+                    ["marker"] = "m_3",
+                    ["text"] = "",
+                },
+            },
+        };
 
     private static async Task CheckReaderRealtimeOutputMcpAsync(
         string root,
@@ -7493,6 +7785,8 @@ internal static class DirectBridgeSelfTest
                 ["sourceInstanceId"] = "source-output",
                 ["receivedAtEpochMs"] = observedAt,
                 ["fresh"] = true,
+                ["highlightSource"] = HighlightSourceFixture(
+                    observedAt),
             },
             ["contextStatus"] = "ready",
             ["currentPage"] = new JsonObject
@@ -7505,6 +7799,8 @@ internal static class DirectBridgeSelfTest
                 ["stable"] = true,
                 ["text"] = "current reading window",
                 ["textAvailable"] = true,
+                ["highlightSource"] = HighlightSourceFixture(
+                    observedAt),
             },
             ["selection"] = new JsonObject
             {
@@ -7780,6 +8076,93 @@ internal static class DirectBridgeSelfTest
                     arguments = new { surface = "epub" },
                 },
             }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 18,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer
+                        .HighlightRangeToolName,
+                    arguments = new
+                    {
+                        rangeRef = new
+                        {
+                            contract = "reader-source-range/1",
+                            snapshotId =
+                                "hrs_0123456789abcdef01234567",
+                            documentId = "library/output-book.pdf",
+                            target = new { kind = "pdf", page = 4 },
+                            sourceDigest =
+                                "rsd1_01234567_0123456789abcdef",
+                            revision = "pdf-rev-4",
+                            startMarker = "m_0",
+                            endMarker = "m_2",
+                        },
+                        color = "green",
+                        note = "marker range",
+                    },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 19,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer
+                        .HighlightRangeToolName,
+                    arguments = new
+                    {
+                        rangeRef = new
+                        {
+                            contract = "reader-source-range/1",
+                            snapshotId =
+                                "hrs_0123456789abcdef01234567",
+                            documentId = "library/output-book.pdf",
+                            target = new { kind = "pdf", page = 4 },
+                            sourceDigest =
+                                "rsd1_01234567_0123456789abcdef",
+                            revision = "pdf-rev-4",
+                            startMarker = "m_2",
+                            endMarker = "m_0",
+                        },
+                        color = "green",
+                        note = (string?)null,
+                    },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 20,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer
+                        .HighlightRangeToolName,
+                    arguments = new
+                    {
+                        rangeRef = new
+                        {
+                            contract = "reader-source-range/1",
+                            snapshotId =
+                                "hrs_0123456789abcdef01234567",
+                            documentId = "library/output-book.pdf",
+                            target = new { kind = "pdf", page = 4 },
+                            sourceDigest =
+                                "rsd1_01234567_0123456789abcdef",
+                            revision = "stale-pdf-rev-4",
+                            startMarker = "m_0",
+                            endMarker = "m_2",
+                        },
+                        color = "green",
+                        note = (string?)null,
+                    },
+                },
+            }),
             "");
         List<ReaderRealtimeOutputRequest> sent = [];
         int probeCount = 0;
@@ -7826,9 +8209,9 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("result").GetProperty("contents");
             JsonElement tools = responses[3].RootElement
                 .GetProperty("result").GetProperty("tools");
-            JsonElement highlightTextTool = tools.EnumerateArray().Single(
+            JsonElement highlightRangeTool = tools.EnumerateArray().Single(
                 tool => tool.GetProperty("name").GetString()
-                    == ReaderContextMcpServer.HighlightTextToolName);
+                    == ReaderContextMcpServer.HighlightRangeToolName);
             JsonElement undoLastTool = tools.EnumerateArray().Single(
                 tool => tool.GetProperty("name").GetString()
                     == ReaderContextMcpServer.UndoLastToolName);
@@ -7877,7 +8260,7 @@ internal static class DirectBridgeSelfTest
             using JsonDocument result = JsonDocument.Parse(resultText);
             using JsonDocument fallbackCardResult = JsonDocument.Parse(
                 fallbackCardText);
-            using JsonDocument highlightResult = JsonDocument.Parse(
+            using JsonDocument legacyHighlightResult = JsonDocument.Parse(
                 responses[12].RootElement.GetProperty("result")
                     .GetProperty("content")[0].GetProperty("text")
                     .GetString()!);
@@ -7893,8 +8276,20 @@ internal static class DirectBridgeSelfTest
                 responses[15].RootElement.GetProperty("result")
                     .GetProperty("content")[0].GetProperty("text")
                     .GetString()!);
+            using JsonDocument rangeResult = JsonDocument.Parse(
+                responses[17].RootElement.GetProperty("result")
+                    .GetProperty("content")[0].GetProperty("text")
+                    .GetString()!);
+            using JsonDocument reversedRangeResult = JsonDocument.Parse(
+                responses[18].RootElement.GetProperty("result")
+                    .GetProperty("content")[0].GetProperty("text")
+                    .GetString()!);
+            using JsonDocument staleRangeResult = JsonDocument.Parse(
+                responses[19].RootElement.GetProperty("result")
+                    .GetProperty("content")[0].GetProperty("text")
+                    .GetString()!);
             Require(
-                responses.Length == 17
+                responses.Length == 20
                 && initialize.GetProperty("capabilities")
                     .TryGetProperty("resources", out _)
                 && initialize.GetProperty("instructions").GetString()!
@@ -7904,6 +8299,10 @@ internal static class DirectBridgeSelfTest
                 && initialize.GetProperty("instructions").GetString()!
                     .Contains(
                         "call reader_context_snapshot first",
+                        StringComparison.Ordinal)
+                && initialize.GetProperty("instructions").GetString()!
+                    .Contains(
+                        "reader_highlight_range",
                         StringComparison.Ordinal)
                 && initialize.GetProperty("instructions").GetString()!
                     .Contains(
@@ -7936,8 +8335,31 @@ internal static class DirectBridgeSelfTest
                 && tools.GetArrayLength() == 7
                 && tools[1].GetProperty("name").GetString()
                     == ReaderContextMcpServer.CapabilityGuideToolName
-                && highlightTextTool.GetProperty("name").GetString()
-                    == ReaderContextMcpServer.HighlightTextToolName
+                && !tools.EnumerateArray().Any(
+                    tool => tool.GetProperty("name").GetString()
+                        == ReaderContextMcpServer.HighlightTextToolName)
+                && highlightRangeTool.GetProperty("inputSchema")
+                    .GetProperty("properties")
+                    .GetProperty("rangeRef")
+                    .GetProperty("additionalProperties").GetBoolean()
+                    == false
+                && highlightRangeTool.GetProperty("description").GetString()!
+                    .Contains(
+                        "never falls back to text search",
+                        StringComparison.Ordinal)
+                && highlightRangeTool.GetProperty("description").GetString()!
+                    .Contains(
+                        "endMarker is the first excluded",
+                        StringComparison.Ordinal)
+                && highlightRangeTool.GetProperty("inputSchema")
+                    .GetProperty("properties")
+                    .GetProperty("rangeRef")
+                    .GetProperty("properties")
+                    .GetProperty("endMarker")
+                    .GetProperty("description").GetString()!
+                    .Contains(
+                        "Exclusive boundary",
+                        StringComparison.Ordinal)
                 && ankiDraftTool.GetProperty("name").GetString()
                     == ReaderContextMcpServer.AnkiDraftToolName
                 && undoLastTool.GetProperty("name").GetString()
@@ -7996,8 +8418,11 @@ internal static class DirectBridgeSelfTest
                     .GetBoolean()
                 && fallbackCardResult.RootElement.GetProperty("kind")
                     .GetString() == "card"
-                && highlightResult.RootElement.GetProperty("status")
-                    .GetString() == "highlight_saved"
+                && legacyHighlightResult.RootElement.GetProperty("code")
+                    .GetString()
+                    == "BW_READER_HIGHLIGHT_RANGE_REQUIRED"
+                && responses[12].RootElement.GetProperty("result")
+                    .GetProperty("isError").GetBoolean()
                 && ankiDraftResult.RootElement.GetProperty("status")
                     .GetString() == "draft_delivered"
                 && !ankiDraftResult.RootElement.GetProperty("anki_written")
@@ -8013,6 +8438,14 @@ internal static class DirectBridgeSelfTest
                     .GetString() == "delivered"
                 && undoResult.RootElement.GetProperty("kind")
                     .GetString() == "client-action"
+                && rangeResult.RootElement.GetProperty("status")
+                    .GetString() == "highlight_saved"
+                && reversedRangeResult.RootElement.GetProperty("code")
+                    .GetString() == "BW_READER_HIGHLIGHT_RANGE_STALE"
+                && staleRangeResult.RootElement.GetProperty("code")
+                    .GetString() == "BW_READER_HIGHLIGHT_RANGE_STALE"
+                && responses[18].RootElement.GetProperty("result")
+                    .GetProperty("isError").GetBoolean()
                 && probeCount == 8
                 && sent.Count == 6
                 && sent[0].SourceInstanceId == "source-output"
@@ -8032,18 +8465,15 @@ internal static class DirectBridgeSelfTest
                     ?.GetValue<string>() == "fact"
                 && sent[2].Payload["card"]?["data"]?["answer"]
                     ?.GetValue<string>() == "卡片已送达"
-                && sent[3].Kind == "highlight-text"
-                && sent[3].Payload["mutationId"]?.GetValue<string>()
-                    .StartsWith("c_", StringComparison.Ordinal) == true
-                && sent[4].Kind == "anki-draft"
-                && sent[4].Payload["draftId"]?.GetValue<string>()
+                && sent[3].Kind == "anki-draft"
+                && sent[3].Payload["draftId"]?.GetValue<string>()
                     .StartsWith("draft-", StringComparison.Ordinal) == true
-                && sent[4].Payload["sourceText"]?.GetValue<string>()
+                && sent[3].Payload["sourceText"]?.GetValue<string>()
                     == "current reading window"
-                && sent[5].Kind == "client-action"
-                && sent[5].Payload["fn"]?.GetValue<string>()
+                && sent[4].Kind == "client-action"
+                && sent[4].Payload["fn"]?.GetValue<string>()
                     == "_nativeReaderUndoLast"
-                && sent[5].Payload["args"] is JsonArray undoArguments
+                && sent[4].Payload["args"] is JsonArray undoArguments
                 && undoArguments.Count == 1
                 && undoArguments[0]?.GetValue<string>() is string undoId
                 && undoId.StartsWith("rundo_", StringComparison.Ordinal)
@@ -8051,10 +8481,17 @@ internal static class DirectBridgeSelfTest
                 && undoId[6..].All(character =>
                     character is >= '0' and <= '9'
                     or >= 'a' and <= 'f')
-                && sent[5].Payload["file"] is null
-                && sent[5].Payload["page"] is null
-                && sent[5].Payload["surface"] is null
-                && sent[5].Payload["action"] is null
+                && sent[4].Payload["file"] is null
+                && sent[4].Payload["page"] is null
+                && sent[4].Payload["surface"] is null
+                && sent[4].Payload["action"] is null
+                && sent[5].Kind == "highlight-range"
+                && sent[5].Payload["mutationId"]?.GetValue<string>()
+                    .StartsWith("c_", StringComparison.Ordinal) == true
+                && sent[5].Payload["rangeRef"]?["startMarker"]
+                    ?.GetValue<string>() == "m_0"
+                && sent[5].Payload["rangeRef"]?["endMarker"]
+                    ?.GetValue<string>() == "m_2"
                 && responses[9].RootElement.GetProperty("error")
                     .GetProperty("code").GetInt32() == -32602
                 && responses[10].RootElement.GetProperty("error")

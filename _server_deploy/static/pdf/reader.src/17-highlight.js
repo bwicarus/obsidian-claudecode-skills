@@ -272,10 +272,18 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
 }
 
 function _pdfExactTextProjection(chars) {
-  let text = '', map = [], last = null;
+  let text = '', boundaries = [0], last = null;
   const cjk = (value) => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(value || '');
-  const append = (value, index) => {
-    for (let k = 0; k < value.length; k++) { text += value[k]; map.push(index); }
+  // Keep projected *boundaries* rather than mapping every displayed code unit
+  // to one native character. Synthetic layout spaces occupy no PDF character:
+  // both of their boundaries point at the next native index. This prevents a
+  // marker ending after a row/gap space from accidentally including the first
+  // character of the next word.
+  const append = (value, startIndex, endIndex) => {
+    for (let k = 0; k < value.length; k++) {
+      text += value[k];
+      boundaries.push(k === value.length - 1 ? endIndex : startIndex);
+    }
   };
   for (let i = 0; i < (chars || []).length; i++) {
     const ch = chars[i] || {};
@@ -283,26 +291,241 @@ function _pdfExactTextProjection(chars) {
       const cjkPair = cjk(ch.c) && cjk(last.c);
       const dy = Math.abs(Number(ch.top || 0) - Number(last.top || 0));
       if (dy > Number(ch.height || 0) * 0.5) {
-        if (!cjkPair) append(' ', i);
+        if (!cjkPair) append(' ', i, i);
       } else {
         const gap = Number(ch.left || 0) - (Number(last.left || 0) + Number(last.width || 0));
         const ref = Math.min(Number(ch.height || 0), Number(last.height || 0));
-        if (!cjkPair && gap > ref * ((/[A-Za-z]/.test(ch.c || '') && /[A-Za-z]/.test(last.c || '')) ? 1.3 : 0.6) && !last.sp && !ch.sp) append(' ', i);
+        if (!cjkPair && gap > ref * ((/[A-Za-z]/.test(ch.c || '') && /[A-Za-z]/.test(last.c || '')) ? 1.3 : 0.6) && !last.sp && !ch.sp) append(' ', i, i);
       }
     }
-    append(ch.sp ? ' ' : String(ch.c || ''), i);
+    append(ch.sp ? ' ' : String(ch.c || ''), i, i + 1);
     last = ch;
   }
-  let folded = '', foldedMap = [], space = false;
-  for (let i = 0; i < text.length; i++) {
+  let first = 0, lastText = text.length;
+  while (first < lastText && /\s/.test(text[first])) first += 1;
+  while (lastText > first && /\s/.test(text[lastText - 1])) lastText -= 1;
+  let folded = '', foldedBoundaries = [];
+  for (let i = first; i < lastText;) {
     if (/\s/.test(text[i])) {
-      if (space) continue;
-      folded += ' '; foldedMap.push(map[i]); space = true;
-    } else {
-      folded += text[i]; foldedMap.push(map[i]); space = false;
+      let end = i + 1;
+      while (end < lastText && /\s/.test(text[end])) end += 1;
+      if (!foldedBoundaries.length) foldedBoundaries.push(boundaries[i]);
+      folded += ' ';
+      foldedBoundaries.push(boundaries[end]);
+      i = end;
+      continue;
+    }
+    if (!foldedBoundaries.length) foldedBoundaries.push(boundaries[i]);
+    folded += text[i];
+    foldedBoundaries.push(boundaries[i + 1]);
+    i += 1;
+  }
+  return { text: folded, boundaries: foldedBoundaries };
+}
+
+// ── reader-highlight-source/1 ──────────────────────────────────────────────
+//
+// Assistant highlights must not locate a returned quote with indexOf().  The
+// text shown to the assistant and the PDF geometry must come from the same
+// authoritative __charBoxes projection.  A short-lived snapshot exposes only
+// opaque boundary markers; their real projected/native offsets stay in this
+// page realm.  Nothing is inserted into the PDF text layer or DOM.
+const _READER_HIGHLIGHT_SOURCE_CONTRACT = 'reader-highlight-source/1';
+const _READER_SOURCE_RANGE_CONTRACT = 'reader-source-range/1';
+const _READER_SOURCE_TTL_MS = 5 * 60 * 1000;
+const _READER_SOURCE_MAX_TEXT = 16384;
+const _READER_SOURCE_MAX_MARKERS = 2048;
+const _pdfReaderSourceSnapshots = new Map();
+let _pdfReaderSourceFallbackNonce = 0;
+
+function _readerSourceDigest(value) {
+  const text = String(value || '');
+  let a = 0x811c9dc5, b = 0x9e3779b9;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    a ^= code; a = Math.imul(a, 0x01000193) >>> 0;
+    b ^= code + ((i + 1) * 0x45d9f3b); b = Math.imul(b, 0x27d4eb2d) >>> 0;
+  }
+  return 'rsd1_' + text.length.toString(16).padStart(8, '0') + '_' +
+    a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0');
+}
+
+function _readerSourceSnapshotId() {
+  try {
+    const bytes = new Uint8Array(12);
+    window.crypto.getRandomValues(bytes);
+    return 'hrs_' + Array.from(bytes, (v) => v.toString(16).padStart(2, '0')).join('');
+  } catch (_) {
+    _pdfReaderSourceFallbackNonce += 1;
+    const seed = Date.now().toString(16).padStart(12, '0') + ':' +
+      _pdfReaderSourceFallbackNonce + ':' + Math.random();
+    return 'hrs_' + _readerSourceDigest(seed).slice(-16) +
+      (Date.now() >>> 0).toString(16).padStart(8, '0');
+  }
+}
+
+function _readerSourcePieces(text) {
+  text = String(text || '');
+  if (!text) throw new Error('BW_READER_SOURCE_EMPTY');
+  if (text.length > _READER_SOURCE_MAX_TEXT) throw new Error('BW_READER_SOURCE_TOO_LARGE');
+  const pieces = [];
+  // Modern WebKit ships Unicode word segmentation. It gives Japanese word
+  // boundaries without shipping another tokenizer and keeps the model-facing
+  // marker list much smaller than one object per CJK character. The opaque
+  // range remains authoritative even when an older host uses the fallback.
+  try {
+    if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+      const segments = new Intl.Segmenter(undefined, { granularity: 'word' }).segment(text);
+      for (const item of segments) {
+        const segment = String(item && item.segment || '');
+        for (let i = 0; i < segment.length;) {
+          let end = Math.min(segment.length, i + 512);
+          if (end < segment.length && /[\uD800-\uDBFF]/.test(segment[end - 1]) &&
+              /[\uDC00-\uDFFF]/.test(segment[end])) end += 1;
+          pieces.push(segment.slice(i, end));
+          i = end;
+        }
+      }
+    }
+  } catch (_) { pieces.length = 0; }
+  if (!pieces.length || pieces.join('') !== text) {
+    pieces.length = 0;
+    for (let i = 0; i < text.length;) {
+      const cp = text.codePointAt(i);
+      const unit = String.fromCodePoint(cp);
+      const asciiWord = /[A-Za-z0-9_'\u2019\-]/.test(unit);
+      const whitespace = /\s/.test(unit);
+      let end = i + unit.length;
+      if (asciiWord || whitespace) {
+        while (end < text.length && end - i < 512) {
+          const next = String.fromCodePoint(text.codePointAt(end));
+          if ((asciiWord && !/[A-Za-z0-9_'\u2019\-]/.test(next)) ||
+              (whitespace && !/\s/.test(next))) break;
+          end += next.length;
+        }
+      }
+      pieces.push(text.slice(i, end));
+      i = end;
     }
   }
-  return { text: folded.trim(), map: foldedMap.slice(folded.length - folded.trimStart().length) };
+  // Dense CJK pages can otherwise spend most of the 128 KiB snapshot budget on
+  // marker objects.  Merge adjacent natural pieces only when necessary; never
+  // truncate source text and never expose the resulting offsets.
+  if (pieces.length + 1 > _READER_SOURCE_MAX_MARKERS) {
+    const compact = [];
+    const chunkSize = Math.ceil(text.length / (_READER_SOURCE_MAX_MARKERS - 1));
+    for (let i = 0; i < text.length;) {
+      let end = Math.min(text.length, i + chunkSize);
+      if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]) &&
+          /[\uDC00-\uDFFF]/.test(text[end])) end += 1;
+      compact.push(text.slice(i, end));
+      i = end;
+    }
+    return compact;
+  }
+  return pieces;
+}
+
+function _readerSourceMarkerBundle(text) {
+  const pieces = _readerSourcePieces(text);
+  const markers = [], offsets = Object.create(null);
+  let offset = 0;
+  for (let i = 0; i < pieces.length; i++) {
+    const marker = 'm_' + i.toString(36);
+    offsets[marker] = offset;
+    markers.push({ marker, text: pieces[i] });
+    offset += pieces[i].length;
+  }
+  const terminal = 'm_' + pieces.length.toString(36);
+  offsets[terminal] = offset;
+  markers.push({ marker: terminal, text: '' });
+  return { markers, offsets };
+}
+
+function _readerSourceRemember(cache, snapshot) {
+  const now = Date.now();
+  for (const [id, value] of cache) {
+    if (!value || value.expiresAt <= now) cache.delete(id);
+  }
+  while (cache.size >= 12) cache.delete(cache.keys().next().value);
+  cache.set(snapshot.snapshotId, snapshot);
+}
+
+function _readerSourceExisting(cache, documentId, target, sourceDigest, revision, text) {
+  const now = Date.now();
+  for (const [id, value] of cache) {
+    if (!value || value.expiresAt <= now) { cache.delete(id); continue; }
+    // Do not hand a model an identity that can expire while it is choosing the
+    // two markers. Mint the next snapshot before the final 30-second window.
+    if (value.expiresAt - now <= 30000) { cache.delete(id); continue; }
+    if (value.documentId === documentId &&
+        value.target && value.target.kind === target.kind &&
+        Number(value.target.page) === Number(target.page) &&
+        value.sourceDigest === sourceDigest && value.revision === revision &&
+        value.text === text) return value;
+  }
+  return null;
+}
+
+function _readerSourceMutationId(request, ref) {
+  if (request.mutationId != null && request.mutationId !== '') {
+    if (!/^c_[a-f0-9]{8,32}$/.test(request.mutationId)) {
+      throw new Error('BW_READER_HIGHLIGHT_MUTATION_ID');
+    }
+    return request.mutationId;
+  }
+  return 'c_' + _readerSourceDigest(
+    ref.snapshotId + ':' + ref.startMarker + ':' + ref.endMarker
+  ).slice(-16);
+}
+
+function _pdfSourceRevision(pw, page, digest) {
+  const nativeRevision = String((pw && pw.__pageTextRevision) || '');
+  return nativeRevision
+    ? ('pdfrev_' + _readerSourceDigest(nativeRevision).slice(-16))
+    : ('pdf_' + page + '_' + digest);
+}
+
+function _pdfRangeRef(request) {
+  const ref = request && request.rangeRef;
+  const refKeys = ref && typeof ref === 'object' ? Object.keys(ref).sort() : [];
+  const exactRefKeys = [
+    'contract', 'documentId', 'endMarker', 'revision', 'snapshotId',
+    'sourceDigest', 'startMarker', 'target'
+  ];
+  if (!ref || ref.contract !== _READER_SOURCE_RANGE_CONTRACT ||
+      refKeys.length !== exactRefKeys.length ||
+      refKeys.some((key, index) => key !== exactRefKeys[index])) {
+    throw new Error('BW_READER_RANGE_CONTRACT_INVALID');
+  }
+  if (!/^hrs_[0-9a-f]{24}$/.test(String(ref.snapshotId || ''))) {
+    throw new Error('BW_READER_RANGE_SNAPSHOT_STALE');
+  }
+  const snapshot = _pdfReaderSourceSnapshots.get(ref.snapshotId);
+  if (!snapshot || snapshot.expiresAt <= Date.now()) {
+    _pdfReaderSourceSnapshots.delete(ref.snapshotId);
+    throw new Error('BW_READER_RANGE_SNAPSHOT_STALE');
+  }
+  const targetKeys = ref.target && typeof ref.target === 'object'
+    ? Object.keys(ref.target).sort() : [];
+  if (ref.documentId !== FILE_REL || snapshot.documentId !== FILE_REL ||
+      !ref.target || ref.target.kind !== 'pdf' ||
+      targetKeys.length !== 2 || targetKeys[0] !== 'kind' || targetKeys[1] !== 'page' ||
+      Number(ref.target.page) !== snapshot.target.page) {
+    throw new Error('BW_READER_RANGE_SOURCE_STALE');
+  }
+  if (ref.sourceDigest !== snapshot.sourceDigest || ref.revision !== snapshot.revision) {
+    throw new Error('BW_READER_RANGE_SOURCE_STALE');
+  }
+  const start = snapshot.offsets[String(ref.startMarker || '')];
+  const end = snapshot.offsets[String(ref.endMarker || '')];
+  if (!Number.isInteger(start) || !Number.isInteger(end)) {
+    throw new Error('BW_READER_RANGE_MARKER_INVALID');
+  }
+  if (start < 0 || end > snapshot.text.length || start >= end) {
+    throw new Error('BW_READER_RANGE_INVALID');
+  }
+  return { ref, snapshot, start, end };
 }
 
 function _pdfExactTextRange(chars, sourceText) {
@@ -312,10 +535,12 @@ function _pdfExactTextRange(chars, sourceText) {
   const first = projected.text.indexOf(query);
   if (first < 0) throw new Error('BW_READER_HIGHLIGHT_TEXT_NOT_FOUND');
   if (projected.text.indexOf(query, first + 1) >= 0) throw new Error('BW_READER_HIGHLIGHT_TEXT_AMBIGUOUS');
-  const start = projected.map[first];
-  const end = projected.map[first + query.length - 1];
-  if (!Number.isInteger(start) || !Number.isInteger(end)) throw new Error('BW_READER_HIGHLIGHT_TEXT_RANGE_INVALID');
-  return { start, end };
+  const start = projected.boundaries[first];
+  const endExclusive = projected.boundaries[first + query.length];
+  if (!Number.isInteger(start) || !Number.isInteger(endExclusive) || start >= endExclusive) {
+    throw new Error('BW_READER_HIGHLIGHT_TEXT_RANGE_INVALID');
+  }
+  return { start, end: endExclusive - 1 };
 }
 
 async function _pdfExactTextPage(targetPage) {
@@ -360,6 +585,99 @@ async function _pdfWaitForHighlightVisible(pw, page, id) {
   }
   throw new Error('BW_READER_HIGHLIGHT_NOT_RENDERED');
 }
+
+window.__bwReaderHighlightSource = async function (request) {
+  request = request || {};
+  if (request.file !== FILE_REL) throw new Error('BW_READER_SOURCE_WRONG_BOOK');
+  if (!request.target || request.target.kind !== 'pdf') throw new Error('BW_READER_SOURCE_TARGET_KIND');
+  const page = Number(request.target.page);
+  const pw = await _pdfExactTextPage(page);
+  const projected = _pdfExactTextProjection(pw.__charBoxes);
+  if (!projected.text) throw new Error('BW_READER_SOURCE_EMPTY');
+  const sourceDigest = _readerSourceDigest(projected.text);
+  const revision = _pdfSourceRevision(pw, page, sourceDigest);
+  const existing = _readerSourceExisting(
+    _pdfReaderSourceSnapshots, FILE_REL, { kind: 'pdf', page }, sourceDigest, revision,
+    projected.text
+  );
+  if (existing) {
+    return {
+      contract: _READER_HIGHLIGHT_SOURCE_CONTRACT,
+      snapshotId: existing.snapshotId,
+      documentId: existing.documentId,
+      target: { kind: 'pdf', page },
+      sourceDigest: existing.sourceDigest,
+      revision: existing.revision,
+      expiresAt: existing.expiresAt,
+      markers: existing.markers.map((item) => ({ marker: item.marker, text: item.text }))
+    };
+  }
+  const snapshotId = _readerSourceSnapshotId();
+  const expiresAt = Date.now() + _READER_SOURCE_TTL_MS;
+  const bundle = _readerSourceMarkerBundle(projected.text);
+  _readerSourceRemember(_pdfReaderSourceSnapshots, {
+    snapshotId,
+    documentId: FILE_REL,
+    target: { kind: 'pdf', page },
+    sourceDigest,
+    revision,
+    expiresAt,
+    text: projected.text,
+    offsets: bundle.offsets,
+    markers: bundle.markers.map((item) => ({ marker: item.marker, text: item.text }))
+  });
+  return {
+    contract: _READER_HIGHLIGHT_SOURCE_CONTRACT,
+    snapshotId,
+    documentId: FILE_REL,
+    target: { kind: 'pdf', page },
+    sourceDigest,
+    revision,
+    expiresAt,
+    markers: bundle.markers.map((item) => ({ marker: item.marker, text: item.text }))
+  };
+};
+
+window.__bwReaderHighlightRange = async function (request) {
+  request = request || {};
+  const colors = { yellow:'#fff59d', green:'#a7f3d0', blue:'#a3d4ff', pink:'#fda4af' };
+  if (!colors[request.color]) throw new Error('BW_READER_HIGHLIGHT_COLOR_INVALID');
+  const resolved = _pdfRangeRef(request);
+  const page = resolved.snapshot.target.page;
+  const pw = await _pdfExactTextPage(page);
+  const projected = _pdfExactTextProjection(pw.__charBoxes);
+  const sourceDigest = _readerSourceDigest(projected.text);
+  const revision = _pdfSourceRevision(pw, page, sourceDigest);
+  if (sourceDigest !== resolved.snapshot.sourceDigest ||
+      revision !== resolved.snapshot.revision ||
+      projected.text !== resolved.snapshot.text) {
+    throw new Error('BW_READER_RANGE_SOURCE_STALE');
+  }
+  const startIndex = projected.boundaries[resolved.start];
+  const endExclusive = projected.boundaries[resolved.end];
+  if (!Number.isInteger(startIndex) || !Number.isInteger(endExclusive) || startIndex >= endExclusive) {
+    throw new Error('BW_READER_RANGE_INVALID');
+  }
+  const mutationId = _readerSourceMutationId(request, resolved.ref);
+  const highlight = await saveHighlight({
+    pw,
+    sIdx: startIndex,
+    eIdx: endExclusive - 1,
+    color: colors[request.color],
+    note: request.note || '',
+    id: mutationId,
+    silent: true
+  });
+  if (!highlight || !highlight.id) throw new Error('BW_READER_HIGHLIGHT_SAVE_INVALID');
+  await _pdfWaitForHighlightVisible(pw, page, highlight.id);
+  return {
+    ok: true,
+    status: 'highlight_saved',
+    id: highlight.id,
+    target: { kind: 'pdf', page },
+    text: highlight.text
+  };
+};
 
 window.__bwReaderHighlightExactText = async function (request) {
   request = request || {};

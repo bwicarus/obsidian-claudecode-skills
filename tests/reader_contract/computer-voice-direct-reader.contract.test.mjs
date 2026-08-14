@@ -337,7 +337,7 @@ function createServer(scenario) {
         result(this, request, scenario.helloPayload || {
           protocolVersion: 3,
           limits: {
-            maxMessageBytes: 65536,
+            maxMessageBytes: 262144,
             pcmFrameBytes: 1956,
             pcmQueueLimitMs: 400,
             heartbeatIntervalMs: 5000,
@@ -1003,6 +1003,8 @@ function createHarness(overrides = {}) {
     nativeLocalPageContext: false,
     nativePageContextPublishes: [],
     nativePageTexts: {},
+    readerHighlightSourceProvider: null,
+    readerHighlightSourceCalls: [],
     readerAdapterContext: null,
     ...overrides,
   };
@@ -1219,6 +1221,15 @@ function createHarness(overrides = {}) {
           });
         },
       },
+    };
+  }
+  if (typeof scenario.readerHighlightSourceProvider === "function") {
+    window.__bwReaderHighlightSource = (request) => {
+      scenario.readerHighlightSourceCalls.push(structuredClone(request));
+      return scenario.readerHighlightSourceProvider(
+        structuredClone(request),
+        scenario.readerHighlightSourceCalls.length,
+      );
     };
   }
   window.__bwReaderFetch = createJournalFetch(scenario);
@@ -1932,6 +1943,25 @@ test("snapshot-mcp 将精确高亮和 Anki 草稿送进 Reader 接收器并逐�
         cloze: "普通卡不需要绑定当前页：{{c1::本地卡库}}先保存。",
       }],
     },
+  }, {
+    ...base,
+    correlation: "output-highlight-range-24",
+    kind: "highlight-range",
+    payload: {
+      mutationId: "c_fedcba9876543210fedcba9876543210",
+      rangeRef: {
+        contract: "reader-source-range/1",
+        snapshotId: "hrs_0123456789abcdef01234567",
+        documentId: "book.pdf",
+        target: { kind: "pdf", page: 24 },
+        sourceDigest: "rsd1_01234567_0123456789abcdef",
+        revision: "pdf-rev-24",
+        startMarker: "m_0",
+        endMarker: "m_z",
+      },
+      color: "blue",
+      note: "长段落",
+    },
   }];
 
   for (const delivery of deliveries) {
@@ -1941,7 +1971,7 @@ test("snapshot-mcp 将精确高亮和 Anki 草稿送进 Reader 接收器并逐�
     );
   }
   await waitForCondition(
-    () => harness.scenario.readerRealtimeOutputAcks.length === 3,
+    () => harness.scenario.readerRealtimeOutputAcks.length === 4,
     "Reader exact highlight and Anki draft ACKs",
   );
 
@@ -2015,6 +2045,26 @@ test("snapshot-mcp 对可关联的非法精确输出立即回 rejected ACK且绝
       draftId: "draft-0123456789abcdef0123456789abcdef",
       cards: [],
     },
+  }, {
+    ...base,
+    correlation: "invalid-highlight-range-24",
+    kind: "highlight-range",
+    payload: {
+      mutationId: "c_0123456789abcdef0123456789abcdef",
+      rangeRef: {
+        contract: "reader-source-range/1",
+        snapshotId: "hrs_0123456789abcdef01234567",
+        documentId: "book.pdf",
+        target: { kind: "pdf", page: 24 },
+        sourceDigest: "rsd1_01234567_0123456789abcdef",
+        revision: "pdf-rev-24",
+        startMarker: "m_0",
+        endMarker: "m_1",
+        offset: 17,
+      },
+      color: "yellow",
+      note: null,
+    },
   }];
 
   malformed.forEach((delivery) => {
@@ -2033,11 +2083,11 @@ test("snapshot-mcp 对可关联的非法精确输出立即回 rejected ACK且绝
     sourceInstanceId: "source-0123456789abcdef0123456789abcdef",
   }, harness.server.sockets[0]);
   await waitForCondition(
-    () => harness.scenario.readerRealtimeOutputAcks.length === 2,
+    () => harness.scenario.readerRealtimeOutputAcks.length === 3,
     "malformed Reader output rejected ACKs",
   );
   await waitForCondition(
-    () => harness.scenario.readerRealtimeOutputDiagnostics.length === 6,
+    () => harness.scenario.readerRealtimeOutputDiagnostics.length === 8,
     "malformed Reader output diagnostics",
   );
 
@@ -2057,8 +2107,9 @@ test("snapshot-mcp 对可关联的非法精确输出立即回 rejected ACK且绝
     })),
   );
   assert.deepEqual(
-    harness.scenario.readerRealtimeOutputDiagnostics.slice(0, 4),
+    harness.scenario.readerRealtimeOutputDiagnostics.slice(0, 5),
     [
+      "Reader 实时输出拒绝: BW_READER_REALTIME_OUTPUT_SCHEMA (正在回关联拒绝回执)",
       "Reader 实时输出拒绝: BW_READER_REALTIME_OUTPUT_SCHEMA (正在回关联拒绝回执)",
       "Reader 实时输出拒绝: BW_READER_REALTIME_OUTPUT_SCHEMA (正在回关联拒绝回执)",
       "Reader 实时输出拒绝: BW_READER_REALTIME_OUTPUT_SCHEMA (身份不可安全关联,未回执)",
@@ -2066,8 +2117,9 @@ test("snapshot-mcp 对可关联的非法精确输出立即回 rejected ACK且绝
     ],
   );
   assert.deepEqual(
-    harness.scenario.readerRealtimeOutputDiagnostics.slice(4),
+    harness.scenario.readerRealtimeOutputDiagnostics.slice(5),
     [
+      "Reader 实时输出拒绝: BW_READER_REALTIME_OUTPUT_SCHEMA (已回关联拒绝回执)",
       "Reader 实时输出拒绝: BW_READER_REALTIME_OUTPUT_SCHEMA (已回关联拒绝回执)",
       "Reader 实时输出拒绝: BW_READER_REALTIME_OUTPUT_SCHEMA (已回关联拒绝回执)",
     ],
@@ -3641,6 +3693,7 @@ test("原生 12 秒巡检必须证明当前页写入而不能只接受可读旧�
 });
 
 test("原生 App 本地书把当前视口前后正文写进本地 page.context", async () => {
+  const timers = createManualTimers();
   const contextSyncStorage = new Map([["eph-ctx-sync", "1"]]);
   const harness = createHarness({
     origin: NATIVE_APP_ORIGIN,
@@ -3655,6 +3708,23 @@ test("原生 App 本地书把当前视口前后正文写进本地 page.context",
     },
     readerAdapterContext: {
       visible_text: "当前窗口重点内容",
+    },
+    timers,
+    readerHighlightSourceProvider(request, call) {
+      return {
+        contract: "reader-highlight-source/1",
+        snapshotId: `hrs_${String(call).padStart(24, "0")}`,
+        documentId: request.file,
+        target: request.target,
+        sourceDigest: "rsd1_01234567_0123456789abcdef",
+        revision: "pdf-rev-7",
+        expiresAt: Date.now() + 300000,
+        markers: [
+          { marker: "m_0", text: "当前页完整文字，" },
+          { marker: "m_1", text: "包含当前窗口重点内容。" },
+          { marker: "m_2", text: "" },
+        ],
+      };
     },
     activeReading: {
       kind: "pdf",
@@ -3678,6 +3748,111 @@ test("原生 App 本地书把当前视口前后正文写进本地 page.context",
   assert.match(payload.text, /【当前显示区域之前】[\s\S]*上一页结尾/);
   assert.match(payload.text, /【当前显示区域（重点）】[\s\S]*当前窗口重点内容/);
   assert.match(payload.text, /【当前显示区域之后】[\s\S]*下一页开头/);
+  await waitForCondition(
+    () => harness.scenario.readerHighlightSourceCalls.length === 1,
+    "initial marker source build",
+  );
+  await waitForCondition(
+    () => timers.count(250) >= 1,
+    "active-reading follow-up tick",
+  );
+  timers.runOne(250);
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.some(
+      (request) => request.active.highlightSource,
+    ),
+    "native App marker source active-reading",
+  );
+  const ranged = harness.scenario.activeReadingRequests.find(
+    (request) => request.active.highlightSource,
+  ).active.highlightSource;
+  assert.equal(ranged.contract, "reader-highlight-source/1");
+  assert.equal(ranged.snapshotId, "hrs_000000000000000000000001");
+  assert.deepEqual(ranged.target, { kind: "pdf", page: 7 });
+  for (let index = 0; index < 3; index += 1) {
+    await waitForCondition(
+      () => timers.count(250) >= 1,
+      `same-page short tick ${index + 1}`,
+    );
+    timers.runOne(250);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(
+    harness.scenario.readerHighlightSourceCalls.length,
+    1,
+    "same-page short polling must not rebuild or re-digest the source",
+  );
+  harness.scenario.activeReading = {
+    ...harness.scenario.activeReading,
+    pos: 8,
+  };
+  await waitForCondition(
+    () => timers.count(250) >= 1,
+    "page-change active-reading tick",
+  );
+  timers.runOne(250);
+  await waitForCondition(
+    () => harness.scenario.readerHighlightSourceCalls.length === 2,
+    "page change immediately rebuilds marker source",
+  );
+  assert.deepEqual(
+    harness.scenario.readerHighlightSourceCalls[1],
+    {
+      file: "localbook:app-snapshot",
+      target: { kind: "pdf", page: 8 },
+    },
+  );
+
+  await disableSnapshot(harness);
+});
+
+test("密集 CJK marker 来源超过旧 64KiB 仍经有界 256KiB active-reading 上报", async () => {
+  const markers = Array.from({ length: 2047 }, (_, index) => ({
+    marker: `m_${index.toString(36)}`,
+    text: "日本語断片",
+  }));
+  markers.push({ marker: `m_${(2047).toString(36)}`, text: "" });
+  const contextSyncStorage = new Map([["eph-ctx-sync", "1"]]);
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    contextSyncStorage,
+    contextDeliveryMode: "snapshot-mcp",
+    activeReading: {
+      kind: "pdf",
+      file: "localbook:dense-cjk",
+      title: "Dense CJK",
+      pos: 9,
+    },
+    readerHighlightSourceProvider(request) {
+      return {
+        contract: "reader-highlight-source/1",
+        snapshotId: "hrs_abcdef0123456789abcdef01",
+        documentId: request.file,
+        target: request.target,
+        sourceDigest: "rsd1_00003ff8_fedcba9876543210",
+        revision: "pdfrev_0123456789abcdef",
+        expiresAt: Date.now() + 300000,
+        markers,
+      };
+    },
+  });
+
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.some(
+      (request) => request.active.highlightSource,
+    ),
+    "dense CJK marker active-reading",
+  );
+  const request = harness.scenario.activeReadingRequests.find(
+    (candidate) => candidate.active.highlightSource,
+  );
+  const bytes = Buffer.byteLength(JSON.stringify(request), "utf8");
+  assert.ok(bytes > 65536, `expected >64KiB, got ${bytes}`);
+  assert.ok(bytes < 262144, `expected <256KiB, got ${bytes}`);
+  assert.equal(request.active.highlightSource.markers.length, 2048);
+  assert.equal(request.active.highlightSource.markers.at(-1).text, "");
 
   await disableSnapshot(harness);
 });

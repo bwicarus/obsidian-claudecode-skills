@@ -52,6 +52,7 @@ function nativeRealtimeToolHarness(options = {}) {
     selection: String(options.selection || ""),
     question: String(options.question || ""),
     providerPages: options.providerPages || {},
+    highlightSource: options.highlightSource || null,
   };
   const sandbox = {};
   vm.runInNewContext(`
@@ -64,6 +65,7 @@ function nativeRealtimeToolHarness(options = {}) {
       selection: initial.selection
     };
     var providerCalls = [];
+    var highlightCalls = [];
     var providerPages = initial.providerPages;
     var provider = {
       contract: 'reader-page-text-provider/1',
@@ -127,7 +129,21 @@ function nativeRealtimeToolHarness(options = {}) {
       BWReaderRuntime: BWReaderRuntime,
       __BW_NATIVE_LOCAL_READER__: true,
       __BW_NATIVE_OPENAI_REALTIME__: true,
-      __bwNativeRealtime: { request: function () {} }
+      __bwNativeRealtime: { request: function () {} },
+      __bwReaderHighlightSource: function (request) {
+        if (!initial.highlightSource) return Promise.resolve(null);
+        return Promise.resolve(Object.assign({}, initial.highlightSource, {
+          documentId: initial.highlightSource.documentId || request.file,
+          target: initial.highlightSource.target || request.target
+        }));
+      },
+      __bwReaderHighlightRange: function (request) {
+        highlightCalls.push(request);
+        return Promise.resolve({
+          ok: true, id: 'c_12345678', text: '跨行长内容',
+          target: request.rangeRef.target
+        });
+      }
     };
     var localStorage = { getItem: function () { return null; } };
     function setTimeout() { return 0; }
@@ -144,6 +160,7 @@ function nativeRealtimeToolHarness(options = {}) {
       statuses: statuses,
       visualCalls: visualCalls,
       providerCalls: providerCalls,
+      highlightCalls: highlightCalls,
       holdVisual: function () { holdVisual = true; },
       releaseVisuals: function (value) {
         holdVisual = false;
@@ -1047,6 +1064,102 @@ test("native read_page awaits the App page-text provider and returns real nearby
     api.sent.filter((message) => message.type === "response.create").length,
     1,
   );
+});
+
+test("native Realtime selects App-owned markers and highlights without quote search or Pi", async () => {
+  const highlightSource = {
+    contract: "reader-highlight-source/1",
+    snapshotId: "hrs_0123456789abcdef01234567",
+    documentId: "localbook:context-contract",
+    target: { kind: "pdf", page: 7 },
+    sourceDigest: "rsd1_00000005_0123456789abcdef",
+    revision: "pdfrev_0123456789abcdef",
+    expiresAt: Date.now() + 30_000,
+    markers: [
+      { marker: "m_0", text: "跨行" },
+      { marker: "m_1", text: "长内容" },
+      { marker: "m_2", text: "" },
+    ],
+  };
+  const api = nativeRealtimeToolHarness({
+    page: 7,
+    providerPages: { 7: "跨行长内容" },
+    highlightSource,
+  });
+
+  await api.tool("read_page", {}, "read-highlight-source");
+  const readOutput = realtimeToolOutputs(api)[0];
+  assert.deepEqual(readOutput.highlight_source, highlightSource);
+  assert.deepEqual(readOutput.page_context.highlight_source, highlightSource);
+
+  api.clear();
+  const rangeRef = {
+    contract: "reader-source-range/1",
+    snapshotId: highlightSource.snapshotId,
+    documentId: highlightSource.documentId,
+    target: highlightSource.target,
+    sourceDigest: highlightSource.sourceDigest,
+    revision: highlightSource.revision,
+    startMarker: "m_0",
+    endMarker: "m_2",
+  };
+  await api.tool("highlight", { rangeRef, color: "#fff59d", note: "重点" }, "range-highlight");
+
+  assert.equal(api.highlightCalls.length, 1);
+  assert.deepEqual(api.highlightCalls[0].rangeRef, rangeRef);
+  assert.equal(api.highlightCalls[0].color, "yellow");
+  assert.equal(api.highlightCalls[0].note, "重点");
+  const result = realtimeToolOutputs(api)[0];
+  assert.equal(result.ok, true);
+  assert.equal(result.source, "app-authoritative-range");
+  assert.equal(result.text, "跨行长内容");
+});
+
+test("native Realtime refuses an unanchored text highlight instead of falling back", async () => {
+  const api = nativeRealtimeToolHarness({ page: 7, providerPages: { 7: "重复文字重复文字" } });
+  await api.tool("highlight", { text: "重复文字" }, "legacy-text-highlight");
+  assert.equal(api.highlightCalls.length, 0);
+  const result = realtimeToolOutputs(api)[0];
+  assert.match(result.error, /BW_READER_HIGHLIGHT_RANGE_REQUIRED/);
+  assert.equal(result.route, "local");
+});
+
+test("native Realtime refuses an old marker range after the visible page changes", async () => {
+  const source = {
+    contract: "reader-highlight-source/1",
+    snapshotId: "hrs_89abcdef0123456789abcdef",
+    documentId: "localbook:context-contract",
+    target: { kind: "pdf", page: 7 },
+    sourceDigest: "rsd1_00000005_89abcdef01234567",
+    revision: "pdfrev_89abcdef01234567",
+    expiresAt: Date.now() + 30_000,
+    markers: [
+      { marker: "m_0", text: "旧页内容" },
+      { marker: "m_1", text: "" },
+    ],
+  };
+  const api = nativeRealtimeToolHarness({ page: 7, highlightSource: source });
+  await api.tool("read_page", {}, "read-old-page");
+  api.clear();
+  api.mutate({ page: 8 });
+
+  await api.tool("highlight", {
+    rangeRef: {
+      contract: "reader-source-range/1",
+      snapshotId: source.snapshotId,
+      documentId: source.documentId,
+      target: source.target,
+      sourceDigest: source.sourceDigest,
+      revision: source.revision,
+      startMarker: "m_0",
+      endMarker: "m_1",
+    },
+    color: "yellow",
+  }, "stale-page-range");
+
+  assert.equal(api.highlightCalls.length, 0);
+  const result = realtimeToolOutputs(api)[0];
+  assert.match(result.error, /BW_READER_RANGE_SOURCE_STALE/);
 });
 
 test("see_ink sends only its image while other visual tools freeze page context", async () => {

@@ -4247,3 +4247,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **已知门禁**：Windows 全量 Python/handoff 仍只命中已登记的 POSIX `fcntl`、Linux 路径/fixture 与本机测试数据基线；本批定向与跨格式合同均通过。
 - **发布事实**：Direct `0.1.126` 已原子安装并恢复 viewer HTTP 200、Codex 麦克风 active、`lastError=null`，回滚点 `install-0.1.126-20260814T034115Z-3c1ebd1e`；Actions `31767661941` 上传 TestFlight `1.1.55 (296)`，`31768179124` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：未部署 Pi 或桌面扩展正式渠道；既有 ReaderPC/Direct 原子更新、候选分支推送和 TestFlight 内测上传以后无需逐次确认，失败时自动回滚或取日志后重试。
+
+## Codex：长文本高亮改为本机范围标记候选（2026-08-14 JST）
+- **改了什么**：PDF/EPUB 由 App 从同一文字投影生成短期不透明边界 marker，Realtime 与 Direct 只回传起止 marker，App 直接映射坐标，不再用长原文反查；旧全文工具仅在无 marker 的旧客户端兼容。
+- **长内容边界**：PDF 合成空格使用边界映射；EPUB 超长章节按当前视口生成私有 baseOffset 窗口，视口、正文、revision、书页或 TTL 变化均拒绝旧范围，不泄露真实 offset。
+- **怎么验的**：Reader Node 全量、Python 定向、Direct Release 0 警告/0 错误及完整自检、扩展 vendor、ReaderBundle 与发布管线通过；Windows handoff/全量 Python 仍仅命中既有 `fcntl`/fixture 环境基线。
+- **没做/下一步**：未推送、安装、上传或部署 Pi；先真机验收 PDF 长跨行重复段、EPUB 长章后半与翻页后旧 marker 拒绝，再进入原子发布流程。
