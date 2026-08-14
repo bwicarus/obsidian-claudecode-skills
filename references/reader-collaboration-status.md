@@ -4240,9 +4240,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **发布事实**：TestFlight `1.1.54 (293)` 已确认 `VALID / IN_BETA_TESTING`；本机已安装 ReaderPC `0.1.22` 与 Direct `0.1.123`，现场为 viewer HTTP 200、Codex 麦克风 active、Direct `lastError=null`。
 - **边界/下一步**：无 App 页面连接时快照正文保持 disabled tombstone 属正常；未为验收改动用户当前 `true` 开关，`false` 停止路径由行为自测覆盖；死 PID 记录清理为非阻断 P1。
 
-## Codex：PDF/EPUB 统一本机撤销与助手高亮反馈候选（2026-08-14 JST）
+## Codex：PDF/EPUB 统一本机撤销与助手高亮反馈已发布（2026-08-14 JST）
 - **改了什么**：桥接只接受强类型 `client-action`，助手高亮落库后恢复原有卡片条；PDF/EPUB 共用无参 `reader_undo_last`，由 App 受信当前书籍 surface 分流。
 - **一致性**：高亮、撤销栈与防重放回执在同一有界事务原子提交；缺失同书同类型撤销快照的 EPUB 动作在写入前拒绝，其余冲突/超时/未知结果均 fail closed，Pi 元数据不阻塞本机提交。
 - **怎么验的**：共享构建、Reader Node 全量、Direct Release 编译/完整自检、真实包内 stdio MCP、ReaderBundle 及发布管线均通过；旧实现反证覆盖 PDF/EPUB 原子性与可见刷新。
 - **已知门禁**：Windows 全量 Python/handoff 仍只命中已登记的 POSIX `fcntl`、Linux 路径/fixture 与本机测试数据基线；本批定向与跨格式合同均通过。
-- **候选/下一步**：App `1.1.55` 与不可变 Direct `0.1.126` 已在本地备妥，尚未安装、推送、上传 TestFlight、部署 Pi 或发布桌面扩展；获人工验收授权后再走原子安装与 Actions。
+- **发布事实**：Direct `0.1.126` 已原子安装并恢复 viewer HTTP 200、Codex 麦克风 active、`lastError=null`，回滚点 `install-0.1.126-20260814T034115Z-3c1ebd1e`；Actions `31767661941` 上传 TestFlight `1.1.55 (296)`，`31768179124` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：未部署 Pi 或桌面扩展正式渠道；既有 ReaderPC/Direct 原子更新、候选分支推送和 TestFlight 内测上传以后无需逐次确认，失败时自动回滚或取日志后重试。
