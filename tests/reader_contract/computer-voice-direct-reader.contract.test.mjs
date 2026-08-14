@@ -1000,6 +1000,7 @@ function createHarness(overrides = {}) {
     nativeComputerVoice: false,
     nativeComputerVoiceState: null,
     nativeReaderForeground: null,
+    nowEpochMs: null,
     nativeLocalPageContext: false,
     nativePageContextPublishes: [],
     nativePageTexts: {},
@@ -1245,6 +1246,14 @@ function createHarness(overrides = {}) {
       },
     };
   }
+  const RealDate = Date;
+  class HarnessDate extends RealDate {
+    static now() {
+      return Number.isSafeInteger(scenario.nowEpochMs)
+        ? scenario.nowEpochMs
+        : RealDate.now();
+    }
+  }
   const context = vm.createContext({
     window,
     document,
@@ -1260,7 +1269,7 @@ function createHarness(overrides = {}) {
     Set,
     Object,
     Promise,
-    Date,
+    Date: HarnessDate,
     Number,
     JSON,
     Math,
@@ -1324,6 +1333,12 @@ function createHarness(overrides = {}) {
     },
     setVisibilityState(value) {
       document.visibilityState = value;
+    },
+    setNativeReaderForeground(value) {
+      window.__BW_NATIVE_READER_FOREGROUND__ = value;
+    },
+    setNowEpochMs(value) {
+      scenario.nowEpochMs = value;
     },
     setUiOwner(value) {
       document.documentElement.dataset.bwReaderUiOwner = value;
@@ -2947,7 +2962,7 @@ test("snapshot-mcp 仅转发 Pi ACK 绑定的 vbook 真实卷页并拒绝跨页�
     "selection unknown realtime update",
   );
   assert.match(SOURCE, /var ACTIVE_READING_POLL_MS = 250;/);
-  assert.match(SOURCE, /var ACTIVE_READING_HEARTBEAT_MS = 60000;/);
+  assert.match(SOURCE, /var ACTIVE_READING_HEARTBEAT_MS = 20000;/);
   assert.match(
     SOURCE,
     /now - pump\.lastSentAt < ACTIVE_READING_HEARTBEAT_MS/,
@@ -3402,6 +3417,52 @@ test("原生 App 即使 eph-ctx-sync=0 仍完成 context 握手并启动快照�
   await disableSnapshot(harness);
 });
 
+test("原生 App 静止页每 20 秒续鲜且不会跨过 ReaderPC 35 秒过期线", async () => {
+  const timers = createManualTimers();
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncStorage: new Map([["eph-ctx-sync", "1"]]),
+    nowEpochMs: 1_000_000,
+    timers,
+    activeReading: {
+      kind: "pdf",
+      file: "localbook:heartbeat",
+      title: "Heartbeat",
+      pos: 12,
+      selection: "",
+    },
+  });
+
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.length === 1,
+    "initial active-reading heartbeat",
+  );
+  await waitForCondition(
+    () => timers.count(250) === 1,
+    "active-reading poll after initial ACK",
+  );
+
+  harness.setNowEpochMs(1_019_999);
+  timers.runOne(250);
+  await waitForCondition(
+    () => timers.count(250) === 1,
+    "unchanged page remains below heartbeat boundary",
+  );
+  assert.equal(harness.scenario.activeReadingRequests.length, 1);
+
+  harness.setNowEpochMs(1_020_000);
+  timers.runOne(250);
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.length === 2,
+    "unchanged page is republished at the 20 second boundary",
+  );
+
+  await disableSnapshot(harness);
+});
+
 test("原生 App 先探测 ReaderPC，legacy 回执会停用生产而不读取 App 开关", async () => {
   const contextSyncStorage = new Map([["eph-ctx-sync", "1"]]);
   const harness = createHarness({
@@ -3428,7 +3489,7 @@ test("原生 App 先探测 ReaderPC，legacy 回执会停用生产而不读取 A
   assert.equal(harness.scenario.activeReadingRequests.length, 0);
 });
 
-test("原生 App 前台标志是专用快照可见性的权威而不受隐藏 WebView 误杀", async () => {
+test("原生 App 场景变化只唤醒探测，服务器总开关开启时不主动断开专用快照", async () => {
   const contextSyncStorage = new Map([["eph-ctx-sync", "1"]]);
   const foreground = createHarness({
     origin: NATIVE_APP_ORIGIN,
@@ -3443,6 +3504,24 @@ test("原生 App 前台标志是专用快照可见性的权威而不受隐藏 We
   assert.equal(foreground.server.sockets.length, 1);
   assert.equal(foreground.scenario.socketUrls[0], CONTEXT_ENDPOINT);
 
+  foreground.setNativeReaderForeground(false);
+  foreground.dispatchWindowEvent("bw-native-reader-foreground", {
+    active: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(
+    foreground.server.sockets[0].readyState,
+    1,
+    "inactive/background 事件不得主动关闭服务器授权的快照连接",
+  );
+  assert.equal(
+    foreground.server.requests.filter(
+      (request) => request.type === "context-mode",
+    ).length,
+    1,
+    "即将挂起时不得启动会在 WebKit 冻结期间误超时的探测",
+  );
+
   const background = createHarness({
     origin: NATIVE_APP_ORIGIN,
     nativeComputerVoice: true,
@@ -3451,10 +3530,15 @@ test("原生 App 前台标志是专用快照可见性的权威而不受隐藏 We
     contextSyncStorage: new Map([["eph-ctx-sync", "1"]]),
     contextDeliveryMode: "snapshot-mcp",
   });
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.equal(background.server.sockets.length, 0);
+  await waitForRequest(background, "context-open");
+  assert.equal(
+    background.server.sockets.length,
+    1,
+    "App 在后台标志下重新装载时仍应遵循服务器总开关建连",
+  );
 
   await disableSnapshot(foreground);
+  await disableSnapshot(background);
 });
 
 test("原生语音占用主 WSS 时专用快照断线保留配置并有界退避重连", async () => {

@@ -55,7 +55,10 @@
   var COMPUTER_TARGET_CODEX = "codex-desktop";
   var COMPUTER_TARGET_CLASSIC = "chatgpt-classic";
   var ACTIVE_READING_POLL_MS = 250;
-  var ACTIVE_READING_HEARTBEAT_MS = 60000;
+  // ReaderPC marks a snapshot stale after 35 seconds.  Republish the unchanged
+  // active page comfortably inside that window so an otherwise idle reading
+  // session never appears disconnected.
+  var ACTIVE_READING_HEARTBEAT_MS = 20000;
   var LOCAL_PAGE_CONTEXT_POLL_MS = 1500;
   var LOCAL_PAGE_TEXT_WAIT_MS = 1200;
   var SNAPSHOT_RECONNECT_MS = 1000;
@@ -5792,13 +5795,13 @@
 
   function readerContextSurfaceVisible() {
     if (nativeReaderOwnsSnapshotLifecycle()) {
-      // In the native App, Swift owns the actual scene lifecycle.  WKWebView's
-      // document.visibilityState can become hidden while a native voice sheet
-      // or overlay is presented even though the Reader scene is still active.
-      // Treating that implementation detail as background used to close the
-      // independent snapshot WSS a few seconds after voice started.  The
-      // native foreground flag is the single authority for this path.
-      return window.__BW_NATIVE_READER_FOREGROUND__ !== false;
+      // The server-owned context mode is the native snapshot lifetime
+      // authority.  Scene foreground changes are wake/probe hints only: an
+      // inactive sheet or a background transition must not proactively close
+      // the independent context WSS while the persisted master switch is on.
+      // iOS may suspend WebKit while backgrounded; the existing foreground
+      // probe will prove or rebuild the same link after execution resumes.
+      return true;
     }
     return !document || document.visibilityState !== "hidden";
   }
@@ -6126,6 +6129,25 @@
   }
 
   function resumeSnapshotLinkFromForeground(event) {
+    if (nativeReaderOwnsSnapshotLifecycle() && event) {
+      var nativeSceneInactive = !!(
+        event.type === "bw-native-reader-foreground" &&
+        event.detail &&
+        event.detail.active === false
+      );
+      var nativeWebViewHidden = !!(
+        event.type === "visibilitychange" &&
+        document &&
+        document.visibilityState === "hidden"
+      );
+      if (nativeSceneInactive || nativeWebViewHidden) {
+        // These are suspend notifications, not permission changes.  Starting
+        // a seven-second probe while WebKit is about to freeze can turn a good
+        // link into a false timeout on resume.  The active/probe event remains
+        // the explicit point at which we prove or rebuild the connection.
+        return Promise.resolve(snapshotLink);
+      }
+    }
     if (
       nativeReaderOwnsSnapshotLifecycle() &&
       !snapshotLink &&
