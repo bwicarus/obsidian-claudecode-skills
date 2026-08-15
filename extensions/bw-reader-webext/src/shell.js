@@ -51,7 +51,11 @@
     // 扩展在 App 内的 WKWebView 里也会跑(书籍 PWA 场景),那时 __bwPwaBridge
     // 存在;只有真正的 Safari 网页才需要让位。
     if (iOSLike && !window.__bwPwaBridge && !window.__bwRootNative) {
+      // 竖栏本身已经完全避开顶部死区,这个 inset 只用来给栏内第一个按钮
+      // 留出上边距 —— 竖栏顶端仍然贴 top:0(背景铺满,外观完整),
+      // 但按钮从死区之下开始排。
       root.style.setProperty("--bw-ios-gesture-inset", "40px");
+      root.dataset.bwRail = "1";
     }
   } catch (_) {}
 
@@ -81,36 +85,50 @@ button{-webkit-appearance:none;appearance:none}
 #ep-side .ep-side-pane:not(.active){display:none}
 /* 补偿:rc-sidedrawer CSS 的 body.ep-side-open 选择器在门面下落在 #bw-root 上 → 把手随抽屉左移这条在此复述 */
 #bw-root.ep-side-open #ep-side-handle{right:var(--ep-side-width,min(38vw,560px))}
-/* ── iOS Safari 顶部系统手势带:贴着屏幕顶边的元素收不到触摸 ──────────────
-   真机证据(1.1.58 build 330):顶栏按钮与侧栏 tab 全部点不动,而中部的抽屉
-   把手一切正常;点击时连 window 捕获阶段的诊断都一行不出 —— 事件根本没有
-   进入页面,不是被谁吞掉。两者唯一的共同点就是 top:0。Safari 自己要用最
-   上面那条带做下拉/地址栏手势,落在里面的网页元素拿不到 pointer 事件。
+/* ── iOS Safari 顶部手势带 → 整条栏改走左侧 ────────────────────────────
+   实测(iPadOS 18.7, 1376x900, dpr 2):屏幕顶部约 40px 的触摸不送达页面,
+   那一带归 Safari 自己的下拉/地址栏手势。自检证明按钮几何正确、中心命中
+   的就是按钮自己 —— 不是遮挡也不是被 stopPropagation,是事件压根没到,
+   所以连 window 捕获阶段的诊断都一行不出。
 
-   这不是"扩展 UI 有 bug",是它站错了位置。App 内的阅读器没有这个问题
-   (原生壳没有 Safari 的手势带),所以修必须只作用于扩展的网页场景 ——
-   rc-sidedrawer.js 是 App/扩展共用的原件,绝不能为此改动它。
+   早期版本没这毛病,不是那时能点到那一带,而是顶栏默认收起、要点 48px 处的
+   pill 才滑下来;后来改成常驻展开,按钮才停进了死区。
 
-   之前三轮都在改命中逻辑(代际、composedPath、宿主几何),而位置才是原因。 */
-/* 修法不是把整条顶栏往下推 —— 那样看着就是"悬在半空",用户第一眼就说怪。
-   顶栏**仍然贴 top:0**,背景一路铺到屏幕最顶端,外观与 App 内一致;
-   只是把里面的**可点内容**用 padding 压到死区之下。死区那几十像素由顶栏
-   自己的背景填满,看不出让位,按钮却落在能收到触摸的区域里。
-   (Safari 的顶部手势带归系统所有,网页无法用 touch-action 之类夺回 ——
-   App 里没这问题是因为它自己拥有 WebView,可以设
-   contentInsetAdjustmentBehavior=.never;扩展寄居在别人的标签页里没这个权力。) */
-#header{padding-top:calc(env(safe-area-inset-top) + var(--bw-ios-gesture-inset,0px))!important;
-        height:calc(42px + env(safe-area-inset-top) + var(--bw-ios-gesture-inset,0px))!important}
-/* 按钮压到 30px:让开死区必然要加高度,那就从别处收一点还回去。
-   40(死区) + 30(按钮) + 12(上下留白) = 82,比原来的 48 高 34,而不是高 44。
-   30px 仍在 iOS 建议的最小可点尺寸之上(按钮宽 38+,面积够)。 */
-#header button{height:30px!important;min-width:34px!important;padding:0 9px!important}
-/* 侧栏同理:面板本体照旧铺满整个右侧,只把 tab 栏压到死区之下。 */
-#ep-side-tabbar{padding-top:calc(6px + var(--bw-ios-gesture-inset,0px))!important}
-/* 收起顶栏后用来重新展开的 pill:rc-ui.js:46 在收起态把它设成 top:0 —— 正好
-   落回死区。真机实测(用户报告):顶栏一收起就再也打不开,界面被锁死。
-   它是个独立小控件、没有背景条可以填充,只能整体下移。 */
-.rc-topbar-pill[data-collapsed="1"]{top:var(--bw-ios-gesture-inset,0px)!important}
+   先前用内边距让位可行但要为此加高顶栏、缩小按钮,用户反馈"看着很怪"。
+   改走左侧后完全绕开那条带:不必让位、不必压扁按钮,顶部整片都空出来。
+   普通网页上常驻的功能只有 5 个(振假名/翻译/绘图/便签/搜索)加助手/设置/
+   收起,竖排绰绰有余;书籍专用的一整组在网页上本来就是隐藏的。 */
+#bw-root[data-bw-rail="1"] #header{
+  top:0!important;bottom:0!important;left:0!important;right:auto!important;
+  width:calc(46px + env(safe-area-inset-left))!important;height:auto!important;
+  flex-direction:column!important;justify-content:flex-start!important;
+  padding:calc(var(--bw-ios-gesture-inset,0px) + 8px) 0 8px 0!important;
+  padding-left:env(safe-area-inset-left)!important;
+  overflow-x:hidden!important;overflow-y:auto!important;
+  border-bottom:0!important;border-right:1px solid var(--rc-border,#2a3550)!important;
+  box-shadow:6px 0 24px rgba(0,0,0,.35)!important}
+/* 竖排放不下页面标题,隐藏(标题本来也只是提示,hover 才看得见) */
+#bw-root[data-bw-rail="1"] #header h1{display:none!important}
+#bw-root[data-bw-rail="1"] #header .bw-sp{flex:1 0 auto!important}
+#bw-root[data-bw-rail="1"] #header button{
+  width:36px!important;min-width:36px!important;height:36px!important;
+  padding:0!important;flex:none!important}
+/* 收起态:rc-ui 的规则是压高度 + translateY(-105%)(为横栏写的),竖栏要
+   改成压宽度 + 向左移,否则收起时它会往上跑而不是滑出左侧。 */
+#bw-root[data-bw-rail="1"] #header.rc-topbar-collapsed{
+  width:0!important;min-width:0!important;height:auto!important;
+  padding-left:0!important;padding-right:0!important;
+  border-right-width:0!important;
+  transform:translateX(-105%)!important}
+/* 收起态的 pill:横排时它挂在顶部中央,竖排要挪到左缘中部,同样避开死区 */
+#bw-root[data-bw-rail="1"] .rc-topbar-pill,
+#bw-root[data-bw-rail="1"] .rc-topbar-pill[data-collapsed="1"]{
+  left:0!important;top:50%!important;
+  transform:translateY(-50%) rotate(180deg)!important;
+  writing-mode:vertical-rl!important;
+  min-width:0!important;width:22px!important;height:auto!important;
+  padding:13px 0!important;border-radius:0 12px 12px 0!important;
+  border-left:0!important;border-top:1px solid rgba(255,255,255,.20)!important}
 /* pane 占位文案 */
 .bw-pane-todo{padding:18px;color:var(--rc-text-muted,#8a9bb4);font-size:13px;line-height:1.8}
 .bw-pane-todo b{color:var(--rc-text-strong,#cfe6ff)}
