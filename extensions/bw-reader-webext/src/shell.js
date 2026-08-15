@@ -29,6 +29,23 @@
   };
 
   // ── 样式:#header 系逐字来自 pdf-styles.css(标注差异);pill 沿用抽屉把手的磨砂语言 ──
+  // iOS Safari 顶部手势带的让位高度。只在**扩展跑在 Safari 网页里**时给值:
+  //  · App 内的阅读器由原生壳承载,没有这条手势带,给了反而白白让出一截;
+  //  · 桌面浏览器同理。
+  // 44px 是量出来的:用户报告"几乎贴着按钮下边缘才能点中",而按钮高 36px、
+  // 顶栏上边距若干 —— 能点中的那一线正好在 40px 上下。取 44 留一点余量,
+  // 同时仍在 env(safe-area-inset-top) 的量级内,不至于把顶栏推到显眼的位置。
+  try {
+    const ua = navigator.userAgent || "";
+    const iOSLike = /iPad|iPhone|iPod/.test(ua) ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    // 扩展在 App 内的 WKWebView 里也会跑(书籍 PWA 场景),那时 __bwPwaBridge
+    // 存在;只有真正的 Safari 网页才需要让位。
+    if (iOSLike && !window.__bwPwaBridge && !window.__bwRootNative) {
+      root.style.setProperty("--bw-ios-gesture-inset", "44px");
+    }
+  } catch (_) {}
+
   const st = document.createElement("style");
   st.id = "bw-shell-css";
   st.textContent = `
@@ -55,6 +72,19 @@ button{-webkit-appearance:none;appearance:none}
 #ep-side .ep-side-pane:not(.active){display:none}
 /* 补偿:rc-sidedrawer CSS 的 body.ep-side-open 选择器在门面下落在 #bw-root 上 → 把手随抽屉左移这条在此复述 */
 #bw-root.ep-side-open #ep-side-handle{right:var(--ep-side-width,min(38vw,560px))}
+/* ── iOS Safari 顶部系统手势带:贴着屏幕顶边的元素收不到触摸 ──────────────
+   真机证据(1.1.58 build 330):顶栏按钮与侧栏 tab 全部点不动,而中部的抽屉
+   把手一切正常;点击时连 window 捕获阶段的诊断都一行不出 —— 事件根本没有
+   进入页面,不是被谁吞掉。两者唯一的共同点就是 top:0。Safari 自己要用最
+   上面那条带做下拉/地址栏手势,落在里面的网页元素拿不到 pointer 事件。
+
+   这不是"扩展 UI 有 bug",是它站错了位置。App 内的阅读器没有这个问题
+   (原生壳没有 Safari 的手势带),所以修必须只作用于扩展的网页场景 ——
+   rc-sidedrawer.js 是 App/扩展共用的原件,绝不能为此改动它。
+
+   之前三轮都在改命中逻辑(代际、composedPath、宿主几何),而位置才是原因。 */
+#header{top:var(--bw-ios-gesture-inset,0px)!important}
+#ep-side{top:var(--bw-ios-gesture-inset,0px)!important}
 /* pane 占位文案 */
 .bw-pane-todo{padding:18px;color:var(--rc-text-muted,#8a9bb4);font-size:13px;line-height:1.8}
 .bw-pane-todo b{color:var(--rc-text-strong,#cfe6ff)}

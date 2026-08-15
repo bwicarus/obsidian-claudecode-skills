@@ -215,6 +215,19 @@
       reported++;
     }
   }
+  // 顶部死区实测:每次 pointerdown 记下最小的 y。iOS Safari 会截走贴顶那条
+  // 带里的触摸,页面完全收不到事件 —— 所以"页面见过的最高一次触摸"就是死区
+  // 下沿的上界。用户在顶栏上反复点几次,这个数字就逼近真实高度,
+  // 让位高度不必再靠描述推算。
+  let minY = null;
+  window.addEventListener("pointerdown", (e) => {
+    if (typeof e.clientY !== "number") return;
+    if (minY === null || e.clientY < minY) {
+      minY = e.clientY;
+      log("最高触摸 y=" + fmt(minY) + "(顶部死区不超过这个值)");
+    }
+  }, { capture: true, passive: true });
+
   // 延后一拍:facade/shell 都在 document_idle 之后才建好 shadow 与顶栏。
   setTimeout(probeTopbar, 1500);
 
