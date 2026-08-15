@@ -171,7 +171,11 @@
         if (!(window.RC && RC.outgoing)) return;
         var t = '';
         try { t = (window.getSelection() || {}).toString().trim(); } catch (e) {}
-        if (t && t.length >= 2) RC.outgoing.focus('text', { file: FREL, text: t.slice(0, 200) });
+        // page 必填,Windows 侧的 CopyFocusReference 缺了它直接 throw、整条
+        // 选区事件被丢掉。HTML 阅读器本来就没有"页"(html_reader.py 明确
+        // 说明网页阅读独立状态、不进书的 reading-pos)——给固定的 1 不是
+        // 编造页码,是如实反映"这份文档只有一页"。
+        if (t && t.length >= 2) RC.outgoing.focus('text', { file: FREL, text: t.slice(0, 200), page: 1 });
         else RC.outgoing.cancel();
       });
     } catch (e) {}

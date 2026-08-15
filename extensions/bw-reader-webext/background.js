@@ -6502,8 +6502,10 @@ async function readerPrepareSnapshot(message, sender) {
     throw readerRelayError("BW_READER_CONTEXT_LIMIT", "快照消息超过 1 MiB");
   }
   const page = message.snapshot;
-  if (!readerExactKeys(page, ["url", "title", "text", "selection", "selectionRegions",
+  if (!readerExactKeys(page, ["url", "title", "text", "selection", "selectionContext",
+    "selectionRegions",
     "visual", "viewKey", "viewport", "document"]) || page.url !== binding.url ||
+    typeof page.selectionContext !== "string" || page.selectionContext.length > 1200 ||
     typeof page.title !== "string" || page.title.length > 1024 ||
     /[\u0000-\u001f\u007f]/.test(page.title) ||
     typeof page.viewKey !== "string" || page.viewKey.length < 1 || page.viewKey.length > 160 ||
@@ -6550,6 +6552,12 @@ async function readerPrepareSnapshot(message, sender) {
     selectionState: selection ? "active" : "cleared", selection: selection || null,
     observedAtEpochMs: Date.now(),
   };
+  // 选中所在块的原文。跟 selection 同生共死:桥的合同是"非 active 不许有
+  // 上下文",落单会让整条 active-reading 被拒。
+  const selectionContext = selection
+    ? readerNormalizeText(page.selectionContext || "", 1200)
+    : "";
+  if (selectionContext) viewport.selectionContext = selectionContext;
   if (vp.controlCorrelation !== undefined) viewport.controlCorrelation = vp.controlCorrelation;
   const documentPayload = {
     contract: "reader-document/1", sourceInstanceId: doc.sourceInstanceId,
@@ -6758,6 +6766,10 @@ async function readerPostSnapshot(prepared) {
       selectionState: viewport.selectionState, selection: viewport.selection,
       sourceInstanceId: viewport.sourceInstanceId, selectionRegions,
       observedAtEpochMs: Date.now(),
+      ...(viewport.selectionContext
+        ? { selectionContext: viewport.selectionContext,
+            selectionContextSource: "web-block" }
+        : {}),
     },
   };
   if (prior.documentSignature !== documentSignature) body.document = documentPayload;

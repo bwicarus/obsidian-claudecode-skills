@@ -5719,6 +5719,37 @@
         selectionState = "cleared";
       }
     }
+    // 选中附近的原文(宿主在 pend 里给的 sel_context / sel_context_source)。
+    // 只在选中 active 时带 —— 桥的合同是"非 active 不许有上下文",违反会让
+    // 整条 active-reading 被拒,且非重试错误会把上下文泵整个停死。
+    // 非字符串/超限/含控制字符按**缺席**处理而不是拒绝:上下文是增强,
+    // 它坏了不该连位置和选中本体一起陪葬。
+    var selectionContext = null;
+    var selectionContextSource = null;
+    if (selectionState === "active") {
+      var rawSelCtx = source.sel_context;
+      if (typeof rawSelCtx === "string") {
+        // 桥的合同只放行换行和制表两种控制字符;回车先归一化成换行,
+        // 其余控制字符按「上下文缺席」处理 —— 上下文是增强,一个坏字符
+        // 不该让位置和选中本体一起陪葬。
+        rawSelCtx = rawSelCtx.replace(/\r\n?/g, "\n").trim().slice(0, 1200);
+        if (
+          rawSelCtx &&
+          !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(rawSelCtx)
+        ) {
+          selectionContext = rawSelCtx;
+          var rawSelCtxSrc = source.sel_context_source;
+          if (
+            typeof rawSelCtxSrc === "string" &&
+            rawSelCtxSrc.trim() &&
+            rawSelCtxSrc.trim().length <= 40 &&
+            !/[\u0000-\u001f\u007f-\u009f]/.test(rawSelCtxSrc.trim())
+          ) {
+            selectionContextSource = rawSelCtxSrc.trim();
+          }
+        }
+      }
+    }
     var activeReading = {
       kind: source.kind,
       file: file,
@@ -5728,6 +5759,12 @@
       selection: selection,
       sourceInstanceId: currentReaderSourceInstanceId(),
     };
+    if (selectionContext) {
+      activeReading.selectionContext = selectionContext;
+      if (selectionContextSource) {
+        activeReading.selectionContextSource = selectionContextSource;
+      }
+    }
     try {
       if (typeof RC.selectionRegionsForPage === "function") {
         activeReading.selectionRegions = RC.selectionRegionsForPage({

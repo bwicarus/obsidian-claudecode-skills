@@ -1100,7 +1100,8 @@ internal sealed class ReaderRealtimeOutputBroker
             throw Failure(
                 "BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE",
                 "指定 Reader 页面来源当前不在线（已等待 "
-                    + $"{SourceRegistrationWait.TotalSeconds:0.#} 秒仍未注册）",
+                    + $"{SourceRegistrationWait.TotalSeconds:0.#} 秒仍未注册；"
+                    + _router.DescribeRegisteredSources() + "）",
                 retryable: true);
         }
         PendingOutput pending = new(

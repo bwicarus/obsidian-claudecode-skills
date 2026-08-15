@@ -1259,8 +1259,28 @@
       return null;
     }
     var selection = "";
+    var selectionContext = "";
     try {
-      selection = String(window.getSelection() || "").trim().slice(0, 400);
+      var liveSel = window.getSelection();
+      selection = String(liveSel || "").trim().slice(0, 400);
+      // 选中所在块级元素的原文(web-adapter.captureFromSelection 同款取法)。
+      // 那份 1200 字符 context 早就算好了,却因为这条快照通道用裸 getSelection
+      // 一直没进过快照。扩展自身 Shadow UI 里的选区不算书页内容。
+      if (selection && liveSel && liveSel.rangeCount) {
+        var selRange = liveSel.getRangeAt(0);
+        var selHost = document.getElementById("bw-reader-host");
+        if (!(selHost && selHost.contains(selRange.commonAncestorContainer))) {
+          var selNode = selRange.startContainer;
+          var selEl = selNode && (selNode.nodeType === 3 ? selNode.parentElement : selNode);
+          var selBlk = selEl && selEl.closest
+            ? selEl.closest("p,li,td,blockquote,div,section,h1,h2,h3,h4")
+            : null;
+          if (selBlk) {
+            var selCtx = normalizeReadableText(String(selBlk.textContent || "")).trim().slice(0, 1200);
+            if (selCtx && selCtx !== selection) selectionContext = selCtx;
+          }
+        }
+      }
     } catch (_) {}
     var selectionRegions = {
       contract: "reader-selection-regions/1",
@@ -1292,6 +1312,7 @@
       // current viewport only; the full document never enters page.text.
       text: visibleText,
       selection: selection,
+      selectionContext: selectionContext,
       selectionRegions: selectionRegions,
       visual: visualState,
       viewKey: viewKey,

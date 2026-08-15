@@ -359,6 +359,42 @@ def _attr(s: str, limit: int = 120) -> str:
     return v.replace('"', "'").replace(MARK_L, "").replace(MARK_R, "")
 
 
+def _flatten_with_map(s: str) -> tuple[str, list[int]]:
+    """把连续空白压成单个空格，并记住每个字符来自哪里。
+
+    存在的理由：PDF 正文按**视觉行**插换行（`_page_text_clean` 每行末一个 \\n），
+    而高亮文本来自字符层选择，天然连续。两边的空白必然对不上，跨行的高亮
+    因此一条都锚不上。
+
+    原实现顾虑「压缩空白后定位会错位」—— 那个顾虑对，但空白无关匹配不必是
+    近似的：把压缩后的下标一一映射回原文下标，位置就是精确的。
+    返回 `(flat, imap)`，`imap[i]` 是 `flat[i]` 在 `s` 里的下标。
+    """
+    out: list[str] = []
+    imap: list[int] = []
+    in_space = False
+    for index, char in enumerate(s):
+        if char.isspace():
+            # 前导空白不产生输出,否则映射会指向段首而不是词首。
+            #
+            # 折叠出的这个空格记的是**第一个**空白的下标。当前调用方读不到它
+            # ——待查文本经 `" ".join(split())` 后首尾必为非空白,取的只有首末
+            # 字符的映射。若将来允许首尾带空白,这里就成了边界所在,需重新想清楚
+            # 该指向空白的头还是尾。
+            if out and not in_space:
+                out.append(" ")
+                imap.append(index)
+            in_space = True
+            continue
+        out.append(char)
+        imap.append(index)
+        in_space = False
+    while out and out[-1] == " ":
+        out.pop()
+        imap.pop()
+    return "".join(out), imap
+
+
 def annotate_page_text(text: str, highlights=(), blocks=()) -> tuple[str, list]:
     """把高亮包进正文原位,块状附属内容按锚定顺序插入。
 
@@ -376,28 +412,31 @@ def annotate_page_text(text: str, highlights=(), blocks=()) -> tuple[str, list]:
     unanchored: list = []
     taken: list[tuple[int, int]] = []
 
+    flat, imap = _flatten_with_map(esc)
+
     for h in (highlights or []):
         needle = _escape_marks(" ".join(str(h.get("text") or "").split()))
         if not needle:
             unanchored.append(dict(h, _reason="no_text"))
             continue
-        # 正文换行与高亮里的空白往往不一致,先按原样找,找不到再退回压缩空白后找。
-        pos = esc.find(needle)
-        if pos < 0:
-            flat = " ".join(esc.split())
-            p2 = flat.find(needle)
-            if p2 < 0:
-                unanchored.append(dict(h, _reason="not_found_in_page_text"))
-                continue
-            # 压缩空白后能找到,说明是换行差异:此时不做近似定位(会错位),照实回报。
-            unanchored.append(dict(h, _reason="whitespace_mismatch"))
+        # 空白无关匹配是主路径,不是回退:正文按视觉行断开、高亮文本连续,
+        # 两者的空白**通常**就是不一致的。压缩后的位置经 imap 一一映射回原文,
+        # 所以这是精确定位而非近似。
+        found = flat.find(needle)
+        if found < 0:
+            unanchored.append(dict(h, _reason="not_found_in_page_text"))
             continue
-        end = pos + len(needle)
+        pos = imap[found]
+        # 末字符的源下标 +1:区间要盖住原文里被折叠的那些空白。
+        end = imap[found + len(needle) - 1] + 1
         if any(pos < b and a < end for a, b in taken):
             unanchored.append(dict(h, _reason="overlaps_earlier_highlight"))
             continue
+        # 同一段文字在一页里出现多次时取第一处 —— 可能标在错的地方。
+        # 不说出来的话,AI 会把标记位置当成确定的事实去引用。
+        ambiguous = flat.find(needle, found + 1) >= 0
         taken.append((pos, end))
-        spans.append((pos, end, h))
+        spans.append((pos, end, dict(h, _ambiguous=ambiguous)))
 
     # 从后往前插入,否则先插入的标记会让后面的偏移全部失效。
     out = esc
@@ -407,6 +446,8 @@ def annotate_page_text(text: str, highlights=(), blocks=()) -> tuple[str, list]:
             attrs += f' color="{_attr(h["color"], 24)}"'
         if h.get("note"):
             attrs += f' note="{_attr(h["note"])}"'
+        if h.get("_ambiguous"):
+            attrs += ' ambiguous="1"'
         out = (out[:pos] + f"{MARK_L}HIGHLIGHT{attrs}{MARK_R}" + out[pos:end]
                + f"{MARK_L}/HIGHLIGHT{MARK_R}" + out[end:])
 
@@ -442,15 +483,21 @@ def _viewport_center(viewport, total: int):
     return None
 
 
-def _page_embeds(pdf, rel: str, page) -> tuple[list, list]:
+def _page_embeds(pdf, rel: str, page) -> tuple[list, list, list]:
     """取该页的高亮与块状附属内容。任一 sidecar 缺失/损坏都只让那一类为空,不影响正文。
 
     PDF 高亮按 `page` 过滤;EPUB 高亮的锚是 `anchor.section`(page 参数在 EPUB 语义下即 section)。
     便签只有页面坐标锚、没有正文字符锚,所以归到块状内容;其中 card/html/video 便签
     是任务书说的"绑定在页面元素上的工具卡",纯文本便签同样走这条管线。
+
+    第三个返回值是**读取失败的原因**。以前两处 `except` 直接把列表清空,于是
+    "sidecar 读不出来"与"这页本来就没标注"返回得一模一样 —— 用户看不到自己的
+    高亮时,没有任何地方分得清是没锚上还是根本没读到。正文仍然照发(标注是增强,
+    不该拖垮主线),但失败要留下痕迹。
     """
     is_epub = str(rel).lower().endswith(".epub")
     pg = str(page)
+    problems: list = []
     hls: list = []
     try:
         if is_epub:
@@ -462,8 +509,9 @@ def _page_embeds(pdf, rel: str, page) -> tuple[list, list]:
             for h in ((pdf._hl_load(rel) or {}).get("highlights") or []):
                 if str(h.get("page", "")) == pg:
                     hls.append(h)
-    except Exception:
+    except Exception as error:
         hls = []
+        problems.append(f"highlights:{type(error).__name__}: {str(error)[:80]}")
 
     blocks: list = []
     try:
@@ -489,9 +537,10 @@ def _page_embeds(pdf, rel: str, page) -> tuple[list, list]:
                                "label": n.get("id")})
             elif str(n.get("text") or "").strip():
                 blocks.append({"kind": "note", "text": n["text"], "label": n.get("id")})
-    except Exception:
+    except Exception as error:
         blocks = []
-    return hls, blocks
+        problems.append(f"blocks:{type(error).__name__}: {str(error)[:80]}")
+    return hls, blocks, problems
 
 
 def build_page_context(pdf, rel: str, page, *, reason: str = "dwell",
@@ -536,10 +585,14 @@ def build_page_context(pdf, rel: str, page, *, reason: str = "dwell",
             # 失败不能影响正文本身 —— 正文是主线,标注是增强。
             embeds = {"highlights": 0, "blocks": 0, "unanchored": []}
             try:
-                hls, blocks = _page_embeds(pdf, rel, page)
+                hls, blocks, problems = _page_embeds(pdf, rel, page)
                 body, unanchored = annotate_page_text(body, hls, blocks)
                 embeds = {"highlights": len(hls) - len(unanchored),
                           "blocks": len(blocks), "unanchored": unanchored}
+                # sidecar 读不出来时,上面那些计数会全是 0 —— 与「这页本来就
+                # 没标注」一模一样。带上原因,让两者能分开。
+                if problems:
+                    embeds["error"] = "; ".join(problems)[:200]
             except Exception as ex:
                 embeds["error"] = f"{type(ex).__name__}: {str(ex)[:120]}"
             out.update(text=body, text_available=True, text_source=src,

@@ -17,7 +17,13 @@ internal sealed record DirectActiveReading(
     JsonElement? ViewPage = null,
     string? SourceInstanceId = null,
     JsonElement? SelectionRegions = null,
-    JsonElement? HighlightSource = null);
+    JsonElement? HighlightSource = null,
+    // 选中附近的原文与它的来历(pdf-sentence / epub-paragraph / web-block)。
+    // 可选:旧版前端不发,缺席就是今天的行为。selection 本体保持字符串不动 ——
+    // 链上有多处按 typeof selection === "string" 把关,改它的形状会让旧版
+    // 前端的选中被整条静默清空。
+    string? SelectionContext = null,
+    string? SelectionContextSource = null);
 
 internal sealed record DirectViewportContext(
     string SourceInstanceId,
@@ -132,6 +138,17 @@ internal sealed class FileDirectSnapshotContextAdapter :
         "snapshot-not-received");
     private JsonObject? _latestEvent;
 
+    // 「用户刚做了什么」——不同于 _latestEvent(内部记账,装的是折叠出来的系统
+    // 事件类型,readerpc.recovering 那种)。这里只在几处明确知道是**真实用户
+    // 动作**的地方追加(翻页/画完一笔),≤5 条、30 秒窗、按当前书清空——不做
+    // 事件全覆盖,宁可少而准。参见 references/local-first-data-architecture.md
+    // 第 16 条。跟 _latestEvent 一样不落盘:重启后没有"最近"可言,清空是对的。
+    private readonly List<JsonObject> _recentActions = new();
+    private string? _recentActionsFile;
+    private const int MaximumRecentActions = 5;
+    private static readonly TimeSpan RecentActionsWindow =
+        TimeSpan.FromSeconds(30);
+
     private sealed record AdapterState(
         long Revision,
         JsonObject? StablePage,
@@ -139,7 +156,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
         JsonObject Selection,
         JsonObject Focus,
         JsonObject? LatestEvent,
-        IReadOnlyList<string> RecentEventOrder);
+        IReadOnlyList<string> RecentEventOrder,
+        IReadOnlyList<JsonObject> RecentActions,
+        string? RecentActionsFile);
 
     private sealed record FocusFoldResult(
         JsonObject Focus,
@@ -277,11 +296,24 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 bool changedPage = _activeReading is not null
                     && !SameActiveReadingIdentity(_activeReading, next);
                 _activeReading = next;
+                if (changedPage)
+                {
+                    RecordAction(
+                        "page-turn",
+                        next,
+                        activeReading.ObservedAtEpochMilliseconds);
+                }
                 if (activeReading.SelectionState == "active")
                 {
                     _selection = ActiveSelection(
                         activeReading.Selection!,
-                        next);
+                        next,
+                        activeReading.SelectionContext,
+                        activeReading.SelectionContextSource);
+                    RecordAction(
+                        "selection",
+                        next,
+                        activeReading.ObservedAtEpochMilliseconds);
                 }
                 else if (activeReading.SelectionState == "cleared")
                 {
@@ -434,6 +466,10 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 _activeReading = null;
                 _selection = UnknownSelection("snapshot-cleared");
                 _focus = UnknownFocus("snapshot-cleared");
+                // 没有"当前书"了,留着上一本书的动作记录只会显得像是这本新
+                // 上下文里发生的事。
+                _recentActions.Clear();
+                _recentActionsFile = null;
                 _latestEvent = new JsonObject
                 {
                     ["source"] = "context-control",
@@ -494,6 +530,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
             .Append("sourceInstanceId")
             .Append("selectionRegions")
             .Append("highlightSource")
+            .Append("selectionContext")
+            .Append("selectionContextSource")
             .ToHashSet(StringComparer.Ordinal);
         if (
             requiredKeys.Any(key => !keys.Contains(key))
@@ -636,6 +674,31 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             throw ActiveReadingInvalid();
         }
+        // 选中附近的原文。约束跟着 selection 走:没有活动选中就不许有上下文,
+        // 有来历标签就必须有上下文本体 —— 一个孤零零的 "pdf-sentence" 标签
+        // 什么也不说明。null 等同缺席(前端清空选中时整组一起消失)。
+        string? selectionContext = OptionalActiveText(
+            value,
+            "selectionContext",
+            1200);
+        string? selectionContextSource = OptionalActiveText(
+            value,
+            "selectionContextSource",
+            40);
+        if (
+            (
+                selectionState != "active"
+                && (selectionContext is not null
+                    || selectionContextSource is not null)
+            )
+            || (
+                selectionContextSource is not null
+                && selectionContext is null
+            )
+        )
+        {
+            throw ActiveReadingInvalid();
+        }
         return new DirectActiveReading(
             kind,
             file,
@@ -648,7 +711,40 @@ internal sealed class FileDirectSnapshotContextAdapter :
             viewPage,
             sourceInstanceId,
             selectionRegions,
-            highlightSource);
+            highlightSource,
+            selectionContext,
+            selectionContextSource);
+    }
+
+    // active 里的可选文本字段:缺席/null → null;字符串超限或含控制字符、
+    // 或者是别的类型 → 整条拒绝。宽进(可缺)严出(在场必须合规),
+    // 与 selection 本体同一条纪律 —— 一条严一条松,校验就形同虚设。
+    private static string? OptionalActiveText(
+        JsonElement value,
+        string name,
+        int maximumLength)
+    {
+        if (!value.TryGetProperty(name, out JsonElement property))
+        {
+            return null;
+        }
+        if (property.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+        if (
+            property.ValueKind != JsonValueKind.String
+            || property.GetString() is not string text
+            || text.Length > maximumLength
+            || string.IsNullOrWhiteSpace(text)
+            || text.Any(character =>
+                char.IsControl(character)
+                && character is not ('\n' or '\t'))
+        )
+        {
+            throw ActiveReadingInvalid();
+        }
+        return text;
     }
 
     private static JsonElement ValidateHighlightSource(
@@ -1199,6 +1295,143 @@ internal sealed class FileDirectSnapshotContextAdapter :
             .Trim();
     }
 
+    // 记一条"用户刚做了什么"。只在明确知道是真实用户动作的地方调用——
+    // 翻页(真的换了页,不是重复上报同一页)、画完一笔(从未稳定到稳定的那一刻)。
+    // 不追求覆盖面:宁可少几种动作类型,也不要把系统内部状态转换错认成用户动作。
+    private void RecordAction(string kind, JsonObject pageIdentity, long atMs)
+    {
+        string? file = StringValue(pageIdentity["file"]);
+        if (string.IsNullOrEmpty(file))
+        {
+            return;
+        }
+        // 换书清空:上一本书翻到第几页,跟这本书完全无关,留着只会误导。
+        if (!string.Equals(_recentActionsFile, file, StringComparison.Ordinal))
+        {
+            _recentActions.Clear();
+            _recentActionsFile = file;
+        }
+        _recentActions.Add(new JsonObject
+        {
+            ["kind"] = kind,
+            ["page"] = pageIdentity["page"]?.DeepClone(),
+            ["atMs"] = atMs,
+        });
+        PruneRecentActions();
+    }
+
+    private void PruneRecentActions()
+    {
+        long cutoffMs = _utcNow().ToUnixTimeMilliseconds()
+            - (long)RecentActionsWindow.TotalMilliseconds;
+        while (
+            _recentActions.Count > 0
+            && (_recentActions[0]["atMs"]?.GetValue<long?>() ?? 0) < cutoffMs
+        )
+        {
+            _recentActions.RemoveAt(0);
+        }
+        while (_recentActions.Count > MaximumRecentActions)
+        {
+            _recentActions.RemoveAt(0);
+        }
+    }
+
+    // 给模型的那份要带"多少秒前",而不是一个原始时间戳——模型不该自己去算
+    // 现在减去 atMs。每次读的时候重新剪一遍:条目可能是几十秒前写入的,
+    // 单靠写入时剪过一次不够,窗口要在**读**的这一刻仍然成立。
+    private JsonArray BuildRecentActions()
+    {
+        PruneRecentActions();
+        long nowMs = _utcNow().ToUnixTimeMilliseconds();
+        JsonArray array = [];
+        foreach (JsonObject entry in _recentActions)
+        {
+            long atMs = entry["atMs"]?.GetValue<long?>() ?? nowMs;
+            array.Add(new JsonObject
+            {
+                ["kind"] = entry["kind"]?.DeepClone(),
+                ["page"] = entry["page"]?.DeepClone(),
+                ["secondsAgo"] = (int)Math.Max(
+                    0,
+                    (nowMs - atMs) / 1000),
+            });
+        }
+        return array;
+    }
+
+    // 「用户此刻选中/聚焦着什么」,合并两个此前互相独立的单槽状态:_selection
+    // (纯文字,来自 window.getSelection)与 _focus(卡片/图片/画布区域/高亮,
+    // 来自点选)。两者**已经可能同时非空**——BuildFocus 只在 kind=="text"
+    // 时才会覆盖 _selection,聚焦一张卡片不会清掉之前选中的文字——所以合并
+    // 不需要新的前端手势,只是把两份已经存在的信号并到一处给模型看。
+    //
+    // 不做的事:真正的"同时选中好几个东西"(比如同时选两条高亮)需要全新的
+    // 前端交互设计,现在完全没有;items 里最多两条(文字 + 聚焦对象),
+    // 不是一个开放式的多选列表。
+    private JsonArray BuildSelectionItems()
+    {
+        JsonArray items = [];
+        if (
+            StringValue(_selection["state"]) == "active"
+            && StringValue(_selection["text"]) is string selectedText
+        )
+        {
+            JsonObject textItem = new()
+            {
+                ["kind"] = "text",
+                ["text"] = selectedText,
+            };
+            // 选中附近的原文,让模型不必回整页正文里找这句话的前后文。
+            // 只在前端真的算出来时出现。
+            if (StringValue(_selection["context"]) is string context)
+            {
+                textItem["context"] = context;
+                if (StringValue(_selection["contextSource"])
+                    is string contextSource)
+                {
+                    textItem["contextSource"] = contextSource;
+                }
+            }
+            items.Add(textItem);
+        }
+        // kind=="text" 的 focus 只是 _selection 的影子(同一次选中在两处
+        // 各存一份),在这里再放一条会让模型以为用户选中了两样东西。
+        if (
+            StringValue(_focus["state"]) == "active"
+            && StringValue(_focus["kind"]) is string focusKind
+            && focusKind != "text"
+            && _focus["ref"] is JsonObject focusRef
+        )
+        {
+            JsonObject item = new() { ["kind"] = focusKind };
+            if (StringValue(focusRef["text"]) is string focusText)
+            {
+                item["text"] = focusText;
+            }
+            if (StringValue(focusRef["brief"]) is string brief)
+            {
+                item["text"] ??= brief;
+            }
+            // cid 是卡片批次的全局编号,批内单卡没有自己的号——只能给到
+            // "这一批"的粒度,不能假装能定位到批内第几张。
+            if (StringValue(focusRef["cid"]) is string cid)
+            {
+                item["ref"] = cid;
+            }
+            else if (StringValue(focusRef["id"]) is string id)
+            {
+                item["ref"] = id;
+            }
+            if (StringValue(focusRef["color"]) is string color)
+            {
+                item["color"] = color;
+            }
+            items.Add(item);
+        }
+        return items;
+    }
+
     private void FoldJournal(DirectContextEvent contextEvent)
     {
         JsonObject value = JsonNode.Parse(
@@ -1233,10 +1466,42 @@ internal sealed class FileDirectSnapshotContextAdapter :
             _activeReading = activeReading;
             if (changedPage)
             {
-                _selection = ClearedSelection(
-                    "stable-page-changed");
                 _focus = UnknownFocus("stable-page-changed");
+                RecordAction(
+                    "page-turn",
+                    activeReading,
+                    activeReading["observedAtEpochMs"]
+                        ?.GetValue<long?>() ?? 0);
             }
+            // Pi 一直在写这个字段(pdf_reader.py:3290 的 ctx["selection"]),
+            // 这里此前从没读过——服务器托管书籍的选区经这条链路整段丢失,
+            // 只有 App 直连的 WSS 活跃阅读上报能把选区带到模型面前。
+            // 这个事件每次都代表"此刻的真实状态"(reason 由 Pi 按当时有没有
+            // 选区二选一),所以缺字段要当作"现在没有选区"处理,不是"这条
+            // 事件没提所以维持原样"——否则旧选区会在用户已经点掉之后继续
+            // 挂在快照里。
+            JsonObject? pageContext = value["page_context"] as JsonObject;
+            string? reportedSelection = StringValue(
+                pageContext?["selection"]);
+            // 400 字符与控制符校验跟 WSS 活跃阅读那条路的 selection 字段
+            // 同一套约束(line ~653) —— 两条路径最终写进同一个 _selection,
+            // 不能一条严格一条放任,否则校验形同虚设。
+            if (
+                reportedSelection is { Length: > 400 }
+                || (
+                    reportedSelection is not null
+                    && reportedSelection.Any(char.IsControl)
+                )
+            )
+            {
+                throw JournalInvalid();
+            }
+            _selection = !string.IsNullOrEmpty(reportedSelection)
+                ? ActiveSelection(reportedSelection, activeReading)
+                : ClearedSelection(
+                    changedPage
+                        ? "stable-page-changed"
+                        : "page-context-no-selection");
         }
         else if (contextEvent.Type == "focus")
         {
@@ -1252,7 +1517,34 @@ internal sealed class FileDirectSnapshotContextAdapter :
         }
         else if (contextEvent.Type == "drawing")
         {
-            _stablePage = FoldDrawingEvent(value, _stablePage);
+            // 落笔前后各读一次 stable:FoldDrawingEvent 页不对就原样返回,
+            // 这里必须拿折叠后真正生效的那份来判断"是不是这一刻刚稳定",
+            // 不能拿传入的 value 猜 —— 传入 value 页不对时折叠根本没发生。
+            bool wasStable = _stablePage?["visual"] is JsonObject beforeVisual
+                && beforeVisual["drawing"] is JsonObject beforeDrawing
+                && beforeDrawing["stable"]?.GetValueKind()
+                    == JsonValueKind.True;
+            JsonObject? folded = FoldDrawingEvent(value, _stablePage);
+            bool nowStable = folded?["visual"] is JsonObject afterVisual
+                && afterVisual["drawing"] is JsonObject afterDrawing
+                && afterDrawing["stable"]?.GetValueKind()
+                    == JsonValueKind.True;
+            _stablePage = folded;
+            if (!wasStable && nowStable && folded is not null)
+            {
+                // lastEditedAt 是**秒**(Python time.time() 风格,freshWindowS
+                // 那个 S 后缀就是同一单位的提示),不是毫秒 —— 当成毫秒读会让
+                // 每一次画图动作都显得发生在 1970 年,进 RecordAction 时立刻
+                // 被 30 秒窗剪掉,画图这个动作就永远不会出现在 recentActions 里。
+                double? lastEditedAtSeconds =
+                    NumericValue(folded["visual"]?["drawing"]?["lastEditedAt"]);
+                RecordAction(
+                    "drawing",
+                    folded,
+                    lastEditedAtSeconds is double seconds
+                        ? (long)(seconds * 1000)
+                        : 0);
+            }
         }
         else if (contextEvent.Type == "command-failed")
         {
@@ -1435,7 +1727,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
 
     private static bool ValidFocusKind(string? kind) =>
         kind is "text" or "image" or "card"
-            or "drawing" or "region";
+            or "drawing" or "region" or "highlight";
 
     private static JsonObject CopyFocusReference(
         string kind,
@@ -1500,6 +1792,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
             "alt",
             "text",
             "file",
+            // 高亮的颜色是它在正文里唯一的视觉身份(跟 ⟦HIGHLIGHT color=…⟧
+            // 用的是同一个属性)——没有它,模型分不清用户选中的是哪一条高亮。
+            "color",
         })
         {
             string? value = OptionalFocusString(
@@ -2198,12 +2493,29 @@ internal sealed class FileDirectSnapshotContextAdapter :
             }
             safeUnanchored.Add(safe);
         }
-        return new JsonObject
+        JsonObject copied = new()
         {
             ["highlights"] = highlights,
             ["blocks"] = blocks,
             ["unanchored"] = safeUnanchored,
         };
+        // 标注读取失败的原因过去止步于此:Pi 会写 embeds.error,而这里只重建
+        // 三个键,于是诊断在跨机边界上蒸发。零计数和读不出来在下游长得一样,
+        // 用户看不到自己的高亮时也就无从查起。
+        if (value["error"] is not null)
+        {
+            string? reason = StringValue(value["error"]);
+            if (
+                reason is null
+                || reason.Length > 240
+                || reason.Any(char.IsControl)
+            )
+            {
+                throw JournalInvalid();
+            }
+            copied["error"] = reason;
+        }
+        return copied;
     }
 
     private static JsonObject? CopyViewport(
@@ -2515,11 +2827,13 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["updatedAtUtc"] = _utcNow()
                 .ToString("O"),
             ["latestEvent"] = _latestEvent?.DeepClone(),
+            ["recentActions"] = BuildRecentActions(),
             ["activeReading"] = publicActiveReading,
             ["contextStatus"] = contextStatus,
             ["currentPage"] = effectivePage,
             ["selection"] = _selection.DeepClone(),
             ["focus"] = _focus.DeepClone(),
+            ["selectedItems"] = BuildSelectionItems(),
         };
     }
 
@@ -2590,7 +2904,12 @@ internal sealed class FileDirectSnapshotContextAdapter :
             _focus.DeepClone() as JsonObject
                 ?? UnknownFocus("snapshot-checkpoint-failed"),
             _latestEvent?.DeepClone() as JsonObject,
-            _recentEventOrder.ToArray());
+            _recentEventOrder.ToArray(),
+            _recentActions
+                .Select(entry => entry.DeepClone() as JsonObject
+                    ?? throw JournalInvalid())
+                .ToArray(),
+            _recentActionsFile);
 
     private void RestoreState(AdapterState state)
     {
@@ -2611,6 +2930,13 @@ internal sealed class FileDirectSnapshotContextAdapter :
             _recentEventOrder.Enqueue(eventId);
             _recentEventIds.Add(eventId);
         }
+        _recentActions.Clear();
+        foreach (JsonObject entry in state.RecentActions)
+        {
+            _recentActions.Add(entry.DeepClone() as JsonObject
+                ?? throw JournalInvalid());
+        }
+        _recentActionsFile = state.RecentActionsFile;
     }
 
     private void LoadExistingState()
@@ -2968,13 +3294,34 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             return UnknownSelection("snapshot-invalid-selection");
         }
-        return new JsonObject
+        JsonObject restored = new()
         {
             ["state"] = state,
             ["text"] = state == "active" ? text : null,
             ["ref"] = source?["ref"]?.DeepClone(),
             ["reason"] = StringValue(source?["reason"]),
         };
+        // 上下文要在重启后活下来:这里逐键重建,不补这两行的话,进程存活期间
+        // 一切正常、服务一重启 context 就无声消失 —— 又一个只在特定时机
+        // 出现的静默丢弃。纪律与入口一致:只在 active 时接受,超限即弃。
+        if (
+            state == "active"
+            && StringValue(source?["context"]) is string context
+            && context.Length <= 1200
+            && !string.IsNullOrWhiteSpace(context)
+        )
+        {
+            restored["context"] = context;
+            if (
+                StringValue(source?["contextSource"]) is string contextSource
+                && contextSource.Length <= 40
+                && !string.IsNullOrWhiteSpace(contextSource)
+            )
+            {
+                restored["contextSource"] = contextSource;
+            }
+        }
+        return restored;
     }
 
     private static JsonObject RestoreFocus(JsonObject? source)
@@ -3055,8 +3402,11 @@ internal sealed class FileDirectSnapshotContextAdapter :
 
     private static JsonObject ActiveSelection(
         string text,
-        JsonObject active) =>
-        new()
+        JsonObject active,
+        string? context = null,
+        string? contextSource = null)
+    {
+        JsonObject selection = new()
         {
             ["state"] = "active",
             ["text"] = text,
@@ -3067,6 +3417,19 @@ internal sealed class FileDirectSnapshotContextAdapter :
             },
             ["reason"] = null,
         };
+        // 上下文只在有的时候出现:缺席(旧版前端、journal 折叠路径)时不放一个
+        // null 占位 —— 「没有上下文」和「上下文为空」是两句不同的话,
+        // null 占位会把前者伪装成后者。
+        if (context is not null)
+        {
+            selection["context"] = context;
+            if (contextSource is not null)
+            {
+                selection["contextSource"] = contextSource;
+            }
+        }
+        return selection;
+    }
 
     private static bool SamePage(JsonObject left, JsonObject right) =>
         string.Equals(

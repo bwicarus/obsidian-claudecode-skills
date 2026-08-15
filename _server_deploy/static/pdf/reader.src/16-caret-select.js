@@ -222,9 +222,28 @@ function paintSelectionOverlay() {
 function _ctxSelReport(txt) {
   // 选区即时同步(用户拍板 2026-07-27):建立/改动/**清空**都立刻推,不走导航防抖。
   // 传空串而不是省略字段 —— 省略会让快照留着上一次的旧选区(静默退化)。
+  //
+  // sel_context = 选中所在句(字符层现算,≤600)。两个刻意的选择:
+  //  · **现算而不读 __lastSelSentence**:那个全局量在本函数触发之后才写入、
+  //    且 _updateSelPreview 一进来就先把它清空 —— 在这里读永远拿到空串。
+  //  · **跟 selection 同一条纪律用空串清空**:ctxSync 的合并把 null/缺席当
+  //    "没变",旧句子会粘在 pend 里随心跳反复重发。
   try {
+    let selCtx = '';
+    if (txt && _charSel && _charSel.pw) {
+      try {
+        const ch = _charSel.pw.__charBoxes;
+        const r = _expandSentenceFromRange(ch, _charSel.startIdx, _charSel.endIdx);
+        if (r) {
+          const sent = _charsRangeToText(ch, r.start, r.end).slice(0, 600);
+          // 句子跟选中一字不差时不带 —— 重复内容只花 token 不添信息。
+          if (sent && sent.trim() !== txt.trim()) selCtx = sent;
+        }
+      } catch (_) {}
+    }
     window.RC?.ctxSync?.report(
-      { kind: 'pdf', file: FILE_REL, selection: txt || '', sel_page: currentPage },
+      { kind: 'pdf', file: FILE_REL, selection: txt || '', sel_page: currentPage,
+        sel_context: selCtx, sel_context_source: selCtx ? 'pdf-sentence' : '' },
       { immediate: true });
     // 焦点通道(与选区并行,语义不同:选区是"选了什么文字",焦点是"当前对象是谁")。
     // 取消必须显式发,否则上游会拿着已取消的对象当现状。
