@@ -251,7 +251,8 @@ def read_reader_context_status(
     value = _read_json(snapshot_path) or {}
     if value.get("schema") != READER_CONTEXT_SNAPSHOT_CONTRACT:
         return ReaderContextStatus(False, False, "", "", None)
-    if value.get("contextStatus") == "disabled":
+    context_status = value.get("contextStatus")
+    if context_status == "disabled":
         return ReaderContextStatus(False, False, "", "", None)
     active = value.get("activeReading")
     active = active if isinstance(active, dict) else {}
@@ -264,6 +265,8 @@ def read_reader_context_status(
         updated = _parse_epoch_ms(value.get("updatedAtUtc"))
     current = int(time.time() * 1000) if now_epoch_ms is None else now_epoch_ms
     fresh = bool(
+        context_status not in {"pending", "stale"}
+        and
         isinstance(updated, int)
         and updated > 0
         and 0 <= current - updated <= fresh_for_ms
@@ -277,14 +280,16 @@ def read_reader_context_status(
     )
 
 
-def write_disabled_reader_context_snapshot(
+def _write_reader_context_lifecycle_snapshot(
     bridge_root: Path,
     *,
+    context_status: str,
+    event_name: str,
+    reason: str,
+    error_label: str,
     now: datetime | None = None,
     producer_instance_id: str | None = None,
 ) -> None:
-    """Atomically revoke every Reader action target while ReaderPC is offline."""
-
     instant = now or datetime.now(timezone.utc)
     if instant.tzinfo is None:
         instant = instant.replace(tzinfo=timezone.utc)
@@ -293,9 +298,11 @@ def write_disabled_reader_context_snapshot(
     try:
         uuid.UUID(hex=producer)
     except (AttributeError, TypeError, ValueError) as exc:
-        raise ReaderPCServiceError("停用快照 producer 标识无效。") from exc
+        raise ReaderPCServiceError(
+            f"{error_label} producer 标识无效。"
+        ) from exc
     if len(producer) != 32 or producer.casefold() != producer:
-        raise ReaderPCServiceError("停用快照 producer 标识无效。")
+        raise ReaderPCServiceError(f"{error_label} producer 标识无效。")
     epoch_ms = int(instant.timestamp() * 1000)
     _atomic_json(
         bridge_root / "runtime" / "reader-context-snapshot.json",
@@ -307,26 +314,64 @@ def write_disabled_reader_context_snapshot(
             "latestEvent": {
                 "source": "readerpc-service",
                 "seq": None,
-                "id": f"readerpc-disabled-{producer}",
-                "type": "readerpc.disabled",
+                "id": f"readerpc-{event_name}-{producer}",
+                "type": f"readerpc.{event_name}",
                 "ts": epoch_ms,
             },
             "activeReading": None,
-            "contextStatus": "disabled",
+            "contextStatus": context_status,
             "currentPage": None,
             "selection": {
                 "state": "unknown",
                 "text": None,
                 "ref": None,
-                "reason": "readerpc-service-disabled",
+                "reason": reason,
             },
             "focus": {
                 "state": "unknown",
                 "kind": None,
                 "ref": None,
-                "reason": "readerpc-service-disabled",
+                "reason": reason,
             },
         },
+    )
+
+
+def write_disabled_reader_context_snapshot(
+    bridge_root: Path,
+    *,
+    now: datetime | None = None,
+    producer_instance_id: str | None = None,
+) -> None:
+    """Atomically revoke every Reader action target after an explicit stop."""
+
+    _write_reader_context_lifecycle_snapshot(
+        bridge_root,
+        context_status="disabled",
+        event_name="disabled",
+        reason="readerpc-service-disabled",
+        error_label="停用快照",
+        now=now,
+        producer_instance_id=producer_instance_id,
+    )
+
+
+def write_recovering_reader_context_snapshot(
+    bridge_root: Path,
+    *,
+    now: datetime | None = None,
+    producer_instance_id: str | None = None,
+) -> None:
+    """Revoke action targets without claiming the enabled service was disabled."""
+
+    _write_reader_context_lifecycle_snapshot(
+        bridge_root,
+        context_status="pending",
+        event_name="recovering",
+        reason="readerpc-service-recovering",
+        error_label="恢复中快照",
+        now=now,
+        producer_instance_id=producer_instance_id,
     )
 
 

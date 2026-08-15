@@ -44,6 +44,7 @@ from readerpc_services import (
     read_codex_voice_activity,
     read_reader_context_status,
     write_disabled_reader_context_snapshot as write_offline_snapshot,
+    write_recovering_reader_context_snapshot as write_recovering_snapshot,
     write_readerpc_status,
 )
 from voice_history_sidebar_sync import (
@@ -54,7 +55,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.26"
+APP_VERSION = "0.1.29"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 POLL_INTERVAL_MS = 2_500
@@ -83,6 +84,15 @@ def write_disabled_reader_context_snapshot(
     """Compatibility wrapper around the shared ReaderPC lifecycle writer."""
 
     write_offline_snapshot(bridge_paths.root, **kwargs)
+
+
+def write_recovering_reader_context_snapshot(
+    bridge_paths: BridgePaths,
+    **kwargs: Any,
+) -> None:
+    """Publish a non-actionable snapshot while the enabled service recovers."""
+
+    write_recovering_snapshot(bridge_paths.root, **kwargs)
 
 
 def prepare_readerpc_shortcut_broker() -> WindowsShortcutBroker | None:
@@ -227,7 +237,7 @@ def enable_readerpc_voice(
             else "尚未完成电脑语音配置，请先打开详细设置。"
         )
         try:
-            write_disabled_reader_context_snapshot(bridge_paths)
+            write_recovering_reader_context_snapshot(bridge_paths)
         except Exception as exc:
             raise ReaderPCServiceError(
                 f"{message} 同时无法撤销旧实时快照：{exc}"
@@ -252,7 +262,7 @@ def enable_readerpc_voice(
         except Exception:
             pass
         try:
-            write_disabled_reader_context_snapshot(bridge_paths)
+            write_recovering_reader_context_snapshot(bridge_paths)
         except Exception as rollback_exc:
             raise ReaderPCServiceError(
                 f"电脑语音启动失败：{exc}；同时无法撤销旧实时快照："
@@ -271,6 +281,11 @@ def stop_readerpc_voice(
     """Revoke ReaderPC intent and stop its exact Direct generation."""
 
     failures: list[str] = []
+    lifecycle_writer = (
+        write_disabled_reader_context_snapshot
+        if disable_configuration
+        else write_recovering_reader_context_snapshot
+    )
     try:
         set_codex_voice_keep_active(bridge_paths, False)
     except Exception as exc:
@@ -281,7 +296,7 @@ def stop_readerpc_voice(
         except Exception as exc:
             failures.append(f"关闭派生的电脑语音配置：{exc}")
     try:
-        write_disabled_reader_context_snapshot(bridge_paths)
+        lifecycle_writer(bridge_paths)
     except Exception as exc:
         failures.append(f"撤销旧实时快照：{exc}")
     if terminate_service:
@@ -292,7 +307,7 @@ def stop_readerpc_voice(
         except Exception as exc:
             failures.append(f"停止电脑语音服务：{exc}")
     try:
-        write_disabled_reader_context_snapshot(bridge_paths)
+        lifecycle_writer(bridge_paths)
     except Exception as exc:
         failures.append(f"确认实时快照已撤销：{exc}")
     if failures:
@@ -830,7 +845,7 @@ class ReaderPCWindow:
                     self.voice_snapshot_offline_marked = False
                 else:
                     if not self.voice_snapshot_offline_marked:
-                        write_disabled_reader_context_snapshot(
+                        write_recovering_reader_context_snapshot(
                             self.bridge_paths
                         )
                         self.voice_snapshot_offline_marked = True
