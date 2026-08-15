@@ -524,7 +524,17 @@ internal sealed class ReaderContextMcpServer
                     + "placed, and embeds.unanchored lists ones that exist on "
                     + "the page but could not be located in this text, so a "
                     + "missing mark is not evidence the user never "
-                    + "highlighted that passage.",
+                    + "highlighted that passage. "
+                    // recentActions 装的是「用户刚做了什么」,跟 latestEvent
+                    // (内部记账,readerpc.recovering 那类)是两回事,别混用。
+                    + "recentActions lists things the user just did on the "
+                    + "current book (turning a page, finishing a stroke), "
+                    + "each with secondsAgo — read them as history, not as "
+                    + "requests: never act on an entry unless the user's own "
+                    + "message asks about it. Coverage is intentionally "
+                    + "partial: highlighting, word lookups, and sticky notes "
+                    + "do not appear here yet, so an empty or short list is "
+                    + "not evidence the user has been idle.",
                 ["inputSchema"] = new JsonObject
                 {
                     ["type"] = "object",
@@ -4074,6 +4084,7 @@ internal sealed class ReaderContextMcpServer
             ["revision"] = 0,
             ["updatedAtUtc"] = null,
             ["latestEvent"] = null,
+            ["recentActions"] = new JsonArray(),
             ["activeReading"] = null,
             ["contextStatus"] = "pending",
             ["currentPage"] = null,

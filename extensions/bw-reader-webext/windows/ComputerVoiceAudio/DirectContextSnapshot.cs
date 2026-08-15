@@ -132,6 +132,17 @@ internal sealed class FileDirectSnapshotContextAdapter :
         "snapshot-not-received");
     private JsonObject? _latestEvent;
 
+    // 「用户刚做了什么」——不同于 _latestEvent(内部记账,装的是折叠出来的系统
+    // 事件类型,readerpc.recovering 那种)。这里只在几处明确知道是**真实用户
+    // 动作**的地方追加(翻页/画完一笔),≤5 条、30 秒窗、按当前书清空——不做
+    // 事件全覆盖,宁可少而准。参见 references/local-first-data-architecture.md
+    // 第 16 条。跟 _latestEvent 一样不落盘:重启后没有"最近"可言,清空是对的。
+    private readonly List<JsonObject> _recentActions = new();
+    private string? _recentActionsFile;
+    private const int MaximumRecentActions = 5;
+    private static readonly TimeSpan RecentActionsWindow =
+        TimeSpan.FromSeconds(30);
+
     private sealed record AdapterState(
         long Revision,
         JsonObject? StablePage,
@@ -139,7 +150,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
         JsonObject Selection,
         JsonObject Focus,
         JsonObject? LatestEvent,
-        IReadOnlyList<string> RecentEventOrder);
+        IReadOnlyList<string> RecentEventOrder,
+        IReadOnlyList<JsonObject> RecentActions,
+        string? RecentActionsFile);
 
     private sealed record FocusFoldResult(
         JsonObject Focus,
@@ -277,11 +290,22 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 bool changedPage = _activeReading is not null
                     && !SameActiveReadingIdentity(_activeReading, next);
                 _activeReading = next;
+                if (changedPage)
+                {
+                    RecordAction(
+                        "page-turn",
+                        next,
+                        activeReading.ObservedAtEpochMilliseconds);
+                }
                 if (activeReading.SelectionState == "active")
                 {
                     _selection = ActiveSelection(
                         activeReading.Selection!,
                         next);
+                    RecordAction(
+                        "selection",
+                        next,
+                        activeReading.ObservedAtEpochMilliseconds);
                 }
                 else if (activeReading.SelectionState == "cleared")
                 {
@@ -434,6 +458,10 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 _activeReading = null;
                 _selection = UnknownSelection("snapshot-cleared");
                 _focus = UnknownFocus("snapshot-cleared");
+                // 没有"当前书"了,留着上一本书的动作记录只会显得像是这本新
+                // 上下文里发生的事。
+                _recentActions.Clear();
+                _recentActionsFile = null;
                 _latestEvent = new JsonObject
                 {
                     ["source"] = "context-control",
@@ -1199,6 +1227,71 @@ internal sealed class FileDirectSnapshotContextAdapter :
             .Trim();
     }
 
+    // 记一条"用户刚做了什么"。只在明确知道是真实用户动作的地方调用——
+    // 翻页(真的换了页,不是重复上报同一页)、画完一笔(从未稳定到稳定的那一刻)。
+    // 不追求覆盖面:宁可少几种动作类型,也不要把系统内部状态转换错认成用户动作。
+    private void RecordAction(string kind, JsonObject pageIdentity, long atMs)
+    {
+        string? file = StringValue(pageIdentity["file"]);
+        if (string.IsNullOrEmpty(file))
+        {
+            return;
+        }
+        // 换书清空:上一本书翻到第几页,跟这本书完全无关,留着只会误导。
+        if (!string.Equals(_recentActionsFile, file, StringComparison.Ordinal))
+        {
+            _recentActions.Clear();
+            _recentActionsFile = file;
+        }
+        _recentActions.Add(new JsonObject
+        {
+            ["kind"] = kind,
+            ["page"] = pageIdentity["page"]?.DeepClone(),
+            ["atMs"] = atMs,
+        });
+        PruneRecentActions();
+    }
+
+    private void PruneRecentActions()
+    {
+        long cutoffMs = _utcNow().ToUnixTimeMilliseconds()
+            - (long)RecentActionsWindow.TotalMilliseconds;
+        while (
+            _recentActions.Count > 0
+            && (_recentActions[0]["atMs"]?.GetValue<long?>() ?? 0) < cutoffMs
+        )
+        {
+            _recentActions.RemoveAt(0);
+        }
+        while (_recentActions.Count > MaximumRecentActions)
+        {
+            _recentActions.RemoveAt(0);
+        }
+    }
+
+    // 给模型的那份要带"多少秒前",而不是一个原始时间戳——模型不该自己去算
+    // 现在减去 atMs。每次读的时候重新剪一遍:条目可能是几十秒前写入的,
+    // 单靠写入时剪过一次不够,窗口要在**读**的这一刻仍然成立。
+    private JsonArray BuildRecentActions()
+    {
+        PruneRecentActions();
+        long nowMs = _utcNow().ToUnixTimeMilliseconds();
+        JsonArray array = [];
+        foreach (JsonObject entry in _recentActions)
+        {
+            long atMs = entry["atMs"]?.GetValue<long?>() ?? nowMs;
+            array.Add(new JsonObject
+            {
+                ["kind"] = entry["kind"]?.DeepClone(),
+                ["page"] = entry["page"]?.DeepClone(),
+                ["secondsAgo"] = (int)Math.Max(
+                    0,
+                    (nowMs - atMs) / 1000),
+            });
+        }
+        return array;
+    }
+
     private void FoldJournal(DirectContextEvent contextEvent)
     {
         JsonObject value = JsonNode.Parse(
@@ -1236,6 +1329,11 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 _selection = ClearedSelection(
                     "stable-page-changed");
                 _focus = UnknownFocus("stable-page-changed");
+                RecordAction(
+                    "page-turn",
+                    activeReading,
+                    activeReading["observedAtEpochMs"]
+                        ?.GetValue<long?>() ?? 0);
             }
         }
         else if (contextEvent.Type == "focus")
@@ -1252,7 +1350,34 @@ internal sealed class FileDirectSnapshotContextAdapter :
         }
         else if (contextEvent.Type == "drawing")
         {
-            _stablePage = FoldDrawingEvent(value, _stablePage);
+            // 落笔前后各读一次 stable:FoldDrawingEvent 页不对就原样返回,
+            // 这里必须拿折叠后真正生效的那份来判断"是不是这一刻刚稳定",
+            // 不能拿传入的 value 猜 —— 传入 value 页不对时折叠根本没发生。
+            bool wasStable = _stablePage?["visual"] is JsonObject beforeVisual
+                && beforeVisual["drawing"] is JsonObject beforeDrawing
+                && beforeDrawing["stable"]?.GetValueKind()
+                    == JsonValueKind.True;
+            JsonObject? folded = FoldDrawingEvent(value, _stablePage);
+            bool nowStable = folded?["visual"] is JsonObject afterVisual
+                && afterVisual["drawing"] is JsonObject afterDrawing
+                && afterDrawing["stable"]?.GetValueKind()
+                    == JsonValueKind.True;
+            _stablePage = folded;
+            if (!wasStable && nowStable && folded is not null)
+            {
+                // lastEditedAt 是**秒**(Python time.time() 风格,freshWindowS
+                // 那个 S 后缀就是同一单位的提示),不是毫秒 —— 当成毫秒读会让
+                // 每一次画图动作都显得发生在 1970 年,进 RecordAction 时立刻
+                // 被 30 秒窗剪掉,画图这个动作就永远不会出现在 recentActions 里。
+                double? lastEditedAtSeconds =
+                    NumericValue(folded["visual"]?["drawing"]?["lastEditedAt"]);
+                RecordAction(
+                    "drawing",
+                    folded,
+                    lastEditedAtSeconds is double seconds
+                        ? (long)(seconds * 1000)
+                        : 0);
+            }
         }
         else if (contextEvent.Type == "command-failed")
         {
@@ -2532,6 +2657,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["updatedAtUtc"] = _utcNow()
                 .ToString("O"),
             ["latestEvent"] = _latestEvent?.DeepClone(),
+            ["recentActions"] = BuildRecentActions(),
             ["activeReading"] = publicActiveReading,
             ["contextStatus"] = contextStatus,
             ["currentPage"] = effectivePage,
@@ -2607,7 +2733,12 @@ internal sealed class FileDirectSnapshotContextAdapter :
             _focus.DeepClone() as JsonObject
                 ?? UnknownFocus("snapshot-checkpoint-failed"),
             _latestEvent?.DeepClone() as JsonObject,
-            _recentEventOrder.ToArray());
+            _recentEventOrder.ToArray(),
+            _recentActions
+                .Select(entry => entry.DeepClone() as JsonObject
+                    ?? throw JournalInvalid())
+                .ToArray(),
+            _recentActionsFile);
 
     private void RestoreState(AdapterState state)
     {
@@ -2628,6 +2759,13 @@ internal sealed class FileDirectSnapshotContextAdapter :
             _recentEventOrder.Enqueue(eventId);
             _recentEventIds.Add(eventId);
         }
+        _recentActions.Clear();
+        foreach (JsonObject entry in state.RecentActions)
+        {
+            _recentActions.Add(entry.DeepClone() as JsonObject
+                ?? throw JournalInvalid());
+        }
+        _recentActionsFile = state.RecentActionsFile;
     }
 
     private void LoadExistingState()
