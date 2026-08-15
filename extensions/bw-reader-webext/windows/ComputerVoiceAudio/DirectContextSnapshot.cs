@@ -1292,6 +1292,66 @@ internal sealed class FileDirectSnapshotContextAdapter :
         return array;
     }
 
+    // 「用户此刻选中/聚焦着什么」,合并两个此前互相独立的单槽状态:_selection
+    // (纯文字,来自 window.getSelection)与 _focus(卡片/图片/画布区域/高亮,
+    // 来自点选)。两者**已经可能同时非空**——BuildFocus 只在 kind=="text"
+    // 时才会覆盖 _selection,聚焦一张卡片不会清掉之前选中的文字——所以合并
+    // 不需要新的前端手势,只是把两份已经存在的信号并到一处给模型看。
+    //
+    // 不做的事:真正的"同时选中好几个东西"(比如同时选两条高亮)需要全新的
+    // 前端交互设计,现在完全没有;items 里最多两条(文字 + 聚焦对象),
+    // 不是一个开放式的多选列表。
+    private JsonArray BuildSelectionItems()
+    {
+        JsonArray items = [];
+        if (
+            StringValue(_selection["state"]) == "active"
+            && StringValue(_selection["text"]) is string selectedText
+        )
+        {
+            items.Add(new JsonObject
+            {
+                ["kind"] = "text",
+                ["text"] = selectedText,
+            });
+        }
+        // kind=="text" 的 focus 只是 _selection 的影子(同一次选中在两处
+        // 各存一份),在这里再放一条会让模型以为用户选中了两样东西。
+        if (
+            StringValue(_focus["state"]) == "active"
+            && StringValue(_focus["kind"]) is string focusKind
+            && focusKind != "text"
+            && _focus["ref"] is JsonObject focusRef
+        )
+        {
+            JsonObject item = new() { ["kind"] = focusKind };
+            if (StringValue(focusRef["text"]) is string focusText)
+            {
+                item["text"] = focusText;
+            }
+            if (StringValue(focusRef["brief"]) is string brief)
+            {
+                item["text"] ??= brief;
+            }
+            // cid 是卡片批次的全局编号,批内单卡没有自己的号——只能给到
+            // "这一批"的粒度,不能假装能定位到批内第几张。
+            if (StringValue(focusRef["cid"]) is string cid)
+            {
+                item["ref"] = cid;
+            }
+            else if (StringValue(focusRef["id"]) is string id)
+            {
+                item["ref"] = id;
+            }
+            if (StringValue(focusRef["color"]) is string color)
+            {
+                item["color"] = color;
+            }
+            items.Add(item);
+        }
+        return items;
+    }
+
     private void FoldJournal(DirectContextEvent contextEvent)
     {
         JsonObject value = JsonNode.Parse(
@@ -1560,7 +1620,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
 
     private static bool ValidFocusKind(string? kind) =>
         kind is "text" or "image" or "card"
-            or "drawing" or "region";
+            or "drawing" or "region" or "highlight";
 
     private static JsonObject CopyFocusReference(
         string kind,
@@ -1625,6 +1685,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
             "alt",
             "text",
             "file",
+            // 高亮的颜色是它在正文里唯一的视觉身份(跟 ⟦HIGHLIGHT color=…⟧
+            // 用的是同一个属性)——没有它,模型分不清用户选中的是哪一条高亮。
+            "color",
         })
         {
             string? value = OptionalFocusString(
@@ -2663,6 +2726,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["currentPage"] = effectivePage,
             ["selection"] = _selection.DeepClone(),
             ["focus"] = _focus.DeepClone(),
+            ["selectedItems"] = BuildSelectionItems(),
         };
     }
 
