@@ -43,7 +43,14 @@ def project_root() -> Path:
 
 
 def mirror_dir() -> Path:
-    return project_root() / "knowledge_graph"
+    """副本单独放，**不占 `knowledge_graph/`**。
+
+    那个名字在 Pi 上指的是权威文件（带掌握度、会被建图写）。同名会埋一个雷：
+    哪天电脑上也跑了建图，这边的只读副本和那边的权威文件就会互相覆盖 ——
+    而覆盖掉的是掌握度，也就是唯一不能重算出来的那部分。
+    路径本身就该说清它是什么。
+    """
+    return project_root() / "state" / "kg-mirror"
 
 
 def _request(url: str, token: str, timeout: int) -> dict:

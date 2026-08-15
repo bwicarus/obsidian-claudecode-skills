@@ -45,9 +45,9 @@ class SyncTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
-        (self.root / "knowledge_graph").mkdir()
+        (self.root / "kg-mirror").mkdir()
         self._original = SYNC.mirror_dir
-        SYNC.mirror_dir = lambda: self.root / "knowledge_graph"
+        SYNC.mirror_dir = lambda: self.root / "kg-mirror"
         self.responses = {}
         self.calls = []
 
@@ -69,7 +69,7 @@ class SyncTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def _manifest(self):
-        path = self.root / "knowledge_graph" / SYNC.MANIFEST_NAME
+        path = self.root / "kg-mirror" / SYNC.MANIFEST_NAME
         return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
 
     def test_downloads_and_records_freshness(self):
@@ -82,7 +82,7 @@ class SyncTest(unittest.TestCase):
         }
         self.assertEqual(SYNC.sync("https://pi/", "tok", 5, None), 0)
         saved = json.loads(
-            (self.root / "knowledge_graph" / "LADR.json").read_text("utf-8"))
+            (self.root / "kg-mirror" / "LADR.json").read_text("utf-8"))
         self.assertEqual(saved["nodes"][0]["id"], "ladr.l2.1")
         entry = self._manifest()["books"]["LADR"]
         self.assertEqual(entry["revision"], "r1")
@@ -113,7 +113,7 @@ class SyncTest(unittest.TestCase):
                 "ok": True, "revision": "r1", "unchanged": False, "graph": GRAPH},
         }
         SYNC.sync("https://pi/", "tok", 5, None)
-        target = self.root / "knowledge_graph" / "LADR.json"
+        target = self.root / "kg-mirror" / "LADR.json"
         before = target.read_text("utf-8")
 
         # 下一次服务端换了修订号但下载失败
@@ -139,7 +139,7 @@ class SyncTest(unittest.TestCase):
                 "ok": True, "revision": "r1", "unchanged": False, "graph": GRAPH},
         }
         SYNC.sync("https://pi/", "tok", 5, None)
-        target = self.root / "knowledge_graph" / "LADR.json"
+        target = self.root / "kg-mirror" / "LADR.json"
 
         self.responses = {
             "/api/kg/index": {"ok": True, "books": [
@@ -163,7 +163,7 @@ class SyncTest(unittest.TestCase):
         self.assertGreater(entry["syncedAtEpochSeconds"], 0)
 
     def test_broken_manifest_is_rebuilt_not_fatal(self):
-        (self.root / "knowledge_graph" / SYNC.MANIFEST_NAME).write_text(
+        (self.root / "kg-mirror" / SYNC.MANIFEST_NAME).write_text(
             "{ not json", encoding="utf-8")
         self.responses = {
             "/api/kg/index": {"ok": True, "books": [
@@ -182,13 +182,22 @@ class SyncTest(unittest.TestCase):
                 "ok": True, "revision": "r1", "unchanged": False, "graph": GRAPH},
         }
         SYNC.sync("https://pi/", "tok", 5, None)
-        target = self.root / "knowledge_graph" / "LADR.json"
+        target = self.root / "kg-mirror" / "LADR.json"
 
         # 服务端一本都没返回（可能是它那边出了问题）—— 绝不能据此清空本地。
         self.responses = {"/api/kg/index": {"ok": True, "books": []}}
         SYNC.sync("https://pi/", "tok", 5, None)
         self.assertTrue(target.is_file(),
                         "服务端返回空不等于用户没有书，不能据此删本地副本")
+
+    def test_mirror_never_occupies_the_authoritative_directory(self):
+        # 副本目录不能叫 knowledge_graph —— 那是 Pi 上权威文件的名字。同名时，
+        # 哪天电脑上也跑了建图，只读副本就会覆盖掉带掌握度的权威文件，
+        # 而掌握度是唯一不能重算出来的那部分。
+        SYNC.mirror_dir = self._original
+        path = SYNC.mirror_dir()
+        self.assertNotEqual(path.name, "knowledge_graph")
+        self.assertNotIn("knowledge_graph", path.parts)
 
     def test_only_one_book(self):
         self.responses = {

@@ -61,9 +61,16 @@ internal static class ReaderQueryProtocol
     internal const string EventName = "reader-query-request";
     internal const string ResponseType = "reader-query";
 
-    // 上限必须待在 WSS 控制帧的 64 KiB 之内（见 rc-computer-voice.js 的
-    // MAX_MESSAGE_BYTES），否则两端各自看都合理，合起来却永远发不出去。
-    // 40 KiB 留足信封与转义膨胀的余量，仍能装下几百条高亮连原文。
+    // 两条约束，紧的是后一条：
+    //
+    //  · 传输：必须小于 rc-computer-voice.js 的 MAX_MESSAGE_BYTES
+    //    （与 DirectBridgeContract.MaximumMessageBytes 同为 256 KiB）。
+    //    否则两端各自看都合理、合起来永远发不出去 —— 最难查的那类失败。
+    //  · **上下文**：结果整段进模型的上下文。40 KiB 已经约 12k token，
+    //    再大就是拿用户的对话预算去换一份没人读完的列表。装不下时截断并
+    //    标 Truncated，让助手知道该缩小范围重问，而不是以为自己看全了。
+    //
+    // 所以这个数字由第二条定，不是由帧限定。
     internal const int MaximumResultBytes = 40 * 1024;
     internal const int MaximumResultDepth = 8;
     internal const int MaximumQueryTextCharacters = 256;

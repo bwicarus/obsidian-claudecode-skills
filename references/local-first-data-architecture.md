@@ -489,8 +489,18 @@ Pi 真正不可替代的只剩一个角色：**同步中继**（永远在线、�
 ## 二、未定 / 待办
 
 - [ ] **日语语法基准书**未定（英语已定 EGIU-5e）
-- [ ] **`knowledge_graph/<book>.json` 拆分**（图 / 掌握度）—— 同步的前置
-- [ ] **KG 同步到 Windows**（图先行，只读单向；比检索模块化便宜，应先做）
+- [x] ~~**`knowledge_graph/<book>.json` 拆分**（图 / 掌握度）~~ —— **暂不需要
+      （2026-08-15）**。它是**双向**同步的前置：两边都写掌握度才需要各存各的。
+      只读单向分发只要在导出时剥掉学习者字段就够了（`kg_export.graph_only`）。
+      现在拆要动 18 个各自 `json.loads` KG 的文件，收益为零。等掌握度真要
+      回写时再拆
+- [x] **KG 同步到 Windows**（图先行，只读单向）—— **已做（2026-08-15）**：
+      Pi 侧 `_server_deploy/kg_export.py` 两个只读端点（索引带内容哈希修订号 /
+      单本带 `?since=` 短路），Windows 侧 `scripts/sync_kg_from_pi.py` 拉取，
+      `scripts/lib/kg_mirror.py` 是**唯一读取入口**（强制带新鲜度）。
+      ⚠ 副本落在 `state/kg-mirror/` 而**不是** `knowledge_graph/` ——
+      后者是权威目录名，同名等于给"副本覆盖掉掌握度"埋雷。
+      ⏳ 未部署（等 Codex 那边一起出）
 - [x] ~~谁是主~~ —— **已由产品边界解决（2026-08-15）**：iPad 上 App 管书、
       扩展管网页、Pi 只提供服务端能力与同步。问题从"三套 AI 谁优先"变成
       "能力实现放在哪一层"。⚠ `native-local-runtime.js`（现 10750 行）仍是
@@ -510,7 +520,10 @@ Pi 真正不可替代的只剩一个角色：**同步中继**（永远在线、�
 - [ ] **Pi → Windows 推送**（第 17 条）：现在是 15 分钟拉一次
 - [ ] **同步服务优先级**：显式提高，别让夜间批处理拖慢
 - [ ] **启动器接同步与领任务**（Codex 已做启动器本体）
-- [ ] **「同步中」状态暴露给 AI**，防止启动阶段的否定性误答
+- [~] **「同步中」状态暴露给 AI**，防止启动阶段的否定性误答 ——
+      KG 这一份已做：`kg_mirror.load()` 必带新鲜度、`status().neverSynced`
+      区分"从没同步过"与"同步过但没有书"、缺副本抛 `MirrorMissing` 而不是
+      返回空图。其它数据域接入时照此办理
 - [ ] OCR/YOLO 产物补 GPU 标识与权重哈希（现有 provenance 已够用，模型换版本时才需要）
 - [x] ~~B 类 14 条：App 补齐能力~~ —— **已核实为空**，无需补（见第 19 条注）
 - [ ] **清理 `BW_FETCH_ROUTE_METHODS` 里从未被调用的 11 条**：它们让允许面
@@ -557,6 +570,15 @@ Pi 真正不可替代的只剩一个角色：**同步中继**（永远在线、�
   漏报三个工具、又把无关字符串当成工具名。要问它自己（`--self-test` / `tools/list`）
 - **`tests/reader_contract/` 已 125 个文件**，一次跑完接近 10 分钟命令上限，
   需分两批
+- **Direct 的消息上限是 256 KiB，不是 64 KiB**（`DirectBridgeContract
+  .MaximumMessageBytes` 与 `rc-computer-voice.js` 的 `MAX_MESSAGE_BYTES`
+  都是 262144）。曾按 64 KiB 写过 `ReaderQuery.MaximumResultBytes` 的理由。
+  数值（40 KiB）不必改，但**真正的约束是上下文预算不是帧限** ——
+  40 KiB 已约 12k token。⚠ 别据「上限是 256 KiB」去放宽：
+  TF309 的 Swift 侧一度仍是 64 KiB 且严格相等校验，两端版本会错开
+- **副本目录不要跟权威目录同名**：KG 副本落在 `state/kg-mirror/` 而非
+  `knowledge_graph/`。同名时哪天电脑侧也跑建图，只读副本会覆盖掉带掌握度的
+  权威文件 —— 而掌握度是唯一不能重算出来的那部分。路径本身就该说清它是什么
 - [ ] **安全排查**：照 OpenClaw 的攻击面查一遍
       （silent binding fallback、ClawJacked 式本地 WebSocket 爆破）
 
