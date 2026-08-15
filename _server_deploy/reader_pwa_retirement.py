@@ -30,8 +30,19 @@ RETIRED_PAGE_ENDPOINTS = frozenset({
     "pdf_reader.pdf_search_page",  # /pdf/search    全局搜索页
     "pdf_reader.epub_view",        # /pdf/epub/view EPUB 阅读器
     "pdf_reader.pdf_fav_view",     # /pdf/fav/view  收藏夹（物化成 EPUB 的那本）
-    "pdf_reader.html_view",        # /pdf/html/view 导入的 HTML/Markdown
 })
+
+# ⚠ `pdf_reader.html_view`(/pdf/html/view)**不在**退役名单里。
+#
+# 它有两种用法,共用一个端点:
+#   · `?file=__web__` —— 旧的网页阅读入口,已随更早那次退役关掉(见
+#     html_reader.py 里那两处,现在直接回退役说明)
+#   · `?file=<vault 里的 .md/.html>` —— **读 vault 里的真实书籍文件**
+#
+# 后者必须留着:App 的书库只认 pdf 和 epub(ios/BWReader/App 里
+# pathExtension 的判定只有这两种),扩展也不提供打开 vault 文件的入口。
+# 一并退役会让 .md/.html 书籍**没有任何途径可读** —— 那不是把能力挪走,
+# 是把它删掉。"PWA 彻底退役"指的是那套 PWA 阅读器界面,不是连内容一起断。
 
 _NOTICE_HTML = """<!doctype html>
 <meta charset="utf-8">
