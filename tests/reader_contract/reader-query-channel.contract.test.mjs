@@ -658,3 +658,110 @@ test("查词与生词标记的工具描述交代了对 Pi 的依赖", () => {
     "这会改变用户阅读器里的下划线和 Anki 的排程",
   );
 });
+
+// ── 网页宿主：AI 要能看到扩展在网页上做的高亮 ────────────────────────
+// 书籍高亮在 App 的本机库，网页高亮在扩展的 webHighlightsV1。同一个查询名
+// 落到不同宿主，各答各的 —— 谁都不在就回 unsupported，绝不去猜另一边：
+// 答错宿主的数据比答不上来更糟，因为它看起来是对的。
+function webQuery({ records = [], params = {}, host } = {}) {
+  const start = VOICE.indexOf("function _webHighlightsQuery(");
+  assert.notEqual(start, -1, "找不到网页高亮查询实现");
+  const context = {
+    String, Number, Array, Promise, JSON,
+    location: { href: "https://example.test/a" },
+    out: null,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(
+    `${balanced(VOICE, start)}
+     out = _webHighlightsQuery(
+       ${host ? "host" : "{ list: () => records }"},
+       ${JSON.stringify(params)});`,
+    Object.assign(context, { records, host }),
+  );
+  return context.out;
+}
+
+const WEB_RECORDS = [
+  { id: "wh_1", url: "https://example.test/a", text: "alpha 段落", exact: "alpha 段落",
+    prefix: "前文".repeat(20), suffix: "后文".repeat(20),
+    color: "#fff59d", note: "记一笔", kind: "note", time: 1000 },
+  { id: "wh_2", url: "https://example.test/a", text: "beta 段落", exact: "beta 段落",
+    prefix: "x".repeat(48), suffix: "y".repeat(48),
+    color: "#a5d8ff", note: "", kind: "note", time: 2000 },
+];
+
+test("网页高亮能被读到，按时间排序", async () => {
+  const value = await webQuery({ records: WEB_RECORDS });
+  assert.equal(value.surface, "web");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(value.highlights.map((h) => h.id))),
+    ["wh_1", "wh_2"],
+  );
+  assert.equal(value.matched, 2);
+  assert.equal(value.truncated, false);
+});
+
+test("不回锚定用的 prefix/suffix", async () => {
+  // 那是定位用的上下文片段，助手拿它做不了什么，却会让结果体积翻倍 ——
+  // 与书籍高亮不回 rects 同理。
+  const value = await webQuery({ records: WEB_RECORDS });
+  for (const item of value.highlights) {
+    assert.deepEqual(
+      Object.keys(item).sort(),
+      ["color", "id", "kind", "note", "text", "time"],
+    );
+  }
+});
+
+test("按文字过滤，忽略大小写", async () => {
+  const value = await webQuery({ records: WEB_RECORDS, params: { contains: "BETA" } });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(value.highlights.map((h) => h.id))), ["wh_2"],
+  );
+});
+
+test("装不下时截断并如实标注", async () => {
+  const many = Array.from({ length: 400 }, (_, index) => ({
+    id: `wh_${index}`, text: "x".repeat(300), color: "#fff59d",
+    note: "", kind: "note", time: index,
+  }));
+  const value = await webQuery({ records: many });
+  assert.equal(value.truncated, true);
+  assert.equal(value.matched, 400, "总数如实报出，助手才知道少了多少");
+  assert.ok(value.returned < value.matched);
+});
+
+test("读取失败如实报错，不返回空列表", async () => {
+  // 空列表会被读成「这个网页你没划过」，那是一句错的断言。
+  await assert.rejects(
+    webQuery({ host: { list() { throw new Error("storage unavailable"); } } }),
+    (error) => /storage unavailable/.test(String(error.message)),
+  );
+});
+
+test("两种宿主各答各的，都不在则 unsupported", () => {
+  const table = VOICE.slice(
+    VOICE.indexOf("var READER_QUERY_HANDLERS = {"),
+    VOICE.indexOf("function normalizeReaderQueryRequest("),
+  );
+  const branch = table.slice(table.indexOf("highlights: function"),
+    table.indexOf("notes: function"));
+  assert.match(branch, /_nativeReaderHighlights/, "书籍走 App 本机运行时");
+  assert.match(branch, /__bwWebHighlights/, "网页走扩展本地存储");
+  assert.match(branch, /return null;\s*\},?\s*$/m,
+    "两者都不在必须回 null（→ unsupported），不能猜另一边");
+});
+
+test("每个查询声明自己适用哪种界面", () => {
+  const QUERY_CS = readFileSync(new URL(
+    "../../extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderQuery.cs",
+    import.meta.url), "utf8");
+  const fn = QUERY_CS.slice(
+    QUERY_CS.indexOf("IsQueryForSurface"),
+    QUERY_CS.indexOf("internal static object Event("));
+  // 网页上问目录、在书里问网页锚点，都该在这里被拒，而不是走到执行侧才失败
+  assert.match(fn, /"highlights" => kind is "pdf" or "epub" or "web"/);
+  assert.match(fn, /"toc" => kind is "pdf"/);
+  assert.match(fn, /_ => false/, "未声明的组合一律拒绝");
+});

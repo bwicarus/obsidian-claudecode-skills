@@ -3245,7 +3245,7 @@ internal sealed class ReaderContextMcpServer
             || payload["contextStatus"]?.GetValue<string>() != "ready"
             || payload["activeReading"] is not JsonObject active
             || StringValue(active["kind"]) is not string kind
-            || kind is not ("pdf" or "epub")
+            || !ReaderQueryProtocol.IsQueryForSurface(query, kind)
             || StringValue(active["sourceInstanceId"])
                 is not string activeSource
             || !DirectBridgeContract.IsSafeId(activeSource)

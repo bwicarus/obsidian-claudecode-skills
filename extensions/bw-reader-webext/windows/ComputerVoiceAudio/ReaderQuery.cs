@@ -74,6 +74,28 @@ internal static class ReaderQueryProtocol
         value is "highlights" or "notes" or "search" or "toc"
             or "page-text" or "lookup";
 
+    // 每个查询各自声明适用哪种阅读界面。一刀切放开会让助手在网页上问目录、
+    // 在书里问网页锚点 —— 那些请求会走到执行侧才失败，错误信息也说不清缘由。
+    // 在这里拒绝，助手拿到的是"这个界面不支持"，而不是一次无从解释的失败。
+    //
+    // web = 浏览器扩展所在的普通网页；pdf/epub = App 里打开的书。
+    internal static bool IsQueryForSurface(string query, string kind) =>
+        query switch
+        {
+            // 高亮两边都有：书里在 App 的本机库，网页在扩展的 webHighlightsV1
+            "highlights" => kind is "pdf" or "epub" or "web",
+            // 便签：书里在 App 本机库，网页在扩展的 __bwDocumentNotes（scoped
+            // repository，同样不经 Pi）。网页侧的 handler 尚未接，接上后
+            // 这里改成三个都放行即可 —— 现在放行会让请求走到执行侧才失败。
+            "notes" => kind is "pdf" or "epub",
+            // 全书搜索、目录、按页取文，都以「书有页码结构」为前提
+            "search" or "page-text" => kind is "pdf" or "epub",
+            "toc" => kind is "pdf",
+            // 查词与界面无关
+            "lookup" => kind is "pdf" or "epub" or "web",
+            _ => false,
+        };
+
     internal static object Event(ReaderQueryRequest request) =>
         new
         {

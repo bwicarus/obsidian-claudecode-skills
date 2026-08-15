@@ -44,6 +44,9 @@ if (window.__bwPwaProviderOnly) return;
   var READER_REALTIME_OUTPUT_ACK = "reader-realtime-output-ack";
   var READER_VISUAL_DELIVERY_CONTRACT = "reader-visual-delivery/2";
   var READER_VISUAL_EVENT = "reader-visual-request";
+  var READER_QUERY_EVENT = "reader-query-request";
+  var READER_QUERY_RESPONSE = "reader-query";
+  var READER_QUERY_CONTRACT = "reader-query/1";
   var READER_VISUAL_CHUNK = "reader-visual";
   var READER_VISUAL_MAX_BYTES = 768 * 1024;
   var READER_VISUAL_CHUNK_CHARS = 48000;
@@ -3053,6 +3056,171 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
 
+  // 桥接问，本机答。名单在这里再卡一次 —— 协议侧已经卡过，但这一侧才是真正
+  // 去调函数的地方，只有这里的名单能保证"名单外的名字调不到任何东西"。
+  var READER_QUERY_HANDLERS = {
+    highlights: function (params) {
+      var target = window._nativeReaderHighlights;
+      if (typeof target !== "function") return null;
+      return target.call(window, {
+        page: params.page,
+        contains: params.contains,
+      });
+    },
+    notes: function (params) {
+      var target = window._nativeReaderNotes;
+      if (typeof target !== "function") return null;
+      return target.call(window, {
+        page: params.page,
+        contains: params.contains,
+      });
+    },
+    search: function (params) {
+      var target = window._nativeReaderSearch;
+      if (typeof target !== "function") return null;
+      return target.call(window, {
+        query: params.query,
+        limit: params.limit,
+      });
+    },
+    toc: function () {
+      var target = window._nativeReaderToc;
+      if (typeof target !== "function") return null;
+      return target.call(window);
+    },
+    "page-text": function (params) {
+      var target = window._nativeReaderPageText;
+      if (typeof target !== "function") return null;
+      return target.call(window, { page: params.page });
+    },
+    lookup: function (params) {
+      var target = window._nativeReaderLookupWord;
+      if (typeof target !== "function") return null;
+      return target.call(window, { word: params.word });
+    },
+  };
+
+  function normalizeReaderQueryRequest(rawPayload) {
+    var value = rawPayload;
+    exactObject(
+      value,
+      [
+        "contract",
+        "commandKind",
+        "correlation",
+        "sourceInstanceId",
+        "snapshotRevision",
+        "file",
+        "query",
+        "params",
+      ],
+      [],
+      "Reader 查询请求"
+    );
+    if (
+      value.contract !== READER_QUERY_CONTRACT ||
+      value.commandKind !== "query"
+    ) {
+      throw directError(
+        "Reader 查询请求合同无效",
+        "BW_READER_QUERY_SCHEMA",
+        false
+      );
+    }
+    var query = safeText(value.query, "query", 64, false);
+    if (!Object.prototype.hasOwnProperty.call(READER_QUERY_HANDLERS, query)) {
+      throw directError(
+        "Reader 查询名称不在名单内",
+        "BW_READER_QUERY_SCHEMA",
+        false
+      );
+    }
+    if (
+      !value.params ||
+      typeof value.params !== "object" ||
+      Array.isArray(value.params)
+    ) {
+      throw directError(
+        "Reader 查询参数无效",
+        "BW_READER_QUERY_SCHEMA",
+        false
+      );
+    }
+    if (
+      !Number.isSafeInteger(value.snapshotRevision) ||
+      value.snapshotRevision < 0
+    ) {
+      throw directError(
+        "Reader 查询 snapshotRevision 无效",
+        "BW_READER_QUERY_SCHEMA",
+        false
+      );
+    }
+    return {
+      correlation: safeId(value.correlation, "correlation"),
+      sourceInstanceId: safeId(value.sourceInstanceId, "sourceInstanceId"),
+      snapshotRevision: value.snapshotRevision,
+      file: safeText(value.file, "file", 4096, false),
+      query: query,
+      params: value.params,
+    };
+  }
+
+  DirectSocket.prototype._sendReaderQueryResult = function (
+    request,
+    status,
+    result,
+    truncated
+  ) {
+    return this.request(
+      READER_QUERY_RESPONSE,
+      {
+        sessionId: this.readerVisualSessionId,
+        correlation: request.correlation,
+        sourceInstanceId: request.sourceInstanceId,
+        snapshotRevision: request.snapshotRevision,
+        file: request.file,
+        query: request.query,
+        status: status,
+        result: result,
+        truncated: truncated,
+      },
+      REQUEST_TIMEOUT_MS
+    );
+  };
+
+  DirectSocket.prototype._handleReaderQuery = function (rawPayload) {
+    var request = normalizeReaderQueryRequest(rawPayload);
+    var self = this;
+    var handler = READER_QUERY_HANDLERS[request.query];
+    var work;
+    try {
+      work = handler(request.params);
+    } catch (error) {
+      work = Promise.reject(error);
+    }
+    // 界面做不到跟这次没答上来，是两种不同的事实。都答成空列表，助手就会
+    // 替用户断定「你没有划过」—— 宁可让它知道没答上来。
+    if (work === null) {
+      this._sendReaderQueryResult(request, "unsupported", {}, false)
+        .catch(function () {});
+      return;
+    }
+    Promise.resolve(work).then(function (value) {
+      var payload = value && typeof value === "object" ? value : {};
+      return self._sendReaderQueryResult(
+        request,
+        "ok",
+        payload,
+        payload.truncated === true
+      );
+    }).catch(function () {
+      return self._sendReaderQueryResult(request, "unavailable", {}, false);
+    }).catch(function () {
+      // 回传本身失败时由 Windows 侧的超时收尾，这里不重试也不再报第二次。
+    });
+  };
+
   DirectSocket.prototype._handleReaderVisual = function (rawPayload) {
     var request = normalizeReaderVisualRequest(rawPayload);
     var self = this;
@@ -3151,6 +3319,10 @@ if (window.__bwPwaProviderOnly) return;
         }
         if (message.event === READER_VISUAL_EVENT) {
           this._handleReaderVisual(message.payload);
+          return;
+        }
+        if (message.event === READER_QUERY_EVENT) {
+          this._handleReaderQuery(message.payload);
           return;
         }
         if (message.event === READER_REALTIME_OUTPUT_EVENT) {

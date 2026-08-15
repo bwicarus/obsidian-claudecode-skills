@@ -1805,17 +1805,87 @@ if (window.__bwPwaProviderOnly) return;
         // nativeInterfaceSurface 分流 PDF/EPUB，并再次校验一次性编号。
         var _caFn = String(p.fn || '');
         var _caArgs = Array.isArray(p.args) ? p.args : [];
-        var _caId = _caArgs.length === 1 ? String(_caArgs[0] || '') : '';
-        if (_caFn !== '_nativeReaderUndoLast' || !/^rundo_[0-9a-f]{24}$/.test(_caId)) {
+        // 显式映射，仍不动态分派：每个入口自带参数校验，且只认这张表里的名字。
+        // 表按名字取函数，而不是按消息里的字符串去 window 上找 —— 后者会把
+        // 一条跨进程消息升级成"调用页面任意函数"。
+        var _caTarget = null;
+        var _caCall = null;
+        if (_caFn === '_nativeReaderUndoLast') {
+          var _caId = _caArgs.length === 1 ? String(_caArgs[0] || '') : '';
+          if (!/^rundo_[0-9a-f]{24}$/.test(_caId)) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window._nativeReaderUndoLast;
+          _caCall = function (target) { return target.call(window, _caId); };
+        } else if (_caFn === '_nativeReaderCreateNote') {
+          var _caNote = _caArgs.length === 1 && _caArgs[0] &&
+            typeof _caArgs[0] === 'object' && !Array.isArray(_caArgs[0])
+            ? _caArgs[0] : null;
+          var _caText = _caNote ? String(_caNote.text == null ? '' : _caNote.text) : '';
+          if (!_caNote || !_caText.trim() || _caText.length > 4000) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window._nativeReaderCreateNote;
+          _caCall = function (target) {
+            return target.call(window, { text: _caText });
+          };
+        } else if (_caFn === '_nativeReaderEditNote') {
+          var _caEditArg = Array.isArray(p.args) ? p.args[0] : null;
+          var _caEditId = _caEditArg && typeof _caEditArg === 'object'
+            ? String(_caEditArg.id == null ? '' : _caEditArg.id) : '';
+          var _caEditText = _caEditArg && typeof _caEditArg === 'object'
+            ? String(_caEditArg.text == null ? '' : _caEditArg.text) : '';
+          if (!/^[A-Za-z0-9_-]{1,64}$/.test(_caEditId) ||
+              !_caEditText.trim() || _caEditText.length > 4000) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window._nativeReaderEditNote;
+          _caCall = function (target) {
+            return target.call(window, { id: _caEditId, text: _caEditText });
+          };
+        } else if (_caFn === '_nativeReaderMakeNote') {
+          var _caMakeArg = Array.isArray(p.args) ? p.args[0] : null;
+          var _caMakeText = _caMakeArg && typeof _caMakeArg === 'object'
+            ? String(_caMakeArg.text == null ? '' : _caMakeArg.text) : '';
+          var _caMakeTitle = _caMakeArg && typeof _caMakeArg === 'object'
+            ? String(_caMakeArg.title == null ? '' : _caMakeArg.title) : '';
+          if (!_caMakeText.trim() || _caMakeText.length > 240000 ||
+              _caMakeTitle.length > 240) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window._nativeReaderMakeNote;
+          _caCall = function (target) {
+            return target.call(window, {
+              title: _caMakeTitle,
+              text: _caMakeText
+            });
+          };
+        } else if (_caFn === '_nativeReaderMarkVocabulary') {
+          var _caVocabArg = Array.isArray(p.args) ? p.args[0] : null;
+          var _caVocabWord = _caVocabArg && typeof _caVocabArg === 'object'
+            ? String(_caVocabArg.word == null ? '' : _caVocabArg.word) : '';
+          var _caVocabMark = _caVocabArg && typeof _caVocabArg === 'object'
+            ? String(_caVocabArg.mark == null ? '' : _caVocabArg.mark) : '';
+          if (!_caVocabWord.trim() || _caVocabWord.length > 128 ||
+              (_caVocabMark !== 'known' && _caVocabMark !== 'unknown')) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window._nativeReaderMarkVocabulary;
+          _caCall = function (target) {
+            return target.call(window, {
+              word: _caVocabWord,
+              mark: _caVocabMark
+            });
+          };
+        } else {
           throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
         }
-        var _caTarget = window._nativeReaderUndoLast;
         if (typeof _caTarget !== 'function') {
           throw new Error(
             'BW_READER_CLIENT_ACTION_UNAVAILABLE:' + _caFn
           );
         }
-        work = Promise.resolve(_caTarget.call(window, _caId));
+        work = Promise.resolve(_caCall(_caTarget));
       } else {
         throw new Error('BW_READER_REALTIME_OUTPUT_KIND_UNSUPPORTED');
       }
