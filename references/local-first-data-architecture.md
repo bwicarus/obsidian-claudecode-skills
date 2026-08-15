@@ -500,7 +500,10 @@ Pi 真正不可替代的只剩一个角色：**同步中继**（永远在线、�
       `scripts/lib/kg_mirror.py` 是**唯一读取入口**（强制带新鲜度）。
       ⚠ 副本落在 `state/kg-mirror/` 而**不是** `knowledge_graph/` ——
       后者是权威目录名，同名等于给"副本覆盖掉掌握度"埋雷。
-      ⏳ 未部署（等 Codex 那边一起出）
+      ✅ **已部署（2026-08-16）**：`/api/kg/index` 在 Pi 上返回 200。
+      ⚠ Windows 侧首次拉取还差一步——`scripts/sync_kg_from_pi.py` 需要
+      `BW_PI_TOKEN`，那个 token 要在 Pi 的 `/profile/` 页面生成（凭据只能
+      由用户自己建）。设好后跑一次即可，之后副本落在 `state/kg-mirror/`
 - [x] ~~谁是主~~ —— **已由产品边界解决（2026-08-15）**：iPad 上 App 管书、
       扩展管网页、Pi 只提供服务端能力与同步。问题从"三套 AI 谁优先"变成
       "能力实现放在哪一层"。⚠ `native-local-runtime.js`（现 10750 行）仍是
