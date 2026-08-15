@@ -524,6 +524,32 @@ internal sealed class ReaderContextSourceRouter
         return false;
     }
 
+    // 找不到租约时，桥自己知道一件能立刻分清病因的事：它到底注册了几个来源。
+    //
+    //   一个都没有 → 那个页面从未完成 visual-register(连接没建/握手没走完)
+    //   有别的     → 注册是通的,但注册下来的来源跟快照报的不是同一个
+    //
+    // 两者的修法完全不同,而「来源不在线」这句话对它们一视同仁。快照里
+    // 明明有来源标识却取不到图时,分不清这两种就只能靠猜。
+    //
+    // 只回数量和前 8 位:够区分是谁,不把完整标识写进会流向模型的错误里。
+    internal string DescribeRegisteredSources()
+    {
+        lock (_gate)
+        {
+            if (_sources.Count == 0)
+            {
+                return "桥上当前没有任何已注册的来源";
+            }
+            IEnumerable<string> heads = _sources.Keys
+                .OrderBy(key => key, StringComparer.Ordinal)
+                .Take(4)
+                .Select(key => key.Length > 8 ? key[..8] + "…" : key);
+            return $"桥上已注册 {_sources.Count} 个来源(" +
+                string.Join(", ", heads) + ")，其中没有这一个";
+        }
+    }
+
     internal async Task SendAsync(
         ReaderContextSourceLease lease,
         object message,
@@ -599,9 +625,13 @@ internal sealed class ReaderVisualDeliveryBroker
             || lease is null
         )
         {
+            // 「不在线」只说了结果。快照里明明带着来源标识却取不到图时,
+            // 真正要分清的是:那个页面从没注册过,还是注册下来的是别人。
+            // 桥自己知道答案,不说出来就只能靠猜。
             throw new ReaderVisualDeliveryException(
                 "BW_READER_VISUAL_SOURCE_OFFLINE",
-                "快照指定的 Reader 页面来源当前不在线",
+                "快照指定的 Reader 页面来源当前不在线（"
+                    + _router.DescribeRegisteredSources() + "）",
                 retryable: true);
         }
         PendingDelivery pending = new(request, lease);

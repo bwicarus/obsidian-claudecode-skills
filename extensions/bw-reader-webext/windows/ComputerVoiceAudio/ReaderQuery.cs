@@ -337,7 +337,8 @@ internal sealed class ReaderQueryBroker
         {
             throw Failure(
                 "BW_READER_QUERY_SOURCE_OFFLINE",
-                "快照指定的 Reader 页面来源当前不在线",
+                "快照指定的 Reader 页面来源当前不在线（"
+                    + _router.DescribeRegisteredSources() + "）",
                 retryable: true);
         }
         PendingQuery pending = new(request, lease);
