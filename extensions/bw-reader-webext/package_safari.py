@@ -66,8 +66,6 @@ BACKGROUND_SCRIPTS = (
     "vendor/reader-runtime-document-note-repository.js",
     "vendor/reader-runtime-interaction-policy.js",
     "vendor/reader-runtime-vocabulary-state.js",
-    "src/route-destination.js",
-    "src/local-endpoint.js",
     "background.js",
 )
 BACKGROUND_IMPORTS = BACKGROUND_SCRIPTS[:-1]

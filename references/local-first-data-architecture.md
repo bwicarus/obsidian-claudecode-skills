@@ -431,79 +431,47 @@ iOS App 与浏览器扩展提供，Pi 不再提供一份 App 已经能提供的�
 - 按 endpoint 拦不按 path：endpoint 覆盖同一处理器的所有 URL 变体，按 path 会漏
 - **只关页面，`/pdf/api/*` 一律不动** —— App 与扩展还要用那些服务端能力
 
-### 19. iPad 上扩展只依赖 App，不依赖 Pi
+### 19. iPad 上扩展只管网页，书籍完全归 App
 
-**扩展还在调 Pi，恰恰说明扩展没达到要求。** 同一份高亮，App 存在 IndexedDB、
-扩展写去 Pi —— 用户在扩展里划的线，App 里看不见。这是**用户可见的数据割裂**。
+**产品边界（2026-08-15 拍板）**：iPad 上**扩展在书籍阅读器场景里没有角色**。
+真书由 App 全权负责，扩展只管普通网页。其它浏览器（Windows Chrome 等）
+没有 App 依附，等以后单独做新扩展。
 
-方向：iPad 上扩展改成读写宿主 App 的数据。其它浏览器（Windows Chrome 等）
-没有 App 依附，**等以后单独做新扩展**，现在只专注 iPad。
+**这条推翻了同日早些时候的一次尝试**，记录始末以免重来：
 
-**扩展依赖 Pi 的 54 条，分三类**（`owner` × 扩展是否在调）：
+曾判断「扩展把高亮写去 Pi、App 的在 IndexedDB，两份数据割裂」，据此做了
+路由分流（10 条 App-owned 路由改指向 App 本机服务）+ 落点机制
+（App 经 App Group 把端口与 capability token 交给扩展）。**已全部撤回**。
 
-| 类 | 条数 | 处置 |
-|---|---|---|
-| **A** App 已有实现 | 10 | **改指向 App**，不需要新写能力 ✅ 已完成 |
-| ~~**B** App 缺此能力~~ | ~~14~~ → **0** | **这一类实际是空的**，见下 |
-| **C** 本就该服务端 | 30 | 保持，走普通联网 API |
+撤回原因是那个割裂在 iPad 的网页场景下**并不存在**：
 
-> **B 类是误判，已纠正（2026-08-15）。** 逐条核实后：
-> - **11 条只出现在 `background.js` 的允许清单里、扩展从没调用过**
->   （`ai-stream-result`、`job-status`、`lookup-event`、`review-answer`、
->   `run-save`、`snippets-to-async`、`sync-batch`、`favorites`、
->   `phrase-mark`、`phrases`、`review-queue`）
-> - **2 条只在 `hostMode === 'html'` 下触发**（`html-highlights`、
->   `context-sync`），即 PWA 的 HTML 阅读器 → **随 PWA 一起退役**
-> - **1 条本就该打 Pi**：`ping` 是探测 Pi 可达性的，属于 C 类
->
-> 错因：把「扩展源码里出现过这个路径」当成了「扩展在用它」。
-> `BW_FETCH_ROUTE_METHODS` 是**允许清单**（若有人请求则放行哪些方法），
-> 不是调用记录。
->
-> 其中一条判断反得尤其彻底：曾断言「`html-highlights` 是扩展独有场景、
-> App 没有对应物、应优先做」。实际**扩展在普通网页上的高亮早已完全本地化** ——
-> `src/web-highlights.js`，存 `webHighlightsV1`，exact quote + prefix/suffix +
-> DOM 文本位置复合锚，渲染走 CSS Highlights API，一次都不碰 Pi。
->
-> **结论：iPad 上「扩展只依赖 App」这个目标，A 类改完就基本达成，
-> 不需要先在 App 里补一批新能力。**
+- 扩展在普通网页上的高亮早已完全本地化 —— `src/web-highlights.js`，
+  存 `webHighlightsV1`，exact quote + prefix/suffix + DOM 位置复合锚，
+  CSS Highlights API 渲染，不碰任何 `/pdf/api/*`
+- 那 10 条的调用点在 `src/pwa-adapter.js`（403 行）与 `src/shell.js`（623 行），
+  两者第一行就是门：`if (!RC || !RC.use || !bridge) return;`
+  需要 `window.__bwPwaBridge` / `__bwRoot`，**普通网页两者都没有**。
+  这 1000 余行在 iPad 网页场景下一行都不执行
 
-A 类：`highlights` / `epub-highlights` / `notes` / `note-composite` /
-`reading-pos` / `userpages` / `video-player-prefs` / `toc` / `to-note` / `img-proxy`
+**错因（同日第二次犯同一个错）**：把「源码里出现这条路径」当成「它会被执行」。
+第一次是把 `BW_FETCH_ROUTE_METHODS`（允许清单）当成调用记录；
+第二次是没检查模块的激活条件。**判断依赖必须看两样：真实调用点，
+以及那段代码在目标场景下会不会运行。**
 
-**⚠ 退役判据要两个条件同时成立**：`owner == local`（App 能做）**且**扩展不再调它。
-只看 manifest 会误删 —— 那个字段的含义是"App 有本地实现"，不是"没人需要 Pi 那份"。
-（曾据此列出 34 条"可移走"，其中 4 条扩展正在用，照做会当场弄坏扩展的高亮与便签。）
+**遗留待办**：`pwa-adapter.js` / `shell.js` 里的书籍分支是死代码，应整块退役。
+它们不执行所以无害，但留着会让下一个人重复上面的误判。
 
-### 20. 落点机制与硬失败
+### 20. ~~落点机制与硬失败~~（已撤回）
 
-App 把本机服务落点（端口 + capability token）写进 **App Group**
-`group.space.bwicarus.bwreader2`，扩展经 native message 的 `capabilities` 取用。
+App 经 App Group 向扩展公布本机服务落点、扩展硬失败不回落 Pi ——
+这套设计**随第 19 条一起撤回**，因为它服务的场景不存在。
 
-已实现：`ios/BWReader/Shared/ReaderLocalEndpointShare.swift`（发布）、
-`Extension/SafariWebExtensionHandler.swift`（返回）、
-`extensions/bw-reader-webext/src/local-endpoint.js`（解析）、
-`src/route-destination.js`（分流表）、`background.js` 闸门接线。
+其中两条判断本身仍然成立，将来若真需要扩展访问 App 数据可以复用：
 
-**硬失败，不回落 Pi。** 回落看起来友好，实际是把割裂藏起来：用户以为存上了，
-换个入口就不见了，而且再也想不起是哪一次存到了另一边。宁可当场说
-"请先打开 BW Reader"。有一条测试直接扫源码，**禁止 local-endpoint.js 里出现
-任何 Pi 地址** —— 一旦有，某天就会有人接一条回落分支。
-
-**三种拿不到落点的原因必须分开**，因为修法完全不同：
-
-| 状态 | 谁能解决 |
-|---|---|
-| `app-not-running` | 用户自己（打开 App） |
-| `unavailable` | 要看日志（App Group 配置） |
-| `missing`（旧版 App 无此字段） | 更新 App |
-
-**落点带 pid / startedAt**：App 重启换端口与 token，旧值会让请求一路 403，
-而 403 看起来像"权限配错了"，排查方向完全错。
-
-**分流表是显式白名单，不做前缀匹配**：前缀匹配会让新增路由默默落进某一边，
-落错边的后果是数据写进另一份存储，要等用户发现"东西不见了"。
-未列举的**默认走 Pi** —— 猜成 App 会打到一个可能没实现该路由的本机服务上。
+- **硬失败优于回落**：回落看起来友好，实际是把割裂藏起来 —— 用户以为存上了，
+  换个入口就不见了。宁可当场说「请先打开 App」
+- **拿不到落点的三种原因必须分开**（App 没开 / App Group 配置坏 / 旧版 App
+  无此字段），因为三者分别指向：用户自己开 App、看日志、更新 App
 
 ### 21. Pi 的 CLI 包装成 API，消除「Pi 网关」这个概念
 
