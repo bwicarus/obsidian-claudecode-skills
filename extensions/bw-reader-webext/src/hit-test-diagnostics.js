@@ -52,16 +52,65 @@
     if (!raf) raf = requestAnimationFrame(render);
   }
 
-  function shortPath(e) {
-    const cp = typeof e.composedPath === "function" ? e.composedPath() : [];
-    return cp.slice(0, 4).map((n) => {
-      if (!n || !n.nodeType) return String(n).slice(0, 12);
-      if (n.nodeType !== 1) return "#text";
-      const id = n.id ? "#" + n.id : "";
-      const cls = n.className && typeof n.className === "string"
-        ? "." + n.className.split(/\s+/).slice(0, 2).join(".") : "";
-      return n.tagName.toLowerCase() + id + cls;
-    }).join(">");
+  // node → 可读片段。ShadowRoot 的 nodeType 是 11(DOCUMENT_FRAGMENT_NODE),
+  // 不是 1——第一版把它跟真正的文本节点混着标成 "#text",第一次真机截图里
+  // 那个看着莫名其妙的 "#text" 就是它,不是路径里真出现了文本节点。
+  function nodeLabel(n) {
+    if (!n) return String(n);
+    if (n instanceof ShadowRoot) return "[shadow-root]";
+    if (!n.nodeType) return String(n).slice(0, 12);
+    if (n.nodeType !== 1) return "#text";
+    const id = n.id ? "#" + n.id : "";
+    const cls = n.className && typeof n.className === "string"
+      ? "." + n.className.split(/\s+/).slice(0, 2).join(".") : "";
+    return n.tagName.toLowerCase() + id + cls;
+  }
+
+  function shortPath(cp) {
+    return cp.slice(0, 4).map(nodeLabel).join(">");
+  }
+
+  // composedPath() 里第一个真正的元素节点——不是 ShadowRoot、不是 document——
+  // 就是浏览器自己判定"事件目标"的那个东西。它是不是好使,看它自己的
+  // getBoundingClientRect() 是否真的包住了这次点击的坐标。
+  function firstElement(cp) {
+    for (const n of cp) {
+      if (n && n.nodeType === 1) return n;
+    }
+    return null;
+  }
+
+  // 命中点核实,两条独立证据:
+  //   ① 目标自己的可点区域是否真的盖住了这次点击——用户说"贴着按钮下边缘
+  //      才能点中",这条直接把这句话量化成像素级的 dx/dy。
+  //   ② 从纯几何角度(不看事件分发,只看渲染树)穿透 Shadow DOM 逐层
+  //      elementFromPoint,得到的元素跟浏览器判定的目标是不是同一个——
+  //      不一致就说明是"分发算的目标"和"看起来在那儿的元素"根本不是一回事。
+  function rectCheck(target, x, y) {
+    if (!target || typeof target.getBoundingClientRect !== "function") {
+      return "no-rect-target";
+    }
+    const r = target.getBoundingClientRect();
+    const inside = x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    if (inside) return "inside-own-rect";
+    // 到最近边的有向距离:正值=点在矩形外该方向那一侧。
+    const dx = x < r.left ? r.left - x : (x > r.right ? x - r.right : 0);
+    const dy = y < r.top ? r.top - y : (y > r.bottom ? y - r.bottom : 0);
+    return "OUTSIDE-own-rect dx=" + fmt(dx) + " dy=" + fmt(dy)
+      + " rect=" + fmt(r.left) + "," + fmt(r.top) + "-" + fmt(r.right) + "," + fmt(r.bottom);
+  }
+
+  function deepElementFromPoint(x, y) {
+    let el;
+    try { el = document.elementFromPoint(x, y); } catch (_) { return null; }
+    let guard = 0;
+    while (el && el.shadowRoot && guard++ < 8) {
+      let inner;
+      try { inner = el.shadowRoot.elementFromPoint(x, y); } catch (_) { break; }
+      if (!inner || inner === el) break;
+      el = inner;
+    }
+    return el;
   }
 
   function inkDiag() {
@@ -71,27 +120,26 @@
     } catch (_) { return null; }
   }
 
-  // 命中点核实:visually-at 与 elementFromPoint 是否指向同一元素。二者不一致
-  // 直接证明是几何/视口错位而不是事件被业务代码吞掉——这是最想要的那条证据。
-  function hitCheck(x, y) {
-    let el;
-    try { el = document.elementFromPoint(x, y); } catch (_) { return "elementFromPoint 异常"; }
-    if (!el) return "elementFromPoint=null(命中点落在可视区域外)";
-    const id = el.id ? "#" + el.id : "";
-    const inShadowRoot = !!(el.getRootNode && el.getRootNode() instanceof ShadowRoot);
-    return el.tagName.toLowerCase() + id
-      + (inShadowRoot ? "[in-shadow]" : "[light-dom]");
-  }
-
   function record(kind, e) {
     const x = e.clientX ?? (e.touches && e.touches[0] && e.touches[0].clientX);
     const y = e.clientY ?? (e.touches && e.touches[0] && e.touches[0].clientY);
-    const at = typeof x === "number" ? hitCheck(x, y) : "no-coords";
+    const cp = typeof e.composedPath === "function" ? e.composedPath() : [];
+    const target = firstElement(cp);
     const ink = inkDiag();
-    let line = kind + " path=" + shortPath(e)
+    let line = kind + " path=" + shortPath(cp)
       + " type=" + (e.pointerType || (e.touches ? "touch-legacy" : "-"))
-      + " xy=" + fmt(x) + "," + fmt(y)
-      + " hit=" + at;
+      + " xy=" + fmt(x) + "," + fmt(y);
+    if (typeof x === "number") {
+      line += " " + rectCheck(target, x, y);
+      const deep = deepElementFromPoint(x, y);
+      // 分发目标(target,来自 composedPath)跟纯几何穿透算出来的元素
+      // 不是同一个,才值得单独报一行——多数时候两者一致,不必每条都印。
+      if (deep && target && deep !== target) {
+        line += " geomHit=" + nodeLabel(deep) + "≠dispatchTarget";
+      }
+    } else {
+      line += " no-coords";
+    }
     if (ink) {
       line += " ink[strokes=" + ink.strokesLen
         + " tap=" + ink.touchTapActive
