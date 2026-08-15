@@ -1903,6 +1903,17 @@ if (window.__bwPwaProviderOnly) return;
               note: _caWebNote
             });
           };
+        } else if (_caFn === '_bwWebNoteCreate') {
+          var _caWnArg = Array.isArray(p.args) ? p.args[0] : null;
+          var _caWnText = _caWnArg && typeof _caWnArg === 'object'
+            ? String(_caWnArg.text == null ? '' : _caWnArg.text) : '';
+          if (!_caWnText.trim() || _caWnText.length > 4000) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window._bwWebNoteCreate;
+          _caCall = function (target) {
+            return target.call(window, { text: _caWnText });
+          };
         } else {
           throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
         }

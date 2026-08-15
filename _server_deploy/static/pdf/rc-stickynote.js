@@ -1869,6 +1869,37 @@
       '便签已创建(所在页尚未渲染,渲染后出现)'
     );
   }
+  /* 带内容地在视野中央建一张便签 —— 给助手用。
+   *
+   * 助手没有指针，指不出"贴在哪"，但它知道要写什么。所以位置由这里用
+   * 与用户点"新建便签"完全相同的落点逻辑决定（中央优先，落在页缝/空白
+   * 就试附近候选），内容由调用方给。
+   *
+   * 走 createRecord 而不是另写一条持久化：便签的锚定、代次校验、渲染与
+   * 失败提示都在那条路上，绕过去就会得到一张存下来但不显示、
+   * 或者显示了却没存的便签。
+   */
+  function createAtCenterWithText(text) {
+    var body = String(text == null ? '' : text);
+    if (!body.trim()) { toastMsg('便签内容为空'); return false; }
+    if (body.length > 4000) { toastMsg('便签内容过长'); return false; }
+    if (!O || !O.anchorFromPoint) { toastMsg('当前界面不支持便签'); return false; }
+    var w = window.innerWidth || 1024, h = window.innerHeight || 768;
+    var cands = [[w / 2, h / 2], [w / 2, h * 0.42], [w / 2, h * 0.58], [w / 2, h * 0.33], [w / 2, h * 0.66], [w * 0.4, h / 2], [w * 0.6, h / 2]];
+    var anchor = null;
+    for (var i = 0; i < cands.length && !anchor; i++) {
+      try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {}
+    }
+    // 落不下就说出来。悄悄不建的话，助手会以为写成功了并这样告诉用户。
+    if (!anchor) { toastMsg('这里放不了便签(把页面滚到正文上再试)'); return false; }
+    createRecord(
+      anchor,
+      { color: DEFAULT_COLOR, w: 260, h: 180, text: body },
+      '便签已创建(所在页尚未渲染,渲染后出现)'
+    );
+    return true;
+  }
+
   function createAtCenter() {
     if (!O || !O.anchorFromPoint) return;
     var w = window.innerWidth || 1024, h = window.innerHeight || 768;
@@ -2119,6 +2150,7 @@
     createAt: createAt,
     // 视野中央建默认便签(顶栏 🗒 按钮入口;经 opts.anchorFromPoint 解析,页缝自动就近重试)
     createAtCenter: createAtCenter,
+    createAtCenterWithText: createAtCenterWithText,
     // 阶段 B:拖放建视频便签(助手视频卡长按拖到书页 → 该屏幕点建带 video 的便签)
     createVideoAt: createVideoAt,
     createCardAt: createCardAt,   // 卡片便签(制卡卡 📌 钉页 / 真机拖出复用)

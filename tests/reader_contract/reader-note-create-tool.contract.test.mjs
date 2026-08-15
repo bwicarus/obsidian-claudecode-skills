@@ -533,3 +533,80 @@ test("工具声明为非幂等，并说明与书籍工具的分工", () => {
   assert.match(prose, /worse than none/,
     "要说明定位失败时为何不做近似匹配");
 });
+
+// ── 网页便签（AI 在普通网页上贴）──────────────────────────────────
+// 与网页高亮同一条原则的另一面：助手没有指针，指不出"贴在哪"，但知道要写什么。
+// 位置由页面用与用户点「新建便签」完全相同的落点逻辑决定。
+const STICKY = read("_server_deploy/static/pdf/rc-stickynote.js");
+const WEBNOTES = read("extensions/bw-reader-webext/src/web-notes.js");
+
+test("带内容创建复用既有的落点与持久化，不另写一条", () => {
+  const fn = STICKY.slice(
+    STICKY.indexOf("function createAtCenterWithText("),
+    STICKY.indexOf("function createAtCenter()"),
+  );
+  assert.match(fn, /createRecord\(/,
+    "绕过 createRecord 会得到一张存了不显示、或显示了没存的便签");
+  assert.match(fn, /anchorFromPoint/, "落点逻辑与用户新建便签一致");
+  assert.match(fn, /text: body/, "内容要真的传下去");
+});
+
+test("落不下时出声并返回 false，不静默不建", () => {
+  const fn = STICKY.slice(
+    STICKY.indexOf("function createAtCenterWithText("),
+    STICKY.indexOf("function createAtCenter()"),
+  );
+  // 提示语里本身带括号，所以匹配「出声 + 返回 false」这两件事，
+  // 而不是提示语的具体写法。
+  assert.match(fn, /if \(!anchor\) \{ toastMsg\(/,
+    "落不下必须出声：悄悄不建的话，助手会以为成功并这样告诉用户");
+  assert.match(fn, /放不了便签[\s\S]{0,40}return false;/,
+    "并且要返回 false，让调用方知道没建成");
+  assert.match(fn, /便签内容为空/);
+  assert.match(fn, /便签内容过长/);
+});
+
+test("身份未就绪时拒绝，不写到错的文档下", () => {
+  const fn = WEBNOTES.slice(WEBNOTES.indexOf("async createWithText("));
+  assert.match(fn, /currentIdentity.*boundedRefresh/s);
+  assert.match(fn, /throw new Error\('网页便签仓库尚未就绪'\)/,
+    "身份没拿到就写，便签会落到别的文档下面");
+});
+
+test("执行侧只把文本交给受信入口", async () => {
+  const seen = [];
+  const context = dispatch({
+    fn: "_bwWebNoteCreate",
+    args: [{ text: "记一条", x: 100, y: 200, anchor: { fake: true } }],
+    host: { _bwWebNoteCreate: (input) => { seen.push(input); return "ok"; } },
+  });
+  assert.equal(context.thrown, null);
+  await context.work;
+  assert.deepEqual(JSON.parse(JSON.stringify(seen)), [{ text: "记一条" }],
+    "夹带的坐标必须被丢弃");
+});
+
+test("空内容与超长拒绝，不触碰宿主", () => {
+  for (const text of ["", "  ", "x".repeat(4001)]) {
+    let called = false;
+    const context = dispatch({
+      fn: "_bwWebNoteCreate", args: [{ text }],
+      host: { _bwWebNoteCreate: () => { called = true; } },
+    });
+    assert.equal(called, false);
+    assert.match(String(context.thrown && context.thrown.message),
+      /CLIENT_ACTION_INVALID:_bwWebNoteCreate/);
+  }
+});
+
+test("工具已注册，声明非幂等并指明书里该用哪个", () => {
+  assert.match(BRIDGE, /"_bwWebNoteCreate"/);
+  assert.match(BRIDGE, /Exact\(webNote, "text"\)/);
+  assert.match(MCP, /"reader_web_note"/);
+  const start = MCP.indexOf('["name"] = WebNoteToolName');
+  const prose = MCP.slice(start, start + 3200).replace(/"\s*\+\s*"/g, "");
+  assert.match(prose, /\["idempotentHint"\] = false/,
+    "重试会留下两张便签");
+  assert.match(prose, /reader_note_create/, "书里该用另一个工具");
+  assert.match(prose, /no pointer/, "要说明为什么不收位置");
+});

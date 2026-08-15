@@ -1519,6 +1519,7 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
         "reader_visual_image",
         "reader_browser_control",
         "reader_highlight_range",
+        "reader_web_note",
         "reader_web_highlight",
         "reader_mark_vocab",
         "reader_make_note",

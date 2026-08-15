@@ -200,7 +200,21 @@
       return RC.stickynote.createAtCenter();
     },
     reposition,
-    refreshIdentity: () => boundedRefresh()
+    refreshIdentity: () => boundedRefresh(),
+    /* 带内容创建 —— 给助手用。身份未就绪时明确失败：便签要落进当前文档的
+     * scoped repository，身份没拿到就写，会落到错的文档下面。 */
+    async createWithText(text){
+      if(!currentIdentity && !(await boundedRefresh()))
+        throw new Error('网页便签仓库尚未就绪');
+      return RC.stickynote.createAtCenterWithText(text);
+    }
+  };
+
+  // 受信入口：桥接的 client-action 只认这个名字，经门面转一道。
+  window._bwWebNoteCreate = function (payload) {
+    return window.__bwWebNotes.createWithText(
+      payload && typeof payload === 'object' ? payload.text : ''
+    );
   };
   RC.actions.bind(
     'note.create',

@@ -27,6 +27,7 @@ internal sealed class ReaderContextMcpServer
     internal const string LookupToolName = "reader_lookup_word";
     internal const string MarkVocabToolName = "reader_mark_vocab";
     internal const string WebHighlightToolName = "reader_web_highlight";
+    internal const string WebNoteToolName = "reader_web_note";
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
@@ -655,6 +656,43 @@ internal sealed class ReaderContextMcpServer
                     + "or stale-revision ranges and never falls back to text "
                     + "search. Do not retry an unknown mutation outcome.",
                 ["inputSchema"] = BuildHighlightRangeArgumentsSchema(),
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = WebNoteToolName,
+                ["description"] =
+                    "Pin a sticky note onto the web page the user is reading. "
+                    + "Give only the text: the page places it where a user "
+                    + "pressing New Note would get it, because you have no "
+                    + "pointer and cannot say where. Fails plainly if there "
+                    + "is nowhere to anchor - scrolled onto blank space, for "
+                    + "instance - rather than silently doing nothing, since "
+                    + "you would otherwise tell the user it was saved. For "
+                    + "books use reader_note_create instead. Do not retry an "
+                    + "unknown outcome: a second attempt leaves two notes.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["text"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 4000,
+                            ["description"] = "The note's contents.",
+                        },
+                    },
+                    ["required"] = new JsonArray { "text" },
+                    ["additionalProperties"] = false,
+                },
                 ["annotations"] = new JsonObject
                 {
                     ["readOnlyHint"] = false,
@@ -1745,6 +1783,40 @@ internal sealed class ReaderContextMcpServer
                 id,
                 "lookup",
                 new JsonObject { ["word"] = lookupWord },
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == WebNoteToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            string webNoteText = arguments.ValueKind == JsonValueKind.Object
+                && arguments.TryGetProperty("text", out JsonElement webNoteValue)
+                && webNoteValue.ValueKind == JsonValueKind.String
+                ? webNoteValue.GetString() ?? string.Empty
+                : string.Empty;
+            if (string.IsNullOrWhiteSpace(webNoteText)
+                || webNoteText.Length > 4_000)
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid web note text",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            await SendReaderOutputAsync(
+                id,
+                "client-action",
+                new JsonObject
+                {
+                    ["fn"] = "_bwWebNoteCreate",
+                    ["args"] = new JsonArray
+                    {
+                        new JsonObject { ["text"] = webNoteText },
+                    },
+                },
                 cancellationToken).ConfigureAwait(false);
             return;
         }

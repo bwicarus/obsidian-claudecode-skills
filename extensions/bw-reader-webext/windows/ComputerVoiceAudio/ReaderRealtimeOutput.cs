@@ -342,7 +342,8 @@ internal static class ReaderRealtimeOutputProtocol
             or "_nativeReaderEditNote"
             or "_nativeReaderMakeNote"
             or "_nativeReaderMarkVocabulary"
-            or "_bwWebHighlightByText"))
+            or "_bwWebHighlightByText"
+            or "_bwWebNoteCreate"))
         {
             throw Invalid("Reader 客户端动作不在白名单内");
         }
@@ -350,6 +351,25 @@ internal static class ReaderRealtimeOutputProtocol
         if (args.ValueKind != JsonValueKind.Array)
         {
             throw Invalid("Reader 客户端动作参数必须是数组");
+        }
+        if (fn is "_bwWebNoteCreate")
+        {
+            // 只给内容。位置由页面用与用户点「新建便签」相同的落点逻辑决定 ——
+            // 助手没有指针，让它传坐标就是把它没有的事实写进协议。
+            if (args.GetArrayLength() != 1
+                || args[0].ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 网页便签需要一个内容对象");
+            }
+            JsonElement webNote = args[0];
+            DirectJsonValidation.RequireNoDuplicateKeys(webNote);
+            Exact(webNote, "text");
+            string webNoteText = Text(webNote, "text", 4_000);
+            if (string.IsNullOrWhiteSpace(webNoteText))
+            {
+                throw Invalid("Reader 网页便签内容为空");
+            }
+            return;
         }
         if (fn is "_bwWebHighlightByText")
         {
