@@ -182,5 +182,41 @@
     mount();
   }
 
-  window.__bwHitTestDiag = { lines, log };
+  // 顶栏按钮的**静态自检**:不依赖用户点中任何东西。
+  //
+  // 前两轮的面板只在收到事件时才写一行,可这次的故障很可能正是"事件根本
+  // 没到" —— 那种情况下面板一行都不出,看起来像诊断没装上。所以这里主动
+  // 量一次:按钮在不在、它的矩形在哪、以及**那个矩形的中心点到底命中了谁**。
+  //
+  // 最后一项是关键。命中的若不是按钮自己,返回的元素名就直接指认了盖在
+  // 上面的那一层是什么 —— 这正是三轮猜测都想知道而始终没拿到的那条证据。
+  function probeTopbar() {
+    const shadow = window.__bwShadow;
+    if (!shadow) { log("自检: 无 __bwShadow(扩展 UI 未装载)"); return; }
+    const header = shadow.querySelector("#header");
+    if (!header) { log("自检: shadow 内无 #header"); return; }
+    const hr = header.getBoundingClientRect();
+    log("自检 #header rect=" + fmt(hr.left) + "," + fmt(hr.top)
+      + "-" + fmt(hr.right) + "," + fmt(hr.bottom));
+    const buttons = header.querySelectorAll("button");
+    log("自检 顶栏按钮数=" + buttons.length);
+    let reported = 0;
+    for (const b of buttons) {
+      if (reported >= 3) break;            // 三个够定性,不刷屏
+      const r = b.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      const hit = deepElementFromPoint(cx, cy);
+      const own = hit === b || (b.contains && hit && b.contains(hit));
+      log("自检 " + (b.id ? "#" + b.id : b.textContent.trim().slice(0, 6))
+        + " rect=" + fmt(r.left) + "," + fmt(r.top) + "-" + fmt(r.right) + "," + fmt(r.bottom)
+        + " 中心命中=" + nodeLabel(hit) + (own ? " ✓自己" : " ✗被挡"));
+      reported++;
+    }
+  }
+  // 延后一拍:facade/shell 都在 document_idle 之后才建好 shadow 与顶栏。
+  setTimeout(probeTopbar, 1500);
+
+  window.__bwHitTestDiag = { lines, log, probeTopbar };
 })();
