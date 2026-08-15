@@ -11,7 +11,7 @@ enum DirectVoiceProtocol {
     )!
     static let origin = "https://bwicarus.taile44d0c.ts.net"
 
-    static let maximumMessageBytes = 64 * 1024
+    static let maximumMessageBytes = 256 * 1024
     static let maximumPendingRequests = 16
     static let pcmHeaderBytes = 36
     static let pcmPayloadBytes = 1_920
