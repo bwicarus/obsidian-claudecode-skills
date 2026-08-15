@@ -55,7 +55,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.29"
+APP_VERSION = "0.1.32"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 POLL_INTERVAL_MS = 2_500

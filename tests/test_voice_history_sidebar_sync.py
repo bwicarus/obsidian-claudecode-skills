@@ -1536,6 +1536,39 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
                 )
         run_once.assert_not_called()
 
+    def test_reader_mcp_tools_use_readable_sidebar_labels(self):
+        snapshot = SYNC._project_tool(
+            {
+                "type": "mcpToolCall",
+                "server": "reader_snapshot",
+                "tool": "reader_context_snapshot",
+                "status": "completed",
+            }
+        )
+        anki = SYNC._project_tool(
+            {
+                "type": "mcpToolCall",
+                "server": "reader_snapshot",
+                "tool": "reader_anki_draft",
+                "status": "completed",
+            }
+        )
+        unknown = SYNC._project_tool(
+            {
+                "type": "mcpToolCall",
+                "server": "other_server",
+                "tool": "private_action",
+                "status": "completed",
+            }
+        )
+
+        self.assertEqual(snapshot["tool"], "reader_snapshot.reader_context_snapshot")
+        self.assertEqual(snapshot["label"], "读取页面")
+        self.assertEqual(anki["tool"], "reader_snapshot.reader_anki_draft")
+        self.assertEqual(anki["label"], "制卡")
+        self.assertEqual(unknown["tool"], "other_server.private_action")
+        self.assertEqual(unknown["label"], "工具：other_server.private_action")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8667,10 +8667,16 @@ internal static class DirectBridgeSelfTest
                     .Contains(
                         "Windows Codex 语音主路由",
                         StringComparison.Ordinal)
-                // 这个 server 只注入了 sendOutput，没注入查询客户端:因此
-                // 只该看到基线 7 个加上四个 client-action 类新工具。查询工具
-                // 一个都不该出现 —— 列出一个调不动的工具，比不列更坏。
-                && tools.GetArrayLength() == 11
+                // 这个 server 只注入了 sendOutput，没注入查询客户端：因此
+                // 只该看到两个无条件工具和 11 个 output 工具。查询工具一个
+                // 都不该出现 —— 列出一个调不动的工具，比不列更坏。
+                && tools.GetArrayLength() == 13
+                && tools.EnumerateArray().Any(tool =>
+                    tool.GetProperty("name").GetString()
+                        == ReaderContextMcpServer.WebHighlightToolName)
+                && tools.EnumerateArray().Any(tool =>
+                    tool.GetProperty("name").GetString()
+                        == ReaderContextMcpServer.WebNoteToolName)
                 && !tools.EnumerateArray().Any(tool =>
                     tool.GetProperty("name").GetString() is
                         "reader_highlights" or "reader_notes"

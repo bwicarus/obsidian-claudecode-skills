@@ -1593,10 +1593,12 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                         CodexVoiceActivityController.StartObservationTimeout,
                         CodexVoiceActivityController.MonitorInterval,
                         CancellationToken.None).ConfigureAwait(false);
-                voiceConfirmation = await VoiceActivity.ConfirmUsableAsync(
-                    voiceConfirmation,
-                    CodexVoiceActivityController.StartUsableSettleDelay,
-                    CancellationToken.None).ConfigureAwait(false);
+                voiceConfirmation = await VoiceActivity
+                    .ConfirmUsableForStartAsync(
+                        voiceConfirmation,
+                        shortcutReceipt,
+                        CodexVoiceActivityController.StartUsableSettleDelay,
+                        CancellationToken.None).ConfigureAwait(false);
                 _voiceConfirmation = voiceConfirmation;
                 _voiceStartBaseline = null;
                 CancellationTokenSource voiceMonitorLifetime = new();

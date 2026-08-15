@@ -7,6 +7,7 @@ internal static class CodexVoiceActivitySelfTest
         CheckShortcutBrokerContract(checks);
         CheckActivityRule(checks);
         CheckPreexistingVoiceIsNotOwned(checks);
+        CheckPreexistingVoiceUsesFastPath(checks);
         CheckNewVoiceIsOwned(checks);
         CheckStartedVoiceMustSettle(checks);
         CheckUnattestedTransitionFailsClosed(checks);
@@ -190,6 +191,103 @@ internal static class CodexVoiceActivitySelfTest
             checks);
     }
 
+    private static void CheckPreexistingVoiceUsesFastPath(
+        ICollection<string> checks)
+    {
+        CodexVoiceActivitySnapshot active =
+            CodexVoiceActivitySnapshot.Available(300, 0);
+        FakeCodexVoiceActivitySource fastSource = new(active, active);
+        FakeCodexVoiceActivityClock fastClock = new();
+        CodexVoiceActivityController fastController = new(
+            fastSource,
+            fastClock);
+        CodexVoiceStartConfirmation fastConfirmation =
+            fastController.ConfirmStartedAsync(
+                fastController.CaptureStartBaseline(),
+                shortcutReceipt: null,
+                TimeSpan.FromSeconds(3),
+                TimeSpan.FromMilliseconds(250),
+                CancellationToken.None).GetAwaiter().GetResult();
+        CodexVoiceStartConfirmation fastResult =
+            fastController.ConfirmUsableForStartAsync(
+                fastConfirmation,
+                shortcutReceipt: null,
+                TimeSpan.FromSeconds(8),
+                CancellationToken.None).GetAwaiter().GetResult();
+
+        CodexVoiceActivitySnapshot replacement =
+            CodexVoiceActivitySnapshot.Available(500, 0);
+        FakeCodexVoiceActivitySource changedSource = new(
+            active,
+            replacement,
+            replacement);
+        FakeCodexVoiceActivityClock changedClock = new();
+        CodexVoiceActivityController changedController = new(
+            changedSource,
+            changedClock);
+        CodexVoiceStartConfirmation changedConfirmation =
+            changedController.ConfirmStartedAsync(
+                changedController.CaptureStartBaseline(),
+                shortcutReceipt: null,
+                TimeSpan.FromSeconds(3),
+                TimeSpan.FromMilliseconds(250),
+                CancellationToken.None).GetAwaiter().GetResult();
+        DirectProtocolException changedFailure = Capture(
+            () => changedController.ConfirmUsableForStartAsync(
+                changedConfirmation,
+                shortcutReceipt: null,
+                TimeSpan.FromSeconds(8),
+                CancellationToken.None));
+
+        FakeCodexVoiceActivitySource recoveringSource = new(
+            active,
+            CodexVoiceActivitySnapshot.Unavailable(),
+            active);
+        FakeCodexVoiceActivityClock recoveringClock = new();
+        CodexVoiceActivityController recoveringController = new(
+            recoveringSource,
+            recoveringClock);
+        CodexVoiceStartConfirmation recoveringConfirmation =
+            recoveringController.ConfirmStartedAsync(
+                recoveringController.CaptureStartBaseline(),
+                shortcutReceipt: null,
+                TimeSpan.FromSeconds(3),
+                TimeSpan.FromMilliseconds(250),
+                CancellationToken.None).GetAwaiter().GetResult();
+        CodexVoiceStartConfirmation recovered =
+            recoveringController.ConfirmUsableForStartAsync(
+                recoveringConfirmation,
+                shortcutReceipt: null,
+                TimeSpan.FromSeconds(8),
+                CancellationToken.None).GetAwaiter().GetResult();
+
+        Require(
+            fastResult.Snapshot.Active
+            && fastResult.Snapshot.LastUsedTimeStart == 300
+            && fastSource.ReadCount == 2
+            && fastClock.DelayCount == 0
+            && changedFailure.Code
+                == CodexVoiceActivityController.StartNotConfirmedCode
+            && changedFailure.Retryable
+            && changedSource.ReadCount == 3
+            && changedClock.DelayCount == 1
+            && changedClock.UtcNow
+                == FakeCodexVoiceActivityClock.Start
+                    + TimeSpan.FromSeconds(8),
+            "codex-voice-preexisting-same-generation-skips-settle",
+            checks);
+        Require(
+            recovered.Snapshot.Active
+            && recovered.Snapshot.LastUsedTimeStart == 300
+            && recoveringSource.ReadCount == 3
+            && recoveringClock.DelayCount == 1
+            && recoveringClock.UtcNow
+                == FakeCodexVoiceActivityClock.Start
+                    + TimeSpan.FromSeconds(8),
+            "codex-voice-preexisting-unavailable-fast-check-keeps-bounded-recovery",
+            checks);
+    }
+
     private static void CheckUnattestedTransitionFailsClosed(
         ICollection<string> checks)
     {
@@ -238,11 +336,12 @@ internal static class CodexVoiceActivitySelfTest
             new FakeCodexVoiceActivitySource(active),
             stableClock);
         CodexVoiceStartConfirmation stable =
-            stableController.ConfirmUsableAsync(
+            stableController.ConfirmUsableForStartAsync(
                 new CodexVoiceStartConfirmation(
                     active,
                     ObservedAfterShortcut: true,
                     OwnershipToken: Token(300)),
+                shortcutReceipt: null,
                 TimeSpan.FromSeconds(8),
                 CancellationToken.None).GetAwaiter().GetResult();
 
@@ -252,11 +351,12 @@ internal static class CodexVoiceActivitySelfTest
                 CodexVoiceActivitySnapshot.Available(300, 400)),
             closedClock);
         DirectProtocolException closedFailure = Capture(
-            () => closedController.ConfirmUsableAsync(
+            () => closedController.ConfirmUsableForStartAsync(
                 new CodexVoiceStartConfirmation(
                     active,
                     ObservedAfterShortcut: true,
                     OwnershipToken: Token(300)),
+                shortcutReceipt: null,
                 TimeSpan.FromSeconds(8),
                 CancellationToken.None));
 

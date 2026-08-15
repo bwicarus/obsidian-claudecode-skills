@@ -474,6 +474,50 @@ internal sealed class CodexVoiceActivityController
     }
 
     internal async Task<CodexVoiceStartConfirmation>
+        ConfirmUsableForStartAsync(
+            CodexVoiceStartConfirmation confirmation,
+            CodexVoiceShortcutReceipt? shortcutReceipt,
+            TimeSpan settleDelay,
+            CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(confirmation);
+        RequireAvailable(confirmation.Snapshot);
+
+        // ReaderPC now owns Codex Voice keepalive independently from an App
+        // audio START.  When this START sent no shortcut and the voice was
+        // already active, a fresh read of the same generation is sufficient:
+        // the media and route resources have already been committed at the
+        // caller's atomic boundary.  Do not impose the legacy eight-second
+        // post-shortcut settle delay on that pre-warmed path.
+        if (
+            shortcutReceipt is null
+            && !confirmation.ObservedAfterShortcut
+            && confirmation.Snapshot.Active
+        )
+        {
+            CodexVoiceActivitySnapshot current = _source.Read();
+            if (
+                current.Status
+                    == CodexVoiceActivityReadStatus.Available
+                && current.Active
+                && current.LastUsedTimeStart
+                    == confirmation.Snapshot.LastUsedTimeStart
+            )
+            {
+                return confirmation with { Snapshot = current };
+            }
+        }
+
+        // Cold activation, a changed/closed generation, unavailable activity
+        // telemetry, or an actual shortcut receipt retains the bounded settle
+        // confirmation and its fail-closed result.
+        return await ConfirmUsableAsync(
+            confirmation,
+            settleDelay,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<CodexVoiceStartConfirmation>
         ConfirmUsableAsync(
             CodexVoiceStartConfirmation confirmation,
             TimeSpan settleDelay,

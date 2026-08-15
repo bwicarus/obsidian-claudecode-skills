@@ -460,6 +460,43 @@ def _safe_tool_name(value: Any, fallback: str) -> str:
     )[:160]
 
 
+_READER_TOOL_LABELS = {
+    "reader_context_snapshot": "读取页面",
+    "reader_visual_image": "看页面图",
+    "reader_browser_control": "操作阅读页面",
+    "reader_highlight_text": "高亮",
+    "reader_highlight_range": "高亮",
+    "reader_anki_draft": "制卡",
+    "reader_card": "显示 Reader 卡片",
+    "reader_command": "执行 Reader 命令",
+    "reader_undo_last": "撤销",
+    "reader_note_create": "新建便签",
+    "reader_note_edit": "编辑便签",
+    "reader_highlights": "看高亮",
+    "reader_notes": "看便签",
+    "reader_search": "搜索全书",
+    "reader_toc": "查目录",
+    "reader_page_text": "读取页面文字",
+    "reader_make_note": "整理笔记",
+    "reader_lookup_word": "查词典",
+    "reader_mark_vocab": "加生词本",
+    "reader_web_highlight": "高亮网页文字",
+    "reader_web_note": "创建网页便签",
+    "reader_capability_guide": "查看 Reader 能力指南",
+}
+
+
+def _tool_label(server: str, tool: str, fallback: str) -> str:
+    # Keep protocol identities stable.  The synchronized Reader sidebar is a
+    # presentation surface, so known Reader tools get the same concise labels
+    # as Realtime while unknown MCP tools retain their exact technical name.
+    if server in {"reader", "reader_snapshot"}:
+        label = _READER_TOOL_LABELS.get(tool)
+        if label is not None:
+            return label
+    return f"工具：{fallback}"
+
+
 def _project_tool(item: dict[str, Any]) -> dict[str, str | None] | None:
     item_type = item.get("type")
     if item_type == "mcpToolCall":
@@ -483,7 +520,7 @@ def _project_tool(item: dict[str, Any]) -> dict[str, str | None] | None:
         return {
             "status": status,
             "tool": name,
-            "label": f"工具：{name}"[:320],
+            "label": _tool_label(server, tool, name)[:320],
             "detail": detail,
         }
     if item_type == "webSearch":
