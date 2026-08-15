@@ -53,14 +53,21 @@ test("stylus touch 在扩展控件上不得被全局滚动拦截器 preventDefau
   );
 });
 
-test("主 Shadow 宿主保持显式全视口且空白区域继续穿透", () => {
+test("主 Shadow 宿主是 0×0,不铺任何全视口覆盖平面", () => {
+  // 这条测试上一版钉的是反面(全视口 fixed + pointer-events:none + 子层
+  // auto)——那套结构在 iPad 真机上让顶栏与侧栏上方按钮整片不可点,只剩
+  // 按钮下边缘一线能命中,0.2.109/0.2.110 两轮修法均被真机否证后整体还原。
+  // 现在钉住还原后的形状:宿主 0×0、不占布局、没有 pointer-events 反转,
+  // fixed 子元素各自逃逸,能被点到的只有真实控件自己的矩形。
   assert.match(
     FACADE_SOURCE,
-    /host\.style\.cssText = "position:fixed;inset:0;width:100vw;height:100vh;z-index:2147483647;pointer-events:none;"/,
+    /host\.style\.cssText = "position:absolute;top:0;left:0;width:0;height:0;z-index:2147483647;"/,
   );
-  assert.match(
+  // 全视口宿主不得回潮 —— 谁要再引入,必须先拿真机证据推翻这一条。
+  assert.doesNotMatch(
     FACADE_SOURCE,
-    /root\.style\.cssText = "position:fixed;inset:0;width:100%;height:100%;pointer-events:none;"/,
+    /host\.style\.cssText = "[^"]*(100vw|inset:0|pointer-events)/,
   );
-  assert.doesNotMatch(FACADE_SOURCE, /host\.style\.cssText = "[^"]*pointer-events:auto/);
+  // root 不给内联样式:0 尺寸静态容器,不构成覆盖平面。
+  assert.doesNotMatch(FACADE_SOURCE, /root\.style\.cssText = "[^"]+"/);
 });

@@ -2483,11 +2483,23 @@
     }
   );
 
-  // ── Shadow 宿主:全视口但自身穿透；真正的扩展控件在 #bw-root 直系层恢复命中。
-  // 旧 0×0 宿主让 fixed 侧栏大多可点，却会令底部收藏面板在 Chromium 命中测试中时有时无。
+  // ── Shadow 宿主:0×0 不占布局,fixed 子元素自己逃逸到视口 —— App 阅读器的
+  // 命中几何,也是最早版本在 iPad 上可点的那套。
+  //
+  // 全视口 fixed + pointer-events:none + 子层 auto 那版(4b3e84d4 引入)在
+  // iPad 真机上让顶栏与侧栏上方按钮整片不可点,只剩按钮下边缘一线能命中;
+  // 两轮修法(0.2.109 代际升级、0.2.110 composedPath+显式几何)均被真机否证。
+  // 真机采集进一步排除了视口错位(visualViewport 与 inner 完全一致)并证明
+  // Shadow 内元素能收到完整事件(侧栏把手一切正常)——嫌疑收敛到全视口
+  // 平面自身及其撑出来的透明子层。0×0 宿主下不存在任何覆盖平面:
+  // 静态子元素塌缩成零宽,能被点到的只有真实控件自己的矩形。
+  //
+  // 已知代价:当年改成全视口的动机是"0×0 下底部收藏面板在 Chromium 命中
+  // 测试时有时无"——那是桌面自动化测试的抖动;真机整片按钮死是用户每天
+  // 撞上的事,两害相权取其轻。若收藏面板复发,单独给它修,不再动全局几何。
   const host = document.createElement("div");
   host.id = "bw-reader-host";
-  host.style.cssText = "position:fixed;inset:0;width:100vw;height:100vh;z-index:2147483647;pointer-events:none;";
+  host.style.cssText = "position:absolute;top:0;left:0;width:0;height:0;z-index:2147483647;";
   document.documentElement.appendChild(host);
   const shadow = host.attachShadow({ mode: "open" });
 
@@ -2499,9 +2511,9 @@
   // 根容器(充当 document.body / documentElement 双角色):
   //   · rc-sidedrawer 往 body 挂抽屉/把手、往 body toggle .ep-side-open 类 → 落这里;
   //   · rc-sidedrawer 往 documentElement 设 --gp-blur CSS 变量 → 落这里(变量继承到抽屉)。
+  //   · 不给任何内联样式:它跟宿主一样零尺寸,浮动 UI 全靠自身 fixed 定位。
   const root = document.createElement("div");
   root.id = "bw-root";
-  root.style.cssText = "position:fixed;inset:0;width:100%;height:100%;pointer-events:none;";
   shadow.appendChild(root);
 
   // 网页卡片专用的文档坐标层：宿主页滚动时由浏览器原生带着走，不再在 fixed UI 层里逐帧追位置。
