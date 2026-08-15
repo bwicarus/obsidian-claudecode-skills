@@ -20,6 +20,22 @@ const readerWebView = read("ios/BWReader/App/ReaderWebView.swift");
 const nativeVoiceSystem = read(
   "ios/BWReader/App/NativeVoiceSystemIntegration.swift",
 );
+const directVoiceProtocol = read("ios/BWReader/App/DirectVoiceProtocol.swift");
+const directBridgeContract = read(
+  "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectBridgeContract.cs",
+);
+
+test("App, shared Reader, and Direct agree on the voice envelope limit", () => {
+  assert.match(
+    directVoiceProtocol,
+    /static let maximumMessageBytes = 256 \* 1024/,
+  );
+  assert.match(
+    directBridgeContract,
+    /MaximumMessageBytes = 256 \* 1024/,
+  );
+  assert.match(runtime, /var MAX_MESSAGE_BYTES = 262144/);
+});
 
 test("Reader structured cards acknowledge only an actual render", () => {
   assert.match(
