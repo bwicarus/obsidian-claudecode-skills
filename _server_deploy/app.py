@@ -1631,6 +1631,12 @@ register_reader_sync_relay(app)
 from shared_note import register_shared_note
 register_shared_note(app)
 
+# 知识图谱只读导出：给电脑侧一份本地副本，供 AI 批量处理（跨书串联、找前置）。
+# 只出图不出掌握度 —— 图跟人无关所以能只读单向分发，掌握度两边都会写，
+# 混进来会让副本无法判断自己是否过时。鉴权复用 current_user()，不另造一套。
+from kg_export import register_kg_export
+register_kg_export(app, current_user)
+
 from computer_voice_routes import register_computer_voice
 register_computer_voice(app, root=DATA_DIR)
 
