@@ -124,7 +124,10 @@ button{-webkit-appearance:none;appearance:none}
 #bw-root[data-bw-rail="1"] .rc-topbar-pill,
 #bw-root[data-bw-rail="1"] .rc-topbar-pill[data-collapsed="1"]{
   left:0!important;top:50%!important;
-  transform:translateY(-50%) rotate(180deg)!important;
+  /* 不加 rotate:writing-mode:vertical-rl 本身就是正着往下读(抽屉把手
+     #ep-side-handle 用的就是这一条、一直是正的)。先前多加的 180° 把字
+     整个倒了过来。 */
+  transform:translateY(-50%)!important;
   writing-mode:vertical-rl!important;
   min-width:0!important;width:22px!important;height:auto!important;
   padding:13px 0!important;border-radius:0 12px 12px 0!important;

@@ -51,7 +51,6 @@ SRC_FILES = (
     "computer-voice-native-protocol.js",
     "direct-sync-content-host.js",
     "facade.js",
-    "hit-test-diagnostics.js",
     "pwa-adapter.js",
     "pwa-marker.js",
     "settings-sync.js",
@@ -352,7 +351,6 @@ def expected_runtime_js(source_root: Path = HERE) -> tuple[str, ...]:
     wrapped_after_core = wrapped[1:]
     return (
         "src/bw-probe.js",
-        "src/hit-test-diagnostics.js",
         "src/facade.js",
         "src/settings-sync.js",
         "src/browser-control.js",
