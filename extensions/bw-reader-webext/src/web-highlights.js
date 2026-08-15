@@ -115,7 +115,21 @@
     document.addEventListener('pointercancel',e=>{if(e.pointerId===activePointer){gesture.cancel();activeHit=null;activePointer=null;}},{capture:true,passive:true});
   }
   document.addEventListener('dblclick',e=>{const h=hitAt(e.clientX,e.clientY);if(!h)return;e.preventDefault();e.stopPropagation();openEditor(h);},true);
-  load().catch(()=>{});
+  // 与固定卡片同一个坑：MV3 的 service worker 会休眠，刷新时这一次 get 可能
+  // 带着 lastError 回来。吞掉的话，页面上原有的高亮不会重新画出来 ——
+  // 用户看到的是"高亮没了"，而数据其实还在。短暂失败重试，真失败要出声。
+  const HL_RESTORE_ATTEMPTS=3,HL_RESTORE_BACKOFF_MS=120;
+  function restoreHighlights(attempt){
+    return load().catch(err=>{
+      if(attempt<HL_RESTORE_ATTEMPTS){
+        return new Promise(r=>setTimeout(r,HL_RESTORE_BACKOFF_MS*attempt))
+          .then(()=>restoreHighlights(attempt+1));
+      }
+      try{console.warn('[bw] 网页高亮未能载入：',err&&err.message||err);}catch(_){}
+      try{RC.toast?.('网页高亮暂时载入失败，刷新页面可重试');}catch(_){}
+    });
+  }
+  restoreHighlights(1);
   const mo=new MutationObserver(()=>{clearTimeout(applyTimer);applyTimer=setTimeout(applyAll,800);});
   if(document.body)mo.observe(document.body,{childList:true,subtree:true});
 })();

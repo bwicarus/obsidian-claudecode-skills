@@ -5,6 +5,8 @@
   if (window.__bwPwaProviderOnly || window.__bwPwaBridge || !window.RC || !window.__bwRoot || !window.__bwPinRoot) return;
   const RC=window.RC,root=window.__bwRoot,pinRoot=window.__bwPinRoot,host=window.__bwReaderHost,pinHost=window.__bwPinHost,KEY='webCardPinsV1',PAGE=location.href.split('#')[0];
   const DRAG_HOLD_MS=420,DRAG_SLOP=8;
+  // MV3 service worker 冷启动窗口；三次退避足够覆盖，再多就该让用户知道了。
+  const PIN_RESTORE_ATTEMPTS=3,PIN_RESTORE_BACKOFF_MS=120;
   let pins=[],dragging=null,placeRaf=0;
   const mkCid=()=>RC.voiceCard?.mkCid?.()||('c'+Date.now().toString(36)+Math.random().toString(36).slice(2,6));
   function ensureIdentity(p){let changed=false;if(p.kind==='flash'){if(!p.gid){const seed=p.cid||mkCid();p.gid=String(seed).startsWith('card_')||String(seed).startsWith('fcg_')?String(seed):('fcg_'+seed);changed=true;}if(p.cid!==p.gid){p.cid=p.gid;changed=true;}}else if(!p.cid){p.cid=(p.kind==='html'&&p.html?.cid)||mkCid();changed=true;}p.cid=String(p.cid);if(p.kind==='html'&&p.html&&p.html.cid!==p.cid){p.html.cid=p.cid;changed=true;}return changed;}
@@ -176,10 +178,32 @@
   // 上下滚动由文档坐标层原生完成；只在 resize/DOM 布局改变时重算元素锚点。
   addEventListener('resize',schedulePlace,{passive:true});
   try{new MutationObserver(schedulePlace).observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['style','class','hidden','open']});}catch(_){}
-  window.__bwExtensionStore.get(KEY).then(all=>{
-    pins=(all?.[PAGE]||[]);let migrated=false;pins.forEach(p=>{if(ensureIdentity(p))migrated=true;mount(p);});
-    // 0.2.5 以前只有 x/y：对当前视野内的旧卡原位补一次 DOM 锚，不要求用户删除重贴。
-    pins.forEach(p=>{if(p.anchor)return;const x=(Number(p.x)||0)-scrollX,y=(Number(p.y)||0)-scrollY;if(x>=0&&y>=0&&x<innerWidth&&y<innerHeight){const a=anchorAt(x,y);if(a){p.anchor=a;migrated=true;}}});
-    if(migrated)persist();schedulePlace();
-  }).catch(()=>{});
+  // 刷新后卡片"消失"的根因：MV3 的 service worker 会休眠，页面重载时
+  // content script 立刻请求，worker 若正在冷启动，chrome.runtime.sendMessage
+  // 会带着 lastError 回来。原先这里 .catch(()=>{}) 把它吞了 —— 数据其实还在
+  // 磁盘上，只是这一次没读出来，而且一声不吭。
+  //
+  // 所以：短暂失败重试几次（冷启动是暂时的），真的读不到就出声。
+  // 绝不能静默留下一个空页面 —— 用户会以为卡片被删了，而且没有任何线索。
+  function restorePins(attempt){
+    return window.__bwExtensionStore.get(KEY).then(all=>{
+      pins=(all?.[PAGE]||[]);let migrated=false;pins.forEach(p=>{if(ensureIdentity(p))migrated=true;mount(p);});
+      // 0.2.5 以前只有 x/y：对当前视野内的旧卡原位补一次 DOM 锚，不要求用户删除重贴。
+      pins.forEach(p=>{if(p.anchor)return;const x=(Number(p.x)||0)-scrollX,y=(Number(p.y)||0)-scrollY;if(x>=0&&y>=0&&x<innerWidth&&y<innerHeight){const a=anchorAt(x,y);if(a){p.anchor=a;migrated=true;}}});
+      if(migrated)persist();schedulePlace();
+      return true;
+    }).catch(err=>{
+      // 退避重试：worker 冷启动通常几十毫秒内就绪。
+      if(attempt<PIN_RESTORE_ATTEMPTS){
+        return new Promise(r=>setTimeout(r,PIN_RESTORE_BACKOFF_MS*attempt))
+          .then(()=>restorePins(attempt+1));
+      }
+      // 说出来。页面上已固定的卡片没有渲染出来，用户看到的是"卡片没了"，
+      // 而真相是"这次没读到"—— 两者的处理完全不同（重试 vs 重新做一张）。
+      try{console.warn('[bw] 网页固定卡片未能载入：',err&&err.message||err);}catch(_){}
+      try{RC.toast?.('固定卡片暂时载入失败，刷新页面可重试');}catch(_){}
+      return false;
+    });
+  }
+  restorePins(1);
 })();

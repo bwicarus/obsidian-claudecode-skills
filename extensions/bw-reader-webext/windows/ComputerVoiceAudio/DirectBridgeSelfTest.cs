@@ -11055,10 +11055,22 @@ internal static class DirectBridgeSelfTest
                 enabled: false,
                 viewerRunning: true)
                 == DirectSnapshotViewerIntentAction.Close
+            && DirectSnapshotViewer.ShouldKeepExistingViewer(
+                ownerMatches: true,
+                trackedProcessRunning: false,
+                handedOffViewerRunning: true)
+            && !DirectSnapshotViewer.ShouldKeepExistingViewer(
+                ownerMatches: false,
+                trackedProcessRunning: false,
+                handedOffViewerRunning: true)
+            && !DirectSnapshotViewer.ShouldKeepExistingViewer(
+                ownerMatches: true,
+                trackedProcessRunning: false,
+                handedOffViewerRunning: false)
             && !viewerArguments.Contains(
                 "--reader-context-view",
                 StringComparer.Ordinal),
-            "direct-snapshot-viewer-reopens-and-tracks-mode-intent",
+            "direct-snapshot-viewer-adopts-edge-handoff-and-tracks-mode-intent",
             checks);
 
         adapter = new FileDirectSnapshotContextAdapter(

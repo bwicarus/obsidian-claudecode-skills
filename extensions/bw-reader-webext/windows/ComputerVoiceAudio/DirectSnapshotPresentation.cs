@@ -2100,13 +2100,23 @@ internal sealed class DirectSnapshotViewer : IDisposable
             {
                 return;
             }
-            if (
-                _viewerProcess is { HasExited: false }
-                && string.Equals(
-                    _viewerOwnerId,
-                    ownerId,
-                    StringComparison.Ordinal)
-            )
+            bool ownerMatches = string.Equals(
+                _viewerOwnerId,
+                ownerId,
+                StringComparison.Ordinal);
+            bool trackedProcessRunning =
+                _viewerProcess is { HasExited: false };
+            // Edge may hand an app-mode launch to its profile broker and let
+            // the Process.Start launcher exit.  The titled window is then the
+            // live viewer; treating the launcher as the viewer would make the
+            // five-second service heartbeat kill and reopen it forever.
+            bool handedOffViewerRunning =
+                !trackedProcessRunning
+                && ViewerWindowExistsBestEffort();
+            if (ShouldKeepExistingViewer(
+                ownerMatches,
+                trackedProcessRunning,
+                handedOffViewerRunning))
             {
                 return;
             }
@@ -2176,6 +2186,13 @@ internal sealed class DirectSnapshotViewer : IDisposable
             ? DirectSnapshotViewerIntentAction.Close
             : DirectSnapshotViewerIntentAction.None;
     }
+
+    internal static bool ShouldKeepExistingViewer(
+        bool ownerMatches,
+        bool trackedProcessRunning,
+        bool handedOffViewerRunning) =>
+        ownerMatches
+        && (trackedProcessRunning || handedOffViewerRunning);
 
     internal void CloseForConnection(string ownerId)
     {
@@ -2295,6 +2312,38 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 process.Dispose();
             }
         }
+    }
+
+    private static bool ViewerWindowExistsBestEffort()
+    {
+        bool found = false;
+        foreach (Process process in Process.GetProcessesByName("msedge"))
+        {
+            try
+            {
+                if (
+                    !process.HasExited
+                    && string.Equals(
+                        process.MainWindowTitle,
+                        ViewerWindowTitle,
+                        StringComparison.Ordinal)
+                )
+                {
+                    found = true;
+                }
+            }
+            catch (Exception exception) when (
+                exception is InvalidOperationException
+                or NotSupportedException
+                or System.ComponentModel.Win32Exception)
+            {
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
+        return found;
     }
 
     private bool PrepareLocalResponse(
