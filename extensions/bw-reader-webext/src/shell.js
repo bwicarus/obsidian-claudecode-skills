@@ -85,6 +85,11 @@ button{-webkit-appearance:none;appearance:none}
    之前三轮都在改命中逻辑(代际、composedPath、宿主几何),而位置才是原因。 */
 #header{top:var(--bw-ios-gesture-inset,0px)!important}
 #ep-side{top:var(--bw-ios-gesture-inset,0px)!important}
+/* 收起顶栏后用来重新展开的 pill:rc-ui.js:46 在收起态把它设成 top:0 —— 正好
+   落回死区。真机实测(用户报告):顶栏一收起就再也打不开,界面被锁死。
+   展开态的 pill 挂在顶栏下沿(48px+安全区),本来就在死区之外,只有收起态
+   这一条需要让位。 */
+.rc-topbar-pill[data-collapsed="1"]{top:var(--bw-ios-gesture-inset,0px)!important}
 /* pane 占位文案 */
 .bw-pane-todo{padding:18px;color:var(--rc-text-muted,#8a9bb4);font-size:13px;line-height:1.8}
 .bw-pane-todo b{color:var(--rc-text-strong,#cfe6ff)}
