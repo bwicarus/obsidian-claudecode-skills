@@ -4274,5 +4274,5 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **改了什么**：完整纳入 `27b8c9fa` 的 ReaderQuery、21 工具、KG 快照与来源注册诊断，同时保留 Swift 256 KiB、快照 viewer 隔离、预热连接快路径和侧栏中文工具标签。
 - **怎么验的**：Reader Node 全量、Direct Release 构建/完整自检、Direct/ReaderPC 不可变候选 verify/self-test 通过；独立审查确认两个 manifest 与源码及载荷均零偏差。
 - **Windows 安装**：停止全部 ReaderPC/Direct/MCP/专用 viewer 后安装 Direct `0.1.138` 与 ReaderPC `0.1.32`；健康接口与 viewer HTTP 200，回滚点 `install-0.1.138-20260815T075250Z-d21a5b2f`。
-- **App 发布**：功能源 `406dff7c` 已推送，Actions `31873024642` 正构建并上传 TestFlight `1.1.58`；完成后需另查 Apple processing 状态。
+- **App 发布**：功能源 `406dff7c`；Actions `31873024642` 上传 TestFlight `1.1.58 (313)`，`31873361366` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：Windows 全量 Python/handoff 仍命中已登记的 POSIX `fcntl` 与 Windows fixture/编码基线；未部署 Pi 或扩展正式渠道，待 TestFlight VALID 后真机验收 21 工具、连接耗时与中文标签。
