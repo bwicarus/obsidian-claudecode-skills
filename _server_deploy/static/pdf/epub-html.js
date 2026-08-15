@@ -427,15 +427,45 @@
   // 目录已并入统一抽屉「目录」tab(由 buildToc 填 #ep-toc-list);开关走 RC.sidedrawer
 
   // ── 原生选区 → 工具栏(内容在主文档,直接 getSelection)──
+  // 选中所在段落(≤1200)。**从实况选区现算**而不读 cur.ctx —— captureSel 先调
+  // _ctxSelReport、之后才更新 cur,在这里读 cur 拿到的是上一次选区的段落。
+  // 实况选区拿不到时才退回 cur,且只在 cur.text 与本次选中一致时用(防串档)。
+  function _epubSelBlockCtx(txt) {
+    if (!txt) return '';
+    try {
+      var s = window.getSelection();
+      if (s && s.rangeCount && !s.isCollapsed) {
+        var n = s.getRangeAt(0).startContainer;
+        var el = n && (n.nodeType === 3 ? n.parentElement : n);
+        var blk = el && el.closest ? el.closest('p,li,td,blockquote,h1,h2,h3,h4,div') : null;
+        if (blk) {
+          // _countableText 已排除注入的振假名/译文/便签,拿到的是书自己的文字
+          var ctx = _countableText(blk).trim().slice(0, 1200);
+          if (ctx && ctx !== txt) return ctx;
+        }
+      }
+    } catch (e) {}
+    try {
+      if (cur && cur.text === txt && cur.ctx && cur.ctx !== txt) {
+        return String(cur.ctx).slice(0, 1200);
+      }
+    } catch (e) {}
+    return '';
+  }
   function _ctxSelReport(txt) {
     // 选区即时同步:建立/改动/清空都立刻推(空串=显式无选区,不是省略字段)
     try {
+      var selCtx = _epubSelBlockCtx(txt);
       window.RC && RC.ctxSync && RC.ctxSync.report(
         {
           kind: 'epub',
           file: FREL,
           selection: txt || '',
-          sel_page: _curTopIdx
+          sel_page: _curTopIdx,
+          // 跟 selection 同一条纪律用空串清空:ctxSync 把 null/缺席当"没变",
+          // 旧段落会粘在 pend 里随心跳反复重发。
+          sel_context: selCtx,
+          sel_context_source: selCtx ? 'epub-paragraph' : ''
         },
         { immediate: true });
       if (window.RC && RC.outgoing) {

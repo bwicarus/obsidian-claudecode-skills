@@ -17,7 +17,13 @@ internal sealed record DirectActiveReading(
     JsonElement? ViewPage = null,
     string? SourceInstanceId = null,
     JsonElement? SelectionRegions = null,
-    JsonElement? HighlightSource = null);
+    JsonElement? HighlightSource = null,
+    // 选中附近的原文与它的来历(pdf-sentence / epub-paragraph / web-block)。
+    // 可选:旧版前端不发,缺席就是今天的行为。selection 本体保持字符串不动 ——
+    // 链上有多处按 typeof selection === "string" 把关,改它的形状会让旧版
+    // 前端的选中被整条静默清空。
+    string? SelectionContext = null,
+    string? SelectionContextSource = null);
 
 internal sealed record DirectViewportContext(
     string SourceInstanceId,
@@ -301,7 +307,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 {
                     _selection = ActiveSelection(
                         activeReading.Selection!,
-                        next);
+                        next,
+                        activeReading.SelectionContext,
+                        activeReading.SelectionContextSource);
                     RecordAction(
                         "selection",
                         next,
@@ -522,6 +530,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
             .Append("sourceInstanceId")
             .Append("selectionRegions")
             .Append("highlightSource")
+            .Append("selectionContext")
+            .Append("selectionContextSource")
             .ToHashSet(StringComparer.Ordinal);
         if (
             requiredKeys.Any(key => !keys.Contains(key))
@@ -664,6 +674,31 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             throw ActiveReadingInvalid();
         }
+        // 选中附近的原文。约束跟着 selection 走:没有活动选中就不许有上下文,
+        // 有来历标签就必须有上下文本体 —— 一个孤零零的 "pdf-sentence" 标签
+        // 什么也不说明。null 等同缺席(前端清空选中时整组一起消失)。
+        string? selectionContext = OptionalActiveText(
+            value,
+            "selectionContext",
+            1200);
+        string? selectionContextSource = OptionalActiveText(
+            value,
+            "selectionContextSource",
+            40);
+        if (
+            (
+                selectionState != "active"
+                && (selectionContext is not null
+                    || selectionContextSource is not null)
+            )
+            || (
+                selectionContextSource is not null
+                && selectionContext is null
+            )
+        )
+        {
+            throw ActiveReadingInvalid();
+        }
         return new DirectActiveReading(
             kind,
             file,
@@ -676,7 +711,40 @@ internal sealed class FileDirectSnapshotContextAdapter :
             viewPage,
             sourceInstanceId,
             selectionRegions,
-            highlightSource);
+            highlightSource,
+            selectionContext,
+            selectionContextSource);
+    }
+
+    // active 里的可选文本字段:缺席/null → null;字符串超限或含控制字符、
+    // 或者是别的类型 → 整条拒绝。宽进(可缺)严出(在场必须合规),
+    // 与 selection 本体同一条纪律 —— 一条严一条松,校验就形同虚设。
+    private static string? OptionalActiveText(
+        JsonElement value,
+        string name,
+        int maximumLength)
+    {
+        if (!value.TryGetProperty(name, out JsonElement property))
+        {
+            return null;
+        }
+        if (property.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+        if (
+            property.ValueKind != JsonValueKind.String
+            || property.GetString() is not string text
+            || text.Length > maximumLength
+            || string.IsNullOrWhiteSpace(text)
+            || text.Any(character =>
+                char.IsControl(character)
+                && character is not ('\n' or '\t'))
+        )
+        {
+            throw ActiveReadingInvalid();
+        }
+        return text;
     }
 
     private static JsonElement ValidateHighlightSource(
@@ -1309,11 +1377,23 @@ internal sealed class FileDirectSnapshotContextAdapter :
             && StringValue(_selection["text"]) is string selectedText
         )
         {
-            items.Add(new JsonObject
+            JsonObject textItem = new()
             {
                 ["kind"] = "text",
                 ["text"] = selectedText,
-            });
+            };
+            // 选中附近的原文,让模型不必回整页正文里找这句话的前后文。
+            // 只在前端真的算出来时出现。
+            if (StringValue(_selection["context"]) is string context)
+            {
+                textItem["context"] = context;
+                if (StringValue(_selection["contextSource"])
+                    is string contextSource)
+                {
+                    textItem["contextSource"] = contextSource;
+                }
+            }
+            items.Add(textItem);
         }
         // kind=="text" 的 focus 只是 _selection 的影子(同一次选中在两处
         // 各存一份),在这里再放一条会让模型以为用户选中了两样东西。
@@ -3214,13 +3294,34 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             return UnknownSelection("snapshot-invalid-selection");
         }
-        return new JsonObject
+        JsonObject restored = new()
         {
             ["state"] = state,
             ["text"] = state == "active" ? text : null,
             ["ref"] = source?["ref"]?.DeepClone(),
             ["reason"] = StringValue(source?["reason"]),
         };
+        // 上下文要在重启后活下来:这里逐键重建,不补这两行的话,进程存活期间
+        // 一切正常、服务一重启 context 就无声消失 —— 又一个只在特定时机
+        // 出现的静默丢弃。纪律与入口一致:只在 active 时接受,超限即弃。
+        if (
+            state == "active"
+            && StringValue(source?["context"]) is string context
+            && context.Length <= 1200
+            && !string.IsNullOrWhiteSpace(context)
+        )
+        {
+            restored["context"] = context;
+            if (
+                StringValue(source?["contextSource"]) is string contextSource
+                && contextSource.Length <= 40
+                && !string.IsNullOrWhiteSpace(contextSource)
+            )
+            {
+                restored["contextSource"] = contextSource;
+            }
+        }
+        return restored;
     }
 
     private static JsonObject RestoreFocus(JsonObject? source)
@@ -3301,8 +3402,11 @@ internal sealed class FileDirectSnapshotContextAdapter :
 
     private static JsonObject ActiveSelection(
         string text,
-        JsonObject active) =>
-        new()
+        JsonObject active,
+        string? context = null,
+        string? contextSource = null)
+    {
+        JsonObject selection = new()
         {
             ["state"] = "active",
             ["text"] = text,
@@ -3313,6 +3417,19 @@ internal sealed class FileDirectSnapshotContextAdapter :
             },
             ["reason"] = null,
         };
+        // 上下文只在有的时候出现:缺席(旧版前端、journal 折叠路径)时不放一个
+        // null 占位 —— 「没有上下文」和「上下文为空」是两句不同的话,
+        // null 占位会把前者伪装成后者。
+        if (context is not null)
+        {
+            selection["context"] = context;
+            if (contextSource is not null)
+            {
+                selection["contextSource"] = contextSource;
+            }
+        }
+        return selection;
+    }
 
     private static bool SamePage(JsonObject left, JsonObject right) =>
         string.Equals(

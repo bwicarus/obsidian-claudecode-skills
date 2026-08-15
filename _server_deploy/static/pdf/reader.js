@@ -6317,9 +6317,28 @@ function paintSelectionOverlay() {
 function _ctxSelReport(txt) {
   // 选区即时同步(用户拍板 2026-07-27):建立/改动/**清空**都立刻推,不走导航防抖。
   // 传空串而不是省略字段 —— 省略会让快照留着上一次的旧选区(静默退化)。
+  //
+  // sel_context = 选中所在句(字符层现算,≤600)。两个刻意的选择:
+  //  · **现算而不读 __lastSelSentence**:那个全局量在本函数触发之后才写入、
+  //    且 _updateSelPreview 一进来就先把它清空 —— 在这里读永远拿到空串。
+  //  · **跟 selection 同一条纪律用空串清空**:ctxSync 的合并把 null/缺席当
+  //    "没变",旧句子会粘在 pend 里随心跳反复重发。
   try {
+    let selCtx = '';
+    if (txt && _charSel && _charSel.pw) {
+      try {
+        const ch = _charSel.pw.__charBoxes;
+        const r = _expandSentenceFromRange(ch, _charSel.startIdx, _charSel.endIdx);
+        if (r) {
+          const sent = _charsRangeToText(ch, r.start, r.end).slice(0, 600);
+          // 句子跟选中一字不差时不带 —— 重复内容只花 token 不添信息。
+          if (sent && sent.trim() !== txt.trim()) selCtx = sent;
+        }
+      } catch (_) {}
+    }
     window.RC?.ctxSync?.report(
-      { kind: 'pdf', file: FILE_REL, selection: txt || '', sel_page: currentPage },
+      { kind: 'pdf', file: FILE_REL, selection: txt || '', sel_page: currentPage,
+        sel_context: selCtx, sel_context_source: selCtx ? 'pdf-sentence' : '' },
       { immediate: true });
     // 焦点通道(与选区并行,语义不同:选区是"选了什么文字",焦点是"当前对象是谁")。
     // 取消必须显式发,否则上游会拿着已取消的对象当现状。
@@ -6608,11 +6627,33 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
   };
   if (/^c_[a-f0-9]{8,32}$/.test(id || '')) payload.id = id;
   try {
-    const r = await fetch('/pdf/api/highlights', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload),
-    });
-    const d = await r.json();
+    let d;
+    const nativeRuntime = window.__BW_READER_RUNTIME__;
+    const directLocal = silent && payload.id && nativeRuntime &&
+      typeof nativeRuntime.savePDFHighlight === 'function';
+    if (directLocal) {
+      window.dlog?.('精确高亮: 本地独立写入开始');
+      let timer = 0;
+      try {
+        d = await Promise.race([
+          nativeRuntime.savePDFHighlight(payload),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(
+              'BW_READER_HIGHLIGHT_LOCAL_WRITE_TIMEOUT'
+            )), 6000);
+          })
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      window.dlog?.('精确高亮: 本地写入完成');
+    } else {
+      const r = await fetch('/pdf/api/highlights', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(payload),
+      });
+      d = await r.json();
+    }
     if (!d.ok) {
       if (silent) throw new Error('BW_READER_HIGHLIGHT_SAVE_REJECTED:' + (d.error || '?'));
       alert('保存高亮失败：' + (d.error || '?')); return null;
@@ -6651,10 +6692,18 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
 }
 
 function _pdfExactTextProjection(chars) {
-  let text = '', map = [], last = null;
+  let text = '', boundaries = [0], last = null;
   const cjk = (value) => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(value || '');
-  const append = (value, index) => {
-    for (let k = 0; k < value.length; k++) { text += value[k]; map.push(index); }
+  // Keep projected *boundaries* rather than mapping every displayed code unit
+  // to one native character. Synthetic layout spaces occupy no PDF character:
+  // both of their boundaries point at the next native index. This prevents a
+  // marker ending after a row/gap space from accidentally including the first
+  // character of the next word.
+  const append = (value, startIndex, endIndex) => {
+    for (let k = 0; k < value.length; k++) {
+      text += value[k];
+      boundaries.push(k === value.length - 1 ? endIndex : startIndex);
+    }
   };
   for (let i = 0; i < (chars || []).length; i++) {
     const ch = chars[i] || {};
@@ -6662,26 +6711,241 @@ function _pdfExactTextProjection(chars) {
       const cjkPair = cjk(ch.c) && cjk(last.c);
       const dy = Math.abs(Number(ch.top || 0) - Number(last.top || 0));
       if (dy > Number(ch.height || 0) * 0.5) {
-        if (!cjkPair) append(' ', i);
+        if (!cjkPair) append(' ', i, i);
       } else {
         const gap = Number(ch.left || 0) - (Number(last.left || 0) + Number(last.width || 0));
         const ref = Math.min(Number(ch.height || 0), Number(last.height || 0));
-        if (!cjkPair && gap > ref * ((/[A-Za-z]/.test(ch.c || '') && /[A-Za-z]/.test(last.c || '')) ? 1.3 : 0.6) && !last.sp && !ch.sp) append(' ', i);
+        if (!cjkPair && gap > ref * ((/[A-Za-z]/.test(ch.c || '') && /[A-Za-z]/.test(last.c || '')) ? 1.3 : 0.6) && !last.sp && !ch.sp) append(' ', i, i);
       }
     }
-    append(ch.sp ? ' ' : String(ch.c || ''), i);
+    append(ch.sp ? ' ' : String(ch.c || ''), i, i + 1);
     last = ch;
   }
-  let folded = '', foldedMap = [], space = false;
-  for (let i = 0; i < text.length; i++) {
+  let first = 0, lastText = text.length;
+  while (first < lastText && /\s/.test(text[first])) first += 1;
+  while (lastText > first && /\s/.test(text[lastText - 1])) lastText -= 1;
+  let folded = '', foldedBoundaries = [];
+  for (let i = first; i < lastText;) {
     if (/\s/.test(text[i])) {
-      if (space) continue;
-      folded += ' '; foldedMap.push(map[i]); space = true;
-    } else {
-      folded += text[i]; foldedMap.push(map[i]); space = false;
+      let end = i + 1;
+      while (end < lastText && /\s/.test(text[end])) end += 1;
+      if (!foldedBoundaries.length) foldedBoundaries.push(boundaries[i]);
+      folded += ' ';
+      foldedBoundaries.push(boundaries[end]);
+      i = end;
+      continue;
+    }
+    if (!foldedBoundaries.length) foldedBoundaries.push(boundaries[i]);
+    folded += text[i];
+    foldedBoundaries.push(boundaries[i + 1]);
+    i += 1;
+  }
+  return { text: folded, boundaries: foldedBoundaries };
+}
+
+// ── reader-highlight-source/1 ──────────────────────────────────────────────
+//
+// Assistant highlights must not locate a returned quote with indexOf().  The
+// text shown to the assistant and the PDF geometry must come from the same
+// authoritative __charBoxes projection.  A short-lived snapshot exposes only
+// opaque boundary markers; their real projected/native offsets stay in this
+// page realm.  Nothing is inserted into the PDF text layer or DOM.
+const _READER_HIGHLIGHT_SOURCE_CONTRACT = 'reader-highlight-source/1';
+const _READER_SOURCE_RANGE_CONTRACT = 'reader-source-range/1';
+const _READER_SOURCE_TTL_MS = 5 * 60 * 1000;
+const _READER_SOURCE_MAX_TEXT = 16384;
+const _READER_SOURCE_MAX_MARKERS = 2048;
+const _pdfReaderSourceSnapshots = new Map();
+let _pdfReaderSourceFallbackNonce = 0;
+
+function _readerSourceDigest(value) {
+  const text = String(value || '');
+  let a = 0x811c9dc5, b = 0x9e3779b9;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    a ^= code; a = Math.imul(a, 0x01000193) >>> 0;
+    b ^= code + ((i + 1) * 0x45d9f3b); b = Math.imul(b, 0x27d4eb2d) >>> 0;
+  }
+  return 'rsd1_' + text.length.toString(16).padStart(8, '0') + '_' +
+    a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0');
+}
+
+function _readerSourceSnapshotId() {
+  try {
+    const bytes = new Uint8Array(12);
+    window.crypto.getRandomValues(bytes);
+    return 'hrs_' + Array.from(bytes, (v) => v.toString(16).padStart(2, '0')).join('');
+  } catch (_) {
+    _pdfReaderSourceFallbackNonce += 1;
+    const seed = Date.now().toString(16).padStart(12, '0') + ':' +
+      _pdfReaderSourceFallbackNonce + ':' + Math.random();
+    return 'hrs_' + _readerSourceDigest(seed).slice(-16) +
+      (Date.now() >>> 0).toString(16).padStart(8, '0');
+  }
+}
+
+function _readerSourcePieces(text) {
+  text = String(text || '');
+  if (!text) throw new Error('BW_READER_SOURCE_EMPTY');
+  if (text.length > _READER_SOURCE_MAX_TEXT) throw new Error('BW_READER_SOURCE_TOO_LARGE');
+  const pieces = [];
+  // Modern WebKit ships Unicode word segmentation. It gives Japanese word
+  // boundaries without shipping another tokenizer and keeps the model-facing
+  // marker list much smaller than one object per CJK character. The opaque
+  // range remains authoritative even when an older host uses the fallback.
+  try {
+    if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+      const segments = new Intl.Segmenter(undefined, { granularity: 'word' }).segment(text);
+      for (const item of segments) {
+        const segment = String(item && item.segment || '');
+        for (let i = 0; i < segment.length;) {
+          let end = Math.min(segment.length, i + 512);
+          if (end < segment.length && /[\uD800-\uDBFF]/.test(segment[end - 1]) &&
+              /[\uDC00-\uDFFF]/.test(segment[end])) end += 1;
+          pieces.push(segment.slice(i, end));
+          i = end;
+        }
+      }
+    }
+  } catch (_) { pieces.length = 0; }
+  if (!pieces.length || pieces.join('') !== text) {
+    pieces.length = 0;
+    for (let i = 0; i < text.length;) {
+      const cp = text.codePointAt(i);
+      const unit = String.fromCodePoint(cp);
+      const asciiWord = /[A-Za-z0-9_'\u2019\-]/.test(unit);
+      const whitespace = /\s/.test(unit);
+      let end = i + unit.length;
+      if (asciiWord || whitespace) {
+        while (end < text.length && end - i < 512) {
+          const next = String.fromCodePoint(text.codePointAt(end));
+          if ((asciiWord && !/[A-Za-z0-9_'\u2019\-]/.test(next)) ||
+              (whitespace && !/\s/.test(next))) break;
+          end += next.length;
+        }
+      }
+      pieces.push(text.slice(i, end));
+      i = end;
     }
   }
-  return { text: folded.trim(), map: foldedMap.slice(folded.length - folded.trimStart().length) };
+  // Dense CJK pages can otherwise spend most of the 128 KiB snapshot budget on
+  // marker objects.  Merge adjacent natural pieces only when necessary; never
+  // truncate source text and never expose the resulting offsets.
+  if (pieces.length + 1 > _READER_SOURCE_MAX_MARKERS) {
+    const compact = [];
+    const chunkSize = Math.ceil(text.length / (_READER_SOURCE_MAX_MARKERS - 1));
+    for (let i = 0; i < text.length;) {
+      let end = Math.min(text.length, i + chunkSize);
+      if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]) &&
+          /[\uDC00-\uDFFF]/.test(text[end])) end += 1;
+      compact.push(text.slice(i, end));
+      i = end;
+    }
+    return compact;
+  }
+  return pieces;
+}
+
+function _readerSourceMarkerBundle(text) {
+  const pieces = _readerSourcePieces(text);
+  const markers = [], offsets = Object.create(null);
+  let offset = 0;
+  for (let i = 0; i < pieces.length; i++) {
+    const marker = 'm_' + i.toString(36);
+    offsets[marker] = offset;
+    markers.push({ marker, text: pieces[i] });
+    offset += pieces[i].length;
+  }
+  const terminal = 'm_' + pieces.length.toString(36);
+  offsets[terminal] = offset;
+  markers.push({ marker: terminal, text: '' });
+  return { markers, offsets };
+}
+
+function _readerSourceRemember(cache, snapshot) {
+  const now = Date.now();
+  for (const [id, value] of cache) {
+    if (!value || value.expiresAt <= now) cache.delete(id);
+  }
+  while (cache.size >= 12) cache.delete(cache.keys().next().value);
+  cache.set(snapshot.snapshotId, snapshot);
+}
+
+function _readerSourceExisting(cache, documentId, target, sourceDigest, revision, text) {
+  const now = Date.now();
+  for (const [id, value] of cache) {
+    if (!value || value.expiresAt <= now) { cache.delete(id); continue; }
+    // Do not hand a model an identity that can expire while it is choosing the
+    // two markers. Mint the next snapshot before the final 30-second window.
+    if (value.expiresAt - now <= 30000) { cache.delete(id); continue; }
+    if (value.documentId === documentId &&
+        value.target && value.target.kind === target.kind &&
+        Number(value.target.page) === Number(target.page) &&
+        value.sourceDigest === sourceDigest && value.revision === revision &&
+        value.text === text) return value;
+  }
+  return null;
+}
+
+function _readerSourceMutationId(request, ref) {
+  if (request.mutationId != null && request.mutationId !== '') {
+    if (!/^c_[a-f0-9]{8,32}$/.test(request.mutationId)) {
+      throw new Error('BW_READER_HIGHLIGHT_MUTATION_ID');
+    }
+    return request.mutationId;
+  }
+  return 'c_' + _readerSourceDigest(
+    ref.snapshotId + ':' + ref.startMarker + ':' + ref.endMarker
+  ).slice(-16);
+}
+
+function _pdfSourceRevision(pw, page, digest) {
+  const nativeRevision = String((pw && pw.__pageTextRevision) || '');
+  return nativeRevision
+    ? ('pdfrev_' + _readerSourceDigest(nativeRevision).slice(-16))
+    : ('pdf_' + page + '_' + digest);
+}
+
+function _pdfRangeRef(request) {
+  const ref = request && request.rangeRef;
+  const refKeys = ref && typeof ref === 'object' ? Object.keys(ref).sort() : [];
+  const exactRefKeys = [
+    'contract', 'documentId', 'endMarker', 'revision', 'snapshotId',
+    'sourceDigest', 'startMarker', 'target'
+  ];
+  if (!ref || ref.contract !== _READER_SOURCE_RANGE_CONTRACT ||
+      refKeys.length !== exactRefKeys.length ||
+      refKeys.some((key, index) => key !== exactRefKeys[index])) {
+    throw new Error('BW_READER_RANGE_CONTRACT_INVALID');
+  }
+  if (!/^hrs_[0-9a-f]{24}$/.test(String(ref.snapshotId || ''))) {
+    throw new Error('BW_READER_RANGE_SNAPSHOT_STALE');
+  }
+  const snapshot = _pdfReaderSourceSnapshots.get(ref.snapshotId);
+  if (!snapshot || snapshot.expiresAt <= Date.now()) {
+    _pdfReaderSourceSnapshots.delete(ref.snapshotId);
+    throw new Error('BW_READER_RANGE_SNAPSHOT_STALE');
+  }
+  const targetKeys = ref.target && typeof ref.target === 'object'
+    ? Object.keys(ref.target).sort() : [];
+  if (ref.documentId !== FILE_REL || snapshot.documentId !== FILE_REL ||
+      !ref.target || ref.target.kind !== 'pdf' ||
+      targetKeys.length !== 2 || targetKeys[0] !== 'kind' || targetKeys[1] !== 'page' ||
+      Number(ref.target.page) !== snapshot.target.page) {
+    throw new Error('BW_READER_RANGE_SOURCE_STALE');
+  }
+  if (ref.sourceDigest !== snapshot.sourceDigest || ref.revision !== snapshot.revision) {
+    throw new Error('BW_READER_RANGE_SOURCE_STALE');
+  }
+  const start = snapshot.offsets[String(ref.startMarker || '')];
+  const end = snapshot.offsets[String(ref.endMarker || '')];
+  if (!Number.isInteger(start) || !Number.isInteger(end)) {
+    throw new Error('BW_READER_RANGE_MARKER_INVALID');
+  }
+  if (start < 0 || end > snapshot.text.length || start >= end) {
+    throw new Error('BW_READER_RANGE_INVALID');
+  }
+  return { ref, snapshot, start, end };
 }
 
 function _pdfExactTextRange(chars, sourceText) {
@@ -6691,23 +6955,149 @@ function _pdfExactTextRange(chars, sourceText) {
   const first = projected.text.indexOf(query);
   if (first < 0) throw new Error('BW_READER_HIGHLIGHT_TEXT_NOT_FOUND');
   if (projected.text.indexOf(query, first + 1) >= 0) throw new Error('BW_READER_HIGHLIGHT_TEXT_AMBIGUOUS');
-  const start = projected.map[first];
-  const end = projected.map[first + query.length - 1];
-  if (!Number.isInteger(start) || !Number.isInteger(end)) throw new Error('BW_READER_HIGHLIGHT_TEXT_RANGE_INVALID');
-  return { start, end };
+  const start = projected.boundaries[first];
+  const endExclusive = projected.boundaries[first + query.length];
+  if (!Number.isInteger(start) || !Number.isInteger(endExclusive) || start >= endExclusive) {
+    throw new Error('BW_READER_HIGHLIGHT_TEXT_RANGE_INVALID');
+  }
+  return { start, end: endExclusive - 1 };
 }
 
 async function _pdfExactTextPage(targetPage) {
   const page = Number(targetPage);
   if (!Number.isInteger(page) || page < 1 || !pdfDoc || page > pdfDoc.numPages) throw new Error('BW_READER_HIGHLIGHT_PAGE_INVALID');
-  await window.goToPage(page);
-  for (let tries = 0; tries < 40; tries++) {
+  const readyPage = () => {
     const pw = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
-    if (pw && pw.dataset.loaded === '1' && Array.isArray(pw.__charBoxes) && pw.__charBoxes.length) return pw;
+    return pw && pw.dataset.loaded === '1' && Array.isArray(pw.__charBoxes) && pw.__charBoxes.length
+      ? pw : null;
+  };
+  // 精确高亮最常见的目标就是用户眼前这一页。旧实现无条件重新 goToPage，
+  // 一旦 PDF 重渲染或原生文字层请求卡住，当前已经可用的文字层也被一起
+  // 阻塞，Windows 最终只能得到回执超时。先消费现成页面，不做多余导航。
+  const current = Number(currentPage) === page ? readyPage() : null;
+  if (current) return current;
+  let navigationError = null;
+  try {
+    Promise.resolve(window.goToPage(page)).catch((error) => { navigationError = error; });
+  } catch (error) {
+    navigationError = error;
+  }
+  // 不 await goToPage：页面是否真正可用由同一个 DOM/文字层条件判定；这样
+  // 即使导航 Promise 本身失联，也会在有界时间内明确失败而不是永久处理中。
+  for (let tries = 0; tries < 80; tries++) {
+    const pw = readyPage();
+    if (pw) return pw;
+    if (navigationError) throw navigationError;
     await new Promise((resolve) => setTimeout(resolve, 120));
   }
   throw new Error('BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE');
 }
+
+async function _pdfWaitForHighlightVisible(pw, page, id) {
+  for (let tries = 0; tries < 40; tries++) {
+    renderHighlightsOnPage(pw, page);
+    const rendered = Array.from(pw.querySelectorAll('.hl-saved')).find((node) =>
+      node.dataset.id === id && parseFloat(node.style.width || '0') > 0 &&
+      parseFloat(node.style.height || '0') > 0
+    );
+    if (rendered) return rendered;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error('BW_READER_HIGHLIGHT_NOT_RENDERED');
+}
+
+window.__bwReaderHighlightSource = async function (request) {
+  request = request || {};
+  if (request.file !== FILE_REL) throw new Error('BW_READER_SOURCE_WRONG_BOOK');
+  if (!request.target || request.target.kind !== 'pdf') throw new Error('BW_READER_SOURCE_TARGET_KIND');
+  const page = Number(request.target.page);
+  const pw = await _pdfExactTextPage(page);
+  const projected = _pdfExactTextProjection(pw.__charBoxes);
+  if (!projected.text) throw new Error('BW_READER_SOURCE_EMPTY');
+  const sourceDigest = _readerSourceDigest(projected.text);
+  const revision = _pdfSourceRevision(pw, page, sourceDigest);
+  const existing = _readerSourceExisting(
+    _pdfReaderSourceSnapshots, FILE_REL, { kind: 'pdf', page }, sourceDigest, revision,
+    projected.text
+  );
+  if (existing) {
+    return {
+      contract: _READER_HIGHLIGHT_SOURCE_CONTRACT,
+      snapshotId: existing.snapshotId,
+      documentId: existing.documentId,
+      target: { kind: 'pdf', page },
+      sourceDigest: existing.sourceDigest,
+      revision: existing.revision,
+      expiresAt: existing.expiresAt,
+      markers: existing.markers.map((item) => ({ marker: item.marker, text: item.text }))
+    };
+  }
+  const snapshotId = _readerSourceSnapshotId();
+  const expiresAt = Date.now() + _READER_SOURCE_TTL_MS;
+  const bundle = _readerSourceMarkerBundle(projected.text);
+  _readerSourceRemember(_pdfReaderSourceSnapshots, {
+    snapshotId,
+    documentId: FILE_REL,
+    target: { kind: 'pdf', page },
+    sourceDigest,
+    revision,
+    expiresAt,
+    text: projected.text,
+    offsets: bundle.offsets,
+    markers: bundle.markers.map((item) => ({ marker: item.marker, text: item.text }))
+  });
+  return {
+    contract: _READER_HIGHLIGHT_SOURCE_CONTRACT,
+    snapshotId,
+    documentId: FILE_REL,
+    target: { kind: 'pdf', page },
+    sourceDigest,
+    revision,
+    expiresAt,
+    markers: bundle.markers.map((item) => ({ marker: item.marker, text: item.text }))
+  };
+};
+
+window.__bwReaderHighlightRange = async function (request) {
+  request = request || {};
+  const colors = { yellow:'#fff59d', green:'#a7f3d0', blue:'#a3d4ff', pink:'#fda4af' };
+  if (!colors[request.color]) throw new Error('BW_READER_HIGHLIGHT_COLOR_INVALID');
+  const resolved = _pdfRangeRef(request);
+  const page = resolved.snapshot.target.page;
+  const pw = await _pdfExactTextPage(page);
+  const projected = _pdfExactTextProjection(pw.__charBoxes);
+  const sourceDigest = _readerSourceDigest(projected.text);
+  const revision = _pdfSourceRevision(pw, page, sourceDigest);
+  if (sourceDigest !== resolved.snapshot.sourceDigest ||
+      revision !== resolved.snapshot.revision ||
+      projected.text !== resolved.snapshot.text) {
+    throw new Error('BW_READER_RANGE_SOURCE_STALE');
+  }
+  const startIndex = projected.boundaries[resolved.start];
+  const endExclusive = projected.boundaries[resolved.end];
+  if (!Number.isInteger(startIndex) || !Number.isInteger(endExclusive) || startIndex >= endExclusive) {
+    throw new Error('BW_READER_RANGE_INVALID');
+  }
+  const mutationId = _readerSourceMutationId(request, resolved.ref);
+  const highlight = await saveHighlight({
+    pw,
+    sIdx: startIndex,
+    eIdx: endExclusive - 1,
+    color: colors[request.color],
+    note: request.note || '',
+    id: mutationId,
+    silent: true
+  });
+  if (!highlight || !highlight.id) throw new Error('BW_READER_HIGHLIGHT_SAVE_INVALID');
+  await _pdfWaitForHighlightVisible(pw, page, highlight.id);
+  return {
+    ok: true,
+    status: 'highlight_saved',
+    id: highlight.id,
+    target: { kind: 'pdf', page },
+    text: highlight.text
+  };
+};
 
 window.__bwReaderHighlightExactText = async function (request) {
   request = request || {};
@@ -6722,6 +7112,9 @@ window.__bwReaderHighlightExactText = async function (request) {
     pw, sIdx: range.start, eIdx: range.end, color: colors[request.color],
     note: request.note || '', id: request.mutationId, silent: true
   });
+  await _pdfWaitForHighlightVisible(
+    pw, Number(request.target.page), highlight.id
+  );
   return { ok: true, status: 'highlight_saved', id: highlight.id, page: Number(request.target.page), text: highlight.text };
 };
 
@@ -7941,9 +8334,10 @@ function openHlPopover(h, anchorDiv, pw) {
       onColor: (c) => {
         if (!c) {                                       // 取消颜色:照搬下方 268-277 语义
           const hasNote = (h.note || '').trim() || (h.body || '').trim() || (h.sentence || '').trim();
-          if (!hasNote) _hlDelete(h, pw);
-          else { _hlUpdate(h, pw, { color: '' }); _toast('已取消颜色（备注保留）'); }
-        } else _hlUpdate(h, pw, { color: c });
+          if (!hasNote) return _hlDelete(h, pw);
+          return _hlUpdate(h, pw, { color: '' });
+        }
+        return _hlUpdate(h, pw, { color: c });
       },
       onNote: (t) => _hlUpdate(h, pw, { note: t }),
       onDelete: () => _hlDelete(h, pw),
@@ -8040,12 +8434,18 @@ async function _hlUpdate(h, pw, patch) {
       body: JSON.stringify({file: FILE_REL, id: h.id, ...patch}),
     });
     const d = await r.json();
-    if (!d.ok) { alert('保存失败：' + (d.error || '?')); return; }
+    if (!d.ok) { _toast('保存失败：' + (d.error || '?')); return false; }
     Object.assign(h, d.highlight);
     renderHighlightsOnPage(pw, h.page);
     _toast('已保存');
-  } catch (e) { alert('保存异常：' + e.message); }
+    return true;
+  } catch (e) { _toast('保存未确认：' + e.message); return false; }
 }
+// 删除必须给出明确结果:true=后端确认删掉,false=没删掉。
+//
+// 此前成功、失败、异常三条路都返回 undefined,于是调用方的 `ok !== false` 一律判成
+// 成功,界面把行移走而后端那条高亮还在 —— 刷新后它又回来了,这正是"删不掉"的观感。
+// 未知结果(网络中断、超时)按未删处理:不假删、不自动重试,让用户看见它还在。
 async function _hlDelete(h, pw) {
   try {
     const r = await fetch('/pdf/api/highlights', {
@@ -8053,13 +8453,18 @@ async function _hlDelete(h, pw) {
       body: JSON.stringify({file: FILE_REL, id: h.id}),
     });
     const d = await r.json();
-    if (!d.ok) { alert('删除失败：' + (d.error || '?')); return; }
+    if (!d.ok) { _toast('删除失败：' + (d.error || '未知原因')); return false; }
     _allHighlights = _allHighlights.filter(x => x.id !== h.id);
     _hlByPage[h.page] = (_hlByPage[h.page] || []).filter(x => x.id !== h.id);
     renderHighlightsOnPage(pw, h.page);
     closeHlPopover();
     _toast('已删除');
-  } catch (e) { alert('删除异常：' + e.message); }
+    return true;
+  } catch (e) {
+    // 用 toast 而非 alert:alert 会阻塞整个页面事件,在 iPad 上尤其难恢复。
+    _toast('删除未确认：' + ((e && e.message) || '无响应'));
+    return false;
+  }
 }
 
 // 预览块的交互：
@@ -12040,7 +12445,13 @@ if (window.PdfAdapter && PdfAdapter.bind) {
     //   PDF 暂无「高亮抽屉」UI → 这几个钩子目前无 live 调用方,先就位)。编辑/图描述浮层走 per-call opts,不依赖此 bind。
     allHighlights: () => (typeof _allHighlights !== 'undefined' ? _allHighlights : []),
     jumpToHl: (hl) => { try { if (hl && hl.page && window.goToPage) window.goToPage(hl.page); } catch (_) {} },
-    hlDelete: (hl) => { try { var pw = document.querySelector('.page-wrap[data-page-num="' + (hl && hl.page) + '"]'); if (typeof _hlDelete === 'function') _hlDelete(hl, pw); } catch (_) {} },
+    // 必须把删除的 Promise 交出去:调用方要等到后端确认才移除界面。
+    // 早先这里既不 return 也把异常吞掉,上层拿到 undefined 就当成功了。
+    hlDelete: (hl) => {
+      var pw = document.querySelector('.page-wrap[data-page-num="' + (hl && hl.page) + '"]');
+      if (typeof _hlDelete !== 'function') return Promise.resolve(false);
+      return Promise.resolve(_hlDelete(hl, pw)).then(function (ok) { return ok === true; });
+    },
     // ── 助手侧栏共享化(②a):把 25-assistant.js 依赖的**全部宿主符号**收进 asst host 袋,供未来搬进
     //    rc-assistant.js 的共享侧栏经 RC.adapter()._host.asst 取用(EPUB 提供同名袋 → 复用整份侧栏)。
     //    全是**纯转发**到 PDF 现有 window.* / reader.js 作用域符号(本文件同在 reader.js IIFE)→ PDF 行为零变化;
@@ -12073,7 +12484,7 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       renderNoteChips: () => { try { window.__renderNoteChips && window.__renderNoteChips(); } catch (_) {} },
       notesReload: () => { try { window.notesReload && window.notesReload(); } catch (_) {} },
       noteInject: (n) => { try { return !!(window.__noteInject && window.__noteInject(n)); } catch (_) { return false; } },
-      reloadHighlights: () => { try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {} },
+      reloadHighlights: () => { try { return window._reloadHighlights ? window._reloadHighlights() : Promise.resolve(); } catch (e) { return Promise.reject(e); } },
       loadAllHighlights: () => { try { if (typeof loadAllHighlights === 'function') loadAllHighlights(); } catch (_) {} },
       renderHighlightsOnPage: (pw, n) => { try { if (typeof renderHighlightsOnPage === 'function') renderHighlightsOnPage(pw, n); } catch (_) {} },
       showHlPicker: (d) => { try { window._showHlPicker && window._showHlPicker(d); } catch (_) {} },
@@ -12176,19 +12587,37 @@ if (window.PdfAdapter && PdfAdapter.bind) {
   const _loadHlPane = () => {
     const box = document.getElementById('pdf-hl-list'); if (!box) return;
     box.innerHTML = '<div style="color:#5a6680;font-size:12px">加载…</div>';
-    fetch('/pdf/api/highlights?file=' + encodeURIComponent(FILE_REL)).then(r => r.json()).then(d => {
-      const hs = (d && d.highlights) || [];
+    fetch('/pdf/api/highlights?file=' + encodeURIComponent(FILE_REL)).then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(d => {
+      if (!d || d.ok === false || !Array.isArray(d.highlights)) throw new Error((d && d.error) || '响应无效');
+      const hs = d.highlights;
       RC.highlight.renderList(box, hs, {
         reverse: true,
         emptyHtml: '还没有高亮。<br>选中文字 → 「🖍 高亮」',
         onJump: (h) => { try { jumpWithBack(h.page); RC.sidedrawer.afterJump(); } catch (_) {} },
+        // 专门的高亮管理页直接复用统一删除,不再自己发一套 fetch。
+        //
+        // 只把列表行删掉是不够的:_allHighlights / _hlByPage 与当前页的叠层都要跟着变。
+        // 而 shared 模式下 25-assistant.js 顶部提前 return,window._reloadHighlights
+        // 根本没有注册,所以"删完刷新一下"这条退路在这里是不存在的。
+        // _hlDelete 一次做完四件事:请求后端、更新内存、重绘该页、给出提示,
+        // 并返回 true/false 供列表决定要不要移除该行。
         onDelete: (h) => {
-          fetch('/pdf/api/highlights?file=' + encodeURIComponent(FILE_REL) + '&id=' + encodeURIComponent(h.id), { method: 'DELETE' })
-            .then(() => { try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {} })
-            .catch(() => {});
+          const pw = document.querySelector(
+            '.page-wrap[data-page-num="' + (h && h.page) + '"]'
+          );
+          return _hlDelete(h, pw);
         },
+
       });
-    }).catch(() => { box.innerHTML = '<div style="color:#5a6680;font-size:12px">加载失败</div>'; });
+    }).catch(error => {
+      box.innerHTML = '<div style="color:#d88;font-size:12px">加载失败：' +
+        String((error && error.message) || '未知原因').replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s])) +
+        '<br><button type="button" id="pdf-hl-retry">重试</button></div>';
+      document.getElementById('pdf-hl-retry')?.addEventListener('click', _loadHlPane);
+    });
   };
 
   // 目录 pane:GET /api/toc?entries=1(book_toc._effective_toc,page=印刷页)→ 简单列表(照 EPUB buildToc)
@@ -12631,6 +13060,20 @@ window._lbClick = _lbClick;
     return { unit: 'page', index: Math.max(0, (Number(currentPage) || 1) - 1), total };
   }
 
+  function _bookRemoveHighlightProjection(id) {
+    id = String(id || '');
+    if (!id) return { ok: false, error: '缺少高亮 id' };
+    const before = _allHighlights.length;
+    _allHighlights = _allHighlights.filter((item) => item && String(item.id) !== id);
+    Object.keys(_hlByPage).forEach((page) => {
+      _hlByPage[page] = (_hlByPage[page] || []).filter((item) => item && String(item.id) !== id);
+    });
+    document.querySelectorAll('.hl-saved[data-id]').forEach((node) => {
+      if (String(node.dataset.id || '') === id) node.remove();
+    });
+    return { ok: true, id, removed: before !== _allHighlights.length };
+  }
+
   async function action(name, payload) {
     payload = payload || {};
     switch (name) {
@@ -12664,6 +13107,8 @@ window._lbClick = _lbClick;
           highlight: h ? { id: h.id, page: h.page, color: h.color, text: h.text } : null,
         };
       }
+      case 'remove_highlight':
+        return _bookRemoveHighlightProjection(payload.id);
       case 'open_search':
         if (window.openSearch) window.openSearch();
         return { ok: true };
@@ -12791,7 +13236,7 @@ window._lbClick = _lbClick;
   }
 
   const names = [
-    'ocr', 'highlight', 'open_search', 'toggle_ruby', 'toggle_page_translate',
+    'ocr', 'highlight', 'remove_highlight', 'open_search', 'toggle_ruby', 'toggle_page_translate',
     'create_sticky', 'toggle_ink', 'anchor_fx', 'jump_page', 'jump_location',
     'change_page', 'fit_width', 'zoom_by', 'jump_context', 'flash_selection',
     'pin_card', 'pin_html', 'toggle_fullscreen', 'open_settings', 'open_favorite',
