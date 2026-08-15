@@ -264,20 +264,41 @@ export class ContextLink {
   }
 
   #registerVisualSource() {
-    if (
-      !this.sourceInstanceId ||
-      !this.sessionId ||
-      !this.socket ||
-      this.socket.readyState !== 1 ||
-      this.registeredSourceInstanceId === this.sourceInstanceId
-    ) return Promise.resolve({ skipped: true });
+    // 这五个条件此前折成一个布尔然后静默跳过。跳过意味着 Windows 那边
+    // 永远没有这个页面的租约,于是每一次取图都答「来源离线」——而离线是
+    // 结果不是原因。原因就在这五项里,不说出来就无从查起。
+    if (this.registeredSourceInstanceId === this.sourceInstanceId) {
+      return Promise.resolve({ skipped: true, reason: "already-registered" });
+    }
+    const missing =
+      !this.sourceInstanceId ? "无来源标识"
+      : !this.sessionId ? "无会话"
+      : !this.socket ? "socket 尚未创建"
+      : this.socket.readyState !== 1
+        ? "socket 未就绪(readyState=" + this.socket.readyState + ")"
+        : null;
+    if (missing) {
+      // connect() 之前调用必然落在这里,那是正常时序;要紧的是**连上之后**
+      // 仍落在这里 —— 那时它就是故障的全部解释。
+      this.onStatus({ state: "visual-register-skipped", reason: missing });
+      return Promise.resolve({ skipped: true, reason: missing });
+    }
     const source = this.sourceInstanceId;
     return this.#request("visual-register", {
       sessionId: this.sessionId,
       sourceInstanceId: source,
     }).then((result) => {
       this.registeredSourceInstanceId = source;
+      this.onStatus({ state: "visual-registered", sourceInstanceId: source });
       return result;
+    }, (error) => {
+      // 注册被桥拒绝过去只会顺着 promise 链消失。它和「跳过」后果相同
+      // 但原因完全不同(前者是桥的相态/白名单,后者是本地时序),分开报。
+      this.onStatus({
+        state: "visual-register-failed",
+        reason: (error && error.message) || String(error),
+      });
+      throw error;
     });
   }
 

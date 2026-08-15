@@ -356,6 +356,22 @@ function visualLinkStatus(status) {
   if (status?.state === "error" || status?.state === "retrying") {
     frameProbe("视觉链路: " + status.state +
       (status.error ? " " + describe(status.error) : ""));
+    return;
+  }
+  // 注册成功只留痕,不打扰。
+  if (status?.state === "visual-registered") {
+    frameProbe("视觉来源已注册: " + String(status.sourceInstanceId || ""));
+    return;
+  }
+  // 没注册上则用 note:这正是用户会遇到的那个「AI 说图片来源离线」,
+  // 而离线只是结果。原因在这里,它必须走到人能看见的地方 ——
+  // iPad 上没有控制台,frameProbe 到不了。
+  if (status?.state === "visual-register-skipped") {
+    note("视觉来源未注册: " + String(status.reason || ""));
+    return;
+  }
+  if (status?.state === "visual-register-failed") {
+    note("视觉来源注册被拒: " + String(status.reason || ""));
   }
 }
 
@@ -769,15 +785,31 @@ function ensureVisualLink(page) {
   // context-sync preference gate. Unknown is therefore safe during startup,
   // while an explicit false must tear down the already-registered visual and
   // browser-control source immediately.
-  if (
-    (contextPreferenceKnown && !contextSyncEnabled) ||
-    !contextSurfaceVisible()
-  ) {
+  // 这三个提前退出决定「AI 能不能看到这个页面」,而它们此前都不出声。
+  // 后果:快照照常走 POST(那条路不看这里),于是助手知道用户在看什么、
+  // 甚至知道刚画过东西,却一取图就说来源离线 —— 而没有任何地方说得出
+  // 为什么。在 iPad 上没有控制台,不出声等于永远查不出来。
+  if (contextPreferenceKnown && !contextSyncEnabled) {
+    note("视觉来源未注册: 上下文同步开关为关");
+    closeVisualLink();
+    return;
+  }
+  if (!contextSurfaceVisible()) {
+    note("视觉来源未注册: 通话框不可见(visibilityState=" +
+      String(document.visibilityState) + ")");
     closeVisualLink();
     return;
   }
   const source = String(page?.document?.sourceInstanceId || "");
-  if (!/^[A-Za-z0-9_-]{22}$/.test(source)) return;
+  if (!/^[A-Za-z0-9_-]{22}$/.test(source)) {
+    // 空串通常意味着 background 那边这个标签还没被顶层网页认领
+    // (readerCallSender 在未认领时返回 "")。这跟「格式不对」是两回事,
+    // 分开说,否则修的时候会去查正则而不是查认领。
+    note("视觉来源未注册: " + (source
+      ? "来源标识格式不合法"
+      : "本页尚未认领通话框(background 未绑定 sourceInstanceId)"));
+    return;
+  }
   visualPage = page;
   visualCommitted = {
     snapshotRevision: page.snapshotRevision,
@@ -791,7 +823,13 @@ function ensureVisualLink(page) {
   try { visualLink?.close(); } catch (_) {}
   visualSourceInstanceId = source;
   visualLink = new ContextLink(visualLinkStatus, handleContextBridgeEvent);
-  visualLink.bindVisualSource(source).catch(() => {});
+  // 绑定在 connect 之前,所以这一次必然只是记下 id 并 skip;真正的
+  // visual-register 发生在连上之后(ctxlink 的 context-open 之后那一步)。
+  // 因此这里的失败是「连 id 都没记下」,比注册失败更早也更彻底 ——
+  // 吞掉它,后面每一次取图都会报来源离线而查不到源头。
+  visualLink.bindVisualSource(source).catch((error) => {
+    note("视觉来源绑定失败: " + (error && error.message || error));
+  });
   visualLink.connect();
 }
 
