@@ -458,6 +458,17 @@
         transport: { extensionBridge: true, serviceWorker: 'none' }
       }
     ),
+    remoteRequired(
+      'knowledge.note.create',
+      ['/pdf/api/to-note'],
+      ['POST'],
+      '笔记写进 vault，只有服务器能落盘；没有本地投影可先行显示，'
+        + '失败必须让调用方知道，否则助手会告诉用户"已经记下了"。',
+      {
+        kind: 'command',
+        transport: { extensionBridge: true, serviceWorker: 'none' }
+      }
+    ),
     networkMutation(
       'document.epub-action.commit',
       '/pdf/api/epub-action',
@@ -512,6 +523,30 @@
       ['/pdf/api/page-chars'],
       'private-cache-first',
       { transport: { serviceWorker: 'private-cache-first' } }
+    ),
+    cachedRead(
+      // 助手问「这本书目录长什么样」。目录随书固定，缓存优先没有代价。
+      'document.toc.read',
+      ['/pdf/api/toc'],
+      'private-cache-first',
+      {
+        transport: {
+          extensionBridge: true,
+          serviceWorker: 'private-cache-first'
+        }
+      }
+    ),
+    cachedRead(
+      // 助手问「第 N 页写了什么」。同一页正文不会变，重复取是纯浪费。
+      'document.page-text.read',
+      ['/api/assistant/voice-page-text'],
+      'private-cache-first',
+      {
+        transport: {
+          extensionBridge: true,
+          serviceWorker: 'private-cache-first'
+        }
+      }
     ),
     cachedRead(
       'dictionary.quick.read',

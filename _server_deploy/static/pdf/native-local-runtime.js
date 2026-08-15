@@ -9976,6 +9976,7 @@
         text: text,
         color: '#ffffff'
       };
+      // @interaction document.note.create
       return root.fetch(localBasePath() + '/pdf/api/notes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -10024,6 +10025,7 @@
       ));
     }
     return bootPromise.then(function () {
+      // @interaction document.note.update
       return root.fetch(localBasePath() + '/pdf/api/notes', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -10268,6 +10270,7 @@
       ));
     }
     return bootPromise.then(function () {
+      // @interaction document.toc.read
       return root.fetch(
         localBasePath() + '/pdf/api/toc?file='
           + encodeURIComponent(localFileRef()) + '&entries=1'
@@ -10328,6 +10331,7 @@
       ));
     }
     return bootPromise.then(function () {
+      // @interaction document.page-text.read
       return root.fetch(
         localBasePath() + '/api/assistant/voice-page-text?file='
           + encodeURIComponent(localFileRef()) + '&page=' + page
@@ -10392,6 +10396,7 @@
         title = ('阅读笔记 · ' + (book || '当前书') + ' · 第 '
           + Math.trunc(page) + ' 页');
       }
+      // @interaction knowledge.note.create
       return root.fetch(localBasePath() + '/pdf/api/to-note', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -10438,6 +10443,7 @@
       ));
     }
     return bootPromise.then(function () {
+      // @interaction dictionary.quick.read
       return root.fetch(
         localBasePath() + '/pdf/api/dict-quick?word='
           + encodeURIComponent(word)
@@ -10495,6 +10501,7 @@
       ));
     }
     return bootPromise.then(function () {
+      // @interaction vocabulary.mastery.set
       return root.fetch(localBasePath() + '/pdf/api/vocab-mark', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

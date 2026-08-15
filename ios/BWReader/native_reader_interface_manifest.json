@@ -78,22 +78,22 @@
         "scope": "current",
         "requiredMethods": [],
         "identities": [
-        {
-          "methods": [
-            "POST"
-          ],
-          "location": "json",
-          "pointer": "/context/file_rel",
-          "transform": "exact"
-        },
-        {
-          "methods": [
-            "POST"
-          ],
-          "location": "json",
-          "pointer": "/context/file",
-          "transform": "exact"
-        }
+          {
+            "methods": [
+              "POST"
+            ],
+            "location": "json",
+            "pointer": "/context/file_rel",
+            "transform": "exact"
+          },
+          {
+            "methods": [
+              "POST"
+            ],
+            "location": "json",
+            "pointer": "/context/file",
+            "transform": "exact"
+          }
         ],
         "continuation": {
           "kind": "rid",
@@ -3129,6 +3129,12 @@
       "resource": "static/reader-runtime/interaction-policy.js",
       "path": "/pdf/api/reocr-page/clear",
       "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+    },
+    {
+      "surface": "epub",
+      "resource": "static/reader-runtime/interaction-policy.js",
+      "path": "/pdf/api/toc",
+      "reason": "Shared policy declaration for the PDF surface; the query channel opens toc to PDF only."
     },
     {
       "surface": "epub",

@@ -4,9 +4,9 @@
   "note": "Existing debt only. Retired allowances must be removed in the same change; new fingerprints or higher counts fail --check.",
   "summary": {
     "cache-first-unannotated": 3,
-    "dynamic-unannotated": 128,
+    "dynamic-unannotated": 127,
     "local-immediate-unannotated": 6,
-    "unclassified-literal": 80
+    "unclassified-literal": 79
   },
   "allowances": {
     "cache-first-unannotated|_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js|fetch|fetch('/pdf/api/phrase-mark')|phrase.state.read must prove cached/local read before network": 1,
@@ -78,7 +78,6 @@
     "dynamic-unannotated|_server_deploy/static/pdf/rc-videoplayer.js|fetch|fetch(PREFS_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ patch: patch }), keepalive: true })|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/rc-voicecall.js|fetch|fetch('/api/assistant/voice-clip?id=' + id, { method: 'POST', headers: { 'Content-Type': mime }, body: blob })|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/rc-voicecall.js|new WebSocket|new WebSocket(_wsUrl(path))|dynamic endpoint/method needs @interaction <id>": 1,
-    "dynamic-unannotated|_server_deploy/static/pdf/rc-wordpop.js|fetch|fetch(url)|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/01-boot.js|fetch|fetch('/pdf/api/book-figures?file=' + encodeURIComponent(FILE_REL || ''))|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/01-boot.js|fetch|fetch('/pdf/api/book-langs?file=' + encodeURIComponent(FILE_REL || ''))|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/03-loader.js|fetch|fetch('/pdf/api/book-crop?file=' + encodeURIComponent(FILE_REL))|dynamic endpoint/method needs @interaction <id>": 1,
@@ -193,7 +192,6 @@
     "unclassified-literal|_server_deploy/static/pdf/reader.src/18-grammar.js|fetch|fetch('/pdf/api/grammar-tracked', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({file: FILE_REL, enabled_books: books}), })|POST /pdf/api/grammar-tracked": 1,
     "unclassified-literal|_server_deploy/static/pdf/reader.src/19-dict.js|fetch|fetch('/pdf/api/vocab-anki', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({word: lemma}), })|POST /pdf/api/vocab-anki": 1,
     "unclassified-literal|_server_deploy/static/pdf/reader.src/21-misc-ai.js|fetch|fetch('/pdf/api/char-offset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: FILE_REL, page, dx: ofs.dx, dy: ofs.dy, scale: ofs.scale }), })|POST /pdf/api/char-offset": 1,
-    "unclassified-literal|_server_deploy/static/pdf/reader.src/21-misc-ai.js|fetch|fetch('/pdf/api/to-note', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({text: lastSelText, name: trimmed, file: FILE_REL, page: _selPageNum()}), })|POST /pdf/api/to-note": 1,
     "unclassified-literal|_server_deploy/static/pdf/reader.src/21-misc-ai.js|fetch|fetch('/pdf/api/translate-config')|GET /pdf/api/translate-config": 1,
     "unclassified-literal|_server_deploy/static/pdf/reader.src/21-misc-ai.js|fetch|fetch('/pdf/api/translate-config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({backend: sb.value, model: sm.value, effort: se.value}), })|POST /pdf/api/translate-config": 1,
     "unclassified-literal|_server_deploy/static/pdf/reader.src/22-prewarm.js|fetch|fetch('/pdf/api/prewarm-async', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: FILE_REL, width: w }), })|POST /pdf/api/prewarm-async": 1,
