@@ -2245,7 +2245,8 @@ internal sealed class ReaderContextMcpServer
         }
 
         await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
-        JsonObject payload = BuildToolPayload();
+        // 这是九个调用点里唯一真正交给模型的一份，只在这里传 true。
+        JsonObject payload = BuildToolPayload(forModel: true);
         await AttachOutputAccessAsync(payload, cancellationToken)
             .ConfigureAwait(false);
         DocumentReadReceipt? receipt = await AttachDocumentContextAsync(
@@ -3987,7 +3988,59 @@ internal sealed class ReaderContextMcpServer
         }
     }
 
-    private JsonObject BuildToolPayload()
+    // 绘图状态在传输层有 12 个字段，模型只需要其中三件事：有没有图、稳没稳、
+    // 取图要用什么。其余是同一个三态的四种编码（empty/inProgress/stable/
+    // freshness=="none" 互相决定）、身份的第二三遍抄写（file/page 在
+    // currentPage 已有）、策略参数（freshWindowS 是"多久算新"的阈值，不是事实），
+    // 以及一个 ref —— 它四个键全部是父级字段的副本。实测那一块 JSON 七百余
+    // 字符，有效信息不足四十。
+    //
+    // 只收敛**给模型的这一份**：payload 是 DeepClone 出来的，存储的快照、
+    // 四处产生方、以及 CopyDrawing 那张一致性矩阵都不动。取图的准入条件
+    // （drawingRevision）也因此原样保留在传输层。
+    private static void TrimDrawingForModel(JsonObject snapshot)
+    {
+        if (
+            snapshot["currentPage"] is not JsonObject page
+            || page["visual"] is not JsonObject visual
+            || visual["drawing"] is not JsonObject drawing
+        )
+        {
+            return;
+        }
+        JsonObject trimmed = new()
+        {
+            // 有没有图：empty 是唯一的事实来源，has_ink 被校验强制等于它。
+            ["hasInk"] = drawing["empty"]?.GetValueKind() != JsonValueKind.True,
+            ["stable"] = drawing["stable"]?.GetValueKind() == JsonValueKind.True,
+        };
+        // 新鲜度回答的是「这是刚画的还是很久以前画的」，模型据此判断用户是不是
+        // 在问刚画的东西 —— 那不是冗余。但阈值本身不该进上下文。
+        if (drawing["freshness"] is not null)
+        {
+            trimmed["freshness"] = drawing["freshness"]!.DeepClone();
+        }
+        if (drawing["lastEditedAt"] is not null)
+        {
+            trimmed["lastEditedAt"] = drawing["lastEditedAt"]!.DeepClone();
+        }
+        // 取图唯一真正需要跨机传的东西。未稳定时它是 null，保留这个 null 是
+        // 有意的：模型要能看出「有图但还不能取」。
+        trimmed["revision"] = drawing["drawingRevision"]?.DeepClone();
+        visual["drawing"] = trimmed;
+        // visual.has_ink 与 drawing.empty 被 CopyVisual 强制互为反面（不一致
+        // 就丢掉整条事件）。两个字段说同一句话，模型这边留一个就够。
+        visual.Remove("has_ink");
+    }
+
+    // `forModel` 默认 **false**，也就是默认给完整的一份。
+    //
+    // 这个默认值是有意选的：这个函数的九个调用点里只有一个真的把结果交给模型，
+    // 其余都是内部逻辑 —— 构造取图请求要读 drawingRevision/inProgress/empty，
+    // 校验请求是否仍然有效也要读。收敛过的投影喂给它们会让取图直接失效，
+    // 而且是静默失效（字段缺失读成 null，判断自然不成立）。
+    // 默认完整意味着将来新增调用点不会踩这个坑；要收敛必须自己说出来。
+    private JsonObject BuildToolPayload(bool forModel = false)
     {
         JsonObject? snapshot = _latestSnapshot?.DeepClone()
             as JsonObject;
@@ -4006,6 +4059,12 @@ internal sealed class ReaderContextMcpServer
             snapshot["visualAccess"] = BuildVisualAccess(
                 snapshot,
                 _fetchVisualAsync is not null);
+            if (forModel)
+            {
+                // **必须排在 BuildVisualAccess 之后**：那一步还要读 stable /
+                // inProgress / empty / drawingRevision 去算 scopes。
+                TrimDrawingForModel(snapshot);
+            }
             return snapshot;
         }
         return new JsonObject
