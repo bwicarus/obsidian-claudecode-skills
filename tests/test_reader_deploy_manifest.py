@@ -455,3 +455,70 @@ class ReaderDeployManifestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManifestCoversItsOwnImportsTests(unittest.TestCase):
+    """清单内的模块 import 的本地模块，必须也在清单里。
+
+    2026-08-16 的真实事故：`app.py`(清单内) 顶层 `from kg_export import ...`，
+    而 `kg_export.py` 不在清单里。部署只装清单内的文件，于是 webapp 起不来
+    (ModuleNotFoundError)，整次部署失败回滚。
+
+    同一个清单文件里 `reader_card_contract.py` 旁边早就写着「漏登记 → 依赖方
+    上线而模块不上线」——光靠注释提醒挡不住第二次，所以改用检查。
+    """
+
+    def test_no_manifest_module_imports_an_unlisted_local_module(self) -> None:
+        import ast
+
+        root = Path(__file__).resolve().parent.parent
+        source_dir = root / "_server_deploy"
+        listed = {
+            Path(entry.source_rel).name
+            for entry in manifest.manifest_entries()
+            if str(entry.source_rel).endswith(".py")
+        }
+        # 本地模块 = _server_deploy 下真实存在的 .py。标准库与第三方不算。
+        local_modules = {p.name for p in source_dir.glob("*.py")}
+
+        missing: list[str] = []
+        for name in sorted(listed):
+            path = source_dir / name
+            if not path.is_file():
+                continue
+            try:
+                tree = ast.parse(path.read_text("utf-8", errors="replace"))
+            except SyntaxError:
+                continue
+            # 只看**顶层** import。函数体内的延迟导入只在走到那条路径时
+            # 才加载，模块缺失不会让服务起不来；仓库里现存 8 处这样的用法
+            # (app.py→insights、assistant.py→image_search 等)，它们从没出过事。
+            # 真正致命的是模块级 import：进程一启动就 ModuleNotFoundError。
+            for node in tree.body:
+                target = None
+                if isinstance(node, ast.ImportFrom) and node.level == 0:
+                    target = (node.module or "").split(".")[0]
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        candidate = alias.name.split(".")[0] + ".py"
+                        if candidate in local_modules and candidate not in listed:
+                            missing.append(f"{name} → {candidate}")
+                    continue
+                if not target:
+                    continue
+                candidate = target + ".py"
+                if candidate in local_modules and candidate not in listed:
+                    missing.append(f"{name} → {candidate}")
+
+        # 既有的两条:app.py 顶层 import insights / fitness,而这两个按
+        # references/deployment-workflow.md 是 B 类(手工 cp 部署)。它们至今
+        # 没出事,只因为早就手工放在 Pi 上了 —— 但同一个风险仍在:谁把
+        # webapp 目录清干净重建,服务就起不来。这里如实记下来而不是假装
+        # 没有,新增的漏登记照样会红。
+        known_manual = {"app.py → insights.py", "app.py → fitness.py"}
+        self.assertEqual(
+            sorted(set(missing) - known_manual),
+            [],
+            "清单内的模块 import 了未登记的本地模块；部署后依赖方会 "
+            "ModuleNotFoundError（2026-08-16 就这么失败过一次）",
+        )

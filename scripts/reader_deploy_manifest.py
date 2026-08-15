@@ -121,6 +121,9 @@ WEBAPP_SOURCE_FILES = (
     "reader_direct_commands.py",  # 无 AI 直接命令:协议/执行器/失败事件总线
     "reader_direct_wire.py",      # 直接命令接线层(pdf_reader 在前半段 import 它)
     "reader_outgoing_context.py", # 出向上下文:绘图版本 + 焦点状态机
+    "kg_export.py",               # KG 只读导出端点(app.py 顶层 import 它)
+    "kg_page_index.py",           # 当前页 → KG 节点(reader_outgoing_context import 它)
+    "reader_pwa_retirement.py",   # PWA 页面退役拦截(pdf_reader import 它)
     "reader_sw_auth.py",
     "web_proxy_cap.py",
     "web_cookie_store.py",
