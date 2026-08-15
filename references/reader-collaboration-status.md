@@ -4262,3 +4262,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：Reader 合同全量、ReaderPC/安装事务专项、Direct Release 0 警告 0 错误与完整自检、ReaderBundle 及不可变候选 verify/self-test 均通过。
 - **Windows 安装**：Direct `0.1.132`、ReaderPC `0.1.26` 已原子安装但保持停机；相关进程与 43128 监听均为零，旧计划任务不存在，keepalive=false、Codex 麦克风 inactive；Direct 回滚点 `install-0.1.132-20260814T123432Z-dc46bd66`。
 - **发布/边界**：功能提交 `fb4d7f2a`；Actions `31801099327` 上传 TestFlight `1.1.57 (306)`，`31802039561` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。未部署 Pi 或桌面扩展正式渠道；用户手动启动 ReaderPC 后再验收唯一生命周期与查词动画。
+
+## Codex：快照页稳定与 App 电脑语音协议同步已发布（2026-08-15 JST）
+- **根因/改动**：Direct 每次心跳误把 Edge 启动 stub 当 viewer 并重开窗口；App 又仍按 64 KiB 严格校验已升为 256 KiB 的 Direct HELLO，因而不发送 START。现 viewer 接管真实窗口，Swift/C#/JS 容量合同统一。
+- **ReaderPC**：自动恢复、启动失败与旧代替换统一发布 `pending/recovering`，只有明确关闭或退出发布 `disabled`；本机已安装 ReaderPC `0.1.29`，Direct `0.1.135` 严格绑定其 owner。
+- **验证**：Reader 合同、ReaderPC 包校验/自测、Direct Release 构建/完整自检通过；现场跨多个心跳 Direct 与 viewer PID 均不变化，健康接口无错误。
+- **发布事实**：提交 `1c21d726`、`dd7ac40b`、`47e235fc`；Actions `31864316357` 上传 TestFlight `1.1.57 (311)`，`31864732031` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：未部署 Pi 或桌面扩展正式渠道；旧 App 与 Direct 256 KiB 合同不兼容，安装 build 311 后点一次“电脑”按钮验收 START、快照恢复与音频连接。
