@@ -1727,7 +1727,8 @@ internal static class DirectBridgeSelfTest
         DirectBridgeServer server = new(
             new DirectBridgeConfigStore(configPath),
             new FakeDirectAppLauncher(),
-            serverMedia);
+            serverMedia,
+            codexVoiceControl: CreateInactiveCodexVoiceControl());
         await server.DisposeAsync().ConfigureAwait(false);
         await server.DisposeAsync().ConfigureAwait(false);
         Require(
@@ -1744,7 +1745,8 @@ internal static class DirectBridgeSelfTest
         DirectBridgeServer exhaustedServer = new(
             new DirectBridgeConfigStore(configPath),
             new FakeDirectAppLauncher(),
-            exhaustedMedia);
+            exhaustedMedia,
+            codexVoiceControl: CreateInactiveCodexVoiceControl());
         bool boundedFailureObserved = false;
         try
         {
@@ -9196,7 +9198,8 @@ internal static class DirectBridgeSelfTest
             new DirectBridgeConfigStore(configPath),
             new FakeDirectAppLauncher(),
             new FakeDirectMediaAdapter(),
-            snapshotContextAdapter: adapter);
+            snapshotContextAdapter: adapter,
+            codexVoiceControl: CreateInactiveCodexVoiceControl());
 
         DefaultHttpContext optionsContext = SnapshotPostContext(
             HttpMethods.Options,
@@ -11623,6 +11626,17 @@ internal static class DirectBridgeSelfTest
         await File.WriteAllTextAsync(configPath, json)
             .ConfigureAwait(false);
     }
+
+    private static DirectCodexVoiceControl
+        CreateInactiveCodexVoiceControl() =>
+            new(
+                () => CodexVoiceActivitySnapshot.Available(
+                    lastUsedTimeStart: 100,
+                    lastUsedTimeStop: 200),
+                (_, _, _) =>
+                    Task.FromException<CodexVoiceActivitySnapshot>(
+                        new InvalidOperationException(
+                            "isolated self-test voice control must stay inactive")));
 
     private static async Task WriteKeepActiveIntentAsync(
         string path,
