@@ -380,7 +380,18 @@
   window.__bwWebInk={
     toggle:()=>set(!on),set,
     state:()=>({on,tool,color,width,pencil:'always',doubleTapAction:configuredDoubleTapAction(),regions:strokes.filter(isRegion).length}),
-    exportSnapshot
+    exportSnapshot,
+    // 只读诊断钩子：iPad 顶栏/侧栏按钮点不动排查用。不改变任何行为，只把这个
+    // IIFE 私有的双击抑制状态读出来 —— suppressRecognizedDoubleTapClick 会在
+    // 武装窗口内吞掉"任意下一次点击"，不看这几个字段就无法判断某次点击落空
+    // 是不是撞上了这条路径。
+    diag:()=>({
+      strokesLen:strokes.length,
+      touchTapActive:!!touchTap,
+      suppressArmed:!!suppressTapClick,
+      suppressAgeMs:suppressTapClick?performance.now()-suppressTapClick.t:null,
+      lastTapAgeMs:lastTap?performance.now()-lastTap.t:null,
+    })
   };
   window.RC?.actions?.bind?.('ink.toggle',()=>({
     ok:true,
