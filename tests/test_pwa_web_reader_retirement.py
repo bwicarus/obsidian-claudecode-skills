@@ -114,10 +114,13 @@ class PwaWebReaderRetirementIntegrationTest(unittest.TestCase):
                 assert "no-store" in response.headers.get("Cache-Control", "")
 
             # Old portal/bookmark paths do not render a webpage reader.
+            # They used to redirect to the bookshelf; the bookshelf itself is
+            # now retired too, so redirecting there would land the user on a
+            # 410 after a pointless hop. They answer with the retirement
+            # notice directly.
             for path in ("/pdf/web", "/pdf/html/view?file=__web__"):
                 response = client.get(path)
-                assert response.status_code == 302
-                assert response.headers["Location"].endswith("/pdf/")
+                assert response.status_code == 410, (path, response.status_code)
 
             handoff = client.get(
                 "/pdf/web/live?url="

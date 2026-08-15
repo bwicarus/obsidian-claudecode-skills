@@ -2036,8 +2036,11 @@ def register_html_reader(
         """统一 HTML 阅读器主页(架构验收)。?file=<vault-rel .html/.md>;无 file → 内置 sample。"""
         rel = (request.args.get("file") or "").strip()
         if rel == "__web__":
-            # 兼容旧收藏/历史入口；本地 .html/.md 书籍阅读仍由下方路径处理。
-            return redirect("/pdf/")
+            # 旧收藏/历史入口。原本送回书架,但书架自己也随 PWA 一起退役了
+            # (reader_pwa_retirement),再往那儿转等于让用户连撞两次墙 ——
+            # 先跳一次,再收到一个 410。直接给退役说明。
+            import reader_pwa_retirement as _retired_pwa
+            return _retired_pwa.retired_response()
         if rel:
             abs_path = _safe_vault_path(rel)
             if not abs_path or abs_path.suffix.lower() not in (".html", ".htm", ".md", ".markdown"):
@@ -2655,8 +2658,13 @@ def register_html_reader(
 
     @bp.route("/web")
     def pdf_web_portal():
-        """Retired PWA web-reader portal; old bookmarks return to the bookshelf."""
-        return redirect("/pdf/")
+        """已退役的 PWA 网页阅读器入口。
+
+        原先转回书架,但书架现在也退役了(reader_pwa_retirement),那个转向
+        会落在一个 410 上。直接说明,不让用户经过一次无意义的跳转。
+        """
+        import reader_pwa_retirement as _retired_pwa
+        return _retired_pwa.retired_response()
 
     @bp.route("/api/web-fetch", methods=["POST"])
     def pdf_api_web_fetch():
