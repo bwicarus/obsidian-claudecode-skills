@@ -3058,22 +3058,145 @@ if (window.__bwPwaProviderOnly) return;
 
   // 桥接问，本机答。名单在这里再卡一次 —— 协议侧已经卡过，但这一侧才是真正
   // 去调函数的地方，只有这里的名单能保证"名单外的名字调不到任何东西"。
+  /* 网页高亮的查询实现（扩展宿主）。
+   *
+   * 只回助手用得上的字段。prefix/suffix 是锚定用的上下文片段，几十字符一条，
+   * 助手拿它做不了什么，却会让结果体积翻倍 —— 与书籍高亮不回 rects 同理。
+   *
+   * 装不下时截断并如实标注：一个被悄悄截短的列表跟完整的长得一样，
+   * 助手会据此报一个总数。 */
+  function _webHighlightsQuery(web, params) {
+    var all;
+    try {
+      all = web.list() || [];
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    var needle = String(params && params.contains || "").trim().toLowerCase();
+    var matched = [];
+    for (var i = 0; i < all.length; i += 1) {
+      var item = all[i];
+      if (!item || typeof item !== "object") continue;
+      var text = String(item.text == null ? "" : item.text);
+      if (needle && text.toLowerCase().indexOf(needle) < 0) continue;
+      matched.push({
+        id: String(item.id == null ? "" : item.id),
+        text: text.length > 600 ? text.slice(0, 600) : text,
+        color: String(item.color == null ? "" : item.color),
+        note: String(item.note == null ? "" : item.note).slice(0, 600),
+        kind: String(item.kind == null ? "" : item.kind),
+        time: Number(item.time) || 0,
+      });
+    }
+    matched.sort(function (a, b) { return (a.time || 0) - (b.time || 0); });
+    var budget = 32 * 1024;
+    var used = 0;
+    var kept = [];
+    var truncated = false;
+    for (var m = 0; m < matched.length; m += 1) {
+      var size = JSON.stringify(matched[m]).length + 1;
+      if (used + size > budget) { truncated = true; break; }
+      used += size;
+      kept.push(matched[m]);
+    }
+    return Promise.resolve({
+      ok: true,
+      surface: "web",
+      url: String((all[0] && all[0].url) || location.href || ""),
+      highlights: kept,
+      matched: matched.length,
+      returned: kept.length,
+      truncated: truncated,
+    });
+  }
+
+  /* 网页便签的查询实现（扩展宿主）。
+   *
+   * 便签在扩展的 document-notes scoped repository 里，读要经 background，
+   * 所以这里是异步的 —— 与高亮（页面内同步 list）不同，失败方式也多一种：
+   * 仓库尚未 READY。那种情况必须如实抛出，不能当成"没有便签"：
+   * 空列表会被读成"这个网页你没记过东西"，那是一句错的断言。
+   *
+   * 锚点（anchor）不回给助手：它是页面坐标与 DOM 位置，助手用不上，
+   * 却会让每条记录大出好几倍 —— 与高亮不回 prefix/suffix 同理。 */
+  function _webNotesQuery(repository, params) {
+    return Promise.resolve()
+      .then(function () { return repository.list({}); })
+      .then(function (result) {
+        var all = result && Array.isArray(result.notes)
+          ? result.notes
+          : (Array.isArray(result) ? result : []);
+        var needle = String(params && params.contains || "")
+          .trim().toLowerCase();
+        var matched = [];
+        for (var i = 0; i < all.length; i += 1) {
+          var item = all[i];
+          if (!item || typeof item !== "object") continue;
+          var text = String(item.text == null ? "" : item.text);
+          if (needle && text.toLowerCase().indexOf(needle) < 0) continue;
+          matched.push({
+            id: String(item.id == null ? "" : item.id),
+            text: text.length > 1000 ? text.slice(0, 1000) : text,
+            color: String(item.color == null ? "" : item.color),
+            time: Number(item.updated || item.created || item.time) || 0,
+          });
+        }
+        matched.sort(function (a, b) { return (a.time || 0) - (b.time || 0); });
+        var budget = 32 * 1024;
+        var used = 0;
+        var kept = [];
+        var truncated = false;
+        for (var m = 0; m < matched.length; m += 1) {
+          var size = JSON.stringify(matched[m]).length + 1;
+          if (used + size > budget) { truncated = true; break; }
+          used += size;
+          kept.push(matched[m]);
+        }
+        return {
+          ok: true,
+          surface: "web",
+          url: String(location.href || ""),
+          notes: kept,
+          matched: matched.length,
+          returned: kept.length,
+          truncated: truncated,
+        };
+      });
+  }
+
   var READER_QUERY_HANDLERS = {
     highlights: function (params) {
+      // 两种宿主各答各的：书籍走 App 的本机运行时，普通网页走扩展自己的
+      // 本地存储（webHighlightsV1）。谁都不在就回 null → unsupported，
+      // 不去猜另一边 —— 答错宿主的数据比答不上来更糟。
       var target = window._nativeReaderHighlights;
-      if (typeof target !== "function") return null;
-      return target.call(window, {
-        page: params.page,
-        contains: params.contains,
-      });
+      if (typeof target === "function") {
+        return target.call(window, {
+          page: params.page,
+          contains: params.contains,
+        });
+      }
+      var web = window.__bwWebHighlights;
+      if (web && typeof web.list === "function") {
+        return _webHighlightsQuery(web, params);
+      }
+      return null;
     },
     notes: function (params) {
+      // 与 highlights 同构：书里走 App 本机运行时，网页走扩展的
+      // __bwDocumentNotes（scoped repository，同样不经 Pi）。
       var target = window._nativeReaderNotes;
-      if (typeof target !== "function") return null;
-      return target.call(window, {
-        page: params.page,
-        contains: params.contains,
-      });
+      if (typeof target === "function") {
+        return target.call(window, {
+          page: params.page,
+          contains: params.contains,
+        });
+      }
+      var repository = window.__bwDocumentNotes;
+      if (repository && typeof repository.list === "function") {
+        return _webNotesQuery(repository, params);
+      }
+      return null;
     },
     search: function (params) {
       var target = window._nativeReaderSearch;

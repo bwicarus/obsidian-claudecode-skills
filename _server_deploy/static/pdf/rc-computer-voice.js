@@ -3107,6 +3107,60 @@
     });
   }
 
+  /* 网页便签的查询实现（扩展宿主）。
+   *
+   * 便签在扩展的 document-notes scoped repository 里，读要经 background，
+   * 所以这里是异步的 —— 与高亮（页面内同步 list）不同，失败方式也多一种：
+   * 仓库尚未 READY。那种情况必须如实抛出，不能当成"没有便签"：
+   * 空列表会被读成"这个网页你没记过东西"，那是一句错的断言。
+   *
+   * 锚点（anchor）不回给助手：它是页面坐标与 DOM 位置，助手用不上，
+   * 却会让每条记录大出好几倍 —— 与高亮不回 prefix/suffix 同理。 */
+  function _webNotesQuery(repository, params) {
+    return Promise.resolve()
+      .then(function () { return repository.list({}); })
+      .then(function (result) {
+        var all = result && Array.isArray(result.notes)
+          ? result.notes
+          : (Array.isArray(result) ? result : []);
+        var needle = String(params && params.contains || "")
+          .trim().toLowerCase();
+        var matched = [];
+        for (var i = 0; i < all.length; i += 1) {
+          var item = all[i];
+          if (!item || typeof item !== "object") continue;
+          var text = String(item.text == null ? "" : item.text);
+          if (needle && text.toLowerCase().indexOf(needle) < 0) continue;
+          matched.push({
+            id: String(item.id == null ? "" : item.id),
+            text: text.length > 1000 ? text.slice(0, 1000) : text,
+            color: String(item.color == null ? "" : item.color),
+            time: Number(item.updated || item.created || item.time) || 0,
+          });
+        }
+        matched.sort(function (a, b) { return (a.time || 0) - (b.time || 0); });
+        var budget = 32 * 1024;
+        var used = 0;
+        var kept = [];
+        var truncated = false;
+        for (var m = 0; m < matched.length; m += 1) {
+          var size = JSON.stringify(matched[m]).length + 1;
+          if (used + size > budget) { truncated = true; break; }
+          used += size;
+          kept.push(matched[m]);
+        }
+        return {
+          ok: true,
+          surface: "web",
+          url: String(location.href || ""),
+          notes: kept,
+          matched: matched.length,
+          returned: kept.length,
+          truncated: truncated,
+        };
+      });
+  }
+
   var READER_QUERY_HANDLERS = {
     highlights: function (params) {
       // 两种宿主各答各的：书籍走 App 的本机运行时，普通网页走扩展自己的
@@ -3126,12 +3180,20 @@
       return null;
     },
     notes: function (params) {
+      // 与 highlights 同构：书里走 App 本机运行时，网页走扩展的
+      // __bwDocumentNotes（scoped repository，同样不经 Pi）。
       var target = window._nativeReaderNotes;
-      if (typeof target !== "function") return null;
-      return target.call(window, {
-        page: params.page,
-        contains: params.contains,
-      });
+      if (typeof target === "function") {
+        return target.call(window, {
+          page: params.page,
+          contains: params.contains,
+        });
+      }
+      var repository = window.__bwDocumentNotes;
+      if (repository && typeof repository.list === "function") {
+        return _webNotesQuery(repository, params);
+      }
+      return null;
     },
     search: function (params) {
       var target = window._nativeReaderSearch;

@@ -84,10 +84,9 @@ internal static class ReaderQueryProtocol
         {
             // 高亮两边都有：书里在 App 的本机库，网页在扩展的 webHighlightsV1
             "highlights" => kind is "pdf" or "epub" or "web",
-            // 便签：书里在 App 本机库，网页在扩展的 __bwDocumentNotes（scoped
-            // repository，同样不经 Pi）。网页侧的 handler 尚未接，接上后
-            // 这里改成三个都放行即可 —— 现在放行会让请求走到执行侧才失败。
-            "notes" => kind is "pdf" or "epub",
+            // 便签：书里在 App 本机库，网页在扩展的 __bwDocumentNotes
+            // （scoped repository，同样不经 Pi）
+            "notes" => kind is "pdf" or "epub" or "web",
             // 全书搜索、目录、按页取文，都以「书有页码结构」为前提
             "search" or "page-text" => kind is "pdf" or "epub",
             "toc" => kind is "pdf",

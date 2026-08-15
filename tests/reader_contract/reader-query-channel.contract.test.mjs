@@ -765,3 +765,101 @@ test("每个查询声明自己适用哪种界面", () => {
   assert.match(fn, /"toc" => kind is "pdf"/);
   assert.match(fn, /_ => false/, "未声明的组合一律拒绝");
 });
+
+// ── 网页便签 ────────────────────────────────────────────────────────
+// 与高亮同构，但多一种失败方式：便签在扩展 background 的仓库里，读要跨进程，
+// 仓库可能尚未 READY。那种情况必须抛，不能当成"没有便签" ——
+// 空列表会被读成"这个网页你没记过东西"，那是一句错的断言。
+function webNotesQuery({ notes = [], params = {}, repository } = {}) {
+  const start = VOICE.indexOf("function _webNotesQuery(");
+  assert.notEqual(start, -1, "找不到网页便签查询实现");
+  const context = {
+    String, Number, Array, Promise, JSON,
+    location: { href: "https://example.test/a" },
+    out: null,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(
+    `${balanced(VOICE, start)}
+     out = _webNotesQuery(
+       ${repository ? "repo" : "{ list: () => Promise.resolve({ notes }) }"},
+       ${JSON.stringify(params)});`,
+    Object.assign(context, { notes, repo: repository }),
+  );
+  return context.out;
+}
+
+const WEB_NOTES = [
+  { id: "n_1", text: "第一条", color: "#fff8c5", created: 1000, updated: 1500,
+    anchor: { x: 0.3, y: 0.4, kind: "web", documentId: "d1" } },
+  { id: "n_2", text: "第二条 beta", color: "#d0ebff", created: 2000,
+    anchor: { x: 0.1, y: 0.9, kind: "web", documentId: "d1" } },
+];
+
+test("网页便签能被读到，按时间排序", async () => {
+  const value = await webNotesQuery({ notes: WEB_NOTES });
+  assert.equal(value.surface, "web");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(value.notes.map((n) => n.id))), ["n_1", "n_2"],
+  );
+  assert.equal(value.matched, 2);
+});
+
+test("不回锚点坐标", async () => {
+  // 页面坐标与 DOM 位置助手用不上，却让每条大出好几倍 ——
+  // 与高亮不回 prefix/suffix、书籍高亮不回 rects 同理。
+  const value = await webNotesQuery({ notes: WEB_NOTES });
+  for (const item of value.notes) {
+    assert.deepEqual(Object.keys(item).sort(), ["color", "id", "text", "time"]);
+  }
+});
+
+test("按文字过滤", async () => {
+  const value = await webNotesQuery({ notes: WEB_NOTES, params: { contains: "BETA" } });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(value.notes.map((n) => n.id))), ["n_2"],
+  );
+});
+
+test("仓库未就绪时抛错，不返回空列表", async () => {
+  await assert.rejects(
+    webNotesQuery({
+      repository: {
+        list: () => Promise.reject(
+          Object.assign(new Error("尚未 READY"), { code: "BW_DOCUMENT_NOTES_NOT_READY" }),
+        ),
+      },
+    }),
+    (error) => error.code === "BW_DOCUMENT_NOTES_NOT_READY",
+    "空列表会被读成「这个网页你没记过东西」",
+  );
+});
+
+test("装不下时截断并如实标注", async () => {
+  const many = Array.from({ length: 300 }, (_, index) => ({
+    id: `n_${index}`, text: "y".repeat(400), color: "#fff8c5", created: index,
+  }));
+  const value = await webNotesQuery({ notes: many });
+  assert.equal(value.truncated, true);
+  assert.equal(value.matched, 300);
+  assert.ok(value.returned < value.matched);
+});
+
+test("两种宿主各答各的，都不在则 unsupported", () => {
+  const table = VOICE.slice(
+    VOICE.indexOf("var READER_QUERY_HANDLERS = {"),
+    VOICE.indexOf("function normalizeReaderQueryRequest("),
+  );
+  const branch = table.slice(table.indexOf("notes: function"),
+    table.indexOf("search: function"));
+  assert.match(branch, /_nativeReaderNotes/, "书籍走 App 本机运行时");
+  assert.match(branch, /__bwDocumentNotes/, "网页走扩展仓库");
+  assert.match(branch, /return null;/, "都不在必须回 null → unsupported");
+});
+
+test("notes 的适用面已含 web", () => {
+  const QUERY_CS = readFileSync(new URL(
+    "../../extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderQuery.cs",
+    import.meta.url), "utf8");
+  assert.match(QUERY_CS, /"notes" => kind is "pdf" or "epub" or "web"/);
+});
