@@ -4276,3 +4276,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **Windows 安装**：停止全部 ReaderPC/Direct/MCP/专用 viewer 后安装 Direct `0.1.138` 与 ReaderPC `0.1.32`；健康接口与 viewer HTTP 200，回滚点 `install-0.1.138-20260815T075250Z-d21a5b2f`。
 - **App 发布**：功能源 `406dff7c`；Actions `31873024642` 上传 TestFlight `1.1.58 (313)`，`31873361366` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：Windows 全量 Python/handoff 仍命中已登记的 POSIX `fcntl` 与 Windows fixture/编码基线；未部署 Pi 或扩展正式渠道，待 TestFlight VALID 后真机验收 21 工具、连接耗时与中文标签。
+
+## Codex：Safari 扩展运行时代次热修（2026-08-15 JST）
+- **根因/改动**：App `313` 改了扩展运行资源却仍沿用 `0.2.108`，Safari 更新后可能混用旧 worker/监听器；现将 manifest 与后台 build marker 同步升为 `0.2.109`，不回滚工具或 UI。
+- **怎么验的**：真实 `311/313` 产物逐文件审计确认无漏包和语法错误；Safari 打包成功、Reader Node 全量通过，提交 `31a66b1d` 已推送。
+- **发布事实**：Actions `31874820934` 上传 TestFlight `1.1.58 (317)`；`31875208883` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **下一步**：用户安装 build `317` 后重新载入原页面，验收扩展顶栏与侧栏点击；若旧页面仍保留死 DOM，关闭再开启扩展并重开该页。
