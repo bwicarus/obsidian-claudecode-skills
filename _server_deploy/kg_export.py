@@ -58,6 +58,24 @@ def _kg_dir() -> Path:
     return root / "knowledge_graph"
 
 
+# 目录里不止书：建图会留下 `.bak` / `.pre` / `.scan` 快照，另有一份 `kg_audit.json`。
+# 它们的结构与图相同，所以不会解析失败 —— 只会静静地变成书架上多出来的几本
+# 不存在的书。这份排除表照 assistant.py 的（现有最严的一份）。
+_NON_BOOK_MARKERS = (".bak", ".pre", ".scan", "_archive")
+_NON_BOOK_NAMES = frozenset({"kg_audit.json"})
+
+
+def _book_files(directory: Path) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    return sorted(
+        path
+        for path in directory.glob("*.json")
+        if path.name not in _NON_BOOK_NAMES
+        and not any(marker in path.name for marker in _NON_BOOK_MARKERS)
+    )
+
+
 def graph_only(kg: dict) -> dict:
     """剥掉跟学习者有关的部分，只留图。
 
@@ -97,6 +115,13 @@ def _safe_book(name: str) -> str:
         abort(400)
     if "/" in value or "\\" in value or value.startswith("."):
         abort(400)
+    # 索引里排除的东西，单本端点也要排除 —— 否则索引说"没有这本"，
+    # 直接点名却拿得到，两个端点各说各话。
+    filename = f"{value}.json"
+    if filename in _NON_BOOK_NAMES or any(
+        marker in filename for marker in _NON_BOOK_MARKERS
+    ):
+        abort(404)
     return value
 
 
@@ -121,26 +146,24 @@ def register_kg_export(app, require_owner) -> None:
     def api_kg_index():
         if not require_owner():
             abort(401)
-        directory = _kg_dir()
         books = []
-        if directory.is_dir():
-            for path in sorted(directory.glob("*.json")):
-                try:
-                    graph = _load_graph(path)
-                except Exception:
-                    # 一本书坏了不该让整个索引失败 —— 那会让电脑侧以为
-                    # 一本书都没有。跳过它，但把它列出来。
-                    books.append({
-                        "book": path.stem,
-                        "error": "unreadable",
-                    })
-                    continue
+        for path in _book_files(_kg_dir()):
+            try:
+                graph = _load_graph(path)
+            except Exception:
+                # 一本书坏了不该让整个索引失败 —— 那会让电脑侧以为
+                # 一本书都没有。跳过它，但把它列出来。
                 books.append({
                     "book": path.stem,
-                    "revision": revision_of(graph),
-                    "nodes": len(graph.get("nodes") or []),
-                    "edges": len(graph.get("edges") or []),
+                    "error": "unreadable",
                 })
+                continue
+            books.append({
+                "book": path.stem,
+                "revision": revision_of(graph),
+                "nodes": len(graph.get("nodes") or []),
+                "edges": len(graph.get("edges") or []),
+            })
         return jsonify({
             "contract": CONTRACT,
             "ok": True,

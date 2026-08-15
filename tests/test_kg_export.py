@@ -195,3 +195,41 @@ class EndpointTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NonBookFilesTest(unittest.TestCase):
+    """目录里不止书。
+
+    建图会留下 `.bak` / `.pre` / `.scan` 快照，另有一份 `kg_audit.json`。
+    它们结构与图相同，所以不会解析失败 —— 只会静静地变成书架上多出来的
+    几本不存在的书，然后被同步到电脑上，然后被 AI 当成用户在读的书。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name) / "knowledge_graph"
+        self.dir.mkdir(parents=True)
+        self._original = KG._kg_dir
+        KG._kg_dir = lambda: self.dir
+        for name in ("LADR.json", "LADR.bak.json", "LADR.pre.json",
+                     "LADR.scan.json", "kg_audit.json"):
+            (self.dir / name).write_text(
+                json.dumps({"book": "x", "nodes": [], "edges": []}),
+                encoding="utf-8")
+
+    def tearDown(self):
+        KG._kg_dir = self._original
+        self._tmp.cleanup()
+
+    def test_index_lists_only_real_books(self):
+        names = [p.stem for p in KG._book_files(self.dir)]
+        self.assertEqual(names, ["LADR"],
+                         "备份与审计文件不是书，不该出现在书架上")
+
+    def test_named_lookup_agrees_with_the_index(self):
+        # 索引说没有、直接点名却拿得到，是两个端点各说各话。
+        for excluded in ("LADR.bak", "kg_audit", "LADR.scan"):
+            with self.subTest(book=excluded):
+                with self.assertRaises(Exception):
+                    KG._safe_book(excluded)
+        self.assertEqual(KG._safe_book("LADR"), "LADR")
