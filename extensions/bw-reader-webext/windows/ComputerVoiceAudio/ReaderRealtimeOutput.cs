@@ -1052,6 +1052,22 @@ internal sealed class ReaderRealtimeOutputBroker
     private static readonly TimeSpan DeliveryTimeout = TimeSpan.FromSeconds(20);
     private const int MaximumPendingOutputs = 16;
 
+    // WSS 连上与「这个 source 可以收东西」不是同一时刻:连接在
+    // DirectBridgeServer 就建立了,能回传要等 DirectBridgeProtocol 的
+    // visual-register/Attach。中间那段空窗里,快照是 ready、health 也说
+    // contextConnected,写回却立刻报来源离线 —— 用户看到的就是这个。
+    //
+    // 所以这里等一小会儿,**只等注册,不重发**。区别要紧:此刻还没有任何东西
+    // 发出去过,等的是能不能发;而一旦 SendAsync 抛了错或租约中途退休,
+    // 写入结果就未知了,那时重试会写出第二条,绝不能等同处理。
+    //
+    // 上限刻意短。阅读器里用户是在等着的,让他为一次写便签站在那里数秒
+    // 比失败更难受;重连退避第一档就在一秒上下,盖住它就够了。
+    private static readonly TimeSpan SourceRegistrationWait =
+        TimeSpan.FromMilliseconds(2_500);
+    private static readonly TimeSpan SourceRegistrationPoll =
+        TimeSpan.FromMilliseconds(50);
+
     private sealed record PendingOutput(
         ReaderRealtimeOutputRequest Request,
         ReaderContextSourceLease Lease,
@@ -1076,16 +1092,15 @@ internal sealed class ReaderRealtimeOutputBroker
         ReaderRealtimeOutputRequest request,
         CancellationToken cancellationToken)
     {
-        if (
-            !_router.TryGetLease(
-                request.SourceInstanceId,
-                out ReaderContextSourceLease? lease)
-            || lease is null
-        )
+        ReaderContextSourceLease? lease = await WaitForSourceAsync(
+            request.SourceInstanceId,
+            cancellationToken).ConfigureAwait(false);
+        if (lease is null)
         {
             throw Failure(
                 "BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE",
-                "指定 Reader 页面来源当前不在线",
+                "指定 Reader 页面来源当前不在线（已等待 "
+                    + $"{SourceRegistrationWait.TotalSeconds:0.#} 秒仍未注册）",
                 retryable: true);
         }
         PendingOutput pending = new(
@@ -1201,6 +1216,36 @@ internal sealed class ReaderRealtimeOutputBroker
             }
             _pending.Remove(ack.Correlation);
             pending.Completion.TrySetResult(ack);
+        }
+    }
+
+    // 等这个 source 完成注册。等到了给租约,等不到给 null。
+    //
+    // 轮询而不是让 router 发信号,是因为只有这一条路径需要等:为一个局部需求
+    // 去改共享的 router 语义,代价比每 50 毫秒查一次字典大得多。
+    private async Task<ReaderContextSourceLease?> WaitForSourceAsync(
+        string sourceInstanceId,
+        CancellationToken cancellationToken)
+    {
+        DateTimeOffset deadline = DateTimeOffset.UtcNow + SourceRegistrationWait;
+        while (true)
+        {
+            if (
+                _router.TryGetLease(
+                    sourceInstanceId,
+                    out ReaderContextSourceLease? lease)
+                && lease is not null
+            )
+            {
+                return lease;
+            }
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                return null;
+            }
+            await Task.Delay(
+                SourceRegistrationPoll,
+                cancellationToken).ConfigureAwait(false);
         }
     }
 
