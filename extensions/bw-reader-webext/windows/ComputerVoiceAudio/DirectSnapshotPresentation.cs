@@ -1907,6 +1907,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
     private readonly int _listenPort;
     private readonly string _viewerUrl;
     private readonly string _profilePath;
+    private readonly bool _manageViewerProcess;
     private readonly object _gate = new();
     private Process? _viewerProcess;
     private string? _viewerOwnerId;
@@ -1920,7 +1921,8 @@ internal sealed class DirectSnapshotViewer : IDisposable
 
     internal DirectSnapshotViewer(
         string snapshotPath,
-        int listenPort)
+        int listenPort,
+        bool manageViewerProcess = true)
     {
         _snapshotPath = System.IO.Path.GetFullPath(snapshotPath);
         _listenPort = listenPort;
@@ -1933,6 +1935,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
                     "snapshot state path has no directory",
                     nameof(snapshotPath)),
             "reader-context-viewer-profile");
+        _manageViewerProcess = manageViewerProcess;
     }
 
     internal Task HandleViewerAsync(HttpContext context)
@@ -2154,6 +2157,10 @@ internal sealed class DirectSnapshotViewer : IDisposable
         string contextDeliveryMode,
         bool enabled)
     {
+        if (!_manageViewerProcess)
+        {
+            return;
+        }
         if (!ShouldOpenForServiceIntent(contextDeliveryMode, enabled))
         {
             CloseForConnection(ServiceIntentOwner);
@@ -2251,6 +2258,10 @@ internal sealed class DirectSnapshotViewer : IDisposable
         lock (_gate)
         {
             _disposed = true;
+            if (!_manageViewerProcess)
+            {
+                return;
+            }
             StopViewerProcessBestEffort();
             CloseStaleViewerWindowsBestEffort();
         }

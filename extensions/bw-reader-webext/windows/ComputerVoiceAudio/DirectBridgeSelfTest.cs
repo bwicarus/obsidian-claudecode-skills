@@ -1728,7 +1728,8 @@ internal static class DirectBridgeSelfTest
             new DirectBridgeConfigStore(configPath),
             new FakeDirectAppLauncher(),
             serverMedia,
-            codexVoiceControl: CreateInactiveCodexVoiceControl());
+            codexVoiceControl: CreateInactiveCodexVoiceControl(),
+            manageSnapshotViewerProcess: false);
         await server.DisposeAsync().ConfigureAwait(false);
         await server.DisposeAsync().ConfigureAwait(false);
         Require(
@@ -1746,7 +1747,8 @@ internal static class DirectBridgeSelfTest
             new DirectBridgeConfigStore(configPath),
             new FakeDirectAppLauncher(),
             exhaustedMedia,
-            codexVoiceControl: CreateInactiveCodexVoiceControl());
+            codexVoiceControl: CreateInactiveCodexVoiceControl(),
+            manageSnapshotViewerProcess: false);
         bool boundedFailureObserved = false;
         try
         {
@@ -9199,7 +9201,8 @@ internal static class DirectBridgeSelfTest
             new FakeDirectAppLauncher(),
             new FakeDirectMediaAdapter(),
             snapshotContextAdapter: adapter,
-            codexVoiceControl: CreateInactiveCodexVoiceControl());
+            codexVoiceControl: CreateInactiveCodexVoiceControl(),
+            manageSnapshotViewerProcess: false);
 
         DefaultHttpContext optionsContext = SnapshotPostContext(
             HttpMethods.Options,
@@ -10942,7 +10945,8 @@ internal static class DirectBridgeSelfTest
 
         using DirectSnapshotViewer localViewer = new(
             snapshotPath,
-            DirectBridgeContract.DefaultListenPort);
+            DirectBridgeContract.DefaultListenPort,
+            manageViewerProcess: false);
         DefaultHttpContext viewerContext = new();
         viewerContext.Request.Method = HttpMethods.Get;
         viewerContext.Request.Host = new HostString(

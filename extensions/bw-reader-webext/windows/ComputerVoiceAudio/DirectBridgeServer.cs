@@ -72,7 +72,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         IDirectMediaAdapter mediaAdapter,
         IDirectContextAdapter? contextAdapter = null,
         IDirectSnapshotContextAdapter? snapshotContextAdapter = null,
-        DirectCodexVoiceControl? codexVoiceControl = null)
+        DirectCodexVoiceControl? codexVoiceControl = null,
+        bool manageSnapshotViewerProcess = true)
     {
         _configStore = configStore;
         _snapshotContextAdapter = snapshotContextAdapter;
@@ -105,7 +106,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 configStore.InstallationRoot,
                 "runtime",
                 FileDirectSnapshotContextAdapter.SnapshotFileName),
-            config.ListenPort);
+            config.ListenPort,
+            manageSnapshotViewerProcess);
         _codexVoiceControl = codexVoiceControl
             ?? DirectCodexVoiceControl.CreateProduction(
                 Path.Combine(runtimeDirectory, "codex-voice-keepalive.json"),
