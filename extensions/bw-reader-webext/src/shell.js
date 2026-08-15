@@ -32,9 +32,18 @@
   // iOS Safari 顶部手势带的让位高度。只在**扩展跑在 Safari 网页里**时给值:
   //  · App 内的阅读器由原生壳承载,没有这条手势带,给了反而白白让出一截;
   //  · 桌面浏览器同理。
-  // 44px 是量出来的:用户报告"几乎贴着按钮下边缘才能点中",而按钮高 36px、
-  // 顶栏上边距若干 —— 能点中的那一线正好在 40px 上下。取 44 留一点余量,
-  // 同时仍在 env(safe-area-inset-top) 的量级内,不至于把顶栏推到显眼的位置。
+  // 40px = 实测。iPadOS 18.7 / Safari 标签页(inner 1376x900, dpr 2,
+  // safe-area-inset-top 实测为 0)下,顶部约 40px 的触摸不送达页面:
+  // 那一带归 Safari 自己的下拉/地址栏手势,页面连 window 捕获阶段都收不到
+  // 事件 —— 这也正是"点了却连诊断都不出一行"的原因(不是被遮挡、也不是被
+  // 谁 stopPropagation:自检显示按钮中心命中的就是按钮自己)。
+  //
+  // 早期版本没这个毛病,不是因为当时能点到那一带,而是顶栏默认收起
+  // (translateY(-102%)),要点 pill 才滑下来,而 pill 挂在 48px 处、本就在
+  // 死区之外。后来顶栏改成默认常驻,按钮才长期停在这一带里。
+  //
+  // 先前取 44 是从"贴着下边缘可点"反推的,偏大了十来像素(顶栏被撑到 92px,
+  // 用户直接反馈"看着很怪")。收到 40 刚好让开,不多让。
   try {
     const ua = navigator.userAgent || "";
     const iOSLike = /iPad|iPhone|iPod/.test(ua) ||
@@ -42,7 +51,7 @@
     // 扩展在 App 内的 WKWebView 里也会跑(书籍 PWA 场景),那时 __bwPwaBridge
     // 存在;只有真正的 Safari 网页才需要让位。
     if (iOSLike && !window.__bwPwaBridge && !window.__bwRootNative) {
-      root.style.setProperty("--bw-ios-gesture-inset", "44px");
+      root.style.setProperty("--bw-ios-gesture-inset", "40px");
     }
   } catch (_) {}
 
@@ -91,7 +100,11 @@ button{-webkit-appearance:none;appearance:none}
    App 里没这问题是因为它自己拥有 WebView,可以设
    contentInsetAdjustmentBehavior=.never;扩展寄居在别人的标签页里没这个权力。) */
 #header{padding-top:calc(env(safe-area-inset-top) + var(--bw-ios-gesture-inset,0px))!important;
-        height:calc(48px + env(safe-area-inset-top) + var(--bw-ios-gesture-inset,0px))!important}
+        height:calc(42px + env(safe-area-inset-top) + var(--bw-ios-gesture-inset,0px))!important}
+/* 按钮压到 30px:让开死区必然要加高度,那就从别处收一点还回去。
+   40(死区) + 30(按钮) + 12(上下留白) = 82,比原来的 48 高 34,而不是高 44。
+   30px 仍在 iOS 建议的最小可点尺寸之上(按钮宽 38+,面积够)。 */
+#header button{height:30px!important;min-width:34px!important;padding:0 9px!important}
 /* 侧栏同理:面板本体照旧铺满整个右侧,只把 tab 栏压到死区之下。 */
 #ep-side-tabbar{padding-top:calc(6px + var(--bw-ios-gesture-inset,0px))!important}
 /* 收起顶栏后用来重新展开的 pill:rc-ui.js:46 在收起态把它设成 top:0 —— 正好
