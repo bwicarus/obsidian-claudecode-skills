@@ -71,7 +71,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         IDirectAppLauncher appLauncher,
         IDirectMediaAdapter mediaAdapter,
         IDirectContextAdapter? contextAdapter = null,
-        IDirectSnapshotContextAdapter? snapshotContextAdapter = null)
+        IDirectSnapshotContextAdapter? snapshotContextAdapter = null,
+        DirectCodexVoiceControl? codexVoiceControl = null)
     {
         _configStore = configStore;
         _snapshotContextAdapter = snapshotContextAdapter;
@@ -105,17 +106,18 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 "runtime",
                 FileDirectSnapshotContextAdapter.SnapshotFileName),
             config.ListenPort);
-        _codexVoiceControl = DirectCodexVoiceControl.CreateProduction(
-            Path.Combine(runtimeDirectory, "codex-voice-keepalive.json"),
-            appLauncher,
-            keepActiveChanged: enabled =>
-                _snapshotViewer.SynchronizeServiceIntent(
-                    _configStore.Load().ContextDeliveryMode,
-                    enabled),
-            automaticRecoveryFailed: exception =>
-                _ = _coordinator.RecordFailure(
-                    exception,
-                    "codex-voice-keepalive"));
+        _codexVoiceControl = codexVoiceControl
+            ?? DirectCodexVoiceControl.CreateProduction(
+                Path.Combine(runtimeDirectory, "codex-voice-keepalive.json"),
+                appLauncher,
+                keepActiveChanged: enabled =>
+                    _snapshotViewer.SynchronizeServiceIntent(
+                        _configStore.Load().ContextDeliveryMode,
+                        enabled),
+                automaticRecoveryFailed: exception =>
+                    _ = _coordinator.RecordFailure(
+                        exception,
+                        "codex-voice-keepalive"));
         _documentCorpus = new ReaderDocumentCorpusStore(
             Path.Combine(
                 runtimeDirectory,

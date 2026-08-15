@@ -1877,6 +1877,32 @@ if (window.__bwPwaProviderOnly) return;
               mark: _caVocabMark
             });
           };
+        } else if (_caFn === '_bwWebHighlightByText') {
+          var _caWebArg = Array.isArray(p.args) ? p.args[0] : null;
+          var _caWebExact = _caWebArg && typeof _caWebArg === 'object'
+            ? String(_caWebArg.exact == null ? '' : _caWebArg.exact) : '';
+          if (!_caWebExact.trim() || _caWebExact.length > 2000) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          var _caWebColor = _caWebArg && typeof _caWebArg.color === 'string'
+            ? _caWebArg.color : '';
+          var _caWebNote = _caWebArg && typeof _caWebArg.note === 'string'
+            ? _caWebArg.note : '';
+          if (_caWebColor.length > 32 || _caWebNote.length > 2000) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window._bwWebHighlightByText;
+          _caCall = function (target) {
+            return target.call(window, {
+              exact: _caWebExact,
+              prefix: _caWebArg && typeof _caWebArg.prefix === 'string'
+                ? _caWebArg.prefix.slice(0, 200) : '',
+              suffix: _caWebArg && typeof _caWebArg.suffix === 'string'
+                ? _caWebArg.suffix.slice(0, 200) : '',
+              color: _caWebColor,
+              note: _caWebNote
+            });
+          };
         } else {
           throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
         }

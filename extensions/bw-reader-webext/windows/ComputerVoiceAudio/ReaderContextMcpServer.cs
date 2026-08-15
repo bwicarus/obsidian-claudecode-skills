@@ -26,6 +26,7 @@ internal sealed class ReaderContextMcpServer
     internal const string MakeNoteToolName = "reader_make_note";
     internal const string LookupToolName = "reader_lookup_word";
     internal const string MarkVocabToolName = "reader_mark_vocab";
+    internal const string WebHighlightToolName = "reader_web_highlight";
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
@@ -654,6 +655,78 @@ internal sealed class ReaderContextMcpServer
                     + "or stale-revision ranges and never falls back to text "
                     + "search. Do not retry an unknown mutation outcome.",
                 ["inputSchema"] = BuildHighlightRangeArgumentsSchema(),
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = WebHighlightToolName,
+                ["description"] =
+                    "Highlight a passage on the web page the user is reading. "
+                    + "Give the exact text as it appears in the page, copied "
+                    + "verbatim from the snapshot - the page locates it "
+                    + "itself, because you can name a sentence but not a DOM "
+                    + "position. If that sentence occurs more than once, pass "
+                    + "prefix and suffix (the text just before and just "
+                    + "after) so the right occurrence is chosen. Fails "
+                    + "plainly when the text cannot be found, rather than "
+                    + "marking an approximate spot: a highlight in the wrong "
+                    + "place is worse than none, because the user reads it as "
+                    + "their own mistake. Works on ordinary web pages, not in "
+                    + "books - use reader_highlight_range there. Do not retry "
+                    + "an unknown outcome.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["exact"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 2000,
+                            ["description"] =
+                                "The passage, copied verbatim from the page.",
+                        },
+                        ["prefix"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["maxLength"] = 200,
+                            ["description"] =
+                                "Text immediately before it, to disambiguate "
+                                + "a repeated sentence. Empty if not needed.",
+                        },
+                        ["suffix"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["maxLength"] = 200,
+                            ["description"] = "Text immediately after it.",
+                        },
+                        ["color"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["maxLength"] = 32,
+                            ["description"] =
+                                "CSS colour. Empty for the default.",
+                        },
+                        ["note"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["maxLength"] = 2000,
+                            ["description"] = "Optional note attached to it.",
+                        },
+                    },
+                    ["required"] = new JsonArray
+                    {
+                        "exact", "prefix", "suffix", "color", "note",
+                    },
+                    ["additionalProperties"] = false,
+                },
                 ["annotations"] = new JsonObject
                 {
                     ["readOnlyHint"] = false,
@@ -1672,6 +1745,54 @@ internal sealed class ReaderContextMcpServer
                 id,
                 "lookup",
                 new JsonObject { ["word"] = lookupWord },
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == WebHighlightToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            string Field(string name, int maximum)
+            {
+                if (arguments.ValueKind != JsonValueKind.Object
+                    || !arguments.TryGetProperty(name, out JsonElement value)
+                    || value.ValueKind != JsonValueKind.String)
+                {
+                    return string.Empty;
+                }
+                string text = value.GetString() ?? string.Empty;
+                return text.Length > maximum ? string.Empty : text;
+            }
+            string webExact = Field("exact", 2_000);
+            if (string.IsNullOrWhiteSpace(webExact))
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid web highlight text",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            JsonObject webPayload = new()
+            {
+                ["fn"] = "_bwWebHighlightByText",
+                ["args"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["exact"] = webExact,
+                        ["prefix"] = Field("prefix", 200),
+                        ["suffix"] = Field("suffix", 200),
+                        ["color"] = Field("color", 32),
+                        ["note"] = Field("note", 2_000),
+                    },
+                },
+            };
+            await SendReaderOutputAsync(
+                id,
+                "client-action",
+                webPayload,
                 cancellationToken).ConfigureAwait(false);
             return;
         }

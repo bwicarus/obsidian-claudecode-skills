@@ -89,6 +89,38 @@
   document.addEventListener('selectionchange',()=>{try{const s=getSelection();if(s&&s.rangeCount&&!s.isCollapsed&&!window.__bwShadow.contains(s.anchorNode))currentRange=s.getRangeAt(0).cloneRange();}catch(_){}},{passive:true});
 
   window.__bwWebHighlights={
+    /* 按文字写入 —— 给助手用的入口。
+     *
+     * 助手没有选区：它看到的是快照里的正文，指得出「哪一句」，指不出
+     * DOM Range。所以这里复用 locate() 的定位 —— 与重画已有高亮同一套
+     * 打分（exact 命中 + prefix/suffix 各加分），页面上重复出现的句子
+     * 才能选对那一处。
+     *
+     * 定位不到就明确失败，绝不退而求其次画在第一个近似位置：画错地方的
+     * 高亮比没有更糟 —— 用户会以为自己标错了，而且要逐条核对才能发现。
+     */
+    async saveByText(payload){
+      const exact=String(payload?.exact||payload?.text||'').trim();
+      if(!exact)throw new Error('没有可高亮的文字');
+      if(exact.length>2000)throw new Error('要高亮的文字过长');
+      const probe={exact,prefix:String(payload?.prefix||''),suffix:String(payload?.suffix||'')};
+      const range=locate(probe);
+      if(!range)throw new Error('这段文字在当前页面上找不到，可能页面已变化');
+      const idx=textIndex();
+      const start=absoluteOffset(idx,range.startContainer,range.startOffset);
+      const end=absoluteOffset(idx,range.endContainer,range.endOffset);
+      if(start<0||end<start)throw new Error('这个区域暂时无法建立稳定锚点');
+      const rec={id:'wh_'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
+        url:PAGE,text:exact,exact,
+        prefix:idx.text.slice(Math.max(0,start-48),start),
+        suffix:idx.text.slice(end,end+48),
+        color:String(payload?.color||'#fff59d'),
+        note:String(payload?.note||''),sentence:String(payload?.sentence||''),
+        kind:String(payload?.kind||'note'),time:Date.now()};
+      records.push(rec);paint(rec,range.cloneRange());
+      await persist();
+      return rec;
+    },
     async save(color,meta){
       let r=currentRange;try{const s=getSelection();if(s&&s.rangeCount&&!s.isCollapsed)r=s.getRangeAt(0).cloneRange();}catch(_){}
       if(!r||r.collapsed)throw new Error('原网页选区已经失效，请重新选择');
@@ -129,6 +161,12 @@
       try{RC.toast?.('网页高亮暂时载入失败，刷新页面可重试');}catch(_){}
     });
   }
+  // 受信入口：桥接的 client-action 只认这个名字。经 __bwWebHighlights 转一道，
+  // 调用方拿不到内部实现，也绕不过其中的定位与长度校验 —— 与 App 侧
+  // _nativeReaderCreateNote 同一形态。
+  window._bwWebHighlightByText = function (payload) {
+    return window.__bwWebHighlights.saveByText(payload);
+  };
   restoreHighlights(1);
   const mo=new MutationObserver(()=>{clearTimeout(applyTimer);applyTimer=setTimeout(applyAll,800);});
   if(document.body)mo.observe(document.body,{childList:true,subtree:true});

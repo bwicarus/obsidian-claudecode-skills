@@ -341,7 +341,8 @@ internal static class ReaderRealtimeOutputProtocol
             or "_nativeReaderCreateNote"
             or "_nativeReaderEditNote"
             or "_nativeReaderMakeNote"
-            or "_nativeReaderMarkVocabulary"))
+            or "_nativeReaderMarkVocabulary"
+            or "_bwWebHighlightByText"))
         {
             throw Invalid("Reader 客户端动作不在白名单内");
         }
@@ -349,6 +350,33 @@ internal static class ReaderRealtimeOutputProtocol
         if (args.ValueKind != JsonValueKind.Array)
         {
             throw Invalid("Reader 客户端动作参数必须是数组");
+        }
+        if (fn is "_bwWebHighlightByText")
+        {
+            // 只给文字与上下文，不给坐标：助手看到的是快照里的正文，
+            // 它指得出"哪一句"，指不出 DOM 位置。页面自己用 exact +
+            // prefix/suffix 打分定位，重复句子才能选对那一处。
+            if (args.GetArrayLength() != 1
+                || args[0].ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 网页高亮需要一个对象");
+            }
+            JsonElement web = args[0];
+            DirectJsonValidation.RequireNoDuplicateKeys(web);
+            Exact(web, "exact", "prefix", "suffix", "color", "note");
+            string webExact = Text(web, "exact", 2_000);
+            if (string.IsNullOrWhiteSpace(webExact))
+            {
+                throw Invalid("Reader 网页高亮文字为空");
+            }
+            // 这四个允许为空：上下文可以没有（短句不需要消歧），
+            // 颜色与备注本就是可选。默认的 Text() 会把空串当无效，
+            // 那样助手每次都得编一个 prefix 才能画高亮。
+            _ = Text(web, "prefix", 200, allowEmpty: true);
+            _ = Text(web, "suffix", 200, allowEmpty: true);
+            _ = Text(web, "color", 32, allowEmpty: true);
+            _ = Text(web, "note", 2_000, allowEmpty: true);
+            return;
         }
         if (fn is "_nativeReaderMarkVocabulary")
         {

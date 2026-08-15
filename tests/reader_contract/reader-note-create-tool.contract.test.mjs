@@ -446,3 +446,90 @@ test("存笔记工具声明为非幂等：重试会写出第二份文件", () =>
     "不写清楚，一次超时会变成两份笔记",
   );
 });
+
+// ── 网页高亮（AI 在普通网页上画）──────────────────────────────────
+// 助手没有选区：它看到的是快照里的正文，指得出「哪一句」，指不出 DOM Range。
+// 所以协议只收文字与上下文，由页面自己用 exact + prefix/suffix 打分定位 ——
+// 与便签「只收文本、位置由 App 填」是同一条原则的另一面。
+const WEBHL = read("extensions/bw-reader-webext/src/web-highlights.js");
+
+test("按文字定位，重复出现时用上下文消歧", () => {
+  const fn = WEBHL.slice(
+    WEBHL.indexOf("async saveByText("),
+    WEBHL.indexOf("async save(color,meta)"),
+  );
+  assert.match(fn, /locate\(probe\)/, "复用重画已有高亮那套定位，不另写一份");
+  assert.match(fn, /prefix.*suffix|suffix.*prefix/s, "上下文要参与定位");
+});
+
+test("定位不到就失败，绝不画在近似位置", () => {
+  const fn = WEBHL.slice(
+    WEBHL.indexOf("async saveByText("),
+    WEBHL.indexOf("async save(color,meta)"),
+  );
+  assert.match(fn, /if\(!range\)throw/,
+    "画错地方的高亮比没有更糟：用户会以为是自己标错了");
+  assert.doesNotMatch(fn, /\|\|\s*records\[0\]|first|近似/,
+    "不得退而求其次");
+});
+
+test("受信入口经门面转一道，绕不过校验", () => {
+  assert.match(WEBHL, /window\._bwWebHighlightByText\s*=/);
+  const mount = WEBHL.slice(WEBHL.indexOf("window._bwWebHighlightByText"),
+    WEBHL.indexOf("window._bwWebHighlightByText") + 200);
+  assert.match(mount, /__bwWebHighlights\.saveByText/,
+    "不直接暴露内部实现");
+});
+
+test("执行侧只把文字与上下文交给入口", async () => {
+  const seen = [];
+  const context = dispatch({
+    fn: "_bwWebHighlightByText",
+    args: [{ exact: "一句话", prefix: "前", suffix: "后", color: "#ff0",
+             note: "", x: 999, id: "伪造" }],
+    host: { _bwWebHighlightByText: (input) => { seen.push(input); return "ok"; } },
+  });
+  assert.equal(context.thrown, null);
+  await context.work;
+  assert.deepEqual(
+    Object.keys(JSON.parse(JSON.stringify(seen[0]))).sort(),
+    ["color", "exact", "note", "prefix", "suffix"],
+    "夹带的坐标与 id 必须被丢弃",
+  );
+});
+
+test("空文字与超长一律拒绝，且不触碰宿主", () => {
+  for (const exact of ["", "   ", "x".repeat(2001)]) {
+    let called = false;
+    const context = dispatch({
+      fn: "_bwWebHighlightByText",
+      args: [{ exact, prefix: "", suffix: "", color: "", note: "" }],
+      host: { _bwWebHighlightByText: () => { called = true; } },
+    });
+    assert.equal(called, false);
+    assert.match(String(context.thrown && context.thrown.message),
+      /CLIENT_ACTION_INVALID:_bwWebHighlightByText/);
+  }
+});
+
+test("桥接允许可选字段为空", () => {
+  // 默认的 Text() 把空串当无效。不放开的话，助手每次都得编一个 prefix
+  // 才能画高亮 —— 而编出来的上下文正好会让定位失准。
+  assert.match(BRIDGE, /"_bwWebHighlightByText"/);
+  assert.match(BRIDGE, /Text\(web, "prefix", 200, allowEmpty: true\)/);
+  assert.match(BRIDGE, /Text\(web, "note", 2_000, allowEmpty: true\)/);
+  assert.match(BRIDGE, /Exact\(web, "exact", "prefix", "suffix", "color", "note"\)/);
+});
+
+test("工具声明为非幂等，并说明与书籍工具的分工", () => {
+  assert.match(MCP, /"reader_web_highlight"/);
+  const start = MCP.indexOf('["name"] = WebHighlightToolName');
+  // 截取要覆盖到 annotations —— 描述本身就占两千多字符，窗口小了
+  // 会截在 inputSchema 里，然后报一个"没有 idempotentHint"的假失败。
+  const prose = MCP.slice(start, start + 4600).replace(/"\s*\+\s*"/g, "");
+  assert.match(prose, /\["idempotentHint"\] = false/);
+  assert.match(prose, /reader_highlight_range/,
+    "要指明书里该用哪个工具，否则助手会在书里调这个");
+  assert.match(prose, /worse than none/,
+    "要说明定位失败时为何不做近似匹配");
+});
