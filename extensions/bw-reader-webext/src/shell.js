@@ -83,12 +83,20 @@ button{-webkit-appearance:none;appearance:none}
    rc-sidedrawer.js 是 App/扩展共用的原件,绝不能为此改动它。
 
    之前三轮都在改命中逻辑(代际、composedPath、宿主几何),而位置才是原因。 */
-#header{top:var(--bw-ios-gesture-inset,0px)!important}
-#ep-side{top:var(--bw-ios-gesture-inset,0px)!important}
+/* 修法不是把整条顶栏往下推 —— 那样看着就是"悬在半空",用户第一眼就说怪。
+   顶栏**仍然贴 top:0**,背景一路铺到屏幕最顶端,外观与 App 内一致;
+   只是把里面的**可点内容**用 padding 压到死区之下。死区那几十像素由顶栏
+   自己的背景填满,看不出让位,按钮却落在能收到触摸的区域里。
+   (Safari 的顶部手势带归系统所有,网页无法用 touch-action 之类夺回 ——
+   App 里没这问题是因为它自己拥有 WebView,可以设
+   contentInsetAdjustmentBehavior=.never;扩展寄居在别人的标签页里没这个权力。) */
+#header{padding-top:calc(env(safe-area-inset-top) + var(--bw-ios-gesture-inset,0px))!important;
+        height:calc(48px + env(safe-area-inset-top) + var(--bw-ios-gesture-inset,0px))!important}
+/* 侧栏同理:面板本体照旧铺满整个右侧,只把 tab 栏压到死区之下。 */
+#ep-side-tabbar{padding-top:calc(6px + var(--bw-ios-gesture-inset,0px))!important}
 /* 收起顶栏后用来重新展开的 pill:rc-ui.js:46 在收起态把它设成 top:0 —— 正好
    落回死区。真机实测(用户报告):顶栏一收起就再也打不开,界面被锁死。
-   展开态的 pill 挂在顶栏下沿(48px+安全区),本来就在死区之外,只有收起态
-   这一条需要让位。 */
+   它是个独立小控件、没有背景条可以填充,只能整体下移。 */
 .rc-topbar-pill[data-collapsed="1"]{top:var(--bw-ios-gesture-inset,0px)!important}
 /* pane 占位文案 */
 .bw-pane-todo{padding:18px;color:var(--rc-text-muted,#8a9bb4);font-size:13px;line-height:1.8}
