@@ -266,10 +266,14 @@
     if(Math.hypot((e.clientX||0)-s.x,(e.clientY||0)-s.y)>36)return;
     suppressTapClick=null;e.preventDefault();e.stopImmediatePropagation();
   }
-  // pen 落点该放行不画：扩展自己的工具条 + 网页可交互元素(让 Apple Pencil 仍能点按钮/链接、在输入框写字)
-  function _ignore(e){const t=e.target,cp=e.composedPath?e.composedPath():[];
+  // document capture 看到 Shadow DOM 事件时，Safari 会把 event.target 重定向成
+  // #bw-reader-host；必须沿 composedPath 找真实控件，否则 Apple Pencil 会把顶栏/
+  // 侧栏按钮误当画布并在 capture 阶段截断事件。
+  const INTERACTIVE_SELECTOR='button,a,input,textarea,select,summary,label,[role="button"],[contenteditable="true"],[contenteditable=""]';
+  function _ignore(e){const t=e&&e.target,cp=e&&typeof e.composedPath==='function'?e.composedPath():[];
     if(cp.includes(tools))return true;
-    if(t&&t.closest&&t.closest('button,a,input,textarea,select,summary,label,[role="button"],[contenteditable="true"],[contenteditable=""]'))return true;
+    if(cp.some(n=>n&&typeof n.matches==='function'&&n.matches(INTERACTIVE_SELECTOR)))return true;
+    if(t&&t.closest&&t.closest(INTERACTIVE_SELECTOR))return true;
     return false;}
   const preventSel=e=>e.preventDefault();   // pen 画时不选中网页文字
   // ── 指针状态机(document capture)：照搬 pdf-tail.js:_inkPointerDown 的判定，plumbing 挂 document ──
@@ -344,7 +348,7 @@
   }
   function onLostCapture(e){if(active&&!active.finishing&&e.pointerId===active.id)onUp(e);}
   // Apple Pencil 不滚页：stylus 触摸的 touchstart/touchmove preventDefault(照搬 04-render.js:159 _blk)。手指照常滚。
-  const _blk=e=>{for(const t of e.touches){if(t.touchType==='stylus'){e.preventDefault();break;}}};
+  const _blk=e=>{if(_ignore(e))return;for(const t of e.touches||[]){if(t.touchType==='stylus'){e.preventDefault();break;}}};
   document.addEventListener('pointerover',onPenHover,true);
   document.addEventListener('pointermove',onPenHover,true);
   document.addEventListener('pointerout',onPenOut,true);

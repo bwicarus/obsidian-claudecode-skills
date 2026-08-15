@@ -2487,7 +2487,7 @@
   // 旧 0×0 宿主让 fixed 侧栏大多可点，却会令底部收藏面板在 Chromium 命中测试中时有时无。
   const host = document.createElement("div");
   host.id = "bw-reader-host";
-  host.style.cssText = "position:fixed;inset:0;width:auto;height:auto;z-index:2147483647;pointer-events:none;";
+  host.style.cssText = "position:fixed;inset:0;width:100vw;height:100vh;z-index:2147483647;pointer-events:none;";
   document.documentElement.appendChild(host);
   const shadow = host.attachShadow({ mode: "open" });
 
@@ -2501,7 +2501,7 @@
   //   · rc-sidedrawer 往 documentElement 设 --gp-blur CSS 变量 → 落这里(变量继承到抽屉)。
   const root = document.createElement("div");
   root.id = "bw-root";
-  root.style.cssText = "position:fixed;inset:0;pointer-events:none;";
+  root.style.cssText = "position:fixed;inset:0;width:100%;height:100%;pointer-events:none;";
   shadow.appendChild(root);
 
   // 网页卡片专用的文档坐标层：宿主页滚动时由浏览器原生带着走，不再在 fixed UI 层里逐帧追位置。
