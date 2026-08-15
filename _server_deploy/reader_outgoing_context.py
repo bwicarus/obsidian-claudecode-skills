@@ -563,6 +563,19 @@ def build_page_context(pdf, rel: str, page, *, reason: str = "dwell",
         }
     except Exception:
         out["visual"] = {"page_image": None, "has_ink": False, "drawing": None}
+    # 这页在讲什么概念。带上它是因为这是助手最常需要再问一轮的东西 ——
+    # 正文说的是"这页写了什么字",知识点说的是"这页在讲什么"。
+    # 拿不到时照样带上字段并说明原因:少一个字段,上游分不清"这本书没建过图"
+    # 和"这段代码没跑",于是会把后者当前者讲出来。
+    try:
+        import kg_page_index as _KG
+        out["knowledge"] = _KG.knowledge_for_page(rel, page)
+    except Exception as ex:
+        out["knowledge"] = {
+            "available": False,
+            "reason": f"知识图谱不可用:{type(ex).__name__}: {str(ex)[:80]}",
+            "book": None, "section": None, "concepts": [],
+        }
     return out
 
 

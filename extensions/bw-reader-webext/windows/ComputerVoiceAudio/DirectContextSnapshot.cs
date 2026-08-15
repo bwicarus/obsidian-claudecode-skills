@@ -1326,6 +1326,11 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             next["viewport"] = viewport;
         }
+        JsonObject? knowledge = CopyKnowledge(pageContext["knowledge"]);
+        if (knowledge is not null)
+        {
+            next["knowledge"] = knowledge;
+        }
         JsonObject activeReading = new()
         {
             ["kind"] = kind,
@@ -1968,6 +1973,148 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["ref"] = reference,
             ["empty"] = empty,
         };
+    }
+
+    // 这一页在图谱上对应哪些知识点。正文说的是"这页写了什么字",
+    // 这里说的是"这页在讲什么" —— 助手最常需要再问一轮的东西。
+    //
+    // 与 CopyVisual/CopyEmbeds 不同,格式不合时**不丢整条**,只把这个字段换成
+    // 一句说明。正文是主线,知识点是增强;为一个增强字段丢掉整页正文,
+    // 用户付出的代价远大于收益。但也不静默:换上的说明会一路带到助手那里。
+    private const int KnowledgeNameLimit = 200;
+    private const int KnowledgeSummaryLimit = 400;
+    private const int KnowledgeConceptLimit = 8;
+
+    private static JsonObject KnowledgeUnavailable(string reason) =>
+        new()
+        {
+            ["available"] = false,
+            ["reason"] = reason,
+            ["book"] = null,
+            ["section"] = null,
+            ["concepts"] = new JsonArray(),
+        };
+
+    private static JsonObject? CopyKnowledge(JsonNode? node)
+    {
+        // 没有这个字段 = 对面还是旧版 Pi。不是错误,也不必解释。
+        if (node is null)
+        {
+            return null;
+        }
+        if (node is not JsonObject value)
+        {
+            return KnowledgeUnavailable("知识图谱字段格式不正确");
+        }
+        bool available =
+            value["available"]?.GetValueKind() == JsonValueKind.True;
+        JsonObject result = new()
+        {
+            ["available"] = available,
+            ["reason"] = SafeKnowledgeText(
+                value["reason"], KnowledgeSummaryLimit),
+            ["book"] = SafeKnowledgeText(value["book"], KnowledgeNameLimit),
+        };
+        if (value["section"] is JsonObject section)
+        {
+            JsonObject? safeSection = CopyKnowledgeNode(section);
+            if (safeSection is null)
+            {
+                return KnowledgeUnavailable("知识图谱节点格式不正确");
+            }
+            result["section"] = safeSection;
+        }
+        else
+        {
+            result["section"] = null;
+        }
+        JsonArray concepts = [];
+        if (value["concepts"] is JsonArray raw)
+        {
+            if (raw.Count > KnowledgeConceptLimit)
+            {
+                return KnowledgeUnavailable("知识图谱节点过多");
+            }
+            foreach (JsonNode? item in raw)
+            {
+                if (item is not JsonObject concept)
+                {
+                    return KnowledgeUnavailable("知识图谱节点格式不正确");
+                }
+                JsonObject? safe = CopyKnowledgeNode(concept);
+                if (safe is null)
+                {
+                    return KnowledgeUnavailable("知识图谱节点格式不正确");
+                }
+                concepts.Add(safe);
+            }
+        }
+        result["concepts"] = concepts;
+        if (
+            NonNegativeInteger(
+                value["concepts_truncated"],
+                out long dropped)
+            && dropped > 0
+        )
+        {
+            result["conceptsTruncated"] = dropped;
+        }
+        // 摘要是建图时写的概括,不是书上的字。不把这句带过去,助手会拿它当原文
+        // 引用,而用户翻到那页会发现书上没有这句话。
+        string? note = SafeKnowledgeText(
+            value["note"], KnowledgeSummaryLimit);
+        if (!string.IsNullOrEmpty(note))
+        {
+            result["note"] = note;
+        }
+        return result;
+    }
+
+    private static JsonObject? CopyKnowledgeNode(JsonObject node)
+    {
+        string? name = SafeKnowledgeText(node["name"], KnowledgeNameLimit);
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return null;
+        }
+        JsonObject safe = new() { ["name"] = name };
+        foreach ((string field, int limit) in new[]
+        {
+            ("id", KnowledgeNameLimit),
+            ("type", KnowledgeNameLimit),
+            ("summary", KnowledgeSummaryLimit),
+        })
+        {
+            if (node[field] is null)
+            {
+                continue;
+            }
+            string? text = SafeKnowledgeText(node[field], limit);
+            if (text is null)
+            {
+                return null;
+            }
+            safe[field] = text;
+        }
+        if (node["summary_truncated"]?.GetValueKind() == JsonValueKind.True)
+        {
+            safe["summaryTruncated"] = true;
+        }
+        return safe;
+    }
+
+    private static string? SafeKnowledgeText(JsonNode? node, int limit)
+    {
+        if (node is null || node.GetValueKind() == JsonValueKind.Null)
+        {
+            return null;
+        }
+        string? text = StringValue(node);
+        if (text is null || text.Length > limit || text.Any(char.IsControl))
+        {
+            return null;
+        }
+        return text;
     }
 
     private static JsonObject? CopyEmbeds(JsonNode? node)
