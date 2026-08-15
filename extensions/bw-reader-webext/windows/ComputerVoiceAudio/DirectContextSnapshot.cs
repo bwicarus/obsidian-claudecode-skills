@@ -1386,8 +1386,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
             _activeReading = activeReading;
             if (changedPage)
             {
-                _selection = ClearedSelection(
-                    "stable-page-changed");
                 _focus = UnknownFocus("stable-page-changed");
                 RecordAction(
                     "page-turn",
@@ -1395,6 +1393,35 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     activeReading["observedAtEpochMs"]
                         ?.GetValue<long?>() ?? 0);
             }
+            // Pi 一直在写这个字段(pdf_reader.py:3290 的 ctx["selection"]),
+            // 这里此前从没读过——服务器托管书籍的选区经这条链路整段丢失,
+            // 只有 App 直连的 WSS 活跃阅读上报能把选区带到模型面前。
+            // 这个事件每次都代表"此刻的真实状态"(reason 由 Pi 按当时有没有
+            // 选区二选一),所以缺字段要当作"现在没有选区"处理,不是"这条
+            // 事件没提所以维持原样"——否则旧选区会在用户已经点掉之后继续
+            // 挂在快照里。
+            JsonObject? pageContext = value["page_context"] as JsonObject;
+            string? reportedSelection = StringValue(
+                pageContext?["selection"]);
+            // 400 字符与控制符校验跟 WSS 活跃阅读那条路的 selection 字段
+            // 同一套约束(line ~653) —— 两条路径最终写进同一个 _selection,
+            // 不能一条严格一条放任,否则校验形同虚设。
+            if (
+                reportedSelection is { Length: > 400 }
+                || (
+                    reportedSelection is not null
+                    && reportedSelection.Any(char.IsControl)
+                )
+            )
+            {
+                throw JournalInvalid();
+            }
+            _selection = !string.IsNullOrEmpty(reportedSelection)
+                ? ActiveSelection(reportedSelection, activeReading)
+                : ClearedSelection(
+                    changedPage
+                        ? "stable-page-changed"
+                        : "page-context-no-selection");
         }
         else if (contextEvent.Type == "focus")
         {

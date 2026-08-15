@@ -534,7 +534,20 @@ internal sealed class ReaderContextMcpServer
                     + "message asks about it. Coverage is intentionally "
                     + "partial: highlighting, word lookups, and sticky notes "
                     + "do not appear here yet, so an empty or short list is "
-                    + "not evidence the user has been idle.",
+                    + "not evidence the user has been idle. "
+                    // selectedItems 合并了 selection(纯文字)和 focus(卡片/
+                    // 图片/画布区域/高亮)这两个此前分开暴露的槽位。
+                    + "selectedItems merges what the user has selected as "
+                    + "plain text with what they have focused by tapping — a "
+                    + "highlight, a card, an image, a drawn region. Each "
+                    + "entry has kind (text/highlight/card/image/drawing/"
+                    + "region — a different vocabulary from the ⟦…⟧ inline "
+                    + "marks above, not the same one); a card's ref is its "
+                    + "batch id, since individual cards within a batch have "
+                    + "no id of their own. At most one text entry and one "
+                    + "focus entry can appear together — this is not an "
+                    + "open-ended multi-select, just two signals that can be "
+                    + "true at once.",
                 ["inputSchema"] = new JsonObject
                 {
                     ["type"] = "object",
@@ -4095,6 +4108,7 @@ internal sealed class ReaderContextMcpServer
                 ["ref"] = null,
                 ["reason"] = "snapshot-not-received",
             },
+            ["selectedItems"] = new JsonArray(),
             ["mcp"] = new JsonObject
             {
                 ["pid"] = Environment.ProcessId,
@@ -4319,6 +4333,11 @@ internal sealed class ReaderContextMcpServer
             ["ref"] = null,
             ["reason"] = "active-reading-stale",
         };
+        // selectedItems 是 BuildToolPayload 序列化时就已经算好、嵌进 snapshot
+        // 里的——patch 了上面的 selection 却不动它,会让模型同时看到
+        // "selection.state=unknown" 和一条看起来仍然新鲜的 selectedItems 条目,
+        // 两者互相矛盾。
+        snapshot["selectedItems"] = new JsonArray();
     }
 
     private static double? DoubleValue(JsonNode? value)

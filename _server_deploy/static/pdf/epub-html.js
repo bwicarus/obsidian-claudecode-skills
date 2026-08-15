@@ -439,7 +439,10 @@
         },
         { immediate: true });
       if (window.RC && RC.outgoing) {
-        if (txt) RC.outgoing.focus('text', { file: FREL, text: String(txt).slice(0, 200) });
+        // page 必填:缺了它 Windows 侧的 CopyFocusReference 直接 throw,
+        // 这条选区事件整条丢掉,而不是"页码留空"这么温和——用同一个
+        // _curTopIdx(上面 ctxSync 也拿它当 sel_page)。
+        if (txt) RC.outgoing.focus('text', { file: FREL, text: String(txt).slice(0, 200), page: _curTopIdx });
         else RC.outgoing.cancel();
       }
     } catch (e) {}
