@@ -2198,12 +2198,29 @@ internal sealed class FileDirectSnapshotContextAdapter :
             }
             safeUnanchored.Add(safe);
         }
-        return new JsonObject
+        JsonObject copied = new()
         {
             ["highlights"] = highlights,
             ["blocks"] = blocks,
             ["unanchored"] = safeUnanchored,
         };
+        // 标注读取失败的原因过去止步于此:Pi 会写 embeds.error,而这里只重建
+        // 三个键,于是诊断在跨机边界上蒸发。零计数和读不出来在下游长得一样,
+        // 用户看不到自己的高亮时也就无从查起。
+        if (value["error"] is not null)
+        {
+            string? reason = StringValue(value["error"]);
+            if (
+                reason is null
+                || reason.Length > 240
+                || reason.Any(char.IsControl)
+            )
+            {
+                throw JournalInvalid();
+            }
+            copied["error"] = reason;
+        }
+        return copied;
     }
 
     private static JsonObject? CopyViewport(
