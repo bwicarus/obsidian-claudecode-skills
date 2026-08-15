@@ -1496,12 +1496,29 @@ internal sealed class FileDirectSnapshotContextAdapter :
             {
                 throw JournalInvalid();
             }
-            _selection = !string.IsNullOrEmpty(reportedSelection)
-                ? ActiveSelection(reportedSelection, activeReading)
-                : ClearedSelection(
-                    changedPage
-                        ? "stable-page-changed"
-                        : "page-context-no-selection");
+            // **字段缺席 ≠ 没有选区。** Pi 只在 has_sel 时才写 ctx["selection"]
+            // (pdf_reader.py:3289 `if has_sel:`),所以"这条事件没提选区"是
+            // 常态,不代表用户刚点掉了选中。把缺席当清空会抹掉 WSS 活跃阅读
+            // 那条路刚送来的真实选区 —— 自检 direct-snapshot-events-
+            // atomically-fold-latest 就是这么红的:同一页先来 active-reading
+            // 带 "selected words",随后的 page.context 不带该键,选区被清掉。
+            // 只有键**在场且为空**才是"用户取消了选中"这个明确信号。
+            bool selectionReported = pageContext is not null
+                && pageContext.ContainsKey("selection");
+            if (selectionReported)
+            {
+                _selection = !string.IsNullOrEmpty(reportedSelection)
+                    ? ActiveSelection(reportedSelection, activeReading)
+                    : ClearedSelection(
+                        changedPage
+                            ? "stable-page-changed"
+                            : "page-context-no-selection");
+            }
+            else if (changedPage)
+            {
+                // 翻页仍然清:上一页的选区挂在新页面上是错的。
+                _selection = ClearedSelection("stable-page-changed");
+            }
         }
         else if (contextEvent.Type == "focus")
         {
@@ -2502,9 +2519,13 @@ internal sealed class FileDirectSnapshotContextAdapter :
         // 标注读取失败的原因过去止步于此:Pi 会写 embeds.error,而这里只重建
         // 三个键,于是诊断在跨机边界上蒸发。零计数和读不出来在下游长得一样,
         // 用户看不到自己的高亮时也就无从查起。
-        if (value["error"] is not null)
+        // 键名是 sidecarError 而不是通用的 error:自检
+        // direct-snapshot-folds-whitelisted-metadata 会喂一个
+        // error="diagnostic-not-contract" 来验证"合同外字段一律剥掉"这条规则,
+        // 沿用 error 等于把那条规则挖个洞。专属键名让诊断和白名单纪律共存。
+        if (value["sidecarError"] is not null)
         {
-            string? reason = StringValue(value["error"]);
+            string? reason = StringValue(value["sidecarError"]);
             if (
                 reason is null
                 || reason.Length > 240
@@ -2513,7 +2534,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             {
                 throw JournalInvalid();
             }
-            copied["error"] = reason;
+            copied["sidecarError"] = reason;
         }
         return copied;
     }

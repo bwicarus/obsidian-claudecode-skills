@@ -183,3 +183,23 @@ test("重启后上下文要活下来", () => {
   assert.match(body, /state == "active"/,
     "恢复时的纪律要跟入口一致");
 });
+
+test("page.context 不带 selection 键时不清空选区", () => {
+  // 这一条是被真实自检(direct-snapshot-events-atomically-fold-latest)
+  // 抓出来的,合同测试当时全绿——因为它测的是我写的逻辑,而不是这条逻辑
+  // 与真实事件序列的相互作用。
+  //
+  // Pi 只在 has_sel 时才写 ctx["selection"](pdf_reader.py:3289 的
+  // `if has_sel:`),所以"事件没提选区"是常态。把缺席当成"用户取消了选中",
+  // 会抹掉 WSS 活跃阅读那条路刚送来的真实选区:同一页先收到带
+  // "selected words" 的 active-reading,紧接着一条不带该键的 page.context,
+  // 选区就没了。
+  const at = SNAPSHOT.indexOf("bool selectionReported");
+  assert.ok(at > 0, "必须显式判断这个键在不在,而不是只看值空不空");
+  const body = SNAPSHOT.slice(at, at + 900);
+  assert.match(body, /ContainsKey\("selection"\)/);
+  assert.match(body, /if \(selectionReported\)/,
+    "只有键在场时才依据它更新选区");
+  assert.match(body, /else if \(changedPage\)/,
+    "翻页仍要清:上一页的选区挂到新页上是错的");
+});

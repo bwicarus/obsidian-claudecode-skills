@@ -214,10 +214,10 @@ class EmbedsIntegrationTest(unittest.TestCase):
         broken = OC.build_page_context(
             self._Pdf(text="正文", hl_boom=True), "书/a.pdf", 12)
         self.assertEqual(clean["embeds"]["highlights"], 0)
-        self.assertNotIn("error", clean["embeds"], "干净的一页不该带错误")
-        self.assertIn("error", broken["embeds"],
+        self.assertNotIn("sidecarError", clean["embeds"], "干净的一页不该带错误")
+        self.assertIn("sidecarError", broken["embeds"],
                       "读不出来必须出声,否则与'这页没标注'无从分辨")
-        self.assertIn("sidecar 坏了", broken["embeds"]["error"])
+        self.assertIn("sidecar 坏了", broken["embeds"]["sidecarError"])
 
     def test_body_survives_a_broken_sidecar(self):
         # 正文是主线,标注是增强。sidecar 坏了不该让用户连正文都拿不到。
@@ -242,7 +242,7 @@ class EmbedsIntegrationTest(unittest.TestCase):
         ctx = OC.build_page_context(pdf, "书/a.pdf", 12)
         self.assertEqual(ctx["embeds"]["blocks"], 1, "能读到的那半要保住")
         self.assertIn("⟦CARD_START", ctx["text"])
-        self.assertIn("highlights:", ctx["embeds"].get("error", ""),
+        self.assertIn("highlights:", ctx["embeds"].get("sidecarError", ""),
                       "读不出的那半要指名道姓，不能只说'出错了'")
 
     def test_notes_become_trailing_blocks(self):

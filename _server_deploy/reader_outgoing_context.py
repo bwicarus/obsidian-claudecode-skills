@@ -592,9 +592,9 @@ def build_page_context(pdf, rel: str, page, *, reason: str = "dwell",
                 # sidecar 读不出来时,上面那些计数会全是 0 —— 与「这页本来就
                 # 没标注」一模一样。带上原因,让两者能分开。
                 if problems:
-                    embeds["error"] = "; ".join(problems)[:200]
+                    embeds["sidecarError"] = "; ".join(problems)[:200]
             except Exception as ex:
-                embeds["error"] = f"{type(ex).__name__}: {str(ex)[:120]}"
+                embeds["sidecarError"] = f"{type(ex).__name__}: {str(ex)[:120]}"
             out.update(text=body, text_available=True, text_source=src,
                        truncated=len(txt) > PAGE_TEXT_LIMIT, embeds=embeds)
         else:
