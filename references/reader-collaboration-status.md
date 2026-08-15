@@ -4282,3 +4282,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：真实 `311/313` 产物逐文件审计确认无漏包和语法错误；Safari 打包成功、Reader Node 全量通过，提交 `31a66b1d` 已推送。
 - **发布事实**：Actions `31874820934` 上传 TestFlight `1.1.58 (317)`；`31875208883` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **下一步**：用户安装 build `317` 后重新载入原页面，验收扩展顶栏与侧栏点击；若旧页面仍保留死 DOM，关闭再开启扩展并重开该页。
+
+## Codex：Safari 顶栏与侧栏命中修复（2026-08-15 JST）
+- **根因/改动**：document capture 只看被 Safari 重定向后的 host target，Apple Pencil 因而把 Shadow 内按钮当画布截断；现按 composedPath 放行控件，并给主宿主写明全视口尺寸，扩展版本升为 `0.2.110`。
+- **怎么验的**：新增旧实现必失败的 Shadow/笔输入合同，Reader Node 全量通过；Chromium 与 WebKit 真实坐标点击同时确认扩展控件命中与宿主页空白穿透，Safari 包构建成功。
+- **发布事实**：提交 `ee128287`；Actions `31876229519` 上传 TestFlight `1.1.58 (320)`，`31876665515` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：未改 Windows/Pi 或 Claude 工具批次；用户安装 build `320` 后分别用 Apple Pencil 和手指验收顶栏按钮、右侧栏 tab 与网页正文滚动。
