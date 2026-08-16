@@ -936,13 +936,6 @@ window._favOpenPicker = function () {
     }, 400);
   }
   var _lpMounted = {};
-  var _lpCssDone = false;
-  function _lpEnsureCss() {
-    if (_lpCssDone) return; _lpCssDone = true;
-    var st = document.createElement('style');
-    st.textContent = '.pdf-upage .lp-del{position:absolute;right:8px;top:8px;z-index:60;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.35);color:#ff3b30;border-radius:8px;padding:4px 9px;font-size:13px;cursor:pointer;touch-action:manipulation}';
-    document.head.appendChild(st);
-  }
   function _lpMountOne(rec, afterEl) {
     var tmp = document.createElement('div');
     tmp.className = 'rc-upage pdf-upage up2-new'; tmp.dataset.uid = rec.id;
@@ -959,16 +952,8 @@ window._favOpenPicker = function () {
       _upRenderOverlay(ov, rec);
       ov.addEventListener('click', _lpSaveSoon, true);   // capture:选择题 picked 等改动落盘(按钮的 stopPropagation 在冒泡段,不挡这里)
     }
-    // 显式删除钮:本机纸不走编辑面板/badge 的老删除入口(那些对 lp 页不可达),
-    // 每张纸自带一个,删除=整组(见 _upDelReal 的 lp 分支)。
-    _lpEnsureCss();
-    var del = document.createElement('button');
-    del.className = 'lp-del'; del.textContent = '🗑'; del.title = '删除这张练习纸';
-    del.addEventListener('click', function (e) {
-      e.stopPropagation();
-      if (confirm('删除这张练习纸?(整组一起删)')) _upDelReal(rec);
-    });
-    tmp.appendChild(del);
+    // 删除走设计内入口:每张覆盖页都有左上角 Aa → 编辑面板 → 🗑(up2-del2)→
+    // _upDelReal —— lp 分支已让终点认识本机纸(整组删)。不另造删除按钮。
     return tmp;
   }
   function _lpRestore() {   // 幂等恢复:页 DOM 未就绪时 _upPlace 失败,靠调用方重试补挂
