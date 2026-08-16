@@ -299,21 +299,61 @@ def run(client: PiClient, directory: Path, *, once: bool) -> int:
         print(f"追赶完成。镜像目录 {directory}")
         return 0
 
+    # 读线程 + 带超时的主循环。第一版把「检查去抖到期」放在收到下一行 SSE 之后，
+    # 实测端到端 16.1s —— 恰好是服务端心跳间隔 15s + 1s:事件到达后计划 2s 拉取,
+    # 但下一次循环要等下一个心跳才发生。铃铛响了,看表的人在打盹。
+    # 现在读线程只管把事件塞队列,主循环 0.5s 醒一次看表,到期就拉。
+    import queue as _queue
+    import threading
+
+    def _reader_thread(stream, out_q: _queue.Queue):
+        try:
+            text = io.TextIOWrapper(stream, encoding="utf-8")
+            for event in parse_sse_events(text):
+                out_q.put(("ev", event))
+            out_q.put(("eof", None))
+        except Exception as error:            # 含 40s 无心跳的 socket 超时
+            out_q.put(("err", error))
+
     planner = PullPlanner()
     backoff = 1.0
     last_kg = time.time()
     while True:
         try:
             stream = client.open_sse("/pdf/api/reader-events")
-            _set_sse_status(manifest, "connected")
+        except KeyboardInterrupt:
+            _set_sse_status(manifest, "stopped")
             save_manifest(directory, manifest)
-            backoff = 1.0
-            reader = io.TextIOWrapper(stream, encoding="utf-8")
-            for event in parse_sse_events(reader):
+            return 0
+        except Exception as error:
+            msg = f"{type(error).__name__}: {str(error)[:200]}"
+            _set_sse_status(manifest, "reconnecting", msg)
+            save_manifest(directory, manifest)
+            print(f"SSE 连接失败({msg})，{backoff:.0f}s 后重连", file=sys.stderr)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60.0)
+            continue
+
+        _set_sse_status(manifest, "connected")
+        save_manifest(directory, manifest)
+        backoff = 1.0
+        q: _queue.Queue = _queue.Queue()
+        t = threading.Thread(target=_reader_thread, args=(stream, q), daemon=True)
+        t.start()
+        disconnected = None
+        try:
+            while disconnected is None:
+                try:
+                    kind, payload = q.get(timeout=0.5)
+                except _queue.Empty:
+                    kind, payload = ("tick", None)
                 now = time.time()
-                if event is not None:
-                    manifest.setdefault("sse", {})["lastEventAtEpochSeconds"] = _now()
-                    planner.note_event(event, now)
+                if kind == "ev" and payload is not None:
+                    manifest.setdefault("sse", {})[
+                        "lastEventAtEpochSeconds"] = _now()
+                    planner.note_event(payload, now)
+                elif kind in ("eof", "err"):
+                    disconnected = payload or EOFError("stream ended")
                 for domain, rel in planner.due(now):
                     try:
                         if domain == "pos":
@@ -323,7 +363,8 @@ def run(client: PiClient, directory: Path, *, once: bool) -> int:
                                              domain, rel)
                     except Exception as error:
                         print(f"  ! 拉取 {domain} {rel}: "
-                              f"{type(error).__name__}: {error}", file=sys.stderr)
+                              f"{type(error).__name__}: {error}",
+                              file=sys.stderr)
                     save_manifest(directory, manifest)
                 if now - last_kg >= KG_REFRESH_SECONDS:
                     last_kg = now
@@ -332,15 +373,19 @@ def run(client: PiClient, directory: Path, *, once: bool) -> int:
             _set_sse_status(manifest, "stopped")
             save_manifest(directory, manifest)
             return 0
-        except Exception as error:
-            # 服务端 ~5 分钟回收长连接是**日常**，不是故障；照样出声但语气不同
-            msg = f"{type(error).__name__}: {str(error)[:200]}"
-            _set_sse_status(manifest, "reconnecting", msg)
-            save_manifest(directory, manifest)
-            print(f"SSE 断开({msg})，{backoff:.0f}s 后重连", file=sys.stderr)
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 60.0)
-        # 每次重连前做轻量追赶，补上断线窗口错过的事件
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+        # 服务端 ~5 分钟回收长连接是**日常**,不是故障;照样出声但语气不同
+        msg = f"{type(disconnected).__name__}: {str(disconnected)[:200]}"
+        _set_sse_status(manifest, "reconnecting", msg)
+        save_manifest(directory, manifest)
+        print(f"SSE 断开({msg})，{backoff:.0f}s 后重连", file=sys.stderr)
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 60.0)
+        # 每次重连前做轻量追赶,补上断线窗口错过的事件
         try:
             catch_up(client, directory, manifest, full=False)
             save_manifest(directory, manifest)
