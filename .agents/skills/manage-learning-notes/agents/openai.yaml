@@ -1,0 +1,4 @@
+interface:
+  display_name: "学习笔记流水线"
+  short_description: "管理 Obsidian 学习笔记的登记、标注、摘要、关联和 Anki 制卡"
+  default_prompt: "使用 $manage-learning-notes 处理指定学习笔记的登记、标注、摘要、关联或制卡步骤。"

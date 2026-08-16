@@ -1,0 +1,4 @@
+interface:
+  display_name: "BW 网站管理"
+  short_description: "开发、检查和部署 bwicarus 网站、页面与 Flask 服务"
+  default_prompt: "使用 $manage-bw-webapp 检查、修改或部署 bwicarus 网站。"

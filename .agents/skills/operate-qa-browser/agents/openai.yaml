@@ -1,0 +1,4 @@
+interface:
+  display_name: "截图问答系统"
+  short_description: "检查、修改和运行项目的截图问答、卡片上下文与远程 QA 系统"
+  default_prompt: "使用 $operate-qa-browser 检查或修改本项目的截图问答系统。"

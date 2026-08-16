@@ -1,0 +1,4 @@
+interface:
+  display_name: "知识图谱管理"
+  short_description: "检查、维护和改进项目的技能树、知识图谱及其服务端界面"
+  default_prompt: "使用 $manage-knowledge-graph 检查或修改本项目的技能树与知识图谱。"
