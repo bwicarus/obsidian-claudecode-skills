@@ -113,6 +113,7 @@ WEBAPP_SOURCE_FILES = (
     "computer_voice_routes.py",
     "reader_sync_relay.py",
     "reader_events.py",
+    "error_reports.py",         # 报错一键上传(pdf_reader 顶层 import 它)
     "book_toc.py",
     "grammar_reader.py",
     "epub_assistant.py",

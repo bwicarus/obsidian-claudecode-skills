@@ -12954,6 +12954,11 @@ def pdf_api_epub_ink_shot():
 from reader_events import publish as _reader_publish, register_reader_events
 register_reader_events(bp)
 
+# ── 报错一键上传(AI 自动化环境·支柱①):落 Pi + SSE 广播 → Windows 镜像秒级拉走 ──
+from error_reports import register_error_reports
+register_error_reports(bp, claude_dir=CLAUDE_DIR, publish=_reader_publish,
+                       jsonify=jsonify, request=request, session=session)
+
 
 # ── 统一 HTML 阅读器:拆到 html_reader.py(2026-07-06 结构拆分第 2 刀;_safe_vault_path 等依赖经参数注入)──
 from html_reader import register_html_reader

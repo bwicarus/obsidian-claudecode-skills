@@ -3676,6 +3676,28 @@ def _t_see_ink(args, ctx):
         return {"error": str(e)[:140]}
 
 
+def _t_report_problem(args, ctx):
+    """「没按预期工作」一键报告(AI 自动化环境·支柱①):确定性打包用户描述+当时环境
+    (书页/选区/最近工具调用/最近对话) → 落 Pi → SSE 广播 → Windows 镜像秒级拉走,
+    调试侧 AI 直接读文件夹。采集不调 AI:总结是调试侧的事,采集侧多做一步就多一个
+    采集本身出错的可能。"""
+    what = str(args.get("what") or args.get("text") or "").strip()
+    if not what:
+        return {"error": "缺 what:让用户一句话描述哪里没按预期"}
+    import error_reports as ER
+    pdf = _pdf()
+    report = ER.collect_report(pdf.CLAUDE_DIR, what=what, ctx=(ctx or {}),
+                               uid=(ctx or {}).get("_uid"))
+    ER.save_report(pdf.CLAUDE_DIR, report)
+    try:
+        pdf._reader_publish("error-report", (ctx or {}).get("file_rel") or "", report["id"])
+    except Exception:
+        pass
+    return {"ok": True, "id": report["id"],
+            "note": "已生成问题报告(含最近的工具调用与对话尾部),开发侧几秒内可见。"
+                    "告诉用户已记录即可,不用复述报告内容。"}
+
+
 def _t_undo_last(args, ctx):
     if _native_pdf_state(ctx) is not None:
         # The App owns this undo stack.  Returning a client action is not a
@@ -5477,6 +5499,7 @@ TOOLS = {
                    "args {id, text?, color?}(id 从 notes_query 拿;text/color 至少给一个)。"
                    "**只能改文字和颜色**——手写笔画/位置/尺寸动不了(工具层面就不接收),别答应用户改这些", _t_notes_edit),
     "undo_last": ("撤销最近一次写操作(删掉刚建的卡/笔记/高亮/便签)。用户说『撤销/取消刚才那个』时用。args {}", _t_undo_last),
+    "report_problem": ("★用户说『这个不对/出错了/没反应/跟预期不一样/记录一下这个问题』时用:把他的描述+当时环境(最近的工具调用/对话/书页)打包成问题报告给开发侧。args {what:用户原话描述哪里不对}。调完只需说『已记录』,别复述内容", _t_report_problem),
     "page_new": ("造一张交互纸的**第一步**:开一张新草稿。args {paper?:dictation|exam|math|draw|note(默认note), title?}。"
                  "接着用 page_add 一个个加元素,最后 page_show 生成。"
                  "适合『给我出题我写』『做张清单/试卷』;要**逐个念、念一个等一个**的听写用 start_dictation。", _t_page_new),

@@ -61,6 +61,7 @@ KIND_TO_DOMAIN = {
     "ink": ("ink", None),      # 墨迹体量大且分析用不到矢量笔画，只记时间戳不拉内容
     "text": ("text", None),    # 自建页正文同理：记"变过"，用到时再说
     "pos": ("pos", None),      # 位置走整份 positions.json，单独处理
+    "error-report": ("error-report", None),   # 问题报告:按 id 增量拉,单独处理
 }
 
 
@@ -180,8 +181,8 @@ class PullPlanner:
             return                                  # 未知/无关事件：忽略
         domain, _ = KIND_TO_DOMAIN[kind]
         rel = str(event.get("file") or "")
-        if domain == "pos":
-            self._pending[("pos", "")] = now + self.debounce
+        if domain in ("pos", "error-report"):
+            self._pending[(domain, "")] = now + self.debounce
         elif rel:
             self._pending[(domain, rel)] = now + self.debounce
 
@@ -235,10 +236,43 @@ def pull_book_domain(client: PiClient, directory: Path, manifest: dict,
     dom.pop("lastError", None)
 
 
+def pull_error_reports(client: PiClient, directory: Path, manifest: dict) -> None:
+    """把新的问题报告拉进 error-reports/。「特定文件夹」就是它——调试侧 AI 直接读。"""
+    since = int(manifest.get("errorReportsSyncedAt") or 0)
+    # 往回多要 5 分钟:上一轮拉取与报告落盘之间的时钟缝隙不该丢报告
+    payload = client.get_json("/pdf/api/error-reports",
+                              {"since": max(0, since - 300)})
+    out_dir = directory / "error-reports"
+    for meta in payload.get("reports") or []:
+        rid = str(meta.get("id") or "")
+        if not rid or meta.get("error"):
+            continue
+        target = out_dir / f"{rid}.json"
+        if target.is_file():
+            continue
+        full_payload = client.get_json(f"/pdf/api/error-report/{rid}")
+        report = full_payload.get("report")
+        if not isinstance(report, dict):
+            continue
+        out_dir.mkdir(parents=True, exist_ok=True)
+        tmp = out_dir / f"{rid}.json.tmp-{os.getpid()}"
+        tmp.write_text(json.dumps(report, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+        os.replace(tmp, target)
+        print(f"  ⚑ 新问题报告 {rid}: {str(report.get('what') or '')[:60]}",
+              file=sys.stderr)
+    manifest["errorReportsSyncedAt"] = _now()
+
+
 def catch_up(client: PiClient, directory: Path, manifest: dict,
              *, full: bool) -> None:
     """追赶：positions 必拉（小）；full 时另拉最近 N 本书的三个域。"""
     pull_positions(client, directory, manifest)
+    try:
+        pull_error_reports(client, directory, manifest)
+    except Exception as error:
+        # 端点可能还没部署(灰度期);出声但不拦追赶
+        print(f"  ! 问题报告拉取: {type(error).__name__}: {error}", file=sys.stderr)
     if not full:
         return
     positions = json.loads(
@@ -358,6 +392,8 @@ def run(client: PiClient, directory: Path, *, once: bool) -> int:
                     try:
                         if domain == "pos":
                             pull_positions(client, directory, manifest)
+                        elif domain == "error-report":
+                            pull_error_reports(client, directory, manifest)
                         else:
                             pull_book_domain(client, directory, manifest,
                                              domain, rel)
