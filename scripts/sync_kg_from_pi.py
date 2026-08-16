@@ -42,6 +42,39 @@ def project_root() -> Path:
     return Path(override) if override else Path(__file__).resolve().parent.parent
 
 
+def _env_file_value(name: str) -> str:
+    """从 `.env` 里取一个值。
+
+    Windows 上没有任何东西会把 `.env` 读进环境变量（Linux 那边是 systemd /
+    profile.d 干的，Python 侧从来没有加载器）。token 只写进 `.env` 的话，
+    直接 `python scripts/sync_kg_from_pi.py` 仍然是 401 —— 而且报的还是
+    「凭据无效」，看不出是没读到。
+
+    凭据属于这台机器，不属于某个检出，所以按「本检出的 .env → 主项目的
+    .env」顺序找；worktree 里通常没有 .env，会落到 C:\\claude 那份。
+    """
+    candidates = [project_root() / ".env"]
+    canonical = Path(os.environ.get("CLAUDE_PROJECT") or r"C:\claude") / ".env"
+    if canonical not in candidates:
+        candidates.append(canonical)
+    for path in candidates:
+        try:
+            if not path.is_file():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                if key.strip() != name:
+                    continue
+                return value.strip().strip('"').strip("'")
+        except Exception:
+            # 读不动就当没有：这是个回退路径，不该让同步整个停摆。
+            continue
+    return ""
+
+
 def mirror_dir() -> Path:
     """副本单独放，**不占 `knowledge_graph/`**。
 
@@ -167,12 +200,13 @@ def main() -> int:
         description="把 Pi 上的知识图谱（只读部分）同步到本机")
     parser.add_argument(
         "--base",
-        default=os.environ.get("BW_PI_BASE", "https://bwicarus.taile44d0c.ts.net"),
-        help="Pi 的基址，默认取 BW_PI_BASE")
+        default=(os.environ.get("BW_PI_BASE", "") or _env_file_value("BW_PI_BASE")
+                 or "https://bwicarus.taile44d0c.ts.net"),
+        help="Pi 的基址，默认取 BW_PI_BASE，其次 .env 里的同名项")
     parser.add_argument(
         "--token",
-        default=os.environ.get("BW_PI_TOKEN", ""),
-        help="API token，默认取 BW_PI_TOKEN")
+        default=os.environ.get("BW_PI_TOKEN", "") or _env_file_value("BW_PI_TOKEN"),
+        help="API token，默认取 BW_PI_TOKEN，其次 .env 里的同名项")
     parser.add_argument("--book", default=None, help="只同步这一本")
     parser.add_argument(
         "--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
@@ -180,7 +214,7 @@ def main() -> int:
 
     if not args.token:
         # 明说缺什么。没有 token 时静默失败会被当成"服务端没有图谱"。
-        print("缺少 API token：设置 BW_PI_TOKEN 或传 --token。"
+        print("缺少 API token：设置 BW_PI_TOKEN、写进 .env，或传 --token。"
               "token 在 Pi 的 /profile/ 页面生成。", file=sys.stderr)
         return 1
     try:
