@@ -936,6 +936,13 @@ window._favOpenPicker = function () {
     }, 400);
   }
   var _lpMounted = {};
+  var _lpCssDone = false;
+  function _lpEnsureCss() {
+    if (_lpCssDone) return; _lpCssDone = true;
+    var st = document.createElement('style');
+    st.textContent = '.pdf-upage .lp-del{position:absolute;right:8px;top:8px;z-index:60;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.35);color:#ff3b30;border-radius:8px;padding:4px 9px;font-size:13px;cursor:pointer;touch-action:manipulation}';
+    document.head.appendChild(st);
+  }
   function _lpMountOne(rec, afterEl) {
     var tmp = document.createElement('div');
     tmp.className = 'rc-upage pdf-upage up2-new'; tmp.dataset.uid = rec.id;
@@ -952,6 +959,16 @@ window._favOpenPicker = function () {
       _upRenderOverlay(ov, rec);
       ov.addEventListener('click', _lpSaveSoon, true);   // capture:选择题 picked 等改动落盘(按钮的 stopPropagation 在冒泡段,不挡这里)
     }
+    // 显式删除钮:本机纸不走编辑面板/badge 的老删除入口(那些对 lp 页不可达),
+    // 每张纸自带一个,删除=整组(见 _upDelReal 的 lp 分支)。
+    _lpEnsureCss();
+    var del = document.createElement('button');
+    del.className = 'lp-del'; del.textContent = '🗑'; del.title = '删除这张练习纸';
+    del.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (confirm('删除这张练习纸?(整组一起删)')) _upDelReal(rec);
+    });
+    tmp.appendChild(del);
     return tmp;
   }
   function _lpRestore() {   // 幂等恢复:页 DOM 未就绪时 _upPlace 失败,靠调用方重试补挂
@@ -1419,6 +1436,22 @@ window._favOpenPicker = function () {
     _upDelInd.className = ''; _upDelInd.innerHTML = '<span class="up2-spin"></span><span class="up2-msg">' + RC.esc(txt) + '</span>';
   }
   function _upDelReal(rec) {
+    if (String(rec.id || '').indexOf('lp_') === 0) {
+      // 本机纸:只存 localStorage,不存在于任何服务端/原生 sidecar——老路径的三连
+      // (临时表/按 page 找 DOM/DELETE API)对它全部落空,实测表现"点删除删不掉"。
+      // 纸是一个整体(gid 一组),删任何一页=删整张(留孤儿页比删多了更困惑)。
+      var gid = rec.gid || rec.id, all = _lpAll(), n = 0;
+      for (var li = all.length - 1; li >= 0; li--) {
+        if ((all[li].gid || all[li].id) !== gid) continue;
+        var lel = _lpMounted[all[li].id];
+        if (lel) { try { lel.remove(); } catch (_) {} }
+        delete _lpMounted[all[li].id];
+        all.splice(li, 1); n += 1;
+      }
+      _lpSaveSoon();
+      if (window.RC && RC.toast) RC.toast(n > 1 ? ('已删除整张练习纸(' + n + ' 页)') : '本机练习纸已删除');
+      return;
+    }
     if (rec._temp) {   // 乐观新建 job 还没完成就删 → 移除临时元素;绑真 id 时再清理那张空白真页(_upBindTempToReal)
       _upTempCancelled[rec.id] = true;
       var tel = _upTempEls[rec.id]; if (tel) { try { tel.remove(); } catch (_) {} }
