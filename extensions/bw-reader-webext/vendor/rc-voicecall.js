@@ -1914,6 +1914,20 @@ if (window.__bwPwaProviderOnly) return;
           _caCall = function (target) {
             return target.call(window, { text: _caWnText });
           };
+        } else if (_caFn === '__upStartTask') {
+          // 交互练习纸:normalizer 已做结构闸,执行侧再卡一次形状后调页面的
+          // 造纸入口(pdf-uishared;本机书在入口内自动走 _lp 本地分支)。
+          var _caPaper = _caArgs.length === 1 && _caArgs[0] &&
+            typeof _caArgs[0] === 'object' && !Array.isArray(_caArgs[0])
+            ? _caArgs[0] : null;
+          var _caPaperBlocks = _caPaper && _caPaper.params &&
+            Array.isArray(_caPaper.params.blocks) ? _caPaper.params.blocks : null;
+          if (!_caPaper || _caPaper.kind !== 'free' || !_caPaperBlocks ||
+              !_caPaperBlocks.length || _caPaperBlocks.length > 48) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window.__upStartTask;
+          _caCall = function (target) { return target.call(window, _caPaper); };
         } else {
           throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
         }
@@ -2248,8 +2262,6 @@ if (window.__bwPwaProviderOnly) return;
   }
   function _pinForget(label, cid, el) {
     label = String(label || '');
-    // 取消选中 → 焦点必须**显式取消**;否则上游会拿着已取消的对象当现状(A5 硬规则)。
-    try { if (window.RC && RC.outgoing) RC.outgoing.cancel(); } catch (e) {}
     var id = _pins.ids[label] || (el && el.dataset && el.dataset.vcContextId) || '';
     try { var registry = _ctxSelectionRegistry(); if (registry && id) registry.deselect(id); } catch (e) {}
     delete _pins.map[label]; delete _pins.els[label]; delete _pins.ids[label];
@@ -2257,6 +2269,14 @@ if (window.__bwPwaProviderOnly) return;
     Object.keys(_pins.cids).forEach(function (key) {
       if (_pins.cids[key] === label) delete _pins.cids[key];
     });
+    // 取消选中 → 焦点必须**显式取消**,否则上游会拿着已取消的对象当现状
+    // (A5 硬规则)。但这里原来无条件调用:钉着 3 张卡片时忘掉其中 1 张,
+    // 会把 focus 整个清空,另外 2 张跟着从快照里消失——A5 规则要求的是
+    // "取消的那个不能再被当成现状",不是"还有东西钉着也一起清空"。
+    // 只在忘掉的是最后一张时才真的取消。
+    if (Object.keys(_pins.map).length === 0) {
+      try { if (window.RC && RC.outgoing) RC.outgoing.cancel(); } catch (e) {}
+    }
     return id;
   }
   function _effectivePins(options) {

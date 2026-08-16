@@ -1911,6 +1911,20 @@
           _caCall = function (target) {
             return target.call(window, { text: _caWnText });
           };
+        } else if (_caFn === '__upStartTask') {
+          // 交互练习纸:normalizer 已做结构闸,执行侧再卡一次形状后调页面的
+          // 造纸入口(pdf-uishared;本机书在入口内自动走 _lp 本地分支)。
+          var _caPaper = _caArgs.length === 1 && _caArgs[0] &&
+            typeof _caArgs[0] === 'object' && !Array.isArray(_caArgs[0])
+            ? _caArgs[0] : null;
+          var _caPaperBlocks = _caPaper && _caPaper.params &&
+            Array.isArray(_caPaper.params.blocks) ? _caPaper.params.blocks : null;
+          if (!_caPaper || _caPaper.kind !== 'free' || !_caPaperBlocks ||
+              !_caPaperBlocks.length || _caPaperBlocks.length > 48) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window.__upStartTask;
+          _caCall = function (target) { return target.call(window, _caPaper); };
         } else {
           throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
         }

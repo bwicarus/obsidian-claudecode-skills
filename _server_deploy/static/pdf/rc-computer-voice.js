@@ -1156,17 +1156,11 @@
         payload.sourceText = sourceText;
       }
     } else if (kind === "client-action") {
-      // 桥接只允许调用一个受信语义入口。助手高亮的可见卡片
-      // 在本地落库成功后直接产生，不需要也不允许穿过这个动态动作通道。
+      // 桥接只允许名单内的受信语义入口,逐入口校验。⚠ 这是白名单的第三份副本
+      // (Windows C# ValidatePayload / rc-voicecall 执行映射 / 这里),加新入口三处
+      // 必须同步——漏这里的实测表现是"接收端 SCHEMA 拒绝,而调用侧一切正常"。
       exactObject(p, ["fn", "args"], [], "Reader 客户端动作");
       var actionFn = safeText(p.fn, "Reader 客户端动作 fn", 64, false);
-      if (actionFn !== "_nativeReaderUndoLast") {
-        throw directError(
-          "Reader 客户端动作不在白名单内",
-          "BW_READER_REALTIME_OUTPUT_SCHEMA",
-          false
-        );
-      }
       if (!Array.isArray(p.args)) {
         throw directError(
           "Reader 客户端动作参数必须是数组",
@@ -1174,17 +1168,82 @@
           false
         );
       }
-      var undoId = p.args.length === 1
-        ? safeText(p.args[0], "Reader 撤销操作编号", 32, false)
-        : "";
-      if (!/^rundo_[0-9a-f]{24}$/.test(undoId)) {
+      if (actionFn === "_nativeReaderUndoLast") {
+        var undoId = p.args.length === 1
+          ? safeText(p.args[0], "Reader 撤销操作编号", 32, false)
+          : "";
+        if (!/^rundo_[0-9a-f]{24}$/.test(undoId)) {
+          throw directError(
+            "Reader 撤销操作编号无效",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        payload = { fn: actionFn, args: [undoId] };
+      } else if (actionFn === "__upStartTask") {
+        // 交互练习纸:与 Windows 侧同一套结构闸;内容级容错在纸的接收链里做。
+        if (p.args.length !== 1 || !plainObject(p.args[0])) {
+          throw directError(
+            "Reader 练习纸需要一个任务对象",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        var paperSpec = p.args[0];
+        exactObject(
+          paperSpec,
+          ["kind", "title", "paper", "params"],
+          [],
+          "Reader 练习纸任务"
+        );
+        if (safeText(paperSpec.kind, "Reader 练习纸 kind", 16, false) !== "free") {
+          throw directError(
+            "Reader 练习纸只允许 free 任务",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        var paperTitle = safeText(paperSpec.title, "Reader 练习纸标题", 120, false);
+        var paperPreset = safeText(paperSpec.paper, "Reader 练习纸纸型", 16, false);
+        exactObject(
+          paperSpec.params,
+          ["blocks", "paper", "title"],
+          [],
+          "Reader 练习纸参数"
+        );
+        var paperBlocks = paperSpec.params.blocks;
+        if (!Array.isArray(paperBlocks) || paperBlocks.length < 1 || paperBlocks.length > 48) {
+          throw directError(
+            "Reader 练习纸元素必须是 1..48 个",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        for (var paperI = 0; paperI < paperBlocks.length; paperI++) {
+          if (!plainObject(paperBlocks[paperI])) {
+            throw directError(
+              "Reader 练习纸元素必须是对象",
+              "BW_READER_REALTIME_OUTPUT_SCHEMA",
+              false
+            );
+          }
+        }
+        payload = {
+          fn: actionFn,
+          args: [{
+            kind: "free",
+            title: paperTitle,
+            paper: paperPreset,
+            params: { blocks: paperBlocks, paper: paperPreset, title: paperTitle },
+          }],
+        };
+      } else {
         throw directError(
-          "Reader 撤销操作编号无效",
+          "Reader 客户端动作不在白名单内",
           "BW_READER_REALTIME_OUTPUT_SCHEMA",
           false
         );
       }
-      payload = { fn: actionFn, args: [undoId] };
     } else {
       throw directError("Reader 输出类型不受支持", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
     }
