@@ -55,9 +55,15 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.32"
+APP_VERSION = "0.1.33"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
+# 桥接模式旗标的独立意图文件(C# 启动时读取;keepalive/config/runtime-status 都是
+# exact 合同不能加键)。bridge-only = C# 完全不装载 keepalive 链(不拉 Codex、不发
+# 任何 F24)+ 语音动作(start/codex-voice-set)拒绝,上下文/快照/工具照常。
+SERVICE_MODE_CONTRACT = "readerpc-service-mode/1"
+SERVICE_MODE_FULL = "full"
+SERVICE_MODE_BRIDGE_ONLY = "bridge-only"
 POLL_INTERVAL_MS = 2_500
 STATUS_PUBLISH_INTERVAL_SECONDS = 10.0
 PC_RESTART_BACKOFF_SECONDS = 30.0
@@ -163,8 +169,11 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-def load_preferences(path: Path) -> dict[str, bool]:
-    defaults = {"keepPcPreprocessingOnline": True}
+def load_preferences(path: Path) -> dict[str, object]:
+    defaults: dict[str, object] = {
+        "keepPcPreprocessingOnline": True,
+        "serviceMode": SERVICE_MODE_FULL,
+    }
     try:
         value = json.loads(path.read_text("utf-8"))
     except (OSError, ValueError):
@@ -175,18 +184,45 @@ def load_preferences(path: Path) -> dict[str, bool]:
         or not isinstance(value.get("keepPcPreprocessingOnline"), bool)
     ):
         return defaults
+    # serviceMode 缺省容忍(旧偏好文件没有它)→ full;非法值也回 full,
+    # 不 bump contract:旧版启动器只读自己认识的键,天然兼容。
+    mode = value.get("serviceMode")
     return {
         "keepPcPreprocessingOnline": value["keepPcPreprocessingOnline"],
+        "serviceMode": (
+            mode
+            if mode in (SERVICE_MODE_FULL, SERVICE_MODE_BRIDGE_ONLY)
+            else SERVICE_MODE_FULL
+        ),
     }
 
 
-def save_preferences(path: Path, *, keep_pc_online: bool) -> None:
+def save_preferences(
+    path: Path,
+    *,
+    keep_pc_online: bool,
+    service_mode: str = SERVICE_MODE_FULL,
+) -> None:
+    if service_mode not in (SERVICE_MODE_FULL, SERVICE_MODE_BRIDGE_ONLY):
+        raise ReaderPCServiceError(f"未知服务模式 {service_mode}")
     _atomic_json(
         path,
         {
             "contract": PREFERENCES_CONTRACT,
             "keepPcPreprocessingOnline": bool(keep_pc_online),
+            "serviceMode": service_mode,
         },
+    )
+
+
+def set_readerpc_service_mode(bridge_paths: BridgePaths, mode: str) -> None:
+    """写 C# 启动时读取的模式意图文件。改模式必须随后重启直连服务才生效。"""
+
+    if mode not in (SERVICE_MODE_FULL, SERVICE_MODE_BRIDGE_ONLY):
+        raise ReaderPCServiceError(f"未知服务模式 {mode}")
+    _atomic_json(
+        bridge_paths.runtime_status.parent / "readerpc-service-mode.json",
+        {"contract": SERVICE_MODE_CONTRACT, "mode": mode},
     )
 
 
@@ -226,6 +262,8 @@ def read_codex_voice_keep_active(
 def enable_readerpc_voice(
     bridge_paths: BridgePaths,
     process_runner: WindowsProcessRunner,
+    *,
+    bridge_only: bool = False,
 ) -> int:
     """Start the Direct generation owned by this ReaderPC process."""
 
@@ -245,7 +283,13 @@ def enable_readerpc_voice(
         raise ReaderPCServiceError(message)
 
     try:
-        set_codex_voice_keep_active(bridge_paths, True)
+        # 模式文件必须先于 start:C# 只在启动时读它。桥接模式下 keepalive 写 False
+        # 只为磁盘状态一致(C# 传 null 路径根本不读它),真正的"不碰语音"由模式文件保证。
+        set_readerpc_service_mode(
+            bridge_paths,
+            SERVICE_MODE_BRIDGE_ONLY if bridge_only else SERVICE_MODE_FULL,
+        )
+        set_codex_voice_keep_active(bridge_paths, not bridge_only)
         set_direct_config_enabled(
             bridge_paths,
             True,
@@ -441,6 +485,9 @@ class ReaderPCWindow:
         self.keep_pc_online = tk.BooleanVar(
             value=preferences["keepPcPreprocessingOnline"]
         )
+        self.bridge_only = tk.BooleanVar(
+            value=preferences["serviceMode"] == SERVICE_MODE_BRIDGE_ONLY
+        )
 
         root.title(PRODUCT_NAME)
         root.geometry("620x500")
@@ -499,6 +546,14 @@ class ReaderPCWindow:
             text="打开音频与连接配置",
             command=self.open_legacy_voice_settings,
         ).pack(side="right")
+        mode_row = ttk.Frame(outer)
+        mode_row.pack(fill="x", pady=(2, 2))
+        ttk.Checkbutton(
+            mode_row,
+            text="仅桥接模式：不接管语音（上下文/快照/工具照常，语音留在本机）",
+            variable=self.bridge_only,
+            command=self.on_bridge_only_changed,
+        ).pack(side="left")
 
         ttk.Separator(outer).pack(fill="x", pady=(12, 10))
         self.footer = ttk.Label(
@@ -738,6 +793,14 @@ class ReaderPCWindow:
             capture_generation=codex_voice.generation,
         )
 
+    def _bridge_only_enabled(self) -> bool:
+        """偏好里的桥接模式;部分构造(测试/早期启动)时按完整模式处理。"""
+        var = getattr(self, "bridge_only", None)
+        try:
+            return bool(var.get()) if var is not None else False
+        except Exception:
+            return False
+
     def toggle_voice(self) -> None:
         current = self._voice_status()
         if not current.service_online:
@@ -750,11 +813,14 @@ class ReaderPCWindow:
         self.voice_recovery_in_progress = True
         self.voice_start_in_progress = True
 
+        bridge_only = self._bridge_only_enabled()
+
         def start() -> int:
             try:
                 pid = enable_readerpc_voice(
                     self.bridge_paths,
                     self.process_runner,
+                    bridge_only=bridge_only,
                 )
                 self.voice_snapshot_offline_marked = False
                 return pid
@@ -762,9 +828,13 @@ class ReaderPCWindow:
                 self.voice_start_in_progress = False
 
         self._run_task(
-            "正在恢复电脑语音与实时快照服务…",
+            "正在恢复桥接与实时快照服务…"
+            if bridge_only
+            else "正在恢复电脑语音与实时快照服务…",
             start,
-            "电脑语音与实时快照服务已恢复；正在确认 Codex 语音。",
+            "桥接与实时快照已恢复（语音未接管）。"
+            if bridge_only
+            else "电脑语音与实时快照服务已恢复；正在确认 Codex 语音。",
         )
 
     def _stop_voice_task(self) -> None:
@@ -797,6 +867,11 @@ class ReaderPCWindow:
         save_preferences(
             self.readerpc_paths.preferences_file,
             keep_pc_online=running,
+            service_mode=(
+                SERVICE_MODE_BRIDGE_ONLY
+                if self._bridge_only_enabled()
+                else SERVICE_MODE_FULL
+            ),
         )
         if running:
             self.last_pc_start_attempt = time.monotonic()
@@ -814,6 +889,49 @@ class ReaderPCWindow:
 
     def on_keep_pc_changed(self) -> None:
         self._set_pc_running(bool(self.keep_pc_online.get()))
+
+    def on_bridge_only_changed(self) -> None:
+        """切模式 = 存偏好 + 停当前直连代际 + 按新模式重启(C# 只在启动时读模式文件)。"""
+        bridge_only = bool(self.bridge_only.get())
+        save_preferences(
+            self.readerpc_paths.preferences_file,
+            keep_pc_online=bool(self.keep_pc_online.get()),
+            service_mode=(
+                SERVICE_MODE_BRIDGE_ONLY if bridge_only else SERVICE_MODE_FULL
+            ),
+        )
+        if self.busy or self.closing:
+            return
+
+        def switch() -> int:
+            try:
+                stop_readerpc_voice(
+                    self.bridge_paths,
+                    self.process_runner,
+                    disable_configuration=False,
+                )
+            except Exception:
+                pass   # 旧代际可能本就不在;重启路径自身会再校验
+            self.voice_start_in_progress = True
+            try:
+                pid = enable_readerpc_voice(
+                    self.bridge_paths,
+                    self.process_runner,
+                    bridge_only=bridge_only,
+                )
+                self.voice_snapshot_offline_marked = False
+                return pid
+            finally:
+                self.voice_start_in_progress = False
+
+        self.last_voice_start_attempt = time.monotonic()
+        self._run_task(
+            "正在切换到仅桥接模式…" if bridge_only else "正在切换到完整模式…",
+            switch,
+            "已切到仅桥接模式：语音未接管，上下文与工具照常。"
+            if bridge_only
+            else "已切回完整模式：电脑语音恢复接管。",
+        )
 
     def _ensure_pc_online(self) -> None:
         if self.closed or self.closing:
@@ -893,6 +1011,7 @@ class ReaderPCWindow:
             context = read_reader_context_status(
                 self.bridge_paths.root / "runtime" / "reader-context-snapshot.json"
             )
+            bridge_only = self._bridge_only_enabled()
             if not voice.service_online:
                 voice_label = (
                     "正在恢复"
@@ -900,6 +1019,10 @@ class ReaderPCWindow:
                     else "离线 · 等待重试"
                 )
                 voice_color = "#b26a00"
+            elif bridge_only:
+                # 桥接模式:直连在线而 Codex 语音未接管是**正常态**,标绿不标黄。
+                voice_label = "桥接模式 · 语音未接管"
+                voice_color = "#167347"
             elif codex_voice.active is True:
                 voice_label = "在线 · Codex 语音工作中"
                 voice_color = "#167347"
@@ -962,7 +1085,7 @@ class ReaderPCWindow:
                     voice={
                         "online": voice.service_online,
                         "configured": voice.configuration_enabled,
-                        "intentEnabled": True,
+                        "intentEnabled": not bridge_only,
                         "codexVoiceStatus": codex_voice.status,
                         "codexVoiceActive": codex_voice.active,
                         "readerConnected": voice.reader_connected,

@@ -1081,6 +1081,7 @@ internal sealed class DirectBridgeProtocolSession
         _acceptReaderRealtimeOutput;
     private readonly Action<string> _contextDeliveryModeChanged;
     private readonly Func<DateTimeOffset> _utcNow;
+    private readonly bool _bridgeOnlyMode;
     private bool _helloSeen;
     private bool _authenticated;
     private string? _contextDeliveryMode;
@@ -1111,7 +1112,8 @@ internal sealed class DirectBridgeProtocolSession
             acceptReaderRealtimeOutput = null,
         Action<string>? contextDeliveryModeChanged = null,
         IReaderDictionaryFallback? dictionaryFallback = null,
-        IReaderLocalAnkiWriter? localAnkiWriter = null)
+        IReaderLocalAnkiWriter? localAnkiWriter = null,
+        bool bridgeOnlyMode = false)
     {
         if (!DirectBridgeContract.IsSafeId(connectionId))
         {
@@ -1154,6 +1156,19 @@ internal sealed class DirectBridgeProtocolSession
         _contextDeliveryModeChanged = contextDeliveryModeChanged
             ?? (_ => { });
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+        _bridgeOnlyMode = bridgeOnlyMode;
+    }
+
+    // 桥接模式:上下文/快照/工具照常,语音动作(start/codex-voice-set/keepalive-set)
+    // 一律明确拒绝——错误码专用,客户端据此显示"桥在、语音未接管"而不是猜。
+    private void RequireVoiceAllowed()
+    {
+        if (_bridgeOnlyMode)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_BRIDGE_ONLY",
+                "桥接模式:语音未接管(上下文与工具照常)。要用电脑语音,请在 ReaderPC 服务器切回完整模式。");
+        }
     }
 
     internal bool Authenticated => _authenticated;
@@ -1401,12 +1416,40 @@ internal sealed class DirectBridgeProtocolSession
 
     private object HandleContextMode(JsonElement message)
     {
-        RequireExactKeys(
-            message,
-            "contract",
-            "type",
-            "requestId");
+        // serviceMode 按请求自愿升级:客户端带 wantServiceMode:true 才回新字段。
+        // 无条件加字段会炸旧客户端的 exactObject 校验(已装 App 的 bundle 改不了);
+        // 旧客户端不发该键 → 回执与历史逐字节同形。每次快照连接与前台验活都会
+        // 重新查 context-mode,桥接/完整状态天然保鲜,图标据此分支。
+        bool wantServiceMode = message.TryGetProperty(
+            "wantServiceMode",
+            out JsonElement wantValue)
+            && wantValue.ValueKind == JsonValueKind.True;
+        if (wantServiceMode)
+        {
+            RequireExactKeys(
+                message,
+                "contract",
+                "type",
+                "requestId",
+                "wantServiceMode");
+        }
+        else
+        {
+            RequireExactKeys(
+                message,
+                "contract",
+                "type",
+                "requestId");
+        }
         RequireAuthenticated();
+        if (wantServiceMode)
+        {
+            return new
+            {
+                mode = RequireContextDeliveryMode(),
+                serviceMode = _bridgeOnlyMode ? "bridge-only" : "full",
+            };
+        }
         return new
         {
             mode = RequireContextDeliveryMode(),
@@ -1808,6 +1851,7 @@ internal sealed class DirectBridgeProtocolSession
                 "BW_COMPUTER_VOICE_DIRECT_PHASE_INVALID",
                 "当前连接阶段不能远程控制 Codex 语音");
         }
+        RequireVoiceAllowed();
         DirectCodexVoiceSetResult result =
             await _codexVoiceControl.SetActiveAsync(
                 RequireBoolean(message, "active"),
@@ -1837,6 +1881,7 @@ internal sealed class DirectBridgeProtocolSession
                 "BW_COMPUTER_VOICE_DIRECT_PHASE_INVALID",
                 "当前连接阶段不能设置 Codex 语音持续运行");
         }
+        RequireVoiceAllowed();
         DirectCodexVoiceSetResult result =
             await _codexVoiceControl.SetKeepActiveAsync(
                 RequireBoolean(message, "enabled"),
@@ -2024,6 +2069,7 @@ internal sealed class DirectBridgeProtocolSession
         }
         RequireExactKeys(message, [.. expectedKeys]);
         RequireAuthenticated();
+        RequireVoiceAllowed();
         string sessionId = RequireSafeId(message, "sessionId");
         _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
         string appKind = hasAppKind

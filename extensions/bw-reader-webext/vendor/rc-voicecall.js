@@ -769,6 +769,8 @@ if (window.__bwPwaProviderOnly) return;
        '#asst-computer.speaking{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:vcCallPulse 1s ease-in-out infinite}' +
        '#asst-computer.connecting{background:#8a5a00;border-color:#ff9f0a;color:#ffd60a;animation:vcCallPulse .7s ease-in-out infinite}' +
        '#asst-computer.native-app-required,#vc-top-computer.native-app-required{opacity:.38;cursor:not-allowed;animation:none!important}' +
+      // 桥接模式(ReaderPC 仅桥接,语音未接管):蓝色描边、不脉冲——一眼区别于绿(通话)与灰(不可用)
+       '#asst-computer.bridge-only,#vc-top-computer.bridge-only{background:#12233d;border-color:#4da3ff;color:#4da3ff;animation:none!important}' +
        '#asst-call.vc-review-disabled,#vc-top-call.vc-review-disabled,#asst-computer.vc-review-disabled,#vc-top-computer.vc-review-disabled{opacity:.48;cursor:not-allowed;animation:none!important}' +
       // ASR 连续听(mic 长按开):紫色呼吸,与系统听写的蓝 .on 区分
       '#asst-mic.asr{background:#bf5af2 !important;border-color:#bf5af2 !important;color:#fff !important;animation:vcCallPulse 1.6s ease-in-out infinite}' +
@@ -8392,8 +8394,28 @@ if (window.__bwPwaProviderOnly) return;
     }
     return available;
   }
+  // 桥接模式(ReaderPC 仅桥接):rc-computer-voice 每次 context-mode 查询后广播,
+  // 两个按钮切蓝色描边态;点击不再发起通话,提示原因(诚实,不静默失败)。
+  var _bridgeOnlyServiceMode = false;
+  window.addEventListener('bw-computer-voice-service-mode', function (ev) {
+    var bridged = !!(ev && ev.detail && ev.detail.serviceMode === 'bridge-only');
+    _bridgeOnlyServiceMode = bridged;
+    ['asst-computer', 'vc-top-computer'].forEach(function (id) {
+      var b = document.getElementById(id);
+      if (!b) return;
+      b.classList.toggle('bridge-only', bridged);
+      if (bridged) {
+        b.title = '桥接模式:上下文已连,语音未接管(在 ReaderPC 服务器切回完整模式可用语音)';
+        b.setAttribute('aria-label', b.title);
+      }
+    });
+  });
   function _toggleNativeComputerVoiceApp() {
     if (!_nativeComputerVoiceAppAvailable()) return false;
+    if (_bridgeOnlyServiceMode) {
+      try { if (window.RC && RC.toast) RC.toast('桥接模式:语音未接管。上下文/出卷等照常;要通话请在 ReaderPC 切回完整模式。'); } catch (_) {}
+      return true;   // 已消费点击:不发 START(服务端也会拒),不留静默失败
+    }
     try {
       var computerVoice = window.RC && RC.computerVoice;
       function postTarget(appKind) {

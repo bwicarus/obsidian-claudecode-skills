@@ -139,6 +139,7 @@ if (window.__bwPwaProviderOnly) return;
   var lastContextResumeCursor = null;
   var contextPumpGeneration = 0;
   var contextDeliveryMode = null;
+  var bridgeServiceMode = "full";   // "full" | "bridge-only":ReaderPC 桥接模式旗标(context-mode 自愿升级字段带回)
   var contextModeChanging = false;
   var contextModeChangePromise = null;
   var snapshotLink = null;
@@ -3790,7 +3791,9 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function normalizeContextMode(value) {
-    exactObject(value, ["mode"], [], "CONTEXT-MODE 响应");
+    // serviceMode 是请求带 wantServiceMode:true 才有的自愿升级字段(optional):
+    // 旧服务端不回它 → 保持 "full";桥接模式服务端回 "bridge-only" → 图标分支。
+    exactObject(value, ["mode"], ["serviceMode"], "CONTEXT-MODE 响应");
     if (
       value.mode !== CONTEXT_DELIVERY_LEGACY &&
       value.mode !== CONTEXT_DELIVERY_SNAPSHOT
@@ -3801,6 +3804,23 @@ if (window.__bwPwaProviderOnly) return;
         false
       );
     }
+    if (value.serviceMode !== undefined) {
+      if (value.serviceMode !== "full" && value.serviceMode !== "bridge-only") {
+        throw directError(
+          "Windows 服务模式无效",
+          "BW_READER_CONTEXT_DELIVERY_MODE_INVALID",
+          false
+        );
+      }
+      bridgeServiceMode = value.serviceMode;
+    } else {
+      bridgeServiceMode = "full";
+    }
+    try {
+      window.dispatchEvent(new CustomEvent("bw-computer-voice-service-mode", {
+        detail: { serviceMode: bridgeServiceMode },
+      }));
+    } catch (_) {}
     contextDeliveryMode = value.mode;
     applyReaderPCSnapshotAuthority(value.mode);
     return value.mode;
@@ -3821,7 +3841,13 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function queryContextMode(channel) {
-    return channel.request("context-mode", {}).then(normalizeContextMode);
+    // 旧服务端(≤0.1.146)对未知请求键按 exact 拒绝:失败退回历史形状重试一次,
+    // serviceMode 落 "full"。Windows 包回滚时新客户端不至于断上下文链。
+    return channel.request("context-mode", { wantServiceMode: true })
+      .then(normalizeContextMode)
+      .catch(function () {
+        return channel.request("context-mode", {}).then(normalizeContextMode);
+      });
   }
 
   function contextSyncEnabled() {

@@ -71,7 +71,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             path = Path(raw) / "missing.json"
             self.assertEqual(
                 load_preferences(path),
-                {"keepPcPreprocessingOnline": True},
+                {"keepPcPreprocessingOnline": True, "serviceMode": "full"},
             )
 
     def test_preferences_round_trip_explicit_opt_out(self) -> None:
@@ -80,7 +80,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             save_preferences(path, keep_pc_online=False)
             self.assertEqual(
                 load_preferences(path),
-                {"keepPcPreprocessingOnline": False},
+                {"keepPcPreprocessingOnline": False, "serviceMode": "full"},
             )
 
     def test_invalid_preferences_fail_to_safe_default(self) -> None:
@@ -88,6 +88,79 @@ class ReaderPCLauncherTests(unittest.TestCase):
             path = Path(raw) / "readerpc.json"
             path.write_text('{"keepPcPreprocessingOnline":"yes"}', "utf-8")
             self.assertTrue(load_preferences(path)["keepPcPreprocessingOnline"])
+
+    def test_preferences_bridge_mode_round_trip_and_legacy_files(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "readerpc.json"
+            save_preferences(
+                path,
+                keep_pc_online=True,
+                service_mode="bridge-only",
+            )
+            self.assertEqual(
+                load_preferences(path)["serviceMode"], "bridge-only"
+            )
+            # 旧版偏好文件(没有 serviceMode 键)→ 落 full,contract 不 bump
+            path.write_text(
+                '{"contract":"readerpc-server-config/1",'
+                '"keepPcPreprocessingOnline":true}',
+                "utf-8",
+            )
+            self.assertEqual(load_preferences(path)["serviceMode"], "full")
+            # 非法模式值 → 落 full
+            path.write_text(
+                '{"contract":"readerpc-server-config/1",'
+                '"keepPcPreprocessingOnline":true,"serviceMode":"chaos"}',
+                "utf-8",
+            )
+            self.assertEqual(load_preferences(path)["serviceMode"], "full")
+
+    def test_service_mode_intent_file_written_before_voice_start(self) -> None:
+        """桥接模式:模式文件先于 start 落盘(C# 只在启动时读),且 keepalive=False。"""
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime" / "direct.status.json"
+            runtime.parent.mkdir(parents=True)
+            bridge_paths = SimpleNamespace(
+                runtime_status=runtime,
+                direct_config=SimpleNamespace(exists=lambda: True),
+            )
+            order: list[str] = []
+            with (
+                patch(
+                    "readerpc_launcher.load_direct_config",
+                    return_value={
+                        "localOptIn": True,
+                        "contextDeliveryMode": "snapshot-mcp",
+                    },
+                ),
+                patch("readerpc_launcher.set_direct_config_enabled"),
+                patch(
+                    "readerpc_launcher.start_readerpc_voice",
+                    side_effect=lambda *_a, **_k: (
+                        order.append("start"),
+                        4321,
+                    )[1],
+                ),
+            ):
+                self.assertEqual(
+                    enable_readerpc_voice(
+                        bridge_paths,
+                        Mock(),
+                        bridge_only=True,
+                    ),
+                    4321,
+                )
+            mode_file = runtime.parent / "readerpc-service-mode.json"
+            self.assertEqual(
+                json.loads(mode_file.read_text("utf-8")),
+                {"contract": "readerpc-service-mode/1", "mode": "bridge-only"},
+            )
+            keepalive = json.loads(
+                (runtime.parent / "codex-voice-keepalive.json")
+                .read_text("utf-8")
+            )
+            self.assertFalse(keepalive["enabled"])
+            self.assertEqual(order, ["start"])
 
     def test_codex_voice_master_switch_is_exact_and_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -244,6 +317,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
                 "readerpc_launcher.set_direct_config_enabled",
                 side_effect=lambda *_args, **_kwargs: calls.append("configure-off"),
             ),
+            patch("readerpc_launcher.set_readerpc_service_mode"),
             patch(
                 "readerpc_launcher.read_direct_status",
                 return_value=SimpleNamespace(service_online=True),
@@ -283,6 +357,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
                 "readerpc_launcher.set_direct_config_enabled",
                 side_effect=lambda *_args, **_kwargs: calls.append("configure-off"),
             ) as configure,
+            patch("readerpc_launcher.set_readerpc_service_mode"),
             patch(
                 "readerpc_launcher.read_direct_status",
                 return_value=SimpleNamespace(service_online=False),
@@ -306,6 +381,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
         process_runner = Mock()
         with (
             patch("readerpc_launcher.set_codex_voice_keep_active"),
+            patch("readerpc_launcher.set_readerpc_service_mode"),
             patch("readerpc_launcher.set_direct_config_enabled") as configure,
             patch(
                 "readerpc_launcher.read_direct_status",
@@ -425,6 +501,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
                     ("configure", kwargs)
                 ),
             ),
+            patch("readerpc_launcher.set_readerpc_service_mode"),
             patch(
                 "readerpc_launcher.start_readerpc_voice",
                 side_effect=lambda *_args, **kwargs: calls.append(
@@ -493,6 +570,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
                 "readerpc_launcher.set_direct_config_enabled",
                 side_effect=lambda *_args, **_kwargs: events.append("configure"),
             ),
+            patch("readerpc_launcher.set_readerpc_service_mode"),
             patch("readerpc_launcher.start_readerpc_voice", side_effect=fail_start),
             patch(
                 "readerpc_launcher.write_recovering_reader_context_snapshot",
@@ -529,6 +607,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
                 "readerpc_launcher.set_codex_voice_keep_active",
                 return_value=False,
             ) as intent,
+            patch("readerpc_launcher.set_readerpc_service_mode"),
             patch("readerpc_launcher.set_direct_config_enabled") as configure,
             patch(
                 "readerpc_launcher.start_readerpc_voice",
@@ -554,6 +633,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             patch(
                 "readerpc_launcher.set_codex_voice_keep_active"
             ),
+            patch("readerpc_launcher.set_readerpc_service_mode"),
             patch("readerpc_launcher.set_direct_config_enabled") as configure,
             patch(
                 "readerpc_launcher.start_readerpc_voice",
@@ -609,7 +689,11 @@ class ReaderPCLauncherTests(unittest.TestCase):
             return_value=4321,
         ) as enable:
             window._start_voice_task()
-        enable.assert_called_once_with(window.bridge_paths, window.process_runner)
+        enable.assert_called_once_with(
+            window.bridge_paths,
+            window.process_runner,
+            bridge_only=False,
+        )
         self.assertFalse(window.voice_snapshot_offline_marked)
 
     def test_offline_retry_uses_the_same_owned_start_path(self) -> None:
@@ -620,7 +704,11 @@ class ReaderPCLauncherTests(unittest.TestCase):
             return_value=4321,
         ) as enable:
             window._start_voice_task()
-        enable.assert_called_once_with(window.bridge_paths, window.process_runner)
+        enable.assert_called_once_with(
+            window.bridge_paths,
+            window.process_runner,
+            bridge_only=False,
+        )
 
     def test_manual_retry_only_starts_when_server_service_is_offline(self) -> None:
         window = self.window_without_tk()

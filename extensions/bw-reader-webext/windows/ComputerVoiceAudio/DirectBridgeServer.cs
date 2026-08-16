@@ -42,6 +42,42 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly DirectRuntimeStatusWriter _statusWriter;
     private readonly DirectServiceLease _serviceLease;
     private readonly DirectSnapshotViewer _snapshotViewer;
+    private readonly bool _bridgeOnlyMode;
+
+    // 桥接模式旗标走独立意图文件:keepalive/direct-config/runtime-status 三者都是
+    // exact 合同(四处副本校验键集),加键任何一个都会被判无效或服务离线。
+    internal const string ServiceModeContract = "readerpc-service-mode/1";
+
+    internal static bool ReadBridgeOnlyMode(string runtimeDirectory)
+    {
+        try
+        {
+            string path = Path.Combine(
+                runtimeDirectory,
+                "readerpc-service-mode.json");
+            if (!File.Exists(path))
+            {
+                return false;
+            }
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllText(path));
+            JsonElement root = document.RootElement;
+            return root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty(
+                    "contract",
+                    out JsonElement contract)
+                && contract.ValueKind == JsonValueKind.String
+                && contract.GetString() == ServiceModeContract
+                && root.TryGetProperty("mode", out JsonElement mode)
+                && mode.ValueKind == JsonValueKind.String
+                && mode.GetString() == "bridge-only";
+        }
+        catch (Exception)
+        {
+            // 读不出 = 完整模式:失败回落到现状行为,而不是悄悄改变语音语义。
+            return false;
+        }
+    }
     private readonly ReaderDocumentCorpusStore _documentCorpus;
     private readonly ReaderContextSourceRouter _readerSourceRouter = new();
     private readonly ReaderVisualDeliveryBroker _readerVisualBroker;
@@ -108,9 +144,17 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 FileDirectSnapshotContextAdapter.SnapshotFileName),
             config.ListenPort,
             manageSnapshotViewerProcess);
+        _bridgeOnlyMode = ReadBridgeOnlyMode(runtimeDirectory);
+        // 桥接模式:keepActivePath 传 null = 整条 keepalive 链不装载(不轮询、不拉
+        // Codex、不发任何 F24——含"写 false 会发一次 stop 把用户手动开的语音关掉"
+        // 那条初次 reconcile)。写 false 与不装载语义不同,桥接模式必须是后者。
         _codexVoiceControl = codexVoiceControl
             ?? DirectCodexVoiceControl.CreateProduction(
-                Path.Combine(runtimeDirectory, "codex-voice-keepalive.json"),
+                _bridgeOnlyMode
+                    ? null
+                    : Path.Combine(
+                        runtimeDirectory,
+                        "codex-voice-keepalive.json"),
                 appLauncher,
                 keepActiveChanged: enabled =>
                     _snapshotViewer.SynchronizeServiceIntent(
@@ -1007,6 +1051,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             _configStore,
             _coordinator,
             codexVoiceControl: _codexVoiceControl,
+            bridgeOnlyMode: _bridgeOnlyMode,
             registerReaderSource: sourceInstanceId =>
             {
                 sourceLease = _readerSourceRouter.Attach(
@@ -1200,6 +1245,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             _configStore,
             _coordinator,
             codexVoiceControl: _codexVoiceControl,
+            bridgeOnlyMode: _bridgeOnlyMode,
             contextDeliveryModeChanged: mode =>
                 _snapshotViewer.SynchronizeServiceIntent(
                     mode,
