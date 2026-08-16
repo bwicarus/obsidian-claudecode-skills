@@ -1581,7 +1581,9 @@ def main(argv=None) -> int:
         args = parse_args(argv)
         _lower_process_priority()
         runner = build_runner(args)
+        failure_streak = 0
         while True:
+            failed = False
             try:
                 worked = runner.run_once()
             except LeaseStopped as exc:
@@ -1591,11 +1593,24 @@ def main(argv=None) -> int:
                 return 130
             except Exception as exc:
                 print("PC OCR worker error: " + safe_error(exc), file=sys.stderr, flush=True)
-                worked = True
+                # ⚠ 2026-08-17 修:失败以前被记成 worked=True → recycle 模式直接
+                # return 0 → 监督者 30s 后重启 → 持续性错误(Pi 证书过期/502)变成
+                # "每 30 秒冷启动一个进程"的重启风暴,而下面写好的退避永远走不到。
+                # recycle 的本意是"干完活释放模型显存"——失败根本没加载模型,
+                # 留在进程内按指数退避重试才是便宜的路径。
+                worked = False
+                failed = True
             if args.once or (args.recycle_after_job and worked):
                 return 0
-            # Empty queues poll slowly.  Failures also back off so a broken Pi
-            # or model does not consume CPU in a tight retry loop.
+            if failed:
+                failure_streak += 1
+                backoff = min(600.0, 10.0 * (2 ** min(failure_streak - 1, 6)))
+                print(f"PC OCR worker backing off {backoff:.0f}s (streak {failure_streak})",
+                      file=sys.stderr, flush=True)
+                time.sleep(backoff)
+                continue
+            failure_streak = 0
+            # Empty queues poll slowly so an idle worker stays cheap.
             time.sleep(max(5.0, float(args.idle_poll_seconds if not worked else 10.0)))
     except Exception as exc:
         print("PC OCR worker startup failed: " + safe_error(exc), file=sys.stderr)

@@ -66,8 +66,16 @@ SERVICE_MODE_FULL = "full"
 SERVICE_MODE_BRIDGE_ONLY = "bridge-only"
 POLL_INTERVAL_MS = 2_500
 STATUS_PUBLISH_INTERVAL_SECONDS = 10.0
+# 保活退避(2026-08-17 重启风暴修):基础 30s,连败指数升级封顶 15 分钟,成功清零。
+# 固定 30s 的旧行为在持续性故障(依赖服务坏死等)下= 24 小时不停冷启动进程,
+# 且 UI 只闪成功提示,用户无从知道在空转。
 PC_RESTART_BACKOFF_SECONDS = 30.0
 VOICE_RESTART_BACKOFF_SECONDS = 30.0
+RESTART_BACKOFF_CAP_SECONDS = 900.0
+
+
+def _escalated_backoff(base: float, streak: int) -> float:
+    return min(RESTART_BACKOFF_CAP_SECONDS, base * (2 ** min(max(streak, 0), 5)))
 VOICE_START_TIMEOUT_SECONDS = 8.0
 VOICE_START_POLL_SECONDS = 0.1
 SHORTCUT_BROKER_READY_SECONDS = 2.0
@@ -445,6 +453,10 @@ def start_readerpc_voice(
 
 
 class ReaderPCWindow:
+    # 类级默认:保活退避计数在部分构造(测试/早期启动)下也存在
+    pc_fail_streak = 0
+    voice_fail_streak = 0
+
     def __init__(
         self,
         root: tk.Tk,
@@ -466,6 +478,8 @@ class ReaderPCWindow:
         self.service_lock = threading.Lock()
         self.last_pc_start_attempt = 0.0
         self.last_voice_start_attempt = 0.0
+        self.pc_fail_streak = 0
+        self.voice_fail_streak = 0
         self.voice_recovery_in_progress = False
         self.voice_start_in_progress = False
         self.voice_stop_in_progress = False
@@ -936,18 +950,42 @@ class ReaderPCWindow:
     def _ensure_pc_online(self) -> None:
         if self.closed or self.closing:
             return
-        if (
-            self.keep_pc_online.get()
-            and not self.busy
-            and not self.pc_ocr.status().running
-            and time.monotonic() - self.last_pc_start_attempt >= PC_RESTART_BACKOFF_SECONDS
-        ):
-            self.last_pc_start_attempt = time.monotonic()
-            self._run_task(
-                "正在让 PC 预处理保持在线…",
-                self.pc_ocr.start,
-                "PC 预处理已恢复在线。",
+        try:
+            pc_running = self.pc_ocr.status().running
+            if pc_running:
+                self.pc_fail_streak = 0
+            backoff = _escalated_backoff(
+                PC_RESTART_BACKOFF_SECONDS, self.pc_fail_streak
             )
+            if (
+                self.keep_pc_online.get()
+                and not self.busy
+                and not pc_running
+                and time.monotonic() - self.last_pc_start_attempt >= backoff
+            ):
+                self.last_pc_start_attempt = time.monotonic()
+                self.pc_fail_streak += 1
+                if self.pc_fail_streak >= 3:
+                    self.footer.configure(
+                        text=(
+                            "PC 预处理已连续 %d 次未能保持在线,退避 %d 秒重试。"
+                            % (
+                                self.pc_fail_streak,
+                                int(_escalated_backoff(
+                                    PC_RESTART_BACKOFF_SECONDS,
+                                    self.pc_fail_streak,
+                                )),
+                            )
+                        ),
+                        foreground="#b26a00",
+                    )
+                self._run_task(
+                    "正在让 PC 预处理保持在线…",
+                    self.pc_ocr.start,
+                    "PC 预处理已恢复在线。",
+                )
+        except Exception:
+            pass
         self.root.after(5_000, self._ensure_pc_online)
 
     def _reconcile_service_mode_intent(self) -> None:
@@ -990,17 +1028,38 @@ class ReaderPCWindow:
                 status = self._voice_status()
                 if status.service_online:
                     self.voice_snapshot_offline_marked = False
+                    self.voice_fail_streak = 0
                 else:
                     if not self.voice_snapshot_offline_marked:
                         write_recovering_reader_context_snapshot(
                             self.bridge_paths
                         )
                         self.voice_snapshot_offline_marked = True
+                    voice_backoff = _escalated_backoff(
+                        VOICE_RESTART_BACKOFF_SECONDS,
+                        self.voice_fail_streak,
+                    )
                     if (
                         not self.busy
                         and time.monotonic() - self.last_voice_start_attempt
-                        >= VOICE_RESTART_BACKOFF_SECONDS
+                        >= voice_backoff
                     ):
+                        self.voice_fail_streak += 1
+                        if self.voice_fail_streak >= 3:
+                            self.footer.configure(
+                                text=(
+                                    "直连服务已连续 %d 次恢复失败(%s),退避 %d 秒重试。"
+                                    % (
+                                        self.voice_fail_streak,
+                                        status.reason or "?",
+                                        int(_escalated_backoff(
+                                            VOICE_RESTART_BACKOFF_SECONDS,
+                                            self.voice_fail_streak,
+                                        )),
+                                    )
+                                ),
+                                foreground="#b26a00",
+                            )
                         self._start_voice_task()
         except (BridgeError, ReaderPCServiceError, OSError, ValueError) as exc:
             self.footer.configure(
