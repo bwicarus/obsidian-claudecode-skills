@@ -12,7 +12,21 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 
 mkdir -p "$BACKUP_DIR"
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
+# 清理失败不能伪装成备份失败。rsync -a 会把 webapp 运行用户拥有的只读文件
+# 原样复制进 stage(reader-sidecars/backups 下就有),备份用户删不掉它们;
+# 在 set -e 下 trap 里 rm 的非零退出会成为整个脚本的退出码 —— **而这发生在
+# 归档已经成功落地之后**。systemd 于是天天报 failed,而 ~/backups 里每天
+# 2GB 的包一直好好的。假警报比没有警报更坏:真出事时已经没人看了。
+# 先放开自己这份副本的权限再删,仍删不掉就出声但不改变备份的成败。
+cleanup_stage() {
+  local code=$?
+  chmod -R u+rwX "$STAGE" 2>/dev/null || true
+  if ! rm -rf "$STAGE" 2>/dev/null; then
+    echo "⚠ 临时目录未能完全清理: $STAGE(备份本身不受影响)" >&2
+  fi
+  return $code
+}
+trap cleanup_stage EXIT
 
 # ── 1) webapp/data:账号/token/用户数据(不可再生) ──
 if [ -d "$WEBAPP_DATA" ]; then

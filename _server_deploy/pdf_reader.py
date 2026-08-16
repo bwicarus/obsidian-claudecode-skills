@@ -16618,9 +16618,20 @@ def _fig_load_abs(abs_path) -> dict:
 
 def _fig_save_abs(abs_path, data: dict):
     p = _fig_path_abs(abs_path)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
-    tmp.replace(p)
+    # tmp 名带 pid:四个写入方(这里、yolo_figures、describe_figures_batch、
+    # formula_writeback)都做 tmp→replace,各自看都是原子的,但**共用同一个
+    # <sha>.json.tmp**。yolo-figures 每 6 小时、figures-describe 每晚、webapp
+    # 随时都可能写同一本书,撞上就是两个进程往同一个 tmp 里交替写,replace
+    # 上去的是两半拼起来的内容。
+    # 2026-08-16 实测:6 个 sidecar 坏了 2 个,一个 UTF-8 中途断裂,另一个尾部
+    # 多出一截旧内容(短的覆盖长的之后残留)。整个夜间批处理在读到它时崩掉,
+    # 后面的书一本都没处理。
+    tmp = p.with_suffix(f".json.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+        tmp.replace(p)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 def _fig_done_page(data: dict, page: int) -> bool:
     return any(f.get("page") == page for f in data.get("figures", [])) or page in set(data.get("_none_pages", []))

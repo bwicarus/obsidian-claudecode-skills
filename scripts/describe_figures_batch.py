@@ -203,7 +203,9 @@ def process_book(sidecar_path, model="sonnet", force=False, dry=False):
         if not dry:
             data["figures_geom"] = geom
             data["figures_described_at"] = int(time.time())
-            tmp = sidecar_path + ".tmp"
+            # tmp 名带 pid:四个写入方共用 <sha>.json.tmp 会互相覆盖出半截
+            # 内容(2026-08-16 实测坏了 2 个 sidecar,夜间批处理整个崩掉)。
+            tmp = f"{sidecar_path}.{os.getpid()}.tmp"
             open(tmp, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False, indent=1))
             os.replace(tmp, sidecar_path)
     doc.close()
@@ -224,10 +226,26 @@ def main():
             print(f"no sidecar: {sc}"); return 2
         process_book(str(sc), a.model, a.force, a.dry)
     elif a.all:
+        # 一本书坏了不能让整批停摆。2026-08-16:一个 sidecar 的 UTF-8 断裂让
+        # 整个夜间批处理抛异常退出,排在它后面的书一本都没处理,而 systemd
+        # 只看到 exit=1、日志里连是哪本书都没有。
+        # 出错要指名道姓、继续下一本,并在最后以非零退出让 systemd 仍然知道
+        # 有问题 —— 既不隐瞒失败,也不让一本坏书绑架其余的。
+        failed = []
         for sc in sorted(glob.glob(str(FIG_DIR / "*.json"))):
             if sc.endswith((".bak", ".progress.json", ".tmp")):
                 continue
-            process_book(sc, a.model, a.force, a.dry)
+            try:
+                process_book(sc, a.model, a.force, a.dry)
+            except Exception as exc:
+                failed.append((os.path.basename(sc), f"{type(exc).__name__}: {exc}"))
+                print(f"  ✗ {os.path.basename(sc)}: {type(exc).__name__}: {exc}")
+        if failed:
+            print()
+            print(f"{len(failed)} 本书处理失败:")
+            for name, why in failed:
+                print(f"  · {name}: {why}")
+            return 1
     else:
         print("need --all or --book"); return 2
     return 0

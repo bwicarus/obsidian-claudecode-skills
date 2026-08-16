@@ -11,7 +11,7 @@ results.json 形如:
 原地更新 formulas[idx].latex(+ 可选 kind / latex_engine),写前备份到 <sidecar>.json.bak,原子替换。
 保留 sidecar 原有紧凑格式(单行 JSON),不重排其它字段。
 """
-import sys, json, argparse, shutil
+import sys, os, json, argparse, shutil
 from pathlib import Path
 
 PROJ = Path(__file__).resolve().parent.parent
@@ -61,7 +61,8 @@ def main():
         n += 1
 
     shutil.copy2(sc, sc.with_suffix(".json.bak"))
-    tmp = sc.with_suffix(".json.tmp")
+    # tmp 名带 pid:与 webapp/yolo/describe 共用同一 tmp 会写坏 sidecar。
+    tmp = sc.with_suffix(f".json.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")  # indent=1 跟 _fig_save_abs 一致
     tmp.replace(sc)
     print(f"wrote {n}/{len(formulas)} latex into {sc.name} (backup .json.bak)")

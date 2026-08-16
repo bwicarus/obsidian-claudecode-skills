@@ -246,7 +246,9 @@ def process_sidecar(path, dry=False, force=False):
     data["geom"] = "yolo"
     data["geom_at"] = int(time.time())
     if not dry:
-        tmp = path + ".tmp"
+        # tmp 名带 pid:与 webapp/describe/formula 共用同一 tmp 会写坏 sidecar
+        # (2026-08-16 实测坏了 2 个,夜间批处理因此整个崩掉)。
+        tmp = f"{path}.{os.getpid()}.tmp"
         open(tmp, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False, indent=1))
         os.replace(tmp, path)
     print(f"  {os.path.basename(path)}: in={len(figs)} yolo_boxes={nyolo} → out={len(new_figs)} (单图yolo:{nsingle} 图组:{ngrp} 回退ai:{nfa} 无AI注的YOLO框:{nstand}) formulas={len(formulas_all)}(沿用旧latex {n_kept}) 沿用旧desc {n_desc_kept}")
