@@ -661,7 +661,7 @@ def user_dir(username, dataset=""):
     return base
 
 PROTECTED_PREFIXES = ("/dashboard", "/private", "/history", "/qa", "/profile", "/admin", "/auth", "/control", "/pdf", "/insights",
-                      "/api/assistant", "/api/fitness")   # 后两个:让 Bearer 桥也覆盖(MCP 外部 agent 冷启动直调健身/助手,此前靠先调 /pdf 拿 session cookie 的隐式顺序)
+                      "/api/assistant", "/api/fitness", "/api/kg")   # 后三个:让 Bearer 桥也覆盖(MCP 外部 agent 冷启动直调健身/助手,此前靠先调 /pdf 拿 session cookie 的隐式顺序;/api/kg 是电脑侧只读拉图谱,只有 token 没有 cookie)
 PUBLIC_PREFIXES    = ("/login", "/logout", "/register", "/static")
 WEB_PROXY_CAP_EXACT_PATHS = {
     "/pdf/web/frame",

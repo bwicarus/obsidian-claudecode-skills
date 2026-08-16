@@ -186,7 +186,16 @@ def main() -> int:
     try:
         return sync(args.base, args.token, args.timeout, args.book)
     except urllib.error.HTTPError as error:
-        detail = "凭据无效或已过期" if error.code in (401, 403) else str(error)
+        # 401 的字面意思是「凭据无效」，但服务端还有一种同样返回 401 的情况：
+        # token 完全有效，只是这条路径没挂到 app.py 的 Bearer 桥
+        # （PROTECTED_PREFIXES）上，于是 token 压根没被解析。两种都写出来，
+        # 免得只按字面去查 token、查不出问题。2026-08-16 实际踩过一次。
+        if error.code in (401, 403):
+            detail = ("凭据无效或已过期；也可能是服务端没把 /api/kg 挂到 "
+                      "Bearer 桥上（app.py 的 PROTECTED_PREFIXES），"
+                      "那种情况下 token 是好的但不会被解析")
+        else:
+            detail = str(error)
         print(f"同步失败：HTTP {error.code} —— {detail}", file=sys.stderr)
         return 1
     except Exception as error:
