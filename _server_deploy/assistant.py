@@ -5578,7 +5578,7 @@ _TOOL_NAMES_BY_NAMESPACE = {
     },
     "annotation": {
         "see_page", "see_figure", "see_ink", "highlight", "auto_highlight",
-        "read_highlights", "find_highlights", "undo_last",
+        "read_highlights", "find_highlights", "undo_last", "report_problem",
     },
     "language_notes": {
         "notes_query", "notes_read", "notes_create", "notes_edit", "page_vocab",
