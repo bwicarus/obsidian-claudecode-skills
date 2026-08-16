@@ -1082,6 +1082,7 @@ internal sealed class DirectBridgeProtocolSession
     private readonly Action<string> _contextDeliveryModeChanged;
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly bool _bridgeOnlyMode;
+    private readonly Action<string>? _writeServiceModeIntent;
     private bool _helloSeen;
     private bool _authenticated;
     private string? _contextDeliveryMode;
@@ -1113,7 +1114,8 @@ internal sealed class DirectBridgeProtocolSession
         Action<string>? contextDeliveryModeChanged = null,
         IReaderDictionaryFallback? dictionaryFallback = null,
         IReaderLocalAnkiWriter? localAnkiWriter = null,
-        bool bridgeOnlyMode = false)
+        bool bridgeOnlyMode = false,
+        Action<string>? writeServiceModeIntent = null)
     {
         if (!DirectBridgeContract.IsSafeId(connectionId))
         {
@@ -1157,6 +1159,7 @@ internal sealed class DirectBridgeProtocolSession
             ?? (_ => { });
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
         _bridgeOnlyMode = bridgeOnlyMode;
+        _writeServiceModeIntent = writeServiceModeIntent;
     }
 
     // 桥接模式:上下文/快照/工具照常,语音动作(start/codex-voice-set/keepalive-set)
@@ -1252,6 +1255,9 @@ internal sealed class DirectBridgeProtocolSession
                     break;
                 case "context-mode-set":
                     payload = HandleContextModeSet(message);
+                    break;
+                case "service-mode-set":
+                    payload = HandleServiceModeSet(message);
                     break;
                 case "context-open":
                     payload = HandleContextOpen(message);
@@ -1453,6 +1459,38 @@ internal sealed class DirectBridgeProtocolSession
         return new
         {
             mode = RequireContextDeliveryMode(),
+        };
+    }
+
+    private object HandleServiceModeSet(JsonElement message)
+    {
+        // App 设置面板遥控 ReaderPC 模式:这里只写意图文件;真正的停旧代际→按新
+        // 模式重启由 ReaderPC 的收敛循环执行(它是唯一的服务生命周期所有者)。
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "mode");
+        RequireAuthenticated();
+        string mode = RequireString(message, "mode", 16);
+        if (mode is not ("full" or "bridge-only"))
+        {
+            throw new DirectProtocolException(
+                "BW_READERPC_SERVICE_MODE_INVALID",
+                "服务模式只能是 full 或 bridge-only");
+        }
+        if (_writeServiceModeIntent is null)
+        {
+            throw new DirectProtocolException(
+                "BW_READERPC_SERVICE_MODE_UNAVAILABLE",
+                "服务模式意图写入尚未接线");
+        }
+        _writeServiceModeIntent(mode);
+        return new
+        {
+            serviceMode = mode,
+            applied = "pending-restart",
         };
     }
 

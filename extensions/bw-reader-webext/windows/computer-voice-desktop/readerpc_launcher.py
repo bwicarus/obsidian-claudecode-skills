@@ -950,10 +950,39 @@ class ReaderPCWindow:
             )
         self.root.after(5_000, self._ensure_pc_online)
 
+    def _reconcile_service_mode_intent(self) -> None:
+        """App 经桥请求换模式(C# 只写意图文件);ReaderPC 是唯一的服务生命周期
+        所有者,在这里收敛:文件模式 ≠ 当前模式 → 同步 UI/偏好并按新模式重启。
+        重启后文件==已应用模式,循环自然静止。"""
+        try:
+            value = json.loads(
+                (self.bridge_paths.runtime_status.parent
+                 / "readerpc-service-mode.json").read_text("utf-8")
+            )
+        except (OSError, ValueError, TypeError):
+            return   # TypeError:部分构造(测试 Mock 路径)——按无意图处理
+        if not (isinstance(value, dict)
+                and value.get("contract") == SERVICE_MODE_CONTRACT):
+            return
+        mode = value.get("mode")
+        if mode not in (SERVICE_MODE_FULL, SERVICE_MODE_BRIDGE_ONLY):
+            return
+        wanted = mode == SERVICE_MODE_BRIDGE_ONLY
+        if wanted == self._bridge_only_enabled():
+            return
+        if self.busy or self.closing or self.voice_start_in_progress:
+            return
+        var = getattr(self, "bridge_only", None)
+        if var is None:
+            return
+        var.set(wanted)
+        self.on_bridge_only_changed()
+
     def _ensure_voice_online(self) -> None:
         if self.closed or self.closing:
             return
         try:
+            self._reconcile_service_mode_intent()
             # Do not race the known start transaction: it owns config, process
             # and the first fresh runtime heartbeat. Other busy work (for
             # example PC preprocessing) must not leave a stale ready snapshot.

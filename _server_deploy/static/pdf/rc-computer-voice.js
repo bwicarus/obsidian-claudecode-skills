@@ -8389,8 +8389,35 @@
     });
   }
 
+  function setReaderPCServiceMode(mode) {
+    // App 设置面板遥控 ReaderPC 模式:C# 写意图文件,ReaderPC 的收敛循环(≤5s)
+    // 停旧代际按新模式重启——所以回执是 pending-restart,数秒后 context-mode
+    // 重查会带回新 serviceMode(事件广播,图标随之切)。
+    if (mode !== "full" && mode !== "bridge-only") {
+      return Promise.reject(new Error("BW_READERPC_SERVICE_MODE_INVALID"));
+    }
+    var state = snapshotLink;
+    var channel = state && state.channel;
+    if (!channel) {
+      return Promise.reject(new Error("BW_READERPC_SERVICE_MODE_LINK_OFFLINE"));
+    }
+    return channel.request("service-mode-set", { mode: mode }).then(function (value) {
+      exactObject(value, ["serviceMode", "applied"], [], "SERVICE-MODE-SET 响应");
+      if (value.serviceMode !== "full" && value.serviceMode !== "bridge-only") {
+        throw directError(
+          "Windows 服务模式无效",
+          "BW_READERPC_SERVICE_MODE_INVALID",
+          false
+        );
+      }
+      return value;
+    });
+  }
+
   RC.computerVoice = Object.freeze({
     contract: BRIDGE_CONTRACT,
+    getServiceMode: function () { return bridgeServiceMode; },
+    setServiceMode: setReaderPCServiceMode,
     sendWebPageContext: sendWebPageContext,
     directContract: DIRECT_CONTRACT,
     availability: availability,

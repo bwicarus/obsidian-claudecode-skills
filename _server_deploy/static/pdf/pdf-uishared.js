@@ -956,6 +956,21 @@ window._favOpenPicker = function () {
     // _upDelReal —— lp 分支已让终点认识本机纸(整组删)。不另造删除按钮。
     return tmp;
   }
+  function _lpSyncWidths() {
+    // 缩放/侧栏挤压后真实页宽度变了:镜像 _upPlace 的对齐规则(宽度对齐邻页,
+    // aspect-ratio 驱动高度)。lp 页挂载后不再经 _upPlace,靠本函数在每次
+    // _userpagesMount 幂等钩子里跟排——否则"新建页不跟其它页一起缩放"。
+    Object.keys(_lpMounted).forEach(function (id) {
+      var el = _lpMounted[id];
+      if (!el || !el.isConnected) return;
+      var sib = el.previousElementSibling;
+      while (sib && !(sib.classList && sib.classList.contains('page-wrap'))) sib = sib.previousElementSibling;
+      var ref = sib || document.querySelector('.page-wrap[data-page-num]');
+      if (!ref) return;
+      var w = ref.getBoundingClientRect().width;
+      if (w > 40 && Math.abs((parseFloat(el.style.width) || 0) - w) > 1) el.style.width = Math.round(w) + 'px';
+    });
+  }
   function _lpRestore() {   // 幂等恢复:页 DOM 未就绪时 _upPlace 失败,靠调用方重试补挂
     var prevByGid = {};
     _lpAll().forEach(function (rec) {
@@ -963,6 +978,7 @@ window._favOpenPicker = function () {
       var el = _lpMountOne(rec, rec.idx > 0 ? prevByGid[rec.gid] : null);
       if (el) prevByGid[rec.gid] = el;
     });
+    _lpSyncWidths();
   }
   function _lpStartTask(spec) {
     var sp = _lpSpec(spec.paper || (spec.params && spec.params.paper) || 'note');

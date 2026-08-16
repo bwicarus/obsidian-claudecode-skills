@@ -700,6 +700,13 @@
           '<div style="font-size:13px;color:#cfe0ff;font-weight:600;margin-bottom:4px">电脑客户端桥接</div>' +
           '<div style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-bottom:10px">电脑图标按钮是唯一启动入口；普通电话按钮只负责豆包、GPT 或 Grok。查看状态不会启动应用、采音或发送快捷键。</div>' +
           '<div id="rcset-computer-inline"></div>' +
+          '<label id="set-bridge-voice-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:#cfe0ff;font-weight:600;cursor:pointer;margin-top:10px">' +
+            '<input type="checkbox" id="set-bridge-voice" style="width:16px;height:16px"> 🔊 把语音也桥接进来' +
+          '</label>' +
+          '<div id="set-bridge-voice-help" style="display:none;font-size:11px;color:#8a9bb4;line-height:1.6;margin-top:5px">' +
+            '关闭 = ReaderPC 仅桥接模式：上下文/快照/出卷等照常，语音留在电脑本地不被接管。切换在数秒内由 ReaderPC 重启服务生效。' +
+          '</div>' +
+          '<div id="set-bridge-voice-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
         '</div>' +
         '<div id="set-ctx-sync-card" style="background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin:16px 0">' +
           '<label id="set-ctx-sync-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:#cfe0ff;font-weight:600;cursor:pointer">' +
@@ -1265,7 +1272,40 @@
 
   // ── 双向上下文同步总开关:自闭环(自己回填、自己在 change 时落盘)。
   //    PDF 宿主的保存走 opts.onSave 原生函数、根本不进 saveInternal,挂在「保存」里三宿主行为会不一致。
+  // ── 「把语音也桥接进来」= ReaderPC full/bridge-only 遥控开关。
+  //    只在快照链已回报 serviceMode 的服务端(0.1.147+)上显示;切换写意图文件,
+  //    ReaderPC 数秒内重启服务生效,之后 context-mode 重查带回新值(事件驱动回填)。
+  function _fillBridgeVoice() {
+    var row = $('set-bridge-voice-row'), cb = $('set-bridge-voice');
+    var help = $('set-bridge-voice-help'), msg = $('set-bridge-voice-msg');
+    if (!row || !cb || !(window.RC && RC.computerVoice && RC.computerVoice.setServiceMode)) return;
+    function fill() {
+      var mode = RC.computerVoice.getServiceMode && RC.computerVoice.getServiceMode();
+      var known = mode === 'full' || mode === 'bridge-only';
+      row.style.display = known ? 'flex' : 'none';
+      if (help) help.style.display = known ? '' : 'none';
+      if (known) cb.checked = mode === 'full';
+    }
+    fill();
+    if (!cb._bridgeBound) {
+      cb._bridgeBound = true;
+      window.addEventListener('bw-computer-voice-service-mode', fill);
+      cb.addEventListener('change', function () {
+        var target = cb.checked ? 'full' : 'bridge-only';
+        cb.disabled = true;
+        if (msg) { msg.textContent = '正在请求切换…'; msg.style.display = ''; }
+        RC.computerVoice.setServiceMode(target).then(function () {
+          if (msg) { msg.textContent = '已请求切换到' + (target === 'full' ? '完整模式' : '仅桥接模式') + '，数秒内生效。'; }
+        }).catch(function (e) {
+          fill();   // 失败回滚显示
+          if (msg) { msg.textContent = '切换失败：' + ((e && e.message) || '桥接链路离线'); }
+        }).then(function () { cb.disabled = false; });
+      });
+    }
+  }
+
   function _fillCtxSync() {
+    _fillBridgeVoice();
     var cb = $('set-ctx-sync'), legacy = $('set-ctx-legacy');
     var msg = $('set-ctx-sync-msg'), card = $('set-ctx-sync-card');
     var syncRow = $('set-ctx-sync-row'), help = $('set-ctx-mode-help');
