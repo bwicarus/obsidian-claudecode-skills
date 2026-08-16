@@ -12,6 +12,15 @@ StandardOutput=journal
 StandardError=journal
 TimeoutStartSec=7200
 User=bwicarus
+# 同步优先级(架构第 17 条):webapp 承载同步 SSE 与所有交互流量,夜间批处理
+# 不得与它同优先级抢 CPU —— 否则某夜 daily 跑起来同步莫名变慢,很难联想到原因。
+# 给 webapp 提负 Nice 需要 root/AmbientCapabilities,风险大;把重活压下去等价且安全。
+# (yolo-figures Nice=19 / figures-describe Nice=15 / book-ocr Nice=19 早已如此,
+#  daily 是漏网的最后一个重活。)
+Nice=10
+CPUWeight=50
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
 
 [Install]
 WantedBy=multi-user.target
