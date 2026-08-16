@@ -42,6 +42,9 @@ window._favOpenPicker = function () {
   var UP_FILE = (window.__PDF_CFG && __PDF_CFG.file_rel) || '';
   var UP_API = '/pdf/api/pdf-insert-page';       // 新建/删除/baked编辑 = 真插页 job
   var UP_TEXT_API = '/pdf/api/userpages';        // v4 overlay 文字即时存边车(不 job、不 reload)
+  // 本机导入书(localbook:,字节只在设备、Pi 无此书):服务端任务链对它必然失败,
+  // 造纸走下方 _lp* 本地分支(2026-08-16 用户架构拍板:纸=类型化数据,接收端全权处理)。
+  var UP_LOCAL = String(UP_FILE).indexOf('localbook:') === 0;
   var _upCss = document.createElement('style');
   _upCss.textContent =
     '.up2-badge{position:absolute;left:6px;top:6px;z-index:40;background:rgba(26,37,64,.88);color:#9fcbff;border:1px solid rgba(91,118,184,.6);border-radius:999px;padding:2px 10px;font-size:12px;line-height:1.5;cursor:pointer;-webkit-user-select:none;user-select:none;box-shadow:0 1px 5px rgba(0,0,0,.35)}' +
@@ -849,6 +852,147 @@ window._favOpenPicker = function () {
   // 建一张任务纸(乐观新建),绑到真页号后回调 onReady(rec, tmpEl)。多纸时反复调它。
   //   afterEl(可选):把新页**紧邻这个 DOM 元素之后**插入 —— 多纸溢出必须用它,否则按页号 _upPlace
   //   会命中"乐观插入未重编号的陈旧同号真页"→ 溢出页落到它后面 = 两页中间隔一页(用户实测 #1)。
+  // ═══ 本机书本地造纸(_lp*)═══════════════════════════════════════════════════
+  // 布局算术移植自 paper.py(spec/default_span/layout)——**单源在服务端**,这里是
+  // 刻意的最小副本(改语义两边同步,rect 直接复用 _upGridRect=同一算术)。持久化
+  // localStorage['lp:'+UP_FILE];渲染/交互 100% 复用服务端纸的 _upRenderOverlay。
+  var _lpPAPERS = { dictation: { bg: '#fffdf7', rows: 20, cols: 24, margin: .05, font_ratio: .42, rule: 'line' },
+                    exam: { bg: '#ffffff', rows: 30, cols: 34, margin: .05, font_ratio: .5, rule: 'none' },
+                    math: { bg: '#fbfdff', rows: 32, cols: 30, margin: .04, font_ratio: .5, rule: 'grid' },
+                    draw: { bg: '#fffefa', rows: 24, cols: 26, margin: .03, font_ratio: .5, rule: 'none' },
+                    note: { bg: '#fffdf7', rows: 26, cols: 28, margin: .05, font_ratio: .45, rule: 'line' } };
+  function _lpSpec(kind) {   // A4 固定 595×842:与服务端打不开书时的 fallback 同款,插入页无需跟书页同比例
+    var p = _lpPAPERS[kind] || _lpPAPERS.note, pw = 595, ph = 842, mx = pw * p.margin, my = ph * p.margin;
+    return { kind: _lpPAPERS[kind] ? kind : 'note', bg: p.bg, rule: p.rule, rows: p.rows, cols: p.cols,
+             font_ratio: p.font_ratio, mx: mx, my: my, page_w: pw, page_h: ph,
+             char_w: (pw - 2 * mx) / p.cols, line_h: (ph - 2 * my) / p.rows };
+  }
+  function _lpWide(s) { var n = 0, t = String(s || ''); for (var i = 0; i < t.length; i++) n += t.charCodeAt(i) < 0x2E80 ? .5 : 1; return Math.ceil(n); }
+  function _lpSpan(b, sp) {
+    var k = b.kind, C = sp.cols;
+    if (k === 'text') { var w = (b.cols | 0) || C, need = Math.max(1, Math.ceil(_lpWide(b.text) / Math.max(1, w))); if (b.style === 'h1') need += 1; return [need, w]; }
+    if (k === 'blank') return [Math.max(1, Math.ceil((_lpWide(b.label) + 8) / C)), C];
+    if (k === 'choice') {
+      var q = Math.max(1, Math.ceil(_lpWide(b.text || b.label) / C)), opts = b.options || [], orows = opts.length ? 1 : 0, used = 0;
+      for (var i = 0; i < opts.length; i++) { var w2 = Math.min(C, _lpWide('A. ' + opts[i]) + 2); if (used && used + w2 > C) { orows += 1; used = 0; } used += w2; }
+      return [q + orows + 1, C];
+    }
+    if (k === 'button') return [1, Math.min(C, _lpWide(b.label) + 3)];
+    if (k === 'checkbox') return [1, Math.min(C, _lpWide(b.label) + 4)];
+    return [1, C];   // hr 及其它:1 行整宽
+  }
+  function _lpHit(occ, r, c, h, w) { for (var i = 0; i < occ.length; i++) { var o = occ[i]; if (!(r + h <= o[0] || o[0] + o[2] <= r || c + w <= o[1] || o[1] + o[3] <= c)) return true; } return false; }
+  function _lpLayout(blocks, sp) {   // 碰撞安全 + 自动补页(铁律:每个元素独占位置,冲突往后挪)
+    var ROWS = sp.rows, COLS = sp.cols, pages = [], cur = [], occ = [], r = 0, c = 0;
+    function np() { if (cur.length) pages.push(cur); cur = []; occ = []; r = 0; c = 0; }
+    (blocks || []).forEach(function (b0) {
+      var b = {}; for (var k in b0) b[k] = b0[k];
+      var s = b.span || _lpSpan(b, sp), h = Math.max(1, Math.min(s[0] | 0, ROWS)), w = Math.max(1, Math.min(s[1] | 0, COLS));
+      if (b.at) {
+        var ar = Math.max(0, b.at[0] | 0), ac = Math.max(0, Math.min(b.at[1] | 0, COLS - w));
+        while (ar + h <= ROWS && _lpHit(occ, ar, ac, h, w)) ar += 1;
+        if (ar + h > ROWS) { np(); ar = 0; ac = Math.max(0, Math.min(b.at[1] | 0, COLS - w)); while (ar + h <= ROWS && _lpHit(occ, ar, ac, h, w)) ar += 1; }
+        b.at = [ar, ac]; b.span = [h, w]; b.rect = _upGridRect(sp, ar, ac, h, w); occ.push([ar, ac, h, w]); cur.push(b); return;
+      }
+      if (c + w > COLS) { r += 1; c = 0; }
+      for (;;) { if (c + w > COLS) { r += 1; c = 0; } if (r + h > ROWS) np(); if (!_lpHit(occ, r, c, h, w)) break; c += 1; }
+      b.at = [r, c]; b.span = [h, w]; b.rect = _upGridRect(sp, r, c, h, w); occ.push([r, c, h, w]); cur.push(b);
+      if (w >= COLS) { r += h; c = 0; } else { c += w; if (c >= COLS) { r += h; c = 0; } }
+    });
+    if (cur.length) pages.push(cur);
+    return pages.length ? pages : [[]];
+  }
+  function _lpNorm(blocks) {   // paper.normalize_blocks 的最小副本:只保"渲染不出空壳"
+    var out = [];
+    (Array.isArray(blocks) ? blocks : []).forEach(function (a) {
+      if (!a || typeof a !== 'object') return;
+      var k = a.kind; if (['text', 'blank', 'choice', 'checkbox', 'button', 'hr'].indexOf(k) < 0) return;
+      var b = {}; for (var key in a) b[key] = a[key];
+      var t = String(b.text || '').trim(), l = String(b.label || '').trim();
+      if (k === 'text' || k === 'hr' || k === 'choice') { if (!t && l) { b.text = b.label; delete b.label; } }
+      else if (!l && t) { b.label = b.text; delete b.text; }
+      if (k === 'choice') {
+        var o = b.options; if (typeof o === 'string') o = o.split('/').map(function (x) { return x.trim(); }).filter(Boolean);
+        if (!Array.isArray(o) || !o.length) { b.kind = 'text'; delete b.options; }
+        else { b.options = o.slice(0, 6).map(function (x) { return String(x).replace(/^[A-Da-d][\.、\)]\s*/, '').trim(); });
+               if (b.answer) b.answer = String(b.answer).trim().toUpperCase().slice(0, 1); }
+      }
+      if (!b.id) b.id = 'b' + out.length;
+      out.push(b);
+    });
+    if (out.some(function (b) { return b.kind === 'blank'; }) && !out.some(function (b) { return b.kind === 'button'; }))
+      out.push({ kind: 'button', label: '让 AI 检查', event: 'check', id: 'b' + out.length });
+    return out.slice(0, 48);
+  }
+  function _lpLoad() { try { var d = JSON.parse(localStorage.getItem('lp:' + UP_FILE) || 'null'); return (d && d.v === 1 && Array.isArray(d.papers)) ? d.papers : []; } catch (e) { return []; } }
+  var _lpPapers = null;   // 内存权威:渲染器/交互直接改 rec,落盘统一走 _lpSaveSoon
+  function _lpAll() { if (!_lpPapers) _lpPapers = _lpLoad(); return _lpPapers; }
+  var _lpSaveT = 0;
+  function _lpSaveSoon() {
+    clearTimeout(_lpSaveT);
+    _lpSaveT = setTimeout(function () {
+      try { localStorage.setItem('lp:' + UP_FILE, JSON.stringify({ v: 1, papers: _lpAll() })); }
+      catch (e) { try { console.warn('[lp] 本地纸保存失败', e); } catch (e2) {} }
+    }, 400);
+  }
+  var _lpMounted = {};
+  function _lpMountOne(rec, afterEl) {
+    var tmp = document.createElement('div');
+    tmp.className = 'rc-upage pdf-upage up2-new'; tmp.dataset.uid = rec.id;
+    tmp.style.aspectRatio = '595/842'; tmp.style.minHeight = '0';
+    var placed = false;
+    if (afterEl && afterEl.isConnected) {
+      try { if (afterEl.style.width) tmp.style.width = afterEl.style.width; afterEl.parentNode.insertBefore(tmp, afterEl.nextSibling); placed = true; } catch (e) {}
+    }
+    if (!placed && !_upPlace(tmp, rec.after || 0, null)) return null;
+    _lpMounted[rec.id] = tmp;
+    _upMountOverlay(rec, tmp);
+    var ov = tmp.querySelector('.up2-content');
+    if (ov) {
+      _upRenderOverlay(ov, rec);
+      ov.addEventListener('click', _lpSaveSoon, true);   // capture:选择题 picked 等改动落盘(按钮的 stopPropagation 在冒泡段,不挡这里)
+    }
+    return tmp;
+  }
+  function _lpRestore() {   // 幂等恢复:页 DOM 未就绪时 _upPlace 失败,靠调用方重试补挂
+    var prevByGid = {};
+    _lpAll().forEach(function (rec) {
+      if (_lpMounted[rec.id] && _lpMounted[rec.id].isConnected) { prevByGid[rec.gid] = _lpMounted[rec.id]; return; }
+      var el = _lpMountOne(rec, rec.idx > 0 ? prevByGid[rec.gid] : null);
+      if (el) prevByGid[rec.gid] = el;
+    });
+  }
+  function _lpStartTask(spec) {
+    var sp = _lpSpec(spec.paper || (spec.params && spec.params.paper) || 'note');
+    var blocks = _lpNorm((spec.params && spec.params.blocks) || []);
+    if (!blocks.length) { alert('这张纸没有可用元素'); return; }
+    var pages = _lpLayout(blocks, sp);
+    var after = 0; try { after = _upCurPage() | 0; } catch (e) {}
+    var gid = 'lp_' + Date.now().toString(36), prev = null, title = spec.title || '练习纸';
+    pages.forEach(function (pageBlocks, i) {
+      var rec = { id: gid + '_' + i, gid: gid, idx: i, after: after, mode: 'overlay',
+                  title: i ? title + ' · 第 ' + (i + 1) + ' 页' : title,
+                  run_id: gid + '_' + i,   // 本地纸 run_id=自身 id(lp_ 前缀)→ _upRunEvent 分流到本地语义
+                  paper: sp, blocks: pageBlocks, created: Date.now() };
+      _lpAll().push(rec);
+      var el = _lpMountOne(rec, prev);
+      if (el && !i) { try { el.scrollIntoView({ block: 'center', behavior: 'auto' }); } catch (e) {} }
+      if (el) prev = el;
+    });
+    _lpSaveSoon();
+  }
+  function _lpRunEvent(rec, ev) {   // 本地事件语义:能本地做的本地做,做不到的诚实说,绝不静默
+    var sep = String(ev || '').indexOf(':'), act = sep < 0 ? String(ev || '') : ev.slice(0, sep), arg = sep < 0 ? '' : ev.slice(sep + 1);
+    function rerender() { var el = _lpMounted[rec.id], ov = el && el.querySelector('.up2-content'); if (ov) _upRenderOverlay(ov, rec); _lpSaveSoon(); }
+    if ((act === 'reveal' || act === 'hide') && arg) { (rec.blocks || []).forEach(function (b) { if (b.id === arg) b.hidden = (act === 'hide'); }); rerender(); return; }
+    if ((act === 'set_enabled' || act === 'enable' || act === 'disable') && arg) { (rec.blocks || []).forEach(function (b) { if (b.id === arg) b.enabled = (act !== 'disable'); }); rerender(); return; }
+    if (act === 'goto' && /^\d+$/.test(arg)) { try { if (window.jumpWithBack) window.jumpWithBack(parseInt(arg, 10)); } catch (e) {} return; }
+    if (act === 'say' && arg) { try { var u = new SpeechSynthesisUtterance(arg); u.lang = /[぀-ヿ]/.test(arg) ? 'ja-JP' : (/[一-鿿]/.test(arg) ? 'zh-CN' : 'en-US'); speechSynthesis.speak(u); } catch (e) {} return; }
+    if (act === 'check') { _upRunHint(rec, '本机书的 AI 批改还没接通(即将上线);你的作答已保存在本机。'); return; }
+    _upRunHint(rec, '这个按钮的动作(' + ev + ')在本机纸上暂不支持。');
+  }
+  // ═══ 本机书本地造纸(_lp*)结束 ═══════════════════════════════════════════════
+
   function _upSpawnTaskPage(after, title, onReady, afterEl) {
     if (after < 0) after = 0;
     var tempId = 'tmp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -910,6 +1054,7 @@ window._favOpenPicker = function () {
     try {
       spec = spec || {};
       if (_upEditing || document.body.classList.contains('up-editing')) { alert('先完成当前正在编辑的页'); return; }
+      if (UP_LOCAL) { _lpStartTask(spec); return; }   // 本机书:数据已在手,布局/存储/渲染全本地走完
       var after = 0;
       try { after = _upCurPage() | 0; } catch (e) {}
       _upSpawnTaskPage(after, spec.title || '任务纸', function (rec, tmp) {
@@ -1008,6 +1153,7 @@ window._favOpenPicker = function () {
   }
   function _upRunEvent(rec, ev) {
     if (!rec.run_id) return;
+    if (String(rec.run_id).indexOf('lp_') === 0) { _lpRunEvent(rec, ev); return; }   // 本机纸:本地语义,不打服务端
     try { if (window.__vcTtsWarm) window.__vcTtsWarm(); } catch (e) {}   // ② 必须在点击同步栈里
     if (ev === 'check' || ev.indexOf('check:') === 0) {   // 检查/复判:先截整页(所见即所得)再连截图一起发。★截图**加 5s 超时**:卡住也照发纯事件
       _upRunHint(rec, '正在截图检查…');   //   (后端回退服务端拼图)→ 绝不因截图挂住而"点检查没反应"(用户实测根因之一)。
@@ -1476,6 +1622,7 @@ window._favOpenPicker = function () {
     setTimeout(function () {
       _upSched = false;
       try { _upPatchRemode(); _upWrapNoteHost(); if (window.RC && RC.userpages) RC.userpages.mountAll(); _upMountBadges(); } catch (_) {}
+      if (UP_LOCAL) { try { _lpRestore(); } catch (_) {} }   // 本机纸随页渲染幂等补挂
     }, 0);
   };
   RC.userpages.init({
@@ -1492,6 +1639,7 @@ window._favOpenPicker = function () {
   var _upBootTries = 0;
   var _upBootT = setInterval(function () {
     try { _upMountBadges(); } catch (_) {}
+    if (UP_LOCAL) { try { _lpRestore(); } catch (_) {} }   // 本机纸恢复:页区就绪前 _upPlace 失败,重试幂等补挂
     if (++_upBootTries >= 12) clearInterval(_upBootT);
   }, 500);
   // ➕ = 乐观新建(方案调整 2026-07-04):点 ➕ 立刻在插入点插一个**可编辑覆盖层**(临时 client id,马上打字),
