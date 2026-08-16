@@ -1564,6 +1564,18 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   <h2>当前选区</h2>
                   <pre id="selection" class="muted">当前没有可用选区。</pre>
                 </section>
+                <section>
+                  <h2>选中集合（selectedItems，模型收到的）</h2>
+                  <pre id="selectedItems" class="muted">当前没有选中项。</pre>
+                </section>
+                <section>
+                  <h2>最近操作（recentActions，模型收到的）</h2>
+                  <pre id="recentActions" class="muted">最近没有操作。</pre>
+                </section>
+                <section>
+                  <h2>本页知识点（knowledge，模型收到的）</h2>
+                  <pre id="knowledge" class="muted">本页没有关联知识点。</pre>
+                </section>
                 <section class="wide">
                   <h2>当前页正文</h2>
                   <pre id="pageMeta" class="muted"></pre>
@@ -1578,7 +1590,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   <pre id="viewport" class="muted">当前没有 EPUB 视口。</pre>
                 </section>
                 <section class="wide">
-                  <h2>绘图与页图</h2>
+                  <h2>绘图与页图（下为模型收到的精简版）</h2>
                   <pre id="drawing" class="muted">当前页没有视觉引用。</pre>
                   <p id="imageNote" class="warning" hidden></p>
                   <a id="imageLink" target="_blank" rel="noreferrer" hidden>
@@ -1604,6 +1616,9 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 const embeds = byId("embeds");
                 const viewport = byId("viewport");
                 const drawing = byId("drawing");
+                const selectedItems = byId("selectedItems");
+                const recentActions = byId("recentActions");
+                const knowledge = byId("knowledge");
                 const imageNote = byId("imageNote");
                 const imageLink = byId("imageLink");
                 const pageImage = byId("pageImage");
@@ -1836,12 +1851,36 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   viewport.textContent = page?.viewport
                     ? JSON.stringify(page.viewport, null, 2)
                     : "当前没有 EPUB 视口。";
+                  // 模型收到的精简版(字段清单与 ReaderContextMcpServer.
+                  // TrimDrawingForModel 保持一致;完整原始对象在快照 JSON 里)
+                  const d = page?.visual?.drawing;
                   drawing.textContent = page?.visual
                     ? JSON.stringify({
                         has_ink: page.visual.has_ink,
-                        drawing: page.visual.drawing ?? null
+                        drawing: d ? {
+                          drawingRevision: d.drawingRevision ?? null,
+                          freshness: d.freshness ?? null,
+                          inProgress: d.inProgress ?? null,
+                          stable: d.stable ?? null,
+                          empty: d.empty ?? null
+                        } : null
                       }, null, 2)
                     : "当前页没有视觉引用。";
+                  const items = snapshot.selectedItems;
+                  selectedItems.textContent =
+                    Array.isArray(items) && items.length > 0
+                      ? JSON.stringify(items, null, 2)
+                      : "当前没有选中项。";
+                  const acts = snapshot.recentActions ?? page?.recentActions;
+                  recentActions.textContent =
+                    Array.isArray(acts) && acts.length > 0
+                      ? JSON.stringify(acts, null, 2)
+                      : "最近没有操作。";
+                  const kg = page?.knowledge;
+                  knowledge.textContent =
+                    kg && typeof kg === "object"
+                      ? JSON.stringify(kg, null, 2)
+                      : "本页没有关联知识点。";
                   latest.textContent = snapshot.latestEvent
                     ? JSON.stringify(snapshot.latestEvent, null, 2)
                     : "暂无事件。";

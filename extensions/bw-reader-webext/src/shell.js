@@ -120,10 +120,11 @@ button{-webkit-appearance:none;appearance:none}
   padding-left:0!important;padding-right:0!important;
   border-right-width:0!important;
   transform:translateX(-105%)!important}
-/* 收起态的 pill:横排时它挂在顶部中央,竖排要挪到左缘中部,同样避开死区 */
-#bw-root[data-bw-rail="1"] .rc-topbar-pill,
-#bw-root[data-bw-rail="1"] .rc-topbar-pill[data-collapsed="1"]{
-  left:0!important;top:50%!important;
+/* pill:横排时挂顶部中央,竖排挪到左缘中部。**展开态它要骑在栏的外缘**
+   (left=栏宽 46px+安全区),否则落在栏里被内容压住(用户实测截图:把手陷进
+   抽屉里);收起态栏已滑出屏幕,pill 才回到屏幕左缘。 */
+#bw-root[data-bw-rail="1"] .rc-topbar-pill{
+  left:calc(46px + env(safe-area-inset-left,0px))!important;top:50%!important;
   /* 不加 rotate:writing-mode:vertical-rl 本身就是正着往下读(抽屉把手
      #ep-side-handle 用的就是这一条、一直是正的)。先前多加的 180° 把字
      整个倒了过来。 */
@@ -132,6 +133,7 @@ button{-webkit-appearance:none;appearance:none}
   min-width:0!important;width:22px!important;height:auto!important;
   padding:13px 0!important;border-radius:0 12px 12px 0!important;
   border-left:0!important;border-top:1px solid rgba(255,255,255,.20)!important}
+#bw-root[data-bw-rail="1"] .rc-topbar-pill[data-collapsed="1"]{left:0!important}
 /* pane 占位文案 */
 .bw-pane-todo{padding:18px;color:var(--rc-text-muted,#8a9bb4);font-size:13px;line-height:1.8}
 .bw-pane-todo b{color:var(--rc-text-strong,#cfe6ff)}
