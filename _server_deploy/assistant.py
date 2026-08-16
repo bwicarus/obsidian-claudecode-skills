@@ -4751,38 +4751,10 @@ def _t_page_new(args, ctx):
             "下一步": "用 page_add 加元素(**可一次批量** page_add(blocks=[…]) 一把加完,更好安排位置),再 page_show 生成。", "silent": True}
 
 
-# 元素字段白名单:kind/内容 + style + 定位(at/cols/span)+ 按钮态(event/enabled)。
-_BLOCK_KEYS = ("kind", "text", "style", "label", "answer", "event", "id", "enabled", "at", "cols", "span", "options", "node_id", "layer", "picked")
-_BLOCK_KINDS = ("text", "blank", "checkbox", "button", "hr", "choice")
-
-
-def _norm_block(a, idx):
-    b = {k: v for k, v in a.items() if k in _BLOCK_KEYS}
-    # 顽强容错:AI 常把内容放错字段(text 块的题目写进 label,或反之)。text/hr 用 `text`,
-    #   blank/button/checkbox 用 `label` —— 放错就自动搬到正确字段(否则渲染不出=用户实测"page_add 失败")。
-    kind = b.get("kind")
-    _t = str(b.get("text") or "").strip()
-    _l = str(b.get("label") or "").strip()
-    if kind in ("text", "hr", "choice"):   # choice 题干也用 text
-        if not _t and _l:
-            b["text"] = b.pop("label")
-    else:   # blank / button / checkbox 用 label
-        if not _l and _t:
-            b["label"] = b.pop("text")
-    if kind == "choice":
-        opts = b.get("options")
-        if isinstance(opts, str):
-            opts = [x.strip() for x in opts.split("/") if x.strip()]
-        if not isinstance(opts, list) or not opts:
-            b["kind"] = "text"          # 没给选项 → 降级普通文字,别渲染出空壳
-            b.pop("options", None)
-        else:
-            import re as _re2
-            b["options"] = [_re2.sub(r"^[A-Da-d][\.、\)]\s*", "", str(o)).strip() for o in opts[:6]]
-            if b.get("answer"):
-                b["answer"] = str(b["answer"]).strip().upper()[:1]
-    b.setdefault("id", "b%d" % idx)
-    return b
+# 元素字段白名单与归一化 2026-08-16 起**单源在 paper.py**(语音直连 reader_paper_start
+# 成为第二个编排入口后,顽强容错不能在每个入口各抄一份)。这里保留同名引用,CLI 路径行为不变。
+from paper import BLOCK_KEYS as _BLOCK_KEYS, BLOCK_KINDS as _BLOCK_KINDS  # noqa: E402
+from paper import normalize_block as _norm_block  # noqa: E402,F401
 
 
 def _t_page_add(args, ctx):

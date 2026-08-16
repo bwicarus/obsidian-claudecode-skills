@@ -487,11 +487,19 @@ def _free_tick(run, event):
       call:工具名       去壳调任意工具(通用出口)
     check/call 起后台或即时;其余同步瞬间完成。"""
     if run["step"] == 0:                       # 铺纸:AI 给的 blocks → 布局器排版
+        import paper as PA
         run["paper"] = (run.get("params") or {}).get("paper") or "note"
-        _set_blocks(run, (run.get("params") or {}).get("blocks") or [], kind="free")
+        # 归一化在 run 入口做(单源在 paper.normalize_blocks):CLI 路径已在 page_add 归一过
+        # (幂等,无副作用),语音直连一发式(reader_paper_start→__upStartTask)全靠这里。
+        raw = (run.get("params") or {}).get("blocks") or []
+        blocks = PA.normalize_blocks(raw)
+        dropped = (len(raw) if isinstance(raw, list) else 0) - len(blocks)
+        PA.ensure_check_button(blocks)
+        _set_blocks(run, blocks, kind="free")
         run["step"] = 1
         run["status"] = "waiting"
-        run["hint"] = "纸已生成。填写/勾选后点纸上的按钮。"
+        run["hint"] = ("纸已生成。填写/勾选后点纸上的按钮。"
+                       + ("(丢弃了 %d 个无效元素)" % dropped if dropped > 0 else ""))
         return True
     if not event:
         return False

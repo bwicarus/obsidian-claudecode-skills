@@ -79,6 +79,10 @@ WEBAPP_SOURCE_FILES = (
     # checkout.  It is therefore part of the same atomic reader release.
     "voice_realtime_relay.py",
     "task_runtime.py",
+    # 纸张模型/格子布局器:assistant.py 顶层 import 它,task_runtime._set_blocks 也
+    # 函数内 import。此前一直漏登记,Pi 上没炸纯靠旧版手工副本残留——正是本清单
+    # 注释里反复警告的"依赖方上线而模块不上线"。
+    "paper.py",
     # Production routes import these modules directly.  Keeping them out of
     # the manifest would make a successful deploy depend on stale files left
     # behind by an older release.

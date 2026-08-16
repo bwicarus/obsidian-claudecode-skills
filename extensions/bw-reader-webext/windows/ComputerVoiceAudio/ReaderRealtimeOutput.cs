@@ -343,7 +343,8 @@ internal static class ReaderRealtimeOutputProtocol
             or "_nativeReaderMakeNote"
             or "_nativeReaderMarkVocabulary"
             or "_bwWebHighlightByText"
-            or "_bwWebNoteCreate"))
+            or "_bwWebNoteCreate"
+            or "__upStartTask"))
         {
             throw Invalid("Reader 客户端动作不在白名单内");
         }
@@ -351,6 +352,48 @@ internal static class ReaderRealtimeOutputProtocol
         if (args.ValueKind != JsonValueKind.Array)
         {
             throw Invalid("Reader 客户端动作参数必须是数组");
+        }
+        if (fn is "__upStartTask")
+        {
+            // 交互练习纸:一个 spec 对象遥控 PDF 阅读器起 free 任务纸(乐观建页 →
+            // run-start → 服务端布局)。内容级容错单源在 Pi 的任务链;这里只卡
+            // 结构与上限,坚持"名单内入口 + 逐入口校验",不放任意字段过桥。
+            if (args.GetArrayLength() != 1
+                || args[0].ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 练习纸需要一个任务对象");
+            }
+            JsonElement paperSpec = args[0];
+            DirectJsonValidation.RequireNoDuplicateKeys(paperSpec);
+            Exact(paperSpec, "kind", "title", "paper", "params");
+            if (Text(paperSpec, "kind", 16) != "free")
+            {
+                throw Invalid("Reader 练习纸只允许 free 任务");
+            }
+            _ = Text(paperSpec, "title", 120);
+            _ = Text(paperSpec, "paper", 16);
+            JsonElement paperParams = paperSpec.GetProperty("params");
+            if (paperParams.ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 练习纸参数必须是对象");
+            }
+            DirectJsonValidation.RequireNoDuplicateKeys(paperParams);
+            Exact(paperParams, "blocks", "paper", "title");
+            JsonElement paperBlocks = paperParams.GetProperty("blocks");
+            if (paperBlocks.ValueKind != JsonValueKind.Array
+                || paperBlocks.GetArrayLength() < 1
+                || paperBlocks.GetArrayLength() > 48)
+            {
+                throw Invalid("Reader 练习纸元素必须是 1..48 个");
+            }
+            foreach (JsonElement paperBlock in paperBlocks.EnumerateArray())
+            {
+                if (paperBlock.ValueKind != JsonValueKind.Object)
+                {
+                    throw Invalid("Reader 练习纸元素必须是对象");
+                }
+            }
+            return;
         }
         if (fn is "_bwWebNoteCreate")
         {

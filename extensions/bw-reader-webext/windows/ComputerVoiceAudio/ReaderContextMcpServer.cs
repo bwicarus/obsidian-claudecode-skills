@@ -18,6 +18,7 @@ internal sealed class ReaderContextMcpServer
     internal const string UndoLastToolName = "reader_undo_last";
     internal const string NoteCreateToolName = "reader_note_create";
     internal const string NoteEditToolName = "reader_note_edit";
+    internal const string PaperStartToolName = "reader_paper_start";
     internal const string HighlightsToolName = "reader_highlights";
     internal const string NotesToolName = "reader_notes";
     internal const string SearchToolName = "reader_search";
@@ -980,6 +981,160 @@ internal sealed class ReaderContextMcpServer
                     },
                     ["required"] = new JsonArray { "text" },
                     ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = PaperStartToolName,
+                ["description"] =
+                    "Create an interactive exercise sheet as a new insert "
+                    + "page in the currently open PDF book, in ONE call. "
+                    + "Design the questions yourself from the user's words "
+                    + "and the current page, then pass every element in "
+                    + "reading order via blocks: kind 'text' for headings, "
+                    + "instructions and question stems (content in text, "
+                    + "optional style 'h1'); 'blank' for a handwriting "
+                    + "answer area (label carries the question or number, "
+                    + "optional answer enables grading); 'choice' for "
+                    + "multiple choice (stem in text, options array, "
+                    + "optional answer letter); 'checkbox'; 'button' "
+                    + "(label plus event, e.g. 'check' to grade "
+                    + "handwriting); 'hr' as a separator. Layout, page "
+                    + "creation and rendering all happen inside the Reader; "
+                    + "a grading button is added automatically when blanks "
+                    + "exist. PDF books only; the sheet appears in the open "
+                    + "Reader within about two seconds. The outcome is not "
+                    + "echoed back: never resend the same sheet blindly — "
+                    + "confirm with the user or a fresh snapshot first.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["required"] = new JsonArray { "blocks" },
+                    ["properties"] = new JsonObject
+                    {
+                        ["title"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 120,
+                            ["description"] =
+                                "Sheet title shown on the insert page.",
+                        },
+                        ["paper"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["enum"] = new JsonArray(
+                                "note",
+                                "dictation",
+                                "exam",
+                                "math",
+                                "draw"),
+                            ["description"] =
+                                "Paper preset; default note.",
+                        },
+                        ["blocks"] = new JsonObject
+                        {
+                            ["type"] = "array",
+                            ["minItems"] = 1,
+                            ["maxItems"] = 48,
+                            ["items"] = new JsonObject
+                            {
+                                ["type"] = "object",
+                                ["additionalProperties"] = false,
+                                ["required"] = new JsonArray { "kind" },
+                                ["properties"] = new JsonObject
+                                {
+                                    ["kind"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["enum"] = new JsonArray(
+                                            "text",
+                                            "blank",
+                                            "choice",
+                                            "checkbox",
+                                            "button",
+                                            "hr"),
+                                    },
+                                    ["text"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["maxLength"] = 2000,
+                                    },
+                                    ["label"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["maxLength"] = 2000,
+                                    },
+                                    ["options"] = new JsonObject
+                                    {
+                                        ["type"] = "array",
+                                        ["maxItems"] = 6,
+                                        ["items"] = new JsonObject
+                                        {
+                                            ["type"] = "string",
+                                            ["maxLength"] = 200,
+                                        },
+                                    },
+                                    ["answer"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["maxLength"] = 400,
+                                    },
+                                    ["style"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["maxLength"] = 16,
+                                    },
+                                    ["event"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["maxLength"] = 80,
+                                    },
+                                    ["id"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["maxLength"] = 32,
+                                    },
+                                    ["at"] = new JsonObject
+                                    {
+                                        ["type"] = "array",
+                                        ["minItems"] = 2,
+                                        ["maxItems"] = 2,
+                                        ["items"] = new JsonObject
+                                        {
+                                            ["type"] = "integer",
+                                        },
+                                    },
+                                    ["cols"] = new JsonObject
+                                    {
+                                        ["type"] = "integer",
+                                    },
+                                    ["span"] = new JsonObject
+                                    {
+                                        ["type"] = "array",
+                                        ["minItems"] = 2,
+                                        ["maxItems"] = 2,
+                                        ["items"] = new JsonObject
+                                        {
+                                            ["type"] = "integer",
+                                        },
+                                    },
+                                    ["enabled"] = new JsonObject
+                                    {
+                                        ["type"] = "boolean",
+                                    },
+                                },
+                            },
+                        },
+                    },
                 },
                 ["annotations"] = new JsonObject
                 {
@@ -2219,6 +2374,17 @@ internal sealed class ReaderContextMcpServer
             return;
         }
         if (
+            toolName == PaperStartToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            await HandleReaderPaperStartToolCallAsync(
+                id,
+                arguments,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
             toolName == UndoLastToolName
             && _sendOutputAsync is not null
         )
@@ -2365,6 +2531,118 @@ internal sealed class ReaderContextMcpServer
         await SendReaderOutputAsync(
             id,
             kind,
+            payload,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static readonly string[] PaperBlockKinds =
+        ["text", "blank", "choice", "checkbox", "button", "hr"];
+
+    private static readonly string[] PaperPresets =
+        ["note", "dictation", "exam", "math", "draw"];
+
+    private async Task HandleReaderPaperStartToolCallAsync(
+        JsonNode id,
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        // 结构校验只做"这批块值得送出"这一层;内容级顽强容错(字段搬移、choice 降级、
+        // 自动补检查按钮)单源在 Pi 的 paper.normalize_blocks——两端不重复实现,
+        // 避免同一规则两份实现各自漂移。
+        if (
+            arguments.ValueKind != JsonValueKind.Object
+            || !arguments.TryGetProperty("blocks", out JsonElement blocks)
+            || blocks.ValueKind != JsonValueKind.Array
+            || blocks.GetArrayLength() < 1
+            || blocks.GetArrayLength() > 48
+            || blocks.GetRawText().Length > 24_000
+        )
+        {
+            await WriteErrorAsync(
+                id,
+                -32602,
+                "Invalid paper blocks",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        foreach (JsonElement block in blocks.EnumerateArray())
+        {
+            if (
+                block.ValueKind != JsonValueKind.Object
+                || !block.TryGetProperty("kind", out JsonElement kindValue)
+                || kindValue.ValueKind != JsonValueKind.String
+                || Array.IndexOf(
+                    PaperBlockKinds,
+                    kindValue.GetString()) < 0
+            )
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid paper block kind",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+        }
+        string title =
+            arguments.TryGetProperty("title", out JsonElement titleValue)
+            && titleValue.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(titleValue.GetString())
+                ? titleValue.GetString()!.Trim()
+                : "练习纸";
+        if (title.Length > 120)
+        {
+            title = title[..120];
+        }
+        string paper =
+            arguments.TryGetProperty("paper", out JsonElement paperValue)
+            && paperValue.ValueKind == JsonValueKind.String
+            && Array.IndexOf(PaperPresets, paperValue.GetString()) >= 0
+                ? paperValue.GetString()!
+                : "note";
+
+        // 交互纸的布局/运行时只存在于 PDF 阅读器(__upStartTask 是 PDF 面的全局);
+        // 在 EPUB/网页快照下发送只会静默无事发生——违背"提前退出要出声",在这里拦。
+        await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
+        JsonObject current = BuildToolPayload();
+        string surface =
+            current["currentPage"] is JsonObject currentPage
+            && currentPage["kind"] is JsonValue surfaceValue
+            && surfaceValue.TryGetValue(out string? surfaceText)
+                ? surfaceText ?? string.Empty
+                : string.Empty;
+        if (!string.Equals(surface, "pdf", StringComparison.Ordinal))
+        {
+            await WriteReaderOutputToolErrorAsync(
+                id,
+                "BW_READER_PAPER_SURFACE_UNSUPPORTED",
+                "交互练习纸目前只支持 PDF 书页;当前快照的表面不是 PDF。请让用户在 App 里打开一本 PDF 书后重试。",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // 与 assistant 侧 page_show 完全同形的遥控载荷:前端 __upStartTask 负责
+        // 乐观建页 → run-start(free) → 服务端布局 → 渲染与多页补页,全链已验证。
+        JsonObject spec = new()
+        {
+            ["kind"] = "free",
+            ["title"] = title,
+            ["paper"] = paper,
+            ["params"] = new JsonObject
+            {
+                ["blocks"] = JsonNode.Parse(blocks.GetRawText()),
+                ["paper"] = paper,
+                ["title"] = title,
+            },
+        };
+        JsonObject payload = new()
+        {
+            ["fn"] = "__upStartTask",
+            ["args"] = new JsonArray { spec },
+        };
+        await SendReaderOutputAsync(
+            id,
+            "client-action",
             payload,
             cancellationToken).ConfigureAwait(false);
     }

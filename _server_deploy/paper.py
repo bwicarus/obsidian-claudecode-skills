@@ -202,3 +202,63 @@ def plan(kind: str, blocks: list, page_w: float, page_h: float) -> dict:
     sp = spec(kind, page_w, page_h)
     pgs = layout(blocks, sp)
     return {"spec": sp, "papers": pgs, "n_pages": len(pgs)}
+
+
+# ── 块归一化(2026-08-16 语音直连制卷闭环) ────────────────────────────────────
+# 语义从 assistant._norm_block 下沉到纸张模型:第二个编排入口(Windows Codex 语音
+# reader_paper_start → __upStartTask → run-start free)出现后,"AI 把内容放错字段"的
+# 顽强容错必须在服务端单源生效,而不是散落在每个编排端各抄一份。
+BLOCK_KEYS = ("kind", "text", "style", "label", "answer", "event", "id", "enabled",
+              "at", "cols", "span", "options", "node_id", "layer", "picked")
+BLOCK_KINDS = ("text", "blank", "checkbox", "button", "hr", "choice")
+MAX_BLOCKS = 48
+
+
+def normalize_block(a: dict, idx: int) -> dict:
+    """单块顽强容错(与 assistant 侧历史行为逐条一致,单源在此):
+    text/hr/choice 用 `text`,blank/button/checkbox 用 `label`——放错自动搬到正确字段
+    (否则渲染不出,用户实测表现为"page_add 失败");choice 缺选项降级 text;id 缺省补。"""
+    import re as _re
+    b = {k: v for k, v in a.items() if k in BLOCK_KEYS}
+    kind = b.get("kind")
+    _t = str(b.get("text") or "").strip()
+    _l = str(b.get("label") or "").strip()
+    if kind in ("text", "hr", "choice"):   # choice 题干也用 text
+        if not _t and _l:
+            b["text"] = b.pop("label")
+    else:   # blank / button / checkbox 用 label
+        if not _l and _t:
+            b["label"] = b.pop("text")
+    if kind == "choice":
+        opts = b.get("options")
+        if isinstance(opts, str):
+            opts = [x.strip() for x in opts.split("/") if x.strip()]
+        if not isinstance(opts, list) or not opts:
+            b["kind"] = "text"          # 没给选项 → 降级普通文字,别渲染出空壳
+            b.pop("options", None)
+        else:
+            b["options"] = [_re.sub(r"^[A-Da-d][\.、\)]\s*", "", str(o)).strip() for o in opts[:6]]
+            if b.get("answer"):
+                b["answer"] = str(b["answer"]).strip().upper()[:1]
+    b.setdefault("id", "b%d" % idx)
+    return b
+
+
+def normalize_blocks(blocks) -> list:
+    """整批归一化:丢弃非对象与非法 kind、截到 MAX_BLOCKS——**不炸**,语音链路里一个坏块
+    不该毁掉整张纸;丢了多少由调用方数差值出声(静默失败教训:折成布尔前先报原始值)。"""
+    out = []
+    for a in (blocks if isinstance(blocks, list) else []):
+        if isinstance(a, dict) and a.get("kind") in BLOCK_KINDS:
+            out.append(normalize_block(a, len(out)))
+        if len(out) >= MAX_BLOCKS:
+            break
+    return out
+
+
+def ensure_check_button(blocks: list) -> list:
+    """有作答区(blank)却没有任何按钮 → 自动补「让 AI 检查」。幂等;与 assistant
+    page_show 收口的兜底同一规则,直连一发式入口没有收口步骤,所以在这里保证。"""
+    if any(b.get("kind") == "blank" for b in blocks) and not any(b.get("kind") == "button" for b in blocks):
+        blocks.append({"kind": "button", "label": "让 AI 检查", "event": "check", "id": "b%d" % len(blocks)})
+    return blocks

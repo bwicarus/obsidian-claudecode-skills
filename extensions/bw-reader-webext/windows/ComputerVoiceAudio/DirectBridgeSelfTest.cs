@@ -8498,6 +8498,31 @@ internal static class DirectBridgeSelfTest
                     },
                 },
             }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 21,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.PaperStartToolName,
+                    arguments = new
+                    {
+                        title = "假名练习",
+                        paper = "dictation",
+                        blocks = new object[]
+                        {
+                            new { kind = "text", text = "写出对应的假名" },
+                            new
+                            {
+                                kind = "blank",
+                                label = "1. 樱",
+                                answer = "さくら",
+                            },
+                        },
+                    },
+                },
+            }),
             "");
         List<ReaderRealtimeOutputRequest> sent = [];
         int probeCount = 0;
@@ -8623,8 +8648,15 @@ internal static class DirectBridgeSelfTest
                 responses[19].RootElement.GetProperty("result")
                     .GetProperty("content")[0].GetProperty("text")
                     .GetString()!);
+            JsonElement paperTool = tools.EnumerateArray().Single(
+                tool => tool.GetProperty("name").GetString()
+                    == ReaderContextMcpServer.PaperStartToolName);
+            using JsonDocument paperResult = JsonDocument.Parse(
+                responses[20].RootElement.GetProperty("result")
+                    .GetProperty("content")[0].GetProperty("text")
+                    .GetString()!);
             Require(
-                responses.Length == 20
+                responses.Length == 21
                 && initialize.GetProperty("capabilities")
                     .TryGetProperty("resources", out _)
                 && initialize.GetProperty("instructions").GetString()!
@@ -8668,9 +8700,9 @@ internal static class DirectBridgeSelfTest
                         "Windows Codex 语音主路由",
                         StringComparison.Ordinal)
                 // 这个 server 只注入了 sendOutput，没注入查询客户端：因此
-                // 只该看到两个无条件工具和 11 个 output 工具。查询工具一个
+                // 只该看到两个无条件工具和 12 个 output 工具。查询工具一个
                 // 都不该出现 —— 列出一个调不动的工具，比不列更坏。
-                && tools.GetArrayLength() == 13
+                && tools.GetArrayLength() == 14
                 && tools.EnumerateArray().Any(tool =>
                     tool.GetProperty("name").GetString()
                         == ReaderContextMcpServer.WebHighlightToolName)
@@ -8795,8 +8827,16 @@ internal static class DirectBridgeSelfTest
                     .GetString() == "BW_READER_HIGHLIGHT_RANGE_STALE"
                 && responses[18].RootElement.GetProperty("result")
                     .GetProperty("isError").GetBoolean()
-                && probeCount == 8
-                && sent.Count == 6
+                && paperTool.GetProperty("inputSchema")
+                    .GetProperty("required")[0].GetString() == "blocks"
+                && !paperTool.GetProperty("inputSchema")
+                    .GetProperty("additionalProperties").GetBoolean()
+                && paperResult.RootElement.GetProperty("status")
+                    .GetString() == "delivered"
+                && paperResult.RootElement.GetProperty("kind")
+                    .GetString() == "client-action"
+                && probeCount == 9
+                && sent.Count == 7
                 && sent[0].SourceInstanceId == "source-output"
                 && sent[0].SnapshotRevision == 42
                 && sent[0].File == "library/output-book.pdf"
@@ -8841,6 +8881,22 @@ internal static class DirectBridgeSelfTest
                     ?.GetValue<string>() == "m_0"
                 && sent[5].Payload["rangeRef"]?["endMarker"]
                     ?.GetValue<string>() == "m_2"
+                && sent[6].Kind == "client-action"
+                && sent[6].SourceInstanceId == "source-output"
+                && sent[6].File == "library/output-book.pdf"
+                && sent[6].Payload["fn"]?.GetValue<string>()
+                    == "__upStartTask"
+                && sent[6].Payload["args"] is JsonArray paperArguments
+                && paperArguments.Count == 1
+                && paperArguments[0]?["kind"]?.GetValue<string>() == "free"
+                && paperArguments[0]?["paper"]?.GetValue<string>()
+                    == "dictation"
+                && paperArguments[0]?["title"]?.GetValue<string>()
+                    == "假名练习"
+                && paperArguments[0]?["params"]?["blocks"]
+                    is JsonArray paperBlocks
+                && paperBlocks.Count == 2
+                && paperBlocks[1]?["label"]?.GetValue<string>() == "1. 樱"
                 && responses[9].RootElement.GetProperty("error")
                     .GetProperty("code").GetInt32() == -32602
                 && responses[10].RootElement.GetProperty("error")

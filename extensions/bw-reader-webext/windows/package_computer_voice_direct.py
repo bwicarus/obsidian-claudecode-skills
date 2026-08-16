@@ -1525,6 +1525,7 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
         "reader_make_note",
         "reader_note_edit",
         "reader_note_create",
+        "reader_paper_start",
         "reader_undo_last",
         "reader_anki_draft",
         "reader_card",
