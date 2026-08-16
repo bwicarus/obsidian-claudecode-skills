@@ -2942,6 +2942,12 @@ def pdf_api_reading_pos():
                     m,
                     indent=None,
                 )
+        # 数据面推送(架构第 17 条):阅读位置也进总线。前端本就节流上报(不是每次
+        # 翻页一条),事件量有限;Windows 镜像收到后重拉整份 positions(一个小 JSON)。
+        try:
+            _reader_publish("pos", rel_clean, None)
+        except Exception:
+            pass
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
     return jsonify({"ok": True, "pos": pos})
@@ -10339,6 +10345,11 @@ def _epub_hl_save(rel: str, items: list, identity=None):
         items,
         indent=None,
     )
+    # 数据面推送(架构第 17 条),同 _hl_save。
+    try:
+        _reader_publish("epub-hl", rel, None)
+    except Exception:
+        pass
 
 
 @contextmanager
@@ -10444,6 +10455,11 @@ def _notes_save(rel: str, items: list, identity=None):
         items,
         indent=None,
     )
+    # 数据面推送(架构第 17 条),同 _hl_save。
+    try:
+        _reader_publish("note", rel, None)
+    except Exception:
+        pass
 
 
 @contextmanager
@@ -16571,6 +16587,13 @@ def _hl_save(rel: str, data: dict, identity=None):
         data,
         indent=2,
     )
+    # 数据面推送(架构第 17 条):高亮变了广播一声,Windows 镜像守护订阅后增量重拉。
+    # 事件只说「变了」不带内容 —— 与总线既有语义一致(收到即重拉);前端对未知
+    # kind 显式忽略,不受影响。
+    try:
+        _reader_publish("hl", rel, None)
+    except Exception:
+        pass   # 广播失败不能影响保存;镜像侧另有周期追赶兜底
 
 
 @contextmanager
