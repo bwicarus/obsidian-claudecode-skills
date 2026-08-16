@@ -632,6 +632,59 @@ def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
 
     H["recall.notes"] = recall_notes
 
+    # ── 掌握度查询/便签编辑/撤销(2026-08-16 补齐,全部纯确定性)──────────────────
+    def vocab_page(anchor, params, prev):
+        words = params.get("words")
+        if isinstance(words, list) and words:
+            if len(words) > 200:
+                raise ValueError("params.words 超过上限 200")
+            return {"lookups": pdf.vocab_mastery_for([str(w) for w in words]),
+                    "note": "mastered=true=已掌握;tracked=false=生词库里没有(=从没查过)"}
+        rel, _ap = _rel(anchor)
+        try:
+            page = int(anchor.get("page"))
+        except (TypeError, ValueError):
+            raise ValueError("查整页生词时 anchor.page 必填")
+        items = pdf.page_unmastered_vocab(rel, page)
+        return {"unmastered_on_page": items, "count": len(items),
+                "note": "该页『还没掌握』的生词(=页面下划线词)。不在列表的词:"
+                        "要么已掌握、要么从没查过"}
+    H["vocab.page"] = vocab_page
+
+    def note_edit(anchor, params, prev):
+        # 只收 text/color 两个字段 —— 跟旧助手工具同一条硬约束:
+        # 笔画/位置/尺寸是用户数据,实现层面根本不读那些参数。
+        rel, _ap = _rel(anchor)
+        nid = str(params.get("id") or "").strip()
+        if not nid:
+            raise ValueError("params.id 必填(先 note.list 拿便签 id)")
+        new_text, new_color = params.get("text"), params.get("color")
+        if new_text is None and new_color is None:
+            raise ValueError("text / color 至少给一个(只能改这两个)")
+        import time as _time
+        with pdf._notes_edit(rel) as items:
+            n = next((x for x in items if x.get("id") == nid), None)
+            if n is None:
+                raise ValueError("没找到这个 id 的便签(先 note.list 拿最新列表)")
+            if new_text is not None:
+                n["text"] = str(new_text)[:8000]
+            if new_color is not None:
+                n["color"] = str(new_color).strip()[:24]
+            n["updated"] = int(_time.time())
+        return {"id": nid, "edited": True}
+    H["note.edit"] = note_edit
+
+    def undo_last(anchor, params, prev):
+        import voice
+        uid = current_user_id() if callable(current_user_id) else None
+        r = voice._undo_do(None, owner=uid)   # 撤自己最近一次未撤销的写操作(按账号隔离)
+        if not isinstance(r, dict):
+            raise ValueError("撤销栈返回异常")
+        if not r.get("ok"):
+            raise ValueError(str(r.get("error") or "没有可撤销的操作"))
+        return {"undone": r.get("kind") or True}
+    H["undo.last"] = undo_last
+
     _assert_no_ai(H.keys())
     missing = sorted(set(DC.ACTIONS) - set(H))
     return H, missing

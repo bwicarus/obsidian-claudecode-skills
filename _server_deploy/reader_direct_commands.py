@@ -47,6 +47,12 @@ ACTIONS: dict[str, dict] = {
     "recall.creation":  {"target": (),               "desc": "召回本地创造物注册表(纸/报告/搜索/翻译等的句柄与内容;引用型只回 ref 不解引用)"},
     "recall.notes":     {"target": (),               "desc": "召回已学内容(知识索引/已学 KG 节点/Anki);query 必填,不扫 raw vault、不联网、不调 AI"},
     "result.present":   {"target": ("file", "page"), "desc": "把上游已完成的 reader-result 展示卡写回阅读器;只渲染,不调 AI"},
+    # ↓ 2026-08-16 补齐(架构「6 个纯确定性缺口」中的三个)。其余三个各有理由缓:
+    #   掌握度读写等确认流设计;material.read 体量大另批;page.show 在本通道无对应
+    #   (page.add 直写用户页,没有草稿态要"生成")。
+    "vocab.page":       {"target": ("file",),        "desc": "查掌握度数据库:params.words=逐词查;不传 words=该页『还没掌握』的生词(=页面下划线词)。纯 DB 读"},
+    "note.edit":        {"target": ("file",),        "desc": "改便签的 text/color(只这两个字段;笔画/位置/尺寸是用户数据,实现层面不读那些参数)"},
+    "undo.last":        {"target": (),               "desc": "撤销本账号最近一次未撤销的写操作(高亮/便签/卡草稿),复用既有撤销栈"},
 }
 MODES = ("independent", "dependent")
 _MAX_STEPS = 20

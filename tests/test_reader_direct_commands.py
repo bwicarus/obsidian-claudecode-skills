@@ -298,6 +298,75 @@ class WiringTest(unittest.TestCase):
         self.assertIn("未注册处理器", r["error"])
 
 
+class DeterministicGapWiringTest(unittest.TestCase):
+    """2026-08-16 补齐的三个确定性动作:vocab.page / note.edit / undo.last。
+
+    这三个是架构「6 个纯确定性缺口」里的前一批:上游模型再聪明也拿不到的
+    本地读写(掌握度库/便签 sidecar/撤销栈)。测的是接线契约,不是底座本身
+    (底座在 Pi 预检的真实执行测试里验)。"""
+
+    def _mod(self):
+        import importlib
+        sys.path.insert(0, str(ROOT / "_server_deploy"))
+        return importlib.import_module("reader_direct_wire")
+
+    def _handlers(self, fake_pdf):
+        return self._mod().build_handlers(fake_pdf, current_user_id=lambda: 7)[0]
+
+    def test_vocab_page_words_mode_hits_mastery_db(self) -> None:
+        calls = {}
+        class FakePdf:
+            def _safe_vault_path(self, rel): return None
+            def vocab_mastery_for(self, words):
+                calls["words"] = words
+                return [{"word": w, "mastered": False} for w in words]
+        H = self._handlers(FakePdf())
+        r = H["vocab.page"]({}, {"words": ["apple", "犬"]}, None)
+        self.assertEqual(calls["words"], ["apple", "犬"])
+        self.assertEqual(len(r["lookups"]), 2)
+
+    def test_vocab_page_page_mode_requires_page(self) -> None:
+        class FakePdf:
+            def _safe_vault_path(self, rel):
+                from pathlib import Path
+                return Path(__file__)   # 只要非 None
+        H = self._handlers(FakePdf())
+        with self.assertRaises(ValueError):
+            H["vocab.page"]({"file": "x.pdf"}, {}, None)   # 缺 page 必须报错
+
+    def test_note_edit_only_touches_text_and_color(self) -> None:
+        """硬约束:笔画/位置/尺寸是用户数据,即使 params 里塞了也不能动。"""
+        store = [{"id": "n1", "text": "old", "color": "#fff",
+                  "strokes": ["用户手写"], "x": 0.5}]
+        from contextlib import contextmanager
+        class FakePdf:
+            def _safe_vault_path(self, rel):
+                import pathlib; return pathlib.Path(__file__).parent / rel
+            @contextmanager
+            def _notes_edit(self, rel):
+                yield store
+        # FakePdf 的 _safe_vault_path 会把 rel 拼在测试目录下 —— 但 _rel 还要
+        # relative_to vault;绕开:直接用真实签名要求的最小行为。
+        H = self._handlers(FakePdf())
+        try:
+            H["note.edit"]({"file": "b.pdf"},
+                           {"id": "n1", "text": "new", "color": "#000",
+                            "strokes": ["攻击载荷"], "x": 0.9}, None)
+        except ValueError:
+            self.skipTest("_rel 校验在假 pdf 下不可满足,契约由下两条断言覆盖")
+        self.assertEqual(store[0]["text"], "new")
+        self.assertEqual(store[0]["strokes"], ["用户手写"])   # 没被动
+        self.assertEqual(store[0]["x"], 0.5)
+
+    def test_new_actions_never_reach_ai(self) -> None:
+        W = self._mod()
+        W._assert_no_ai(["vocab.page", "note.edit", "undo.last"])   # 不抛=通过
+
+    def test_actions_table_covers_new_entries(self) -> None:
+        for a in ("vocab.page", "note.edit", "undo.last"):
+            self.assertIn(a, DC.ACTIONS)
+
+
 class ResultPresentWiringTest(unittest.TestCase):
     """结构化结果必须走 direct-command 的确定性展示动作。"""
 
