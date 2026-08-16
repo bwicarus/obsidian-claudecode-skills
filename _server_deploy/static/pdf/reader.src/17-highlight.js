@@ -155,12 +155,23 @@ function _pdfHlToAsst(h) {
 }
 
 // 把 chars[s..e] 合并成连续 PDF pt rects（同行合并）
+//
+// 必须和蓝色实时选区用同一个块过滤。选区是一段**字符索引区间**,而索引顺序
+// 不等于阅读顺序 —— 竖排漫画一页上,右侧气泡的字符索引可能正好夹在用户选中
+// 那一段的首尾之间。蓝色 overlay 和 _charsRangeToText 都过 _charRangeBlockFilter
+// 把这些别块字符挡掉,只有这里没过:于是用户看到蓝色框住的是一段,保存后黄色
+// 高亮却连右边的对话一起涂了。
+//
+// 2026-08-16 用户实测报告:「第一张图的蓝色选中范围和高亮这一段后实际黄色
+// 高亮的范围不同,右侧的对话也被高亮了」。
 function _charsRangeToRects(chars, sIdx, eIdx) {
   if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
+  const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
   const rects = [];
   let cur = null;
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
+    if (!_inBlk(c)) continue;   // 别块(另一个气泡/另一栏)不画高亮,与蓝色选区一致
     if (c.sp && (!c.width || c.width < 0.5)) {
       if (cur && c._x1 > cur.x1) cur.x1 = c._x1;
       continue;

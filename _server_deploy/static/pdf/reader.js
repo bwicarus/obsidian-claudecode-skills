@@ -6614,12 +6614,23 @@ function _pdfHlToAsst(h) {
 }
 
 // 把 chars[s..e] 合并成连续 PDF pt rects（同行合并）
+//
+// 必须和蓝色实时选区用同一个块过滤。选区是一段**字符索引区间**,而索引顺序
+// 不等于阅读顺序 —— 竖排漫画一页上,右侧气泡的字符索引可能正好夹在用户选中
+// 那一段的首尾之间。蓝色 overlay 和 _charsRangeToText 都过 _charRangeBlockFilter
+// 把这些别块字符挡掉,只有这里没过:于是用户看到蓝色框住的是一段,保存后黄色
+// 高亮却连右边的对话一起涂了。
+//
+// 2026-08-16 用户实测报告:「第一张图的蓝色选中范围和高亮这一段后实际黄色
+// 高亮的范围不同,右侧的对话也被高亮了」。
 function _charsRangeToRects(chars, sIdx, eIdx) {
   if (sIdx > eIdx) [sIdx, eIdx] = [eIdx, sIdx];
+  const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
   const rects = [];
   let cur = null;
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
+    if (!_inBlk(c)) continue;   // 别块(另一个气泡/另一栏)不画高亮,与蓝色选区一致
     if (c.sp && (!c.width || c.width < 0.5)) {
       if (cur && c._x1 > cur.x1) cur.x1 = c._x1;
       continue;
@@ -9707,12 +9718,14 @@ document.addEventListener('copy', (e) => {
 function _buildSentenceFromSel(pw, sIdx, eIdx) {
   const chars = pw.__charBoxes;
   if (!chars || sIdx < 0 || eIdx >= chars.length || sIdx > eIdx) return null;
-  // 跟选中预览 _selByCharRange 用**同款块过滤**：排序后选区首尾之间会交错进别气泡/别栏的字，
-  // 翻译/解释必须只取起止块区间内的字（= 预览所见），否则译文混进左右气泡内容。
-  const _blk = (c) => (c.bk != null && c.bk >= 0) ? c.bk : ((c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
-  const _sb = _blk(chars[sIdx]), _eb = _blk(chars[eIdx]);
-  const _bLo = Math.min(_sb, _eb), _bHi = Math.max(_sb, _eb);
-  const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b < 0 || (b >= _bLo && b <= _bHi); };
+  // 跟选中预览 _selByCharRange 用**同一个**块过滤：排序后选区首尾之间会交错进别气泡/别栏的字，
+  // 翻译/解释必须只取真正被选中的字（= 预览所见），否则译文混进左右气泡内容。
+  //
+  // 这里原本自己抄了一份，用块号 min/max 当区间判断。但块号是不透明身份，
+  // 数值上夹在中间不代表版面上属于这一段（13-selection.js 的注释早写着这条），
+  // 所以「同款过滤」这句注释并不成立：预览挡掉的气泡，翻译照样收进去。
+  // 直接调共享实现，三处（预览 / 高亮矩形 / 这里）只留一份语义。
+  const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
   const rects = []; let cur = null, firstC = null, lastC = null, text = '';
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];

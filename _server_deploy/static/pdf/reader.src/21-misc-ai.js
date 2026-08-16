@@ -463,12 +463,14 @@ document.addEventListener('copy', (e) => {
 function _buildSentenceFromSel(pw, sIdx, eIdx) {
   const chars = pw.__charBoxes;
   if (!chars || sIdx < 0 || eIdx >= chars.length || sIdx > eIdx) return null;
-  // 跟选中预览 _selByCharRange 用**同款块过滤**：排序后选区首尾之间会交错进别气泡/别栏的字，
-  // 翻译/解释必须只取起止块区间内的字（= 预览所见），否则译文混进左右气泡内容。
-  const _blk = (c) => (c.bk != null && c.bk >= 0) ? c.bk : ((c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
-  const _sb = _blk(chars[sIdx]), _eb = _blk(chars[eIdx]);
-  const _bLo = Math.min(_sb, _eb), _bHi = Math.max(_sb, _eb);
-  const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b < 0 || (b >= _bLo && b <= _bHi); };
+  // 跟选中预览 _selByCharRange 用**同一个**块过滤：排序后选区首尾之间会交错进别气泡/别栏的字，
+  // 翻译/解释必须只取真正被选中的字（= 预览所见），否则译文混进左右气泡内容。
+  //
+  // 这里原本自己抄了一份，用块号 min/max 当区间判断。但块号是不透明身份，
+  // 数值上夹在中间不代表版面上属于这一段（13-selection.js 的注释早写着这条），
+  // 所以「同款过滤」这句注释并不成立：预览挡掉的气泡，翻译照样收进去。
+  // 直接调共享实现，三处（预览 / 高亮矩形 / 这里）只留一份语义。
+  const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
   const rects = []; let cur = null, firstC = null, lastC = null, text = '';
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
