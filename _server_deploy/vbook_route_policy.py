@@ -163,7 +163,10 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_snippets_to': 'PAGE',   # /pdf/api/snippets-to
     'pdf_reader.pdf_api_snippets_to_async': 'PAGE',   # /pdf/api/snippets-to-async
     'pdf_reader.pdf_api_to_note': 'PAGE',   # /pdf/api/to-note
-    'pdf_reader.pdf_api_direct_command': 'GLOBAL',   # 无 AI 直接命令(anchor 自带 file,不经合并层重写)
+    'pdf_reader.pdf_api_direct_command': 'GLOBAL',
+    'pdf_reader.pdf_api_error_report': 'GLOBAL',   # 报错一键上传(账户级,与合并无关)
+    'pdf_reader.pdf_api_error_reports': 'GLOBAL',   # 报告列表
+    'pdf_reader.pdf_api_error_report_one': 'GLOBAL',   # 单份报告   # 无 AI 直接命令(anchor 自带 file,不经合并层重写)
     'pdf_reader.pdf_api_direct_events': 'GLOBAL',    # 失败事件订阅(与具体书无关)
     'pdf_reader.pdf_api_outgoing_drawing': 'GLOBAL', # 绘图版本(按 file+page 查,自己校验)
     'pdf_reader.pdf_api_outgoing_focus': 'GLOBAL',   # 焦点上报(引用自带定位)
