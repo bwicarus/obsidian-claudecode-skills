@@ -2548,41 +2548,76 @@ internal sealed class ReaderContextMcpServer
     {
         // 结构校验只做"这批块值得送出"这一层;内容级顽强容错(字段搬移、choice 降级、
         // 自动补检查按钮)单源在 Pi 的 paper.normalize_blocks——两端不重复实现,
-        // 避免同一规则两份实现各自漂移。
-        if (
-            arguments.ValueKind != JsonValueKind.Object
-            || !arguments.TryGetProperty("blocks", out JsonElement blocks)
-            || blocks.ValueKind != JsonValueKind.Array
-            || blocks.GetArrayLength() < 1
-            || blocks.GetArrayLength() > 48
-            || blocks.GetRawText().Length > 24_000
-        )
+        // 避免同一规则两份实现各自漂移。每条失败都精确报因:第一版只回
+        // "Invalid paper blocks",实测模型只能转述"结构校验被拒绝,没有具体原因",
+        // 既救不了这一次调用,也定位不了问题——正是折成布尔不报原始值的老毛病。
+        string? blocksProblem = null;
+        JsonElement blocks = default;
+        if (arguments.ValueKind != JsonValueKind.Object)
         {
-            await WriteErrorAsync(
+            blocksProblem = "arguments 必须是 JSON 对象";
+        }
+        else if (!arguments.TryGetProperty("blocks", out blocks))
+        {
+            blocksProblem = "缺少 blocks 字段";
+        }
+        else if (blocks.ValueKind != JsonValueKind.Array)
+        {
+            blocksProblem = "blocks 必须是数组,收到 " + blocks.ValueKind;
+        }
+        else if (blocks.GetArrayLength() is < 1 or > 48)
+        {
+            blocksProblem =
+                "blocks 数量必须在 1..48,收到 " + blocks.GetArrayLength();
+        }
+        else if (blocks.GetRawText().Length > 24_000)
+        {
+            blocksProblem =
+                "blocks 序列化总长不能超过 24000 字符,收到 "
+                + blocks.GetRawText().Length;
+        }
+        else
+        {
+            int blockIndex = 0;
+            foreach (JsonElement block in blocks.EnumerateArray())
+            {
+                if (block.ValueKind != JsonValueKind.Object)
+                {
+                    blocksProblem =
+                        "blocks[" + blockIndex + "] 必须是对象,收到 "
+                        + block.ValueKind;
+                    break;
+                }
+                if (
+                    !block.TryGetProperty("kind", out JsonElement kindValue)
+                    || kindValue.ValueKind != JsonValueKind.String
+                )
+                {
+                    blocksProblem =
+                        "blocks[" + blockIndex + "] 缺少字符串 kind 字段";
+                    break;
+                }
+                if (Array.IndexOf(
+                    PaperBlockKinds,
+                    kindValue.GetString()) < 0)
+                {
+                    blocksProblem =
+                        "blocks[" + blockIndex + "].kind 非法:"
+                        + kindValue.GetString()
+                        + "(可用 text/blank/choice/checkbox/button/hr)";
+                    break;
+                }
+                blockIndex++;
+            }
+        }
+        if (blocksProblem is not null)
+        {
+            await WriteReaderOutputToolErrorAsync(
                 id,
-                -32602,
-                "Invalid paper blocks",
+                "BW_READER_PAPER_BLOCKS_INVALID",
+                "练习纸参数无效:" + blocksProblem + "。修正后重试同一工具。",
                 cancellationToken).ConfigureAwait(false);
             return;
-        }
-        foreach (JsonElement block in blocks.EnumerateArray())
-        {
-            if (
-                block.ValueKind != JsonValueKind.Object
-                || !block.TryGetProperty("kind", out JsonElement kindValue)
-                || kindValue.ValueKind != JsonValueKind.String
-                || Array.IndexOf(
-                    PaperBlockKinds,
-                    kindValue.GetString()) < 0
-            )
-            {
-                await WriteErrorAsync(
-                    id,
-                    -32602,
-                    "Invalid paper block kind",
-                    cancellationToken).ConfigureAwait(false);
-                return;
-            }
         }
         string title =
             arguments.TryGetProperty("title", out JsonElement titleValue)
@@ -2863,10 +2898,25 @@ internal sealed class ReaderContextMcpServer
                 cancellationToken).ConfigureAwait(false);
             return;
         }
-        ReaderRealtimeOutputRequest? request = BuildRealtimeOutputRequest(
-            current,
-            kind,
-            payload);
+        ReaderRealtimeOutputRequest? request;
+        try
+        {
+            request = BuildRealtimeOutputRequest(
+                current,
+                kind,
+                payload);
+        }
+        catch (ReaderRealtimeOutputException exception)
+        {
+            // 载荷校验失败曾被折叠成 null → 误报"来源未就绪",错误码指错方向,
+            // 模型无从自纠(实测表现:"结构校验被拒绝,没有具体原因")。如实转告。
+            await WriteReaderOutputToolErrorAsync(
+                id,
+                exception.Code,
+                exception.Message,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
         if (request is null)
         {
             await WriteReaderOutputToolErrorAsync(
@@ -3088,21 +3138,16 @@ internal sealed class ReaderContextMcpServer
         {
             return null;
         }
-        try
-        {
-            return ReaderRealtimeOutputProtocol.Create(
-                "output-" + Guid.NewGuid().ToString("N"),
-                identity.SourceInstanceId,
-                identity.SnapshotRevision,
-                identity.File,
-                identity.Page,
-                kind,
-                outputPayload);
-        }
-        catch (ReaderRealtimeOutputException)
-        {
-            return null;
-        }
+        // 不再把载荷校验异常折叠成 null:null 专指"快照没有可定位来源",校验失败
+        // 带着各自的 code/message 上浮,调用方如实回给模型,模型才能修正后重试。
+        return ReaderRealtimeOutputProtocol.Create(
+            "output-" + Guid.NewGuid().ToString("N"),
+            identity.SourceInstanceId,
+            identity.SnapshotRevision,
+            identity.File,
+            identity.Page,
+            kind,
+            outputPayload);
     }
 
     internal static bool HighlightRangeMatchesSnapshot(
