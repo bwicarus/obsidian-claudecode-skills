@@ -177,6 +177,34 @@ function _charConnectedBlockPath(blocks, startId, endId) {
 // 块号是不透明身份，不能用 min/max 表达区间。同块严格只取该块；不同块时
 // 只取端点之间的几何连通路径。若端点不连通，宁可只保留两个端点块，也不把
 // 视觉上夹在中间、语义上属于别的气泡/栏的块吞进来。
+// 区间内应当被选中的块集合。
+//
+// 与 _charConnectedBlockPath 的差别是「路径」vs「区间」:那个只保留 BFS 走过
+// 的一条链,这个保留区间内所有与端点连成一片的块。同一段落里每行单独成块的
+// PDF(实测:料理师)靠后者才能整段选中,而旁边气泡因为与本段不连通仍被排除。
+function _charSpanBlocks(blocks, startId, endId) {
+  const nodes = Array.from(blocks.values());
+  const allowed = new Set([startId, endId]);
+  // 反复扩张到不动点:A 连 B、B 连 C 时,C 也属于同一片(多行段落就是这样
+  // 一行接一行连起来的),只做一轮会漏掉隔行的块。
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const candidate of nodes) {
+      if (allowed.has(candidate.id)) continue;
+      for (const id of allowed) {
+        const current = blocks.get(id);
+        if (current && _charBlocksConnected(current, candidate)) {
+          allowed.add(candidate.id);
+          grew = true;
+          break;
+        }
+      }
+    }
+  }
+  return allowed;
+}
+
 function _charRangeBlockFilter(chars, sIdx, eIdx) {
   if (chars[sIdx] && chars[eIdx]
       && chars[sIdx]._selectionBlockFilter === false
@@ -185,7 +213,18 @@ function _charRangeBlockFilter(chars, sIdx, eIdx) {
   if (sb < 0 || eb < 0) return () => true;
   if (sb === eb) return (c) => _charBlockId(c) === sb || (_charBlockId(c) < 0 && !!c.sp);
   const blocks = _charBlockGeometry(chars, sIdx, eIdx);
-  const allowed = _charConnectedBlockPath(blocks, sb, eb) || new Set([sb, eb]);
+  // 用户拖出的是一个**连续的索引区间**,区间内的块本就都该在选中范围里。
+  // 之前这里取的是 BFS 的一条「路径」,而路径 ≠ 区间:BFS 一找到通路就停,
+  // 路径之外的块整块被丢掉。
+  //
+  // 2026-08-16 实测(料理师 part1 第 26 页):这本书**每一行单独成块**
+  // (blk 17/18/19/20…),用户选中 5 行的一段,画出来只剩零散几截,
+  // 「已选」预览也因为中间的字被过滤掉而串成「食心配中が毒ありの」。
+  //
+  // 连通判定仍然有用 —— 它挡的是「视觉上夹在中间、其实属于另一个气泡/栏」
+  // 的块。所以保留它,但只用来**排除**:凡是与区间内其它块连通的都留下,
+  // 只有孤立的才剔除。这样同段多行照常全选,旁边的气泡仍然进不来。
+  const allowed = _charSpanBlocks(blocks, sb, eb);
   return (c) => allowed.has(_charBlockId(c)) || (_charBlockId(c) < 0 && !!c.sp);
 }
 
