@@ -178,9 +178,24 @@ function _charsRangeToRects(chars, sIdx, eIdx) {
     }
     const x0 = c._x0, y0 = c._y0, x1 = c._x1, y1 = c._y1;
     const lineH = y1 - y0;
-    const _sameBk = cur && c.bk != null && cur.bk != null && c.bk >= 0 && c.bk === cur.bk;   // #56:同排版块=同视觉行(OCR justified),水平相邻即合并,不受块内字符 top 抖动分段(治句子/下划线在括号处断)
-    if (cur &&
-        (_sameBk || Math.abs(y0 - cur.y0) <= Math.max(2, Math.max(cur.y1 - cur.y0, y1 - y0) * 0.6)) &&   // 跨块才按 y0 判行(跨行 y0 差>字高分段)
+    const _sameBk = cur && c.bk != null && cur.bk != null && c.bk >= 0 && c.bk === cur.bk;   // #56:同排版块内字符 top 会抖动(括号/标点),不能一抖就分段
+    // 同块**不等于**同一视觉行。#56 原本让同块直接跳过换行判断,前提是
+    // "一个块 = 一个视觉行"(OCR justified 的常见形态)。这个前提不普遍成立:
+    // 实测《料理师》part1 第 27 页,块 30 一个块装了两行,于是两行被并成一个
+    // 矩形 —— 用户看到的就是"选到半行,高亮却是一整个方块"。
+    //
+    // 所以同块时放宽的应该是 top 抖动的**容差**,而不是取消判断本身:仍要求
+    // 两者在垂直方向实质重叠。同一行的字互相盖住大半,下一行的字几乎不盖,
+    // 这个量能同时容忍括号抖动、又挡住换行。
+    const _vOverlap = cur
+      ? Math.max(0, Math.min(y1, cur.y1) - Math.max(y0, cur.y0)) /
+        Math.max(1, Math.min(y1 - y0, cur.y1 - cur.y0))
+      : 0;
+    const _sameLine = !!cur && (
+      (_sameBk && _vOverlap >= 0.35) ||
+      Math.abs(y0 - cur.y0) <= Math.max(2, Math.max(cur.y1 - cur.y0, y1 - y0) * 0.6)   // 跨块按 y0 判行(跨行 y0 差>字高分段)
+    );
+    if (cur && _sameLine &&
         x0 <= cur.x1 + Math.max(2, lineH * 0.6)) {
       cur.x1 = Math.max(cur.x1, x1);
       cur.y0 = Math.min(cur.y0, y0);
