@@ -5169,6 +5169,11 @@ def _t_make_diagnostic(args, ctx):
     if not concept:
         return {"error": "要给知识点(concept)"}
     rel = (ctx or {}).get("file_rel") or ""
+    if rel.startswith("localbook:"):
+        # 本机导入书:诊断卷的任务运行时(run-start)在 Pi、只认 vault 书。
+        # 旧文案"只支持 PDF 阅读器"是误导——本机书就是 PDF,错在书的宿主不在服务端。
+        return {"error": "本机导入的书暂不支持诊断卷(出卷的任务运行时在服务端,只认书库里的书)。"
+                         "把这本书上传到书库后就可以出卷。"}
     if not rel or not rel.lower().endswith(".pdf"):
         return {"error": "诊断卷目前只支持 PDF 阅读器"}
     import sys as _sys
