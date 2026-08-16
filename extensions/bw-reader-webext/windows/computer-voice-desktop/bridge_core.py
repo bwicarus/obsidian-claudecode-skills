@@ -2183,16 +2183,38 @@ class WindowsProcessRunner:
             or not _same_path(executable.parent, cwd)
         ):
             raise BridgeError("直连启动命令或目录偏离固定合同。")
-        process = subprocess.Popen(
-            list(command),
-            cwd=str(cwd),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            shell=False,
-            close_fds=True,
-            creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
+        # stderr 接滚动日志而非 DEVNULL(2026-08-17):C# 的 DirectSecurityLog(每次
+        # 启停/断连/故障的时间线)写 stderr,此前从出生起被丢弃——每次"又断了"都
+        # 只能靠失败账本残片拼图。日志只含固定事件码,无 PCM/密钥/origin(见
+        # DirectSecurityLog 注释),落盘无隐私增量。超 1MB 砍到尾部 256KB。
+        stderr_target = subprocess.DEVNULL
+        log_handle = None
+        try:
+            log_path = executable.parent.parent / "runtime" / "computer-voice-direct.service.err.log"
+            try:
+                if log_path.stat().st_size > 1_000_000:
+                    tail = log_path.read_bytes()[-256_000:]
+                    log_path.write_bytes(tail)
+            except OSError:
+                pass
+            log_handle = open(log_path, "ab")
+            stderr_target = log_handle
+        except OSError:
+            pass   # 日志开不了不拦启动:回落 DEVNULL(保持旧行为)
+        try:
+            process = subprocess.Popen(
+                list(command),
+                cwd=str(cwd),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_target,
+                shell=False,
+                close_fds=True,
+                creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        finally:
+            if log_handle is not None:
+                log_handle.close()   # 子进程已持有句柄;父进程立即放手
         self._children[process.pid] = process
         return process.pid
 
