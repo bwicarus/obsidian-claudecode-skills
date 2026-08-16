@@ -505,6 +505,23 @@ Pi 真正不可替代的只剩一个角色：**同步中继**（永远在线、�
 延迟卡住时，才给那个流程上 outbox。契约已备好（`command-outbox/2`、
 `mut-v2` mutationId），升级路径是通的——不是"不做"，是"等一个真实的受害者"。
 
+### 23. Realtime 语音暂停开发，重心全移 Windows 桥接 Codex（2026-08-16 用户拍板）
+
+基于实际使用方式：GPT Realtime / relay 语音链路（voice_realtime_relay、rt_* 设置、
+App 的 relay 语音）**暂停开发** —— 保持现状运行、只修致命 bug、不再投入新功能。
+所有语音/助手侧的新能力先在 **Windows 桥接 Codex** 上做，稳定后再移植回 Realtime。
+含义：SURFACE_RTC_DIRECT/REALTIME_WS 面的工具扩展、垫话策略、计费优化等
+一律冻结；遇到"该给语音也加吗"的问题，答案默认是"不加，等移植"。
+
+### 24. AI 自动化环境·四支柱（2026-08-16 用户提出，逐条推进）
+
+| 支柱 | 内容 | 状态 |
+|---|---|---|
+| ① 报错自动上传 | 用户说"没按预期"→ 当时+之前的环境打包成报告 → Windows 特定文件夹 | **已建**：`error_reports.py` + `report_problem` 工具 + 镜像守护拉进 `state/pi-mirror/error-reports/`。前提纪律=《silent-failure-lessons》五条 |
+| ② 扫描抽象化 | 长文分段+索引一次，KG/诊断/搜索/摘要多处复用，条目带页跨度/哈希/溯源 | **待设计**——与 KG 讨论一起定，否则又造单用途扫描 |
+| ③ 工具文档自动管理 | 参照 Hermes：triggers[] frontmatter、使用计数、定期 review（外部参考节：不引入平台、抄三取舍） | **待做**，依赖真实使用数据积累 |
+| ④ Pi 定时/主动自动化 | 定时提醒 + AI 基于数据排程（heartbeat 待办的落地形态） | **等①②③**，用户自己定的顺序 |
+
 ---
 
 ## 二、未定 / 待办
