@@ -8405,7 +8405,7 @@ if (window.__bwPwaProviderOnly) return;
       if (!b) return;
       b.classList.toggle('bridge-only', bridged);
       if (bridged) {
-        b.title = '桥接模式:上下文已连,语音未接管(在 ReaderPC 服务器切回完整模式可用语音)';
+        b.title = '桥接模式:语音在电脑本机(通话不接到 App;切回完整模式可接过来)';
         b.setAttribute('aria-label', b.title);
       }
     });
@@ -8413,7 +8413,7 @@ if (window.__bwPwaProviderOnly) return;
   function _toggleNativeComputerVoiceApp() {
     if (!_nativeComputerVoiceAppAvailable()) return false;
     if (_bridgeOnlyServiceMode) {
-      try { if (window.RC && RC.toast) RC.toast('桥接模式:语音未接管。上下文/出卷等照常;要通话请在 ReaderPC 切回完整模式。'); } catch (_) {}
+      try { if (window.RC && RC.toast) RC.toast('桥接模式:语音在电脑本机运行。上下文/出卷照常;要把通话接到 App,请切回完整模式。'); } catch (_) {}
       return true;   // 已消费点击:不发 START(服务端也会拒),不留静默失败
     }
     try {

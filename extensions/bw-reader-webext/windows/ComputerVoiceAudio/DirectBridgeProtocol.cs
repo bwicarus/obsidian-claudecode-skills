@@ -1162,15 +1162,16 @@ internal sealed class DirectBridgeProtocolSession
         _writeServiceModeIntent = writeServiceModeIntent;
     }
 
-    // 桥接模式:上下文/快照/工具照常,语音动作(start/codex-voice-set/keepalive-set)
-    // 一律明确拒绝——错误码专用,客户端据此显示"桥在、语音未接管"而不是猜。
+    // 桥接模式:语音留在电脑本机(Codex 保活照常),只拒 START——那是把音频
+    // 路由到虚拟设备、PCM 隧道到 App 的动作。codex-voice-set/keepalive-set
+    // 不闸:远程开关电脑本机的语音不涉及音频路由。
     private void RequireVoiceAllowed()
     {
         if (_bridgeOnlyMode)
         {
             throw new DirectProtocolException(
                 "BW_COMPUTER_VOICE_DIRECT_BRIDGE_ONLY",
-                "桥接模式:语音未接管(上下文与工具照常)。要用电脑语音,请在 ReaderPC 服务器切回完整模式。");
+                "桥接模式:语音在电脑本机运行,通话不接到 App。要把通话接过来,请切回完整模式。");
         }
     }
 
@@ -1889,7 +1890,6 @@ internal sealed class DirectBridgeProtocolSession
                 "BW_COMPUTER_VOICE_DIRECT_PHASE_INVALID",
                 "当前连接阶段不能远程控制 Codex 语音");
         }
-        RequireVoiceAllowed();
         DirectCodexVoiceSetResult result =
             await _codexVoiceControl.SetActiveAsync(
                 RequireBoolean(message, "active"),
@@ -1919,7 +1919,6 @@ internal sealed class DirectBridgeProtocolSession
                 "BW_COMPUTER_VOICE_DIRECT_PHASE_INVALID",
                 "当前连接阶段不能设置 Codex 语音持续运行");
         }
-        RequireVoiceAllowed();
         DirectCodexVoiceSetResult result =
             await _codexVoiceControl.SetKeepActiveAsync(
                 RequireBoolean(message, "enabled"),

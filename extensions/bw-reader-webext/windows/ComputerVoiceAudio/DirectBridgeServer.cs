@@ -210,16 +210,15 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 && !ReadSnapshotViewerHidden(runtimeDirectory));
         _runtimeDirectory = runtimeDirectory;
         _bridgeOnlyMode = ReadBridgeOnlyMode(runtimeDirectory);
-        // 桥接模式:keepActivePath 传 null = 整条 keepalive 链不装载(不轮询、不拉
-        // Codex、不发任何 F24——含"写 false 会发一次 stop 把用户手动开的语音关掉"
-        // 那条初次 reconcile)。写 false 与不装载语义不同,桥接模式必须是后者。
+        // 桥接模式语义(2026-08-17 用户更正):语音**留在电脑**——Codex 照常自动
+        // 拉起、F24 保活照常(keepalive 链完整装载),音频走电脑自己的设备;唯一
+        // 被拒的是 App 发起的 START(那才是把音频路由到虚拟设备、PCM 隧道到
+        // App 的动作)。"不接管"指不接走音频,不是不管语音。
         _codexVoiceControl = codexVoiceControl
             ?? DirectCodexVoiceControl.CreateProduction(
-                _bridgeOnlyMode
-                    ? null
-                    : Path.Combine(
-                        runtimeDirectory,
-                        "codex-voice-keepalive.json"),
+                Path.Combine(
+                    runtimeDirectory,
+                    "codex-voice-keepalive.json"),
                 appLauncher,
                 keepActiveChanged: enabled =>
                     _snapshotViewer.SynchronizeServiceIntent(

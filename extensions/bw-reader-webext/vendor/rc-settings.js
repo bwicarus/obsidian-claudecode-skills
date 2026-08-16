@@ -707,7 +707,7 @@ if (window.__bwPwaProviderOnly) return;
             '<input type="checkbox" id="set-bridge-voice" style="width:16px;height:16px"> 🔊 把语音也桥接进来' +
           '</label>' +
           '<div id="set-bridge-voice-help" style="display:none;font-size:11px;color:#8a9bb4;line-height:1.6;margin-top:5px">' +
-            '关闭 = ReaderPC 仅桥接模式：上下文/快照/出卷等照常，语音留在电脑本地不被接管。切换在数秒内由 ReaderPC 重启服务生效。' +
+            '关闭 = 仅桥接：语音留在电脑（用电脑音频设备），通话不接到 App；上下文/快照/出卷照常。切换在数秒内由 ReaderPC 重启服务生效。' +
           '</div>' +
           '<div id="set-bridge-voice-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
         '</div>' +

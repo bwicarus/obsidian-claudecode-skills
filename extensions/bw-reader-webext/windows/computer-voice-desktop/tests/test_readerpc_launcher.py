@@ -160,7 +160,8 @@ class ReaderPCLauncherTests(unittest.TestCase):
                 (runtime.parent / "codex-voice-keepalive.json")
                 .read_text("utf-8")
             )
-            self.assertFalse(keepalive["enabled"])
+            # 2026-08-17 语义更正:桥接模式语音留在电脑,keepalive 照常 True
+            self.assertTrue(keepalive["enabled"])
             self.assertEqual(order, ["start"])
 
     def test_codex_voice_master_switch_is_exact_and_fail_closed(self) -> None:

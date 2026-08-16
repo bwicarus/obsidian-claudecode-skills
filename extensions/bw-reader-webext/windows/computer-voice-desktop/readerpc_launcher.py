@@ -307,14 +307,15 @@ def enable_readerpc_voice(
         raise ReaderPCServiceError(message)
 
     try:
-        # 模式文件必须先于 start:C# 只在启动时读它。桥接模式下 keepalive 写 False
-        # 只为磁盘状态一致(C# 传 null 路径根本不读它),真正的"不碰语音"由模式文件保证。
+        # 模式文件必须先于 start:C# 只在启动时读它。桥接模式语义(2026-08-17
+        # 用户更正):语音**留在电脑**——keepalive 照常 True(自动拉 Codex+保持
+        # 语音),只是 START(音频接到 App)被拒;"不接管"指不接走音频。
         set_readerpc_service_mode(
             bridge_paths,
             SERVICE_MODE_BRIDGE_ONLY if bridge_only else SERVICE_MODE_FULL,
             snapshot_viewer_hidden=snapshot_viewer_hidden,
         )
-        set_codex_voice_keep_active(bridge_paths, not bridge_only)
+        set_codex_voice_keep_active(bridge_paths, True)
         set_direct_config_enabled(
             bridge_paths,
             True,
@@ -640,7 +641,7 @@ class ReaderPCWindow:
         mode_row.pack(fill="x", pady=(2, 2))
         ttk.Checkbutton(
             mode_row,
-            text="仅桥接模式：不接管语音（上下文/快照/工具照常，语音留在本机）",
+            text="仅桥接模式：语音留在电脑（用电脑音频设备），通话不接到 App",
             variable=self.bridge_only,
             command=self.on_bridge_only_changed,
         ).pack(side="left")
@@ -987,9 +988,9 @@ class ReaderPCWindow:
         self._save_current_preferences()
         self._restart_voice_with_intent(
             "正在切换到仅桥接模式…" if bridge_only else "正在切换到完整模式…",
-            "已切到仅桥接模式：语音未接管，上下文与工具照常。"
+            "已切到仅桥接模式：语音留在电脑本机，通话不接到 App。"
             if bridge_only
-            else "已切回完整模式：电脑语音恢复接管。",
+            else "已切回完整模式：通话可接到 App。",
         )
 
     def on_snapshot_hidden_changed(self) -> None:
@@ -1163,9 +1164,13 @@ class ReaderPCWindow:
                 )
                 voice_color = "#b26a00"
             elif bridge_only:
-                # 桥接模式:直连在线而 Codex 语音未接管是**正常态**,标绿不标黄。
-                voice_label = "桥接模式 · 语音未接管"
-                voice_color = "#167347"
+                # 桥接模式:语音在本机跑(保活照常),通话不接到 App。
+                if codex_voice.active is True:
+                    voice_label = "桥接模式 · Codex 语音本机运行中"
+                    voice_color = "#167347"
+                else:
+                    voice_label = "桥接模式 · 正在确认本机语音"
+                    voice_color = "#b26a00"
             elif codex_voice.active is True:
                 voice_label = "在线 · Codex 语音工作中"
                 voice_color = "#167347"
