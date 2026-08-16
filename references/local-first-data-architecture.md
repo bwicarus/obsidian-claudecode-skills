@@ -500,10 +500,19 @@ Pi 真正不可替代的只剩一个角色：**同步中继**（永远在线、�
       `scripts/lib/kg_mirror.py` 是**唯一读取入口**（强制带新鲜度）。
       ⚠ 副本落在 `state/kg-mirror/` 而**不是** `knowledge_graph/` ——
       后者是权威目录名，同名等于给"副本覆盖掉掌握度"埋雷。
-      ✅ **已部署（2026-08-16）**：`/api/kg/index` 在 Pi 上返回 200。
-      ⚠ Windows 侧首次拉取还差一步——`scripts/sync_kg_from_pi.py` 需要
-      `BW_PI_TOKEN`，那个 token 要在 Pi 的 `/profile/` 页面生成（凭据只能
-      由用户自己建）。设好后跑一次即可，之后副本落在 `state/kg-mirror/`
+      ✅ **端到端打通（2026-08-16）**：首次拉取实测 EGIU 761 节点、LADR 403
+      节点；再跑一次显示「未变 2」，说明修订号短路也在工作。凭据放 `.env` 的
+      `BW_PI_TOKEN`（gitignored），脚本自带 `.env` 回退 —— Windows 上没有
+      任何东西把 `.env` 读进环境变量（Linux 那边是 systemd / profile.d 干的）。
+      ⚠ 打通前撞了一个静默失败，值得记：`kg_export.py` 用 `current_user`
+      鉴权（写法没问题），但 `/api/kg` 不在 `app.py` 的 `PROTECTED_PREFIXES`
+      里，而 Bearer token 正是靠那张前缀表换成 session 的。于是 token 完全
+      有效却恒 401 —— 401 的字面意思是「凭据无效」，把排查方向带去查 token。
+      浏览器里毫无症状（有 cookie），只有纯 token 的客户端会撞上。
+      已加 `tests/test_bearer_bridge_covers_token_routes.py` 抓**这一类**：
+      从 AST 找出所有 `register_X(app, current_user)` 注册的模块，断言其路由
+      前缀都被桥覆盖。这是《silent-failure-lessons》第二条的又一个实例 ——
+      折成布尔（「有没有用户」）之前，原始原因（「token 压根没被解析」）就丢了。
 - [x] ~~谁是主~~ —— **已由产品边界解决（2026-08-15）**：iPad 上 App 管书、
       扩展管网页、Pi 只提供服务端能力与同步。问题从"三套 AI 谁优先"变成
       "能力实现放在哪一层"。⚠ `native-local-runtime.js`（现 10750 行）仍是
@@ -563,8 +572,45 @@ Pi 真正不可替代的只剩一个角色：**同步中继**（永远在线、�
       返回空图。其它数据域接入时照此办理
 - [ ] OCR/YOLO 产物补 GPU 标识与权重哈希（现有 provenance 已够用，模型换版本时才需要）
 - [x] ~~B 类 14 条：App 补齐能力~~ —— **已核实为空**，无需补（见第 19 条注）
-- [ ] **清理 `BW_FETCH_ROUTE_METHODS` 里从未被调用的 11 条**：它们让允许面
-      大于实际使用面，也正是这次误判的来源
+- [x] ~~清理 `BW_FETCH_ROUTE_METHODS` 里从未被调用的 11 条~~ —— **核实后不做
+      （2026-08-16）**。按字面执行会造成回归，原因是这条待办把作用域丢了。
+
+      「从未被调用」在原始语境里指的是 **iPad 普通网页场景**（见上面第 19 条
+      那段：那 1000 余行在 iPad 网页场景下一行都不执行）。压缩成待办后读起来
+      像"全局无人调用"，而那是错的。
+
+      实测（对 Pi 直接请求，2026-08-16）：设 `__bwPwaBridge` 的是
+      `pwa-marker.js`，它注入在 4 个页面上 ——
+
+      | 页面 | 状态码 |
+      |---|---|
+      | `/pdf/html/view` | **200，还活着**（读 vault 里的 .md/.html 书） |
+      | `/pdf/epub/view` | 410（已退役） |
+      | `/pdf/view` | 404 |
+      | `/pdf/fav/open` | 404 |
+
+      只要 `/pdf/html/view` 还是 200，`pwa-adapter.js` / `shell.js` 的书籍分支
+      就**会**执行，它们用到的路由不能从允许清单里删 —— 删掉的后果是
+      `BW_FETCH_OPERATION` 拦截，表现为功能静默失效。
+
+      按调用点门禁逐条核过 82 条：**只有 4 条可证明为死**（门禁要求
+      `hostMode === 'epub' || 'favorite'`，而这两类页面已 410/404）：
+      `epub-convo`、`epub-convo/clear`、`epub-convo/append`、`epub-highlights`。
+      收益（少 4 条允许面）远小于风险（判据本身刚被证明容易错），故不动。
+
+      ⚠ 顺带发现两件事，各自独立：
+      · manifest 仍把内容脚本注入到 3 个 404/410 的页面 —— 无害但会让下一个人
+        再次误判"这些书籍分支是活的"。
+      · `RC.ctxSync.setBase` **没有任何调用点**，于是 `report({kind:'web'})`
+        在第 545 行 `return false` 静默退出。网页上下文实际走的是
+        `ctxlink.js` 的快照通道（见 `web-context-snapshot-handoff.md`），
+        所以这是设计更替后的死分支，不是活 bug —— 但它正是
+        《silent-failure-lessons》第一条那种"提前退出不出声"的形状。
+
+      **方法论**（值得单独记）：判断一条路由死没死，光看"源码里有没有"不够
+      （第一次错），光看"调用点在哪个文件"也不够（这次差点错）——
+      必须看**调用点的门禁在目标场景下成不成立**，而门禁常常取决于
+      某个页面还返不返回 200。所以这类判断要以实测状态码收尾。
 - [x] ~~A 类改指向后 Pi 侧移入 `_retired/`~~ —— **随 A 类改指向一起作废**
       （见第 19/20 条：那批已 revert，扩展不再读 App 的书籍数据）
 - [x] ~~真机验证 loopback~~ —— **随落点机制撤回而作废**（第 20 条）
