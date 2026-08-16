@@ -181,6 +181,7 @@ def load_preferences(path: Path) -> dict[str, object]:
     defaults: dict[str, object] = {
         "keepPcPreprocessingOnline": True,
         "serviceMode": SERVICE_MODE_FULL,
+        "snapshotViewerHidden": False,
     }
     try:
         value = json.loads(path.read_text("utf-8"))
@@ -192,9 +193,10 @@ def load_preferences(path: Path) -> dict[str, object]:
         or not isinstance(value.get("keepPcPreprocessingOnline"), bool)
     ):
         return defaults
-    # serviceMode 缺省容忍(旧偏好文件没有它)→ full;非法值也回 full,
-    # 不 bump contract:旧版启动器只读自己认识的键,天然兼容。
+    # serviceMode/snapshotViewerHidden 缺省容忍(旧偏好文件没有)→ 默认;非法值
+    # 也回默认,不 bump contract:旧版启动器只读自己认识的键,天然兼容。
     mode = value.get("serviceMode")
+    hidden = value.get("snapshotViewerHidden")
     return {
         "keepPcPreprocessingOnline": value["keepPcPreprocessingOnline"],
         "serviceMode": (
@@ -202,6 +204,7 @@ def load_preferences(path: Path) -> dict[str, object]:
             if mode in (SERVICE_MODE_FULL, SERVICE_MODE_BRIDGE_ONLY)
             else SERVICE_MODE_FULL
         ),
+        "snapshotViewerHidden": hidden is True,
     }
 
 
@@ -210,6 +213,7 @@ def save_preferences(
     *,
     keep_pc_online: bool,
     service_mode: str = SERVICE_MODE_FULL,
+    snapshot_viewer_hidden: bool = False,
 ) -> None:
     if service_mode not in (SERVICE_MODE_FULL, SERVICE_MODE_BRIDGE_ONLY):
         raise ReaderPCServiceError(f"未知服务模式 {service_mode}")
@@ -219,18 +223,29 @@ def save_preferences(
             "contract": PREFERENCES_CONTRACT,
             "keepPcPreprocessingOnline": bool(keep_pc_online),
             "serviceMode": service_mode,
+            "snapshotViewerHidden": bool(snapshot_viewer_hidden),
         },
     )
 
 
-def set_readerpc_service_mode(bridge_paths: BridgePaths, mode: str) -> None:
-    """写 C# 启动时读取的模式意图文件。改模式必须随后重启直连服务才生效。"""
+def set_readerpc_service_mode(
+    bridge_paths: BridgePaths,
+    mode: str,
+    *,
+    snapshot_viewer_hidden: bool = False,
+) -> None:
+    """写 C# 启动时读取的模式意图文件。改任一项必须随后重启直连服务才生效。
+    snapshotViewer 键=静默快照(hidden 时 C# 不开快照查看器窗口,服务照跑)。"""
 
     if mode not in (SERVICE_MODE_FULL, SERVICE_MODE_BRIDGE_ONLY):
         raise ReaderPCServiceError(f"未知服务模式 {mode}")
     _atomic_json(
         bridge_paths.runtime_status.parent / "readerpc-service-mode.json",
-        {"contract": SERVICE_MODE_CONTRACT, "mode": mode},
+        {
+            "contract": SERVICE_MODE_CONTRACT,
+            "mode": mode,
+            "snapshotViewer": "hidden" if snapshot_viewer_hidden else "visible",
+        },
     )
 
 
@@ -272,6 +287,7 @@ def enable_readerpc_voice(
     process_runner: WindowsProcessRunner,
     *,
     bridge_only: bool = False,
+    snapshot_viewer_hidden: bool = False,
 ) -> int:
     """Start the Direct generation owned by this ReaderPC process."""
 
@@ -296,6 +312,7 @@ def enable_readerpc_voice(
         set_readerpc_service_mode(
             bridge_paths,
             SERVICE_MODE_BRIDGE_ONLY if bridge_only else SERVICE_MODE_FULL,
+            snapshot_viewer_hidden=snapshot_viewer_hidden,
         )
         set_codex_voice_keep_active(bridge_paths, not bridge_only)
         set_direct_config_enabled(
@@ -457,6 +474,62 @@ class ReaderPCWindow:
     pc_fail_streak = 0
     voice_fail_streak = 0
 
+    def _snapshot_hidden_enabled(self) -> bool:
+        var = getattr(self, "snapshot_hidden", None)
+        try:
+            return bool(var.get()) if var is not None else False
+        except Exception:
+            return False
+
+    def _current_intent_kwargs(self) -> dict:
+        """两个模式开关共用的启动意图(enable_readerpc_voice 的 kwargs)。"""
+        return {
+            "bridge_only": self._bridge_only_enabled(),
+            "snapshot_viewer_hidden": self._snapshot_hidden_enabled(),
+        }
+
+    def _save_current_preferences(self) -> None:
+        save_preferences(
+            self.readerpc_paths.preferences_file,
+            keep_pc_online=bool(self.keep_pc_online.get()),
+            service_mode=(
+                SERVICE_MODE_BRIDGE_ONLY
+                if self._bridge_only_enabled()
+                else SERVICE_MODE_FULL
+            ),
+            snapshot_viewer_hidden=self._snapshot_hidden_enabled(),
+        )
+
+    def _restart_voice_with_intent(self, busy: str, done: str) -> None:
+        """模式类开关共用:停旧代际 → 按当前意图重启(C# 只在启动时读意图文件)。"""
+        if self.busy or self.closing:
+            return
+        intent = self._current_intent_kwargs()
+
+        def switch() -> int:
+            try:
+                stop_readerpc_voice(
+                    self.bridge_paths,
+                    self.process_runner,
+                    disable_configuration=False,
+                )
+            except Exception:
+                pass   # 旧代际可能本就不在;重启路径自身会再校验
+            self.voice_start_in_progress = True
+            try:
+                pid = enable_readerpc_voice(
+                    self.bridge_paths,
+                    self.process_runner,
+                    **intent,
+                )
+                self.voice_snapshot_offline_marked = False
+                return pid
+            finally:
+                self.voice_start_in_progress = False
+
+        self.last_voice_start_attempt = time.monotonic()
+        self._run_task(busy, switch, done)
+
     def __init__(
         self,
         root: tk.Tk,
@@ -501,6 +574,9 @@ class ReaderPCWindow:
         )
         self.bridge_only = tk.BooleanVar(
             value=preferences["serviceMode"] == SERVICE_MODE_BRIDGE_ONLY
+        )
+        self.snapshot_hidden = tk.BooleanVar(
+            value=bool(preferences["snapshotViewerHidden"])
         )
 
         root.title(PRODUCT_NAME)
@@ -567,6 +643,14 @@ class ReaderPCWindow:
             text="仅桥接模式：不接管语音（上下文/快照/工具照常，语音留在本机）",
             variable=self.bridge_only,
             command=self.on_bridge_only_changed,
+        ).pack(side="left")
+        viewer_row = ttk.Frame(outer)
+        viewer_row.pack(fill="x", pady=(2, 2))
+        ttk.Checkbutton(
+            viewer_row,
+            text="静默快照：后台运行快照服务，不显示查看器窗口",
+            variable=self.snapshot_hidden,
+            command=self.on_snapshot_hidden_changed,
         ).pack(side="left")
 
         ttk.Separator(outer).pack(fill="x", pady=(12, 10))
@@ -828,13 +912,14 @@ class ReaderPCWindow:
         self.voice_start_in_progress = True
 
         bridge_only = self._bridge_only_enabled()
+        intent = self._current_intent_kwargs()
 
         def start() -> int:
             try:
                 pid = enable_readerpc_voice(
                     self.bridge_paths,
                     self.process_runner,
-                    bridge_only=bridge_only,
+                    **intent,
                 )
                 self.voice_snapshot_offline_marked = False
                 return pid
@@ -878,15 +963,7 @@ class ReaderPCWindow:
 
     def _set_pc_running(self, running: bool) -> None:
         self.keep_pc_online.set(running)
-        save_preferences(
-            self.readerpc_paths.preferences_file,
-            keep_pc_online=running,
-            service_mode=(
-                SERVICE_MODE_BRIDGE_ONLY
-                if self._bridge_only_enabled()
-                else SERVICE_MODE_FULL
-            ),
-        )
+        self._save_current_preferences()
         if running:
             self.last_pc_start_attempt = time.monotonic()
             self._run_task(
@@ -907,44 +984,22 @@ class ReaderPCWindow:
     def on_bridge_only_changed(self) -> None:
         """切模式 = 存偏好 + 停当前直连代际 + 按新模式重启(C# 只在启动时读模式文件)。"""
         bridge_only = bool(self.bridge_only.get())
-        save_preferences(
-            self.readerpc_paths.preferences_file,
-            keep_pc_online=bool(self.keep_pc_online.get()),
-            service_mode=(
-                SERVICE_MODE_BRIDGE_ONLY if bridge_only else SERVICE_MODE_FULL
-            ),
-        )
-        if self.busy or self.closing:
-            return
-
-        def switch() -> int:
-            try:
-                stop_readerpc_voice(
-                    self.bridge_paths,
-                    self.process_runner,
-                    disable_configuration=False,
-                )
-            except Exception:
-                pass   # 旧代际可能本就不在;重启路径自身会再校验
-            self.voice_start_in_progress = True
-            try:
-                pid = enable_readerpc_voice(
-                    self.bridge_paths,
-                    self.process_runner,
-                    bridge_only=bridge_only,
-                )
-                self.voice_snapshot_offline_marked = False
-                return pid
-            finally:
-                self.voice_start_in_progress = False
-
-        self.last_voice_start_attempt = time.monotonic()
-        self._run_task(
+        self._save_current_preferences()
+        self._restart_voice_with_intent(
             "正在切换到仅桥接模式…" if bridge_only else "正在切换到完整模式…",
-            switch,
             "已切到仅桥接模式：语音未接管，上下文与工具照常。"
             if bridge_only
             else "已切回完整模式：电脑语音恢复接管。",
+        )
+
+    def on_snapshot_hidden_changed(self) -> None:
+        hidden = self._snapshot_hidden_enabled()
+        self._save_current_preferences()
+        self._restart_voice_with_intent(
+            "正在应用静默快照设置…",
+            "静默快照已开启：后台服务照常，不再显示快照查看器。"
+            if hidden
+            else "静默快照已关闭：快照查看器恢复显示。",
         )
 
     def _ensure_pc_online(self) -> None:

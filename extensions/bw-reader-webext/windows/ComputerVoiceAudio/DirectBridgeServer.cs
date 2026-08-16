@@ -80,19 +80,56 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         }
     }
 
+    internal static bool ReadSnapshotViewerHidden(string runtimeDirectory)
+    {
+        try
+        {
+            string path = Path.Combine(
+                runtimeDirectory,
+                "readerpc-service-mode.json");
+            if (!File.Exists(path))
+            {
+                return false;
+            }
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllText(path));
+            JsonElement root = document.RootElement;
+            return root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty(
+                    "contract",
+                    out JsonElement contract)
+                && contract.ValueKind == JsonValueKind.String
+                && contract.GetString() == ServiceModeContract
+                && root.TryGetProperty(
+                    "snapshotViewer",
+                    out JsonElement viewer)
+                && viewer.ValueKind == JsonValueKind.String
+                && viewer.GetString() == "hidden";
+        }
+        catch (Exception)
+        {
+            return false;   // 读不出 = 显示查看器(现状行为)
+        }
+    }
+
     internal static void WriteServiceModeIntent(
         string runtimeDirectory,
         string mode)
     {
         // 原子写(tmp+move):模式意图文件同时被 ReaderPC 收敛循环轮询,半写状态
-        // 会被它当无效丢弃,但没必要制造这种窗口。
+        // 会被它当无效丢弃,但没必要制造这种窗口。App 遥控只改 mode:静默快照
+        // 键(snapshotViewer)由 ReaderPC 界面所有,这里读旧值保留,不冲掉。
         string path = Path.Combine(
             runtimeDirectory,
             "readerpc-service-mode.json");
+        string viewer = ReadSnapshotViewerHidden(runtimeDirectory)
+            ? "hidden"
+            : "visible";
         string payload = JsonSerializer.Serialize(new
         {
             contract = ServiceModeContract,
             mode,
+            snapshotViewer = viewer,
         });
         string temporary = path + ".tmp-" + Environment.ProcessId;
         File.WriteAllText(
@@ -160,13 +197,17 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         _serviceLease = new DirectServiceLease(
             configStore.InstallationRoot,
             configStore.Path);
+        // 静默快照(2026-08-17 用户需求):意图文件带 snapshotViewer:"hidden" 时
+        // 不管理查看器窗口——快照服务本体照跑,只是不开展示窗。唯一的打开入口
+        // SynchronizeServiceIntent 守 _manageViewerProcess,无旁路。
         _snapshotViewer = new DirectSnapshotViewer(
             Path.Combine(
                 configStore.InstallationRoot,
                 "runtime",
                 FileDirectSnapshotContextAdapter.SnapshotFileName),
             config.ListenPort,
-            manageSnapshotViewerProcess);
+            manageSnapshotViewerProcess
+                && !ReadSnapshotViewerHidden(runtimeDirectory));
         _runtimeDirectory = runtimeDirectory;
         _bridgeOnlyMode = ReadBridgeOnlyMode(runtimeDirectory);
         // 桥接模式:keepActivePath 传 null = 整条 keepalive 链不装载(不轮询、不拉

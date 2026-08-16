@@ -71,7 +71,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             path = Path(raw) / "missing.json"
             self.assertEqual(
                 load_preferences(path),
-                {"keepPcPreprocessingOnline": True, "serviceMode": "full"},
+                {"keepPcPreprocessingOnline": True, "serviceMode": "full", "snapshotViewerHidden": False},
             )
 
     def test_preferences_round_trip_explicit_opt_out(self) -> None:
@@ -80,7 +80,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             save_preferences(path, keep_pc_online=False)
             self.assertEqual(
                 load_preferences(path),
-                {"keepPcPreprocessingOnline": False, "serviceMode": "full"},
+                {"keepPcPreprocessingOnline": False, "serviceMode": "full", "snapshotViewerHidden": False},
             )
 
     def test_invalid_preferences_fail_to_safe_default(self) -> None:
@@ -153,7 +153,8 @@ class ReaderPCLauncherTests(unittest.TestCase):
             mode_file = runtime.parent / "readerpc-service-mode.json"
             self.assertEqual(
                 json.loads(mode_file.read_text("utf-8")),
-                {"contract": "readerpc-service-mode/1", "mode": "bridge-only"},
+                {"contract": "readerpc-service-mode/1", "mode": "bridge-only",
+                 "snapshotViewer": "visible"},
             )
             keepalive = json.loads(
                 (runtime.parent / "codex-voice-keepalive.json")
@@ -693,6 +694,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             window.bridge_paths,
             window.process_runner,
             bridge_only=False,
+            snapshot_viewer_hidden=False,
         )
         self.assertFalse(window.voice_snapshot_offline_marked)
 
@@ -708,6 +710,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             window.bridge_paths,
             window.process_runner,
             bridge_only=False,
+            snapshot_viewer_hidden=False,
         )
 
     def test_manual_retry_only_starts_when_server_service_is_offline(self) -> None:
