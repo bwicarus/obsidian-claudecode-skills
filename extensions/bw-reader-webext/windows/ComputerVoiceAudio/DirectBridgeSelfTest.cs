@@ -9159,8 +9159,12 @@ internal static class DirectBridgeSelfTest
             && readingWindow["afterText"]?.GetValue<string>() == "后文"
             && readingWindow["controlCorrelation"]?.GetValue<string>()
                 == controlCorrelation
+            // 网页正文契约(2026-08-16 用户拍板):跟阅读器「当前页」同一个模型
+            // —— text = 前文 + ⟦VIEWPORT⟧视口⟦/VIEWPORT⟧ + 后文,而不是把页面
+            // 剪成只剩视口那条缝。前后文都缺席时退回纯视口(本夹具两者都给)。
             && persistedSnapshot["currentPage"]?["text"]
-                ?.GetValue<string>() == visibleText,
+                ?.GetValue<string>()
+                == "前文\n⟦VIEWPORT⟧\n" + visibleText + "\n⟦/VIEWPORT⟧\n后文",
             "direct-reader-document-and-viewport-are-strict-and-atomic",
             checks);
         Require(

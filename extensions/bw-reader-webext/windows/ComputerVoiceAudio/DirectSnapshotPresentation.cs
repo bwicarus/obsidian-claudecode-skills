@@ -1599,10 +1599,6 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   <img id="pageImage" alt="当前页图（加载失败时请使用上方链接）"
                        referrerpolicy="no-referrer">
                 </section>
-                <section class="wide">
-                  <h2>最近阅读器事件</h2>
-                  <pre id="latest" class="muted">暂无事件。</pre>
-                </section>
               </main>
               <script>
                 "use strict";
@@ -1622,8 +1618,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 const imageNote = byId("imageNote");
                 const imageLink = byId("imageLink");
                 const pageImage = byId("pageImage");
-                const latest = byId("latest");
-
+                
                 const valueText = value =>
                   value === null || value === undefined
                     ? "—"
@@ -1757,8 +1752,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   embeds.replaceChildren();
                   viewport.textContent = "当前没有 EPUB 视口。";
                   drawing.textContent = "当前页没有视觉引用。";
-                  latest.textContent = "暂无事件。";
-                  resetImage();
+                                    resetImage();
                 }
 
                 function addEmbed(prefix, entry) {
@@ -1881,9 +1875,6 @@ internal sealed class DirectSnapshotViewer : IDisposable
                     kg && typeof kg === "object"
                       ? JSON.stringify(kg, null, 2)
                       : "本页没有关联知识点。";
-                  latest.textContent = snapshot.latestEvent
-                    ? JSON.stringify(snapshot.latestEvent, null, 2)
-                    : "暂无事件。";
 
                   resetImage();
                   const image = page?.visual?.page_image;

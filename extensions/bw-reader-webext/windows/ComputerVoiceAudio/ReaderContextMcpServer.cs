@@ -519,6 +519,15 @@ internal sealed class ReaderContextMcpServer
                     + "text inside them without the marks, and read a "
                     + "backslash before ⟦ or ⟧ as a literal bracket printed "
                     + "on the page rather than a mark. "
+                    // 网页正文的视口标记(2026-08-16):跟阅读器整页正文对齐,
+                    // 网页也给前后文,视口用同族标记框出。
+                    + "On a web page, currentPage.text carries surrounding "
+                    + "content too: ⟦VIEWPORT⟧…"
+                    + "⟦/VIEWPORT⟧ wraps what is actually on "
+                    + "screen, and text before/after those marks is the "
+                    + "page content just above/below the visible area. "
+                    + "When the user says here or this part, prefer the "
+                    + "marked span. "
                     // 计数与正文里出现的标记数不一致是常态,不说清楚会被读成矛盾。
                     + "embeds.highlights counts only those that could be "
                     + "placed, and embeds.unanchored lists ones that exist on "

@@ -421,7 +421,28 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 stable["sourceInstanceId"] = viewport.SourceInstanceId;
                 stable["documentKey"] = viewport.DocumentKey;
                 stable["readingWindow"] = viewportJson;
-                stable["text"] = viewport.VisibleText;
+                // 网页正文 = 前文 + ⟦VIEWPORT⟧视口⟦/VIEWPORT⟧ + 后文。
+                // 用户拍板(2026-08-16):跟阅读器「当前页」同一个模型——只给视口
+                // 等于把页面剪成一条缝。前后文本来就在 readingWindow 里一路传到
+                // 这儿(扩展端各截 2400 字),只是从没被组装进 text。标记沿用 ⟦⟧
+                // 家族;真虚拟页编号不做——网页在配对协议里 page 恒为 0,
+                // 编号会震到 (file,page) 配对。
+                string beforePart = viewport.BeforeText ?? "";
+                string afterPart = viewport.AfterText ?? "";
+                bool hasAround =
+                    !string.IsNullOrWhiteSpace(beforePart)
+                    || !string.IsNullOrWhiteSpace(afterPart);
+                stable["text"] = hasAround
+                    ? (string.IsNullOrWhiteSpace(beforePart)
+                          ? ""
+                          : beforePart + "\n")
+                      + "⟦VIEWPORT⟧\n"
+                      + viewport.VisibleText
+                      + "\n⟦/VIEWPORT⟧"
+                      + (string.IsNullOrWhiteSpace(afterPart)
+                          ? ""
+                          : "\n" + afterPart)
+                    : viewport.VisibleText;
                 stable["textAvailable"] =
                     !string.IsNullOrWhiteSpace(viewport.VisibleText);
                 _revision = checked(_revision + 1);
