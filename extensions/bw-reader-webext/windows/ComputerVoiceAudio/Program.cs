@@ -338,7 +338,18 @@ internal static class Program
         }
         finally
         {
-            directServeMutex.ReleaseMutex();
+            try
+            {
+                directServeMutex.ReleaseMutex();
+            }
+            catch (ApplicationException)
+            {
+                // Mutex 有线程亲和性:WaitOne 在启动线程,await 之后 finally 跑在
+                // 线程池线程 → ReleaseMutex 必抛——这把**每一次正常退出都变成崩溃**
+                // (自测 SELF_TEST_FAILED 与生产异常退出同源,2026-08-17 栈实锤)。
+                // 吞掉是安全的:进程退出时 OS 释放互斥,下一实例的
+                // AbandonedMutexException 分支(上方)已按"获得所有权"处理。
+            }
         }
     }
 

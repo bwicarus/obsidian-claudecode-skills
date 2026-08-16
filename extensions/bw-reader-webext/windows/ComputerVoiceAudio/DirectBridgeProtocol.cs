@@ -472,27 +472,12 @@ internal sealed class DirectCodexVoiceControl :
                     launcher,
                     static (delay, token) => Task.Delay(delay, token),
                     cancellationToken),
-            recoverStartFailureAsync: async cancellationToken =>
-            {
-                DirectAppTargetProfile profile = DirectAppTargets.Require(
-                    DirectAppTargets.CodexDesktop);
-                CodexAppTarget current = RequireCodexTarget();
-                _ = await launcher.RestartAsync(
-                    profile.AppKind,
-                    profile.AppUserModelId,
-                    new DirectAppTarget(
-                        current.RootProcessId,
-                        current.RootProcessStartFileTimeUtc,
-                        profile.AppKind,
-                        profile.AppUserModelId),
-                    TimeSpan.FromSeconds(30),
-                    cancellationToken).ConfigureAwait(false);
-                // RestartAsync waits for the fresh generation to be ready. Let
-                // its voice UI settle once before the one permitted retry F24.
-                await Task.Delay(
-                    RestartReadySettleDelay,
-                    cancellationToken).ConfigureAwait(false);
-            },
+            // recoverStartFailureAsync 有意不接线(2026-08-17 用户实测拍板):
+            // "恢复=重启 Codex App"会反复杀掉用户正在使用的会话(今晚实录:20 分钟
+            // 内多次),且重启窗口里新旧两代并存又制造 APP_AMBIGUOUS——自己造病
+            // 自己治。语音开不成就如实报失败,交给失败预算(每代 2 次、20s 间隔)
+            // 温和重试;绝不动用户开着的 App。
+            recoverStartFailureAsync: null,
             keepActiveChanged: keepActiveChanged,
             automaticRecoveryFailed: automaticRecoveryFailed);
     }
