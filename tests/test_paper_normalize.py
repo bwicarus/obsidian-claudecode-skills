@@ -69,25 +69,17 @@ class NormalizeBlocksTest(unittest.TestCase):
         self.assertEqual(out[0]["id"], "b0")
 
 
-class EnsureCheckButtonTest(unittest.TestCase):
-    def test_added_when_blank_and_no_button(self):
-        out = paper.ensure_check_button([{"kind": "blank", "label": "1.", "id": "b0"}])
-        self.assertEqual(out[-1]["kind"], "button")
-        self.assertEqual(out[-1]["event"], "check")
+class NoAutoButtonTest(unittest.TestCase):
+    def test_blanks_do_not_grow_a_grading_button(self):
+        # 2026-08-17 用户拍板:批改对话式(视觉看纸),归一化不再自动补按钮
+        out = paper.normalize_blocks([{"kind": "blank", "label": "1."}])
+        self.assertEqual([b["kind"] for b in out], ["blank"])
 
-    def test_idempotent(self):
-        out = paper.ensure_check_button([{"kind": "blank", "label": "1.", "id": "b0"}])
-        n = len(out)
-        self.assertEqual(len(paper.ensure_check_button(out)), n)
-
-    def test_not_added_without_blank(self):
-        out = paper.ensure_check_button([{"kind": "text", "text": "只读说明", "id": "b0"}])
-        self.assertEqual(len(out), 1)
-
-    def test_existing_button_respected(self):
-        blocks = [{"kind": "blank", "label": "1.", "id": "b0"},
-                  {"kind": "button", "label": "念给我听", "event": "say:好", "id": "b1"}]
-        self.assertEqual(len(paper.ensure_check_button(blocks)), 2)
+    def test_explicit_button_preserved(self):
+        out = paper.normalize_blocks(
+            [{"kind": "blank", "label": "1."},
+             {"kind": "button", "label": "显示答案", "event": "reveal:b0"}])
+        self.assertEqual([b["kind"] for b in out], ["blank", "button"])
 
 
 if __name__ == "__main__":

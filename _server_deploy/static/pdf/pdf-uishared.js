@@ -920,8 +920,8 @@ window._favOpenPicker = function () {
       if (!b.id) b.id = 'b' + out.length;
       out.push(b);
     });
-    if (out.some(function (b) { return b.kind === 'blank'; }) && !out.some(function (b) { return b.kind === 'button'; }))
-      out.push({ kind: 'button', label: '让 AI 检查', event: 'check', id: 'b' + out.length });
+    // 不自动补「让 AI 检查」按钮(2026-08-17 用户拍板):批改=让语音 AI 直接看纸,
+    // 不需要页内按钮与截图上传管道。按钮仍合法,模型按需显式放。
     return out.slice(0, 48);
   }
   function _lpLoad() { try { var d = JSON.parse(localStorage.getItem('lp:' + UP_FILE) || 'null'); return (d && d.v === 1 && Array.isArray(d.papers)) ? d.papers : []; } catch (e) { return []; } }

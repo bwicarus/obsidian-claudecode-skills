@@ -256,9 +256,7 @@ def normalize_blocks(blocks) -> list:
     return out
 
 
-def ensure_check_button(blocks: list) -> list:
-    """有作答区(blank)却没有任何按钮 → 自动补「让 AI 检查」。幂等;与 assistant
-    page_show 收口的兜底同一规则,直连一发式入口没有收口步骤,所以在这里保证。"""
-    if any(b.get("kind") == "blank" for b in blocks) and not any(b.get("kind") == "button" for b in blocks):
-        blocks.append({"kind": "button", "label": "让 AI 检查", "event": "check", "id": "b%d" % len(blocks)})
-    return blocks
+# (2026-08-17 用户拍板:语音路径不再自动补「让 AI 检查」按钮——批改改为对话式,
+#  模型用 reader_visual_image 直接看纸批改,不养第二条截图上传管道。按钮仍是合法
+#  元素,模型/用户明确要交互(reveal/hide 等)时自己放。CLI 旧路径的兜底在
+#  assistant.page_show 内,不受影响。)

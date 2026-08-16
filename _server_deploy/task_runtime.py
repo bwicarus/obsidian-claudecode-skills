@@ -494,7 +494,6 @@ def _free_tick(run, event):
         raw = (run.get("params") or {}).get("blocks") or []
         blocks = PA.normalize_blocks(raw)
         dropped = (len(raw) if isinstance(raw, list) else 0) - len(blocks)
-        PA.ensure_check_button(blocks)
         _set_blocks(run, blocks, kind="free")
         run["step"] = 1
         run["status"] = "waiting"
