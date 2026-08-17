@@ -16043,6 +16043,9 @@ def _validate_snippets_body(body):
     }, None
 
 
+# records 文件名安全化：Windows 与 Linux 都不接受的字符一律折成 __。
+#   与 scripts/anki_from_note.safe_record_stem 同一套规则。
+_RECORD_STEM_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 _ANKI_MD_LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\((https?://[^)]+)\)")
 # ⚠ 图片必须先于链接处理，而且链接正则必须用 (?<!!) 把图片排除掉：
 #   markdown 图片是 ![alt](url)，跟链接只差前面一个 !。原来的链接正则不排除它，
@@ -16387,6 +16390,53 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
                         pass
                 out["anki_added"] = added
                 out["anki_note_ids"] = note_ids   # 供撤销:deleteNotes
+                # ── anki/records:让阅读器建的卡也进入 KG / 掌握度分析(2026-08-18)──
+                #   笔记侧(scripts/anki_from_note.py)每建一批卡都写一份 records，
+                #   而 KG 关联、复习优先级、仪表盘**只认 records** —— 阅读器这条路
+                #   一条都不产生，所以"按掌握度低的知识找回对应知识点"对书里建的卡
+                #   从来就不成立。
+                #   ⚠ 这里只**开始记录**，不动任何消费方：records 的索引键是
+                #     Path(source_note).stem，指向 vault 里的笔记，而书不是笔记；
+                #     要让消费侧认它还得单独一轮（会牵动每日流程与仪表盘，不该顺手改）。
+                #     但数据是采集时才有的 —— 晚一天开始就少一天，先记下来。
+                try:
+                    _rec_dir = CLAUDE_DIR / "anki" / "records"
+                    _rec_dir.mkdir(parents=True, exist_ok=True)
+                    _raw_stem = (_sf or "reader") + (("#p%d" % _sp) if _sp else "")
+                    _stem = _RECORD_STEM_RE.sub("__", _raw_stem)[:120]
+                    _rec_path = _rec_dir / ("reader-" + _stem + ".json")
+                    _old_rec = {}
+                    if _rec_path.exists():
+                        try:
+                            _old_rec = json.loads(_rec_path.read_text(encoding="utf-8"))
+                        except Exception:
+                            _old_rec = {}
+                    _cards_rec = list(_old_rec.get("cards") or [])
+                    for _ci, _cc in enumerate(cards):
+                        _cards_rec.append({
+                            "local_id": (_aid or "reader") + "-" + str(_ci),
+                            "type": (_cc.get("type") or "basic").lower(),
+                            "deck": "QA",
+                            "front": _cc.get("front", ""),
+                            "back": _cc.get("back", ""),
+                            "text": _cc.get("text", ""),
+                            "reason": "阅读器选段制卡",
+                            "tags": ["pdf-snippets"],
+                            "anki_note_id": note_ids[_ci] if _ci < len(note_ids) else None,
+                            "status": "added",
+                        })
+                    _rec_path.write_text(json.dumps({
+                        "source_note": _sf or "",
+                        "source_link": _src_ref,
+                        "source_url": "",
+                        "source_kind": "book",      # 供消费方区分:不是 vault 笔记
+                        "generated_at": int(time.time()),
+                        "generator": "pdf_reader._run_snippets_to",
+                        "status": "ok",
+                        "cards": _cards_rec,
+                    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                except Exception:
+                    pass   # 记录失败绝不该影响制卡本身
                 # ⚠ AnkiConnect × Anki 25 的坑(2026-07-14 定位):addNote 的 deckName **不生效**——
                 #   插件用 `note.model()['did'] = deck_id` 指定牌组,而它调的 startEditing() → requireReset()
                 #   → mw.reset() 把 notetype 缓存清了,addNote 读回来的 did 已退回 notetype 自带的默认牌组
