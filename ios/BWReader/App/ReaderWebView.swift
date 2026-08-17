@@ -321,6 +321,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeRealtimeBridge: ReaderNativeRealtimeBridge?
     private var nativeBookOCRBridge: NativeBookOCRBridge?
     private var nativePDFMutationBridge: ReaderNativePDFMutationBridge?
+    var nativeAppPrefsBridge: ReaderNativeAppPrefsBridge?
     private let nativePDFMutationActor = ReaderNativePDFMutationActor()
     private var nativeBookOCRUpdateCancellable: AnyCancellable?
     private var bookUserStateWebAdapter: ReaderBookUserStateWebAdapter?
@@ -501,6 +502,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 nativePDFMutationBridge,
                 contentWorld: .page,
                 name: ReaderNativePDFMutationBridge.messageName
+            )
+            // 网页设置面板读写原生偏好（白名单）——用户要求把原生 sheet 里那 12 个
+            // Section 并进我们自己的设置 tab，这是它需要的唯一新通道。
+            let nativeAppPrefsBridge = ReaderNativeAppPrefsBridge()
+            self.nativeAppPrefsBridge = nativeAppPrefsBridge
+            contentController.addScriptMessageHandler(
+                nativeAppPrefsBridge,
+                contentWorld: .page,
+                name: ReaderNativeAppPrefsBridge.messageName
             )
             nativeBookOCRUpdateCancellable = NativeBookOCRManager.shared
                 .$lastUpdate

@@ -322,8 +322,15 @@ if (window.__bwPwaProviderOnly) return;
     st.textContent = `
 /* 右侧统一抽屉:照搬 PDF #grammar-panel 磨砂玻璃滑出。默认挤压 → EPUB 正文留左侧可读 */
 #ep-side{position:fixed;top:0;right:0;bottom:0;width:var(--ep-side-width,min(38vw,560px));display:flex;flex-direction:column;z-index:120;
-  background:linear-gradient(135deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03)),rgba(14,20,40,0.62);
-  backdrop-filter:blur(var(--gp-blur,20px)) saturate(150%) brightness(1.05);-webkit-backdrop-filter:blur(var(--gp-blur,20px)) saturate(150%) brightness(1.05);
+  background:linear-gradient(135deg,rgba(255,255,255,0.07),rgba(255,255,255,0.03)),rgba(14,20,40,0.94);
+  /* ⚠ 这里**不用** backdrop-filter。同一文件下方 open() 里那条注释已经记过它的代价：
+     iOS 上「transform + backdrop-filter」会让整个抽屉的后代**命中盒相对合成层偏移** ——
+     点输入框却触发上方按钮、顶栏按钮点不到。当时的办法是滑入结束后撤掉 transform，
+     但 backdrop-filter 自己就会造合成层，撤 transform 只是把问题缩小，没有消除。
+     2026-08-18 同一个根在卡片那边连坑三轮（球被裁、浮层错位），去掉毛玻璃即消失。
+     这里同样处理：底色加实到 0.94 顶替，视觉损失有限，换回确定可点。
+     想找回毛玻璃就把下面这行注释放开，但请连带复测顶栏按钮的命中。 */
+  /* backdrop-filter:blur(var(--gp-blur,20px)) saturate(150%) brightness(1.05);-webkit-backdrop-filter:blur(var(--gp-blur,20px)) saturate(150%) brightness(1.05); */
   border-left:1px solid rgba(255,255,255,0.20);
   box-shadow:-14px 0 48px rgba(0,0,0,0.45),inset 1px 0 0 rgba(255,255,255,0.16);
   transform:translateX(102%);transition:transform 0.4s cubic-bezier(.4,0,.2,1);touch-action:pan-y;padding-top:env(safe-area-inset-top)}

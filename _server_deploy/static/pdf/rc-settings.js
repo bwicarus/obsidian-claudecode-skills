@@ -930,6 +930,40 @@
 
     // 网页翻译 tab（仅 host:'web' 显示，gateSections 门控 data-sec="web-tab"）。收纳纯网页翻译设置，
     // 消费端=web-immersive；语言=全局 bw-set-target-langs（settings-sync 桥全站一致）；显示方式=rcWebTrStyle。
+    // ════ pane: 本机(App 原生偏好)════
+    //   用户要求把 App 那两个原生悬浮按钮里的东西并进我们自己的设置面板 ——
+    //   那张 sheet 平铺了 12 个 Section（文字识别/词典/书库/Key/Pi 同步/触控/阅读位置…），
+    //   没有层级也无法在扩展、Pi 上访问。这里先接**纯偏好**那几项（走 bwNativeAppPrefs
+    //   白名单通道）；凭据、Vault 路径、书库这类留在原生 sheet 由系统 UI 管，
+    //   不进白名单也就不会经由网页泄漏。
+    //   这一 tab 只在 App 内出现（通道不存在时整块隐藏），扩展/浏览器看不到。
+    var paneNative =
+      '<div class="set-pane" data-pane="native" style="display:none">' +
+        '<div style="font-size:12px;color:#8fa5c8;margin-bottom:12px">这些开关属于 iPad 上的 App 本体，改完即时生效。凭据、Vault 目录、书库仍在 App 的原生设置里（系统 UI 才能安全地管它们）。</div>' +
+        '<label style="' + LBL + '">📝 文字识别（设备端）</label>' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;cursor:pointer;margin-bottom:8px">' +
+          '<input type="checkbox" id="rcset-nat-ocr" style="width:16px;height:16px"> 启用设备端文字识别' +
+        '</label>' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;cursor:pointer;margin-bottom:14px">' +
+          '<input type="checkbox" id="rcset-nat-ocr-auto" style="width:16px;height:16px"> 打开书就自动识别（不必手动触发）' +
+        '</label>' +
+        HR +
+        '<label style="' + LBL + '">✏️ Apple Pencil 手势</label>' +
+        '<div style="display:flex;gap:10px;margin-bottom:10px">' +
+          '<div style="flex:1"><div style="font-size:12px;color:#8fa5c8;margin-bottom:4px">笔身双击</div>' +
+            '<select id="rcset-nat-pen-dtap" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">' +
+              '<option value="none">不做任何事</option><option value="toggleEraser">切换橡皮</option>' +
+              '<option value="showPalette">打开绘图面板</option><option value="toggleSelection">切换选区笔</option>' +
+            '</select></div>' +
+          '<div style="flex:1"><div style="font-size:12px;color:#8fa5c8;margin-bottom:4px">笔身挤压（Pencil Pro）</div>' +
+            '<select id="rcset-nat-pen-sq" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">' +
+              '<option value="none">不做任何事</option><option value="toggleEraser">切换橡皮</option>' +
+              '<option value="showPalette">打开绘图面板</option><option value="toggleSelection">切换选区笔</option>' +
+            '</select></div>' +
+        '</div>' +
+        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6">画面上那枚笔按钮只在 Pencil 悬停或落笔后出现；纯手指操作时它不会占地方。用挤压/双击也能直接唤出绘图面板。</div>' +
+      '</div>';
+
     var paneWeb =
       '<div class="set-pane" data-pane="web" data-sec="web-tab" style="display:none">' +
         '<label style="' + LBL + '">🌐 网页翻译（浏览器扩展 / 网页阅读专用）</label>' +
@@ -1004,8 +1038,9 @@
           '<button type="button" class="set-tab" data-pane="hl">高亮</button>' +
           '<button type="button" class="set-tab" data-pane="note">便签</button>' +
           '<button type="button" class="set-tab" data-sec="web-tab" data-pane="web">网页翻译</button>' +
+          '<button type="button" class="set-tab" data-pane="native" id="rcset-tab-native" style="display:none">本机</button>' +
         '</div>' +
-        '<div class="ep-set-body">' + paneAi + paneComputer + paneRead + paneGrammar + paneHl + paneNote + paneWeb + '</div>' +
+        '<div class="ep-set-body">' + paneAi + paneComputer + paneRead + paneGrammar + paneHl + paneNote + paneWeb + paneNative + '</div>' +
         '<div style="display:flex;gap:8px;justify-content:flex-end;padding-top:12px;border-top:1px solid #2a3550;margin-top:2px">' +
           '<button id="rcset-cancel" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">取消</button>' +
           '<button id="rcset-save" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">保存</button>' +
@@ -1013,6 +1048,40 @@
       '</div>';
     document.body.appendChild(mask);
     modal = mask.querySelector('.ep-set-modal');
+
+    // ── 本机(App 原生偏好)：只有 App 内才有这条通道，扩展/浏览器里整块不出现 ──
+    //   写立即生效、不等「保存」：这些是 App 本体的开关，跟面板里其它需要成批提交的
+    //   设置不是一回事；而且原生那侧本来就是改一个存一个。
+    (function () {
+      var api = window.webkit && window.webkit.messageHandlers &&
+                window.webkit.messageHandlers.bwNativeAppPrefs;
+      if (!api || typeof api.postMessage !== 'function') return;
+      var tab = $('rcset-tab-native');
+      if (tab) tab.style.display = '';
+      var K = {
+        'rcset-nat-ocr': 'reader.textRecognition.enabled',
+        'rcset-nat-ocr-auto': 'reader.textRecognition.automaticLocal',
+        'rcset-nat-pen-dtap': 'native-pencil.double-tap',
+        'rcset-nat-pen-sq': 'native-pencil.squeeze'
+      };
+      api.postMessage({ action: 'list' }).then(function (vals) {
+        vals = vals || {};
+        Object.keys(K).forEach(function (id) {
+          var el = $(id); if (!el) return;
+          var v = vals[K[id]];
+          if (el.type === 'checkbox') el.checked = !!v;
+          else if (typeof v === 'string' && v) el.value = v;
+          el.addEventListener('change', function () {
+            var payload = el.type === 'checkbox' ? !!el.checked : String(el.value || '');
+            api.postMessage({ action: 'set', key: K[id], value: payload })
+              .catch(function () { try { RC.toast && RC.toast('这项没能写回 App'); } catch (e) {} });
+          });
+        });
+      }).catch(function () {
+        // 通道在但读失败 → 把 tab 收回去，别给一排永远无效的开关
+        if (tab) tab.style.display = 'none';
+      });
+    })();
 
     // 点遮罩空白处 = 取消(对齐 PDF 原生 mask onclick closeSettings)
     mask.addEventListener('click', function (e) { if (e.target === mask) cancel(); });
