@@ -993,6 +993,50 @@
   function _workspace() {
     return document.getElementById('asst-review-workspace');
   }
+  var RV_H_KEY = 'rc-review-h';
+  function _applyRvH(px) {
+    // 上下都留余量:卡片区不能小到看不见卡，也不能吃掉整个对话区。
+    var lo = 150, hi = Math.max(lo + 80, Math.round(window.innerHeight * 0.8));
+    var v = Math.max(lo, Math.min(Math.round(px), hi));
+    try {
+      document.documentElement.style.setProperty('--rv-h', v + 'px');
+      localStorage.setItem(RV_H_KEY, String(v));
+    } catch (_) {}
+  }
+  function _restoreRvH() {
+    try {
+      var v = parseInt(localStorage.getItem(RV_H_KEY) || '', 10);
+      if (v > 0) document.documentElement.style.setProperty('--rv-h', v + 'px');
+    } catch (_) {}
+  }
+  function _bindSplit(split, workspace) {
+    var startY = 0, startH = 0, active = false;
+    split.addEventListener('pointerdown', function (e) {
+      active = true;
+      startY = e.clientY;
+      startH = workspace.getBoundingClientRect().height;
+      try { split.setPointerCapture(e.pointerId); } catch (_) {}
+      split.classList.add('rv-split-on');
+      e.preventDefault();
+    });
+    split.addEventListener('pointermove', function (e) {
+      if (!active) return;
+      _applyRvH(startH + (e.clientY - startY));
+      e.preventDefault();
+    });
+    var end = function (e) {
+      if (!active) return;
+      active = false;
+      split.classList.remove('rv-split-on');
+      try { split.releasePointerCapture(e.pointerId); } catch (_) {}
+    };
+    split.addEventListener('pointerup', end);
+    split.addEventListener('pointercancel', end);
+    split.addEventListener('dblclick', function () {   // 双击复位到默认比例
+      try { localStorage.removeItem(RV_H_KEY); } catch (_) {}
+      document.documentElement.style.removeProperty('--rv-h');
+    });
+  }
 
   function _button(action, label, className, title) {
     var button = document.createElement('button');
@@ -2728,7 +2772,7 @@
     style.id = 'rc-review-css';
     style.textContent =
       '#asst-review-toggle.on{background:#2c2652!important;border-color:#8b7bd1!important;color:#eee8ff!important}' +
-      '#asst-review-workspace{flex:0 1 min(54vh,520px);height:min(54vh,520px);max-height:54%;min-height:0;overflow:hidden;padding:10px 10px 6px;border:0;background:transparent;color:var(--rc-text,#e6e6f0);font-family:var(--rc-font-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);overscroll-behavior:contain;touch-action:auto;scrollbar-width:none}' +
+      '#asst-review-workspace{flex:0 1 var(--rv-h,min(54vh,520px));height:var(--rv-h,min(54vh,520px));max-height:80%;min-height:0;overflow:hidden;padding:10px 10px 6px;border:0;background:transparent;color:var(--rc-text,#e6e6f0);font-family:var(--rc-font-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);overscroll-behavior:contain;touch-action:auto;scrollbar-width:none}' +
       '#asst-review-workspace[hidden]{display:none!important}' +
       '#asst-review-workspace.rv-card-collapsed,#asst-review-workspace.rv-card-empty{flex-basis:auto;height:auto}' +
       '#asst-review-workspace::-webkit-scrollbar{display:none}' +
@@ -2758,7 +2802,12 @@
       '.rv-card-extra[open]{padding-bottom:8px}.rv-card-extra[open]>summary{border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:7px}' +
       '.rv-review-controls{display:flex;flex:0 1 45%;flex-direction:column;min-height:0;max-height:45%;overflow:hidden;padding-top:7px}' +
       '.rv-review-controls>.rv-improve-toggle{flex:0 0 auto;width:100%}' +
-      '.rv-improve-panel{display:flex;flex:1 1 auto;flex-direction:column;gap:9px;max-height:none;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-width:none;margin-top:7px;padding:11px 0 1px;border:0;border-top:1px solid rgba(255,255,255,.10);border-radius:0;background:transparent}' +
+      // ★ 改进面板改成**浮层**(用户要求):原来它是 flex:1 1 auto 的兄弟节点,
+      //   一展开就把卡片挤扁 —— 而人展开它正是为了对着卡片改。现在覆盖在卡片区上方,
+      //   卡片尺寸完全不受影响;底色做实一点,盖住下面的卡才读得清。
+      '.rv-improve-panel{position:absolute;left:0;right:0;top:0;bottom:0;z-index:6;display:flex;flex-direction:column;gap:9px;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-width:none;margin:0;padding:11px 10px 8px;border:0;border-radius:12px;background:rgba(16,22,42,.94);box-shadow:0 -6px 26px rgba(0,0,0,.4)}' +
+      // 浮层要有定位基准 —— 没有它 absolute 会一路上溯到更外层，盖错地方。
+      '#rc-review-body{position:relative}' +
       '.rv-improve-panel::-webkit-scrollbar{width:0;height:0;display:none}' +
       '.rv-selection-count{font-size:12px;color:var(--rc-text-muted,#75839e);line-height:1.45}' +
       '.rv-selection-count.ready{color:#78d6ae}' +
@@ -2792,7 +2841,14 @@
       '.rv-selectable-segment.rv-covered{opacity:.62}' +
       '.asst-a.rv-picked{box-shadow:0 0 0 2px rgba(96,165,250,.7) inset}' +
       '#side-pane-asst:not(.review-mode) .rv-answer-picker,#side-pane-asst:not(.review-mode) .rv-segment-picker{display:none!important}' +
-      '@media(max-height:620px){#asst-review-workspace{flex-basis:min(48vh,360px);height:min(48vh,360px);max-height:48%;min-height:0}}';
+      '@media(max-height:620px){#asst-review-workspace{flex-basis:var(--rv-h,min(48vh,360px));height:var(--rv-h,min(48vh,360px));max-height:72%;min-height:0}}' +
+      // 上下分隔手柄:拖它调整卡片区与对话区的比例(用户要求)。
+      // touch-action:none —— 否则 iOS 会把纵向拖动解释成页面滚动，手柄根本拖不动。
+      '.rv-split{flex:0 0 auto;height:16px;display:flex;align-items:center;justify-content:center;cursor:ns-resize;touch-action:none;-webkit-tap-highlight-color:transparent}' +
+      '.rv-split::before{content:"";width:38px;height:4px;border-radius:2px;background:rgba(255,255,255,.2);transition:background .15s,width .15s}' +
+      '.rv-split:hover::before,.rv-split.rv-split-on::before{background:rgba(255,255,255,.45);width:54px}' +
+      '#asst-review-workspace[hidden] + .rv-split{display:none}' +
+      '#asst-review-workspace.rv-card-collapsed + .rv-split,#asst-review-workspace.rv-card-empty + .rv-split{display:none}';
     document.head.appendChild(style);
   }
 
@@ -2840,6 +2896,13 @@
       body.appendChild(initial);
       workspace.appendChild(body);
       pane.insertBefore(workspace, thread);
+      var split = document.createElement('div');
+      split.className = 'rv-split';
+      split.setAttribute('role', 'separator');
+      split.setAttribute('aria-label', '拖动调整卡片区高度');
+      pane.insertBefore(split, thread);
+      _bindSplit(split, workspace);
+      _restoreRvH();
     }
 
     quick.addEventListener('click', function (event) {
