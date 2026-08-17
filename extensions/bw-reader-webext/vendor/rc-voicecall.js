@@ -365,11 +365,22 @@ if (window.__bwPwaProviderOnly) return;
       '@keyframes vcCapDot{0%,100%{opacity:.25;transform:translateY(0)}50%{opacity:.95;transform:translateY(-2.5px)}}' +
       // 65 文字卡片:iOS 通知风磨砂堆叠(右下锚,新卡在前,旧卡左上交错缩小)
       '#vc-cards{position:fixed;right:14px;bottom:calc(150px + env(safe-area-inset-bottom,0px));z-index:2147481400;width:min(80vw,340px);pointer-events:none}' +
-      '.vc-card{position:absolute;right:0;bottom:0;width:100%;background:rgba(28,28,30,.72);-webkit-backdrop-filter:blur(24px) saturate(1.6);backdrop-filter:blur(24px) saturate(1.6);' +
+      // ⚠ 毛玻璃**不能**画在这个元素自己身上:它同时在 transition width/height/border-radius,
+      //   而 WebKit(iOS)下 backdrop-filter 的采样与裁剪跟不上尺寸变化 —— 卡片右侧和底部
+      //   会露出一圈没被裁掉的模糊层,看起来像"上面盖了个更大且错位的透明浮层"(实测)。
+      //   放到 ::before 上:它由布局逐帧决定 inset:0,自己不参与任何过渡,裁剪永远是当前尺寸。
+      '.vc-card{position:absolute;right:0;bottom:0;width:100%;background:transparent;isolation:isolate;' +
+      '--vc-cardbg:rgba(28,28,30,.72);--vc-cardblur:blur(24px) saturate(1.6);' +
       '-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;' +
       'border:0.5px solid rgba(255,255,255,.14);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.4);color:#f2f2f7;font-size:14px;line-height:1.55;' +
       'padding:10px 13px 12px;pointer-events:auto;display:flex;flex-direction:column;max-height:36vh;' +
       'transition:transform .38s cubic-bezier(.32,.72,.36,1),opacity .32s ease;font-family:-apple-system,system-ui,sans-serif}' +
+      // 底面(磨砂 + 底色)统一由这一层画。各状态只改 --vc-cardbg/--vc-cardblur 两个变量,
+      // 不再各自写 background —— 否则一旦有人漏改,那个状态就退回到"卡片自己画背景",
+      // 尺寸过渡时的裁剪滞后立刻回来。
+      '.vc-card::before{content:"";position:absolute;inset:0;border-radius:inherit;z-index:-1;pointer-events:none;' +
+        'background:var(--vc-cardbg);-webkit-backdrop-filter:var(--vc-cardblur);backdrop-filter:var(--vc-cardblur);' +
+        'transition:background .3s ease}' +
       // 141 轮次容器(rc-turncard.js;设计见 references/adr-turn-container.md):
       //   容器本体复用既有气泡/结果卡外观(.asst-a / .vc-if / .vc-if-hd),流程按钮复用 .vc-flowb,
       //   看大图复用 .fig-lightbox —— 一律不另造(用户拍板:复用之前设计的,别自己新设计一套)。
@@ -448,29 +459,52 @@ if (window.__bwPwaProviderOnly) return;
         'box-shadow:0 4px 14px -4px rgba(0,0,0,.45)}' +
       // 收起态:整张卡就是那枚圆角方形标记
       '.vc-card.vc-dot{width:40px;height:40px;min-height:0;padding:0;border-radius:13px;border-color:transparent;' +
-        'background:transparent;box-shadow:none;overflow:visible;backdrop-filter:none;-webkit-backdrop-filter:none}' +
+        '--vc-cardbg:transparent;--vc-cardblur:none;box-shadow:none;overflow:visible}' +
       '.vc-card.vc-dot .vc-card-hd,.vc-card.vc-dot .vc-card-sum,.vc-card.vc-dot .vc-card-bd{display:none}' +
+      // 收起成球时让后面的书页透出来。⚠ 但不能只是把填充调淡 —— 上面那条注释记着教训:
+      // 6% 白玻璃压在 PDF 白页上直接隐形。所以**可见性改由轮廓承担**:填充与模糊都压低,
+      // 边框反而加实、再加一圈极淡的外描边,球在白页和深色插图上都还认得出。
+      // 展开后不受影响(下面的 :not(.vc-dot) 把值还原)。
+      '.vc-card.vc-dot .vc-card-dot{--vc-tf:color-mix(in srgb,var(--vc-tc) 12%,rgba(22,26,38,.34));' +
+        '--vc-tl:color-mix(in srgb,var(--vc-tc) 62%,rgba(255,255,255,.34));' +
+        '-webkit-backdrop-filter:blur(9px) saturate(1.2);backdrop-filter:blur(9px) saturate(1.2);' +
+        'box-shadow:0 2px 9px -3px rgba(0,0,0,.34),0 0 0 0.5px rgba(0,0,0,.16)}' +
+      // 手指按住时补回不透明度:正在操作的东西该是实的,不然点下去像没点到。
+      '.vc-card.vc-dot .vc-card-dot:active{--vc-tf:color-mix(in srgb,var(--vc-tc) 26%,rgba(22,26,38,.72))}' +
       // 三态生长:**以左上角(标记位置)为原点**拉长/展开——标记不动,卡片从它身上长出来
+      // 三态生长的曲线统一成 iOS 那条 smooth-spring 近似(.32,.72,.36,1):起步快、尾巴长,
+      // 停下来时没有回弹的"抖"。原来尺寸和 transform 用了两条不同曲线(其中一条 1.35 会过冲),
+      // 两条曲线同时跑,边框和内容看着像各走各的。
       '.vc-card.vc-hasdot{right:auto;bottom:auto;transform-origin:0 0;' +
-        'transition:width .34s cubic-bezier(.2,.85,.3,1),height .34s cubic-bezier(.2,.85,.3,1),' +
-        'border-radius .3s,background .3s,box-shadow .3s,border-color .25s,' +
-        'transform .3s cubic-bezier(.34,1.35,.64,1),opacity .3s}' +
+        'transition:width .42s cubic-bezier(.32,.72,.36,1),height .42s cubic-bezier(.32,.72,.36,1),' +
+        'border-radius .34s cubic-bezier(.32,.72,.36,1),box-shadow .34s ease,border-color .25s,' +
+        'transform .34s cubic-bezier(.32,.72,.36,1),opacity .26s ease}' +
+      // 内容**错峰**:容器先长开,正文晚 .14s 再淡入;收起时正文先走(.14s),容器随后收。
+      // 这是这类展开动画看着"稳"的关键 —— 否则正文会跟着容器一起被拉伸/压扁。
+      '.vc-card.vc-hasdot.vc-min .vc-card-bd{display:block;opacity:0;pointer-events:none;transition:opacity .14s ease}' +
+      '.vc-card.vc-hasdot:not(.vc-min):not(.vc-dot) .vc-card-bd{opacity:1;transition:opacity .26s ease .14s}' +
       // 长条 = **一行**(用户改):标题+状态+▶+✕ 全挤在头部一行,与标记同高 40px
       //   → 标记→长条 = 上下边不动、纯向右拉长;长条→方块 = 纯向下伸长(动画方向干净)
       '.vc-card.vc-hasdot.vc-min{width:300px;height:40px;min-height:40px;padding:0 10px 0 0;overflow:hidden}' +
       '.vc-card.vc-hasdot.vc-min .vc-card-hd{margin-bottom:0;height:40px}' +
-      '.vc-card.vc-hasdot.vc-min .vc-card-sum,.vc-card.vc-hasdot.vc-min .vc-card-bd{display:none}' +
+      // ⚠ 正文不再 display:none —— 它改由上面的错峰规则做 opacity 淡出(display 不能过渡),
+      //   靠 vc-min 的 overflow:hidden + 固定 40px 高裁掉,布局不受影响。
+      '.vc-card.vc-hasdot.vc-min .vc-card-sum{display:none}' +
       '.vc-card.vc-hasdot:not(.vc-min):not(.vc-dot){width:326px;padding:0 13px 12px 0}' +
       '.vc-card.vc-hasdot:not(.vc-min):not(.vc-dot) .vc-card-hd{padding-right:10px}' +
       '.vc-card.vc-hasdot:not(.vc-min):not(.vc-dot) .vc-card-sum{display:none}' +
       '.vc-card.vc-hasdot:not(.vc-min):not(.vc-dot) .vc-card-bd{padding-left:13px}' +
       // 完成态:有色磨砂 + 边缘阴影(跟"创建时的透明玻璃圆"区分开)
       '.vc-card.vc-typed{border-color:color-mix(in srgb,var(--vc-tc) 42%,transparent);' +
-        'background:color-mix(in srgb,var(--vc-tc) 13%,rgba(28,28,30,.74));' +
+        '--vc-cardbg:color-mix(in srgb,var(--vc-tc) 13%,rgba(28,28,30,.74));' +
         'box-shadow:0 16px 42px rgba(0,0,0,.5),0 0 22px -8px color-mix(in srgb,var(--vc-tc) 55%,transparent)}' +
       '.vc-card.vc-typed .vc-card-hd{color:var(--vc-tc)}' +
-      '.vc-card.vc-typed.vc-dot{background:rgba(255,255,255,.05);box-shadow:none;border-color:transparent}' +
+      '.vc-card.vc-typed.vc-dot{--vc-cardbg:rgba(255,255,255,.05);--vc-cardblur:none;box-shadow:none;border-color:transparent}' +
       '.vc-card.vc-err{--vc-tc:#ff6961}' +
+      // 系统开了"减弱动态效果"就只留淡入淡出 —— iOS 上这是无障碍设置,不是可选装饰。
+      '@media (prefers-reduced-motion:reduce){' +
+        '.vc-card,.vc-card.vc-hasdot,.vc-card::before,.vc-card .vc-card-bd{transition-duration:.01s!important;transition-delay:0s!important}' +
+        '.vc-card-dot{transition:none}}' +
       // 展开视图 = **数据流图**(用户设计):AI / 工具 / 结果 各一个可点开的小方块,用线连起来表示数据传递
       '.vc-flow{margin-top:2px}' +
       '.vc-fn{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:10px;cursor:pointer;' +
