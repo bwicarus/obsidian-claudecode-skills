@@ -38,6 +38,8 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
+from signal_audit import SelfDoubt, write_audit_entry
+
 CONFIG_CONTRACT = "nightreign-probe-config/2"
 LEDGER_CONTRACT = "game-ledger/2"
 STATE_ROOT = Path(r"C:\claude\state\game-ledger\nightreign")
@@ -74,6 +76,12 @@ DEFAULT_CONFIG: dict = {
     "evidenceOffsets": [-8.0, -5.0, -3.0, -1.5, -0.6, 0.0, 1.0, 2.0],
     "evidenceWindow": 0.7,  # 每个时间点在 ±该秒内挑最清晰帧
     "evidenceTailSeconds": 2.5,  # 事发后等这么久再落盘(等尾帧进缓冲)
+    # 自审计(2026-08-17):探针怀疑自己,把"要人盯着试错"变成自动收敛。
+    # 阈值来自实测分布(P99=3.2 P99.9=18/秒),取 8 标记约 0.3% 样本 —— 值得
+    # 看一眼的量级,不是"一定错"。可疑读数照常进事件流,只是额外留证送审。
+    "auditMaxRatePerSecond": 8.0,
+    "auditReboundWindow": 1.0,
+    "auditMinIntervalSeconds": 6.0,
     "windowTitleContains": ["NIGHTREIGN", "黑夜君临"],
 }
 
@@ -511,6 +519,14 @@ def run() -> int:
     next_ring = 0.0
     pending_ev: list[dict] = []  # 等尾帧成熟后落盘
     ep_pending: dict | None = None
+    doubt = SelfDoubt(
+        full_scale=1.0,  # 首个满量程读数进来后校准
+        max_rate_per_second=float(cfg["auditMaxRatePerSecond"]),
+        rebound_window=float(cfg["auditReboundWindow"]),
+    )
+    audit_dir = session_dir / "audit"
+    audit_n = [0]
+    last_audit = 0.0
     game_front = None
     last_hud = "on"
     last_sample: tuple = ()
@@ -561,6 +577,23 @@ def run() -> int:
                     im.save(buf, "JPEG", quality=int(cfg["frameQuality"]))
                     sharp = _sharpness(np.asarray(im.convert("L").resize((320, 180))))
                     ring.append((now, buf.getvalue(), sharp))
+
+                # 自审计:物理不可能 / 交叉矛盾 / 时序回弹 → 打标留证送审
+                doubt.full_scale = max(doubt.full_scale, float(hp_total), 1.0)
+                sus = doubt.check(
+                    float(hp_raw), now,
+                    companions={"fp": float(fp_lit), "stamina": float(st_lit)})
+                if sus is not None and now - last_audit >= cfg["auditMinIntervalSeconds"]:
+                    last_audit = now
+                    audit_n[0] += 1
+                    aid = f"a{audit_n[0]:04d}"
+                    write_audit_entry(
+                        audit_dir, aid, sus,
+                        {"ts": _now_iso(), "hud": hud_state, "ghostCols": hp_ghost,
+                         "totalCols": hp_total, "fp": fp_lit, "stamina": st_lit})
+                    pending_ev.append({"id": f"audit-{aid}", "anchor": now,
+                                       "due": now + float(cfg["evidenceTailSeconds"])})
+                    print(f"[audit] {aid} {sus.kind}: {sus.detail}")
 
                 cur_sample = (hp_raw, hp_ghost // 8, fp_lit // 50, st_lit // 50, hud_state)
                 if cur_sample != last_sample:
