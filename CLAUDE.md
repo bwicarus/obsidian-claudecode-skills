@@ -25,6 +25,12 @@
   `scripts\deploy_from_windows.ps1 -PreflightOnly`,脚本自带摘要校验/原子安装/失败回滚/健康检查,
   **不要手工重做**);**清单外**(insights/fitness/qa_server/`control.html` 等)才手工 `cp` + restart。
   各处旧文档里的 `scp root@bwicarus.space` 与手工回滚清单**已废弃**。
+- 🤝 **工程所有权（2026-08-16 用户拍板）：全部工程由 Claude 负责**。此前的分工文档
+  （如 `references/codex-claude-bridge-role-swap-20260805.md` 的 Claude=Windows 桥 /
+  Codex=iOS 划分）**已过时,不要拿它们当现行边界**;`extensions/`、`ios/`、`_server_deploy/`、
+  Windows 桥（`ComputerVoiceAudio` 等）都可直接做。Codex 仍作为运行时存在（语音助手/CLI）,
+  但开发归 Claude。⚠ 另:`~/.claude/projects/C--claude/memory/` 自 2026-07-29 Pi 记忆同步后
+  ACL 损坏（读写全拒),修复前持久记忆不可用——跨会话事实请写进本文件或 `references/`。
 - 📬 **与 Codex 协作统一走 BW AgentBridge Lite（BWAB）,不再使用旧 SQLite 邮箱**。
   从桌面“多AI协作终端-正式版”进入后,使用 Channel 的 `get_messages` / `reply` /
   `notify_assistant` / `bridge_status`;开工前、完工后、需要对方配合时各查一次。
@@ -36,6 +42,20 @@
   `%LOCALAPPDATA%\BWReaderExtensionTest\browser-profile-v2`,或 Claude Code 内置 Browser pane
   (独立 profile、无扩展无 cookie,**做不了扩展链测试**)。**不动日常 Chrome、常用账号和已装扩展**;
   真机验收先经用户确认。
+
+## 🚨 iOS App 形态（2026-08-17 实锤，最高优先级事实）
+
+**BWReader App 是本地渲染**：阅读器 runtime 由 `ios/BWReader/package_local_reader.py` 烤成
+ReaderBundle 打进 App 包（确定性、运行时零下载、环回 `127.0.0.1:43129` 供壳、页图 PDFKit、
+AI 类 API 经 Swift 网关打 Pi）。**改 `_server_deploy/static/pdf/*.js` 要到达 iPad 只能走
+TestFlight 新构建**（CI `safari-extension-ios.yml` workflow_dispatch + `upload=true`，CI 内自跑
+打包）；部署 Pi 影响两类东西：桌面/扩展表面的 JS，以及 **App 经 Swift 网关调用的
+owner=pi 服务端 API**（run-start 任务链/词典/翻译/助手等约 110 条，见
+`native_reader_interface_manifest.json`）——改这些 .py 仍必须部署 Pi。方向=逐步本地化、
+Pi 退纯备份，但**尚未到达**。本机导入书 = `localbook:` 前缀（字节仅在设备，
+security-scoped bookmark 就地读）。语音 client-action 白名单有**四份副本**须同步：C#
+`ValidatePayload` / `rc-computer-voice` 入站闸 / `rc-voicecall` 执行映射 /（随 bundle 各一份）。
+旧 worktree（如 `bwreader-ios-merge`）里的远程壳 `ReaderWebView.swift` 是过时代码，勿据其推断。
 
 ## 🚨 浏览器扩展 / 阅读器统一层交接入口（2026-07-22）
 
@@ -130,6 +150,7 @@ python3 extensions/bw-reader-webext/handoff_check.py --full
 - `references/ai-assistant-webapp-patterns.md` — **「网页里集成 AI 助手」可迁移架构要点**(独立蓝本,可喂给做别的 AI 网页的人/AI):⭐生成与请求解耦(detached worker + rid 重连,切后台不丢)/ 全站 fetch 韧性 / 对话服务端持久化 / Markdown×MathJax 占位符共存 / 模型分档+反馈梯子(Pareto)/ agentic 工具循环(沙盒+顽强JSON)/ 上下文只在助手开着时收集 / 后台长任务+进度 / 额度护栏 / iOS 坑 / 系统prompt清单 + 落地 checklist
 - `references/web-context-snapshot-handoff.md` — **网页上下文快照最终架构与交接**（2026-08-06 打通）。链路 = content.js 采集 → 同页 postMessage 给内嵌框 → 框内一次 POST `/reader-context/snapshot` → 桥覆盖快照。要点：唯一硬约束是桥的 origin 白名单拒网页 origin（故必须由扩展 origin 的框代发）；**位置与正文分开对待**（位置是状态必须每次为真，正文是内容重复时标注送出时刻）；只有 `hasFocus` 的页面才上报（`visibilityState` 会让后台标签盖掉前台页）；正文提取必须遍历实况树，`cloneNode` 会让 `innerText` 退化成 `textContent`。含未完成项（30s 断连看门狗、每元素分开上报）
 - `references/silent-failure-lessons.md` — **静默失败十处清单 + 五条规则**（2026-08-05/06，"网页内容传到 Windows 快照"查了一整天的沉淀）。⚠ **新功能落地前先读**：十处不是十个 bug，是同一个选择重复十次——出了状况就悄悄什么都不做，于是前一处的沉默盖住后一处，每修好一处下一处才露出来。含最贵的教训（用 Python 验证浏览器路径 → 脚本不发 CORS 预检 → 假阳性把方向带偏几轮）、五条规则（每个提前退出都要出声 / 折成布尔前先报原始值 / 诊断通道不能穿过被测对象 / 新功能落地时诊断出口必须已在 / 无控制台设备上沉默等于不可诊断），以及"约束显得无解时先问它是不是自找的"（上下文只需一次 POST，却一直跑在语音的长连接机制上）
+- `references/evidence-quality-lessons.md` — **证据质量三条规则 + 落地检查表**（2026-08-17，游戏探针首场 3/8 误判的沉淀）。⚠ **建任何「大量采集→事后让 AI 提炼」的通道前先读**：病根不是 AI 判不准也不是阈值没调好，而是**存下来的东西根本没法判**——采集不可重来,分析层能重写一百遍,当时没存对的救不回来。三条：① 一个信号只有一种解释时才能单独采（但也别过度承诺:实测判不出就如实记歧义,别让确定性层假装能判）② 单帧不是证据、序列才是（时间覆盖要宽于事件:远景认种类/近景认过程/事后认结果）③ 模糊帧等于没有帧（每个时刻留候选,按清晰度挑）。附:性能瓶颈要实测再砍（PIL LANCZOS 47.8ms → numpy 步长降采样 7.7ms 且分辨率更高）
 - `references/vendor-docs-local.md` — **本地厂商参考库**(`/home/bwicarus/refs/`,git 之外):OpenAI cookbook(含 Realtime 提示词指南/上下文压缩/out-of-band)、**官方 realtime-agents 参考应用**、xAI cookbook。⚠ **要查官方资料先 grep 这里,别急着上网**(2026-07-14 教训:没查官方资料导致成本算反、开关没找到)
 - `references/grammar-analysis-system.md` — 英语语法分析系统：grammar KG（`scripts/kg/build_grammar_nodes.py` 三层抽取 + `grammar-nodes.json`）+ spacy 词性/依存（独立 spacy-venv，`spacy_parse.py --server` 常驻模式免每次加载模型，pdf_reader 经 `_spacy_worker_request` 锁串行+超时自愈调用）+ pdf_reader 的 grammar-* 路由（跟踪语法点分析；spaCy 结果存 sentence-only 缓存键、grammar-stream 有回放缓存）
 
