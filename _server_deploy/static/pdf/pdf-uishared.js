@@ -729,7 +729,10 @@ window._favOpenPicker = function () {
     var cw = Math.max(1, el.clientWidth || Math.round(el.getBoundingClientRect().width) || 300);
     var ch = Math.max(1, el.clientHeight || Math.round(el.getBoundingClientRect().height) || 400);
     var cv = document.createElement('canvas'); cv.className = 'ink-layer';   // z7,pointer-events:none(CSS);绘制靠 pw capture 拦 pointerdown
-    cv.style.width = cw + 'px'; cv.style.height = ch + 'px';
+    // ⚠ 不写 style.width/height:.ink-layer 的 CSS 本来就是 position:absolute + inset:0,
+    //   会自动铺满纸;一旦写死 px 就把这份自动跟随覆盖掉 —— 页面一缩放,纸变了而墨迹层
+    //   停在旧尺寸(用户实测:自定页上的绘图不跟着缩放)。这里只管**位图分辨率**,
+    //   CSS 尺寸交给 inset:0,缩放时立刻跟上,随后由 ResizeObserver 校准清晰度。
     var dpr = window.devicePixelRatio || 1;
     cv.width = Math.floor(cw * dpr); cv.height = Math.floor(ch * dpr);
     el.style.position = el.style.position || 'relative';
@@ -747,10 +750,12 @@ window._favOpenPicker = function () {
     var cv = el && el.__inkCanvas; if (!cv) return;
     var cw = Math.max(1, el.clientWidth || Math.round(el.getBoundingClientRect().width));
     var ch = Math.max(1, el.clientHeight || Math.round(el.getBoundingClientRect().height));
-    if (Math.abs((parseFloat(cv.style.width) || 0) - cw) < 1 && Math.abs((parseFloat(cv.style.height) || 0) - ch) < 1) return;
+    // 只调位图分辨率;CSS 尺寸由 .ink-layer 的 inset:0 自动跟随(不再写 style.width/height,
+    // 那会覆盖掉自动跟随)。因此比较的是**位图**是否已是想要的尺寸,不再读 style。
     var dpr = window.devicePixelRatio || 1;
-    cv.style.width = cw + 'px'; cv.style.height = ch + 'px';
-    cv.width = Math.floor(cw * dpr); cv.height = Math.floor(ch * dpr);
+    var wantW = Math.floor(cw * dpr), wantH = Math.floor(ch * dpr);
+    if (cv.width === wantW && cv.height === wantH) return;
+    cv.width = wantW; cv.height = wantH;
     if (window._inkRedraw) window._inkRedraw(el);
   }
   // 虚拟 .pdf-upage 墨迹落盘:绑真 id 后 POST 到 realPage(/api/ink 按整数页键);未绑(临时)则只留 el.__inkStrokes,绑定时补。
@@ -1330,7 +1335,16 @@ window._favOpenPicker = function () {
       //   尺寸只由页面决定、不受内部字号影响 → 回调里改字号不会自激。
       try {
         if (window.ResizeObserver) {
-          var ro = new ResizeObserver(function () { _upFitText(body); });
+          var ro = new ResizeObserver(function () {
+            _upFitText(body);
+            // 手写层同理:_upResizeInk 给 canvas 设的是**固定 px**,只在渲染时校准一次 ——
+            // 页面一缩放,元素尺寸变了而 canvas 还停在旧尺寸,墨迹就不跟着纸走。
+            // 笔画本身是归一化坐标,所以尺寸校准 + 重绘之后位置自然对上。
+            try {
+              var h = ov.closest ? ov.closest('.pdf-upage') : null;
+              if (h && h.__inkCanvas) _upResizeInk(h);
+            } catch (e2) {}
+          });
           ro.observe(body);
           body.__ro = ro;
         }
