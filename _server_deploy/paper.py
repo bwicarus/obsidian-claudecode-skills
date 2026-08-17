@@ -71,7 +71,10 @@ def default_span(b: dict, sp: dict) -> list:
     C = sp["cols"]
     if k == "text":
         w = int(b.get("cols") or C)
-        need = max(1, int(math.ceil(_wide(b.get("text")) / max(1, w))))
+        # h1 的字号是 1.25 个格宽(前端 _upFitText 同款系数)→ 一行只装得下 w/1.25 个全角字。
+        # 不把这个系数算进来,标题就会比估算多占一行 → 溢出被裁(实测标题被切掉半行就是这个)。
+        eff = (w / 1.25) if b.get("style") == "h1" else float(w)
+        need = max(1, int(math.ceil(_wide(b.get("text")) / max(1.0, eff))))
         if b.get("style") == "h1":
             need += 1                                   # 大标题占两行(视觉留白)
         return [need, w]

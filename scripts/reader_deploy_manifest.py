@@ -79,6 +79,10 @@ WEBAPP_SOURCE_FILES = (
     # checkout.  It is therefore part of the same atomic reader release.
     "voice_realtime_relay.py",
     "task_runtime.py",
+    # 格子布局器。task_runtime._set_blocks 直接 import paper —— 不在清单里的话,
+    # 部署完的新 task_runtime 会去用上一版遗留的 paper.py(正是本文件上方那条注释
+    # 说的 stale-file 依赖),前后端的格子算术就此对不上,而且看不出是哪来的。
+    "paper.py",
     # Production routes import these modules directly.  Keeping them out of
     # the manifest would make a successful deploy depend on stale files left
     # behind by an older release.
