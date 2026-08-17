@@ -73,7 +73,10 @@ DEFAULT_CONFIG: dict = {
     "frameRingSeconds": 14.0,
     "frameDownscale": 2,  # 4K→1080p 步长降采样(见 run() 里的性能注记)
     "frameQuality": 72,
-    "evidenceOffsets": [-8.0, -5.0, -3.0, -1.5, -0.6, 0.0, 1.0, 2.0],
+    # 上下文帧(看敌人远景与结果);变化时刻的帧由 CHANGE_LEADS 另加,
+    # 总数放宽到 ~16 —— 消费端换成 Codex 后,8 张是自我设限:实测帧越多
+    # 归因越准(3帧全看不清 → 8帧能定位到帧间隙),而帧本就在环形缓冲里。
+    "evidenceOffsets": [-8.0, -6.0, -4.5, -3.0, -2.0, -1.2, -0.5, 0.0, 0.8, 1.6, 2.4],
     "evidenceWindow": 0.7,  # 每个时间点在 ±该秒内挑最清晰帧
     "evidenceTailSeconds": 2.5,  # 事发后等这么久再落盘(等尾帧进缓冲)
     # 敌人名字条 ROI(4K 原分辨率比例):游戏把精英/Boss 名字写在屏幕下方居中。
@@ -389,6 +392,10 @@ def _write_clip(out_dir: Path, ring_snapshot: list, anchor: float,
             pass
 
 
+# 变化时刻附近的取帧偏移:命中动作在血条变化之前,故向前多取两帧
+CHANGE_LEADS = (-0.45, -0.2, 0.0)
+
+
 def pick_evidence_frames(
     ring: list[tuple[float, bytes, float]],
     anchor_ts: float,
@@ -407,10 +414,16 @@ def pick_evidence_frames(
     picked: list[dict] = []
     used: set[float] = set()
     all_offsets = list(offsets)
+    # 每个变化时刻取**三帧**:动作 → 命中 → 结果。
+    # 关键细节(2026-08-17 实测发现):血条变化是**结果**,造成它的那一击发生在
+    # 之前约 0.1-0.3 秒。只在变化时刻取帧,拍到的永远是"已经挨完打"的画面 ——
+    # Codex 三次评测都在说同一句"没有命中瞬间/没有对应命中帧"。
     for ts in (change_ts or []):
-        rel = round(ts - anchor_ts, 2)
-        if all(abs(rel - o) > window for o in all_offsets):
-            all_offsets.append(rel)
+        base = ts - anchor_ts
+        for lead in CHANGE_LEADS:
+            rel = round(base + lead, 2)
+            if all(abs(rel - o) > window * 0.8 for o in all_offsets):
+                all_offsets.append(rel)
     for off in sorted(all_offsets):
         target = anchor_ts + off
         cands = [
