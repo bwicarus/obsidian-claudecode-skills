@@ -1521,6 +1521,19 @@ write_json_atomic "$BACKUP_DIR/result.json" "complete"
 sudo rm -f -- "$ACTIVE_MARKER"
 DEPLOY_FINISHED=1
 
+# 备份轮转：只保留最近 KEEP 份。
+# 2026-08-18 实测：一晚十几次部署后攒到 141 份 75G，把根分区吃到 100%，
+# 下一次部署在"备份生产文件"这一步直接 No space left on device 失败。
+# 备份的用途是回滚到最近几版，留一百多份没有任何额外价值。
+# 只在部署成功后清，失败时保留现场供取证。
+BACKUP_KEEP=15
+if [ -d "$BACKUP_ROOT" ]; then
+  ls -1t "$BACKUP_ROOT" 2>/dev/null | tail -n +$((BACKUP_KEEP + 1)) | while read -r _old; do
+    [ -n "$_old" ] && rm -rf -- "${BACKUP_ROOT:?}/$_old"
+  done
+  echo "   备份轮转：保留最近 $BACKUP_KEEP 份（当前 $(ls -1 "$BACKUP_ROOT" 2>/dev/null | wc -l) 份，$(du -sh "$BACKUP_ROOT" 2>/dev/null | cut -f1)）"
+fi
+
 if [ "$SYNC_PC" = "1" ]; then
   echo "── ⑤ 同步 Windows 开发仓库（部署成功后的可选动作）"
   if tar -C "$CANDIDATE_ROOT" -cf - \
