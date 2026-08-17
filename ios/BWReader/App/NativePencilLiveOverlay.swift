@@ -253,6 +253,14 @@ struct NativePencilLiveOverlay: View {
         }
     }
 
+    /// 收起成球时用的图标：笔换成**不自带圆圈**的 `pencil.tip`。
+    /// `pencil.tip.crop.circle` 自己画了一个圆环,套进圆形球里就是两层圆,
+    /// 而套进原先的圆角矩形里更糟 —— 圆环被矩形边切掉一截,看着像多了一层
+    /// 方向不对的覆盖层。球本身已经是圆,图标就不该再带圆。
+    private var collapsedToolIcon: String {
+        controller.tool == .pen ? "pencil.tip" : toolIcon
+    }
+
     private func palettePosition(in size: CGSize) -> CGPoint {
         let anchor = controller.paletteAnchor ?? CGPoint(x: 0.84, y: 0.78)
         let inset = min(132, size.width / 2)
@@ -373,15 +381,22 @@ struct NativePencilLiveOverlay: View {
                     .fixedSize()
                     .position(palettePosition(in: geometry.size))
                 } else if controller.canDraw {
+                    // 收起态 = 一枚正圆。`.borderedProminent` 画的是圆角矩形,而图标
+                    // `pencil.tip.crop.circle` 自带圆环 —— 圆环被矩形边切掉一截,看着像多了
+                    // 一层方向不对的覆盖层。这里自己画底:Circle 背景 + 不带圆环的图标,
+                    // 并且把命中形状也设成 Circle,让可点区域和看到的圆一致。
                     Button {
                         controller.showPalette()
                     } label: {
-                        Image(systemName: toolIcon)
-                            .font(.title2)
-                            .frame(width: 42, height: 42)
+                        Image(systemName: collapsedToolIcon)
+                            .font(.title3)
+                            .foregroundStyle(.white)
+                            .frame(width: 52, height: 52)
+                            .background(Color.accentColor, in: Circle())
+                            .shadow(color: .black.opacity(0.26), radius: 7, y: 3)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.blue)
+                    .buttonStyle(.plain)
+                    .contentShape(Circle())
                     .position(launcherPosition(in: geometry.size))
                     .gesture(
                         DragGesture(minimumDistance: 8)
