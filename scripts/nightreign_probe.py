@@ -69,7 +69,14 @@ DEFAULT_CONFIG: dict = {
     "hudGoneThreshold": 4,  # FP+耐力填充 ≤ 此值 = HUD 整体消失(加载/黑屏)
     "hudConfirmTicks": 3,  # HUD 状态需连续几帧一致才切换(去抖)
     # 证据序列
+    # 环形缓冲基础频率;检测到血量变化后临时提速到 burstHz 持续 burstSeconds。
+    # 为什么要提速(2026-08-17 实测):运动增强(光流)需要**相邻帧**,Farneback
+    # 假设小位移;拿间隔 1-2.7 秒的证据帧去算,光流本身就是噪声,补偿也救不回来。
+    # 而"是抓取还是横扫"这类判断只存在于运动里,静态帧根本没有这个信息。
+    # 平时 2.5Hz 省 CPU,出事时 8Hz 连拍 1.2 秒 —— 只在真正需要的 1% 时间里加速。
     "frameRingHz": 2.5,
+    "frameBurstHz": 8.0,
+    "frameBurstSeconds": 1.2,
     "frameRingSeconds": 14.0,
     "frameDownscale": 2,  # 4K→1080p 步长降采样(见 run() 里的性能注记)
     "frameQuality": 72,
@@ -641,6 +648,8 @@ def run() -> int:
     ring: deque[tuple[float, bytes, float]] = deque(
         maxlen=int(float(cfg["frameRingHz"]) * float(cfg["frameRingSeconds"])) + 4)
     ring_interval = 1.0 / float(cfg["frameRingHz"])
+    burst_interval = 1.0 / float(cfg["frameBurstHz"])
+    burst_until = 0.0
     next_ring = 0.0
     pending_ev: list[dict] = []  # 等尾帧成熟后落盘
     ep_pending: dict | None = None
@@ -695,7 +704,9 @@ def run() -> int:
 
                 # 帧环形缓冲(比采样慢,只在游戏前台时填)
                 if now >= next_ring:
-                    next_ring = now + ring_interval
+                    # 出事后的 burst 窗口内按高频抓,让相邻帧够近以支持光流
+                    in_burst = now < burst_until
+                    next_ring = now + (burst_interval if in_burst else ring_interval)
                     shot = sct.grab(mon)
                     # numpy 步长降采样 + BGRA→RGB:PIL 的 LANCZOS 缩放实测
                     # 47.8ms,这条路径 7.7ms 且分辨率更高(整帧 137→64ms)。
@@ -759,6 +770,8 @@ def run() -> int:
                         prev_c, cur_c = transition
                         kind = classify_change(
                             prev_c, cur_c, drop_threshold=int(cfg["dropThresholdCols"]))
+                        if kind in ("hp-drop", "hp-gain"):
+                            burst_until = now + float(cfg["frameBurstSeconds"])
                         if kind == "hp-drop":
                             delta_abs = prev_c - cur_c
                             was_active = episode.active
