@@ -769,6 +769,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
               style.textContent =
                 "#ink-fab,#ink-toolbar,#ep-ink-btn,#ep-ink-toolbar{" +
                 "display:none!important}" +
+                // App 里这两个网页按钮是多余的：全屏在 App 里没有"腾出浏览器 chrome"
+                // 可言（顶栏本来就是我们自己的），而「⬇ 本机」那条离线缓存链在 App 内
+                // 因缺 pwa-cache-identity.js 本就半死——真正的本机书走 localbook: +
+                // ReaderLocalRuntimeServer，跟这个按钮无关。
+                // 只在 App 内藏起来而不是删掉：PWA 和浏览器仍然需要它们。
+                "#fs-toggle,#lb-btn{display:none!important}" +
                 // ReaderRootView owns two 44pt buttons in the upper-right.
                 // Keep the web fullscreen recovery control outside their hit box.
                 "#fs-restore{right:calc(env(safe-area-inset-right,0px) + 112px)!important}";

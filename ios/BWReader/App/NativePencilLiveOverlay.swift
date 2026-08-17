@@ -54,6 +54,9 @@ final class NativePencilInkController: ObservableObject {
     @Published var width: CGFloat = 4
     @Published private(set) var paletteAnchor: CGPoint?
     @Published private(set) var recentPencilAnchor: CGPoint?
+    /// Pencil 最近是否出现过（悬停或落笔）；收起态笔按钮只在为真时显示。见 noteHandPresence()。
+    @Published private(set) var pencilRecentlyActive = false
+    private var pencilPresenceToken: UInt64 = 0
     private var previousDrawingTool: Tool = .pen
 
     var canDraw: Bool { !layout.surfaces.isEmpty }
@@ -94,6 +97,26 @@ final class NativePencilInkController: ObservableObject {
             x: min(1, max(0, point.x / bounds.width)),
             y: min(1, max(0, point.y / bounds.height))
         )
+        noteHandPresence()
+    }
+
+    /// Pencil 刚刚出现过（悬停或落笔）。
+    ///
+    /// 收起态那枚笔按钮原来的条件是 `canDraw`，而 `canDraw` 只表示"网页报上来的可书写
+    /// 表面非空"——也就是"书打开了"，跟 Apple Pencil 毫无关系。于是纯触控时它也一直杵在
+    /// 画面上，而那种场景根本用不到它。改为只在 Pencil 用过之后的一段时间里出现。
+    ///
+    /// 不用"仅 hover 时显示"：老 iPad 的 Pencil 不支持悬停，那样它们会彻底失去入口。
+    /// 落笔也算"出现过"，所以老设备写下第一笔后按钮照常可用。
+    func noteHandPresence() {
+        pencilPresenceToken &+= 1
+        let token = pencilPresenceToken
+        if !pencilRecentlyActive { pencilRecentlyActive = true }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 12_000_000_000)   // 12s 无 Pencil 动静就收起
+            guard let self, self.pencilPresenceToken == token else { return }
+            if !self.paletteVisible { self.pencilRecentlyActive = false }
+        }
     }
 
     func report(_ error: Error) {
@@ -380,7 +403,11 @@ struct NativePencilLiveOverlay: View {
                     }
                     .fixedSize()
                     .position(palettePosition(in: geometry.size))
-                } else if controller.canDraw {
+                // 只在 Pencil 出现过之后显示。纯触控时这枚按钮完全不出现 ——
+                // 用户原话："纯触控时反而用不上"。面板本身的显示条件是
+                // canDraw && paletteVisible，不经过这枚按钮，所以 Pencil Pro 挤压
+                // (已默认 showPalette) 和双击照常能唤出，删按钮不会挡住任何入口。
+                } else if controller.canDraw, controller.pencilRecentlyActive {
                     // 收起态 = 一枚正圆。`.borderedProminent` 画的是圆角矩形,而图标
                     // `pencil.tip.crop.circle` 自带圆环 —— 圆环被矩形边切掉一截,看着像多了
                     // 一层方向不对的覆盖层。这里自己画底:Circle 背景 + 不带圆环的图标,
@@ -650,6 +677,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
 
         func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
             synchronizeDocumentGeneration(on: canvasView)
+            controller.noteHandPresence()   // 落笔也算 Pencil 出现过（老 iPad 不支持悬停，靠这条兜住）
             canvasToolActive = true
             activeCanvasTool = controller.tool
             if activeCanvasTool == .pen {
@@ -749,7 +777,14 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 currentSurface = nil
             }
 
-            for sample in stroke.path {
+            // ⚠ 不能直接 `for sample in stroke.path` —— 那样拿到的是 B 样条的**控制点**，
+            //   控制点并不在曲线上。再叠加网页端的中点 quadratic（曲线只经过相邻点中点），
+            //   弯钩和转折会被往内削两次，写出来的字就"不像"。
+            //   interpolatedPoints(by:) 才是曲线上的真实点，按弧长等距取样。
+            //   距离取画布短边的 1/900：太密会撑爆 payload（网页端每段上限 4096 点），
+            //   太疏又回到削平老路。
+            let step = max(1.0, min(canvasBounds.width, canvasBounds.height) / 900.0)
+            for sample in stroke.path.interpolatedPoints(by: .distance(step)) {
                 let normalized = CGPoint(
                     x: sample.location.x / canvasBounds.width,
                     y: sample.location.y / canvasBounds.height
@@ -768,7 +803,9 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 if let last = currentPoints.last {
                     let dx = point[0] - last[0]
                     let dy = point[1] - last[1]
-                    if dx * dx + dy * dy < 0.000_004 { continue }
+                    // 抽稀阈值从 0.002 收到 0.0006（页宽的万分之六）。原值是配合稀疏控制点定的，
+                    // 现在上游已经是等距曲线点，再按 0.002 抽等于把刚取回来的精度又扔掉一遍。
+                    if dx * dx + dy * dy < 0.000_000_36 { continue }
                 }
                 currentPoints.append(point)
             }
