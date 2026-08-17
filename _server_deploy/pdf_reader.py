@@ -16241,6 +16241,39 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
             raw = _ai_call_untrusted(prompt, "card_improve", uid)
             cards = _parse_anki_cards_response(raw)
             _step(f"正在写入 Anki（{len(cards)} 张）" if cards else "AI 没生成卡片")
+            # ── 出处(2026-08-18)：此前这条路的 fields **只有正反面**，零出处 ──────────────
+            #   下游「按掌握度低的知识找回对应知识点」完全依赖出处回溯，没有它整条链不成立；
+            #   而且丢的是**采集时才有**的信息——事后没有任何办法把卡重新对回它出自哪一页。
+            #   两条路都要接：草稿路(defer_add)把 entity_id 交给后续确认入库那一步去拼 footer，
+            #   直接入库路在这里自己拼。断点原本在「选段路从不注册实体」→ 前端 gid 回落成
+            #   fcg_snip_*，与 card_ 前缀的正则对不上 → 不发 entity_id → source_ref 空 → footer 空串。
+            _sf, _sp = str(source_file or ""), int(source_page or 0)
+            if not _sf and snippets:   # 旧调用者只给 source URL，从 query 里挖
+                try:
+                    import urllib.parse as _up0
+                    _q0 = _up0.parse_qs(_up0.urlparse(snippets[0].get("source") or "").query)
+                    _sf = (_q0.get("file") or [""])[0]
+                    _sp = int((_q0.get("page") or ["0"])[0] or 0)
+                except Exception:
+                    pass
+            if _sf and VB is not None:   # 合订本必须归一到真成员 + 局部页，否则换台设备打开的是错的书
+                try:
+                    _sf, _sp = VB.locate(_sf, _sp or 1)
+                except Exception:
+                    pass
+            # 规范形式是 book:<rel>#p<page>（与本文件 11243 的 draft 路一致）；裸路径虽然
+            # _anki_source_ref 也能吃，但两条路写出不同形状会让跨设备解析各走各的。
+            _src_ref = ("book:%s#p%d" % (_sf, _sp)) if (_sf and _sp) else (("book:%s" % _sf) if _sf else "")
+            _aid = ""
+            if cards:
+                try:
+                    _aid = _entity_reg_cards(cards, {"source_ref": _src_ref} if _src_ref else None)
+                except Exception:
+                    _aid = ""
+            if _aid:
+                out["id"] = _aid            # 前端按 card_ 前缀认它当 gid（rc-snippets）
+            if _src_ref:
+                out["source_ref"] = _src_ref
             if defer_add:   # B1 融合复习卡:草稿不入库(未经确认的卡不能进 Anki 库——用户规格)
                 # 后续的注意力账本与 AnkiWeb sync 共用 added 判定。草稿路径
                 # 不会写 Anki，但仍必须给它明确的 0，不能让已生成的卡片
@@ -16301,17 +16334,25 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
                 note_ids = []
                 for idx, c in enumerate(cards):
                     ctype = (c.get("type") or "basic").lower()
+                    # 出处 footer：可见的「来源/卡片编号/问 AI」+ 隐藏的 @src 机器可读标记，
+                    # 与 /pdf/api/anki-add-cards 那条确认入库路用的是同一个生成器，两条路格式一致。
+                    _ftr = ""
+                    if _aid or _src_ref:
+                        try:
+                            _ftr = _anki_provenance_footer(_aid, idx, _src_ref)
+                        except Exception:
+                            _ftr = ""
                     if ctype == "cloze":
                         text_val = _anki_md_links(c.get("text", ""))
                         if idx == 0 and img_tag:   # 只贴进本次生成的第一张卡,避免多卡重复贴同一张图
                             text_val += img_tag
-                        fields = {c_text: text_val}
+                        fields = {c_text: text_val + _ftr}
                         model_name = cloze_m
                     else:
                         back_val = _anki_md_links(c.get("back", ""))
                         if idx == 0 and img_tag:
                             back_val += img_tag
-                        fields = {b_front: _anki_md_links(c.get("front", "")), b_back: back_val}
+                        fields = {b_front: _anki_md_links(c.get("front", "")), b_back: back_val + _ftr}
                         model_name = basic_m
                     req = json.dumps({
                         "action": "addNote", "version": 6,
