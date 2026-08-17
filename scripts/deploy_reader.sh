@@ -60,11 +60,20 @@ WRITER_TIMERS=(
   "bwicarus-quick-sync.timer"
   "bwicarus-daily.timer"
   "concept-graph.timer"
+  # 这两个也写 KG_MUTABLE_PATHS 里的 state/pdf-figures：
+  #   yolo_figures.py:19 与 describe_figures_batch.py:19 都以它为 FIG_DIR。
+  # 漏登记的后果实测过（2026-08-18 02:29 部署撞上 02:30 的 figures-describe）：
+  # 它们不被冻结 → 部署窗口内改了 KG 状态 → 健康检查判定"意外写入" →
+  # 回滚无法自证 → 现场冻结、webapp 停在 inactive，服务直接下线。
+  "yolo-figures.timer"
+  "figures-describe.timer"
 )
 WRITER_SERVICES=(
   "bwicarus-quick-sync.service"
   "bwicarus-daily.service"
   "concept-graph.service"
+  "yolo-figures.service"
+  "figures-describe.service"
 )
 MANAGED_SERVICES=("webapp.service" "$VOICE_RT_UNIT")
 KG_MUTABLE_PATHS=(
