@@ -126,61 +126,65 @@ def load_config() -> dict:
 def measure_bar(
     bgra: bytes, width: int, height: int, *,
     skip_left: int, ref_cols: int, tol: int, run: int,
-    sat_solid: int, sat_ratio: float,
+    sat_solid: int, **_legacy,
 ) -> tuple[int, int, int]:
     """量血条,返回 (实血, 余像, 总填充) 三个列数。
 
-    第四版(2026-08-17,用户指出"该看空的血条"后的实测修正):
-    填充色是**开放集合** —— 正常橙红、装备对比变粉、中毒、雨淋、虚血…
-    数不完,所以不能锚在填充色上。但空槽同样不能锚:实测它**半透明**,
-    背景透过来(雪地场景 lum102、夜沼场景 lum45),一样不稳定。
+    第五版(2026-08-17,用户提出"对比最左侧与其它位置的差异"后定型):
+    填充色是**开放集合**(橙红/变粉/中毒/雨淋/虚血…数不完),空槽也不能锚
+    (实测半透明,背景透过来:雪地 lum102、夜沼 lum45)。唯一闭合的不变量是
+    **一段填充内部同色**,所以判据是"与最左端(必为填充)的差异从哪里开始"。
 
-    真正稳定的是**填充段自身的均匀性**:不管什么颜色,同一段填充是同色的,
-    而空槽随背景波动。故锚在最左端(必为填充)取参考色,向右找第一处显著
-    偏离 = 填充边界 total。
+    要求**连续性**:实测"统计与参考一致的列数"会被空槽里偶然相似的列污染
+    (三个案例分别高估 51/93/147 列),必须是"第一处连续 run 列偏离"。
 
-    段内再分实血与余像:余像是"最近损失"的白影,永远**去饱和**(实测
-    sat16),而实血无论橙红(sat50)还是变粉(sat58)都保有饱和度。用段内
-    相对跌落 + 绝对下限双判据,整段同质时按绝对饱和度定性。
+    逐段推进拿到三个量:
+      段1(锚最左) = 实血      —— 有饱和度,无论什么色相
+      段2(锚段1右侧) = 余像    —— 去饱和白影,亮度高于背景;它是"最近损失"
+      其余 = 空槽/背景
+    濒死态最左端本身就是余像(低饱和),此时实血记 0,整段计入余像。
 
-    四态回归:满血 346/0、濒死 **0/377**(此前误读成有血)、变粉 476/0
-    (此前误读成 0,伪造 98% 暴击)、商店遮罩 394 与遮罩前 394 完全一致。
+    真实帧回归:满血 346/0、濒死 0/377、变粉 476/0(旧版误读成 0 伪造暴击)、
+    商店遮罩 394 与遮罩前 394 一致、恶魔王子 408 + 余像、倒地 26/460。
     """
     import numpy as np
 
     a = np.frombuffer(bgra, np.uint8).reshape(height, width, 4)[:, :, 2::-1]
     cols = a.astype(np.float32).mean(axis=0)
 
-    ref = np.median(cols[skip_left:skip_left + ref_cols], axis=0)
-    dist = np.abs(cols - ref).sum(axis=1)
-    total_end = len(cols)
-    miss = 0
-    for x in range(skip_left + ref_cols, len(cols)):
-        if dist[x] > tol:
-            miss += 1
-            if miss >= run:
-                total_end = x - run + 1
-                break
-        else:
-            miss = 0
-    total = total_end - skip_left
-    if total <= 0:
-        return 0, 0, 0
+    def segment(start: int) -> tuple[int, np.ndarray]:
+        """从 start 起量一段同色区,返回 (段末位置, 该段参考色)。"""
+        ref = np.median(cols[start:start + ref_cols], axis=0)
+        dist = np.abs(cols - ref).sum(axis=1)
+        miss = 0
+        for x in range(start + ref_cols, len(cols)):
+            if dist[x] > tol:
+                miss += 1
+                if miss >= run:
+                    return x - run + 1, ref
+            else:
+                miss = 0
+        return len(cols), ref
 
-    body = cols[skip_left:total_end]
-    sat = body.max(axis=1) - body.min(axis=1)
-    k = max(2, run // 2)
-    smooth = np.convolve(sat, np.ones(2 * k + 1) / (2 * k + 1), mode="same")
-    if len(smooth) > 4 * k:
-        left_hi = float(smooth[: len(smooth) // 2].max())
-        for i in range(k, len(smooth) - k):
-            if smooth[i] < left_hi / sat_ratio and smooth[i] < sat_solid:
-                if i > k:
-                    return i, total - i, total
-                break
-    if float(np.median(sat)) >= sat_solid:
-        return total, 0, total
-    return 0, total, total
+    if skip_left + ref_cols >= len(cols):
+        return 0, 0, 0
+    end1, ref1 = segment(skip_left)
+    seg1 = end1 - skip_left
+    sat1 = float(ref1.max() - ref1.min())
+
+    if sat1 < sat_solid:
+        # 最左端已是去饱和白影 = 濒死/刚被打空,实血为 0
+        return 0, seg1, seg1
+
+    ghost = 0
+    if end1 + ref_cols < len(cols):
+        end2, ref2 = segment(end1)
+        sat2 = float(ref2.max() - ref2.min())
+        lum2 = float(ref2[0] * 0.299 + ref2[1] * 0.587 + ref2[2] * 0.114)
+        # 余像 = 去饱和且够亮的白影;暗背景不算
+        if sat2 < sat_solid and lum2 >= 70:
+            ghost = end2 - end1
+    return seg1, ghost, seg1 + ghost
 
 
 def count_cool_pixels(bgra: bytes, min_level: int, dominance: int) -> int:
@@ -350,11 +354,13 @@ def self_test() -> int:
             + [205, 200, 210, 255] * ghost_n    # 余像:去饱和白影
             + [40, 55, 90, 255] * slot_n        # 空槽:背景色(任意)
         )
-    kw = dict(skip_left=2, ref_cols=6, tol=55, run=4, sat_solid=30, sat_ratio=1.8)
+    kw = dict(skip_left=2, ref_cols=6, tol=55, run=4, sat_solid=30)
     n = 40 - kw["skip_left"]  # 读数天然少 skip_left 列(那是边框装饰)
     assert measure_bar(bar(40, 0, 30), 70, 1, **kw) == (n, 0, n), "满血无余像"
     assert measure_bar(bar(0, 40, 30), 70, 1, **kw) == (0, n, n), "濒死:实血 0"
-    # 变色(粉紫/中毒绿/冰蓝)都不影响 —— 第四版正是为这个开放集合设计
+    hp, gh, tot = measure_bar(bar(30, 20, 30), 80, 1, **kw)
+    assert hp == 30 - kw["skip_left"] and gh == 20 and tot == hp + gh, (hp, gh, tot)
+    # 变色(粉紫/中毒绿/冰蓝)都不影响 —— 正是为这个开放集合设计
     for tint in ((210, 60, 190), (90, 200, 70), (70, 120, 210)):
         assert measure_bar(bar(40, 0, 30, tint), 70, 1, **kw)[0] == n, f"变色 {tint}"
 
@@ -421,7 +427,7 @@ def probe_bars_once() -> int:
             fill, ghost, total = measure_bar(
                 raw, b["w"], b["h"], skip_left=bc["skipLeft"],
                 ref_cols=bc["refCols"], tol=bc["tol"], run=bc["run"],
-                sat_solid=bc["satSolid"], sat_ratio=bc["satRatio"])
+                sat_solid=bc["satSolid"])
             print(f"{name:8s} 实血={fill:5d} 余像={ghost:5d} 总={total:5d}列  冷填充="
                   f"{count_cool_pixels(raw, cfg['cool']['minLevel'], cfg['cool']['dominance']):5d}")
     print(f"前台窗口: {_foreground_title()!r}")
@@ -534,7 +540,7 @@ def run() -> int:
                     bytes(sct.grab(rects["hp"]).raw), hp_rect["w"], hp_rect["h"],
                     skip_left=barcfg["skipLeft"], ref_cols=barcfg["refCols"],
                     tol=barcfg["tol"], run=barcfg["run"],
-                    sat_solid=barcfg["satSolid"], sat_ratio=barcfg["satRatio"])
+                    sat_solid=barcfg["satSolid"])
                 fp_lit = count_cool_pixels(
                     bytes(sct.grab(rects["fp"]).raw), cool["minLevel"], cool["dominance"])
                 st_lit = count_cool_pixels(
