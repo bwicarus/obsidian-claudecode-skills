@@ -369,8 +369,13 @@ if (window.__bwPwaProviderOnly) return;
       //   而 WebKit(iOS)下 backdrop-filter 的采样与裁剪跟不上尺寸变化 —— 卡片右侧和底部
       //   会露出一圈没被裁掉的模糊层,看起来像"上面盖了个更大且错位的透明浮层"(实测)。
       //   放到 ::before 上:它由布局逐帧决定 inset:0,自己不参与任何过渡,裁剪永远是当前尺寸。
+      // ⚠ --vc-cardblur 默认 none:backdrop-filter 在 iOS 上会**整层与元素本体错位**
+      //   (模糊层留在左上、本体偏右下,超出的被裁 → 右边看着变成直角)。移到 ::before 只是
+      //   把裁剪滞后治好了,错位是 backdrop-filter 自己的合成问题,换个宿主一样犯。
+      //   球那边去掉它之后问题直接消失,同一个原因 —— 所以这里也去掉,底色相应加实补偿。
+      //   想找回磨砂:把 --vc-cardblur 改回 blur(24px) saturate(1.6) 即可,一处开关。
       '.vc-card{position:absolute;right:0;bottom:0;width:100%;background:transparent;isolation:isolate;' +
-      '--vc-cardbg:rgba(28,28,30,.72);--vc-cardblur:blur(24px) saturate(1.6);' +
+      '--vc-cardbg:rgba(30,30,34,.9);--vc-cardblur:none;' +
       '-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;' +
       'border:0.5px solid rgba(255,255,255,.14);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.4);color:#f2f2f7;font-size:14px;line-height:1.55;' +
       'padding:10px 13px 12px;pointer-events:auto;display:flex;flex-direction:column;max-height:36vh;' +
@@ -451,7 +456,7 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-card.vc-page-placement:not(.vc-dot):not(.vc-min)>.vc-card-bd.fc-bare>.fc-wrap>.fc-track>.fc-slide{height:auto;min-height:0;max-height:100%;align-self:stretch;overflow:hidden}' +
       '.vc-card.vc-page-placement:not(.vc-dot):not(.vc-min)>.vc-card-bd.fc-bare>.fc-wrap>.fc-track>.fc-slide>.fc-card{box-sizing:border-box;height:100%;max-height:100%;overflow:hidden}' +
       '.vc-card.vc-page-placement:not(.vc-dot):not(.vc-min)>.vc-card-bd.fc-bare>.fc-wrap>.fc-dots{grid-row:2}' +
-      '.vc-card-rs{position:absolute;right:5px;bottom:5px;width:25px;height:25px;display:none;z-index:24;cursor:nwse-resize;touch-action:none;padding:0;border-radius:9px;border:1px solid rgba(157,140,255,.66);background:rgba(24,28,42,.78);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);box-shadow:0 5px 16px rgba(0,0,0,.34);color:#d8d1ff;-webkit-tap-highlight-color:transparent}' +
+      '.vc-card-rs{position:absolute;right:5px;bottom:5px;width:25px;height:25px;display:none;z-index:24;cursor:nwse-resize;touch-action:none;padding:0;border-radius:9px;border:1px solid rgba(157,140,255,.66);background:rgba(24,28,42,.92);box-shadow:0 5px 16px rgba(0,0,0,.34);color:#d8d1ff;-webkit-tap-highlight-color:transparent}' +
       '.vc-card-rs::after{content:"";position:absolute;right:6px;bottom:6px;width:8px;height:8px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;border-radius:1px}' +
       '.vc-card.vc-resize-armed:not(.vc-dot):not(.vc-min)>.vc-card-rs{display:block;animation:vcRsIn .18s cubic-bezier(.2,.85,.3,1)}' +
       '.vc-card.vc-resizing{transition:none!important;will-change:width,height;box-shadow:0 18px 46px rgba(0,0,0,.52),0 0 0 1px rgba(157,140,255,.68)!important}' +
@@ -486,10 +491,16 @@ if (window.__bwPwaProviderOnly) return;
       // 6% 白玻璃压在 PDF 白页上直接隐形。所以**可见性改由轮廓承担**:填充与模糊都压低,
       // 边框反而加实、再加一圈极淡的外描边,球在白页和深色插图上都还认得出。
       // 展开后不受影响(下面的 :not(.vc-dot) 把值还原)。
-      '.vc-card.vc-dot .vc-card-dot{--vc-tf:color-mix(in srgb,var(--vc-tc) 12%,rgba(22,26,38,.34));' +
-        '--vc-tl:color-mix(in srgb,var(--vc-tc) 62%,rgba(255,255,255,.34));' +
-        '-webkit-backdrop-filter:blur(9px) saturate(1.2);backdrop-filter:blur(9px) saturate(1.2);' +
-        'box-shadow:0 2px 9px -3px rgba(0,0,0,.34),0 0 0 0.5px rgba(0,0,0,.16)}' +
+      // ⚠ 收起态**去掉** backdrop-filter,不是调低它:
+      //   ① iOS 上这一层的合成结果与元素本体对不齐,模糊层留在左上、本体偏右下,
+      //      超出的部分被裁 → 右边看着变成直角(用户诊断:"偏右下就导致右边被截掉",正解);
+      //   ② 球要的是"透出后面的字",而 blur 本身就是遮挡 —— 两者方向相反。
+      //   去掉之后这个元素只剩一层背景,没有第二个层可错位,问题从根上消失。
+      //   可见性仍由轮廓承担:内描边加实 + 一圈极淡外描边,亮底暗底都认得出。
+      '.vc-card.vc-dot .vc-card-dot{--vc-tf:color-mix(in srgb,var(--vc-tc) 14%,rgba(22,26,38,.38));' +
+        '--vc-tl:color-mix(in srgb,var(--vc-tc) 66%,rgba(255,255,255,.38));' +
+        '-webkit-backdrop-filter:none;backdrop-filter:none;' +
+        'box-shadow:0 2px 9px -3px rgba(0,0,0,.34),0 0 0 0.5px rgba(0,0,0,.18)}' +
       // 手指按住时补回不透明度:正在操作的东西该是实的,不然点下去像没点到。
       '.vc-card.vc-dot .vc-card-dot:active{--vc-tf:color-mix(in srgb,var(--vc-tc) 26%,rgba(22,26,38,.72))}' +
       // 三态生长:**以左上角(标记位置)为原点**拉长/展开——标记不动,卡片从它身上长出来
@@ -517,7 +528,7 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-card.vc-hasdot:not(.vc-min):not(.vc-dot) .vc-card-bd{padding-left:13px}' +
       // 完成态:有色磨砂 + 边缘阴影(跟"创建时的透明玻璃圆"区分开)
       '.vc-card.vc-typed{border-color:color-mix(in srgb,var(--vc-tc) 42%,transparent);' +
-        '--vc-cardbg:color-mix(in srgb,var(--vc-tc) 13%,rgba(28,28,30,.74));' +
+        '--vc-cardbg:color-mix(in srgb,var(--vc-tc) 15%,rgba(28,30,34,.9));' +   /* 去 blur 后加实 */
         'box-shadow:0 16px 42px rgba(0,0,0,.5),0 0 22px -8px color-mix(in srgb,var(--vc-tc) 55%,transparent)}' +
       '.vc-card.vc-typed .vc-card-hd{color:var(--vc-tc)}' +
       '.vc-card.vc-typed.vc-dot{--vc-cardbg:rgba(255,255,255,.05);--vc-cardblur:none;box-shadow:none;border-color:transparent}' +
