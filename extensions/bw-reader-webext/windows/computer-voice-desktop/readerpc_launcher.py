@@ -824,8 +824,9 @@ class ReaderPCWindow:
             ).start()
 
         root.title(PRODUCT_NAME)
-        root.geometry("620x500")
-        root.minsize(560, 450)
+        # 高度要装下 3 个服务行 + 5 行选项 + 页脚;500 时最后两行会被裁掉
+        root.geometry("620x620")
+        root.minsize(560, 560)
         root.protocol("WM_DELETE_WINDOW", self.request_exit)
         root.bind("<Unmap>", self._on_unmap, add="+")
 
