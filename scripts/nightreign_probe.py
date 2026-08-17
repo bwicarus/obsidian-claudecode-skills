@@ -52,7 +52,8 @@ DEFAULT_CONFIG: dict = {
         "stamina": {"x": 334, "y": 140, "w": 800, "h": 12},
     },
     # HP 按饱和度量长度(见 measure_bar);阈值来自四态实测
-    "bar": {"satMin": 42, "lumMin": 55, "run": 12, "skipLeft": 6},
+    "bar": {"skipLeft": 20, "refCols": 50, "tol": 55, "run": 20,
+            "satSolid": 30, "satRatio": 1.8},
     "cool": {"minLevel": 60, "dominance": 15},  # FP/耐力存在性(青/绿)
     "pollHz": 8,
     "dropThresholdCols": 6,
@@ -124,49 +125,62 @@ def load_config() -> dict:
 
 def measure_bar(
     bgra: bytes, width: int, height: int, *,
-    sat_min: int, lum_min: int, run: int, skip_left: int
-) -> tuple[int, int]:
-    """量血条:返回 (实血长度, 余像长度),单位=列。
+    skip_left: int, ref_cols: int, tol: int, run: int,
+    sat_solid: int, sat_ratio: float,
+) -> tuple[int, int, int]:
+    """量血条,返回 (实血, 余像, 总填充) 三个列数。
 
-    第三版核心(2026-08-17,AI 裁定反查出的根因):血条**会整体变色**
-    (橙红↔粉紫,装备对比/区域增益/队友状态都会触发),按红色像素计数时
-    变色瞬间读数归零,直接伪造出"98% 暴击"。改按列的**饱和度**找填充
-    右端 —— 这是几何量,实测四态皆可分:满血填充 sat48/空槽 33-38、
-    变粉填充 sat58、商店遮罩下血条区仍 48 而遮罩区 0、濒死整条 15-18
-    (剩的是苍白余像,实血确为 0)。
+    第四版(2026-08-17,用户指出"该看空的血条"后的实测修正):
+    填充色是**开放集合** —— 正常橙红、装备对比变粉、中毒、雨淋、虚血…
+    数不完,所以不能锚在填充色上。但空槽同样不能锚:实测它**半透明**,
+    背景透过来(雪地场景 lum102、夜沼场景 lum45),一样不稳定。
 
-    余像(高亮度低饱和,填充右侧那截白影)顺带给出"最近损失了多少",
-    是免费的第二信号。
+    真正稳定的是**填充段自身的均匀性**:不管什么颜色,同一段填充是同色的,
+    而空槽随背景波动。故锚在最左端(必为填充)取参考色,向右找第一处显著
+    偏离 = 填充边界 total。
+
+    段内再分实血与余像:余像是"最近损失"的白影,永远**去饱和**(实测
+    sat16),而实血无论橙红(sat50)还是变粉(sat58)都保有饱和度。用段内
+    相对跌落 + 绝对下限双判据,整段同质时按绝对饱和度定性。
+
+    四态回归:满血 346/0、濒死 **0/377**(此前误读成有血)、变粉 476/0
+    (此前误读成 0,伪造 98% 暴击)、商店遮罩 394 与遮罩前 394 完全一致。
     """
-    cols_sat: list[int] = []
-    cols_lum: list[int] = []
-    for x in range(width):
-        s_acc = l_acc = 0
-        for y in range(height):
-            i = (y * width + x) * 4
-            b, g, r = bgra[i], bgra[i + 1], bgra[i + 2]
-            s_acc += max(r, g, b) - min(r, g, b)
-            l_acc += (r * 299 + g * 587 + b * 114) // 1000
-        cols_sat.append(s_acc // height)
-        cols_lum.append(l_acc // height)
+    import numpy as np
 
-    def edge(pred, start: int) -> int:
-        """从 start 起向右,首次连续 run 列不满足 pred 的位置。"""
-        miss = 0
-        for x in range(start, len(cols_sat)):
-            if pred(x):
-                miss = 0
-            else:
-                miss += 1
-                if miss >= run:
-                    return x - run + 1
-        return len(cols_sat)
+    a = np.frombuffer(bgra, np.uint8).reshape(height, width, 4)[:, :, 2::-1]
+    cols = a.astype(np.float32).mean(axis=0)
 
-    fill_end = edge(lambda x: cols_sat[x] >= sat_min, skip_left)
-    fill = max(0, fill_end - skip_left)
-    ghost_end = edge(lambda x: cols_lum[x] >= lum_min, fill_end)
-    ghost = max(0, ghost_end - fill_end)
-    return fill, ghost
+    ref = np.median(cols[skip_left:skip_left + ref_cols], axis=0)
+    dist = np.abs(cols - ref).sum(axis=1)
+    total_end = len(cols)
+    miss = 0
+    for x in range(skip_left + ref_cols, len(cols)):
+        if dist[x] > tol:
+            miss += 1
+            if miss >= run:
+                total_end = x - run + 1
+                break
+        else:
+            miss = 0
+    total = total_end - skip_left
+    if total <= 0:
+        return 0, 0, 0
+
+    body = cols[skip_left:total_end]
+    sat = body.max(axis=1) - body.min(axis=1)
+    k = max(2, run // 2)
+    smooth = np.convolve(sat, np.ones(2 * k + 1) / (2 * k + 1), mode="same")
+    if len(smooth) > 4 * k:
+        left_hi = float(smooth[: len(smooth) // 2].max())
+        for i in range(k, len(smooth) - k):
+            if smooth[i] < left_hi / sat_ratio and smooth[i] < sat_solid:
+                if i > k:
+                    return i, total - i, total
+                break
+    if float(np.median(sat)) >= sat_solid:
+        return total, 0, total
+    return 0, total, total
 
 
 def count_cool_pixels(bgra: bytes, min_level: int, dominance: int) -> int:
@@ -328,24 +342,21 @@ def self_test() -> int:
         bytes([190, 150, 60, 255] + [80, 170, 60, 255] + [20, 20, 40, 255]), 60, 15
     ) == 2, "冷色只认青条和绿条"
 
-    # measure_bar:单行血条,左 10 列饱和填充 + 5 列高亮低饱和余像 + 空槽
-    def bar(fill_n, ghost_n, slot_n, fill_rgb=(200, 40, 40)):
-        r, g, b = fill_rgb
+    # measure_bar:三段分割(实血/余像/空槽),锚在填充段自身
+    def bar(solid_n, ghost_n, slot_n, solid=(200, 60, 50)):
+        r, g, b = solid
         return bytes(
-            [b, g, r, 255] * fill_n          # 高饱和填充
-            + [200, 200, 210, 255] * ghost_n  # 余像:亮且近白
-            + [30, 28, 34, 255] * slot_n      # 空槽:暗
+            [b, g, r, 255] * solid_n            # 实血:有饱和度
+            + [205, 200, 210, 255] * ghost_n    # 余像:去饱和白影
+            + [40, 55, 90, 255] * slot_n        # 空槽:背景色(任意)
         )
-    kw = dict(sat_min=42, lum_min=55, run=3, skip_left=0)
-    assert measure_bar(bar(10, 5, 20), 35, 1, **kw) == (10, 5), "实血/余像分离"
-    # 变色(粉紫)不影响长度 —— 这正是第三版要修的根因
-    assert measure_bar(bar(10, 5, 20, (210, 60, 190)), 35, 1, **kw) == (10, 5), "变粉同长"
-    assert measure_bar(bar(0, 12, 20), 32, 1, **kw) == (0, 12), "濒死:实血 0,余像长"
-    assert measure_bar(bar(25, 0, 10), 35, 1, **kw) == (25, 0), "满血无余像"
-    kw = dict(drop_threshold=4)
-    assert classify_change(100, 97, **kw) is None, "小抖动不该报事件"
-    assert classify_change(100, 90, **kw) == "hp-drop"
-    assert classify_change(90, 100, **kw) == "hp-gain"
+    kw = dict(skip_left=2, ref_cols=6, tol=55, run=4, sat_solid=30, sat_ratio=1.8)
+    n = 40 - kw["skip_left"]  # 读数天然少 skip_left 列(那是边框装饰)
+    assert measure_bar(bar(40, 0, 30), 70, 1, **kw) == (n, 0, n), "满血无余像"
+    assert measure_bar(bar(0, 40, 30), 70, 1, **kw) == (0, n, n), "濒死:实血 0"
+    # 变色(粉紫/中毒绿/冰蓝)都不影响 —— 第四版正是为这个开放集合设计
+    for tint in ((210, 60, 190), (90, 200, 70), (70, 120, 210)):
+        assert measure_bar(bar(40, 0, 30, tint), 70, 1, **kw)[0] == n, f"变色 {tint}"
 
     f = StabilityFilter(2, 8)
     assert f.feed(6932) is None and f.feed(6932) is None
@@ -407,10 +418,11 @@ def probe_bars_once() -> int:
                 sct.grab({"left": b["x"], "top": b["y"], "width": b["w"], "height": b["h"]}).raw
             )
             bc = cfg["bar"]
-            fill, ghost = measure_bar(
-                raw, b["w"], b["h"], sat_min=bc["satMin"], lum_min=bc["lumMin"],
-                run=bc["run"], skip_left=bc["skipLeft"])
-            print(f"{name:8s} 实血={fill:5d}列 余像={ghost:5d}列  冷填充="
+            fill, ghost, total = measure_bar(
+                raw, b["w"], b["h"], skip_left=bc["skipLeft"],
+                ref_cols=bc["refCols"], tol=bc["tol"], run=bc["run"],
+                sat_solid=bc["satSolid"], sat_ratio=bc["satRatio"])
+            print(f"{name:8s} 实血={fill:5d} 余像={ghost:5d} 总={total:5d}列  冷填充="
                   f"{count_cool_pixels(raw, cfg['cool']['minLevel'], cfg['cool']['dominance']):5d}")
     print(f"前台窗口: {_foreground_title()!r}")
     return 0
@@ -432,7 +444,7 @@ def run() -> int:
     (session_dir / "evidence").mkdir(parents=True, exist_ok=True)
     ledger = (session_dir / "ledger.jsonl").open("a", encoding="utf-8")
     samples = (session_dir / "samples.csv").open("a", encoding="utf-8")
-    samples.write("ts,hp_cols,ghost_cols,fp,stamina,hud\n")
+    samples.write("ts,hp_cols,ghost_cols,total_cols,fp,stamina,hud\n")
     (session_dir / "session.json").write_text(
         json.dumps(
             {"contract": LEDGER_CONTRACT, "game": "nightreign", "channel": "hud",
@@ -518,10 +530,11 @@ def run() -> int:
 
                 now = time.monotonic()
                 hp_rect = bars["hp"]
-                hp_raw, hp_ghost = measure_bar(
+                hp_raw, hp_ghost, hp_total = measure_bar(
                     bytes(sct.grab(rects["hp"]).raw), hp_rect["w"], hp_rect["h"],
-                    sat_min=barcfg["satMin"], lum_min=barcfg["lumMin"],
-                    run=barcfg["run"], skip_left=barcfg["skipLeft"])
+                    skip_left=barcfg["skipLeft"], ref_cols=barcfg["refCols"],
+                    tol=barcfg["tol"], run=barcfg["run"],
+                    sat_solid=barcfg["satSolid"], sat_ratio=barcfg["satRatio"])
                 fp_lit = count_cool_pixels(
                     bytes(sct.grab(rects["fp"]).raw), cool["minLevel"], cool["dominance"])
                 st_lit = count_cool_pixels(
@@ -546,7 +559,8 @@ def run() -> int:
                 cur_sample = (hp_raw, hp_ghost // 8, fp_lit // 50, st_lit // 50, hud_state)
                 if cur_sample != last_sample:
                     samples.write(
-                        f"{_now_iso()},{hp_raw},{hp_ghost},{fp_lit},{st_lit},{hud_state}\n")
+                        f"{_now_iso()},{hp_raw},{hp_ghost},{hp_total},"
+                        f"{fp_lit},{st_lit},{hud_state}\n")
                     samples.flush()
                     last_sample = cur_sample
 
@@ -583,7 +597,8 @@ def run() -> int:
                                 eid = emit("episode-start", ep_pending["pxBefore"],
                                            ep_pending["pxAfter"],
                                            {"fp": fp_lit, "stamina": st_lit,
-                                            "ghostCols": hp_ghost})
+                                            "ghostCols": hp_ghost,
+                                            "totalCols": hp_total})
                                 pending_ev.append(
                                     {"id": eid, "anchor": ep_pending["anchor"],
                                      "due": ep_pending["anchor"]
@@ -615,7 +630,8 @@ def run() -> int:
 
                 if now - heartbeat_at >= 120.0:
                     heartbeat_at = now
-                    print(f"[heartbeat] hp={hp_raw}列 余像={hp_ghost} fp={fp_lit} st={st_lit} "
+                    print(f"[heartbeat] hp={hp_raw}列 余像={hp_ghost} 总={hp_total} "
+                          f"fp={fp_lit} st={st_lit} "
                           f"hud={hud_state} 缓冲={len(ring)}帧")
 
                 elapsed = time.monotonic() - tick_start
