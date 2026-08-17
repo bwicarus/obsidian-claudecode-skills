@@ -36,23 +36,37 @@ SYSTEM = (
     "只描述你真正看到的东西;看不清就说看不清,不要编造。"
 )
 
-PROMPT = """这是一次玩家受伤事件的连续画面(按时间顺序,offset 是相对首次受击的秒数)。
+PROMPT = """《艾尔登法环:黑夜君临》一次玩家受伤事件的连续画面(方括号=相对首次受击的秒数)。
 
-台账数据:持续 {dur:.1f} 秒,挨打 {drops} 次,损失约 {pct}% 血,段结束原因={ended}。
+台账:持续 {dur:.1f} 秒,挨打 {drops} 次,损失约 {pct}% 血,段结束原因={ended}。
 
-请回答(用 JSON,不要其它文字):
-{{"attacker":"凶手名字或外形描述",
+⚠ HUD 布局(务必分清,别把队友当敌人):
+- 左上三条(橙/蓝/绿)= **玩家自己**的 HP/FP/耐力
+- 左侧带头像的列表 = **队友**(Boochi、n1993r 这类玩家 ID),友方!
+- 屏幕**下方居中**的横条 + 中文名 = **敌人**,这才是攻击者
+- 敌人名只能从下方居中那条读,绝不能用队友 ID
+
+输出 JSON(只输出 JSON):
+{{"attacker":"敌人中文名(只从下方居中血条读;多条时选与玩家近身缠斗的那个)",
+  "otherEnemies":"同时在场的其它敌人名",
   "source":"name-plate|visual-id|inferred|unknown",
   "confidence":"high|medium|low",
-  "action":"致命过程一句话",
+  "appearance":"外形:体型/颜色/材质/肢体/武器",
+  "firstSeenAt":"第几秒首次看清它",
+  "approach":"怎么进入战斗:方向、冲刺还是走近、距离变化",
+  "attackMotion":"攻击动作分步:起手→中段→命中",
+  "telegraph":"可辨识的攻击预兆",
+  "effects":"伴随特效",
+  "sceneContext":"地形环境",
+  "playerResponse":"玩家当时在做什么、有没有躲",
+  "counterplay":"应对建议",
   "outcome":"died|downed|survived|menu-or-other|unclear",
-  "evidence":"判断依据,指明哪一帧看到的",
+  "evidence":"判 outcome 的依据,指明哪一帧",
+  "uncertain":"看不清只能推测的部分",
   "quality":"good|fair|poor"}}
 
-要点:
-1. 优先在画面下方找**带名字的敌人血条**(如"负伤恶魔""恶魔王子""黑夜王"),读到就用它,source 填 name-plate。
-2. 认不出贴脸的怪就看**靠前的帧**,那时敌人还在远处、轮廓完整。
-3. 结果看**最后几帧**:"陷入濒死了"字样或紫色复活圈=downed;"夜渡失败"大字/画面变灰=died;血条还有血=survived;画面是菜单/地图/加载=menu-or-other。
+判 outcome:"陷入濒死了"字样或紫色复活圈=downed;"夜渡失败"大字/画面变灰=died;
+血条还有血=survived;画面是菜单/地图/加载=menu-or-other。
 """
 
 
@@ -81,26 +95,27 @@ def b64_image(path: Path, max_side: int | None = 1280) -> str:
 
 def ask(frames: list[tuple[float, Path]], meta: dict, timeout: float) -> dict:
     content: list[dict] = [{"type": "text", "text": PROMPT.format(**meta)}]
+    # 名字条裁图先送且不缩放 —— 名字的权威来源,避免模型拿队友 ID 顶包
     for off, path in frames:
-        content.append({"type": "text", "text": f"[{off:+.1f}s] 全屏:"})
+        plate = path.with_name(path.stem + "_plate.jpg")
+        if plate.exists():
+            content.append({"type": "text",
+                            "text": "【敌人名字条(原尺寸,名字以此为准)】"})
+            content.append({"type": "image_url", "image_url": {
+                "url": f"data:image/jpeg;base64,{b64_image(plate, None)}"}})
+            break
+    for off, path in frames:
+        content.append({"type": "text", "text": f"[{off:+.1f}s]"})
         content.append({
             "type": "image_url",
             "image_url": {"url": f"data:image/jpeg;base64,{b64_image(path)}"},
         })
-        plate = path.with_name(path.stem + "_plate.jpg")
-        if plate.exists():
-            content.append({"type": "text",
-                            "text": f"[{off:+.1f}s] 敌人名字条(原尺寸):"})
-            content.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/jpeg;base64,{b64_image(plate, None)}"},
-            })
+
     body = json.dumps({
         "messages": [{"role": "system", "content": SYSTEM},
                      {"role": "user", "content": content}],
         "temperature": 0.2,
-        "max_tokens": 700,
+        "max_tokens": 1600,
         # Qwen3.8 默认 thinking:正式答案会跑进 reasoning_content 而 content 为空,
         # 且思考先把 token 预算吃光导致截断。语义裁定不需要长链思考,直接关掉。
         "chat_template_kwargs": {"enable_thinking": False},
@@ -172,8 +187,9 @@ def main() -> int:
         results.append({"id": w["id"], "ts": w["ts"], "lossPx": w["lossPx"],
                         "frames": len(frames), "seconds": round(dt, 1), **v})
         print(f"  [{i}/{len(items)}] {w['id']} {dt:5.1f}s  "
-              f"{v.get('attacker', v.get('_parse', v.get('_error','?')))[:40]}  "
-              f"{v.get('outcome','')}/{v.get('confidence','')}")
+              f"{str(v.get('attacker', v.get('_parse', v.get('_error','?'))))[:24]:24s} "
+              f"{v.get('outcome','')}/{v.get('confidence','')}  "
+              f"{str(v.get('appearance',''))[:30]}")
 
     out = sess / "refined" / "verdicts-local.json"
     out.write_text(json.dumps(

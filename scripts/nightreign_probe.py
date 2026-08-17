@@ -299,10 +299,12 @@ class EpisodeTracker:
         self.started = 0.0
         self.last_decrease = 0.0
         self.drops = 0
+        self.change_ts: list[float] = []
 
     def on_decrease(self, px_before: int, px_after: int, now_ts: float) -> bool:
         self.last_decrease = now_ts
         self.drops += 1
+        self.change_ts.append(now_ts)
         if self.active:
             self.min_px = min(self.min_px, px_after)
             return False
@@ -311,6 +313,7 @@ class EpisodeTracker:
         self.min_px = px_after
         self.started = now_ts
         self.drops = 1
+        self.change_ts = [now_ts]
         return True
 
     def quiet_elapsed(self, now_ts: float) -> bool:
@@ -336,15 +339,24 @@ def pick_evidence_frames(
     anchor_ts: float,
     offsets: list[float],
     window: float,
+    change_ts: list[float] | None = None,
 ) -> list[dict]:
     """按相对时刻取帧,每点在 ±window 内挑最清晰的一张;同一帧不重复取。
 
-    这是"证据可判读性"的核心:事发帧必然模糊且敌人贴脸,靠前几秒的帧才有
-    完整轮廓,靠后的帧能看到结果(倒地提示/死亡画面)。
+    两类时刻(2026-08-17 定型):
+      固定偏移 —— 看上下文(敌人远处轮廓、事后结果)
+      **真实变化时刻** —— 信号层测到的每次掉血/回血,看因果。实测缺了这类
+      时刻时,模型只能把两次相隔 0.26s 的掉血都归给同一帧,还会为了填满
+      叙事而编造细节;帧对准了变化点它才真的"看见"而不是推测。
     """
     picked: list[dict] = []
     used: set[float] = set()
-    for off in offsets:
+    all_offsets = list(offsets)
+    for ts in (change_ts or []):
+        rel = round(ts - anchor_ts, 2)
+        if all(abs(rel - o) > window for o in all_offsets):
+            all_offsets.append(rel)
+    for off in sorted(all_offsets):
         target = anchor_ts + off
         cands = [
             f for f in ring if abs(f[0] - target) <= window and f[0] not in used
@@ -356,7 +368,9 @@ def pick_evidence_frames(
         picked.append(
             {"offset": round(best[0] - anchor_ts, 2), "sharpness": round(best[2], 1),
              "_ts": best[0], "_jpg": best[1],
-             "_plate": best[3] if len(best) > 3 else None}
+             "_plate": best[3] if len(best) > 3 else None,
+             "atChange": any(abs(best[0] - c) <= window
+                             for c in (change_ts or []))}
         )
     return picked
 
@@ -499,10 +513,11 @@ def run() -> int:
               + (f" {extra.get('endedBy','')}" if extra else ""))
         return event_id
 
-    def save_evidence(event_id: str, anchor: float, ring_snapshot: list) -> None:
+    def save_evidence(event_id: str, anchor: float, ring_snapshot: list,
+                      change_ts: list[float] | None = None) -> None:
         picks = pick_evidence_frames(
             ring_snapshot, anchor, list(cfg["evidenceOffsets"]),
-            float(cfg["evidenceWindow"]))
+            float(cfg["evidenceWindow"]), change_ts)
         if not picks:
             print(f"[warn] {event_id} 无可用证据帧(缓冲空?)")
             return
@@ -518,6 +533,7 @@ def run() -> int:
                 pname = f"{i:02d}_{p['offset']:+.1f}s_plate.jpg"
                 (d / pname).write_bytes(p["_plate"])
                 entry["plate"] = pname
+            entry["atChange"] = bool(p.get("atChange"))
             manifest.append(entry)
         (d / "manifest.json").write_text(
             json.dumps({"eventId": event_id, "anchorTs": _now_iso(),
@@ -697,7 +713,8 @@ def run() -> int:
                 # 尾帧成熟的证据落盘
                 if pending_ev and pending_ev[0]["due"] <= now:
                     job = pending_ev.pop(0)
-                    save_evidence(job["id"], job["anchor"], list(ring))
+                    save_evidence(job["id"], job["anchor"], list(ring),
+                                  list(episode.change_ts) if episode.active else None)
 
                 health_window.append(hp_raw)
                 if not health_warned and len(health_window) == health_window.maxlen:
