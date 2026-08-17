@@ -531,6 +531,11 @@ def run() -> int:
     last_hud = "on"
     last_sample: tuple = ()
     heartbeat_at = time.monotonic()
+    # 坐标健康检查(2026-08-17):全自动校准试过,实测会把大片天空误当状态条,
+    # 且调研显示社区工具同样是"学一次缓存起来"。所以不假装能自动 —— 改为
+    # 廉价检测坐标失效的稳定表征:读数长期贴死在 0 或轨道满格。
+    health_window: deque[int] = deque(maxlen=240)
+    health_warned = False
 
     rects = {n: {"left": b["x"], "top": b["y"], "width": b["w"], "height": b["h"]}
              for n, b in bars.items()}
@@ -666,6 +671,18 @@ def run() -> int:
                 if pending_ev and pending_ev[0]["due"] <= now:
                     job = pending_ev.pop(0)
                     save_evidence(job["id"], job["anchor"], list(ring))
+
+                health_window.append(hp_raw)
+                if not health_warned and len(health_window) == health_window.maxlen:
+                    track = bars["hp"]["w"]
+                    if max(health_window) <= 2:
+                        health_warned = True
+                        print("[health] HP 读数长期为 0 —— 血条坐标可能已失效"
+                              "(换了分辨率/窗口模式?)。跑 nightreign_calibrate_hud.py 重新标定。")
+                    elif min(health_window) >= track * 0.95:
+                        health_warned = True
+                        print("[health] HP 读数长期贴满轨道 —— 矩形可能没对准血条。"
+                              "跑 nightreign_calibrate_hud.py 重新标定。")
 
                 if now - heartbeat_at >= 120.0:
                     heartbeat_at = now
