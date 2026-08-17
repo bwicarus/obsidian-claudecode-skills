@@ -76,6 +76,11 @@ DEFAULT_CONFIG: dict = {
     "evidenceOffsets": [-8.0, -5.0, -3.0, -1.5, -0.6, 0.0, 1.0, 2.0],
     "evidenceWindow": 0.7,  # 每个时间点在 ±该秒内挑最清晰帧
     "evidenceTailSeconds": 2.5,  # 事发后等这么久再落盘(等尾帧进缓冲)
+    # 敌人名字条 ROI(4K 原分辨率比例):游戏把精英/Boss 名字写在屏幕下方居中。
+    # 实测决定性:同一模型同一帧,整屏缩到 896px 读成"负伤恶螣",裁这块原尺寸
+    # 送就读对"负伤恶魔" —— 模型一直有能力,是缩放把字弄没了。故证据序列额外
+    # 存这块的**未降采样**裁图,让语义层能读名字而不是猜外形。
+    "namePlateRoi": [0.20, 0.63, 0.62, 0.80],  # x0,y0,x1,y1 相对全屏
     # 自审计(2026-08-17):探针怀疑自己,把"要人盯着试错"变成自动收敛。
     # 阈值来自实测分布(P99=3.2 P99.9=18/秒),取 8 标记约 0.3% 样本 —— 值得
     # 看一眼的量级,不是"一定错"。可疑读数照常进事件流,只是额外留证送审。
@@ -350,7 +355,8 @@ def pick_evidence_frames(
         used.add(best[0])
         picked.append(
             {"offset": round(best[0] - anchor_ts, 2), "sharpness": round(best[2], 1),
-             "_ts": best[0], "_jpg": best[1]}
+             "_ts": best[0], "_jpg": best[1],
+             "_plate": best[3] if len(best) > 3 else None}
         )
     return picked
 
@@ -506,8 +512,13 @@ def run() -> int:
         for i, p in enumerate(picks):
             name = f"{i:02d}_{p['offset']:+.1f}s.jpg"
             (d / name).write_bytes(p["_jpg"])
-            manifest.append({"file": name, "offset": p["offset"],
-                             "sharpness": p["sharpness"]})
+            entry = {"file": name, "offset": p["offset"],
+                     "sharpness": p["sharpness"]}
+            if p.get("_plate"):
+                pname = f"{i:02d}_{p['offset']:+.1f}s_plate.jpg"
+                (d / pname).write_bytes(p["_plate"])
+                entry["plate"] = pname
+            manifest.append(entry)
         (d / "manifest.json").write_text(
             json.dumps({"eventId": event_id, "anchorTs": _now_iso(),
                         "frames": manifest}, ensure_ascii=False, indent=2), "utf-8")
@@ -583,13 +594,20 @@ def run() -> int:
                     # numpy 步长降采样 + BGRA→RGB:PIL 的 LANCZOS 缩放实测
                     # 47.8ms,这条路径 7.7ms 且分辨率更高(整帧 137→64ms)。
                     step = int(cfg["frameDownscale"])
-                    arr = np.frombuffer(shot.raw, np.uint8).reshape(
-                        shot.height, shot.width, 4)[::step, ::step, 2::-1]
-                    im = Image.fromarray(arr)
+                    full = np.frombuffer(shot.raw, np.uint8).reshape(
+                        shot.height, shot.width, 4)[:, :, 2::-1]
+                    im = Image.fromarray(full[::step, ::step])
                     buf = io.BytesIO()
                     im.save(buf, "JPEG", quality=int(cfg["frameQuality"]))
+                    # 名字条:原分辨率裁,不降采样(缩放会把字弄没,实测)
+                    rx0, ry0, rx1, ry1 = cfg["namePlateRoi"]
+                    plate = Image.fromarray(full[
+                        int(shot.height * ry0):int(shot.height * ry1),
+                        int(shot.width * rx0):int(shot.width * rx1)])
+                    pbuf = io.BytesIO()
+                    plate.save(pbuf, "JPEG", quality=88)
                     sharp = _sharpness(np.asarray(im.convert("L").resize((320, 180))))
-                    ring.append((now, buf.getvalue(), sharp))
+                    ring.append((now, buf.getvalue(), sharp, pbuf.getvalue()))
 
                 # 自审计:物理不可能 / 交叉矛盾 / 时序回弹 → 打标留证送审
                 doubt.full_scale = max(doubt.full_scale, float(hp_total), 1.0)
