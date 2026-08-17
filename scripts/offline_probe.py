@@ -30,6 +30,8 @@ import argparse
 import json
 import subprocess
 import sys
+
+import numpy as np
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -64,19 +66,59 @@ def probe_video(path: Path) -> dict:
             "seconds": float(j["format"]["duration"])}
 
 
-def crop_stream(path: Path, rect: dict, fps: float, scale_x: float,
-                scale_y: float):
-    """只解码并输出血条那一小块,rawvideo 走管道。"""
-    x = int(rect["x"] * scale_x)
-    y = int(rect["y"] * scale_y)
-    w = max(2, int(rect["w"] * scale_x))
-    h = max(2, int(rect["h"] * scale_y))
-    cmd = [FFMPEG, "-v", "error", "-i", str(path),
-           "-vf", f"fps={fps},crop={w}:{h}:{x}:{y}",
-           "-f", "rawvideo", "-pix_fmt", "bgra", "-"]
+def hwaccel_works(path: Path) -> bool:
+    """试解一帧确认 cuda 能用 —— 4K HEVC 软解是这条流水线的大头。
+
+    不做 silent fallback:能不能用要说出来,否则慢了都不知道慢在哪。
+    """
+    out = subprocess.run(
+        [FFMPEG, "-v", "error", "-hwaccel", "cuda", "-i", str(path),
+         "-frames:v", "1", "-f", "null", "-"],
+        capture_output=True, text=True, errors="replace", timeout=180,
+        creationflags=NO_WINDOW)
+    return out.returncode == 0
+
+
+def crop_union(path: Path, bars: dict, fps: float, scale_x: float,
+               scale_y: float, hwaccel: bool):
+    """一次解码,只 crop 三条 bar 的**包围盒**。
+
+    原来 hp/fp/stamina 各开一个 ffmpeg,等于把整个 4K 视频解三遍 —— 而三条
+    bar 挤在同一列(y 84~152),包围盒才 1400×68,合起来解一遍就够。
+    """
+    x0 = min(b["x"] for b in bars.values())
+    y0 = min(b["y"] for b in bars.values())
+    x1 = max(b["x"] + b["w"] for b in bars.values())
+    y1 = max(b["y"] + b["h"] for b in bars.values())
+    x, y = int(x0 * scale_x), int(y0 * scale_y)
+    w = max(2, int((x1 - x0) * scale_x))
+    h = max(2, int((y1 - y0) * scale_y))
+    cmd = [FFMPEG, "-v", "error"]
+    if hwaccel:
+        cmd += ["-hwaccel", "cuda"]
+    cmd += ["-i", str(path), "-vf", f"fps={fps},crop={w}:{h}:{x}:{y}",
+            "-f", "rawvideo", "-pix_fmt", "bgra", "-"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)
-    return proc, w, h
+    return proc, x, y, w, h
+
+
+def sub_rect(arr, bar: dict, ox: int, oy: int, scale_x: float,
+             scale_y: float) -> tuple[bytes, int, int]:
+    """从包围盒里切出某条 bar,还原成 measure_bar 期望的 bgra bytes。
+
+    ⚠ 高度必须偶数(yuv420p 的色度对齐):hp 配置写 h=9,单独 crop 时 ffmpeg
+    会**静默**把它砍成 8 —— 于是旧版按 9 行去读只有 8 行的流,每帧多吃一行,
+    错位逐帧累积;而包围盒是 68 行(偶数)不会被砍,照配置切 9 行又会把 bar
+    之间的间隙混进来,整条血条被判成低饱和的残影。两个方向的错都源于同一个
+    没人说出口的调整,这里显式对齐到 ffmpeg 的真实行为。
+    """
+    dx = int(bar["x"] * scale_x) - ox
+    dy = int(bar["y"] * scale_y) - oy
+    dw = max(2, int(bar["w"] * scale_x))
+    dh = max(2, (int(bar["h"] * scale_y) // 2) * 2)
+    piece = arr[dy:dy + dh, dx:dx + dw]
+    return np.ascontiguousarray(piece).tobytes(), dw, dh
 
 
 def main() -> int:
@@ -85,6 +127,9 @@ def main() -> int:
     ap.add_argument("--fps", type=float, default=8.0,
                     help="重建采样率;跟实时探针一致(8Hz)便于对照")
     ap.add_argument("--out", help="输出 session 目录;默认按录像名生成")
+    ap.add_argument("--hwaccel", action="store_true",
+                    help="cuda 硬解:快一倍多,但 fp/stamina 有约 0.2%% 的舍入差"
+                         "(hp 实测逐帧一致)。默认软解以与实时探针同口径")
     a = ap.parse_args()
 
     video = Path(a.video)
@@ -121,9 +166,10 @@ def main() -> int:
     samples.write("ts,hp_cols,ghost_cols,total_cols,fp,stamina,hud\n")
     ledger = (out_dir / "ledger.jsonl").open("w", encoding="utf-8")
 
-    procs = {}
-    for name in ("hp", "fp", "stamina"):
-        procs[name] = crop_stream(video, bars[name], a.fps, scale_x, scale_y)
+    hw = a.hwaccel and hwaccel_works(video)
+    print(f"解码 {'cuda 硬解' if hw else '软解'}", flush=True)
+    proc, ox, oy, uw, uh = crop_union(video, bars, a.fps, scale_x, scale_y, hw)
+    union_bytes = uw * uh * 4
 
     stability = StabilityFilter(int(cfg["stabilityTicks"]),
                                 int(cfg["stabilityToleranceCols"]))
@@ -154,13 +200,12 @@ def main() -> int:
 
     try:
         while True:
-            raw = {}
-            for name, (proc, w, h) in procs.items():
-                need = w * h * 4
-                buf = proc.stdout.read(need)
-                if len(buf) < need:
-                    raise StopIteration
-                raw[name] = (buf, w, h)
+            buf = proc.stdout.read(union_bytes)
+            if len(buf) < union_bytes:
+                raise StopIteration
+            frame = np.frombuffer(buf, np.uint8).reshape(uh, uw, 4)
+            raw = {n: sub_rect(frame, bars[n], ox, oy, scale_x, scale_y)
+                   for n in ("hp", "fp", "stamina")}
 
             hp_raw, hp_ghost, hp_total, _ = measure_bar(
                 raw["hp"][0], raw["hp"][1], raw["hp"][2],
@@ -225,9 +270,8 @@ def main() -> int:
     except StopIteration:
         pass
     finally:
-        for proc, _, _ in procs.values():
-            proc.stdout.close()
-            proc.terminate()
+        proc.stdout.close()
+        proc.terminate()
         samples.close()
         ledger.close()
 
