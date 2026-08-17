@@ -878,7 +878,6 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 }
                 var segments = canonicalEraserSegments(
                     points: eraserPoints,
-                    widths: nil,
                     layout: eraserLayout
                 )
                 eraserPoints = []
