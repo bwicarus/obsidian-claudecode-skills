@@ -182,6 +182,7 @@ def load_preferences(path: Path) -> dict[str, object]:
         "keepPcPreprocessingOnline": True,
         "serviceMode": SERVICE_MODE_FULL,
         "snapshotViewerHidden": False,
+        "hideVoiceOrb": False,
     }
     try:
         value = json.loads(path.read_text("utf-8"))
@@ -205,6 +206,7 @@ def load_preferences(path: Path) -> dict[str, object]:
             else SERVICE_MODE_FULL
         ),
         "snapshotViewerHidden": hidden is True,
+        "hideVoiceOrb": value.get("hideVoiceOrb") is True,
     }
 
 
@@ -214,6 +216,7 @@ def save_preferences(
     keep_pc_online: bool,
     service_mode: str = SERVICE_MODE_FULL,
     snapshot_viewer_hidden: bool = False,
+    hide_voice_orb: bool = False,
 ) -> None:
     if service_mode not in (SERVICE_MODE_FULL, SERVICE_MODE_BRIDGE_ONLY):
         raise ReaderPCServiceError(f"未知服务模式 {service_mode}")
@@ -224,6 +227,7 @@ def save_preferences(
             "keepPcPreprocessingOnline": bool(keep_pc_online),
             "serviceMode": service_mode,
             "snapshotViewerHidden": bool(snapshot_viewer_hidden),
+            "hideVoiceOrb": bool(hide_voice_orb),
         },
     )
 
@@ -384,6 +388,72 @@ def stop_readerpc_voice(
         raise ReaderPCServiceError("；".join(failures))
 
 
+# ── Codex 语音球隐藏(2026-08-17 用户需求) ────────────────────────────────────
+# 语音球是 Codex 的独立置顶 Electron 窗(class Chrome_WidgetWin_1,标题 "Codex",
+# TOPMOST,属主 ChatGPT (Beta).exe),每次语音会话重建 → 周期按签名扫描隐藏。
+# 只动显示层:麦克风/播报/F24 保活全不受影响。主应用窗不置顶,签名天然排除。
+def find_voice_orb_windows() -> list[int]:
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    GWL_EXSTYLE = -20
+    WS_EX_TOPMOST = 0x0000_0008
+    result: list[int] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def on_window(hwnd, _lparam):
+        try:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            if not (user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST):
+                return True
+            cls = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(hwnd, cls, 64)
+            if cls.value != "Chrome_WidgetWin_1":
+                return True
+            title = ctypes.create_unicode_buffer(64)
+            user32.GetWindowTextW(hwnd, title, 64)
+            if title.value != "Codex":
+                return True
+            pid = wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            handle = kernel32.OpenProcess(0x1000, False, pid.value)
+            if not handle:
+                return True
+            try:
+                buf = ctypes.create_unicode_buffer(1024)
+                size = wintypes.DWORD(len(buf))
+                if not kernel32.QueryFullProcessImageNameW(
+                    handle, 0, buf, ctypes.byref(size)
+                ):
+                    return True
+                exe = buf.value.rsplit("\\", 1)[-1].lower()
+            finally:
+                kernel32.CloseHandle(handle)
+            if exe not in ("chatgpt (beta).exe", "codex.exe"):
+                return True
+            result.append(int(hwnd))
+        except Exception:
+            pass
+        return True
+
+    user32.EnumWindows(on_window, 0)
+    return result
+
+
+def set_window_visible(hwnd: int, visible: bool) -> None:
+    if os.name != "nt":
+        return
+    import ctypes
+
+    # SW_HIDE=0;SW_SHOWNA=8(显示但不抢焦点)
+    ctypes.WinDLL("user32").ShowWindow(hwnd, 8 if visible else 0)
+
+
 def _tray_image() -> Image.Image:
     image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -475,6 +545,34 @@ class ReaderPCWindow:
     pc_fail_streak = 0
     voice_fail_streak = 0
 
+    def _hide_orb_enabled(self) -> bool:
+        var = getattr(self, "hide_voice_orb", None)
+        try:
+            return bool(var.get()) if var is not None else False
+        except Exception:
+            return False
+
+    def _voice_orb_tick(self) -> None:
+        """开着就按签名隐藏语音球(每次语音会话重建,须周期扫);关掉恢复已藏的。"""
+        hidden = getattr(self, "_orb_hidden_hwnds", None)
+        if hidden is None:
+            return
+        try:
+            if self._hide_orb_enabled():
+                for hwnd in find_voice_orb_windows():
+                    set_window_visible(hwnd, False)
+                    hidden.add(hwnd)
+            elif hidden:
+                for hwnd in list(hidden):
+                    set_window_visible(hwnd, True)
+                hidden.clear()
+        except Exception:
+            pass
+
+    def on_hide_orb_changed(self) -> None:
+        self._save_current_preferences()
+        self._voice_orb_tick()
+
     def _snapshot_hidden_enabled(self) -> bool:
         var = getattr(self, "snapshot_hidden", None)
         try:
@@ -499,6 +597,7 @@ class ReaderPCWindow:
                 else SERVICE_MODE_FULL
             ),
             snapshot_viewer_hidden=self._snapshot_hidden_enabled(),
+            hide_voice_orb=self._hide_orb_enabled(),
         )
 
     def _restart_voice_with_intent(self, busy: str, done: str) -> None:
@@ -579,6 +678,10 @@ class ReaderPCWindow:
         self.snapshot_hidden = tk.BooleanVar(
             value=bool(preferences["snapshotViewerHidden"])
         )
+        self.hide_voice_orb = tk.BooleanVar(
+            value=bool(preferences["hideVoiceOrb"])
+        )
+        self._orb_hidden_hwnds: set[int] = set()
 
         root.title(PRODUCT_NAME)
         root.geometry("620x500")
@@ -644,6 +747,14 @@ class ReaderPCWindow:
             text="仅桥接模式：语音留在电脑（用电脑音频设备），通话不接到 App",
             variable=self.bridge_only,
             command=self.on_bridge_only_changed,
+        ).pack(side="left")
+        orb_row = ttk.Frame(outer)
+        orb_row.pack(fill="x", pady=(2, 2))
+        ttk.Checkbutton(
+            orb_row,
+            text="隐藏 Codex 语音球（只藏显示层，语音功能不受影响）",
+            variable=self.hide_voice_orb,
+            command=self.on_hide_orb_changed,
         ).pack(side="left")
         viewer_row = ttk.Frame(outer)
         viewer_row.pack(fill="x", pady=(2, 2))
@@ -1076,6 +1187,7 @@ class ReaderPCWindow:
         if self.closed or self.closing:
             return
         try:
+            self._voice_orb_tick()
             self._reconcile_service_mode_intent()
             # Do not race the known start transaction: it owns config, process
             # and the first fresh runtime heartbeat. Other busy work (for
