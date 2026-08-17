@@ -247,6 +247,13 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-anchor-fx.rc-afx-line::after{content:"";position:absolute;right:-4px;top:-5px;width:8px;height:8px;border-radius:50%;background:#0a84ff}',
       '.rc-note-html{display:none}',
       '.rc-note.rc-note-hashtml .rc-note-html{display:block;padding:3px 5px 5px;font-size:14px;line-height:1.6;color:#e6e6f0;max-height:min(50vh,340px);overflow-y:auto;-webkit-overflow-scrolling:touch}',
+      // ★ 壳里装的是整张 .vc-card 时,**尺寸与滚动全部交给卡片**。
+      //   上面那条给普通 HTML 便签用的 padding + 限高 + 独立滚动,套在卡片外面会出三件事:
+      //   ① padding 把卡片顶向右下(左 5px/上 3px),超出的右边被壳裁掉 —— 就是"右边变直角";
+      //   ② 壳的 max-height 让整张卡在壳里再滚一层(卡片自己已经有 overflow-y:auto);
+      //   ③ 壳的圆角与卡片圆角不同心,于是看着像卡片外面浮了一层错位的框。
+      //   用户诊断:"整个卡片都放在一个透明底框中甚至可以在其中滚动，这就是所有问题的根源"。
+      '.rc-note.rc-note-hashtml .rc-note-html.rc-note-html-card{padding:0;max-height:none;overflow:visible;background:transparent}',
       '.rc-note.rc-note-hashtml .rc-note-text,.rc-note.rc-note-hashtml .rc-note-tools,.rc-note.rc-note-hashtml .rc-note-ink{display:none!important}',
       '.rc-note.rc-note-hashtml.rc-note-collapsed .rc-note-html{display:none}',
       '.rc-note.rc-note-hasvideo .rc-vid-embed{border-radius:9px 9px 0 0;overflow:hidden}',
@@ -940,12 +947,17 @@ if (window.__bwPwaProviderOnly) return;
             ctl._cardPresentationSize = size || null;
             try {
               ctl.body.style.width = _formW(ctl, h.form);
-              ctl.html.style.maxHeight = size ? (Math.max(100, Math.min(720, Math.round(size.h))) + 'px') : '';
+              // 装的是卡片 → 壳不限高(卡片自带 max-height 与滚动);inline 值要清掉,
+              // 否则上一次普通便签留下的 maxHeight 会继续裁着卡片。
+              ctl.html.style.maxHeight = '';
             } catch (_) {}
           },
           onClose: function () { try { ctl.del.click(); } catch (e) {} },
           onForm: function (f) { try { h.form = f; ctl.note.html = h; ctl.body.style.width = _formW(ctl, f); patchNote(ctl.note, { html: h }); } catch (e) {} } });
       done = !!el2;
+      // 成功装进真 .vc-card 才打这个标记:回退分支(下面的 fb)仍是普通 HTML,
+      // 那时壳的 padding/限高/滚动照旧需要。
+      try { box.classList.toggle('rc-note-html-card', done); } catch (e2) {}
     } catch (e) {}
     if (!done) { var fb = document.createElement('div'); if (h.isHtml) fb.innerHTML = h.content; else fb.textContent = h.content; box.appendChild(fb); }
     bindHtmlCardSelection(

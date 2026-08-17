@@ -125,16 +125,42 @@ if (window.__bwPwaProviderOnly) return;
       ctx.fillText(label, labelX + pad, labelY + pad);
       ctx.restore();
     } else if (t === 'pen') {
-      ctx.beginPath(); ctx.moveTo(X(0), Y(0));
-      if (pts.length === 1) { ctx.lineTo(X(0) + 0.1, Y(0)); }
-      else {
-        for (var i = 1; i < pts.length - 1; i++) {
-          var mx = (X(i) + X(i + 1)) / 2, my = (Y(i) + Y(i + 1)) / 2;
-          ctx.quadraticCurveTo(X(i), Y(i), mx, my);
+      // 逐点宽度(ww):PencilKit 采到的笔尖大小,随压感与倾斜变化 —— 笔锋就在这里。
+      // canvas 的 lineWidth 在一条 path 内不能变,所以逐段独立描边:每段仍是原来的
+      // 中点 quadratic(平滑度不变),只是各自设当段宽度。round 的 cap/join 把接缝盖住,
+      // 看上去是一条宽度连续变化的线,而不是一截截。
+      var ww = (s.ww && s.ww.length === pts.length) ? s.ww : null;
+      if (ww && pts.length >= 2) {
+        var base = ctx.lineWidth;
+        for (var k = 1; k < pts.length - 1; k++) {
+          var ax = (X(k - 1) + X(k)) / 2, ay = (Y(k - 1) + Y(k)) / 2;
+          var bx = (X(k) + X(k + 1)) / 2, by = (Y(k) + Y(k + 1)) / 2;
+          ctx.lineWidth = Math.max(0.6, ww[k] * dpr);
+          ctx.beginPath();
+          ctx.moveTo(k === 1 ? X(0) : ax, k === 1 ? Y(0) : ay);
+          ctx.quadraticCurveTo(X(k), Y(k), bx, by);
+          ctx.stroke();
         }
-        ctx.lineTo(X(pts.length - 1), Y(pts.length - 1));
+        // 收尾那一小段:最后一个采样点常常是抬笔处,宽度最细,笔锋收得干净
+        var lastI = pts.length - 1;
+        ctx.lineWidth = Math.max(0.6, ww[lastI] * dpr);
+        ctx.beginPath();
+        ctx.moveTo((X(lastI - 1) + X(lastI)) / 2, (Y(lastI - 1) + Y(lastI)) / 2);
+        ctx.lineTo(X(lastI), Y(lastI));
+        ctx.stroke();
+        ctx.lineWidth = base;
+      } else {
+        ctx.beginPath(); ctx.moveTo(X(0), Y(0));
+        if (pts.length === 1) { ctx.lineTo(X(0) + 0.1, Y(0)); }
+        else {
+          for (var i = 1; i < pts.length - 1; i++) {
+            var mx = (X(i) + X(i + 1)) / 2, my = (Y(i) + Y(i + 1)) / 2;
+            ctx.quadraticCurveTo(X(i), Y(i), mx, my);
+          }
+          ctx.lineTo(X(pts.length - 1), Y(pts.length - 1));
+        }
+        ctx.stroke();
       }
-      ctx.stroke();
     } else if (t === 'line' && pts.length >= 2) {
       ctx.beginPath(); ctx.moveTo(X(0), Y(0)); ctx.lineTo(X(1), Y(1)); ctx.stroke();
     } else if (t === 'arrow' && pts.length >= 2) {
