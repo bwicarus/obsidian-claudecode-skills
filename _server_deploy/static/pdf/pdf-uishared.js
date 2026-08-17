@@ -110,7 +110,9 @@ window._favOpenPicker = function () {
     //   容器必须 position:relative(绝对定位的基准);绝不能用自由流式 CSS(会跟服务端算的 bbox 对不上)。
     '.up2-blocks{position:absolute;inset:0}' +
     '.up2-b{position:absolute;box-sizing:border-box;display:flex;align-items:center}' +
-    '.up2-b.up2-h1{font-weight:700;color:#1e2a44;font-size:1.25em!important;align-items:flex-end;padding-bottom:4px}' +
+    // ⚠ 这里**不能**写 font-size:!important —— 字号由 _upFitText 按格子算(h1 的 1.25 倍已经
+    //   算在 __fr 里)。曾经这条 !important 把算好的值整个盖掉,标题既被重复放大又脱离格子体系。
+    '.up2-b.up2-h1{font-weight:700;color:#1e2a44;align-items:flex-end;padding-bottom:4px}' +
     '.up2-b-blank{align-items:flex-end;gap:6px;flex-wrap:wrap}' +   // 长标签(整道题在 label 里)换行,作答线落到末行
     '.up2-b-lab{flex:none;color:#5b76b8;opacity:.75;white-space:normal;max-width:100%}' +
     // 手写就写在这条线上。线只是**视觉参考**;bbox 是算出来的,手写层(ink canvas)在更上层,天然共存。
@@ -128,9 +130,12 @@ window._favOpenPicker = function () {
     '.up2-rule-line{background-image:repeating-linear-gradient(to bottom,transparent 0,transparent calc(var(--lh) - 1px),rgba(120,150,200,.16) calc(var(--lh) - 1px),rgba(120,150,200,.16) var(--lh))}' +
     '.up2-rule-grid{background-image:repeating-linear-gradient(to bottom,transparent 0,transparent calc(var(--lh) - 1px),rgba(120,150,200,.13) calc(var(--lh) - 1px),rgba(120,150,200,.13) var(--lh)),repeating-linear-gradient(to right,transparent 0,transparent calc(var(--cw) - 1px),rgba(120,150,200,.13) calc(var(--cw) - 1px),rgba(120,150,200,.13) var(--cw))}' +
     // <span role=button>(不是 <button>):memory ios-button-white-block —— Safari 会用原生外观盖掉一切
-    '.up2-b-btn{display:inline-flex;align-items:center;justify-content:center;padding:9px 18px;' +
-      'border-radius:10px;background:#3b6fd4;color:#fff;font-size:14px;font-weight:600;cursor:pointer;' +
-      '-webkit-appearance:none;appearance:none;user-select:none;margin-right:8px}' +
+    // 字号继承块(= 一格宽),内边距用 em —— 写死 px 的话按钮不跟着页面缩放,
+    // 在大页面上缩成一粒、小页面上撑出格子。后端给按钮留的宽是"文字 + 3 格",
+    // 这里 1.1em×2 的横向内边距正好落在那 3 格里。
+    '.up2-b-btn{display:inline-flex;align-items:center;justify-content:center;padding:.4em 1.1em;' +
+      'border-radius:.6em;background:#3b6fd4;color:#fff;font-weight:600;cursor:pointer;line-height:1.2;' +
+      '-webkit-appearance:none;appearance:none;user-select:none;margin-right:.5em}' +
     '.up2-b-btn:active{transform:scale(.96)}' +
     '.up2-b-btn.up2-b-off{background:#9aa7c4;opacity:.55;cursor:not-allowed}' +   // #36 禁用态
     '.up2-b-btn.up2-b-off:active{transform:none}' +
@@ -1200,6 +1205,39 @@ window._favOpenPicker = function () {
       if (el) el.textContent = txt || '';
     } catch (e) {}
   }
+  // ★ 字号 = 一格的**宽**,行高 = 一格的**高** —— 网格模型的两个方向都要锁住。
+  //
+  //   曾经只锁了字号、而且锚错了方向:字号 = 格高 × font_ratio(一个拍出来的常数 0.5)。
+  //   两个后果:
+  //   ① 块内换行走 CSS 默认行高(≈1.2em ≈ 0.6 格),文字行不落在格子行上;
+  //   ② CJK 全角字宽 = font-size,字号 0.5 格高 ≈ 0.8 格宽 → 一行塞得下 41 个字,
+  //      而后端按 cols=34 估行数。前后端对不上,长内容就溢出被裁、看着互相压。
+  //   要让"一行 = cols 个字"成立,font_ratio 必须等于 char_w/line_h —— 那是随页面
+  //   宽高比变的量,根本不该是常数。所以字号直接取格宽,font_ratio 不再参与。
+  //
+  //   锁住之后:一行文字 = 一格,一个全角字 = 一格,后端 ceil(字数/列数) 算出的行数
+  //   == 前端真实占用的行数,服务端算的 bbox 才真的等于屏幕上的位置(批改裁图靠它)。
+  function _upFitText(body) {
+    var bh = body.offsetHeight || 0, bw = body.offsetWidth || 0;
+    if (!bh || !bw) return;
+    body.querySelectorAll('.up2-b').forEach(function (el) {
+      if (el.classList.contains('up2-b-card')) { el.style.overflow = 'auto'; return; }   // #50 卡片自带字号/样式,不锁字号
+      if (!el.__cwr) return;
+      // ⚠ 规格残缺(paper 字段被写成字符串而不是 spec 对象)时**不能**回退到块自身高度 ——
+      //   那正是字号爆炸的老路(3 格高的块字号立刻 3 倍)。用保守均分兜底,并且出声。
+      var rowPx = (el.__lhr && bh) ? bh * el.__lhr : bh / 26;
+      var colPx = bw * el.__cwr;
+      if (!el.__lhr && !body.__warnedLhr) {
+        body.__warnedLhr = 1;
+        try { console.warn('[paper] 缺 line_h/page_h,行高按 26 行兜底;检查 upage.paper 是否为完整 spec 对象'); } catch (e) {}
+      }
+      // 不设上限、不取整:页面放多大字就该多大(旧代码 min(64) 会在大页面上把比例钳死),
+      // 整数舍入在小格子上会累积成可见偏移,浏览器本来就支持小数 px。
+      el.style.fontSize = Math.max(1, colPx * (el.classList.contains('up2-h1') ? 1.25 : 1)) + 'px';
+      el.style.lineHeight = rowPx + 'px';
+      el.style.overflow = 'hidden';
+    });
+  }
   // ★ 严格按**格子绝对定位**渲染 —— 服务端用 (row,col,span) 纯算术算出的 rect,
   //   只有前端也按同一套格子摆,那个 rect 才等于屏幕上的真实位置(批改按它裁图)。
   //   ⚠ 绝不能用自由流式 CSS:那样服务端算的 bbox 就对不上了。
@@ -1227,8 +1265,8 @@ window._favOpenPicker = function () {
       //   (A4 595pt vs 超大扫描件 2230pt),写死会让字比蚂蚁小或撑破格子(实测那次就是这么翻的)。
       // 字号锁定**单行格高**(不是块的 offsetHeight —— 内容多的块会被撑高,× ratio 就字号爆炸,
       //   用户实测检查结果撑破整页的根因)。行高比例 = line_h / page_h,乘页元素像素高。
-      d.__fr = (b.kind === 'text' && b.style === 'h1') ? (sp.font_ratio || 0.45) * 1.25 : (sp.font_ratio || 0.45);
-      d.__lhr = (sp.line_h && sp.page_h) ? (sp.line_h / sp.page_h) : 0;   // 单行占页高的比例
+      d.__lhr = (sp.line_h && sp.page_h) ? (sp.line_h / sp.page_h) : 0;   // 一格占页高的比例 → 行高
+      d.__cwr = (sp.char_w && sp.page_w) ? (sp.char_w / sp.page_w) : 0;   // 一格占页宽的比例 → 字号
       if (b.kind === 'text') {
         d.textContent = b.text || b.label || '';   // 容错:AI 把题目误放进 label 也能显示(后端 _norm_block 已纠,这里兜旧数据)
         if (b.style === 'h1') d.classList.add('up2-h1');
@@ -1286,16 +1324,17 @@ window._favOpenPicker = function () {
     requestAnimationFrame(function () {
       // 检查结果(持久化在 sidecar 的 result_md)→ 渲进卡内结果区(不塞格子)
       if (rec.result_md) _upRenderResult(ov, rec.result_md, _upResKey(ov, rec.id), rec.check_name, rec.check_score);
-      var bh = body.offsetHeight || 0;
-      body.querySelectorAll('.up2-b').forEach(function (el) {
-        if (el.classList.contains('up2-b-card')) { el.style.overflow = 'auto'; return; }   // #50 卡片自带字号/样式,不锁字号
-        var fr = el.__fr; if (!fr) return;
-        // 单行格高(px)= 页高 × 行高比例;字号 = 单行格高 × ratio。**与块自身高度无关** → 永不爆炸。
-        var rowPx = (el.__lhr && bh) ? bh * el.__lhr : (el.offsetHeight || 20);
-        var fs = Math.max(9, Math.min(64, Math.round(rowPx * fr)));
-        el.style.fontSize = fs + 'px';
-        if (el.classList.contains('up2-b-text') || el.classList.contains('up2-b')) el.style.overflow = 'hidden';
-      });
+      _upFitText(body);
+      // ★ 跟随页面缩放实时重算。只在渲染时算一次的话,PDF 一缩放 px 就不再对应格子,
+      //   字相对纸整个飘掉(用户实测:放大后字号明显不跟随)。容器是 absolute inset:0,
+      //   尺寸只由页面决定、不受内部字号影响 → 回调里改字号不会自激。
+      try {
+        if (window.ResizeObserver) {
+          var ro = new ResizeObserver(function () { _upFitText(body); });
+          ro.observe(body);
+          body.__ro = ro;
+        }
+      } catch (e) {}
     });
     var host = ov.closest ? ov.closest('.pdf-upage') : null; if (host && host.__inkCanvas) _upResizeInk(host);
   }
