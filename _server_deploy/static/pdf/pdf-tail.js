@@ -530,7 +530,14 @@ document.addEventListener('pointermove', e => {
         _inkPushUndo(segment.pw);
         operation.touched[segment.id] = segment;
       }
-      _inkStrokesOf(segment.pw).push({ t: 'pen', c: color, w: width, p: segment.points });
+      // ww = 逐点笔尖大小(PencilKit 的压感/倾斜)。只有跟点数一一对应才收下 ——
+      // 对不上就整条退回常数宽,宁可没有笔锋也不能让宽度错位到别的点上。
+      var stroke = { t: 'pen', c: color, w: width, p: segment.points };
+      var raww = segment.raw.widths;
+      if (Array.isArray(raww) && raww.length === segment.points.length) {
+        stroke.ww = raww.map(function (v) { return Math.max(0.3, Math.min(48, Number(v) || width)); });
+      }
+      _inkStrokesOf(segment.pw).push(stroke);
       operation.nextSegment += 1;
       operation.written += 1;
     }

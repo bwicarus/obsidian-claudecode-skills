@@ -211,6 +211,12 @@ private struct NativeInkSegment {
     let color: String?
     let width: CGFloat?
     let points: [[CGFloat]]
+    /// 逐点笔尖大小（PKStrokePoint.size.width，随压感与倾斜变化）。
+    ///
+    /// 没有它的话，笔画只剩一个常数 `width`，网页端用固定 lineWidth 重绘 ——
+    /// PencilKit 落笔时的笔锋在提交那一刻就被抹平成等宽线。长度与 points 一一对应；
+    /// 橡皮/套索/存量数据为 nil，渲染端回落常数宽。
+    let widths: [CGFloat]?
 }
 
 private enum NativeInkOperationKind: String {
@@ -760,10 +766,12 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             var output: [NativeInkSegment] = []
             var currentSurface: NativeInkSurface?
             var currentPoints: [[CGFloat]] = []
+            var currentWidths: [CGFloat] = []
 
             func flush() {
                 guard let surface = currentSurface, currentPoints.count >= 2 else {
                     currentPoints = []
+                    currentWidths = []
                     currentSurface = nil
                     return
                 }
@@ -771,9 +779,13 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                     surfaceId: surface.id,
                     color: color,
                     width: max(1, min(width, 16)),
-                    points: currentPoints
+                    points: currentPoints,
+                    // 一一对应才有意义：数量对不上就整条退回常数宽，
+                    // 宁可没有笔锋，也不能让宽度错位到别的点上。
+                    widths: currentWidths.count == currentPoints.count ? currentWidths : nil
                 ))
                 currentPoints = []
+                currentWidths = []
                 currentSurface = nil
             }
 
@@ -808,6 +820,9 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                     if dx * dx + dy * dy < 0.000_000_36 { continue }
                 }
                 currentPoints.append(point)
+                // 笔尖大小：PKStrokePoint.size 随压感与倾斜变化，这就是"笔锋"的来源。
+                // 钳在滑块量程内，避免个别采样点的极值把线撑出格。
+                currentWidths.append(max(0.5, min(sample.size.width, 48)))
             }
             flush()
             return output
@@ -863,6 +878,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 }
                 var segments = canonicalEraserSegments(
                     points: eraserPoints,
+                    widths: nil,
                     layout: eraserLayout
                 )
                 eraserPoints = []
@@ -956,7 +972,8 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                     surfaceId: segment.surfaceId,
                     color: "#0a84ff",
                     width: 2,
-                    points: points
+                    points: points,
+                    widths: nil   // 闭合区域是几何图形，没有压感语义
                 )
             }
         }
@@ -979,7 +996,8 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                     surfaceId: surface.id,
                     color: nil,
                     width: nil,
-                    points: currentPoints
+                    points: currentPoints,
+                    widths: nil   // 橡皮轨迹不描边，宽度无意义
                 ))
                 currentPoints = []
                 currentSurface = nil
@@ -1295,6 +1313,7 @@ fileprivate extension ReaderWebViewModel {
             ]
             if let color = segment.color { value["color"] = color }
             if let width = segment.width { value["width"] = width }
+            if let widths = segment.widths { value["widths"] = widths }
             return value
         }
         var payload: [String: Any] = [
