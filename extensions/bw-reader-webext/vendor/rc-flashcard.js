@@ -238,7 +238,19 @@ if (window.__bwPwaProviderOnly) return;
       '.fc-lbl{font-size:12px;color:var(--rc-text-dim,#7a8497);margin-bottom:5px;font-weight:650;letter-spacing:.02em}' +
       '.fc-ed{width:100%;box-sizing:border-box;background:#10182c;border:1px solid #2a3550;border-radius:8px;color:#e6e6f0;font:inherit;font-size:14px;line-height:1.6;padding:10px 12px;min-height:72px;resize:vertical;margin-bottom:8px}' +
       '.fc-btns{display:flex;gap:7px;margin-top:10px}' +
-      '.fc-btns button{flex:1;border-radius:9px;padding:10px 0;font-size:13px;cursor:pointer;border:1px solid #2a3550;background:#1a2540;color:#cfe6ff;-webkit-tap-highlight-color:transparent}' +
+      '.fc-btns button{flex:1;border-radius:9px;padding:7px 0;font-size:12.5px;cursor:pointer;border:1px solid #2a3550;background:#1a2540;color:#cfe6ff;-webkit-tap-highlight-color:transparent}' +
+      // 上下滑手势的视觉反馈:卡片跟手位移 + 到阈值后辉光与提示。
+      // 按钮**保留**(只收窄):手势在不同设备上的可靠性没法在这里验证,
+      // 留着按钮意味着即使手势失灵也不会让卡片没法操作。
+      '.fc-slide.fc-swiping{transition:none}' +
+      '.fc-slide.fc-swipe-settle{transition:transform .22s cubic-bezier(.32,.72,.36,1)}' +
+      '.fc-swipe-tip{position:absolute;left:0;right:0;display:flex;align-items:center;justify-content:center;'
+        + 'font-size:12.5px;font-weight:650;letter-spacing:.03em;pointer-events:none;opacity:0;transition:opacity .14s;z-index:4}' +
+      '.fc-swipe-tip.up{top:6px;color:#fca5a5}' +
+      '.fc-swipe-tip.down{bottom:6px;color:#86efac}' +
+      '.fc-swipe-tip.on{opacity:1}' +
+      '.fc-slide.fc-armed-up .fc-card{box-shadow:0 0 0 2px rgba(248,113,113,.85),0 0 22px rgba(248,113,113,.45)}' +
+      '.fc-slide.fc-armed-down .fc-card{box-shadow:0 0 0 2px rgba(134,239,172,.85),0 0 22px rgba(134,239,172,.45)}' +
       '.fc-del{border-color:#7f1d1d!important;color:#fca5a5!important;flex:0 0 42%!important}' +
       '.fc-add{border-color:#14532d!important;color:#86efac!important}' +
       '.fc-export{border-color:#1e3a8a!important;color:#93c5fd!important}' +
@@ -346,7 +358,88 @@ if (window.__bwPwaProviderOnly) return;
       '<div class="fc-review-footer">' + footerControls + '</div>' +
       '</div>';
   }
+  /// 草稿卡的上下滑:上滑删除、下滑入库(用户设计)。
+  ///
+  /// 这一带有三条轴在抢同一个手指：
+  ///   · 横轴 —— .fc-track 的 scroll-snap（左右翻卡）
+  ///   · 纵轴 —— .fc-card 自己的 overflow-y（长卡片要能读完）
+  ///   · 纵轴 —— 外层侧栏/页面滚动
+  /// 所以接管条件卡得很紧：必须是明确的纵向意图（|dy| 明显大于 |dx|），
+  /// **并且**卡片内部已经滚到那个方向的尽头 —— 否则先让人把卡片读完。
+  /// 判定不成立时全程不 preventDefault，另外两条轴照常工作。
+  ///
+  /// 两段阈值：过 ARM 出现辉光和提示（此时松手仍可反悔），再过 FIRE 才真正执行。
+  function bindSwipe(container, slide, st, i) {
+    var ARM = 58, FIRE = 118, card = slide.querySelector('.fc-card');
+    if (!card) return;
+    var sx = 0, sy = 0, dy = 0, mode = '', armed = '', id = null;
+    var tipUp = document.createElement('div');
+    tipUp.className = 'fc-swipe-tip up';
+    tipUp.textContent = '松手删除';
+    var tipDown = document.createElement('div');
+    tipDown.className = 'fc-swipe-tip down';
+    tipDown.textContent = '松手保存到卡库';
+    slide.style.position = slide.style.position || 'relative';
+    slide.appendChild(tipUp);
+    slide.appendChild(tipDown);
+
+    function atEdge(dir) {   // dir<0 = 上滑(要看是否已到底部)
+      var t = card.scrollTop, h = card.scrollHeight, ch = card.clientHeight;
+      if (h - ch <= 2) return true;             // 根本没得滚
+      return dir < 0 ? (t + ch >= h - 2) : (t <= 2);
+    }
+    function reset(animate) {
+      slide.classList.remove('fc-swiping', 'fc-armed-up', 'fc-armed-down');
+      if (animate) slide.classList.add('fc-swipe-settle');
+      slide.style.transform = '';
+      tipUp.classList.remove('on');
+      tipDown.classList.remove('on');
+      setTimeout(function () { slide.classList.remove('fc-swipe-settle'); }, 240);
+      mode = ''; armed = ''; dy = 0; id = null;
+    }
+    slide.addEventListener('pointerdown', function (e) {
+      var c = st.cards[i];
+      if (!c || c._st !== 'draft' || c._addPending) return;   // 只在草稿态
+      if (e.target && e.target.closest && e.target.closest('textarea,button')) return;
+      sx = e.clientX; sy = e.clientY; dy = 0; mode = ''; id = e.pointerId;
+    });
+    slide.addEventListener('pointermove', function (e) {
+      if (id === null || e.pointerId !== id) return;
+      var ddx = e.clientX - sx, ddy = e.clientY - sy;
+      if (!mode) {
+        if (Math.abs(ddx) > 8 && Math.abs(ddx) >= Math.abs(ddy)) { id = null; return; }   // 横向 → 让给翻页
+        if (Math.abs(ddy) < 10) return;
+        if (!atEdge(ddy)) { id = null; return; }   // 还能滚 → 让给卡片自己滚
+        mode = 'v';
+        slide.classList.add('fc-swiping');
+      }
+      dy = ddy;
+      e.preventDefault();
+      var damp = dy * (Math.abs(dy) > FIRE ? 0.45 : 0.85);   // 过线后阻尼，给"到头了"的手感
+      slide.style.transform = 'translateY(' + damp.toFixed(1) + 'px)';
+      var want = dy <= -ARM ? 'up' : (dy >= ARM ? 'down' : '');
+      if (want !== armed) {
+        armed = want;
+        slide.classList.toggle('fc-armed-up', armed === 'up');
+        slide.classList.toggle('fc-armed-down', armed === 'down');
+        tipUp.classList.toggle('on', armed === 'up');
+        tipDown.classList.toggle('on', armed === 'down');
+      }
+    }, { passive: false });
+    var end = function (e) {
+      if (id === null || (e.pointerId !== undefined && e.pointerId !== id)) return;
+      var fired = mode === 'v' && Math.abs(dy) >= FIRE;
+      var dir = dy < 0 ? 'up' : 'down';
+      reset(true);
+      if (!fired) return;
+      if (dir === 'up') removeDraft(container, i);
+      else addToAnki(container, i);
+    };
+    slide.addEventListener('pointerup', end);
+    slide.addEventListener('pointercancel', end);
+  }
   function bindSlide(container, slide, st, i) {
+    bindSwipe(container, slide, st, i);
     slide.querySelectorAll('[data-fc]').forEach(function (el) {
       el.addEventListener('click', function (ev) {
         ev.stopPropagation(); var act = el.dataset.fc, cc = st.cards[i];

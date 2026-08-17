@@ -1675,7 +1675,9 @@ if (window.__bwPwaProviderOnly) return;
       'rv-improve-toggle'
     );
     improveToggle.setAttribute('aria-expanded', String(_improveExpanded));
-    reviewControls.appendChild(improveToggle);
+    // 「改进」挪到头部那一行（跟 ⟳ / 收起展开并列）——它原来挂在卡片面板底部，
+    // 白占一行高度，而这一行本来就是放开关的地方（用户要求）。
+    toolbar.appendChild(improveToggle);
     _appendImprovePanel(reviewControls, card);
     panel.appendChild(reviewControls);
   }
@@ -2812,6 +2814,8 @@ if (window.__bwPwaProviderOnly) return;
       // 浮层要有定位基准 —— 没有它 absolute 会一路上溯到更外层，盖错地方。
       '#rc-review-body{position:relative}' +
       '.rv-improve-panel::-webkit-scrollbar{width:0;height:0;display:none}' +
+      // 「改进」按钮移走后，这个容器只剩浮层面板(absolute)，自身不该再占高度。
+      '.rv-review-controls{flex:0 0 auto;min-height:0}' +
       '.rv-selection-count{font-size:12px;color:var(--rc-text-muted,#75839e);line-height:1.45}' +
       '.rv-selection-count.ready{color:#78d6ae}' +
       '.rv-improve-modes{display:grid;grid-template-columns:1fr 1fr;padding:3px;background:rgba(14,21,37,.54);border:1px solid var(--rc-border,#2a3550);border-radius:9px;gap:3px}' +
