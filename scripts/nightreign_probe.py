@@ -135,8 +135,8 @@ def measure_bar(
     bgra: bytes, width: int, height: int, *,
     skip_left: int, ref_cols: int, tol: int, run: int,
     sat_solid: int, **_legacy,
-) -> tuple[int, int, int]:
-    """量血条,返回 (实血, 余像, 总填充) 三个列数。
+) -> tuple[int, int, int, dict]:
+    """量血条,返回 (实血, 余像, 总填充, 判据详情)。
 
     第五版(2026-08-17,用户提出"对比最左侧与其它位置的差异"后定型):
     填充色是**开放集合**(橙红/变粉/中毒/雨淋/虚血…数不完),空槽也不能锚
@@ -174,15 +174,19 @@ def measure_bar(
                 miss = 0
         return len(cols), ref
 
+    detail: dict = {}
     if skip_left + ref_cols >= len(cols):
-        return 0, 0, 0
+        return 0, 0, 0, detail
     end1, ref1 = segment(skip_left)
     seg1 = end1 - skip_left
     sat1 = float(ref1.max() - ref1.min())
+    detail = {"ref1": [round(float(v)) for v in ref1], "sat1": round(sat1, 1),
+              "seg1": seg1, "satSolid": sat_solid}
 
     if sat1 < sat_solid:
         # 最左端已是去饱和白影 = 濒死/刚被打空,实血为 0
-        return 0, seg1, seg1
+        detail["verdict"] = "left-desaturated→solid=0"
+        return 0, seg1, seg1, detail
 
     ghost = 0
     if end1 + ref_cols < len(cols):
@@ -190,9 +194,11 @@ def measure_bar(
         sat2 = float(ref2.max() - ref2.min())
         lum2 = float(ref2[0] * 0.299 + ref2[1] * 0.587 + ref2[2] * 0.114)
         # 余像 = 去饱和且够亮的白影;暗背景不算
+        detail.update({"sat2": round(sat2, 1), "lum2": round(lum2, 1)})
         if sat2 < sat_solid and lum2 >= 70:
             ghost = end2 - end1
-    return seg1, ghost, seg1 + ghost
+    detail["verdict"] = "normal"
+    return seg1, ghost, seg1 + ghost, detail
 
 
 def count_cool_pixels(bgra: bytes, min_level: int, dominance: int) -> int:
@@ -364,9 +370,11 @@ def self_test() -> int:
         )
     kw = dict(skip_left=2, ref_cols=6, tol=55, run=4, sat_solid=30)
     n = 40 - kw["skip_left"]  # 读数天然少 skip_left 列(那是边框装饰)
-    assert measure_bar(bar(40, 0, 30), 70, 1, **kw) == (n, 0, n), "满血无余像"
-    assert measure_bar(bar(0, 40, 30), 70, 1, **kw) == (0, n, n), "濒死:实血 0"
-    hp, gh, tot = measure_bar(bar(30, 20, 30), 80, 1, **kw)
+    assert measure_bar(bar(40, 0, 30), 70, 1, **kw)[:3] == (n, 0, n), "满血无余像"
+    assert measure_bar(bar(0, 40, 30), 70, 1, **kw)[:3] == (0, n, n), "濒死:实血 0"
+    det = measure_bar(bar(0, 40, 30), 70, 1, **kw)[3]
+    assert det["verdict"].startswith("left-desat") and det["sat1"] < 30, det
+    hp, gh, tot, _ = measure_bar(bar(30, 20, 30), 80, 1, **kw)
     assert hp == 30 - kw["skip_left"] and gh == 20 and tot == hp + gh, (hp, gh, tot)
     # 变色(粉紫/中毒绿/冰蓝)都不影响 —— 正是为这个开放集合设计
     for tint in ((210, 60, 190), (90, 200, 70), (70, 120, 210)):
@@ -432,7 +440,7 @@ def probe_bars_once() -> int:
                 sct.grab({"left": b["x"], "top": b["y"], "width": b["w"], "height": b["h"]}).raw
             )
             bc = cfg["bar"]
-            fill, ghost, total = measure_bar(
+            fill, ghost, total, _ = measure_bar(
                 raw, b["w"], b["h"], skip_left=bc["skipLeft"],
                 ref_cols=bc["refCols"], tol=bc["tol"], run=bc["run"],
                 sat_solid=bc["satSolid"])
@@ -557,7 +565,7 @@ def run() -> int:
 
                 now = time.monotonic()
                 hp_rect = bars["hp"]
-                hp_raw, hp_ghost, hp_total = measure_bar(
+                hp_raw, hp_ghost, hp_total, hp_detail = measure_bar(
                     bytes(sct.grab(rects["hp"]).raw), hp_rect["w"], hp_rect["h"],
                     skip_left=barcfg["skipLeft"], ref_cols=barcfg["refCols"],
                     tol=barcfg["tol"], run=barcfg["run"],
@@ -595,7 +603,8 @@ def run() -> int:
                     write_audit_entry(
                         audit_dir, aid, sus,
                         {"ts": _now_iso(), "hud": hud_state, "ghostCols": hp_ghost,
-                         "totalCols": hp_total, "fp": fp_lit, "stamina": st_lit})
+                         "totalCols": hp_total, "fp": fp_lit, "stamina": st_lit,
+                         "measure": hp_detail})
                     pending_ev.append({"id": f"audit-{aid}", "anchor": now,
                                        "due": now + float(cfg["evidenceTailSeconds"])})
                     print(f"[audit] {aid} {sus.kind}: {sus.detail}")
