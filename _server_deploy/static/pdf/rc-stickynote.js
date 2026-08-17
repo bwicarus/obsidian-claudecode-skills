@@ -251,6 +251,21 @@
       //   ③ 壳的圆角与卡片圆角不同心,于是看着像卡片外面浮了一层错位的框。
       //   用户诊断:"整个卡片都放在一个透明底框中甚至可以在其中滚动，这就是所有问题的根源"。
       '.rc-note.rc-note-hashtml .rc-note-html.rc-note-html-card{padding:0;max-height:none;overflow:visible;background:transparent}',
+      // ★ 卡片收成球时，壳必须**完全隐形** —— 球自己就是全部视觉。
+      //   用户报了四轮"球外面还有一圈框/边线"，每轮我都去猜是哪一层留下的
+      //   （壳背景？body 边框？handle？html 容器？），猜一层修一层，没有尽头。
+      //   这里改成不问来源：dot 态下把壳这一整套装饰(背景/边框/阴影/描边)一次清零，
+      //   任何一层想画点什么都画不出来。展开态不受影响。
+      //   :has() 在 iOS 15.4+ 可用；万一不支持，退化成现状(有框)，不会更糟。
+      '.rc-note:has(.vc-card.vc-dot),' +
+      '.rc-note:has(.vc-card.vc-dot) .rc-note-body,' +
+      '.rc-note:has(.vc-card.vc-dot) .rc-note-handle,' +
+      '.rc-note:has(.vc-card.vc-dot) .rc-note-html' +
+      '{background:transparent!important;background-image:none!important;border:none!important;' +
+      'box-shadow:none!important;outline:none!important;backdrop-filter:none!important;' +
+      '-webkit-backdrop-filter:none!important}',
+      // 壳的尺寸也跟着球收 —— 否则壳还占着方块那么大一片，手指点旁边空白也算点中它。
+      '.rc-note:has(.vc-card.vc-dot){width:auto!important;height:auto!important;min-width:0!important;min-height:0!important}',
       '.rc-note.rc-note-hashtml .rc-note-text,.rc-note.rc-note-hashtml .rc-note-tools,.rc-note.rc-note-hashtml .rc-note-ink{display:none!important}',
       '.rc-note.rc-note-hashtml.rc-note-collapsed .rc-note-html{display:none}',
       '.rc-note.rc-note-hasvideo .rc-vid-embed{border-radius:9px 9px 0 0;overflow:hidden}',

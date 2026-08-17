@@ -660,6 +660,8 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-fc{margin-top:7px;background:rgba(0,0,0,.26);border:0.5px solid rgba(255,255,255,.1);border-radius:9px;padding:7px 9px;color:#e6ecf8;font-size:13px}' +
       '.vc-fc img{max-width:100%;border-radius:6px;margin-top:5px;display:block}' +
       '.vc-fc-t{font-size:9.5px;letter-spacing:.1em;color:#7c8bab;font-weight:700;margin-bottom:3px}' +
+      // 删掉「正面/背面」标题后，靠底色深一档区分背面（.vc-fc 本身已有边框和间距）。
+      '.vc-fc-back{background:rgba(0,0,0,.36)}' +
       '.vc-cz{background:rgba(123,108,255,.22);border-bottom:1.5px solid #7b6cff;border-radius:3px;padding:0 5px;color:#cdc6ff;font-weight:600}' +
       '.vc-fc-n{display:flex;align-items:center;gap:7px;margin-top:7px}' +
       '.vc-fc-n button{background:transparent;border:0.5px solid rgba(255,255,255,.16);border-radius:7px;color:#93a4c6;width:26px;height:24px;cursor:pointer;font-size:13px;padding:0}' +

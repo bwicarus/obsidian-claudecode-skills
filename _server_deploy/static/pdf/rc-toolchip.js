@@ -129,8 +129,10 @@
         function (_m, a) { return '<span class="vc-cz">' + a + '</span>'; });
       faces = '<div class="vc-fc"><div class="vc-fc-t">填空</div>' + cz + '</div>';
     } else {
-      faces = '<div class="vc-fc"><div class="vc-fc-t">正面</div>' + mdInline(c.front || '') + '</div>' +
-              '<div class="vc-fc"><div class="vc-fc-t">背面</div>' + mdInline(c.back || '') + '</div>';
+      // 「正面」「背面」两个标题不带信息、只占高度（用户要求删）——正反面靠 .vc-fc 之间的
+      // 分隔线区分就够了。cloze 那支保留「填空」：它标识的是卡片类型，不是废话。
+      faces = '<div class="vc-fc">' + mdInline(c.front || '') + '</div>' +
+              '<div class="vc-fc vc-fc-back">' + mdInline(c.back || '') + '</div>';
     }
     var dots = cards.map(function (_x, k) { return '<span class="vc-fc-d' + (k === i ? ' on' : '') + '"></span>'; }).join('');
     return '<div style="font-weight:600;margin-bottom:2px">已加 ' + (r.n || cards.length) + ' 张卡 · ' + esc(r.deck || 'QA') + '</div>' +
