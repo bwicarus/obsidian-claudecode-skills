@@ -534,7 +534,7 @@
       container.__fcPager.destroy();
     }
     container.__fcPager = null;
-    var activeIndices = [];
+    var activeIndices = [];   // 轮播位置 → 卡片下标（已删的不占位）
     st.cards.forEach(function (card, index) {
       if (!card._removed) activeIndices.push(index);
     });
@@ -565,6 +565,7 @@
     });
     try { RC.typeset && RC.typeset(container); } catch (e) {}
     if (track) {
+      container.__fcActive = activeIndices;   // 供 _advanceToNextDraft 换算位置
       container.__fcPager = bindPager(container, {
         track: track,
         slides: container.querySelectorAll('.fc-slide'),
@@ -830,6 +831,7 @@
         exportToComputerAnki(container, i);
       }
     } catch (_) {}
+    _advanceToNextDraft(container, i);
     return record;
   }
   function failRepositoryConfirmation(container, st, c, i, previous, error) {
@@ -887,6 +889,30 @@
           container, st, c, i, previous, explicitError
         );
       });
+  }
+  /// 处理完一张后推进到下一张仍待确认的卡（用户 2026-08-18 选定"点击瞬间就推进"）。
+  ///
+  /// 此前保存后是**就地**把当前 slide 从草稿重渲成学习卡（92fcab51 引入 scroll-snap
+  /// 时定的规则），于是多张草稿要逐张手动划过去。这里在操作后主动前进；
+  /// pager 的 onChange 会同步 st.idx，所以不会被 _restoreStates 的重建弹回。
+  /// 后面没有待处理的就往前找；一张都不剩就停在原地（不打扰）。
+  function _advanceToNextDraft(container, fromIndex) {
+    try {
+      var st = container && container.__fc;
+      var pager = container && container.__fcPager;
+      var active = container && container.__fcActive;
+      if (!st || !pager || typeof pager.goto !== 'function' || !active) return;
+      var cards = st.cards || [];
+      var isPending = function (c) {
+        return c && !c._removed && (c._st === 'draft' || c._st === undefined) && !c._addPending;
+      };
+      var target = -1;
+      for (var k = fromIndex + 1; k < cards.length; k++) { if (isPending(cards[k])) { target = k; break; } }
+      if (target < 0) for (var j = 0; j < fromIndex; j++) { if (isPending(cards[j])) { target = j; break; } }
+      if (target < 0) return;
+      var pos = active.indexOf(target);
+      if (pos >= 0) pager.goto(pos, { reason: 'advance-after-confirm' });
+    } catch (_) {}
   }
   function addToAnki(container, i) {
     var st = container && container.__fc, c = st && st.cards[i];
