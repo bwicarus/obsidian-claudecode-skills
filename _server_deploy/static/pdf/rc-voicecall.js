@@ -458,6 +458,16 @@
       '.vc-card.vc-dot{width:40px;height:40px;min-height:0;padding:0;border-radius:13px;border-color:transparent;' +
         '--vc-cardbg:transparent;--vc-cardblur:none;box-shadow:none;overflow:visible}' +
       '.vc-card.vc-dot .vc-card-hd,.vc-card.vc-dot .vc-card-sum,.vc-card.vc-dot .vc-card-bd{display:none}' +
+      // 收起成球时让后面的书页透出来。⚠ 但不能只是把填充调淡 —— 上面那条注释记着教训:
+      // 6% 白玻璃压在 PDF 白页上直接隐形。所以**可见性改由轮廓承担**:填充与模糊都压低,
+      // 边框反而加实、再加一圈极淡的外描边,球在白页和深色插图上都还认得出。
+      // 展开后不受影响(下面的 :not(.vc-dot) 把值还原)。
+      '.vc-card.vc-dot .vc-card-dot{--vc-tf:color-mix(in srgb,var(--vc-tc) 12%,rgba(22,26,38,.34));' +
+        '--vc-tl:color-mix(in srgb,var(--vc-tc) 62%,rgba(255,255,255,.34));' +
+        '-webkit-backdrop-filter:blur(9px) saturate(1.2);backdrop-filter:blur(9px) saturate(1.2);' +
+        'box-shadow:0 2px 9px -3px rgba(0,0,0,.34),0 0 0 0.5px rgba(0,0,0,.16)}' +
+      // 手指按住时补回不透明度:正在操作的东西该是实的,不然点下去像没点到。
+      '.vc-card.vc-dot .vc-card-dot:active{--vc-tf:color-mix(in srgb,var(--vc-tc) 26%,rgba(22,26,38,.72))}' +
       // 三态生长:**以左上角(标记位置)为原点**拉长/展开——标记不动,卡片从它身上长出来
       // 三态生长的曲线统一成 iOS 那条 smooth-spring 近似(.32,.72,.36,1):起步快、尾巴长,
       // 停下来时没有回弹的"抖"。原来尺寸和 transform 用了两条不同曲线(其中一条 1.35 会过冲),
