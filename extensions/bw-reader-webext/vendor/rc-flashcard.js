@@ -227,6 +227,9 @@ if (window.__bwPwaProviderOnly) return;
       '.fc-bare .fc-card{background:transparent;border:none;padding:4px 0;box-shadow:none}.fc-bare .fc-wrap{margin-top:0}' +
       '.fc-slbl{font-size:12px;color:var(--rc-text-muted,#8a9bb4);margin-bottom:6px}' +
       '.fc-card{background:linear-gradient(145deg,rgba(22,32,58,.82),rgba(13,19,34,.88));border:1px solid rgba(125,211,252,.16);border-radius:var(--rc-radius-xl,12px);padding:14px;font-size:15px;line-height:1.65;color:var(--rc-text,#e6e6f0);max-height:min(46vh,300px);overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;box-shadow:inset 0 1px 0 rgba(255,255,255,.035)}' +
+      // 卡面图片:此前这套样式里**一条 img 规则都没有**,AI 生成的带图卡要么撑爆卡片、
+      // 要么被挤出可视区(后端那条 markdown 图片被当链接吃掉的 bug 修好后才显出来)。
+      '.fc-card img{max-width:100%;height:auto;display:block;margin:.45em auto;border-radius:6px}' +
       // 学习卡有内层 fc-card 与共享壳 vc-card-bd 两个纵向滚动容器。页面 placement
       // 直接 mountState，不一定经过 renderEntity 的 data-learning-card-id；fc-bare 才是
       // 两条渲染链都具备的真实标记。只隐藏轨道，继续保留原生滚动。

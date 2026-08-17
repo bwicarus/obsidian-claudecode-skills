@@ -16043,7 +16043,12 @@ def _validate_snippets_body(body):
     }, None
 
 
-_ANKI_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+_ANKI_MD_LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\((https?://[^)]+)\)")
+# ⚠ 图片必须先于链接处理，而且链接正则必须用 (?<!!) 把图片排除掉：
+#   markdown 图片是 ![alt](url)，跟链接只差前面一个 !。原来的链接正则不排除它，
+#   于是 ![春卷](https://…) 里的 [春卷](https://…) 被当成链接替换，结果是
+#   !<a href="…">春卷</a> —— 图片变成一个带感叹号的链接，卡上自然什么都看不见。
+_ANKI_MD_IMG_RE = re.compile(r"!\[([^\]]*)\]\((https?://[^)]+)\)")
 
 
 class _AnkiCardsResponseError(ValueError):
@@ -16120,9 +16125,14 @@ def _parse_anki_cards_response(raw):
 
 
 def _anki_md_links(text):
-    """Anki 卡按 HTML 渲染:AI 生成的 markdown 链接 [文本](url) 转成可点的 <a href>(否则整串显示成字面文本)。"""
+    """Anki 卡按 HTML 渲染:AI 生成的 markdown 链接 [文本](url) 转成可点的 <a href>(否则整串显示成字面文本)。
+
+    图片 ![alt](url) 先转 <img> —— 顺序不能反:先跑链接的话图片已经被破坏成
+    `!<a href>alt</a>`，再怎么处理都救不回来。
+    """
     if not text:
         return text
+    text = _ANKI_MD_IMG_RE.sub(r'<img src="\2" alt="\1">', text)
     return _ANKI_MD_LINK_RE.sub(r'<a href="\2">\1</a>', text)
 
 
