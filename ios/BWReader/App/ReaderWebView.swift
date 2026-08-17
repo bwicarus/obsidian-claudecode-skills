@@ -777,7 +777,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 "#fs-toggle,#lb-btn{display:none!important}" +
                 // ReaderRootView owns two 44pt buttons in the upper-right.
                 // Keep the web fullscreen recovery control outside their hit box.
-                "#fs-restore{right:calc(env(safe-area-inset-right,0px) + 112px)!important}";
+                "#fs-restore{right:calc(env(safe-area-inset-right,0px) + 112px)!important}" +
+                // 同一对原生按钮也压在右侧抽屉的顶部 —— 抽屉是 top:0/right:0 全高的，
+                // 它头部那一排按钮正好落在按钮的命中区下面，点不到（用户实测）。
+                // #fs-restore 早就做了水平避让，抽屉这边一直漏着；这里补垂直避让：
+                // 44pt 按钮 + 上边距，取 52px。
+                "#ep-side{padding-top:calc(env(safe-area-inset-top,0px) + 52px)!important}";
               (document.head || document.documentElement).appendChild(style);
 
               const dispatchOverride = (detail) => {

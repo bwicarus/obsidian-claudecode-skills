@@ -279,7 +279,7 @@ if (window.__bwPwaProviderOnly) return;
         : (c._ratingPending
           ? '⏳ 正在提交评分'
           : '✓ 已复习 · 距下次复习 <b>' + esc(nextLabel(c._next)) + '</b>');
-      return '<div class="fc-card"><div class="fc-donehd">' + doneLabel + '</div><div class="fc-lbl">正面</div>' + df + '<div class="fc-back"><div class="fc-lbl">背面</div>' + db + '</div></div>';
+      return '<div class="fc-card"><div class="fc-donehd">' + doneLabel + '</div>' + df + '<div class="fc-back">' + db + '</div></div>';
     }
     if (c._st === 'draft') {
       var b = c.type === 'cloze'
@@ -291,12 +291,12 @@ if (window.__bwPwaProviderOnly) return;
     if (c._st === 'preview') {
       var pf = faceHtml(st, c, 'front');
       var pb = faceHtml(st, c, 'back');
-      return '<div class="fc-card"><div class="fc-lbl">正面</div>' + pf + '<div class="fc-back"><div class="fc-lbl">背面</div>' + pb + '</div></div>';
+      return '<div class="fc-card">' + pf + '<div class="fc-back">' + pb + '</div></div>';
     }
     var front = faceHtml(st, c, 'front');
     var back = faceHtml(st, c, 'back');
     if (c._addPending) {
-      return '<div class="fc-card"><div class="fc-lbl">正面</div>' + front +
+      return '<div class="fc-card">' + front +
         '<div class="fc-pending">' +
         (c._addQueued
           ? '本地保存结果待核对，正在用原写入编号确认；请勿重复提交'
@@ -312,15 +312,16 @@ if (window.__bwPwaProviderOnly) return;
         mobileApi.available());
       if (canDesktop || canMobile) {
         exportControls = '<div class="fc-btns">' +
-          (canDesktop ? '<button class="fc-export" data-fc="export-pc">发送到电脑 Anki</button>' : '') +
-          (canMobile ? '<button class="fc-export" data-fc="export-mobile">发送到 iPad Anki</button>' : '') +
+          // 电脑 Anki 已在保存时自动推送，不再占一个按钮位；
+          // iPad Anki 必须用户主动（要切 App），保留这一个。
+          (canMobile ? '<button class="fc-export" data-fc="export-mobile">同步到 iPad Anki</button>' : '') +
           '</div>';
       }
     }
     var answerControls = c._ratingUnavailable
       ? '<div class="fc-unavailable">' +
         (c._ratingUnavailableReason === 'not-exported'
-          ? '已保存在 Reader 本地卡库；外部 Anki 只是可选副本。'
+          ? ''   // 保存成功本身已有 toast；再挂一条"外部 Anki 只是可选副本"是在讲实现细节
           : (c._ratingUnavailableReason === 'external'
             ? '已发送到外部 Anki；请在对应 Anki 中复习。'
             : (c._ratingUnavailableReason === 'export-pending'
@@ -821,6 +822,17 @@ if (window.__bwPwaProviderOnly) return;
     // 但不能再把本地成功回执绑在它（或旧 Pi 投影）上。
     _stateSync(st, i);
     RC.toast && RC.toast('✓ 已保存到 Reader 本地卡库');
+    // ★ 统一同步(2026-08-18 用户要求):电脑 Anki 走后台 HTTP，全程没有打断，
+    //   所以不该再让用户逐张点「发送到电脑 Anki」—— 保存成功即自动推送。
+    //   失败不弹错:回执已按 aid 落库，下次仍可重试，不打断阅读。
+    //   ⚠ iPad Anki 不自动:它要 URL scheme 切换 App，自动切会把人从书里踢出去，
+    //     所以那条仍然保留一个手动入口。
+    try {
+      if (!c._pcExportStatus && st.opts && st.opts.localDraft &&
+          RC.computerVoice && typeof RC.computerVoice.addLocalAnkiCard === 'function') {
+        exportToComputerAnki(container, i);
+      }
+    } catch (_) {}
     return record;
   }
   function failRepositoryConfirmation(container, st, c, i, previous, error) {
