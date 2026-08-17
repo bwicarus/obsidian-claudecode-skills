@@ -47,22 +47,24 @@ DEFAULT_CONFIG: dict = {
     "contract": CONFIG_CONTRACT,
     # 三条状态条矩形(物理像素,从 HUD 放大图直读并逐态验证)
     "bars": {
-        "hp": {"x": 334, "y": 84, "w": 800, "h": 9},
+        "hp": {"x": 334, "y": 84, "w": 1400, "h": 9},
         "fp": {"x": 334, "y": 110, "w": 800, "h": 10},
         "stamina": {"x": 334, "y": 140, "w": 800, "h": 12},
     },
-    "red": {"rMin": 90, "dominance": 25},  # HP 填充判定
-    "cool": {"minLevel": 60, "dominance": 15},  # FP/耐力填充判定(青/绿)
+    # HP 按饱和度量长度(见 measure_bar);阈值来自四态实测
+    "bar": {"satMin": 42, "lumMin": 55, "run": 12, "skipLeft": 6},
+    "cool": {"minLevel": 60, "dominance": 15},  # FP/耐力存在性(青/绿)
     "pollHz": 8,
-    "dropThresholdPx": 4,
-    "hitDropPx": 80,
+    "dropThresholdCols": 6,
+    "hitDropCols": 25,
     "episodeQuietSeconds": 10.0,
     "stabilityTicks": 2,
-    "stabilityTolerancePx": 8,
-    "epOpenPx": 40,
-    "healClosePx": 80,
-    "commitLossPx": 150,
+    "stabilityToleranceCols": 4,
+    "epOpenCols": 16,
+    "healCloseCols": 25,
+    "commitLossCols": 40,
     "hudGoneThreshold": 4,  # FP+耐力填充 ≤ 此值 = HUD 整体消失(加载/黑屏)
+    "hudConfirmTicks": 3,  # HUD 状态需连续几帧一致才切换(去抖)
     # 证据序列
     "frameRingHz": 2.5,
     "frameRingSeconds": 14.0,
@@ -120,13 +122,51 @@ def load_config() -> dict:
 
 # ── 纯逻辑(可自检) ────────────────────────────────────────────────────────────
 
-def count_fill_pixels(bgra: bytes, r_min: int, dominance: int) -> int:
-    n = 0
-    for i in range(0, len(bgra) - 3, 4):
-        b, g, r = bgra[i], bgra[i + 1], bgra[i + 2]
-        if r >= r_min and (r - (g if g > b else b)) >= dominance:
-            n += 1
-    return n
+def measure_bar(
+    bgra: bytes, width: int, height: int, *,
+    sat_min: int, lum_min: int, run: int, skip_left: int
+) -> tuple[int, int]:
+    """量血条:返回 (实血长度, 余像长度),单位=列。
+
+    第三版核心(2026-08-17,AI 裁定反查出的根因):血条**会整体变色**
+    (橙红↔粉紫,装备对比/区域增益/队友状态都会触发),按红色像素计数时
+    变色瞬间读数归零,直接伪造出"98% 暴击"。改按列的**饱和度**找填充
+    右端 —— 这是几何量,实测四态皆可分:满血填充 sat48/空槽 33-38、
+    变粉填充 sat58、商店遮罩下血条区仍 48 而遮罩区 0、濒死整条 15-18
+    (剩的是苍白余像,实血确为 0)。
+
+    余像(高亮度低饱和,填充右侧那截白影)顺带给出"最近损失了多少",
+    是免费的第二信号。
+    """
+    cols_sat: list[int] = []
+    cols_lum: list[int] = []
+    for x in range(width):
+        s_acc = l_acc = 0
+        for y in range(height):
+            i = (y * width + x) * 4
+            b, g, r = bgra[i], bgra[i + 1], bgra[i + 2]
+            s_acc += max(r, g, b) - min(r, g, b)
+            l_acc += (r * 299 + g * 587 + b * 114) // 1000
+        cols_sat.append(s_acc // height)
+        cols_lum.append(l_acc // height)
+
+    def edge(pred, start: int) -> int:
+        """从 start 起向右,首次连续 run 列不满足 pred 的位置。"""
+        miss = 0
+        for x in range(start, len(cols_sat)):
+            if pred(x):
+                miss = 0
+            else:
+                miss += 1
+                if miss >= run:
+                    return x - run + 1
+        return len(cols_sat)
+
+    fill_end = edge(lambda x: cols_sat[x] >= sat_min, skip_left)
+    fill = max(0, fill_end - skip_left)
+    ghost_end = edge(lambda x: cols_lum[x] >= lum_min, fill_end)
+    ghost = max(0, ghost_end - fill_end)
+    return fill, ghost
 
 
 def count_cool_pixels(bgra: bytes, min_level: int, dominance: int) -> int:
@@ -191,11 +231,24 @@ class HudState:
     三条读数如实写进事件与曲线,供分析层自行取用。
     """
 
-    def __init__(self, gone_threshold: int = 4) -> None:
+    def __init__(self, gone_threshold: int = 4, confirm_ticks: int = 3) -> None:
         self.gone_threshold = int(gone_threshold)
+        self.confirm = max(1, int(confirm_ticks))
+        self.state = "on"
+        self._cand = "on"
+        self._count = 0
 
     def feed(self, fp_fill: int, st_fill: int) -> str:
-        return "gone" if fp_fill + st_fill <= self.gone_threshold else "on"
+        """需连续 confirm 帧一致才切换。首场 72 次转换里 28 次是 <1s 的来回抖
+        (HUD 淡入淡出/伤害闪白的瞬间),不去抖会把台账淹掉。"""
+        raw = "gone" if fp_fill + st_fill <= self.gone_threshold else "on"
+        if raw == self._cand:
+            self._count += 1
+        else:
+            self._cand, self._count = raw, 1
+        if self._count >= self.confirm and self._cand != self.state:
+            self.state = self._cand
+        return self.state
 
 
 class EpisodeTracker:
@@ -271,16 +324,24 @@ def pick_evidence_frames(
 
 
 def self_test() -> int:
-    # BGRA 序:红填充 ×2 / 浅黄残影 / 暗背景 / FP 青 / 耐力绿
-    px = bytes(
-        [0, 0, 200, 255] * 2
-        + [140, 200, 220, 255]
-        + [20, 20, 40, 255]
-        + [190, 150, 60, 255]
-        + [80, 170, 60, 255]
-    )
-    assert count_fill_pixels(px, 90, 25) == 2, "HP 红填充只认前两个"
-    assert count_cool_pixels(px, 60, 15) == 2, "冷色只认青条和绿条"
+    assert count_cool_pixels(
+        bytes([190, 150, 60, 255] + [80, 170, 60, 255] + [20, 20, 40, 255]), 60, 15
+    ) == 2, "冷色只认青条和绿条"
+
+    # measure_bar:单行血条,左 10 列饱和填充 + 5 列高亮低饱和余像 + 空槽
+    def bar(fill_n, ghost_n, slot_n, fill_rgb=(200, 40, 40)):
+        r, g, b = fill_rgb
+        return bytes(
+            [b, g, r, 255] * fill_n          # 高饱和填充
+            + [200, 200, 210, 255] * ghost_n  # 余像:亮且近白
+            + [30, 28, 34, 255] * slot_n      # 空槽:暗
+        )
+    kw = dict(sat_min=42, lum_min=55, run=3, skip_left=0)
+    assert measure_bar(bar(10, 5, 20), 35, 1, **kw) == (10, 5), "实血/余像分离"
+    # 变色(粉紫)不影响长度 —— 这正是第三版要修的根因
+    assert measure_bar(bar(10, 5, 20, (210, 60, 190)), 35, 1, **kw) == (10, 5), "变粉同长"
+    assert measure_bar(bar(0, 12, 20), 32, 1, **kw) == (0, 12), "濒死:实血 0,余像长"
+    assert measure_bar(bar(25, 0, 10), 35, 1, **kw) == (25, 0), "满血无余像"
     kw = dict(drop_threshold=4)
     assert classify_change(100, 97, **kw) is None, "小抖动不该报事件"
     assert classify_change(100, 90, **kw) == "hp-drop"
@@ -293,11 +354,14 @@ def self_test() -> int:
     assert f.feed(4500) is None and f.feed(4500) == (6932, 4500), "站稳才发布"
     assert f.feed(4498) == (4500, 4498), "慢漂逐帧通过"
 
-    h = HudState(4)
+    h = HudState(4, 3)
     assert h.feed(3754, 3899) == "on", "濒死实测值:HUD 在"
     assert h.feed(1242, 616) == "on", "菜单遮罩:像素层判不出,不冒充判定"
     assert h.feed(1394, 0) == "on", "低资源战斗:同样只算在场"
-    assert h.feed(0, 0) == "gone", "加载黑屏:全灭(唯一能判准的一态)"
+    assert h.feed(0, 0) == "on" and h.feed(0, 0) == "on", "单帧全灭不切(去抖)"
+    assert h.feed(0, 0) == "gone", "连续三帧全灭才认定 HUD 消失"
+    assert h.feed(2000, 2000) == "gone", "回来也要连续三帧才切"
+    assert h.feed(2000, 2000) == "gone" and h.feed(2000, 2000) == "on", "确认后恢复"
 
     e = EpisodeTracker(10.0)
     assert e.on_decrease(1000, 950, 10.0) is True, "首掉开段"
@@ -342,10 +406,12 @@ def probe_bars_once() -> int:
             raw = bytes(
                 sct.grab({"left": b["x"], "top": b["y"], "width": b["w"], "height": b["h"]}).raw
             )
-            print(
-                f"{name:8s} 红填充={count_fill_pixels(raw, cfg['red']['rMin'], cfg['red']['dominance']):5d}"
-                f"  冷填充={count_cool_pixels(raw, cfg['cool']['minLevel'], cfg['cool']['dominance']):5d}"
-            )
+            bc = cfg["bar"]
+            fill, ghost = measure_bar(
+                raw, b["w"], b["h"], sat_min=bc["satMin"], lum_min=bc["lumMin"],
+                run=bc["run"], skip_left=bc["skipLeft"])
+            print(f"{name:8s} 实血={fill:5d}列 余像={ghost:5d}列  冷填充="
+                  f"{count_cool_pixels(raw, cfg['cool']['minLevel'], cfg['cool']['dominance']):5d}")
     print(f"前台窗口: {_foreground_title()!r}")
     return 0
 
@@ -358,7 +424,7 @@ def run() -> int:
     _set_dpi_aware()
     cfg = load_config()
     bars = cfg["bars"]
-    red, cool = cfg["red"], cfg["cool"]
+    barcfg, cool = cfg["bar"], cfg["cool"]
     poll = 1.0 / float(cfg["pollHz"])
     title_keys = [str(k).upper() for k in cfg["windowTitleContains"]]
 
@@ -366,7 +432,7 @@ def run() -> int:
     (session_dir / "evidence").mkdir(parents=True, exist_ok=True)
     ledger = (session_dir / "ledger.jsonl").open("a", encoding="utf-8")
     samples = (session_dir / "samples.csv").open("a", encoding="utf-8")
-    samples.write("ts,hp,fp_lit,st_lit,hud\n")
+    samples.write("ts,hp_cols,ghost_cols,fp,stamina,hud\n")
     (session_dir / "session.json").write_text(
         json.dumps(
             {"contract": LEDGER_CONTRACT, "game": "nightreign", "channel": "hud",
@@ -413,13 +479,13 @@ def run() -> int:
                         "frames": manifest}, ensure_ascii=False, indent=2), "utf-8")
         print(f"   └ 证据 {len(manifest)} 帧 → evidence/{event_id}")
 
-    hit_px = int(cfg["hitDropPx"])
-    ep_open_px = int(cfg["epOpenPx"])
-    heal_close_px = int(cfg["healClosePx"])
-    commit_loss_px = int(cfg["commitLossPx"])
+    hit_px = int(cfg["hitDropCols"])
+    ep_open_px = int(cfg["epOpenCols"])
+    heal_close_px = int(cfg["healCloseCols"])
+    commit_loss_px = int(cfg["commitLossCols"])
     episode = EpisodeTracker(float(cfg["episodeQuietSeconds"]))
-    stability = StabilityFilter(int(cfg["stabilityTicks"]), int(cfg["stabilityTolerancePx"]))
-    hud = HudState(int(cfg["hudGoneThreshold"]))
+    stability = StabilityFilter(int(cfg["stabilityTicks"]), int(cfg["stabilityToleranceCols"]))
+    hud = HudState(int(cfg["hudGoneThreshold"]), int(cfg["hudConfirmTicks"]))
 
     ring: deque[tuple[float, bytes, float]] = deque(
         maxlen=int(float(cfg["frameRingHz"]) * float(cfg["frameRingSeconds"])) + 4)
@@ -451,8 +517,11 @@ def run() -> int:
                     continue
 
                 now = time.monotonic()
-                hp_raw = count_fill_pixels(
-                    bytes(sct.grab(rects["hp"]).raw), red["rMin"], red["dominance"])
+                hp_rect = bars["hp"]
+                hp_raw, hp_ghost = measure_bar(
+                    bytes(sct.grab(rects["hp"]).raw), hp_rect["w"], hp_rect["h"],
+                    sat_min=barcfg["satMin"], lum_min=barcfg["lumMin"],
+                    run=barcfg["run"], skip_left=barcfg["skipLeft"])
                 fp_lit = count_cool_pixels(
                     bytes(sct.grab(rects["fp"]).raw), cool["minLevel"], cool["dominance"])
                 st_lit = count_cool_pixels(
@@ -474,9 +543,10 @@ def run() -> int:
                     sharp = _sharpness(np.asarray(im.convert("L").resize((320, 180))))
                     ring.append((now, buf.getvalue(), sharp))
 
-                cur_sample = (hp_raw, fp_lit // 50, st_lit // 50, hud_state)
+                cur_sample = (hp_raw, hp_ghost // 8, fp_lit // 50, st_lit // 50, hud_state)
                 if cur_sample != last_sample:
-                    samples.write(f"{_now_iso()},{hp_raw},{fp_lit},{st_lit},{hud_state}\n")
+                    samples.write(
+                        f"{_now_iso()},{hp_raw},{hp_ghost},{fp_lit},{st_lit},{hud_state}\n")
                     samples.flush()
                     last_sample = cur_sample
 
@@ -497,7 +567,7 @@ def run() -> int:
                     if transition is not None:
                         prev_c, cur_c = transition
                         kind = classify_change(
-                            prev_c, cur_c, drop_threshold=int(cfg["dropThresholdPx"]))
+                            prev_c, cur_c, drop_threshold=int(cfg["dropThresholdCols"]))
                         if kind == "hp-drop":
                             delta_abs = prev_c - cur_c
                             was_active = episode.active
@@ -512,7 +582,8 @@ def run() -> int:
                                          or episode.drops >= 2)):
                                 eid = emit("episode-start", ep_pending["pxBefore"],
                                            ep_pending["pxAfter"],
-                                           {"fp": fp_lit, "stamina": st_lit})
+                                           {"fp": fp_lit, "stamina": st_lit,
+                                            "ghostCols": hp_ghost})
                                 pending_ev.append(
                                     {"id": eid, "anchor": ep_pending["anchor"],
                                      "due": ep_pending["anchor"]
@@ -544,7 +615,7 @@ def run() -> int:
 
                 if now - heartbeat_at >= 120.0:
                     heartbeat_at = now
-                    print(f"[heartbeat] hp={hp_raw} fp={fp_lit} st={st_lit} "
+                    print(f"[heartbeat] hp={hp_raw}列 余像={hp_ghost} fp={fp_lit} st={st_lit} "
                           f"hud={hud_state} 缓冲={len(ring)}帧")
 
                 elapsed = time.monotonic() - tick_start
