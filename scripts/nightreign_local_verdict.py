@@ -56,9 +56,18 @@ PROMPT = """这是一次玩家受伤事件的连续画面(按时间顺序,offset
 """
 
 
-def b64_image(path: Path, max_side: int | None = 1024) -> str:
-    """max_side=None 表示**不缩放**。名字条裁图必须原尺寸送 —— 实测同一模型
-    同一帧,整屏缩到 896px 读成"负伤恶螣",裁图原尺寸送就读对"负伤恶魔"。"""
+def b64_image(path: Path, max_side: int | None = 1280) -> str:
+    """max_side=None 表示**不缩放**。
+
+    1280 是实测的清晰度拐点(读游戏内敌人名字):
+        896px  → "负伤恶螳"(错)  1.2s
+        1280px → "负伤恶魔"(对)  1.7s
+        1920px → 对,但 3.6s,无额外收益
+    另做过原生视频输入(llama-mtmd-cli --video)的对照:同为 1280px 时结论
+    与静态帧**完全一致**,而视频要独占显存重载 13GB 模型(1-2 分钟) vs
+    常驻 server 的 1.7 秒。故当前任务(读名字/判结果)不走视频路径;若将来
+    要理解连续动作(boss 招式、操作序列),再回头评估视频。
+    """
     from PIL import Image
     import io
 
