@@ -123,17 +123,10 @@ private struct ReaderRootView: View {
                 .padding(4)
 
             HStack(spacing: 8) {
-                Button {
-                    showsLibrary = true
-                } label: {
-                    Image(systemName: "books.vertical")
-                        .font(.system(size: 17, weight: .semibold))
-                        .frame(width: 44, height: 44)
-                        .background(.ultraThinMaterial, in: Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("打开书库")
-
+                // 书库的悬浮钮撤掉：阅读器顶栏已经有「书籍」按钮（⚙ 旁边），
+                // 它在 App 内会被 takeOverLibraryNavigation 拦截、照样弹这个原生书库 sheet。
+                // 用户要求"书籍按钮单独出来放在设置按钮旁"——那个位置就在顶栏，
+                // 右上角再挂一枚等于同一个入口占两处，还挡着侧栏顶部的按钮。
                 Button {
                     nativeToolsInitialAction = .openNativeTools
                     showsNativeTools = true

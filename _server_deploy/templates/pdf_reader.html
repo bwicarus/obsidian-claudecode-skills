@@ -54,7 +54,12 @@ try {
     {% if ui_shared %}<button onclick="window._noteCreateAtCenter && _noteCreateAtCenter()" title="便签（在当前视野中央新建;单击短条折叠/展开,长按短条移动/删除,长按内容区编辑）"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5H19V14L14 19H5Z"/><path d="M14 19V14H19"/><path d="M8 9.5H15.5"/><path d="M8 12.5H12"/></svg></button>{% endif %}
     {% if ui_shared %}<button onclick="window._upCreate && _upCreate()" title="插入我的页（真正写进 PDF:页数变化、所有阅读器可见;已有高亮/便签/墨迹等页锚自动迁移,原书先备份;页角 📝 可编辑/删除）"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="3.5" width="13" height="17" rx="2"/><path d="M12 8.5V15.5"/><path d="M8.5 12H15.5"/></svg></button>{% endif %}
     <!-- 语音通话入口已整合进 AI 侧栏 composer(#asst-call,rc-voicecall.js 注入在语音输入旁) -->
-    <button id="fs-toggle" onclick="toggleFullscreen()" title="全屏阅读：隐藏顶栏腾出空间（再点右上角 ⤢ 恢复）">⛶ 全屏</button>
+    <!-- ⚠ 全屏按钮不显示但**元素必须留着**：setupFs 以它为初始化入口（没有它连 #fs-restore 的退出绑定都不会挂），语音命令 toggle_fullscreen 靠 .click()，rc-voicecall 还拿它当顶栏插入锚点。
+         用户要的是“顶栏别占这个位置”，不是“全屏功能不要了”。 -->
+    <button id="fs-toggle" onclick="toggleFullscreen()" hidden aria-hidden="true" tabindex="-1">⿛</button>
+    <!-- 书籍：App 内点它会被 takeOverLibraryNavigation 拦截、直接弹原生书库；
+         扩展/浏览器里就是回书架列表。放在 ⚙ 旁边（用户要求「书籍按钮单独出来放设置旁」）。 -->
+    <button onclick="goPdfList()" title="书籍：回到书架 / 打开书库"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 4.5h4v15h-4z"/><path d="M9.8 4.5h3.6v15H9.8z"/><path d="M15.1 5.2l3.4.9-3.6 13.6-3.4-.9z"/></svg></button>
     <button onclick="openSettings()" title="AI 设置"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M21 12h-2.5M5.5 12H3M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8M18.4 18.4l-1.8-1.8M7.4 7.4L5.6 5.6"/></svg></button>
   </div>
   <!-- 全屏阅读时浮出的恢复按钮（点它显示顶栏） -->
