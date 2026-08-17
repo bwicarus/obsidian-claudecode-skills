@@ -183,6 +183,7 @@ def load_preferences(path: Path) -> dict[str, object]:
         "serviceMode": SERVICE_MODE_FULL,
         "snapshotViewerHidden": False,
         "hideVoiceOrb": False,
+        "autoStartOnBoot": False,
     }
     try:
         value = json.loads(path.read_text("utf-8"))
@@ -207,6 +208,7 @@ def load_preferences(path: Path) -> dict[str, object]:
         ),
         "snapshotViewerHidden": hidden is True,
         "hideVoiceOrb": value.get("hideVoiceOrb") is True,
+        "autoStartOnBoot": value.get("autoStartOnBoot") is True,
     }
 
 
@@ -217,6 +219,7 @@ def save_preferences(
     service_mode: str = SERVICE_MODE_FULL,
     snapshot_viewer_hidden: bool = False,
     hide_voice_orb: bool = False,
+    auto_start_on_boot: bool = False,
 ) -> None:
     if service_mode not in (SERVICE_MODE_FULL, SERVICE_MODE_BRIDGE_ONLY):
         raise ReaderPCServiceError(f"未知服务模式 {service_mode}")
@@ -228,6 +231,7 @@ def save_preferences(
             "serviceMode": service_mode,
             "snapshotViewerHidden": bool(snapshot_viewer_hidden),
             "hideVoiceOrb": bool(hide_voice_orb),
+            "autoStartOnBoot": bool(auto_start_on_boot),
         },
     )
 
@@ -454,6 +458,97 @@ def set_window_visible(hwnd: int, visible: bool) -> None:
     ctypes.WinDLL("user32").ShowWindow(hwnd, 8 if visible else 0)
 
 
+# ── 开机自启 + 崩溃看门狗(2026-08-17 做成可选项) ────────────────────────────
+# 外部三件套由本进程按偏好收敛:start-readerpc.ps1(读偏好+退出标记后决定)、
+# start-readerpc.vbs(wscript 包装,无控制台闪烁)、HKCU Run + 5 分钟计划任务。
+# 用户主动退出会写退出标记,看门狗见标记不复活;登录自启会清标记。
+AUTOSTART_RUN_VALUE = "BWReaderPCServer"
+WATCHDOG_TASK_NAME = "BW ReaderPC Watchdog"
+USER_EXIT_MARKER_NAME = "readerpc-user-exit.json"
+USER_EXIT_MARKER_CONTRACT = "readerpc-user-exit/1"
+
+_AUTOSTART_PS1 = 'param([string]$Reason = "watchdog")\n$root = Join-Path $env:LOCALAPPDATA "BWReader"\n$cfg = Join-Path $root "readerpc-server.config.json"\n$marker = Join-Path $root "readerpc-user-exit.json"\n$log = Join-Path $root "ReaderPC-Server\\autostart.log"\nfunction Log($m) {\n  try {\n    if ((Test-Path $log) -and (Get-Item $log).Length -gt 524288) { Clear-Content $log }\n    Add-Content -Path $log -Value "$(Get-Date -Format o) [$Reason] $m"\n  } catch {}\n}\ntry { $prefs = Get-Content $cfg -Raw | ConvertFrom-Json } catch { Log "无法读偏好: $_"; exit 0 }\nif ($prefs.autoStartOnBoot -ne $true) { exit 0 }\nif (Get-Process -Name "ReaderPC-Server" -ErrorAction SilentlyContinue) { exit 0 }\nif ($Reason -eq "logon") {\n  Remove-Item $marker -ErrorAction SilentlyContinue\n} elseif (Test-Path $marker) {\n  Log "用户主动退出过,看门狗不复活"\n  exit 0\n}\ntry { $cur = Get-Content (Join-Path $root "ReaderPC-Server\\current.json") -Raw | ConvertFrom-Json } catch { Log "无法读 current.json: $_"; exit 0 }\n$exe = Join-Path $cur.release "ReaderPC-Server.exe"\nif (-not (Test-Path $exe)) { Log "找不到 $exe"; exit 0 }\nLog "启动 $exe"\nStart-Process $exe\n'
+
+_AUTOSTART_VBS = 'Dim reason\nIf WScript.Arguments.Count > 0 Then\n    reason = WScript.Arguments(0)\nElse\n    reason = "watchdog"\nEnd If\nCreateObject("WScript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""__PS1__"" -Reason " & reason, 0, False\n'
+
+
+def write_autostart_scripts(local_root: Path) -> Path:
+    install_root = local_root / "ReaderPC-Server"
+    install_root.mkdir(parents=True, exist_ok=True)
+    ps1 = install_root / "start-readerpc.ps1"
+    vbs = install_root / "start-readerpc.vbs"
+    ps1.write_text(_AUTOSTART_PS1, encoding="utf-8-sig")
+    vbs.write_text(
+        _AUTOSTART_VBS.replace("__PS1__", str(ps1)), encoding="utf-8-sig"
+    )
+    return vbs
+
+
+def set_autostart_enabled(local_root: Path, enabled: bool) -> None:
+    """收敛开机自启外部状态。开=写脚本+Run 键+看门狗任务;关=拆 Run 键+删任务。"""
+    if os.name != "nt":
+        return
+    import winreg
+
+    run_key = "Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+    no_window = 0x08000000
+    if enabled:
+        vbs = write_autostart_scripts(local_root)
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.SetValueEx(
+                key,
+                AUTOSTART_RUN_VALUE,
+                0,
+                winreg.REG_SZ,
+                f'wscript.exe //B "{vbs}" logon',
+            )
+        proc = subprocess.run(
+            [
+                "schtasks", "/Create", "/F",
+                "/TN", WATCHDOG_TASK_NAME,
+                "/SC", "MINUTE", "/MO", "5",
+                "/TR", f'wscript.exe //B "{vbs}" watchdog',
+            ],
+            capture_output=True,
+            text=True,
+            creationflags=no_window,
+        )
+        if proc.returncode != 0:
+            raise ReaderPCServiceError(
+                f"看门狗计划任务创建失败: {proc.stderr.strip() or proc.stdout.strip()}"
+            )
+    else:
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_SET_VALUE
+            ) as key:
+                winreg.DeleteValue(key, AUTOSTART_RUN_VALUE)
+        except FileNotFoundError:
+            pass
+        subprocess.run(
+            ["schtasks", "/Delete", "/F", "/TN", WATCHDOG_TASK_NAME],
+            capture_output=True,
+            text=True,
+            creationflags=no_window,
+        )
+
+
+def write_user_exit_marker(local_root: Path) -> None:
+    _atomic_json(
+        local_root / USER_EXIT_MARKER_NAME,
+        {"contract": USER_EXIT_MARKER_CONTRACT, "exitedAt": time.time()},
+    )
+
+
+def clear_user_exit_marker(local_root: Path) -> None:
+    try:
+        (local_root / USER_EXIT_MARKER_NAME).unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"[warn] 清除退出标记失败: {exc}")
+
+
 def _tray_image() -> Image.Image:
     image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -472,7 +567,12 @@ def stop_readerpc_services(
     process_runner: WindowsProcessRunner,
     pc_ocr: PcOcrServiceController,
 ) -> None:
-    """Stop every service owned by ReaderPC without touching Codex MCP clients."""
+    """退出即全停(2026-08-17 用户定案):桥接/语音/keepalive 链一并终止。
+
+    旧行为 terminate_service=False 留着 C# 直连服务,keepalive 链因此在用户
+    退出后还会把 Codex 拉起来。现在退出后不留任何后台;Codex 会话里的
+    reader_snapshot MCP 是 Codex 自己拉的独立进程,不受影响。
+    """
 
     failures: list[str] = []
     try:
@@ -485,7 +585,7 @@ def stop_readerpc_services(
             bridge_paths,
             process_runner,
             disable_configuration=True,
-            terminate_service=False,
+            terminate_service=True,
         )
     except Exception as exc:
         failures.append(f"电脑语音与上下文直连：{exc}")
@@ -545,6 +645,33 @@ class ReaderPCWindow:
     pc_fail_streak = 0
     voice_fail_streak = 0
 
+    def _auto_start_enabled(self) -> bool:
+        var = getattr(self, "auto_start", None)
+        try:
+            return bool(var.get()) if var is not None else False
+        except Exception:
+            return False
+
+    def _converge_autostart(self) -> None:
+        try:
+            set_autostart_enabled(self.readerpc_paths.local_root, True)
+        except Exception as exc:
+            print(f"[warn] 自启收敛失败: {exc}")
+
+    def on_auto_start_changed(self) -> None:
+        self._save_current_preferences()
+        enabled = self._auto_start_enabled()
+
+        def worker() -> None:
+            try:
+                set_autostart_enabled(self.readerpc_paths.local_root, enabled)
+            except Exception as exc:
+                self.events.put(("task-error", ("开机自启设置", exc)))
+
+        threading.Thread(
+            target=worker, name="readerpc-autostart", daemon=True
+        ).start()
+
     def _hide_orb_enabled(self) -> bool:
         var = getattr(self, "hide_voice_orb", None)
         try:
@@ -598,6 +725,7 @@ class ReaderPCWindow:
             ),
             snapshot_viewer_hidden=self._snapshot_hidden_enabled(),
             hide_voice_orb=self._hide_orb_enabled(),
+            auto_start_on_boot=self._auto_start_enabled(),
         )
 
     def _restart_voice_with_intent(self, busy: str, done: str) -> None:
@@ -681,7 +809,19 @@ class ReaderPCWindow:
         self.hide_voice_orb = tk.BooleanVar(
             value=bool(preferences["hideVoiceOrb"])
         )
+        self.auto_start = tk.BooleanVar(
+            value=bool(preferences["autoStartOnBoot"])
+        )
         self._orb_hidden_hwnds: set[int] = set()
+        # 手动启动 = 用户要它跑:清退出标记,看门狗恢复看护;偏好开着就把
+        # 外部自启三件套收敛到最新(脚本内容随版本升级)。
+        clear_user_exit_marker(self.readerpc_paths.local_root)
+        if bool(preferences["autoStartOnBoot"]):
+            threading.Thread(
+                target=self._converge_autostart,
+                name="readerpc-autostart-converge",
+                daemon=True,
+            ).start()
 
         root.title(PRODUCT_NAME)
         root.geometry("620x500")
@@ -763,6 +903,14 @@ class ReaderPCWindow:
             text="静默快照：后台运行快照服务，不显示查看器窗口",
             variable=self.snapshot_hidden,
             command=self.on_snapshot_hidden_changed,
+        ).pack(side="left")
+        boot_row = ttk.Frame(outer)
+        boot_row.pack(fill="x", pady=(2, 2))
+        ttk.Checkbutton(
+            boot_row,
+            text="开机后自动启动（含 5 分钟崩溃自愈看门狗；主动退出不会被复活）",
+            variable=self.auto_start,
+            command=self.on_auto_start_changed,
         ).pack(side="left")
 
         ttk.Separator(outer).pack(fill="x", pady=(12, 10))
@@ -883,11 +1031,15 @@ class ReaderPCWindow:
         self.show_window()
         self._set_buttons_enabled(False)
         self.footer.configure(
-            text="正在停止 PC 预处理、电脑语音与 Reader 上下文直连…",
+            text="正在停止全部服务（桥接、电脑语音、PC 预处理）…",
             foreground="#596579",
         )
 
         def worker() -> None:
+            try:
+                write_user_exit_marker(self.readerpc_paths.local_root)
+            except Exception as exc:
+                print(f"[warn] 写退出标记失败(看门狗可能复活): {exc}")
             try:
                 with self.service_lock:
                     stop_readerpc_services(

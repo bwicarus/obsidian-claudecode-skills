@@ -71,7 +71,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             path = Path(raw) / "missing.json"
             self.assertEqual(
                 load_preferences(path),
-                {"keepPcPreprocessingOnline": True, "serviceMode": "full", "snapshotViewerHidden": False, "hideVoiceOrb": False},
+                {"keepPcPreprocessingOnline": True, "serviceMode": "full", "snapshotViewerHidden": False, "hideVoiceOrb": False, "autoStartOnBoot": False},
             )
 
     def test_preferences_round_trip_explicit_opt_out(self) -> None:
@@ -80,7 +80,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             save_preferences(path, keep_pc_online=False)
             self.assertEqual(
                 load_preferences(path),
-                {"keepPcPreprocessingOnline": False, "serviceMode": "full", "snapshotViewerHidden": False, "hideVoiceOrb": False},
+                {"keepPcPreprocessingOnline": False, "serviceMode": "full", "snapshotViewerHidden": False, "hideVoiceOrb": False, "autoStartOnBoot": False},
             )
 
     def test_invalid_preferences_fail_to_safe_default(self) -> None:
@@ -652,7 +652,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             stop_readerpc_services(Mock(), Mock(), pc_ocr)
         pc_ocr.stop.assert_called_once_with()
         self.assertTrue(stop_voice.call_args.kwargs["disable_configuration"])
-        self.assertFalse(stop_voice.call_args.kwargs["terminate_service"])
+        self.assertTrue(stop_voice.call_args.kwargs["terminate_service"])
 
     def test_shutdown_attempts_both_services_and_reports_failure(self) -> None:
         pc_ocr = Mock()
@@ -670,7 +670,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             stop_readerpc_services(Mock(), Mock(), pc_ocr)
         pc_ocr.stop.assert_called_once_with()
         stop_voice.assert_called_once()
-        self.assertFalse(stop_voice.call_args.kwargs["terminate_service"])
+        self.assertTrue(stop_voice.call_args.kwargs["terminate_service"])
 
     def test_shutdown_unconditionally_revokes_readerpc_service_intent(self) -> None:
         pc_ocr = Mock()
@@ -680,7 +680,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
         pc_ocr.stop.assert_called_once_with()
         stop_voice.assert_called_once()
         self.assertTrue(stop_voice.call_args.kwargs["disable_configuration"])
-        self.assertFalse(stop_voice.call_args.kwargs["terminate_service"])
+        self.assertTrue(stop_voice.call_args.kwargs["terminate_service"])
 
     def test_readerpc_monitor_start_delegates_to_owned_enable(self) -> None:
         window = self.window_without_tk()
