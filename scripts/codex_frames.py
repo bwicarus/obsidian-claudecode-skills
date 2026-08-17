@@ -92,11 +92,14 @@ def call_codex(prompt: str, images: list[Path], model: str,
         cmd += ["--image", ",".join(str(i) for i in images)]
     if model:
         cmd += ["--model", model]
-    cmd += ["--", prompt]
+    # prompt 走 stdin:经 cmd.exe 传多行参数会在第一个换行处**静默截断**,
+    # 表现为"模型不听指令",实际是它只收到了第一行(实测 terra 因此只回两句;
+    # 改 stdin 后同一 prompt 立刻给出完整五节分析)。
+    cmd.append("-")
     t0 = time.monotonic()
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                          creationflags=NO_WINDOW, encoding="utf-8",
-                          errors="replace")
+    proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+                          timeout=timeout, creationflags=NO_WINDOW,
+                          encoding="utf-8", errors="replace")
     # 出声,不静默:捕获了 stderr 却不看返回码,就是自找的调试地狱
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()[-600:]
@@ -118,6 +121,8 @@ def main() -> int:
     ap.add_argument("--facts")
     ap.add_argument("--model", default="")
     ap.add_argument("--timeout", type=float, default=900.0)
+    ap.add_argument("--all-frames", action="store_true",
+                    help="用 evidence/<id>/all/ 里的全量帧,而不是精选帧")
     a = ap.parse_args()
 
     if a.session:
@@ -136,6 +141,24 @@ def main() -> int:
     else:
         frame_dir = Path(a.frame_dir)
         facts_path = Path(a.facts) if a.facts else frame_dir / "facts.json"
+
+    all_dir = frame_dir / "all"
+    if a.all_frames and all_dir.is_dir():
+        frames = [{"file": f"all/{f.name}", "second": float(f.stem.rstrip("s"))}
+                  for f in sorted(all_dir.glob("*.jpg"))]
+        print(f"用全量帧:{len(frames)} 张")
+        images = [frame_dir / f["file"] for f in frames]
+        facts = None
+        fp = frame_dir / "facts.json"
+        if fp.exists():
+            facts = json.loads(fp.read_text("utf-8"))
+        text, secs = call_codex(build_prompt(frames, facts), images,
+                                a.model, a.timeout)
+        print(f"耗时 {secs:.1f}s")
+        print("=" * 64)
+        print(text)
+        (frame_dir / "codex-verdict-all.md").write_text(text, "utf-8")
+        return 0
 
     picked_meta = frame_dir / "picked.json"
     if picked_meta.exists():

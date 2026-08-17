@@ -77,6 +77,11 @@ DEFAULT_CONFIG: dict = {
     # 总数放宽到 ~16 —— 消费端换成 Codex 后,8 张是自我设限:实测帧越多
     # 归因越准(3帧全看不清 → 8帧能定位到帧间隙),而帧本就在环形缓冲里。
     "evidenceOffsets": [-8.0, -6.0, -4.5, -3.0, -2.0, -1.2, -0.5, 0.0, 0.8, 1.6, 2.4],
+    # 除了上面这些"精选帧",另把该窗口的**整个环形缓冲**原样落一份到 all/。
+    # 帧本来就在内存里躺着,落盘只多几 MB,而消费端(Codex)吃得下几十张 ——
+    # 之前只存 8 张是按"云端贵"的旧思路自我设限,实测帧越多归因越准。
+    # 精选帧给"快看一眼",all/ 给"要较真时翻回去"。
+    "keepAllFrames": True,
     "evidenceWindow": 0.7,  # 每个时间点在 ±该秒内挑最清晰帧
     "evidenceTailSeconds": 2.5,  # 事发后等这么久再落盘(等尾帧进缓冲)
     # 敌人名字条 ROI(4K 原分辨率比例):游戏把精英/Boss 名字写在屏幕下方居中。
@@ -603,16 +608,27 @@ def run() -> int:
                 entry["plate"] = pname
             entry["atChange"] = bool(p.get("atChange"))
             manifest.append(entry)
+        all_info = None
+        if cfg.get("keepAllFrames") and ring_snapshot:
+            all_dir = d / "all"
+            all_dir.mkdir(exist_ok=True)
+            for item in ring_snapshot:
+                rel = item[0] - anchor
+                (all_dir / f"{rel:+07.2f}s.jpg").write_bytes(item[1])
+            all_info = {"dir": "all", "frames": len(ring_snapshot),
+                        "spanSeconds": round(
+                            ring_snapshot[-1][0] - ring_snapshot[0][0], 1)}
         clip_info = None
         if cfg.get("clipEnabled") and len(ring_snapshot) >= 4:
             clip_info = _write_clip(d, ring_snapshot, anchor, cfg)
         (d / "manifest.json").write_text(
             json.dumps({"eventId": event_id, "anchorTs": _now_iso(),
-                        "frames": manifest, "clip": clip_info},
+                        "frames": manifest, "clip": clip_info, "all": all_info},
                        ensure_ascii=False, indent=2), "utf-8")
-        print(f"   └ 证据 {len(manifest)} 帧"
-              + (f" + 片段 {clip_info['frames']}帧/{clip_info['seconds']}s"
-                 if clip_info else "") + f" → evidence/{event_id}")
+        print(f"   └ 证据 {len(manifest)} 精选帧"
+              + (f" + 全量 {all_info['frames']}帧" if all_info else "")
+              + (f" + 片段 {clip_info['seconds']}s" if clip_info else "")
+              + f" → evidence/{event_id}")
 
     hit_px = int(cfg["hitDropCols"])
     ep_open_px = int(cfg["epOpenCols"])
