@@ -414,6 +414,23 @@ if (window.__bwPwaProviderOnly) return;
       '@keyframes vcClipBreath2{0%,100%{box-shadow:0 0 0 0 rgba(123,108,255,.45)}50%{box-shadow:0 0 0 6px rgba(123,108,255,0)}}' +
       '.vc-card-hd .vc-card-x{margin-left:6px}' +
       '.vc-card-bd{overflow-y:auto;white-space:pre-wrap;word-break:break-word;-webkit-overflow-scrolling:touch;min-height:0}' +
+      // Markdown 元素样式必须挂在 .vc-card-bd 作用域下:侧栏气泡那套(.asst-a)只有内联态
+      // 蹭得到,浮层卡和钉页卡够不着 —— 不补的话同一张卡在三个宿主下排版不一样。
+      // 卡片空间小,间距一律收紧。
+      '.vc-card-bd p{margin:0 0 .55em}.vc-card-bd p:last-child{margin-bottom:0}' +
+      '.vc-card-bd ul,.vc-card-bd ol{margin:.3em 0 .55em;padding-left:1.35em}' +
+      '.vc-card-bd li{margin:.14em 0}' +
+      '.vc-card-bd h1,.vc-card-bd h2,.vc-card-bd h3,.vc-card-bd h4{font-size:1.04em;font-weight:650;margin:.55em 0 .28em}' +
+      '.vc-card-bd h1:first-child,.vc-card-bd h2:first-child,.vc-card-bd h3:first-child{margin-top:0}' +
+      '.vc-card-bd code{background:rgba(255,255,255,.1);border-radius:4px;padding:.08em .34em;font-size:.92em}' +
+      '.vc-card-bd pre{background:rgba(0,0,0,.28);border-radius:8px;padding:8px 10px;overflow-x:auto;margin:.42em 0}' +
+      '.vc-card-bd pre code{background:none;padding:0}' +
+      '.vc-card-bd blockquote{margin:.42em 0;padding-left:.7em;border-left:2px solid rgba(255,255,255,.22);color:#c6cddf}' +
+      '.vc-card-bd a{color:#8ab4ff}' +
+      '.vc-card-bd hr{border:none;border-top:1px solid rgba(255,255,255,.14);margin:.6em 0}' +
+      '.vc-card-bd table{border-collapse:collapse;font-size:.92em;margin:.42em 0;display:block;overflow-x:auto}' +
+      '.vc-card-bd th,.vc-card-bd td{border:1px solid rgba(255,255,255,.16);padding:2px 6px;text-align:left}' +
+      '.vc-card-bd img{max-width:100%;border-radius:6px}' +
       // 双击/触屏双点进入页面 placement 尺寸调整：只改变 full 方块态；
       // dot/min 保留固定语义尺寸。manipulation 保留滚动/缩放，但避免浏览器
       // 把触屏双点优先解释为页面缩放。
@@ -2171,6 +2188,18 @@ if (window.__bwPwaProviderOnly) return;
   function _infoHtml(card) {
     var k = card.kind, d = card.data || {}, h = '';
     function e0(x) { return esc(String(x == null ? '' : x)); }
+    // 长文本字段走 Markdown。此前全字段一律 e0()=esc() 转义死,再走 _cardDom 的 isHtml
+    // 支路(那里还把 white-space 从 pre-wrap 改成 normal)—— 于是 Markdown 不渲染、
+    // **连换行都没了**,两个症状同一个来源。
+    // RC.md 内部已经过 RC.safeHtml 净化;拿不到管线就退回转义,绝不把未净化的原文塞进 innerHTML。
+    // 只用于成段的正文;weather/news 那些短字段(cond/loc/标题)仍走 e0 —— 它们里的
+    // * _ 是字面量,过 marked 会被当强调符吃掉。
+    function md(x) {
+      var s = String(x == null ? '' : x);
+      if (!s) return '';
+      try { if (window.RC && RC.md) return RC.md(s); } catch (e) {}
+      return e0(s);
+    }
     if (k === 'weather') {
       h = '<div class="vc-if-w"><div class="vc-if-wt">' + e0(d.lo) + '–' + e0(d.hi) + '°C</div>' +
           '<div class="vc-if-wc">' + e0(d.cond) + (d.precip != null ? ' · 降水 ' + e0(d.precip) + '%' : '') + '</div>' +
@@ -2209,10 +2238,10 @@ if (window.__bwPwaProviderOnly) return;
           '<div class="vc-ig-t">' + esc(it.title || '') + (it.channel ? '<br><span class="vc-vg-ch">' + esc(it.channel) + '</span>' : '') + '</div></div>';
       }).join('') + '</div>';
     } else if (k === 'fact') {
-      h = '<div class="vc-if-f"><div class="vc-if-fa">' + e0(d.answer) + '</div>' +
-          (d.detail ? '<div class="vc-if-fd">' + e0(d.detail) + '</div>' : '') + '</div>';
+      h = '<div class="vc-if-f"><div class="vc-if-fa">' + md(d.answer) + '</div>' +
+          (d.detail ? '<div class="vc-if-fd">' + md(d.detail) + '</div>' : '') + '</div>';
     } else {
-      h = '<div class="vc-if-g">' + e0(d.text || card.brief || '') + '</div>';
+      h = '<div class="vc-if-g">' + md(d.text || card.brief || '') + '</div>';
     }
     if (card.sources && card.sources.length) {
       h += '<div class="vc-if-srcs">' + card.sources.slice(0, 3).map(function (sc) {
@@ -5026,10 +5055,20 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
   function _cardsVisSync() {   // 77:侧栏开=浮层卡全部消失(不挡内容);关=回来
+    var open = _sideOpen();
     var w = document.getElementById('vc-cards');
-    if (w) w.style.display = _sideOpen() ? 'none' : '';
+    if (w) w.style.display = open ? 'none' : '';
     var tl = document.getElementById('vc-tlayer');
-    if (tl) tl.style.display = _sideOpen() ? 'none' : '';
+    if (tl) tl.style.display = open ? 'none' : '';
+    // 卡片被藏起来的这段时间不该计时:开侧栏时把在跑的定时器停掉,关侧栏时重新排 ——
+    // 否则你开着侧栏做别的事,回来卡已经自己数完消失了(而它从头到尾没在屏幕上出现过)。
+    try {
+      (_cards.list || []).forEach(function (c) {
+        if (!c || !c.el) return;
+        if (open) { try { clearTimeout(c.t); } catch (e) {} c.t = null; }
+        else _armAuto(c, c.el);
+      });
+    } catch (e) {}
     _chipRender();
   }
   // 工具卡图层(用户设计:交错重叠,落点按画面当前占用情况算)——左上角锚定,不进右下堆叠
@@ -5162,8 +5201,20 @@ if (window.__bwPwaProviderOnly) return;
     var _bd = el.querySelector('.vc-card-bd');
     try {
       if (typeof opts.mount === 'function') { _bd.style.whiteSpace = 'normal'; opts.mount(_bd); }   // ④ 承载可操作状态机卡(制卡卡:rc-flashcard mountDrafts);其余原样
-      else if (isHtml) { _bd.innerHTML = text; _bd.style.whiteSpace = 'normal'; }
+      // isHtml 支路补一次公式排版:结果卡走的就是这条,而本文件此前零处 typeset ——
+      // 同一张卡钉进书页时便签壳会 RC.typeset,浮层和侧栏却不会,公式表现三宿主不一致。
+      else if (isHtml) {
+        _bd.innerHTML = text; _bd.style.whiteSpace = 'normal';
+        try { if (window.RC && RC.typeset) RC.typeset(_bd); } catch (e2) {}
+      }
+      // 三级兜底(对齐 rc-turncard.js:29-37)。renderMd 是在 mountPdfSidebar **函数体内**
+      // 导出的,侧栏没挂载的页面上压根不存在;原来直接掉到 textContent,把中间这层
+      // RC.md + typeset 漏了 —— 于是那些页面上连纯文本卡也不渲染 Markdown。
       else if (window.RC && RC.assistant && RC.assistant.renderMd) { RC.assistant.renderMd(_bd, text, true); _bd.style.whiteSpace = 'normal'; }
+      else if (window.RC && RC.md) {
+        _bd.innerHTML = RC.md(text || ''); _bd.style.whiteSpace = 'normal';
+        try { if (RC.typeset) RC.typeset(_bd); } catch (e3) {}
+      }
       else _bd.textContent = text;
     } catch (e) { _bd.textContent = String(text); }
     return { el: el, bd: _bd, f0: _f0 };
@@ -5385,9 +5436,15 @@ if (window.__bwPwaProviderOnly) return;
     try { clearTimeout(c.t); } catch (e) {}
     c.t = null;
     if (!_cardHideOn()) return;
+    // 侧栏开着时浮层卡只是 display:none(_cardsVisSync),**倒计时照跑** —— 卡在你看不见的
+    // 时候自己数完然后没了。看不见就不该计时:这里直接不排,_cardsVisSync 关侧栏时补排。
+    if (_sideOpen() && !c.keepAsDot) return;
     c.t = setTimeout(function () {
       if (el.classList.contains('vc-picked')) return;   // 选中 = 唯一豁免
       if (c.pinned) return;   // 钉子模式 = 豁免(拖出/侧栏收藏夹来源默认钉住,不自动消失)
+      // 绑定到页面元素的卡:到点**收起成球,不关掉**。它的位置本身就是信息 ——
+      // 关掉等于把"这一处有过一次纠正"这件事一起丢了,而球留在锚点上还认得出来。
+      if (c.keepAsDot) { try { _cardForm(el, 'dot'); } catch (e2) {} return; }
       _cardClose(c);
     }, _cardSecs() * 1000);
   }
