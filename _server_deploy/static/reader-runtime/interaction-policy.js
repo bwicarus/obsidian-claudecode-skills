@@ -238,6 +238,16 @@
       { collection: 'document-notes', projection: 'active-document' },
       { transport: { outbox: true, extensionBridge: true, serviceWorker: 'none' } }
     ),
+    // 卡片绑定到自建页的格子块（卡片协议的 bind 字段）。落地形式就是往那一页的
+    // blocks 里插一个 kind:'card' 的块 —— 所以走的是自建页的边车 PATCH，
+    // 与 overlay 文字即时存同一个端点、同一套投影。
+    localMutation(
+      'document.upage.bind-card',
+      '/pdf/api/userpages',
+      ['PATCH'],
+      { collection: 'document-userpages', projection: 'active-document' },
+      { transport: { outbox: true, extensionBridge: true, serviceWorker: 'none' } }
+    ),
     localMutation(
       'review.answer.submit',
       '/pdf/api/review-answer',

@@ -1168,6 +1168,7 @@ window._favOpenPicker = function () {
                   at: [row, col], span: [h, w], rect: _upGridRect(sp, row, col, h, w) };
       blocks.splice(idx + 1, 0, blk);               // 插在目标块**之后** = 内容序列上的位置
       rec.blocks = blocks;
+      // @interaction document.upage.bind-card
       RC.reqJson('PATCH', UP_TEXT_API, { file: UP_FILE, id: rec.id, blocks: blocks }).then(function () {
         var ov = pageEl.querySelector('.up2-content'); if (ov) _upRenderOverlay(ov, rec);
       }).catch(function () {});
