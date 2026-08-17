@@ -467,7 +467,7 @@ WATCHDOG_TASK_NAME = "BW ReaderPC Watchdog"
 USER_EXIT_MARKER_NAME = "readerpc-user-exit.json"
 USER_EXIT_MARKER_CONTRACT = "readerpc-user-exit/1"
 
-_AUTOSTART_PS1 = 'param([string]$Reason = "watchdog")\n$root = Join-Path $env:LOCALAPPDATA "BWReader"\n$cfg = Join-Path $root "readerpc-server.config.json"\n$marker = Join-Path $root "readerpc-user-exit.json"\n$log = Join-Path $root "ReaderPC-Server\x07utostart.log"\nfunction Log($m) {\n  try {\n    if ((Test-Path $log) -and (Get-Item $log).Length -gt 524288) { Clear-Content $log }\n    Add-Content -Path $log -Value "$(Get-Date -Format o) [$Reason] $m"\n  } catch {}\n}\ntry { $prefs = Get-Content $cfg -Raw | ConvertFrom-Json } catch { Log "无法读偏好: $_"; exit 0 }\nif ($prefs.autoStartOnBoot -ne $true) { Log "自启选项未开,不动"; exit 0 }\nif (Get-Process -Name "ReaderPC-Server" -ErrorAction SilentlyContinue) { exit 0 }\nif ($Reason -eq "logon") {\n  Remove-Item $marker -ErrorAction SilentlyContinue\n} elseif (Test-Path $marker) {\n  # 标记只在本次开机内有效:关机时系统关闭应用也会写标记,若登录自启项\n  # 没跑(Win11 Run 键并不可靠),过期标记会永久卡死看门狗 -- 按开机时间判废。\n  $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime\n  if ((Get-Item $marker).LastWriteTime -lt $boot) {\n    Log "退出标记早于本次开机,视为过期并清除"\n    Remove-Item $marker -ErrorAction SilentlyContinue\n  } else {\n    Log "用户本次开机内主动退出过,看门狗不复活"\n    exit 0\n  }\n}\ntry { $cur = Get-Content (Join-Path $root "ReaderPC-Server\\current.json") -Raw | ConvertFrom-Json } catch { Log "无法读 current.json: $_"; exit 0 }\n$exe = Join-Path $cur.release "ReaderPC-Server.exe"\nif (-not (Test-Path $exe)) { Log "找不到 $exe"; exit 0 }\nLog "启动 $exe"\nStart-Process $exe\n'
+_AUTOSTART_PS1 = 'param([string]$Reason = "watchdog")\n$root = Join-Path $env:LOCALAPPDATA "BWReader"\n$cfg = Join-Path $root "readerpc-server.config.json"\n$marker = Join-Path $root "readerpc-user-exit.json"\n$log = Join-Path $root "ReaderPC-Server" | Join-Path -ChildPath "autostart.log"\nfunction Log($m) {\n  # 写日志失败绝不能影响主流程:曾因日志路径损坏导致整个自启脚本退出码 1,\n  # ReaderPC 连着几次重启都起不来,而且因为日志本身坏了所以毫无线索。\n  try {\n    if ((Test-Path $log) -and (Get-Item $log).Length -gt 524288) { Clear-Content $log }\n    Add-Content -Path $log -Value "$(Get-Date -Format o) [$Reason] $m" -Encoding UTF8\n  } catch { }\n}\ntry { $prefs = Get-Content $cfg -Raw | ConvertFrom-Json } catch { Log "无法读偏好: $_"; exit 0 }\nif ($prefs.autoStartOnBoot -ne $true) { Log "自启选项未开,不动"; exit 0 }\nif (Get-Process -Name "ReaderPC-Server" -ErrorAction SilentlyContinue) { exit 0 }\nif ($Reason -eq "logon") {\n  Remove-Item $marker -ErrorAction SilentlyContinue\n} elseif (Test-Path $marker) {\n  # 标记只在本次开机内有效:关机时系统关闭应用也会写标记,若登录自启项没跑\n  # (Win11 的 Run 键并不可靠),过期标记会永久卡死看门狗 -- 按开机时间判废。\n  $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime\n  if ((Get-Item $marker).LastWriteTime -lt $boot) {\n    Log "退出标记早于本次开机,视为过期并清除"\n    Remove-Item $marker -ErrorAction SilentlyContinue\n  } else {\n    Log "用户本次开机内主动退出过,看门狗不复活"\n    exit 0\n  }\n}\ntry { $cur = Get-Content (Join-Path $root "ReaderPC-Server" | Join-Path -ChildPath "current.json") -Raw | ConvertFrom-Json } catch { Log "无法读 current.json: $_"; exit 0 }\n$exe = Join-Path $cur.release "ReaderPC-Server.exe"\nif (-not (Test-Path $exe)) { Log "找不到 $exe"; exit 0 }\nLog "启动 $exe"\nStart-Process $exe\n'
 
 _AUTOSTART_VBS = 'Dim reason\nIf WScript.Arguments.Count > 0 Then\n    reason = WScript.Arguments(0)\nElse\n    reason = "watchdog"\nEnd If\nCreateObject("WScript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""__PS1__"" -Reason " & reason, 0, False\n'
 
@@ -478,8 +478,11 @@ def write_autostart_scripts(local_root: Path) -> Path:
     ps1 = install_root / "start-readerpc.ps1"
     vbs = install_root / "start-readerpc.vbs"
     ps1.write_text(_AUTOSTART_PS1, encoding="utf-8-sig")
+    # ⚠ ps1 要 BOM(PowerShell 5.1 靠它认中文),vbs 绝不能有:VBScript 会把
+    # BOM 当第一个字符,报 "(1, 1) 无效字符" 直接不执行。而 wscript //B 是静默的,
+    # 于是计划任务只留下一个 Last Result: 1 —— 开机自启整条链就这么哑掉了。
     vbs.write_text(
-        _AUTOSTART_VBS.replace("__PS1__", str(ps1)), encoding="utf-8-sig"
+        _AUTOSTART_VBS.replace("__PS1__", str(ps1)), encoding="utf-8"
     )
     return vbs
 
