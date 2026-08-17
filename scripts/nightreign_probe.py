@@ -87,6 +87,13 @@ DEFAULT_CONFIG: dict = {
     "auditMaxRatePerSecond": 8.0,
     "auditReboundWindow": 1.0,
     "auditMinIntervalSeconds": 6.0,
+    # 证据片段(2026-08-17 分工定案):本地 Qwen 看**视频流**,负责两件事 ——
+    # ①这段的事情流程与走向(离散截图把握不了叙事) ②哪几秒能看清敌人全貌;
+    # 然后 Codex 拿流程叙事 + 按指引裁出的精选帧做精细分析。故证据除了离散
+    # 关键帧,还落一段 mp4:环形缓冲里该窗口的**全部**帧,给视频模型完整时序。
+    "clipEnabled": True,
+    "clipFps": 5,
+    "ffmpeg": "C:/Users/bwica/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-9.0-full_build/bin/ffmpeg.exe",
     "windowTitleContains": ["NIGHTREIGN", "黑夜君临"],
 }
 
@@ -334,6 +341,54 @@ class EpisodeTracker:
         return summary
 
 
+def _write_clip(out_dir: Path, ring_snapshot: list, anchor: float,
+                cfg: dict) -> dict | None:
+    """把环形缓冲整段编码成 mp4,给视频模型看完整时序。
+
+    离散关键帧回答"这一刻是什么样",视频回答"这段怎么演变的、哪一刻露出
+    全貌"。两者互补且分工:视频给本地 Qwen 做流程理解与导航,精选帧给
+    Codex 做精细分析。
+    """
+    import shutil
+    import subprocess
+
+    ffmpeg = cfg.get("ffmpeg") or shutil.which("ffmpeg")
+    if not ffmpeg or not Path(ffmpeg).exists():
+        print(f"[warn] 找不到 ffmpeg({ffmpeg}),跳过片段")
+        return None
+    tmp = out_dir / "_clipsrc"
+    tmp.mkdir(exist_ok=True)
+    try:
+        fps = float(cfg.get("clipFps", 5))
+        for i, item in enumerate(ring_snapshot):
+            (tmp / f"{i:04d}.jpg").write_bytes(item[1])
+        clip = out_dir / "clip.mp4"
+        proc = subprocess.run(
+            [str(ffmpeg), "-y", "-framerate", str(fps), "-i",
+             str(tmp / "%04d.jpg"), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+             "-crf", "26", str(clip)],
+            capture_output=True, text=True, timeout=120,
+            creationflags=0x08000000)
+        if proc.returncode != 0 or not clip.exists():
+            print(f"[warn] 片段编码失败: {proc.stderr.strip()[-160:]}")
+            return None
+        span = ring_snapshot[-1][0] - ring_snapshot[0][0]
+        return {"file": "clip.mp4", "frames": len(ring_snapshot),
+                "seconds": round(span, 1), "fps": fps,
+                "startOffset": round(ring_snapshot[0][0] - anchor, 2),
+                "kb": clip.stat().st_size // 1024}
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"[warn] 片段生成异常: {exc}")
+        return None
+    finally:
+        for f in tmp.glob("*.jpg"):
+            f.unlink(missing_ok=True)
+        try:
+            tmp.rmdir()
+        except OSError:
+            pass
+
+
 def pick_evidence_frames(
     ring: list[tuple[float, bytes, float]],
     anchor_ts: float,
@@ -535,10 +590,16 @@ def run() -> int:
                 entry["plate"] = pname
             entry["atChange"] = bool(p.get("atChange"))
             manifest.append(entry)
+        clip_info = None
+        if cfg.get("clipEnabled") and len(ring_snapshot) >= 4:
+            clip_info = _write_clip(d, ring_snapshot, anchor, cfg)
         (d / "manifest.json").write_text(
             json.dumps({"eventId": event_id, "anchorTs": _now_iso(),
-                        "frames": manifest}, ensure_ascii=False, indent=2), "utf-8")
-        print(f"   └ 证据 {len(manifest)} 帧 → evidence/{event_id}")
+                        "frames": manifest, "clip": clip_info},
+                       ensure_ascii=False, indent=2), "utf-8")
+        print(f"   └ 证据 {len(manifest)} 帧"
+              + (f" + 片段 {clip_info['frames']}帧/{clip_info['seconds']}s"
+                 if clip_info else "") + f" → evidence/{event_id}")
 
     hit_px = int(cfg["hitDropCols"])
     ep_open_px = int(cfg["epOpenCols"])
