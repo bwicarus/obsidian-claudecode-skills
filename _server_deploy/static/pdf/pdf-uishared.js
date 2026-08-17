@@ -1130,6 +1130,54 @@ window._favOpenPicker = function () {
     } catch (e) { try { console.warn('[paste] __upPasteCard 失败', e); } catch (e2) {} }
   };
 
+  // ★ 按 block id 把卡片**绑定**到自建页的某个格子块（卡片协议的 bind 字段，用户设计 2026-08-18）。
+  //
+  //   跟 __upPasteCard 的区别：那个按屏幕坐标吸附到最近的格子，这个按目标块的位置插在它**之后**。
+  //   之所以能同时满足用户那两条要求（"保证自己的位置"和"保证自身数据嵌入上下文的位置"），
+  //   是因为自建页的 blocks 本来就是**有序数组**：插进目标块后面，屏幕位置和内容序列位置
+  //   是同一件事，不需要额外发明一套锚。
+  //
+  //   找不到目标块时返回 false —— 调用方据此退回浮层，而不是把卡片丢掉。
+  window.__upBindCard = function (upageId, bid, payload) {
+    try {
+      if (!UP_FILE || !upageId || !bid) return false;
+      var pageEl = null, rec = null;
+      var pages = document.querySelectorAll('.pdf-upage');
+      for (var i = 0; i < pages.length; i++) {
+        var r = pages[i].__upRec;
+        if (r && String(r.id) === String(upageId)) { pageEl = pages[i]; rec = r; break; }
+      }
+      if (!rec) return false;                       // 那一页没在视图里（没渲染/别的书）
+      var blocks = (rec.blocks || []).slice();
+      var idx = -1;
+      for (var j = 0; j < blocks.length; j++) {
+        if (blocks[j] && String(blocks[j].id) === String(bid)) { idx = j; break; }
+      }
+      if (idx < 0) return false;                    // 目标块不存在（可能已被删）
+      var sp = rec.paper || {};
+      var rows = sp.rows || 26, cols = sp.cols || 28;
+      var tgt = blocks[idx];
+      var at = tgt.at || [0, 0], span = tgt.span || [1, cols];
+      var w = Math.max(4, Math.round(cols * 0.9));
+      var h = 8;
+      var row = Math.max(0, Math.min((at[0] | 0) + (span[0] | 0), Math.max(0, rows - h)));
+      var col = Math.max(0, Math.min(at[1] | 0, Math.max(0, cols - w)));
+      var html = payload.isHtml ? (payload.raw || '') : RC.esc(payload.text || payload.raw || '');
+      var blk = { kind: 'card', id: 'card_' + Date.now().toString(36),
+                  html: html, label: payload.label || '', boundTo: String(bid),
+                  at: [row, col], span: [h, w], rect: _upGridRect(sp, row, col, h, w) };
+      blocks.splice(idx + 1, 0, blk);               // 插在目标块**之后** = 内容序列上的位置
+      rec.blocks = blocks;
+      RC.reqJson('PATCH', UP_TEXT_API, { file: UP_FILE, id: rec.id, blocks: blocks }).then(function () {
+        var ov = pageEl.querySelector('.up2-content'); if (ov) _upRenderOverlay(ov, rec);
+      }).catch(function () {});
+      return true;
+    } catch (e) {
+      try { console.warn('[bind] __upBindCard 失败', e); } catch (e2) {}
+      return false;
+    }
+  };
+
   // ══════════ 任务运行时:页面块渲染(text / blank / button)══════════
   //   设计见 references/adr-task-runtime.md。三个坑一次绕开:
   //   ① 覆盖层拦手势用**冒泡非捕获**(memory overlay-gate-use-bubble-not-capture:

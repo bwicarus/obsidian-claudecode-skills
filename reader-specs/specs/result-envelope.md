@@ -24,7 +24,17 @@
 | `general` | — | `text` |
 | `cards` | `cards[]`(每条含 `front`/`cloze`/`text` 之一) | `draft` |
 
-通用可选顶层:`title` `brief` `sources[{url,title}]`。
+通用可选顶层:`title` `brief` `sources[{url,title}]` `bind`。
+
+`bind` 把这张卡**钉到页面上的某个元素**（不给＝现在的浮层行为）。它同时决定两件事:
+卡片在屏幕上的位置，以及卡片内容嵌入上下文时的位置。⚠ 跟同信封的 `anchor` 不是一回事 ——
+`anchor` 说的是"这条结果属于哪本书哪一页"。
+
+目前只认自建页的格子块:
+```json
+{"kind": "upage-block", "upage": "<插入页 id>", "bid": "<block id>"}
+```
+书页正文的字符区间锚留待下一版 —— 先不发明用不上的形状。
 
 **锚定语义(沿用现状,不要改)**
 - 书/卷/页/选区属**轮次或结果的元信息**,放 `anchor`,不塞进 payload。

@@ -23,6 +23,8 @@
 需要给用户看结构化结果时,产出一张卡并按 `specs/result-envelope.md` 提交。
 卡片类型**以前端渲染器实际支持为准**:weather / news / images / videos / fact / general。
 渲染不了的类型会被拒绝,不要发明新类型。
+可选顶层 `bind` 能把卡钉到自建页的某个格子块(`{kind:'upage-block',upage,bid}`);
+不给就是浮层。它跟信封的 `anchor`(哪本书哪一页)是两回事。
 
 ## 多步能力路由(扁平,一跳到底)
 | 请求类型 | 规范文件 |

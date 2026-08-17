@@ -124,7 +124,37 @@ CARD_FIELD_SPECS: dict[str, dict] = {
     "fact":    {"data_req": ("answer",), "data_opt": ("detail",)},
     "general": {"data_req": (), "data_opt": ("text",)},
 }
-_CARD_TOP_OPT = ("title", "brief", "cid", "sources")
+_CARD_TOP_OPT = ("title", "brief", "cid", "sources", "bind")
+
+# bind：把卡片**钉到页面上某个元素**的可选绑定（用户设计 2026-08-18）。
+#   ⚠ 不叫 anchor：reader-result/1 信封里已经有一个 anchor，那是"这条结果属于
+#     哪本书哪一页"(file/page)，跟"钉到页面哪个元素"是两回事。同名会把两种
+#     语义混在一起，日后谁都说不清某处的 anchor 指的是哪个。
+#   两件事由它同时决定：卡片在屏幕上的位置，以及卡片自身内容嵌入上下文时的位置。
+#   所以它不能只是一个像素框——必须能定出"在正文的哪个位置"。
+#   第一版只认自建页的格子块（paper.py 的 block 已经有 id + 服务端纯算术算出的
+#   归一化 rect，前端按 data-bid 绝对定位，贴卡机制 __upPasteCard 也已在用它）：
+#     {"kind": "upage-block", "upage": <插入页 id>, "bid": <block id>}
+#   书页正文的锚（字符区间）留到下一版；现在先不发明，免得发明出用不上的形状。
+_BIND_KINDS = {"upage-block"}
+_BIND_FIELDS = {"upage-block": ("upage", "bid")}
+
+
+def _norm_bind(value, kind: str) -> dict:
+    """绑定规范化。形状不对就整条丢掉（返回 None）而不是抛错——
+    卡片本身仍应显示，只是退回浮层；因为"钉不上去"不该让整张卡消失。"""
+    if not isinstance(value, dict):
+        return None
+    akind = str(value.get("kind") or "").strip()
+    if akind not in _BIND_KINDS:
+        return None
+    out = {"kind": akind}
+    for f in _BIND_FIELDS[akind]:
+        v = value.get(f)
+        if not isinstance(v, (str, int)) or not str(v).strip():
+            return None
+        out[f] = _clip(str(v))
+    return out
 
 PART_FIELD_SPECS: dict[str, dict] = {
     "text":   {"req": ("text",), "opt": ()},
@@ -200,7 +230,11 @@ def validate_card(card) -> dict:
         v = card.get(f)
         if v is None:
             continue
-        if f == "sources":
+        if f == "bind":
+            b = _norm_bind(v, kind)
+            if b:
+                out["bind"] = b
+        elif f == "sources":
             if not isinstance(v, list):
                 raise ValueError(f"card[{kind}].sources 必须是数组")
             out["sources"] = [{"url": _clip(s.get("url")), "title": _clip(s.get("title"))}

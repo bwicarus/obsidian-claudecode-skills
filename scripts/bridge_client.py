@@ -400,6 +400,29 @@ def _normalize_flashcards(raw) -> list[dict]:
     return out
 
 
+_BIND_FIELDS = {"upage-block": ("upage", "bid")}
+
+
+def _normalize_card_bind(value) -> dict:
+    """卡片绑定元素的本地校验。形状与服务端 reader_card_contract._norm_bind 保持一致；
+    这里**拒收**而不是静默丢弃 —— 跨机信封走的是"宁可报错也别悄悄少一半语义"。"""
+    if not isinstance(value, dict):
+        raise ResultEnvelopeError("bind 必须是对象")
+    kind = value.get("kind")
+    if kind not in _BIND_FIELDS:
+        raise ResultEnvelopeError(f"bind.kind 不支持；可用:{sorted(_BIND_FIELDS)}")
+    out = {"kind": kind}
+    for field in _BIND_FIELDS[kind]:
+        raw = value.get(field)
+        if not isinstance(raw, (str, int)) or not str(raw).strip():
+            raise ResultEnvelopeError(f"bind.{field} 必填且不能为空")
+        out[field] = str(raw).strip()[:200]
+    extra = set(value) - {"kind"} - set(_BIND_FIELDS[kind])
+    if extra:
+        raise ResultEnvelopeError(f"bind 含未知字段:{sorted(extra)}")
+    return out
+
+
 def _normalize_sources(raw) -> list[dict]:
     if not isinstance(raw, list) or not raw:
         raise ResultEnvelopeError("sources 必须是非空数组")
@@ -444,7 +467,9 @@ def validate_result(envelope: dict) -> dict:
     """
     env = _result_object(envelope, "reader-result")
     required = {"envelope", "correlation", "kind", "payload", "anchor"}
-    optional = {"title", "brief", "sources"}
+    # bind：把卡片钉到页面某个元素（自建页格子块）。可选；不给就是现在的浮层行为。
+    # ⚠ 跟同信封的 anchor 不是一回事 —— anchor 说的是"属于哪本书哪一页"。
+    optional = {"title", "brief", "sources", "bind"}
     _result_exact_fields(env, required, optional, "reader-result")
     if env["envelope"] != _RESULT_CONTRACT:
         raise ResultEnvelopeError(f"envelope 必须是 {_RESULT_CONTRACT}")
@@ -475,6 +500,8 @@ def validate_result(envelope: dict) -> dict:
                 card[field] = _result_text(env[field], field)
         if "sources" in env:
             card["sources"] = _normalize_sources(env["sources"])
+        if "bind" in env:
+            card["bind"] = _normalize_card_bind(env["bind"])
         parts = [{"kind": "card", "card": card}]
     command = {
         "contract": "reader-direct-command/1",

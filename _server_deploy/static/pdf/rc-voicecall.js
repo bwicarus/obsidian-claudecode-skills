@@ -3150,6 +3150,24 @@
   function renderInfo(card) {
     if (!card || !card.kind) return false;
     var label = card.title || '搜索结果';
+    // ★ card.bind：把这张卡钉到自建页的某个格子块（协议见 reader_card_contract._norm_bind）。
+    //   钉进去之后它就是那一页的一个 block —— 位置和"内容序列上的位置"是同一件事，
+    //   AI 下次读这一页时它按顺序出现在被绑定的块之后，而不是浮在旁边的游离注解。
+    //   ⚠ 绑不上（那页没渲染 / 目标块已删）就**退回浮层**，绝不把卡丢掉：
+    //     位置信息没了还能补，内容没了就真没了。
+    try {
+      var _b = card.bind;
+      if (_b && _b.kind === 'upage-block' && typeof window.__upBindCard === 'function') {
+        var okBind = window.__upBindCard(_b.upage, _b.bid, {
+          isHtml: true,
+          raw: '<div class="vc-if-hd"><span>' + esc(label) + '</span></div>' + _infoHtml(card),
+          text: _infoText(card),
+          label: label
+        });
+        if (okBind) return true;
+        try { RC.toast && RC.toast('没找到要绑定的位置，卡片先放浮层'); } catch (e2) {}
+      }
+    } catch (e) {}
     var th = document.getElementById('asst-thread');
     var _hosts = [];
     // 141(轮次容器):结果卡 = 本轮容器里的一个 **card part**。前置语是它前面的 text part,天然同框,
