@@ -378,6 +378,10 @@ if (window.__bwPwaProviderOnly) return;
       // 底面(磨砂 + 底色)统一由这一层画。各状态只改 --vc-cardbg/--vc-cardblur 两个变量,
       // 不再各自写 background —— 否则一旦有人漏改,那个状态就退回到"卡片自己画背景",
       // 尺寸过渡时的裁剪滞后立刻回来。
+      // 裁剪兜底:非圆点态一律按自身圆角裁。上面把毛玻璃移到 ::before 是治本,
+      // 这一条是**不问来源**的兜底 —— 任何比卡片大或错位的层(含 WebKit 自己合成出来的)
+      // 都到边为止,不会再从右边和底下露出来。圆点态要露出标记,保持 visible。
+      '.vc-card:not(.vc-dot){overflow:hidden}' +
       '.vc-card::before{content:"";position:absolute;inset:0;border-radius:inherit;z-index:-1;pointer-events:none;' +
         'background:var(--vc-cardbg);-webkit-backdrop-filter:var(--vc-cardblur);backdrop-filter:var(--vc-cardblur);' +
         'transition:background .3s ease}' +
@@ -757,6 +761,14 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-if-src{opacity:.65}' +
       '.vc-ig{display:flex;flex-wrap:wrap;gap:8px}' +
       '.vc-ig-cell{position:relative;width:calc(50% - 4px);border-radius:10px;overflow:hidden;background:rgba(255,255,255,.04)}' +
+      // 单张图占满整宽:两列是给多图用的,一张图也缩在左半边纯属浪费(用户实测"图片无法最大化")。
+      // :only-child 而不是 :first-child —— ✕ 删掉的图渲染成空串,剩最后一张时正好命中。
+      '.vc-ig-cell:only-child{width:100%}' +
+      // 手动调过大小的卡:让单图**吃满可用高度**。图片本来只按宽度撑、高度由宽高比定,
+      // 所以你把卡片拉高之后下面全是空的。contain 保证不裁不变形,底色补住letterbox 区域。
+      '.vc-card.vc-user-sized:not(.vc-dot):not(.vc-min) .vc-ig{height:100%}' +
+      '.vc-card.vc-user-sized:not(.vc-dot):not(.vc-min) .vc-ig-cell:only-child{height:100%;display:flex;flex-direction:column}' +
+      '.vc-card.vc-user-sized:not(.vc-dot):not(.vc-min) .vc-ig-cell:only-child .vc-ig-img{flex:1 1 auto;min-height:0;height:auto;object-fit:contain;background:rgba(0,0,0,.18)}' +
       '.vc-card.vc-drop-hot,.vc-if.vc-drop-hot{box-shadow:0 0 0 2.5px #0a84ff,0 12px 40px rgba(0,0,0,.4)!important;transition:box-shadow .12s}' +
       '.vc-imgdrop{margin-top:8px}' +
       '.vc-imgdrop img{max-width:100%;border-radius:8px;display:block}' +
