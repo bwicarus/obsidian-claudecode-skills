@@ -117,6 +117,9 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_library_attachment_download': 'GLOBAL',
     'pdf_reader.pdf_api_library_user_state': 'GLOBAL',
     'pdf_reader.pdf_api_lookup_event': 'PAGE',   # /pdf/api/lookup-event
+    # 复习事件只记录，不读页、不做合订本定位；跟 lookup-event 同属
+    # "服务器=事件中继"那一类，按同样的 PAGE 策略登记（载荷里带 file 便于日后对账）。
+    'pdf_reader.pdf_api_review_event': 'PAGE',   # /pdf/api/review-event
     'pdf_reader.pdf_api_note_composite': 'PAGE',   # /pdf/api/note-composite
     'pdf_reader.pdf_api_notes': 'PAGE',   # /pdf/api/notes
     'pdf_reader.pdf_api_ocr_selection': 'PAGE',   # /pdf/api/ocr-selection
