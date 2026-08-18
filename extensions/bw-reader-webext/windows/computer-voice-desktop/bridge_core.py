@@ -240,7 +240,9 @@ class ShortcutBrokerRequestProcessor:
             )
             or isinstance(value.get("windowHandle"), bool)
             or not isinstance(value.get("windowHandle"), int)
-            or not 0 < value["windowHandle"] <= 0x7FFFFFFFFFFFFFFF
+            # 0 = 目标没有可见窗口（Codex 常驻托盘时就是这样）。句柄只参与签名，
+            # 不用来定位按键；要求它非零等于要求用户必须把 Codex 窗口开着。
+            or not 0 <= value["windowHandle"] <= 0x7FFFFFFFFFFFFFFF
         ):
             receipt = self._failure(
                 request_id if _valid_shortcut_request_id(request_id) else "invalid",

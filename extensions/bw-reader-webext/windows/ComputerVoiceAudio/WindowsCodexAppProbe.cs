@@ -74,7 +74,12 @@ internal static class WindowsCodexAppProbe
             throw new InvalidOperationException(
                 "BW_COMPUTER_VOICE_APP_TREE_AMBIGUOUS");
         }
-        if (state.WindowCount != 1 || state.ReadyTarget is null)
+        // 就绪与否由 ReadyTarget 说了算，不再由"恰好一个可见窗口"说了算。
+        // Probe 已经按 app 类型决定要不要窗口（走全局快捷键的 Codex 不要求，
+        // 靠 UIA 点按钮的 ChatGPT Classic 仍然要求）—— 这里再卡一次
+        // WindowCount != 1，等于把那条放宽整个抵消掉：Codex 常驻托盘时
+        // 可见窗口恒为 0，于是每次都抛 APP_WINDOW_AMBIGUOUS。
+        if (state.ReadyTarget is null)
         {
             throw new InvalidOperationException(
                 "BW_COMPUTER_VOICE_APP_WINDOW_AMBIGUOUS");
@@ -375,12 +380,37 @@ internal static class WindowsCodexAppProbe
                 .Where(handle => handle != 0)
                 .Distinct()
                 .ToArray();
-            if (windows.Length != 1)
+            // 走**全局快捷键**的目标（Codex）不要求有可见主窗口（2026-08-18）。
+            //
+            // 2026-08-18 本机实测：Codex 有 12 个进程、16 个顶层窗口，
+            // 其中**可见的是 0 个** —— 它常驻托盘，而 .NET 的 MainWindowHandle
+            // 只认可见窗口，于是这个判据恒不成立，WaitForUniqueReadyAsync 每次都熬到
+            // 20 秒超时抛 TimeoutException，keepalive 因此永远起不来。
+            // 用户报的"语音总是出问题 / 有时无法启动"，最硬的那一份出处就在这里。
+            //
+            // 而这个句柄在这条路上**根本不用来定位** —— F24 是 keybd_event 全局盲发的，
+            // 句柄只是快捷键请求签名里的一个字段（做幂等去重），而签名里已经有
+            // rootProcessId + startTime 足以唯一。也就是说这道门守的是一件它不需要的事。
+            //
+            // ⚠ ChatGPT Classic 那条路不同：它靠 UIA 点真实按钮
+            // （ChatGptClassicVoiceAutomation 要 target.WindowHandle != 0），
+            // 所以**只对 UsesCodexGlobalShortcut 放宽**，其余照旧要求恰好一个窗口。
+            nint windowHandle;
+            if (profile.UsesCodexGlobalShortcut)
+            {
+                // 有唯一可见窗口就带上（签名更具体），没有就带 0。
+                windowHandle = windows.Length == 1 ? windows[0] : 0;
+            }
+            else if (windows.Length != 1)
             {
                 return new CodexAppProbeState(
                     RootCount: 1,
                     windows.Length,
                     ReadyTarget: null);
+            }
+            else
+            {
+                windowHandle = windows[0];
             }
             long rootProcessStartFileTimeUtc;
             try
@@ -407,12 +437,12 @@ internal static class WindowsCodexAppProbe
             }
             return new CodexAppProbeState(
                 RootCount: 1,
-                WindowCount: 1,
+                windows.Length,
                 new CodexAppTarget(
                     root,
                     rootProcessStartFileTimeUtc,
                     tree,
-                    windows[0],
+                    windowHandle,
                     profile.AppKind));
         }
         finally

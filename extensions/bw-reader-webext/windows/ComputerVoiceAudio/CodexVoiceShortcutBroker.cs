@@ -162,10 +162,14 @@ internal static partial class CodexVoiceShortcutBrokerContract
                 "快捷键代理 requestId 无效",
                 nameof(requestId));
         }
+        // windowHandle 允许为 0：Codex 常驻托盘时一个可见窗口都没有（本机实测 16 个
+        // 顶层窗口全隐藏）。它在这条路上只是**签名的一部分**用来幂等去重，
+        // 而 rootProcessId + startTime 已经足以唯一 —— F24 是全局盲发的，
+        // 从来不靠这个句柄定位。把它当必填就等于要求 Codex 必须开着窗口。
         if (
             target.RootProcessId == 0
             || target.RootProcessStartFileTimeUtc <= 0
-            || target.WindowHandle == 0
+            || target.WindowHandle < 0
         )
         {
             throw new ArgumentException(
