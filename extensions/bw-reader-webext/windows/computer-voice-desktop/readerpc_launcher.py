@@ -55,7 +55,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.33"
+APP_VERSION = "0.1.34"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 桥接模式旗标的独立意图文件(C# 启动时读取;keepalive/config/runtime-status 都是
@@ -1041,7 +1041,17 @@ class ReaderPCWindow:
 
         def worker() -> None:
             try:
-                write_user_exit_marker(self.readerpc_paths.local_root)
+                # ⚠ 不依赖 self.readerpc_paths：退出可能发生在 __init__ 走完之前
+                #   （被别的实例清理、启动早期异常、用户秒关窗），那时这个属性还不存在，
+                #   于是"写退出标记"整个失败 —— 而标记没写成意味着**看门狗会把用户
+                #   主动关掉的服务再拉起来**，语义直接反了。
+                #   这条错一直在发生，只是此前 print 到 --noconsole 的虚空里没人看见；
+                #   加了文件日志的第一次启动就抓到了它。
+                #   路径本来就可以独立求出，不必经过实例。
+                root = getattr(
+                    getattr(self, "readerpc_paths", None), "local_root", None
+                ) or ReaderPCPaths.discover().local_root
+                write_user_exit_marker(root)
             except Exception as exc:
                 _boot_log(f"[warn] 写退出标记失败(看门狗可能复活): {exc}")
             try:
