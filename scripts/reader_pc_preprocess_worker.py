@@ -63,19 +63,15 @@ QUALITY_PROFILE = {
     "name": "quality-first-v2",
     "textGeometry": "mokuro-polygon-direction-v2",
     "gpuRequired": True,
-    # ⚠ 这三个只管**送给 Google Vision 的那张图**，跟下面的模型选择是两回事。
-    #   2026-08-18 用户实测:PC 预处理出来的文字层贴合度**反而不如** Pi。两条 _vision_page
-    #   的数学是逐行相同的，唯一的差别就是这里 —— PC 400dpi/长边 6000/q95，Pi 300/4000/q90。
-    #   更高的输入分辨率在这里不是更准:Vision 的 DOCUMENT_TEXT_DETECTION 内部会把图缩到
-    #   自己的检测尺度再把 symbol 框映回提交图，缩得越狠，映回来的每一档就越粗
-    #   —— 折算到页面点上，6000px 的一档正好比 4000px 的粗一半。这与"PC 反而更偏"吻合。
-    #   所以对齐回 Pi 那组已被用户认可的参数;高质量该花在模型上(mokuro/YOLO/unimernet)，
-    #   而不是花在一张会被对方缩掉的大图上。
-    #   ⚠ 若日后仍偏:该证伪这条假设的证据是"同一页、同一 zoom、两边框坐标不一致"——
-    #     sidecar 里已记 imageWidth/imageHeight，拿它跟 page_w/page_h 一起比即可，不必再猜。
-    "ocrRenderDpi": 300,
-    "maxImageLongEdge": 4000,
-    "jpegQuality": 90,
+    # ⚠ 送 Vision 的那张图的分辨率**不在这里定** —— 由 Pi worker 的 _vision_render
+    #   统一决定(目标 300dpi / 保底 200dpi / 按上传字节实测回退)。两边共用同一个
+    #   函数,不再各写一份参数。
+    #
+    #   2026-08-18 我在这里放过 ocrRenderDpi/maxImageLongEdge/jpegQuality 三项,并
+    #   按"Vision 内部会缩图,大图反而更粗"的假设把它们从 400/6000/95 调到 300/4000/90。
+    #   2026-08-19 实测把这个假设证伪了:400dpi 那本的框高/行距是 0.51(最好的一份),
+    #   而被长边封顶压到 120dpi 的那本是 1.34(框比行距还高)。真正的变量是**有效 DPI**,
+    #   跟提交图的绝对像素数无关。固定的长边封顶对超大页面就是一台降质机器。
     "mangaModel": "mokuro-manga-ocr",
     "layoutModel": "DocLayout-YOLO-DocStructBench",
     "formulaModel": "unimernet-base",
@@ -847,23 +843,13 @@ class QualityPipeline:
                 f"{label} did not prove CUDA placement ({detail}); CPU fallback is disabled"
             )
 
-    def _vision_page(self, page) -> tuple[list[dict], str, int, int]:
+    def _vision_page(self, page) -> tuple[list[dict], str, int, int, float]:
         scripts = self.project_root / "scripts"
         if str(scripts) not in sys.path:
             sys.path.insert(0, str(scripts))
         vision = importlib.import_module("google_vision_ocr")
-        fitz = importlib.import_module("fitz")
-        long_pt = max(float(page.rect.width), float(page.rect.height)) or 1.0
-        zoom = min(
-            float(QUALITY_PROFILE["ocrRenderDpi"]) / 72.0,
-            float(QUALITY_PROFILE["maxImageLongEdge"]) / long_pt,
-        )
-        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-        try:
-            image = pix.tobytes("jpg", jpg_quality=int(QUALITY_PROFILE["jpegQuality"]))
-            image_w, image_h = int(pix.width), int(pix.height)
-        finally:
-            del pix
+        # 渲染参数与 Pi 共用一份实现;这里若再抄一遍,两边迟早又会漂开。
+        image, image_w, image_h, effective_dpi = self._worker_core()._vision_render(page)
         raw = vision.ocr_one_page(vision._load_key(), image)
         sx = float(page.rect.width) / image_w
         sy = float(page.rect.height) / image_h
@@ -887,19 +873,23 @@ class QualityPipeline:
             if item.get("sp"):
                 char["sp"] = 1
             chars.append(char)
-        return chars, str(raw.get("text") or ""), image_w, image_h
+        return chars, str(raw.get("text") or ""), image_w, image_h, effective_dpi
 
     def page(self, claim: Claim, page_number: int) -> dict:
         if self.document is None:
             raise WorkerError("quality pipeline is not open")
         page = self.document[page_number - 1]
+        core = self._worker_core()
+        effective_dpi = None
         if claim.engine == "vision":
-            chars, text, image_w, image_h = self._vision_page(page)
+            chars, text, image_w, image_h, effective_dpi = self._vision_page(page)
+            # vision 分支以前直接跳到下面标 tokenized=True,却从没真跑过分词 ——
+            # 服务器那趟看见这个标记就 continue,于是 PC 出的 vision 页永远没分词。
+            chars = core._tokenize_chars(chars)
         else:
-            core = self._worker_core()
             chars, text, image_w, image_h = core._manga_page(page, self._manga_engine())
             chars = core._tokenize_chars(chars)
-        return {
+        sidecar = {
             "schema": PAGE_SCHEMA,
             "bookId": claim.book_id,
             "contentSha256": claim.content_sha256,
@@ -915,6 +905,11 @@ class QualityPipeline:
             "tokenized": True,
             "generatedAtEpochMs": _now_ms(),
         }
+        if effective_dpi is not None:
+            sidecar["visionEffectiveDpi"] = round(effective_dpi, 1)
+            if effective_dpi < core.VISION_MIN_DPI:
+                sidecar["visionDpiShortfall"] = True
+        return sidecar
 
     def release_text_model(self) -> None:
         self._manga = None

@@ -260,19 +260,76 @@ def _page_done(path: Path, book_id: str, content_sha256: str, engine: str) -> bo
     )
 
 
-def _vision_page(page, project: Path) -> tuple[list[dict], str, int, int]:
+# 送给 Google Vision 的那张图的分辨率策略。
+#
+# 2026-08-19 用户实测:某本 1684x2405pt 的超大跨页扫描书,文字层"高度太高,选下面
+# 会连带选上面"。量出来的实据 —— 同一套代码、三份结果:
+#   595x890pt  -> 3308x4946px = 400dpi -> 框高/行距 0.51, 行重叠 0/28
+#   515x731pt  -> 2145x3045px = 300dpi -> 框高/行距 0.64, 行重叠 2/38
+#   1684x2405pt-> 2802x4000px = **120dpi** -> 框高/行距 **1.34**, 行重叠 **31/56**
+# 根因不是引擎也不是执行者,是**固定的长边像素封顶**:页面越大,封顶把有效 DPI 压得
+# 越低,而 Vision 在低分辨率上出的 symbol 框会粗到吃掉行距。
+#
+# 所以封顶的对象改成它真正要防的东西 —— **上传字节数**(Vision 请求体上限 ~10MB,
+# base64 膨胀 4/3),而不是像素数;分辨率只受"目标 DPI"和"保底 DPI"约束。
+# 字节不靠估:渲染完实测,超了按面积比一次算准再渲,最多三轮。
+#
+# ⚠ 若某页连保底 DPI 都塞不进字节预算(极端巨幅),这里**不静默降级** —— 会把实际
+#   有效 DPI 写进页 sidecar 的 visionEffectiveDpi,低于保底时另记 visionDpiShortfall。
+#   真要解决那种页面得**切片 OCR**(分块 300dpi 各送一次再把框映回页面坐标),
+#   那是明确的下一步,不是这次的范围。
+VISION_TARGET_DPI = 300.0
+VISION_MIN_DPI = 200.0
+VISION_MAX_UPLOAD_BYTES = 6_000_000
+VISION_ABSOLUTE_MAX_LONG_EDGE = 12000.0
+# 再怎么压也不往下走的地板。到了这里还超预算就**照发** —— 预算是我们保守的
+# 自我约束(Vision 实际能收更多),把一页压成糊的去换"一定不超预算"是赔本的。
+VISION_ABSOLUTE_MIN_DPI = 96.0
+VISION_JPEG_QUALITY = 90
+VISION_SHRINK_ATTEMPTS = 6
+
+
+def _vision_render(page) -> tuple[bytes, int, int, float]:
+    """Render one page for Vision at the highest DPI that fits the upload budget."""
+    fitz = __import__("fitz")
+    width_pt = float(page.rect.width) or 1.0
+    long_pt = max(width_pt, float(page.rect.height)) or 1.0
+    zoom = min(
+        VISION_TARGET_DPI / 72.0,
+        VISION_ABSOLUTE_MAX_LONG_EDGE / long_pt,
+    )
+    floor_zoom = VISION_MIN_DPI / 72.0
+    hard_floor_zoom = VISION_ABSOLUTE_MIN_DPI / 72.0
+    image = b""
+    image_w = image_h = 0
+    for _attempt in range(VISION_SHRINK_ATTEMPTS):
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        try:
+            image = pix.tobytes("jpg", jpg_quality=VISION_JPEG_QUALITY)
+            image_w, image_h = int(pix.width), int(pix.height)
+        finally:
+            del pix
+        if len(image) <= VISION_MAX_UPLOAD_BYTES or zoom <= hard_floor_zoom:
+            break
+        # JPEG 字节数**大致**随像素面积走,但只是大致:大片均匀区域几乎不随分辨率
+        # 变小。所以面积比只当作起点,再强制至少降 15%,保证每轮真的在推进 ——
+        # 否则遇到不可压缩的页面会空转到轮次用完，看起来"试过了"其实原地踏步。
+        estimate = zoom * ((VISION_MAX_UPLOAD_BYTES / len(image)) ** 0.5) * 0.98
+        zoom = max(hard_floor_zoom, min(estimate, zoom * 0.85))
+        if zoom < floor_zoom:
+            # 已经掉到保底以下:调用方会据返回的有效 DPI 记 visionDpiShortfall,
+            # 这一页不会被假装成跟别的页一样准。
+            zoom = max(hard_floor_zoom, zoom)
+    effective_dpi = (image_w / width_pt * 72.0) if width_pt else 0.0
+    return image, image_w, image_h, effective_dpi
+
+
+def _vision_page(page, project: Path) -> tuple[list[dict], str, int, int, float]:
     scripts = project / "scripts"
     sys.path.insert(0, str(scripts))
     from google_vision_ocr import _load_key, ocr_one_page  # type: ignore
 
-    long_pt = max(float(page.rect.width), float(page.rect.height)) or 1.0
-    zoom = min(300.0 / 72.0, 4000.0 / long_pt)
-    pix = page.get_pixmap(matrix=__import__("fitz").Matrix(zoom, zoom), alpha=False)
-    try:
-        image = pix.tobytes("jpg", jpg_quality=90)
-        image_w, image_h = pix.width, pix.height
-    finally:
-        del pix
+    image, image_w, image_h, effective_dpi = _vision_render(page)
     raw = ocr_one_page(_load_key(), image)
     sx = float(page.rect.width) / image_w
     sy = float(page.rect.height) / image_h
@@ -296,7 +353,7 @@ def _vision_page(page, project: Path) -> tuple[list[dict], str, int, int]:
         if item.get("sp"):
             char["sp"] = 1
         chars.append(char)
-    return chars, str(raw.get("text") or ""), image_w, image_h
+    return chars, str(raw.get("text") or ""), image_w, image_h, effective_dpi
 
 
 def _manga_line_char_boxes(
@@ -529,7 +586,16 @@ def _tokenize_directory(
         chars = value.get("chars")
         if not isinstance(chars, list):
             raise RuntimeError(f"page {page_number} has no OCR character layer")
-        if any(int(char.get("w", -1)) < 0 for char in chars if not char.get("sp")):
+        # Vision 会给 word id,但它对日文的分词是碎的(实测每组中位 1-2 字,
+        # 「フランス」「受けている」这种都切开)。以前"给了 w 就当分好词"直接把
+        # 日文页的分词权交给了 Vision —— 用户 2026-08-19 报的"分词也有问题"就是它。
+        # 有假名就一律用 fugashi 重分;其余(纯英文/纯中文)保留 Vision 的分组。
+        needs_tokenizing = any(
+            int(char.get("w", -1)) < 0 for char in chars if not char.get("sp")
+        ) or _KANA_RE.search(
+            "".join(str(char.get("c") or "") for char in chars if not char.get("sp"))
+        )
+        if needs_tokenizing:
             value["chars"] = _tokenize_chars(chars)
         value["tokenized"] = True
         if job_path is not None:
@@ -1298,7 +1364,7 @@ def run(args) -> int:
                     currentPage=page_number,
                     textProgress=_progress(total, existing),
                     wordProgress=_progress(
-                        total, existing if args.engine == "vision" else tokenized
+                        total, tokenized
                     ),
                     formulaProgress=_progress(total, 0),
                     percent=round(existing * 75 / max(1, total), 1),
@@ -1309,8 +1375,11 @@ def run(args) -> int:
                     canRetry=False,
                 )
                 page = document[page_number - 1]
+                effective_dpi = None
                 if args.engine == "vision":
-                    chars, text, image_w, image_h = _vision_page(page, Path(args.project))
+                    chars, text, image_w, image_h, effective_dpi = _vision_page(
+                        page, Path(args.project)
+                    )
                 else:
                     chars, text, image_w, image_h = _manga_page(page, engine)
                 sidecar = {
@@ -1330,11 +1399,14 @@ def run(args) -> int:
                     "textCharCount": len("".join(text.split())),
                     "generatedAtEpochMs": int(time.time() * 1000),
                 }
+                if effective_dpi is not None:
+                    # 贴合度问题永远先看这一项 —— 有效 DPI 掉下去,框就会开始糊。
+                    sidecar["visionEffectiveDpi"] = round(effective_dpi, 1)
+                    if effective_dpi < VISION_MIN_DPI:
+                        sidecar["visionDpiShortfall"] = True
                 _assert_worker_identity(job_path)
                 _atomic_json(page_path, sidecar)
                 existing += 1
-                if args.engine == "vision":
-                    tokenized = existing
                 if chars:
                     recognized += 1
                 elapsed = max(0.001, time.time() - start)

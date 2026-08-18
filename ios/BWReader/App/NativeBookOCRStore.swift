@@ -340,6 +340,65 @@ actor NativeBookOCRSidecarStore {
         )
     }
 
+    /// 删除本机已导入的某个文字层。
+    ///
+    /// 用户 2026-08-19：在服务器上删掉一份结果之后，「当前使用」里那一项还在 ——
+    /// 因为那个选择器列的是**本机已导入的层**，跟服务器上的结果是两回事。
+    /// Pi 删了、iPad 上的副本还在，而且可能仍在被使用。
+    ///
+    /// 顺序是要害：**先把选择挪走，再删目录**。反过来的话中间那一瞬
+    /// layerState() 会看到"选中的层不存在"，而 page() 每次读页都调它。
+    /// （那个不一致现在会静默回落而不是抛，但仍然不该主动制造。）
+    func deleteLayer(
+        bookID: String,
+        contentSHA256: String,
+        layer: NativeBookOCRLayerID
+    ) throws -> NativeBookOCRLayerState {
+        guard [.appleVision, .pi, .pc].contains(layer) else {
+            // 内嵌层与兼容旧结果不是"导入进来的一份"，没有可删的目录。
+            throw NativeBookOCRError.storage("这一层不能删除")
+        }
+        try assertPDFMutationWriteAllowed(
+            bookID: bookID,
+            contentSHA256: contentSHA256
+        )
+        let current = try layerState(contentSHA256: contentSHA256)
+        if current.selected == layer {
+            let fallback: NativeBookOCRLayerID =
+                current.available.contains(where: { $0.layer == .legacy })
+                    ? .legacy
+                    : .embedded
+            let selection = NativeBookOCRLayerSelection(
+                schema: NativeBookOCRLayerSelection.schema,
+                contentSHA256: contentSHA256.lowercased(),
+                selected: fallback,
+                updatedAt: Date()
+            )
+            let url = layerSelectionURL(contentSHA256)
+            do {
+                try fileManager.createDirectory(
+                    at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try encoder().encode(selection).write(to: url, options: .atomic)
+            } catch {
+                throw NativeBookOCRError.storage(error.localizedDescription)
+            }
+        }
+        let directory = layerDirectory(
+            contentSHA256: contentSHA256,
+            layer: layer
+        )
+        if fileManager.fileExists(atPath: directory.path) {
+            do {
+                try fileManager.removeItem(at: directory)
+            } catch {
+                throw NativeBookOCRError.storage(error.localizedDescription)
+            }
+        }
+        return try layerState(contentSHA256: contentSHA256)
+    }
+
     func selectLayer(
         bookID: String,
         contentSHA256: String,

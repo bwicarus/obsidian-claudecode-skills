@@ -286,6 +286,45 @@ final class NativeBookOCRManager: ObservableObject {
         return state
     }
 
+    /// 删除本机已导入的文字层。与 selectTextLayer 同一套规矩：
+    /// 写锁 → 等就绪 → 校验身份 → activate → 落盘 → 刷新缓存并广播。
+    /// 缓存按 **bookID** 键（不是 contentSHA256）。
+    @discardableResult
+    func deleteTextLayer(
+        bookID: String,
+        expectedContentSHA256: String,
+        layer: NativeBookOCRLayerID
+    ) async throws -> NativeBookOCRLayerState {
+        try beginWriteOperation(bookID: bookID)
+        defer { endWriteOperation(bookID: bookID) }
+        await waitUntilReady()
+        guard Self.isSHA256(expectedContentSHA256) else {
+            throw NativeBookOCRError.invalidContentSHA256
+        }
+        try activate(
+            bookID: bookID,
+            expectedContentSHA256: expectedContentSHA256
+        )
+        let state = try await store.deleteLayer(
+            bookID: bookID,
+            contentSHA256: expectedContentSHA256,
+            layer: layer
+        )
+        layerStates[bookID] = state
+        let current = status(
+            for: bookID,
+            expectedContentSHA256: expectedContentSHA256
+        )
+        // 正在读的页面要立刻换掉文字层，否则删掉的那一层还留在屏幕上。
+        lastUpdate = NativeBookOCRUpdate(
+            contract: NativeBookOCRUpdate.contract,
+            bookID: bookID,
+            page: nil,
+            status: current
+        )
+        return state
+    }
+
     @discardableResult
     func selectTextLayer(
         bookID: String,

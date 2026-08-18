@@ -27,6 +27,8 @@ private enum ReaderLibraryRefreshClock {
 private struct PendingReleaseDeletion: Identifiable {
     let book: ReaderRemoteBook
     let release: ReaderPiOCRRelease
+    /// 服务器删完还要删本机导入的那份副本，所以要记住是哪一本本机书。
+    let localBook: ReaderLocalBookRecord?
 
     var id: String { release.runId }
 }
@@ -746,10 +748,26 @@ struct ReaderLocalLibraryView: View {
                                     }
                                 }
                             }
+                            // 「设为当前」只对非生效项出现，于是**已经生效**的那一份
+                            // 反而没有任何入口能拉到本机 —— 用户 2026-08-19 就卡在这：
+                            // 服务器上是 08-19 那份、本机「当前使用」里还是 08-12 的，
+                            // 而菜单里什么都点不了。导入必须是独立的一项，永远可用。
+                            if localBook != nil {
+                                Button("导入到本机") {
+                                    Task {
+                                        await importRelease(
+                                            release,
+                                            book: remoteBook,
+                                            localBook: localBook
+                                        )
+                                    }
+                                }
+                            }
                             Button("删除", role: .destructive) {
                                 pendingReleaseDeletion = PendingReleaseDeletion(
                                     book: remoteBook,
-                                    release: release
+                                    release: release,
+                                    localBook: localBook
                                 )
                             }
                         } label: {
@@ -759,7 +777,7 @@ struct ReaderLocalLibraryView: View {
                         .disabled(ocrActionBookID != nil)
                     }
                 }
-                Text("同一本书可以有多份结果；重新预处理会新增一份，不再覆盖。")
+                Text("这里的日期是服务器上产出的时间；「当前使用」里的日期是导入到本机的时间，两者不一定相同。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -819,6 +837,37 @@ struct ReaderLocalLibraryView: View {
         }
     }
 
+    /// 把某一份结果拉到本机（不改服务器上哪一份生效）。
+    ///
+    /// 强制重导：`hasImportedRevision` 是按 revision 去重的，而 revision 是内容
+    /// 寻址的 —— 用户手点这一项时想要的就是"不管你觉得重不重复，拉一次"。
+    private func importRelease(
+        _ release: ReaderPiOCRRelease,
+        book: ReaderRemoteBook,
+        localBook: ReaderLocalBookRecord?
+    ) async {
+        guard let localBook, ocrActionBookID == nil else { return }
+        ocrActionBookID = book.bookId
+        defer { if ocrActionBookID == book.bookId { ocrActionBookID = nil } }
+        if !release.isActive {
+            // 附件下载走的是"当前生效那一份"，所以要先把它切过去。
+            let cookies = await reader.remoteLibraryCookies()
+            do {
+                let listing = try await piOCR.client.activateRelease(
+                    book: book,
+                    runId: release.runId,
+                    cookies: cookies
+                )
+                releasesByBook[book.bookId] = listing
+            } catch {
+                ocrErrorMessage = "切换预处理结果失败：\(error.localizedDescription)"
+                return
+            }
+        }
+        await importPiAttachments(book: book, localBook: localBook)
+        await refreshTextLayers(localBook)
+    }
+
     private func confirmReleaseDeletion(_ pending: PendingReleaseDeletion) async {
         guard ocrActionBookID == nil else { return }
         let book = pending.book
@@ -836,6 +885,34 @@ struct ReaderLocalLibraryView: View {
             releasesByBook[book.bookId] = listing
         } catch {
             ocrErrorMessage = "删除预处理结果失败：\(error.localizedDescription)"
+            return
+        }
+        // 服务器上删掉了，本机导入的那份副本还在，而且「当前使用」里仍然列着它 ——
+        // 用户 2026-08-19 实测。按 **revision** 认领：本机层的元数据里记着它是从
+        // 哪一版导入的，与被删的那一份对上就一并删掉。
+        //
+        // 只删对得上的那一层：本机可能还导入过别的版本，或者根本没导入过这一份。
+        guard let localBook = pending.localBook,
+              let digest = localBook.contentSha256 else { return }
+        guard let state = nativeOCR.layerState(
+            for: localBook.id,
+            expectedContentSHA256: digest
+        ) else { return }
+        let orphaned = state.available.filter {
+            $0.revision == pending.release.revision
+        }
+        for metadata in orphaned {
+            do {
+                _ = try await nativeOCR.deleteTextLayer(
+                    bookID: localBook.id,
+                    expectedContentSHA256: digest,
+                    layer: metadata.layer
+                )
+            } catch {
+                // 服务器那边已经删了，本机没删掉要说出来 —— 否则用户会看到
+                // 「当前使用」里还有一项，却不知道为什么。
+                ocrErrorMessage = "服务器上已删除，但本机这一份没能删掉：\(error.localizedDescription)"
+            }
         }
     }
 

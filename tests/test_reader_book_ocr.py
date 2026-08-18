@@ -258,6 +258,197 @@ class ReaderBookOcrReleaseIndexTest(unittest.TestCase):
         self.assertEqual(first, second)
 
 
+
+class ReaderBookOcrVisionGeometryTest(unittest.TestCase):
+    """送 Vision 的图必须保住有效 DPI，否则文字层的框会高到吃掉行距。
+
+    用户 2026-08-19：「pc预处理vision文字区的高度太高导致选择下方时会一起选择上方，
+    而且这里明显分词也有问题」。量到的实据（同一套代码、三份已有结果）：
+
+        595x890pt  -> 400dpi -> 框高/行距 0.51，行重叠 0/28
+        515x731pt  -> 300dpi -> 框高/行距 0.64，行重叠 2/38
+        1684x2405pt-> 120dpi -> 框高/行距 1.34，行重叠 31/56   <- 就是这本
+
+    第三本被固定的长边像素封顶压到了 120dpi。页面越大压得越狠，这是封顶的
+    数学必然，跟引擎、执行者都无关。
+    """
+
+    def setUp(self) -> None:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "_server_deploy"))
+        import reader_book_ocr_worker  # type: ignore
+
+        self.worker = reader_book_ocr_worker
+
+    def _page(self, width_pt: float, height_pt: float):
+        import fitz  # type: ignore
+
+        document = fitz.open()
+        document.new_page(width=width_pt, height=height_pt)
+        return document, document[0]
+
+    def test_oversized_page_still_reaches_the_dpi_floor(self) -> None:
+        """1684x2405pt 那本必须不再掉到 120dpi。"""
+
+        document, page = self._page(1684.0, 2405.0)
+        try:
+            _image, image_w, _image_h, dpi = self.worker._vision_render(page)
+        finally:
+            document.close()
+        self.assertGreaterEqual(
+            dpi,
+            self.worker.VISION_MIN_DPI,
+            "超大页面被压到保底 DPI 以下 —— 框会重新开始糊",
+        )
+        # 有效 DPI 就是"每页面英寸多少像素"，不是别的什么估计值。
+        self.assertAlmostEqual(dpi, image_w / 1684.0 * 72.0, places=1)
+
+    def test_normal_page_gets_the_target_dpi(self) -> None:
+        document, page = self._page(515.0, 731.0)
+        try:
+            _image, _w, _h, dpi = self.worker._vision_render(page)
+        finally:
+            document.close()
+        self.assertAlmostEqual(dpi, self.worker.VISION_TARGET_DPI, delta=1.0)
+
+    def test_upload_stays_within_the_request_budget(self) -> None:
+        """封顶换成字节预算之后，它必须真的封住 —— 否则 Vision 会拒收整页。
+
+        空白页在任何分辨率下都是几十 KB，拿它测预算等于什么都没测。
+        把预算压到必然触发回退的量级，才看得出回退是不是真的在工作。
+        """
+
+        document, page = self._page(1684.0, 2405.0)
+        try:
+            _image, _w, _h, uncapped_dpi = self.worker._vision_render(page)
+            budget = 40_000
+            with patch.object(self.worker, "VISION_MAX_UPLOAD_BYTES", budget):
+                image, _w2, _h2, capped_dpi = self.worker._vision_render(page)
+        finally:
+            document.close()
+        self.assertLess(
+            capped_dpi,
+            uncapped_dpi,
+            "预算压到 40KB 都没降分辨率 —— 回退根本没触发",
+        )
+        self.assertLess(len(image), len(_image), "降了分辨率字节却没变小")
+        # 故意不断言"一定进预算"：大片均匀区域的 JPEG 几乎不随分辨率变小，
+        # 硬要进预算就得把页面压成糊的。预算是我们保守的自我约束，不是 Vision
+        # 的硬限制 —— 压到地板还超就照发，这是有意的选择。
+
+    def test_budget_pressure_does_not_stop_at_the_floor_forever(self) -> None:
+        """预算实在塞不下时，宁可降到保底以下也要把请求发出去 —— 但要留痕。
+
+        `_vision_render` 返回真实有效 DPI，调用方据此写 visionDpiShortfall；
+        这里钉住的是"不会因为够不到保底就卡死或抛"。
+        """
+
+        document, page = self._page(1684.0, 2405.0)
+        try:
+            with patch.object(self.worker, "VISION_MAX_UPLOAD_BYTES", 1_000):
+                image, _w, _h, dpi = self.worker._vision_render(page)
+        finally:
+            document.close()
+        self.assertGreater(dpi, 0.0)
+        self.assertGreater(len(image), 0)
+
+    def test_pixel_cap_no_longer_decides_resolution(self) -> None:
+        """同一本书的两倍尺寸版本不该拿到一半的 DPI。
+
+        这条直接钉住旧行为的形状：固定长边封顶下，页面翻倍 = DPI 减半。
+        """
+
+        small_doc, small_page = self._page(842.0, 1202.0)
+        big_doc, big_page = self._page(1684.0, 2405.0)
+        try:
+            _i, _w, _h, small_dpi = self.worker._vision_render(small_page)
+            _i2, _w2, _h2, big_dpi = self.worker._vision_render(big_page)
+        finally:
+            small_doc.close()
+            big_doc.close()
+        self.assertGreater(
+            big_dpi,
+            small_dpi * 0.6,
+            "页面变大就掉 DPI —— 固定像素封顶又回来了",
+        )
+
+
+class ReaderBookOcrJapaneseTokenizationTest(unittest.TestCase):
+    """日文页一律用 fugashi 重新分词，不拿 Vision 的 word 分组当分词。
+
+    Vision 对日文的分组实测是碎的（每组中位 1-2 字，「フランス」「受けている」
+    都会被切开）。旧条件是"只要 Vision 给了 word id 就跳过分词"，等于把日文的
+    分词权交给了一个不做日文分词的东西。
+    """
+
+    def setUp(self) -> None:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "_server_deploy"))
+        import reader_book_ocr_worker  # type: ignore
+
+        self.worker = reader_book_ocr_worker
+        self.temp = tempfile.TemporaryDirectory()
+        self.job_dir = Path(self.temp.name)
+        (self.job_dir / "pages").mkdir()
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _write_page(self, text: str) -> Path:
+        # Vision 的形状：每个字都带 word id（>= 0），且逐字成词。
+        chars = [
+            {
+                "c": character,
+                "x0": float(index),
+                "y0": 0.0,
+                "x1": float(index) + 1.0,
+                "y1": 1.0,
+                "w": index,
+                "bk": 1,
+                "b": 0,
+            }
+            for index, character in enumerate(text)
+        ]
+        path = self.job_dir / "pages" / "p000001.json"
+        path.write_text(json.dumps({
+            "schema": "reader-page-chars/1",
+            "engine": "vision",
+            "pageNumber": 1,
+            "page_w": 100.0,
+            "page_h": 100.0,
+            "chars": chars,
+            "furigana": [],
+        }), "utf-8")
+        return path
+
+    def test_japanese_vision_page_is_retokenized(self) -> None:
+        path = self._write_page("中国やフランスの影響を受けている")
+        self.worker._tokenize_directory(self.job_dir)
+        chars = json.loads(path.read_text("utf-8"))["chars"]
+        groups: dict[int, str] = {}
+        for char in chars:
+            groups.setdefault(int(char["w"]), "")
+            groups[int(char["w"])] += char["c"]
+        words = list(groups.values())
+        self.assertIn("フランス", words, f"「フランス」仍被切开：{words}")
+        self.assertIn("中国", words, f"「中国」仍被切开：{words}")
+        self.assertLess(
+            len(words),
+            len("中国やフランスの影響を受けている"),
+            "还是逐字成词 —— Vision 的分组没有被换掉",
+        )
+
+    def test_non_japanese_vision_page_keeps_vision_grouping(self) -> None:
+        """英文页 Vision 的空格分词是可靠的，不该被推翻。"""
+
+        path = self._write_page("hello")
+        before = json.loads(path.read_text("utf-8"))["chars"]
+        self.worker._tokenize_directory(self.job_dir)
+        after = json.loads(path.read_text("utf-8"))["chars"]
+        self.assertEqual(
+            [char["w"] for char in before],
+            [char["w"] for char in after],
+        )
+
+
 class ReaderBookOcrFormulaWorkerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
