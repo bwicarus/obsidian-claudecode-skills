@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -576,6 +577,115 @@ class ReaderBookOcrForcedRerunTest(unittest.TestCase):
             [run["revision"] for run in before["runs"]],
             [run["revision"] for run in after["runs"]],
         )
+
+
+
+class ReaderBookOcrPageSchemaContractTest(unittest.TestCase):
+    """worker 产的页字段必须全部在服务端白名单里。
+
+    2026-08-19：给页加了 visionEffectiveDpi 却忘了在 `_normalize_pc_page` 放行，
+    结果 PC 传上来的**每一页**都被 400 拒，整本 0/53 失败，UI 只显示"PC 预处理
+    失败；可重试"—— 重试多少次都一样。
+
+    白名单是拒绝式的（`set(page) - allowed` 非空即拒），这是对的：多出来的字段
+    可能是攻击面。但"拒绝式"意味着两边必须同步，而同步靠人记是记不住的 ——
+    所以这里直接把两个 worker 的 sidecar 键抓出来跟白名单对。
+    """
+
+    @staticmethod
+    def _allowed_fields() -> set[str]:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "_server_deploy" / "reader_book_ocr.py"
+        ).read_text("utf-8")
+        start = source.index("def _normalize_pc_page(")
+        block = source[start:source.index("}", source.index("allowed = {", start))]
+        return set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', block))
+
+    @staticmethod
+    def _worker_page_fields(relative: str) -> set[str]:
+        source = (
+            Path(__file__).resolve().parents[1] / relative
+        ).read_text("utf-8")
+        fields: set[str] = set()
+        # 页字典的字面量键：`"schema": PAGE_SCHEMA,` 这种。
+        for match in re.finditer(r'"(\w+)":\s*(?![\s\S]{0,3}$)', source):
+            fields.add(match.group(1))
+        # 事后补写的键：`sidecar["visionEffectiveDpi"] = ...`
+        fields |= set(re.findall(r'sidecar\["(\w+)"\]\s*=', source))
+        return fields
+
+    def test_new_page_fields_are_allowed_by_the_server(self) -> None:
+        allowed = self._allowed_fields()
+        # 只挑真正会随页上传的那几个 —— 全量比对会把无关的字面量键也算进来。
+        for field in (
+            "schema", "bookId", "contentSha256", "engine", "pageNumber",
+            "page_w", "page_h", "imageWidth", "imageHeight", "chars",
+            "furigana", "textCharCount", "generatedAtEpochMs", "tokenized",
+            "visionEffectiveDpi", "visionDpiShortfall",
+        ):
+            self.assertIn(field, allowed, f"服务端白名单少了 {field}，PC 传页会被 400 拒")
+
+    def test_pc_worker_sidecar_keys_are_all_allowed(self) -> None:
+        """PC worker 显式补写到 sidecar 上的键，必须都能过白名单。"""
+
+        allowed = self._allowed_fields()
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "scripts" / "reader_pc_preprocess_worker.py"
+        ).read_text("utf-8")
+        written = set(re.findall(r'sidecar\["(\w+)"\]\s*=', source))
+        self.assertTrue(written, "没抓到 PC worker 往 sidecar 写的键；正则该修了")
+        self.assertEqual(
+            written - allowed,
+            set(),
+            "PC worker 写了服务端不认的页字段 —— 每一页都会被 400 拒",
+        )
+
+    def test_a_page_carrying_the_new_fields_passes_normalization(self) -> None:
+        """端到端一点的验证：带新字段的页真的能过 `_normalize_pc_page`。"""
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        base = Path(temp.name)
+        vault = base / "vault"
+        vault.mkdir()
+        (vault / "A.pdf").write_bytes(PDF_A)
+        library = BookLibrary(vault, base / "catalog")
+        entry = library.catalog()[0]
+        service = ReaderBookOcrService(
+            library, base / "ocr", base / "project",
+            launcher=lambda *args: _FakeProcess(1),
+            max_pdf_bytes=1024 * 1024, max_pages=100,
+        )
+        job = {
+            "bookId": entry["bookId"],
+            "contentSha256": entry["contentSha256"],
+            "engine": "vision",
+            "executor": "pc",
+            "processingProfile": "quality-first-v2",
+            "totalPages": 1,
+        }
+        page = {
+            "schema": "reader-page-chars/1",
+            "bookId": entry["bookId"],
+            "contentSha256": entry["contentSha256"],
+            "engine": "vision",
+            "pageNumber": 1,
+            "page_w": 10.0,
+            "page_h": 20.0,
+            "imageWidth": 100,
+            "imageHeight": 200,
+            "chars": [{"c": "x", "x0": 1, "y0": 1, "x1": 2, "y1": 2}],
+            "furigana": [],
+            "textCharCount": 1,
+            "generatedAtEpochMs": 1,
+            "tokenized": True,
+            "visionEffectiveDpi": 238.4,
+            "visionDpiShortfall": False,
+        }
+        normalized, _payload = service._normalize_pc_page(page, 1, job)
+        self.assertEqual(normalized["visionEffectiveDpi"], 238.4)
 
 
 class ReaderBookOcrFormulaWorkerTest(unittest.TestCase):

@@ -1427,6 +1427,13 @@ class ReaderBookOcrService:
             "schema", "bookId", "contentSha256", "engine", "pageNumber",
             "page_w", "page_h", "imageWidth", "imageHeight", "chars",
             "furigana", "textCharCount", "generatedAtEpochMs", "tokenized",
+            # 送 Vision 那张图的实际有效 DPI。贴合度出问题时第一个要看的就是它，
+            # 所以它必须跟着页一起存下来 —— 事后没法重算。
+            #
+            # ⚠ 2026-08-19 的教训:worker 那边加了字段却忘了在这里放行,于是 PC 传
+            #   上来的**每一页**都被 400 拒,整本预处理 0/53 失败。这个白名单是
+            #   拒绝式的(`set(page) - allowed` 非空即拒),给页加字段必须同时改这里。
+            "visionEffectiveDpi", "visionDpiShortfall",
         }
         if not isinstance(page, dict) or set(page) - allowed:
             raise ReaderBookOcrError(
