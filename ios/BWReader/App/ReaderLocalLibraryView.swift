@@ -658,7 +658,6 @@ struct ReaderLocalLibraryView: View {
         }
     }
 
-    @ViewBuilder
     /// 服务器上的历次预处理结果。
     ///
     /// 用户指出选择的地方本来就有（「当前使用」那个选择器）——但那个选择器是
@@ -810,6 +809,7 @@ struct ReaderLocalLibraryView: View {
         }
     }
 
+    @ViewBuilder
     private func piControls(
         remoteBook: ReaderRemoteBook?,
         localBook: ReaderLocalBookRecord?
