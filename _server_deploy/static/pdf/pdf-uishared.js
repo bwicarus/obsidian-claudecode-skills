@@ -142,6 +142,10 @@ window._favOpenPicker = function () {
     '.up2-b-card{background:rgba(123,108,255,.06);border:1px solid rgba(123,108,255,.28);border-radius:10px;' +   // #50 贴上来的卡
       'padding:8px 10px;overflow:auto;font-size:13px;line-height:1.5;color:#2a2f3a}' +
     '.up2-b-card img{max-width:100%}' +
+    // 收起成球：占同一个格子的左上角，其余留白让出书页内容。
+    '.up2-b-card.up2-b-card-dot{width:40px!important;height:40px!important;min-height:0;padding:0;overflow:hidden;border-radius:13px;background:rgba(123,108,255,.16);border-color:rgba(123,108,255,.5);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:width .34s cubic-bezier(.32,.72,.36,1),height .34s cubic-bezier(.32,.72,.36,1)}' +
+    '.up2-b-card.up2-b-card-dot > *{display:none}' +
+    '.up2-b-card.up2-b-card-dot::after{content:"\1F3B4";font-size:17px;line-height:1}' +
     '.up2-run-hint{padding:6px 22px 14px;font-size:12.5px;color:#5b76b8;min-height:14px}' +
     '.up2-run-result{position:absolute;left:0;right:0;bottom:0;max-height:45%;display:flex;flex-direction:column;background:rgba(255,255,255,.97);border-top:1px solid rgba(91,118,184,.25);font-size:13.5px;line-height:1.6;color:#1b2740;box-shadow:0 -4px 16px rgba(0,0,0,.08)}' +
     '.up2-rr-hd{display:flex;align-items:center;gap:8px;padding:7px 16px;border-bottom:1px solid rgba(91,118,184,.16);flex:0 0 auto;background:rgba(245,248,253,.98)}' +   // 收起头(不挡内容:收起后只剩这一条)
@@ -1292,6 +1296,38 @@ window._favOpenPicker = function () {
       el.style.overflow = 'hidden';
     });
   }
+  // 绑定卡的形态：展开 <-> 球。语义与浮层卡的三态一致，区别是这里的卡是自建页的
+  //   一个 block（它同时定住了屏幕位置和内容序列位置），所以"收起"不是关闭，
+  //   只是把同一个格子换一种画法。形态存进 block.form，跨会话保留。
+  var UP_BIND_IDLE_MS = 20000;   // 与浮层卡默认一致（rc-voice-card-secs 默认 20s）
+  function _upBindCardForm(el, blk, rec) {
+    var collapsed = (blk.form === 'dot');
+    var timer = null;
+    function paint() {
+      el.classList.toggle('up2-b-card-dot', collapsed);
+      el.title = collapsed ? '展开这张卡' : '';
+    }
+    function save() {
+      try {
+        blk.form = collapsed ? 'dot' : 'full';
+        // @interaction document.upage.bind-card
+        RC.reqJson('PATCH', UP_TEXT_API, { file: UP_FILE, id: rec.id, blocks: rec.blocks })
+          .catch(function () {});
+      } catch (e) {}
+    }
+    function arm() {
+      clearTimeout(timer);
+      if (collapsed) return;
+      timer = setTimeout(function () { collapsed = true; paint(); save(); }, UP_BIND_IDLE_MS);
+    }
+    el.addEventListener('click', function (ev) {
+      if (!collapsed) { arm(); return; }   // 展开态点内容不收起，只重排计时
+      ev.stopPropagation();
+      collapsed = false; paint(); save(); arm();
+    });
+    paint();
+    arm();
+  }
   // ★ 严格按**格子绝对定位**渲染 —— 服务端用 (row,col,span) 纯算术算出的 rect,
   //   只有前端也按同一套格子摆,那个 rect 才等于屏幕上的真实位置(批改按它裁图)。
   //   ⚠ 绝不能用自由流式 CSS:那样服务端算的 bbox 就对不上了。
@@ -1371,6 +1407,10 @@ window._favOpenPicker = function () {
         // #50 贴到页面的卡片:独立副本(存的是快照 html),按格子定位,内部可滚。
         d.classList.add('up2-b-card');
         try { d.innerHTML = b.html || RC.esc(b.label || '卡片'); } catch (e) { d.textContent = b.label || '卡片'; }
+        // 绑定卡的形态与计时(用户设计)：刚落下时保持打开并走非活跃计时，
+        // 到点**收起成球留在原位**而不是消失 —— 卡片的位置本身就是信息，
+        // 关掉等于把"这一处有过一次纠正"也一起丢了。球仍占同一个格子，点它展开回来。
+        if (b.boundTo) _upBindCardForm(d, b, rec);
       } else { return; }
       body.appendChild(d);
     });
