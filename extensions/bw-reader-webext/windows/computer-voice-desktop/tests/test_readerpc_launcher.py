@@ -23,6 +23,9 @@ from readerpc_launcher import (  # noqa: E402
     load_preferences,
     main,
     read_codex_voice_keep_active,
+    rearm_codex_voice_keep_active,
+    describe_voice_failure,
+    autostart_script_checks,
     readerpc_history_sync_enabled,
     prepare_readerpc_shortcut_broker,
     save_preferences,
@@ -1165,6 +1168,113 @@ class ReaderPCLauncherTests(unittest.TestCase):
             self.assertIs(prepare_readerpc_shortcut_broker(), replacement)
         first.close.assert_called_once_with()
         replacement.start.assert_called_once_with()
+
+
+class RearmCodexVoiceTests(unittest.TestCase):
+    """keepalive 必须真的**翻转**过去，否则 C# 那边等于什么都没收到。
+
+    2026-08-18 用户报「开着服务器软件但语音没被自动激活」。根因在 C# 的
+    ApplyKeepActiveChange：`if (previous == enabled) return false;` —— 值没变就不动，
+    而自动恢复预算用尽后设下的 _automaticRecoveryBlocked 只有真跃迁才会清。
+    ReaderPC 过去每次"恢复"都只是再写一遍 true，于是永远解不开。
+    """
+
+    def _paths(self, root: Path):
+        return SimpleNamespace(runtime_status=root / "runtime" / "runtime-status.json")
+
+    def test_rearm_flips_false_then_true_when_already_enabled(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "runtime").mkdir(parents=True)
+            paths = self._paths(root)
+            set_codex_voice_keep_active(paths, True)
+
+            seen: list[bool] = []
+            real = set_codex_voice_keep_active
+
+            def record(bridge_paths, enabled):
+                seen.append(enabled)
+                real(bridge_paths, enabled)
+
+            with (
+                patch("readerpc_launcher.set_codex_voice_keep_active", record),
+                patch("readerpc_launcher.time.sleep"),
+            ):
+                flipped = rearm_codex_voice_keep_active(paths)
+
+            self.assertTrue(flipped)
+            self.assertEqual(seen, [False, True], "必须先落到 false 才谈得上跃迁")
+            self.assertIs(read_codex_voice_keep_active(paths), True)
+
+    def test_rearm_does_not_flip_when_already_disabled(self):
+        # 本来就是关的 => 没有封锁可解，直接置开即可，不必先制造一次停机。
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "runtime").mkdir(parents=True)
+            paths = self._paths(root)
+            set_codex_voice_keep_active(paths, False)
+
+            seen: list[bool] = []
+            real = set_codex_voice_keep_active
+
+            def record(bridge_paths, enabled):
+                seen.append(enabled)
+                real(bridge_paths, enabled)
+
+            with patch("readerpc_launcher.set_codex_voice_keep_active", record):
+                flipped = rearm_codex_voice_keep_active(paths)
+
+            self.assertFalse(flipped)
+            self.assertEqual(seen, [True])
+
+
+class VoiceFailureDescriptionTests(unittest.TestCase):
+    """失败原因一直写在 runtime-status 里，只是从来没人读出来给人看。"""
+
+    def test_known_code_becomes_readable_text_with_stage(self):
+        text = describe_voice_failure({
+            "failureId": "failure-abcdefghijklmnop",
+            "code": "BW_COMPUTER_VOICE_DIRECT_PORT_BUSY",
+            "stage": "listen",
+            "hresult": None,
+            "atUtc": "2026-08-18T00:00:00Z",
+        })
+        self.assertEqual(text, "端口被占用（listen）")
+
+    def test_unknown_code_still_shows_the_raw_code(self):
+        # 说不出人话也好过什么都不说 —— 这正是这一带反复吃亏的地方。
+        text = describe_voice_failure({
+            "failureId": "failure-abcdefghijklmnop",
+            "code": "BW_SOMETHING_NEW",
+            "stage": "start",
+            "hresult": None,
+            "atUtc": "2026-08-18T00:00:00Z",
+        })
+        self.assertIn("BW_SOMETHING_NEW", text)
+
+    def test_missing_error_is_silent(self):
+        self.assertEqual(describe_voice_failure(None), "")
+
+
+class AutostartScriptCheckTests(unittest.TestCase):
+    """自启链的两个 bug 都是编码问题，而"文件已生成"完全看不出来。"""
+
+    def test_generated_scripts_satisfy_interpreter_encoding_rules(self):
+        checks = autostart_script_checks()
+        self.assertTrue(checks["autostart-ps1-has-bom"], "PowerShell 5.1 靠 BOM 认中文")
+        self.assertTrue(checks["autostart-vbs-no-bom"], "VBScript 会把 BOM 当第一个字符")
+        self.assertTrue(checks["autostart-vbs-ascii"])
+        self.assertTrue(checks["autostart-ps1-parses"], "让 PowerShell 自己说它认不认")
+
+    def test_checks_do_not_touch_the_installed_scripts(self):
+        installed = Path(os.environ.get("LOCALAPPDATA", "")) / "BWReader" / "ReaderPC-Server"
+        before = None
+        target = installed / "start-readerpc.vbs"
+        if target.exists():
+            before = target.read_bytes()
+        autostart_script_checks()
+        if before is not None:
+            self.assertEqual(target.read_bytes(), before, "自测绝不能改已安装的脚本")
 
 
 if __name__ == "__main__":

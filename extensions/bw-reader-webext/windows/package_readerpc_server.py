@@ -164,10 +164,31 @@ def _build_manifest(
     }
 
 
+def _require_app_version_matches(version: str) -> None:
+    """源码里的 APP_VERSION 必须等于这次打的版本号。
+
+    2026-08-18 发现两者早就分家了:候选已经打到 0.1.45，而 readerpc_launcher.APP_VERSION
+    还停在 0.1.34 —— 也就是说 --self-test 报出来的 version、状态文件里的 version、
+    以及日后任何按版本判断的逻辑，指的都不是实际在跑的这一版。
+    这种漂移不会报错，只会在排查时把人引到错误的版本上，所以在这里拦住。
+    """
+
+    text = LAUNCHER_SOURCE.read_text(encoding="utf-8")
+    match = re.search(r'^APP_VERSION = "([^"]+)"', text, re.M)
+    if match is None:
+        _fail("readerpc_launcher.py 里找不到 APP_VERSION")
+    if match.group(1) != version:
+        _fail(
+            f"APP_VERSION({match.group(1)}) 与打包版本({version})不一致；"
+            "先改源码里的 APP_VERSION 再打包。"
+        )
+
+
 def build_candidate(version: str) -> Path:
     version = _version(version)
     if not PYINSTALLER.is_file():
         _fail(f"未找到固定 PyInstaller: {PYINSTALLER}")
+    _require_app_version_matches(version)
     _read_regular(LAUNCHER_SOURCE)
     for source in RUNTIME_SOURCES.values():
         _read_regular(source)
@@ -346,6 +367,12 @@ def _write_shortcut(shortcut: Path, executable: Path) -> Path:
         check=False,
         capture_output=True,
         text=True,
+        # 中文 Windows 上 PowerShell 的报错是按控制台代码页(GBK)输出的，而这里按
+        # UTF-8 解 —— 一旦它真的报错，subprocess.run 会先抛 UnicodeDecodeError，
+        # 于是**看不到那条错误本身**，只看到一个跟快捷方式毫无关系的解码异常。
+        # 诊断通道不能反过来把诊断毁掉：解不出来的字节就替换掉，把原文留给人看。
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
     )
     if result.returncode != 0 or not shortcut.is_file():

@@ -63,9 +63,19 @@ QUALITY_PROFILE = {
     "name": "quality-first-v2",
     "textGeometry": "mokuro-polygon-direction-v2",
     "gpuRequired": True,
-    "ocrRenderDpi": 400,
-    "maxImageLongEdge": 6000,
-    "jpegQuality": 95,
+    # ⚠ 这三个只管**送给 Google Vision 的那张图**，跟下面的模型选择是两回事。
+    #   2026-08-18 用户实测:PC 预处理出来的文字层贴合度**反而不如** Pi。两条 _vision_page
+    #   的数学是逐行相同的，唯一的差别就是这里 —— PC 400dpi/长边 6000/q95，Pi 300/4000/q90。
+    #   更高的输入分辨率在这里不是更准:Vision 的 DOCUMENT_TEXT_DETECTION 内部会把图缩到
+    #   自己的检测尺度再把 symbol 框映回提交图，缩得越狠，映回来的每一档就越粗
+    #   —— 折算到页面点上，6000px 的一档正好比 4000px 的粗一半。这与"PC 反而更偏"吻合。
+    #   所以对齐回 Pi 那组已被用户认可的参数;高质量该花在模型上(mokuro/YOLO/unimernet)，
+    #   而不是花在一张会被对方缩掉的大图上。
+    #   ⚠ 若日后仍偏:该证伪这条假设的证据是"同一页、同一 zoom、两边框坐标不一致"——
+    #     sidecar 里已记 imageWidth/imageHeight，拿它跟 page_w/page_h 一起比即可，不必再猜。
+    "ocrRenderDpi": 300,
+    "maxImageLongEdge": 4000,
+    "jpegQuality": 90,
     "mangaModel": "mokuro-manga-ocr",
     "layoutModel": "DocLayout-YOLO-DocStructBench",
     "formulaModel": "unimernet-base",

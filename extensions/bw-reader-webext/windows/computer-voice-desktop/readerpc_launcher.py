@@ -55,7 +55,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.34"
+APP_VERSION = "0.1.46"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 桥接模式旗标的独立意图文件(C# 启动时读取;keepalive/config/runtime-status 都是
@@ -272,6 +272,74 @@ def set_codex_voice_keep_active(
     )
 
 
+def rearm_codex_voice_keep_active(
+    bridge_paths: BridgePaths,
+    *,
+    settle_seconds: float = 0.35,
+) -> bool:
+    """把 keepalive 真正**翻转**一次 false→true，用来解掉 C# 的自动恢复封锁。
+
+    2026-08-18 用户报「开着服务器软件，语音却没被自动激活」。查下来是这样的：
+    C# 每个"意图代际"只有 2 次自动恢复预算（MaximumAutomaticRecoveryFailuresPerIntent），
+    用尽后 `_automaticRecoveryBlocked = 1`，**永久**放弃自动恢复。而解封只有一条路 ——
+    `ApplyKeepActiveChange` 里那句：
+
+        bool previous = _keepActive == 1;
+        if (previous == enabled) { ...; return false; }   // 值没变就什么都不做
+
+    也就是说只有真正的 false→true 跃迁才会重置失败计数并清掉封锁。
+    偏偏 ReaderPC 每次"恢复"都只是再写一遍 `true` —— 值没变，等于没写。
+    于是界面显示"直连在线"，语音却再也起不来，重启 ReaderPC 也没用
+    （keepalive 文件本来就是 true，写它还是 true）。
+
+    这里补上那一次跃迁。已经是 false 就不必先写 false（本来就没封锁）。
+    返回是否真的做了翻转 —— 悄悄改状态而不留痕迹正是这一带最贵的毛病。
+    """
+
+    current = read_codex_voice_keep_active(bridge_paths)
+    flipped = False
+    if current is not False:
+        # None（文件缺失/损坏）也走翻转：C# 那边可能仍持有 true 的内存状态。
+        set_codex_voice_keep_active(bridge_paths, False)
+        flipped = True
+        # C# 用文件监视 + 轮询发现变化；两次写挨得太近会被合并成一次事件，
+        # 那样又变回"值没变"。给它一个能分辨的间隔。
+        time.sleep(max(0.05, float(settle_seconds)))
+    set_codex_voice_keep_active(bridge_paths, True)
+    return flipped
+
+
+_VOICE_FAILURE_TEXT = {
+    "BW_COMPUTER_VOICE_DIRECT_CONFIG_INVALID": "电脑语音配置无效",
+    "BW_COMPUTER_VOICE_DIRECT_PORT_BUSY": "端口被占用",
+    "BW_COMPUTER_VOICE_DIRECT_CERT_UNTRUSTED": "证书未被信任",
+    "BW_COMPUTER_VOICE_DIRECT_CODEX_NOT_FOUND": "没找到 Codex 客户端",
+    "BW_COMPUTER_VOICE_DIRECT_CODEX_LAUNCH_FAILED": "Codex 启动失败",
+    "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_REJECTED": "语音快捷键被拒绝",
+    "BW_COMPUTER_VOICE_DIRECT_AUDIO_DEVICE_MISSING": "缺少虚拟音频设备",
+}
+
+
+def describe_voice_failure(last_error: dict | None) -> str:
+    """把 C# 写下的失败记录翻成一句人话。
+
+    C# 一直老老实实把失败写进 runtime-status 的 lastError 和 failures.jsonl，
+    bridge_core.read_direct_status 也**已经**把它解析进了 DirectStatus.last_error ——
+    然后 ReaderPC 一次都没用过这个字段。于是界面上只有"无法确认 Codex 语音"，
+    真正的原因就摆在文件里没人读。
+    """
+
+    if not isinstance(last_error, dict):
+        return ""
+    code = str(last_error.get("code") or "")
+    stage = str(last_error.get("stage") or "")
+    text = _VOICE_FAILURE_TEXT.get(code)
+    if not text:
+        # 认不出的 code 也要显示原文:说不出人话总好过什么都不说。
+        text = code or "未知失败"
+    return f"{text}（{stage}）" if stage else text
+
+
 def read_codex_voice_keep_active(
     bridge_paths: BridgePaths,
 ) -> bool | None:
@@ -467,7 +535,7 @@ WATCHDOG_TASK_NAME = "BW ReaderPC Watchdog"
 USER_EXIT_MARKER_NAME = "readerpc-user-exit.json"
 USER_EXIT_MARKER_CONTRACT = "readerpc-user-exit/1"
 
-_AUTOSTART_PS1 = 'param([string]$Reason = "watchdog")\n$root = Join-Path $env:LOCALAPPDATA "BWReader"\n$cfg = Join-Path $root "readerpc-server.config.json"\n$marker = Join-Path $root "readerpc-user-exit.json"\n$log = Join-Path $root "ReaderPC-Server" | Join-Path -ChildPath "autostart.log"\nfunction Log($m) {\n  # 写日志失败绝不能影响主流程:曾因日志路径损坏导致整个自启脚本退出码 1,\n  # ReaderPC 连着几次重启都起不来,而且因为日志本身坏了所以毫无线索。\n  try {\n    if ((Test-Path $log) -and (Get-Item $log).Length -gt 524288) { Clear-Content $log }\n    Add-Content -Path $log -Value "$(Get-Date -Format o) [$Reason] $m" -Encoding UTF8\n  } catch { }\n}\ntry { $prefs = Get-Content $cfg -Raw | ConvertFrom-Json } catch { Log "无法读偏好: $_"; exit 0 }\nif ($prefs.autoStartOnBoot -ne $true) { Log "自启选项未开,不动"; exit 0 }\nif (Get-Process -Name "ReaderPC-Server" -ErrorAction SilentlyContinue) { exit 0 }\nif ($Reason -eq "logon") {\n  Remove-Item $marker -ErrorAction SilentlyContinue\n} elseif (Test-Path $marker) {\n  # 标记只在本次开机内有效:关机时系统关闭应用也会写标记,若登录自启项没跑\n  # (Win11 的 Run 键并不可靠),过期标记会永久卡死看门狗 -- 按开机时间判废。\n  $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime\n  if ((Get-Item $marker).LastWriteTime -lt $boot) {\n    Log "退出标记早于本次开机,视为过期并清除"\n    Remove-Item $marker -ErrorAction SilentlyContinue\n  } else {\n    Log "用户本次开机内主动退出过,看门狗不复活"\n    exit 0\n  }\n}\ntry { $cur = Get-Content (Join-Path $root "ReaderPC-Server" | Join-Path -ChildPath "current.json") -Raw | ConvertFrom-Json } catch { Log "无法读 current.json: $_"; exit 0 }\n$exe = Join-Path $cur.release "ReaderPC-Server.exe"\nif (-not (Test-Path $exe)) { Log "找不到 $exe"; exit 0 }\nLog "启动 $exe"\nStart-Process $exe\n'
+_AUTOSTART_PS1 = 'param([string]$Reason = "watchdog")\n$root = Join-Path $env:LOCALAPPDATA "BWReader"\n$cfg = Join-Path $root "readerpc-server.config.json"\n$marker = Join-Path $root "readerpc-user-exit.json"\n$log = Join-Path $root "ReaderPC-Server" | Join-Path -ChildPath "autostart.log"\nfunction Log($m) {\n  # 写日志失败绝不能影响主流程:曾因日志路径损坏导致整个自启脚本退出码 1,\n  # ReaderPC 连着几次重启都起不来,而且因为日志本身坏了所以毫无线索。\n  try {\n    if ((Test-Path $log) -and (Get-Item $log).Length -gt 524288) { Clear-Content $log }\n    Add-Content -Path $log -Value "$(Get-Date -Format o) [$Reason] $m" -Encoding UTF8\n  } catch { }\n}\ntry { $prefs = Get-Content $cfg -Raw | ConvertFrom-Json } catch { Log "无法读偏好: $_"; exit 0 }\nif ($prefs.autoStartOnBoot -ne $true) { Log "自启选项未开,不动"; exit 0 }\n$hb = Join-Path $root "readerpc-server.status.json"\nif (Get-Process -Name "ReaderPC-Server" -ErrorAction SilentlyContinue) {\n  # 进程还在 != 服务还活着。ReaderPC 每 10 秒刷一次状态文件;心跳停了 3 分钟\n  # 说明界面循环已经卡死或退化 —— 而这恰恰是最坏的情形:看门狗只看进程存在,\n  # 于是它什么都不做,而程序其实早就不工作了(用户: 明明开着却说通道断开)。\n  # 重新拉起就行:新实例启动时会先清掉同角色的旧进程再接管。\n  $stale = $false\n  try { $stale = (-not (Test-Path $hb)) -or (((Get-Date) - (Get-Item $hb).LastWriteTime).TotalSeconds -gt 180) } catch { $stale = $false }\n  if (-not $stale) { exit 0 }\n  Log "进程在但心跳已停超过 180 秒,按无响应处理并重新拉起"\n}\nif ($Reason -eq "logon") {\n  Remove-Item $marker -ErrorAction SilentlyContinue\n} elseif (Test-Path $marker) {\n  # 标记只在本次开机内有效:关机时系统关闭应用也会写标记,若登录自启项没跑\n  # (Win11 的 Run 键并不可靠),过期标记会永久卡死看门狗 -- 按开机时间判废。\n  $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime\n  if ((Get-Item $marker).LastWriteTime -lt $boot) {\n    Log "退出标记早于本次开机,视为过期并清除"\n    Remove-Item $marker -ErrorAction SilentlyContinue\n  } else {\n    Log "用户本次开机内主动退出过,看门狗不复活"\n    exit 0\n  }\n}\ntry { $cur = Get-Content (Join-Path $root "ReaderPC-Server" | Join-Path -ChildPath "current.json") -Raw | ConvertFrom-Json } catch { Log "无法读 current.json: $_"; exit 0 }\n$exe = Join-Path $cur.release "ReaderPC-Server.exe"\nif (-not (Test-Path $exe)) { Log "找不到 $exe"; exit 0 }\nLog "启动 $exe"\nStart-Process $exe\n'
 
 _AUTOSTART_VBS = 'Dim reason\nIf WScript.Arguments.Count > 0 Then\n    reason = WScript.Arguments(0)\nElse\n    reason = "watchdog"\nEnd If\nCreateObject("WScript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""__PS1__"" -Reason " & reason, 0, False\n'
 
@@ -1160,6 +1228,43 @@ class ReaderPCWindow:
     def _voice_status(self):
         return read_direct_status(self.bridge_paths, self.process_runner)
 
+    # 自动解封的节流：服务在线但语音始终不活时，每 45 秒最多翻转一次 keepalive，
+    # 且一轮最多 3 次。C# 那 2 次恢复预算是"每个意图代际"的，翻转 = 换一个代际，
+    # 所以这是有效的；但如果根因是配置/设备缺失，翻多少次都不会好 ——
+    # 那种情况下界面已经把 lastError 的原因写出来了，交给人处理，而不是无限重试。
+    _VOICE_REARM_INTERVAL_S = 45.0
+    _VOICE_REARM_MAX = 3
+
+    def _maybe_rearm_codex_voice(self) -> None:
+        if self.busy or self.closing or self.voice_start_in_progress:
+            return
+        if getattr(self, "_voice_rearm_count", 0) >= self._VOICE_REARM_MAX:
+            return
+        now = time.monotonic()
+        last = getattr(self, "_voice_rearm_at", 0.0)
+        if last and now - last < self._VOICE_REARM_INTERVAL_S:
+            return
+        # 服务刚起来时先给它一点时间自己连上，别抢在正常启动流程前面翻转。
+        started = getattr(self, "last_voice_start_attempt", 0.0)
+        if started and now - started < self._VOICE_REARM_INTERVAL_S:
+            return
+        self._voice_rearm_at = now
+        self._voice_rearm_count = getattr(self, "_voice_rearm_count", 0) + 1
+        attempt = self._voice_rearm_count
+
+        def run() -> None:
+            try:
+                flipped = rearm_codex_voice_keep_active(self.bridge_paths)
+            except Exception as exc:   # 解封失败不该打断界面，但必须留痕
+                _boot_log(f"[warn] Codex 语音解封失败（第 {attempt} 次）: {str(exc)[:160]}")
+                return
+            _boot_log(
+                f"Codex 语音自动解封（第 {attempt}/{self._VOICE_REARM_MAX} 次，"
+                f"{'已翻转 keepalive' if flipped else 'keepalive 原本为关，直接置开'}）"
+            )
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _history_status(self) -> ReaderPCHistoryStatus:
         voice = self._voice_status()
         codex_voice = read_codex_voice_activity()
@@ -1452,13 +1557,23 @@ class ReaderPCWindow:
             elif codex_voice.active is True:
                 voice_label = "在线 · Codex 语音工作中"
                 voice_color = "#167347"
+                self._voice_rearm_count = 0   # 起来了就把解封预算还回去
             else:
+                # 失败原因本来就写在 runtime-status 里，只是从来没人读（见 describe_voice_failure）。
+                # last_error 是 DirectStatus 的可选字段(默认 None);读不到就当没有,
+                # 一个诊断字段缺席不该把整个状态面板打挂。
+                reason = describe_voice_failure(getattr(voice, "last_error", None))
                 voice_label = (
                     "直连在线 · 等待 Codex 语音"
                     if codex_voice.status == "available"
                     else "直连在线 · 无法确认 Codex 语音"
                 )
+                if reason:
+                    voice_label += f"：{reason}"
                 voice_color = "#b26a00"
+                # 服务在线却始终等不到语音 = 多半是 C# 的自动恢复已被封锁；
+                # 只有 keepalive 的 false→true 跃迁能解开它（见 rearm_codex_voice_keep_active）。
+                self._maybe_rearm_codex_voice()
             self.voice_status.configure(text=voice_label, foreground=voice_color)
             self.voice_detail.configure(
                 text=(
@@ -1649,6 +1764,65 @@ def terminate_stale_instances() -> list[int]:
     return killed
 
 
+def autostart_script_checks() -> dict[str, bool]:
+    """把自启脚本真写一遍，然后**让解释器自己说它认不认**。
+
+    2026-08-18 一晚上两个自启 bug 都是这一层漏的，而且都不是逻辑错，是编码错：
+      · ps1 少了 BOM → PowerShell 5.1 按 GBK 解中文 → 解析失败；
+      · vbs 多了 BOM → VBScript 把 BOM 当第一个字符 → "(1,1) 无效字符"，整个不执行。
+    两者都"生成成功"，文件也都在，自测全绿 —— 因为此前只检查了路径存不存在。
+    文件存在从来不等于解释器能读；这里补的就是这一步。
+
+    写进临时目录，绝不碰已安装的那两个脚本。
+    """
+
+    import tempfile
+
+    checks = {
+        "autostart-ps1-has-bom": False,
+        "autostart-vbs-no-bom": False,
+        "autostart-vbs-ascii": False,
+        "autostart-ps1-parses": False,
+    }
+    try:
+        with tempfile.TemporaryDirectory(prefix="readerpc-selftest-") as temp:
+            root = Path(temp)
+            vbs = write_autostart_scripts(root)
+            # 两个脚本落在 write_autostart_scripts 自己建的子目录里，
+            # 从返回的 vbs 反推同目录，别再自己拼一遍路径。
+            ps1 = vbs.parent / "start-readerpc.ps1"
+            ps1_bytes = ps1.read_bytes()
+            vbs_bytes = vbs.read_bytes()
+            checks["autostart-ps1-has-bom"] = ps1_bytes.startswith(b"\xef\xbb\xbf")
+            checks["autostart-vbs-no-bom"] = not vbs_bytes.startswith(b"\xef\xbb\xbf")
+            # VBScript 对非 ASCII 的处理跟代码页绑死；自启脚本里本来就不该有中文。
+            try:
+                vbs_bytes.decode("ascii")
+                checks["autostart-vbs-ascii"] = True
+            except UnicodeDecodeError:
+                checks["autostart-vbs-ascii"] = False
+            if os.name == "nt":
+                # 让 PowerShell 自己解析：这比任何我们写的规则都权威。
+                probe = (
+                    "$e=$null;"
+                    "[void][System.Management.Automation.Language.Parser]::ParseFile("
+                    f"'{ps1}',[ref]$null,[ref]$e);"
+                    "if($e -and $e.Count -gt 0){exit 1}else{exit 0}"
+                )
+                completed = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", probe],
+                    capture_output=True,
+                    timeout=60,
+                    creationflags=0x08000000,
+                )
+                checks["autostart-ps1-parses"] = completed.returncode == 0
+            else:
+                checks["autostart-ps1-parses"] = True   # 非 Windows 上无从校验
+    except Exception as exc:
+        _boot_log("[warn] 自启脚本自测失败: " + str(exc)[:160])
+    return checks
+
+
 def self_test_report() -> dict[str, Any]:
     paths = ReaderPCPaths.discover()
     pc_paths = PcOcrServiceController().paths
@@ -1659,6 +1833,7 @@ def self_test_report() -> dict[str, Any]:
         "pc-python-present": pc_paths.python_exe.is_file(),
         "voice-install-present": BridgePaths.discover().native_host.is_file(),
     }
+    checks.update(autostart_script_checks())
     return {
         "contract": "readerpc-server-self-test/1",
         "ok": all(checks.values()),
