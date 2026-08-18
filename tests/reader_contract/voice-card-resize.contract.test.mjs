@@ -934,3 +934,28 @@ test("web/PWA 页面 placement wrapper 只接收尺寸回调，不把尺寸写�
     /cid: h\.cid,[\s\S]*onSize: function \(size\)/,
   );
 });
+
+test("钉在书页上的卡只有 标记 ⇄ 完全展开 两态，不进长条", () => {
+  // 用户 2026-08-18：「固定到页面上的卡片其实很少用到长条形态……固定后应该默认
+  // 只保留球和最终完全展开两种形态」。理由站得住：长条的作用是"在一堆卡里给个
+  // 大概的信息概要"，而钉住的卡**锚点本身就说明了它是关于什么的**，概要与锚点重复。
+  //
+  // 实现上是在 _cardForm 里按宿主裁剪形态，跟内联卡跳过圆点是同一手法 ——
+  // 不给每个宿主另造一套状态机。
+  const source = VOICE_SOURCE;
+  assert.match(
+    source,
+    /if \(f === 'min' && el\.classList\.contains\('vc-pinned'\)\) f = 'full';/,
+    "钉入卡的长条态必须在形态写入处被裁掉，而不是靠 CSS 藏起来",
+  );
+  // _cardDom 直接写 class、不经过 _cardForm，所以历史存过 min 的钉入卡
+  // 必须在打上 vc-pinned 之后再归一一次，否则恢复出来还是长条。
+  const pinAt = source.indexOf("el.classList.add('vc-pinned');");
+  assert.ok(pinAt > 0);
+  assert.match(
+    source.slice(pinAt, pinAt + 400),
+    /if \(_cardForm\(el\) === 'min'\) _cardForm\(el, 'full'\);/,
+  );
+  // 长条本身没删：浮层卡与侧栏内联卡仍在用它。
+  assert.match(source, /\.vc-card\.vc-min \.vc-card-bd\{display:none\}/);
+});

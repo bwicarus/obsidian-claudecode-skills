@@ -5275,6 +5275,9 @@ if (window.__bwPwaProviderOnly) return;
     el.__bwCardFormApply = function () { _emitForm(); };
     _pinReg(el, _cid0);   // 钉页只是同一卡的另一个实例，不得因换宿主重发编号
     el.classList.add('vc-pinned');
+    // 历史上以长条态存过的钉入卡:恢复时归一到完全展开。_cardDom 是直接写 class 的,
+    //   不经过 _cardForm 的裁剪,所以这一步必须在打上 vc-pinned 之后补。
+    if (_cardForm(el) === 'min') _cardForm(el, 'full');
     if (spec.type) el.classList.add('vc-typed');   // 有色磨砂(浮层同规矩 1326:type 色卡 = --vc-tc + vc-typed,卡头/边框/辉光同色)
     try { ['.vc-card-pin', '.vc-card-p', '.vc-card-x'].forEach(function (q) { var b0 = el.querySelector(q); if (b0) b0.remove(); }); } catch (e) {}   // 浮层结果卡同规矩(1328):▶/✕ 去掉;删除=拖到左上角删除区(用户拍板,无叉叉)
     try { var dup = d.bd.querySelector('.vc-if-hd'); if (dup) dup.remove(); } catch (e) {}
@@ -5512,6 +5515,11 @@ if (window.__bwPwaProviderOnly) return;
   function _cardForm(el, f) {
     if (f === undefined) return el.classList.contains('vc-dot') ? 'dot' : (el.classList.contains('vc-min') ? 'min' : 'full');
     if (f === 'dot' && el.classList.contains('vc-inflow')) f = 'min';   // 内联卡圆点→长条(对话流不缩圆点,消除"拖动变钉子")
+    // 钉在书页上的卡**不进长条态**(用户 2026-08-18 拍板):长条存在的理由是"在一堆卡里
+    //   给个大概的信息概要",而钉住的卡**锚点本身就已经说明了它是关于什么的** ——
+    //   概要与锚点重复,于是这一态从来没被用到。固定后只留 标记 ⇄ 完全展开 两态。
+    //   (与上一行内联卡跳过圆点是同一手法:形态循环按宿主裁剪,而不是给每个宿主另造一套。)
+    if (f === 'min' && el.classList.contains('vc-pinned')) f = 'full';
     el.classList.toggle('vc-dot', f === 'dot');
     el.classList.toggle('vc-min', f === 'min');
     if (f === 'min') {   // 长条:没摘要就从正文摘一行
