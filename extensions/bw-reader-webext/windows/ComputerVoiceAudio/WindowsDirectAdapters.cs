@@ -959,6 +959,7 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
     private Task? _renderMonitor;
     private CancellationTokenSource? _voiceMonitorLifetime;
     private Task? _voiceMonitor;
+    private Task? _voiceObservation;
     private TaskCompletionSource<DirectProtocolException?>?
         _completionSource;
     private Task<DirectProtocolException?> _completion =
@@ -1583,31 +1584,26 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                         committedOwnedResources = true;
                     },
                     cancellationToken);
-                CodexVoiceStartConfirmation voiceConfirmation =
-                    await VoiceActivity.ConfirmStartedAsync(
-                        boundaryVoiceBaseline
-                        ?? throw new DirectProtocolException(
-                            "BW_COMPUTER_VOICE_DIRECT_VOICE_BASELINE_MISSING",
-                            "Codex 语音状态基线不存在"),
-                        shortcutReceipt,
-                        CodexVoiceActivityController.StartObservationTimeout,
-                        CodexVoiceActivityController.MonitorInterval,
-                        CancellationToken.None).ConfigureAwait(false);
-                voiceConfirmation = await VoiceActivity
-                    .ConfirmUsableForStartAsync(
-                        voiceConfirmation,
-                        shortcutReceipt,
-                        CodexVoiceActivityController.StartUsableSettleDelay,
-                        CancellationToken.None).ConfigureAwait(false);
-                _voiceConfirmation = voiceConfirmation;
-                _voiceStartBaseline = null;
-                CancellationTokenSource voiceMonitorLifetime = new();
-                _voiceMonitorLifetime = voiceMonitorLifetime;
-                _voiceMonitor = MonitorVoiceAsync(
-                    voiceConfirmation,
+                // Confirmation can no longer fail this call (2026-08-18 rework).
+                //
+                // 旧行为：先 committedOwnedResources（此时音频已经在流动、用户已经听到
+                // 接通），再花最长 20+8 秒去注册表麦克风台账里等一个"新的语音会话"，
+                // 等不到就把整条**已经在跑的**链自己拆掉。用户感知就是"开起来了又闪退"，
+                // 界面上留下的正是 VOICE_START_NOT_CONFIRMED。
+                //
+                // 而那个台账根本报不了这件事。2026-08-18 在用户机器上实测：
+                //   · Codex 常驻占着麦克风 —— 45 秒观察，采集会话一直 Active，零翻转；
+                //   · 台账是引用计数的 —— 已在用麦时再开一路，start 时间戳纹丝不动。
+                // 也就是说这条确认在等一件**不会发生的事**，然后把它当成失败。
+                //
+                // 现在：通话立刻算成功；确认降级为后台观察 —— 成功就接上本地关闭监视，
+                // 失败只是"没确认"，链路一动不动。STATUS 已经能如实表达这个区别
+                // （captureActive=true 且 outputRouteVerified=false → reason=未验证）。
+                _voiceObservation = ObserveVoiceStartAsync(
+                    boundaryVoiceBaseline,
+                    shortcutReceipt,
                     completion,
-                    lifetime,
-                    voiceMonitorLifetime);
+                    lifetime);
                 _captureActive = true;
                 return new DirectMediaStartResult(
                     HostReady: true,
@@ -1932,6 +1928,7 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         || _renderMonitor is not null
         || _voiceMonitorLifetime is not null
         || _voiceMonitor is not null
+        || _voiceObservation is not null
         || _voiceStartBaseline is not null
         || _voiceConfirmation is not null
         || _voiceTarget is not null
@@ -2064,6 +2061,7 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         CancellationTokenSource? voiceMonitorLifetime =
             _voiceMonitorLifetime;
         Task? voiceMonitor = _voiceMonitor;
+        Task? voiceObservation = _voiceObservation;
         CodexVoiceStartBaseline? voiceStartBaseline =
             _voiceStartBaseline;
         CodexVoiceStartConfirmation? voiceConfirmation =
@@ -2123,6 +2121,20 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 if (ReferenceEquals(_voiceMonitor, voiceMonitor))
                 {
                     _voiceMonitor = null;
+                }
+            },
+            async () =>
+            {
+                // 后台确认观察随通话生命周期取消；这里只等它真正收尾，
+                // 免得留一个还在读注册表的任务跨到下一次 START。
+                if (voiceObservation is null)
+                {
+                    return;
+                }
+                await voiceObservation.ConfigureAwait(false);
+                if (ReferenceEquals(_voiceObservation, voiceObservation))
+                {
+                    _voiceObservation = null;
                 }
             },
             () =>
@@ -2594,6 +2606,65 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
             ownerLifetime.Cancel();
         }
         ScheduleOwnedFailureCleanup(ownerLifetime);
+    }
+
+    /// <summary>
+    /// 后台观察 Codex 语音是否亮起。**任何结果都不影响这次通话**。
+    /// </summary>
+    /// <remarks>
+    /// 确认成功 → 接上本地关闭监视（用户在 Codex 那边挂断时我们能跟着收）。
+    /// 确认失败/超时 → 什么都不做：没确认不等于没接通，而把"没确认"当成"失败"
+    /// 正是旧设计最贵的那个决定。异常一律吞掉，但状态字段要如实清干净，
+    /// 免得下一次 START 拿到上一轮的基线。
+    /// </remarks>
+    private async Task ObserveVoiceStartAsync(
+        CodexVoiceStartBaseline? baseline,
+        CodexVoiceShortcutReceipt? shortcutReceipt,
+        TaskCompletionSource<DirectProtocolException?> completion,
+        CancellationTokenSource lifetime)
+    {
+        if (baseline is null)
+        {
+            _voiceStartBaseline = null;
+            return;
+        }
+        try
+        {
+            CodexVoiceStartConfirmation confirmation =
+                await VoiceActivity.ConfirmStartedAsync(
+                    baseline,
+                    shortcutReceipt,
+                    CodexVoiceActivityController.StartObservationTimeout,
+                    CodexVoiceActivityController.MonitorInterval,
+                    lifetime.Token).ConfigureAwait(false);
+            confirmation = await VoiceActivity
+                .ConfirmUsableForStartAsync(
+                    confirmation,
+                    shortcutReceipt,
+                    CodexVoiceActivityController.StartUsableSettleDelay,
+                    lifetime.Token).ConfigureAwait(false);
+            if (lifetime.IsCancellationRequested)
+            {
+                return;
+            }
+            _voiceConfirmation = confirmation;
+            CancellationTokenSource voiceMonitorLifetime = new();
+            _voiceMonitorLifetime = voiceMonitorLifetime;
+            _voiceMonitor = MonitorVoiceAsync(
+                confirmation,
+                completion,
+                lifetime,
+                voiceMonitorLifetime);
+        }
+        catch (Exception)
+        {
+            // 没确认 ≠ 通话有问题。不记 lastError（那会让界面显示成故障），
+            // 不拆资源，不取消 lifetime。
+        }
+        finally
+        {
+            _voiceStartBaseline = null;
+        }
     }
 
     private async Task MonitorVoiceAsync(

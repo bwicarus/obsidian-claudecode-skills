@@ -4292,6 +4292,39 @@ internal static class DirectBridgeSelfTest
             "direct-codex-voice-already-running-waits-ready-without-settle",
             checks);
 
+        // 用户自己刚点开的 Codex：started == false，但它其实还没准备好接快捷键。
+        // 旧写法 `if (started)` 在这里一秒都不等，F24 就落空 —— 用户报的
+        // 「codex 刚启动时大概无法立刻打开语音，需要等待几秒」正是这条。
+        FakeDirectAppLauncher freshUserLaunch = new()
+        {
+            StartedJustNow = true,
+        };
+        int freshSettleCount = 0;
+        TimeSpan freshSettleDelay = TimeSpan.Zero;
+        await DirectCodexVoiceControl.PrepareInitialStartAsync(
+            freshUserLaunch,
+            (delay, _) =>
+            {
+                freshSettleCount++;
+                freshSettleDelay = delay;
+                return Task.CompletedTask;
+            },
+            CancellationToken.None).ConfigureAwait(false);
+        Require(
+            freshUserLaunch.RestartCount == 0
+            && freshSettleCount == 1
+            && freshSettleDelay > TimeSpan.Zero
+            && freshSettleDelay
+                <= DirectCodexVoiceControl.RestartReadySettleDelay,
+            "direct-codex-voice-user-launched-app-still-settles",
+            checks);
+        Require(
+            DirectCodexVoiceControl.UptimeOf(
+                new DirectAppTarget(1, 0, "codex-desktop", "x"))
+                == TimeSpan.MaxValue,
+            "direct-codex-voice-unknown-start-time-does-not-stall-start",
+            checks);
+
         CodexVoiceActivitySnapshot recoveryState =
             CodexVoiceActivitySnapshot.Available(500, 600);
         int recoveryTransitions = 0;
@@ -4696,10 +4729,12 @@ internal static class DirectBridgeSelfTest
             {
                 automaticFailureNotifications++;
                 automaticFailureSeen.TrySetResult(exception);
+                // 2026-08-18 重做：**不再有"预算耗尽"这一档**。这里等的是
+                // "已经重试到超过旧上限"，用来证明它没有停在第 2 次就永久放弃。
                 if (
                     automaticFailureNotifications
-                        == DirectCodexVoiceControl
-                            .MaximumAutomaticRecoveryFailuresPerIntent
+                        > DirectCodexVoiceControl
+                            .MaximumAutomaticRecoveryFailuresPerIntent + 1
                 )
                 {
                     automaticFailureExhausted.TrySetResult(true);
@@ -4708,15 +4743,20 @@ internal static class DirectBridgeSelfTest
             automaticRecoveryDelayAsync: (delay, cancellationToken) =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                automaticFailureBackoffs++;
+                // 退避必须**递增且有上限**：递增才不会 hammering，有上限才不会
+                // 退到几小时后才试一次。第 n 次应当正好等于 BackoffFor(n)。
                 Require(
-                    delay
-                        == DirectCodexVoiceControl
-                            .AutomaticRecoveryRetryDelay,
+                    delay == DirectCodexVoiceControl.BackoffFor(
+                        automaticFailureBackoffs)
+                    && delay >= DirectCodexVoiceControl
+                        .AutomaticRecoveryRetryDelay
+                    && delay <= DirectCodexVoiceControl
+                        .AutomaticRecoveryMaximumRetryDelay,
                     "direct-codex-voice-persistent-failure-uses-bounded-backoff",
                     checks);
-                automaticFailureBackoffs++;
                 return Task.Delay(
-                    TimeSpan.FromMilliseconds(50),
+                    TimeSpan.FromMilliseconds(20),
                     cancellationToken);
             });
         Exception recordedAutomaticFailure =
@@ -4726,18 +4766,33 @@ internal static class DirectBridgeSelfTest
             TimeSpan.FromSeconds(2)).ConfigureAwait(false);
         await Task.Delay(TimeSpan.FromMilliseconds(250))
             .ConfigureAwait(false);
+        // 旧断言写死 notifications==2 / backoffs==1，正是"两次就永久放弃"的形状。
+        // 现在要证明的相反：意图还在时它一直在试，而且每次都通过退避等待。
         Require(
             automaticFailureControl.KeepActive
-            && automaticFailureTransitions == 4
-            && automaticFailurePreparations == 2
-            && automaticFailureRestarts == 2
-            && automaticFailureNotifications == 2
-            && automaticFailureBackoffs == 1
+            && automaticFailureNotifications
+                > DirectCodexVoiceControl
+                    .MaximumAutomaticRecoveryFailuresPerIntent
+            && automaticFailureBackoffs
+                >= DirectCodexVoiceControl
+                    .MaximumAutomaticRecoveryFailuresPerIntent
+            && automaticFailureTransitions >= automaticFailureNotifications
+            && automaticFailurePreparations >= 2
             && recordedAutomaticFailure is DirectProtocolException
             {
                 Code: CodexVoiceActivityController.StartNotConfirmedCode,
             },
-            "direct-codex-voice-automatic-failure-is-bounded-and-visible",
+            "direct-codex-voice-automatic-failure-keeps-retrying-and-is-visible",
+            checks);
+        Require(
+            DirectCodexVoiceControl.BackoffFor(1)
+                == DirectCodexVoiceControl.AutomaticRecoveryRetryDelay
+            && DirectCodexVoiceControl.BackoffFor(2)
+                > DirectCodexVoiceControl.BackoffFor(1)
+            && DirectCodexVoiceControl.BackoffFor(99)
+                == DirectCodexVoiceControl
+                    .AutomaticRecoveryMaximumRetryDelay,
+            "direct-codex-voice-backoff-grows-and-is-capped",
             checks);
 
         string transientAutomaticFailurePath = System.IO.Path.Combine(
@@ -12052,6 +12107,12 @@ internal static class DirectBridgeSelfTest
 
         internal bool StartedOnEnsure { get; init; }
 
+        /// <summary>
+        /// 让 ready 目标报"刚刚才起来"。用来验证沉降是按**App 运行了多久**判的，
+        /// 而不是按"是不是我们启动的"。
+        /// </summary>
+        internal bool StartedJustNow { get; init; }
+
         internal bool ThrowReadyTimeout { get; init; }
 
         internal bool WaitUntilCanceled { get; init; }
@@ -12109,7 +12170,9 @@ internal static class DirectBridgeSelfTest
             }
             return new DirectAppTarget(
                 4242,
-                133700000000000000,
+                StartedJustNow
+                    ? DateTime.UtcNow.ToFileTimeUtc()
+                    : 133700000000000000,
                 appKind,
                 appUserModelId);
         }

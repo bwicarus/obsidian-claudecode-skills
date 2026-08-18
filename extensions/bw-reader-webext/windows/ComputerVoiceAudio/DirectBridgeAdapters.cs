@@ -319,6 +319,15 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// 保活自愈成功 → 销掉上一次失败。
+    /// </summary>
+    /// <remarks>
+    /// 没有它的时候 lastError 是**粘滞**的：只在 App 侧 START 成功时清，
+    /// 保活链自己恢复了却不清，界面于是长期挂着一条早已过期的失败码。
+    /// </remarks>
+    internal void ClearRecoveryFailure() => ClearLastError();
+
     private void ClearLastError()
     {
         lock (_runtimeErrorGate)

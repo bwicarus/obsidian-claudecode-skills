@@ -292,6 +292,16 @@ internal sealed class CodexVoiceActivityController
     internal static readonly TimeSpan MonitorInterval =
         TimeSpan.FromMilliseconds(250);
 
+    /// <summary>
+    /// 判定「通话已在本地关闭」需要连续命中的帧数。
+    /// </summary>
+    /// <remarks>
+    /// 单帧定罪会把撕裂读和同通话内的麦克风重取误判成挂断，代价是挂掉用户的电话；
+    /// 多等 <c>MonitorInterval</c> × (N-1) 的代价只是晚一点收摊。按 250ms 一帧，
+    /// 4 帧 ≈ 1 秒 —— 对"用户主动挂断"这件事来说察觉得足够快。
+    /// </remarks>
+    internal const int LocalCloseConfirmations = 4;
+
     internal const string ActivityUnavailableCode =
         "BW_COMPUTER_VOICE_DIRECT_ACTIVITY_UNAVAILABLE";
     internal const string ActivityReadFailedCode =
@@ -625,19 +635,38 @@ internal sealed class CodexVoiceActivityController
 
         try
         {
+            // 「通话结束」必须**连续多帧**都成立才算数（2026-08-18 重做）。
+            //
+            // 旧行为是单帧定罪：250ms 读一次注册表，任何一帧看着不对就直接判定
+            // 通话已关闭，然后把整条链拆掉 —— 用户感知就是"说着说着自己没了"。
+            // 而这个数据源恰恰经不起单帧：两个时间戳是**分两次** GetValue 读的，
+            // 没有原子快照，撕裂读会把活着的通话读成已结束；同一通通话里麦克风
+            // 重新获取也会让 start 变一次。
+            //
+            // 一次误读的代价是挂断用户的电话，一次漏判的代价只是晚一秒收摊 ——
+            // 两边不对称，所以宁可慢。
+            int consecutiveClosed = 0;
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 CodexVoiceActivitySnapshot current = ReadRequired();
-                if (
+                bool looksClosed =
                     !current.Active
                     || current.LastUsedTimeStart
-                        != confirmation.Snapshot.LastUsedTimeStart
-                )
+                        != confirmation.Snapshot.LastUsedTimeStart;
+                if (looksClosed)
                 {
-                    return new DirectProtocolException(
-                        ClosedLocallyCode,
-                        "Codex 本地语音会话已关闭或已被另一代会话替换");
+                    consecutiveClosed++;
+                    if (consecutiveClosed >= LocalCloseConfirmations)
+                    {
+                        return new DirectProtocolException(
+                            ClosedLocallyCode,
+                            "Codex 本地语音会话已关闭或已被另一代会话替换");
+                    }
+                }
+                else
+                {
+                    consecutiveClosed = 0;
                 }
                 await _clock.DelayAsync(
                     pollInterval,

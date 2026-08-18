@@ -536,12 +536,43 @@ internal static class CodexVoiceActivitySelfTest
                 TimeSpan.FromMilliseconds(250),
                 CancellationToken.None).GetAwaiter().GetResult();
 
+        // 关闭要连续多帧都成立才算数（2026-08-18）：源在第 2 次读起一直返回"已关闭"，
+        // 所以第 1 次 delay 之后还要再等 N-1 次才定罪。
         Require(
             failure?.Code
                 == CodexVoiceActivityController.ClosedLocallyCode
             && !failure.Retryable
-            && clock.DelayCount == 1,
+            && clock.DelayCount
+                == CodexVoiceActivityController.LocalCloseConfirmations,
             "codex-voice-monitor-detects-local-close",
+            checks);
+
+        // 而单帧的闪烁**不得**挂断通话 —— 这正是旧的单帧定罪造成"说着说着自己没了"
+        // 的地方：两个时间戳分两次读、没有原子快照，撕裂读会把活着的通话读成已结束。
+        CodexVoiceActivitySnapshot live =
+            CodexVoiceActivitySnapshot.Available(300, 0);
+        FakeCodexVoiceActivitySource flapping = new(
+            live,
+            CodexVoiceActivitySnapshot.Available(300, 400),   // 一帧看着像关了
+            live,                                            // 立刻又活着
+            CodexVoiceActivitySnapshot.Available(500, 0));   // 换代 → 才是真关闭
+        FakeCodexVoiceActivityClock flappingClock = new();
+        CodexVoiceActivityController flappingController =
+            new(flapping, flappingClock);
+        DirectProtocolException? flappingFailure =
+            flappingController.MonitorForLocalCloseAsync(
+                new CodexVoiceStartConfirmation(
+                    live,
+                    ObservedAfterShortcut: true,
+                    OwnershipToken: Token(300)),
+                TimeSpan.FromMilliseconds(250),
+                CancellationToken.None).GetAwaiter().GetResult();
+        Require(
+            flappingFailure?.Code
+                == CodexVoiceActivityController.ClosedLocallyCode
+            && flappingClock.DelayCount
+                > CodexVoiceActivityController.LocalCloseConfirmations,
+            "codex-voice-monitor-ignores-single-frame-flap",
             checks);
 
         FakeCodexVoiceActivitySource replacementSource = new(

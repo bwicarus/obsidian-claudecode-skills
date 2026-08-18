@@ -49,6 +49,22 @@ internal sealed class DirectCodexVoiceControl :
         TimeSpan.FromSeconds(8);
     internal static readonly TimeSpan AutomaticRecoveryRetryDelay =
         TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// 自动恢复的退避上限。**没有"放弃"这一档**（2026-08-18 重做）。
+    /// </summary>
+    /// <remarks>
+    /// 旧设计是每个意图代际只给 2 次预算，用尽就 _automaticRecoveryBlocked = 1
+    /// 永久放弃 —— 而解封只有 keepalive 真跃迁一条路，于是用户唯一的出口变成
+    /// "去把 Codex 重启一下"（用户原话）。吸收态在一个本来就靠猜的链路上尤其危险：
+    /// 猜错一次的后果是永久的。
+    ///
+    /// 现在改成有界指数退避、但一直重试：20s → 40s → 80s → … 封顶 5 分钟。
+    /// 既不会 hammering（这是当初设上限的正当理由），也不会把"暂时不行"
+    /// 变成"从此不行"。
+    /// </remarks>
+    internal static readonly TimeSpan AutomaticRecoveryMaximumRetryDelay =
+        TimeSpan.FromMinutes(5);
     internal const int MaximumAutomaticRecoveryFailuresPerIntent = 2;
 
     internal static DirectCodexVoiceControl Shared { get; } =
@@ -74,6 +90,7 @@ internal sealed class DirectCodexVoiceControl :
         _recoverStartFailureAsync;
     private readonly Action<bool>? _keepActiveChanged;
     private readonly Action<Exception>? _automaticRecoveryFailed;
+    private readonly Action? _automaticRecoverySucceeded;
     private readonly Func<TimeSpan, CancellationToken, Task>
         _automaticRecoveryDelayAsync;
     private readonly object _keepActiveIntentGate = new();
@@ -105,6 +122,7 @@ internal sealed class DirectCodexVoiceControl :
         Func<CancellationToken, Task>? recoverStartFailureAsync = null,
         Action<bool>? keepActiveChanged = null,
         Action<Exception>? automaticRecoveryFailed = null,
+        Action? automaticRecoverySucceeded = null,
         Func<TimeSpan, CancellationToken, Task>?
             automaticRecoveryDelayAsync = null)
     {
@@ -122,6 +140,7 @@ internal sealed class DirectCodexVoiceControl :
         _recoverStartFailureAsync = recoverStartFailureAsync;
         _keepActiveChanged = keepActiveChanged;
         _automaticRecoveryFailed = automaticRecoveryFailed;
+        _automaticRecoverySucceeded = automaticRecoverySucceeded;
         _automaticRecoveryDelayAsync = automaticRecoveryDelayAsync
             ?? ((delay, cancellationToken) =>
                 Task.Delay(delay, cancellationToken));
@@ -424,7 +443,8 @@ internal sealed class DirectCodexVoiceControl :
         string? keepActivePath = null,
         IDirectAppLauncher? appLauncher = null,
         Action<bool>? keepActiveChanged = null,
-        Action<Exception>? automaticRecoveryFailed = null)
+        Action<Exception>? automaticRecoveryFailed = null,
+        Action? automaticRecoverySucceeded = null)
     {
         WindowsRegistryCodexVoiceActivitySource source = new(
             DirectAppTargets.CodexDesktop);
@@ -479,7 +499,8 @@ internal sealed class DirectCodexVoiceControl :
             // 温和重试;绝不动用户开着的 App。
             recoverStartFailureAsync: null,
             keepActiveChanged: keepActiveChanged,
-            automaticRecoveryFailed: automaticRecoveryFailed);
+            automaticRecoveryFailed: automaticRecoveryFailed,
+            automaticRecoverySucceeded: automaticRecoverySucceeded);
     }
 
     internal static async Task PrepareInitialStartAsync(
@@ -498,18 +519,50 @@ internal sealed class DirectCodexVoiceControl :
             profile.AppKind,
             profile.AppUserModelId,
             cancellationToken).ConfigureAwait(false);
-        _ = await launcher.WaitForUniqueReadyAsync(
+        DirectAppTarget ready = await launcher.WaitForUniqueReadyAsync(
             profile.AppKind,
             profile.AppUserModelId,
             TimeSpan.FromSeconds(20),
             cancellationToken).ConfigureAwait(false);
-        if (started)
+        // 沉降按**这个 App 起来多久了**算，而不是按"是不是我们启动的"（2026-08-18 重做）。
+        //
+        // 旧写法是 `if (started)`：用户自己刚点开 Codex 时 started == false，
+        // 于是一秒都不等 —— 而窗口句柄出现得比语音 UI 就绪早得多，F24 就落在
+        // 一个还接不住它的窗口上。用户原话：「codex 刚启动时大概无法立刻打开语音，
+        // 需要等待几秒」。谁启动的跟它准备好没有毫无关系，那是我们的视角，不是它的状态。
+        TimeSpan upFor = UptimeOf(ready);
+        TimeSpan settle = started
+            ? RestartReadySettleDelay
+            : RestartReadySettleDelay - upFor;
+        if (settle > TimeSpan.Zero)
         {
-            // A newly launched packaged window can be discoverable before its
-            // voice UI is ready. An already-running ready app skips this wait.
-            await delayAsync(
-                RestartReadySettleDelay,
-                cancellationToken).ConfigureAwait(false);
+            await delayAsync(settle, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>目标 App 已经运行了多久；读不出启动时间就按"已经很久"处理。</summary>
+    /// <remarks>
+    /// 读不出时**不等**：多等几秒的代价只是慢，而这里若因为解析不出时间就一律等，
+    /// 每一次 START 都会平白多花 5 秒。真正需要等的是刚起来那一小段，
+    /// 而那一段的启动时间一定是读得到的（进程就在眼前）。
+    /// </remarks>
+    internal static TimeSpan UptimeOf(DirectAppTarget target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        if (target.RootProcessStartFileTimeUtc <= 0)
+        {
+            return TimeSpan.MaxValue;
+        }
+        try
+        {
+            DateTime started = DateTime.FromFileTimeUtc(
+                target.RootProcessStartFileTimeUtc);
+            TimeSpan elapsed = DateTime.UtcNow - started;
+            return elapsed < TimeSpan.Zero ? TimeSpan.Zero : elapsed;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return TimeSpan.MaxValue;
         }
     }
 
@@ -622,7 +675,7 @@ internal sealed class DirectCodexVoiceControl :
                 if (priorFailureCount > 0)
                 {
                     await _automaticRecoveryDelayAsync(
-                        AutomaticRecoveryRetryDelay,
+                        BackoffFor(priorFailureCount),
                         lifetime.Token).ConfigureAwait(false);
                     if (!TryCaptureAutomaticRecoveryAttempt(
                         generation,
@@ -770,6 +823,32 @@ internal sealed class DirectCodexVoiceControl :
             _automaticRecoveryFailureCount = 0;
             Volatile.Write(ref _automaticRecoveryBlocked, 0);
         }
+        // 恢复成功要**把上一次的失败销掉**。lastError 过去只写不清（清除只发生在
+        // App 侧 START 成功路径），保活自愈成功不碰它 —— 于是界面上那个码可能是
+        // 几分钟前某次尝试留下的旧账，排障时会把人带偏。
+        try
+        {
+            _automaticRecoverySucceeded?.Invoke();
+        }
+        catch
+        {
+            // 通知失败不该影响"已经恢复"这个事实。
+        }
+    }
+
+    /// <summary>连败 n 次后该等多久：20s 起，每次翻倍，封顶 5 分钟。</summary>
+    internal static TimeSpan BackoffFor(int priorFailureCount)
+    {
+        if (priorFailureCount <= 0)
+        {
+            return TimeSpan.Zero;
+        }
+        double seconds = AutomaticRecoveryRetryDelay.TotalSeconds
+            * Math.Pow(2, Math.Min(priorFailureCount - 1, 8));
+        double capped = Math.Min(
+            seconds,
+            AutomaticRecoveryMaximumRetryDelay.TotalSeconds);
+        return TimeSpan.FromSeconds(capped);
     }
 
     private bool RegisterAutomaticRecoveryFailure(
@@ -787,12 +866,13 @@ internal sealed class DirectCodexVoiceControl :
                 return false;
             }
             _automaticRecoveryFailureCount++;
-            shouldRetry = IsTransientAutomaticRecoveryFailure(exception)
-                && _automaticRecoveryFailureCount
-                    < MaximumAutomaticRecoveryFailuresPerIntent;
-            Volatile.Write(
-                ref _automaticRecoveryBlocked,
-                shouldRetry ? 0 : 1);
+            // 只要用户的意图还在（keepActive 且同代），就继续试 —— 失败次数只用来
+            // 决定下一次等多久（见 AutomaticRecoveryMaximumRetryDelay）。
+            // 这里过去会在预算用尽或失败"看着不像暂时的"时上闩；而判定是否暂时
+            // 本身就不可靠（例如读 keybindings.json 失败被归成非暂时），
+            // 一次误判换来的是永久熄火。
+            shouldRetry = true;
+            Volatile.Write(ref _automaticRecoveryBlocked, 0);
         }
         NotifyAutomaticRecoveryFailed(exception);
         return shouldRetry;

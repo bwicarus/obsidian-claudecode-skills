@@ -227,7 +227,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 automaticRecoveryFailed: exception =>
                     _ = _coordinator.RecordFailure(
                         exception,
-                        "codex-voice-keepalive"));
+                        "codex-voice-keepalive"),
+                automaticRecoverySucceeded:
+                    _coordinator.ClearRecoveryFailure);
         _documentCorpus = new ReaderDocumentCorpusStore(
             Path.Combine(
                 runtimeDirectory,
