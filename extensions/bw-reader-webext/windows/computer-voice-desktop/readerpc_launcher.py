@@ -55,7 +55,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.47"
+APP_VERSION = "0.1.48"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 桥接模式旗标的独立意图文件(C# 启动时读取;keepalive/config/runtime-status 都是
@@ -272,41 +272,77 @@ def set_codex_voice_keep_active(
     )
 
 
+# C# 侧是**纯轮询**读 keepalive 文件（DirectBridgeProtocol.cs:519 PeriodicTimer，
+# 默认 5 秒；全仓没有任何 FileSystemWatcher）。这个数字决定了下面那个窗口要多宽。
+_KEEPALIVE_POLL_SECONDS = 5.0
+
+
 def rearm_codex_voice_keep_active(
     bridge_paths: BridgePaths,
     *,
-    settle_seconds: float = 0.35,
+    settle_seconds: float = _KEEPALIVE_POLL_SECONDS + 2.5,
+    activity_reader=None,
 ) -> bool:
     """把 keepalive 真正**翻转**一次 false→true，用来解掉 C# 的自动恢复封锁。
 
-    2026-08-18 用户报「开着服务器软件，语音却没被自动激活」。查下来是这样的：
-    C# 每个"意图代际"只有 2 次自动恢复预算（MaximumAutomaticRecoveryFailuresPerIntent），
-    用尽后 `_automaticRecoveryBlocked = 1`，**永久**放弃自动恢复。而解封只有一条路 ——
-    `ApplyKeepActiveChange` 里那句：
+    为什么需要翻转：C# 每个"意图代际"只有 2 次自动恢复预算，用尽后
+    `_automaticRecoveryBlocked = 1` 永久放弃。解封只有一条路 ——
+    `ApplyKeepActiveChange` 里那句 `if (previous == enabled) return false;`：
+    只有真正的 false→true 跃迁才会重置失败计数并清掉封锁。ReaderPC 过去每次
+    "恢复"都只是再写一遍 true，值没变等于没写。
 
-        bool previous = _keepActive == 1;
-        if (previous == enabled) { ...; return false; }   // 值没变就什么都不做
+    ⚠ 这个函数 2026-08-18 第一版是**有害**的，两处都错：
+      · 窗口只留 0.35 秒，而对面是 5 秒轮询 —— 被看见的概率约 7%，
+        三次预算打完总共约 20%。也就是说"自动解封"九成是空操作；
+      · 更糟的是那 7% 里还藏着伤害：ReconcileKeepActiveAsync 读到 false 时，
+        若麦克风台账显示语音**正开着**，它会 `SetActiveSerializedAsync(active:false)`
+        —— 也就是发 F24 **把用户正在进行的通话关掉**。
 
-    也就是说只有真正的 false→true 跃迁才会重置失败计数并清掉封锁。
-    偏偏 ReaderPC 每次"恢复"都只是再写一遍 `true` —— 值没变，等于没写。
-    于是界面显示"直连在线"，语音却再也起不来，重启 ReaderPC 也没用
-    （keepalive 文件本来就是 true，写它还是 true）。
+    所以现在两条都改：
+      1. **只在语音确实没起来时才翻**。伤害的触发条件正是"台账 active"，
+         而我们要解决的场景恰好是"服务在线但语音起不来"，两者不重叠 ——
+         把它写成前置条件，伤害分支就永远进不去。
+      2. 窗口放宽到**超过一个轮询周期**，否则翻了也白翻。等待期间继续盯台账：
+         一旦语音自己起来了，立刻把 true 写回去并放弃这次解封 —— 既不必再解，
+         也把"C# 可能读到 false"的暴露时间压到最短。
 
-    这里补上那一次跃迁。已经是 false 就不必先写 false（本来就没封锁）。
+    ⚠ 更根本的问题不在这里：拿一个进程外的文件跃迁去撬另一个进程的内部状态机，
+      本身就是个隔着墙按开关的办法。真正的修法在 C# 侧（见语音链路重做）。
+      这里只是把一个会伤人的临时手段改成不伤人的。
+
     返回是否真的做了翻转 —— 悄悄改状态而不留痕迹正是这一带最贵的毛病。
     """
 
+    read_activity = activity_reader or read_codex_voice_activity
+
+    def _voice_active() -> bool:
+        try:
+            return read_activity().active is True
+        except Exception:
+            # 读不到就当"可能开着"，宁可不解封也不要去关用户的通话。
+            return True
+
+    if _voice_active():
+        _boot_log("Codex 语音台账显示正在通话，跳过解封（翻转会把它关掉）")
+        return False
+
     current = read_codex_voice_keep_active(bridge_paths)
-    flipped = False
-    if current is not False:
-        # None（文件缺失/损坏）也走翻转：C# 那边可能仍持有 true 的内存状态。
-        set_codex_voice_keep_active(bridge_paths, False)
-        flipped = True
-        # C# 用文件监视 + 轮询发现变化；两次写挨得太近会被合并成一次事件，
-        # 那样又变回"值没变"。给它一个能分辨的间隔。
-        time.sleep(max(0.05, float(settle_seconds)))
+    if current is False:
+        # 本来就是关的：没有封锁可解，直接置开即可，不必制造一次停机。
+        set_codex_voice_keep_active(bridge_paths, True)
+        return False
+
+    set_codex_voice_keep_active(bridge_paths, False)
+    deadline = time.monotonic() + max(1.0, float(settle_seconds))
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        if _voice_active():
+            # 语音自己起来了 → 解封已无意义，且再停留在 false 就有被关掉的风险。
+            set_codex_voice_keep_active(bridge_paths, True)
+            _boot_log("解封等待期间语音已恢复，提前收窗")
+            return True
     set_codex_voice_keep_active(bridge_paths, True)
-    return flipped
+    return True
 
 
 # ⚠ 这张表**注定是不全的**：C# 侧现有 167 个 BW_COMPUTER_VOICE_DIRECT_* 失败码，

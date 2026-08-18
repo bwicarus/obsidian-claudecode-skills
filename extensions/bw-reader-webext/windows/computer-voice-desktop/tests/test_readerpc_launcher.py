@@ -16,6 +16,7 @@ from unittest.mock import Mock, patch
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
+import readerpc_launcher  # noqa: E402
 from readerpc_launcher import (  # noqa: E402
     ReaderPCWindow,
     ShortcutBrokerError,
@@ -1171,40 +1172,101 @@ class ReaderPCLauncherTests(unittest.TestCase):
 
 
 class RearmCodexVoiceTests(unittest.TestCase):
-    """keepalive 必须真的**翻转**过去，否则 C# 那边等于什么都没收到。
+    """keepalive 必须真的**翻转**过去，而且**不能把用户正在进行的通话关掉**。
 
-    2026-08-18 用户报「开着服务器软件但语音没被自动激活」。根因在 C# 的
-    ApplyKeepActiveChange：`if (previous == enabled) return false;` —— 值没变就不动，
-    而自动恢复预算用尽后设下的 _automaticRecoveryBlocked 只有真跃迁才会清。
-    ReaderPC 过去每次"恢复"都只是再写一遍 true，于是永远解不开。
+    翻转的必要性：C# 的 ApplyKeepActiveChange 里 `if (previous == enabled) return false;`
+    —— 值没变就不动，而自动恢复预算耗尽后设下的 _automaticRecoveryBlocked
+    只有真跃迁才会清。ReaderPC 过去每次"恢复"都只是再写一遍 true。
+
+    不能伤人的必要性（2026-08-18 调查）：C# 的 ReconcileKeepActiveAsync 读到 false 时，
+    若麦克风台账显示语音正开着，会发 F24 **主动把通话关掉**。而 C# 是 5 秒纯轮询、
+    没有文件监视 —— 第一版只留 0.35 秒窗口，等于九成空操作、一成可能伤人。
     """
 
     def _paths(self, root: Path):
         return SimpleNamespace(runtime_status=root / "runtime" / "runtime-status.json")
 
-    def test_rearm_flips_false_then_true_when_already_enabled(self):
+    def _activity(self, active):
+        return lambda: SimpleNamespace(active=active, status="available", generation=None)
+
+    def _record(self, seen):
+        real = set_codex_voice_keep_active
+
+        def record(bridge_paths, enabled):
+            seen.append(enabled)
+            real(bridge_paths, enabled)
+
+        return record
+
+    def test_refuses_to_flip_while_a_call_is_live(self):
+        # 伤害的触发条件正是"台账 active"。这是最重要的一条：宁可不解封，
+        # 也不能去关用户正在进行的通话。
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "runtime").mkdir(parents=True)
             paths = self._paths(root)
             set_codex_voice_keep_active(paths, True)
-
             seen: list[bool] = []
-            real = set_codex_voice_keep_active
-
-            def record(bridge_paths, enabled):
-                seen.append(enabled)
-                real(bridge_paths, enabled)
-
             with (
-                patch("readerpc_launcher.set_codex_voice_keep_active", record),
+                patch("readerpc_launcher.set_codex_voice_keep_active", self._record(seen)),
                 patch("readerpc_launcher.time.sleep"),
             ):
-                flipped = rearm_codex_voice_keep_active(paths)
+                flipped = rearm_codex_voice_keep_active(
+                    paths, activity_reader=self._activity(True)
+                )
+            self.assertFalse(flipped)
+            self.assertEqual(seen, [], "通话进行中一个字都不该写")
+            self.assertIs(read_codex_voice_keep_active(paths), True)
 
+    def test_unreadable_activity_is_treated_as_live(self):
+        # 读不到台账就当"可能开着"：失败方向必须偏向不伤人。
+        def boom():
+            raise OSError("registry unavailable")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "runtime").mkdir(parents=True)
+            paths = self._paths(root)
+            set_codex_voice_keep_active(paths, True)
+            seen: list[bool] = []
+            with (
+                patch("readerpc_launcher.set_codex_voice_keep_active", self._record(seen)),
+                patch("readerpc_launcher.time.sleep"),
+            ):
+                self.assertFalse(
+                    rearm_codex_voice_keep_active(paths, activity_reader=boom)
+                )
+            self.assertEqual(seen, [])
+
+    def test_flips_false_then_true_when_voice_is_down(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "runtime").mkdir(parents=True)
+            paths = self._paths(root)
+            set_codex_voice_keep_active(paths, True)
+            seen: list[bool] = []
+            with (
+                patch("readerpc_launcher.set_codex_voice_keep_active", self._record(seen)),
+                patch("readerpc_launcher.time.sleep"),
+                patch("readerpc_launcher.time.monotonic", side_effect=[0.0, 1.0, 99.0]),
+            ):
+                flipped = rearm_codex_voice_keep_active(
+                    paths, activity_reader=self._activity(False)
+                )
             self.assertTrue(flipped)
             self.assertEqual(seen, [False, True], "必须先落到 false 才谈得上跃迁")
             self.assertIs(read_codex_voice_keep_active(paths), True)
+
+    def test_window_outlives_one_csharp_poll_interval(self):
+        # C# 是 5 秒纯轮询；窗口窄于一个周期，翻了也看不见（第一版 0.35 秒 ≈ 7%）。
+        import inspect
+
+        source = inspect.getsource(rearm_codex_voice_keep_active)
+        self.assertIn("_KEEPALIVE_POLL_SECONDS", source)
+        self.assertGreater(
+            readerpc_launcher._KEEPALIVE_POLL_SECONDS, 4.0,
+            "这个常数必须跟 C# 的 PeriodicTimer 对齐",
+        )
 
     def test_rearm_does_not_flip_when_already_disabled(self):
         # 本来就是关的 => 没有封锁可解，直接置开即可，不必先制造一次停机。
@@ -1213,19 +1275,14 @@ class RearmCodexVoiceTests(unittest.TestCase):
             (root / "runtime").mkdir(parents=True)
             paths = self._paths(root)
             set_codex_voice_keep_active(paths, False)
-
             seen: list[bool] = []
-            real = set_codex_voice_keep_active
-
-            def record(bridge_paths, enabled):
-                seen.append(enabled)
-                real(bridge_paths, enabled)
-
-            with patch("readerpc_launcher.set_codex_voice_keep_active", record):
-                flipped = rearm_codex_voice_keep_active(paths)
-
+            with patch("readerpc_launcher.set_codex_voice_keep_active", self._record(seen)):
+                flipped = rearm_codex_voice_keep_active(
+                    paths, activity_reader=self._activity(False)
+                )
             self.assertFalse(flipped)
             self.assertEqual(seen, [True])
+
 
 
 class VoiceFailureDescriptionTests(unittest.TestCase):
