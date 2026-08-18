@@ -372,3 +372,15 @@ test("一层坏掉不得连累整本书的文字层", () => {
   assert.doesNotMatch(STORE, /throw NativeBookOCRError\.storage\("当前选择的文字层不可用"\)/);
   assert.match(STORE, /selected = available\.contains\(where: \{ \$0\.layer == \.legacy \}\)/);
 });
+
+test("历次结果区块在两个书库入口都要有，且空态说得出原因", () => {
+  // 上一版只挂在本机书那个重载上，Pi 书库那栏整块缺失；而且整段包在
+  // `if let remoteBook` 里 —— 书没上传到 Pi 时连标题都不出现，
+  // 用户看不出这个功能存在（用户实测："我没有看到删除的选项"）。
+  assert.equal(
+    (VIEW.match(/releaseHistory\(remoteBook:/g) || []).length,
+    2,
+    "本机书与 Pi 书两个 preprocessingPanel 重载都要调用",
+  );
+  assert.match(VIEW, /这本书还没有上传到 Pi，服务器上没有预处理结果。/);
+});

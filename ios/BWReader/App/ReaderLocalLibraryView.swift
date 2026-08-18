@@ -481,6 +481,11 @@ struct ReaderLocalLibraryView: View {
     ) -> some View {
         if remoteBook.kind.lowercased() == "pdf" {
             GroupBox {
+                // 从「Pi 书库」那一栏展开时同样要能看到历次结果并删除 ——
+                // 上一版只挂在本机书那个重载上，这边整块缺失。
+                releaseHistory(remoteBook: remoteBook, localBook: localBook)
+
+                Divider()
                 piControls(
                     remoteBook: remoteBook,
                     localBook: localBook
@@ -669,21 +674,30 @@ struct ReaderLocalLibraryView: View {
         remoteBook: ReaderRemoteBook?,
         localBook: ReaderLocalBookRecord?
     ) -> some View {
-        if let remoteBook {
-            let listing = releasesByBook[remoteBook.bookId]
-            VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Label("服务器上的结果", systemImage: "clock.arrow.circlepath")
                     .font(.caption.weight(.semibold))
                 Spacer()
-                if loadingReleasesBookID == remoteBook.bookId {
+                if let remoteBook, loadingReleasesBookID == remoteBook.bookId {
                     ProgressView().controlSize(.mini)
-                } else if let listing {
+                } else if let remoteBook,
+                          let listing = releasesByBook[remoteBook.bookId] {
                     Text("\(listing.releases.count) 份")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
             }
+            if remoteBook == nil {
+                // 整段藏起来等于用户看不出这个功能存在 —— 说清为什么是空的。
+                Text("这本书还没有上传到 Pi，服务器上没有预处理结果。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        if let remoteBook {
+            let listing = releasesByBook[remoteBook.bookId]
+            VStack(alignment: .leading, spacing: 6) {
             if let listing, listing.releases.isEmpty {
                 Text("还没有预处理结果。")
                     .font(.caption2)
