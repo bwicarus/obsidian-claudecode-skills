@@ -1182,6 +1182,71 @@ if (window.__bwPwaProviderOnly) return;
         : '电脑 Anki 接收结果未知，已阻止重复发送');
     });
   }
+  // ── 断了就自动补送 ───────────────────────────────────────────────────
+  // 用户 2026-08-18：「app 不在前台活动时发送卡片等会失败，有解决方法么」。
+  //   会失败是必然的：iOS 一挂起 App，直连电脑的那条 WebSocket 就断了。
+  //   问题不在"失败"，而在**失败之后没有任何东西再试一次** —— 上面那段已经
+  //   老老实实把 _pcExportStatus 记成 'failed'、把回执写进卡里、还分好了
+  //   "可安全重试"和"结果未知"，然后就停在那儿了；而桌面那个手动重试按钮
+  //   早先因为"保存时会自动推送"被去掉，于是这条路彻底没有出口。
+  //   重试本身是安全的：aid 稳定不变，电脑侧用 AID_REUSED 挡重复写入，
+  //   幂等性早就有人管了。所以这里只补最后一步 —— 链路回来时把欠的补上。
+  var _retryScheduled = false;
+  function retryFailedComputerExports(reason) {
+    if (_retryScheduled) return;
+    var linked = false;
+    try {
+      linked = !!(RC.computerVoice && RC.computerVoice.isLinked &&
+        RC.computerVoice.isLinked());
+    } catch (_) { linked = false; }
+    if (!linked) return;
+    _retryScheduled = true;
+    // 让出一拍：链路刚回来时对面往往还在收敛，挤在同一刻发只会再失败一次。
+    setTimeout(function () {
+      _retryScheduled = false;
+      Object.keys(_groups).forEach(function (gid) {
+        var group = _groups[gid];
+        if (!group) return;
+        group.conts.slice().forEach(function (container) {
+          var st = container && container.__fc;
+          if (!st || !st.cards) return;
+          st.cards.forEach(function (card, index) {
+            // 只补"可安全重试"那一类；'unknown' 是电脑侧可能已经写进去了，
+            // 再发一次等于制造重复卡 —— 那种要人来决定。
+            if (card && card._pcExportStatus === 'failed') {
+              try { exportToComputerAnki(container, index); } catch (_) {}
+            }
+          });
+        });
+      });
+    }, 1200);
+    return reason;
+  }
+  // 挂钩全放在 try 里：这个模块跑在好几种宿主上（扩展的 Shadow DOM 门面、App 内的
+  // bundle、契约测试的沙箱），其中的 document 未必是完整的浏览器 document。
+  // 补送是增益功能，绝不能因为宿主少一个方法就让整个模块加载失败。
+  if (!window.__fcExportRetryHook) {
+    window.__fcExportRetryHook = 1;
+    try {
+      if (document && typeof document.addEventListener === 'function') {
+        // 回前台：App 挂起期间断掉的那次就是在这里补上的。
+        document.addEventListener('visibilitychange', function () {
+          if (document.visibilityState === 'visible') {
+            retryFailedComputerExports('foreground');
+          }
+        });
+      }
+    } catch (_) {}
+    // 电脑桥状态变化（重连/服务恢复）也补一次，不必等用户切回来。
+    try {
+      if (RC.computerVoice && RC.computerVoice.onStatus) {
+        RC.computerVoice.onStatus(function () {
+          retryFailedComputerExports('bridge-status');
+        });
+      }
+    } catch (_) {}
+  }
+
   function exportToMobileAnki(container, i) {
     var st = container && container.__fc, c = st && st.cards[i];
     var api = window.BWReaderRuntime && window.BWReaderRuntime.ankiMobileExport;
