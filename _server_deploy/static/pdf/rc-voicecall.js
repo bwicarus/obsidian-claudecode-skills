@@ -3190,8 +3190,12 @@
       var _ck = { images: 'image', videos: 'video', weather: 'weather', news: 'news' }[card.kind] || 'text';
       var _cst = {};
       try { _cst = (window.RC && RC.toolChip && RC.toolChip.styleOf) ? RC.toolChip.styleOf(_ck) : {}; } catch (e) {}
+      // 带 bind 的卡即使**绑不上**（那页没渲染 / 目标块已删）也不能到点就没：
+      //   绑定这件事说明它是钉在某处的一次记录，退回浮层已经丢了位置，
+      //   再让它自己消失就把内容也一起丢了。收成球留着，用户还能找回来。
       var c = _cardPush(_infoHtml(card), label, true, false, card.cid,
-                        { dot: true, form: 'full', type: _cst.color, icon: _cst.icon });
+                        { dot: true, form: 'full', type: _cst.color, icon: _cst.icon,
+                          keepAsDot: !!card.bind });
       if (c) {
         c.el.classList.add('vc-typed');   // 有色磨砂(与工具卡同一套观感)
         try { c.el.__vcCard = card; } catch (e) {}   // #img:浮层实例同挂 card(与侧栏实例共享同一对象 → 拖图入卡 push 一次两处同现)
@@ -5314,7 +5318,8 @@
   }
   function _cardPush(text, kindLabel, isHtml, force, cid, opts) {
     opts = opts || {};
-    // opts(工具指示器 v2):{tool,type,icon,dot:true 起手标记态,form:初始形态,busy:标记呼吸}
+    // opts(工具指示器 v2):{tool,type,icon,dot:true 起手标记态,form:初始形态,busy:标记呼吸,
+    //   keepAsDot:到点收球不关掉(绑定卡)}
     if (!opts.dot && !opts.mount && (!text || (!isHtml && !text.trim()))) return null;   // mount 模式(制卡状态机卡)无 text,放行
     if (_sideOpen() && !force && !opts.dot) return null;   // 侧栏开着=内容已在对话流,不弹;force=92 拖放例外
     injectCss();
@@ -5326,7 +5331,11 @@
     var _cid = cid || _mkCid();   // 95:卡片编号(浮层/侧栏/收藏夹同号 → 选中处处同步)
     el.__bwCardSizeApply = typeof opts.onSize === 'function' ? opts.onSize : null;
     el.dataset.vcCid = _cid;
-    var c = { el: el, t: null, free: false, dx: 0, dy: 0, label: kindLabel || '文字回复', raw: text, isHtml: !!isHtml };
+    // keepAsDot：到点**收起成球**而不是关掉。_armAuto 早就写好了这个分支，但在
+    //   2026-08-19 之前**没有任何地方给它赋过值** —— 于是绑定卡到点照样消失。
+    //   给绑定卡用：卡片的位置本身就是信息，关掉等于把"这一处有过一次纠正"也丢了。
+    var c = { el: el, t: null, free: false, dx: 0, dy: 0, label: kindLabel || '文字回复', raw: text, isHtml: !!isHtml,
+              keepAsDot: !!opts.keepAsDot };
     // 85:卡片不可透过——事件在卡内消化,不冒泡到 document 级监听(点词/选中工具栏等都挂 document)
     ['pointerdown', 'pointerup', 'click', 'touchstart', 'touchend', 'dblclick'].forEach(function (evn) {
       el.addEventListener(evn, function (ev) { ev.stopPropagation(); });
