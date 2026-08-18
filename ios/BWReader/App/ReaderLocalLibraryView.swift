@@ -51,6 +51,10 @@ struct ReaderLocalLibraryView: View {
     // 「标记上日期用以区分，而不是覆盖」）。按 bookId 缓存，展开面板时才拉。
     @State private var releasesByBook: [String: ReaderPiOCRReleaseList] = [:]
     @State private var loadingReleasesBookID: String?
+    // 失败必须与"确实没有结果"分开。2026-08-19 我把 catch 写成静默留空，
+    // 于是用户看到「0 份 · 还没有预处理结果」，而 Pi 上明明有 3 份 ——
+    // 一个请求失败被伪装成了一个事实陈述。
+    @State private var releaseErrorByBook: [String: String] = [:]
     @State private var pendingReleaseDeletion: PendingReleaseDeletion?
 
     let reader: ReaderWebViewModel
@@ -682,6 +686,7 @@ struct ReaderLocalLibraryView: View {
                 if let remoteBook, loadingReleasesBookID == remoteBook.bookId {
                     ProgressView().controlSize(.mini)
                 } else if let remoteBook,
+                          releaseErrorByBook[remoteBook.bookId] == nil,
                           let listing = releasesByBook[remoteBook.bookId] {
                     Text("\(listing.releases.count) 份")
                         .font(.caption2)
@@ -698,7 +703,20 @@ struct ReaderLocalLibraryView: View {
         if let remoteBook {
             let listing = releasesByBook[remoteBook.bookId]
             VStack(alignment: .leading, spacing: 6) {
-            if let listing, listing.releases.isEmpty {
+            if let failure = releaseErrorByBook[remoteBook.bookId] {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("读取失败：\(failure)")
+                    Button("重试") {
+                        Task {
+                            releaseErrorByBook[remoteBook.bookId] = nil
+                            await loadReleases(for: remoteBook)
+                        }
+                    }
+                    .font(.caption2)
+                }
+                .font(.caption2)
+                .foregroundStyle(.orange)
+            } else if let listing, listing.releases.isEmpty {
                 Text("还没有预处理结果。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -765,14 +783,12 @@ struct ReaderLocalLibraryView: View {
         do {
             let listing = try await piOCR.releases(book: book, cookies: cookies)
             releasesByBook[book.bookId] = listing
+            releaseErrorByBook[book.bookId] = nil
         } catch {
-            // 列不出来不该打断整个面板：Pi 可能还没升级、或此刻不可达。
-            // 静默留空，其余功能照常。
-            releasesByBook[book.bookId] = ReaderPiOCRReleaseList(
-                activeRunId: nil,
-                releases: [],
-                stagingArchiveBytes: 0
-            )
+            // 不打断面板其余功能，但**必须说出来**：请求失败与"确实没有结果"
+            // 长得一样的话，用户只会以为功能没做（他确实这么以为了）。
+            releasesByBook[book.bookId] = nil
+            releaseErrorByBook[book.bookId] = error.localizedDescription
         }
     }
 

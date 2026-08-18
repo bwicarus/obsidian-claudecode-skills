@@ -329,7 +329,37 @@ class ReaderBookOcrService:
 
     def _version_dir(self, book_id: str, content_sha256: str) -> Path:
         self._validate_identity(book_id, content_sha256)
-        return self.state_root / book_id / content_sha256
+        direct = self.state_root / book_id / content_sha256
+        if direct.exists():
+            return direct
+        # bookId 会漂移，内容哈希不会。
+        #
+        # 2026-08-19 实测：Pi 上三本书的预处理结果全部挂在**已经不在 catalog 里**
+        # 的 bookId 下，而 catalog 里都有同 contentSha256、不同 bookId 的条目 ——
+        # 书被重新登记过（重传/目录重建），旧结果就此够不着：既列不出来、
+        # 也用不上，看起来就像"从来没跑过"。
+        #
+        # 结果本来就是内容寻址的（同样的字节 → 同样的 OCR），所以按内容找回来是
+        # 安全的：两本书真共享同一份字节时共用结果，也正确。
+        alias = self._version_dir_by_content(content_sha256)
+        if alias is not None:
+            return alias
+        return direct
+
+    def _version_dir_by_content(self, content_sha256: str) -> Path | None:
+        """在别的 bookId 下找同一份内容的结果目录。"""
+
+        try:
+            entries = sorted(self.state_root.iterdir())
+        except OSError:
+            return None
+        for entry in entries:
+            if not entry.is_dir() or not BOOK_ID_RE.fullmatch(entry.name):
+                continue
+            candidate = entry / content_sha256
+            if candidate.is_dir():
+                return candidate
+        return None
 
     def _job_dir(self, book_id: str, content_sha256: str, engine: str) -> Path:
         if engine not in ENGINES:

@@ -226,6 +226,29 @@ class ReaderBookOcrReleaseIndexTest(unittest.TestCase):
         #   （_archive_stale_staging_locked），只有"删到一半崩了"才会看到这个提示。
         #   它有误导性但不阻塞操作，留作后续。
 
+    def test_results_survive_a_book_id_change(self) -> None:
+        """书被重新登记（bookId 变了）之后，旧结果必须还找得回来。
+
+        2026-08-19 Pi 上实测：三本书的预处理结果**全部**挂在已经不在 catalog 里的
+        bookId 下，而 catalog 里都有同 contentSha256、不同 bookId 的条目。
+        结果既列不出来也用不上，看起来就像从来没跑过。
+        结果本来就是内容寻址的，所以按内容找回来是安全的。
+        """
+
+        revision = self._publish("vision", "V")
+        # 模拟重新登记：把结果目录挪到另一个 bookId 下。
+        stale = self.service.state_root / ("book_" + "9" * 32)
+        stale.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(self.version), str(stale / self.entry["contentSha256"]))
+        listing = self._list()
+        self.assertEqual(len(listing["runs"]), 1)
+        self.assertEqual(listing["runs"][0]["revision"], revision)
+        # 而且要真能用 —— 不只是列得出来。
+        status = self.service.status(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.assertEqual(status["engine"], "vision")
+
     def test_run_ids_are_stable_across_repeated_listing(self) -> None:
         """回填是按需重跑的；runId 必须确定性派生，否则每次列举都变成"新的一条"。"""
 
