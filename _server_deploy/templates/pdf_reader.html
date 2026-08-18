@@ -59,7 +59,7 @@ try {
     <button id="fs-toggle" onclick="toggleFullscreen()" hidden aria-hidden="true" tabindex="-1">⿛</button>
     <!-- 书籍：App 内点它会被 takeOverLibraryNavigation 拦截、直接弹原生书库；
          扩展/浏览器里就是回书架列表。放在 ⚙ 旁边（用户要求「书籍按钮单独出来放设置旁」）。 -->
-    <button onclick="goPdfList()" title="书籍：回到书架 / 打开书库"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 4.5h4v15h-4z"/><path d="M9.8 4.5h3.6v15H9.8z"/><path d="M15.1 5.2l3.4.9-3.6 13.6-3.4-.9z"/></svg></button>
+    <button onclick="window.__bwOpenLibrary ? __bwOpenLibrary() : goPdfList()" title="书籍：回到书架 / 打开书库"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 4.5h4v15h-4z"/><path d="M9.8 4.5h3.6v15H9.8z"/><path d="M15.1 5.2l3.4.9-3.6 13.6-3.4-.9z"/></svg></button>
     <button onclick="openSettings()" title="AI 设置"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M21 12h-2.5M5.5 12H3M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8M18.4 18.4l-1.8-1.8M7.4 7.4L5.6 5.6"/></svg></button>
   </div>
   <!-- 全屏阅读时浮出的恢复按钮（点它显示顶栏） -->

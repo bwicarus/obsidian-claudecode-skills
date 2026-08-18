@@ -20,6 +20,13 @@ import WebKit
 final class ReaderNativeAppPrefsBridge: NSObject, WKScriptMessageHandlerWithReply {
     static let messageName = "bwNativeAppPrefs"
 
+    /// 顶栏「书籍」按钮请求打开原生书库 sheet。
+    /// 网页侧**不做 URL 导航** —— 产品已本地化，书架是 SwiftUI，
+    /// 任何一条经过网络地址的路径都可能跑去打开不该存在的网页。
+    var onOpenLibrary: (() -> Void)?
+    /// 顶栏「App 设置」按钮请求打开原生工具 sheet（过渡期：还没搬完的原生项仍在那里）。
+    var onOpenNativeTools: (() -> Void)?
+
     /// 允许网页读写的 key。新增前先问一句：这条泄漏出去会不会有代价？
     /// 会的话就不该进这张表。
     private enum Allowed {
@@ -85,6 +92,14 @@ final class ReaderNativeAppPrefsBridge: NSObject, WKScriptMessageHandlerWithRepl
                 return (nil, "bad value")
             }
             defaults.set(value, forKey: key)
+            return (true, nil)
+
+        case "openLibrary":
+            onOpenLibrary?()
+            return (true, nil)
+
+        case "openNativeTools":
+            onOpenNativeTools?()
             return (true, nil)
 
         default:

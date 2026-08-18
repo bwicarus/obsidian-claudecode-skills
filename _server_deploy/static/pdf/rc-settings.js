@@ -962,6 +962,10 @@
             '</select></div>' +
         '</div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6">画面上那枚笔按钮只在 Pencil 悬停或落笔后出现；纯手指操作时它不会占地方。用挤压/双击也能直接唤出绘图面板。</div>' +
+        HR +
+        '<label style="' + LBL + '">🧰 还没搬过来的原生项</label>' +
+        '<div style="font-size:12px;color:#8fa5c8;margin:-4px 0 10px">离线词典、Pi 同步、OpenAI Key、Vault 目录、设备端识别结果这些仍在 App 的原生设置里（凭据和目录必须由系统 UI 管）。</div>' +
+        '<button type="button" id="rcset-nat-open" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:8px 14px;cursor:pointer;font-size:13px">打开 App 原生设置</button>' +
       '</div>';
 
     var paneWeb =
@@ -1049,7 +1053,37 @@
     document.body.appendChild(mask);
     modal = mask.querySelector('.ep-set-modal');
 
-    // ── 本机(App 原生偏好)：只有 App 内才有这条通道，扩展/浏览器里整块不出现 ──
+    // 顶栏「书籍 / App 设置」：App 内直接请求原生 sheet，**不做 URL 导航**。
+  //   takeOverLibraryNavigation 只在"正在读本机书 + 环回 /pdf/"时才拦截，
+  //   读别处的书时它不拦，硬导航就会跑去打开一个不该存在的网页（用户实测）。
+  //   产品已本地化：书架是 SwiftUI，不该有任何路径经过网络地址。
+  //   不在 App 里（扩展/浏览器）才回退到原来的行为。
+  RC.nativeShell = {
+    _api: function () {
+      var h = window.webkit && window.webkit.messageHandlers &&
+              window.webkit.messageHandlers.bwNativeAppPrefs;
+      return (h && typeof h.postMessage === 'function') ? h : null;
+    },
+    available: function () { return !!RC.nativeShell._api(); },
+    openLibrary: function () {
+      var a = RC.nativeShell._api();
+      if (!a) return false;
+      try { a.postMessage({ action: 'openLibrary' }); return true; } catch (e) { return false; }
+    },
+    openNativeTools: function () {
+      var a = RC.nativeShell._api();
+      if (!a) return false;
+      try { a.postMessage({ action: 'openNativeTools' }); return true; } catch (e) { return false; }
+    }
+  };
+  window.__bwOpenLibrary = function () {
+    if (RC.nativeShell.openLibrary()) return;
+    try { if (typeof goPdfList === 'function') { goPdfList(); return; } } catch (e) {}
+    location.href = '/pdf/';
+  };
+  window.__bwOpenNativeTools = function () { return RC.nativeShell.openNativeTools(); };
+
+  // ── 本机(App 原生偏好)：只有 App 内才有这条通道，扩展/浏览器里整块不出现 ──
     //   写立即生效、不等「保存」：这些是 App 本体的开关，跟面板里其它需要成批提交的
     //   设置不是一回事；而且原生那侧本来就是改一个存一个。
     (function () {
@@ -1064,6 +1098,13 @@
         'rcset-nat-pen-dtap': 'native-pencil.double-tap',
         'rcset-nat-pen-sq': 'native-pencil.squeeze'
       };
+      var openBtn = $('rcset-nat-open');
+      if (openBtn) openBtn.addEventListener('click', function () {
+        // 过渡期入口：原生 sheet 里还有凭据/目录这类不该搬进网页的项。
+        if (!window.__bwOpenNativeTools || !__bwOpenNativeTools()) {
+          try { RC.toast && RC.toast('这台设备上没有 App 原生设置'); } catch (e) {}
+        }
+      });
       api.postMessage({ action: 'list' }).then(function (vals) {
         vals = vals || {};
         Object.keys(K).forEach(function (id) {

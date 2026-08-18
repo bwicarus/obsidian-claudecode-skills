@@ -122,23 +122,14 @@ private struct ReaderRootView: View {
                 )
                 .padding(4)
 
-            HStack(spacing: 8) {
-                // 书库的悬浮钮撤掉：阅读器顶栏已经有「书籍」按钮（⚙ 旁边），
-                // 它在 App 内会被 takeOverLibraryNavigation 拦截、照样弹这个原生书库 sheet。
-                // 用户要求"书籍按钮单独出来放在设置按钮旁"——那个位置就在顶栏，
-                // 右上角再挂一枚等于同一个入口占两处，还挡着侧栏顶部的按钮。
-                Button {
-                    nativeToolsInitialAction = .openNativeTools
-                    showsNativeTools = true
-                } label: {
-                    Image(systemName: "text.viewfinder")
-                        .font(.system(size: 17, weight: .semibold))
-                        .frame(width: 44, height: 44)
-                        .background(.ultraThinMaterial, in: Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("打开原生阅读工具")
-            }
+            // 右上角两枚原生悬浮钮**都撤掉**（用户要求把它们并进我们自己的顶栏）：
+            //   · 书库 → 顶栏「书籍」按钮，经 bwNativeAppPrefs.openLibrary 请求原生 sheet；
+            //   · 原生工具 → 设置面板「本机」tab 里的「打开 App 原生设置」，
+            //     走 bwNativeAppPrefs.openNativeTools。
+            // 两条都不再依赖 URL 导航 —— 产品已本地化，书架是 SwiftUI，
+            // 任何经过网络地址的路径都可能跑去打开不该存在的网页。
+            // 它们还一直挡着侧栏顶部的按钮。
+            EmptyView()
             .frame(
                 maxWidth: .infinity,
                 maxHeight: .infinity,
@@ -189,6 +180,11 @@ private struct ReaderRootView: View {
         .onReceive(reader.$libraryPresentationRequestID) { requestID in
             guard requestID != nil else { return }
             showsLibrary = true
+        }
+        .onReceive(reader.$nativeToolsPresentationRequestID) { requestID in
+            guard requestID != nil else { return }
+            nativeToolsInitialAction = .openNativeTools
+            showsNativeTools = true
         }
         .task {
             BWReaderAppShortcuts.updateAppShortcutParameters()

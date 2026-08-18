@@ -41,7 +41,7 @@
     <button id="ep-upage-btn" title="插入我的页（在当前章之后插入一页 markdown 笔记页,像书的一页一样阅读;✏️ 可再编辑）"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="3.5" width="13" height="17" rx="2"/><path d="M12 8.5V15.5"/><path d="M8.5 12H15.5"/></svg></button>
     <button id="ep-search-btn" title="搜索"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6.2"/><path d="M15.6 15.6L20 20"/></svg></button>
     <!-- 书籍：回书架 / App 内弹原生书库（放在 ⚙ 旁，用户要求） -->
-    <button id="ep-books-btn" onclick="location.href='/pdf/'" title="书籍：回到书架 / 打开书库"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 4.5h4v15h-4z"/><path d="M9.8 4.5h3.6v15H9.8z"/><path d="M15.1 5.2l3.4.9-3.6 13.6-3.4-.9z"/></svg></button>
+    <button id="ep-books-btn" onclick="window.__bwOpenLibrary ? __bwOpenLibrary() : (location.href='/pdf/')" title="书籍：回到书架 / 打开书库"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 4.5h4v15h-4z"/><path d="M9.8 4.5h3.6v15H9.8z"/><path d="M15.1 5.2l3.4.9-3.6 13.6-3.4-.9z"/></svg></button>
     <button id="ep-set-btn" title="设置"><svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M21 12h-2.5M5.5 12H3M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8M18.4 18.4l-1.8-1.8M7.4 7.4L5.6 5.6"/></svg></button>
   </div>
   <div id="ep-bar"></div>

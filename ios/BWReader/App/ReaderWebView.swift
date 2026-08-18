@@ -307,6 +307,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var loadError: String?
     @Published private(set) var libraryPresentationRequestID: UUID?
+    /// 顶栏「App 设置」请求打开原生工具 sheet。与书库那条同一套做法：
+    /// 网页按钮不做 URL 导航，直接经通道请求原生弹 sheet。
+    @Published private(set) var nativeToolsPresentationRequestID: UUID?
     private var nativeComputerVoiceMessageProxy: WeakScriptMessageHandler?
     private var nativeComputerContextMessageProxy: WeakScriptMessageHandler?
     private var nativeAgentVoiceMessageProxy: WeakScriptMessageHandler?
@@ -506,6 +509,17 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // 网页设置面板读写原生偏好（白名单）——用户要求把原生 sheet 里那 12 个
             // Section 并进我们自己的设置 tab，这是它需要的唯一新通道。
             let nativeAppPrefsBridge = ReaderNativeAppPrefsBridge()
+            // 顶栏的「书籍」「App 设置」按钮经这里请求原生 sheet。
+            // ⚠ 不能再让网页按 URL 导航到 /pdf/ —— takeOverLibraryNavigation 只在
+            //   **正在读本机书**且地址是环回 /pdf/ 时才拦截；读 Pi 上的书时它不拦，
+            //   于是硬导航跑去打开一个不该存在的网页（用户实测）。产品已本地化，
+            //   书架是 SwiftUI，不该有任何一条路径经过网络地址。
+            nativeAppPrefsBridge.onOpenLibrary = { [weak self] in
+                self?.libraryPresentationRequestID = UUID()
+            }
+            nativeAppPrefsBridge.onOpenNativeTools = { [weak self] in
+                self?.nativeToolsPresentationRequestID = UUID()
+            }
             self.nativeAppPrefsBridge = nativeAppPrefsBridge
             contentController.addScriptMessageHandler(
                 nativeAppPrefsBridge,
@@ -788,11 +802,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 // ReaderRootView owns two 44pt buttons in the upper-right.
                 // Keep the web fullscreen recovery control outside their hit box.
                 "#fs-restore{right:calc(env(safe-area-inset-right,0px) + 112px)!important}" +
-                // 同一对原生按钮也压在右侧抽屉的顶部 —— 抽屉是 top:0/right:0 全高的，
-                // 它头部那一排按钮正好落在按钮的命中区下面，点不到（用户实测）。
-                // #fs-restore 早就做了水平避让，抽屉这边一直漏着；这里补垂直避让：
-                // 44pt 按钮 + 上边距，取 52px。
-                "#ep-side{padding-top:calc(env(safe-area-inset-top,0px) + 52px)!important}";
+                // ⚠ 这里**不再**给 #ep-side 加顶部避让。
+                //   上一轮我给它加了 52px，方向错了：App 里侧栏就该置顶（右上角那两枚
+                //   原生悬浮钮已经撤掉，不再有东西压着它）；真正需要留距离的是**扩展**
+                //   注入到任意网页的那一侧（那里顶部可能有网页自己的 fixed 头部）。
+                //   扩展那边的距离由 rc-sidedrawer 自己按环境判断，不在这里管。
+                "";
               (document.head || document.documentElement).appendChild(style);
 
               const dispatchOverride = (detail) => {

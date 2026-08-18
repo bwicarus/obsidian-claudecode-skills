@@ -315,9 +315,20 @@
 
   function injectCss() {
     if (_injected) return; _injected = true;
+    // 扩展注入到**任意网页**时，侧栏顶部常压在网页自己的 fixed 头部（或浏览器 UI）下面，
+    // 顶栏那排按钮就点不到。App 里没有这个问题 —— 那是我们自己的壳、右上角也已清空，
+    // 侧栏就该置顶（上一轮我把两边搞反了，给 App 加了距离、扩展反而没有）。
+    // 判据用 App 注入的标记，而不是"是不是扩展"——App 是确定可识别的那一侧。
+    try {
+      var _inApp = !!(window.__BW_NATIVE_PENCILKIT_INK__ ||
+        (window.webkit && window.webkit.messageHandlers &&
+         window.webkit.messageHandlers.bwNativeAppPrefs));
+      if (!_inApp) document.documentElement.classList.add('rc-side-inset-top');
+    } catch (e) {}
     var st = document.createElement('style'); st.id = 'rc-sidedrawer-css';
     st.textContent = `
 /* 右侧统一抽屉:照搬 PDF #grammar-panel 磨砂玻璃滑出。默认挤压 → EPUB 正文留左侧可读 */
+html.rc-side-inset-top #ep-side{padding-top:calc(env(safe-area-inset-top,0px) + 46px)}
 #ep-side{position:fixed;top:0;right:0;bottom:0;width:var(--ep-side-width,min(38vw,560px));display:flex;flex-direction:column;z-index:120;
   background:linear-gradient(135deg,rgba(255,255,255,0.07),rgba(255,255,255,0.03)),rgba(14,20,40,0.94);
   /* ⚠ 这里**不用** backdrop-filter。同一文件下方 open() 里那条注释已经记过它的代价：
