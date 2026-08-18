@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import time
@@ -34,6 +35,204 @@ PDF_A = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n%%EOF\n"
 class _FakeProcess:
     def __init__(self, pid: int | None = None) -> None:
         self.pid = int(pid or os.getpid())
+
+
+
+class ReaderBookOcrReleaseIndexTest(unittest.TestCase):
+    """多份预处理结果：并存、带日期、可切换、可删除。
+
+    用户 2026-08-18：「我希望书库里能够删除预处理的结果，还有预处理的结果标记上
+    日期用以区分，而不是覆盖或者拒绝进行多次预处理」。
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = Path(self.temp.name)
+        self.vault = self.base / "vault"
+        self.vault.mkdir()
+        (self.vault / "A.pdf").write_bytes(PDF_A)
+        self.library = BookLibrary(self.vault, self.base / "catalog")
+        self.entry = self.library.catalog()[0]
+        self.service = ReaderBookOcrService(
+            self.library,
+            self.base / "ocr",
+            self.base / "project",
+            launcher=lambda *args: _FakeProcess(1),
+            max_pdf_bytes=1024 * 1024,
+            max_pages=100,
+        )
+        self.version = self.service._version_dir(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _publish(self, engine: str, char: str) -> str:
+        job_dir = self.version / engine
+        pages = job_dir / "pages"
+        pages.mkdir(parents=True, exist_ok=True)
+        (pages / "p000001.json").write_text(json.dumps({
+            "schema": "reader-page-chars/1",
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "engine": engine,
+            "pageNumber": 1,
+            "page_w": 10,
+            "page_h": 20,
+            "chars": [{"c": char, "x0": 1, "y0": 1, "x1": 2, "y1": 2}],
+            "furigana": [],
+        }), "utf-8")
+        formula_path = job_dir / "formula-source.json"
+        formula_path.write_text('{"formulas":[]}', "utf-8")
+        final_job = {
+            "contract": "reader-library-ocr/1",
+            "jobId": "ocrjob_" + engine,
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "engine": engine,
+            "state": "succeeded",
+            "totalPages": 1,
+            "successfulPages": 1,
+            "formulaState": "unavailable",
+            "formulaTotal": 0,
+            "resultAvailable": True,
+            "updatedAtEpochMs": 1,
+        }
+        (job_dir / "job.json").write_text(json.dumps(final_job), "utf-8")
+        return _publish_release(
+            SimpleNamespace(
+                book_id=self.entry["bookId"],
+                content_sha256=self.entry["contentSha256"],
+                engine=engine,
+                max_bytes=1024 * 1024,
+            ),
+            job_dir,
+            formula_path,
+            final_job,
+            source_path=self.vault / "A.pdf",
+        )
+
+    def _list(self) -> dict:
+        return self.service.list_releases(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+
+    def test_two_runs_coexist_with_dates_and_one_is_active(self) -> None:
+        first = self._publish("vision", "V")
+        second = self._publish("manga", "M")
+        listing = self._list()
+        revisions = {run["revision"] for run in listing["runs"]}
+        self.assertEqual(revisions, {first, second})
+        # 磁盘上本来就并存了；缺的只是枚举 + 日期 + 切换。
+        self.assertEqual(len(listing["runs"]), 2)
+        for run in listing["runs"]:
+            self.assertRegex(run["runId"], r"^ocrrun_[0-9a-f]{16}$")
+            # 日期不编造：取不到就是 None，UI 显示"日期未知"。
+            self.assertTrue(
+                run["publishedAtEpochMs"] is None
+                or isinstance(run["publishedAtEpochMs"], int)
+            )
+        active = [run for run in listing["runs"] if run["isActive"]]
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["revision"], second)
+
+    def test_activate_switches_the_published_result(self) -> None:
+        first = self._publish("vision", "V")
+        self._publish("manga", "M")
+        target = next(
+            run for run in self._list()["runs"] if run["revision"] == first
+        )
+        after = self.service.activate_run(
+            self.entry["bookId"], self.entry["contentSha256"], target["runId"]
+        )
+        self.assertEqual(after["activeRunId"], target["runId"])
+        status = self.service.status(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.assertEqual(status["engine"], "vision")
+
+    def test_deleting_a_non_active_run_keeps_the_active_one_working(self) -> None:
+        first = self._publish("vision", "V")
+        self._publish("manga", "M")
+        victim = next(
+            run for run in self._list()["runs"] if run["revision"] == first
+        )
+        after = self.service.delete_run(
+            self.entry["bookId"], self.entry["contentSha256"], victim["runId"]
+        )
+        self.assertEqual(len(after["runs"]), 1)
+        self.assertFalse(
+            (self.version / "releases" / first).exists(),
+            "物理目录应当已被删除",
+        )
+        status = self.service.status(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.assertEqual(status["engine"], "manga")
+
+    def test_deleting_the_active_run_requires_explicit_confirmation(self) -> None:
+        self._publish("vision", "V")
+        listing = self._list()
+        active = next(run for run in listing["runs"] if run["isActive"])
+        with self.assertRaises(ReaderBookOcrError) as caught:
+            self.service.delete_run(
+                self.entry["bookId"], self.entry["contentSha256"], active["runId"]
+            )
+        self.assertEqual(caught.exception.code, "ocr-run-active")
+        self.assertEqual(caught.exception.status, 409)
+
+    def test_deleting_the_last_run_does_not_brick_the_book(self) -> None:
+        """删完最后一份之后，status 必须还能查 —— 否则连重跑都发不出去。
+
+        旧的 _published_snapshot 对任何缺件一律抛 500，而 status() 无条件调它：
+        删除一旦上线，这本书就会被焊死。这条测试钉住那个自愈分支。
+        """
+
+        self._publish("vision", "V")
+        active = next(run for run in self._list()["runs"] if run["isActive"])
+        after = self.service.delete_run(
+            self.entry["bookId"],
+            self.entry["contentSha256"],
+            active["runId"],
+            allow_deactivate=True,
+        )
+        self.assertEqual(after["runs"], [])
+        self.assertIsNone(after["activeRunId"])
+        status = self.service.status(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.assertEqual(status["state"], "idle")
+
+    def test_stale_fence_pointing_at_a_removed_release_is_not_fatal(self) -> None:
+        """围栏还在、结果目录没了（删除中途崩溃）时，也不能把书焊死。"""
+
+        revision = self._publish("vision", "V")
+        shutil.rmtree(self.version / "releases" / revision)
+        self.assertTrue((self.version / "publication.json").exists())
+        # 要害是**不再 500**：旧行为会在这里抛 ocr-publication-invalid，
+        # 而 status() 是无条件调 _published_snapshot 的，于是整本书连状态都查不了。
+        status = self.service.status(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.assertIn("state", status)
+        # 而且必须还能重新发起预处理 —— 否则"查得到状态"也只是好看而已。
+        job, _already = self.service.start(
+            self.entry["bookId"], self.entry["contentSha256"], "vision"
+        )
+        self.assertEqual(job["state"], "queued")
+        # ⚠ 已知不足：此时 status 会报 failed / ocr-publication-incomplete，
+        #   因为上一次的可变暂存还指着已被删的那一版。正常删除路径会把它一并归档
+        #   （_archive_stale_staging_locked），只有"删到一半崩了"才会看到这个提示。
+        #   它有误导性但不阻塞操作，留作后续。
+
+    def test_run_ids_are_stable_across_repeated_listing(self) -> None:
+        """回填是按需重跑的；runId 必须确定性派生，否则每次列举都变成"新的一条"。"""
+
+        self._publish("vision", "V")
+        first = {run["runId"] for run in self._list()["runs"]}
+        second = {run["runId"] for run in self._list()["runs"]}
+        self.assertEqual(first, second)
 
 
 class ReaderBookOcrFormulaWorkerTest(unittest.TestCase):

@@ -134,6 +134,25 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
         self.assertEqual(
             self.client.get("/pdf/api/library/ocr/executors").status_code, 401
         )
+        # 多份预处理结果的三条（列举 / 切换 / 删除）—— 删除尤其不能漏：
+        # 它是唯一会真的抹掉数据的路由。
+        self.assertEqual(
+            self.client.get(
+                "/pdf/api/library/ocr/releases",
+                query_string={"bookId": "book_" + "a" * 32, "contentSha256": "b" * 64},
+            ).status_code,
+            401,
+        )
+        for route in ("activate", "delete"):
+            denied = self.client.post(
+                f"/pdf/api/library/ocr/releases/{route}",
+                json={
+                    "bookId": "book_" + "a" * 32,
+                    "contentSha256": "b" * 64,
+                    "runId": "ocrrun_" + "0" * 16,
+                },
+            )
+            self.assertEqual(denied.status_code, 401)
         self.assertEqual(
             self.client.post(
                 "/pdf/api/library/ocr/worker/claim",
@@ -542,6 +561,43 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
             query_string={"contentSha256": "0" * 64},
         )
         self.assertEqual(stale.status_code, 409)
+
+    def test_release_listing_switching_and_deletion_over_http(self) -> None:
+        """三条新路由端到端走一遍 —— 服务层通了不等于 HTTP 层也通。"""
+
+        (self.vault / "A.pdf").write_bytes(PDF_A)
+        entry = self.client.get("/pdf/api/library/catalog").get_json()["books"][0]
+        query = {
+            "bookId": entry["bookId"],
+            "contentSha256": entry["contentSha256"],
+        }
+        listing = self.client.get("/pdf/api/library/ocr/releases", query_string=query)
+        self.assertEqual(listing.status_code, 200)
+        payload = listing.get_json()
+        # 还没跑过预处理：空列表而不是报错。
+        self.assertEqual(payload["runs"], [])
+        self.assertIsNone(payload["activeRunId"])
+        # 删除/切换会立刻改变它，不允许任何中间缓存留副本。
+        self.assertEqual(listing.headers.get("Cache-Control"), "private, no-store")
+
+        # 未知 runId 要 404，而不是悄悄成功或 500。
+        missing = self.client.post(
+            "/pdf/api/library/ocr/releases/delete",
+            json={**query, "runId": "ocrrun_" + "0" * 16, "allowDeactivate": True},
+        )
+        self.assertEqual(missing.status_code, 404)
+        # 格式非法的 runId 要 400（跟"不存在"分开报，便于排查）。
+        malformed = self.client.post(
+            "/pdf/api/library/ocr/releases/activate",
+            json={**query, "runId": "nope"},
+        )
+        self.assertEqual(malformed.status_code, 400)
+        # 请求体是硬白名单：多一个字段就 400。
+        extra = self.client.post(
+            "/pdf/api/library/ocr/releases/activate",
+            json={**query, "runId": "ocrrun_" + "0" * 16, "surprise": 1},
+        )
+        self.assertEqual(extra.status_code, 400)
 
     def test_versioned_attachments_and_page_formula_layer(self) -> None:
         (self.vault / "A.pdf").write_bytes(PDF_A)

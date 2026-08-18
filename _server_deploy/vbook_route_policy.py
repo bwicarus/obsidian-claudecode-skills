@@ -101,6 +101,9 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_library_ocr_adoption_preview': 'GLOBAL',
     'pdf_reader.pdf_api_library_ocr_adopt': 'GLOBAL',
     'pdf_reader.pdf_api_library_ocr_status': 'GLOBAL',
+    'pdf_reader.pdf_api_library_ocr_releases': 'GLOBAL',   # /pdf/api/library/ocr/releases
+    'pdf_reader.pdf_api_library_ocr_release_activate': 'GLOBAL',   # /pdf/api/library/ocr/releases/activate
+    'pdf_reader.pdf_api_library_ocr_release_delete': 'GLOBAL',   # /pdf/api/library/ocr/releases/delete
     'pdf_reader.pdf_api_library_ocr_pause': 'GLOBAL',
     'pdf_reader.pdf_api_library_ocr_resume': 'GLOBAL',
     'pdf_reader.pdf_api_library_ocr_cancel': 'GLOBAL',

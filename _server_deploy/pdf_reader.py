@@ -3995,6 +3995,8 @@ def _reader_library_ocr_body(
     allow_engine: bool = False,
     allow_executor: bool = False,
     allow_processing_profile: bool = False,
+    allow_run_id: bool = False,
+    allow_allow_deactivate: bool = False,
 ):
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -4006,6 +4008,10 @@ def _reader_library_ocr_body(
         allowed.add("executor")
     if allow_processing_profile:
         allowed.add("processingProfile")
+    if allow_run_id:
+        allowed.add("runId")
+    if allow_allow_deactivate:
+        allowed.add("allowDeactivate")
     if set(body) - allowed:
         raise ReaderBookOcrError("invalid-request", "unknown OCR request fields", status=400)
     return (
@@ -4015,6 +4021,23 @@ def _reader_library_ocr_body(
         str(body.get("executor") or "pi"),
         (str(body.get("processingProfile")) if body.get("processingProfile") is not None else None),
     )
+
+
+def _reader_library_ocr_run_fields() -> tuple[str, bool]:
+    """取 runId 与 allowDeactivate。
+
+    单独一个函数而不是扩展上面那个 5 元组返回值：现有 6 个调用点都在按位解包，
+    改元组长度会把它们全部打断，而这两个字段只有删除/切换用得上。
+    """
+
+    body = request.get_json(silent=True) or {}
+    run_id = str(body.get("runId") or "")
+    raw = body.get("allowDeactivate")
+    if raw is not None and not isinstance(raw, bool):
+        raise ReaderBookOcrError(
+            "invalid-request", "allowDeactivate must be a boolean", status=400
+        )
+    return run_id, bool(raw)
 
 
 @bp.route("/api/library/ocr/start", methods=["POST"])
@@ -4077,6 +4100,78 @@ def pdf_api_library_ocr_adopt():
         payload = _reader_book_ocr_wire_payload(job, already=already)
         payload["adoption"] = adoption
         return jsonify(payload)
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+
+
+@bp.route("/api/library/ocr/releases")
+def pdf_api_library_ocr_releases():
+    """列出这本书的**全部**预处理结果（带日期），并标出当前生效的那一份。
+
+    用户 2026-08-18：「预处理的结果标记上日期用以区分，而不是覆盖」。
+    磁盘上本来就并存（releases/<revision>/ 不可变），缺的只是枚举这一步。
+    """
+
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    if set(request.args) - {"bookId", "contentSha256"}:
+        return _reader_library_ocr_error(ReaderBookOcrError(
+            "invalid-request", "unknown OCR releases fields", status=400
+        ))
+    try:
+        payload = _reader_book_ocr().list_releases(
+            str(request.args.get("bookId") or ""),
+            str(request.args.get("contentSha256") or ""),
+        )
+        response = jsonify(payload)
+        # 结果按账号隔离，且删除/切换会立刻改变它 —— 不允许任何中间缓存留副本。
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+
+
+@bp.route("/api/library/ocr/releases/activate", methods=["POST"])
+def pdf_api_library_ocr_release_activate():
+    """把某一次预处理结果设为当前生效。
+
+    没有它，"多份并存"只会变成一堆看得见用不上的历史 —— 用户要的是能换回去。
+    """
+
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    try:
+        book_id, content_sha256, _engine, _executor, _profile = _reader_library_ocr_body(
+            allow_run_id=True,
+        )
+        run_id, _allow_deactivate = _reader_library_ocr_run_fields()
+        return jsonify(_reader_book_ocr().activate_run(book_id, content_sha256, run_id))
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+
+
+@bp.route("/api/library/ocr/releases/delete", methods=["POST"])
+def pdf_api_library_ocr_release_delete():
+    """删除某一次预处理结果。**只删预处理产物，永不碰原书。**
+
+    删当前生效的那一份需要 allowDeactivate=true 明确确认 —— 不让系统进入
+    "有结果但没有当前生效"的状态而用户不知情。
+    """
+
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    try:
+        book_id, content_sha256, _engine, _executor, _profile = _reader_library_ocr_body(
+            allow_run_id=True,
+            allow_allow_deactivate=True,
+        )
+        run_id, allow_deactivate = _reader_library_ocr_run_fields()
+        return jsonify(_reader_book_ocr().delete_run(
+            book_id, content_sha256, run_id, allow_deactivate=allow_deactivate
+        ))
     except ReaderBookOcrError as exc:
         return _reader_library_ocr_error(exc)
 

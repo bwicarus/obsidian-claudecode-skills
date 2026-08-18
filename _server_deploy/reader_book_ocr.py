@@ -59,6 +59,17 @@ MAX_PAGES_DEFAULT = 5000
 MAX_ADOPTION_BYTES_DEFAULT = 512 * 1024 * 1024
 MAX_ADOPTION_PAGE_BYTES = 64 * 1024 * 1024
 PUBLICATION_CONTRACT = "reader-book-ocr-publication/1"
+# 运行台账：一次预处理 = 一条 run。
+#
+# 为什么不能直接给 revision 加日期：revision 是**内容寻址**的
+# （_manifest_revision 明确把 generatedAtEpochMs 剔除，发布时还硬传 0），
+# 同参数重跑出相同字节会塌成同一个目录 —— 第二次运行连一条记录都不会留下。
+# 所以另立 run 这一层：一个 revision 可被多条 run 引用，删除按 run 删，
+# 引用归零才删物理目录。目录布局一个字节不改（日期进目录名会破坏内容寻址与去重）。
+#
+# 台账是**纯派生物**：删掉它，旧代码按 publication.json 照常工作，一个字节不丢。
+RELEASE_INDEX_CONTRACT = "reader-book-ocr-release-index/1"
+RUN_ID_RE = re.compile(r"ocrrun_[0-9a-f]{16}")
 MAX_PC_PAGE_BYTES_DEFAULT = 16 * 1024 * 1024
 MAX_PC_FORMULA_BYTES_DEFAULT = 32 * 1024 * 1024
 MAX_PC_PROGRESS_BYTES_DEFAULT = 64 * 1024
@@ -2126,6 +2137,185 @@ class ReaderBookOcrService:
                 "worker-start-failed", "Pi preprocessing failed to start", status=500
             ) from exc
 
+    # ── 运行台账（releases-index.json）─────────────────────────────────
+    #
+    # 真相是 activeRunId；publication.json 降级为它的派生镜像。这样
+    # _published_snapshot 与全部读路由一行不改就继续正确工作，也随时可回滚。
+
+    @staticmethod
+    def _index_path(version_dir: Path) -> Path:
+        return version_dir / "releases-index.json"
+
+    @classmethod
+    def _release_dir_for(cls, version_dir: Path, engine: str, revision: str) -> Path:
+        if engine == LEGACY_ENGINE:
+            return version_dir / LEGACY_ENGINE / "releases" / revision
+        return version_dir / "releases" / revision
+
+    @staticmethod
+    def _release_rel_for(engine: str, revision: str) -> str:
+        if engine == LEGACY_ENGINE:
+            return f"legacy/releases/{revision}"
+        return f"releases/{revision}"
+
+    @staticmethod
+    def _migrated_run_id(engine: str, revision: str) -> str:
+        """给磁盘上已存在的 release 派生一个稳定 runId。
+
+        必须是确定性的：回填会在每次 list/status 时按需重跑，非确定性的 id
+        会让同一份结果每次都变成"新的一条"。
+        """
+
+        digest = hashlib.sha256(f"{engine}\x00{revision}\x00migrated".encode("utf-8")).hexdigest()
+        return "ocrrun_" + digest[:16]
+
+    def _scan_release_dirs(self, version_dir: Path) -> list[tuple[str, str]]:
+        """枚举磁盘上真实存在的 release，返回 [(engine, revision)]。"""
+
+        found: list[tuple[str, str]] = []
+        for engine, root in (
+            ("", version_dir / "releases"),
+            (LEGACY_ENGINE, version_dir / LEGACY_ENGINE / "releases"),
+        ):
+            if not root.is_dir():
+                continue
+            for entry in sorted(root.iterdir()):
+                if not entry.is_dir() or not re.fullmatch(r"ocr_[0-9a-f]{20}", entry.name):
+                    continue
+                if not (entry / "attachments.json").is_file():
+                    continue
+                if engine:
+                    found.append((engine, entry.name))
+                    continue
+                # 非 legacy 的 release 目录本身不带引擎名，engine 记在 job.json 里。
+                job = self._read_optional(entry / "job.json") or {}
+                actual = str(job.get("engine") or "")
+                found.append((actual if actual in ENGINES else "vision", entry.name))
+        return found
+
+    def _run_entry_from_release(
+        self, version_dir: Path, engine: str, revision: str
+    ) -> dict | None:
+        release_dir = self._release_dir_for(version_dir, engine, revision)
+        if not release_dir.is_dir():
+            return None
+        job = self._read_optional(release_dir / "job.json") or {}
+        result = self._read_optional(release_dir / "result.json") or {}
+        manifest = self._read_optional(release_dir / "attachments.json") or {}
+        executor, profile = self._processing_identity(job if job else result)
+        # 时间取值链，取不到就留 None —— **不编造**，UI 显示"日期未知"。
+        published_at = result.get("completedAtEpochMs")
+        if not isinstance(published_at, int):
+            published_at = result.get("adoptedAtEpochMs")
+        if not isinstance(published_at, int):
+            try:
+                published_at = int(release_dir.stat().st_mtime * 1000)
+            except OSError:
+                published_at = None
+        started_at = job.get("createdAtEpochMs")
+        if not isinstance(started_at, int):
+            started_at = None
+        run_id = str(job.get("runId") or "")
+        if not RUN_ID_RE.fullmatch(run_id):
+            run_id = self._migrated_run_id(engine, revision)
+        total_pages = manifest.get("totalPages")
+        if not isinstance(total_pages, int):
+            total_pages = result.get("totalPages")
+        return {
+            "runId": run_id,
+            "revision": revision,
+            "engine": engine,
+            "executor": executor,
+            "processingProfile": profile,
+            "release": self._release_rel_for(engine, revision),
+            "startedAtEpochMs": started_at,
+            "publishedAtEpochMs": published_at,
+            "totalPages": total_pages if isinstance(total_pages, int) else None,
+            "origin": "legacy-adopt" if engine == LEGACY_ENGINE else executor,
+        }
+
+    def _reconcile_index_locked(self, book_id: str, content_sha256: str) -> dict:
+        """按需回填/校正台账。惰性迁移：不写迁移脚本，也不删任何东西。"""
+
+        version_dir = self._version_dir(book_id, content_sha256)
+        runs: list[dict] = []
+        for engine, revision in self._scan_release_dirs(version_dir):
+            entry = self._run_entry_from_release(version_dir, engine, revision)
+            if entry is not None:
+                runs.append(entry)
+        runs.sort(
+            key=lambda item: (item.get("publishedAtEpochMs") or 0, item["runId"]),
+            reverse=True,
+        )
+        existing = self._read_optional(self._index_path(version_dir)) or {}
+        active = str(existing.get("activeRunId") or "")
+        known = {item["runId"] for item in runs}
+        if active not in known:
+            active = ""
+        if not active:
+            # 台账缺 active 时以围栏为准（这也是首次回填的入口）。
+            fence = self._read_optional(version_dir / "publication.json") or {}
+            fence_revision = str(fence.get("revision") or "")
+            fence_engine = str(fence.get("engine") or "")
+            for item in runs:
+                if item["revision"] == fence_revision and item["engine"] == fence_engine:
+                    active = item["runId"]
+                    break
+        try:
+            generation = int(existing.get("generation") or 0)
+        except (TypeError, ValueError):
+            generation = 0
+        index = {
+            "contract": RELEASE_INDEX_CONTRACT,
+            "bookId": book_id,
+            "contentSha256": content_sha256,
+            "generation": generation + 1,
+            "activeRunId": active or None,
+            "runs": runs,
+        }
+        if version_dir.is_dir():
+            atomic_write_json(self._index_path(version_dir), index, indent=2, mode=0o600)
+        return index
+
+    def _build_fence_from_release(
+        self, book_id: str, content_sha256: str, engine: str, revision: str
+    ) -> dict:
+        """从 release 目录**重建**发布围栏。
+
+        围栏的每个字段都能从磁盘推出来，所以不在台账里存副本 ——
+        存副本就会出现"台账说 A、结果是 B"的第三种不一致。
+        """
+
+        version_dir = self._version_dir(book_id, content_sha256)
+        release_dir = self._release_dir_for(version_dir, engine, revision)
+        manifest_path = release_dir / "attachments.json"
+        result = self._read_optional(release_dir / "result.json") or {}
+        job = self._read_optional(release_dir / "job.json") or {}
+        try:
+            manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise ReaderBookOcrError(
+                "ocr-release-missing", "该预处理结果已不在服务器上", status=409
+            ) from exc
+        source_identity = result.get("sourceIdentity")
+        if not isinstance(source_identity, dict):
+            raise ReaderBookOcrError(
+                "ocr-release-invalid", "该预处理结果缺少来源身份，无法启用", status=409
+            )
+        executor, profile = self._processing_identity(job if job else result)
+        return {
+            "contract": PUBLICATION_CONTRACT,
+            "bookId": book_id,
+            "contentSha256": content_sha256,
+            "engine": engine,
+            "executor": executor,
+            "processingProfile": profile,
+            "revision": revision,
+            "release": self._release_rel_for(engine, revision),
+            "manifestSha256": manifest_sha,
+            "sourceIdentity": dict(source_identity),
+        }
+
     def _activate_published_locked(self, version_dir: Path, published: dict) -> None:
         """Repair mutable status pointers from one already-validated release."""
         engine = published["engine"]
@@ -2312,6 +2502,213 @@ class ReaderBookOcrService:
             "executorOnline": pc["online"],
             "executorLastSeenAtEpochMs": pc["lastSeenAtEpochMs"],
         }
+
+    # ── 列举 / 切换 / 删除 ─────────────────────────────────────────────
+
+    def _staging_archive_bytes(self, version_dir: Path) -> int:
+        root = version_dir / "staging-archive"
+        if not root.is_dir():
+            return 0
+        total = 0
+        for path in root.rglob("*"):
+            try:
+                if path.is_file():
+                    total += path.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    def _has_active_job_locked(self, version_dir: Path) -> bool:
+        for engine in sorted(ENGINES):
+            job = self._read_optional(version_dir / engine / "job.json") or {}
+            if job.get("state") in ACTIVE_STATES:
+                return True
+        return False
+
+    def _public_runs(self, index: dict) -> list[dict]:
+        active = index.get("activeRunId")
+        by_revision: dict[str, list[str]] = {}
+        for item in index.get("runs") or []:
+            by_revision.setdefault(item["revision"], []).append(item["runId"])
+        out = []
+        for item in index.get("runs") or []:
+            same = [
+                run_id for run_id in by_revision.get(item["revision"], [])
+                if run_id != item["runId"]
+            ]
+            entry = dict(item)
+            entry["isActive"] = item["runId"] == active
+            # 同一 revision 的多条 run = 重跑出了完全一样的结果。
+            # 如实告诉用户，别让他以为两份内容不同。
+            entry["sameRevisionRunIds"] = same
+            out.append(entry)
+        return out
+
+    def list_releases(self, book_id: str, content_sha256: str) -> dict:
+        """列出这本书这一版内容下的**全部**预处理结果。"""
+
+        self.resolve(book_id, content_sha256)
+        version_dir = self._version_dir(book_id, content_sha256)
+        with exclusive_lock(self.lock_path):
+            index = self._reconcile_index_locked(book_id, content_sha256)
+            return {
+                "contract": RELEASE_INDEX_CONTRACT,
+                "bookId": book_id,
+                "contentSha256": content_sha256,
+                "generation": index["generation"],
+                "activeRunId": index.get("activeRunId"),
+                "runs": self._public_runs(index),
+                "stagingArchiveBytes": self._staging_archive_bytes(version_dir),
+            }
+
+    def _write_index_locked(self, version_dir: Path, index: dict) -> None:
+        atomic_write_json(self._index_path(version_dir), index, indent=2, mode=0o600)
+
+    def _apply_active_locked(
+        self, book_id: str, content_sha256: str, index: dict, run_id: str | None
+    ) -> None:
+        """把 activeRunId 落到台账，并据此重建/清除派生镜像。
+
+        顺序固定：先写台账（真相），再重建围栏与镜像（派生）。反过来会出现
+        "围栏已指向新的、台账还说旧的"，而所有读路由都信围栏。
+        """
+
+        version_dir = self._version_dir(book_id, content_sha256)
+        index = dict(index)
+        index["activeRunId"] = run_id
+        index["generation"] = int(index.get("generation") or 0) + 1
+        self._write_index_locked(version_dir, index)
+        fence_path = version_dir / "publication.json"
+        if run_id is None:
+            # 没有生效结果：把围栏与镜像一并清掉，让 _published_snapshot
+            # 走它已有的"围栏不存在 → None"合法分支。
+            for name in ("publication.json", "current.json", "result.json"):
+                try:
+                    (version_dir / name).unlink()
+                except FileNotFoundError:
+                    pass
+            return
+        entry = next(
+            (item for item in index.get("runs") or [] if item["runId"] == run_id), None
+        )
+        if entry is None:
+            raise ReaderBookOcrError("ocr-run-unknown", "没有这条预处理记录", status=404)
+        fence = self._build_fence_from_release(
+            book_id, content_sha256, entry["engine"], entry["revision"]
+        )
+        atomic_write_json(fence_path, fence, indent=2, mode=0o600)
+        published = self._published_snapshot(book_id, content_sha256)
+        if published is None:
+            raise ReaderBookOcrError(
+                "ocr-release-invalid", "该预处理结果无法启用", status=409
+            )
+        self._activate_published_locked(version_dir, published)
+
+    def activate_run(self, book_id: str, content_sha256: str, run_id: str) -> dict:
+        """把某一次预处理结果设为当前生效。"""
+
+        self.resolve(book_id, content_sha256)
+        if not RUN_ID_RE.fullmatch(str(run_id or "")):
+            raise ReaderBookOcrError("ocr-run-invalid", "预处理记录编号无效", status=400)
+        version_dir = self._version_dir(book_id, content_sha256)
+        with exclusive_lock(self.lock_path):
+            if self._has_active_job_locked(version_dir):
+                raise ReaderBookOcrError(
+                    "ocr-busy", "这本书正在预处理，请先等它结束", status=409
+                )
+            index = self._reconcile_index_locked(book_id, content_sha256)
+            if not any(item["runId"] == run_id for item in index.get("runs") or []):
+                raise ReaderBookOcrError("ocr-run-unknown", "没有这条预处理记录", status=404)
+            self._apply_active_locked(book_id, content_sha256, index, run_id)
+        return self.list_releases(book_id, content_sha256)
+
+    def delete_run(
+        self,
+        book_id: str,
+        content_sha256: str,
+        run_id: str,
+        *,
+        allow_deactivate: bool = False,
+    ) -> dict:
+        """删除某一次预处理结果。**只删预处理产物，永不碰原书。**"""
+
+        self.resolve(book_id, content_sha256)
+        if not RUN_ID_RE.fullmatch(str(run_id or "")):
+            raise ReaderBookOcrError("ocr-run-invalid", "预处理记录编号无效", status=400)
+        version_dir = self._version_dir(book_id, content_sha256)
+        with exclusive_lock(self.lock_path):
+            if self._has_active_job_locked(version_dir):
+                raise ReaderBookOcrError(
+                    "ocr-busy", "这本书正在预处理，请先等它结束", status=409
+                )
+            index = self._reconcile_index_locked(book_id, content_sha256)
+            runs = list(index.get("runs") or [])
+            target = next((item for item in runs if item["runId"] == run_id), None)
+            if target is None:
+                raise ReaderBookOcrError("ocr-run-unknown", "没有这条预处理记录", status=404)
+            remaining = [item for item in runs if item["runId"] != run_id]
+            was_active = index.get("activeRunId") == run_id
+            if was_active and not allow_deactivate:
+                # 不让系统进入"有结果但没有当前生效"的状态：要么先切走，
+                # 要么调用方明确表示"删了就先不用了"。
+                raise ReaderBookOcrError(
+                    "ocr-run-active",
+                    "这是当前生效的结果；请先切换到别的结果，或确认删除后暂不使用预处理",
+                    status=409,
+                )
+            # 先把 active 挪走（还有别的就顺位接上，没有就置空），再动磁盘。
+            if was_active:
+                next_active = remaining[0]["runId"] if remaining else None
+                index = {**index, "runs": remaining}
+                self._apply_active_locked(book_id, content_sha256, index, next_active)
+            else:
+                index = {**index, "runs": remaining}
+                self._write_index_locked(version_dir, index)
+            # 同一 revision 还被别的 run 引用时只减引用，不删物理目录。
+            still_referenced = any(
+                item["revision"] == target["revision"] and item["engine"] == target["engine"]
+                for item in remaining
+            )
+            if not still_referenced:
+                self._discard_release_dir(
+                    version_dir, target["engine"], target["revision"]
+                )
+            # 可变暂存若还指着被删的那一版，一并归档 —— 否则 status() 会拿它
+            # 编出"发布未完成，请重试"这种与事实不符的提示。
+            self._archive_stale_staging_locked(version_dir, target["revision"])
+        return self.list_releases(book_id, content_sha256)
+
+    def _discard_release_dir(self, version_dir: Path, engine: str, revision: str) -> None:
+        """先整目录改名，再递归删。
+
+        直接 rmtree 会让目录短暂处于"残缺但存在"的状态，而按 revision 读的路径
+        （_snapshot_for_revision）在那一瞬间会从"目录不在 → 409"掉进
+        "目录残缺 → 500"。改名让"在"与"不在"之间没有中间态。
+        """
+
+        release_dir = self._release_dir_for(version_dir, engine, revision)
+        if not release_dir.exists():
+            return
+        trash = version_dir / f".trash-{uuid.uuid4().hex}"
+        try:
+            os.replace(release_dir, trash)
+        except OSError as exc:
+            raise ReaderBookOcrError(
+                "ocr-run-delete-failed", "删除预处理结果失败", status=500
+            ) from exc
+        shutil.rmtree(trash, ignore_errors=True)
+
+    def _archive_stale_staging_locked(self, version_dir: Path, revision: str) -> None:
+        for engine in sorted(ENGINES):
+            job_path = version_dir / engine / "job.json"
+            job = self._read_optional(job_path)
+            if not job:
+                continue
+            if job.get("pageCharsRevision") != revision and job.get("revision") != revision:
+                continue
+            self._archive_mutable_staging_locked(
+                version_dir, version_dir / engine, job
+            )
 
     def status(self, book_id: str, content_sha256: str) -> dict:
         self.resolve(book_id, content_sha256)
@@ -2512,6 +2909,22 @@ class ReaderBookOcrService:
             if engine == LEGACY_ENGINE
             else version_dir / "releases" / revision
         )
+        if fence_override is None and not release_dir.is_dir():
+            # 这条围栏指向的 release 已经不在磁盘上了（结果被删除，或上一次删除
+            # 中途崩了）。**这是合法状态，不是损坏。**
+            #
+            # 旧行为是继续往下走，然后在 attachments.json 读不到时抛 500
+            # ocr-publication-invalid —— 而 status() 是无条件调用本函数的，
+            # 于是整本书连状态都查不了、连重跑都发不出去，**书被焊死**。
+            # 删除功能一旦上线，这条路径就会被真实走到。
+            #
+            # 正常的删除会在同一把锁里把围栏一并清掉，所以走到这里通常意味着
+            # 中途崩溃；把它当作"这本书当前没有已发布结果"是安全且自愈的：
+            # 调用方拿到 None 走它已有的合法分支，随后的 reconcile 会把围栏补掉。
+            #
+            # ⚠ 只对"读围栏"这条路生效。fence_override 是按 revision 显式读某一份
+            #   （_snapshot_for_revision），那里目录不在必须如实报错，不能悄悄回落。
+            return None
         job_path = release_dir / "job.json"
         manifest_path = release_dir / "attachments.json"
         formulas_path = release_dir / "formulas.json"
