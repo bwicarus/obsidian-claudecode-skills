@@ -75,6 +75,16 @@ ICON_FILES = (
 LAUNCHER_FILES = ("BW扩展测试.cmd", "BW扩展测试.ps1")
 WINDOWS_SOURCE_FILES = (
     *LAUNCHER_FILES,
+    # 语音链路只读诊断探针（不打包、不部署）。2026-08-18 那次排查绕的弯路
+    # 全部来自"看不见发生了什么"，这个工具是那次的沉淀；它必须留在仓库里，
+    # 而白名单是精确的，所以每个文件都要在这儿列一遍。
+    "VoiceSignalProbe/.gitignore",
+    "VoiceSignalProbe/HookProbe.cs",
+    "VoiceSignalProbe/Program.cs",
+    "VoiceSignalProbe/README.md",
+    "VoiceSignalProbe/SignalDiff.cs",
+    "VoiceSignalProbe/Timing.cs",
+    "VoiceSignalProbe/VoiceSignalProbe.csproj",
     "SURFACE-PEN-CHECKLIST.md",
     "bw-computer-voice-preflight.ps1",
     "bw_computer_voice_supervisor.py",
@@ -466,6 +476,11 @@ def validate_source_layout(source_root: Path = HERE) -> None:
             "ComputerVoiceAudio/obj",
             "candidates",
             "readerpc-candidates",
+            # 诊断探针是独立工程，跟桥一样会在自己目录下产出 bin/obj。
+            # 它不打包、不部署（IsPackable/IsPublishable=false），但源码要留在仓库里 ——
+            # 一个查不到的诊断工具等于没有（见 references/observability-lessons.md）。
+            "VoiceSignalProbe/bin",
+            "VoiceSignalProbe/obj",
         }),
     )
     if any(not name.endswith(".js") for name in (*SRC_FILES, *expected_vendor_files(source_root))):

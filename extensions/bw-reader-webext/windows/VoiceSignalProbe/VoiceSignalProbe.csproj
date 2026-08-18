@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    电脑语音链路的**只读诊断探针**。不参与桥的打包，也不部署到任何地方 ——
+    它存在的唯一目的是：出问题时能看见发生了什么。
+
+    ⚠ 与 ComputerVoiceAudio 是两个独立工程，故意不共享程序集：
+    诊断通道穿过被诊断的对象就会互相污染（references/silent-failure-lessons.md
+    里最贵的那条教训就是这么来的）。这里的 COM 声明是自带的副本，宁可重复。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>bw-voice-signal-probe</AssemblyName>
+    <RootNamespace>BwReader.VoiceSignalProbe</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- 诊断工具不进任何交付物；这里显式关掉打包相关行为，避免被误收。 -->
+    <IsPackable>false</IsPackable>
+    <IsPublishable>false</IsPublishable>
+  </PropertyGroup>
+</Project>
