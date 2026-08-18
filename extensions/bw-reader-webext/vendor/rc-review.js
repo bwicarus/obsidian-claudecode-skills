@@ -1810,6 +1810,30 @@ if (window.__bwPwaProviderOnly) return;
     }
     var aid = _answerAid();
     var reviewedAt = Date.now();
+    // ★ 先把这次复习**作为事件**记下来（2026-08-18 用户要求"统一学习进度"的第一步）。
+    //   在此之前，本地评分在写入的瞬间就把 (卡, 时刻, 评分) 永久销毁了：
+    //   本地卡库存的是状态不是事件（REVIEW_FIELDS 里没有历史位，ease 只留最后一次），
+    //   而 Anki 那边只有解析得出 cardId 的卡才投影得过去 —— 大部分评分既不进 Anki
+    //   也不留痕迹。
+    //   这里只记录，**不改任何调度行为**：下面 patchState 那套 LWW 原样不动。
+    //   走 outbox 是因为它天然 at-least-once + 服务端按 mutationId 幂等，离线也不丢；
+    //   而且 reviewedAt 记的是**真实复习时刻** —— answerCards 传不了时间戳，
+    //   离线补投会被 Anki 记成"补投那一刻"，日志里才有真相。
+    try {
+      if (RC.outbox && typeof RC.outbox.send === 'function') {
+        RC.outbox.send('revlog', 'revlog:' + local.gid + ':' + local.cardIndex + ':' + aid,
+          '/pdf/api/review-event', {
+            id: 'revlog:' + local.gid + ':' + local.cardIndex + ':' + aid,
+            gid: local.gid,
+            index: local.cardIndex,
+            ease: ease,
+            reviewedAt: reviewedAt,
+            source: 'reader',
+            ankiCardId: card && card._legacyExternalCardId ? String(card._legacyExternalCardId) : '',
+            file: (window.UP_FILE || (window.RC && RC.file) || '')
+          });
+      }
+    } catch (e) {}
     var nextReview = _scheduledLocalReview(local.review, ease, reviewedAt);
     repository.patchState(local.gid, local.cardIndex, {
       review: nextReview

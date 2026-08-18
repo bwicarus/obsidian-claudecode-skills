@@ -14695,6 +14695,82 @@ def pdf_api_sync_batch():
 
 
 _LOOKUP_EVT_SEEN = CLAUDE_DIR / "state" / "lookup-events-seen.json"
+# 复习事件日志（append-only JSONL）与去重表。只写不读 —— 消费方将来单独做。
+_REVIEW_EVT_LOG = CLAUDE_DIR / "state" / "reader-review-events.jsonl"
+_REVIEW_EVT_SEEN = CLAUDE_DIR / "state" / "reader-review-events.seen.json"
+
+@bp.route("/api/review-event", methods=["POST"])
+def pdf_api_review_event():
+    """复习事件**只记录**（教义同 lookup-event:服务器=事件中继/聚合，不产生调度副作用）。
+
+    为什么需要它（2026-08-18 用户要求"统一学习进度"）：
+      阅读器里的每一次评分，此前在写入的瞬间就把 (卡, 时刻, 评分) 永久销毁了 ——
+      本地卡库存的是**状态**不是事件（card-repository.js 的 REVIEW_FIELDS 白名单里
+      没有历史位，ease 只保留最后一次），而 Anki 那边只有能解析出 cardId 的卡才
+      投影得过去。也就是说：你在阅读器里评的分，大部分既不进 Anki，也不留痕迹。
+
+    这个端点不解决"同步"，只解决"别再丢"。调度、到期日、谁覆盖谁一概不碰 ——
+    那些留给后续步骤，而它们都需要历史才能做对。数据是采集时才有的，晚一天开始就少一天。
+
+    ⚠ 特别保留 reviewedAt(真实复习时刻)：AnkiConnect 的 answerCards 传不了时间戳，
+      离线补投会被 Anki 记成"补投那一刻"。日志里有真相，Anki 里没有。
+
+    幂等:id 去重(seen 保 4000)。追加写 JSONL,不读不聚合。
+    """
+    body = request.get_json(silent=True) or {}
+    eid = (body.get("id") or "").strip()[:64]
+    gid = (body.get("gid") or "").strip()[:80]
+    try:
+        idx = int(body.get("index"))
+    except (TypeError, ValueError):
+        idx = -1
+    try:
+        ease = int(body.get("ease") or 0)
+    except (TypeError, ValueError):
+        ease = 0
+    if not gid or idx < 0 or ease not in (1, 2, 3, 4):
+        return jsonify({"ok": False, "error": "bad payload"}), 400
+    try:
+        seen = json.loads(_REVIEW_EVT_SEEN.read_text("utf-8"))
+        assert isinstance(seen, list)
+    except Exception:
+        seen = []
+    if eid and eid in seen:
+        return jsonify({"ok": True, "dedup": True})
+    try:
+        reviewed_at = int(body.get("reviewedAt") or 0)
+    except (TypeError, ValueError):
+        reviewed_at = 0
+    if reviewed_at <= 0:
+        reviewed_at = int(time.time() * 1000)
+    row = {
+        "id": eid,
+        "gid": gid,
+        "index": idx,
+        "ease": ease,
+        # 真实复习时刻(毫秒)。离线补投时它与到达时刻会差很远,那正是要留住的东西。
+        "reviewedAt": reviewed_at,
+        "receivedAt": int(time.time() * 1000),
+        "source": (body.get("source") or "reader")[:24],
+        # 能解析出 Anki cardId 的卡带上它,将来对账/补写 revlog 用;解析不出就留空,
+        # 不在这里查 Anki —— 记录端点不做任何可能失败或变慢的事。
+        "ankiCardId": (str(body.get("ankiCardId") or "")[:32] or None),
+        "file": (body.get("file") or "")[:400],
+    }
+    try:
+        _REVIEW_EVT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _REVIEW_EVT_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)[:120]}), 500
+    if eid:
+        seen.append(eid)
+        try:
+            _REVIEW_EVT_SEEN.write_text(json.dumps(seen[-4000:]), "utf-8")
+        except Exception:
+            pass
+    return jsonify({"ok": True})
+
 
 @bp.route("/api/lookup-event", methods=["POST"])
 def pdf_api_lookup_event():
