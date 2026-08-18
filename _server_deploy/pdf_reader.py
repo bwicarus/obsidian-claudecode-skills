@@ -3997,6 +3997,7 @@ def _reader_library_ocr_body(
     allow_processing_profile: bool = False,
     allow_run_id: bool = False,
     allow_allow_deactivate: bool = False,
+    allow_force: bool = False,
 ):
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -4012,6 +4013,8 @@ def _reader_library_ocr_body(
         allowed.add("runId")
     if allow_allow_deactivate:
         allowed.add("allowDeactivate")
+    if allow_force:
+        allowed.add("force")
     if set(body) - allowed:
         raise ReaderBookOcrError("invalid-request", "unknown OCR request fields", status=400)
     return (
@@ -4021,6 +4024,18 @@ def _reader_library_ocr_body(
         str(body.get("executor") or "pi"),
         (str(body.get("processingProfile")) if body.get("processingProfile") is not None else None),
     )
+
+
+def _reader_library_ocr_force() -> bool:
+    """取 force：用户明说"再跑一份"，而不是复用已发布的那份。"""
+
+    body = request.get_json(silent=True) or {}
+    raw = body.get("force")
+    if raw is not None and not isinstance(raw, bool):
+        raise ReaderBookOcrError(
+            "invalid-request", "force must be a boolean", status=400
+        )
+    return bool(raw)
 
 
 def _reader_library_ocr_run_fields() -> tuple[str, bool]:
@@ -4051,9 +4066,11 @@ def pdf_api_library_ocr_start():
             allow_engine=True,
             allow_executor=True,
             allow_processing_profile=True,
+            allow_force=True,
         )
         job, already = _reader_book_ocr().start(
-            book_id, content_sha256, engine, executor, processing_profile
+            book_id, content_sha256, engine, executor, processing_profile,
+            force=_reader_library_ocr_force(),
         )
         return jsonify(_reader_book_ocr_wire_payload(job, already=already))
     except ReaderBookOcrError as exc:

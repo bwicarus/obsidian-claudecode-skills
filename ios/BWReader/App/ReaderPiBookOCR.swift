@@ -294,6 +294,7 @@ final class ReaderPiOCRClient {
         book: ReaderRemoteBook,
         engine: String,
         executor: String,
+        force: Bool = false,
         cookies: [HTTPCookie]
     ) async throws -> ReaderPiOCRJob {
         guard ["vision", "manga"].contains(engine),
@@ -314,6 +315,9 @@ final class ReaderPiOCRClient {
         return try await command(
             path: "pdf/api/library/ocr/start",
             body: body,
+            // 只有用户明说重跑才带这个字段：旧服务器不认识 force，白名单会
+            // 拒掉整个请求，所以默认路径必须保持跟以前逐字节一致。
+            flags: force ? ["force": true] : [:],
             cookies: cookies
         )
     }
@@ -726,13 +730,18 @@ final class ReaderPiOCRClient {
     private func command(
         path: String,
         body: [String: String],
+        // 服务端对 force 这类开关只认真 bool，不认 "true" 字符串 —— 分开传，
+        // 免得为了塞一个布尔值把整个 body 放宽成 [String: Any]。
+        flags: [String: Bool] = [:],
         cookies: [HTTPCookie]
     ) async throws -> ReaderPiOCRJob {
         var request = URLRequest(url: try canonicalURL(path: path))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        var payload: [String: Any] = body
+        for (key, value) in flags { payload[key] = value }
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         apply(cookies: cookies, to: &request)
         return try await jobResponse(for: request, expectedPath: "/\(path)")
     }
@@ -1045,6 +1054,7 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         book: ReaderRemoteBook,
         engine: String,
         executor: String,
+        force: Bool = false,
         cookies: [HTTPCookie],
         localBookID: String? = nil,
         localContentSHA256: String? = nil
@@ -1059,6 +1069,7 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 book: book,
                 engine: engine,
                 executor: executor,
+                force: force,
                 cookies: cookies
             )
         }

@@ -1166,6 +1166,33 @@ struct ReaderLocalLibraryView: View {
                     )
                 }
             }
+            // 用户 2026-08-18：「而不是覆盖或者拒绝进行多次预处理」。
+            // 上面两项仍然复用已发布的结果（省时省钱的正确默认）；只有从这里
+            // 进去才会真的再跑一次，跑出来的是**新的一份**，旧的不动。
+            Section("重新跑一份（不覆盖现有结果）") {
+                Button("通用 PDF（Vision）") {
+                    Task {
+                        await startPiOCR(
+                            remoteBook: remoteBook,
+                            localBook: localBook,
+                            engine: "vision",
+                            executor: executor,
+                            force: true
+                        )
+                    }
+                }
+                Button("漫画文字（Manga OCR）") {
+                    Task {
+                        await startPiOCR(
+                            remoteBook: remoteBook,
+                            localBook: localBook,
+                            engine: "manga",
+                            executor: executor,
+                            force: true
+                        )
+                    }
+                }
+            }
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
@@ -1508,7 +1535,8 @@ struct ReaderLocalLibraryView: View {
         remoteBook: ReaderRemoteBook?,
         localBook: ReaderLocalBookRecord?,
         engine: String,
-        executor: String
+        executor: String,
+        force: Bool = false
     ) async {
         guard recognitionPreferences.isEnabled else {
             ocrErrorMessage = "请先在设置中启用书籍文字识别"
@@ -1565,6 +1593,7 @@ struct ReaderLocalLibraryView: View {
             book: target,
             engine: engine,
             executor: executor,
+            force: force,
             cookies: cookies,
             localBookID: currentLocalBook?.id,
             localContentSHA256: localDigest

@@ -449,6 +449,135 @@ class ReaderBookOcrJapaneseTokenizationTest(unittest.TestCase):
         )
 
 
+
+class ReaderBookOcrForcedRerunTest(unittest.TestCase):
+    """`force=True` 才真的再跑一份；默认仍然复用已发布结果。
+
+    用户 2026-08-18：「而不是覆盖或者拒绝进行多次预处理」。台账把"多份并存"
+    做出来了，但 start() 仍然在已有结果时直接返回旧的那一份 —— 于是修好了
+    OCR 参数也重跑不出来，改进到不了用户手上。
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = Path(self.temp.name)
+        self.vault = self.base / "vault"
+        self.vault.mkdir()
+        (self.vault / "A.pdf").write_bytes(PDF_A)
+        self.library = BookLibrary(self.vault, self.base / "catalog")
+        self.entry = self.library.catalog()[0]
+        self.service = ReaderBookOcrService(
+            self.library,
+            self.base / "ocr",
+            self.base / "project",
+            launcher=lambda *args: _FakeProcess(1),
+            max_pdf_bytes=1024 * 1024,
+            max_pages=100,
+        )
+        self.version = self.service._version_dir(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self._publish()
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _publish(self) -> str:
+        job_dir = self.version / "vision"
+        pages = job_dir / "pages"
+        pages.mkdir(parents=True, exist_ok=True)
+        (pages / "p000001.json").write_text(json.dumps({
+            "schema": "reader-page-chars/1",
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "engine": "vision",
+            "pageNumber": 1,
+            "page_w": 10,
+            "page_h": 20,
+            "chars": [{"c": "x", "x0": 1, "y0": 1, "x1": 2, "y1": 2}],
+            "furigana": [],
+        }), "utf-8")
+        formula_path = job_dir / "formula-source.json"
+        formula_path.write_text('{"formulas":[]}', "utf-8")
+        final_job = {
+            "contract": "reader-library-ocr/1",
+            "jobId": "ocrjob_seed",
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "engine": "vision",
+            "executor": "pi",
+            "state": "succeeded",
+            "totalPages": 1,
+            "successfulPages": 1,
+            "formulaState": "unavailable",
+            "formulaTotal": 0,
+            "resultAvailable": True,
+            "updatedAtEpochMs": 1,
+        }
+        (job_dir / "job.json").write_text(json.dumps(final_job), "utf-8")
+        return _publish_release(
+            SimpleNamespace(
+                book_id=self.entry["bookId"],
+                content_sha256=self.entry["contentSha256"],
+                engine="vision",
+                max_bytes=1024 * 1024,
+            ),
+            job_dir,
+            formula_path,
+            final_job,
+            source_path=self.vault / "A.pdf",
+        )
+
+    def test_default_start_still_reuses_the_published_result(self) -> None:
+        """默认不重跑 —— 那是省时省钱的正确默认，别把它一起改掉。"""
+
+        job, already = self.service.start(
+            self.entry["bookId"], self.entry["contentSha256"], "vision"
+        )
+        self.assertTrue(already)
+        self.assertEqual(job["state"], "succeeded")
+
+    def test_forced_start_queues_a_new_run(self) -> None:
+        job, already = self.service.start(
+            self.entry["bookId"], self.entry["contentSha256"], "vision",
+            force=True,
+        )
+        self.assertFalse(already, "force=True 仍然返回了旧结果")
+        self.assertEqual(job["state"], "queued")
+
+    def test_forced_start_does_not_resume_the_previous_staging(self) -> None:
+        """新参数只作用于"还没做过的页"是最隐蔽的失败形态。
+
+        断点续跑会把上一轮的 successfulPages 继承下来，于是重跑只补剩下的页，
+        已经做过的页仍是旧参数的产物 —— 看起来跑了，其实大部分没变。
+        """
+
+        job, _already = self.service.start(
+            self.entry["bookId"], self.entry["contentSha256"], "vision",
+            force=True,
+        )
+        self.assertEqual(job["processedPages"], 0)
+        self.assertEqual(job["successfulPages"], 0)
+
+    def test_forced_rerun_keeps_the_existing_release(self) -> None:
+        """重跑期间旧结果必须还在 —— 用户随时可以切回去。"""
+
+        before = self.service.list_releases(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.service.start(
+            self.entry["bookId"], self.entry["contentSha256"], "vision",
+            force=True,
+        )
+        after = self.service.list_releases(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.assertEqual(
+            [run["revision"] for run in before["runs"]],
+            [run["revision"] for run in after["runs"]],
+        )
+
+
 class ReaderBookOcrFormulaWorkerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()

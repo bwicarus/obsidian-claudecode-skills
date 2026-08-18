@@ -586,12 +586,42 @@ class PiWorkerApi:
         )
 
 
+def _vision_render_contract(project_root: Path) -> dict:
+    """送 Vision 那张图的渲染契约 —— **必须进页缓存的键**。
+
+    这几个值定义在 Pi worker(两边共用同一份实现),不在 QUALITY_PROFILE 里。
+    2026-08-19 把它们从 QUALITY_PROFILE 搬走时差点留下一个坑:profile 是页缓存
+    的比对项,搬走等于把渲染参数移出了缓存键 —— 以后再调 DPI,旧页会被当成
+    "已经做过"直接复用,新参数永远到不了用户手上。所以在这里显式接回来。
+    """
+
+    deploy = project_root / "_server_deploy"
+    if str(deploy) not in sys.path:
+        sys.path.insert(0, str(deploy))
+    core = importlib.import_module("reader_book_ocr_worker")
+    return {
+        "targetDpi": core.VISION_TARGET_DPI,
+        "minDpi": core.VISION_MIN_DPI,
+        "absoluteMinDpi": core.VISION_ABSOLUTE_MIN_DPI,
+        "maxUploadBytes": core.VISION_MAX_UPLOAD_BYTES,
+        "absoluteMaxLongEdge": core.VISION_ABSOLUTE_MAX_LONG_EDGE,
+        "jpegQuality": core.VISION_JPEG_QUALITY,
+    }
+
+
 class ContentCache:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, project_root: Path | None = None):
         self.root = root
         self.sources = root / "sources"
         self.jobs = root / "jobs"
         self.status_path = root / "worker-status.json"
+        self.project_root = project_root
+        self._render_contract: dict | None = None
+
+    def render_contract(self) -> dict:
+        if self._render_contract is None and self.project_root is not None:
+            self._render_contract = _vision_render_contract(self.project_root)
+        return self._render_contract or {}
 
     def status(self, **changes) -> None:
         current = _load_json(self.status_path) or {
@@ -615,6 +645,7 @@ class ContentCache:
             value
             and value.get("contract") == "reader-pc-ocr-page-cache/1"
             and value.get("profile") == QUALITY_PROFILE
+            and value.get("visionRender") == self.render_contract()
             and isinstance(value.get("page"), dict)
         ):
             value = value["page"]
@@ -636,6 +667,7 @@ class ContentCache:
             {
                 "contract": "reader-pc-ocr-page-cache/1",
                 "profile": dict(QUALITY_PROFILE),
+                "visionRender": dict(self.render_contract()),
                 "page": page,
             },
         )
@@ -1551,7 +1583,7 @@ def build_runner(args) -> WorkerRunner:
     if not engines or len(engines) != len(requested):
         raise WorkerError("configured PC OCR engines must be vision and/or manga")
     cuda = _lightweight_cuda_status()
-    cache = ContentCache(cache_root)
+    cache = ContentCache(cache_root, project_root)
     process_identity = _current_process_identity()
     cache.status(
         state="idle",

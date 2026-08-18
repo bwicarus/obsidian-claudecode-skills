@@ -2380,7 +2380,18 @@ class ReaderBookOcrService:
         engine: str = "vision",
         executor: str = "pi",
         processing_profile: str | None = None,
+        force: bool = False,
     ) -> tuple[dict, bool]:
+        """Queue preprocessing.
+
+        `force=True` 表示"我知道已经有一份，就是要再跑一份"。用户 2026-08-18
+        明确要过：「而不是覆盖或者拒绝进行多次预处理」。默认仍然复用已发布的
+        结果 —— 那是省钱省时的正确默认；只有用户明说重跑时才绕过。
+
+        绕过的是两处复用，缺一不可：已发布结果的直接返回，以及 staging 里
+        同 identity 的断点续跑（后者会让新参数只作用于"还没做过的页"）。
+        """
+
         resolved = self.resolve(book_id, content_sha256)
         engine = str(engine or "vision").strip().lower()
         if engine not in ENGINES:
@@ -2412,14 +2423,16 @@ class ReaderBookOcrService:
             existing = self._job_for_engine(version_dir, engine)
             published = self._published_snapshot(book_id, content_sha256)
             if (
-                published is not None
+                not force
+                and published is not None
                 and published["engine"] == engine
                 and self._processing_identity(published["job"]) == requested_identity
             ):
                 self._activate_published_locked(version_dir, published)
                 return _safe_public_job(published["job"]), True
             if job_dir.exists() and (
-                existing is None
+                force
+                or existing is None
                 or self._processing_identity(existing) != requested_identity
             ):
                 self._archive_mutable_staging_locked(
