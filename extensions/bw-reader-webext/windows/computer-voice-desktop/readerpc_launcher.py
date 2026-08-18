@@ -549,7 +549,7 @@ def clear_user_exit_marker(local_root: Path) -> None:
     try:
         (local_root / USER_EXIT_MARKER_NAME).unlink(missing_ok=True)
     except OSError as exc:
-        print(f"[warn] 清除退出标记失败: {exc}")
+        _boot_log(f"[warn] 清除退出标记失败: {exc}")
 
 
 def _tray_image() -> Image.Image:
@@ -659,7 +659,7 @@ class ReaderPCWindow:
         try:
             set_autostart_enabled(self.readerpc_paths.local_root, True)
         except Exception as exc:
-            print(f"[warn] 自启收敛失败: {exc}")
+            _boot_log(f"[warn] 自启收敛失败: {exc}")
 
     def on_auto_start_changed(self) -> None:
         self._save_current_preferences()
@@ -1043,7 +1043,7 @@ class ReaderPCWindow:
             try:
                 write_user_exit_marker(self.readerpc_paths.local_root)
             except Exception as exc:
-                print(f"[warn] 写退出标记失败(看门狗可能复活): {exc}")
+                _boot_log(f"[warn] 写退出标记失败(看门狗可能复活): {exc}")
             try:
                 with self.service_lock:
                     stop_readerpc_services(
@@ -1539,6 +1539,106 @@ class SingleInstance:
         return True
 
 
+def _boot_log(message: str) -> None:
+    """把故障写进**文件**，而不是 print 到虚空。
+
+    ReaderPC-Server 是 PyInstaller `--noconsole` 单文件打包，运行时
+    `sys.stdout is None` —— 代码里那几处 `_boot_log("[warn] …")` 是彻底的空操作。
+    于是"自启收敛失败""写退出标记失败""清退出标记失败"这类事永远无人知晓，
+    而看门狗每 5 分钟原样重来一次。2026-08-18 查自启那两个 bug 时，最贵的
+    一段时间正是花在"没有任何线索"上。
+
+    与 autostart.log 同目录、同格式，一眼能按时间对上。
+    写日志失败一律吞掉：诊断通道绝不能反过来打断被诊断的程序。
+    """
+    try:
+        path = Path(ReaderPCPaths.discover().local_root) / "readerpc-server.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size > 512 * 1024:
+            path.write_text("", encoding="utf-8")
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(stamp + " " + message + "\n")
+    except Exception:
+        pass
+
+
+def terminate_stale_instances() -> list[int]:
+    """启动时**清掉同角色的旧进程**，保证全机只剩这一个（用户反复要求）。
+
+    旧做法是"拿不到互斥体就自己退出"（main 里 `if not acquire(): return 0`），
+    结果旧实例继续占着 F24 broker、runtime 状态文件和 Direct 服务代际。
+    用户要的恰恰相反：**新的接管，旧的让位**。
+
+    只杀两类，且都按命令行精确匹配，绝不按进程名一刀切：
+      · ReaderPC-Server.exe —— 排除自己与整条祖先链（PyInstaller onefile 有
+        bootloader + app 两个进程，杀错就是自杀）以及自己的子进程；
+      · bw-computer-voice-audio.exe **且命令行含 --direct-serve**（桥服务只能一个）。
+    ⚠ **不碰** `--reader-context-mcp` 那种：那是每个 Codex 会话各自的 MCP 子进程，
+      同时存在多个是正常的，杀它等于打断用户正在进行的对话。
+
+    返回被清掉的 PID —— 悄悄杀进程比不杀更危险，调用方要把它记进日志。
+    """
+    if os.name != "nt":
+        return []
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process | "
+             "Where-Object { $_.Name -eq 'ReaderPC-Server.exe' -or "
+             "$_.Name -eq 'bw-computer-voice-audio.exe' } | "
+             "ForEach-Object { \"$($_.ProcessId)|$($_.ParentProcessId)|"
+             "$($_.Name)|$($_.CommandLine)\" }"],
+            capture_output=True, text=True, timeout=25,
+            creationflags=0x08000000,
+        )
+    except Exception as exc:
+        _boot_log("[warn] 枚举旧进程失败，跳过清理: " + str(exc)[:160])
+        return []
+    rows = []
+    for line in (completed.stdout or "").splitlines():
+        parts = line.strip().split("|", 3)
+        if len(parts) < 3:
+            continue
+        try:
+            rows.append((int(parts[0]), int(parts[1]), parts[2],
+                         parts[3] if len(parts) > 3 else ""))
+        except ValueError:
+            continue
+    by_pid = {r[0]: r for r in rows}
+    mine = {os.getpid()}
+    cursor = os.getpid()
+    for _ in range(8):                       # 自己的祖先链
+        row = by_pid.get(cursor)
+        if row is None:
+            break
+        mine.add(row[0])
+        cursor = row[1]
+    for pid, ppid, _name, _cmd in rows:      # 自己的子进程（刚拉起的 Direct）
+        if ppid in mine:
+            mine.add(pid)
+
+    killed: list[int] = []
+    for pid, _ppid, name, cmdline in rows:
+        if pid in mine:
+            continue
+        lname = (name or "").lower()
+        lcmd = (cmdline or "").lower()
+        if lname == "readerpc-server.exe" or (
+            lname == "bw-computer-voice-audio.exe" and "--direct-serve" in lcmd
+        ):
+            try:
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                               capture_output=True, timeout=15,
+                               creationflags=0x08000000)
+                killed.append(pid)
+            except Exception as exc:
+                _boot_log("[warn] 清理旧进程 " + str(pid) + " 失败: " + str(exc)[:120])
+    if killed:
+        _boot_log("启动清理：已终止同角色旧进程 " + repr(killed))
+    return killed
+
+
 def self_test_report() -> dict[str, Any]:
     paths = ReaderPCPaths.discover()
     pc_paths = PcOcrServiceController().paths
@@ -1570,9 +1670,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if report["ok"] else 1
     if arguments:
         return 2
+    # 单实例：**接管**而不是退让。先清掉同角色旧进程，再拿互斥体。
+    # 旧行为是拿不到锁就 return 0 静默退出，旧实例继续占着 F24 broker、
+    # runtime 状态文件与 Direct 服务代际 —— 用户反复要求的正是反过来。
+    stale = terminate_stale_instances()
     instance = SingleInstance()
     if not instance.acquire():
-        return 0
+        # 清理过仍拿不到 = 旧进程句柄还没释放。等一下再试；仍失败就退出，
+        # 但**留下痕迹** —— 这一步静默失败会让人以为"双击没反应"。
+        time.sleep(1.5)
+        if not instance.acquire():
+            _boot_log("互斥体仍被占用（已清理 " + repr(stale) + "），本次放弃启动")
+            return 0
     # ReaderPC is the sole lifecycle owner. Retire the old logon bootstrap,
     # replace any ownerless Direct generation, and hold the one F24 broker for
     # this process lifetime.
