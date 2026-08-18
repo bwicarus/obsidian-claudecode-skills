@@ -310,6 +310,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 顶栏「App 设置」请求打开原生工具 sheet。与书库那条同一套做法：
     /// 网页按钮不做 URL 导航，直接经通道请求原生弹 sheet。
     @Published private(set) var nativeToolsPresentationRequestID: UUID?
+    /// 设置面板「本机」tab 里的三个原生入口。它们各自弹**单一用途**的原生 UI，
+    /// 而不是那张 12 个 Section 的大表 —— 用户 2026-08-18 要的就是这个分界。
+    @Published private(set) var vaultPickerPresentationRequestID: UUID?
+    @Published private(set) var realtimeKeyPresentationRequestID: UUID?
+    @Published private(set) var piLoginPresentationRequestID: UUID?
     private var nativeComputerVoiceMessageProxy: WeakScriptMessageHandler?
     private var nativeComputerContextMessageProxy: WeakScriptMessageHandler?
     private var nativeAgentVoiceMessageProxy: WeakScriptMessageHandler?
@@ -519,6 +524,30 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             }
             nativeAppPrefsBridge.onOpenNativeTools = { [weak self] in
                 self?.nativeToolsPresentationRequestID = UUID()
+            }
+            nativeAppPrefsBridge.onOpenVaultPicker = { [weak self] in
+                self?.vaultPickerPresentationRequestID = UUID()
+            }
+            nativeAppPrefsBridge.onOpenRealtimeKey = { [weak self] in
+                self?.realtimeKeyPresentationRequestID = UUID()
+            }
+            nativeAppPrefsBridge.onOpenPiLogin = { [weak self] in
+                self?.piLoginPresentationRequestID = UUID()
+            }
+            // 来源闸：与本机笔记桥同一套双检（isMainFrame + 两侧 URL 都可信）。
+            // 不设它的话，允许内嵌的第三方播放器子框也能调下面这批动作。
+            nativeAppPrefsBridge.isTrustedFrame = { [weak self] message in
+                guard let self else { return false }
+                return message.frameInfo.isMainFrame
+                    && message.webView === self.webView
+                    && self.isTrustedReaderURL(self.webView.url)
+                    && self.isTrustedReaderURL(message.frameInfo.request.url)
+            }
+            nativeAppPrefsBridge.surfacesProvider = {
+                ReaderNativeSurfaceState.snapshot()
+            }
+            nativeAppPrefsBridge.performAction = { action, value in
+                ReaderNativeSurfaceState.perform(action, value: value)
             }
             self.nativeAppPrefsBridge = nativeAppPrefsBridge
             contentController.addScriptMessageHandler(

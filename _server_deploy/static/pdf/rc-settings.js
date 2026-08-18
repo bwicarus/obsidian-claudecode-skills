@@ -666,6 +666,156 @@
 
   // ── DOM 建造(一次;共有块 = PDF 原生 HTML 逐字,内联 onclick 改 addEventListener;PDF 特有块 = 原生 HTML
   //    逐字含内联 onclick(window.* 全局,仅 PDF 页显示);EPUB 特有块 = 本文件旧版已验证结构)──
+  // ══════════ 本机 tab：与 App 原生偏好的通道 ══════════
+  function _nativePrefsApi() {
+    try {
+      var api = window.webkit && window.webkit.messageHandlers &&
+                window.webkit.messageHandlers.bwNativeAppPrefs;
+      return (api && typeof api.postMessage === 'function') ? api : null;
+    } catch (e) { return null; }
+  }
+  var _NAT_KEYS = {
+    'rcset-nat-ocr': 'reader.textRecognition.enabled',
+    'rcset-nat-ocr-auto': 'reader.textRecognition.automaticLocal',
+    'rcset-nat-pen-dtap': 'native-pencil.double-tap',
+    'rcset-nat-pen-sq': 'native-pencil.squeeze'
+  };
+  var _natPoll = null;
+  function _natStopPoll() { try { clearInterval(_natPoll); } catch (e) {} _natPoll = null; }
+
+  // 具名动作。失败**一定**出声 —— 原生那边把拒绝的原因原样传上来
+  // （比如 Vault 还有没同步完的笔记时不让撤授权），吞掉它就是"点了没反应"。
+  function _natDo(action, value) {
+    var api = _nativePrefsApi();
+    if (!api) return Promise.resolve(false);
+    var msg = { action: action };
+    if (value !== undefined) msg.value = value;
+    return api.postMessage(msg).then(function () {
+      _fillNativePane();
+      return true;
+    }).catch(function (err) {
+      var why = (err && (err.message || err)) || '没能完成';
+      try { RC.toast && RC.toast(String(why)); } catch (e) {}
+      _fillNativePane();
+      return false;
+    });
+  }
+
+  // 每次打开面板都重读一次。原生那边是 @Published、SwiftUI 自动刷；
+  // 网页这侧没有推送通道，只能主动取（下载中另开轮询，见 _wireNativePane）。
+  function _fillNativePane() {
+    var api = _nativePrefsApi();
+    if (!api) return;
+    var tab = $('rcset-tab-native');
+    api.postMessage({ action: 'list' }).then(function (vals) {
+      vals = vals || {};
+      Object.keys(_NAT_KEYS).forEach(function (id) {
+        var el = $(id); if (!el) return;
+        var v = vals[_NAT_KEYS[id]];
+        if (el.type === 'checkbox') el.checked = !!v;
+        else if (typeof v === 'string' && v) el.value = v;
+      });
+    }).catch(function () {
+      // 通道在但读失败 → 把 tab 收回去，别给一排永远无效的开关
+      if (tab) tab.style.display = 'none';
+    });
+    api.postMessage({ action: 'surfaces' }).then(function (st) {
+      st = st || {};
+      var d = st.dict || {}, v = st.vault || {}, k = st.realtime || {};
+      var dst = $('rcset-nat-dict-st');
+      if (dst) dst.textContent = d.statusText || (d.installed ? '已安装' : '未安装');
+      var bar = $('rcset-nat-dict-bar'), fill = $('rcset-nat-dict-fill');
+      if (bar) bar.style.display = d.downloading ? '' : 'none';
+      if (fill) fill.style.width = Math.round((d.progress || 0) * 100) + '%';
+      var dl = $('rcset-nat-dict-dl'), rm = $('rcset-nat-dict-rm');
+      if (dl) { dl.disabled = !!d.downloading || !!d.installed; dl.style.opacity = dl.disabled ? '.5' : ''; }
+      if (rm) { rm.disabled = !d.installed; rm.style.opacity = rm.disabled ? '.5' : ''; }
+      // 下载中才轮询进度；面板一关就停（hide() 里 clear），别在后台长跑。
+      if (d.downloading && !_natPoll) _natPoll = setInterval(_fillNativePane, 800);
+      if (!d.downloading) _natStopPoll();
+
+      var von = $('rcset-nat-vault-on');
+      if (von) { von.checked = !!v.enabled; von.disabled = !v.configured; }
+      var vst = $('rcset-nat-vault-st');
+      if (vst) {
+        vst.textContent = v.error ? String(v.error)
+          : (v.configured ? ('当前文件夹：' + (v.folderName || '（未命名）')) : '还没有选择文件夹');
+        vst.style.color = v.error ? '#ff9b9b' : '#8fa5c8';
+      }
+      var vclr = $('rcset-nat-vault-clr');
+      if (vclr) { vclr.disabled = !v.configured; vclr.style.opacity = vclr.disabled ? '.5' : ''; }
+
+      var kst = $('rcset-nat-key-st');
+      if (kst) {
+        if (!k.configured) kst.textContent = '这台 iPad 还没有存 OpenAI Key';
+        else {
+          var when = k.importedAt ? new Date(k.importedAt * 1000).toLocaleString() : '';
+          kst.textContent = '已存入 Apple Keychain' + (k.model ? ('（' + k.model + '）') : '') +
+                            (when ? ('　保存于 ' + when) : '');
+        }
+      }
+      var kclr = $('rcset-nat-key-clr');
+      if (kclr) { kclr.disabled = !k.configured; kclr.style.opacity = kclr.disabled ? '.5' : ''; }
+    }).catch(function () {
+      // surfaces 读不到不该把整个 tab 收掉（两组开关仍然可用），但要说出来。
+      var dst = $('rcset-nat-dict-st');
+      if (dst) dst.textContent = '读不到 App 本机状态';
+    });
+  }
+
+  // 事件只绑一次（ensureDom 内调用）。回填每次 open 都跑。
+  function _wireNativePane() {
+    var api = _nativePrefsApi();
+    if (!api) return;
+    var tab = $('rcset-tab-native');
+    if (tab) tab.style.display = '';
+    Object.keys(_NAT_KEYS).forEach(function (id) {
+      var el = $(id); if (!el) return;
+      el.addEventListener('change', function () {
+        var payload = el.type === 'checkbox' ? !!el.checked : String(el.value || '');
+        api.postMessage({ action: 'set', key: _NAT_KEYS[id], value: payload })
+          .catch(function () { try { RC.toast && RC.toast('这项没能写回 App'); } catch (e) {} });
+      });
+    });
+    // 删除类动作走两步确认：仓库里没有 RC.confirm，惯例是按钮先变成"再点一次确认"。
+    function twoStep(btn, label, run) {
+      if (!btn) return;
+      var armed = false, t = null;
+      btn.addEventListener('click', function () {
+        if (!armed) {
+          armed = true; btn.dataset.old = btn.textContent; btn.textContent = '再点一次确认';
+          t = setTimeout(function () { armed = false; btn.textContent = btn.dataset.old || label; }, 4000);
+          return;
+        }
+        clearTimeout(t); armed = false; btn.textContent = btn.dataset.old || label;
+        run();
+      });
+    }
+    var dl = $('rcset-nat-dict-dl');
+    if (dl) dl.addEventListener('click', function () { _natDo('dictDownload'); });
+    twoStep($('rcset-nat-dict-rm'), '删除', function () { _natDo('dictRemove'); });
+
+    var von = $('rcset-nat-vault-on');
+    if (von) von.addEventListener('change', function () { _natDo('vaultSetEnabled', !!von.checked); });
+    var vpick = $('rcset-nat-vault-pick');
+    if (vpick) vpick.addEventListener('click', function () { _natDo('openVaultPicker'); });
+    twoStep($('rcset-nat-vault-clr'), '移除授权', function () { _natDo('vaultClear'); });
+
+    var kset = $('rcset-nat-key-set');
+    if (kset) kset.addEventListener('click', function () { _natDo('openRealtimeKey'); });
+    twoStep($('rcset-nat-key-clr'), '清除本机 Key', function () { _natDo('realtimeClear'); });
+    var plogin = $('rcset-nat-pi-login');
+    if (plogin) plogin.addEventListener('click', function () { _natDo('openPiLogin'); });
+
+    var openBtn = $('rcset-nat-open');
+    if (openBtn) openBtn.addEventListener('click', function () {
+      if (!window.__bwOpenNativeTools || !__bwOpenNativeTools()) {
+        try { RC.toast && RC.toast('这台设备上没有 App 原生设置'); } catch (e) {}
+      }
+    });
+    _fillNativePane();
+  }
+
   function ensureDom() {
     if (_built) return;
     injectCss();
@@ -1001,9 +1151,37 @@
         '</div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6">画面上那枚笔按钮只在 Pencil 悬停或落笔后出现；纯手指操作时它不会占地方。用挤压/双击也能直接唤出绘图面板。</div>' +
         HR +
-        '<label style="' + LBL + '">🧰 还没搬过来的原生项</label>' +
-        '<div style="font-size:12px;color:#8fa5c8;margin:-4px 0 10px">离线词典、Pi 同步、OpenAI Key、Vault 目录、设备端识别结果这些仍在 App 的原生设置里（凭据和目录必须由系统 UI 管）。</div>' +
-        '<button type="button" id="rcset-nat-open" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:8px 14px;cursor:pointer;font-size:13px">打开 App 原生设置</button>' +
+        '<label style="' + LBL + '">📖 离线日语词典</label>' +
+        '<div id="rcset-nat-dict-st" style="font-size:12px;color:#8fa5c8;margin:-2px 0 8px">读取中…</div>' +
+        '<div id="rcset-nat-dict-bar" style="height:4px;background:#1a2540;border-radius:2px;overflow:hidden;margin-bottom:8px;display:none">' +
+          '<div id="rcset-nat-dict-fill" style="height:100%;width:0%;background:#4a9eff;transition:width .3s"></div></div>' +
+        '<div style="display:flex;gap:8px;margin-bottom:6px">' +
+          '<button type="button" id="rcset-nat-dict-dl" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">下载离线日语词典</button>' +
+          '<button type="button" id="rcset-nat-dict-rm" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">删除</button>' +
+        '</div>' +
+        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">词典只存在这台 iPad 的 App 沙盒里，不进入书籍附件、Pi、Safari 扩展或设置同步。数据来自 JMdict / EDICT 项目（CC BY-SA）。</div>' +
+        HR +
+        '<label style="' + LBL + '">📁 本机 Obsidian Vault</label>' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;cursor:pointer;margin-bottom:6px">' +
+          '<input type="checkbox" id="rcset-nat-vault-on" style="width:16px;height:16px"> 写入 iPad 本地 Vault' +
+        '</label>' +
+        '<div id="rcset-nat-vault-st" style="font-size:12px;color:#8fa5c8;margin:-2px 0 8px">读取中…</div>' +
+        '<div style="display:flex;gap:8px">' +
+          '<button type="button" id="rcset-nat-vault-pick" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">选择 / 更换文件夹</button>' +
+          '<button type="button" id="rcset-nat-vault-clr" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">移除授权</button>' +
+        '</div>' +
+        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">选文件夹必须走 App 的系统选择器 —— 只有它给出的授权能长期保存，网页拿不到也不该拿到你的文件路径。</div>' +
+        HR +
+        '<label style="' + LBL + '">🔑 凭据</label>' +
+        '<div id="rcset-nat-key-st" style="font-size:12px;color:#8fa5c8;margin:-2px 0 8px">读取中…</div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+          '<button type="button" id="rcset-nat-key-set" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">输入 / 替换 OpenAI Key</button>' +
+          '<button type="button" id="rcset-nat-key-clr" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">清除本机 Key</button>' +
+          '<button type="button" id="rcset-nat-pi-login" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">登录或重新登录 Pi</button>' +
+        '</div>' +
+        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">Key 由 App 保存在 Apple Keychain，输入框是 App 的原生控件 —— 密钥不经过这个网页。App 保存、启动通话与转写都直连 OpenAI，都不连接 Pi。</div>' +
+        HR +
+        '<button type="button" id="rcset-nat-open" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">打开 App 原生设置（其它诊断项）</button>' +
       '</div>';
 
     var paneWeb =
@@ -1095,43 +1273,15 @@
   // ── 本机(App 原生偏好)：只有 App 内才有这条通道，扩展/浏览器里整块不出现 ──
     //   写立即生效、不等「保存」：这些是 App 本体的开关，跟面板里其它需要成批提交的
     //   设置不是一回事；而且原生那侧本来就是改一个存一个。
-    (function () {
-      var api = window.webkit && window.webkit.messageHandlers &&
-                window.webkit.messageHandlers.bwNativeAppPrefs;
-      if (!api || typeof api.postMessage !== 'function') return;
-      var tab = $('rcset-tab-native');
-      if (tab) tab.style.display = '';
-      var K = {
-        'rcset-nat-ocr': 'reader.textRecognition.enabled',
-        'rcset-nat-ocr-auto': 'reader.textRecognition.automaticLocal',
-        'rcset-nat-pen-dtap': 'native-pencil.double-tap',
-        'rcset-nat-pen-sq': 'native-pencil.squeeze'
-      };
-      var openBtn = $('rcset-nat-open');
-      if (openBtn) openBtn.addEventListener('click', function () {
-        // 过渡期入口：原生 sheet 里还有凭据/目录这类不该搬进网页的项。
-        if (!window.__bwOpenNativeTools || !__bwOpenNativeTools()) {
-          try { RC.toast && RC.toast('这台设备上没有 App 原生设置'); } catch (e) {}
-        }
-      });
-      api.postMessage({ action: 'list' }).then(function (vals) {
-        vals = vals || {};
-        Object.keys(K).forEach(function (id) {
-          var el = $(id); if (!el) return;
-          var v = vals[K[id]];
-          if (el.type === 'checkbox') el.checked = !!v;
-          else if (typeof v === 'string' && v) el.value = v;
-          el.addEventListener('change', function () {
-            var payload = el.type === 'checkbox' ? !!el.checked : String(el.value || '');
-            api.postMessage({ action: 'set', key: K[id], value: payload })
-              .catch(function () { try { RC.toast && RC.toast('这项没能写回 App'); } catch (e) {} });
-          });
-        });
-      }).catch(function () {
-        // 通道在但读失败 → 把 tab 收回去，别给一排永远无效的开关
-        if (tab) tab.style.display = 'none';
-      });
-    })();
+    //
+    //   2026-08-19：从"只有两组开关 + 一枚跳原生的按钮"扩成真正把三项并进来。
+    //   分界是**谁必须由系统 UI 管**：
+    //     · 离线词典 —— 全搬。下载/删除都在 App 沙盒内，没有系统 UI 依赖。
+    //     · Vault —— 状态与开关搬，**选文件夹留原生**（只有系统选择器给出的
+    //       security-scoped URL 能长期保存授权），tab 里的按钮直接唤起它。
+    //     · 凭据 —— 状态与「清除」搬，**输入留原生**（密钥不经过 JS，
+    //       这是 ReaderNativeAppPrefsBridge 的类注释就写死的一条）。
+    _wireNativePane();
 
     // 点遮罩空白处 = 取消(对齐 PDF 原生 mask onclick closeSettings)
     mask.addEventListener('click', function (e) { if (e.target === mask) cancel(); });
@@ -1356,6 +1506,7 @@
 
   function hide() {
     _stopSyncPolling();
+    _natStopPoll();   // 词典下载进度的轮询：面板一关就停，别在后台长跑
     if (mask) mask.style.display = 'none';
   }
   function cancel() {   // 取消/点遮罩:不保存(对齐 PDF 原生:只有「保存」才落盘)
@@ -1564,6 +1715,9 @@
     _fillWebPane();      // 网页翻译 tab 回填(host 无关;非 web host 时 web-* 控件不存在,自动跳过)
     _fillSyncPane();     // 纯 PWA 本地冲突；扩展 owner 只读并引导到 trusted popup
     _fillComputerPane(); // Windows 桥状态只读刷新，不启动应用、采音或快捷键
+    _fillNativePane();   // 本机 tab：原生偏好 + 词典/Vault/凭据三组只读状态
+                         //   （原生那侧是 @Published 自动刷，网页这侧没有推送通道，
+                         //    每次打开都得主动取一次，否则看到的是上次的快照）
     _fillCtxSync();      // 双向上下文同步总开关(自闭环:change 即落盘,不依赖各宿主的保存路径)
     if (typeof _opts.onFill === 'function') {
       try { _opts.onFill(); } catch (e) { toast('设置回填失败：' + (e && e.message)); }   // PDF:原生 _fillSettings(同名 id 全量回填)

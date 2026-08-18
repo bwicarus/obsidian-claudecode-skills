@@ -26,6 +26,31 @@ final class ReaderNativeAppPrefsBridge: NSObject, WKScriptMessageHandlerWithRepl
     var onOpenLibrary: (() -> Void)?
     /// 顶栏「App 设置」按钮请求打开原生工具 sheet（过渡期：还没搬完的原生项仍在那里）。
     var onOpenNativeTools: (() -> Void)?
+    /// 网页请求唤起原生「选择 Vault 文件夹」。必须是原生 picker —— 只有它产出的
+    /// security-scoped URL 才能做 bookmarkData，网页拿不到也不该拿到。
+    var onOpenVaultPicker: (() -> Void)?
+    /// 网页请求唤起「输入 / 替换 OpenAI Key」的单一用途 sheet。**Key 永不经过 JS**。
+    var onOpenRealtimeKey: (() -> Void)?
+    /// 网页请求唤起 Pi 登录（固定 origin 的 WKWebView，cookie 落共享 dataStore）。
+    var onOpenPiLogin: (() -> Void)?
+
+    /// 这条消息是否来自可信来源。
+    ///
+    /// ⚠ 2026-08-19 补：此前这个桥**全程没有 frame / origin 校验**，而导航策略允许
+    /// youtube-nocookie / player.bilibili.com 作为同页**子框**存在，
+    /// `addScriptMessageHandler` 的 handler 对该 content world 的所有 frame 可见 ——
+    /// 也就是说嵌进来的第三方播放器页面能调这个桥。当时暴露面只有 4 个偏好键，
+    /// 危害有限；而下面这批新动作里有"删词典 / 撤 Vault 授权 / 弹原生 picker"，
+    /// 再不设闸就是把它们一起交出去。对齐本地笔记桥的 isMainFrame + 可信 URL 双检。
+    var isTrustedFrame: ((WKScriptMessage) -> Bool)?
+
+    /// 只读状态的提供方。返回值必须是**布尔 / 短串 / 数字**，
+    /// 绝不含 key、bookmark、文件系统路径（folderName 只给 lastPathComponent）。
+    var surfacesProvider: (() -> [String: Any])?
+    /// 具名副作用。返回 nil 表示成功，返回字符串则是要**原样显示给用户**的失败原因
+    /// —— 比如 Vault 还有 pending 笔记时 clearFolder 会拒绝，那个原因必须能到用户眼前，
+    /// 否则就又是一次"点了没反应"（references/silent-failure-lessons.md）。
+    var performAction: ((String, Any?) -> String?)?
 
     /// 允许网页读写的 key。新增前先问一句：这条泄漏出去会不会有代价？
     /// 会的话就不该进这张表。
@@ -48,6 +73,10 @@ final class ReaderNativeAppPrefsBridge: NSObject, WKScriptMessageHandlerWithRepl
         _ controller: WKUserContentController,
         didReceive message: WKScriptMessage
     ) async -> (Any?, String?) {
+        // 先验来源，再看内容 —— 顺序不能反。
+        guard isTrustedFrame?(message) == true else {
+            return (nil, "untrusted frame")
+        }
         guard let body = message.body as? [String: Any],
               let action = body["action"] as? String
         else {
@@ -100,6 +129,33 @@ final class ReaderNativeAppPrefsBridge: NSObject, WKScriptMessageHandlerWithRepl
 
         case "openNativeTools":
             onOpenNativeTools?()
+            return (true, nil)
+
+        case "openVaultPicker":
+            onOpenVaultPicker?()
+            return (true, nil)
+
+        case "openRealtimeKey":
+            onOpenRealtimeKey?()
+            return (true, nil)
+
+        case "openPiLogin":
+            onOpenPiLogin?()
+            return (true, nil)
+
+        case "surfaces":
+            // 词典 / Vault / 凭据 三组的**只读**状态，供网页设置面板直接渲染。
+            // 这是"把内容真正并进设置 tab"和"只在 tab 里放一个跳原生的入口"的分界。
+            return (surfacesProvider?() ?? [:], nil)
+
+        case "dictDownload", "dictRemove",
+             "vaultSetEnabled", "vaultClear",
+             "realtimeClear":
+            // 具名动作白名单。注意这里**没有** realtimeSave 之类会携带密钥的动作 ——
+            // Key 只经原生 SecureField 进 Keychain，任何形式都不经过 JS。
+            if let failure = performAction?(action, body["value"]) {
+                return (nil, failure)
+            }
             return (true, nil)
 
         default:

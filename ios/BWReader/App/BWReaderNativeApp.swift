@@ -1,5 +1,6 @@
 import CoreSpotlight
 import SwiftUI
+import UniformTypeIdentifiers
 import WidgetKit
 
 @main
@@ -27,6 +28,11 @@ private struct ReaderRootView: View {
     @State private var showsDiagnostics = false
     @State private var showsNativeTools = false
     @State private var showsLibrary = false
+    // 设置面板「本机」tab 里的三个原生入口。它们各自弹**单一用途**的 UI ——
+    // 而不是先打开那张 12 个 Section 的大表再让用户自己找。
+    @State private var showsVaultPicker = false
+    @State private var showsRealtimeKey = false
+    @State private var showsPiLogin = false
     @State private var startupResolutionPending = true
     @State private var startupRouteOverrideRequested = false
     @State private var libraryStartupNotice: String?
@@ -186,6 +192,18 @@ private struct ReaderRootView: View {
             nativeToolsInitialAction = .openNativeTools
             showsNativeTools = true
         }
+        .onReceive(reader.$vaultPickerPresentationRequestID) { requestID in
+            guard requestID != nil else { return }
+            showsVaultPicker = true
+        }
+        .onReceive(reader.$realtimeKeyPresentationRequestID) { requestID in
+            guard requestID != nil else { return }
+            showsRealtimeKey = true
+        }
+        .onReceive(reader.$piLoginPresentationRequestID) { requestID in
+            guard requestID != nil else { return }
+            showsPiLogin = true
+        }
         .task {
             BWReaderAppShortcuts.updateAppShortcutParameters()
         }
@@ -234,6 +252,30 @@ private struct ReaderRootView: View {
                 reader: reader,
                 startupNotice: libraryStartupNotice,
                 remote: remoteLibrary
+            )
+        }
+        // 选文件夹**直接弹系统选择器**，不再套一层 sheet —— 用户 2026-08-18 要的
+        // 「由 tab 触发原生 picker」就是这个形态。只有系统选择器产出的
+        // security-scoped URL 能做 bookmarkData，网页拿不到也不该拿到。
+        .fileImporter(
+            isPresented: $showsVaultPicker,
+            allowedContentTypes: [.folder]
+        ) { result in
+            switch result {
+            case .success(let url):
+                ReaderLocalNotesManager.shared.configureFolder(url)
+            case .failure(let error):
+                if (error as? CocoaError)?.code != .userCancelled {
+                    ReaderLocalNotesManager.shared.reportError(error)
+                }
+            }
+        }
+        .sheet(isPresented: $showsRealtimeKey) {
+            ReaderRealtimeKeyView()
+        }
+        .sheet(isPresented: $showsPiLogin) {
+            ReaderPiLoginView(
+                dataStore: reader.webView.configuration.websiteDataStore
             )
         }
     }
