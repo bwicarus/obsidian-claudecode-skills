@@ -1286,9 +1286,25 @@ if (window.__bwPwaProviderOnly) return;
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
+    }).then(function (response) {
+      // ⚠ fetch 对**非 2xx 不会 reject** —— 服务端返 500 时下面的 catch 根本不会
+      //   跑，代码照常往下走，这次状态更新就这么没了，而且没有任何人知道。
+      //   这一处以前完全没有检查 response.ok，比"只认 TypeError"更彻底地漏。
+      if (response && response.ok) return true;
+      var failure = new Error('HTTP ' + ((response && response.status) | 0));
+      failure.__httpStatus = (response && response.status) | 0;
+      throw failure;
     }).catch(function (error) {
       try {
-        if (RC.outbox && error && error.name === 'TypeError') {
+        // 网络断、或服务端说它现在处理不了（Anki 没起来 / 正在 sync → 502/503）
+        // 都还能靠重投救回来；4xx 不重投，那是"你发的东西不对"。
+        var status = (error && error.__httpStatus) | 0;
+        // 与 rc-review._isRetryableSyncError 同一口径：500 状态不明不重投，
+        // 502/503/504 是"没被处理"才重投。
+        var retryable = error && error.name === 'TypeError'
+          || status === 408 || status === 429
+          || status === 502 || status === 503 || status === 504;
+        if (RC.outbox && retryable) {
           RC.outbox.send(
             'entst', st.gid + ':' + i,
             '/pdf/api/entity/' + st.gid, body, 'PATCH'

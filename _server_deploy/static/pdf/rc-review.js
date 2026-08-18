@@ -1802,21 +1802,53 @@
     }).then(function (response) {
       return response.json().catch(function () { return {}; }).then(function (data) {
         if (!response.ok || !data || data.ok === false) {
-          throw new Error(String(data && data.error || ('HTTP ' + response.status)));
+          var failure = new Error(String(data && data.error || ('HTTP ' + response.status)));
+          // 状态码要带出去 —— 判断"能不能重投"靠的就是它，
+          // 塞进 message 字符串里等于让下游去解析人话。
+          failure.__httpStatus = response.status | 0;
+          throw failure;
         }
       });
     }).catch(function (error) {
-      if (error && error.name === 'TypeError' && RC.outbox &&
+      if (_isRetryableSyncError(error) && RC.outbox &&
           typeof RC.outbox.send === 'function') {
         try {
           RC.outbox.send('rev', aid, '/pdf/api/review-answer', payload);
-          _toast('本地评分已保存；外部 Anki 更新将在联网后投递');
+          _toast('本地评分已保存；外部 Anki 更新已入队，稍后自动投递：' +
+                 String(error && error.message || '暂时不可用'));
           return;
         } catch (_) {}
       }
       _toast('本地评分已保存；外部 Anki 更新失败：' +
         String(error && error.message || '未知错误'));
     });
+  }
+
+  // 这次失败**还能不能靠重投救回来**。
+  //
+  //   以前只认 error.name === 'TypeError'（fetch 本身没发出去）。可 Pi 上最常见的
+  //   失败根本不是断网，是 **Anki 没起来 / 正在 sync** —— 那时服务端好好地返
+  //   502/503，于是走不进 outbox，这次评分对 Anki 就永久丢了。本地仓库那笔写入
+  //   是权威的、不会回滚，但"外部 Anki 迟早会追上"这个承诺当场就断了。
+  //
+  //   4xx 不重投：那是"你发的东西不对"，重发一百次还是不对。
+  function _isRetryableSyncError(error) {
+    if (!error) return false;
+    if (error.name === 'TypeError') return true;        // fetch 没发出去
+    var status = error.__httpStatus | 0;
+    // 拿不到状态码就**不猜**。把"没带状态码"当成可重投的话，业务拒绝（409
+    // "scheduler rejected card"）会被当成离线：卡片不放回队列、还塞进 outbox
+    // 反复重投一个服务端已经明确拒绝的东西。既有测试正好钉住了这条
+    // （"an HTTP rejection is authoritative and must never masquerade as offline"）。
+    if (!status) return false;
+    // ⚠ 5xx 不能一刀切。
+    //   500 = 服务端**内部**出错，它可能已经写了一半 —— 状态不明，重投有重复
+    //        计分的风险，所以按"这次评分没成功"处理（卡片放回队列让用户重评）。
+    //   502/503/504 = 网关层明确说"我现在不可用"，请求**根本没被处理** ——
+    //        这才是 Anki 没起来 / 正在 sync 时的形态，重投是安全且必要的，
+    //        不重投就等于这次评分对 Anki 永久丢失。
+    return status === 408 || status === 429
+      || status === 502 || status === 503 || status === 504;
   }
 
   function _answerLocalCurrent(card, ease, pendingKey, originalIndex,
@@ -2008,6 +2040,7 @@
             String(data && data.error || ('HTTP ' + response.status))
           );
           error.reviewRejected = true;
+          error.__httpStatus = response.status | 0;
           throw error;
         }
         if (ease === 1) {
@@ -2058,7 +2091,7 @@
       });
     }).catch(function (error) {
       if (
-        error && error.name === 'TypeError' &&
+        _isRetryableSyncError(error) &&
         RC.outbox && typeof RC.outbox.send === 'function'
       ) {
         try {
@@ -2075,7 +2108,8 @@
             _ratingPending: true,
             _syncPending: true
           }, 'review-queued');
-          _toast('离线：答题已入队，恢复后同步');
+          _toast('答题已入队，恢复后自动同步：' +
+                 String(error && error.message || '暂时不可用'));
           return;
         } catch (_) {}
       }

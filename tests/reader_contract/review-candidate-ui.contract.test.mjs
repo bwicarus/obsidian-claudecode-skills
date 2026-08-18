@@ -1740,7 +1740,14 @@ test("network TypeError preserves optimistic state and sends one durable outbox 
   assert.deepEqual(payload, { aid, card_id: 101, ease: 4 });
   assert.deepEqual(h.getStored().cards.map((card) => card.id), [102]);
   assert.deepEqual(h.getStored().completed_ids, [101]);
-  assert.ok(h.toasts.includes("离线：答题已入队，恢复后同步"));
+  // 断言"入队了 + 说了为什么"，不锁死整句文案。
+  // 2026-08-19 起 toast 会带上失败原因：不只是断网会入队，服务端暂时处理不了
+  // （Anki 没起来 / 正在 sync → 502/503）也会 —— 那时只说"恢复后同步"会让用户
+  // 以为是自己没网。
+  assert.ok(
+    h.toasts.some((text) => text.includes("答题已入队")),
+    "断网时必须告诉用户答题已入队",
+  );
 });
 
 test("open source permits safe Obsidian and HTTP URLs but rejects unsafe sources", async () => {
