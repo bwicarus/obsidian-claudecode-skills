@@ -625,3 +625,42 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 
 /* 106(用户设计):画面中的圆形笔按钮退役——手写入口收敛到顶栏(工具本体不受影响) */
 #ink-fab{display:none !important}
+
+/* ── 钉在书页正文上的卡（bind.kind === 'page-chars'，C15 第二版）──
+   位置由字符层的 charBoxes 直接给出，跟高亮同一个坐标系：页内绝对定位，
+   页面缩放时整层一起变。**不要** fixed + JS 跟滚 —— 那是便签系统写下的禁令。 */
+.pgbind-layer { position: absolute; inset: 0; pointer-events: none; }
+.pgbind-card {
+  pointer-events: auto;
+  background: rgba(18, 26, 45, .94);
+  border: 1px solid #2a3550;
+  border-radius: 8px;
+  color: #e6e6f0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .35);
+  overflow: hidden;
+  cursor: pointer;
+  transition: width .18s ease, height .18s ease, border-radius .18s ease;
+}
+.pgbind-card .pgbind-hd {
+  padding: 5px 9px;
+  font-size: 11.5px;
+  color: #8fb4ff;
+  border-bottom: 1px solid #22304d;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pgbind-card .pgbind-bd { padding: 7px 9px; max-height: 260px; overflow: auto; }
+/* 收起态 = 一颗球，留在锚点上。它的位置本身就是信息：
+   「这一处有过一次纠正」——关掉就把这件事一起丢了。 */
+.pgbind-card.pgbind-dot {
+  width: 26px !important;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(74, 158, 255, .92);
+  border-color: rgba(74, 158, 255, .6);
+}
+.pgbind-card.pgbind-dot .pgbind-hd,
+.pgbind-card.pgbind-dot .pgbind-bd { display: none; }

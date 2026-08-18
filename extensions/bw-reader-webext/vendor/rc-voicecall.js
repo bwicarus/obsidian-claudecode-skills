@@ -3150,6 +3150,8 @@ if (window.__bwPwaProviderOnly) return;
     try { _speakSafe(text); } catch (e) {}
   }
   window.__vcCue = _cue;   // 供任务完成播报复用
+  // 书页字符锚补绑成功后要关掉浮层那份（否则同一内容两处并存）。
+  window.__vcCardClose = function (c) { try { _cardClose(c); } catch (e) {} };
   // 绑不上的卡先挂这里，等那一页真的渲染出来再补绑。
   //   最常见的失败恰恰是"那页还没渲染"（用户在别处翻着，AI 把卡绑到第 12 页），
   //   而这种失败是**会自己好的** —— 只要那页出现。以前退回浮层就到此为止，
@@ -3176,6 +3178,7 @@ if (window.__bwPwaProviderOnly) return;
     if (!card || !card.kind) return false;
     var label = card.title || '搜索结果';
     var _pendBind = null;   // 绑不上时记下"它想去哪"，浮层卡建出来后一起入列
+    var _pendPageBind = null;   // 同上，书页字符锚那条
     // ★ card.bind：把这张卡钉到自建页的某个格子块（协议见 reader_card_contract._norm_bind）。
     //   钉进去之后它就是那一页的一个 block —— 位置和"内容序列上的位置"是同一件事，
     //   AI 下次读这一页时它按顺序出现在被绑定的块之后，而不是浮在旁边的游离注解。
@@ -3195,6 +3198,19 @@ if (window.__bwPwaProviderOnly) return;
         // 记下"它想去哪"。那页出现时 __upBindRetry 会把它接回去。
         _pendBind = { upage: _b.upage, bid: _b.bid, payload: _bp, card: null };
         try { RC.toast && RC.toast('那一页还没打开，卡片先放浮层，等页面出现会自己归位'); } catch (e2) {}
+      }
+      // 书页正文的字符锚（C15 第二版）。跟 upage-block 同一套处置：钉上了就不再
+      //   出浮层；钉不上退回浮层并记下想去哪，那页渲染出来时自己归位。
+      if (_b && _b.kind === 'page-chars' && typeof window.__pageBindCard === 'function') {
+        var _pp = {
+          isHtml: true,
+          raw: _infoHtml(card),
+          text: _infoText(card),
+          label: label
+        };
+        if (window.__pageBindCard(_b, _pp)) return true;
+        _pendPageBind = { bind: _b, payload: _pp };
+        try { RC.toast && RC.toast('那一页还没渲染，卡片先放浮层，翻到时会自己归位'); } catch (e2) {}
       }
     } catch (e) {}
     var th = document.getElementById('asst-thread');
@@ -3226,6 +3242,10 @@ if (window.__bwPwaProviderOnly) return;
                         { dot: true, form: 'full', type: _cst.color, icon: _cst.icon,
                           keepAsDot: !!card.bind });
       if (c && _pendBind) { _pendBind.card = c; _bindPending.push(_pendBind); _pendBind = null; }
+      if (c && _pendPageBind && window.__pageBindDefer) {
+        try { window.__pageBindDefer(_pendPageBind.bind, _pendPageBind.payload, c); } catch (e2) {}
+        _pendPageBind = null;
+      }
       if (c) {
         c.el.classList.add('vc-typed');   // 有色磨砂(与工具卡同一套观感)
         try { c.el.__vcCard = card; } catch (e) {}   // #img:浮层实例同挂 card(与侧栏实例共享同一对象 → 拖图入卡 push 一次两处同现)

@@ -132,12 +132,29 @@ _CARD_TOP_OPT = ("title", "brief", "cid", "sources", "bind")
 #     语义混在一起，日后谁都说不清某处的 anchor 指的是哪个。
 #   两件事由它同时决定：卡片在屏幕上的位置，以及卡片自身内容嵌入上下文时的位置。
 #   所以它不能只是一个像素框——必须能定出"在正文的哪个位置"。
-#   第一版只认自建页的格子块（paper.py 的 block 已经有 id + 服务端纯算术算出的
-#   归一化 rect，前端按 data-bid 绝对定位，贴卡机制 __upPasteCard 也已在用它）：
-#     {"kind": "upage-block", "upage": <插入页 id>, "bid": <block id>}
-#   书页正文的锚（字符区间）留到下一版；现在先不发明，免得发明出用不上的形状。
-_BIND_KINDS = {"upage-block"}
-_BIND_FIELDS = {"upage-block": ("upage", "bid")}
+#   两种锚：
+#   ① 自建页的格子块（paper.py 的 block 已经有 id + 服务端纯算术算出的归一化 rect，
+#      前端按 data-bid 绝对定位，贴卡机制 __upPasteCard 也已在用它）：
+#        {"kind": "upage-block", "upage": <插入页 id>, "bid": <block id>}
+#   ② 书页正文的字符区间（2026-08-19 补齐）：
+#        {"kind": "page-chars", "page": <页码>, "from": <起>, "to": <止>,
+#         "text": <那段文字>, "rev": <产出时的字符层 revision，可空>}
+#
+#   为什么锚是"序号 + 文本 + revision"而不是其中任何一个单独用：
+#   - 只用文本 → 用户明确提过的那个问题：**同一个词在一页里会重复出现**，
+#     光靠文本找不出是哪一处。
+#   - 只用序号 → 序号是某一份字符层里的下标。用户可以切换文字层
+#     （PDF 原文字层 / Pi / PC 各一份，见书库的「当前使用」），换一份序号就全变。
+#   - 所以两个都带：revision 对得上就直接用序号（精确）；对不上就用文本重新找，
+#     并用原序号挑最接近的那一处（消歧）。text 同时也是"这张卡当初钉在哪句话上"
+#     的人类可读记录 —— 即便两种定位都失败，它仍然说得清曾经指向什么。
+_BIND_KINDS = {"upage-block", "page-chars"}
+_BIND_FIELDS = {
+    "upage-block": ("upage", "bid"),
+    "page-chars": ("page", "from", "to"),
+}
+# 可空字段：缺了不影响锚成立，只是降级成"按文本找"或"没有原文记录"。
+_BIND_OPTIONAL = {"page-chars": ("text", "rev")}
 
 
 def _norm_bind(value, kind: str) -> dict:
@@ -154,6 +171,20 @@ def _norm_bind(value, kind: str) -> dict:
         if not isinstance(v, (str, int)) or not str(v).strip():
             return None
         out[f] = _clip(str(v))
+    for f in _BIND_OPTIONAL.get(akind, ()):
+        v = value.get(f)
+        if isinstance(v, (str, int)) and str(v).strip():
+            out[f] = _clip(str(v))
+    if akind == "page-chars":
+        # 序号必须是能比大小的数，且 from <= to。歪掉的区间不如没有 ——
+        # 让它退回浮层，别在页面上定出一个荒唐的位置。
+        try:
+            lo, hi = int(out["from"]), int(out["to"])
+        except (TypeError, ValueError):
+            return None
+        if lo < 0 or hi < lo:
+            return None
+        out["from"], out["to"] = str(lo), str(hi)
     return out
 
 PART_FIELD_SPECS: dict[str, dict] = {

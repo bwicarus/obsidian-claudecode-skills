@@ -220,6 +220,9 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   wrap.__charBoxes = charBoxes;
   wrap.__charsBaseW = wrap.classList.contains('crop-on') ? (parseFloat(wrap.style.getPropertyValue('--full-w')) || wrap.clientWidth || 0) : (wrap.clientWidth || 0);   // #51:建层整页布局宽基准(去边=整页 --full-w,charBox 是整页坐标;非去边=clientWidth);重渲后按 char-layer 实时 BCR/baseW 换算
   try { window.__applyPhraseMergesLocal && window.__applyPhraseMergesLocal(wrap); } catch (_) {}   // 本地词组合并(收藏集驱动,教义:本地算)
+  // 字符层刚就绪 → 把"等着钉到这一页正文上"的卡接回去。时机必须是这里而不是
+  //   页面渲染完：卡是按**字符序号**定位的，charBoxes 没挂上之前定不出位置。
+  try { window.__pageBindRetry && window.__pageBindRetry(num); } catch (_) {}
   const textLayerIdentity = String(d.source || 'unknown')
     + (d.revision ? '/' + String(d.revision) : '');
   window.dlog?.(

@@ -400,7 +400,11 @@ def _normalize_flashcards(raw) -> list[dict]:
     return out
 
 
-_BIND_FIELDS = {"upage-block": ("upage", "bid")}
+_BIND_FIELDS = {
+    "upage-block": ("upage", "bid"),
+    "page-chars": ("page", "from", "to"),
+}
+_BIND_OPTIONAL = {"page-chars": ("text", "rev")}
 
 
 def _normalize_card_bind(value) -> dict:
@@ -417,7 +421,24 @@ def _normalize_card_bind(value) -> dict:
         if not isinstance(raw, (str, int)) or not str(raw).strip():
             raise ResultEnvelopeError(f"bind.{field} 必填且不能为空")
         out[field] = str(raw).strip()[:200]
-    extra = set(value) - {"kind"} - set(_BIND_FIELDS[kind])
+    for field in _BIND_OPTIONAL.get(kind, ()):
+        raw = value.get(field)
+        if isinstance(raw, (str, int)) and str(raw).strip():
+            out[field] = str(raw).strip()[:200]
+    if kind == "page-chars":
+        # 序号要能比大小且 from <= to。歪掉的区间不如没有 —— 与其在页面上定出
+        # 一个荒唐的位置，不如让调用方立刻知道自己发错了。
+        try:
+            lo, hi = int(out["from"]), int(out["to"])
+        except (TypeError, ValueError):
+            raise ResultEnvelopeError("bind.from/to 必须是整数字符序号")
+        if lo < 0 or hi < lo:
+            raise ResultEnvelopeError("bind 的字符区间不合法（要求 0 <= from <= to）")
+        out["from"], out["to"] = str(lo), str(hi)
+    extra = (
+        set(value) - {"kind"}
+        - set(_BIND_FIELDS[kind]) - set(_BIND_OPTIONAL.get(kind, ()))
+    )
     if extra:
         raise ResultEnvelopeError(f"bind 含未知字段:{sorted(extra)}")
     return out
