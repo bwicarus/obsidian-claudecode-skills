@@ -333,3 +333,42 @@ test("opening an embedded-text PDF is never gated by preprocessing state", () =>
   assert.ok(open.indexOf("reader.openLocalBook(") < open.indexOf("scheduleAutomaticNativeOCR("));
   assert.doesNotMatch(open, /nativeOCR\.status|recognitionPreferences\.isEnabled/);
 });
+
+test("书库列出历次预处理结果，带日期、可切换、可删除", () => {
+  // 用户 2026-08-18：「我希望书库里能够删除预处理的结果，还有预处理的结果
+  // 标记上日期用以区分，而不是覆盖或者拒绝进行多次预处理」。
+  assert.match(VIEW, /Label\("服务器上的结果"/);
+  assert.match(VIEW, /piOCR\.releases\(/);
+  assert.match(VIEW, /piOCR\.activateRelease\(/);
+  assert.match(VIEW, /piOCR\.deleteRelease\(/);
+  // 删除是唯一会真的抹掉数据的动作 —— 必须过二次确认。
+  assert.match(VIEW, /confirmationDialog\(\s*"删除这份预处理结果？"/);
+  // 而且要分辨删的是不是当前生效那份：两种后果不一样，文案必须分开。
+  assert.match(VIEW, /pending\.release\.isActive/);
+  assert.match(VIEW, /原书不会被删除/);
+  // 切换之后必须重新导入，否则服务器换了而 iPad 上还是旧结果。
+  assert.match(
+    VIEW,
+    /activateRelease[\s\S]{0,900}importPiAttachments\(/,
+  );
+  // 展开面板才拉，打开书架不为每本书发请求。
+  assert.match(VIEW, /\.task\(id: remoteBook\.bookId\)/);
+});
+
+test("历次结果的日期取不到时如实显示未知，不编造", () => {
+  assert.match(PI, /struct ReaderPiOCRRelease/);
+  // Pi 若还没升级，这些字段不会出现；非可选类型会让整条响应解码失败，
+  // 把"还没升级"变成"功能坏了"。
+  assert.match(PI, /publishedAtEpochMs: Int64\?/);
+  assert.match(PI, /totalPages: Int\?/);
+  assert.match(PI, /"日期未知"/);
+});
+
+test("一层坏掉不得连累整本书的文字层", () => {
+  const STORE = read("ios/BWReader/App/NativeBookOCRStore.swift");
+  // page() 每次读页第一行就调 layerState()，所以这里任何一个 throw
+  // 都会让整本书每一页文字层全抛。删除功能上线后这条路径会被真实走到。
+  assert.doesNotMatch(STORE, /throw NativeBookOCRError\.storage\("文字层页数与元数据不匹配"\)/);
+  assert.doesNotMatch(STORE, /throw NativeBookOCRError\.storage\("当前选择的文字层不可用"\)/);
+  assert.match(STORE, /selected = available\.contains\(where: \{ \$0\.layer == \.legacy \}\)/);
+});

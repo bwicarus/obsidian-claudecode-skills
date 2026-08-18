@@ -2552,6 +2552,8 @@ class ReaderBookOcrService:
         with exclusive_lock(self.lock_path):
             index = self._reconcile_index_locked(book_id, content_sha256)
             return {
+                # 跟这一族其它响应同壳（ok + contract），客户端才能用同一套校验。
+                "ok": True,
                 "contract": RELEASE_INDEX_CONTRACT,
                 "bookId": book_id,
                 "contentSha256": content_sha256,

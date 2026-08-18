@@ -22,6 +22,15 @@ private enum ReaderLibraryRefreshClock {
     static var lastAutomaticRemoteRefreshAt: Date?
 }
 
+/// 一次待确认的删除。删除是唯一会真的抹掉数据的动作，所以必须过二次确认，
+/// 并且要能分辨"删的是不是当前生效的那一份"——两种情形的文案不一样。
+private struct PendingReleaseDeletion: Identifiable {
+    let book: ReaderRemoteBook
+    let release: ReaderPiOCRRelease
+
+    var id: String { release.runId }
+}
+
 struct ReaderLocalLibraryView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var library = ReaderLocalLibraryManager.shared
@@ -38,6 +47,11 @@ struct ReaderLocalLibraryView: View {
     @State private var ocrActionBookID: String?
     @State private var ocrErrorMessage: String?
     @State private var expandedPreprocessingBookIDs = Set<String>()
+    // 服务器上历次预处理结果（用户 2026-08-18：「删除预处理的结果」
+    // 「标记上日期用以区分，而不是覆盖」）。按 bookId 缓存，展开面板时才拉。
+    @State private var releasesByBook: [String: ReaderPiOCRReleaseList] = [:]
+    @State private var loadingReleasesBookID: String?
+    @State private var pendingReleaseDeletion: PendingReleaseDeletion?
 
     let reader: ReaderWebViewModel
     let startupNotice: String?
@@ -145,6 +159,29 @@ struct ReaderLocalLibraryView: View {
                 Button("好", role: .cancel) { ocrErrorMessage = nil }
             } message: {
                 Text(ocrErrorMessage ?? "未知错误")
+            }
+            .confirmationDialog(
+                "删除这份预处理结果？",
+                isPresented: Binding(
+                    get: { pendingReleaseDeletion != nil },
+                    set: { if !$0 { pendingReleaseDeletion = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: pendingReleaseDeletion
+            ) { pending in
+                Button("删除", role: .destructive) {
+                    let target = pending
+                    pendingReleaseDeletion = nil
+                    Task { await confirmReleaseDeletion(target) }
+                }
+                Button("取消", role: .cancel) { pendingReleaseDeletion = nil }
+            } message: { pending in
+                // 删当前生效的那份后果不同 —— 分开说，别让用户事后才发现。
+                Text(
+                    pending.release.isActive
+                        ? "「\(pending.release.displayTitle)」是当前生效的结果。删除后这本书在服务器上将没有生效的预处理结果，需要重新预处理或改用其它结果。原书不会被删除。"
+                        : "将删除「\(pending.release.displayTitle)」。当前生效的结果不受影响，原书也不会被删除。"
+                )
             }
         }
     }
@@ -416,6 +453,9 @@ struct ReaderLocalLibraryView: View {
                     textLayerPicker(book: localBook)
 
                     Divider()
+                    releaseHistory(remoteBook: remoteBook, localBook: localBook)
+
+                    Divider()
                     piControls(
                         remoteBook: remoteBook,
                         localBook: localBook
@@ -576,7 +616,15 @@ struct ReaderLocalLibraryView: View {
         _ metadata: NativeBookOCRLayerMetadata
     ) -> String {
         if metadata.layer == .embedded { return metadata.layer.title }
-        return "\(metadata.layer.title) · \(metadata.pageCount) 页"
+        // 带上导入日期，让同一个格子被不同批次结果覆盖时也能分辨
+        // （updatedAt 一直就在元数据里，只是过去没显示出来）。
+        var title = metadata.layer.title
+        if metadata.updatedAt > Date(timeIntervalSince1970: 0) {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MM-dd"
+            title += " · " + formatter.string(from: metadata.updatedAt)
+        }
+        return title + " · \(metadata.pageCount) 页"
     }
 
     private func refreshTextLayers(_ book: ReaderLocalBookRecord) async {
@@ -611,6 +659,157 @@ struct ReaderLocalLibraryView: View {
     }
 
     @ViewBuilder
+    /// 服务器上的历次预处理结果。
+    ///
+    /// 用户指出选择的地方本来就有（「当前使用」那个选择器）——但那个选择器是
+    /// **每种引擎一个格子**（embedded/legacy/vision/pi/pc 五个固定枚举），
+    /// 装不下"同一种引擎跑过好几次"。所以历次结果列在这里，各带日期；
+    /// 选中某一份会让服务器切过去，再重新导入到本机的对应格子。
+    @ViewBuilder
+    private func releaseHistory(
+        remoteBook: ReaderRemoteBook?,
+        localBook: ReaderLocalBookRecord?
+    ) -> some View {
+        if let remoteBook {
+            let listing = releasesByBook[remoteBook.bookId]
+            VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("服务器上的结果", systemImage: "clock.arrow.circlepath")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                if loadingReleasesBookID == remoteBook.bookId {
+                    ProgressView().controlSize(.mini)
+                } else if let listing {
+                    Text("\(listing.releases.count) 份")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let listing, listing.releases.isEmpty {
+                Text("还没有预处理结果。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else if let listing {
+                ForEach(listing.releases) { release in
+                    HStack(spacing: 6) {
+                        Text(release.displayTitle)
+                            .font(.caption2)
+                        if release.isActive {
+                            Text("当前生效")
+                                .font(.caption2)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Color.accentColor.opacity(0.18))
+                                .clipShape(Capsule())
+                        }
+                        Spacer()
+                        Menu {
+                            if !release.isActive {
+                                Button("设为当前") {
+                                    Task {
+                                        await activateRelease(
+                                            release,
+                                            book: remoteBook,
+                                            localBook: localBook
+                                        )
+                                    }
+                                }
+                            }
+                            Button("删除", role: .destructive) {
+                                pendingReleaseDeletion = PendingReleaseDeletion(
+                                    book: remoteBook,
+                                    release: release
+                                )
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .font(.caption)
+                        }
+                        .disabled(ocrActionBookID != nil)
+                    }
+                }
+                Text("同一本书可以有多份结果；重新预处理会新增一份，不再覆盖。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            }
+            // 展开面板才拉：打开书架不该为每本书发一次网络请求。
+            .task(id: remoteBook.bookId) {
+                if releasesByBook[remoteBook.bookId] == nil {
+                    await loadReleases(for: remoteBook)
+                }
+            }
+        }
+    }
+
+    private func loadReleases(for book: ReaderRemoteBook) async {
+        guard loadingReleasesBookID == nil else { return }
+        loadingReleasesBookID = book.bookId
+        defer {
+            if loadingReleasesBookID == book.bookId { loadingReleasesBookID = nil }
+        }
+        let cookies = await reader.remoteLibraryCookies()
+        do {
+            let listing = try await piOCR.releases(book: book, cookies: cookies)
+            releasesByBook[book.bookId] = listing
+        } catch {
+            // 列不出来不该打断整个面板：Pi 可能还没升级、或此刻不可达。
+            // 静默留空，其余功能照常。
+            releasesByBook[book.bookId] = ReaderPiOCRReleaseList(
+                activeRunId: nil,
+                releases: [],
+                stagingArchiveBytes: 0
+            )
+        }
+    }
+
+    private func activateRelease(
+        _ release: ReaderPiOCRRelease,
+        book: ReaderRemoteBook,
+        localBook: ReaderLocalBookRecord?
+    ) async {
+        guard ocrActionBookID == nil else { return }
+        ocrActionBookID = book.bookId
+        defer { if ocrActionBookID == book.bookId { ocrActionBookID = nil } }
+        let cookies = await reader.remoteLibraryCookies()
+        do {
+            let listing = try await piOCR.activateRelease(
+                book: book,
+                runId: release.runId,
+                cookies: cookies
+            )
+            releasesByBook[book.bookId] = listing
+        } catch {
+            ocrErrorMessage = "切换预处理结果失败：\(error.localizedDescription)"
+            return
+        }
+        // 服务器换了当前生效的那一份，本机还留着上一次导入的旧层 ——
+        // 必须重新导入，否则 iPad 上看到的仍然是旧结果。
+        if let localBook {
+            await importPiAttachments(book: book, localBook: localBook)
+        }
+    }
+
+    private func confirmReleaseDeletion(_ pending: PendingReleaseDeletion) async {
+        guard ocrActionBookID == nil else { return }
+        let book = pending.book
+        ocrActionBookID = book.bookId
+        defer { if ocrActionBookID == book.bookId { ocrActionBookID = nil } }
+        let cookies = await reader.remoteLibraryCookies()
+        do {
+            let listing = try await piOCR.deleteRelease(
+                book: book,
+                runId: pending.release.runId,
+                // 删当前生效的那份：用户已经在对话框里确认过后果了。
+                allowDeactivate: pending.release.isActive,
+                cookies: cookies
+            )
+            releasesByBook[book.bookId] = listing
+        } catch {
+            ocrErrorMessage = "删除预处理结果失败：\(error.localizedDescription)"
+        }
+    }
+
     private func piControls(
         remoteBook: ReaderRemoteBook?,
         localBook: ReaderLocalBookRecord?

@@ -113,6 +113,67 @@ struct ReaderPiOCRAdoption: Codable, Hashable, Sendable {
     let revision: String?
 }
 
+/// 服务器上的一次预处理结果。
+///
+/// 时间字段一律可选：Pi 若还没升级到带运行台账的版本，这些字段不会出现；
+/// 用非可选类型会让整条响应解码失败，把"还没升级"变成"功能坏了"。
+struct ReaderPiOCRRelease: Equatable, Identifiable, Sendable {
+    let runId: String
+    let revision: String
+    let engine: String
+    let executor: String
+    let publishedAt: Date?
+    let totalPages: Int?
+    let isActive: Bool
+
+    var id: String { runId }
+
+    /// 「PC 高质量预处理 · 08-18 · 53 页」——日期取不到就不写，**不编造**。
+    var displayTitle: String {
+        var parts: [String] = [Self.engineTitle(engine: engine, executor: executor)]
+        if let publishedAt {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MM-dd"
+            parts.append(formatter.string(from: publishedAt))
+        } else {
+            parts.append("日期未知")
+        }
+        if let totalPages {
+            parts.append("\(totalPages) 页")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    static func engineTitle(engine: String, executor: String) -> String {
+        if engine == "legacy" { return "兼容旧结果" }
+        return executor == "pc" ? "PC 高质量预处理" : "Pi 预处理"
+    }
+}
+
+struct ReaderPiOCRReleaseList: Equatable, Sendable {
+    let activeRunId: String?
+    let releases: [ReaderPiOCRRelease]
+    let stagingArchiveBytes: Int64
+}
+
+private struct ReaderPiOCRReleaseWire: Decodable {
+    let runId: String
+    let revision: String
+    let engine: String
+    let executor: String
+    let publishedAtEpochMs: Int64?
+    let totalPages: Int?
+    let isActive: Bool?
+}
+
+private struct ReaderPiOCRReleaseListWireResponse: Decodable {
+    let ok: Bool
+    let contract: String
+    let activeRunId: String?
+    let runs: [ReaderPiOCRReleaseWire]
+    let stagingArchiveBytes: Int64?
+}
+
 private struct ReaderPiOCRAdoptionPreviewWireResponse: Decodable {
     let ok: Bool
     let contract: String
@@ -297,6 +358,119 @@ final class ReaderPiOCRClient {
             }
         }
         return payload.executors
+    }
+
+    static let releaseIndexContract = "reader-book-ocr-release-index/1"
+
+    /// 列出服务器上这本书的**全部**预处理结果（带日期）。
+    func releases(
+        book: ReaderRemoteBook,
+        cookies: [HTTPCookie]
+    ) async throws -> ReaderPiOCRReleaseList {
+        var components = URLComponents(
+            url: try canonicalURL(path: "pdf/api/library/ocr/releases"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [
+            URLQueryItem(name: "bookId", value: book.bookId),
+            URLQueryItem(name: "contentSha256", value: book.contentSha256),
+        ]
+        guard let url = components?.url else { throw ReaderPiOCRError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        apply(cookies: cookies, to: &request)
+        return try await releaseListResponse(
+            for: request,
+            expectedPath: "/pdf/api/library/ocr/releases"
+        )
+    }
+
+    /// 把某一次结果设为当前生效。
+    func activateRelease(
+        book: ReaderRemoteBook,
+        runId: String,
+        cookies: [HTTPCookie]
+    ) async throws -> ReaderPiOCRReleaseList {
+        try await releaseCommand(
+            path: "pdf/api/library/ocr/releases/activate",
+            book: book,
+            body: ["runId": runId],
+            cookies: cookies
+        )
+    }
+
+    /// 删除某一次结果。删当前生效的那份需要 allowDeactivate 明确确认。
+    func deleteRelease(
+        book: ReaderRemoteBook,
+        runId: String,
+        allowDeactivate: Bool,
+        cookies: [HTTPCookie]
+    ) async throws -> ReaderPiOCRReleaseList {
+        try await releaseCommand(
+            path: "pdf/api/library/ocr/releases/delete",
+            book: book,
+            body: ["runId": runId, "allowDeactivate": allowDeactivate],
+            cookies: cookies
+        )
+    }
+
+    private func releaseCommand(
+        path: String,
+        book: ReaderRemoteBook,
+        body: [String: Any],
+        cookies: [HTTPCookie]
+    ) async throws -> ReaderPiOCRReleaseList {
+        var request = URLRequest(url: try canonicalURL(path: path))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var payload: [String: Any] = [
+            "bookId": book.bookId,
+            "contentSha256": book.contentSha256,
+        ]
+        for (key, value) in body { payload[key] = value }
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        apply(cookies: cookies, to: &request)
+        return try await releaseListResponse(for: request, expectedPath: "/" + path)
+    }
+
+    private func releaseListResponse(
+        for request: URLRequest,
+        expectedPath: String
+    ) async throws -> ReaderPiOCRReleaseList {
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data, expectedPathPrefix: expectedPath)
+        let payload: ReaderPiOCRReleaseListWireResponse
+        do {
+            payload = try JSONDecoder().decode(
+                ReaderPiOCRReleaseListWireResponse.self,
+                from: data
+            )
+        } catch {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        guard payload.ok, payload.contract == Self.releaseIndexContract else {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        let releases = payload.runs.map { run in
+            ReaderPiOCRRelease(
+                runId: run.runId,
+                revision: run.revision,
+                engine: run.engine,
+                executor: run.executor,
+                publishedAt: run.publishedAtEpochMs.map {
+                    Date(timeIntervalSince1970: Double($0) / 1000)
+                },
+                totalPages: run.totalPages,
+                isActive: run.isActive ?? (run.runId == payload.activeRunId)
+            )
+        }
+        return ReaderPiOCRReleaseList(
+            activeRunId: payload.activeRunId,
+            releases: releases,
+            stagingArchiveBytes: payload.stagingArchiveBytes ?? 0
+        )
     }
 
     func status(
@@ -792,6 +966,37 @@ final class ReaderPiOCRCoordinator: ObservableObject {
     deinit {
         pollingTasks.values.forEach { $0.cancel() }
         attachmentTasks.values.forEach { $0.cancel() }
+    }
+
+    // 历次预处理结果：视图经协调器访问，不直接碰 client（client 是 private，
+    // 而且这一族的既有写法就是"视图 → 协调器 → 客户端"）。
+    func releases(
+        book: ReaderRemoteBook,
+        cookies: [HTTPCookie]
+    ) async throws -> ReaderPiOCRReleaseList {
+        try await client.releases(book: book, cookies: cookies)
+    }
+
+    func activateRelease(
+        book: ReaderRemoteBook,
+        runId: String,
+        cookies: [HTTPCookie]
+    ) async throws -> ReaderPiOCRReleaseList {
+        try await client.activateRelease(book: book, runId: runId, cookies: cookies)
+    }
+
+    func deleteRelease(
+        book: ReaderRemoteBook,
+        runId: String,
+        allowDeactivate: Bool,
+        cookies: [HTTPCookie]
+    ) async throws -> ReaderPiOCRReleaseList {
+        try await client.deleteRelease(
+            book: book,
+            runId: runId,
+            allowDeactivate: allowDeactivate,
+            cookies: cookies
+        )
     }
 
     func job(for book: ReaderRemoteBook) -> ReaderPiOCRJob? {

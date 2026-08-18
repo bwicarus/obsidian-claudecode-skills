@@ -308,18 +308,30 @@ actor NativeBookOCRSidecarStore {
             ) else { continue }
             let stored = try pages(contentSHA256: digest, layer: layer)
             guard !stored.isEmpty, metadata.pageCount == stored.count else {
-                throw NativeBookOCRError.storage("文字层页数与元数据不匹配")
+                // 这一层坏了（页数与元数据对不上，或删到一半），**跳过它**，
+                // 不要连累别的层。
+                //
+                // 旧行为是 throw；而 page() 每次读页第一行就调 layerState()，
+                // 于是一层不一致 = 整本书每一页文字层全抛。删除功能上线后这条
+                // 路径会被真实走到（删层过程中断、Pi 那份被删而本机还留着）。
+                continue
             }
             available.append(metadata)
         }
-        let selected: NativeBookOCRLayerID
+        var selected: NativeBookOCRLayerID
         if let persisted = try loadLayerSelection(contentSHA256: digest) {
             selected = persisted.selected
         } else {
             selected = legacyPages.isEmpty ? .embedded : .legacy
         }
-        guard available.contains(where: { $0.layer == selected }) else {
-            throw NativeBookOCRError.storage("当前选择的文字层不可用")
+        if !available.contains(where: { $0.layer == selected }) {
+            // 选中的层已经不在了（被删、或上面那一步跳过了）。**静默回落**，
+            // 不要抛 —— 抛出去的后果是整本书读不出文字层，而回落最多是
+            // 少了一层可选项。PDF 原文字层永远在 available 里，所以这个回落
+            // 一定有落点。
+            selected = available.contains(where: { $0.layer == .legacy })
+                ? .legacy
+                : .embedded
         }
         return NativeBookOCRLayerState(
             contentSHA256: digest,
