@@ -853,7 +853,7 @@ struct ReaderLocalLibraryView: View {
             // 附件下载走的是"当前生效那一份"，所以要先把它切过去。
             let cookies = await reader.remoteLibraryCookies()
             do {
-                let listing = try await piOCR.client.activateRelease(
+                let listing = try await piOCR.activateRelease(
                     book: book,
                     runId: release.runId,
                     cookies: cookies
