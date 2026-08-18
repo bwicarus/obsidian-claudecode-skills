@@ -372,7 +372,9 @@ actor NativeBookOCRSidecarStore {
                 schema: NativeBookOCRLayerSelection.schema,
                 contentSHA256: contentSHA256.lowercased(),
                 selected: fallback,
-                updatedAt: Date()
+                updatedAt: Date(),
+                // 回落是被动发生的（选中的那层被删了），不是用户拍板。
+                chosenByUser: false
             )
             let url = layerSelectionURL(contentSHA256)
             do {
@@ -399,6 +401,53 @@ actor NativeBookOCRSidecarStore {
         return try layerState(contentSHA256: contentSHA256)
     }
 
+    /// 刚导入的那一层，在"还没人选过"时自动采纳。
+    ///
+    /// 用户 2026-08-19 的实况：书里当前用的是 PDF 自带的文字层，它的框比字高
+    /// 一大截、相邻两行直接重叠 12.7pt，于是"选下面会一起选上面"，词分组也没有。
+    /// 我们跑好的 OCR 层就躺在旁边、几何是准的 —— 但从没被选上，预处理白做。
+    ///
+    /// 「导入不覆盖当前选择」本身是对的（用户挑过的东西不该被后台改掉），错在
+    /// 把"从来没挑过"也算成了一次选择。所以只在这两种情况下自动采纳：
+    /// 当前是内嵌层或兼容旧结果，**且**这个选择不是用户自己点出来的。
+    func adoptImportedLayerIfUnchosen(
+        bookID: String,
+        contentSHA256: String,
+        layer: NativeBookOCRLayerID
+    ) throws -> (state: NativeBookOCRLayerState, adopted: Bool) {
+        let current = try layerState(contentSHA256: contentSHA256)
+        guard current.available.contains(where: { $0.layer == layer }) else {
+            return (current, false)
+        }
+        if current.selected == layer { return (current, false) }
+        guard [.embedded, .legacy].contains(current.selected) else {
+            return (current, false)
+        }
+        let stored = try loadLayerSelection(contentSHA256: contentSHA256)
+        if stored?.chosenByUser == true { return (current, false) }
+        let state = try selectLayer(
+            bookID: bookID,
+            contentSHA256: contentSHA256,
+            layer: layer
+        )
+        // selectLayer 会记 chosenByUser: true —— 这一次不是用户点的，改回去，
+        // 否则以后就再也不会自动采纳更好的层了。
+        let selection = NativeBookOCRLayerSelection(
+            schema: NativeBookOCRLayerSelection.schema,
+            contentSHA256: contentSHA256.lowercased(),
+            selected: layer,
+            updatedAt: Date(),
+            chosenByUser: false
+        )
+        let url = layerSelectionURL(contentSHA256)
+        do {
+            try encoder().encode(selection).write(to: url, options: .atomic)
+        } catch {
+            throw NativeBookOCRError.storage(error.localizedDescription)
+        }
+        return (state, true)
+    }
+
     func selectLayer(
         bookID: String,
         contentSHA256: String,
@@ -416,7 +465,8 @@ actor NativeBookOCRSidecarStore {
             schema: NativeBookOCRLayerSelection.schema,
             contentSHA256: contentSHA256.lowercased(),
             selected: layer,
-            updatedAt: Date()
+            updatedAt: Date(),
+            chosenByUser: true
         )
         let url = layerSelectionURL(contentSHA256)
         do {

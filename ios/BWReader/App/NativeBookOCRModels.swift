@@ -54,6 +54,11 @@ struct NativeBookOCRLayerSelection: Codable, Equatable, Sendable {
     let contentSHA256: String
     let selected: NativeBookOCRLayerID
     let updatedAt: Date
+    /// 这个选择是不是用户自己点的。
+    ///
+    /// 可选而不是 Bool：老的选择文件里没有这个字段，解出来是 nil，语义正好是
+    /// "没主动选过" —— 不需要迁移，也不会把历史选择误判成用户拍板过的。
+    let chosenByUser: Bool?
 }
 
 struct NativeBookOCRLayerState: Equatable, Sendable {

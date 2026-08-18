@@ -1182,7 +1182,11 @@ actor ReaderNativePDFMutationActor {
                 contentSHA256: stagedContentSHA256.lowercased(),
                 selected: availableLayers.contains(selection.selected)
                     ? selection.selected : .embedded,
-                updatedAt: Date()
+                updatedAt: Date(),
+                // 迁移不改变"这是不是用户自己选的"，原样带过去；只有回落到
+                // 内嵌层时才不再算用户拍板（那一层不是他挑的）。
+                chosenByUser: availableLayers.contains(selection.selected)
+                    ? selection.chosenByUser : false
             )
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .millisecondsSince1970

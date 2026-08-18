@@ -10,6 +10,24 @@ const STORE = read("ios/BWReader/App/NativeBookOCRStore.swift");
 const MANAGER = read("ios/BWReader/App/NativeBookOCRManager.swift");
 const BRIDGE = read("ios/BWReader/App/NativeBookOCRBridge.swift");
 
+/// 取一个方法的函数体：从 `func 名(` 到下一个同缩进的 `func`。
+///
+/// 用它而不是 `/func x\([\s\S]{0,600}?y/` 这种字符窗口正则 —— 窗口只要被后来的
+/// 代码撑过头就会静默失配，或者更糟：窗口太大时匹配到隔壁函数里的内容，测试
+/// 看起来是绿的却什么都没在守。
+const bodyOf = (source, name) => {
+  const start = source.indexOf(`func ${name}(`);
+  if (start < 0) return "";
+  const next = source
+    .slice(start + 1)
+    .search(/\n {4}(?:@\w+\s*)*(?:private |static )*func /);
+  return next < 0 ? source.slice(start) : source.slice(start, start + 1 + next);
+};
+
+/// 去掉行注释。断言要守的是代码的行为，注释里出现同样的字面量不算数
+/// —— 否则一句解释性的注释就能让 doesNotMatch 假红，或让 match 假绿。
+const codeOnly = (body) => body.replace(/\/\/.*$/gm, "");
+
 test("native book OCR exposes durable manual lifecycle and staged progress", () => {
   assert.match(MANAGER, /final class NativeBookOCRManager: ObservableObject/);
   assert.match(MANAGER, /static let shared = NativeBookOCRManager\(\)/);
@@ -484,4 +502,59 @@ test("manual page OCR and selection fixes are local, durable, layered, and never
   assert.match(BRIDGE, /private var localBookAccess: ReaderLocalBookAccess\?/);
   assert.match(BRIDGE, /"persisted": true/);
   assert.doesNotMatch(MANAGER, /try\? await store\.(?:appendSelectionCorrection|writeManualPageOverride|clearManualPageOverride)/);
+});
+
+test("导入的文字层在没人挑过时被采纳，用户挑过的绝不覆盖", () => {
+  // 用户 2026-08-19 的实况：书里当前用的是 PDF 自带文字层，它的框比字高一大截、
+  // 相邻两行重叠 12.7pt（实测），于是"选下面会一起选上面"，也没有词分组。我们
+  // 跑好的 OCR 层就在旁边、几何是准的，却从没被选上 —— 预处理白做。
+  //
+  // 「导入不覆盖当前选择」本身是对的；错在把"从来没挑过"也算成了一次选择。
+  assert.match(MODELS, /let chosenByUser: Bool\?/);
+  assert.match(STORE, /func adoptImportedLayerIfUnchosen\(/);
+  // 只在当前是内嵌层/兼容旧结果时采纳 —— 别把用户选中的另一份 OCR 顶掉。
+  assert.match(
+    STORE,
+    /guard \[\.embedded, \.legacy\]\.contains\(current\.selected\) else \{\s*\n\s*return \(current, false\)/,
+  );
+  // 用户自己点过就到此为止。
+  assert.match(STORE, /if stored\?\.chosenByUser == true \{ return \(current, false\) \}/);
+  // 手点选择要留下"用户拍板"的印记，否则下次导入会把它顶掉；
+  // 自动采纳则必须**不留**，否则以后再也不会自动采纳更好的层。
+  // 同样按位置切函数体 —— 字符窗口式的正则会随函数长度悄悄失效。
+  const selectBody = codeOnly(bodyOf(STORE, "selectLayer"));
+  assert.ok(selectBody.length > 0, "找不到 selectLayer");
+  assert.match(selectBody, /chosenByUser: true/);
+  const adoptBody = codeOnly(bodyOf(STORE, "adoptImportedLayerIfUnchosen"));
+  assert.ok(adoptBody.length > 0, "找不到 adoptImportedLayerIfUnchosen");
+  assert.match(adoptBody, /chosenByUser: false/);
+  assert.doesNotMatch(adoptBody, /chosenByUser: true/);
+  // 导入收尾据实报，不能采纳了还说"未自动切换"。
+  assert.match(MANAGER, /try await store\.adoptImportedLayerIfUnchosen\(/);
+  assert.match(MANAGER, /adoption\.adopted[\s\S]{0,200}?并设为当前文字层/);
+  assert.doesNotMatch(MANAGER, /try\? await store\.adoptImportedLayerIfUnchosen/);
+});
+
+test("删除本机文字层：先挪走选择再删目录，且不碰内嵌层", () => {
+  assert.match(STORE, /func deleteLayer\(/);
+  // 顺序是要害：**先把选择挪走，再删目录**。反过来的话，中间那一瞬
+  // layerState() 会看到"选中的层不存在"，而每次读页都调它。
+  // 用位置比较而不是一个跨几百字符的正则 —— 后者只要函数体一长就会假过。
+  const deleteBody = codeOnly(bodyOf(STORE, "deleteLayer"));
+  assert.ok(deleteBody.length > 0, "找不到 deleteLayer");
+  const movesSelection = deleteBody.indexOf("if current.selected == layer");
+  const removesDirectory = deleteBody.indexOf("removeItem(at: directory)");
+  assert.ok(movesSelection >= 0, "deleteLayer 没有把选择挪走");
+  assert.ok(removesDirectory >= 0, "deleteLayer 没有删目录");
+  assert.ok(
+    movesSelection < removesDirectory,
+    "删目录排在挪选择之前 —— 中间那一瞬 layerState() 会看到选中的层不存在",
+  );
+  // 内嵌层与兼容旧结果不是"导入进来的一份"，没有可删的目录。
+  assert.match(
+    STORE,
+    /func deleteLayer\([\s\S]{0,300}?guard \[\.appleVision, \.pi, \.pc\]\.contains\(layer\)/,
+  );
+  assert.match(MANAGER, /func deleteTextLayer\(/);
+  assert.match(MANAGER, /try await store\.deleteLayer\(/);
 });

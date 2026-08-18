@@ -950,6 +950,13 @@ final class NativeBookOCRManager: ObservableObject {
         let state: NativeBookOCRJobState = pages.contains(where: {
             $0.status == .failed
         }) ? .failed : .completed
+        // 还没人挑过文字层时，把刚导入的这一份采纳为当前使用 —— 否则书会继续
+        // 用 PDF 自带的那层，而它的框高到相邻两行重叠，预处理等于白做。
+        let adoption = try await store.adoptImportedLayerIfUnchosen(
+            bookID: bookID,
+            contentSHA256: result.contentSHA256,
+            layer: result.layer
+        )
         let status = Self.makeStatus(
             bookID: bookID,
             contentSHA256: result.contentSHA256,
@@ -957,12 +964,12 @@ final class NativeBookOCRManager: ObservableObject {
             totalPages: totalPages,
             currentPage: nil,
             pages: pages,
-            message: "已导入 \(result.layer.title)附件；当前文字层未自动切换"
+            message: adoption.adopted
+                ? "已导入 \(result.layer.title)附件，并设为当前文字层"
+                : "已导入 \(result.layer.title)附件；当前文字层未自动切换"
         )
         publish(status: status)
-        layerStates[bookID] = try await store.layerState(
-            contentSHA256: result.contentSHA256
-        )
+        layerStates[bookID] = adoption.state
         return result
     }
 
