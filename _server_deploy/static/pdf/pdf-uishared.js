@@ -776,8 +776,19 @@ window._favOpenPicker = function () {
   };
 
   // overlay 页常驻覆盖层:显示态渲 RC.md(空则提示);点击进 textarea 即时编辑
+  // 这一页刚渲染出来 → 把"曾经绑不上、因为那时它还没渲染"的卡接回去。
+  //   放在 _upRenderOverlay 里而不是逐个挂载点，是因为挂载路径有好几条
+  //   （lp 本机纸 / 服务端纸 / 重渲染），但它们都收敛到这里。
+  function _upBindRetryFor(rec) {
+    try {
+      if (rec && rec.id && typeof window.__upBindRetry === 'function') {
+        window.__upBindRetry(rec.id);
+      }
+    } catch (e) {}
+  }
   function _upRenderOverlay(ov, rec) {
     ov.classList.remove('editing');
+    _upBindRetryFor(rec);   // 这一页出现了 → 把等着绑到它上面的卡接回去
     // ★ 任务运行时(references/adr-task-runtime.md):这一页有结构化块 → 走块渲染;否则原 md 路径不动。
     if (rec.blocks && rec.blocks.length) { _upRenderBlocks(ov, rec); return; }
     var md = (rec.md || '').trim();
@@ -1299,10 +1310,52 @@ window._favOpenPicker = function () {
   // 绑定卡的形态：展开 <-> 球。语义与浮层卡的三态一致，区别是这里的卡是自建页的
   //   一个 block（它同时定住了屏幕位置和内容序列位置），所以"收起"不是关闭，
   //   只是把同一个格子换一种画法。形态存进 block.form，跨会话保留。
-  var UP_BIND_IDLE_MS = 20000;   // 与浮层卡默认一致（rc-voice-card-secs 默认 20s）
+  // 与浮层卡**同一个**设置口径（rc-voicecall.js:4079-4080）。以前这里写死 20000，
+  //   于是用户把自动收起关掉、或改成 60s，绑定卡完全不理 —— 提交注释说"与浮层卡默认
+  //   一致"，可只有默认值一致。返回 null = 用户关掉了自动收起，永不排表。
+  var UP_BIND_IDLE_MS = 20000;   // 兜底默认（localStorage 读不到时用）
+  function _upBindIdleMs() {
+    try {
+      if (localStorage.getItem('rc-voice-card-hide') === '0') return null;
+      var v = parseInt(localStorage.getItem('rc-voice-card-secs') || '20', 10) || 20;
+      return Math.max(5, Math.min(60, v)) * 1000;
+    } catch (e) { return UP_BIND_IDLE_MS; }
+  }
+
+  // 收起状态的落盘按 rec 合并成一次 PATCH。
+  //   同页多张绑定卡是同时渲染的，也就会**同时**到点；每张各发一个整数组 PATCH，
+  //   后写会覆盖先写，并发的 form 变更互相吞。合并窗口内只发最后一次。
+  var _upBindSaveTimers = new WeakMap();
+  function _upBindSaveSoon(rec) {
+    try {
+      clearTimeout(_upBindSaveTimers.get(rec));
+      _upBindSaveTimers.set(rec, setTimeout(function () {
+        // @interaction document.upage.bind-card
+        RC.reqJson('PATCH', UP_TEXT_API, { file: UP_FILE, id: rec.id, blocks: rec.blocks })
+          .catch(function () {});
+      }, 300));
+    } catch (e) {}
+  }
+
+  // 绑定卡的形态：展开 <-> 球。语义与浮层卡的三态一致，区别是这里的卡是自建页的
+  //   一个 block（它同时定住了屏幕位置和内容序列位置），所以"收起"不是关闭，
+  //   只是把同一个格子换一种画法。形态存进 block.form，跨会话保留。
+  //
+  // ⚠ 计时**只在这张卡真的被看见时**才走。自建页的元素一旦挂进滚动容器就常驻
+  //   （不虚拟化），所以裸 setTimeout 会让"绑在第 12 页的卡"在你读第 3 页时自己
+  //   收成球，全程没被看见过 —— 浮层那层早就有这个修复（_cardsVisSync:「卡片被藏
+  //   起来的这段时间不该计时」），块这层一直没有对等物。
   function _upBindCardForm(el, blk, rec) {
+    // 同一块的旧实例先拆干净：_upRenderBlocks 每次都重建 innerHTML 并重跑这里，
+    //   旧闭包的 timer 从来没人 clear，它仍会在已脱离的元素上触发，并改**同一个**
+    //   blk 对象写 form:'dot' —— 表现为"刚展开的卡被自己收起来了"。
+    try { if (el.__bwBindTeardown) el.__bwBindTeardown(); } catch (e) {}
+
     var collapsed = (blk.form === 'dot');
     var timer = null;
+    var io = null;
+    var visible = false;
+
     function paint() {
       el.classList.toggle('up2-b-card-dot', collapsed);
       el.title = collapsed ? '展开这张卡' : '';
@@ -1310,23 +1363,50 @@ window._favOpenPicker = function () {
     function save() {
       try {
         blk.form = collapsed ? 'dot' : 'full';
-        // @interaction document.upage.bind-card
-        RC.reqJson('PATCH', UP_TEXT_API, { file: UP_FILE, id: rec.id, blocks: rec.blocks })
-          .catch(function () {});
+        _upBindSaveSoon(rec);
       } catch (e) {}
     }
+    function stop() { try { clearTimeout(timer); } catch (e) {} timer = null; }
     function arm() {
-      clearTimeout(timer);
+      stop();
       if (collapsed) return;
-      timer = setTimeout(function () { collapsed = true; paint(); save(); }, UP_BIND_IDLE_MS);
+      if (!visible) return;                       // 看不见就不该计时
+      if (document.visibilityState === 'hidden') return;   // 切后台同理
+      var ms = _upBindIdleMs();
+      if (ms === null) return;                    // 用户关掉了自动收起
+      timer = setTimeout(function () { collapsed = true; paint(); save(); }, ms);
     }
+    function onVis() { if (document.visibilityState === 'visible') arm(); else stop(); }
+
     el.addEventListener('click', function (ev) {
       if (!collapsed) { arm(); return; }   // 展开态点内容不收起，只重排计时
       ev.stopPropagation();
       collapsed = false; paint(); save(); arm();
     });
+
+    try {
+      if (window.IntersectionObserver) {
+        io = new IntersectionObserver(function (entries) {
+          for (var i = 0; i < entries.length; i++) {
+            visible = entries[i].isIntersecting;
+            if (visible) arm(); else stop();
+          }
+        }, { threshold: 0.15 });
+        io.observe(el);
+      } else {
+        visible = true;   // 没有 IO 就退回旧行为，总比不计时好
+        arm();
+      }
+    } catch (e) { visible = true; arm(); }
+    document.addEventListener('visibilitychange', onVis);
+
+    el.__bwBindTeardown = function () {
+      stop();
+      try { if (io) io.disconnect(); } catch (e) {}
+      document.removeEventListener('visibilitychange', onVis);
+      el.__bwBindTeardown = null;
+    };
     paint();
-    arm();
   }
   // ★ 严格按**格子绝对定位**渲染 —— 服务端用 (row,col,span) 纯算术算出的 rect,
   //   只有前端也按同一套格子摆,那个 rect 才等于屏幕上的真实位置(批改按它裁图)。
@@ -1334,6 +1414,13 @@ window._favOpenPicker = function () {
   function _upRenderBlocks(ov, rec) {
     var sp = rec.paper || {};
     ov.setAttribute('data-up-run', rec.run_id || '');
+    // 这里是唯一销毁块 DOM 的地方 —— 也就是唯一正确的拆卸点。不拆的话旧闭包的
+    //   timer/observer 会活到下一轮，在已脱离的元素上继续改 blk。
+    try {
+      ov.querySelectorAll('.up2-b-card').forEach(function (old) {
+        if (old.__bwBindTeardown) old.__bwBindTeardown();
+      });
+    } catch (e) {}
     ov.innerHTML = '<div class="up2-blocks"></div><div class="up2-run-hint"></div>';
     var body = ov.querySelector('.up2-blocks');
     if (sp.bg) ov.style.background = sp.bg;

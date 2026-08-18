@@ -3147,9 +3147,32 @@
     try { _speakSafe(text); } catch (e) {}
   }
   window.__vcCue = _cue;   // 供任务完成播报复用
+  // 绑不上的卡先挂这里，等那一页真的渲染出来再补绑。
+  //   最常见的失败恰恰是"那页还没渲染"（用户在别处翻着，AI 把卡绑到第 12 页），
+  //   而这种失败是**会自己好的** —— 只要那页出现。以前退回浮层就到此为止，
+  //   球落在随机位置、既不记得想去哪也永不重试。
+  var _bindPending = [];
+  window.__upBindRetry = function (upageId) {
+    if (!upageId || !_bindPending.length) return;
+    var rest = [];
+    _bindPending.forEach(function (item) {
+      if (String(item.upage) !== String(upageId)) { rest.push(item); return; }
+      var ok = false;
+      try {
+        ok = (typeof window.__upBindCard === 'function')
+          && window.__upBindCard(item.upage, item.bid, item.payload);
+      } catch (e) {}
+      if (!ok) { rest.push(item); return; }
+      // 绑上了就把浮层那份关掉 —— 否则同一内容两处并存，用户会以为出了两张卡。
+      try { if (item.card) _cardClose(item.card); } catch (e) {}
+    });
+    _bindPending = rest;
+  };
+
   function renderInfo(card) {
     if (!card || !card.kind) return false;
     var label = card.title || '搜索结果';
+    var _pendBind = null;   // 绑不上时记下"它想去哪"，浮层卡建出来后一起入列
     // ★ card.bind：把这张卡钉到自建页的某个格子块（协议见 reader_card_contract._norm_bind）。
     //   钉进去之后它就是那一页的一个 block —— 位置和"内容序列上的位置"是同一件事，
     //   AI 下次读这一页时它按顺序出现在被绑定的块之后，而不是浮在旁边的游离注解。
@@ -3158,14 +3181,17 @@
     try {
       var _b = card.bind;
       if (_b && _b.kind === 'upage-block' && typeof window.__upBindCard === 'function') {
-        var okBind = window.__upBindCard(_b.upage, _b.bid, {
+        var _bp = {
           isHtml: true,
           raw: '<div class="vc-if-hd"><span>' + esc(label) + '</span></div>' + _infoHtml(card),
           text: _infoText(card),
           label: label
-        });
+        };
+        var okBind = window.__upBindCard(_b.upage, _b.bid, _bp);
         if (okBind) return true;
-        try { RC.toast && RC.toast('没找到要绑定的位置，卡片先放浮层'); } catch (e2) {}
+        // 记下"它想去哪"。那页出现时 __upBindRetry 会把它接回去。
+        _pendBind = { upage: _b.upage, bid: _b.bid, payload: _bp, card: null };
+        try { RC.toast && RC.toast('那一页还没打开，卡片先放浮层，等页面出现会自己归位'); } catch (e2) {}
       }
     } catch (e) {}
     var th = document.getElementById('asst-thread');
@@ -3196,6 +3222,7 @@
       var c = _cardPush(_infoHtml(card), label, true, false, card.cid,
                         { dot: true, form: 'full', type: _cst.color, icon: _cst.icon,
                           keepAsDot: !!card.bind });
+      if (c && _pendBind) { _pendBind.card = c; _bindPending.push(_pendBind); _pendBind = null; }
       if (c) {
         c.el.classList.add('vc-typed');   // 有色磨砂(与工具卡同一套观感)
         try { c.el.__vcCard = card; } catch (e) {}   // #img:浮层实例同挂 card(与侧栏实例共享同一对象 → 拖图入卡 push 一次两处同现)
