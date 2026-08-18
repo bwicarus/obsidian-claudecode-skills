@@ -283,10 +283,21 @@ internal sealed record CodexVoiceStopPlan(
 
 internal sealed class CodexVoiceActivityController
 {
+    /// <summary>按下之后，等这个信号翻转多久才认输。</summary>
+    /// <remarks>
+    /// 2026-08-18 实测（100ms 采样，用户提示"加载完成会叮咚一声"，那声提示音在
+    /// 渲染侧，于是"就绪"这一刻可观测）：
+    ///     台账 active=True → 渲染侧出声 = **2.25 秒**。
+    /// 原来的 20s + 8s 是在没有任何观测手段时拍的，比实际大了将近一个数量级 ——
+    /// 代价是每次失败都要熬满 28 秒才暴露，而"熬着"这段时间里用户什么都看不到。
+    /// 现在按实测取 4 倍余量：真开起来了 2 秒多就确认到，真没开也 10 秒就说话。
+    /// ⚠ 判定依据始终是**信号本身**，这两个数只是"等多久算认输"的上界 ——
+    ///   所以加载慢一点也不会误判，只是确认得晚一点。
+    /// </remarks>
     internal static readonly TimeSpan StartObservationTimeout =
-        TimeSpan.FromSeconds(20);
+        TimeSpan.FromSeconds(10);
     internal static readonly TimeSpan StartUsableSettleDelay =
-        TimeSpan.FromSeconds(8);
+        TimeSpan.FromSeconds(3);
     internal static readonly TimeSpan StopTransitionTimeout =
         TimeSpan.FromSeconds(5);
     internal static readonly TimeSpan MonitorInterval =
