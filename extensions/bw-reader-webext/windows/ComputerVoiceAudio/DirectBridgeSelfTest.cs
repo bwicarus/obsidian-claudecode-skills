@@ -5999,7 +5999,11 @@ internal static class DirectBridgeSelfTest
                     "stage",
                     "hresult",
                     "atUtc",
+                    "exceptionType",
                 })
+            // 这条 !Contains 是整个净化保证的落脚点：异常 message 里会出现
+            // 设备/端点标识（本例的 message 就叫 secret-endpoint-…），
+            // 所以状态文件只带**类型名**这种编译期常量，绝不带 message。
             && !statusError.GetRawText().Contains(
                 "secret-endpoint",
                 StringComparison.Ordinal),

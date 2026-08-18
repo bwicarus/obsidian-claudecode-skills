@@ -1300,6 +1300,33 @@ class VoiceFailureDescriptionTests(unittest.TestCase):
         })
         self.assertEqual(text, "音频链路建立失败；未能确认通话就绪（start）")
 
+    def test_exception_type_is_appended_not_the_message(self):
+        # 桥带回来的是**异常类型名**，不是 message —— message 里可能有设备/端点标识，
+        # 桥那边刻意不外传（自测里那条异常就叫 secret-endpoint-id-must-never-be-serialized）。
+        text = describe_voice_failure({
+            "failureId": "failure-abcdefghijklmnop",
+            "code": "BW_COMPUTER_VOICE_DIRECT_VOICE_START_NOT_CONFIRMED",
+            "stage": "start",
+            "hresult": None,
+            "atUtc": "2026-08-18T00:00:00Z",
+            "exceptionType": "TimeoutException",
+        })
+        self.assertIn("音频链路建立失败", text)
+        self.assertIn("TimeoutException", text)
+
+
+    def test_wildcard_code_without_message_is_still_labelled(self):
+        # INTERNAL_FAILURE 这种通配码没有 message 就等于零信息 —— 至少得说清是哪一段。
+        text = describe_voice_failure({
+            "failureId": "failure-abcdefghijklmnop",
+            "code": "BW_COMPUTER_VOICE_DIRECT_INTERNAL_FAILURE",
+            "stage": "codex-voice-keepalive",
+            "hresult": None,
+            "atUtc": "2026-08-18T00:00:00Z",
+        })
+        self.assertIn("codex-voice-keepalive", text)
+
+
     def test_table_miss_degrades_to_family_plus_raw_code(self):
         # 167 个码不可能手工翻全。表外的必须仍然"说得出是哪一类"并保留原码，
         # 而不是把一串大写英文糊到用户脸上。

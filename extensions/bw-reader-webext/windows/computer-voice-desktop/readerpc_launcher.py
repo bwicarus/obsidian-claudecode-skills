@@ -55,7 +55,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.48"
+APP_VERSION = "0.1.49"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 桥接模式旗标的独立意图文件(C# 启动时读取;keepalive/config/runtime-status 都是
@@ -403,7 +403,16 @@ def describe_voice_failure(last_error: dict | None) -> str:
         return ""
     code = str(last_error.get("code") or "")
     stage = str(last_error.get("stage") or "")
+    # 通配码带回来的**异常类型名**（2026-08-18 起）。不是 message —— message 里
+    # 可能有设备/端点标识，桥那边刻意不外传（自测里那条异常就叫
+    # secret-endpoint-id-must-never-be-serialized）。类型名是编译期常量，安全，
+    # 而且对 INTERNAL_FAILURE 这种本来零信息的码来说是唯一的线索。
+    exception_type = (last_error.get("exceptionType") or "").strip()
     text = _VOICE_FAILURE_TEXT.get(code)
+    if text and exception_type:
+        text = f"{text} · {exception_type}"
+    elif not text and exception_type:
+        text = exception_type
     if not text:
         bare = code[len("BW_COMPUTER_VOICE_DIRECT_"):] if code.startswith(
             "BW_COMPUTER_VOICE_DIRECT_") else code

@@ -297,6 +297,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                 code = failure.Code,
                 stage = failure.Stage,
                 hresult = failure.Hresult,
+                exceptionType = failure.ExceptionType,
             });
             System.IO.File.AppendAllText(
                 path,

@@ -1272,10 +1272,23 @@ def _runtime_status_is_fresh(
 def _validated_runtime_error(value: object) -> dict[str, Any] | None:
     if value is None:
         return None
+    # message 是可选键（2026-08-18 起 C# 会带上异常类型名（不是 message —— message 里可能有设备/端点标识）；旧版本没有，
+    # 而且 JSON 选项可能把 null 整个省掉）——所以按"必需键 + 可选 message"校验，
+    # 不能再写死 exact-set，否则新桥的记录会被整条判无效、last_error 变成 None，
+    # 界面反而比以前更瞎。
     if (
         not isinstance(value, dict)
-        or set(value)
-        != {"failureId", "code", "stage", "hresult", "atUtc"}
+        or not {"failureId", "code", "stage", "hresult", "atUtc"} <= set(value)
+        or not set(value) <= {
+            "failureId", "code", "stage", "hresult", "atUtc", "exceptionType"
+        }
+        or (
+            value.get("exceptionType") is not None
+            and (
+                not isinstance(value.get("exceptionType"), str)
+                or len(value["exceptionType"]) > 300
+            )
+        )
         or not isinstance(value.get("failureId"), str)
         or not re.fullmatch(
             r"failure-[A-Za-z0-9_-]{16}",
