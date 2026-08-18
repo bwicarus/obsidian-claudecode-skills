@@ -87,6 +87,21 @@ test("native shelf opens local bytes directly and keeps Pi transfer as an explic
   // ⚠ 不验 URL 导航：产品已本地化，任何经过网络地址的路径都可能跑去开一个不该
   //   存在的网页（takeOverLibraryNavigation 只在读本机书时才拦截，读 Pi 书时不拦）。
   assert.match(APP_ROOT, /bwNativeAppPrefs\.openLibrary/);
+  // 顶栏那个按钮是模板里的**内联 onclick**，页面一渲染出来就能被按。
+  // 所以 __bwOpenLibrary / RC.nativeShell 必须在模块加载时就位，
+  // 不能藏在 ensureDom()/open() 这种"第一次开设置面板才跑"的函数里 ——
+  // 2026-08-18 用户实测「书架按钮按下后又打开了网页」就是这么来的：
+  // 冷启动读到 undefined → 走 fallback 跳 /pdf/；先开过设置再按却是好的，
+  // 于是这个 bug 靠这种巧合躲过了上一轮验收。
+  const settings = read("_server_deploy/static/pdf/rc-settings.js");
+  const bridgeAt = settings.indexOf("RC.nativeShell = {");
+  const openerAt = settings.indexOf("window.__bwOpenLibrary = function");
+  const ensureDomAt = settings.indexOf("function ensureDom()");
+  assert.ok(bridgeAt > 0 && openerAt > 0 && ensureDomAt > 0);
+  assert.ok(
+    bridgeAt < ensureDomAt && openerAt < ensureDomAt,
+    "书库桥接必须定义在 ensureDom 之前的模块顶层，否则冷启动时按钮会跑去开网页",
+  );
   assert.match(WEB_VIEW, /onOpenLibrary\s*=\s*\{[\s\S]{0,120}libraryPresentationRequestID\s*=\s*UUID\(\)/);
   assert.doesNotMatch(WEB_VIEW, /onOpenLibrary[\s\S]{0,200}location\.href/);
 });

@@ -1232,25 +1232,31 @@ class VoiceFailureDescriptionTests(unittest.TestCase):
     """失败原因一直写在 runtime-status 里，只是从来没人读出来给人看。"""
 
     def test_known_code_becomes_readable_text_with_stage(self):
+        # 用真实存在的 code。之前这里写的 ..._PORT_BUSY 是我凭空造的——C# 侧
+        # 167 个码里根本没有它，于是这条测试在验一件不会发生的事。
         text = describe_voice_failure({
             "failureId": "failure-abcdefghijklmnop",
-            "code": "BW_COMPUTER_VOICE_DIRECT_PORT_BUSY",
-            "stage": "listen",
-            "hresult": None,
-            "atUtc": "2026-08-18T00:00:00Z",
-        })
-        self.assertEqual(text, "端口被占用（listen）")
-
-    def test_unknown_code_still_shows_the_raw_code(self):
-        # 说不出人话也好过什么都不说 —— 这正是这一带反复吃亏的地方。
-        text = describe_voice_failure({
-            "failureId": "failure-abcdefghijklmnop",
-            "code": "BW_SOMETHING_NEW",
+            "code": "BW_COMPUTER_VOICE_DIRECT_VOICE_START_NOT_CONFIRMED",
             "stage": "start",
             "hresult": None,
             "atUtc": "2026-08-18T00:00:00Z",
         })
-        self.assertIn("BW_SOMETHING_NEW", text)
+        self.assertEqual(text, "音频链路建立失败；未能确认通话就绪（start）")
+
+    def test_table_miss_degrades_to_family_plus_raw_code(self):
+        # 167 个码不可能手工翻全。表外的必须仍然"说得出是哪一类"并保留原码，
+        # 而不是把一串大写英文糊到用户脸上。
+        text = describe_voice_failure({
+            "failureId": "failure-abcdefghijklmnop",
+            "code": "BW_COMPUTER_VOICE_DIRECT_AUDIO_ROUTE_LEASE_ENDED",
+            "stage": "start",
+            "hresult": None,
+            "atUtc": "2026-08-18T00:00:00Z",
+        })
+        self.assertIn("音频线路", text)
+        self.assertIn("AUDIO_ROUTE_LEASE_ENDED", text)
+        self.assertNotIn("BW_COMPUTER_VOICE_DIRECT_", text)
+
 
     def test_missing_error_is_silent(self):
         self.assertEqual(describe_voice_failure(None), "")

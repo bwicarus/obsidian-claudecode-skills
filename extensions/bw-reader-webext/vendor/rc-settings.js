@@ -59,8 +59,46 @@ if (window.__bwPwaProviderOnly) return;
  * onclick(全是 window.* 全局名,只在 PDF 页显示)。
  */
 (function () {
+
   if (!window.RC) window.RC = {};
   if (window.RC.settings) return;
+
+  // ⚠ 这一段**必须留在模块顶层**，不能挪进 ensureDom()/open() 之类只在交互时才跑的函数。
+  //   2026-08-18 用户实测「书架按钮按下后又打开了网页」：它原本定义在 ensureDom() 里，
+  //   而 ensureDom 只在第一次打开设置面板时才执行 —— 冷启动后顶栏那个内联 onclick
+  //   `window.__bwOpenLibrary ? __bwOpenLibrary() : goPdfList()` 读到的是 undefined，
+  //   于是径直走 fallback 跳 /pdf/ 打开网页。先开过一次设置再按就正常，
+  //   所以它看起来"修好了"——这类时序 bug 正是靠这种巧合躲过验收的。
+  //   模板里的内联 onclick 在页面加载后随时可能被点，它依赖的全局就必须在模块加载时就位。
+    // 顶栏「书籍 / App 设置」：App 内直接请求原生 sheet，**不做 URL 导航**。
+  //   takeOverLibraryNavigation 只在"正在读本机书 + 环回 /pdf/"时才拦截，
+  //   读别处的书时它不拦，硬导航就会跑去打开一个不该存在的网页（用户实测）。
+  //   产品已本地化：书架是 SwiftUI，不该有任何路径经过网络地址。
+  //   不在 App 里（扩展/浏览器）才回退到原来的行为。
+  RC.nativeShell = {
+    _api: function () {
+      var h = window.webkit && window.webkit.messageHandlers &&
+              window.webkit.messageHandlers.bwNativeAppPrefs;
+      return (h && typeof h.postMessage === 'function') ? h : null;
+    },
+    available: function () { return !!RC.nativeShell._api(); },
+    openLibrary: function () {
+      var a = RC.nativeShell._api();
+      if (!a) return false;
+      try { a.postMessage({ action: 'openLibrary' }); return true; } catch (e) { return false; }
+    },
+    openNativeTools: function () {
+      var a = RC.nativeShell._api();
+      if (!a) return false;
+      try { a.postMessage({ action: 'openNativeTools' }); return true; } catch (e) { return false; }
+    }
+  };
+  window.__bwOpenLibrary = function () {
+    if (RC.nativeShell.openLibrary()) return;
+    try { if (typeof goPdfList === 'function') { goPdfList(); return; } } catch (e) {}
+    location.href = '/pdf/';
+  };
+  window.__bwOpenNativeTools = function () { return RC.nativeShell.openNativeTools(); };
 
   var DEFAULT_HL = ['#fff59d', '#a7f3d0', '#a3d4ff', '#fda4af'];   // 照搬 PDF DEFAULT_HL_COLORS
   // 注:旧 eph-ai-model / eph-ai-effort 键已废弃(2026-07 收口,唯一真源 = 服务端 action 预设),不再读写。
@@ -1056,35 +1094,6 @@ if (window.__bwPwaProviderOnly) return;
     document.body.appendChild(mask);
     modal = mask.querySelector('.ep-set-modal');
 
-    // 顶栏「书籍 / App 设置」：App 内直接请求原生 sheet，**不做 URL 导航**。
-  //   takeOverLibraryNavigation 只在"正在读本机书 + 环回 /pdf/"时才拦截，
-  //   读别处的书时它不拦，硬导航就会跑去打开一个不该存在的网页（用户实测）。
-  //   产品已本地化：书架是 SwiftUI，不该有任何路径经过网络地址。
-  //   不在 App 里（扩展/浏览器）才回退到原来的行为。
-  RC.nativeShell = {
-    _api: function () {
-      var h = window.webkit && window.webkit.messageHandlers &&
-              window.webkit.messageHandlers.bwNativeAppPrefs;
-      return (h && typeof h.postMessage === 'function') ? h : null;
-    },
-    available: function () { return !!RC.nativeShell._api(); },
-    openLibrary: function () {
-      var a = RC.nativeShell._api();
-      if (!a) return false;
-      try { a.postMessage({ action: 'openLibrary' }); return true; } catch (e) { return false; }
-    },
-    openNativeTools: function () {
-      var a = RC.nativeShell._api();
-      if (!a) return false;
-      try { a.postMessage({ action: 'openNativeTools' }); return true; } catch (e) { return false; }
-    }
-  };
-  window.__bwOpenLibrary = function () {
-    if (RC.nativeShell.openLibrary()) return;
-    try { if (typeof goPdfList === 'function') { goPdfList(); return; } } catch (e) {}
-    location.href = '/pdf/';
-  };
-  window.__bwOpenNativeTools = function () { return RC.nativeShell.openNativeTools(); };
 
   // ── 本机(App 原生偏好)：只有 App 内才有这条通道，扩展/浏览器里整块不出现 ──
     //   写立即生效、不等「保存」：这些是 App 本体的开关，跟面板里其它需要成批提交的

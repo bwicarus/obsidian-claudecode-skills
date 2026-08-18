@@ -309,15 +309,46 @@ def rearm_codex_voice_keep_active(
     return flipped
 
 
+# ⚠ 这张表**注定是不全的**：C# 侧现有 167 个 BW_COMPUTER_VOICE_DIRECT_* 失败码，
+#   手工翻译一份必然滞后。真正该做的是把 C# 已经写好的那句人话带出来 ——
+#   它在抛异常时就有（例如 VOICE_START_NOT_CONFIRMED 对应"音频链路建立失败；未能确认通话就绪"），
+#   但 runtime-status 的 lastError 是 exact 合同 {failureId, code, stage, hresult, atUtc}，
+#   **把 message 丢掉了**。补它要动 C# + 合同四处同步，留给语音链路重做那一轮。
+#   在那之前：常见的几条给准确措辞，其余一律优雅降级（见 describe_voice_failure），
+#   而不是让 167 个码里有 160 个显示成一串大写英文。
 _VOICE_FAILURE_TEXT = {
+    "BW_COMPUTER_VOICE_DIRECT_VOICE_START_NOT_CONFIRMED": "音频链路建立失败；未能确认通话就绪",
+    "BW_COMPUTER_VOICE_DIRECT_VOICE_STOP_NOT_CONFIRMED": "未能确认通话已结束",
+    "BW_COMPUTER_VOICE_DIRECT_VOICE_CLOSED_LOCALLY": "通话在电脑这侧被结束",
+    "BW_COMPUTER_VOICE_DIRECT_VOICE_BASELINE_MISSING": "读不到 Codex 语音状态基线",
+    "BW_COMPUTER_VOICE_DIRECT_ACTIVITY_UNAVAILABLE": "读不到麦克风使用记录",
+    "BW_COMPUTER_VOICE_DIRECT_ACTIVITY_READ_FAILED": "麦克风使用记录读取失败",
+    "BW_COMPUTER_VOICE_DIRECT_APP_READY_TIMEOUT": "等 Codex 就绪超时",
+    "BW_COMPUTER_VOICE_DIRECT_APP_START_FAILED": "Codex 启动失败",
+    "BW_COMPUTER_VOICE_DIRECT_APP_AMBIGUOUS": "找到多个 Codex，无法确定目标",
     "BW_COMPUTER_VOICE_DIRECT_CONFIG_INVALID": "电脑语音配置无效",
-    "BW_COMPUTER_VOICE_DIRECT_PORT_BUSY": "端口被占用",
-    "BW_COMPUTER_VOICE_DIRECT_CERT_UNTRUSTED": "证书未被信任",
-    "BW_COMPUTER_VOICE_DIRECT_CODEX_NOT_FOUND": "没找到 Codex 客户端",
-    "BW_COMPUTER_VOICE_DIRECT_CODEX_LAUNCH_FAILED": "Codex 启动失败",
-    "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_REJECTED": "语音快捷键被拒绝",
-    "BW_COMPUTER_VOICE_DIRECT_AUDIO_DEVICE_MISSING": "缺少虚拟音频设备",
+    "BW_COMPUTER_VOICE_DIRECT_AUTH_REQUIRED": "需要先完成配对",
+    "BW_COMPUTER_VOICE_DIRECT_AUTH_TIMEOUT": "配对超时",
+    "BW_COMPUTER_VOICE_DIRECT_BUSY": "上一次操作还没结束",
+    "BW_COMPUTER_VOICE_DIRECT_BRIDGE_ONLY": "当前是仅桥接模式，语音不接到 App",
+    "BW_COMPUTER_VOICE_DIRECT_AUDIO_ROUTE_BUSY": "音频线路被占用",
+    "BW_COMPUTER_VOICE_DIRECT_AUDIO_SERVICE_NOT_READY": "Windows 音频服务未就绪",
+    "BW_COMPUTER_VOICE_DIRECT_CAPTURE_ENDPOINT_INACTIVE": "录音设备未启用",
 }
+
+# 大类前缀 → 一句概括。表外的码靠它给出"至少说得出是哪一类"的说明。
+_VOICE_FAILURE_FAMILY = (
+    ("AUDIO_ROUTE", "音频线路"),
+    ("AUDIO_SERVICE", "Windows 音频服务"),
+    ("AUDIO", "音频"),
+    ("CLASSIC_VOICE", "Codex 经典版语音按钮"),
+    ("VOICE", "Codex 语音"),
+    ("APP", "Codex 应用"),
+    ("SHORTCUT", "语音快捷键"),
+    ("ACTIVITY", "麦克风使用记录"),
+    ("AUTH", "配对"),
+    ("CONFIG", "配置"),
+)
 
 
 def describe_voice_failure(last_error: dict | None) -> str:
@@ -327,6 +358,9 @@ def describe_voice_failure(last_error: dict | None) -> str:
     bridge_core.read_direct_status 也**已经**把它解析进了 DirectStatus.last_error ——
     然后 ReaderPC 一次都没用过这个字段。于是界面上只有"无法确认 Codex 语音"，
     真正的原因就摆在文件里没人读。
+
+    表外的码不显示成一串大写英文：剥掉 BW_COMPUTER_VOICE_DIRECT_ 前缀，按大类给一句
+    概括，再把原码附在后面 —— 说不出准话也要说得出是哪一类，并且保留原文供排查。
     """
 
     if not isinstance(last_error, dict):
@@ -335,8 +369,18 @@ def describe_voice_failure(last_error: dict | None) -> str:
     stage = str(last_error.get("stage") or "")
     text = _VOICE_FAILURE_TEXT.get(code)
     if not text:
-        # 认不出的 code 也要显示原文:说不出人话总好过什么都不说。
-        text = code or "未知失败"
+        bare = code[len("BW_COMPUTER_VOICE_DIRECT_"):] if code.startswith(
+            "BW_COMPUTER_VOICE_DIRECT_") else code
+        family = next(
+            (name for prefix, name in _VOICE_FAILURE_FAMILY if bare.startswith(prefix)),
+            "",
+        )
+        if not bare:
+            text = "未知失败"
+        elif family:
+            text = f"{family}异常 · {bare}"
+        else:
+            text = bare
     return f"{text}（{stage}）" if stage else text
 
 
