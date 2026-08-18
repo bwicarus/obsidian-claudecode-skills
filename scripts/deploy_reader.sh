@@ -75,6 +75,17 @@ WRITER_SERVICES=(
   "yolo-figures.service"
   "figures-describe.service"
 )
+# 幂等批处理型写入者：**可以直接打断**。
+#   yolo_figures.py / describe_figures_batch.py 都按书按页断点续传，打断只损失
+#   当前这一页的计算，下次自然接上；而它们一跑就是几小时（实测 yolo 单轮消耗
+#   10h55m CPU）。若照事务型那样"等它收尾"，部署基本永远排不上
+#   （2026-08-18 实测：加进名单后第一次部署就被正在跑的 yolo 挡下，服务冻结）。
+# ⚠ 事务型的 quick-sync / daily / concept-graph **不在此列** —— 那些杀了可能
+#   留下半写状态，必须按下面的 wait_unit_still 等它自己收尾。
+INTERRUPTIBLE_WRITERS=(
+  "yolo-figures.service"
+  "figures-describe.service"
+)
 MANAGED_SERVICES=("webapp.service" "$VOICE_RT_UNIT")
 KG_MUTABLE_PATHS=(
   # Core KG outputs owned by the three frozen jobs.  The same exact inventory
@@ -593,6 +604,10 @@ freeze_writers() {
   # deactivating.  Only exact inactive/failed states are safe to cross.
   stop_units_and_confirm "${WRITER_TIMERS[@]}" || return
   stop_units_and_confirm "${MANAGED_SERVICES[@]}" || return
+
+  # 幂等批处理先直接停掉（见 INTERRUPTIBLE_WRITERS 上方说明），
+  # 否则下面的等待必然超时。
+  stop_units_and_confirm "${INTERRUPTIBLE_WRITERS[@]}" || return
 
   # 不杀正在运行的 daily/quick/concept 事务。先阻止下一轮，再给当前轮
   # WRITER_WAIT_SECONDS 收尾；超时即在任何代码/指针回切前 fail closed。
