@@ -47,6 +47,32 @@ internal sealed class DirectCodexVoiceControl :
         TimeSpan.FromSeconds(5);
     internal static readonly TimeSpan DisposeStopTimeout =
         TimeSpan.FromSeconds(8);
+    /// <summary>
+    /// 两次快捷键之间的最小间隔。**这条是防止"开了又被自己关掉"的唯一闸门。**
+    /// </summary>
+    /// <remarks>
+    /// F24 是**切换**不是"打开"。Codex 收到后要花几秒初始化语音，而这期间
+    /// 麦克风台账还没有任何变化 —— 于是确认等不到、判定失败、重试**再按一次**，
+    /// 正好把刚开起来的那一路关掉。用户 2026-08-18 亲眼看到的就是这个：
+    /// 「刚好看到你打开语音，但是在他初始化完全前就又被关闭了，
+    ///   可我手动打开的语音在初始化结束后留在了那里」——
+    /// 手动开的能留下，恰恰因为没有第二次按键去撤销它。
+    ///
+    /// 所以按下之后必须**先闭嘴等着**，等够一整轮观察（20s 观察 + 8s 沉降 = 28s）
+    /// 再加上一次重试退避（20s），冷却才可能长过"上一次按键的影响窗口"。
+    /// 冷却期内不按键：既不重复开，也不误关。
+    /// ⚠ 这条对开和关**一视同仁** —— 关的那一次同样可能落在别人刚开起来的初始化中间。
+    ///
+    /// ⚠ 这个 60 秒**不是量出来的**，是按上面那笔账加余量取的。
+    /// 2026-08-18 试过直接测 Codex 的初始化耗时，测不成：我们注入的 F24
+    /// （keybd_event，低层钩子显示带 injected 标记）**两个方向都不生效** ——
+    /// 开着时按不关、关着时按不开，而用户手动按键是有效的。
+    /// 也就是说 Codex 很可能在过滤 injected 输入。真要把这个数定准，
+    /// 得先解决"注入的键对方认不认"，那是另一件事。
+    /// </remarks>
+    internal static readonly TimeSpan ShortcutCooldown =
+        TimeSpan.FromSeconds(60);
+
     internal static readonly TimeSpan AutomaticRecoveryRetryDelay =
         TimeSpan.FromSeconds(20);
 
@@ -103,6 +129,8 @@ internal sealed class DirectCodexVoiceControl :
     private int _keepActive;
     private int _automaticRecoveryFailureCount;
     private int _automaticRecoveryBlocked;
+    private long _lastShortcutSentTicksUtc;
+    private readonly TimeSpan _shortcutCooldown;
     private int _disposeStarted;
 
     internal DirectCodexVoiceControl(
@@ -123,6 +151,7 @@ internal sealed class DirectCodexVoiceControl :
         Action<bool>? keepActiveChanged = null,
         Action<Exception>? automaticRecoveryFailed = null,
         Action? automaticRecoverySucceeded = null,
+        TimeSpan? shortcutCooldown = null,
         Func<TimeSpan, CancellationToken, Task>?
             automaticRecoveryDelayAsync = null)
     {
@@ -141,6 +170,7 @@ internal sealed class DirectCodexVoiceControl :
         _keepActiveChanged = keepActiveChanged;
         _automaticRecoveryFailed = automaticRecoveryFailed;
         _automaticRecoverySucceeded = automaticRecoverySucceeded;
+        _shortcutCooldown = shortcutCooldown ?? ShortcutCooldown;
         _automaticRecoveryDelayAsync = automaticRecoveryDelayAsync
             ?? ((delay, cancellationToken) =>
                 Task.Delay(delay, cancellationToken));
@@ -319,9 +349,20 @@ internal sealed class DirectCodexVoiceControl :
                 ShortcutSent: false);
         }
 
+        // 冷却期内一律不按（见 ShortcutCooldown）：上一次按键可能还在初始化，
+        // 这时再按就是把它撤销。返回当前状态、标明没发按键，让调用方稍后再看 ——
+        // 而不是把"我们选择不按"伪装成一次失败。
+        if (WithinShortcutCooldown())
+        {
+            return new DirectCodexVoiceSetResult(
+                ToState(before),
+                ShortcutSent: false);
+        }
+
         CodexVoiceActivitySnapshot confirmed;
         try
         {
+            MarkShortcutSent();
             confirmed = await TransitionOnceAsync(
                 active,
                 before,
@@ -344,14 +385,41 @@ internal sealed class DirectCodexVoiceControl :
             cancellationToken.ThrowIfCancellationRequested();
             confirmed = afterRestart.Active
                 ? afterRestart
-                : await TransitionOnceAsync(
-                    active: true,
+                : await TransitionOnceAfterRestartAsync(
                     afterRestart,
                     cancellationToken).ConfigureAwait(false);
         }
         return new DirectCodexVoiceSetResult(
             ToState(confirmed),
             ShortcutSent: true);
+    }
+
+    private bool WithinShortcutCooldown()
+    {
+        long last = Interlocked.Read(ref _lastShortcutSentTicksUtc);
+        if (last == 0)
+        {
+            return false;
+        }
+        return DateTime.UtcNow - new DateTime(last, DateTimeKind.Utc)
+            < _shortcutCooldown;
+    }
+
+    private void MarkShortcutSent() =>
+        Interlocked.Exchange(
+            ref _lastShortcutSentTicksUtc,
+            DateTime.UtcNow.Ticks);
+
+    /// <summary>重启补救后的那一次按键：同样要记时间戳，否则冷却形同虚设。</summary>
+    private Task<CodexVoiceActivitySnapshot> TransitionOnceAfterRestartAsync(
+        CodexVoiceActivitySnapshot afterRestart,
+        CancellationToken cancellationToken)
+    {
+        MarkShortcutSent();
+        return TransitionOnceAsync(
+            active: true,
+            afterRestart,
+            cancellationToken);
     }
 
     private async Task<CodexVoiceActivitySnapshot> TransitionOnceAsync(
@@ -444,7 +512,8 @@ internal sealed class DirectCodexVoiceControl :
         IDirectAppLauncher? appLauncher = null,
         Action<bool>? keepActiveChanged = null,
         Action<Exception>? automaticRecoveryFailed = null,
-        Action? automaticRecoverySucceeded = null)
+        Action? automaticRecoverySucceeded = null,
+        TimeSpan? shortcutCooldown = null)
     {
         WindowsRegistryCodexVoiceActivitySource source = new(
             DirectAppTargets.CodexDesktop);
@@ -500,7 +569,8 @@ internal sealed class DirectCodexVoiceControl :
             recoverStartFailureAsync: null,
             keepActiveChanged: keepActiveChanged,
             automaticRecoveryFailed: automaticRecoveryFailed,
-            automaticRecoverySucceeded: automaticRecoverySucceeded);
+            automaticRecoverySucceeded: automaticRecoverySucceeded,
+            shortcutCooldown: shortcutCooldown);
     }
 
     internal static async Task PrepareInitialStartAsync(

@@ -4015,7 +4015,8 @@ internal static class DirectBridgeSelfTest
             keepActivePath: keepActivePath,
             keepActivePollInterval: TimeSpan.FromSeconds(1),
             keepActiveChanged: enabled =>
-                keepActiveChanges.Add(enabled));
+                keepActiveChanges.Add(enabled),
+            shortcutCooldown: TimeSpan.Zero);
         DirectBridgeProtocolSession session = new(
             "connection-codex-voice-control",
             origin,
@@ -4257,7 +4258,8 @@ internal static class DirectBridgeSelfTest
                 cancellationToken.ThrowIfCancellationRequested();
                 firstAttemptRestarts++;
                 return Task.CompletedTask;
-            });
+            },
+            shortcutCooldown: TimeSpan.Zero);
         DirectCodexVoiceSetResult firstAttemptStarted =
             await firstAttemptControl.SetActiveAsync(
                 active: true,
@@ -4273,6 +4275,44 @@ internal static class DirectBridgeSelfTest
             && firstAttemptF24Count == 1,
             "direct-codex-voice-available-inactive-cold-starts-once-without-restart",
             checks);
+
+        // 按下之后必须先闭嘴等着（ShortcutCooldown）。F24 是**切换**不是"打开"：
+        // Codex 收到后要花几秒初始化，这期间台账没有任何变化 —— 旧行为是确认等不到
+        // 就重试再按一次，正好把刚开起来的那一路关掉。用户 2026-08-18 亲眼看到：
+        // 「刚好看到你打开语音，但是在他初始化完全前就又被关闭了，
+        //   可我手动打开的语音在初始化结束后留在了那里」。
+        CodexVoiceActivitySnapshot cooldownState =
+            CodexVoiceActivitySnapshot.Available(700, 800);
+        int cooldownTransitions = 0;
+        await using (DirectCodexVoiceControl cooldownControl = new(
+            () => cooldownState,
+            (active, before, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                cooldownTransitions++;
+                // 按了但状态不变（正是"还在初始化、台账没动"那一刻的样子）
+                return Task.FromResult(before);
+            },
+            shortcutCooldown: TimeSpan.FromMinutes(5)))
+        {
+            try
+            {
+                _ = await cooldownControl.SetActiveAsync(
+                    active: true,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (DirectProtocolException)
+            {
+                // 第一次按下之后确认不了是允许的；这里只关心会不会按第二次。
+            }
+            DirectCodexVoiceSetResult second = await cooldownControl
+                .SetActiveAsync(active: true, CancellationToken.None)
+                .ConfigureAwait(false);
+            Require(
+                cooldownTransitions == 1 && !second.ShortcutSent,
+                "direct-codex-voice-shortcut-has-a-cooldown-between-presses",
+                checks);
+        }
 
         FakeDirectAppLauncher warmStartLauncher = new();
         int warmStartSettleCount = 0;
@@ -4376,7 +4416,8 @@ internal static class DirectBridgeSelfTest
                 recoverySequence.Add("wait-5s");
                 recoveryState = CodexVoiceActivitySnapshot.Available(700, 800);
                 return Task.CompletedTask;
-            });
+            },
+            shortcutCooldown: TimeSpan.Zero);
         DirectCodexVoiceSetResult recovered =
             await recoveryControl.SetActiveAsync(
                 active: true,
@@ -4439,7 +4480,8 @@ internal static class DirectBridgeSelfTest
                 preparedState = CodexVoiceActivitySnapshot.Available(
                     lastUsedTimeStart: 600,
                     lastUsedTimeStop: 700);
-            });
+            },
+            shortcutCooldown: TimeSpan.Zero);
         DirectCodexVoiceSetResult prepared =
             await preparedControl.SetActiveAsync(
                 active: true,
@@ -4500,7 +4542,8 @@ internal static class DirectBridgeSelfTest
                     lastUsedTimeStart: 800,
                     lastUsedTimeStop: 900);
                 return Task.CompletedTask;
-            });
+            },
+            shortcutCooldown: TimeSpan.Zero);
         _ = await startupActivated.Task.WaitAsync(
             TimeSpan.FromSeconds(2)).ConfigureAwait(false);
         Require(
@@ -4545,7 +4588,8 @@ internal static class DirectBridgeSelfTest
             keepActivePath: liveIntentPath,
             keepActivePollInterval: TimeSpan.FromSeconds(1),
             keepActiveChanged: enabled =>
-                liveIntentChanges.Add(enabled));
+                liveIntentChanges.Add(enabled),
+            shortcutCooldown: TimeSpan.Zero);
         await Task.Delay(TimeSpan.FromMilliseconds(150))
             .ConfigureAwait(false);
         Require(
@@ -4629,7 +4673,8 @@ internal static class DirectBridgeSelfTest
                 cancellationToken.ThrowIfCancellationRequested();
                 failedRestarts++;
                 return Task.CompletedTask;
-            });
+            },
+            shortcutCooldown: TimeSpan.Zero);
         try
         {
             _ = await failedRecoveryControl.SetKeepActiveAsync(
@@ -4758,7 +4803,8 @@ internal static class DirectBridgeSelfTest
                 return Task.Delay(
                     TimeSpan.FromMilliseconds(20),
                     cancellationToken);
-            });
+            },
+            shortcutCooldown: TimeSpan.Zero);
         Exception recordedAutomaticFailure =
             await automaticFailureSeen.Task.WaitAsync(
                 TimeSpan.FromSeconds(2)).ConfigureAwait(false);
@@ -4860,7 +4906,8 @@ internal static class DirectBridgeSelfTest
                 return Task.Delay(
                     TimeSpan.FromMilliseconds(100),
                     cancellationToken);
-            });
+            },
+            shortcutCooldown: TimeSpan.Zero);
         _ = await transientAutomaticRecovered.Task.WaitAsync(
             TimeSpan.FromMilliseconds(2500)).ConfigureAwait(false);
         await Task.Delay(TimeSpan.FromMilliseconds(1200))
@@ -4919,7 +4966,8 @@ internal static class DirectBridgeSelfTest
                     cancelRecoveryStopped.TrySetResult(true);
                     throw;
                 }
-            });
+            },
+            shortcutCooldown: TimeSpan.Zero);
         Task<DirectCodexVoiceSetResult> enabling =
             cancelControl.SetKeepActiveAsync(
                 enabled: true,
@@ -5117,11 +5165,13 @@ internal static class DirectBridgeSelfTest
         DirectCodexVoiceControl unavailableControl = new(
             CodexVoiceActivitySnapshot.Unavailable,
             (_, _, _) => Task.FromException<CodexVoiceActivitySnapshot>(
-                new InvalidOperationException("transition must not run")));
+                new InvalidOperationException("transition must not run")),
+            shortcutCooldown: TimeSpan.Zero);
         DirectCodexVoiceControl errorControl = new(
             CodexVoiceActivitySnapshot.Error,
             (_, _, _) => Task.FromException<CodexVoiceActivitySnapshot>(
-                new InvalidOperationException("transition must not run")));
+                new InvalidOperationException("transition must not run")),
+            shortcutCooldown: TimeSpan.Zero);
         string? unavailableCode = null;
         string? errorCode = null;
         try
@@ -5185,7 +5235,8 @@ internal static class DirectBridgeSelfTest
                     ? CodexVoiceActivitySnapshot.Available(300, 200)
                     : CodexVoiceActivitySnapshot.Available(300, 400);
                 return serializedState;
-            });
+            },
+            shortcutCooldown: TimeSpan.Zero);
         DirectBridgeProtocolSession firstConnection = new(
             "connection-codex-voice-serialized-a",
             origin,
@@ -5289,7 +5340,8 @@ internal static class DirectBridgeSelfTest
                 return Task.FromResult(disposeState);
             },
             keepActivePath: disposeKeepActivePath,
-            keepActivePollInterval: TimeSpan.FromSeconds(10));
+            keepActivePollInterval: TimeSpan.FromSeconds(10),
+            shortcutCooldown: TimeSpan.Zero);
         await disposeControl.DisposeAsync().ConfigureAwait(false);
         await disposeControl.DisposeAsync().ConfigureAwait(false);
         using JsonDocument disposedIntent = JsonDocument.Parse(
@@ -5321,7 +5373,8 @@ internal static class DirectBridgeSelfTest
                     "fake dispose stop failed");
             },
             keepActivePath: failedDisposePath,
-            keepActivePollInterval: TimeSpan.FromSeconds(10));
+            keepActivePollInterval: TimeSpan.FromSeconds(10),
+            shortcutCooldown: TimeSpan.Zero);
         string? failedDisposeCode = null;
         try
         {

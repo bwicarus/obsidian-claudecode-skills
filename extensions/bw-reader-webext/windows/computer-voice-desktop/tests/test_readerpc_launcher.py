@@ -1300,6 +1300,20 @@ class VoiceFailureDescriptionTests(unittest.TestCase):
         })
         self.assertEqual(text, "音频链路建立失败；未能确认通话就绪（start）")
 
+    def test_keepalive_not_confirmed_tells_the_user_what_to_do(self):
+        # 实测（低层键盘钩子）确认：F24 确实进了系统输入流，是 Codex 不响应。
+        # 这条路只有一个可执行的自救动作 —— 重启 Codex 让它重新注册全局热键。
+        text = describe_voice_failure({
+            "failureId": "failure-abcdefghijklmnop",
+            "code": "BW_COMPUTER_VOICE_DIRECT_VOICE_START_NOT_CONFIRMED",
+            "stage": "codex-voice-keepalive",
+            "hresult": None,
+            "atUtc": "2026-08-18T00:00:00Z",
+            "exceptionType": None,
+        })
+        self.assertIn("重启 Codex", text)
+        self.assertNotIn("BW_", text)
+
     def test_exception_type_is_appended_not_the_message(self):
         # 桥带回来的是**异常类型名**，不是 message —— message 里可能有设备/端点标识，
         # 桥那边刻意不外传（自测里那条异常就叫 secret-endpoint-id-must-never-be-serialized）。

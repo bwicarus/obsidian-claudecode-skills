@@ -55,7 +55,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.50"
+APP_VERSION = "0.1.51"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 桥接模式旗标的独立意图文件(C# 启动时读取;keepalive/config/runtime-status 都是
@@ -408,6 +408,18 @@ def describe_voice_failure(last_error: dict | None) -> str:
     # secret-endpoint-id-must-never-be-serialized）。类型名是编译期常量，安全，
     # 而且对 INTERNAL_FAILURE 这种本来零信息的码来说是唯一的线索。
     exception_type = (last_error.get("exceptionType") or "").strip()
+    # 保活链上的"按了但没确认"几乎只有一个成因，而且有明确的自救动作 —— 说出来。
+    #
+    # 2026-08-18 在本机用低层键盘钩子验过：注入的 F24 **确实进入了系统输入流**
+    # （收到 keydown+keyup，flags 标着 injected），而 Codex 的 keybindings.json 里
+    # realtimeVoice 也确实绑着 F24 —— 也就是键送到了、对方不响应。
+    # 这正是用户说的"有时需要重启一下 codex 才行"：重启会让它重新注册全局热键。
+    # 与其显示一个只有我们看得懂的码，不如直接告诉用户该做什么。
+    if (
+        code == "BW_COMPUTER_VOICE_DIRECT_VOICE_START_NOT_CONFIRMED"
+        and stage == "codex-voice-keepalive"
+    ):
+        return "Codex 没有响应语音快捷键（键已送达）；重启 Codex 通常可恢复"
     text = _VOICE_FAILURE_TEXT.get(code)
     if text and exception_type:
         text = f"{text} · {exception_type}"
