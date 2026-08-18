@@ -206,6 +206,7 @@ struct NativeReaderToolsView: View {
                 quickNotesSection
                 NativePencilSettingsSection()
                 touchInputSection
+                buildIdentitySection
                 statusSection
             }
             .navigationTitle("原生阅读工具")
@@ -532,6 +533,29 @@ struct NativeReaderToolsView: View {
     }
 
     @ViewBuilder
+    /// 装的是哪一版。
+    ///
+    /// 2026-08-19：用户报"看不到新加的删除入口"，而我们**谁都无法确认他装的是
+    /// 哪个构建** —— App 里没有任何地方显示版本号，TestFlight 的更新又要几分钟
+    /// 处理。于是"功能没生效"和"还没装上"在现场分不开，只能反复猜。
+    /// 这一节就是为了把那种猜测变成一眼可见的事实。
+    private var buildIdentitySection: some View {
+        Section("关于") {
+            LabeledContent("版本") {
+                Text(Self.buildIdentity)
+                    .font(.footnote.monospacedDigit())
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    private static var buildIdentity: String {
+        let info = Bundle.main.infoDictionary
+        let short = (info?["CFBundleShortVersionString"] as? String) ?? "?"
+        let build = (info?["CFBundleVersion"] as? String) ?? "?"
+        return "\(short) (\(build))"
+    }
+
     private var touchInputSection: some View {
         Section("绘图与触控") {
             Picker("触屏双击", selection: $touchDoubleTapAction) {
