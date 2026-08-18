@@ -451,6 +451,49 @@ def process_note(note_path: Path, args: argparse.Namespace) -> None:
         write_record_snapshot(record_path, counts, args.dry_run)
 
 
+def process_book_records(args: argparse.Namespace) -> int:
+    """给**书源** record 也算一次 status_snapshot。
+
+    笔记那条路（collect_notes → record_path_for）按 source_note 反算文件名，
+    对 reader-<book>.json 永远对不上 —— 所以书里建的卡从来拿不到 status_snapshot，
+    于是 KG 那侧的 `card_mastery()` 恒为 None、`weakness_score()` 恒 0.5。
+    「按掌握度低的知识找对应知识点」的**掌握度**那一半就是空的。
+
+    这里直接遍历 records_dir，只认 source_kind == "book"：书没有 frontmatter
+    可写，所以只做 write_record_snapshot 这一半。
+    """
+
+    if not args.write_record:
+        return 0
+    done = 0
+    for record_path in sorted(args.records_dir.glob("*.json")):
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if str(record.get("source_kind") or "") != "book":
+            continue
+        note_ids = collect_anki_note_ids(record)
+        if not note_ids:
+            continue
+        try:
+            counts = query_counts(args.anki_url, note_ids)
+        except RuntimeError as e:
+            print(f"ERROR [{record_path.name}]: {e}", file=sys.stderr)
+            continue
+        book = str(record.get("source_book") or record.get("source_ref") or record_path.stem)
+        print(
+            f"【书 {book}】"
+            f"总 {counts['total']} | 新 {counts['new']} | "
+            f"学习 {counts['learning']} | 复习 {counts['review']} | "
+            f"重学 {counts['relearning']} | 暂停 {counts['suspended']} | "
+            f"留存 {counts.get('retention_avg', 0.0):.2f}"
+        )
+        write_record_snapshot(record_path, counts, args.dry_run)
+        done += 1
+    return done
+
+
 def collect_notes(args: argparse.Namespace) -> list[Path]:
     paths: list[Path] = []
 
@@ -521,7 +564,12 @@ def main() -> None:
             sys.exit(1)
 
     notes = collect_notes(args)
+    # 书源 record 走单独一条路（没有笔记文件可遍历），--all 时一并处理。
+    books = process_book_records(args) if args.all else 0
     if not notes:
+        if books:
+            print(f"没有笔记，但处理了 {books} 份书源 record。")
+            return
         print("未找到目标笔记。", file=sys.stderr)
         sys.exit(1)
 

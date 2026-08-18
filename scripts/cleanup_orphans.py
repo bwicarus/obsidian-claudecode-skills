@@ -262,6 +262,12 @@ def scan_record_orphans() -> list[tuple[Path, str, list[int]]]:
             rec = json.loads(rf.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
+        # 书源 record 不参与孤儿判定。它的"出处"是一本书而不是 vault 笔记，
+        # 尤其本机导入书是 localbook:<sha> —— 在 vault 里必然找不到，
+        # 于是会被判成孤儿，suspend_orphan_cards 会把**真卡**挂起。
+        # 要给书源做孤儿回收得另立规则（书文件不存在才算），不能复用笔记这套。
+        if str(rec.get("source_kind") or "") == "book":
+            continue
         sn = rec.get("source_note", "")
         if not sn:
             continue

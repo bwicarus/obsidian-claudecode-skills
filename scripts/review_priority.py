@@ -87,6 +87,12 @@ def load_records(records_dir: Path) -> dict[str, tuple[dict, Path]]:
     for rf in sorted(records_dir.glob("*.json")):
         try:
             rec = json.loads(rf.read_text(encoding="utf-8"))
+            # 书源的 record 不是笔记图上的节点：它没有 vault .md，
+            # 它的出处在 source_ref（book:<rel>#p<N>）里。显式排除而不是
+            # 依赖 source_note 恰好为空 —— 盘上可能还留着早期写了书路径的旧文件，
+            # 那种文件会让下面的 read_text('utf-8') 撞上 PDF 的二进制。
+            if str(rec.get("source_kind") or "") == "book":
+                continue
             sn  = rec.get("source_note", "")
             if sn:
                 result[Path(sn).stem] = (rec, rf)
@@ -110,6 +116,12 @@ def parse_links(note_path: Path) -> frozenset[str]:
     try:
         return frozenset(_LINK_RE.findall(note_path.read_text(encoding="utf-8")))
     except OSError:
+        return frozenset()
+    except UnicodeDecodeError:
+        # 走到这里说明有个非文本文件被当成笔记了（书源 record 早期把 PDF 路径
+        # 写进了 source_note）。**出声**而不是静默返回空集 —— 静默的话表现是
+        # "这条笔记没有任何链接"，一个完全说得通却完全错误的结论。
+        print(f"  WARN 不是文本文件，跳过链接解析：{note_path}", file=sys.stderr)
         return frozenset()
 
 
@@ -374,6 +386,10 @@ def write_priority_frontmatter(
         content = note_path.read_text(encoding="utf-8")
     except OSError as e:
         print(f"  WARN 读取失败：{e}", file=sys.stderr)
+        return
+    except UnicodeDecodeError:
+        # 同 parse_links：非文本文件不该让整个每日流程崩在这里，但必须出声。
+        print(f"  WARN 不是文本文件，跳过 frontmatter：{note_path}", file=sys.stderr)
         return
     new_content = _set_frontmatter_keys(content, kv)
     if dry_run:

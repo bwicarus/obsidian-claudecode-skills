@@ -14680,6 +14680,21 @@ def pdf_api_anki_add_cards(body_override=None):
                 fingerprint,
                 result,
             )
+            # ── anki/records：让阅读器建的卡真的进入 KG / 掌握度分析 ──
+            #   写入以前只挂在 _run_snippets_to 的直接入库分支上，而 App / 扩展 /
+            #   语音**全部**走 defer_add=true 的这条路 —— 于是 Pi 上一条 record
+            #   都没有，"按掌握度低的知识找回对应知识点"对书里建的卡从来不成立。
+            #   放在 commit 之后：只记真的入了库的那些。
+            if source_ref.startswith("book:"):
+                _book_rel, _, _page_frag = source_ref[5:].partition("#p")
+                try:
+                    _page_no = int(_page_frag) if _page_frag else 0
+                except ValueError:
+                    _page_no = 0
+                _reader_record_write(
+                    _book_rel, _page_no, source_ref, entity_id,
+                    cards, result.get("note_ids") or [],
+                )
     except Exception as ex:
         current_app.logger.exception(
             "Anki add idempotency ledger failure"
@@ -16234,6 +16249,93 @@ def _validate_snippets_body(body):
 # records 文件名安全化：Windows 与 Linux 都不接受的字符一律折成 __。
 #   与 scripts/anki_from_note.safe_record_stem 同一套规则。
 _RECORD_STEM_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+
+
+def _reader_record_write(source_book, source_page, source_ref, entity_id, cards, note_ids):
+    """把阅读器建的卡写进 anki/records，供 KG / 掌握度 / 仪表盘消费。
+
+    ## 为什么 source_note 必须留空
+
+    笔记侧的 record 用 `source_note` 指向 vault 里的 .md，而**书不是笔记**。
+    往那个字段里塞一个 PDF 路径会同时毒害四个既有消费者，它们都只认它：
+
+      - `review_priority.resolve_note_path` / `write_priority_frontmatter`
+        会对它 `read_text('utf-8')` → PDF 是二进制 → **UnicodeDecodeError**
+      - `link_with_ai.read_note_clean` 同上，崩在 worker 里
+      - `cleanup_orphans.scan_record_orphans` 判它是孤儿（`localbook:<sha>` 在
+        vault 里必然不存在）→ **suspend_orphan_cards 会把真卡挂起**
+      - `anki_status.collect_notes` 按它反算 record 文件名，对不上
+
+    所以书源的出处走**新字段**：`source_ref`（已规范化的 `book:<rel>#p<N>`）、
+    `source_book`、`source_page`。老消费者看到 `source_note == ""` 会自然跳过，
+    新消费者按 `source_kind == "book"` 认领。
+
+    ## 为什么一本书只写一个文件
+
+    文件名里带 `#p<page>` 的话，一本书读 200 页就是 200 个 record 文件。
+    页码属于**每张卡**，不属于这一批 —— 所以放进 card 里。
+
+    ## 幂等
+
+    按 `anki_note_id` 去重后再 append。`/api/anki-add-cards` 的 dedup 会重放，
+    无条件 append 会让同一张卡在 record 里堆好几份。
+    """
+
+    try:
+        rec_dir = CLAUDE_DIR / "anki" / "records"
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        stem = _RECORD_STEM_RE.sub("__", str(source_book or "reader"))[:120]
+        rec_path = rec_dir / ("reader-" + stem + ".json")
+        old = {}
+        if rec_path.exists():
+            try:
+                old = json.loads(rec_path.read_text(encoding="utf-8"))
+            except Exception:
+                old = {}
+        existing = list(old.get("cards") or [])
+        seen = {
+            str(c.get("anki_note_id"))
+            for c in existing
+            if c.get("anki_note_id") is not None
+        }
+        for index, card in enumerate(cards or []):
+            note_id = note_ids[index] if index < len(note_ids or []) else None
+            if note_id is not None and str(note_id) in seen:
+                continue        # 重放：这张卡已经记过了
+            if note_id is not None:
+                seen.add(str(note_id))
+            existing.append({
+                "local_id": (entity_id or "reader") + "-" + str(index),
+                "type": (card.get("type") or "basic").lower(),
+                "deck": "QA",
+                "front": card.get("front", ""),
+                "back": card.get("back", ""),
+                "text": card.get("text", ""),
+                "reason": "阅读器选段制卡",
+                "tags": ["pdf-snippets"],
+                "anki_note_id": note_id,
+                "status": "added",
+                # 页码属于每张卡 —— 一本书一个 record，卡各自记自己出自哪一页。
+                "source_page": int(source_page) if source_page else None,
+                "source_ref": source_ref or "",
+            })
+        rec_path.write_text(json.dumps({
+            # ⚠ 恒为空：书不是笔记。见上面的四个消费者。
+            "source_note": "",
+            "source_kind": "book",
+            "source_book": source_book or "",
+            "source_ref": source_ref or "",
+            "source_link": source_ref or "",
+            "source_url": "",
+            "generated_at": int(time.time()),
+            "generator": "pdf_reader._reader_record_write",
+            "status": "ok",
+            "cards": existing,
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return rec_path
+    except Exception:
+        return None   # 记录失败绝不该影响制卡本身
+
 _ANKI_MD_LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\((https?://[^)]+)\)")
 # ⚠ 图片必须先于链接处理，而且链接正则必须用 (?<!!) 把图片排除掉：
 #   markdown 图片是 ![alt](url)，跟链接只差前面一个 !。原来的链接正则不排除它，
@@ -16587,44 +16689,7 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
                 #     Path(source_note).stem，指向 vault 里的笔记，而书不是笔记；
                 #     要让消费侧认它还得单独一轮（会牵动每日流程与仪表盘，不该顺手改）。
                 #     但数据是采集时才有的 —— 晚一天开始就少一天，先记下来。
-                try:
-                    _rec_dir = CLAUDE_DIR / "anki" / "records"
-                    _rec_dir.mkdir(parents=True, exist_ok=True)
-                    _raw_stem = (_sf or "reader") + (("#p%d" % _sp) if _sp else "")
-                    _stem = _RECORD_STEM_RE.sub("__", _raw_stem)[:120]
-                    _rec_path = _rec_dir / ("reader-" + _stem + ".json")
-                    _old_rec = {}
-                    if _rec_path.exists():
-                        try:
-                            _old_rec = json.loads(_rec_path.read_text(encoding="utf-8"))
-                        except Exception:
-                            _old_rec = {}
-                    _cards_rec = list(_old_rec.get("cards") or [])
-                    for _ci, _cc in enumerate(cards):
-                        _cards_rec.append({
-                            "local_id": (_aid or "reader") + "-" + str(_ci),
-                            "type": (_cc.get("type") or "basic").lower(),
-                            "deck": "QA",
-                            "front": _cc.get("front", ""),
-                            "back": _cc.get("back", ""),
-                            "text": _cc.get("text", ""),
-                            "reason": "阅读器选段制卡",
-                            "tags": ["pdf-snippets"],
-                            "anki_note_id": note_ids[_ci] if _ci < len(note_ids) else None,
-                            "status": "added",
-                        })
-                    _rec_path.write_text(json.dumps({
-                        "source_note": _sf or "",
-                        "source_link": _src_ref,
-                        "source_url": "",
-                        "source_kind": "book",      # 供消费方区分:不是 vault 笔记
-                        "generated_at": int(time.time()),
-                        "generator": "pdf_reader._run_snippets_to",
-                        "status": "ok",
-                        "cards": _cards_rec,
-                    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                except Exception:
-                    pass   # 记录失败绝不该影响制卡本身
+                _reader_record_write(_sf, _sp, _src_ref, _aid, cards, note_ids)
                 # ⚠ AnkiConnect × Anki 25 的坑(2026-07-14 定位):addNote 的 deckName **不生效**——
                 #   插件用 `note.model()['did'] = deck_id` 指定牌组,而它调的 startEditing() → requireReset()
                 #   → mw.reset() 把 notetype 缓存清了,addNote 读回来的 did 已退回 notetype 自带的默认牌组
