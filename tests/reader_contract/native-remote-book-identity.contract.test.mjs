@@ -69,7 +69,10 @@ test("every first-party dict-jp request supplies book, page, languages and sente
     /fetch\('\/pdf\/api\/dict-jp\?word=/,
     "shared phrase lookup must stay on the downloaded App dictionary",
   );
-  assert.doesNotMatch(phrasepop, /lookupJapaneseFallback\s*\(/);
+  // 词组释义仍以 App 本地词典为唯一第一源；本地缺**中文**时才向这台电脑上的
+  // ReaderPC 要句境释义，且必须先确认链路已连（isLinked），不为查一个词去拨号。
+  assert.match(phrasepop, /_readerPCLinked\(\)/);
+  assert.match(phrasepop, /cv\.isLinked\s*&&\s*cv\.isLinked\(\)/);
   assert.match(phrasepop, /local\.lookupJapaneseLegacy\(text\)/);
 });
 

@@ -206,6 +206,17 @@
       if (!t || t.tagName !== 'IMG' || t.__brk) return;
       if (!(t.closest && t.closest('.ep-msg.a, .asst-a, #result-content'))) return;
       var src = t.getAttribute('src') || '';
+      // 资产编号图(/pdf/api/asset/<编号>)不带 proxy 时服务器是 **302 到外链**,
+      // 于是真正去取图的是设备本身 —— iPad 直连维基常被挡。而下面那条维基重试只看
+      // src 里的域名,asset 路由的 src 自始至终是本站路径,一次都匹配不上:
+      // 结果是**一次重试都没有**就画破图(2026-08-18 用户报的「图片又打不开了」)。
+      // 服务器本来就为这种情形留了 ?proxy=1(由它取字节再回传,带 SSRF 校验),这里接上。
+      if (!t.__proxied && src.indexOf('/pdf/api/asset/') >= 0 && src.indexOf('proxy=1') < 0) {
+        (window.__rcImgFail = window.__rcImgFail || {})[src] = 1;   // 记失败:重渲新建的同图直接走代理
+        t.__proxied = 1;
+        t.src = src + (src.indexOf('?') < 0 ? '?' : '&') + 'proxy=1';
+        return;
+      }
       if (!t.__proxied && /wikimedia\.org|wikipedia\.org/.test(src) && src.indexOf('/api/img-proxy') < 0) {
         (window.__rcImgFail = window.__rcImgFail || {})[src] = 1;   // 记全局失败表:重渲新建的同图由 rcImgStabilize 直接换代理,不再先撞一次墙
         t.__proxied = 1; t.src = '/pdf/api/img-proxy?url=' + encodeURIComponent(src); return;   // iPad 直连维基常被挡 → 走服务器代理重试
@@ -223,7 +234,14 @@
       if (!root || !root.querySelectorAll) return;
       root.querySelectorAll('img').forEach(function (im) {
         var s = im.getAttribute('src') || '';
-        if (s && (window.__rcImgFail || {})[s] && s.indexOf('/api/img-proxy') < 0) {
+        if (!s || !(window.__rcImgFail || {})[s]) return;
+        // 两种失败图各有各的代理写法:资产编号图加 ?proxy=1(服务器认编号,不接受外部 URL),
+        // 裸外链图才包进 /api/img-proxy?url=。写混了等于没修。
+        if (s.indexOf('/pdf/api/asset/') >= 0) {
+          if (s.indexOf('proxy=1') < 0) {
+            im.__proxied = 1; im.src = s + (s.indexOf('?') < 0 ? '?' : '&') + 'proxy=1';
+          }
+        } else if (s.indexOf('/api/img-proxy') < 0) {
           im.__proxied = 1; im.src = '/pdf/api/img-proxy?url=' + encodeURIComponent(s);
         }
       });

@@ -342,23 +342,73 @@ test("兼容服务器断网只进入 outbox，不回滚本地词组状态", asyn
   assert.equal(harness.outbox[0][0], "phrase");
 });
 
-test("日语词组只使用 App 本地词典，英文兜底也不自动调用 ReaderPC 或 Pi", async () => {
+// 本地词典缺中文时，英文 gloss 绝不冒充中文释义。
+//   2026-08-18 用户看到「タンドリーチキン → tandoori chicken」还挂着「App 本地中文词典」
+//   的落款：「这和我们原先设计的不同，字典里没有的就直接闪烁等待就好了啊」。
+//   rc-offline-dictionary 本来就如实标了 local_zh/meaning_language/english_fallback，
+//   是 phrasepop 越过这些标注去捞 definition/translation 才把英文捞了回来。
+const ENGLISH_ONLY_LOCAL = {
+  CONTRACT: "bw-offline-dictionary/1",
+  isLocalMode() { return true; },
+  async lookupJapaneseLegacy() {
+    return {
+      ok: true,
+      local_zh: false,
+      meaning_language: "en",
+      english_fallback: true,
+      reading: "とりよせ",
+      definition: "order; obtain",
+    };
+  },
+};
+
+test("本地词典只有英文且电脑未连接：不拿英文顶中文，自动转 AI 查询", async () => {
+  const harness = createHarness();
+  const results = [];
+  let computerCalls = 0;
+  harness.sandbox.RC.offlineDictionary = ENGLISH_ONLY_LOCAL;
+  harness.sandbox.RC.computerVoice = {
+    isLinked() { return false; },
+    async lookupJapaneseFallback() {
+      computerCalls += 1;
+      throw new Error("must not run");
+    },
+  };
+
+  harness.sandbox.RC.phrasepop.show({
+    text: "取り寄せ",
+    context: "メインをお取り寄せの牛肉にしたりするわよね。",
+    langs: ["ja"],
+    noDisplay: true,
+    onResult(value) { results.push(value); },
+  });
+
+  await flush();
+  // 电脑不在线就不去拨号，但**空缺要自己补上**：转 AI，而不是把英文 gloss 顶上来。
+  assert.equal(computerCalls, 0);
+  assert.equal(results.length, 0, "AI 未回来之前不得出结果——高亮要一直呼吸");
+  const ask = harness.requests.find(
+    (item) => item.url === "/pdf/api/translate-sentence",
+  );
+  assert.ok(ask, "本地词典缺中文时必须自动发起 AI 查询");
+  assert.equal(ask.method, "POST");
+  assert.equal(JSON.parse(ask.options.body).text, "取り寄せ");
+  ask.resolve({ ok: true, zh: "调货；订购" });
+  await flush();
+
+  assert.equal(results[0].zh, "调货；订购");
+  assert.notEqual(results[0].zh, "order; obtain");
+  assert.equal(results[0].source, "ai-translate");
+  assert.equal(results[0].reading, "とりよせ");
+});
+
+test("本地词典只有英文而电脑已连接：向 ReaderPC 要句境中文，英文只作参考随请求带上", async () => {
   const harness = createHarness();
   const results = [];
   const lookups = [];
-  harness.sandbox.RC.offlineDictionary = {
-    CONTRACT: "bw-offline-dictionary/1",
-    isLocalMode() { return true; },
-    async lookupJapaneseLegacy() {
-      return {
-        ok: true,
-        local_zh: false,
-        reading: "とりよせ",
-        definition: "order; obtain",
-      };
-    },
-  };
+  harness.sandbox.RC.offlineDictionary = ENGLISH_ONLY_LOCAL;
   harness.sandbox.RC.computerVoice = {
+    isLinked() { return true; },
     async lookupJapaneseFallback(request) {
       lookups.push(request);
       return {
@@ -388,16 +438,21 @@ test("日语词组只使用 App 本地词典，英文兜底也不自动调用 Re
   });
 
   await flush();
-  assert.equal(lookups.length, 0);
+  assert.equal(lookups.length, 1);
+  assert.equal(lookups[0].mode, "meaning");
+  assert.equal(lookups[0].term, "取り寄せ");
+  assert.equal(lookups[0].reading, "とりよせ");
+  // 英文 gloss 的去处是**请求里的参考字段**，不是界面。
+  assert.equal(lookups[0].english, "order; obtain");
+  assert.match(lookups[0].context, /お取り寄せの牛肉/);
   assert.equal(
     harness.requests.some((item) =>
       item.url.startsWith("/pdf/api/dict-jp?") ||
       item.url === "/pdf/api/translate-sentence"),
     false,
   );
-  assert.equal(results[0].zh, "order; obtain");
-  assert.equal(results[0].reading, "とりよせ");
-  assert.equal(results[0].source, "local-jmdict");
+  assert.equal(results[0].zh, "调货；订购");
+  assert.equal(results[0].source, "pc-codex-cli");
 });
 
 test("App 本地中文词典命中时不调用 ReaderPC 或 Pi", async () => {
@@ -447,7 +502,7 @@ test("App 本地中文词典命中时不调用 ReaderPC 或 Pi", async () => {
   assert.equal(results[0].source, "local-jmdict");
 });
 
-test("扩展没有 App 私有词典时明确本地未命中，ReaderPC 和 Pi 都不自动调用", async () => {
+test("扩展没有 App 私有词典时不调 ReaderPC，直接 AI 查询", async () => {
   const harness = createHarness();
   const results = [];
   let computerCalls = 0;
@@ -456,6 +511,7 @@ test("扩展没有 App 私有词典时明确本地未命中，ReaderPC 和 Pi �
     isLocalMode() { return false; },
   };
   harness.sandbox.RC.computerVoice = {
+    isLinked() { return false; },
     async lookupJapaneseFallback() {
       computerCalls += 1;
       throw new Error("must not run");
@@ -470,15 +526,48 @@ test("扩展没有 App 私有词典时明确本地未命中，ReaderPC 和 Pi �
   });
   await flush();
 
+  assert.equal(computerCalls, 0);
+  assert.equal(
+    harness.requests.some((item) => item.url.startsWith("/pdf/api/dict-jp?")),
+    false,
+  );
+  const ask = harness.requests.find(
+    (item) => item.url === "/pdf/api/translate-sentence",
+  );
+  assert.ok(ask, "没有本地词典时更应该由 AI 补上，而不是让用户再点一次");
+  // AI 未回来之前小框停在等待态，不得先闪一条“未命中”再被结果覆盖。
+  assert.doesNotMatch(harness.pop.innerHTML, /App 本地日语词典未命中/);
+  ask.resolve({ ok: true, zh: "顾不上那些" });
+  await flush();
+
+  assert.equal(results[0].zh, "顾不上那些");
+  assert.equal(results[0].source, "ai-translate");
+});
+
+test("AI 也没给出结果时才如实说未命中，并保留手动 Pi 精释入口", async () => {
+  const harness = createHarness();
+  const results = [];
+  harness.sandbox.RC.offlineDictionary = {
+    CONTRACT: "bw-offline-dictionary/1",
+    isLocalMode() { return false; },
+  };
+  harness.sandbox.RC.computerVoice = { isLinked() { return false; } };
+
+  harness.sandbox.RC.phrasepop.show({
+    text: "それどころではない",
+    context: "今はそれどころではない。",
+    langs: ["ja"],
+    onResult(value) { results.push(value); },
+  });
+  await flush();
+  const ask = harness.requests.find(
+    (item) => item.url === "/pdf/api/translate-sentence",
+  );
+  ask.resolve({ ok: false, error: "translation failed (no result)" });
+  await flush();
+
   assert.equal(results[0].zh, "");
   assert.equal(results[0].errorCode, "BW_OFFLINE_DICTIONARY_NO_MATCH");
   assert.match(harness.pop.innerHTML, /App 本地日语词典未命中/);
   assert.match(harness.pop.innerHTML, /改用 Pi 旧版精释/);
-  assert.equal(computerCalls, 0);
-  assert.equal(
-    harness.requests.some((item) =>
-      item.url.startsWith("/pdf/api/dict-jp?") ||
-      item.url === "/pdf/api/translate-sentence"),
-    false,
-  );
 });

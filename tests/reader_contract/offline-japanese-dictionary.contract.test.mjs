@@ -266,9 +266,21 @@ test("Japanese UI queries the App dictionary first and restores the old explicit
   assert.match(wordpop, /_lookupJapaneseLocalFirst/);
   assert.match(phrasepop, /_lookupPhraseLocalFirst/);
   assert.doesNotMatch(wordpop, /lookupJapaneseFallback\s*\(/);
-  assert.doesNotMatch(phrasepop, /lookupJapaneseFallback\s*\(/);
+  // 词组:本地词典缺中文时改向已连接的 ReaderPC 要句境释义(2026-08-18 用户拍板:
+  // 「字典里没有的就直接闪烁等待就好了啊」)。英文 gloss 一律不得进视觉层 ——
+  // 它此前被当成中文显示,还挂着「App 本地中文词典」的落款。
+  assert.match(phrasepop, /lookupJapaneseFallback\(\{/);
+  assert.match(phrasepop, /_readerPCLinked\(\)/);
+  assert.match(phrasepop, /function _localChinese/);
+  assert.doesNotMatch(
+    phrasepop,
+    /zh:\s*localResult\.zh\s*\|\|\s*localResult\.definition/,
+    "英文兜底字段不得再被当作中文释义",
+  );
   assert.doesNotMatch(phrasepop, /fetch\('\/pdf\/api\/dict-jp\?word=/);
-  assert.doesNotMatch(phrasepop, /fetch\('\/pdf\/api\/translate-sentence/);
+  // 词典未命中 → 自动 AI 查询（呼吸高亮期间完成），不再停在红字未命中让用户再点一次。
+  assert.match(phrasepop, /'\/pdf\/api\/translate-sentence'/);
+  assert.match(phrasepop, /@interaction ai\.translate\.compute/);
   assert.match(wordpop, /return local\.lookupJapaneseLegacy\(word\)/);
   assert.match(phrasepop, /local\.lookupJapaneseLegacy\(text\)/);
   assert.match(computerVoice, /lookupJapaneseFallback/);

@@ -2582,6 +2582,21 @@
       "description": "Submit one review answer."
     },
     {
+      "path": "/pdf/api/review-event",
+      "match": "exact",
+      "owner": "pi",
+      "methods": [
+        "POST"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": null,
+      "description": "Record one review grading event; never schedules."
+    },
+    {
       "path": "/pdf/api/review-queue",
       "match": "exact",
       "owner": "pi",

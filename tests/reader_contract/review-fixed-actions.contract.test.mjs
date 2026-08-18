@@ -77,18 +77,26 @@ test("controlled reveal supports answer-only replacement without changing other 
     ),
     "append remains the default controlled-review reveal",
   );
-  assert.match(
-    renderer,
-    /if \(c\._st === 'preview'\)[\s\S]*?<div class="fc-lbl">正面/,
-    "preview rendering must remain outside the controlled learn branch",
-  );
+  // 预览态必须在受控复习分支之前**自己 return**，不与复习/草稿态共用渲染。
+  // （原断言靠"preview 之后还能看到 <div class="fc-lbl">正面"来间接确认这一点，
+  //   而正面/背面这两个标题已按用户要求从预览里去掉、只留在草稿的可编辑态，
+  //   且草稿分支现在排在 preview 之前 —— 那条正则从此只是在验行文顺序。）
+  const preview = renderer.slice(renderer.indexOf("if (c._st === 'preview')"));
+  assert.ok(preview.length > 0, "预览态必须有自己的分支");
+  const previewBody = preview.slice(0, preview.indexOf("}"));
+  assert.match(previewBody, /return '<div class="fc-card">'/);
+  assert.doesNotMatch(previewBody, /fc-lbl|fc-reveal|fc-eases|data-fc="reveal"/);
 });
 
 test("review workspace has one bounded face scroller and a fixed bottom improvement dock", () => {
+  // 高度改由用户拖动手柄决定（--rv-h），默认值仍是原来的 min(54vh,520px)：
+  // 用户要求「用一个拖动按钮线拖动调整上方 anki 和下方对话区域的大小」。
+  // 有界这一点没变（仍有 max-height + overflow:hidden），变的只是这个界谁说了算。
   assert.match(
     REVIEW,
-    /#asst-review-workspace\{[^}]*height:min\(54vh,520px\)[^}]*overflow:hidden/,
+    /#asst-review-workspace\{[^}]*height:var\(--rv-h,min\(54vh,520px\)\)[^}]*max-height:80%[^}]*overflow:hidden/,
   );
+  assert.match(REVIEW, /touch-action:none/, "拖动手柄必须自己吃掉纵向手势，否则 iOS 当页面滚动");
   assert.match(
     REVIEW,
     /#rc-review-body\{[^}]*height:100%[^}]*overflow:hidden/,
@@ -114,9 +122,16 @@ test("review workspace has one bounded face scroller and a fixed bottom improvem
     REVIEW,
     /\.rv-review-controls>\.rv-improve-toggle\{[^}]*flex:0 0 auto[^}]*width:100%/,
   );
+  // 改进面板改成**浮层**（用户：展开的内容应该浮在 anki 卡片上方，而不是占掉实际空间）：
+  // 绝对定位铺满卡片区 + 自己滚动，展开时卡片尺寸一动不动。
   assert.match(
     REVIEW,
-    /\.rv-improve-panel\{[^}]*flex:1 1 auto[^}]*overflow-y:auto/,
+    /\.rv-improve-panel\{[^}]*position:absolute[^}]*overflow-y:auto/,
+  );
+  assert.match(
+    REVIEW,
+    /\.rv-improve-panel\{[^}]*left:0;right:0;top:0;bottom:0/,
+    "浮层要盖住整个卡片区，而不是只压住底边",
   );
   assert.match(
     REVIEW,
@@ -137,8 +152,11 @@ test("review workspace has one bounded face scroller and a fixed bottom improvem
     dockMount > pagerMount,
     "the improvement dock must be mounted after the card pager at the bottom",
   );
+  // 「改进」按钮挪到了头部那一行（跟 ⟳ / 收起展开并列）——用户要求：
+  // 它原来独占卡片面板底部一整行，而那一行本来就是放开关的地方。
+  // 面板本身仍挂在 reviewControls 里（它现在是浮层，位置由 CSS 定，不占布局）。
   assert.match(
-    REVIEW.slice(dockMount, REVIEW.indexOf("function _queueCards", dockMount)),
-    /reviewControls\.appendChild\(improveToggle\)[\s\S]*?_appendImprovePanel\(reviewControls, card\)[\s\S]*?panel\.appendChild\(reviewControls\)/,
+    REVIEW.slice(dockMount, REVIEW.indexOf("function _selectCard", dockMount)),
+    /toolbar\.appendChild\(improveToggle\)[\s\S]*?_appendImprovePanel\(reviewControls, card\)[\s\S]*?panel\.appendChild\(reviewControls\)/,
   );
 });

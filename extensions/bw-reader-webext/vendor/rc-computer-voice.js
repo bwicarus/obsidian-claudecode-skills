@@ -8435,6 +8435,13 @@ if (window.__bwPwaProviderOnly) return;
     getTargetApp: getComputerTarget,
     loadTargetApp: loadComputerTarget,
     setTargetApp: setComputerTarget,
+    // 便宜的"这台电脑现在连着吗":只读常驻快照链路的 socket 状态,不发请求、不开新连接。
+    // 词典兜底要用它决定「等」还是「立刻说未命中」——availability() 会开连接发 STATUS,
+    // 拿来做这种前置判断反而把要省的开销花掉了。
+    isLinked: function () {
+      var state = snapshotLink;
+      return !!(state && !state.stopped && directChannelLive(state.channel));
+    },
     lookupJapaneseFallback: lookupJapaneseFallback,
     addLocalAnkiCard: addLocalAnkiCard,
     cancelPreparedGesture: cancelPreparedGesture,

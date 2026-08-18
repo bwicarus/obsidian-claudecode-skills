@@ -605,7 +605,11 @@ test("mounts the card workspace above the unchanged assistant thread", async () 
   assert.ok(workspace);
   assert.ok(toggle);
   assert.equal(toggle.getAttribute("data-action"), "toggle-review");
-  assert.equal(h.paneRoot.children.indexOf(workspace) + 1,
+  // 卡片区与 thread 之间只允许隔着那条拖动分隔线（用户要求可调上下比例），
+  // 顺序仍是 卡片区 → 分隔线 → 完整助手聊天。
+  const split = h.paneRoot.children[h.paneRoot.children.indexOf(workspace) + 1];
+  assert.equal(split?.className, "rv-split", "卡片区之后必须紧跟拖动分隔线");
+  assert.equal(h.paneRoot.children.indexOf(split) + 1,
     h.paneRoot.children.indexOf(h.thread),
     "复习卡片区必须紧邻且位于完整助手聊天 thread 上方");
   assert.equal(h.thread.parentNode, h.paneRoot, "原助手聊天不得被替换或移走");

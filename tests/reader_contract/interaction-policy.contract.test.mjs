@@ -25,6 +25,8 @@ const OUTBOX_ACTION_IDS = [
   "learning.lookup.report",
   "anki.cards.enqueue",
   "entity.state.update",
+  // 卡片绑定到自建页的某个块：与高亮同性质的本地写入，先落地再对账。
+  "document.upage.bind-card",
 ];
 const SERVICE_WORKER_STRATEGIES = new Set([
   "none",

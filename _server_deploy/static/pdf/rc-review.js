@@ -994,20 +994,43 @@
     return document.getElementById('asst-review-workspace');
   }
   var RV_H_KEY = 'rc-review-h';
+  var LS_RV_H_KEY = 'rc-review-h';
+  // 卡片区高度跟队列缓存走同一套存储优先级：**扩展私有存储优先**，没有才落 localStorage。
+  // 扩展里 localStorage 是被寄生那个网页的存储 —— 用户的阅读偏好既不该写进别人家，
+  // 也会被对方清掉。(review-candidate-ui 契约测试盯的就是这条:localCalls 必须为空。)
+  function _rvHSet(value) {
+    try {
+      if (window.__bwExtensionStore && window.__bwExtensionStore.set) {
+        window.__bwExtensionStore.set(RV_H_KEY, value);
+        return;
+      }
+      localStorage.setItem(LS_RV_H_KEY, String(value));
+    } catch (_) {}
+  }
+  function _rvHGet(done) {
+    try {
+      if (window.__bwExtensionStore && window.__bwExtensionStore.get) {
+        Promise.resolve(window.__bwExtensionStore.get(RV_H_KEY))
+          .then(done).catch(function () { done(null); });
+        return;
+      }
+      done(localStorage.getItem(LS_RV_H_KEY));
+    } catch (_) { done(null); }
+  }
   function _applyRvH(px) {
     // 上下都留余量:卡片区不能小到看不见卡，也不能吃掉整个对话区。
     var lo = 150, hi = Math.max(lo + 80, Math.round(window.innerHeight * 0.8));
     var v = Math.max(lo, Math.min(Math.round(px), hi));
-    try {
-      document.documentElement.style.setProperty('--rv-h', v + 'px');
-      localStorage.setItem(RV_H_KEY, String(v));
-    } catch (_) {}
+    try { document.documentElement.style.setProperty('--rv-h', v + 'px'); } catch (_) {}
+    _rvHSet(v);
   }
   function _restoreRvH() {
-    try {
-      var v = parseInt(localStorage.getItem(RV_H_KEY) || '', 10);
-      if (v > 0) document.documentElement.style.setProperty('--rv-h', v + 'px');
-    } catch (_) {}
+    _rvHGet(function (raw) {
+      var v = parseInt(raw == null ? '' : String(raw), 10);
+      if (v > 0) {
+        try { document.documentElement.style.setProperty('--rv-h', v + 'px'); } catch (_) {}
+      }
+    });
   }
   function _bindSplit(split, workspace) {
     var startY = 0, startH = 0, active = false;

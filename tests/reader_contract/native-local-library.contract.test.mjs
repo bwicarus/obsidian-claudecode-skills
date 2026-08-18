@@ -81,7 +81,14 @@ test("native shelf opens local bytes directly and keeps Pi transfer as an explic
   assert.match(REMOTE_LIBRARY, /completionHandler\(nil\)/);
   assert.match(NATIVE_TOOLS, /Label\("本机书库", systemImage: "books\.vertical"\)/);
   assert.match(NATIVE_TOOLS, /ReaderLocalLibraryView\(reader: reader\)/);
-  assert.match(APP_ROOT, /accessibilityLabel\("打开书库"\)/);
+  // 书库入口从右上角的原生悬浮钮搬进了我们自己的顶栏（用户 2026-08-18：两枚原生
+  // 按钮里的东西没分类，且一直挡着侧栏顶部）。所以这里改验**新的那条路**是通的：
+  // 网页顶栏「书籍」→ bwNativeAppPrefs.openLibrary → App 直接呈现 SwiftUI 书架。
+  // ⚠ 不验 URL 导航：产品已本地化，任何经过网络地址的路径都可能跑去开一个不该
+  //   存在的网页（takeOverLibraryNavigation 只在读本机书时才拦截，读 Pi 书时不拦）。
+  assert.match(APP_ROOT, /bwNativeAppPrefs\.openLibrary/);
+  assert.match(WEB_VIEW, /onOpenLibrary\s*=\s*\{[\s\S]{0,120}libraryPresentationRequestID\s*=\s*UUID\(\)/);
+  assert.doesNotMatch(WEB_VIEW, /onOpenLibrary[\s\S]{0,200}location\.href/);
 });
 
 test("ordinary reading and local edits never require a Pi route", () => {

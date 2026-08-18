@@ -438,6 +438,53 @@
     } catch (_) {}
   }
 
+  // 本地词典**是否给出了中文**。rc-offline-dictionary 已经如实标好了
+  // (local_zh / meaning_language / english_fallback,且 zh 在没有中文时就是空串);
+  // 只有 translation/definition 会在缺中文时退成 JMdict 的英文 gloss。
+  // 2026-08-18:此前这里写 `zh || definition || translation`,等于绕过下层如实的标注
+  // 把英文捞回来当中文用 —— 用户看到的「タンドリーチキン → tandoori chicken」
+  // 还挂着「App 本地中文词典」的落款。下层老实,上层不听,是这类 bug 的固定形状。
+  function _localChinese(result) {
+    if (!result || result.ok === false) return '';
+    if (result.meaning_language === 'en' || result.english_fallback ||
+        result.local_zh === false) return '';
+    return String(result.zh || result.definition || result.translation || '').trim();
+  }
+  // 缺中文时把英文 gloss 留作**给 CLI 的参考**(dictionary-lookup 请求本就有 english 字段),
+  // 不进视觉层。
+  function _localEnglish(result) {
+    if (!result || result.ok === false) return '';
+    return String(result.definition || result.translation || '').trim();
+  }
+
+  function _readerPCLinked() {
+    try {
+      var cv = RC.computerVoice;
+      return !!(cv && cv.isLinked && cv.isLinked());
+    } catch (_) { return false; }
+  }
+
+  // 词典没有 → 让 AI 给一条中文释义(这正是迁到 App 本地词典之前的原设计:
+  // 词典未命中就自动接 AI,查询那 1-2 秒高亮一直呼吸)。2026-08-18 用户:
+  // 「未命中的话应该闪烁并 ai 查询而不是显示这个」——「这个」指红字「App 本地日语词典未命中」,
+  // 它把一次可以自己补上的空缺变成了要用户再点一次的死路。
+  async function _lookupPhraseAI(text) {
+    try {
+      // @interaction ai.translate.compute
+      var response = await fetch('/pdf/api/translate-sentence', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text, backend: 'ai' })
+      });
+      var data = await response.json();
+      if (data && data.ok && data.zh) return String(data.zh).trim();
+    } catch (error) {
+      _dictionaryLocalDebug('AI 词组释义失败 ' +
+        String(error && (error.code || error.message) || ''));
+    }
+    return '';
+  }
+
   async function _lookupPhraseLocalFirst(text, context, isJa) {
     var localResult = null;
     if (isJa) {
@@ -450,14 +497,54 @@
             String(error && (error.code || error.message) || ''));
         }
       }
-      if (localResult && localResult.ok) {
+      var zhLocal = _localChinese(localResult);
+      if (zhLocal) {
         return {
-          zh: localResult.zh || localResult.definition || localResult.translation || '',
+          zh: zhLocal,
           reading: localResult.reading || '',
           accent: localResult.accent != null ? localResult.accent : null,
           source: 'local-jmdict'
         };
       }
+      // 本地词典没有中文 → **不拿英文顶上**,而是保持呼吸等待,请这台电脑上的
+      // ReaderPC 用句境算一条中文释义(用户 2026-08-18:「字典里没有的就直接闪烁等待就好了啊」)。
+      // 这条链路的 C# 端(ReaderDictionaryFallback)、本机缓存、客户端与本文件下方
+      // 的 pc-codex-cli 落款**早就建好了,只差这一次调用** —— 于是英文兜底顶了它的位。
+      // 电脑不在线就不等:立刻如实说未命中,把「改用 Pi 旧版精释」按钮留给用户自己按。
+      if (_readerPCLinked()) {
+        try {
+          var cli = await RC.computerVoice.lookupJapaneseFallback({
+            mode: 'meaning',
+            term: text,
+            context: context || '',
+            reading: (localResult && localResult.reading) || '',
+            english: _localEnglish(localResult)
+          });
+          if (cli && cli.text) {
+            return {
+              zh: cli.text,
+              reading: (localResult && localResult.reading) || '',
+              accent: (localResult && localResult.accent != null) ? localResult.accent : null,
+              source: 'pc-codex-cli',
+              cached: !!cli.cached
+            };
+          }
+        } catch (error) {
+          _dictionaryLocalDebug('ReaderPC 句境释义失败 ' +
+            String(error && (error.code || error.message) || ''));
+        }
+      }
+    }
+    // 电脑不在线,或电脑那条也没给出结果 → 自动 AI 查询(日语与非日语同样适用:
+    // 词典本来就只覆盖日语,英文/其它语言的词组过去连这一步都没有)。
+    var zhAI = await _lookupPhraseAI(text);
+    if (zhAI) {
+      return {
+        zh: zhAI,
+        reading: (localResult && localResult.reading) || '',
+        accent: (localResult && localResult.accent != null) ? localResult.accent : null,
+        source: 'ai-translate'
+      };
     }
     return {
       zh: '',
@@ -531,7 +618,9 @@
         (result.source === 'pc-codex-cli'
           ? '<div style="margin:-4px 12px 8px;color:#6f7e96;font-size:10.5px">电脑 ReaderPC · Codex CLI 句境释义' + (result.cached ? ' · 本地缓存' : '') + '</div>'
           : result.source === 'local-jmdict'
-            ? '<div style="margin:-4px 12px 8px;color:#6f7e96;font-size:10.5px">App 本地中文词典</div>' : '') +
+            ? '<div style="margin:-4px 12px 8px;color:#6f7e96;font-size:10.5px">App 本地中文词典</div>'
+          : result.source === 'ai-translate'
+            ? '<div style="margin:-4px 12px 8px;color:#6f7e96;font-size:10.5px">AI 释义（词典未收录）</div>' : '') +
         '<div class="wp-actions">' +
         '<button id="ep-phrase-fav-btn" class="' + (fav ? 'wp-anki' : '') + '" onclick="_epPhraseFav(this)">' +
         (fav ? '★ 已收藏' : '☆ 收藏为词组') + '</button>' +
