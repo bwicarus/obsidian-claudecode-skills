@@ -638,12 +638,19 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
    1.6~2.5:1，够不到 WCAG 对图形元素的 3:1。 */
 .pgmark { position: absolute; z-index: 6; pointer-events: auto; cursor: pointer;
   border: 1.5px solid var(--pm-b); border-radius: 3px; background: transparent;
+  /* pan-y:标记盖在正文上,不给它就等于在书页上开了个"滑不动"的洞——手指恰好
+     落在带卡的词上时页面不跟手。照抄 .fig-hit 那条(26-figures.js)。
+     横滑翻页仍会被吃掉(那是 char-layer 的 touchmove,事件到不了它),
+     但标记只有一个词宽,起手挪开一点即可;竖滑是每一下都要用的,不能丢。 */
+  touch-action: pan-y;
+  -webkit-tap-highlight-color: transparent;
   transition: border-color .15s cubic-bezier(.4,0,.2,1), box-shadow .15s cubic-bezier(.4,0,.2,1); }
 .pgmark:hover { box-shadow: 0 0 0 2px var(--pm-h); }
 .pgmark.on { border-color: var(--pm-i); box-shadow: 0 0 0 2.5px var(--pm-h); }
 /* 角标序号：骑在框的右上角外侧，落进行间空隙。
    **不给实心底** —— 实心块会盖住相邻字，光晕只吃掉字形笔画周围一圈。 */
 .pgmark-n { position: absolute; z-index: 6; pointer-events: auto; cursor: pointer;
+  touch-action: pan-y; -webkit-tap-highlight-color: transparent;
   font: 700 9.5px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", system-ui, sans-serif;
   font-variant-numeric: tabular-nums; color: var(--pm-i); letter-spacing: .02em;
   white-space: nowrap; text-shadow: 0 0 2px #fff, 0 0 2px #fff, 0 0 3px #fff,

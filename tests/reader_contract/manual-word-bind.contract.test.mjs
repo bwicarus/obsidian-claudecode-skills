@@ -65,3 +65,27 @@ test("点标记展开的是真卡，不是内建的纯文本框", () => {
   assert.ok(open.indexOf("payload.onToggle()") < open.indexOf("_toggleBindCard(layer"),
     "宿主出口排在内建浮层之后 = 两份卡同时开");
 });
+
+test("标记靠分层避开查词，不靠任何忽略名单", () => {
+  const CSS = read("_server_deploy/static/pdf/pdf-styles.css");
+  const SEL = read("_server_deploy/static/pdf/reader.src/13-selection.js");
+  // 层 none + 子元素 auto。层若是 auto 且铺满整页 → **整页查词全死**，
+  // 而症状是"点字没反应"，不会有任何报错。
+  assert.match(CSS, /\.pgbind-layer \{ position: absolute; inset: 0; pointer-events: none; \}/);
+  assert.match(CSS, /\.pgmark \{[^}]*pointer-events: auto/);
+  // 反过来：标记盖在正文上，char-layer 的手势处理必须挂在 cl 自身，
+  // 挂到 pw/document 上的话标记就吃不掉事件 → 点标记同时触发查词。
+  assert.match(SEL, /cl\.addEventListener\('touchstart'/);
+  assert.match(SEL, /cl\.addEventListener\('touchend'/);
+  // 竖滑必须能穿过标记，否则书页上多了个滑不动的洞
+  assert.match(CSS, /\.pgmark \{[^}]*touch-action: pan-y/s);
+});
+
+test("标记层带 page-layer 类，去边模式下才不会错位", () => {
+  const BOOT = read("_server_deploy/static/pdf/reader.src/01-boot.js");
+  const CSS = read("_server_deploy/static/pdf/pdf-styles.css");
+  // .fig-layer 当年就是漏了这个 → 去边时锚点跑飞、徽标被裁没
+  assert.match(BOOT, /l\.className = cls \+ ' page-layer'/);
+  assert.match(CSS, /\.crop-on>\.page-layer/);
+  assert.match(BINDCARD, /ensurePageLayer\(pw, 'pgbind-layer'\)/);
+});
