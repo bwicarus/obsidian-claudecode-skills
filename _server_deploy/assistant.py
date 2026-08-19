@@ -9541,7 +9541,72 @@ def assistant_voice_page_text():
         t = (_page_text(f, pg) or "")[:1500]
     except Exception:
         t = ""
-    return jsonify({"ok": True, "text": t})
+    out = {"ok": True, "text": t}
+    # segments=1：额外给出**带字符序号的分段**。
+    #
+    #   为什么需要它（用户 2026-08-19）：卡片可以绑到正文的一段字上
+    #   （bind.kind='page-chars' 要 from/to 两个字符序号），而用户明确说过
+    #   「选中后要求出卡应该不是常态，而是自动化操作」—— 也就是 AI 该自己定位。
+    #   可它此前拿得到的只有一段纯文本，序号在那里就丢了，于是只能反过来要求
+    #   用户先选中。这个参数补上那一环。
+    #
+    #   按 w（词组）聚合而不是逐字返回：一页几百个字符逐字发出去既臃肿又难用，
+    #   而 w 现在是**有意义的词边界**（fugashi 分词，2026-08-19 起对日文生效）。
+    if str(request.args.get("segments") or "") == "1":
+        out["segments"] = _page_text_segments(f, pg)
+    return jsonify(out)
+
+
+def _page_text_segments(file_rel: str, page: int) -> list:
+    """把一页正文切成 [{from,to,text}]，序号是**字符层里的下标**。
+
+    这些序号可以直接填进卡片的 `bind`。空白（sp）不单独成段，但它**占序号** ——
+    序号必须与字符层的真实下标一致，否则绑上去会偏。
+    """
+
+    try:
+        import pdf_reader as _pdfm
+
+        abs_path = _pdfm._safe_vault_path(file_rel)
+        if not abs_path:
+            return []
+        res = _pdfm._page_chars_cached(abs_path, file_rel, page)
+        if not res:
+            return []
+        chars = res[0] or []
+    except Exception:
+        return []
+
+    segments: list = []
+    current_word = None
+    start = 0
+    buffer: list = []
+
+    def flush(end_index: int) -> None:
+        if not buffer:
+            return
+        text = "".join(buffer).strip()
+        if text:
+            segments.append({"from": start, "to": end_index, "text": text[:120]})
+
+    for index, char in enumerate(chars):
+        if char.get("sp"):
+            continue          # 空白不进正文，但**保留它占的序号**
+        value = str(char.get("c") or "")
+        if not value.strip():
+            continue
+        word = char.get("w", -1)
+        if current_word is None or word != current_word or word == -1:
+            flush(index - 1)
+            current_word = word
+            start = index
+            buffer = []
+        buffer.append(value)
+        last = index
+    if buffer:
+        flush(last)
+    # 一页几百个词组，全发出去对提示词是负担；截断并让调用方知道被截了。
+    return segments[:400]
 
 
 @bp.route("/voice-ctx", methods=["GET", "POST"])

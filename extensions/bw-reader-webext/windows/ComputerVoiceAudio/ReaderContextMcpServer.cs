@@ -1227,7 +1227,10 @@ internal sealed class ReaderContextMcpServer
                     + "after a text layer changes. A bound card keeps its "
                     + "position, collapses to a dot when idle instead of "
                     + "disappearing, and falls back to a floating card when the "
-                    + "target is not on screen.",
+                    + "target is not on screen. Binding is meant to be "
+                    + "**automatic**: call reader_page_text, choose the passage "
+                    + "from its `segments`, and bind - do not ask the user to "
+                    + "select text first.",
                 ["inputSchema"] = BuildTypedCardArgumentsSchema(),
                 ["annotations"] = new JsonObject
                 {
@@ -1405,7 +1408,14 @@ internal sealed class ReaderContextMcpServer
                     + "open book, from the Reader's own extraction. The text "
                     + "is capped, and truncated says whether it hit that cap "
                     + "- with truncated true you are looking at the start of "
-                    + "the page, not all of it. Works offline. Safe to retry.",
+                    + "the page, not all of it. Works offline. Safe to retry. "
+                    + "The response also carries `segments`: [{from,to,text}] "
+                    + "where from/to are character indices in the page text "
+                    + "layer. Feed those straight into reader_card's "
+                    + "bind={kind:'page-chars',page,from,to,text} to pin a card "
+                    + "onto that exact passage. **You do not need the user to "
+                    + "select anything first** - read the page, pick the "
+                    + "passage yourself, and bind to it.",
                 ["inputSchema"] = new JsonObject
                 {
                     ["type"] = "object",

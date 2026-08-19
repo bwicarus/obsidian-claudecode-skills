@@ -187,3 +187,41 @@ test("跨机信封放行 bind，但形状不对就拒收", () => {
   assert.match(output, /if \(page < 1 \|\| from < 0 \|\| to < from\)/);
   assert.match(output, /Reader 卡片 bind 类型无效/);
 });
+
+test("AI 能自己定位到正文的一段 —— 不必要求用户先选中", () => {
+  // 用户 2026-08-19：「他说绑定需要我选中，我原先不是这样设计的不是么」。
+  // 用户此前的原话：「选中后要求出卡应该不是常态，而是自动化操作」。
+  //
+  // AI 那么说不是偷懒，是对现状的准确描述：bind.page-chars 要 from/to（字符
+  // 序号），而 reader_page_text 只回一段纯文本 —— 序号在那里就丢了，于是它
+  // 唯一能拿到序号的途径就是用户选区。
+  const assistant = readFileSync(new URL("_server_deploy/assistant.py", ROOT), "utf8");
+  const runtime = readFileSync(
+    new URL("_server_deploy/static/pdf/native-local-runtime.js", ROOT), "utf8");
+  const mcp = readFileSync(
+    new URL(
+      "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderContextMcpServer.cs",
+      ROOT,
+    ),
+    "utf8",
+  );
+
+  // ① 服务端能给出带序号的分段
+  assert.match(assistant, /def _page_text_segments\(file_rel: str, page: int\)/);
+  assert.match(assistant, /out\["segments"\] = _page_text_segments\(f, pg\)/);
+  // 空白不成段，但**占序号** —— 序号必须与字符层真实下标一致，否则绑上去会偏
+  assert.match(assistant, /空白不进正文，但\*\*保留它占的序号\*\*/);
+  // 按 w 聚合：fugashi 分词生效后 w 才是有意义的词边界
+  assert.match(assistant, /word = char\.get\("w", -1\)/);
+
+  // ② runtime 请求并透传
+  assert.match(runtime, /'&segments=1'/);
+  assert.match(runtime, /segments: segments/);
+  // 透传前要校验（序号非法就丢，不能让坏数据变成错误的绑定位置）
+  assert.match(runtime, /if \(!Number\.isInteger\(from\) \|\| !Number\.isInteger\(to\) \|\|/);
+
+  // ③ 告诉 AI 这条路存在，且**不必**要用户选中
+  assert.match(mcp, /You do not need the user to\s*"\s*\+\s*"select anything first/);
+  assert.match(mcp, /Binding is meant to be\s*"\s*\+\s*"\*\*automatic\*\*/);
+  assert.match(mcp, /do not ask the user to\s*"\s*\+\s*"select text first/);
+});

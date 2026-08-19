@@ -10336,6 +10336,10 @@
       return root.fetch(
         localBasePath() + '/api/assistant/voice-page-text?file='
           + encodeURIComponent(localFileRef()) + '&page=' + page
+          // segments=1：带上**带字符序号的分段**。卡片可以绑到正文的一段字上
+          //   （bind.kind='page-chars' 要 from/to），而助手此前拿到的只有纯文本 ——
+          //   序号在那里就丢了，于是它只能反过来要求用户先选中。
+          + '&segments=1'
       );
     }).then(function (response) {
       return response.json().then(function (data) {
@@ -10346,10 +10350,26 @@
           );
         }
         var text = String(data.text == null ? '' : data.text);
+        var segments = [];
+        if (Array.isArray(data.segments)) {
+          for (var i = 0; i < data.segments.length && i < 400; i += 1) {
+            var seg = data.segments[i];
+            if (!seg || typeof seg !== 'object') continue;
+            var from = Number(seg.from), to = Number(seg.to);
+            if (!Number.isInteger(from) || !Number.isInteger(to) ||
+                from < 0 || to < from) continue;
+            segments.push({
+              from: from, to: to,
+              text: String(seg.text == null ? '' : seg.text).slice(0, 120)
+            });
+          }
+        }
         return {
           ok: true, surface: surface, page: page, text: text,
           // 这条接口本身就截到 1500 字符。不说出来，助手会把半页当整页读。
-          truncated: text.length >= 1500
+          truncated: text.length >= 1500,
+          // 每段的 from/to 是**字符层里的真实下标**，可以直接填进卡片的 bind。
+          segments: segments
         };
       });
     });
