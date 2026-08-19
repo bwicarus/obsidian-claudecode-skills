@@ -1788,7 +1788,61 @@
     };
   }
 
-  function _projectLegacyLocalAnswer(card, ease, aid) {
+  // Anki 回读的调度 → 本地卡库。
+  //
+  //   `next` 是服务端评分后用 cardsInfo 取的真实结果（interval/due/queue/type）。
+  //   Anki 的 interval 语义：**正数 = 天，负数 = 秒**（learning 步骤）。
+  //   这里只用 interval 不用 due —— due 的含义随卡片类型而变（new 是位置序号、
+  //   review 是距 collection 创建日的天数、learning/relearning 是 epoch 秒），
+  //   要正确解释它得知道 collection 的 crt，而 interval 不需要。
+  function _externalScheduleFrom(next, reviewedAt) {
+    if (!next || typeof next !== 'object') return null;
+    var iv = Number(next.interval);
+    if (!Number.isFinite(iv) || iv === 0) return null;
+    var days = iv > 0 ? iv : (Math.abs(iv) / 86400);
+    return {
+      intervalDays: Math.round(days * 100) / 100,
+      dueAt: reviewedAt + Math.round(days * 24 * 60 * 60 * 1000)
+    };
+  }
+
+  // 把真调度写回本地。失败**出声**但不回滚本地评分：那笔写入是权威的复习事件，
+  //   只是它附带的"下次何时到期"是个估算值，没能被真值替换而已。
+  function _adoptExternalSchedule(local, next, reviewedAt, aid) {
+    var schedule = _externalScheduleFrom(next, reviewedAt);
+    if (!schedule || !local || !local.gid) return;
+    var repository = _cardRepository();
+    if (!repository || typeof repository.patchState !== 'function') return;
+    var current = local.review || {};
+    if (Math.abs(Number(current.intervalDays || 0) - schedule.intervalDays) < 0.01) {
+      return;   // 估算正好撞对了，不必再写一次
+    }
+    repository.patchState(local.gid, local.cardIndex, {
+      review: {
+        status: current.status || 'review',
+        dueAt: schedule.dueAt,
+        lastReviewedAt: reviewedAt,
+        intervalDays: schedule.intervalDays,
+        ease: current.ease,
+        reps: current.reps,
+        lapses: current.lapses,
+        // 记下这个间隔是谁算的。没有它就分不清"本地估算"和"Anki 真值"，
+        // 而两者数值上完全可能撞车。
+        scheduleSource: 'anki-fsrs'
+      }
+    }, {
+      mutationId: 'sched:' + local.gid + ':' + local.cardIndex + ':' + aid
+    }).catch(function (error) {
+      try {
+        window.dlog && window.dlog(
+          '真实调度未能写回本地：' + String(error && error.message || error),
+          '#ff6b6b'
+        );
+      } catch (_) {}
+    });
+  }
+
+  function _projectLegacyLocalAnswer(card, ease, aid, local, reviewedAt) {
     var cardId = Number(card && card._legacyExternalCardId || 0);
     if (!Number.isSafeInteger(cardId) || cardId <= 0) return;
     var payload = { aid: aid, card_id: cardId, ease: ease };
@@ -1808,6 +1862,10 @@
           failure.__httpStatus = response.status | 0;
           throw failure;
         }
+        // ★ 这里以前只判 ok/error，把 data.next **整个扔了** —— 服务端明明已经
+        //   用 cardsInfo 把 Anki 的真 FSRS 结果回读好了。于是本地存启发式间隔、
+        //   Anki 存 FSRS 间隔，同一张卡从第一次评分起就分叉。
+        _adoptExternalSchedule(local, data && data.next, reviewedAt, aid);
       });
     }).catch(function (error) {
       if (_isRetryableSyncError(error) && RC.outbox &&
@@ -1915,7 +1973,7 @@
         _notifyAssistant('card-rated-local');
       }
       delete _ratingPending[pendingKey];
-      _projectLegacyLocalAnswer(card, ease, aid);
+      _projectLegacyLocalAnswer(card, ease, aid, local, reviewedAt);
     }).catch(function (error) {
       delete _ratingPending[pendingKey];
       _toast('评分未保存，卡片仍在当前队列：' +

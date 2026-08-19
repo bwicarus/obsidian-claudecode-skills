@@ -59,3 +59,50 @@ test("卡片状态同步必须检查 response.ok —— fetch 对非 2xx 不会 
   assert.match(body, /failure\.__httpStatus = \(response && response\.status\) \| 0;/);
   assert.match(body, /status === 503/);
 });
+
+// ── C 组 #17 的 G3：「进度不统一」的本体 ──────────────────────────────
+//
+// 服务端评分后已经用 cardsInfo 把 Anki 的 interval/due/queue/type 回读好了并放进
+// 响应的 `next`，而客户端的 .then() 只判 ok/error，把 data.next 整个扔了。于是
+// 同一张卡：本地卡库存启发式间隔（1.2×/2.5×/3.5×），Anki 存 FSRS 真间隔 ——
+// 从第一次评分起就分叉，而且分叉随复习次数指数放大。
+
+test("Anki 回读的真调度要写回本地，不能扔掉", () => {
+  assert.match(REVIEW, /function _adoptExternalSchedule\(local, next, reviewedAt, aid\)/);
+  // 就在那个曾经把 data.next 扔掉的 .then() 里消费它
+  assert.match(REVIEW, /_adoptExternalSchedule\(local, data && data\.next, reviewedAt, aid\)/);
+  // 调用方要能把 local 与 reviewedAt 传进来
+  assert.match(
+    REVIEW,
+    /function _projectLegacyLocalAnswer\(card, ease, aid, local, reviewedAt\)/,
+  );
+  assert.match(REVIEW, /_projectLegacyLocalAnswer\(card, ease, aid, local, reviewedAt\);/);
+});
+
+test("只用 interval 换算，不碰 Anki 的 due 语义", () => {
+  // Anki 的 due 含义随卡片类型而变：new 是位置序号、review 是距 collection
+  // 创建日的天数、learning/relearning 是 epoch 秒 —— 要正确解释它得知道
+  // collection 的 crt。interval 不需要：正数=天，负数=秒。
+  const body = REVIEW.slice(
+    REVIEW.indexOf("function _externalScheduleFrom("),
+    REVIEW.indexOf("function _adoptExternalSchedule("),
+  );
+  assert.ok(body.length > 0);
+  assert.match(body, /var iv = Number\(next\.interval\)/);
+  assert.match(body, /iv > 0 \? iv : \(Math\.abs\(iv\) \/ 86400\)/, "负 interval 是秒");
+  assert.doesNotMatch(body, /next\.due/, "碰了 due —— 它的含义随卡片类型而变");
+});
+
+test("写回失败要出声，但绝不回滚本地评分", () => {
+  const body = REVIEW.slice(
+    REVIEW.indexOf("function _adoptExternalSchedule("),
+    REVIEW.indexOf("function _projectLegacyLocalAnswer("),
+  );
+  assert.ok(body.length > 0);
+  // 复习**事件**是权威的，只有它附带的"下次何时到期"是估算值。
+  assert.match(body, /window\.dlog/, "写回失败被静默吞了");
+  assert.doesNotMatch(body, /_restoreRejectedAnswer|revert/i);
+  // 记下这个间隔是谁算的 —— 没有它就分不清"本地估算"和"Anki 真值"，
+  // 而两者数值上完全可能撞车。
+  assert.match(body, /scheduleSource: 'anki-fsrs'/);
+});
