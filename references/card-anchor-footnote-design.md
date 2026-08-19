@@ -1,0 +1,359 @@
+# 卡片锚定：脚注式标记 + 词区间锚（设计稿）
+
+> 状态：**设计已定，未实现**。2026-08-20 与用户逐条讨论敲定，全部前提已对着代码核实过
+> （核实结论见文末「核实记录」，65 条存活 / 3 条被证伪）。
+> 可交互样本：`scratchpad/footnote-anchor.html`（真实令牌 + 真实 DOM 结构）。
+
+## 一句话
+
+把「卡片钉在书页正文某一段上」这件事，从**裸字符下标 + 浮层圆球**，改成
+**词区间锚 + 脚注式上标 + 右侧悬浮浮标轨**；手动钉和 AI 自动钉产出**同一种标记**；
+AI 读页面时能**在原位看见已有的卡**，从而可以说「把第 3 个删掉」。
+
+---
+
+## 一、为什么改
+
+2026-08-19 的实际失败链条（用户来回问了六轮）：
+
+1. AI 说「已绑定并已送达」，页面上什么都没有
+2. 查下来 `__pageBindCard` 返回 false → **退回浮层**，而回执照样报 applied
+3. 回执里**没有任何字段**能区分「钉上了」和「退回浮层了」
+4. 更根本的：`ReaderContextMcpServer.cs:3114` 那句 `status` 是对 `request.Kind`
+   做 switch 得来的**常量**，card 落进 `_ => "delivered"` —— 它只表示「这条 kind 是
+   card」，跟卡片有没有钉上毫无关系
+
+同时暴露的三个设计问题：
+
+- **AI 在往一个它看不见任何已有内容的坐标系里插东西**。它读到的页面正文里没有
+  任何已锚定的卡，所以既不知道哪儿标注过，也无法指名修改。
+- **裸字符下标是最脆的锚**。文字层一换（重新预处理 / 换 OCR 结果）下标全变，
+  而 AI 是自己数出来的。
+- **圆球会遮挡视野**（用户原话）。一页十张卡就是十个 40px 的方块压在正文上。
+
+---
+
+## 二、四条已定的设计决定
+
+| # | 决定 | 用户原话 |
+|---|---|---|
+| a | 锚是**区间**，不是插入点 | 「a 应当是一个区间」 |
+| b | 粒度到**词**（不是单字） | 「使用分词得到的区块而不是单字」 |
+| c | 校验复用**高亮那套**的思路 | 「c 使用高亮的机制」 |
+| d | **图区不加入**这个流 | 「d 图区不加入」 |
+
+补充定下的：
+
+- 页面标记 = **脚注式上标**，带**页内序号**；序号与 AI 看到的编号**同一套**
+- 右侧一条**悬浮浮标轨**，兼作滚动条；浮标与上标**等高并列**
+- 浮标**直径 = 该行行高**（设上限防过大）
+- 同一行多张卡**合并成一摞**（不是同心圆），**向左横向展开**
+- 手动与自动**产出完全相同的标记**
+- 视觉**一律复用卡片系统的语言**，不另造
+
+---
+
+## 三、(c) 的取舍：一处需要说明的偏离
+
+用户选了「复用高亮的机制」。核实后发现**高亮那套的失效判据反而弱于现役实现**，
+所以这里做了拆分复用，而不是整套照搬：
+
+高亮（`17-highlight.js:667`）的判据是**版本号比对**：
+
+```js
+if (sourceDigest !== resolved.snapshot.sourceDigest ||
+    revision !== resolved.snapshot.revision ||
+    projected.text !== resolved.snapshot.text) {
+  throw new Error('BW_READER_RANGE_SOURCE_STALE');
+}
+```
+
+而现役 `page-chars`（`34-bindcard.js:41-55`）**明确放弃了 revision**，注释写着：
+
+> 不靠 revision 号判断……版本号只是「可能变了」的间接证据，取出来一比是直接证据
+
+**取直接证据是对的。** 版本号相同不等于这一段字没动（局部修正不改版本号），
+版本号不同也不等于这一段动了（整页重跑但这一行没变）。
+
+所以：
+
+- **从高亮借的是**：AI 只碰**不透明的 marker**，永不碰裸下标 —— 这一条才是高亮
+  真正的优点，也正是今天失败的直接原因（AI 自己数下标）
+- **保留 page-chars 的**：落地时**把文字取出来直接比**，且比之前两边都去空白
+- **粒度对齐到 `w`**：AI 拿到的 segments 本来就按 `w` 聚合，marker 就发到词一级
+
+⚠ 两套分词**不是同一套**，这点必须记住：高亮 marker 来自 `Intl.Segmenter` 对
+**投影文本**切；字符层的 `w` 来自 **fugashi**（日语真分词）。本设计用 `w`，
+因为 AI 侧的 `segments` 已经是它。
+
+---
+
+## 四、数据形状
+
+### 4.1 锚
+
+在现役 `bind.kind='page-chars'` 之外**新增一种**，不改旧的（旧数据继续可用）：
+
+```
+bind = {
+  kind: 'page-words',
+  page: int ≥ 1,
+  mark: "w_<不透明 id>",     // 起点词，AI 只见这个
+  endMark: "w_<不透明 id>",   // 终点词，闭区间
+  text: "トルティージャ、タコス"   // 落地时的直接证据（去空白后比对）
+}
+```
+
+- `mark` / `endMark` 由快照发放，AI **不知道也不需要知道**它对应哪个下标
+- `text` 是**必填**，不是可选 —— 今天的失败正是 text 缺失/带空格导致定位失败
+- 不带 `revision`：按 §三 的理由，用文字直接比
+
+### 4.2 落地判据（按此顺序）
+
+1. 用 `mark`/`endMark` 查快照拿到 `from`/`to`
+2. 取 `[from,to]` 的字，**两边去空白**后与 `text` 比 —— 相同即锚定成功
+3. 不同 → 在**整页**里按 `text` 搜，用原 `from` 就近消歧（`_resolveRange` 已实现）
+4. 仍找不到 → **明确失败**，回执带 `why:'text-not-on-page'`，卡退回浮层
+
+### 4.3 回执
+
+⚠ 这是**前置条件**，不做这条后面全是盲测。今天的 `{outcome:'applied'}` 是
+**固定字面量**，`work` 的值在 `rc-voicecall.js:2030` 被整个丢弃。
+
+沿途一共 **59 处**闸/重建点（另一轮核实的结论），其中必改约 40 处。
+详见 `scratchpad` 里那份追踪结果；关键三处陷阱：
+
+- `rc-computer-voice.js:2704` —— 只改阅读器不改闸，`exactObject` 抛的异常被 catch
+  吞掉，**一次成功的绑定会以 rejected 回给 AI**，链路零报错
+- `rc-computer-voice.js:2696` / `ReaderRealtimeOutput.cs:585` —— `error` 必须
+  **当且仅当** `outcome==='rejected'` 时存在，所以「applied + 用 error 说明没钉上」
+  这条捷径被堵死
+- `ReaderRealtimeOutputRpc.cs:250` —— 校验通过后重新 new 一个 ack，五个参数里
+  **三个是凭空填的**
+
+---
+
+## 五、页面上的实现
+
+### 5.1 层：必须是兄弟层，不能是 char-layer 的后代
+
+这是本设计**最关键的实现约束**，也是最容易做错的一步。
+
+`13-selection.js:876` 的 char-layer 监听器**完全不检查 `e.target`** ——
+任何后代元素都会触发一次完整查词流程，加什么 target 判断都救不了。
+
+而 `.fig-badge` / `.fig-hit` **在 `13-selection.js` 里一次都没出现**：
+它们不靠白名单排除，靠**分层**。
+
+```css
+/* 照抄 .hl-layer（pdf-styles.css:414）的三行模式 */
+.fnmark-layer{position:absolute; inset:0; z-index:6; pointer-events:none}
+.fnmark{pointer-events:auto}
+```
+
+- char-layer `z-index:4` → 已保存高亮 `5` → 徽标/查询高亮/pgbind `6`
+- 与同为 6 的层平级时由 DOM 顺序决定，`17-highlight.js:95` 每次渲染都
+  `pw.appendChild(layer)` 把自己顶到最后 —— 新层要么照做，要么给 7
+
+⚠ **触摸路径的坑**：若把标记做成 char-layer 的后代，iPad 上
+`13-selection.js:939` 的 `touchend` 会 `preventDefault` 把合成 click 一起吃掉 ——
+**按钮彻底失灵，而查词照常触发**。鼠标路径反而两个都触发。
+两条路径错法不同，**只测桌面必漏**。
+
+### 5.2 PDF 没有逐字 DOM
+
+char-layer 是个**空的透明 div**，字都在页图里（`13-selection.js:676`
+`_findCharStrict` 是纯几何比对）。所以「行内上标」在 PDF 里**没有可以 inline 的
+文本流**，必须绝对定位到词矩形的右上角。
+
+好消息：PDF 页不重排，绝对定位反而更稳。EPUB/HTML 表面才有真文本流，
+但为了两个表面同一套代码，**统一用绝对定位**。
+
+现成的取词矩形：`noteWordRect(x,y)` 已经按 `cb.w` 聚合出整词包围盒，
+且已接进拖动反馈层 —— 但它**只吐屏幕矩形不吐下标**，需要在 return 里
+多带 `from`/`to`（该 `w` 组的 min/max）。
+
+### 5.3 视觉：一律复用，不另造
+
+代码里有一条用户拍过的板（`rc-voicecall.js` 轮次容器那段注释）：
+
+> 一律不另造（**用户拍板：复用之前设计的，别自己新设计一套**）
+
+| 元素 | 取自 |
+|---|---|
+| 形状 | `.vc-card-dot`：`border-radius: 13/40 = 0.325 × 尺寸`（圆角方块，非正圆） |
+| 表面 | `backdrop-filter: blur(18px)` + `0.5px` 发丝边 |
+| 色调 | `--vc-tc` 三件套：`--vc-tf` 填充 / `--vc-tl` 描边 / active 态 |
+| 动效 | `cubic-bezier(.34,1.5,.64,1)`；`:active{transform:scale(.9)}` |
+| 展开的卡 | `.vc-card` 本身：`radius:16px`、`rgba(30,30,34,.9)`、`0 12px 40px` |
+
+⚠ **色调有坑，别直接照抄**：
+
+- 学习卡的色是**硬编码** `#b9a8ff` + `🎴`（`renderEntity` 默认值），而
+  `styleOf('anki')` 返回的是**绿色 SVG** —— 两者对不上
+- 这套调色板是**为深色玻璃卡**调的。上标画在**正文白底**上，`#b9a8ff` 在白纸上
+  对比度很低，代码里留着上次「6% 白玻璃压在 PDF 白页上直接隐形」的事故注释。
+  **可见性必须交给描边**，跟 `.vc-card.vc-dot` 收起态的做法一致
+- 图标是**任意 HTML 字符串**（可能是 SVG、emoji、甚至中文两个字），且这些 SVG
+  **只有 viewBox 没有宽高** —— 直接塞进上标会按 300×150 渲染撑爆版面，
+  必须自带一条 `.fnmark svg{width:..;height:..}`
+
+### 5.4 浮标轨
+
+- 悬浮层，**不占布局**；闲置降透明度，滚动/悬停唤醒
+- 纵向映射**分两段**：视口内的与上标**等高（1:1）**；视口外的压进上下窄带
+  （鱼眼式）。最右那条细线仍按**全书比例**，回答的是「我在整本书哪儿」
+- 直径 = 该行行高，上限 30px / 下限 17px
+- 同行多张 → 一摞（同形状偏移副本，最多三层）+ 角标张数；**向左横向展开**
+
+⚠ 对齐坑（样本里踩过）：上标是 `vertical-align:super`，`offsetTop` 给的是**顶边**，
+而浮标居中定位 —— 直接用会差半个行高。必须用 `getBoundingClientRect()` 量中心。
+
+---
+
+## 六、页内序号
+
+- 上标显示的是它在**本页**的序号（1、2、3…），**不是全书连续**
+- 加卡/删卡后**整页重排** —— 序号是**位置**，不是身份
+- AI 看到的是**同一套**，所以「把第 3 个删掉」两边指同一张
+- 卡自身的身份仍是 `gid`/`cid`，序号只是人机共用的指代
+
+---
+
+## 七、AI 侧：把已有的卡插进页面文本
+
+### 7.1 现状
+
+`⟦HIGHLIGHT⟧` / `⟦CARD_START⟧` 这套标记**已经存在**
+（`reader_outgoing_context.py:302`+），且已考虑转义与注入防护。但：
+
+- 它只在 **Pi** 的 `annotate_page_text` 里产生，唯一调用者 `build_page_context`
+- 触发点是 `/pdf/api/active-reading` 的 **POST 副作用**（`reason=='dwell'` 或带选区）
+- 而 `/pdf/api/active-reading` 与 `/pdf/api/outgoing/journal` **都是 App 内本地执行**
+  → **App 的 PDF 页根本不经过 Pi 那套标记**
+- 更关键：`CARD_START` 目前是**追加在正文末尾**的，不在锚位上 —— 因为手动钉卡
+  的锚是**坐标**，系统不知道它对应哪段文字
+
+### 7.2 接入点
+
+**在阅读器本地拼**，不走 Pi：`rc-computer-voice.js` 的 `buildLocalPageContext`
+是 App 表面**唯一**拼 `currentPage.text` 的地方，且已经拿到 chars。
+
+⚠ 它现在用的是**中文小标题**而不是 `⟦…⟧` 家族 —— 要先统一格式。
+
+⚠ 截断顺序：现在是先 `text.slice(0, 12000)` 再返回（`:6401`）。
+标记若在 slice **之后**插会越界 400；在 slice **之前**插则正文被标记挤掉。
+需要改成「先插标记再按标记边界截断」。
+
+### 7.3 格式
+
+卡片插在**被绑定的词之后**：
+
+```
+…トルティージャ、タコス⟦CARD:6 type="配图 × 2" src="ai"⟧トルティージャ是玉米薄饼…⟦/CARD⟧、エンチラーダ…
+```
+
+- `CARD:n` 的 `n` 就是页内序号，与页面上的上标一致
+- 正文本身**不加任何分词标记** —— 用户明确说过读的时候不需要分词信息
+- 要精确区间时 AI 另调一次拿 `segments`（已实现，按 `w` 聚合）
+
+⚠ `CopyEmbeds`（C# 侧）把 `unanchored._reason` 校成**闭集**，新增一个失败原因会让
+**整条 page.context 被丢**。加 `range_source_stale` 这类原因时必须同步那个闭集。
+
+---
+
+## 八、迁移
+
+老便签/卡片的锚是 `{kind:'pdf', page, x, y}`（坐标）。
+
+**用现成的懒迁移钩子，不批处理、不停机**：
+
+1. 老锚照旧能渲染，**不动**
+2. `mount(anchor)` 时把 x/y 投到最近的词，返回升级后的 `anchor`
+3. 组件自己 PATCH 落库（`ensureMounted` 里 `if (m.anchor)`，责任在组件不在 host）
+
+⚠ 四个坑：
+
+- **PDF 侧的懒迁移一次都没用过** —— 全仓只有 EPUB 用过一处，PDF 这条是**全新代码**
+- 守卫**必须**幂等（EPUB 那处是 `anchor.off == null`）：`patchNote` 在 repo 模式下
+  `.then(upsertRecord)` → 又调 `ensureMounted` → 再 mount，不守卫会自激
+- `m.anchor` **只在 `ensureMounted` 一处被消费**，另外三处调 `O.mount` 的地方
+  （`attachPlaceholder` / `anchorFxShow` / `createCardAt`）全都丢弃它
+- **字符层就绪时不会触发便签重挂**：`mountPending` 挂在 `dataset.loaded='1'`，
+  而 `__charBoxes` 是之后异步才到的，`08-charlayer` 只回调 `__pageBindRetry`。
+  词锚需要 charBoxes，所以**必须加一个 charBoxes 就绪的重挂回调**
+
+---
+
+## 九、落地清单
+
+### 照抄现成的
+
+| 要做的 | 抄哪儿 |
+|---|---|
+| 兄弟层三行模式 | `pdf-styles.css:414` `.hl-layer` |
+| 字符区间定位 + 消歧 | `34-bindcard.js` `_resolveRange` |
+| 按 `w` 聚合取整词 | `noteWordRect(x,y)`（需扩返回值带 from/to） |
+| 便签 CRUD / 串行队列 / rev 防回灌 | `rc-stickynote.js` `ioCreate` 一路 |
+| 按下不动作、松手才派发 | `13-selection.js:717` `_hlTapPending` |
+| 卡片视觉三件套 | `rc-voicecall.js` `.vc-card-dot` / `.vc-card` |
+
+### 必须改的
+
+1. **回执通道**（约 40 处，见 §4.3）—— **先做这条**，否则后面全是盲测
+2. `34-bindcard.js`：新增 `page-words` 锚（建议**改它**而不是另起一套）
+3. 新增脚注标记层 + 浮标轨（新代码）
+4. `noteWordRect` 扩返回值
+5. charBoxes 就绪回调（`08-charlayer.js`）
+6. PDF 侧懒迁移 `_pdfUpgradeAnchor`（新代码）
+7. `buildLocalPageContext`：改用 `⟦…⟧` 家族 + 调整截断顺序
+8. `bind` 字段白名单 **11 处**（跑 `python scripts/contract_sites.py card-top-fields`）
+9. C# `CopyEmbeds` 的 `_reason` 闭集
+
+### 已知会咬人的
+
+- `createCardAt` 落库是 **fire-and-forget**，失败只弹 toast 而浮层原卡已 `_cardClose`
+  —— **内容会丢**。新增「区间解析失败」这类失败模式前必须先补这条
+- `createRecord` 把服务端回来的 anchor **原地覆盖回请求时的 anchor** ——
+  服务端 strip 掉的新字段**本次会话看不出来，下次开书才发现锚退化**
+- 服务端 anchor kind 白名单**两份**，且 App 那份是**重建**不是透传
+  （`native-local-runtime.js:4742` + `pdf_reader.py:10655/10689`）
+- Pi 与 App 两份 `segments` 实现的**区间右端算法不同**（Python `index-1`，JS `last`）
+- ReaderBundle 里的 `native-local-runtime.js` 是**旧的**（`pageTextSegments` 不在）
+- 色表有 **3 份物理副本**，另加扩展 `src/web-pins.js` 里**第 4 份手写的**，
+  它**不由 build.py 生成**，改配色跟不上
+- `34-bindcard.js` 顶部那段说明**已过时且写反了**（说页面侧读不到 revision，
+  实际 `wrap.__pageTextRevision` 存在且高亮系统在用）—— 顺手修掉
+
+---
+
+## 十、未决
+
+- **同行判据**：现用「纵向距离 < 半个行高」。扫描书 OCR 行高会跳，
+  可能要改成用行盒。**真机验**
+- **密集页**：视口外的点会在上下窄带堆叠，可能需要「↑ 12」聚合
+- **上标在小字里的重量**：15px 方块在扫描书正文里会不会太抢眼。**真机验**
+- **毛玻璃压白纸**：可见性靠描边撑，样本里可以，真书底色更杂。**真机验**
+- **下标坐标系**：AI 拿到的 `from/to` 来自服务端 chars 原序，而页面 `__charBoxes`
+  在 `_mapCharBoxes` 里**被重排过**（`08-charlayer.js:145` 按 baseline 排序）。
+  两者是否一致**待实测**，不一致的话 §4.2 第 1 步要先做一次映射
+
+---
+
+## 核实记录
+
+本稿全部前提由两轮并行核实产出，每条附代码出处：
+
+- 回执路径追踪：59 处闸/重建点，3 条被证伪
+- 设计前提核实：65 条存活，3 条被证伪（点词几何判定 17 / 手动钉卡与锚迁移 14 /
+  PDF 侧页面文本 19 / 卡片色调与图标 15）
+
+被证伪的主要是「某处能复用」的乐观判断，已从本稿剔除。
+
+⚠ 写稿过程中我自己给用户的三条说法被核实推翻，记在这里免得重犯：
+
+1. 说「加进 `ignoreSelector` 白名单即可」—— **错**。那个机制是给弹层「点它不关闭」
+   用的，跟查词无关；真正的解法是分层
+2. 说「`.fig-badge` 在 PDF 里没有样式，需要补 CSS」—— **错**。样式由
+   `26-figures.js` 在运行时注入，我加的那批是多余的（已撤）
+3. 说「回执现在会说真话」—— **错**。`work` 的值在 `:2030` 被丢弃，那次改动是空的
