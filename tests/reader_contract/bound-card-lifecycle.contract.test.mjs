@@ -214,11 +214,19 @@ test("AI 能自己定位到正文的一段 —— 不必要求用户先选中", 
   // 按 w 聚合：fugashi 分词生效后 w 才是有意义的词边界
   assert.match(assistant, /word = char\.get\("w", -1\)/);
 
-  // ② runtime 请求并透传
-  assert.match(runtime, /'&segments=1'/);
-  assert.match(runtime, /segments: segments/);
-  // 透传前要校验（序号非法就丢，不能让坏数据变成错误的绑定位置）
-  assert.match(runtime, /if \(!Number\.isInteger\(from\) \|\| !Number\.isInteger\(to\) \|\|/);
+  // ② App 侧**本地**实现 —— 这条路由在 manifest 里是 owner:'local'，
+  //    runtime 用 nativeVoicePageText 自己算，**不打 Pi**。
+  assert.match(runtime, /function pageTextSegments\(chars\)/);
+  assert.match(runtime, /segments: pageTextSegments\(result && result\.chars\)/);
+  // 空白不成段但**占序号** —— 否则卡片会绑到偏掉的位置
+  assert.match(runtime, /if \(!item \|\| item\.sp\) continue;/);
+  // 按 w 聚合（fugashi 分词后 w 才是有意义的词边界）
+  assert.match(runtime, /var word = Number\.isInteger\(Number\(item\.w\)\)/);
+  // EPUB 没有字符层：给空数组而不是省略字段（省略会让调用方分不清
+  // "这个表面没有这项能力"和"这一页恰好没内容"）
+  assert.match(runtime, /segments: \[\]/);
+  // ⚠ 绝不能给本地那条加查询参数：它用精确参数白名单，多一个就整条拒
+  assert.doesNotMatch(runtime, /voice-page-text\?file='[\s\S]{0,400}?segments=1/);
 
   // ③ 告诉 AI 这条路存在，且**不必**要用户选中
   assert.match(mcp, /You do not need the user to\s*"\s*\+\s*"select anything first/);

@@ -3456,6 +3456,50 @@
       ? result.chars.map(function (item) { return item.c || ''; }).join('') : '';
   }
 
+  // 把一页正文切成 [{from,to,text}]，序号是**字符层里的真实下标**。
+  //
+  //   为什么本机要有这个（用户 2026-08-19）：卡片可以绑到正文的一段字上
+  //   （bind.kind='page-chars' 要 from/to），而用户明确说过「选中后要求出卡应该
+  //   不是常态，而是自动化操作」—— 也就是助手该自己定位。可它此前拿到的只有
+  //   `searchableText()` 拼出来的一整段纯文本，序号在那一步就丢了，于是只能
+  //   反过来要求用户先选中。
+  //
+  //   按 w（词组）聚合而非逐字：一页几百个字符逐字发既臃肿又难用，而 w 是有意义
+  //   的词边界（日文经 fugashi 分词，2026-08-19 起生效）。
+  //
+  //   ⚠ 空白（sp）不单独成段，但它**占序号** —— 序号必须与 chars 数组的真实下标
+  //     一致，否则卡片会绑到偏掉的位置上。
+  function pageTextSegments(chars) {
+    var segments = [];
+    var currentWord = null;
+    var start = 0;
+    var buffer = [];
+    var last = 0;
+    function flush(end) {
+      if (!buffer.length) return;
+      var text = buffer.join('').trim();
+      if (text) segments.push({ from: start, to: end, text: text.slice(0, 120) });
+    }
+    for (var index = 0; index < (chars || []).length; index += 1) {
+      var item = chars[index];
+      if (!item || item.sp) continue;
+      var value = String(item.c == null ? '' : item.c);
+      if (!value.trim()) continue;
+      var word = Number.isInteger(Number(item.w)) ? Number(item.w) : -1;
+      if (currentWord === null || word !== currentWord || word === -1) {
+        flush(last);
+        currentWord = word;
+        start = index;
+        buffer = [];
+      }
+      buffer.push(value);
+      last = index;
+    }
+    flush(last);
+    // 一页几百个词组全发出去对提示词是负担；截断，宁可少给也不给一大堆。
+    return segments.slice(0, 400);
+  }
+
   function nativeVoicePageText(url) {
     var code = 'BW_LOCAL_VOICE_PAGE_TEXT';
     return localJSONRoute(function () {
@@ -3471,11 +3515,23 @@
           }
           return epubSectionVisibleText(epub, index);
         }).then(function (text) {
-          return { ok: true, text: String(text || '').slice(0, 1500) };
+          return {
+            ok: true,
+            text: String(text || '').slice(0, 1500),
+            // EPUB 这条走的是可见文本，没有字符层，也就没有可用的序号。
+            // 给空数组而不是省略字段：省略会让调用方分不清"这个表面没有这项能力"
+            // 和"这一页恰好没有内容"。
+            segments: []
+          };
         });
       }
       return pageTextForPage(page).then(function (result) {
-        return { ok: true, text: searchableText(result).slice(0, 1500) };
+        return {
+          ok: true,
+          text: searchableText(result).slice(0, 1500),
+          // 助手据此自己挑段落绑卡片，不必要求用户先选中。
+          segments: pageTextSegments(result && result.chars)
+        };
       });
     }, code);
   }
@@ -10334,12 +10390,11 @@
     return bootPromise.then(function () {
       // @interaction document.page-text.read
       return root.fetch(
+        // ⚠ 别在这里加查询参数：本地那条（nativeVoicePageText）用的是**精确参数
+        //   白名单** localFileQuery(url, ['file','page'], …)，多一个参数就整条拒 ——
+        //   那会把原本能用的页文本读取一起弄坏。segments 由本地实现无条件给出。
         localBasePath() + '/api/assistant/voice-page-text?file='
           + encodeURIComponent(localFileRef()) + '&page=' + page
-          // segments=1：带上**带字符序号的分段**。卡片可以绑到正文的一段字上
-          //   （bind.kind='page-chars' 要 from/to），而助手此前拿到的只有纯文本 ——
-          //   序号在那里就丢了，于是它只能反过来要求用户先选中。
-          + '&segments=1'
       );
     }).then(function (response) {
       return response.json().then(function (data) {
