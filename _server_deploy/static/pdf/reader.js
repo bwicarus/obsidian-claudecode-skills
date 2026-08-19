@@ -13836,6 +13836,43 @@ window._lbClick = _lbClick;
     return out;
   }
 
+  /// 撤掉某一处的标记。删卡走这里 —— 光删便签自己那个 DOM 是不够的，
+  /// 描边和序号在另一个层里，不撤就永远留在页上，而且**后面所有序号都错位**
+  /// （序号是位置不是身份，少一个就得整页重排）。
+  window.__pageBindRemove = function (bind) {
+    try {
+      if (!bind || bind.kind !== 'page-chars') return false;
+      var page = parseInt(bind.page, 10);
+      var pw = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
+      if (!pw) return false;
+      var layer = pw.querySelector('.pgbind-layer');
+      if (!layer) return false;
+      // key 是解析**之后**的区间，跟 bind.from/to 不一定相等（文字层换过时会
+      // 重新定位）。所以按 from/to 反推 key 会漏 —— 用 _resolveRange 走一遍。
+      var boxes = pw.__charBoxes;
+      var key = null;
+      if (boxes && boxes.length) {
+        var rg = _resolveRange(boxes, {
+          from: parseInt(bind.from, 10) || 0,
+          to: parseInt(bind.to, 10) || 0,
+          text: bind.text || ''
+        });
+        if (rg) key = 'b' + rg.lo + '_' + rg.hi;
+      }
+      if (!key) key = 'b' + (parseInt(bind.from, 10) || 0) + '_' + (parseInt(bind.to, 10) || 0);
+      var had = !!layer.querySelector('[data-bindkey="' + key + '"]');
+      _removeMark(layer, key);
+      // 展开着的那张也要收掉
+      var c = layer.querySelector('.pgbind-card[data-bindkey="' + key + '"]');
+      if (c) { try { c.__bwBindTeardown && c.__bwBindTeardown(); } catch (e) {} c.remove(); }
+      _renumberMarks(pw);
+      return had;
+    } catch (e) {
+      try { console.warn('[bind] __pageBindRemove 失败', e); } catch (e2) {}
+      return false;
+    }
+  };
+
   /// 绑不上的卡记下来，等那一页真的渲染出来再接回去。
   window.__pageBindDefer = function (bind, payload, card) {
     _pageBindPending.push({ bind: bind, payload: payload, card: card });

@@ -115,3 +115,29 @@ test("退回浮层要留痕 —— 圆球是老形态，退回去看着像本来
   // 刷屏等于没有日志。
   assert.match(NOTE, /if \(ctl\._bindWhy !== \(res && res\.why\)\)/);
 });
+
+test("删卡要撤掉词框和序号，否则整页序号从此错位", () => {
+  // 序号是**位置**不是身份，少一个就得整页重排。留在页上的话，人说的
+  // 「第 3 个」和 AI 数出来的第 3 个就不是同一张了 —— 而这正是页内编号
+  // 存在的理由（用户 2026-08-19：「这样就可以在沟通时说，把第三个删掉」）。
+  assert.match(BINDCARD, /window\.__pageBindRemove = function \(bind\)/);
+  assert.match(BINDCARD, /_removeMark\(layer, key\);\s*\n\s*\/\/ 展开着的那张也要收掉/);
+  assert.match(BINDCARD, /_renumberMarks\(pw\);\s*\n\s*return had;/, "撤掉之后必须整页重排序号");
+  // 便签删除路径要真的调它，且必须在 root.remove() **之前**（之后就读不到 note 了）
+  const rm = NOTE.slice(NOTE.indexOf("function removeLocal(noteId)"));
+  const iCall = rm.indexOf("window.__pageBindRemove(_b)");
+  const iRootRm = rm.indexOf("ctl.root.remove()");
+  assert.ok(iCall >= 0 && iCall < iRootRm, "撤标记要排在便签 DOM 移除之前");
+});
+
+test("撤标记按解析后的区间找 key，不按 bind.from/to 反推", () => {
+  // key 是 _resolveRange **之后**的区间。文字层换过时两者不相等，
+  // 按 bind.from/to 反推会漏删 —— 表现是「删了卡，框还在」。
+  const body = BINDCARD.slice(
+    BINDCARD.indexOf("window.__pageBindRemove = function (bind)"),
+    BINDCARD.indexOf("/// 绑不上的卡记下来"),
+  );
+  assert.ok(body.length > 0);
+  assert.match(body, /_resolveRange\(boxes, \{/);
+  assert.match(body, /key = 'b' \+ rg\.lo \+ '_' \+ rg\.hi/);
+});

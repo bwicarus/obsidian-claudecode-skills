@@ -358,6 +358,12 @@
     var ctl = ctls[noteId];
     if (ctl) {
       try { if (EDIT && EDIT.ctl === ctl) exitEdit(); } catch (_) {}
+      // 词锚的描边和序号在另一个层里,光删便签自己的 DOM 不够 ——
+      // 不撤会永远留在页上,而且**后面所有序号都错位**(序号是位置不是身份)。
+      try {
+        var _b = ctl.note && ctl.note.card && ctl.note.card.bind;
+        if (_b && window.__pageBindRemove) window.__pageBindRemove(_b);
+      } catch (_) {}
       try { ctl.root.remove(); } catch (_) {}
       try { if (ctl._ph) ctl._ph.remove(); } catch (_) {}
       delete ctls[noteId];
