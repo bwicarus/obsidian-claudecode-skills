@@ -141,3 +141,21 @@ test("撤标记按解析后的区间找 key，不按 bind.from/to 反推", () =>
   assert.match(body, /_resolveRange\(boxes, \{/);
   assert.match(body, /key = 'b' \+ rg\.lo \+ '_' \+ rg\.hi/);
 });
+
+test("拖动已词锚的卡 = 重新锚定，不是让标记留在旧词上", () => {
+  // 沿用这套的原语义（拖到哪就绑到哪），也是用户要的「手动和自动形成相同的效果」。
+  // 只更新 anchor 不更新 card.bind 的话，标记留在旧词、卡片跑到别处 ——
+  // 又一个"看着像正常"的错位。
+  assert.match(NOTE, /function _rebindWord\(ctl, cx, cy\)/);
+  // ⚠ 探测点必须是**加过 shift 的落点**，跟同一处 reanchorAt 用同一个点。
+  //   r0 是撤掉 transform 后的矩形（拖动前的位置），拿它探测等于锚回原处。
+  assert.match(NOTE, /_rebindWord\(g\.ctl, r0\.left \+ g\.shiftX \+ 4, r0\.top \+ g\.shiftY \+ 4\)/);
+  assert.match(NOTE, /reanchorAt\(g\.ctl, r0\.left \+ g\.shiftX \+ 4, r0\.top \+ g\.shiftY \+ 4\)/,
+    "两处必须同一个点；改了一处没改另一处 = anchor 和 bind 指向不同地方");
+  // 换了 bind 必须跟 card 一起落库，否则重开又回到旧词
+  assert.match(NOTE, /if \(_rb\) _pf\.card = g\.ctl\.note\.card;/);
+  // 拖到空白/图区 → 撤词锚退回普通便签，比留个指向别处的旧 bind 好
+  assert.match(NOTE, /if \(!nb\) ctl\.root\.style\.display = '';/);
+  // 没真拖动（shift=0）不该重锚
+  assert.match(NOTE, /if \(cx == null \|\| cy == null\) return false;/);
+});

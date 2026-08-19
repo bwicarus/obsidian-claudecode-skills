@@ -1168,6 +1168,34 @@ if (window.__bwPwaProviderOnly) return;
     return true;
   }
 
+  /// 拖动落点重新求词锚。返回 true 表示 card.bind 换了（调用方要把 card 一起落库）。
+  /// 拿不到词（拖到空白/图区/页缝）就**撤掉词锚退回普通便签** —— 比留一个
+  /// 指向别处的旧 bind 好：旧 bind 会让标记停在原地，看着像卡片分身。
+  /// ⚠ cx/cy 必须是**加过 shift 的落点**，跟同一处 reanchorAt 用的是同一个点：
+  ///   r0 是撤掉 transform 之后的矩形（= 拖动前的位置），直接拿它去探测
+  ///   等于锚回原处，而 anchor 已经按落点更新了 —— 两者从此指向不同的地方。
+  function _rebindWord(ctl, cx, cy) {
+    var old = ctl.note && ctl.note.card && ctl.note.card.bind;
+    if (!old) return false;   // 本来就不是词锚卡，不管
+    if (cx == null || cy == null) return false;   // 没真拖动（shift=0）→ 不重锚
+    var wr = null;
+    try {
+      wr = _probeHidden(ctl.root, function () {
+        return O.noteWordRect ? O.noteWordRect(cx, cy) : null;
+      });
+    } catch (e) {}
+    var nb = (wr && wr.page > 0 && wr.text && (wr.dist == null || wr.dist <= 48))
+      ? { kind: 'page-chars', page: wr.page, from: wr.from, to: wr.to,
+          text: String(wr.text).slice(0, 200) }
+      : null;
+    if (nb && nb.page === old.page && nb.from === old.from && nb.to === old.to) return false;
+    try { if (window.__pageBindRemove) window.__pageBindRemove(old); } catch (e) {}
+    ctl.note.card.bind = nb;
+    ctl._bindMarked = false;
+    if (!nb) ctl.root.style.display = '';   // 退回普通便签，别把卡藏没了
+    return true;
+  }
+
   // ── 词锚便签：正文里显示成「词描边 + 右上角序号」，点词才展开真卡 ──────
   //   用户 2026-08-20 定的形态：「插入后自动锁定到前方的分词元素，高亮整个分词，
   //   右上角加上数字，然后点击这个词直接展开卡片」。动机是圆球太多会挡住正文。
@@ -1711,9 +1739,17 @@ if (window.__bwPwaProviderOnly) return;
       g.ctl.root.style.top = (_ct + g.shiftY) + 'px';
       attachPlaceholder(g.ctl);   // 锚已更新 → 占位移到新锚,避免下次 reflow 把便签拉回旧位
     }
+    // 词锚卡:拖动 = 重新锚定(沿用这套的原语义,也是用户要的「手动和自动形成
+    //   相同的效果」)。只更新 anchor 不更新 card.bind 的话,标记会**留在旧词上**
+    //   而卡片跑到别处 —— 又是一个"看着像正常"的错位。
+    var _rb = (r0 && (g.shiftX || g.shiftY))
+      ? _rebindWord(g.ctl, r0.left + g.shiftX + 4, r0.top + g.shiftY + 4)
+      : false;
     ensureMounted(g.ctl.note);   // host 按新锚重算像素位置(左上缩放不跨容器,原地重挂幂等;portaled 时早退)
     g.ctl._suppressTap = Date.now();
-    patchNote(g.ctl.note, { anchor: g.ctl.note.anchor, w: g.ctl.note.w, h: g.ctl.note.h });
+    var _pf = { anchor: g.ctl.note.anchor, w: g.ctl.note.w, h: g.ctl.note.h };
+    if (_rb) _pf.card = g.ctl.note.card;
+    patchNote(g.ctl.note, _pf);
   }
 
   // ─────────────────────────── 手写:编程式笔路由 API(页面 ink 层调用;跨界三段切割的便签侧)───────────────────────────
