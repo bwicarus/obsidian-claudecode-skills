@@ -1546,7 +1546,16 @@
     ctl.root.style.transform = '';
     if (!anchor) { toastMsg('放不到这里(不在内容页上),已弹回'); return; }   // 清 transform→回原位(portaled 回 fixed 原点)
     ctl.note.anchor = anchor;
-    patchNote(ctl.note, { anchor: anchor });
+    // 词锚卡:拖动 = 重新锚定。探测点跟上面 reanchorAt 用**同一个** _lr 左上角,
+    //   两者必须一致,否则 anchor 和 bind 指向不同的地方。
+    //   ⚠ 这里才是便签拖动的真实落点路径(handle 拖拽 → dropNote)。
+    //   曾经把这段放在 onResizeTLUp 里 —— 那是**左上缩放手柄**,而卡片便签的
+    //   `.rc-note-hascard .rc-note-rs-tl` 是 display:none(第 237 行),用户根本
+    //   点不到,于是整段重锚是死代码,表现只是"拖了之后框没跟着搬",不报任何错。
+    var _rb = _rebindWord(ctl, _lr.left + 1, _lr.top + 1);
+    var _pf = { anchor: anchor };
+    if (_rb) _pf.card = ctl.note.card;
+    patchNote(ctl.note, _pf);
     if (wasPortaled) {   // 先解除 portal,ensureMounted 才会真正换容器重挂(否则 portaled 守卫早退)
       ctl.portaled = false; ctl.root.classList.remove('rc-note-portaled');
       ctl.root.style.position = ''; ctl.root.style.left = ''; ctl.root.style.top = '';
@@ -1740,17 +1749,9 @@
       g.ctl.root.style.top = (_ct + g.shiftY) + 'px';
       attachPlaceholder(g.ctl);   // 锚已更新 → 占位移到新锚,避免下次 reflow 把便签拉回旧位
     }
-    // 词锚卡:拖动 = 重新锚定(沿用这套的原语义,也是用户要的「手动和自动形成
-    //   相同的效果」)。只更新 anchor 不更新 card.bind 的话,标记会**留在旧词上**
-    //   而卡片跑到别处 —— 又是一个"看着像正常"的错位。
-    var _rb = (r0 && (g.shiftX || g.shiftY))
-      ? _rebindWord(g.ctl, r0.left + g.shiftX + 4, r0.top + g.shiftY + 4)
-      : false;
     ensureMounted(g.ctl.note);   // host 按新锚重算像素位置(左上缩放不跨容器,原地重挂幂等;portaled 时早退)
     g.ctl._suppressTap = Date.now();
-    var _pf = { anchor: g.ctl.note.anchor, w: g.ctl.note.w, h: g.ctl.note.h };
-    if (_rb) _pf.card = g.ctl.note.card;
-    patchNote(g.ctl.note, _pf);
+    patchNote(g.ctl.note, { anchor: g.ctl.note.anchor, w: g.ctl.note.w, h: g.ctl.note.h });
   }
 
   // ─────────────────────────── 手写:编程式笔路由 API(页面 ink 层调用;跨界三段切割的便签侧)───────────────────────────

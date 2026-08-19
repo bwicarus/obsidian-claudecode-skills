@@ -142,23 +142,35 @@ test("撤标记按解析后的区间找 key，不按 bind.from/to 反推", () =>
   assert.match(body, /key = 'b' \+ rg\.lo \+ '_' \+ rg\.hi/);
 });
 
-test("拖动已词锚的卡 = 重新锚定，不是让标记留在旧词上", () => {
-  // 沿用这套的原语义（拖到哪就绑到哪），也是用户要的「手动和自动形成相同的效果」。
-  // 只更新 anchor 不更新 card.bind 的话，标记留在旧词、卡片跑到别处 ——
-  // 又一个"看着像正常"的错位。
-  assert.match(NOTE, /function _rebindWord\(ctl, cx, cy\)/);
-  // ⚠ 探测点必须是**加过 shift 的落点**，跟同一处 reanchorAt 用同一个点。
-  //   r0 是撤掉 transform 后的矩形（拖动前的位置），拿它探测等于锚回原处。
-  assert.match(NOTE, /_rebindWord\(g\.ctl, r0\.left \+ g\.shiftX \+ 4, r0\.top \+ g\.shiftY \+ 4\)/);
-  assert.match(NOTE, /reanchorAt\(g\.ctl, r0\.left \+ g\.shiftX \+ 4, r0\.top \+ g\.shiftY \+ 4\)/,
-    "两处必须同一个点；改了一处没改另一处 = anchor 和 bind 指向不同地方");
+test("拖动已词锚的卡 = 重新锚定，而且必须挂在**真的**拖动路径上", () => {
+  // ⚠ 这条曾经是绿的、而功能完全不工作 —— 上一版只断言"调用点存在"，
+  //   而调用点在 onResizeTLUp()（左上缩放手柄）里。卡片便签的
+  //   `.rc-note-hascard .rc-note-rs-tl` 是 display:none，用户根本点不到，
+  //   于是整段重锚是死代码。表现只是"拖了之后框没跟着搬"，不报任何错。
+  //   所以这里钉的是**位置**，不只是存在。
+  const iDrop = NOTE.indexOf("function dropNote(ctl, rect0, dx, dy)");
+  const iNext = NOTE.indexOf("\n  function ", iDrop + 10);
+  assert.ok(iDrop >= 0 && iNext > iDrop, "dropNote 改名了？重锚可能又挂错地方");
+  const drop = NOTE.slice(iDrop, iNext);
+  assert.match(drop, /_rebindWord\(ctl, _lr\.left \+ 1, _lr\.top \+ 1\)/,
+    "重锚不在 dropNote 里 = 拖动时根本不会跑");
+  // 探测点必须跟同一函数里的 reanchorAt 用同一个点，否则 anchor 和 bind 分家
+  assert.match(drop, /reanchorAt\(ctl, _lr\.left \+ 1, _lr\.top \+ 1\)/,
+    "两处探测点不一致 = anchor 和 bind 指向不同的地方");
   // 换了 bind 必须跟 card 一起落库，否则重开又回到旧词
-  assert.match(NOTE, /if \(_rb\) _pf\.card = g\.ctl\.note\.card;/);
-  // 拖到空白/图区 → 撤词锚退回普通便签，比留个指向别处的旧 bind 好
-  assert.match(NOTE, /if \(!nb\) ctl\.root\.style\.display = '';/);
-  // 没真拖动（shift=0）不该重锚
+  assert.match(drop, /if \(_rb\) _pf\.card = ctl\.note\.card;/);
+  // 缩放手柄那条路**不该**再有重锚（它是死代码，留着只会让人以为已经处理了）
+  const iTL = NOTE.indexOf("function onResizeTLUp()");
+  const iTLEnd = NOTE.indexOf("\n  function ", iTL + 10);
+  assert.doesNotMatch(NOTE.slice(iTL, iTLEnd), /_rebindWord/,
+    "缩放手柄对卡片便签是 display:none，放这儿等于没放");
+  // _rebindWord 本体的行为
+  assert.match(NOTE, /function _rebindWord\(ctl, cx, cy\)/);
+  assert.match(NOTE, /if \(!nb\) ctl\.root\.style\.display = '';/,
+    "拖到空白/图区 → 撤词锚退回普通便签，别把卡藏没了");
   assert.match(NOTE, /if \(cx == null \|\| cy == null\) return false;/);
 });
+
 
 test("展开时重算尺寸 —— 卡是在 display:none 里 mount 的", () => {
   // 那时 _formW 量到的宽是 0。不补这一下，第一次展开的卡宽度是错的。
