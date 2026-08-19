@@ -96,24 +96,68 @@ enum ReaderOfflineDictionaryStore {
         let installedAt: Date
     }
 
+    /// 词典的根目录 —— 在 **App Group 共享容器**里。
+    ///
+    /// 2026-08-19 从 App 私有的 Application Support 搬过来。原因是 C19：
+    /// Safari 扩展要用 App 的离线词典查词（每点一个词一次，是扩展打 Pi 最频繁的
+    /// 那类请求），而 Safari 的 native handler 跑在**扩展进程**里 ——
+    /// `applicationSupportDirectory` 在那儿解析出的是扩展自己的目录，
+    /// 词典根本不在那条路径上。共享容器是两个进程都看得见的唯一地方。
+    ///
+    /// 快照与本机笔记状态早就在用同一个 App Group，这里只是加入它们。
     static func applicationRoot() throws -> URL {
-        do {
-            let support = try FileManager.default.url(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
-            )
-            return support
-                .appendingPathComponent("BWReader", isDirectory: true)
-                .appendingPathComponent(
-                    "OfflineJapaneseDictionary",
-                    isDirectory: true
-                )
-        } catch {
+        guard let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier:
+                ReaderNativeBridgeContract.appGroupIdentifier
+        ) else {
             throw ReaderOfflineDictionaryError.storageUnavailable(
-                error.localizedDescription
+                "App Group 共享容器不可用"
             )
+        }
+        let root = container
+            .appendingPathComponent("BWReader", isDirectory: true)
+            .appendingPathComponent(
+                "OfflineJapaneseDictionary",
+                isDirectory: true
+            )
+        migrateLegacyApplicationRootIfNeeded(to: root)
+        return root
+    }
+
+    /// 旧位置（App 私有 Application Support）里已经装好的词典搬过来。
+    ///
+    /// 不迁移的话，升级这一版之后 `installedInfo()` 会返回 nil、UI 显示"未安装"，
+    /// 用户得重下几百 MB —— 而那几百 MB 就在磁盘上、只是换了个地方找。
+    ///
+    /// 用 moveItem 而不是 copy：复制会在迁移期间占双份空间。移动失败就当没迁移过
+    /// （旧目录留在原地，下次再试），**不删任何东西** —— 迁移出错时宁可多占一份
+    /// 空间，也不能把用户下好的词典弄丢。
+    private static func migrateLegacyApplicationRootIfNeeded(to target: URL) {
+        let manager = FileManager.default
+        guard !manager.fileExists(atPath: target.path) else { return }
+        guard let support = try? manager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: false
+        ) else { return }
+        let legacy = support
+            .appendingPathComponent("BWReader", isDirectory: true)
+            .appendingPathComponent(
+                "OfflineJapaneseDictionary",
+                isDirectory: true
+            )
+        guard manager.fileExists(atPath: legacy.path) else { return }
+        do {
+            try manager.createDirectory(
+                at: target.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try manager.moveItem(at: legacy, to: target)
+        } catch {
+            // 迁移失败不是致命的：下面的安装检查会认为"未安装"，用户可以重新下载。
+            // 但要留痕 —— 否则"我明明下过"就成了一桩无法解释的怪事。
+            NSLog("[bw-dict] 词典迁移到共享容器失败：%@", error.localizedDescription)
         }
     }
 
