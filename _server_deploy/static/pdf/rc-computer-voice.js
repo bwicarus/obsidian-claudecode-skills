@@ -440,11 +440,75 @@
     return normalized;
   }
 
+  /// 卡片的绑定目标。形状与服务端 `reader_card_contract._norm_bind`、
+  /// C# `ReaderRealtimeOutput.ValidateCardBind` 保持一致。
+  ///
+  /// 区间不合法就整条拒收，不静默丢弃 —— 与其在页面上定出一个荒唐的位置，
+  /// 不如让调用方立刻知道自己发错了。
+  function normalizeCardBind(value) {
+    if (!plainObject(value)) {
+      throw directError(
+        "Reader 卡片 bind 无效",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    }
+    var kind = safeText(value.kind, "Reader 卡片 bind.kind", 32, false);
+    if (kind === "upage-block") {
+      exactObject(value, ["kind", "upage", "bid"], [], "Reader 卡片 bind");
+      return {
+        kind: kind,
+        upage: safeText(value.upage, "Reader 卡片 bind.upage", 200, false),
+        bid: safeText(value.bid, "Reader 卡片 bind.bid", 200, false),
+      };
+    }
+    if (kind === "page-chars") {
+      exactObject(
+        value,
+        ["kind", "page", "from", "to"],
+        ["text", "rev"],
+        "Reader 卡片 bind"
+      );
+      var page = value.page;
+      var from = value.from;
+      var to = value.to;
+      if (
+        !Number.isSafeInteger(page) || page < 1 ||
+        !Number.isSafeInteger(from) || from < 0 ||
+        !Number.isSafeInteger(to) || to < from
+      ) {
+        throw directError(
+          "Reader 卡片 bind 的字符区间无效",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
+      }
+      var bind = { kind: kind, page: page, from: from, to: to };
+      ["text", "rev"].forEach(function (field) {
+        if (
+          Object.prototype.hasOwnProperty.call(value, field) &&
+          value[field] !== null
+        ) {
+          bind[field] = safeText(
+            value[field], "Reader 卡片 bind." + field, 200, false
+          );
+        }
+      });
+      return bind;
+    }
+    throw directError(
+      "Reader 卡片 bind 类型无效",
+      "BW_READER_REALTIME_OUTPUT_SCHEMA",
+      false
+    );
+  }
+
   function normalizeResultCard(card) {
     exactObject(
       card,
       ["kind", "data"],
-      ["title", "brief", "sources"],
+      // bind 已在上游 normalizeCardBind 校验并规范化过，这里只放行
+      ["title", "brief", "sources", "bind"],
       "Reader 结果 card"
     );
     var kind = safeText(card.kind, "Reader 结果 card.kind", 16, false);
@@ -501,6 +565,11 @@
       }
     }
     var normalized = { kind: kind, data: data };
+    // 这是本文件里第二次重建卡片对象。放行了却不搬，表现是"校验全过、
+    // 卡片照常出现、就是不钉" —— 比被拒更难查，因为看不出哪里出了问题。
+    if (Object.prototype.hasOwnProperty.call(card, "bind")) {
+      normalized.bind = card.bind;
+    }
     ["title", "brief"].forEach(function (field) {
       if (Object.prototype.hasOwnProperty.call(card, field)) {
         normalized[field] = resultText(
@@ -954,9 +1023,24 @@
     } else if (kind === "card") {
       exactObject(p, ["card"], [], "Reader 卡片输出");
       var rawCard = p.card;
-      exactObject(rawCard, ["kind", "title", "data"], [], "Reader 卡片");
+      // bind 是可选的第四个字段：把卡片钉在正文某一段上。
+      //
+      // ⚠ 这道闸是这条链上**第四份**卡片字段白名单（前三份：C# ValidatePayload、
+      //   MCP inputSchema、服务端 reader_card_contract）。2026-08-19 前三份都
+      //   放行了 bind，唯独这里没有 —— 于是助手照说明发出来的卡片被回
+      //   BW_READER_REALTIME_OUTPUT_SCHEMA。下游 rc-voicecall 读的就是
+      //   `card.bind`（→ __upBindCard / __pageBindCard），链路其余部分都是通的。
+      exactObject(rawCard, ["kind", "title", "data"], ["bind"], "Reader 卡片");
       var cardValue = { kind: rawCard.kind, data: rawCard.data };
       if (rawCard.title !== null) cardValue.title = rawCard.title;
+      // 这里是**重建**而不是透传，所以放行还不够，必须显式搬过去；
+      // 漏搬的表现是"校验通过但卡片不钉"，比直接拒更难查。
+      if (
+        Object.prototype.hasOwnProperty.call(rawCard, "bind") &&
+        rawCard.bind !== null
+      ) {
+        cardValue.bind = normalizeCardBind(rawCard.bind);
+      }
       payload = { card: normalizeResultCard(cardValue) };
     } else if (kind === "navigate") {
       exactObject(p, ["action", "target", "selectionId"], [], "Reader 导航输出");
