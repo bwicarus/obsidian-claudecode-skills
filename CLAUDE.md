@@ -19,6 +19,17 @@
   git -C "$CLAUDE_PROJECT" status -sb
   ```
 - 🧭 **接续工作/部署细节**:服务器侧 Claude Code 工作流 → `references/server-side-claude-code.md`;Pi 部署 → `references/raspberry-pi-deployment.md`;VPS 迁移 → `references/linux-server-migration.md`;本地实例(Windows Flask) → `references/webapp-development.md`「本地实例」章。
+- 🧭 **改完文档跑一次漂移检查**（没有 CI 会替你跑）：
+
+  ```bash
+  python3 scripts/check_docs_drift.py
+  ```
+
+  七条规则全部**从代码里取事实**（部署清单、runtime 本地分支、OCR profile
+  版本…），所以代码变了它自动跟上，不会自己变成新的过期说法。它防的是
+  2026-08-19 那类事故：文档留着旧工程的说法，于是照着做的人一再走错方向。
+  ⚠ 它也检查「行内重复」——批量改文档时只替换了前缀、旧句子尾巴留在原地，
+  同一行里两个版本并排且互相矛盾。这条默认只看**本次改动的行**。
 - 🚀 **要部署任何改动,先读 `references/deployment-workflow.md`(唯一权威,2026-07-29 收敛)**。
   一句话:**先判断这次改动到不到得了 App** —— 涉及阅读器路由的先跑 `python3 scripts/where_does_this_route_run.py <路由>`,答「App 内本地执行」的,改 `_server_deploy/*.py` 对 App 无效(要改 `_server_deploy/static/pdf/native-local-runtime.js` + 出 TestFlight 构建),部署 Pi 只影响桌面/扩展表面。确认确实要部署后:唯一部署机是 Pi;先跑 `python3 scripts/reader_deploy_manifest.py | cut -f1 | grep -F '<你改的文件>'` 判断在不在部署清单里
   判断在不在部署清单(150 项)里 —— **在清单内**走 `scripts/deploy_reader.sh`(Windows 上是
