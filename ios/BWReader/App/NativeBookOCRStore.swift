@@ -1408,8 +1408,23 @@ actor NativeBookOCRSidecarStore {
               ["vision", "manga"].contains(value.engine) else {
             throw NativeBookOCRError.invalidAttachment("文字页附件身份或几何无效")
         }
+        // ⚠ textCharCount 与 chars.count **不是**同一个量，不能相等比。
+        //
+        //   worker 那边它是正文字符数：`len("".join(text.split()))` —— 拿 Vision
+        //   返回的整页文本去掉**全部** Unicode 空白后的字数。而 chars 是 symbol
+        //   列表，另外含 sp 条目（只标记 Vision 报告的 detectedBreak）。两个口径
+        //   出自不同的数据源，永远不可能逐字对齐：全角空格这类既被 split() 去掉、
+        //   又不产生 detectedBreak 的字符就会让它们差几个。
+        //
+        //   2026-08-19 实测这条一直在拒：三份结果（更早代码产的 57/60、Pi 产的
+        //   60/60、当天新跑的 53/53）几乎每页都不等 —— 也就是说**导入从来没成功过**，
+        //   报的是「文字页字符层无效」。按 sp 重数之后仍有 1/53 差 1，
+        //   足以说明"调口径"是条走不通的路。
+        //
+        //   换成一个**恒成立**的不变量：正文字数不可能超过条目总数。反过来才是
+        //   真的数据损坏，而那正是这条校验本来想拦的东西。
         guard value.chars.count <= 250_000,
-              value.textCharCount.map({ $0 == value.chars.count }) ?? true,
+              value.textCharCount.map({ $0 >= 0 && $0 <= value.chars.count }) ?? true,
               value.chars.allSatisfy({ character in
                 !character.c.isEmpty
                     && character.c.count <= 16

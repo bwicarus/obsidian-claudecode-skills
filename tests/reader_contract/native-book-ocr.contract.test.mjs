@@ -358,7 +358,14 @@ test("Pi and PC attachment receipts verify durable per-page character counts", (
     /probePages[\s\S]*densestPage[\s\S]*storedPage\.chars\.count == expectedCounts\[pageNumber\]/,
   );
   assert.match(STORE, /executor == "pc" \? \.pc : \.pi/);
-  assert.match(STORE, /textCharCount\.map\(\{ \$0 == value\.chars\.count \}\) \?\? true/);
+  // 这一条守的核心是上面那个**同源**比较（落盘后的 chars.count 对回执里的
+  // expectedCounts）—— 那个成立。而 textCharCount 与 chars.count 是两个不同口径
+  // 的量（正文字数 vs 含 sp 的条目数），相等比一直在拒真数据；
+  // 详见下面 "导入校验不拿 textCharCount 跟 chars.count 相等比"。
+  assert.match(
+    STORE,
+    /textCharCount\.map\(\{ \$0 >= 0 && \$0 <= value\.chars\.count \}\) \?\? true/,
+  );
 });
 
 test("native page text bridge data is available without coupling the core to UI files", () => {
@@ -557,4 +564,28 @@ test("删除本机文字层：先挪走选择再删目录，且不碰内嵌层",
   );
   assert.match(MANAGER, /func deleteTextLayer\(/);
   assert.match(MANAGER, /try await store\.deleteLayer\(/);
+});
+
+test("导入校验不拿 textCharCount 跟 chars.count 相等比", () => {
+  // 用户 2026-08-19：「导入预处理失败 —— 文字页字符层无效」。
+  //
+  // 根因：这两个**不是同一个量**。worker 那边 textCharCount 是正文字符数
+  // （`len("".join(text.split()))`，去掉全部 Unicode 空白），而 chars 是 symbol
+  // 列表、另含 sp 条目（只标记 Vision 报告的 detectedBreak）。两个口径出自不同
+  // 数据源，永远不可能逐字对齐。
+  //
+  // 实测这条一直在拒：更早代码产的 57/60、Pi 产的 60/60、当天新跑的 53/53 页
+  // 都不等 —— 也就是**导入从来没成功过**。按 sp 重数之后仍有 1/53 差 1，
+  // 说明"调口径"走不通。
+  //
+  // 换成恒成立的不变量：正文字数不可能超过条目总数。三份结果共 1032 页全部通过。
+  assert.doesNotMatch(
+    STORE,
+    /textCharCount\.map\(\{ \$0 == value\.chars\.count \}\)/,
+    "又在拿两个不同口径的量做相等比",
+  );
+  assert.match(
+    STORE,
+    /textCharCount\.map\(\{ \$0 >= 0 && \$0 <= value\.chars\.count \}\)/,
+  );
 });
