@@ -5678,6 +5678,47 @@ internal static class DirectBridgeSelfTest
             checks);
     }
 
+    /// 能力指南必须把 `bind` 讲清楚，而且不能留下与 schema 互斥的措辞。
+    ///
+    /// 助手实际读的是 `reader://capabilities/cards`，不是 inputSchema。指南
+    /// 漏讲只是让它想不到用；指南写反（「必须且只能有三个字段」）会让它明确
+    /// 拒绝 —— 后者才是 2026-08-19 那次「AI 说做不到」的真实原因。
+    ///
+    /// 同时检查 `get.md`：字符序号只能从 `reader_page_text` 的 `segments` 拿，
+    /// 那份指南不讲，助手就只能反过来要求用户先选中 —— 而用户明确说过
+    /// 「选中后出卡不该是常态」。
+    private static bool CheckCardGuideDocumentsBind()
+    {
+        // ⚠ 取的是 contents[0].text 的**原文**，不是 ToJsonString()。
+        //   第一版就是拿 ToJsonString() 搜的，结果这条守卫等于不存在：
+        //   System.Text.Json 默认把非 ASCII 转义成 \uXXXX，于是 ASCII 探针
+        //   （bind / page-chars）照常命中，而中文探针（那句劝退措辞）永远
+        //   命中不了 —— 变异测试把劝退句放回去，自测照样绿。
+        //   这种"只对一半输入生效"的守卫，不跑变异根本看不出来。
+        static string GuideText(ReaderCapabilityCatalog catalog, string uri) =>
+            catalog.ReadAsync(uri, CancellationToken.None)
+                .GetAwaiter().GetResult()["contents"]!
+                .AsArray()[0]!["text"]!
+                .GetValue<string>();
+
+        ReaderCapabilityCatalog catalog = new();
+        string cards = GuideText(catalog, "reader://capabilities/cards");
+        string get = GuideText(catalog, "reader://capabilities/get");
+
+        bool cardsOk =
+            cards.Contains("bind", StringComparison.Ordinal)
+            && cards.Contains("page-chars", StringComparison.Ordinal)
+            && cards.Contains("upage-block", StringComparison.Ordinal)
+            // 这句是当时把助手劝退的那一句，不能再出现
+            && !cards.Contains("必须且只能有", StringComparison.Ordinal);
+
+        bool getOk =
+            get.Contains("segments", StringComparison.Ordinal)
+            && get.Contains("reader_page_text", StringComparison.Ordinal);
+
+        return cardsOk && getOk;
+    }
+
     private static bool CheckStrictV5ConfigSchema(string root)
     {
         string schemaRoot = System.IO.Path.Combine(
@@ -8869,6 +8910,20 @@ internal static class DirectBridgeSelfTest
                     .GetBoolean()
                 && !cardSchema.GetProperty("additionalProperties")
                     .GetBoolean()
+                // schema 与能力指南必须说同一件事。
+                //
+                // 2026-08-19：schema 已经放行了可选的 `bind`（把卡片钉到正文
+                // 某一段），但 cards.md 仍写着「`card` 必须且只能有 kind、
+                // title、data 三个字段」。助手读的是指南 —— 于是它回答
+                // 「说明里没有钉住内容的说明，做不到」。**指南说反了比没写更糟**：
+                // 没写它可能去看 schema，写反了它会直接放弃。
+                //
+                // 这条同时钉住两边：schema 里要有 bind，指南里要讲 bind，
+                // 且指南不能再出现那句互斥的措辞。
+                && cardSchema.GetProperty("properties")
+                    .TryGetProperty("bind", out JsonElement cardBindSchema)
+                && cardBindSchema.TryGetProperty("anyOf", out _)
+                && CheckCardGuideDocumentsBind()
                 && cardKinds.SetEquals(new[]
                 {
                     "weather",
