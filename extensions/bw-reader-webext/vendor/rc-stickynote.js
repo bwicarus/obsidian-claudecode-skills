@@ -1213,6 +1213,10 @@ if (window.__bwPwaProviderOnly) return;
         onToggle: function () {
           ctl._bindOpen = !ctl._bindOpen;
           ctl.root.style.display = ctl._bindOpen ? '' : 'none';
+          // 卡是在 display:none 里 mount 的 —— 那时 _formW 量到的宽是 0。
+          // 显出来之后补跑一次 syncCtl 把尺寸重算对；renderNoteCard 有
+          // `box.__sig === sig` 守卫，不会重建卡片 DOM，学习状态不丢。
+          if (ctl._bindOpen) { try { syncCtl(ctl); } catch (e) {} }
         }
       });
     } catch (e) {}

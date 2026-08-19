@@ -159,3 +159,14 @@ test("拖动已词锚的卡 = 重新锚定，不是让标记留在旧词上", ()
   // 没真拖动（shift=0）不该重锚
   assert.match(NOTE, /if \(cx == null \|\| cy == null\) return false;/);
 });
+
+test("展开时重算尺寸 —— 卡是在 display:none 里 mount 的", () => {
+  // 那时 _formW 量到的宽是 0。不补这一下，第一次展开的卡宽度是错的。
+  assert.match(NOTE, /if \(ctl\._bindOpen\) \{ try \{ syncCtl\(ctl\); \} catch \(e\) \{\} \}/);
+  // 靠 renderNoteCard 的 __sig 守卫避免重建卡片 DOM（重建 = 学习状态丢）。
+  // 而宽度计算必须排在守卫**之前**，否则补跑等于没跑。
+  const rc = NOTE.slice(NOTE.indexOf("function renderNoteCard(ctl)"));
+  const iW = rc.indexOf("ctl.body.style.width = _formW(ctl, card.form)");
+  const iGuard = rc.indexOf("if (box.__sig === sig) return;");
+  assert.ok(iW >= 0 && iGuard > iW, "宽度计算跑到 __sig 守卫后面了，补跑 syncCtl 就白搭");
+});
