@@ -37,7 +37,11 @@ test("定位靠直接验证文本，不靠 revision 号推断", () => {
   // 版本号只是"可能变了"的间接证据；把那段字取出来一比是直接证据。
   // 而且页面这一侧根本没有可靠的字符层 revision 可读。
   assert.match(BINDCARD, /function _resolveRange\(boxes, want\)/);
-  assert.match(BINDCARD, /if \(got === text\) return \{ from: from, to: to \};/);
+  // 比对前两边都去空白：字符层的 sp 条目不进 joined，而调用方送来的锚文本
+  // 常常带分隔（segments 拼接、排版空隙）。2026-08-19 就是一个空格让整条锚定
+  // 失效，而链路上没有任何一处说得出为什么。
+  assert.match(BINDCARD, /if \(_stripWs\(got\) === text\) return \{ from: from, to: to \};/);
+  assert.match(BINDCARD, /function _stripWs/);
   assert.doesNotMatch(BINDCARD, /dataset\.charsRev/);
 });
 
@@ -60,18 +64,41 @@ test("钉在书页上的卡跟高亮同一个坐标系，不用 fixed 跟滚", (
   assert.match(CSS, /\.pgbind-layer \{ position: absolute; inset: 0;/);
 });
 
-test("生命周期与自建页那条一致：可见才计时、到点收球、能拆", () => {
-  assert.match(BINDCARD, /new IntersectionObserver\(/);
-  assert.match(BINDCARD, /if \(collapsed \|\| !visible\) return;/);
-  assert.match(BINDCARD, /document\.visibilityState === 'hidden'/);
-  assert.match(BINDCARD, /el\.__bwBindTeardown = function \(\)/);
-  // 计时读用户设置，跟浮层卡同口径
-  assert.match(BINDCARD, /localStorage\.getItem\('rc-voice-card-secs'\)/);
-  assert.match(BINDCARD, /Math\.max\(5, Math\.min\(60, v\)\)/);
-  // 球是圆的，且留在原位
-  assert.match(CSS, /\.pgbind-card\.pgbind-dot \{[\s\S]{0,200}?border-radius: 50%/);
+// ── 标记的形态（2026-08-20 用户重新定，替换了初版）────────────────
+//
+// 初版是「落下时展开、非活跃计时、到点收成球留在锚点上」。两条都被否掉：
+//   「圆球过多会遮挡视野」
+//   「实际的书中字符可不像你的例子那样有足够的空白位置，这样会盖到其它字符」
+// 所以标记不再占正文面积 —— 给被锚的词描边、中间不填色，卡片按需点开。
+// 这条测试替换了原来那条「可见才计时、到点收球、能拆」。
+
+test("标记只描边不填色 —— 字像素完全不被碰", () => {
+  // 填色即便走 multiply 也仍然改了字的底色，而扫描书底色本来就不匀。
+  assert.match(CSS, /\.pgmark \{[\s\S]{0,240}?background: transparent/);
+  assert.match(CSS, /\.pgmark \{[\s\S]{0,240}?border: 1\.5px solid var\(--pm-b\)/);
+  // 边框色不能是色调原色：实测在纸上只有 1.6~2.5:1，够不到图形元素的 3:1
+  assert.match(BINDCARD, /--pm-b:color-mix\(in srgb,' \+ tc \+ ' 60%,#2a2440\)/);
 });
 
+test("跨行的词按行切框，不是一个大包围盒", () => {
+  // 整体包围盒会把两行之间的整片正文都圈进去
+  assert.match(BINDCARD, /function _rangeRects/);
+  assert.match(BINDCARD, /Math\.abs\(base - cur\.base\) < b\.height \* 0\.6/);
+});
+
+test("序号是页内位置，加删卡后整页重排", () => {
+  // 序号是位置不是身份 —— 所以每次全量重算，不维护自增计数器
+  assert.match(BINDCARD, /function _renumberMarks/);
+  assert.match(BINDCARD, /ns\[i\]\.textContent = String\(i \+ 1\)/);
+  // 先行后列
+  assert.match(BINDCARD, /if \(Math\.abs\(ta - tb\) > 6\) return ta - tb;/);
+});
+
+test("卡片按需展开，且一次只开一张", () => {
+  // 满页都是卡就回到了「圆球遮挡视野」那个老问题
+  assert.match(BINDCARD, /function _toggleBindCard/);
+  assert.match(BINDCARD, /var others = layer\.querySelectorAll\('\.pgbind-card'\)/);
+});
 test("钉不上退回浮层，那页渲染出来时自己归位", () => {
   assert.match(VOICECALL, /_b\.kind === 'page-chars'/);
   assert.match(VOICECALL, /window\.__pageBindCard\(_b, _pp\)/);

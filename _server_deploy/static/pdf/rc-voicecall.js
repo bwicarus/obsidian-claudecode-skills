@@ -3191,6 +3191,17 @@
   /// 现在把结果记在这里，由 card 分支放进回执，助手就能说真话。
   var _lastBindOutcome = null;
 
+  /// 这张卡的色调。唯一对外的取色 API 是 RC.toolChip.styleOf(kind).color。
+  /// 拿不到就兜底成学习卡那个紫 —— 现网所有学习卡都是硬编码的这一个色，
+  /// 而 styleOf('anki') 返回的是绿色，两者本来就对不上（核实记录里那条）。
+  function _bindTone(kind) {
+    try {
+      var s = RC.toolChip && RC.toolChip.styleOf && RC.toolChip.styleOf(kind);
+      if (s && s.color) return s.color;
+    } catch (e) {}
+    return '#b9a8ff';
+  }
+
   function renderInfo(card) {
     _lastBindOutcome = null;
     if (!card || !card.kind) return false;
@@ -3225,7 +3236,13 @@
           isHtml: true,
           raw: _infoHtml(card),
           text: _infoText(card),
-          label: label
+          label: label,
+          // 标记的边框与角标按这张卡自己的色调走。取法是核实过的那条：
+          // 卡片系统里色调的对外来源就是 RC.toolChip.styleOf(kind).color。
+          // ⚠ 学习卡不在那张色表里（它是硬编码的 #b9a8ff + 🎴），所以取不到时
+          //    兜底成同一个紫，别让它变成 styleOf('anki') 返回的绿 —— 那两个
+          //    在现网就是对不上的。
+          tone: _bindTone(card.kind)
         };
         // ⚠ 返回值现在是 {ok, why, detail}，不是裸布尔。非空对象恒为真，
         //   写成 `if (window.__pageBindCard(...))` 会把每次失败都判成钉上了。
