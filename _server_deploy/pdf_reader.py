@@ -14858,7 +14858,13 @@ def pdf_api_review_event():
         ease = int(body.get("ease") or 0)
     except (TypeError, ValueError):
         ease = 0
-    if not gid or idx < 0 or ease not in (1, 2, 3, 4):
+    anki_card_id = str(body.get("ankiCardId") or "")[:32]
+    # 身份有**两种**，有一种就够：
+    #   (gid, index) = 本地卡库里的第几张卡；ankiCardId = Anki 卡号。
+    # Pi 复习队列里的卡只有后者 —— 早先只认前者，于是那条评分面的事件会被判
+    # bad payload 全部丢掉（2026-08-19 补覆盖面时发现）。
+    has_local_identity = bool(gid) and idx >= 0
+    if (not has_local_identity and not anki_card_id) or ease not in (1, 2, 3, 4):
         return jsonify({"ok": False, "error": "bad payload"}), 400
     try:
         seen = json.loads(_REVIEW_EVT_SEEN.read_text("utf-8"))
@@ -14884,7 +14890,13 @@ def pdf_api_review_event():
         "source": (body.get("source") or "reader")[:24],
         # 能解析出 Anki cardId 的卡带上它,将来对账/补写 revlog 用;解析不出就留空,
         # 不在这里查 Anki —— 记录端点不做任何可能失败或变慢的事。
-        "ankiCardId": (str(body.get("ankiCardId") or "")[:32] or None),
+        "ankiCardId": (anki_card_id or None),
+        # aid = 这次评分的幂等标识，/pdf/api/review-answer 的台账正是按它认账。
+        #   不存的话日志与台账对不上号，重放只能在"不敢投"和"重复投"之间二选一。
+        "aid": (str(body.get("aid") or "")[:64] or None),
+        # 哪条评分面（local / pi / flashcard）。三条的补投语义不同：本地卡库那条
+        #   可以按 (gid,index) 找回卡，Pi 那条只能靠 ankiCardId。
+        "queue": (str(body.get("queue") or "local")[:16]),
         "file": (body.get("file") or "")[:400],
     }
     try:

@@ -1390,6 +1390,33 @@
     broadcast(st.gid, i, container);
     notifyGroup(st.gid, 'review-pending', i);
     _stateSync(st, i);
+    // 第三条评分面（侧栏 / 便签 / 收藏夹里的融合复习卡）以前也完全不记事件。
+    //   事件是补投的底账，三条评分面缺一条就有一批复习永远补不回来。
+    // @interaction learning.review-event.report
+    try {
+      if (RC.outbox && typeof RC.outbox.send === 'function') {
+        var evtId = 'revlog:fc:' + st.gid + ':' + i + ':' + aid;
+        RC.outbox.send('revlog', evtId, '/pdf/api/review-event', {
+          id: evtId,
+          aid: aid,          // 幂等台账按它认账，没有就跟台账对不上号
+          gid: st.gid,
+          index: i,
+          ease: ease,
+          reviewedAt: Date.now(),
+          source: 'reader',
+          ankiCardId: exactCardId ? String(exactCardId) : '',
+          queue: 'flashcard'
+        });
+      } else if (window.dlog) {
+        window.dlog('复习事件未记录：outbox 不可用', '#ffa500');
+      }
+    } catch (evtErr) {
+      try {
+        window.dlog && window.dlog(
+          '复习事件未记录：' + String(evtErr && evtErr.message || evtErr), '#ff6b6b'
+        );
+      } catch (_) {}
+    }
     fetch('/pdf/api/review-answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(function (r) {
         return r.json().catch(function () {

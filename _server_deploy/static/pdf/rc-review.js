@@ -1753,6 +1753,38 @@
     }
   }
 
+  // 复习事件上报（**只记不改调度**）。
+  //
+  //   它是补投的底账：`answerCards` 传不了时间戳，离线补投会被 Anki 记成
+  //   "补投那一刻"，只有这里存着真实复习时刻。
+  //
+  //   `aid` 必须带上 —— /pdf/api/review-answer 的幂等台账就是按它认账的。
+  //   没有它，日志和台账对不上号，重放只能在"不敢投"和"重复投"之间二选一。
+  //
+  //   走 outbox：天然 at-least-once + 服务端按 mutationId 幂等，离线也不丢。
+  //   失败**出声**：没有日志就没有重放，而这件事以前被一个空 catch 吞着。
+  // @interaction learning.review-event.report
+  function _reportReviewEvent(key, fields) {
+    try {
+      if (!RC.outbox || typeof RC.outbox.send !== 'function') {
+        window.dlog && window.dlog('复习事件未记录：outbox 不可用', '#ffa500');
+        return;
+      }
+      var id = 'revlog:' + key;
+      RC.outbox.send('revlog', id, '/pdf/api/review-event', Object.assign({
+        id: id,
+        source: 'reader',
+        file: (window.UP_FILE || (window.RC && RC.file) || '')
+      }, fields || {}));
+    } catch (e) {
+      try {
+        window.dlog && window.dlog(
+          '复习事件未记录：' + String(e && e.message || e), '#ff6b6b'
+        );
+      } catch (_) {}
+    }
+  }
+
   function _scheduledLocalReview(previous, ease, reviewedAt) {
     previous = previous || {};
     var priorInterval = Math.max(0, Number(previous.intervalDays || 0));
@@ -1929,33 +1961,15 @@
     //   走 outbox 是因为它天然 at-least-once + 服务端按 mutationId 幂等，离线也不丢；
     //   而且 reviewedAt 记的是**真实复习时刻** —— answerCards 传不了时间戳，
     //   离线补投会被 Anki 记成"补投那一刻"，日志里才有真相。
-    try {
-      if (RC.outbox && typeof RC.outbox.send === 'function') {
-        RC.outbox.send('revlog', 'revlog:' + local.gid + ':' + local.cardIndex + ':' + aid,
-          '/pdf/api/review-event', {
-            id: 'revlog:' + local.gid + ':' + local.cardIndex + ':' + aid,
-            gid: local.gid,
-            index: local.cardIndex,
-            ease: ease,
-            reviewedAt: reviewedAt,
-            source: 'reader',
-            ankiCardId: card && card._legacyExternalCardId ? String(card._legacyExternalCardId) : '',
-            file: (window.UP_FILE || (window.RC && RC.file) || '')
-          });
-      } else {
-        // outbox 不在 = 这次复习没有底账。不该静默 —— 没有日志就没有重放，
-        // 而"重放"是离线/Anki 没起来时唯一的补救手段。
-        window.dlog && window.dlog('复习事件未记录：outbox 不可用', '#ffa500');
-      }
-    } catch (e) {
-      // 以前这里是空的。于是四处白名单一处都没登记时（2026-08-19 实测就是这样），
-      // 事件被每一层默默拒收、日志文件永远是空的，谁也不知道为什么。
-      try {
-        window.dlog && window.dlog(
-          '复习事件未记录：' + String(e && e.message || e), '#ff6b6b'
-        );
-      } catch (_) {}
-    }
+    _reportReviewEvent(local.gid + ':' + local.cardIndex + ':' + aid, {
+      aid: aid,
+      gid: local.gid,
+      index: local.cardIndex,
+      ease: ease,
+      reviewedAt: reviewedAt,
+      ankiCardId: card && card._legacyExternalCardId
+        ? String(card._legacyExternalCardId) : ''
+    });
     var nextReview = _scheduledLocalReview(local.review, ease, reviewedAt);
     repository.patchState(local.gid, local.cardIndex, {
       review: nextReview
@@ -2096,6 +2110,14 @@
       card_id: card.id,
       ease: ease
     };
+    // 这条评分面（Pi 上的复习队列）以前完全不记事件 —— 覆盖面只有 1/3。
+    _reportReviewEvent('pi:' + card.id + ':' + aid, {
+      aid: aid,
+      ease: ease,
+      reviewedAt: Date.now(),
+      ankiCardId: String(card.id || ''),
+      queue: 'pi'
+    });
     // @interaction review.answer.submit
     fetch('/pdf/api/review-answer', {
       method: 'POST',

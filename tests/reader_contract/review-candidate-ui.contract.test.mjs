@@ -1508,7 +1508,10 @@ test("HTTP or business rejection restores an optimistically removed card", async
 
   assert.deepEqual(h.getStored().cards.map((card) => card.id), [91, 92]);
   assert.deepEqual(h.getStored().completed_ids, []);
-  assert.equal(h.outboxCalls.length, 0,
+  // 只数**评分**（kind 'rev'）。复习事件日志（kind 'revlog'）是另一回事：
+  // 它总是要记，跟这次评分被不被接受无关 —— 它正是补投的底账。
+  assert.equal(
+    h.outboxCalls.filter(([kind]) => kind === "rev").length, 0,
     "an HTTP rejection is authoritative and must never masquerade as offline");
   assert.ok(h.toasts.some((text) =>
     text.includes("卡片已放回复习队列") &&
@@ -1732,8 +1735,10 @@ test("network TypeError preserves optimistic state and sends one durable outbox 
   h.clickEase(4);
   await settleAsync();
 
-  assert.equal(h.outboxCalls.length, 1);
-  const [kind, aid, url, payload] = h.outboxCalls[0];
+  // 同上：评分只该入队一次；事件日志是独立的一条，不参与这里的计数。
+  const ratingCalls = h.outboxCalls.filter(([kind]) => kind === "rev");
+  assert.equal(ratingCalls.length, 1);
+  const [kind, aid, url, payload] = ratingCalls[0];
   assert.equal(kind, "rev");
   assert.match(aid, /^a_[a-f0-9]{16}$/);
   assert.equal(url, "/pdf/api/review-answer");

@@ -133,13 +133,53 @@ test("复习事件端点在四处白名单里都登记了", () => {
 });
 
 test("事件上报失败不再被空 catch 吞掉", () => {
+  // 上报已抽成共用函数 _reportReviewEvent（三条评分面共用），断言看它。
   const body = REVIEW.slice(
-    REVIEW.indexOf("RC.outbox.send('revlog'"),
-    REVIEW.indexOf("var nextReview = _scheduledLocalReview("),
+    REVIEW.indexOf("function _reportReviewEvent(key, fields)"),
+    REVIEW.indexOf("function _scheduledLocalReview("),
   );
-  assert.ok(body.length > 0);
+  assert.ok(body.length > 0, "找不到 _reportReviewEvent");
   assert.doesNotMatch(body, /\} catch \(e\) \{\}/, "还是空 catch");
   assert.match(body, /复习事件未记录：/);
   // outbox 不在也要说 —— 那同样意味着这次复习没有底账
   assert.match(body, /outbox 不可用/);
+});
+
+// ── C 组 #17 的 G2：三条评分面缺一不可 ────────────────────────────────
+//
+// 只有本地卡库那条在记事件；Pi 复习队列与融合复习卡两条完全不记 —— 覆盖面 1/3。
+// 事件是补投的底账，缺一条就有一批复习永远补不回来。
+
+test("三条评分面都记复习事件", () => {
+  const flashcard = read("_server_deploy/static/pdf/rc-flashcard.js");
+  // ① 本地卡库（走共用函数）
+  assert.match(REVIEW, /function _reportReviewEvent\(key, fields\)/);
+  assert.match(REVIEW, /_reportReviewEvent\(local\.gid \+ ':' \+ local\.cardIndex/);
+  // ② Pi 复习队列
+  assert.match(REVIEW, /_reportReviewEvent\('pi:' \+ card\.id \+ ':' \+ aid/);
+  // ③ 融合复习卡（侧栏 / 便签 / 收藏夹）
+  assert.match(flashcard, /'revlog:fc:' \+ st\.gid \+ ':' \+ i \+ ':' \+ aid/);
+  assert.match(flashcard, /queue: 'flashcard'/);
+});
+
+test("事件体带 aid —— 否则跟幂等台账对不上号", () => {
+  const flashcard = read("_server_deploy/static/pdf/rc-flashcard.js");
+  // /pdf/api/review-answer 的幂等台账就是按 aid 认账的。没有它，重放只能在
+  // "不敢投"和"重复投"之间二选一。
+  assert.match(REVIEW, /_reportReviewEvent\([\s\S]{0,200}?aid: aid,/);
+  assert.match(flashcard, /aid: aid,\s+\/\/ 幂等台账按它认账/);
+  // 服务端要真的存下来
+  const server = read("_server_deploy/pdf_reader.py");
+  assert.match(server, /"aid": \(str\(body\.get\("aid"\) or ""\)\[:64\] or None\)/);
+  assert.match(server, /"queue": \(str\(body\.get\("queue"\) or "local"\)\[:16\]\)/);
+});
+
+test("事件身份有两种，有一种就够 —— Pi 队列的卡没有 gid", () => {
+  const server = read("_server_deploy/pdf_reader.py");
+  // 早先只认 (gid, index)，于是 Pi 那条评分面的事件会被判 bad payload 全丢。
+  assert.match(server, /has_local_identity = bool\(gid\) and idx >= 0/);
+  assert.match(
+    server,
+    /if \(not has_local_identity and not anki_card_id\) or ease not in \(1, 2, 3, 4\)/,
+  );
 });
