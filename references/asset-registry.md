@@ -39,9 +39,9 @@
 ## 规则
 
 - **编号**:`{kind3}_{hex6}`(`img_ab12ef`);**服务端发放,AI 永远不自编**;同 URL 复用同编号(防膨胀)。
-- **存储**:`state/assets/registry.json` `{id:{kind,url,ts,local,concept,source,matched_query,page_url}}`;
-  本地文件 `state/assets/files/<id>.<ext>`。
-- **解析**:`GET /pdf/api/asset/<id>` — local 有→本地文件(immutable 缓存);无→302 外链;无此编号→404 JSON。
+- **存储**:**账号私有边车目录**下的 `assets/registry.json`(`pdf_reader._asset_reg_path`:10769 → `_reader_sidecar_path("assets","registry.json")`:208 → `reader_sidecar_store.default_sidecar_root`:123 = `$READER_SIDECAR_ROOT` / `$WEBAPP_DATA/reader-sidecars` / `<项目根>/state/reader-sidecars`,再按账号命名空间分目录;**已不是全局 `state/assets/registry.json`**)`{id:{kind,url,ts,local,concept,source,matched_query,page_url}}`;
+  本地文件 `<账号边车根>/assets/files/<id>.<ext>`(`_asset_dir(identity)/"files"`,pdf_reader.py:10999)。
+- **解析**:`GET /pdf/api/asset/<id>` — local 有→本地文件(**`Cache-Control: private, no-store` + `Vary: Authorization, Cookie`,已不是 immutable**:编号按账号发,公共缓存会串账号);无→302 外链(`?proxy=1` 则由服务端代取,扩展用);无此编号→404 JSON。
 - **本地化时机**(用户拍板):**贴页时**(不是搜到就下——搜 8 张只用 1 张)。`/api/notes` POST/PATCH 保存后扫
   html.content 里的 `/pdf/api/asset/<id>` 引用 → `_asset_localize_async` 后台线程下载;失败保留外链下次重试。
 - **AI 引用协议**:search_image 的 `found_brief=["#img_xxxx 概念(命中词:…)"]`;_note 教 AI
@@ -68,7 +68,7 @@
 - 编号带 kind 前缀防混用;registry 与创造物库**分表同句柄语法**(生命周期不同:贴页的永久,未用的可 30 天清)
 - 上下文零 URL(found_brief/[图:alt] 注入/_infoText 全部只元数据)——省 token+防 AI 抄错 URL
 
-## P2(待做)
+## 遗留待做(与上文第 28 行的 §P3 重叠,可合并;此标题原写「P2(待做)」是笔误 —— P2 已于 2026-07-21 上线,见第 17 行「## P2 已上线」)
 
 - recall 统一入口按前缀分流(img_→注册表元数据,cre_→创造物库)
 - make_anki image_url 支持传 #id;视频纳入(vid_)

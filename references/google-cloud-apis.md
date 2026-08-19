@@ -12,13 +12,14 @@ GCP project `My First Project` (project# 915753578532, org `bwicarus-org`) 启�
 | Cloud Vision API | `vision.googleapis.com` | PDF OCR(`google_vision_ocr.py`)| `AIzaSy...` key |
 | YouTube Data API v3 | `youtube.googleapis.com` | 频道视频搜索 | `AIzaSy...` key |
 | Cloud Speech-to-Text API | `speech.googleapis.com` | 健身视频高质量字幕 | `AIzaSy...` key |
-| Generative Language API(Gemini) | `generativelanguage.googleapis.com` | 字幕翻译 | `AQ.Ab...` service-account-绑定 key |
+| Generative Language API(Gemini) | `generativelanguage.googleapis.com` | 字幕翻译 **+ 阅读器助手主力叶子调用**（`assistant.py`：深度解释/总结、现场看图、`gemini-embedding-001` 向量、SSE 流式；`_GEMINI_MODEL = "gemini-3.5-flash"`）| `AQ.Ab...` service-account-绑定 key（付费档兜底）+ `gemini-api-key-free`（免费档，优先用）|
 
 ### Key 文件位置(Pi)
 
 ```
 /home/bwicarus/.config/gcp-vision-key  600  # AIzaSy* (Vision + YouTube + STT)
-/home/bwicarus/.config/gemini-api-key   600  # AQ.Ab*  (Gemini 专用)
+/home/bwicarus/.config/gemini-api-key       600  # AQ.Ab*  (Gemini 付费档:免费档限流/耗尽时兜底)
+/home/bwicarus/.config/gemini-api-key-free  600  # Gemini 免费档:assistant.py 与 _client/core/ai_backends.py 都优先读这把
 ```
 
 ### Key 配置规则
@@ -29,6 +30,8 @@ GCP project `My First Project` (project# 915753578532, org `bwicarus-org`) 启�
   - Cloud Vision API
   - YouTube Data API v3
   - Cloud Speech-to-Text API
+  - Cloud Translation API（`scripts/vocab/translate.py::_gtranslate` 打 `translation.googleapis.com`；漏勾就是下文那个 `API_KEY_SERVICE_BLOCKED`）
+  - Custom Search JSON API（`_server_deploy/image_search.py` 打 `www.googleapis.com/customsearch/v1`；`_key()` 先读 server-config `image.api_key`、没配才回落这把 `AIzaSy*`，cx 取 `image.cse_id`）
 
 **`AQ.Ab*` key(Gemini)**:
 - 服务账号绑定的 API key(新功能)
@@ -99,7 +102,11 @@ YouTube 重置:Pacific Time 午夜 = UTC 08:00。脚本里默认取 UTC 08:00 �
 | `scripts/find_jeff_videos.py` | `_log_quota("youtube", 100, "search.list", note=q)` |
 | `scripts/google_vision_ocr.py` | `_log_quota("vision", 1, "images:annotate")` |
 | `_server_deploy/youtube_speech.py` | `_log_quota("stt", CHUNK_SEC, "speech:recognize")` |
-| `_server_deploy/youtube_subtitles.py` | `_log_quota("gemini", 1, "generateContent:flash")` |
+| `_server_deploy/youtube_subtitles.py` | `log_usage("gemini", 1, "generateContent:flash")`；另 L351 `log_usage("translate", len(segments), "v2:batch")` |
+| `_server_deploy/assistant.py` | `log_usage("gemini", <tokens>, label, note="model=… tier=free/paid in=… out=… status=…")`（`gemini_cost()` 靠这份 note 算钱，`tier=free` 的记录只累计用量不计费）|
+| `_server_deploy/youtube_search.py` | `log_usage("youtube", units, "search.list")`（服务端健身视频搜索）|
+| `_server_deploy/voice.py` | `log_usage("stt", 1, "speech:recognize")`（全站语音助手，不只健身字幕）|
+| `_server_deploy/image_search.py` | `log_usage("customsearch", 1, "web"/"image")`（Custom Search JSON API，key 见 `_key()`）|
 
 ---
 

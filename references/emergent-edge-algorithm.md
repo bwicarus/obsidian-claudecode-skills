@@ -69,7 +69,7 @@
   同 ankicards 区块管理模式)/ `## AI 解释(自动)`(可关)。
 - **挂起边=未解析 wikilink**(Obsidian 原生灰显,零实现);**Graph View 免费镜像概念网**。
 - 机器真相仍在 `emergent-graph.json`(skilltree/统一图消费);笔记是人类可读镜像,单向 机器→笔记「自动区」同步。
-- `promote_concepts.collect_seeds` 扩展:除 NOTE_PATTERN 外,收 `资源/概念/**/*.md`(frontmatter type=concept-auto)。
+- ⚠ **未实现（2026-08-19 复核）**:`promote_concepts.collect_seeds`（`scripts/kg/promote_concepts.py:100-137`）**没有**扫 `资源/概念/**/*.md`,它只收两个源——NOTE_PATTERN 登记笔记 + 诊断卷 `node_results`。`资源/概念` 目录只被 `scripts/kg/propose_concept_notes.py` 读（`CONCEPT_DIR_NAME` :41,glob 在 :193 身份解析 R4「文件名/frontmatter aliases 认同一概念」与 :418 `_enrich_existing` 命中即合并写回),用途是身份解析与合并,**不是**把概念笔记当种子回收。
 
 ## 3. 存量特例:笔记引文扫描(零 AI 拼边,保留)
 
@@ -102,7 +102,7 @@ F^s+微积分4篇无(手绘图源)。AI 一句话确认(prereq|demote|drop,10 �
 | A | vocab 门修复(繁简双查+fail-closed+碎片门) | 0 |
 | B | 存量引文扫描引擎(§3,在 7+4 篇上验证)+ 边直接生效改造(status:auto) | 一批几分钱 |
 | C | 主流程(§1):向前搜索+相关性+AI①②+概念笔记(§2,含编码注册表+pending_notes 排除行+**§2b 身份解析**)+挂起边 | 每新词 2-3 次有界调用 |
-| D | AI 审计任务(§4)+ 接线 quick_sync(候选检测)/daily(生成+审计) | 夜间配额内 |
+| D ✅ 已上线 | AI 审计任务(§4,`scripts/kg/audit_edges.py`)+ 接线 quick_sync(候选检测=`propose_concept_notes.py --detect-only`)/ **独立的 `concept-graph.timer` → `scripts/concept_graph_daily.py`**(生成+审计;⚠ 2026-07-19 起已从 bwicarus-daily 分离,别去 `daily_anki_status.py` 里找) | 夜间配额内 |
 | E | 共现辅助/相对阈值/桥自然长(数据厚后) | 0 |
 
 ## 附录:关键实锤(2026-07-18/19)

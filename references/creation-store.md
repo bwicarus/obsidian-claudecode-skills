@@ -21,7 +21,7 @@
 - **存储**:`state/assistant-creations/<uid>.json`(环形 40 条)。条目:
   `{id: c_<hex ts>_<rand>, kind, brief(告知一行,含实际查询词), query, content(≤8000)|ref(引用型), anchor:{file,page}, ts}`
 - **登记点**(全自动):
-  - 编排三循环(claude/gemini/codex)工具 done → `_creation_register`(白名单 `_CREATION_KINDS`:web_search/search_video/search_image/translate/summarize_section/search_all_books;error 不登;**read_page 不登**——可随时重读,登了只添噪);
+  - 编排三循环(claude/gemini/codex)工具 done → `_creation_register`(assistant.py:5999):**不再是纯白名单全自动** —— 每个工具有 per-user「记忆」开关 `_creation_enabled`(:5949,on/off 覆盖),白名单 `_CREATION_KINDS`(:5935,web_search/search_video/search_image/translate/summarize_section/search_all_books)只决定这条路径的**默认开**,名单外的工具用户开了开关也能登;error 不登;**read_page 不登**——可随时重读,登了只添噪;**沙盒产物一律不登**(`_creation_add`:934 拦 `.sandbox` 路径)。另有 highlight / auto_highlight / dictation_grade / make_paper / do_task 走**各自的专用登记点**(assistant.py:3911/:4132/:1101、task_runtime.py:1541、voice.py:1702),默认开由 `_CREATION_DEFAULT_ON`(:5946)决定;
   - 纸:`task_runtime.start()` → kind:'paper', ref={upage,file,page}(本体在 userpages sidecar,不复制;"未检查/已检查"清单时实时判);
   - 检查报告:`_save_check_report` → kind:'check_report', ref={name}(本体在报告库);
   - CLI 任务:`voice._task_agent` done → kind:'cli_task', brief=流程摘要, content=answer。

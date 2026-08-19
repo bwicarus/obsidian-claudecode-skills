@@ -1,5 +1,7 @@
 # 本地数据手账界面 · 数据源蓝图(2026-07-20 盘点)
 
+> ⚠ **归档（2026-08-19 复核，勿据其推断现状）**：本文是 2026-07-20 那天的盘点快照，**核心结论已部分被推翻**。① 阅读器 sidecar 的权威不再在 Pi 而在 **App 本地**：`python scripts/where_does_this_route_run.py /pdf/api/reading-pos`（`/pdf/api/highlights`、`/pdf/api/notes`、`/pdf/api/userpages` 同）都是 `owner=local` 且 `native-local-runtime.js` 有本地分支＝App 内本地执行、不打 Pi；**仍在 Pi 的**是 `/pdf/api/favorites`（owner=pi、无本地分支）以及生词库、查词 `/pdf/api/dict`、注意力事件 `/pdf/api/read-dwell`、Anki records —— 所以 §「仅 Pi」那一格不是全错，别整段丢掉。② 交付设定过时：「无扩展的网页端能完整跑」「部署在 webapp 内 `/journal/`」不再成立，PWA 阅读器页面 2026-08-14 起返回 410（`_server_deploy/reader_pwa_retirement.py`），产品只做 iOS App 与浏览器扩展。以下按当时原文保留，只作思路留档。
+
 > 6-agent workflow 盘点浏览器/扩展/SW/服务端全部存储层的产物。用户诉求:"新建一个手账一样的界面来观察记录保存到本地的各种数据"。
 
 ## ⭐ 关键真相:数据其实存哪(诚实版)

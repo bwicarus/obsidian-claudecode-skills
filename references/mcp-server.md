@@ -4,7 +4,7 @@
 > 让任何 MCP 客户端(Claude Code、claude.ai、其他 agent)像操作一个 App 一样控制整个自学系统。
 
 > 另有一个边界完全不同的 Windows 实验 MCP：电脑语音原生 EXE 的
-> `--direct-serve` 在既有 loopback 监听器上常驻提供 `/mcp`，只读 PWA 直连更新的本地
+> `--direct-serve` 在既有 loopback 监听器上常驻提供 `/mcp`，只读**浏览器扩展**直连更新的本地
 > `reader-context-snapshot.json`，工具仅 `reader_context_snapshot`。Codex 通过
 > Streamable HTTP 复用这一实例，不再按会话拉起 stdio 子进程；旧
 > `--reader-context-mcp --state <path>` 入口仅供回滚与隔离诊断。它不经过本页的
@@ -15,7 +15,7 @@
 
 ```
 外部 agent(MCP 客户端)
-    → mcp_server.py(FastMCP,14 个工具)
+    → mcp_server.py(FastMCP,20 个工具:下表 v1 的 14 个 + 编排模式 4 个 + 写操作封装 2 个)
     → webapp HTTP API(127.0.0.1:5000,gunicorn)
     → Bearer token 经 app.py _bearer_user 桥认证成正式 session
     → 走跟浏览器完全相同的代码路径(权限/数据/副作用一致)
@@ -34,7 +34,7 @@
 | 书 | `read_page(file,page)` | GET /pdf/api/page-text(为 MCP 新加的轻端点) |
 | 书 | `search_in_book(file,query)` | GET /pdf/api/search |
 | 书 | `search_all_books(query)` | GET /pdf/api/global-search(FTS) |
-| 书 | `reading_positions()` | 直读 state/reader-positions.json |
+| 书 | `reading_positions()`(已按最后阅读时间排序 + 直接给 `most_recent`) | GET /pdf/api/reading-pos。⚠ 该路由 owner=local:权威在 App 本地,Pi 这份是同步中继副本,可能落后于设备 |
 | 语言 | `lookup_word(word,context,langs)` | GET /pdf/api/dict-quick(英 ECDICT/日 unidic 统一) |
 | 语言 | `translate_text(text)` | POST /pdf/api/translate-sentence |
 | 语言 | `mark_vocab(word,mark)` | POST vocab-mark / jp-vocab-mark(按字符自动路由) |
@@ -43,7 +43,7 @@
 
 ## 编排模式(外部 AI 临时取代内置助手的编排层)
 
-外部 AI 可以**成为"大脑"**,共享内置读书助手的"身体"(29 个书内工具 + 会话历史):
+外部 AI 可以**成为"大脑"**,共享内置读书助手的"身体"(`assistant.py::TOOLS` 现 53 个书内工具 + 会话历史):
 
 | MCP 工具 | 后端桥(assistant.py 新增) | 作用 |
 |---|---|---|
@@ -65,7 +65,7 @@ claude mcp add --scope user bwicarus-app -- /home/bwicarus/mcp-venv/bin/python /
 ```
 stdio 模式由客户端按需拉起进程,不需要常驻服务。
 
-**远程模式(已启用)**:`mcp-server.service`(systemd,`--http 8766` Streamable HTTP,只听 127.0.0.1)+ Pi nginx 两个 server 块(80/443)各加了 `location /mcp`(proxy_buffering off + 3600s 超时;⚠ Pi nginx 是手工 patch,备份在 `sites-available/bwicarus.bak-mcp`)。unit 副本 `references/systemd/mcp-server.service`。
+**远程模式(已启用)**:`mcp-server.service`(systemd,`--http 8766` Streamable HTTP;⚠ **unit 设 `MCP_HTTP_HOST=0.0.0.0`,不是只听 127.0.0.1**——127.0.0.1 只是 mcp_server.py 的代码默认值)+ Pi nginx 两个 server 块(80/443)各加了 `location /mcp`(proxy_buffering off + 3600s 超时;⚠ Pi nginx 是手工 patch,备份在 `sites-available/bwicarus.bak-mcp`)。unit 副本 `references/systemd/mcp-server.service`。
 
 **HTTP 模式强制 Bearer 门禁**:所有请求须带 `Authorization: Bearer <token>`,认**两类** token(无 token → 401;静态 token 文件缺失服务拒绝启动):
 - 静态 token `~/.config/mcp-http-token`(Claude Code / 脚本客户端,`--header` 直填);
@@ -89,7 +89,7 @@ claude.ai 自定义连接器**只支持 OAuth**(UI 无静态 Bearer/自定义 he
 - **发现流程**:客户端无 token 打 /mcp → 401 带 `WWW-Authenticate: Bearer resource_metadata=...` → 客户端顺藤摸瓜 DCR→authorize→token(claude.ai 全自动,用户只见授权页)。
 - **信任模型**:授权页要求**配对密码**(`~/.config/mcp-oauth-pass`,600)——URL 公开无妨,没密码拿不到 token。consent-phishing 缓解=页面显示回调域名+警示「只在自己主动添加连接器时输入」。密码输错限速(10min 5 次/IP)。
 - **token**:access 7 天 / refresh 180 天(轮换,旧 refresh 即废),存 `~/.config/mcp-oauth-store.json`(600,原子写);前缀 `mat_`/`mrt_`/`mac_`(access/refresh/code)、`mcl_`(client)。静态 token 并行有效。
-- **public base** env `MCP_PUBLIC_BASE`(默认 `https://bwicarus.taile44d0c.ts.net:8443`)——元数据/issuer 都用它,换域名只改这一处。
+- **public base** env `MCP_PUBLIC_BASE`——⚠ mcp_server.py:371 的**代码默认**是 `https://bwicarus.taile44d0c.ts.net:8443`,但 `references/systemd/mcp-server.service` **已覆盖成 `https://bwicarus.space`**,实际元数据/issuer 用的是后者;下面 8443 Funnel 的地址与它不一致,接连接器前先确认在用哪个。换域名只改这一处。
 - ⚠ **lifespan 桥接坑**:外层 Starlette 组装(Route+Mount)会消费 lifespan 不传子 app → FastMCP 的 session manager 不启动,/mcp 全 500 且 worker 连接复位。mcp_oauth.build_asgi 里手动 `async with mcp_app.router.lifespan_context(mcp_app)` 桥接。
 - **Claude app 添加**:设置 → 连接器 → 添加自定义连接器 → URL 填 `https://bwicarus.taile44d0c.ts.net:8443/mcp`(Advanced 的 Client ID/Secret 留空,走 DCR)→ 跳授权页输配对密码。ChatGPT 开发者模式连接器同一套 OAuth 应可用(待实测)。
 

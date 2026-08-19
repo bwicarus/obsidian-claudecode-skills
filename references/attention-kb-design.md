@@ -1,5 +1,7 @@
 # 通用知识库 / 注意力画像系统 —— 设计讨论稿(2026-07-17,状态:构想探讨中,未动工)
 
+> ⚠ **归档标记（2026-08-19 复核）**：标题里的「未动工」早已不成立，本文是 2026-07-17/18 两天的**滚动进度记录**，不是当前状态文档（§5b 自己就写着「地基已落地…阶段 0+1 上线」）。实况：`scripts/attention_profile.py` 已上线并由 `scripts/quick_sync.py:113-117` 每 15min 跑，`_server_deploy/insights.py:506` 有「注意力焦点」面板，`scripts/learning_situations.py` / `scripts/error_meta_profile.py` / `scripts/kg/mastery_overrides.py` 均已落地，dwell 上报路由在 `_server_deploy/pdf_reader.py:1918`。另：文末「前端是 nginx 静态文件，改后部署 `/var/www/html/static/pdf/`」只覆盖桌面/旧网页一条路径 —— 同一批源文件还会被 `ios/BWReader/package_local_reader.py` 整目录烤进 App 的 ReaderBundle（含 `pdf-uishared.js`，到 iPad 只能靠新的 TestFlight 构建）；扩展那条只带 `extensions/bw-reader-webext/build.py` 的 FILES/GUARDED_LIBS 清单文件（`rc-*.js` 等，`pdf-uishared.js` 不在其中），改了要重新打包。以下按当时原文保留。
+
 > 用户构想:多渠道字符流(阅读器行为/AI 识别/智能眼镜眼动)→ 加权分词统计 → 时间衰减排序
 > = 当前学习焦点;通用词筛除;双时间线近似缩小到某书某页;跨材料同知识点自动关联(超阈值 AI 判定);
 > 最终全自动调用各界面。本文 = 构想 ↔ 成熟技术的映射 + 研究扫描结论 + 架构草案。

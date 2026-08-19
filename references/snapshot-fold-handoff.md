@@ -1,5 +1,7 @@
 # 快照 MCP 字段对接交接（Claude → Codex，2026-07-30）
 
+> ⚠ **已归档（2026-08-19）**：本文是 2026-07-30 那个时点的交接快照，按当时「Claude=Windows 桥 / Codex=快照 MCP 与 iOS」的分工写成。2026-08-16 用户拍板**全部工程由 Claude 负责**，文中「snapshot MCP 后续全部交给 Codex」「Claude 不再并行修改 A 类文件」等分工**已作废**；§6 的 BWAB 投递限制也是当时旧守护进程下的实测。下面内容只作历史存档与字段语义（`visual.drawing.freshness` / `embeds` / 正文内嵌标记转义）参考，**不要当现行分工或现行状态读**。
+
 > 用户已确认：**snapshot MCP 后续全部交给 Codex 做**。本文是 Claude 侧全部资产与缺口定位。
 > Claude 不再并行修改本文列出的 A 类文件，避免双写。
 

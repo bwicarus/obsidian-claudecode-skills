@@ -1,4 +1,4 @@
-# 阅读器上下文链路接入点地图（Claude → Codex，2026-07-30）
+# 阅读器上下文链路接入点地图（2026-07-30 建；⚠ 2026-08-16 起全部工程归 Claude，标题原有的「Claude → Codex」分工已作废）
 
 > 用途：接续 snapshot MCP 字段对接工作时，不必再摸索"这一跳在哪个文件"。
 > 所有行号为 2026-07-30 当日实测（`reader_outgoing_context.py` 与 `reader_direct_wire.py`
@@ -10,15 +10,15 @@
 ```
 用户操作(翻页/选区/绘图)
   → ① 前端采集与防抖        rc-core.js / epub-html.js / pdf-adapter
-  → ② Pi 路由入口            pdf_reader.py  /pdf/api/active-reading
+  → ② 路由入口(App 内本地)   native-local-runtime.js 的 /pdf/api/active-reading 分支;桌面/扩展表面才走 Pi 的 pdf_reader.py
   → ③ 上下文构造与折叠        reader_outgoing_context.py
   → ④ 出向 journal           state/reader-outgoing-journal.jsonl
-  → ⑤ PWA 经固定 WSS 直连     rc-computer-voice.js → Windows
-  → ⑥ Windows 折叠成快照      DirectContextSnapshot.cs  ← ⚠ 字段在这里被白名单裁掉
+  → ⑤ App/扩展经固定 WSS 直连 rc-computer-voice.js → Windows(PWA 阅读页 2026-08-14 起 410,已不是交付表面)
+  → ⑥ Windows 折叠成快照      DirectContextSnapshot.cs  (visual/drawing/embeds/viewport/knowledge 已由 CopyVisual/CopyEmbeds/CopyViewport/CopyKnowledge 保留)
   → ⑦ MCP 只读工具           ReaderContextMcpServer.cs  reader_context_snapshot
   → Codex 读到
 
-回写方向（用户已定案：走直接命令，MCP 保持只读）
+回写方向（直接命令仍在；但 **MCP 面已不再只读** —— ReaderContextMcpServer.cs 现有 reader_command / reader_highlight_text / reader_note_create / reader_note_edit / reader_anki_draft / reader_undo_last 等写工具）
 Codex 产出结构化结果
   → ⑧ 直接命令白名单          reader_direct_commands.py  ACTIONS
   → ⑨ handler 组装与执行      reader_direct_wire.py  build_handlers
@@ -75,7 +75,7 @@ Codex 产出结构化结果
 | `_viewport_center` | 399 | `{para}` 或 `{ratio}` → 中心段号；坏值一律退回整章 |
 | `_page_embeds` | 418 | 取该页高亮与块状内容（PDF 按 `page`，EPUB 按 `anchor.section`） |
 | `build_page_context` | 470 | **正向链路的核心产出** |
-| `register_outgoing_context` | 542 | 挂 `/api/drawing-state`、`/api/focus`、`/api/outgoing/journal` |
+| `register_outgoing_context` | 635 | 挂 `/api/outgoing/journal`、`/api/outgoing/drawing`、`/api/outgoing/focus`、`/api/outgoing/state`（**没有** `/api/drawing-state`、`/api/focus`，那只是代码注释里的旧叫法） |
 
 `build_page_context` 的输出形状与字段语义见 `reader-specs/fixtures/README.md`，
 可重放样例在 `reader-specs/fixtures/outgoing-events.jsonl` 第 1 行。
@@ -83,15 +83,15 @@ Codex 产出结构化结果
 ### ⑥ Windows 折叠 —— ⚠ 当前缺口就在这里
 
 `extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectContextSnapshot.cs`
-折叠时的字段集只有 `file` / `page` / `selection`（约 262-266 的键列表）。
-`visual` / `drawing` / `embeds` / `viewport` 全部零命中 → 被丢弃。
+折叠时的字段集已不止 `file` / `page` / `selection`：`BuildPageContext` 另外调 `CopyVisual` / `CopyEmbeds` / `CopyViewport` / `CopyKnowledge`。
+`visual`（含 `drawing`）/ `embeds` / `viewport` / `knowledge` 现在都会写进快照，这个缺口已经补上。
 
 模式分流在 `DirectBridgeProtocol.cs:544`：
 `LegacyInject → ForwardLegacyContextAsync`／else `→ ForwardSnapshotContextAsync`。
 `HandleActiveReadingAsync` 强制 `SnapshotMcp`，否则抛
 `BW_READER_CONTEXT_SNAPSHOT_MODE_REQUIRED`。
 
-### ⑦ MCP 只读面
+### ⑦ MCP 面（**已不再只读**：除 `reader_context_snapshot` 外还有一批写工具）
 
 `ReaderContextMcpServer.cs`：`ToolName = "reader_context_snapshot"`(:9)、
 `FreshnessWindow`(:12) 3 分钟 → `contextStatus=stale`、`RunAsync`(:54)。
@@ -101,13 +101,13 @@ Codex 产出结构化结果
 
 ### ⑧ 白名单 —— `_server_deploy/reader_direct_commands.py`
 
-`ACTIONS`(:26) 现有 **20 个动作**，`MODES`(:44) = `independent` / `dependent`，
+`ACTIONS`(:26) 现有 **24 个动作**，`MODES`(:57) = `independent` / `dependent`，
 `validate()` 校验 `correlation/target/anchor/params/idempotency/dependencies/mode/steps`。
 
 读：`read.page` `read.selection` `read.pageimage` `toc.get` `search.book` `search.all`
 `dict.lookup` `highlight.list` `note.list` `section.read` `recall.creation` `recall.notes`
 写：`highlight.create` `note.create` `page.new` `page.add` `anki.draft` `vocab.add`
-导航：`nav.goto` `nav.open`
+导航：`nav.goto` `nav.open`；07-30 之后新增：读 `vocab.page`；写 `note.edit` `undo.last`；回写 `result.present`
 
 ### ⑨ handler 组装 —— `_server_deploy/reader_direct_wire.py`
 
@@ -115,7 +115,7 @@ Codex 产出结构化结果
 |---|---|---|
 | `_AI_TOOL_NAMES` | 22 | **会调 AI 的旧工具名，勿移除任何一项**（曾误移除 `add_vocab`/`search_image`，已撤回并由 `tests/test_ai_boundary.py` 逐名钉住） |
 | `_assert_no_ai` | 44 | 比 `action.split(".",1)[-1]`；所以 `vocab.add` 的 tail 是 `add`，本就不会被 `add_vocab` 拦 |
-| `build_handlers` | 51 | 可选注入项**都有 fallback**，不传 inject 也是 20/20、`missing` 为空 |
+| `build_handlers` | 51 | 可选注入项**都有 fallback**，不传 inject 也是 24/24、`missing` 为空 |
 | `section_read` | 283 | EPUB 直接取章；PDF 按 TOC 切片，无目录退回单页并在 `section_title` 注明 |
 | `recall_creation` | 358 | 直读 `state/assistant-creations/<uid>.json`；引用型只回 `ref` 不解引用 |
 | `recall_notes` | 390 | 三源（索引/KG/Anki）；`query` 必填 ≤80、`limit` ≤8、不隐式继承 selection |
@@ -137,10 +137,10 @@ Codex 产出结构化结果
 | 节 | 实现位置 | 状态 |
 |---|---|---|
 | 一 正文（PDF dwell / EPUB 视口） | `build_page_context` + `_viewport_center`；前端 `_reportPos`/`_viewportRatio` | Pi 侧完成 |
-| 二 绘图三态 | `DrawingRevisions._snapshot` 的 `freshness` | Pi 侧完成，**fold 丢弃** |
+| 二 绘图三态 | `DrawingRevisions._snapshot` 的 `freshness` | 完成（fold 侧 `CopyVisual`→`CopyDrawing` 已保留） |
 | 三 焦点 | `FocusState`；前端 `RC.outgoing.focus/cancel` | 通了（VAD 触发时机未做） |
-| 四 正文锚定嵌入 | `annotate_page_text` + `_page_embeds` | Pi 侧完成，**fold 丢弃** |
-| 五/六 结构化回写 | 直接命令 ⑧⑨ + `result-envelope.md` | **待接线** |
+| 四 正文锚定嵌入 | `annotate_page_text` + `_page_embeds` | 完成（fold 侧 `CopyEmbeds` 已保留） |
+| 五/六 结构化回写 | 直接命令 ⑧⑨ + `result-envelope.md`；`result.present` 动作 + `pdf_reader.py:3084` 的 `register_direct_commands` | 已接线 |
 | 七/十 助手入口与规范拆分 | `reader-specs/AGENTS.md` + `specs/*.md` | 完成 |
 | 八 AI 委托迁移 | `reader-agent-capability-audit.md`；`do_task`/`make_paper` 待迁 | 部分 |
 | 九 不依赖会调 AI 的 MCP | `_AI_TOOL_NAMES` + `_assert_no_ai` | 完成 |
@@ -168,7 +168,7 @@ Codex 产出结构化结果
 ## 5. 只读验证命令（不改任何状态）
 
 ```bash
-# 直接命令接线情况（应 20/20、missing 为空）
+# 直接命令接线情况（应 24/24、missing 为空）
 python3 -c "import sys;sys.path.insert(0,'_server_deploy');import reader_direct_commands as D;print(len(D.ACTIONS))"
 
 # 字段契约与样例

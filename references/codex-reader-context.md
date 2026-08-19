@@ -32,7 +32,7 @@ git -C . log --oneline -5
 
 ## 2. 产品与所有权
 
-正式客户端包含本地优先 iOS App、独立 PWA 与扩展：
+正式客户端只有本地优先 iOS App 与浏览器扩展；**PWA 阅读器界面已于 2026-08-14 退役**（`_server_deploy/reader_pwa_retirement.py` 让 `/pdf/`、`/pdf/search`、`/pdf/epub/view`、`/pdf/fav/view` 返回 410），下面几条关于 PWA 的分档只作历史参考：
 
 - iOS App：安装包内置同一 Reader renderer/共享组件；Swift 拥有本机文件、数据、生命周期与
   系统能力，Pi 仅作显式同步、备份和联网服务，App 内不运行 PWA/扩展接管协议。
@@ -40,7 +40,7 @@ git -C . log --oneline -5
   功能。除非用户另行恢复该主线，不得把 App/扩展改动附带部署到 Pi PWA。
 - 普通网页无扩展：无 BW 功能。
 - 普通网页有扩展：扩展提供全部网页阅读功能。
-- 真书 PWA 无扩展：PWA 提供完整 fallback。
+- ~~真书 PWA 无扩展：PWA 提供完整 fallback。~~ ⚠ **已失效**：PWA 阅读器页面 2026-08-14 起返回 410（`_server_deploy/reader_pwa_retirement.py` 的 `RETIRED_PAGE_ENDPOINTS`：`/pdf/`、`/pdf/search`、`/pdf/epub/view`、`/pdf/fav/view`，由 `pdf_reader.py` 在 before_request 最前面拦），没有 PWA fallback。两处**没有**退役、仍在服务：`/pdf/api/*`（App 与扩展都在调）与 `/pdf/html/view?file=<vault 里的 .md/.html>`（App 书库只认 pdf/epub、扩展不开 vault 文件，一并退役等于把这类书删掉——见该文件里那段注释）。
 - 真书 PWA 有扩展：扩展是唯一共享 UI/网络/通用数据 owner；PWA 保留原 renderer、
   `DocumentHost`、私有 anchor 和书籍数据。
 

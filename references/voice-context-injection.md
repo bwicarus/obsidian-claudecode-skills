@@ -1,6 +1,6 @@
 # 语音上下文注入 · 统一端口(设计定稿 2026-07-21)
 > 用户拍板:『不要再因几种语音注入方式不同出问题——包装成统一端口』。本文=5-agent workflow 盘点四路注入点
-> 的对照地图+设计稿。**实施前必读;加任何新注入只走 RC.voiceCtx,严禁直连某条传输。**
+> 的对照地图+设计稿。**加任何新注入只走 RC.voiceCtx,严禁直连某条传输**——这条铁律仍有效(`rc-voicectx.js:2` 原样重申)。⚠ 但 **P1 已落地**(`rc-voicectx.js` 已存在;pins/removed_imgs 已改走 `RC.voiceCtx.state/event`,`dc.onopen` 已 `flushPending`,`_rtcCompactNow` 已 `invalidate`,后端 `assistant.py::_announce_lines` 已消费 `ctx.announcements`):下文「待迁移/已知坑」请按提案时点读,**且全文行号已失效**(rc-voicecall.js 现 9499 行:`_pinSync`:2388、`_imgGoneNote`:3048、`_rtcFlushCtx`:5814、`_rtcCompactNow`:7573)。
 # 语音助手上下文注入统一端口设计稿
 
 ## 当前 Realtime 传输边界
@@ -15,14 +15,14 @@
 - `make_note` 写 App 本机笔记；`make_anki`、联网搜索、深度思考、后台 CLI、造纸和长文路由是
   明示的可选 AI/API 工具，可以在调用时访问 Pi。它们不是通话或上下文的依赖，Pi 离线只让本次
   工具失败，普通回答、选区、页面、笔迹和合成图仍须正常工作。
-- PWA/其他没有 App 原生桥的客户端可继续显式使用 Pi 提供的 AI API/兼容传输；这条兼容路径不是
+- 没有 App 原生桥的客户端(桌面浏览器表面;PWA 阅读器已退役返 410)可继续显式使用 Pi 提供的 AI API/兼容传输；这条兼容路径不是
   App 或 Safari 扩展的回退，也不得取得 App Keychain 中的长期 key。
 - `RC.voiceCtx` 的 `rtc` transport 绑定浏览器自己的 DataChannel；`dc.onopen` 后
   `flushPending('rtc')`。用户开口边沿必须先 `_requestSyncNow()`，再 `_rtcFlushCtx()`，保证
   当前视口而非上一帧被注入；重连时本机清同步指纹并重推状态。
 - `see_ink` / `see_page` / `see_figure` 是模型显式查看请求，必须把真实合成图注入同一 Realtime
   会话；`rt_image` 只控制非显式、机会式图像输入，不能把显式查看降级为“存在笔迹”的文字说明。
-- PWA 无扩展路径暂保留服务端 SDP 代理作为兼容回退；不能据此把 App/扩展媒体重新绕回 Pi。
+- 服务端 SDP 代理(`/api/assistant/rtc-client-secret`、`/api/assistant/rtc-call`,assistant.py:10434/10518)仍在,供**没有 App 原生桥的浏览器表面**兼容回退(前端调用点 rc-voicecall.js:8057/8221);原文说的「PWA 无扩展路径」已不存在——PWA 阅读器页面返 410。不能据此把 App/扩展媒体重新绕回 Pi。
 
 ## 一、注入种类 × 路 对照表
 
@@ -36,7 +36,7 @@
 | 圈画 ink | ✅ ikHint 提示 see_ink(:2841);system 注入**归 relay** | ✅ 510 状态事件 `_state_event_text` L418 | ✅ `ctx.ink` + `_text_under_ink`:5011 | 已知哑路教训(:1925 dc 直发从没落地),现分工明确,不算坑 |
 | 选中 sel / focus / figs_n | sel 注入归 relay;⚠ focus/figs **rtc-ctl 分支不消费** | ✅ 三字段 L3557-3566 | ✅ `ctx.selection`+focus_sel chip | ⚠ 统一上行时 focus/figs 在 rtc-ctl/openai 分支静默丢 |
 | 长按带入 pins | ✅ `_pinSync`:1121 覆盖式+fp | ⚠ **无**(syncState 只上 sel/focus/figs,pins 不上行) | ✅ `ctx.pinned`:1849 每轮快照 | ⚠⚠ 豆包路模型不知道带入了什么;dc 路 **fp 在 `!_rtc.on` 早退前推进**(:1127)→通话外改 pin 下通电话漏快照 |
-| 配图✕删除通告 | ✅ `_imgGoneNote`:1200(dc open 才发) | ⚠ **无** | ⚠ **无——`__vcRemovedImgs` 环全仓零消费者(死代码)** | ⚠⚠⚠ 今天这类 bug 的典型:文字路 AI 永远不知道删过图;dc 未 open 也丢,「环里留底」没人读 |
+| 配图✕删除通告 | ✅ 已改走 `RC.voiceCtx.event('removed_imgs')`(rc-voicecall.js:3048) | ⚠ **无**(豆包 `handle_browser` 仍无 `note` 分支,只有 openai-WS 分支有,voice_realtime_relay.py:2073) | ✅ 已补:`drainForSend()` → `ctx.announcements` → `assistant.py::_announce_lines`(6572) | ✅ 原「`__vcRemovedImgs` 死环」已修:该符号全仓已不存在,文字路不再丢删图信息 |
 | 创造物告知 creations | ✅ rcHint:2832,15s SWR | ⚠ **无**(SP 只有工具目录,无 creations-brief) | ✅ 同源 `_creations_recent_line` | ⚠ 豆包路 recall_creation 无句柄可指 |
 | 工具结果喂回 | ✅ function_call_output:3111,预算精简 | ✅ 502 external_rag L855,slim 管线 | ➖ agent 循环原生 | 机制各异但均有;精简规则(cards_brief/found_brief/截断)**三处重复实现** ⚠ |
 | recent_tools 制卡语境 | ✅ :3098 环6条 | ✅ 随 voice-tool ctx | ⚠ **send 不上送**,制卡资料退化为最近6轮文本 | ⚠ 已知不对称 |

@@ -308,6 +308,7 @@ def check_collab(paths) -> list[Finding]:
 # ── 7. 行内重复片段（防我自己批量改文档时改坏） ────────────────────────
 _SCAN_ALL = False   # --all 打开；默认只看本次改动的行
 _LINK_SELF = re.compile(r"\[`?([^\]`]+)`?\]\(\1\)")   # [`x`](x) 天然重复
+_CJK = re.compile(r"[一-鿿]")   # 真坏行重复的是中文散文，不是路径
 _SENT_PUNCT = re.compile(r"[。，：；、！？]")
 
 
@@ -346,6 +347,8 @@ def check_duplicated_span(paths) -> list[Finding]:
             continue                       # 不是这次改的，历史重复不归它管
         stripped = _LINK_SELF.sub("", line)
         is_table = line.strip().startswith("|")
+        # 开头出现重复的列表/引用记号（`- - **`、`> - > - `），是拼接事故的硬证据
+        doubled_marker = bool(re.match(r"\s*(?:[-*>]\s+){2,}", line))
         widths = (40,) if is_table else (26,)
         hit = None
         for width in widths:
@@ -357,6 +360,13 @@ def check_duplicated_span(paths) -> list[Finding]:
                     continue
                 if is_table and "|" not in frag:
                     continue      # 表格里只有整段单元格序列被复制才算症状
+                # ⚠ 真坏行重复的是**中文散文**；正常文档里重复的是标识符和路径
+                # （同一句里提两次同一个脚本、两个共享后缀的函数名 …）。
+                # 2026-08-19 第二轮审计实测：不加这一条会误报 4 处，全是后者。
+                # 那 4 行已进夹具对照组。唯一的例外是开头记号被复制的行 ——
+                # 那种即使重复的是纯 ASCII 路径列表也确凿是事故。
+                if not doubled_marker and not _CJK.search(frag):
+                    continue
                 hit = frag
                 break
             if hit:

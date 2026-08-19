@@ -32,3 +32,15 @@
 |---|---|---|
 | `/pdf/api/highlights` | 高亮 CRUD | local |
 | `/pdf/api/notes` | 便签 CRUD | local |
+
+### 真实误报（2026-08-19 第二轮审计跑出来的 4 条，全部经人工确认是正常写法：
+同一路径在一句里出现两次、两个共享后缀的函数名。判据调整后这些**必须不被报**）
+
+- ⚠ **前端 `_server_deploy/static/pdf/*`**（`reader.js`+`reader.src/*.js` 源、`rc-*.js` 共享控制层、`pdf-adapter.js`/`epub-html.js` 各 adapter、`rc-userpages.js`/`rc-favorites.js`/`rc-stickynote.js`、`native-local-runtime.js` 等）有**三条互不相干的分发路径**：① 桌面/旧网页表面由 nginx(443) 从 `/var/www/html/static/pdf/` 服务（`immutable` 缓存），`127.0.0.1:5000` 的 Flask `/static/` 是**陈旧副本**，改前端要到桌面表面必须 `bash scripts/deploy_reader.sh` 部署到 nginx 静态目录，直连 :5000 看到的是旧的；② **App 不走 nginx** —— 同一批文件被 `ios/BWReader/package_local_reader.py` 烤进 ReaderBundle 随包发，要到 iPad 只能出 TestFlight 新构建；③ **浏览器扩展也不走 nginx** —— 它按 `manifest.json` 加载自带副本 `extensions/bw-reader-webext/vendor/rc-*.js`（由 `extensions/bw-reader-webext/build.py` 从这批源文件生成），要到扩展必须重跑 build.py 再打包，部署 nginx 对扩展无效。
+
+- `scripts/daily_anki_status.py::main` 现在跑 **22 步**（2026-08-19 核实；开头另有总开关 `server-config` 的 `daily.enabled`，false 则 timer 照常触发但脚本 `write_run("skipped")` 空跑退出）。下面这份编号列表是 2026-05 的旧子集，**权威流程直接读 `scripts/daily_anki_status.py::main`**——它比下表多出：通用语停用词 / 停用词复活赛（受 `stopword_gov.enabled`、`ai_judge` 控制）、领域词典 / 融合权重学习 / 跨语言概念归一（`attention_profile.py --domain-dict|--fit|--concepts`）、学习近况（`learning_situations.py --daily`）、错误模式元画像（`error_meta_profile.py --gen`）；概念网三步已拆到独立的 `concept-graph.timer`（02:30）：
+
+- **更新到笔记**：POST `/api/card-update` `{target:'note', verbosity:'verbose'|'concise'}` → 后台 `_prepare_legacy_card_draft()`（qa_browser.py:1122）**只出草稿、一个字都不写盘** → 前端渲染「草稿预览（尚未写入）」→ 用户确认后 POST `/api/card-update-commit` → `_commit_legacy_card_draft()`（qa_browser.py:1343）才真正改写源笔记
+
+该文件在 `scripts/reader_deploy_manifest.py` 清单内(dest `webapp/voice_realtime_relay.py`),**必须走 `scripts/deploy_reader.sh`**——脚本自带原子安装、`assert_voice_runtime_stable` 稳定性检查,并在装完断言 `systemctl cat voice-rt` 的 ExecStart 指向 `/home/bwicarus/webapp/voice_realtime_relay.py`(deploy_reader.sh:1493);不要手工 `cp` + `sudo systemctl restart voice-rt`。⚠ 重启会掐断进行中的通话,发布前仍需自行确认当前无人在通话中(原文引用的 `[[restart-voice-rt-check-active-call]]` 程序化 gate 全仓查无此物,是悬空链接,别指望它挡)。
+

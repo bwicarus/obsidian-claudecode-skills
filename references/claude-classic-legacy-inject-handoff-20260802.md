@@ -1,5 +1,7 @@
 # GPT Classic legacy-inject 接管交接（2026-08-02 17:45 JST）
 
+> ⚠ **2026-08-02 时点交接（当时安装桥 0.1.56），勿据其推断现状**：文中交出去的「首个必败点＝Classic 粘贴回读校验」与「建议改用 UIA 读回绕开剪贴板序列化」已经落地 —— `typist-runtime/voice_typist.py` 现有 `read_composer_value()` 与 `classic_paste_verified_via_uia` / `classic_paste_readback_diff` 事件（2026-08-03 `a14e7e2b`「修通 GPT Classic 电脑客户端语音冷启动与启停」）；桥候选已到 `windows/candidates/0.1.159`，语音开关的启停链路又在 2026-08-17/18 被整体重做（`cd2f6081`「重做「打开与保持」」等）。文末「按 Codex 的安排接手、完工经 BWAB 回报 Codex」的分工已于 2026-08-16 作废（全部工程归 Claude）。现行边界见 CLAUDE.md「工程所有权」。
+
 ## 用户要求与当前边界
 
 - 用户明确要求：把 GPT Classic 旧版文字注入的剩余故障交给 Claude 修改。

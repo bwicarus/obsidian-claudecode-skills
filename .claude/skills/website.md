@@ -37,7 +37,7 @@
 
 ```
 C:\claude\
-  _server_deploy\                  ← Flask 多用户应用源码（部署 = 纯 cp 到 /root/webapp/）
+  _server_deploy\                  ← Flask 多用户应用源码（清单内文件走 scripts/deploy_reader.sh；清单外才手工 cp 到 Pi 的 /home/bwicarus/webapp/）
     app.py                         ← 路由、登录、邀请码注册、/api/upload
     control.py / skilltree.py / pdf_reader.py / insights.py / fitness*.py ...
     templates\                     ← login / control / skilltree / pdf / fitness 模板
@@ -114,7 +114,7 @@ Session 有效期 30 天（`permanent_session_lifetime`）。
 - VPS：改 `_server_deploy/nginx/bwicarus.conf`，部署到 `/etc/nginx/sites-enabled/default`
 - Pi：**手工 patch** `/etc/nginx/sites-available/bwicarus` 对应 server 块（Tailscale 证书配置，**绝不可用 git 版 cp 覆盖**）
 
-**④ 部署（源码全在 git，部署 = 纯 cp）：**
+**④ 部署（源码全在 git；清单内走 `deploy_reader.sh`，清单外才 cp）：**
 ```bash
 # 服务器上（VPS=/root，Pi=/home/bwicarus）
 git -C <项目根> pull
@@ -167,7 +167,7 @@ Write-Host "Obsidian: $obsidianRunning  Anki: $ankiRunning"
 - **服务器侧自动**：daily（01:00）和 `anki-sync-refresh.timer`（15min）跑完 export 后直接 cp 到 `<webapp>/data/users/bwicarus/dashboard/`（`WEBAPP_DASHBOARD_DIR`，见 `scripts/daily_anki_status.py` / `anki_sync_refresh.py`）
 - **手动等价**（服务器上）：`cp dashboard/{dashboard.json,index.html} <webapp>/data/users/bwicarus/dashboard/`
 
-### 登录页 / Flask 代码改动（源码全在 git，部署 = 纯 cp）
+### 登录页 / Flask 代码改动（源码全在 git；清单内走 `deploy_reader.sh`，清单外才 cp）
 ```bash
 # 本地改 _server_deploy/... → git push；然后在服务器上：
 git -C <项目根> pull
@@ -184,7 +184,7 @@ sudo nginx -t && sudo systemctl restart nginx   # 新增 location 用 restart，
 
 ### 新增公开静态页
 ```powershell
-scp "本地\page.html" root@31.220.31.30:/var/www/html/
+scp "本地\page.html" pi:/var/www/html/          # 目标是 Pi；VPS 31.220.31.30 自 2026-06-10 暂停，别再往那推
 ```
 
 ---
@@ -192,9 +192,9 @@ scp "本地\page.html" root@31.220.31.30:/var/www/html/
 ## Flask 服务管理
 
 ```bash
-ssh root@31.220.31.30 "systemctl status webapp"   # 查看状态
-ssh root@31.220.31.30 "systemctl restart webapp"  # 重启
-ssh root@31.220.31.30 "journalctl -u webapp -n 30 --no-pager"  # 查日志
+ssh pi "systemctl status webapp"   # 查看状态（Pi 是唯一活跃实例；VPS 31.220.31.30 已暂停）
+ssh pi "systemctl restart webapp"  # 重启
+ssh pi "journalctl -u webapp -n 30 --no-pager"  # 查日志
 ```
 
 ---

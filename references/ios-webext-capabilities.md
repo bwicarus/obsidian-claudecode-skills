@@ -4,7 +4,7 @@
 > 本文是 5 路并行调研(developer.apple.com / webkit.org 一手来源优先)的落地结论,
 > 指导「本地 PDF」「语音直连」「扩展架构」三大决策。标 ⚠ 的是真机必验项。
 
-## 一、本地 PDF 存哪层(定案:主屏 PWA 为主层)
+## 一、本地 PDF 存哪层(⚠ 原定案「主屏 PWA 为主层」已作废:PWA 阅读器页面整体退役返 410,阅读器改由 iOS App 本地渲染的 ReaderBundle 承载;下表只当 iOS 各存储层的平台事实速查,别当选型结论)
 
 | 层 | 配额 | 清除风险 | 判定 |
 |---|---|---|---|
@@ -15,7 +15,7 @@
 | **原生容器 App(App Group/Documents)** | 无 web 配额,仅设备空间 | **零系统主动清除**(Offload 也保留 data) | ✅ 后备/升级层。经 `sendNativeMessage`→`beginRequest` 中转喂扩展(≤64MB/条,分块;⚠吞吐待真机实测) |
 
 **主屏 PWA 实施要点**:字节存 OPFS(iOS 15.2+,写文件须 Worker+`createSyncAccessHandle`;`createWritable` 要 Safari 26)或 Cache Storage;开机调 `persist()` 并在 UI 显示 `estimate()/persisted()` 状态;**Safari 与主屏 PWA 存储不互通**(加主屏只拷 cookies)。App 安装形态以本机书库和 sidecar 为 source of truth；Pi 只做显式同步/备份，不能成为打开本机书的前置。
-**原生层红线**:用户经 document picker 授权的目录 bookmark **在扩展里 resolve 不了**(iOS 无 .withSecurityScope)→ 文件必须物理搬进 App Group,不能原位引用;iOS 容器 App 不能主动推消息给扩展 JS(macOS-only),只能扩展拉。
+**原生层红线**:用户经 document picker 授权的目录 bookmark **在扩展里 resolve 不了**(iOS 无 .withSecurityScope);但**容器 App 自己 resolve 得了**——现役实现就是存 bookmark 后 `startAccessingSecurityScopedResource()` **原位读**(`ios/BWReader/App/ReaderLocalLibrary.swift:181-210`,本机书标识 `localbook:`),**并没有**把文件物理搬进 App Group;iOS 容器 App 不能主动推消息给扩展 JS(macOS-only),只能扩展拉。
 
 ## 二、语音直连矩阵(修正版)
 
@@ -36,7 +36,7 @@
 - **downloads API 不存在**(Safari 全平台无此 API)→ "保存文件"用页面侧 Blob+`<a download>`(用户手势)或原生容器。
 - 消息上限 64MB/条;iOS 页面内存墙 ~100-200MB(超了直接杀无回调)→ 大文件按页/块流转,用后即弃。
 - `beginRequest` 真机 ~5% 挂起 → JS 侧超时+重试,handler 幂等。
-- 所有重要状态可从 Pi 重建(清历史连坐/schema 迁移事故都发生过)。
+- ⚠ **已作废**:高亮/笔记/词组/阅读位置的权威在 **App 本地**(`scripts/where_does_this_route_run.py /pdf/api/highlights` → owner=local + 有本地分支),Pi 只在同步中继时经手,不能假设「所有重要状态可从 Pi 重建」。扩展侧的 token/设置仍应当可丢缓存对待(清历史连坐/schema 迁移事故都发生过)。
 - 审核:容器 App 别做纯空壳(4.2 最低功能),放书库管理/设置页即可;TestFlight 阶段无碍。
 - ⚠ 真机首验清单:①扩展 origin 跨 Safari 重启稳定性;②unlimitedStorage 实际生效量;③清历史/放置7天后 storage.local 与 IDB 存活;④OPFS 扩展页内可用性;⑤native messaging 吞吐。
 
@@ -46,5 +46,5 @@
   页面/选区/笔迹/合成图/本机笔记均不经 Pi。没有 App 原生桥的客户端才使用兼容 relay。
 - **CLI/API 型 AI**:制卡、联网搜索、深度思考、后台任务、造纸和长文生成可按需访问 Pi；它们
   是可选工具而非 App 前置。能在 App 内完成的笔记、书籍状态、设置与修改不得走这个通道。
-- **PDF 本地化**:阅读器 PWA 离线化(主屏+OPFS+persist),扩展不掺和(Safari 原生 PDF 预览不跑 content script,本地书必须经自家阅读器打开)。
-- **扩展**:学习功能透镜(查词/翻译/助手/制卡),重活全甩 Pi。
+- **PDF 本地化**(路线已换):不走 PWA 离线化,而是 `ios/BWReader/package_local_reader.py` 把阅读器烤成 ReaderBundle 随 App 包发(运行时零下载,环回 `127.0.0.1` 供壳),本机书走 `localbook:` + security-scoped bookmark 原位读;扩展不掺和(Safari 原生 PDF 预览不跑 content script,本地书必须经自家阅读器打开)。
+- **扩展**:学习功能透镜(查词/翻译/助手/制卡)。⚠ 「重活全甩 Pi」已不成立——Safari 扩展与 App 同包、经 native messaging 拿 App 的能力,与 PC 的联系也走 App;Pi 只负责「把 Claude/Codex CLI 抽象成 AI 的 HTTP API」和设备间同步中继这两件事。

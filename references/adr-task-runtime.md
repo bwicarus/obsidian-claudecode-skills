@@ -87,7 +87,7 @@ AI(一次调用) → 生成 words[] + 起一个 run
    → 必须有 `GET /pdf/api/run-status?rid=`,前端 **visibilitychange 回前台时拉状态机对齐**,不能只靠推送。
 2. **iOS AudioContext 必须在点击手势的同步栈内 warm**(`window.__vcTtsWarm()`,rc-voicecall.js:1936)
    → 听写「开始」按钮**必须**调它,否则 iOS 上无声。
-3. `html_reader.html` **没有引 rc-voicecall.js** → HTML 阅读器里没有 `__vcSpeakText`。**先只做 PDF。**
+3. ~~`html_reader.html` 没有引 rc-voicecall.js~~ **已过时**:它现在引了(html_reader.html:223),`__vcSpeakText`(rc-voicecall.js:4855)在 HTML 阅读器里也有。仍**先只做 PDF** 的真实理由是块渲染器 `pdf-uishared.js` 只挂在 pdf_reader.html:597。
 
 ### 3.3 存储:文件驱动,照抄 preprocess 范式
 
@@ -149,7 +149,7 @@ webapp 一重启就丢,且**没有"挂起等待用户事件"这个状态**。
 |---|---|---|
 | 1 | **新建 `_server_deploy/task_runtime.py`** | 状态机:`start(kind, params, ctx)` / `advance(rid, event)` / `status(rid)`;文件驱动 |
 | 2 | `pdf_reader.py` 新路由 | `POST /pdf/api/run-event {rid, event}`(按钮回执)· `GET /pdf/api/run-status?rid=`(回前台对齐)<br>⚠ 挂 `/pdf` 前缀 → 自动进 `PROTECTED_PREFIXES`(app.py:349)拿到 session+Bearer 双认证 |
-| 3 | `pdf_reader.py` `pdf_api_userpages` PATCH 白名单(:6067-6081) | 放行 `blocks` / `kind` / `run_id`(现在只认 `title/md/after/h`,**没列进去的字段会被静默丢掉**) |
+| 3 | `pdf_reader.py` `pdf_api_userpages` PATCH 白名单 | ✅ `blocks` 已放行(pdf_reader.py:11817,**仅 `mode=="overlay"` 的真插入页分支**);`kind`/`run_id` **至今不在白名单** —— 由 task_runtime 服务端直接写 sidecar(task_runtime.py:149-155),不走 PATCH。**没列进去的字段仍会被静默丢掉** |
 | 4 | `static/pdf/pdf-uishared.js` `_upRenderOverlay`(:721) | `if (rec.blocks) renderBlocks(body, rec) else 原 md 路径`;button/checkbox 点击 → `POST /pdf/api/run-event`<br>⚠ 覆盖层拦手势用**冒泡非捕获**(memory `overlay-gate-use-bubble-not-capture`:捕获阶段 stopPropagation 会吞掉内部按钮事件) |
 | 5 | `assistant.py` `TOOLS`(:2970) | 加 `start_dictation`(生成 words + 起 run)。**唯一注册表** → 侧栏/语音/MCP **自动全都有** |
 | 6 | `assistant.py` `_tool_label`(:3061) | 中文名 |
@@ -171,8 +171,8 @@ webapp 一重启就丢,且**没有"挂起等待用户事件"这个状态**。
 - **不复用 `_task_sema`**(voice.py:694 的 `Semaphore(2)`,**阻塞排队**)。听写要等你写完 N 个词,
   占着它会把制卡/笔记全堵死。
 - **不复用 `RC.toolChip.track`**(rc-toolchip.js:748:240 次 × 1.2s ≈ **5 分钟就 fail**)。远不够。
-- **先只做 PDF**。EPUB 插入页是虚拟段(`.ep-usec`)、坐标系不同;HTML 阅读器连 `__vcSpeakText` 都没有。
-- **不做通用配方系统**。先把听写这一个场景端到端跑通(它把四层全用上),再抽象。
+- **先只做 PDF**。EPUB 插入页是虚拟段(`.ep-usec`)、坐标系不同;HTML 阅读器虽已有 `__vcSpeakText`(html_reader.html:223 引了 rc-voicecall.js),但不加载块渲染器 `pdf-uishared.js`。
+- ~~**不做通用配方系统**~~ **已反转**:通用声明式配方系统在阶段 C 落地 —— `task_runtime.py` 的 `RECIPES`(:1077)/`validate_flow`(:872)/`_recipe_tick`(:910)/`_PROGRAMS` 含 `recipe`(:1071)/`RECIPES_DIR=state/recipes`(:1098)/按 `_flow_signature` 合并(:1281);上层入口 `save_intent_tool` / `run_saved_task`(assistant.py:4794/4823)。⚠ 但**听写本身没搬过去**:`RECIPES["dictation"]` 只是声明式样板,生产入口 `start_dictation`(assistant.py:4940)仍发 `kind:"dictation"` → 硬编码的 `_dictation_tick`(task_runtime.py:214)。
 
 ---
 

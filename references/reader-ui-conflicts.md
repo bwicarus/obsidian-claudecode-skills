@@ -1,6 +1,6 @@
 # 阅读器共享视觉：组件与冲突登记
 
-目标是让普通网页扩展、真书 PWA fallback、真书 PWA + 扩展共用唯一视觉令牌与 UI 组件。
+目标是让普通网页扩展与 iOS App 本地 Reader（`ios/BWReader` 的 ReaderBundle）共用唯一视觉令牌与 UI 组件；文中的「真书 PWA fallback」「真书 PWA + 扩展」两类表面按 2026-08-18 产品边界不再投入（`/pdf/`、`/pdf/search`、`/pdf/epub/view`、`/pdf/fav/view` 已返回 410，见 `_server_deploy/reader_pwa_retirement.py`），只作历史契约保留。
 普通网页由扩展渲染；真书无扩展时由 PWA 渲染；真书有扩展时扩展是唯一可见共享 UI，PWA
 保留 renderer 与 DocumentHost。各宿主仍负责坐标、锚点和内容投影，视觉迁移也遵守
 “不擅自放弃差异功能”。
@@ -24,5 +24,5 @@
 | 滚动条与对话轮次导航 | equivalent | 阅读 UI 内的视觉与交互可共享 | 宿主网页自身滚动条不改 |
 
 迁移门禁：以上 1A/2A/3A/4B/5V/6A 是已经确认的统一标准；其余未登记冲突仍需对照
-普通 Web 扩展、PDF/EPUB/HTML/Favorite 的 PWA fallback 与扩展 takeover，不能为了复用代码
+普通 Web 扩展与 iOS App 本地 Reader（ReaderBundle）这两类现役表面（PDF/EPUB/HTML/Favorite 的 PWA fallback 与扩展 takeover 按 2026-08-18 产品边界不再投入：`/pdf/epub/view` 已返回 410，其余路由虽仍在服务也不再纳入回归），不能为了复用代码
 自行删掉任一宿主已有能力。普通网页扩展视觉是正式产品回归范围。

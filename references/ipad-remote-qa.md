@@ -9,7 +9,7 @@ http://<Tailscale-IP>:9090/qa?key=<cmd_server_API_KEY>
    ↓ cmd_server 收到，body 是 {image_b64: "..."} 或纯 base64
 cmd_server 转发到 daemon /api/inject-image
    ↓
-qa_browser daemon 解码 → 自动转 PNG（含 HEIC）→ 写到 %LOCALAPPDATA%\bwicarus-client\qa-temp\remote-<ts>.png
+qa_browser daemon 解码 → 自动转 PNG（含 HEIC）→ 写到 <paths.app_dir()>/qa-temp/remote-<ts>.png（Pi 实例=state/qa-server-data/qa-temp/，由 systemd BWICARUS_APP_DIR 指定；Windows 客户端才是 %LOCALAPPDATA%\bwicarus-client\qa-temp\）
    ↓ 注入 state["img_b64"/"img_fname"/"temp_path"]，session.reset()
 
 [iPad 切到 Safari]
@@ -114,7 +114,7 @@ QA 页的 MathJax / marked 不走 jsdelivr CDN（公网/隐私考虑），由 ng
 `/var/www/html/static/qa/` 提供（VPS 同名路径）。
 
 **现状（2026-05-31 核实）**：URL 现在**直接硬编码**在 `_client/core/qa_browser.py`
-（约 1592-1593 行），是协议相对的自托管地址、且已是 SVG 版：
+（约 2093-2094 行，行号会漂，直接 `grep -n static/qa/mathjax.js _client/core/qa_browser.py`），是协议相对的自托管地址、且已是 SVG 版：
 
 ```html
 <script src="//bwicarus.taile44d0c.ts.net/static/qa/mathjax.js?v=svg1" async id="MathJax-script"></script>
@@ -124,9 +124,9 @@ QA 页的 MathJax / marked 不走 jsdelivr CDN（公网/隐私考虑），由 ng
 源码里已经 grep 不到任何 `jsdelivr` / `tex-chtml` 字串。
 
 **注意（systemd sed 已成 no-op）**：`references/systemd/qa-server.service`
-（VPS 版）的 ExecStartPre 仍有两条 sed，想把
+（⚠ 仓库里这份其实是 **Pi 版**：`Description=…(Pi 侧)`、`User=bwicarus`、路径全为 `/home/bwicarus/claude`，仓库内没有 VPS 版副本）的 ExecStartPre 仍有两条 sed，想把
 `https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js` /
-`.../marked@9/marked.min.js` 替换成 `bwicarus.space/static/qa/...`。但这两个
+`.../marked@9/marked.min.js` 替换成 `http://bwicarus.taile44d0c.ts.net/static/qa/...`（**不是** `bwicarus.space`——那是 VPS 上那份的写法）。但这两个
 **目标字串源码里早已不存在**，sed 现在每次都命中 0 处、纯属历史遗留兜底（可删）。
 
 **两实例 host 不一致**：源码硬编码的是 **Pi** 的 `bwicarus.taile44d0c.ts.net`

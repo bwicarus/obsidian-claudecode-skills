@@ -1,5 +1,7 @@
 # 旧版文字注入双目标可用性复核（2026-08-02 JST）
 
+> ⚠ **2026-08-02 的一次只读复核委托，勿据其推断现状**：文中的现场坐标已全部过期 —— 已安装桥 0.1.50（现候选 `windows/candidates/0.1.159`）、共享检出停在 `learning-loop-review-fixes@6b3080e`（该分支已于 2026-07-29 推送并成为主线，领先 `origin/main` 497 提交，见 `references/cross-machine-dev-setup.md:142`）、以及「本地 `rc-voicecall.js` 尚无 `appKind` 目标选择」这个临时差异。它要复核的两个阻塞点此后都有了答案：Classic 的粘贴回读改由 UIA 兜底（`voice_typist.py` 的 `classic_paste_verified_via_uia`，2026-08-03 `a14e7e2b`）。文末「回报 Codex、不要联系其他 AI」的协作约定也已被 BWAB 取代（见 `references/agent-collaboration.md`）。
+
 ## 用户目标
 
 请 Claude **只读复核**旧版文字注入当前是否真的可用于两个电脑客户端目标：

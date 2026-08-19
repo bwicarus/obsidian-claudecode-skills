@@ -1,6 +1,6 @@
 # 阅读器共享运行时：冲突与迁移登记
 
-目标是让普通网页扩展、真书 PWA fallback、真书 PWA + 扩展尽量共用上层语义、组件和接口，
+目标是让普通网页扩展与 iOS App 本地 Reader（`ios/BWReader` 的 ReaderBundle）尽量共用上层语义、组件和接口（下表中的「真书 PWA fallback」「真书 PWA + 扩展」两类表面按 2026-08-18 产品边界不再投入：`/pdf/`、`/pdf/search`、`/pdf/epub/view`、`/pdf/fav/view` 已返回 410，见 `_server_deploy/reader_pwa_retirement.py`；`/pdf/view`、`/pdf/html/view`、`/pdf/fav/open` 仍在服务，但只作历史契约保留），
 同时保留 PDF、EPUB、导入 HTML 与普通网页必然不同的宿主实现。整合不以删减功能为手段。
 
 架构基线见 `reader-runtime-architecture.md`。状态含义：
@@ -17,7 +17,7 @@
 
 | 功能 | 状态 | 已确认共享部分 | 保留的差异/未完成项 |
 |---|---|---|---|
-| 产品入口 | decided | 普通网页只由扩展实现；PWA 只承载 PDF/EPUB/HTML/Markdown/Favorite 真书 | 旧 PWA web/proxy/RBI 已备份并退役，不得恢复 |
+| 产品入口 | decided | 正式交付表面只有 iOS App 与浏览器扩展；PWA 阅读器页面已于 2026-08-14 退役（`/pdf/`、`/pdf/search`、`/pdf/epub/view`、`/pdf/fav/view` 返回 410，见 `_server_deploy/reader_pwa_retirement.py`） | 旧 PWA web/proxy/RBI 已备份并退役，不得恢复；也不得再为 PWA 表面做兼容取舍 |
 | UI 所有权 | adapter | 共用视觉令牌、组件和动作契约 | 普通网页=扩展；真书无扩展=PWA；真书有扩展=扩展 Shell。PWA 只在 TAKEOVER 后隐藏重复 UI，断线恢复 |
 | 文档统一端口 | adapter | selection/content/location/read/navigate/search/highlight 等统一语义 | PDF 页几何、EPUB offset、HTML 文档锚、Web quote/DOM 锚必须保持私有 |
 | PWA 真书 RPC | adapter | `book-host/1` + `bw-reader-pwa/1`；两阶段接管、心跳、GOODBYE | 每种书的 capability 与 payload 仍须逐项真机验证，缺失时 fail closed |
@@ -27,7 +27,7 @@
 | 设置权威 | equivalent | 有扩展时扩展本地设置跨站权威；无扩展真书用 PWA fallback | 新增键仍须逐键决定 global/document/device/session，不能按前缀整包迁移 |
 | 当前账户 | equivalent | PWA session 验证账户；扩展保存最后一次已验证 namespace，普通网页不依赖 PWA 常开 | namespace 只隔离数据库，不代替 token/授权 |
 | API token | equivalent | 后台私有 IndexedDB，内容脚本不可读 | 旧裸 token 只保留无明文审计存根，不自动传播 |
-| 跨设备数据同步与命令补投 | conflict | SyncGateway 交换 DataStore changes；CommandOutbox 重试固定业务命令 | 两者不能互相导入；服务端 cursor/去重/冲突 UI 尚未完整实现 |
+| 跨设备数据同步与命令补投 | conflict | SyncGateway 交换 DataStore changes；CommandOutbox 重试固定业务命令 | 两者不能互相导入；服务端 relay 已落地（`_server_deploy/reader_sync_relay.py`：server cursor、`direct_signal_dedupe` 去重、显式 revision 冲突、`/api/reader/sync/snapshot` 恢复快照），仍缺的是冲突 UI |
 | 旧浏览器本地实体 | pending | 旧 pins/highlights/ink 不删除 | pins/highlights 如何无损认领仍待盘点；历史 `webInkV1` 保留但新 stroke 不再写 |
 | 普通网页绘图 | decided | 工具和笔/橡皮状态机可共享 | 响应式重排使持久坐标失效，新墨迹只存当前标签页会话 |
 | 真书绘图 | adapter | 共享工具意图和 Apple Pencil/触摸规则 | stroke 坐标和持久化归 PWA 各书籍 surface，不受网页 session-only 规则影响 |
@@ -48,7 +48,7 @@
 | 顶部栏 | adapter | 4B 可收起、统一按钮组件、capability 驱动 | 真书显示页码/缩放/裁边等；普通网页只显示真实支持项 |
 | 网络执行器 | pending | 固定 operation + schema + 超时/大小限制 | 旧模块仍有多条请求路径；不能用一个任意 URL/method operation 假装统一 |
 | 派生缓存 | adapter | 按账户隔离的 query/translation/dictionary cache | TTL、容量、退出保留和 PWA fallback 收束仍待逐类决定 |
-| 服务器旧实体分区 | 首批完成 / 更广 pending | reading-pos、phrases、notes、PDF/EPUB/HTML highlights、entity/assets 已按 uid+namespace 分区并通过恢复/隔离测试 | deferred-owned 域和统一 mutation ledger 未完成；不得宣称整个数据层完成 |
+| 服务器旧实体分区 | 首批完成 / 更广 pending | reading-pos、phrases、notes、PDF/EPUB/HTML highlights、entity/assets 已按 uid+namespace 分区并通过恢复/隔离测试；ink（`pdf-ink`/`epub-ink`）与 `reader-userpages` 随后也已进入 `reader_sidecar_store.LEGACY_DATASETS` | 其余 deferred-owned 域和统一 mutation ledger 未完成；不得宣称整个数据层完成 |
 
 ## Anchor 不透明边界
 
@@ -71,7 +71,7 @@
 未来账户为空；身份或校验歧义 fail closed；稳定 card/entity/asset ID 与引用不重编号。
 
 首批已覆盖 reading-pos、phrases、notes、PDF/EPUB/HTML highlights、entity/assets。
-vocab/Anki、conversation、attention、ink、favorites、userpages 等 deferred-owned 域继续原功能，
+ink 与 userpages 已纳入 `reader_sidecar_store.LEGACY_DATASETS`（`pdf-ink`/`epub-ink`/`reader-userpages`）；仅剩 vocab/Anki、conversation、attention、favorites 等 deferred-owned 域继续原功能，
 之后逐域无损迁移。
 
 ## 尚待用户决定
@@ -91,6 +91,6 @@ vocab/Anki、conversation、attention、ink、favorites、userpages 等 deferred
 1. 迁移前用测试固定现有行为。
 2. `conflict` / `pending` 只能加 adapter、capability 或兼容读取，不能删除实现。
 3. 默认行为、数据格式或物理归属改变前更新本表；冲突项先让用户决定。
-4. 回归矩阵覆盖普通 Web 扩展、四类 PWA fallback、四类 PWA takeover。
+4. 回归矩阵覆盖普通 Web 扩展与 iOS App 本地 Reader（ReaderBundle）两类现役表面；PWA fallback / takeover 按 2026-08-18 产品边界不再投入（`/pdf/epub/view`、`/pdf/fav/view` 已返回 410，`/pdf/view`、`/pdf/html/view`、`/pdf/fav/open` 虽仍在服务也不再纳入回归），只在核对历史契约时参考。
 5. capability 缺失时 fail closed；“按钮能点但什么也没做”不算兼容。
 6. 网页绘图 session-only 是已确认决定；不得据此删除旧数据或改动真书墨迹。

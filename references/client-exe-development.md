@@ -46,6 +46,9 @@ bwicarus-client.exe (PyInstaller --onefile, ~33MB)
 | `_client/core/auth.py` | device-link OAuth |
 | `_client/core/screenshot.py` | 全屏截图工具（PIL ImageGrab → PNG bytes，`capture_full_screen()`） |
 | `_client/core/task_state.py` | 只读主项目 `state/active_tasks.json`（task_tracker 写），给悬浮窗当数据源 |
+| `_client/core/card_improvement_service.py` | 卡片改进共享层（`CardReference` 解析 / prompt 构造 / 草稿解析），`qa_browser.py:16` 顶层硬 import |
+
+> ⚠ **这两个文件已不只是客户端代码**：`card_improvement_service.py` 与 `ai_backends.py` 都在 `scripts/reader_deploy_manifest.py` 清单里（分别装到 webapp 和 kg_runtime），改完必须走 `scripts/deploy_reader.sh`，不能只当作随 core zip 发的客户端文件。
 
 > ⚠️ **build/deploy 脚本不在仓库**：`_client/` 下当前只有 `core/` 和 `launcher/` 两个目录（外加 `README.md`），**没有 `_client/build/` 目录**。早期文档提到的 `build_core.py` / `build_launcher.py` / `deploy_core.sh` / `bwicarus-client.spec` 全仓库找不到。core zip / manifest.json 的生成与部署方式目前在仓库里无迹可寻（疑似手工或在另一台机器上做），下文「改 core / 改 launcher / 发布新版」的命令示例属于 **理想流程，并不能照搬执行**——动手前需先确认真实打包脚本所在。`_client/README.md` 也引用了同一批不存在的脚本。
 
@@ -64,7 +67,7 @@ python build/build_core.py        # ← 该脚本仓库里不存在
 
 # 4. 部署到服务器（脚本缺失）
 bash build/deploy_core.sh         # ← 该脚本仓库里不存在
-# 或手动：scp dist/client/* root@bwicarus.space:/var/www/html/static/client/
+# 或手动：scp dist/client/* pi:/tmp/ && ssh pi 'sudo install -m 644 /tmp/core-*.zip /tmp/manifest.json /var/www/html/static/client/'   # Pi（ssh 别名 pi，登录用户 bwicarus，写 /var/www 需 sudo）；root@bwicarus.space 是 2026-06-10 起暂停的 VPS
 
 # 5. 客户端下次启动自动拉新版（用户不用操作）
 ```
@@ -84,7 +87,7 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe \
     --workpath build \
     launcher/main.py        # 或自备 .spec
 # 部署到服务器（用户下次「下载客户端」时拿到新 .exe）
-scp dist/bwicarus-client.exe root@bwicarus.space:/var/www/html/static/client/
+scp dist/bwicarus-client.exe pi:/tmp/ && ssh pi 'sudo install -m 644 /tmp/bwicarus-client.exe /var/www/html/static/client/'   # 目标是 Pi（ssh 别名 pi，登录用户 bwicarus，写 /var/www 需 sudo）；root@bwicarus.space 是 2026-06-10 起暂停的 VPS
 ```
 
 旧 launcher 已下载的用户**不会自动更新 launcher 自身**——他们需要重新去 webapp `/profile/` 下载新版。所以**尽量在 core 里实现，不动 launcher**。
@@ -134,7 +137,7 @@ nginx 配置中 `/static/` 由 nginx 直接 serve（不经过 Flask）。
 
 ## 跟服务器侧网页控制面板的关系
 
-服务器侧 `https://bwicarus.space/control/` 是 EXE 客户端的网页版替代，**做的事一样**：
+服务器侧 `https://bwicarus.taile44d0c.ts.net/control/`（Pi；公网 `bwicarus.space` 是 2026-06-10 起暂停的 VPS）是 EXE 客户端的网页版替代，**做的事一样**：
 - 触发 register / daily / ankiweb-sync / 重启 Anki
 - 切 AI 后端（claude / gpt）
 - 各种开关（auto_restart / wake_anki / upload_after / qa_remote_daemon 等）
@@ -144,7 +147,7 @@ nginx 配置中 `/static/` 由 nginx 直接 serve（不经过 Flask）。
 - 客户端 EXE 多了：vault watcher（实时检测笔记变化）、本机截图问答 ctrl+shift+q、悬浮窗任务监视、托盘
 - 服务器侧 webapp 多了：网页可视化 / 多设备访问 / iPad 远程触发
 
-迁移期建议两边都跑，但**凌晨 04:00 daily 任务只让一边跑**（避免 AnkiWeb sync 冲突）：
+迁移期建议两边都跑，但**凌晨 daily 任务只让一边跑**（避免 AnkiWeb sync 冲突；注意两边时刻不同：Windows 客户端默认 04:00，Pi 的 `bwicarus-daily.timer` 是 `OnCalendar=*-*-* 01:00:00`）：
 - 推荐让 **服务器 systemd timer** 跑（更稳，机器不睡）
 - Windows 客户端的 scheduled_register.enabled 设 False（在「笔记登记」tab）
 - 或者反过来由 Windows 跑、服务器 timer disable

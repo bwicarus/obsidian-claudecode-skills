@@ -1,6 +1,6 @@
 # ADR:造纸编排器 —— AI 现场设计交互页,可保存成工具
 
-日期:2026-07-15 · 状态:**已采纳,待实现** · 提出者:用户
+日期:2026-07-15 · 状态:**已落地**(2026-08-19 复核:阶段 A–E 均已实现) · 提出者:用户 · ⚠ 文中 `create_page` 是设计期代号,落地实名是 **`make_paper(intent)`**(assistant.py `_t_make_paper`),仓库里已无 `create_page` 这个符号
 
 > 前置:`adr-task-runtime.md`(任务运行时的两条铁律 + 按 bbox 裁图批改)、
 > `paper.py`(纸张 + 格子布局器,已上线)。本 ADR 在其上再抽象一层。
@@ -100,7 +100,7 @@ create_page 的工具说明必须写死:**"整件事交给我,包括需要先查
   Semaphore(2))→ 内存任务表 `_vtasks`(1800s TTL)+ `/api/voice/task-status` 轮询。
 
 **要动的**:
-- `_VTASK_KINDS`(voice.py:693,现 `note/anki/vocab/search`)**加 `page`**;`_run_task` 的 dispatch map 同步加(漏一个 → 404/KeyError)。
+- ~~`_VTASK_KINDS` 加 `page`~~ **最终没这么做**:`_VTASK_KINDS`(voice.py:720)仍是 `note/anki/vocab/search`;造纸复用通用 `agent` kind —— `make_paper` → `assistant._bg_task("agent", …)`(assistant.py:2711)直接起线程跑 `voice._run_task`(dispatch map 见 voice.py:1737),不经 `/api/voice/task` 的 kind 闸。
 - 编排 agent 的**工具集**要含造纸原语(create_paper / write_blocks / define_handler)—— 这几个要作为
   MCP 工具暴露给无头 agent(它只能用 `mcp__bwapp`)。
 - **别复用 `_task_sema`(Semaphore(2) 阻塞排队)**给需要长活的 run —— 编排是有界短任务可以用,
@@ -149,9 +149,9 @@ create_page 的工具说明必须写死:**"整件事交给我,包括需要先查
 
 **已核实(2026-07-15)**:我们的 MCP 服务器**全线是 HTTP 转发**(mcp_server.py 用 httpx,
 `_post("/api/assistant/tool",...)`,连 read_page/lookup_word 原生工具也转发;注释:"不 import webapp 代码,
-只走 HTTP")。最终落点都是 **`TOOLS[name][1](args, ctx)`**(assistant.py 5 处)。
+只走 HTTP")。最终落点是**唯一生产执行出口** `assistant._run_tool(name, args, ctx, surface=…)`(assistant.py:127 —— 先过 `_tool_available` registry 闸,再落到 `TOOLS[name][1]`,全仓仅 assistant.py:148 这一处)。
 
-⇒ **「去壳」= 配方运行时不走 MCP、进程内直接调 `TOOLS[name][1](args, ctx)`** —— 调的**就是 MCP 转发到的
+⇒ **「去壳」= 配方运行时不走 MCP、进程内经 `assistant._run_tool(name, args, ctx, surface=A.SURFACE_INTERNAL)` 调用**(task_runtime.py:1492 `_run_sources` 即如此;**别直调 `TOOLS[name][1]`,那会绕过 surface 可用性闸**)—— 调的**就是 MCP 转发到的
 同一个函数**。于是:
 - **零代码拷贝**(引用同一函数,不复制)
 - **零标注、零反向更新**(改了 `get_highlights`,所有烤了它的配方自动跟着变 —— 同一个函数)

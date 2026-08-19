@@ -5,7 +5,7 @@
 
 ## 1. 旧 AI/Agent 工具总览
 
-`_server_deploy/assistant.py` 内的沙盒工具共 **52 个**(`_t_*`)。按"执行时是否会再次调用 AI"分两类:
+`_server_deploy/assistant.py` 内的沙盒工具共 **53 个**(`_t_*`)。按"执行时是否会再次调用 AI"分两类:
 
 ### 1.1 会再次调用 AI —— 新通道**不得依赖**(23 个)
 
@@ -38,7 +38,7 @@
 > **正确姿势**:旧工具名一律留在本表;要用某项能力,就像 `vocab.add` 那样**另拆一条
 > 确定性路径**(`build_vocab_note` + `online=False`),而不是给旧工具开口子。
 
-### 1.2 确定性(执行期不调 AI)—— 可作为直接命令的底层能力(29 个)
+### 1.2 确定性(执行期不调 AI)—— 可作为直接命令的底层能力(30 个;下表 29 个 + 2026-08 新增 `report_problem`:打包用户描述与当时环境落盘,采集不调 AI)
 
 | 分组 | 工具 | 对应确定性底座 |
 |---|---|---|
@@ -56,7 +56,7 @@
 
 ## 2. MCP 门面
 
-`_server_deploy/mcp_server.py` 暴露 14 个工具,其中 `assistant_call_tool` 可**代调上面任意
+`_server_deploy/mcp_server.py` 暴露 20 个工具,其中 `assistant_call_tool` 可**代调上面任意
 `_t_*` 工具**——因此 MCP 门面整体**不能**作为新通道的执行依赖(它可间接触发 AI)。
 新通道只直连 1.2 里的确定性底座,不经 MCP。
 
@@ -83,7 +83,7 @@
 
 ### 直接命令 vs 助手工具的差集(截至 07-29)
 
-`reader_direct_commands.py` 现有 **20 个**动作。与助手工具对比:
+`reader_direct_commands.py` 现有 **24 个**动作(07-29 后又加了 `note.edit` `undo.last` `vocab.page` `result.present`)。与助手工具对比:
 
 - **已补齐**(07-29):`recall.creation` `recall.notes` `vocab.add` `section.read`。
   注意 `vocab.add` 走的是**新拆的确定性路径**(`build_vocab_note` + `online=False`),
@@ -93,9 +93,9 @@
   自己查更直接;直接命令只补**上游拿不到的本地数据**(任务书第七节亦有原话:
   "天气由 AI 自查后按天气卡字段输出")。
 - **待定**:`read_check_report` 要等 `verify=false` 的强制形式确定后再说。
-- **直接命令有、助手没有**:`read.pageimage` `toc.get` `dict.lookup` `highlight.create`
-  `highlight.list` `note.list` `page.new` `page.add` —— 说明通道在**写与定位**上已比助手
-  完整,缺的只是召回类读操作。
+- **直接命令有、助手没有**:只有 `read.pageimage` 与 `result.present`。`toc.get`/`dict.lookup`/`highlight.create`/
+  `highlight.list`/`note.list`/`page.new`/`page.add` 助手侧都有对应工具(`toc`/`lookup_word`/`highlight`/
+  `read_highlights`/`notes_query`/`page_new`/`page_add`,见本文 §1.2),不是通道独有。
 
 ## 4. 缺口与兼容边界
 

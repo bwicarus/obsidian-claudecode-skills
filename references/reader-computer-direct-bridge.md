@@ -13,11 +13,11 @@ App 本机 Reader 的原生合成图沿同一视觉合同回传 Windows，不经
 
 ## 目标
 
-电脑语音的控制、状态、错误与媒体全部由 Reader/PWA 直接交给 Windows 桥接器。Pi 继续提供
-书籍和 PWA 页面，但不再参与电脑语音的配对、心跳、启动命令、SDP/ICE 或媒体。
+电脑语音的控制、状态、错误与媒体全部由 Reader（iOS App / 浏览器扩展）直接交给 Windows 桥接器。Pi 继续提供
+书籍与服务端 API（PWA 阅读页 2026-08-14 起 410，见 `reader_pwa_retirement.py`），但不再参与电脑语音的配对、心跳、启动命令、SDP/ICE 或媒体。
 
 ```text
-Reader/PWA
+Reader（iOS App / 浏览器扩展）
     │  wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1
     │  控制 JSON + 有界二进制 PCM
     ▼
@@ -62,10 +62,10 @@ loopback 目标。关闭桌面控制窗不等于关闭 bootstrap；bootstrap 空
 - 收到 `START` 后，Windows bootstrap 才可按顺序进入 `starting-service`、`starting-app`、
   `waiting-app-ready`。捕获 worker 未运行时启动 worker；配置的 Codex/ChatGPT Desktop 未运行时，
   只允许用登记的 packaged app identity 激活它，不从网页接受可执行文件路径或任意命令。
-- 当前直连服务只接受固定 `appKind=codex-desktop`，并只激活
-  `OpenAI.Codex_2p2nqsd0c76g0!App`；Reader 不提交 AUMID、可执行路径或命令。
-  `OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT` 仅作为桌面控制器里的保留本机常量，
-  尚未开放到当前服务合同。启动后必须重新归并进程树并等待唯一根目标就绪，超时、多根或
+- 当前直连服务接受两个固定档（`DirectAppTargets.IsSupported`）：`appKind=codex-desktop` 激活
+  `OpenAI.CodexBeta_2p2nqsd0c76g0!App`；Reader 不提交 AUMID、可执行路径或命令。
+  `appKind=chatgpt-classic` 激活 `OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT`，它已经进入服务合同，
+  不再只是桌面控制器里的保留常量。启动后必须重新归并进程树并等待唯一根目标就绪，超时、多根或
   身份不符均失败。
 - Codex 的 `realtimeVoice` 是本机 OS-global hotkey。Windows 每次 START 都从当前用户
   `~/.codex/keybindings.json` 验证它唯一绑定为固定 `Ctrl+Shift+C`，不从 Reader 接收
@@ -116,7 +116,7 @@ PCM 只在 Tailscale 加密直连中出现，不写 Pi、磁盘、日志或浏�
   构造，不在本轮创建计划任务或开机项。
 - 真机验收顺序：Windows 服务可见启用 → PWA 配对 → idle 状态 → 用户点击电话按钮 →
   app-output 听感 / mic 活性 / 明确停止。任何失败都先保存错误码，再停止。
-- Reader/PWA 生产部署仍必须先提交、推送，再从 Windows 运行项目远程预检与部署流程；不得直接
+- Reader 生产部署仍必须先提交、推送，再从 Windows 跑 `scripts\deploy_from_windows.ps1`（在 `scripts/reader_deploy_manifest.py` 清单内的文件走 `scripts/deploy_reader.sh`，清单外才手工 cp）；不得直接
   修改 Pi 工作树或生产文件。
 
 ## 2026-07-29 Windows 候选证据

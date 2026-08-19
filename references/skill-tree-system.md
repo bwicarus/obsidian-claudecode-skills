@@ -147,7 +147,7 @@ canvas-wrap (home SVG, 永远渲染、永远在底层)
 
 > 元数据编辑（title / note_prefix / scan_config）走 `POST /skilltree/<book>/api/edit` body `op="set_meta" key=... value=...`（control.html 第 877-884 行就是这么调的），**没有** `/skilltree/<book>/api/books-meta` 这个 per-book POST 路由。
 
-控制面板技能树 tab：`https://bwicarus.space/control/` → "技能树" panel
+控制面板技能树 tab：`https://bwicarus.taile44d0c.ts.net/control/`（Pi，当前唯一活跃实例；`bwicarus.space` 的 VPS 自 2026-06-10 暂停、代码停在 2026-05-28，本文后面记的 kg_audit 每本书开关等 2026-06-17 之后的改动只在 Pi 上有）→ "技能树" panel
 - 书本列表 / 编辑 (title, note_prefix, scan_config) / 删除
 - 额度消耗日志按钮 + modal（读 `state/quota_log.json`）
 - **新建书本**按钮 → 弹 modal（见下）
@@ -279,7 +279,7 @@ systemd 服务（qa-server / bwicarus-daily）有 `EnvironmentFile=...env`，跑
 
 ### 服务器有两套 nginx 配置
 
-- **VPS** `/etc/nginx/sites-enabled/default`：跟 git 里 `_server_deploy/nginx/bwicarus.conf` 一致，可 cp 部署
+- **VPS**（⏸ 2026-06-10 起暂停、代码停在 2026-05-28，日常不要再往这台部署）`/etc/nginx/sites-enabled/default`：跟 git 里 `_server_deploy/nginx/bwicarus.conf` 一致，历史上可 cp 部署
 - **Pi** `/etc/nginx/sites-available/bwicarus`：Tailscale HTTPS Cert + 80/443 两 server 块，**与 git 版结构完全不同**。**绝不可 cp 覆盖**（会冲掉 Tailscale 证书配置 → 全站挂）。Pi 改 nginx 只能手 patch
 
 ### `_render_anim` 标志位的生命周期

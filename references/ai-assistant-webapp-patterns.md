@@ -1,6 +1,6 @@
 # 在网页里集成 AI 助手 —— 可复用架构要点
 
-> 这是一份**可迁移的模式手册**,提炼自一个真实项目(网页 PDF 阅读器 + 侧边栏 AI 助手,移动端为主)。
+> 这是一份**可迁移的模式手册**,提炼自一个真实项目(PDF 阅读器 + 侧边栏 AI 助手,移动端为主)。⚠ 该阅读器的**网页/PWA 入口已退役**(`/pdf/`、`/pdf/search`、`/pdf/epub/view`、`/pdf/fav/view` 现返回 410,见 `_server_deploy/reader_pwa_retirement.py`);同一套前端现随 iOS App 的 ReaderBundle 与浏览器扩展分发,`/pdf/api/*` 仍在。文中模式仍然适用,但别照着去访问那些网页入口。
 > 给"要做另一个带 AI 的网页"的人/AI 当蓝本:每节是「问题 → 方案 → 为什么 → 代码骨架 → 坑」。
 > 不绑任何具体框架;后端示例用 Python(Flask 风格)+ 一个"模型进程"(CLI 或 HTTP API 均可),前端用原生 JS。
 > 术语:**编排器/orchestrator** = 主回答模型;**工具/tool** = 模型可调的能力;**rid** = 一次生成任务的 id。
@@ -356,10 +356,10 @@ function setFocus(text){ if(!asstOpen()) return; /* 否则才钉入上下文 */ 
 
 ### 输入框上的「配图/视频」偏好开关(2026-07-06)
 把「要不要配图/视频」从 AI 自己猜改成**用户显式表达**(ChatGPT 工具开关 / Perplexity Focus 范式):
-- 输入框上方两个独立 pill toggle(🖼 配图 / 🎬 视频),可各开可同开、默认都关、状态存 localStorage 跨会话。
-- **零改后端**:开启是「倾向不强制」——`window.rcMediaBias()` 读 localStorage 返回一段偏好提示,sendChat 发送前拼到 `message` 末尾(`message + rcMediaBias()`)。提示写明「适合才配、纯推导/基础常识别硬塞」,避免对纯文字问答硬配。
-- **气泡不受污染**:偏置只拼进 body 的 message 字段、不改 message 变量本身,用户气泡仍显示原问题(EPUB 气泡用 msg、PDF 用 text 原值,body 表达式拼接不回写变量)。
-- 共享实现在 `rc-video.js`(`rcMediaBias` + `rcBuildMediaRow(inputEl)`),PDF(挂 #asst-input)/EPUB(挂 #ep-ai-input)各一行调用。
+- 快捷按钮栏(跟「🗑 清空 / ⚙ 模型」同一行)上**三个**独立 toggle(书页 / 配图 / 视频,内联 SVG 图标非 emoji),可各开可同开、状态存 localStorage 跨会话;**「书页」默认开**(点暗 → `rcNoBook()` 为真,发 `no_book`,后端当通用助手答),「配图/视频」默认关。
+- **偏好走独立字段**(⚠ 早期那版「零改后端 + `rcMediaBias()` 拼进 message」已被换掉,仓库里不再有该符号):`window.rcMediaPrefer()` 读 localStorage 返回 `{image, video}`,sendChat 把它作为**独立的 `media_prefer` 字段**放进请求体(不进 message);后端各自把「适合才配、纯推导/基础常识别硬塞」注入系统提示 —— 见 `assistant.py:9322`/`6226` 与 `epub_assistant.py:2374`/`1515`。**所以这不是零改后端**,而且 EPUB 有自己一套 prompt,必须单独补(该文件注释里点名这是「AI 讲整章/编图」反复的真因)。
+- **气泡不受污染**:偏好**完全不进 message**(作为并列的 `media_prefer` 字段随 body 发),所以气泡、对话历史、后续上下文里始终只有原问题 —— 这正是从早期「拼进 message 末尾」改成独立字段的原因(见 `rc-video.js:152` 与 `epub_assistant.py:2374` 注释)。
+- 共享实现在 `rc-video.js`(`rcMediaPrefer()` 第 153 行 + `rcBuildMediaRow(quickBar)` 第 166 行;**没有** `rcMediaBias`),挂的是**快捷按钮栏**而非输入框:主路径由 `rc-assistant.js::rcBuildQuickBar` 一行并入(PDF `#asst-quick` / EPUB `#ep-asst-quick` 单一来源),`reader.js` / `reader.src/25-assistant.js` 里的 `rcBuildMediaRow(_qb)` 只是 legacy 兜底。
 
 
 ### 视口焦点上下文(2026-07-06):给 AI「用户此刻在看哪一段」而非只给章节

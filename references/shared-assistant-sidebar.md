@@ -1,5 +1,7 @@
 # 助手侧栏彻底共享(PDF + EPUB 一份代码)
 
+> ⚠ **归档(2026-08-19 复核)**:本文是 2026-07-06/07 那次迁移的**分阶段施工日志**,按时间顺序追加——**任何单段都不是现状**,开头「现状=两份独立实现」「默认走老 25-assistant」都已被后文与代码推翻。迁移已完成:EPUB 内联助手物理删除、共享侧栏无条件挂载(`_server_deploy/static/pdf/epub-html.js:5840`),`html-reader.js:608` 也挂同一份,PDF 侧 shared 已是默认(`reader.js:10312`,`?ui=legacy` 才回落)。只有下面「关键坑」里的构建/部署两条按现行三条投递路径更新过,其余按史料读。
+
 > 目标:PDF 阅读器与 EPUB 阅读器**用同一份助手侧栏代码**,差异全部由 adapter 吸收。
 > 用户拍板方向(2026-07-06):不是对齐按钮,而是**彻底共享整个侧栏**。
 > 铁律:中间层去适应旧代码、完全复用 PDF 阅读器原有全部能力,不为不同阅读器另造上层建筑。
@@ -59,9 +61,9 @@
 
 ## 关键坑
 
-- `reader.js` = `scripts/build_pdf_reader_js.sh` 拼 `reader.src/*.js`(含 25-assistant + 27-rc-adapter)。改 reader.src 后必须 rebuild + `check_pdf_reader_js.sh` + 部署 `reader.js`。
+- `reader.js` = `scripts/build_pdf_reader_js.sh` 拼 `reader.src/*.js`(含 25-assistant + 27-rc-adapter)。改 reader.src 后必须 rebuild + `check_pdf_reader_js.sh`;`reader.js` 在 `scripts/reader_deploy_manifest.py` 清单内(policy `reader_git_stamp`),部署**必须走 `scripts/deploy_reader.sh`**,不能手工 cp。⚠ 这只到桌面表面——到 iPad 还要 `ios/BWReader/package_local_reader.py` 重烤 ReaderBundle(它自己从 `reader.src/*.js` 再拼一份)+ 出新 TestFlight 构建。
 - `PdfAdapter` 已有 `bind({...})` → `_host` 袋 + `RC.use(PdfAdapter)` 注册 + `RC.adapter()._host` 取。②a 就是往这个 `bind` 补齐上面所有方法。
-- 静态由 nginx `/var/www/html/static/pdf/` 服务;`:5000` Flask static 陈旧。验前端用 nginx curl + `diff -q`。
+- ⚠ `static/pdf/*` 有**三条互不相通的投递路径**:① 桌面/旧网页表面走 nginx `/var/www/html/static/pdf/`(deploy_reader.sh 的 STATIC_ROOT);② iPad App 走 ReaderBundle 随包发(`ios/BWReader/package_local_reader.py`,只能靠新 TestFlight 构建到达);③ 扩展加载 `extensions/bw-reader-webext/vendor/` 里的自带副本(含 `rc-assistant.js`,需重新打包)。`:5000` Flask static 是陈旧副本。nginx curl + `diff -q` **只验得了 ①**。
 - EPUB 无 legacy 模式(恒加载 rc-*);PDF 有 `?ui=legacy` → 共享层不加载,25-assistant 必须留 native 兜底。
 - 便签透明度:PDF 缩放用祖先 CSS `zoom`/`transform` → `backdrop-filter` 磨砂失效(平台限制),EPUB 无此问题。收口时评估是否换不依赖磨砂的透明方案。
 

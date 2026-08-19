@@ -2,7 +2,7 @@
 
 多用户 web 训练追踪 + 循证 AI 教练 + YouTube 教学视频集成 + 高质量字幕。
 
-部署:bwicarus.space VPS + Pi 共享一套代码,**per-user 数据**(SQLite + WEBAPP_DATA)。
+部署:**只有 Pi**(VPS `bwicarus.space` 2026-06-10 起暂停,代码停在 2026-05-28,不要往那边部署),**per-user 数据**(SQLite + WEBAPP_DATA)。
 
 > 入口:`https://bwicarus.taile44d0c.ts.net/private/fitness/`(需登录)
 

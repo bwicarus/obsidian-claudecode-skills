@@ -1,5 +1,7 @@
 # Windows 桥接器角色互换交接（2026-08-05）
 
+> ⚠ **2026-08-05 时点交接，其全部内容（分工）已作废，勿据其推断现状**：文中「Claude 独占 `extensions/bw-reader-webext/windows/**`、Codex 独占 `ios/BWReader/**` 与 Safari 扩展前端、两边互相冻结」的划分已于 2026-08-16 整体废止（全部工程归 Claude；CLAUDE.md「工程所有权」直接点名本文过时）；协作也已从旧 SQLite 邮箱改为 BW AgentBridge Lite（见 `references/agent-collaboration.md`）。技术坐标同样过期：文中要修的 0.1.85 快照缺口（`ValidateActiveReading` 拒 `viewFile`/`viewPage`）所涉的 vbook 视图身份，现由 `scripts/lib/vbook.py` + `_server_deploy/vbook_route_policy.py` 统一定义，桥候选已到 0.1.159。
+
 ## 用户决定
 
 用户要求把桥相关任务完整转交 Claude 重新设计制作，Codex 接手 Claude 原先负责的

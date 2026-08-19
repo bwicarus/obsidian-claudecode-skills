@@ -4,7 +4,7 @@
 
 `_server_deploy/qa_server.py::DEFAULT_CONFIG` 是默认值（注意：Python 文件是下划线 `qa_server.py`，systemd 服务名才是连字符 `qa-server.service`）；用户改的部分通过 `_deep_merge` 深度合并覆盖到默认上。
 
-**权威字段清单 = `scripts/config_schema.py::SCHEMA`**（dot-path → 类型）。控制面板 `POST /control/api/config` 经 `validate_partial()` 用它过滤：**未声明字段 / 类型不匹配一律拒绝**（防「字段名打错静默生效」），合法部分仍写入、errors 回前端提示。设置 panel 的可见字段与顺序来自同文件 `FIELD_META`（不在 FIELD_META 的 SCHEMA 字段仍走校验，只是 UI 不显示，如 AI cli command）。`kg_audit.books.*` 用 `*` 通配支持任意书名动态键。
+**权威字段清单 = `scripts/config_schema.py::SCHEMA`**（dot-path → 类型）。控制面板 `POST /control/api/config` 经 `validate_partial()` 用它过滤：**未声明字段 / 类型不匹配一律拒绝**（防「字段名打错静默生效」），合法部分仍写入、errors 回前端提示。设置 panel 的可见字段与顺序来自同文件 `FIELD_META`（不在 FIELD_META 的 SCHEMA 字段仍走校验，只是 UI 不显示，如 AI cli command）。`kg_audit.books.*` 用 `*` 通配支持任意书名动态键。⚠ 下面的分组表**尚未收录** SCHEMA 里已有的 `web_portal.cse_cx`（config_schema.py:58，网页阅读门户 CSE）与 `stopword_gov.enabled` / `stopword_gov.ai_judge`（:61-62，停用词治理，daily 内跑）——以 SCHEMA 为准。
 > ⚠ **`dict.*` / `vocab.*` 既不在 DEFAULT_CONFIG 也不在 SCHEMA** → 控制面板会当「未知字段」拒绝，只能**手工编辑** `state/server-config.json`（各处代码靠 `.get()` 兜底读，见下）。
 
 ## 顶层字段
@@ -110,7 +110,7 @@
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `card_qa.delete_original` | `false`（不在 DEFAULT_CONFIG，但**在 `config_schema.py` SCHEMA + FIELD_META** → 控制面板「卡片 QA 改进」组可勾） | QA cardCtx 模式「修改 Anki」时，AI 生成新卡后是否删原卡（关掉则原 + 新都留）|
+| `card_qa.delete_original` | `false`（**已成死旋钮**：仍在 `config_schema.py` SCHEMA:83 + FIELD_META:228 里、面板照样可勾，但**没有任何代码读它**）| 曾用于 QA cardCtx「修改 Anki」删不删原卡；现在卡片改进**始终保留原卡**（qa_browser.py:1205 docstring / :1299 `deleted = False` / :2069 页面文案），勾了不会生效，两个契约测试还反向断言源码里不得出现这个键 |
 
 ### `kg_audit.*` —— KG 节点审查（每本书可单独开关）
 
@@ -129,12 +129,12 @@
 
 ### `dict.*` —— PDF 阅读器字典 / 翻译配置
 
-注意：`dict.*` **不在** `qa_server.py::DEFAULT_CONFIG` 里（不会被 seed 进文件），完全靠各处 `.get(key, 默认)` 兜底。被 `_server_deploy/pdf_reader.py`（行 315/996/1000/1949）、`scripts/vocab/dict_sources.py`、`scripts/vocab/translate.py` 读取。`dict_sources.py::_cfg()` / `translate.py::_cfg()` 取的就是 `cfg["dict"]` 子字典。
+注意：`dict.*` **不在** `qa_server.py::DEFAULT_CONFIG` 里（不会被 seed 进文件），完全靠各处 `.get(key, 默认)` 兜底。被 `_server_deploy/pdf_reader.py`（行 937-942 句子翻译取 backend/model/effort、8537 `_auto_anki_cfg`、18602 翻译源设置 GET/POST）、`scripts/vocab/dict_sources.py`、`scripts/vocab/translate.py` 读取。`dict_sources.py::_cfg()` / `translate.py::_cfg()` 取的就是 `cfg["dict"]` 子字典。
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `dict.translate_backend` | `auto`（auto = deepl → mymemory） | 句子翻译后端 |
-| `dict.translate_model` | `haiku` | 翻译用 AI 模型（backend 走 AI 时）|
+| `dict.translate_backend` | `auto`（auto = gtranslate → deepl → ai → mymemory，见 translate.py:523；另可填 `gtranslate`/`google`、`deepl`、`ai`、`mymemory`、`no_ai`=不落 AI 的 gtranslate→deepl→mymemory）| 句子翻译后端 |
+| `dict.translate_model` | `sonnet` | 翻译用 AI 模型（backend 走 AI 时；三处兜底都是 sonnet：translate.py:504 / pdf_reader.py:941 / pdf_reader.py:18607）|
 | `dict.translate_effort` | `low` | 翻译 reasoning effort |
 | `dict.deepl_key` | `""` | DeepL API key（可选；空则 auto 走 mymemory）|
 | `dict.mymemory_email` | `""` | MyMemory 翻译 API 的 email（提高免费配额）|
@@ -173,7 +173,7 @@
 
 ## 修改方法
 
-1. **控制面板**（推荐）：`https://bwicarus.space/control/` →「设置」面板 → 修改 → 保存。后端 `/control/api/config` POST 写回文件。
+1. **控制面板**（推荐）：`https://bwicarus.taile44d0c.ts.net/control/`（Pi；`bwicarus.space` 是 2026-06-10 起暂停的 VPS，在那边改不生效）→「设置」面板 → 修改 → 保存。后端 `/control/api/config` POST 写回文件。
 2. **直接编辑**：`nano /home/bwicarus/claude/state/server-config.json`。qa-server 无需重启（每次读最新），但 daily 是 systemd timer，下次触发才生效。
 3. **不要**手动编辑同时控制面板也在编辑：会有 race condition 覆盖。
 

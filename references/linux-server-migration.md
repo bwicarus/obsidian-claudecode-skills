@@ -49,7 +49,7 @@ QA_PUBLIC_URL=https://bwicarus.space/qa
 | `anki-headless.service` | 启 Anki + AnkiConnect 8765（依赖 xvfb-99） |
 | `obsidian-sync.service` | `ob sync --continuous` 持续同步 vault |
 | `bwicarus-daily.service` | 一次性跑 daily 流程（`scripts/daily_anki_status.py`） |
-| `bwicarus-daily.timer` | 每天 04:00 触发 daily.service（含 missed-run 补跑） |
+| `bwicarus-daily.timer` | 每天 **01:00** 触发 daily.service（`Persistent=true`，含 missed-run 补跑；原 04:00，73d8eb6 起提前到用户不用 AI 的空闲时段）|
 | `anki-sync-refresh.service`/`.timer` | review 数据变动时 AnkiWeb sync + dashboard refresh（后续新增） |
 | `bwicarus-quick-sync.service`/`.timer` | vault 快速 sync + cleanup + KG prune，无 AI / 无 Anki（后续新增） |
 | `book-ocr.service` + `book-ocr-watchdog.service`/`.timer` | Mokuro 日文教材 OCR 后台（后续新增） |
@@ -58,7 +58,7 @@ QA_PUBLIC_URL=https://bwicarus.space/qa
 
 所有 unit 文件源码在 `references/systemd/`（OCR / quick-sync / sync-refresh 这几套是 2026-05-14 之后新增的，文件都已纳入该目录）。`systemctl enable` 后开机自启。
 
-> ⚠ **VPS 代码/部署冻结在 2026-05-28**，所以 VPS 上**没有**之后新增的这几套 unit（都只在 Pi 跑，副本仍在 `references/systemd/`）：`bwicarus-backup.{service,timer}`（每日 03:30 备份）、`yolo-figures.{service,timer}`（6h 闲时 DocLayout-YOLO 框图）、`figures-describe.{service,timer}`（夜间裁图描述）、`push-big-files.{service,timer}`（仅 Pi，4h 推 >200MB 文件到 PC）。完整清单以 Pi 为准，见 [`raspberry-pi-deployment.md`](raspberry-pi-deployment.md)。
+> ⚠ **VPS 代码/部署冻结在 2026-05-28**，所以 VPS 上**没有**之后新增的这几套 unit（都只在 Pi 跑，副本仍在 `references/systemd/`）：`bwicarus-backup.{service,timer}`（每日 03:30 备份）、`yolo-figures.{service,timer}`（6h 闲时 DocLayout-YOLO 框图）、`figures-describe.{service,timer}`（夜间裁图描述）、`push-big-files.{service,timer}`（仅 Pi，4h 推 >200MB 文件到 PC）、`concept-graph.{service,timer}`（02:30 概念网流水线，已从 daily 拆出）、`mcp-server.service`（MCP 门面 `--http 8766`）、`voice-rt.service`（豆包实时 S2S 中继）、`rbi-server.service`（Pi 真 Chrome + rrweb 推 iPad）、`reader-context-push.service`（inotify + SSH 推阅读器上下文快照到 Windows PC）。完整清单以 Pi 为准，见 [`raspberry-pi-deployment.md`](raspberry-pi-deployment.md)。
 
 ## webapp 控制面板
 
@@ -162,7 +162,7 @@ API：
 
 ### qa-server.service 必须的 sed patch（ExecStartPre，每次重启自动跑）
 
-实际只有 3 条 ExecStartPre sed（见 `references/systemd/qa-server.service`）：
+实际只有 3 条 ExecStartPre sed（下面这三行是 **VPS 上那份**的写法；⚠ 仓库里 `references/systemd/qa-server.service` 是 **Pi 版**——`Description=…(Pi 侧)`、`User=bwicarus`、路径全为 `/home/bwicarus/claude`，两条 CDN sed 的替换目标是 `http://bwicarus.taile44d0c.ts.net/static/qa/...` 而**不是** `bwicarus.space`）：
 ```
 sed -i "s|https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js|https://bwicarus.space/static/qa/mathjax.js|g" qa_browser.py
 sed -i "s|https://cdn.jsdelivr.net/npm/marked@9/marked.min.js|https://bwicarus.space/static/qa/marked.js|g" qa_browser.py
@@ -195,7 +195,7 @@ sed -i 's|"--dangerously-skip-permissions"|"--allowedTools", "Read"|g' ai_backen
 - `.panel-stack { overflow-y: auto }` 兜底滚动
 
 ### 完整 daily 流程验证
-- `scripts/daily_anki_status.py::main` 现在跑约 15 步（权威流程见 CLAUDE.md「自动化任务」小节）：
+- `scripts/daily_anki_status.py::main` 现在跑 **22 步**（2026-08-19 核实；开头另有总开关 `server-config` 的 `daily.enabled`，false 则 timer 照常触发但脚本 `write_run("skipped")` 空跑退出）。下面这份编号列表是 2026-05 的旧子集，**权威流程直接读 `scripts/daily_anki_status.py::main`**——它比下表多出：通用语停用词 / 停用词复活赛（受 `stopword_gov.enabled`、`ai_judge` 控制）、领域词典 / 融合权重学习 / 跨语言概念归一（`attention_profile.py --domain-dict|--fit|--concepts`）、学习近况（`learning_situations.py --daily`）、错误模式元画像（`error_meta_profile.py --gen`）；概念网三步已拆到独立的 `concept-graph.timer`（02:30）：
   1. smoke tests（守门，任一 fail 立即 abort，不动 Anki / vault / dashboard）
   2. 确保 AnkiConnect
   3. AnkiWeb 同步（拉最新 —— 在读 Anki 数据**之前**先拉，吃进 AnkiDroid 等其它设备的复习记录；失败不阻断）

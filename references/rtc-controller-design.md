@@ -131,9 +131,9 @@ route_to_text/cache 命中)不走 `_prep_tool_result`,而 tool_status 在 try/ex
 headless E2E 直接给 `RC.turnCard.addPart({kind:'cards',...})` 喂同形状数据,确认渲出 `.fc-card`
 (正面文本+入库按钮+多卡圆点)。
 
-**部署要点**:`voice-rt.service` 直接跑 `/home/bwicarus/claude/_server_deploy/voice_realtime_relay.py`
-**原地**(不经 `sudo cp` 到 webapp 目录——那份是没人 import 的陈旧遗留副本,纯属混淆源),
-改完直接 `sudo systemctl restart voice-rt`(必须先过 [[restart-voice-rt-check-active-call]] 的程序化 gate)。
+**部署要点(2026-08-19 复核,结论与原文相反)**:`voice-rt.service` 跑的是**已安装副本** `/home/bwicarus/webapp/voice_realtime_relay.py`(见 `references/systemd/voice-rt.service` 的 ExecStart 与 WorkingDirectory),
+**不是** checkout 里的 `_server_deploy/voice_realtime_relay.py`——只改 checkout 不部署,线上一个字都不会变;
+该文件在 `scripts/reader_deploy_manifest.py` 清单内(dest `webapp/voice_realtime_relay.py`),**必须走 `scripts/deploy_reader.sh`**——脚本自带原子安装、`assert_voice_runtime_stable` 稳定性检查,并在装完断言 `systemctl cat voice-rt` 的 ExecStart 指向 `/home/bwicarus/webapp/voice_realtime_relay.py`(deploy_reader.sh:1493);不要手工 `cp` + `sudo systemctl restart voice-rt`。⚠ 重启会掐断进行中的通话,发布前仍需自行确认当前无人在通话中(原文引用的 `[[restart-voice-rt-check-active-call]]` 程序化 gate 全仓查无此物,是悬空链接,别指望它挡)。
 
 **遗留**:①处的 cache 命中分支(`tool_cache[ck] = {"out":..., "ca":...}`)没存 `slim_full`,
 命中缓存重放时同样会丢 `result`——但 make_anki 等写操作从不 cacheable,只有只读工具(如

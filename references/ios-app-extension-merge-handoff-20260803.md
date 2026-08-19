@@ -1,5 +1,7 @@
 # iOS 单 App 合并交接：阅读器 + 语音 + Safari 扩展（2026-08-03 JST）
 
+> ⚠ **2026-08-03 的合并草案，方案已执行完毕，勿把它当待办**：合并当天即落地（`49abb569`「feat(ios): 合并阅读器语音与 Safari 扩展」），工程在 `ios/BWReader/`（`project.yml` + App / Extension / Shared / Widget），§0 说的「两个 App 抢同一 bundle ID、互相覆盖」已不存在；「由 Codex 执行」的分工已于 2026-08-16 作废（全部工程归 Claude）。§3 目标形态里「App target = ReaderWebView（WKWebView 加载 PWA）」也已过时：阅读器 runtime 现由 `ios/BWReader/package_local_reader.py` 烤成 ReaderBundle 随包发，PWA 阅读器页面 2026-08-14 起返 410（`_server_deploy/reader_pwa_retirement.py`）。**§2 的无 Mac 构建链路、六个 secrets 与五个踩坑仍然成立。**
+
 > 用户决定：把 BWReaderNative（阅读器 + 原生语音）与今天新建的 Safari Web Extension
 > 合并成**单个 Xcode 工程**，由 Codex 执行。本文是现状 + 合并草案。
 

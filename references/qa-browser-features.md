@@ -39,7 +39,7 @@ iPad 用法见 [`ipad-remote-qa.md`](ipad-remote-qa.md)。
         ↓
 POST /api/create-note  body={name, pairs, image_b64}
         ↓ 立即返回 {ok, job_id}（AI 整理 10-30s，移动端连接易断 → 后台线程跑，复用 _card_jobs）
-后台 _create_note_from_qa（_client/core/qa_browser.py:_card_update_note 旁）
+后台 _create_note_from_qa（_client/core/qa_browser.py:1404）
   ├─ 清理 name → vault/<name>.md（同名追加 -1/-2）
   ├─ AI 整理 pairs → 结构化 Markdown
   │   prompt 要求：去对话冗余、## 标题、$...$ 数学、不发挥
@@ -58,8 +58,8 @@ POST /api/create-note  body={name, pairs, image_b64}
 参数：`/?card=<local_id>` → `loadCardContext()` 拉卡片两面 + 显示在截图位置。
 
 勾选有用回答后，header 出现三个按钮：
-- **更新到笔记**：`_card_update_note(local_id, pairs, verbosity='verbose'|'concise')` → AI 改写源笔记
-- **根据此修改 Anki**：`_card_update_anki(local_id, pairs)` → AI 生成新卡替代原卡（删/留旧卡由 server-config 控制）
+- **更新到笔记**：POST `/api/card-update` `{target:'note', verbosity:'verbose'|'concise'}` → 后台 `_prepare_legacy_card_draft()`（qa_browser.py:1122）**只出草稿、一个字都不写盘** → 前端渲染「草稿预览（尚未写入）」→ 用户确认后 POST `/api/card-update-commit` → `_commit_legacy_card_draft()`（qa_browser.py:1343）才真正改写源笔记
+- **根据此修改 Anki**：同样两段式（`/api/card-update` 出草稿 → `/api/card-update-commit` 写入）；**原卡永远保留**——`_commit_legacy_anki_draft`（qa_browser.py:1199）docstring 写死「The original card is never deleted.」、:1299 `deleted = False`，页面文案也是「卡片改进始终保留原卡，避免丢失 FSRS 复习历史」，早已不由 server-config 控制删/留
 - **全部更新**：两个都跑
 
 异步实现：提交 POST `/api/card-update`（立即返回 `{job_id}`），前端轮询 GET `/api/card-update-status?job=<job_id>` 拿结果（done 的 job 保留 30 分钟，弱网下轮询能重取，移动端连接断了不丢）。这套 `_card_jobs` + 轮询端点同时被 `/api/create-note` 和 server 模式 `/api/save` 复用，见「后台 job 化」节。
@@ -73,7 +73,7 @@ POST /api/create-note  body={name, pairs, image_b64}
 | **详细**（默认） | 默认保留 ④ 全部原文 + 在合适位置追加 / 改写 QA 内容；prompt 强调"有判断力"——允许重组顺序、合并相似段、连贯化跨段衔接（应对用户选了**间断**段落）；不强制逐字照搬 | 原笔记内容多、QA 是详细解析 |
 | **精炼** | 允许大幅删减，提炼核心；同样有判断力可改写但不损失关键信息 | 原笔记太啰嗦想压缩 |
 
-两种模式共用 `_card_update_note`，传 `verbosity` 参数（`verbose`=详细 / `concise`=精炼，`/api/card-update` body 也读 `verbosity`，非法值回落 `verbose`）。返回里加"保留率"百分比（新内容 / 旧内容长度比）让用户验证 AI 没过度精炼。
+两种模式共用同一条 prepare/commit 链（`_prepare_legacy_card_draft` → `_commit_legacy_card_draft`），传 `verbosity` 参数（`verbose`=详细 / `concise`=精炼，`/api/card-update` body 也读 `verbosity`，非法值回落 `verbose`）。commit 返回的 summary 是「净变化 ±N 字」（qa_browser.py:1392），旧的"保留率"百分比已不存在。
 
 **prompt 进化历史**（按时间）：
 1. 初版：要求 AI 严格保留所有原文 → 用户反馈"过度精炼"
@@ -97,7 +97,7 @@ POST /api/create-note  body={name, pairs, image_b64}
 
 | 路由 | 后台跑什么 | 前端轮询函数 |
 |---|---|---|
-| `/api/card-update` | `_card_update_anki` / `_card_update_note` | `pollCardJob`（2s 间隔，连续失败 40 次放弃）|
+| `/api/card-update` → `/api/card-update-commit` | `_prepare_legacy_card_draft`（只出草稿不写盘）/ `_commit_legacy_card_draft`（用户确认后才写 Anki/笔记，另起一个 job）| prepare 用 `pollCardJob`（qa_browser.py:2459）、commit 用 `pollCardCommitJob`（:2395）——都是 running 每 2s 重拉、失败重试 3s 上限 40 次 |
 | `/api/create-note` | `_create_note_from_qa` | `pollCreateNoteJob`（封顶 60 次）|
 | `/api/save`（仅 server 模式） | `_do_full_save` 全链路 | `pollSaveJob`（120 次未完成 / 连续 40 次轮询失败才放弃，提示「任务仍在后台执行，稍后可在历史记录查看」）|
 
@@ -109,7 +109,7 @@ POST /api/create-note  body={name, pairs, image_b64}
 
 ### `/api/card-delete`：sync 后台化（非 job）
 
-`_card_delete`（qa_browser.py:1024）：Anki `deleteNotes` + records 写盘**同步完成**后即返回 `{ok: true, synced: "pending"}`；AnkiWeb sync（最长 120s，不值得占住请求线程）改后台 fire-and-forget 线程，失败由 15min `anki-sync-refresh.timer` 兜住。前端 synced **三态**：`true`=已同步 / `'pending'`=后台同步中（显示「同步中」）/ falsy=未同步 —— `'pending'` 是 truthy，**不能直接 `j.synced ?`** 当布尔用。对比：cardCtx「修改 Anki」（`_card_update_anki`）末尾的 sync 仍同步等待 —— 它本身已在 job 线程里跑，等得起。
+`_card_delete`（qa_browser.py:1473）：Anki `deleteNotes` + records 写盘**同步完成**后即返回 `{ok: true, synced: "pending"}`；AnkiWeb sync（最长 120s，不值得占住请求线程）改后台 fire-and-forget 线程，失败由 15min `anki-sync-refresh.timer` 兜住。前端 synced **三态**：`true`=已同步 / `'pending'`=后台同步中（显示「同步中」）/ falsy=未同步 —— `'pending'` 是 truthy，**不能直接 `j.synced ?`** 当布尔用。对比：cardCtx「修改 Anki」的 commit（`_commit_legacy_anki_draft`，qa_browser.py:1199）末尾的 sync 仍同步等待 —— 它本身已在 job 线程里跑，等得起。
 
 ## AI 后端 + System Prompt
 
@@ -270,7 +270,7 @@ function maybeRender() {
 
 ## 控制面板交互
 
-`https://bwicarus.space/control/` 里 QA 相关开关（写入 `server-config.json`）：
+Pi 控制面板 `https://bwicarus.taile44d0c.ts.net/control/` 里 QA 相关开关（写入 `server-config.json`；`bwicarus.space` 是 2026-06-10 起暂停的 VPS，别往那边改）：
 
 | 字段 | 含义 |
 |---|---|

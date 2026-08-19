@@ -1,5 +1,7 @@
 # Claude 完整接管：电脑按钮、Swift App、Codex / GPT Classic 语音与文字接力
 
+> ⚠ **2026-08-02 时点的产品全貌记录，勿据其推断现状**：三条地基前提都已被推翻 —— ① Swift 真值不再是 `C:\iCloudDrive\BWReaderNative.swiftpm`，2026-08-03 `49abb569` 已把它合进单一 Xcode 工程 `ios/BWReader/`；② App 不再是「WKWebView 加载 Pi 上 Reader 网页」的壳，阅读器 runtime 由 `ios/BWReader/package_local_reader.py` 烤成 ReaderBundle 随包发、走环回 `127.0.0.1:43129`，改前端要到 iPad 只能出 TestFlight 构建；③ §0 里「Safari/PWA 无原生能力时按钮显示不可用」所指的 PWA 表面已于 2026-08-14 整体下线（`_server_deploy/reader_pwa_retirement.py`，`/pdf/`、`/pdf/search`、`/pdf/epub/view`、`/pdf/fav/view` 返 410）。§6/§9 的版本坐标（桥 0.1.38 回滚点、生产 HEAD `2ba49dc`、黄金基线 `4fc0dfa + preview10`）也全部过期，桥候选已到 0.1.159。仍然成立的只有按钮语义与 DOM（`#asst-computer` / `#vc-top-computer`、电脑按钮与普通电话按钮分流，见 `_server_deploy/static/pdf/rc-voicecall.js`）。现行架构见 CLAUDE.md「iOS App 形态」，分工见「工程所有权」。
+
 > 日期：2026-08-02 JST  
 > 用户决定：本模块后续由 Claude 接管。本文是产品与架构全貌，不只是一次故障记录。  
 > 安全边界：不要自动启动语音、采音或发送快捷键；iPad 实机通话由用户测试。

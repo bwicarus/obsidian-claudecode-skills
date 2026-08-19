@@ -41,18 +41,35 @@ def _apply_one(lines: list[str], anchor: str, new: str) -> tuple[bool, str]:
 
 
 def _sanity(before: str, after: str, new: str) -> str | None:
-    """替换后的自检。返回问题描述，没问题返回 None。"""
+    """替换后的自检。返回问题描述，没问题返回 None。
 
-    if before.strip().startswith("|") and not after.strip().endswith("|"):
-        return "原行是表格行，新行没有以 | 收尾"
-    if before.lstrip().startswith("- ") and not after.lstrip().startswith(("- ", "* ", ">")):
+    只剩两条**结构**检查。原本还有第三条查"新行里是不是混进了旧文本"，
+    调了三轮之后拿掉了 —— 记在这里，免得有人再加回来：
+
+    那条查的是「只替换前缀、旧尾巴留在原地」的痕迹。但那个症状是**子串替换**
+    独有的，而这个脚本只做整行替换，结构上已不可能发生。三个版本在 170 条
+    真实数据上的战绩是 **误报 18、真阳性 0**：
+      v1 按"行内长片段重复"判 —— 误伤两个共享后缀的函数名、两个共享目录的
+         key 文件、markdown 自指链接 `[`x`](x)`（5 条）；
+      v2 改判"新行吞掉整条旧行" —— 误伤全部归档标记，那类本来就是
+         「标题行 + 换行 + 归档提示」（11 条）；
+      v3 加了"旧行必须在开头且后面有换行"的豁免 —— 又误伤同行续写和
+         「旧行 + 新表格行 + 引用块」（2 条）。
+
+    每一版都是在给正常写法打补丁，说明判据本身没抓到真信号。按这个仓库自己
+    的教训（`references/silent-failure-lessons.md`）：只产生误报的检查比没有
+    检查更糟，它训练人忽略输出。这件事交给 `scripts/check_docs_drift.py` 的
+    「行内重复」—— 它有夹具（8 条真实坏行 + 对照组）验过召回与误报，
+    且只看本次改动的行。改完文档跑一次它即可。
+    """
+
+    lines = [l for l in after.splitlines() if l.strip()]
+    if before.strip().startswith("|"):
+        # 多行替换（一行拆成表格多行 + 说明块）是正常的，只要还有表格行在
+        if not any(l.strip().startswith("|") and l.strip().endswith("|") for l in lines):
+            return "原行是表格行，新内容里没有一行是完整表格行"
+    if before.lstrip().startswith("- ") and not after.lstrip().startswith(("- ", "* ", ">", "|")):
         return "原行是列表项，新行丢了列表记号"
-    # 新行里若把同一个长片段写了两遍,基本可以断定是拼接时把旧文本带进来了
-    for width in (40, 30):
-        for i in range(0, max(0, len(new) - width), 7):
-            frag = new[i : i + width]
-            if frag.count(" ") < width // 2 and new.count(frag) > 1:
-                return f"新行内部出现重复片段：{frag[:30]!r}"
     return None
 
 

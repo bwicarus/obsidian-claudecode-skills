@@ -358,7 +358,7 @@ smoke tests / 确保 AnkiConnect / AnkiWeb 同步（拉最新）/ 登记新笔�
 
 ## 已知差异（设计）
 
-- **AnkiWeb 同步**：两边都是 sync client，共享同一账户的 hkey。两边 daily 错开（VPS 04:00 CST = UTC+8 / Pi 04:00 JST = UTC+9），自然差 1 小时不撞。
+- **AnkiWeb 同步**：两边都是 sync client，共享同一账户的 hkey。两边 daily 错开（VPS 04:00 CST = UTC+8 / Pi **01:00** JST，见 `references/systemd/bwicarus-daily.timer`，73d8eb6 起从 04:00 提前），不会撞。
 - **webapp 用户表独立**：Pi 上 `/home/bwicarus/webapp/data/app.db` 是 Pi 自己的 SQLite，跟 VPS 分离。admin `bwicarus` 用同 PASSWORD_HASH 在两边都能登录；其它注册用户在 Pi 上不自动出现。
 - **Obsidian Sync**：两边都是 sync 客户端，云端是真相源，多设备 supported。
 - **Memory**：两边 auto memory 是分支快照。在 Pi 上累积的新 memory 不自动回流 VPS，反之亦然。

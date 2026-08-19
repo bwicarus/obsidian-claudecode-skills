@@ -1,5 +1,7 @@
 # iOS Reader + Safari 扩展语音失败交接（2026-08-03）
 
+> ⚠ **2026-08-03 的失败现场记录（TestFlight 1.0.1–1.0.3），勿据其推断现状**：文中点名的工作树 `bwreader-ios-merge` / 分支 `agent/ios-reader-extension-merge` 已被主线取代（合并工程在 `ios/BWReader/`，`49abb569`），CLAUDE.md 更明确写着「旧 worktree（如 `bwreader-ios-merge`）里的远程壳 `ReaderWebView.swift` 是过时代码，勿据其推断」；App 也已从远程 Reader 页改为本地 ReaderBundle 渲染（`ios/BWReader/package_local_reader.py`，环回 `127.0.0.1:43129`）。文末「构建上传需分寸」已放宽：2026-08-18 用户明确 `gh workflow run safari-extension-ios.yml -f upload=true` 可直接触发。§「用户要求的正确产品边界」五条（App 内 Reader 是完整产品、扩展只送当前网页上下文、电脑按钮与普通电话按钮各自独立）**至今仍然成立**。
+
 ## 用户要求的正确产品边界
 
 1. `bwicarus-test` App 内的 Reader 是完整产品：书籍阅读、Reader 上下文、电脑客户端语音、

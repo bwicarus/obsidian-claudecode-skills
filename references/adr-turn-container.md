@@ -117,7 +117,7 @@ relay 的 sideband 收的是 OpenAI 的**完整事件流**(它就是靠这个执
 ## 6. 明确不做的事
 
 - **不为 EPUB 另造一套**。`rc-turncard.js` 是共享层(与 `rc-assistant`/`rc-toolchip` 同级),两个阅读器共用 —— 这条是项目铁律(见 `references/unified-control-layer.md`)。
-- **不保留"两套渲染路径"**。阶段 1 一旦落地,旧的"实时拼接"代码必须删掉,不许留着当 fallback ——
+- **不保留"两套渲染路径"**(⚠ 实现打了折扣:`RC.toolChip.absorb`(rc-toolchip.js:866,唯一调用点 rc-voicecall.js:3260)与 `if (!_tcOk)` 的独立落库(rc-voicecall.js:3264)**保留为「轮次容器不可用」时的极端兜底**;容器在时 `_hosts` 为空、absorb 自然 no-op)。阶段 1 落地后旧的"实时拼接"主路径必须删掉,不许留着当常规 fallback ——
   留着就等于允许分叉,今天这类 bug 就会回来。(历史**数据**的向后兼容是另一回事,那个要留。)
 - **不把 base64 落进历史。** 见 §4。
 

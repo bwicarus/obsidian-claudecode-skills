@@ -1,6 +1,6 @@
 # 英语语法分析系统（task #182 / #183）
 
-网页 PDF 阅读器里「按你正在跟踪的语法点，分析一句英文」的整套系统。选中 PDF 里一段英文 →
+iOS App 与浏览器扩展的阅读器里「按你正在跟踪的语法点，分析一句英文」的整套系统（网页版 `/pdf/` 阅读器已于 2026-08-14 退役返回 410，见 `_server_deploy/reader_pwa_retirement.py`；本文的 grammar 路由仍全部由 Pi 服务端执行，`where_does_this_route_run.py /pdf/api/grammar-analyze` = owner=pi、无本地分支）。选中 PDF 里一段英文 →
 「📊 语法分析」→ 右侧抽屉里出现一张分析卡：整句中文翻译 + 句子结构图（spaCy 词性/依存/成分，
 四种视图）+ 命中的跟踪语法点逐条讲解 + 底部追问框 + 一键制 Anki。
 
@@ -102,7 +102,7 @@ python3 scripts/kg/build_grammar_nodes.py --pdf <path> --book EGIU \
 
 `kind == "grammar"` 是整个系统的「开关位」：
 
-- `pdf_reader.py::pdf_api_grammar_books` 只列 `kind=="grammar"` 的 KG；
+- `grammar_reader.py::pdf_api_grammar_books` 只列 `kind=="grammar"` 的 KG（函数已随 grammar 路由搬出 `pdf_reader.py`，endpoint 名仍是 `pdf_reader.pdf_api_grammar_books`）；
 - `_collect_grammar_tracked_nodes` 只从 grammar KG 收 tracked 节点；
 - `skilltree.py::toggle-tracked` 只允许 grammar KG 的 level-2 节点切 tracked；
 - PDF 知识点抽屉里只有 `n.kind === 'grammar'` 的节点才渲染「👁 跟踪」按钮。
@@ -145,7 +145,7 @@ L2 完整字段（KG 同步后）：
 
 ### 4.1 venv 隔离原因
 
-webapp 跑系统 Python（`/root/webapp` 的 Flask 进程），**装不了 spaCy + en_core_web_sm 模型**
+webapp 跑系统 Python（当前唯一活跃实例是 Pi 的 `/home/bwicarus/webapp`，gunicorn 起 `/usr/bin/python3`；旧文里的 `/root/webapp` 是已暂停的 VPS 视角），**装不了 spaCy + en_core_web_sm 模型**
 （依赖重、跟 webapp 环境冲突）。所以 spaCy 单独装在一个隔离 venv 里，webapp 通过 **subprocess** 调它：
 
 - venv 路径：`SPACY_PYTHON` env（默认 `/home/bwicarus/spacy-venv/bin/python`）。
@@ -159,8 +159,8 @@ webapp 跑系统 Python（`/root/webapp` 的 Flask 进程），**装不了 spaCy
 
 - `spacy_parse.py --server`（`serve()`）：启动即 `_load()` 加载模型，stdout 先吐一行 `{"ready": true}`；
   之后 stdin 每行一个 `{"text": ...}`、每行回一个 JSON + flush（JSON 编码天然处理句内换行）；EOF/管道断 → 退出。
-- webapp 侧 `pdf_reader.py::_spacy_worker_request(sentence, timeout=10)`：
-  - `_SPACY_LOCK` 覆盖**完整收发**（gunicorn 8 gthread 下防多请求响应错配，请求串行排队）；
+- webapp 侧 `grammar_reader.py::_spacy_worker_request(sentence, timeout=10)`（2026-07-06 随 grammar 路由从 `pdf_reader.py` 搬出；`_spacy_available` / `SPACY_PY` 仍留在 `pdf_reader.py` 并注入进来）：
+  - `_SPACY_LOCK` 覆盖**完整收发**（gunicorn 单 worker + 32 gthread 线程下防多请求响应错配，请求串行排队；线程数 2026 年因 SSE 打满线程池的全站宕机事故从 8 提到 32）；
   - 进程没起 / 死了（`poll() is not None`）就地拉起；首次多给 8s 等模型加载（先存进程盒 `_SPACY_PROC`
     再等 ready，超时路径才 kill 得到）；
   - 超时 / 异常 → kill + 置空进程盒，下次重拉；本次返回 None（调用方 `_spacy_grammar` 返回 None
@@ -191,7 +191,7 @@ webapp 跑系统 Python（`/root/webapp` 的 Flask 进程），**装不了 spaCy
 
 ## 5. `pdf_reader.py` grammar 路由清单
 
-全部在 `pdf_reader.py` 约 L10476–11222（`bp` blueprint，挂在 `/pdf` 前缀下；行号随版本漂移，按路由名 grep）。
+全部在 `_server_deploy/grammar_reader.py`（2026-07-06 结构拆分第 4 刀时从 `pdf_reader.py` 整块搬出：`register_grammar(bp, …)` 把 8 条路由 `add_url_rule` 挂回 pdf_reader 的同一个 `bp`，仍在 `/pdf` 前缀下、endpoint 名不变；所以按路由名 grep 落到的是 grammar_reader.py，改服务端实现改这个文件，它在 `scripts/reader_deploy_manifest.py` 清单里是独立一项）。
 
 | 路由 | 方法 | body / query | 返回 / 行为 |
 |---|---|---|---|
@@ -339,7 +339,7 @@ PDF 设置面板「📊 启用语法分析（per-PDF）」`renderGrammarTrackLis
    所以 grammar-analyze 的缓存命中必须验 `tokens`/`analyses` 真内容（否则空结构被当命中返回）；
    两边写入都必须 merge 旧字段（直接整文件覆盖会冲掉对方的结果）。
 10. **spaCy worker 是单进程 + 锁串行**：`_spacy_worker_request` 的 `_SPACY_LOCK` 覆盖完整收发，多请求排队。
-    绝不能绕锁直接写 worker stdin（gunicorn 8 gthread 下响应会错配到别的请求）。worker 卡死靠超时
+    绝不能绕锁直接写 worker stdin（gunicorn 32 gthread 下响应会错配到别的请求）。worker 卡死靠超时
     kill + 置空自愈，下一个请求重拉（首次含模型加载 ~3s）。
 
 ---

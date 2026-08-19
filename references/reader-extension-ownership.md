@@ -1,6 +1,8 @@
 # PWA / 浏览器扩展能力与数据归属
 
-> 0.2.42 当前规则。目标不是让扩展成为 PWA 的后台 provider，而是：
+> ⚠ **状态复核（2026-08-19）**：PWA 已于 2026-08-14 退役 —— `/pdf/`、`/pdf/search`、`/pdf/epub/view`、`/pdf/fav/view` 由 `_server_deploy/reader_pwa_retirement.py` 的 `RETIRED_PAGE_ENDPOINTS` 返回 410；正式交付表面只剩 **iOS App**（`ios/BWReader` 的 ReaderBundle 本地渲染）**与浏览器扩展**。下文所有「PWA」列/行只作历史契约保留，不得据此新增或保留为 PWA 做的兼容取舍。本文未登记 App 表面：某条阅读器路由到底由谁执行，以 `ios/BWReader/native_reader_interface_manifest.json` 的 owner **加** `_server_deploy/static/pdf/native-local-runtime.js` 里有无本地分支为准（判据 `python scripts/where_does_this_route_run.py <路由>`）。
+
+> 当前候选版本以 `extensions/bw-reader-webext/manifest.json` 为唯一来源，本文不写死版本号（本轮为 0.2.121，仅作参照）。目标不是让扩展成为 PWA 的后台 provider，而是：
 > 普通网页全部由扩展实现；真书由 PWA 渲染，扩展存在时接管共享 UI/网络/通用数据。
 
 ## 运行矩阵
@@ -41,7 +43,7 @@
 | 全局设置 | 扩展本地权威 | PWA fallback | 扩展权威；PWA 只补缺失值 |
 | 设备/书籍设置 | 扩展设备项；网页会话项不跨设备 | PWA | PWA document/device store |
 | 查询/翻译/词典缓存 | 扩展按账户 | PWA fallback | 扩展按账户 |
-| 跨设备同步 | 本地 journal，服务器 relay 待完成 | PWA journal | 扩展/PWA 各自提交归属内变化 |
+| 跨设备同步 | 本地 journal + 服务器 relay 已落地（`_server_deploy/reader_sync_relay.py`，`sync-gateway/2` / `sync-v3`，`/api/reader/sync/{exchange,snapshot,signal,owner/*}`，由 `app.py` 无条件 `register_reader_sync_relay` 注册） | 历史 PWA journal | 各端提交归属内变化 |
 | 第三方网页抓取 | 浏览器直接访问；受控后台请求 | 不支持 | 不支持 |
 | 旧网页代理/RBI | 不使用 | 不使用 | 不使用 |
 
@@ -108,7 +110,7 @@
 扩展只对四个精确真书路由尝试接管：
 
 - `/pdf/view`
-- `/pdf/epub/view`
+- `/pdf/epub/view`（⚠ 2026-08-14 起返回 410，见 `_server_deploy/reader_pwa_retirement.py` 的 `RETIRED_PAGE_ENDPOINTS`；扩展 manifest 仍匹配这条 URL，但已无可接管的页面。四条里实际还活着的是 `/pdf/view`、`/pdf/html/view`、`/pdf/fav/open`）
 - `/pdf/html/view`
 - `/pdf/fav/open`
 
@@ -146,7 +148,7 @@ Favorite 路由使用 EPUB 壳，但身份必须是 `app=epub + route=favorite`�
 账户数、manifest 或 checksum 不一致时 fail closed。新账户从空分区开始，所有稳定 ID 原样复制。
 
 首批已覆盖 reading-pos、phrases、notes、PDF/EPUB/HTML highlights、entity/assets。
-vocab/Anki、conversation、attention、ink、favorites、userpages 等 deferred-owned 域继续保留
+ink 与 userpages 已随后纳入分区（`_server_deploy/reader_sidecar_store.py` 的 `LEGACY_DATASETS` 含 `pdf-ink`/`epub-ink`/`reader-userpages`）；仅剩 vocab/Anki、conversation、attention、favorites 等 deferred-owned 域继续保留
 原功能，之后逐域无损迁移。
 
 ## 禁止事项

@@ -22,7 +22,7 @@
   ⚠ 配置陷阱(实测):`features.fast_mode` 键非法、`[mcp_servers.X] enabled=false` 覆盖语法非法
   (报 invalid transport)——**任一非法键=整份配置静默回默认**,改完必须看 configWarning/RUST_LOG。
   默认模型改 gpt-5.6-luna+low(官方定位:清晰重复的提取/转换/摘要=阅读场景)。
-- 定位:**只当纯文本/看图模型用**(read-only + approvalPolicy never + cwd=/tmp),不让它当 agent;
+- 定位:**只当纯文本/看图模型用**(read-only + approvalPolicy never + 主路 cwd=`~/.reader-codex/empty`,见 assistant.py `_CODEX_RC_CWD`:1401 与 `_CodexApp.thread_start`:1695;⚠ 只有 `codex exec` 兜底那条仍 `cwd="/tmp"`,见 `_codex_exec_text`:1817),不让它当 agent;
   编排循环现已接入,见 §6。
 
 ## 1. 四种集成方式(升级路径)

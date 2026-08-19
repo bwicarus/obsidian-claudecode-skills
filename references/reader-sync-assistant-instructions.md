@@ -2,7 +2,7 @@
 
 > 用途：粘贴进 **Codex Desktop** 与 **ChatGPT Classic** 的「自定义指令 / 记忆」。
 > legacy-inject 模式下，Reader 会把你正在读的内容**作为真实消息**打进对话框并发送。
-> 没有这套规则，AI 会对每一条上下文都回一句，语音模式下会一直说个不停。
+> 桥接侧其实已经自动送过一遍：`voice_typist.py::SESSION_PREAMBLE_TEXT` 由 `_submit_session_preamble_once` 在每通电话开头发一次（`session_preamble.enabled` 默认 true），所以手工粘贴是**加固**而非前置条件；两边都没有时，AI 才会对每条上下文都回一句。
 >
 > 本文按 `voice_typist.py::format_context_event` 的**实际输出**编写（2026-08-02 核对），
 > 不是凭记忆复述。若那边的行首格式变了，这里要同步。
@@ -59,6 +59,9 @@
 
 - DRAWING | id=… | p12 | ……
   我在这一页的手写批注已经定稿。
+
+- COMMAND_FAILED | id=… | p12 | ……
+  阅读器执行我请求的某个动作失败了。知道即可，同样不要回复。
 
 同一页的内容可能反复同步（我翻页、改选区、继续画）。
 以最新一条为准，旧的直接覆盖，不要把它们当成多次不同的提问。

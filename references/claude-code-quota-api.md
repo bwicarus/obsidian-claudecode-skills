@@ -46,7 +46,7 @@ Claude Code 自己会用 `refreshToken` 自动续期 `accessToken`——**每次
 ## 完整 curl 示例
 
 ```bash
-TOKEN=$(python3 -c "import json; print(json.load(open('/root/.claude/.credentials.json'))['claudeAiOauth']['accessToken'])")
+TOKEN=$(python3 -c "import json,pathlib; print(json.loads((pathlib.Path.home()/'.claude/.credentials.json').read_text())['claudeAiOauth']['accessToken'])")   # Pi 上凭据在 /home/bwicarus/.claude；只有 root 实例（旧 VPS / root cron）才是 /root/.claude —— scripts/lib/claude_quota.py::_credentials_path() 就是先 $HOME 再回退 /root
 
 curl -sS https://api.anthropic.com/api/oauth/usage \
   -H "Authorization: Bearer $TOKEN" \
@@ -141,7 +141,7 @@ binary 把所有 endpoint 路径以明文字符串嵌着，挨个 curl 试就知
 | `time_to_safe_cutoff(target_hour=9, target_min=0, buffer_min=30, now=None)` | 时间感知截止：因 5h 是滑动窗口，只要在 `target - 5h - buffer` 前停跑，target 时 5h util 自然≈0 |
 | `can_run_aggressive(target_hour=9, ..., target_7d_util=88.0)` | 激进模式：cutoff 前不看 5h，只看 7d 窗口未爆 |
 
-调用方：`_server_deploy/control.py`（`/control/api/quota-now` 路由）、`scripts/daily_anki_status.py`、`scripts/kg/audit_kg.py`、`scripts/kg/rescan_rolling.py`。`python -m scripts.lib.claude_quota`（`__main__`）会打印当前 quota + `can_run_more` 判定。
+调用方：`_server_deploy/control.py`（`/control/api/quota-now` 路由）、`_server_deploy/assistant.py`（`_quota_loop()` 每 150s 轮询，`util_5h`/`util_7d_sonnet` 超阈值只给前端一句提醒，不降级不阻断）、`scripts/daily_anki_status.py`、`scripts/kg/audit_kg.py`、`scripts/kg/rescan_rolling.py`。`python -m scripts.lib.claude_quota`（`__main__`）会打印当前 quota + `can_run_more` 判定。
 
 ---
 

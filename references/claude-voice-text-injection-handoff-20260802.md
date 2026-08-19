@@ -1,5 +1,7 @@
 # Claude 接管：BWReader App 电脑语音与文字注入（2026-08-02 JST）
 
+> ⚠ **2026-08-02 一次「零 START」故障的现场记录，勿据其推断现状**：现场坐标已全部过期 —— 桥当时被回滚到 0.1.38（现候选 `windows/candidates/0.1.159`）、Swift 真值当时在 `C:\iCloudDrive\BWReaderNative.swiftpm`（2026-08-03 `49abb569` 起在仓库 `ios/BWReader/App/`）、App 当时是加载 Pi 上 Reader 网页的壳（现为随包发的本地 ReaderBundle + 环回 `127.0.0.1:43129`）。文首指向的 `claude-computer-client-full-handoff-20260802.md` 同样已归档。现行架构见 CLAUDE.md「iOS App 形态」，工程分工见「工程所有权」（2026-08-16 起全部归 Claude）。
+
 > 这份文件只记录一次“零 START”故障。产品全貌（用户所称“电视按钮”、Swift App、
 > 普通电话分流、Codex / GPT Classic、语音与文字模式、生产/安装/WIP 边界）请先读：
 > `C:\claude\references\claude-computer-client-full-handoff-20260802.md`
