@@ -223,6 +223,11 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   // 字符层刚就绪 → 把"等着钉到这一页正文上"的卡接回去。时机必须是这里而不是
   //   页面渲染完：卡是按**字符序号**定位的，charBoxes 没挂上之前定不出位置。
   try { window.__pageBindRetry && window.__pageBindRetry(num); } catch (_) {}
+  // 手动钉在词上的便签同理，而且**只能在这里**接：便签的挂载点是 04-render 里
+  //   `dataset.loaded='1'` 那一句，跑在 charBoxes 挂上之前 —— 那时 __pageBindCard
+  //   必然报 no-char-layer，卡就退回老浮层了。表现是「钉的时候好好的，重开书
+  //   变回圆球」，而且不报任何错。mountAll 幂等，重复跑无副作用。
+  try { if (window.RC && RC.stickynote && RC.stickynote.repositionAll) RC.stickynote.repositionAll(); } catch (_) {}
   const textLayerIdentity = String(d.source || 'unknown')
     + (d.revision ? '/' + String(d.revision) : '');
   window.dlog?.(

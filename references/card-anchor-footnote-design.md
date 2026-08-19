@@ -328,15 +328,32 @@ char-layer 是个**空的透明 div**，字都在页图里（`13-selection.js:67
 
 ### 必须改的
 
-1. **回执通道**（约 40 处，见 §4.3）—— **先做这条**，否则后面全是盲测
-2. `34-bindcard.js`：新增 `page-words` 锚（建议**改它**而不是另起一套）
-3. 新增脚注标记层 + 浮标轨（新代码）
-4. `noteWordRect` 扩返回值
-5. charBoxes 就绪回调（`08-charlayer.js`）
-6. PDF 侧懒迁移 `_pdfUpgradeAnchor`（新代码）
-7. `buildLocalPageContext`：改用 `⟦…⟧` 家族 + 调整截断顺序
-8. `bind` 字段白名单 **11 处**（跑 `python scripts/contract_sites.py card-top-fields`）
-9. C# `CopyEmbeds` 的 `_reason` 闭集
+> 2026-08-20 状态。✅=已落地并有契约测试（逐条变异验证过「破坏即红」）。
+
+1. ✅ **回执通道**（11 处闸/重建点，见 §4.3）—— 先做的这条，否则后面全是盲测。
+   `4a6ac19f`；测试 `bind-receipt-truthful.contract.test.mjs`
+2. ✅ `34-bindcard.js` 改 `page-chars` 锚（改它，没另起一套）
+3. ✅ 标记层（`.pgbind-layer` + `.pgmark` + `.pgmark-n`）。**浮标轨没做** ——
+   见下方「变更过的决定」
+4. ✅ `noteWordRect` 扩返回值（`from`/`to`/`text`/`page`/`dist`）
+5. ✅ charBoxes 就绪回调（`08-charlayer.js`）—— **不是可选项**：便签的挂载点是
+   `04-render.js` 里 `dataset.loaded='1'` 那一句，跑在 `__charBoxes` 挂上**之前**，
+   所以词锚在那一刻必然 `no-char-layer` → 退回老浮层，且不报任何错。表现是
+   「钉的时候好好的，重开书变回圆球」。接在现成的 `__pageBindRetry` 同一处
+6. ⬜ PDF 侧懒迁移 `_pdfUpgradeAnchor` —— 存量卡还是老浮层形态，不影响新卡
+7. ⬜ `buildLocalPageContext` 的 `⟦CARD_START⟧` 内联标记 —— AI **读**页面时还看不见
+   卡片编号。这是 §五那条「回传时范围内若有卡片也要用符号标出」的另一半
+8. ✅ `bind` 字段白名单（跑 `python scripts/contract_sites.py card-top-fields`）
+9. ✅ C# `CopyEmbeds` 的 `_reason` 闭集
+
+### 变更过的决定
+
+- **浮标轨（右侧悬浮点）没有做**。样本迭代到最后用户选的是「插入后自动锁定到
+  前方的分词元素，高亮整个分词，右上角加上数字，然后点击这个词直接展开卡片」
+  —— 词本身就是把手，右侧那条轨道的作用（找到卡在哪）被角标序号取代了。
+  §三的「同心圆合并」同理作废。想恢复的话样本还在 artifact 里。
+- **手动钉卡的词锚存在 `card` 载荷里，不是 `anchor`**（理由见「已知会咬人的」
+  第 2、3 条）。好处是服务端和 App runtime 一行都不用改。
 
 ### 已知会咬人的
 

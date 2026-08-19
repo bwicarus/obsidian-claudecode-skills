@@ -89,3 +89,20 @@ test("标记层带 page-layer 类，去边模式下才不会错位", () => {
   assert.match(CSS, /\.crop-on>\.page-layer/);
   assert.match(BINDCARD, /ensurePageLayer\(pw, 'pgbind-layer'\)/);
 });
+
+test("charBoxes 就绪时必须重挂便签，否则首次开页一定退回浮层", () => {
+  const CHAR = read("_server_deploy/static/pdf/reader.src/08-charlayer.js");
+  const RENDER = read("_server_deploy/static/pdf/reader.src/04-render.js");
+  const NOTE2 = read("_server_deploy/static/pdf/rc-stickynote.js");
+  // 时序事实：便签挂载点在 dataset.loaded='1' 那一句，跑在 charBoxes 挂上**之前**。
+  // 所以词锚在那一刻必然 no-char-layer → 退回老浮层，且不报任何错。
+  // 表现是「钉的时候好好的，重开书变回圆球」。
+  assert.match(RENDER, /wrap\.dataset\.loaded = '1';\s*\n\s*try \{ if \(window\.__uiShared && window\.RC && RC\.stickynote\) RC\.stickynote\.mountPending\(\)/);
+  const iBoxes = CHAR.indexOf("wrap.__charBoxes = charBoxes;");
+  const iRemount = CHAR.indexOf("RC.stickynote.repositionAll()");
+  assert.ok(iBoxes >= 0 && iRemount > iBoxes, "重挂必须排在 __charBoxes 赋值之后");
+  // 同一处也接 AI 那条 —— 两条路共用这个时机，别只接一条
+  assert.ok(CHAR.indexOf("window.__pageBindRetry(num)") > iBoxes);
+  // repositionAll 就是 mountAll，幂等；不幂等的话这里会变成重复建 DOM
+  assert.match(NOTE2, /repositionAll: mountAll,/);
+});
