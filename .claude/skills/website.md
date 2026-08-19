@@ -118,7 +118,7 @@ Session 有效期 30 天（`permanent_session_lifetime`）。
 ```bash
 # 服务器上（VPS=/root，Pi=/home/bwicarus）
 git -C <项目根> pull
-cp <项目根>/_server_deploy/app.py <webapp目录>/app.py
+bash scripts/deploy_reader.sh    # app.py 在部署清单内，别手工 cp
 sudo systemctl restart webapp
 sudo nginx -t && sudo systemctl restart nginx   # 新增 location 块 reload 可能不完全生效，用 restart
 ```
@@ -171,7 +171,7 @@ Write-Host "Obsidian: $obsidianRunning  Anki: $ankiRunning"
 ```bash
 # 本地改 _server_deploy/... → git push；然后在服务器上：
 git -C <项目根> pull
-cp <项目根>/_server_deploy/templates/login.html <webapp目录>/templates/   # 或 app.py / control.py 等
+cp <项目根>/_server_deploy/templates/login.html <webapp目录>/templates/   # 仅限清单外的文件；app.py / control.py 在清单内，走 deploy_reader.sh
 sudo systemctl restart webapp
 ```
 

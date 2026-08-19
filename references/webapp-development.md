@@ -38,21 +38,21 @@ nginx 两个 server 块各有 `location ^~ /static/pdf/ { … try_files $uri =40
 
 | 路径 | 部署到服务器 |
 |---|---|
-| `_server_deploy/app.py` | `webapp/app.py`（git tracked，~1020 行，cp/scp 部署） |
+| `_server_deploy/app.py` | `webapp/app.py`（git tracked，~1020 行，**在部署清单内 → `scripts/deploy_reader.sh`**） |
 | `_server_deploy/control.py` | `webapp/control.py` |
 | `_server_deploy/templates/control.html` | `webapp/templates/control.html` |
 | `_server_deploy/qa_server.py` | `claude/_server_deploy/qa_server.py`（git pull 拿到）|
 | `_server_deploy/{skilltree,pdf_reader,fitness,fitness_coach,insights,voice,assistant,epub_assistant,youtube_*}.py` | `webapp/`（各 blueprint，app.py 末尾 `register_*` 挂载）|
 | `_server_deploy/static/*` | **`/var/www/html/static/`**（nginx 直服，不进 `webapp/`，见上「静态文件由 nginx 直服」）|
 
-> 部署根按环境换：Pi = `/home/bwicarus/webapp/`（**当前主力**）、VPS = `/root/webapp/`（⏸ 暂停）。下文沿用 VPS `/root/...` 视角写，Pi 换 `/home/bwicarus/...`。`_server_deploy/app.py` 是 Flask 主入口，**完全在版本控制下**，可像 control.py 一样 cp/scp 部署。
+> 部署根按环境换：Pi = `/home/bwicarus/webapp/`（**当前主力**）、VPS = `/root/webapp/`（⏸ 暂停）。下文沿用 VPS `/root/...` 视角写，Pi 换 `/home/bwicarus/...`。`_server_deploy/app.py` 是 Flask 主入口，**完全在版本控制下**；它与 control.py 都在部署清单内 → 走 `scripts/deploy_reader.sh`，**不要手工 cp/scp**（脚本自带摘要校验、原子安装、失败回滚与健康检查）。
 
 ### 服务器（真实部署路径）
 
 | 路径 | 内容 |
 |---|---|
 | `/root/webapp/app.py` | Flask 主入口（765 行，由各种 routes 直接挂 @app.route；源码 = git `_server_deploy/app.py`） |
-| `/root/webapp/control.py` | 控制面板 blueprint（git tracked，scp 部署）|
+| `/root/webapp/control.py` | 控制面板 blueprint（git tracked，**在部署清单内 → `scripts/deploy_reader.sh`**）|
 | `/root/webapp/.env` | SECRET_KEY / RELAY_KEY / 其他 webapp env |
 | `/root/webapp/templates/*.html` | Jinja2 模板 |
 | `/root/webapp/data/users/<username>/{dashboard,history,private}/` | 用户私有数据 |

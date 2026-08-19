@@ -20,7 +20,7 @@
 - **`_server_deploy/static/pdf/reader.js`** — 阅读器主逻辑模块（~10262 行，运行时是**一个 ES module**；配置走 `window.__PDF_CFG`）。**它是构建产物**：由下面的分块源 `cat` 拼接而成
 - **`_server_deploy/static/pdf/reader.src/NN-*.js`** — 按功能分块的源（**28 个文件 00~27**，60~730 行）。**改前端 = 改这里对应的功能文件**，不是改 reader.js。拼接成单文件运行 → 所有现有交叉调用/全局原样工作（**不是** import/export 强边界，是「分文件、共享同一模块作用域」，故拆分零运行时风险，diff 拼接结果 vs 原 reader.js = 0）。分块清单：
   `00-resilient-fetch`(全站网络韧性) `01-boot`(PDFJS import/配置/langs) `02-position`(位置记忆) `03-loader`(loadPdf) `04-render`(renderPage) `05-nav`(页导航/缩放/侧栏/vocab-list/tts) `06-layout`(阅读模式/适宽/pinch) `07-continuous`(连续滚动) `08-charlayer`(char-layer绑定/生词下划线) `09-ruby`(振假名) `10-pagetranslate`(整页翻译/行间对照) `11-search`(全文搜索) `12-vocab-sentences`(句子虚框/翻译浮层) `13-selection`(char选中核心) `14-textlayer-legacy`(旧textLayer+工具栏/preview) `15-phrase-wordpop`(F6词组+单词小框) `16-caret-select`(caret/bindTextLayerClick) `17-highlight`(高亮sidecar+markFromResult) `18-grammar`(语法分析+依存图) `19-dict`(字典SSE+hl popover+日语AI) `20-result-draft`(结果modal/草稿/后台job) `21-misc-ai`(md/设置/`_aiStream`/aiCall/onTranslate等) `22-prewarm`(整本预热) `23-bookshelf`(书架) `24-connquality`(连接质量探针) `25-assistant`(侧栏 Copilot 助手) `26-figures`(插图徽标) `27-rc-adapter`(PdfAdapter：把 reader.src 内部桥进共享 rc-* 层)
-  - **构建**：`bash scripts/build_pdf_reader_js.sh`（= `cat reader.src/*.js > reader.js`，NN- 前缀保序）。`check_pdf_reader_js.sh` 会**先自动重建再校验**，所以正常流程 `改 src → bash scripts/check_pdf_reader_js.sh（顺带重建）→ cp reader.js → 部署`
+  - **构建**：`bash scripts/build_pdf_reader_js.sh`（= `cat reader.src/*.js > reader.js`，NN- 前缀保序）。`check_pdf_reader_js.sh` 会**先自动重建再校验**，所以正常流程 `改 src → bash scripts/check_pdf_reader_js.sh（顺带重建）→ bash scripts/deploy_reader.sh`（reader.js 在部署清单内，**不要手工 cp**；且这只到桌面/旧网页表面 —— 到 App 要新 TestFlight 构建，到 Safari 扩展要同步 vendor 副本并重新打包）
   - 进一步要做 import/export 强边界 = 逐个模块迁移（拆全局状态，风险高、无运行时测试，须小步 + 真机验证），目前**未做**
 - `_server_deploy/templates/pdf_index.html` — PDF 列表页（GET `/` render）
 
@@ -1216,7 +1216,7 @@ EPUB 开书跳书尾 bug 两轮修复(v2 前缀 / scrollRestoration=manual)后,�
 
 ## §17 2026-07-06 后端结构拆分(五刀)——pdf_reader.py 域模块化
 
-pdf_reader.py 11.6k 行 → 9.4k 行,五个自包含域拆成独立模块(**部署时必须跟 pdf_reader.py 一起 cp 到 `/home/bwicarus/webapp/`**):
+pdf_reader.py 11.6k 行 → 9.4k 行,五个自包含域拆成独立模块(**与 pdf_reader.py 同在部署清单内，一起走 `bash scripts/deploy_reader.sh`，不要手工 cp**):
 
 | 模块 | 域 | 路由 | 注入依赖 |
 |---|---|---|---|

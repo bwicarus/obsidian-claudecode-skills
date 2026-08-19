@@ -138,9 +138,9 @@ sudo mkdir -p /var/www/html/static/qa
 sudo chown bwicarus:bwicarus /var/www/html/static -R
 
 SRC=~/claude/_server_deploy
-cp $SRC/app.py $SRC/control.py ~/webapp/
+bash scripts/deploy_reader.sh          # app.py / control.py 都在部署清单内，别手工 cp
 cp -r $SRC/templates/* ~/webapp/templates/
-cp $SRC/static/nav.js /var/www/html/static/
+# nav.js 同样在部署清单内，已由上面的 deploy_reader.sh 一并投递
 
 # 模板内容（从 VPS rsync 或 git 出来）
 rsync -avz $VPS:/root/webapp/data/{dashboard_template,history_template}/ ~/webapp/data/

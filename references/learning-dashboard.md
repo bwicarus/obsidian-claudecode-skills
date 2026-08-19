@@ -12,7 +12,7 @@
 - app.py 三处接入：`from insights import register_insights; register_insights(app)`(app.run 之前) + `PROTECTED_PREFIXES` 加 `/insights`(鉴权) + `NAV_INJECT_PREFIXES` 加 `/insights`(注 nav.js+PWA)
 - Pi nginx：`/etc/nginx/sites-available/bwicarus` 两个 server 块(80+443)各加一行 `location /insights { proxy_pass http://127.0.0.1:5000; ... }`(Pi 的 `location /` 是静态 404 兜底不反代，必须显式加；改完 `nginx -t && systemctl restart nginx` 不是 reload)
 - 入口：nav.js DEFAULT_LINKS + 用户 nav-links.json 都加了「学习数据看板」→ `/insights/`；`/dashboard` 页头也有按钮
-- 部署：`cp insights.py app.py /home/bwicarus/webapp/ && cp templates/insights.html /home/bwicarus/webapp/templates/ && sudo systemctl restart webapp`
+- 部署：**分两半**。`app.py` 在部署清单内 → `bash scripts/deploy_reader.sh`；`insights.py` 与 `templates/insights.html` 在清单外 → `cp insights.py /home/bwicarus/webapp/ && cp templates/insights.html /home/bwicarus/webapp/templates/ && sudo systemctl restart webapp`。（判归属：`python3 scripts/reader_deploy_manifest.py | cut -f1 | grep -F <文件>`）
 
 ## 路由
 - `GET /insights/` → 渲染 insights.html

@@ -1,6 +1,8 @@
 # iPad 快捷指令切换到服务器（替代本机 Windows）
 
-把 iPad 拍照 + 截图问答的目标从 Windows 100.x 切到 bwicarus.space 服务器的 100.x。
+把 iPad 拍照 + 截图问答的目标从 Windows 100.x 切到服务器的 100.x。
+
+> ⚠ **本文写于 VPS 时代，命令里的 `bwicarus.space` / `root@` 已过时**：VPS 自 2026-06-10 起暂停（只留公网 webapp，自动化全 disable），当前唯一活跃实例是 **Pi**（`bwicarus.taile44d0c.ts.net`，ssh 别名 `pi`，用户 `bwicarus` 而非 root）。照做前把主机与用户换成 Pi 的；Tailscale IP 也要换成 Pi 的 `100.101.15.57`。
 
 ## 前置：Tailscale 授权
 

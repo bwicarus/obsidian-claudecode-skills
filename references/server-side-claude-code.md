@@ -217,7 +217,9 @@ journalctl -u anki-headless -n 30 --no-pager
 - Windows 上的 SSH client config / git credential helper（其他设备能 SSH 就行）
 - Windows Claude Code session jsonl（聊天回顾用，跟项目继续无关）
 
-## 服务器侧 git push 配置流程（一次性，2026-05-15 完成）
+## 服务器侧 git push 配置流程（一次性，2026-05-15 在 VPS 上完成）
+
+> ⚠ 下面是**当时在 VPS 上做的记录**（VPS 自 2026-06-10 暂停）。Pi 上的等价配置已另行完成；要重做时把 `ssh root@bwicarus.space` 换成 `ssh pi`、`/root/` 换成 `/home/bwicarus/`。
 
 ```bash
 # 1. 服务器生成 SSH key
