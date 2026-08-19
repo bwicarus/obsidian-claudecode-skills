@@ -8,6 +8,7 @@ const read = (path) => readFileSync(new URL(path, ROOT), "utf8");
 const INBOUND = read("_server_deploy/static/pdf/rc-computer-voice.js");
 const VENDOR = read("extensions/bw-reader-webext/vendor/rc-computer-voice.js");
 const CONTRACT = read("_server_deploy/reader_card_contract.py");
+const EXT_CALL = read("extensions/bw-reader-webext/call.js");
 const CSHARP = read(
   "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderRealtimeOutput.cs",
 );
@@ -25,14 +26,17 @@ const MCP = read(
 //           additionalProperties、localFileQuery 的精确参数表 —— 全是
 //           「清单类的东西改了一处，以为改好了」。
 //
-// 所以这里不测某一处放没放行，测的是**五份是否彼此一致**。少改一处就红。
+// 所以这里不测某一处放没放行，测的是**各份是否彼此一致**。少改一处就红。
+// ⚠ 数量本身也会错：写这份测试时算的是五份，真实是六份 —— 漏掉的
+//   extensions/bw-reader-webext/call.js 正是当时还在拒的那一处。
+//   所以别再靠数，用 scripts/contract_sites.py 查。
 //
 // ⚠ 入站闸里还有一个更隐蔽的形态：那两处都是**重建**卡片对象而不是透传，
 //   所以"放行"和"搬过去"是两件事。只放行不搬的表现是「校验全过、卡片照常
 //   出现、就是不钉」—— 比被拒难查得多，因为链路上没有任何一处报错。
 //   下面第 3、4 条专门钉这个。
 
-test("bind 在五份卡片字段白名单里都放行", () => {
+test("bind 在六份卡片字段白名单里都放行", () => {
   // ① 阅读器入站闸：card 分支的可选字段
   assert.match(
     INBOUND,
@@ -66,6 +70,16 @@ test("bind 在五份卡片字段白名单里都放行", () => {
     MCP,
     /\["bind"\] = new JsonObject/,
     "BuildTypedCardArgumentsSchema 必须暴露 bind",
+  );
+
+  // ⑥ 扩展侧投递闸。写这份测试时它没被算进来 —— 前五处全放行之后，用户拿到的
+  //    仍是 BW_READER_REALTIME_OUTPUT_SCHEMA，卡的就是这里。
+  //    「五份」当时是我数出来的，而不是查出来的；现在登记在
+  //    reader-specs/contract-sites.json，用 scripts/contract_sites.py 查。
+  assert.match(
+    EXT_CALL,
+    /keysWithOptional\(p\.card, \["kind", "title", "data"\], \["bind"\]\)/,
+    "extensions/bw-reader-webext/call.js 的 card 闸必须放行 bind",
   );
 });
 

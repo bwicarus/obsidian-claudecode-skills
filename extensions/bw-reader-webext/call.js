@@ -268,6 +268,20 @@ function exactKeys(value, keys) {
     actual.every((key, index) => key === expected[index]);
 }
 
+/// 必填全等 + 允许一组具名可选字段。
+///
+/// exactKeys 是全等：多一个少一个都拒。那对"这条协议只有这些字段"是对的，
+/// 但表达不了"可选"。加这个而不是放宽 exactKeys —— 别的调用点仍然该严格。
+function keysWithOptional(value, required, optional) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const seen = new Set(Object.keys(value));
+  for (const key of required) {
+    if (!seen.delete(key)) return false;
+  }
+  for (const key of optional) seen.delete(key);
+  return seen.size === 0;
+}
+
 function safeVisualId(value, nullable) {
   if (nullable && value === null) return null;
   const text = String(value || "");
@@ -673,7 +687,15 @@ function normalizeRealtimeOutputEvent(message) {
         typeof p.label !== "string" || !p.label || p.label.length > 320 ||
         (p.detail !== null && (typeof p.detail !== "string" || p.detail.length > 6000))) return null;
   } else if (value.kind === "card") {
-    if (!exactKeys(p, ["card"]) || !exactKeys(p.card, ["kind", "title", "data"]) ||
+    // bind（把卡钉在正文某一段上）是可选的第四个字段。
+    //
+    // ⚠ 这是这条链上**第六份**卡片字段白名单。前五份（MCP inputSchema、
+    //   C# ValidateCard、阅读器入站闸 ×2、服务端契约）都放行之后，用户拿到
+    //   的仍是 BW_READER_REALTIME_OUTPUT_SCHEMA —— 卡在这里。
+    //   `payload: p` 是透传不重建，所以放行即可，不需要再搬字段。
+    //   登记在 reader-specs/contract-sites.json，别再靠记忆数。
+    if (!exactKeys(p, ["card"]) ||
+        !keysWithOptional(p.card, ["kind", "title", "data"], ["bind"]) ||
         !["weather", "news", "images", "videos", "fact", "general"].includes(p.card.kind) ||
         (p.card.title !== null && (typeof p.card.title !== "string" || p.card.title.length > 320)) ||
         !p.card.data || typeof p.card.data !== "object" || Array.isArray(p.card.data)) return null;
