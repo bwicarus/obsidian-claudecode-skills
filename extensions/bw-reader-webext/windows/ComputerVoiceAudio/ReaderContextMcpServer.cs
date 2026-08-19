@@ -1215,7 +1215,19 @@ internal sealed class ReaderContextMcpServer
                     + "watch/share URL (do not fabricate a video id), "
                     + "fact={answer,detail?}, or general={text?}. The server "
                     + "strictly revalidates the existing Realtime card "
-                    + "protocol and waits for the same delivery receipt.",
+                    + "protocol and waits for the same delivery receipt. "
+                    + "Optional `bind` pins the card to one element instead of "
+                    + "letting it float: {kind:'upage-block',upage,bid} targets "
+                    + "a block on a user-inserted page, and "
+                    + "{kind:'page-chars',page,from,to,text?,rev?} targets a "
+                    + "character range in the book body itself. Pass `text` "
+                    + "with page-chars whenever you can: the same word often "
+                    + "appears several times on one page, and the reader uses "
+                    + "`text` plus the original index to pick the right one "
+                    + "after a text layer changes. A bound card keeps its "
+                    + "position, collapses to a dot when idle instead of "
+                    + "disappearing, and falls back to a floating card when the "
+                    + "target is not on screen.",
                 ["inputSchema"] = BuildTypedCardArgumentsSchema(),
                 ["annotations"] = new JsonObject
                 {
@@ -1570,6 +1582,83 @@ internal sealed class ReaderContextMcpServer
                         ["description"] =
                             "Kind-specific exact object; see the "
                             + "reader://capabilities/cards guide.",
+                    },
+                    // 可选：把这张卡钉到页面上的某个元素。
+                    //
+                    // 2026-08-19 补。此前 bind 在服务端契约、跨机信封与两份规范
+                    // 文档里都有，唯独**没有暴露给 AI** —— 而这里是 AI 唯一真正
+                    // 读到的地方。加上 additionalProperties:false，等于它既看不见
+                    // 也传不进。用户实测反馈就是"AI 说没看到这个参数"。
+                    ["bind"] = new JsonObject
+                    {
+                        ["anyOf"] = new JsonArray
+                        {
+                            new JsonObject
+                            {
+                                ["type"] = "object",
+                                ["additionalProperties"] = false,
+                                ["required"] = new JsonArray("kind", "upage", "bid"),
+                                ["properties"] = new JsonObject
+                                {
+                                    ["kind"] = new JsonObject
+                                    {
+                                        ["const"] = "upage-block",
+                                    },
+                                    ["upage"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["maxLength"] = 200,
+                                    },
+                                    ["bid"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["maxLength"] = 200,
+                                    },
+                                },
+                            },
+                            new JsonObject
+                            {
+                                ["type"] = "object",
+                                ["additionalProperties"] = false,
+                                ["required"] = new JsonArray("kind", "page", "from", "to"),
+                                ["properties"] = new JsonObject
+                                {
+                                    ["kind"] = new JsonObject
+                                    {
+                                        ["const"] = "page-chars",
+                                    },
+                                    ["page"] = new JsonObject
+                                    {
+                                        ["type"] = "integer",
+                                        ["minimum"] = 1,
+                                    },
+                                    ["from"] = new JsonObject
+                                    {
+                                        ["type"] = "integer",
+                                        ["minimum"] = 0,
+                                    },
+                                    ["to"] = new JsonObject
+                                    {
+                                        ["type"] = "integer",
+                                        ["minimum"] = 0,
+                                    },
+                                    ["text"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["maxLength"] = 200,
+                                    },
+                                    ["rev"] = new JsonObject
+                                    {
+                                        ["type"] = "string",
+                                        ["maxLength"] = 200,
+                                    },
+                                },
+                            },
+                            new JsonObject
+                            {
+                                ["type"] = "null",
+                            },
+                        },
                     },
                 },
             },

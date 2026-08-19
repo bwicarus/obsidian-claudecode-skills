@@ -132,3 +132,58 @@ test("绑不上时退回浮层而不是丢卡", () => {
   assert.match(VOICECALL, /if \(okBind\) return true;/);
   assert.match(VOICECALL, /那一页还没打开，卡片先放浮层，等页面出现会自己归位/);
 });
+
+// ── AI 侧：它得**看得见**这个参数才可能用 ────────────────────────────
+//
+// 用户 2026-08-19 反馈：「ai 说他没有看到关于绑定元素的参数所以无法把卡片绑定到
+// 某个元素上」—— AI 说得完全对。C15 做了"契约四处同步"
+// （reader_card_contract / bridge_client / result-envelope.md / AGENTS.md），
+// 但漏了**AI 唯一真正读到的那处**：MCP 工具的 inputSchema 与 description。
+// 链路上有三道都不认 bind，任何一道漏掉这个功能对 AI 就不存在。
+
+test("MCP 卡片工具把 bind 暴露给 AI", () => {
+  const mcp = readFileSync(
+    new URL(
+      "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderContextMcpServer.cs",
+      ROOT,
+    ),
+    "utf8",
+  );
+  const schema = mcp.slice(
+    mcp.indexOf("BuildTypedCardArgumentsSchema() => new()"),
+    mcp.indexOf("private static JsonObject BuildExactSourceArgumentsSchema"),
+  );
+  assert.ok(schema.length > 0);
+  // ⚠ card 是 additionalProperties:false —— 不在 properties 里就等于传不进。
+  assert.match(schema, /\["bind"\] = new JsonObject/);
+  assert.match(schema, /\["const"\] = "upage-block"/);
+  assert.match(schema, /\["const"\] = "page-chars"/);
+  // 描述里要说清楚它是干什么的，否则 AI 看得见也不知道何时用
+  assert.match(mcp, /Optional `bind` pins the card to one element/);
+  // 「同一个词在一页里出现好几次」这条必须讲给 AI —— 不带 text 就没法消歧
+  assert.match(mcp, /the same word often\s*"\s*\+\s*"appears several times on one page/);
+});
+
+test("跨机信封放行 bind，但形状不对就拒收", () => {
+  const output = readFileSync(
+    new URL(
+      "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderRealtimeOutput.cs",
+      ROOT,
+    ),
+    "utf8",
+  );
+  // Exact 是 SetEquals（多一个字段就拒），所以可选字段要用另一个校验器 ——
+  // 不是放宽 Exact：别的调用点仍然该严格。
+  assert.match(output, /private static void ExactWithOptional\(/);
+  assert.match(
+    output,
+    /ExactWithOptional\(card, new\[\] \{ "kind", "title", "data" \}, new\[\] \{ "bind" \}\)/,
+  );
+  assert.match(output, /private static void ValidateCardBind\(JsonElement bind\)/);
+  // 两种 kind 都认
+  assert.match(output, /case "upage-block":/);
+  assert.match(output, /case "page-chars":/);
+  // 歪掉的区间要拒 —— 与其在页面上定出荒唐位置，不如让调用方立刻知道发错了
+  assert.match(output, /if \(page < 1 \|\| from < 0 \|\| to < from\)/);
+  assert.match(output, /Reader 卡片 bind 类型无效/);
+});

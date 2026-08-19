@@ -596,7 +596,15 @@ internal static class ReaderRealtimeOutputProtocol
 
     private static void ValidateCard(JsonElement card)
     {
-        Exact(card, "kind", "title", "data");
+        // bind 是**可选**的，所以不能用 Exact（它是 SetEquals 全等，多一个字段就拒）。
+        // 2026-08-19：此前正是这一道把 AI 传来的 bind 挡在外面 —— 就算 schema 放行了，
+        // 到这里仍会被判"字段不匹配"。
+        ExactWithOptional(card, new[] { "kind", "title", "data" }, new[] { "bind" });
+        if (card.TryGetProperty("bind", out JsonElement bind)
+            && bind.ValueKind != JsonValueKind.Null)
+        {
+            ValidateCardBind(bind);
+        }
         string kind = Text(card, "kind", 32);
         if (kind is not (
             "weather" or "news" or "images" or "videos" or "fact" or
@@ -975,6 +983,90 @@ internal static class ReaderRealtimeOutputProtocol
                     throw Invalid("Reader Anki 草稿卡片类型无效");
             }
         }
+    }
+
+    /// 必填字段全等 + 允许一组具名可选字段。
+    ///
+    /// Exact 是 SetEquals：多一个少一个都拒。那对"这条协议只有这些字段"是对的，
+    /// 但表达不了"可选"。加这个而不是放宽 Exact —— 别的调用点仍然该严格。
+    private static void ExactWithOptional(
+        JsonElement value,
+        string[] required,
+        string[] optional)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            throw Invalid("Reader 输出必须是对象");
+        }
+        DirectJsonValidation.RequireNoDuplicateKeys(value);
+        HashSet<string> actual = value.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (string field in required)
+        {
+            if (!actual.Remove(field))
+            {
+                throw Invalid("Reader 输出字段不匹配");
+            }
+        }
+        foreach (string field in optional)
+        {
+            actual.Remove(field);
+        }
+        if (actual.Count > 0)
+        {
+            throw Invalid("Reader 输出字段不匹配");
+        }
+    }
+
+    /// 卡片的绑定目标。形状与服务端 reader_card_contract._norm_bind 一致 ——
+    /// 那边形状不对是**整条丢掉**（卡片仍显示，只是退回浮层），这里是跨机信封，
+    /// 按既有教义**拒收**：宁可报错也别悄悄少一半语义。
+    private static void ValidateCardBind(JsonElement bind)
+    {
+        if (bind.ValueKind != JsonValueKind.Object)
+        {
+            throw Invalid("Reader 卡片 bind 无效");
+        }
+        string kind = Text(bind, "kind", 32);
+        switch (kind)
+        {
+            case "upage-block":
+                Exact(bind, "kind", "upage", "bid");
+                _ = Text(bind, "upage", 200);
+                _ = Text(bind, "bid", 200);
+                break;
+            case "page-chars":
+                ExactWithOptional(
+                    bind,
+                    new[] { "kind", "page", "from", "to" },
+                    new[] { "text", "rev" });
+                int page = CardInt(bind, "page");
+                int from = CardInt(bind, "from");
+                int to = CardInt(bind, "to");
+                // 歪掉的区间不如没有：与其在页面上定出一个荒唐的位置，
+                // 不如让调用方立刻知道自己发错了。
+                if (page < 1 || from < 0 || to < from)
+                {
+                    throw Invalid("Reader 卡片 bind 的字符区间无效");
+                }
+                OptionalCardText(bind, "text");
+                OptionalCardText(bind, "rev");
+                break;
+            default:
+                throw Invalid("Reader 卡片 bind 类型无效");
+        }
+    }
+
+    private static int CardInt(JsonElement value, string name)
+    {
+        if (!value.TryGetProperty(name, out JsonElement field)
+            || field.ValueKind != JsonValueKind.Number
+            || !field.TryGetInt32(out int result))
+        {
+            throw Invalid("Reader 卡片 bind 字段无效");
+        }
+        return result;
     }
 
     private static void Exact(JsonElement value, params string[] fields)
