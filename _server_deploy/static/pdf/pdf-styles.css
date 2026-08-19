@@ -93,6 +93,32 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 /* 插图徽标层:必须和其它叠层一样 absolute+inset:0(原来漏了 → 去边模式 .crop-on>* 的 transform 把它当定位上下文,
    静态块锚点跑飞、徽标被 overflow:hidden 裁没=整页不出徽标)。带 page-layer 类→ 去边时也吃 --full-w/h 撑满整图。 */
 .fig-layer{position:absolute;inset:0;z-index:9;pointer-events:none}
+/* 插图徽标与图区命中层。
+   ⚠ 2026-08-19 补：这几个类**在 PDF 阅读器里一条样式都没有** —— reader.js
+   照常创建它们（`.fig-badge` / `.fig-hit` / `.fig-hl` / `.fig-hl-sel`），
+   JS 也照常写 left/top，但没有 position:absolute，那些 left/top 全是死的，
+   于是徽标退化成一堆没有定位、没有形状的块，散在页面上。
+   用户实测截图里那些"灰色小方块"就是它，还一度被当成了绑定卡的收起态。
+   同名规则只在 epub-styles.css 里有，而 PDF 阅读器不加载那份。
+   尺寸 26px 与 reader.js 的 `var S = 26` 对齐（pos 已经是左上角=中心-S/2）。 */
+.fig-badge{position:absolute;width:26px;height:26px;border-radius:50%;z-index:6;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;color:#fff;opacity:.5;
+  background:rgba(10,132,255,.62);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
+  transition:opacity .18s ease,transform .14s ease}
+.fig-badge:hover{opacity:.95}
+.fig-badge:active{transform:scale(.88)}
+.fig-badge svg{width:15px;height:15px;display:block}
+/* 命中层只接事件，不该有任何可见外观 —— 它盖在图上，画出来就是一块脏东西 */
+.fig-hit{position:absolute;background:transparent;border:0}
+.fig-hl,.fig-hl-sel{position:absolute;pointer-events:none;border-radius:6px;
+  border:2px solid rgba(10,132,255,.85);background:rgba(10,132,255,.10)}
+.fig-pop{position:fixed;z-index:130;max-width:min(86vw,440px);background:#11192c;color:#e8eeff;
+  border:1px solid #2a3a63;border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.5);
+  padding:14px 16px;font-size:14px;line-height:1.6;max-height:60vh;overflow-y:auto}
+.fig-pop h4{margin:0 0 6px;font-size:14px;color:#7fb0ff;font-weight:600;padding-right:18px}
+.fig-pop .fig-x{position:absolute;top:8px;right:10px;color:#8aa;cursor:pointer;font-size:16px;line-height:1}
+.fig-pop p{margin:.35em 0}
+.fig-pop-mask{position:fixed;inset:0;z-index:129;background:transparent}
 .textLayer .endOfContent{display:block;position:absolute;inset:100% 0 0;z-index:0;cursor:default;user-select:none;-webkit-user-select:none}
 .textLayer .endOfContent.active{inset:0}
 

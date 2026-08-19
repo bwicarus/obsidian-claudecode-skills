@@ -13635,27 +13635,51 @@ window._lbClick = _lbClick;
 
   /// 把卡钉到书页正文的一段字符上。绑不上返回 false —— 调用方据此退回浮层，
   /// **绝不把卡丢掉**：位置没了还能补，内容没了就真没了。
+  /// → `{ ok: true }` 或 `{ ok: false, why: '<原因>' }`。
+  ///
+  /// ⚠ 早先它一律返回 `false`：五种完全不同的情况（那页没渲染 / 字符层没到 /
+  ///   区间对不上文字 / 算不出框 / 建不出层）挤在同一个信号里。上层看到 false
+  ///   就退回浮层，而回执照样报"已送达" —— 用户看到卡片没钉上，链路上却没有
+  ///   任何一处说得出为什么。2026-08-19 用户连问两轮才定位到这里。
+  ///   现在把原因带出去，回执里直接能看到。
   window.__pageBindCard = function (bind, payload) {
     try {
-      if (!bind || bind.kind !== 'page-chars') return false;
+      if (!bind || bind.kind !== 'page-chars') return { ok: false, why: 'not-page-chars' };
       var page = parseInt(bind.page, 10);
-      if (!(page > 0)) return false;
+      if (!(page > 0)) return { ok: false, why: 'bad-page' };
       var pw = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
-      if (!pw || pw.dataset.loaded !== '1') return false;   // 那页还没渲染
+      if (!pw || pw.dataset.loaded !== '1') return { ok: false, why: 'page-not-rendered' };
       var boxes = pw.__charBoxes;
-      if (!boxes || !boxes.length) return false;            // 字符层还没到
+      if (!boxes || !boxes.length) return { ok: false, why: 'no-char-layer' };
       var range = _resolveRange(boxes, {
         from: parseInt(bind.from, 10) || 0,
         to: parseInt(bind.to, 10) || 0,
         text: bind.text || ''
       });
-      if (!range) return false;
+      // 最常见的一种：文字层换过一份（重新预处理 / 换 OCR 结果），助手拿到的
+      // segments 下标跟当前这份对不上，按下标取出来的字跟 bind.text 不一致。
+      // 把"想要什么"和"这个下标上实际是什么"一起报出去 —— 只说"失败"的话，
+      // 分不清是下标偏了还是压根不是那一页。
+      if (!range) {
+        return {
+          ok: false,
+          why: 'range-unresolved',
+          detail: {
+            chars: boxes.length,
+            from: parseInt(bind.from, 10) || 0,
+            to: parseInt(bind.to, 10) || 0,
+            wanted: String(bind.text || '').slice(0, 40),
+            gotAtIndex: _textAt(boxes, parseInt(bind.from, 10) || 0,
+                                parseInt(bind.to, 10) || 0).slice(0, 40)
+          }
+        };
+      }
       var rect = _rangeRect(boxes, range);
-      if (!rect) return false;
+      if (!rect) return { ok: false, why: 'no-rect' };
 
       var layer = (typeof ensurePageLayer === 'function')
         ? ensurePageLayer(pw, 'pgbind-layer') : null;
-      if (!layer) return false;
+      if (!layer) return { ok: false, why: 'no-layer' };
       pw.appendChild(layer);   // 排在 char-layer 之后，卡片能接到点击
 
       // 同一处已经有卡就替换，别叠罗汉
@@ -13679,12 +13703,27 @@ window._lbClick = _lbClick;
         '</div>';
       layer.appendChild(el);
       _armBindCard(el);
-      return true;
+      return { ok: true, page: page, from: range.from, to: range.to };
     } catch (e) {
       try { console.warn('[bind] __pageBindCard 失败', e); } catch (e2) {}
-      return false;
+      return { ok: false, why: 'exception', detail: { name: (e && e.name) || '' } };
     }
   };
+
+  /// 把 [from,to] 这段字取出来，用于回答"我在这个下标上看到的是什么"。
+  /// 定位失败时最值钱的就是这一条 —— 有它才分得清「下标偏了」和「不是那页」。
+  ///
+  /// 跳过 sp（空白）的口径必须跟 _resolveRange 一致：口径不一样的话，
+  /// 报出来的字跟它实际拿去比对的不是同一个东西，这条诊断会把人带偏。
+  function _textAt(boxes, from, to) {
+    var out = '';
+    for (var i = from; i <= to && i < boxes.length; i++) {
+      if (i < 0) continue;
+      var b = boxes[i];
+      if (b && !b.sp && b.c) out += b.c;
+    }
+    return out;
+  }
 
   /// 绑不上的卡记下来，等那一页真的渲染出来再接回去。
   window.__pageBindDefer = function (bind, payload, card) {
@@ -13696,9 +13735,11 @@ window._lbClick = _lbClick;
     var rest = [];
     _pageBindPending.forEach(function (item) {
       if (parseInt(item.bind.page, 10) !== parseInt(pageNum, 10)) { rest.push(item); return; }
-      var ok = false;
-      try { ok = window.__pageBindCard(item.bind, item.payload); } catch (e) {}
-      if (!ok) { rest.push(item); return; }
+      // __pageBindCard 现在返回 {ok, why}，不是裸布尔 —— 非空对象恒为真，
+      // 直接当条件用会把每次失败都判成成功。
+      var res = null;
+      try { res = window.__pageBindCard(item.bind, item.payload); } catch (e) {}
+      if (!res || !res.ok) { rest.push(item); return; }
       // 补上了就把浮层那份关掉，否则同一内容两处并存。
       try {
         if (item.card && window.__vcCardClose) window.__vcCardClose(item.card);

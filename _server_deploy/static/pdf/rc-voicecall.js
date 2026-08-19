@@ -1809,7 +1809,19 @@
         if (!renderInfo(p.card)) {
           throw new Error('BW_READER_CARD_RENDER_FAILED');
         }
-        work = true;
+        // 带 bind 的卡：回执必须说清**钉上了没有**。
+        // 只回 true 的话，"钉在正文上"和"退回浮层"长得一模一样，助手会把
+        // 后者转述成前者 —— 这正是 2026-08-19 那两轮的成因。
+        var _bo = _lastBindOutcome;
+        work = _bo
+          ? {
+              status: 'delivered',
+              bound: !!_bo.bound,
+              bind_kind: _bo.kind,
+              bind_why: _bo.bound ? '' : (_bo.why || 'unknown'),
+              bind_detail: _bo.bound ? null : (_bo.detail || null)
+            }
+          : true;
       } else if (delivery.kind === 'navigate') {
         work = _readerOutputNavigate(delivery);
       } else if (delivery.kind === 'highlight') {
@@ -3171,7 +3183,16 @@
     _bindPending = rest;
   };
 
+  /// 上一张带 bind 的卡究竟钉上了没有、没钉上是为什么。
+  ///
+  /// 为什么要有它：`renderInfo` 早先只回一个布尔"渲染成功"，而钉上了和
+  /// 退回浮层**都算渲染成功** —— 于是回执一律报"已送达"，助手照实转述成
+  /// 「已绑定」，用户看到的却是没钉上。2026-08-19 用户连问两轮才查清。
+  /// 现在把结果记在这里，由 card 分支放进回执，助手就能说真话。
+  var _lastBindOutcome = null;
+
   function renderInfo(card) {
+    _lastBindOutcome = null;
     if (!card || !card.kind) return false;
     var label = card.title || '搜索结果';
     var _pendBind = null;   // 绑不上时记下"它想去哪"，浮层卡建出来后一起入列
@@ -3191,7 +3212,8 @@
           label: label
         };
         var okBind = window.__upBindCard(_b.upage, _b.bid, _bp);
-        if (okBind) return true;
+        if (okBind) { _lastBindOutcome = { bound: true, kind: 'upage-block' }; return true; }
+        _lastBindOutcome = { bound: false, kind: 'upage-block', why: 'upage-not-open' };
         // 记下"它想去哪"。那页出现时 __upBindRetry 会把它接回去。
         _pendBind = { upage: _b.upage, bid: _b.bid, payload: _bp, card: null };
         try { RC.toast && RC.toast('那一页还没打开，卡片先放浮层，等页面出现会自己归位'); } catch (e2) {}
@@ -3205,7 +3227,16 @@
           text: _infoText(card),
           label: label
         };
-        if (window.__pageBindCard(_b, _pp)) return true;
+        // ⚠ 返回值现在是 {ok, why, detail}，不是裸布尔。非空对象恒为真，
+        //   写成 `if (window.__pageBindCard(...))` 会把每次失败都判成钉上了。
+        var _pr = window.__pageBindCard(_b, _pp);
+        if (_pr && _pr.ok) { _lastBindOutcome = { bound: true, kind: 'page-chars' }; return true; }
+        _lastBindOutcome = {
+          bound: false,
+          kind: 'page-chars',
+          why: (_pr && _pr.why) || 'unknown',
+          detail: (_pr && _pr.detail) || null
+        };
         _pendPageBind = { bind: _b, payload: _pp };
         try { RC.toast && RC.toast('那一页还没渲染，卡片先放浮层，翻到时会自己归位'); } catch (e2) {}
       }
