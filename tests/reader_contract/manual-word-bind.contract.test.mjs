@@ -106,3 +106,12 @@ test("charBoxes 就绪时必须重挂便签，否则首次开页一定退回浮�
   // repositionAll 就是 mountAll，幂等；不幂等的话这里会变成重复建 DOM
   assert.match(NOTE2, /repositionAll: mountAll,/);
 });
+
+test("退回浮层要留痕 —— 圆球是老形态，退回去看着像本来就该这样", () => {
+  // silent-failure-lessons.md 第五节：最难发现的沉默不是"什么都不做"，
+  // 而是"悄悄退回一个看起来完全正常的旧行为"。
+  assert.match(NOTE, /console\.warn\('\[bind\] 词锚没画上，退回浮层便签'/);
+  // 去重：mountAll 每次重排都会跑一遍，不去重的话一页翻下来刷屏，
+  // 刷屏等于没有日志。
+  assert.match(NOTE, /if \(ctl\._bindWhy !== \(res && res\.why\)\)/);
+});

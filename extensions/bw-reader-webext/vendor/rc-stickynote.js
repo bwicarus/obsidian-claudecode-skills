@@ -1185,7 +1185,16 @@ if (window.__bwPwaProviderOnly) return;
     if (res && res.ok) {
       ctl._bindMarked = true;
       ctl.root.style.display = ctl._bindOpen ? '' : 'none';
-    } else if (ctl._bindMarked) {
+    } else {
+      // 回退到老浮层是对的（宁可看到老样子，也不要卡片消失），但**必须留痕**：
+      // 圆球本来就是老形态，退回去看着像「这卡就是这样的」，没人会去查。
+      // 见 references/silent-failure-lessons.md 第五节。
+      if (ctl._bindWhy !== (res && res.why)) {
+        ctl._bindWhy = res && res.why;
+        try { console.warn('[bind] 词锚没画上，退回浮层便签', ctl.note.id, res); } catch (e) {}
+      }
+    }
+    if (!(res && res.ok) && ctl._bindMarked) {
       // 之前标上过、这次没标上（换页/重渲）——先回到可见，别把卡片藏没了
       ctl._bindMarked = false;
       ctl.root.style.display = '';
