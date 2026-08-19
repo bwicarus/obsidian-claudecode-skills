@@ -42,6 +42,22 @@ git rev-parse --abbrev-ref HEAD && git worktree list
   git -C "$CLAUDE_PROJECT" status -sb
   ```
 - 🧭 **接续工作/部署细节**:服务器侧 Claude Code 工作流 → `references/server-side-claude-code.md`;Pi 部署 → `references/raspberry-pi-deployment.md`;VPS 迁移 → `references/linux-server-migration.md`;本地实例(Windows Flask) → `references/webapp-development.md`「本地实例」章。
+- 🔢 **改任何白名单 / 清单 / 字段表之前，先数清楚它有几份副本**：
+
+  ```bash
+  python3 scripts/contract_sites.py card-top-fields bind
+  ```
+
+  2026-08-19 这个模式一天咬了五次（`_normalize_pc_page` 允许字段、MCP
+  `additionalProperties`、`localFileQuery` 参数表、Xcode target sources、
+  卡片字段白名单）。最后一次让用户来回问了四轮，因为是一层层撞出来的：
+  MCP schema → 能力指南 → 发现层 → 阅读器入站闸，**每一层都长得像"就差这一处"**。
+  根因不是哪处写错，是没有地方能回答"一共有几处"。
+  ⚠ 两个必须记住的形态：① 有些站点是**重建**对象而不是透传，
+  放行了还要显式搬字段，只放行不搬的表现是「校验全过就是不生效」；
+  ② 面向 AI 的说明**写反比没写更糟** —— 没写它可能去翻 schema，
+  写反了它直接放弃。
+
 - 🧭 **改完文档跑一次漂移检查**（没有 CI 会替你跑）：
 
   ```bash
@@ -53,6 +69,20 @@ git rev-parse --abbrev-ref HEAD && git worktree list
   2026-08-19 那类事故：文档留着旧工程的说法，于是照着做的人一再走错方向。
   ⚠ 它也检查「行内重复」——批量改文档时只替换了前缀、旧句子尾巴留在原地，
   同一行里两个版本并排且互相矛盾。这条默认只看**本次改动的行**。
+- 📦 **改完先问「这些文件要到哪些表面才算到达」**（不是问「要不要部署 Pi」）：
+
+  ```bash
+  python3 scripts/where_does_this_file_go.py --since HEAD~1
+  ```
+
+  2026-08-19 同一个错犯了三次：改完阅读器前端就部署 Pi，然后跟用户说好了 ——
+  而用户在 **App** 上，App 加载的是打进包的 ReaderBundle，**根本不走 nginx**，
+  部署 Pi 对他完全无效。用户第三次才说「你又部署到 pi 是什么意思」。
+  ⚠ 一个文件常常同时属于多个表面，**做一个不等于做完**：
+  桌面走 `deploy_reader.sh`、App 要新 TestFlight 构建、Safari 扩展要
+  `extensions/bw-reader-webext/build.py` 重新生成 vendor 再随构建打包。
+  三条互不相干。这个脚本第一次跑就抓到我当时漏掉的 vendor 那条。
+
 - 🚀 **要部署任何改动,先读 `references/deployment-workflow.md`(唯一权威,2026-07-29 收敛)**。
   一句话:**先判断这次改动到不到得了 App** —— 涉及阅读器路由的先跑 `python3 scripts/where_does_this_route_run.py <路由>`,答「App 内本地执行」的,改 `_server_deploy/*.py` 对 App 无效(要改 `_server_deploy/static/pdf/native-local-runtime.js` + 出 TestFlight 构建),部署 Pi 只影响桌面/扩展表面。确认确实要部署后:唯一部署机是 Pi;先跑 `python3 scripts/reader_deploy_manifest.py | cut -f1 | grep -F '<你改的文件>'` 判断在不在部署清单里
   判断在不在部署清单(150 项)里 —— **在清单内**走 `scripts/deploy_reader.sh`(Windows 上是
