@@ -177,3 +177,56 @@
 **验证**(headless Playwright,探测点→anchorFromPoint→noteMount→探针 BCR 闭环):单本 crop 开/关 **0.0px**、真实 vbook(料理师)**0.0px**、词框反馈 8/8 dist=0 覆盖字符、真实拖动松手前后 delta=(0,0)。
 
 **铁律**:今后任何"屏幕坐标 ↔ 页锚"的新功能,**必须走 char-layer BCR 基准**(或 `_pdfNoteGeom`),严禁直接用 `pw.clientWidth`(去边下是裁后窄宽,必偏)。
+
+---
+
+## 卡片便签的「词锚」形态（2026-08-20 用户拍板，PDF 阅读器）
+
+原来卡片便签钉在页上是一个**圆球**，用户的问题是「圆球过多会遮挡视野」。
+新形态：
+
+> 「插入后自动锁定到前方的分词元素，高亮整个分词，右上角加上数字，
+> 然后点击这个词直接展开卡片」
+
+即：卡片不在页上占地方，**被绑定的那个词本身**就是它的把手。
+
+### 不是另造一套便签
+
+卡片壳、学习状态、拖动、删除、落库全是原来那份。词锚只加两件事：
+
+1. 画标记（`__pageBindCard` → `.pgmark` 描边 + `.pgmark-n` 角标）
+2. 把便签默认 `display:none`，点标记才显出来
+
+因此**手动钉和 AI 自动钉产出完全相同的标记**（两条路进同一个
+`__pageBindCard`），页内序号也是同一套。
+
+### 存在哪
+
+`note.card.bind = { kind:'page-chars', page, from, to, text }`。
+
+⚠ **不能存进 `note.anchor`**：anchor 在 `native-local-runtime.js` 的
+`normalizedNoteAnchor` 里是**逐字段重建**的，加字段会被静默 strip——当次
+会话看不出来，下次开书才发现锚退化了。`card` 是 `boundedCanonicalJSON`
+整块不透明存，所以服务端和 App runtime **一行都不用改**。
+
+### 五个必须一起做的点（少一个都是"看着像正常"的错位）
+
+| 时机 | 做什么 | 不做的表现 |
+|---|---|---|
+| 建卡 | 落点吸附最近词（≤48px，跟拖动反馈同一阈值） | 「看到框、松手却钉到别处」 |
+| **charBoxes 就绪** | `RC.stickynote.repositionAll()` | 首次开页必然退回圆球（挂载跑在 charBoxes 之前） |
+| 删卡 | `__pageBindRemove` + 整页重排序号 | 框留在页上，且**后面所有序号错位** |
+| 拖动 | 用**加过 shift 的落点**重求词锚 | 标记留在旧词、卡片跑到别处 |
+| 绑不上 | 退回浮层 **并 `console.warn`** | 圆球本来就是老形态，退回去看着像"本来就该这样" |
+
+序号是**位置不是身份** —— 加卡删卡都整页重算（`_renumberMarks`），
+不维护自增计数器。这样人和 AI 说的「第 3 个」才是同一张。
+
+### 还没做
+
+AI **读**页面时看不见卡片编号（`buildLocalPageContext` 吐的是纯文本）。
+所以「把第三个删掉」这个用途目前只有人这一侧成立。要补的是
+`⟦CARD:n …⟧` 内联标记，格式见
+[`card-anchor-footnote-design.md`](card-anchor-footnote-design.md) §7.3。
+
+⚠ EPUB 没有 `__pageBindCard`，词锚在 EPUB 上静默回落到老浮层便签。
