@@ -1155,7 +1155,38 @@
       ctl.root.style.top = (Math.max(0, Math.min(1, note.anchor.y || 0)) * 100) + '%';
     }
     syncCtl(ctl);
+    _applyWordBind(ctl);
     return true;
+  }
+
+  // ── 词锚便签：正文里显示成「词描边 + 右上角序号」，点词才展开真卡 ──────
+  //   用户 2026-08-20 定的形态：「插入后自动锁定到前方的分词元素，高亮整个分词，
+  //   右上角加上数字，然后点击这个词直接展开卡片」。动机是圆球太多会挡住正文。
+  //
+  //   实现上**不换一套便签**：卡片壳、学习状态、拖动、删除全是原来那份，
+  //   这里只做两件事 —— 画标记、把便签默认收起来。绑不上时（页没渲染出来、
+  //   文字层换过）**原样显示便签**，不制造「卡不见了」。
+  function _applyWordBind(ctl) {
+    var b = ctl.note && ctl.note.card && ctl.note.card.bind;
+    if (!b || !window.__pageBindCard) return;
+    var res = null;
+    try {
+      res = window.__pageBindCard(b, {
+        label: '🎴 卡片',
+        onToggle: function () {
+          ctl._bindOpen = !ctl._bindOpen;
+          ctl.root.style.display = ctl._bindOpen ? '' : 'none';
+        }
+      });
+    } catch (e) {}
+    if (res && res.ok) {
+      ctl._bindMarked = true;
+      ctl.root.style.display = ctl._bindOpen ? '' : 'none';
+    } else if (ctl._bindMarked) {
+      // 之前标上过、这次没标上（换页/重渲）——先回到可见，别把卡片藏没了
+      ctl._bindMarked = false;
+      ctl.root.style.display = '';
+    }
   }
   // 全量重挂/重定位:ensureMounted 幂等(容器校验/换容器重挂/位置重算全在里面)。
   // 亦是 v4 repositionAll 的实现——重排(侧栏开关/字号/栏宽/resize)后 host 重算像素位置。
@@ -1966,15 +1997,31 @@
     var anchor = null;
     for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
     if (!anchor) { toastMsg('这里放不了(把卡片放到正文上再松手)'); return false; }
+    // ── 词锚（用户设计 2026-08-20）：落点吸附到最近的分词元素 ──────────
+    //   手动钉和 AI 自动钉要产出**同一种标记**，所以这里也解析出词区间。
+    //   吸附范围沿用拖动反馈那条（≤48px），两者必须一致，否则「看到框但钉别处」。
+    //
+    //   ⚠ 词锚放进 **card 载荷**里，不是放进 anchor —— anchor 在
+    //     native-local-runtime.js::normalizedNoteAnchor 里是**逐字段重建**的，
+    //     加新字段会被静默 strip（本次会话看不出来，下次开书才发现锚退化了）；
+    //     而 card 是 boundedCanonicalJSON 整块不透明存，加字段两侧都不用改。
+    var _wb = null;
+    try {
+      var _wr = O.noteWordRect ? O.noteWordRect(clientX, clientY) : null;
+      if (_wr && _wr.page > 0 && _wr.text && (_wr.dist == null || _wr.dist <= 48)) {
+        _wb = { kind: 'page-chars', page: _wr.page,
+                from: _wr.from, to: _wr.to, text: String(_wr.text).slice(0, 200) };
+      }
+    } catch (e) {}
     var cid0 = gid || ((window.RC && RC.voiceCard && RC.voiceCard.mkCid) ? ('fcg_' + RC.voiceCard.mkCid()) : ('fcg_' + Date.now().toString(36)));
     gid = gid || cid0;
     var w0 = 300, bw0 = 0; try { var mm = O.mount(anchor); if (mm && mm.el && mm.el.clientWidth) { bw0 = mm.el.clientWidth; w0 = Math.max(240, Math.min(480, Math.round(bw0 * 0.44))); } } catch (e) {}   // 卡宽按页面宽自适应+记创建时页宽(缩放等比跟随,用户拍板)
     // gid/cid 原样携带，同一学习卡组跨宿主共享；repository 不重编号业务卡。
     createRecord(
       anchor,
-      { color: '#0d1322', w: w0, h: 210, collapsed: false, card: { cards: cards, gid: gid, cid: cid0, base_w: bw0 } },
+      { color: '#0d1322', w: w0, h: 210, collapsed: false, card: { cards: cards, gid: gid, cid: cid0, base_w: bw0, bind: _wb } },
       '卡片便签已建(所在页尚未渲染,渲染后出现)',
-      '✅ 卡片已钉到书页'
+      _wb ? ('✅ 已钉到「' + _wb.text.slice(0, 12) + '」') : '✅ 卡片已钉到书页'
     );
     return true;
   }

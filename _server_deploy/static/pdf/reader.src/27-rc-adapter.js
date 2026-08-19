@@ -151,12 +151,35 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       if (bestRow) { best = bestRow; bd = brd * brd; }
       if (!best) return null;
       let L = best.left, T = best.top, R2 = best.left + best.width, B = best.top + best.height;
+      // 词区间的**下标**：手动把卡钉到词上时要的正是它。
+      // 这里本来只吐屏幕矩形 —— 矩形能画反馈，但存不成锚（换一份文字层坐标
+      // 就全变）。下标 + 文本才是能持久的锚，跟 page-chars 那套同一口径。
+      let from = best._oi, to = best._oi;
       if (best.w !== -1) for (const cb of cbs) {
         if (cb.w !== best.w || cb.sp) continue;
         L = Math.min(L, cb.left); T = Math.min(T, cb.top);
         R2 = Math.max(R2, cb.left + cb.width); B = Math.max(B, cb.top + cb.height);
+        if (cb._oi < from) from = cb._oi;
+        if (cb._oi > to) to = cb._oi;
       }
-      return { el: pw, left: L * Klay, top: T * Klay, width: (R2 - L) * Klay, height: (B - T) * Klay, dist: Math.sqrt(bd) * dispK };
+      // ⚠ 按 **_oi（原始下标）** 取文本，不能顺着 cbs 拼：cbs 在 _mapCharBoxes
+      //   里被按 baseline 重排过，顺着拼会串行。
+      const seg = [];
+      for (let i = 0; i < cbs.length; i++) {
+        const c2 = cbs[i];
+        if (!c2 || c2.sp || !c2.c) continue;
+        if (c2._oi >= from && c2._oi <= to) seg.push(c2);
+      }
+      seg.sort((a, b) => (a._oi | 0) - (b._oi | 0));
+      let txt = '';
+      for (const c3 of seg) txt += c3.c;
+      return {
+        el: pw, left: L * Klay, top: T * Klay,
+        width: (R2 - L) * Klay, height: (B - T) * Klay,
+        dist: Math.sqrt(bd) * dispK,
+        from: from, to: to, text: txt,
+        page: parseInt(pw.dataset.pageNum, 10) || 0
+      };
     },
     noteAnchorFromPoint: (x, y) => {
       const t = document.elementFromPoint(x, y);

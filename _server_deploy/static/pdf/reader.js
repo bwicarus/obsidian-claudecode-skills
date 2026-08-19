@@ -12437,12 +12437,35 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       if (bestRow) { best = bestRow; bd = brd * brd; }
       if (!best) return null;
       let L = best.left, T = best.top, R2 = best.left + best.width, B = best.top + best.height;
+      // 词区间的**下标**：手动把卡钉到词上时要的正是它。
+      // 这里本来只吐屏幕矩形 —— 矩形能画反馈，但存不成锚（换一份文字层坐标
+      // 就全变）。下标 + 文本才是能持久的锚，跟 page-chars 那套同一口径。
+      let from = best._oi, to = best._oi;
       if (best.w !== -1) for (const cb of cbs) {
         if (cb.w !== best.w || cb.sp) continue;
         L = Math.min(L, cb.left); T = Math.min(T, cb.top);
         R2 = Math.max(R2, cb.left + cb.width); B = Math.max(B, cb.top + cb.height);
+        if (cb._oi < from) from = cb._oi;
+        if (cb._oi > to) to = cb._oi;
       }
-      return { el: pw, left: L * Klay, top: T * Klay, width: (R2 - L) * Klay, height: (B - T) * Klay, dist: Math.sqrt(bd) * dispK };
+      // ⚠ 按 **_oi（原始下标）** 取文本，不能顺着 cbs 拼：cbs 在 _mapCharBoxes
+      //   里被按 baseline 重排过，顺着拼会串行。
+      const seg = [];
+      for (let i = 0; i < cbs.length; i++) {
+        const c2 = cbs[i];
+        if (!c2 || c2.sp || !c2.c) continue;
+        if (c2._oi >= from && c2._oi <= to) seg.push(c2);
+      }
+      seg.sort((a, b) => (a._oi | 0) - (b._oi | 0));
+      let txt = '';
+      for (const c3 of seg) txt += c3.c;
+      return {
+        el: pw, left: L * Klay, top: T * Klay,
+        width: (R2 - L) * Klay, height: (B - T) * Klay,
+        dist: Math.sqrt(bd) * dispK,
+        from: from, to: to, text: txt,
+        page: parseInt(pw.dataset.pageNum, 10) || 0
+      };
     },
     noteAnchorFromPoint: (x, y) => {
       const t = document.elementFromPoint(x, y);
@@ -13535,45 +13558,77 @@ window._lbClick = _lbClick;
 
   function _stripWs(s) { return String(s || '').replace(/\s+/g, ''); }
 
+  /// 按**原始下标 `_oi`** 排一份视图。
+  ///
+  /// ⚠ 这是 2026-08-20 查出来的一个真 bug：`__charBoxes` 在 `_mapCharBoxes` 里被
+  ///   **按阅读顺序重排过**（`cb.sort()` 先 baseline 后 left），而 AI 拿到的
+  ///   `from/to` 来自服务端 chars 的**原序**（segments 两侧都是 enumerate 原序）。
+  ///   也就是说 `boxes[i]` 的位置跟 `bind.from` 根本不是同一个坐标系。
+  ///
+  ///   之前没炸，是因为文本回退兜住了 —— 但代价是「按序号精确定位」那条路
+  ///   **从来没命中过**，而且消歧时拿来比距离的参考下标也是错的。
+  ///   典型的静默降级：功能看着在用，实际一直走的是兜底那条。
+  function _byOi(boxes) {
+    var v = boxes.slice();
+    v.sort(function (a, b) { return (a._oi | 0) - (b._oi | 0); });
+    return v;
+  }
+
   function _resolveRange(boxes, want) {
     var from = want.from | 0, to = Math.max(want.from | 0, want.to | 0);
     var text = _stripWs(want.text);
-    if (from < boxes.length && to < boxes.length) {
-      if (!text) return { from: from, to: to };
-      var got = '';
-      for (var k = from; k <= to && k < boxes.length; k++) {
-        if (boxes[k] && !boxes[k].sp && boxes[k].c) got += boxes[k].c;
-      }
-      if (_stripWs(got) === text) return { from: from, to: to };   // 序号仍然作数
+    var ord = _byOi(boxes);
+
+    // 序号是 _oi 语义：先按 _oi 取出这一段，比对文字
+    var got = '', hit = [];
+    for (var k = 0; k < ord.length; k++) {
+      var oi = ord[k]._oi | 0;
+      if (oi < from || oi > to) continue;
+      hit.push(ord[k]);
+      if (!ord[k].sp && ord[k].c) got += ord[k].c;
     }
+    if (hit.length) {
+      if (!text) return { lo: from, hi: to, boxes: hit };
+      if (_stripWs(got) === text) return { lo: from, hi: to, boxes: hit };   // 序号仍然作数
+    }
+
     // 序号对不上了（换过文字层 / 越界 / 那段字变了）→ 按文本重新找，
     // 用原序号挑最近的一处 —— 这就是"同一个词重复出现"时的消歧依据。
     if (!text) return null;
-    var joined = '';
-    var index = [];   // joined 里每个字符对应的 box 下标
-    for (var i = 0; i < boxes.length; i++) {
-      var c = boxes[i] && boxes[i].c;
-      if (!c || boxes[i].sp) continue;
+    var joined = '', index = [];   // joined 每个字符 → ord 里的位置
+    for (var i = 0; i < ord.length; i++) {
+      var c = ord[i] && ord[i].c;
+      if (!c || ord[i].sp) continue;
       joined += c;
       index.push(i);
     }
     var best = -1, bestDist = Infinity, at = joined.indexOf(text);
     while (at >= 0) {
-      var start = index[at];
-      var dist = Math.abs(start - from);
+      var dist = Math.abs((ord[index[at]]._oi | 0) - from);
       if (dist < bestDist) { bestDist = dist; best = at; }
       at = joined.indexOf(text, at + 1);
     }
     if (best < 0) return null;
-    var lo = index[best];
-    var hi = index[Math.min(best + text.length - 1, index.length - 1)];
-    return { from: lo, to: hi };
+    var a = index[best];
+    var b = index[Math.min(best + text.length - 1, index.length - 1)];
+    var picked = ord.slice(a, b + 1);
+    return { lo: ord[a]._oi | 0, hi: ord[b]._oi | 0, boxes: picked };
   }
 
-  function _rangeRects(boxes, range) {
+  /// 按行切成多个矩形。整体包围盒不够用 —— 被锚的词跨行时，一个大框会把
+  /// 两行之间的整片正文都圈进去。
+  /// 吃的是 range.boxes（已按 _oi 选好的那些），不再按下标索引 —— 见 _byOi
+  /// 那段注释：boxes 数组的位置跟 bind.from 不是同一个坐标系。
+  function _rangeRects(range) {
+    var picked = range.boxes.slice();
+    // 画框要按几何顺序，所以这里按 baseline 再排一次
+    picked.sort(function (a, b) {
+      var d = (a.top + a.height) - (b.top + b.height);
+      return Math.abs(d) > (Math.max(a.height, b.height) || 1) * 0.6 ? d : a.left - b.left;
+    });
     var lines = [], cur = null;
-    for (var i = range.from; i <= range.to && i < boxes.length; i++) {
-      var b = boxes[i];
+    for (var i = 0; i < picked.length; i++) {
+      var b = picked[i];
       if (!b || b.sp) continue;
       var base = b.top + b.height;
       // 同一行的判据用**行高的一半**：OCR 出来的同行字 baseline 会有零点几像素
@@ -13695,7 +13750,7 @@ window._lbClick = _lbClick;
           }
         };
       }
-      var rects = _rangeRects(boxes, range);
+      var rects = _rangeRects(range);
       if (!rects) return { ok: false, why: 'no-rect' };
 
       var layer = (typeof ensurePageLayer === 'function')
@@ -13704,7 +13759,7 @@ window._lbClick = _lbClick;
       pw.appendChild(layer);   // 排在 char-layer 之后，标记能接到点击
 
       // 同一处已经有卡就替换，别叠罗汉
-      var key = 'b' + range.from + '_' + range.to;
+      var key = 'b' + range.lo + '_' + range.hi;
       _removeMark(layer, key);
 
       // ── 标记本体：给被锚的词描边，**不填色** ──────────────────
@@ -13740,13 +13795,17 @@ window._lbClick = _lbClick;
       // 卡片本身按需展开；标记与角标都是它的把手
       var open = function (ev) {
         if (ev) ev.stopPropagation();
+        // 宿主自己有卡（手动钉的便签就是）→ 把展开交回去，别在这儿另画一个。
+        // 用户 2026-08-19：「打开的卡片应该是我们本来设计的卡片而不是你现在这个」。
+        // 内建的 pgbind-card 只服务于 AI 直接钉进来、没有宿主壳的那条路。
+        if (payload && typeof payload.onToggle === 'function') { payload.onToggle(); return; }
         _toggleBindCard(layer, key, payload, last);
       };
       var hs = layer.querySelectorAll('[data-bindkey="' + key + '"]');
       for (var h = 0; h < hs.length; h++) hs[h].addEventListener('click', open);
 
       _renumberMarks(pw);
-      return { ok: true, page: page, from: range.from, to: range.to };
+      return { ok: true, page: page, from: range.lo, to: range.hi };
     } catch (e) {
       try { console.warn('[bind] __pageBindCard 失败', e); } catch (e2) {}
       return { ok: false, why: 'exception', detail: { name: (e && e.name) || '' } };
@@ -13760,9 +13819,13 @@ window._lbClick = _lbClick;
   /// 报出来的字跟它实际拿去比对的不是同一个东西，这条诊断会把人带偏。
   function _textAt(boxes, from, to) {
     var out = '';
-    for (var i = from; i <= to && i < boxes.length; i++) {
-      if (i < 0) continue;
-      var b = boxes[i];
+    // ⚠ 按 _oi 取，不按数组位置 —— boxes 被按阅读顺序重排过（见 _byOi）。
+    //   报错时用错坐标系，等于给出一段**看起来像但其实是别处**的文字，
+    //   比不报还坏。
+    var ord = _byOi(boxes);
+    for (var i = 0; i < ord.length; i++) {
+      var b = ord[i];
+      if (!b || (b._oi | 0) < from || (b._oi | 0) > to) continue;
       if (b && !b.sp && b.c) out += b.c;
     }
     return out;

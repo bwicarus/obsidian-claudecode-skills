@@ -40,20 +40,25 @@ test("定位靠直接验证文本，不靠 revision 号推断", () => {
   // 比对前两边都去空白：字符层的 sp 条目不进 joined，而调用方送来的锚文本
   // 常常带分隔（segments 拼接、排版空隙）。2026-08-19 就是一个空格让整条锚定
   // 失效，而链路上没有任何一处说得出为什么。
-  assert.match(BINDCARD, /if \(_stripWs\(got\) === text\) return \{ from: from, to: to \};/);
+  assert.match(BINDCARD, /if \(_stripWs\(got\) === text\) return \{ lo: from, hi: to, boxes: hit \};/);
   assert.match(BINDCARD, /function _stripWs/);
   assert.doesNotMatch(BINDCARD, /dataset\.charsRev/);
 });
 
 test("同一个词重复出现时，用原序号挑最近的一处", () => {
   // 用户明确提过这一条。只按文本找会命中第一处，那不一定是卡当初钉的地方。
-  const body = BINDCARD.slice(
-    BINDCARD.indexOf("function _resolveRange("),
-    BINDCARD.indexOf("function _rangeRect("),
-  );
-  assert.ok(body.length > 0);
+  const a = BINDCARD.indexOf("function _resolveRange(");
+  const b = BINDCARD.indexOf("function _rangeRects(");
+  // ⚠ 两个下标都必须真找到。原先只断言 `body.length > 0`，而 indexOf 找不到
+  //   时返回 -1，slice(a, -1) 会切出**几乎整份文件** —— 于是"在 _resolveRange
+  //   里"这个前提悄悄没了，测试还照常绿。_rangeRect → _rangeRects 改名之后
+  //   它就一直是这个状态。
+  assert.ok(a >= 0 && b > a, "锚点函数名对不上了，切不出 _resolveRange 的函数体");
+  const body = BINDCARD.slice(a, b);
   assert.match(body, /joined\.indexOf\(text, at \+ 1\)/, "没有继续找下一处");
-  assert.match(body, /Math\.abs\(start - from\)/, "没有用原序号做消歧");
+  // 消歧依据必须是**原序号**（_oi）跟 from 的距离。这里不钉变量名 —— 钉了
+  // 就会像上一版那样，一次正当重构把它弄红，而真正的行为其实没变。
+  assert.match(body, /Math\.abs\(\(ord\[index\[at\]\]\._oi \| 0\) - from\)/, "没有用原序号做消歧");
 });
 
 test("钉在书页上的卡跟高亮同一个坐标系，不用 fixed 跟滚", () => {
