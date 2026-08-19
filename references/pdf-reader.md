@@ -1,10 +1,10 @@
 # PDF 阅读器完整参考
 
-**地址**：`https://bwicarus.space/pdf/` （需登录；客户端通过 device-link 拿 session）
+**当前交付表面**：iPad App（BWReader，阅读器 runtime 打进包，本地渲染）+ Safari 扩展。网页/PWA 阅读器自 2026-08-18 边界收窄后**不再作为交付表面**——本文 §11「iPad 远程访问」、§23/24/27 的 PWA 各节按历史留档读。Pi 侧地址 `https://bwicarus.taile44d0c.ts.net/pdf/`（需登录；唯一部署机是 Pi）；`https://bwicarus.space/pdf/` 是已暂停的 VPS，不要据它验证改动。
 
 **目标**：在浏览器里读 vault 里的 PDF + 多种 AI 交互（翻译 / 解释 / 问 AI / 加笔记） + iOS 风格高亮编辑（带备注、色板、左滑删除）+ AI 选段草稿系统 + 知识树关联节点查询。
 
-不依赖客户端 EXE 或 Obsidian。所有数据持久化在服务器：高亮 → `state/pdf-highlights/<sha1>.json`；草稿 → 浏览器 localStorage（per-device）。
+不依赖客户端 EXE 或 Obsidian。**数据权威在设备**：App 内高亮/便签/插入页/墨迹/阅读位置由 `native-local-runtime.js` 直接落本机存储（`/pdf/api/highlights` 等 owner=local，不出网），Pi 只在设备间同步中继时经手；Pi 侧落盘也已按账号分区 `<sidecar root>/by-user/<user_id>/pdf-highlights/<sha1>.json`。草稿 → 浏览器 localStorage（per-device）。⚠ 改任何一条阅读器路由前先跑 `python3 scripts/where_does_this_route_run.py <路由>` 确认谁执行。
 
 ---
 
@@ -36,7 +36,7 @@ _server_deploy/templates/pdf_reader.html → <webapp>/templates/pdf_reader.html
 _server_deploy/static/pdf/reader.js     → /var/www/html/static/pdf/reader.js   ★ 新增,改前端必带,漏了阅读器白屏
 data/ecdict.db                           → <webapp>/data/ecdict.db
 ```
-改完 `cp` 三件套（py + html + reader.js）+ `systemctl restart webapp`。**⚠ 改 JS 逻辑改的是 `reader.src/NN-*.js`,不是 html、也不是直接改 reader.js**；流程：`改 reader.src/ → bash scripts/check_pdf_reader_js.sh（自动重建 reader.js + 校验）→ cp reader.js → /var/www/html/static/pdf/`（cache-bust 自动）。restart webapp 只为 py/html 改动；纯 JS 改动只需 cp reader.js（前端 ?v=mtime 自动失效缓存）。**部署 static JS 由 nginx/443 从 `/var/www/html/static` 服务，Flask `:5000` 的 static 是陈旧副本**——真机/Playwright 验证务必走 nginx。
+改 JS 逻辑改的是 `reader.src/NN-*.js`（**不是 html、也不是直接改 reader.js**），然后 `bash scripts/check_pdf_reader_js.sh`（自动重建 reader.js + 校验）。**之后有三个互不相通的投递表面**：① Pi/旧网页表面走 `bash scripts/deploy_reader.sh`（唯一生产写入口，别再手工 cp 三件套 + restart）；② **iPad App 加载的是打进包的 ReaderBundle**（`ios/BWReader/package_local_reader.py`），只能靠新的 TestFlight 构建到达；③ Safari 扩展加载 `extensions/bw-reader-webext/vendor/` 里的自带副本，需同步该副本并重新打包。nginx/Playwright 只能验证表面 ①。
 
 ### 1.1 共享控制层（rc-*）+ ui_shared 默认模式（2026-07）
 
@@ -596,7 +596,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 | 任务 | 改哪 |
 |---|---|
 | 加新 AI 路由 | `pdf_reader.py` 加 route + 复用 `_ai_call_stream` / `_sse_stream` |
-| 改高亮存储 schema | `pdf_reader.py` `_hl_load/_save` + POST/PATCH/DELETE 三个 route 同步 |
+| 改高亮存储 schema | **两处都要改**：Pi 侧 `pdf_reader.py` `_hl_load/_save` + POST/PATCH/DELETE 三个 route；App 侧 `static/pdf/native-local-runtime.js` 的 `localPDFHighlights`/`persistLocalPDFHighlight`（有精确字段白名单 + `strictQuery` 拒绝任何查询参数，新字段不加进去会被 400 拒）|
 | 改预览块单行行数 | popover html template `${h.xxx ? ... : ''}` 三行 |
 | 改 swipe 距离 | CSS `.swiped .item{transform:translateX(-Npx)}` 跟 `.del-row{width:Npx}` 同步 |
 | 加新色板默认色 | `const DEFAULT_HL_COLORS = [...]` 在 hl 大块开头 |
@@ -611,7 +611,7 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 - 多页选中：选区横跨多页时只渲染当前页 sel-overlay（拼文本是 OK 的）
 - 高亮 import/export：暂无 UI，可直接复制 `state/pdf-highlights/*.json`
 - 高亮搜索：暂无 UI 列出某 PDF 所有高亮的概览（只能逐个点开）
-- 多用户：高亮 sidecar 全 user 共享（一个 vault 一个 sha1）；如果未来要 per-user 可改路径加 username 前缀
+- 多用户：Pi 侧 sidecar **已按账号分区**（`_reader_sidecar_path` → `SidecarStore.account_path`，落 `<sidecar root>/by-user/<user_id>/pdf-highlights/<sha1>.json`），高亮/便签/插入页/墨迹/服务端阅读位置一视同仁；App 侧则是各设备本机存储，Pi 只在同步中继时经手。
 - 日语生词下划线**密度治理待定**：`_build_jp_vocab_marks` 把库里非 mastered 的词全划，库攒大后词密页几乎全划（机制如实工作，非 bug）；限量/开关/频率阈值还没做，见 §34④
 
 ---

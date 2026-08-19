@@ -438,7 +438,7 @@ if user_mark == "unknown": score -= 0.50
 - 实现：char-layer onEnd 单击分支内，`_clickCount === 1` 命中 vocab mark 且 `label_slug != mastered` → `setTimeout(onTranslate, 30)`（让 selByCharRange 先布工具栏，translate 关掉它弹字典）
 - 三击/双击保持原行为（选行 / 选段）；选中范围跨多词不触发自动翻译
 
-后端 `/api/page-chars` 新增 `vocab_marks: [{word, lemma, mastery, label_slug, rects:[[x0,y0,x1,y1],...]}]`（`_build_vocab_marks`，用 PDF pt 坐标 rect 列表，不依赖 char idx —— 跟前端 chars sort 与否无关）。另有轻量路由 `/api/page-vocab-marks` 仅返回该页 vocab_marks（不返回 chars）：
+后端 `/api/page-overlay` 返回 `vocab_marks: [{word, lemma, mastery, label_slug, rects:[[x0,y0,x1,y1],...]}]`（`_build_vocab_marks`，用 PDF pt 坐标 rect 列表，不依赖 char idx —— 跟前端 chars sort 与否无关）；`/api/page-chars` 自 2026-06-07 拆分后**不再内嵌** vocab_marks，只回 `{chars,page_w,page_h,furigana}`。另有轻量路由 `/api/page-vocab-marks` 仅返回该页 vocab_marks（不返回 chars）。⚠ 归属不同：page-chars 在 App 内是本地实现（改服务端无效），page-overlay 仍由 Pi 提供生词数据、App 侧 `mergeNativePageOverlay` 把它与本地文字层合并 —— 生词/掌握度的权威还在 Pi。`_build_vocab_marks` 的步骤：
 1. 扫该页 chars 识别英文词边界（连续 `isalpha`/`'-`）
 2. word lemma 化（不走 ECDICT！直接查 `vocab_index` —— index 已把所有 forms 都 cache）
 3. 命中 vocab 且 `label_slug != mastered` → 标记

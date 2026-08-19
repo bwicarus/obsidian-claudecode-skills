@@ -1,8 +1,8 @@
 # 电脑客户端语音桥接
 
-## direct v3 迁移计划（实施中，尚未安装/部署）
+## direct v3 固定拓扑（已实施并安装；Windows Direct 自 0.1.11 起持续原子安装，当前候选 0.1.159）
 
-当前 direct v2 把 Windows 会话中的一个精确麦克风 endpoint 作为输入。RDP 的“远程音频”
+（历史背景，v2 已下线）direct v2 曾把 Windows 会话中的一个精确麦克风 endpoint 作为输入。RDP 的“远程音频” endpoint 会随远程会话建立、断开和重定向策略消失；配置仍引用旧 ID 时，START 会在 `microphone.get-explicit-device / HRESULT 0x80070490` 失败。这不是进程输出捕获失败，也不是 Pi 中继问题 —— v3 因此改为固定的双向直连。RDP 的“远程音频”
 endpoint 会随远程会话建立、断开和重定向策略消失；配置仍引用旧 ID 时，START 会在
 `microphone.get-explicit-device / HRESULT 0x80070490` 失败。这不是进程输出捕获失败，也
 不是 Pi 中继问题。
@@ -47,7 +47,7 @@ process-loopback 本身仍按目标进程树捕获，不退回全系统混音。
    与候选构建。
 
 浏览器仍受操作系统/浏览器麦克风权限约束；“免配对、免地址配置”不等于绕过系统隐私授权。
-Pi 继续提供 Reader/PWA、书籍与 outgoing journal 数据；它不代理 Windows WSS、控制消息或
+Pi 为扩展与网页表面提供书籍与 outgoing journal 数据；**App 内 `/pdf/api/outgoing/journal` 是本地实现（`native-local-runtime.js`），不打 Pi —— 改服务端只影响扩展/网页那一侧，到 App 需要新的 TestFlight 构建**。Pi 都不代理 Windows WSS、控制消息或 PCM 媒体。；它不代理 Windows WSS、控制消息或
 PCM 媒体。
 
 ## v3 固定拓扑
@@ -56,7 +56,8 @@ PCM 媒体。
 固定的 Windows 地址：
 
 ```text
-书籍 PWA（精确生产 Origin）
+App 内阅读器（本地 ReaderBundle 环回 Origin；专用 context WSS 见下文「实验上下文末端」）
+〔原「书籍 PWA（精确生产 Origin）」入口已退役：`/pdf/*` 阅读器页面返回 410 Gone〕
     ├─ 同源 GET /pdf/api/outgoing/journal
     └─ wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1
 
@@ -184,7 +185,7 @@ Windows WSS、固定文本合同和固定长度 PCM，不读取配对记录，�
 音频 direct v3 保持不变；上下文末端由 strict config 明确二选一：
 
 - `legacy-inject`：沿用 journal → Windows named pipe → voice-typist；
-- `snapshot-mcp`：PWA 仍从 Pi 的 active/journal 接口取事件，但经现有固定 WSS 直接送到
+- `snapshot-mcp`：扩展表面仍从 Pi 的 `/pdf/api/active-reading` 与 `/pdf/api/outgoing/journal` 取事件；**App 内这两条都由 `native-local-runtime.js` 本地应答（前者属于 owner=pi 但已本地化的名实不符路由），改 Pi 无效**。事件经现有固定 WSS 直接送到 Windows，原子更新 `runtime/reader-context-snapshot.json`。，但经现有固定 WSS 直接送到
   Windows，原子更新 `runtime/reader-context-snapshot.json`。active GET 负责把 vbook
   全局页解析回真实卷/卷内页，journal 再提供稳定正文；Pi 的旧 context.md 推送停止，
   START 不启动 typist，正文不进入客户端输入框。

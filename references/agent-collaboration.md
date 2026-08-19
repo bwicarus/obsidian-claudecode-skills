@@ -7,8 +7,8 @@ history and must not receive new messages.
 
 ## Current boundary
 
-- Both development agents currently use the Windows worktree `C:\claude`.
-- The Raspberry Pi remains the production reader host and deployment target.
+- Both development agents work on Windows, but each bounded scope gets its own branch and worktree (`git worktree list` shows the live set); `C:\claude` is only one of them. Never write the same file from two worktrees on the same branch.
+- The Raspberry Pi is the deployment target for the server-side APIs the App and the extension still call (dictionary, translation, OCR, KG). It no longer hosts a reader UI — the PWA reader pages return 410 Gone and the reader runtime ships inside the App — and it is not the authority for reader data such as highlights, notes or reading positions. Before changing a route, run `scripts/where_does_this_route_run.py <path>`.
 - BWAB is installed at `C:\Users\bwica\BWAgentBridgeLite`.
 - State and events live outside Git under `%LOCALAPPDATA%\BWAgentBridgeLite`,
   isolated by project and pair. The bridge binds only to `127.0.0.1`.

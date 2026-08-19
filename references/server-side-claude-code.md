@@ -133,7 +133,11 @@ scp -r root@bwicarus.space:/root/.claude/projects/-root-claude/memory/ \
 
 下次会话在服务器跑时，先让它**读这两个文件**就能恢复完整理解（Pi 上把 `/root/claude` 换成 `/home/bwicarus/claude`）：
 - `/root/claude/CLAUDE.md`
-- `/root/claude/references/linux-server-migration.md`
+- `/home/bwicarus/claude/CLAUDE.md`
+- `/home/bwicarus/claude/references/raspberry-pi-deployment.md`（Pi 实机形态：unit 清单、nginx 手工 patch 约束）
+- `/home/bwicarus/claude/references/deployment-workflow.md`（部署唯一权威：判类 → deploy_reader.sh / 手工 cp）
+
+（`linux-server-migration.md` 是 VPS 文档，VPS 自 2026-06-10 暂停，只在要恢复 VPS 时读。）
 
 也会自动读 `/root/.claude/projects/-root-claude/memory/MEMORY.md`（新版单横杠目录；如果有的话，要先 scp；Pi = `/home/bwicarus/.claude/projects/-home-bwicarus-claude/memory/`）。
 

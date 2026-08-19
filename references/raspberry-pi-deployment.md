@@ -12,12 +12,12 @@
 ```
 公网                              Tailscale 内网 100.x.x.x
 ─────────                          ──────────────────────
-bwicarus.space (VPS, 1vCPU/3.8G)   bwicarus.taile44d0c.ts.net (Pi 5, 8GB)
+> ⏸ **状态注记（2026-06-10）：VPS 已暂停，Pi 是唯一活跃实例。** 本文档是 2026-05-15 那次「从 VPS 复制到 Pi」的实操记录：下面所有 `rsync $VPS:` / `ssh $VPS` 的 bootstrap 步骤**今天不能照跑**（VPS 自动化单元已 disable、代码冻结在 2026-05-28）。要新起一台实例，数据源改为 GitHub 仓库 + AnkiWeb + Obsidian Sync 云端，或从 Pi 直接 rsync。拓扑图与下方「跟服务器对等度」表保留作历史记录。
   └─ 1175 笔记 vault                 └─ 1175 笔记 vault（独立副本）
   └─ 5634 Anki 卡                   └─ 5634 Anki 卡（独立副本，AnkiWeb sync）
   └─ webapp/qa-server/...           └─ 同上 6 个项目 systemd unit + nginx
   └─ Let's Encrypt (bwicarus.space) └─ Let's Encrypt (Tailscale Cert 自动签)
-  └─ daily timer 04:00 CST          └─ daily timer 04:00 JST（错开 1 小时）
+  └─ daily timer 04:00 CST          └─ daily timer **01:00**（`references/systemd/bwicarus-daily.timer`，原 04:00，73d8eb6 起提前以错开时段）
 ```
 
 两端**完全独立**：服务器下线 Pi 仍 100% 可用。共享 source of truth 是 GitHub 仓库 + AnkiWeb + Obsidian Sync 云端。
@@ -230,7 +230,7 @@ sudo mkdir -p /etc/tailscale-certs && cd /etc/tailscale-certs
 sudo tailscale cert bwicarus.taile44d0c.ts.net   # Let's Encrypt 真证书，3 个月有效
 ```
 
-nginx 配置见 `_server_deploy/nginx/`，Pi 版的只在 `[bwicarus|Tailscale DNS|100.101.15.57]` 几个 host 上监听 80/443。
+nginx 配置：git 的 `_server_deploy/nginx/bwicarus.conf` 是 **VPS 版**（`server_name bwicarus.space` + Certbot），**仓库里没有 Pi 版**。Pi 的配置只存在于机器上的 `/etc/nginx/sites-available/bwicarus`（Tailscale HTTPS Cert + 80/443 两个 server 块，server_name 是 `bwicarus` / MagicDNS / `100.101.15.57`），结构与 git 那份完全不同：**只能手工 patch，绝不可 cp 覆盖**（会冲掉 Tailscale 证书，全站挂）。同理别照 `_server_deploy/nginx/README.md` 的 `cp … /etc/nginx/sites-enabled/default` 在 Pi 上跑。
 
 **⚠️ Pi nginx (`/etc/nginx/sites-available/bwicarus`) 必须给 `/pdf` 和 `/api` location 加 `proxy_read_timeout 300s`**（80 + 443 两个 server 块各 2 处）。默认 60s 下，PDF 阅读器的 AI 端点（`/pdf/api/grammar-analyze` 语法分析、`/pdf/api/dict`/`translate` 走 claude_cli 翻译）在 Pi 上有时跑 >60s → nginx 返回 502。一行 sed 即可：
 
@@ -312,14 +312,31 @@ codex --version
 ### 阶段 10：systemd + 跑首次 daily
 
 ```bash
+```bash
 sudo systemctl enable --now xvfb-99 anki-headless obsidian-sync qa-server webapp nginx
+sudo systemctl enable --now bwicarus-daily.timer
+# 增量 timer（后续陆续新增）
+sudo systemctl enable --now anki-sync-refresh.timer bwicarus-quick-sync.timer push-big-files.timer \
+     bwicarus-backup.timer yolo-figures.timer figures-describe.timer book-ocr-watchdog.timer \
+     concept-graph.timer
+# Pi 当前两项核心职责（AI 调用中继 / 设备间同步中继）对应的 unit，别漏：
+sudo systemctl enable --now voice-rt.service        # 语音 realtime 中继 :8767，deploy_reader.sh 的健康门禁会探它
+sudo systemctl enable --now reader-context-push.service mcp-server.service rbi-server.service
+sudo systemctl start bwicarus-daily.service        # 首次手动跑，验证所有 step 全 ok
+```
 sudo systemctl enable --now bwicarus-daily.timer
 sudo systemctl enable --now anki-sync-refresh.timer bwicarus-quick-sync.timer push-big-files.timer \
      bwicarus-backup.timer yolo-figures.timer figures-describe.timer book-ocr-watchdog.timer   # 增量 timer（后续陆续新增）
 sudo systemctl start bwicarus-daily.service        # 首次手动跑，验证所有 step 全 ok
 ```
 
-预期：所有 step 全 ✓。`scripts/daily_anki_status.py` 当前跑 **15 步**（按顺序）：
+预期：所有 step 全 ✓。`scripts/daily_anki_status.py` 当前跑 **20 步**（含守门的 smoke tests）+ 2 个条件步骤：
+smoke tests / 确保 AnkiConnect / AnkiWeb 同步（拉最新）/ 登记新笔记 / 更新 Anki 状态 /
+计算复习优先级 / 薄弱卡 AI 改写 / 已掌握卡换问法 / 卡片质量体检 / 重建必复习牌组 /
+清理孤儿 / KG 关联+掌握度 /〔通用语停用词 + 停用词复活赛：受 server-config `stopword_gov.enabled` 控制〕/
+领域词典 / 融合权重学习 / 跨语言概念归一 / 学习近况 / 错误模式元画像 /
+导出仪表板 / 部署仪表板 / AnkiWeb 同步。
+（概念网三步已拆到独立的 `concept-graph.timer`，不在 daily 内。步数以 `main()` 里的 `step(...)` 调用为准，别写死。）
 smoke tests / 确保 AnkiConnect / AnkiWeb 同步（拉最新）/ 登记新笔记 / 更新 Anki 状态 /
 计算复习优先级 / 薄弱卡 AI 改写 / 已掌握卡换问法 / 卡片质量体检 / 重建必复习牌组 /
 清理孤儿 / KG 关联+掌握度 / 导出仪表板 / 部署仪表板 / AnkiWeb 同步。

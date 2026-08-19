@@ -82,7 +82,11 @@
         下行 │  │ 上行                下行 │  │ 上行
              ↓  │                          ↓  │
         ┌────────────────────────────────────────┐
-        │  Pi ——— 持久节点（永不关机）             │
+        │  Pi ——— 同步中继 + AI API（永不关机）      │
+│  · 事件**顺序**权威（不是内容真相）        │
+│  · 定期压快照 · 按订阅分发 · 备份          │
+
+（数据权威在各端本地：阅读器的高亮/便签/阅读位置在 App 本机是真源，Pi 只在中继时经手。）  │
         │  · 事件日志（真相）· 定期压快照           │
         │  · 按订阅分发   · 备份                   │
         └────────────────────────────────────────┘
@@ -306,7 +310,7 @@ CUDA，DocLayout 同一权重加载到 CUDA，公式走 UniMERNet CUDA。
 - ⚠ **现有 provenance 缺口**：standalone `yolo_figures.py` 的 figure sidecar
   只写 `geom:"yolo"` / `fsrc:"yolo"` / `fconf` / `fcls`，**没有 model file /
   device / profile**。若要独立重跑插图几何，无法分辨哪些页是什么条件下产出的
-- ⚠ 已知文档漂移：架构文档写 `quality-first-v1`，代码已是 `v2`（Codex 报告）
+- ~~⚠ 已知文档漂移：架构文档写 `quality-first-v1`，代码已是 `v2`~~ → 2026-08-19 已修：`reader-runtime-architecture.md` 与代码（`reader_book_ocr.py::PROCESSING_PROFILES`）一致为 `quality-first-v2`。
 
 **暂不做自动调度**：人工选的隐含好处是你知道每本书用了什么精度；自动调度
 要么按"PC 在不在线"选（等于精度随机），要么要一套优先级规则，当前痛点
@@ -421,7 +425,7 @@ CUDA，DocLayout 同一权重加载到 CUDA，公式走 UniMERNet CUDA。
 **几乎所有桌面浏览器都支持扩展，但对 PWA 的支持参差**。完整阅读能力由
 iOS App 与浏览器扩展提供，Pi 不再提供一份 App 已经能提供的阅读界面。
 
-已实现：`_server_deploy/reader_pwa_retirement.py` 拦五个页面入口
+已实现：`_server_deploy/reader_pwa_retirement.py` 拦**四个**页面入口（`/pdf/`、`/pdf/search`、`/pdf/epub/view`、`/pdf/fav/view`），返回 **410 + 说明页**。⚠ `/pdf/html/view` **有意不退役**：它同时是 vault 里 .md/.html 书的唯一阅读入口，而 App 书库只认 pdf/epub，退了等于删能力（见该文件里的注释）。个页面入口
 （`/pdf/`、`/pdf/search`、`/pdf/epub/view`、`/pdf/fav/view`、`/pdf/html/view`），
 返回 **410 + 说明页**。
 
@@ -553,7 +557,7 @@ App 的 relay 语音）**暂停开发** —— 保持现状运行、只修致命
       折成布尔（「有没有用户」）之前，原始原因（「token 压根没被解析」）就丢了。
 - [x] ~~谁是主~~ —— **已由产品边界解决（2026-08-15）**：iPad 上 App 管书、
       扩展管网页、Pi 只提供服务端能力与同步。问题从"三套 AI 谁优先"变成
-      "能力实现放在哪一层"。⚠ `native-local-runtime.js`（现 10750 行）仍是
+`native-local-runtime.js`（现 ~10.8k 行）就地实现了 manifest 里 55 条路由（owner=local 35 条是真本地终结；owner=pi 命中的 19 条多数只是本地加工后仍转 Pi），但不再有第三方（PWA/扩展）去读它，drift 面收窄。具体某条走哪边以 `scripts/where_does_this_route_run.py` 为准，别引用固定数字。
       Pi 45 条路由的第二份实现，但不再有第三方（PWA/扩展）去读它，drift 面收窄
 - [ ] **工具粒度重新梳理**：按「用户实际会说的话」列，看每句现在要几次往返
 - [ ] **载体抽象**：App / 扩展 / 未来的眼镜，共同抽象是「注意力落在什么内容上」。

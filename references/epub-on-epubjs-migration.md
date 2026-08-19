@@ -4,7 +4,7 @@
 >
 > 本文写于「打算把 EPUB 阅读器迁到 epub.js 成熟地基、手搓版搬齐后退役」的时期。**那个方向后来反转、已废**:
 > - **正主 = 手搓主文档版 `epub-html.js`**(把 EPUB 渲进主文档那条,266KB,`epub_html_reader.html`)——它是**默认 EPUB 阅读器**(`pdf_reader.py::epub_view` 默认分支),布局不抖、tap 坑已治,收藏夹物化 EPUB / 插入页 / 便签等新功能全建在它上,近期开发**全在这条**。
-> - **epub.js 版(`epub2*.js` + `?engine=epubjs` → `epub_reader.html`)= 退役中**:代码仍在、`?engine=epubjs` 仍可达,但**开发已停**(冻结在 2026-06-28~07-01),**不会再成为默认**。原计划「搬齐 → 切默认 → 手搓版退役」不会发生;**反了过来:手搓版是永久赢家,epub.js 是休眠实验**。
+> - **epub.js 版(`epub2*.js` + `?engine=epubjs` → `epub_reader.html`)= 已于 2026-07-06 整线删除**（commit 4d475c79「删除 epub.js 退役全线(12文件~250KB)」）：代码、模板、`?engine=epubjs` 分支都不存在了，`pdf_reader.py::epub_view` 直接渲 `epub_html_reader.html`。**下方「地基(已就位)」「移植阶段 P1-P10」「全部完成清单」全是那条已删分支的历史记录——别去找这些文件、也别照它改**；只有「iframe 底座坑」一节作为 epub.js 通用踩坑留档（`vendor/epub.min.js` 仍在盘上但全仓零引用）。
 > - 因此本文下方的「移植阶段 P1-P10 / 全搬计划 / 全部完成清单」都是 epub.js 那条**休眠分支**的记录;**新 session 别据此以为「默认要切 epub.js」或去动 epub.js 那套**。真正在维护的 EPUB 代码是 `epub-html.js`(+ 共享 `rc-*.js`,见 [`unified-control-layer.md`](unified-control-layer.md))。
 > - **仍有价值的部分**(仅当有人真去碰休眠的 epub.js 分支时):下方的 **iframe 底座坑**(iOS 单击文字不派发任何事件 → 折叠光标轮询兜底 / CFI 锚 / 选区桥接 / 装饰注 iframe document)是硬核踩坑,epub.js 特有,留档不删。
 

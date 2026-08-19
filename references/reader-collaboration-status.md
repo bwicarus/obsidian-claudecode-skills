@@ -35,7 +35,7 @@
   接管回归。
 - 风险：PWA/旧 AI 的 notes HTTP fallback 仍存在，下一阶段要先迁移 AI
   `notes_create/notes_edit`，再删除兼容路径。
-- 下一负责人：协调任务或下一位接手者；先读主交接，再决定是否部署整套 PWA runtime，
+- 下一负责人：（本条已作废）PWA 阅读器页面此后整体退役为 410 Gone，不再部署 PWA runtime，也不再跑 PWA 接管回归；交接对象改为 App（ReaderBundle）与扩展两个表面。
   不得只为通过测试放宽 provider registry。
 
 ## Claude 复核记录：0.2.50（2026-07-25，read-only）

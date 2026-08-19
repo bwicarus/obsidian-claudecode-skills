@@ -10,7 +10,23 @@
   VPS 自 2026-06-10 暂停，代码停在 5-28；除非明确要恢复 VPS，否则不要往它部署。
 - **Windows 不直接写 Pi 生产**。源码只经 git 上游流动（见
   [`cross-machine-dev-setup.md`](cross-machine-dev-setup.md)）。
-- 改动分两类，**判据是部署清单，不是文件所在目录**。
+- ## 第零步：先问这条改动在 App 内是不是本地实现
+
+```bash
+python3 scripts/where_does_this_route_run.py <你改的路由>   # 单条
+python3 scripts/where_does_this_route_run.py --audit        # 全量看名实不符
+```
+
+输出「App 内本地执行，不打 Pi」= 改 `_server_deploy/*.py` 对 App 无效；要改的是
+`_server_deploy/static/pdf/native-local-runtime.js`，且到 iPad 只能靠新的 TestFlight 构建。
+⚠ manifest 的 `owner` 记的是**数据归属**，不是「请求实际打给谁」——当前 owner=pi 的路由里
+有 19 条 runtime 已本地化，只看 owner 会把这 19 条全判错。
+
+确认这条确实由 Pi 执行（AI 类调用、同步中继、扩展/桌面表面）之后，再进入下面的第一步。
+
+## 第一步：判断你的改动属于哪一类
+
+改动分两类，**判据是部署清单，不是文件所在目录**。
 
 ## 第一步：判断你的改动属于哪一类
 
@@ -18,7 +34,7 @@
 python3 scripts/reader_deploy_manifest.py | cut -f1 | grep -F '<你改的文件路径>'
 ```
 
-`scripts/reader_deploy_manifest.py` 是生产文件清单的**唯一事实源**（当前 150 项）。
+`scripts/reader_deploy_manifest.py` 是生产文件清单的**唯一事实源**（写作时 162 项；**以脚本实时输出为准，别拿文档里的数字当校验基准**）。
 命中 = A 类，没命中 = B 类。旧文档里任何手写的文件列表都不能代替它。
 
 | | A 类（清单内） | B 类（清单外） |
@@ -109,7 +125,7 @@ Python 全量只在改到 Python/部署逻辑时跑。`handoff_check.py` 只在�
 
   | 改动类型 | 验收时点 |
   |---|---|
-  | Reader/PWA 共享的新功能、UI/视觉或交互变更（可原子回滚） | 合同测试和预检通过后**直接部署到生产 iPad**，用户在 iPad 验收；不默认插入独立扩展测试 |
+  | | Reader/PWA 共享的新功能、UI/视觉或交互变更（可原子回滚） | 先确认改动能不能到达设备：`_server_deploy/static/pdf/*` 与已本地化的路由由 `ios/BWReader/package_local_reader.py` 烤进 App 包，**部署 Pi 对 App 无效**，到 iPad 需要新的 TestFlight 构建（`gh workflow run safari-extension-ios.yml --ref <分支> -f upload=true`）。只有落在 owner=pi 且 runtime 无本地分支的服务端路由上，合同测试和预检通过后部署 Pi 才等于上生产 iPad，由用户在 iPad 验收 |；不默认插入独立扩展测试 |
   | 扩展专属改动 | 独立测试环境仅在用户明确要求时使用；扩展正式渠道发布仍须发布前人工验收 |
   | 数据迁移/schema、不可逆操作 | **必须部署前验收** |
   | 修 bug、重构、性能优化、纯文档 | **预检通过即可部署** |

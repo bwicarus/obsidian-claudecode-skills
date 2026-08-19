@@ -108,7 +108,7 @@
   - `anchorFromDrop(x, y) -> anchor`:松手视口坐标 → {page,x,y}(PDF)/{section,x,y}(EPUB),归一化。
   - `contextAt(anchor) -> string`:锚点附近正文(PDF=该页文本切片;EPUB=该 section `_countableText` 切片,取锚点 y 比例附近 ±600 字)。
   - `endpoints` / `file`。
-- **后端**:`pdf_reader.py` 便签 sidecar CRUD(照 epub-highlights 模式,按书 JSON,PDF/EPUB 同一套路由——anchor 结构不透明存储);合成图片端点(服务端 PIL 重绘文字+笔画,避免前端 html2canvas 依赖)。
+- - **后端(两份实现，改行为要同步)**：App 内 `/pdf/api/notes` 与 `/pdf/api/note-composite` 是 owner=local，由 `static/pdf/native-local-runtime.js` 的 `localNotes` / `localNoteComposite` 就地处理（便签存本机 store，合成图 `renderLocalNoteComposite` 在设备上画，无 PIL），本地实现带精确字段白名单且不接受任何查询参数；`pdf_reader.py` 的便签 sidecar CRUD + PIL 合成端点只服务旧网页表面与 Pi 中继。(照 epub-highlights 模式,按书 JSON,PDF/EPUB 同一套路由——anchor 结构不透明存储);合成图片端点(服务端 PIL 重绘文字+笔画,避免前端 html2canvas 依赖)。
 - **AI 工具**:`assistant.py` 工具循环注册 `notes_query/notes_read/notes_create/notes_edit`(沙盒注册机制照 task#210/211 现有工具)。
 
 ### 数据模型(sidecar,按书一个 JSON)
@@ -132,7 +132,7 @@
 - 有笔画(视觉通道):`kind:'note', note_id` 条目并入 `context.figures` 走现有图附件通道;服务端 `_t_see_figure`(assistant.py/epub_assistant.py 都认 kind)按 note_id 调 `pdf_reader._note_composite_png` **现场重合成**(不传 data URL,永远最新 sidecar);prompt fig 块里给便签文字+位置正文,笔画内容按需 see_figure。chip 缩略图另经 `/api/note-composite` 取 data_url 仅前端显示(`_thumb` 字段不随请求发)。
 
 ### AI 工具协议(assistant.py)✅ 已实现(2026-07-03,四工具 + 撤销卡,两侧行为一致)
-实现:核心四函数在 `assistant.py`(`_t_notes_query/_t_notes_read/_t_notes_create/_t_notes_edit`,`kind='pdf'|'epub'` 参数定位置口径),PDF 助手 TOOLS 直接注册,EPUB 助手 `_etools` 以 `lambda a,c: _A()._t_notes_*(a,c,kind="epub")` 复用。file 一律从会话 ctx 取(`ctx.file_rel`,同 see_figure),AI 不传 file。数据层直调 `pdf_reader._notes_load/_notes_save`。
+实现:核心四函数在 `assistant.py`(`_t_notes_query/_t_notes_read/_t_notes_create/_t_notes_edit`,`kind='pdf'|'epub'` 参数定位置口径),PDF 助手 TOOLS 直接注册,EPUB 助手 `_etools` 以 `lambda a,c: _A()._t_notes_*(a,c,kind="epub")` 复用。file 一律从会话 ctx 取(`ctx.file_rel`,同 see_figure),AI 不传 file。数据层走 `_vb_notes(file_rel, ctx)`：**原生书读的是 App 随请求送上的 `native_local_state` 权威快照**（快照由 `native-local-runtime.js::nativePDFRequestBody` 注入，Pi 侧 `assistant.py::_native_pdf_state` 校验合同），**只有旧书才落到 `pdf_reader._notes_load/_notes_save`**。
 
 - `notes_query {color?, keyword?, page?|section?}` → {count, notes:[{id, color(色名), 位置(第N页/第N章), text 摘要≤60, has_ink}]} 上限 50;三过滤可组合,全空=列全部。color 收色名(白/黄/蓝/绿/粉/石墨/墨绿,同 rc-stickynote 色板)或 hex;PDF 的 page 是印刷页(`_to_pdf` 换算)。
 - `notes_read {id}` → 全文 + 位置 + color;有笔画时 note 提示「含手写内容,调 see_figure({note_id})看合成图」——**see_figure 两侧已加 args.note_id 支持**(不依赖用户双击带入,直接按 id 走 `_note_composite_png`)。
@@ -170,7 +170,7 @@
 
 **根因**:去边靠 CSS `.crop-on>* { transform: translate(-cropL,-cropT) }`(pdf-styles.css)平移**所有**子层——包括便签 `.rc-note`、反馈层 `.rc-anchor-fx`。但 PDF host(`reader.src/27-rc-adapter.js`)原 `noteMount`/`noteAnchorFromPoint`/`noteWordRect` 用**裁后** `pw.clientWidth`(=可见窄宽)算锚/还原像素,没算这个 translate → 落点系统性偏 -(cropL,cropT)。三条链(重拖已钉便签 / 浮层卡钉入 / 侧栏拖出)都经这三个 host 函数,全偏。
 
-**修法**(统一基准,一处修好三条链):三个 host 函数改用 `_pdfNoteGeom(pw)` —— 以 **char-layer(`pw.__charLayer`,撑满整页 `--full-w`、与便签同吃 translate)的实时 `getBoundingClientRect()` + 整页布局宽**为基准。crop/zoom/祖先缩放全部自动含在 BCR 里,便签 append 进吃 translate 的 pw 自然对齐。char-layer 未就绪时回退 `pw BCR + --crop-l/--full-w` 手算。`reader.src/08-charlayer.js` 的 `__charsBaseW` 也改存**整页布局宽**(去边下=`--full-w`;charBox 本就是整页坐标)。anchor.x/y 语义从"裁后比例"变"整页比例"——非去边下两者恒等(char-layer=pw 全宽),旧便签零影响;去边旧便签本就偏,自动修正。⚠ 改 `reader.src/*` 后必须同步重建 `reader.js` 并 `sudo cp` 到 `/var/www/html/static/pdf/`(nginx 服务的才是真机加载的)。
+**修法**(统一基准,一处修好三条链):三个 host 函数改用 `_pdfNoteGeom(pw)` —— 以 **char-layer(`pw.__charLayer`,撑满整页 `--full-w`、与便签同吃 translate)的实时 `getBoundingClientRect()` + 整页布局宽**为基准。crop/zoom/祖先缩放全部自动含在 BCR 里,便签 append 进吃 translate 的 pw 自然对齐。char-layer 未就绪时回退 `pw BCR + --crop-l/--full-w` 手算。`reader.src/08-charlayer.js` 的 `__charsBaseW` 也改存**整页布局宽**(去边下=`--full-w`;charBox 本就是整页坐标)。anchor.x/y 语义从"裁后比例"变"整页比例"——非去边下两者恒等(char-layer=pw 全宽),旧便签零影响;去边旧便签本就偏,自动修正。⚠ 改 `reader.src/*` 后必须重建 `reader.js`（`bash scripts/check_pdf_reader_js.sh`），再按表面分别投递：Pi/旧网页走 `bash scripts/deploy_reader.sh`（唯一生产写入口，别手工 sudo cp）；**iPad App 加载的是打进包的 ReaderBundle**（`ios/BWReader/package_local_reader.py`），只能靠新的 TestFlight 构建到达；Safari 扩展加载 `extensions/bw-reader-webext/vendor/` 自带副本，需同步并重新打包。。
 
 **顺带修 S1**(外部诊断确认的竞态,`rc-stickynote.js`):`dropNote` 探测点从 `rect0+指针位移` 改为**松手瞬间实时 BCR**(transform-origin '0 0' 下左上=视觉落点),与拖动反馈 `anchorFxShow` 一致;`repositionPortaled` 跳过拖动中的便签(防异步页渲染改写 `root.left`)。
 

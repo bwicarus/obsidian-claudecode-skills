@@ -12,7 +12,7 @@ Flask 多用户应用 + nginx 反代 + systemd service 的完整开发流程。
         ↓ /control, /dashboard, /profile, /admin, /history, /api, /auth, /login, /register, /logout
         ↓
 [Flask webapp :5000]  ←  webapp/app.py（systemd webapp.service，Pi 上是 gunicorn）
-        ├── 7 个 blueprint：control / skilltree / pdf_reader / fitness / insights / voice / assistant（+ pdf 蓝图上再挂 epub_assistant）
+        ├── 11 个 blueprint：control / skilltree / **reader_sync_relay**（Reader DataStore 变更的按账号分区中继；权威在客户端 DataRegistry，Pi 只经手）/ shared_note / kg_export / **computer_voice_routes** / pdf_reader / fitness / insights / voice / assistant（+ pdf 蓝图上再挂 epub_assistant）
         ├── templates/*.html
         └── data/users/<u>/* + data/{dashboard,history}_template/
 ```
@@ -115,7 +115,9 @@ nginx 两个 server 块各有 `location ^~ /static/pdf/ { … try_files $uri =40
 | `/pdf/api/upload` | POST | 上传 PDF 到 vault |
 | `/pdf/api/list-pdfs` | GET | PDF 列表 JSON |
 | `/pdf/api/snippets-to` | POST | 草稿 → 笔记 / Anki / 两者 |
-| `/pdf/api/highlights` | GET/POST/PATCH/DELETE | 高亮 sidecar JSON 增删改查 |
+> ⚠ **本表列的是 Pi 上存在的路由，不等于 App 会调它。** 阅读器有一批路由在 iOS App 内是本地实现（highlights / reading-pos / sync-batch / phrases / job-status 等），请求不出网，改服务端对 App 无效。改任何 `/pdf/api/*` 之前先跑 `python3 scripts/where_does_this_route_run.py <路由>`。
+
+| `/pdf/api/highlights` | GET/POST/PATCH/DELETE | 高亮 sidecar JSON 增删改查（**仅网页/扩展表面**；App 内为本地实现）|
 | `/qa/` `/qa` | GET | 渲染 `qa.html`（旧 qa 流程，读 `data/qa.json`）|
 | `/qa/update` | POST | 旧 relay 写 qa.json（X-API-Key = RELAY_KEY）|
 
@@ -194,18 +196,23 @@ journalctl -u webapp -n 20 --no-pager
 
 ### 加新 location 到 nginx（少做）
 
+> ⚠ 下面按 **Pi**（当前唯一活跃实例）写。VPS 自 2026-06-10 暂停，
+> `root@bwicarus.space` 那套仅在 VPS 重新启用后才有意义。
+> **Pi 的 nginx 配置与 git 里那份 VPS 版结构完全不同，只能手工 patch，
+> 绝不可 `cp` 覆盖**（会冲掉 Tailscale 证书配置，全站挂）。
+
 ```bash
-ssh root@bwicarus.space
+ssh pi
 
-# 备份到 sites-enabled 外面（注意：bak 文件别留在 sites-enabled/ 否则 nginx 当配置读会冲突）
-cp /etc/nginx/sites-enabled/default /root/nginx-backups/default.bak.$(date +%s)
+# 备份到 sites-available 外面（bak 留在 sites-enabled/ 会被 nginx 当配置读，冲突）
+sudo cp /etc/nginx/sites-available/bwicarus ~/nginx-backups/bwicarus.bak.$(date +%s)
 
-# 编辑
-nvim /etc/nginx/sites-enabled/default
+# 编辑：Pi 有 80 / 443 两个 server 块，新 location 两处各加一次
+sudo nano /etc/nginx/sites-available/bwicarus
 # 加: location /new-prefix { proxy_pass http://127.0.0.1:5000; proxy_set_header Host $host; ... }
 
-# 验证 + reload（不重启）
-nginx -t && systemctl reload nginx
+# 验证 + reload（新增 location 块 reload 有时不完全生效，不灵就 restart）
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
 ## webapp.service 配置（Pi 实机 = gunicorn）
@@ -323,18 +330,18 @@ if __name__ == "__main__":
 ## 测试 / debug 流程
 
 ```bash
-# 本机看返回码
-curl -sI https://bwicarus.space/<path>
+# 本机看返回码（Pi 走 Tailscale MagicDNS；bwicarus.space 是暂停中的 VPS）
+curl -sI https://bwicarus.taile44d0c.ts.net/<path>
 
 # 服务器看 webapp 日志
-ssh root@bwicarus.space 'journalctl -u webapp -n 50 --no-pager'
+ssh pi 'sudo journalctl -u webapp -n 50 --no-pager'
 
 # 服务器看 nginx 日志
-ssh root@bwicarus.space 'tail -30 /var/log/nginx/access.log'
-ssh root@bwicarus.space 'tail -30 /var/log/nginx/error.log'
+ssh pi 'sudo tail -30 /var/log/nginx/access.log'
+ssh pi 'sudo tail -30 /var/log/nginx/error.log'
 
-# python flask 直接跑（debug 模式）
-ssh root@bwicarus.space
+# python flask 直接跑（debug 模式；注意生产是 gunicorn，行为不完全一致）
+ssh pi
 systemctl stop webapp
 cd /root/webapp
 python3 app.py    # 阻塞，看 stdout
@@ -395,7 +402,7 @@ upload_dataset(client, Path(dash_dir), "dashboard")
 - **CSRF**:零依赖会话级 token(`_csrf_token()`/`_csrf_ok()` + `context_processor` 注入 `csrf_token()`)。**仅**登录/注册两个公开 HTML 表单校验(模板加隐藏 `csrf_token` 域);JSON API 不走(靠 `SameSite=Lax` + session/Bearer,给所有 fetch 串 token 风险高收益低)。`SameSite=Lax` 本已挡跨站带 cookie 的 POST。
 - session cookie 早已 `HttpOnly + SameSite=Lax + Secure`,SECRET_KEY 走 env(无需改)。`SESSION_COOKIE_SECURE` 随环境降级:`os.environ.get("SESSION_COOKIE_SECURE","1") not in ("0","false","False")`(`app.py:33`),**默认仍 Secure(生产不变)**;本地裸 http 实例由 `.env.local` 设 `SESSION_COOKIE_SECURE=0` 关掉,兼容非 Chrome 浏览器(注:Chrome/Firefox 对 127.0.0.1/localhost 视作 secure context,即便 True 本地也能登录,此处降级只为边界场景)。
 
-**部署回顾**:Python 改 `cp _server_deploy/*.py /home/bwicarus/webapp/` + `systemctl restart webapp`;模板 `cp templates/*.html`;nginx `nginx -t && systemctl reload nginx`;systemd `cp references/systemd/*.{service,timer} /etc/systemd/system/ && daemon-reload`。VPS 实例同源码,nginx 用 git 的 `_server_deploy/nginx/bwicarus.conf`(需同步加这些 header/gzip/limit_req)。
+**部署回顾**：先判类（`python3 scripts/reader_deploy_manifest.py | cut -f1 | grep -F '<你改的文件>'`）。命中清单的（`app.py` / `control.py` / `pdf_reader.py` / `assistant.py` / `voice.py` / `reader_sync_relay.py` / 7 个阅读器模板 / `nav.js` 等）走 `bash scripts/deploy_reader.sh`，**不要手工 cp**；未命中的（`insights.py` / `fitness*.py` / `qa_server.py` / `templates/control.html` 等）才 `cp` + `systemctl restart webapp`。nginx：Pi 上手工 patch `/etc/nginx/sites-available/bwicarus` 后 `nginx -t && systemctl reload nginx`（绝不 cp git 的 VPS 版）；systemd `cp references/systemd/*.{service,timer} /etc/systemd/system/ && daemon-reload`。VPS 实例同源码，nginx 用 git 的 `_server_deploy/nginx/bwicarus.conf`（需同步加这些 header/gzip/limit_req）。唯一权威见 [`deployment-workflow.md`](deployment-workflow.md)。
 
 ## 控制面板状态轮询（/control/api/status 缓存 + 前端节流，2026-06）
 

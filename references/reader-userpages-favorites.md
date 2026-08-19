@@ -50,7 +50,7 @@
   2. **overlay 记录 job 禁止回写 md/title**:边车是唯一真源,job 只 `synced_ver = max(synced_ver, base_ver)`(单调 max)。baked 记录保持原 update(写 md/title)语义。
   3. **sync 路由 record_op 只带 `base_ver`,不带 md/title**:job payload 另带 md/title(渲进 PDF 用),取自服务端**锁内原子快照**(md+md_ver 一起读,不信客户端);`md_ver<=synced_ver`(不脏)→ 直接 `{clean:true}` 免一次昂贵 `doc.save`。
 - **自主路径文本真源**:未同步(脏)的 overlay 页 PDF 那页是空白 → `_page_text`(assistant.py,`_overlay_md_for_page`)、`build_search_index.py`(`_apply_overlay_supplement` + 把 overlay 边车 mtime 折进书变更签名)遇脏 overlay 页用边车 md 补 `get_text`,让 read_page/搜索/译页不落空;已同步页 PDF 已有文字,不重复补。
-- **⚠ 成本(如实,别掩盖 Pi 代价)**:**每次后台同步 = `_inspage_job` 整本 `doc.save` + 刷 book_mtime → 全书页图/字符层缓存(按 mtime 键)全部失效**,用户随后滚到任意未编辑页都要重渲染(Pi ~几秒/页)。这正是同步频率**必须**压到「完成编辑 + 关书」的原因(8~10s 自动防抖会把「一次 reload」痛点换成「反复逐页重渲染」更碎)。不脏免同步(clean 短路)是关键省心。未来可评估 PyMuPDF 增量保存降低 mtime 影响。
+- **⚠ 成本(如实)**:**每次后台同步 = `_inspage_job` 整本 `doc.save` + 刷 book_mtime → 全书页图/字符层缓存(按 mtime 键)全部失效**,用户随后滚到任意未编辑页都要重渲染。**本机书这笔账记在设备上**(改页事务 `native-local-runtime.js::beginNativePDFMutationJob` + 环回 PDFKit 出页图都在 App 内，`/pdf/api/pdf-insert-page` 与 `/pdf/api/page-image` 都是 owner=local)；只有走 Pi 的旧网页表面才是 Pi ~几秒/页。这正是同步频率**必须**压到「完成编辑 + 关书」的原因(8~10s 自动防抖会把「一次 reload」痛点换成「反复逐页重渲染」更碎)。不脏免同步(clean 短路)是关键省心。未来可评估 PyMuPDF 增量保存降低 mtime 影响。
 
 ## 真插 / 真删(改 PDF 页数)+ 锚迁移注册表 `PAGE_ANCHOR_MIGRATIONS`
 
@@ -58,7 +58,7 @@
 
 - **安全落盘**:磁盘空间守卫 → 备份 `state/pdf-page-backups/<sha>/<ts>.pdf`(留最近 2 份)→ PyMuPDF 改页 → tmp 同目录 save(点开头文件名避开 Obsidian Sync;<40MB `garbage=3` 否则 `garbage=1`+deflate)→ 重开断言页数 → **journal**(写于 `os.replace` 前、迁移全部完成后删;残留 → 后续操作 409 拒绝,防「替换成功但迁移没跑」带伤续写)→ `os.replace` 原子替换 → **锚迁移事务**。任何异常回滚不动原书 = 全成或全不成。
 - **锚迁移注册表**(⚠ **未来任何新增按页存储必须在此登记**):每项 `(name, fn(ctx)->plans)`。插入=page>after 则 +1、删除=反向 -1(被删页锚丢弃)、编辑=0。**事务两阶段**:phase1 全迁移器纯内存算出 write/rename/unlink 计划(读原始 JSON,绕过 loader 的 mtime 清空守卫)→ phase2 统一落盘,任一步失败逆序回滚 + copy 备份恢复 PDF。
-- **需迁 14 项**(2026-07-03 全项目 grep 盘点):pdf-highlights / reader-notes(便签 anchor.page,`u_*` 字符串跳过)/ pdf-ink / reader-favorites(本书 items)/ reader-userpages(真页 page + 旧 after 边界)/ pdf-tr-sentences / pdf-char-offset / pdf-toc(仅 range,entries 是印刷页天然稳)/ sentence-cards(页号在 sha1 键 → 重键)/ vocab-exposure / **pdf-figures + figures_geom + formulas**(各 page + `_none_pages`,并把 `book_mtime` 刷新 → loader mtime 守卫不触发,贵的 AI 图描述/YOLO 框全保留)/ pdf-ocr-fix(同款 mtime 刷新)/ pdf-page-ocr(页号在文件名 → 改名)/ mokuro+google-vision OCR checkpoint(`p%04d` 0-based → +1 降序改名防撞)。
+- **需迁 19 项**(Pi 侧 `PAGE_ANCHOR_MIGRATIONS`，2026-08 复核)：pdf-highlights / reader-notes(便签 anchor.page,`u_*` 字符串跳过)/ **reader-positions**(服务端续读位置)/ pdf-ink / reader-favorites(本书 items)/ reader-userpages(真页 page + 旧 after 边界)/ pdf-tr-sentences / pdf-char-offset / pdf-toc(仅 range,entries 是印刷页天然稳)/ sentence-cards(页号在 sha1 键 → 重键)/ vocab-exposure / **pdf-figures + figures_geom + formulas**(各 page + `_none_pages`,并把 `book_mtime` 刷新 → loader mtime 守卫不触发,贵的 AI 图描述/YOLO 框全保留)/ pdf-ocr-fix(同款 mtime 刷新)/ pdf-page-ocr(页号在文件名 → 改名)/ mokuro+google-vision OCR checkpoint(`p%04d` 0-based → +1 降序改名防撞)/ **vocab-lookups** / **assistant-convo** / **attention-dwell** / **attention-db**。⚠ **注册表有两份**：本机书的插/删页在 App 内本地跑（`native-local-runtime.js::localPDFInsertPage` → `beginNativePDFMutationJob`），对应 `PDF_MUTATION_PAGE_ANCHOR_DOMAINS`（20 个域 + 每域 local-migrate / pi-preserve-rebind / native-ocr-migrate 策略）。**新增任何按页存储必须两份都登记**，只改 Pi 那份对 App 无效。
 - **免迁**(键机制天然失效,已逐一读代码确认):页图 `sha-p{p}-w{w}-{mtime}.jpg` / 字符层 `sha16-p{p}-{mtime}-{lang}.json` / 振假名·整本文本(文件名含 mtime → 替换即换键)/ FTS 搜索(meta.mtime 变 → quick_sync ≤15min 自动整书重建)/ lastopen / grammar 缓存 / assistant 会话 / vocab-lookups / pdf-prefs 阅读位置(客户端 localStorage 为真源)。
 - **已知妥协**:pdf-book-offset 印刷页偏移是全书标量,插入点之后印刷页显示差 1(设置可重对齐);vault 笔记/Anki 里历史「第N页」散文引用不迁。
 
@@ -153,7 +153,7 @@ EPUB 插入段本就是 `#ep-col` 内的 DOM 文本 → 选词/查词/AI/高亮*
 ## 零进度 / 静态由 nginx 服务 / 系统边界特判
 
 - **零进度**(收藏夹书排除出进度系统):`_fav_serve_reader` 传 `server_pos=None`、不调 `_lastopen_touch`(不进「最近打开」);`reading-pos` 对 `资源/收藏夹/` 前缀提前拒收(服务端更稳)。`fav-drafts` 草稿 key 已随精简页退役。
-- **静态由 nginx 服务**(测试/部署 gotcha):部署版 static JS 在 `/var/www/html/static`,**只有 nginx/443 服务它**;Flask `:5000` 是陈旧 static。真机/Playwright 验证收藏夹务必走 nginx 而非 `:5000`。
+- **静态由 nginx 服务**(仅限旧网页表面)：部署版 static JS 在 `/var/www/html/static`，只有 nginx/443 服务它；Flask `:5000` 是陈旧 static。⚠ **nginx 那份到不了 App 和扩展**——App 加载打进包的 ReaderBundle（`ios/BWReader/package_local_reader.py`，需新 TestFlight 构建），Safari 扩展加载 `extensions/bw-reader-webext/vendor/` 自带副本（需重新打包）。Playwright 走 nginx 只能验证网页表面。
 - **系统边界**:产物在 `state/reader-fav-epub`(**非 vault** → 无 Obsidian Sync churn、天然不进书架/搜索)。`_FAV_BOOK_PREFIX="资源/收藏夹/"` 现是**合成 rel 键**,仍作为锚用于:`_resolve_epub_book` 解析、零进度、禁自我收藏、以及**防御性**排除(`_list_vault_pdfs`:108 + `build_search_index.py::_list_pdfs` 仍 `startswith` 跳过,防 v3 残留的 vault PDF 混进书架/双份命中)。register/KG/制卡(只扫 `[0-9A-Fa-f]{3}-*.md`)、push_big_files、backup 均顺其自然。
 
 ## 退役清单
@@ -190,5 +190,5 @@ EPUB 插入段本就是 `#ep-col` 内的 DOM 文本 → 选词/查词/AI/高亮*
 - **删除闭环**:统一 🗑(收藏夹删=删原书那页,确认文案明示)→ 后端 `_fav_cascade_userpage_delete` 级联清各收藏夹条目 + `userpage-del` SSE(所有视图当场移除元素)+ `_fav_prune_dead_userpages`(open/预建时清存量墓碑;sidecar 存在且查无 id 才删)。
 - **结构真·增量**:fav CRUD→`fav-changed`;重建完→`fav-built`;打开着的收藏夹 `_favReconcile` 拉 `/api/fav-meta` 按条目 key diff:保留节复用 DOM 只改 idx、移除节消失、新增节建占位懒加载(滚动/墨迹 canvas 不动)。
 - **来源条**(v13):`《书名》·页/节 | 打开原书↗ | ☆取消收藏`(`_fav_sep_html3` 带 data-fitem→PATCH remove_item,乐观隐藏+reconcile 收尾);间距紧凑(sep 8/5、item 2)。
-- **收藏夹工程**:后台预建(`_fav_prebuild_loop` 45s 后+每 15min,串行防并发压 Pi;线程起失败回滚占位);独立 PWA(`/fav/manifest`+`/fav/icon` 金星,start_url 固定本夹,零状态不进「最近打开」)。
+- **收藏夹工程**:后台预建(`_fav_prebuild_loop` 45s 后+每 15min,串行防并发压 Pi;线程起失败回滚占位);独立 PWA(`/fav/manifest`+`/fav/icon` 金星,start_url 固定本夹,零状态不进「最近打开」)——**已随 2026-08-18「只做 App 与扩展」边界停用**：路由仍在 `favorites_reader.py:1426-1427`，但不再作为交付形态，新功能不要建在它上面。。
 - **实时同步**:内容 ~1s(SSE)、结构=重建耗时(几秒);正在画/编辑的页永不被打断/覆盖(drawing/dirty 守卫,响应落地复查)。

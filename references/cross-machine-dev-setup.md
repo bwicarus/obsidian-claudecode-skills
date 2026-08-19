@@ -5,7 +5,7 @@
 ## 为什么这么分
 
 `deploy_reader.sh` 依赖 sudo / systemd / nginx / `/var/www/html` 原子安装,本质是 Pi 的东西;
-真实数据(reader sidecars、KG、Anki、`webapp/data`)也只在 Pi。Windows 是 2TB 的开发机,
+KG、Anki、`webapp/data` 只在 Pi。**reader sidecars（高亮/便签/续读位置）的权威在 App 本地**（`/pdf/api/highlights|notes|reading-pos` 都是 `native-local-runtime.js` 的本地实现），Pi 上那份只服务扩展/网页表面并充当设备间同步中继。改任何一条阅读器路由前先跑 `python3 scripts/where_does_this_route_run.py <路由>` 判断归属，再决定要不要部署 Pi。Windows 是 2TB 的开发机,
 适合编辑与快测。所以不是"把整套搬去 Windows",而是**按能力分层**。
 
 分层不是拍脑袋,是 2026-07-29 在 Windows 上把 86 个测试模块逐个跑出来的结果(见下)。

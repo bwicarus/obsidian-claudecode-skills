@@ -24,7 +24,12 @@
 | 页面 | 无扩展 | 有扩展 |
 |---|---|---|
 | 普通网页 | 没有 BW 功能 | 扩展提供完整 BW 网页阅读功能 |
-| PWA 真书 | PWA 完整阅读器 | 扩展接管共享 UI/网络/通用数据；PWA 保留 renderer、锚点和书籍私有数据 |
+| 页面 | 无扩展 | 有扩展 |
+|---|---|---|
+| 普通网页 | 没有 BW 功能 | 扩展提供完整 BW 网页阅读功能 |
+| 真书（PDF/EPUB/导入 HTML·Markdown/收藏书） | 由 iOS App 内置 Reader 打开 | 同左；Safari 扩展不进入 App 的 WKWebView |
+
+PWA 真书界面已于 2026-08-14 废除（页面入口 410），2026-08-18 用户拍板只做 App 与扩展。下文凡以「PWA 真书」为前提的接管不变量、验收项与回归矩阵，只作为历史契约保留。
 
 “真书”只有：
 
@@ -385,7 +390,7 @@ owner token；`accountProof` 只能比较 RTC peer 是否属于同一账户，�
 PWA 无扩展时用 Web Lock 保证同一安装只有一个直连标签页。当前未配置公共 STUN/TURN，因此
 无法直连时按设计继续走服务端。
 
-当前跨设备白名单只有 `user-settings` 与 `vocabulary-state`；派生缓存不上传。每条变化携带
+当前跨设备白名单是四条：`user-settings`、`vocabulary-state`、`card-entities`、`card-states`（`data-registry.js` 里 `sync:true` 的即是全部）；派生缓存（query/translation/dictionary-cache）不上传。「只有 user-settings 与 vocabulary-state」是 `PREVIOUS_CARDLESS_SYNC_DIGESTS` 记录的上一代，不要当现状引用。每条变化携带
 它实际看到的父业务状态，relay 只有在父状态与当前 head 精确一致时才接纳真实变化，更高
 revision 不能绕过分叉。同业务值只收敛元数据，真实分叉保留 conflict 并暂停；旧 `sync-v2`
 只通过精确摘要 checkpoint + 稳定快照迁移，旧无证明 head 不能覆盖已有本地值。
@@ -621,7 +626,7 @@ Windows 真机必须验证：
 ## 11. 部署门禁
 
 > ⚠ **怎么部署看 [`deployment-workflow.md`](deployment-workflow.md)（唯一权威）。**
-> 生产文件清单的唯一事实源是 `scripts/reader_deploy_manifest.py`（当前 150 项），
+> 生产文件清单的唯一事实源是 `scripts/reader_deploy_manifest.py`（跑一次看当前条数，别引用固定数字），
 > 唯一写入口是 `scripts/deploy_reader.sh`。下面这份文件列表是**给人看的重点提示**，
 > 不能代替清单；漏没漏以 `python3 scripts/reader_deploy_manifest.py` 为准。
 

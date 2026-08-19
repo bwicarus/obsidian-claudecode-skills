@@ -32,7 +32,12 @@ session ID 从 `claude --resume` 不带参数时的交互列表里挑，或者�
 ## 📊 看 Pi 服务状态
 
 ```bash
-systemctl status webapp anki-headless qa-server obsidian-sync xvfb-99 nginx bwicarus-daily.timer --no-pager -l | head -50
+```bash
+systemctl status webapp voice-rt qa-server anki-headless obsidian-sync xvfb-99 nginx \
+  mcp-server bwicarus-daily.timer concept-graph.timer --no-pager -l | head -60
+```
+
+`voice-rt`（:8767 语音 realtime 中继）是 `deploy_reader.sh` 的健康门禁之一，别漏看。
 ```
 
 输出每个 unit 的 active / inactive / failed，含最近几行 journal。
@@ -64,7 +69,24 @@ sudo systemctl restart qa-server
 ## 🔄 git pull 最新代码 + 重启 webapp
 
 ```bash
-cd ~/claude && git pull && cp _server_deploy/{app,control}.py ~/webapp/ && cp _server_deploy/templates/*.html ~/webapp/templates/ && cp _server_deploy/static/nav.js /var/www/html/static/ && sudo systemctl restart webapp.service
+## 🔄 git pull 最新代码 + 部署
+
+⚠ `app.py` / `control.py` / `_server_deploy/templates/*.html` 里的 7 个阅读器模板都在**部署清单内**，
+必须走原子部署，不要手工 cp：
+
+```bash
+cd ~/claude && git pull && bash scripts/deploy_reader.sh
+```
+
+清单外文件（`templates/control.html`、`insights.py`、`fitness*.py`、`qa_server.py` …）才手工 cp：
+
+```bash
+cp ~/webapp/templates/control.html ~/deploy-backups/manual/control.html.$(date +%s)
+cp _server_deploy/templates/control.html ~/webapp/templates/ && sudo systemctl restart webapp.service
+```
+
+判类：`python3 scripts/reader_deploy_manifest.py | cut -f1 | grep -F '<你改的文件>'`，
+完整规则见 [`deployment-workflow.md`](deployment-workflow.md)。nginx 改动不在这条里。
 ```
 
 部署 control 面板 / nav.js 改动一条龙。nginx 配置改动不在这条里（要 reload nginx 单独执行）。
@@ -91,7 +113,7 @@ echo | openssl s_client -connect 127.0.0.1:443 -servername bwicarus.taile44d0c.t
 cd ~/claude && /usr/bin/python3 -m unittest discover tests -v 2>&1 | tail -10
 ```
 
-预期 `Ran 21 tests ... OK`，0.2s。
+预期结尾 `OK`（当前 `tests/` 有 124 个 `test_*.py`、约 1300 个用例，耗时以实际为准；**别拿固定的用例数当通过标准**，只看有没有 `FAILED`/`ERROR`）。
 
 ## 🗂️ 看 vault / Anki 规模
 

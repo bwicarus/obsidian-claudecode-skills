@@ -7,7 +7,7 @@
 
 ## 1. 产品边界
 
-正式产品包含本地优先的 iOS App、独立网页版 PWA 和浏览器扩展。App 不再内嵌远程 PWA；
+正式产品只有本地优先的 iOS App 与浏览器扩展。PWA 已于 2026-08-14 废除：`/pdf/`、`/pdf/search`、`/pdf/epub/view`、`/pdf/fav/view` 返回 410（`_server_deploy/reader_pwa_retirement.py`），网页阅读器不再是交付表面。下表中的「PWA」列只作为历史契约保留，不得据此新增或保留兼容取舍。App 不再内嵌远程 PWA；
 它把同一套 Reader HTML/JS/CSS 作为本地渲染组件打进安装包，由 Swift 持有文件、生命周期、
 系统能力和同步入口。网页/真书运行矩阵固定为：
 
@@ -120,12 +120,14 @@
 
 ### PWA 真书
 
-正式入口只有：
+PWA 真书入口现状（2026-08-14 退役后）：
 
-- `/pdf/view`
-- `/pdf/epub/view`
-- `/pdf/html/view`
-- `/pdf/fav/open`
+- `/pdf/view` —— 仍 200（带 `?file=`），历史入口
+- `/pdf/html/view` —— 仍 200，且是 vault 里 .md/.html 书的唯一阅读途径
+- `/pdf/fav/open` —— 仍 200
+- `/pdf/epub/view`、`/pdf/`、`/pdf/search`、`/pdf/fav/view` —— **410**（`reader_pwa_retirement.py`）
+
+下文的 `book-host/1` 两阶段接管只对仍 200 的入口有意义，且不再是投入方向。
 
 PWA 暴露 `book-host/1`，扩展通过 `bw-reader-pwa/1` 两阶段接管：
 
@@ -235,7 +237,7 @@ AnkiConnect 与 AnkiMobile 都是可选投影，外部 note/card ID 只能写入
 - 派生结果身份至少包含书籍内容摘要、引擎、执行器与 `processingProfile`。切换 Pi/PC 或质量档时
   必须使用干净的可变 staging，不能复用另一档的残页；已发布 release 保持不可变并可按 revision
   审计。原 PDF 永不因 OCR 被覆盖。
-- PC 默认使用 `quality-first-v1`：要求 CUDA，模型按任务惰性加载并在结束后释放，进程保持低优先级；
+- PC 默认使用 `quality-first-v2`：要求 CUDA，模型按任务惰性加载并在结束后释放，进程保持低优先级；
   空闲轮询不得占用 GPU。质量模型不可用时要显示明确原因，不能静默退回 CPU 或较轻模型。
 - PC worker 一次只持有一个短租约；页、公式和完成请求都绑定 worker instance、job、generation、
   lease 与源摘要。租约失效、源文件变化、协议回执不完整或重复进程身份冲突时均 fail closed。

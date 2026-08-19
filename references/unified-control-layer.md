@@ -365,7 +365,7 @@ relay 发的 `tool_status`:
 
 ### ⚠ 部署
 
-`rc-toolchip.js` 必须同时进 `pdf_reader.py` 的 **`_epub_js_v` 和 `_pdf_shared_js_v`** 两个缓存击穿清单——漏了会让阅读器永远跑旧缓存 JS(EPUB 曾因 `rc-voicecall.js` 漏在 `_epub_js_v` 里,导致「设置面板没有语音 tab」排查一整轮)。前端只由 nginx 从 `/var/www/html/static/pdf/` 服务。
+`rc-toolchip.js` 必须同时进 `pdf_reader.py` 的 **`_epub_js_v` 和 `_pdf_shared_js_v`** 两个缓存击穿清单——漏了会让阅读器永远跑旧缓存 JS(EPUB 曾因 `rc-voicecall.js` 漏在 `_epub_js_v` 里,导致「设置面板没有语音 tab」排查一整轮)。前端有两个交付面，缺一都会「改了没生效」：① **网页/扩展面**由 nginx 从 `/var/www/html/static/pdf/` 服务（走部署脚本）；② **iOS App 面**由 `ios/BWReader/package_local_reader.py` 把整个 `_server_deploy/static/pdf/` 烤进 ReaderBundle，包内环回服务、`shared_js_v` 恒为 `local`——**改动到达 iPad 只能走 TestFlight 新构建，部署 nginx 对 App 无效**。上面两张 cache-bust 清单只对 ① 有意义。
 
 
 ---
