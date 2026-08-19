@@ -19,7 +19,13 @@ internal sealed record ReaderRealtimeOutputAck(
     string Correlation,
     string SourceInstanceId,
     string Outcome,
-    string? Error);
+    string? Error,
+    // 卡片钉在正文上没有、没钉上是为什么。
+    // ⚠ 不能复用 Error：下面那条不变式要求 Error 当且仅当 outcome=='rejected'
+    //   时存在，而「退回浮层」是 applied —— 卡确实送到了，只是没钉上。
+    //   这个 record 是**容器闸**：不给它开槽，前后两处 new 就无处可搬。
+    string? BindOutcome,
+    string? BindReason);
 
 internal sealed class ReaderRealtimeOutputException : Exception
 {
@@ -555,16 +561,22 @@ internal static class ReaderRealtimeOutputProtocol
 
     internal static ReaderRealtimeOutputAck ValidateAck(JsonElement message)
     {
-        Exact(
+        // Exact 是 SetEquals：多一个少一个都拒。bindOutcome/bindReason 是可选的，
+        // 所以走 ExactWithOptional（同一个类里已有，2026-08-19 为 card.bind 加的）。
+        ExactWithOptional(
             message,
-            "contract",
-            "type",
-            "requestId",
-            "sessionId",
-            "correlation",
-            "sourceInstanceId",
-            "outcome",
-            "error");
+            new[]
+            {
+                "contract",
+                "type",
+                "requestId",
+                "sessionId",
+                "correlation",
+                "sourceInstanceId",
+                "outcome",
+                "error",
+            },
+            new[] { "bindOutcome", "bindReason" });
         if (
             Text(message, "contract", 128) != DirectBridgeContract.Contract
             || Text(message, "type", 64) != AckType
@@ -586,12 +598,26 @@ internal static class ReaderRealtimeOutputProtocol
         {
             throw Invalid("Reader 输出拒绝回执必须且只能携带 error");
         }
+        // 过闸之后立刻重建成 record —— JsonElement 上的其它字段在这一行之后
+        // 就不存在了。放行不等于搬运，这一处必须显式取。
+        string? bindOutcome = message.TryGetProperty("bindOutcome", out _)
+            ? NullableText(message, "bindOutcome", 32)
+            : null;
+        if (bindOutcome is not (null or "none" or "bound" or "floating" or "unknown"))
+        {
+            throw Invalid("Reader 输出回执 bindOutcome 无效");
+        }
+        string? bindReason = message.TryGetProperty("bindReason", out _)
+            ? NullableText(message, "bindReason", 120)
+            : null;
         return new ReaderRealtimeOutputAck(
             sessionId,
             correlation,
             sourceInstanceId,
             outcome,
-            error);
+            error,
+            bindOutcome,
+            bindReason);
     }
 
     private static void ValidateCard(JsonElement card)

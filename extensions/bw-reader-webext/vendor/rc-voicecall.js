@@ -1815,16 +1815,17 @@ if (window.__bwPwaProviderOnly) return;
         // 带 bind 的卡：回执必须说清**钉上了没有**。
         // 只回 true 的话，"钉在正文上"和"退回浮层"长得一模一样，助手会把
         // 后者转述成前者 —— 这正是 2026-08-19 那两轮的成因。
+        //
+        // 只用两个字段：bindOutcome（枚举）+ bindReason（没钉上时的原因）。
+        // 沿途要过 11 道闸/重建点，字段每多一个就多 11 处 —— 而 kind/detail
+        // 对助手的下一步决策没有影响，它需要知道的是「钉上了没有、为什么」。
         var _bo = _lastBindOutcome;
         work = _bo
           ? {
-              status: 'delivered',
-              bound: !!_bo.bound,
-              bind_kind: _bo.kind,
-              bind_why: _bo.bound ? '' : (_bo.why || 'unknown'),
-              bind_detail: _bo.bound ? null : (_bo.detail || null)
+              bindOutcome: _bo.bound ? 'bound' : 'floating',
+              bindReason: _bo.bound ? null : (_bo.why || 'unknown')
             }
-          : true;
+          : { bindOutcome: 'none', bindReason: null };
       } else if (delivery.kind === 'navigate') {
         work = _readerOutputNavigate(delivery);
       } else if (delivery.kind === 'highlight') {
@@ -2030,9 +2031,19 @@ if (window.__bwPwaProviderOnly) return;
       } else {
         throw new Error('BW_READER_REALTIME_OUTPUT_KIND_UNSUPPORTED');
       }
-      return Promise.resolve(work).then(function () {
+      return Promise.resolve(work).then(function (value) {
         _rememberReaderOutput(delivery.correlation);
-        return { outcome: 'applied' };
+        var receipt = { outcome: 'applied' };
+        // ⚠ 回调原先**不接参数**，各分支辛苦拼的结构化结果在这里被整个丢掉，
+        //   回执永远是那个固定字面量。2026-08-19 用户连问两轮「AI 说成功但
+        //   什么都看不到」，根子就在这一行。
+        //   ⚠ 只搬认识的键，别整个 assign —— 下游 exactObject 是全等白名单，
+        //     多一个键会让**成功的投递被回成 rejected**，且链路上零报错。
+        if (value && typeof value === 'object') {
+          if (value.bindOutcome) receipt.bindOutcome = value.bindOutcome;
+          if (value.bindReason) receipt.bindReason = value.bindReason;
+        }
+        return receipt;
       }, function (error) {
         return _readerOutputReject(error);
       });

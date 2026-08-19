@@ -724,7 +724,9 @@ function waitForRealtimeOutputReceipt(delivery) {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       realtimeOutputReceipts.delete(delivery.correlation);
-      resolve({ outcome: "rejected", error: "BW_READER_REALTIME_OUTPUT_FRAME_TIMEOUT" });
+      // 超时时「钉没钉上」是真的未知 —— 不能填 floating，那是编的
+      resolve({ outcome: "rejected", error: "BW_READER_REALTIME_OUTPUT_FRAME_TIMEOUT",
+                bindOutcome: "unknown", bindReason: null });
     }, 8000);
     realtimeOutputReceipts.set(delivery.correlation, (receipt) => {
       clearTimeout(timer);
@@ -753,6 +755,8 @@ async function deliverRealtimeOutput(delivery) {
       sourceInstanceId: delivery.sourceInstanceId,
       outcome: "rejected",
       error: "BW_READER_REALTIME_OUTPUT_STALE",
+      bindOutcome: "unknown",
+      bindReason: null,
     });
     return;
   }
@@ -762,7 +766,12 @@ async function deliverRealtimeOutput(delivery) {
     correlation: delivery.correlation,
     sourceInstanceId: delivery.sourceInstanceId,
     outcome: receipt.outcome,
-    error: receipt.outcome === "rejected" ? String(receipt.error || "BW_READER_REALTIME_OUTPUT_REJECTED").slice(0, 500) : null,
+    error: receipt.outcome === "rejected" ? String(receipt.error || "BW_READER_REALTIME_OUTPUT_REJECTED").slice(0, 500) : null,,
+    // ⚠ 重建不是透传：放行了还要显式搬。这一处与
+    //   rc-computer-voice.js 的 ACK 必须同时改，否则 App 路径能说真话、
+    //   扩展路径继续报「已送达」。
+    bindOutcome: receipt.bindOutcome || null,
+    bindReason: receipt.bindReason || null
   });
 }
 
@@ -778,7 +787,9 @@ window.addEventListener("message", (event) => {
   const resolve = realtimeOutputReceipts.get(correlation);
   if (!resolve) return;
   realtimeOutputReceipts.delete(correlation);
-  resolve({ outcome: value.outcome, error: value.error || null });
+  resolve({ outcome: value.outcome, error: value.error || null,
+            bindOutcome: value.bindOutcome || null,
+            bindReason: value.bindReason || null });
 });
 
 function handleContextBridgeEvent(message) {

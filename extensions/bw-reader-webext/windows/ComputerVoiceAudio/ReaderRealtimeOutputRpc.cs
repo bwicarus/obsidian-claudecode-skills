@@ -166,6 +166,9 @@ internal static class ReaderRealtimeOutputRpcProtocol
         ["page"] = request.Page.DeepClone(),
         ["kind"] = request.Kind,
         ["outcome"] = ack.Outcome,
+        // 卡片钉在正文上没有 —— 沿途每一处都是重建，不显式搬就在这里断掉
+        ["bindOutcome"] = ack.BindOutcome,
+        ["bindReason"] = ack.BindReason,
         ["code"] = null,
         ["message"] = null,
         ["retryable"] = false,
@@ -187,6 +190,8 @@ internal static class ReaderRealtimeOutputRpcProtocol
         ["outcome"] = null,
         ["code"] = exception.Code,
         ["message"] = exception.Message,
+        ["bindOutcome"] = null,
+        ["bindReason"] = null,
         ["retryable"] = exception.Retryable,
     };
 
@@ -206,6 +211,11 @@ internal static class ReaderRealtimeOutputRpcProtocol
             "page",
             "kind",
             "outcome",
+            // ⚠ RequireExact 是 SetEquals，且它在读 ok 之前就跑 —— 所以**失败包
+            //   也必须带这两个键**（填 null），否则一出错就变成「回包字段不匹配」
+            //   这另一种错，真正的原因被盖掉。
+            "bindOutcome",
+            "bindReason",
             "code",
             "message",
             "retryable");
@@ -247,12 +257,25 @@ internal static class ReaderRealtimeOutputRpcProtocol
         {
             throw Invalid("Reader 输出 RPC 成功回执字段无效");
         }
+        // ⚠ 这里五个位置参数里有三个是**凭空填的**（sessionId 空串、error null，
+        //   correlation/sourceInstanceId 来自 request 的回声）。新加的两个必须
+        //   从回包里真的取出来，否则这一步会把上游的结果抹平。
+        string? bindOutcome = root.GetProperty("bindOutcome").ValueKind == JsonValueKind.Null
+            ? null : RequiredString(root, "bindOutcome", 32);
+        if (bindOutcome is not (null or "none" or "bound" or "floating" or "unknown"))
+        {
+            throw Invalid("Reader 输出 RPC bindOutcome 无效");
+        }
+        string? bindReason = root.GetProperty("bindReason").ValueKind == JsonValueKind.Null
+            ? null : RequiredString(root, "bindReason", 120);
         return new ReaderRealtimeOutputAck(
             string.Empty,
             expected.Correlation,
             expected.SourceInstanceId,
             outcome,
-            null);
+            null,
+            bindOutcome,
+            bindReason);
     }
 
     private static void RequireEcho(

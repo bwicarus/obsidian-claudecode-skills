@@ -1273,7 +1273,12 @@
                 outcome: receipt.outcome,
                 error: receipt.outcome === 'rejected'
                   ? String(receipt.error || 'BW_READER_REALTIME_OUTPUT_REJECTED').slice(0, 500)
-                  : null
+                  : null,
+                // ⚠ 这里是**重建**：不显式搬，绑定结果在这一步静默消失。
+                //   下面四处纯失败路径用固定字面量调 reply()，拿不到这两个键，
+                //   所以取值必须容忍缺省。
+                bindOutcome: receipt.bindOutcome || null,
+                bindReason: receipt.bindReason || null
               }
             }, '*');
           } catch (_) {}

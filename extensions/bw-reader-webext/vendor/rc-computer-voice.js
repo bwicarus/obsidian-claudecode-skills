@@ -2688,7 +2688,17 @@ if (window.__bwPwaProviderOnly) return;
       }
       return receiver(delivery);
     }).then(function (receipt) {
-      exactObject(receipt, ["outcome"], ["error"], "Reader 输出回执");
+      // bindOutcome / bindReason：卡片钉在正文上没有、没钉上是为什么。
+      //
+      // ⚠ 它们**不能复用 error** —— 下面那条不变式要求 error 当且仅当
+      //   outcome==='rejected' 时存在，而「退回浮层」是 applied（卡确实送到了，
+      //   只是没钉上）。所以必须是独立字段。
+      // ⚠ 这一处必须与 rc-voicecall.js 那边**同一次提交、同一次投递**：
+      //   只要这里没放行，上游一带新字段，这个 exactObject 就抛，被下面的
+      //   catch 整个换成 rejected —— 表现是「一次成功的绑定被回成失败」，
+      //   而链路上没有任何一处出声。
+      exactObject(receipt, ["outcome"], ["error", "bindOutcome", "bindReason"],
+        "Reader 输出回执");
       if (["applied", "replay", "rejected"].indexOf(receipt.outcome) < 0) {
         throw directError(
           "Reader 输出回执 outcome 无效",
@@ -2705,6 +2715,14 @@ if (window.__bwPwaProviderOnly) return;
       }
       return receipt;
     }).catch(function (error) {
+      // 这个兜底本身是对的，但它会把**上面任何一处校验失败**都变成一条
+      // 看起来像"执行失败"的 rejected。白名单漏配时症状正是如此，而且链路上
+      // 没有任何一处出声 —— 所以这里至少留一句可见诊断。
+      try {
+        console.warn("[reader-output] 回执被判无效 →",
+          (error && (error.code || error.message)) || error,
+          "correlation=" + delivery.correlation);
+      } catch (e) {}
       return {
         outcome: "rejected",
         error: String(
@@ -2714,12 +2732,16 @@ if (window.__bwPwaProviderOnly) return;
       };
     }).then(function (receipt) {
       if (!self.readerVisualSessionId) return null;
+      // ⚠ 这里是**重建**不是透传：放行了还要显式搬。只放行不搬的表现是
+      //   「校验全过、就是不生效」，比被拒难查得多。
       return self.request(READER_REALTIME_OUTPUT_ACK, {
         sessionId: self.readerVisualSessionId,
         correlation: delivery.correlation,
         sourceInstanceId: delivery.sourceInstanceId,
         outcome: receipt.outcome,
         error: receipt.outcome === "rejected" ? receipt.error : null,
+        bindOutcome: receipt.bindOutcome || null,
+        bindReason: receipt.bindReason || null,
       }, REQUEST_TIMEOUT_MS);
     }).catch(function () {
       // The Windows broker owns retry/reporting. Never render or execute twice.

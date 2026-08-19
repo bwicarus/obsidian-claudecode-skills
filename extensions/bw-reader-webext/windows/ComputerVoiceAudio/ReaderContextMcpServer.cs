@@ -3111,6 +3111,11 @@ internal sealed class ReaderContextMcpServer
                             ["outcome"] = ack.Outcome,
                             ["sourceInstanceId"] = request.SourceInstanceId,
                             ["snapshotRevision"] = request.SnapshotRevision,
+                            // ⚠ status 是对 request.Kind 做 switch 得来的**常量** ——
+                            //   card 落进 `_ => "delivered"`，它只表示「这条 kind 是
+                            //   card」，跟卡片有没有钉上毫无关系。2026-08-19 助手正是
+                            //   照它转述成「已绑定并已送达」，而页面上什么都没有。
+                            //   真正的答案在下面 bind_outcome 里。
                             ["status"] = request.Kind switch
                             {
                                 "anki-draft" => "draft_delivered",
@@ -3118,6 +3123,12 @@ internal sealed class ReaderContextMcpServer
                                 "highlight-range" => "highlight_saved",
                                 _ => "delivered",
                             },
+                            // 卡片是钉在正文上了，还是退回了浮层。
+                            //   bound=钉上了 / floating=没钉上退回浮层（reason 说明为什么）
+                            //   none=这张卡本来就没带 bind / unknown=超时或过期，没执行过
+                            // 只有带 bind 的卡才有意义，其余为 null。
+                            ["bind_outcome"] = ack.BindOutcome,
+                            ["bind_reason"] = ack.BindReason,
                             ["anki_written"] = request.Kind == "anki-draft"
                                 ? false
                                 : null,

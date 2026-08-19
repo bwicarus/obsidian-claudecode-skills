@@ -8177,6 +8177,8 @@ internal static class DirectBridgeSelfTest
                 routeRequest.Correlation,
                 routeRequest.SourceInstanceId,
                 "applied",
+                null,
+                "bound",
                 null));
         ReaderRealtimeOutputAck routedAck = await routed.ConfigureAwait(false);
         ReaderRealtimeOutputSourceStatus onlineStatus =
@@ -8718,6 +8720,8 @@ internal static class DirectBridgeSelfTest
                     request.Correlation,
                     request.SourceInstanceId,
                     "applied",
+                    null,
+                    "none",
                     null));
             });
         _ = await server.RunAsync(CancellationToken.None)

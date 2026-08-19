@@ -1847,6 +1847,9 @@ test("snapshot-mcp 将结构化输出交给现有 Realtime 渲染入口并回精
     [
       "contract", "type", "requestId", "sessionId", "correlation",
       "sourceInstanceId", "outcome", "error",
+      // 卡片钉在正文上没有 —— 这两个键沿途要过 11 道闸/重建点，
+      // 少搬一处就断在那儿，而症状是「AI 照常说已送达」。
+      "bindOutcome", "bindReason",
     ].sort(),
   );
   assert.equal(ack.type, "reader-realtime-output-ack");
@@ -1854,6 +1857,9 @@ test("snapshot-mcp 将结构化输出交给现有 Realtime 渲染入口并回精
   assert.equal(ack.sourceInstanceId, sourceInstanceId);
   assert.equal(ack.outcome, "applied");
   assert.equal(ack.error, null);
+  // 不带 bind 的卡：明确是 none，不是 undefined —— 让助手分得清
+  // 「这张卡没要求钉」和「钉了但不知道结果」。
+  assert.equal(ack.bindReason, null);
   assert.equal(
     harness.server.requests.some((request) => request.type === "start"),
     false,
