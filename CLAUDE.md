@@ -25,6 +25,12 @@
   `scripts\deploy_from_windows.ps1 -PreflightOnly`,脚本自带摘要校验/原子安装/失败回滚/健康检查,
   **不要手工重做**);**清单外**(insights/fitness/qa_server/`control.html` 等)才手工 `cp` + restart。
   各处旧文档里的 `scp root@bwicarus.space` 与手工回滚清单**已废弃**。
+- 🤝 **工程所有权（2026-08-16 用户拍板）：全部工程由 Claude 负责**。此前的分工文档
+  （如 `references/codex-claude-bridge-role-swap-20260805.md` 的 Claude=Windows 桥 /
+  Codex=iOS 划分）**已过时,不要拿它们当现行边界**;`extensions/`、`ios/`、`_server_deploy/`、
+  Windows 桥（`ComputerVoiceAudio` 等）都可直接做。Codex 仍作为运行时存在（语音助手/CLI）,
+  但开发归 Claude。⚠ 另:`~/.claude/projects/C--claude/memory/` 自 2026-07-29 Pi 记忆同步后
+  ACL 损坏（读写全拒),修复前持久记忆不可用——跨会话事实请写进本文件或 `references/`。
 - 📬 **与 Codex 协作统一走 BW AgentBridge Lite（BWAB）,不再使用旧 SQLite 邮箱**。
   从桌面“多AI协作终端-正式版”进入后,使用 Channel 的 `get_messages` / `reply` /
   `notify_assistant` / `bridge_status`;开工前、完工后、需要对方配合时各查一次。
@@ -36,6 +42,21 @@
   `%LOCALAPPDATA%\BWReaderExtensionTest\browser-profile-v2`,或 Claude Code 内置 Browser pane
   (独立 profile、无扩展无 cookie,**做不了扩展链测试**)。**不动日常 Chrome、常用账号和已装扩展**;
   真机验收先经用户确认。
+
+## 🚨 iOS App 形态（2026-08-17 实锤，最高优先级事实）
+
+**BWReader App 是本地渲染**：阅读器 runtime 由 `ios/BWReader/package_local_reader.py` 烤成
+ReaderBundle 打进 App 包（确定性、运行时零下载、环回 `127.0.0.1:43129` 供壳、页图 PDFKit、
+AI 类 API 经 Swift 网关打 Pi）。**改 `_server_deploy/static/pdf/*.js` 要到达 iPad 只能走
+TestFlight 新构建**（CI `safari-extension-ios.yml` workflow_dispatch + `upload=true`，CI 内自跑
+打包）；部署 Pi 影响两类东西：桌面/扩展表面的 JS，以及 **App 经 Swift 网关调用的
+owner=pi 服务端 API**（run-start 任务链/词典/翻译/助手等约 110 条，见
+`native_reader_interface_manifest.json`）——改这些 .py 仍必须部署 Pi ——
+但**先用 `scripts/where_does_this_route_run.py` 查**，别按 owner 字段想当然（它是数据归属，不是执行方；runtime 里可能已有本地分支）。方向=逐步本地化、
+Pi 退纯备份，但**尚未到达**。本机导入书 = `localbook:` 前缀（字节仅在设备，
+security-scoped bookmark 就地读）。语音 client-action 白名单有**四份副本**须同步：C#
+`ValidatePayload` / `rc-computer-voice` 入站闸 / `rc-voicecall` 执行映射 /（随 bundle 各一份）。
+旧 worktree（如 `bwreader-ios-merge`）里的远程壳 `ReaderWebView.swift` 是过时代码，勿据其推断。
 
 ## 🚨 浏览器扩展 / 阅读器统一层交接入口（2026-07-22）
 
@@ -130,6 +151,8 @@ python3 extensions/bw-reader-webext/handoff_check.py --full
 - `references/ai-assistant-webapp-patterns.md` — **「网页里集成 AI 助手」可迁移架构要点**(独立蓝本,可喂给做别的 AI 网页的人/AI):⭐生成与请求解耦(detached worker + rid 重连,切后台不丢)/ 全站 fetch 韧性 / 对话服务端持久化 / Markdown×MathJax 占位符共存 / 模型分档+反馈梯子(Pareto)/ agentic 工具循环(沙盒+顽强JSON)/ 上下文只在助手开着时收集 / 后台长任务+进度 / 额度护栏 / iOS 坑 / 系统prompt清单 + 落地 checklist
 - `references/web-context-snapshot-handoff.md` — **网页上下文快照最终架构与交接**（2026-08-06 打通）。链路 = content.js 采集 → 同页 postMessage 给内嵌框 → 框内一次 POST `/reader-context/snapshot` → 桥覆盖快照。要点：唯一硬约束是桥的 origin 白名单拒网页 origin（故必须由扩展 origin 的框代发）；**位置与正文分开对待**（位置是状态必须每次为真，正文是内容重复时标注送出时刻）；只有 `hasFocus` 的页面才上报（`visibilityState` 会让后台标签盖掉前台页）；正文提取必须遍历实况树，`cloneNode` 会让 `innerText` 退化成 `textContent`。含未完成项（30s 断连看门狗、每元素分开上报）
 - `references/silent-failure-lessons.md` — **静默失败十处清单 + 五条规则**（2026-08-05/06，"网页内容传到 Windows 快照"查了一整天的沉淀）。⚠ **新功能落地前先读**：十处不是十个 bug，是同一个选择重复十次——出了状况就悄悄什么都不做，于是前一处的沉默盖住后一处，每修好一处下一处才露出来。含最贵的教训（用 Python 验证浏览器路径 → 脚本不发 CORS 预检 → 假阳性把方向带偏几轮）、五条规则（每个提前退出都要出声 / 折成布尔前先报原始值 / 诊断通道不能穿过被测对象 / 新功能落地时诊断出口必须已在 / 无控制台设备上沉默等于不可诊断），以及"约束显得无解时先问它是不是自找的"（上下文只需一次 POST，却一直跑在语音的长连接机制上）
+- `references/evidence-quality-lessons.md` — **证据质量三条规则 + 落地检查表**（2026-08-17，游戏探针首场 3/8 误判的沉淀）。⚠ **建任何「大量采集→事后让 AI 提炼」的通道前先读**：病根不是 AI 判不准也不是阈值没调好，而是**存下来的东西根本没法判**——采集不可重来,分析层能重写一百遍,当时没存对的救不回来。三条：① 一个信号只有一种解释时才能单独采（但也别过度承诺:实测判不出就如实记歧义,别让确定性层假装能判）② 单帧不是证据、序列才是（时间覆盖要宽于事件:远景认种类/近景认过程/事后认结果）③ 模糊帧等于没有帧（每个时刻留候选,按清晰度挑）。附:性能瓶颈要实测再砍（PIL LANCZOS 47.8ms → numpy 步长降采样 7.7ms 且分辨率更高）
+- `references/video-understanding-2026.md` — **视频理解 2026 调研结论 + 我们的架构判据**（2026-08-17 一晚五份独立调研,含直接读 llama.cpp/transformers/vLLM 源码）。⚠ **想"换个更好的视频模型"之前先读这里**——大概率不用换。一句话:**没有任何生产级 VLM 的 video encoder 有真时序**,所谓"视频输入"在 Qwen3-VL/Gemini/llama.cpp 全家都是"抽帧+文本时间戳"(Qwen3-VL 官方主动废除时序位置编码;llama.cpp 的 `--video` 就是 `--image` 的别名);而工业界通用形态是**廉价确定性信号扫全部 → 昂贵模型只看候选**(Verkada 只送裁剪不送整帧、SoccerNet 冠军全是 YOLO+跟踪+几何、内容审核 1fps 采样、游戏 highlight 全靠遥测且唯一做像素 CV 的公司破产了)。含:最高性价比改进(**把光流画进帧里,同模型 0%→51.54%**)+ 我们踩的两个坑(游戏镜头在动要做全局补偿、光流需相邻帧故加自适应连拍)+ 明确不值得做的五项(TAL 已停滞/streaming VLM/生成模型 encoder/场景检测)+ 待做清单(音频 P0、IG-VLM 帧网格、Set-of-Mark)
 - `references/vendor-docs-local.md` — **本地厂商参考库**(`/home/bwicarus/refs/`,git 之外):OpenAI cookbook(含 Realtime 提示词指南/上下文压缩/out-of-band)、**官方 realtime-agents 参考应用**、xAI cookbook。⚠ **要查官方资料先 grep 这里,别急着上网**(2026-07-14 教训:没查官方资料导致成本算反、开关没找到)
 - `references/grammar-analysis-system.md` — 英语语法分析系统：grammar KG（`scripts/kg/build_grammar_nodes.py` 三层抽取 + `grammar-nodes.json`）+ spacy 词性/依存（独立 spacy-venv，`spacy_parse.py --server` 常驻模式免每次加载模型，pdf_reader 经 `_spacy_worker_request` 锁串行+超时自愈调用）+ pdf_reader 的 grammar-* 路由（跟踪语法点分析；spaCy 结果存 sentence-only 缓存键、grammar-stream 有回放缓存）
 
@@ -454,3 +477,41 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
 **audit_kg 7d 配额上限**：daily 内 `--budget-target-7d` 从 88 → 60（控制夜间消耗）
 
 **额度日志**：`state/quota_log.json` 记 daily 各步前后 quota 快照；控制面板「额度消耗日志」按钮 + modal 可查
+
+## 🎯 产品边界（2026-08-18 用户拍板）
+
+**目前只做 App 与扩展；PWA 和网页端的开发与使用暂时放弃。**
+
+- 做改动时不必再为 PWA 表面做兼容取舍（此前"App 内隐藏而不删，因为 PWA 还要用"
+  这类折中可以直接改成删）。
+- ⚠ **Pi 是什么、不是什么（2026-08-19 用户重新定义，之前那句概括把人带偏过多次）**：
+  Pi 的存在主要是两件事 —— ① 把 **CLI 调用抽象成一种 AI 的 API**（Claude/Codex 包成
+  HTTP 服务）；② 做**设备间的同步中继**。它**不是**阅读器的数据权威，也不是业务逻辑
+  所在地：高亮/笔记/词组/复习状态这些的权威在 **App 本地**，Pi 只在中继时经手。
+
+  **所以「改了 `_server_deploy/*.py` 就要部署 Pi」是错的**，动手前先查这条路由到底
+  由谁执行：
+
+  ```bash
+  python3 scripts/where_does_this_route_run.py /api/assistant/voice-page-text
+  ```
+
+  它会同时看两处（缺一都会误判）：
+  - `ios/BWReader/native_reader_interface_manifest.json` 的 `owner` —— 但注意
+    **owner 记的是"数据归属"，不是"请求实际打给谁"**；
+  - `_server_deploy/static/pdf/native-local-runtime.js` 里有没有该路径的**本地分支** ——
+    有的话 App 内根本不出网，改服务端对 App 无效。
+
+  实测（2026-08-19）：manifest 里 108 条 owner=pi，其中 **19 条 runtime 已本地化**；
+  按上面那两条职责重新归类，真正该由 Pi 承担的只有约 47 条（AI 41 + 同步 6），
+  另有 18 条纯数据 CRUD 仍挂在 pi 名下没转完。**这份 manifest 是滞后的，别把它
+  当作"谁执行"的答案。**
+
+  Safari 扩展同理：它与 App 同包、经 native messaging 拿 App 的能力，
+  与 PC 的联系也走 App —— **不因为它是"扩展"就一定走 Pi**。
+- 与 2026-07-25 那条旧边界（"普通网页装扩展才启用完整 BW 功能；PWA 只读 PDF/EPUB…"）
+  相比，这次是进一步收窄：PWA 直接不投入。
+
+## 授权（2026-08-18 用户明确）
+- **iOS CI 构建不必逐次确认**：`gh workflow run safari-extension-ios.yml --ref <分支> -f upload=true`
+  （含 TestFlight 上传）在改动需要上设备时**直接触发**即可。
