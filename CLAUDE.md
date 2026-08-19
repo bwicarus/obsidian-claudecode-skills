@@ -2,6 +2,29 @@
 
 ## ⚡ 环境定向（新 session 先读这个）
 
+### 🌲 第 0 步：你在哪棵 git 树
+
+这个仓库同时存在多个 worktree，**你所在的 checkout 决定你能看见哪些代码**。
+两条主分支已经真分叉（都在 origin 上，不会丢，但谁也不是谁的超集）：
+
+| checkout | 分支 | 独有的东西 |
+|---|---|---|
+| `C:\claude`（会话默认目录） | `codex/windows-reader-visual-20260806` | 录像/离线重建/造纸/voicecall 那 25 个提交 |
+| `~/.codex/worktrees/reader-tools-release-20260815` | `codex/reader-tools-release-20260815` | 阅读器工具线 603 个提交；`native-local-runtime.js`、`native_reader_interface_manifest.json`、`scripts/where_does_this_route_run.py`、`scripts/check_docs_drift.py` **只在这里** |
+
+`origin/main` 停在 2026-07-12，早已被上面两条包含，**不要拿它当"现状"**。
+
+⚠ **所以「这个文件不存在」在本仓库不构成结论** —— 先确认你在哪棵树：
+
+```bash
+git rev-parse --abbrev-ref HEAD && git worktree list
+```
+
+要核实阅读器/部署/路由归属这类事实，去有那些文件的树里核实；
+在 `C:\claude` 里查不到，多半只是这棵树旧，而不是那东西不存在。
+
+
+
 **同一套代码跑在 3 个环境,路径/端口/服务管理方式都不同。先认清你在哪台机**(`hostname`):
 
 | 环境 | 判定 | 项目根 | Vault | webapp | 服务管理 |
