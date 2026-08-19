@@ -57,13 +57,22 @@ def _runtime_source() -> str:
 
 
 def _has_local_branch(path: str, runtime: str) -> bool:
-    """runtime 里有没有直接针对这条路径的分支。
+    """runtime 里有没有**真正的分发分支**处理这条路径。
 
-    按字面量找 `'<path>'` —— runtime 的分发就是一串
-    `if (url.pathname === '/pdf/api/xxx')`，所以这个判据既准又不脆。
+    ⚠ 只按 `'<path>'` 字面量找是**不够的**（第一版就是那么写的，当天就误判了）：
+    路径还会出现在别的地方，比如 `NATIVE_SYNC_BATCH_ENDPOINTS` 这种 outbox 的
+    端点白名单 —— 出现在那里恰恰说明它**要发去 Pi**，跟"本地执行"正好相反。
+    `/pdf/api/review-answer` 就这么被判成了本地，进而得出"部署 Pi 无效"的错误结论。
+
+    真正的分发有两种形状，认这两种就够（第二种漏了会把 highlights 这类判成走 Pi）：
+      - `url.pathname === '<path>'`  —— localFetch 顶层分发
+      - `path === '<path>'`          —— handleLocalState 内部分发（它先取了局部变量）
     """
 
-    return f"'{path}'" in runtime
+    return (
+        f"url.pathname === '{path}'" in runtime
+        or f"path === '{path}'" in runtime
+    )
 
 
 def _unmangle(path: str) -> str:

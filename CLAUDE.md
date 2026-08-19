@@ -502,10 +502,17 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
   - `_server_deploy/static/pdf/native-local-runtime.js` 里有没有该路径的**本地分支** ——
     有的话 App 内根本不出网，改服务端对 App 无效。
 
-  实测（2026-08-19）：manifest 里 108 条 owner=pi，其中 **19 条 runtime 已本地化**；
-  按上面那两条职责重新归类，真正该由 Pi 承担的只有约 47 条（AI 41 + 同步 6），
-  另有 18 条纯数据 CRUD 仍挂在 pi 名下没转完。**这份 manifest 是滞后的，别把它
-  当作"谁执行"的答案。**
+  实测（2026-08-19，判据脚本连修三版之后的数字）：manifest 共 146 条，
+  108 条 owner=pi、35 条 local、3 条 native。其中 **9 条 owner=pi 但 runtime 已有
+  本地分支**（`assistant/chat`、`voice-tool`、`active-reading`、`context-sync`、
+  `epub-action`、`epub-assistant`、`job-status`、`page-overlay`、`sync-batch`）——
+  改这 9 条的服务端实现对 App 无效。`owner=local` 的 35 条**全部**都有本地分支。
+
+  ⚠ 判据本身踩过两个坑，写下来免得重蹈：
+  - 只按 `'<path>'` 字面量找会**高估**：路径也出现在 `NATIVE_SYNC_BATCH_ENDPOINTS`
+    这类 outbox 端点白名单里，而出现在那儿恰恰说明它**要发去 Pi**。
+  - 只认 `url.pathname === '<path>'` 会**低估**：`handleLocalState` 内部用的是
+    `path === '<path>'`（它先取了局部变量），漏掉会把 highlights 这类判成走 Pi。
 
   Safari 扩展同理：它与 App 同包、经 native messaging 拿 App 的能力，
   与 PC 的联系也走 App —— **不因为它是"扩展"就一定走 Pi**。
