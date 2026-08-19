@@ -246,7 +246,17 @@ test("App download stays in private Application Support and outside backup/sync"
   assert.match(nativeStore, /OfflineJapaneseDictionary/);
   assert.match(nativeStore, /isExcludedFromBackup = true/);
   assert.match(nativeStore, /raw\.githubusercontent\.com/);
-  assert.doesNotMatch(nativeStore, /containerURL\(forSecurityApplicationGroupIdentifier/);
+  // ⚠ 这条守的是对用户的承诺（下面第 252 行那句"不进入…Safari 扩展…"）：
+  //   词典只归 App，不进 App Group 共享容器 —— 进了就等于 Safari 扩展也读得到。
+  //
+  //   2026-08-19 发现它**一直是失效的**：原正则要求 `containerURL(` 与
+  //   `forSecurityApplicationGroupIdentifier` 紧挨着，而 Swift 里这两者之间
+  //   几乎总是换行（参数太长）。也就是说真写了共享容器它也拦不住 —— 当天就有一笔
+  //   改动这么过去了，靠别的测试才暴露出来。现在允许中间有空白。
+  assert.doesNotMatch(
+    nativeStore,
+    /containerURL\(\s*forSecurityApplicationGroupIdentifier/,
+  );
   assert.match(localServer, /native-api\/offline-dictionary\//);
   assert.match(settings, /下载离线日语词典/);
   assert.match(settings, /不进入书籍附件、Pi、Safari 扩展或设置同步/);
