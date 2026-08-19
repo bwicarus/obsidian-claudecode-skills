@@ -255,6 +255,16 @@
       { collection: 'card-states', projection: 'review-queue-local-state' },
       { transport: { outbox: true, extensionBridge: true, serviceWorker: 'none' } }
     ),
+    // 复习事件日志。**只记不改调度** —— 它不投影到任何本地集合，存在的意义是
+    //   给补投留一份"真实复习时刻"的底账：answerCards 传不了时间戳，离线补投
+    //   会被 Anki 记成"补投那一刻",只有这里存着真相。
+    localMutation(
+      'learning.review-event.report',
+      '/pdf/api/review-event',
+      ['POST'],
+      { collection: 'card-states', projection: 'review-queue-local-state' },
+      { transport: { outbox: true, extensionBridge: true, serviceWorker: 'none' } }
+    ),
     remoteRequired(
       'assistant.model-preference.set',
       ['/api/assistant/action-pref'],

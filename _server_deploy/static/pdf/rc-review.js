@@ -1942,8 +1942,20 @@
             ankiCardId: card && card._legacyExternalCardId ? String(card._legacyExternalCardId) : '',
             file: (window.UP_FILE || (window.RC && RC.file) || '')
           });
+      } else {
+        // outbox 不在 = 这次复习没有底账。不该静默 —— 没有日志就没有重放，
+        // 而"重放"是离线/Anki 没起来时唯一的补救手段。
+        window.dlog && window.dlog('复习事件未记录：outbox 不可用', '#ffa500');
       }
-    } catch (e) {}
+    } catch (e) {
+      // 以前这里是空的。于是四处白名单一处都没登记时（2026-08-19 实测就是这样），
+      // 事件被每一层默默拒收、日志文件永远是空的，谁也不知道为什么。
+      try {
+        window.dlog && window.dlog(
+          '复习事件未记录：' + String(e && e.message || e), '#ff6b6b'
+        );
+      } catch (_) {}
+    }
     var nextReview = _scheduledLocalReview(local.review, ease, reviewedAt);
     repository.patchState(local.gid, local.cardIndex, {
       review: nextReview

@@ -14728,6 +14728,9 @@ _SYNC_BATCH_EXACT_ENDPOINTS = {
     "/pdf/api/notes": {"POST", "PATCH", "DELETE"},
     "/pdf/api/anki-add-cards": {"POST"},
     "/pdf/api/review-answer": {"POST"},
+    # 复习事件日志。只记不改调度，但它是**重放的唯一依据** —— 不放行的话
+    # outbox 会在这里默默拒收，日志永远是空的（2026-08-19 实测就是这样）。
+    "/pdf/api/review-event": {"POST"},
     "/pdf/api/reading-pos": {"POST"},
 }
 _SYNC_BATCH_ENTITY_PATH = re.compile(r"^/pdf/api/entity/[A-Za-z0-9_-]{1,160}$")

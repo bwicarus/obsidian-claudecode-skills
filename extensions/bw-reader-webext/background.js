@@ -207,6 +207,7 @@ const BW_FETCH_ROUTE_METHODS = (() => {
     "/pdf/api/note-composite",
     "/pdf/api/reading-pos",
     "/pdf/api/review-answer",
+    "/pdf/api/review-event",
     "/pdf/api/run-save",
     "/pdf/api/snippets-to-async",
     "/pdf/api/sync-batch",

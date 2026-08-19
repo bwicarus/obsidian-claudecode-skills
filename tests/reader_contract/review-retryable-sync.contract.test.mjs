@@ -106,3 +106,40 @@ test("写回失败要出声，但绝不回滚本地评分", () => {
   // 而两者数值上完全可能撞车。
   assert.match(body, /scheduleSource: 'anki-fsrs'/);
 });
+
+// ── C 组 #17 的 G1：事件日志根本没落地 ────────────────────────────────
+//
+// 上报代码写好了、走 outbox，但 `/pdf/api/review-event` 在**四处白名单里一处都
+// 没登记** —— outbox 的每一层都会拒收它。而上报被 `catch (e) {}` 包着，于是这件
+// 事没有任何声音：日志文件永远是空的，谁也不知道为什么。
+//
+// 没有日志就没有重放，补偿路径整个悬空。
+
+test("复习事件端点在四处白名单里都登记了", () => {
+  const server = read("_server_deploy/pdf_reader.py");
+  const native = read("_server_deploy/static/pdf/native-local-runtime.js");
+  const policy = read("_server_deploy/static/reader-runtime/interaction-policy.js");
+  const background = read("extensions/bw-reader-webext/background.js");
+
+  // ① 服务端 outbox 批处理：只放行 POST
+  assert.match(server, /"\/pdf\/api\/review-event": \{"POST"\}/);
+  // ② App 内本地 runtime
+  assert.match(native, /'\/pdf\/api\/review-event': Object\.freeze\(\['POST'\]\)/);
+  // ③ 网络审计门禁的能力登记
+  assert.match(policy, /'learning\.review-event\.report'/);
+  assert.match(policy, /'\/pdf\/api\/review-event'/);
+  // ④ 扩展 background 的路由白名单
+  assert.match(background, /"\/pdf\/api\/review-event"/);
+});
+
+test("事件上报失败不再被空 catch 吞掉", () => {
+  const body = REVIEW.slice(
+    REVIEW.indexOf("RC.outbox.send('revlog'"),
+    REVIEW.indexOf("var nextReview = _scheduledLocalReview("),
+  );
+  assert.ok(body.length > 0);
+  assert.doesNotMatch(body, /\} catch \(e\) \{\}/, "还是空 catch");
+  assert.match(body, /复习事件未记录：/);
+  // outbox 不在也要说 —— 那同样意味着这次复习没有底账
+  assert.match(body, /outbox 不可用/);
+});

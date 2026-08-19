@@ -23,6 +23,7 @@ const OUTBOX_ACTION_IDS = [
   "review.answer.submit",
   "reading.position.save",
   "learning.lookup.report",
+  "learning.review-event.report",
   "anki.cards.enqueue",
   "entity.state.update",
   // 卡片绑定到自建页的某个块：与高亮同性质的本地写入，先落地再对账。

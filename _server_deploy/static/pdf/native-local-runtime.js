@@ -9552,6 +9552,7 @@
     '/pdf/api/notes': Object.freeze(['POST', 'PATCH', 'DELETE']),
     '/pdf/api/anki-add-cards': Object.freeze(['POST']),
     '/pdf/api/review-answer': Object.freeze(['POST']),
+    '/pdf/api/review-event': Object.freeze(['POST']),
     '/pdf/api/reading-pos': Object.freeze(['POST'])
   });
 
