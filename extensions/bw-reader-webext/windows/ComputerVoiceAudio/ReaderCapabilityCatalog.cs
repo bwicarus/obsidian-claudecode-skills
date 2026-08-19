@@ -19,7 +19,15 @@ internal sealed class ReaderCapabilityCatalog
         new("index", "Reader 能力索引", "仅在无法判断精确 topic 时用于发现"),
         new("get", "GET Reader 信息", "读取页文、窗口、选区、全文与合成图"),
         new("conversation", "对话同步", "Windows 电脑语音聊天同步语义"),
-        new("cards", "卡片输出", "发送现有 Realtime 卡片"),
+        // ⚠ 这行描述是**能力发现层**：助手先扫 resources/list 决定自己能做什么，
+        //   扫不到关键词就直接答"没有这个能力"，根本不会去读 cards.md。
+        //   2026-08-19 因为它只写「发送现有 Realtime 卡片」，助手连着两轮回答
+        //   「功能列表里没有页面锚定/钉住能力，做不到」—— 而 schema 和指南其实
+        //   都已经支持了。同一件事有三层（schema → 指南 → 发现层），漏最外层
+        //   等于前两层白做。
+        new("cards", "卡片输出",
+            "发送现有 Realtime 卡片；可用 bind 把卡片钉在正文某一段上"
+            + "（页面锚定 / 固定 / 绑定元素）"),
         new("navigation", "导航输出", "滚动、定位、跳页与跳章节"),
         new("highlight", "高亮输出", "保存当前稳定选区"),
         new("tool-status", "工具状态输出", "发送现有 Realtime 工具状态"),

@@ -5704,6 +5704,10 @@ internal static class DirectBridgeSelfTest
         ReaderCapabilityCatalog catalog = new();
         string cards = GuideText(catalog, "reader://capabilities/cards");
         string get = GuideText(catalog, "reader://capabilities/get");
+        string index = GuideText(catalog, ReaderCapabilityCatalog.IndexUri);
+        string listing = catalog.List()["resources"]!.AsArray()
+            .Select(entry => entry!["description"]!.GetValue<string>())
+            .Aggregate(string.Empty, (all, one) => all + "\n" + one);
 
         bool cardsOk =
             cards.Contains("bind", StringComparison.Ordinal)
@@ -5716,7 +5720,19 @@ internal static class DirectBridgeSelfTest
             get.Contains("segments", StringComparison.Ordinal)
             && get.Contains("reader_page_text", StringComparison.Ordinal);
 
-        return cardsOk && getOk;
+        // **发现层**。助手先扫 resources/list 与索引决定"我有没有这个能力"，
+        // 扫不到关键词就直接答"做不到"，压根不会去读 cards.md。
+        // 2026-08-19 前两层都补好之后，助手仍连答两轮
+        // 「功能列表里没有页面锚定/钉住能力」—— 漏的就是这一层。
+        // 用**用户会说的词**去钉，不是用字段名：他不会说「bind」，会说
+        // 「锚定」「钉住」「固定」。
+        bool discoveryOk =
+            index.Contains("锚定", StringComparison.Ordinal)
+            && index.Contains("钉", StringComparison.Ordinal)
+            && listing.Contains("锚定", StringComparison.Ordinal)
+            && listing.Contains("钉", StringComparison.Ordinal);
+
+        return cardsOk && getOk && discoveryOk;
     }
 
     private static bool CheckStrictV5ConfigSchema(string root)
