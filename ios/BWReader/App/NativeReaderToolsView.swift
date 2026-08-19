@@ -339,7 +339,7 @@ struct NativeReaderToolsView: View {
                 }
             }
 
-            Text("词典不随 App 安装包提供。只有你在这里主动下载后，数据才会进入本 App 的 Application Support；它已排除 iCloud 备份，不进入书籍附件、Pi、Safari 扩展或设置同步。")
+            Text("词典不随 App 安装包提供。只有你在这里主动下载后，数据才会进入本 App 与它自己的 Safari 扩展共享的容器（同一个 App 组，供扩展离线查词）；它已排除 iCloud 备份，不进入书籍附件、Pi 或设置同步。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

@@ -26,6 +26,10 @@ enum ReaderNativeBridgeContract {
         "realtime.mint",
         "realtime.image",
         "realtime.hangup",
+        // 离线日语词典（C 组 #19）：扩展查词走 App 本地的 JMdict 而不是打 Pi。
+        //   词典在 App Group 共享容器里，所以这两条**零前台依赖** ——
+        //   native handler 跑在扩展进程里，App 在不在前台都不影响。
+        "dict.status",
     ]
     static let supportedAppKinds = [
         "codex-desktop",

@@ -86,6 +86,8 @@ targets:
       - path: Shared/ReaderRealtimeCredentialCore.swift
       - path: Shared/ReaderSharedSnapshot.swift
       - path: Shared/ReaderLocalNoteBridge.swift
+      # 离线词典的只读核心：扩展查词走本地词典而不是打 Pi（C 组 #19）。
+      - path: Shared/ReaderOfflineDictionaryCore.swift
       # Keep the staging directory itself out of the bundle. Root files are
       # copied one by one, while the referenced directories preserve the paths
       # used by manifest.json and extension-owned packaged data.

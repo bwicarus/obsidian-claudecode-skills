@@ -1162,7 +1162,7 @@ if (window.__bwPwaProviderOnly) return;
           '<button type="button" id="rcset-nat-dict-dl" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">下载离线日语词典</button>' +
           '<button type="button" id="rcset-nat-dict-rm" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">删除</button>' +
         '</div>' +
-        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">词典只存在这台 iPad 的 App 沙盒里，不进入书籍附件、Pi、Safari 扩展或设置同步。数据来自 JMdict / EDICT 项目（CC BY-SA）。</div>' +
+        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">词典只存在这台 iPad 上，由本 App 与它自己的 Safari 扩展共享（同一个 App 组，供扩展离线查词）；不进入书籍附件、Pi 或设置同步。数据来自 JMdict / EDICT 项目（CC BY-SA）。</div>' +
         HR +
         '<label style="' + LBL + '">📁 本机 Obsidian Vault</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;cursor:pointer;margin-bottom:6px">' +

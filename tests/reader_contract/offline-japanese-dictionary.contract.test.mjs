@@ -238,28 +238,48 @@ test("lookup code ships everywhere but dictionary bytes ship nowhere", () => {
   assert.equal((htmlReader.match(/"pdf\/rc-offline-dictionary\.js"/g) || []).length, 1);
 });
 
-test("App download stays in private Application Support and outside backup/sync", () => {
-  const nativeStore = read("ios/BWReader/App/ReaderOfflineDictionary.swift");
+test("词典留在设备上：可与同包 Safari 扩展共享，但不进 iCloud / Pi / 设置同步", () => {
+  const core = read("ios/BWReader/Shared/ReaderOfflineDictionaryCore.swift");
+  const installer = read("ios/BWReader/App/ReaderOfflineDictionary.swift");
   const localServer = read("ios/BWReader/App/ReaderLocalRuntimeServer.swift");
   const settings = read("ios/BWReader/App/NativeReaderToolsView.swift");
-  assert.match(nativeStore, /\.applicationSupportDirectory/);
-  assert.match(nativeStore, /OfflineJapaneseDictionary/);
-  assert.match(nativeStore, /isExcludedFromBackup = true/);
-  assert.match(nativeStore, /raw\.githubusercontent\.com/);
-  // ⚠ 这条守的是对用户的承诺（下面第 252 行那句"不进入…Safari 扩展…"）：
-  //   词典只归 App，不进 App Group 共享容器 —— 进了就等于 Safari 扩展也读得到。
+  const webSettings = read("_server_deploy/static/pdf/rc-settings.js");
+
+  // ── 边界改了，但只改了一条 ──────────────────────────────────────
   //
-  //   2026-08-19 发现它**一直是失效的**：原正则要求 `containerURL(` 与
-  //   `forSecurityApplicationGroupIdentifier` 紧挨着，而 Swift 里这两者之间
-  //   几乎总是换行（参数太长）。也就是说真写了共享容器它也拦不住 —— 当天就有一笔
-  //   改动这么过去了，靠别的测试才暴露出来。现在允许中间有空白。
-  assert.doesNotMatch(
-    nativeStore,
-    /containerURL\(\s*forSecurityApplicationGroupIdentifier/,
+  // 2026-08-19 用户拍板（C 组 #19）：允许词典放进 App Group 共享容器，让同一个包
+  // 里的 Safari 扩展能离线查词。那句承诺的本意是"不外流"，而 App 组只在
+  // App + 它自己的扩展 + Widget 之间共享 —— 不进 iCloud、不到 Pi、不随设置同步。
+  //
+  // 所以这条守卫**不再**禁止 App Group，但下面每一条仍然要守住：真正会让数据
+  // 离开这台设备的路径，一条都不许开。
+  assert.match(
+    core,
+    /containerURL\(\s*forSecurityApplicationGroupIdentifier:\s*\n?\s*ReaderNativeBridgeContract\.appGroupIdentifier/,
+    "词典应当放在 App Group 共享容器（扩展要读得到）",
   );
+  assert.match(core, /OfflineJapaneseDictionary/);
+  // 仍然排除 iCloud 备份 —— 几百 MB 的词典不该占用户的 iCloud 空间。
+  // （这条在 Core：它属于"准备目录"，跟存储路径一起走，不属于下载。）
+  assert.match(core, /isExcludedFromBackup = true/);
+  // 下载源不变（sourceBaseURL 也是只读常量，在 Core）
+  assert.match(core, /raw\.githubusercontent\.com/);
+  // Installer 确实还在 App 那边
+  assert.match(installer, /private enum ReaderOfflineDictionaryInstaller/);
+  // App 内运行时仍从本地读（不因为共享而改走网络）
   assert.match(localServer, /native-api\/offline-dictionary\//);
+
+  // ── 承诺的文案必须跟着实现走 ────────────────────────────────────
+  //
+  // 两处都要改：原生表里那份，和 2026-08-19 搬进设置面板「本机」tab 的那份。
+  // 实现变了而话没变 = 对用户撒谎；话变了而实现没变 = 白白削弱承诺。
   assert.match(settings, /下载离线日语词典/);
-  assert.match(settings, /不进入书籍附件、Pi、Safari 扩展或设置同步/);
+  for (const source of [settings, webSettings]) {
+    assert.match(source, /不进入书籍附件、Pi 或设置同步/);
+    assert.match(source, /Safari 扩展共享/);
+    // 旧话不能残留 —— 它现在是错的
+    assert.doesNotMatch(source, /不进入书籍附件、Pi、Safari 扩展或设置同步/);
+  }
 });
 
 test("Japanese UI queries the App dictionary first and restores the old explicit expand-to-AI fallback", () => {

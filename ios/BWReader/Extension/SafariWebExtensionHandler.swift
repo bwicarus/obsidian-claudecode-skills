@@ -364,6 +364,30 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 context: context
             )
 
+        case "dict.status":
+            // 词典装没装、装的是哪一版。扩展据此决定"本地查"还是"回落 Pi"。
+            guard exactKeys(
+                message,
+                required: ["contract", "action", "requestId"]
+            ) else {
+                complete(context, response: schemaFailure(
+                    action: action,
+                    requestID: requestID
+                ))
+                return
+            }
+            var dictResponse = baseResponse(action: action, requestID: requestID)
+            let installed = try? ReaderOfflineDictionaryStore.installedInfo()
+            if let info = installed ?? nil {
+                dictResponse["installed"] = true
+                dictResponse["release"] = info.release
+                dictResponse["byteCount"] = info.byteCount
+            } else {
+                dictResponse["installed"] = false
+            }
+            dictResponse["dataset"] = ReaderOfflineDictionaryStore.datasetID
+            complete(context, response: dictResponse)
+
         case "notes.status":
             guard exactKeys(
                 message,
