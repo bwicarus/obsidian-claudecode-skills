@@ -11,6 +11,7 @@
   if (!window.RC) window.RC = {};
   if (RC.voicecall) return;
 
+  var PAGE_CARD_CONTENT_LIMIT = 100000;
   var ws = null, ac = null, capNode = null, micStream = null, playT = 0, playing = [];
   var box = null, f32buf = new Float32Array(0), curAText = '';
   var _computerVoiceUnsub = null;
@@ -1908,6 +1909,93 @@
           }
           _caTarget = window._nativeReaderUndoLast;
           _caCall = function (target) { return target.call(window, _caId); };
+        } else if (_caFn === '_nativeReaderPageCardMutate') {
+          var _caCardArg = _caArgs.length === 1 && _caArgs[0] &&
+            typeof _caArgs[0] === 'object' && !Array.isArray(_caArgs[0])
+            ? _caArgs[0] : null;
+          var _caCardOp = _caCardArg ? String(_caCardArg.operation || '') : '';
+          var _caCardOperationId = _caCardArg
+            ? String(_caCardArg.operationId || '') : '';
+          var _caCardExpectedId = _caCardArg
+            ? String(_caCardArg.expectedId || '') : '';
+          var _caCardReplacement = _caCardArg && _caCardArg.replacement;
+          var _caCardHasNumber = !!(_caCardArg &&
+            Object.prototype.hasOwnProperty.call(_caCardArg, 'number'));
+          var _caAllowedKeys = _caCardOp === 'edit'
+            ? ['operation', 'operationId', 'expectedId', 'expectedRevision', 'replacement']
+            : ['operation', 'operationId', 'expectedId', 'expectedRevision'];
+          if (_caCardHasNumber) _caAllowedKeys.push('number');
+          if (!_caCardArg || (_caCardOp !== 'edit' && _caCardOp !== 'delete') ||
+              Object.keys(_caCardArg).some(function (key) {
+                return _caAllowedKeys.indexOf(key) < 0;
+              }) || Object.keys(_caCardArg).length !== _caAllowedKeys.length ||
+              !/^pcard_[0-9a-f]{24}$/.test(_caCardOperationId) ||
+              (_caCardHasNumber &&
+                (!Number.isSafeInteger(_caCardArg.number) || _caCardArg.number < 1)) ||
+              !/^[A-Za-z0-9_-]{2,96}$/.test(_caCardExpectedId) ||
+              !Number.isSafeInteger(_caCardArg.expectedRevision) ||
+              _caCardArg.expectedRevision < 0) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          if (_caCardOp === 'delete') {
+            if (_caCardReplacement != null) {
+              throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+            }
+          } else {
+            var _caHasContent = _caCardReplacement &&
+              Object.prototype.hasOwnProperty.call(_caCardReplacement, 'content');
+            var _caHasCards = _caCardReplacement &&
+              Object.prototype.hasOwnProperty.call(_caCardReplacement, 'cards');
+            if (!_caCardReplacement || typeof _caCardReplacement !== 'object' ||
+                Array.isArray(_caCardReplacement) || _caHasContent === _caHasCards ||
+                Object.keys(_caCardReplacement).some(function (key) {
+                  return key !== 'content' && key !== 'cards';
+                })) {
+              throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+            }
+            if (_caHasContent) {
+              if (typeof _caCardReplacement.content !== 'string' ||
+                  !_caCardReplacement.content.trim() ||
+                  _caCardReplacement.content.length > PAGE_CARD_CONTENT_LIMIT) {
+                throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+              }
+            } else {
+              if (!Array.isArray(_caCardReplacement.cards) ||
+                  !_caCardReplacement.cards.length ||
+                  _caCardReplacement.cards.length > 12 ||
+                  !_caCardReplacement.cards.every(function (card) {
+                    if (!card || typeof card !== 'object' || Array.isArray(card)) {
+                      return false;
+                    }
+                    var keys = Object.keys(card).sort().join(',');
+                    if (card.type === 'basic' && keys === 'back,front,type') {
+                      return typeof card.front === 'string' && !!card.front.trim() &&
+                        card.front.length <= PAGE_CARD_CONTENT_LIMIT &&
+                        typeof card.back === 'string' && !!card.back.trim() &&
+                        card.back.length <= PAGE_CARD_CONTENT_LIMIT;
+                    }
+                    return card.type === 'cloze' && keys === 'cloze,type' &&
+                      typeof card.cloze === 'string' &&
+                      card.cloze.length <= PAGE_CARD_CONTENT_LIMIT &&
+                      /\{\{c[1-9][0-9]*::[\s\S]+?\}\}/.test(card.cloze);
+                  })) {
+                throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+              }
+            }
+          }
+          _caTarget = window._nativeReaderPageCardMutate;
+          _caCall = function (target) {
+            var input = {
+              operation: _caCardOp,
+              operationId: _caCardOperationId,
+              expectedId: _caCardExpectedId,
+              expectedRevision: _caCardArg.expectedRevision,
+              replacement: _caCardOp === 'edit' ? _caCardReplacement : undefined
+            };
+            if (_caCardOp !== 'edit') delete input.replacement;
+            if (_caCardHasNumber) input.number = _caCardArg.number;
+            return target.call(window, input);
+          };
         } else if (_caFn === '_nativeReaderCreateNote') {
           var _caNote = _caArgs.length === 1 && _caArgs[0] &&
             typeof _caArgs[0] === 'object' && !Array.isArray(_caArgs[0])
@@ -5364,7 +5452,17 @@
           if (!snap.length) return false;
           return RC.stickynote.createCardAt(px, py, snap, st.gid);
         } else if (bd && RC.stickynote.createHtmlAt) {   // 通用卡:HTML 快照 → html 便签；保留浮层卡 cid
-          return RC.stickynote.createHtmlAt(px, py, { content: bd.innerHTML, isHtml: true, label: c.label || '卡片', type: (el.style && el.style.getPropertyValue('--vc-tc')) || '', icon: (function () { try { var dd = el.querySelector('.vc-card-dot'); return dd ? dd.innerHTML : ''; } catch (e) { return ''; } })(), cid: c.cid || (el.dataset && el.dataset.vcCid) || '' });
+          return RC.stickynote.createHtmlAt(px, py, {
+            content: bd.innerHTML,
+            // `c.raw` is the source answer passed to _cardPush.  Persist it as
+            // AI context instead of re-reading the rendered controls.
+            contextText: c.raw || bd.textContent || '',
+            isHtml: true,
+            label: c.label || '卡片',
+            type: (el.style && el.style.getPropertyValue('--vc-tc')) || '',
+            icon: (function () { try { var dd = el.querySelector('.vc-card-dot'); return dd ? dd.innerHTML : ''; } catch (e) { return ''; } })(),
+            cid: c.cid || (el.dataset && el.dataset.vcCid) || ''
+          });
         }
       } catch (e) {}
       return false;

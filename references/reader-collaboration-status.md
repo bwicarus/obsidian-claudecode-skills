@@ -4295,3 +4295,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：共享/vendor/reader 生成物重建，Reader Node 全量通过；专项覆盖 EPUB page 0、q/a 旧卡、旧 pump 回灌、重放幂等、窄屏 clamp 与删除墓碑。
 - **已知边界**：Windows handoff/全量 Python 仍命中既有 `fcntl`、Linux 路径/fixture 和本机数据基线；Linux 完整门禁交给 Pi 原子预检，跨设备同语义同时首次创建为非阻断 P2。
 - **发布下一步**：候选版本 WebExt `0.2.122`、App `1.1.68`；本轮直接推送 TestFlight 与 Pi，随后由用户按视觉、刷新/缩放、页边展开和删除/AI 联动清单验收。
+
+## Codex：词锚卡正式候选收口（2026-08-20 JST）
+- **改了什么**：补齐自由卡线性锚按钮、同行浮标重叠横展、分类色 2px 词框、页边顶层展开、设置层级与侧栏长消息换行；自由卡仍只靠拖到左上角删除。
+- **AI/存储**：快照直接带稳定 id/revision、锚定序号、类型、锚定词与完整 replacement；所有卡按 id 读改删，只有锚定卡可按号，正常内容不截断，100000 字符/约 200 KiB 仅作异常保护。
+- **怎么验的**：共享源码和生成物一致，Reader Node 全量、页面卡 Python 专项、Windows Direct Release 编译/自检、发布管线均通过；Windows handoff 只命中既有 POSIX `fcntl` 边界。
+- **候选/下一步**：WebExt `0.2.123`、launcher v13、App `1.1.69`、Direct `0.1.169`；按用户明确要求不等待发布前人工验收，提交推送后由 Pi 预检并直接发布正式成品。

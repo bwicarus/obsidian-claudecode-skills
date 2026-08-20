@@ -44,6 +44,7 @@ function runBranch({
     Promise,
     Array,
     String,
+    PAGE_CARD_CONTENT_LIMIT: 100000,
     work: null,
     thrown: null,
   };
@@ -75,6 +76,122 @@ test("受信 Reader 撤销入口存在时只传入受校验的一次性编号", 
   assert.equal(thrown, null);
   assert.equal(await work, "done");
   assert.deepEqual(seen, ["rundo_" + "b".repeat(24)]);
+});
+
+test("锚定卡片修改同时校验可选页内序号、稳定 placement id 与 notes revision", async () => {
+  const seen = [];
+  const payload = {
+    operation: "edit",
+    operationId: "pcard_" + "c".repeat(24),
+    number: 2,
+    expectedId: "c_1111111111111111",
+    expectedRevision: 7,
+    replacement: {
+      cards: [{ type: "basic", front: "新问题", back: "新答案" }],
+    },
+  };
+  const { work, thrown } = runBranch({
+    fn: "_nativeReaderPageCardMutate",
+    args: [payload],
+    host: {
+      _nativeReaderPageCardMutate: (value) => {
+        seen.push(structuredClone(value));
+        return { ok: true };
+      },
+    },
+  });
+  assert.equal(thrown, null);
+  assert.deepEqual(await work, { ok: true });
+  assert.deepEqual(seen, [payload]);
+});
+
+test("自由卡只凭稳定 placement id 与 revision 也能修改", async () => {
+  const seen = [];
+  const payload = {
+    operation: "edit",
+    operationId: "pcard_" + "9".repeat(24),
+    expectedId: "placement_free_card_1",
+    expectedRevision: 7,
+    replacement: { content: "自由卡新正文" },
+  };
+  const { work, thrown } = runBranch({
+    fn: "_nativeReaderPageCardMutate",
+    args: [payload],
+    host: {
+      _nativeReaderPageCardMutate: (value) => {
+        seen.push(structuredClone(value));
+        return { ok: true };
+      },
+    },
+  });
+  assert.equal(thrown, null);
+  assert.deepEqual(await work, { ok: true });
+  assert.deepEqual(seen, [payload]);
+  assert.equal(Object.hasOwn(seen[0], "number"), false);
+});
+
+test("页面卡片正文以十万字符为异常安全上限", async () => {
+  const host = { _nativeReaderPageCardMutate: (value) => value };
+  const base = {
+    operation: "edit",
+    operationId: "pcard_" + "f".repeat(24),
+    number: 1,
+    expectedId: "c_1111111111111111",
+    expectedRevision: 7,
+  };
+  const accepted = runBranch({
+    fn: "_nativeReaderPageCardMutate",
+    args: [{ ...base, replacement: { content: "甲".repeat(100000) } }],
+    host,
+  });
+  assert.equal(accepted.thrown, null);
+  assert.equal((await accepted.work).replacement.content.length, 100000);
+
+  for (const replacement of [
+    { content: "甲".repeat(100001) },
+    { cards: [{ type: "basic", front: "问".repeat(100001), back: "答" }] },
+    { cards: [{ type: "cloze", cloze: `{{c1::${"词".repeat(100001)}}}` }] },
+  ]) {
+    const rejected = runBranch({
+      fn: "_nativeReaderPageCardMutate",
+      args: [{ ...base, replacement }],
+      host,
+    });
+    assert.match(
+      String(rejected.thrown && rejected.thrown.message),
+      /BW_READER_CLIENT_ACTION_INVALID:_nativeReaderPageCardMutate/,
+    );
+  }
+});
+
+test("卡片删除不能只凭易变序号，也不能夹带 replacement", () => {
+  const host = { _nativeReaderPageCardMutate() { throw new Error("must not run"); } };
+  for (const args of [
+    [{
+      operation: "delete",
+      operationId: "pcard_" + "d".repeat(24),
+      number: 2,
+      expectedRevision: 7,
+    }],
+    [{
+      operation: "delete",
+      operationId: "pcard_" + "e".repeat(24),
+      number: 2,
+      expectedId: "c_1111111111111111",
+      expectedRevision: 7,
+      replacement: { content: "不应出现" },
+    }],
+  ]) {
+    const { thrown } = runBranch({
+      fn: "_nativeReaderPageCardMutate",
+      args,
+      host,
+    });
+    assert.match(
+      String(thrown && thrown.message),
+      /BW_READER_CLIENT_ACTION_INVALID:_nativeReaderPageCardMutate/,
+    );
+  }
 });
 
 test("HTML/普通网页宿主没有本机书籍事务时明确拒绝，绝不静默跳过", () => {

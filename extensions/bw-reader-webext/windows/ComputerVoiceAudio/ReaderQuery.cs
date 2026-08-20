@@ -60,6 +60,12 @@ internal static class ReaderQueryProtocol
     internal const string QueryContract = "reader-query/1";
     internal const string EventName = "reader-query-request";
     internal const string ResponseType = "reader-query";
+    internal const string PageCardDetailContract =
+        "reader-page-card-detail/1";
+    internal const string PageCardContentFormat =
+        "application/vnd.bw-reader.card+json;version=1";
+    internal const int MaximumPageCardChunkCodeUnits = 24 * 1024;
+    internal const int MaximumPageCardChunkUtf8Bytes = 24 * 1024;
 
     // 两条约束，紧的是后一条：
     //
@@ -79,7 +85,7 @@ internal static class ReaderQueryProtocol
     // 名单之外的名字只可能是错误或攻击，两种都该当场拒绝。
     internal static bool IsQuery(string value) =>
         value is "highlights" or "notes" or "search" or "toc"
-            or "page-text" or "lookup";
+            or "page-text" or "page-cards" or "page-card" or "lookup";
 
     // 每个查询各自声明适用哪种阅读界面。一刀切放开会让助手在网页上问目录、
     // 在书里问网页锚点 —— 那些请求会走到执行侧才失败，错误信息也说不清缘由。
@@ -95,7 +101,10 @@ internal static class ReaderQueryProtocol
             // （scoped repository，同样不经 Pi）
             "notes" => kind is "pdf" or "epub" or "web",
             // 全书搜索、目录、按页取文，都以「书有页码结构」为前提
-            "search" or "page-text" => kind is "pdf" or "epub",
+            "search" or "page-text" =>
+                kind is "pdf" or "epub",
+            "page-cards" => kind is "pdf",
+            "page-card" => kind is "pdf",
             "toc" => kind is "pdf",
             // 查词与界面无关
             "lookup" => kind is "pdf" or "epub" or "web",
@@ -179,6 +188,12 @@ internal static class ReaderQueryProtocol
         // 执行侧构造结果，桥接不解释它的内容 —— 但必须限住它的体量与深度，
         // 否则一个页面就能让下游解析器陷进去。
         RequireBoundedJson(result);
+        if (query == "page-card" && status == "ok")
+        {
+            ValidatePageCardDetailResult(
+                result,
+                truncated.ValueKind == JsonValueKind.True);
+        }
         return new ReaderQueryResponse(
             sessionId,
             correlation,
@@ -189,6 +204,267 @@ internal static class ReaderQueryProtocol
             status,
             result.Clone(),
             truncated.ValueKind == JsonValueKind.True);
+    }
+
+    // page-card 是唯一把卡片源内容送进模型的查询，因此不能沿用“只限总大小、
+    // 不解释结果”的宽松规则。这里同时钉住分块边界、序号/未绑定语义和内容格式；
+    // 否则一个伪 next_offset 会让下一次读取跳过正文，或把自由卡伪装成第 N 张。
+    internal static void ValidatePageCardDetailResult(
+        JsonElement result,
+        bool envelopeTruncated)
+    {
+        RequireExactFields(
+            result,
+            "contract",
+            "page",
+            "revision",
+            "card",
+            "content",
+            "content_length",
+            "offset",
+            "next_offset",
+            "truncated");
+        if (RequiredString(result, "contract", 128) != PageCardDetailContract)
+        {
+            throw Invalid("Reader 单卡查询合同无效");
+        }
+        long page = RequiredSafeInteger(result, "page", 1, 10_000_000);
+        _ = RequiredSafeInteger(result, "revision", 0, 9_007_199_254_740_991L);
+        if (!result.TryGetProperty("card", out JsonElement card)
+            || card.ValueKind != JsonValueKind.Object)
+        {
+            throw Invalid("Reader 单卡查询 card 无效");
+        }
+        ValidatePageCardIdentity(card, page);
+
+        if (!result.TryGetProperty("content", out JsonElement contentValue)
+            || contentValue.ValueKind != JsonValueKind.String)
+        {
+            throw Invalid("Reader 单卡查询 content 无效");
+        }
+        string content = contentValue.GetString() ?? string.Empty;
+        if (content.Length > MaximumPageCardChunkCodeUnits
+            || content.IndexOf('\0') >= 0
+            || System.Text.Encoding.UTF8.GetByteCount(content)
+                > MaximumPageCardChunkUtf8Bytes)
+        {
+            throw Invalid("Reader 单卡查询 content 超出分块上限");
+        }
+        long contentLength = RequiredSafeInteger(
+            result,
+            "content_length",
+            0,
+            9_007_199_254_740_991L);
+        long offset = RequiredSafeInteger(
+            result,
+            "offset",
+            0,
+            9_007_199_254_740_991L);
+        if (offset > contentLength)
+        {
+            throw Invalid("Reader 单卡查询 offset 越界");
+        }
+        long end = offset + content.Length;
+        if (end > contentLength)
+        {
+            throw Invalid("Reader 单卡查询 content 越过总长度");
+        }
+        bool detailTruncated = RequiredBoolean(result, "truncated");
+        if (detailTruncated != envelopeTruncated)
+        {
+            throw Invalid("Reader 单卡查询截断标志不一致");
+        }
+        if (!result.TryGetProperty("next_offset", out JsonElement nextValue))
+        {
+            throw Invalid("Reader 单卡查询缺 next_offset");
+        }
+        if (detailTruncated)
+        {
+            if (nextValue.ValueKind != JsonValueKind.Number
+                || !nextValue.TryGetInt64(out long nextOffset)
+                || nextOffset != end
+                || nextOffset <= offset
+                || nextOffset >= contentLength
+                || nextOffset > 9_007_199_254_740_991L)
+            {
+                throw Invalid("Reader 单卡查询 next_offset 无效");
+            }
+        }
+        else if (nextValue.ValueKind != JsonValueKind.Null || end != contentLength)
+        {
+            throw Invalid("Reader 单卡查询末块边界无效");
+        }
+    }
+
+    private static void ValidatePageCardIdentity(JsonElement card, long page)
+    {
+        RequireExactFields(
+            card,
+            "id",
+            "number",
+            "kind",
+            "type",
+            "label",
+            "bind",
+            "unbound",
+            "content_format");
+        string id = RequiredString(card, "id", 96);
+        if (id.Length < 2 || !id.All(character => character is
+                >= 'A' and <= 'Z'
+                or >= 'a' and <= 'z'
+                or >= '0' and <= '9'
+                or '_' or '-'))
+        {
+            throw Invalid("Reader 单卡查询 id 无效");
+        }
+        string kind = RequiredString(card, "kind", 16);
+        string type = RequiredString(card, "type", 16);
+        if (kind is not ("anki" or "card") || type != kind)
+        {
+            throw Invalid("Reader 单卡查询类型无效");
+        }
+        string label = RequiredString(card, "label", 120);
+        if (label.IndexOf('\0') >= 0
+            || RequiredString(card, "content_format", 128)
+                != PageCardContentFormat)
+        {
+            throw Invalid("Reader 单卡查询标签或内容格式无效");
+        }
+        bool unbound = RequiredBoolean(card, "unbound");
+        if (!card.TryGetProperty("number", out JsonElement number)
+            || !card.TryGetProperty("bind", out JsonElement bind))
+        {
+            throw Invalid("Reader 单卡查询锚点字段缺失");
+        }
+        if (unbound)
+        {
+            if (number.ValueKind != JsonValueKind.Null
+                || bind.ValueKind != JsonValueKind.Null)
+            {
+                throw Invalid("Reader 未绑定卡片不得伪造序号或锚点");
+            }
+            return;
+        }
+        if (number.ValueKind != JsonValueKind.Number
+            || !number.TryGetInt64(out long visibleNumber)
+            || visibleNumber is < 1 or > 1_000_000
+            || bind.ValueKind != JsonValueKind.Object)
+        {
+            throw Invalid("Reader 已绑定卡片序号或锚点无效");
+        }
+        RequireExactFields(bind, "kind", "page", "from", "to", "text");
+        if (RequiredString(bind, "kind", 32) != "page-chars"
+            || RequiredSafeInteger(bind, "page", 1, 10_000_000) != page)
+        {
+            throw Invalid("Reader 单卡查询页锚不匹配");
+        }
+        long from = RequiredSafeInteger(bind, "from", 0, 1_000_000);
+        long to = RequiredSafeInteger(bind, "to", 0, 1_000_000);
+        if (to < from
+            || !bind.TryGetProperty("text", out JsonElement text)
+            || text.ValueKind != JsonValueKind.String
+            || (text.GetString() ?? string.Empty).Length > 200
+            || (text.GetString() ?? string.Empty).IndexOf('\0') >= 0)
+        {
+            throw Invalid("Reader 单卡查询字符锚无效");
+        }
+    }
+
+    internal static bool PageCardResponseMatchesRequest(
+        ReaderQueryRequest request,
+        ReaderQueryResponse response)
+    {
+        if (request.Query != "page-card" || response.Status != "ok")
+        {
+            return true;
+        }
+        try
+        {
+            JsonElement result = response.Result;
+            JsonElement card = result.GetProperty("card");
+            JsonObject parameters = request.Parameters as JsonObject
+                ?? throw Invalid("Reader 单卡查询参数无效");
+            HashSet<string> allowed = new(
+                ["page", "id", "number", "offset", "limit", "expectedRevision"],
+                StringComparer.Ordinal);
+            bool hasId = parameters.ContainsKey("id");
+            bool hasNumber = parameters.ContainsKey("number");
+            if (parameters.Any(pair => !allowed.Contains(pair.Key))
+                || hasId == hasNumber
+                || !TryNodeInt64(parameters["offset"], out long offset)
+                || offset is < 0 or > 9_007_199_254_740_991L
+                || !TryNodeInt64(parameters["limit"], out long limit)
+                || limit is < 1 or > MaximumPageCardChunkCodeUnits
+                || (offset > 0 && !parameters.ContainsKey("expectedRevision")))
+            {
+                throw Invalid("Reader 单卡查询参数无效");
+            }
+            if (parameters["expectedRevision"] is JsonNode expectedNode
+                && (!TryNodeInt64(expectedNode, out long expectedRevision)
+                    || expectedRevision is < 0 or > 9_007_199_254_740_991L
+                    || result.GetProperty("revision").GetInt64()
+                        != expectedRevision))
+            {
+                return false;
+            }
+            if (result.GetProperty("offset").GetInt64() != offset
+                || (result.GetProperty("content").GetString() ?? string.Empty)
+                    .Length > limit)
+            {
+                return false;
+            }
+            if (parameters["page"] is JsonNode requestedPage
+                && (!TryNodeInt64(requestedPage, out long page)
+                    || page is < 1 or > 10_000_000
+                    || result.GetProperty("page").GetInt64() != page))
+            {
+                return false;
+            }
+            if (hasId)
+            {
+                string requestedId = parameters["id"]!.GetValue<string>();
+                return requestedId.Length is >= 2 and <= 96
+                    && requestedId.All(character => character is
+                        >= 'A' and <= 'Z'
+                        or >= 'a' and <= 'z'
+                        or >= '0' and <= '9'
+                        or '_' or '-')
+                    && card.GetProperty("id").GetString() == requestedId;
+            }
+            return TryNodeInt64(parameters["number"], out long requestedNumber)
+                && requestedNumber is >= 1 and <= 1_000_000
+                && card.GetProperty("number").ValueKind == JsonValueKind.Number
+                && card.GetProperty("number").GetInt64()
+                    == requestedNumber;
+        }
+        catch (Exception exception) when (
+            exception is InvalidOperationException
+            or FormatException
+            or KeyNotFoundException
+            or DirectProtocolException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryNodeInt64(JsonNode? node, out long value)
+    {
+        value = 0;
+        if (node is not JsonValue scalar)
+        {
+            return false;
+        }
+        if (scalar.TryGetValue(out long longValue))
+        {
+            value = longValue;
+            return true;
+        }
+        if (scalar.TryGetValue(out int intValue))
+        {
+            value = intValue;
+            return true;
+        }
+        return false;
     }
 
     internal static void RequireBoundedJson(JsonElement value)
@@ -287,6 +563,31 @@ internal static class ReaderQueryProtocol
             throw Invalid($"Reader 查询 {name} 无效");
         }
         return parsed;
+    }
+
+    private static long RequiredSafeInteger(
+        JsonElement message,
+        string name,
+        long minimum,
+        long maximum)
+    {
+        long value = RequiredInt64(message, name);
+        if (value < minimum || value > maximum)
+        {
+            throw Invalid($"Reader 查询 {name} 范围无效");
+        }
+        return value;
+    }
+
+    private static bool RequiredBoolean(JsonElement message, string name)
+    {
+        if (!message.TryGetProperty(name, out JsonElement value)
+            || value.ValueKind
+                is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            throw Invalid($"Reader 查询 {name} 无效");
+        }
+        return value.ValueKind == JsonValueKind.True;
     }
 
     private static DirectProtocolException Invalid(string message) =>
@@ -447,6 +748,15 @@ internal sealed class ReaderQueryBroker
                 throw Failure(
                     "BW_READER_QUERY_IDENTITY_MISMATCH",
                     "Reader 查询来源、书目、版本或名称不匹配",
+                    retryable: false);
+            }
+            if (!ReaderQueryProtocol.PageCardResponseMatchesRequest(
+                    request,
+                    response))
+            {
+                throw Failure(
+                    "BW_READER_QUERY_RESULT_MISMATCH",
+                    "Reader 单卡查询结果与页码、选择器或分块参数不匹配",
                     retryable: false);
             }
             _pending.Remove(response.Correlation);

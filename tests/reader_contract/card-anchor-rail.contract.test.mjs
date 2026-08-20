@@ -41,6 +41,34 @@ test("右侧 150px 浮标轨覆盖正文且按词的屏幕中心实时对齐", (
   assert.match(BIND, /Math\.max\(_DOT_MIN, Math\.min\(_DOT_MAX,/);
 });
 
+test("同行多卡先以数量重叠提示，首次点击只横向展开，空白或滚动会折叠", () => {
+  assert.match(BIND, /function _railGroupKey\(row\)/);
+  assert.match(BIND, /dot\.__bwGroupSize > 1[\s\S]{0,180}?rail\.__expandedGroupKey = groupKey[\s\S]{0,120}?return;/,
+    "组未展开时必须在调用 open 之前返回");
+  assert.match(BIND, /dot\.dataset\.groupCount = String\(group\.length\)/);
+  assert.match(BIND, /var step = expanded \? spreadStep : 5;/,
+    "收起态只少量错位，展开态才使用完整横向间距");
+  assert.match(CSS, /\.pgbind-rail-dot\.group-lead:not\(\.group-open\)::after \{ content: attr\(data-group-count\)/);
+  assert.match(CSS, /\.pgbind-rail-dot\.group-lead:not\(\.group-open\) \{ border-width: 2px; \}/,
+    "收起态主标必须用固定加粗框明确表示复数，不能只靠背后错位");
+  assert.match(CSS, /\*\{box-sizing:border-box\}/,
+    "加粗边框必须落在 border-box 内，不能让同行组收起时尺寸跳变");
+  assert.match(BIND, /document\.addEventListener\('pointerdown', onOutside, true\)/);
+  assert.match(BIND, /var onMove = function \(\) \{\s*_collapseRailGroup\(rail\);/,
+    "滚动与缩放重排前必须折叠已展开组");
+});
+
+test("浮标纵向位置立即跟随滚动，只保留同行横向展开动画", () => {
+  const dotRule = CSS.match(/\.pgbind-rail-dot \{([\s\S]*?)\}/)?.[1] || "";
+  const viewRule = CSS.match(/\.pgbind-rail-view \{([\s\S]*?)\}/)?.[1] || "";
+  assert.doesNotMatch(dotRule, /(?:^|,)\s*top\s+[.\d]/,
+    "浮标 top 过渡会在滚动时持续追赶正文锚点");
+  assert.doesNotMatch(viewRule, /(?:^|,)\s*top\s+[.\d]/,
+    "轨道视窗 top 也必须立即跟随滚动");
+  assert.match(dotRule, /right \.22s cubic-bezier\(\.34,1\.5,\.64,1\)/,
+    "同行横向展开动画仍需保留");
+});
+
 test("展开复用正式 vc-card，并 portal 到页容器之外后按视口四边 clamp", () => {
   assert.match(BIND, /RC\.voiceCard\.renderInto\(host,/);
   assert.doesNotMatch(CSS, /\.pgbind-card\s*\{/,
@@ -64,10 +92,11 @@ test("展开复用正式 vc-card，并 portal 到页容器之外后按视口四�
 
 test("词锚展开态只有明确的垃圾桶删除，失败不先收卡，成功由权威删除撤 frame+rail", () => {
   assert.match(NOTE, /\.rc-note\.rc-note-word-open \.rc-note-del\{display:flex!important/);
+  assert.doesNotMatch(NOTE, /rc-note-free-card-open \.rc-note-del\{display:flex!important/);
   assert.match(NOTE, /ctl\.del\.title = '删除这张卡片'/);
   assert.match(NOTE, /ctl\.del\.setAttribute\('aria-label', '删除这张卡片'\)/);
-  assert.match(NOTE, /window\.confirm\(wordCard \? '删除这张卡片？' : '删除这张便签？'\)/);
-  assert.match(NOTE, /deleteNote\(ctl\.note, wordCard \? '🗑 卡片已删除'/);
+  assert.match(NOTE, /window\.confirm\(pageCard \? '删除这张卡片？' : '删除这张便签？'\)/);
+  assert.match(NOTE, /deleteNote\(ctl\.note, pageCard \? '🗑 卡片已删除'/);
   assert.match(NOTE, /if \(ok !== true && ctl\.del\) ctl\.del\.disabled = false/,
     "删除失败必须保持展开态并恢复按钮");
   assert.match(NOTE, /upsertRecord\(result, generation\);\s*\n\s*if \(generation !== _generation \|\| currentNote\(id\)\)/,

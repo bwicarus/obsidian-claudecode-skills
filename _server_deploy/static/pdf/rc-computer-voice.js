@@ -61,8 +61,18 @@
   var ACTIVE_READING_HEARTBEAT_MS = 60000;
   var LOCAL_PAGE_CONTEXT_POLL_MS = 1500;
   var LOCAL_PAGE_TEXT_WAIT_MS = 1200;
-  var LOCAL_PAGE_CONTEXT_LIMIT = 12000;
+  // 256 KiB is the direct bridge's immutable frame ceiling.  Keep enough
+  // envelope headroom while allowing normal long cards to remain complete.
+  var LOCAL_PAGE_CONTEXT_LIMIT = 220000;
+  var LOCAL_PAGE_CONTEXT_MAX_BYTES = 224 * 1024;
   var LOCAL_PAGE_CARDS_CONTRACT = "reader-local-page-cards/1";
+  var LOCAL_PAGE_CARD_SOURCE_CONTRACT = "reader-local-page-card-source/1";
+  var LOCAL_PAGE_CARD_PROJECTION_CONTRACT =
+    "reader-local-page-card-projection/1";
+  var READER_PAGE_CARD_DETAIL_CONTRACT = "reader-page-card-detail/1";
+  var LOCAL_PAGE_CARD_CONTEXT_LIMIT = 100000;
+  var LOCAL_PAGE_CARD_REPLACEMENT_FORMAT =
+    "application/vnd.bw-reader.card-replacement+json;version=1";
   var LOCAL_NOTES_CHANGED_CONTRACT = "reader-local-notes-changed/1";
   var LOCAL_NOTES_CHANGED_EVENT = "bw:native-document-notes-changed";
   var LOCAL_HIGHLIGHT_SOURCE_REFRESH_MS = 30000;
@@ -831,6 +841,46 @@
     });
   }
 
+  function normalizeReaderPageCardCards(cards) {
+    if (!Array.isArray(cards) || cards.length < 1 || cards.length > 12) {
+      throw directError(
+        "Reader 页面卡片数量无效",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    }
+    return cards.map(function (card, index) {
+      var label = "Reader 页面卡片 cards[" + index + "]";
+      if (!plainObject(card)) {
+        throw directError(label + " 无效", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+      }
+      if (card.type === "basic") {
+        exactObject(card, ["type", "front", "back"], [], label);
+        var front = safeText(
+          card.front, label + ".front", LOCAL_PAGE_CARD_CONTEXT_LIMIT, false
+        );
+        var back = safeText(
+          card.back, label + ".back", LOCAL_PAGE_CARD_CONTEXT_LIMIT, false
+        );
+        if (!front.trim() || !back.trim()) {
+          throw directError(label + " 正反面不能为空", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+        }
+        return { type: "basic", front: front, back: back };
+      }
+      if (card.type === "cloze") {
+        exactObject(card, ["type", "cloze"], [], label);
+        var cloze = safeText(
+          card.cloze, label + ".cloze", LOCAL_PAGE_CARD_CONTEXT_LIMIT, false
+        );
+        if (!/\{\{c[1-9][0-9]*::[\s\S]+?\}\}/.test(cloze)) {
+          throw directError(label + " 缺少有效挖空", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+        }
+        return { type: "cloze", cloze: cloze };
+      }
+      throw directError(label + ".type 无效", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+    });
+  }
+
   function normalizeReaderResultDelivery(value) {
     exactObject(
       value,
@@ -1270,6 +1320,77 @@
           );
         }
         payload = { fn: actionFn, args: [undoId] };
+      } else if (actionFn === "_nativeReaderPageCardMutate") {
+        if (p.args.length !== 1 || !plainObject(p.args[0])) {
+          throw directError(
+            "Reader 页面卡片修改需要一个对象",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        var mutation = p.args[0];
+        var mutationOperation = safeText(
+          mutation.operation, "Reader 页面卡片 operation", 16, false
+        );
+        var hasMutationNumber = Object.prototype.hasOwnProperty.call(
+          mutation, "number"
+        );
+        exactObject(
+          mutation,
+          mutationOperation === "edit"
+            ? ["operation", "operationId", "expectedId", "expectedRevision", "replacement"]
+            : ["operation", "operationId", "expectedId", "expectedRevision"],
+          ["number"],
+          "Reader 页面卡片修改"
+        );
+        if (mutationOperation !== "edit" && mutationOperation !== "delete") {
+          throw directError("Reader 页面卡片操作无效", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+        }
+        var mutationId = safeText(
+          mutation.operationId, "Reader 页面卡片 operationId", 30, false
+        );
+        var placementId = safeText(
+          mutation.expectedId, "Reader 页面卡片 expectedId", 96, false
+        );
+        if (!/^pcard_[0-9a-f]{24}$/.test(mutationId) ||
+            !/^[A-Za-z0-9_-]{2,96}$/.test(placementId) ||
+            (hasMutationNumber &&
+              (!Number.isSafeInteger(mutation.number) || mutation.number < 1)) ||
+            !Number.isSafeInteger(mutation.expectedRevision) ||
+            mutation.expectedRevision < 0) {
+          throw directError("Reader 页面卡片稳定引用无效", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+        }
+        var normalizedMutation = {
+          operation: mutationOperation,
+          operationId: mutationId,
+          expectedId: placementId,
+          expectedRevision: mutation.expectedRevision,
+        };
+        if (hasMutationNumber) normalizedMutation.number = mutation.number;
+        if (mutationOperation === "edit") {
+          if (!plainObject(mutation.replacement)) {
+            throw directError("Reader 页面卡片替换无效", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+          }
+          if (Object.prototype.hasOwnProperty.call(mutation.replacement, "content")) {
+            exactObject(mutation.replacement, ["content"], [], "Reader 页面卡片替换");
+            var replacementContent = safeText(
+              mutation.replacement.content,
+              "Reader 页面卡片 content",
+              LOCAL_PAGE_CARD_CONTEXT_LIMIT,
+              false
+            );
+            if (!replacementContent.trim()) {
+              throw directError("Reader 页面卡片 content 不能为空", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+            }
+            normalizedMutation.replacement = { content: replacementContent };
+          } else {
+            exactObject(mutation.replacement, ["cards"], [], "Reader 页面卡片替换");
+            normalizedMutation.replacement = {
+              cards: normalizeReaderPageCardCards(mutation.replacement.cards),
+            };
+          }
+        }
+        payload = { fn: actionFn, args: [normalizedMutation] };
       } else if (actionFn === "__upStartTask") {
         // 交互练习纸:与 Windows 侧同一套结构闸;内容级容错在纸的接收链里做。
         if (p.args.length !== 1 || !plainObject(p.args[0])) {
@@ -3383,6 +3504,21 @@
       var target = window._nativeReaderPageText;
       if (typeof target !== "function") return null;
       return target.call(window, { page: params.page });
+    },
+    "page-cards": function (params) {
+      var page = params && Object.prototype.hasOwnProperty.call(params, "page")
+        ? params.page : null;
+      if (page === null || page === undefined) {
+        // Keep the query channel self-contained for hosts that replace the
+        // exported pageCards function with a capability stub.
+        var current = localActiveReadingSnapshot();
+        if (!current || current.kind !== "pdf") return null;
+        page = current.page;
+      }
+      return pageCardIndex(page);
+    },
+    "page-card": function (params) {
+      return pageCard(params);
     },
     lookup: function (params) {
       var target = window._nativeReaderLookupWord;
@@ -6469,12 +6605,59 @@
     } catch (_) { return Promise.resolve(emptyLocalPageRecord(fallback)); }
   }
 
+  function assertCompleteLocalPageCardReplacement(card) {
+    if (card.contentTruncated === true) return;
+    var replacement;
+    try {
+      replacement = JSON.parse(card.contextContent);
+    } catch (_) {
+      throw new Error("本机权威卡片替换正文不是 JSON");
+    }
+    if (!plainObject(replacement)) {
+      throw new Error("本机权威卡片替换正文无效");
+    }
+    if (card.replacement === "content") {
+      exactObject(replacement, ["content"], [], "本机权威卡片替换正文");
+      if (card.kind !== "card" || typeof replacement.content !== "string" ||
+          !replacement.content.trim()) {
+        throw new Error("本机权威通用卡片替换正文无效");
+      }
+      return;
+    }
+    exactObject(replacement, ["cards"], [], "本机权威卡片替换正文");
+    if (card.kind !== "anki") {
+      throw new Error("本机权威学习卡替换正文无效");
+    }
+    if (!Array.isArray(replacement.cards) || replacement.cards.length < 1 ||
+        replacement.cards.length > 12) {
+      throw new Error("本机权威学习卡替换正文无效");
+    }
+    replacement.cards.forEach(function (face) {
+      if (!plainObject(face)) {
+        throw new Error("本机权威学习卡替换正文无效");
+      }
+      if (face.type === "basic") {
+        exactObject(face, ["type", "front", "back"], [], "本机权威学习卡替换正文");
+        if (typeof face.front !== "string" || !face.front.trim() ||
+            typeof face.back !== "string" || !face.back.trim()) {
+          throw new Error("本机权威学习卡替换正文无效");
+        }
+        return;
+      }
+      exactObject(face, ["type", "cloze"], [], "本机权威学习卡替换正文");
+      if (face.type !== "cloze" || typeof face.cloze !== "string" ||
+          !/\{\{c[1-9][0-9]*::[\s\S]+?\}\}/.test(face.cloze)) {
+        throw new Error("本机权威学习卡替换正文无效");
+      }
+    });
+  }
+
   function localPageCardRecords(runtime, page) {
     if (!runtime || typeof runtime.pageContextCards !== "function") {
       // Capability skew must not regress the pre-existing plain-text context.
       // We still never synthesize cards from DOM; only an available App-owned
       // authoritative provider is allowed to add CARD markers.
-      return Promise.resolve([]);
+      return Promise.resolve({ revision: null, cards: [] });
     }
     var failed = {};
     return boundedLocalPageTask(runtime.pageContextCards({ page: page }), failed)
@@ -6487,34 +6670,66 @@
             result.cards.length > 2000) {
           throw new Error("本机权威卡片投影无效");
         }
-        return result.cards.map(function (card, sourceIndex) {
+        return {
+          revision: Number(result.revision),
+          cards: result.cards.map(function (card, sourceIndex) {
           var bind = card && card.bind;
           var from = bind && Number(bind.from);
           var to = bind && Number(bind.to);
+          var unbound = !!(card && card.unbound === true);
           if (!card || typeof card !== "object" || Array.isArray(card) ||
               (card.kind !== "anki" && card.kind !== "card") ||
-              typeof card.id !== "string" || !card.id || card.id.length > 240 ||
+              typeof card.id !== "string" ||
+              !/^[A-Za-z0-9_-]{2,96}$/.test(card.id) ||
               typeof card.label !== "string" || card.label.length > 120 ||
-              typeof card.text !== "string" || card.text.length > 2400 ||
-              !bind || typeof bind !== "object" || Array.isArray(bind) ||
-              bind.kind !== "page-chars" || Number(bind.page) !== page ||
-              !Number.isSafeInteger(from) || !Number.isSafeInteger(to) ||
-              from < 0 || to < from || to > 1000000 ||
-              typeof bind.text !== "string" || bind.text.length > 200) {
+              typeof card.text !== "string" ||
+              card.text.length > LOCAL_PAGE_CARD_CONTEXT_LIMIT ||
+              typeof card.contextContent !== "string" ||
+              card.contextContent.length > LOCAL_PAGE_CARD_CONTEXT_LIMIT ||
+              !Number.isSafeInteger(card.contentLength) ||
+              card.contentLength < 0 ||
+              (card.contentTruncated === false
+                ? card.contentLength !== card.contextContent.length
+                : card.contentLength <= card.contextContent.length) ||
+              card.contentFormat !== LOCAL_PAGE_CARD_REPLACEMENT_FORMAT ||
+              card.replacement !== (card.kind === "anki" ? "cards" : "content") ||
+              typeof card.contentTruncated !== "boolean" || (
+                unbound
+                  ? (card.number !== null || bind !== null)
+                  : (!bind || typeof bind !== "object" || Array.isArray(bind) ||
+                    bind.kind !== "page-chars" || Number(bind.page) !== page ||
+                    !Number.isSafeInteger(from) || !Number.isSafeInteger(to) ||
+                    from < 0 || to < from || to > 1000000 ||
+                    typeof bind.text !== "string" || bind.text.length > 200)
+              )) {
             throw new Error("本机权威卡片条目无效");
           }
-          return {
+          assertCompleteLocalPageCardReplacement(card);
+          var normalized = {
             id: card.id,
             kind: card.kind,
             label: card.label,
             text: card.text,
-            bind: {
-              kind: "page-chars", page: page, from: from, to: to,
-              text: bind.text
-            },
+            contextContent: card.contextContent,
+            contentLength: card.contentLength,
+            contentFormat: card.contentFormat,
+            replacement: card.replacement,
+            contentTruncated: card.contentTruncated,
             sourceIndex: sourceIndex
           };
-        });
+          if (unbound) {
+            normalized.bind = null;
+            normalized.number = null;
+            normalized.unbound = true;
+          } else {
+            normalized.bind = {
+              kind: "page-chars", page: page, from: from, to: to,
+              text: bind.text
+            };
+          }
+            return normalized;
+          })
+        };
       });
   }
 
@@ -6620,6 +6835,7 @@
   function projectLocalPageCards(pageRecord, cards) {
     var projected = [];
     cards.forEach(function (card) {
+      if (card.unbound === true) return;
       var range = resolveLocalCardRange(pageRecord.chars, card.bind);
       if (!range || range.hi > pageRecord.lastSource ||
           !Number.isSafeInteger(pageRecord.after[range.hi])) return;
@@ -6647,6 +6863,332 @@
     return projected;
   }
 
+  function buildLocalPageCardProjection(page, pageRecord, recordSet) {
+    recordSet = recordSet && typeof recordSet === "object"
+      ? recordSet : { revision: null, cards: [] };
+    var cards = Array.isArray(recordSet.cards) ? recordSet.cards : [];
+    var revision = Number.isSafeInteger(recordSet.revision)
+      ? recordSet.revision : null;
+    var projected = projectLocalPageCards(pageRecord, cards);
+    var numberedIndexes = Object.create(null);
+    var publicCards = projected.map(function (item) {
+      numberedIndexes[item.card.sourceIndex] = true;
+      return {
+        number: item.number,
+        id: item.card.id,
+        kind: item.card.kind,
+        type: item.card.kind,
+        label: item.card.label,
+        text: item.card.text,
+        content: item.card.text,
+        bind: {
+          kind: "page-chars",
+          page: page,
+          from: item.card.bind.from,
+          to: item.card.bind.to,
+          text: item.card.bind.text
+        },
+        revision: revision,
+        unbound: false
+      };
+    });
+    var unboundCards = [];
+    cards.forEach(function (card) {
+      if (numberedIndexes[card.sourceIndex]) return;
+      // A persisted bind that cannot be resolved is not a free card. Returning
+      // it as unbound would both violate the validator (unbound => bind:null)
+      // and silently change its product meaning. Exact projection is atomic:
+      // one unresolved bound card makes this snapshot unavailable.
+      if (card.unbound !== true || card.bind !== null) {
+        throw new Error("已锚定卡片几何暂不可解析");
+      }
+      var fallback = {
+        number: null,
+        id: card.id,
+        kind: card.kind,
+        type: card.kind,
+        label: card.label,
+        text: card.text,
+        content: card.text,
+        bind: null,
+        revision: revision,
+        unbound: true
+      };
+      publicCards.push(fallback);
+      unboundCards.push({ card: card, number: null });
+    });
+    return {
+      value: {
+        contract: LOCAL_PAGE_CARD_PROJECTION_CONTRACT,
+        page: page,
+        revision: revision,
+        cards: publicCards
+      },
+      projected: projected,
+      unboundCards: unboundCards
+    };
+  }
+
+  function pageCards(page) {
+    if (page === null || page === undefined) {
+      var current = localActiveReadingSnapshot();
+      if (!current || current.kind !== "pdf") {
+        return Promise.reject(directError(
+          "Reader 当前 PDF 页不可用",
+          "BW_READER_PAGE_CARDS_PAGE_UNAVAILABLE",
+          true
+        ));
+      }
+      page = current.page;
+    }
+    page = Number(page);
+    if (!Number.isSafeInteger(page) || page < 1) {
+      return Promise.reject(directError(
+        "Reader 当前页卡片页码无效",
+        "BW_READER_PAGE_CARDS_PAGE_INVALID",
+        false
+      ));
+    }
+    var runtime = localNativePageRuntime();
+    if (!runtime || typeof runtime.pageContextCards !== "function") {
+      return Promise.reject(directError(
+        "Reader 当前界面没有权威卡片投影",
+        "BW_READER_PAGE_CARDS_UNAVAILABLE",
+        true
+      ));
+    }
+    return Promise.all([
+      localPageRecord(page, ""),
+      localPageCardRecords(runtime, page)
+    ]).then(function (records) {
+      return buildLocalPageCardProjection(page, records[0], records[1]).value;
+    });
+  }
+
+  // `reader_page_cards` is an index, not the full-content transport.  Keep it
+  // below the Reader query frame budget and say exactly when only a prefix was
+  // returned; `reader_page_card_read` can then fetch any number/id in chunks.
+  function pageCardIndex(page) {
+    return pageCards(page).then(function (projection) {
+      var sourceCards = Array.isArray(projection.cards) ? projection.cards : [];
+      var result = {
+        contract: projection.contract,
+        page: projection.page,
+        revision: projection.revision,
+        count: sourceCards.length,
+        returned: 0,
+        cards: [],
+        truncated: false
+      };
+      var budget = 32 * 1024;
+      for (var index = 0; index < sourceCards.length; index += 1) {
+        var source = sourceCards[index];
+        var fullContent = String(source.content || source.text || "");
+        var contentChunk = localPageCardUTF8Chunk(fullContent, 0, 1600);
+        var item = {
+          number: source.number,
+          id: source.id,
+          kind: source.kind,
+          type: source.type,
+          label: source.label,
+          content: contentChunk.content,
+          content_truncated: contentChunk.end < fullContent.length,
+          bind: source.bind,
+          revision: source.revision,
+          unbound: source.unbound === true
+        };
+        var candidate = Object.assign({}, result, {
+          returned: result.cards.length + 1,
+          cards: result.cards.concat([item]),
+          truncated: index + 1 < sourceCards.length
+        });
+        if (messageBytes(JSON.stringify(candidate)) > budget) {
+          result.truncated = true;
+          break;
+        }
+        result.cards.push(item);
+        result.returned = result.cards.length;
+      }
+      if (result.returned < sourceCards.length) result.truncated = true;
+      return result;
+    });
+  }
+
+  function localPageCardUTF8Chunk(value, offset, limit) {
+    value = String(value || "");
+    var end = Math.min(value.length, offset + limit);
+    if (end > offset && end < value.length &&
+        /[\uD800-\uDBFF]/.test(value.charAt(end - 1)) &&
+        /[\uDC00-\uDFFF]/.test(value.charAt(end))) {
+      end -= 1;
+    }
+    var low = offset;
+    var high = end;
+    while (low < high && messageBytes(value.slice(offset, high)) > 24576) {
+      var middle = offset + Math.floor((high - offset) / 2);
+      if (middle > offset && middle < value.length &&
+          /[\uDC00-\uDFFF]/.test(value.charAt(middle)) &&
+          /[\uD800-\uDBFF]/.test(value.charAt(middle - 1))) {
+        middle -= 1;
+      }
+      if (middle <= offset) {
+        high = offset;
+        break;
+      }
+      high = middle;
+    }
+    end = high;
+    while (end < value.length && end < offset + limit) {
+      var step = end + 1;
+      if (step < value.length &&
+          /[\uD800-\uDBFF]/.test(value.charAt(step - 1)) &&
+          /[\uDC00-\uDFFF]/.test(value.charAt(step))) {
+        step += 1;
+      }
+      if (step > offset + limit ||
+          messageBytes(value.slice(offset, step)) > 24576) break;
+      end = step;
+    }
+    if (end <= offset && offset < value.length) {
+      end = offset + 1;
+      if (end < value.length &&
+          /[\uD800-\uDBFF]/.test(value.charAt(end - 1)) &&
+          /[\uDC00-\uDFFF]/.test(value.charAt(end))) end += 1;
+    }
+    return { content: value.slice(offset, end), end: end };
+  }
+
+  // Explicit full read for one placement.  The list/context projection stays
+  // compact; this endpoint resolves the same visible number to a stable id and
+  // then streams the authoritative source JSON in UTF-8-bounded chunks.
+  function pageCard(rawParams) {
+    var params = rawParams && typeof rawParams === "object" ? rawParams : {};
+    exactObject(
+      params, [], ["page", "id", "number", "offset", "limit", "expectedRevision"],
+      "Reader 页面卡片详情参数"
+    );
+    var page = Object.prototype.hasOwnProperty.call(params, "page")
+      ? Number(params.page) : null;
+    if (page === null) {
+      var current = localActiveReadingSnapshot();
+      if (!current || current.kind !== "pdf") {
+        return Promise.reject(directError(
+          "Reader 当前 PDF 页不可用",
+          "BW_READER_PAGE_CARD_PAGE_UNAVAILABLE",
+          true
+        ));
+      }
+      page = Number(current.page);
+    }
+    if (!Number.isSafeInteger(page) || page < 1) {
+      return Promise.reject(directError(
+        "Reader 页面卡片页码无效", "BW_READER_PAGE_CARD_PARAMS", false
+      ));
+    }
+    var hasId = Object.prototype.hasOwnProperty.call(params, "id");
+    var hasNumber = Object.prototype.hasOwnProperty.call(params, "number");
+    var id = hasId ? String(params.id || "") : "";
+    var number = hasNumber ? Number(params.number) : null;
+    if ((hasId === hasNumber) || (hasId && !/^[A-Za-z0-9_-]{2,96}$/.test(id)) ||
+        (hasNumber && (!Number.isSafeInteger(number) || number < 1))) {
+      return Promise.reject(directError(
+        "Reader 页面卡片选择器无效", "BW_READER_PAGE_CARD_PARAMS", false
+      ));
+    }
+    var offset = Object.prototype.hasOwnProperty.call(params, "offset")
+      ? Number(params.offset) : 0;
+    var limit = Object.prototype.hasOwnProperty.call(params, "limit")
+      ? Number(params.limit) : 12000;
+    if (!Number.isSafeInteger(offset) || offset < 0 ||
+        !Number.isSafeInteger(limit) || limit < 1 || limit > 24576) {
+      return Promise.reject(directError(
+        "Reader 页面卡片分块参数无效", "BW_READER_PAGE_CARD_PARAMS", false
+      ));
+    }
+    var hasExpectedRevision = Object.prototype.hasOwnProperty.call(
+      params, "expectedRevision"
+    );
+    var expectedRevision = hasExpectedRevision
+      ? Number(params.expectedRevision) : null;
+    if ((hasExpectedRevision && (!Number.isSafeInteger(expectedRevision) ||
+        expectedRevision < 0)) || (offset > 0 && !hasExpectedRevision)) {
+      return Promise.reject(directError(
+        "Reader 页面卡片续读修订号无效", "BW_READER_PAGE_CARD_PARAMS", false
+      ));
+    }
+    var runtime = localNativePageRuntime();
+    if (!runtime || typeof runtime.pageCardSource !== "function") {
+      return Promise.reject(directError(
+        "Reader 当前界面没有完整卡片读取能力",
+        "BW_READER_PAGE_CARD_UNAVAILABLE",
+        true
+      ));
+    }
+    return pageCards(page).then(function (projection) {
+      if (hasExpectedRevision &&
+          Number(projection.revision) !== expectedRevision) {
+        throw directError(
+          "Reader 页面卡片在分块读取期间已变化，请从 offset=0 重新读取",
+          "BW_READER_PAGE_CARD_STALE", true
+        );
+      }
+      var cards = Array.isArray(projection.cards) ? projection.cards : [];
+      var picked = null;
+      for (var index = 0; index < cards.length; index += 1) {
+        var card = cards[index];
+        if (hasId && card.id !== id) continue;
+        if (hasNumber && card.number !== number) continue;
+        picked = card;
+        break;
+      }
+      if (!picked) {
+        throw directError(
+          "Reader 当前页找不到对应卡片",
+          "BW_READER_PAGE_CARD_NOT_FOUND",
+          false
+        );
+      }
+      return Promise.resolve(runtime.pageCardSource({ page: page, id: picked.id }))
+        .then(function (source) {
+          if (!source || typeof source !== "object" ||
+              source.contract !== LOCAL_PAGE_CARD_SOURCE_CONTRACT ||
+              Number(source.page) !== page || source.id !== picked.id ||
+              source.kind !== picked.kind ||
+              Number(source.revision) !== Number(projection.revision) ||
+              typeof source.content !== "string" ||
+              offset > source.content.length) {
+            throw directError(
+              "Reader 页面卡片详情与当前投影不一致",
+              "BW_READER_PAGE_CARD_STALE",
+              true
+            );
+          }
+          var chunk = localPageCardUTF8Chunk(source.content, offset, limit);
+          var nextOffset = chunk.end < source.content.length ? chunk.end : null;
+          return {
+            contract: READER_PAGE_CARD_DETAIL_CONTRACT,
+            page: page,
+            revision: Number(projection.revision),
+            card: {
+              id: picked.id,
+              number: picked.number,
+              kind: picked.kind,
+              type: picked.kind,
+              label: picked.label,
+              bind: picked.bind,
+              unbound: picked.unbound === true,
+              content_format: "application/vnd.bw-reader.card+json;version=1"
+            },
+            content: chunk.content,
+            content_length: source.content.length,
+            offset: offset,
+            next_offset: nextOffset,
+            truncated: nextOffset !== null
+          };
+        });
+    });
+  }
+
   function escapeLocalContextText(value) {
     return String(value || "")
       .replace(/\\/g, "\\\\")
@@ -6665,14 +7207,21 @@
 
   function localCardMarker(item) {
     var card = item.card;
-    return '⟦CARD_START n="' + String(item.number) +
+    var unbound = card.unbound === true;
+    return '⟦CARD_START n="' + (unbound ? '' : String(item.number)) +
       '" id="' + localContextMarkerAttribute(card.id, 120) +
+      '" revision="' + String(item.revision) +
       '" type="' + localContextMarkerAttribute(card.kind, 32) +
       '" label="' + localContextMarkerAttribute(card.label, 120) +
-      '"⟧' + escapeLocalContextText(card.text) + '⟦CARD_END⟧';
+      '" content_format="' + localContextMarkerAttribute(card.contentFormat, 96) +
+      '" replacement="' + localContextMarkerAttribute(card.replacement, 16) +
+      '" content_length="' + String(card.contentLength) +
+      '" content_truncated="' + (card.contentTruncated ? 'true' : 'false') +
+      (unbound ? '" unbound="true' : '') +
+      '"⟧' + escapeLocalContextText(card.contextContent) + '⟦CARD_END⟧';
   }
 
-  function annotateLocalPageRange(pageRecord, projected, start, end) {
+  function annotateLocalPageRange(pageRecord, projected, start, end, revision) {
     start = Math.max(0, Math.min(pageRecord.text.length, Number(start) || 0));
     end = Math.max(start, Math.min(pageRecord.text.length, Number(end) || 0));
     var inserts = Object.create(null);
@@ -6686,19 +7235,35 @@
     var cursor = start;
     offsets.forEach(function (offset) {
       output += escapeLocalContextText(pageRecord.text.slice(cursor, offset));
-      inserts[offset].forEach(function (item) { output += localCardMarker(item); });
+      inserts[offset].forEach(function (item) {
+        output += localCardMarker(Object.assign({ revision: revision }, item));
+      });
       cursor = offset;
     });
     return output + escapeLocalContextText(pageRecord.text.slice(cursor, end));
   }
 
-  // Truncate only at complete escaped units and complete CARD blocks. A block
-  // that would cross the 12k boundary is omitted whole; a consumer can never
-  // receive CARD_START without its matching CARD_END.
-  function truncateLocalPageContext(value, maximum) {
+  // Truncate only at complete escaped units and complete CARD blocks.  The
+  // character fence protects storage while the byte fence leaves room inside
+  // the direct bridge's 256 KiB JSON frame. A consumer can never receive a
+  // CARD_START without its matching CARD_END.
+  function truncateLocalPageContext(value, maximum, maximumBytes) {
     value = String(value || "");
-    if (value.length <= maximum) return { text: value, truncated: false };
-    var cut = maximum;
+    var cut = Math.min(value.length, maximum);
+    if (messageBytes(JSON.stringify(value.slice(0, cut))) > maximumBytes) {
+      var low = 0;
+      var high = cut;
+      while (low < high) {
+        var middle = low + Math.ceil((high - low) / 2);
+        if (messageBytes(JSON.stringify(value.slice(0, middle))) <= maximumBytes) {
+          low = middle;
+        } else {
+          high = middle - 1;
+        }
+      }
+      cut = low;
+    }
+    if (cut >= value.length) return { text: value, truncated: false };
     if (cut > 0 && /[\uD800-\uDBFF]/.test(value.charAt(cut - 1)) &&
         /[\uDC00-\uDFFF]/.test(value.charAt(cut))) cut -= 1;
     var index = 0;
@@ -6745,12 +7310,31 @@
       // projection, so keep its established plain-text context path untouched.
       current.kind === "pdf" && page >= 1
         ? localPageCardRecords(runtime, page)
-        : Promise.resolve([])
+        : Promise.resolve({ revision: null, cards: [] })
     ]).then(function (records) {
       var previous = records[0];
       var currentPage = records[1];
       var next = records[2];
-      var projected = projectLocalPageCards(currentPage, records[3]);
+      var pageCardProjection = buildLocalPageCardProjection(
+        page, currentPage, records[3]
+      );
+      var projected = pageCardProjection.projected;
+      var unboundMarkers = [];
+      var unboundMarkerSize = 0;
+      var unboundTruncated = false;
+      pageCardProjection.unboundCards.forEach(function (item) {
+        if (unboundTruncated) return;
+        var marker = localCardMarker(Object.assign(
+          { revision: pageCardProjection.value.revision }, item
+        ));
+        if (unboundMarkerSize + marker.length + 1 >
+            Math.floor(LOCAL_PAGE_CONTEXT_LIMIT / 3)) {
+          unboundTruncated = true;
+          return;
+        }
+        unboundMarkerSize += marker.length + 1;
+        unboundMarkers.push(marker);
+      });
       var currentText = currentPage.text || visible;
       if (!visible) visible = currentText.slice(0, 5000);
       var exactIndex = visible ? currentText.indexOf(visible) : -1;
@@ -6762,7 +7346,8 @@
         }
         var beforeStart = Math.max(0, exactIndex - 1800);
         var beforeCurrent = annotateLocalPageRange(
-          currentPage, projected, beforeStart, exactIndex
+          currentPage, projected, beforeStart, exactIndex,
+          pageCardProjection.value.revision
         );
         if (beforeCurrent) beforeParts.push(beforeCurrent);
         if (beforeParts.length) {
@@ -6770,14 +7355,16 @@
         }
         if (visible) {
           sections.push("【当前显示区域（重点）】\n" + annotateLocalPageRange(
-            currentPage, projected, exactIndex, exactIndex + visible.length
+            currentPage, projected, exactIndex, exactIndex + visible.length,
+            pageCardProjection.value.revision
           ));
         }
         var afterParts = [];
         var visibleEnd = exactIndex + visible.length;
         var afterCurrent = annotateLocalPageRange(
           currentPage, projected, visibleEnd,
-          Math.min(currentText.length, visibleEnd + 1800)
+          Math.min(currentText.length, visibleEnd + 1800),
+          pageCardProjection.value.revision
         );
         if (afterCurrent) afterParts.push(afterCurrent);
         if (next.text) afterParts.push(escapeLocalContextText(next.text.slice(0, 2200)));
@@ -6791,15 +7378,23 @@
         }
         if (currentText) {
           sections.push("【当前页文字（视口范围暂不可精确定位）】\n" +
-            annotateLocalPageRange(currentPage, projected, 0, currentText.length));
+            annotateLocalPageRange(
+              currentPage, projected, 0, currentText.length,
+              pageCardProjection.value.revision
+            ));
         }
         if (next.text) {
           sections.push("【当前显示区域之后】\n" +
             escapeLocalContextText(next.text.slice(0, 2200)));
         }
       }
+      if (unboundMarkers.length) {
+        sections.push("【当前页未锚定卡片（不参与正文及右侧标记序号）】\n" +
+          unboundMarkers.join("\n"));
+      }
       var bounded = truncateLocalPageContext(
-        sections.join("\n\n"), LOCAL_PAGE_CONTEXT_LIMIT
+        sections.join("\n\n"), LOCAL_PAGE_CONTEXT_LIMIT,
+        LOCAL_PAGE_CONTEXT_MAX_BYTES
       );
       var text = bounded.text;
       return {
@@ -6812,7 +7407,7 @@
         textSource: "app-local-visible-window",
         fallbackReason: text ? null : "本机文字层尚未提供当前页文字",
         truncated: bounded.truncated || currentPage.truncated ||
-          previous.truncated || next.truncated
+          previous.truncated || next.truncated || unboundTruncated
       };
     });
   }
@@ -8947,6 +9542,7 @@
     getServiceMode: function () { return bridgeServiceMode; },
     setServiceMode: setReaderPCServiceMode,
     sendWebPageContext: sendWebPageContext,
+    pageCards: pageCards,
     directContract: DIRECT_CONTRACT,
     availability: availability,
     reserveSelectedEngineUpdate: reserveSelectedEngineUpdate,

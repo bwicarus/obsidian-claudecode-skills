@@ -1,7 +1,7 @@
 # PWA 阅读器 / 浏览器扩展统一层交接
 
 当前候选由 `extensions/bw-reader-webext/manifest.json` 唯一确定；本轮登记版本为
-`0.2.122`。发布事实仍只写入 `reader-collaboration-status.md`，这里不把候选误写成已部署。
+`0.2.123`。发布事实仍只写入 `reader-collaboration-status.md`，这里不把候选误写成已部署。
 
 本文是该主线的唯一新会话入口。它记录用户已经确认的产品边界、现状和继续工作的门禁。
 不得用旧聊天中的 0.2.37 provider-only 方案覆盖本文。
@@ -194,9 +194,8 @@ Windows 只捕获明确选择的活动麦克风与 Codex 目标进程树输出�
 部署事务发布，真实双向可听 E2E 仍需在活动 Windows 音频会话中人工验证。
 0.2.67 的发布安全门禁继续保留：Windows launcher 在专用 profile 更新后通过 loopback
 DevTools 执行 `chrome.runtime.reload()`、核对实际 worker 构建版本，阻止新版内容脚本与旧
-后台混合运行。launcher 为 v12；功能逻辑沿用已验收的 v10，v12 用于
-承认跨机换行契约使 Windows `.cmd` 真源与已部署 v11 ZIP 的字节发生变化，避免覆盖
-不可变的 v11 资产。
+后台混合运行。launcher 为 v13；功能逻辑沿用已验收的 v10。发布门禁确认当前启动器
+字节已不同于线上 v12，因此提升不可变版本，绝不覆盖既有 v12 脚本或双文件 ZIP。
 历史 0.2.72 Windows 测试 ZIP SHA-256 为
 `b365fb2d8ba9d64dc622fd0dca66f4e67e999c168eaec715dba30cbd627b2960`；Safari/iOS ZIP
 SHA-256 为 `71b0242c35d7de4ac0ecfea7bbc971c7551285a1b966f43f3040998273ed80d0`。

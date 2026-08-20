@@ -121,17 +121,18 @@ Python 全量只在改到 Python/部署逻辑时跑。`handoff_check.py` 只在�
 
 ## 验收与登记
 
-- **验收按改动类型分级**（2026-07-31 用户更新流程）：
+- **验收按改动类型分级**（2026-08-20 用户更新流程）：
 
   | 改动类型 | 验收时点 |
   |---|---|
-  | | Reader/PWA 共享的新功能、UI/视觉或交互变更（可原子回滚） | 先确认改动能不能到达设备：`_server_deploy/static/pdf/*` 与已本地化的路由由 `ios/BWReader/package_local_reader.py` 烤进 App 包，**部署 Pi 对 App 无效**，到 iPad 需要新的 TestFlight 构建（`gh workflow run safari-extension-ios.yml --ref <分支> -f upload=true`）。只有落在 owner=pi 且 runtime 无本地分支的服务端路由上，合同测试和预检通过后部署 Pi 才等于上生产 iPad，由用户在 iPad 验收 |；不默认插入独立扩展测试 |
-  | 扩展专属改动 | 独立测试环境仅在用户明确要求时使用；扩展正式渠道发布仍须发布前人工验收 |
+  | Reader/PWA 共享的新功能、UI/视觉或交互变更（可原子回滚） | 用户明确要求直接发布时，合同测试与发布门禁通过后直接发布，由用户验收正式成品；不得自行增加发布前人工验收等待。先确认改动能不能到达设备：`_server_deploy/static/pdf/*` 与已本地化的路由由 `ios/BWReader/package_local_reader.py` 烤进 App 包，**部署 Pi 对 App 无效**，到 iPad 需要新的 TestFlight 构建（`gh workflow run safari-extension-ios.yml --ref <分支> -f upload=true`）。只有落在 owner=pi 且 runtime 无本地分支的服务端路由上，部署 Pi 才能交付该行为 |
+  | 扩展专属改动 | 独立测试环境仅在用户明确要求时使用；用户明确要求直接正式发布时，自动发布门禁通过后直接切换渠道并在成品上验收 |
   | 数据迁移/schema、不可逆操作 | **必须部署前验收** |
   | 修 bug、重构、性能优化、纯文档 | **预检通过即可部署** |
 
-  直接部署/免验收前提：目标行为有合同测试覆盖 / `deploy_reader.sh` 全程通过 /
-  不含数据迁移、schema 或不可逆操作。部署后必须主动报健康检查；用户报错时优先回滚。
+  直接部署/将验收放到成品后的前提：用户有明确发布授权 / 目标行为有合同测试覆盖 /
+  对应发布脚本全程通过 / 不含数据迁移、schema 或不可逆操作。部署后必须主动报健康检查；
+  用户报错时优先使用自动生成的回滚点恢复。
 - 独立浏览器自动化是按需工程回归，不再是 Reader/PWA 部署的默认中间步骤。
 - Windows 侧浏览器测试只用 `BW Codex Chrome Test` + `%LOCALAPPDATA%\BWReaderExtensionTest\browser-profile-v2`，
   或 Claude Code 内置 Browser pane（独立 profile、无扩展、无 cookie，做不了扩展链测试）。

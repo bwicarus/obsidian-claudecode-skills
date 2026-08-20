@@ -57,7 +57,7 @@ test("SSE and voice actions must commit locally before old UI can observe succes
 
   const sse = functionBody(RUNTIME, "nativePDFCommittedSSE", "nativePDFChatFailure");
   const commitAt = sse.search(
-    /nativePDFCommitActions\(\s*actions,\s*revisions,\s*writerLease\s*\)/,
+    /nativePDFCommitActions\(\s*actions,\s*authority,\s*writerLease\s*\)/,
   );
   const exposeAt = sse.indexOf("controller.enqueue", commitAt);
   assert.ok(commitAt >= 0 && exposeAt > commitAt, "SSE exposes action before local commit");
@@ -67,7 +67,7 @@ test("SSE and voice actions must commit locally before old UI can observe succes
 
   const voice = functionBody(RUNTIME, "nativePDFVoiceToolFetch", "nativeEPUBAuthoritySnapshot");
   const voiceCommitAt = voice.search(
-    /nativePDFCommitActions\(\s*actions,\s*request\.snapshot\.revisions,\s*writerLease\s*\)/,
+    /nativePDFCommitActions\(\s*actions,\s*request\.snapshot,\s*writerLease\s*\)/,
   );
   const voiceReplyAt = voice.indexOf("return jsonResponse(payload", voiceCommitAt);
   assert.ok(voiceCommitAt >= 0 && voiceReplyAt > voiceCommitAt,

@@ -78,6 +78,8 @@ if (window.__bwPwaProviderOnly) return;
   var LP_TOL = 10;                      // 长按移动取消容差
   var CARD_DRAG_HOLD_MS = 420;          // 卡头蓄力：与侧栏宽度把手采用同一成熟节奏
   var CARD_DRAG_TOL = 8;                // 蓄力前超过容差即取消，快划不会误拖或切形态
+  var PAGE_CARD_CONTENT_LIMIT = 100000; // 页面卡片正文唯一异常安全上限
+  var FREE_CARD_ANCHOR_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="5" r="3"/><path d="M12 8v14"/><path d="M5 12H2a10 10 0 0 0 20 0h-3"/></svg>';
 
   var O = null;        // opts
   var notes = [];      // 服务端便签列表(本地镜像)
@@ -191,6 +193,15 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-note-del:hover{background:rgba(40,40,44,.72)}',
       '.rc-note-del:active{transform:scale(.86);background:rgba(20,20,22,.85)}',
       '.rc-note.rc-note-editing .rc-note-del{display:flex}',
+      // 自由卡片保持旧的可移动形态；只有完全展开时显示显式线性锚图标，由用户
+      // 自己决定何时升级成正文词锚。按钮放在卡头右上、关闭/删除位左侧。
+      '.rc-note-anchor{position:absolute;top:6px;right:38px;z-index:32;width:27px;height:27px;border-radius:9px;border:1px solid rgba(255,255,255,.34);background:rgba(20,24,36,.68);-webkit-backdrop-filter:blur(7px);backdrop-filter:blur(7px);color:#fff;display:none;align-items:center;justify-content:center;cursor:pointer;padding:0;font-size:15px;line-height:1;box-shadow:0 2px 8px rgba(0,0,0,.28);-webkit-tap-highlight-color:transparent}',
+      '.rc-note-anchor:hover{background:rgba(31,41,64,.82);border-color:rgba(125,211,252,.62)}',
+      '.rc-note-anchor:active{transform:scale(.9)}',
+      '.rc-note-anchor:disabled{opacity:.55;cursor:wait}',
+      '.rc-note-anchor svg{width:14px;height:14px;display:block}',
+      '.rc-note.rc-note-free-card-open .rc-note-anchor{display:flex}',
+      '.rc-note.rc-note-word-open .rc-note-anchor{display:none!important}',
       // body:折叠/展开的记录区(底=rgba(便签色,α) 由 applyColor 内联;磨砂 blur 在这常驻,
       //   -webkit-backdrop-filter iOS 必须;文字 textarea + 手写 canvas 叠放,可重叠)。
       // ⚠ user-select:text 必须显式给整个子树:PDF 挂载容器 .page-wrap 是 -webkit-user-select:none,
@@ -279,6 +290,12 @@ if (window.__bwPwaProviderOnly) return;
       '-webkit-backdrop-filter:none!important}',
       // 壳的尺寸也跟着球收 —— 否则壳还占着方块那么大一片，手指点旁边空白也算点中它。
       '.rc-note:has(.vc-card.vc-dot){width:auto!important;height:auto!important;min-width:0!important;min-height:0!important}',
+      // 自由卡圆球非焦点时与“将要锁定的正文行”同高；焦点/悬停/拖动仍回到 40px。
+      // --rc-free-dot-size 由 syncFreeCardAnchorUi 从 selection 或同一 noteWordRect 回退链实时写入。
+      '.rc-note.rc-note-free-card-dot:not(:focus-within):not(:hover):not(.rc-card-drag-charging):not(.rc-card-drag-ready):not(.rc-note-lift) .vc-card.vc-dot{width:var(--rc-free-dot-size,40px);height:var(--rc-free-dot-size,40px)}',
+      '.rc-note.rc-note-free-card-dot:not(:focus-within):not(:hover):not(.rc-card-drag-charging):not(.rc-card-drag-ready):not(.rc-note-lift) .vc-card.vc-dot .vc-card-dot{width:var(--rc-free-dot-size,40px);height:var(--rc-free-dot-size,40px);border-radius:32%}',
+      '.rc-note.rc-note-free-card-dot:not(:focus-within):not(:hover):not(.rc-card-drag-charging):not(.rc-card-drag-ready):not(.rc-note-lift) .vc-card.vc-dot .vc-card-dot svg{width:48%;height:48%}',
+      '@media (pointer:coarse){.rc-note.rc-note-free-card-dot .vc-card.vc-dot .vc-card-dot::after{content:"";position:absolute;left:50%;top:50%;width:max(40px,100%);height:max(40px,100%);transform:translate(-50%,-50%)}}',
       '.rc-note.rc-note-hashtml .rc-note-text,.rc-note.rc-note-hashtml .rc-note-tools,.rc-note.rc-note-hashtml .rc-note-ink{display:none!important}',
       '.rc-note.rc-note-hashtml.rc-note-collapsed .rc-note-html{display:none}',
       '.rc-note.rc-note-hasvideo .rc-vid-embed{border-radius:9px 9px 0 0;overflow:hidden}',
@@ -359,10 +376,15 @@ if (window.__bwPwaProviderOnly) return;
     return 'rc-note:' + kind + ':' + String(noteId || 'new') + ':' + random;
   }
   function noteIdOf(note) { return String(note && (note.noteId || note.id) || ''); }
-  function wordBindSlot(note) {
-    if (note && note.card && note.card.bind && note.card.bind.kind === 'page-chars') return 'card';
-    if (note && note.html && note.html.bind && note.html.bind.kind === 'page-chars') return 'html';
+  function cardPayloadSlot(note) {
+    if (note && note.card && typeof note.card === 'object') return 'card';
+    if (note && note.html && typeof note.html === 'object') return 'html';
     return '';
+  }
+  function wordBindSlot(note) {
+    var slot = cardPayloadSlot(note);
+    return slot && note[slot].bind && note[slot].bind.kind === 'page-chars'
+      ? slot : '';
   }
   function wordBindOf(note) {
     var slot = wordBindSlot(note);
@@ -429,6 +451,26 @@ if (window.__bwPwaProviderOnly) return;
     } else {
       ensureMounted(next);
     }
+    return next;
+  }
+  // Legacy /pdf/api/notes commits do not carry repository revisions.  This
+  // helper is used only after our own PATCH has returned success, so it may
+  // replace the in-memory record directly without pretending rev=0 is newer.
+  function applyLegacyCommittedRecord(note, generation) {
+    if (generation !== _generation || !note) throw staleError();
+    var id = noteIdOf(note);
+    if (!id) throw new Error('便签保存响应缺少 id');
+    var next = cloneValue(note);
+    next.id = id; next.noteId = id;
+    var index = noteIndex(id);
+    if (index < 0) notes.push(next);
+    else notes[index] = next;
+    var ctl = ctls[id];
+    if (ctl) {
+      ctl.note = next;
+      syncCtl(ctl);
+      ensureMounted(next);
+    } else ensureMounted(next);
     return next;
   }
   function eventData(event) {
@@ -554,8 +596,8 @@ if (window.__bwPwaProviderOnly) return;
       var body = { file: O.file, id: id };
       for (var key in payload) if (Object.prototype.hasOwnProperty.call(payload, key)) body[key] = payload[key];
       operation = legacyJson('PATCH', body).then(function (data) {
-        if (data && data.note) return data.note;
-        return note;
+        if (!data || !data.note) throw new Error('便签保存响应无效');
+        return applyLegacyCommittedRecord(data.note, generation);
       });
     }
     operation.then(function (result) {
@@ -657,10 +699,12 @@ if (window.__bwPwaProviderOnly) return;
         '<div class="rc-note-rs-tl" title="拖动调整大小(右下角固定)"></div>' +
       '</div>' +
       // 删除键挂 root(不在小把手内)→ 定位在便签**整体**右上角外部
+      '<button class="rc-note-anchor" title="锚定到正文" aria-label="锚定到正文">' + FREE_CARD_ANCHOR_ICON + '</button>' +
       '<button class="rc-note-del" title="删除便签"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>';
     var ctl = {
       note: note, root: root,
       handle: root.querySelector('.rc-note-handle'),
+      anchorBtn: root.querySelector('.rc-note-anchor'),
       del: root.querySelector('.rc-note-del'),
       body: root.querySelector('.rc-note-body'),
       ta: root.querySelector('.rc-note-text'),
@@ -800,8 +844,10 @@ if (window.__bwPwaProviderOnly) return;
     // 完整字段（含 Anki/source/entity/state）由 bindCardSelection 的 meta.cards 保留。
     return (Array.isArray(cards) ? cards : []).map(function (c, index) {
       c = c || {};
-      var front = c.front != null ? c.front : (c.q != null ? c.q : (c.cloze != null ? c.cloze : c.text));
-      var back = c.back != null ? c.back : c.a;
+      var front = c.front != null ? c.front
+        : (c.question != null ? c.question
+          : (c.q != null ? c.q : (c.cloze != null ? c.cloze : c.text)));
+      var back = c.back != null ? c.back : (c.answer != null ? c.answer : c.a);
       var lines = ['卡片 ' + (index + 1)];
       if (front != null && String(front).trim()) lines.push('正面：' + String(front));
       if (back != null && String(back).trim()) lines.push('背面：' + String(back));
@@ -991,7 +1037,7 @@ if (window.__bwPwaProviderOnly) return;
             }
           },
           onClose: function () { try { ctl.del.click(); } catch (e) {} },
-          onForm: function (f) { try { card.form = f; ctl.note.card = card; ctl.body.style.width = _formW(ctl, f); patchNote(ctl.note, { card: card }); } catch (e) {} } });
+          onForm: function (f) { try { card.form = f; ctl.note.card = card; ctl.body.style.width = _formW(ctl, f); syncFreeCardAnchorUi(ctl); patchNote(ctl.note, { card: card }); } catch (e) {} } });
       done = !!cardEl;
     } catch (e) {}
     if (!done) { try { stateBody = box; RC.flashcard.mountState(box, card.cards, { bare: true, gid: card.gid, nopin: true, onStateChange: onPlacementStateChange }); } catch (e) {} }   // voiceCard 未载兜底
@@ -1035,7 +1081,7 @@ if (window.__bwPwaProviderOnly) return;
             } catch (_) {}
           },
           onClose: function () { try { ctl.del.click(); } catch (e) {} },
-          onForm: function (f) { try { h.form = f; ctl.note.html = h; ctl.body.style.width = _formW(ctl, f); patchNote(ctl.note, { html: h }); } catch (e) {} } });
+          onForm: function (f) { try { h.form = f; ctl.note.html = h; ctl.body.style.width = _formW(ctl, f); syncFreeCardAnchorUi(ctl); patchNote(ctl.note, { html: h }); } catch (e) {} } });
       done = !!el2;
       // 成功装进真 .vc-card 才打这个标记:回退分支(下面的 fb)仍是普通 HTML,
       // 那时壳的 padding/限高/滚动照旧需要。
@@ -1085,15 +1131,172 @@ if (window.__bwPwaProviderOnly) return;
     }
   }
 
+  function syncFreeCardAnchorUi(ctl) {
+    if (!ctl || !ctl.anchorBtn) return;
+    var slot = cardPayloadSlot(ctl.note);
+    var payload = slot ? ctl.note[slot] : null;
+    var form = payload && payload.form ? String(payload.form) : 'full';
+    try {
+      var cardEl = ctl.root.querySelector('.vc-card');
+      if (cardEl) form = cardEl.classList.contains('vc-dot')
+        ? 'dot' : (cardEl.classList.contains('vc-min') ? 'min' : 'full');
+    } catch (_) {}
+    var free = !!(payload && !payload.bind);
+    var dot = !!(free && !ctl.note.collapsed && form === 'dot');
+    var show = !!(free && !ctl.note.collapsed && form === 'full');
+    ctl.root.classList.toggle('rc-note-free-card-dot', dot);
+    if (dot) {
+      var targetHeight = freeCardTargetLineHeight(ctl);
+      if (targetHeight) {
+        if (ctl.root.style.setProperty) ctl.root.style.setProperty('--rc-free-dot-size', targetHeight + 'px');
+        else ctl.root.style['--rc-free-dot-size'] = targetHeight + 'px';
+      } else if (ctl.root.style.removeProperty) ctl.root.style.removeProperty('--rc-free-dot-size');
+      else ctl.root.style['--rc-free-dot-size'] = '';
+    } else if (ctl.root.style.removeProperty) ctl.root.style.removeProperty('--rc-free-dot-size');
+    else ctl.root.style['--rc-free-dot-size'] = '';
+    ctl.root.classList.toggle('rc-note-free-card-open', show);
+    ctl.anchorBtn.setAttribute('aria-hidden', show ? 'false' : 'true');
+    if (!show) ctl.anchorBtn.disabled = false;
+  }
+
+  // 当前“锁定元素”的唯一精确来源是 selection-controller：PDF adapter
+  // 会给出 pdf-char(page/startIdx/endIdx)。助手焦点 chip(__focusSel)只有文字，
+  // 没有页码或字符下标，不能据此猜一个同名词。
+  function currentLockedPageBind(ctl) {
+    var selection = null;
+    if (ctl) ctl._lockedSelection = null;
+    try {
+      var controller = window.__bwSelectionController;
+      selection = controller && typeof controller.current === 'function'
+        ? controller.current() : null;
+    } catch (_) {}
+    var anchor = selection && selection.anchor;
+    if (!anchor || (anchor.kind !== 'pdf-char' && anchor.kind !== 'page-chars')) return null;
+    if (anchor.file && O && O.file && String(anchor.file) !== String(O.file)) return null;
+    var page = Number(anchor.page);
+    var from = Number(anchor.kind === 'pdf-char' ? anchor.startIdx : anchor.from);
+    var to = Number(anchor.kind === 'pdf-char' ? anchor.endIdx : anchor.to);
+    var notePage = Number(ctl && ctl.note && ctl.note.anchor && ctl.note.anchor.page);
+    var text = String(anchor.text || (selection && selection.text) || '').trim();
+    if (!Number.isInteger(page) || page < 1 || !Number.isInteger(notePage) ||
+        page !== notePage || !Number.isInteger(from) || !Number.isInteger(to) ||
+        from < 0 || to < from || !text || text.length > 200) return null;
+    try {
+      var meta = window.__lastSelMeta;
+      if (meta && meta.page != null && Number(meta.page) !== page) return null;
+      if (meta && Number(meta.t) > 0 && Date.now() - Number(meta.t) > 10 * 60 * 1000) return null;
+    } catch (_) {}
+    if (ctl) ctl._lockedSelection = selection;
+    return { kind: 'page-chars', page: page, from: from, to: to, text: text };
+  }
+
+  function freeCardAnchorPoint(ctl) {
+    var source = ctl && ctl._ph && ctl._ph.isConnected ? ctl._ph : (ctl && ctl.root);
+    if (!source || typeof source.getBoundingClientRect !== 'function') return null;
+    var rect = source.getBoundingClientRect();
+    var left = Number(rect && rect.left), top = Number(rect && rect.top);
+    return Number.isFinite(left) && Number.isFinite(top)
+      ? { x: left + 1, y: top + 1 } : null;
+  }
+
+  function freeCardWordRectAt(ctl, point) {
+    if (!point || !O || typeof O.noteWordRect !== 'function') return null;
+    var word = null;
+    try {
+      word = _probeHidden(ctl.root, function () {
+        return O.noteWordRect(point.x, point.y);
+      });
+    } catch (_) {}
+    return word && (word.dist == null || word.dist <= 48) ? word : null;
+  }
+
+  function freeCardTargetLineHeight(ctl) {
+    var locked = currentLockedPageBind(ctl);
+    var word = null;
+    if (locked && ctl._lockedSelection) {
+      var rect = ctl._lockedSelection.rect;
+      rect = rect && rect.client ? rect.client : rect;
+      var left = Number(rect && rect.left), top = Number(rect && rect.top);
+      var width = Number(rect && rect.width), height = Number(rect && rect.height);
+      if (Number.isFinite(left) && Number.isFinite(top)) {
+        word = freeCardWordRectAt(ctl, {
+          x: left + Math.max(1, Math.min(Number.isFinite(width) ? width / 2 : 4, 8)),
+          // 多行选区只探第一行，不能把联合矩形总高误当正文行高。
+          y: top + Math.max(1, Math.min(Number.isFinite(height) ? height / 2 : 8, 12))
+        });
+        if (word && Number(word.page) !== Number(locked.page)) word = null;
+      }
+    }
+    if (!word) word = freeCardWordRectAt(ctl, freeCardAnchorPoint(ctl));
+    var lineHeight = Number(word && word.height);
+    if (!Number.isFinite(lineHeight) || lineHeight <= 0 || lineHeight > 96) return null;
+    return Math.round(lineHeight * 100) / 100;
+  }
+
+  function resolveFreeCardBind(ctl) {
+    var locked = currentLockedPageBind(ctl);
+    if (locked) return { bind: locked, source: 'selection' };
+    var point = freeCardAnchorPoint(ctl);
+    if (!point) return null;
+    var nearby = null;
+    try {
+      nearby = _probeHidden(ctl.root, function () {
+        return wordBindFromPoint(point.x, point.y);
+      });
+    } catch (_) {}
+    return nearby ? { bind: nearby, source: 'card' } : null;
+  }
+
+  function anchorFreeCard(ctl) {
+    var slot = cardPayloadSlot(ctl && ctl.note);
+    if (!slot || ctl.note[slot].bind || ctl._freeAnchorPending) return Promise.resolve(false);
+    var resolved = resolveFreeCardBind(ctl);
+    if (!resolved) {
+      toastMsg('没有可锚定的正文：请先选中当前页文字，或把卡片移到文字附近');
+      return Promise.resolve(false);
+    }
+    var payload = cloneValue(ctl.note[slot]);
+    payload.bind = resolved.bind;
+    var fields = {}; fields[slot] = payload;
+    ctl._freeAnchorPending = true;
+    if (ctl.anchorBtn) ctl.anchorBtn.disabled = true;
+    return patchNote(ctl.note, fields).then(function (saved) {
+      if (!saved) throw new Error('卡片锚定响应无效');
+      var live = ctls[noteIdOf(saved)] || ctl;
+      live._freeAnchorPending = false;
+      if (live.anchorBtn) live.anchorBtn.disabled = false;
+      syncFreeCardAnchorUi(live);
+      // 自由卡可能已在通用 overlay；持久化成功后才退出并画词框，
+      // 失败时保持原卡原位，不能先乐观切换成“已锚定”。
+      if (live.portaled) portalOut(live);
+      else if (!live._bindMarked) _applyWordBind(live);
+      toastMsg(resolved.source === 'selection'
+        ? '✅ 已锚定到当前选中文字' : '✅ 已锚定到卡片附近正文');
+      return true;
+    }).catch(function () {
+      ctl._freeAnchorPending = false;
+      if (ctl.anchorBtn) ctl.anchorBtn.disabled = false;
+      syncFreeCardAnchorUi(ctl);
+      return false;
+    });
+  }
+
   function bindCtl(ctl) {
+    ctl.anchorBtn.addEventListener('pointerdown', function (e) {
+      e.stopPropagation();
+    });
+    ctl.anchorBtn.addEventListener('click', function (e) {
+      e.stopPropagation(); e.preventDefault();
+      anchorFreeCard(ctl);
+    });
     // 🗑 删除(EDIT 模式出现;confirm 后 DELETE)
     ctl.del.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
     ctl.del.addEventListener('click', function (e) {
       e.stopPropagation(); e.preventDefault();
-      var wordCard = !!(ctl._bindOpen && wordBindOf(ctl.note));
-      if (!window.confirm(wordCard ? '删除这张卡片？' : '删除这张便签？')) return;
+      var pageCard = !!cardPayloadSlot(ctl.note);
+      if (!window.confirm(pageCard ? '删除这张卡片？' : '删除这张便签？')) return;
       ctl.del.disabled = true;
-      deleteNote(ctl.note, wordCard ? '🗑 卡片已删除' : '🗑 便签已删除').then(function (ok) {
+      deleteNote(ctl.note, pageCard ? '🗑 卡片已删除' : '🗑 便签已删除').then(function (ok) {
         // 成功时 removeLocal 已经撤掉正文框、右侧浮标与卡片 DOM；只有失败
         // 才会回到这里恢复按钮，卡片继续保持展开，不能先乐观收起。
         if (ok !== true && ctl.del) ctl.del.disabled = false;
@@ -1382,7 +1585,9 @@ if (window.__bwPwaProviderOnly) return;
     return true;
   }
 
-  /// 拖动落点重新求词锚。返回 card/html 槽名表示 bind 换了（调用方把该槽一起落库）。
+  /// 已锚定卡拖动落点重新求词锚。返回 card/html 槽名表示 bind 换了
+  ///（调用方把该槽一起落库）。自由卡普通拖动仍保持自由；只有用户点 ⚓️
+  /// 才首次写入 bind。
   /// 拿不到词（拖到空白/图区/页缝）就**撤掉词锚退回普通便签** —— 比留一个
   /// 指向别处的旧 bind 好：旧 bind 会让标记停在原地，看着像卡片分身。
   /// ⚠ cx/cy 必须是**加过 shift 的落点**，跟同一处 reanchorAt 用的是同一个点：
@@ -1390,21 +1595,17 @@ if (window.__bwPwaProviderOnly) return;
   ///   等于锚回原处，而 anchor 已经按落点更新了 —— 两者从此指向不同的地方。
   function _rebindWord(ctl, cx, cy) {
     var slot = wordBindSlot(ctl.note);
-    var old = slot ? ctl.note[slot].bind : null;
-    if (!old) return false;   // 本来就不是词锚卡，不管
+    if (!slot) return false;
+    var old = ctl.note[slot].bind;
     if (cx == null || cy == null) return false;   // 没真拖动（shift=0）→ 不重锚
-    var wr = null;
+    var nb = null;
     try {
-      wr = _probeHidden(ctl.root, function () {
-        return O.noteWordRect ? O.noteWordRect(cx, cy) : null;
+      nb = _probeHidden(ctl.root, function () {
+        return wordBindFromPoint(cx, cy);
       });
     } catch (e) {}
-    var nb = (wr && wr.page > 0 && wr.text && (wr.dist == null || wr.dist <= 48))
-      ? { kind: 'page-chars', page: wr.page, from: wr.from, to: wr.to,
-          text: String(wr.text).slice(0, 200) }
-      : null;
-    if (nb && nb.page === old.page && nb.from === old.from && nb.to === old.to) return false;
-    try { if (window.__pageBindRemove) window.__pageBindRemove(old, ctl.note.id); } catch (e) {}
+    if (old && nb && nb.page === old.page && nb.from === old.from && nb.to === old.to) return false;
+    try { if (old && window.__pageBindRemove) window.__pageBindRemove(old, ctl.note.id); } catch (e) {}
     ctl.note[slot].bind = nb;
     ctl._bindMarked = false;
     if (!nb) ctl.root.style.display = '';   // 退回普通便签，别把卡藏没了
@@ -1538,6 +1739,7 @@ if (window.__bwPwaProviderOnly) return;
     renderNoteVideo(ctl);   // 视频便签:有 video 则渲染播放器+控件(签名去重,无变化不重建)
     renderNoteCard(ctl);    // 卡片便签:有 card 则 mount rc-flashcard(同 gid → 与侧栏/浮层原卡联动)
     renderNoteHtml(ctl);    // 通用卡便签:天气/搜索/图等 vc-card 的 HTML 快照
+    syncFreeCardAnchorUi(ctl);
     // 正在输入时(聚焦)不回灌服务端文字,防清掉未保存输入
     if (document.activeElement !== ctl.ta && ctl.ta.value !== (n.text || '')) ctl.ta.value = n.text || '';
   }
@@ -2240,6 +2442,16 @@ if (window.__bwPwaProviderOnly) return;
         c.root.classList.remove('rc-note-word-open');
         c.root.style.display = 'none';
         setWordDeleteUi(c, false);
+        // 展开时 __pageBindCard 会给正文框、角标和右侧浮标统一加 .on。
+        // 外点关闭绕过了 onToggle，必须在这里同步撤掉；否则卡已经消失，
+        // 页面入口却仍保持“已打开”的加深描边。
+        if (c._bindKey) {
+          try {
+            document.querySelectorAll('[data-bindkey="' + c._bindKey + '"]').forEach(function (el) {
+              el.classList.remove('on');
+            });
+          } catch (_) {}
+        }
       }
       portalOut(c);   // 有活视频不降层:portalOut 的 reparent 会重载 iframe=播放中断(用户规格:点外面不碰播放)
     }
@@ -2340,37 +2552,51 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   // 卡片便签:从制卡卡 📌 钉页 / 真机圆球拖出 → 在该屏幕点建带 card 的便签(复用 rc-flashcard 全套状态机)
+  function wordBindFromPoint(clientX, clientY) {
+    var word = null;
+    try { word = O && O.noteWordRect ? O.noteWordRect(clientX, clientY) : null; } catch (_) {}
+    if (!word || !(word.page > 0) || !word.text ||
+        (word.dist != null && word.dist > 48)) return null;
+    var page = Number(word.page), from = Number(word.from), to = Number(word.to);
+    if (!Number.isInteger(page) || !Number.isInteger(from) || !Number.isInteger(to) ||
+        page < 1 || from < 0 || to < from) return null;
+    return {
+      kind: 'page-chars', page: page, from: from, to: to,
+      text: String(word.text).slice(0, 200)
+    };
+  }
   function createCardAt(clientX, clientY, cards, gid) {
     if (!O || !O.anchorFromPoint || !cards || !cards.length) return false;
+    var oversized = cards.some(function (card) {
+      if (!card || typeof card !== 'object') return true;
+      if (card.type === 'cloze') {
+        return String(card.cloze || card.text || '').length > PAGE_CARD_CONTENT_LIMIT;
+      }
+      return String(card.front != null ? card.front : (card.question || '')).length >
+          PAGE_CARD_CONTENT_LIMIT ||
+        String(card.back != null ? card.back : (card.answer || '')).length >
+          PAGE_CARD_CONTENT_LIMIT;
+    });
+    if (oversized) {
+      toastMsg('卡片正文异常过大，未放入书页');
+      return false;
+    }
     var cands = [[clientX, clientY], [clientX, clientY - 22], [clientX, clientY + 22], [clientX - 30, clientY], [clientX + 30, clientY]];
     var anchor = null;
     for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
     if (!anchor) { toastMsg('这里放不了(把卡片放到正文上再松手)'); return false; }
-    // ── 词锚（用户设计 2026-08-20）：落点吸附到最近的分词元素 ──────────
-    //   手动钉和 AI 自动钉要产出**同一种标记**，所以这里也解析出词区间。
-    //   吸附范围沿用拖动反馈那条（≤48px），两者必须一致，否则「看到框但钉别处」。
-    //
-    //   ⚠ 词锚放进 **card 载荷**里，不是放进 anchor —— anchor 在
-    //     native-local-runtime.js::normalizedNoteAnchor 里是**逐字段重建**的，
-    //     加新字段会被静默 strip（本次会话看不出来，下次开书才发现锚退化了）；
-    //     而 card 是 boundedCanonicalJSON 整块不透明存，加字段两侧都不用改。
-    var _wb = null;
-    try {
-      var _wr = O.noteWordRect ? O.noteWordRect(clientX, clientY) : null;
-      if (_wr && _wr.page > 0 && _wr.text && (_wr.dist == null || _wr.dist <= 48)) {
-        _wb = { kind: 'page-chars', page: _wr.page,
-                from: _wr.from, to: _wr.to, text: String(_wr.text).slice(0, 200) };
-      }
-    } catch (e) {}
+    // 手动从原卡拖进书页时保持旧的“自由卡片”语义：这里只保存页面 placement，
+    // 不自动写 page-chars。用户展开后点 ⚓️ 才显式升级；AI 的自动锚定另走
+    // persistBoundCard，不与手动投放混用。
     var cid0 = gid || ((window.RC && RC.voiceCard && RC.voiceCard.mkCid) ? ('fcg_' + RC.voiceCard.mkCid()) : ('fcg_' + Date.now().toString(36)));
     gid = gid || cid0;
     var w0 = 300, bw0 = 0; try { var mm = O.mount(anchor); if (mm && mm.el && mm.el.clientWidth) { bw0 = mm.el.clientWidth; w0 = Math.max(240, Math.min(480, Math.round(bw0 * 0.44))); } } catch (e) {}   // 卡宽按页面宽自适应+记创建时页宽(缩放等比跟随,用户拍板)
     // gid/cid 原样携带，同一学习卡组跨宿主共享；repository 不重编号业务卡。
     createRecord(
       anchor,
-      { color: '#0d1322', w: w0, h: 210, collapsed: false, card: { cards: cards, gid: gid, cid: cid0, base_w: bw0, bind: _wb } },
+      { color: '#0d1322', w: w0, h: 210, collapsed: false, card: { cards: cards, gid: gid, cid: cid0, base_w: bw0 } },
       '卡片便签已建(所在页尚未渲染,渲染后出现)',
-      _wb ? ('✅ 已钉到「' + _wb.text.slice(0, 12) + '」') : '✅ 卡片已钉到书页'
+      '✅ 自由卡片已放进书页'
     );
     return true;
   }
@@ -2379,18 +2605,52 @@ if (window.__bwPwaProviderOnly) return;
   // 允许的交互由共享模块按自描述 data-* 属性做全局委托；便签不持久化闭包。
   function createHtmlAt(clientX, clientY, htmlObj) {
     if (!O || !O.anchorFromPoint || !htmlObj || !htmlObj.content) return false;
+    var rawContent = String(htmlObj.content || '');
+    if (rawContent.length > PAGE_CARD_CONTENT_LIMIT) {
+      toastMsg('卡片正文异常过大，未放入书页');
+      return false;
+    }
     var cands = [[clientX, clientY], [clientX, clientY - 22], [clientX, clientY + 22], [clientX - 30, clientY], [clientX + 30, clientY]];
     var anchor = null;
     for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
     if (!anchor) { toastMsg('这里放不了(把卡片放到正文上再松手)'); return false; }
     var cid1 = htmlObj.cid || ((window.RC && RC.voiceCard && RC.voiceCard.mkCid) ? RC.voiceCard.mkCid() : ('c' + Date.now().toString(36)));
     var w1 = 300, bw1 = 0; try { var mh = O.mount(anchor); if (mh && mh.el && mh.el.clientWidth) { bw1 = mh.el.clientWidth; w1 = Math.max(240, Math.min(480, Math.round(bw1 * 0.44))); } } catch (e) {}   // 卡宽按页面宽自适应+记创建时页宽
+    // Keep a durable AI-readable body beside the rendered snapshot.  The
+    // visible HTML can contain controls (for example a remove button), so
+    // deriving context later from that shell can collapse a real card into
+    // merely "× + label".  Prefer the source text supplied by the card host;
+    // otherwise derive plain text once, while the original body is available.
+    var contextText = String(htmlObj.contextText || '').trim();
+    if (contextText && htmlObj.isHtml) {
+      contextText = htmlCardContextText(null, {
+        content: contextText,
+        isHtml: true
+      });
+    }
+    if (!contextText) contextText = htmlCardContextText(null, htmlObj);
+    contextText = String(contextText || '');
+    if (contextText.length > PAGE_CARD_CONTENT_LIMIT) {
+      toastMsg('卡片上下文异常过大，未放入书页');
+      return false;
+    }
+    var html1 = {
+      content: rawContent,
+      contextText: contextText,
+      isHtml: !!htmlObj.isHtml,
+      label: htmlObj.label || '',
+      type: htmlObj.type || '',
+      category: htmlObj.category || '',
+      icon: htmlObj.icon || '',
+      cid: cid1,
+      base_w: bw1
+    };
     // cid 原样持久化，重开不换号。
     createRecord(
       anchor,
-      { color: '#0d1322', w: w1, h: 210, collapsed: false, html: { content: htmlObj.content, isHtml: !!htmlObj.isHtml, label: htmlObj.label || '', type: htmlObj.type || '', icon: htmlObj.icon || '', cid: cid1, base_w: bw1 } },
+      { color: '#0d1322', w: w1, h: 210, collapsed: false, html: html1 },
       '卡片便签已建(所在页尚未渲染,渲染后出现)',
-      '✅ 卡片已钉到书页'
+      '✅ 自由卡片已放进书页'
     );
     return true;
   }
@@ -2453,6 +2713,13 @@ if (window.__bwPwaProviderOnly) return;
     if (!isFinite(x) || !isFinite(y)) return Promise.resolve({ ok: false, why: 'bad-screen-point' });
     var content = String(payload.raw || payload.text || '');
     if (!content.trim()) return Promise.resolve({ ok: false, why: 'empty-card' });
+    if (content.length > PAGE_CARD_CONTENT_LIMIT) {
+      return Promise.resolve({ ok: false, why: 'card-too-large' });
+    }
+    var contextText = String(payload.contextText || payload.text || '');
+    if (contextText.length > PAGE_CARD_CONTENT_LIMIT) {
+      return Promise.resolve({ ok: false, why: 'card-context-too-large' });
+    }
 
     var key = _boundCardKey(bind, payload, content);
     var existing = _existingBoundCard(bind, payload, content);
@@ -2483,6 +2750,7 @@ if (window.__bwPwaProviderOnly) return;
       } catch (e2) {}
       var html = {
         content: content,
+        contextText: contextText,
         isHtml: !!payload.isHtml,
         label: payload.label || '卡片',
         type: tone,

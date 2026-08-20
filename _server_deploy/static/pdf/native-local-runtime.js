@@ -20,6 +20,18 @@
   var NATIVE_EPUB_ACTION_CONTRACT = 'reader-native-epub-action/1';
   var NATIVE_READER_UNDO_RESULT_CONTRACT = 'reader-native-undo-result/1';
   var LOCAL_PAGE_CARDS_CONTRACT = 'reader-local-page-cards/1';
+  var LOCAL_PAGE_CARD_SOURCE_CONTRACT = 'reader-local-page-card-source/1';
+  var LOCAL_PAGE_CARD_PROJECTION_CONTRACT = 'reader-local-page-card-projection/1';
+  var NATIVE_PAGE_CARD_PROJECTION_CONTRACT = 'reader-native-page-card-projection/1';
+  // Normal and long cards are complete in the page snapshot.  This is only a
+  // corrupt-data/programming-error fence; the direct bridge still owns the
+  // smaller total-message byte budget.
+  var LOCAL_PAGE_CARD_CONTEXT_LIMIT = 100000;
+  var LOCAL_PAGE_CARD_CONTEXT_MAX_WIRE_BYTES = 200 * 1024;
+  var LOCAL_PAGE_CARD_CONTEXT_FRAGMENT = 2000;
+  var LOCAL_PAGE_CONTEXT_TEXT_LIMIT = 220000;
+  var LOCAL_PAGE_CARD_REPLACEMENT_FORMAT =
+    'application/vnd.bw-reader.card-replacement+json;version=1';
   var LOCAL_NOTES_CHANGED_CONTRACT = 'reader-local-notes-changed/1';
   var LOCAL_NOTES_CHANGED_EVENT = 'bw:native-document-notes-changed';
   var NATIVE_INTERFACE_CONTRACT = 'reader-native-interface-manifest/2';
@@ -497,6 +509,9 @@
     return Promise.resolve().then(function () {
       lease = acquireNativePDFWriterLease(label);
       return assertNoNativePDFMutationJournal();
+    }).then(function () {
+      assertNativePDFWriterLease(lease);
+      return nativePDFRecoverPendingPageCardJournals(lease);
     }).then(function () {
       assertNativePDFWriterLease(lease);
       return task(lease);
@@ -2272,7 +2287,28 @@
         '本机 outgoing journal 事件损坏', 'BW_LOCAL_OUTGOING_JOURNAL_CORRUPT'
       );
     }
-    validateOpaqueJSON(event, 'BW_LOCAL_OUTGOING_JOURNAL_CORRUPT');
+    var opaqueEvent = event;
+    if (event.type === 'page.context') {
+      var pageContext = event.page_context;
+      var pageText = pageContext && pageContext.text;
+      if (!pageContext || typeof pageContext !== 'object' ||
+          Array.isArray(pageContext) || typeof pageText !== 'string' ||
+          pageText.length > LOCAL_PAGE_CONTEXT_TEXT_LIMIT ||
+          /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(pageText)) {
+        throw outgoingRequestError(
+          'page.context.text 无效或过长',
+          'BW_LOCAL_OUTGOING_JOURNAL_CORRUPT', 400
+        );
+      }
+      // page.context.text is the one intentionally large opaque field: it can
+      // contain complete inline CARD records.  Validate it against its own
+      // bounded contract, then keep the generic 8192-character fence for every
+      // other string in this event and all other outgoing event types.
+      opaqueEvent = Object.assign({}, event, {
+        page_context: Object.assign({}, pageContext, { text: '' })
+      });
+    }
+    validateOpaqueJSON(opaqueEvent, 'BW_LOCAL_OUTGOING_JOURNAL_CORRUPT');
     return event;
   }
   function normalizeOutgoingJournalState(value) {
@@ -2377,7 +2413,8 @@
         /[\u0000-\u001f\u007f]/.test(value.title)) {
       throw outgoingRequestError('title 无效或过长', code, 400);
     }
-    if (typeof value.text !== 'string' || value.text.length > 12000 ||
+    if (typeof value.text !== 'string' ||
+        value.text.length > LOCAL_PAGE_CONTEXT_TEXT_LIMIT ||
         /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value.text)) {
       throw outgoingRequestError('text 无效或过长', code, 400);
     }
@@ -4470,7 +4507,7 @@
           ts: nowSeconds()
         });
         undo = undo.slice(-80);
-        receipts = receipts.slice(-160);
+        receipts = boundedAssistantOperationReceipts(receipts);
         var suffix = randomHex(12);
         return stores.document.batch([
           stateRecordMutation(
@@ -7842,7 +7879,91 @@
     };
   }
 
-  function nativePDFAuthoritySnapshot() {
+  function nativePDFContextPages(context) {
+    var output = [];
+    function add(value) {
+      value = Number(value);
+      if (Number.isSafeInteger(value) && value >= 1 && value <= 10000000 &&
+          output.indexOf(value) < 0) output.push(value);
+    }
+    context = context && typeof context === 'object' && !Array.isArray(context)
+      ? context : {};
+    if (Array.isArray(context.pages)) context.pages.slice(0, 12).forEach(add);
+    add(context.page);
+    return output;
+  }
+
+  function nativePDFPageCardProjection(context, notesRevision) {
+    var pages = nativePDFContextPages(context);
+    var computerVoice = root.RC && root.RC.computerVoice;
+    if (!pages.length || !computerVoice ||
+        typeof computerVoice.pageCards !== 'function') return Promise.resolve(null);
+    return Promise.all(pages.map(function (page) {
+      return Promise.resolve(computerVoice.pageCards(page)).then(function (value) {
+        if (!value || value.contract !== LOCAL_PAGE_CARD_PROJECTION_CONTRACT ||
+            Number(value.page) !== page || Number(value.revision) !== Number(notesRevision) ||
+            !Array.isArray(value.cards)) {
+          throw new RuntimeError(
+            '页面卡片精确序号投影与权威便签版本不一致',
+            'BW_NATIVE_PDF_PAGE_CARDS_PROJECTION'
+          );
+        }
+        return {
+          page: page,
+          cards: value.cards.map(function (card) {
+            if (!card || typeof card !== 'object' || Array.isArray(card) ||
+                typeof card.id !== 'string' || !card.id ||
+                (card.kind !== 'anki' && card.kind !== 'card') ||
+                typeof card.label !== 'string' || typeof card.text !== 'string' ||
+                typeof card.unbound !== 'boolean') {
+              throw new RuntimeError(
+                '页面卡片精确序号投影条目无效',
+                'BW_NATIVE_PDF_PAGE_CARDS_PROJECTION'
+              );
+            }
+            if (card.unbound === true) {
+              if (card.number !== null || card.bind !== null) {
+                throw new RuntimeError(
+                  '自由卡片精确序号投影无效',
+                  'BW_NATIVE_PDF_PAGE_CARDS_PROJECTION'
+                );
+              }
+            } else if (!Number.isSafeInteger(card.number) || card.number < 1 ||
+                       !card.bind || card.bind.kind !== 'page-chars' ||
+                       Number(card.bind.page) !== page) {
+              throw new RuntimeError(
+                '锚定卡片精确序号投影无效',
+                'BW_NATIVE_PDF_PAGE_CARDS_PROJECTION'
+              );
+            }
+            return {
+              id: card.id,
+              number: card.number,
+              kind: card.kind,
+              label: card.label,
+              text: card.text,
+              bind: card.bind == null ? null : clone(card.bind),
+              unbound: card.unbound
+            };
+          })
+        };
+      });
+    })).then(function (rows) {
+      var projectedPages = {};
+      rows.forEach(function (row) { projectedPages[String(row.page)] = row.cards; });
+      return {
+        contract: NATIVE_PAGE_CARD_PROJECTION_CONTRACT,
+        revision: Number(notesRevision),
+        pages: projectedPages
+      };
+    }).catch(function () {
+      // Geometry is optional for reading but mandatory for number-based writes.
+      // Omit the whole projection rather than forwarding a partial/stale map.
+      return null;
+    });
+  }
+
+  function nativePDFAuthoritySnapshot(context) {
     return Promise.all([
       storedStateRecord(stores.document, 'document-highlights', 'documentId', bookId, []),
       storedStateRecord(stores.document, 'document-notes-legacy', 'documentId', bookId, []),
@@ -7863,17 +7984,20 @@
         ink: clone(records[2].payload),
         user_pages: clone(records[3].payload)
       };
-      var encoded = JSON.stringify(snapshot);
+      return nativePDFPageCardProjection(context, records[1].rev).then(function (projection) {
+        if (projection) snapshot.page_cards = projection;
+        var encoded = JSON.stringify(snapshot);
       // The gateway allows 8 MiB total.  Never truncate authoritative ink or
       // notes: a visible refusal is safer than letting Pi reason over a state
       // that only looks complete.
-      if (utf8(encoded).byteLength > 6 * 1024 * 1024) {
-        throw new RuntimeError(
-          '本机 PDF 批注状态过大，无法完整交给助手',
-          'BW_NATIVE_PDF_ASSISTANT_STATE_LIMIT'
-        );
-      }
-      return snapshot;
+        if (utf8(encoded).byteLength > 6 * 1024 * 1024) {
+          throw new RuntimeError(
+            '本机 PDF 批注状态过大，无法完整交给助手',
+            'BW_NATIVE_PDF_ASSISTANT_STATE_LIMIT'
+          );
+        }
+        return snapshot;
+      });
     });
   }
 
@@ -7898,11 +8022,8 @@
 
   function nativePDFRequestBody(input, init, contextKey, writerLease) {
     assertNativePDFWriterLease(writerLease);
-    return Promise.all([bodyJSON(input, init), nativePDFAuthoritySnapshot()])
-      .then(function (values) {
+    return bodyJSON(input, init).then(function (body) {
         assertNativePDFWriterLease(writerLease);
-        var body = values[0];
-        var snapshot = values[1];
         if (!body || typeof body !== 'object' || Array.isArray(body)) {
           throw new RuntimeError(
             'PDF 助手请求体无效', 'BW_NATIVE_PDF_ASSISTANT_BODY'
@@ -7912,8 +8033,13 @@
         if (!context || typeof context !== 'object' || Array.isArray(context)) {
           context = {};
         }
-        return nativePDFAssistantContext(context).then(function (suppliedContext) {
+        return Promise.all([
+          nativePDFAssistantContext(context),
+          nativePDFAuthoritySnapshot(context)
+        ]).then(function (values) {
           assertNativePDFWriterLease(writerLease);
+          var suppliedContext = values[0];
+          var snapshot = values[1];
           body = Object.assign({}, body);
           body[contextKey] = Object.assign({}, suppliedContext, {
             file_rel: localFileRef(),
@@ -7930,7 +8056,11 @@
       value = action && Array.isArray(action.args) ? action.args[0] : '';
     }
     value = String(value || '');
-    if (!/^npdf_[0-9a-f]{24}$/.test(value)) {
+    var valid = descriptor && (descriptor.kind === 'page-card-edit' ||
+      descriptor.kind === 'page-card-delete')
+      ? /^(?:npdf|pcard)_[0-9a-f]{24}$/.test(value)
+      : /^npdf_[0-9a-f]{24}$/.test(value);
+    if (!valid) {
       throw new RuntimeError(
         'PDF 助手本机动作缺少可信操作编号',
         'BW_NATIVE_PDF_ASSISTANT_ACTION'
@@ -7955,6 +8085,12 @@
     if (data.type === 'note' && data.op === 'edit') {
       return { kind: 'note-edit', data: data };
     }
+    if (data.type === 'page-card' && data.op === 'edit') {
+      return { kind: 'page-card-edit', data: data };
+    }
+    if (data.type === 'page-card' && data.op === 'delete') {
+      return { kind: 'page-card-delete', data: data };
+    }
     return null;
   }
 
@@ -7967,6 +8103,12 @@
     if (descriptor.kind === 'undo') return nativePDFRefreshAction();
     var output = clone(action);
     output.args[0].file = localFileRef();
+    if (descriptor.kind === 'page-card-edit' ||
+        descriptor.kind === 'page-card-delete') {
+      // before/after may each be multiple MiB and are trusted-runtime journal
+      // material, not UI state. Keep only stable display metadata in the page.
+      output.args[0].item = { id: String(descriptor.data.expected_id || '') };
+    }
     return output;
   }
 
@@ -8013,6 +8155,286 @@
         ? Number(value.updated) : now
     };
     return note;
+  }
+
+  function nativePDFPageCardBind(note, code) {
+    var payload = note && note.card ? note.card : (note && note.html ? note.html : null);
+    var bind = payload && payload.bind;
+    if (!bind || typeof bind !== 'object' || Array.isArray(bind) ||
+        bind.kind !== 'page-chars') {
+      throw outgoingRequestError('页面卡片不是字符锚定卡片', code, 409);
+    }
+    return {
+      kind: 'page-chars',
+      page: strictInteger(bind.page, 1, 10000000, 'page', code),
+      from: strictInteger(bind.from, 0, 1000000, 'from', code),
+      to: strictInteger(bind.to, 0, 1000000, 'to', code),
+      text: boundedLocalString(bind.text, 200, '', code, '锚定词', false)
+    };
+  }
+
+  function nativePDFPageCardOptionalBind(note, code) {
+    var payload = note && note.card ? note.card : (note && note.html ? note.html : null);
+    if (!payload || payload.bind == null) return null;
+    return nativePDFPageCardBind(note, code);
+  }
+
+  function nativePDFPageCardIdentity(note) {
+    var value = clone(note);
+    delete value.updated;
+    if (value.card) {
+      value.card = clone(value.card);
+      delete value.card.cards;
+      delete value.card.contextText;
+      delete value.card.context_text;
+    }
+    if (value.html) {
+      value.html = clone(value.html);
+      delete value.html.content;
+      delete value.html.contextText;
+      delete value.html.context_text;
+    }
+    return canonicalJSONString(value);
+  }
+
+  function nativePDFPageCardCanonicalID(card, code) {
+    if (!card || typeof card !== 'object' || Array.isArray(card)) return null;
+    var ids = [];
+    ['id', 'cid', 'gid'].forEach(function (field) {
+      if (!Object.prototype.hasOwnProperty.call(card, field) || card[field] == null ||
+          card[field] === '') return;
+      if (typeof card[field] !== 'string') {
+        throw outgoingRequestError('学习卡语义身份无效', code, 409);
+      }
+      ids.push(card[field]);
+    });
+    if (!ids.length) return null;
+    if (ids.some(function (id) { return id !== ids[0]; })) {
+      throw outgoingRequestError('学习卡 id/cid/gid 不一致', code, 409);
+    }
+    return /^card_[a-f0-9]{4,64}$/.test(ids[0]) ? ids[0] : null;
+  }
+
+  function nativePDFPageCardCards(value, code) {
+    if (!Array.isArray(value) || value.length < 1 || value.length > 12) {
+      throw outgoingRequestError('学习卡替换必须包含 1 到 12 张卡片', code, 400);
+    }
+    return value.map(function (card) {
+      if (!card || typeof card !== 'object' || Array.isArray(card)) {
+        throw outgoingRequestError('学习卡替换条目无效', code, 400);
+      }
+      var keys = Object.keys(card).sort().join(',');
+      if (card.type === 'basic' && keys === 'back,front,type') {
+        var front = boundedLocalString(
+          card.front, LOCAL_PAGE_CARD_CONTEXT_LIMIT, '', code, '卡片正面', false
+        );
+        var back = boundedLocalString(
+          card.back, LOCAL_PAGE_CARD_CONTEXT_LIMIT, '', code, '卡片背面', false
+        );
+        if (!front.trim() || !back.trim()) {
+          throw outgoingRequestError('basic 卡正反面不能为空', code, 400);
+        }
+        return { type: 'basic', front: front, back: back };
+      }
+      if (card.type === 'cloze' && keys === 'cloze,type') {
+        var cloze = boundedLocalString(
+          card.cloze, LOCAL_PAGE_CARD_CONTEXT_LIMIT, '', code, '挖空卡正文', false
+        );
+        if (!/\{\{c[1-9][0-9]*::[\s\S]+?\}\}/.test(cloze)) {
+          throw outgoingRequestError('cloze 卡缺少有效挖空', code, 400);
+        }
+        return { type: 'cloze', cloze: cloze };
+      }
+      throw outgoingRequestError('学习卡只能完整替换 strict basic/cloze 内容', code, 400);
+    });
+  }
+
+  function nativePDFPageCardContextText(cards) {
+    var rows = (Array.isArray(cards) ? cards : []).map(function (card) {
+      if (card && card.type === 'cloze') {
+        return localContextPlainText(card.cloze, LOCAL_PAGE_CARD_CONTEXT_LIMIT);
+      }
+      var front = localContextPlainText(
+        card && card.front, LOCAL_PAGE_CARD_CONTEXT_LIMIT
+      );
+      var back = localContextPlainText(
+        card && card.back, LOCAL_PAGE_CARD_CONTEXT_LIMIT
+      );
+      return [front, back].filter(Boolean).join(' / ');
+    }).filter(Boolean);
+    return localContextPlainText(
+      rows.join('\n'), LOCAL_PAGE_CARD_CONTEXT_LIMIT
+    );
+  }
+
+  function nativePDFPageCardHTML(value, code) {
+    value = boundedLocalString(
+      value, LOCAL_PAGE_CARD_CONTEXT_LIMIT, '', code, '卡片内容', false
+    );
+    if (!value.trim() || !root.DOMPurify ||
+        typeof root.DOMPurify.sanitize !== 'function' ||
+        typeof root.DOMParser !== 'function') {
+      throw outgoingRequestError('卡片 HTML 净化器不可用或内容为空', code, 400);
+    }
+    if (typeof root.DOMPurify.removeAllHooks === 'function') {
+      root.DOMPurify.removeAllHooks();
+    }
+    var sanitized = String(root.DOMPurify.sanitize(value, {
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form'],
+      FORBID_ATTR: ['srcdoc']
+    }) || '');
+    if (!sanitized.trim()) {
+      throw outgoingRequestError('卡片 HTML 净化后为空', code, 400);
+    }
+    var parsed = new root.DOMParser().parseFromString(sanitized, 'text/html');
+    var contextText = localContextPlainText(
+      parsed && parsed.body ? parsed.body.textContent || '' : '',
+      LOCAL_PAGE_CARD_CONTEXT_LIMIT
+    );
+    return { content: sanitized, contextText: contextText };
+  }
+
+  function nativePDFPageCardPlan(data, code) {
+    var commonKeys = [
+      'type', 'op', 'native_operation_id', 'file', 'page', 'number',
+      'expected_id', 'expected_revision', 'item'
+    ];
+    if (!exactKeys(data, commonKeys) || data.type !== 'page-card' ||
+        (data.op !== 'edit' && data.op !== 'delete')) {
+      throw outgoingRequestError('页面卡片动作合同无效', code, 400);
+    }
+    requireLocalFile(data.file, code);
+    var id = localRecordId(data.expected_id, code);
+    var page = strictInteger(data.page, 1, 10000000, 'page', code);
+    var number = data.number == null
+      ? null : strictInteger(data.number, 1, 1000000, 'number', code);
+    var expectedRevision = strictInteger(
+      data.expected_revision, 0, Number.MAX_SAFE_INTEGER, 'expected_revision', code
+    );
+    var item = data.item;
+    var itemKeys = data.op === 'edit' ? ['id', 'before', 'after'] : ['id', 'before'];
+    if (!exactKeys(item, itemKeys) || localRecordId(item.id, code) !== id) {
+      throw outgoingRequestError('页面卡片动作项目无效', code, 400);
+    }
+    var before = nativePDFNoteSnapshot(item.before, id, code);
+    if (before.id !== id || (!!before.card === !!before.html) || before.video) {
+      throw outgoingRequestError('页面卡片修改前快照无效', code, 400);
+    }
+    var bind = nativePDFPageCardOptionalBind(before, code);
+    var anchorPage = before.anchor && before.anchor.kind === 'pdf'
+      ? Number(before.anchor.page) : null;
+    if ((bind && (bind.page !== page || bind.to < bind.from)) ||
+        (!bind && anchorPage !== page) || (number != null && !bind)) {
+      throw outgoingRequestError('页面卡片页锚不匹配', code, 409);
+    }
+    var after = null;
+    var replacementCards = null;
+    if (data.op === 'edit') {
+      after = nativePDFNoteSnapshot(item.after, id, code);
+      if (after.id !== id || nativePDFPageCardIdentity(before) !==
+          nativePDFPageCardIdentity(after) || (!!after.card === !!before.card) === false) {
+        throw outgoingRequestError('页面卡片修改越过了内容字段边界', code, 409);
+      }
+      var afterBind = nativePDFPageCardOptionalBind(after, code);
+      if (canonicalJSONString(afterBind) !== canonicalJSONString(bind)) {
+        throw outgoingRequestError('页面卡片修改不得改变锚点', code, 409);
+      }
+      if (before.card) {
+        replacementCards = nativePDFPageCardCards(after.card.cards, code);
+        after.card.cards = clone(replacementCards);
+        // Remote contextText is not authority. Derive the future AI context
+        // from the exact validated faces that will be persisted.
+        after.card.contextText = nativePDFPageCardContextText(replacementCards);
+      } else {
+        var safeHTML = nativePDFPageCardHTML(after.html.content, code);
+        after.html.content = safeHTML.content;
+        // AI-supplied contextText is not an authority; derive it from the same
+        // sanitized DOM that will actually render.
+        after.html.contextText = safeHTML.contextText;
+      }
+    }
+    return {
+      id: id, page: page, number: number,
+      expectedRevision: expectedRevision,
+      before: before, after: after,
+      replacementCards: replacementCards,
+      canonicalId: before.card ? nativePDFPageCardCanonicalID(before.card, code) : null
+    };
+  }
+
+  function nativePDFPageCardFingerprint(plan, operationID, kind) {
+    return canonicalJSONString({
+      id: operationID, kind: kind, placementId: plan.id,
+      page: plan.page, number: plan.number,
+      before: plan.before, after: plan.after
+    });
+  }
+
+  function nativePDFPageCardWireCards(cards) {
+    return (Array.isArray(cards) ? cards : []).map(function (card) {
+      return card && card.type === 'cloze'
+        ? { type: 'cloze', cloze: String(card.cloze || '') }
+        : {
+            type: 'basic',
+            front: String(card && card.front || ''),
+            back: String(card && card.back || '')
+          };
+    });
+  }
+
+  function nativePDFPageCardRequestFingerprint(plan, kind) {
+    var replacement = null;
+    if (kind === 'page-card-edit' && plan.after && plan.after.card) {
+      replacement = { cards: nativePDFPageCardWireCards(plan.after.card.cards) };
+    } else if (kind === 'page-card-edit' && plan.after && plan.after.html) {
+      replacement = { content: String(plan.after.html.content || '') };
+    }
+    return canonicalJSONString({
+      operation: kind === 'page-card-delete' ? 'delete' : 'edit',
+      expectedId: plan.id,
+      expectedRevision: plan.expectedRevision,
+      replacement: replacement
+    });
+  }
+
+  function nativePDFDirectPageCardRequestFingerprint(input, code) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw outgoingRequestError('页面卡片修改参数无效', code, 400);
+    }
+    var operation = input.operation;
+    var keys = operation === 'edit'
+      ? ['operation', 'operationId', 'expectedId', 'expectedRevision', 'replacement']
+      : ['operation', 'operationId', 'expectedId', 'expectedRevision'];
+    if (Object.prototype.hasOwnProperty.call(input, 'number')) keys.push('number');
+    if ((operation !== 'edit' && operation !== 'delete') || !exactKeys(input, keys) ||
+        !/^pcard_[0-9a-f]{24}$/.test(String(input.operationId || ''))) {
+      throw outgoingRequestError('页面卡片修改合同无效', code, 400);
+    }
+    var replacement = null;
+    if (operation === 'edit') {
+      if (exactKeys(input.replacement, ['cards'])) {
+        replacement = {
+          cards: nativePDFPageCardWireCards(
+            nativePDFPageCardCards(input.replacement.cards, code)
+          )
+        };
+      } else if (exactKeys(input.replacement, ['content'])) {
+        replacement = {
+          content: nativePDFPageCardHTML(input.replacement.content, code).content
+        };
+      } else {
+        throw outgoingRequestError('页面卡片替换内容无效', code, 400);
+      }
+    }
+    return canonicalJSONString({
+      operation: operation,
+      expectedId: localRecordId(input.expectedId, code),
+      expectedRevision: strictInteger(
+        input.expectedRevision, 0, Number.MAX_SAFE_INTEGER, 'expectedRevision', code
+      ),
+      replacement: replacement
+    });
   }
 
   function nativePDFHighlightSnapshot(value, code) {
@@ -8069,16 +8491,976 @@
     );
   }
 
-  function nativePDFCommitActions(actions, expectedRevisions, writerLease) {
+  function nativePDFExpectedRevisions(state) {
+    return state && state.revisions && typeof state.revisions === 'object'
+      ? state.revisions : (state || {});
+  }
+
+  function nativePDFAssertPageCardReference(state, plan) {
+    var projection = state && state.page_cards;
+    if (!projection) return;
+    var rows = projection.contract === NATIVE_PAGE_CARD_PROJECTION_CONTRACT &&
+      Number(projection.revision) === Number(plan.expectedRevision) &&
+      projection.pages && Array.isArray(projection.pages[String(plan.page)])
+      ? projection.pages[String(plan.page)] : null;
+    if (!rows) nativePDFRevisionConflict('页面卡片投影');
+    var row = rows.find(function (candidate) {
+      return candidate && String(candidate.id || '') === plan.id;
+    });
+    if (!row || (plan.number != null &&
+        (row.unbound === true || Number(row.number) !== Number(plan.number)))) {
+      nativePDFRevisionConflict(plan.number == null
+        ? '页面卡片稳定 ID' : '页面卡片当前序号');
+    }
+  }
+
+  function nativePDFPageCardCanonicalRepository() {
+    var repository = runtimeRoot.cardRepository;
+    if (!repository || typeof repository.load !== 'function' ||
+        typeof repository.replaceContent !== 'function') return null;
+    return repository;
+  }
+
+  function nativePDFPageCardSemanticCards(existing, replacement, code) {
+    if (!Array.isArray(existing) || existing.length !== replacement.length) {
+      throw outgoingRequestError('学习卡批内数量不得改变', code, 409);
+    }
+    return replacement.map(function (face, index) {
+      var old = existing[index] && typeof existing[index] === 'object'
+        ? existing[index] : {};
+      var merged = clone(face);
+      ['deck', 'tags', 'reason'].forEach(function (field) {
+        if (Object.prototype.hasOwnProperty.call(old, field)) {
+          merged[field] = clone(old[field]);
+        }
+      });
+      return merged;
+    });
+  }
+
+  function nativePDFPageCardCanonicalIntent(plan, operationID, code) {
+    if (!plan.replacementCards || !plan.canonicalId) return Promise.resolve(null);
+    var repository = nativePDFPageCardCanonicalRepository();
+    if (!repository) {
+      return Promise.reject(new RuntimeError(
+        '统一学习卡仓库尚未准备好', 'BW_NATIVE_PDF_PAGE_CARD_ENTITY'
+      ));
+    }
+    return repository.load(plan.canonicalId).then(function (record) {
+      if (!record || record.deleted || !Array.isArray(record.cards) ||
+          !Number.isSafeInteger(Number(record.entityRev))) {
+        throw outgoingRequestError('统一学习卡实体不存在', code, 409);
+      }
+      if (!plan.before.card || !Array.isArray(plan.before.card.cards) ||
+          canonicalJSONString(plan.before.card.cards) !==
+          canonicalJSONString(record.cards)) {
+        nativePDFRevisionConflict('统一学习卡与页面副本内容');
+      }
+      return {
+        id: plan.canonicalId,
+        beforeCards: clone(record.cards),
+        afterCards: nativePDFPageCardSemanticCards(
+          record.cards, plan.replacementCards, code
+        ),
+        beforeEntityRev: Number(record.entityRev),
+        lastEntityRev: null,
+        mutationId: operationID + ':entity:apply'
+      };
+    });
+  }
+
+  function nativePDFPageCardApplyCanonical(entity, code) {
+    if (!entity) return Promise.resolve(null);
+    var repository = nativePDFPageCardCanonicalRepository();
+    if (!repository) {
+      return Promise.reject(new RuntimeError(
+        '统一学习卡仓库尚未准备好', 'BW_NATIVE_PDF_PAGE_CARD_ENTITY'
+      ));
+    }
+    return repository.load(entity.id).then(function (record) {
+      if (!record || record.deleted || !Array.isArray(record.cards)) {
+        throw outgoingRequestError('统一学习卡实体不存在', code, 409);
+      }
+      var current = canonicalJSONString(record.cards);
+      var before = canonicalJSONString(entity.beforeCards);
+      var after = canonicalJSONString(entity.afterCards);
+      if (current === after) {
+        entity.lastEntityRev = Number(record.entityRev);
+        return clone(entity);
+      }
+      if (current !== before || Number(record.entityRev) !== Number(entity.beforeEntityRev)) {
+        nativePDFRevisionConflict('统一学习卡内容');
+      }
+      return repository.replaceContent(entity.id, entity.afterCards, {
+        ifEntityRev: Number(record.entityRev), mutationId: entity.mutationId
+      }).then(function (updated) {
+        entity.lastEntityRev = Number(updated.entityRev);
+        return clone(entity);
+      });
+    });
+  }
+
+  function nativePDFPageCardRecordSet(queryOptions) {
+    var specs = [
+      ['document-notes-legacy', []],
+      ['card-placements', []],
+      ['entity-references', []],
+      ['pdf-assistant-ops', []]
+    ];
+    return Promise.all(specs.map(function (spec) {
+      return storedStateRecord(
+        stores.document, spec[0], 'documentId', bookId, spec[1], queryOptions
+      );
+    })).then(function (records) { return { specs: specs, records: records }; });
+  }
+
+  function nativePDFPageCardJournalValue(
+    plan, operationID, kind, fingerprint, requestFingerprint, entity
+  ) {
+    return {
+      id: operationID,
+      contract: 'reader-native-page-card-action/1',
+      kind: kind,
+      state: 'preparing',
+      fingerprint: fingerprint,
+      requestFingerprint: requestFingerprint,
+      placementId: plan.id,
+      page: plan.page,
+      number: plan.number,
+      expectedRevision: plan.expectedRevision,
+      before: clone(plan.before),
+      after: clone(plan.after),
+      beforeIndex: null,
+      entity: clone(entity),
+      transition: 0,
+      ts: nowSeconds()
+    };
+  }
+
+  function boundedAssistantOperationReceipts(value) {
+    var receipts = Array.isArray(value) ? value : [];
+    var keep = new Set();
+    var byteCount = 2;
+    var maxCount = 160;
+    var maxBytes = 4 * 1024 * 1024;
+    function sizeOf(item) {
+      try { return utf8(JSON.stringify(item)).byteLength + 1; }
+      catch (_) { return maxBytes + 1; }
+    }
+    // An interrupted page-card saga is recovery authority. It must never be
+    // discarded merely because newer, already-complete receipts arrived.
+    receipts.forEach(function (item, index) {
+      if (item && item.contract === 'reader-native-page-card-action/1' &&
+          (item.state === 'preparing' || item.pending)) {
+        keep.add(index);
+        byteCount += sizeOf(item);
+      }
+    });
+    for (var index = receipts.length - 1;
+         index >= 0 && keep.size < maxCount; index -= 1) {
+      if (keep.has(index)) continue;
+      var itemSize = sizeOf(receipts[index]);
+      if (byteCount + itemSize > maxBytes) continue;
+      keep.add(index);
+      byteCount += itemSize;
+    }
+    return receipts.filter(function (_, index) { return keep.has(index); });
+  }
+
+  function nativePDFCommitPageCardAction(actions, actionIndex, expectedState, writerLease) {
+    assertNativePDFWriterLease(writerLease);
+    var action = actions[actionIndex];
+    var descriptor = nativePDFActionDescriptor(action);
+    var code = 'BW_NATIVE_PDF_ASSISTANT_ACTION';
+    var plan = nativePDFPageCardPlan(descriptor.data, code);
+    var operationID = nativePDFOperationID(action, descriptor);
+    var fingerprint = nativePDFPageCardFingerprint(plan, operationID, descriptor.kind);
+    var requestFingerprint = nativePDFPageCardRequestFingerprint(plan, descriptor.kind);
+    var expectedRevisions = nativePDFExpectedRevisions(expectedState);
+    var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
+    return serializeLocalStateMutation('document', 'pdf-assistant-bundle', function () {
+      assertNativePDFWriterLease(writerLease);
+      return nativePDFPageCardRecordSet(bound).then(function (recordSet) {
+        var notes = storedList(clone(recordSet.records[0].payload), code);
+        var receipts = storedList(clone(recordSet.records[3].payload), code);
+        var prior = receipts.find(function (item) {
+          return item && String(item.id || '') === operationID;
+        });
+        if (prior) {
+          if (prior.contract !== 'reader-native-page-card-action/1' ||
+              prior.fingerprint !== fingerprint ||
+              prior.requestFingerprint !== requestFingerprint) {
+            nativePDFRevisionConflict('页面卡片操作编号');
+          }
+          if (prior.state === 'done') {
+            var replayOutput = actions.map(clone);
+            replayOutput[actionIndex] = nativePDFSanitizeAction(action, descriptor);
+            return {
+              actions: replayOutput,
+              revisions: clone(expectedRevisions),
+              replayed: true,
+              receipt: clone(prior)
+            };
+          }
+          if (prior.state === 'undone') {
+            throw outgoingRequestError(
+              '这次页面卡片操作已经撤销，不能按原请求伪装成已执行', code, 409
+            );
+          }
+          if (prior.state !== 'preparing') {
+            throw outgoingRequestError('页面卡片操作日志状态无效', code, 409);
+          }
+          return null;
+        }
+        if (Number(expectedRevisions.notes) !== Number(plan.expectedRevision)) {
+          nativePDFRevisionConflict('页面卡片列表');
+        }
+        nativePDFAssertPageCardReference(expectedState, plan);
+        if (Number(recordSet.records[0].rev) !== Number(plan.expectedRevision)) {
+          nativePDFRevisionConflict('页面卡片列表');
+        }
+        var noteIndex = notes.findIndex(function (note) {
+          return note && String(note.id || '') === plan.id;
+        });
+        if (noteIndex < 0 || canonicalJSONString(
+          nativePDFNoteSnapshot(notes[noteIndex], plan.id, code)
+        ) !== canonicalJSONString(plan.before)) {
+          nativePDFRevisionConflict('页面卡片内容');
+        }
+        return nativePDFPageCardCanonicalIntent(plan, operationID, code).then(function (entityIntent) {
+          var journal = nativePDFPageCardJournalValue(
+            plan, operationID, descriptor.kind, fingerprint,
+            requestFingerprint, entityIntent
+          );
+          if (entityIntent && journal.after && journal.after.card) {
+            journal.after.card.cards = clone(entityIntent.afterCards);
+          }
+          journal.beforeIndex = noteIndex;
+          receipts.push(journal);
+          receipts = boundedAssistantOperationReceipts(receipts);
+          return stores.document.batch([
+            stateRecordMutation(
+              'pdf-assistant-ops', receipts, randomHex(12) + '-page-card-intent',
+              recordSet.records[3].rev
+            )
+          ], bound).then(function () { return null; });
+        });
+      }).then(function (early) {
+        if (early) return early;
+        return nativePDFPageCardRecordSet(bound).then(function (recordSet) {
+          var receipts = storedList(clone(recordSet.records[3].payload), code);
+          var journal = receipts.find(function (item) {
+            return item && String(item.id || '') === operationID;
+          });
+          if (!journal || journal.state !== 'preparing' ||
+              journal.fingerprint !== fingerprint) {
+            nativePDFRevisionConflict('页面卡片操作日志');
+          }
+          return nativePDFPageCardApplyCanonical(journal.entity, code).then(function (entity) {
+            journal.entity = clone(entity);
+            return nativePDFPageCardRecordSet(bound).then(function (currentSet) {
+              var currentNotes = storedList(clone(currentSet.records[0].payload), code);
+              var currentReceipts = storedList(clone(currentSet.records[3].payload), code);
+              var currentJournalIndex = currentReceipts.findIndex(function (item) {
+                return item && String(item.id || '') === operationID;
+              });
+              if (currentJournalIndex < 0 ||
+                  currentReceipts[currentJournalIndex].state !== 'preparing' ||
+                  currentReceipts[currentJournalIndex].fingerprint !== fingerprint) {
+                nativePDFRevisionConflict('页面卡片操作日志');
+              }
+              var noteIndex = currentNotes.findIndex(function (note) {
+                return note && String(note.id || '') === journal.placementId;
+              });
+              if (noteIndex < 0 || canonicalJSONString(
+                nativePDFNoteSnapshot(currentNotes[noteIndex], journal.placementId, code)
+              ) !== canonicalJSONString(journal.before)) {
+                nativePDFRevisionConflict('页面卡片内容');
+              }
+              if (descriptor.kind === 'page-card-delete') currentNotes.splice(noteIndex, 1);
+              else currentNotes[noteIndex] = clone(journal.after);
+              journal = clone(currentReceipts[currentJournalIndex]);
+              journal.entity = clone(entity);
+              journal.state = 'done';
+              journal.updatedAt = Date.now();
+              currentReceipts[currentJournalIndex] = journal;
+              var placements = deriveCardPlacements(currentNotes);
+              var references = deriveEntityReferences(placements);
+              var suffix = randomHex(12);
+              return stores.document.batch([
+                stateRecordMutation(
+                  'document-notes-legacy', currentNotes, suffix + '-page-card-notes',
+                  currentSet.records[0].rev
+                ),
+                stateRecordMutation(
+                  'card-placements', placements, suffix + '-page-card-placements',
+                  currentSet.records[1].rev
+                ),
+                stateRecordMutation(
+                  'entity-references', references, suffix + '-page-card-references',
+                  currentSet.records[2].rev
+                ),
+                stateRecordMutation(
+                  'pdf-assistant-ops', currentReceipts, suffix + '-page-card-ops',
+                  currentSet.records[3].rev
+                )
+              ], bound).then(function () {
+                announceLocalNotesChanged('page-card');
+                var output = actions.map(clone);
+                output[actionIndex] = nativePDFSanitizeAction(action, descriptor);
+                return storedStateRecord(
+                  stores.document, 'document-notes-legacy', 'documentId', bookId, [], bound
+                ).then(function (updatedNotes) {
+                  return {
+                    actions: output,
+                    revisions: Object.assign({}, expectedRevisions, {
+                      notes: updatedNotes.rev
+                    }),
+                    replayed: false,
+                    receipt: clone(journal)
+                  };
+                });
+              });
+            });
+          });
+        });
+      });
+    });
+  }
+
+  function nativePDFPageCardProjectionState(localProjection) {
+    var page = Number(localProjection && localProjection.page);
+    var revision = Number(localProjection && localProjection.revision);
+    if (!localProjection || localProjection.contract !==
+        LOCAL_PAGE_CARD_PROJECTION_CONTRACT ||
+        !Number.isSafeInteger(page) || page < 1 ||
+        !Number.isSafeInteger(revision) || revision < 0 ||
+        !Array.isArray(localProjection.cards)) {
+      throw new RuntimeError(
+        '页面卡片精确序号暂不可用', 'BW_NATIVE_PDF_PAGE_CARDS_PROJECTION'
+      );
+    }
+    var rows = localProjection.cards.map(function (card) {
+      return {
+        id: String(card && card.id || ''),
+        number: card && card.number == null ? null : Number(card.number),
+        kind: String(card && card.kind || ''),
+        label: String(card && card.label || ''),
+        text: String(card && card.text || ''),
+        bind: card && card.bind == null ? null : clone(card.bind),
+        unbound: !!(card && card.unbound)
+      };
+    });
+    var pages = {};
+    pages[String(page)] = rows;
+    return {
+      contract: NATIVE_PAGE_CARD_PROJECTION_CONTRACT,
+      revision: revision,
+      pages: pages
+    };
+  }
+
+  function nativePDFDirectPageCardData(input, projection, note, code) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw outgoingRequestError('页面卡片修改参数无效', code, 400);
+    }
+    var operation = input.operation;
+    var keys = operation === 'edit'
+      ? ['operation', 'operationId', 'expectedId', 'expectedRevision', 'replacement']
+      : ['operation', 'operationId', 'expectedId', 'expectedRevision'];
+    var hasNumber = Object.prototype.hasOwnProperty.call(input, 'number');
+    if (hasNumber) keys.push('number');
+    if ((operation !== 'edit' && operation !== 'delete') || !exactKeys(input, keys) ||
+        !/^pcard_[0-9a-f]{24}$/.test(String(input.operationId || ''))) {
+      throw outgoingRequestError('页面卡片修改合同无效', code, 400);
+    }
+    var requestedNumber = hasNumber
+      ? strictInteger(input.number, 1, 1000000, 'number', code) : null;
+    var expectedId = localRecordId(input.expectedId, code);
+    var expectedRevision = strictInteger(
+      input.expectedRevision, 0, Number.MAX_SAFE_INTEGER, 'expectedRevision', code
+    );
+    if (Number(projection.revision) !== expectedRevision) {
+      nativePDFRevisionConflict('页面卡片列表');
+    }
+    var row = projection.cards.find(function (candidate) {
+      if (!candidate) return false;
+      return requestedNumber == null
+        ? String(candidate.id || '') === expectedId
+        : Number(candidate.number) === requestedNumber;
+    });
+    if (!row || String(row.id || '') !== expectedId ||
+        (requestedNumber != null && row.unbound === true)) {
+      nativePDFRevisionConflict(requestedNumber == null
+        ? '页面卡片稳定 ID' : '页面卡片当前序号');
+    }
+    var number = row.unbound === true || row.number == null
+      ? null : strictInteger(row.number, 1, 1000000, 'number', code);
+    var before = nativePDFNoteSnapshot(note, expectedId, code);
+    var after = null;
+    if (operation === 'edit') {
+      if (!input.replacement || typeof input.replacement !== 'object' ||
+          Array.isArray(input.replacement)) {
+        throw outgoingRequestError('页面卡片替换内容无效', code, 400);
+      }
+      after = clone(before);
+      if (exactKeys(input.replacement, ['cards']) && before.card) {
+        after.card.cards = nativePDFPageCardCards(input.replacement.cards, code);
+        after.card.contextText = nativePDFPageCardContextText(after.card.cards);
+      } else if (exactKeys(input.replacement, ['content']) && before.html) {
+        after.html.content = boundedLocalString(
+          input.replacement.content, LOCAL_PAGE_CARD_CONTEXT_LIMIT,
+          '', code, '卡片内容', false
+        );
+        after.html.contextText = '';
+      } else {
+        throw outgoingRequestError('替换内容与卡片类型不匹配', code, 400);
+      }
+      after.updated = nowSeconds();
+    }
+    var data = {
+      type: 'page-card', op: operation,
+      native_operation_id: String(input.operationId),
+      file: localFileRef(), page: Number(projection.page), number: number,
+      expected_id: expectedId, expected_revision: expectedRevision,
+      item: { id: expectedId, before: before }
+    };
+    if (after) data.item.after = after;
+    return data;
+  }
+
+  function nativeReaderPageCardMutate(input) {
+    var code = 'BW_NATIVE_READER_PAGE_CARD';
+    return bootPromise.then(function () {
+      if (nativeInterfaceSurface !== 'pdf') {
+        throw new RuntimeError(
+          '当前界面不是 PDF 页面卡片宿主', 'BW_NATIVE_READER_PAGE_CARD_SURFACE'
+        );
+      }
+      var computerVoice = root.RC && root.RC.computerVoice;
+      if (!computerVoice || typeof computerVoice.pageCards !== 'function') {
+        throw new RuntimeError(
+          '当前页卡片精确序号不可用', 'BW_NATIVE_PDF_PAGE_CARDS_PROJECTION'
+        );
+      }
+      return withNativePDFWriter('reader-page-card', function (writerLease) {
+        var requestFingerprint = nativePDFDirectPageCardRequestFingerprint(input, code);
+        return storedStateRecord(
+          stores.document, 'pdf-assistant-ops', 'documentId', bookId, [],
+          { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS }
+        ).then(function (opsRecord) {
+          var prior = storedList(opsRecord.payload, code).find(function (item) {
+            return item && String(item.id || '') === String(input.operationId || '');
+          });
+          if (!prior) return null;
+          if (prior.contract !== 'reader-native-page-card-action/1' ||
+              prior.requestFingerprint !== requestFingerprint) {
+            nativePDFRevisionConflict('页面卡片操作编号');
+          }
+          if (prior.state === 'done') {
+            return {
+              ok: true,
+              operationId: String(input.operationId),
+              operation: String(input.operation),
+              page: Number(prior.page),
+              number: prior.number == null ? null : Number(prior.number),
+              id: String(prior.placementId),
+              replayed: true
+            };
+          }
+          if (prior.state === 'undone') {
+            throw outgoingRequestError(
+              '这次页面卡片操作已经撤销，不能按原请求伪装成已执行', code, 409
+            );
+          }
+          return null;
+        }).then(function (replayed) {
+          if (replayed) return replayed;
+          return Promise.resolve(computerVoice.pageCards()).then(function (projection) {
+          return storedStateRecord(
+            stores.document, 'document-notes-legacy', 'documentId', bookId, [],
+            { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS }
+          ).then(function (notesRecord) {
+            if (Number(notesRecord.rev) !== Number(projection.revision)) {
+              nativePDFRevisionConflict('页面卡片列表');
+            }
+            var expectedId = localRecordId(input && input.expectedId, code);
+            var note = storedList(notesRecord.payload, code).find(function (candidate) {
+              return candidate && String(candidate.id || '') === expectedId;
+            });
+            if (!note) nativePDFRevisionConflict('页面卡片内容');
+            var data = nativePDFDirectPageCardData(
+              input, projection, note, code
+            );
+            var action = { fn: '_assistEdit', args: [data] };
+            var expectedState = {
+              revisions: { notes: Number(notesRecord.rev) },
+              page_cards: nativePDFPageCardProjectionState(projection)
+            };
+            return nativePDFCommitActions(
+              [action], expectedState, writerLease
+            ).then(function (committed) {
+              var sanitized = committed.actions[0];
+              if (committed.replayed !== true && sanitized &&
+                  sanitized.fn === '_assistEdit' &&
+                  Array.isArray(sanitized.args) && typeof root._assistEdit === 'function') {
+                root._assistEdit(clone(sanitized.args[0]));
+              }
+              return {
+                ok: true,
+                operationId: String(input.operationId),
+                operation: String(input.operation),
+                page: Number(projection.page),
+                number: data.number == null ? null : Number(data.number),
+                id: expectedId,
+                replayed: committed.replayed === true
+              };
+            });
+          });
+        });
+        });
+      });
+    });
+  }
+
+  function nativePDFPageCardTransitionCanonical(
+    entity, targetState, operationID, transition, code
+  ) {
+    if (!entity) return Promise.resolve(null);
+    var repository = nativePDFPageCardCanonicalRepository();
+    if (!repository) {
+      return Promise.reject(new RuntimeError(
+        '统一学习卡仓库尚未准备好', 'BW_NATIVE_PDF_PAGE_CARD_ENTITY'
+      ));
+    }
+    var targetCards = targetState === 'done' ? entity.afterCards : entity.beforeCards;
+    var otherCards = targetState === 'done' ? entity.beforeCards : entity.afterCards;
+    return repository.load(entity.id).then(function (record) {
+      if (!record || record.deleted || !Array.isArray(record.cards)) {
+        throw outgoingRequestError('统一学习卡实体不存在', code, 409);
+      }
+      var current = canonicalJSONString(record.cards);
+      if (current === canonicalJSONString(targetCards)) {
+        entity.lastEntityRev = Number(record.entityRev);
+        return clone(entity);
+      }
+      if (current !== canonicalJSONString(otherCards)) {
+        nativePDFRevisionConflict('统一学习卡内容');
+      }
+      return repository.replaceContent(entity.id, targetCards, {
+        ifEntityRev: Number(record.entityRev),
+        mutationId: operationID + ':t' + String(transition) + ':entity'
+      }).then(function (updated) {
+        entity.lastEntityRev = Number(updated.entityRev);
+        return clone(entity);
+      });
+    });
+  }
+
+  function nativePDFRecoverPendingPageCardJournals(writerLease) {
+    if (nativeInterfaceSurface !== 'pdf' || !stores || !stores.document) {
+      return Promise.resolve(false);
+    }
+    var code = 'BW_NATIVE_PDF_PAGE_CARD_RECOVERY';
+    var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
+    return serializeLocalStateMutation('document', 'pdf-assistant-bundle', function () {
+      var recovered = false;
+
+      function sameNote(note, snapshot, placementID) {
+        if (!note || !snapshot) return false;
+        return canonicalJSONString(
+          nativePDFNoteSnapshot(note, placementID, code)
+        ) === canonicalJSONString(snapshot);
+      }
+
+      function placementPhase(notes, placementID, kind, targetState, before, after) {
+        var noteIndex = notes.findIndex(function (note) {
+          return note && String(note.id || '') === placementID;
+        });
+        if (kind === 'page-card-delete') {
+          if (targetState === 'done') {
+            if (noteIndex < 0) return { phase: 'target', index: noteIndex };
+            return sameNote(notes[noteIndex], before, placementID)
+              ? { phase: 'source', index: noteIndex }
+              : { phase: 'conflict', index: noteIndex };
+          }
+          if (noteIndex < 0) return { phase: 'source', index: noteIndex };
+          return sameNote(notes[noteIndex], before, placementID)
+            ? { phase: 'target', index: noteIndex }
+            : { phase: 'conflict', index: noteIndex };
+        }
+        if (noteIndex < 0) return { phase: 'conflict', index: noteIndex };
+        var target = targetState === 'done' ? after : before;
+        var source = targetState === 'done' ? before : after;
+        if (sameNote(notes[noteIndex], target, placementID)) {
+          return { phase: 'target', index: noteIndex };
+        }
+        if (sameNote(notes[noteIndex], source, placementID)) {
+          return { phase: 'source', index: noteIndex };
+        }
+        return { phase: 'conflict', index: noteIndex };
+      }
+
+      function terminalizeConflict(
+        recordSet, receipts, journalIndex, journal, operationID, sourceState
+      ) {
+        journal.state = 'conflicted';
+        journal.pending = null;
+        journal.recoveryError = 'placement-content-conflict';
+        journal.updatedAt = Date.now();
+        receipts[journalIndex] = journal;
+        return stores.document.batch([stateRecordMutation(
+          'pdf-assistant-ops', boundedAssistantOperationReceipts(receipts),
+          randomHex(12) + '-page-card-recovery-conflict', recordSet.records[3].rev
+        )], bound).then(function () {
+          recovered = true;
+          try {
+            if (typeof root._toast === 'function') {
+              root._toast('一项卡片操作与较新的页面内容冲突，已停止自动恢复');
+            }
+          } catch (_) {}
+          // If the prior process had already changed the entity, restore the
+          // saga's source face with an entity CAS. The journal is terminalized
+          // first, so even a failed compensation cannot lock every later PDF
+          // write behind an eternal pending record.
+          return nativePDFPageCardTransitionCanonical(
+            clone(journal.entity), sourceState, operationID,
+            Number(journal.transition || 0) + 1000000, code
+          ).catch(function () { return null; }).then(function () { return next(); });
+        });
+      }
+
+      function next() {
+        assertNativePDFWriterLease(writerLease);
+        return nativePDFPageCardRecordSet(bound).then(function (recordSet) {
+          var receipts = storedList(clone(recordSet.records[3].payload), code);
+          var journalIndex = receipts.findIndex(function (item) {
+            return item && item.contract === 'reader-native-page-card-action/1' &&
+              (item.state === 'preparing' || item.pending);
+          });
+          if (journalIndex < 0) return recovered;
+
+          var journal = clone(receipts[journalIndex]);
+          var operationID = String(journal.id || '');
+          var placementID = localRecordId(journal.placementId, code);
+          var kind = String(journal.kind || '');
+          if (!/^(?:npdf|pcard)_[0-9a-f]{24}$/.test(operationID) ||
+              (kind !== 'page-card-edit' && kind !== 'page-card-delete')) {
+            throw outgoingRequestError('页面卡片恢复日志无效', code, 409);
+          }
+          var before = nativePDFNoteSnapshot(journal.before, placementID, code);
+          var after = kind === 'page-card-edit'
+            ? nativePDFNoteSnapshot(journal.after, placementID, code) : null;
+          var preparing = journal.state === 'preparing';
+          var targetState = preparing ? 'done'
+            : String(journal.pending && journal.pending.target || '');
+          var sourceState = targetState === 'done' ? 'undone' : 'done';
+          if ((targetState !== 'done' && targetState !== 'undone') ||
+              (!preparing && journal.state !== sourceState)) {
+            throw outgoingRequestError('页面卡片恢复状态无效', code, 409);
+          }
+          var initialNotes = storedList(clone(recordSet.records[0].payload), code);
+          var initialPhase = placementPhase(
+            initialNotes, placementID, kind, targetState, before, after
+          );
+          if (initialPhase.phase === 'conflict') {
+            return terminalizeConflict(
+              recordSet, receipts, journalIndex, journal, operationID, sourceState
+            );
+          }
+          var canonical = preparing
+            ? nativePDFPageCardApplyCanonical(clone(journal.entity), code)
+            : nativePDFPageCardTransitionCanonical(
+                clone(journal.entity), targetState, operationID,
+                Number(journal.transition || 0), code
+              );
+
+          return canonical.then(function (entity) {
+            assertNativePDFWriterLease(writerLease);
+            return nativePDFPageCardRecordSet(bound).then(function (currentSet) {
+              var notes = storedList(clone(currentSet.records[0].payload), code);
+              var currentReceipts = storedList(clone(currentSet.records[3].payload), code);
+              var currentIndex = currentReceipts.findIndex(function (item) {
+                return item && String(item.id || '') === operationID;
+              });
+              if (currentIndex < 0) {
+                nativePDFRevisionConflict('页面卡片恢复日志');
+              }
+              var currentJournal = clone(currentReceipts[currentIndex]);
+              var stillPending = preparing
+                ? currentJournal.state === 'preparing'
+                : currentJournal.pending &&
+                  currentJournal.pending.target === targetState &&
+                  currentJournal.state === sourceState;
+              if (!stillPending) nativePDFRevisionConflict('页面卡片恢复日志');
+
+              var currentPhase = placementPhase(
+                notes, placementID, kind, targetState, before, after
+              );
+              if (currentPhase.phase === 'conflict') {
+                return terminalizeConflict(
+                  currentSet, currentReceipts, currentIndex, currentJournal,
+                  operationID, sourceState
+                );
+              }
+              var noteIndex = currentPhase.index;
+              var changed = false;
+              if (currentPhase.phase === 'source') {
+                if (kind === 'page-card-delete') {
+                  if (targetState === 'done') {
+                    notes.splice(noteIndex, 1);
+                  } else {
+                    var insertAt = Math.max(0, Math.min(
+                      notes.length, Number(currentJournal.beforeIndex) || 0
+                    ));
+                    notes.splice(insertAt, 0, clone(before));
+                  }
+                } else {
+                  notes[noteIndex] = clone(targetState === 'done' ? after : before);
+                }
+                changed = true;
+              }
+
+              currentJournal.entity = clone(entity);
+              currentJournal.state = targetState;
+              currentJournal.pending = null;
+              currentJournal.updatedAt = Date.now();
+              currentReceipts[currentIndex] = currentJournal;
+              var suffix = randomHex(12);
+              var mutations = [stateRecordMutation(
+                'pdf-assistant-ops', boundedAssistantOperationReceipts(currentReceipts),
+                suffix + '-page-card-recovery-ops', currentSet.records[3].rev
+              )];
+              if (changed) {
+                var placements = deriveCardPlacements(notes);
+                var references = deriveEntityReferences(placements);
+                mutations.unshift(
+                  stateRecordMutation(
+                    'document-notes-legacy', notes,
+                    suffix + '-page-card-recovery-notes', currentSet.records[0].rev
+                  ),
+                  stateRecordMutation(
+                    'card-placements', placements,
+                    suffix + '-page-card-recovery-placements', currentSet.records[1].rev
+                  ),
+                  stateRecordMutation(
+                    'entity-references', references,
+                    suffix + '-page-card-recovery-references', currentSet.records[2].rev
+                  )
+                );
+              }
+              return stores.document.batch(mutations, bound).then(function () {
+                recovered = true;
+                if (changed) {
+                  announceLocalNotesChanged('page-card-recovery');
+                  try { if (typeof root.notesReload === 'function') root.notesReload(); } catch (_) {}
+                }
+                return next();
+              });
+            });
+          });
+        });
+      }
+
+      return next();
+    });
+  }
+
+  function nativeReaderPageCardAction(input) {
+    var code = 'BW_NATIVE_READER_PAGE_CARD_ACTION';
+    if (!exactKeys(input, ['operationId', 'action']) ||
+        !/^(?:npdf|pcard)_[0-9a-f]{24}$/.test(String(input.operationId || '')) ||
+        (input.action !== 'undo' && input.action !== 'redo')) {
+      return Promise.reject(outgoingRequestError(
+        '页面卡片撤销参数无效', code, 400
+      ));
+    }
+    var operationID = String(input.operationId);
+    var targetState = input.action === 'undo' ? 'undone' : 'done';
+    var sourceState = input.action === 'undo' ? 'done' : 'undone';
+    var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
+    return bootPromise.then(function () {
+      if (nativeInterfaceSurface !== 'pdf') {
+        throw new RuntimeError(
+          '当前界面不是 PDF 页面卡片宿主', 'BW_NATIVE_READER_PAGE_CARD_SURFACE'
+        );
+      }
+      return withNativePDFWriter('reader-page-card-action', function (writerLease) {
+        return serializeLocalStateMutation('document', 'pdf-assistant-bundle', function () {
+          assertNativePDFWriterLease(writerLease);
+          return nativePDFPageCardRecordSet(bound).then(function (recordSet) {
+            var receipts = storedList(clone(recordSet.records[3].payload), code);
+            var journalIndex = receipts.findIndex(function (item) {
+              return item && String(item.id || '') === operationID;
+            });
+            if (journalIndex < 0 || receipts[journalIndex].contract !==
+                'reader-native-page-card-action/1') {
+              throw outgoingRequestError('页面卡片操作记录已失效', code, 404);
+            }
+            var journal = clone(receipts[journalIndex]);
+            if (journal.state === targetState && !journal.pending) {
+              return {
+                ok: true, operationId: operationID, action: input.action,
+                state: targetState, replayed: true,
+                page: journal.page, number: journal.number, id: journal.placementId
+              };
+            }
+            if (journal.pending) {
+              if (journal.pending.target !== targetState) {
+                nativePDFRevisionConflict('页面卡片撤销状态');
+              }
+            } else {
+              if (journal.state !== sourceState) {
+                nativePDFRevisionConflict('页面卡片撤销状态');
+              }
+              journal.transition = Number(journal.transition || 0) + 1;
+              journal.pending = { target: targetState, step: 'intent' };
+              journal.updatedAt = Date.now();
+              receipts[journalIndex] = journal;
+              return stores.document.batch([
+                stateRecordMutation(
+                  'pdf-assistant-ops', receipts,
+                  randomHex(12) + '-page-card-transition-intent',
+                  recordSet.records[3].rev
+                )
+              ], bound).then(function () { return null; });
+            }
+            return null;
+          }).then(function (early) {
+            if (early) return early;
+            return nativePDFPageCardRecordSet(bound).then(function (intentSet) {
+              var intentReceipts = storedList(clone(intentSet.records[3].payload), code);
+              var intentIndex = intentReceipts.findIndex(function (item) {
+                return item && String(item.id || '') === operationID;
+              });
+              var journal = intentIndex >= 0 ? clone(intentReceipts[intentIndex]) : null;
+              if (!journal || !journal.pending ||
+                  journal.pending.target !== targetState) {
+                nativePDFRevisionConflict('页面卡片撤销日志');
+              }
+              return nativePDFPageCardTransitionCanonical(
+                journal.entity, targetState, operationID,
+                Number(journal.transition || 0), code
+              ).then(function (entity) {
+                return nativePDFPageCardRecordSet(bound).then(function (currentSet) {
+                  var notes = storedList(clone(currentSet.records[0].payload), code);
+                  var currentReceipts = storedList(clone(currentSet.records[3].payload), code);
+                  var currentIndex = currentReceipts.findIndex(function (item) {
+                    return item && String(item.id || '') === operationID;
+                  });
+                  var currentJournal = currentIndex >= 0
+                    ? clone(currentReceipts[currentIndex]) : null;
+                  if (!currentJournal || !currentJournal.pending ||
+                      currentJournal.pending.target !== targetState) {
+                    nativePDFRevisionConflict('页面卡片撤销日志');
+                  }
+                  var noteIndex = notes.findIndex(function (note) {
+                    return note && String(note.id || '') === currentJournal.placementId;
+                  });
+                  var kind = String(currentJournal.kind || '');
+                  if (targetState === 'undone') {
+                    if (kind === 'page-card-delete') {
+                      if (noteIndex >= 0) nativePDFRevisionConflict('页面卡片内容');
+                      var insertAt = Math.max(0, Math.min(
+                        notes.length, Number(currentJournal.beforeIndex) || 0
+                      ));
+                      notes.splice(insertAt, 0, clone(currentJournal.before));
+                    } else {
+                      if (noteIndex < 0 || canonicalJSONString(
+                        nativePDFNoteSnapshot(notes[noteIndex], currentJournal.placementId, code)
+                      ) !== canonicalJSONString(currentJournal.after)) {
+                        nativePDFRevisionConflict('页面卡片内容');
+                      }
+                      notes[noteIndex] = clone(currentJournal.before);
+                    }
+                  } else if (kind === 'page-card-delete') {
+                    if (noteIndex < 0 || canonicalJSONString(
+                      nativePDFNoteSnapshot(notes[noteIndex], currentJournal.placementId, code)
+                    ) !== canonicalJSONString(currentJournal.before)) {
+                      nativePDFRevisionConflict('页面卡片内容');
+                    }
+                    notes.splice(noteIndex, 1);
+                  } else {
+                    if (noteIndex < 0 || canonicalJSONString(
+                      nativePDFNoteSnapshot(notes[noteIndex], currentJournal.placementId, code)
+                    ) !== canonicalJSONString(currentJournal.before)) {
+                      nativePDFRevisionConflict('页面卡片内容');
+                    }
+                    notes[noteIndex] = clone(currentJournal.after);
+                  }
+                  currentJournal.entity = clone(entity);
+                  currentJournal.state = targetState;
+                  currentJournal.pending = null;
+                  currentJournal.updatedAt = Date.now();
+                  currentReceipts[currentIndex] = currentJournal;
+                  var placements = deriveCardPlacements(notes);
+                  var references = deriveEntityReferences(placements);
+                  var suffix = randomHex(12);
+                  return stores.document.batch([
+                    stateRecordMutation(
+                      'document-notes-legacy', notes, suffix + '-page-card-transition-notes',
+                      currentSet.records[0].rev
+                    ),
+                    stateRecordMutation(
+                      'card-placements', placements,
+                      suffix + '-page-card-transition-placements',
+                      currentSet.records[1].rev
+                    ),
+                    stateRecordMutation(
+                      'entity-references', references,
+                      suffix + '-page-card-transition-references',
+                      currentSet.records[2].rev
+                    ),
+                    stateRecordMutation(
+                      'pdf-assistant-ops', currentReceipts,
+                      suffix + '-page-card-transition-ops',
+                      currentSet.records[3].rev
+                    )
+                  ], bound).then(function () {
+                    announceLocalNotesChanged('page-card-' + input.action);
+                    return {
+                      ok: true, operationId: operationID, action: input.action,
+                      state: targetState, replayed: false,
+                      page: currentJournal.page, number: currentJournal.number,
+                      id: currentJournal.placementId
+                    };
+                  });
+                });
+              });
+            });
+          });
+        });
+      });
+    });
+  }
+
+  function nativePDFCommitActions(actions, expectedState, writerLease) {
     assertNativePDFWriterLease(writerLease);
     if (!Array.isArray(actions)) {
       return Promise.reject(new RuntimeError(
         'PDF 助手动作列表无效', 'BW_NATIVE_PDF_ASSISTANT_ACTION'
       ));
     }
-    var hasLocal = actions.some(function (action) {
-      return !!nativePDFActionDescriptor(action);
+    var descriptors = actions.map(nativePDFActionDescriptor);
+    var pageCardIndexes = [];
+    descriptors.forEach(function (descriptor, index) {
+      if (descriptor && (descriptor.kind === 'page-card-edit' ||
+          descriptor.kind === 'page-card-delete')) pageCardIndexes.push(index);
     });
+    if (pageCardIndexes.length) {
+      if (pageCardIndexes.length !== 1 || descriptors.some(function (descriptor, index) {
+        return index !== pageCardIndexes[0] && !!descriptor;
+      })) {
+        return Promise.reject(new RuntimeError(
+          '一次响应只能提交一个页面卡片动作', 'BW_NATIVE_PDF_ASSISTANT_ACTION'
+        ));
+      }
+      return nativePDFCommitPageCardAction(
+        actions, pageCardIndexes[0], expectedState, writerLease
+      );
+    }
+    var expectedRevisions = nativePDFExpectedRevisions(expectedState);
+    var hasLocal = descriptors.some(function (descriptor) { return !!descriptor; });
     if (!hasLocal) {
       return Promise.resolve({ actions: clone(actions), revisions: clone(expectedRevisions) });
     }
@@ -8287,7 +9669,7 @@
         });
 
         undo = undo.slice(-80);
-        receipts = receipts.slice(-160);
+        receipts = boundedAssistantOperationReceipts(receipts);
         var suffix = randomHex(12);
         var mutations = [];
         if (touchedHighlights) {
@@ -8418,7 +9800,7 @@
     return { event: event, data: data };
   }
 
-  function nativePDFCommittedSSE(response, initialRevisions, writerLease) {
+  function nativePDFCommittedSSE(response, initialState, writerLease) {
     if (!response.ok || !response.body || typeof ReadableStream === 'undefined') {
       releaseNativePDFWriterLease(writerLease);
       return Promise.resolve(response);
@@ -8427,7 +9809,7 @@
     var decoder = new TextDecoder();
     var encoder = new TextEncoder();
     var buffer = '';
-    var revisions = clone(initialRevisions);
+    var authority = clone(initialState);
     var stopped = false;
     var stream = new ReadableStream({
       start: function (controller) {
@@ -8458,9 +9840,13 @@
           }
           assertNativePDFWriterLease(writerLease);
           return nativePDFCommitActions(
-            actions, revisions, writerLease
+            actions, authority, writerLease
           ).then(function (result) {
-            revisions = result.revisions;
+            authority.revisions = result.revisions;
+            // A successful page-card write changes numbering; no later action
+            // in this response may reuse the pre-write geometry projection.
+            if (result.receipt && result.receipt.contract ===
+                'reader-native-page-card-action/1') delete authority.page_cards;
             controller.enqueue(encoder.encode(
               'event: actions\ndata: ' + JSON.stringify(result.actions) + '\n\n'
             ));
@@ -8523,6 +9909,8 @@
       writerLease = acquireNativePDFWriterLease('assistant-sse');
       return assertNoNativePDFMutationJournal();
     }).then(function () {
+      return nativePDFRecoverPendingPageCardJournals(writerLease);
+    }).then(function () {
       return nativePDFRequestBody(input, init, 'context', writerLease);
     }).then(function (request) {
       return nativePiFetch(url.href, {
@@ -8535,7 +9923,7 @@
         signal: requestSignal(input, init)
       }, route).then(function (response) {
         return nativePDFCommittedSSE(
-          response, request.snapshot.revisions, writerLease
+          response, request.snapshot, writerLease
         );
       });
     }).catch(function (error) {
@@ -8575,7 +9963,7 @@
           var plural = Array.isArray(result.client_actions);
           var actions = plural ? result.client_actions : (singular ? [result.client_action] : []);
           return nativePDFCommitActions(
-            actions, request.snapshot.revisions, writerLease
+            actions, request.snapshot, writerLease
           ).then(function (committed) {
             payload = clone(payload);
             if (plural) payload.result.client_actions = committed.actions;
@@ -10302,6 +11690,10 @@
   }
 
   function localContextCardBody(note, kind, payload) {
+    var contextText = localContextPlainText(
+      payload.contextText || payload.context_text || '', LOCAL_PAGE_CARD_CONTEXT_LIMIT
+    );
+    if (contextText) return contextText;
     if (kind === 'anki') {
       var rows = [];
       var cards = Array.isArray(payload.cards) ? payload.cards : [];
@@ -10313,10 +11705,12 @@
         // renderer accepts. Older notes commonly persisted q/a rather than
         // front/back; omitting them produced a formally valid but empty CARD.
         var frontField = card.front != null ? 'front'
-          : (card.q != null ? 'q' : (card.cloze != null ? 'cloze' : 'text'));
+          : (card.question != null ? 'question'
+            : (card.q != null ? 'q' : (card.cloze != null ? 'cloze' : 'text')));
         var front = localContextPlainText(card[frontField], 800);
         var back = localContextPlainText(
-          card.back != null ? card.back : card.a, 800
+          card.back != null ? card.back
+            : (card.answer != null ? card.answer : card.a), 800
         );
         if (front) parts.push(front);
         if (back) parts.push(back);
@@ -10325,15 +11719,93 @@
           if (cloze) parts.push(cloze);
         }
         if (parts.length) rows.push(parts.join(' / '));
-        if (rows.join('\n').length >= 2400) break;
+        if (rows.join('\n').length >= LOCAL_PAGE_CARD_CONTEXT_LIMIT) break;
       }
       return localContextPlainText(
-        rows.join('\n') || payload.text || note.text || '', 2400
+        rows.join('\n') || payload.text || note.text || '',
+        LOCAL_PAGE_CARD_CONTEXT_LIMIT
       );
     }
     return localContextPlainText(
-      payload.text || payload.content || note.text || '', 2400
+      payload.text || payload.content || note.text || '',
+      LOCAL_PAGE_CARD_CONTEXT_LIMIT
     );
+  }
+
+  function localPageCardReplacementFace(card, fields) {
+    card = card && typeof card === 'object' && !Array.isArray(card) ? card : {};
+    for (var index = 0; index < fields.length; index += 1) {
+      var field = fields[index];
+      if (card[field] != null) return String(card[field]);
+    }
+    return '';
+  }
+
+  // This is deliberately the exact shape accepted by reader_page_card_edit,
+  // not the richer persistence/source shape.  Learning-card metadata omitted
+  // here (deck/tags/reason) is preserved by the authoritative edit transaction.
+  function localPageCardReplacement(note, kind, payload) {
+    if (kind === 'anki') {
+      var cards = (Array.isArray(payload.cards) ? payload.cards : []).map(
+        function (card) {
+          card = card && typeof card === 'object' && !Array.isArray(card)
+            ? card : {};
+          var hasBasicFace = card.front != null || card.question != null ||
+            card.q != null || card.text != null || card.back != null ||
+            card.answer != null || card.a != null;
+          if (card.type === 'cloze' || (card.type == null && card.cloze != null &&
+              !hasBasicFace)) {
+            return { type: 'cloze', cloze: String(card.cloze || '') };
+          }
+          return {
+            type: 'basic',
+            front: localPageCardReplacementFace(
+              card, ['front', 'question', 'q', 'text']
+            ),
+            back: localPageCardReplacementFace(card, ['back', 'answer', 'a'])
+          };
+        }
+      );
+      return { replacement: 'cards', value: { cards: cards } };
+    }
+    return {
+      replacement: 'content',
+      value: {
+        content: String(payload.content == null
+          ? (payload.text == null ? note.text || '' : payload.text)
+          : payload.content)
+      }
+    };
+  }
+
+  function localPageCardContextContent(note, kind, payload) {
+    var replacement = localPageCardReplacement(note, kind, payload);
+    var encoded = canonicalJSONString(replacement.value);
+    // Account for the marker escape plus the surrounding JSON transport.  A
+    // pathological backslash-heavy value can be far larger on the wire than
+    // its UTF-16 length even before the 256 KiB direct-message hard limit.
+    var markerEscaped = encoded
+      .replace(/\\/g, '\\\\')
+      .replace(/⟦/g, '\\⟦')
+      .replace(/⟧/g, '\\⟧');
+    var wireBytes = utf8(JSON.stringify(markerEscaped)).byteLength;
+    var truncated = encoded.length > LOCAL_PAGE_CARD_CONTEXT_LIMIT ||
+      wireBytes > LOCAL_PAGE_CARD_CONTEXT_MAX_WIRE_BYTES;
+    var content = encoded;
+    if (truncated) {
+      var head = encoded.slice(0, LOCAL_PAGE_CARD_CONTEXT_FRAGMENT);
+      var tail = encoded.slice(-LOCAL_PAGE_CARD_CONTEXT_FRAGMENT);
+      content = '【卡片 replacement JSON 异常超大，已安全截断；原始长度=' +
+        encoded.length + ' UTF-16 字符】\n【头部片段】' + head +
+        '\n【尾部片段】' + tail;
+    }
+    return {
+      content: content,
+      contentLength: encoded.length,
+      contentFormat: LOCAL_PAGE_CARD_REPLACEMENT_FORMAT,
+      replacement: replacement.replacement,
+      contentTruncated: truncated
+    };
   }
 
   // page.context 只拿生成内联 CARD 所需的最小投影。来源始终是 App-owned
@@ -10366,25 +11838,48 @@
         if (!kind) continue;
         var data = kind === 'anki' ? note.card : note.html;
         var bind = data.bind;
-        if (!bind || typeof bind !== 'object' || Array.isArray(bind) ||
-            bind.kind !== 'page-chars' || Number(bind.page) !== page) continue;
-        var from = Number(bind.from), to = Number(bind.to);
-        if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 ||
-            to < from || to > 1000000) continue;
-        var id = String(note.id || note.noteId || '').slice(0, 240);
-        if (!id) continue;
-        cards.push({
+        var hasPageBind = !!(bind && typeof bind === 'object' &&
+          !Array.isArray(bind) && bind.kind === 'page-chars');
+        if (hasPageBind && Number(bind.page) !== page) continue;
+        var from = Number(bind && bind.from), to = Number(bind && bind.to);
+        var bound = !!(hasPageBind && Number(bind.page) === page &&
+          Number.isInteger(from) && Number.isInteger(to) && from >= 0 &&
+          to >= from && to <= 1000000);
+        var anchor = note.anchor;
+        var unbound = !bound && !!(anchor && typeof anchor === 'object' &&
+          !Array.isArray(anchor) && anchor.kind === 'pdf' &&
+          Number(anchor.page) === page);
+        if (!bound && !unbound) continue;
+        var id = localRecordId(note.id || note.noteId, 'BW_LOCAL_PAGE_CARDS');
+        var anchorLabel = bound ? localContextPlainText(bind.text || '', 120) : '';
+        var cardLabel = localContextPlainText(
+          data.label || data.title || data.gid || data.cid || id, 120
+        );
+        var contextContent = localPageCardContextContent(note, kind, data);
+        var projected = {
           id: id,
           kind: kind,
-          label: localContextPlainText(
-            data.label || data.title || data.gid || data.cid || id, 120
-          ),
+          label: anchorLabel || cardLabel,
           text: localContextCardBody(note, kind, data),
-          bind: {
+          contextContent: contextContent.content,
+          contentLength: contextContent.contentLength,
+          contentFormat: contextContent.contentFormat,
+          replacement: contextContent.replacement,
+          contentTruncated: contextContent.contentTruncated
+        };
+        if (bound) {
+          projected.bind = {
             kind: 'page-chars', page: page, from: from, to: to,
             text: localContextPlainText(bind.text || '', 200)
-          }
-        });
+          };
+        } else {
+          // 历史手动 placement 没有字符 bind。它属于哪一页可以由权威
+          // PDF anchor 确认，但不能据此猜正文词或伪造页内序号。
+          projected.bind = null;
+          projected.number = null;
+          projected.unbound = true;
+        }
+        cards.push(projected);
         // 超过这个数量就不能保证有界读取，也不能截掉尾部后继续声称序号完整。
         if (cards.length > 2000) {
           throw new RuntimeError(
@@ -10397,6 +11892,110 @@
         page: page,
         revision: Number(record.rev) || 0,
         cards: cards
+      };
+    });
+  }
+
+  // Complete, stable source for one page placement.  This is intentionally a
+  // separate capability from pageContextCards: the latter is a small list used
+  // on every context refresh, while this source may be read in bounded chunks
+  // by an explicit assistant tool.
+  function nativePageCardSource(input) {
+    var payload = input && typeof input === 'object' && !Array.isArray(input)
+      ? input : {};
+    if (Object.keys(payload).sort().join(',') !== 'id,page' ||
+        typeof payload.page !== 'number' || !Number.isInteger(payload.page) ||
+        payload.page < 1) {
+      return Promise.reject(new RuntimeError(
+        '本地页面卡片详情参数无效', 'BW_LOCAL_PAGE_CARD_SOURCE_PARAMS'
+      ));
+    }
+    var page = payload.page;
+    var id;
+    try { id = localRecordId(payload.id, 'BW_LOCAL_PAGE_CARD_SOURCE'); }
+    catch (error) { return Promise.reject(error); }
+    return bootPromise.then(function () {
+      return storedStateRecord(
+        stores.document, 'document-notes-legacy', 'documentId', bookId, []
+      );
+    }).then(function (record) {
+      var notes = Array.isArray(record.payload) ? record.payload : [];
+      var note = null;
+      for (var index = 0; index < notes.length; index += 1) {
+        var candidate = notes[index];
+        if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+        if (String(candidate.id || candidate.noteId || '') === id) {
+          note = candidate;
+          break;
+        }
+      }
+      if (!note) {
+        throw new RuntimeError(
+          '页面卡片不存在', 'BW_LOCAL_PAGE_CARD_SOURCE_NOT_FOUND'
+        );
+      }
+      var kind = note.card && typeof note.card === 'object' && !Array.isArray(note.card)
+        ? 'anki'
+        : (note.html && typeof note.html === 'object' && !Array.isArray(note.html)
+          ? 'card' : '');
+      if (!kind) {
+        throw new RuntimeError(
+          '目标不是页面卡片', 'BW_LOCAL_PAGE_CARD_SOURCE_NOT_CARD'
+        );
+      }
+      var data = kind === 'anki' ? note.card : note.html;
+      var bind = data.bind;
+      var boundHere = !!(bind && typeof bind === 'object' && !Array.isArray(bind) &&
+        bind.kind === 'page-chars' && Number(bind.page) === page);
+      var anchor = note.anchor;
+      var freeHere = !boundHere && !!(anchor && typeof anchor === 'object' &&
+        !Array.isArray(anchor) && anchor.kind === 'pdf' &&
+        Number(anchor.page) === page);
+      if (!boundHere && !freeHere) {
+        throw new RuntimeError(
+          '页面卡片不属于当前页', 'BW_LOCAL_PAGE_CARD_SOURCE_PAGE'
+        );
+      }
+      var source;
+      if (kind === 'anki') {
+        source = {
+          kind: 'anki',
+          cards: clone(Array.isArray(data.cards) ? data.cards : [])
+        };
+      } else {
+        var rawContent = String(data.content == null
+          ? (data.text == null ? note.text || '' : data.text)
+          : data.content);
+        var contextText = String(
+          data.contextText == null ? (data.context_text || '') : data.contextText
+        );
+        if (!contextText.trim()) {
+          contextText = localContextPlainText(
+            rawContent, LOCAL_PAGE_CARD_CONTEXT_LIMIT
+          );
+        }
+        source = {
+          kind: 'card',
+          isHtml: data.isHtml === true,
+          type: String(data.type || '').slice(0, 256),
+          category: String(data.category || '').slice(0, 128),
+          contextText: contextText.slice(0, LOCAL_PAGE_CARD_CONTEXT_LIMIT),
+          content: rawContent
+        };
+      }
+      var encoded = canonicalJSONString(source);
+      if (utf8(encoded).byteLength > 3 * 1024 * 1024) {
+        throw new RuntimeError(
+          '页面卡片详情过大', 'BW_LOCAL_PAGE_CARD_SOURCE_LIMIT'
+        );
+      }
+      return {
+        contract: LOCAL_PAGE_CARD_SOURCE_CONTRACT,
+        page: page,
+        revision: Number(record.rev) || 0,
+        id: id,
+        kind: kind,
+        content: encoded
       };
     });
   }
@@ -10774,6 +12373,8 @@
     localBookId: bookId,
     ready: function () { return bootPromise; },
     undoLast: nativeReaderUndoLast,
+    pageCardMutate: nativeReaderPageCardMutate,
+    pageCardAction: nativeReaderPageCardAction,
     createNote: nativeReaderCreateNote,
     editNote: nativeReaderEditNote,
     highlights: nativeReaderHighlights,
@@ -10833,6 +12434,7 @@
     dictionaryFallbackCache: dictionaryFallbackCacheAPI,
     publishPageContext: publishLocalPageContext,
     pageContextCards: nativePageContextCards,
+    pageCardSource: nativePageCardSource,
     documentHost: function () {
       return root.RC && root.RC.documentHost && root.RC.documentHost.current
         ? root.RC.documentHost.current() : null;
@@ -10869,6 +12471,12 @@
   runtimeRoot.nativeLocalRuntime = api;
   root._nativeReaderUndoLast = function (operationID) {
     return api.undoLast(operationID);
+  };
+  root._nativeReaderPageCardMutate = function (input) {
+    return api.pageCardMutate(input);
+  };
+  root._nativeReaderPageCardAction = function (input) {
+    return api.pageCardAction(input);
   };
   // 与撤销同一形态的受信入口：经 api 转一道，调用方拿不到内部实现，
   // 也无法绕过其中的界面与内容校验。

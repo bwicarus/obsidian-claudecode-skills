@@ -255,7 +255,8 @@ function openGrammarPanel() {
   if (_onGr && !_grammarHistLoaded && typeof loadGrammarHistory === 'function') loadGrammarHistory();
 }
 window.closeGrammarPanel = () => {
-  document.getElementById('grammar-panel')?.classList.remove('open');
+  document.getElementById('grammar-panel')?.classList.remove('open', 'rc-side-settings-open');
+  const sideSettings = document.getElementById('side-settings'); if (sideSettings) sideSettings.style.display = 'none';
   document.body.classList.remove('grammar-open');
   _hideDepTip();
   // 还原侧栏打开时临时切走的双页——仅当当前仍是"被临时切出来的单列"(开栏期间手动改过模式就不还原)
@@ -301,14 +302,19 @@ window._gpSetBlur = (v) => {
 window.toggleSideSettings = (ev) => {
   if (ev) ev.stopPropagation();
   const m = document.getElementById('side-settings'); if (!m) return;
-  if (m.style.display === 'block') { m.style.display = 'none'; return; }
+  const panel = document.getElementById('grammar-panel');
+  if (m.style.display === 'block') {
+    m.style.display = 'none'; panel?.classList.remove('rc-side-settings-open'); return;
+  }
   _gpSyncUI();
   m.style.display = 'block';
+  panel?.classList.add('rc-side-settings-open');
 };
 document.addEventListener('pointerdown', (e) => {   // 点弹层外部 → 关
   const m = document.getElementById('side-settings');
   if (m && m.style.display === 'block' && !m.contains(e.target) && !e.target.closest('#side-settings-btn')) {
     m.style.display = 'none';
+    document.getElementById('grammar-panel')?.classList.remove('rc-side-settings-open');
   }
 }, true);
 _gpApplyAppearance();   // 载入即应用持久化设置

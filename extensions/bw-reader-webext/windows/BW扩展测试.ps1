@@ -1,7 +1,7 @@
 param([switch]$NoLaunch)
 
 $ErrorActionPreference = 'Stop'
-$launcherVersion = 12
+$launcherVersion = 13
 $channelUrl = 'https://bwicarus.taile44d0c.ts.net/static/pdf/bw-reader-webext-test-channel.json'
 $baseDir = Join-Path $env:LOCALAPPDATA 'BWReaderExtensionTest'
 $extensionDir = Join-Path $baseDir 'extension'

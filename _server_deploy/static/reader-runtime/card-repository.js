@@ -1045,6 +1045,67 @@
       });
     }
 
+    // Replace only the semantic card faces of an existing entity.  Page-card
+    // editing must not reuse saveConfirmedCard: that transition also confirms
+    // a draft and rewrites review state.  Keeping this operation entity-only
+    // preserves every stable batch index, learning phase, review value and
+    // external projection receipt (including an already-exported Anki note).
+    function replaceContent(idValue, cardsValue, operationOptions) {
+      operationOptions = operationOptions || {};
+      var id;
+      var cards;
+      try {
+        id = normalizeId(idValue);
+        cards = normalizeCards(cardsValue);
+      } catch (error) { return Promise.reject(error); }
+      return serialize(function () {
+        return pair(id).then(function (records) {
+          rejectDeleted(records, id);
+          if (!records.entity || !records.state) {
+            throw new CardRepositoryError('卡组不存在', 'BW_CARD_REPOSITORY_NOT_FOUND');
+          }
+          var previous = project(records, false);
+          if (cards.length !== previous.cards.length) {
+            throw new CardRepositoryError(
+              '内容修改不得改变批内卡片数量',
+              'BW_CARD_REPOSITORY_TRANSITION'
+            );
+          }
+          // Validate the untouched state map before accepting an entity-only
+          // write.  A partial/corrupt pair must never be hidden by an edit.
+          normalizeStateMap(records.state.value.states, cards.length);
+          if (same(previous.cards, cards)) return previous;
+          var entity = entityValue(
+            id,
+            cards,
+            records.entity.value.source,
+            records.entity.value.createdAt,
+            now()
+          );
+          var base = mutationBase(
+            operationOptions.mutationId,
+            'replace-content',
+            id,
+            mutationFactory
+          );
+          return store.put(ENTITY_COLLECTION, entity, {
+            id: id,
+            ifRev: revision(
+              records.entity,
+              operationOptions.ifEntityRev,
+              'ifEntityRev'
+            ),
+            mutationId: base + ':entity'
+          }).then(function (entityRecord) {
+            return project({
+              entity: verifyWrite(entityRecord, entity, ENTITY_COLLECTION),
+              state: records.state
+            }, false);
+          });
+        });
+      });
+    }
+
     function removeDraftCard(idValue, cardIndex, operationOptions) {
       operationOptions = operationOptions || {};
       var id;
@@ -1532,6 +1593,7 @@
       newCardId: newCardId,
       registerDraft: registerDraft,
       saveConfirmedCard: saveConfirmedCard,
+      replaceContent: replaceContent,
       removeDraftCard: removeDraftCard,
       patchState: patchState,
       recordAnkiReceipt: recordAnkiReceipt,
@@ -1580,6 +1642,7 @@
     newCardId: secureId,
     registerDraft: delegate('registerDraft'),
     saveConfirmedCard: delegate('saveConfirmedCard'),
+    replaceContent: delegate('replaceContent'),
     removeDraftCard: delegate('removeDraftCard'),
     patchState: delegate('patchState'),
     recordAnkiReceipt: delegate('recordAnkiReceipt'),

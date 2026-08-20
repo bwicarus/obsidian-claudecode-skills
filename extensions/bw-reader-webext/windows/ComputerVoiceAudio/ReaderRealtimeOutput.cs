@@ -51,6 +51,7 @@ internal static class ReaderRealtimeOutputProtocol
     internal const string AckType = "reader-realtime-output-ack";
     internal const int MaximumTextCharacters = 8_000;
     internal const int MaximumPayloadBytes = 32 * 1024;
+    internal const int MaximumPageCardContentCharacters = 100_000;
 
     internal static bool IsKind(string value) => value is
         "assistant-turn"
@@ -130,7 +131,10 @@ internal static class ReaderRealtimeOutputProtocol
         }
         byte[] bytes = Encoding.UTF8.GetBytes(
             payload.ToJsonString(DirectBridgeContract.JsonOptions));
-        if (bytes.Length > MaximumPayloadBytes)
+        int maximumPayloadBytes = IsPageCardMutation(kind, payload)
+            ? DirectBridgeContract.MaximumMessageBytes
+            : MaximumPayloadBytes;
+        if (bytes.Length > maximumPayloadBytes)
         {
             throw Invalid("Reader 输出 payload 超过大小上限");
         }
@@ -344,6 +348,7 @@ internal static class ReaderRealtimeOutputProtocol
         string fn = Text(root, "fn", 64);
         if (fn is not (
             "_nativeReaderUndoLast"
+            or "_nativeReaderPageCardMutate"
             or "_nativeReaderCreateNote"
             or "_nativeReaderEditNote"
             or "_nativeReaderMakeNote"
@@ -397,6 +402,143 @@ internal static class ReaderRealtimeOutputProtocol
                 if (paperBlock.ValueKind != JsonValueKind.Object)
                 {
                     throw Invalid("Reader 练习纸元素必须是对象");
+                }
+            }
+            return;
+        }
+        if (fn is "_nativeReaderPageCardMutate")
+        {
+            if (args.GetArrayLength() != 1
+                || args[0].ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 页面卡片修改需要一个对象");
+            }
+            JsonElement mutation = args[0];
+            DirectJsonValidation.RequireNoDuplicateKeys(mutation);
+            string operation = Text(mutation, "operation", 16);
+            bool hasNumber = mutation.TryGetProperty(
+                "number",
+                out JsonElement numberValue);
+            if (operation == "edit")
+            {
+                if (hasNumber)
+                {
+                    Exact(
+                        mutation,
+                        "operation",
+                        "operationId",
+                        "number",
+                        "expectedId",
+                        "expectedRevision",
+                        "replacement");
+                }
+                else
+                {
+                    Exact(
+                        mutation,
+                        "operation",
+                        "operationId",
+                        "expectedId",
+                        "expectedRevision",
+                        "replacement");
+                }
+            }
+            else if (operation == "delete")
+            {
+                if (hasNumber)
+                {
+                    Exact(
+                        mutation,
+                        "operation",
+                        "operationId",
+                        "number",
+                        "expectedId",
+                        "expectedRevision");
+                }
+                else
+                {
+                    Exact(
+                        mutation,
+                        "operation",
+                        "operationId",
+                        "expectedId",
+                        "expectedRevision");
+                }
+            }
+            else
+            {
+                throw Invalid("Reader 页面卡片操作无效");
+            }
+            string pageCardOperationId = Text(mutation, "operationId", 30);
+            const string operationPrefix = "pcard_";
+            if (pageCardOperationId.Length != operationPrefix.Length + 24
+                || !pageCardOperationId.StartsWith(
+                    operationPrefix,
+                    StringComparison.Ordinal)
+                || pageCardOperationId[operationPrefix.Length..].Any(character =>
+                    character is not (
+                        >= '0' and <= '9' or >= 'a' and <= 'f')))
+            {
+                throw Invalid("Reader 页面卡片操作编号无效");
+            }
+            if (hasNumber
+                && (numberValue.ValueKind != JsonValueKind.Number
+                    || !numberValue.TryGetInt32(out int number)
+                    || number < 1))
+            {
+                throw Invalid("Reader 页面卡片当前序号无效");
+            }
+            string expectedId = Text(mutation, "expectedId", 96);
+            if (expectedId.Length < 2
+                || expectedId.Any(character => character is not (
+                    >= 'A' and <= 'Z'
+                    or >= 'a' and <= 'z'
+                    or >= '0' and <= '9'
+                    or '_' or '-')))
+            {
+                throw Invalid("Reader 页面卡片稳定编号无效");
+            }
+            if (!mutation.TryGetProperty(
+                    "expectedRevision",
+                    out JsonElement revisionValue)
+                || revisionValue.ValueKind != JsonValueKind.Number
+                || !revisionValue.TryGetInt64(out long expectedRevision)
+                || expectedRevision < 0
+                || expectedRevision > 9_007_199_254_740_991L)
+            {
+                throw Invalid("Reader 页面卡片版本无效");
+            }
+            if (operation == "edit")
+            {
+                JsonElement replacement = mutation.GetProperty("replacement");
+                if (replacement.ValueKind != JsonValueKind.Object)
+                {
+                    throw Invalid("Reader 页面卡片替换内容无效");
+                }
+                DirectJsonValidation.RequireNoDuplicateKeys(replacement);
+                bool hasContent = replacement.TryGetProperty("content", out _);
+                bool hasCards = replacement.TryGetProperty("cards", out _);
+                if (hasContent == hasCards)
+                {
+                    throw Invalid("Reader 页面卡片只能选择一种替换内容");
+                }
+                if (hasContent)
+                {
+                    Exact(replacement, "content");
+                    string content = Text(
+                        replacement,
+                        "content",
+                        MaximumPageCardContentCharacters);
+                    if (string.IsNullOrWhiteSpace(content))
+                    {
+                        throw Invalid("Reader 页面卡片内容为空");
+                    }
+                }
+                else
+                {
+                    Exact(replacement, "cards");
+                    ValidatePageCardReplacementCards(
+                        replacement.GetProperty("cards"));
                 }
             }
             return;
@@ -1009,6 +1151,105 @@ internal static class ReaderRealtimeOutputProtocol
                     throw Invalid("Reader Anki 草稿卡片类型无效");
             }
         }
+    }
+
+    private static void ValidatePageCardReplacementCards(JsonElement cards)
+    {
+        if (
+            cards.ValueKind != JsonValueKind.Array
+            || cards.GetArrayLength() is < 1 or > 12
+        )
+        {
+            throw Invalid("Reader 页面卡片数量无效");
+        }
+        foreach (JsonElement card in cards.EnumerateArray())
+        {
+            if (card.ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 页面卡片无效");
+            }
+            DirectJsonValidation.RequireNoDuplicateKeys(card);
+            string type = Text(card, "type", 16);
+            if (type == "basic")
+            {
+                Exact(card, "type", "front", "back");
+                _ = Text(
+                    card,
+                    "front",
+                    MaximumPageCardContentCharacters);
+                _ = Text(
+                    card,
+                    "back",
+                    MaximumPageCardContentCharacters);
+            }
+            else if (type == "cloze")
+            {
+                Exact(card, "type", "cloze");
+                string cloze = Text(
+                    card,
+                    "cloze",
+                    MaximumPageCardContentCharacters);
+                if (!ContainsPageCardClozeDeletion(cloze))
+                {
+                    throw Invalid(
+                        "Reader 页面 cloze 卡至少需要一个 {{c1::...}} 挖空");
+                }
+            }
+            else
+            {
+                throw Invalid("Reader 页面卡片类型无效");
+            }
+        }
+    }
+
+    private static bool ContainsPageCardClozeDeletion(string value)
+    {
+        int searchFrom = 0;
+        while (searchFrom < value.Length)
+        {
+            int marker = value.IndexOf("{{c", searchFrom, StringComparison.Ordinal);
+            if (marker < 0)
+            {
+                return false;
+            }
+            int cursor = marker + 3;
+            if (cursor >= value.Length || value[cursor] is < '1' or > '9')
+            {
+                searchFrom = marker + 3;
+                continue;
+            }
+            cursor += 1;
+            while (cursor < value.Length && value[cursor] is >= '0' and <= '9')
+            {
+                cursor += 1;
+            }
+            if (cursor + 2 > value.Length
+                || value[cursor] != ':'
+                || value[cursor + 1] != ':')
+            {
+                searchFrom = marker + 3;
+                continue;
+            }
+            int contentStart = cursor + 2;
+            int close = value.IndexOf("}}", contentStart, StringComparison.Ordinal);
+            if (close > contentStart)
+            {
+                return true;
+            }
+            searchFrom = marker + 3;
+        }
+        return false;
+    }
+
+    private static bool IsPageCardMutation(string kind, JsonNode payload)
+    {
+        if (kind != "client-action" || payload is not JsonObject action)
+        {
+            return false;
+        }
+        return action["fn"] is JsonValue functionValue
+            && functionValue.TryGetValue(out string? functionName)
+            && functionName == "_nativeReaderPageCardMutate";
     }
 
     /// 必填字段全等 + 允许一组具名可选字段。

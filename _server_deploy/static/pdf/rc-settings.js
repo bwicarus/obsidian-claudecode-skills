@@ -625,7 +625,9 @@
   function injectCss() {
     if ($('rc-settings-css')) return;
     var css =
-      '.rc-set-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:250}' +
+      // 设置是阅读器内最高的可交互 Web 层：正文标记、卡片、视频与语音浮层都必须退到它下面。
+      // 删除确认使用浏览器/原生确认面，天然仍在 Web 内容之上。
+      '.rc-set-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:2147483400}' +
       '.rc-set-mask .ep-set-modal{background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:16px 20px;width:420px;max-width:92vw;max-height:88vh;display:flex;flex-direction:column}' +
       '.rc-set-mask .ep-set-h3{margin:0 0 10px;font-size:15px;color:#cfe6ff}' +
       '.rc-set-mask .set-tabs{display:flex;gap:2px;border-bottom:1px solid #2a3550;flex-wrap:wrap}' +

@@ -309,9 +309,14 @@ async function waitForPDFMutationAction(messages, action, minimumCount = 1) {
 function makeDataStore(gateEvents, state = { values: new Map(), revision: 0 }) {
   const values = state.values;
   return {
-    put(collection, value) {
+    put(collection, value, options = {}) {
       const key = `${collection}:${value.id}`;
       const current = values.get(key);
+      if (options.ifRev != null && options.ifRev !== (current?.rev || 0)) {
+        const error = new Error("revision conflict");
+        error.code = "BW_DATA_CONFLICT";
+        return Promise.reject(error);
+      }
       const record = clone(value);
       state.revision += 1;
       values.set(key, { value: record, rev: (current?.rev || 0) + 1, updatedAt: state.revision });
@@ -329,6 +334,12 @@ function makeDataStore(gateEvents, state = { values: new Map(), revision: 0 }) {
         const value = values.get(`${collection}:${id}`);
         return value == null ? null : clone(value);
       }));
+    },
+    list(collection) {
+      const prefix = `${collection}:`;
+      return Promise.resolve([...values.entries()]
+        .filter(([key]) => key.startsWith(prefix))
+        .map(([, value]) => clone(value)));
     },
     batch(mutations) {
       for (const mutation of mutations) {
@@ -360,6 +371,7 @@ function makeDataStore(gateEvents, state = { values: new Map(), revision: 0 }) {
       if (String(id).startsWith("native-idb-gate-")) gateEvents.push("remove");
       return Promise.resolve({ ok: true });
     },
+    subscribe() { return () => {}; },
   };
 }
 
@@ -386,6 +398,8 @@ async function harness(options = {}) {
     get: (collection, id) => globalStore.get(collection, id),
     put: (collection, value) => globalStore.put(collection, value),
     remove: (collection, id) => globalStore.remove(collection, id),
+    list: (collection) => globalStore.list(collection),
+    batch: (mutations, options) => globalStore.batch(mutations, options),
     subscribe: () => () => {},
   };
   const shellPath = "/r/" + "a".repeat(64) +
@@ -2406,12 +2420,22 @@ test("native local page context joins the same monotonic journal without Pi", as
   await enableNativeContext(result);
   const runtime = result.context.BWReaderRuntime.nativeLocalRuntime;
   const file = "localbook-" + "b".repeat(64);
+  const replacement = JSON.stringify({ content: "完整卡片正文🙂".repeat(1200) });
+  const completeCardMarker =
+    `⟦CARD_START n="1" id="card-large" revision="7" type="card" ` +
+    `label="锚定词" content_format="application/vnd.bw-reader.card-replacement+json;version=1" ` +
+    `replacement="content" content_length="${replacement.length}" ` +
+    `content_truncated="false"⟧${replacement}⟦CARD_END⟧`;
+  const pageText =
+    `【当前显示区域之前】\n前文\n\n【当前显示区域（重点）】\n${completeCardMarker}` +
+    "\n\n【当前显示区域之后】\n后文";
+  assert.ok(pageText.length > 8192);
   const published = await runtime.publishPageContext({
     kind: "pdf",
     file,
     page: 12,
     title: "Local PDF",
-    text: "【当前显示区域之前】\n前文\n\n【当前显示区域（重点）】\n当前文字\n\n【当前显示区域之后】\n后文",
+    text: pageText,
     textAvailable: true,
     textSource: "app-local-visible-window",
     fallbackReason: null,
@@ -2430,6 +2454,17 @@ test("native local page context joins the same monotonic journal without Pi", as
     }),
   });
   assert.equal(focus.status, 200);
+  const rejectedOpaque = await result.context.fetch("/pdf/api/outgoing/focus", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      kind: "text",
+      ref: { text: "x".repeat(8193) },
+      task: "selection",
+    }),
+  });
+  assert.equal(rejectedOpaque.status, 400);
+  assert.equal((await rejectedOpaque.json()).code, "BW_LOCAL_OUTGOING_FOCUS_BODY");
   const journal = await (await result.context.fetch(
     "/pdf/api/outgoing/journal?since=0&limit=20&wait=0",
   )).json();
@@ -2444,7 +2479,9 @@ test("native local page context joins the same monotonic journal without Pi", as
     journal.events[0].page_context.text_source,
     "app-local-visible-window",
   );
-  assert.match(journal.events[0].page_context.text, /当前显示区域（重点）/);
+  assert.equal(journal.events[0].page_context.text, pageText);
+  assert.match(journal.events[0].page_context.text, /content_truncated="false"/);
+  assert.match(journal.events[0].page_context.text, /完整卡片正文🙂完整卡片正文🙂/);
   assert.equal(result.gatewayMessages.length, 1);
   assert.equal(result.gatewayMessages[0].path, "/pdf/api/context-sync");
 
@@ -2625,6 +2662,7 @@ test("native page-context cards come from authoritative notes and refresh only a
       cards: [
         { front: "<b>问题</b>", back: "答案" },
         { q: "旧式问题", a: "旧式答案" },
+        { question: "渲染器问题", answer: "渲染器答案" },
       ],
     },
   })).status, 200);
@@ -2667,11 +2705,37 @@ test("native page-context cards come from authoritative notes and refresh only a
   assert.deepEqual(initial.cards[0], {
     id: "c_1111111111111111",
     kind: "anki",
-    label: "问答卡",
-    text: "问题 / 答案 旧式问题 / 旧式答案",
+    label: "锚点",
+    text: "问题 / 答案 旧式问题 / 旧式答案 渲染器问题 / 渲染器答案",
+    contextContent: JSON.stringify({
+      cards: [
+        { back: "答案", front: "<b>问题</b>", type: "basic" },
+        { back: "旧式答案", front: "旧式问题", type: "basic" },
+        { back: "渲染器答案", front: "渲染器问题", type: "basic" },
+      ],
+    }),
+    contentLength: JSON.stringify({
+      cards: [
+        { back: "答案", front: "<b>问题</b>", type: "basic" },
+        { back: "旧式答案", front: "旧式问题", type: "basic" },
+        { back: "渲染器答案", front: "渲染器问题", type: "basic" },
+      ],
+    }).length,
+    contentFormat: "application/vnd.bw-reader.card-replacement+json;version=1",
+    replacement: "cards",
+    contentTruncated: false,
     bind: { kind: "page-chars", page: 7, from: 4, to: 5, text: "锚点" },
   });
+  assert.equal(initial.cards[1].label, "天气");
   assert.equal(initial.cards[1].text, "晴天");
+  assert.equal(initial.cards[1].contentFormat,
+    "application/vnd.bw-reader.card-replacement+json;version=1");
+  assert.equal(initial.cards[1].replacement, "content");
+  assert.equal(initial.cards[1].contentTruncated, false);
+  assert.equal(initial.cards[1].contentLength, initial.cards[1].contextContent.length);
+  assert.deepEqual(JSON.parse(initial.cards[1].contextContent), {
+    content: "<script>bad()</script><b>晴天</b>",
+  }, "complete general-card context is the exact edit replacement shape");
 
   const missingChangeCount = changes.length;
   const missing = await context.fetch(
@@ -2706,6 +2770,974 @@ test("native page-context cards come from authoritative notes and refresh only a
     "c_2222222222222222",
     "c_3333333333333333",
   ], "the event follows the same committed batch as derived placement indexes");
+});
+
+test("native page-context prefers explicit contextText and falls back from an empty anchor label", async () => {
+  const { context } = await harness();
+  const save = (body) => context.fetch("/pdf/api/notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE,
+      anchor: { kind: "pdf", page: 7, x: 0.25, y: 0.4 },
+      ...body,
+    }),
+  });
+  assert.equal((await save({
+    id: "c_4444444444444444",
+    html: {
+      cid: "explicit-context",
+      label: "旧卡名",
+      content: "<b>仅供视觉渲染</b>",
+      contextText: "AI 应读取的完整正文",
+      bind: { kind: "page-chars", page: 7, from: 1, to: 2, text: "锚定词" },
+    },
+  })).status, 200);
+  assert.equal((await save({
+    id: "c_5555555555555555",
+    html: {
+      cid: "fallback-label",
+      label: "原卡名",
+      content: "<i>旧卡正文</i>",
+      bind: { kind: "page-chars", page: 7, from: 3, to: 4, text: "   " },
+    },
+  })).status, 200);
+  assert.equal((await save({
+    id: "c_6666666666666666",
+    card: {
+      gid: "legacy-unbound",
+      cid: "legacy-unbound",
+      label: "历史学习卡",
+      cards: [{ question: "历史题目", answer: "历史答案" }],
+    },
+  })).status, 200);
+
+  const cards = clone(await context.BWReaderRuntime.nativeLocalRuntime.pageContextCards({ page: 7 }));
+  assert.deepEqual(cards.cards.slice(0, 2).map(({ label, text }) => ({ label, text })), [
+    { label: "锚定词", text: "AI 应读取的完整正文" },
+    { label: "原卡名", text: "旧卡正文" },
+  ]);
+  assert.deepEqual(cards.cards[2], {
+    id: "c_6666666666666666",
+    kind: "anki",
+    label: "历史学习卡",
+    text: "历史题目 / 历史答案",
+    contextContent: JSON.stringify({
+      cards: [{ back: "历史答案", front: "历史题目", type: "basic" }],
+    }),
+    contentLength: JSON.stringify({
+      cards: [{ back: "历史答案", front: "历史题目", type: "basic" }],
+    }).length,
+    contentFormat: "application/vnd.bw-reader.card-replacement+json;version=1",
+    replacement: "cards",
+    contentTruncated: false,
+    bind: null,
+    number: null,
+    unbound: true,
+  });
+});
+
+test("native page-card source returns stable complete HTML and learning-card JSON and rejects wrong identity", async () => {
+  const { context } = await harness();
+  const save = (body) => context.fetch("/pdf/api/notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE,
+      anchor: { kind: "pdf", page: 7, x: 0.25, y: 0.4 },
+      ...body,
+    }),
+  });
+  const htmlId = "c_7777777777777777";
+  const learningId = "c_8888888888888888";
+  const htmlContent = "<section data-kind=\"完整\">" + "中文正文🙂".repeat(18000) + "</section>";
+  const htmlContext = "供 AI 完整读取的上下文：" + "甲乙丙丁".repeat(800);
+  const learningCards = [
+    {
+      type: "basic",
+      front: "完整问题",
+      back: "完整答案",
+      deck: "阅读::第七页",
+      tags: ["中文", "page-card"],
+      source: { paragraph: 3, quote: "不能被投影摘要截掉" },
+    },
+    {
+      type: "cloze",
+      cloze: "这是 {{c1::完整}} 的挖空内容",
+      reason: "保留整张学习卡记录",
+    },
+  ];
+
+  assert.equal((await save({
+    id: htmlId,
+    html: {
+      cid: "complete-html-card",
+      label: "完整工具卡",
+      isHtml: true,
+      type: "weather",
+      category: "tool",
+      content: htmlContent,
+      contextText: htmlContext,
+      bind: { kind: "page-chars", page: 7, from: 12, to: 15, text: "天气" },
+    },
+  })).status, 200);
+  assert.equal((await save({
+    id: learningId,
+    card: {
+      gid: "complete-learning-card",
+      cid: "complete-learning-card",
+      label: "完整学习卡",
+      cards: learningCards,
+      bind: { kind: "page-chars", page: 7, from: 30, to: 34, text: "复习" },
+    },
+  })).status, 200);
+
+  const runtime = context.BWReaderRuntime.nativeLocalRuntime;
+  const projected = clone(await runtime.pageContextCards({ page: 7 }));
+  const projectedHTML = projected.cards.find((card) => card.id === htmlId);
+  const projectedLearning = projected.cards.find((card) => card.id === learningId);
+  const htmlReplacement = JSON.stringify({ content: htmlContent });
+  assert.equal(projectedHTML.contentTruncated, true);
+  assert.equal(projectedHTML.contentLength, htmlReplacement.length);
+  assert.ok(projectedHTML.contentLength > 100000);
+  assert.match(projectedHTML.contextContent,
+    new RegExp(`异常超大，已安全截断；原始长度=${htmlReplacement.length}`));
+  assert.ok(projectedHTML.contextContent.includes(htmlReplacement.slice(0, 2000)));
+  assert.ok(projectedHTML.contextContent.includes(htmlReplacement.slice(-2000)));
+  assert.doesNotMatch(projectedHTML.contextContent, /供 AI 完整读取的上下文/,
+    "exceptional truncation is an explicit head/tail diagnostic, never a substitute summary");
+  assert.equal(projectedHTML.replacement, "content");
+  assert.equal(projectedLearning.contentTruncated, false);
+  assert.equal(projectedLearning.contentLength, projectedLearning.contextContent.length);
+  assert.deepEqual(JSON.parse(projectedLearning.contextContent), {
+    cards: [
+      { back: "完整答案", front: "完整问题", type: "basic" },
+      { cloze: "这是 {{c1::完整}} 的挖空内容", type: "cloze" },
+    ],
+  }, "complete learning-card context strips metadata into the exact edit shape");
+  const htmlFirst = clone(await runtime.pageCardSource({ page: 7, id: htmlId }));
+  const htmlSecond = clone(await runtime.pageCardSource({ page: 7, id: htmlId }));
+  assert.equal(htmlFirst.contract, "reader-local-page-card-source/1");
+  assert.equal(htmlFirst.page, 7);
+  assert.equal(htmlFirst.revision, 2);
+  assert.equal(htmlFirst.id, htmlId);
+  assert.equal(htmlFirst.kind, "card");
+  assert.equal(htmlFirst.content, htmlSecond.content,
+    "unchanged source must use stable canonical JSON, not renderer-dependent object order");
+  assert.deepEqual(JSON.parse(htmlFirst.content), {
+    category: "tool",
+    content: htmlContent,
+    contextText: htmlContext,
+    isHtml: true,
+    kind: "card",
+    type: "weather",
+  });
+  assert.ok(JSON.parse(htmlFirst.content).content.length > 100000,
+    "explicit source read preserves content beyond the exceptional snapshot fence");
+
+  const learning = clone(await runtime.pageCardSource({ page: 7, id: learningId }));
+  assert.equal(learning.contract, "reader-local-page-card-source/1");
+  assert.equal(learning.revision, 2);
+  assert.equal(learning.id, learningId);
+  assert.equal(learning.kind, "anki");
+  assert.deepEqual(JSON.parse(learning.content), {
+    cards: learningCards,
+    kind: "anki",
+  });
+
+  await assert.rejects(
+    runtime.pageCardSource({ page: 8, id: htmlId }),
+    (error) => error?.code === "BW_LOCAL_PAGE_CARD_SOURCE_PAGE",
+    "a stable id must not authorize reading the card through the wrong page",
+  );
+  await assert.rejects(
+    runtime.pageCardSource({ page: 7, id: "c_9999999999999999" }),
+    (error) => error?.code === "BW_LOCAL_PAGE_CARD_SOURCE_NOT_FOUND",
+    "an unknown stable id must fail closed instead of returning a nearby card",
+  );
+});
+
+test("page-card edit and derived context share the 100000-character bug fence", () => {
+  const cardValidators = SOURCE.slice(
+    SOURCE.indexOf("function nativePDFPageCardCards("),
+    SOURCE.indexOf("function nativePDFPageCardPlan("),
+  );
+  assert.match(cardValidators, /LOCAL_PAGE_CARD_CONTEXT_LIMIT/);
+  assert.doesNotMatch(
+    cardValidators,
+    /\b(?:8000|64000|262144|2400)\b/,
+    "page-card faces, generic content, and derived context must share one limit",
+  );
+  const directMutation = SOURCE.slice(
+    SOURCE.indexOf("function nativePDFDirectPageCardData("),
+    SOURCE.indexOf("function nativeReaderPageCardMutate("),
+  );
+  assert.match(
+    directMutation,
+    /input\.replacement\.content, LOCAL_PAGE_CARD_CONTEXT_LIMIT/,
+  );
+  const sourceRead = SOURCE.slice(
+    SOURCE.indexOf("function nativePageCardSource("),
+    SOURCE.indexOf("function nativeReaderSearch("),
+  );
+  assert.match(
+    sourceRead,
+    /contextText\.slice\(0, LOCAL_PAGE_CARD_CONTEXT_LIMIT\)/,
+  );
+});
+
+function localPageCardProjection(revision, cards) {
+  return {
+    contract: "reader-local-page-card-projection/1",
+    page: 7,
+    revision,
+    cards: cards.map((card, index) => ({
+      number: card.unbound === true ? null : (card.number ?? index + 1),
+      id: card.id,
+      kind: card.kind,
+      type: card.kind,
+      label: card.label,
+      text: card.text,
+      content: card.text,
+      bind: card.bind == null ? null : clone(card.bind),
+      revision,
+      unbound: card.unbound === true,
+    })),
+  };
+}
+
+function installPageCardCanonicalRepository(result, cardId, cards) {
+  const state = {
+    canonical: { id: cardId, cards: clone(cards), entityRev: 1 },
+    failNextReplace: null,
+    replaceAttempts: 0,
+  };
+  const repository = {
+    load: async (id) => id === cardId ? clone(state.canonical) : null,
+    replaceContent: async (id, nextCards, options) => {
+      assert.equal(id, cardId);
+      assert.equal(options.ifEntityRev, state.canonical.entityRev);
+      state.replaceAttempts += 1;
+      if (state.failNextReplace) {
+        const error = state.failNextReplace;
+        state.failNextReplace = null;
+        throw error;
+      }
+      state.canonical = {
+        ...state.canonical,
+        cards: clone(nextCards),
+        entityRev: state.canonical.entityRev + 1,
+      };
+      return clone(state.canonical);
+    },
+  };
+  result.context.BWReaderRuntime.cardRepository = repository;
+  state.repository = repository;
+  state.load = () => repository.load(cardId);
+  return state;
+}
+
+async function seedCanonicalAnchoredPageCard(result, options) {
+  const bind = {
+    kind: "page-chars",
+    page: 7,
+    from: options.from ?? 1,
+    to: options.to ?? 2,
+    text: options.anchorText || "恢复锚点",
+  };
+  const response = await result.context.fetch("/pdf/api/notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE,
+      id: options.placementId,
+      anchor: { kind: "pdf", page: 7, x: 0.3, y: 0.3 },
+      card: {
+        id: options.cardId,
+        cid: options.cardId,
+        gid: options.cardId,
+        label: options.anchorText || "恢复锚点",
+        bind,
+        cards: clone(options.cards),
+      },
+    }),
+  });
+  assert.equal(response.status, 200);
+  const placementId = (await response.json()).note.id;
+  result.context.RC = {
+    computerVoice: {
+      pageCards: () => Promise.resolve(localPageCardProjection(1, [{
+        id: placementId,
+        kind: "anki",
+        label: bind.text,
+        text: "旧正面 / 旧背面",
+        bind,
+      }])),
+    },
+  };
+  return { bind, placementId };
+}
+
+function storedPageCardJournal(result, operationId) {
+  const key =
+    `native-pdf-assistant-ops:${DEFAULT_LOCAL_BOOK_ID}:pdf-assistant-ops`;
+  const record = result.dataStoresState.document.values.get(key);
+  return clone(record?.value?.payload?.find((item) => item?.id === operationId));
+}
+
+test("direct page-card edit/delete commit before UI and targeted undo/redo restore exact placement", async () => {
+  const result = await harness();
+  const note = {
+    file: DEFAULT_LOCAL_FILE,
+    id: "placement_card_1",
+    anchor: { kind: "pdf", page: 7, x: 0.35, y: 0.4 },
+    card: {
+      gid: "legacy_learning_1",
+      cid: "legacy_learning_1",
+      label: "旧标签",
+      bind: { kind: "page-chars", page: 7, from: 1, to: 2, text: "锚定词" },
+      cards: [{ type: "basic", front: "旧问题", back: "旧答案" }],
+    },
+  };
+  const createdResponse = await result.context.fetch("/pdf/api/notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(note),
+  });
+  assert.equal(createdResponse.status, 200);
+  note.id = (await createdResponse.json()).note.id;
+
+  let revision = 1;
+  const cards = [{
+    id: note.id,
+    kind: "anki",
+    label: "锚定词",
+    text: "旧问题 / 旧答案",
+    bind: clone(note.card.bind),
+  }];
+  result.context.RC = {
+    computerVoice: {
+      pageCards(page) {
+        assert.ok(page === undefined || page === 7);
+        return Promise.resolve(localPageCardProjection(revision, cards));
+      },
+    },
+  };
+  const uiActions = [];
+  result.context._assistEdit = (value) => uiActions.push(clone(value));
+  const editId = "pcard_" + "1".repeat(24);
+  const edited = await result.context._nativeReaderPageCardMutate({
+    operation: "edit",
+    operationId: editId,
+    number: 1,
+    expectedId: note.id,
+    expectedRevision: revision,
+    replacement: {
+      cards: [{ type: "basic", front: "新问题", back: "新答案" }],
+    },
+  });
+  assert.equal(edited.ok, true);
+  assert.equal(uiActions.length, 1, "the action strip is emitted only after the durable commit");
+  assert.deepEqual(uiActions[0].item, { id: note.id }, "UI never receives before/after snapshots");
+  const listedAfterEdit = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listedAfterEdit.notes[0].card.cards[0].front, "新问题");
+  assert.equal(listedAfterEdit.notes[0].card.bind.text, "锚定词");
+
+  const replay = await result.context._nativeReaderPageCardMutate({
+    operation: "edit",
+    operationId: editId,
+    number: 1,
+    expectedId: note.id,
+    expectedRevision: 1,
+    replacement: {
+      cards: [{ type: "basic", front: "新问题", back: "新答案" }],
+    },
+  });
+  assert.equal(replay.replayed, true);
+  assert.equal(uiActions.length, 1, "an idempotent transport replay must not duplicate the UI strip");
+  await assert.rejects(
+    result.context._nativeReaderPageCardMutate({
+      operation: "edit",
+      operationId: editId,
+      number: 1,
+      expectedId: note.id,
+      expectedRevision: 1,
+      replacement: {
+        cards: [{ type: "basic", front: "碰撞", back: "不同内容" }],
+      },
+    }),
+    (error) => error.code === "BW_NATIVE_PDF_ASSISTANT_CONFLICT",
+  );
+
+  const undoEdit = await result.context._nativeReaderPageCardAction({
+    operationId: editId,
+    action: "undo",
+  });
+  assert.equal(undoEdit.state, "undone");
+  await assert.rejects(
+    result.context._nativeReaderPageCardMutate({
+      operation: "edit",
+      operationId: editId,
+      number: 1,
+      expectedId: note.id,
+      expectedRevision: 1,
+      replacement: {
+        cards: [{ type: "basic", front: "新问题", back: "新答案" }],
+      },
+    }),
+    /已经撤销/,
+    "replaying an undone mutation must not report the original edit as applied",
+  );
+  let listed = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.notes[0].card.cards[0].front, "旧问题");
+  const redoEdit = await result.context._nativeReaderPageCardAction({
+    operationId: editId,
+    action: "redo",
+  });
+  assert.equal(redoEdit.state, "done");
+  listed = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.notes[0].card.cards[0].front, "新问题");
+
+  revision = 4;
+  cards[0].text = "新问题 / 新答案";
+  const deleteId = "pcard_" + "2".repeat(24);
+  const removed = await result.context._nativeReaderPageCardMutate({
+    operation: "delete",
+    operationId: deleteId,
+    number: 1,
+    expectedId: note.id,
+    expectedRevision: revision,
+  });
+  assert.equal(removed.ok, true);
+  listed = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.notes.length, 0);
+  await result.context._nativeReaderPageCardAction({ operationId: deleteId, action: "undo" });
+  listed = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.notes[0].card.cards[0].front, "新问题");
+  await result.context._nativeReaderPageCardAction({ operationId: deleteId, action: "redo" });
+  listed = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.notes.length, 0);
+});
+
+test("stable ID edits and deletes a free card while visible number remains anchored-only", async () => {
+  const result = await harness();
+  result.context.DOMPurify = {
+    removeAllHooks() {},
+    sanitize(value) { return String(value); },
+  };
+  result.context.DOMParser = class DOMParser {
+    parseFromString(value) {
+      return { body: { textContent: String(value).replace(/<[^>]+>/g, " ") } };
+    }
+  };
+  const created = await result.context.fetch("/pdf/api/notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE,
+      id: "placement_free_card_1",
+      anchor: { kind: "pdf", page: 7, x: 0.45, y: 0.75 },
+      html: { cid: "free_html_1", label: "自由卡", content: "旧正文" },
+    }),
+  });
+  assert.equal(created.status, 200);
+  const placementId = (await created.json()).note.id;
+  let revision = 1;
+  const cards = [{
+    id: placementId,
+    kind: "card",
+    label: "自由卡",
+    text: "旧正文",
+    bind: null,
+    unbound: true,
+  }];
+  result.context.RC = {
+    computerVoice: {
+      pageCards: () => Promise.resolve(localPageCardProjection(revision, cards)),
+    },
+  };
+  const uiActions = [];
+  result.context._assistEdit = (value) => uiActions.push(clone(value));
+
+  const editId = "pcard_" + "a".repeat(24);
+  const edited = await result.context._nativeReaderPageCardMutate({
+    operation: "edit",
+    operationId: editId,
+    expectedId: placementId,
+    expectedRevision: revision,
+    replacement: { content: "<b>自由卡新正文</b>" },
+  });
+  assert.equal(edited.ok, true);
+  assert.equal(edited.number, null);
+  assert.equal(uiActions[0].number, null);
+  let listed = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.notes[0].html.content, "<b>自由卡新正文</b>");
+  assert.equal(listed.notes[0].html.contextText, "自由卡新正文");
+
+  revision = 2;
+  await assert.rejects(
+    result.context._nativeReaderPageCardMutate({
+      operation: "delete",
+      operationId: "pcard_" + "b".repeat(24),
+      number: 1,
+      expectedId: placementId,
+      expectedRevision: revision,
+    }),
+    (error) => error.code === "BW_NATIVE_PDF_ASSISTANT_CONFLICT",
+    "a free card must never acquire an invented visible number shortcut",
+  );
+
+  const deleteId = "pcard_" + "c".repeat(24);
+  const deleted = await result.context._nativeReaderPageCardMutate({
+    operation: "delete",
+    operationId: deleteId,
+    expectedId: placementId,
+    expectedRevision: revision,
+  });
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.number, null);
+  listed = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.notes.length, 0);
+
+  const undone = await result.context._nativeReaderPageCardAction({
+    operationId: deleteId,
+    action: "undo",
+  });
+  assert.equal(undone.state, "undone");
+  listed = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.notes[0].id, placementId);
+});
+
+test("canonical learning-card edit preserves state/Anki receipt and placement-only delete leaves entity intact", async () => {
+  const result = await harness();
+  const cardId = "card_abcd1234";
+  const seeded = {
+    id: cardId,
+    cards: [{
+      type: "basic",
+      front: "旧正面",
+      back: "旧背面",
+      deck: "Reader::Test",
+      tags: ["keep-me"],
+      reason: "保留元数据",
+    }],
+    entityRev: 1,
+    stateRev: 7,
+  };
+  let canonical = clone(seeded);
+  const repository = {
+    load: async (id) => id === cardId ? clone(canonical) : null,
+    replaceContent: async (id, cards, options) => {
+      assert.equal(id, cardId);
+      assert.equal(options.ifEntityRev, canonical.entityRev);
+      canonical = { ...canonical, cards: clone(cards), entityRev: canonical.entityRev + 1 };
+      return clone(canonical);
+    },
+  };
+  result.context.BWReaderRuntime.cardRepository = repository;
+  const stateKey = `card-states:${cardId}`;
+  result.dataStoresState.global.values.set(stateKey, {
+    value: {
+      id: cardId,
+      states: {
+        "0": {
+          phase: "confirmed",
+          projections: {
+            anki: {
+              desktop: {
+                status: "succeeded",
+                mutationId: "anki-existing",
+                noteIds: [123],
+                cardIds: [456],
+              },
+            },
+          },
+        },
+      },
+    },
+    rev: 7,
+  });
+  const stateBefore = clone(result.dataStoresState.global.values.get(stateKey));
+  const bind = { kind: "page-chars", page: 7, from: 1, to: 2, text: "锚定词" };
+  const created = await result.context.fetch("/pdf/api/notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE,
+      anchor: { kind: "pdf", page: 7, x: 0.3, y: 0.3 },
+      card: {
+        gid: cardId,
+        cid: cardId,
+        label: "学习卡",
+        bind,
+        cards: clone(seeded.cards),
+      },
+    }),
+  });
+  const placementId = (await created.json()).note.id;
+  let revision = 1;
+  result.context.RC = {
+    computerVoice: {
+      pageCards: () => Promise.resolve(localPageCardProjection(revision, [{
+        id: placementId,
+        kind: "anki",
+        label: "锚定词",
+        text: "旧正面 / 旧背面",
+        bind,
+      }])),
+    },
+  };
+  result.context._assistEdit = () => {};
+  const editId = "pcard_" + "4".repeat(24);
+  await result.context._nativeReaderPageCardMutate({
+    operation: "edit",
+    operationId: editId,
+    number: 1,
+    expectedId: placementId,
+    expectedRevision: revision,
+    replacement: {
+      cards: [{ type: "basic", front: "新正面", back: "新背面" }],
+    },
+  });
+  const canonicalAfter = await repository.load(cardId);
+  assert.equal(canonicalAfter.cards[0].front, "新正面");
+  assert.equal(canonicalAfter.cards[0].deck, "Reader::Test");
+  assert.deepEqual(clone(canonicalAfter.cards[0].tags), ["keep-me"]);
+  assert.deepEqual(
+    result.dataStoresState.global.values.get(stateKey),
+    stateBefore,
+    "content replacement must not rewrite card-states or its Anki receipt revision",
+  );
+  let listed = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.notes[0].card.cards[0].front, "新正面");
+  assert.equal(listed.notes[0].card.cards[0].deck, "Reader::Test");
+
+  await result.context._nativeReaderPageCardAction({ operationId: editId, action: "undo" });
+  assert.equal((await repository.load(cardId)).cards[0].front, "旧正面");
+  await result.context._nativeReaderPageCardAction({ operationId: editId, action: "redo" });
+  assert.equal((await repository.load(cardId)).cards[0].front, "新正面");
+
+  revision = 4;
+  const entityBeforeDelete = clone(canonical);
+  await result.context._nativeReaderPageCardMutate({
+    operation: "delete",
+    operationId: "pcard_" + "5".repeat(24),
+    number: 1,
+    expectedId: placementId,
+    expectedRevision: revision,
+  });
+  listed = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.notes.length, 0);
+  assert.deepEqual(
+    canonical,
+    entityBeforeDelete,
+    "placement-only delete must not touch the canonical learning-card entity",
+  );
+  assert.deepEqual(result.dataStoresState.global.values.get(stateKey), stateBefore);
+});
+
+test("interrupted canonical page-card commit recovers before targeted undo", async () => {
+  const result = await harness();
+  const cardId = "card_a1b2c3d4";
+  const oldCards = [{
+    type: "basic",
+    front: "旧正面",
+    back: "旧背面",
+    deck: "Reader::Recovery",
+    tags: ["recovery"],
+    reason: "故障恢复测试",
+  }];
+  const canonical = installPageCardCanonicalRepository(result, cardId, oldCards);
+  const { placementId } = await seedCanonicalAnchoredPageCard(result, {
+    cardId,
+    cards: oldCards,
+    placementId: "placement_recovery_1",
+  });
+  const uiActions = [];
+  result.context._assistEdit = (value) => uiActions.push(clone(value));
+
+  const originalBatch = result.documentStore.batch.bind(result.documentStore);
+  let injected = false;
+  result.documentStore.batch = (mutations, options) => {
+    const collections = mutations.map((mutation) => mutation.collection);
+    if (!injected &&
+        collections.includes("native-document-notes-legacy") &&
+        collections.includes("native-pdf-assistant-ops")) {
+      injected = true;
+      const error = new Error("injected final page-card batch failure");
+      error.code = "BW_TEST_PAGE_CARD_BATCH";
+      return Promise.reject(error);
+    }
+    return originalBatch(mutations, options);
+  };
+
+  const operationId = "pcard_" + "7".repeat(24);
+  await assert.rejects(
+    result.context._nativeReaderPageCardMutate({
+      operation: "edit",
+      operationId,
+      number: 1,
+      expectedId: placementId,
+      expectedRevision: 1,
+      replacement: {
+        cards: [{ type: "basic", front: "新正面", back: "新背面" }],
+      },
+    }),
+    /injected final page-card batch failure/,
+  );
+  assert.equal(injected, true);
+  assert.equal((await canonical.load()).cards[0].front, "新正面");
+  assert.equal(storedPageCardJournal(result, operationId).state, "preparing");
+  assert.equal(uiActions.length, 0, "a failed final batch must not expose UI success");
+
+  let listed = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.notes[0].card.cards[0].front, "旧正面");
+
+  const restarted = await harness({ dataStoresState: result.dataStoresState });
+  restarted.context.BWReaderRuntime.cardRepository = canonical.repository;
+  const undone = await restarted.context._nativeReaderPageCardAction({
+    operationId,
+    action: "undo",
+  });
+  assert.equal(undone.state, "undone");
+  assert.equal(undone.replayed, false);
+  assert.equal((await canonical.load()).cards[0].front, "旧正面");
+  listed = await (await restarted.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.notes[0].card.cards[0].front, "旧正面");
+  const journal = storedPageCardJournal(restarted, operationId);
+  assert.equal(journal.state, "undone");
+  assert.equal(journal.pending, null);
+});
+
+test("conflicting page-card recovery terminalizes without applying canonical target", async () => {
+  const result = await harness();
+  const cardId = "card_b1c2d3e4";
+  const oldCards = [{
+    type: "basic",
+    front: "旧正面",
+    back: "旧背面",
+    deck: "Reader::Recovery",
+    tags: ["recovery"],
+    reason: "第三态恢复测试",
+  }];
+  const canonical = installPageCardCanonicalRepository(result, cardId, oldCards);
+  const { placementId } = await seedCanonicalAnchoredPageCard(result, {
+    cardId,
+    cards: oldCards,
+    placementId: "placement_recovery_2",
+    from: 3,
+    to: 4,
+  });
+  result.context._assistEdit = () => {};
+
+  const injected = new Error("injected canonical apply failure");
+  injected.code = "BW_TEST_PAGE_CARD_ENTITY";
+  canonical.failNextReplace = injected;
+  const operationId = "pcard_" + "8".repeat(24);
+  await assert.rejects(
+    result.context._nativeReaderPageCardMutate({
+      operation: "edit",
+      operationId,
+      number: 1,
+      expectedId: placementId,
+      expectedRevision: 1,
+      replacement: {
+        cards: [{ type: "basic", front: "目标正面", back: "目标背面" }],
+      },
+    }),
+    /injected canonical apply failure/,
+  );
+  assert.equal((await canonical.load()).cards[0].front, "旧正面");
+  assert.equal(storedPageCardJournal(result, operationId).state, "preparing");
+
+  const notesKey =
+    `native-document-notes-legacy:${DEFAULT_LOCAL_BOOK_ID}:document-notes-legacy`;
+  const notesRecord = result.dataStoresState.document.values.get(notesKey);
+  const externalValue = clone(notesRecord.value);
+  const externalPlacement = externalValue.payload.find((note) => note.id === placementId);
+  externalPlacement.card.cards[0].front = "第三态正面";
+  externalPlacement.card.cards[0].back = "第三态背面";
+  externalPlacement.card.contextText = "第三态正面 / 第三态背面";
+  await result.documentStore.put(
+    "native-document-notes-legacy",
+    externalValue,
+    { ifRev: notesRecord.rev },
+  );
+
+  const restarted = await harness({ dataStoresState: result.dataStoresState });
+  restarted.context.BWReaderRuntime.cardRepository = canonical.repository;
+  const unrelated = await restarted.context.fetch("/pdf/api/notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE,
+      id: "c_9999999999999999",
+      anchor: { kind: "pdf", page: 7, x: 0.7, y: 0.7 },
+      text: "无关便签仍可写入",
+      strokes: [],
+    }),
+  });
+  assert.equal(unrelated.status, 200, "a conflicted journal must not lock later writes");
+  assert.equal((await canonical.load()).cards[0].front, "旧正面");
+  assert.equal(canonical.replaceAttempts, 1, "recovery must preflight placement before entity apply");
+
+  const journal = storedPageCardJournal(restarted, operationId);
+  assert.equal(journal.state, "conflicted");
+  assert.equal(journal.pending, null);
+  assert.equal(journal.recoveryError, "placement-content-conflict");
+  const listed = await (await restarted.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(
+    listed.notes.find((note) => note.id === placementId).card.cards[0].front,
+    "第三态正面",
+  );
+  assert.ok(listed.notes.some((note) => note.id === "c_9999999999999999"));
+});
+
+test("HTML page-card edit sanitizes persisted markup and derives AI context from rendered text", async () => {
+  const result = await harness();
+  result.context.DOMPurify = {
+    removeAllHooks() {},
+    sanitize(value) {
+      return String(value)
+        .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
+        .replace(/\sonerror\s*=\s*(["']).*?\1/gi, "");
+    },
+  };
+  result.context.DOMParser = class DOMParser {
+    parseFromString(value) {
+      return { body: { textContent: String(value).replace(/<[^>]+>/g, " ") } };
+    }
+  };
+  const bind = { kind: "page-chars", page: 7, from: 3, to: 4, text: "安全词" };
+  const created = await result.context.fetch("/pdf/api/notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE,
+      anchor: { kind: "pdf", page: 7, x: 0.4, y: 0.4 },
+      html: { cid: "html_safe", label: "HTML", content: "旧内容", bind },
+    }),
+  });
+  const placementId = (await created.json()).note.id;
+  result.context.RC = {
+    computerVoice: {
+      pageCards: () => Promise.resolve(localPageCardProjection(1, [{
+        id: placementId, kind: "card", label: "安全词", text: "旧内容", bind,
+      }])),
+    },
+  };
+  result.context._assistEdit = () => {};
+  await result.context._nativeReaderPageCardMutate({
+    operation: "edit",
+    operationId: "pcard_" + "6".repeat(24),
+    number: 1,
+    expectedId: placementId,
+    expectedRevision: 1,
+    replacement: {
+      content: '<img src="x" onerror="steal()"><b>安全正文</b><script>steal()</script>',
+    },
+  });
+  const listed = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.doesNotMatch(listed.notes[0].html.content, /script|onerror/i);
+  assert.equal(listed.notes[0].html.contextText, "安全正文");
+});
+
+test("Pi page-card action receives exact renderer numbering and cannot expose success before App delete", async () => {
+  let nextAction = null;
+  let piPlacementId = "";
+  const result = await harness({
+    interfaceManifest: withGenericAssistantRoutesSupported(),
+    piProxyResponse(message) {
+      const forwarded = JSON.parse(message.body);
+      const state = forwarded.ctx.native_local_state;
+      nextAction = {
+        fn: "_assistEdit",
+        args: [{
+          type: "page-card",
+          op: "delete",
+          native_operation_id: "npdf_" + "3".repeat(24),
+          file: state.file,
+          page: 7,
+          number: 1,
+          expected_id: piPlacementId,
+          expected_revision: state.revisions.notes,
+          item: { id: piPlacementId, before: clone(state.notes[0]) },
+        }],
+      };
+      return { ok: true, result: { ok: true, client_action: nextAction } };
+    },
+  });
+  const bind = { kind: "page-chars", page: 7, from: 2, to: 3, text: "正文词" };
+  const createdResponse = await result.context.fetch("/pdf/api/notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE,
+      id: "placement_card_pi",
+      anchor: { kind: "pdf", page: 7, x: 0.2, y: 0.2 },
+      html: { cid: "tool_pi", label: "原标签", content: "完整内容", bind },
+    }),
+  });
+  assert.equal(createdResponse.status, 200);
+  piPlacementId = (await createdResponse.json()).note.id;
+  result.context.RC = {
+    computerVoice: {
+      pageCards: () => Promise.resolve(localPageCardProjection(1, [{
+        id: piPlacementId,
+        kind: "card",
+        label: "正文词",
+        text: "完整内容",
+        bind,
+      }])),
+    },
+  };
+  const response = await result.context.fetch("/api/assistant/voice-tool", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cmd: "{}", ctx: { page: 7, pages: [7] } }),
+  });
+  assert.equal(response.status, 200);
+  const forwarded = JSON.parse(result.gatewayMessages[0].body);
+  assert.equal(forwarded.ctx.native_local_state.page_cards.contract,
+    "reader-native-page-card-projection/1");
+  assert.equal(forwarded.ctx.native_local_state.page_cards.pages["7"][0].number, 1);
+  const payload = await response.json();
+  assert.deepEqual(payload.result.client_action.args[0].item, { id: piPlacementId });
+  assert.equal(Object.hasOwn(payload.result.client_action.args[0].item, "before"), false);
+  const listed = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.notes.length, 0, "sanitized UI success is returned only after App state changed");
 });
 
 function canvasRecorder() {

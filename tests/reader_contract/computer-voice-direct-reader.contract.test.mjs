@@ -19,6 +19,37 @@ const DIRECT_CONTRACT = "reader-computer-voice-direct/1";
 const RESULT_DELIVERY_CONTRACT = "reader-result-delivery/1";
 const REALTIME_OUTPUT_CONTRACT = "reader-realtime-output/1";
 const VISUAL_DELIVERY_CONTRACT = "reader-visual-delivery/2";
+const PAGE_CARD_REPLACEMENT_FORMAT =
+  "application/vnd.bw-reader.card-replacement+json;version=1";
+const PAGE_CARD_CONTEXT_LIMIT = 100000;
+const PAGE_CARD_CONTEXT_FRAGMENT = 2000;
+
+function contextCardFixture(card, replacement = null) {
+  const value = replacement || (card.kind === "anki"
+    ? {
+        cards: [{
+          back: card.text,
+          front: card.text,
+          type: "basic",
+        }],
+      }
+    : { content: card.text });
+  const encoded = JSON.stringify(value);
+  const contentTruncated = encoded.length > PAGE_CARD_CONTEXT_LIMIT;
+  const contextContent = contentTruncated
+    ? `【卡片 replacement JSON 异常超大，已安全截断；原始长度=${encoded.length} UTF-16 字符】\n`
+      + `【头部片段】${encoded.slice(0, PAGE_CARD_CONTEXT_FRAGMENT)}\n`
+      + `【尾部片段】${encoded.slice(-PAGE_CARD_CONTEXT_FRAGMENT)}`
+    : encoded;
+  return {
+    ...card,
+    contextContent,
+    contentLength: encoded.length,
+    contentFormat: PAGE_CARD_REPLACEMENT_FORMAT,
+    replacement: card.kind === "anki" ? "cards" : "content",
+    contentTruncated,
+  };
+}
 
 function createAudioContextClass(scenario) {
   return class FakeAudioContext {
@@ -3966,13 +3997,13 @@ test("旧 active-reading pump 的迟到卡片读取不能覆盖新 pump 上下�
     contract: "reader-local-page-cards/1",
     page: 7,
     revision: 1,
-    cards: [{
+    cards: [contextCardFixture({
       id: "c_oldoldoldoldold1",
       kind: "card",
       label: "旧卡",
       text: "不得回灌",
       bind: { kind: "page-chars", page: 7, from: 0, to: 0, text: "甲" },
-    }],
+    })],
   });
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(harness.scenario.nativePageContextPublishes.length, 1);
@@ -3986,27 +4017,29 @@ test("旧 active-reading pump 的迟到卡片读取不能覆盖新 pump 上下�
 test("权威卡片按页面几何编号且成功删除只触发一次重排后的 page.context", async () => {
   const timers = createManualTimers();
   const cards = [
-    {
+    contextCardFixture({
       id: "c_3333333333333333",
       kind: "anki",
       label: "第三张",
       text: "第三张内容",
       bind: { kind: "page-chars", page: 7, from: 4, to: 4, text: "戊" },
-    },
-    {
+    }, {
+      cards: [{ back: "第三张内容", front: "第三张内容", type: "basic" }],
+    }),
+    contextCardFixture({
       id: "c_1111111111111111",
       kind: "card",
       label: "第一张",
       text: "反斜杠 \\ 与正文符号 ⟦原文⟧",
       bind: { kind: "page-chars", page: 7, from: 0, to: 0, text: "甲" },
-    },
-    {
+    }),
+    contextCardFixture({
       id: "c_2222222222222222",
       kind: "card",
       label: "第二张",
       text: "第二张内容",
       bind: { kind: "page-chars", page: 7, from: 2, to: 2, text: "丙" },
-    },
+    }),
   ];
   const pageChars = Array.from("甲乙丙丁戊己庚辛", (character, index) => ({
     c: character,
@@ -4046,14 +4079,60 @@ test("权威卡片按页面几何编号且成功删除只触发一次重排后�
   assert.match(initial, /甲⟦CARD_START n="3" id="c_1111111111111111"/);
   assert.match(initial, /丙⟦CARD_START n="1" id="c_2222222222222222"/);
   assert.match(initial, /戊⟦CARD_START n="2" id="c_3333333333333333"/);
+  assert.match(
+    initial,
+    /CARD_START n="1" id="c_2222222222222222" revision="1" type="card" label="第二张" content_format="application\/vnd\.bw-reader\.card-replacement\+json;version=1" replacement="content" content_length="19" content_truncated="false"⟧\{"content":"第二张内容"\}⟦CARD_END⟧/,
+    "a complete marker carries the exact edit replacement plus stable id/revision",
+  );
+  assert.match(
+    initial,
+    /CARD_START n="2" id="c_3333333333333333" revision="1" type="anki"[^⟧]+replacement="cards" content_length="59" content_truncated="false"⟧\{"cards":\[\{"back":"第三张内容","front":"第三张内容","type":"basic"\}\]\}⟦CARD_END⟧/,
+    "learning-card marker content maps directly to reader_page_card_edit.cards",
+  );
   assert.ok(
     initial.indexOf('id="c_1111111111111111"') <
       initial.indexOf('id="c_2222222222222222"'),
     "marker insertion follows source text while n follows independent page geometry",
   );
-  assert.match(initial, /反斜杠 \\\\ 与正文符号 \\⟦原文\\⟧/);
+  assert.match(initial, /id="c_1111111111111111"[^⟧]+content_truncated="false"/);
   assert.equal((initial.match(/⟦CARD_START /g) || []).length, 3);
   assert.equal((initial.match(/⟦CARD_END⟧/g) || []).length, 3);
+  assert.deepEqual(
+    Array.from(initial.matchAll(/CARD_START n="(\d+)" id="([^"]+)"/g))
+      .map((match) => ({ number: Number(match[1]), id: match[2] }))
+      .sort((left, right) => left.number - right.number),
+    [
+      { number: 1, id: "c_2222222222222222" },
+      { number: 2, id: "c_3333333333333333" },
+      { number: 3, id: "c_1111111111111111" },
+    ],
+    "CARD n must use the visible mark/rail row-then-column order, not source insertion order",
+  );
+  const projection = await harness.api.pageCards(7);
+  assert.equal(projection.contract, "reader-local-page-card-projection/1");
+  assert.equal(projection.page, 7);
+  assert.equal(projection.revision, 1);
+  assert.deepEqual(
+    structuredClone(projection.cards),
+    [cards[2], cards[0], cards[1]].map((card, index) => ({
+      number: index + 1,
+      id: card.id,
+      kind: card.kind,
+      type: card.kind,
+      label: card.label,
+      text: card.text,
+      content: card.text,
+      bind: card.bind,
+      revision: 1,
+      unbound: false,
+    })),
+    "read-only pageCards must reuse the exact visible row/column numbering",
+  );
+  assert.deepEqual(
+    structuredClone(await harness.api.pageCards()),
+    structuredClone(projection),
+    "omitting page is allowed only through the validated active-reading snapshot",
+  );
 
   await waitForCondition(() => timers.count(250) >= 1, "settled initial pump");
   await new Promise((resolve) => setImmediate(resolve));
@@ -4081,6 +4160,16 @@ test("权威卡片按页面几何编号且成功删除只触发一次重排后�
   assert.match(afterDelete, /CARD_START n="1" id="c_3333333333333333"/);
   assert.match(afterDelete, /CARD_START n="2" id="c_1111111111111111"/);
   assert.doesNotMatch(afterDelete, /CARD_START n="3"/);
+  assert.deepEqual(
+    Array.from(afterDelete.matchAll(/CARD_START n="(\d+)" id="([^"]+)"/g))
+      .map((match) => ({ number: Number(match[1]), id: match[2] }))
+      .sort((left, right) => left.number - right.number),
+    [
+      { number: 1, id: "c_3333333333333333" },
+      { number: 2, id: "c_1111111111111111" },
+    ],
+    "a committed deletion must compact the same visible page order without gaps",
+  );
 
   await waitForCondition(() => timers.count(250) >= 1, "post-delete pump tick");
   timers.runOne(250);
@@ -4117,6 +4206,168 @@ test("权威卡片按页面几何编号且成功删除只触发一次重排后�
   await disableSnapshot(harness);
 });
 
+test("历史未锚定卡进入当前页上下文但不冒充正文或右侧标记序号", async () => {
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeLocalPageContext: true,
+    contextSyncStorage: new Map([["eph-ctx-sync", "1"]]),
+    contextDeliveryMode: "snapshot-mcp",
+    nativePageTexts: { 7: "甲乙丙" },
+    nativePageChars: {
+      7: Array.from("甲乙丙", (character, index) => ({
+        c: character,
+        x0: index * 10,
+        y0: 0,
+        x1: index * 10 + 9,
+        y1: 12,
+        sp: false,
+      })),
+    },
+    nativePageCards: {
+      7: [
+        contextCardFixture({
+          id: "c_7777777777777777",
+          kind: "card",
+          label: "甲",
+          text: "已锚正文",
+          bind: { kind: "page-chars", page: 7, from: 0, to: 0, text: "甲" },
+        }),
+        contextCardFixture({
+          id: "c_8888888888888888",
+          kind: "anki",
+          label: "历史学习卡",
+          text: "历史题目 / 历史答案",
+          bind: null,
+          number: null,
+          unbound: true,
+        }, {
+          cards: [{ back: "历史答案", front: "历史题目", type: "basic" }],
+        }),
+      ],
+    },
+    readerAdapterContext: { visible_text: "甲乙丙" },
+    activeReading: {
+      kind: "pdf",
+      file: "localbook:legacy-unbound",
+      title: "Legacy unbound",
+      pos: 7,
+    },
+  });
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.nativePageContextPublishes.length === 1,
+    "page context with an unbound legacy card",
+  );
+  const text = harness.scenario.nativePageContextPublishes[0].text;
+  assert.match(text, /甲⟦CARD_START n="1" id="c_7777777777777777"/);
+  assert.match(text, /【当前页未锚定卡片（不参与正文及右侧标记序号）】/);
+  assert.match(
+    text,
+    /CARD_START n="" id="c_8888888888888888" revision="1" type="anki" label="历史学习卡"[^⟧]+replacement="cards" content_length="57" content_truncated="false" unbound="true"⟧\{"cards":\[\{"back":"历史答案","front":"历史题目","type":"basic"\}\]\}⟦CARD_END⟧/,
+  );
+  assert.doesNotMatch(text, /n="2" id="c_8888888888888888"/);
+  const projection = await harness.api.pageCards(7);
+  assert.deepEqual(structuredClone(projection), {
+    contract: "reader-local-page-card-projection/1",
+    page: 7,
+    revision: 1,
+    cards: [
+      {
+        number: 1,
+        id: "c_7777777777777777",
+        kind: "card",
+        type: "card",
+        label: "甲",
+        text: "已锚正文",
+        content: "已锚正文",
+        bind: { kind: "page-chars", page: 7, from: 0, to: 0, text: "甲" },
+        revision: 1,
+        unbound: false,
+      },
+      {
+        number: null,
+        id: "c_8888888888888888",
+        kind: "anki",
+        type: "anki",
+        label: "历史学习卡",
+        text: "历史题目 / 历史答案",
+        content: "历史题目 / 历史答案",
+        bind: null,
+        revision: 1,
+        unbound: true,
+      },
+    ],
+  });
+  harness.scenario.nativePageCards[7].push(contextCardFixture({
+    id: "c_9999999999999999",
+    kind: "card",
+    label: "失配锚点",
+    text: "不能冒充自由卡",
+    bind: { kind: "page-chars", page: 7, from: 90, to: 91, text: "不存在" },
+  }));
+  await assert.rejects(
+    harness.api.pageCards(7),
+    /已锚定卡片几何暂不可解析/,
+    "bound geometry failure must fail the exact projection, never become unbound",
+  );
+  await disableSnapshot(harness);
+});
+
+test("只有异常超大卡片才安全截断并给出长度与可识别头尾", async () => {
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeLocalPageContext: true,
+    contextSyncStorage: new Map([["eph-ctx-sync", "1"]]),
+    contextDeliveryMode: "snapshot-mcp",
+    nativePageTexts: { 7: "甲乙" },
+    nativePageChars: {
+      7: Array.from("甲乙", (character, index) => ({
+        c: character,
+        x0: index * 10,
+        y0: 0,
+        x1: index * 10 + 9,
+        y1: 12,
+        sp: false,
+      })),
+    },
+    nativePageCards: {
+      7: [contextCardFixture({
+        id: "c_extreme000000001",
+        kind: "card",
+        label: "异常大卡",
+        text: "旧可读摘要不应冒充实际内容",
+        bind: { kind: "page-chars", page: 7, from: 0, to: 0, text: "甲" },
+      }, { content: "Z".repeat(100100) })],
+    },
+    readerAdapterContext: { visible_text: "甲乙" },
+    activeReading: {
+      kind: "pdf",
+      file: "localbook:extreme-card-context",
+      title: "Extreme card context",
+      pos: 7,
+    },
+  });
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.nativePageContextPublishes.length === 1,
+    "page context with an exceptional card fence",
+  );
+  const payload = harness.scenario.nativePageContextPublishes[0];
+  assert.equal(payload.truncated, false,
+    "the compact safety diagnostic itself fits the page snapshot");
+  assert.match(
+    payload.text,
+    /id="c_extreme000000001" revision="1"[^⟧]+content_length="100114" content_truncated="true"/,
+  );
+  assert.match(payload.text, /卡片 replacement JSON 异常超大，已安全截断；原始长度=100114/);
+  assert.match(payload.text, /【头部片段】\{"content":"Z+/);
+  assert.match(payload.text, /【尾部片段】Z+"\}/);
+  assert.doesNotMatch(payload.text, /旧可读摘要不应冒充实际内容/);
+  await disableSnapshot(harness);
+});
+
 test("本地 page.context 截断不会留下半个 CARD marker", async () => {
   const timers = createManualTimers();
   const harness = createHarness({
@@ -4127,28 +4378,28 @@ test("本地 page.context 截断不会留下半个 CARD marker", async () => {
     contextDeliveryMode: "snapshot-mcp",
     nativePageTexts: {
       6: "P".repeat(3000),
-      7: "A".repeat(12000),
+      7: "A".repeat(230000),
       8: "N".repeat(3000),
     },
     nativePageCards: {
       7: [
-        {
+        contextCardFixture({
           id: "c_aaaaaaaaaaaaaaaa",
           kind: "card",
           label: "完整卡",
           text: "X".repeat(2400),
           bind: { kind: "page-chars", page: 7, from: 100, to: 100, text: "A" },
-        },
-        {
+        }),
+        contextCardFixture({
           id: "c_bbbbbbbbbbbbbbbb",
           kind: "card",
           label: "跨界卡",
           text: "Y".repeat(2400),
-          bind: { kind: "page-chars", page: 7, from: 6790, to: 6790, text: "A" },
-        },
+          bind: { kind: "page-chars", page: 7, from: 218000, to: 218000, text: "A" },
+        }),
       ],
     },
-    readerAdapterContext: { visible_text: "A".repeat(5000) },
+    readerAdapterContext: { visible_text: "A".repeat(219000) },
     activeReading: {
       kind: "pdf",
       file: "localbook:card-truncation",
@@ -4165,11 +4416,16 @@ test("本地 page.context 截断不会留下半个 CARD marker", async () => {
   const payload = harness.scenario.nativePageContextPublishes[0];
   const starts = (payload.text.match(/⟦CARD_START /g) || []).length;
   const ends = (payload.text.match(/⟦CARD_END⟧/g) || []).length;
-  assert.ok(payload.text.length <= 12000);
+  assert.ok(payload.text.length <= 220000);
   assert.equal(payload.truncated, true);
   assert.equal(starts, ends);
   assert.equal(starts, 1);
   assert.match(payload.text, /c_aaaaaaaaaaaaaaaa/);
+  assert.match(
+    payload.text,
+    /id="c_aaaaaaaaaaaaaaaa" revision="1"[^⟧]+content_length="2414" content_truncated="false"⟧\{"content":"X{2400}"\}⟦CARD_END⟧/,
+    "a normal long replacement remains complete even when the whole page hits its transport fence",
+  );
   assert.doesNotMatch(payload.text, /c_bbbbbbbbbbbbbbbb/);
   await disableSnapshot(harness);
 });

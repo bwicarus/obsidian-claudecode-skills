@@ -161,7 +161,10 @@ function handlerSource() {
   return balanced(VOICE, start);
 }
 
-function runHandler({ query = "highlights", params = {}, impl, host } = {}) {
+function runHandler({
+  query = "highlights", params = {}, impl, host,
+  pageCardsImpl, pageCardImpl, activeReadingSnapshot,
+} = {}) {
   const sent = [];
   const sendStart = VOICE.indexOf(
     "DirectSocket.prototype._sendReaderQueryResult = function (",
@@ -180,6 +183,10 @@ function runHandler({ query = "highlights", params = {}, impl, host } = {}) {
     // 常量从源文件里读，而不是在测试里另抄一份：抄一份就等于两处各有一个
     // 真相，改了源文件测试还会绿。
     READER_QUERY_RESPONSE: /READER_QUERY_RESPONSE = "([^"]+)"/.exec(VOICE)[1],
+    pageCards: pageCardsImpl || (() => Promise.reject(new Error("page cards unavailable"))),
+    pageCardIndex: pageCardsImpl || (() => Promise.reject(new Error("page cards unavailable"))),
+    pageCard: pageCardImpl || (() => Promise.reject(new Error("page card unavailable"))),
+    localActiveReadingSnapshot: activeReadingSnapshot || (() => null),
   };
   context.globalThis = context;
   vm.runInNewContext(
@@ -203,6 +210,82 @@ function runHandler({ query = "highlights", params = {}, impl, host } = {}) {
     Object.assign(context, { sent }),
   );
   return sent;
+}
+
+function functionSource(name) {
+  const start = VOICE.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `找不到 ${name}`);
+  return balanced(VOICE, start);
+}
+
+function runPageCard({
+  input = {}, page = 7, projectionCards = [], revision = 4,
+  sourceById = {}, activeReadingSnapshot,
+} = {}) {
+  const pageReads = [];
+  const sourceReads = [];
+  const runtime = {
+    pageCardSource(selector) {
+      sourceReads.push(structuredClone(selector));
+      const source = sourceById[selector.id];
+      return Promise.resolve(typeof source === "function" ? source(selector) : source);
+    },
+  };
+  const context = {
+    Error, String, Number, Array, Promise, JSON, Object, TextEncoder,
+    LOCAL_PAGE_CARD_SOURCE_CONTRACT: "reader-local-page-card-source/1",
+    READER_PAGE_CARD_DETAIL_CONTRACT: "reader-page-card-detail/1",
+    localActiveReadingSnapshot: activeReadingSnapshot
+      || (() => ({ kind: "pdf", page })),
+    localNativePageRuntime: () => runtime,
+    pageCards(requestedPage) {
+      pageReads.push(requestedPage);
+      return Promise.resolve({
+        contract: "reader-local-page-card-projection/1",
+        page: requestedPage,
+        revision,
+        cards: structuredClone(projectionCards),
+      });
+    },
+    input,
+    out: null,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(
+    `${functionSource("directError")}
+     ${functionSource("plainObject")}
+     ${functionSource("exactObject")}
+     ${functionSource("messageBytes")}
+     ${functionSource("localPageCardUTF8Chunk")}
+     ${functionSource("pageCard")}
+     out = Promise.resolve().then(function () { return pageCard(input); });`,
+    context,
+  );
+  return { result: context.out, pageReads, sourceReads };
+}
+
+function runPageCardIndex(cards, revision = 4) {
+  const context = {
+    String, Number, Array, Promise, JSON, Object, TextEncoder,
+    pageCards(page) {
+      return Promise.resolve({
+        contract: "reader-local-page-card-projection/1",
+        page,
+        revision,
+        cards: structuredClone(cards),
+      });
+    },
+    out: null,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(
+    `${functionSource("messageBytes")}
+     ${functionSource("localPageCardUTF8Chunk")}
+     ${functionSource("pageCardIndex")}
+     out = pageCardIndex(7);`,
+    context,
+  );
+  return context.out;
 }
 
 test("成功时回 ok，并把截断标志原样带回", async () => {
@@ -231,6 +314,364 @@ test("执行失败时回 unavailable，不是空结果", async () => {
   await new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
   assert.equal(sent.length, 1);
   assert.equal(sent[0].status, "unavailable");
+});
+
+test("page-cards 显式页码复用只读投影；省略页码只认可靠 PDF 快照", async () => {
+  const calls = [];
+  const explicit = runHandler({
+    query: "page-cards",
+    params: { page: 9 },
+    pageCardsImpl(page) {
+      calls.push(page);
+      return Promise.resolve({
+        contract: "reader-local-page-card-projection/1",
+        page,
+        revision: 4,
+        cards: [],
+      });
+    },
+  });
+  await new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
+  assert.deepEqual(calls, [9]);
+  assert.equal(explicit[0].status, "ok");
+  assert.equal(explicit[0].result.page, 9);
+
+  const implicitCalls = [];
+  const implicit = runHandler({
+    query: "page-cards",
+    params: {},
+    activeReadingSnapshot: () => ({ kind: "pdf", page: 7 }),
+    pageCardsImpl(page) {
+      implicitCalls.push(page);
+      return Promise.resolve({
+        contract: "reader-local-page-card-projection/1",
+        page,
+        revision: 5,
+        cards: [],
+      });
+    },
+  });
+  await new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
+  assert.deepEqual(implicitCalls, [7]);
+  assert.equal(implicit[0].status, "ok");
+
+  const unsupported = runHandler({
+    query: "page-cards",
+    params: {},
+    activeReadingSnapshot: () => ({ kind: "epub", page: 7 }),
+  });
+  assert.equal(unsupported[0].status, "unsupported",
+    "不能从多页 DOM 顺序猜当前 PDF 页");
+});
+
+test("page-cards 是含正文摘要的有界索引，超预算返回真实前缀", async () => {
+  const small = await runPageCardIndex([
+    {
+      number: 1, id: "c_small0000000001", kind: "card", type: "card",
+      label: "锚定词", text: "不是标签而是真实卡片正文", content: "不是标签而是真实卡片正文",
+      bind: { kind: "page-chars", page: 7, from: 1, to: 3, text: "词" },
+      revision: 4, unbound: false,
+    },
+  ]);
+  assert.equal(small.truncated, false);
+  assert.equal(small.count, 1);
+  assert.equal(small.returned, 1);
+  assert.equal(small.cards[0].content, "不是标签而是真实卡片正文");
+  assert.equal(small.cards[0].content_truncated, false);
+  assert.equal("text" in small.cards[0], false, "索引不重复携带同一正文两次");
+
+  const many = Array.from({ length: 120 }, (_, index) => ({
+    number: index + 1,
+    id: `c_index${String(index).padStart(10, "0")}`,
+    kind: "card", type: "card", label: `词${index}`,
+    text: "长正文".repeat(900), content: "长正文".repeat(900),
+    bind: {
+      kind: "page-chars", page: 7,
+      from: index * 2, to: index * 2 + 1, text: `词${index}`,
+    },
+    revision: 4, unbound: false,
+  }));
+  const bounded = await runPageCardIndex(many);
+  assert.equal(bounded.count, many.length);
+  assert.equal(bounded.truncated, true);
+  assert.ok(bounded.returned > 0 && bounded.returned < bounded.count);
+  assert.ok(
+    new TextEncoder().encode(JSON.stringify(bounded)).byteLength <= 32 * 1024,
+    "索引必须真的落在 Reader 查询帧预算内",
+  );
+  assert.equal(bounded.cards[0].content_truncated, true);
+});
+
+test("page-card WSS 查询显式分派并原样回传分块状态", async () => {
+  const calls = [];
+  const params = {
+    id: "c_detailcard00001", offset: 12, limit: 1000, expectedRevision: 4,
+  };
+  const sent = runHandler({
+    query: "page-card",
+    params,
+    pageCardImpl(input) {
+      calls.push(structuredClone(input));
+      return Promise.resolve({
+        contract: "reader-page-card-detail/1",
+        content: "后续内容",
+        next_offset: 16,
+        truncated: true,
+      });
+    },
+  });
+  await new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
+  assert.deepEqual(calls, [params]);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].status, "ok");
+  assert.equal(sent[0].truncated, true);
+  assert.equal(sent[0].result.next_offset, 16);
+});
+
+test("page-card 可按当前序号或稳定 id 读取同一份权威源内容", async () => {
+  const cards = [
+    {
+      number: 1,
+      id: "c_firstcard000001",
+      kind: "card",
+      type: "card",
+      label: "第一张",
+      bind: { kind: "page-chars", page: 7, from: 1, to: 2, text: "甲乙" },
+      unbound: false,
+    },
+    {
+      number: 2,
+      id: "c_secondcard00002",
+      kind: "anki",
+      type: "anki",
+      label: "第二张",
+      bind: { kind: "page-chars", page: 7, from: 8, to: 9, text: "丙丁" },
+      unbound: false,
+    },
+  ];
+  const content = JSON.stringify({
+    contract: "reader-page-card-source/1",
+    cards: [{ type: "basic", front: "完整问题", back: "完整答案" }],
+  });
+  const sourceById = {
+    [cards[1].id]: {
+      contract: "reader-local-page-card-source/1",
+      page: 7,
+      id: cards[1].id,
+      kind: cards[1].kind,
+      revision: 4,
+      content,
+    },
+  };
+
+  const byNumber = runPageCard({
+    input: { page: 7, number: 2, offset: 0, limit: 24576 },
+    projectionCards: cards,
+    sourceById,
+  });
+  const numbered = await byNumber.result;
+  assert.deepEqual(byNumber.pageReads, [7]);
+  assert.deepEqual(byNumber.sourceReads, [{ page: 7, id: cards[1].id }]);
+  assert.equal(numbered.card.number, 2);
+  assert.equal(numbered.card.id, cards[1].id,
+    "可见序号只能解析到该次投影里的稳定 placement id");
+  assert.equal(numbered.content, content);
+  assert.equal(numbered.next_offset, null);
+
+  const byId = runPageCard({
+    input: { id: cards[1].id, offset: 0, limit: 24576 },
+    projectionCards: cards,
+    sourceById,
+  });
+  const stable = await byId.result;
+  assert.equal(stable.card.id, cards[1].id);
+  assert.equal(stable.card.number, 2);
+  assert.equal(stable.content, content);
+});
+
+test("page-card 中文源内容按 UTF-16 offset 连续续读且每块不超过 24 KiB UTF-8", async () => {
+  const id = "c_chinesechunk0001";
+  const card = {
+    number: 1,
+    id,
+    kind: "card",
+    type: "card",
+    label: "中文长卡",
+    bind: { kind: "page-chars", page: 7, from: 3, to: 5, text: "中文卡" },
+    unbound: false,
+  };
+  const content = JSON.stringify({ html: `<p>${"汉字🙂".repeat(9000)}</p>` });
+  const sourceById = {
+    [id]: {
+      contract: "reader-local-page-card-source/1",
+      page: 7,
+      id,
+      kind: "card",
+      revision: 4,
+      content,
+    },
+  };
+  let offset = 0;
+  let combined = "";
+  let chunks = 0;
+  let expectedRevision = null;
+  while (true) {
+    const { result } = runPageCard({
+      input: Object.assign(
+        { id, offset, limit: 24576 },
+        offset > 0 ? { expectedRevision } : {},
+      ),
+      projectionCards: [card],
+      sourceById,
+    });
+    const value = await result;
+    if (expectedRevision === null) expectedRevision = value.revision;
+    assert.equal(value.revision, expectedRevision);
+    assert.equal(value.offset, offset);
+    assert.ok(value.content.length <= 24576, "limit 按 UTF-16 code units 约束");
+    assert.ok(
+      Buffer.byteLength(value.content, "utf8") <= 24 * 1024,
+      "中文与 emoji 也必须落在独立的 24 KiB UTF-8 上限内",
+    );
+    assert.doesNotMatch(value.content.slice(-1), /[\uD800-\uDBFF]/,
+      "分块不得把 surrogate pair 从中间切开");
+    assert.doesNotMatch(value.content.slice(0, 1), /[\uDC00-\uDFFF]/,
+      "续块不得从孤立 low surrogate 开始");
+    combined += value.content;
+    chunks += 1;
+    if (value.next_offset === null) {
+      assert.equal(value.truncated, false);
+      assert.equal(offset + value.content.length, content.length);
+      break;
+    }
+    assert.equal(value.truncated, true);
+    assert.equal(value.next_offset, offset + value.content.length,
+      "next_offset 必须紧接本块，不能跳字或重叠");
+    assert.ok(value.next_offset < content.length);
+    offset = value.next_offset;
+  }
+  assert.ok(chunks > 1, "样本必须真的触发 UTF-8 分块");
+  assert.equal(combined, content, "沿 next_offset 续读必须无损拼回完整源 JSON");
+});
+
+test("page-card 续块必须沿用首块 revision，内容变化时拒绝混拼", async () => {
+  const id = "c_revisionguard001";
+  const card = {
+    number: 1, id, kind: "card", type: "card", label: "修订守卫",
+    bind: { kind: "page-chars", page: 7, from: 1, to: 2, text: "修订" },
+    unbound: false,
+  };
+  const sourceById = {
+    [id]: {
+      contract: "reader-local-page-card-source/1", page: 7, id,
+      kind: "card", revision: 5, content: JSON.stringify({ content: "新版本" }),
+    },
+  };
+  const { result } = runPageCard({
+    input: { id, offset: 2, limit: 10, expectedRevision: 4 },
+    projectionCards: [card], revision: 5, sourceById,
+  });
+  await assert.rejects(
+    result,
+    (error) => error.code === "BW_READER_PAGE_CARD_STALE"
+      && error.retryable === true,
+  );
+});
+
+test("page-card 自由卡没有序号，仍可凭稳定 id 读取", async () => {
+  const id = "c_freecard0000001";
+  const content = JSON.stringify({ html: "<article>自由卡完整正文</article>" });
+  const card = {
+    number: null,
+    id,
+    kind: "card",
+    type: "card",
+    label: "自由卡",
+    bind: null,
+    unbound: true,
+  };
+  const { result } = runPageCard({
+    input: { id, offset: 0, limit: 24576 },
+    projectionCards: [card],
+    sourceById: {
+      [id]: {
+        contract: "reader-local-page-card-source/1",
+        page: 7,
+        id,
+        kind: "card",
+        revision: 4,
+        content,
+      },
+    },
+  });
+  const value = await result;
+  assert.equal(value.card.id, id);
+  assert.equal(value.card.number, null);
+  assert.equal(value.card.bind, null);
+  assert.equal(value.card.unbound, true);
+  assert.equal(value.content, content);
+});
+
+test("page-card 非法选择器、分块边界与未知字段全部 fail closed", async () => {
+  const validCard = {
+    number: 1,
+    id: "c_validcard000001",
+    kind: "card",
+    type: "card",
+    label: "合法卡",
+    bind: { kind: "page-chars", page: 7, from: 0, to: 0, text: "甲" },
+    unbound: false,
+  };
+  for (const input of [
+    {},
+    { page: 0, id: validCard.id },
+    { id: "x" },
+    { id: "bad id" },
+    { number: 0 },
+    { id: validCard.id, number: 1 },
+    { id: validCard.id, offset: -1 },
+    { id: validCard.id, offset: 1 },
+    { id: validCard.id, limit: 24577 },
+    { id: validCard.id, expectedRevision: -1 },
+    { id: validCard.id, extra: true },
+  ]) {
+    const { result } = runPageCard({ input, projectionCards: [validCard] });
+    await assert.rejects(
+      result,
+      (error) => error.retryable === false
+        && ["BW_READER_PAGE_CARD_PARAMS", "BW_COMPUTER_VOICE_DIRECT_SCHEMA"]
+          .includes(error.code),
+      `非法参数不得落到权威内容读取：${JSON.stringify(input)}`,
+    );
+  }
+});
+
+test("page-card MCP 参数层严格 id xor number，并补齐连续续读默认值", () => {
+  const start = MCP.indexOf("internal static bool TryReadPageCardReadQuery(");
+  const end = MCP.indexOf("internal static bool TryReadPageCardMutation(", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const parser = MCP.slice(start, end);
+  assert.match(parser, /actual\.Contains\("id"\) == actual\.Contains\("number"\)/,
+    "缺 selector 与同时给两个 selector 都必须拒绝");
+  assert.match(parser, /long offset = 0;/);
+  assert.match(parser, /int limit = ReaderQueryProtocol\.MaximumPageCardChunkCodeUnits;/);
+  assert.match(parser, /parameters\["offset"\] = offset;/);
+  assert.match(parser, /parameters\["limit"\] = limit;/);
+  assert.match(parser, /else if \(offset > 0\)/,
+    "续块缺 expectedRevision 必须拒绝");
+  assert.match(parser, /parameters\["expectedRevision"\] = expectedRevision;/);
+
+  const matchStart = QUERY.indexOf("internal static bool PageCardResponseMatchesRequest(");
+  const matchEnd = QUERY.indexOf("internal static void RequireBoundedJson(", matchStart);
+  const matcher = QUERY.slice(matchStart, matchEnd);
+  for (const guard of [
+    'parameters["offset"]', 'parameters["limit"]', 'parameters["page"]',
+    'parameters["id"]', 'parameters["number"]',
+    'parameters["expectedRevision"]',
+  ]) {
+    assert.ok(matcher.includes(guard), `回包缺请求匹配守卫 ${guard}`);
+  }
 });
 
 test("名单外的名字调不到任何东西", () => {
@@ -548,12 +989,14 @@ test("页文本页码非法或界面不支持时拒绝", async () => {
   );
 });
 
-test("五个查询名两端一致，且都显式映射", () => {
+test("七个 Reader 查询名两端一致，且都显式映射", () => {
   const table = VOICE.slice(
     VOICE.indexOf("var READER_QUERY_HANDLERS = {"),
     VOICE.indexOf("function normalizeReaderQueryRequest("),
   );
-  for (const name of ["highlights", "notes", "search", "toc", "page-text"]) {
+  for (const name of [
+    "highlights", "notes", "search", "toc", "page-text", "page-cards", "page-card",
+  ]) {
     assert.match(QUERY, new RegExp(`"${name}"`), `桥接名单缺 ${name}`);
     assert.ok(
       table.includes(`${name}: function`) || table.includes(`"${name}": function`),

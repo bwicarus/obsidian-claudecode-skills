@@ -345,6 +345,7 @@ html.rc-side-inset-top #ep-side{padding-top:calc(env(safe-area-inset-top,0px) + 
   border-left:1px solid rgba(255,255,255,0.20);
   box-shadow:-14px 0 48px rgba(0,0,0,0.45),inset 1px 0 0 rgba(255,255,255,0.16);
   transform:translateX(102%);transition:transform 0.4s cubic-bezier(.4,0,.2,1);touch-action:pan-y;padding-top:env(safe-area-inset-top)}
+#ep-side.rc-side-settings-open{z-index:2147483400}
 /* 调宽期间去掉高成本玻璃/颗粒与追赶式过渡；松手后立即恢复完整视觉。 */
 html.rc-side-width-preview #ep-side{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
 html.rc-side-width-preview #ep-side::before{display:none}
@@ -597,7 +598,10 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
       if (_vs) { try { _vs.textContent = '界面版本: ' + (window.__READER_GIT || '未知'); } catch (e) {} }
       try { document.addEventListener('pointerdown', function (e) {
         var m = document.getElementById('ep-side-settings');
-        if (m && m.style.display === 'block' && !m.contains(e.target) && !(e.target.closest && e.target.closest('#ep-side-set-btn'))) m.style.display = 'none';
+        if (m && m.style.display === 'block' && !m.contains(e.target) && !(e.target.closest && e.target.closest('#ep-side-set-btn'))) {
+          m.style.display = 'none';
+          var side0 = document.getElementById('ep-side'); if (side0) side0.classList.remove('rc-side-settings-open');
+        }
       }, true); } catch (e) {}
     }
   }
@@ -665,8 +669,11 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
   function toggleSideSettings(ev) {
     if (ev) ev.stopPropagation();
     var m = document.getElementById('ep-side-settings'); if (!m) return;
-    if (m.style.display === 'block') { m.style.display = 'none'; return; }
-    _syncSettingsUI(); m.style.display = 'block';
+    var side = document.getElementById('ep-side');
+    if (m.style.display === 'block') {
+      m.style.display = 'none'; if (side) side.classList.remove('rc-side-settings-open'); return;
+    }
+    _syncSettingsUI(); m.style.display = 'block'; if (side) side.classList.add('rc-side-settings-open');
   }
 
   // 只切 pane(toggle .active on tab + pane),并触发 onTab 懒填充。不改开关态。
@@ -735,7 +742,8 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
       clearTimeout(s.__tfT);
       s.style.transform = '';     // 清掉 none → 回到 CSS .open 的 translateX(0)(视觉不变)
       void s.offsetWidth;          // 强制 reflow 让浏览器认 translateX(0) 为滑出起点
-      s.classList.remove('open');  // → CSS base translateX(102%),带过渡滑出
+      s.classList.remove('open', 'rc-side-settings-open');  // → CSS base translateX(102%),带过渡滑出
+      var sm = document.getElementById('ep-side-settings'); if (sm) sm.style.display = 'none';
     }
     document.body.classList.remove('ep-side-open');
     _mirror(_opts.mirrorOpenClass, false);

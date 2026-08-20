@@ -25,8 +25,8 @@
 // 「圆球过多会遮挡视野」，以及更要命的一条 ——
 // 「实际的书中字符可不像你的例子那样有足够的空白位置，这样会盖到其它字符」。
 //
-// 所以标记**不占正文面积**，改成：给被锚的词描边 + 不遮字的下半部极淡渐变/
-// 分段底边小装饰 + 右上角一个**页内序号**；卡片按需点开，一次只开一张。
+// 所以标记**不占正文面积**，改成：给被锚的词画透明底分类色边框 + 右上角一个
+// **页内序号**；卡片按需点开，一次只开一张。
 // 不恢复实心填充：扫描书底色本来就不匀，重色块会直接盖住字形。
 //
 // 序号是它在**本页**的次序，不是全书连续：位置，不是身份。人和 AI 用同一套，
@@ -195,14 +195,39 @@
     });
   }
 
+  function _collapseRailGroup(rail) {
+    if (rail) rail.__expandedGroupKey = '';
+  }
+
+  function _railGroupKey(row) {
+    var keys = [];
+    for (var i = 0; i < row.length; i++) keys.push(String(row[i].dataset.bindkey || ''));
+    keys.sort();
+    return keys.join('|');
+  }
+
+  /// 同行重叠组第一次只展开，第二次点到明确编号才打开卡片。
+  function _openRailDot(rail, dot, open, ev) {
+    if (ev) ev.stopPropagation();
+    var groupKey = dot && dot.__bwGroupKey;
+    if (rail && dot && dot.__bwGroupSize > 1 && groupKey && rail.__expandedGroupKey !== groupKey) {
+      rail.__expandedGroupKey = groupKey;
+      _wakeRail(rail);
+      _scheduleRails();
+      return;
+    }
+    open(ev);
+  }
+
   function _destroyRail(rail) {
     if (!rail) return;
     var scrollEl = rail.__scrollEl, onMove = rail.__onMove;
     try { if (scrollEl && onMove) scrollEl.removeEventListener('scroll', onMove); } catch (e) {}
     try { if (onMove) window.removeEventListener('resize', onMove); } catch (e2) {}
-    try { if (rail.__rootObserver) rail.__rootObserver.disconnect(); } catch (e3) {}
-    try { if (scrollEl && scrollEl.__pgbindRail === rail) scrollEl.__pgbindRail = null; } catch (e4) {}
-    try { rail.remove(); } catch (e5) {}
+    try { if (rail.__onOutside) document.removeEventListener('pointerdown', rail.__onOutside, true); } catch (e3) {}
+    try { if (rail.__rootObserver) rail.__rootObserver.disconnect(); } catch (e4) {}
+    try { if (scrollEl && scrollEl.__pgbindRail === rail) scrollEl.__pgbindRail = null; } catch (e5) {}
+    try { rail.remove(); } catch (e6) {}
   }
 
   function _railFor(pw) {
@@ -215,12 +240,23 @@
     var view = document.createElement('div'); view.className = 'pgbind-rail-view';
     rail.appendChild(view);
     document.body.appendChild(rail);
-    rail.__scrollEl = scrollEl; rail.__view = view;
+    rail.__scrollEl = scrollEl; rail.__view = view; rail.__expandedGroupKey = '';
     scrollEl.__pgbindRail = rail;
-    var onMove = function () { _wakeRail(rail); _scheduleRails(); };
+    var onMove = function () {
+      _collapseRailGroup(rail);
+      _wakeRail(rail);
+      _scheduleRails();
+    };
     rail.__onMove = onMove;
     try { scrollEl.addEventListener('scroll', onMove, { passive: true }); } catch (e) {}
     try { window.addEventListener('resize', onMove); } catch (e2) {}
+    var onOutside = function (ev) {
+      if (!rail.__expandedGroupKey || (ev && ev.target && rail.contains(ev.target))) return;
+      _collapseRailGroup(rail);
+      _scheduleRails();
+    };
+    rail.__onOutside = onOutside;
+    try { document.addEventListener('pointerdown', onOutside, true); } catch (e3) {}
     // #main 被刷新/宿主重建时，旧滚动根不会再发 scroll；监听 DOM 替换后主动
     // 撤掉 body 上的孤儿 fixed rail 与事件，不等下一次 resize 才收拾。
     try {
@@ -230,7 +266,7 @@
         });
         rail.__rootObserver.observe(document.body, { childList: true, subtree: true });
       }
-    } catch (e3) {}
+    } catch (e4) {}
     _wakeRail(rail); _scheduleRails();
     return rail;
   }
@@ -262,23 +298,83 @@
       else if (cy < 0) above.push(d); else below.push(d);
     }
     near.sort(function (a, b) { return a.__bwCy - b.__bwCy; });
-    var row = [], lastCy = -1e9;
+    var rows = [], row = [], lastCy = -1e9;
     for (var n = 0; n < near.length; n++) {
-      var dot = near[n], size0 = dot.__bwSize;
-      if (Math.abs(dot.__bwCy - lastCy) > Math.max(size0, row.length ? row[0].__bwSize : 0) * 0.6) row = [];
-      row.push(dot); lastCy = dot.__bwCy;
-      dot.classList.remove('far');
-      dot.style.width = size0 + 'px'; dot.style.height = size0 + 'px';
-      dot.style.borderRadius = Math.round(size0 * 0.325) + 'px';
-      dot.style.fontSize = Math.max(9, Math.round(size0 * 0.42)) + 'px';
-      dot.style.top = Math.max(_RAIL_EDGE, Math.min(h - _RAIL_EDGE, dot.__bwCy)) + 'px';
-      // 同行多卡向左排开，保证每个编号都能直接点；不让重叠的顶层按钮吞掉下面那张。
-      dot.style.right = Math.min(_RAIL_W - size0 - 4, 16 + (row.length - 1) * (size0 + 6)) + 'px';
+      var next = near[n];
+      if (row.length && Math.abs(next.__bwCy - lastCy) >
+          Math.max(next.__bwSize, row[0].__bwSize) * 0.6) {
+        rows.push(row); row = [];
+      }
+      row.push(next); lastCy = next.__bwCy;
+    }
+    if (row.length) rows.push(row);
+
+    var liveGroups = Object.create(null);
+    for (var g = 0; g < rows.length; g++) {
+      rows[g].sort(function (a, b) {
+        return (parseInt(a.textContent, 10) || 0) - (parseInt(b.textContent, 10) || 0);
+      });
+      if (rows[g].length > 1) liveGroups[_railGroupKey(rows[g])] = true;
+    }
+    if (rail.__expandedGroupKey && !liveGroups[rail.__expandedGroupKey]) _collapseRailGroup(rail);
+
+    for (var r0 = 0; r0 < rows.length; r0++) {
+      var group = rows[r0], groupKey = group.length > 1 ? _railGroupKey(group) : '';
+      var expanded = !!groupKey && rail.__expandedGroupKey === groupKey;
+      var rowCy = 0, rowSize = 0;
+      for (var q0 = 0; q0 < group.length; q0++) {
+        rowCy += group[q0].__bwCy;
+        rowSize = Math.max(rowSize, group[q0].__bwSize);
+      }
+      rowCy /= group.length;
+      var maxRight = Math.max(16, _RAIL_W - rowSize - 4);
+      var spreadStep = group.length > 1
+        ? Math.min(rowSize + 6, Math.max(6, (maxRight - 16) / (group.length - 1))) : 0;
+      for (var q = 0; q < group.length; q++) {
+        var dot = group[q], size0 = dot.__bwSize;
+        dot.__bwGroupKey = groupKey; dot.__bwGroupSize = group.length;
+        dot.classList.remove('far');
+        dot.classList.toggle('grouped', group.length > 1);
+        dot.classList.toggle('group-lead', group.length > 1 && q === 0);
+        dot.classList.toggle('group-open', expanded);
+        if (group.length > 1 && q === 0 && !expanded) {
+          dot.dataset.groupCount = String(group.length);
+          dot.setAttribute('aria-expanded', 'false');
+          dot.setAttribute('aria-label', '本行 ' + group.length + ' 张卡片，点击展开');
+          dot.title = '本行 ' + group.length + ' 张卡片，点击展开';
+        } else {
+          delete dot.dataset.groupCount;
+          if (group.length > 1 && q === 0) dot.setAttribute('aria-expanded', 'true');
+          else dot.removeAttribute('aria-expanded');
+          if (dot.__bwCardLabel) {
+            dot.setAttribute('aria-label', dot.__bwCardLabel);
+            dot.title = dot.__bwCardLabel;
+          }
+        }
+        dot.tabIndex = group.length > 1 && !expanded && q > 0 ? -1 : 0;
+        dot.style.zIndex = String(group.length > 1 && !expanded ? 40 + group.length - q : 20 + group.length - q);
+        dot.style.width = size0 + 'px'; dot.style.height = size0 + 'px';
+        dot.style.borderRadius = Math.round(size0 * 0.325) + 'px';
+        dot.style.fontSize = Math.max(9, Math.round(size0 * 0.42)) + 'px';
+        dot.style.top = Math.max(_RAIL_EDGE, Math.min(h - _RAIL_EDGE, rowCy)) + 'px';
+        // 收起时只错开一点并用组数量提示；第一次点击后才沿水平方向完整展开。
+        var step = expanded ? spreadStep : 5;
+        dot.style.right = Math.min(maxRight, 16 + q * step) + 'px';
+      }
     }
     var farPlace = function (arr, lower) {
       arr.sort(function (a, b) { return a.__bwCy - b.__bwCy; });
       for (var k = 0; k < arr.length; k++) {
-        var fd = arr[k]; fd.classList.add('far'); fd.style.right = '13px';
+        var fd = arr[k];
+        fd.__bwGroupKey = ''; fd.__bwGroupSize = 1;
+        fd.classList.add('far');
+        fd.classList.remove('grouped', 'group-lead', 'group-open');
+        delete fd.dataset.groupCount; fd.removeAttribute('aria-expanded');
+        fd.tabIndex = 0; fd.style.zIndex = ''; fd.style.right = '13px';
+        if (fd.__bwCardLabel) {
+          fd.setAttribute('aria-label', fd.__bwCardLabel);
+          fd.title = fd.__bwCardLabel;
+        }
         fd.style.top = (lower
           ? h - _RAIL_EDGE + 2 + (_RAIL_EDGE - 4) * ((k + 1) / (arr.length + 1))
           : 2 + (_RAIL_EDGE - 4) * ((k + 1) / (arr.length + 1))) + 'px';
@@ -369,6 +465,7 @@
       var rd = document.querySelector('.pgbind-rail-dot[data-bindkey="' + ns[i].dataset.bindkey + '"]');
       if (rd) {
         rd.textContent = ns[i].textContent;
+        rd.__bwCardLabel = ns[i].title;
         rd.title = ns[i].title;
         rd.setAttribute('aria-label', ns[i].title);
       }
@@ -521,12 +618,12 @@
       var key = uid ? ('u' + uid) : ('p' + page + 'b' + range.lo + '_' + range.hi);
       _removeMark(layer, key);
 
-      // ── 标记本体：描边 + CSS 极淡下半渐变/分段底线，不用盖字的实心填充 ──
+      // ── 标记本体：透明底分类色描边，不用盖字的填充或伪元素装饰 ──
       //   用户 2026-08-20 定：「实际的书中字符可不像你的例子那样有足够的空白
       //   位置，这样会盖到其它字符」——标记不能抢正文面积。填色即使走 multiply
-      //   也仍然改了字的底色，而扫描书底色本来就不匀；这里只给 CSS 9% 装饰。
+      //   也仍然改了字的底色，而扫描书底色本来就不匀。
       //   框往外放 PAD，别贴着字形。
-      var PAD = 1.5;
+      var PAD = 2;
       var tone = _bindTone(payload);
       var lastMark = null;
       for (var r = 0; r < rects.length; r++) {
@@ -582,7 +679,7 @@
       var hs = layer.querySelectorAll('[data-bindkey="' + key + '"]');
       for (var h = 0; h < hs.length; h++) hs[h].addEventListener('click', open);
       if (dot) {
-        dot.addEventListener('click', open);
+        dot.addEventListener('click', function (ev) { _openRailDot(rail, dot, open, ev); });
         dot.addEventListener('pointerenter', function () { _wakeRail(rail); });
       }
 

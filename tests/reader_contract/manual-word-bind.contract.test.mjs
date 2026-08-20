@@ -31,10 +31,21 @@ test("适配器吐出的是能持久的东西：下标区间 + 文本，不只�
   assert.match(body, /seg\.sort\(\(a, b\) => \(a\._oi \| 0\) - \(b\._oi \| 0\)\)/);
 });
 
-test("词锚写进 card 载荷，不写进 anchor", () => {
-  // anchor 在 native-local-runtime 里是**逐字段重建**的，加字段会被静默 strip
-  // —— 当次会话看不出来，下次开书才发现锚退化。card 则是整块不透明存。
-  assert.match(NOTE, /card: \{ cards: cards, gid: gid, cid: cid0, base_w: bw0, bind: _wb \}/);
+test("手动投放保持自由卡片；AI 自动锚定仍把 bind 写进卡载荷", () => {
+  const manual = NOTE.slice(
+    NOTE.indexOf("function createCardAt("),
+    NOTE.indexOf("function _sameWordBind("),
+  );
+  assert.doesNotMatch(manual, /wordBindFromPoint|bind:\s*_wb/,
+    "手动拖入靠近文字也必须保持自由卡片");
+  assert.match(manual, /✅ 自由卡片已放进书页/);
+  const ai = NOTE.slice(
+    NOTE.indexOf("function persistBoundCard("),
+    NOTE.indexOf("RC.stickynote ="),
+  );
+  assert.match(ai, /bind:\s*cloneValue\(bind\)/,
+    "AI page-chars 自动插入仍必须产生持久词锚");
+  // anchor 在 native-local-runtime 里是逐字段重建的，词锚只能放 card/html 载荷。
   assert.match(RUNTIME, /anchor: normalizedNoteAnchor\(body\.anchor, code\)/,
     "anchor 仍是逐字段重建 —— 上面那条『别写进 anchor』的理由还成立");
   assert.match(RUNTIME, /card: body\.card == null \? null : boundedCanonicalJSON\(body\.card/,
@@ -43,7 +54,15 @@ test("词锚写进 card 载荷，不写进 anchor", () => {
 
 test("吸附范围跟拖动时看到的框是同一条，不能各算各的", () => {
   // 不一致的表现是「看到框、松手却钉到别处」——最难自证的一类。
-  assert.match(NOTE, /_wr\.dist == null \|\| _wr\.dist <= 48/);
+  const helper = NOTE.slice(
+    NOTE.indexOf("function wordBindFromPoint("),
+    NOTE.indexOf("function createCardAt("),
+  );
+  assert.match(helper, /word\.dist != null && word\.dist > 48/);
+  assert.match(NOTE, /return wordBindFromPoint\(point\.x, point\.y\);/,
+    "显式 ⚓️ 的卡片附近回退必须复用同一个 48px 词锚解析器");
+  assert.match(NOTE, /return wordBindFromPoint\(cx, cy\);/,
+    "已锚定卡拖动重锚也必须复用同一解析器");
   assert.match(NOTE, /词中心 ≤48px/, "拖动反馈那条注释里的阈值改了就要一起改");
 });
 
@@ -117,6 +136,11 @@ test("charBoxes 就绪时必须重挂便签，否则首次开页一定退回浮�
   assert.ok(iBoxes >= 0 && iRemount > iBoxes, "重挂必须排在 __charBoxes 赋值之后");
   // 同一处也接 AI 那条 —— 两条路共用这个时机，别只接一条
   assert.ok(CHAR.indexOf("window.__pageBindRetry(num)") > iBoxes);
+  const corrected = CHAR.slice(CHAR.indexOf("const d2 = await"), CHAR.indexOf("wrap.__vocabMarks"));
+  assert.match(corrected, /window\.__pageBindRetry && window\.__pageBindRetry\(num\)/,
+    "overlay 真 cv 替换字符几何后必须再次恢复词锚");
+  assert.match(corrected, /RC\.stickynote\.repositionAll\(\)/,
+    "overlay 真 cv 替换字符几何后必须再次挂载手动卡片");
   // repositionAll 就是 mountAll，幂等；不幂等的话这里会变成重复建 DOM
   assert.match(NOTE2, /repositionAll: mountAll,/);
 });
@@ -160,7 +184,7 @@ test("撤标记按解析后的区间找 key，不按 bind.from/to 反推", () =>
   assert.match(body, /key = 'p' \+ page \+ 'b' \+ rg\.lo \+ '_' \+ rg\.hi/);
 });
 
-test("拖动已词锚的卡 = 重新锚定，而且必须挂在**真的**拖动路径上", () => {
+test("拖动仅重锚已有词锚；自由卡必须点 ⚓️ 才首次锚定", () => {
   // ⚠ 这条曾经是绿的、而功能完全不工作 —— 上一版只断言"调用点存在"，
   //   而调用点在 onResizeTLUp()（左上缩放手柄）里。卡片便签的
   //   `.rc-note-hascard .rc-note-rs-tl` 是 display:none，用户根本点不到，
@@ -184,9 +208,60 @@ test("拖动已词锚的卡 = 重新锚定，而且必须挂在**真的**拖动�
     "缩放手柄对卡片便签是 display:none，放这儿等于没放");
   // _rebindWord 本体的行为
   assert.match(NOTE, /function _rebindWord\(ctl, cx, cy\)/);
+  assert.match(NOTE, /var slot = wordBindSlot\(ctl\.note\);\s*\n\s*if \(!slot\) return false;/,
+    "自由卡普通拖动不得自动升级成词锚");
   assert.match(NOTE, /if \(!nb\) ctl\.root\.style\.display = '';/,
     "拖到空白/图区 → 撤词锚退回普通便签，别把卡藏没了");
   assert.match(NOTE, /if \(cx == null \|\| cy == null\) return false;/);
+});
+
+test("自由卡完全展开时显示统一线性锚图标，精确选区优先且 commit 后才切换", () => {
+  assert.match(NOTE, /class="rc-note-anchor"/);
+  assert.match(NOTE, /FREE_CARD_ANCHOR_ICON = '<svg[^']*stroke="currentColor"/);
+  assert.match(NOTE, /aria-label="锚定到正文">' \+ FREE_CARD_ANCHOR_ICON/);
+  assert.doesNotMatch(
+    NOTE.slice(NOTE.indexOf("function buildCtl("), NOTE.indexOf("function buildTools(")),
+    /⚓/,
+    "系统 emoji 字形与现有线性按钮风格不一致",
+  );
+  assert.match(NOTE, /rc-note-free-card-open \.rc-note-anchor\{display:flex\}/);
+  assert.match(NOTE, /form === 'full'/, "圆点/长条态不应遮进一个锚定按钮");
+  assert.match(NOTE, /window\.__bwSelectionController/);
+  assert.match(NOTE, /anchor\.kind !== 'pdf-char' && anchor\.kind !== 'page-chars'/);
+  assert.doesNotMatch(
+    NOTE.slice(NOTE.indexOf("function currentLockedPageBind("), NOTE.indexOf("function freeCardAnchorPoint(")),
+    /__focusSel/,
+    "焦点 chip 没有页码/字符下标，不能拿同名文字猜锚点",
+  );
+  const action = NOTE.slice(
+    NOTE.indexOf("function anchorFreeCard("),
+    NOTE.indexOf("function bindCtl("),
+  );
+  assert.ok(action.indexOf("patchNote(ctl.note, fields).then") < action.indexOf("_applyWordBind(live)"),
+    "repository 未确认前不能先画成已锚定");
+  assert.match(action, /if \(live\.portaled\) portalOut\(live\)/);
+});
+
+test("自由卡圆球非焦点尺寸跟随锁定目标的真实正文行高", () => {
+  assert.match(NOTE, /function freeCardTargetLineHeight\(ctl\)/);
+  assert.match(NOTE, /rect && rect\.client \? rect\.client : rect/,
+    "PDF 选区 rect 的 client 包装不能被当成普通 rect");
+  assert.match(NOTE, /O\.noteWordRect\(point\.x, point\.y\)/,
+    "锁定选区和就近回退必须复用 host 的真实单词行高");
+  assert.match(NOTE, /多行选区只探第一行/);
+  assert.match(NOTE, /--rc-free-dot-size/);
+  assert.match(NOTE, /rc-note-free-card-dot:not\(:focus-within\):not\(:hover\)/,
+    "只有非焦点视觉圆球缩小，操作态仍保留正常尺寸");
+  assert.match(NOTE, /width:max\(40px,100%\)/,
+    "视觉圆面缩小后，粗指针命中区仍应至少 40px");
+});
+
+test("自由卡沿用拖到左上角删除，只有词锚卡展开后显示垃圾桶", () => {
+  assert.doesNotMatch(NOTE, /rc-note-free-card-open \.rc-note-del\{display:flex!important/);
+  assert.doesNotMatch(NOTE, /setWordDeleteUi\(ctl, show\)/);
+  assert.match(NOTE, /rc-note-word-open \.rc-note-del\{display:flex!important/);
+  assert.match(NOTE, /var pageCard = !!cardPayloadSlot\(ctl\.note\)/);
+  assert.match(NOTE, /pageCard \? '删除这张卡片？' : '删除这张便签？'/);
 });
 
 
@@ -201,4 +276,17 @@ test("展开时重算尺寸 —— 卡是在 display:none 里 mount 的", () => 
   const iW = rc.indexOf("ctl.body.style.width = _formW(ctl, card.form)");
   const iGuard = rc.indexOf("if (box.__sig === sig) return;");
   assert.ok(iW >= 0 && iGuard > iW, "宽度计算跑到 __sig 守卫后面了，补跑 syncCtl 就白搭");
+});
+
+test("点击词锚卡外部时卡片与 frame/rail 激活态一起收起", () => {
+  const outside = NOTE.slice(
+    NOTE.indexOf("function onDocDown(e)"),
+    NOTE.indexOf("// ─────────────────────────── 创建", NOTE.indexOf("function onDocDown(e)")),
+  );
+  assert.match(outside, /if \(c\._bindOpen\) \{[\s\S]*c\._bindOpen = false;[\s\S]*c\.root\.style\.display = 'none';/,
+    "外点必须真正关闭并隐藏词锚卡");
+  assert.match(outside, /if \(c\._bindKey\) \{[\s\S]*document\.querySelectorAll\('\[data-bindkey="' \+ c\._bindKey \+ '\"\]'\)[\s\S]*el\.classList\.remove\('on'\)/,
+    "外点关闭不能留下正文框、角标或右侧浮标的打开态");
+  assert.ok(outside.indexOf("classList.remove('on')") < outside.indexOf("portalOut(c)"),
+    "激活态应在 portalOut 重挂 DOM 前撤掉");
 });

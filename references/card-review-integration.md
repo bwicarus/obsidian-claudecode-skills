@@ -14,6 +14,23 @@
 - ReaderPC AnkiConnect 与 AnkiMobile `addnote` 都是用户触发的可选导出。外部写入使用
   pending/succeeded/failed/unknown receipt；结果未知禁止盲重试，外部 ID 只存在投影 receipt。
 
+### 当前页面词锚卡合同（2026-08-20，覆盖下文旧“句末注入”说明）
+
+- 页面 placement 权威保存在当前书籍 `document-notes-legacy`，`card-placements` 与
+  `entity-references` 只是可重建投影；placement ID 始终与卡片实体 `id === cid === gid` 分开。
+- placement 分为两种显示状态：手动拖放后是自由卡（`number:null, unbound:true`）；锚定卡按当前页
+  几何顺序自动维护连续编号，编号同时用于正文词框、右侧浮标与 AI 上下文，删除后立即重排。
+- 自由卡与锚定卡在 AI 看来是同一种卡：当前页快照都直接包含稳定 placement ID、notes revision、
+  卡片类型和可交给编辑工具的完整 replacement JSON；锚定卡另有当前编号与锚定词 label。正常卡片
+  不截断，只有超过异常保护上限才显式标记 `content_truncated=true`，此时才通过带 revision 的连续
+  分块补读，并拒绝跨版本拼接。
+- AI 可按稳定 ID 或“第 N 张卡”查询、读取、修改和删除；修改/删除必须同时校验稳定 ID 与当前
+  notes revision。删除只移除 placement，不删除卡片实体、学习状态或 Anki 数据，并提供定向撤销/重做。
+- 已固定的自由卡在原卡片右上角显示与其他控件一致的线性锚定按钮；点击后优先锚到当前锁定的精确字符范围，否则只在 48px
+  内寻找最近词。升级复用同一 placement；没有可靠目标时明确失败，不静默锚到错误内容。
+- 自由卡圆球在非焦点态按同一锁定目标的实际正文行高缩放；仍用既有“拖到左上角”手势删除，不新增
+  删除按钮。升级为锚定卡后，展开态才显示垃圾桶。
+
 
 > Anki 卡片以**工具结果卡**为载体,贯穿"制卡→编辑→确认→学习→收纳→钉到页面"全生命周期;
 > 字幕模式与侧边栏共用同一张卡。美术与现有工具卡(rc-turncard/voiceCard 形态)完全一致化。
@@ -139,7 +156,7 @@ __vcInfoCardEl(rc-voicecall:1256)是静态渲染器无编辑态;renderInfo(1270)
     - 坐标:📌 按钮无坐标→卡位置 + **视野中央回退**(卡落页边/空白时,E2E 实锤根因);拖出有坐标只认该点。
     - E2E:天气卡📌→html便签+内容/制卡卡📌→card便签/浮层转移floatClosed/后端存 card+html/清理 leftover=0。
   - **⭐⭐ 第二轮纠正(2026-07-20)**:①"参照便签系统"=借**锚定机制**,钉住的仍是**卡**(不是变成白便签)→ createCardAt/createHtmlAt 底色改 `#0d1322` 暗色玻璃(applyColor+isDarkBg 自动适配前景,零新机制,观感=卡);②**拖出松手钉页只对 `c.pinMode` 卡**(收藏夹 dock 拖出复制设 `pinned+pinMode`;浮动卡拖动=挪位**不误钉**),钉入点=**卡左上角 rect**(非指针);③📌 按钮仍通用(卡位+视野中央回退)。E2E:钉入便签 darkBody/darkFg、浮动卡拖到正文松手 floatSurvives+floatNotPinned。
-  - **⭐ 便签/卡片内容注入 AI 上下文(用户设计 2026-07-20)**:钉在页面上的便签/卡片有绑定对象 → 所有取页上下文的任务把内容插到绑定对象**所在句子末尾**,标「【便签内容：…】」/「【卡片：正面 → 背面】」。实现:`pdf_reader._pin_context_annotations(rel,page,text)`(锚 x,y→PyMuPDF words 最近词→文本中找词→句尾插入;定位不到→文末追加;html 便签剥标签),接在 `assistant._page_text` PDF 分支(一处接入:assistant/voice/make_anki/read_page 全生效,voice._page_text 委托 assistant)。E2E:锚"交换律"→标注恰在其句尾;删便签后零残留。⚠ EPUB 分支(epub_assistant section 文本)未接,待后续。
+  - **历史方案，已由上方“当前页面词锚卡合同”取代——便签/卡片内容注入 AI 上下文(2026-07-20)**:当时把内容插到绑定对象所在句末；当前页面卡改用带稳定身份、编号和真实内容的 `CARD_START/CARD_END` 结构块，不能再依赖句末纯文本标注裁决页面卡语义。
   - **⭐⭐⭐ 第三轮定稿(2026-07-20,'直接复用字幕模式的卡片代码')**:钉入渲染不再手工拼——`_cardPush` 的卡 DOM 构建段**机械抽出**为 `_cardDom`(形态class/--vc-tc/卡头+按钮/TTS/bd填充),浮层卡与钉入卡跑**同一段代码**;公开 `RC.voiceCard.renderInto(host,spec)`(spec={text,label,isHtml,type,icon,form,mount,onClose,onForm}):vc-pinned+vc-typed(有色磨砂)+钉子钮移除+bd里 vc-if-hd 剥掉(双标题)+✕=onClose(触发便签del)。rc-stickynote renderNoteCard/Html 只调它;便签壳全透明+resize白圆钮/外✕隐藏。**三态收纳同浮层**(dot:true→标记/长条/方块 `_cycleForm` 单击循环,头部点击=循环 2420 同规矩),`onForm`→html.form/card.form 落 sidecar 持久化(sig 排除 form 防重建丢状态),重挂按 form 恢复=**钉在页上的圆球闭环**。**卡宽按页面自适应**:createCardAt/HtmlAt 量 O.mount 容器宽×0.44(240-480),ghost 同式,body 高 auto。修过的坑:.rc-note-ink 手写canvas白块盖卡(内联样式,CSS !important+JS双保险)、卡头色需 vc-typed 消费 --vc-tc(215)。E2E:同源(hd▶/单标题/主题绿)+三态循环+storedForm/loadAll恢复+宽自适应+回归(浮层push/dot cycle)。
   - ⏳ 真机剩:拖出手感(pinMode 松手钉页逻辑已写、headless 测不了 touch)、侧栏 turnCard 制卡卡把手(拖出走 _dragToDock 的卡都通了;turnCard cards part 无把手)
 - ✅ **双实例状态同步**:侧栏 turnCard + 浮层 vc-card 两份 rc-flashcard 按 **gid 卡组**联动——两处 push 生成同 `_gid`(rc-voicecall 680/706),侧栏 addPart 与浮层 mount 都带 gid,turncard renderPart 串 `p.gid`;rc-flashcard `_groups[gid]={cards,conts}`:同 gid 实例**共享同一批卡对象** + 状态变化(编辑/入库/评分/删除)`broadcast` 重渲其它实例(edit/单卡 updateSlide、del renderTrack;except self 防光标跳)。E2E:shared/editSync/A入库→B learn+B拿note_id/A评分→B done

@@ -270,6 +270,11 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
             wrap.__charsBaseW = wrap.classList.contains('crop-on') ? (parseFloat(wrap.style.getPropertyValue('--full-w')) || wrap.clientWidth || 0) : (wrap.clientWidth || 0);   // #51:cv 校正重建同步基准宽(整页布局宽)
             wrap.__pageWPt = d2.page_w; wrap.__pageHPt = d2.page_h;
             wrap.__furigana = d2.furigana || [];
+            try { window.__applyPhraseMergesLocal && window.__applyPhraseMergesLocal(wrap); } catch (_) {}
+            // 真 cv 可能替换掉首次用缓存猜值建立的整套字符几何。词锚必须
+            // 对这份最终权威几何再挂一次，否则刷新后会一直等到下一次重渲。
+            try { window.__pageBindRetry && window.__pageBindRetry(num); } catch (_) {}
+            try { if (window.RC && RC.stickynote && RC.stickynote.repositionAll) RC.stickynote.repositionAll(); } catch (_) {}
             try { renderRubyLayer(wrap); } catch (_) {}
           }
         } catch (_) {}

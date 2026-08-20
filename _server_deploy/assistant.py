@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import copy
+import html as _html
 import json
 import hashlib
 import math
@@ -200,7 +201,9 @@ def _native_pdf_state(ctx):
         "contract", "file", "revisions", "highlights", "notes", "ink",
         "user_pages",
     }
-    if not isinstance(state, dict) or set(state) != required:
+    optional = {"page_cards"}
+    if not isinstance(state, dict) or not required.issubset(state) \
+            or set(state) - required - optional:
         raise ValueError("本机 PDF 助手状态合同无效")
     if state.get("contract") != _NATIVE_PDF_STATE_CONTRACT:
         raise ValueError("本机 PDF 助手状态版本不受支持")
@@ -216,6 +219,8 @@ def _native_pdf_state(ctx):
             or not isinstance(state.get("notes"), list) \
             or not isinstance(state.get("user_pages"), list):
         raise ValueError("本机 PDF 助手列表状态无效")
+    if "page_cards" in state:
+        _native_pdf_page_cards_projection(state.get("page_cards"), revisions["notes"])
     ink = state.get("ink")
     if not isinstance(ink, dict) or any(
         not isinstance(key, str) or not key.isdigit() or not isinstance(value, list)
@@ -223,6 +228,78 @@ def _native_pdf_state(ctx):
     ):
         raise ValueError("本机 PDF 助手墨迹状态无效")
     return state
+
+
+def _native_pdf_page_cards_projection(value, notes_revision):
+    """Validate the optional App-projected page-card numbering contract.
+
+    The PDF renderer owns page-character geometry.  When it supplies this
+    projection, Python must not reconstruct a conflicting ``n`` from character
+    offsets. Complete card content continues to come from the authoritative
+    ``notes`` snapshot in the same state object; projection fields are checked
+    only as renderer-owned numbering evidence.
+    """
+    if not isinstance(value, dict) or set(value) != {
+        "contract", "revision", "pages",
+    }:
+        raise ValueError("本机 PDF 卡片序号投影合同无效")
+    if value.get("contract") != "reader-native-page-card-projection/1":
+        raise ValueError("本机 PDF 卡片序号投影版本不受支持")
+    revision = value.get("revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) \
+            or revision < 0 or revision != notes_revision:
+        raise ValueError("本机 PDF 卡片序号投影修订号无效")
+    pages = value.get("pages")
+    if not isinstance(pages, dict):
+        raise ValueError("本机 PDF 卡片序号投影页状态无效")
+    for page, rows in pages.items():
+        if not isinstance(page, str) or not page.isdigit() or int(page) < 1 \
+                or not isinstance(rows, list):
+            raise ValueError("本机 PDF 卡片序号投影页状态无效")
+        seen_ids = set()
+        seen_numbers = set()
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != {
+                "id", "number", "kind", "label", "text", "bind", "unbound",
+            }:
+                raise ValueError("本机 PDF 卡片序号投影条目无效")
+            card_id = row.get("id")
+            number = row.get("number")
+            unbound = row.get("unbound")
+            kind = row.get("kind")
+            bind = row.get("bind")
+            if not isinstance(card_id, str) or not card_id or len(card_id) > 240 \
+                    or kind not in {"anki", "card"} \
+                    or not isinstance(row.get("label"), str) \
+                    or not isinstance(row.get("text"), str) \
+                    or not isinstance(unbound, bool) or card_id in seen_ids:
+                raise ValueError("本机 PDF 卡片序号投影条目无效")
+            if unbound:
+                if number is not None or bind is not None:
+                    raise ValueError("本机 PDF 未绑定卡片序号投影无效")
+            else:
+                try:
+                    bind_page = int(bind.get("page")) if isinstance(bind, dict) else 0
+                    bind_from = bind.get("from") if isinstance(bind, dict) else None
+                    bind_to = bind.get("to") if isinstance(bind, dict) else None
+                except (TypeError, ValueError):
+                    bind_page = 0
+                if not isinstance(number, int) or isinstance(number, bool) \
+                        or number < 1 or number in seen_numbers \
+                        or not isinstance(bind, dict) \
+                        or set(bind) != {"kind", "page", "from", "to", "text"} \
+                        or bind.get("kind") != "page-chars" \
+                        or bind_page != int(page) \
+                        or not isinstance(bind_from, int) or isinstance(bind_from, bool) \
+                        or not isinstance(bind_to, int) or isinstance(bind_to, bool) \
+                        or bind_from < 0 or bind_to < bind_from or bind_to > 1000000 \
+                        or not isinstance(bind.get("text"), str):
+                    raise ValueError("本机 PDF 已绑定卡片序号投影无效")
+                seen_numbers.add(number)
+            seen_ids.add(card_id)
+        if seen_numbers and seen_numbers != set(range(1, len(seen_numbers) + 1)):
+            raise ValueError("本机 PDF 卡片序号投影不连续")
+    return value
 
 
 def _native_epub_state(ctx):
@@ -4222,6 +4299,530 @@ def _t_see_figure(args, ctx):
         return {"error": str(e)[:140]}
 
 
+# ── 正文锚定卡片:App-owned placement 是唯一权威。─────────────────────────
+# 服务端只投影/校验并返回严格 client_action，绝不把 native PDF 卡片
+# 写进 Pi sidecar。序号是当前页位置，稳定身份仍是 placement id + notes revision。
+
+_PAGE_CARD_CONTENT_LIMIT = 100000
+
+
+def _page_card_plain_text(value, maximum=_PAGE_CARD_CONTENT_LIMIT):
+    value = str(value or "")
+    value = re.sub(r"<script\b[^>]*>[\s\S]*?</script>", " ", value,
+                   flags=re.IGNORECASE)
+    value = re.sub(r"<style\b[^>]*>[\s\S]*?</style>", " ", value,
+                   flags=re.IGNORECASE)
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = _html.unescape(value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[:maximum]
+
+
+def _page_card_bind(value, page):
+    if not isinstance(value, dict) or value.get("kind") != "page-chars":
+        return None
+    try:
+        bind_page = int(value.get("page"))
+        start = int(value.get("from"))
+        end = int(value.get("to"))
+    except (TypeError, ValueError):
+        return None
+    if bind_page != page or start < 0 or end < start or end > 1000000:
+        return None
+    return {
+        "kind": "page-chars", "page": page, "from": start, "to": end,
+        "text": _page_card_plain_text(value.get("text"), 200),
+    }
+
+
+def _page_card_body(note, kind, payload):
+    explicit = _page_card_plain_text(
+        payload.get("contextText") or payload.get("context_text") or ""
+    )
+    if explicit:
+        return explicit
+    if kind == "anki":
+        rows = []
+        cards = payload.get("cards") if isinstance(payload.get("cards"), list) else []
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            front_field = "front"
+            front = card.get("front")
+            if front is None:
+                front_field = "question"
+                front = card.get("question")
+            if front is None:
+                front_field = "q"
+                front = card.get("q")
+            if front is None:
+                front_field = "cloze"
+                front = card.get("cloze")
+            if front is None:
+                front_field = "text"
+                front = card.get("text")
+            back = card.get("back")
+            if back is None:
+                back = card.get("answer")
+            if back is None:
+                back = card.get("a")
+            parts = [part for part in (
+                _page_card_plain_text(front), _page_card_plain_text(back)
+            ) if part]
+            cloze = _page_card_plain_text(card.get("cloze"))
+            if cloze and front_field != "cloze":
+                parts.append(cloze)
+            if parts:
+                rows.append(" / ".join(parts))
+        return _page_card_plain_text(
+            "\n".join(rows) or payload.get("text") or note.get("text") or ""
+        )
+    return _page_card_plain_text(
+        payload.get("text") or payload.get("content") or note.get("text") or ""
+    )
+
+
+def _page_card_page(args, ctx):
+    raw = args.get("page") if isinstance(args, dict) else None
+    if raw is None:
+        pages = ctx.get("pages") if isinstance(ctx, dict) else None
+        raw = pages[0] if isinstance(pages, list) and pages else (ctx or {}).get("page")
+        try:
+            page = int(raw)
+        except (TypeError, ValueError):
+            return None
+    else:
+        try:
+            page = _to_pdf(ctx, int(raw))
+        except (TypeError, ValueError):
+            return None
+    return page if isinstance(page, int) and not isinstance(page, bool) and page > 0 else None
+
+
+def _page_card_note_rows(state, page):
+    rows = []
+    seen_ids = set()
+    for source_index, note in enumerate(state.get("notes") or []):
+        if not isinstance(note, dict):
+            continue
+        if isinstance(note.get("card"), dict):
+            kind, payload = "anki", note["card"]
+        elif isinstance(note.get("html"), dict):
+            kind, payload = "card", note["html"]
+        else:
+            continue
+        card_id = str(note.get("id") or note.get("noteId") or "")[:240]
+        if not card_id:
+            continue
+        if card_id in seen_ids:
+            raise ValueError("权威 placement 存在重复卡片 id")
+        seen_ids.add(card_id)
+        raw_bind = payload.get("bind")
+        has_page_bind = isinstance(raw_bind, dict) and raw_bind.get("kind") == "page-chars"
+        if has_page_bind:
+            try:
+                if int(raw_bind.get("page")) != page:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        bind = _page_card_bind(raw_bind, page)
+        anchor = note.get("anchor") if isinstance(note.get("anchor"), dict) else {}
+        try:
+            anchor_page = int(anchor.get("page"))
+        except (TypeError, ValueError):
+            anchor_page = 0
+        unbound = bind is None and anchor.get("kind") == "pdf" and anchor_page == page
+        if bind is None and not unbound:
+            continue
+        anchor_label = _page_card_plain_text(bind.get("text"), 120) if bind else ""
+        card_label = _page_card_plain_text(
+            payload.get("label") or payload.get("title") or payload.get("gid")
+            or payload.get("cid") or card_id, 120
+        )
+        row = {
+            "id": card_id,
+            "kind": kind,
+            "label": anchor_label or card_label,
+            "content": _page_card_body(note, kind, payload),
+            "bind": bind,
+            "unbound": unbound,
+            "number": None,
+            "placement": copy.deepcopy(note),
+            "payload": copy.deepcopy(payload),
+            "source_index": source_index,
+        }
+        if kind == "anki":
+            row["cards"] = copy.deepcopy(payload.get("cards") or [])
+        else:
+            row["raw_content"] = str(payload.get("content") or payload.get("text") or "")
+            row["contextText"] = str(
+                payload.get("contextText") or payload.get("context_text") or row["content"]
+            )
+        rows.append(row)
+        if len(rows) > 2000:
+            raise ValueError("单页锚定卡片过多，无法安全编号")
+    return rows
+
+
+def _page_card_projection(ctx, page):
+    state = _native_pdf_state(ctx)
+    if state is None:
+        return None, None, "native-required"
+    revision = state["revisions"]["notes"]
+    rows = _page_card_note_rows(state, page)
+    by_id = {row["id"]: row for row in rows}
+    projected = state.get("page_cards")
+    if projected is not None and str(page) in projected["pages"]:
+        authority = projected["pages"][str(page)]
+        if {row["id"] for row in authority} != set(by_id):
+            raise ValueError("本机 PDF 卡片序号投影与权威 placement 不一致")
+        ordered = []
+        for projected_row in authority:
+            row = by_id[projected_row["id"]]
+            if row["kind"] != projected_row["kind"] \
+                    or row["unbound"] != projected_row["unbound"] \
+                    or row["bind"] != projected_row["bind"] \
+                    or row["label"] != projected_row["label"]:
+                raise ValueError("本机 PDF 卡片序号投影类型与 placement 不一致")
+            row["number"] = projected_row["number"]
+            ordered.append(row)
+        ordered.sort(key=lambda row: (
+            row["number"] is None,
+            row["number"] if row["number"] is not None else row["source_index"],
+        ))
+        return state, ordered, "renderer-geometry"
+
+    bound = [row for row in rows if not row["unbound"]]
+    bound.sort(key=lambda row: (
+        row["bind"]["from"], row["bind"]["to"], row["source_index"]
+    ))
+    for number, row in enumerate(bound, 1):
+        row["number"] = number
+    unbound = sorted(
+        (row for row in rows if row["unbound"]), key=lambda row: row["source_index"]
+    )
+    return state, bound + unbound, "bind-order"
+
+
+def _page_card_public(row):
+    result = {
+        "id": row["id"], "number": row["number"], "kind": row["kind"],
+        "label": row["label"], "content": row["content"],
+        "bind": copy.deepcopy(row["bind"]), "unbound": row["unbound"],
+    }
+    if row["kind"] == "anki":
+        result["cards"] = copy.deepcopy(row.get("cards") or [])
+    else:
+        result["raw_content"] = row.get("raw_content") or ""
+        result["contextText"] = row.get("contextText") or ""
+    return result
+
+
+def _page_card_source(row):
+    """Return the complete, stable source shape for one placement.
+
+    The page list deliberately does not inline this object.  A single-card
+    read serializes it once and exposes bounded, contiguous chunks so the
+    orchestrator never silently loses the tail at its generic tool-result
+    budget.
+    """
+    if row["kind"] == "anki":
+        return {
+            "kind": "anki",
+            "cards": copy.deepcopy(row.get("cards") or []),
+        }
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    return {
+        "kind": "card",
+        "isHtml": payload.get("isHtml") is True,
+        "type": str(payload.get("type") or "")[:256],
+        "category": str(payload.get("category") or "")[:128],
+        "contextText": row.get("contextText") or "",
+        "content": row.get("raw_content") or "",
+    }
+
+
+def _page_card_index_item(row):
+    preview = str(row.get("content") or "")[:600]
+    source = json.dumps(
+        _page_card_source(row), ensure_ascii=False, separators=(",", ":")
+    )
+    return {
+        "id": row["id"], "number": row["number"], "kind": row["kind"],
+        "label": row["label"], "content": preview,
+        "content_truncated": len(source) > len(preview),
+        "bind": copy.deepcopy(row["bind"]), "unbound": row["unbound"],
+    }
+
+
+def _t_page_cards_query(args, ctx):
+    page = _page_card_page(args, ctx)
+    if page is None:
+        return {"error": "不知道要读哪一页", "code": "page_card_page_required"}
+    state, rows, source = _page_card_projection(ctx, page)
+    if state is None:
+        return {"error": "当前不是 App 权威的本机 PDF", "code": "native_page_cards_required"}
+    result = {
+        "page": page, "revision": state["revisions"]["notes"],
+        "number_source": source, "count": len(rows), "returned": 0,
+        "cards": [], "truncated": False,
+        "note": ("序号由当前页渲染几何投影提供。" if source == "renderer-geometry"
+                 else "当前请求没有渲染几何投影，序号仅按 bind.from/to 稳定回退；写入前仍必须携带 id+修订号。"),
+    }
+    # This result is fed back to three different orchestrators.  Keep the
+    # complete JSON below their shared 6000-character envelope instead of
+    # relying on a blind slice that turns a prefix into an apparent full list.
+    budget = 4200
+    for index, row in enumerate(rows):
+        item = _page_card_index_item(row)
+        candidate = dict(result)
+        candidate["cards"] = result["cards"] + [item]
+        candidate["returned"] = len(candidate["cards"])
+        candidate["truncated"] = index + 1 < len(rows)
+        encoded = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > budget:
+            result["truncated"] = True
+            break
+        result["cards"].append(item)
+        result["returned"] = len(result["cards"])
+    if result["returned"] < len(rows):
+        result["truncated"] = True
+    return result
+
+
+def _t_page_card_read(args, ctx):
+    page = _page_card_page(args, ctx)
+    if page is None:
+        return {"error": "不知道要读哪一页", "code": "page_card_page_required"}
+    state, rows, source = _page_card_projection(ctx, page)
+    if state is None:
+        return {"error": "当前不是 App 权威的本机 PDF", "code": "native_page_cards_required"}
+    card_id = str(args.get("id") or "")
+    number = args.get("number")
+    if not card_id and (not isinstance(number, int) or isinstance(number, bool) or number < 1):
+        return {"error": "缺 id 或当前页 number", "code": "page_card_selector_required"}
+    row = next((item for item in rows if card_id and item["id"] == card_id), None)
+    if row is None and isinstance(number, int) and not isinstance(number, bool):
+        row = next((item for item in rows if item["number"] == number), None)
+    if row is None:
+        return {"error": "没找到这张卡片", "code": "page_card_not_found"}
+    revision = state["revisions"]["notes"]
+    offset = args.get("offset", 0)
+    limit = args.get("limit", 2000)
+    expected_revision = args.get("expected_revision")
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0 \
+            or not isinstance(limit, int) or isinstance(limit, bool) \
+            or limit < 1 or limit > 2000:
+        return {"error": "卡片分块参数无效", "code": "page_card_chunk_invalid"}
+    if offset > 0 and (not isinstance(expected_revision, int)
+                       or isinstance(expected_revision, bool)):
+        return {
+            "error": "续读必须携带首块 expected_revision",
+            "code": "page_card_revision_required",
+        }
+    if expected_revision is not None and expected_revision != revision:
+        return {
+            "error": "卡片在分块读取期间已变化，请从 offset=0 重新读取",
+            "code": "page_card_revision_conflict", "current_revision": revision,
+        }
+    content = json.dumps(
+        _page_card_source(row), ensure_ascii=False, separators=(",", ":")
+    )
+    if offset > len(content):
+        return {"error": "卡片分块 offset 越界", "code": "page_card_chunk_invalid"}
+    end = min(len(content), offset + limit)
+    chunk = content[offset:end]
+    next_offset = end if end < len(content) else None
+    return {
+        "page": page, "revision": revision, "number_source": source,
+        "card": {
+            "id": row["id"], "number": row["number"], "kind": row["kind"],
+            "label": row["label"], "bind": copy.deepcopy(row["bind"]),
+            "unbound": row["unbound"],
+            "content_format": "application/vnd.bw-reader.card+json;version=1",
+        },
+        "content": chunk, "content_length": len(content), "offset": offset,
+        "next_offset": next_offset, "truncated": next_offset is not None,
+    }
+
+
+def _page_card_write_target(args, ctx):
+    page = _page_card_page(args, ctx)
+    if page is None:
+        return None, None, None, {"error": "不知道要改哪一页", "code": "page_card_page_required"}
+    number = args.get("number")
+    # Stable placement id is the primary selector for every page card.  The
+    # visible number is only an optional, renderer-owned shortcut for anchored
+    # cards; it is never sufficient on its own.
+    expected_id = args.get("id") or args.get("expected_id")
+    expected_revision = args.get("expected_revision")
+    if (number is not None and (
+            not isinstance(number, int) or isinstance(number, bool) or number < 1)) \
+            or not isinstance(expected_id, str) or not expected_id \
+            or not isinstance(expected_revision, int) or isinstance(expected_revision, bool) \
+            or expected_revision < 0:
+        return None, None, None, {
+            "error": "写操作必须携带稳定 id + expected_revision；number 仅为锚定卡快捷校验",
+            "code": "page_card_stable_reference_required",
+        }
+    state, rows, source = _page_card_projection(ctx, page)
+    if state is None:
+        return None, None, None, {
+            "error": "当前不是 App 权威的本机 PDF", "code": "native_page_cards_required",
+        }
+    if number is not None and source != "renderer-geometry":
+        return None, None, None, {
+            "error": "当前页的可见卡片序号尚未完成精确投影，请稍后重新读取",
+            "code": "page_card_geometry_required",
+        }
+    revision = state["revisions"]["notes"]
+    if revision != expected_revision:
+        return None, None, None, {
+            "error": "卡片列表已变化，请重新读取后再操作",
+            "code": "page_card_revision_conflict", "current_revision": revision,
+        }
+    if number is None:
+        row = next((item for item in rows if item["id"] == expected_id), None)
+        if row is None:
+            return None, None, None, {
+                "error": "没找到这个稳定 ID 对应的页面卡片",
+                "code": "page_card_not_found",
+            }
+    else:
+        row = next((item for item in rows if item["number"] == number), None)
+        if row is None or row["unbound"] or row["id"] != expected_id:
+            return None, None, None, {
+                "error": "序号已指向其它卡片，请重新读取后再操作",
+                "code": "page_card_identity_conflict",
+                "current_id": row["id"] if row else None,
+            }
+    return state, row, source, None
+
+
+def _page_card_row_page(row):
+    bind = row.get("bind") if isinstance(row, dict) else None
+    if isinstance(bind, dict):
+        page = bind.get("page")
+        if isinstance(page, int) and not isinstance(page, bool) and page > 0:
+            return page
+    placement = row.get("placement") if isinstance(row, dict) else None
+    anchor = placement.get("anchor") if isinstance(placement, dict) else None
+    page = anchor.get("page") if isinstance(anchor, dict) else None
+    return page if isinstance(page, int) and not isinstance(page, bool) and page > 0 else None
+
+
+def _page_card_client_action(state, row, op, after=None):
+    item = {"id": row["id"], "before": copy.deepcopy(row["placement"])}
+    if after is not None:
+        item["after"] = after
+    data = {
+        "type": "page-card", "op": op,
+        "native_operation_id": "npdf_" + os.urandom(12).hex(),
+        "file": state["file"], "page": _page_card_row_page(row),
+        "number": row["number"], "expected_id": row["id"],
+        "expected_revision": state["revisions"]["notes"], "item": item,
+    }
+    return {"fn": "_assistEdit", "args": [data]}
+
+
+def _t_page_card_edit(args, ctx):
+    state, row, source, error = _page_card_write_target(args, ctx)
+    if error:
+        return error
+    after = copy.deepcopy(row["placement"])
+    if row["kind"] == "anki":
+        cards = args.get("cards")
+        if not isinstance(cards, list) or not cards or len(cards) > 12:
+            return {
+                "error": "学习卡必须传 1 到 12 张严格 basic/cloze 卡片",
+                "code": "page_card_cards_required",
+            }
+        normalized_cards = []
+        for card in cards:
+            if not isinstance(card, dict) or set(card) not in (
+                    {"type", "front", "back"}, {"type", "cloze"}):
+                return {
+                    "error": "每张学习卡只能是 {type:basic,front,back} 或 {type:cloze,cloze}",
+                    "code": "page_card_cards_invalid",
+                }
+            card_type = card.get("type")
+            if card_type == "basic":
+                front, back = card.get("front"), card.get("back")
+                if not isinstance(front, str) or not front.strip() \
+                        or not isinstance(back, str) or not back.strip() \
+                        or len(front) > _PAGE_CARD_CONTENT_LIMIT \
+                        or len(back) > _PAGE_CARD_CONTENT_LIMIT:
+                    return {
+                        "error": "basic 卡必须有非空 front/back，且单面不超过 100000 字符",
+                        "code": "page_card_cards_invalid",
+                    }
+                normalized_cards.append({"type": "basic", "front": front, "back": back})
+            elif card_type == "cloze":
+                cloze = card.get("cloze")
+                if not isinstance(cloze, str) or not cloze.strip() \
+                        or len(cloze) > _PAGE_CARD_CONTENT_LIMIT \
+                        or not re.search(r"\{\{c[1-9][0-9]*::.+?\}\}", cloze, re.S):
+                    return {
+                        "error": "cloze 卡必须含有效的 {{cN::...}} 挖空，且不超过 100000 字符",
+                        "code": "page_card_cards_invalid",
+                    }
+                normalized_cards.append({"type": "cloze", "cloze": cloze})
+            else:
+                return {
+                    "error": "学习卡 type 只能是 basic 或 cloze",
+                    "code": "page_card_cards_invalid",
+                }
+        cards = normalized_cards
+        after["card"] = dict(after["card"])
+        after["card"]["cards"] = copy.deepcopy(cards)
+        after["card"]["contextText"] = _page_card_body(
+            {}, "anki", {"cards": cards}
+        )
+    else:
+        content = args.get("content")
+        context_text = args.get("contextText")
+        if not isinstance(content, str) or not content.strip():
+            return {
+                "error": "HTML/通用卡必须传非空 content（完整替换）",
+                "code": "page_card_content_required",
+            }
+        if context_text is not None and not isinstance(context_text, str):
+            return {"error": "contextText 必须是文字", "code": "page_card_context_invalid"}
+        if len(content) > _PAGE_CARD_CONTENT_LIMIT or (
+                isinstance(context_text, str)
+                and len(context_text) > _PAGE_CARD_CONTENT_LIMIT):
+            return {"error": "卡片内容过大", "code": "page_card_content_limit"}
+        after["html"] = dict(after["html"])
+        after["html"]["content"] = content
+        after["html"]["contextText"] = (
+            context_text if isinstance(context_text, str)
+            else _page_card_plain_text(content)
+        )
+    after["updated"] = int(time.time())
+    return {
+        "ok": True, "pending": True, "op": "edit", "page": _page_card_row_page(row),
+        "number": row["number"], "id": row["id"],
+        "expected_revision": state["revisions"]["notes"],
+        "number_source": source,
+        "client_action": _page_card_client_action(state, row, "edit", after),
+        "note": "已把严格更改描述交给 App；只有 App 原子提交回执成功才算修改完成。",
+    }
+
+
+def _t_page_card_delete(args, ctx):
+    state, row, source, error = _page_card_write_target(args, ctx)
+    if error:
+        return error
+    return {
+        "ok": True, "pending": True, "op": "delete", "page": _page_card_row_page(row),
+        "number": row["number"], "id": row["id"],
+        "expected_revision": state["revisions"]["notes"],
+        "number_source": source, "delete_scope": "placement-only",
+        "client_action": _page_card_client_action(state, row, "delete"),
+        "note": "已把 placement-only 删除交给 App；不删 canonical 学习卡、学习状态或 Anki。",
+    }
+
+
 # ── 便签(sticky notes)四工具:查询/读取/新建/编辑(阶段3 AI 工具;设计见 references/sticky-notes-design.md)。
 #   数据层直接用 pdf_reader 的便签 sidecar(_notes_load/_notes_save,PDF/EPUB 同一套,anchor 不透明)。
 #   kind 由注册方定:PDF 助手='pdf'(位置说印刷页),EPUB 助手='epub'(位置说 section idx),行为一致。
@@ -5379,6 +5980,30 @@ def _t_error_patterns(args, ctx):
 
 TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
+    "page_cards_query": ("读当前 PDF 页上的所有卡片（包括锚定卡和手动拖入的自由卡）。"
+                         "返回当前序号 number、稳定 placement id、notes revision、锚定词 label、"
+                         "有界正文摘要及 count/returned/truncated/content_truncated。完整源内容必须再调 page_card_read。"
+                         "未绑定的历史卡 number=null,unbound=true，不得猜序号。args {page?}",
+                         _t_page_cards_query),
+    "page_card_read": ("按连续分块读当前 PDF 页上一张卡片的完整源 JSON。"
+                        "可用当前页 number 或稳定 id；truncated=true 时用 next_offset 续读，"
+                        "并把首块 revision 作为 expected_revision 原样带回。修订变化就从 offset=0 重读。"
+                        "args {number?|id?,page?,offset?,limit?,expected_revision?}",
+                        _t_page_card_read),
+    "page_card_edit": ("修改当前 PDF 页一张卡片的内容。当前页面快照的 CARD 标记若已带"
+                        "完整内容、稳定 id 和 revision，可直接把它们作为替换内容、id 与 expected_revision 调用，"
+                        "无需先 page_cards_query/read；只有标记缺失、陈旧或 content_truncated=true 时才补读。"
+                        "锚定卡可额外携带 number 作当前序号快捷双重校验。学习卡用 cards 数组完整替换；"
+                        "HTML/通用卡用 content 完整替换，contextText 可选传 AI 应读文字。"
+                        "args {id,expected_revision,number?,page?,cards?|content?,contextText?}",
+                        _t_page_card_edit),
+    "page_card_delete": ("删除当前 PDF 页一张卡片的 placement。当前页面快照 CARD 标记已有"
+                          "稳定 id + revision 时可直接作为 id + expected_revision 调用，无需先读取卡片内容；"
+                          "只有标记缺失或陈旧时才 page_cards_query。"
+                          "只有锚定卡可额外携带 number 作当前序号快捷双重校验。"
+                          "只删页面 placement，不删 canonical 学习卡、学习状态或 Anki；App 成功后会提供撤销/重做条。"
+                          "args {id,expected_revision,number?,page?}",
+                          _t_page_card_delete),
     "recall_creation": ("取回一个**创造物**的完整内容(之前工具的产出:练习纸/检查报告/联网搜索/视频/翻译/章节总结)。"
                         "上下文『最近创造物』清单里的 #id 就是句柄;用户提到『刚才查的/搜的/那张纸/那个结果/第几题的答案』→ 调我拿全文再答。"
                         "纸类条目返回**题目+标准答案+检查报告(有的话)**。args {id?:句柄; kind?:类型; query?:描述模糊;都不传=最近一条}", _t_recall_creation),
@@ -5542,6 +6167,7 @@ _TOOL_NAMESPACE_DESCRIPTIONS = {
     "knowledge": "连接笔记、知识图谱、学习焦点和元认知记录。",
     "language_notes": "翻译、词汇掌握、词典与书页便签。",
     "media_web": "联网检索网页、图片和教学视频。",
+    "page_cards": "读取、修改或删除正文锚定卡片，使用当前序号与稳定身份双重校验。",
     "reading": "读取、搜索、导航当前书籍和其它书籍。",
     "recipes": "召回创造物、检查报告和已保存的复合工具。",
     "review": "诊断、提议并在确认后更新知识掌握度。",
@@ -5562,6 +6188,9 @@ _TOOL_NAMES_BY_NAMESPACE = {
         "lookup_word", "correct_dict", "add_vocab", "translate",
     },
     "media_web": {"web_search", "search_image", "search_video"},
+    "page_cards": {
+        "page_cards_query", "page_card_read", "page_card_edit", "page_card_delete",
+    },
     "creation": {
         "make_anki", "make_note", "do_task", "make_paper", "page_new",
         "page_add", "page_show", "start_dictation",
@@ -5668,6 +6297,52 @@ _TOOL_SCHEMA_OVERRIDES = {
             "description": "兼容批量调用；单页优先使用 page",
         },
     }),
+    "page_cards_query": _tool_object_schema({
+        "page": dict(_PAGE_VALUE_SCHEMA, description="印刷页码；不给则当前页"),
+    }),
+    "page_card_read": _tool_object_schema({
+        "number": {"type": "integer", "minimum": 1, "description": "当前页可见序号"},
+        "id": {"type": "string", "description": "稳定 placement id；未绑定卡也可用"},
+        "page": dict(_PAGE_VALUE_SCHEMA, description="印刷页码；不给则当前页"),
+        "offset": {"type": "integer", "minimum": 0, "description": "首块为 0；续读使用 next_offset"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 2000,
+                  "description": "本块最多读取的源 JSON 字符数"},
+        "expected_revision": {"type": "integer", "minimum": 0,
+                              "description": "续读时必须逐字带回首块 revision"},
+    }),
+    "page_card_edit": {
+        "type": "object",
+        "properties": {
+            "number": {"type": "integer", "minimum": 1,
+                       "description": "仅锚定卡可用的当前页快捷序号；仍会与 id 双重校验"},
+            "id": {"type": "string", "minLength": 1,
+                   "description": "所有页面卡片通用的稳定 placement id"},
+            "expected_revision": {"type": "integer", "minimum": 0},
+            "page": dict(_PAGE_VALUE_SCHEMA, description="印刷页码；不给则当前页"),
+            "cards": {
+                "type": "array", "minItems": 1,
+                "items": {"type": "object", "additionalProperties": True},
+                "description": "学习卡的完整结构替换",
+            },
+            "content": {"type": "string", "minLength": 1, "description": "HTML/通用卡完整内容"},
+            "contextText": {"type": "string", "description": "AI 上下文应读的纯文字"},
+        },
+        "required": ["id", "expected_revision"],
+        "additionalProperties": False,
+    },
+    "page_card_delete": {
+        "type": "object",
+        "properties": {
+            "number": {"type": "integer", "minimum": 1,
+                       "description": "仅锚定卡可用的当前页快捷序号；仍会与 id 双重校验"},
+            "id": {"type": "string", "minLength": 1,
+                   "description": "所有页面卡片通用的稳定 placement id"},
+            "expected_revision": {"type": "integer", "minimum": 0},
+            "page": dict(_PAGE_VALUE_SCHEMA, description="印刷页码；不给则当前页"),
+        },
+        "required": ["id", "expected_revision"],
+        "additionalProperties": False,
+    },
     "goto_page": _tool_object_schema({
         "page": dict(
             _PAGE_VALUE_SCHEMA,
@@ -5907,6 +6582,20 @@ def _step_detail(res):
         return ""
 
 
+def _tool_result_for_model(name, res):
+    """Serialize one tool result for the next orchestrator turn.
+
+    Most historical tools retain the shared 6000-character budget.  Page-card
+    list/read results are already explicitly bounded and carry their own
+    truncation/continuation fields, so slicing them again would silently break
+    that contract and make a partial card look complete.
+    """
+    encoded = json.dumps(res, ensure_ascii=False)
+    if name in {"page_cards_query", "page_card_read"}:
+        return encoded
+    return encoded[:6000]
+
+
 def _tool_label(name, args):
     if name in ("do_task", "make_paper", "read_check_report", "run_saved_task"):   # CLI 卡标题 = 用户任务原话(不是通用工具名),前端拿它当卡头
         if name == "run_saved_task":
@@ -5921,6 +6610,8 @@ def _tool_label(name, args):
             "add_vocab": "加生词本", "highlight": "高亮", "auto_highlight": "自动标重点(逐页外包)", "read_highlights": "看高亮", "find_highlights": "列出可删高亮", "toc": "查目录", "page_vocab": "查掌握度",
             "lookup_word": "查词典", "see_page": "看页面图", "see_figure": "看这张图", "see_ink": "看笔迹标注",
             "notes_query": "查便签", "notes_read": "读便签", "notes_create": "新建便签", "notes_edit": "修改便签",
+            "page_cards_query": "查页面卡片", "page_card_read": "读页面卡片",
+            "page_card_edit": "修改页面卡片", "page_card_delete": "删除页面卡片",
             "recall_notes": "召回我的笔记", "undo_last": "撤销", "search_image": "配图搜索", "search_video": "找视频"}.get(name, name)
 
 
@@ -5929,7 +6620,8 @@ def _tool_label(name, args):
 _READONLY_TOOLS = {"read_page", "read_selection", "search_book", "search_all_books", "toc", "page_vocab",
                    "lookup_word", "see_page", "see_figure", "see_ink", "read_highlights", "find_highlights",
                    "notes_query", "notes_read", "read_check_report", "summarize_section", "web_search",
-                   "search_image", "search_video", "recall_notes", "list_saved_tasks"}
+                   "search_image", "search_video", "recall_notes", "list_saved_tasks",
+                   "page_cards_query", "page_card_read"}
 
 # 创造物自动登记:非操作型工具完成 → 入库(告知 brief 含实际查询词;read_page 不登——可随时重读,登了只添噪)。
 _CREATION_KINDS = {
@@ -8456,7 +9148,7 @@ def _agent_run_claude(message, ctx, history, mdl, eff, uid, fallback_from=None):
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
                 yield _tool2(name, _tool_label(name, targs), targs, "done", res, _tool_sec, locals().get("_subs"), _gm, _ga)
-                text_part = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
+                text_part = "【工具结果】" + _tool_result_for_model(name, res) + "\n\n继续(调工具只输出 JSON,能答就直接答):"
                 if vision:   # see_page:把渲染图作为 image block 喂回(大脑 sonnet 能看图)
                     content = [{"type": "text", "text": text_part}]
                     for v in vision[:2]:
@@ -8692,7 +9384,7 @@ def _agent_run_gemini(message, ctx, history, variant, depth, uid):
                     yield {"event": "undo", "data": {"undo_id": res["undo_id"], "label": _tool_label(name, targs), "page": res.pop("_jump_page", None) or (ctx.get("pages") or [ctx.get("page")] or [None])[0]}}
                 yield {"event": "tool-done", "data": _tool_label(name, targs)}
                 yield _tool2(name, _tool_label(name, targs), targs, "done", res, _tool_sec, locals().get("_subs"), _gm, _ga)
-                feed = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
+                feed = "【工具结果】" + _tool_result_for_model(name, res) + "\n\n继续(调工具只输出 JSON,能答就直接答):"
                 contents.append({"role": "model", "parts": [{"text": raw}]})
                 uparts = [{"text": feed}]
                 if vision:   # see_page 等:渲染图 inlineData 喂回(Gemini 多模态)
@@ -8844,7 +9536,7 @@ def _agent_run_codex(message, ctx, history, variant, depth, uid, fast=False):
                         _vd = f"(看图失败:{str(_e)[:80]})"
                     if isinstance(res, dict):
                         res["图像内容(视觉模型转述)"] = (_vd or "")[:2200]
-                nxt = "【工具结果】" + json.dumps(res, ensure_ascii=False)[:6000] + "\n\n继续(调工具只输出 JSON,能答就直接答):"
+                nxt = "【工具结果】" + _tool_result_for_model(name, res) + "\n\n继续(调工具只输出 JSON,能答就直接答):"
                 continue
             _fix = None if locals().get("_claim_retried") else _claim_fix_msg(raw, locals().get("_used_tools"))
             if _fix:   # 写操作幻觉 → 拦下,打回重试一次(仅一次,防循环)

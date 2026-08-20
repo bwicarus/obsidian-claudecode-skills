@@ -2855,6 +2855,11 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
             wrap.__charsBaseW = wrap.classList.contains('crop-on') ? (parseFloat(wrap.style.getPropertyValue('--full-w')) || wrap.clientWidth || 0) : (wrap.clientWidth || 0);   // #51:cv 校正重建同步基准宽(整页布局宽)
             wrap.__pageWPt = d2.page_w; wrap.__pageHPt = d2.page_h;
             wrap.__furigana = d2.furigana || [];
+            try { window.__applyPhraseMergesLocal && window.__applyPhraseMergesLocal(wrap); } catch (_) {}
+            // 真 cv 可能替换掉首次用缓存猜值建立的整套字符几何。词锚必须
+            // 对这份最终权威几何再挂一次，否则刷新后会一直等到下一次重渲。
+            try { window.__pageBindRetry && window.__pageBindRetry(num); } catch (_) {}
+            try { if (window.RC && RC.stickynote && RC.stickynote.repositionAll) RC.stickynote.repositionAll(); } catch (_) {}
             try { renderRubyLayer(wrap); } catch (_) {}
           }
         } catch (_) {}
@@ -7592,7 +7597,8 @@ function openGrammarPanel() {
   if (_onGr && !_grammarHistLoaded && typeof loadGrammarHistory === 'function') loadGrammarHistory();
 }
 window.closeGrammarPanel = () => {
-  document.getElementById('grammar-panel')?.classList.remove('open');
+  document.getElementById('grammar-panel')?.classList.remove('open', 'rc-side-settings-open');
+  const sideSettings = document.getElementById('side-settings'); if (sideSettings) sideSettings.style.display = 'none';
   document.body.classList.remove('grammar-open');
   _hideDepTip();
   // 还原侧栏打开时临时切走的双页——仅当当前仍是"被临时切出来的单列"(开栏期间手动改过模式就不还原)
@@ -7638,14 +7644,19 @@ window._gpSetBlur = (v) => {
 window.toggleSideSettings = (ev) => {
   if (ev) ev.stopPropagation();
   const m = document.getElementById('side-settings'); if (!m) return;
-  if (m.style.display === 'block') { m.style.display = 'none'; return; }
+  const panel = document.getElementById('grammar-panel');
+  if (m.style.display === 'block') {
+    m.style.display = 'none'; panel?.classList.remove('rc-side-settings-open'); return;
+  }
   _gpSyncUI();
   m.style.display = 'block';
+  panel?.classList.add('rc-side-settings-open');
 };
 document.addEventListener('pointerdown', (e) => {   // 点弹层外部 → 关
   const m = document.getElementById('side-settings');
   if (m && m.style.display === 'block' && !m.contains(e.target) && !e.target.closest('#side-settings-btn')) {
     m.style.display = 'none';
+    document.getElementById('grammar-panel')?.classList.remove('rc-side-settings-open');
   }
 }, true);
 _gpApplyAppearance();   // 载入即应用持久化设置
@@ -10358,8 +10369,13 @@ async function _connProbe() {
     'background:#2563eb;color:#fff;font-size:24px;box-shadow:0 6px 18px rgba(0,0,0,.4);cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent}' +
     '#asst-fab:active{transform:scale(.92)}' +
     '#side-pane-asst.active{display:flex;flex-direction:column;overflow:hidden;height:100%}' +
-    '#asst-thread{flex:1 1 auto;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px;-webkit-overflow-scrolling:touch;min-height:0;overscroll-behavior:contain;touch-action:pan-y}' +   // contain+pan-y:滚到头不把滚动链漏给底下 PDF(否则阅读器在浮层下偷偷滚→IO 渲页=卡)
-    '.asst-msg{max-width:92%;padding:9px 12px;border-radius:13px;font-size:14px;line-height:1.55;word-break:break-word}' +
+    '#asst-thread{flex:1 1 auto;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px;-webkit-overflow-scrolling:touch;min-width:0;min-height:0;max-width:100%;box-sizing:border-box;overscroll-behavior:contain;touch-action:pan-y}' +   // contain+pan-y:滚到头不把滚动链漏给底下 PDF(否则阅读器在浮层下偷偷滚→IO 渲页=卡)
+    // Flex 子项默认 min-width:auto，会按连续代码串的 min-content 宽度撑破气泡；清零后再用
+    // overflow-wrap:anywhere 处理无空格 ID/日文/卡片标记。pre 保留格式并以自身横滚作最后兜底。
+    '.asst-msg{box-sizing:border-box;min-width:0;max-width:92%;padding:9px 12px;border-radius:13px;font-size:14px;line-height:1.55;overflow-wrap:anywhere;word-break:break-word}' +
+    '.asst-msg .rc-turn-bd,.asst-msg .rc-part,.asst-msg .rc-part-text,.asst-msg .vc-card-bd{box-sizing:border-box;min-width:0;max-width:100%;overflow-wrap:anywhere}' +
+    '.asst-msg code,.asst-msg samp,.asst-msg kbd{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}' +
+    '.asst-msg pre{box-sizing:border-box;min-width:0;max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;overflow-x:auto}' +
     '.asst-u{align-self:flex-end;background:#1d4ed8;color:#fff;border-bottom-right-radius:4px}' +
     '.asst-a{align-self:flex-start;background:#161d31;border:1px solid #243152;border-bottom-left-radius:4px}' +
     '.asst-a p{margin:.4em 0}.asst-a ul,.asst-a ol{margin:.3em 0;padding-left:1.3em}.asst-a code{background:#0b1220;padding:1px 4px;border-radius:4px}' +
@@ -10438,7 +10454,7 @@ async function _connProbe() {
     '.actx-page{align-self:flex-start;font-size:11px;color:#eaf2ff;background:rgba(255,255,255,.16);border-radius:9px;padding:2px 9px;cursor:pointer}' +
     '.actx-page:active{background:rgba(255,255,255,.28)}' +
     // ⚙ 模型设置面板(每任务 后端/型号/深度)
-    '.ams-mask{position:fixed;inset:0;z-index:130;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}' +
+    '.ams-mask{position:fixed;inset:0;z-index:2147483400;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}' +
     '.ams-box{background:#0d1426;border:1px solid #2a3a63;border-radius:14px;max-width:440px;width:100%;max-height:86vh;overflow-y:auto;padding:14px 14px 16px;box-shadow:0 12px 40px rgba(0,0,0,.6)}' +
     '.ams-h{font-size:15px;color:#dbe7ff;font-weight:600;display:flex;align-items:center;justify-content:space-between;margin-bottom:3px}' +
     '.ams-x{background:none;border:none;color:#7c93c4;font-size:20px;cursor:pointer;padding:0 4px;line-height:1}' +
@@ -11179,6 +11195,7 @@ async function _connProbe() {
   var _assistEdits = {}, _aeCtr = 0;
   window._assistEdit = function (d) {
     try {
+      if (d && d.type === 'page-card') return _assistPageCard(d);
       if (!d || !Array.isArray(d.items) || !d.items.length) return;
       if (d.type === 'note') return _assistNoteCard(d);   // 便签写操作(notes_create/notes_edit)→ 便签版卡
       if (d.type !== 'highlight') return;
@@ -11209,6 +11226,77 @@ async function _connProbe() {
       thread.appendChild(card); scrollDown();
     } catch (_) {}
   };
+
+  // 词锚卡片的 AI 修改/删除必须由 native runtime 先提交，随后才到这里显示。
+  // 操作条只保存稳定 operation id；撤销/重做时仍回到 runtime 做目标快照与
+  // revision 校验，绝不能由 UI 拿一个可能已重排的“第 N 个”直接写 notes。
+  function _assistPageCard(d) {
+    try {
+      var operationId = String(d.native_operation_id || d.operationId || '');
+      if (!/^(?:npdf|pcard)_[0-9a-f]{24}$/.test(operationId)) return;
+      var op = d.op === 'edit' ? 'edit' : (d.op === 'delete' ? 'delete' : '');
+      if (!op) return;
+      var item = d.item && typeof d.item === 'object' ? d.item
+        : (Array.isArray(d.items) && d.items[0] ? d.items[0] : {});
+      var number = Number(d.number != null ? d.number : item.number);
+      if (!Number.isInteger(number) || number < 1) number = null;
+      var page = Number(d.page != null ? d.page : item.page);
+      if (!Number.isInteger(page) || page < 1) page = null;
+      // The native runtime has already committed before dispatching this UI
+      // receipt. Reload now so deleted frames/rail markers disappear and the
+      // remaining cards receive their compacted visible numbers immediately.
+      try { window.notesReload && window.notesReload(); } catch (_) {}
+      for (var existingId in _assistEdits) {
+        if (!Object.prototype.hasOwnProperty.call(_assistEdits, existingId)) continue;
+        var existing = _assistEdits[existingId];
+        if (existing && existing.ntype === 'page-card' &&
+            existing.operationId === operationId) return;
+      }
+      var eid = 'ae' + (++_aeCtr);
+      _assistEdits[eid] = {
+        ntype: 'page-card', op: op, operationId: operationId,
+        page: page, number: number, item: item, undone: false
+      };
+      var card = document.createElement('div'); card.className = 'asst-edit-card';
+      var head = document.createElement('div'); head.className = 'asst-edit-h';
+      var ordinal = number ? ('第 ' + number + ' 个') : '自由';
+      head.textContent = (op === 'delete' ? '🗑 已删除' : '✏️ 已修改') + ordinal + '卡片';
+      card.appendChild(head);
+      if (page) {
+        var chips = document.createElement('div'); chips.className = 'asst-edit-chips';
+        var jump = document.createElement('button'); jump.className = 'asst-jump';
+        jump.setAttribute('data-page', page); jump.textContent = '→ 第' + page + '页';
+        chips.appendChild(jump); card.appendChild(chips);
+      }
+      var btn = document.createElement('button'); btn.className = 'asst-edit-undo';
+      btn.setAttribute('data-eid', eid); btn.textContent = '↩ 撤销';
+      card.appendChild(btn); thread.appendChild(card); scrollDown();
+    } catch (_) {}
+  }
+
+  function _pageCardEditToggle(st, button) {
+    var action = st.undone ? 'redo' : 'undo';
+    var target = window._nativeReaderPageCardAction;
+    if (typeof target !== 'function') {
+      button.disabled = false;
+      button.textContent = st.undone ? '↪ 重做' : '↩ 撤销';
+      try { window._toast && window._toast('当前阅读器尚未准备好卡片撤销'); } catch (_) {}
+      return;
+    }
+    button.textContent = action === 'undo' ? '撤销中…' : '重做中…';
+    Promise.resolve(target({ operationId: st.operationId, action: action }))
+      .then(function (result) {
+        if (!result || result.ok !== true) throw new Error('page-card-action-failed');
+        st.undone = action === 'undo';
+        button.disabled = false;
+        button.textContent = st.undone ? '↪ 重做' : '↩ 撤销';
+        try { window.notesReload && window.notesReload(); } catch (_) {}
+      }).catch(function () {
+        button.disabled = false;
+        button.textContent = st.undone ? '↪ 重做' : '↩ 撤销';
+        try { window._toast && window._toast(action === 'undo' ? '撤销失败，卡片可能已发生变化' : '重做失败，卡片可能已发生变化'); } catch (_) {}
+      });
+  }
   // 便签写操作的「跳转 + 撤销⇄重做」卡(同高亮卡形态;后端 notes_create/notes_edit 的 client_action 触发):
   //   create:撤销=DELETE 该便签,重做=POST 快照重建(拿新 id 接管撤销);edit:撤销=PATCH 旧 text/color,重做=PATCH 新值。
   //   任何一步都只碰 text/color/整条,绝不动 strokes/anchor/尺寸。
@@ -11527,6 +11615,7 @@ async function _connProbe() {
     if (eb) {
       var eid2 = eb.getAttribute('data-eid'); var st = _assistEdits[eid2]; if (!st) return;
       eb.disabled = true;
+      if (st.ntype === 'page-card') { _pageCardEditToggle(st, eb); return; }
       if (st.ntype === 'note') { _noteEditToggle(st, eb); return; }   // 便签卡:走便签版撤销⇄重做
       if (!st.undone) {
         eb.textContent = '撤销中…';
@@ -13548,8 +13637,8 @@ window._lbClick = _lbClick;
 // 「圆球过多会遮挡视野」，以及更要命的一条 ——
 // 「实际的书中字符可不像你的例子那样有足够的空白位置，这样会盖到其它字符」。
 //
-// 所以标记**不占正文面积**，改成：给被锚的词描边 + 不遮字的下半部极淡渐变/
-// 分段底边小装饰 + 右上角一个**页内序号**；卡片按需点开，一次只开一张。
+// 所以标记**不占正文面积**，改成：给被锚的词画透明底分类色边框 + 右上角一个
+// **页内序号**；卡片按需点开，一次只开一张。
 // 不恢复实心填充：扫描书底色本来就不匀，重色块会直接盖住字形。
 //
 // 序号是它在**本页**的次序，不是全书连续：位置，不是身份。人和 AI 用同一套，
@@ -13718,14 +13807,39 @@ window._lbClick = _lbClick;
     });
   }
 
+  function _collapseRailGroup(rail) {
+    if (rail) rail.__expandedGroupKey = '';
+  }
+
+  function _railGroupKey(row) {
+    var keys = [];
+    for (var i = 0; i < row.length; i++) keys.push(String(row[i].dataset.bindkey || ''));
+    keys.sort();
+    return keys.join('|');
+  }
+
+  /// 同行重叠组第一次只展开，第二次点到明确编号才打开卡片。
+  function _openRailDot(rail, dot, open, ev) {
+    if (ev) ev.stopPropagation();
+    var groupKey = dot && dot.__bwGroupKey;
+    if (rail && dot && dot.__bwGroupSize > 1 && groupKey && rail.__expandedGroupKey !== groupKey) {
+      rail.__expandedGroupKey = groupKey;
+      _wakeRail(rail);
+      _scheduleRails();
+      return;
+    }
+    open(ev);
+  }
+
   function _destroyRail(rail) {
     if (!rail) return;
     var scrollEl = rail.__scrollEl, onMove = rail.__onMove;
     try { if (scrollEl && onMove) scrollEl.removeEventListener('scroll', onMove); } catch (e) {}
     try { if (onMove) window.removeEventListener('resize', onMove); } catch (e2) {}
-    try { if (rail.__rootObserver) rail.__rootObserver.disconnect(); } catch (e3) {}
-    try { if (scrollEl && scrollEl.__pgbindRail === rail) scrollEl.__pgbindRail = null; } catch (e4) {}
-    try { rail.remove(); } catch (e5) {}
+    try { if (rail.__onOutside) document.removeEventListener('pointerdown', rail.__onOutside, true); } catch (e3) {}
+    try { if (rail.__rootObserver) rail.__rootObserver.disconnect(); } catch (e4) {}
+    try { if (scrollEl && scrollEl.__pgbindRail === rail) scrollEl.__pgbindRail = null; } catch (e5) {}
+    try { rail.remove(); } catch (e6) {}
   }
 
   function _railFor(pw) {
@@ -13738,12 +13852,23 @@ window._lbClick = _lbClick;
     var view = document.createElement('div'); view.className = 'pgbind-rail-view';
     rail.appendChild(view);
     document.body.appendChild(rail);
-    rail.__scrollEl = scrollEl; rail.__view = view;
+    rail.__scrollEl = scrollEl; rail.__view = view; rail.__expandedGroupKey = '';
     scrollEl.__pgbindRail = rail;
-    var onMove = function () { _wakeRail(rail); _scheduleRails(); };
+    var onMove = function () {
+      _collapseRailGroup(rail);
+      _wakeRail(rail);
+      _scheduleRails();
+    };
     rail.__onMove = onMove;
     try { scrollEl.addEventListener('scroll', onMove, { passive: true }); } catch (e) {}
     try { window.addEventListener('resize', onMove); } catch (e2) {}
+    var onOutside = function (ev) {
+      if (!rail.__expandedGroupKey || (ev && ev.target && rail.contains(ev.target))) return;
+      _collapseRailGroup(rail);
+      _scheduleRails();
+    };
+    rail.__onOutside = onOutside;
+    try { document.addEventListener('pointerdown', onOutside, true); } catch (e3) {}
     // #main 被刷新/宿主重建时，旧滚动根不会再发 scroll；监听 DOM 替换后主动
     // 撤掉 body 上的孤儿 fixed rail 与事件，不等下一次 resize 才收拾。
     try {
@@ -13753,7 +13878,7 @@ window._lbClick = _lbClick;
         });
         rail.__rootObserver.observe(document.body, { childList: true, subtree: true });
       }
-    } catch (e3) {}
+    } catch (e4) {}
     _wakeRail(rail); _scheduleRails();
     return rail;
   }
@@ -13785,23 +13910,83 @@ window._lbClick = _lbClick;
       else if (cy < 0) above.push(d); else below.push(d);
     }
     near.sort(function (a, b) { return a.__bwCy - b.__bwCy; });
-    var row = [], lastCy = -1e9;
+    var rows = [], row = [], lastCy = -1e9;
     for (var n = 0; n < near.length; n++) {
-      var dot = near[n], size0 = dot.__bwSize;
-      if (Math.abs(dot.__bwCy - lastCy) > Math.max(size0, row.length ? row[0].__bwSize : 0) * 0.6) row = [];
-      row.push(dot); lastCy = dot.__bwCy;
-      dot.classList.remove('far');
-      dot.style.width = size0 + 'px'; dot.style.height = size0 + 'px';
-      dot.style.borderRadius = Math.round(size0 * 0.325) + 'px';
-      dot.style.fontSize = Math.max(9, Math.round(size0 * 0.42)) + 'px';
-      dot.style.top = Math.max(_RAIL_EDGE, Math.min(h - _RAIL_EDGE, dot.__bwCy)) + 'px';
-      // 同行多卡向左排开，保证每个编号都能直接点；不让重叠的顶层按钮吞掉下面那张。
-      dot.style.right = Math.min(_RAIL_W - size0 - 4, 16 + (row.length - 1) * (size0 + 6)) + 'px';
+      var next = near[n];
+      if (row.length && Math.abs(next.__bwCy - lastCy) >
+          Math.max(next.__bwSize, row[0].__bwSize) * 0.6) {
+        rows.push(row); row = [];
+      }
+      row.push(next); lastCy = next.__bwCy;
+    }
+    if (row.length) rows.push(row);
+
+    var liveGroups = Object.create(null);
+    for (var g = 0; g < rows.length; g++) {
+      rows[g].sort(function (a, b) {
+        return (parseInt(a.textContent, 10) || 0) - (parseInt(b.textContent, 10) || 0);
+      });
+      if (rows[g].length > 1) liveGroups[_railGroupKey(rows[g])] = true;
+    }
+    if (rail.__expandedGroupKey && !liveGroups[rail.__expandedGroupKey]) _collapseRailGroup(rail);
+
+    for (var r0 = 0; r0 < rows.length; r0++) {
+      var group = rows[r0], groupKey = group.length > 1 ? _railGroupKey(group) : '';
+      var expanded = !!groupKey && rail.__expandedGroupKey === groupKey;
+      var rowCy = 0, rowSize = 0;
+      for (var q0 = 0; q0 < group.length; q0++) {
+        rowCy += group[q0].__bwCy;
+        rowSize = Math.max(rowSize, group[q0].__bwSize);
+      }
+      rowCy /= group.length;
+      var maxRight = Math.max(16, _RAIL_W - rowSize - 4);
+      var spreadStep = group.length > 1
+        ? Math.min(rowSize + 6, Math.max(6, (maxRight - 16) / (group.length - 1))) : 0;
+      for (var q = 0; q < group.length; q++) {
+        var dot = group[q], size0 = dot.__bwSize;
+        dot.__bwGroupKey = groupKey; dot.__bwGroupSize = group.length;
+        dot.classList.remove('far');
+        dot.classList.toggle('grouped', group.length > 1);
+        dot.classList.toggle('group-lead', group.length > 1 && q === 0);
+        dot.classList.toggle('group-open', expanded);
+        if (group.length > 1 && q === 0 && !expanded) {
+          dot.dataset.groupCount = String(group.length);
+          dot.setAttribute('aria-expanded', 'false');
+          dot.setAttribute('aria-label', '本行 ' + group.length + ' 张卡片，点击展开');
+          dot.title = '本行 ' + group.length + ' 张卡片，点击展开';
+        } else {
+          delete dot.dataset.groupCount;
+          if (group.length > 1 && q === 0) dot.setAttribute('aria-expanded', 'true');
+          else dot.removeAttribute('aria-expanded');
+          if (dot.__bwCardLabel) {
+            dot.setAttribute('aria-label', dot.__bwCardLabel);
+            dot.title = dot.__bwCardLabel;
+          }
+        }
+        dot.tabIndex = group.length > 1 && !expanded && q > 0 ? -1 : 0;
+        dot.style.zIndex = String(group.length > 1 && !expanded ? 40 + group.length - q : 20 + group.length - q);
+        dot.style.width = size0 + 'px'; dot.style.height = size0 + 'px';
+        dot.style.borderRadius = Math.round(size0 * 0.325) + 'px';
+        dot.style.fontSize = Math.max(9, Math.round(size0 * 0.42)) + 'px';
+        dot.style.top = Math.max(_RAIL_EDGE, Math.min(h - _RAIL_EDGE, rowCy)) + 'px';
+        // 收起时只错开一点并用组数量提示；第一次点击后才沿水平方向完整展开。
+        var step = expanded ? spreadStep : 5;
+        dot.style.right = Math.min(maxRight, 16 + q * step) + 'px';
+      }
     }
     var farPlace = function (arr, lower) {
       arr.sort(function (a, b) { return a.__bwCy - b.__bwCy; });
       for (var k = 0; k < arr.length; k++) {
-        var fd = arr[k]; fd.classList.add('far'); fd.style.right = '13px';
+        var fd = arr[k];
+        fd.__bwGroupKey = ''; fd.__bwGroupSize = 1;
+        fd.classList.add('far');
+        fd.classList.remove('grouped', 'group-lead', 'group-open');
+        delete fd.dataset.groupCount; fd.removeAttribute('aria-expanded');
+        fd.tabIndex = 0; fd.style.zIndex = ''; fd.style.right = '13px';
+        if (fd.__bwCardLabel) {
+          fd.setAttribute('aria-label', fd.__bwCardLabel);
+          fd.title = fd.__bwCardLabel;
+        }
         fd.style.top = (lower
           ? h - _RAIL_EDGE + 2 + (_RAIL_EDGE - 4) * ((k + 1) / (arr.length + 1))
           : 2 + (_RAIL_EDGE - 4) * ((k + 1) / (arr.length + 1))) + 'px';
@@ -13892,6 +14077,7 @@ window._lbClick = _lbClick;
       var rd = document.querySelector('.pgbind-rail-dot[data-bindkey="' + ns[i].dataset.bindkey + '"]');
       if (rd) {
         rd.textContent = ns[i].textContent;
+        rd.__bwCardLabel = ns[i].title;
         rd.title = ns[i].title;
         rd.setAttribute('aria-label', ns[i].title);
       }
@@ -14044,12 +14230,12 @@ window._lbClick = _lbClick;
       var key = uid ? ('u' + uid) : ('p' + page + 'b' + range.lo + '_' + range.hi);
       _removeMark(layer, key);
 
-      // ── 标记本体：描边 + CSS 极淡下半渐变/分段底线，不用盖字的实心填充 ──
+      // ── 标记本体：透明底分类色描边，不用盖字的填充或伪元素装饰 ──
       //   用户 2026-08-20 定：「实际的书中字符可不像你的例子那样有足够的空白
       //   位置，这样会盖到其它字符」——标记不能抢正文面积。填色即使走 multiply
-      //   也仍然改了字的底色，而扫描书底色本来就不匀；这里只给 CSS 9% 装饰。
+      //   也仍然改了字的底色，而扫描书底色本来就不匀。
       //   框往外放 PAD，别贴着字形。
-      var PAD = 1.5;
+      var PAD = 2;
       var tone = _bindTone(payload);
       var lastMark = null;
       for (var r = 0; r < rects.length; r++) {
@@ -14105,7 +14291,7 @@ window._lbClick = _lbClick;
       var hs = layer.querySelectorAll('[data-bindkey="' + key + '"]');
       for (var h = 0; h < hs.length; h++) hs[h].addEventListener('click', open);
       if (dot) {
-        dot.addEventListener('click', open);
+        dot.addEventListener('click', function (ev) { _openRailDot(rail, dot, open, ev); });
         dot.addEventListener('pointerenter', function () { _wakeRail(rail); });
       }
 

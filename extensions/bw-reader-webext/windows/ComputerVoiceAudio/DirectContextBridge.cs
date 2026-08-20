@@ -480,7 +480,7 @@ internal sealed class NamedPipeDirectContextAdapter :
                 character is not (>= '0' and <= '9')
                 and not (>= 'a' and <= 'f'))
             || Encoding.UTF8.GetByteCount(value.GetRawText())
-                > NamedPipeDirectContextTransport.MaximumPayloadBytes
+                > DirectBridgeContract.MaximumMessageBytes
         )
         {
             throw ContextSchemaInvalid();

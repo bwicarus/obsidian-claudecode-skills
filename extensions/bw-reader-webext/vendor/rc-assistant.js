@@ -84,7 +84,7 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-asst-ctx-row.clk{cursor:pointer}.rc-asst-ctx-row.clk:active{background:rgba(255,255,255,.2)}' +
       '.rc-asst-ctx-row.fml{text-align:center;white-space:normal;overflow-x:auto;color:#eaf2ff}' +
       // ── ⚙ 模型设置面板(每任务 后端/型号/深度)── 逐字照搬 25-assistant.js:122-136
-      '.ams-mask{position:fixed;inset:0;z-index:130;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}' +
+      '.ams-mask{position:fixed;inset:0;z-index:2147483400;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}' +
       '.ams-box{background:#0d1426;border:1px solid #2a3a63;border-radius:14px;max-width:440px;width:100%;max-height:86vh;overflow-y:auto;padding:14px 14px 16px;box-shadow:0 12px 40px rgba(0,0,0,.6)}' +
       '.ams-h{font-size:15px;color:#dbe7ff;font-weight:600;display:flex;align-items:center;justify-content:space-between;margin-bottom:3px}' +
       '.ams-x{background:none;border:none;color:#7c93c4;font-size:20px;cursor:pointer;padding:0 4px;line-height:1}' +
@@ -891,7 +891,7 @@ if (window.__bwPwaProviderOnly) return;
     '#asst-fab:active{transform:scale(.92)}' +
     '#side-pane-asst{position:relative}' +
     '#side-pane-asst.active{display:flex;flex-direction:column;overflow:hidden;height:100%}' +
-    '#asst-thread{flex:1 1 auto;overflow-y:auto;padding:12px 12px 12px 30px;display:flex;flex-direction:column;gap:10px;-webkit-overflow-scrolling:touch;min-height:0;overscroll-behavior:contain;touch-action:pan-y;scrollbar-width:none}' +   // contain+pan-y:滚到头不把滚动链漏给底下 PDF(否则阅读器在浮层下偷偷滚→IO 渲页=卡)
+    '#asst-thread{flex:1 1 auto;overflow-y:auto;padding:12px 12px 12px 30px;display:flex;flex-direction:column;gap:10px;-webkit-overflow-scrolling:touch;min-width:0;min-height:0;max-width:100%;box-sizing:border-box;overscroll-behavior:contain;touch-action:pan-y;scrollbar-width:none}' +   // contain+pan-y:滚到头不把滚动链漏给底下 PDF(否则阅读器在浮层下偷偷滚→IO 渲页=卡)
     '#asst-thread::-webkit-scrollbar,#asst-ta::-webkit-scrollbar,.ams-mask *::-webkit-scrollbar{width:0;height:0;display:none}' +
     '#asst-ta,.ams-mask *{scrollbar-width:none}' +
     /* Codex 式轮次导航：一问一答一短条；当前视口里的轮次提亮，悬停/触摸按曲线向外展开。 */
@@ -907,7 +907,12 @@ if (window.__bwPwaProviderOnly) return;
     '#asst-turntip .q{font-size:13px;font-weight:650;line-height:1.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
     '#asst-turntip .a{margin-top:7px;font-size:12px;line-height:1.5;color:#aeb2ba;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
     '@keyframes asstTurnTipIn{from{opacity:0;transform:translateX(-7px) scale(.98)}to{opacity:1;transform:none}}' +
-    '.asst-msg{max-width:92%;padding:9px 12px;border-radius:13px;font-size:14px;line-height:1.55;word-break:break-word}' +
+    // Flex 子项默认 min-width:auto，会按连续代码串的 min-content 宽度撑破气泡；清零后再用
+    // overflow-wrap:anywhere 处理无空格 ID/日文/卡片标记。pre 保留格式并以自身横滚作最后兜底。
+    '.asst-msg{box-sizing:border-box;min-width:0;max-width:92%;padding:9px 12px;border-radius:13px;font-size:14px;line-height:1.55;overflow-wrap:anywhere;word-break:break-word}' +
+    '.asst-msg .rc-turn-bd,.asst-msg .rc-part,.asst-msg .rc-part-text,.asst-msg .vc-card-bd{box-sizing:border-box;min-width:0;max-width:100%;overflow-wrap:anywhere}' +
+    '.asst-msg code,.asst-msg samp,.asst-msg kbd{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}' +
+    '.asst-msg pre{box-sizing:border-box;min-width:0;max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;overflow-x:auto}' +
     '.asst-u{align-self:flex-end;background:#1d4ed8;color:#fff;border-bottom-right-radius:4px}' +
     '.asst-a{align-self:flex-start;background:#161d31;border:1px solid #243152;border-bottom-left-radius:4px}' +
     '.asst-a p{margin:.4em 0}.asst-a ul,.asst-a ol{margin:.3em 0;padding-left:1.3em}.asst-a code{background:#0b1220;padding:1px 4px;border-radius:4px}' +
@@ -932,6 +937,8 @@ if (window.__bwPwaProviderOnly) return;
     '.asst-edit-chips{display:flex;flex-wrap:wrap;gap:6px}' +
     '.asst-edit-undo{align-self:flex-start;background:#26344f;border:1px solid #3a5273;color:#dbe7ff;border-radius:8px;padding:3px 12px;font-size:12.5px;cursor:pointer}' +
     '.asst-edit-undo:active{background:#2f4061}.asst-edit-undo:disabled{opacity:.55}' +
+    '.asst-pc-snack{position:fixed;left:50%;bottom:max(22px,env(safe-area-inset-bottom));transform:translateX(-50%);z-index:320;display:flex;align-items:center;gap:12px;max-width:min(92vw,520px);padding:10px 12px 10px 15px;border:1px solid #3a5273;border-radius:12px;background:rgba(19,32,58,.94);box-shadow:0 10px 30px rgba(0,0,0,.4);color:#e9efff;backdrop-filter:blur(10px)}' +
+    '.asst-pc-snack-msg{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}.asst-pc-snack .asst-edit-undo{flex:0 0 auto;margin:0}' +
     '#asst-quick{flex:0 0 auto;display:flex;flex-wrap:nowrap;gap:6px;padding:8px 10px;border-top:1px solid #233156;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}' +
     '#asst-quick::-webkit-scrollbar{display:none}' +
     '#asst-quick button{flex:none;white-space:nowrap}' +   // 按钮多了不换行:单行横滑(iOS chips 惯例)
@@ -1019,7 +1026,7 @@ if (window.__bwPwaProviderOnly) return;
     '.actx-page{align-self:flex-start;font-size:11px;color:#eaf2ff;background:rgba(255,255,255,.16);border-radius:9px;padding:2px 9px;cursor:pointer}' +
     '.actx-page:active{background:rgba(255,255,255,.28)}' +
     // ⚙ 模型设置面板(每任务 后端/型号/深度)
-    '.ams-mask{position:fixed;inset:0;z-index:130;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}' +
+    '.ams-mask{position:fixed;inset:0;z-index:2147483400;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}' +
     '.ams-box{background:#0d1426;border:1px solid #2a3a63;border-radius:14px;max-width:440px;width:100%;max-height:86vh;overflow-y:auto;padding:14px 14px 16px;box-shadow:0 12px 40px rgba(0,0,0,.6)}' +
     '.ams-h{font-size:15px;color:#dbe7ff;font-weight:600;display:flex;align-items:center;justify-content:space-between;margin-bottom:3px}' +
     '.ams-x{background:none;border:none;color:#7c93c4;font-size:20px;cursor:pointer;padding:0 4px;line-height:1}' +
@@ -2035,6 +2042,7 @@ if (window.__bwPwaProviderOnly) return;
   var _assistEdits = {}, _aeCtr = 0;
   window._assistEdit = function (d) {
     try {
+      if (d && d.type === 'page-card') return _assistPageCard(d);
       if (!d || !Array.isArray(d.items) || !d.items.length) return;
       if (d.type === 'note') return _assistNoteCard(d);   // 便签写操作(notes_create/notes_edit)→ 便签版卡
       if (d.type !== 'highlight') return;
@@ -2073,6 +2081,125 @@ if (window.__bwPwaProviderOnly) return;
       thread.appendChild(card); scrollDown();
     } catch (_) {}
   };
+
+  // 词锚卡片的 AI 修改/删除必须由 native runtime 先提交，随后才到这里显示。
+  // 操作卡只保存稳定 operation id；撤销/重做仍回 runtime 做目标快照与
+  // revision 校验，不能由 UI 拿一个可能已重排的“第 N 个”直接写 notes。
+  function _assistPageCard(d) {
+    try {
+      var operationId = String(d.native_operation_id || d.operationId || '');
+      if (!/^(?:npdf|pcard)_[0-9a-f]{24}$/.test(operationId)) return;
+      var op = d.op === 'edit' ? 'edit' : (d.op === 'delete' ? 'delete' : '');
+      if (!op) return;
+      var item = d.item && typeof d.item === 'object' ? d.item
+        : (Array.isArray(d.items) && d.items[0] ? d.items[0] : {});
+      var number = Number(d.number != null ? d.number : item.number);
+      if (!Number.isInteger(number) || number < 1) number = null;
+      var page = Number(d.page != null ? d.page : item.page);
+      if (!Number.isInteger(page) || page < 1) page = null;
+      // native runtime 已提交；先重挂页面卡片，让删除、编号紧缩和右侧标记立即可见。
+      try { window.notesReload && window.notesReload(); } catch (_) {}
+      for (var existingId in _assistEdits) {
+        if (!Object.prototype.hasOwnProperty.call(_assistEdits, existingId)) continue;
+        var existing = _assistEdits[existingId];
+        if (existing && existing.ntype === 'page-card' &&
+            existing.operationId === operationId) return;
+      }
+      var eid = 'ae' + (++_aeCtr);
+      _assistEdits[eid] = {
+        ntype: 'page-card', op: op, operationId: operationId,
+        page: page, number: number, item: item, undone: false
+      };
+      var card = document.createElement('div'); card.className = 'asst-edit-card';
+      var head = document.createElement('div'); head.className = 'asst-edit-h';
+      var ordinal = number ? ('第 ' + number + ' 个') : '自由';
+      head.textContent = (op === 'delete' ? '🗑 已删除' : '✏️ 已修改') + ordinal + '卡片';
+      card.appendChild(head);
+      if (page) {
+        var chips = document.createElement('div'); chips.className = 'asst-edit-chips';
+        var jump = document.createElement('button'); jump.className = 'asst-jump';
+        jump.setAttribute('data-page', page); jump.textContent = '→ 第' + page + '页';
+        chips.appendChild(jump); card.appendChild(chips);
+      }
+      var btn = document.createElement('button'); btn.className = 'asst-edit-undo';
+      btn.setAttribute('data-eid', eid); btn.setAttribute('data-pcard-operation', operationId); btn.textContent = '↩ 撤销';
+      card.appendChild(btn); thread.appendChild(card); scrollDown();
+      try { _showPageCardSnack(eid, _assistEdits[eid]); } catch (_) {}
+    } catch (_) {}
+  }
+
+  var _pageCardSnackTimer = 0;
+  function _armPageCardSnack(snack) {
+    if (_pageCardSnackTimer) clearTimeout(_pageCardSnackTimer);
+    _pageCardSnackTimer = setTimeout(function () {
+      if (snack && snack.parentNode) snack.parentNode.removeChild(snack);
+      _pageCardSnackTimer = 0;
+    }, 6500);
+  }
+
+  function _showPageCardSnack(eid, st) {
+    if (!document.body || !st) return;
+    var old = document.getElementById && document.getElementById('asst-pc-snack');
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+    var snack = document.createElement('div');
+    snack.id = 'asst-pc-snack'; snack.className = 'asst-pc-snack';
+    snack.setAttribute('role', 'status'); snack.setAttribute('aria-live', 'polite');
+    var message = document.createElement('span'); message.className = 'asst-pc-snack-msg';
+    var ordinal = st.number ? ('第 ' + st.number + ' 个') : '自由';
+    message.textContent = (st.op === 'delete' ? '已删除' : '已修改') + ordinal + '卡片';
+    var button = document.createElement('button'); button.className = 'asst-edit-undo';
+    button.setAttribute('data-eid', eid);
+    button.setAttribute('data-pcard-operation', st.operationId);
+    button.textContent = st.undone ? '↪ 重做' : '↩ 撤销';
+    button.addEventListener('click', function () {
+      if (button.disabled) return;
+      button.disabled = true; _pageCardEditToggle(st, button);
+    });
+    snack.appendChild(message); snack.appendChild(button); document.body.appendChild(snack);
+    snack.addEventListener('pointerenter', function () {
+      if (_pageCardSnackTimer) clearTimeout(_pageCardSnackTimer);
+    });
+    snack.addEventListener('pointerleave', function () { _armPageCardSnack(snack); });
+    snack.addEventListener('focusin', function () {
+      if (_pageCardSnackTimer) clearTimeout(_pageCardSnackTimer);
+    });
+    snack.addEventListener('focusout', function (event) {
+      if (!event.relatedTarget || !snack.contains(event.relatedTarget)) _armPageCardSnack(snack);
+    });
+    _armPageCardSnack(snack);
+  }
+
+  function _syncPageCardButtons(st, disabled, label) {
+    if (!document.querySelectorAll) return;
+    var buttons = document.querySelectorAll('[data-pcard-operation="' + st.operationId + '"]');
+    Array.prototype.forEach.call(buttons, function (candidate) {
+      candidate.disabled = disabled; candidate.textContent = label;
+    });
+  }
+
+  function _pageCardEditToggle(st, button) {
+    var action = st.undone ? 'redo' : 'undo';
+    var target = window._nativeReaderPageCardAction;
+    if (typeof target !== 'function') {
+      button.disabled = false;
+      button.textContent = st.undone ? '↪ 重做' : '↩ 撤销';
+      try { window._toast && window._toast('当前阅读器尚未准备好卡片撤销'); } catch (_) {}
+      return;
+    }
+    button.textContent = action === 'undo' ? '撤销中…' : '重做中…';
+    Promise.resolve(target({ operationId: st.operationId, action: action }))
+      .then(function (result) {
+        if (!result || result.ok !== true) throw new Error('page-card-action-failed');
+        st.undone = action === 'undo';
+        _syncPageCardButtons(st, false, st.undone ? '↪ 重做' : '↩ 撤销');
+        button.disabled = false; button.textContent = st.undone ? '↪ 重做' : '↩ 撤销';
+        try { window.notesReload && window.notesReload(); } catch (_) {}
+      }).catch(function () {
+        _syncPageCardButtons(st, false, st.undone ? '↪ 重做' : '↩ 撤销');
+        button.disabled = false; button.textContent = st.undone ? '↪ 重做' : '↩ 撤销';
+        try { window._toast && window._toast(action === 'undo' ? '撤销失败，卡片可能已发生变化' : '重做失败，卡片可能已发生变化'); } catch (_) {}
+      });
+  }
   // 便签写操作的「跳转 + 撤销⇄重做」卡(同高亮卡形态;后端 notes_create/notes_edit 的 client_action 触发):
   //   create:撤销=DELETE 该便签,重做=POST 快照重建(拿新 id 接管撤销);edit:撤销=PATCH 旧 text/color,重做=PATCH 新值。
   //   任何一步都只碰 text/color/整条,绝不动 strokes/anchor/尺寸。
@@ -2815,6 +2942,7 @@ if (window.__bwPwaProviderOnly) return;
     if (eb) {
       var eid2 = eb.getAttribute('data-eid'); var st = _assistEdits[eid2]; if (!st) return;
       eb.disabled = true;
+      if (st.ntype === 'page-card') { _pageCardEditToggle(st, eb); return; }
       if (st.ntype === 'note') { _noteEditToggle(st, eb); return; }   // 便签卡:走便签版撤销⇄重做
       if (!st.undone) {
         eb.textContent = '撤销中…';

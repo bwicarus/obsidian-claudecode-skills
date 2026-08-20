@@ -78,15 +78,15 @@ test("正文锚跟高亮同坐标；右侧轨和展开卡才是视口 portal", (
 // 初版是「落下时展开、非活跃计时、到点收成球留在锚点上」。两条都被否掉：
 //   「圆球过多会遮挡视野」
 //   「实际的书中字符可不像你的例子那样有足够的空白位置，这样会盖到其它字符」
-// 所以标记不再占正文面积 —— 描边 + 极淡下半渐变/分段底线，卡片按需点开。
+// 所以标记不再占正文面积 —— 透明底分类色描边，卡片按需点开。
 // 这条测试替换了原来那条「可见才计时、到点收球、能拆」。
 
-test("标记有轻量分类装饰，但不恢复盖字的实心填充", () => {
-  assert.match(CSS, /background: linear-gradient\(180deg,transparent 0 62%,color-mix\(in srgb,var\(--pm-t\) 9%,transparent\) 62% 100%\)/);
-  assert.match(CSS, /\.pgmark::after \{[\s\S]{0,260}?linear-gradient\(90deg,var\(--pm-t\) 0 38%,transparent 38% 62%,var\(--pm-t\) 62% 100%\)/);
-  assert.doesNotMatch(CSS, /\.pgmark \{[^}]*background:\s*var\(--pm-t\)/,
-    "词框不能恢复成会盖住正文的实心分类色");
-  assert.match(CSS, /\.pgmark \{[\s\S]{0,240}?border: 1\.5px solid var\(--pm-b\)/);
+test("标记只保留透明底分类色 2px 边框", () => {
+  assert.match(CSS, /\.pgmark \{[\s\S]{0,240}?border: 2px solid var\(--pm-b\);[^}]*background: transparent;/);
+  assert.doesNotMatch(CSS, /\.pgmark::before/);
+  assert.doesNotMatch(CSS, /\.pgmark::after/);
+  assert.match(BINDCARD, /var PAD = 2;/,
+    "2px 边框的几何外扩也必须同步为 2，避免贴住字形");
   // 边框色不能是色调原色：实测在纸上只有 1.6~2.5:1，够不到图形元素的 3:1
   assert.match(BINDCARD, /--pm-b:color-mix\(in srgb,' \+ tc \+ ' 60%,#2a2440\)/);
 });

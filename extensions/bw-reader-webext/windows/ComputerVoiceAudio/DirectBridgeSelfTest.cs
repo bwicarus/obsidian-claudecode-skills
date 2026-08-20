@@ -738,6 +738,8 @@ internal static class DirectBridgeSelfTest
         await CheckReaderContextMcpProtocolAsync(
             root,
             checks).ConfigureAwait(false);
+        CheckReaderPageCardQueryContract(checks);
+        CheckReaderPageCardMutationContract(checks);
         await CheckReaderRealtimeOutputMcpAsync(
             root,
             checks).ConfigureAwait(false);
@@ -757,6 +759,370 @@ internal static class DirectBridgeSelfTest
             checks).ConfigureAwait(false);
         await CheckReaderPcOwnerLeaseAsync(checks)
             .ConfigureAwait(false);
+    }
+
+    private static void CheckReaderPageCardQueryContract(
+        ICollection<string> checks)
+    {
+        JsonObject schema =
+            ReaderContextMcpServer.BuildPageCardReadArgumentsSchema();
+        JsonObject schemaProperties = schema["properties"]!.AsObject();
+        JsonArray selectors = schema["oneOf"]!.AsArray();
+
+        using JsonDocument idArguments = JsonDocument.Parse(
+            """
+            {"page":7,"id":"c_1111111111111111","offset":0,"limit":20}
+            """);
+        bool idAccepted = ReaderContextMcpServer.TryReadPageCardReadQuery(
+            idArguments.RootElement,
+            out JsonObject idParameters);
+        using JsonDocument numberArguments = JsonDocument.Parse(
+            """
+            {"number":2}
+            """);
+        bool numberAccepted = ReaderContextMcpServer.TryReadPageCardReadQuery(
+            numberArguments.RootElement,
+            out JsonObject numberParameters);
+        using JsonDocument bothArguments = JsonDocument.Parse(
+            """
+            {"id":"c_1111111111111111","number":2}
+            """);
+        bool bothRejected = !ReaderContextMcpServer.TryReadPageCardReadQuery(
+            bothArguments.RootElement,
+            out _);
+        using JsonDocument missingArguments = JsonDocument.Parse("{}");
+        bool missingRejected = !ReaderContextMcpServer.TryReadPageCardReadQuery(
+            missingArguments.RootElement,
+            out _);
+        using JsonDocument oversizedArguments = JsonDocument.Parse(
+            """
+            {"id":"c_1111111111111111","limit":24577}
+            """);
+        bool oversizedRejected =
+            !ReaderContextMcpServer.TryReadPageCardReadQuery(
+                oversizedArguments.RootElement,
+                out _);
+        using JsonDocument continuationArguments = JsonDocument.Parse(
+            """
+            {"id":"c_1111111111111111","offset":20,"limit":20,"expectedRevision":11}
+            """);
+        bool continuationAccepted =
+            ReaderContextMcpServer.TryReadPageCardReadQuery(
+                continuationArguments.RootElement,
+                out JsonObject continuationParameters);
+        using JsonDocument unguardedContinuationArguments = JsonDocument.Parse(
+            """
+            {"id":"c_1111111111111111","offset":20,"limit":20}
+            """);
+        bool unguardedContinuationRejected =
+            !ReaderContextMcpServer.TryReadPageCardReadQuery(
+                unguardedContinuationArguments.RootElement,
+                out _);
+
+        const string source =
+            "{\"kind\":\"anki\",\"cards\":[{\"type\":\"basic\","
+            + "\"front\":\"问题\",\"back\":\"答案\"}]}";
+        string chunk = source[..20];
+        JsonElement detail = JsonSerializer.SerializeToElement(new
+        {
+            contract = ReaderQueryProtocol.PageCardDetailContract,
+            page = 7,
+            revision = 11,
+            card = new
+            {
+                id = "c_1111111111111111",
+                number = (int?)2,
+                kind = "anki",
+                type = "anki",
+                label = "锚定词",
+                bind = new
+                {
+                    kind = "page-chars",
+                    page = 7,
+                    @from = 4,
+                    to = 5,
+                    text = "锚定词",
+                },
+                unbound = false,
+                content_format = ReaderQueryProtocol.PageCardContentFormat,
+            },
+            content = chunk,
+            content_length = source.Length,
+            offset = 0,
+            next_offset = (int?)chunk.Length,
+            truncated = true,
+        });
+        ReaderQueryProtocol.ValidatePageCardDetailResult(
+            detail,
+            envelopeTruncated: true);
+        ReaderQueryRequest request = new(
+            "query-page-card-1",
+            "source-page-card-1",
+            12,
+            "book.pdf",
+            "page-card",
+            idParameters);
+        ReaderQueryResponse response = new(
+            "session-page-card-1",
+            request.Correlation,
+            request.SourceInstanceId,
+            request.SnapshotRevision,
+            request.File,
+            request.Query,
+            "ok",
+            detail,
+            true);
+        bool responseMatches =
+            ReaderQueryProtocol.PageCardResponseMatchesRequest(
+                request,
+                response);
+        ReaderQueryRequest numberRequest = request with
+        {
+            Correlation = "query-page-card-2",
+            Parameters = numberParameters,
+        };
+        bool numberResponseMatches =
+            ReaderQueryProtocol.PageCardResponseMatchesRequest(
+                numberRequest,
+                response);
+        JsonObject expectedRevisionParameters = idParameters.DeepClone().AsObject();
+        expectedRevisionParameters["expectedRevision"] = 11;
+        bool expectedRevisionMatches =
+            ReaderQueryProtocol.PageCardResponseMatchesRequest(
+                request with { Parameters = expectedRevisionParameters },
+                response);
+        expectedRevisionParameters["expectedRevision"] = 10;
+        bool wrongExpectedRevisionRejected =
+            !ReaderQueryProtocol.PageCardResponseMatchesRequest(
+                request with { Parameters = expectedRevisionParameters },
+                response);
+        JsonElement unavailableEnvelope = JsonSerializer.SerializeToElement(new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = ReaderQueryProtocol.ResponseType,
+            requestId = "request-page-card-unavailable",
+            sessionId = "session-AAAAAAAAAAAAAAAAAAAAAA",
+            correlation = request.Correlation,
+            sourceInstanceId = request.SourceInstanceId,
+            snapshotRevision = request.SnapshotRevision,
+            file = request.File,
+            query = request.Query,
+            status = "unavailable",
+            result = new { },
+            truncated = false,
+        });
+        ReaderQueryResponse unavailable =
+            ReaderQueryProtocol.ValidateResponse(unavailableEnvelope);
+        bool unavailableAccepted = unavailable.Status == "unavailable"
+            && ReaderQueryProtocol.PageCardResponseMatchesRequest(
+                request,
+                unavailable);
+        JsonObject wrongSelectorParameters =
+            numberParameters.DeepClone().AsObject();
+        wrongSelectorParameters["number"] = 3;
+        bool wrongSelectorRejected =
+            !ReaderQueryProtocol.PageCardResponseMatchesRequest(
+                numberRequest with
+                {
+                    Correlation = "query-page-card-3",
+                    Parameters = wrongSelectorParameters,
+                },
+                response);
+        JsonObject ambiguousSelectorParameters =
+            idParameters.DeepClone().AsObject();
+        ambiguousSelectorParameters["number"] = 2;
+        bool ambiguousResponseRejected =
+            !ReaderQueryProtocol.PageCardResponseMatchesRequest(
+                request with
+                {
+                    Correlation = "query-page-card-4",
+                    Parameters = ambiguousSelectorParameters,
+                },
+                response);
+
+        bool badNextRejected = false;
+        try
+        {
+            JsonObject badNext = JsonNode.Parse(detail.GetRawText())!.AsObject();
+            badNext["next_offset"] = chunk.Length + 1;
+            ReaderQueryProtocol.ValidatePageCardDetailResult(
+                JsonSerializer.SerializeToElement(badNext),
+                envelopeTruncated: true);
+        }
+        catch (DirectProtocolException exception)
+        {
+            badNextRejected = exception.Code
+                == "BW_READER_QUERY_SCHEMA_INVALID";
+        }
+
+        bool byteLimitRejected = false;
+        try
+        {
+            string oversizedChunk = new string(
+                '界',
+                ReaderQueryProtocol.MaximumPageCardChunkUtf8Bytes / 3 + 1);
+            JsonObject tooLarge = JsonNode.Parse(detail.GetRawText())!.AsObject();
+            tooLarge["content"] = oversizedChunk;
+            tooLarge["content_length"] = oversizedChunk.Length;
+            tooLarge["next_offset"] = null;
+            tooLarge["truncated"] = false;
+            ReaderQueryProtocol.ValidatePageCardDetailResult(
+                JsonSerializer.SerializeToElement(tooLarge),
+                envelopeTruncated: false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            byteLimitRejected = exception.Code
+                == "BW_READER_QUERY_SCHEMA_INVALID";
+        }
+
+        const string normalSource =
+            "{\"kind\":\"card\",\"isHtml\":false,\"type\":\"note\","
+            + "\"category\":\"general\",\"contextText\":\"手动拖入\","
+            + "\"content\":\"自由卡正文\"}";
+        JsonElement unbound = JsonSerializer.SerializeToElement(new
+        {
+            contract = ReaderQueryProtocol.PageCardDetailContract,
+            page = 7,
+            revision = 11,
+            card = new
+            {
+                id = "c_2222222222222222",
+                number = (int?)null,
+                kind = "card",
+                type = "card",
+                label = "自由卡",
+                bind = (object?)null,
+                unbound = true,
+                content_format = ReaderQueryProtocol.PageCardContentFormat,
+            },
+            content = normalSource,
+            content_length = normalSource.Length,
+            offset = 0,
+            next_offset = (int?)null,
+            truncated = false,
+        });
+        ReaderQueryProtocol.ValidatePageCardDetailResult(
+            unbound,
+            envelopeTruncated: false);
+
+        Require(
+            ReaderQueryProtocol.IsQuery("page-card")
+            && ReaderQueryProtocol.IsQueryForSurface("page-card", "pdf")
+            && !ReaderQueryProtocol.IsQueryForSurface("page-card", "epub")
+            && !ReaderQueryProtocol.IsQueryForSurface("page-card", "web")
+            && idAccepted
+            && idParameters["page"]?.GetValue<int>() == 7
+            && idParameters["id"]?.GetValue<string>()
+                == "c_1111111111111111"
+            && idParameters["offset"]?.GetValue<long>() == 0
+            && idParameters["limit"]?.GetValue<int>() == 20
+            && numberAccepted
+            && numberParameters["number"]?.GetValue<int>() == 2
+            && numberParameters["offset"]?.GetValue<long>() == 0
+            && numberParameters["limit"]?.GetValue<int>()
+                == ReaderQueryProtocol.MaximumPageCardChunkCodeUnits
+            && bothRejected
+            && missingRejected
+            && oversizedRejected
+            && continuationAccepted
+            && continuationParameters["expectedRevision"]?.GetValue<long>() == 11
+            && unguardedContinuationRejected
+            && selectors.Count == 2
+            && schemaProperties["limit"]!["maximum"]?.GetValue<int>()
+                == ReaderQueryProtocol.MaximumPageCardChunkCodeUnits
+            && schemaProperties.ContainsKey("expectedRevision")
+            && responseMatches
+            && numberResponseMatches
+            && expectedRevisionMatches
+            && wrongExpectedRevisionRejected
+            && unavailableAccepted
+            && wrongSelectorRejected
+            && ambiguousResponseRejected
+            && badNextRejected
+            && byteLimitRejected,
+            "direct-reader-page-card-query-is-pdf-only-chunked-and-fail-closed",
+            checks);
+    }
+
+    private static void CheckReaderPageCardMutationContract(
+        ICollection<string> checks)
+    {
+        using JsonDocument freeEditArguments = JsonDocument.Parse(
+            """
+            {"id":"c_2222222222222222","expectedRevision":11,"content":"自由卡新正文"}
+            """);
+        bool freeEditAccepted =
+            ReaderContextMcpServer.TryReadPageCardMutation(
+                freeEditArguments.RootElement,
+                "edit",
+                out JsonObject freeEditPayload);
+        JsonObject freeEditMutation = freeEditAccepted
+            ? freeEditPayload["args"]!.AsArray()[0]!.AsObject()
+            : new JsonObject();
+
+        using JsonDocument boundDeleteArguments = JsonDocument.Parse(
+            """
+            {"id":"c_1111111111111111","expectedRevision":11,"number":2}
+            """);
+        bool boundDeleteAccepted =
+            ReaderContextMcpServer.TryReadPageCardMutation(
+                boundDeleteArguments.RootElement,
+                "delete",
+                out JsonObject boundDeletePayload);
+        JsonObject boundDeleteMutation = boundDeleteAccepted
+            ? boundDeletePayload["args"]!.AsArray()[0]!.AsObject()
+            : new JsonObject();
+
+        using JsonDocument zeroNumberArguments = JsonDocument.Parse(
+            """
+            {"id":"c_1111111111111111","expectedRevision":11,"number":0}
+            """);
+        bool zeroNumberRejected =
+            !ReaderContextMcpServer.TryReadPageCardMutation(
+                zeroNumberArguments.RootElement,
+                "delete",
+                out _);
+        using JsonDocument oldPublicNameArguments = JsonDocument.Parse(
+            """
+            {"expectedId":"c_1111111111111111","expectedRevision":11}
+            """);
+        bool oldPublicNameRejected =
+            !ReaderContextMcpServer.TryReadPageCardMutation(
+                oldPublicNameArguments.RootElement,
+                "delete",
+                out _);
+        using JsonDocument extraFieldArguments = JsonDocument.Parse(
+            """
+            {"id":"c_1111111111111111","expectedRevision":11,"extra":true}
+            """);
+        bool extraFieldRejected =
+            !ReaderContextMcpServer.TryReadPageCardMutation(
+                extraFieldArguments.RootElement,
+                "delete",
+                out _);
+
+        Require(
+            freeEditAccepted
+            && freeEditMutation["operation"]?.GetValue<string>() == "edit"
+            && freeEditMutation["expectedId"]?.GetValue<string>()
+                == "c_2222222222222222"
+            && freeEditMutation["expectedRevision"]?.GetValue<long>() == 11
+            && !freeEditMutation.ContainsKey("number")
+            && freeEditMutation["replacement"]!["content"]?.GetValue<string>()
+                == "自由卡新正文"
+            && boundDeleteAccepted
+            && boundDeleteMutation["operation"]?.GetValue<string>() == "delete"
+            && boundDeleteMutation["expectedId"]?.GetValue<string>()
+                == "c_1111111111111111"
+            && boundDeleteMutation["expectedRevision"]?.GetValue<long>() == 11
+            && boundDeleteMutation["number"]?.GetValue<int>() == 2
+            && !boundDeleteMutation.ContainsKey("replacement")
+            && zeroNumberRejected
+            && oldPublicNameRejected
+            && extraFieldRejected,
+            "page-card-writes-use-stable-id-with-optional-bound-number",
+            checks);
     }
 
     private static async Task CheckReaderPcOwnerLeaseAsync(
@@ -6247,6 +6613,114 @@ internal static class DirectBridgeSelfTest
 
         string sessionId = "session-" + DirectBase64Url.Encode(
             Enumerable.Repeat((byte)0xd4, 16).ToArray());
+        JsonElement largeSnapshotEventValue = JsonSerializer.SerializeToElement(
+            new
+            {
+                v = 1,
+                seq = 8,
+                type = "page.context",
+                ts = 1_750_000_008,
+                id = "0000000000000008",
+                text = new string('x', 220_000),
+            });
+        int largeSnapshotEventBytes = Encoding.UTF8.GetByteCount(
+            largeSnapshotEventValue.GetRawText());
+        DirectContextEvent largeSnapshotEvent =
+            NamedPipeDirectContextAdapter.ValidateEvent(
+                largeSnapshotEventValue);
+
+        const string largeRequestId = "request-context-ipc-large-8";
+        FakeDirectContextIpcTransport largeLegacyTransport = new();
+        largeLegacyTransport.ReplyFactory = _ =>
+            JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                contract = NamedPipeDirectContextAdapter.IpcContract,
+                requestId = largeRequestId,
+                ok = true,
+                action = "context",
+                payload = new
+                {
+                    sessionId,
+                    eventId = largeSnapshotEvent.EventId,
+                    seq = largeSnapshotEvent.Sequence,
+                    outcome = "accepted",
+                },
+            });
+        NamedPipeDirectContextAdapter largeLegacyAdapter = new(
+            largeLegacyTransport);
+        bool largeLegacyForwardRejected = false;
+        try
+        {
+            _ = await largeLegacyAdapter.ForwardAsync(
+                largeRequestId,
+                sessionId,
+                NamedPipeDirectContextAdapter.ContextContract,
+                largeSnapshotEvent,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            largeLegacyForwardRejected = exception.Code
+                == "BW_COMPUTER_VOICE_CONTEXT_SCHEMA_INVALID"
+                && !exception.Retryable;
+        }
+
+        bool largeLegacyTransportRejected = false;
+        try
+        {
+            _ = await new NamedPipeDirectContextTransport().ExchangeAsync(
+                new byte[
+                    NamedPipeDirectContextTransport.MaximumPayloadBytes + 1],
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            largeLegacyTransportRejected = exception.Code
+                == "BW_COMPUTER_VOICE_CONTEXT_IPC_FRAME_INVALID"
+                && exception.Retryable;
+        }
+
+        JsonElement oversizedSnapshotEventValue =
+            JsonSerializer.SerializeToElement(new
+            {
+                v = 1,
+                seq = 10,
+                type = "page.context",
+                ts = 1_750_000_010,
+                id = "000000000000000a",
+                text = new string(
+                    'x',
+                    DirectBridgeContract.MaximumMessageBytes),
+            });
+        bool oversizedSnapshotEventRejected = false;
+        try
+        {
+            _ = NamedPipeDirectContextAdapter.ValidateEvent(
+                oversizedSnapshotEventValue);
+        }
+        catch (DirectProtocolException exception)
+        {
+            oversizedSnapshotEventRejected = exception.Code
+                == "BW_COMPUTER_VOICE_CONTEXT_SCHEMA_INVALID"
+                && !exception.Retryable;
+        }
+        Require(
+            largeSnapshotEventBytes
+                > NamedPipeDirectContextTransport.MaximumPayloadBytes
+            && largeSnapshotEventBytes
+                < DirectBridgeContract.MaximumMessageBytes
+            && largeSnapshotEvent.Type == "page.context"
+            && largeSnapshotEvent.EventId == "0000000000000008"
+            && largeLegacyForwardRejected
+            && largeLegacyTransport.ExchangeCount == 0
+            && largeLegacyTransportRejected
+            && Encoding.UTF8.GetByteCount(
+                oversizedSnapshotEventValue.GetRawText())
+                > DirectBridgeContract.MaximumMessageBytes
+            && oversizedSnapshotEventRejected,
+            "direct-snapshot-context-validation-allows-256k-while-legacy-pipe-stays-64k",
+            checks);
+
         const string ipcRequestId = "request-context-ipc-9";
         JsonElement eventValue = JsonSerializer.SerializeToElement(new
         {
@@ -8873,20 +9347,28 @@ internal static class DirectBridgeSelfTest
                         "Windows Codex 语音主路由",
                         StringComparison.Ordinal)
                 // 这个 server 只注入了 sendOutput，没注入查询客户端：因此
-                // 只该看到两个无条件工具和 12 个 output 工具。查询工具一个
+                // 只该看到两个无条件工具和 14 个 output 工具。查询工具一个
                 // 都不该出现 —— 列出一个调不动的工具，比不列更坏。
-                && tools.GetArrayLength() == 14
+                && tools.GetArrayLength() == 16
                 && tools.EnumerateArray().Any(tool =>
                     tool.GetProperty("name").GetString()
                         == ReaderContextMcpServer.WebHighlightToolName)
                 && tools.EnumerateArray().Any(tool =>
                     tool.GetProperty("name").GetString()
                         == ReaderContextMcpServer.WebNoteToolName)
+                && tools.EnumerateArray().Any(tool =>
+                    tool.GetProperty("name").GetString()
+                        == ReaderContextMcpServer.PageCardEditToolName)
+                && tools.EnumerateArray().Any(tool =>
+                    tool.GetProperty("name").GetString()
+                        == ReaderContextMcpServer.PageCardDeleteToolName)
                 && !tools.EnumerateArray().Any(tool =>
                     tool.GetProperty("name").GetString() is
                         "reader_highlights" or "reader_notes"
                         or "reader_search" or "reader_toc"
-                        or "reader_page_text" or "reader_lookup_word")
+                        or "reader_page_text" or "reader_page_cards"
+                        or "reader_page_card_read"
+                        or "reader_lookup_word")
                 && tools[1].GetProperty("name").GetString()
                     == ReaderContextMcpServer.CapabilityGuideToolName
                 && !tools.EnumerateArray().Any(

@@ -48,8 +48,13 @@
     'background:#2563eb;color:#fff;font-size:24px;box-shadow:0 6px 18px rgba(0,0,0,.4);cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent}' +
     '#asst-fab:active{transform:scale(.92)}' +
     '#side-pane-asst.active{display:flex;flex-direction:column;overflow:hidden;height:100%}' +
-    '#asst-thread{flex:1 1 auto;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px;-webkit-overflow-scrolling:touch;min-height:0;overscroll-behavior:contain;touch-action:pan-y}' +   // contain+pan-y:滚到头不把滚动链漏给底下 PDF(否则阅读器在浮层下偷偷滚→IO 渲页=卡)
-    '.asst-msg{max-width:92%;padding:9px 12px;border-radius:13px;font-size:14px;line-height:1.55;word-break:break-word}' +
+    '#asst-thread{flex:1 1 auto;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px;-webkit-overflow-scrolling:touch;min-width:0;min-height:0;max-width:100%;box-sizing:border-box;overscroll-behavior:contain;touch-action:pan-y}' +   // contain+pan-y:滚到头不把滚动链漏给底下 PDF(否则阅读器在浮层下偷偷滚→IO 渲页=卡)
+    // Flex 子项默认 min-width:auto，会按连续代码串的 min-content 宽度撑破气泡；清零后再用
+    // overflow-wrap:anywhere 处理无空格 ID/日文/卡片标记。pre 保留格式并以自身横滚作最后兜底。
+    '.asst-msg{box-sizing:border-box;min-width:0;max-width:92%;padding:9px 12px;border-radius:13px;font-size:14px;line-height:1.55;overflow-wrap:anywhere;word-break:break-word}' +
+    '.asst-msg .rc-turn-bd,.asst-msg .rc-part,.asst-msg .rc-part-text,.asst-msg .vc-card-bd{box-sizing:border-box;min-width:0;max-width:100%;overflow-wrap:anywhere}' +
+    '.asst-msg code,.asst-msg samp,.asst-msg kbd{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}' +
+    '.asst-msg pre{box-sizing:border-box;min-width:0;max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;overflow-x:auto}' +
     '.asst-u{align-self:flex-end;background:#1d4ed8;color:#fff;border-bottom-right-radius:4px}' +
     '.asst-a{align-self:flex-start;background:#161d31;border:1px solid #243152;border-bottom-left-radius:4px}' +
     '.asst-a p{margin:.4em 0}.asst-a ul,.asst-a ol{margin:.3em 0;padding-left:1.3em}.asst-a code{background:#0b1220;padding:1px 4px;border-radius:4px}' +
@@ -128,7 +133,7 @@
     '.actx-page{align-self:flex-start;font-size:11px;color:#eaf2ff;background:rgba(255,255,255,.16);border-radius:9px;padding:2px 9px;cursor:pointer}' +
     '.actx-page:active{background:rgba(255,255,255,.28)}' +
     // ⚙ 模型设置面板(每任务 后端/型号/深度)
-    '.ams-mask{position:fixed;inset:0;z-index:130;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}' +
+    '.ams-mask{position:fixed;inset:0;z-index:2147483400;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}' +
     '.ams-box{background:#0d1426;border:1px solid #2a3a63;border-radius:14px;max-width:440px;width:100%;max-height:86vh;overflow-y:auto;padding:14px 14px 16px;box-shadow:0 12px 40px rgba(0,0,0,.6)}' +
     '.ams-h{font-size:15px;color:#dbe7ff;font-weight:600;display:flex;align-items:center;justify-content:space-between;margin-bottom:3px}' +
     '.ams-x{background:none;border:none;color:#7c93c4;font-size:20px;cursor:pointer;padding:0 4px;line-height:1}' +
@@ -869,6 +874,7 @@
   var _assistEdits = {}, _aeCtr = 0;
   window._assistEdit = function (d) {
     try {
+      if (d && d.type === 'page-card') return _assistPageCard(d);
       if (!d || !Array.isArray(d.items) || !d.items.length) return;
       if (d.type === 'note') return _assistNoteCard(d);   // 便签写操作(notes_create/notes_edit)→ 便签版卡
       if (d.type !== 'highlight') return;
@@ -899,6 +905,77 @@
       thread.appendChild(card); scrollDown();
     } catch (_) {}
   };
+
+  // 词锚卡片的 AI 修改/删除必须由 native runtime 先提交，随后才到这里显示。
+  // 操作条只保存稳定 operation id；撤销/重做时仍回到 runtime 做目标快照与
+  // revision 校验，绝不能由 UI 拿一个可能已重排的“第 N 个”直接写 notes。
+  function _assistPageCard(d) {
+    try {
+      var operationId = String(d.native_operation_id || d.operationId || '');
+      if (!/^(?:npdf|pcard)_[0-9a-f]{24}$/.test(operationId)) return;
+      var op = d.op === 'edit' ? 'edit' : (d.op === 'delete' ? 'delete' : '');
+      if (!op) return;
+      var item = d.item && typeof d.item === 'object' ? d.item
+        : (Array.isArray(d.items) && d.items[0] ? d.items[0] : {});
+      var number = Number(d.number != null ? d.number : item.number);
+      if (!Number.isInteger(number) || number < 1) number = null;
+      var page = Number(d.page != null ? d.page : item.page);
+      if (!Number.isInteger(page) || page < 1) page = null;
+      // The native runtime has already committed before dispatching this UI
+      // receipt. Reload now so deleted frames/rail markers disappear and the
+      // remaining cards receive their compacted visible numbers immediately.
+      try { window.notesReload && window.notesReload(); } catch (_) {}
+      for (var existingId in _assistEdits) {
+        if (!Object.prototype.hasOwnProperty.call(_assistEdits, existingId)) continue;
+        var existing = _assistEdits[existingId];
+        if (existing && existing.ntype === 'page-card' &&
+            existing.operationId === operationId) return;
+      }
+      var eid = 'ae' + (++_aeCtr);
+      _assistEdits[eid] = {
+        ntype: 'page-card', op: op, operationId: operationId,
+        page: page, number: number, item: item, undone: false
+      };
+      var card = document.createElement('div'); card.className = 'asst-edit-card';
+      var head = document.createElement('div'); head.className = 'asst-edit-h';
+      var ordinal = number ? ('第 ' + number + ' 个') : '自由';
+      head.textContent = (op === 'delete' ? '🗑 已删除' : '✏️ 已修改') + ordinal + '卡片';
+      card.appendChild(head);
+      if (page) {
+        var chips = document.createElement('div'); chips.className = 'asst-edit-chips';
+        var jump = document.createElement('button'); jump.className = 'asst-jump';
+        jump.setAttribute('data-page', page); jump.textContent = '→ 第' + page + '页';
+        chips.appendChild(jump); card.appendChild(chips);
+      }
+      var btn = document.createElement('button'); btn.className = 'asst-edit-undo';
+      btn.setAttribute('data-eid', eid); btn.textContent = '↩ 撤销';
+      card.appendChild(btn); thread.appendChild(card); scrollDown();
+    } catch (_) {}
+  }
+
+  function _pageCardEditToggle(st, button) {
+    var action = st.undone ? 'redo' : 'undo';
+    var target = window._nativeReaderPageCardAction;
+    if (typeof target !== 'function') {
+      button.disabled = false;
+      button.textContent = st.undone ? '↪ 重做' : '↩ 撤销';
+      try { window._toast && window._toast('当前阅读器尚未准备好卡片撤销'); } catch (_) {}
+      return;
+    }
+    button.textContent = action === 'undo' ? '撤销中…' : '重做中…';
+    Promise.resolve(target({ operationId: st.operationId, action: action }))
+      .then(function (result) {
+        if (!result || result.ok !== true) throw new Error('page-card-action-failed');
+        st.undone = action === 'undo';
+        button.disabled = false;
+        button.textContent = st.undone ? '↪ 重做' : '↩ 撤销';
+        try { window.notesReload && window.notesReload(); } catch (_) {}
+      }).catch(function () {
+        button.disabled = false;
+        button.textContent = st.undone ? '↪ 重做' : '↩ 撤销';
+        try { window._toast && window._toast(action === 'undo' ? '撤销失败，卡片可能已发生变化' : '重做失败，卡片可能已发生变化'); } catch (_) {}
+      });
+  }
   // 便签写操作的「跳转 + 撤销⇄重做」卡(同高亮卡形态;后端 notes_create/notes_edit 的 client_action 触发):
   //   create:撤销=DELETE 该便签,重做=POST 快照重建(拿新 id 接管撤销);edit:撤销=PATCH 旧 text/color,重做=PATCH 新值。
   //   任何一步都只碰 text/color/整条,绝不动 strokes/anchor/尺寸。
@@ -1217,6 +1294,7 @@
     if (eb) {
       var eid2 = eb.getAttribute('data-eid'); var st = _assistEdits[eid2]; if (!st) return;
       eb.disabled = true;
+      if (st.ntype === 'page-card') { _pageCardEditToggle(st, eb); return; }
       if (st.ntype === 'note') { _noteEditToggle(st, eb); return; }   // 便签卡:走便签版撤销⇄重做
       if (!st.undone) {
         eb.textContent = '撤销中…';

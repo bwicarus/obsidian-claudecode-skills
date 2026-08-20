@@ -116,7 +116,8 @@ class FakeElement {
       ? "textarea"
       : selector.includes("canvas") || selector === ".rc-note-ink"
         ? "canvas"
-        : selector.includes("button") || selector === ".rc-note-del"
+        : selector.includes("button") || selector === ".rc-note-del" ||
+            selector === ".rc-note-anchor"
           ? "button"
           : "div";
     const child = new FakeElement(tag);
@@ -178,7 +179,18 @@ function note(documentId, id, rev, text, extra = {}) {
   };
 }
 
-function loadStickynote({ repository, mount = null, fetchCalls = [], localStorageValues = {} }) {
+function loadStickynote({
+  repository,
+  mount = null,
+  fetchCalls = [],
+  localStorageValues = {},
+  noteWordRect = null,
+  selectionController = null,
+  pageBindCard = null,
+  fetchImpl = null,
+  file = null,
+  source = SOURCE,
+}) {
   const head = new FakeElement("head");
   head._connected = true;
   const body = new FakeElement("body");
@@ -222,6 +234,7 @@ function loadStickynote({ repository, mount = null, fetchCalls = [], localStorag
     },
     fetch(url, init) {
       fetchCalls.push({ url: String(url), init });
+      if (fetchImpl) return fetchImpl(String(url), init || {});
       return Promise.reject(new Error("repository 模式不应 fetch"));
     },
     RC: {},
@@ -230,8 +243,10 @@ function loadStickynote({ repository, mount = null, fetchCalls = [], localStorag
       hit() { return false; },
     },
   };
+  if (selectionController) sandbox.__bwSelectionController = selectionController;
+  if (pageBindCard) sandbox.__pageBindCard = pageBindCard;
   sandbox.window = sandbox;
-  vm.runInContext(SOURCE, vm.createContext(sandbox), {
+  vm.runInContext(source, vm.createContext(sandbox), {
     filename: "rc-stickynote.js",
   });
   const documentId = "web:https://example.test/article";
@@ -239,10 +254,12 @@ function loadStickynote({ repository, mount = null, fetchCalls = [], localStorag
   container._connected = true;
   sandbox.RC.stickynote.init({
     documentId,
+    ...(file ? { file } : {}),
     repository,
     disablePortal: true,
     mount: mount || (() => ({ el: container, left: 20, top: 30 })),
     anchorFromPoint: () => anchor(documentId),
+    noteWordRect: noteWordRect || undefined,
     toast() {},
   });
   return { sandbox, documentId, container, fetchCalls };
@@ -469,6 +486,283 @@ test("四种 create 都先取 repository ID；card 的 cid/gid 原样保存且 C
   assert.equal(fetchCalls.length, 0);
 });
 
+test("placement storage 接受十万字符并显式拒绝异常超大的页面卡片", async () => {
+  let nextId = 0;
+  const creates = [];
+  const repository = {
+    newId: () => `c_${String(++nextId).padStart(32, "0")}`,
+    list: async () => [],
+    get: async () => null,
+    create(input) {
+      creates.push(structuredClone(input));
+      return Promise.resolve({
+        ...structuredClone(input),
+        id: input.noteId,
+        noteId: input.noteId,
+        rev: 1,
+        deleted: false,
+      });
+    },
+    patch: async () => null,
+    remove: async () => null,
+    subscribe: () => () => {},
+  };
+  const { sandbox } = loadStickynote({ repository });
+  await tick();
+  const rc = sandbox.RC.stickynote;
+
+  assert.equal(rc.createHtmlAt(10, 10, {
+    content: "甲".repeat(100000),
+    contextText: "完整正文",
+    isHtml: false,
+  }), true);
+  await tick();
+  assert.equal(creates[0].html.content.length, 100000);
+
+  assert.equal(rc.createHtmlAt(10, 10, {
+    content: "甲".repeat(100001),
+    contextText: "完整正文",
+    isHtml: false,
+  }), false);
+  assert.equal(rc.createCardAt(10, 10, [{
+    type: "basic", front: "问".repeat(100001), back: "答",
+  }], "oversized-learning"), false);
+
+  const bind = { kind: "page-chars", page: 3, from: 1, to: 2, text: "词" };
+  const oversizedContent = await rc.persistBoundCard(
+    bind, { raw: "文".repeat(100001) }, { x: 10, y: 10 },
+  );
+  assert.equal(oversizedContent.ok, false);
+  assert.equal(oversizedContent.why, "card-too-large");
+  const oversizedContext = await rc.persistBoundCard(bind, {
+      raw: "正文", contextText: "文".repeat(100001),
+    }, { x: 10, y: 10 });
+  assert.equal(oversizedContext.ok, false);
+  assert.equal(oversizedContext.why, "card-context-too-large");
+  assert.equal(creates.length, 1, "异常输入不能进入 repository");
+});
+
+test("手动拖入学习卡与 HTML 卡即使靠近文字也保持自由卡片", async () => {
+  const ids = ["f", "0"].map((value) => `c_${value.repeat(32)}`);
+  const creates = [];
+  const repository = {
+    newId: () => ids[creates.length],
+    list: async () => [],
+    get: async () => null,
+    create(input, options) {
+      creates.push({ input: structuredClone(input), options });
+      return Promise.resolve({
+        ...structuredClone(input),
+        id: input.noteId,
+        noteId: input.noteId,
+        rev: 1,
+        deleted: false,
+      });
+    },
+    patch: async () => null,
+    remove: async () => null,
+    subscribe: () => () => {},
+  };
+  const words = [
+    { page: 7, from: 10, to: 11, text: "学习词", dist: 3 },
+    { page: 7, from: 20, to: 21, text: "工具词", dist: 4 },
+  ];
+  const { sandbox } = loadStickynote({
+    repository,
+    noteWordRect: () => words.shift(),
+  });
+  await tick();
+
+  sandbox.RC.stickynote.createCardAt(
+    10,
+    10,
+    [{ question: "渲染器题目", answer: "渲染器答案" }],
+    "manual-learning-card",
+  );
+  await tick();
+  sandbox.RC.stickynote.createHtmlAt(20, 20, {
+    content: "<b>工具卡正文</b>",
+    isHtml: true,
+    label: "工具卡",
+    cid: "manual-html-card",
+  });
+  await tick();
+
+  assert.equal(creates.length, 2);
+  assert.equal(Object.hasOwn(creates[0].input.card, "bind"), false);
+  assert.equal(Object.hasOwn(creates[1].input.html, "bind"), false);
+  assert.equal(words.length, 2,
+    "普通投放不能偷偷调用分词吸附；只有显式 ⚓️ 或 AI 自动锚定才写 bind");
+  assert.equal(
+    sandbox.RC.stickynote.cardContextText(creates[0].input.card.cards),
+    "卡片 1\n正面：渲染器题目\n背面：渲染器答案",
+  );
+});
+
+test("自由学习卡与 HTML 卡普通拖动不会升级为 page-chars", async () => {
+  const instrumented = SOURCE.replace(
+    "  // ── 词锚便签：正文里显示成「词描边 + 右上角序号」，点词才展开真卡 ──────",
+    "  window.__testRebindWord = _rebindWord;\n\n" +
+      "  // ── 词锚便签：正文里显示成「词描边 + 右上角序号」，点词才展开真卡 ──────",
+  );
+  assert.notEqual(instrumented, SOURCE, "test hook insertion point must stay attached to _rebindWord");
+  const words = [
+    { page: 7, from: 30, to: 31, text: "补锚词", dist: 2 },
+    { page: 7, from: 40, to: 41, text: "补工具词", dist: 2 },
+  ];
+  const repository = {
+    newId: async () => `c_${"1".repeat(32)}`,
+    list: async () => [],
+    get: async () => null,
+    create: async () => null,
+    patch: async () => null,
+    remove: async () => null,
+    subscribe: () => () => {},
+  };
+  const { sandbox, documentId } = loadStickynote({
+    repository,
+    noteWordRect: () => words.shift(),
+    source: instrumented,
+  });
+  await tick();
+
+  const learning = note(documentId, `c_${"2".repeat(32)}`, 1, "", {
+    card: { gid: "legacy-learning", cid: "legacy-learning", cards: [] },
+  });
+  const html = note(documentId, `c_${"3".repeat(32)}`, 1, "", {
+    html: { cid: "legacy-html", content: "<b>旧工具卡</b>" },
+  });
+  const learningCtl = { note: learning, root: new FakeElement("div") };
+  const htmlCtl = { note: html, root: new FakeElement("div") };
+
+  assert.equal(sandbox.__testRebindWord(learningCtl, 10, 10), false);
+  assert.equal(Object.hasOwn(learning.card, "bind"), false);
+  assert.equal(sandbox.__testRebindWord(htmlCtl, 20, 20), false);
+  assert.equal(Object.hasOwn(html.html, "bind"), false);
+  assert.equal(words.length, 2, "自由卡普通拖动不应调用词探测");
+});
+
+test("展开自由卡点击 ⚓️ 才持久化精确选区并立即切成正文标记", async () => {
+  const documentId = "web:https://example.test/article";
+  const id = `c_${"4".repeat(32)}`;
+  const initial = note(documentId, id, 1, "", {
+    anchor: { kind: "pdf", page: 7, x: 0.25, y: 0.4 },
+    card: {
+      gid: "free-learning", cid: "free-learning", form: "full",
+      cards: [{ question: "自由题目", answer: "自由答案" }],
+    },
+  });
+  const patches = [];
+  const markerCalls = [];
+  const repository = {
+    newId: async () => `c_${"5".repeat(32)}`,
+    list: async () => [structuredClone(initial)],
+    get: async () => null,
+    patch(noteId, fields, options) {
+      patches.push({ noteId, fields: structuredClone(fields), options });
+      return Promise.resolve({
+        ...structuredClone(initial),
+        ...structuredClone(fields),
+        id, noteId: id, rev: 2,
+      });
+    },
+    create: async () => null,
+    remove: async () => null,
+    subscribe: () => () => {},
+  };
+  const { sandbox, container } = loadStickynote({
+    repository,
+    selectionController: {
+      current: () => ({
+        text: "锁定元素",
+        anchor: {
+          kind: "pdf-char", page: 7, startIdx: 12, endIdx: 15,
+        },
+      }),
+    },
+    pageBindCard(bind, payload) {
+      markerCalls.push({ bind: structuredClone(bind), payload });
+      return { ok: true, key: "p7b12_15" };
+    },
+  });
+  await tick();
+  await tick();
+
+  const root = container.children.find((child) => child.dataset.noteId === id);
+  const button = root.querySelector(".rc-note-anchor");
+  assert.equal(root.classList.contains("rc-note-free-card-open"), true);
+  assert.equal(button.attributes.get("aria-hidden"), "false");
+  button.dispatch("click");
+  await tick();
+  await tick();
+
+  assert.equal(patches.length, 1);
+  assert.deepEqual(patches[0].fields.card.bind, {
+    kind: "page-chars", page: 7, from: 12, to: 15, text: "锁定元素",
+  });
+  assert.deepEqual(structuredClone(sandbox.RC.stickynote.notes()[0].card.bind), {
+    kind: "page-chars", page: 7, from: 12, to: 15, text: "锁定元素",
+  });
+  assert.equal(markerCalls.length, 1,
+    "repository commit 后才允许画正文框和右侧标记");
+  assert.equal(root.style.display, "none");
+  assert.equal(root.classList.contains("rc-note-free-card-open"), false);
+});
+
+test("PDF legacy PATCH 成功后同一会话立即从自由卡切成正文词锚", async () => {
+  const documentId = "web:https://example.test/article";
+  const id = `c_${"6".repeat(32)}`;
+  const initial = note(documentId, id, 0, "", {
+    anchor: { kind: "pdf", page: 7, x: 0.25, y: 0.4 },
+    card: {
+      gid: "legacy-free", cid: "legacy-free", form: "full",
+      cards: [{ question: "旧题目", answer: "旧答案" }],
+    },
+  });
+  const markerCalls = [];
+  const patchBodies = [];
+  const { sandbox, container } = loadStickynote({
+    file: "localbook:localbook-" + "b".repeat(64),
+    selectionController: {
+      current: () => ({
+        text: "锁定元素",
+        anchor: { kind: "pdf-char", page: 7, startIdx: 22, endIdx: 24 },
+      }),
+    },
+    pageBindCard(bind, payload) {
+      markerCalls.push({ bind: structuredClone(bind), payload });
+      return { ok: true, key: "p7b22_24" };
+    },
+    fetchImpl: async (_url, init) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "GET") {
+        return { ok: true, json: async () => ({ ok: true, notes: [structuredClone(initial)] }) };
+      }
+      assert.equal(method, "PATCH");
+      const body = JSON.parse(init.body);
+      patchBodies.push(body);
+      const saved = structuredClone(initial);
+      saved.card = structuredClone(body.card);
+      return { ok: true, json: async () => ({ ok: true, note: saved }) };
+    },
+  });
+  await tick();
+  await tick();
+
+  const root = container.children.find((child) => child.dataset.noteId === id);
+  root.querySelector(".rc-note-anchor").dispatch("click");
+  await tick();
+  await tick();
+
+  assert.equal(patchBodies.length, 1);
+  assert.deepEqual(structuredClone(sandbox.RC.stickynote.notes()[0].card.bind), {
+    kind: "page-chars", page: 7, from: 22, to: 24, text: "锁定元素",
+  });
+  assert.equal(markerCalls.length, 1);
+  assert.equal(root.style.display, "none");
+  assert.equal(root.classList.contains("rc-note-free-card-open"), false);
+});
+
 test("AI page-chars 只在 repository create 与本地投影完成后报告持久化成功", async () => {
   const id = `c_${"9".repeat(32)}`;
   const gate = deferred();
@@ -525,6 +819,7 @@ test("AI page-chars 只在 repository create 与本地投影完成后报告持�
   assert.equal(creates[0].input.html.category, "image");
   assert.equal(creates[0].input.html.type, "#34d399");
   assert.equal(creates[0].input.html.content, payload.raw);
+  assert.equal(creates[0].input.html.contextText, payload.text);
   assert.equal(sandbox.RC.stickynote.notes().length, 1);
 
   const reused = await sandbox.RC.stickynote.persistBoundCard(bind, payload, { x: 100, y: 120 });

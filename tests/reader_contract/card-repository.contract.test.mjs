@@ -134,6 +134,72 @@ test("saveConfirmedCard 只确认指定 index，不拆分或重编号批内卡�
   );
 });
 
+test("replaceContent 只改卡面，保留学习状态、稳定 index 与 Anki receipt", async () => {
+  const store = makeStore("replace-content");
+  const repo = repository(store, {
+    clock: (() => {
+      let value = 1_800_000_000_000;
+      return () => value++;
+    })(),
+  }).repo;
+  const draft = await repo.registerDraft({
+    id: CARD_A,
+    cards: [basic("before 0"), basic("before 1")],
+    source: source(),
+  }, { mutationId: "replace-seed" });
+  const confirmed = await repo.saveConfirmedCard({
+    id: CARD_A,
+    cardIndex: 1,
+  }, {
+    mutationId: "replace-confirm",
+    ifEntityRev: draft.entityRev,
+    ifStateRev: draft.stateRev,
+  });
+  const withReceipt = await repo.recordAnkiReceipt(CARD_A, 1, "desktop", {
+    status: "succeeded",
+    mutationId: "anki-existing",
+    noteIds: [123],
+    cardIds: [456],
+  }, {
+    mutationId: "replace-receipt",
+    ifStateRev: confirmed.stateRev,
+  });
+
+  const replaced = await repo.replaceContent(CARD_A, [
+    basic("after 0"),
+    basic("after 1"),
+  ], {
+    mutationId: "replace-content",
+    ifEntityRev: withReceipt.entityRev,
+  });
+
+  assert.equal(replaced.cards[0].front, "after 0");
+  assert.equal(replaced.cards[1].front, "after 1");
+  assert.deepEqual(replaced.states, withReceipt.states);
+  assert.equal(replaced.states[0].phase, "draft");
+  assert.equal(replaced.states[1].phase, "confirmed");
+  assert.deepEqual(
+    replaced.states[1].projections.anki.desktop.noteIds,
+    [123],
+  );
+  assert.equal(replaced.stateRev, withReceipt.stateRev);
+  assert.ok(replaced.entityRev > withReceipt.entityRev);
+  await assert.rejects(
+    repo.replaceContent(CARD_A, [basic("only one")], {
+      mutationId: "replace-card-count",
+      ifEntityRev: replaced.entityRev,
+    }),
+    (error) => error.code === "BW_CARD_REPOSITORY_TRANSITION",
+  );
+  await assert.rejects(
+    repo.replaceContent(CARD_A, [basic("stale 0"), basic("stale 1")], {
+      mutationId: "replace-stale",
+      ifEntityRev: withReceipt.entityRev,
+    }),
+    (error) => error.code === "BW_CARD_REPOSITORY_CONFLICT",
+  );
+});
+
 test("删除已持久化草稿只写稳定 index tombstone，剩余卡保存与重载不复活", async () => {
   const store = makeStore("remove-draft-index");
   const repo = repository(store).repo;
