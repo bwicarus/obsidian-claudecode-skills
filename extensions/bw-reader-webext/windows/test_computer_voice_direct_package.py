@@ -85,7 +85,10 @@ class FakeStdioRunner:
                         {"name": "reader_mark_vocab"},
                         {"name": "reader_make_note"},
                         {"name": "reader_note_edit"},
+                        {"name": "reader_page_card_edit"},
+                        {"name": "reader_page_card_delete"},
                         {"name": "reader_note_create"},
+                        {"name": "reader_paper_start"},
                         {"name": "reader_undo_last"},
                         {"name": "reader_anki_draft"},
                         {"name": "reader_card"},
@@ -109,6 +112,8 @@ class FakeStdioRunner:
                                 ]
                             },
                         },
+                        {"name": "reader_page_cards"},
+                        {"name": "reader_page_card_read"},
                         {"name": "reader_notes"},
                         {"name": "reader_toc"},
                         {"name": "reader_lookup_word"},
@@ -901,7 +906,7 @@ class DirectPackageTests(unittest.TestCase):
             ]
             with self.assertRaisesRegex(
                 package.PackageError,
-                "精确 21 工具合同",
+            "精确 26 工具合同",
             ):
                 package._validate_mcp_smoke_output(
                     self._stdio_result(responses)
@@ -916,7 +921,7 @@ class DirectPackageTests(unittest.TestCase):
                     item["name"] = "reader_highlight_text"
             with self.assertRaisesRegex(
                 package.PackageError,
-                "精确 21 工具合同",
+            "精确 26 工具合同",
             ):
                 package._validate_mcp_smoke_output(
                     self._stdio_result(responses)
