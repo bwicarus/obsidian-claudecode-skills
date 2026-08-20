@@ -4307,3 +4307,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **Windows**：Direct `0.1.170` 的 26 工具打包合同、包内自检与 7/7 安装哈希通过，`/healthz ok=true`；回退点 `install-0.1.170-20260820T101102Z-4d6f6323` 保留完整 `0.1.168`。
 - **iOS**：Actions `32357074601` 上传 TestFlight `1.1.69 (398)`；`32357907516` 确认 `COMPLETE / VALID / IN_BETA_TESTING`，错误与警告均为空。
 - **验证/交接**：Reader Node `1586/1586`、页面卡 Python `15/15`、Direct 打包测试 `23/23` 通过；正式成品已上线，下一步由用户直接验收刷新/缩放、同行复数、顶层展开、删改与 AI 快照联动。
+## Codex：词锚卡验收修订正式发布（2026-08-20 JST）
+- **修复**：纵图卡首次展开按原图比例适配视口；右侧浮标在滚动当帧同步并取消纵向追赶动画；Codex Voice 实际 MCP 白名单补齐页面卡按 ID 查/读/改/删，Direct 安装会幂等迁移旧白名单。
+- **验证**：Reader 合同 `1587/1587`、页面卡/语音历史 Python `41/41`、Direct 安装器 `28/28`、ReaderBundle 314 文件与包内 stdio MCP 自检通过；Windows 全量仅命中既有 `fcntl`/fixture 基线，Pi 完整预检与 E2E 通过。
+- **发布**：提交 `0f03ff46`；Pi Reader/WebExt `0.2.124`、KG `kg-0.2.124-97b51962e0d5dc6ba650` 与公开 channel 已切换，回退点 `20260820T110950Z-48651` / `webext-channel-20260820T111332Z-idnrqhlb`。
+- **Windows/iOS**：Direct `0.1.171` 已原子安装、`/healthz ok=true`，回退点 `install-0.1.171-20260820T111506Z-21a36738`；Actions `32362974932` 上传 TestFlight `1.1.70 (401)`，`32363683378` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **验收边界**：旧 Codex Voice 任务不会热加载新增工具，必须新建语音任务；用户随后直接验收纵图比例、滚动同步及按 ID 查改删。
