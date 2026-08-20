@@ -1553,6 +1553,14 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
                 "status": "completed",
             }
         )
+        page_card_edit = SYNC._project_tool(
+            {
+                "type": "mcpToolCall",
+                "server": "reader_snapshot",
+                "tool": "reader_page_card_edit",
+                "status": "completed",
+            }
+        )
         unknown = SYNC._project_tool(
             {
                 "type": "mcpToolCall",
@@ -1566,6 +1574,11 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
         self.assertEqual(snapshot["label"], "读取页面")
         self.assertEqual(anki["tool"], "reader_snapshot.reader_anki_draft")
         self.assertEqual(anki["label"], "制卡")
+        self.assertEqual(
+            page_card_edit["tool"],
+            "reader_snapshot.reader_page_card_edit",
+        )
+        self.assertEqual(page_card_edit["label"], "修改卡片")
         self.assertEqual(unknown["tool"], "other_server.private_action")
         self.assertEqual(unknown["label"], "工具：other_server.private_action")
 

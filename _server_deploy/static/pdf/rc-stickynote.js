@@ -256,6 +256,10 @@
       // fixed 只逃出 overflow，不会自动让 720px 用户尺寸塞进窄分屏；展开态
       // 额外受视口 max-width 约束，收起时由 JS 清掉，不改持久 w/h。
       '.rc-note.rc-note-word-portaled,.rc-note.rc-note-word-portaled .rc-note-body{max-width:calc(100vw - 16px)}',
+      // 单图词锚卡首次展开按图片固有比例缩进视口。宽高由 _fitWordImageCard
+      // 依据 naturalWidth/naturalHeight 计算；这里的 max-height 只是舍入与字体变化兜底。
+      // vc-user-sized 明确排除，用户手动调过的 presentation 永远优先。
+      '.rc-note.rc-note-word-open .vc-card.vc-word-image-fit:not(.vc-user-sized) .vc-ig-cell:only-child .vc-ig-img{height:auto;max-height:var(--vc-word-image-max-h,calc(100vh - 88px));object-fit:contain}',
       // 拖动锚定反馈(用户设计 2026-07-21 #51):拖动时实时标出将绑定的位置——
       //   光带=命中内容(锚到这段);横线=空白/clamp(内容插入位置,排到上方内容之后)。iOS 蓝,美观优先。
       '.rc-anchor-fx{position:absolute;pointer-events:none;z-index:60;transition:top .06s linear,left .06s linear,width .06s linear}',
@@ -1447,8 +1451,21 @@
     try { if (ctl.body) ctl.body.style.removeProperty('max-width'); } catch (_) {}
     try {
       var card = ctl.root.querySelector('.vc-card');
-      if (card) { card.style.removeProperty('max-width'); card.style.removeProperty('max-height'); }
+      if (card) {
+        card.style.removeProperty('max-width'); card.style.removeProperty('max-height');
+        card.style.removeProperty('--vc-word-image-max-h');
+        card.classList.remove('vc-word-image-fit');
+      }
     } catch (_) {}
+    // 自动图像宽度只是展开态的视口投影，不进入 note/card presentation。
+    // 迁回页面锚时恢复原始/用户尺寸，防止下次打开把自动缩放误当手调结果。
+    if (ctl._wordImageFit) {
+      ctl._wordImageFit = null;
+      try {
+        var data = (ctl.note && (ctl.note.card || ctl.note.html)) || {};
+        if (ctl.body) ctl.body.style.width = _formW(ctl, data.form);
+      } catch (_) {}
+    }
   }
   function unobserveWordPortal(ctl) {
     if (!ctl || !ctl._wordPortalObserver) return;
@@ -1464,6 +1481,63 @@
       ctl._wordPortalObserver.observe(ctl.root);
     } catch (_) { ctl._wordPortalObserver = null; }
   }
+  function _fitWordImageCard(ctl, card, maxW, maxH) {
+    if (!ctl || !card || card.classList.contains('vc-user-sized')) return false;
+    var cells = null, image = null;
+    try {
+      cells = card.querySelectorAll('.vc-ig-cell');
+      if (!cells || cells.length !== 1) return false;
+      if (cells[0].querySelector('.vc-vg-wrap')) return false;   // 视频封面沿用视频卡布局，不冒充原图比例
+      image = cells[0].querySelector('.vc-ig-img');
+    } catch (_) { return false; }
+    if (!image) return false;
+    card.classList.add('vc-word-image-fit');
+    // 网络图首次 mount 时 natural* 可能仍为 0。显式等 load 后重排，不能只靠
+    // ResizeObserver 猜测：父卡已经命中 max-height 时，根尺寸可能根本不变化。
+    if (!(Number(image.naturalWidth) > 0 && Number(image.naturalHeight) > 0)) {
+      if (!image.__rcWordImageFitBound) {
+        image.__rcWordImageFitBound = true;
+        image.addEventListener('load', function () {
+          image.__rcWordImageFitBound = false;
+          if (ctl._bindOpen && ctl._wordFixedPortal) scheduleWordPortalPlacement();
+        }, { once: true });
+      }
+      return true;
+    }
+    var rootRect = ctl.root.getBoundingClientRect();
+    var imageRect = image.getBoundingClientRect();
+    var body = card.querySelector('.vc-card-bd');
+    var bodyRect = body && body.getBoundingClientRect ? body.getBoundingClientRect() : { width: 0, height: 0 };
+    var fit = ctl._wordImageFit;
+    // syncCtl/reflow 若恢复了新的默认宽度，就以新宽度重新取基准；我们自己上次
+    // 写入的 appliedW 不触发重置，因此滚动/ResizeObserver 反复调用保持幂等。
+    if (!fit || fit.image !== image ||
+        (fit.appliedW && Math.abs(rootRect.width - fit.appliedW) > 2)) {
+      var renderedImageH = Math.max(1, Number(image.offsetHeight) || imageRect.height || 1);
+      var bodyScrollH = Math.max(bodyRect.height || 0, Number(body && body.scrollHeight) || 0);
+      fit = {
+        image: image,
+        baseOuterW: Math.max(1, rootRect.width),
+        chromeW: Math.max(0, rootRect.width - imageRect.width),
+        // 卡头/外 padding + caption/单图 cell 中除图片外的内容。
+        chromeH: Math.max(0, rootRect.height - bodyRect.height) +
+          Math.max(0, bodyScrollH - renderedImageH),
+        appliedW: 0
+      };
+      ctl._wordImageFit = fit;
+    }
+    var ratio = Number(image.naturalWidth) / Number(image.naturalHeight);
+    if (!(ratio > 0) || !Number.isFinite(ratio)) return true;
+    var imageMaxW = Math.max(1, maxW - fit.chromeW);
+    var imageMaxH = Math.max(1, maxH - fit.chromeH);
+    var baseImageW = Math.max(1, fit.baseOuterW - fit.chromeW);
+    var targetImageW = Math.min(baseImageW, imageMaxW, imageMaxH * ratio);
+    var targetOuterW = Math.max(120, Math.min(maxW, Math.round(targetImageW + fit.chromeW)));
+    fit.appliedW = targetOuterW;
+    try { if (ctl.body) ctl.body.style.width = targetOuterW + 'px'; } catch (_) {}
+    try { card.style.setProperty('--vc-word-image-max-h', Math.floor(imageMaxH) + 'px'); } catch (_) {}
+    return true;
+  }
   function _clampWordCard(ctl) {
     if (!ctl || !ctl.portaled || !ctl._bindOpen) return;
     var probe = ctl.root.getBoundingClientRect();
@@ -1478,7 +1552,8 @@
       var card = ctl.root.querySelector('.vc-card');
       if (card) {
         card.style.setProperty('max-width', maxW + 'px', 'important');
-        var naturalMaxH = card.classList.contains('vc-user-sized')
+        var imageFit = _fitWordImageCard(ctl, card, maxW, maxH);
+        var naturalMaxH = card.classList.contains('vc-user-sized') || imageFit
           ? maxH : Math.min(maxH, Math.max(96, Math.round(vh * 0.36)));
         card.style.setProperty('max-height', naturalMaxH + 'px', 'important');
       }

@@ -4,14 +4,16 @@
 Build and verification remain side-effect free. Installation is transactional:
 it validates both sides, backs up only the fixed payload, stops only the exact
 owned Direct service, and restores the old payload/service after any failure.
-Configuration, runtime state, bundled .NET, and all other install files are
-outside the payload whitelist and are never replaced.
+Runtime state, bundled .NET, and all other install files stay outside the
+payload whitelist.  An existing Codex reader_snapshot tool whitelist may be
+transactionally migrated after payload verification; it is backed up with the
+install transaction and restored if the install fails.
 """
 from __future__ import annotations
 
 import argparse
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import importlib.util
@@ -26,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from typing import Any, Mapping, Protocol, Sequence
 import uuid
 import zipfile
@@ -44,6 +47,7 @@ TYPIST_LAUNCHER_SOURCE = TYPIST_RUNTIME_SOURCE / "voice-typist-launcher.ps1"
 CANDIDATES = HERE / "candidates"
 DEFAULT_INSTALL_ROOT = Path.home() / "bw-computer-voice-bridge"
 DEFAULT_BACKUP_ROOT = Path.home() / "bw-computer-voice-bridge-backups"
+DEFAULT_CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
 
 PACKAGE_CONTRACT = "reader-computer-voice-direct-package/1"
 MANIFEST_SCHEMA = 1
@@ -94,6 +98,13 @@ DOTNET_DEFAULT = Path(
 PYINSTALLER_DEFAULT = Path(
     r"C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe"
 )
+CODEX_READER_PAGE_CARD_TOOLS = (
+    "reader_page_cards",
+    "reader_page_card_read",
+    "reader_page_card_edit",
+    "reader_page_card_delete",
+)
+CODEX_CONFIG_BACKUP_REL = "codex-config.toml.before-reader-page-card-tools"
 
 
 class PackageError(RuntimeError):
@@ -137,6 +148,19 @@ class InstalledProcess:
     executable: Path
     command_line: str
     creation_date: str
+
+
+@dataclass(frozen=True)
+class CodexConfigMigration:
+    changed: bool
+    reason: str
+    config_path: Path | None = None
+    backup_path: Path | None = None
+    added_tools: tuple[str, ...] = ()
+    before_sha256: str | None = None
+    after_sha256: str | None = None
+    before_bytes: bytes | None = field(default=None, repr=False)
+    after_bytes: bytes | None = field(default=None, repr=False)
 
 
 class InstalledProcessBackend(Protocol):
@@ -575,6 +599,284 @@ def _require_plain_directory(path: Path, *, label: str) -> Path:
     if resolved != lexical:
         _fail(f"{label} 经过链接或越出词法路径: {lexical}")
     return resolved
+
+
+def _decode_codex_config(content: bytes) -> tuple[str, bytes]:
+    bom = b"\xef\xbb\xbf" if content.startswith(b"\xef\xbb\xbf") else b""
+    try:
+        return content[len(bom):].decode("utf-8"), bom
+    except UnicodeDecodeError as exc:
+        _fail(f"Codex config.toml 不是 UTF-8: {exc}")
+
+
+def _reader_snapshot_section_span(text: str) -> tuple[int, int] | None:
+    table_pattern = re.compile(
+        r"(?m)^[ \t]*\[([^\]\r\n]+)\][ \t]*(?:#[^\r\n]*)?$"
+    )
+    tables = list(table_pattern.finditer(text))
+    targets = [
+        (index, match)
+        for index, match in enumerate(tables)
+        if match.group(1).strip() == "mcp_servers.reader_snapshot"
+    ]
+    if not targets:
+        return None
+    if len(targets) != 1:
+        _fail("Codex config.toml 含重复 reader_snapshot 表")
+    index, target = targets[0]
+    end = tables[index + 1].start() if index + 1 < len(tables) else len(text)
+    return target.end(), end
+
+
+def _toml_array_end(text: str, opening: int, *, limit: int) -> int:
+    if opening >= limit or text[opening] != "[":
+        _fail("reader_snapshot enabled_tools 不是 TOML 数组")
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    in_comment = False
+    index = opening
+    while index < limit:
+        char = text[index]
+        if in_comment:
+            if char in "\r\n":
+                in_comment = False
+            index += 1
+            continue
+        if quote is not None:
+            if quote == '"' and escaped:
+                escaped = False
+            elif quote == '"' and char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if char == "#":
+            in_comment = True
+        elif char in {'"', "'"}:
+            if text[index:index + 3] in {'"""', "'''"}:
+                _fail("reader_snapshot enabled_tools 不支持多行字符串")
+            quote = char
+        elif char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return index
+            if depth < 0:
+                break
+        index += 1
+    _fail("reader_snapshot enabled_tools 数组未闭合")
+
+
+def _codex_config_with_reader_page_card_tools(
+    content: bytes,
+    *,
+    install_root: Path,
+) -> tuple[bytes, tuple[str, ...], str]:
+    text, bom = _decode_codex_config(content)
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        _fail(f"Codex config.toml 无效，拒绝迁移: {exc}")
+    servers = parsed.get("mcp_servers")
+    server = servers.get("reader_snapshot") if isinstance(servers, dict) else None
+    if server is None:
+        return content, (), "reader-snapshot-not-registered"
+    if not isinstance(server, dict):
+        _fail("Codex reader_snapshot 配置不是表")
+    command = server.get("command")
+    expected_command = install_root / NATIVE_REL
+    if not isinstance(command, str) or not _same_windows_path(command, expected_command):
+        _fail("Codex reader_snapshot 未指向本次 Direct 安装；拒绝修改")
+    if "enabled_tools" not in server:
+        return content, (), "all-tools-already-enabled"
+    enabled = server["enabled_tools"]
+    if not isinstance(enabled, list) or not all(
+        isinstance(item, str) and item for item in enabled
+    ):
+        _fail("Codex reader_snapshot enabled_tools 必须是非空字符串数组")
+    missing = tuple(tool for tool in CODEX_READER_PAGE_CARD_TOOLS if tool not in enabled)
+    if not missing:
+        return content, (), "already-current"
+
+    section = _reader_snapshot_section_span(text)
+    if section is None:
+        _fail("Codex reader_snapshot 使用了不受支持的 TOML 布局")
+    section_start, section_end = section
+    assignment_pattern = re.compile(
+        r"(?m)^[ \t]*enabled_tools[ \t]*=[ \t]*"
+    )
+    assignments = list(
+        assignment_pattern.finditer(text, section_start, section_end)
+    )
+    if len(assignments) != 1:
+        _fail("Codex reader_snapshot enabled_tools 布局不唯一")
+    value_start = assignments[0].end()
+    while value_start < section_end and text[value_start] in " \t\r\n":
+        value_start += 1
+    value_end = _toml_array_end(text, value_start, limit=section_end)
+    raw_array = text[value_start:value_end + 1]
+    try:
+        localized = tomllib.loads(f"value = {raw_array}\n")["value"]
+    except (tomllib.TOMLDecodeError, KeyError) as exc:
+        _fail(f"无法独立解析 reader_snapshot enabled_tools: {exc}")
+    if localized != enabled:
+        _fail("reader_snapshot enabled_tools 文本与 TOML 语义不一致")
+    updated_enabled = [*enabled, *missing]
+    canonical_array = "[" + ", ".join(
+        json.dumps(item, ensure_ascii=False) for item in updated_enabled
+    ) + "]"
+    updated_text = text[:value_start] + canonical_array + text[value_end + 1:]
+    updated = bom + updated_text.encode("utf-8")
+    try:
+        verified = tomllib.loads(updated_text)
+    except tomllib.TOMLDecodeError as exc:
+        _fail(f"迁移后的 Codex config.toml 无效: {exc}")
+    verified_tools = verified["mcp_servers"]["reader_snapshot"]["enabled_tools"]
+    if verified_tools != updated_enabled:
+        _fail("迁移后的 reader_snapshot enabled_tools 未通过语义校验")
+    return updated, missing, "updated"
+
+
+def _write_new_regular(path: Path, content: bytes, *, label: str) -> None:
+    try:
+        with path.open("xb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError as exc:
+        _fail(f"{label} 写入失败: {exc}")
+    if _read_regular(path) != content:
+        _fail(f"{label} 写后校验失败")
+
+
+def _atomic_replace_regular(
+    path: Path,
+    content: bytes,
+    *,
+    expected_before: bytes,
+    replace_file: Any = os.replace,
+) -> None:
+    parent = _require_plain_directory(path.parent, label="Codex 配置目录")
+    lexical = _lexical_absolute(path)
+    if lexical.parent != parent:
+        _fail("Codex config.toml 解析后偏离固定配置目录")
+    try:
+        status = lexical.lstat()
+    except OSError as exc:
+        _fail(f"Codex config.toml 不存在或不可读取: {exc}")
+    if _is_reparse_path(lexical, status) or not stat.S_ISREG(status.st_mode):
+        _fail("Codex config.toml 必须是非 reparse 普通文件")
+    if _read_regular(lexical) != expected_before:
+        _fail("Codex config.toml 在迁移期间发生变化；拒绝覆盖")
+    temporary = lexical.with_name(
+        f".{lexical.name}.bw-reader-tools-{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        _write_new_regular(temporary, content, label="Codex 配置临时文件")
+        try:
+            os.chmod(temporary, stat.S_IMODE(status.st_mode))
+        except OSError as exc:
+            _fail(f"无法保留 Codex config.toml 权限: {exc}")
+        replace_file(temporary, lexical)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    if _read_regular(lexical) != content:
+        _fail("Codex config.toml 原子写后校验失败")
+
+
+def migrate_codex_reader_page_card_tools(
+    config_path: Path | None,
+    *,
+    install_root: Path,
+    backup_directory: Path,
+    replace_file: Any = os.replace,
+) -> CodexConfigMigration:
+    """Expose shipped page-card tools through an existing Codex whitelist."""
+
+    if config_path is None:
+        return CodexConfigMigration(False, "disabled")
+    lexical = _lexical_absolute(config_path)
+    try:
+        status = lexical.lstat()
+    except FileNotFoundError:
+        return CodexConfigMigration(False, "config-missing", config_path=lexical)
+    except OSError as exc:
+        _fail(f"无法检查 Codex config.toml: {exc}")
+    if _is_reparse_path(lexical, status) or not stat.S_ISREG(status.st_mode):
+        _fail("Codex config.toml 必须是非 reparse 普通文件")
+    before = _read_regular(lexical)
+    after, added, reason = _codex_config_with_reader_page_card_tools(
+        before,
+        install_root=install_root,
+    )
+    before_digest = _sha256(before)
+    if not added:
+        return CodexConfigMigration(
+            False,
+            reason,
+            config_path=lexical,
+            before_sha256=before_digest,
+            after_sha256=before_digest,
+        )
+    backup_root = _require_plain_directory(
+        backup_directory,
+        label="Direct 安装事务备份",
+    )
+    backup_path = backup_root / CODEX_CONFIG_BACKUP_REL
+    _write_new_regular(backup_path, before, label="Codex config.toml 写前备份")
+    try:
+        _atomic_replace_regular(
+            lexical,
+            after,
+            expected_before=before,
+            replace_file=replace_file,
+        )
+    except Exception:
+        current = _read_regular(lexical)
+        if current == after:
+            _atomic_replace_regular(
+                lexical,
+                before,
+                expected_before=after,
+            )
+        raise
+    return CodexConfigMigration(
+        True,
+        reason,
+        config_path=lexical,
+        backup_path=backup_path,
+        added_tools=added,
+        before_sha256=before_digest,
+        after_sha256=_sha256(after),
+        before_bytes=before,
+        after_bytes=after,
+    )
+
+
+def _restore_codex_config_migration(migration: CodexConfigMigration) -> None:
+    if not migration.changed:
+        return
+    if (
+        migration.config_path is None
+        or migration.backup_path is None
+        or migration.before_bytes is None
+        or migration.after_bytes is None
+    ):
+        _fail("Codex 配置迁移回滚记录不完整")
+    backup = _read_regular(migration.backup_path)
+    if backup != migration.before_bytes:
+        _fail("Codex 配置写前备份校验失败；拒绝回滚")
+    _atomic_replace_regular(
+        migration.config_path,
+        backup,
+        expected_before=migration.after_bytes,
+    )
 
 
 def _require_plain_source_root(path: Path, *, label: str) -> Path:
@@ -1798,6 +2100,7 @@ def _install_verified_payload(
     service_controller: InstallServiceController,
     mcp_controller: InstallMcpController,
     runner: CommandRunner,
+    codex_config_path: Path | None,
     replace_file: Any = os.replace,
 ) -> dict[str, Any]:
     install_root = _require_plain_directory(install_root, label="Direct 安装根")
@@ -1818,6 +2121,7 @@ def _install_verified_payload(
     stopped = False
     payload_mutation_started = False
     mcp_processes_stopped = 0
+    codex_migration = CodexConfigMigration(False, "not-started")
     try:
         if was_running:
             service_controller.stop(install_root)
@@ -1839,6 +2143,11 @@ def _install_verified_payload(
             installed_payload,
             runner=runner,
         )
+        codex_migration = migrate_codex_reader_page_card_tools(
+            codex_config_path,
+            install_root=install_root,
+            backup_directory=backup,
+        )
         receipt = {
             "backup": str(backup),
             "installedVersion": installed_manifest["version"],
@@ -1850,6 +2159,16 @@ def _install_verified_payload(
             "serviceRestored": False,
             "serviceRestartDeferredToReaderPC": was_running,
             "mcpProcessesStopped": mcp_processes_stopped,
+            "codexConfigMigration": {
+                "changed": codex_migration.changed,
+                "reason": codex_migration.reason,
+                "toolsAdded": list(codex_migration.added_tools),
+                "backup": (
+                    str(codex_migration.backup_path)
+                    if codex_migration.backup_path is not None
+                    else None
+                ),
+            },
         }
         (backup / "install-receipt.json").write_text(
             json.dumps(receipt, ensure_ascii=False, sort_keys=True) + "\n",
@@ -1858,6 +2177,11 @@ def _install_verified_payload(
         return receipt
     except Exception as install_error:
         recovery_errors: list[str] = []
+        if codex_migration.changed:
+            try:
+                _restore_codex_config_migration(codex_migration)
+            except Exception as exc:
+                recovery_errors.append(f"恢复 Codex config.toml 失败: {exc}")
         if stopped:
             try:
                 if service_controller.is_running(install_root):
@@ -1889,6 +2213,7 @@ def install_archive(
     service_controller: InstallServiceController | None = None,
     mcp_controller: InstallMcpController | None = None,
     runner: CommandRunner | None = None,
+    codex_config_path: Path | None = DEFAULT_CODEX_CONFIG,
     replace_file: Any = os.replace,
 ) -> dict[str, Any]:
     """Atomically install a validated candidate and preserve non-payload data."""
@@ -1909,6 +2234,7 @@ def install_archive(
         ),
         mcp_controller=(mcp_controller or ExactReaderContextMcpController()),
         runner=runner or SubprocessRunner(timeout_seconds=SELF_TEST_TIMEOUT_SECONDS),
+        codex_config_path=codex_config_path,
         replace_file=replace_file,
     )
 
@@ -1938,6 +2264,7 @@ def rollback_install(
         ),
         mcp_controller=(mcp_controller or ExactReaderContextMcpController()),
         runner=runner or SubprocessRunner(timeout_seconds=SELF_TEST_TIMEOUT_SECONDS),
+        codex_config_path=None,
     )
 
 

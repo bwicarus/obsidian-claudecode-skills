@@ -95,7 +95,9 @@ Codex 产出结构化结果
 
 `ReaderContextMcpServer.cs`：`ToolName = "reader_context_snapshot"`(:9)、
 `FreshnessWindow`(:12) 3 分钟 → `contextStatus=stale`、`RunAsync`(:54)。
-注册事实用 `codex mcp get reader_snapshot` 现场查，不看 README。
+注册事实用 `codex mcp get reader_snapshot` 现场查，不看 README。服务端 `tools/list` 与 Codex
+`enabled_tools` 是两道独立门：新增工具必须同时命中二者，并在新会话中完成一次真实调用；
+只验证服务端清单不能证明 Codex 语音可见。
 
 ## 2. 反向链路（AI 产出 → 阅读器）
 

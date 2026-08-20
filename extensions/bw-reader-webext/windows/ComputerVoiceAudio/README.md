@@ -156,8 +156,11 @@ background 的固定 relay，不能把 URL、设备 ID、AUMID、进程、路径
 ```
 
 它注册只读 `reader_context_snapshot`、按需 `reader_visual_image`、受限的
-`reader_browser_control`、严格 `reader_command`，以及只为复杂任务读取一个工作流文件的
-`reader_capability_guide`；客户端可用 `enabled_tools` 进一步收窄。服务进程在同一 MCP
+`reader_browser_control`、严格 `reader_command`、按稳定 ID 读写页面卡片的
+`reader_page_cards` / `reader_page_card_read` / `reader_page_card_edit` /
+`reader_page_card_delete`，以及只为复杂任务读取一个工作流文件的
+`reader_capability_guide`；客户端可用 `enabled_tools` 进一步收窄，但发布新增工具后必须同步
+该白名单并以 `codex mcp get reader_snapshot` 验证。服务进程在同一 MCP
 连接中保持 instance/call sequence，逐次读取原子快照；最新文件损坏时保留上一次有效
 revision。`active-reading` 超过三分钟则返回 `contextStatus=stale`，正文、选区和视觉请求都
 不会继续使用旧页面。`reader_visual_image` 只向快照中精确匹配且在线的 source 请求当前

@@ -185,6 +185,35 @@
     _railSleep = setTimeout(function () { try { rail.classList.remove('awake'); } catch (e) {} }, 1600);
   }
 
+  /// Scroll itself is compositor-driven, while the rail is a body/fixed portal.
+  /// Waiting for the coalesced rAF before touching the portal therefore leaves
+  /// one visibly stale frame behind the page.  Move only the dots by the known
+  /// scroll delta immediately (no geometry read), then let the rAF below replace
+  /// it with fresh anchor BCRs.  The tiny viewport indicator deliberately does
+  /// not share this transform: its movement is proportional to total scroll.
+  function _rootScrollTop() {
+    var root = document.scrollingElement || document.documentElement || document.body;
+    return Number((root && root.scrollTop) || window.scrollY || window.pageYOffset || 0);
+  }
+
+  function _primeRailScroll(rail) {
+    if (!rail || !rail.__scrollEl) return;
+    var scrollEl = rail.__scrollEl;
+    var root = document.scrollingElement || document.documentElement || document.body;
+    var localNow = Number(scrollEl.scrollTop || 0);
+    var rootNow = _rootScrollTop();
+    var localBase = Number(rail.__layoutScrollTop || 0);
+    var rootBase = Number(rail.__layoutRootScrollTop || 0);
+    var shift = -(localNow - localBase);
+    if (scrollEl === root || scrollEl === document.documentElement || scrollEl === document.body) {
+      // Root scrolling is already represented by scrollEl.scrollTop.
+      rootNow = localNow;
+    } else {
+      shift -= (rootNow - rootBase);
+    }
+    rail.style.setProperty('--rail-y-shift', shift + 'px');
+  }
+
   function _scheduleRails() {
     if (_railRaf) return;
     var raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 0); };
@@ -223,11 +252,13 @@
     if (!rail) return;
     var scrollEl = rail.__scrollEl, onMove = rail.__onMove;
     try { if (scrollEl && onMove) scrollEl.removeEventListener('scroll', onMove); } catch (e) {}
-    try { if (onMove) window.removeEventListener('resize', onMove); } catch (e2) {}
-    try { if (rail.__onOutside) document.removeEventListener('pointerdown', rail.__onOutside, true); } catch (e3) {}
-    try { if (rail.__rootObserver) rail.__rootObserver.disconnect(); } catch (e4) {}
-    try { if (scrollEl && scrollEl.__pgbindRail === rail) scrollEl.__pgbindRail = null; } catch (e5) {}
-    try { rail.remove(); } catch (e6) {}
+    try { if (onMove) document.removeEventListener('scroll', onMove, true); } catch (e2) {}
+    try { if (onMove) window.removeEventListener('scroll', onMove, true); } catch (e3) {}
+    try { if (onMove) window.removeEventListener('resize', onMove); } catch (e4) {}
+    try { if (rail.__onOutside) document.removeEventListener('pointerdown', rail.__onOutside, true); } catch (e5) {}
+    try { if (rail.__rootObserver) rail.__rootObserver.disconnect(); } catch (e6) {}
+    try { if (scrollEl && scrollEl.__pgbindRail === rail) scrollEl.__pgbindRail = null; } catch (e7) {}
+    try { rail.remove(); } catch (e8) {}
   }
 
   function _railFor(pw) {
@@ -241,22 +272,30 @@
     rail.appendChild(view);
     document.body.appendChild(rail);
     rail.__scrollEl = scrollEl; rail.__view = view; rail.__expandedGroupKey = '';
+    rail.__layoutScrollTop = Number(scrollEl.scrollTop || 0);
+    rail.__layoutRootScrollTop = _rootScrollTop();
+    rail.style.setProperty('--rail-y-shift', '0px');
     scrollEl.__pgbindRail = rail;
     var onMove = function () {
+      _primeRailScroll(rail);
       _collapseRailGroup(rail);
       _wakeRail(rail);
       _scheduleRails();
     };
     rail.__onMove = onMove;
     try { scrollEl.addEventListener('scroll', onMove, { passive: true }); } catch (e) {}
-    try { window.addEventListener('resize', onMove); } catch (e2) {}
+    // Element scroll does not bubble. Capture catches nested/internal scrollers;
+    // window covers the document scrollingElement path in WebKit as well.
+    try { document.addEventListener('scroll', onMove, { capture: true, passive: true }); } catch (e2) {}
+    try { window.addEventListener('scroll', onMove, { capture: true, passive: true }); } catch (e3) {}
+    try { window.addEventListener('resize', onMove); } catch (e4) {}
     var onOutside = function (ev) {
       if (!rail.__expandedGroupKey || (ev && ev.target && rail.contains(ev.target))) return;
       _collapseRailGroup(rail);
       _scheduleRails();
     };
     rail.__onOutside = onOutside;
-    try { document.addEventListener('pointerdown', onOutside, true); } catch (e3) {}
+    try { document.addEventListener('pointerdown', onOutside, true); } catch (e5) {}
     // #main 被刷新/宿主重建时，旧滚动根不会再发 scroll；监听 DOM 替换后主动
     // 撤掉 body 上的孤儿 fixed rail 与事件，不等下一次 resize 才收拾。
     try {
@@ -266,7 +305,7 @@
         });
         rail.__rootObserver.observe(document.body, { childList: true, subtree: true });
       }
-    } catch (e4) {}
+    } catch (e6) {}
     _wakeRail(rail); _scheduleRails();
     return rail;
   }
@@ -386,6 +425,12 @@
       rail.__view.style.top = ((scrollEl.scrollTop || 0) / total * h) + 'px';
       rail.__view.style.height = (Math.max(8, (scrollEl.clientHeight || h) / total * h)) + 'px';
     }
+    // Commit against the latest scroll offsets in the same animation frame,
+    // then clear the compositor-only provisional delta.  No stale delta can
+    // leak into a second frame, even when several scroll events were coalesced.
+    rail.__layoutScrollTop = Number(scrollEl.scrollTop || 0);
+    rail.__layoutRootScrollTop = _rootScrollTop();
+    rail.style.setProperty('--rail-y-shift', '0px');
   }
 
   function _removeRailMark(key) {

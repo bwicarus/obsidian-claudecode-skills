@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -337,6 +338,205 @@ class DirectPackageTests(unittest.TestCase):
         (install_root / "dotnet8" / "dotnet.exe").write_bytes(b"dotnet-must-survive")
         return old_manifest, old_payload
 
+    def _codex_config(
+        self,
+        root: Path,
+        install_root: Path,
+        *,
+        include_whitelist: bool = True,
+        command: Path | None = None,
+    ) -> tuple[Path, bytes]:
+        config_dir = root / "codex-home"
+        config_dir.mkdir()
+        config_path = config_dir / "config.toml"
+        whitelist = (
+            "enabled_tools = [\n"
+            "  \"reader_context_snapshot\", # keep existing tool\n"
+            "  \"reader_card\",\n"
+            "]\n"
+            if include_whitelist
+            else ""
+        )
+        registered_command = command or (install_root / package.NATIVE_REL)
+        content = (
+            "# user-owned Codex settings must survive\n"
+            "model = \"gpt-test\"\n\n"
+            "[mcp_servers.reader_snapshot]\n"
+            f"command = '{registered_command}'\n"
+            "args = [\"--reader-context-mcp\"]\n"
+            "default_tools_approval_mode = \"approve\"\n"
+            f"{whitelist}\n"
+            "[profiles.keep_me]\n"
+            "approval_policy = \"never\"\n"
+        ).encode("utf-8")
+        config_path.write_bytes(content)
+        return config_path, content
+
+    def test_codex_config_migration_adds_only_missing_page_card_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            install_root = root / "install"
+            backup = root / "backup"
+            backup.mkdir()
+            config_path, original = self._codex_config(root, install_root)
+
+            migration = package.migrate_codex_reader_page_card_tools(
+                config_path,
+                install_root=install_root,
+                backup_directory=backup,
+            )
+
+            self.assertTrue(migration.changed)
+            self.assertEqual(
+                migration.added_tools,
+                package.CODEX_READER_PAGE_CARD_TOOLS,
+            )
+            self.assertEqual(
+                migration.backup_path,
+                backup / package.CODEX_CONFIG_BACKUP_REL,
+            )
+            self.assertEqual(migration.backup_path.read_bytes(), original)
+            updated_bytes = config_path.read_bytes()
+            updated = tomllib.loads(updated_bytes.decode("utf-8"))
+            self.assertEqual(updated["model"], "gpt-test")
+            self.assertEqual(
+                updated["profiles"]["keep_me"]["approval_policy"],
+                "never",
+            )
+            self.assertEqual(
+                updated["mcp_servers"]["reader_snapshot"]["enabled_tools"],
+                [
+                    "reader_context_snapshot",
+                    "reader_card",
+                    *package.CODEX_READER_PAGE_CARD_TOOLS,
+                ],
+            )
+            self.assertIn(
+                b"# user-owned Codex settings must survive",
+                updated_bytes,
+            )
+
+            unchanged = package.migrate_codex_reader_page_card_tools(
+                config_path,
+                install_root=install_root,
+                backup_directory=backup,
+            )
+            self.assertFalse(unchanged.changed)
+            self.assertEqual(unchanged.reason, "already-current")
+            self.assertEqual(config_path.read_bytes(), updated_bytes)
+            self.assertEqual(
+                tuple(path.name for path in backup.iterdir()),
+                (package.CODEX_CONFIG_BACKUP_REL,),
+            )
+
+    def test_codex_config_without_whitelist_needs_no_write_or_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            install_root = root / "install"
+            backup = root / "backup"
+            backup.mkdir()
+            config_path, original = self._codex_config(
+                root,
+                install_root,
+                include_whitelist=False,
+            )
+
+            migration = package.migrate_codex_reader_page_card_tools(
+                config_path,
+                install_root=install_root,
+                backup_directory=backup,
+            )
+
+            self.assertFalse(migration.changed)
+            self.assertEqual(migration.reason, "all-tools-already-enabled")
+            self.assertEqual(config_path.read_bytes(), original)
+            self.assertEqual(list(backup.iterdir()), [])
+
+    def test_codex_config_migration_refuses_unrelated_server_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            install_root = root / "install"
+            backup = root / "backup"
+            backup.mkdir()
+            config_path, original = self._codex_config(
+                root,
+                install_root,
+                command=root / "someone-else.exe",
+            )
+
+            with self.assertRaisesRegex(
+                package.PackageError,
+                "未指向本次 Direct 安装",
+            ):
+                package.migrate_codex_reader_page_card_tools(
+                    config_path,
+                    install_root=install_root,
+                    backup_directory=backup,
+                )
+
+            self.assertEqual(config_path.read_bytes(), original)
+            self.assertEqual(list(backup.iterdir()), [])
+
+    def test_codex_config_atomic_failure_keeps_original_after_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            install_root = root / "install"
+            backup = root / "backup"
+            backup.mkdir()
+            config_path, original = self._codex_config(root, install_root)
+
+            def fail_replace(source: Path, target: Path) -> None:
+                raise OSError("simulated atomic replace failure")
+
+            with self.assertRaisesRegex(OSError, "simulated atomic replace failure"):
+                package.migrate_codex_reader_page_card_tools(
+                    config_path,
+                    install_root=install_root,
+                    backup_directory=backup,
+                    replace_file=fail_replace,
+                )
+
+            self.assertEqual(config_path.read_bytes(), original)
+            self.assertEqual(
+                (backup / package.CODEX_CONFIG_BACKUP_REL).read_bytes(),
+                original,
+            )
+
+    def test_install_runs_codex_tool_whitelist_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            archive = self._candidate(root)
+            install_root = root / "install"
+            backup_root = root / "backups"
+            self._installed_old_payload(archive, install_root)
+            config_path, original = self._codex_config(root, install_root)
+
+            receipt = package.install_archive(
+                archive,
+                install_root=install_root,
+                backup_root=backup_root,
+                service_controller=FakeInstallService(running=False),
+                mcp_controller=FakeMcpController(),
+                runner=FakeRunner(),
+                codex_config_path=config_path,
+            )
+
+            config_receipt = receipt["codexConfigMigration"]
+            self.assertTrue(config_receipt["changed"])
+            self.assertEqual(
+                config_receipt["toolsAdded"],
+                list(package.CODEX_READER_PAGE_CARD_TOOLS),
+            )
+            config_backup = Path(config_receipt["backup"])
+            self.assertEqual(config_backup.parent, Path(receipt["backup"]))
+            self.assertEqual(config_backup.read_bytes(), original)
+            parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            self.assertTrue(
+                set(package.CODEX_READER_PAGE_CARD_TOOLS).issubset(
+                    parsed["mcp_servers"]["reader_snapshot"]["enabled_tools"]
+                )
+            )
+
     def test_atomic_install_defers_service_restart_to_readerpc_owner(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -356,6 +556,7 @@ class DirectPackageTests(unittest.TestCase):
                 service_controller=service,
                 mcp_controller=mcp,
                 runner=FakeRunner(),
+                codex_config_path=None,
             )
 
             self.assertEqual(receipt["installedVersion"], "0.4.1")
@@ -454,6 +655,7 @@ class DirectPackageTests(unittest.TestCase):
                     service_controller=service,
                     mcp_controller=mcp,
                     runner=FakeRunner(),
+                    codex_config_path=None,
                     replace_file=fail_once,
                 )
 
@@ -530,6 +732,7 @@ class DirectPackageTests(unittest.TestCase):
                     service_controller=service,
                     mcp_controller=package.ExactReaderContextMcpController(backend),
                     runner=FakeRunner(),
+                    codex_config_path=None,
                 )
 
             self.assertEqual(backend.terminated, [])

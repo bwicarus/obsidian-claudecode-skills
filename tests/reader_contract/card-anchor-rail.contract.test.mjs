@@ -54,7 +54,7 @@ test("同行多卡先以数量重叠提示，首次点击只横向展开，空�
   assert.match(CSS, /\*\{box-sizing:border-box\}/,
     "加粗边框必须落在 border-box 内，不能让同行组收起时尺寸跳变");
   assert.match(BIND, /document\.addEventListener\('pointerdown', onOutside, true\)/);
-  assert.match(BIND, /var onMove = function \(\) \{\s*_collapseRailGroup\(rail\);/,
+  assert.match(BIND, /var onMove = function \(\) \{\s*(?:_primeRailScroll\(rail\);\s*)?_collapseRailGroup\(rail\);/,
     "滚动与缩放重排前必须折叠已展开组");
 });
 
@@ -67,6 +67,18 @@ test("浮标纵向位置立即跟随滚动，只保留同行横向展开动画",
     "轨道视窗 top 也必须立即跟随滚动");
   assert.match(dotRule, /right \.22s cubic-bezier\(\.34,1\.5,\.64,1\)/,
     "同行横向展开动画仍需保留");
+  assert.match(dotRule, /translateY\(calc\(-50% \+ var\(--rail-y-shift,0px\)\)\)/,
+    "浮标应通过继承的合成层位移在 scroll 事件内先跟上正文");
+  assert.doesNotMatch(dotRule, /transform\s+\.[\d]+s/,
+    "即时滚动位移不能再被 transform transition 拖成追赶动画");
+  assert.match(BIND, /function _primeRailScroll\(rail\)[\s\S]*?rail\.style\.setProperty\('--rail-y-shift', shift \+ 'px'\)/,
+    "scroll 热路径只能按缓存的 scrollTop 写临时位移，不能等几何重测");
+  assert.match(BIND, /var onMove = function \(\) \{\s*_primeRailScroll\(rail\);[\s\S]{0,160}?_scheduleRails\(\);/,
+    "临时位移必须先于 rAF 合并调度写入");
+  assert.match(BIND, /document\.addEventListener\('scroll', onMove, \{ capture: true, passive: true \}\)/,
+    "内部滚动容器需由 capture scroll 统一覆盖");
+  assert.match(BIND, /rail\.__layoutScrollTop = Number\(scrollEl\.scrollTop \|\| 0\);[\s\S]{0,160}?--rail-y-shift', '0px'/,
+    "rAF 用最新几何落位后必须原子清掉临时位移");
 });
 
 test("展开复用正式 vc-card，并 portal 到页容器之外后按视口四边 clamp", () => {
@@ -88,6 +100,27 @@ test("展开复用正式 vc-card，并 portal 到页容器之外后按视口四�
   assert.match(NOTE, /function observeWordPortal\(ctl\)/,
     "图片载入或卡片内部展开改变尺寸后也要再次 clamp");
   assert.match(NOTE, /z-index:190;pointer-events:none/);
+});
+
+test("单图词锚首次展开按图片固有比例缩进视口，手动尺寸仍优先", () => {
+  assert.match(NOTE,
+    /function _fitWordImageCard\(ctl, card, maxW, maxH\)[\s\S]*?card\.classList\.contains\('vc-user-sized'\)[\s\S]*?cells\.length !== 1/,
+    "自动比例只处理未手调尺寸的单图卡");
+  assert.match(NOTE,
+    /image\.addEventListener\('load',[\s\S]*?scheduleWordPortalPlacement\(\)/,
+    "首次 mount 时图片尚未解码，也必须在 intrinsic size 可用后重新排版");
+  assert.match(NOTE,
+    /var ratio = Number\(image\.naturalWidth\) \/ Number\(image\.naturalHeight\)[\s\S]*?targetImageW = Math\.min\(baseImageW, imageMaxW, imageMaxH \* ratio\)/,
+    "宽度必须由图片固有比例和视口双边界共同决定，不能只裁父容器");
+  assert.match(NOTE,
+    /ctl\.body\.style\.width = targetOuterW \+ 'px'[\s\S]*?--vc-word-image-max-h/,
+    "卡片外壳和图片应一起缩放，不能只给图片制造 letterbox");
+  assert.match(NOTE,
+    /\.vc-card\.vc-word-image-fit:not\(\.vc-user-sized\)[^']*height:auto;max-height:var\(--vc-word-image-max-h[^']*object-fit:contain/,
+    "图片保持原比例且完整显示，不允许 cover 裁切或拉伸");
+  assert.match(NOTE,
+    /card\.classList\.contains\('vc-user-sized'\) \|\| imageFit\s*\? maxH/,
+    "图像自适应和用户尺寸都使用完整视口上界，普通文字卡仍保留紧凑上界");
 });
 
 test("词锚展开态只有明确的垃圾桶删除，失败不先收卡，成功由权威删除撤 frame+rail", () => {
