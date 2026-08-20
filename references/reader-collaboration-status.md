@@ -4301,3 +4301,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **AI/存储**：快照直接带稳定 id/revision、锚定序号、类型、锚定词与完整 replacement；所有卡按 id 读改删，只有锚定卡可按号，正常内容不截断，100000 字符/约 200 KiB 仅作异常保护。
 - **怎么验的**：共享源码和生成物一致，Reader Node 全量、页面卡 Python 专项、Windows Direct Release 编译/自检、发布管线均通过；Windows handoff 只命中既有 POSIX `fcntl` 边界。
 - **候选/下一步**：WebExt `0.2.123`、launcher v13、App `1.1.69`、Direct `0.1.169`；按用户明确要求不等待发布前人工验收，提交推送后由 Pi 预检并直接发布正式成品。
+
+## Codex：词锚卡正式成品发布（2026-08-20 JST）
+- **Pi/扩展**：Reader `0.2.123` 与 KG `kg-0.2.123-e994a738bbd2f8c2350e` 原子部署、E2E 和服务稳定检查通过；公开 Windows channel 已切到 WebExt `0.2.123`、launcher v13，线上包/launcher 哈希与声明一致。
+- **Windows**：Direct `0.1.170` 的 26 工具打包合同、包内自检与 7/7 安装哈希通过，`/healthz ok=true`；回退点 `install-0.1.170-20260820T101102Z-4d6f6323` 保留完整 `0.1.168`。
+- **iOS**：Actions `32357074601` 上传 TestFlight `1.1.69 (398)`；`32357907516` 确认 `COMPLETE / VALID / IN_BETA_TESTING`，错误与警告均为空。
+- **验证/交接**：Reader Node `1586/1586`、页面卡 Python `15/15`、Direct 打包测试 `23/23` 通过；正式成品已上线，下一步由用户直接验收刷新/缩放、同行复数、顶层展开、删改与 AI 快照联动。
