@@ -61,12 +61,16 @@ test("同一个词重复出现时，用原序号挑最近的一处", () => {
   assert.match(body, /Math\.abs\(\(ord\[index\[at\]\]\._oi \| 0\) - from\)/, "没有用原序号做消歧");
 });
 
-test("钉在书页上的卡跟高亮同一个坐标系，不用 fixed 跟滚", () => {
-  // references/sticky-notes-design.md 的禁令：锚在内容坐标系。
-  assert.match(BINDCARD, /position:absolute;left:/);
-  assert.doesNotMatch(BINDCARD, /position:\s*fixed/);
+test("正文锚跟高亮同坐标；右侧轨和展开卡才是视口 portal", () => {
+  // 正文框必须留在内容坐标系，缩放/刷新由 charBoxes 重建；视口轨只读它的 BCR。
+  assert.match(CSS, /\.pgmark \{ position: absolute;/);
+  assert.match(BINDCARD, /m\.style\.cssText =\s*\n\s*'left:' \+ \(box\.x0 - PAD\)/);
   assert.match(BINDCARD, /ensurePageLayer\(pw, 'pgbind-layer'\)/);
   assert.match(CSS, /\.pgbind-layer \{ position: absolute; inset: 0;/);
+  assert.match(CSS, /\.pgbind-rail \{ position: fixed; width: 150px; pointer-events: none;/);
+  assert.match(BINDCARD, /var ar = a\.getBoundingClientRect\(\);/);
+  assert.match(BINDCARD, /var cy = ar\.top \+ ar\.height \/ 2 - top;/);
+  assert.match(CSS, /\.pgbind-card-portal \{ position: fixed; z-index: 190;/);
 });
 
 // ── 标记的形态（2026-08-20 用户重新定，替换了初版）────────────────
@@ -74,12 +78,14 @@ test("钉在书页上的卡跟高亮同一个坐标系，不用 fixed 跟滚", (
 // 初版是「落下时展开、非活跃计时、到点收成球留在锚点上」。两条都被否掉：
 //   「圆球过多会遮挡视野」
 //   「实际的书中字符可不像你的例子那样有足够的空白位置，这样会盖到其它字符」
-// 所以标记不再占正文面积 —— 给被锚的词描边、中间不填色，卡片按需点开。
+// 所以标记不再占正文面积 —— 描边 + 极淡下半渐变/分段底线，卡片按需点开。
 // 这条测试替换了原来那条「可见才计时、到点收球、能拆」。
 
-test("标记只描边不填色 —— 字像素完全不被碰", () => {
-  // 填色即便走 multiply 也仍然改了字的底色，而扫描书底色本来就不匀。
-  assert.match(CSS, /\.pgmark \{[\s\S]{0,240}?background: transparent/);
+test("标记有轻量分类装饰，但不恢复盖字的实心填充", () => {
+  assert.match(CSS, /background: linear-gradient\(180deg,transparent 0 62%,color-mix\(in srgb,var\(--pm-t\) 9%,transparent\) 62% 100%\)/);
+  assert.match(CSS, /\.pgmark::after \{[\s\S]{0,260}?linear-gradient\(90deg,var\(--pm-t\) 0 38%,transparent 38% 62%,var\(--pm-t\) 62% 100%\)/);
+  assert.doesNotMatch(CSS, /\.pgmark \{[^}]*background:\s*var\(--pm-t\)/,
+    "词框不能恢复成会盖住正文的实心分类色");
   assert.match(CSS, /\.pgmark \{[\s\S]{0,240}?border: 1\.5px solid var\(--pm-b\)/);
   // 边框色不能是色调原色：实测在纸上只有 1.6~2.5:1，够不到图形元素的 3:1
   assert.match(BINDCARD, /--pm-b:color-mix\(in srgb,' \+ tc \+ ' 60%,#2a2440\)/);
@@ -105,13 +111,17 @@ test("序号是页内位置，加删卡后整页重排", () => {
 });
 
 test("卡片按需展开，且一次只开一张", () => {
-  // 满页都是卡就回到了「圆球遮挡视野」那个老问题
+  // 展开复用正式 vc-card；激活态先清全局，再只点亮当前绑定。
   assert.match(BINDCARD, /function _toggleBindCard/);
-  assert.match(BINDCARD, /var others = layer\.querySelectorAll\('\.pgbind-card'\)/);
+  assert.match(BINDCARD, /RC\.voiceCard\.renderInto\(host,/);
+  assert.match(BINDCARD, /_clearBindActive\(\);/);
+  assert.match(BINDCARD, /_setBindActive\(key, on\);/);
 });
 test("钉不上退回浮层，那页渲染出来时自己归位", () => {
   assert.match(VOICECALL, /_b\.kind === 'page-chars'/);
-  assert.match(VOICECALL, /window\.__pageBindCard\(_b, _pp\)/);
+  // AI 结果必须先等 document-notes 权威仓写入与本地投影完成；只有
+  // persist 明确返回 ok 才能把它当成已绑定，不能先画临时框谎报成功。
+  assert.match(VOICECALL, /await window\.__pageBindPersist\(_b, _pp\)/);
   assert.match(VOICECALL, /__pageBindDefer\(_pendPageBind\.bind/);
   assert.match(BINDCARD, /window\.__pageBindRetry = function \(pageNum\)/);
   // 补绑的触发点必须是**字符层就绪**，不是页面渲染完 ——

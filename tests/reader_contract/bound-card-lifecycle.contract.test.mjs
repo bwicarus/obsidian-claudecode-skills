@@ -133,7 +133,7 @@ test("绑不上时退回浮层而不是丢卡", () => {
   // ⚠ 原来写的是 /if \(okBind\) return true;/ —— 贴着字面量写，
   //   给成功路径加一条 _lastBindOutcome 记录就红了，而行为一点没变。
   //   断言要钉的是「成功即 return」这件事，不是那一行长什么样。
-  assert.match(VOICECALL, /if \(okBind\)[^\n]*return true;/);
+  assert.match(VOICECALL, /if \(okBind\) return _renderInfoResult\(true, 'bound'\);/);
   assert.match(VOICECALL, /那一页还没打开，卡片先放浮层，等页面出现会自己归位/);
 });
 

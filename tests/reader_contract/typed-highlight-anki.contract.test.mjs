@@ -157,8 +157,9 @@ test("PDF exact-text success waits until its saved rectangle is rendered", () =>
 });
 
 test("Realtime output waits for exact highlight and rendered Anki draft", () => {
-  const start = VOICE.indexOf("function _acceptReaderRealtimeOutput");
-  const end = VOICE.indexOf("RC.voicecall =", start);
+  const start = VOICE.indexOf("function _applyReaderRealtimeOutput(delivery)");
+  const end = VOICE.indexOf("function _acceptReaderRealtimeOutput(delivery)", start);
+  assert.ok(start >= 0 && end > start);
   const receiver = VOICE.slice(start, end);
   assert.match(receiver, /delivery\.kind === 'highlight-text'/);
   assert.match(receiver, /__bwReaderHighlightExactText\(p\)/);

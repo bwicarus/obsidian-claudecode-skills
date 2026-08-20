@@ -1642,10 +1642,18 @@
 
   // ── client_action 派发:relay 意图旁路的页面控制指令在**阅读器环境**执行 ──
   function dispatch(fn, args) {
-    if (fn === 'renderVideos') { renderVids((args || [[]])[0] || [], (args || [])[1]); return; }
-    if (fn === 'renderImages') { renderImgs((args || [[]])[0] || []); return; }
-    if (fn === 'renderInfoCard') { renderInfo((args || [{}])[0] || {}); return; }
-    try { if (typeof window[fn] === 'function') window[fn].apply(null, args || []); } catch (e) {}
+    var result;
+    if (fn === 'renderVideos') result = renderVids((args || [[]])[0] || [], (args || [])[1]);
+    else if (fn === 'renderImages') result = renderImgs((args || [[]])[0] || []);
+    else if (fn === 'renderInfoCard') result = renderInfo((args || [{}])[0] || {});
+    else {
+      try { if (typeof window[fn] === 'function') return window[fn].apply(null, args || []); } catch (e) {}
+      return null;
+    }
+    // relay 路径没有 ACK 消费者，但异步落库仍必须有拒绝处理，不能制造
+    // WebKit 的 unhandledrejection。Direct 路径会直接 await renderInfo 的原 Promise。
+    if (result && typeof result.catch === 'function') result.catch(function () {});
+    return result;
   }
   window.__vcDispatch = dispatch;   // 测试/共享层可直接派发结果卡(与 relay client_action 同一条路)
 
@@ -1653,6 +1661,7 @@
   // 外部只交语义化 kind；这里是唯一白名单，避免把旧 dispatch 的 window[fn]
   // 兼容分支扩大成远程脚本入口。
   var _readerOutputSeen = Object.create(null);
+  var _readerOutputPending = Object.create(null);
   var _readerOutputOrder = [];
   function _rememberReaderOutput(id) {
     _readerOutputSeen[id] = 1;
@@ -1767,14 +1776,8 @@
     }
     throw new Error('BW_READER_NAVIGATION_UNAVAILABLE');
   }
-  function _acceptReaderRealtimeOutput(delivery) {
+  function _applyReaderRealtimeOutput(delivery) {
     try {
-      if (!delivery || !delivery.correlation || !delivery.kind) {
-        return Promise.resolve(_readerOutputReject('BW_READER_REALTIME_OUTPUT_INVALID'));
-      }
-      if (_readerOutputSeen[delivery.correlation]) {
-        return Promise.resolve({ outcome: 'replay' });
-      }
       var p = delivery.payload || {}, work;
       if (delivery.kind === 'assistant-turn') {
         if (typeof window.__asstVoiceMsg !== 'function' ||
@@ -1806,23 +1809,23 @@
         });
         work = true;
       } else if (delivery.kind === 'card') {
-        if (!renderInfo(p.card)) {
-          throw new Error('BW_READER_CARD_RENDER_FAILED');
-        }
         // 带 bind 的卡：回执必须说清**钉上了没有**。
-        // 只回 true 的话，"钉在正文上"和"退回浮层"长得一模一样，助手会把
-        // 后者转述成前者 —— 这正是 2026-08-19 那两轮的成因。
+        // 必须等待本地 placement 真正提交；Promise 还在 pending 时不能抢跑回执。
         //
         // 只用两个字段：bindOutcome（枚举）+ bindReason（没钉上时的原因）。
         // 沿途要过 11 道闸/重建点，字段每多一个就多 11 处 —— 而 kind/detail
         // 对助手的下一步决策没有影响，它需要知道的是「钉上了没有、为什么」。
-        var _bo = _lastBindOutcome;
-        work = _bo
-          ? {
-              bindOutcome: _bo.bound ? 'bound' : 'floating',
-              bindReason: _bo.bound ? null : (_bo.why || 'unknown')
-            }
-          : { bindOutcome: 'none', bindReason: null };
+        work = Promise.resolve(renderInfo(p.card, {
+          uid: String(delivery.correlation || '')
+        })).then(function (result) {
+          if (!result || result.rendered !== true) {
+            throw new Error('BW_READER_CARD_RENDER_FAILED');
+          }
+          return {
+            bindOutcome: result.bindOutcome || 'none',
+            bindReason: result.bindReason || null
+          };
+        });
       } else if (delivery.kind === 'navigate') {
         work = _readerOutputNavigate(delivery);
       } else if (delivery.kind === 'highlight') {
@@ -2047,6 +2050,32 @@
     } catch (error) {
       return Promise.resolve(_readerOutputReject(error));
     }
+  }
+  function _acceptReaderRealtimeOutput(delivery) {
+    if (!delivery || !delivery.correlation || !delivery.kind) {
+      return Promise.resolve(_readerOutputReject('BW_READER_REALTIME_OUTPUT_INVALID'));
+    }
+    var correlation = String(delivery.correlation);
+    if (_readerOutputSeen[correlation]) return Promise.resolve({ outcome: 'replay' });
+    // 同一 correlation 在第一次落库尚未完成时可能被桥接层重送。共享同一 Promise，
+    // 既不重复写 placement，也让两个调用者得到同一条真实回执。
+    if (_readerOutputPending[correlation]) return _readerOutputPending[correlation];
+    // Defer the real work by one microtask so the pending entry is installed
+    // before any host/repository callback can synchronously re-enter us.
+    var pending = Promise.resolve().then(function () {
+      return _applyReaderRealtimeOutput(delivery);
+    }).then(
+      function (receipt) {
+        delete _readerOutputPending[correlation];
+        return receipt;
+      },
+      function (error) {
+        delete _readerOutputPending[correlation];
+        return _readerOutputReject(error);
+      }
+    );
+    _readerOutputPending[correlation] = pending;
+    return pending;
   }
   // 把已登记的草稿镜像到当前对话流，与浮层构成同一实体的两个视图。
   //
@@ -3194,28 +3223,33 @@
     _bindPending = rest;
   };
 
-  /// 上一张带 bind 的卡究竟钉上了没有、没钉上是为什么。
-  ///
-  /// 为什么要有它：`renderInfo` 早先只回一个布尔"渲染成功"，而钉上了和
-  /// 退回浮层**都算渲染成功** —— 于是回执一律报"已送达"，助手照实转述成
-  /// 「已绑定」，用户看到的却是没钉上。2026-08-19 用户连问两轮才查清。
-  /// 现在把结果记在这里，由 card 分支放进回执，助手就能说真话。
-  var _lastBindOutcome = null;
+  function _renderInfoResult(rendered, outcome, reason) {
+    return {
+      rendered: rendered === true,
+      bindOutcome: outcome || 'none',
+      bindReason: reason || null
+    };
+  }
 
-  /// 这张卡的色调。唯一对外的取色 API 是 RC.toolChip.styleOf(kind).color。
-  /// 拿不到就兜底成学习卡那个紫 —— 现网所有学习卡都是硬编码的这一个色，
-  /// 而 styleOf('anki') 返回的是绿色，两者本来就对不上（核实记录里那条）。
-  function _bindTone(kind) {
-    try {
-      var s = RC.toolChip && RC.toolChip.styleOf && RC.toolChip.styleOf(kind);
-      if (s && s.color) return s.color;
-    } catch (e) {}
+  /// 词锚卡沿用已经确认过的四类脚注色，而不是工具运行状态色：
+  /// 文字/背景/辨析=紫，考点/出题=蓝，配图/视频=绿，数值=黄。
+  /// `kind` 是结构卡协议字段；旧卡没有单独 category，所以标题只作为兼容判定。
+  function _bindTone(kind, label) {
+    kind = String(kind || '').toLowerCase();
+    label = String(label || '');
+    if (kind === 'images' || kind === 'image' || kind === 'videos' || kind === 'video' ||
+        /配图|图片|图像|视频/.test(label)) return '#34d399';
+    if (kind === 'fact' || kind === 'qa' ||
+        /考点|出题|问答|问题|练习|测试|题目/.test(label)) return '#7dd3fc';
+    if (kind === 'weather' || kind === 'numeric' || kind === 'number' ||
+        /数值|数据|统计|温度|百分比/.test(label)) return '#fbbf24';
     return '#b9a8ff';
   }
 
-  function renderInfo(card) {
-    _lastBindOutcome = null;
-    if (!card || !card.kind) return false;
+  async function renderInfo(card, options) {
+    if (!card || !card.kind) return _renderInfoResult(false);
+    options = options || {};
+    var _bindOutcome = null;
     var label = card.title || '搜索结果';
     var _pendBind = null;   // 绑不上时记下"它想去哪"，浮层卡建出来后一起入列
     var _pendPageBind = null;   // 同上，书页字符锚那条
@@ -3234,15 +3268,15 @@
           label: label
         };
         var okBind = window.__upBindCard(_b.upage, _b.bid, _bp);
-        if (okBind) { _lastBindOutcome = { bound: true, kind: 'upage-block' }; return true; }
-        _lastBindOutcome = { bound: false, kind: 'upage-block', why: 'upage-not-open' };
+        if (okBind) return _renderInfoResult(true, 'bound');
+        _bindOutcome = { outcome: 'floating', reason: 'upage-not-open' };
         // 记下"它想去哪"。那页出现时 __upBindRetry 会把它接回去。
         _pendBind = { upage: _b.upage, bid: _b.bid, payload: _bp, card: null };
         try { RC.toast && RC.toast('那一页还没打开，卡片先放浮层，等页面出现会自己归位'); } catch (e2) {}
       }
       // 书页正文的字符锚（C15 第二版）。跟 upage-block 同一套处置：钉上了就不再
       //   出浮层；钉不上退回浮层并记下想去哪，那页渲染出来时自己归位。
-      if (_b && _b.kind === 'page-chars' && typeof window.__pageBindCard === 'function') {
+      if (_b && _b.kind === 'page-chars') {
         var _pp = {
           isHtml: true,
           raw: _infoHtml(card),
@@ -3251,28 +3285,40 @@
           // 标记按**这张卡的身份**去重，不按它落在哪个词。用区间当身份的话，
           // 同一个词上的第二张卡会把第一张的标记抹掉 —— 而 AI 钉的卡没有
           // 宿主便签兜着，抹掉就是内容彻底失联。
-          uid: card.cid || '',
-          // 标记的边框与角标按这张卡自己的色调走。取法是核实过的那条：
-          // 卡片系统里色调的对外来源就是 RC.toolChip.styleOf(kind).color。
-          // ⚠ 学习卡不在那张色表里（它是硬编码的 #b9a8ff + 🎴），所以取不到时
-          //    兜底成同一个紫，别让它变成 styleOf('anki') 返回的绿 —— 那两个
-          //    在现网就是对不上的。
-          tone: _bindTone(card.kind)
+          uid: card.cid || options.uid || '',
+          category: card.kind || 'general',
+          // 标记、浮标和展开卡共用脚注分类色；kind 是主判据，标题只兼容旧卡。
+          tone: _bindTone(card.kind, label)
         };
-        // ⚠ 返回值现在是 {ok, why, detail}，不是裸布尔。非空对象恒为真，
-        //   写成 `if (window.__pageBindCard(...))` 会把每次失败都判成钉上了。
-        var _pr = window.__pageBindCard(_b, _pp);
-        if (_pr && _pr.ok) { _lastBindOutcome = { bound: true, kind: 'page-chars' }; return true; }
-        _lastBindOutcome = {
-          bound: false,
-          kind: 'page-chars',
-          why: (_pr && _pr.why) || 'unknown',
-          detail: (_pr && _pr.detail) || null
+        // `__pageBindPersist` 只有在 document-notes 权威仓提交并完成本地投影后
+        // 才 resolve ok:true。这里绝不先画临时框再谎报 bound。
+        var _pr = null;
+        if (typeof window.__pageBindPersist === 'function') {
+          try { _pr = await window.__pageBindPersist(_b, _pp); }
+          catch (persistError) {
+            _pr = {
+              ok: false,
+              why: String((persistError && (persistError.code || persistError.message)) ||
+                'persist-failed').slice(0, 120)
+            };
+          }
+        } else _pr = { ok: false, why: 'persistence-unavailable' };
+        if (_pr && _pr.ok === true) return _renderInfoResult(true, 'bound');
+        _bindOutcome = {
+          outcome: 'floating',
+          reason: (_pr && _pr.why) || 'unknown'
         };
         _pendPageBind = { bind: _b, payload: _pp };
         try { RC.toast && RC.toast('那一页还没渲染，卡片先放浮层，翻到时会自己归位'); } catch (e2) {}
       }
-    } catch (e) {}
+    } catch (e) {
+      if (card.bind) {
+        _bindOutcome = {
+          outcome: 'floating',
+          reason: String((e && (e.code || e.message)) || 'bind-failed').slice(0, 120)
+        };
+      }
+    }
     var th = document.getElementById('asst-thread');
     var _hosts = [];
     // 141(轮次容器):结果卡 = 本轮容器里的一个 **card part**。前置语是它前面的 text part,天然同框,
@@ -3345,11 +3391,15 @@
     if (_rendered) {
       _cue('搜索完成');   // 75:仅在卡片实际出现后播放确认音；拒绝回执不能伪装成功
     }
-    return _rendered;
+    return _renderInfoResult(
+      _rendered,
+      _bindOutcome && _bindOutcome.outcome,
+      _bindOutcome && _bindOutcome.reason
+    );
   }
   function renderImgs(imgs) {   // 88:图片结果升格为结构化卡(kind:'images')走 renderInfo 全管线——对话流+浮层同款、落库、回放、✕/单选/溯源
     if (!imgs || !imgs.length) return;
-    renderInfo({
+    return renderInfo({
       kind: 'images', title: '配图 × ' + imgs.length,
       brief: imgs.map(function (im) { return im.title || im.concept || '图'; }).join('、').slice(0, 120),
       data: { items: imgs.filter(function (im) { return im && im.image_url; }).map(function (im) {
@@ -3360,7 +3410,7 @@
   }
   function renderVids(vids, meta) {   // 98(用户设计):视频升格结构卡(kind:'videos')走 renderInfo 全管线——对话流+浮层同款、✕/单选/播放、落库回放、溯源
     if (!vids || !vids.length) return;
-    renderInfo({
+    return renderInfo({
       kind: 'videos', title: '相关视频 × ' + vids.length,
       brief: vids.map(function (v) { return v.title || ''; }).filter(Boolean).slice(0, 4).join('、').slice(0, 120),
       data: { q: (meta && meta.q) || '', items: vids.map(function (v) {

@@ -4288,3 +4288,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：新增旧实现必失败的 Shadow/笔输入合同，Reader Node 全量通过；Chromium 与 WebKit 真实坐标点击同时确认扩展控件命中与宿主页空白穿透，Safari 包构建成功。
 - **发布事实**：提交 `ee128287`；Actions `31876229519` 上传 TestFlight `1.1.58 (320)`，`31876665515` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：未改 Windows/Pi 或 Claude 工具批次；用户安装 build `320` 后分别用 Apple Pencil 和手指验收顶栏按钮、右侧栏 tab 与网页正文滚动。
+
+## Codex：词锚卡片、权威保存与 AI 页上下文发布候选（2026-08-20 JST）
+- **改了什么**：刷新/缩放重建分类色词框与右侧 fixed 浮标轨；正式卡片 body-fixed 顶层展开，关闭叉改为事务删除，成功后同步撤卡、词框和浮标。
+- **存储/AI**：placement 权威落在当前书籍 `document-notes-legacy`，同批生成索引投影；AI 只读权威记录，以完整 `CARD_START/CARD_END` 块注入并在删除后立即重排。
+- **怎么验的**：共享/vendor/reader 生成物重建，Reader Node 全量通过；专项覆盖 EPUB page 0、q/a 旧卡、旧 pump 回灌、重放幂等、窄屏 clamp 与删除墓碑。
+- **已知边界**：Windows handoff/全量 Python 仍命中既有 `fcntl`、Linux 路径/fixture 和本机数据基线；Linux 完整门禁交给 Pi 原子预检，跨设备同语义同时首次创建为非阻断 P2。
+- **发布下一步**：候选版本 WebExt `0.2.122`、App `1.1.68`；本轮直接推送 TestFlight 与 Pi，随后由用户按视觉、刷新/缩放、页边展开和删除/AI 联动清单验收。

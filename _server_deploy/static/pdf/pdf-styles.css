@@ -628,21 +628,23 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 
 /* ── 钉在书页正文上的卡（bind.kind === 'page-chars'，C15 第二版）──
    位置由字符层的 charBoxes 直接给出，跟高亮同一个坐标系：页内绝对定位，
-   页面缩放时整层一起变。**不要** fixed + JS 跟滚 —— 那是便签系统写下的禁令。 */
+   页面缩放时整层一起变。正文框不用 fixed 跟滚；只有右侧轨/展开卡作为视口 UI
+   portal 到 body，分别按框的 BCR 对齐和按 viewport clamp。 */
 /* z-index 排在**所有装饰叠层之上**（振假名 8 / 手写 7 / 译页 9 / 插图 9）。
    那几层都是 pointer-events:none，所以只会**视觉**盖住角标 —— 但角标看不见
    就等于卡片的把手没了（点不中一个看不见的东西）。装饰可以被压住一点，
    把手不能。层本身仍是 none，只有 .pgmark/.pgmark-n 子元素接事件，
    所以不会抢走 char-layer 的查词，也不挡手写。 */
 .pgbind-layer { position: absolute; inset: 0; pointer-events: none; z-index: 10; }
-/* 词锚标记（用户设计 2026-08-20）：给被锚的词描边，**中间不填色**。
+/* 词锚标记（用户设计 2026-08-20）：给被锚的词描边，不用实心填充。
    用户原话：「实际的书中字符可不像你的例子那样有足够的空白位置，这样会盖到
-   其它字符」——标记不能抢正文面积。填色即便走 multiply 也仍然改了字的底色，
-   而扫描书底色本来就不匀；描边完全不碰字像素。
+   其它字符」——标记不能抢正文面积。装饰只留在下半部 9% 极淡渐变、底边分段
+   强调和左上小角饰；仍看得到分类，不会恢复盖字的实心色块。
    ⚠ 边框色由 JS 按卡片色调推出（--pm-b），不是色调原色：原色在纸上只有
    1.6~2.5:1，够不到 WCAG 对图形元素的 3:1。 */
 .pgmark { position: absolute; z-index: 1; pointer-events: auto; cursor: pointer;
-  border: 1.5px solid var(--pm-b); border-radius: 3px; background: transparent;
+  border: 1.5px solid var(--pm-b); border-radius: 3px;
+  background: linear-gradient(180deg,transparent 0 62%,color-mix(in srgb,var(--pm-t) 9%,transparent) 62% 100%);
   /* pan-y:标记盖在正文上,不给它就等于在书页上开了个"滑不动"的洞——手指恰好
      落在带卡的词上时页面不跟手。照抄 .fig-hit 那条(26-figures.js)。
      横滑翻页仍会被吃掉(那是 char-layer 的 touchmove,事件到不了它),
@@ -650,6 +652,12 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
   touch-action: pan-y;
   -webkit-tap-highlight-color: transparent;
   transition: border-color .15s cubic-bezier(.4,0,.2,1), box-shadow .15s cubic-bezier(.4,0,.2,1); }
+.pgmark::before { content:""; position:absolute; left:-2px; top:-2px; width:5px; height:5px;
+  border-left:1.5px solid var(--pm-t); border-top:1.5px solid var(--pm-t);
+  border-radius:2px 0 0 0; pointer-events:none; opacity:.72; }
+.pgmark::after { content:""; position:absolute; left:20%; right:20%; bottom:-2.5px; height:1.5px;
+  border-radius:2px; pointer-events:none; opacity:.72;
+  background:linear-gradient(90deg,var(--pm-t) 0 38%,transparent 38% 62%,var(--pm-t) 62% 100%); }
 .pgmark:hover { box-shadow: 0 0 0 2px var(--pm-h); }
 .pgmark.on { border-color: var(--pm-i); box-shadow: 0 0 0 2.5px var(--pm-h); }
 /* 角标序号：骑在框的右上角外侧，落进行间空隙。
@@ -662,37 +670,32 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
     0 0 4px #fff, 1px 0 2px #fff, -1px 0 2px #fff;
   transition: transform .15s cubic-bezier(.34,1.5,.64,1); }
 .pgmark-n:hover { transform: scale(1.25); }
-.pgbind-card {
-  pointer-events: auto;
-  background: rgba(18, 26, 45, .94);
-  border: 1px solid #2a3550;
-  border-radius: 8px;
-  color: #e6e6f0;
-  font-size: 12.5px;
-  line-height: 1.55;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, .35);
-  overflow: hidden;
-  cursor: pointer;
-  transition: width .18s ease, height .18s ease, border-radius .18s ease;
-}
-.pgbind-card .pgbind-hd {
-  padding: 5px 9px;
-  font-size: 11.5px;
-  color: #8fb4ff;
-  border-bottom: 1px solid #22304d;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.pgbind-card .pgbind-bd { padding: 7px 9px; max-height: 260px; overflow: auto; }
-/* 收起态 = 一颗球，留在锚点上。它的位置本身就是信息：
-   「这一处有过一次纠正」——关掉就把这件事一起丢了。 */
-.pgbind-card.pgbind-dot {
-  width: 26px !important;
-  height: 26px;
-  border-radius: 50%;
-  background: rgba(74, 158, 255, .92);
-  border-color: rgba(74, 158, 255, .6);
-}
-.pgbind-card.pgbind-dot .pgbind-hd,
-.pgbind-card.pgbind-dot .pgbind-bd { display: none; }
+/* 右侧浮标轨：fixed portal 到 body，覆盖 #main 右侧 150px，不给正文增加 padding/栏宽。
+   rail 自身不吃事件，只有编号浮标可点；因此查词、滚动和手写仍由下层正文处理。 */
+.pgbind-rail { position: fixed; width: 150px; pointer-events: none; z-index: 188; opacity:1; }
+.pgbind-rail-view { position: absolute; right: 4px; width: 2px; min-height: 8px;
+  border-radius: 1px; background: rgba(185,168,255,.45); opacity:.38;
+  transition: top .08s linear, height .08s linear, opacity .25s cubic-bezier(.4,0,.2,1); }
+.pgbind-rail.awake .pgbind-rail-view { opacity:.72; }
+.pgbind-rail-dot { position: absolute; right: 16px; padding: 0; margin: 0;
+  transform: translateY(-50%); pointer-events: auto; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  border: .5px solid color-mix(in srgb,var(--pm-t) 68%,#171923);
+  background: color-mix(in srgb,var(--pm-t) 34%,rgba(245,245,250,.72));
+  color: var(--pm-i); font-family: -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",system-ui,sans-serif;
+  font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 0 rgba(255,255,255,.45);
+  box-shadow: 0 2px 9px -3px rgba(0,0,0,.38),0 0 0 .5px rgba(0,0,0,.18);
+  touch-action: pan-y; -webkit-tap-highlight-color: transparent;
+  transition: width .18s cubic-bezier(.4,0,.2,1),height .18s cubic-bezier(.4,0,.2,1),
+    right .22s cubic-bezier(.34,1.5,.64,1),top .2s cubic-bezier(.34,1.5,.64,1),
+    opacity .18s cubic-bezier(.4,0,.2,1),transform .16s cubic-bezier(.34,1.5,.64,1),box-shadow .3s; }
+.pgbind-rail-dot:hover,.pgbind-rail-dot:focus-visible,.pgbind-rail-dot.on { outline: none;
+  box-shadow: 0 3px 12px -2px rgba(0,0,0,.46),0 0 0 1px var(--pm-t); }
+.pgbind-rail-dot:active { transform: translateY(-50%) scale(.9); }
+.pgbind-rail-dot.far { width: 7px !important; height: 7px !important;
+  border-radius: 2.5px !important; opacity: .55; font-size: 0 !important;
+  box-shadow: 0 0 0 .5px rgba(0,0,0,.22); }
+/* 无便签仓的兼容兜底也只能 portal 正式 .vc-card；旧 .pgbind-card 视觉彻底退役。 */
+.pgbind-card-portal { position: fixed; z-index: 190; pointer-events: none; }
+.pgbind-card-portal>.vc-card { pointer-events: auto; }

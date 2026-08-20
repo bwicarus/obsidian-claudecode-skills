@@ -245,7 +245,7 @@ test("pinned video notes keep their durable source but display through the local
 
 test("video play prefers the shared internal player on every Reader host", () => {
   const start = SOURCE.indexOf("function _igWire(root, card)");
-  const end = SOURCE.indexOf("function renderInfo(card)", start);
+  const end = SOURCE.indexOf("async function renderInfo(card, options)", start);
   assert.ok(start >= 0 && end > start);
   const wire = SOURCE.slice(start, end);
   assert.match(wire, /_openVideoRef\(_videoButtonRef\(pb\), vt\.title \|\| ''\)/);

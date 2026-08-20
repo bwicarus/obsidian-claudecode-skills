@@ -13538,9 +13538,9 @@ window._lbClick = _lbClick;
 //
 // ## 坐标系
 //
-// 跟高亮同一套：页内绝对定位，位置由 charBoxes 的 left/top/width/height 直接给出
-// （它们已经是渲染后的 CSS 像素）。**不要**用 fixed + JS 跟滚 —— 那是便签系统早就
-// 写下的禁令（references/sticky-notes-design.md），页面一缩放就散架。
+// 正文框跟高亮同一套：页内绝对定位，位置由 charBoxes 的 left/top/width/height 直接给出
+// （它们已经是渲染后的 CSS 像素），不靠 fixed 跟滚。右侧快捷轨和展开卡是刻意
+// portal 到 body 的视口 UI：前者每帧读正文框 BCR 对齐，后者避免被 page-wrap 裁切。
 //
 // ## 标记的形态（2026-08-20 用户重新定，替换了初版）
 //
@@ -13548,10 +13548,9 @@ window._lbClick = _lbClick;
 // 「圆球过多会遮挡视野」，以及更要命的一条 ——
 // 「实际的书中字符可不像你的例子那样有足够的空白位置，这样会盖到其它字符」。
 //
-// 所以标记**不占正文面积**，改成：给被锚的词**描边**（中间不填色，字像素完全
-// 不被碰）+ 右上角一个**页内序号**；卡片按需点开，一次只开一张。
-// 填色即便走 mix-blend-mode:multiply 也仍然改了字的底色，而扫描书底色本来就
-// 不匀 —— 描边是唯一完全不动原文的做法。
+// 所以标记**不占正文面积**，改成：给被锚的词描边 + 不遮字的下半部极淡渐变/
+// 分段底边小装饰 + 右上角一个**页内序号**；卡片按需点开，一次只开一张。
+// 不恢复实心填充：扫描书底色本来就不匀，重色块会直接盖住字形。
 //
 // 序号是它在**本页**的次序，不是全书连续：位置，不是身份。人和 AI 用同一套，
 // 所以能说「把第 3 个删掉」。加卡/删卡后整页重排（_renumberMarks 每次全量重算）。
@@ -13560,6 +13559,11 @@ window._lbClick = _lbClick;
   'use strict';
 
   var _pageBindPending = [];   // 绑不上的先存着：最常见的失败是"那页还没渲染"
+  var _RAIL_W = 150, _DOT_MIN = 17, _DOT_MAX = 30, _RAIL_EDGE = 18;
+  var _railRaf = 0, _railSleep = 0, _fallbackCard = null;
+  var _BIND_TONES = {
+    text: '#b9a8ff', qa: '#7dd3fc', image: '#34d399', number: '#fbbf24'
+  };
 
   function _stripWs(s) { return String(s || '').replace(/\s+/g, ''); }
 
@@ -13652,7 +13656,29 @@ window._lbClick = _lbClick;
     return lines.length ? lines : null;
   }
 
-  /// 取这张卡的色调，推出边框/角标两个自定义属性。
+  /// 词锚只认四类视觉语义。旧工具卡色值也在这里归一，避免正文框、序号、
+  /// 右侧浮标和展开卡各自沿用一套历史色表。
+  function _bindCategory(payload) {
+    payload = payload || {};
+    var raw = String(payload.category || payload.kind || '').toLowerCase();
+    var label = String(payload.label || '') + ' ' + String(payload.text || '').slice(0, 80);
+    if (/image|images|video|配图|图片|图像|视频/.test(raw + ' ' + label)) return 'image';
+    if (/number|numeric|metric|weather|数值|数字|数据|统计|温度|价格/.test(raw + ' ' + label)) return 'number';
+    if (/qa|question|anki|quiz|问答|考点|出题|题目|学习卡/.test(raw + ' ' + label)) return 'qa';
+    if (/text|文字|背景|辨析|摘要|翻译|解释|新闻/.test(raw + ' ' + label)) return 'text';
+    // rc-toolchip 的旧类型色 → 本设计四类色。只作旧调用方兼容，新调用方应传 category。
+    var old = String(payload.tone || '').toLowerCase();
+    if (old === '#c77dff' || old === '#34d399' || old === '#ff7a59') return 'image';
+    if (old === '#39d98a' || old === '#7dd3fc') return 'qa';
+    if (old === '#2dd4bf' || old === '#fbbf24') return 'number';
+    return 'text';
+  }
+
+  function _bindColor(payload) {
+    return _BIND_TONES[_bindCategory(payload)] || _BIND_TONES.text;
+  }
+
+  /// 取这张卡的分类色调，推出正文框/数字/浮标共用的自定义属性。
   ///
   /// ⚠ 不能直接把色调原色当边框：实测在纸上只有 1.6~2.5:1，够不到 WCAG 对
   ///   图形元素的 3:1（1.5px 细边尤其吃亏）。掺 40% 深底压到 3.4~4.9:1。
@@ -13660,13 +13686,160 @@ window._lbClick = _lbClick;
   ///   SVG 图标**调的，图标靠形状识别 3:1 就够；搬到白纸上的数字实测只有
   ///   1.0~1.4:1（某些色几乎隐形）。
   function _bindTone(payload) {
-    var tc = (payload && payload.tone) || '#b9a8ff';
-    return '--pm-b:color-mix(in srgb,' + tc + ' 60%,#2a2440);' +
+    var tc = _bindColor(payload);
+    return '--pm-t:' + tc + ';' +
+           '--pm-b:color-mix(in srgb,' + tc + ' 60%,#2a2440);' +
            '--pm-i:color-mix(in srgb,' + tc + ' 22%,#14101f);' +
            '--pm-h:color-mix(in srgb,' + tc + ' 30%,transparent);';
   }
 
+  function _scrollAncestor(el) {
+    for (var p = el && el.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+      var s = null; try { s = getComputedStyle(p); } catch (e) {}
+      if (s && /(auto|scroll|overlay)/.test((s.overflowY || '') + ' ' + (s.overflow || ''))) return p;
+    }
+    return document.getElementById('main') || document.scrollingElement || document.documentElement;
+  }
+
+  function _wakeRail(rail) {
+    if (!rail) return;
+    rail.classList.add('awake');
+    clearTimeout(_railSleep);
+    _railSleep = setTimeout(function () { try { rail.classList.remove('awake'); } catch (e) {} }, 1600);
+  }
+
+  function _scheduleRails() {
+    if (_railRaf) return;
+    var raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 0); };
+    _railRaf = raf(function () {
+      _railRaf = 0;
+      var rails = document.querySelectorAll('.pgbind-rail');
+      for (var i = 0; i < rails.length; i++) _layoutRail(rails[i]);
+    });
+  }
+
+  function _destroyRail(rail) {
+    if (!rail) return;
+    var scrollEl = rail.__scrollEl, onMove = rail.__onMove;
+    try { if (scrollEl && onMove) scrollEl.removeEventListener('scroll', onMove); } catch (e) {}
+    try { if (onMove) window.removeEventListener('resize', onMove); } catch (e2) {}
+    try { if (rail.__rootObserver) rail.__rootObserver.disconnect(); } catch (e3) {}
+    try { if (scrollEl && scrollEl.__pgbindRail === rail) scrollEl.__pgbindRail = null; } catch (e4) {}
+    try { rail.remove(); } catch (e5) {}
+  }
+
+  function _railFor(pw) {
+    var scrollEl = _scrollAncestor(pw);
+    if (!scrollEl || !document.body) return null;
+    if (scrollEl.__pgbindRail && scrollEl.__pgbindRail.isConnected) return scrollEl.__pgbindRail;
+    var rail = document.createElement('div');
+    rail.className = 'pgbind-rail';
+    rail.setAttribute('aria-label', '本页卡片快捷入口');
+    var view = document.createElement('div'); view.className = 'pgbind-rail-view';
+    rail.appendChild(view);
+    document.body.appendChild(rail);
+    rail.__scrollEl = scrollEl; rail.__view = view;
+    scrollEl.__pgbindRail = rail;
+    var onMove = function () { _wakeRail(rail); _scheduleRails(); };
+    rail.__onMove = onMove;
+    try { scrollEl.addEventListener('scroll', onMove, { passive: true }); } catch (e) {}
+    try { window.addEventListener('resize', onMove); } catch (e2) {}
+    // #main 被刷新/宿主重建时，旧滚动根不会再发 scroll；监听 DOM 替换后主动
+    // 撤掉 body 上的孤儿 fixed rail 与事件，不等下一次 resize 才收拾。
+    try {
+      if (window.MutationObserver && document.body) {
+        rail.__rootObserver = new MutationObserver(function () {
+          if (!scrollEl.isConnected) _destroyRail(rail);
+        });
+        rail.__rootObserver.observe(document.body, { childList: true, subtree: true });
+      }
+    } catch (e3) {}
+    _wakeRail(rail); _scheduleRails();
+    return rail;
+  }
+
+  function _layoutRail(rail) {
+    var scrollEl = rail && rail.__scrollEl;
+    if (!scrollEl || !scrollEl.isConnected) { _destroyRail(rail); return; }
+    var sr = scrollEl.getBoundingClientRect();
+    var top = Math.max(0, sr.top), bottom = Math.min(window.innerHeight || sr.bottom, sr.bottom);
+    var h = Math.max(0, bottom - top);
+    var padR = 0; try { padR = parseFloat(getComputedStyle(scrollEl).paddingRight) || 0; } catch (e) {}
+    rail.style.left = Math.round(Math.max(sr.left, sr.right - padR - _RAIL_W)) + 'px';
+    rail.style.top = Math.round(top) + 'px';
+    rail.style.width = _RAIL_W + 'px'; rail.style.height = Math.round(h) + 'px';
+    rail.style.display = h > 0 ? '' : 'none';
+
+    var above = [], below = [], near = [];
+    var dots = [].slice.call(rail.querySelectorAll('.pgbind-rail-dot'));
+    for (var i = 0; i < dots.length; i++) {
+      var d = dots[i], a = d.__bwAnchor;
+      if (!a || !a.isConnected) { d.style.display = 'none'; continue; }
+      var ar = a.getBoundingClientRect();
+      if (!ar.width && !ar.height) { d.style.display = 'none'; continue; }
+      d.style.display = '';
+      var cy = ar.top + ar.height / 2 - top;
+      var size = Math.max(_DOT_MIN, Math.min(_DOT_MAX, Math.round(ar.height || _DOT_MIN)));
+      d.__bwCy = cy; d.__bwSize = size;
+      if (cy >= 0 && cy <= h) near.push(d);
+      else if (cy < 0) above.push(d); else below.push(d);
+    }
+    near.sort(function (a, b) { return a.__bwCy - b.__bwCy; });
+    var row = [], lastCy = -1e9;
+    for (var n = 0; n < near.length; n++) {
+      var dot = near[n], size0 = dot.__bwSize;
+      if (Math.abs(dot.__bwCy - lastCy) > Math.max(size0, row.length ? row[0].__bwSize : 0) * 0.6) row = [];
+      row.push(dot); lastCy = dot.__bwCy;
+      dot.classList.remove('far');
+      dot.style.width = size0 + 'px'; dot.style.height = size0 + 'px';
+      dot.style.borderRadius = Math.round(size0 * 0.325) + 'px';
+      dot.style.fontSize = Math.max(9, Math.round(size0 * 0.42)) + 'px';
+      dot.style.top = Math.max(_RAIL_EDGE, Math.min(h - _RAIL_EDGE, dot.__bwCy)) + 'px';
+      // 同行多卡向左排开，保证每个编号都能直接点；不让重叠的顶层按钮吞掉下面那张。
+      dot.style.right = Math.min(_RAIL_W - size0 - 4, 16 + (row.length - 1) * (size0 + 6)) + 'px';
+    }
+    var farPlace = function (arr, lower) {
+      arr.sort(function (a, b) { return a.__bwCy - b.__bwCy; });
+      for (var k = 0; k < arr.length; k++) {
+        var fd = arr[k]; fd.classList.add('far'); fd.style.right = '13px';
+        fd.style.top = (lower
+          ? h - _RAIL_EDGE + 2 + (_RAIL_EDGE - 4) * ((k + 1) / (arr.length + 1))
+          : 2 + (_RAIL_EDGE - 4) * ((k + 1) / (arr.length + 1))) + 'px';
+      }
+    };
+    farPlace(above, false); farPlace(below, true);
+    if (rail.__view) {
+      var total = Math.max(scrollEl.clientHeight || 0, scrollEl.scrollHeight || 0, 1);
+      rail.__view.style.top = ((scrollEl.scrollTop || 0) / total * h) + 'px';
+      rail.__view.style.height = (Math.max(8, (scrollEl.clientHeight || h) / total * h)) + 'px';
+    }
+  }
+
+  function _removeRailMark(key) {
+    var rails = document.querySelectorAll('.pgbind-rail');
+    for (var i = 0; i < rails.length; i++) {
+      var dots = rails[i].querySelectorAll('.pgbind-rail-dot[data-bindkey="' + key + '"]');
+      for (var j = 0; j < dots.length; j++) dots[j].remove();
+      // 最后一张卡删掉后连 2px view 也必须消失；空轨道不是功能入口，
+      // 留着只会像一条来源不明的页面装饰。
+      if (!rails[i].querySelector('.pgbind-rail-dot')) _destroyRail(rails[i]);
+    }
+    _scheduleRails();
+  }
+
+  function _setBindActive(key, on) {
+    var all = document.querySelectorAll('[data-bindkey="' + key + '"]');
+    for (var i = 0; i < all.length; i++) all[i].classList.toggle('on', !!on);
+  }
+
+  function _clearBindActive() {
+    var all = document.querySelectorAll('.pgmark.on,.pgmark-n.on,.pgbind-rail-dot.on');
+    for (var i = 0; i < all.length; i++) all[i].classList.remove('on');
+  }
+
   function _removeMark(layer, key) {
+    _removeRailMark(key);
+    if (_fallbackCard && _fallbackCard.dataset.bindkey === key) _closeFallbackCard();
     var olds = layer.querySelectorAll('[data-bindkey="' + key + '"]');
     for (var i = 0; i < olds.length; i++) {
       try { olds[i].__bwBindTeardown && olds[i].__bwBindTeardown(); } catch (e) {}
@@ -13716,74 +13889,143 @@ window._lbClick = _lbClick;
       //   序号变多位数时也要跟着退，所以这里算、不在建元素时算。
       var wEst = String(ns[i].textContent || '1').length * 5.4 + 1;
       ns[i].style.left = ((parseFloat(ns[i].dataset.bx) || 0) - wEst - dup * (wEst + 2)) + 'px';
+      var rd = document.querySelector('.pgbind-rail-dot[data-bindkey="' + ns[i].dataset.bindkey + '"]');
+      if (rd) {
+        rd.textContent = ns[i].textContent;
+        rd.title = ns[i].title;
+        rd.setAttribute('aria-label', ns[i].title);
+      }
     }
+    _scheduleRails();
   }
 
-  /// 点标记 → 展开卡片；再点一次收起。卡片仍是既有的 .pgbind-card 外观。
-  function _toggleBindCard(layer, key, payload, near) {
-    var exist = layer.querySelector('.pgbind-card[data-bindkey="' + key + '"]');
-    if (exist) {
-      try { exist.__bwBindTeardown && exist.__bwBindTeardown(); } catch (e) {}
-      exist.remove();
-      return;
-    }
-    // 一次只开一张，否则满页都是卡就回到了「圆球遮挡视野」那个老问题
-    var others = layer.querySelectorAll('.pgbind-card');
-    for (var i = 0; i < others.length; i++) {
-      try { others[i].__bwBindTeardown && others[i].__bwBindTeardown(); } catch (e) {}
-      others[i].remove();
-    }
-    var el = document.createElement('div');
-    el.className = 'pgbind-card';
-    el.dataset.bindkey = key;
-    var w = Math.max(near.x1 - near.x0, 180);
-    el.style.cssText =
-      'position:absolute;left:' + near.x0 + 'px;top:' + (near.y1 + 6) + 'px;' +
-      'width:' + w + 'px;z-index:3';   // 层内层级：描边 1 < 角标 2 < 展开的卡 3
-    el.innerHTML = '<div class="pgbind-hd">' +
-      (window.RC && RC.esc ? RC.esc(payload.label || '卡片') : (payload.label || '卡片')) +
-      '</div><div class="pgbind-bd">' +
-      (payload.isHtml ? (payload.raw || '') :
-        (window.RC && RC.esc ? RC.esc(payload.text || '') : (payload.text || ''))) +
-      '</div>';
-    el.addEventListener('click', function (ev) { ev.stopPropagation(); });
-    layer.appendChild(el);
+  function _closeFallbackCard() {
+    if (!_fallbackCard) return;
+    var old = _fallbackCard; _fallbackCard = null;
+    _setBindActive(old.dataset.bindkey || '', false);
+    try { old.remove(); } catch (e) {}
   }
+
+  /// 只有没有持久便签宿主的兼容界面才会走这里。仍然调用 RC.voiceCard.renderInto，
+  /// 并把 host portal 到 body；不再维护第二套 .pgbind-card 视觉。
+  function _toggleBindCard(key, payload, source) {
+    if (_fallbackCard && _fallbackCard.dataset.bindkey === key) { _closeFallbackCard(); return false; }
+    _closeFallbackCard();
+    if (!(window.RC && RC.voiceCard && RC.voiceCard.renderInto) || !document.body) return false;
+    var host = document.createElement('div');
+    host.className = 'pgbind-card-portal'; host.dataset.bindkey = key;
+    host.style.width = Math.min(326, Math.max(120, (window.innerWidth || 360) - 16)) + 'px';
+    document.body.appendChild(host);
+    var card = null;
+    try {
+      card = RC.voiceCard.renderInto(host, {
+        text: payload.isHtml ? (payload.raw || '') : (payload.text || ''),
+        label: payload.label || '卡片', isHtml: !!payload.isHtml,
+        type: _bindColor(payload), icon: payload.icon || '🎴', form: 'full', cid: payload.uid || key
+      });
+    } catch (e) {}
+    if (!card) { host.remove(); return false; }
+    host.addEventListener('click', function (ev) { ev.stopPropagation(); });
+    var sr = source && source.getBoundingClientRect ? source.getBoundingClientRect() : { left: 8, right: 8, top: 8, height: 0 };
+    var cr = host.getBoundingClientRect(), gap = 10, vw = window.innerWidth || 1024, vh = window.innerHeight || 768;
+    var left = sr.left - cr.width - gap;
+    if (left < 8) left = sr.right + gap;
+    left = Math.max(8, Math.min(vw - cr.width - 8, left));
+    var top = Math.max(8, Math.min(vh - cr.height - 8, sr.top + sr.height / 2 - cr.height / 2));
+    host.style.left = left + 'px'; host.style.top = top + 'px';
+    _fallbackCard = host; _setBindActive(key, true);
+    return true;
+  }
+
+  function _resolvePageBind(bind) {
+    if (!bind || bind.kind !== 'page-chars') return { ok: false, why: 'not-page-chars' };
+    var page = parseInt(bind.page, 10);
+    if (!(page > 0)) return { ok: false, why: 'bad-page' };
+    var pw = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
+    if (!pw || pw.dataset.loaded !== '1') return { ok: false, why: 'page-not-rendered', page: page };
+    var boxes = pw.__charBoxes;
+    if (!boxes || !boxes.length) return { ok: false, why: 'no-char-layer', page: page };
+    var range = _resolveRange(boxes, {
+      from: parseInt(bind.from, 10) || 0,
+      to: parseInt(bind.to, 10) || 0,
+      text: bind.text || ''
+    });
+    if (!range) {
+      return {
+        ok: false, why: 'range-unresolved', page: page,
+        detail: {
+          chars: boxes.length,
+          from: parseInt(bind.from, 10) || 0,
+          to: parseInt(bind.to, 10) || 0,
+          wanted: String(bind.text || '').slice(0, 40),
+          gotAtIndex: _textAt(boxes, parseInt(bind.from, 10) || 0,
+                              parseInt(bind.to, 10) || 0).slice(0, 40)
+        }
+      };
+    }
+    var rects = _rangeRects(range);
+    if (!rects) return { ok: false, why: 'no-rect', page: page };
+    return { ok: true, page: page, pw: pw, boxes: boxes, range: range,
+             rects: rects, last: rects[rects.length - 1] };
+  }
+
+  function _bindScreenPoint(g) {
+    var ge = g.pw.__charLayer || g.pw;
+    var gr = ge.getBoundingClientRect();
+    var baseW = g.pw.__charsBaseW || ge.clientWidth || gr.width || 1;
+    var screenK = (gr.width / baseW) || 1;
+    return {
+      x: gr.left + (g.last.x0 + g.last.x1) / 2 * screenK,
+      y: gr.top + (g.last.y0 + g.last.y1) / 2 * screenK
+    };
+  }
+
+  /// AI page-chars 的唯一持久化入口。返回 Promise；只有便签仓完成 create 且
+  /// 本地投影已 upsert 后才 resolve ok:true。rc-voicecall 不得先调 __pageBindCard
+  /// 画临时 DOM 再宣称 bound。
+  window.__pageBindPersist = function (bind, payload) {
+    var g = null;
+    try { g = _resolvePageBind(bind); } catch (e) {
+      return Promise.resolve({ ok: false, why: 'exception', detail: { name: (e && e.name) || '' } });
+    }
+    if (!g || !g.ok) return Promise.resolve(g || { ok: false, why: 'unresolved' });
+    if (!(window.RC && RC.stickynote && typeof RC.stickynote.persistBoundCard === 'function')) {
+      return Promise.resolve({ ok: false, why: 'persistence-unavailable' });
+    }
+    payload = payload || {};
+    var normalized = {
+      uid: payload.uid || '', label: payload.label || '卡片',
+      text: payload.text || '', raw: payload.raw || '', isHtml: !!payload.isHtml,
+      icon: payload.icon || '', category: _bindCategory(payload), tone: _bindColor(payload)
+    };
+    return Promise.resolve(RC.stickynote.persistBoundCard(bind, normalized, _bindScreenPoint(g)))
+      .then(function (result) {
+        if (!result || result.ok !== true) return result || { ok: false, why: 'persistence-failed' };
+        return { ok: true, page: g.page, from: g.range.lo, to: g.range.hi,
+                 noteId: result.noteId || '', persisted: true };
+      }, function (error) {
+        return { ok: false, why: 'persistence-failed',
+                 detail: { name: (error && error.name) || '' } };
+      });
+  };
 
   window.__pageBindCard = function (bind, payload) {
     try {
-      if (!bind || bind.kind !== 'page-chars') return { ok: false, why: 'not-page-chars' };
-      var page = parseInt(bind.page, 10);
-      if (!(page > 0)) return { ok: false, why: 'bad-page' };
-      var pw = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
-      if (!pw || pw.dataset.loaded !== '1') return { ok: false, why: 'page-not-rendered' };
-      var boxes = pw.__charBoxes;
-      if (!boxes || !boxes.length) return { ok: false, why: 'no-char-layer' };
-      var range = _resolveRange(boxes, {
-        from: parseInt(bind.from, 10) || 0,
-        to: parseInt(bind.to, 10) || 0,
-        text: bind.text || ''
-      });
-      // 最常见的一种：文字层换过一份（重新预处理 / 换 OCR 结果），助手拿到的
-      // segments 下标跟当前这份对不上，按下标取出来的字跟 bind.text 不一致。
-      // 把"想要什么"和"这个下标上实际是什么"一起报出去 —— 只说"失败"的话，
-      // 分不清是下标偏了还是压根不是那一页。
-      if (!range) {
-        return {
-          ok: false,
-          why: 'range-unresolved',
-          detail: {
-            chars: boxes.length,
-            from: parseInt(bind.from, 10) || 0,
-            to: parseInt(bind.to, 10) || 0,
-            wanted: String(bind.text || '').slice(0, 40),
-            gotAtIndex: _textAt(boxes, parseInt(bind.from, 10) || 0,
-                                parseInt(bind.to, 10) || 0).slice(0, 40)
-          }
-        };
+      var geom = _resolvePageBind(bind);
+      var uid = (payload && payload.uid) ? String(payload.uid).replace(/[^\w-]/g, '') : '';
+      if (!geom.ok) {
+        if (uid) _removeRailMark('u' + uid);
+        return geom;
       }
-      var rects = _rangeRects(range);
-      if (!rects) return { ok: false, why: 'no-rect' };
+      var page = geom.page, pw = geom.pw, boxes = geom.boxes;
+      var range = geom.range, rects = geom.rects, last = geom.last;
+
+      // 有持久化能力时，AI 直绑必须先走 __pageBindPersist。这里拒绝临时成功，
+      // 防止旧调用方继续把当前 page-wrap 里的短命 DOM 当作已绑定。
+      if (!(payload && typeof payload.onToggle === 'function') &&
+          window.RC && RC.stickynote && typeof RC.stickynote.persistBoundCard === 'function') {
+        return { ok: false, why: 'persistence-required' };
+      }
 
       var layer = (typeof ensurePageLayer === 'function')
         ? ensurePageLayer(pw, 'pgbind-layer') : null;
@@ -13799,17 +14041,17 @@ window._lbClick = _lbClick;
       //     恢复不了（它自己每次都 ok，走不到那条「失败才回到可见」的兜底）。
       //   身份来自调用方：便签传 note.id，AI 传卡片 cid。取不到才退回区间 key
       //   （老数据/没传 uid 的调用方，行为跟以前一样）。
-      var uid = (payload && payload.uid) ? String(payload.uid).replace(/[^\w-]/g, '') : '';
-      var key = uid ? ('u' + uid) : ('b' + range.lo + '_' + range.hi);
+      var key = uid ? ('u' + uid) : ('p' + page + 'b' + range.lo + '_' + range.hi);
       _removeMark(layer, key);
 
-      // ── 标记本体：给被锚的词描边，**不填色** ──────────────────
+      // ── 标记本体：描边 + CSS 极淡下半渐变/分段底线，不用盖字的实心填充 ──
       //   用户 2026-08-20 定：「实际的书中字符可不像你的例子那样有足够的空白
       //   位置，这样会盖到其它字符」——标记不能抢正文面积。填色即使走 multiply
-      //   也仍然改了字的底色，而扫描书底色本来就不匀；描边完全不碰字像素。
+      //   也仍然改了字的底色，而扫描书底色本来就不匀；这里只给 CSS 9% 装饰。
       //   框往外放 PAD，别贴着字形。
       var PAD = 1.5;
       var tone = _bindTone(payload);
+      var lastMark = null;
       for (var r = 0; r < rects.length; r++) {
         var box = rects[r];
         var m = document.createElement('div');
@@ -13820,12 +14062,12 @@ window._lbClick = _lbClick;
           'width:' + (box.x1 - box.x0 + PAD * 2) + 'px;' +
           'height:' + (box.y1 - box.y0 + PAD * 2) + 'px;' + tone;
         layer.appendChild(m);
+        lastMark = m;
       }
 
       // ── 角标序号：骑在最后一段框的右上角外侧，落进行间空隙 ──────
       //   序号是它在**本页**的次序，不是全书连续 —— 位置，不是身份。
       //   人和 AI 用同一套，所以能说「把第 3 个删掉」。
-      var last = rects[rects.length - 1];
       var n = document.createElement('span');
       n.className = 'pgmark-n';
       n.dataset.bindkey = key;
@@ -13835,20 +14077,40 @@ window._lbClick = _lbClick;
         'left:' + (last.x1 + PAD + 1) + 'px;top:' + (last.y0 - PAD - 4) + 'px;' + tone;
       layer.appendChild(n);
 
+      // 右侧 150px 透明浮标轨：覆盖正文，不参与 #main/page-container 布局。
+      // 浮标的纵向位置只读词框实时 BCR，缩放/滚动/去边都自动落在同一视觉中心。
+      var rail = _railFor(pw), dot = null;
+      if (rail) {
+        dot = document.createElement('button'); dot.type = 'button';
+        dot.className = 'pgbind-rail-dot'; dot.dataset.bindkey = key;
+        dot.style.cssText = tone; dot.__bwAnchor = lastMark || n;
+        rail.appendChild(dot); _wakeRail(rail);
+      }
+
       // 卡片本身按需展开；标记与角标都是它的把手
       var open = function (ev) {
         if (ev) ev.stopPropagation();
         // 宿主自己有卡（手动钉的便签就是）→ 把展开交回去，别在这儿另画一个。
         // 用户 2026-08-19：「打开的卡片应该是我们本来设计的卡片而不是你现在这个」。
-        // 内建的 pgbind-card 只服务于 AI 直接钉进来、没有宿主壳的那条路。
-        if (payload && typeof payload.onToggle === 'function') { payload.onToggle(); return; }
-        _toggleBindCard(layer, key, payload, last);
+        _clearBindActive();
+        var source = ev && ev.currentTarget;
+        var on = false;
+        if (payload && typeof payload.onToggle === 'function') {
+          on = !!payload.onToggle({ source: source, bindKey: key, category: _bindCategory(payload) });
+        } else {
+          on = _toggleBindCard(key, payload || {}, source);
+        }
+        _setBindActive(key, on);
       };
       var hs = layer.querySelectorAll('[data-bindkey="' + key + '"]');
       for (var h = 0; h < hs.length; h++) hs[h].addEventListener('click', open);
+      if (dot) {
+        dot.addEventListener('click', open);
+        dot.addEventListener('pointerenter', function () { _wakeRail(rail); });
+      }
 
       _renumberMarks(pw);
-      return { ok: true, page: page, from: range.lo, to: range.hi };
+      return { ok: true, page: page, from: range.lo, to: range.hi, key: key };
     } catch (e) {
       try { console.warn('[bind] __pageBindCard 失败', e); } catch (e2) {}
       return { ok: false, why: 'exception', detail: { name: (e && e.name) || '' } };
@@ -13881,18 +14143,16 @@ window._lbClick = _lbClick;
     try {
       if (!bind || bind.kind !== 'page-chars') return false;
       var page = parseInt(bind.page, 10);
+      var uk = uid ? ('u' + String(uid).replace(/[^\w-]/g, '')) : '';
       var pw = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
-      if (!pw) return false;
+      if (!pw) { if (uk) _removeRailMark(uk); return false; }
       var layer = pw.querySelector('.pgbind-layer');
-      if (!layer) return false;
+      if (!layer) { if (uk) _removeRailMark(uk); return false; }
       // 有身份就直接按身份撤 —— 撤的是**这张卡**的标记，不会误伤同一个词上
       // 的另一张。没有身份（老数据）才退回区间 key，行为跟以前一样。
-      var uk = uid ? ('u' + String(uid).replace(/[^\w-]/g, '')) : '';
       if (uk) {
         var had0 = !!layer.querySelector('[data-bindkey="' + uk + '"]');
         _removeMark(layer, uk);
-        var c0 = layer.querySelector('.pgbind-card[data-bindkey="' + uk + '"]');
-        if (c0) { try { c0.__bwBindTeardown && c0.__bwBindTeardown(); } catch (e) {} c0.remove(); }
         _renumberMarks(pw);
         return had0;
       }
@@ -13906,14 +14166,11 @@ window._lbClick = _lbClick;
           to: parseInt(bind.to, 10) || 0,
           text: bind.text || ''
         });
-        if (rg) key = 'b' + rg.lo + '_' + rg.hi;
+        if (rg) key = 'p' + page + 'b' + rg.lo + '_' + rg.hi;
       }
-      if (!key) key = 'b' + (parseInt(bind.from, 10) || 0) + '_' + (parseInt(bind.to, 10) || 0);
+      if (!key) key = 'p' + page + 'b' + (parseInt(bind.from, 10) || 0) + '_' + (parseInt(bind.to, 10) || 0);
       var had = !!layer.querySelector('[data-bindkey="' + key + '"]');
       _removeMark(layer, key);
-      // 展开着的那张也要收掉
-      var c = layer.querySelector('.pgbind-card[data-bindkey="' + key + '"]');
-      if (c) { try { c.__bwBindTeardown && c.__bwBindTeardown(); } catch (e) {} c.remove(); }
       _renumberMarks(pw);
       return had;
     } catch (e) {
@@ -13924,24 +14181,84 @@ window._lbClick = _lbClick;
 
   /// 绑不上的卡记下来，等那一页真的渲染出来再接回去。
   window.__pageBindDefer = function (bind, payload, card) {
-    _pageBindPending.push({ bind: bind, payload: payload, card: card });
+    payload = payload || {};
+    var uid = payload.uid ? String(payload.uid).replace(/[^\w-]/g, '') : '';
+    var key = uid ? ('u' + uid) : [
+      'p', parseInt(bind && bind.page, 10) || 0,
+      parseInt(bind && bind.from, 10) || 0,
+      parseInt(bind && bind.to, 10) || 0
+    ].join(':');
+    // renderInfo 有「已经建出浮层」和「没有浮层」两个登记出口。同一张 AI 卡
+    // 只能占一个队列项；第二次登记只补 card 引用，不能再发一次 repository create。
+    for (var i = 0; i < _pageBindPending.length; i++) {
+      var old = _pageBindPending[i];
+      if (old.pendingKey !== key) continue;
+      if (!old.card && card) old.card = card;
+      return old;
+    }
+    var item = { bind: bind, payload: payload, card: card, pendingKey: key,
+                 inFlight: null, done: false, lastWhy: '' };
+    _pageBindPending.push(item);
+    return item;
   };
+
+  function _finishPageBindPending(item, result) {
+    item.inFlight = null;
+    if (!result || result.ok !== true) {
+      item.lastWhy = (result && result.why) || 'unknown';
+      return false;
+    }
+    item.done = true;
+    _pageBindPending = _pageBindPending.filter(function (pending) { return pending !== item; });
+    // 权威便签已经 create+upsert（它自己的 _applyWordBind 也已画好标记）之后，
+    // 才能关闭浮层副本；提前关会在仓库失败时把唯一可见内容一起丢掉。
+    try {
+      if (item.card && window.__vcCardClose) window.__vcCardClose(item.card);
+    } catch (e) {}
+    return true;
+  }
 
   window.__pageBindRetry = function (pageNum) {
     if (!_pageBindPending.length) return;
     var rest = [];
     _pageBindPending.forEach(function (item) {
+      if (item.done) return;
       if (parseInt(item.bind.page, 10) !== parseInt(pageNum, 10)) { rest.push(item); return; }
-      // __pageBindCard 现在返回 {ok, why}，不是裸布尔 —— 非空对象恒为真，
-      // 直接当条件用会把每次失败都判成成功。
-      var res = null;
-      try { res = window.__pageBindCard(item.bind, item.payload); } catch (e) {}
-      if (!res || !res.ok) { rest.push(item); return; }
-      // 补上了就把浮层那份关掉，否则同一内容两处并存。
+      if (item.inFlight) { rest.push(item); return; }
+
+      if (item.payload && typeof item.payload.onToggle === 'function') {
+        // 已经在 document-notes 里的手动/历史便签只需重画短命 DOM；它有宿主真卡，
+        // 不应再 create 一份 HTML 便签。
+        var res = null;
+        try { res = window.__pageBindCard(item.bind, item.payload); } catch (e) {}
+        if (!res || !res.ok) { item.lastWhy = (res && res.why) || 'unknown'; rest.push(item); return; }
+        _finishPageBindPending(item, res);
+        return;
+      }
+
+      // AI payload 没有持久宿主。启用 persistence-required 后再调 __pageBindCard
+      // 只会稳定返回失败；必须重走唯一的 Promise 持久化入口。同一 item 的 inFlight
+      // 是重入闸，persistBoundCard 内再按 uid+词区间做跨调用幂等。
+      rest.push(item);
+      if (typeof window.__pageBindPersist !== 'function') {
+        item.lastWhy = 'persistence-unavailable';
+        return;
+      }
       try {
-        if (item.card && window.__vcCardClose) window.__vcCardClose(item.card);
-      } catch (e) {}
+        item.inFlight = Promise.resolve(window.__pageBindPersist(item.bind, item.payload));
+      } catch (e2) {
+        item.lastWhy = 'persistence-failed';
+        item.inFlight = null;
+        return;
+      }
+      item.inFlight.then(function (result) {
+        _finishPageBindPending(item, result);
+      }, function () {
+        item.inFlight = null;
+        item.lastWhy = 'persistence-failed';
+      });
     });
-    _pageBindPending = rest;
+    // 异步成功回调会按对象身份再过滤一次；这里保留 inFlight 项供后续触发看见闸门。
+    _pageBindPending = rest.filter(function (item) { return !item.done; });
   };
 })();

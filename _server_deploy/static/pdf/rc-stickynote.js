@@ -98,6 +98,8 @@
   var _unsubscribe = null;
   var _writeQueues = Object.create(null);   // noteId -> Promise；同一便签严格串行写
   var _seenRevs = Object.create(null);      // CHANGE 先于 LIST/RESULT 时阻止旧快照回灌
+  var _boundCardWrites = Object.create(null);   // document+sourceUid+词区间 -> 稳定 create intent；结果未知也复用同一事务
+  var _wordPortalBound = false, _wordPortalRaf = 0;
   var _mutationSeq = 0;
 
   function toastMsg(m) {
@@ -235,6 +237,14 @@
       '.rc-note.rc-note-hascard .rc-note-handle::after,.rc-note.rc-note-hashtml .rc-note-handle::after{display:none}',
       '.rc-note.rc-note-hascard .rc-note-body,.rc-note.rc-note-hashtml .rc-note-body{margin-top:0;border:none!important;box-shadow:none!important;background:transparent!important;border-radius:16px}',
       '.rc-note.rc-note-hascard .rc-note-rs,.rc-note.rc-note-hascard .rc-note-rs-tl,.rc-note.rc-note-hascard .rc-note-del,.rc-note.rc-note-hashtml .rc-note-rs,.rc-note.rc-note-hashtml .rc-note-rs-tl,.rc-note.rc-note-hashtml .rc-note-del{display:none!important}',   // 白圆手柄/外部✕不属于卡观感；删卡只走拖到左上角大投放区
+      // 词锚展开卡是例外：右上角明确给垃圾桶删除按钮，不再用“关闭 ✕”造成
+      // 只是收起还是删除的歧义。只覆盖 word-open，不改变普通卡/便签既有交互。
+      '.rc-note.rc-note-word-open .rc-note-del{display:flex!important;top:5px;right:5px;z-index:30;width:26px;height:26px;background:rgba(64,35,42,.82);color:#ffd8de}',
+      '.rc-note.rc-note-word-open .rc-note-del:hover{background:rgba(102,41,52,.94)}',
+      '.rc-note.rc-note-word-open .rc-note-del:disabled{opacity:.55;cursor:wait}',
+      // fixed 只逃出 overflow，不会自动让 720px 用户尺寸塞进窄分屏；展开态
+      // 额外受视口 max-width 约束，收起时由 JS 清掉，不改持久 w/h。
+      '.rc-note.rc-note-word-portaled,.rc-note.rc-note-word-portaled .rc-note-body{max-width:calc(100vw - 16px)}',
       // 拖动锚定反馈(用户设计 2026-07-21 #51):拖动时实时标出将绑定的位置——
       //   光带=命中内容(锚到这段);横线=空白/clamp(内容插入位置,排到上方内容之后)。iOS 蓝,美观优先。
       '.rc-anchor-fx{position:absolute;pointer-events:none;z-index:60;transition:top .06s linear,left .06s linear,width .06s linear}',
@@ -346,6 +356,15 @@
     return 'rc-note:' + kind + ':' + String(noteId || 'new') + ':' + random;
   }
   function noteIdOf(note) { return String(note && (note.noteId || note.id) || ''); }
+  function wordBindSlot(note) {
+    if (note && note.card && note.card.bind && note.card.bind.kind === 'page-chars') return 'card';
+    if (note && note.html && note.html.bind && note.html.bind.kind === 'page-chars') return 'html';
+    return '';
+  }
+  function wordBindOf(note) {
+    var slot = wordBindSlot(note);
+    return slot ? note[slot].bind : null;
+  }
   function noteIndex(noteId) {
     for (var i = 0; i < notes.length; i++) if (noteIdOf(notes[i]) === noteId) return i;
     return -1;
@@ -358,10 +377,12 @@
     var ctl = ctls[noteId];
     if (ctl) {
       try { if (EDIT && EDIT.ctl === ctl) exitEdit(); } catch (_) {}
+      unobserveWordPortal(ctl);
+      clearWordViewportLimits(ctl);
       // 词锚的描边和序号在另一个层里,光删便签自己的 DOM 不够 ——
       // 不撤会永远留在页上,而且**后面所有序号都错位**(序号是位置不是身份)。
       try {
-        var _b = ctl.note && ctl.note.card && ctl.note.card.bind;
+        var _b = wordBindOf(ctl.note);
         if (_b && window.__pageBindRemove) window.__pageBindRemove(_b, ctl.note.id);
       } catch (_) {}
       try { ctl.root.remove(); } catch (_) {}
@@ -483,14 +504,20 @@
       return data.notes || [];
     });
   }
-  function ioCreate(fields, generation) {
+  function ioCreate(fields, generation, createIdentity) {
     if (repoMode()) {
       if (!repoReady()) return Promise.reject(new Error('便签 repository 合同不完整'));
-      return Promise.resolve(O.repository.newId()).then(function (noteId) {
+      var noteIdPromise = createIdentity && createIdentity.noteId
+        ? Promise.resolve(createIdentity.noteId)
+        : Promise.resolve(O.repository.newId());
+      return noteIdPromise.then(function (noteId) {
         if (generation !== _generation) throw staleError();
         var input = { documentId: O.documentId, noteId: noteId };
         for (var key in fields) if (Object.prototype.hasOwnProperty.call(fields, key)) input[key] = cloneValue(fields[key]);
-        var mid = mutationId('create', noteId);
+        // AI 词锚卡遇到「仓库已提交、回执超时」时必须以同一个 noteId +
+        // mutationId 重放；换一个 ID 会把一次未知结果扩大成两张持久卡。
+        var mid = createIdentity && createIdentity.mutationId
+          ? createIdentity.mutationId : mutationId('create', noteId);
         return O.repository.create(input, { mutationId: mid });
       });
     }
@@ -552,7 +579,15 @@
           mutationId: mid
         });
       }).then(function (result) {
+        // remove 的 HTTP/transport 成功不等于业务删除成功。只有同 document、
+        // 同 noteId 的 tombstone 真正进入本地投影后才允许 UI 撤框/撤轨。
+        if (generation !== _generation) throw staleError();
+        if (!result || result.deleted !== true || noteIdOf(result) !== id || !O ||
+            String(result.documentId || '') !== String(O.documentId || '')) {
+          throw new Error('便签删除响应无效');
+        }
         upsertRecord(result, generation);
+        if (generation !== _generation || currentNote(id)) throw new Error('便签删除墓碑未生效');
         return true;
       });
     } else {
@@ -770,6 +805,32 @@
       return lines.join('\n');
     }).join('\n\n');
   }
+  var WORD_CARD_TONES = {
+    text: '#b9a8ff', qa: '#7dd3fc', image: '#34d399', number: '#fbbf24'
+  };
+  function wordCardCategory(value, label, oldTone, fallback) {
+    var raw = String(value || '').toLowerCase();
+    var text = raw + ' ' + String(label || '');
+    if (/image|images|video|配图|图片|图像|视频/.test(text)) return 'image';
+    if (/number|numeric|metric|weather|数值|数字|数据|统计|温度|价格/.test(text)) return 'number';
+    if (/qa|question|anki|quiz|问答|考点|出题|题目|学习卡/.test(text)) return 'qa';
+    if (/text|文字|背景|辨析|摘要|翻译|解释|新闻/.test(text)) return 'text';
+    var old = String(oldTone || '').toLowerCase();
+    if (old === '#c77dff' || old === '#34d399' || old === '#ff7a59') return 'image';
+    if (old === '#39d98a' || old === '#7dd3fc') return 'qa';
+    if (old === '#2dd4bf' || old === '#fbbf24') return 'number';
+    return fallback || 'text';
+  }
+  function wordCardPresentation(note) {
+    var slot = wordBindSlot(note), data = slot ? note[slot] : null;
+    if (!data) return { slot: '', bind: null, category: 'text', tone: WORD_CARD_TONES.text, label: '卡片', icon: '🎴' };
+    var label = slot === 'card' ? '🎴 卡片' : (data.label || '卡片');
+    // 学习卡的结构本身就是问答；通用 HTML 卡才默认文字。
+    var category = wordCardCategory(data.category || data.kind, label, data.type, slot === 'card' ? 'qa' : 'text');
+    return { slot: slot, bind: data.bind, category: category,
+             tone: WORD_CARD_TONES[category] || WORD_CARD_TONES.text,
+             label: label, icon: data.icon || (category === 'image' ? '▧' : (category === 'number' ? '#' : (category === 'qa' ? '?' : '¶'))) };
+  }
   function resolveCardSnapshot(cardsOrGetter) {
     var cards = cardsOrGetter;
     try {
@@ -903,7 +964,7 @@
     };
     try {
       if (window.RC && RC.voiceCard && RC.voiceCard.renderInto)
-        cardEl = RC.voiceCard.renderInto(box, { text: null, label: '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''), isHtml: false, type: card.type || '#b9a8ff', icon: '🎴', form: card.form, cid: card.cid || card.gid,
+        cardEl = RC.voiceCard.renderInto(box, { text: null, label: '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''), isHtml: false, type: card.bind ? wordCardPresentation(ctl.note).tone : (card.type || '#b9a8ff'), icon: '🎴', form: card.form, cid: card.cid || card.gid,
           onSize: function (size) {
             ctl._cardPresentationSize = size || null;
             try { ctl.body.style.width = _formW(ctl, card.form); } catch (_) {}
@@ -960,7 +1021,7 @@
     var done = false, el2 = null;
     try {
       if (window.RC && RC.voiceCard && RC.voiceCard.renderInto)
-        el2 = RC.voiceCard.renderInto(box, { text: h.content, label: h.label || '卡片', isHtml: !!h.isHtml, type: h.type, icon: h.icon, form: h.form, cid: h.cid,
+        el2 = RC.voiceCard.renderInto(box, { text: h.content, label: h.label || '卡片', isHtml: !!h.isHtml, type: h.bind ? wordCardPresentation(ctl.note).tone : h.type, icon: h.icon, form: h.form, cid: h.cid,
           onSize: function (size) {
             ctl._cardPresentationSize = size || null;
             try {
@@ -1005,13 +1066,37 @@
     setNoteVideo(ctl, id);
   }
 
+  var WORD_DELETE_ICON = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 4.5h9M6 2.8h4M5 4.5l.45 8h5.1l.45-8M6.8 6.5v4M9.2 6.5v4"/></svg>';
+  function setWordDeleteUi(ctl, on) {
+    if (!ctl || !ctl.del) return;
+    if (on) {
+      if (ctl.del.__normalHtml == null) ctl.del.__normalHtml = ctl.del.innerHTML;
+      ctl.del.innerHTML = WORD_DELETE_ICON;
+      ctl.del.title = '删除这张卡片';
+      ctl.del.setAttribute('aria-label', '删除这张卡片');
+    } else if (ctl.del.__normalHtml != null) {
+      ctl.del.innerHTML = ctl.del.__normalHtml;
+      ctl.del.title = '删除便签';
+      ctl.del.setAttribute('aria-label', '删除便签');
+      ctl.del.disabled = false;
+    }
+  }
+
   function bindCtl(ctl) {
     // 🗑 删除(EDIT 模式出现;confirm 后 DELETE)
     ctl.del.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
     ctl.del.addEventListener('click', function (e) {
       e.stopPropagation(); e.preventDefault();
-      if (!window.confirm('删除这张便签？')) return;
-      deleteNote(ctl.note, '🗑 便签已删除');
+      var wordCard = !!(ctl._bindOpen && wordBindOf(ctl.note));
+      if (!window.confirm(wordCard ? '删除这张卡片？' : '删除这张便签？')) return;
+      ctl.del.disabled = true;
+      deleteNote(ctl.note, wordCard ? '🗑 卡片已删除' : '🗑 便签已删除').then(function (ok) {
+        // 成功时 removeLocal 已经撤掉正文框、右侧浮标与卡片 DOM；只有失败
+        // 才会回到这里恢复按钮，卡片继续保持展开，不能先乐观收起。
+        if (ok !== true && ctl.del) ctl.del.disabled = false;
+      }).catch(function () {
+        if (ctl.del) ctl.del.disabled = false;
+      });
     });
     // handle:长按 lpMs() 进 EDIT(与 body 长按同一入口);EDIT 模式下按下即拖(移动便签)
     ctl.handle.addEventListener('pointerdown', function (e) { onHandleDown(ctl, e); });
@@ -1042,7 +1127,7 @@
   //   {el, left, top, anchor?} —— left/top 为容器内**像素**(PDF=x·clientWidth/y·clientHeight,行为等价旧 %;
   //   EPUB=内容锚 off→字符 rect→section 内像素+dx/dy);anchor 字段=host 懒迁移升级后的新锚(旧 x/y 比例锚 →
   //   内容锚),组件负责 PATCH 落库。旧契约({el,w,h} 无 left/top)兼容:组件退回自算 x/y 百分比。
-  // ─────────────────────────── 展开态置顶浮层(portal 到滚动容器内的叠加层)───────────────────────────
+  // ─────────────────────────── 展开态置顶浮层───────────────────────────
   // 根因:PDF 单页/连续缩放靠祖先 CSS zoom 撑大,zoom≠1 在 Chrome/Safari 造层叠上下文,把 absolute-in-page-wrap
   //   的便签困死其中 → z-index 再高也冲不出侧栏(120)。
   // 解法:展开时把便签搬到「滚动容器(PDF #main / EPUB 滚动祖先)内部」的叠加层 .rc-note-overlay
@@ -1050,6 +1135,8 @@
   //   便签在叠加层里 absolute 定位 → 随容器**原生滚动**(零 JS 跟滚抖动),又因叠加层不在被 zoom 的 page-container 内
   //   而逃出层叠陷阱。page-wrap 内留 0×0 占位:reflow/缩放/侧栏开关后 repositionPortaled 读占位屏幕位重算便签坐标
   //   (原生滚动不需此步,故不绑 scroll)。折叠即回内容锚。
+  // 词锚展开卡更严格：页边/底部也不能被 #main overflow 截断，因此另走
+  // wordPortalIn → body fixed，并在 scroll/resize 时按词框 BCR + viewport clamp 重排。
   function scrollAncestor(el) {
     for (var p = el && el.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
       var s; try { s = getComputedStyle(p); } catch (e) { continue; }
@@ -1114,14 +1201,133 @@
     ctl.root.style.left = c.x + 'px'; ctl.root.style.top = c.y + 'px';
     ctl.root.classList.add('rc-note-portaled');
   }
+  // 词锚展开卡必须逃出 #main/page-wrap 的 overflow 与 zoom。通用 portalIn 仍在
+  // 滚动容器里，页边/底部会被裁；这一条专门直挂 body，用 fixed 视口坐标。
+  function wordPortalIn(ctl) {
+    if (!ctl || ctl.portaled || ctl.note.collapsed || !ctl.root.isConnected || !document.body) return;
+    var home = ctl.root.parentElement;
+    var noteRect = ctl.root.getBoundingClientRect();
+    if (!noteRect.width && !noteRect.height) return;
+    attachPlaceholder(ctl);
+    ctl.portaled = true; ctl._wordFixedPortal = true;
+    ctl._scrollEl = ctl._scrollEl || scrollAncestor(home);
+    document.body.appendChild(ctl.root);
+    ctl.root.style.position = 'fixed';
+    ctl.root.style.left = Math.round(noteRect.left) + 'px';
+    ctl.root.style.top = Math.round(noteRect.top) + 'px';
+    ctl.root.style.zIndex = '190';
+    ctl.root.classList.add('rc-note-portaled', 'rc-note-word-portaled');
+    bindWordPortalTracking();
+    observeWordPortal(ctl);
+  }
   function portalOut(ctl) {
     if (!ctl || !ctl.portaled) return;
+    unobserveWordPortal(ctl);
+    clearWordViewportLimits(ctl);
     ctl.portaled = false;
-    ctl.root.classList.remove('rc-note-portaled');
-    ctl.root.style.position = ''; ctl.root.style.left = ''; ctl.root.style.top = '';
+    ctl._wordFixedPortal = false;
+    ctl.root.classList.remove('rc-note-portaled', 'rc-note-word-portaled');
+    ctl.root.style.position = ''; ctl.root.style.left = ''; ctl.root.style.top = ''; ctl.root.style.zIndex = '';
     if (ctl._ph) { try { ctl._ph.remove(); } catch (e) {} ctl._ph = null; }
     ctl._scrollEl = null;
     try { ensureMounted(ctl.note); } catch (e) {}   // 回内容锚(容器没了→卸下待 mountPending 补挂)
+  }
+  function _moveWordCardByScreen(ctl, left, top) {
+    if (!ctl || !ctl.portaled) return;
+    var r = ctl.root.getBoundingClientRect();
+    ctl.root.style.left = ((parseFloat(ctl.root.style.left) || 0) + left - r.left) + 'px';
+    ctl.root.style.top = ((parseFloat(ctl.root.style.top) || 0) + top - r.top) + 'px';
+  }
+  function clearWordViewportLimits(ctl) {
+    if (!ctl) return;
+    try { ctl.root.style.removeProperty('max-width'); } catch (_) {}
+    try { if (ctl.body) ctl.body.style.removeProperty('max-width'); } catch (_) {}
+    try {
+      var card = ctl.root.querySelector('.vc-card');
+      if (card) { card.style.removeProperty('max-width'); card.style.removeProperty('max-height'); }
+    } catch (_) {}
+  }
+  function unobserveWordPortal(ctl) {
+    if (!ctl || !ctl._wordPortalObserver) return;
+    try { ctl._wordPortalObserver.disconnect(); } catch (_) {}
+    ctl._wordPortalObserver = null;
+  }
+  function observeWordPortal(ctl) {
+    if (!ctl || !window.ResizeObserver || ctl._wordPortalObserver) return;
+    try {
+      ctl._wordPortalObserver = new window.ResizeObserver(function () {
+        if (ctl._bindOpen && ctl._wordFixedPortal) scheduleWordPortalPlacement();
+      });
+      ctl._wordPortalObserver.observe(ctl.root);
+    } catch (_) { ctl._wordPortalObserver = null; }
+  }
+  function _clampWordCard(ctl) {
+    if (!ctl || !ctl.portaled || !ctl._bindOpen) return;
+    var probe = ctl.root.getBoundingClientRect();
+    var vw = window.innerWidth || document.documentElement.clientWidth || probe.right;
+    var vh = window.innerHeight || document.documentElement.clientHeight || probe.bottom;
+    var gap = 8, maxW = Math.max(120, vw - gap * 2), maxH = Math.max(96, vh - gap * 2);
+    // 只钳视觉尺寸，不改 note.w/h。vc-user-sized 的 width 是 !important，
+    // 因此 max-width 也显式 important；正文已有 overflow-y:auto。
+    try { ctl.root.style.maxWidth = maxW + 'px'; } catch (_) {}
+    try { if (ctl.body) ctl.body.style.maxWidth = maxW + 'px'; } catch (_) {}
+    try {
+      var card = ctl.root.querySelector('.vc-card');
+      if (card) {
+        card.style.setProperty('max-width', maxW + 'px', 'important');
+        var naturalMaxH = card.classList.contains('vc-user-sized')
+          ? maxH : Math.min(maxH, Math.max(96, Math.round(vh * 0.36)));
+        card.style.setProperty('max-height', naturalMaxH + 'px', 'important');
+      }
+    } catch (_) {}
+    var r = ctl.root.getBoundingClientRect();
+    var left = r.left, top = r.top;
+    if (r.right > vw - gap) left -= r.right - (vw - gap);
+    if (left < gap) left = gap;
+    if (r.bottom > vh - gap) top -= r.bottom - (vh - gap);
+    if (top < gap) top = gap;
+    _moveWordCardByScreen(ctl, left, top);
+  }
+  function _wordSource(ctl, preferred) {
+    if (preferred && preferred.isConnected && preferred.getBoundingClientRect) return preferred;
+    if (!ctl || !ctl._bindKey) return null;
+    var q = ctl._bindSourceKind === 'rail' ? '.pgbind-rail-dot' : '.pgmark';
+    try { return document.querySelector(q + '[data-bindkey="' + ctl._bindKey + '"]'); } catch (_) { return null; }
+  }
+  function _placeWordCard(ctl, source, skipFrame) {
+    if (!ctl || !ctl.portaled || !ctl._bindOpen) return;
+    source = _wordSource(ctl, source);
+    if (source) {
+      ctl._bindSourceKind = source.classList && source.classList.contains('pgbind-rail-dot') ? 'rail' : 'word';
+      var sr = source.getBoundingClientRect(), cr = ctl.root.getBoundingClientRect(), gap = 10;
+      var vw = window.innerWidth || 1024;
+      var left = ctl._bindSourceKind === 'rail' ? sr.left - cr.width - gap : sr.right + gap;
+      if (left + cr.width > vw - 8) left = sr.left - cr.width - gap;
+      var top = sr.top + sr.height / 2 - cr.height / 2;
+      _moveWordCardByScreen(ctl, left, top);
+    }
+    _clampWordCard(ctl);
+    if (!skipFrame) {
+      var raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 0); };
+      raf(function () { if (ctl._bindOpen && ctl.portaled) _placeWordCard(ctl, null, true); });
+    }
+  }
+  function scheduleWordPortalPlacement() {
+    if (_wordPortalRaf) return;
+    var raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 0); };
+    _wordPortalRaf = raf(function () {
+      _wordPortalRaf = 0;
+      for (var id in ctls) {
+        var ctl = ctls[id];
+        if (ctl && ctl._bindOpen && ctl._wordFixedPortal) _placeWordCard(ctl, null, true);
+      }
+    });
+  }
+  function bindWordPortalTracking() {
+    if (_wordPortalBound) return;
+    _wordPortalBound = true;
+    try { document.addEventListener('scroll', scheduleWordPortalPlacement, { passive: true, capture: true }); } catch (e) {}
+    try { window.addEventListener('resize', scheduleWordPortalPlacement); } catch (e2) {}
   }
   // reflow/缩放/侧栏开关后:portaled 便签读占位当前屏幕位 → 重算叠加层坐标
   function repositionPortaled() {
@@ -1131,9 +1337,17 @@
       if (_hd && _hd.dragging && _hd.ctl === ctl) continue;   // #51 S1:拖动中的便签不被异步重渲重定位(消除"拖动期间 root.left 被 mountAll 改写"→松手落点偏移的竞态)
       if (!ctl._ph || !ctl._ph.isConnected) { attachPlaceholder(ctl); }   // 页重渲冲掉占位 → 在新容器补挂
       if (!ctl._ph || !ctl._ph.isConnected) continue;   // 锚页未挂载(滚出) → 保持原坐标,展开浮层不消失
+      // 展开中的词锚卡被 page-wrap 重建时 ensureMounted 会被 portaled 守卫跳过；
+      // 这里必须单独重画正文框和右侧浮标，否则缩放后卡还在、两个入口却消失。
+      if (ctl._bindOpen) _applyWordBind(ctl);
+      if (ctl._wordFixedPortal) {
+        if (ctl._bindOpen) _placeWordCard(ctl, null, true);
+        continue;
+      }
       var pr = ctl._ph.getBoundingClientRect();
       var c = _contentXY(ctl._scrollEl, pr.left, pr.top);
       ctl.root.style.left = c.x + 'px'; ctl.root.style.top = c.y + 'px';
+      if (ctl._bindOpen) _placeWordCard(ctl, null, true);
     }
   }
   function ensureMounted(note) {
@@ -1165,14 +1379,15 @@
     return true;
   }
 
-  /// 拖动落点重新求词锚。返回 true 表示 card.bind 换了（调用方要把 card 一起落库）。
+  /// 拖动落点重新求词锚。返回 card/html 槽名表示 bind 换了（调用方把该槽一起落库）。
   /// 拿不到词（拖到空白/图区/页缝）就**撤掉词锚退回普通便签** —— 比留一个
   /// 指向别处的旧 bind 好：旧 bind 会让标记停在原地，看着像卡片分身。
   /// ⚠ cx/cy 必须是**加过 shift 的落点**，跟同一处 reanchorAt 用的是同一个点：
   ///   r0 是撤掉 transform 之后的矩形（= 拖动前的位置），直接拿它去探测
   ///   等于锚回原处，而 anchor 已经按落点更新了 —— 两者从此指向不同的地方。
   function _rebindWord(ctl, cx, cy) {
-    var old = ctl.note && ctl.note.card && ctl.note.card.bind;
+    var slot = wordBindSlot(ctl.note);
+    var old = slot ? ctl.note[slot].bind : null;
     if (!old) return false;   // 本来就不是词锚卡，不管
     if (cx == null || cy == null) return false;   // 没真拖动（shift=0）→ 不重锚
     var wr = null;
@@ -1187,10 +1402,10 @@
       : null;
     if (nb && nb.page === old.page && nb.from === old.from && nb.to === old.to) return false;
     try { if (window.__pageBindRemove) window.__pageBindRemove(old, ctl.note.id); } catch (e) {}
-    ctl.note.card.bind = nb;
+    ctl.note[slot].bind = nb;
     ctl._bindMarked = false;
     if (!nb) ctl.root.style.display = '';   // 退回普通便签，别把卡藏没了
-    return true;
+    return slot;
   }
 
   // ── 词锚便签：正文里显示成「词描边 + 右上角序号」，点词才展开真卡 ──────
@@ -1201,7 +1416,8 @@
   //   这里只做两件事 —— 画标记、把便签默认收起来。绑不上时（页没渲染出来、
   //   文字层换过）**原样显示便签**，不制造「卡不见了」。
   function _applyWordBind(ctl) {
-    var b = ctl.note && ctl.note.card && ctl.note.card.bind;
+    var presentation = wordCardPresentation(ctl.note);
+    var b = presentation.bind;
     if (!b || !window.__pageBindCard) return;
     // ⚠ 先藏起来再试。挂载点是 04-render.js 的 dataset.loaded='1'，那时
     //   `wrap.__charBoxes` 还没挂上（08-charlayer 的 fetch 是异步的），
@@ -1218,20 +1434,49 @@
         // 第二张卡会把第一张的标记删掉，而第一张此时已 display:none，从此
         // 看不见也点不开（且它自己每次都 ok，走不到下面那条恢复分支）。
         uid: ctl.note.id,
-        label: '🎴 卡片',
-        onToggle: function () {
-          ctl._bindOpen = !ctl._bindOpen;
-          ctl.root.style.display = ctl._bindOpen ? '' : 'none';
+        label: presentation.label, category: presentation.category,
+        tone: presentation.tone, icon: presentation.icon,
+        onToggle: function (meta) {
+          if (ctl._bindOpen) {
+            ctl._bindOpen = false;
+            ctl.root.classList.remove('rc-note-word-open');
+            ctl.root.style.display = 'none';
+            setWordDeleteUi(ctl, false);
+            if (ctl.portaled) portalOut(ctl);
+            return false;
+          }
+          // 一次只展开一张。别只 portalOut 其它卡：那会保留 _bindOpen=true，
+          // ensureMounted 随即又把它显示回来。
+          for (var id in ctls) {
+            var other = ctls[id];
+            if (!other || other === ctl || !other._bindOpen) continue;
+            other._bindOpen = false; other.root.classList.remove('rc-note-word-open');
+            other.root.style.display = 'none';
+            setWordDeleteUi(other, false);
+            if (other.portaled) portalOut(other);
+          }
+          ctl._bindOpen = true;
+          ctl.root.classList.add('rc-note-word-open');
+          ctl.root.style.display = '';
           // 卡是在 display:none 里 mount 的 —— 那时 _formW 量到的宽是 0。
-          // 显出来之后补跑一次 syncCtl 把尺寸重算对；renderNoteCard 有
-          // `box.__sig === sig` 守卫，不会重建卡片 DOM，学习状态不丢。
-          if (ctl._bindOpen) { try { syncCtl(ctl); } catch (e) {} }
+          // 显出来之后补跑一次 syncCtl；__sig 守卫保证不重建卡片状态机。
+          try { syncCtl(ctl); } catch (e) {}
+          setWordDeleteUi(ctl, true);
+          wordPortalIn(ctl);   // body-fixed：逃出 #main/page-wrap 的 zoom 与 overflow 裁剪
+          _placeWordCard(ctl, meta && meta.source);
+          return true;
         }
       });
     } catch (e) {}
     if (res && res.ok) {
       ctl._bindMarked = true;
+      ctl._bindKey = res.key || ctl._bindKey || '';
       ctl.root.style.display = ctl._bindOpen ? '' : 'none';
+      if (ctl._bindOpen && ctl._bindKey) {
+        try {
+          document.querySelectorAll('[data-bindkey="' + ctl._bindKey + '"]').forEach(function (el) { el.classList.add('on'); });
+        } catch (_) {}
+      }
     } else {
       // 回退到老浮层是对的（宁可看到老样子，也不要卡片消失），但**必须留痕**：
       // 圆球本来就是老形态，退回去看着像「这卡就是这样的」，没人会去查。
@@ -1267,9 +1512,11 @@
       // **不重建 page-wrap**，所以不撤就成了孤儿：框和数字留在页上，
       // 点了没反应，而且把后面的序号一起顶歪。
       try {
-        var _b0 = ctls[id].note && ctls[id].note.card && ctls[id].note.card.bind;
+        var _b0 = wordBindOf(ctls[id].note);
         if (_b0 && window.__pageBindRemove) window.__pageBindRemove(_b0, id);
       } catch (e0) {}
+      unobserveWordPortal(ctls[id]);
+      clearWordViewportLimits(ctls[id]);
       try { ctls[id].root.remove(); } catch (e) {}
       try { if (ctls[id]._ph) ctls[id]._ph.remove(); } catch (e2) {}   // 清占位,防叠加层/页容器残留孤儿
     }
@@ -1566,7 +1813,7 @@
     // #51 S1:探测点用**松手瞬间实时 BCR**(transform 未清,transform-origin '0 0' 下左上角=视觉落点),
     //   不再用 rect0+指针位移——后者在"拖动中异步页渲染/滚动改了 root.left"时与实际视觉位置分叉
     //   (拖动反馈 anchorFxShow 一直用实时 BCR,两链对齐=拖动显示与松手落点一致)。
-    var wasPortaled = ctl.portaled;
+    var wasPortaled = ctl.portaled, wasWordPortal = !!ctl._wordFixedPortal;
     var _lr = ctl.root.getBoundingClientRect();
     var anchor = _probeHidden(ctl.root, function () { return reanchorAt(ctl, _lr.left + 1, _lr.top + 1); });   // #51:穿透自身探测;实时 BCR 左上 +1
     ctl.root.style.transform = '';
@@ -1580,15 +1827,20 @@
     //   点不到,于是整段重锚是死代码,表现只是"拖了之后框没跟着搬",不报任何错。
     var _rb = _rebindWord(ctl, _lr.left + 1, _lr.top + 1);
     var _pf = { anchor: anchor };
-    if (_rb) _pf.card = ctl.note.card;
+    if (_rb) _pf[_rb] = ctl.note[_rb];
     patchNote(ctl.note, _pf);
     if (wasPortaled) {   // 先解除 portal,ensureMounted 才会真正换容器重挂(否则 portaled 守卫早退)
-      ctl.portaled = false; ctl.root.classList.remove('rc-note-portaled');
-      ctl.root.style.position = ''; ctl.root.style.left = ''; ctl.root.style.top = '';
+      if (wasWordPortal) { unobserveWordPortal(ctl); clearWordViewportLimits(ctl); }
+      ctl.portaled = false; ctl._wordFixedPortal = false;
+      ctl.root.classList.remove('rc-note-portaled', 'rc-note-word-portaled');
+      ctl.root.style.position = ''; ctl.root.style.left = ''; ctl.root.style.top = ''; ctl.root.style.zIndex = '';
       if (ctl._ph) { try { ctl._ph.remove(); } catch (e) {} ctl._ph = null; }
     }
     ensureMounted(ctl.note);   // 跨页/跨章 → 换容器重挂 + 新锚绝对定位
-    if (wasPortaled && !ctl.note.collapsed) portalIn(ctl);   // 回置顶浮层(落点新位置,重建占位)
+    if (wasPortaled && !ctl.note.collapsed) {
+      if (wasWordPortal && ctl._bindOpen) wordPortalIn(ctl);
+      else portalIn(ctl);
+    }   // 回置顶浮层(落点新位置,重建占位)
   }
   // ─────────────────────────── EDIT 编辑模式(长按便签任意部分,handle/body 同一入口)───────────────────────────
   // 同时呈现:🗑 + 色板工具条 + 左上/右下缩放手柄 + handle 拖拽移动;移动/缩放/换色可连续操作不自动退出。
@@ -1977,27 +2229,39 @@
     //   capture 阶段先于 onBodyDown/onHandleDown 跑:被点那张稍后由其 pointerdown 再 portalIn(不受影响)。
     for (var id in ctls) {
       var c = ctls[id];
-      if (c && c.portaled && c.root !== insideRoot && !_hasLiveVid(c)) portalOut(c);   // 有活视频不降层:portalOut 的 reparent 会重载 iframe=播放中断(用户规格:点外面不碰播放)
+      if (!c || !c.portaled || c.root === insideRoot || _hasLiveVid(c)) continue;
+      if (c._bindOpen) {
+        // 词锚卡的收起态只有正文框/角标/右侧浮标；点外面不能把真卡塞回
+        // page-wrap 变成一张普通可见便签，否则下一次缩放又会出现第二份入口。
+        c._bindOpen = false;
+        c.root.classList.remove('rc-note-word-open');
+        c.root.style.display = 'none';
+        setWordDeleteUi(c, false);
+      }
+      portalOut(c);   // 有活视频不降层:portalOut 的 reparent 会重载 iframe=播放中断(用户规格:点外面不碰播放)
     }
   }
 
   // ─────────────────────────── 创建 ───────────────────────────
-  function createRecord(anchor, fields, pendingMessage, mountedMessage) {
+  function createRecord(anchor, fields, pendingMessage, mountedMessage, createIdentity) {
     var generation = _generation;
     fields = fields || {};
     fields.anchor = anchor;
-    ioCreate(fields, generation).then(function (note) {
-      if (generation !== _generation) return;
+    return ioCreate(fields, generation, createIdentity).then(function (note) {
+      if (generation !== _generation) return null;
       // legacy vbook 响应锚可能使用成员局部页；当前视图应继续使用请求时锚。
       if (note && note.anchor && anchor) note.anchor = anchor;
-      var mounted = !!upsertRecord(note, generation);
-      if (!mounted || !ctls[noteIdOf(note)] || !ctls[noteIdOf(note)].root.isConnected) {
+      var projected = upsertRecord(note, generation);
+      var mounted = !!projected;
+      if (!mounted || !ctls[noteIdOf(projected)] || !ctls[noteIdOf(projected)].root.isConnected) {
         if (pendingMessage) toastMsg(pendingMessage);
       } else if (mountedMessage) {
         toastMsg(mountedMessage);
       }
+      return projected;
     }).catch(function (error) {
       ioError(error, '便签创建失败');
+      return null;
     });
   }
   function createAt(anchor) {
@@ -2128,6 +2392,144 @@
     return true;
   }
 
+  function _sameWordBind(a, b) {
+    return !!(a && b && a.kind === 'page-chars' && b.kind === 'page-chars' &&
+      parseInt(a.page, 10) === parseInt(b.page, 10) &&
+      parseInt(a.from, 10) === parseInt(b.from, 10) &&
+      parseInt(a.to, 10) === parseInt(b.to, 10));
+  }
+  function _boundCardKey(bind, payload, content) {
+    var uid = String(payload && payload.uid || '').trim();
+    return [String(O && O.documentId || ''), uid || String(content || '').slice(0, 256), parseInt(bind.page, 10) || 0,
+      parseInt(bind.from, 10) || 0, parseInt(bind.to, 10) || 0].join('|');
+  }
+  function _existingBoundCard(bind, payload, content) {
+    var uid = String(payload && payload.uid || '').trim();
+    for (var i = 0; i < notes.length; i++) {
+      var h = notes[i] && notes[i].html;
+      if (!h || !_sameWordBind(h.bind, bind)) continue;
+      if (uid ? String(h.sourceUid || h.cid || '') === uid : String(h.content || '') === String(content || '')) return notes[i];
+    }
+    return null;
+  }
+
+  function _prepareBoundCardIdentity(state) {
+    if (!state.repository) return Promise.resolve(null);
+    if (state.identity) return Promise.resolve(state.identity);
+    if (state.identityPromise) return state.identityPromise;
+    if (!repoReady()) return Promise.reject(new Error('便签 repository 合同不完整'));
+    state.identityPromise = Promise.resolve(O.repository.newId()).then(function (noteId) {
+      if (state.generation !== _generation || !O || O.documentId !== state.documentId) throw staleError();
+      noteId = String(noteId || '');
+      if (!noteId) throw new Error('便签 repository ID 无效');
+      // 这两个值属于一次逻辑创建，不属于一次网络尝试。结果未知时重试必须
+      // 原样复用，repository 才能按 mutationId 幂等返回第一次的提交结果。
+      state.identity = { noteId: noteId, mutationId: mutationId('create', noteId) };
+      return state.identity;
+    }).catch(function (error) {
+      // newId 本身失败时尚未发出 create，可以安全重新申请；一旦 identity
+      // 建立，后面的 create 失败不会清它。
+      state.identityPromise = null;
+      throw error;
+    });
+    return state.identityPromise;
+  }
+
+  /* AI page-chars 的唯一持久化入口。
+   * 合同：persistBoundCard(bind,payload,screenPoint) -> Promise<{ok,noteId?,why?}>。
+   * 只有 ioCreate 成功且 upsertRecord 已完成才返回 ok:true；失败统一返回 ok:false，
+   * 调用方不得把“已经画出临时 DOM”当作持久化成功。
+   */
+  function persistBoundCard(bind, payload, screenPoint) {
+    payload = payload || {}; screenPoint = screenPoint || {};
+    if (!O || !O.anchorFromPoint) return Promise.resolve({ ok: false, why: 'stickynote-unavailable' });
+    if (!bind || bind.kind !== 'page-chars') return Promise.resolve({ ok: false, why: 'bad-bind' });
+    var page = parseInt(bind.page, 10), from = parseInt(bind.from, 10), to = parseInt(bind.to, 10);
+    if (!(page > 0) || !(from >= 0) || !(to >= from)) return Promise.resolve({ ok: false, why: 'bad-bind' });
+    var x = Number(screenPoint.x), y = Number(screenPoint.y);
+    if (!isFinite(x) || !isFinite(y)) return Promise.resolve({ ok: false, why: 'bad-screen-point' });
+    var content = String(payload.raw || payload.text || '');
+    if (!content.trim()) return Promise.resolve({ ok: false, why: 'empty-card' });
+
+    var key = _boundCardKey(bind, payload, content);
+    var existing = _existingBoundCard(bind, payload, content);
+    if (existing) {
+      delete _boundCardWrites[key];
+      ensureMounted(existing);
+      return Promise.resolve({ ok: true, noteId: noteIdOf(existing), persisted: true, reused: true });
+    }
+    var state = _boundCardWrites[key];
+    if (state && state.inFlight) return state.inFlight;
+    if (state && state.terminal) return Promise.resolve(state.terminal);
+    if (!state) {
+      var anchor = null;
+      try { anchor = O.anchorFromPoint(x, y); } catch (e) {}
+      if (!anchor) return Promise.resolve({ ok: false, why: 'anchor-unresolved' });
+
+      var category = wordCardCategory(payload.category, payload.label, payload.tone, 'text');
+      var tone = WORD_CARD_TONES[category] || WORD_CARD_TONES.text;
+      var cid = String(payload.uid || '').trim() || ((window.RC && RC.voiceCard && RC.voiceCard.mkCid)
+        ? RC.voiceCard.mkCid() : ('c' + Date.now().toString(36)));
+      var w = 300, baseW = 0;
+      try {
+        var mounted = O.mount(anchor);
+        if (mounted && mounted.el && mounted.el.clientWidth) {
+          baseW = mounted.el.clientWidth;
+          w = Math.max(240, Math.min(480, Math.round(baseW * 0.44)));
+        }
+      } catch (e2) {}
+      var html = {
+        content: content,
+        isHtml: !!payload.isHtml,
+        label: payload.label || '卡片',
+        type: tone,
+        icon: payload.icon || (category === 'image' ? '▧' : (category === 'number' ? '#' : (category === 'qa' ? '?' : '¶'))),
+        cid: cid,
+        sourceUid: String(payload.uid || '').trim() || cid,
+        category: category,
+        bind: cloneValue(bind),
+        base_w: baseW
+      };
+      state = {
+        generation: _generation,
+        documentId: String(O.documentId || ''),
+        repository: repoMode(),
+        anchor: cloneValue(anchor),
+        fields: { color: '#0d1322', w: w, h: 210, collapsed: false, html: html },
+        identity: null, identityPromise: null, inFlight: null, terminal: null
+      };
+      _boundCardWrites[key] = state;
+    }
+
+    var operation = _prepareBoundCardIdentity(state).then(function (identity) {
+      if (state.generation !== _generation || !O || String(O.documentId || '') !== state.documentId) throw staleError();
+      return createRecord(
+        state.anchor,
+        cloneValue(state.fields),
+        '卡片已保存(所在页尚未渲染，渲染后会出现)',
+        null,
+        identity
+      );
+    }).then(function (note) {
+      if (!note || !noteIdOf(note)) return { ok: false, why: 'create-failed' };
+      return { ok: true, noteId: noteIdOf(note), persisted: true };
+    }, function () {
+      return { ok: false, why: 'create-failed' };
+    });
+    state.inFlight = operation;
+    operation.then(function (result) {
+      if (_boundCardWrites[key] !== state) return;
+      state.inFlight = null;
+      if (result && result.ok === true) delete _boundCardWrites[key];
+      // 旧 HTTP POST 没有稳定 noteId/mutationId。结果未知后宁可维持失败，
+      // 也不能盲重试造副本；document-notes repository 才允许同事务重放。
+      else if (!state.repository) state.terminal = result || { ok: false, why: 'create-failed' };
+    }, function () {
+      if (_boundCardWrites[key] === state) state.inFlight = null;
+    });
+    return operation;
+  }
+
   // ── 拖动锚定反馈层(#51 用户设计,所有拖动统一挂:便签拖动/单图拖出/侧栏拖出/钉子卡拖动)──
   function _probeHidden(el, fn) {
     // 探测穿透(#51 修:拖动物自己压住内容,elementFromPoint/caretFromPoint 全命中它→恒横线/EPUB 甚至锚到便签自身文字)
@@ -2180,6 +2582,7 @@
     }
     _writeQueues = Object.create(null);
     _seenRevs = Object.create(null);
+    _boundCardWrites = Object.create(null);
     // teardown 只撤销当前交互，不允许 resize/pen 的收尾 PATCH 在 O 被下一页替换后
     // 错写到新 document；正常 pagehide/visibilitychange 已有独立 flush。
     O = null;
@@ -2311,6 +2714,7 @@
     createVideoAt: createVideoAt,
     createCardAt: createCardAt,   // 卡片便签(制卡卡 📌 钉页 / 真机拖出复用)
     createHtmlAt: createHtmlAt,   // 通用卡便签(天气/搜索/图等 vc-card 钉页)
+    persistBoundCard: persistBoundCard,   // AI page-chars：Promise 只在 create+本地投影成功后 ok:true
     cardContextText: cardContextText,   // 收藏/上下文共用正面+背面可读投影；raw/meta 仍保留完整卡记录
     bindCardSelection: bindCardSelection,   // 固定学习卡整卡长按：PWA/普通网页共用同一语义与完整快照
     bindHtmlCardSelection: bindHtmlCardSelection,   // 固定工具/HTML 卡正文长按：同 cid 处处同步，不占用卡头拖拽

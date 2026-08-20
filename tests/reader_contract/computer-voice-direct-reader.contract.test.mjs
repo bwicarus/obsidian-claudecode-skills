@@ -1003,6 +1003,13 @@ function createHarness(overrides = {}) {
     nativeLocalPageContext: false,
     nativePageContextPublishes: [],
     nativePageTexts: {},
+    nativePageChars: {},
+    nativePageCards: {},
+    nativePageCardReads: [],
+    nativePageCardRevision: 1,
+    nativePageCardError: null,
+    nativePageCardProvider: null,
+    nativePageCardsUnavailable: false,
     readerHighlightSourceProvider: null,
     readerHighlightSourceCalls: [],
     readerAdapterContext: null,
@@ -1204,20 +1211,53 @@ function createHarness(overrides = {}) {
     document,
   };
   if (scenario.nativeLocalPageContext) {
-    window.BWReaderRuntime = {
-      nativeLocalRuntime: {
-        ready() { return Promise.resolve(); },
-        publishPageContext(payload) {
-          scenario.nativePageContextPublishes.push(structuredClone(payload));
-          return Promise.resolve({ ok: true, seq: scenario.nativePageContextPublishes.length });
-        },
+    const nativeLocalRuntime = {
+      ready() { return Promise.resolve(); },
+      publishPageContext(payload) {
+        scenario.nativePageContextPublishes.push(structuredClone(payload));
+        return Promise.resolve({ ok: true, seq: scenario.nativePageContextPublishes.length });
       },
+    };
+    if (!scenario.nativePageCardsUnavailable) {
+      nativeLocalRuntime.pageContextCards = ({ page }) => {
+        scenario.nativePageCardReads.push(page);
+        if (typeof scenario.nativePageCardProvider === "function") {
+          return scenario.nativePageCardProvider(
+            page,
+            scenario.nativePageCardReads.length,
+          );
+        }
+        if (scenario.nativePageCardError) {
+          return Promise.reject(scenario.nativePageCardError);
+        }
+        return Promise.resolve({
+          contract: "reader-local-page-cards/1",
+          page,
+          revision: scenario.nativePageCardRevision,
+          cards: structuredClone(scenario.nativePageCards[page] || []),
+        });
+      };
+    }
+    window.BWReaderRuntime = {
+      nativeLocalRuntime,
       pageTextProvider: {
         contract: "reader-page-text-provider/1",
         pageChars(page) {
+          if (Array.isArray(scenario.nativePageChars[page])) {
+            return Promise.resolve({
+              chars: structuredClone(scenario.nativePageChars[page]),
+            });
+          }
           const text = String(scenario.nativePageTexts[page] || "");
           return Promise.resolve({
-            chars: Array.from(text, (character) => ({ c: character })),
+            chars: Array.from(text, (character, index) => ({
+              c: character,
+              x0: index * 10,
+              y0: 0,
+              x1: index * 10 + 9,
+              y1: 12,
+              sp: /\s/.test(character),
+            })),
           });
         },
       },
@@ -1333,6 +1373,9 @@ function createHarness(overrides = {}) {
         handler({ type, detail });
       }
     },
+    windowListenerCount(type) {
+      return (windowEventHandlers.get(type) || []).length;
+    },
     setVisibilityState(value) {
       document.visibilityState = value;
     },
@@ -1400,6 +1443,16 @@ async function waitForCondition(predicate, label, timeoutMs = 2500) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.fail(`timed out waiting for ${label}`);
+}
+
+async function runLocalContextTimersUntil(timers, predicate, label) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (predicate()) return;
+    if (timers.count(0)) timers.runOne(0);
+    else if (timers.count(250)) timers.runOne(250);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`timed out advancing local page context timers for ${label}`);
 }
 
 function visualRequest(harness, fields = {}) {
@@ -3809,6 +3862,315 @@ test("原生 App 本地书把当前视口前后正文写进本地 page.context",
     },
   );
 
+  await disableSnapshot(harness);
+});
+
+test("本地卡片投影 capability 缺失时仍发布纯正文且不从 DOM 猜卡", async () => {
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeLocalPageContext: true,
+    nativePageCardsUnavailable: true,
+    contextSyncStorage: new Map([["eph-ctx-sync", "1"]]),
+    contextDeliveryMode: "snapshot-mcp",
+    nativePageTexts: { 4: "兼容旧 runtime 的纯正文" },
+    readerAdapterContext: { visible_text: "纯正文" },
+    activeReading: {
+      kind: "pdf",
+      file: "localbook:capability-skew",
+      title: "Capability skew",
+      pos: 4,
+    },
+  });
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.nativePageContextPublishes.length === 1,
+    "plain page context with old local runtime",
+  );
+  assert.match(harness.scenario.nativePageContextPublishes[0].text, /纯正文/);
+  assert.doesNotMatch(
+    harness.scenario.nativePageContextPublishes[0].text,
+    /CARD_START/,
+  );
+  assert.deepEqual(harness.scenario.nativePageCardReads, []);
+  await disableSnapshot(harness);
+});
+
+test("EPUB 第一节 page=0 继续发布纯正文且不调用 PDF 卡片投影", async () => {
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeLocalPageContext: true,
+    contextSyncStorage: new Map([["eph-ctx-sync", "1"]]),
+    contextDeliveryMode: "snapshot-mcp",
+    readerAdapterContext: { visible_text: "EPUB 第一节正文" },
+    activeReading: {
+      kind: "epub",
+      file: "localbook:epub-zero",
+      title: "EPUB zero section",
+      pos: 0,
+    },
+  });
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.nativePageContextPublishes.length === 1,
+    "EPUB page zero plain context",
+  );
+  const payload = harness.scenario.nativePageContextPublishes[0];
+  assert.equal(payload.kind, "epub");
+  assert.equal(payload.page, 0);
+  assert.match(payload.text, /EPUB 第一节正文/);
+  assert.doesNotMatch(payload.text, /CARD_START/);
+  assert.deepEqual(harness.scenario.nativePageCardReads, []);
+  await disableSnapshot(harness);
+});
+
+test("旧 active-reading pump 的迟到卡片读取不能覆盖新 pump 上下文", async () => {
+  const pending = [];
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeReaderForeground: true,
+    nativeLocalPageContext: true,
+    contextSyncStorage: new Map([["eph-ctx-sync", "1"]]),
+    contextDeliveryMode: "snapshot-mcp",
+    nativePageTexts: { 7: "甲乙丙丁" },
+    readerAdapterContext: { visible_text: "甲乙丙丁" },
+    nativePageCardProvider(page) {
+      return new Promise((resolve) => pending.push({ page, resolve }));
+    },
+    activeReading: {
+      kind: "pdf",
+      file: "localbook:pump-generation",
+      title: "Pump generation",
+      pos: 7,
+    },
+  });
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(() => pending.length === 1, "old pump card read");
+
+  await harness.api.contextSyncChanged();
+  await waitForCondition(() => pending.length >= 2, "replacement pump card read");
+  pending[1].resolve({
+    contract: "reader-local-page-cards/1",
+    page: 7,
+    revision: 2,
+    cards: [],
+  });
+  await waitForCondition(
+    () => harness.scenario.nativePageContextPublishes.length === 1,
+    "replacement pump page context",
+  );
+
+  pending[0].resolve({
+    contract: "reader-local-page-cards/1",
+    page: 7,
+    revision: 1,
+    cards: [{
+      id: "c_oldoldoldoldold1",
+      kind: "card",
+      label: "旧卡",
+      text: "不得回灌",
+      bind: { kind: "page-chars", page: 7, from: 0, to: 0, text: "甲" },
+    }],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(harness.scenario.nativePageContextPublishes.length, 1);
+  assert.doesNotMatch(
+    harness.scenario.nativePageContextPublishes[0].text,
+    /不得回灌|CARD_START/,
+  );
+  await disableSnapshot(harness);
+});
+
+test("权威卡片按页面几何编号且成功删除只触发一次重排后的 page.context", async () => {
+  const timers = createManualTimers();
+  const cards = [
+    {
+      id: "c_3333333333333333",
+      kind: "anki",
+      label: "第三张",
+      text: "第三张内容",
+      bind: { kind: "page-chars", page: 7, from: 4, to: 4, text: "戊" },
+    },
+    {
+      id: "c_1111111111111111",
+      kind: "card",
+      label: "第一张",
+      text: "反斜杠 \\ 与正文符号 ⟦原文⟧",
+      bind: { kind: "page-chars", page: 7, from: 0, to: 0, text: "甲" },
+    },
+    {
+      id: "c_2222222222222222",
+      kind: "card",
+      label: "第二张",
+      text: "第二张内容",
+      bind: { kind: "page-chars", page: 7, from: 2, to: 2, text: "丙" },
+    },
+  ];
+  const pageChars = Array.from("甲乙丙丁戊己庚辛", (character, index) => ({
+    c: character,
+    x0: index * 10,
+    y0: 0,
+    x1: index * 10 + 9,
+    y1: 12,
+    sp: false,
+  }));
+  Object.assign(pageChars[0], { x0: 40, x1: 49, y0: 20, y1: 32 });
+  Object.assign(pageChars[2], { x0: 10, x1: 19 });
+  Object.assign(pageChars[4], { x0: 30, x1: 39 });
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeLocalPageContext: true,
+    contextSyncStorage: new Map([["eph-ctx-sync", "1"]]),
+    contextDeliveryMode: "snapshot-mcp",
+    nativePageTexts: { 7: "甲乙丙丁戊己庚辛" },
+    nativePageChars: { 7: pageChars },
+    nativePageCards: { 7: cards },
+    readerAdapterContext: { visible_text: "甲乙丙丁戊己庚辛" },
+    activeReading: {
+      kind: "pdf",
+      file: "localbook:card-context",
+      title: "Card context",
+      pos: 7,
+    },
+    timers,
+  });
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.nativePageContextPublishes.length === 1,
+    "initial CARD-marked page context",
+  );
+  const initial = harness.scenario.nativePageContextPublishes[0].text;
+  assert.match(initial, /甲⟦CARD_START n="3" id="c_1111111111111111"/);
+  assert.match(initial, /丙⟦CARD_START n="1" id="c_2222222222222222"/);
+  assert.match(initial, /戊⟦CARD_START n="2" id="c_3333333333333333"/);
+  assert.ok(
+    initial.indexOf('id="c_1111111111111111"') <
+      initial.indexOf('id="c_2222222222222222"'),
+    "marker insertion follows source text while n follows independent page geometry",
+  );
+  assert.match(initial, /反斜杠 \\\\ 与正文符号 \\⟦原文\\⟧/);
+  assert.equal((initial.match(/⟦CARD_START /g) || []).length, 3);
+  assert.equal((initial.match(/⟦CARD_END⟧/g) || []).length, 3);
+
+  await waitForCondition(() => timers.count(250) >= 1, "settled initial pump");
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.scenario.nativePageCards[7] = [cards[0], cards[1]];
+  harness.scenario.nativePageCardRevision += 1;
+  assert.equal(harness.windowListenerCount("bw:native-document-notes-changed"), 1);
+  harness.dispatchWindowEvent("bw:native-document-notes-changed", {
+    contract: "reader-local-notes-changed/1",
+    file: "localbook:card-context",
+    revision: 1,
+    source: "mutation",
+  });
+  const readsBeforeDeleteRefresh = harness.scenario.nativePageCardReads.length;
+  await runLocalContextTimersUntil(
+    timers,
+    () => harness.scenario.nativePageCardReads.length > readsBeforeDeleteRefresh,
+    "notes refresh tick",
+  );
+  await waitForCondition(
+    () => harness.scenario.nativePageContextPublishes.length === 2,
+    "renumbered page context after deletion",
+  );
+  const afterDelete = harness.scenario.nativePageContextPublishes[1].text;
+  assert.doesNotMatch(afterDelete, /c_2222222222222222|第二张内容/);
+  assert.match(afterDelete, /CARD_START n="1" id="c_3333333333333333"/);
+  assert.match(afterDelete, /CARD_START n="2" id="c_1111111111111111"/);
+  assert.doesNotMatch(afterDelete, /CARD_START n="3"/);
+
+  await waitForCondition(() => timers.count(250) >= 1, "post-delete pump tick");
+  timers.runOne(250);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.scenario.nativePageContextPublishes.length, 2,
+    "one committed notes event yields one changed page.context");
+  harness.dispatchWindowEvent("bw:native-document-notes-changed", {
+    contract: "reader-local-notes-changed/1",
+    file: "localbook:another-book",
+    revision: 2,
+    source: "mutation",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.scenario.nativePageContextPublishes.length, 2,
+    "another document must not refresh the current page context");
+
+  const readsBeforeFailure = harness.scenario.nativePageCardReads.length;
+  harness.scenario.nativePageCardError = new Error("authoritative read failed");
+  harness.dispatchWindowEvent("bw:native-document-notes-changed", {
+    contract: "reader-local-notes-changed/1",
+    file: "localbook:card-context",
+    revision: 3,
+    source: "mutation",
+  });
+  await runLocalContextTimersUntil(
+    timers,
+    () => harness.scenario.nativePageCardReads.length > readsBeforeFailure,
+    "failed authoritative read",
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.scenario.nativePageContextPublishes.length, 2,
+    "a failed authoritative read keeps the last complete context");
+  harness.scenario.nativePageCardError = null;
+  await disableSnapshot(harness);
+});
+
+test("本地 page.context 截断不会留下半个 CARD marker", async () => {
+  const timers = createManualTimers();
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeLocalPageContext: true,
+    contextSyncStorage: new Map([["eph-ctx-sync", "1"]]),
+    contextDeliveryMode: "snapshot-mcp",
+    nativePageTexts: {
+      6: "P".repeat(3000),
+      7: "A".repeat(12000),
+      8: "N".repeat(3000),
+    },
+    nativePageCards: {
+      7: [
+        {
+          id: "c_aaaaaaaaaaaaaaaa",
+          kind: "card",
+          label: "完整卡",
+          text: "X".repeat(2400),
+          bind: { kind: "page-chars", page: 7, from: 100, to: 100, text: "A" },
+        },
+        {
+          id: "c_bbbbbbbbbbbbbbbb",
+          kind: "card",
+          label: "跨界卡",
+          text: "Y".repeat(2400),
+          bind: { kind: "page-chars", page: 7, from: 6790, to: 6790, text: "A" },
+        },
+      ],
+    },
+    readerAdapterContext: { visible_text: "A".repeat(5000) },
+    activeReading: {
+      kind: "pdf",
+      file: "localbook:card-truncation",
+      title: "Card truncation",
+      pos: 7,
+    },
+    timers,
+  });
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.nativePageContextPublishes.length === 1,
+    "bounded CARD page context",
+  );
+  const payload = harness.scenario.nativePageContextPublishes[0];
+  const starts = (payload.text.match(/⟦CARD_START /g) || []).length;
+  const ends = (payload.text.match(/⟦CARD_END⟧/g) || []).length;
+  assert.ok(payload.text.length <= 12000);
+  assert.equal(payload.truncated, true);
+  assert.equal(starts, ends);
+  assert.equal(starts, 1);
+  assert.match(payload.text, /c_aaaaaaaaaaaaaaaa/);
+  assert.doesNotMatch(payload.text, /c_bbbbbbbbbbbbbbbb/);
   await disableSnapshot(harness);
 });
 

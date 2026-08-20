@@ -34,9 +34,15 @@ const MCP = read(
 // 「AI 照常说已送达」** —— 没有任何一处会报错。所以这里逐处钉住。
 
 test("绑定结果从阅读器出发时就被带上", () => {
-  // 钉上/退回浮层/本来就没 bind，三种要分得开
-  assert.match(VOICECALL, /bindOutcome: _bo\.bound \? 'bound' : 'floating'/);
-  assert.match(VOICECALL, /bindOutcome: 'none'/);
+  // 每次 renderInfo 自己返回结果；不能在异步持久化之后读取一份全局“上一张卡”状态。
+  assert.match(VOICECALL, /async function renderInfo\(card, options\)/);
+  assert.match(VOICECALL, /bindOutcome: outcome \|\| 'none'/);
+  assert.doesNotMatch(VOICECALL, /_lastBindOutcome/);
+  assert.match(
+    VOICECALL,
+    /work = Promise\.resolve\(renderInfo\(p\.card,[\s\S]{0,500}?result\.rendered !== true/,
+    "回执必须等待本次卡片渲染和持久化的 Promise",
+  );
   // ⚠ 回调必须接住值。原先写的是 `.then(function () {`，各分支拼的东西全丢。
   assert.match(
     VOICECALL,
@@ -46,6 +52,32 @@ test("绑定结果从阅读器出发时就被带上", () => {
   // 只搬认识的键：下游 exactObject 是全等白名单，多一个键会让**成功的投递
   // 被回成 rejected**，且链路上零报错。
   assert.match(VOICECALL, /if \(value\.bindOutcome\) receipt\.bindOutcome = value\.bindOutcome;/);
+});
+
+test("同一投递在落库完成前共享 single-flight，不会重复写卡", () => {
+  assert.match(VOICECALL, /var _readerOutputPending = Object\.create\(null\)/);
+  assert.match(
+    VOICECALL,
+    /if \(_readerOutputPending\[correlation\]\) return _readerOutputPending\[correlation\]/,
+  );
+  assert.match(
+    VOICECALL,
+    /Promise\.resolve\(\)\.then\(function \(\) \{\s*return _applyReaderRealtimeOutput\(delivery\)/,
+    "先登记 pending，再在微任务中执行持久化，堵住同步重入窗口",
+  );
+  assert.match(VOICECALL, /_readerOutputPending\[correlation\] = pending/);
+});
+
+test("frame 回执等待时间覆盖 document-notes 的合法写入预算", () => {
+  assert.match(CALL, /const REALTIME_OUTPUT_RECEIPT_TIMEOUT_MS = 18000/);
+  assert.match(CALL, /\}, REALTIME_OUTPUT_RECEIPT_TIMEOUT_MS\)/);
+});
+
+test("page-chars 只在权威 placement 提交后回 bound", () => {
+  assert.match(VOICECALL, /await window\.__pageBindPersist\(_b, _pp\)/);
+  assert.match(VOICECALL, /if \(_pr && _pr\.ok === true\) return _renderInfoResult\(true, 'bound'\)/);
+  assert.doesNotMatch(VOICECALL, /window\.__pageBindCard\(_b, _pp\)/);
+  assert.match(VOICECALL, /uid: card\.cid \|\| options\.uid \|\| ''/);
 });
 
 test("阅读器入站闸放行这两个字段", () => {

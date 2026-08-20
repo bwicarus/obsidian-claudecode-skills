@@ -2598,6 +2598,116 @@ test("native local notes retain offline card placement payloads", async () => {
   assert.equal(payload.notes[0].card.gid, card.gid);
 });
 
+test("native page-context cards come from authoritative notes and refresh only after committed changes", async () => {
+  const result = await harness();
+  const { context } = result;
+  const changes = [];
+  context.addEventListener("bw:native-document-notes-changed", (event) => {
+    changes.push(clone(event.detail));
+  });
+  const save = (body) => context.fetch("/pdf/api/notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE,
+      anchor: { kind: "pdf", page: 7, x: 0.25, y: 0.4 },
+      ...body,
+    }),
+  });
+
+  assert.equal((await save({
+    id: "c_1111111111111111",
+    card: {
+      gid: "learning-card-1",
+      cid: "learning-card-1",
+      label: "问答卡",
+      bind: { kind: "page-chars", page: 7, from: 4, to: 5, text: "锚点" },
+      cards: [
+        { front: "<b>问题</b>", back: "答案" },
+        { q: "旧式问题", a: "旧式答案" },
+      ],
+    },
+  })).status, 200);
+  assert.equal((await save({
+    id: "c_2222222222222222",
+    html: {
+      cid: "tool-card-2",
+      label: "天气卡",
+      type: "weather",
+      content: "<script>bad()</script><b>晴天</b>",
+      bind: { kind: "page-chars", page: 7, from: 9, to: 10, text: "天气" },
+    },
+  })).status, 200);
+  assert.equal((await save({
+    id: "c_3333333333333333",
+    card: {
+      gid: "other-page",
+      cid: "other-page",
+      bind: { kind: "page-chars", page: 8, from: 1, to: 2, text: "别页" },
+      cards: [{ front: "不应返回", back: "不应返回" }],
+    },
+  })).status, 200);
+
+  assert.equal(changes.length, 3);
+  assert.deepEqual(changes.at(-1), {
+    contract: "reader-local-notes-changed/1",
+    file: DEFAULT_LOCAL_FILE,
+    revision: 3,
+    source: "mutation",
+  });
+  const runtime = context.BWReaderRuntime.nativeLocalRuntime;
+  const initial = clone(await runtime.pageContextCards({ page: 7 }));
+  assert.equal(initial.contract, "reader-local-page-cards/1");
+  assert.equal(initial.page, 7);
+  assert.equal(initial.revision, 3);
+  assert.deepEqual(initial.cards.map((card) => card.id), [
+    "c_1111111111111111",
+    "c_2222222222222222",
+  ]);
+  assert.deepEqual(initial.cards[0], {
+    id: "c_1111111111111111",
+    kind: "anki",
+    label: "问答卡",
+    text: "问题 / 答案 旧式问题 / 旧式答案",
+    bind: { kind: "page-chars", page: 7, from: 4, to: 5, text: "锚点" },
+  });
+  assert.equal(initial.cards[1].text, "晴天");
+
+  const missingChangeCount = changes.length;
+  const missing = await context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE) +
+      "&id=c_aaaaaaaaaaaaaaaa",
+    { method: "DELETE" },
+  );
+  assert.equal(missing.status, 404);
+  assert.equal(changes.length, missingChangeCount,
+    "failed deletion must not announce a context-removing change");
+  assert.deepEqual(
+    clone(await runtime.pageContextCards({ page: 7 })).cards.map((card) => card.id),
+    initial.cards.map((card) => card.id),
+  );
+
+  const removed = await context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE) +
+      "&id=c_1111111111111111",
+    { method: "DELETE" },
+  );
+  assert.equal(removed.status, 200);
+  assert.equal(changes.length, missingChangeCount + 1);
+  assert.equal(changes.at(-1).source, "mutation");
+  assert.deepEqual(
+    clone(await runtime.pageContextCards({ page: 7 })).cards.map((card) => card.id),
+    ["c_2222222222222222"],
+  );
+  const placements = result.dataStoresState.document.values.get(
+    `native-card-placements:${DEFAULT_LOCAL_BOOK_ID}:card-placements`,
+  ).value.payload;
+  assert.deepEqual(placements.map((placement) => placement.placementId), [
+    "c_2222222222222222",
+    "c_3333333333333333",
+  ], "the event follows the same committed batch as derived placement indexes");
+});
+
 function canvasRecorder() {
   const operations = [];
   const ctx = {

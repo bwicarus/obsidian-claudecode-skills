@@ -19,6 +19,9 @@
   var NATIVE_EPUB_ASSISTANT_STATE_CONTRACT = 'reader-native-epub-assistant-state/1';
   var NATIVE_EPUB_ACTION_CONTRACT = 'reader-native-epub-action/1';
   var NATIVE_READER_UNDO_RESULT_CONTRACT = 'reader-native-undo-result/1';
+  var LOCAL_PAGE_CARDS_CONTRACT = 'reader-local-page-cards/1';
+  var LOCAL_NOTES_CHANGED_CONTRACT = 'reader-local-notes-changed/1';
+  var LOCAL_NOTES_CHANGED_EVENT = 'bw:native-document-notes-changed';
   var NATIVE_INTERFACE_CONTRACT = 'reader-native-interface-manifest/2';
   var NATIVE_INTERFACE_OWNERS = new Set(['local', 'pi', 'native']);
   var NATIVE_INTERFACE_MATCHES = new Set(['exact', 'segment']);
@@ -677,6 +680,21 @@
     return { payload: payload, value: value };
   }
 
+  var localNotesChangeRevision = 0;
+  function announceLocalNotesChanged(source) {
+    localNotesChangeRevision += 1;
+    try {
+      root.dispatchEvent(new CustomEvent(LOCAL_NOTES_CHANGED_EVENT, {
+        detail: {
+          contract: LOCAL_NOTES_CHANGED_CONTRACT,
+          file: localFileRef(),
+          revision: localNotesChangeRevision,
+          source: String(source || 'write')
+        }
+      }));
+    } catch (_) {}
+  }
+
   function mutateDocumentStateNow(kind, fallback, mutator, batchOptions) {
     var attempts = 0;
     function attempt() {
@@ -715,6 +733,11 @@
           )];
         }
         return stores.document.batch(mutations, batchOptions).then(function () {
+          if (kind === 'document-notes-legacy') {
+            // 只在 notes + 两个派生索引的事务确实提交后发信号。删除失败或 CAS
+            // 仍未知时不发，旧 page.context 因而继续保留，不能提前把 CARD 擦掉。
+            announceLocalNotesChanged('mutation');
+          }
           return clone(outcome.value);
         });
       }).catch(function (error) {
@@ -1080,7 +1103,10 @@
       stateRecordMutation('document-notes-legacy', notes, suffix + '-notes'),
       stateRecordMutation('card-placements', placements, suffix + '-cards'),
       stateRecordMutation('entity-references', references, suffix + '-entities')
-    ]).then(function () { return clone(notes); });
+    ]).then(function () {
+      announceLocalNotesChanged('replace');
+      return clone(notes);
+    });
   }
 
   var USER_STATE_RECORD_KINDS = Object.freeze([
@@ -10259,6 +10285,122 @@
     });
   }
 
+  function localContextPlainText(value, maximum) {
+    value = String(value == null ? '' : value)
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;|&#160;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+    return value.slice(0, maximum);
+  }
+
+  function localContextCardBody(note, kind, payload) {
+    if (kind === 'anki') {
+      var rows = [];
+      var cards = Array.isArray(payload.cards) ? payload.cards : [];
+      for (var index = 0; index < cards.length; index += 1) {
+        var card = cards[index];
+        if (!card || typeof card !== 'object' || Array.isArray(card)) continue;
+        var parts = [];
+        // Read the same durable learning-card aliases that the visible card
+        // renderer accepts. Older notes commonly persisted q/a rather than
+        // front/back; omitting them produced a formally valid but empty CARD.
+        var frontField = card.front != null ? 'front'
+          : (card.q != null ? 'q' : (card.cloze != null ? 'cloze' : 'text'));
+        var front = localContextPlainText(card[frontField], 800);
+        var back = localContextPlainText(
+          card.back != null ? card.back : card.a, 800
+        );
+        if (front) parts.push(front);
+        if (back) parts.push(back);
+        if (frontField !== 'cloze') {
+          var cloze = localContextPlainText(card.cloze, 800);
+          if (cloze) parts.push(cloze);
+        }
+        if (parts.length) rows.push(parts.join(' / '));
+        if (rows.join('\n').length >= 2400) break;
+      }
+      return localContextPlainText(
+        rows.join('\n') || payload.text || note.text || '', 2400
+      );
+    }
+    return localContextPlainText(
+      payload.text || payload.content || note.text || '', 2400
+    );
+  }
+
+  // page.context 只拿生成内联 CARD 所需的最小投影。来源始终是 App-owned
+  // document-notes 权威记录，不从可见 DOM、pgbind-layer 或组件内存反推。
+  function nativePageContextCards(input) {
+    var payload = input && typeof input === 'object' && !Array.isArray(input)
+      ? input : {};
+    if (Object.keys(payload).some(function (key) { return key !== 'page'; }) ||
+        typeof payload.page !== 'number' || !Number.isInteger(payload.page) ||
+        payload.page < 1) {
+      return Promise.reject(new RuntimeError(
+        '本地页面卡片页码无效', 'BW_LOCAL_PAGE_CARDS_PARAMS'
+      ));
+    }
+    var page = payload.page;
+    return bootPromise.then(function () {
+      return storedStateRecord(
+        stores.document, 'document-notes-legacy', 'documentId', bookId, []
+      );
+    }).then(function (record) {
+      var notes = Array.isArray(record.payload) ? record.payload : [];
+      var cards = [];
+      for (var index = 0; index < notes.length; index += 1) {
+        var note = notes[index];
+        if (!note || typeof note !== 'object' || Array.isArray(note)) continue;
+        var kind = note.card && typeof note.card === 'object' && !Array.isArray(note.card)
+          ? 'anki'
+          : (note.html && typeof note.html === 'object' && !Array.isArray(note.html)
+            ? 'card' : '');
+        if (!kind) continue;
+        var data = kind === 'anki' ? note.card : note.html;
+        var bind = data.bind;
+        if (!bind || typeof bind !== 'object' || Array.isArray(bind) ||
+            bind.kind !== 'page-chars' || Number(bind.page) !== page) continue;
+        var from = Number(bind.from), to = Number(bind.to);
+        if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 ||
+            to < from || to > 1000000) continue;
+        var id = String(note.id || note.noteId || '').slice(0, 240);
+        if (!id) continue;
+        cards.push({
+          id: id,
+          kind: kind,
+          label: localContextPlainText(
+            data.label || data.title || data.gid || data.cid || id, 120
+          ),
+          text: localContextCardBody(note, kind, data),
+          bind: {
+            kind: 'page-chars', page: page, from: from, to: to,
+            text: localContextPlainText(bind.text || '', 200)
+          }
+        });
+        // 超过这个数量就不能保证有界读取，也不能截掉尾部后继续声称序号完整。
+        if (cards.length > 2000) {
+          throw new RuntimeError(
+            '单页锚定卡片过多，无法安全编号', 'BW_LOCAL_PAGE_CARDS_LIMIT'
+          );
+        }
+      }
+      return {
+        contract: LOCAL_PAGE_CARDS_CONTRACT,
+        page: page,
+        revision: Number(record.rev) || 0,
+        cards: cards
+      };
+    });
+  }
+
   // 助手在这本书里搜。复用本机既有的全文检索，不另起一套。
   //
   // incomplete 与 truncated 是两件事，都要报：前者是"有些页没能搜到"（文本层
@@ -10690,6 +10832,7 @@
     bookUserState: bookUserStateAPI,
     dictionaryFallbackCache: dictionaryFallbackCacheAPI,
     publishPageContext: publishLocalPageContext,
+    pageContextCards: nativePageContextCards,
     documentHost: function () {
       return root.RC && root.RC.documentHost && root.RC.documentHost.current
         ? root.RC.documentHost.current() : null;

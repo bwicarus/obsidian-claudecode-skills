@@ -469,6 +469,149 @@ test("四种 create 都先取 repository ID；card 的 cid/gid 原样保存且 C
   assert.equal(fetchCalls.length, 0);
 });
 
+test("AI page-chars 只在 repository create 与本地投影完成后报告持久化成功", async () => {
+  const id = `c_${"9".repeat(32)}`;
+  const gate = deferred();
+  const creates = [];
+  const repository = {
+    newId: () => id,
+    list: async () => [],
+    get: async () => null,
+    create(input, options) {
+      creates.push({ input: structuredClone(input), options });
+      return gate.promise;
+    },
+    patch: async () => null,
+    remove: async () => null,
+    subscribe: () => () => {},
+  };
+  const { sandbox, documentId, fetchCalls } = loadStickynote({ repository });
+  await tick();
+
+  const bind = { kind: "page-chars", page: 3, from: 12, to: 15, text: "示例" };
+  const payload = {
+    uid: "ai-card-42",
+    raw: "<figure>配图卡</figure>",
+    text: "配图卡",
+    isHtml: true,
+    label: "配图",
+    category: "image",
+    icon: "▧",
+  };
+  const first = sandbox.RC.stickynote.persistBoundCard(bind, payload, { x: 100, y: 120 });
+  const retry = sandbox.RC.stickynote.persistBoundCard(bind, payload, { x: 100, y: 120 });
+  assert.equal(typeof first?.then, "function", "公开入口必须返回 Promise 状态");
+  let settled = false;
+  first.then(() => { settled = true; });
+  await tick();
+  assert.equal(settled, false, "仓库写入未完成前不能提前报告 bound");
+  assert.equal(creates.length, 1, "同一 AI 卡重试不能重复创建持久记录");
+
+  const created = {
+    ...structuredClone(creates[0].input),
+    id,
+    noteId: id,
+    rev: 1,
+    deleted: false,
+  };
+  gate.resolve(created);
+  const [firstResult, retryResult] = await Promise.all([first, retry]);
+  assert.equal(firstResult.ok, true);
+  assert.equal(firstResult.noteId, id);
+  assert.equal(retryResult.ok, true);
+  assert.equal(creates[0].input.documentId, documentId);
+  assert.deepEqual(creates[0].input.html.bind, bind);
+  assert.equal(creates[0].input.html.sourceUid, payload.uid);
+  assert.equal(creates[0].input.html.category, "image");
+  assert.equal(creates[0].input.html.type, "#34d399");
+  assert.equal(creates[0].input.html.content, payload.raw);
+  assert.equal(sandbox.RC.stickynote.notes().length, 1);
+
+  const reused = await sandbox.RC.stickynote.persistBoundCard(bind, payload, { x: 100, y: 120 });
+  assert.equal(reused.ok, true);
+  assert.equal(reused.reused, true);
+  assert.equal(creates.length, 1, "已持久化的相同 uid+词区间也不能再建一张");
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("AI page-chars 回执未知后以同一 noteId+mutationId 重放，不创建第二张卡", async () => {
+  const id = `c_${"8".repeat(32)}`;
+  let newIdCalls = 0;
+  const creates = [];
+  const repository = {
+    newId() {
+      newIdCalls += 1;
+      return id;
+    },
+    list: async () => [],
+    get: async () => null,
+    create(input, options) {
+      creates.push({ input: structuredClone(input), options: structuredClone(options) });
+      if (creates.length === 1) {
+        const error = new Error("create outcome unknown");
+        error.code = "BW_DATA_OUTCOME_UNKNOWN";
+        return Promise.reject(error);
+      }
+      return Promise.resolve({
+        ...structuredClone(input),
+        id: input.noteId,
+        noteId: input.noteId,
+        rev: 1,
+        deleted: false,
+      });
+    },
+    patch: async () => null,
+    remove: async () => null,
+    subscribe: () => () => {},
+  };
+  const { sandbox } = loadStickynote({ repository });
+  await tick();
+
+  const bind = { kind: "page-chars", page: 6, from: 20, to: 22, text: "事务" };
+  const payload = {
+    uid: "ai-stable-intent",
+    raw: "<b>稳定重放</b>",
+    isHtml: true,
+    label: "文字",
+    category: "text",
+  };
+  const first = await sandbox.RC.stickynote.persistBoundCard(bind, payload, { x: 50, y: 60 });
+  assert.equal(first.ok, false);
+  const second = await sandbox.RC.stickynote.persistBoundCard(bind, payload, { x: 55, y: 65 });
+  assert.equal(second.ok, true);
+  assert.equal(newIdCalls, 1, "结果未知后不能重新取 ID");
+  assert.equal(creates.length, 2, "第二次只重放同一逻辑 create");
+  assert.equal(creates[0].input.noteId, creates[1].input.noteId);
+  assert.equal(creates[0].options.mutationId, creates[1].options.mutationId);
+  assert.deepEqual(creates[0].input, creates[1].input,
+    "重放必须连 anchor/payload 都保持不变，不能让同 mutationId 对应不同签名");
+  assert.equal(sandbox.RC.stickynote.notes().length, 1);
+});
+
+test("repository remove 只有有效墓碑投影后才报告成功并撤 UI", async () => {
+  const documentId = "web:https://example.test/article";
+  const id = `c_${"7".repeat(32)}`;
+  const repository = {
+    newId: () => `c_${"6".repeat(32)}`,
+    list: async () => [note(documentId, id, 2, "keep")],
+    get: async () => null,
+    create: async () => null,
+    patch: async () => null,
+    remove: async () => undefined,
+    subscribe: () => () => {},
+  };
+  const { sandbox, container } = loadStickynote({ repository });
+  await tick();
+  await tick();
+  const root = container.children.find((child) => child.dataset.noteId === id);
+  root.querySelector(".rc-note-del").dispatch("click");
+  await tick();
+  await tick();
+  assert.equal(sandbox.RC.stickynote.notes().length, 1,
+    "resolved 但不是 tombstone 的响应不能删除本地记录");
+  assert.equal(root.isConnected, true, "删除失败时原卡必须继续留在页面");
+});
+
 test("repository LIST 完整分页，并安全 reconcile 缺失项而保留分页途中 CHANGE", async () => {
   const documentId = "web:https://example.test/article";
   const all = Array.from({ length: 201 }, (_, index) => {

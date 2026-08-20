@@ -38,11 +38,15 @@ test("App, shared Reader, and Direct agree on the voice envelope limit", () => {
 });
 
 test("Reader structured cards acknowledge only an actual render", () => {
+  const applyStart = voicecall.indexOf("function _applyReaderRealtimeOutput(delivery)");
+  const applyEnd = voicecall.indexOf("function _acceptReaderRealtimeOutput(delivery)", applyStart);
+  assert.ok(applyStart >= 0 && applyEnd > applyStart);
+  const apply = voicecall.slice(applyStart, applyEnd);
   assert.match(
-    voicecall,
-    /delivery\.kind === 'card'[\s\S]*if \(!renderInfo\(p\.card\)\)[\s\S]*BW_READER_CARD_RENDER_FAILED/,
+    apply,
+    /delivery\.kind === 'card'[\s\S]*work = Promise\.resolve\(renderInfo\(p\.card,[\s\S]*result\.rendered !== true[\s\S]*BW_READER_CARD_RENDER_FAILED/,
   );
-  const renderStart = voicecall.indexOf("function renderInfo(card)");
+  const renderStart = voicecall.indexOf("async function renderInfo(card, options)");
   const renderEnd = voicecall.indexOf("function renderImgs(imgs)", renderStart);
   assert.ok(renderStart >= 0 && renderEnd > renderStart);
   const render = voicecall.slice(renderStart, renderEnd);
@@ -54,7 +58,7 @@ test("Reader structured cards acknowledge only an actual render", () => {
   assert.match(render, /if \(d\.isConnected\) _hosts\.push\(d\)/);
   assert.match(render, /if \(c\.el\.isConnected\) _hosts\.push\(c\.el\)/);
   assert.match(render, /var _rendered = _tcOk \|\| _hosts\.length > 0/);
-  assert.match(render, /return _rendered/);
+  assert.match(render, /return _renderInfoResult\(\s*_rendered,/);
   assert.doesNotMatch(
     render,
     /RC\.turnCard\.addPart\([^;]+;\s*_tcOk = true/,
@@ -74,16 +78,16 @@ test("Windows conversation delivery acknowledges only connected Reader bubbles",
   );
   assert.match(msg, /return !!\(d\.isConnected && d\.parentNode === thread\)/);
 
-  const acceptStart = voicecall.indexOf("function _acceptReaderRealtimeOutput(delivery)");
-  const acceptEnd = voicecall.indexOf("RC.voicecall = RC.voicecall || {}", acceptStart);
-  assert.ok(acceptStart >= 0 && acceptEnd > acceptStart);
-  const accept = voicecall.slice(acceptStart, acceptEnd);
+  const applyStart = voicecall.indexOf("function _applyReaderRealtimeOutput(delivery)");
+  const applyEnd = voicecall.indexOf("function _acceptReaderRealtimeOutput(delivery)", applyStart);
+  assert.ok(applyStart >= 0 && applyEnd > applyStart);
+  const apply = voicecall.slice(applyStart, applyEnd);
   assert.match(
-    accept,
+    apply,
     /_resetRendered[\s\S]*_userRendered[\s\S]*_assistantRendered[\s\S]*BW_READER_CONVERSATION_RENDER_FAILED/,
   );
   assert.match(
-    accept,
+    apply,
     /window\.__asstVoiceLog\([\s\S]*work = true/,
     "history persistence is scheduled only after the current Reader actually rendered both bubbles",
   );

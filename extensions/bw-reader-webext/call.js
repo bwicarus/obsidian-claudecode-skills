@@ -18,6 +18,10 @@ const LOCAL_BROWSER_CONTROL_CONTRACT = "bw-browser-control/1";
 const REALTIME_OUTPUT_CONTRACT = "reader-realtime-output/1";
 const REALTIME_OUTPUT_EVENT = "reader-realtime-output";
 const REALTIME_OUTPUT_ACK = "reader-realtime-output-ack";
+// A document-notes write may legitimately consume the facade's 15 s request
+// budget. Keep the outer frame alive beyond that budget so it cannot report an
+// unknown failure and then let the same placement commit a moment later.
+const REALTIME_OUTPUT_RECEIPT_TIMEOUT_MS = 18000;
 const VISUAL_CHUNK_CHARACTERS = 48000;
 const VISUAL_MAX_BYTES = 786432;
 const VISUAL_MAX_CHUNKS = 24;
@@ -727,7 +731,7 @@ function waitForRealtimeOutputReceipt(delivery) {
       // 超时时「钉没钉上」是真的未知 —— 不能填 floating，那是编的
       resolve({ outcome: "rejected", error: "BW_READER_REALTIME_OUTPUT_FRAME_TIMEOUT",
                 bindOutcome: "unknown", bindReason: null });
-    }, 8000);
+    }, REALTIME_OUTPUT_RECEIPT_TIMEOUT_MS);
     realtimeOutputReceipts.set(delivery.correlation, (receipt) => {
       clearTimeout(timer);
       resolve(receipt);

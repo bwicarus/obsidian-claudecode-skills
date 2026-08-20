@@ -61,6 +61,10 @@
   var ACTIVE_READING_HEARTBEAT_MS = 60000;
   var LOCAL_PAGE_CONTEXT_POLL_MS = 1500;
   var LOCAL_PAGE_TEXT_WAIT_MS = 1200;
+  var LOCAL_PAGE_CONTEXT_LIMIT = 12000;
+  var LOCAL_PAGE_CARDS_CONTRACT = "reader-local-page-cards/1";
+  var LOCAL_NOTES_CHANGED_CONTRACT = "reader-local-notes-changed/1";
+  var LOCAL_NOTES_CHANGED_EVENT = "bw:native-document-notes-changed";
   var LOCAL_HIGHLIGHT_SOURCE_REFRESH_MS = 30000;
   var LOCAL_HIGHLIGHT_SOURCE_RETRY_MS = 5000;
   var LOCAL_HIGHLIGHT_SOURCE_TTL_MARGIN_MS = 30000;
@@ -154,6 +158,7 @@
   var nativeContextRequestSequence = 0;
   var nativeContextPending = Object.create(null);
   var localHighlightSourceCache = null;
+  var localActiveReadingStates = [];
   var readerVisualCache = null;
   var readerVisualCaptureKey = null;
   var readerVisualCapturePromise = null;
@@ -6209,7 +6214,7 @@
       }),
       null
     ).then(function (value) {
-      if (!activeReadingPumpAlive(state)) return;
+      if (!activeReadingPumpAlive(state, pump)) return;
       var latest = localActiveReadingSnapshot();
       if (
         !latest || latest.file !== current.file ||
@@ -6355,72 +6360,448 @@
     } catch (_) { return ""; }
   }
 
+  function emptyLocalPageRecord(text) {
+    text = cleanLocalPageText(text || "", LOCAL_PAGE_CONTEXT_LIMIT);
+    return {
+      text: text,
+      chars: [],
+      after: [],
+      lastSource: -1,
+      truncated: false
+    };
+  }
+
+  // Keep the original provider-array index as the anchor coordinate while
+  // building the same whitespace-normalized text that page.context exposes.
+  // `after[i]` is the normalized insertion offset immediately after source
+  // character i; this makes range projection independent from the rendered DOM.
+  function normalizeLocalPageChars(chars, maximum) {
+    chars = Array.isArray(chars) ? chars : [];
+    maximum = Math.max(0, Number(maximum) || 0);
+    var text = "";
+    var normalizedChars = [];
+    var after = [];
+    var pending = "";
+    var truncated = false;
+    var lastSource = -1;
+
+    function appendValue(value, sourceIndex) {
+      var units = Array.from(String(value || ""));
+      for (var unitIndex = 0; unitIndex < units.length; unitIndex += 1) {
+        var unit = units[unitIndex];
+        if (text.length + unit.length > maximum) {
+          truncated = true;
+          return false;
+        }
+        text += unit;
+        lastSource = sourceIndex;
+      }
+      return true;
+    }
+
+    for (var index = 0; index < chars.length; index += 1) {
+      var source = chars[index] && typeof chars[index] === "object"
+        ? chars[index] : {};
+      var item = Object.assign({}, source, { _oi: index });
+      normalizedChars.push(item);
+      var value = String(source.c == null ? "" : source.c)
+        .replace(/\u0000/g, "")
+        .replace(/\r\n?/g, "\n");
+      var pieces = Array.from(value);
+      for (var partIndex = 0; partIndex < pieces.length; partIndex += 1) {
+        var part = pieces[partIndex];
+        if (part === " " || part === "\t") {
+          if (pending.indexOf("\n") < 0) pending = " ";
+          continue;
+        }
+        if (part === "\n") {
+          pending = pending.indexOf("\n") >= 0
+            ? pending.slice(0, 2) + "\n"
+            : "\n";
+          if (pending.length > 2) pending = "\n\n";
+          continue;
+        }
+        if (pending && text) {
+          if (!appendValue(pending, index)) break;
+        }
+        pending = "";
+        if (!appendValue(part, index)) break;
+      }
+      after[index] = text.length;
+      if (truncated) {
+        for (var rest = index + 1; rest < chars.length; rest += 1) {
+          normalizedChars.push(Object.assign({}, chars[rest] || {}, { _oi: rest }));
+          after[rest] = text.length;
+        }
+        break;
+      }
+    }
+    return {
+      text: text,
+      chars: normalizedChars,
+      after: after,
+      lastSource: lastSource,
+      truncated: truncated
+    };
+  }
+
   function localPageRecord(page, fallbackText) {
     page = Number(page) || 0;
     var fallback = cleanLocalPageText(
       fallbackText || localDOMPageText(page, false),
-      12000
+      LOCAL_PAGE_CONTEXT_LIMIT
     );
-    if (!page) return Promise.resolve(fallback);
+    if (!page) return Promise.resolve(emptyLocalPageRecord(fallback));
     try {
       var provider = window.BWReaderRuntime &&
         window.BWReaderRuntime.pageTextProvider;
       if (!provider || provider.contract !== "reader-page-text-provider/1" ||
           typeof provider.pageChars !== "function") {
-        return Promise.resolve(fallback);
+        return Promise.resolve(emptyLocalPageRecord(fallback));
       }
       return boundedLocalPageTask(provider.pageChars(page), null).then(
         function (result) {
           var chars = result && Array.isArray(result.chars) ? result.chars : [];
-          var text = cleanLocalPageText(chars.map(function (item) {
-            return item && item.c != null ? String(item.c) : "";
-          }).join(""), 12000);
-          return text || fallback;
+          var record = normalizeLocalPageChars(chars, LOCAL_PAGE_CONTEXT_LIMIT);
+          return record.text ? record : emptyLocalPageRecord(fallback);
         }
       );
-    } catch (_) { return Promise.resolve(fallback); }
+    } catch (_) { return Promise.resolve(emptyLocalPageRecord(fallback)); }
   }
 
-  function buildLocalPageContext(current) {
+  function localPageCardRecords(runtime, page) {
+    if (!runtime || typeof runtime.pageContextCards !== "function") {
+      // Capability skew must not regress the pre-existing plain-text context.
+      // We still never synthesize cards from DOM; only an available App-owned
+      // authoritative provider is allowed to add CARD markers.
+      return Promise.resolve([]);
+    }
+    var failed = {};
+    return boundedLocalPageTask(runtime.pageContextCards({ page: page }), failed)
+      .then(function (result) {
+        if (result === failed || !result || typeof result !== "object" ||
+            result.contract !== LOCAL_PAGE_CARDS_CONTRACT ||
+            Number(result.page) !== page ||
+            !Number.isSafeInteger(Number(result.revision)) ||
+            Number(result.revision) < 0 || !Array.isArray(result.cards) ||
+            result.cards.length > 2000) {
+          throw new Error("本机权威卡片投影无效");
+        }
+        return result.cards.map(function (card, sourceIndex) {
+          var bind = card && card.bind;
+          var from = bind && Number(bind.from);
+          var to = bind && Number(bind.to);
+          if (!card || typeof card !== "object" || Array.isArray(card) ||
+              (card.kind !== "anki" && card.kind !== "card") ||
+              typeof card.id !== "string" || !card.id || card.id.length > 240 ||
+              typeof card.label !== "string" || card.label.length > 120 ||
+              typeof card.text !== "string" || card.text.length > 2400 ||
+              !bind || typeof bind !== "object" || Array.isArray(bind) ||
+              bind.kind !== "page-chars" || Number(bind.page) !== page ||
+              !Number.isSafeInteger(from) || !Number.isSafeInteger(to) ||
+              from < 0 || to < from || to > 1000000 ||
+              typeof bind.text !== "string" || bind.text.length > 200) {
+            throw new Error("本机权威卡片条目无效");
+          }
+          return {
+            id: card.id,
+            kind: card.kind,
+            label: card.label,
+            text: card.text,
+            bind: {
+              kind: "page-chars", page: page, from: from, to: to,
+              text: bind.text
+            },
+            sourceIndex: sourceIndex
+          };
+        });
+      });
+  }
+
+  function stripLocalCardWhitespace(value) {
+    return String(value || "").replace(/\s+/g, "");
+  }
+
+  // Pure projection of a persisted page-chars anchor onto one authoritative
+  // provider array. It intentionally mirrors reader.src/34-bindcard.js and
+  // never consults page-wrap/__charBoxes or card component DOM.
+  function resolveLocalCardRange(chars, want) {
+    var from = Number(want && want.from);
+    var to = Number(want && want.to);
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)) return null;
+    to = Math.max(from, to);
+    var text = stripLocalCardWhitespace(want && want.text);
+    var hit = [];
+    var got = "";
+    for (var index = 0; index < chars.length; index += 1) {
+      var item = chars[index];
+      if (!item || index < from || index > to) continue;
+      hit.push(item);
+      if (!item.sp && item.c) got += String(item.c);
+    }
+    if (hit.length && (!text || stripLocalCardWhitespace(got) === text)) {
+      return { lo: from, hi: to, boxes: hit };
+    }
+    if (!text) return null;
+    var joined = "";
+    var sourceIndexes = [];
+    for (var cursor = 0; cursor < chars.length; cursor += 1) {
+      var character = chars[cursor];
+      if (!character || !character.c || character.sp) continue;
+      var sourceText = String(character.c);
+      for (var unit = 0; unit < sourceText.length; unit += 1) {
+        joined += sourceText.charAt(unit);
+        sourceIndexes.push(cursor);
+      }
+    }
+    var best = -1;
+    var bestDistance = Infinity;
+    var at = joined.indexOf(text);
+    while (at >= 0) {
+      var distance = Math.abs(sourceIndexes[at] - from);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = at;
+      }
+      at = joined.indexOf(text, at + 1);
+    }
+    if (best < 0) return null;
+    var lo = sourceIndexes[best];
+    var hi = sourceIndexes[Math.min(best + text.length - 1,
+      sourceIndexes.length - 1)];
+    return { lo: lo, hi: hi, boxes: chars.slice(lo, hi + 1) };
+  }
+
+  function localCardGeometry(range) {
+    var picked = (range && range.boxes || []).filter(function (box) {
+      return box && !box.sp && [box.x0, box.y0, box.x1, box.y1]
+        .every(function (value) { return Number.isFinite(Number(value)); });
+    }).map(function (box) {
+      return {
+        x0: Number(box.x0), y0: Number(box.y0),
+        x1: Number(box.x1), y1: Number(box.y1)
+      };
+    });
+    picked.sort(function (left, right) {
+      var leftHeight = Math.max(1, left.y1 - left.y0);
+      var rightHeight = Math.max(1, right.y1 - right.y0);
+      var baseline = left.y1 - right.y1;
+      return Math.abs(baseline) > Math.max(leftHeight, rightHeight) * 0.6
+        ? baseline : left.x0 - right.x0;
+    });
+    var lines = [];
+    var current = null;
+    picked.forEach(function (box) {
+      var height = Math.max(1, box.y1 - box.y0);
+      if (current && Math.abs(box.y1 - current.base) < height * 0.6) {
+        current.x0 = Math.min(current.x0, box.x0);
+        current.y0 = Math.min(current.y0, box.y0);
+        current.x1 = Math.max(current.x1, box.x1);
+        current.y1 = Math.max(current.y1, box.y1);
+      } else {
+        current = {
+          base: box.y1, x0: box.x0, y0: box.y0,
+          x1: box.x1, y1: box.y1
+        };
+        lines.push(current);
+      }
+    });
+    if (!lines.length) return null;
+    var last = lines[lines.length - 1];
+    return {
+      x: last.x1,
+      y: last.y0,
+      rowHeight: Math.max(1, lines[0].y1 - lines[0].y0)
+    };
+  }
+
+  // Page order and n= numbering are derived together from the same resolved
+  // anchors as the visible marks: rows top-to-bottom, then left-to-right.
+  function projectLocalPageCards(pageRecord, cards) {
+    var projected = [];
+    cards.forEach(function (card) {
+      var range = resolveLocalCardRange(pageRecord.chars, card.bind);
+      if (!range || range.hi > pageRecord.lastSource ||
+          !Number.isSafeInteger(pageRecord.after[range.hi])) return;
+      var geometry = localCardGeometry(range);
+      if (!geometry) return;
+      projected.push({
+        card: card,
+        range: range,
+        offset: pageRecord.after[range.hi],
+        geometry: geometry
+      });
+    });
+    var rowTolerance = projected.reduce(function (maximum, item) {
+      return Math.max(maximum, item.geometry ? item.geometry.rowHeight * 0.5 : 0);
+    }, 6);
+    projected.sort(function (left, right) {
+      if (Math.abs(left.geometry.y - right.geometry.y) > rowTolerance) {
+        return left.geometry.y - right.geometry.y;
+      }
+      var horizontal = left.geometry.x - right.geometry.x;
+      if (horizontal) return horizontal;
+      return left.card.sourceIndex - right.card.sourceIndex;
+    });
+    projected.forEach(function (item, index) { item.number = index + 1; });
+    return projected;
+  }
+
+  function escapeLocalContextText(value) {
+    return String(value || "")
+      .replace(/\\/g, "\\\\")
+      .replace(/⟦/g, "\\⟦")
+      .replace(/⟧/g, "\\⟧");
+  }
+
+  function localContextMarkerAttribute(value, maximum) {
+    return String(value || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, maximum)
+      .replace(/"/g, "'")
+      .replace(/[⟦⟧]/g, "");
+  }
+
+  function localCardMarker(item) {
+    var card = item.card;
+    return '⟦CARD_START n="' + String(item.number) +
+      '" id="' + localContextMarkerAttribute(card.id, 120) +
+      '" type="' + localContextMarkerAttribute(card.kind, 32) +
+      '" label="' + localContextMarkerAttribute(card.label, 120) +
+      '"⟧' + escapeLocalContextText(card.text) + '⟦CARD_END⟧';
+  }
+
+  function annotateLocalPageRange(pageRecord, projected, start, end) {
+    start = Math.max(0, Math.min(pageRecord.text.length, Number(start) || 0));
+    end = Math.max(start, Math.min(pageRecord.text.length, Number(end) || 0));
+    var inserts = Object.create(null);
+    projected.forEach(function (item) {
+      if (item.offset <= start || item.offset > end) return;
+      if (!inserts[item.offset]) inserts[item.offset] = [];
+      inserts[item.offset].push(item);
+    });
+    var offsets = Object.keys(inserts).map(Number).sort(function (a, b) { return a - b; });
+    var output = "";
+    var cursor = start;
+    offsets.forEach(function (offset) {
+      output += escapeLocalContextText(pageRecord.text.slice(cursor, offset));
+      inserts[offset].forEach(function (item) { output += localCardMarker(item); });
+      cursor = offset;
+    });
+    return output + escapeLocalContextText(pageRecord.text.slice(cursor, end));
+  }
+
+  // Truncate only at complete escaped units and complete CARD blocks. A block
+  // that would cross the 12k boundary is omitted whole; a consumer can never
+  // receive CARD_START without its matching CARD_END.
+  function truncateLocalPageContext(value, maximum) {
+    value = String(value || "");
+    if (value.length <= maximum) return { text: value, truncated: false };
+    var cut = maximum;
+    if (cut > 0 && /[\uD800-\uDBFF]/.test(value.charAt(cut - 1)) &&
+        /[\uDC00-\uDFFF]/.test(value.charAt(cut))) cut -= 1;
+    var index = 0;
+    var cardStartToken = "⟦CARD_START";
+    while (index < cut) {
+      if (value.charAt(index) === "\\") {
+        if (index + 1 >= cut) { cut = index; break; }
+        index += 2;
+        continue;
+      }
+      if (value.slice(index, index + cardStartToken.length) === cardStartToken) {
+        var headEnd = value.indexOf("⟧", index + cardStartToken.length);
+        var cardEnd = headEnd < 0 ? -1 : value.indexOf("⟦CARD_END⟧", headEnd + 1);
+        if (headEnd < 0 || cardEnd < 0) {
+          cut = index;
+          break;
+        }
+        var blockEnd = cardEnd + "⟦CARD_END⟧".length;
+        if (blockEnd > cut) {
+          cut = index;
+          break;
+        }
+        index = blockEnd;
+        continue;
+      }
+      index += 1;
+    }
+    return { text: value.slice(0, cut), truncated: true };
+  }
+
+  function buildLocalPageContext(current, runtime) {
     var page = Number(current.page) || 0;
     var visible = localAdapterVisibleText() || localDOMPageText(page, true);
     var previousPage = page > 1 ? page - 1 : 0;
     var nextPage = page ? page + 1 : 0;
     return Promise.all([
-      previousPage ? localPageRecord(previousPage, "") : Promise.resolve(""),
+      previousPage ? localPageRecord(previousPage, "")
+        : Promise.resolve(emptyLocalPageRecord("")),
       localPageRecord(page, visible),
-      nextPage ? localPageRecord(nextPage, "") : Promise.resolve("")
+      nextPage ? localPageRecord(nextPage, "")
+        : Promise.resolve(emptyLocalPageRecord("")),
+      // document-notes page-chars are PDF page geometry (1-based). EPUB uses
+      // section index 0 for its first section and has no compatible placement
+      // projection, so keep its established plain-text context path untouched.
+      current.kind === "pdf" && page >= 1
+        ? localPageCardRecords(runtime, page)
+        : Promise.resolve([])
     ]).then(function (records) {
-      var currentText = records[1] || visible;
+      var previous = records[0];
+      var currentPage = records[1];
+      var next = records[2];
+      var projected = projectLocalPageCards(currentPage, records[3]);
+      var currentText = currentPage.text || visible;
       if (!visible) visible = currentText.slice(0, 5000);
-      var before = records[0] ? records[0].slice(-2200) : "";
-      var after = records[2] ? records[2].slice(0, 2200) : "";
       var exactIndex = visible ? currentText.indexOf(visible) : -1;
-      if (exactIndex >= 0) {
-        before = cleanLocalPageText(
-          (before ? before + "\n" : "") +
-          currentText.slice(Math.max(0, exactIndex - 1800), exactIndex),
-          4000
-        );
-        after = cleanLocalPageText(
-          currentText.slice(exactIndex + visible.length, exactIndex + visible.length + 1800) +
-          (after ? "\n" + after : ""),
-          4000
-        );
-      }
       var sections = [];
-      if (before) sections.push("【当前显示区域之前】\n" + before);
-      if (visible) {
-        sections.push("【当前显示区域（重点）】\n" + visible);
-      } else if (currentText) {
-        sections.push("【当前页文字（视口范围暂不可精确定位）】\n" + currentText);
+      if (exactIndex >= 0) {
+        var beforeParts = [];
+        if (previous.text) {
+          beforeParts.push(escapeLocalContextText(previous.text.slice(-2200)));
+        }
+        var beforeStart = Math.max(0, exactIndex - 1800);
+        var beforeCurrent = annotateLocalPageRange(
+          currentPage, projected, beforeStart, exactIndex
+        );
+        if (beforeCurrent) beforeParts.push(beforeCurrent);
+        if (beforeParts.length) {
+          sections.push("【当前显示区域之前】\n" + beforeParts.join("\n"));
+        }
+        if (visible) {
+          sections.push("【当前显示区域（重点）】\n" + annotateLocalPageRange(
+            currentPage, projected, exactIndex, exactIndex + visible.length
+          ));
+        }
+        var afterParts = [];
+        var visibleEnd = exactIndex + visible.length;
+        var afterCurrent = annotateLocalPageRange(
+          currentPage, projected, visibleEnd,
+          Math.min(currentText.length, visibleEnd + 1800)
+        );
+        if (afterCurrent) afterParts.push(afterCurrent);
+        if (next.text) afterParts.push(escapeLocalContextText(next.text.slice(0, 2200)));
+        if (afterParts.length) {
+          sections.push("【当前显示区域之后】\n" + afterParts.join("\n"));
+        }
+      } else {
+        if (previous.text) {
+          sections.push("【当前显示区域之前】\n" +
+            escapeLocalContextText(previous.text.slice(-2200)));
+        }
+        if (currentText) {
+          sections.push("【当前页文字（视口范围暂不可精确定位）】\n" +
+            annotateLocalPageRange(currentPage, projected, 0, currentText.length));
+        }
+        if (next.text) {
+          sections.push("【当前显示区域之后】\n" +
+            escapeLocalContextText(next.text.slice(0, 2200)));
+        }
       }
-      if (after) sections.push("【当前显示区域之后】\n" + after);
-      var text = sections.join("\n\n");
-      var truncated = text.length > 12000 ||
-        currentText.length >= 12000 || records[0].length >= 12000 ||
-        records[2].length >= 12000;
-      text = text.slice(0, 12000);
+      var bounded = truncateLocalPageContext(
+        sections.join("\n\n"), LOCAL_PAGE_CONTEXT_LIMIT
+      );
+      var text = bounded.text;
       return {
         kind: current.kind,
         file: current.file,
@@ -6430,7 +6811,8 @@
         textAvailable: !!text.trim(),
         textSource: "app-local-visible-window",
         fallbackReason: text ? null : "本机文字层尚未提供当前页文字",
-        truncated: truncated
+        truncated: bounded.truncated || currentPage.truncated ||
+          previous.truncated || next.truncated
       };
     });
   }
@@ -6443,10 +6825,12 @@
         now - pump.lastPageContextCheckAt < LOCAL_PAGE_CONTEXT_POLL_MS) return;
     pump.lastPageContextCheckAt = now;
     pump.pageContextInFlight = true;
+    var generation = pump.pageContextGeneration;
     Promise.resolve(typeof runtime.ready === "function" ? runtime.ready() : null)
-      .then(function () { return buildLocalPageContext(current); })
+      .then(function () { return buildLocalPageContext(current, runtime); })
       .then(function (payload) {
-        if (!activeReadingPumpAlive(state)) return null;
+        if (!activeReadingPumpAlive(state, pump) ||
+            generation !== pump.pageContextGeneration) return null;
         var latest = localActiveReadingSnapshot();
         if (!latest || latest.file !== current.file ||
             !sameActiveScalar(latest.page, current.page)) return null;
@@ -6464,14 +6848,21 @@
         }
       }).finally(function () {
         pump.pageContextInFlight = false;
+        if (generation !== pump.pageContextGeneration &&
+            activeReadingPumpAlive(state, pump)) {
+          pump.lastPageContextCheckAt = 0;
+          var latest = localActiveReadingSnapshot();
+          if (latest) maybePublishLocalPageContext(state, pump, latest);
+        }
       });
   }
 
-  function activeReadingPumpAlive(state) {
+  function activeReadingPumpAlive(state, pump) {
     return !!(
       state &&
-      state.activeReadingPump &&
-      !state.activeReadingPump.stopped &&
+      pump &&
+      state.activeReadingPump === pump &&
+      !pump.stopped &&
       contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT &&
       (
         state.nativeContext === true
@@ -6483,10 +6874,36 @@
     );
   }
 
+  function localNotesChanged(event) {
+    var detail = event && event.detail;
+    if (!detail || typeof detail !== "object" || Array.isArray(detail) ||
+        detail.contract !== LOCAL_NOTES_CHANGED_CONTRACT ||
+        typeof detail.file !== "string" || !detail.file ||
+        !Number.isSafeInteger(Number(detail.revision)) ||
+        Number(detail.revision) < 1 || typeof detail.source !== "string") return;
+    var current = localActiveReadingSnapshot();
+    if (!current || current.file !== detail.file) return;
+    var states = localActiveReadingStates.slice();
+    states.forEach(function (state) {
+      var pump = state && state.activeReadingPump;
+      if (!activeReadingPumpAlive(state, pump)) return;
+      pump.pageContextGeneration += 1;
+      pump.lastPageContextCheckAt = 0;
+      // page.context has its own in-flight fence, so a notes commit must not
+      // wait for an unrelated active-reading request. If a context build is
+      // already running, its generation mismatch starts this pass in finally.
+      if (!pump.pageContextInFlight) {
+        maybePublishLocalPageContext(state, pump, current);
+      }
+    });
+  }
+
   function stopActiveReadingPump(state) {
     var pump = state && state.activeReadingPump;
     if (!pump || pump.stopped) return;
     pump.stopped = true;
+    var stateIndex = localActiveReadingStates.indexOf(state);
+    if (stateIndex >= 0) localActiveReadingStates.splice(stateIndex, 1);
     if (pump.timer) {
       clearTimeout(pump.timer);
       pump.timer = null;
@@ -6496,7 +6913,7 @@
 
   function scheduleActiveReadingPump(state, delay) {
     var pump = state && state.activeReadingPump;
-    if (!activeReadingPumpAlive(state) || pump.timer) return;
+    if (!activeReadingPumpAlive(state, pump) || pump.timer) return;
     pump.timer = setTimeout(function () {
       pump.timer = null;
       runActiveReadingPump(state);
@@ -6526,7 +6943,7 @@
 
   function runActiveReadingPump(state) {
     var pump = state && state.activeReadingPump;
-    if (!activeReadingPumpAlive(state) || pump.inFlight) return;
+    if (!activeReadingPumpAlive(state, pump) || pump.inFlight) return;
     var current = localActiveReadingSnapshot();
     if (!current) {
       scheduleActiveReadingPump(state, ACTIVE_READING_POLL_MS);
@@ -6546,7 +6963,7 @@
     }
     pump.inFlight = true;
     Promise.resolve().then(function () {
-      if (!activeReadingPumpAlive(state)) return null;
+      if (!activeReadingPumpAlive(state, pump)) return null;
       var latest = localActiveReadingSnapshot();
       if (!latest || JSON.stringify(latest) !== signature) {
         return null;
@@ -6566,14 +6983,14 @@
         return;
       }
       normalizeActiveReadingAck(value, state);
-      if (!activeReadingPumpAlive(state)) return;
+      if (!activeReadingPumpAlive(state, pump)) return;
       pump.lastSignature = signature;
       pump.lastSentAt = Date.now();
       pump.inFlight = false;
       scheduleActiveReadingPump(state, ACTIVE_READING_POLL_MS);
     }).catch(function (error) {
       pump.inFlight = false;
-      if (!activeReadingPumpAlive(state)) return;
+      if (!activeReadingPumpAlive(state, pump)) return;
       if (error && error.retryable === true) {
         scheduleActiveReadingPump(state, CONTEXT_RETRY_MS);
         return;
@@ -6591,6 +7008,7 @@
       lastSignature: null,
       lastSentAt: 0,
       pageContextInFlight: false,
+      pageContextGeneration: 0,
       lastPageContextCheckAt: 0,
       lastPageContextSignature: null,
       lastPageContextError: "",
@@ -6599,6 +7017,9 @@
       nextHighlightSourceCheckAt: 0,
       lastHighlightSourceError: "",
     };
+    if (localActiveReadingStates.indexOf(state) < 0) {
+      localActiveReadingStates.push(state);
+    }
     runActiveReadingPump(state);
   }
 
@@ -6963,7 +7384,7 @@
   function proveSnapshotPublication(state) {
     if (
       !contextPumpAlive(state, state && state.contextPump) ||
-      !activeReadingPumpAlive(state)
+      !activeReadingPumpAlive(state, state && state.activeReadingPump)
     ) {
       return Promise.reject(directError(
         "Windows 本地 Reader 快照发送泵需要重建",
@@ -8389,6 +8810,7 @@
       "bw-native-reader-foreground",
       resumeSnapshotLinkFromForeground
     );
+    window.addEventListener(LOCAL_NOTES_CHANGED_EVENT, localNotesChanged);
   }
   if (document && typeof document.addEventListener === "function") {
     document.addEventListener(

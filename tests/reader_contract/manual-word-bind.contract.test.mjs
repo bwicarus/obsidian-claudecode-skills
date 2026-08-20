@@ -63,11 +63,17 @@ test("挂载时画标记，并把浮层收起来；绑不上则原样显示", ()
 
 test("点标记展开的是真卡，不是内建的纯文本框", () => {
   // 用户 2026-08-19：「打开的卡片应该是我们本来设计的卡片而不是你现在这个」
-  assert.match(BINDCARD, /if \(payload && typeof payload\.onToggle === 'function'\) \{ payload\.onToggle\(\); return; \}/);
-  // 出口必须在 _toggleBindCard **之前**，否则两个都会开
+  assert.match(BINDCARD, /on = !!payload\.onToggle\(\{ source: source, bindKey: key, category: _bindCategory\(payload\) \}\)/);
+  assert.match(NOTE, /wordPortalIn\(ctl\);\s*\/\/ body-fixed/,
+    "宿主真卡必须 body-fixed portal 到页面容器之外，不能继续被 #main/page-wrap 裁切");
+  assert.match(NOTE, /_placeWordCard\(ctl, meta && meta\.source\)/);
+  // 宿主出口必须在兜底 _toggleBindCard **之前**，否则两个都会开
   const open = BINDCARD.slice(BINDCARD.indexOf("var open = function (ev)"));
-  assert.ok(open.indexOf("payload.onToggle()") < open.indexOf("_toggleBindCard(layer"),
+  assert.ok(open.indexOf("payload.onToggle(") < open.indexOf("_toggleBindCard(key"),
     "宿主出口排在内建浮层之后 = 两份卡同时开");
+  // 无宿主的兼容路径也必须复用正式 vc-card，旧 pgbind-card 视觉不能复活
+  assert.match(BINDCARD, /RC\.voiceCard\.renderInto\(host,/);
+  assert.doesNotMatch(BINDCARD, /host\.className = 'pgbind-card'/);
 });
 
 test("标记靠分层避开查词，不靠任何忽略名单", () => {
@@ -132,7 +138,8 @@ test("删卡要撤掉词框和序号，否则整页序号从此错位", () => {
   // 撤的必须是**这张卡**的标记，不能误伤同一个词上的另一张
   assert.match(BINDCARD, /var uk = uid \? \('u' \+ String\(uid\)/);
   assert.match(NOTE, /window\.__pageBindRemove\(_b, ctl\.note\.id\)/);
-  assert.match(BINDCARD, /_removeMark\(layer, key\);\s*\n\s*\/\/ 展开着的那张也要收掉/);
+  assert.match(BINDCARD, /function _removeMark\(layer, key\) \{\s*\n\s*_removeRailMark\(key\)/,
+    "正文标记删除时右侧浮标必须同步删除");
   assert.match(BINDCARD, /_renumberMarks\(pw\);\s*\n\s*return had;/, "撤掉之后必须整页重排序号");
   // 便签删除路径要真的调它，且必须在 root.remove() **之前**（之后就读不到 note 了）
   const rm = NOTE.slice(NOTE.indexOf("function removeLocal(noteId)"));
@@ -150,7 +157,7 @@ test("撤标记按解析后的区间找 key，不按 bind.from/to 反推", () =>
   );
   assert.ok(body.length > 0);
   assert.match(body, /_resolveRange\(boxes, \{/);
-  assert.match(body, /key = 'b' \+ rg\.lo \+ '_' \+ rg\.hi/);
+  assert.match(body, /key = 'p' \+ page \+ 'b' \+ rg\.lo \+ '_' \+ rg\.hi/);
 });
 
 test("拖动已词锚的卡 = 重新锚定，而且必须挂在**真的**拖动路径上", () => {
@@ -168,8 +175,8 @@ test("拖动已词锚的卡 = 重新锚定，而且必须挂在**真的**拖动�
   // 探测点必须跟同一函数里的 reanchorAt 用同一个点，否则 anchor 和 bind 分家
   assert.match(drop, /reanchorAt\(ctl, _lr\.left \+ 1, _lr\.top \+ 1\)/,
     "两处探测点不一致 = anchor 和 bind 指向不同的地方");
-  // 换了 bind 必须跟 card 一起落库，否则重开又回到旧词
-  assert.match(drop, /if \(_rb\) _pf\.card = ctl\.note\.card;/);
+  // 换了 bind 必须把实际 card/html 槽一起落库，否则重开又回到旧词
+  assert.match(drop, /if \(_rb\) _pf\[_rb\] = ctl\.note\[_rb\];/);
   // 缩放手柄那条路**不该**再有重锚（它是死代码，留着只会让人以为已经处理了）
   const iTL = NOTE.indexOf("function onResizeTLUp()");
   const iTLEnd = NOTE.indexOf("\n  function ", iTL + 10);
@@ -185,7 +192,9 @@ test("拖动已词锚的卡 = 重新锚定，而且必须挂在**真的**拖动�
 
 test("展开时重算尺寸 —— 卡是在 display:none 里 mount 的", () => {
   // 那时 _formW 量到的宽是 0。不补这一下，第一次展开的卡宽度是错的。
-  assert.match(NOTE, /if \(ctl\._bindOpen\) \{ try \{ syncCtl\(ctl\); \} catch \(e\) \{\} \}/);
+  const toggle = NOTE.slice(NOTE.indexOf("onToggle: function (meta)"), NOTE.indexOf("});", NOTE.indexOf("onToggle: function (meta)")) + 3);
+  assert.match(toggle, /ctl\._bindOpen = true;/);
+  assert.match(toggle, /try \{ syncCtl\(ctl\); \} catch \(e\) \{\}/);
   // 靠 renderNoteCard 的 __sig 守卫避免重建卡片 DOM（重建 = 学习状态丢）。
   // 而宽度计算必须排在守卫**之前**，否则补跑等于没跑。
   const rc = NOTE.slice(NOTE.indexOf("function renderNoteCard(ctl)"));

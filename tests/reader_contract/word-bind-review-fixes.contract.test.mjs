@@ -19,10 +19,10 @@ test("标记按卡片身份去重，不按它落在哪个词", () => {
   // 5 个独立视角都撞到这条。用区间当 key 时，同一个词上的第二张卡会把第一张的
   // 标记删掉；而第一张此时已被 _applyWordBind 设成 display:none，于是它
   // **看不见也点不开**，并且永远恢复不了（它自己每次都 ok，走不到失败兜底）。
-  assert.match(BINDCARD, /var key = uid \? \('u' \+ uid\) : \('b' \+ range\.lo \+ '_' \+ range\.hi\);/);
+  assert.match(BINDCARD, /var key = uid \? \('u' \+ uid\) : \('p' \+ page \+ 'b' \+ range\.lo \+ '_' \+ range\.hi\);/);
   // 两条路都要传身份，少一条那条路就还是老行为
   assert.match(NOTE, /uid: ctl\.note\.id,/, "便签侧没传身份");
-  assert.match(VOICE, /uid: card\.cid \|\| '',/, "AI 侧没传身份");
+  assert.match(VOICE, /uid: card\.cid \|\| options\.uid \|\| '',/, "AI 侧没传身份");
   // 撤除同理
   assert.match(BINDCARD, /window\.__pageBindRemove = function \(bind, uid\)/);
 });
@@ -65,10 +65,11 @@ test("标记层压过所有装饰叠层", () => {
   // 振假名 8 / 手写 7 / 译页 9 / 插图 9 都是 pointer-events:none，
   // 只会**视觉**盖住角标 —— 但看不见的把手等于没有把手。
   assert.match(CSS, /\.pgbind-layer \{ position: absolute; inset: 0; pointer-events: none; z-index: 10; \}/);
-  // 层内层级：描边 < 角标 < 展开的卡
+  // 层内层级：描边 < 角标；展开卡逃出页容器进入顶层 portal。
   assert.match(CSS, /\.pgmark \{ position: absolute; z-index: 1;/);
   assert.match(CSS, /\.pgmark-n \{ position: absolute; z-index: 2;/);
-  assert.match(BINDCARD, /'width:' \+ w \+ 'px;z-index:3';/);
+  assert.match(CSS, /\.pgbind-card-portal \{ position: fixed; z-index: 190;/);
+  assert.match(NOTE, /ov\.style\.cssText = 'position:absolute;left:0;top:0;width:0;height:0;z-index:190;pointer-events:none'/);
 });
 
 test("removeAllEls 也要撤标记，否则留下点不动的孤儿", () => {
