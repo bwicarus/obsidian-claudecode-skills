@@ -365,7 +365,7 @@ if (window.__bwPwaProviderOnly) return;
       // 不撤会永远留在页上,而且**后面所有序号都错位**(序号是位置不是身份)。
       try {
         var _b = ctl.note && ctl.note.card && ctl.note.card.bind;
-        if (_b && window.__pageBindRemove) window.__pageBindRemove(_b);
+        if (_b && window.__pageBindRemove) window.__pageBindRemove(_b, ctl.note.id);
       } catch (_) {}
       try { ctl.root.remove(); } catch (_) {}
       try { if (ctl._ph) ctl._ph.remove(); } catch (_) {}
@@ -1189,7 +1189,7 @@ if (window.__bwPwaProviderOnly) return;
           text: String(wr.text).slice(0, 200) }
       : null;
     if (nb && nb.page === old.page && nb.from === old.from && nb.to === old.to) return false;
-    try { if (window.__pageBindRemove) window.__pageBindRemove(old); } catch (e) {}
+    try { if (window.__pageBindRemove) window.__pageBindRemove(old, ctl.note.id); } catch (e) {}
     ctl.note.card.bind = nb;
     ctl._bindMarked = false;
     if (!nb) ctl.root.style.display = '';   // 退回普通便签，别把卡藏没了
@@ -1206,9 +1206,21 @@ if (window.__bwPwaProviderOnly) return;
   function _applyWordBind(ctl) {
     var b = ctl.note && ctl.note.card && ctl.note.card.bind;
     if (!b || !window.__pageBindCard) return;
+    // ⚠ 先藏起来再试。挂载点是 04-render.js 的 dataset.loaded='1'，那时
+    //   `wrap.__charBoxes` 还没挂上（08-charlayer 的 fetch 是异步的），
+    //   所以第一次必然拿到 no-char-layer。不先藏的话，每次翻页/缩放都会先
+    //   闪出一张**完整的浮层卡盖住正文**，几百毫秒后才收成描边 —— 而这正是
+    //   用户否掉圆球时说的「遮挡视野」。
+    //   它是词锚卡这件事**已经存在于数据里**（card.bind），不需要等渲染确认。
+    //   真的绑不上时下面会把它放回来（那条路径本来就要求"原样显示"）。
+    if (!ctl._bindOpen && ctl.root.style.display !== 'none') ctl.root.style.display = 'none';
     var res = null;
     try {
       res = window.__pageBindCard(b, {
+        // 标记按**这张便签的身份**去重，不按它落在哪个词 —— 否则同一个词上的
+        // 第二张卡会把第一张的标记删掉，而第一张此时已 display:none，从此
+        // 看不见也点不开（且它自己每次都 ok，走不到下面那条恢复分支）。
+        uid: ctl.note.id,
         label: '🎴 卡片',
         onToggle: function () {
           ctl._bindOpen = !ctl._bindOpen;
@@ -1232,10 +1244,16 @@ if (window.__bwPwaProviderOnly) return;
         try { console.warn('[bind] 词锚没画上，退回浮层便签', ctl.note.id, res); } catch (e) {}
       }
     }
-    if (!(res && res.ok) && ctl._bindMarked) {
-      // 之前标上过、这次没标上（换页/重渲）——先回到可见，别把卡片藏没了
+    if (!(res && res.ok)) {
       ctl._bindMarked = false;
-      ctl.root.style.display = '';
+      // 上面为了不闪先把它藏了 —— 那就必须分清「等一下还会成」和「这页就是不成」，
+      // 否则一张永远绑不上的卡会**永久隐身**，比闪一下糟得多。
+      //   · page-not-rendered / no-char-layer = 还没轮到它，重试马上会来（08-charlayer
+      //     在 __charBoxes 挂上后就调 repositionAll）→ 继续藏着，不闪。
+      //   · 其它（区间解析不出来 / 不是这页 / 异常）= 这页当前状态下就是不成
+      //     → 立刻放回来，退化成普通浮层便签，用户至少还能看到内容。
+      var _tmp = res && (res.why === 'page-not-rendered' || res.why === 'no-char-layer');
+      if (!_tmp) ctl.root.style.display = '';
     }
   }
   // 全量重挂/重定位:ensureMounted 幂等(容器校验/换容器重挂/位置重算全在里面)。
@@ -1247,6 +1265,14 @@ if (window.__bwPwaProviderOnly) return;
   }
   function removeAllEls() {
     for (var id in ctls) {
+      // 词锚的描边和序号在 pgbind-layer 里，不跟着便签 root 走。
+      // removeAllEls 的调用方（loadAll：撤销、AI 改便签、跨端 LIST 回来）
+      // **不重建 page-wrap**，所以不撤就成了孤儿：框和数字留在页上，
+      // 点了没反应，而且把后面的序号一起顶歪。
+      try {
+        var _b0 = ctls[id].note && ctls[id].note.card && ctls[id].note.card.bind;
+        if (_b0 && window.__pageBindRemove) window.__pageBindRemove(_b0, id);
+      } catch (e0) {}
       try { ctls[id].root.remove(); } catch (e) {}
       try { if (ctls[id]._ph) ctls[id]._ph.remove(); } catch (e2) {}   // 清占位,防叠加层/页容器残留孤儿
     }

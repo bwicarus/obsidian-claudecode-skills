@@ -629,14 +629,19 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 /* ── 钉在书页正文上的卡（bind.kind === 'page-chars'，C15 第二版）──
    位置由字符层的 charBoxes 直接给出，跟高亮同一个坐标系：页内绝对定位，
    页面缩放时整层一起变。**不要** fixed + JS 跟滚 —— 那是便签系统写下的禁令。 */
-.pgbind-layer { position: absolute; inset: 0; pointer-events: none; }
+/* z-index 排在**所有装饰叠层之上**（振假名 8 / 手写 7 / 译页 9 / 插图 9）。
+   那几层都是 pointer-events:none，所以只会**视觉**盖住角标 —— 但角标看不见
+   就等于卡片的把手没了（点不中一个看不见的东西）。装饰可以被压住一点，
+   把手不能。层本身仍是 none，只有 .pgmark/.pgmark-n 子元素接事件，
+   所以不会抢走 char-layer 的查词，也不挡手写。 */
+.pgbind-layer { position: absolute; inset: 0; pointer-events: none; z-index: 10; }
 /* 词锚标记（用户设计 2026-08-20）：给被锚的词描边，**中间不填色**。
    用户原话：「实际的书中字符可不像你的例子那样有足够的空白位置，这样会盖到
    其它字符」——标记不能抢正文面积。填色即便走 multiply 也仍然改了字的底色，
    而扫描书底色本来就不匀；描边完全不碰字像素。
    ⚠ 边框色由 JS 按卡片色调推出（--pm-b），不是色调原色：原色在纸上只有
    1.6~2.5:1，够不到 WCAG 对图形元素的 3:1。 */
-.pgmark { position: absolute; z-index: 6; pointer-events: auto; cursor: pointer;
+.pgmark { position: absolute; z-index: 1; pointer-events: auto; cursor: pointer;
   border: 1.5px solid var(--pm-b); border-radius: 3px; background: transparent;
   /* pan-y:标记盖在正文上,不给它就等于在书页上开了个"滑不动"的洞——手指恰好
      落在带卡的词上时页面不跟手。照抄 .fig-hit 那条(26-figures.js)。
@@ -649,7 +654,7 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 .pgmark.on { border-color: var(--pm-i); box-shadow: 0 0 0 2.5px var(--pm-h); }
 /* 角标序号：骑在框的右上角外侧，落进行间空隙。
    **不给实心底** —— 实心块会盖住相邻字，光晕只吃掉字形笔画周围一圈。 */
-.pgmark-n { position: absolute; z-index: 6; pointer-events: auto; cursor: pointer;
+.pgmark-n { position: absolute; z-index: 2; pointer-events: auto; cursor: pointer;
   touch-action: pan-y; -webkit-tap-highlight-color: transparent;
   font: 700 9.5px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", system-ui, sans-serif;
   font-variant-numeric: tabular-nums; color: var(--pm-i); letter-spacing: .02em;

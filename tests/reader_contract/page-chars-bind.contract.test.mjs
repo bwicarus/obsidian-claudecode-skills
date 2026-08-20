@@ -95,8 +95,13 @@ test("序号是页内位置，加删卡后整页重排", () => {
   // 序号是位置不是身份 —— 所以每次全量重算，不维护自增计数器
   assert.match(BINDCARD, /function _renumberMarks/);
   assert.match(BINDCARD, /ns\[i\]\.textContent = String\(i \+ 1\)/);
-  // 先行后列
-  assert.match(BINDCARD, /if \(Math\.abs\(ta - tb\) > 6\) return ta - tb;/);
+  // 先行后列。⚠ 同行判据是**相对行高**，不是固定 6px：同一行不同字号/字形的
+  //   两个词，字形顶边差常常超过 6px，固定阈值会把同一行判成上下关系，
+  //   编号顺序跟阅读顺序相反 —— 而人和 AI 说的「第 3 个」就此不是同一张。
+  assert.match(BINDCARD, /var rowTol = Math\.max\(6, lh \* 0\.5\);/);
+  assert.match(BINDCARD, /if \(Math\.abs\(ta - tb\) > rowTol\) return ta - tb;/);
+  // 排序基准是被锚词的顶边（dataset.by，内容坐标），不是角标自己的 style.top
+  assert.match(BINDCARD, /parseFloat\(el\.dataset\.by \|\| el\.style\.top\)/);
 });
 
 test("卡片按需展开，且一次只开一张", () => {

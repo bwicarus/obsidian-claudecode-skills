@@ -51,8 +51,12 @@ test("挂载时画标记，并把浮层收起来；绑不上则原样显示", ()
   assert.match(NOTE, /function _applyWordBind\(ctl\)/);
   assert.match(NOTE, /window\.__pageBindCard\(b, \{/);
   assert.match(NOTE, /ctl\.root\.style\.display = ctl\._bindOpen \? '' : 'none'/);
-  // 绑不上（页没渲染 / 文字层换过）时必须回到可见，否则表现是「卡片不见了」
-  assert.match(NOTE, /ctl\._bindMarked = false;\s*\n\s*ctl\.root\.style\.display = '';/);
+  // 挂载时先藏 —— 不藏的话每次翻页都会先闪一张完整浮层卡盖住正文
+  assert.match(NOTE, /if \(!ctl\._bindOpen && ctl\.root\.style\.display !== 'none'\) ctl\.root\.style\.display = 'none';/);
+  // 但"先藏"就必须分清暂时失败和真失败，否则一张永远绑不上的卡会**永久隐身**
+  assert.match(NOTE, /res\.why === 'page-not-rendered' \|\| res\.why === 'no-char-layer'/);
+  assert.match(NOTE, /if \(!_tmp\) ctl\.root\.style\.display = '';/,
+    "真失败时不放回来 = 卡片藏没了，比闪一下糟得多");
   // EPUB 没有这个全局 —— 缺它要静静回落到老浮层，不能抛
   assert.match(NOTE, /if \(!b \|\| !window\.__pageBindCard\) return;/);
 });
@@ -71,7 +75,11 @@ test("标记靠分层避开查词，不靠任何忽略名单", () => {
   const SEL = read("_server_deploy/static/pdf/reader.src/13-selection.js");
   // 层 none + 子元素 auto。层若是 auto 且铺满整页 → **整页查词全死**，
   // 而症状是"点字没反应"，不会有任何报错。
-  assert.match(CSS, /\.pgbind-layer \{ position: absolute; inset: 0; pointer-events: none; \}/);
+  assert.match(CSS, /\.pgbind-layer \{ position: absolute; inset: 0; pointer-events: none; z-index: 10; \}/);
+  // 层要压过振假名(8)/手写(7)/译页(9)/插图(9)：那几层都是 pointer-events:none，
+  // 只会**视觉**盖住角标 —— 而看不见的把手等于没有把手。
+  assert.match(CSS, /\.ruby-layer\{[^}]*z-index:8/);
+  assert.match(CSS, /\.page-tr-layer\{[^}]*z-index:9/);
   assert.match(CSS, /\.pgmark \{[^}]*pointer-events: auto/);
   // 反过来：标记盖在正文上，char-layer 的手势处理必须挂在 cl 自身，
   // 挂到 pw/document 上的话标记就吃不掉事件 → 点标记同时触发查词。
@@ -120,12 +128,15 @@ test("删卡要撤掉词框和序号，否则整页序号从此错位", () => {
   // 序号是**位置**不是身份，少一个就得整页重排。留在页上的话，人说的
   // 「第 3 个」和 AI 数出来的第 3 个就不是同一张了 —— 而这正是页内编号
   // 存在的理由（用户 2026-08-19：「这样就可以在沟通时说，把第三个删掉」）。
-  assert.match(BINDCARD, /window\.__pageBindRemove = function \(bind\)/);
+  assert.match(BINDCARD, /window\.__pageBindRemove = function \(bind, uid\)/);
+  // 撤的必须是**这张卡**的标记，不能误伤同一个词上的另一张
+  assert.match(BINDCARD, /var uk = uid \? \('u' \+ String\(uid\)/);
+  assert.match(NOTE, /window\.__pageBindRemove\(_b, ctl\.note\.id\)/);
   assert.match(BINDCARD, /_removeMark\(layer, key\);\s*\n\s*\/\/ 展开着的那张也要收掉/);
   assert.match(BINDCARD, /_renumberMarks\(pw\);\s*\n\s*return had;/, "撤掉之后必须整页重排序号");
   // 便签删除路径要真的调它，且必须在 root.remove() **之前**（之后就读不到 note 了）
   const rm = NOTE.slice(NOTE.indexOf("function removeLocal(noteId)"));
-  const iCall = rm.indexOf("window.__pageBindRemove(_b)");
+  const iCall = rm.indexOf("window.__pageBindRemove(_b, ctl.note.id)");
   const iRootRm = rm.indexOf("ctl.root.remove()");
   assert.ok(iCall >= 0 && iCall < iRootRm, "撤标记要排在便签 DOM 移除之前");
 });
@@ -134,7 +145,7 @@ test("撤标记按解析后的区间找 key，不按 bind.from/to 反推", () =>
   // key 是 _resolveRange **之后**的区间。文字层换过时两者不相等，
   // 按 bind.from/to 反推会漏删 —— 表现是「删了卡，框还在」。
   const body = BINDCARD.slice(
-    BINDCARD.indexOf("window.__pageBindRemove = function (bind)"),
+    BINDCARD.indexOf("window.__pageBindRemove = function (bind, uid)"),
     BINDCARD.indexOf("/// 绑不上的卡记下来"),
   );
   assert.ok(body.length > 0);

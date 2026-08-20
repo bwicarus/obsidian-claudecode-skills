@@ -13681,14 +13681,41 @@ window._lbClick = _lbClick;
     var layer = pw.querySelector('.pgbind-layer');
     if (!layer) return;
     var ns = [].slice.call(layer.querySelectorAll('.pgmark-n'));
+    // ⚠ 排序基准是被锚词的**顶边**（dataset.by），不是角标自己的 style.top ——
+    //   两者差一个固定偏移，但 by 才是内容坐标，跟 _rangeRects 同源。
+    //   同行判据用**行高的一半**而不是固定 6px：同一行不同字号/字形的两个词，
+    //   顶边差常常超过 6px，用固定阈值会把同一行判成上下关系，编号跟阅读顺序
+    //   相反 —— 而人和 AI 说的「第 3 个」就此不是同一张。
+    var byOf = function (el) { return parseFloat(el.dataset.by || el.style.top) || 0; };
+    var bxOf = function (el) { return parseFloat(el.dataset.bx || el.style.left) || 0; };
+    var lh = 0;
+    for (var m0 = 0; m0 < ns.length; m0++) {
+      var mk = layer.querySelector('.pgmark[data-bindkey="' + ns[m0].dataset.bindkey + '"]');
+      var h0 = mk ? (parseFloat(mk.style.height) || 0) : 0;
+      if (h0 > lh) lh = h0;
+    }
+    var rowTol = Math.max(6, lh * 0.5);
     ns.sort(function (a, b) {
-      var ta = parseFloat(a.style.top) || 0, tb = parseFloat(b.style.top) || 0;
-      if (Math.abs(ta - tb) > 6) return ta - tb;
-      return (parseFloat(a.style.left) || 0) - (parseFloat(b.style.left) || 0);
+      var ta = byOf(a), tb = byOf(b);
+      if (Math.abs(ta - tb) > rowTol) return ta - tb;
+      return bxOf(a) - bxOf(b);
     });
+    // 同一个词上有多张卡时角标会完全重叠 → 点不中被压住的那个。按顺序横向错开。
+    var seen = {};
     for (var i = 0; i < ns.length; i++) {
       ns[i].textContent = String(i + 1);
       ns[i].title = '本页第 ' + (i + 1) + ' 张卡片';
+      var sig = ns[i].dataset.bx + ',' + ns[i].dataset.by;
+      if (ns[i].dataset.bx == null) continue;
+      var dup = seen[sig] || 0; seen[sig] = dup + 1;
+      // ⚠ 角标往**词的内侧**放，右边缘对齐词的右边缘 —— 不要往外挑。
+      //   往外只偏 2.5px 的话，在无空格排版（中日文）+ 紧贴墨迹的 OCR 文字层
+      //   + 低缩放这三条同时成立时，白光晕会啃掉**后一个字**左上角的笔画。
+      //   盖自己这个词的尾巴无所谓（它本来就被框起来了，是这张卡的地盘），
+      //   盖邻字才是用户说的「遮挡」。宽度按位数估（9.5px 字重 700 约 5.4px/位）。
+      //   序号变多位数时也要跟着退，所以这里算、不在建元素时算。
+      var wEst = String(ns[i].textContent || '1').length * 5.4 + 1;
+      ns[i].style.left = ((parseFloat(ns[i].dataset.bx) || 0) - wEst - dup * (wEst + 2)) + 'px';
     }
   }
 
@@ -13712,7 +13739,7 @@ window._lbClick = _lbClick;
     var w = Math.max(near.x1 - near.x0, 180);
     el.style.cssText =
       'position:absolute;left:' + near.x0 + 'px;top:' + (near.y1 + 6) + 'px;' +
-      'width:' + w + 'px;z-index:7';
+      'width:' + w + 'px;z-index:3';   // 层内层级：描边 1 < 角标 2 < 展开的卡 3
     el.innerHTML = '<div class="pgbind-hd">' +
       (window.RC && RC.esc ? RC.esc(payload.label || '卡片') : (payload.label || '卡片')) +
       '</div><div class="pgbind-bd">' +
@@ -13763,8 +13790,17 @@ window._lbClick = _lbClick;
       if (!layer) return { ok: false, why: 'no-layer' };
       pw.appendChild(layer);   // 排在 char-layer 之后，标记能接到点击
 
-      // 同一处已经有卡就替换，别叠罗汉
-      var key = 'b' + range.lo + '_' + range.hi;
+      // ── 标记的身份 ──────────────────────────────────────────
+      //   ⚠ 曾经用「解析出来的字符区间」当 key（'b'+lo+'_'+hi）。它同时承担了
+      //     两件不该混在一起的事：① 同一张卡重挂时替换自己的旧标记（对的）
+      //     ② 同一个词上的第二张卡把第一张的标记也删掉（错的）。
+      //     ②的后果不是报错 —— 第一张的宿主便签此前已被 _applyWordBind 设成
+      //     display:none，标记又被撤掉，于是它**看不见也点不开**，而且永远
+      //     恢复不了（它自己每次都 ok，走不到那条「失败才回到可见」的兜底）。
+      //   身份来自调用方：便签传 note.id，AI 传卡片 cid。取不到才退回区间 key
+      //   （老数据/没传 uid 的调用方，行为跟以前一样）。
+      var uid = (payload && payload.uid) ? String(payload.uid).replace(/[^\w-]/g, '') : '';
+      var key = uid ? ('u' + uid) : ('b' + range.lo + '_' + range.hi);
       _removeMark(layer, key);
 
       // ── 标记本体：给被锚的词描边，**不填色** ──────────────────
@@ -13793,6 +13829,8 @@ window._lbClick = _lbClick;
       var n = document.createElement('span');
       n.className = 'pgmark-n';
       n.dataset.bindkey = key;
+      n.dataset.bx = String(Math.round(last.x1));
+      n.dataset.by = String(Math.round(last.y0));
       n.style.cssText =
         'left:' + (last.x1 + PAD + 1) + 'px;top:' + (last.y0 - PAD - 4) + 'px;' + tone;
       layer.appendChild(n);
@@ -13839,7 +13877,7 @@ window._lbClick = _lbClick;
   /// 撤掉某一处的标记。删卡走这里 —— 光删便签自己那个 DOM 是不够的，
   /// 描边和序号在另一个层里，不撤就永远留在页上，而且**后面所有序号都错位**
   /// （序号是位置不是身份，少一个就得整页重排）。
-  window.__pageBindRemove = function (bind) {
+  window.__pageBindRemove = function (bind, uid) {
     try {
       if (!bind || bind.kind !== 'page-chars') return false;
       var page = parseInt(bind.page, 10);
@@ -13847,6 +13885,17 @@ window._lbClick = _lbClick;
       if (!pw) return false;
       var layer = pw.querySelector('.pgbind-layer');
       if (!layer) return false;
+      // 有身份就直接按身份撤 —— 撤的是**这张卡**的标记，不会误伤同一个词上
+      // 的另一张。没有身份（老数据）才退回区间 key，行为跟以前一样。
+      var uk = uid ? ('u' + String(uid).replace(/[^\w-]/g, '')) : '';
+      if (uk) {
+        var had0 = !!layer.querySelector('[data-bindkey="' + uk + '"]');
+        _removeMark(layer, uk);
+        var c0 = layer.querySelector('.pgbind-card[data-bindkey="' + uk + '"]');
+        if (c0) { try { c0.__bwBindTeardown && c0.__bwBindTeardown(); } catch (e) {} c0.remove(); }
+        _renumberMarks(pw);
+        return had0;
+      }
       // key 是解析**之后**的区间，跟 bind.from/to 不一定相等（文字层换过时会
       // 重新定位）。所以按 from/to 反推 key 会漏 —— 用 _resolveRange 走一遍。
       var boxes = pw.__charBoxes;

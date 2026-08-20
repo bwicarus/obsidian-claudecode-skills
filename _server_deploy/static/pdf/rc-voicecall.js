@@ -3248,6 +3248,10 @@
           raw: _infoHtml(card),
           text: _infoText(card),
           label: label,
+          // 标记按**这张卡的身份**去重，不按它落在哪个词。用区间当身份的话，
+          // 同一个词上的第二张卡会把第一张的标记抹掉 —— 而 AI 钉的卡没有
+          // 宿主便签兜着，抹掉就是内容彻底失联。
+          uid: card.cid || '',
           // 标记的边框与角标按这张卡自己的色调走。取法是核实过的那条：
           // 卡片系统里色调的对外来源就是 RC.toolChip.styleOf(kind).color。
           // ⚠ 学习卡不在那张色表里（它是硬编码的 #b9a8ff + 🎴），所以取不到时
@@ -3326,6 +3330,16 @@
         fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
           body: JSON.stringify({ assistant: '', card: card, via: 'voice', file: _rtc.ctxFile || '', page: _rtc.ctxPage || 0 }) }).catch(function () {});
       } catch (e) {}
+    }
+    // ⚠ 补绑登记不能只在「浮层那条路」里做。上面 __pageBindDefer 的调用在
+    //   `if (!_sideOpen())` 分支内部 —— 侧栏开着时卡片进侧栏、不建浮层，于是
+    //   那句 toast 承诺的「翻到时会自己归位」根本没登记，永远不会归位。
+    //   而失败提示是**无条件**弹的，所以用户听到的是一句空头支票。
+    //   这里补上：没浮层就不传 card（__pageBindDefer 第三参只用于成功后关掉
+    //   浮层镜像，为 null 时那步自然跳过）。
+    if (_pendPageBind && window.__pageBindDefer) {
+      try { window.__pageBindDefer(_pendPageBind.bind, _pendPageBind.payload, null); } catch (e2) {}
+      _pendPageBind = null;
     }
     var _rendered = _tcOk || _hosts.length > 0;
     if (_rendered) {

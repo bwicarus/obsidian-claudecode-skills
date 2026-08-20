@@ -12048,6 +12048,20 @@ def _pam_notes(ctx):
                     changed = True; continue
                 if np != p:
                     a["page"] = np; changed = True
+            # 词锚（card.bind）也是按 PDF 页号定位的，同样要迁。
+            # ⚠ 漏掉的话表现不是报错：anchor 迁了、bind 留在旧页号，于是卡片
+            #   本体去了新页，而描边和序号画在**旧页号那一页**上（或者那页没了
+            #   就干脆不出现）。两边各说各话，看着像"标记随机丢失"。
+            b = ((n or {}).get("card") or {}).get("bind") or {}
+            bp = b.get("page")
+            if b.get("kind") == "page-chars" and isinstance(bp, int) and not isinstance(bp, bool):
+                nbp = ctx["mv"](bp)
+                if nbp is None:
+                    # 被锚的那一页删了 —— 撤掉词锚退回普通便签，别让它指向不存在的页
+                    n["card"]["bind"] = None
+                    changed = True
+                elif nbp != bp:
+                    b["page"] = nbp; changed = True
             keep.append(n)
         if changed:
             d[:] = keep
