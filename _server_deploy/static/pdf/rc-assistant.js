@@ -837,7 +837,9 @@
     // 普通助手与复习助手是两个真实会话域，不是同一 DOM 里的视觉筛选。
     // normal 保留各 reader adapter 的书籍端点；review 恒走统一 assistant API，并由服务端
     // 以 uid + mode 物理分开历史、任务 scope 与 clear。任何一边清空都不能波及另一边。
-    var _assistantMode = 'normal', _modeEpoch = 0, _historyEpoch = 0, _clearing = false;
+    var _assistantMode = 'normal', _modeEpoch = 0, _historyEpoch = 0, _clearing = false,
+        _historyLoadCount = 0, _historyReloadTimer = null, _historyReloadQueued = null,
+        _historyReloadInFlight = null, _historyLastPublicReloadAt = 0;
     function _modeNorm(mode) { return mode === 'review' ? 'review' : 'normal'; }
     function _chatUrl(mode) { return _modeNorm(mode || _assistantMode) === 'review' ? '/api/assistant/chat' : _NORMAL_CHATURL; }
     function _historyUrl(mode) {
@@ -1067,6 +1069,9 @@
   // 悬浮机器人 FAB(#asst-fab)已按用户要求去掉——开助手走右侧抽屉把手(#ep-side-handle / #side-handle)即可,不再额外占屏。
 
   var thread = pane.querySelector('#asst-thread');
+  // History reloads render into a hidden staging container first.  Live sends
+  // keep using `thread`; only the synchronous replay pass switches this target.
+  var _historyRenderTarget = null;
   var ta = pane.querySelector('#asst-ta');
   var sendBtn = pane.querySelector('#asst-send');
 
@@ -1692,8 +1697,16 @@
       HOST.goTo(_pg);
     }
   });
-  function scrollDown() { thread.scrollTop = thread.scrollHeight; }
-  function addMsg(cls, html) { var d = document.createElement('div'); d.className = 'asst-msg ' + cls; d.innerHTML = html; thread.appendChild(d); scrollDown(); return d; }
+  function scrollDown(target) {
+    // requestAnimationFrame(scrollDown) 会把时间戳当第一个参数；只有真实容器才接受为 target。
+    if (!target || typeof target.appendChild !== 'function') target = thread;
+    if (target === thread) target.scrollTop = target.scrollHeight;
+  }
+  function addMsg(cls, html) {
+    var target = _historyRenderTarget || thread;
+    var d = document.createElement('div'); d.className = 'asst-msg ' + cls; d.innerHTML = html;
+    target.appendChild(d); scrollDown(target); return d;
+  }
 
   // 视口焦点:当前与 #main 视口相交的页的字符层文字(镜像 EPUB _visibleText)。让 AI 回答/找视频/配图/拟搜索词
   // 都紧扣"用户此刻在看的这段",而非泛泛的整页/整章主题(后端 _sys_prompt 的「紧扣可见段落」指引靠它才生效)。
@@ -2344,7 +2357,10 @@
       else if (_hasSel) text = '讲讲这段';
       else return;   // 真·空(无任何上下文)→ 不发
     }
+    var _historyWasLoading = _historyLoadCount > 0;
+    _historyEpoch++;   // pending online history may never replace a newly-started live turn
     streaming = true; _setSendMode(true);
+    if (_historyWasLoading) _queueHistoryReload({ reason: 'post-stream-history' });
     var uMsg = addMsg('asst-u', esc(text));
     try { var _cc = _ctxCard(sentCtx, true, text); if (_cc) uMsg.appendChild(_cc); } catch (_) {}
     try { (HOST.clearFigFocus ? HOST.clearFigFocus() : (window.__clearFigFocus && window.__clearFigFocus())); } catch (_) {}   // 图已"用掉"并进了这条历史 → 清空带入列表,下一条不再重复携带(经 HOST:EPUB=__clearFigAttached)
@@ -2797,8 +2813,8 @@
       // connected readers; without recording the local turn first, our own
       // event consumer appends the same user/assistant pair a second time.
       if (_b.turn_id && _liveSeen) {
-        _liveSeen[_b.turn_id] = 1;
-        _liveSeen['u:' + _b.turn_id] = 1;
+        _historyMarkSeen(_b.turn_id);
+        _historyMarkSeen('u:' + _b.turn_id);
       }
       fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
         body: JSON.stringify(_b) }).catch(function () {});
@@ -3175,10 +3191,10 @@
   function greet() {
     var _n = (HOST.locNoun && HOST.locNoun()) || '页';   // 位置量词按 reader(PDF=页 / EPUB=章)
     if (_assistantMode === 'review') {
-      addMsg('asst-a', '现在是复习助手。上方会显示当前相关 Anki 卡片，我会围绕这张卡追问、诊断记忆漏洞，并能把你选中的回答段落送入“更新笔记 / 改进卡片 / 两者都做”的草稿流程。<br><span style="color:#7a8497">(复习记录与普通助手分开保存；这里的 🗑 只清复习对话)</span>');
+      addMsg('asst-a', '现在是复习助手。上方会显示当前相关 Anki 卡片，我会围绕这张卡追问、诊断记忆漏洞，并能把你选中的回答段落送入“更新笔记 / 改进卡片 / 两者都做”的草稿流程。<br><span style="color:#7a8497">(复习记录与普通助手分开保存；联网时从 Pi 在线恢复，不属于离线同步包；这里的 🗑 只清复习对话)</span>');
       return;
     }
-    addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这' + _n + '讲什么 / 总结这' + _n + '<br>· 翻译这段(先选中)<br>· 找讲XX的' + _n + '跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话云端保存、跨设备;🗑 清空)</span>');
+    addMsg('asst-a', '我是这本书的阅读助手。试试:<br>· 这' + _n + '讲什么 / 总结这' + _n + '<br>· 翻译这段(先选中)<br>· 找讲XX的' + _n + '跳过去<br>· 把这段做成卡片 / 整理成笔记<br><span style="color:#7a8497">(写入/制卡都可「↩ 撤销」;对话联网时从 Pi 在线恢复，不属于离线同步包;🗑 清空)</span>');
   }
   // ── 87:气泡装饰(标题整行把手,voiceMsg 实时与 loadHistory 回放共用——"消息记录中的卡片永远是卡片")──
   function _bubDecor(el, label, textFn) {
@@ -3287,7 +3303,7 @@
     }
     thread.innerHTML = '';
     try { RC.toolChip && RC.toolChip.clearAll(); } catch (_) {}
-    loadHistory(mode);
+    reloadHistory({ mode: mode, reason: 'mode-change', immediate: true, allowHidden: true });
     try {
       window.dispatchEvent(new CustomEvent('rc:assistant-mode-changed', { detail: { mode: mode } }));
     } catch (_) {}
@@ -3302,45 +3318,25 @@
 
   // ── 外部写入的实时到达(2026-07-27,用户需求③)────────────────────────────────
   // 跨机命令走 SSH bridge 落库后,服务端经既有 reader-events SSE 推一条 assistant-history。
-  // 侧栏开着就**当场追加**,不必刷新;渲染用的是与实时/回放完全同一个 RC.turnCard.renderTurn
-  // (ADR 不变式①:不存在第三条渲染路径)。这里不新增任何对外服务,只消费既有事件总线。
-  var _liveSeen = {};        // turn_id → 1:同一轮重复事件/重连不会画两遍
+  // 事件只登记目标轮次并进入下方**唯一**的原子历史刷新队列；不再另开一次全量 GET 后
+  // 增量 append。这样抽屉打开、native sync 与实时事件不会互相覆盖或把同一轮画两遍。
+  var _liveSeen = {};        // turn_id → 1:本页已用权威历史原子回放/本地已呈现
+  var _liveSeenOrder = [];   // 有界去重；长期开页也不随历史总量无限增长
+  var _historyPendingTurns = Object.create(null);   // turn_id → 1:已排队，重复 SSE 不再追加请求
+  function _historyMarkSeen(tid) {
+    tid = String(tid || '');
+    if (!tid || _liveSeen[tid]) return;
+    _liveSeen[tid] = 1; _liveSeenOrder.push(tid);
+    while (_liveSeenOrder.length > 256) delete _liveSeen[_liveSeenOrder.shift()];
+  }
   function onHistoryEvent(ev) {
     try {
       if (!ev || !thread) return;
       var tid = String((ev && ev.turn_id) || '');
-      if (!tid || _liveSeen[tid]) return;
-      // 「面板开着吗」必须问抽屉本人:pane 是本模块 createElement 出来的容器,它被挂进共享抽屉后
-      // 自身 style.display 一直是空串,拿它判开合永远为真/为假都不对 —— 真机探针实测事件到达却被这道
-      // gate 挡掉(ack 0、正文没出现),而我一度误以为通过了(其实是开抽屉时 loadHistory 顺带带出来的)。
-      var _open = false;
-      try { _open = !!(window.RC && RC.sidedrawer && RC.sidedrawer.isOpen && RC.sidedrawer.isOpen()); } catch (e) {}
-      if (!_open) _open = !!(thread && thread.offsetParent !== null);   // 兜底:元素真的可见(祖先没被 display:none)
-      if (!_open) return;   // 面板没开:不抢渲染,打开时 loadHistory 会带出来
-      fetch(_historyUrl(_assistantMode)).then(function (r) { return r.json(); }).then(function (d) {
-        if (!d || !d.ok || !Array.isArray(d.messages)) return;
-        var hit = null, uq = '';
-        for (var i = d.messages.length - 1; i >= 0; i--) {
-          var m = d.messages[i];
-          if (m && m.role === 'assistant' && String(m.turn_id || '') === tid) { hit = m; 
-            for (var j = i - 1; j >= 0; j--) { if (d.messages[j] && d.messages[j].role === 'user') { uq = d.messages[j].content || ''; break; } }
-            break; }
-        }
-        if (!hit || _liveSeen[tid]) return;
-        _liveSeen[tid] = 1;
-        if (uq && !_liveSeen['u:' + tid]) { _liveSeen['u:' + tid] = 1; addMsg('asst-u', esc(uq)); }
-        if (Array.isArray(hit.parts) && hit.parts.length && window.RC && RC.turnCard) {
-          RC.turnCard.renderTurn('live' + tid, hit.parts);
-        } else {
-          var el = addMsg('asst-a', ''); renderMd(el, hit.content || '');
-        }
-        scrollDown();
-        // 渲染完才回执 → 桥接器能把「已写库」和「前端已画出来」分开报
-        try {
-          fetch('/pdf/api/turn-ack', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ turn_id: tid }), keepalive: true }).catch(function () {});
-        } catch (e) {}
-      }).catch(function () {});
+      if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(tid) || _liveSeen[tid] || _historyPendingTurns[tid]) return;
+      if (Object.keys(_historyPendingTurns).length >= 64) return;
+      _historyPendingTurns[tid] = 1;
+      _requestHistoryReload({ reason: 'assistant-history', publicTrigger: true, ackTurnIds: [tid] });
     } catch (e) {}
   }
 
@@ -3349,61 +3345,318 @@
   //   也不报错",真机排查了很久(2026-07-27)。挂载完成时赋值,天然与闭包同作用域。
   try { RC.assistant.onHistoryEvent = function (ev) { return onHistoryEvent(ev); }; } catch (e) {}
 
-  function loadHistory(mode, options) {   // 开面板载入当前模式的服务端历史；异步回包不得跨模式落进 DOM
-    mode = _modeNorm(mode || _assistantMode);
+  function _historyReplayError(error, options) {
     options = options || {};
-    var histToken = ++_historyEpoch, modeEpoch = _modeEpoch;
-    return fetch(_historyUrl(mode)).then(function (r) { return r.json(); }).then(function (d) {
-      if (histToken !== _historyEpoch || modeEpoch !== _modeEpoch || mode !== _assistantMode) return;
-      if (d && d.ok && d.messages && d.messages.length) {
-        var _lastQ = '';   // 历史回答的「!」反馈要带上「重答」用的原问题 → 记住上一条用户消息
-        d.messages.forEach(function (m, _mi) {
-          if (m.role === 'user') {
-            _lastQ = m.content || '';
-            var uel = addMsg('asst-u', esc(m.content));
-            try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel, section: m.section, selection_anchor: m.sel_anchor }, false, m.content); if (c) uel.appendChild(c); } catch (_) {}   // section/sel_anchor=EPUB 历史字段(PDF 无此字段不受影响)
-          }
-          else if (Array.isArray(m.parts) && m.parts.length && window.RC && RC.turnCard) {
-            // ★ 141(轮次容器)回放:**走与实时完全同一个 renderPart()**(ADR 不变式①)——
-            //   实时和回放不可能分叉,今天那类"刷新后卡片退化成纯文本"的 bug 从架构上消失。
-            var _rtid = 'h' + (m.ts || Math.random().toString(36).slice(2, 8));
-            RC.turnCard.renderTurn(_rtid, m.parts);
-          }
-          else if (m.card && window.__vcInfoCardEl) {   // 87:旧数据(没有 parts)→ 回落到结构化卡回放,保持向后兼容
-            if (!m.card.cid) m.card.cid = 'hist_' + String(m.id || m.rid || m.ts || 'row') + '_' + _mi;
-            var ce = window.__vcInfoCardEl(m.card);
-            if (ce) { thread.appendChild(ce); }
-          }
-          else {
-            var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || '');
-            renderMd(el, (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_pf.text).text : _pf.text);
-            try { _attachClipBtn(el, m, mode); } catch (_) {}   // 66:语音回放按钮(有录音=紫;无=灰,点了 TTS 念+保存)
-            try { if (m.via === 'voice' && (m.content || '').length > 120) _bubDecor(el, 'AI 回答', (function (t0) { return function () { return t0; }; })(m.content || '')); } catch (_) {}   // 87:历史语音长文=同样可拖可长按
-            try { _renderFollowups(el, _pf.followups); } catch (_) {}
-            try { _attachFeedback(el, _lastQ, m.trace || null, m.ts || null); } catch (_) {}   // 历史也带 trace(步骤/模型/耗时)+ 时刻;质量回报用 _lastQ 重答
-            if (Array.isArray(m.videos) && m.videos.length && window.renderVideos) { try { window.renderVideos(m.videos); } catch (_) {} }   // 视频卡刷新回放(镜像 EPUB 阶段C)
-            if (Array.isArray(m.undo_cards)) m.undo_cards.forEach(function (u) {   // H2:高亮撤销卡刷新回放(undo_id 服务端持久,撤销/跳转 handler 已复用)
-              if (!u || !u.undo_id) return;
-              var _ujp = u.page ? ' <button class="asst-jump" data-page="' + esc(u.page) + '">↗ 跳转</button>' : '';
-              addMsg('asst-a', '✓ ' + esc(u.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(u.undo_id) + '">↩ 撤销</button>');
-            });
-            if (Array.isArray(m.actions) && HOST.showAction) m.actions.forEach(function (a) {   // EPUB 动作卡回放(持久撤销⇄重做,存 meta.actions;PDF 无此字段)
-              try { HOST.showAction(a); } catch (_) {}
-            });
-          }
-        });
-        // 进面板自动滚到最新(最下方):渲完滚一次,再隔 250ms 补一次(图/MathJax 异步撑高后位置会漂)
-        requestAnimationFrame(scrollDown);
-        setTimeout(scrollDown, 250);
-      } else greet();
-    }).catch(function () {
-      if (histToken === _historyEpoch && modeEpoch === _modeEpoch && mode === _assistantMode) {
-        if (options.greetOnError === false) {
-          addMsg('asst-note', '清空失败，且暂时无法重新载入原对话；请稍后重试。');
-        } else greet();
+    var status = Number(error && error.status) || 0;
+    var text = options.greetOnError === false
+      ? '清空失败，且暂时无法重新载入原对话；请稍后重试。'
+      : (status === 401
+        ? '登录状态已失效，暂时无法从 Pi 恢复对话。'
+        : '暂时无法从 Pi 恢复对话；现有记录已保留。');
+    try { if (typeof _toast === 'function') _toast(text); } catch (_) {}
+    // 已有 DOM 是上一次成功回放，失败时绝不清掉。首次加载没有任何内容时才落一条明确错误。
+    if (!thread.children.length) {
+      _historyRenderTarget = null;
+      addMsg('asst-note', esc(text));
+    }
+  }
+
+  function _historyTurnId(message, mode, scope) {
+    message = message || {};
+    var historyId = String(message.history_id || '');
+    if (/^[A-Za-z0-9_.:-]{1,160}$/.test(historyId)) {
+      return 'hist_' + _modeNorm(mode) + '_' + historyId;
+    }
+    var direct = String(message.turn_id || message.id || message.rid || '');
+    if (/^[A-Za-z0-9_.:-]{1,160}$/.test(direct)) {
+      return 'hist_' + _modeNorm(mode) + '_' + direct;
+    }
+    // 新服务端在切出 [-100:] 窗口前会原子补齐 history_id。这里只保留跨版本兜底，
+    // 绝不使用窗口数组下标：窗口滑动时同一条记录的 DOM 身份必须保持不变。
+    var seed = _modeNorm(mode) + '|scope:' + String(scope || _historyUrl(mode)) +
+      String(message.role || '') + '|' + String(message.ts || '') + '|';
+    try {
+      seed += JSON.stringify({
+        parts: message.parts || null,
+        card: message.card || null,
+        content: message.content || ''
+      });
+    } catch (_) { seed += String(message.content || ''); }
+    if (seed.length > 200000) seed = seed.slice(0, 200000);
+    var hex = '';
+    for (var lane = 0; lane < 4; lane++) {
+      var hash = (2166136261 ^ (lane * 2654435761)) >>> 0;
+      for (var i = 0; i < seed.length; i++) {
+        hash ^= seed.charCodeAt(i);
+        hash = Math.imul(hash, 16777619) >>> 0;
       }
+      hex += hash.toString(16).padStart(8, '0');
+    }
+    return 'hist_' + _modeNorm(mode) + '_' + hex;
+  }
+
+  function _historyReplayOne(m, mode, state, target, scope, deferredActions) {
+    if (!m || (m.role !== 'user' && m.role !== 'assistant')) throw new Error('invalid history record');
+    if (m.role === 'user') {
+      state.lastQ = m.content || '';
+      var uel = addMsg('asst-u', esc(m.content));
+      try { var c = _ctxCard({ figures: m.figures, selection: m.selection, page: m.page, file_rel: m.file_rel, section: m.section, selection_anchor: m.sel_anchor }, false, m.content); if (c) uel.appendChild(c); } catch (_) {}   // section/sel_anchor=EPUB 历史字段(PDF 无此字段不受影响)
+      return;
+    }
+    if (Array.isArray(m.parts) && m.parts.length && window.RC && RC.turnCard) {
+      // ★ 141(轮次容器)回放仍走唯一 renderPart；target 只把整批先画进 staging，成功后一次换入。
+      var _rtid = _historyTurnId(m, mode, scope);
+      if (!RC.turnCard.renderTurn(
+        _rtid, m.parts, target, { historyReplay: true }
+      )) throw new Error('turn replay failed');
+      return;
+    }
+    if (m.card && window.__vcInfoCardEl) {   // 87:旧数据(没有 parts)→ 回落到结构化卡回放,保持向后兼容
+      var legacyCard = m.card;
+      if (!legacyCard.cid) {
+        legacyCard = Object.assign({}, legacyCard, {
+          cid: _historyTurnId(m, mode, scope) + '_card'
+        });
+      }
+      var ce = window.__vcInfoCardEl(legacyCard);
+      if (!ce) throw new Error('legacy card replay failed');
+      target.appendChild(ce);
+      return;
+    }
+    var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || '');
+    renderMd(el, (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_pf.text).text : _pf.text);
+    try { _attachClipBtn(el, m, mode); } catch (_) {}   // 66:语音回放按钮(有录音=紫;无=灰,点了 TTS 念+保存)
+    try { if (m.via === 'voice' && (m.content || '').length > 120) _bubDecor(el, 'AI 回答', (function (t0) { return function () { return t0; }; })(m.content || '')); } catch (_) {}   // 87:历史语音长文=同样可拖可长按
+    try { _renderFollowups(el, _pf.followups); } catch (_) {}
+    try { _attachFeedback(el, state.lastQ, m.trace || null, m.ts || null); } catch (_) {}   // 历史也带 trace(步骤/模型/耗时)+ 时刻;质量回报用 lastQ 重答
+    if (Array.isArray(m.videos) && m.videos.length && window.renderVideos) {
+      try { window.renderVideos(m.videos, { host: el, dedupe: false }); } catch (_) {}
+    }   // 历史视频绑定 staging 内这条气泡；每次原子重载都必须重新生成
+    if (Array.isArray(m.undo_cards)) m.undo_cards.forEach(function (u) {   // H2:高亮撤销卡刷新回放(undo_id 服务端持久,撤销/跳转 handler 已复用)
+      if (!u || !u.undo_id) return;
+      var _ujp = u.page ? ' <button class="asst-jump" data-page="' + esc(u.page) + '">↗ 跳转</button>' : '';
+      addMsg('asst-a', '✓ ' + esc(u.label || '完成') + _ujp + ' <button class="asst-undo" data-uid="' + esc(u.undo_id) + '">↩ 撤销</button>');
+    });
+    if (Array.isArray(m.actions) && HOST.showAction) m.actions.forEach(function (a) {   // EPUB 动作卡必须保持在原消息位置；commit 后让宿主创建，再移回占位点
+      var marker = document.createElement('span'); marker.hidden = true; target.appendChild(marker);
+      deferredActions.push({ marker: marker, action: a });
     });
   }
+
+  function _historyCommit(stage, deferredActions) {
+    var previous = document.createDocumentFragment();
+    while (thread.firstChild) previous.appendChild(thread.firstChild);
+    try {
+      var next = document.createDocumentFragment();
+      while (stage.firstChild) next.appendChild(stage.firstChild);
+      thread.appendChild(next);
+    } catch (error) {
+      while (thread.firstChild) thread.removeChild(thread.firstChild);
+      thread.appendChild(previous);
+      throw error;
+    }
+    deferredActions.forEach(function (item) {
+      try {
+        var card = HOST.showAction(item.action);
+        if (card) item.marker.replaceWith(card); else item.marker.remove();
+      } catch (_) { try { item.marker.remove(); } catch (_) {} }
+    });
+    try { RC.turnCard && RC.turnCard.prune && RC.turnCard.prune(); } catch (_) {}
+  }
+
+  function loadHistory(mode, options) {   // Pi 权威端在线重载；异步回包不得跨模式落进 DOM
+    mode = _modeNorm(mode || _assistantMode);
+    options = options || {};
+    var historyScope = _historyUrl(mode);
+    var histToken = ++_historyEpoch, modeEpoch = _modeEpoch;
+    _historyLoadCount++;
+    return fetch(historyScope).then(function (r) {
+      if (!r || r.ok === false) {
+        var requestError = new Error('history request failed');
+        requestError.status = Number(r && r.status) || 0;
+        throw requestError;
+      }
+      return r.json();
+    }).then(function (d) {
+      if (histToken !== _historyEpoch || modeEpoch !== _modeEpoch || mode !== _assistantMode) return { ok: false, stale: true };
+      if (!d || d.ok !== true || !Array.isArray(d.messages)) throw new Error('invalid history response');
+
+      var stage = document.createElement('div');
+      stage.hidden = true; stage.setAttribute('aria-hidden', 'true'); pane.appendChild(stage);
+      var state = { lastQ: '' }, deferredActions = [], skipped = 0, seenTurnIds = [];
+      _historyRenderTarget = stage;
+      try {
+        if (d.messages.length) {
+          d.messages.forEach(function (m) {
+            var marker = document.createComment('history-record'); stage.appendChild(marker);
+            var deferredAt = deferredActions.length;
+            try {
+              _historyReplayOne(m, mode, state, stage, historyScope, deferredActions);
+              var recordTurnId = String(m && m.turn_id || '');
+              if (recordTurnId && seenTurnIds.indexOf(recordTurnId) < 0) seenTurnIds.push(recordTurnId);
+            } catch (_) {
+              skipped++;
+              deferredActions.length = deferredAt;
+              while (marker.nextSibling) stage.removeChild(marker.nextSibling);
+              addMsg('asst-note', '有 1 条旧对话暂时无法显示，其余记录已恢复。');
+            } finally {
+              try { marker.remove(); } catch (_) { if (marker.parentNode) marker.parentNode.removeChild(marker); }
+            }
+          });
+        } else greet();
+        _historyRenderTarget = null;
+        if (histToken !== _historyEpoch || modeEpoch !== _modeEpoch || mode !== _assistantMode) {
+          stage.remove();
+          try { RC.turnCard && RC.turnCard.prune && RC.turnCard.prune(); } catch (_) {}
+          return { ok: false, stale: true };
+        }
+        _historyCommit(stage, deferredActions);
+        stage.remove();
+        requestAnimationFrame(scrollDown);
+        setTimeout(scrollDown, 250);   // 图/MathJax 异步撑高后再校一次
+        return { ok: true, count: d.messages.length, skipped: skipped, turnIds: seenTurnIds };
+      } catch (renderError) {
+        _historyRenderTarget = null;
+        try { stage.remove(); } catch (_) {}
+        try { RC.turnCard && RC.turnCard.prune && RC.turnCard.prune(); } catch (_) {}
+        throw renderError;
+      }
+    }).catch(function (error) {
+      _historyRenderTarget = null;
+      if (histToken === _historyEpoch && modeEpoch === _modeEpoch && mode === _assistantMode) {
+        _historyReplayError(error, options);
+      }
+      return { ok: false, error: true };
+    }).then(function (result) {
+      _historyLoadCount = Math.max(0, _historyLoadCount - 1);
+      return result;
+    }, function (error) {
+      _historyLoadCount = Math.max(0, _historyLoadCount - 1);
+      throw error;
+    });
+  }
+
+  function _assistantPaneVisible() {
+    if (!pane || !pane.classList || !pane.classList.contains('active')) return false;
+    try { return !RC.sidedrawer || !RC.sidedrawer.isOpen || RC.sidedrawer.isOpen(); } catch (_) { return true; }
+  }
+
+  function _historyBatch(options, waiter) {
+    options = options || {};
+    var mode = _modeNorm(options.mode || _assistantMode);
+    var epoch = _modeEpoch;
+    var queued = _historyReloadQueued;
+    if (!queued || queued.mode !== mode || queued.modeEpoch !== epoch) {
+      if (queued) {
+        (queued.ackTurnIds || []).forEach(function (tid) { delete _historyPendingTurns[tid]; });
+        (queued.waiters || []).forEach(function (resolve) { resolve({ ok: false, stale: true }); });
+      }
+      queued = _historyReloadQueued = {
+        mode: mode, modeEpoch: epoch, reasons: [], ackTurnIds: [], waiters: [],
+        publicTrigger: false, allowHidden: false, greetOnError: true, immediate: false
+      };
+    }
+    var reason = String(options.reason || 'manual');
+    if (queued.reasons.indexOf(reason) < 0) queued.reasons.push(reason);
+    (options.ackTurnIds || []).forEach(function (tid) {
+      tid = String(tid || '');
+      if (tid && queued.ackTurnIds.length < 64 && queued.ackTurnIds.indexOf(tid) < 0) queued.ackTurnIds.push(tid);
+    });
+    if (waiter) queued.waiters.push(waiter);
+    queued.publicTrigger = queued.publicTrigger || options.publicTrigger === true;
+    queued.allowHidden = queued.allowHidden || options.allowHidden === true;
+    queued.immediate = queued.immediate || options.immediate === true;
+    if (options.greetOnError === false) queued.greetOnError = false;
+    return queued;
+  }
+
+  function _historyAckRendered(expected, seen) {
+    var visible = Object.create(null);
+    (seen || []).forEach(function (tid) {
+      tid = String(tid || '');
+      if (tid) { visible[tid] = 1; _historyMarkSeen(tid); }
+    });
+    (expected || []).forEach(function (tid) {
+      tid = String(tid || '');
+      delete _historyPendingTurns[tid];
+      if (!tid || !visible[tid]) return;
+      // 原子替换成功且这轮确实存在后才回执；写库、事件投递与前端已显示仍是三层事实。
+      try {
+        fetch('/pdf/api/turn-ack', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ turn_id: tid }), keepalive: true }).catch(function () {});
+      } catch (_) {}
+    });
+  }
+
+  function _historySchedule(delay) {
+    if (_historyReloadTimer || _historyReloadInFlight || !_historyReloadQueued) return;
+    delay = Math.max(0, Number(delay) || 0);
+    if (_historyReloadQueued.publicTrigger) {
+      // 这些入口最终都能被页面脚本触及；即使宿主内容伪造/风暴调用，最多约每 400ms 一次 GET。
+      delay = Math.max(delay, 400 - Math.max(0, Date.now() - _historyLastPublicReloadAt));
+    }
+    _historyReloadTimer = setTimeout(_historyDrain, delay);
+  }
+
+  function _historyDrain() {
+    _historyReloadTimer = null;
+    var queued = _historyReloadQueued;
+    if (!queued || _historyReloadInFlight) return;
+    if (streaming || _clearing) { _historySchedule(250); return; }
+    if (!queued.allowHidden && !_assistantPaneVisible()) return;   // 保留批次；真正打开助手时同批刷新
+    _historyReloadQueued = null;
+    if (queued.publicTrigger) _historyLastPublicReloadAt = Date.now();
+    _historyReloadInFlight = loadHistory(queued.mode, { greetOnError: queued.greetOnError });
+    _historyReloadInFlight.then(function (result) {
+      // send() 只增加 history epoch；模式没有变化时应把同一批留到流结束后再取，而不是丢掉回执目标。
+      if (result && result.stale && queued.modeEpoch === _modeEpoch && queued.mode === _assistantMode) {
+        _historyBatch({
+          mode: queued.mode, reason: queued.reasons.join('+'), ackTurnIds: queued.ackTurnIds,
+          publicTrigger: queued.publicTrigger, allowHidden: queued.allowHidden,
+          greetOnError: queued.greetOnError
+        });
+        queued.waiters.forEach(function (resolve) { _historyBatch({}, resolve); });
+        return;
+      }
+      if (result && result.ok) _historyAckRendered(queued.ackTurnIds, result.turnIds);
+      else queued.ackTurnIds.forEach(function (tid) { delete _historyPendingTurns[tid]; });
+      queued.waiters.forEach(function (resolve) { resolve(result || { ok: false }); });
+    }, function () {
+      queued.ackTurnIds.forEach(function (tid) { delete _historyPendingTurns[tid]; });
+      queued.waiters.forEach(function (resolve) { resolve({ ok: false, error: true }); });
+    }).then(function () {
+      _historyReloadInFlight = null;
+      if (_historyReloadQueued) _historySchedule(_historyReloadQueued.immediate ? 0 : 80);
+    });
+  }
+
+  function _queueHistoryReload(options) {
+    return new Promise(function (resolve) {
+      var queued = _historyBatch(options || {}, resolve);
+      _historySchedule(queued.immediate ? 0 : 80);
+    });
+  }
+  function reloadHistory(options) { return _queueHistoryReload(options || {}); }
+  function _requestHistoryReload(options) {
+    var queued = _historyBatch(options || {}, null);
+    _historySchedule(queued.immediate ? 0 : 80);
+    return true;
+  }
+
+  // 不再监听可伪造的 window CustomEvent。共享抽屉与 native coordinator 直接调用这两个
+  // 有界入口；参数不透传调度权限，所有外部可触达调用都强制合并并限流。
+  RC.assistant.reloadHistory = function () {
+    return _requestHistoryReload({ reason: 'public-api', publicTrigger: true });
+  };
+  RC.assistant.onDrawerTabChanged = function (tab, open) {
+    if (tab !== 'asst' || open !== true) return false;
+    _requestHistoryReload({ reason: 'drawer-open', publicTrigger: true });
+    return true;
+  };
+  RC.assistant.onNativePiSyncFinished = function () {
+    _requestHistoryReload({ reason: 'native-pi-sync-finished', publicTrigger: true });
+    return true;
+  };
   pane.dataset.assistantMode = _assistantMode;
   var _initialClearButton = pane.querySelector('[data-q="clear"]');
   if (_initialClearButton) {
@@ -3415,7 +3668,7 @@
   if (RC.review && RC.review.mode && RC.review.mode() === 'review') {
     setAssistantMode('review');
   } else {
-    loadHistory(_assistantMode);
+    reloadHistory({ reason: 'initial-history', immediate: true, allowHidden: true });
   }
   };
 })();

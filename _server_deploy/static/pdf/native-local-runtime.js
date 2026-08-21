@@ -29,6 +29,9 @@
   var LOCAL_PAGE_CARD_CONTEXT_LIMIT = 100000;
   var LOCAL_PAGE_CARD_CONTEXT_MAX_WIRE_BYTES = 200 * 1024;
   var LOCAL_PAGE_CARD_CONTEXT_FRAGMENT = 2000;
+  var LOCAL_PAGE_CARD_SNAPSHOT_CACHE_REVISIONS = 4;
+  var LOCAL_PAGE_CARD_SNAPSHOT_CACHE_BYTES = 4 * 1024 * 1024;
+  var nativePageCardSnapshotCache = new Map();
   var LOCAL_PAGE_CONTEXT_TEXT_LIMIT = 220000;
   var LOCAL_PAGE_CARD_REPLACEMENT_FORMAT =
     'application/vnd.bw-reader.card-replacement+json;version=1';
@@ -2909,7 +2912,8 @@
     'contract', 'localBookId', 'page', 'state', 'source', 'revision'
   ]);
   var PAGE_TEXT_CHAR_KEYS = new Set([
-    'c', 'x0', 'y0', 'x1', 'y1', 'w', 'bk', 'sp', 'b', 'fml', 'flx'
+    'c', 'x0', 'y0', 'x1', 'y1', 'w', 'bk', 'sp', 'b', 'fml', 'flx',
+    'line', 'vertical'
   ]);
   var PAGE_TEXT_FURIGANA_KEYS = new Set(['x0', 'y0', 'x1', 'y1', 'rt', 'wd', 'ctx']);
   var PAGE_TEXT_FORMULA_KEYS = new Set([
@@ -2983,11 +2987,14 @@
           x1 > 100000 || y1 > 100000 ||
           (item.w != null && !Number.isInteger(Number(item.w))) ||
           (item.bk != null && !Number.isInteger(Number(item.bk))) ||
+          (item.line != null &&
+            (!Number.isInteger(Number(item.line)) || Number(item.line) < 0)) ||
+          (item.vertical != null && typeof item.vertical !== 'boolean') ||
           (item.flx != null && typeof item.flx !== 'string')) {
         dropped += 1;
         continue;
       }
-      out.push({
+      var normalized = {
         c: c,
         x0: x0, y0: y0, x1: x1, y1: y1,
         w: Number.isInteger(Number(item.w)) ? Number(item.w) : -1,
@@ -2995,7 +3002,10 @@
         sp: !!item.sp,
         fml: !!item.fml,
         flx: item.fml ? String(item.flx || '').slice(0, 4000) : ''
-      });
+      };
+      if (item.line != null) normalized.line = Number(item.line);
+      if (item.vertical != null) normalized.vertical = item.vertical;
+      out.push(normalized);
     }
     // An originally empty page is a valid, selectable-text-free PDF page. It
     // is different from a non-empty payload where every character failed
@@ -8157,6 +8167,50 @@
     return note;
   }
 
+  function nativePDFRememberPageCardSnapshots(revision, notes, cardIDs) {
+    revision = Number(revision);
+    if (!Number.isSafeInteger(revision) || revision < 0 ||
+        !Array.isArray(notes) || !Array.isArray(cardIDs)) return;
+    var entry = nativePageCardSnapshotCache.get(revision);
+    if (!entry) entry = { bytes: 0, cards: new Map() };
+    var wanted = new Set(cardIDs.map(function (id) { return String(id || ''); }));
+    for (var index = 0; index < notes.length; index += 1) {
+      var note = notes[index];
+      var id = String(note && (note.id || note.noteId) || '');
+      if (!wanted.has(id) || entry.cards.has(id)) continue;
+      try {
+        var encoded = canonicalJSONString(
+          nativePDFNoteSnapshot(note, id, 'BW_LOCAL_PAGE_CARDS')
+        );
+        var size = utf8(encoded).byteLength;
+        if (size > LOCAL_PAGE_CARD_SNAPSHOT_CACHE_BYTES ||
+            entry.bytes + size > LOCAL_PAGE_CARD_SNAPSHOT_CACHE_BYTES) continue;
+        entry.cards.set(id, encoded);
+        entry.bytes += size;
+      } catch (_) {}
+    }
+    nativePageCardSnapshotCache.set(revision, entry);
+    while (nativePageCardSnapshotCache.size >
+        LOCAL_PAGE_CARD_SNAPSHOT_CACHE_REVISIONS) {
+      nativePageCardSnapshotCache.delete(
+        nativePageCardSnapshotCache.keys().next().value
+      );
+    }
+  }
+
+  function nativePDFCachedPageCardUnchanged(revision, note, id, code) {
+    var entry = nativePageCardSnapshotCache.get(Number(revision));
+    var expected = entry && entry.cards.get(String(id || ''));
+    if (!expected) return false;
+    try {
+      return expected === canonicalJSONString(
+        nativePDFNoteSnapshot(note, id, code)
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
   function nativePDFPageCardBind(note, code) {
     var payload = note && note.card ? note.card : (note && note.html ? note.html : null);
     var bind = payload && payload.bind;
@@ -8383,7 +8437,7 @@
     });
   }
 
-  function nativePDFPageCardRequestFingerprint(plan, kind) {
+  function nativePDFPageCardRequestFingerprint(plan, kind, numberSpecified) {
     var replacement = null;
     if (kind === 'page-card-edit' && plan.after && plan.after.card) {
       replacement = { cards: nativePDFPageCardWireCards(plan.after.card.cards) };
@@ -8394,6 +8448,8 @@
       operation: kind === 'page-card-delete' ? 'delete' : 'edit',
       expectedId: plan.id,
       expectedRevision: plan.expectedRevision,
+      numberSpecified: numberSpecified === true,
+      number: numberSpecified === true ? plan.number : null,
       replacement: replacement
     });
   }
@@ -8433,6 +8489,9 @@
       expectedRevision: strictInteger(
         input.expectedRevision, 0, Number.MAX_SAFE_INTEGER, 'expectedRevision', code
       ),
+      numberSpecified: Object.prototype.hasOwnProperty.call(input, 'number'),
+      number: Object.prototype.hasOwnProperty.call(input, 'number')
+        ? strictInteger(input.number, 1, 1000000, 'number', code) : null,
       replacement: replacement
     });
   }
@@ -8496,20 +8555,22 @@
       ? state.revisions : (state || {});
   }
 
-  function nativePDFAssertPageCardReference(state, plan) {
+  function nativePDFAssertPageCardReference(state, plan, stableIDOnly) {
     var projection = state && state.page_cards;
     if (!projection) return;
+    var revisionMatches = Number(projection.revision) ===
+      Number(plan.expectedRevision);
     var rows = projection.contract === NATIVE_PAGE_CARD_PROJECTION_CONTRACT &&
-      Number(projection.revision) === Number(plan.expectedRevision) &&
-      projection.pages && Array.isArray(projection.pages[String(plan.page)])
+      (stableIDOnly || plan.number == null || revisionMatches) && projection.pages &&
+      Array.isArray(projection.pages[String(plan.page)])
       ? projection.pages[String(plan.page)] : null;
     if (!rows) nativePDFRevisionConflict('页面卡片投影');
     var row = rows.find(function (candidate) {
       return candidate && String(candidate.id || '') === plan.id;
     });
-    if (!row || (plan.number != null &&
+    if (!row || (!stableIDOnly && plan.number != null &&
         (row.unbound === true || Number(row.number) !== Number(plan.number)))) {
-      nativePDFRevisionConflict(plan.number == null
+      nativePDFRevisionConflict(stableIDOnly || plan.number == null
         ? '页面卡片稳定 ID' : '页面卡片当前序号');
     }
   }
@@ -8675,8 +8736,12 @@
     var plan = nativePDFPageCardPlan(descriptor.data, code);
     var operationID = nativePDFOperationID(action, descriptor);
     var fingerprint = nativePDFPageCardFingerprint(plan, operationID, descriptor.kind);
-    var requestFingerprint = nativePDFPageCardRequestFingerprint(plan, descriptor.kind);
     var expectedRevisions = nativePDFExpectedRevisions(expectedState);
+    var stableIDOnly = plan.number == null ||
+      !!(expectedState && expectedState.page_card_stable_id === true);
+    var requestFingerprint = nativePDFPageCardRequestFingerprint(
+      plan, descriptor.kind, !stableIDOnly
+    );
     var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
     return serializeLocalStateMutation('document', 'pdf-assistant-bundle', function () {
       assertNativePDFWriterLease(writerLease);
@@ -8712,13 +8777,17 @@
           }
           return null;
         }
-        if (Number(expectedRevisions.notes) !== Number(plan.expectedRevision)) {
+        var listRevisionChanged =
+          Number(expectedRevisions.notes) !== Number(plan.expectedRevision) ||
+          Number(recordSet.records[0].rev) !== Number(plan.expectedRevision);
+        // Visible numbers are list-owned and can never be rebased.  Stable-id
+        // operations may cross an unrelated list revision only when the exact
+        // target snapshot below still matches; canonical learning-card content
+        // keeps its independent entityRev CAS in the following intent/apply.
+        if (listRevisionChanged && !stableIDOnly) {
           nativePDFRevisionConflict('页面卡片列表');
         }
-        nativePDFAssertPageCardReference(expectedState, plan);
-        if (Number(recordSet.records[0].rev) !== Number(plan.expectedRevision)) {
-          nativePDFRevisionConflict('页面卡片列表');
-        }
+        nativePDFAssertPageCardReference(expectedState, plan, stableIDOnly);
         var noteIndex = notes.findIndex(function (note) {
           return note && String(note.id || '') === plan.id;
         });
@@ -8880,7 +8949,10 @@
     var expectedRevision = strictInteger(
       input.expectedRevision, 0, Number.MAX_SAFE_INTEGER, 'expectedRevision', code
     );
-    if (Number(projection.revision) !== expectedRevision) {
+    if (Number(projection.revision) !== expectedRevision &&
+        (hasNumber || !nativePDFCachedPageCardUnchanged(
+          expectedRevision, note, expectedId, code
+        ))) {
       nativePDFRevisionConflict('页面卡片列表');
     }
     var row = projection.cards.find(function (candidate) {
@@ -8995,7 +9067,10 @@
             var action = { fn: '_assistEdit', args: [data] };
             var expectedState = {
               revisions: { notes: Number(notesRecord.rev) },
-              page_cards: nativePDFPageCardProjectionState(projection)
+              page_cards: nativePDFPageCardProjectionState(projection),
+              page_card_stable_id: !Object.prototype.hasOwnProperty.call(
+                input, 'number'
+              )
             };
             return nativePDFCommitActions(
               [action], expectedState, writerLease
@@ -11779,8 +11854,10 @@
 
   function localContextPlainText(value, maximum) {
     value = String(value == null ? '' : value)
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+      // Renderer controls are not card meaning.  Strip the whole control
+      // element before removing ordinary markup so labels such as the image
+      // card's “×” never leak into AI snapshots.
+      .replace(/<(button|script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
       .replace(/<[^>]+>/g, ' ')
       .replace(/&nbsp;|&#160;/gi, ' ')
       .replace(/&amp;/gi, '&')
@@ -11811,15 +11888,20 @@
         var frontField = card.front != null ? 'front'
           : (card.question != null ? 'question'
             : (card.q != null ? 'q' : (card.cloze != null ? 'cloze' : 'text')));
-        var front = localContextPlainText(card[frontField], 800);
+        var front = localContextPlainText(
+          card[frontField], LOCAL_PAGE_CARD_CONTEXT_LIMIT
+        );
         var back = localContextPlainText(
           card.back != null ? card.back
-            : (card.answer != null ? card.answer : card.a), 800
+            : (card.answer != null ? card.answer : card.a),
+          LOCAL_PAGE_CARD_CONTEXT_LIMIT
         );
         if (front) parts.push(front);
         if (back) parts.push(back);
         if (frontField !== 'cloze') {
-          var cloze = localContextPlainText(card.cloze, 800);
+          var cloze = localContextPlainText(
+            card.cloze, LOCAL_PAGE_CARD_CONTEXT_LIMIT
+          );
           if (cloze) parts.push(cloze);
         }
         if (parts.length) rows.push(parts.join(' / '));
@@ -11991,6 +12073,9 @@
           );
         }
       }
+      nativePDFRememberPageCardSnapshots(
+        record.rev, notes, cards.map(function (card) { return card.id; })
+      );
       return {
         contract: LOCAL_PAGE_CARDS_CONTRACT,
         page: page,

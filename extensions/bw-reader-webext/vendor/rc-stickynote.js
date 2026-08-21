@@ -959,6 +959,47 @@ if (window.__bwPwaProviderOnly) return;
       return content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     }
   }
+  function normalizeHtmlCardImageAssets(content) {
+    content = String(content || '');
+    if (!content || content.indexOf('data-aid') < 0) return content;
+    var shell;
+    try {
+      shell = document.createElement('div');
+      shell.innerHTML = content;
+      var changed = false;
+      Array.prototype.forEach.call(shell.querySelectorAll('img[data-aid]'), function (image) {
+        var aid = String(image.getAttribute('data-aid') || '').trim();
+        if (!/^[a-z]{2,4}_[a-f0-9]{4,12}$/.test(aid)) return;
+        var source = String(image.getAttribute('data-source-url') || '').trim();
+        if (!source) {
+          var current = String(image.getAttribute('src') || '').trim();
+          try {
+            var parsed = new URL(current, window.location.href);
+            if (parsed.pathname === '/pdf/api/img-proxy') {
+              var remote = new URL(parsed.searchParams.get('url') || '');
+              if (remote.protocol === 'https:' && remote.hostname &&
+                  !remote.username && !remote.password && !remote.hash) {
+                image.setAttribute('data-source-url', remote.href);
+                changed = true;
+              }
+            }
+          } catch (_) {}
+        }
+        var primary = '/pdf/api/asset/' + aid + '?proxy=1';
+        if (image.hasAttribute('data-asset-fallback-done')) {
+          image.removeAttribute('data-asset-fallback-done');
+          changed = true;
+        }
+        if (image.getAttribute('src') !== primary) {
+          image.setAttribute('src', primary);
+          changed = true;
+        }
+      });
+      return changed ? shell.innerHTML : content;
+    } catch (_) {
+      return content;
+    }
+  }
   function bindHtmlCardSelection(el, htmlOrGetter, cid, hostKind) {
     cid = String(cid || '');
     if (!el || !cid ||
@@ -1054,6 +1095,14 @@ if (window.__bwPwaProviderOnly) return;
   function renderNoteHtml(ctl) {
     var h = ctl.note.html, box = ctl.html; if (!box) return;
     if (!h || !h.content) { if (ctl.root.classList.contains('rc-note-hashtml')) { ctl.root.classList.remove('rc-note-hashtml'); try { ctl.cv.style.display = ''; } catch (e) {} } box.innerHTML = ''; box.__sig = ''; return; }
+    var durableContent = normalizeHtmlCardImageAssets(h.content);
+    if (durableContent !== h.content) {
+      h.content = durableContent;
+      ctl.note.html = h;
+      // Re-persist legacy image-card HTML with its actual asset URL so the
+      // server's existing asset-localization scanner can see and localize it.
+      patchNote(ctl.note, { html: h });
+    }
     if (!h.cid) { h.cid = (window.RC && RC.voiceCard && RC.voiceCard.mkCid) ? RC.voiceCard.mkCid() : ('c' + Date.now().toString(36)); ctl.note.html = h; patchNote(ctl.note, { html: h }); }   // 存量 HTML 卡补号后立即持久化
     ctl.root.classList.add('rc-note-hashtml');
     try { ctl.cv.style.display = 'none'; ctl.body.style.background = 'transparent'; ctl.body.style.backdropFilter = ''; ctl.body.style.webkitBackdropFilter = ''; ctl.handle.style.background = 'transparent'; } catch (e) {}   // 便签壳透明(卡自己有玻璃)
@@ -2683,7 +2732,7 @@ if (window.__bwPwaProviderOnly) return;
   // 允许的交互由共享模块按自描述 data-* 属性做全局委托；便签不持久化闭包。
   function createHtmlAt(clientX, clientY, htmlObj) {
     if (!O || !O.anchorFromPoint || !htmlObj || !htmlObj.content) return false;
-    var rawContent = String(htmlObj.content || '');
+    var rawContent = normalizeHtmlCardImageAssets(htmlObj.content);
     if (rawContent.length > PAGE_CARD_CONTENT_LIMIT) {
       toastMsg('卡片正文异常过大，未放入书页');
       return false;

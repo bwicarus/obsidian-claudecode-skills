@@ -288,7 +288,9 @@ test("page sidecars bind full content identity, geometry, and engine revision", 
   ]) {
     assert.match(MODELS, new RegExp(`let ${key}:`));
   }
-  for (const key of ["c", "x0", "y0", "x1", "y1", "sp", "w", "b", "bk"]) {
+  for (const key of [
+    "c", "x0", "y0", "x1", "y1", "sp", "w", "b", "bk", "line", "vertical",
+  ]) {
     assert.match(MODELS, new RegExp(`(?:var|let) ${key}:`));
   }
   assert.match(PROCESSOR, /reader-native-page-geometry\/1/);
@@ -498,6 +500,8 @@ test("native update event and page formula reply keep the exact public shape", (
     assert.match(BRIDGE, new RegExp(`"${key}":`));
   }
   assert.match(BRIDGE, /"multiline": jsonNullable\(value\.multiline\)/);
+  assert.match(BRIDGE, /if let line = value\.line, line >= 0 \{ result\["line"\] = line \}/);
+  assert.match(BRIDGE, /if let vertical = value\.vertical \{ result\["vertical"\] = vertical \}/);
   assert.match(BRIDGE, /"retryable": retryable/);
   assert.match(BRIDGE, /private static func pageRevision/);
   const revision = BRIDGE.slice(

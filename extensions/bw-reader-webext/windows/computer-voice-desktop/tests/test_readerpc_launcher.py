@@ -22,6 +22,7 @@ from readerpc_launcher import (  # noqa: E402
     ShortcutBrokerError,
     enable_readerpc_voice,
     load_preferences,
+    merge_preferences_with_service_intent,
     main,
     read_codex_voice_keep_active,
     rearm_codex_voice_keep_active,
@@ -34,6 +35,7 @@ from readerpc_launcher import (  # noqa: E402
     start_readerpc_voice,
     stop_readerpc_voice,
     stop_readerpc_services,
+    terminate_stale_instances,
     write_disabled_reader_context_snapshot,
     write_recovering_reader_context_snapshot,
 )
@@ -47,6 +49,51 @@ from readerpc_services import (  # noqa: E402
 
 
 class ReaderPCLauncherTests(unittest.TestCase):
+    class MutableProcessRunner:
+        def __init__(self, executables: dict[int, Path]) -> None:
+            self.executables = dict(executables)
+            self.terminations: list[tuple[int, Path]] = []
+
+        def executable_for_pid(self, pid: int) -> Path | None:
+            return self.executables.get(pid)
+
+        def terminate_exact(self, pid: int, executable: Path) -> bool:
+            self.terminations.append((pid, executable))
+            return False
+
+    @staticmethod
+    def write_takeover_direct_identity(
+        paths,
+        pid: int,
+        instance_id: str = "a" * 32,
+    ) -> None:
+        paths.native_host.parent.mkdir(parents=True, exist_ok=True)
+        paths.native_host.write_bytes(b"direct placeholder")
+        paths.service_record.parent.mkdir(parents=True, exist_ok=True)
+        paths.service_record.write_text(
+            json.dumps({
+                "contract": "reader-computer-voice-desktop-service/1",
+                "pid": pid,
+                "executable": str(paths.native_host.resolve()),
+                "configPath": str(paths.direct_config.resolve()),
+                "startedAtUtc": "2026-08-22T00:00:00Z",
+            }),
+            encoding="utf-8",
+        )
+        paths.runtime_status.write_text(
+            json.dumps({
+                "contract": "reader-computer-voice-direct-runtime-status/2",
+                "serviceInstanceId": instance_id,
+                "pid": pid,
+                "state": "active",
+                "readerConnected": True,
+                "captureActive": False,
+                "lastError": None,
+                "updatedAtUtc": "2026-08-22T00:00:00Z",
+            }),
+            encoding="utf-8",
+        )
+
     @staticmethod
     def window_without_tk() -> ReaderPCWindow:
         window = ReaderPCWindow.__new__(ReaderPCWindow)
@@ -68,6 +115,9 @@ class ReaderPCLauncherTests(unittest.TestCase):
         window.voice_start_in_progress = False
         window.voice_stop_in_progress = False
         window.voice_snapshot_offline_marked = False
+        window._shortcut_broker = Mock()
+        window.history_stop_event = threading.Event()
+        window.history_thread = None
         return window
 
     def test_preferences_default_to_keep_pc_online(self) -> None:
@@ -75,7 +125,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             path = Path(raw) / "missing.json"
             self.assertEqual(
                 load_preferences(path),
-                {"keepPcPreprocessingOnline": True, "serviceMode": "full", "snapshotViewerHidden": False, "hideVoiceOrb": False, "autoStartOnBoot": False},
+                {"keepPcPreprocessingOnline": True, "serviceMode": "full", "voiceEnabled": True, "snapshotViewerHidden": False, "hideVoiceOrb": False, "autoStartOnBoot": False},
             )
 
     def test_preferences_round_trip_explicit_opt_out(self) -> None:
@@ -84,7 +134,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             save_preferences(path, keep_pc_online=False)
             self.assertEqual(
                 load_preferences(path),
-                {"keepPcPreprocessingOnline": False, "serviceMode": "full", "snapshotViewerHidden": False, "hideVoiceOrb": False, "autoStartOnBoot": False},
+                {"keepPcPreprocessingOnline": False, "serviceMode": "full", "voiceEnabled": True, "snapshotViewerHidden": False, "hideVoiceOrb": False, "autoStartOnBoot": False},
             )
 
     def test_invalid_preferences_fail_to_safe_default(self) -> None:
@@ -111,6 +161,59 @@ class ReaderPCLauncherTests(unittest.TestCase):
                 "utf-8",
             )
             self.assertEqual(load_preferences(path)["serviceMode"], "full")
+
+    def test_preferences_voice_axis_round_trip_and_legacy_default(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "readerpc.json"
+            save_preferences(
+                path,
+                keep_pc_online=True,
+                service_mode="bridge-only",
+                voice_enabled=False,
+            )
+            value = load_preferences(path)
+            self.assertEqual(value["serviceMode"], "bridge-only")
+            self.assertFalse(value["voiceEnabled"])
+            path.write_text(
+                '{"contract":"readerpc-server-config/1",'
+                '"keepPcPreprocessingOnline":true,"serviceMode":"full"}',
+                "utf-8",
+            )
+            self.assertTrue(load_preferences(path)["voiceEnabled"])
+
+    def test_service_intent_overrides_stale_preferences_before_voice_helpers(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            bridge_paths = Mock()
+            bridge_paths.runtime_status.parent = root
+            preferences = {
+                "keepPcPreprocessingOnline": True,
+                "serviceMode": "full",
+                "voiceEnabled": True,
+                "snapshotViewerHidden": False,
+                "hideVoiceOrb": False,
+                "autoStartOnBoot": False,
+            }
+            (root / "readerpc-service-mode.json").write_text(
+                json.dumps({
+                    "contract": "readerpc-service-mode/1",
+                    "mode": "bridge-only",
+                    "voiceEnabled": False,
+                    "snapshotViewer": "hidden",
+                }),
+                encoding="utf-8",
+            )
+            merged = merge_preferences_with_service_intent(
+                preferences,
+                bridge_paths,
+            )
+        self.assertEqual(merged["serviceMode"], "bridge-only")
+        self.assertFalse(merged["voiceEnabled"])
+        self.assertTrue(merged["snapshotViewerHidden"])
+
+    def test_invalid_service_mode_preference_falls_back_to_full(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "readerpc.json"
             # 非法模式值 → 落 full
             path.write_text(
                 '{"contract":"readerpc-server-config/1",'
@@ -120,7 +223,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             self.assertEqual(load_preferences(path)["serviceMode"], "full")
 
     def test_service_mode_intent_file_written_before_voice_start(self) -> None:
-        """桥接模式:模式文件先于 start 落盘(C# 只在启动时读),且 keepalive=False。"""
+        """桥接模式与独立语音轴都在 start 前落盘。"""
         with tempfile.TemporaryDirectory() as raw:
             runtime = Path(raw) / "runtime" / "direct.status.json"
             runtime.parent.mkdir(parents=True)
@@ -158,6 +261,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(mode_file.read_text("utf-8")),
                 {"contract": "readerpc-service-mode/1", "mode": "bridge-only",
+                 "voiceEnabled": True,
                  "snapshotViewer": "visible"},
             )
             keepalive = json.loads(
@@ -167,6 +271,51 @@ class ReaderPCLauncherTests(unittest.TestCase):
             # 2026-08-17 语义更正:桥接模式语音留在电脑,keepalive 照常 True
             self.assertTrue(keepalive["enabled"])
             self.assertEqual(order, ["start"])
+
+    def test_voice_disabled_still_starts_direct_non_voice_foundation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime" / "direct.status.json"
+            runtime.parent.mkdir(parents=True)
+            bridge_paths = SimpleNamespace(
+                runtime_status=runtime,
+                direct_config=SimpleNamespace(exists=lambda: True),
+            )
+            with (
+                patch(
+                    "readerpc_launcher.load_direct_config",
+                    return_value={
+                        "localOptIn": True,
+                        "contextDeliveryMode": "snapshot-mcp",
+                    },
+                ),
+                patch("readerpc_launcher.set_direct_config_enabled") as configure,
+                patch(
+                    "readerpc_launcher.start_readerpc_voice",
+                    return_value=7654,
+                ) as start,
+            ):
+                self.assertEqual(
+                    enable_readerpc_voice(
+                        bridge_paths,
+                        Mock(),
+                        bridge_only=True,
+                        voice_enabled=False,
+                    ),
+                    7654,
+                )
+            intent = json.loads(
+                (runtime.parent / "readerpc-service-mode.json")
+                .read_text("utf-8")
+            )
+            self.assertEqual(intent["mode"], "bridge-only")
+            self.assertFalse(intent["voiceEnabled"])
+            keepalive = json.loads(
+                (runtime.parent / "codex-voice-keepalive.json")
+                .read_text("utf-8")
+            )
+            self.assertFalse(keepalive["enabled"])
+            configure.assert_called_once()
+            start.assert_called_once()
 
     def test_codex_voice_master_switch_is_exact_and_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -292,6 +441,22 @@ class ReaderPCLauncherTests(unittest.TestCase):
                 self.assertFalse(status.capture_active)
                 self.assertIsNone(status.capture_generation)
 
+    def test_no_voice_history_status_does_not_probe_codex_activity(self) -> None:
+        window = self.window_without_tk()
+        window.voice_enabled = Mock()
+        window.voice_enabled.get.return_value = False
+        window._voice_status = Mock(
+            return_value=SimpleNamespace(service_online=True)
+        )
+        with patch(
+            "readerpc_launcher.read_codex_voice_activity"
+        ) as activity:
+            status = window._history_status()
+        activity.assert_not_called()
+        self.assertTrue(status.service_online)
+        self.assertFalse(status.capture_active)
+        self.assertIsNone(status.capture_generation)
+
     def test_history_sync_skips_when_another_owner_holds_lease(self) -> None:
         window = self.window_without_tk()
         window.bridge_paths.root = Path("C:/fixed")
@@ -330,7 +495,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             ),
             patch(
                 "readerpc_launcher.stop_direct_service",
-                side_effect=lambda *_args: calls.append("stop"),
+                side_effect=lambda *_args, **_kwargs: calls.append("stop"),
             ) as stop,
             patch(
                 "readerpc_launcher.write_disabled_reader_context_snapshot",
@@ -349,7 +514,12 @@ class ReaderPCLauncherTests(unittest.TestCase):
             ],
         )
         intent.assert_called_once_with(bridge_paths, False)
-        stop.assert_called_once_with(bridge_paths, process_runner)
+        stop.assert_called_once_with(
+            bridge_paths,
+            process_runner,
+            graceful=True,
+            force_on_cleanup_failure=True,
+        )
         self.assertEqual(tombstone.call_count, 2)
 
     def test_disabled_intent_derives_direct_config_off_before_stop(self) -> None:
@@ -699,6 +869,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             window.bridge_paths,
             window.process_runner,
             bridge_only=False,
+            voice_enabled=True,
             snapshot_viewer_hidden=False,
         )
         self.assertFalse(window.voice_snapshot_offline_marked)
@@ -715,8 +886,113 @@ class ReaderPCLauncherTests(unittest.TestCase):
             window.bridge_paths,
             window.process_runner,
             bridge_only=False,
+            voice_enabled=True,
             snapshot_viewer_hidden=False,
         )
+
+    def test_voice_switch_restarts_only_optional_layer_intent(self) -> None:
+        window = self.window_without_tk()
+        window.voice_enabled = Mock()
+        window.voice_enabled.get.return_value = False
+        window._save_current_preferences = Mock()
+        window._restart_voice_with_intent = Mock()
+        window.on_voice_enabled_changed()
+        window._save_current_preferences.assert_called_once_with()
+        window._restart_voice_with_intent.assert_called_once()
+        pending, done = window._restart_voice_with_intent.call_args.args
+        self.assertIn("关闭语音", pending)
+        self.assertIn("继续可用", done)
+
+    def test_voice_disabled_restart_closes_f24_and_keeps_direct_online(self) -> None:
+        window = self.window_without_tk()
+        window.bridge_only = Mock()
+        window.bridge_only.get.return_value = False
+        window.voice_enabled = Mock()
+        window.voice_enabled.get.return_value = False
+        window.snapshot_hidden = Mock()
+        window.snapshot_hidden.get.return_value = False
+        window._run_task = Mock(
+            side_effect=lambda _pending, action, _success: action()
+        )
+        window._converge_shortcut_broker = Mock()
+        window._converge_history_monitor = Mock()
+        with (
+            patch("readerpc_launcher.stop_readerpc_voice") as stop,
+            patch(
+                "readerpc_launcher.enable_readerpc_voice",
+                return_value=4321,
+            ) as enable,
+        ):
+            window._restart_voice_with_intent("pending", "done")
+        self.assertFalse(stop.call_args.kwargs["force_on_cleanup_failure"])
+        window._converge_shortcut_broker.assert_called_once_with(
+            voice_shortcut_enabled=False
+        )
+        window._converge_history_monitor.assert_called_once_with(False)
+        enable.assert_called_once_with(
+            window.bridge_paths,
+            window.process_runner,
+            bridge_only=False,
+            voice_enabled=False,
+            snapshot_viewer_hidden=False,
+        )
+
+    def test_switch_cleanup_failure_preserves_helpers_and_stops_new_generation(self) -> None:
+        window = self.window_without_tk()
+        window.bridge_only = Mock()
+        window.bridge_only.get.return_value = False
+        window.voice_enabled = Mock()
+        window.voice_enabled.get.return_value = False
+        window.snapshot_hidden = Mock()
+        window.snapshot_hidden.get.return_value = False
+        window._applied_service_mode = "full"
+        window._applied_voice_enabled = True
+        window._applied_snapshot_hidden = False
+        window._run_task = Mock(
+            side_effect=lambda _pending, action, _success: action()
+        )
+        window._converge_shortcut_broker = Mock()
+        window._converge_history_monitor = Mock()
+        with (
+            patch(
+                "readerpc_launcher.stop_readerpc_voice",
+                side_effect=RuntimeError("cleanup receipt failed"),
+            ),
+            patch("readerpc_launcher.enable_readerpc_voice") as enable,
+            self.assertRaisesRegex(RuntimeError, "cleanup receipt failed"),
+        ):
+            window._restart_voice_with_intent("pending", "done")
+        window._converge_shortcut_broker.assert_not_called()
+        window._converge_history_monitor.assert_not_called()
+        enable.assert_not_called()
+        kind, rollback = window.events.get_nowait()
+        self.assertEqual(kind, "intent-rollback")
+        self.assertTrue(rollback["voice_enabled"])
+
+    def test_reconcile_compares_app_intent_with_applied_not_desired_ui(self) -> None:
+        window = self.window_without_tk()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            window.bridge_paths.runtime_status.parent = root
+            (root / "readerpc-service-mode.json").write_text(
+                json.dumps({
+                    "contract": "readerpc-service-mode/1",
+                    "mode": "full",
+                    "voiceEnabled": False,
+                    "snapshotViewer": "visible",
+                }),
+                encoding="utf-8",
+            )
+            window.bridge_only = Mock()
+            window.bridge_only.get.return_value = False
+            window.voice_enabled = Mock()
+            window.voice_enabled.get.return_value = False
+            window._applied_service_mode = "full"
+            window._applied_voice_enabled = True
+            window._save_current_preferences = Mock()
+            window._restart_voice_with_intent = Mock()
+            window._reconcile_service_mode_intent()
+        window._restart_voice_with_intent.assert_called_once()
 
     def test_manual_retry_only_starts_when_server_service_is_offline(self) -> None:
         window = self.window_without_tk()
@@ -936,6 +1212,66 @@ class ReaderPCLauncherTests(unittest.TestCase):
         self.assertTrue(voice["intentEnabled"])
         self.assertFalse(voice["codexVoiceActive"])
 
+    def test_no_voice_refresh_does_not_probe_codex_activity(self) -> None:
+        window = self.window_without_tk()
+        window.voice_enabled = Mock()
+        window.voice_enabled.get.return_value = False
+        window.bridge_only = Mock()
+        window.bridge_only.get.return_value = False
+        window.voice_status = Mock()
+        window.voice_detail = Mock()
+        window.context_status = Mock()
+        window.context_detail = Mock()
+        window.pc_status = Mock()
+        window.pc_detail = Mock()
+        window.readerpc_paths = SimpleNamespace(
+            status_file=Path("C:/readerpc.status.json")
+        )
+        window.last_status_publish = 0.0
+        window._voice_status = Mock(return_value=SimpleNamespace(
+            service_online=True,
+            configuration_enabled=True,
+            reader_connected=False,
+            capture_active=False,
+            reason="reader-not-connected",
+            pid=4321,
+        ))
+        window.pc_ocr.status.return_value = PcOcrStatus(
+            running=False,
+            state="stopped",
+            phase="",
+            pid=None,
+            start_file_time_utc=None,
+            worker_id=None,
+            gpu_name=None,
+            current_page=None,
+            progress={},
+            updated_at_epoch_ms=None,
+            error=None,
+            controllable=True,
+            source_ready=True,
+        )
+        window.bridge_paths.root = Path("C:/fixed")
+        with (
+            patch("readerpc_launcher.read_codex_voice_activity") as activity,
+            patch(
+                "readerpc_launcher.read_reader_context_status",
+                return_value=ReaderContextStatus(False, False, "", "", None),
+            ),
+            patch("readerpc_launcher.write_readerpc_status") as publish,
+            patch("readerpc_launcher.time.monotonic", return_value=20.0),
+        ):
+            window.refresh()
+        activity.assert_not_called()
+        self.assertEqual(
+            window.voice_status.configure.call_args.kwargs["text"],
+            "Reader 服务在线 · 语音功能已关闭",
+        )
+        self.assertEqual(
+            publish.call_args.kwargs["voice"]["codexVoiceStatus"],
+            "disabled",
+        )
+
     def test_voice_start_requires_matching_fresh_runtime(self) -> None:
         runner = Mock()
         runner.executable_for_pid.return_value = Path("C:/voice.exe")
@@ -1064,9 +1400,270 @@ class ReaderPCLauncherTests(unittest.TestCase):
         self.assertFalse(window.closed)
         self.assertFalse(window.closing)
 
+    def test_takeover_closes_only_pyinstaller_gui_leaf_then_stops_direct(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            paths = readerpc_launcher.BridgePaths.for_root(root)
+            direct_pid = 3201
+            parent_pid = 3101
+            gui_pid = 3102
+            reader_exe = root / "ReaderPC-Server.exe"
+            self.write_takeover_direct_identity(paths, direct_pid)
+            runner = self.MutableProcessRunner({
+                parent_pid: reader_exe,
+                gui_pid: reader_exe,
+                direct_pid: paths.native_host.resolve(),
+            })
+            rows = [
+                (parent_pid, 1, "ReaderPC-Server.exe", str(reader_exe)),
+                (gui_pid, parent_pid, "ReaderPC-Server.exe", str(reader_exe)),
+                (
+                    direct_pid,
+                    gui_pid,
+                    "bw-computer-voice-audio.exe",
+                    f'"{paths.native_host}" --direct-serve --config x',
+                ),
+            ]
+            closed: list[int] = []
+
+            def close_gui(pid: int) -> bool:
+                closed.append(pid)
+                runner.executables.pop(gui_pid, None)
+                runner.executables.pop(parent_pid, None)
+                return True
+
+            def stop_direct(_paths, _runner, **kwargs) -> bool:
+                self.assertFalse(kwargs["force_on_cleanup_failure"])
+                runner.executables.pop(direct_pid, None)
+                paths.service_record.unlink()
+                paths.shutdown_receipt.write_text(json.dumps({
+                    "contract": "readerpc-direct-shutdown-result/1",
+                    "serviceInstanceId": "a" * 32,
+                    "state": "success",
+                }), encoding="utf-8")
+                return True
+
+            with patch(
+                "readerpc_launcher.stop_direct_service",
+                side_effect=stop_direct,
+            ) as stop:
+                stale = terminate_stale_instances(
+                    paths,
+                    runner,
+                    process_rows=rows,
+                    close_process=close_gui,
+                )
+        self.assertEqual(stale, [parent_pid, gui_pid])
+        self.assertEqual(closed, [gui_pid])
+        stop.assert_called_once()
+        self.assertEqual(runner.terminations, [])
+
+    def test_takeover_waits_if_record_disappears_while_direct_is_live(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            paths = readerpc_launcher.BridgePaths.for_root(root)
+            direct_pid = 4201
+            gui_pid = 4101
+            reader_exe = root / "ReaderPC-Server.exe"
+            self.write_takeover_direct_identity(paths, direct_pid)
+            runner = self.MutableProcessRunner({
+                gui_pid: reader_exe,
+                direct_pid: paths.native_host.resolve(),
+            })
+            rows = [
+                (gui_pid, 1, "ReaderPC-Server.exe", str(reader_exe)),
+                (
+                    direct_pid,
+                    gui_pid,
+                    "bw-computer-voice-audio.exe",
+                    f'"{paths.native_host}" --direct-serve --config x',
+                ),
+            ]
+            clock = [0.0]
+            waits = [0]
+
+            def close_gui(_pid: int) -> bool:
+                runner.executables.pop(gui_pid, None)
+                paths.service_record.unlink()
+                return True
+
+            def finish_cleanup(delay: float) -> None:
+                clock[0] += delay
+                waits[0] += 1
+                if waits[0] == 1:
+                    runner.executables.pop(direct_pid, None)
+                    paths.shutdown_receipt.write_text(json.dumps({
+                        "contract": "readerpc-direct-shutdown-result/1",
+                        "serviceInstanceId": "a" * 32,
+                        "state": "success",
+                    }), encoding="utf-8")
+
+            stale = terminate_stale_instances(
+                paths,
+                runner,
+                process_rows=rows,
+                close_process=close_gui,
+                sleeper=finish_cleanup,
+                monotonic=lambda: clock[0],
+                timeout_seconds=1.0,
+            )
+        self.assertEqual(stale, [gui_pid])
+        self.assertEqual(waits[0], 1)
+        self.assertEqual(runner.terminations, [])
+
+    def test_takeover_refuses_live_direct_after_record_disappears(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            paths = readerpc_launcher.BridgePaths.for_root(root)
+            direct_pid = 5201
+            gui_pid = 5101
+            reader_exe = root / "ReaderPC-Server.exe"
+            self.write_takeover_direct_identity(paths, direct_pid)
+            runner = self.MutableProcessRunner({
+                gui_pid: reader_exe,
+                direct_pid: paths.native_host.resolve(),
+            })
+            rows = [
+                (gui_pid, 1, "ReaderPC-Server.exe", str(reader_exe)),
+                (
+                    direct_pid,
+                    gui_pid,
+                    "bw-computer-voice-audio.exe",
+                    f'"{paths.native_host}" --direct-serve --config x',
+                ),
+            ]
+            clock = [0.0]
+
+            def close_gui(_pid: int) -> bool:
+                runner.executables.pop(gui_pid, None)
+                paths.service_record.unlink()
+                return True
+
+            def advance(delay: float) -> None:
+                clock[0] += delay
+
+            with self.assertRaisesRegex(
+                readerpc_launcher.ReaderPCServiceError,
+                "未完成退出清理",
+            ):
+                terminate_stale_instances(
+                    paths,
+                    runner,
+                    process_rows=rows,
+                    close_process=close_gui,
+                    sleeper=advance,
+                    monotonic=lambda: clock[0],
+                    timeout_seconds=0.3,
+                )
+        self.assertEqual(runner.terminations, [])
+        self.assertIn(direct_pid, runner.executables)
+
+    def test_takeover_requires_success_receipt_after_direct_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            paths = readerpc_launcher.BridgePaths.for_root(root)
+            direct_pid = 6201
+            gui_pid = 6101
+            reader_exe = root / "ReaderPC-Server.exe"
+            self.write_takeover_direct_identity(paths, direct_pid)
+            runner = self.MutableProcessRunner({
+                gui_pid: reader_exe,
+                direct_pid: paths.native_host.resolve(),
+            })
+            rows = [
+                (gui_pid, 1, "ReaderPC-Server.exe", str(reader_exe)),
+                (
+                    direct_pid,
+                    gui_pid,
+                    "bw-computer-voice-audio.exe",
+                    f'"{paths.native_host}" --direct-serve --config x',
+                ),
+            ]
+
+            def close_without_receipt(_pid: int) -> bool:
+                runner.executables.pop(gui_pid, None)
+                runner.executables.pop(direct_pid, None)
+                paths.service_record.unlink()
+                return True
+
+            with self.assertRaisesRegex(
+                readerpc_launcher.ReaderPCServiceError,
+                "没有可验证的清理成功回执",
+            ):
+                terminate_stale_instances(
+                    paths,
+                    runner,
+                    process_rows=rows,
+                    close_process=close_without_receipt,
+                )
+        self.assertEqual(runner.terminations, [])
+
+    def test_takeover_blocks_orphan_direct_without_force_kill(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            paths = readerpc_launcher.BridgePaths.for_root(root)
+            paths.native_host.parent.mkdir(parents=True, exist_ok=True)
+            paths.native_host.write_bytes(b"direct placeholder")
+            direct_pid = 7201
+            runner = self.MutableProcessRunner({
+                direct_pid: paths.native_host.resolve(),
+            })
+            rows = [(
+                direct_pid,
+                1,
+                "bw-computer-voice-audio.exe",
+                f'"{paths.native_host}" --direct-serve --config x',
+            )]
+            with self.assertRaisesRegex(
+                readerpc_launcher.ReaderPCServiceError,
+                "未被严格服务记录认证",
+            ):
+                terminate_stale_instances(
+                    paths,
+                    runner,
+                    process_rows=rows,
+                    close_process=lambda _pid: True,
+                )
+        self.assertEqual(runner.terminations, [])
+
     def test_gui_owns_shortcut_broker_for_entire_window_lifetime(self) -> None:
+        paths = SimpleNamespace(preferences_file=Path("C:/readerpc.json"))
+        bridge_paths = Mock()
+        process_runner = Mock()
+        preferences = {
+            "keepPcPreprocessingOnline": True,
+            "serviceMode": "full",
+            "voiceEnabled": True,
+            "snapshotViewerHidden": False,
+            "hideVoiceOrb": False,
+            "autoStartOnBoot": False,
+        }
         with (
+            patch(
+                "readerpc_launcher.BridgePaths.discover",
+                return_value=bridge_paths,
+            ),
+            patch(
+                "readerpc_launcher.WindowsProcessRunner",
+                return_value=process_runner,
+            ),
+            patch(
+                "readerpc_launcher.terminate_stale_instances",
+                return_value=[],
+            ) as takeover,
             patch("readerpc_launcher.SingleInstance") as instance,
+            patch(
+                "readerpc_launcher.ReaderPCPaths.discover",
+                return_value=paths,
+            ),
+            patch(
+                "readerpc_launcher.load_preferences",
+                return_value=preferences,
+            ),
+            patch(
+                "readerpc_launcher.merge_preferences_with_service_intent",
+                return_value=preferences,
+            ),
             patch(
                 "readerpc_launcher.prepare_readerpc_shortcut_broker"
             ) as prepare_broker,
@@ -1076,9 +1673,17 @@ class ReaderPCLauncherTests(unittest.TestCase):
             instance.return_value.acquire.return_value = True
             self.assertEqual(main([]), 0)
 
-        prepare_broker.assert_called_once_with()
-        prepare_broker.return_value.close.assert_called_once_with()
-        make_window.assert_called_once_with(make_root.return_value)
+        prepare_broker.assert_called_once_with(voice_shortcut_enabled=True)
+        takeover.assert_called_once_with(bridge_paths, process_runner)
+        prepare_broker.return_value.close.assert_not_called()
+        make_window.return_value.close_shortcut_broker.assert_called_once_with()
+        make_window.assert_called_once_with(
+            make_root.return_value,
+            bridge_paths=bridge_paths,
+            process_runner=process_runner,
+            readerpc_paths=paths,
+            shortcut_broker=prepare_broker.return_value,
+        )
         make_root.return_value.mainloop.assert_called_once_with()
 
     def test_readerpc_retires_owned_logon_bootstrap_and_owns_broker(self) -> None:
@@ -1139,6 +1744,25 @@ class ReaderPCLauncherTests(unittest.TestCase):
         remove_task.assert_not_called()
         stop_voice.assert_called_once()
         broker.return_value.start.assert_called_once_with()
+
+    def test_voice_disabled_retires_old_owner_without_creating_f24_broker(self) -> None:
+        with (
+            patch(
+                "readerpc_launcher.inspect_bootstrap_task",
+                return_value=SimpleNamespace(exists=False, owned=False),
+            ),
+            patch("readerpc_launcher.remove_bootstrap_task") as remove_task,
+            patch("readerpc_launcher.stop_readerpc_voice") as stop_voice,
+            patch("readerpc_launcher.WindowsShortcutBroker") as broker,
+        ):
+            self.assertIsNone(
+                prepare_readerpc_shortcut_broker(
+                    voice_shortcut_enabled=False
+                )
+            )
+        remove_task.assert_not_called()
+        stop_voice.assert_called_once()
+        broker.assert_not_called()
 
     def test_retired_broker_pipe_is_replaced_after_bounded_unwind(self) -> None:
         first = Mock()

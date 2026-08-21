@@ -41,10 +41,17 @@ if (window.__bwPwaProviderOnly) return;
   function _scroll() { try { var t = _thread(); if (t) t.scrollTop = t.scrollHeight; } catch (e) {} }
 
   // ── 容器 ─────────────────────────────────────────────────────────────────
-  function open(tid) {
-    var th = _thread();
+  function open(tid, target, options) {
+    var th = target || _thread();
     if (!th) return null;
-    if (_turns[tid] && _turns[tid].el && _turns[tid].el.isConnected) { _cur = tid; return _turns[tid]; }
+    options = options && typeof options === 'object' ? options : {};
+    if (
+      _turns[tid] && _turns[tid].el && _turns[tid].el.isConnected &&
+      (!target || _turns[tid].el.parentNode === target)
+    ) {
+      if (!target) _cur = tid;
+      return _turns[tid];
+    }
     var el = document.createElement('div');
     el.className = 'asst-msg asst-a rc-turn';   // 复用既有气泡外观;有工具时再补 .vc-if 卡头(见 _ensureHead)
     el.setAttribute('data-turn', tid);
@@ -52,9 +59,10 @@ if (window.__bwPwaProviderOnly) return;
     var flow = document.createElement('div'); flow.className = 'rc-turn-flow'; flow.hidden = true;
     el.appendChild(bd); el.appendChild(flow);
     th.appendChild(el);
-    var t = _turns[tid] = { tid: tid, el: el, hd: null, bd: bd, flow: flow, parts: [], draft: null, orchTaskId: null };   // tid 也用于存量卡稳定补号
-    _cur = tid;
-    _scroll();
+    var t = _turns[tid] = { tid: tid, el: el, hd: null, bd: bd, flow: flow,
+      parts: [], draft: null, orchTaskId: null,
+      historyReplay: options.historyReplay === true };   // tid 也用于存量卡稳定补号
+    if (!target) { _cur = tid; _scroll(); }
     return t;
   }
 
@@ -138,7 +146,7 @@ if (window.__bwPwaProviderOnly) return;
         if (!/^card_[a-f0-9]{4,64}$/.test(String(p.gid || ''))) {
           p.gid = _localCardGid(String(t.tid || 'turn') + ':' + String(_cardSeq));
         }
-        if (p.draft && RC.flashcard.presentDraft) {
+        if (p.draft && RC.flashcard.presentDraft && !t.historyReplay) {
           // 上游若已经把这张草稿登记进本地仓，就必须原样沿用它的身份。
           //
           // 这里曾一律自造 assistant-turn:<tid>:<seq> 作为 source 并把
@@ -186,7 +194,7 @@ if (window.__bwPwaProviderOnly) return;
       return null;
     }
     t.bd.appendChild(d);
-    _scroll();
+    if (!t.historyReplay) _scroll();
     return d;
   }
 
@@ -486,8 +494,8 @@ if (window.__bwPwaProviderOnly) return;
   function idle(tid) { var t = _turns[tid]; if (t && t.statusEl) t.statusEl.hidden = true; }
 
   // ── 历史回放:**同一个 renderPart**(不变式①)────────────────────────────
-  function renderTurn(tid, parts) {
-    var t = open(tid);
+  function renderTurn(tid, parts, target, options) {
+    var t = open(tid, target, options);
     if (!t) return null;
     (parts || []).forEach(function (p) {
       t.parts.push(p);
@@ -526,6 +534,13 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
   function reset() { _turns = {}; _cur = null; }
+  function prune() {
+    Object.keys(_turns).forEach(function (tid) {
+      var t = _turns[tid];
+      if (!t || !t.el || !t.el.isConnected) delete _turns[tid];
+    });
+    if (_cur && !_turns[_cur]) _cur = null;
+  }
 
   // ── CLI 委托任务追踪(从 rc-assistant 搬入:卡头/增量正文/流程/建纸 CA;阅读器与工具库页共用同一份)──
   function trackCli(tid, taskId, label) {
@@ -611,7 +626,7 @@ if (window.__bwPwaProviderOnly) return;
 
   RC.turnCard = {
     open: open, addPart: addPart, draftText: draftText, freezeDraft: freezeDraft, busy: busy, idle: idle,
-    renderTurn: renderTurn, partsOf: partsOf, reset: reset, setTaskId: setTaskId, setOrchTaskId: setOrchTaskId, title: title, status: status, cliPart: cliPart,
+    renderTurn: renderTurn, partsOf: partsOf, reset: reset, prune: prune, setTaskId: setTaskId, setOrchTaskId: setOrchTaskId, title: title, status: status, cliPart: cliPart,
     current: function () { return _cur; },
     trackCli: trackCli,
     has: function (tid) { return !!_turns[tid]; },

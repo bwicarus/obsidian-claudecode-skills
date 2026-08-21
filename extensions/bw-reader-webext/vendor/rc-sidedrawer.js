@@ -41,6 +41,7 @@ if (window.__bwPwaProviderOnly) return;
   var _injected = false;
   var _built = false;
   var _curTab = '';
+  var _lastAssistantNoticeTab = '', _lastAssistantNoticeOpen = false;
   var LS_KEY = 'ep-side-tab';
   // 侧栏外观持久化键(照搬 PDF reader.src/18-grammar.js 的 pdf-gp-{floating,blur};EPUB 不按排版分键 → 简单全局键)
   var LS_FLOAT = 'eph-gp-floating', LS_BLUR = 'eph-gp-blur', LS_WIDTH = 'ep-side-width';
@@ -752,6 +753,17 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
       b.style.display = (b.__tabs && b.__tabs.indexOf(name) >= 0) ? '' : 'none';
     });
     try { if (typeof _opts.onTab === 'function') _opts.onTab(name); } catch (e) {}
+    // 直接通知可信共享组件，不广播可由宿主内容伪造/风暴触发的 window CustomEvent。
+    // 同一打开周期的同一 tab 只通知一次；助手自身还会做合并与网络限流。
+    var nowOpen = isOpen();
+    if (nowOpen && (!_lastAssistantNoticeOpen || _lastAssistantNoticeTab !== name)) {
+      _lastAssistantNoticeOpen = true; _lastAssistantNoticeTab = name;
+      try {
+        if (RC.assistant && typeof RC.assistant.onDrawerTabChanged === 'function') {
+          RC.assistant.onDrawerTabChanged(name, true);
+        }
+      } catch (e) {}
+    }
   }
 
   function _lastTab() {
@@ -799,6 +811,7 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
       var sm = document.getElementById('ep-side-settings'); if (sm) sm.style.display = 'none';
     }
     document.body.classList.remove('ep-side-open');
+    _lastAssistantNoticeOpen = false;
     _mirror(_opts.mirrorOpenClass, false);
     _reflow();
   }

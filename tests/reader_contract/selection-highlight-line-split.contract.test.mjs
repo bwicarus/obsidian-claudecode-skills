@@ -34,9 +34,10 @@ function rectsFor(fixture) {
   const ctx = { console };
   vm.createContext(ctx);
   for (const n of [
-    "_charBlockId", "_charBlockGeometry", "_charBlockGap", "_charBlockOverlapRatio",
+    "_charBlockId", "_charLineKey", "_charLineGeometry", "_charBlockGeometry",
+    "_charBlockGap", "_charBlockOverlapRatio",
     "_charBlocksConnected", "_charConnectedBlockPath", "_charSpanBlocks",
-    "_charRangeBlockFilter", "_charsRangeToRects",
+    "_charRangeBlockFilter", "_charRangeToVisualRects", "_charsRangeToRects",
   ]) vm.runInContext(fnBody(n), ctx);
 
   const d = JSON.parse(fs.readFileSync(`${FIXTURES}/${fixture}.json`, "utf8"));

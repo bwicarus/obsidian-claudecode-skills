@@ -23,6 +23,7 @@ import reader_book_ocr  # noqa: E402
 import reader_book_ocr_worker  # noqa: E402
 from reader_book_ocr import ReaderBookOcrError, ReaderBookOcrService  # noqa: E402
 from reader_book_ocr_worker import (  # noqa: E402
+    _manga_page,
     _manga_line_char_boxes,
     _publish_attachments,
     _publish_release,
@@ -1010,7 +1011,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "imageHeight": 200,
             "chars": [{
                 "c": "A", "x0": 1, "y0": 1, "x1": 2, "y1": 2,
-                "w": 1, "bk": 0, "b": 0, "line": 0,
+                "w": 1, "bk": 0, "b": 0, "line": 0, "vertical": True,
             }],
             "furigana": [],
             "textCharCount": 1,
@@ -2185,6 +2186,26 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
 
 
 class ReaderBookOcrWorkerContractTest(unittest.TestCase):
+    def test_manga_page_preserves_authoritative_vertical_direction(self) -> None:
+        class FakePixmap:
+            width = 100
+            height = 100
+
+            def save(self, path) -> None:
+                Path(path).write_bytes(b"png")
+
+        page = SimpleNamespace(
+            rect=SimpleNamespace(width=100, height=100),
+            get_pixmap=lambda **_kwargs: FakePixmap(),
+        )
+        engine = lambda _path: {"blocks": [{
+            "vertical": True,
+            "lines": ["縦書"],
+            "lines_coords": [[[10, 10], [30, 10], [30, 70], [10, 70]]],
+        }]}
+        chars, _text, _image_w, _image_h = _manga_page(page, engine)
+        self.assertEqual([char.get("vertical") for char in chars], [True, True])
+
     def test_manga_line_geometry_follows_vertical_japanese_writing(self) -> None:
         boxes = _manga_line_char_boxes(
             "取り寄せ",

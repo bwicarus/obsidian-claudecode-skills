@@ -468,7 +468,7 @@ def _manga_page(page, engine) -> tuple[list[dict], str, int, int]:
                 vertical=(block_vertical if isinstance(block_vertical, bool) else None),
             )
             for character, x0, y0, x1, y1 in cells:
-                chars.append({
+                char = {
                     "c": character,
                     "x0": round(x0 * sx, 3),
                     "y0": round(y0 * sy, 3),
@@ -478,7 +478,13 @@ def _manga_page(page, engine) -> tuple[list[dict], str, int, int]:
                     "bk": block_no,
                     "line": line_no,
                     "b": 0,
-                })
+                }
+                # Preserve MangaPageOcr's authoritative writing direction.  A
+                # square block can contain several vertical lines, so the whole
+                # block aspect ratio is not a reliable substitute downstream.
+                if isinstance(block_vertical, bool):
+                    char["vertical"] = block_vertical
+                chars.append(char)
             if cells:
                 text_lines.append(text)
                 line_no += 1

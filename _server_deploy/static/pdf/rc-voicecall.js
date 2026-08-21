@@ -2351,6 +2351,18 @@
     var remote = _cardHttpsURL(raw);
     return remote ? '/pdf/api/img-proxy?url=' + encodeURIComponent(remote) : '';
   }
+  function _cardAssetID(value) {
+    var raw = String(value == null ? '' : value).trim();
+    return /^[a-z]{2,4}_[a-f0-9]{4,12}$/.test(raw) ? raw : '';
+  }
+  function _cardAssetURL(value) {
+    var aid = _cardAssetID(value);
+    return aid ? '/pdf/api/asset/' + aid + '?proxy=1' : '';
+  }
+  function _cardImageURL(item) {
+    item = item || {};
+    return _cardAssetURL(item.aid) || _cardMediaURL(item.url);
+  }
   function _videoCardRef(item) {
     item = item || {};
     var url = _cardHttpsURL(item.url);
@@ -2472,6 +2484,37 @@
     }, true);
   }
   _bindPinnedVideoClicks();
+  var _cardImageFallbackBound = false;
+  function _bindCardImageFallbacks() {
+    if (_cardImageFallbackBound) return;
+    _cardImageFallbackBound = true;
+    // Asset ids are the durable primary source.  A raw HTTPS source is kept
+    // only as a one-shot compatibility fallback for an account whose asset
+    // registry has not reached this host yet.  The fallback still crosses the
+    // existing bounded same-origin proxy; arbitrary network URLs never become
+    // DOM image sources.
+    // In the ordinary-page extension host `document` is a facade whose body is
+    // the actual Reader root inside a ShadowRoot.  Image error events are not
+    // composed, so a listener forwarded to the host document never sees them;
+    // capture on the Reader root works in both the Shadow DOM host and PWA.
+    var eventRoot = document.body && document.body.addEventListener
+      ? document.body : document;
+    eventRoot.addEventListener('error', function (event) {
+      var image = event.target;
+      if (!image || String(image.tagName || '').toLowerCase() !== 'img' ||
+          image.getAttribute('data-asset-fallback-done') === '1') return;
+      var aid = _cardAssetID(image.getAttribute('data-aid'));
+      var primary = _cardAssetURL(aid);
+      if (!aid || image.getAttribute('src') !== primary) return;
+      var sourceURL = _cardHttpsURL(image.getAttribute('data-source-url'));
+      var fallback = sourceURL
+        ? '/pdf/api/img-proxy?url=' + encodeURIComponent(sourceURL) : '';
+      if (!fallback || fallback === primary) return;
+      image.setAttribute('data-asset-fallback-done', '1');
+      image.setAttribute('src', fallback);
+    }, true);
+  }
+  _bindCardImageFallbacks();
   function _infoHtml(card) {
     var k = card.kind, d = card.data || {}, h = '';
     function e0(x) { return esc(String(x == null ? '' : x)); }
@@ -2500,10 +2543,10 @@
     } else if (k === 'images') {
       h = '<div class="vc-ig">' + (d.items || []).map(function (it, i) {
         if (it._gone) return '';   // ✕删除的图不再渲染(拖整框/回放/三态重渲都不带回;data-i 保原索引供 ✕ 定位)
-        var media = _cardMediaURL(it.url);
+        var aid = _cardAssetID(it.aid), media = _cardImageURL(it);
         return '<div class="vc-ig-cell" data-i="' + i + '">' +
           '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除">✕</button>' +
-          (media ? '<img class="vc-ig-img" data-i="' + i + '"' + (it.aid ? ' data-aid="' + esc(it.aid) + '"' : '') +
+          (media ? '<img class="vc-ig-img" data-i="' + i + '"' + (aid ? ' data-aid="' + esc(aid) + '"' : '') +
             ' data-source-url="' + esc(it.url || '') + '" src="' + esc(media) + '" alt="' + esc(it.title || '') + '">' :
             '<span class="rc-img-broken">🖼 图片地址无效</span>') +
           (it.title ? '<div class="vc-ig-t">' + esc(it.title) + '</div>' : '') + '</div>';
@@ -5133,16 +5176,17 @@
       var _currentAttr = String(was.img.getAttribute && was.img.getAttribute('src') || '');
       var _stableCurrent = /^(?:data:image\/|\/pdf\/api\/(?:asset\/|page-image(?:\?|$)|img-proxy(?:\?|$)))/i.test(_currentAttr)
         ? _currentAttr : '';
-      var _asrcRaw = (was.img.dataset && was.img.dataset.aid)
-        ? ('/pdf/api/asset/' + was.img.dataset.aid)
-        : (_cardMediaURL(_persistentSource) || _stableCurrent);
+      var _dragAid = _cardAssetID(was.img.dataset && was.img.dataset.aid);
+      var _asrcRaw = _cardAssetURL(_dragAid) ||
+        _cardMediaURL(_persistentSource) || _stableCurrent;
       if (!_asrcRaw) {
         try { if (typeof _toast === 'function') _toast('图片来源无效，未粘贴'); } catch (e0) {}
         return;
       }
       var _asrc = esc(_asrcRaw);   // 持久化稳定 asset/proxy 地址，不能保存 App loopback 或扩展 blob 临时 URL
       var _sourceAttr = _persistentSource ? ' data-source-url="' + esc(_persistentSource) + '"' : '';
-      var _ih = '<div class="vc-imgdrop"><img' + _sourceAttr + ' src="' + _asrc + '">' + (_cap ? '<div class="vc-imgdrop-t">' + esc(_cap) + '</div>' : '') + '</div>';
+      var _aidAttr = _dragAid ? ' data-aid="' + esc(_dragAid) + '"' : '';
+      var _ih = '<div class="vc-imgdrop"><img' + _aidAttr + _sourceAttr + ' src="' + _asrc + '">' + (_cap ? '<div class="vc-imgdrop-t">' + esc(_cap) + '</div>' : '') + '</div>';
       // ① 落在另一张卡上 → 图进那张卡的**数据层**(元数据跟进,非 DOM-only:三态重渲/回放/上下文/拖整框都带);同编号(cid)所有实例同步;收藏夹持久
       try {
         var _tgt = document.elementFromPoint(ev.clientX, ev.clientY);
@@ -5153,7 +5197,7 @@
           try { _els = (_cid2 && _pins.byCid[_cid2] || []).filter(function (x) { return x.isConnected; }); } catch (e) {}
           if (!_els.length) _els = [_tc];
           var _tcard = _tc.__vcCard || null;   // #img:目标卡数据对象(建卡时挂;同 cid 浮层/侧栏共享同一对象)
-          var _dImg = { url: _persistentSource || _asrcRaw, aid: (was.img.dataset && was.img.dataset.aid) || '', title: _cap, src: 'dragged', _added: 1 };   // 只保存稳定原始来源或 Reader 资产地址;绝不落 App loopback/blob 临时 URL
+          var _dImg = { url: _persistentSource || _asrcRaw, aid: _dragAid, title: _cap, src: 'dragged', _added: 1 };   // 只保存稳定原始来源或 Reader 资产地址;绝不落 App loopback/blob 临时 URL
           if (_tcard && _tcard.kind === 'images' && _tcard.data) {   // 图卡 → push data.items(持久) + 各实例 append 标准 vc-ig-cell(即时;_igWire 委托自动接管 ✕/单选)
             _tcard.data.items = _tcard.data.items || [];
             _tcard.data.items.push(_dImg);
@@ -5180,7 +5224,7 @@
       try {
         if (window.RC && RC.stickynote && RC.stickynote.createHtmlAt)
           RC.stickynote.createHtmlAt(ev.clientX, ev.clientY, {
-            content: '<img src="' + _asrc + '" style="max-width:100%;border-radius:8px;display:block">' + (_cap ? '<div style="font-size:11px;opacity:.7;margin-top:3px">' + esc(_cap) + '</div>' : ''),
+            content: '<img' + _aidAttr + _sourceAttr + ' src="' + _asrc + '" style="max-width:100%;border-radius:8px;display:block">' + (_cap ? '<div style="font-size:11px;opacity:.7;margin-top:3px">' + esc(_cap) + '</div>' : ''),
             isHtml: true, label: _cap || '图片' });   // 松手不在正文=anchorFromPoint 落空,toast 提示,不误钉
       } catch (e) {}
     }, true);

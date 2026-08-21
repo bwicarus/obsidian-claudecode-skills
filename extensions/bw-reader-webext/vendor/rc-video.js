@@ -137,11 +137,14 @@ if (window.__bwPwaProviderOnly) return;
     handle.addEventListener('click', function (e) { e.stopPropagation(); e.preventDefault(); });   // 手柄单击不误播放
   }
 
-  window.renderVideos = function (videos) {
+  window.renderVideos = function (videos, options) {
     if (!videos || !videos.length) return;
+    options = options && typeof options === 'object' ? options : {};
     var key = videos.map(function (v) { return v && v.id; }).join(',');
-    if (!key || _seen[key]) return; _seen[key] = 1;
-    var host = _hostBubble(); if (!host || !host.parentNode) return;
+    var dedupe = options.dedupe !== false;
+    if (!key || (dedupe && _seen[key])) return;
+    var host = options.host || _hostBubble(); if (!host || !host.parentNode) return;
+    if (dedupe) _seen[key] = 1;
     var wrap = document.createElement('div'); wrap.className = 'rc-vids';
     videos.forEach(function (v) { if (v && v.id) wrap.appendChild(_card(v)); });
     if (!wrap.childNodes.length) return;

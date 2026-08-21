@@ -24,6 +24,15 @@ const directVoiceProtocol = read("ios/BWReader/App/DirectVoiceProtocol.swift");
 const directBridgeContract = read(
   "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectBridgeContract.cs",
 );
+const directBridgeProtocol = read(
+  "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectBridgeProtocol.cs",
+);
+const directBridgeServer = read(
+  "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectBridgeServer.cs",
+);
+const directProgram = read(
+  "extensions/bw-reader-webext/windows/ComputerVoiceAudio/Program.cs",
+);
 
 test("App, shared Reader, and Direct agree on the voice envelope limit", () => {
   assert.match(
@@ -418,7 +427,7 @@ test("电脑客户端设置只读 Codex 语音状态且不再拥有服务器生�
   assert.match(settingsBody, /○ Codex 语音当前未运行（由 ReaderPC 服务器管理）。/);
   assert.match(
     settingsBody,
-    /实时快照与 Codex 语音随 ReaderPC 服务器进程一起启动和停止/,
+    /实时快照、视觉读取、浏览器控制与卡片工具由 ReaderPC 非语音服务常驻提供/,
   );
   assert.doesNotMatch(
     settingsBody,
@@ -430,6 +439,117 @@ test("电脑客户端设置只读 Codex 语音状态且不再拥有服务器生�
   const refreshBody = settingsBody.slice(refreshStart, refreshEnd);
   assert.match(refreshBody, /availability\(\)\.then\(render\)/);
   assert.doesNotMatch(refreshBody, /setCodexVoice|codex-voice-(?:set|keepalive-set)/);
+});
+
+test("ReaderPC uses independent connection and voice axes with old-service fallback", () => {
+  assert.match(
+    runtime,
+    /var bridgeServiceMode = "full"[\s\S]*var bridgeVoiceEnabled = true[\s\S]*var bridgeVoiceEnabledKnown = false/,
+  );
+  assert.match(
+    runtime,
+    /wantServiceMode: true,[\s\S]*wantVoiceEnabled: true,[\s\S]*wantServiceMode: true[\s\S]*channel\.request\("context-mode", \{\}\)/,
+  );
+  assert.match(
+    runtime,
+    /function setReaderPCServiceMode\(mode\)[\s\S]*channel\.request\("service-mode-set", \{ mode: mode \}\)/,
+    "the existing full/bridge-only switch must remain mode-only",
+  );
+  assert.match(
+    runtime,
+    /function setReaderPCVoiceEnabled\(enabled\)[\s\S]*beginReaderPCPending\("voice", enabled\)[\s\S]*channel\.request\("service-mode-set", \{[\s\S]*voiceEnabled: enabled/,
+  );
+  const voiceSetterStart = runtime.indexOf(
+    "function setReaderPCVoiceEnabled(enabled)",
+  );
+  const voiceSetterEnd = runtime.indexOf("RC.computerVoice", voiceSetterStart);
+  const voiceSetter = runtime.slice(voiceSetterStart, voiceSetterEnd);
+  assert.doesNotMatch(
+    voiceSetter,
+    /mode:\s*bridgeServiceMode/,
+    "a voice-only write must preserve any pending mode already on disk",
+  );
+  assert.match(
+    runtime,
+    /var bridgePendingServiceMode = null[\s\S]*var bridgePendingVoiceEnabled = null/,
+  );
+  assert.match(
+    runtime,
+    /READERPC_INTENT_APPLY_TIMEOUT_MS = SNAPSHOT_RECONNECT_MAX_MS \* 5[\s\S]*BW_READERPC_VOICE_APPLY_TIMEOUT/,
+  );
+  assert.match(
+    runtime,
+    /getServiceMode: function \(\) \{ return bridgeServiceMode; \}[\s\S]*getPendingServiceMode[\s\S]*getVoiceEnabled:[\s\S]*bridgeVoiceEnabled[\s\S]*getPendingVoiceEnabled/,
+    "applied and pending ReaderPC axes must remain separately observable",
+  );
+  assert.doesNotMatch(runtime, /server-only/);
+
+  const bridgeIndex = settings.indexOf('id="set-bridge-voice-row"');
+  const noVoiceIndex = settings.indexOf('id="set-readerpc-no-voice-row"');
+  assert.ok(bridgeIndex >= 0 && noVoiceIndex > bridgeIndex);
+  assert.match(
+    settings,
+    /id="set-readerpc-no-voice"[\s\S]*无语音功能（其它 Reader 功能保持在线）/,
+  );
+  assert.match(
+    settings,
+    /var targetEnabled = !noVoice\.checked[\s\S]*setVoiceEnabled\(targetEnabled\)/,
+    "the positive no-voice checkbox maps to voiceEnabled=false",
+  );
+  assert.match(
+    settings,
+    /实时快照、视觉读取、浏览器控制、卡片、Anki、词典、OCR 与历史工具继续在线/,
+  );
+  assert.match(
+    settings,
+    /getPendingServiceMode[\s\S]*ReaderPC 连接模式已生效/,
+  );
+  assert.match(
+    settings,
+    /getPendingVoiceEnabled[\s\S]*ReaderPC 语音设置已生效/,
+  );
+});
+
+test("ReaderPC voice failure cannot stop snapshot, visual, query, browser, or MCP services", () => {
+  assert.match(
+    directBridgeServer,
+    /private const bool SnapshotServiceRequested = true/,
+  );
+  assert.match(
+    directBridgeServer,
+    /visualRpcTask = _readerVisualRpcServer\.RunAsync[\s\S]*browserControlRpcTask = _readerBrowserControlRpcServer\.RunAsync[\s\S]*queryRpcTask = _readerQueryRpcServer\.RunAsync[\s\S]*realtimeOutputRpcTask = _readerRealtimeOutputRpcServer\.RunAsync/,
+  );
+  assert.match(
+    directBridgeServer,
+    /_codexVoiceControl = !_voiceEnabled[\s\S]*new DirectDisabledCodexVoiceControl\(\)[\s\S]*DirectCodexVoiceControl\.CreateProduction/,
+  );
+  assert.match(
+    directProgram,
+    /ReadVoiceEnabled[\s\S]*voiceEnabled[\s\S]*new WindowsDirectAppLauncher\(\)[\s\S]*new UnwiredDirectAppLauncher\(\)[\s\S]*new WindowsDirectMediaAdapter[\s\S]*new UnwiredDirectMediaAdapter\(\)/,
+    "voice-off startup must not construct the production launcher/audio chain",
+  );
+  assert.match(
+    directBridgeProtocol,
+    /else if \(!_voiceEnabled\)[\s\S]*state = "idle";[\s\S]*reason = null;[\s\S]*ready = true;/,
+  );
+  for (const action of [
+    "HandleStartAsync",
+    "HandleCodexVoiceSetAsync",
+    "HandleCodexVoiceKeepAliveSetAsync",
+    "HandleStopAsync",
+  ]) {
+    const declaration = new RegExp(
+      `private async Task(?:<[^>]+>)? ${action}\\(`,
+    ).exec(directBridgeProtocol);
+    assert.ok(declaration, `missing ${action}`);
+    const body = directBridgeProtocol.slice(
+      declaration.index,
+      declaration.index + 1400,
+    );
+    assert.match(body, /RequireAuthenticated\(\);[\s\S]*RequireVoiceAllowed\(\);/);
+  }
+  assert.doesNotMatch(directBridgeServer, /server-only/);
+  assert.doesNotMatch(directBridgeProtocol, /server-only/);
 });
 
 test("电脑按钮按宿主分流，普通电话保持独立", () => {

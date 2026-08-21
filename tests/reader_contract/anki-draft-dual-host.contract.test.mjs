@@ -167,11 +167,12 @@ test("始终使用确定性轮次，不读 current() 也不绑陈旧的语音轮
 });
 
 // 对话流一侧：拿到上游身份就必须沿用，不能自造。
-function runTurnCardCards(part) {
+function runTurnCardCards(part, historyReplay = false) {
   const anchor = TURNCARD.indexOf("} else if (p.kind === 'cards') {");
   assert.notEqual(anchor, -1, "找不到 cards 分支");
   const branch = TURNCARD.slice(anchor, TURNCARD.indexOf("} else if (p.kind === 'meta')", anchor));
   const calls = [];
+  const renders = [];
   const context = {
     window: { RC: {} },
     RC: {
@@ -180,10 +181,14 @@ function runTurnCardCards(part) {
           calls.push({ cards, gid, options });
           return Promise.resolve(true);
         },
+        renderEntity: (host, spec) => {
+          renders.push({ host, spec });
+          return { el: {}, bd: {} };
+        },
       },
     },
     d: { textContent: "" },
-    t: { tid: "turn_7", parts: [] },
+    t: { tid: "turn_7", parts: [], historyReplay },
     p: part,
     Promise,
     _localCardGid: (seed) => "card_" + "f".repeat(6),
@@ -194,6 +199,7 @@ function runTurnCardCards(part) {
   // branch 本身以 "} else if" 开头，外壳要留一个未闭合的 if 给它接上。
   // 截取止于下一个 "} else if"，而那个 "}" 正是闭合本分支的，所以要补回来。
   vm.runInNewContext(`(function () { if (false) { ${branch} } })();`, context);
+  calls.renders = renders;
   return calls;
 }
 
@@ -229,6 +235,17 @@ test("没有上游身份的旧路径保持原行为，不回归", () => {
     /assistant-turn/,
     "旧路径沿用原来的自造 source，行为不变",
   );
+});
+
+test("历史 staging 只渲染草稿而不重新登记本地实体", () => {
+  const calls = runTurnCardCards({
+    kind: "cards", cards: CARDS, draft: true, gid: "card_abc123",
+    repositorySource: SOURCE, localDraft: LOCAL,
+  }, true);
+  assert.equal(calls.length, 0, "read-only history replay must not call presentDraft/registerDraft");
+  assert.equal(calls.renders.length, 1);
+  assert.equal(calls.renders[0].spec.mode, "draft");
+  assert.equal(calls.renders[0].spec.gid, "card_abc123");
 });
 
 test("generic 草稿的 source 不带书页锚点", () => {

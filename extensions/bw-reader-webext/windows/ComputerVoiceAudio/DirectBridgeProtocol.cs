@@ -37,6 +37,39 @@ internal interface IDirectCodexVoiceControl
         CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Non-voice ReaderPC service control. It deliberately owns no keepalive
+/// monitor, Windows capability probe, F24 sender, or automatic recovery task.
+/// </summary>
+internal sealed class DirectDisabledCodexVoiceControl :
+    IDirectCodexVoiceControl
+{
+    internal const string DisabledSource = "readerpc-voice-disabled";
+
+    public bool KeepActive => false;
+
+    public DirectCodexVoiceState ReadState() => new(
+        "unavailable",
+        Active: null,
+        DisabledSource);
+
+    public Task<DirectCodexVoiceSetResult> SetActiveAsync(
+        bool active,
+        CancellationToken cancellationToken) =>
+        Task.FromException<DirectCodexVoiceSetResult>(Disabled());
+
+    public Task<DirectCodexVoiceSetResult> SetKeepActiveAsync(
+        bool enabled,
+        CancellationToken cancellationToken) =>
+        Task.FromException<DirectCodexVoiceSetResult>(Disabled());
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+    private static DirectProtocolException Disabled() => new(
+        "BW_COMPUTER_VOICE_DIRECT_VOICE_DISABLED",
+        "ReaderPC 语音功能已关闭；快照与其它非语音工具仍可用。");
+}
+
 internal sealed class DirectCodexVoiceControl :
     IDirectCodexVoiceControl,
     IAsyncDisposable
@@ -1213,7 +1246,8 @@ internal sealed class DirectBridgeProtocolSession
     private readonly Action<string> _contextDeliveryModeChanged;
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly bool _bridgeOnlyMode;
-    private readonly Action<string>? _writeServiceModeIntent;
+    private readonly bool _voiceEnabled;
+    private readonly Action<string?, bool?>? _writeServiceModeIntent;
     private bool _helloSeen;
     private bool _authenticated;
     private string? _contextDeliveryMode;
@@ -1246,7 +1280,8 @@ internal sealed class DirectBridgeProtocolSession
         IReaderDictionaryFallback? dictionaryFallback = null,
         IReaderLocalAnkiWriter? localAnkiWriter = null,
         bool bridgeOnlyMode = false,
-        Action<string>? writeServiceModeIntent = null)
+        bool voiceEnabled = true,
+        Action<string?, bool?>? writeServiceModeIntent = null)
     {
         if (!DirectBridgeContract.IsSafeId(connectionId))
         {
@@ -1290,6 +1325,7 @@ internal sealed class DirectBridgeProtocolSession
             ?? (_ => { });
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
         _bridgeOnlyMode = bridgeOnlyMode;
+        _voiceEnabled = voiceEnabled;
         _writeServiceModeIntent = writeServiceModeIntent;
     }
 
@@ -1298,6 +1334,12 @@ internal sealed class DirectBridgeProtocolSession
     // 不闸:远程开关电脑本机的语音不涉及音频路由。
     private void RequireVoiceAllowed()
     {
+        if (!_voiceEnabled)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_VOICE_DISABLED",
+                "ReaderPC 语音功能已关闭；快照与其它非语音工具仍可用。");
+        }
         if (_bridgeOnlyMode)
         {
             throw new DirectProtocolException(
@@ -1567,7 +1609,27 @@ internal sealed class DirectBridgeProtocolSession
             "wantServiceMode",
             out JsonElement wantValue)
             && wantValue.ValueKind == JsonValueKind.True;
-        if (wantServiceMode)
+        bool wantVoiceEnabled = message.TryGetProperty(
+            "wantVoiceEnabled",
+            out JsonElement wantVoiceValue)
+            && wantVoiceValue.ValueKind == JsonValueKind.True;
+        if (wantVoiceEnabled && !wantServiceMode)
+        {
+            throw new DirectProtocolException(
+                "BW_READERPC_SERVICE_MODE_INVALID",
+                "voiceEnabled 状态只能和 serviceMode 一起读取");
+        }
+        if (wantVoiceEnabled)
+        {
+            RequireExactKeys(
+                message,
+                "contract",
+                "type",
+                "requestId",
+                "wantServiceMode",
+                "wantVoiceEnabled");
+        }
+        else if (wantServiceMode)
         {
             RequireExactKeys(
                 message,
@@ -1585,6 +1647,15 @@ internal sealed class DirectBridgeProtocolSession
                 "requestId");
         }
         RequireAuthenticated();
+        if (wantVoiceEnabled)
+        {
+            return new
+            {
+                mode = RequireContextDeliveryMode(),
+                serviceMode = _bridgeOnlyMode ? "bridge-only" : "full",
+                voiceEnabled = _voiceEnabled,
+            };
+        }
         if (wantServiceMode)
         {
             return new
@@ -1603,15 +1674,50 @@ internal sealed class DirectBridgeProtocolSession
     {
         // App 设置面板遥控 ReaderPC 模式:这里只写意图文件;真正的停旧代际→按新
         // 模式重启由 ReaderPC 的收敛循环执行(它是唯一的服务生命周期所有者)。
-        RequireExactKeys(
-            message,
-            "contract",
-            "type",
-            "requestId",
-            "mode");
+        bool hasMode = message.TryGetProperty("mode", out _);
+        bool hasVoiceEnabled = message.TryGetProperty(
+            "voiceEnabled",
+            out _);
+        if (!hasMode && !hasVoiceEnabled)
+        {
+            throw new DirectProtocolException(
+                "BW_READERPC_SERVICE_MODE_INVALID",
+                "至少需要指定 serviceMode 或 voiceEnabled");
+        }
+        if (hasMode && hasVoiceEnabled)
+        {
+            RequireExactKeys(
+                message,
+                "contract",
+                "type",
+                "requestId",
+                "mode",
+                "voiceEnabled");
+        }
+        else if (hasMode)
+        {
+            RequireExactKeys(
+                message,
+                "contract",
+                "type",
+                "requestId",
+                "mode");
+        }
+        else
+        {
+            RequireExactKeys(
+                message,
+                "contract",
+                "type",
+                "requestId",
+                "voiceEnabled");
+        }
         RequireAuthenticated();
-        string mode = RequireString(message, "mode", 16);
-        if (mode is not ("full" or "bridge-only"))
+        string? mode = hasMode
+            ? RequireString(message, "mode", 16)
+            : null;
+        if (mode is not null
+            && mode is not ("full" or "bridge-only"))
         {
             throw new DirectProtocolException(
                 "BW_READERPC_SERVICE_MODE_INVALID",
@@ -1623,7 +1729,27 @@ internal sealed class DirectBridgeProtocolSession
                 "BW_READERPC_SERVICE_MODE_UNAVAILABLE",
                 "服务模式意图写入尚未接线");
         }
-        _writeServiceModeIntent(mode);
+        bool? voiceEnabled = hasVoiceEnabled
+            ? RequireBoolean(message, "voiceEnabled")
+            : null;
+        _writeServiceModeIntent(mode, voiceEnabled);
+        if (hasMode && hasVoiceEnabled)
+        {
+            return new
+            {
+                serviceMode = mode,
+                voiceEnabled,
+                applied = "pending-restart",
+            };
+        }
+        if (hasVoiceEnabled)
+        {
+            return new
+            {
+                voiceEnabled,
+                applied = "pending-restart",
+            };
+        }
         return new
         {
             serviceMode = mode,
@@ -1958,6 +2084,16 @@ internal sealed class DirectBridgeProtocolSession
                 "BW_COMPUTER_VOICE_DIRECT_LOCAL_OPT_IN_REQUIRED";
             ready = false;
         }
+        else if (!_voiceEnabled)
+        {
+            // ReaderPC's non-voice foundation is independently useful.  It
+            // must report ready without probing an App launcher, media host,
+            // virtual routes, or Codex Voice when the optional voice layer is
+            // disabled.
+            state = "idle";
+            reason = null;
+            ready = true;
+        }
         else if (!_coordinator.AppLauncherReady)
         {
             state = "unavailable";
@@ -2017,6 +2153,7 @@ internal sealed class DirectBridgeProtocolSession
             "requestId",
             "active");
         RequireAuthenticated();
+        RequireVoiceAllowed();
         if (_phase is not (
             DirectProtocolPhase.AwaitingStart
             or DirectProtocolPhase.ContextOnly
@@ -2046,6 +2183,7 @@ internal sealed class DirectBridgeProtocolSession
             "requestId",
             "enabled");
         RequireAuthenticated();
+        RequireVoiceAllowed();
         if (_phase is not (
             DirectProtocolPhase.AwaitingStart
             or DirectProtocolPhase.ContextOnly
@@ -2632,6 +2770,7 @@ internal sealed class DirectBridgeProtocolSession
             "requestId",
             "sessionId");
         RequireAuthenticated();
+        RequireVoiceAllowed();
         string sessionId = RequireSafeId(message, "sessionId");
         await _coordinator.StopAsync(
             _connectionId,

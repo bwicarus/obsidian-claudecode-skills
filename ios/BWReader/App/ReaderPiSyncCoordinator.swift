@@ -107,6 +107,7 @@ struct ReaderPiSyncReport: Identifiable, Equatable, Sendable {
         "笔迹",
         "便签",
         "卡片位置",
+        "对话记录（联网时从 Pi 在线恢复，不在离线同步包）",
     ]
 
     let id: String
@@ -449,6 +450,22 @@ private extension ReaderWebViewModel {
                 ) != nil else {
             throw ReaderPiSyncError.invalidDataResult
         }
+        // 对话仍由 Pi 按既有 normal/review/EPUB scope 权威保存，不加入
+        // DataRegistry。它与本次离线 collection sync 的 complete/partial/blocked/error
+        // 终态互相独立：只要服务端返回了可解析报告，就让当前页面尝试一次在线历史刷新。
+        // 直接调用组件的有界入口，不广播可由宿主网页伪造并反复触发的 window CustomEvent。
+        _ = try? await webView.callAsyncJavaScript(
+            """
+            if (window.RC && RC.assistant &&
+                typeof RC.assistant.onNativePiSyncFinished === "function") {
+              return RC.assistant.onNativePiSyncFinished();
+            }
+            return false;
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
         return ReaderPiDataSyncReport(
             state: decoded.state,
             owner: decoded.owner,

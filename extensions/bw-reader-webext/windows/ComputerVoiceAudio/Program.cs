@@ -294,12 +294,27 @@ internal static class Program
         try
         {
             DirectBridgeConfigStore configStore = new(configPath);
-            _ = configStore.Load();
+            DirectBridgeConfig config = configStore.Load();
+            string runtimeDirectory = Path.GetDirectoryName(
+                config.RuntimeStatusPath)
+                ?? Path.Combine(configStore.InstallationRoot, "runtime");
+            bool voiceEnabled = DirectBridgeServer.ReadVoiceEnabled(
+                runtimeDirectory);
+            // The optional voice layer must be absent, not merely idle.  In
+            // no-voice mode do not construct the Windows App launcher or the
+            // audio route/media adapter; all Reader non-voice brokers below
+            // are still hosted by the same Direct process.
+            IDirectAppLauncher appLauncher = voiceEnabled
+                ? new WindowsDirectAppLauncher()
+                : new UnwiredDirectAppLauncher();
+            IDirectMediaAdapter mediaAdapter = voiceEnabled
+                ? new WindowsDirectMediaAdapter(
+                    configStore.InstallationRoot)
+                : new UnwiredDirectMediaAdapter();
             await using DirectBridgeServer server = new(
                 configStore,
-                new WindowsDirectAppLauncher(),
-                new WindowsDirectMediaAdapter(
-                    configStore.InstallationRoot),
+                appLauncher,
+                mediaAdapter,
                 new NamedPipeDirectContextAdapter(),
                 new FileDirectSnapshotContextAdapter(
                     Path.Combine(

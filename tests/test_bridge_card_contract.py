@@ -216,9 +216,12 @@ class BridgeAndDeliveryTest(unittest.TestCase):
         asst = (ROOT / "_server_deploy/assistant.py").read_text("utf-8")
         self.assertIn('"delivered": _delivered', asst)
 
-    def test_live_append_reuses_the_one_renderer(self) -> None:
+    def test_live_event_reuses_the_atomic_history_renderer(self) -> None:
         js = (ROOT / "_server_deploy/static/pdf/rc-assistant.js").read_text("utf-8")
-        self.assertIn("RC.turnCard.renderTurn('live'", js, "实时追加必须走同一个渲染器")
+        self.assertIn("_requestHistoryReload({ reason: 'assistant-history'", js,
+                      "实时事件必须进入唯一原子历史刷新队列")
+        self.assertIn("RC.turnCard.renderTurn(\n        _rtid, m.parts, target, { historyReplay: true }", js,
+                      "实时事件最终必须走同一个权威历史渲染器")
         self.assertIn("/pdf/api/turn-ack", js, "渲染完要回执")
         for host in ("pdf-tail.js", "epub-html.js"):
             h = (ROOT / "_server_deploy/static/pdf" / host).read_text("utf-8")
@@ -227,10 +230,10 @@ class BridgeAndDeliveryTest(unittest.TestCase):
 
     def test_local_voice_turn_ignores_its_own_history_echo(self) -> None:
         js = (ROOT / "_server_deploy/static/pdf/rc-assistant.js").read_text("utf-8")
-        mark = js.index("_liveSeen[_b.turn_id] = 1")
+        mark = js.index("_historyMarkSeen(_b.turn_id);")
         post = js.index("fetch('/api/assistant/log'", mark)
         self.assertLess(mark, post, "本地轮次必须在落库广播前登记，避免自己的 SSE 回声重复渲染")
-        self.assertIn("_liveSeen['u:' + _b.turn_id] = 1", js[mark:post])
+        self.assertIn("_historyMarkSeen('u:' + _b.turn_id);", js[mark:post])
 
     def test_native_agent_final_utterance_is_idempotent_while_busy(self) -> None:
         js = (ROOT / "_server_deploy/static/pdf/rc-voicecall.js").read_text("utf-8")

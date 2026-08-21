@@ -411,9 +411,43 @@ function createServer(scenario) {
         ) {
           return;
         }
-        result(this, request, {
+        const payload = {
           mode: scenario.contextDeliveryMode || "legacy-inject",
-        });
+        };
+        if (request.wantServiceMode === true) {
+          payload.serviceMode = scenario.serviceMode || "full";
+        }
+        if (request.wantVoiceEnabled === true) {
+          payload.voiceEnabled = scenario.voiceEnabled !== false;
+        }
+        result(this, request, payload);
+        return;
+      }
+      if (request.type === "service-mode-set") {
+        if (
+          scenario.serviceModeWritesApply !== false &&
+          typeof request.mode === "string"
+        ) {
+          scenario.serviceMode = request.mode;
+        }
+        if (typeof request.voiceEnabled === "boolean") {
+          if (scenario.serviceModeWritesApply !== false) {
+            scenario.voiceEnabled = request.voiceEnabled;
+          }
+          const payload = {
+            voiceEnabled: request.voiceEnabled,
+            applied: "pending-restart",
+          };
+          if (typeof request.mode === "string") {
+            payload.serviceMode = request.mode;
+          }
+          result(this, request, payload);
+        } else {
+          result(this, request, {
+            serviceMode: request.mode,
+            applied: "pending-restart",
+          });
+        }
         return;
       }
       if (request.type === "context-mode-set") {
@@ -773,6 +807,15 @@ function createManualTimers() {
       entries.delete(match[0]);
       match[1].callback();
     },
+    runThrough(delay) {
+      const matches = [...entries.entries()].filter(
+        ([, entry]) => entry.delay <= delay,
+      );
+      for (const [id, entry] of matches) {
+        entries.delete(id);
+        entry.callback();
+      }
+    },
   };
 }
 
@@ -1044,6 +1087,8 @@ function createHarness(overrides = {}) {
     readerHighlightSourceProvider: null,
     readerHighlightSourceCalls: [],
     readerAdapterContext: null,
+    serviceModeWritesApply: true,
+    windowEvents: [],
     ...overrides,
   };
   const server = createServer(scenario);
@@ -1237,7 +1282,12 @@ function createHarness(overrides = {}) {
       handlers.push(handler);
       windowEventHandlers.set(type, handlers);
     },
-    dispatchEvent() {},
+    dispatchEvent(event) {
+      scenario.windowEvents.push({
+        type: event && event.type,
+        detail: structuredClone(event && event.detail),
+      });
+    },
     AbortController,
     document,
   };
@@ -1544,6 +1594,89 @@ test("v3 HELLO 后直接 STATUS，固定 WSS 且不读取浏览器身份或麦�
     /indexedDB|pairingCode|clientPublicKeySpki|type:\s*"pair"|type:\s*"auth"/i,
   );
   assert.doesNotMatch(SOURCE, /data-role="(?:endpoint|code|pair|forget)"/);
+});
+
+test("ReaderPC connection and voice switches separate pending from applied axes", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    serviceMode: "full",
+    voiceEnabled: true,
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  try {
+    await waitForCondition(
+      () => harness.api.getVoiceEnabled() === true,
+      "negotiated ReaderPC voice axis",
+    );
+
+    const modeWrite = harness.api.setServiceMode("bridge-only");
+    assert.equal(harness.api.getServiceMode(), "full");
+    assert.equal(harness.api.getPendingServiceMode(), "bridge-only");
+    const voiceWrite = harness.api.setVoiceEnabled(false);
+    assert.equal(harness.api.getVoiceEnabled(), true);
+    assert.equal(harness.api.getPendingVoiceEnabled(), false);
+    await Promise.all([modeWrite, voiceWrite]);
+
+    const writes = harness.server.requests.filter(
+      (request) => request.type === "service-mode-set",
+    );
+    assert.deepEqual(writes.map((request) => ({
+      mode: request.mode,
+      voiceEnabled: request.voiceEnabled,
+    })), [
+      { mode: "bridge-only", voiceEnabled: undefined },
+      { mode: undefined, voiceEnabled: false },
+    ]);
+    assert.equal(harness.scenario.serviceMode, "bridge-only");
+    assert.equal(harness.scenario.voiceEnabled, false);
+    assert.equal(harness.api.getServiceMode(), "full");
+    assert.equal(harness.api.getPendingServiceMode(), "bridge-only");
+    assert.equal(harness.api.getVoiceEnabled(), true);
+    assert.equal(harness.api.getPendingVoiceEnabled(), false);
+  } finally {
+    await disableSnapshot(harness);
+  }
+});
+
+test("ReaderPC pending voice timeout restores authoritative state and emits failure", async () => {
+  const timers = createManualTimers();
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    serviceMode: "full",
+    voiceEnabled: true,
+    serviceModeWritesApply: false,
+    timers,
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  try {
+    await waitForCondition(
+      () => harness.api.getVoiceEnabled() === true,
+      "negotiated ReaderPC voice axis",
+    );
+    await harness.api.setVoiceEnabled(false);
+    assert.equal(harness.api.getVoiceEnabled(), true);
+    assert.equal(harness.api.getPendingVoiceEnabled(), false);
+    assert.equal(timers.count(30000), 0);
+    assert.equal(timers.count(75000), 1);
+    timers.runThrough(60000);
+    assert.equal(harness.api.getPendingVoiceEnabled(), false);
+    timers.runOne(75000);
+    assert.equal(harness.api.getVoiceEnabled(), true);
+    assert.equal(harness.api.getPendingVoiceEnabled(), null);
+    const failure = harness.scenario.windowEvents.find(
+      (event) => event.type === "bw-computer-voice-service-mode-failed",
+    );
+    assert.equal(failure.detail.axis, "voice");
+    assert.equal(failure.detail.requested, false);
+    assert.equal(failure.detail.voiceEnabled, true);
+    assert.equal(failure.detail.code, "BW_READERPC_VOICE_APPLY_TIMEOUT");
+  } finally {
+    await disableSnapshot(harness);
+  }
 });
 
 test("旧 computer_client 电话入口仅保留受控兼容，直接调用与伪同 ID 均 fail closed", async () => {
@@ -4039,6 +4172,12 @@ test("权威卡片按页面几何编号且成功删除只触发一次重排后�
       label: "第二张",
       text: "第二张内容",
       bind: { kind: "page-chars", page: 7, from: 2, to: 2, text: "丙" },
+    }, {
+      content: '<div class="vc-ig"><div class="vc-ig-cell" data-i="0">'
+        + '<button class="vc-ig-x" aria-label="移除">×</button>'
+        + '<img class="vc-ig-img" data-source-url="https://images.example/roast.jpg" '
+        + 'src="/pdf/api/img-proxy?url=internal"><div class="vc-ig-t">第二张内容</div>'
+        + '</div></div>',
     }),
   ];
   const pageChars = Array.from("甲乙丙丁戊己庚辛", (character, index) => ({
@@ -4081,20 +4220,25 @@ test("权威卡片按页面几何编号且成功删除只触发一次重排后�
   assert.match(initial, /戊⟦CARD_START n="2" id="c_3333333333333333"/);
   assert.match(
     initial,
-    /CARD_START n="1" id="c_2222222222222222" revision="1" type="card" label="第二张" content_format="application\/vnd\.bw-reader\.card-replacement\+json;version=1" replacement="content" content_length="19" content_truncated="false"⟧\{"content":"第二张内容"\}⟦CARD_END⟧/,
-    "a complete marker carries the exact edit replacement plus stable id/revision",
+    /CARD_START n="1" id="c_2222222222222222" revision="1" type="card" label="第二张"⟧第二张内容⟦CARD_END⟧/,
+    "a marker carries only the semantic body plus stable id/revision",
   );
   assert.match(
     initial,
-    /CARD_START n="2" id="c_3333333333333333" revision="1" type="anki"[^⟧]+replacement="cards" content_length="59" content_truncated="false"⟧\{"cards":\[\{"back":"第三张内容","front":"第三张内容","type":"basic"\}\]\}⟦CARD_END⟧/,
-    "learning-card marker content maps directly to reader_page_card_edit.cards",
+    /CARD_START n="2" id="c_3333333333333333" revision="1" type="anki" label="第三张"⟧第三张内容⟦CARD_END⟧/,
+    "learning-card markers are readable without exposing replacement JSON",
+  );
+  assert.doesNotMatch(
+    initial,
+    /content_format=|content_length=|content_truncated=|replacement=|\{"content"|\{"cards"|vc-ig|<div|<button|class=|data-|aria-|img-proxy|images\.example/,
+    "page snapshots must not expose renderer/source transport fields",
   );
   assert.ok(
     initial.indexOf('id="c_1111111111111111"') <
       initial.indexOf('id="c_2222222222222222"'),
     "marker insertion follows source text while n follows independent page geometry",
   );
-  assert.match(initial, /id="c_1111111111111111"[^⟧]+content_truncated="false"/);
+  assert.match(initial, /id="c_1111111111111111"[^⟧]*⟧反斜杠 \\\\ 与正文符号/);
   assert.equal((initial.match(/⟦CARD_START /g) || []).length, 3);
   assert.equal((initial.match(/⟦CARD_END⟧/g) || []).length, 3);
   assert.deepEqual(
@@ -4264,7 +4408,7 @@ test("历史未锚定卡进入当前页上下文但不冒充正文或右侧标�
   assert.match(text, /【当前页未锚定卡片（不参与正文及右侧标记序号）】/);
   assert.match(
     text,
-    /CARD_START n="" id="c_8888888888888888" revision="1" type="anki" label="历史学习卡"[^⟧]+replacement="cards" content_length="57" content_truncated="false" unbound="true"⟧\{"cards":\[\{"back":"历史答案","front":"历史题目","type":"basic"\}\]\}⟦CARD_END⟧/,
+    /CARD_START n="" id="c_8888888888888888" revision="1" type="anki" label="历史学习卡" unbound="true"⟧历史题目 \/ 历史答案⟦CARD_END⟧/,
   );
   assert.doesNotMatch(text, /n="2" id="c_8888888888888888"/);
   const projection = await harness.api.pageCards(7);
@@ -4314,7 +4458,7 @@ test("历史未锚定卡进入当前页上下文但不冒充正文或右侧标�
   await disableSnapshot(harness);
 });
 
-test("只有异常超大卡片才安全截断并给出长度与可识别头尾", async () => {
+test("异常超大渲染源也只向快照提供语义正文", async () => {
   const harness = createHarness({
     origin: NATIVE_APP_ORIGIN,
     nativeComputerVoice: true,
@@ -4356,15 +4500,12 @@ test("只有异常超大卡片才安全截断并给出长度与可识别头尾",
   );
   const payload = harness.scenario.nativePageContextPublishes[0];
   assert.equal(payload.truncated, false,
-    "the compact safety diagnostic itself fits the page snapshot");
+    "the semantic card body fits the page snapshot");
   assert.match(
     payload.text,
-    /id="c_extreme000000001" revision="1"[^⟧]+content_length="100114" content_truncated="true"/,
+    /id="c_extreme000000001" revision="1" type="card" label="异常大卡"⟧旧可读摘要不应冒充实际内容⟦CARD_END⟧/,
   );
-  assert.match(payload.text, /卡片 replacement JSON 异常超大，已安全截断；原始长度=100114/);
-  assert.match(payload.text, /【头部片段】\{"content":"Z+/);
-  assert.match(payload.text, /【尾部片段】Z+"\}/);
-  assert.doesNotMatch(payload.text, /旧可读摘要不应冒充实际内容/);
+  assert.doesNotMatch(payload.text, /replacement JSON|【头部片段】|【尾部片段】|Z{20}|content_length/);
   await disableSnapshot(harness);
 });
 
@@ -4423,8 +4564,8 @@ test("本地 page.context 截断不会留下半个 CARD marker", async () => {
   assert.match(payload.text, /c_aaaaaaaaaaaaaaaa/);
   assert.match(
     payload.text,
-    /id="c_aaaaaaaaaaaaaaaa" revision="1"[^⟧]+content_length="2414" content_truncated="false"⟧\{"content":"X{2400}"\}⟦CARD_END⟧/,
-    "a normal long replacement remains complete even when the whole page hits its transport fence",
+    /id="c_aaaaaaaaaaaaaaaa" revision="1" type="card" label="完整卡"⟧X{2400}⟦CARD_END⟧/,
+    "a normal long semantic body remains complete when the whole page hits its transport fence",
   );
   assert.doesNotMatch(payload.text, /c_bbbbbbbbbbbbbbbb/);
   await disableSnapshot(harness);

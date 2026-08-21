@@ -18,6 +18,12 @@ namespace BwReader.ComputerVoiceAudio;
 internal sealed class DirectBridgeServer : IAsyncDisposable
 {
     private const int CoordinatorDisposeAttemptLimit = 2;
+    private static readonly TimeSpan HostShutdownTimeout =
+        TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan OwnedCleanupTimeout =
+        TimeSpan.FromSeconds(30);
+    internal static readonly TimeSpan GracefulShutdownMaximumWait =
+        HostShutdownTimeout + OwnedCleanupTimeout;
     internal static readonly TimeSpan DisconnectCleanupWatchdogDelay =
         TimeSpan.FromSeconds(30);
     private const string SingleUserReaderOrigin =
@@ -43,13 +49,162 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly DirectServiceLease _serviceLease;
     private readonly DirectSnapshotViewer _snapshotViewer;
     private readonly bool _bridgeOnlyMode;
+    private readonly bool _voiceEnabled;
     private readonly string _runtimeDirectory;
 
     // 桥接模式旗标走独立意图文件:keepalive/direct-config/runtime-status 三者都是
     // exact 合同(四处副本校验键集),加键任何一个都会被判无效或服务离线。
     internal const string ServiceModeContract = "readerpc-service-mode/1";
+    internal const string ShutdownRequestContract =
+        "readerpc-direct-shutdown/1";
+    internal const string ShutdownRequestFileName =
+        "readerpc-direct-shutdown.json";
+    internal const string ShutdownReceiptContract =
+        "readerpc-direct-shutdown-result/1";
+    internal const string ShutdownReceiptFileName =
+        "readerpc-direct-shutdown-result.json";
+    internal static readonly TimeSpan ShutdownRequestPollInterval =
+        TimeSpan.FromMilliseconds(100);
 
-    internal static bool ReadBridgeOnlyMode(string runtimeDirectory)
+    internal static bool TryConsumeShutdownRequest(
+        string runtimeDirectory,
+        string serviceInstanceId)
+    {
+        try
+        {
+            string path = Path.Combine(
+                runtimeDirectory,
+                ShutdownRequestFileName);
+            if (!File.Exists(path)
+                || !DirectBridgeContract.IsServiceInstanceId(
+                    serviceInstanceId))
+            {
+                return false;
+            }
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllText(path));
+            JsonElement root = document.RootElement;
+            HashSet<string> keys = root.ValueKind == JsonValueKind.Object
+                ? root.EnumerateObject()
+                    .Select(property => property.Name)
+                    .ToHashSet(StringComparer.Ordinal)
+                : [];
+            if (
+                !keys.SetEquals(new[]
+                {
+                    "contract",
+                    "serviceInstanceId",
+                })
+                || root.GetProperty("contract").ValueKind
+                    != JsonValueKind.String
+                || root.GetProperty("contract").GetString()
+                    != ShutdownRequestContract
+                || root.GetProperty("serviceInstanceId").ValueKind
+                    != JsonValueKind.String
+                || root.GetProperty("serviceInstanceId").GetString()
+                    != serviceInstanceId
+            )
+            {
+                return false;
+            }
+            File.Delete(path);
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is IOException
+            or UnauthorizedAccessException
+            or JsonException)
+        {
+            return false;
+        }
+    }
+
+    internal static void WriteShutdownReceipt(
+        string runtimeDirectory,
+        string serviceInstanceId,
+        string state,
+        string? code = null)
+    {
+        if (!DirectBridgeContract.IsServiceInstanceId(serviceInstanceId))
+        {
+            throw new ArgumentException(
+                "shutdown receipt requires a service instance id",
+                nameof(serviceInstanceId));
+        }
+        object payload = state switch
+        {
+            "accepted" when code is null => new
+            {
+                contract = ShutdownReceiptContract,
+                serviceInstanceId,
+                state,
+                maximumWaitMs = checked((int)
+                    GracefulShutdownMaximumWait.TotalMilliseconds),
+            },
+            "success" when code is null => new
+            {
+                contract = ShutdownReceiptContract,
+                serviceInstanceId,
+                state,
+            },
+            "failed" when IsSafeShutdownCode(code) => new
+            {
+                contract = ShutdownReceiptContract,
+                serviceInstanceId,
+                state,
+                code,
+            },
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(state),
+                "shutdown receipt state is invalid"),
+        };
+        Directory.CreateDirectory(runtimeDirectory);
+        string path = Path.Combine(
+            runtimeDirectory,
+            ShutdownReceiptFileName);
+        string temporary = path
+            + ".tmp-"
+            + Environment.ProcessId.ToString(CultureInfo.InvariantCulture)
+            + "-"
+            + Guid.NewGuid().ToString("N");
+        try
+        {
+            File.WriteAllText(
+                temporary,
+                JsonSerializer.Serialize(payload),
+                new UTF8Encoding(false));
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(temporary);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+    }
+
+    private static bool IsSafeShutdownCode(string? code) =>
+        !string.IsNullOrEmpty(code)
+        && code.Length <= 128
+        && code.All(character =>
+            character is >= 'A' and <= 'Z'
+            or >= '0' and <= '9'
+            or '_');
+
+    private static string ShutdownFailureCode(Exception exception) =>
+        exception is DirectProtocolException protocol
+            && IsSafeShutdownCode(protocol.Code)
+                ? protocol.Code
+                : "BW_COMPUTER_VOICE_DIRECT_SHUTDOWN_CLEANUP_FAILED";
+
+    internal static string ReadServiceMode(string runtimeDirectory)
     {
         try
         {
@@ -58,25 +213,77 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 "readerpc-service-mode.json");
             if (!File.Exists(path))
             {
-                return false;
+                return "full";
             }
             using JsonDocument document = JsonDocument.Parse(
                 File.ReadAllText(path));
             JsonElement root = document.RootElement;
-            return root.ValueKind == JsonValueKind.Object
+            JsonElement mode = default;
+            bool valid = root.ValueKind == JsonValueKind.Object
                 && root.TryGetProperty(
                     "contract",
                     out JsonElement contract)
                 && contract.ValueKind == JsonValueKind.String
                 && contract.GetString() == ServiceModeContract
-                && root.TryGetProperty("mode", out JsonElement mode)
-                && mode.ValueKind == JsonValueKind.String
-                && mode.GetString() == "bridge-only";
+                && root.TryGetProperty("mode", out mode)
+                && mode.ValueKind == JsonValueKind.String;
+            string? value = valid ? mode.GetString() : null;
+            return value is "full" or "bridge-only" ? value : "full";
         }
         catch (Exception)
         {
             // 读不出 = 完整模式:失败回落到现状行为,而不是悄悄改变语音语义。
-            return false;
+            return "full";
+        }
+    }
+
+    internal static bool ReadBridgeOnlyMode(string runtimeDirectory) =>
+        ReadServiceMode(runtimeDirectory) == "bridge-only";
+
+    internal static bool ReadVoiceEnabled(string runtimeDirectory)
+    {
+        try
+        {
+            string path = Path.Combine(
+                runtimeDirectory,
+                "readerpc-service-mode.json");
+            if (!File.Exists(path))
+            {
+                return true;
+            }
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllText(path));
+            JsonElement root = document.RootElement;
+            if (
+                root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty(
+                    "contract",
+                    out JsonElement contract)
+                || contract.ValueKind != JsonValueKind.String
+                || contract.GetString() != ServiceModeContract
+            )
+            {
+                return true;
+            }
+            if (!root.TryGetProperty(
+                "voiceEnabled",
+                out JsonElement value))
+            {
+                // Backward compatibility: released intent files predate the
+                // second axis and therefore mean voice-on.
+                return true;
+            }
+            return value.ValueKind switch
+            {
+                JsonValueKind.False => false,
+                JsonValueKind.True => true,
+                _ => true,
+            };
+        }
+        catch (Exception)
+        {
+            // 旧文件/损坏文件保持已发布语音默认开启语义。
+            return true;
         }
     }
 
@@ -114,21 +321,33 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
     internal static void WriteServiceModeIntent(
         string runtimeDirectory,
-        string mode)
+        string? mode = null,
+        bool? voiceEnabled = null)
     {
         // 原子写(tmp+move):模式意图文件同时被 ReaderPC 收敛循环轮询,半写状态
-        // 会被它当无效丢弃,但没必要制造这种窗口。App 遥控只改 mode:静默快照
-        // 键(snapshotViewer)由 ReaderPC 界面所有,这里读旧值保留,不冲掉。
+        // 会被它当无效丢弃,但没必要制造这种窗口。App 可独立改 mode 或
+        // voiceEnabled；缺失轴从现有意图读回。静默快照键(snapshotViewer)
+        // 由 ReaderPC 界面所有,这里同样保留,不冲掉。
         string path = Path.Combine(
             runtimeDirectory,
             "readerpc-service-mode.json");
         string viewer = ReadSnapshotViewerHidden(runtimeDirectory)
             ? "hidden"
             : "visible";
+        string resolvedMode = mode ?? ReadServiceMode(runtimeDirectory);
+        if (resolvedMode is not ("full" or "bridge-only"))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(mode),
+                "ReaderPC service mode must be full or bridge-only");
+        }
+        bool resolvedVoiceEnabled = voiceEnabled
+            ?? ReadVoiceEnabled(runtimeDirectory);
         string payload = JsonSerializer.Serialize(new
         {
             contract = ServiceModeContract,
-            mode,
+            mode = resolvedMode,
+            voiceEnabled = resolvedVoiceEnabled,
             snapshotViewer = viewer,
         });
         string temporary = path + ".tmp-" + Environment.ProcessId;
@@ -150,7 +369,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly ReaderRealtimeOutputBroker _readerRealtimeOutputBroker;
     private readonly NamedPipeReaderRealtimeOutputRpcServer
         _readerRealtimeOutputRpcServer;
-    private readonly DirectCodexVoiceControl _codexVoiceControl;
+    private readonly IDirectCodexVoiceControl _codexVoiceControl;
     private readonly CodexCliReaderDictionaryFallback _dictionaryFallback;
     private readonly ReaderLocalAnkiRegistry _localAnkiRegistry;
     private readonly ReaderLocalAnkiWriter _localAnkiWriter;
@@ -158,9 +377,15 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private string _runtimeState = "starting";
     private bool _runtimeReaderConnected;
     private bool _runtimeCaptureActive;
+    private int _gracefulShutdownRequested;
     private bool _disposed;
     private bool _disposeCompleted;
     private readonly IDirectSnapshotContextAdapter? _snapshotContextAdapter;
+
+    // The Direct process is the non-voice ReaderPC foundation.  Snapshot,
+    // query, visual delivery and MCP lifetime must never be coupled to Codex
+    // Voice keepalive or health; there is no independent non-voice-off axis.
+    private const bool SnapshotServiceRequested = true;
 
     internal DirectBridgeServer(
         DirectBridgeConfigStore configStore,
@@ -168,7 +393,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         IDirectMediaAdapter mediaAdapter,
         IDirectContextAdapter? contextAdapter = null,
         IDirectSnapshotContextAdapter? snapshotContextAdapter = null,
-        DirectCodexVoiceControl? codexVoiceControl = null,
+        IDirectCodexVoiceControl? codexVoiceControl = null,
         bool manageSnapshotViewerProcess = true)
     {
         _configStore = configStore;
@@ -210,11 +435,14 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 && !ReadSnapshotViewerHidden(runtimeDirectory));
         _runtimeDirectory = runtimeDirectory;
         _bridgeOnlyMode = ReadBridgeOnlyMode(runtimeDirectory);
+        _voiceEnabled = ReadVoiceEnabled(runtimeDirectory);
         // 桥接模式语义(2026-08-17 用户更正):语音**留在电脑**——Codex 照常自动
         // 拉起、F24 保活照常(keepalive 链完整装载),音频走电脑自己的设备;唯一
         // 被拒的是 App 发起的 START(那才是把音频路由到虚拟设备、PCM 隧道到
         // App 的动作)。"不接管"指不接走音频,不是不管语音。
-        _codexVoiceControl = codexVoiceControl
+        _codexVoiceControl = !_voiceEnabled
+            ? new DirectDisabledCodexVoiceControl()
+            : codexVoiceControl
             ?? DirectCodexVoiceControl.CreateProduction(
                 Path.Combine(
                     runtimeDirectory,
@@ -256,12 +484,16 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     internal async Task<int> RunAsync(CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        using CancellationTokenSource serviceLifetime =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+        CancellationToken serviceToken = serviceLifetime.Token;
         DirectBridgeConfig config = _configStore.Load();
         await WriteRuntimeStatusAsync(
             "starting",
             readerConnected: false,
             captureActive: false,
-            cancellationToken).ConfigureAwait(false);
+            serviceToken).ConfigureAwait(false);
 
         WebApplicationBuilder builder =
             WebApplication.CreateSlimBuilder();
@@ -285,7 +517,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         });
         builder.Services.Configure<HostOptions>(options =>
         {
-            options.ShutdownTimeout = TimeSpan.FromSeconds(10);
+            options.ShutdownTimeout = HostShutdownTimeout;
         });
 
         await using WebApplication app = builder.Build();
@@ -295,7 +527,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         });
         app.MapGet(
             "/healthz",
-            context => HandleHealthAsync(context, cancellationToken));
+            context => HandleHealthAsync(context, serviceToken));
         app.MapGet(
             DirectSnapshotViewer.ViewerPath,
             _snapshotViewer.HandleViewerAsync);
@@ -307,10 +539,10 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             _snapshotViewer.HandleMarkdownAsync);
         app.Map(
             "/reader-computer-voice/v1",
-            context => HandleBridgeAsync(context, cancellationToken));
+            context => HandleBridgeAsync(context, serviceToken));
         app.Map(
             "/reader-context/v1",
-            context => HandleContextBridgeAsync(context, cancellationToken));
+            context => HandleContextBridgeAsync(context, serviceToken));
         // One-shot snapshot delivery.
         //
         // A page's context is used once and discarded -- collect, send, done --
@@ -334,7 +566,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         app.MapMethods(
             "/reader-context/snapshot",
             new[] { "POST", "OPTIONS" },
-            context => HandleSnapshotPostAsync(context, cancellationToken));
+            context => HandleSnapshotPostAsync(context, serviceToken));
         app.MapFallback(context =>
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
@@ -351,59 +583,86 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         Task? realtimeOutputRpcTask = null;
         CancellationTokenSource? queryRpcLifetime = null;
         Task? queryRpcTask = null;
+        CancellationTokenSource? shutdownRequestLifetime = null;
+        Task? shutdownRequestTask = null;
         try
         {
-            await app.StartAsync(cancellationToken).ConfigureAwait(false);
-            visualRpcLifetime =
+            await app.StartAsync(serviceToken).ConfigureAwait(false);
+            shutdownRequestLifetime =
                 CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken);
+            shutdownRequestTask = MonitorShutdownRequestAsync(
+                () =>
+                {
+                    serviceLifetime.Cancel();
+                    app.Lifetime.StopApplication();
+                },
+                shutdownRequestLifetime.Token);
+            visualRpcLifetime =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    serviceToken);
             visualRpcTask = _readerVisualRpcServer.RunAsync(
                 visualRpcLifetime.Token);
             browserControlRpcLifetime =
                 CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken);
+                    serviceToken);
             browserControlRpcTask = _readerBrowserControlRpcServer.RunAsync(
                 browserControlRpcLifetime.Token);
             queryRpcLifetime =
                 CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken);
+                    serviceToken);
             queryRpcTask = _readerQueryRpcServer.RunAsync(
                 queryRpcLifetime.Token);
             realtimeOutputRpcLifetime =
                 CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken);
+                    serviceToken);
             realtimeOutputRpcTask = _readerRealtimeOutputRpcServer.RunAsync(
                 realtimeOutputRpcLifetime.Token);
-            await _serviceLease.WriteAsync(cancellationToken)
+            await _serviceLease.WriteAsync(serviceToken)
                 .ConfigureAwait(false);
             await WriteRuntimeStatusAsync(
                 "idle",
                 readerConnected: false,
                 captureActive: false,
-                cancellationToken).ConfigureAwait(false);
+                serviceToken).ConfigureAwait(false);
             _snapshotViewer.SynchronizeServiceIntent(
                 config.ContextDeliveryMode,
-                _codexVoiceControl.KeepActive);
+                SnapshotServiceRequested);
             heartbeatLifetime =
                 CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken);
+                    serviceToken);
             heartbeatTask = HeartbeatAsync(heartbeatLifetime.Token);
             DirectSecurityLog.Write(
                 _serviceInstanceId,
                 "service-start",
                 "BW_COMPUTER_VOICE_DIRECT_SERVICE_STARTED",
                 ok: true);
-            await app.WaitForShutdownAsync(cancellationToken)
+            await app.WaitForShutdownAsync(serviceToken)
                 .ConfigureAwait(false);
             return 0;
         }
         catch (OperationCanceledException)
-            when (cancellationToken.IsCancellationRequested)
+            when (serviceToken.IsCancellationRequested)
         {
             return 0;
         }
         finally
         {
+            if (shutdownRequestLifetime is not null)
+            {
+                shutdownRequestLifetime.Cancel();
+            }
+            if (shutdownRequestTask is not null)
+            {
+                try
+                {
+                    await shutdownRequestTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+            shutdownRequestLifetime?.Dispose();
             if (queryRpcLifetime is not null)
             {
                 queryRpcLifetime.Cancel();
@@ -504,6 +763,59 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 await _serviceLease.ClearIfOwnedAsync()
                     .ConfigureAwait(false);
             }
+        }
+    }
+
+    private async Task MonitorShutdownRequestAsync(
+        Action stopApplication,
+        CancellationToken cancellationToken)
+    {
+        if (TryConsumeShutdownRequest(
+            _runtimeDirectory,
+            _serviceInstanceId))
+        {
+            AcceptGracefulShutdown(stopApplication);
+            return;
+        }
+        using PeriodicTimer timer = new(ShutdownRequestPollInterval);
+        while (await timer.WaitForNextTickAsync(cancellationToken)
+            .ConfigureAwait(false))
+        {
+            if (!TryConsumeShutdownRequest(
+                _runtimeDirectory,
+                _serviceInstanceId))
+            {
+                continue;
+            }
+            AcceptGracefulShutdown(stopApplication);
+            return;
+        }
+    }
+
+    private void AcceptGracefulShutdown(Action stopApplication)
+    {
+        Volatile.Write(ref _gracefulShutdownRequested, 1);
+        try
+        {
+            WriteShutdownReceipt(
+                _runtimeDirectory,
+                _serviceInstanceId,
+                "accepted");
+        }
+        catch (Exception exception)
+        {
+            DirectSecurityLog.Write(
+                _serviceInstanceId,
+                "service-stop",
+                ShutdownFailureCode(exception),
+                ok: false);
+        }
+        finally
+        {
+            // Cancel the service-owned token before asking Kestrel to stop.
+            // Long-lived WSS/RPC work then leaves immediately instead of
+            // consuming the whole host drain window ahead of media cleanup.
+            stopApplication();
         }
     }
 
@@ -1118,9 +1430,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             _coordinator,
             codexVoiceControl: _codexVoiceControl,
             bridgeOnlyMode: _bridgeOnlyMode,
-            writeServiceModeIntent: mode => WriteServiceModeIntent(
+            voiceEnabled: _voiceEnabled,
+            writeServiceModeIntent: (mode, voiceEnabled) => WriteServiceModeIntent(
                 _runtimeDirectory,
-                mode),
+                mode,
+                voiceEnabled),
             registerReaderSource: sourceInstanceId =>
             {
                 sourceLease = _readerSourceRouter.Attach(
@@ -1172,14 +1486,14 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             contextDeliveryModeChanged: mode =>
                 _snapshotViewer.SynchronizeServiceIntent(
                     mode,
-                    _codexVoiceControl.KeepActive),
+                    SnapshotServiceRequested),
             dictionaryFallback: _dictionaryFallback,
             localAnkiWriter: _localAnkiWriter);
 
         _contextConnectionHealth.Connected();
         _snapshotViewer.SynchronizeServiceIntent(
             _configStore.Load().ContextDeliveryMode,
-            _codexVoiceControl.KeepActive);
+            SnapshotServiceRequested);
         try
         {
             while (
@@ -1317,13 +1631,15 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             _coordinator,
             codexVoiceControl: _codexVoiceControl,
             bridgeOnlyMode: _bridgeOnlyMode,
-            writeServiceModeIntent: mode => WriteServiceModeIntent(
+            voiceEnabled: _voiceEnabled,
+            writeServiceModeIntent: (mode, voiceEnabled) => WriteServiceModeIntent(
                 _runtimeDirectory,
-                mode),
+                mode,
+                voiceEnabled),
             contextDeliveryModeChanged: mode =>
                 _snapshotViewer.SynchronizeServiceIntent(
                     mode,
-                    _codexVoiceControl.KeepActive),
+                    SnapshotServiceRequested),
             dictionaryFallback: _dictionaryFallback,
             localAnkiWriter: _localAnkiWriter);
         Task<DirectClientMessage?>? prefetchedReceiveTask = null;
@@ -2142,7 +2458,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             DirectBridgeConfig config = _configStore.Load();
             _snapshotViewer.SynchronizeServiceIntent(
                 config.ContextDeliveryMode,
-                _codexVoiceControl.KeepActive);
+                SnapshotServiceRequested);
             string state;
             bool readerConnected;
             bool captureActive;
@@ -2328,24 +2644,75 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             _disposed = true;
             try
             {
-                await DisposeCoordinatorWithBoundedRetryAsync()
-                    .ConfigureAwait(false);
+                try
+                {
+                    await DisposeOwnedResourcesAsync().WaitAsync(
+                        OwnedCleanupTimeout).ConfigureAwait(false);
+                }
+                catch (TimeoutException exception)
+                {
+                    throw new DirectProtocolException(
+                        "BW_COMPUTER_VOICE_DIRECT_SHUTDOWN_CLEANUP_TIMEOUT",
+                        "Direct 退出时清理语音、媒体与路由超时",
+                        retryable: true,
+                        innerException: exception);
+                }
+                _disposeCompleted = true;
+                if (Volatile.Read(ref _gracefulShutdownRequested) != 0)
+                {
+                    WriteShutdownReceipt(
+                        _runtimeDirectory,
+                        _serviceInstanceId,
+                        "success");
+                }
             }
-            finally
+            catch (Exception exception)
             {
-                _snapshotViewer.Dispose();
-                _dictionaryFallback.Dispose();
-                await _codexVoiceControl.DisposeAsync()
-                    .ConfigureAwait(false);
+                if (Volatile.Read(ref _gracefulShutdownRequested) != 0)
+                {
+                    try
+                    {
+                        WriteShutdownReceipt(
+                            _runtimeDirectory,
+                            _serviceInstanceId,
+                            "failed",
+                            ShutdownFailureCode(exception));
+                    }
+                    catch (Exception receiptException)
+                    {
+                        throw new AggregateException(
+                            exception,
+                            receiptException);
+                    }
+                }
+                throw;
             }
-            await _connectionOwnership.DisposeAsync()
-                .ConfigureAwait(false);
-            _disposeCompleted = true;
         }
         finally
         {
             _disposeGate.Release();
         }
+    }
+
+    private async Task DisposeOwnedResourcesAsync()
+    {
+        try
+        {
+            await DisposeCoordinatorWithBoundedRetryAsync()
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _snapshotViewer.Dispose();
+            _dictionaryFallback.Dispose();
+            if (_codexVoiceControl is IAsyncDisposable disposableVoice)
+            {
+                await disposableVoice.DisposeAsync()
+                    .ConfigureAwait(false);
+            }
+        }
+        await _connectionOwnership.DisposeAsync()
+            .ConfigureAwait(false);
     }
 
     private async Task DisposeCoordinatorWithBoundedRetryAsync()

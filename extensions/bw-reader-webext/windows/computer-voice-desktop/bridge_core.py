@@ -29,6 +29,13 @@ DIRECT_STATUS_CONTRACT = (
     "reader-computer-voice-direct-runtime-status/2"
 )
 SERVICE_RECORD_CONTRACT = "reader-computer-voice-desktop-service/1"
+DIRECT_SHUTDOWN_CONTRACT = "readerpc-direct-shutdown/1"
+DIRECT_SHUTDOWN_FILE = "readerpc-direct-shutdown.json"
+DIRECT_SHUTDOWN_RECEIPT_CONTRACT = "readerpc-direct-shutdown-result/1"
+DIRECT_SHUTDOWN_RECEIPT_FILE = "readerpc-direct-shutdown-result.json"
+DIRECT_SHUTDOWN_ACCEPT_TIMEOUT_SECONDS = 2.0
+DIRECT_SHUTDOWN_POLL_SECONDS = 0.1
+DIRECT_SHUTDOWN_PROCESS_EXIT_TIMEOUT_SECONDS = 2.0
 SELF_TEST_CONTRACT = "reader-computer-voice-desktop-self-test/1"
 
 FIXED_LISTEN_HOST = "127.0.0.1"
@@ -414,6 +421,14 @@ class BridgePaths:
     runtime_status: Path
     service_record: Path
 
+    @property
+    def shutdown_request(self) -> Path:
+        return self.runtime_status.parent / DIRECT_SHUTDOWN_FILE
+
+    @property
+    def shutdown_receipt(self) -> Path:
+        return self.runtime_status.parent / DIRECT_SHUTDOWN_RECEIPT_FILE
+
     @classmethod
     def for_root(cls, root: Path) -> "BridgePaths":
         root = root.resolve()
@@ -475,6 +490,15 @@ class DirectStatus:
     service_instance_id: str = ""
     capture_active: bool = False
     last_error: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class DirectShutdownIdentity:
+    """The strict on-disk identity captured before a ReaderPC handover."""
+
+    pid: int
+    process_live: bool
+    service_instance_id: str | None
 
 
 @dataclass(frozen=True)
@@ -1477,10 +1501,186 @@ def _remove_service_record_for_pid(paths: BridgePaths, pid: int) -> bool:
     return True
 
 
+def _read_shutdown_receipt(
+    paths: BridgePaths,
+    service_instance_id: str,
+) -> dict[str, object] | None:
+    try:
+        if paths.shutdown_receipt.stat().st_size not in range(1, 2049):
+            return None
+        value = json.loads(paths.shutdown_receipt.read_text("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(value, dict)
+        or value.get("contract") != DIRECT_SHUTDOWN_RECEIPT_CONTRACT
+        or value.get("serviceInstanceId") != service_instance_id
+    ):
+        return None
+    state = value.get("state")
+    if state == "accepted":
+        maximum_wait_ms = value.get("maximumWaitMs")
+        if (
+            set(value) != {
+                "contract",
+                "serviceInstanceId",
+                "state",
+                "maximumWaitMs",
+            }
+            or not isinstance(maximum_wait_ms, int)
+            or isinstance(maximum_wait_ms, bool)
+            or maximum_wait_ms not in range(1_000, 120_001)
+        ):
+            return None
+    elif state == "success":
+        if set(value) != {"contract", "serviceInstanceId", "state"}:
+            return None
+    elif state == "failed":
+        code = value.get("code")
+        if (
+            set(value) != {
+                "contract",
+                "serviceInstanceId",
+                "state",
+                "code",
+            }
+            or not isinstance(code, str)
+            or re.fullmatch(r"[A-Z0-9_]{1,128}", code) is None
+        ):
+            return None
+    else:
+        return None
+    return value
+
+
+def _shutdown_service_instance_id(
+    paths: BridgePaths,
+    pid: int,
+) -> str | None:
+    """Authenticate a live generation without treating heartbeat age as ID.
+
+    Freshness belongs to the UI health model.  Graceful teardown instead needs
+    the exact service record PID, executable and runtime generation; a quiet or
+    temporarily stale heartbeat must never downgrade into an unconfirmed hard
+    kill that is then reported as a successful mode switch.
+    """
+
+    runtime = read_json(paths.runtime_status)
+    if (
+        runtime is None
+        or set(runtime) != DIRECT_STATUS_KEYS
+        or runtime.get("contract") != DIRECT_STATUS_CONTRACT
+        or runtime.get("pid") != pid
+        or not isinstance(runtime.get("serviceInstanceId"), str)
+        or re.fullmatch(
+            r"[0-9a-f]{32}",
+            runtime.get("serviceInstanceId", ""),
+        ) is None
+    ):
+        return None
+    return runtime["serviceInstanceId"]
+
+
+def inspect_direct_shutdown_identity(
+    paths: BridgePaths,
+    runner: ProcessRunner,
+) -> DirectShutdownIdentity | None:
+    """Inspect an owned Direct generation without changing its lifecycle.
+
+    A replacing ReaderPC captures this identity before asking the old GUI to
+    close.  The capture deliberately ignores heartbeat age, but it never
+    accepts an invalid record, a reused PID, or a different executable.
+    """
+
+    record = _load_service_record(paths)
+    if record is None:
+        if paths.service_record.exists():
+            raise BridgeError(
+                "直连服务记录存在但合同无效；拒绝接管未知代际。"
+            )
+        return None
+    pid = record["pid"]
+    executable = runner.executable_for_pid(pid)
+    if executable is None:
+        return DirectShutdownIdentity(
+            pid=pid,
+            process_live=False,
+            service_instance_id=_shutdown_service_instance_id(paths, pid),
+        )
+    if not _same_path(executable, paths.native_host):
+        raise BridgeError("PID 对应进程不是固定直连代理；拒绝接管。")
+    return DirectShutdownIdentity(
+        pid=pid,
+        process_live=True,
+        service_instance_id=_shutdown_service_instance_id(paths, pid),
+    )
+
+
+def read_direct_shutdown_receipt_state(
+    paths: BridgePaths,
+    service_instance_id: str,
+) -> str | None:
+    """Return only a schema-validated receipt state for one generation."""
+
+    receipt = _read_shutdown_receipt(paths, service_instance_id)
+    if receipt is None:
+        return None
+    return str(receipt["state"])
+
+
+def clear_direct_service_record_if_pid(
+    paths: BridgePaths,
+    pid: int,
+) -> bool:
+    """Clear a dead/stale record only when it still names the captured PID."""
+
+    return _remove_service_record_for_pid(paths, pid)
+
+
+def _remove_shutdown_file(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _hard_stop_after_unconfirmed_cleanup(
+    paths: BridgePaths,
+    runner: ProcessRunner,
+    pid: int,
+) -> None:
+    if not runner.terminate_exact(pid, paths.native_host.resolve()):
+        raise BridgeError("直连代理清理未确认，且同一进程无法安全停止。")
+    _remove_shutdown_file(paths.shutdown_request)
+    _remove_service_record_for_pid(paths, pid)
+
+
 def stop_direct_service(
     paths: BridgePaths,
     runner: ProcessRunner,
+    *,
+    graceful: bool = False,
+    graceful_accept_timeout_seconds: float = (
+        DIRECT_SHUTDOWN_ACCEPT_TIMEOUT_SECONDS
+    ),
+    graceful_poll_seconds: float = DIRECT_SHUTDOWN_POLL_SECONDS,
+    process_exit_timeout_seconds: float = (
+        DIRECT_SHUTDOWN_PROCESS_EXIT_TIMEOUT_SECONDS
+    ),
+    force_on_cleanup_failure: bool = True,
+    sleeper: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> bool:
+    if (
+        graceful_accept_timeout_seconds <= 0
+        or graceful_accept_timeout_seconds > 10
+        or graceful_poll_seconds <= 0
+        or graceful_poll_seconds > 1
+        or process_exit_timeout_seconds <= 0
+        or process_exit_timeout_seconds > 10
+        or not isinstance(force_on_cleanup_failure, bool)
+    ):
+        raise BridgeError("优雅停止等待参数无效。")
     record = _load_service_record(paths)
     if record is None:
         if paths.service_record.exists():
@@ -1494,12 +1694,104 @@ def stop_direct_service(
         return False
     if not _same_path(executable, paths.native_host):
         raise BridgeError("PID 对应进程不是固定直连代理；拒绝停止。")
+    if graceful:
+        service_instance_id = _shutdown_service_instance_id(paths, pid)
+        if service_instance_id is None:
+            raise BridgeError(
+                "直连代理仍在运行，但无法认证当前服务代际；"
+                "拒绝把强制终止当作设置切换成功。"
+            )
+        if service_instance_id is not None:
+            _remove_shutdown_file(paths.shutdown_receipt)
+            _atomic_write_json(
+                paths.shutdown_request,
+                {
+                    "contract": DIRECT_SHUTDOWN_CONTRACT,
+                    "serviceInstanceId": service_instance_id,
+                },
+            )
+            accept_deadline = monotonic() + graceful_accept_timeout_seconds
+            cleanup_deadline: float | None = None
+            success_deadline: float | None = None
+            while True:
+                receipt = _read_shutdown_receipt(
+                    paths,
+                    service_instance_id,
+                )
+                receipt_state = receipt.get("state") if receipt else None
+                now = monotonic()
+                executable_now = runner.executable_for_pid(pid)
+                if receipt_state == "failed":
+                    if executable_now is not None:
+                        if force_on_cleanup_failure:
+                            _hard_stop_after_unconfirmed_cleanup(
+                                paths,
+                                runner,
+                                pid,
+                            )
+                    else:
+                        _remove_service_record_for_pid(paths, pid)
+                        _remove_shutdown_file(paths.shutdown_request)
+                    raise BridgeError(
+                        "直连代理报告退出清理失败："
+                        f"{receipt['code']}"
+                    )
+                if receipt_state == "success":
+                    if executable_now is None:
+                        _remove_service_record_for_pid(paths, pid)
+                        _remove_shutdown_file(paths.shutdown_request)
+                        # Keep the instance-bound success receipt until the
+                        # next request.  A replacing ReaderPC process can then
+                        # prove the previous owner's Direct generation cleaned
+                        # up instead of trusting PID disappearance alone.
+                        return True
+                    if success_deadline is None:
+                        success_deadline = (
+                            now + process_exit_timeout_seconds
+                        )
+                    elif now >= success_deadline:
+                        if force_on_cleanup_failure:
+                            _hard_stop_after_unconfirmed_cleanup(
+                                paths,
+                                runner,
+                                pid,
+                            )
+                        raise BridgeError(
+                            "直连代理已确认清理，但进程未在合同时间内退出。"
+                        )
+                elif receipt_state == "accepted" and cleanup_deadline is None:
+                    cleanup_deadline = (
+                        now + int(receipt["maximumWaitMs"]) / 1000.0
+                    )
+                if executable_now is None:
+                    _remove_service_record_for_pid(paths, pid)
+                    _remove_shutdown_file(paths.shutdown_request)
+                    raise BridgeError(
+                        "直连代理已退出，但没有返回清理成功回执。"
+                    )
+                if cleanup_deadline is not None and now >= cleanup_deadline:
+                    if force_on_cleanup_failure:
+                        _hard_stop_after_unconfirmed_cleanup(
+                            paths,
+                            runner,
+                            pid,
+                        )
+                    raise BridgeError(
+                        "直连代理未在服务声明的清理期限内返回结果。"
+                    )
+                if cleanup_deadline is None and now >= accept_deadline:
+                    if force_on_cleanup_failure:
+                        _hard_stop_after_unconfirmed_cleanup(
+                            paths,
+                            runner,
+                            pid,
+                        )
+                    raise BridgeError("直连代理没有接受优雅停止请求。")
+                sleeper(graceful_poll_seconds)
     if not runner.terminate_exact(pid, paths.native_host.resolve()):
         raise BridgeError("直连代理未确认停止。")
-    try:
-        paths.service_record.unlink()
-    except FileNotFoundError:
-        pass
+    _remove_shutdown_file(paths.shutdown_request)
+    _remove_service_record_for_pid(paths, pid)
     return True
 
 

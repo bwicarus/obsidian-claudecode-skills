@@ -28,8 +28,12 @@ def main() -> None:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         url = f"http://127.0.0.1:{server.server_address[1]}/extensions/bw-reader-webext/README.md"
         with sync_playwright() as p:
+            # Pi releases keep the pinned Chromium path.  Windows development uses
+            # Playwright's own isolated browser when that Pi path is absent; the
+            # empty user-data directory below remains an ephemeral test profile.
+            browser_executable = CHROME if CHROME.exists() else pathlib.Path(p.chromium.executable_path)
             ctx = p.chromium.launch_persistent_context(
-                "", executable_path=str(CHROME), headless=False, viewport={"width": 1180, "height": 820},
+                "", executable_path=str(browser_executable), headless=False, viewport={"width": 1180, "height": 820},
                 args=[f"--disable-extensions-except={EXT}", f"--load-extension={EXT}"],
             )
             try:
@@ -408,6 +412,51 @@ def main() -> None:
                 assert learning_entity["drops"][0]["gid"] == "anki_card_9001", learning_entity
                 assert learning_entity["drops"][0]["cards"][0]["id"] == 9001, learning_entity
                 assert learning_entity["drops"][0]["cards"][0]["source_ref"] == "note:000-proof.md", learning_entity
+
+                # 未保存草稿与保存后的卡面共用安全富文本投影：ruby/rt 在默认视图中
+                # 立即渲染，原始标记只留在折叠编辑器；编辑后也不能绕过 sanitizer。
+                ruby_draft = cdp.send("Runtime.evaluate", {
+                    "contextId": extension_world,
+                    "expression": """(() => {
+                      const host=document.createElement('div');host.id='ruby-draft-regression';
+                      window.__bwShadow.appendChild(host);window.__rubyDraftXss=0;
+                      const made=RC.flashcard.renderEntity(host,{
+                        label:'Reader 卡片草稿',gid:'card_abcd',mode:'draft',entityRegistered:false,
+                        card:{type:'basic',front:'イスラム<ruby>教<rt>きょう</rt></ruby>で、<ruby>食<rt>た</rt></ruby>べてはいけないものは何ですか。',
+                          back:'<ruby>豚肉<rt>ぶたにく</rt></ruby>、アルコール、<ruby>血液<rt>けつえき</rt></ruby>などです。'}
+                      });
+                      const previews=[...made.bd.querySelectorAll('.fc-draft-preview')];
+                      const editor=made.bd.querySelector('.fc-draft-editor');
+                      const ta=made.bd.querySelector('.fc-ed[data-f="front"]');
+                      const before={
+                        previews:previews.length,ruby:made.bd.querySelectorAll('.fc-draft-preview ruby').length,
+                        rt:made.bd.querySelectorAll('.fc-draft-preview rt').length,
+                        literal:previews.some(el=>el.textContent.includes('<ruby>')),
+                        collapsed:!!editor&&!editor.open,raw:ta?.value||'',
+                        save:!!made.bd.querySelector('.fc-add'),del:!!made.bd.querySelector('.fc-del')
+                      };
+                      ta.value='<ruby>語<rt>ご</rt></ruby><img src="x" onerror="window.__rubyDraftXss=1"><script>window.__rubyDraftXss=2</script>';
+                      ta.dispatchEvent(new Event('input',{bubbles:true}));
+                      const live=made.bd.querySelector('.fc-draft-preview[data-preview="front"]');
+                      const after={ruby:live.querySelectorAll('ruby').length,rt:live.querySelectorAll('rt').length,
+                        script:!!live.querySelector('script'),onerror:!!live.querySelector('[onerror]'),
+                        xss:window.__rubyDraftXss,literal:live.textContent.includes('<ruby>')};
+                      host.remove();return {before,after};
+                    })()""",
+                    "returnByValue": True,
+                }).get("result", {}).get("value")
+                assert ruby_draft["before"]["previews"] == 2, ruby_draft
+                assert ruby_draft["before"]["ruby"] == 4, ruby_draft
+                assert ruby_draft["before"]["rt"] == 4, ruby_draft
+                assert ruby_draft["before"]["literal"] is False, ruby_draft
+                assert ruby_draft["before"]["collapsed"] is True, ruby_draft
+                assert "<ruby>" in ruby_draft["before"]["raw"], ruby_draft
+                assert ruby_draft["before"]["save"] is True, ruby_draft
+                assert ruby_draft["before"]["del"] is True, ruby_draft
+                assert ruby_draft["after"] == {
+                    "ruby": 1, "rt": 1, "script": False, "onerror": False,
+                    "xss": 0, "literal": False,
+                }, ruby_draft
 
                 # 同 cid 的两个渲染实例共享选中状态：长按侧栏原卡，页面卡必须同时变紫框。
                 selection_body = card.locator(".vc-card-bd")

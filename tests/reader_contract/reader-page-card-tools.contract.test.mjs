@@ -42,6 +42,28 @@ function toolSpec(constant, length = 5200) {
   return MCP.slice(start, start + length);
 }
 
+function toolDescription(constant) {
+  const marker = `["name"] = ${constant}`;
+  const start = MCP.indexOf(marker);
+  assert.notEqual(start, -1, `missing tool ${constant}`);
+  const end = MCP.indexOf('["inputSchema"]', start);
+  assert.notEqual(end, -1, `missing input schema for ${constant}`);
+  return MCP.slice(start, end).replace(/"\s*\+\s*"/g, "");
+}
+
+test("总快照工具准确说明 CARD marker 只有语义正文", () => {
+  const prose = toolDescription("ToolName");
+  assert.match(prose, /concise semantic text/);
+  assert.match(prose, /never exact rich source JSON/);
+  assert.match(prose, /reader_page_card_read first for a partial edit/);
+  assert.match(prose, /preserve existing rich media or layout/);
+  assert.match(prose, /delete never needs an extra read/);
+  assert.doesNotMatch(
+    prose,
+    /content_format|content_truncated|complete compact replacement JSON/,
+  );
+});
+
 test("四个页面卡片工具都注册在与实现相同的依赖门下", () => {
   for (const name of [
     "reader_page_cards",
@@ -75,8 +97,9 @@ test("索引读保持有界，单卡读按稳定选择器分块返回完整源�
   assert.match(prose, /bounded index/);
   assert.match(prose, /anchor-word label/);
   assert.match(prose, /stable id and the shared revision/);
-  assert.match(prose, /fallback index for cards absent from the snapshot/);
-  assert.match(prose, /reader_page_card_read only for a source marked truncated/);
+  assert.match(prose, /fallback semantic index for cards absent from the snapshot/);
+  assert.match(prose, /never returns renderer HTML or control markup/);
+  assert.match(prose, /reader_page_card_read only when exact rich source is needed/);
 
   const readSpec = toolSpec("PageCardReadToolName", 4200);
   const readProse = readSpec.replace(/"\s*\+\s*"/g, "");
@@ -328,7 +351,10 @@ test("工具描述说明自动重排、placement-only 删除与 Anki 边界", ()
   assert.match(edit, /unbound manually dragged card/);
   assert.match(edit, /stable id and revision already present in a currentPage CARD marker/);
   assert.match(edit, /id and expectedRevision/);
-  assert.match(edit, /call this tool directly without a preliminary card query/);
+  assert.match(edit, /concise semantic text/);
+  assert.match(edit, /omits renderer HTML, controls, proxy URLs and layout attributes/);
+  assert.match(edit, /partial edit must preserve existing rich media or layout/);
+  assert.match(edit, /reader_page_card_read first/);
   assert.match(edit, /optional shortcut/);
   assert.match(edit, /Omit number for an unbound card/);
   assert.match(edit, /does not silently rewrite an already exported Anki note/);

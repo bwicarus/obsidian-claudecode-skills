@@ -46,7 +46,8 @@ function mediaHelpers(windowOverride = {}, documentOverride = {}) {
     "esc",
     "document",
     `${SOURCE.slice(start, end)}
-     return { _cardHttpsURL, _cardMediaURL, _videoCardRef,
+     return { _cardHttpsURL, _cardMediaURL, _cardAssetID, _cardAssetURL,
+       _cardImageURL, _videoCardRef,
        _videoCardThumb, _videoCardThumbSource, _videoButtonRef,
        _openVideoRef, _infoHtml };`,
   );
@@ -130,6 +131,90 @@ test("structured image cards use the same-origin bounded image proxy", () => {
   assert.match(html, new RegExp(`src="${proxied.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`));
   assert.match(html, /data-source-url="https:\/\/images\.unsplash\.com/);
   assert.doesNotMatch(html, /src="https:\/\/images\.unsplash\.com/);
+});
+
+test("registered image cards persist the account asset and fall back through img-proxy once", () => {
+  let delegatedError = null;
+  let hostDocumentListener = false;
+  const helpers = mediaHelpers({}, {
+    body: {
+      addEventListener(type, listener, options) {
+        if (type === "error" && options === true) delegatedError = listener;
+      },
+    },
+    addEventListener(type) {
+      if (type === "error") hostDocumentListener = true;
+    },
+  });
+  const remote = "https://images.example/photo.jpg?width=900";
+  const aid = "img_a1b2c3d4";
+  const primary = `/pdf/api/asset/${aid}?proxy=1`;
+  const fallback = `/pdf/api/img-proxy?url=${encodeURIComponent(remote)}`;
+  assert.equal(helpers._cardAssetID(aid), aid);
+  assert.equal(helpers._cardAssetID("img_../../secret"), "");
+  assert.equal(helpers._cardAssetURL(aid), primary);
+  assert.equal(helpers._cardImageURL({ aid, url: remote }), primary);
+
+  const html = helpers._infoHtml({
+    kind: "images",
+    data: { items: [{ aid, url: remote, title: "durable" }] },
+  });
+  assert.match(html, new RegExp(`src="${primary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`));
+  assert.match(html, new RegExp(`data-aid="${aid}"`));
+  assert.match(html, /data-source-url="https:\/\/images\.example\/photo\.jpg\?width=900"/);
+  assert.equal(typeof delegatedError, "function");
+  assert.equal(hostDocumentListener, false,
+    "the non-composed image error must be captured inside the Reader ShadowRoot");
+
+  const attrs = new Map([
+    ["data-aid", aid],
+    ["data-source-url", remote],
+    ["src", primary],
+  ]);
+  const image = {
+    tagName: "IMG",
+    getAttribute(name) { return attrs.get(name) || ""; },
+    setAttribute(name, value) { attrs.set(name, String(value)); },
+  };
+  delegatedError({ target: image });
+  assert.equal(attrs.get("src"), fallback);
+  assert.equal(attrs.get("data-asset-fallback-done"), "1");
+  attrs.set("src", primary);
+  delegatedError({ target: image });
+  assert.equal(attrs.get("src"), primary, "the same image never retries its fallback");
+
+  const internalAttrs = new Map([
+    ["data-aid", aid],
+    ["data-source-url", "/pdf/api/page-image?file=book.pdf&page=1"],
+    ["src", primary],
+  ]);
+  delegatedError({ target: {
+    tagName: "IMG",
+    getAttribute(name) { return internalAttrs.get(name) || ""; },
+    setAttribute(name, value) { internalAttrs.set(name, String(value)); },
+  } });
+  assert.equal(internalAttrs.get("src"), primary,
+    "only the original bounded HTTPS source may become an asset fallback");
+  assert.equal(internalAttrs.has("data-asset-fallback-done"), false);
+});
+
+test("sticky image cards normalize durable asset URLs before render and persistence", () => {
+  const normalizer = STICKY_NOTES.slice(
+    STICKY_NOTES.indexOf("function normalizeHtmlCardImageAssets("),
+    STICKY_NOTES.indexOf("function bindHtmlCardSelection("),
+  );
+  assert.match(normalizer, /\^\[a-z\]\{2,4\}_\[a-f0-9\]\{4,12\}\$/);
+  assert.match(normalizer, /\/pdf\/api\/asset\/.*\?proxy=1/);
+  assert.match(normalizer, /data-source-url/);
+  assert.match(normalizer, /removeAttribute\('data-asset-fallback-done'\)/);
+  assert.match(
+    STICKY_NOTES,
+    /var durableContent = normalizeHtmlCardImageAssets\(h\.content\)/,
+  );
+  assert.match(
+    STICKY_NOTES,
+    /var rawContent = normalizeHtmlCardImageAssets\(htmlObj\.content\)/,
+  );
 });
 
 test("ordinary-page extension images cross its fetch bridge instead of the host site", () => {

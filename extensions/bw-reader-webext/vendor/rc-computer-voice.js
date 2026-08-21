@@ -83,6 +83,10 @@ if (window.__bwPwaProviderOnly) return;
   var LOCAL_HIGHLIGHT_SOURCE_TTL_MARGIN_MS = 30000;
   var SNAPSHOT_RECONNECT_MS = 1000;
   var SNAPSHOT_RECONNECT_MAX_MS = 15000;
+  // Server cleanup may consume its published 40s bound, service start another
+  // 8s, and the capped reconnect window 15s.  Keep a 75s client bound so the
+  // UI does not falsely roll back a healthy worst-case switch at 60s.
+  var READERPC_INTENT_APPLY_TIMEOUT_MS = SNAPSHOT_RECONNECT_MAX_MS * 5;
   var CONTEXT_BOOTSTRAP_LIMIT = 500;
   var CONTEXT_LIVE_LIMIT = 32;
   var CONTEXT_LIVE_WAIT_S = 20;
@@ -154,6 +158,15 @@ if (window.__bwPwaProviderOnly) return;
   var contextPumpGeneration = 0;
   var contextDeliveryMode = null;
   var bridgeServiceMode = "full";   // "full" | "bridge-only":ReaderPC 桥接模式旗标(context-mode 自愿升级字段带回)
+  // Independent optional layer.  Missing means an older ReaderPC service;
+  // preserve released voice-on behavior but do not expose a switch that the
+  // old service cannot understand.
+  var bridgeVoiceEnabled = true;
+  var bridgeVoiceEnabledKnown = false;
+  var bridgePendingServiceMode = null;
+  var bridgePendingVoiceEnabled = null;
+  var bridgePendingServiceModeTimer = null;
+  var bridgePendingVoiceEnabledTimer = null;
   var contextModeChanging = false;
   var contextModeChangePromise = null;
   var snapshotLink = null;
@@ -4144,10 +4157,112 @@ if (window.__bwPwaProviderOnly) return;
     }).then(normalizeHello);
   }
 
+  function emitReaderPCServiceIntent() {
+    try {
+      window.dispatchEvent(new CustomEvent("bw-computer-voice-service-mode", {
+        detail: {
+          serviceMode: bridgeServiceMode,
+          voiceEnabled: bridgeVoiceEnabledKnown
+            ? bridgeVoiceEnabled
+            : null,
+          pendingServiceMode: bridgePendingServiceMode,
+          pendingVoiceEnabled: bridgePendingVoiceEnabled,
+        },
+      }));
+    } catch (_) {}
+  }
+
+  function clearReaderPCPendingTimer(axis) {
+    var timer = axis === "voice"
+      ? bridgePendingVoiceEnabledTimer
+      : bridgePendingServiceModeTimer;
+    if (timer) clearTimeout(timer);
+    if (axis === "voice") bridgePendingVoiceEnabledTimer = null;
+    else bridgePendingServiceModeTimer = null;
+  }
+
+  function failReaderPCPending(axis, code, message) {
+    var requested = axis === "voice"
+      ? bridgePendingVoiceEnabled
+      : bridgePendingServiceMode;
+    if (requested === null) return;
+    clearReaderPCPendingTimer(axis);
+    if (axis === "voice") {
+      bridgePendingVoiceEnabled = null;
+    } else {
+      bridgePendingServiceMode = null;
+    }
+    emitReaderPCServiceIntent();
+    emitStatus({
+      state: "warning",
+      message: message,
+      code: code,
+    });
+    try {
+      window.dispatchEvent(new CustomEvent(
+        "bw-computer-voice-service-mode-failed",
+        { detail: {
+          axis: axis,
+          requested: requested,
+          serviceMode: bridgeServiceMode,
+          voiceEnabled: bridgeVoiceEnabledKnown
+            ? bridgeVoiceEnabled
+            : null,
+          code: code,
+          message: message,
+        } }
+      ));
+    } catch (_) {}
+  }
+
+  function beginReaderPCPending(axis, requested) {
+    clearReaderPCPendingTimer(axis);
+    if (axis === "voice") {
+      bridgePendingVoiceEnabled = requested;
+    } else {
+      bridgePendingServiceMode = requested;
+    }
+    var timer = setTimeout(function () {
+      failReaderPCPending(
+        axis,
+        axis === "voice"
+          ? "BW_READERPC_VOICE_APPLY_TIMEOUT"
+          : "BW_READERPC_SERVICE_MODE_APPLY_TIMEOUT",
+        axis === "voice"
+          ? "ReaderPC 未在期限内确认语音设置；已恢复显示实际状态。"
+          : "ReaderPC 未在期限内确认连接模式；已恢复显示实际状态。"
+      );
+    }, READERPC_INTENT_APPLY_TIMEOUT_MS);
+    if (timer && typeof timer.unref === "function") timer.unref();
+    if (axis === "voice") bridgePendingVoiceEnabledTimer = timer;
+    else bridgePendingServiceModeTimer = timer;
+    emitReaderPCServiceIntent();
+  }
+
+  function reconcileReaderPCPending(axis, applied) {
+    var requested = axis === "voice"
+      ? bridgePendingVoiceEnabled
+      : bridgePendingServiceMode;
+    if (requested === null) return;
+    if (requested === applied) {
+      clearReaderPCPendingTimer(axis);
+      if (axis === "voice") {
+        bridgePendingVoiceEnabled = null;
+      } else {
+        bridgePendingServiceMode = null;
+      }
+    }
+  }
+
   function normalizeContextMode(value) {
-    // serviceMode 是请求带 wantServiceMode:true 才有的自愿升级字段(optional):
-    // 旧服务端不回它 → 保持 "full";桥接模式服务端回 "bridge-only" → 图标分支。
-    exactObject(value, ["mode"], ["serviceMode"], "CONTEXT-MODE 响应");
+    // serviceMode/voiceEnabled are opt-in upgrade fields.  Missing fields
+    // identify an older service and retain the released voice-on default.
+    exactObject(
+      value,
+      ["mode"],
+      ["serviceMode", "voiceEnabled"],
+      "CONTEXT-MODE 响应"
+    );
     if (
       value.mode !== CONTEXT_DELIVERY_LEGACY &&
       value.mode !== CONTEXT_DELIVERY_SNAPSHOT
@@ -4170,11 +4285,24 @@ if (window.__bwPwaProviderOnly) return;
     } else {
       bridgeServiceMode = "full";
     }
-    try {
-      window.dispatchEvent(new CustomEvent("bw-computer-voice-service-mode", {
-        detail: { serviceMode: bridgeServiceMode },
-      }));
-    } catch (_) {}
+    reconcileReaderPCPending("service", bridgeServiceMode);
+    if (value.voiceEnabled !== undefined) {
+      if (typeof value.voiceEnabled !== "boolean") {
+        throw directError(
+          "Windows 语音功能状态无效",
+          "BW_READERPC_VOICE_ENABLED_INVALID",
+          false
+        );
+      }
+      bridgeVoiceEnabled = value.voiceEnabled;
+      bridgeVoiceEnabledKnown = true;
+      reconcileReaderPCPending("voice", bridgeVoiceEnabled);
+    } else {
+      // Once capability was negotiated, a transient fallback response from an
+      // older/stopping generation must not erase the user's pending axis.
+      if (!bridgeVoiceEnabledKnown) bridgeVoiceEnabled = true;
+    }
+    emitReaderPCServiceIntent();
     contextDeliveryMode = value.mode;
     applyReaderPCSnapshotAuthority(value.mode);
     return value.mode;
@@ -4195,12 +4323,20 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function queryContextMode(channel) {
-    // 旧服务端(≤0.1.146)对未知请求键按 exact 拒绝:失败退回历史形状重试一次,
-    // serviceMode 落 "full"。Windows 包回滚时新客户端不至于断上下文链。
-    return channel.request("context-mode", { wantServiceMode: true })
+    // Exact-key older services reject unknown fields.  Negotiate newest →
+    // serviceMode-only → legacy so either side can roll back independently.
+    return channel.request("context-mode", {
+      wantServiceMode: true,
+      wantVoiceEnabled: true,
+    })
       .then(normalizeContextMode)
       .catch(function () {
-        return channel.request("context-mode", {}).then(normalizeContextMode);
+        return channel.request("context-mode", { wantServiceMode: true })
+          .then(normalizeContextMode)
+          .catch(function () {
+            return channel.request("context-mode", {})
+              .then(normalizeContextMode);
+          });
       });
   }
 
@@ -8863,17 +8999,24 @@ if (window.__bwPwaProviderOnly) return;
   function localCardMarker(item) {
     var card = item.card;
     var unbound = card.unbound === true;
+    // page.context is model-facing reading context, not a renderer/source
+    // transport.  The authoritative provider also exposes replacement JSON so
+    // an explicit page-card read can perform a lossless rich-card edit, but
+    // embedding that JSON here leaks vc-* controls, proxy URLs and layout
+    // markup into every snapshot.  Use the already-normalized semantic body;
+    // stable id + revision remain sufficient for direct delete and guarded
+    // edit selection.
+    var semanticBody = String(card.text || "").trim();
+    if (!semanticBody) {
+      semanticBody = "（这张卡片没有可读文字；需要完整源内容时请按 ID 读取）";
+    }
     return '⟦CARD_START n="' + (unbound ? '' : String(item.number)) +
       '" id="' + localContextMarkerAttribute(card.id, 120) +
       '" revision="' + String(item.revision) +
       '" type="' + localContextMarkerAttribute(card.kind, 32) +
       '" label="' + localContextMarkerAttribute(card.label, 120) +
-      '" content_format="' + localContextMarkerAttribute(card.contentFormat, 96) +
-      '" replacement="' + localContextMarkerAttribute(card.replacement, 16) +
-      '" content_length="' + String(card.contentLength) +
-      '" content_truncated="' + (card.contentTruncated ? 'true' : 'false') +
       (unbound ? '" unbound="true' : '') +
-      '"⟧' + escapeLocalContextText(card.contextContent) + '⟦CARD_END⟧';
+      '"⟧' + escapeLocalContextText(semanticBody) + '⟦CARD_END⟧';
   }
 
   function annotateLocalPageRange(pageRecord, projected, start, end, revision) {
@@ -10933,7 +11076,10 @@ if (window.__bwPwaProviderOnly) return;
     }
 
     function renderCodexVoice(value, connectionState) {
-      if (value && value.status === "available") {
+      if (bridgeVoiceEnabledKnown && !bridgeVoiceEnabled) {
+        codexVoiceStatus.textContent =
+          "○ ReaderPC 语音功能已关闭；其它 Reader 功能保持在线。";
+      } else if (value && value.status === "available") {
         codexVoiceStatus.textContent = value.active
           ? "● Codex 语音正在运行（由 ReaderPC 服务器管理）。"
           : "○ Codex 语音当前未运行（由 ReaderPC 服务器管理）。";
@@ -10969,7 +11115,8 @@ if (window.__bwPwaProviderOnly) return;
         "所选目标的输出固定到独立虚拟扬声器后按进程树回传。" +
         "切换目标或刷新状态不会启动应用或采音。" +
         "通话中不能切换目标；挂断只停止音频桥接。" +
-        "实时快照与 Codex 语音随 ReaderPC 服务器进程一起启动和停止。";
+        "实时快照、视觉读取、浏览器控制与卡片工具由 ReaderPC 非语音服务常驻提供；" +
+        "Codex 语音、F24 保活与音频路由由独立语音开关控制。";
       renderCodexVoice(
         value.status && value.status.codexVoice,
         value.state
@@ -11179,6 +11326,8 @@ if (window.__bwPwaProviderOnly) return;
     if (!channel) {
       return Promise.reject(new Error("BW_READERPC_SERVICE_MODE_LINK_OFFLINE"));
     }
+    var previousPending = bridgePendingServiceMode;
+    beginReaderPCPending("service", mode);
     return channel.request("service-mode-set", { mode: mode }).then(function (value) {
       exactObject(value, ["serviceMode", "applied"], [], "SERVICE-MODE-SET 响应");
       if (value.serviceMode !== "full" && value.serviceMode !== "bridge-only") {
@@ -11189,13 +11338,81 @@ if (window.__bwPwaProviderOnly) return;
         );
       }
       return value;
+    }).catch(function (error) {
+      if (bridgePendingServiceMode === mode) {
+        clearReaderPCPendingTimer("service");
+        bridgePendingServiceMode = null;
+        if (previousPending !== null) {
+          beginReaderPCPending("service", previousPending);
+        } else {
+          emitReaderPCServiceIntent();
+        }
+      }
+      throw error;
+    });
+  }
+
+  function setReaderPCVoiceEnabled(enabled) {
+    if (typeof enabled !== "boolean") {
+      return Promise.reject(new Error("BW_READERPC_VOICE_ENABLED_INVALID"));
+    }
+    if (!bridgeVoiceEnabledKnown) {
+      return Promise.reject(new Error("BW_READERPC_VOICE_ENABLED_UNSUPPORTED"));
+    }
+    var state = snapshotLink;
+    var channel = state && state.channel;
+    if (!channel) {
+      return Promise.reject(new Error("BW_READERPC_SERVICE_MODE_LINK_OFFLINE"));
+    }
+    var previousPending = bridgePendingVoiceEnabled;
+    beginReaderPCPending("voice", enabled);
+    return channel.request("service-mode-set", {
+      voiceEnabled: enabled,
+    }).then(function (value) {
+      exactObject(
+        value,
+        ["voiceEnabled", "applied"],
+        [],
+        "SERVICE-MODE-SET 语音响应"
+      );
+      if (value.voiceEnabled !== enabled) {
+        throw directError(
+          "Windows 语音功能切换回执无效",
+          "BW_READERPC_VOICE_ENABLED_INVALID",
+          false
+        );
+      }
+      return value;
+    }).catch(function (error) {
+      if (bridgePendingVoiceEnabled === enabled) {
+        clearReaderPCPendingTimer("voice");
+        bridgePendingVoiceEnabled = null;
+        if (previousPending !== null) {
+          beginReaderPCPending("voice", previousPending);
+        } else {
+          emitReaderPCServiceIntent();
+        }
+      }
+      throw error;
     });
   }
 
   RC.computerVoice = Object.freeze({
     contract: BRIDGE_CONTRACT,
     getServiceMode: function () { return bridgeServiceMode; },
+    getPendingServiceMode: function () {
+      return bridgePendingServiceMode;
+    },
     setServiceMode: setReaderPCServiceMode,
+    getVoiceEnabled: function () {
+      return bridgeVoiceEnabledKnown
+        ? bridgeVoiceEnabled
+        : null;
+    },
+    getPendingVoiceEnabled: function () {
+      return bridgePendingVoiceEnabled;
+    },
+    setVoiceEnabled: setReaderPCVoiceEnabled,
     sendWebPageContext: sendWebPageContext,
     pageCards: pageCards,
     directContract: DIRECT_CONTRACT,

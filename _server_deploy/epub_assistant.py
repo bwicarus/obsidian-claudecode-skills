@@ -1872,10 +1872,61 @@ def _econvo_load(uid, file_rel):
         return []
 
 
+_HISTORY_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,120}$")
+
+
+def _new_history_id() -> str:
+    return "h_" + os.urandom(12).hex()
+
+
+def _ensure_history_ids(messages) -> bool:
+    changed = False
+    used = set()
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        history_id = str(message.get("history_id") or "")
+        if not _HISTORY_ID_RE.fullmatch(history_id) or history_id in used:
+            history_id = _new_history_id()
+            while history_id in used:
+                history_id = _new_history_id()
+            message["history_id"] = history_id
+            changed = True
+        used.add(history_id)
+    return changed
+
+
+def _econvo_load_for_history(uid, file_rel):
+    """Migrate legacy rows before slicing the public EPUB history window."""
+    with _econvo_lock:
+        messages = _econvo_load(uid, file_rel)
+        if not _ensure_history_ids(messages):
+            return messages
+        path = _econvo_path(uid, file_rel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(path.name + ".tmp")
+        try:
+            temp.write_text(json.dumps(messages, ensure_ascii=False), "utf-8")
+            os.replace(temp, path)
+        except Exception:
+            try:
+                temp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+        return messages
+
+
 def _econvo_append(uid, file_rel, role, content, meta=None):
     with _econvo_lock:
         msgs = _econvo_load(uid, file_rel)
-        rec = {"role": role, "content": content, "ts": int(time.time())}
+        _ensure_history_ids(msgs)
+        rec = {
+            "history_id": _new_history_id(),
+            "role": role,
+            "content": content,
+            "ts": int(time.time()),
+        }
         if meta:
             for k in ("section", "book", "selection", "sel_anchor", "trace", "actions", "videos"):
                 v = meta.get(k)
@@ -2434,11 +2485,12 @@ def _eassistant_convo_get():
     if not _logged_in():
         return jsonify({"ok": False}), 401
     file_rel = (request.args.get("file") or "").strip()
+    messages = _econvo_load_for_history(_uid(), file_rel)
     if request.args.get("compact"):   # ㊲:语音回放用压缩视图(摘要 sidecar 由 assistant.py 统一管)
         import assistant as _as
         v = _as._compact_view(_uid(), file_rel)
         return jsonify({"ok": True, "summary": v["summary"], "messages": v["messages"]})
-    return jsonify({"ok": True, "messages": _econvo_load(_uid(), file_rel)[-100:]})
+    return jsonify({"ok": True, "messages": messages[-100:]})
 
 
 def _eassistant_convo_append():

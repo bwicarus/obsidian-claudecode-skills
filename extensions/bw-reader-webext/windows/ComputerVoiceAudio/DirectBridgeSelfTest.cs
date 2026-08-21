@@ -197,6 +197,10 @@ internal static class DirectBridgeSelfTest
             root,
             origin,
             checks).ConfigureAwait(false);
+        await CheckReaderPcVoiceOptionalLayerAsync(
+            root,
+            origin,
+            checks).ConfigureAwait(false);
 
         FakeDirectAppLauncher appLauncher = new();
         FakeDirectMediaAdapter mediaAdapter = new()
@@ -8825,6 +8829,328 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("state").GetString() == "unknown",
             "direct-snapshot-clear-removes-page-and-selection",
             checks);
+    }
+
+    private static async Task CheckReaderPcVoiceOptionalLayerAsync(
+        string root,
+        string origin,
+        ICollection<string> checks)
+    {
+        string installationRoot = System.IO.Path.Combine(
+            root,
+            "readerpc-voice-optional");
+        string runtimeDirectory = System.IO.Path.Combine(
+            installationRoot,
+            "runtime");
+        string configPath = System.IO.Path.Combine(
+            installationRoot,
+            "native-host",
+            "direct.json");
+        string statusPath = System.IO.Path.Combine(
+            runtimeDirectory,
+            "computer-voice-direct.status.json");
+        Directory.CreateDirectory(runtimeDirectory);
+        await WriteConfigAsync(
+            configPath,
+            statusPath,
+            origin,
+            localOptIn: true).ConfigureAwait(false);
+
+        string intentPath = System.IO.Path.Combine(
+            runtimeDirectory,
+            "readerpc-service-mode.json");
+        await File.WriteAllTextAsync(
+            intentPath,
+            JsonSerializer.Serialize(new
+            {
+                contract = DirectBridgeServer.ServiceModeContract,
+                mode = "bridge-only",
+                voiceEnabled = false,
+                snapshotViewer = "hidden",
+            })).ConfigureAwait(false);
+        Require(
+            DirectBridgeServer.ReadServiceMode(runtimeDirectory)
+                == "bridge-only"
+            && DirectBridgeServer.ReadBridgeOnlyMode(runtimeDirectory)
+            && !DirectBridgeServer.ReadVoiceEnabled(runtimeDirectory),
+            "readerpc-intent-has-independent-service-and-voice-axes",
+            checks);
+        DirectBridgeServer.WriteServiceModeIntent(
+            runtimeDirectory,
+            "full");
+        using (JsonDocument preserved = JsonDocument.Parse(
+            await File.ReadAllTextAsync(intentPath).ConfigureAwait(false)))
+        {
+            JsonElement value = preserved.RootElement;
+            Require(
+                value.GetProperty("mode").GetString() == "full"
+                && !value.GetProperty("voiceEnabled").GetBoolean()
+                && value.GetProperty("snapshotViewer").GetString()
+                    == "hidden",
+                "readerpc-mode-write-preserves-voice-and-viewer-axes",
+                checks);
+        }
+        await File.WriteAllTextAsync(
+            intentPath,
+            JsonSerializer.Serialize(new
+            {
+                contract = DirectBridgeServer.ServiceModeContract,
+                mode = "full",
+            })).ConfigureAwait(false);
+        Require(
+            DirectBridgeServer.ReadVoiceEnabled(runtimeDirectory),
+            "readerpc-legacy-intent-defaults-voice-on",
+            checks);
+        await File.WriteAllTextAsync(
+            intentPath,
+            JsonSerializer.Serialize(new
+            {
+                contract = "wrong-contract",
+                mode = "full",
+                voiceEnabled = false,
+            })).ConfigureAwait(false);
+        Require(
+            DirectBridgeServer.ReadVoiceEnabled(runtimeDirectory),
+            "readerpc-invalid-intent-cannot-disable-voice",
+            checks);
+
+        string shutdownPath = System.IO.Path.Combine(
+            runtimeDirectory,
+            DirectBridgeServer.ShutdownRequestFileName);
+        const string serviceInstanceId =
+            "0123456789abcdef0123456789abcdef";
+        await File.WriteAllTextAsync(
+            shutdownPath,
+            JsonSerializer.Serialize(new
+            {
+                contract = DirectBridgeServer.ShutdownRequestContract,
+                serviceInstanceId =
+                    "fedcba9876543210fedcba9876543210",
+            })).ConfigureAwait(false);
+        bool staleConsumed = DirectBridgeServer.TryConsumeShutdownRequest(
+            runtimeDirectory,
+            serviceInstanceId);
+        await File.WriteAllTextAsync(
+            shutdownPath,
+            JsonSerializer.Serialize(new
+            {
+                contract = DirectBridgeServer.ShutdownRequestContract,
+                serviceInstanceId,
+            })).ConfigureAwait(false);
+        bool currentConsumed = DirectBridgeServer.TryConsumeShutdownRequest(
+            runtimeDirectory,
+            serviceInstanceId);
+        Require(
+            !staleConsumed
+            && currentConsumed
+            && !File.Exists(shutdownPath),
+            "readerpc-graceful-shutdown-consumes-only-current-instance",
+            checks);
+        string shutdownReceiptPath = System.IO.Path.Combine(
+            runtimeDirectory,
+            DirectBridgeServer.ShutdownReceiptFileName);
+        DirectBridgeServer.WriteShutdownReceipt(
+            runtimeDirectory,
+            serviceInstanceId,
+            "accepted");
+        using (JsonDocument accepted = JsonDocument.Parse(
+            await File.ReadAllTextAsync(shutdownReceiptPath)
+                .ConfigureAwait(false)))
+        {
+            JsonElement value = accepted.RootElement;
+            Require(
+                value.EnumerateObject().Select(property => property.Name)
+                    .ToHashSet(StringComparer.Ordinal)
+                    .SetEquals(new[]
+                    {
+                        "contract",
+                        "serviceInstanceId",
+                        "state",
+                        "maximumWaitMs",
+                    })
+                && value.GetProperty("contract").GetString()
+                    == DirectBridgeServer.ShutdownReceiptContract
+                && value.GetProperty("serviceInstanceId").GetString()
+                    == serviceInstanceId
+                && value.GetProperty("state").GetString() == "accepted"
+                && value.GetProperty("maximumWaitMs").GetInt32()
+                    == (int)DirectBridgeServer
+                        .GracefulShutdownMaximumWait.TotalMilliseconds,
+                "readerpc-shutdown-accepted-receipt-publishes-server-budget",
+                checks);
+        }
+        DirectBridgeServer.WriteShutdownReceipt(
+            runtimeDirectory,
+            serviceInstanceId,
+            "failed",
+            "BW_COMPUTER_VOICE_DIRECT_MEDIA_CLEANUP_PENDING");
+        using (JsonDocument failed = JsonDocument.Parse(
+            await File.ReadAllTextAsync(shutdownReceiptPath)
+                .ConfigureAwait(false)))
+        {
+            JsonElement value = failed.RootElement;
+            Require(
+                value.EnumerateObject().Select(property => property.Name)
+                    .ToHashSet(StringComparer.Ordinal)
+                    .SetEquals(new[]
+                    {
+                        "contract",
+                        "serviceInstanceId",
+                        "state",
+                        "code",
+                    })
+                && value.GetProperty("state").GetString() == "failed"
+                && value.GetProperty("code").GetString()
+                    == "BW_COMPUTER_VOICE_DIRECT_MEDIA_CLEANUP_PENDING",
+                "readerpc-shutdown-failed-receipt-is-safe-and-instance-bound",
+                checks);
+        }
+        File.Delete(shutdownReceiptPath);
+
+        DirectBridgeConfigStore store = new(configPath);
+        await using DirectBridgeCoordinator coordinator = new(
+            store,
+            new UnwiredDirectAppLauncher(),
+            new UnwiredDirectMediaAdapter());
+        DirectDisabledCodexVoiceControl voiceControl = new();
+        string? writtenMode = null;
+        bool? writtenVoiceEnabled = null;
+        DirectBridgeProtocolSession session = new(
+            "connection-readerpc-no-voice",
+            origin,
+            store,
+            coordinator,
+            codexVoiceControl: voiceControl,
+            bridgeOnlyMode: false,
+            voiceEnabled: false,
+            writeServiceModeIntent: (mode, voiceEnabled) =>
+            {
+                writtenMode = mode;
+                writtenVoiceEnabled = voiceEnabled;
+            });
+        List<object> events = [];
+        List<byte[]> frames = [];
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "readerpc-no-voice-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "hello");
+        JsonElement status = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "status",
+                    requestId = "readerpc-no-voice-status",
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "status");
+        JsonElement contextMode = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "context-mode",
+                    requestId = "readerpc-no-voice-context-mode",
+                    wantServiceMode = true,
+                    wantVoiceEnabled = true,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "context-mode");
+        JsonElement voiceSet = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "service-mode-set",
+                    requestId = "readerpc-no-voice-mode-set",
+                    voiceEnabled = true,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "service-mode-set");
+        Require(
+            status.GetProperty("ready").GetBoolean()
+            && status.GetProperty("state").GetString() == "idle"
+            && status.GetProperty("codexVoice")
+                .GetProperty("status").GetString() == "unavailable"
+            && status.GetProperty("codexVoice")
+                .GetProperty("source").GetString()
+                == DirectDisabledCodexVoiceControl.DisabledSource
+            && contextMode.GetProperty("serviceMode").GetString()
+                == "full"
+            && !contextMode.GetProperty("voiceEnabled").GetBoolean()
+            && voiceSet.EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal)
+                .SetEquals(new[] { "voiceEnabled", "applied" })
+            && voiceSet.GetProperty("voiceEnabled").GetBoolean()
+            && writtenMode is null
+            && writtenVoiceEnabled == true,
+            "readerpc-no-voice-status-and-voice-only-intent-remain-ready",
+            checks);
+
+        string sessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Repeat((byte)0x55, 16).ToArray());
+        object[] blockedMessages =
+        [
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "start",
+                requestId = "readerpc-no-voice-start",
+                sessionId,
+            },
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "stop",
+                requestId = "readerpc-no-voice-stop",
+                sessionId,
+            },
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "codex-voice-set",
+                requestId = "readerpc-no-voice-codex-set",
+                active = true,
+            },
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "codex-voice-keepalive-set",
+                requestId = "readerpc-no-voice-keepalive",
+                enabled = true,
+            },
+        ];
+        foreach (object blockedMessage in blockedMessages)
+        {
+            JsonElement blocked = await SendAsync(
+                session,
+                blockedMessage,
+                events,
+                frames).ConfigureAwait(false);
+            Require(
+                !blocked.GetProperty("ok").GetBoolean()
+                && blocked.GetProperty("error").GetProperty("code")
+                    .GetString()
+                    == "BW_COMPUTER_VOICE_DIRECT_VOICE_DISABLED",
+                "readerpc-no-voice-rejects-voice-action",
+                checks);
+        }
     }
 
     private static async Task CheckContextDeliveryModeSetAsync(

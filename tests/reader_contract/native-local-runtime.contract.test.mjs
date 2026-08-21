@@ -2561,12 +2561,10 @@ test("native local page context joins the same monotonic journal without Pi", as
   await enableNativeContext(result);
   const runtime = result.context.BWReaderRuntime.nativeLocalRuntime;
   const file = "localbook-" + "b".repeat(64);
-  const replacement = JSON.stringify({ content: "完整卡片正文🙂".repeat(1200) });
+  const semanticBody = "完整卡片正文🙂".repeat(1200);
   const completeCardMarker =
     `⟦CARD_START n="1" id="card-large" revision="7" type="card" ` +
-    `label="锚定词" content_format="application/vnd.bw-reader.card-replacement+json;version=1" ` +
-    `replacement="content" content_length="${replacement.length}" ` +
-    `content_truncated="false"⟧${replacement}⟦CARD_END⟧`;
+    `label="锚定词"⟧${semanticBody}⟦CARD_END⟧`;
   const pageText =
     `【当前显示区域之前】\n前文\n\n【当前显示区域（重点）】\n${completeCardMarker}` +
     "\n\n【当前显示区域之后】\n后文";
@@ -2621,7 +2619,10 @@ test("native local page context joins the same monotonic journal without Pi", as
     "app-local-visible-window",
   );
   assert.equal(journal.events[0].page_context.text, pageText);
-  assert.match(journal.events[0].page_context.text, /content_truncated="false"/);
+  assert.doesNotMatch(
+    journal.events[0].page_context.text,
+    /content_format=|content_truncated=|replacement=|content_length=/,
+  );
   assert.match(journal.events[0].page_context.text, /完整卡片正文🙂完整卡片正文🙂/);
   assert.equal(result.gatewayMessages.length, 1);
   assert.equal(result.gatewayMessages[0].path, "/pdf/api/context-sync");
@@ -2813,7 +2814,10 @@ test("native page-context cards come from authoritative notes and refresh only a
       cid: "tool-card-2",
       label: "天气卡",
       type: "weather",
-      content: "<script>bad()</script><b>晴天</b>",
+      content: '<div class="vc-ig"><button class="vc-ig-x" '
+        + 'aria-label="移除">×</button><img class="vc-ig-img" '
+        + 'src="/pdf/api/img-proxy?url=internal" data-source-url="https://example/image.jpg">'
+        + '<div class="vc-ig-t"><strong>晴天</strong><div>适合出门</div></div></div>',
       bind: { kind: "page-chars", page: 7, from: 9, to: 10, text: "天气" },
     },
   })).status, 200);
@@ -2868,14 +2872,20 @@ test("native page-context cards come from authoritative notes and refresh only a
     bind: { kind: "page-chars", page: 7, from: 4, to: 5, text: "锚点" },
   });
   assert.equal(initial.cards[1].label, "天气");
-  assert.equal(initial.cards[1].text, "晴天");
+  assert.equal(initial.cards[1].text, "晴天 适合出门");
+  assert.doesNotMatch(initial.cards[1].text,
+    /×|vc-ig|img-proxy|data-source-url|example\/image/,
+    "semantic projection excludes renderer controls, classes and URLs");
   assert.equal(initial.cards[1].contentFormat,
     "application/vnd.bw-reader.card-replacement+json;version=1");
   assert.equal(initial.cards[1].replacement, "content");
   assert.equal(initial.cards[1].contentTruncated, false);
   assert.equal(initial.cards[1].contentLength, initial.cards[1].contextContent.length);
   assert.deepEqual(JSON.parse(initial.cards[1].contextContent), {
-    content: "<script>bad()</script><b>晴天</b>",
+    content: '<div class="vc-ig"><button class="vc-ig-x" '
+      + 'aria-label="移除">×</button><img class="vc-ig-img" '
+      + 'src="/pdf/api/img-proxy?url=internal" data-source-url="https://example/image.jpg">'
+      + '<div class="vc-ig-t"><strong>晴天</strong><div>适合出门</div></div></div>',
   }, "complete general-card context is the exact edit replacement shape");
 
   const missingChangeCount = changes.length;
@@ -2993,10 +3003,11 @@ test("native page-card source returns stable complete HTML and learning-card JSO
   const learningId = "c_8888888888888888";
   const htmlContent = "<section data-kind=\"完整\">" + "中文正文🙂".repeat(18000) + "</section>";
   const htmlContext = "供 AI 完整读取的上下文：" + "甲乙丙丁".repeat(800);
+  const longLearningFront = "完整问题".repeat(300);
   const learningCards = [
     {
       type: "basic",
-      front: "完整问题",
+      front: longLearningFront,
       back: "完整答案",
       deck: "阅读::第七页",
       tags: ["中文", "page-card"],
@@ -3052,10 +3063,13 @@ test("native page-card source returns stable complete HTML and learning-card JSO
   assert.equal(projectedLearning.contentLength, projectedLearning.contextContent.length);
   assert.deepEqual(JSON.parse(projectedLearning.contextContent), {
     cards: [
-      { back: "完整答案", front: "完整问题", type: "basic" },
+      { back: "完整答案", front: longLearningFront, type: "basic" },
       { cloze: "这是 {{c1::完整}} 的挖空内容", type: "cloze" },
     ],
   }, "complete learning-card context strips metadata into the exact edit shape");
+  assert.match(projectedLearning.text, new RegExp(longLearningFront + " / 完整答案"));
+  assert.ok(projectedLearning.text.length > 800,
+    "ordinary learning-card faces are not cut by the obsolete 800-character preview limit");
   const htmlFirst = clone(await runtime.pageCardSource({ page: 7, id: htmlId }));
   const htmlSecond = clone(await runtime.pageCardSource({ page: 7, id: htmlId }));
   assert.equal(htmlFirst.contract, "reader-local-page-card-source/1");
@@ -3370,6 +3384,180 @@ test("direct page-card edit/delete commit before UI and targeted undo/redo resto
     "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
   )).json();
   assert.equal(listed.notes.length, 0);
+});
+
+test("stable-id page-card writes rebase across unrelated list revisions but numbers and changed targets fail closed", async () => {
+  const result = await harness();
+  result.context.DOMPurify = {
+    removeAllHooks() {},
+    sanitize(value) { return String(value); },
+  };
+  result.context.DOMParser = class DOMParser {
+    parseFromString(value) {
+      return { body: { textContent: String(value).replace(/<[^>]+>/g, " ") } };
+    }
+  };
+  const ids = [];
+  for (const [index, text] of ["甲", "乙", "丙"].entries()) {
+    const response = await result.context.fetch("/pdf/api/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        file: DEFAULT_LOCAL_FILE,
+        id: `placement_rebase_${index + 1}`,
+        anchor: { kind: "pdf", page: 7, x: 0.2 + index * 0.1, y: 0.4 },
+        html: {
+          cid: `rebase_${index + 1}`,
+          label: text,
+          content: `${text}旧正文`,
+          bind: {
+            kind: "page-chars", page: 7,
+            from: index * 2, to: index * 2 + 1, text,
+          },
+        },
+      }),
+    });
+    assert.equal(response.status, 200);
+    ids.push((await response.json()).note.id);
+  }
+
+  const runtime = result.context.BWReaderRuntime.nativeLocalRuntime;
+  const initial = clone(await runtime.pageContextCards({ page: 7 }));
+  assert.equal(initial.revision, 3);
+  const notesAtRevisionThree = (await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json()).notes;
+  let revision = initial.revision;
+  const rows = initial.cards.map((card) => ({
+    id: card.id,
+    kind: card.kind,
+    label: card.label,
+    text: card.text,
+    bind: clone(card.bind),
+  }));
+  result.context.RC = {
+    computerVoice: {
+      pageCards: () => Promise.resolve(localPageCardProjection(revision, rows)),
+    },
+  };
+  result.context._assistEdit = () => {};
+
+  await result.context._nativeReaderPageCardMutate({
+    operation: "edit",
+    operationId: "pcard_" + "d".repeat(24),
+    expectedId: ids[0],
+    expectedRevision: 3,
+    replacement: { content: "甲新正文" },
+  });
+  revision = 4;
+  rows[0].text = "甲新正文";
+  const notesAtRevisionFour = (await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json()).notes;
+  assert.deepEqual(
+    notesAtRevisionFour.find((note) => note.id === ids[1]),
+    notesAtRevisionThree.find((note) => note.id === ids[1]),
+    "editing another card leaves the target's authoritative before snapshot exact",
+  );
+
+  await assert.rejects(
+    result.context._nativeReaderPageCardMutate({
+      operation: "edit",
+      operationId: "pcard_" + "e".repeat(24),
+      number: 2,
+      expectedId: ids[1],
+      expectedRevision: 3,
+      replacement: { content: "乙不应写入" },
+    }),
+    (error) => error.code === "BW_NATIVE_PDF_ASSISTANT_CONFLICT",
+    "a visible number is list-owned and never rebases",
+  );
+
+  let rebasedEdit;
+  try {
+    rebasedEdit = await result.context._nativeReaderPageCardMutate({
+      operation: "edit",
+      operationId: "pcard_" + "f".repeat(24),
+      expectedId: ids[1],
+      expectedRevision: 3,
+      replacement: { content: "乙新正文" },
+    });
+  } catch (error) {
+    assert.fail(`unchanged stable-id edit did not rebase: ${error?.message}`);
+  }
+  assert.equal(rebasedEdit.ok, true);
+  revision = 5;
+  rows[1].text = "乙新正文";
+
+  const numberedOperationId = "pcard_" + "1".repeat(24);
+  const numberedRequest = {
+    operation: "edit",
+    operationId: numberedOperationId,
+    number: 1,
+    expectedId: ids[0],
+    expectedRevision: 5,
+    replacement: { content: "甲编号正文" },
+  };
+  assert.equal((await result.context._nativeReaderPageCardMutate(numberedRequest)).ok, true);
+  revision = 6;
+  rows[0].text = "甲编号正文";
+  assert.equal(
+    (await result.context._nativeReaderPageCardMutate(numberedRequest)).replayed,
+    true,
+    "an exact numbered request replays its existing receipt",
+  );
+  await assert.rejects(
+    result.context._nativeReaderPageCardMutate({ ...numberedRequest, number: 2 }),
+    (error) => error.code === "BW_NATIVE_PDF_ASSISTANT_CONFLICT",
+    "reusing an operationId with a different visible number conflicts",
+  );
+  const numberOmitted = { ...numberedRequest };
+  delete numberOmitted.number;
+  await assert.rejects(
+    result.context._nativeReaderPageCardMutate(numberOmitted),
+    (error) => error.code === "BW_NATIVE_PDF_ASSISTANT_CONFLICT",
+    "reusing an operationId after changing number presence conflicts",
+  );
+
+  await assert.rejects(
+    result.context._nativeReaderPageCardMutate({
+      operation: "edit",
+      operationId: "pcard_" + "0".repeat(24),
+      expectedId: ids[1],
+      expectedRevision: 3,
+      replacement: { content: "覆盖新正文" },
+    }),
+    (error) => error.code === "BW_NATIVE_PDF_ASSISTANT_CONFLICT",
+    "the old exact target snapshot no longer matches after a real target edit",
+  );
+
+  const deleteId = "pcard_" + "9".repeat(24);
+  let rebasedDelete;
+  try {
+    rebasedDelete = await result.context._nativeReaderPageCardMutate({
+      operation: "delete",
+      operationId: deleteId,
+      expectedId: ids[2],
+      expectedRevision: 3,
+    });
+  } catch (error) {
+    assert.fail(`unchanged stable-id delete did not rebase: ${error?.message}`);
+  }
+  assert.equal(rebasedDelete.ok, true);
+  const replay = await result.context._nativeReaderPageCardMutate({
+    operation: "delete",
+    operationId: deleteId,
+    expectedId: ids[2],
+    expectedRevision: 3,
+  });
+  assert.equal(replay.replayed, true, "rebasing preserves operationId replay semantics");
+
+  const listed = await (await result.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.deepEqual(listed.notes.map((note) => note.html.content), [
+    "甲编号正文", "乙新正文",
+  ]);
 });
 
 test("stable ID edits and deletes a free card while visible number remains anchored-only", async () => {
@@ -4842,8 +5030,10 @@ test("imported Pi page text is consumed without starting Apple OCR", async () =>
         pageWidth: 720,
         pageHeight: 960,
         chars: [
-          { c: "読", x0: 30, y0: 40, x1: 45, y1: 60, w: 90, bk: 7, sp: false },
-          { c: "書", x0: 45, y0: 40, x1: 60, y1: 60, w: 90, bk: 7, sp: false },
+          { c: "読", x0: 30, y0: 40, x1: 45, y1: 60, w: 90, bk: 7,
+            line: 3, vertical: true, sp: false },
+          { c: "書", x0: 45, y0: 40, x1: 60, y1: 60, w: 90, bk: 7,
+            line: 3, vertical: true, sp: false },
         ],
         furigana: [
           { x0: 30, y0: 40, x1: 60, y1: 60, rt: "どくしょ", wd: "読書" },
@@ -4865,6 +5055,11 @@ test("imported Pi page text is consumed without starting Apple OCR", async () =>
   assert.equal(payload.source, "pi");
   assert.equal(payload.state, "ready");
   assert.equal(payload.chars.map((item) => item.c).join(""), "読書");
+  assert.deepEqual(
+    payload.chars.map((item) => [item.line, item.vertical]),
+    [[3, true], [3, true]],
+    "native page-text normalization must preserve authoritative manga line direction",
+  );
   assert.equal(payload.furigana[0].rt, "どくしょ");
   assert.equal(payload.word_segmentation, "ready");
   assert.equal(payload.character_geometry, "exact");

@@ -169,8 +169,12 @@ class DirectResultBottomTest(unittest.TestCase):
         ).read_text("utf-8")
         self.assertIn("assistant-history", source)
         self.assertIn("function onHistoryEvent(ev)", source)
-        self.assertIn("RC.turnCard.renderTurn('live' + tid, hit.parts)", source)
-        self.assertIn("RC.turnCard.renderTurn(_rtid, m.parts)", source)
+        self.assertIn("_requestHistoryReload({ reason: 'assistant-history'", source)
+        self.assertIn(
+            "_historyReplayOne(m, mode, state, stage, historyScope",
+            source,
+        )
+        self.assertIn("RC.turnCard.renderTurn(\n        _rtid, m.parts, target", source)
 
 
 class CrossMachineDirectTransportTest(unittest.TestCase):

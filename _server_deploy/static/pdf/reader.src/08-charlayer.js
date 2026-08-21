@@ -136,6 +136,9 @@ function _mapCharBoxes(chars, scale, source, revision, characterGeometry) {
     c: ch.c, _oi,
     w: (ch.w == null ? -1 : ch.w),
     bk: (ch.bk == null ? -1 : ch.bk),
+    line: ch.line != null && Number.isSafeInteger(Number(ch.line)) && Number(ch.line) >= 0
+      ? Number(ch.line) : null,
+    vertical: ch.vertical === true ? true : (ch.vertical === false ? false : null),
     _selectionBlockFilter: useBlockFilter,
     left: ch.x0 * scale, top: ch.y0 * scale,
     width: (ch.x1 - ch.x0) * scale, height: (ch.y1 - ch.y0) * scale,
@@ -151,6 +154,66 @@ function _mapCharBoxes(chars, scale, source, revision, characterGeometry) {
     if (Math.abs(a.left - b.left) < ref * 0.3) return a._oi - b._oi;
     return a.left - b.left;
   });
+
+  // Manga OCR can place several vertical columns in one block.  The legacy
+  // baseline sort above deliberately interleaves them (right-1, middle-1,
+  // left-1, right-2...), which makes an exact drag inside one column span the
+  // other columns too.  Preserve the legacy positions relative to other
+  // blocks, but reorder the characters occupying this block's slots by the
+  // OCR line identity.  Old data without a trustworthy line/direction keeps
+  // the historical horizontal order.
+  const lineStats = new Map();
+  for (const c of cb) {
+    if (c.bk < 0 || c.line == null) continue;
+    const key = c.bk + ':' + c.line;
+    let stat = lineStats.get(key);
+    if (!stat) {
+      stat = {bk: c.bk, line: c.line, left: c.left, top: c.top,
+        right: c.left + c.width, bottom: c.top + c.height,
+        explicitVertical: false, explicitHorizontal: false};
+      lineStats.set(key, stat);
+    } else {
+      stat.left = Math.min(stat.left, c.left); stat.top = Math.min(stat.top, c.top);
+      stat.right = Math.max(stat.right, c.left + c.width);
+      stat.bottom = Math.max(stat.bottom, c.top + c.height);
+    }
+    if (c.vertical === true) stat.explicitVertical = true;
+    if (c.vertical === false) stat.explicitHorizontal = true;
+  }
+  const blockDirections = new Map();
+  for (const stat of lineStats.values()) {
+    const width = Math.max(1, stat.right - stat.left);
+    const height = Math.max(1, stat.bottom - stat.top);
+    const axis = stat.explicitVertical && !stat.explicitHorizontal
+      ? 'vertical'
+      : (stat.explicitHorizontal && !stat.explicitVertical
+        ? 'horizontal'
+        : (height > width * 1.15 ? 'vertical'
+          : (width > height * 1.15 ? 'horizontal' : 'ambiguous')));
+    const votes = blockDirections.get(stat.bk) || {vertical: 0, horizontal: 0};
+    if (axis === 'vertical') votes.vertical++;
+    if (axis === 'horizontal') votes.horizontal++;
+    blockDirections.set(stat.bk, votes);
+  }
+  for (const [bk, votes] of blockDirections) {
+    if (!(votes.vertical > 0 && votes.horizontal === 0)) continue;
+    const positions = [];
+    const members = [];
+    for (let i = 0; i < cb.length; i++) {
+      if (cb[i].bk !== bk) continue;
+      positions.push(i); members.push(cb[i]);
+    }
+    members.sort((a, b) => {
+      const aLine = a.line == null ? Number.MAX_SAFE_INTEGER : a.line;
+      const bLine = b.line == null ? Number.MAX_SAFE_INTEGER : b.line;
+      if (aLine !== bLine) return aLine - bLine;
+      if (Math.abs(a.top - b.top) > Math.max(a.height, b.height) * 0.25) {
+        return a.top - b.top;
+      }
+      return a._oi - b._oi;
+    });
+    positions.forEach((position, i) => { cb[position] = members[i]; });
+  }
   return cb;
 }
 

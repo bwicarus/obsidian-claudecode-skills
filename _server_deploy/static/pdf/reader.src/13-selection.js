@@ -37,10 +37,32 @@ function _syncCharBoxScale(pw) {
   }
   pw.__cbSX = sx; pw.__cbSY = sy;
 }
-function _findCharAt(charBoxes, x, y) {
+function _selectionEndpointFilter(charBoxes, anchorIdx) {
+  if (!Number.isInteger(anchorIdx) || anchorIdx < 0 || anchorIdx >= charBoxes.length) {
+    return () => true;
+  }
+  const anchor = charBoxes[anchorIdx];
+  if (!anchor || anchor._selectionBlockFilter === false) return () => true;
+  const anchorBlock = _charBlockId(anchor);
+  if (anchorBlock < 0) return () => true;
+  const blocks = _charBlockGeometry(charBoxes, 0, charBoxes.length - 1);
+  const allowed = _charSpanBlocks(blocks, anchorBlock, anchorBlock);
+  return (c) => allowed.has(_charBlockId(c));
+}
+
+function _findCharAt(charBoxes, x, y, anchorIdx) {
+  // 拖选终点只能落在起点所在的几何连通文字片区。旧实现的同行/Manhattan
+  // 兜底没有距离上限：正文行尾空白处松手时，会把远处漫画气泡当作 endpoint；
+  // endpoint 又按设计总被块过滤保留，于是蓝色选区同时罩住正文和气泡。
+  const accepts = _selectionEndpointFilter(charBoxes, anchorIdx);
+  const boundedFallback = Number.isInteger(anchorIdx) && anchorIdx >= 0 &&
+    anchorIdx < charBoxes.length &&
+    charBoxes[anchorIdx] && charBoxes[anchorIdx]._selectionBlockFilter !== false;
   // 先尝试落在某 char bbox 内（优先 non-space）
   for (let i = 0; i < charBoxes.length; i++) {
     const c = charBoxes[i];
+    // 精确落在字符框内代表用户真的拖进了那个文字段；即使它与起点块不连通
+    // 也必须允许。起点连通分量只约束下面空白处的吸附回退。
     if (c.sp) continue;
     if (x >= c.left && x <= c.left + c.width && y >= c.top && y <= c.top + c.height) {
       return i;
@@ -50,7 +72,7 @@ function _findCharAt(charBoxes, x, y) {
   // 同行内 X 距离最近的 non-space
   for (let i = 0; i < charBoxes.length; i++) {
     const c = charBoxes[i];
-    if (c.sp) continue;
+    if (c.sp || !accepts(c)) continue;
     const yIn = (y >= c.top - 2 && y <= c.top + c.height + 2);
     if (yIn) {
       const dx = (x < c.left) ? (c.left - x) : (x > c.left + c.width) ? (x - c.left - c.width) : 0;
@@ -58,21 +80,76 @@ function _findCharAt(charBoxes, x, y) {
     }
   }
   if (best >= 0) return best;
+  // 竖排同列内 Y 距离最近的 non-space。横排有上面的同行兜底；没有这一段时
+  // 手指落在竖列字符间隙会直接进入全页 Manhattan，容易跳到旁边气泡。
+  for (let i = 0; i < charBoxes.length; i++) {
+    const c = charBoxes[i];
+    if (c.sp || !accepts(c)) continue;
+    const xIn = (x >= c.left - 2 && x <= c.left + c.width + 2);
+    if (xIn) {
+      const dy = (y < c.top) ? (c.top - y)
+        : (y > c.top + c.height) ? (y - c.top - c.height) : 0;
+      if (dy < bestD) { bestD = dy; best = i; }
+    }
+  }
+  if (best >= 0) return best;
   // 整体 Manhattan 距离兜底
   for (let i = 0; i < charBoxes.length; i++) {
     const c = charBoxes[i];
-    if (c.sp) continue;
+    if (c.sp || !accepts(c)) continue;
     const cx = c.left + c.width / 2, cy = c.top + c.height / 2;
     const d = Math.abs(x - cx) + Math.abs(y - cy) * 3;
     if (d < bestD) { bestD = d; best = i; }
   }
-  return best;
+  if (!boundedFallback || best < 0) return best;
+  const chosen = charBoxes[best];
+  const ref = Math.max(1, chosen.width || 0, chosen.height || 0);
+  return bestD <= ref * 1.5 ? best : -1;
 }
 
 function _charBlockId(c) {
   return (c && c.bk != null && c.bk >= 0)
     ? c.bk
     : ((!c || c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
+}
+
+function _charLineKey(c) {
+  if (!c || c.line == null) return '';
+  const line = Number(c.line);
+  if (!Number.isSafeInteger(line) || line < 0) return '';
+  return _charBlockId(c) + ':' + line;
+}
+
+function _charLineGeometry(chars, sIdx, eIdx) {
+  const lines = new Map();
+  for (let i = sIdx; i <= eIdx; i++) {
+    const c = chars[i], key = _charLineKey(c);
+    if (!key) continue;
+    const left = Number(c.left), top = Number(c.top);
+    const right = left + Number(c.width), bottom = top + Number(c.height);
+    if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) continue;
+    let line = lines.get(key);
+    if (!line) {
+      line = {left, top, right, bottom, explicitVertical: false, explicitHorizontal: false};
+      lines.set(key, line);
+    } else {
+      line.left = Math.min(line.left, left); line.top = Math.min(line.top, top);
+      line.right = Math.max(line.right, right); line.bottom = Math.max(line.bottom, bottom);
+    }
+    if (c.vertical === true) line.explicitVertical = true;
+    if (c.vertical === false) line.explicitHorizontal = true;
+  }
+  for (const line of lines.values()) {
+    const width = Math.max(1, line.right - line.left);
+    const height = Math.max(1, line.bottom - line.top);
+    line.axis = line.explicitVertical && !line.explicitHorizontal
+      ? 'vertical'
+      : (line.explicitHorizontal && !line.explicitVertical
+        ? 'horizontal'
+        : (height > width * 1.15 ? 'vertical'
+          : (width > height * 1.15 ? 'horizontal' : 'ambiguous')));
+  }
+  return lines;
 }
 
 function _charBlockGeometry(chars, sIdx, eIdx) {
@@ -82,6 +159,7 @@ function _charBlockGeometry(chars, sIdx, eIdx) {
     if (id >= 0) relevant.add(id);
   }
   const blocks = new Map();
+  const lines = _charLineGeometry(chars, 0, chars.length - 1);
   for (let i = 0; i < chars.length; i++) {
     const c = chars[i], id = _charBlockId(c);
     if (id < 0 || !relevant.has(id) || !c) continue;
@@ -98,6 +176,9 @@ function _charBlockGeometry(chars, sIdx, eIdx) {
         bottom: top + height,
         charWidths: [],
         charHeights: [],
+        verticalVotes: 0,
+        horizontalVotes: 0,
+        hasLineMetadata: false,
       };
       blocks.set(id, block);
     } else {
@@ -108,6 +189,12 @@ function _charBlockGeometry(chars, sIdx, eIdx) {
     }
     if (!c.sp && width > 0) block.charWidths.push(width);
     if (!c.sp && height > 0) block.charHeights.push(height);
+    const line = lines.get(_charLineKey(c));
+    if (line) block.hasLineMetadata = true;
+    if (line && line.axis === 'vertical') block.verticalVotes++;
+    if (line && line.axis === 'horizontal') block.horizontalVotes++;
+    if (!line && c.vertical === true) block.verticalVotes++;
+    if (!line && c.vertical === false) block.horizontalVotes++;
   }
   const median = (values, fallback) => {
     if (!values.length) return fallback;
@@ -119,9 +206,23 @@ function _charBlockGeometry(chars, sIdx, eIdx) {
     block.height = Math.max(0, block.bottom - block.top);
     block.charWidth = Math.max(1, median(block.charWidths, block.width || 1));
     block.charHeight = Math.max(1, median(block.charHeights, block.height || 1));
-    block.axis = block.width > block.height * 1.15
+    const geometryAxis = block.width > block.height * 1.15
       ? 'horizontal'
       : (block.height > block.width * 1.15 ? 'vertical' : 'ambiguous');
+    // Old OCR/Apple Vision sidecars have neither `line` nor `vertical`.  Keep
+    // their narrow tall blocks as vertical columns; forcing every metadata-less
+    // block to horizontal disconnects the middle column of a multi-column drag.
+    // A dense multi-row block is inherently ambiguous without metadata, so it
+    // keeps the historical horizontal default instead of turning an entire
+    // paragraph/table cell into one vertical column.
+    const legacyAxis = geometryAxis === 'vertical' &&
+      block.width > block.charWidth * 2.2 && block.charWidths.length > 3
+      ? 'horizontal' : geometryAxis;
+    block.axis = block.verticalVotes > 0 && block.horizontalVotes === 0
+      ? 'vertical'
+      : (block.horizontalVotes > 0 && block.verticalVotes === 0
+        ? 'horizontal'
+        : (block.hasLineMetadata ? geometryAxis : legacyAxis));
   }
   return blocks;
 }
@@ -226,6 +327,109 @@ function _charRangeBlockFilter(chars, sIdx, eIdx) {
   // 只有孤立的才剔除。这样同段多行照常全选,旁边的气泡仍然进不来。
   const allowed = _charSpanBlocks(blocks, sb, eb);
   return (c) => allowed.has(_charBlockId(c)) || (_charBlockId(c) < 0 && !!c.sp);
+}
+
+// 把字符区间投影成视觉矩形。实时蓝选区与保存后的持久高亮共用这一份：
+// 横排按 Y 重叠与 X 间距合并，竖排按 X 重叠与 Y 间距合并。过去两条路径
+// 各抄一份横排算法，结果竖排漫画必然逐字显示成一摞小方块。
+function _charRangeToVisualRects(chars, sIdx, eIdx, coordinateSpace) {
+  if (sIdx > eIdx) { const t = sIdx; sIdx = eIdx; eIdx = t; }
+  if (sIdx < 0 || eIdx >= chars.length) return [];
+  const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
+  const blocks = _charBlockGeometry(chars, sIdx, eIdx);
+  const lines = _charLineGeometry(chars, sIdx, eIdx);
+  const pointSpace = coordinateSpace === 'point';
+  const rectOf = (c) => {
+    const x0 = Number(pointSpace ? c._x0 : c.left);
+    const y0 = Number(pointSpace ? c._y0 : c.top);
+    const x1 = Number(pointSpace ? c._x1 : (c.left + c.width));
+    const y1 = Number(pointSpace ? c._y1 : (c.top + c.height));
+    return [x0, y0, x1, y1].every(Number.isFinite) && x1 > x0 && y1 > y0
+      ? {x0, y0, x1, y1} : null;
+  };
+  const overlap = (a0, a1, b0, b1) => {
+    const amount = Math.max(0, Math.min(a1, b1) - Math.max(a0, b0));
+    return amount / Math.max(1, Math.min(a1 - a0, b1 - b0));
+  };
+  const gap = (a0, a1, b0, b1) =>
+    Math.max(0, Math.max(a0, b0) - Math.min(a1, b1));
+  const entries = [];
+  const lastRectByBlock = new Map();
+  for (let i = sIdx; i <= eIdx; i++) {
+    const c = chars[i];
+    if (!_inBlk(c)) continue;
+    const blockId = _charBlockId(c);
+    const block = blocks.get(blockId);
+    const lineKey = _charLineKey(c);
+    const line = lines.get(lineKey);
+    // Existing manga sidecars already carry a stable line number; new ones also
+    // carry the OCR engine's authoritative direction. Prefer the per-line axis
+    // because one square block may contain several vertical columns under one bk.
+    const axis = line && line.axis !== 'ambiguous'
+      ? line.axis
+      : (block && block.axis === 'vertical' ? 'vertical' : 'horizontal');
+    let rect = rectOf(c);
+    const continuityKey = lineKey || ('block:' + blockId);
+    const previousRect = lastRectByBlock.get(continuityKey) || null;
+    if ((!rect || (c.sp && rect.x1 - rect.x0 < 0.5)) && c.sp && previousRect) {
+      if (axis === 'vertical') {
+        const h = Math.max(1, previousRect.x1 - previousRect.x0) * 0.3;
+        rect = {x0: previousRect.x0, y0: previousRect.y1,
+          x1: previousRect.x1, y1: previousRect.y1 + h};
+      } else {
+        const w = Math.max(1, previousRect.y1 - previousRect.y0) * 0.3;
+        rect = {x0: previousRect.x1, y0: previousRect.y0,
+          x1: previousRect.x1 + w, y1: previousRect.y1};
+      }
+    }
+    if (!rect) continue;
+    entries.push({x0: rect.x0, y0: rect.y0, x1: rect.x1, y1: rect.y1,
+      axis, lineKey, first: i});
+    lastRectByBlock.set(continuityKey, rect);
+  }
+
+  // Do not depend on mapped array adjacency. _mapCharBoxes deliberately sorts
+  // by horizontal baseline, so two vertical manga columns arrive interleaved
+  // (left-1,right-1,left-2,right-2...).  Merge each entry into the compatible
+  // geometric row/column already seen, then restore the first-selected order.
+  const groups = [];
+  const canMerge = (group, item) => {
+    if (group.axis !== item.axis) return false;
+    if (group.lineKey && item.lineKey && group.lineKey !== item.lineKey) return false;
+    if (item.axis === 'vertical') {
+      return overlap(group.x0, group.x1, item.x0, item.x1) >= 0.35 &&
+        gap(group.y0, group.y1, item.y0, item.y1) <=
+          Math.max(2, Math.max(group.x1 - group.x0, item.x1 - item.x0) * 0.6);
+    }
+    return overlap(group.y0, group.y1, item.y0, item.y1) >= 0.35 &&
+      gap(group.x0, group.x1, item.x0, item.x1) <=
+        Math.max(2, Math.max(group.y1 - group.y0, item.y1 - item.y0) * 0.6);
+  };
+  for (const item of entries) {
+    let chosen = null, chosenScore = -Infinity;
+    for (const group of groups) {
+      if (!canMerge(group, item)) continue;
+      const transverse = item.axis === 'vertical'
+        ? overlap(group.x0, group.x1, item.x0, item.x1)
+        : overlap(group.y0, group.y1, item.y0, item.y1);
+      const primaryGap = item.axis === 'vertical'
+        ? gap(group.y0, group.y1, item.y0, item.y1)
+        : gap(group.x0, group.x1, item.x0, item.x1);
+      const score = transverse * 1000 - primaryGap;
+      if (score > chosenScore) { chosen = group; chosenScore = score; }
+    }
+    if (!chosen) {
+      groups.push({...item});
+      continue;
+    }
+    chosen.x0 = Math.min(chosen.x0, item.x0);
+    chosen.y0 = Math.min(chosen.y0, item.y0);
+    chosen.x1 = Math.max(chosen.x1, item.x1);
+    chosen.y1 = Math.max(chosen.y1, item.y1);
+    chosen.first = Math.min(chosen.first, item.first);
+  }
+  groups.sort((a, b) => a.first - b.first);
+  return groups.map((group) => [group.x0, group.y0, group.x1, group.y1]);
 }
 
 // chars[s..e] 拼成文本（含 X gap 智能空格 + 跨行换行；跟 _selByCharRange 同逻辑）
@@ -374,46 +578,17 @@ function _selByCharRange(pw, sIdx, eIdx) {
   } catch (_) {}
   _charSel = {pw, startIdx: sIdx, endIdx: eIdx, dragging: _charSel?.dragging || false};
   try { window.__lastSelMeta = { page: (typeof _selPageNum === 'function' ? _selPageNum() : (typeof currentPage !== 'undefined' ? currentPage : 0)), t: Date.now() }; } catch (_) {}   // char 层选中也记 meta(页+时间);否则 __voiceContext 新鲜度校验(meta.page===curP && <10min)失败 → 助手拿到空选中
-  // 高亮：合并同行 chars 成连续矩形（空格按行高估算占位，让单词间高亮连贯）
+  // 高亮：横排按行、竖排按列合并；与保存后的高亮共用同一几何函数。
   const ov = pw.querySelector('.sel-overlay');
   if (ov) {
     ov.innerHTML = '';
-    let cur = null;
-    for (let i = sIdx; i <= eIdx; i++) {
-      const c = chars[i];
-      if (!_inBlk(c)) continue;   // 跨块过滤：别块字符不画选中高亮
-      // 空格如果 bbox 缺失，用前一字符的位置 + 估算 width
-      let cleft = c.left, ctop = c.top, cw = c.width, ch = c.height;
-      if (c.sp && (!cw || cw < 0.5) && i > sIdx) {
-        const prev = chars[i - 1];
-        cleft = prev.left + prev.width;
-        ctop = prev.top;
-        ch = prev.height;
-        cw = ch * 0.3;   // 估算空格宽度
-      }
-      if (cur && Math.abs(ctop - cur.top) <= ch * 0.4 && cleft <= cur.left + cur.width + ch * 0.5) {
-        cur.width = Math.max(cur.left + cur.width, cleft + cw) - cur.left;
-        cur.height = Math.max(cur.height, ch);
-      } else {
-        if (cur) {
-          const div = document.createElement('div');
-          div.className = 'hl';
-          div.style.left = cur.left + 'px';
-          div.style.top = cur.top + 'px';
-          div.style.width = cur.width + 'px';
-          div.style.height = cur.height + 'px';
-          ov.appendChild(div);
-        }
-        cur = {left: cleft, top: ctop, width: cw, height: ch};
-      }
-    }
-    if (cur) {
+    for (const rect of _charRangeToVisualRects(chars, sIdx, eIdx, 'css')) {
       const div = document.createElement('div');
       div.className = 'hl';
-      div.style.left = cur.left + 'px';
-      div.style.top = cur.top + 'px';
-      div.style.width = cur.width + 'px';
-      div.style.height = cur.height + 'px';
+      div.style.left = rect[0] + 'px';
+      div.style.top = rect[1] + 'px';
+      div.style.width = (rect[2] - rect[0]) + 'px';
+      div.style.height = (rect[3] - rect[1]) + 'px';
       ov.appendChild(div);
     }
   }
@@ -775,7 +950,7 @@ function _bindCharLayer(cl, pw) {
     }
     _dragMoved = true;
     if (ev && ev.cancelable) ev.preventDefault();
-    const idx = _findCharAt(pw.__charBoxes, x, y);
+    const idx = _findCharAt(pw.__charBoxes, x, y, _dragStartCharIdx);
     if (idx < 0) return;
     _selByCharRange(pw, _dragStartCharIdx, idx);
   };
@@ -788,7 +963,7 @@ function _bindCharLayer(cl, pw) {
     const startIdx = _dragStartCharIdx;
     _dragStartCharIdx = null;
     if (_dragMoved) {
-      const idx = _findCharAt(pw.__charBoxes, x, y);
+      const idx = _findCharAt(pw.__charBoxes, x, y, startIdx);
       if (idx >= 0) _selByCharRange(pw, startIdx, idx);
       try { window.__setFocusSel && window.__setFocusSel((lastSelText || '').trim(), 'text'); } catch (_) {}   // 拖选段落 → 右侧焦点显示
       // 选中=普通选中(点别处照常消失)。持久呼吸高亮只在点「词组」按钮查询期间出现(showPhrasePopover)

@@ -208,6 +208,16 @@ if (window.__bwPwaProviderOnly) return;
       : md(side === 'back' ? card.back : card.front);
     return safeHtml(html);
   }
+  function draftFieldHtml(st, card, label, field, side) {
+    var raw = field === 'cloze' ? card.cloze : card[field];
+    return '<div class="fc-lbl">' + esc(label) + '</div>' +
+      '<div class="fc-draft-preview" data-preview="' + esc(field) + '">' +
+        faceHtml(st, card, side) +
+      '</div>' +
+      '<details class="fc-draft-editor"><summary>编辑源文</summary>' +
+        '<textarea class="fc-ed" data-f="' + esc(field) + '">' + esc(raw) + '</textarea>' +
+      '</details>';
+  }
   var _EASE = [['1', '再来', 'e1'], ['2', '困难', 'e2'], ['3', '良好', 'e3'], ['4', '简单', 'e4']];
   var _groups = {};   // gid → {cards:共享卡对象数组, conts:[渲染实例容器]}:同 gid 多宿主(侧栏/浮层)状态联动
   function injectCss() {
@@ -254,6 +264,10 @@ if (window.__bwPwaProviderOnly) return;
       '.fc-del{border-color:#7f1d1d!important;color:#fca5a5!important;flex:0 0 42%!important}' +
       '.fc-add{border-color:#14532d!important;color:#86efac!important}' +
       '.fc-export{border-color:#1e3a8a!important;color:#93c5fd!important}' +
+      '.fc-draft-preview{min-height:44px;margin-bottom:7px;padding:10px 12px;border:1px solid rgba(125,211,252,.18);border-radius:8px;background:rgba(10,17,32,.38);font-size:14px;line-height:1.65;overflow-wrap:anywhere}' +
+      '.fc-draft-preview ruby{ruby-align:center}.fc-draft-preview rt{font-size:.56em;color:#a8c7ff}' +
+      '.fc-draft-editor{margin:0 0 9px}.fc-draft-editor summary{width:max-content;max-width:100%;padding:3px 2px;color:#8a9bb4;font-size:12px;cursor:pointer;list-style-position:inside;-webkit-tap-highlight-color:transparent}' +
+      '.fc-draft-editor[open] summary{margin-bottom:5px;color:#bae6fd}' +
       '.fc-face{cursor:pointer;min-height:44px}.fc-face .fc-hint{font-size:12px;color:var(--rc-text-muted,#8a9bb4);margin-top:10px}' +
       '.fc-back{border-top:1px solid rgba(255,255,255,.10);margin-top:12px;padding-top:12px}' +
       '.fc-eases{display:flex;gap:6px;margin-top:12px}' +
@@ -295,8 +309,9 @@ if (window.__bwPwaProviderOnly) return;
     }
     if (c._st === 'draft') {
       var b = c.type === 'cloze'
-        ? '<div class="fc-lbl">填空(cloze,答案用 {{c1::…}} 包住)</div><textarea class="fc-ed" data-f="cloze">' + esc(c.cloze) + '</textarea>'
-        : '<div class="fc-lbl">正面</div><textarea class="fc-ed" data-f="front">' + esc(c.front) + '</textarea><div class="fc-lbl">背面</div><textarea class="fc-ed" data-f="back">' + esc(c.back) + '</textarea>';
+        ? draftFieldHtml(st, c, '填空（答案用 {{c1::…}} 包住）', 'cloze', 'back')
+        : draftFieldHtml(st, c, '正面', 'front', 'front') +
+          draftFieldHtml(st, c, '背面', 'back', 'back');
       b += '<div class="fc-btns"><button class="fc-del" data-fc="del">🗑 删除</button><button class="fc-add" data-fc="add">✓ 保存到 Reader 卡库</button></div>';
       return '<div class="fc-card">' + b + '</div>';
     }
@@ -400,7 +415,7 @@ if (window.__bwPwaProviderOnly) return;
     slide.addEventListener('pointerdown', function (e) {
       var c = st.cards[i];
       if (!c || c._st !== 'draft' || c._addPending) return;   // 只在草稿态
-      if (e.target && e.target.closest && e.target.closest('textarea,button')) return;
+      if (e.target && e.target.closest && e.target.closest('textarea,button,summary')) return;
       sx = e.clientX; sy = e.clientY; dy = 0; mode = ''; id = e.pointerId;
     });
     slide.addEventListener('pointermove', function (e) {
@@ -461,6 +476,14 @@ if (window.__bwPwaProviderOnly) return;
     });
     slide.querySelectorAll('.fc-ed').forEach(function (ta) { ta.addEventListener('input', function () {
       st.cards[i][ta.dataset.f] = ta.value;
+      var preview = slide.querySelector('.fc-draft-preview[data-preview="' + ta.dataset.f + '"]');
+      if (preview) {
+        var side = ta.dataset.f === 'back' || ta.dataset.f === 'cloze' ? 'back' : 'front';
+        // faceHtml is the same markdown/ruby projection used after save and is
+        // already sanitized by RC.safeHtml. Never assign textarea.value here.
+        preview.innerHTML = faceHtml(st, st.cards[i], side);
+        try { RC.typeset && RC.typeset(preview); } catch (_) {}
+      }
       broadcast(st.gid, i, container);
       notifyGroup(st.gid, 'draft-edit', i);
       // 草稿正文跟状态一起按稳定 batch index 写入本地权威仓。每次 input 都立刻

@@ -1486,7 +1486,10 @@ class ReaderBookOcrService:
             raise ReaderBookOcrError(
                 "invalid-worker-page", "invalid PC OCR tokenization state", status=400
             )
-        char_fields = {"c", "x0", "y0", "x1", "y1", "w", "bk", "b", "sp", "line", "conf"}
+        char_fields = {
+            "c", "x0", "y0", "x1", "y1", "w", "bk", "b", "sp", "line", "conf",
+            "vertical",
+        }
         for char in chars:
             if (
                 not isinstance(char, dict)
@@ -1516,6 +1519,10 @@ class ReaderBookOcrService:
                     raise ReaderBookOcrError(
                         "invalid-worker-page", "invalid PC OCR character metadata", status=400
                     )
+            if "vertical" in char and not isinstance(char["vertical"], bool):
+                raise ReaderBookOcrError(
+                    "invalid-worker-page", "invalid PC OCR character direction", status=400
+                )
             if "conf" in char and char["conf"] is not None:
                 try:
                     confidence = float(char["conf"])

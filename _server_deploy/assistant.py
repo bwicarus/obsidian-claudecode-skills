@@ -1228,6 +1228,53 @@ def _convo_load(uid, mode="normal"):
         return []
 
 
+_HISTORY_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,120}$")
+
+
+def _new_history_id() -> str:
+    """Return one opaque identity that remains stable across history windows."""
+    return "h_" + os.urandom(12).hex()
+
+
+def _ensure_history_ids(messages) -> bool:
+    """Assign unique ids to valid legacy rows in-place; return whether changed."""
+    changed = False
+    used = set()
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        history_id = str(message.get("history_id") or "")
+        if not _HISTORY_ID_RE.fullmatch(history_id) or history_id in used:
+            history_id = _new_history_id()
+            while history_id in used:
+                history_id = _new_history_id()
+            message["history_id"] = history_id
+            changed = True
+        used.add(history_id)
+    return changed
+
+
+def _convo_load_for_history(uid, mode="normal"):
+    """Load one scope and atomically persist ids before exposing any window."""
+    with _convo_lock:
+        messages = _convo_load(uid, mode)
+        if not _ensure_history_ids(messages):
+            return messages
+        path = _convo_path(uid, mode)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(path.name + ".tmp")
+        try:
+            temp.write_text(json.dumps(messages, ensure_ascii=False), "utf-8")
+            os.replace(temp, path)
+        except Exception:
+            try:
+                temp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+        return messages
+
+
 def _convo_upsert_turn(
     uid,
     turn_id: str,
@@ -1254,6 +1301,8 @@ def _convo_upsert_turn(
                 break
         if rec is None:
             return False
+        if not _HISTORY_ID_RE.fullmatch(str(rec.get("history_id") or "")):
+            rec["history_id"] = _new_history_id()
         if content:
             rec["content"] = content
         rec["ts"] = int(time.time())
@@ -1347,7 +1396,13 @@ def _convo_drop_media(uid, msgs, mode=None):
 def _convo_append(uid, role, content, meta=None, mode="normal"):
     with _convo_lock:
         msgs = _convo_load(uid, mode)
-        rec = {"role": role, "content": content, "ts": int(time.time())}
+        _ensure_history_ids(msgs)
+        rec = {
+            "history_id": _new_history_id(),
+            "role": role,
+            "content": content,
+            "ts": int(time.time()),
+        }
         if meta:   # 记每轮所在位置(书/页/选中句/用过的图)+ 助手回答的调用轨迹 trace + 搜到的视频,让历史回看也能显示上下文卡片 / 感叹号步骤 / 视频卡
             # ⚠ 白名单:没列进来的 meta 字段会被**静默丢掉**。141 的 parts 忘了加就等于没落库。
             for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos", "undo_cards", "via", "clip", "card", "parts", "turn_id"):   # clip=语音录音;card=87 结构化卡;parts/turn_id=141 轮次容器
@@ -1383,6 +1438,7 @@ def _convo_put_direct_result(
     """
     with _convo_lock:
         msgs = _convo_load(uid, mode)
+        _ensure_history_ids(msgs)
         rec = None
         for item in reversed(msgs):
             if (
@@ -1395,12 +1451,15 @@ def _convo_put_direct_result(
         created = rec is None
         if created:
             rec = {
+                "history_id": _new_history_id(),
                 "role": "assistant",
                 "content": content or "[卡片]",
                 "ts": int(time.time()),
             }
             msgs.append(rec)
         else:
+            if not _HISTORY_ID_RE.fullmatch(str(rec.get("history_id") or "")):
+                rec["history_id"] = _new_history_id()
             # A card-only replay must not erase useful text already stored for
             # the same deterministic turn id.
             if content and (content != "[卡片]" or not rec.get("content")):
@@ -5982,7 +6041,8 @@ TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
     "page_cards_query": ("读当前 PDF 页上的所有卡片（包括锚定卡和手动拖入的自由卡）。"
                          "返回当前序号 number、稳定 placement id、notes revision、锚定词 label、"
-                         "有界正文摘要及 count/returned/truncated/content_truncated。完整源内容必须再调 page_card_read。"
+                         "简洁语义正文及 count/returned/truncated/content_truncated；不返回渲染 HTML、控件或代理地址。"
+                         "只有需要无损保留富媒体或布局时才再调 page_card_read。"
                          "未绑定的历史卡 number=null,unbound=true，不得猜序号。args {page?}",
                          _t_page_cards_query),
     "page_card_read": ("按连续分块读当前 PDF 页上一张卡片的完整源 JSON。"
@@ -5990,9 +6050,10 @@ TOOLS = {
                         "并把首块 revision 作为 expected_revision 原样带回。修订变化就从 offset=0 重读。"
                         "args {number?|id?,page?,offset?,limit?,expected_revision?}",
                         _t_page_card_read),
-    "page_card_edit": ("修改当前 PDF 页一张卡片的内容。当前页面快照的 CARD 标记若已带"
-                        "完整内容、稳定 id 和 revision，可直接把它们作为替换内容、id 与 expected_revision 调用，"
-                        "无需先 page_cards_query/read；只有标记缺失、陈旧或 content_truncated=true 时才补读。"
+    "page_card_edit": ("修改当前 PDF 页一张卡片的内容。当前页面快照的 CARD 标记会带语义正文、"
+                        "稳定 id 和 revision，但刻意不带渲染 HTML、控件、代理地址与布局属性。"
+                        "若用户要求整体替换且可由语义正文直接构造，可立即调用；若要局部修改并保留现有图片、"
+                        "链接或布局，必须先 page_card_read 取得精确源。标记缺失或陈旧时也先补读。"
                         "锚定卡可额外携带 number 作当前序号快捷双重校验。学习卡用 cards 数组完整替换；"
                         "HTML/通用卡用 content 完整替换，contextText 可选传 AI 应读文字。"
                         "args {id,expected_revision,number?,page?,cards?|content?,contextText?}",
@@ -10206,12 +10267,13 @@ def assistant_history():
         )
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
+    messages = _convo_load_for_history(session["user_id"], assistant_mode)
     if request.args.get("compact"):   # ㊲:语音回放用压缩视图(摘要+近几轮原文),侧栏显示仍走全量
         v = _compact_view(session["user_id"], mode=assistant_mode)
         return jsonify({"ok": True, "summary": v["summary"], "messages": v["messages"]})
     return jsonify({
         "ok": True,
-        "messages": _convo_load(session["user_id"], assistant_mode)[-100:],
+        "messages": messages[-100:],
     })
 
 

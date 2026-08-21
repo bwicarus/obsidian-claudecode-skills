@@ -34,7 +34,7 @@ function loadFns(names) {
 }
 
 const FILTER_USERS = [
-  ["_charsRangeToRects", "保存高亮用的矩形"],
+  ["_charRangeToVisualRects", "实时选区与保存高亮共用的矩形"],
   ["_charsRangeToText", "选中文本"],
   ["_buildSentenceFromSel", "翻译/解释取的句子"],
 ];
@@ -49,6 +49,11 @@ test("每条从索引区间还原字符的路径都调共享块过滤，并且�
     assert.match(body, /if \(!_inBlk\(c\)\) continue;/,
       `${name}（${what}）算了过滤却没在循环里应用`);
   }
+});
+
+test("保存高亮委托给实时选区的同一横排/竖排几何投影", () => {
+  const body = fnBody("_charsRangeToRects");
+  assert.match(body, /return _charRangeToVisualRects\(chars, sIdx, eIdx, 'point'\)/);
 });
 
 test("没有人再自己抄一份块过滤（块号 min/max 不是区间）", () => {
@@ -80,10 +85,35 @@ function makeChars() {
 }
 
 const GEOM_FNS = [
-  "_charBlockId", "_charBlockGeometry", "_charBlockGap", "_charBlockOverlapRatio",
+  "_charBlockId", "_charLineKey", "_charLineGeometry", "_charBlockGeometry",
+  "_charBlockGap", "_charBlockOverlapRatio",
   "_charBlocksConnected", "_charConnectedBlockPath", "_charSpanBlocks",
-  "_charRangeBlockFilter", "_charsRangeToRects",
+  "_charRangeBlockFilter", "_charRangeToVisualRects", "_charsRangeToRects",
 ];
+
+test("drag endpoint fallback stays inside the start block's connected component", () => {
+  const ctx = loadFns([
+    "_charBlockId", "_charLineKey", "_charLineGeometry", "_charBlockGeometry",
+    "_charBlockGap", "_charBlockOverlapRatio",
+    "_charBlocksConnected", "_charConnectedBlockPath", "_charSpanBlocks",
+    "_selectionEndpointFilter", "_findCharAt",
+  ]);
+  const chars = [
+    { c: "正", bk: 5, sp: false, left: 0, top: 50, width: 20, height: 20 },
+    { c: "文", bk: 5, sp: false, left: 20, top: 50, width: 20, height: 20 },
+    { c: "行", bk: 5, sp: false, left: 40, top: 50, width: 20, height: 20 },
+    { c: "末", bk: 5, sp: false, left: 60, top: 50, width: 20, height: 20 },
+    { c: "泡", bk: 9, sp: false, left: 280, top: 50, width: 20, height: 20 },
+    { c: "泡", bk: 9, sp: false, left: 280, top: 70, width: 20, height: 20 },
+  ];
+
+  assert.equal(ctx._findCharAt(chars, 240, 70), 4,
+    "precondition: the historical unbounded fallback prefers the distant bubble");
+  assert.equal(ctx._findCharAt(chars, 240, 70, 0), 3,
+    "a drag that started in the body must snap to the body's last character, not the bubble");
+  assert.equal(ctx._findCharAt(chars, 285, 75, 0), 5,
+    "an exact hit inside a disconnected text block must remain selectable");
+});
 
 test("索引夹在中间的另一个气泡，不会被画进保存的高亮里", () => {
   const ctx = loadFns(GEOM_FNS);

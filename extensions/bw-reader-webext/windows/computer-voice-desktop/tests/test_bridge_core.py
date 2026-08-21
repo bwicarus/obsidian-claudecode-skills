@@ -23,6 +23,8 @@ from bridge_core import (  # noqa: E402
     DEFAULT_ALLOWED_ORIGINS,
     FIXED_ALLOWED_TAILSCALE_USER_LOGIN,
     DIRECT_STATUS_CONTRACT,
+    DIRECT_SHUTDOWN_CONTRACT,
+    DIRECT_SHUTDOWN_RECEIPT_CONTRACT,
     FIXED_APP_KIND,
     FIXED_LISTEN_HOST,
     FIXED_LISTEN_PORT,
@@ -1005,6 +1007,240 @@ class DirectDesktopCoreTests(unittest.TestCase):
             runner.terminations,
             [(pid, self.paths.native_host.resolve())],
         )
+
+    def test_readerpc_graceful_stop_requires_success_receipt_and_pid_exit(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        pid = start_direct_service(self.paths, runner, now=NOW)
+        self.write_runtime(pid=pid, state="active", updated=NOW)
+        requests: list[dict] = []
+        clock = [0.0]
+        step = [0]
+
+        def graceful_exit(delay: float) -> None:
+            clock[0] += delay
+            step[0] += 1
+            if step[0] == 1:
+                requests.append(json.loads(
+                    self.paths.shutdown_request.read_text("utf-8")
+                ))
+                self.paths.shutdown_receipt.write_text(json.dumps({
+                    "contract": DIRECT_SHUTDOWN_RECEIPT_CONTRACT,
+                    "serviceInstanceId": "a" * 32,
+                    "state": "accepted",
+                    "maximumWaitMs": 40000,
+                }), encoding="utf-8")
+            elif step[0] == 2:
+                self.paths.shutdown_receipt.write_text(json.dumps({
+                    "contract": DIRECT_SHUTDOWN_RECEIPT_CONTRACT,
+                    "serviceInstanceId": "a" * 32,
+                    "state": "success",
+                }), encoding="utf-8")
+            else:
+                runner.executables.pop(pid, None)
+
+        with patch("bridge_core.utc_now", return_value=NOW):
+            self.assertTrue(stop_direct_service(
+                self.paths,
+                runner,
+                graceful=True,
+                graceful_poll_seconds=0.1,
+                sleeper=graceful_exit,
+                monotonic=lambda: clock[0],
+            ))
+        self.assertEqual(requests, [{
+            "contract": DIRECT_SHUTDOWN_CONTRACT,
+            "serviceInstanceId": "a" * 32,
+        }])
+        self.assertEqual(runner.terminations, [])
+        self.assertFalse(self.paths.service_record.exists())
+        self.assertFalse(self.paths.shutdown_request.exists())
+        self.assertEqual(
+            json.loads(self.paths.shutdown_receipt.read_text("utf-8")),
+            {
+                "contract": DIRECT_SHUTDOWN_RECEIPT_CONTRACT,
+                "serviceInstanceId": "a" * 32,
+                "state": "success",
+            },
+        )
+
+    def test_readerpc_graceful_stop_failed_receipt_hard_kills_and_raises(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        pid = start_direct_service(self.paths, runner, now=NOW)
+        self.write_runtime(pid=pid, state="active", updated=NOW)
+        clock = [0.0]
+
+        def fail_cleanup(delay: float) -> None:
+            clock[0] += delay
+            self.paths.shutdown_receipt.write_text(json.dumps({
+                "contract": DIRECT_SHUTDOWN_RECEIPT_CONTRACT,
+                "serviceInstanceId": "a" * 32,
+                "state": "failed",
+                "code": "BW_COMPUTER_VOICE_DIRECT_MEDIA_CLEANUP_PENDING",
+            }), encoding="utf-8")
+
+        with patch("bridge_core.utc_now", return_value=NOW):
+            with self.assertRaisesRegex(
+                BridgeError,
+                "MEDIA_CLEANUP_PENDING",
+            ):
+                stop_direct_service(
+                    self.paths,
+                    runner,
+                    graceful=True,
+                    graceful_poll_seconds=0.1,
+                    sleeper=fail_cleanup,
+                    monotonic=lambda: clock[0],
+                )
+        self.assertEqual(
+            runner.terminations,
+            [(pid, self.paths.native_host.resolve())],
+        )
+        self.assertFalse(self.paths.shutdown_request.exists())
+
+    def test_graceful_failed_receipt_without_force_preserves_identity(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        pid = start_direct_service(self.paths, runner, now=NOW)
+        self.write_runtime(pid=pid, state="active", updated=NOW)
+        clock = [0.0]
+
+        def fail_cleanup(delay: float) -> None:
+            clock[0] += delay
+            self.paths.shutdown_receipt.write_text(json.dumps({
+                "contract": DIRECT_SHUTDOWN_RECEIPT_CONTRACT,
+                "serviceInstanceId": "a" * 32,
+                "state": "failed",
+                "code": "BW_COMPUTER_VOICE_DIRECT_CLEANUP_FAILED",
+            }), encoding="utf-8")
+
+        with self.assertRaisesRegex(BridgeError, "CLEANUP_FAILED"):
+            stop_direct_service(
+                self.paths,
+                runner,
+                graceful=True,
+                force_on_cleanup_failure=False,
+                graceful_poll_seconds=0.1,
+                sleeper=fail_cleanup,
+                monotonic=lambda: clock[0],
+            )
+        self.assertEqual(runner.terminations, [])
+        self.assertIn(pid, runner.executables)
+        self.assertTrue(self.paths.service_record.exists())
+        self.assertTrue(self.paths.shutdown_request.exists())
+        self.assertEqual(
+            json.loads(self.paths.shutdown_receipt.read_text("utf-8"))["state"],
+            "failed",
+        )
+
+    def test_graceful_accept_timeout_without_force_preserves_identity(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        pid = start_direct_service(self.paths, runner, now=NOW)
+        self.write_runtime(pid=pid, state="active", updated=NOW)
+        clock = [0.0]
+
+        def advance(delay: float) -> None:
+            clock[0] += delay
+
+        with self.assertRaisesRegex(BridgeError, "没有接受"):
+            stop_direct_service(
+                self.paths,
+                runner,
+                graceful=True,
+                force_on_cleanup_failure=False,
+                graceful_accept_timeout_seconds=0.2,
+                graceful_poll_seconds=0.1,
+                sleeper=advance,
+                monotonic=lambda: clock[0],
+            )
+        self.assertEqual(runner.terminations, [])
+        self.assertIn(pid, runner.executables)
+        self.assertTrue(self.paths.service_record.exists())
+        self.assertTrue(self.paths.shutdown_request.exists())
+
+    def test_graceful_cleanup_timeout_without_force_preserves_identity(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        pid = start_direct_service(self.paths, runner, now=NOW)
+        self.write_runtime(pid=pid, state="active", updated=NOW)
+        clock = [0.0]
+
+        def accept_but_never_finish(delay: float) -> None:
+            clock[0] += delay
+            self.paths.shutdown_receipt.write_text(json.dumps({
+                "contract": DIRECT_SHUTDOWN_RECEIPT_CONTRACT,
+                "serviceInstanceId": "a" * 32,
+                "state": "accepted",
+                "maximumWaitMs": 1000,
+            }), encoding="utf-8")
+
+        with self.assertRaisesRegex(BridgeError, "清理期限"):
+            stop_direct_service(
+                self.paths,
+                runner,
+                graceful=True,
+                force_on_cleanup_failure=False,
+                graceful_accept_timeout_seconds=1.0,
+                graceful_poll_seconds=0.6,
+                sleeper=accept_but_never_finish,
+                monotonic=lambda: clock[0],
+            )
+        self.assertEqual(runner.terminations, [])
+        self.assertIn(pid, runner.executables)
+        self.assertTrue(self.paths.service_record.exists())
+        self.assertTrue(self.paths.shutdown_request.exists())
+        self.assertTrue(self.paths.shutdown_receipt.exists())
+
+    def test_readerpc_graceful_stop_accepts_stale_but_exact_runtime_identity(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        pid = start_direct_service(self.paths, runner, now=NOW)
+        self.write_runtime(
+            pid=pid,
+            state="active",
+            updated=NOW - timedelta(minutes=5),
+        )
+        clock = [0.0]
+        step = [0]
+
+        def finish(delay: float) -> None:
+            clock[0] += delay
+            step[0] += 1
+            state = "accepted" if step[0] == 1 else "success"
+            value = {
+                "contract": DIRECT_SHUTDOWN_RECEIPT_CONTRACT,
+                "serviceInstanceId": "a" * 32,
+                "state": state,
+            }
+            if state == "accepted":
+                value["maximumWaitMs"] = 40000
+            self.paths.shutdown_receipt.write_text(
+                json.dumps(value),
+                encoding="utf-8",
+            )
+            if step[0] >= 3:
+                runner.executables.pop(pid, None)
+
+        self.assertTrue(stop_direct_service(
+            self.paths,
+            runner,
+            graceful=True,
+            graceful_poll_seconds=0.1,
+            sleeper=finish,
+            monotonic=lambda: clock[0],
+        ))
+        self.assertEqual(runner.terminations, [])
+
+    def test_readerpc_graceful_stop_refuses_unidentified_live_generation(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        pid = start_direct_service(self.paths, runner, now=NOW)
+        with self.assertRaisesRegex(BridgeError, "无法认证当前服务代际"):
+            stop_direct_service(self.paths, runner, graceful=True)
+        self.assertEqual(runner.terminations, [])
+        self.assertIn(pid, runner.executables)
 
     def test_readerpc_owned_start_passes_exact_positive_owner_pid(self) -> None:
         self.enable_config()

@@ -578,6 +578,14 @@ internal sealed class ReaderContextSourceRouter
 
 internal sealed class ReaderVisualDeliveryBroker
 {
+    // 快照写入和 visual-register/Attach 不在同一个原子步骤里。页面刷新、
+    // 前后台切换或 Direct 服务重连时,快照可能已经 ready,而同一来源的租约
+    // 还在握手末尾。这里仅在发送取图请求**之前**给注册留一个短窗口;
+    // 请求一旦发送就不等待新租约、不重发,避免把旧页面的返回接到新来源上。
+    private static readonly TimeSpan SourceRegistrationWait =
+        TimeSpan.FromMilliseconds(2_500);
+    private static readonly TimeSpan SourceRegistrationPoll =
+        TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan DeliveryTimeout =
         TimeSpan.FromSeconds(12);
     private const int MaximumPendingDeliveries = 4;
@@ -618,19 +626,18 @@ internal sealed class ReaderVisualDeliveryBroker
         ReaderVisualDeliveryRequest request,
         CancellationToken cancellationToken)
     {
-        if (
-            !_router.TryGetLease(
-                request.SourceInstanceId,
-                out ReaderContextSourceLease? lease)
-            || lease is null
-        )
+        ReaderContextSourceLease? lease = await WaitForSourceAsync(
+            request.SourceInstanceId,
+            cancellationToken).ConfigureAwait(false);
+        if (lease is null)
         {
             // 「不在线」只说了结果。快照里明明带着来源标识却取不到图时,
             // 真正要分清的是:那个页面从没注册过,还是注册下来的是别人。
             // 桥自己知道答案,不说出来就只能靠猜。
             throw new ReaderVisualDeliveryException(
                 "BW_READER_VISUAL_SOURCE_OFFLINE",
-                "快照指定的 Reader 页面来源当前不在线（"
+                "快照指定的 Reader 页面来源当前不在线（已等待 "
+                    + $"{SourceRegistrationWait.TotalSeconds:0.#} 秒仍未注册；"
                     + _router.DescribeRegisteredSources() + "）",
                 retryable: true);
         }
@@ -792,6 +799,32 @@ internal sealed class ReaderVisualDeliveryBroker
             Complete:
                 chunk.Status == "unavailable"
                 || completed is not null);
+    }
+
+    private async Task<ReaderContextSourceLease?> WaitForSourceAsync(
+        string sourceInstanceId,
+        CancellationToken cancellationToken)
+    {
+        DateTimeOffset deadline = DateTimeOffset.UtcNow + SourceRegistrationWait;
+        while (true)
+        {
+            if (
+                _router.TryGetLease(
+                    sourceInstanceId,
+                    out ReaderContextSourceLease? lease)
+                && lease is not null
+            )
+            {
+                return lease;
+            }
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                return null;
+            }
+            await Task.Delay(
+                SourceRegistrationPoll,
+                cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private static void RequireIdentity(

@@ -25,6 +25,7 @@ vm.runInContext(
      map: _mapCharBoxes,
      text: _charsRangeToText,
      blockFilter: _charRangeBlockFilter,
+     visualRects: _charRangeToVisualRects,
      line: _lineExpandFromChar,
    };`,
   sandbox,
@@ -132,6 +133,77 @@ test("竖排拖选沿 Y 重叠且 X 间距小的列块连通", () => {
   ];
   const onlyRight = api.blockFilter(chars, 0, 3);
   assert.deepEqual(chars.filter(onlyRight).map((c) => c.c), ["右", "次"]);
+});
+
+test("旧竖排三栏无 line/direction 时拖选不漏掉中栏", () => {
+  const mapped = api.map([
+    rawChar("右", 1, 100, 0, { width: 10, height: 20 }),
+    rawChar("右", 1, 100, 20, { width: 10, height: 20 }),
+    rawChar("右", 1, 100, 40, { width: 10, height: 20 }),
+    rawChar("中", 2, 82, 0, { width: 10, height: 20 }),
+    rawChar("中", 2, 82, 20, { width: 10, height: 20 }),
+    rawChar("中", 2, 82, 40, { width: 10, height: 20 }),
+    rawChar("左", 3, 64, 0, { width: 10, height: 20 }),
+    rawChar("左", 3, 64, 20, { width: 10, height: 20 }),
+    rawChar("左", 3, 64, 40, { width: 10, height: 20 }),
+  ], 1, "pi", "pi-manga/legacy-no-direction", "estimated");
+
+  assert.equal(mapped.map((c) => c.c).join(""), "左中右左中右左中右");
+  assert.equal(api.text(mapped, 2, 6), "右左中右左",
+    "the connected middle vertical column must not be filtered from the drag interval");
+});
+
+test("同一方形漫画块按竖排 reading order 排序且单列端点不串列", () => {
+  const mapped = api.map([
+    rawChar("右", 11, 210, 10, { width: 18, height: 20, line: 0 }),
+    rawChar("縦", 11, 210, 30, { width: 18, height: 20, line: 0 }),
+    rawChar("列", 11, 210, 50, { width: 18, height: 20, line: 0 }),
+    rawChar("中", 11, 180, 10, { width: 18, height: 20, line: 1 }),
+    rawChar("縦", 11, 180, 30, { width: 18, height: 20, line: 1 }),
+    rawChar("列", 11, 180, 50, { width: 18, height: 20, line: 1 }),
+    rawChar("左", 11, 150, 10, { width: 18, height: 20, line: 2 }),
+    rawChar("縦", 11, 150, 30, { width: 18, height: 20, line: 2 }),
+    rawChar("列", 11, 150, 50, { width: 18, height: 20, line: 2 }),
+  ], 1, "pi", "pi-manga/1:vertical-regression", "estimated");
+  assert.equal(mapped.map((c) => c.c).join(""), "右縦列中縦列左縦列");
+  assert.equal(api.text(mapped, 0, 2), "右縦列",
+    "右侧一列的精确端点只能覆盖该列");
+  assert.deepEqual(Array.from(api.visualRects(mapped, 0, 2, "css")[0]),
+    [210, 10, 228, 70]);
+  const rects = api.visualRects(mapped, 0, mapped.length - 1, "css");
+  assert.equal(rects.length, 3, "同 bk 的三条竖列应各自合成一个纵框");
+  assert.deepEqual(Array.from(rects[0]), [210, 10, 228, 70]);
+  assert.deepEqual(Array.from(rects[1]), [180, 10, 198, 70]);
+  assert.deepEqual(Array.from(rects[2]), [150, 10, 168, 70]);
+});
+
+test("旧数据缺 line 与 direction 时维持横排而不把 null 当第 0 行", () => {
+  const mapped = api.map([
+    rawChar("甲", 7, 0, 0), rawChar("乙", 7, 10, 0), rawChar("丙", 7, 20, 0),
+    rawChar("丁", 7, 0, 18), rawChar("戊", 7, 10, 18), rawChar("己", 7, 20, 18),
+    rawChar("庚", 7, 0, 36), rawChar("辛", 7, 10, 36), rawChar("壬", 7, 20, 36),
+  ], 1, "pi", "pi-manga/1:legacy-no-line", "estimated");
+  assert.equal(mapped.every((c) => c.line === null), true);
+  assert.equal(mapped.map((c) => c.c).join(""), "甲乙丙丁戊己庚辛壬");
+  const rects = api.visualRects(mapped, 0, mapped.length - 1, "css");
+  assert.equal(rects.length, 3);
+  assert.deepEqual(Array.from(rects, (rect) => Array.from(rect)), [
+    [0, 0, 28, 10], [0, 18, 28, 28], [0, 36, 28, 46],
+  ]);
+});
+
+test("不同明确竖排 line 即使横向重叠也不会合并", () => {
+  const mapped = api.map([
+    rawChar("甲", 9, 100, 0, { width: 18, height: 20, line: 0, vertical: true }),
+    rawChar("乙", 9, 100, 20, { width: 18, height: 20, line: 0, vertical: true }),
+    rawChar("丙", 9, 110, 0, { width: 18, height: 20, line: 1, vertical: true }),
+    rawChar("丁", 9, 110, 20, { width: 18, height: 20, line: 1, vertical: true }),
+  ], 1, "pi", "pi-manga/1:overlap-lines", "estimated");
+  const rects = api.visualRects(mapped, 0, mapped.length - 1, "css");
+  assert.equal(rects.length, 2);
+  assert.deepEqual(Array.from(rects, (rect) => Array.from(rect)), [
+    [100, 0, 118, 40], [110, 0, 128, 40],
+  ]);
 });
 
 test("公式字符按视觉 Y/X 留在正文中段而不按 bk 搬到末尾", () => {

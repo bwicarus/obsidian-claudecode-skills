@@ -893,7 +893,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
     private static func characterObject(
         _ value: NativeBookOCRCharacter
     ) -> [String: Any] {
-        [
+        var result: [String: Any] = [
             "c": value.c,
             "x0": value.x0,
             "y0": value.y0,
@@ -904,6 +904,9 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
             "b": value.b,
             "bk": value.bk,
         ]
+        if let line = value.line, line >= 0 { result["line"] = line }
+        if let vertical = value.vertical { result["vertical"] = vertical }
+        return result
     }
 
     private static func furiganaObject(

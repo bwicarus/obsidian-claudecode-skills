@@ -207,9 +207,11 @@ struct NativeBookOCRCharacter: Codable, Equatable, Sendable {
     var w: Int
     var b: Int
     var bk: Int
+    var line: Int?
+    var vertical: Bool?
 
     private enum CodingKeys: String, CodingKey {
-        case c, x0, y0, x1, y1, sp, w, b, bk
+        case c, x0, y0, x1, y1, sp, w, b, bk, line, vertical
     }
 
     init(
@@ -221,7 +223,9 @@ struct NativeBookOCRCharacter: Codable, Equatable, Sendable {
         sp: Int,
         w: Int,
         b: Int,
-        bk: Int
+        bk: Int,
+        line: Int? = nil,
+        vertical: Bool? = nil
     ) {
         self.c = c
         self.x0 = x0
@@ -232,6 +236,8 @@ struct NativeBookOCRCharacter: Codable, Equatable, Sendable {
         self.w = w
         self.b = b
         self.bk = bk
+        self.line = line
+        self.vertical = vertical
     }
 
     init(from decoder: Decoder) throws {
@@ -245,6 +251,8 @@ struct NativeBookOCRCharacter: Codable, Equatable, Sendable {
         w = try values.decodeIfPresent(Int.self, forKey: .w) ?? -1
         b = try values.decodeIfPresent(Int.self, forKey: .b) ?? 0
         bk = try values.decodeIfPresent(Int.self, forKey: .bk) ?? -1
+        line = try values.decodeIfPresent(Int.self, forKey: .line)
+        vertical = try values.decodeIfPresent(Bool.self, forKey: .vertical)
     }
 }
 

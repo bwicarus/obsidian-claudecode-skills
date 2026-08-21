@@ -897,6 +897,13 @@
             '关闭 = 仅桥接：语音留在电脑（用电脑音频设备），通话不接到 App；上下文/快照/出卷照常。切换在数秒内由 ReaderPC 重启服务生效。' +
           '</div>' +
           '<div id="set-bridge-voice-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
+          '<label id="set-readerpc-no-voice-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:#cfe0ff;font-weight:600;cursor:pointer;margin-top:10px">' +
+            '<input type="checkbox" id="set-readerpc-no-voice" style="width:16px;height:16px"> 🔇 无语音功能（其它 Reader 功能保持在线）' +
+          '</label>' +
+          '<div id="set-readerpc-no-voice-help" style="display:none;font-size:11px;color:#8a9bb4;line-height:1.6;margin-top:5px">' +
+            '开启后不自动拉起 Codex Voice，不启用 F24 保活与音频路由；实时快照、视觉读取、浏览器控制、卡片、Anki、词典、OCR 与历史工具继续在线。' +
+          '</div>' +
+          '<div id="set-readerpc-no-voice-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
         '</div>' +
         '<div id="set-ctx-sync-card" style="background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin:16px 0">' +
           '<label id="set-ctx-sync-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:#cfe0ff;font-weight:600;cursor:pointer">' +
@@ -906,7 +913,7 @@
             '<input type="checkbox" id="set-ctx-legacy" style="width:16px;height:16px"> 测试旧版文字注入' +
           '</label>' +
           '<div id="set-ctx-mode-help" style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-top:5px">' +
-            '实时快照 MCP 跟随 ReaderPC 电脑语音服务启停，不受旧版同步开关影响。只有测试旧版文字注入时才显示其同步开关。' +
+            '实时快照 MCP 跟随 ReaderPC 非语音服务，不受语音功能或旧版同步开关影响。只有测试旧版文字注入时才显示其同步开关。' +
           '</div>' +
           '<div id="set-ctx-sync-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
         '</div>' +
@@ -1550,13 +1557,50 @@
   function _fillBridgeVoice() {
     var row = $('set-bridge-voice-row'), cb = $('set-bridge-voice');
     var help = $('set-bridge-voice-help'), msg = $('set-bridge-voice-msg');
+    var noVoiceRow = $('set-readerpc-no-voice-row');
+    var noVoice = $('set-readerpc-no-voice');
+    var noVoiceHelp = $('set-readerpc-no-voice-help');
+    var noVoiceMsg = $('set-readerpc-no-voice-msg');
     if (!row || !cb || !(window.RC && RC.computerVoice && RC.computerVoice.setServiceMode)) return;
     function fill() {
       var mode = RC.computerVoice.getServiceMode && RC.computerVoice.getServiceMode();
       var known = mode === 'full' || mode === 'bridge-only';
+      var pendingMode = RC.computerVoice.getPendingServiceMode &&
+        RC.computerVoice.getPendingServiceMode();
       row.style.display = known ? 'flex' : 'none';
       if (help) help.style.display = known ? '' : 'none';
       if (known) cb.checked = mode === 'full';
+      cb.disabled = pendingMode === 'full' || pendingMode === 'bridge-only';
+      if (cb.disabled && msg) {
+        msg.textContent = '请求已接收，正在等待 ReaderPC 新服务确认…';
+        msg.style.display = '';
+      } else if (msg && msg.textContent.indexOf('正在等待 ReaderPC') >= 0) {
+        msg.textContent = 'ReaderPC 连接模式已生效。';
+        msg.style.display = '';
+      }
+      var voiceEnabled = RC.computerVoice.getVoiceEnabled &&
+        RC.computerVoice.getVoiceEnabled();
+      var pendingVoice = RC.computerVoice.getPendingVoiceEnabled &&
+        RC.computerVoice.getPendingVoiceEnabled();
+      var voiceKnown = typeof voiceEnabled === 'boolean' &&
+        typeof RC.computerVoice.setVoiceEnabled === 'function';
+      if (noVoiceRow) noVoiceRow.style.display = voiceKnown ? 'flex' : 'none';
+      if (noVoiceHelp) noVoiceHelp.style.display = voiceKnown ? '' : 'none';
+      if (voiceKnown && noVoice) noVoice.checked = !voiceEnabled;
+      if (noVoice) {
+        noVoice.disabled = typeof pendingVoice === 'boolean';
+      }
+      if (typeof pendingVoice === 'boolean' && noVoiceMsg) {
+        noVoiceMsg.textContent =
+          '请求已接收，正在等待 ReaderPC 新服务确认…';
+        noVoiceMsg.style.display = '';
+      } else if (
+        noVoiceMsg &&
+        noVoiceMsg.textContent.indexOf('正在等待 ReaderPC') >= 0
+      ) {
+        noVoiceMsg.textContent = 'ReaderPC 语音设置已生效。';
+        noVoiceMsg.style.display = '';
+      }
     }
     fill();
     if (!cb._bridgeBound) {
@@ -1567,12 +1611,64 @@
         cb.disabled = true;
         if (msg) { msg.textContent = '正在请求切换…'; msg.style.display = ''; }
         RC.computerVoice.setServiceMode(target).then(function () {
-          if (msg) { msg.textContent = '已请求切换到' + (target === 'full' ? '完整模式' : '仅桥接模式') + '，数秒内生效。'; }
+          if (msg) { msg.textContent = '请求已接收，正在等待 ReaderPC 新服务确认…'; }
         }).catch(function (e) {
           fill();   // 失败回滚显示
           if (msg) { msg.textContent = '切换失败：' + ((e && e.message) || '桥接链路离线'); }
-        }).then(function () { cb.disabled = false; });
+        }).then(fill);
       });
+      window.addEventListener(
+        'bw-computer-voice-service-mode-failed',
+        function (event) {
+          var detail = event && event.detail;
+          if (!detail || detail.axis !== 'service') return;
+          fill();
+          if (msg) {
+            msg.textContent = '切换失败，已恢复实际状态：' +
+              (detail.message || detail.code || 'ReaderPC 未确认');
+            msg.style.display = '';
+          }
+        }
+      );
+    }
+    if (noVoice && !noVoice._readerPcVoiceBound) {
+      noVoice._readerPcVoiceBound = true;
+      window.addEventListener('bw-computer-voice-service-mode', fill);
+      noVoice.addEventListener('change', function () {
+        var targetEnabled = !noVoice.checked;
+        noVoice.disabled = true;
+        if (noVoiceMsg) {
+          noVoiceMsg.textContent = targetEnabled
+            ? '正在请求启用语音功能…'
+            : '正在请求关闭语音功能…';
+          noVoiceMsg.style.display = '';
+        }
+        RC.computerVoice.setVoiceEnabled(targetEnabled).then(function () {
+          if (noVoiceMsg) {
+            noVoiceMsg.textContent =
+              '请求已接收，正在等待 ReaderPC 新服务确认…';
+          }
+        }).catch(function (e) {
+          fill();
+          if (noVoiceMsg) {
+            noVoiceMsg.textContent = '切换失败：' +
+              ((e && e.message) || '桥接链路离线');
+          }
+        }).then(fill);
+      });
+      window.addEventListener(
+        'bw-computer-voice-service-mode-failed',
+        function (event) {
+          var detail = event && event.detail;
+          if (!detail || detail.axis !== 'voice') return;
+          fill();
+          if (noVoiceMsg) {
+            noVoiceMsg.textContent = '切换失败，已恢复实际状态：' +
+              (detail.message || detail.code || 'ReaderPC 未确认');
+            noVoiceMsg.style.display = '';
+          }
+        }
+      );
     }
   }
 
@@ -1598,7 +1694,7 @@
       if (help) {
         help.textContent = legacyMode
           ? '此开关只控制旧版 Voice Typist 文字注入；实时快照不经过这里。'
-          : '实时快照 MCP 跟随 ReaderPC 电脑语音服务启停，不受旧版同步开关影响。';
+          : '实时快照 MCP 跟随 ReaderPC 非语音服务，不受语音功能或旧版同步开关影响。';
       }
     }
     cb.checked = RC.ctxSync.enabled();
