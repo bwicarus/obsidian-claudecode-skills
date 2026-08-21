@@ -4340,3 +4340,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证**：热更新/删除竞态合同 `42/42`、Reader Node 全量与专项 Python 通过；Windows handoff 只命中既有 POSIX `fcntl` 平台边界，Pi Linux 预检、原子部署与真实 E2E 全过，webapp/voice-rt active。
 - **Pi/扩展**：Reader `0.2.128` / KG `kg-0.2.128-b8e07f2fcd0ee32accd8` 已上线；公开 WebExt `0.2.128` 摘要 `4a87bcfa99a95c3cb1d695791747bca708d54561e0f72b5ce439b6df1be70e25` 一致；回滚点 `20260821T065116Z-139361` / `webext-channel-20260821T065555Z-gnoca8_5`。
 - **iOS/边界**：Actions `32456432640` 上传 TestFlight `1.1.73 (411)`，`32456932404` 确认 `COMPLETE / IN_BETA_TESTING` 且零错误警告；Direct `0.1.174` 协议未变，无需重装，下一步由用户在正式成品验收当前复习卡即时换面。
+
+## Codex：侧栏内容点击收起正式发布（2026-08-21 JST）
+- **修复**：侧栏正文与对话消息区点击现与书页空白一致，会关闭已展开卡片、选中菜单等临时层；按钮、输入框、卡片与设置等真实控件仍保持可操作，Shadow DOM 点击按真实目标判定。
+- **验证**：专项合同 `5/5` 且旧实现注入会被精确杀死，Reader Node 全量 `1611/1611`、发布管线、隔离浏览器真实点击、Pi Linux 预检与生产 E2E 均通过。
+- **Pi/扩展**：Reader `0.2.129` / KG `kg-0.2.129-d0011070f49f0969eb49` 已原子部署，`webapp/voice-rt` active；公开 WebExt `0.2.129` 摘要 `6b7bf7eb49aecbd2e0b2ad3ebd7bee6300332e6cbfae29ff17046a9f8a2f5150` 一致。
+- **回退**：Reader 回退点 `/home/bwicarus/deploy-backups/reader/20260821T100411Z-159937`；扩展 channel 回退点 `webext-channel-20260821T100815Z-3l4vy4su`。
+- **iOS/Windows**：Actions `32471288871` 上传 TestFlight `1.1.74 (414)`，`32472070767` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告；Direct `0.1.174` 未改且 `/healthz ok=true`。
