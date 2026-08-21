@@ -4327,3 +4327,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **Windows**：Direct `0.1.172` 已原子安装并把 5 个学习卡/复习 MCP 工具迁入 Codex 配置；回滚点 `install-0.1.172-20260821T014847Z-162ee586`，旧任务不热加载，新语音任务自动加载。
 - **Anki/iOS**：Pi AnkiConnect v6 在线，写操作按稳定 ID 调本机 AnkiConnect 后独立报告 AnkiWeb sync；Actions `32437687870` 上传 TestFlight `1.1.71 (404)`，`32438398526` 确认 `COMPLETE / IN_BETA_TESTING` 且零错误警告。
 - **边界**：Windows 当前未启动 Anki，故本机 8765/Direct healthz 未监听；启动 Anki 与 ReaderPC/新 Codex 语音任务后由各自 owner 拉起，未绕过所有权手工常驻。
+
+## Codex：复习实时更新与 Anki 图片媒体化正式发布（2026-08-21 JST）
+- **修复**：Review 订阅权威卡仓库并按稳定 id 原位刷新/删除，保留当前序位与翻面状态；Anki 写入将权威 Markdown 与 HTML 投影分离，外图经安全下载、格式校验和 `storeMediaFile` 后再修改 note。
+- **验证**：Reader Node 全量、专项 Python 58 项、Direct Release 编译/完整自检、Pi Linux 门禁与真实 E2E 通过；生产脚本摘要一致，webapp/voice-rt active，Pi AnkiConnect v6、Direct `/healthz` 均正常。
+- **Pi/扩展**：Reader `0.2.127` / KG `kg-0.2.127-7058efb4732e9ffb5ab2` 已原子部署；公开 WebExt `0.2.127` 下载摘要 `bceea351992b0e58385e5437adb840d7593c976ba8f9ebafd6272ffb36c7be12` 一致；回滚点 `20260821T050801Z-119553` / `webext-channel-20260821T051119Z-uxyq7vns`。
+- **Windows/iOS**：Direct `0.1.174` 已原子安装且进程/监听/包摘要一致，回滚点 `install-0.1.174-20260821T050453Z-a66ecde8`；Actions `32449645273` 上传 TestFlight `1.1.72 (408)`，`32450115413` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界**：Windows Anki 当前未启动，未直接改写用户现存异常图卡；新管线已上线，旧卡若只剩已过期外链仍需在 Anki 在线时重新提供有效图片后按 id 修改。
