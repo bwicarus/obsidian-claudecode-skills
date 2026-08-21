@@ -77,10 +77,20 @@ class AnkiAddIdempotencyTest(unittest.TestCase):
             item.stop()
         self.temp.cleanup()
 
-    def _invoke(self, *, aid="fc_test", front="Q", entity_id=""):
+    def _invoke(
+        self,
+        *,
+        aid="fc_test",
+        front="Q",
+        back="A",
+        entity_id="",
+        cards=None,
+    ):
         body = {
             "aid": aid,
-            "cards": [{"type": "basic", "front": front, "back": "A"}],
+            "cards": cards or [
+                {"type": "basic", "front": front, "back": back}
+            ],
             "card_index": 0,
         }
         if entity_id:
@@ -133,6 +143,13 @@ class AnkiAddIdempotencyTest(unittest.TestCase):
                 })
             if action in ("createDeck", "changeDeck"):
                 return _UrlResponse({"result": None, "error": None})
+            if action == "storeMediaFile":
+                with lock:
+                    actions.append(action)
+                return _UrlResponse({
+                    "result": payload["params"]["filename"],
+                    "error": None,
+                })
             raise AssertionError(action)
 
         return urlopen
@@ -192,6 +209,251 @@ class AnkiAddIdempotencyTest(unittest.TestCase):
             second["card_ids_by_note"],
         )
         self.assertEqual(actions, ["addNote"])
+
+    def test_image_markdown_is_stored_before_add_and_retry_does_not_repeat(self):
+        actions = []
+        captured_notes = []
+        base = self._anki_success(actions)
+
+        def urlopen(request, timeout):
+            payload = json.loads(request.data.decode("utf-8"))
+            if payload["action"] == "addNote":
+                captured_notes.append(payload["params"]["note"])
+            return base(request, timeout)
+
+        image_url = "https://images.example.test/curry.jpg?width=900"
+        image_bytes = b"\xff\xd8\xffprojection-test"
+        with (
+            patch("urllib.request.urlopen", side_effect=urlopen),
+            patch.object(
+                pdf_reader,
+                "_fetch_public_image",
+                return_value=(image_bytes, "image/jpeg", image_url),
+            ) as fetch,
+        ):
+            first_status, first = self._invoke(
+                aid="fc_image",
+                back="答案\n\n![配图](" + image_url + ")",
+            )
+            second_status, second = self._invoke(
+                aid="fc_image",
+                back="答案\n\n![配图](" + image_url + ")",
+            )
+
+        filename = pdf_reader._anki_projection_media_filename(
+            image_bytes, "image/jpeg"
+        )
+        self.assertEqual(first_status, 200)
+        self.assertEqual(second_status, 200)
+        self.assertTrue(second["dedup"])
+        self.assertEqual(actions, ["storeMediaFile", "addNote"])
+        fetch.assert_called_once()
+        self.assertEqual(fetch.call_args.args, (image_url,))
+        self.assertEqual(
+            fetch.call_args.kwargs["allowed_schemes"], ("https",)
+        )
+        back = captured_notes[0]["fields"]["Back"]
+        self.assertIn('src="' + filename + '"', back)
+        self.assertNotIn("https://", back)
+        self.assertEqual(first["note_ids"], second["note_ids"])
+
+    def test_http_image_is_rejected_before_fetch_store_or_add(self):
+        actions = []
+        base = self._anki_success(actions)
+        with (
+            patch("urllib.request.urlopen", side_effect=base),
+            patch.object(pdf_reader, "_fetch_public_image") as fetch,
+        ):
+            first_status, first = self._invoke(
+                aid="fc_http_image",
+                back="![配图](http://127.0.0.1/private.png)",
+            )
+            second_status, second = self._invoke(
+                aid="fc_http_image",
+                back="![配图](http://127.0.0.1/private.png)",
+            )
+
+        self.assertEqual(first_status, 400)
+        self.assertEqual(second_status, 400)
+        self.assertEqual(first["code"], "card_image_url_invalid")
+        self.assertEqual(second["code"], "card_image_url_invalid")
+        self.assertEqual(actions, [])
+        fetch.assert_not_called()
+
+    def test_long_face_is_not_silently_truncated_and_huge_face_is_explicit(self):
+        actions = []
+        captured = []
+        base = self._anki_success(actions)
+
+        def urlopen(request, timeout):
+            payload = json.loads(request.data.decode("utf-8"))
+            if payload["action"] == "addNote":
+                captured.append(payload["params"]["note"])
+            return base(request, timeout)
+
+        long_front = "长" * 8_001
+        with patch("urllib.request.urlopen", side_effect=urlopen):
+            status, _data = self._invoke(
+                aid="fc_long_face",
+                front=long_front,
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            captured[0]["fields"]["Front"].count("长"), 8_001
+        )
+
+        actions.clear()
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=self._anki_success(actions),
+        ):
+            status, data = self._invoke(
+                aid="fc_huge_face",
+                front="大" * 64_001,
+            )
+        self.assertEqual(status, 413)
+        self.assertEqual(data["code"], "anki_card_projection_too_large")
+        self.assertEqual(actions, [])
+
+    def test_add_rejects_malformed_media_and_bad_magic_before_add(self):
+        cases = [
+            '<img src=https://images.example.test/a.png>',
+            '<img src="a.png" srcset="https://images.example.test/a@2x.png 2x">',
+            '<video poster="https://images.example.test/a.png"></video>',
+            '<p style=color:red>unsafe</p>',
+            '<p style="color:red">unsafe</p>',
+        ]
+        for index, html in enumerate(cases):
+            actions = []
+            with (
+                self.subTest(html=html),
+                patch(
+                    "urllib.request.urlopen",
+                    side_effect=self._anki_success(actions),
+                ),
+                patch.object(pdf_reader, "_fetch_public_image") as fetch,
+            ):
+                status, data = self._invoke(
+                    aid=f"fc_bad_markup_{index}",
+                    back=html,
+                )
+            self.assertEqual(status, 400)
+            self.assertEqual(data["code"], "anki_media_url_invalid")
+            self.assertEqual(actions, [])
+            fetch.assert_not_called()
+
+        actions = []
+        image_url = "https://images.example.test/fake.png"
+        with (
+            patch(
+                "urllib.request.urlopen",
+                side_effect=self._anki_success(actions),
+            ),
+            patch.object(
+                pdf_reader,
+                "_fetch_public_image",
+                return_value=(b"not-a-png", "image/png", image_url),
+            ),
+        ):
+            status, data = self._invoke(
+                aid="fc_bad_magic",
+                back="![bad](" + image_url + ")",
+            )
+        self.assertEqual(status, 415)
+        self.assertEqual(data["code"], "anki_media_fetch_failed")
+        self.assertEqual(actions, [])
+
+    def test_add_enforces_unique_image_operation_limit_before_fetch(self):
+        actions = []
+        markdown = "\n".join(
+            "![img](https://images.example.test/%d.png)" % index
+            for index in range(9)
+        )
+        with (
+            patch(
+                "urllib.request.urlopen",
+                side_effect=self._anki_success(actions),
+            ),
+            patch.object(pdf_reader, "_fetch_public_image") as fetch,
+        ):
+            status, data = self._invoke(
+                aid="fc_too_many_images",
+                back=markdown,
+            )
+        self.assertEqual(status, 413)
+        self.assertEqual(data["code"], "anki_media_fetch_failed")
+        self.assertEqual(actions, [])
+        fetch.assert_not_called()
+
+    def test_first_explicit_add_rejection_releases_claim_for_retry(self):
+        actions = []
+        base = self._anki_success(actions)
+        add_calls = 0
+
+        def urlopen(request, timeout):
+            nonlocal add_calls
+            payload = json.loads(request.data.decode("utf-8"))
+            if payload["action"] == "addNote":
+                add_calls += 1
+                if add_calls == 1:
+                    actions.append("addNote")
+                    return _UrlResponse({
+                        "result": None,
+                        "error": "model rejected note",
+                    })
+            return base(request, timeout)
+
+        with patch("urllib.request.urlopen", side_effect=urlopen):
+            first_status, first = self._invoke(aid="fc_explicit_retry")
+            second_status, second = self._invoke(aid="fc_explicit_retry")
+
+        self.assertEqual(first_status, 502)
+        self.assertEqual(first["code"], "anki_add_rejected")
+        self.assertEqual(second_status, 200)
+        self.assertTrue(second["ok"])
+        self.assertEqual(actions, ["addNote", "addNote"])
+
+    def test_partial_batch_failure_stays_pending_and_never_replays(self):
+        actions = []
+        base = self._anki_success(actions)
+        add_calls = 0
+
+        def urlopen(request, timeout):
+            nonlocal add_calls
+            payload = json.loads(request.data.decode("utf-8"))
+            if payload["action"] == "addNote":
+                add_calls += 1
+                actions.append("addNote")
+                if add_calls == 1:
+                    return _UrlResponse({"result": 101, "error": None})
+                return _UrlResponse({
+                    "result": None,
+                    "error": "second note rejected",
+                })
+            return base(request, timeout)
+
+        cards = [
+            {"type": "basic", "front": "Q1", "back": "A1"},
+            {"type": "basic", "front": "Q2", "back": "A2"},
+        ]
+        with patch("urllib.request.urlopen", side_effect=urlopen):
+            first_status, first = self._invoke(
+                aid="fc_partial_batch", cards=cards
+            )
+            second_status, second = self._invoke(
+                aid="fc_partial_batch", cards=cards
+            )
+
+        self.assertEqual(first_status, 503)
+        self.assertEqual(
+            first["code"], "anki_add_partial_outcome_unknown"
+        )
+        self.assertEqual(first["outcome"], "partial")
+        self.assertEqual(first["added"], 1)
+        self.assertEqual(first["note_ids"], [101])
+        self.assertEqual(second_status, 409)
+        self.assertEqual(second["code"], "anki_add_outcome_unknown")
+        self.assertEqual(add_calls, 2)
 
     def test_same_aid_with_different_payload_is_rejected(self):
         actions = []

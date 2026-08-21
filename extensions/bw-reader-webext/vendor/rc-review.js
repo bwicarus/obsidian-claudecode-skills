@@ -28,6 +28,8 @@ if (window.__bwPwaProviderOnly) return;
   var _observer = null;
   var _decorateTimer = 0;
   var _selectionUnsubscribe = null;
+  var _cardRepositoryRef = null;
+  var _cardRepositoryUnsubscribe = null;
   var _selectionSuppress = false;
   var _selectionState = Object.create(null);
   var _selectionRecords = Object.create(null);
@@ -87,6 +89,60 @@ if (window.__bwPwaProviderOnly) return;
     } catch (_) {
       return '';
     }
+  }
+
+  function _safeReviewImageSource(value) {
+    var raw = String(value == null ? '' : value).trim();
+    if (!raw || /[\u0000-\u0020\u007f\\]/.test(raw)) return '';
+    if (/^data:image\/(?:png|jpe?g|gif|webp|avif);base64,/i.test(raw) ||
+        /^blob:(?:https?:\/\/|null\/)[^\s]+$/i.test(raw)) {
+      return raw;
+    }
+    try {
+      var localApiPrefix = '/pdf/api' + '/';
+      if (raw.indexOf(localApiPrefix) === 0) {
+        var local = new URL(raw, 'https://reader.invalid');
+        var localImageRoute =
+          local.pathname === localApiPrefix + 'page-image' ||
+          local.pathname === localApiPrefix + 'img-proxy' ||
+          local.pathname.indexOf(localApiPrefix + 'asset/') === 0;
+        if (local.origin === 'https://reader.invalid' && localImageRoute &&
+            !local.hash) {
+          return raw;
+        }
+        return '';
+      }
+      var parsed = new URL(raw);
+      if (parsed.protocol !== 'https:' || !parsed.hostname ||
+          parsed.username || parsed.password || parsed.hash) return '';
+      return '/pdf/api/img-proxy?url=' + encodeURIComponent(parsed.href);
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function _proxyReviewImages(html) {
+    var root = document.createElement('div');
+    root.innerHTML = _sanitize(html);
+    Array.prototype.forEach.call(root.querySelectorAll('img[src]'), function (image) {
+      var safe = _safeReviewImageSource(image.getAttribute('src'));
+      if (safe) image.setAttribute('src', safe);
+      else image.removeAttribute('src');
+    });
+    return _sanitize(root.innerHTML);
+  }
+
+  // Canonical Reader cards store semantic Markdown.  Legacy Anki queue cards
+  // already contain template-rendered HTML and must stay on the old HTML path.
+  function _localMarkdownFace(value) {
+    var source = String(value == null ? '' : value);
+    var rendered;
+    try {
+      rendered = RC.md ? RC.md(source) : _esc(source).replace(/\r?\n/g, '<br>');
+    } catch (_) {
+      rendered = _esc(source).replace(/\r?\n/g, '<br>');
+    }
+    return _proxyReviewImages(rendered);
   }
 
   function _textNodesWithin(node) {
@@ -750,20 +806,11 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function _localClozeFace(value, reveal) {
-    var html = String(value == null ? '' : value).replace(
-      /[&<>"']/g,
-      function (character) {
-        return {
-          '&': '&amp;', '<': '&lt;', '>': '&gt;',
-          '"': '&quot;', "'": '&#39;'
-        }[character];
-      }
-    );
-    html = html.replace(
+    var markdown = String(value == null ? '' : value).replace(
       /\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g,
       reveal ? '<b>$1</b>' : '<b>[…]</b>'
     );
-    return html.replace(/\r?\n/g, '<br>');
+    return _localMarkdownFace(markdown);
   }
 
   function _legacyProjectionCardId(state) {
@@ -776,15 +823,20 @@ if (window.__bwPwaProviderOnly) return;
     return Number.isSafeInteger(cardId) && cardId > 0 ? cardId : null;
   }
 
+  function _cardContentFingerprint(card) {
+    var serialized = JSON.stringify(card || {});
+    return serialized.length + ':' + _hash(serialized);
+  }
+
   function _localReviewCard(record, card, state, cardIndex, due) {
     var source = record.source || {};
     var mapped = Object.assign({}, card, {
       question: card.type === 'cloze'
         ? _localClozeFace(card.cloze || card.text || '', false)
-        : String(card.front || ''),
+        : _localMarkdownFace(card.front || ''),
       answer: card.type === 'cloze'
         ? _localClozeFace(card.cloze || card.text || '', true)
-        : String(card.back || ''),
+        : _localMarkdownFace(card.back || ''),
       deck: String(card.deck || ''),
       reason: String(card.reason || ''),
       local_id: record.id + ':' + cardIndex,
@@ -799,6 +851,8 @@ if (window.__bwPwaProviderOnly) return;
       _localReview: {
         gid: record.id,
         cardIndex: cardIndex,
+        contentFingerprint: _cardContentFingerprint(card),
+        entityRev: Number(record.entityRev || 0),
         stateRev: Number(record.stateRev || 0),
         review: Object.assign({}, state.review || {}),
         projections: Object.assign({}, state.projections || {}),
@@ -810,9 +864,128 @@ if (window.__bwPwaProviderOnly) return;
     return mapped;
   }
 
+  function _localQueueIndex(entityId, cardIndex) {
+    entityId = String(entityId || '');
+    cardIndex = Number(cardIndex);
+    for (var index = 0; index < _queue.length; index++) {
+      var card = _queue[index];
+      var local = card && card._localReview;
+      if (local && String(local.gid || card.entity_id || '') === entityId &&
+          Number(local.cardIndex) === cardIndex) return index;
+    }
+    return -1;
+  }
+
+  function _saveChangedQueue() {
+    var snapshot = _currentQueueSnapshot();
+    _saveLocal(snapshot, function () {
+      return snapshot.client_context_key === _contextCacheKey;
+    });
+  }
+
+  function _acceptCardRepositoryChange(event) {
+    var entityId = String(event && event.cardId || '');
+    var record = event && event.record;
+    if (!entityId || !_queue.length) return;
+
+    var changedContent = false;
+    var changedCurrentContent = false;
+    var changedMetadata = false;
+    var removedCurrent = false;
+    var removedAny = false;
+    for (var queueIndex = _queue.length - 1; queueIndex >= 0; queueIndex--) {
+      var queued = _queue[queueIndex];
+      var local = queued && queued._localReview;
+      if (!local || String(local.gid || queued.entity_id || '') !== entityId) {
+        continue;
+      }
+      var cardIndex = Number(local.cardIndex);
+      var nextCard = record && !record.deleted && Array.isArray(record.cards)
+        ? record.cards[cardIndex] : null;
+      var nextState = record && record.states
+        ? record.states[String(cardIndex)] : null;
+      var review = nextState && nextState.review || {};
+      var status = String(review.status || 'new').toLowerCase();
+      var dueAt = Number(review.dueAt);
+      var unavailable = status === 'unavailable' || status === 'suspended' ||
+        status === 'buried' ||
+        (status !== 'new' && Number.isFinite(dueAt) && dueAt > Date.now());
+      var removed = !nextCard || !nextState || nextState.removed === true ||
+        nextState.phase !== 'confirmed' ||
+        (nextState.flags && nextState.flags.archived === true) || unavailable;
+      if (removed) {
+        if (queueIndex < _idx) _idx -= 1;
+        else if (queueIndex === _idx) removedCurrent = true;
+        if (local.wasDue) _dueTotal = Math.max(0, _dueTotal - 1);
+        _queue.splice(queueIndex, 1);
+        removedAny = true;
+        continue;
+      }
+
+      var next = _localReviewCard(
+        record, nextCard, nextState, cardIndex, local.wasDue === true
+      );
+      if (String(local.contentFingerprint || '') !==
+          next._localReview.contentFingerprint) {
+        _queue[queueIndex] = next;
+        changedContent = true;
+        if (queueIndex === _idx) changedCurrentContent = true;
+      } else if (Number(local.entityRev || 0) !== Number(record.entityRev || 0) ||
+                 Number(local.stateRev || 0) !== Number(record.stateRev || 0)) {
+        // Projection receipts and other state-only writes must refresh the
+        // optimistic-concurrency metadata without flashing the card face.
+        queued._localReview = next._localReview;
+        if (next._legacyExternalCardId != null) {
+          queued._legacyExternalCardId = next._legacyExternalCardId;
+        } else {
+          delete queued._legacyExternalCardId;
+        }
+        changedMetadata = true;
+      }
+    }
+
+    if (!removedAny && !changedContent && !changedMetadata) return;
+    _idx = Math.max(0, Math.min(_idx, Math.max(0, _queue.length - 1)));
+    if (removedCurrent) {
+      _showingAnswer = false;
+      _improveExpanded = false;
+      _invalidateCardRequests(true);
+    } else if (changedCurrentContent) {
+      // The current semantic face changed underneath an improvement draft.
+      // Keep presentation state, but never let the old draft target new text.
+      _invalidateCardRequests(true);
+    }
+    _saveChangedQueue();
+    if (changedMetadata && !removedAny && !changedContent) return;
+    render();
+    _activateCurrentSelections();
+    _scheduleDecorate();
+    _notifyAssistant(removedAny ? 'card-deleted-external' : 'card-updated');
+  }
+
+  function _bindCardRepository(repository) {
+    if (_cardRepositoryRef === repository) return;
+    try {
+      if (typeof _cardRepositoryUnsubscribe === 'function') {
+        _cardRepositoryUnsubscribe();
+      }
+    } catch (_) {}
+    _cardRepositoryRef = repository || null;
+    _cardRepositoryUnsubscribe = null;
+    if (!repository || typeof repository.subscribe !== 'function') return;
+    try {
+      _cardRepositoryUnsubscribe = repository.subscribe(
+        _acceptCardRepositoryChange
+      );
+    } catch (_) {
+      _cardRepositoryUnsubscribe = null;
+    }
+  }
+
   async function _loadLocalReviewQueue(limit) {
     var repository = _cardRepository();
     if (!repository) return null;
+    _bindCardRepository(repository);
     var records = await repository.snapshot();
     if (!Array.isArray(records)) {
       throw new Error('本地卡库返回了无效快照');
@@ -3107,7 +3280,6 @@ if (window.__bwPwaProviderOnly) return;
     } catch (_) {}
     if (!confirmed) return Promise.resolve(false);
     _commitStagedRating('delete-card');
-    var originalIndex = _idx;
     var entityId = String(local.gid || card.entity_id || '');
     var cardIndex = Number(local.cardIndex);
     var projections = Object.assign({}, local.projections || {});
@@ -3116,20 +3288,27 @@ if (window.__bwPwaProviderOnly) return;
       mutationId: 'review-remove:' + entityId + ':' + cardIndex + ':' +
         _answerAid()
     }).then(function (removed) {
-      _rememberAndDeactivateSelections();
-      _invalidateCardRequests(true);
-      _queue.splice(originalIndex, 1);
-      if (local.wasDue) _dueTotal = Math.max(0, _dueTotal - 1);
-      _idx = Math.max(0, Math.min(originalIndex, _queue.length - 1));
-      _showingAnswer = false;
-      _improveExpanded = false;
-      var snapshot = _currentQueueSnapshot();
-      _saveLocal(snapshot, function () {
-        return snapshot.client_context_key === _contextCacheKey;
-      });
-      render();
-      _activateCurrentSelections();
-      _notifyAssistant('card-deleted');
+      // A synchronous repository subscription may have removed this exact
+      // item before the mutation promise resolves. Resolve by stable identity,
+      // never by the captured numeric slot (which may now hold its sibling).
+      var committedIndex = _localQueueIndex(entityId, cardIndex);
+      if (committedIndex >= 0) {
+        var removingCurrent = committedIndex === _idx;
+        _rememberAndDeactivateSelections();
+        if (removingCurrent) _invalidateCardRequests(true);
+        _queue.splice(committedIndex, 1);
+        if (local.wasDue) _dueTotal = Math.max(0, _dueTotal - 1);
+        if (committedIndex < _idx) _idx -= 1;
+        _idx = Math.max(0, Math.min(_idx, Math.max(0, _queue.length - 1)));
+        if (removingCurrent) {
+          _showingAnswer = false;
+          _improveExpanded = false;
+        }
+        _saveChangedQueue();
+        render();
+        _activateCurrentSelections();
+        _notifyAssistant('card-deleted');
+      }
       try {
         window.dispatchEvent(new CustomEvent('rc:learning-card-removed', {
           detail: {

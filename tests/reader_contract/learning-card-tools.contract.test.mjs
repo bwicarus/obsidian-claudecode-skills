@@ -277,12 +277,14 @@ test("编辑保留 Anki 出处脚注，复习删除也走同一投影链", () =>
   const fields = method(COMPUTER, "function ankiFieldsForReaderCard(");
   assert.match(
     fields,
-    /<hr><div style="font-size:0\.85em;color:#666;">来源：/,
+    /<hr><div class="bw-reader-anki-source">来源：/,
   );
+  assert.match(fields, /legacyMarker/);
+  assert.match(fields, /legacyMarker[\s\S]*safeMarker/);
   assert.match(fields, /provenanceFooter\(textField\)/);
   assert.match(fields, /provenanceFooter\(front\)/);
   assert.match(fields, /provenanceFooter\(back\)/);
-  assert.match(fields, /String\(card\.front \|\| ""\) \+ "<hr>"/);
+  assert.match(fields, /ankiProjectionHtml\(card\.front \|\| ""\) \+ "<hr>"/);
 
   const piClient = method(COMPUTER, "function operatePiAnkiCard(");
   assert.match(piClient, /toLowerCase\(\)[\s\S]*indexOf\("unknown"\)/);
@@ -311,4 +313,69 @@ test("编辑保留 Anki 出处脚注，复习删除也走同一投影链", () =>
     PI,
     /response = \{[\s\S]*?"next": nxt,[\s\S]*?"anki_web_sync": sync_layer/,
   );
+});
+
+test("Anki add/edit 先投影 Markdown，Windows 与 Pi 再安全本地化图片", () => {
+  const card = method(COMPUTER, "function normalizeLocalAnkiCard(");
+  assert.match(card, /canonical[\s\S]*projectionField\(canonical\.front/);
+  assert.match(card, /projectionField\(canonical\.back/);
+  assert.match(card, /projectionField\(canonical\.cloze/);
+  assert.match(card, /64000/);
+  const addRequest = method(
+    COMPUTER,
+    "function normalizeLocalAnkiAddRequest(",
+  );
+  assert.match(addRequest, /card: normalizedCard\.canonical/);
+  assert.match(addRequest, /projection: normalizedCard\.projection/);
+  assert.match(addRequest, /192 \* 1024/);
+  const projection = method(COMPUTER, "function ankiProjectionHtml(");
+  assert.match(projection, /typeof RC\.md === "function"/);
+  assert.match(projection, /querySelectorAll\("img"\)/);
+  assert.match(projection, /ankiProjectionImageSource/);
+  const source = method(COMPUTER, "function ankiProjectionImageSource(");
+  assert.match(source, /parsed\.protocol !== "https:"/);
+  assert.match(source, /BW_READER_ANKI_MEDIA_URL_INVALID/);
+  assert.match(source, /localhost\|local\|lan\|internal/);
+
+  assert.match(LOCAL_ANKI, /class BoundedReaderPublicImageFetcher/);
+  assert.match(LOCAL_ANKI, /Dns\.GetHostAddressesAsync/);
+  assert.match(LOCAL_ANKI, /ConnectCallback/);
+  assert.match(LOCAL_ANKI, /UseProxy = false/);
+  assert.match(LOCAL_ANKI, /"storeMediaFile"/);
+  assert.match(LOCAL_ANKI, /Convert\.ToBase64String\(image\.Data\)/);
+  assert.match(LOCAL_ANKI, /"bw-reader-img-" \+ digest \+ extension/);
+  assert.match(LOCAL_ANKI, /ValidateImageContent/);
+  assert.match(LOCAL_ANKI, /MaximumProjectionImages = 8/);
+  assert.match(LOCAL_ANKI, /MaximumProjectionImageBytes = 32L \* 1024 \* 1024/);
+  assert.match(LOCAL_ANKI, /registered\.CanonicalCard\.DeepClone/);
+  assert.match(LOCAL_ANKI, /NormalizeProjectionCard/);
+  assert.match(
+    LOCAL_ANKI,
+    /canonicalCard\["type"\][\s\S]*projectionCard\["type"\][\s\S]*类型不一致/,
+  );
+  assert.match(LOCAL_ANKI, /srcset\|style\|xlink:href/);
+  assert.doesNotMatch(LOCAL_ANKI, /NetworkStylePattern/);
+  assert.match(LOCAL_ANKI, /maximumTextLength: 64_000/);
+  assert.match(DIRECT_PROTOCOL, /hasProjection \? projectionValue : cardValue/);
+  assert.match(DIRECT_PROTOCOL, /192 \* 1024/);
+
+  assert.match(PI, /def _anki_projection_localize_fields\(/);
+  assert.match(
+    PI,
+    /_fetch_public_image\([\s\S]*allowed_schemes=\("https",\)/,
+  );
+  assert.match(PI, /"storeMediaFile"/);
+  assert.match(PI, /base64\.b64encode\(content\)/);
+  assert.match(PI, /def _anki_projection_media_filename\(/);
+  assert.match(PI, /hashlib\.sha256\(bytes\(content\)\)/);
+  assert.match(PI, /class _AnkiProjectionHtmlInspector/);
+  assert.match(PI, /if lowered == "style"/);
+  assert.match(PI, /_ANKI_PROJECTION_MAX_IMAGES = 8/);
+  assert.match(
+    PI,
+    /remaining_time = state\.deadline - time\.monotonic\(\)[\s\S]*"storeMediaFile"[\s\S]*timeout=min\(15\.0/,
+  );
+  assert.match(PI, /anki_add_partial_outcome_unknown/);
+  assert.doesNotMatch(PI, /card\.get\("front"\)[^\n]*\[:8000\]/);
+  assert.match(PI, /import markdown[\s\S]*markdown\.markdown\(/);
 });

@@ -629,7 +629,7 @@
         false
       );
     }
-    return cards.map(function (card, index) {
+    var normalized = cards.map(function (card, index) {
       exactObject(
         card,
         ["type"],
@@ -807,7 +807,7 @@
       var type = safeText(card.type, label + ".type", 16, false);
       if (type === "basic") {
         exactObject(card, ["type", "front", "back"], [], label);
-        var front = safeText(card.front, label + ".front", 8000, false);
+        var front = safeText(card.front, label + ".front", 64000, false);
         if (!front.trim()) {
           throw directError(
             label + ".front 不能为空",
@@ -818,12 +818,12 @@
         return {
           type: type,
           front: front,
-          back: safeText(card.back, label + ".back", 8000, true),
+          back: safeText(card.back, label + ".back", 64000, true),
         };
       }
       if (type === "cloze") {
         exactObject(card, ["type", "cloze"], [], label);
-        var cloze = safeText(card.cloze, label + ".cloze", 8000, false);
+        var cloze = safeText(card.cloze, label + ".cloze", 64000, false);
         if (!cloze.trim()) {
           throw directError(
             label + ".cloze 不能为空",
@@ -839,6 +839,15 @@
         false
       );
     });
+    if (new TextEncoder().encode(JSON.stringify(normalized)).byteLength >
+        192 * 1024) {
+      throw directError(
+        "Reader Anki 草稿卡面总量超过 192 KiB 安全上限",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    }
+    return normalized;
   }
 
   function normalizeReaderPageCardCards(cards) {
@@ -4540,35 +4549,151 @@
       );
     }
     var type = safeText(value.type, "Anki card type", 16, false);
-    var card;
+    function projectionField(markdown, name) {
+      var html = ankiProjectionHtml(markdown);
+      if (html.length > 64000) {
+        throw directError(
+          name + " 的 Anki HTML 投影超过 64000 字符",
+          "BW_READER_LOCAL_ANKI_SCHEMA",
+          false
+        );
+      }
+      return html;
+    }
+    var canonical;
+    var projection;
     if (type === "basic") {
       exactObject(value, ["type", "front", "back"], [], "本机 Anki 基础卡");
-      card = {
+      canonical = {
         type: type,
-        front: safeText(value.front, "Anki front", 8000, false),
-        back: safeText(value.back, "Anki back", 8000, true),
+        front: safeText(value.front, "Anki front", 64000, false),
+        back: safeText(value.back, "Anki back", 64000, true),
       };
-      if (/\0/.test(card.front + card.back)) {
+      projection = {
+        type: type,
+        front: projectionField(canonical.front, "Anki front"),
+        back: projectionField(canonical.back, "Anki back"),
+      };
+      if (/\0/.test(canonical.front + canonical.back)) {
         throw directError("本机 Anki 卡片包含 NUL", "BW_READER_LOCAL_ANKI_SCHEMA", false);
       }
-      return card;
+      return { canonical: canonical, projection: projection };
     }
     if (type === "cloze") {
       exactObject(value, ["type", "cloze"], [], "本机 Anki 填空卡");
-      card = {
+      canonical = {
         type: type,
-        cloze: safeText(value.cloze, "Anki cloze", 8000, false),
+        cloze: safeText(value.cloze, "Anki cloze", 64000, false),
       };
-      if (/\0/.test(card.cloze)) {
+      projection = {
+        type: type,
+        cloze: projectionField(canonical.cloze, "Anki cloze"),
+      };
+      if (/\0/.test(canonical.cloze)) {
         throw directError("本机 Anki 卡片包含 NUL", "BW_READER_LOCAL_ANKI_SCHEMA", false);
       }
-      return card;
+      return { canonical: canonical, projection: projection };
     }
     throw directError(
       "本机 Anki 卡片类型无效",
       "BW_READER_LOCAL_ANKI_SCHEMA",
       false
     );
+  }
+
+  // Reader entities keep semantic Markdown. Anki fields are HTML, so both
+  // initial projection and later edits must use the same renderer as the card
+  // shown in Reader. Remote images remain HTTPS here; the trusted Windows/Pi
+  // projection writer stores them through AnkiConnect and replaces src with a
+  // deterministic local media filename before addNote/updateNoteFields.
+  function ankiProjectionImageSource(value) {
+    var source = String(value == null ? "" : value).trim();
+    if (!source || /[\u0000-\u001f\u007f]/.test(source)) {
+      throw directError(
+        "Anki 卡片图片地址无效",
+        "BW_READER_ANKI_MEDIA_URL_INVALID",
+        false
+      );
+    }
+    var hasScheme = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(source);
+    if (!hasScheme) {
+      // A bare filename may already name media in collection.media. Paths,
+      // protocol-relative URLs and traversal are never accepted.
+      if (source.indexOf("/") >= 0 || source.indexOf("\\") >= 0 ||
+          source === "." || source === ".." || /[<>:"|?*#]/.test(source)) {
+        throw directError(
+          "Anki 卡片图片只能引用已有媒体文件或绝对 HTTPS 地址",
+          "BW_READER_ANKI_MEDIA_URL_INVALID",
+          false
+        );
+      }
+      return source;
+    }
+    var parsed;
+    try {
+      parsed = new URL(source);
+    } catch (_) {
+      parsed = null;
+    }
+    var host = parsed ? String(parsed.hostname || "").toLowerCase() : "";
+    var privateName = host === "localhost" ||
+      /\.(?:localhost|local|lan|internal|home|home\.arpa)$/.test(host);
+    var ipLiteral = /^\[.*\]$/.test(host) ||
+      /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host);
+    if (!parsed || parsed.protocol !== "https:" || !host ||
+        parsed.username || parsed.password || parsed.hash ||
+        (parsed.port && parsed.port !== "443") || privateName || ipLiteral ||
+        host.indexOf(".") < 0) {
+      throw directError(
+        "Anki 卡片远程图片只允许公开、无凭据的绝对 HTTPS 地址",
+        "BW_READER_ANKI_MEDIA_URL_INVALID",
+        false
+      );
+    }
+    return source;
+  }
+
+  function ankiProjectionHtml(value) {
+    var source = String(value == null ? "" : value);
+    // Validate before RC.safeHtml can silently remove an unsafe src. These
+    // forms cover the canonical Markdown emitted by Reader and raw HTML kept
+    // for backwards compatibility; rendered HTML is checked once more below.
+    source.replace(
+      /!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))/g,
+      function (_, angle, plain) {
+        ankiProjectionImageSource(angle || plain || "");
+        return _;
+      }
+    );
+    source.replace(
+      /<img\b[^>]*\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi,
+      function (_, quoted, single, bare) {
+        ankiProjectionImageSource(quoted || single || bare || "");
+        return _;
+      }
+    );
+    var html;
+    try {
+      html = window.RC && typeof RC.md === "function"
+        ? RC.md(source)
+        : (RC.esc ? RC.esc(source) : source
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")).replace(/\r?\n/g, "<br>");
+    } catch (error) {
+      throw directError(
+        "Anki 卡片 Markdown 渲染失败",
+        "BW_READER_ANKI_MARKDOWN_INVALID",
+        false,
+        error
+      );
+    }
+    var root = document.createElement("div");
+    root.innerHTML = String(html || "");
+    Array.prototype.forEach.call(root.querySelectorAll("img"), function (img) {
+      ankiProjectionImageSource(img.getAttribute("src") || "");
+    });
+    return root.innerHTML;
   }
 
   function normalizeLocalAnkiAddRequest(value) {
@@ -4590,7 +4715,8 @@
         false
       );
     }
-    return {
+    var normalizedCard = normalizeLocalAnkiCard(value.card);
+    var normalized = {
       draftId: draftId,
       sourceInstanceId: safeId(
         value.sourceInstanceId,
@@ -4598,8 +4724,18 @@
       ),
       cardIndex: value.cardIndex,
       aid: aid,
-      card: normalizeLocalAnkiCard(value.card),
+      card: normalizedCard.canonical,
+      projection: normalizedCard.projection,
     };
+    var bytes = new TextEncoder().encode(JSON.stringify(normalized)).byteLength;
+    if (bytes > 192 * 1024) {
+      throw directError(
+        "本机 Anki 请求超过 192 KiB 安全上限",
+        "BW_READER_ANKI_REQUEST_TOO_LARGE",
+        false
+      );
+    }
+    return normalized;
   }
 
   function normalizeLocalAnkiAddResult(value) {
@@ -7713,11 +7849,20 @@
     // text, while the recorded source must remain available on the Anki card.
     function provenanceFooter(name) {
       var value = currentValue(name);
-      var marker = '<hr><div style="font-size:0.85em;color:#666;">来源：';
-      var offset = value.lastIndexOf(marker);
+      var safeMarker = '<hr><div class="bw-reader-anki-source">来源：';
+      var legacyMarker = '<hr><div style="font-size:0.85em;color:#666;">来源：';
+      var safeOffset = value.lastIndexOf(safeMarker);
+      var legacyOffset = value.lastIndexOf(legacyMarker);
+      var offset = Math.max(safeOffset, legacyOffset);
       if (offset < 0) return "";
       var suffix = value.slice(offset);
-      return /<\/div>\s*$/.test(suffix) ? suffix : "";
+      if (!/<\/div>\s*$/.test(suffix)) return "";
+      return offset === legacyOffset
+        ? suffix.replace(
+          '<hr><div style="font-size:0.85em;color:#666;">',
+          '<hr><div class="bw-reader-anki-source">'
+        )
+        : suffix;
     }
     var result = {};
     if (card.type === "cloze") {
@@ -7727,7 +7872,7 @@
         "BW_READER_ANKI_FIELD_MAP",
         false
       );
-      result[textField] = String(card.cloze || "") +
+      result[textField] = ankiProjectionHtml(card.cloze || "") +
         provenanceFooter(textField);
       return result;
     }
@@ -7742,12 +7887,13 @@
       false
     );
     if (!back) {
-      result[front] = String(card.front || "") + "<hr>" +
-        String(card.back || "") + provenanceFooter(front);
+      result[front] = ankiProjectionHtml(card.front || "") + "<hr>" +
+        ankiProjectionHtml(card.back || "") + provenanceFooter(front);
       return result;
     }
-    result[front] = String(card.front || "");
-    result[back] = String(card.back || "") + provenanceFooter(back);
+    result[front] = ankiProjectionHtml(card.front || "");
+    result[back] = ankiProjectionHtml(card.back || "") +
+      provenanceFooter(back);
     return result;
   }
 

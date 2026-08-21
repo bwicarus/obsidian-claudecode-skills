@@ -1,10 +1,301 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace BwReader.ComputerVoiceAudio;
+
+internal sealed record ReaderPublicImage(byte[] Data, string ContentType);
+
+internal interface IReaderPublicImageFetcher
+{
+    Task<ReaderPublicImage> FetchAsync(
+        string url,
+        CancellationToken cancellationToken);
+}
+
+// Remote card images are open-world input. Do not hand their original URL to
+// AnkiConnect: its URL downloader has no Reader SSRF policy. This transport
+// resolves and checks every redirect hop, pins the verified address at the
+// socket boundary while retaining the original hostname for TLS/SNI, disables
+// environment proxies, and returns only bounded raster image bytes.
+internal sealed class BoundedReaderPublicImageFetcher :
+    IReaderPublicImageFetcher
+{
+    private const int MaximumRedirects = 5;
+    private const int MaximumBytes = 16 * 1024 * 1024;
+    private static readonly TimeSpan TotalTimeout = TimeSpan.FromSeconds(15);
+    private static readonly HashSet<string> ContentTypes = new(
+        StringComparer.OrdinalIgnoreCase)
+    {
+        "image/avif",
+        "image/bmp",
+        "image/gif",
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    };
+
+    public async Task<ReaderPublicImage> FetchAsync(
+        string url,
+        CancellationToken cancellationToken)
+    {
+        using CancellationTokenSource deadline =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+        deadline.CancelAfter(TotalTimeout);
+        Uri current = RequirePublicHttpsUri(url);
+        for (int hop = 0; hop <= MaximumRedirects; hop++)
+        {
+            IPAddress[] addresses = await Dns.GetHostAddressesAsync(
+                current.DnsSafeHost,
+                deadline.Token).ConfigureAwait(false);
+            if (addresses.Length == 0 || addresses.Any(
+                    address => !IsPublicAddress(address)))
+            {
+                throw new ReaderLocalAnkiException(
+                    "BW_READER_ANKI_MEDIA_URL_INVALID",
+                    "Anki 卡片图片地址解析到了非公网地址");
+            }
+            // Connect only to checked public IPv4 answers. Global IPv6 is
+            // ignored rather than trying to maintain a second allowlist for
+            // transition/special ranges (6to4, Teredo, NAT64, and successors).
+            // Any private/special answer in the complete DNS set above still
+            // rejects the URL, so a mixed public/private answer cannot bypass
+            // the policy.
+            IPAddress[] pinnedAddresses = addresses
+                .Where(address => address.AddressFamily
+                    == AddressFamily.InterNetwork)
+                .Distinct()
+                .ToArray();
+            if (pinnedAddresses.Length == 0)
+            {
+                throw new ReaderLocalAnkiException(
+                    "BW_READER_ANKI_MEDIA_URL_INVALID",
+                    "Anki 卡片图片地址没有可验证的公网 IPv4");
+            }
+
+            using SocketsHttpHandler handler = new()
+            {
+                AllowAutoRedirect = false,
+                AutomaticDecompression = DecompressionMethods.None,
+                ConnectTimeout = TimeSpan.FromSeconds(4),
+                UseCookies = false,
+                UseProxy = false,
+            };
+            string expectedHost = current.DnsSafeHost;
+            int expectedPort = current.Port;
+            handler.ConnectCallback = async (context, token) =>
+            {
+                if (!string.Equals(
+                        context.DnsEndPoint.Host,
+                        expectedHost,
+                        StringComparison.OrdinalIgnoreCase)
+                    || context.DnsEndPoint.Port != expectedPort)
+                {
+                    throw new HttpRequestException(
+                        "public image socket target changed");
+                }
+                Exception? last = null;
+                foreach (IPAddress address in pinnedAddresses)
+                {
+                    Socket socket = new(
+                        address.AddressFamily,
+                        SocketType.Stream,
+                        ProtocolType.Tcp);
+                    try
+                    {
+                        await socket.ConnectAsync(
+                            new IPEndPoint(address, expectedPort),
+                            token).ConfigureAwait(false);
+                        return new NetworkStream(socket, ownsSocket: true);
+                    }
+                    catch (Exception exception) when (
+                        exception is SocketException
+                        or OperationCanceledException)
+                    {
+                        socket.Dispose();
+                        last = exception;
+                        if (exception is OperationCanceledException)
+                        {
+                            throw;
+                        }
+                    }
+                }
+                throw new HttpRequestException(
+                    "public image connection failed",
+                    last);
+            };
+            using HttpClient client = new(handler)
+            {
+                Timeout = Timeout.InfiniteTimeSpan,
+            };
+            using HttpRequestMessage request = new(HttpMethod.Get, current);
+            request.Headers.TryAddWithoutValidation(
+                "Accept",
+                "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.1");
+            request.Headers.TryAddWithoutValidation(
+                "User-Agent",
+                "BW-Reader-Anki-Media/1.0");
+            using HttpResponseMessage response = await client.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                deadline.Token).ConfigureAwait(false);
+            if (IsRedirect(response.StatusCode))
+            {
+                if (hop == MaximumRedirects
+                    || response.Headers.Location is not Uri location)
+                {
+                    throw new ReaderLocalAnkiException(
+                        "BW_READER_ANKI_MEDIA_FETCH_FAILED",
+                        "Anki 卡片图片重定向无效",
+                        retryable: true);
+                }
+                current = RequirePublicHttpsUri(
+                    location.IsAbsoluteUri
+                        ? location.AbsoluteUri
+                        : new Uri(current, location).AbsoluteUri);
+                continue;
+            }
+            if (response.StatusCode != HttpStatusCode.OK)
+            {
+                throw new ReaderLocalAnkiException(
+                    "BW_READER_ANKI_MEDIA_FETCH_FAILED",
+                    "Anki 卡片图片返回 HTTP "
+                        + (int)response.StatusCode,
+                    retryable: true);
+            }
+            string contentType = response.Content.Headers.ContentType
+                ?.MediaType?.Trim().ToLowerInvariant() ?? "";
+            if (!ContentTypes.Contains(contentType))
+            {
+                throw new ReaderLocalAnkiException(
+                    "BW_READER_ANKI_MEDIA_TYPE_INVALID",
+                    "Anki 卡片图片类型不受支持");
+            }
+            if (response.Content.Headers.ContentLength is long declared
+                && declared > MaximumBytes)
+            {
+                throw new ReaderLocalAnkiException(
+                    "BW_READER_ANKI_MEDIA_TOO_LARGE",
+                    "Anki 卡片图片超过 16 MiB");
+            }
+            await using Stream input = await response.Content
+                .ReadAsStreamAsync(deadline.Token).ConfigureAwait(false);
+            using MemoryStream output = new();
+            byte[] buffer = new byte[64 * 1024];
+            while (true)
+            {
+                int read = await input.ReadAsync(
+                    buffer,
+                    deadline.Token).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    break;
+                }
+                if (output.Length + read > MaximumBytes)
+                {
+                    throw new ReaderLocalAnkiException(
+                        "BW_READER_ANKI_MEDIA_TOO_LARGE",
+                        "Anki 卡片图片超过 16 MiB");
+                }
+                output.Write(buffer, 0, read);
+            }
+            if (output.Length == 0)
+            {
+                throw new ReaderLocalAnkiException(
+                    "BW_READER_ANKI_MEDIA_FETCH_FAILED",
+                    "Anki 卡片图片为空",
+                    retryable: true);
+            }
+            return new ReaderPublicImage(output.ToArray(), contentType);
+        }
+        throw new ReaderLocalAnkiException(
+            "BW_READER_ANKI_MEDIA_FETCH_FAILED",
+            "Anki 卡片图片重定向过多",
+            retryable: true);
+    }
+
+    internal static Uri RequirePublicHttpsUri(string value)
+    {
+        string source = value.Trim();
+        if (source != value
+            || source.Length is < 1 or > 4096
+            || source.Any(character => char.IsControl(character))
+            || source.Contains('\\')
+            || !Uri.TryCreate(source, UriKind.Absolute, out Uri? parsed)
+            || parsed.Scheme != Uri.UriSchemeHttps
+            || string.IsNullOrWhiteSpace(parsed.Host)
+            || !string.IsNullOrEmpty(parsed.UserInfo)
+            || !string.IsNullOrEmpty(parsed.Fragment)
+            || !parsed.IsDefaultPort)
+        {
+            throw new ReaderLocalAnkiException(
+                "BW_READER_ANKI_MEDIA_URL_INVALID",
+                "Anki 卡片远程图片只允许无凭据的绝对 HTTPS 地址");
+        }
+        string host = parsed.DnsSafeHost.TrimEnd('.').ToLowerInvariant();
+        if (host == "localhost"
+            || host.EndsWith(".localhost", StringComparison.Ordinal)
+            || host.EndsWith(".local", StringComparison.Ordinal)
+            || host.EndsWith(".internal", StringComparison.Ordinal)
+            || host.EndsWith(".ts.net", StringComparison.Ordinal))
+        {
+            throw new ReaderLocalAnkiException(
+                "BW_READER_ANKI_MEDIA_URL_INVALID",
+                "Anki 卡片图片地址不能指向本机或内网");
+        }
+        return parsed;
+    }
+
+    internal static bool IsPublicAddress(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6)
+        {
+            return IsPublicAddress(address.MapToIPv4());
+        }
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            byte[] bytes = address.GetAddressBytes();
+            return !IPAddress.IsLoopback(address)
+                && !address.IsIPv6LinkLocal
+                && !address.IsIPv6SiteLocal
+                && !address.IsIPv6Multicast
+                && !address.IsIPv6UniqueLocal
+                && !address.Equals(IPAddress.IPv6Any)
+                && !(bytes[0] == 0x20 && bytes[1] == 0x01
+                    && bytes[2] == 0x0d && bytes[3] == 0xb8);
+        }
+        if (address.AddressFamily != AddressFamily.InterNetwork)
+        {
+            return false;
+        }
+        byte[] octets = address.GetAddressBytes();
+        return octets[0] switch
+        {
+            0 or 10 or 127 => false,
+            100 when octets[1] is >= 64 and <= 127 => false,
+            169 when octets[1] == 254 => false,
+            172 when octets[1] is >= 16 and <= 31 => false,
+            192 when octets[1] == 168 => false,
+            192 when octets[1] == 0 && octets[2] is 0 or 2 => false,
+            198 when octets[1] is 18 or 19 or 51 => false,
+            203 when octets[1] == 0 && octets[2] == 113 => false,
+            >= 224 => false,
+            _ => true,
+        };
+    }
+
+    private static bool IsRedirect(HttpStatusCode status) => status is
+        HttpStatusCode.MovedPermanently
+        or HttpStatusCode.Redirect
+        or HttpStatusCode.RedirectMethod
+        or HttpStatusCode.TemporaryRedirect
+        or HttpStatusCode.PermanentRedirect;
+}
 
 internal sealed class ReaderLocalAnkiException : Exception
 {
@@ -30,7 +321,8 @@ internal sealed record ReaderLocalAnkiRegisteredCard(
     string File,
     JsonObject Target,
     string SourceText,
-    JsonObject Card);
+    JsonObject CanonicalCard,
+    JsonObject ProjectionCard);
 
 internal sealed record ReaderLocalAnkiAddResult(
     long[] NoteIds,
@@ -194,12 +486,28 @@ internal sealed class ReaderLocalAnkiRegistry
         string sourceInstanceId,
         string draftId,
         int cardIndex,
-        JsonObject suppliedCard,
+        JsonObject suppliedCanonicalCard,
+        JsonObject suppliedProjectionCard,
         CancellationToken cancellationToken)
     {
         RequireSafeSource(sourceInstanceId);
         RequireDraftId(draftId);
-        JsonObject normalizedCard = NormalizeCard(suppliedCard);
+        // Canonical Reader Markdown owns semantic identity. The HTML sent to
+        // Anki is a derived projection and may change when the Markdown
+        // renderer/sanitizer is upgraded; it must never change an existing
+        // aid fingerprint by itself.
+        JsonObject canonicalCard = NormalizeProjectionCard(
+            suppliedCanonicalCard);
+        JsonObject projectionCard = NormalizeProjectionCard(
+            suppliedProjectionCard);
+        if (!string.Equals(
+                canonicalCard["type"]!.GetValue<string>(),
+                projectionCard["type"]!.GetValue<string>(),
+                StringComparison.Ordinal))
+        {
+            throw Invalid(
+                "Reader 本地 Anki canonical 与 projection 类型不一致");
+        }
         if (cardIndex is < 0 or >= 20)
         {
             throw Invalid("Reader 本地 Anki 卡片序号无效");
@@ -243,7 +551,8 @@ internal sealed class ReaderLocalAnkiRegistry
                 ((JsonObject)draft["target"]!).DeepClone()
                     .AsObject(),
                 draft["sourceText"]!.GetValue<string>(),
-                normalizedCard);
+                canonicalCard,
+                projectionCard);
         }, write: false, cancellationToken);
     }
 
@@ -503,7 +812,15 @@ internal sealed class ReaderLocalAnkiRegistry
         }, cancellationToken);
     }
 
-    internal static JsonObject NormalizeCard(JsonObject card)
+    internal static JsonObject NormalizeCard(JsonObject card) =>
+        NormalizeCard(card, maximumTextLength: 64_000);
+
+    internal static JsonObject NormalizeProjectionCard(JsonObject card) =>
+        NormalizeCard(card, maximumTextLength: 64_000);
+
+    private static JsonObject NormalizeCard(
+        JsonObject card,
+        int maximumTextLength)
     {
         using JsonDocument document = JsonDocument.Parse(
             card.ToJsonString(DirectBridgeContract.JsonOptions));
@@ -521,8 +838,10 @@ internal sealed class ReaderLocalAnkiRegistry
             return new JsonObject
             {
                 ["type"] = "basic",
-                ["front"] = RequireCardText(value, "front", false),
-                ["back"] = RequireCardText(value, "back", true),
+                ["front"] = RequireCardText(
+                    value, "front", false, maximumTextLength),
+                ["back"] = RequireCardText(
+                    value, "back", true, maximumTextLength),
             };
         }
         if (type == "cloze")
@@ -531,7 +850,8 @@ internal sealed class ReaderLocalAnkiRegistry
             return new JsonObject
             {
                 ["type"] = "cloze",
-                ["cloze"] = RequireCardText(value, "cloze", false),
+                ["cloze"] = RequireCardText(
+                    value, "cloze", false, maximumTextLength),
             };
         }
         throw Invalid("Reader 本地 Anki 卡片类型无效");
@@ -545,7 +865,7 @@ internal sealed class ReaderLocalAnkiRegistry
             ["sourceInstanceId"] = registered.SourceInstanceId,
             ["draftId"] = registered.DraftId,
             ["cardIndex"] = registered.CardIndex,
-            ["card"] = registered.Card.DeepClone(),
+            ["card"] = registered.CanonicalCard.DeepClone(),
         };
         return Convert.ToHexString(SHA256.HashData(
             Encoding.UTF8.GetBytes(canonical.ToJsonString(
@@ -613,6 +933,12 @@ internal sealed class ReaderLocalAnkiRegistry
                 throw Invalid("Reader 本地 Anki 卡片无效");
             }
             normalizedCards.Add(NormalizeCard(card));
+        }
+        if (Encoding.UTF8.GetByteCount(normalizedCards.ToJsonString(
+                DirectBridgeContract.JsonOptions)) > 192 * 1024)
+        {
+            throw Invalid(
+                "Reader 本地 Anki 草稿卡面总量超过 192 KiB 安全上限");
         }
         return new JsonObject
         {
@@ -1153,12 +1479,13 @@ internal sealed class ReaderLocalAnkiRegistry
     private static string RequireCardText(
         JsonElement card,
         string name,
-        bool allowEmpty)
+        bool allowEmpty,
+        int maximumLength = 8000)
     {
         if (!card.TryGetProperty(name, out JsonElement field)
             || field.ValueKind != JsonValueKind.String
             || field.GetString() is not string value
-            || value.Length > 8000
+            || value.Length > maximumLength
             || (!allowEmpty && value.Length == 0)
             || value.Contains('\0'))
         {
@@ -1318,7 +1645,8 @@ internal interface IReaderLocalAnkiWriter
         string draftId,
         int cardIndex,
         string aid,
-        JsonObject card,
+        JsonObject canonicalCard,
+        JsonObject projectionCard,
         CancellationToken cancellationToken);
 
     Task<JsonObject> OperateAsync(
@@ -1329,20 +1657,46 @@ internal interface IReaderLocalAnkiWriter
 internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
 {
     private const string DeckName = "QA";
+    private const int MaximumProjectionImages = 8;
+    private const long MaximumProjectionImageBytes = 32L * 1024 * 1024;
+    private static readonly TimeSpan ProjectionImageDeadline =
+        TimeSpan.FromSeconds(30);
+    private static readonly Regex ImageTagStartPattern = new(
+        @"(?is)<img\b",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex ImageTagPattern = new(
+        @"(?is)<img\b[^>]*>",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex ImageSourcePattern = new(
+        @"(?is)(?<prefix><img\b[^>]*?\bsrc\s*=\s*)(?<quote>[""'])(?<src>[^""'<>]*?)\k<quote>",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex ImageSourceTokenPattern = new(
+        @"(?is)(?<![A-Za-z0-9_:-])src\s*=",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex QuotedAttributeValuePattern = new(
+        @"(?is)([""']).*?\1",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex NetworkMarkupPattern = new(
+        @"(?is)^<\s*(?:audio|base|embed|iframe|link|meta|object|script|source|style|svg|track|video)\b|(?<![A-Za-z0-9_:-])(?:background|data|formaction|manifest|ping|poster|srcset|style|xlink:href)\s*=|(?<![A-Za-z0-9_:-])on[a-z0-9_-]+\s*=",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly SemaphoreSlim AddGate = new(1, 1);
     private static readonly SemaphoreSlim OperationGate = AddGate;
 
     private readonly ReaderLocalAnkiRegistry _registry;
     private readonly IReaderAnkiConnectClient _client;
+    private readonly IReaderPublicImageFetcher _imageFetcher;
     private readonly object _backgroundSyncLock = new();
     private Task<ReaderLocalAnkiSyncOutcome>? _backgroundSync;
 
     internal ReaderLocalAnkiWriter(
         ReaderLocalAnkiRegistry registry,
-        IReaderAnkiConnectClient? client = null)
+        IReaderAnkiConnectClient? client = null,
+        IReaderPublicImageFetcher? imageFetcher = null)
     {
         _registry = registry;
         _client = client ?? new FixedLoopbackAnkiConnectClient();
+        _imageFetcher = imageFetcher
+            ?? new BoundedReaderPublicImageFetcher();
     }
 
     public async Task<ReaderLocalAnkiWriteOutcome> AddAsync(
@@ -1350,7 +1704,8 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
         string draftId,
         int cardIndex,
         string aid,
-        JsonObject card,
+        JsonObject canonicalCard,
+        JsonObject projectionCard,
         CancellationToken cancellationToken)
     {
         ReaderLocalAnkiRegistry.RequireAid(aid);
@@ -1359,7 +1714,8 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
                 sourceInstanceId,
                 draftId,
                 cardIndex,
-                card,
+                canonicalCard,
+                projectionCard,
                 cancellationToken).ConfigureAwait(false);
         string fingerprint = ReaderLocalAnkiRegistry.Fingerprint(registered);
         await AddGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -1651,6 +2007,14 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
     {
         long noteId = request.NoteIds[0];
         JsonObject desired = NormalizeFields(request.Fields!);
+        // A prior update may already have committed. Re-fetching a remote
+        // image at this point could write different bytes under the same
+        // logical retry, so an image-bearing pending mutation is never
+        // inspected or replayed automatically.
+        if (receipt?.State == "pending" && ContainsImageMarkup(desired))
+        {
+            throw UnknownOperationOutcome();
+        }
         JsonArray info = await ReadInfoAsync(
             "notesInfo",
             "notes",
@@ -1668,6 +2032,19 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
                 "Anki 中找不到要修改的 note");
         }
         ValidateFieldsExist(note, desired);
+        try
+        {
+            desired = await LocalizeRemoteImagesAsync(
+                desired,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (ReaderAnkiConnectException exception)
+        {
+            // storeMediaFile is deterministic and happens before the note
+            // mutation claim. A failed response is safe to retry under the
+            // same filename; it must not fence the update as outcome-unknown.
+            throw MapOperationConnectFailure(exception);
+        }
         bool alreadyApplied = FieldsMatch(note, desired);
         if (receipt?.State == "pending")
         {
@@ -2557,7 +2934,7 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
         string[] models = RequireStrings(await _client.CallAsync(
             "modelNames", new JsonObject(), cancellationToken)
             .ConfigureAwait(false));
-        string type = registered.Card["type"]!.GetValue<string>();
+        string type = registered.ProjectionCard["type"]!.GetValue<string>();
         string model = type == "cloze"
             ? PickModel(models, "Cloze", "填空题", "挖空题")
             : PickModel(models, "Basic", "基础的", "基本");
@@ -2576,7 +2953,9 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
             new JsonObject { ["deck"] = DeckName },
             cancellationToken).ConfigureAwait(false);
 
-        JsonObject noteFields = BuildFields(registered, type, fields);
+        JsonObject noteFields = await LocalizeRemoteImagesAsync(
+            BuildFields(registered, type, fields),
+            cancellationToken).ConfigureAwait(false);
         return new ReaderLocalAnkiPreparedNote(
             model,
             noteFields,
@@ -2725,7 +3104,8 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
         JsonObject result = new();
         if (type == "cloze")
         {
-            result[fields[0]] = registered.Card["cloze"]!.GetValue<string>();
+            result[fields[0]] = registered.ProjectionCard["cloze"]!
+                .GetValue<string>();
             if (fields.Length > 1)
             {
                 result[fields[1]] = footer;
@@ -2737,8 +3117,9 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
             }
             return result;
         }
-        string front = registered.Card["front"]!.GetValue<string>();
-        string back = registered.Card["back"]!.GetValue<string>() + footer;
+        string front = registered.ProjectionCard["front"]!.GetValue<string>();
+        string back = registered.ProjectionCard["back"]!.GetValue<string>()
+            + footer;
         result[fields[0]] = front;
         if (fields.Length > 1)
         {
@@ -2749,6 +3130,365 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
             result[fields[0]] = front + "<hr>" + back;
         }
         return result;
+    }
+
+    private async Task<JsonObject> LocalizeRemoteImagesAsync(
+        JsonObject fields,
+        CancellationToken cancellationToken)
+    {
+        JsonObject result = fields.DeepClone().AsObject();
+        HashSet<string> remoteSources = new(StringComparer.Ordinal);
+        foreach ((string name, JsonNode? node) in result.ToArray())
+        {
+            string html = node?.GetValue<string>() ?? "";
+            foreach (string source in RequireImageSources(html))
+            {
+                if (!Uri.TryCreate(source, UriKind.Absolute, out _))
+                {
+                    RequireLocalMediaName(source);
+                    continue;
+                }
+                Uri remote = BoundedReaderPublicImageFetcher
+                    .RequirePublicHttpsUri(source);
+                remoteSources.Add(remote.AbsoluteUri);
+            }
+        }
+        if (remoteSources.Count == 0)
+        {
+            return result;
+        }
+        if (remoteSources.Count > MaximumProjectionImages)
+        {
+            throw new ReaderLocalAnkiException(
+                "BW_READER_ANKI_MEDIA_LIMIT_EXCEEDED",
+                "一次 Anki 操作最多处理 8 张远程图片");
+        }
+
+        using CancellationTokenSource deadline =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+        deadline.CancelAfter(ProjectionImageDeadline);
+        Dictionary<string, string> localized = new(StringComparer.Ordinal);
+        Dictionary<string, ReaderPublicImage> pendingFiles =
+            new(StringComparer.Ordinal);
+        long totalBytes = 0;
+        foreach (string source in remoteSources)
+        {
+            ReaderPublicImage image;
+            try
+            {
+                image = await _imageFetcher.FetchAsync(
+                    source,
+                    deadline.Token).ConfigureAwait(false);
+            }
+            catch (ReaderLocalAnkiException)
+            {
+                throw;
+            }
+            catch (OperationCanceledException) when (
+                !cancellationToken.IsCancellationRequested)
+            {
+                throw new ReaderLocalAnkiException(
+                    "BW_READER_ANKI_MEDIA_TIMEOUT",
+                    "Anki 卡片图片处理超过 30 秒",
+                    retryable: true);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (
+                exception is HttpRequestException
+                or IOException
+                or SocketException)
+            {
+                throw new ReaderLocalAnkiException(
+                    "BW_READER_ANKI_MEDIA_FETCH_FAILED",
+                    "Anki 卡片图片下载失败",
+                    retryable: true,
+                    innerException: exception);
+            }
+            ValidateImageContent(image.Data, image.ContentType);
+            totalBytes += image.Data.LongLength;
+            if (totalBytes > MaximumProjectionImageBytes)
+            {
+                throw new ReaderLocalAnkiException(
+                    "BW_READER_ANKI_MEDIA_LIMIT_EXCEEDED",
+                    "一次 Anki 操作的图片总量不能超过 32 MiB");
+            }
+            string file = DeterministicMediaFileName(
+                image.Data,
+                image.ContentType);
+            localized[source] = file;
+            pendingFiles.TryAdd(file, image);
+        }
+
+        // Fetch and validate the complete bounded set before writing any Anki
+        // media. This prevents a ninth/oversized/bad-magic image from leaving
+        // a partially projected operation behind.
+        foreach ((string file, ReaderPublicImage image) in pendingFiles)
+        {
+            JsonNode? response;
+            try
+            {
+                response = await _client.CallAsync(
+                    "storeMediaFile",
+                    new JsonObject
+                    {
+                        ["filename"] = file,
+                        ["data"] = Convert.ToBase64String(image.Data),
+                    },
+                    deadline.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (
+                !cancellationToken.IsCancellationRequested)
+            {
+                throw new ReaderLocalAnkiException(
+                    "BW_READER_ANKI_MEDIA_TIMEOUT",
+                    "Anki 卡片图片处理超过 30 秒",
+                    retryable: true);
+            }
+            if (response is not JsonValue value
+                || !value.TryGetValue(out string? returned)
+                || !string.Equals(returned, file, StringComparison.Ordinal))
+            {
+                throw new ReaderAnkiConnectException(
+                    ReaderAnkiConnectFailure.InvalidResponse,
+                    "AnkiConnect storeMediaFile 响应无效");
+            }
+        }
+
+        foreach ((string name, JsonNode? node) in result.ToArray())
+        {
+            string html = node?.GetValue<string>() ?? "";
+            MatchCollection matches = ImageSourcePattern.Matches(html);
+            if (matches.Count == 0)
+            {
+                continue;
+            }
+            StringBuilder output = new(html.Length + 64);
+            int offset = 0;
+            foreach (Match match in matches)
+            {
+                Group sourceGroup = match.Groups["src"];
+                output.Append(html, offset, sourceGroup.Index - offset);
+                string encodedSource = sourceGroup.Value;
+                string source = WebUtility.HtmlDecode(encodedSource);
+                if (!Uri.TryCreate(source, UriKind.Absolute, out _))
+                {
+                    output.Append(encodedSource);
+                    offset = sourceGroup.Index + sourceGroup.Length;
+                    continue;
+                }
+                Uri remote = BoundedReaderPublicImageFetcher
+                    .RequirePublicHttpsUri(source);
+                string file = localized[remote.AbsoluteUri];
+                output.Append(file);
+                offset = sourceGroup.Index + sourceGroup.Length;
+            }
+            output.Append(html, offset, html.Length - offset);
+            result[name] = output.ToString();
+        }
+        return result;
+    }
+
+    internal static string DeterministicMediaFileName(
+        byte[] content,
+        string contentType)
+    {
+        string normalizedType = contentType.Split(';', 2)[0]
+            .Trim().ToLowerInvariant();
+        ValidateImageContent(content, normalizedType);
+        string extension = normalizedType switch
+        {
+            "image/avif" => ".avif",
+            "image/bmp" => ".bmp",
+            "image/gif" => ".gif",
+            "image/jpeg" => ".jpg",
+            "image/png" => ".png",
+            "image/webp" => ".webp",
+            _ => throw new ReaderLocalAnkiException(
+                "BW_READER_ANKI_MEDIA_TYPE_INVALID",
+                "Anki 卡片图片类型不受支持"),
+        };
+        string digest = Convert.ToHexString(SHA256.HashData(
+            content)).ToLowerInvariant();
+        return "bw-reader-img-" + digest + extension;
+    }
+
+    private static bool ContainsImageMarkup(JsonObject fields) =>
+        fields.Any(pair => ImageTagStartPattern.IsMatch(
+            pair.Value?.GetValue<string>() ?? ""));
+
+    private static IReadOnlyList<string> RequireImageSources(string html)
+    {
+        foreach (string tag in ScanStartTags(html))
+        {
+            string withoutValues = QuotedAttributeValuePattern.Replace(
+                tag,
+                "\"\"");
+            bool imageTag = Regex.IsMatch(
+                tag,
+                @"(?is)^<\s*img\b");
+            if (NetworkMarkupPattern.IsMatch(withoutValues)
+                || (!imageTag
+                    && ImageSourceTokenPattern.IsMatch(withoutValues)))
+            {
+                throw InvalidImageMarkup();
+            }
+        }
+        MatchCollection starts = ImageTagStartPattern.Matches(html);
+        MatchCollection tags = ImageTagPattern.Matches(html);
+        if (starts.Count != tags.Count)
+        {
+            throw InvalidImageMarkup();
+        }
+        List<string> sources = [];
+        foreach (Match tag in tags)
+        {
+            string withoutValues = QuotedAttributeValuePattern.Replace(
+                tag.Value,
+                "\"\"");
+            if (ImageSourceTokenPattern.Matches(withoutValues).Count != 1)
+            {
+                throw InvalidImageMarkup();
+            }
+            Match source = ImageSourcePattern.Match(tag.Value);
+            if (!source.Success)
+            {
+                // Unquoted src (and any malformed or duplicate residue) must
+                // not survive the page-side sanitizer boundary.
+                throw InvalidImageMarkup();
+            }
+            sources.Add(WebUtility.HtmlDecode(source.Groups["src"].Value));
+        }
+        return sources;
+    }
+
+    private static IReadOnlyList<string> ScanStartTags(string html)
+    {
+        List<string> tags = [];
+        for (int index = 0; index < html.Length; index++)
+        {
+            if (html[index] != '<'
+                || index + 1 >= html.Length
+                || !IsAsciiLetter(html[index + 1]))
+            {
+                continue;
+            }
+            int start = index;
+            char quote = '\0';
+            bool closed = false;
+            for (int cursor = index + 2; cursor < html.Length; cursor++)
+            {
+                char current = html[cursor];
+                // A literal nested '<' cannot occur in a well-formed HTML
+                // start tag, including inside a quoted attribute value. Stop
+                // rather than accidentally consuming a later tag as the end
+                // of an unterminated one.
+                if (current == '<')
+                {
+                    throw InvalidImageMarkup();
+                }
+                if (quote != '\0')
+                {
+                    if (current == quote)
+                    {
+                        quote = '\0';
+                    }
+                    continue;
+                }
+                if (current is '\'' or '"')
+                {
+                    quote = current;
+                    continue;
+                }
+                if (current != '>')
+                {
+                    continue;
+                }
+                tags.Add(html[start..(cursor + 1)]);
+                index = cursor;
+                closed = true;
+                break;
+            }
+            if (!closed || quote != '\0')
+            {
+                throw InvalidImageMarkup();
+            }
+        }
+        return tags;
+    }
+
+    private static bool IsAsciiLetter(char value) =>
+        value is >= 'A' and <= 'Z' or >= 'a' and <= 'z';
+
+    private static ReaderLocalAnkiException InvalidImageMarkup() => new(
+        "BW_READER_ANKI_MEDIA_MARKUP_INVALID",
+        "Anki 卡片图片 HTML 含有未允许的媒体标签或属性");
+
+    private static void ValidateImageContent(byte[] content, string contentType)
+    {
+        ReadOnlySpan<byte> data = content;
+        string type = contentType.Split(';', 2)[0]
+            .Trim().ToLowerInvariant();
+        bool valid = type switch
+        {
+            "image/png" => data.Length >= 8
+                && data[..8].SequenceEqual(
+                    new byte[] { 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a }),
+            "image/jpeg" => data.Length >= 3
+                && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff,
+            "image/gif" => data.Length >= 6
+                && (data[..6].SequenceEqual("GIF87a"u8)
+                    || data[..6].SequenceEqual("GIF89a"u8)),
+            "image/bmp" => data.Length >= 2
+                && data[..2].SequenceEqual("BM"u8),
+            "image/webp" => data.Length >= 12
+                && data[..4].SequenceEqual("RIFF"u8)
+                && data.Slice(8, 4).SequenceEqual("WEBP"u8),
+            "image/avif" => IsAvif(data),
+            _ => false,
+        };
+        if (!valid)
+        {
+            throw new ReaderLocalAnkiException(
+                "BW_READER_ANKI_MEDIA_TYPE_INVALID",
+                "Anki 卡片图片内容与声明类型不一致");
+        }
+    }
+
+    private static bool IsAvif(ReadOnlySpan<byte> data)
+    {
+        if (data.Length < 12 || !data.Slice(4, 4).SequenceEqual("ftyp"u8))
+        {
+            return false;
+        }
+        int maximum = Math.Min(data.Length - 3, 64);
+        for (int index = 8; index < maximum; index += 4)
+        {
+            ReadOnlySpan<byte> brand = data.Slice(index, 4);
+            if (brand.SequenceEqual("avif"u8)
+                || brand.SequenceEqual("avis"u8))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void RequireLocalMediaName(string source)
+    {
+        if (source.Length is < 1 or > 255
+            || source is "." or ".."
+            || source.Any(character => char.IsControl(character))
+            || source.IndexOfAny(['/', '\\', ':', '<', '>', '"', '|', '?', '*', '#'])
+                >= 0)
+        {
+            throw new ReaderLocalAnkiException(
+                "BW_READER_ANKI_MEDIA_URL_INVALID",
+                "Anki 卡片图片只能引用已有媒体文件或绝对 HTTPS 地址");
+        }
     }
 
     private static string ProvenanceFooter(
@@ -2767,7 +3507,7 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
         };
         string source = WebUtility.HtmlEncode(
             registered.File + (location.Length > 0 ? "#" + location : ""));
-        return "<hr><div style=\"font-size:0.85em;color:#666;\">"
+        return "<hr><div class=\"bw-reader-anki-source\">"
             + "来源：" + source + "</div>";
     }
 

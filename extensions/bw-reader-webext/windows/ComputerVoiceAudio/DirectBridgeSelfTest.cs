@@ -1391,12 +1391,48 @@ internal static class DirectBridgeSelfTest
         await registry.RegisterDraftAsync(
             draft,
             CancellationToken.None).ConfigureAwait(false);
+        JsonObject editedCanonical = new()
+        {
+            ["type"] = "basic",
+            ["front"] = "用户编辑后的问题",
+            ["back"] = "用户编辑后的答案",
+        };
+        ReaderLocalAnkiRegisteredCard projectionV1 =
+            await registry.ResolveCardAsync(
+                "source-local-anki",
+                "draft-" + new string('a', 32),
+                0,
+                editedCanonical,
+                new JsonObject
+                {
+                    ["type"] = "basic",
+                    ["front"] = "<p>用户编辑后的问题</p>",
+                    ["back"] = "<p>用户编辑后的答案</p>",
+                },
+                CancellationToken.None).ConfigureAwait(false);
+        ReaderLocalAnkiRegisteredCard projectionV2 =
+            await registry.ResolveCardAsync(
+                "source-local-anki",
+                "draft-" + new string('a', 32),
+                0,
+                editedCanonical,
+                new JsonObject
+                {
+                    ["type"] = "basic",
+                    ["front"] = "<div>用户编辑后的问题</div>",
+                    ["back"] = "<div>用户编辑后的答案</div>",
+                },
+                CancellationToken.None).ConfigureAwait(false);
+        bool projectionFingerprintStable =
+            ReaderLocalAnkiRegistry.Fingerprint(projectionV1)
+            == ReaderLocalAnkiRegistry.Fingerprint(projectionV2);
         await registry.RegisterDraftAsync(
             draft,
             CancellationToken.None).ConfigureAwait(false);
 
         FakeReaderAnkiConnectClient anki = new();
-        ReaderLocalAnkiWriter writer = new(registry, anki);
+        FakeReaderPublicImageFetcher images = new();
+        ReaderLocalAnkiWriter writer = new(registry, anki, images);
         DirectBridgeConfigStore store = new(configPath);
         _ = store.SetContextDeliveryMode(
             DirectContextDeliveryMode.SnapshotMcp);
@@ -1481,6 +1517,38 @@ internal static class DirectBridgeSelfTest
                     front = "Q",
                     back = "A",
                 },
+                projection = new
+                {
+                    type = "basic",
+                    front = "Q",
+                    back = "A",
+                },
+            },
+            events,
+            frames).ConfigureAwait(false);
+        JsonElement projectionTypeMismatch = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-add-cards-local",
+                requestId = "request-local-anki-projection-type-mismatch",
+                sessionId,
+                sourceInstanceId = "source-local-anki",
+                draftId = "draft-" + new string('a', 32),
+                cardIndex = 0,
+                aid = "fc_" + new string('9', 32),
+                card = new
+                {
+                    type = "basic",
+                    front = "Q",
+                    back = "A",
+                },
+                projection = new
+                {
+                    type = "cloze",
+                    cloze = "{{c1::Q}}",
+                },
             },
             events,
             frames).ConfigureAwait(false);
@@ -1498,7 +1566,16 @@ internal static class DirectBridgeSelfTest
             {
                 type = "basic",
                 front = "用户编辑后的问题",
-                back = "用户编辑后的答案",
+                back = "用户编辑后的答案\n\n![配图](https://images.example.test/soup.png)"
+                    + "\n\n![配图](https://images.example.test/soup.png)",
+            },
+            projection = new
+            {
+                type = "basic",
+                front = "用户编辑后的问题",
+                back = "<p>用户编辑后的答案</p>"
+                    + "<img src=\"https://images.example.test/soup.png\">"
+                    + "<img src=\"https://images.example.test/soup.png\">",
             },
         };
         JsonElement first = RequireSuccess(
@@ -1509,6 +1586,8 @@ internal static class DirectBridgeSelfTest
             await SendAsync(session, addRequest, events, frames)
                 .ConfigureAwait(false),
             "anki-add-cards-local");
+        string? primaryAddedFront = anki.LastAddedFront;
+        string? primaryAddedBack = anki.LastAddedBack;
         JsonElement mismatch = await SendAsync(
             session,
             new
@@ -1522,6 +1601,12 @@ internal static class DirectBridgeSelfTest
                 cardIndex = 0,
                 aid = "fc_" + new string('c', 32),
                 card = new
+                {
+                    type = "basic",
+                    front = "Q",
+                    back = "A",
+                },
+                projection = new
                 {
                     type = "basic",
                     front = "Q",
@@ -1599,7 +1684,8 @@ internal static class DirectBridgeSelfTest
             fields = new Dictionary<string, string>
             {
                 ["正面"] = "修改后的问题",
-                ["背面"] = "修改后的答案",
+                ["背面"] = "<p>修改后的答案</p>"
+                    + "<img src=\"https://images.example.test/edit.jpg?x=1&amp;y=2\">",
             },
             syncMode = "wait",
         };
@@ -1611,6 +1697,240 @@ internal static class DirectBridgeSelfTest
             await SendAsync(session, updateRequest, events, frames)
                 .ConfigureAwait(false),
             "anki-card-operation-local");
+        JsonElement unsafeImageUpdate = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-card-operation-local",
+                requestId = "request-local-anki-update-unsafe-image",
+                sessionId,
+                operation = "update-note-fields",
+                mutationId = "mutation-update-unsafe-image",
+                noteId = 101,
+                fields = new Dictionary<string, string>
+                {
+                    ["背面"] = "<img src=\"http://127.0.0.1/private.png\">",
+                },
+                syncMode = "wait",
+            },
+            events,
+            frames).ConfigureAwait(false);
+        JsonElement unquotedImageUpdate = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-card-operation-local",
+                requestId = "request-local-anki-update-unquoted-image",
+                sessionId,
+                operation = "update-note-fields",
+                mutationId = "mutation-update-unquoted-image",
+                noteId = 101,
+                fields = new Dictionary<string, string>
+                {
+                    ["背面"] = "<img src=https://images.example.test/unquoted.png>",
+                },
+                syncMode = "wait",
+            },
+            events,
+            frames).ConfigureAwait(false);
+        JsonElement duplicateImageUpdate = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-card-operation-local",
+                requestId = "request-local-anki-update-duplicate-image",
+                sessionId,
+                operation = "update-note-fields",
+                mutationId = "mutation-update-duplicate-image",
+                noteId = 101,
+                fields = new Dictionary<string, string>
+                {
+                    ["背面"] = "<img src=\"local-a.png\" src=\"local-b.png\">",
+                },
+                syncMode = "wait",
+            },
+            events,
+            frames).ConfigureAwait(false);
+        JsonElement unquotedStyleUpdate = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-card-operation-local",
+                requestId = "request-local-anki-update-unquoted-style",
+                sessionId,
+                operation = "update-note-fields",
+                mutationId = "mutation-update-unquoted-style",
+                noteId = 101,
+                fields = new Dictionary<string, string>
+                {
+                    ["背面"] = "<p style=color:red>unsafe</p>",
+                },
+                syncMode = "wait",
+            },
+            events,
+            frames).ConfigureAwait(false);
+        JsonElement quotedGreaterStyleUpdate = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-card-operation-local",
+                requestId = "request-local-anki-update-quoted-greater-style",
+                sessionId,
+                operation = "update-note-fields",
+                mutationId = "mutation-update-quoted-greater-style",
+                noteId = 101,
+                fields = new Dictionary<string, string>
+                {
+                    ["背面"] = "<div title=\">\" style=\"background:url(https://example.test/x.png)\">unsafe</div>",
+                },
+                syncMode = "wait",
+            },
+            events,
+            frames).ConfigureAwait(false);
+        JsonElement singleQuotedGreaterStyleUpdate = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-card-operation-local",
+                requestId = "request-local-anki-update-single-quoted-greater-style",
+                sessionId,
+                operation = "update-note-fields",
+                mutationId = "mutation-update-single-quoted-greater-style",
+                noteId = 101,
+                fields = new Dictionary<string, string>
+                {
+                    ["背面"] = "<div title='>' style='color:red'>unsafe</div>",
+                },
+                syncMode = "wait",
+            },
+            events,
+            frames).ConfigureAwait(false);
+        JsonElement unclosedStartTagUpdate = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-card-operation-local",
+                requestId = "request-local-anki-update-unclosed-start-tag",
+                sessionId,
+                operation = "update-note-fields",
+                mutationId = "mutation-update-unclosed-start-tag",
+                noteId = 101,
+                fields = new Dictionary<string, string>
+                {
+                    ["背面"] = "<div title=\"unterminated\"",
+                },
+                syncMode = "wait",
+            },
+            events,
+            frames).ConfigureAwait(false);
+        images.ReturnInvalidMagic = true;
+        JsonElement badMagicImageUpdate = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-card-operation-local",
+                requestId = "request-local-anki-update-bad-magic",
+                sessionId,
+                operation = "update-note-fields",
+                mutationId = "mutation-update-bad-magic",
+                noteId = 101,
+                fields = new Dictionary<string, string>
+                {
+                    ["背面"] = "<img src=\"https://images.example.test/fake.png\">",
+                },
+                syncMode = "wait",
+            },
+            events,
+            frames).ConfigureAwait(false);
+        images.ReturnInvalidMagic = false;
+        string tooManyImages = string.Concat(
+            Enumerable.Range(0, 9).Select(index =>
+                "<img src=\"https://images.example.test/" + index + ".png\">"));
+        JsonElement tooManyImageUpdate = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-card-operation-local",
+                requestId = "request-local-anki-update-too-many-images",
+                sessionId,
+                operation = "update-note-fields",
+                mutationId = "mutation-update-too-many-images",
+                noteId = 101,
+                fields = new Dictionary<string, string>
+                {
+                    ["背面"] = tooManyImages,
+                },
+                syncMode = "wait",
+            },
+            events,
+            frames).ConfigureAwait(false);
+        int mediaStoresBeforeAggregate = anki.StoreMediaCount;
+        int imageCallsBeforeAggregate = images.CallCount;
+        images.ReturnLargeImages = true;
+        string aggregateImages = string.Concat(
+            Enumerable.Range(0, 3).Select(index =>
+                "<img src=\"https://images.example.test/large-"
+                + index + ".png\">"));
+        JsonElement aggregateImageUpdate = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-card-operation-local",
+                requestId = "request-local-anki-update-aggregate-images",
+                sessionId,
+                operation = "update-note-fields",
+                mutationId = "mutation-update-aggregate-images",
+                noteId = 101,
+                fields = new Dictionary<string, string>
+                {
+                    ["背面"] = aggregateImages,
+                },
+                syncMode = "wait",
+            },
+            events,
+            frames).ConfigureAwait(false);
+        int mediaStoresAfterAggregate = anki.StoreMediaCount;
+        int imageCallsAfterAggregate = images.CallCount;
+        images.ReturnLargeImages = false;
+        object pendingImageRequest = new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = "anki-card-operation-local",
+            requestId = "request-local-anki-update-pending-image",
+            sessionId,
+            operation = "update-note-fields",
+            mutationId = "mutation-update-pending-image",
+            noteId = 101,
+            fields = new Dictionary<string, string>
+            {
+                ["背面"] = "<img src=\"https://images.example.test/pending.png\">",
+            },
+            syncMode = "wait",
+        };
+        anki.FailAction = "updateNoteFields";
+        JsonElement pendingImageFirst = await SendAsync(
+            session,
+            pendingImageRequest,
+            events,
+            frames).ConfigureAwait(false);
+        anki.FailAction = null;
+        int imageCallsBeforePendingReplay = images.CallCount;
+        int mediaStoresBeforePendingReplay = anki.StoreMediaCount;
+        JsonElement pendingImageReplay = await SendAsync(
+            session,
+            pendingImageRequest,
+            events,
+            frames).ConfigureAwait(false);
         JsonElement answer = RequireSuccess(
             await SendAsync(
                 session,
@@ -1695,6 +2015,29 @@ internal static class DirectBridgeSelfTest
             },
             events,
             frames).ConfigureAwait(false);
+        JsonElement legacyAdd = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "anki-add-cards-local",
+                    requestId = "request-local-anki-legacy-add",
+                    sessionId,
+                    sourceInstanceId = "source-local-anki",
+                    draftId = "draft-" + new string('a', 32),
+                    cardIndex = 0,
+                    aid = "fc_" + new string('8', 32),
+                    card = new
+                    {
+                        type = "basic",
+                        front = "旧页面请求",
+                        back = "无 projection 仍可添加",
+                    },
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "anki-add-cards-local");
         await Task.Delay(350).ConfigureAwait(false);
         FakeReaderAnkiConnectClient preflightAnki = new()
         {
@@ -1712,6 +2055,12 @@ internal static class DirectBridgeSelfTest
                 "draft-" + new string('a', 32),
                 0,
                 preflightAid,
+                new JsonObject
+                {
+                    ["type"] = "basic",
+                    ["front"] = "预检失败可重试",
+                    ["back"] = "A",
+                },
                 new JsonObject
                 {
                     ["type"] = "basic",
@@ -1751,6 +2100,12 @@ internal static class DirectBridgeSelfTest
                     ["front"] = "不可逆阶段失败",
                     ["back"] = "A",
                 },
+                new JsonObject
+                {
+                    ["type"] = "basic",
+                    ["front"] = "不可逆阶段失败",
+                    ["back"] = "A",
+                },
                 CancellationToken.None).ConfigureAwait(false);
             throw new InvalidOperationException(
                 "addNote outcome unexpectedly succeeded");
@@ -1768,21 +2123,42 @@ internal static class DirectBridgeSelfTest
         {
             type = "anki-card-operation-local",
         });
+        string addedMediaFile = ReaderLocalAnkiWriter
+            .DeterministicMediaFileName(
+                FakeReaderPublicImageFetcher.BytesForCall(1),
+                "image/png");
+        string updatedMediaFile = ReaderLocalAnkiWriter
+            .DeterministicMediaFileName(
+                FakeReaderPublicImageFetcher.BytesForCall(2),
+                "image/png");
+        bool mediaNamesAreContentAddressed = addedMediaFile !=
+            ReaderLocalAnkiWriter.DeterministicMediaFileName(
+                FakeReaderPublicImageFetcher.BytesForCall(2),
+                "image/png");
         string localAnkiEvidence = JsonSerializer.Serialize(new
         {
             first = first.GetRawText(),
             replay = replay.GetRawText(),
             mismatch = mismatch.GetRawText(),
+            projectionTypeMismatch = projectionTypeMismatch.GetRawText(),
+            aggregateImageUpdate = aggregateImageUpdate.GetRawText(),
+            legacyAdd = legacyAdd.GetRawText(),
             preflightFailure = preflightFailure.Code,
             preflightReceipt = preflightReceipt?.State,
             unknownFailure = unknownFailure.Code,
             unknownReceipt = unknownReceipt?.State,
             anki.AddNoteCount,
             anki.LastAddedFront,
+            anki.LastAddedBack,
+            anki.LastUpdatedBack,
+            anki.StoreMediaCount,
+            images.CallCount,
             anki.Actions,
         });
         bool localAnkiOk =
             legacyClaim == ReaderLocalAnkiClaimOutcome.Claimed
+            && projectionFingerprintStable
+            && mediaNamesAreContentAddressed
             && migratedLegacy["contract"]?.GetValue<string>()
                 == ReaderLocalAnkiRegistry.RegistryContract
             && migratedLegacy["mutations"] is JsonObject
@@ -1795,12 +2171,23 @@ internal static class DirectBridgeSelfTest
             && wrongSession.GetProperty("error").GetProperty("code")
                 .GetString()
                 == "BW_READER_CONTEXT_SNAPSHOT_SESSION_MISMATCH"
+            && !projectionTypeMismatch.GetProperty("ok").GetBoolean()
+            && projectionTypeMismatch.GetProperty("error")
+                .GetProperty("code").GetString()
+                == "BW_READER_ANKI_REQUEST_INVALID"
             && first.GetProperty("added").GetInt32() == 1
             && !first.GetProperty("dedup").GetBoolean()
             && first.GetProperty("note_ids")[0].GetInt64() == 101
             && replay.GetProperty("dedup").GetBoolean()
-            && anki.AddNoteCount == 1
-            && anki.LastAddedFront == "用户编辑后的问题"
+            && anki.AddNoteCount == 2
+            && primaryAddedFront == "用户编辑后的问题"
+            && primaryAddedBack is string addedBack
+            && addedBack.Split(addedMediaFile).Length == 3
+            && !addedBack.Contains("https://", StringComparison.Ordinal)
+            && addedBack.Contains(
+                "class=\"bw-reader-anki-source\"",
+                StringComparison.Ordinal)
+            && !addedBack.Contains("style=", StringComparison.Ordinal)
             && !mismatch.GetProperty("ok").GetBoolean()
             && mismatch.GetProperty("error").GetProperty("code")
                 .GetString() == "BW_READER_ANKI_DRAFT_SOURCE_MISMATCH"
@@ -1823,7 +2210,7 @@ internal static class DirectBridgeSelfTest
             && !updateUnknownReplay.GetProperty("ok").GetBoolean()
             && updateUnknownReplay.GetProperty("error").GetProperty("code")
                 .GetString() == "BW_READER_ANKI_OPERATION_OUTCOME_UNKNOWN"
-            && anki.Actions.Count(value => value == "updateNoteFields") == 2
+            && anki.Actions.Count(value => value == "updateNoteFields") == 3
             && update.GetProperty("anki_local_applied").GetBoolean()
             && update.GetProperty("anki_local_status").GetString()
                 == "succeeded"
@@ -1833,6 +2220,60 @@ internal static class DirectBridgeSelfTest
             && updateReplay.GetProperty("anki_local_status").GetString()
                 == "deduplicated"
             && anki.UpdateNoteCount == 1
+            && anki.LastUpdatedBack is string updatedBack
+            && updatedBack.Contains(
+                updatedMediaFile,
+                StringComparison.Ordinal)
+            && !updatedBack.Contains("https://", StringComparison.Ordinal)
+            && !unsafeImageUpdate.GetProperty("ok").GetBoolean()
+            && unsafeImageUpdate.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_MEDIA_URL_INVALID"
+            && !unquotedImageUpdate.GetProperty("ok").GetBoolean()
+            && unquotedImageUpdate.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_MEDIA_MARKUP_INVALID"
+            && !duplicateImageUpdate.GetProperty("ok").GetBoolean()
+            && duplicateImageUpdate.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_MEDIA_MARKUP_INVALID"
+            && !unquotedStyleUpdate.GetProperty("ok").GetBoolean()
+            && unquotedStyleUpdate.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_MEDIA_MARKUP_INVALID"
+            && !quotedGreaterStyleUpdate.GetProperty("ok").GetBoolean()
+            && quotedGreaterStyleUpdate.GetProperty("error")
+                .GetProperty("code").GetString()
+                == "BW_READER_ANKI_MEDIA_MARKUP_INVALID"
+            && !singleQuotedGreaterStyleUpdate.GetProperty("ok").GetBoolean()
+            && singleQuotedGreaterStyleUpdate.GetProperty("error")
+                .GetProperty("code").GetString()
+                == "BW_READER_ANKI_MEDIA_MARKUP_INVALID"
+            && !unclosedStartTagUpdate.GetProperty("ok").GetBoolean()
+            && unclosedStartTagUpdate.GetProperty("error")
+                .GetProperty("code").GetString()
+                == "BW_READER_ANKI_MEDIA_MARKUP_INVALID"
+            && !badMagicImageUpdate.GetProperty("ok").GetBoolean()
+            && badMagicImageUpdate.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_MEDIA_TYPE_INVALID"
+            && !tooManyImageUpdate.GetProperty("ok").GetBoolean()
+            && tooManyImageUpdate.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_MEDIA_LIMIT_EXCEEDED"
+            && !aggregateImageUpdate.GetProperty("ok").GetBoolean()
+            && aggregateImageUpdate.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_MEDIA_LIMIT_EXCEEDED"
+            && imageCallsAfterAggregate == imageCallsBeforeAggregate + 3
+            && mediaStoresAfterAggregate == mediaStoresBeforeAggregate
+            && !pendingImageFirst.GetProperty("ok").GetBoolean()
+            && pendingImageFirst.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_OPERATION_OUTCOME_UNKNOWN"
+            && !pendingImageReplay.GetProperty("ok").GetBoolean()
+            && pendingImageReplay.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_OPERATION_OUTCOME_UNKNOWN"
+            && images.CallCount == imageCallsBeforePendingReplay
+            && anki.StoreMediaCount == mediaStoresBeforePendingReplay
+            && images.CallCount == 7
+            && anki.StoreMediaCount == 3
+            && anki.Actions.IndexOf("storeMediaFile")
+                < anki.Actions.IndexOf("addNote")
+            && anki.Actions.LastIndexOf("storeMediaFile")
+                < anki.Actions.LastIndexOf("updateNoteFields")
             && answer.GetProperty("anki_local_applied").GetBoolean()
             && answer.GetProperty("answers")[0]
                 .GetProperty("card_id").GetInt64() == 201
@@ -1848,6 +2289,14 @@ internal static class DirectBridgeSelfTest
             && anki.DeleteNoteCount == 1
             && anki.Actions.Count(value => value == "sync") >= 5
             && readDeleted.GetProperty("notes").GetArrayLength() == 0
+            && legacyAdd.GetProperty("added").GetInt32() == 1
+            && !legacyAdd.GetProperty("dedup").GetBoolean()
+            && anki.LastAddedFront == "旧页面请求"
+            && anki.LastAddedBack is string legacyBack
+            && legacyBack.Contains(
+                "class=\"bw-reader-anki-source\"",
+                StringComparison.Ordinal)
+            && !legacyBack.Contains("style=", StringComparison.Ordinal)
             && !operationExtraField.GetProperty("ok").GetBoolean()
             && operationExtraField.GetProperty("error")
                 .GetProperty("code").GetString()
@@ -13227,6 +13676,54 @@ internal static class DirectBridgeSelfTest
         }
     }
 
+    private sealed class FakeReaderPublicImageFetcher :
+        IReaderPublicImageFetcher
+    {
+        private static readonly byte[] LargePngBytes = CreateLargePngBytes();
+
+        internal int CallCount { get; private set; }
+
+        internal List<string> Urls { get; } = [];
+
+        internal bool ReturnInvalidMagic { get; set; }
+
+        internal bool ReturnLargeImages { get; set; }
+
+        public Task<ReaderPublicImage> FetchAsync(
+            string url,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CallCount++;
+            Urls.Add(url);
+            return Task.FromResult(new ReaderPublicImage(
+                ReturnInvalidMagic
+                    ? Encoding.UTF8.GetBytes("not-a-png")
+                    : ReturnLargeImages
+                        ? LargePngBytes
+                        : BytesForCall(CallCount),
+                "image/png"));
+        }
+
+        private static byte[] CreateLargePngBytes()
+        {
+            byte[] bytes = new byte[12 * 1024 * 1024];
+            byte[] signature =
+            [
+                0x89, 0x50, 0x4e, 0x47,
+                0x0d, 0x0a, 0x1a, 0x0a,
+            ];
+            signature.CopyTo(bytes, 0);
+            return bytes;
+        }
+
+        internal static byte[] BytesForCall(int call) =>
+        [
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+            .. Encoding.UTF8.GetBytes("fake-image-" + call),
+        ];
+    }
+
     private sealed class FakeReaderAnkiConnectClient :
         IReaderAnkiConnectClient
     {
@@ -13249,7 +13746,13 @@ internal static class DirectBridgeSelfTest
 
         internal int SyncCount { get; private set; }
 
+        internal int StoreMediaCount { get; private set; }
+
         internal string? LastAddedFront { get; private set; }
+
+        internal string? LastAddedBack { get; private set; }
+
+        internal string? LastUpdatedBack { get; private set; }
 
         internal List<string> Actions { get; } = [];
 
@@ -13275,15 +13778,14 @@ internal static class DirectBridgeSelfTest
             }
             JsonNode? result = action switch
             {
-                "findNotes" => _noteAdded
-                    ? new JsonArray(101)
-                    : new JsonArray(),
+                "findNotes" => FindNotes(parameters),
                 "modelNames" => new JsonArray("基础的", "填空题"),
                 "modelFieldNames" => parameters["modelName"]
                     ?.GetValue<string>() == "填空题"
                         ? new JsonArray("文字", "附加")
                         : new JsonArray("正面", "背面"),
                 "createDeck" => JsonValue.Create(1),
+                "storeMediaFile" => StoreMediaFile(parameters),
                 "addNote" => AddNote(parameters),
                 "findCards" => new JsonArray(201),
                 "changeDeck" => JsonValue.Create(true),
@@ -13308,6 +13810,8 @@ internal static class DirectBridgeSelfTest
             JsonObject fields = note["fields"]?.AsObject()
                 ?? throw new InvalidOperationException("missing fields");
             LastAddedFront = fields.First().Value?.GetValue<string>();
+            LastAddedBack = fields.Skip(1).FirstOrDefault().Value
+                ?.GetValue<string>();
             _fields.Clear();
             foreach ((string name, JsonNode? value) in fields)
             {
@@ -13321,7 +13825,26 @@ internal static class DirectBridgeSelfTest
                     "bw_reader_payload_", StringComparison.Ordinal))
                 ?? throw new InvalidOperationException(
                     "missing fingerprint tag");
+            _aidTag = note["tags"]?.AsArray()
+                .Select(value => value?.GetValue<string>() ?? "")
+                .First(value => value.StartsWith(
+                    "bw_reader_aid_", StringComparison.Ordinal))
+                ?? throw new InvalidOperationException(
+                    "missing aid tag");
             return JsonValue.Create(101)!;
+        }
+
+        private JsonNode FindNotes(JsonObject parameters)
+        {
+            string query = parameters["query"]?.GetValue<string>() ?? "";
+            return _noteAdded
+                && !_noteDeleted
+                && string.Equals(
+                    query,
+                    "tag:" + _aidTag,
+                    StringComparison.Ordinal)
+                ? new JsonArray(101)
+                : new JsonArray();
         }
 
         private JsonNode NotesInfo(JsonObject parameters)
@@ -13352,7 +13875,7 @@ internal static class DirectBridgeSelfTest
                 ["tags"] = new JsonArray(
                     "pdf-snippets",
                     "card-lab",
-                    "bw_reader_aid_fc_" + new string('b', 32),
+                    _aidTag,
                     _fingerprintTag),
             });
         }
@@ -13395,7 +13918,19 @@ internal static class DirectBridgeSelfTest
             {
                 _fields[name] = value?.GetValue<string>() ?? "";
             }
+            LastUpdatedBack = fields["背面"]?.GetValue<string>();
             return null;
+        }
+
+        private JsonNode StoreMediaFile(JsonObject parameters)
+        {
+            string filename = parameters["filename"]?.GetValue<string>()
+                ?? throw new InvalidOperationException("missing media filename");
+            string data = parameters["data"]?.GetValue<string>()
+                ?? throw new InvalidOperationException("missing media data");
+            _ = Convert.FromBase64String(data);
+            StoreMediaCount++;
+            return JsonValue.Create(filename)!;
         }
 
         private JsonNode? DeleteNotes(JsonObject parameters)
@@ -13436,6 +13971,8 @@ internal static class DirectBridgeSelfTest
         }
 
         private string _fingerprintTag = "";
+
+        private string _aidTag = "";
 
     }
 

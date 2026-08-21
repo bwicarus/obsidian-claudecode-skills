@@ -24,6 +24,7 @@ import re
 import statistics
 import sys
 import time
+import unicodedata
 import urllib.parse
 import uuid
 from contextlib import contextmanager
@@ -14264,7 +14265,7 @@ def _anki_provenance_footer(entity_id: str, card_index: int, source_ref: str) ->
             % (_html.escape(qa, quote=True), _html.escape(query, quote=True))
         )
     visible = (
-        '<hr><div style="font-size:0.85em;color:#666;">'
+        '<hr><div class="bw-reader-anki-source">'
         + "<br>".join(lines)
         + "</div>"
         if lines
@@ -14454,6 +14455,339 @@ class _AnkiCardProtocolError(RuntimeError):
 
 class _AnkiCardActionError(RuntimeError):
     """AnkiConnect explicitly rejected the requested action."""
+
+
+_ANKI_PROJECTED_IMAGE_SRC_RE = re.compile(
+    r"(?is)(?P<prefix><img\b[^>]*?\bsrc\s*=\s*)"
+    r"(?P<quote>[\"'])(?P<src>[^\"'<>]*?)(?P=quote)"
+)
+_ANKI_PROJECTED_IMAGE_EXTENSIONS = {
+    "image/avif": ".avif",
+    "image/bmp": ".bmp",
+    "image/gif": ".gif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+_ANKI_PROJECTION_MAX_IMAGES = 8
+_ANKI_PROJECTION_MAX_TOTAL_BYTES = 32 * 1024 * 1024
+_ANKI_PROJECTION_TOTAL_TIMEOUT = 30.0
+_ANKI_PROJECTION_MAX_FIELD_CHARS = 64_000
+_ANKI_PROJECTION_MAX_ADD_TEXT_BYTES = 512 * 1024
+_ANKI_PROJECTION_BLOCKED_TAGS = frozenset({
+    "audio", "base", "embed", "iframe", "link", "meta", "object",
+    "script", "source", "style", "svg", "track", "video",
+})
+_ANKI_PROJECTION_AUTOLOAD_ATTRS = frozenset({
+    "background", "data", "formaction", "manifest", "ping", "poster",
+    "src", "srcset", "xlink:href",
+})
+
+
+class _AnkiProjectionHtmlInspector:
+    """Strictly inspect projected HTML before any Anki media mutation."""
+
+    def __init__(self):
+        from html.parser import HTMLParser
+
+        owner = self
+
+        class _Parser(HTMLParser):
+            def __init__(self):
+                super().__init__(convert_charrefs=True)
+
+            def handle_starttag(self, tag, attrs):
+                owner._start(tag, attrs, self.get_starttag_text())
+
+            def handle_startendtag(self, tag, attrs):
+                owner._start(tag, attrs, self.get_starttag_text())
+
+        self.sources = []
+        self.image_count = 0
+        self.parser = _Parser()
+
+    def _start(self, tag, attrs, raw):
+        import html as _html
+
+        tag = str(tag or "").lower()
+        if tag in _ANKI_PROJECTION_BLOCKED_TAGS:
+            raise ValueError("Anki card HTML contains a blocked media tag")
+        names = [str(name or "").lower() for name, _value in attrs]
+        if len(names) != len(set(names)):
+            raise ValueError("Anki card HTML contains duplicate attributes")
+        for (name, value), lowered in zip(attrs, names):
+            value = str(value or "")
+            if lowered.startswith("on"):
+                raise ValueError("Anki card HTML contains an event attribute")
+            if lowered == "style":
+                raise ValueError("Anki card HTML cannot contain inline style")
+            if lowered == "href":
+                parsed = urllib.parse.urlsplit(value)
+                if parsed.scheme and parsed.scheme.lower() not in ("http", "https"):
+                    raise ValueError("Anki card HTML link scheme is unsafe")
+            if lowered in _ANKI_PROJECTION_AUTOLOAD_ATTRS and not (
+                tag == "img" and lowered == "src"
+            ):
+                raise ValueError("Anki card HTML contains a network attribute")
+        if tag != "img":
+            return
+        self.image_count += 1
+        if names.count("src") != 1:
+            raise ValueError("Anki card image must have one src attribute")
+        match = _ANKI_PROJECTED_IMAGE_SRC_RE.search(str(raw or ""))
+        if not match:
+            raise ValueError("Anki card image src must be quoted")
+        parser_value = next(
+            str(value or "")
+            for (name, value), lowered in zip(attrs, names)
+            if lowered == "src"
+        )
+        source = _html.unescape(match.group("src"))
+        if source != parser_value:
+            raise ValueError("Anki card image src is ambiguous")
+        self.sources.append(source)
+
+    def inspect(self, value):
+        text = str(value or "")
+        self.parser.feed(text)
+        self.parser.close()
+        without_comments = re.sub(r"(?is)<!--.*?-->", "", text)
+        if len(re.findall(r"(?is)<img\b", without_comments)) != self.image_count:
+            raise ValueError("Anki card image markup is malformed")
+        return list(self.sources)
+
+
+class _AnkiProjectionMediaState:
+    def __init__(self):
+        self.deadline = time.monotonic() + _ANKI_PROJECTION_TOTAL_TIMEOUT
+        self.sources = {}
+        self.files = set()
+        self.total_bytes = 0
+
+
+class _AnkiProjectionPayloadError(ValueError):
+    def __init__(self, message, *, http_status=400):
+        super().__init__(str(message))
+        self.http_status = int(http_status)
+
+
+def _anki_projection_validate_add_cards(cards):
+    total_bytes = 0
+    for card in cards:
+        if not isinstance(card, dict):
+            raise _AnkiProjectionPayloadError("Anki card must be an object")
+        card_type = str(card.get("type") or "basic").lower()
+        values = (
+            [card.get("cloze") or card.get("text") or ""]
+            if card_type == "cloze"
+            else [card.get("front") or "", card.get("back") or ""]
+        )
+        for value in values:
+            if not isinstance(value, str) or "\x00" in value:
+                raise _AnkiProjectionPayloadError(
+                    "Anki card face must be text"
+                )
+            if len(value) > _ANKI_PROJECTION_MAX_FIELD_CHARS:
+                raise _AnkiProjectionPayloadError(
+                    "Anki card face exceeds 64000 characters",
+                    http_status=413,
+                )
+            total_bytes += len(value.encode("utf-8"))
+            if total_bytes > _ANKI_PROJECTION_MAX_ADD_TEXT_BYTES:
+                raise _AnkiProjectionPayloadError(
+                    "Anki card faces exceed 512 KiB",
+                    http_status=413,
+                )
+
+
+def _anki_projection_validate_image_content(content: bytes, content_type: str):
+    content = bytes(content or b"")
+    kind = _public_image_content_type(content_type)
+    if kind == "image/png":
+        valid = content.startswith(b"\x89PNG\r\n\x1a\n")
+    elif kind == "image/jpeg":
+        valid = len(content) >= 3 and content[:3] == b"\xff\xd8\xff"
+    elif kind == "image/gif":
+        valid = content[:6] in (b"GIF87a", b"GIF89a")
+    elif kind == "image/bmp":
+        valid = content.startswith(b"BM")
+    elif kind == "image/webp":
+        valid = (
+            len(content) >= 12
+            and content[:4] == b"RIFF"
+            and content[8:12] == b"WEBP"
+        )
+    elif kind == "image/avif":
+        valid = (
+            len(content) >= 12
+            and content[4:8] == b"ftyp"
+            and any(
+                content[offset:offset + 4] in (b"avif", b"avis")
+                for offset in range(8, min(len(content) - 3, 64), 4)
+            )
+        )
+    else:
+        valid = False
+    if not valid:
+        raise _PublicImageFetchError(
+            "Anki card image content does not match its type",
+            http_status=415,
+        )
+    return kind
+
+
+def _anki_projection_media_filename(content: bytes, content_type: str) -> str:
+    kind = _anki_projection_validate_image_content(content, content_type)
+    extension = _ANKI_PROJECTED_IMAGE_EXTENSIONS.get(
+        kind
+    )
+    if not extension:
+        raise _PublicImageFetchError(
+            "Anki card image type is unsupported",
+            http_status=415,
+        )
+    digest = hashlib.sha256(bytes(content)).hexdigest()
+    return "bw-reader-img-" + digest + extension
+
+
+def _anki_projection_local_media_name(value: str) -> str:
+    if (
+        not value
+        or len(value) > 255
+        or value in (".", "..")
+        or re.search(r"[\x00-\x1f\x7f/\\:<>\"|?*#]", value)
+    ):
+        raise ValueError(
+            "Anki card image must use existing media or absolute HTTPS"
+        )
+    return value
+
+
+def _anki_projection_localize_fields(
+    fields: dict,
+    connect,
+    state: _AnkiProjectionMediaState | None = None,
+) -> dict:
+    """Store public card images in Anki media before a note mutation.
+
+    The shared public-image fetcher validates and pins every DNS/redirect hop.
+    AnkiConnect receives only bounded base64 bytes, never an open-world URL.
+    Image bytes map to one deterministic filename, so a safe retry cannot
+    overwrite changed content under an old URL. Per-operation image count,
+    cumulative bytes, and elapsed time are bounded. Fields with no image make
+    no fetch or storeMediaFile call.
+    """
+    import html as _html
+
+    output = {name: str(raw or "") for name, raw in fields.items()}
+    state = state if isinstance(state, _AnkiProjectionMediaState) else (
+        _AnkiProjectionMediaState()
+    )
+    requested = []
+    for value in output.values():
+        for source in _AnkiProjectionHtmlInspector().inspect(value):
+            parsed = urllib.parse.urlsplit(source)
+            if not parsed.scheme and not parsed.netloc:
+                _anki_projection_local_media_name(source)
+                continue
+            source = _deferred_card_image_url(source)
+            if source not in state.sources and source not in requested:
+                requested.append(source)
+    if len(state.sources) + len(requested) > _ANKI_PROJECTION_MAX_IMAGES:
+        raise _PublicImageFetchError(
+            "Anki card operation exceeds 8 unique remote images",
+            http_status=413,
+        )
+
+    pending = []
+    prospective_total = state.total_bytes
+    for source in requested:
+        remaining_time = state.deadline - time.monotonic()
+        remaining_bytes = _ANKI_PROJECTION_MAX_TOTAL_BYTES - prospective_total
+        if remaining_time <= 0:
+            raise _PublicImageFetchError(
+                "Anki card image operation timed out", http_status=504,
+            )
+        if remaining_bytes <= 0:
+            raise _PublicImageFetchError(
+                "Anki card operation exceeds 32 MiB", http_status=413,
+            )
+        content, content_type, _final_url = _fetch_public_image(
+            source,
+            max_bytes=min(_PUBLIC_IMAGE_MAX_BYTES, remaining_bytes),
+            total_timeout=min(_PUBLIC_IMAGE_TOTAL_TIMEOUT, remaining_time),
+            allowed_schemes=("https",),
+        )
+        kind = _anki_projection_validate_image_content(content, content_type)
+        prospective_total += len(content)
+        if prospective_total > _ANKI_PROJECTION_MAX_TOTAL_BYTES:
+            raise _PublicImageFetchError(
+                "Anki card operation exceeds 32 MiB", http_status=413,
+            )
+        pending.append((source, content, kind))
+
+    # Validate the complete bounded set before making the first media write.
+    for source, content, content_type in pending:
+        filename = _anki_projection_media_filename(content, content_type)
+        if filename not in state.files:
+            remaining_time = state.deadline - time.monotonic()
+            if remaining_time <= 0:
+                raise _PublicImageFetchError(
+                    "Anki media store operation exceeded 30 seconds",
+                    http_status=504,
+                )
+            result = connect(
+                "storeMediaFile",
+                {
+                    "filename": filename,
+                    "data": base64.b64encode(content).decode("ascii"),
+                },
+                timeout=min(15.0, max(0.1, remaining_time)),
+            )
+            if time.monotonic() > state.deadline:
+                raise _PublicImageFetchError(
+                    "Anki media store operation exceeded 30 seconds",
+                    http_status=504,
+                )
+            if result != filename:
+                raise _AnkiCardProtocolError(
+                    "unexpected storeMediaFile result"
+                )
+            state.files.add(filename)
+        state.sources[source] = filename
+    state.total_bytes = prospective_total
+
+    for name, raw in fields.items():
+        value = str(raw or "")
+
+        def replace(match):
+            encoded_source = match.group("src")
+            source = _html.unescape(encoded_source)
+            parsed = urllib.parse.urlsplit(source)
+            if not parsed.scheme and not parsed.netloc:
+                _anki_projection_local_media_name(source)
+                return match.group(0)
+            # Reuse the canonical card-image URL contract, then perform the
+            # authoritative DNS/public-address check in _fetch_public_image.
+            source = _deferred_card_image_url(source)
+            filename = state.sources[source]
+            return (
+                match.group("prefix")
+                + match.group("quote")
+                + filename
+                + match.group("quote")
+            )
+
+        localized = _ANKI_PROJECTED_IMAGE_SRC_RE.sub(replace, value)
+        # A second parse proves no remote or malformed media reference escaped
+        # the quoted img-src rewrite.
+        for source in _AnkiProjectionHtmlInspector().inspect(localized):
+            parsed = urllib.parse.urlsplit(source)
+            if parsed.scheme or parsed.netloc:
+                raise ValueError("remote Anki image survived localization")
+            _anki_projection_local_media_name(source)
+        output[name] = localized
+    return output
 
 
 def _anki_card_operation_mutation_id(value) -> str:
@@ -14679,7 +15013,12 @@ def _anki_card_operation_commit(
         return True
 
 
-def _anki_card_operation_connect(action: str, params: dict | None = None):
+def _anki_card_operation_connect(
+    action: str,
+    params: dict | None = None,
+    *,
+    timeout: float = 15.0,
+):
     """Call one fixed AnkiConnect action and validate its envelope."""
     import urllib.request
 
@@ -14696,7 +15035,7 @@ def _anki_card_operation_connect(action: str, params: dict | None = None):
                 data=wire,
                 headers={"Content-Type": "application/json"},
             ),
-            timeout=15,
+            timeout=min(15.0, max(0.1, float(timeout))),
         ) as response:
             raw = response.read()
     except Exception as ex:
@@ -15060,6 +15399,63 @@ def pdf_api_anki_card_operation():
                     response["delete_scope"] = "note"
                 return jsonify(response), 404
 
+            def _release_media_failure(code, error, status):
+                if not _anki_card_operation_release_claim(
+                    mutation_id, operation, fingerprint
+                ):
+                    return jsonify({
+                        "ok": False,
+                        "operation": operation,
+                        "mutationId": mutation_id,
+                        "code": "anki_card_operation_claim_persist",
+                        "error": "failed to release operation claim",
+                        **_anki_card_operation_layers(
+                            "not-requested", "not-requested"
+                        ),
+                    }), 503
+                return jsonify({
+                    "ok": False,
+                    "operation": operation,
+                    "mutationId": mutation_id,
+                    "code": code,
+                    "error": str(error)[:160],
+                    **_anki_card_operation_layers(
+                        "not-applied", "not-requested"
+                    ),
+                }), status
+
+            if operation == "update-note-fields":
+                try:
+                    payload["fields"] = _anki_projection_localize_fields(
+                        payload["fields"],
+                        _anki_card_operation_connect,
+                    )
+                except _PublicImageFetchError as ex:
+                    return _release_media_failure(
+                        "anki_media_fetch_failed",
+                        ex,
+                        ex.http_status,
+                    )
+                except (
+                    _AnkiCardsResponseError,
+                    ValueError,
+                ) as ex:
+                    return _release_media_failure(
+                        getattr(ex, "code", "anki_media_url_invalid"),
+                        ex,
+                        400,
+                    )
+                except (
+                    _AnkiCardTransportError,
+                    _AnkiCardProtocolError,
+                    _AnkiCardActionError,
+                ) as ex:
+                    # storeMediaFile uses deterministic filename+bytes and is
+                    # safe to repeat. No note mutation has been issued yet.
+                    return _release_media_failure(
+                        "anki_media_store_failed", ex, 502
+                    )
+
             if operation == "sync":
                 try:
                     _anki_card_operation_connect("sync")
@@ -15248,6 +15644,15 @@ def pdf_api_anki_add_cards(body_override=None):
     cards = body.get("cards") or []
     if not isinstance(cards, list) or not cards or len(cards) > 20:
         return jsonify({"ok": False, "error": "bad cards"}), 400
+    try:
+        _anki_projection_validate_add_cards(cards)
+    except _AnkiProjectionPayloadError as ex:
+        return jsonify({
+            "ok": False,
+            "error": str(ex)[:140],
+            "code": "anki_card_projection_too_large"
+            if ex.http_status == 413 else "anki_card_projection_invalid",
+        }), ex.http_status
     entity_id = str(body.get("entity_id") or "").strip()
     try:
         card_index = max(0, int(body.get("card_index") or 0))
@@ -15313,7 +15718,7 @@ def pdf_api_anki_add_cards(body_override=None):
                 "http://127.0.0.1:8765",
             )
 
-            def _ank(action, params=None):
+            def _ank(action, params=None, *, timeout=10.0):
                 rq = json.dumps({
                     "action": action,
                     "version": 6,
@@ -15325,9 +15730,41 @@ def pdf_api_anki_add_cards(body_override=None):
                         data=rq,
                         headers={"Content-Type": "application/json"},
                     ),
-                    timeout=10,
+                    timeout=min(10.0, max(0.1, float(timeout))),
                 ) as rr:
                     return json.loads(rr.read())
+
+            def _ank_result(action, params=None, *, timeout=10.0):
+                try:
+                    envelope = _ank(action, params, timeout=timeout)
+                except Exception as ex:
+                    raise _AnkiCardTransportError(str(ex)[:160]) from ex
+                if (
+                    not isinstance(envelope, dict)
+                    or "result" not in envelope
+                    or "error" not in envelope
+                ):
+                    raise _AnkiCardProtocolError(
+                        "invalid AnkiConnect response"
+                    )
+                if envelope.get("error") is not None:
+                    raise _AnkiCardActionError(
+                        str(envelope["error"])[:160]
+                    )
+                return envelope.get("result")
+
+            def _release_add_media_failure(code, error, status):
+                if not _anki_add_release_claim(aid, fingerprint):
+                    return jsonify({
+                        "ok": False,
+                        "error": "failed to release Anki add claim",
+                        "code": "anki_add_claim_persist",
+                    }), 503
+                return jsonify({
+                    "ok": False,
+                    "error": str(error)[:140],
+                    "code": code,
+                }), status
 
             try:
                 _mn = _ank("modelNames").get("result") or []
@@ -15384,42 +15821,74 @@ def pdf_api_anki_add_cards(body_override=None):
             except Exception:
                 pass
 
-            added, note_ids = 0, []
-            for offset, card in enumerate(cards):
-                if not isinstance(card, dict):
-                    continue
-                ctype = (card.get("type") or "basic").lower()
-                footer = _anki_provenance_footer(
-                    entity_id,
-                    card_index + offset,
-                    source_ref,
-                )
-                if ctype == "cloze":
-                    cloze_text = _anki_md_links(
-                        (
+            prepared_notes = []
+            stored_media = _AnkiProjectionMediaState()
+            try:
+                for offset, card in enumerate(cards):
+                    if not isinstance(card, dict):
+                        continue
+                    ctype = (card.get("type") or "basic").lower()
+                    footer = _anki_provenance_footer(
+                        entity_id,
+                        card_index + offset,
+                        source_ref,
+                    )
+                    if ctype == "cloze":
+                        cloze_text = _anki_md_links(
                             card.get("cloze")
                             or card.get("text")
                             or ""
-                        )[:8000]
-                    )
-                    fields = {c_text: cloze_text}
-                    if c_extra:
-                        fields[c_extra] = footer
+                        )
+                        fields = {c_text: cloze_text}
+                        if c_extra:
+                            fields[c_extra] = footer
+                        else:
+                            fields[c_text] += footer
+                        model_name = cloze_m
                     else:
-                        fields[c_text] += footer
-                    model_name = cloze_m
-                else:
-                    fields = {
-                        b_front: _anki_md_links(
-                            (card.get("front") or "")[:8000]
-                        ),
-                        b_back: _anki_md_links(
-                            (card.get("back") or "")[:8000]
-                        ) + footer,
-                    }
-                    model_name = basic_m
+                        fields = {
+                            b_front: _anki_md_links(
+                                card.get("front") or ""
+                            ),
+                            b_back: _anki_md_links(
+                                card.get("back") or ""
+                            ) + footer,
+                        }
+                        model_name = basic_m
+                    fields = _anki_projection_localize_fields(
+                        fields,
+                        _ank_result,
+                        stored_media,
+                    )
+                    prepared_notes.append((model_name, fields))
+            except _PublicImageFetchError as ex:
+                return _release_add_media_failure(
+                    "anki_media_fetch_failed", ex, ex.http_status
+                )
+            except (
+                _AnkiCardsResponseError,
+                ValueError,
+            ) as ex:
+                return _release_add_media_failure(
+                    getattr(ex, "code", "anki_media_url_invalid"),
+                    ex,
+                    400,
+                )
+            except (
+                _AnkiCardTransportError,
+                _AnkiCardProtocolError,
+                _AnkiCardActionError,
+            ) as ex:
+                # Deterministic media writes are safe to repeat; addNote has
+                # not been called yet, so the add claim can be released.
+                return _release_add_media_failure(
+                    "anki_media_store_failed", ex, 502
+                )
+
+            note_ids = []
+            for model_name, fields in prepared_notes:
                 try:
-                    response = _ank(
+                    note_id = _ank_result(
                         "addNote",
                         {
                             "note": {
@@ -15433,21 +15902,60 @@ def pdf_api_anki_add_cards(body_override=None):
                             },
                         },
                     )
-                except Exception as ex:
+                    if (
+                        isinstance(note_id, bool)
+                        or not isinstance(note_id, int)
+                        or note_id <= 0
+                    ):
+                        raise _AnkiCardProtocolError(
+                            "addNote returned an invalid note ID"
+                        )
+                except _AnkiCardActionError as ex:
+                    if not note_ids:
+                        # Anki explicitly rejected the first note, proving no
+                        # add mutation happened. The claim is safe to release.
+                        if not _anki_add_release_claim(aid, fingerprint):
+                            return jsonify({
+                                "ok": False,
+                                "error": "failed to release Anki add claim",
+                                "code": "anki_add_claim_persist",
+                            }), 503
+                        return jsonify({
+                            "ok": False,
+                            "error": str(ex)[:140],
+                            "code": "anki_add_rejected",
+                        }), 502
+                    # Earlier notes already exist. Never commit a partial batch
+                    # as success and never replay it under the same aid.
+                    return jsonify({
+                        "ok": False,
+                        "error": str(ex)[:140],
+                        "code": "anki_add_partial_outcome_unknown",
+                        "outcome": "partial",
+                        "added": len(note_ids),
+                        "note_ids": note_ids,
+                    }), 503
+                except (
+                    _AnkiCardTransportError,
+                    _AnkiCardProtocolError,
+                ) as ex:
                     # addNote may have committed before the response was lost.
                     # Keep the durable pending receipt; a retry must not create
                     # the same note under a fresh server execution.
                     return jsonify({
                         "ok": False,
                         "error": str(ex)[:140],
-                        "code": "anki_add_outcome_unknown",
+                        "code": (
+                            "anki_add_partial_outcome_unknown"
+                            if note_ids else "anki_add_outcome_unknown"
+                        ),
+                        "outcome": "partial" if note_ids else "unknown",
+                        "added": len(note_ids),
+                        "note_ids": note_ids,
                     }), 503
-                if (
-                    not response.get("error")
-                    and response.get("result")
-                ):
-                    added += 1
-                    note_ids.append(int(response["result"]))
+                note_ids.append(note_id)
+
+            added = len(note_ids)
 
             card_ids = []
             card_ids_by_note = {}
@@ -17265,13 +17773,22 @@ def _parse_anki_cards_response(raw):
 
 
 def _anki_md_links(text):
-    """Anki 卡按 HTML 渲染:AI 生成的 markdown 链接 [文本](url) 转成可点的 <a href>(否则整串显示成字面文本)。
+    """Render semantic Reader Markdown to the HTML Anki fields expect.
 
-    图片 ![alt](url) 先转 <img> —— 顺序不能反:先跑链接的话图片已经被破坏成
-    `!<a href>alt</a>`，再怎么处理都救不回来。
+    Pi already ships Python-Markdown for the HTML reader. Keep the historical
+    image/link fallback for recovery environments, with images converted first
+    so the link expression cannot consume them.
     """
     if not text:
         return text
+    try:
+        import markdown
+        return markdown.markdown(
+            str(text),
+            extensions=["extra", "sane_lists", "nl2br"],
+        )
+    except Exception:
+        pass
     text = _ANKI_MD_IMG_RE.sub(r'<img src="\2" alt="\1">', text)
     return _ANKI_MD_LINK_RE.sub(r'<a href="\2">\1</a>', text)
 
@@ -17302,6 +17819,65 @@ def _download_image_for_anki(url, timeout=5, max_bytes=10 * 1024 * 1024):
         return fname, base64.b64encode(data).decode("ascii")
     except Exception:
         return None
+
+
+def _deferred_card_image_url(value):
+    """Return one canonical Reader-card image URL or reject it fail closed.
+
+    Deferred cards keep their faces as Markdown and do not download media yet.
+    Match the Reader image proxy's public contract here: an exact, absolute
+    credential-free HTTPS URL with no fragment.  Network/public-address checks
+    remain the proxy's responsibility when the image is fetched.
+    """
+    if not isinstance(value, str) or not value:
+        raise _AnkiCardsResponseError(
+            "card_image_url_invalid", "卡片配图必须是绝对 HTTPS URL",
+        )
+    if (
+        value != value.strip()
+        or len(value.encode("utf-8")) > 4_096
+        or "\\" in value
+        or any(ch.isspace() or unicodedata.category(ch).startswith("C") for ch in value)
+    ):
+        raise _AnkiCardsResponseError(
+            "card_image_url_invalid", "卡片配图 URL 含不安全字符",
+        )
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        _ = parsed.port
+    except ValueError as exc:
+        raise _AnkiCardsResponseError(
+            "card_image_url_invalid", "卡片配图 URL 格式无效",
+        ) from exc
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.netloc
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise _AnkiCardsResponseError(
+            "card_image_url_invalid",
+            "卡片配图只允许无凭据、无片段的绝对 HTTPS URL",
+        )
+    return value
+
+
+def _append_deferred_card_image(cards, image_url):
+    """Put one image on the first canonical draft using the existing Markdown face format."""
+    if not cards or not image_url:
+        return
+    card = cards[0]
+    if str(card.get("type") or "basic").lower() == "cloze":
+        face_key = "cloze" if card.get("cloze") else "text"
+    else:
+        face_key = "back"
+    face = str(card.get(face_key) or "").rstrip()
+    image_markdown = f"![配图]({image_url})"
+    if image_markdown in face:
+        return
+    card[face_key] = face + (("\n\n" if face else "") + image_markdown)
 
 
 def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain", uid="", image_url=None, defer_add=False,
@@ -17366,6 +17942,10 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
     # ── 创建 Anki 卡 ──
     if make_anki:
         try:
+            deferred_image_url = (
+                _deferred_card_image_url(image_url)
+                if defer_add and image_url else ""
+            )
             _step("正在整理要做卡的内容")
             # AI 把 snippets 转 Anki 卡片 JSON
             snippets_text = "\n\n".join([
@@ -17390,6 +17970,10 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
             # 当成制卡 action，也不能让 Realtime 的登录 uid 丢失后回落默认档。
             raw = _ai_call_untrusted(prompt, "card_improve", uid)
             cards = _parse_anki_cards_response(raw)
+            if deferred_image_url:
+                # Reader 本地卡仓保存 Markdown 卡面。必须在实体注册与返回草稿之前
+                # 写入配图，确保 registry、前端 canonical draft 与后续投影看到同一内容。
+                _append_deferred_card_image(cards, deferred_image_url)
             _step(f"正在写入 Anki（{len(cards)} 张）" if cards else "AI 没生成卡片")
             # ── 出处(2026-08-18)：此前这条路的 fields **只有正反面**，零出处 ──────────────
             #   下游「按掌握度低的知识找回对应知识点」完全依赖出处回溯，没有它整条链不成立；

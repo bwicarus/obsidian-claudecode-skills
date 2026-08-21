@@ -2131,17 +2131,48 @@ internal sealed class DirectBridgeProtocolSession
         JsonElement message,
         CancellationToken cancellationToken)
     {
-        RequireExactKeys(
-            message,
-            "contract",
-            "type",
-            "requestId",
-            "sessionId",
-            "sourceInstanceId",
-            "draftId",
-            "cardIndex",
-            "aid",
-            "card");
+        bool hasProjection = message.TryGetProperty(
+            "projection",
+            out JsonElement projectionValue);
+        if (hasProjection)
+        {
+            RequireExactKeys(
+                message,
+                "contract",
+                "type",
+                "requestId",
+                "sessionId",
+                "sourceInstanceId",
+                "draftId",
+                "cardIndex",
+                "aid",
+                "card",
+                "projection");
+        }
+        else
+        {
+            // Rolling upgrade: Direct is installed before WebExt. The previous
+            // extension sent canonical Markdown only as `card`; use that same
+            // Markdown-shaped value as the fallback projection until WebExt
+            // starts sending the separately rendered `projection` field.
+            RequireExactKeys(
+                message,
+                "contract",
+                "type",
+                "requestId",
+                "sessionId",
+                "sourceInstanceId",
+                "draftId",
+                "cardIndex",
+                "aid",
+                "card");
+        }
+        if (Encoding.UTF8.GetByteCount(message.GetRawText()) > 192 * 1024)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ANKI_REQUEST_TOO_LARGE",
+                "Reader 本地 Anki 请求超过 192 KiB 安全上限");
+        }
         RequireAuthenticated();
         if (_phase != DirectProtocolPhase.ContextOnly)
         {
@@ -2169,7 +2200,9 @@ internal sealed class DirectBridgeProtocolSession
             || !indexValue.TryGetInt32(out int cardIndex)
             || cardIndex is < 0 or >= 20
             || !message.TryGetProperty("card", out JsonElement cardValue)
-            || cardValue.ValueKind != JsonValueKind.Object)
+            || cardValue.ValueKind != JsonValueKind.Object
+            || (hasProjection
+                && projectionValue.ValueKind != JsonValueKind.Object))
         {
             throw new DirectProtocolException(
                 "BW_READER_ANKI_REQUEST_INVALID",
@@ -2180,6 +2213,10 @@ internal sealed class DirectBridgeProtocolSession
             JsonObject card = JsonNode.Parse(cardValue.GetRawText())
                 as JsonObject
                 ?? throw new JsonException("card is empty");
+            JsonObject projection = JsonNode.Parse(
+                (hasProjection ? projectionValue : cardValue).GetRawText())
+                as JsonObject
+                ?? throw new JsonException("projection is empty");
             ReaderLocalAnkiWriteOutcome outcome =
                 await _localAnkiWriter.AddAsync(
                     sourceInstanceId,
@@ -2187,6 +2224,7 @@ internal sealed class DirectBridgeProtocolSession
                     cardIndex,
                     aid,
                     card,
+                    projection,
                     cancellationToken).ConfigureAwait(false);
             return outcome.Result.ToPayload(outcome.Dedup);
         }

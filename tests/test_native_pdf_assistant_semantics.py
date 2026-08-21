@@ -177,6 +177,17 @@ class NativePDFAssistantSemanticsTests(unittest.TestCase):
         self.assertEqual(result["source_ref"], "books/demo.pdf#p2")
         self.assertEqual(result["source_highlight"]["text"], "selected material")
 
+    def test_realtime_make_anki_forwards_image_to_deferred_canonical_generation(self):
+        image_url = "https://images.example.test/card/photo.jpg"
+        result, run_snippets = self._run_realtime_make_anki(
+            {"text": "card source", "image_url": image_url},
+            {"_uid": "reader-user-7"},
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(run_snippets.call_args.kwargs["defer_add"])
+        self.assertEqual(run_snippets.call_args.kwargs["image_url"], image_url)
+
     def test_deferred_anki_generation_keeps_cards_without_post_add_error(self):
         model_call = Mock(
             return_value='{"cards":[{"type":"basic","front":"Q","back":"A"}]}',
@@ -204,6 +215,62 @@ class NativePDFAssistantSemanticsTests(unittest.TestCase):
         ])
         self.assertNotIn("anki_error", result)
         self.assertEqual(model_call.call_args.args[1:], ("card_improve", "reader-user-7"))
+
+    def test_deferred_anki_generation_keeps_https_image_in_canonical_markdown(self):
+        image_url = "https://images.example.test/card/photo.jpg?size=large"
+        cases = (
+            (
+                '{"cards":[{"type":"basic","front":"Q","back":"A"}]}',
+                "back", "back",
+                "A\n\n![配图](https://images.example.test/card/photo.jpg?size=large)",
+            ),
+            (
+                '{"cards":[{"type":"cloze","text":"X is {{c1::Y}}"}]}',
+                "cloze", "text",
+                "X is {{c1::Y}}\n\n![配图](https://images.example.test/card/photo.jpg?size=large)",
+            ),
+        )
+        for model_output, output_face_key, entity_face_key, expected in cases:
+            registered = Mock(return_value="card_abcdef123456")
+            with self.subTest(face_key=output_face_key), patch.object(
+                pdf_reader, "_ai_call_untrusted", return_value=model_output,
+            ), patch.object(pdf_reader, "_entity_reg_cards", registered):
+                result = pdf_reader._run_snippets_to(
+                    [{"text": "card source", "source": ""}],
+                    False, True, "", uid="reader-user-7",
+                    image_url=image_url, defer_add=True,
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["anki_cards"][0][output_face_key], expected)
+            self.assertEqual(
+                registered.call_args.args[0][0][entity_face_key], expected,
+            )
+
+    def test_deferred_anki_generation_rejects_unsafe_image_url_before_ai(self):
+        unsafe_urls = (
+            "http://images.example.test/card.jpg",
+            "/pdf/api/img-proxy?url=https%3A%2F%2Fimages.example.test%2Fcard.jpg",
+            "https://user:secret@images.example.test/card.jpg",
+            "https://images.example.test/card.jpg#fragment",
+            " https://images.example.test/card.jpg",
+            "https://images.example.test/card.jpg\nignored",
+        )
+        for image_url in unsafe_urls:
+            model_call = Mock(side_effect=AssertionError("AI must not run"))
+            with self.subTest(image_url=image_url), patch.object(
+                pdf_reader, "_ai_call_untrusted", model_call,
+            ):
+                result = pdf_reader._run_snippets_to(
+                    [{"text": "card source", "source": ""}],
+                    False, True, "", uid="reader-user-7",
+                    image_url=image_url, defer_add=True,
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["anki_error_code"], "card_image_url_invalid")
+            self.assertNotIn("anki_cards", result)
+            model_call.assert_not_called()
 
     def test_untrusted_card_text_never_uses_codex_host_tools(self):
         tools_off = Mock(return_value='{"cards":[]}')

@@ -221,6 +221,41 @@ class FakeElement {
     if (selector === ".asst-a") {
       return this.descendants().filter((node) => node.classList.contains("asst-a"));
     }
+    if (selector === "img[src]" && this._rawHtml) {
+      return [...this._rawHtml.matchAll(/<img\b[^>]*>/gi)].flatMap((match) => {
+        let currentTag = match[0];
+        const srcPattern = /(\bsrc\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i;
+        const source = currentTag.match(srcPattern);
+        if (!source) return [];
+        let currentSource = source[2] ?? source[3] ?? source[4] ?? "";
+        const replaceTag = (nextTag) => {
+          const index = this._rawHtml.indexOf(currentTag);
+          if (index >= 0) {
+            this._rawHtml = this._rawHtml.slice(0, index) + nextTag +
+              this._rawHtml.slice(index + currentTag.length);
+          }
+          currentTag = nextTag;
+        };
+        return [{
+          getAttribute(name) {
+            return String(name).toLowerCase() === "src" ? currentSource : null;
+          },
+          setAttribute(name, value) {
+            if (String(name).toLowerCase() !== "src") return;
+            currentSource = String(value);
+            replaceTag(currentTag.replace(
+              srcPattern,
+              `$1"${currentSource.replace(/"/g, "&quot;")}"`,
+            ));
+          },
+          removeAttribute(name) {
+            if (String(name).toLowerCase() !== "src") return;
+            currentSource = "";
+            replaceTag(currentTag.replace(srcPattern, ""));
+          },
+        }];
+      });
+    }
     // Queue rendering does not parse raw HTML. Sanitizer selectors therefore
     // correctly see no executable DOM nodes in this deliberately tiny harness.
     return [];
@@ -277,7 +312,8 @@ function harness({
   openImpl = null,
   dispatchImpl = null,
   outboxImpl = null,
-  cardRepository = null
+  cardRepository = null,
+  markdownImpl = null
 }) {
   const document = new FakeDocument();
   const pane = document.createElement("section");
@@ -324,6 +360,12 @@ function harness({
       };
     },
     esc(value) { return String(value || ""); },
+    safeHtml(value) { return String(value == null ? "" : value); },
+    md(value) {
+      return typeof markdownImpl === "function"
+        ? markdownImpl(String(value == null ? "" : value))
+        : String(value == null ? "" : value);
+    },
     toast(value) { toasts.push(String(value || "")); },
     outbox: {
       send(...args) {
@@ -1182,6 +1224,198 @@ test("local repository enumerates confirmed due cards before new cards without P
   assert.doesNotMatch(h.pane.innerHTML, /ARCHIVED|REMOVED|FUTURE/);
 });
 
+test("an open local second card follows repository edits in place and keeps reveal and panel state", async () => {
+  const state = (confirmedAt) => ({
+    phase: "confirmed", removed: false, confirmedAt,
+    review: {
+      status: "new", dueAt: null, lastReviewedAt: null,
+      intervalDays: 0, ease: 0, reps: 0, lapses: 0,
+    },
+    flags: { archived: false }, projections: { anki: {} }, exactState: {},
+  });
+  let record = {
+    id: "card_live", entityRev: 4, stateRev: 8, deleted: false,
+    source: { kind: "reader", sourceId: "live-source" },
+    cards: [
+      { type: "basic", front: "FIRST", back: "FIRST BACK" },
+      { type: "basic", front: "SECOND OLD", back: "SECOND OLD BACK" },
+    ],
+    states: { 0: state(1), 1: state(2) },
+  };
+  let subscriber = null;
+  const repository = {
+    async snapshot() { return [structuredClone(record)]; },
+    async patchState() { throw new Error("not used"); },
+    subscribe(listener) {
+      subscriber = listener;
+      return () => { subscriber = null; };
+    },
+  };
+  const h = harness({
+    context: {}, cardRepository: repository,
+    fetchImpl: async () => { throw new Error("local queue must not call Pi"); },
+  });
+
+  await h.RC.review.reload();
+  assert.ok(subscriber, "review must subscribe after the canonical repository appears");
+  h.RC.review.next();
+  h.RC.review.show();
+  h.RC.review.setImproveExpanded(true);
+  assert.equal(h.RC.review.currentCard().entity_index, 1);
+  assert.match(h.pane.innerHTML, /SECOND OLD BACK/);
+
+  record = structuredClone(record);
+  record.entityRev += 1;
+  record.cards[1].front = "SECOND NEW";
+  record.cards[1].back = "SECOND NEW BACK";
+  subscriber({ cardId: record.id, record: structuredClone(record) });
+
+  assert.equal(h.RC.review.currentCard().entity_index, 1,
+    "an entity edit must not jump back to the first sibling");
+  assert.equal(h.RC.review.currentCard().question, "SECOND NEW");
+  assert.equal(h.currentPager().index(), 1);
+  assert.match(h.pane.innerHTML, /SECOND NEW BACK/,
+    "the updated card remains revealed");
+  assert.equal(
+    h.findActions("toggle-improve")[0].getAttribute("aria-expanded"),
+    "true",
+    "content refresh keeps the open improvement panel",
+  );
+
+  const rendersBeforeStateOnly = h.learningCardRenders.length;
+  record = structuredClone(record);
+  record.stateRev += 1;
+  record.states[1].projections.anki.readerpc = { status: "succeeded" };
+  subscriber({ cardId: record.id, record: structuredClone(record) });
+  assert.equal(h.learningCardRenders.length, rendersBeforeStateOnly,
+    "projection-only receipt updates metadata without flashing the face");
+  assert.equal(h.RC.review.currentCard()._localReview.stateRev, record.stateRev);
+});
+
+test("repository removal drops only the exact local index and keeps its siblings", async () => {
+  const state = (confirmedAt) => ({
+    phase: "confirmed", removed: false, confirmedAt,
+    review: {
+      status: "new", dueAt: null, lastReviewedAt: null,
+      intervalDays: 0, ease: 0, reps: 0, lapses: 0,
+    },
+    flags: { archived: false }, projections: { anki: {} }, exactState: {},
+  });
+  let record = {
+    id: "card_exact", entityRev: 2, stateRev: 5, deleted: false,
+    source: { kind: "reader", sourceId: "exact-source" },
+    cards: [
+      { type: "basic", front: "KEEP ZERO", back: "A0" },
+      { type: "basic", front: "REMOVE ONE", back: "A1" },
+      { type: "basic", front: "KEEP TWO", back: "A2" },
+    ],
+    states: { 0: state(1), 1: state(2), 2: state(3) },
+  };
+  let subscriber;
+  const h = harness({
+    context: {},
+    cardRepository: {
+      async snapshot() { return [structuredClone(record)]; },
+      async patchState() { throw new Error("not used"); },
+      subscribe(listener) { subscriber = listener; return () => {}; },
+    },
+    fetchImpl: async () => { throw new Error("local queue must not call Pi"); },
+  });
+  await h.RC.review.reload();
+  h.RC.review.next();
+  assert.equal(h.RC.review.currentCard().entity_index, 1);
+
+  record = structuredClone(record);
+  record.stateRev += 1;
+  record.states[1].removed = true;
+  subscriber({ cardId: record.id, record: structuredClone(record) });
+
+  assert.equal(h.RC.review.currentCard().entity_index, 2,
+    "removing the current middle card selects the following sibling");
+  assert.match(h.pane.innerHTML, /KEEP TWO/);
+  assert.doesNotMatch(h.pane.innerHTML, /REMOVE ONE/);
+  h.RC.review.previous();
+  assert.equal(h.RC.review.currentCard().entity_index, 0);
+  h.RC.review.next();
+  assert.equal(h.RC.review.currentCard().entity_index, 2,
+    "the adjacent sibling must not be consumed by a stale numeric slot");
+});
+
+test("canonical faces parse Markdown and proxy HTTPS images while legacy Anki HTML stays HTML", async () => {
+  const mdCalls = [];
+  const local = harness({
+    context: {},
+    markdownImpl(value) {
+      mdCalls.push(value);
+      if (value.includes("LOCAL IMAGE")) {
+        return '<p><strong>LOCAL IMAGE</strong>' +
+          '<img src="https://images.example.test/soup.png">' +
+          '<img src="data:image/png;base64,AA==">' +
+          '<img src="blob:https://reader.example/id-1">' +
+          '<img src="/pdf/api/asset/card-image">' +
+          '<img src="/pdf/api/review-queue"></p>';
+      }
+      return `<p>${value}</p>`;
+    },
+    cardRepository: {
+      async snapshot() {
+        return [{
+          id: "card_image", entityRev: 1, stateRev: 1, deleted: false,
+          source: { kind: "reader", sourceId: "image-source" },
+          cards: [{ type: "basic", front: "**LOCAL IMAGE**", back: "LOCAL BACK" }],
+          states: { 0: {
+            phase: "confirmed", removed: false, confirmedAt: 1,
+            review: {
+              status: "new", dueAt: null, lastReviewedAt: null,
+              intervalDays: 0, ease: 0, reps: 0, lapses: 0,
+            },
+            flags: { archived: false }, projections: { anki: {} }, exactState: {},
+          } },
+        }];
+      },
+      async patchState() { throw new Error("not used"); },
+      subscribe() { return () => {}; },
+    },
+    fetchImpl: async () => { throw new Error("local queue must not call Pi"); },
+  });
+  await local.RC.review.reload();
+  const localFace = local.learningCardRenders.at(-1).card._displayFrontHtml;
+  assert.match(localFace, /<strong>LOCAL IMAGE<\/strong>/);
+  assert.match(
+    localFace,
+    new RegExp("/pdf/api/img-proxy\\?url=" +
+      encodeURIComponent("https://images.example.test/soup.png")),
+  );
+  assert.match(localFace, /data:image\/png;base64,AA==/);
+  assert.match(localFace, /blob:https:\/\/reader\.example\/id-1/);
+  assert.match(localFace, /\/pdf\/api\/asset\/card-image/);
+  assert.doesNotMatch(localFace, /\/pdf\/api\/review-queue/,
+    "card images may only call the Reader's fixed image routes");
+  assert.equal(mdCalls.length, 2, "canonical front and back each use RC.md once");
+
+  const legacyMdCalls = [];
+  const legacy = harness({
+    context: {},
+    markdownImpl(value) {
+      legacyMdCalls.push(value);
+      return `<p>DOUBLE ${value}</p>`;
+    },
+    fetchImpl: async () => response({
+      ok: true, due_total: 1, related_total: 0,
+      cards: [{
+        id: 9901,
+        question: '<strong>LEGACY HTML</strong><img src="/pdf/api/asset/legacy">',
+        answer: '<em>LEGACY BACK</em>',
+      }],
+    }),
+  });
+  await legacy.RC.review.reload();
+  const legacyFace = legacy.learningCardRenders.at(-1).card._displayFrontHtml;
+  assert.equal(legacyMdCalls.length, 0, "legacy Anki template HTML never enters RC.md");
+  assert.match(legacyFace, /<strong>LEGACY HTML<\/strong>/);
+  assert.doesNotMatch(legacyFace, /DOUBLE/);
+});
+
 test("local rating is staged for one action, then persists before external projection", async () => {
   const write = deferred();
   const patchCalls = [];
@@ -1313,6 +1547,7 @@ test("undo restores the staged card exactly without touching Reader or Anki", as
 
 test("review delete removes only the current local card and emits its Anki projection", async () => {
   const removeCalls = [];
+  let subscriber = null;
   const state = (confirmedAt, projections = { anki: {} }) => ({
     phase: "confirmed", removed: false, confirmedAt,
     review: {
@@ -1329,7 +1564,7 @@ test("review delete removes only the current local card and emits its Anki proje
     cardRepository: {
       async snapshot() {
         return [{
-          id: "card_delete", stateRev: 12, deleted: false,
+          id: "card_delete", entityRev: 4, stateRev: 12, deleted: false,
           source: { kind: "reader", sourceId: "source-delete" },
           cards: [
             { type: "basic", front: "DELETE ME", back: "A" },
@@ -1340,11 +1575,23 @@ test("review delete removes only the current local card and emits its Anki proje
       },
       async removeCard(...args) {
         removeCalls.push(structuredClone(args));
-        return { id: "card_delete", stateRev: 13, states: {
-          0: { removed: true }, 1: state(2)
-        } };
+        const removed = {
+          id: "card_delete", entityRev: 4, stateRev: 13, deleted: false,
+          source: { kind: "reader", sourceId: "source-delete" },
+          cards: [
+            { type: "basic", front: "DELETE ME", back: "A" },
+            { type: "basic", front: "KEEP ME", back: "B" },
+          ],
+          states: {
+            0: { ...state(1, projection), removed: true },
+            1: state(2),
+          },
+        };
+        subscriber?.({ cardId: "card_delete", record: structuredClone(removed) });
+        return removed;
       },
-      async patchState() { throw new Error("rating is not part of this test"); }
+      async patchState() { throw new Error("rating is not part of this test"); },
+      subscribe(listener) { subscriber = listener; return () => {}; },
     },
     fetchImpl: async () => { throw new Error("delete is projected by its event owner"); }
   });

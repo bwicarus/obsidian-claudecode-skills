@@ -94,7 +94,7 @@ class AnkiCardOperationTest(unittest.TestCase):
     def _success(actions, *, delay=0):
         lock = threading.Lock()
 
-        def call(action, params=None):
+        def call(action, params=None, **_kwargs):
             with lock:
                 actions.append((action, params or {}))
             if delay and action in (
@@ -219,6 +219,281 @@ class AnkiCardOperationTest(unittest.TestCase):
         self.assertEqual(first["anki_local_applied"]["status"], "succeeded")
         self.assertEqual(first["anki_web_sync"]["status"], "succeeded")
         self.assertEqual(first["updated_fields"], ["Back", "Front"])
+
+    def test_update_stores_public_image_before_note_and_replay_is_idempotent(self):
+        actions = []
+        stored = {}
+
+        def call(action, params=None, **_kwargs):
+            params = params or {}
+            actions.append((action, params))
+            if action == "notesInfo":
+                return [{"noteId": 32, "fields": {"Back": {"value": "old"}}}]
+            if action == "storeMediaFile":
+                stored.update(params)
+                return params["filename"]
+            if action in ("updateNoteFields", "sync"):
+                return None
+            raise AssertionError(action)
+
+        image_url = "https://images.example.test/soup.png?size=large"
+        image_bytes = b"\x89PNG\r\n\x1a\nprojection-test"
+        body = {
+            "operation": "update-note-fields",
+            "mutationId": "update-image-1",
+            "noteId": 32,
+            "fields": {
+                "Back": '<p>答案</p><img src="' + image_url + '">',
+            },
+        }
+        with (
+            patch.object(
+                pdf_reader,
+                "_anki_card_operation_connect",
+                side_effect=call,
+            ),
+            patch.object(
+                pdf_reader,
+                "_fetch_public_image",
+                return_value=(image_bytes, "image/png", image_url),
+            ) as fetch,
+        ):
+            first_status, first = self._invoke(body)
+            second_status, second = self._invoke(body)
+
+        filename = pdf_reader._anki_projection_media_filename(
+            image_bytes, "image/png"
+        )
+        self.assertEqual(first_status, 200)
+        self.assertEqual(second_status, 200)
+        self.assertTrue(second["dedup"])
+        self.assertEqual(
+            [action for action, _ in actions],
+            ["notesInfo", "storeMediaFile", "updateNoteFields", "sync"],
+        )
+        fetch.assert_called_once()
+        self.assertEqual(fetch.call_args.args, (image_url,))
+        self.assertEqual(
+            fetch.call_args.kwargs["allowed_schemes"], ("https",)
+        )
+        self.assertEqual(stored["filename"], filename)
+        self.assertEqual(
+            stored["data"],
+            "iVBORw0KGgpwcm9qZWN0aW9uLXRlc3Q=",
+        )
+        updated = actions[2][1]["note"]["fields"]["Back"]
+        self.assertIn('src="' + filename + '"', updated)
+        self.assertNotIn("https://", updated)
+        self.assertEqual(first["anki_local_applied"]["status"], "succeeded")
+
+    def test_update_rejects_http_image_before_media_or_note_write(self):
+        actions = []
+        body = {
+            "operation": "update-note-fields",
+            "mutationId": "update-http-image",
+            "noteId": 33,
+            "fields": {
+                "Back": '<img src="http://127.0.0.1/private.png">',
+            },
+        }
+        with (
+            patch.object(
+                pdf_reader,
+                "_anki_card_operation_connect",
+                side_effect=self._success(actions),
+            ),
+            patch.object(pdf_reader, "_fetch_public_image") as fetch,
+        ):
+            first_status, first = self._invoke(body)
+            second_status, second = self._invoke(body)
+
+        self.assertEqual(first_status, 400)
+        self.assertEqual(second_status, 400)
+        self.assertEqual(first["code"], "card_image_url_invalid")
+        self.assertEqual(second["code"], "card_image_url_invalid")
+        self.assertEqual(
+            [action for action, _ in actions],
+            ["notesInfo", "notesInfo"],
+        )
+        fetch.assert_not_called()
+
+    def test_image_projection_rejects_malformed_or_autoloading_html(self):
+        cases = [
+            '<img src=https://images.example.test/a.png>',
+            '<img src="a.png" src="b.png">',
+            '<img src="a.png" srcset="https://images.example.test/a@2x.png 2x">',
+            '<video poster="https://images.example.test/a.png"></video>',
+            '<p style=color:red>unsafe</p>',
+            '<p style="color:red">unsafe</p>',
+        ]
+        for index, html in enumerate(cases):
+            actions = []
+            with (
+                self.subTest(html=html),
+                patch.object(
+                    pdf_reader,
+                    "_anki_card_operation_connect",
+                    side_effect=self._success(actions),
+                ),
+                patch.object(pdf_reader, "_fetch_public_image") as fetch,
+            ):
+                status, data = self._invoke({
+                    "operation": "update-note-fields",
+                    "mutationId": f"update-bad-markup-{index}",
+                    "noteId": 40 + index,
+                    "fields": {"Back": html},
+                })
+            self.assertEqual(status, 400)
+            self.assertEqual(data["code"], "anki_media_url_invalid")
+            self.assertEqual(
+                [action for action, _params in actions], ["notesInfo"]
+            )
+            fetch.assert_not_called()
+
+    def test_image_projection_checks_magic_and_operation_count_before_write(self):
+        actions = []
+        body = {
+            "operation": "update-note-fields",
+            "mutationId": "update-bad-magic",
+            "noteId": 50,
+            "fields": {
+                "Back": '<img src="https://images.example.test/a.png">',
+            },
+        }
+        with (
+            patch.object(
+                pdf_reader,
+                "_anki_card_operation_connect",
+                side_effect=self._success(actions),
+            ),
+            patch.object(
+                pdf_reader,
+                "_fetch_public_image",
+                return_value=(b"not-a-png", "image/png", "https://images.example.test/a.png"),
+            ),
+        ):
+            status, data = self._invoke(body)
+        self.assertEqual(status, 415)
+        self.assertEqual(data["code"], "anki_media_fetch_failed")
+        self.assertEqual(
+            [action for action, _params in actions], ["notesInfo"]
+        )
+
+        actions.clear()
+        images = "".join(
+            '<img src="https://images.example.test/%d.png">' % index
+            for index in range(9)
+        )
+        with (
+            patch.object(
+                pdf_reader,
+                "_anki_card_operation_connect",
+                side_effect=self._success(actions),
+            ),
+            patch.object(pdf_reader, "_fetch_public_image") as fetch,
+        ):
+            status, data = self._invoke({
+                "operation": "update-note-fields",
+                "mutationId": "update-too-many-images",
+                "noteId": 51,
+                "fields": {"Back": images},
+            })
+        self.assertEqual(status, 413)
+        self.assertEqual(data["code"], "anki_media_fetch_failed")
+        self.assertEqual(
+            [action for action, _params in actions], ["notesInfo"]
+        )
+        fetch.assert_not_called()
+
+    def test_image_projection_aggregate_limit_writes_no_media(self):
+        actions = []
+        images = "".join(
+            '<img src="https://images.example.test/%d.png">' % index
+            for index in range(3)
+        )
+        large_png = (
+            b"\x89PNG\r\n\x1a\n"
+            + b"\0" * (12 * 1024 * 1024 - 8)
+        )
+        with (
+            patch.object(
+                pdf_reader,
+                "_anki_card_operation_connect",
+                side_effect=self._success(actions),
+            ),
+            patch.object(
+                pdf_reader,
+                "_fetch_public_image",
+                return_value=(large_png, "image/png", "https://images.example.test/fetched.png"),
+            ) as fetch,
+        ):
+            status, data = self._invoke({
+                "operation": "update-note-fields",
+                "mutationId": "update-aggregate-too-large",
+                "noteId": 53,
+                "fields": {"Back": images},
+            })
+
+        self.assertEqual(status, 413)
+        self.assertEqual(data["code"], "anki_media_fetch_failed")
+        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual(
+            [action for action, _params in actions], ["notesInfo"]
+        )
+
+    def test_pending_image_update_never_redownloads_or_rewrites_media(self):
+        actions = []
+        image_url = "https://images.example.test/pending.png"
+
+        def call(action, params=None, **_kwargs):
+            actions.append((action, params or {}))
+            if action == "notesInfo":
+                return [{"noteId": 52, "fields": {"Back": {"value": "old"}}}]
+            if action == "storeMediaFile":
+                return params["filename"]
+            if action == "updateNoteFields":
+                raise pdf_reader._AnkiCardTransportError("lost response")
+            raise AssertionError(action)
+
+        body = {
+            "operation": "update-note-fields",
+            "mutationId": "update-image-pending",
+            "noteId": 52,
+            "fields": {"Back": '<img src="' + image_url + '">'},
+        }
+        image_bytes = b"\x89PNG\r\n\x1a\npending"
+        with (
+            patch.object(
+                pdf_reader,
+                "_anki_card_operation_connect",
+                side_effect=call,
+            ),
+            patch.object(
+                pdf_reader,
+                "_fetch_public_image",
+                return_value=(image_bytes, "image/png", image_url),
+            ) as fetch,
+        ):
+            first_status, first = self._invoke(body)
+            second_status, second = self._invoke(body)
+
+        self.assertEqual(first_status, 503)
+        self.assertEqual(first["code"], "outcome_unknown")
+        self.assertEqual(second_status, 409)
+        self.assertEqual(second["code"], "outcome_unknown")
+        self.assertEqual(
+            [action for action, _params in actions],
+            ["notesInfo", "storeMediaFile", "updateNoteFields"],
+        )
+        fetch.assert_called_once()
+
+    def test_media_filename_is_content_addressed(self):
+        first = b"\x89PNG\r\n\x1a\nfirst"
+        second = b"\x89PNG\r\n\x1a\nsecond"
+        self.assertNotEqual(
+            pdf_reader._anki_projection_media_filename(first, "image/png"),
+            pdf_reader._anki_projection_media_filename(second, "image/png"),
+        )
 
     def test_delete_is_explicitly_note_level_and_syncs(self):
         actions = []
