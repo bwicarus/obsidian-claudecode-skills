@@ -556,15 +556,17 @@ internal static class ReaderRealtimeOutputProtocol
             string operation = Text(mutation, "operation", 16);
             if (operation == "edit")
             {
-                Exact(
+                ExactWithOptional(
                     mutation,
-                    "operation",
-                    "mutationId",
-                    "id",
-                    "cardIndex",
-                    "expectedEntityRev",
-                    "externalPolicy",
-                    "card");
+                    [
+                        "operation",
+                        "mutationId",
+                        "id",
+                        "cardIndex",
+                        "expectedEntityRev",
+                        "externalPolicy",
+                    ],
+                    ["card", "source"]);
             }
             else if (operation == "delete")
             {
@@ -626,11 +628,22 @@ internal static class ReaderRealtimeOutputProtocol
             {
                 throw Invalid("Reader 学习卡版本无效");
             }
+            JsonElement card = default;
+            JsonElement source = default;
+            bool hasCard = operation == "edit"
+                && mutation.TryGetProperty("card", out card);
+            bool hasSource = operation == "edit"
+                && mutation.TryGetProperty("source", out source);
             if (operation == "edit"
-                && !ReaderContextMcpServer.ValidateLearningCardContent(
-                    mutation.GetProperty("card")))
+                && (!hasCard && !hasSource
+                    || hasCard
+                        && !ReaderContextMcpServer.ValidateLearningCardContent(
+                            card)
+                    || hasSource
+                        && !ReaderContextMcpServer.ValidateLearningCardSource(
+                            source)))
             {
-                throw Invalid("Reader 学习卡内容无效");
+                throw Invalid("Reader 学习卡内容或出处无效");
             }
             return;
         }

@@ -740,6 +740,7 @@ internal static class DirectBridgeSelfTest
             checks).ConfigureAwait(false);
         CheckReaderPageCardQueryContract(checks);
         CheckReaderPageCardMutationContract(checks);
+        CheckReaderLearningCardMutationContract(checks);
         await CheckReaderRealtimeOutputMcpAsync(
             root,
             checks).ConfigureAwait(false);
@@ -1122,6 +1123,241 @@ internal static class DirectBridgeSelfTest
             && oldPublicNameRejected
             && extraFieldRejected,
             "page-card-writes-use-stable-id-with-optional-bound-number",
+            checks);
+    }
+
+    private static void CheckReaderLearningCardMutationContract(
+        ICollection<string> checks)
+    {
+        JsonObject schema =
+            ReaderContextMcpServer.BuildLearningCardEditArgumentsSchema();
+        JsonArray required = schema["required"]!.AsArray();
+        JsonObject sourceSchema = schema["properties"]!["source"]!.AsObject();
+        HashSet<string> sourceProperties = sourceSchema["properties"]!
+            .AsObject()
+            .Select(property => property.Key)
+            .ToHashSet(StringComparer.Ordinal);
+
+        using JsonDocument sourceOnlyArguments = JsonDocument.Parse(
+            """
+            {
+              "id":"card_aabbccdd",
+              "cardIndex":1,
+              "expectedEntityRevision":7,
+              "source":{
+                "kind":"reader-book-exact-card-draft",
+                "documentId":"library/book.pdf",
+                "url":"https://example.test/source",
+                "location":{"kind":"pdf","page":12},
+                "legacy":{"migrated":true}
+              }
+            }
+            """);
+        bool sourceOnlyAccepted =
+            ReaderContextMcpServer.TryReadLearningCardMutation(
+                sourceOnlyArguments.RootElement,
+                "edit",
+                out JsonObject sourceOnlyPayload,
+                out string sourceOnlyId,
+                out int sourceOnlyIndex);
+        JsonObject sourceOnlyMutation = sourceOnlyAccepted
+            ? sourceOnlyPayload["args"]!.AsArray()[0]!.AsObject()
+            : new JsonObject();
+
+        using JsonDocument combinedArguments = JsonDocument.Parse(
+            """
+            {
+              "id":"card_aabbccdd",
+              "cardIndex":1,
+              "expectedEntityRevision":7,
+              "externalPolicy":"reader-only",
+              "card":{
+                "type":"basic",
+                "front":"新正面",
+                "back":"新背面",
+                "reason":"修正出处"
+              },
+              "source":{
+                "kind":"reader-book-exact-card-draft",
+                "documentId":"library/new-book.pdf",
+                "location":{"kind":"pdf","page":18}
+              }
+            }
+            """);
+        bool combinedAccepted =
+            ReaderContextMcpServer.TryReadLearningCardMutation(
+                combinedArguments.RootElement,
+                "edit",
+                out JsonObject combinedPayload,
+                out _,
+                out _);
+        JsonObject combinedMutation = combinedAccepted
+            ? combinedPayload["args"]!.AsArray()[0]!.AsObject()
+            : new JsonObject();
+
+        using JsonDocument missingReplacement = JsonDocument.Parse(
+            """
+            {"id":"card_aabbccdd","cardIndex":1,"expectedEntityRevision":7}
+            """);
+        bool missingRejected =
+            !ReaderContextMcpServer.TryReadLearningCardMutation(
+                missingReplacement.RootElement,
+                "edit",
+                out _,
+                out _,
+                out _);
+        using JsonDocument sourceAlias = JsonDocument.Parse(
+            """
+            {
+              "id":"card_aabbccdd",
+              "cardIndex":1,
+              "expectedEntityRevision":7,
+              "sourceUrl":"https://example.test/not-canonical"
+            }
+            """);
+        bool aliasRejected =
+            !ReaderContextMcpServer.TryReadLearningCardMutation(
+                sourceAlias.RootElement,
+                "edit",
+                out _,
+                out _,
+                out _);
+        using JsonDocument invalidSource = JsonDocument.Parse(
+            """
+            {
+              "id":"card_aabbccdd",
+              "cardIndex":1,
+              "expectedEntityRevision":7,
+              "source":{
+                "kind":"reader-book-exact-card-draft",
+                "metadata":{},
+                "location":12
+              }
+            }
+            """);
+        bool invalidSourceRejected =
+            !ReaderContextMcpServer.TryReadLearningCardMutation(
+                invalidSource.RootElement,
+                "edit",
+                out _,
+                out _,
+                out _);
+
+        JsonObject oversizedSource = new()
+        {
+            ["kind"] = "reader-source",
+            ["sourceId"] = "reader-source:oversized",
+            ["quote"] = new string('q', 32768),
+            ["context"] = new string('c', 65536),
+            ["requirement"] = new string('r', 32768),
+        };
+        bool oversizedSourceRejected =
+            !ReaderContextMcpServer.ValidateLearningCardSource(
+                JsonSerializer.SerializeToElement(oversizedSource));
+        JsonObject denseCjkSource = new()
+        {
+            ["kind"] = "reader-source",
+            ["sourceId"] = "reader-source:dense-cjk",
+            ["legacy"] = new JsonObject
+            {
+                ["text"] = new string('日', 30_000),
+            },
+        };
+        bool denseCjkSourceAccepted =
+            ReaderContextMcpServer.ValidateLearningCardSource(
+                JsonSerializer.SerializeToElement(denseCjkSource));
+        using JsonDocument nonFiniteNestedNumber = JsonDocument.Parse(
+            """
+            {
+              "kind":"reader-source",
+              "sourceId":"reader-source:non-finite",
+              "legacy":{"score":1e400}
+            }
+            """);
+        bool nonFiniteNestedNumberRejected =
+            !ReaderContextMcpServer.ValidateLearningCardSource(
+                nonFiniteNestedNumber.RootElement);
+
+        JsonObject largeSourceAction = new()
+        {
+            ["fn"] = "_nativeReaderLearningCardMutate",
+            ["args"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["operation"] = "edit",
+                    ["mutationId"] = "lcard_" + new string('a', 24),
+                    ["id"] = "card_aabbccdd",
+                    ["cardIndex"] = 1,
+                    ["expectedEntityRev"] = 7,
+                    ["externalPolicy"] = "reader-only",
+                    ["source"] = new JsonObject
+                    {
+                        ["kind"] = "reader-source",
+                        ["sourceId"] = "reader-source:large",
+                        ["context"] = new string('x', 50_000),
+                    },
+                },
+            },
+        };
+        bool largeSourceActionAccepted = false;
+        try
+        {
+            JsonNode normalized = ReaderRealtimeOutputProtocol.ValidatePayload(
+                "client-action",
+                largeSourceAction);
+            largeSourceActionAccepted = normalized["args"]?[0]?["source"]?
+                ["context"]?.GetValue<string>().Length == 50_000;
+        }
+        catch (ReaderRealtimeOutputException)
+        {
+            largeSourceActionAccepted = false;
+        }
+
+        Require(
+            required.Select(item => item!.GetValue<string>()).ToHashSet(
+                StringComparer.Ordinal).SetEquals(new[]
+                {
+                    "id", "cardIndex", "expectedEntityRevision",
+                })
+            && schema["anyOf"]!.AsArray().Count == 2
+            && sourceSchema["additionalProperties"]?.GetValue<bool>() == false
+            && sourceSchema["properties"]?["kind"]?["minLength"]
+                ?.GetValue<int>() == 1
+            && sourceSchema["anyOf"]!.AsArray().All(branch =>
+                branch?["properties"] is JsonObject branchProperties
+                && branchProperties.Count == 1
+                && branchProperties.First().Value?["minLength"]
+                    ?.GetValue<int>() == 1)
+            && sourceProperties.SetEquals(new[]
+            {
+                "kind", "sourceId", "documentId", "bookId", "url", "title",
+                "quote", "context", "tool", "draftId", "sourceInstanceId",
+                "requirement", "location", "anchor", "selection", "legacy",
+            })
+            && sourceOnlyAccepted
+            && sourceOnlyId == "card_aabbccdd"
+            && sourceOnlyIndex == 1
+            && sourceOnlyMutation["operation"]?.GetValue<string>() == "edit"
+            && sourceOnlyMutation["expectedEntityRev"]?.GetValue<long>() == 7
+            && sourceOnlyMutation["externalPolicy"]?.GetValue<string>()
+                == "sync-if-projected"
+            && !sourceOnlyMutation.ContainsKey("card")
+            && sourceOnlyMutation["source"]?["documentId"]?.GetValue<string>()
+                == "library/book.pdf"
+            && combinedAccepted
+            && combinedMutation.ContainsKey("card")
+            && combinedMutation.ContainsKey("source")
+            && combinedMutation["externalPolicy"]?.GetValue<string>()
+                == "reader-only"
+            && missingRejected
+            && aliasRejected
+            && invalidSourceRejected
+            && oversizedSourceRejected
+            && denseCjkSourceAccepted
+            && nonFiniteNestedNumberRejected
+            && largeSourceActionAccepted,
+            "learning-card-edit-accepts-batch-source-replacement-with-large-payload",
             checks);
     }
 

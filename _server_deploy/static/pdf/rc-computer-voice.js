@@ -1419,10 +1419,10 @@
           learningMutation,
           learningOperation === "edit"
             ? ["operation", "mutationId", "id", "cardIndex",
-              "expectedEntityRev", "externalPolicy", "card"]
+              "expectedEntityRev", "externalPolicy"]
             : ["operation", "mutationId", "id", "cardIndex",
               "expectedStateRev", "externalPolicy"],
-          [],
+          learningOperation === "edit" ? ["card", "source"] : [],
           "Reader 学习卡修改"
         );
         if ((learningOperation !== "edit" && learningOperation !== "delete") ||
@@ -1446,10 +1446,17 @@
           externalPolicy: learningMutation.externalPolicy,
         };
         if (learningOperation === "edit") {
+          var learningHasCard = Object.prototype.hasOwnProperty.call(
+            learningMutation, "card"
+          );
+          var learningHasSource = Object.prototype.hasOwnProperty.call(
+            learningMutation, "source"
+          );
           if (!Number.isSafeInteger(learningMutation.expectedEntityRev) ||
               learningMutation.expectedEntityRev < 0 ||
-              !plainObject(learningMutation.card) ||
-              messageBytes(JSON.stringify(learningMutation.card)) > 200000) {
+              (!learningHasCard && !learningHasSource) ||
+              (learningHasCard && (!plainObject(learningMutation.card) ||
+                messageBytes(JSON.stringify(learningMutation.card)) > 200000))) {
             throw directError(
               "Reader 学习卡编辑内容无效",
               "BW_READER_REALTIME_OUTPUT_SCHEMA",
@@ -1458,9 +1465,17 @@
           }
           normalizedLearningMutation.expectedEntityRev =
             learningMutation.expectedEntityRev;
-          normalizedLearningMutation.card = JSON.parse(
-            JSON.stringify(learningMutation.card)
-          );
+          if (learningHasCard) {
+            normalizedLearningMutation.card = JSON.parse(
+              JSON.stringify(learningMutation.card)
+            );
+          }
+          if (learningHasSource) {
+            normalizedLearningMutation.source = normalizeLearningCardSource(
+              learningMutation.source,
+              "Reader 学习卡 source"
+            );
+          }
         } else {
           if (!Number.isSafeInteger(learningMutation.expectedStateRev) ||
               learningMutation.expectedStateRev < 0) {
@@ -7613,13 +7628,118 @@
 
   var LEARNING_CARD_CONTRACT = "reader-learning-card/1";
   var LEARNING_CARD_LIST_BUDGET = 180 * 1024;
+  var LEARNING_CARD_SOURCE_LIMIT = 128 * 1024;
+  var LEARNING_CARD_SOURCE_TEXT_LIMITS = Object.freeze({
+    kind: 80,
+    sourceId: 4096,
+    documentId: 4096,
+    bookId: 4096,
+    url: 8192,
+    title: 1024,
+    quote: 32768,
+    context: 65536,
+    tool: 160,
+    draftId: 512,
+    sourceInstanceId: 512,
+    requirement: 32768,
+  });
+  var LEARNING_CARD_SOURCE_OBJECT_FIELDS = Object.freeze([
+    "location", "anchor", "selection", "legacy",
+  ]);
+
+  function normalizeLearningCardSource(value, label) {
+    label = label || "Reader 学习卡 source";
+    function validNestedJSON(input, seen, depth) {
+      if (input === null || typeof input === "boolean") return true;
+      if (typeof input === "string") return input.indexOf("\u0000") < 0;
+      if (typeof input === "number") return Number.isFinite(input);
+      if (typeof input !== "object" || depth > 64 ||
+          (!Array.isArray(input) && !plainObject(input)) ||
+          seen.indexOf(input) >= 0) return false;
+      seen.push(input);
+      var valid;
+      if (Array.isArray(input)) {
+        valid = true;
+        for (var index = 0; index < input.length; index += 1) {
+          if (!Object.prototype.hasOwnProperty.call(input, index) ||
+              !validNestedJSON(input[index], seen, depth + 1)) {
+            valid = false;
+            break;
+          }
+        }
+      } else {
+        valid = Object.keys(input).every(function (key) {
+          return key.indexOf("\u0000") < 0 &&
+            validNestedJSON(input[key], seen, depth + 1);
+        });
+      }
+      seen.pop();
+      return valid;
+    }
+    var textFields = Object.keys(LEARNING_CARD_SOURCE_TEXT_LIMITS);
+    exactObject(
+      value,
+      ["kind"],
+      textFields.filter(function (key) { return key !== "kind"; })
+        .concat(LEARNING_CARD_SOURCE_OBJECT_FIELDS),
+      label
+    );
+    var normalized = {};
+    textFields.forEach(function (key) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) return;
+      var field = value[key];
+      if (typeof field !== "string" || field.indexOf("\u0000") >= 0 ||
+          messageBytes(field) > LEARNING_CARD_SOURCE_TEXT_LIMITS[key] ||
+          (key === "kind" && !field.trim())) {
+        throw directError(
+          label + "." + key + " 无效",
+          "BW_READER_LEARNING_CARD_PARAMS",
+          false
+        );
+      }
+      normalized[key] = field;
+    });
+    LEARNING_CARD_SOURCE_OBJECT_FIELDS.forEach(function (key) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) return;
+      if (!plainObject(value[key]) ||
+          !validNestedJSON(value[key], [], 0)) {
+        throw directError(
+          label + "." + key + " 必须是对象",
+          "BW_READER_LEARNING_CARD_PARAMS",
+          false
+        );
+      }
+      var serialized;
+      try { serialized = JSON.stringify(value[key]); }
+      catch (_) { serialized = ""; }
+      if (!serialized || messageBytes(serialized) > LEARNING_CARD_SOURCE_LIMIT) {
+        throw directError(
+          label + "." + key + " 无效",
+          "BW_READER_LEARNING_CARD_PARAMS",
+          false
+        );
+      }
+      normalized[key] = JSON.parse(serialized);
+    });
+    if (!["sourceId", "documentId", "bookId", "url", "draftId",
+      "sourceInstanceId"].some(function (key) {
+        return typeof normalized[key] === "string" && !!normalized[key].trim();
+      }) || messageBytes(JSON.stringify(normalized)) > LEARNING_CARD_SOURCE_LIMIT) {
+      throw directError(
+        label + " 缺少稳定来源或超出大小上限",
+        "BW_READER_LEARNING_CARD_PARAMS",
+        false
+      );
+    }
+    return normalized;
+  }
 
   function learningCardRepository() {
     var repository = window.BWReaderRuntime &&
       window.BWReaderRuntime.cardRepository;
     if (!repository || typeof repository.load !== "function" ||
         typeof repository.snapshot !== "function" ||
-        typeof repository.replaceContent !== "function") {
+        typeof repository.replaceEntity !== "function") {
       throw directError(
         "Reader 本地学习卡仓尚未就绪",
         "BW_READER_LEARNING_CARD_UNAVAILABLE",
@@ -7819,7 +7939,198 @@
     };
   }
 
-  function ankiFieldsForReaderCard(note, card) {
+  function escapeAnkiProvenance(value, attribute) {
+    var escaped = String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    return attribute ? escaped.replace(/"/g, "&quot;") : escaped;
+  }
+
+  function safeAnkiSourceUrl(value) {
+    var raw = String(value == null ? "" : value).trim().slice(0, 8192);
+    if (!raw || /[\u0000-\u001f\u007f]/.test(raw)) return "";
+    var parsed;
+    try { parsed = new URL(raw); }
+    catch (_) { return ""; }
+    var protocol = String(parsed.protocol || "").toLowerCase();
+    if (protocol === "http:" || protocol === "https:") {
+      if (!parsed.hostname || parsed.username || parsed.password) return "";
+      return parsed.toString();
+    }
+    // Mirror the review UI's fail-closed Obsidian deep-link contract.  Only
+    // obsidian://open with one decoded, vault-relative file is clickable.
+    if (protocol !== "obsidian:" ||
+        String(parsed.hostname || "").toLowerCase() !== "open" ||
+        (parsed.pathname !== "" && parsed.pathname !== "/") ||
+        parsed.username || parsed.password || parsed.hash) return "";
+    var files = parsed.searchParams.getAll("file");
+    if (files.length !== 1) return "";
+    var file = String(files[0] || "").trim();
+    for (var decodePass = 0; decodePass < 5; decodePass += 1) {
+      if (!file || /[\u0000-\u001f\u007f]/.test(file) ||
+          file.charAt(0) === "/" || file.charAt(0) === "\\" ||
+          /^[a-z][a-z0-9+.-]*:/i.test(file) ||
+          file.replace(/\\/g, "/").split("/").some(function (part) {
+            return part.trim() === "." || part.trim() === "..";
+          })) return "";
+      var decoded;
+      try { decoded = decodeURIComponent(file); }
+      catch (_) { return ""; }
+      if (decoded === file) return parsed.toString();
+      file = decoded.trim();
+    }
+    // Excessively nested encoding is ambiguous and must not become a link.
+    return "";
+  }
+
+  function ankiSourcePage(source) {
+    var candidates = [source && source.location, source && source.anchor,
+      source && source.selection];
+    for (var index = 0; index < candidates.length; index += 1) {
+      var value = candidates[index];
+      if (!value || typeof value !== "object") continue;
+      var page = Number(value.page != null ? value.page :
+        (value.pageNumber != null ? value.pageNumber :
+          (value.unit === "page" ? value.index : null)));
+      if (Number.isSafeInteger(page) && page > 0) return page;
+    }
+    return null;
+  }
+
+  function normalizeAnkiSourceReference(value) {
+    var raw = String(value == null ? "" : value).trim().slice(0, 2000);
+    if (!raw || /[\u0000-\u001f\u007f-\u009f]/.test(raw)) return "";
+    var readerBook = /^reader-book:([\s\S]+)$/i.exec(raw);
+    if (readerBook) {
+      if (!readerBook[1].trim()) return "";
+      raw = "book:" + readerBook[1];
+    }
+    var typed = /^(book|note|web|kg|anki):([\s\S]+)$/i.exec(raw);
+    if (typed) {
+      if (!typed[2].trim()) return "";
+      if (typed[1].toLowerCase() === "web") {
+        var webUrl = safeAnkiSourceUrl(typed[2]);
+        return webUrl && !/^obsidian:/i.test(webUrl) ? "web:" + webUrl : "";
+      }
+      return typed[1].toLowerCase() + ":" + typed[2];
+    }
+    var url = safeAnkiSourceUrl(raw);
+    if (url) return /^https?:/i.test(url) ? "web:" + url : url;
+    if (/\.md(?:#.*)?$/i.test(raw)) return "note:" + raw;
+    if (/\.(?:pdf|epub|html?|md)(?:#.*)?$/i.test(raw)) return "book:" + raw;
+    return "";
+  }
+
+  function ankiSourceReference(source) {
+    source = source && typeof source === "object" ? source : {};
+    var reference = normalizeAnkiSourceReference(source.sourceId);
+    if (!reference) {
+      var sourceUrl = safeAnkiSourceUrl(source.url);
+      if (sourceUrl) {
+        reference = /^https?:/i.test(sourceUrl)
+          ? "web:" + sourceUrl : sourceUrl;
+      }
+    }
+    if (!reference) {
+      var documentId = String(source.documentId || source.bookId || "").trim();
+      if (!documentId) return "";
+      reference = normalizeAnkiSourceReference(documentId);
+      if (!reference) {
+        reference = /note/i.test(String(source.kind || "")) || /\.md$/i.test(documentId)
+          ? "note:" + documentId
+          : "book:" + documentId;
+      }
+    }
+    var page = ankiSourcePage(source);
+    if (page && reference.indexOf("#") < 0 && /^book:/i.test(reference)) {
+      reference += "#p" + page;
+    }
+    return normalizeAnkiSourceReference(reference);
+  }
+
+  function stripAnkiProvenance(value) {
+    var root = document.createElement("div");
+    root.innerHTML = String(value == null ? "" : value);
+    function trailingNode() {
+      var node = root.lastChild;
+      while (node && node.nodeType === 3 && !String(node.nodeValue || "").trim()) {
+        var previous = node.previousSibling;
+        root.removeChild(node);
+        node = previous;
+      }
+      return node;
+    }
+    function provenanceComment(node) {
+      return node && node.nodeType === 8 &&
+        /^\s*@(src|entity):/i.test(String(node.nodeValue || ""));
+    }
+    var node = trailingNode();
+    while (provenanceComment(node)) {
+      root.removeChild(node);
+      node = trailingNode();
+    }
+    var reserved = node && node.nodeType === 1 &&
+      node.tagName.toLowerCase() === "div" &&
+      (node.classList.contains("bw-reader-anki-source") || (function () {
+        var style = String(node.getAttribute("style") || "")
+          .toLowerCase().replace(/\s+/g, "");
+        return /^来源\s*[：:]/.test(String(node.textContent || "").trim()) &&
+          style.indexOf("font-size:0.85em") >= 0 &&
+          style.indexOf("color:#666") >= 0;
+      })());
+    if (reserved) {
+      var before = node.previousSibling;
+      root.removeChild(node);
+      while (before && before.nodeType === 3 &&
+          !String(before.nodeValue || "").trim()) {
+        var beforeWhitespace = before.previousSibling;
+        root.removeChild(before);
+        before = beforeWhitespace;
+      }
+      if (before && before.nodeType === 1 &&
+          before.tagName.toLowerCase() === "hr") {
+        root.removeChild(before);
+      }
+    }
+    return root.innerHTML;
+  }
+
+  function ankiProvenanceFooter(source, entityId, cardIndex) {
+    var reference = ankiSourceReference(source);
+    var safeEntityId = /^card_[a-f0-9]{4,64}$/.test(String(entityId || ""))
+      ? String(entityId) : "";
+    var markerReference = reference.replace(/--/g, "%2D%2D");
+    var markers = markerReference ? "<!--@src:" + markerReference + "-->" : "";
+    if (safeEntityId) {
+      markers += "<!--@entity:" + safeEntityId + ":" + cardIndex + "-->";
+    }
+    // A synthetic Reader draft id is not a material source.  In that case
+    // stale visible provenance is removed while the stable entity marker is
+    // retained for future id-based edits/deletes.
+    if (!reference) return markers;
+    source = source && typeof source === "object" ? source : {};
+    var label = String(source.title || "").trim().slice(0, 1024) || reference;
+    if (label !== reference) label += " · " + reference;
+    var href = safeAnkiSourceUrl(source.url);
+    if (!href && /^web:/i.test(reference)) {
+      href = safeAnkiSourceUrl(reference.slice(4));
+    }
+    var visibleSource = href
+      ? '<a href="' + escapeAnkiProvenance(href, true) +
+        '" rel="noopener noreferrer">' + escapeAnkiProvenance(label, false) +
+        "</a>"
+      : escapeAnkiProvenance(label, false);
+    var lines = ["来源：" + visibleSource];
+    if (safeEntityId) {
+      lines.push("卡片编号：" + escapeAnkiProvenance(safeEntityId, false));
+    }
+    return '<hr><div class="bw-reader-anki-source">' +
+      lines.join("<br>") + "</div>" + markers;
+  }
+
+  function ankiFieldsForReaderCard(note, card, source, entityId, cardIndex,
+      projectionMode) {
     var fields = note && note.fields && typeof note.fields === "object"
       ? note.fields : {};
     var names = Object.keys(fields);
@@ -7845,25 +8156,11 @@
           typeof field.value === "string") return field.value;
       return typeof field === "string" ? field : "";
     }
-    // Windows addNote owns this exact footer. Semantic edits replace card
-    // text, while the recorded source must remain available on the Anki card.
-    function provenanceFooter(name) {
-      var value = currentValue(name);
-      var safeMarker = '<hr><div class="bw-reader-anki-source">来源：';
-      var legacyMarker = '<hr><div style="font-size:0.85em;color:#666;">来源：';
-      var safeOffset = value.lastIndexOf(safeMarker);
-      var legacyOffset = value.lastIndexOf(legacyMarker);
-      var offset = Math.max(safeOffset, legacyOffset);
-      if (offset < 0) return "";
-      var suffix = value.slice(offset);
-      if (!/<\/div>\s*$/.test(suffix)) return "";
-      return offset === legacyOffset
-        ? suffix.replace(
-          '<hr><div style="font-size:0.85em;color:#666;">',
-          '<hr><div class="bw-reader-anki-source">'
-        )
-        : suffix;
+    function projected(value) {
+      return stripAnkiProvenance(ankiProjectionHtml(value));
     }
+    var footer = ankiProvenanceFooter(source, entityId, cardIndex);
+    var provenanceOnly = projectionMode === "provenance-only";
     var result = {};
     if (card.type === "cloze") {
       var textField = named("Text") || named("Cloze") || ordered()[0];
@@ -7872,8 +8169,26 @@
         "BW_READER_ANKI_FIELD_MAP",
         false
       );
-      result[textField] = ankiProjectionHtml(card.cloze || "") +
-        provenanceFooter(textField);
+      var extraField = named("Back Extra") || named("BackExtra") ||
+        named("背面额外") || ordered().filter(function (name) {
+          return name !== textField;
+        })[0];
+      if (extraField) {
+        result[extraField] =
+          stripAnkiProvenance(currentValue(extraField)) + footer;
+        if (provenanceOnly) {
+          // Older Reader projections appended provenance to Text even when a
+          // Back Extra field existed.  Remove that legacy footer while moving
+          // provenance to Back Extra, without changing the cloze body.
+          result[textField] = stripAnkiProvenance(currentValue(textField));
+        } else {
+          result[textField] = projected(card.cloze || card.text || "");
+        }
+      } else {
+        result[textField] = provenanceOnly
+          ? stripAnkiProvenance(currentValue(textField)) + footer
+          : projected(card.cloze || card.text || "") + footer;
+      }
       return result;
     }
     var front = named("Front") || named("正面");
@@ -7886,19 +8201,38 @@
       "BW_READER_ANKI_FIELD_MAP",
       false
     );
-    if (!back) {
-      result[front] = ankiProjectionHtml(card.front || "") + "<hr>" +
-        ankiProjectionHtml(card.back || "") + provenanceFooter(front);
+    if (provenanceOnly) {
+      var footerField = back || front;
+      result[footerField] =
+        stripAnkiProvenance(currentValue(footerField)) + footer;
       return result;
     }
-    result[front] = ankiProjectionHtml(card.front || "");
-    result[back] = ankiProjectionHtml(card.back || "") +
-      provenanceFooter(back);
+    if (!back) {
+      result[front] = projected(card.front || "") + "<hr>" +
+        projected(card.back || "") + footer;
+      return result;
+    }
+    result[front] = projected(card.front || "");
+    result[back] = projected(card.back || "") + footer;
     return result;
   }
 
   function operatePiAnkiCard(payload) {
     payload = Object.assign({}, payload);
+    var operation = String(payload.operation || "");
+    var mutating = operation === "update-note-fields" ||
+      operation === "delete-notes";
+    function transportFailure(error, code) {
+      var wrapped = directError(
+        String(error && error.message || error || "Pi AnkiConnect 传输失败")
+          .slice(0, 1000),
+        code,
+        true,
+        error
+      );
+      if (mutating) wrapped.outcomeUnknown = true;
+      return wrapped;
+    }
     // Pi owns the sync step for every successful mutation.  syncMode is a
     // Windows bridge scheduling choice and is intentionally not part of the
     // protected Pi endpoint contract.
@@ -7909,7 +8243,7 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }).then(function (response) {
-      return response.json().catch(function () { return {}; }).then(function (body) {
+      return response.json().then(function (body) {
         if (!response.ok || !body || body.ok !== true) {
           var error = directError(
             String(body && (body.error || body.message) ||
@@ -7917,13 +8251,27 @@
             String(body && body.code || "BW_READER_PI_ANKI_OPERATION"),
             response.status >= 500
           );
-          error.outcomeUnknown = response.status === 409 &&
-            String(body && body.code || "").toLowerCase()
-              .indexOf("unknown") >= 0;
+          error.outcomeUnknown =
+            String(body && body.code || "").toLowerCase() ===
+              "outcome_unknown";
           throw error;
         }
         return body;
+      }, function (error) {
+        throw transportFailure(
+          error,
+          mutating
+            ? "BW_READER_PI_ANKI_RESPONSE_OUTCOME_UNKNOWN"
+            : "BW_READER_PI_ANKI_RESPONSE_INVALID"
+        );
       });
+    }, function (error) {
+      throw transportFailure(
+        error,
+        mutating
+          ? "BW_READER_PI_ANKI_TRANSPORT_OUTCOME_UNKNOWN"
+          : "BW_READER_PI_ANKI_TRANSPORT"
+      );
     });
   }
 
@@ -7947,7 +8295,8 @@
     ));
   }
 
-  function writeProjectedAnki(target, operation, mutationId, receipt, card) {
+  function writeProjectedAnki(target, operation, mutationId, receipt, card,
+      source, entityId, cardIndex, projectionMode) {
     var noteIds = Array.isArray(receipt && receipt.noteIds)
       ? receipt.noteIds.map(Number).filter(function (id) {
         return Number.isSafeInteger(id) && id > 0;
@@ -7998,7 +8347,9 @@
             operation: "update-note-fields",
             mutationId: mutationId + ":" + index,
             noteId: noteId,
-            fields: ankiFieldsForReaderCard(note, card),
+            fields: ankiFieldsForReaderCard(
+              note, card, source, entityId, cardIndex, projectionMode
+            ),
             syncMode: "background",
           };
           return (target === "readerpc"
@@ -8042,7 +8393,7 @@
   }
 
   function projectLearningCardMutation(repo, record, cardIndex, operation,
-      mutationId, card) {
+      mutationId, card, source, projectionMode) {
     var state = record.states[String(cardIndex)] || {};
     var projections = state.projections && state.projections.anki || {};
     var targets = Object.keys(projections).filter(function (target) {
@@ -8073,7 +8424,15 @@
           },
         }, mutationId + ":pending:" + targetIndex).then(function (pending) {
           return writeProjectedAnki(
-            target, operation, externalMutation, projections[target], card
+            target,
+            operation,
+            externalMutation,
+            projections[target],
+            card,
+            source,
+            record.id,
+            cardIndex,
+            projectionMode
           ).then(function (external) {
             var compact = compactAnkiOperationResult(external);
             results[target] = compact;
@@ -8126,15 +8485,63 @@
     });
   }
 
+  function projectLearningCardSourceMutation(repo, record, mutationId,
+      contentCardIndex) {
+    var results = {};
+    // Freeze the semantic payload from the entity CAS that triggered this
+    // projection.  Later repo.load calls are only allowed to contribute the
+    // latest receipt/state revision; a concurrent edit must not leak newer
+    // card faces or source into this mutationId's external side effect.
+    var frozenCards = JSON.parse(JSON.stringify(record.cards));
+    var frozenSource = JSON.parse(JSON.stringify(record.source));
+    var chain = Promise.resolve(record);
+    frozenCards.forEach(function (_, cardIndex) {
+      chain = chain.then(function (current) {
+        var currentState = current.states && current.states[String(cardIndex)];
+        if (!currentState || currentState.removed === true) return current;
+        return projectLearningCardMutation(
+          repo,
+          current,
+          cardIndex,
+          "edit",
+          mutationId + ":source:" + cardIndex,
+          frozenCards[cardIndex],
+          frozenSource,
+          cardIndex === contentCardIndex
+            ? "content-and-provenance"
+            : "provenance-only"
+        ).then(function (projection) {
+          Object.keys(projection.external_results).forEach(function (target) {
+            results[cardIndex + ":" + target] =
+              projection.external_results[target];
+          });
+          return projection.record;
+        });
+      });
+    });
+    return chain.then(function (latest) {
+      return { record: latest, external_results: results };
+    });
+  }
+
   function nativeReaderLearningCardMutate(raw) {
     var value = raw && typeof raw === "object" ? raw : {};
     var operation = String(value.operation || "");
+    var editHasCard = operation === "edit" &&
+      Object.prototype.hasOwnProperty.call(value, "card");
+    var editHasSource = operation === "edit" &&
+      Object.prototype.hasOwnProperty.call(value, "source");
     var required = operation === "edit"
       ? ["operation", "mutationId", "id", "cardIndex", "expectedEntityRev",
-        "externalPolicy", "card"]
+        "externalPolicy"]
       : ["operation", "mutationId", "id", "cardIndex", "expectedStateRev",
         "externalPolicy"];
-    exactObject(value, required, [], "Reader 学习卡修改");
+    exactObject(
+      value,
+      required,
+      operation === "edit" ? ["card", "source"] : [],
+      "Reader 学习卡修改"
+    );
     if (operation !== "edit" && operation !== "delete") {
       return Promise.reject(directError(
         "Reader 学习卡操作无效", "BW_READER_LEARNING_CARD_PARAMS", false
@@ -8205,17 +8612,30 @@
       if (operation === "edit") {
         if (!Number.isSafeInteger(value.expectedEntityRev) ||
             value.expectedEntityRev < 0 ||
-            !plainObject(value.card)) {
+            (!editHasCard && !editHasSource) ||
+            (editHasCard && (!plainObject(value.card) ||
+              messageBytes(JSON.stringify(value.card)) > 200000)) ||
+            typeof repo.replaceEntity !== "function") {
           throw directError(
             "Reader 学习卡编辑参数无效",
             "BW_READER_LEARNING_CARD_PARAMS",
             false
           );
         }
-        var cards = before.cards.slice();
-        cards[cardIndex] = value.card;
-        nextCard = value.card;
-        local = repo.replaceContent(id, cards, {
+        var replacement = {};
+        if (editHasCard) {
+          var cards = before.cards.slice();
+          cards[cardIndex] = value.card;
+          replacement.cards = cards;
+          nextCard = value.card;
+        }
+        if (editHasSource) {
+          replacement.source = normalizeLearningCardSource(
+            value.source,
+            "Reader 学习卡 source"
+          );
+        }
+        local = repo.replaceEntity(id, replacement, {
           ifEntityRev: value.expectedEntityRev,
           mutationId: mutationId + ":reader",
         });
@@ -8239,6 +8659,7 @@
         // delay the visible Review card.  The Review surface itself checks the
         // stable id + cardIndex and only redraws the foreground card.
         var viewUpdate = requestLearningCardViewRefresh(applied, cardIndex);
+        if (operation === "edit") nextCard = applied.cards[cardIndex];
         if (value.externalPolicy === "reader-only") {
           return {
             contract: "reader-learning-card-mutation/1",
@@ -8249,9 +8670,23 @@
             record: learningCardPublic(applied, cardIndex),
           };
         }
-        return projectLearningCardMutation(
-          repo, applied, cardIndex, operation, mutationId, nextCard
-        ).then(function (projection) {
+        var projected = editHasSource
+          ? projectLearningCardSourceMutation(
+            repo,
+            applied,
+            mutationId,
+            editHasCard ? cardIndex : null
+          )
+          : projectLearningCardMutation(
+            repo,
+            applied,
+            cardIndex,
+            operation,
+            mutationId,
+            nextCard,
+            applied.source
+          );
+        return projected.then(function (projection) {
           return repo.load(id).then(function (latest) {
             return {
               contract: "reader-learning-card-mutation/1",

@@ -67,7 +67,7 @@ class FakeStdioRunner:
                 "result": {
                     "serverInfo": {
                         "name": "bw-reader-context-snapshot",
-                        "version": "1.7.0",
+                        "version": "1.8.0",
                     },
                 },
             },
@@ -1098,7 +1098,7 @@ class DirectPackageTests(unittest.TestCase):
             responses[0]["result"]["serverInfo"]["version"] = "1.5.0"
             with self.assertRaisesRegex(
                 package.PackageError,
-                "serverInfo 不是 1.7.0 合同",
+                "serverInfo 不是 1.8.0 合同",
             ):
                 package._validate_mcp_smoke_output(
                     self._stdio_result(responses)

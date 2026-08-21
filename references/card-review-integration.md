@@ -16,8 +16,11 @@
 - Codex Voice 直接提供 canonical 学习卡的列表、按 ID 读取、编辑、删除和当前复习卡读取；返回项
   包含完整卡片内容、出处、状态、`card_*` ID、批内 `cardIndex` 与当前 entity/state revision。
   编辑用 entity revision，删除用 state revision，不能仅凭显示顺序修改。
-- canonical 编辑/删除先提交 Reader 本地仓；默认 `sync-if-projected` 只对已有可靠 note ID 的
-  Windows/Pi 投影调用 AnkiConnect，并请求 AnkiWeb sync；`reader-only` 可明确跳过外部投影。
+- canonical 编辑/删除先提交 Reader 本地仓。编辑可只替换指定 index 的卡面、只替换同一
+  `card_*` 批次共享的完整 `source`，或在同一次 entity revision CAS 中同时替换两者；
+  `source` 变更会立即刷新当前复习卡的出处，并同步更新该批次所有已有可靠 note ID 的出处，
+  不会新建替代卡。默认 `sync-if-projected` 对 Windows/Pi 投影调用 AnkiConnect，并请求
+  AnkiWeb sync；`reader-only` 可明确跳过外部投影。
   回执分别记录 Reader、本机 Anki、AnkiWeb 三层结果，结果未知禁止盲重试。删除外部投影是
   note 级删除；AnkiMobile 没有可靠按 ID 修改/删除通道时 fail closed。
 

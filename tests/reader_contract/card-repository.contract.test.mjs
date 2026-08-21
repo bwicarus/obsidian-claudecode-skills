@@ -175,6 +175,7 @@ test("replaceContent 只改卡面，保留学习状态、稳定 index 与 Anki r
 
   assert.equal(replaced.cards[0].front, "after 0");
   assert.equal(replaced.cards[1].front, "after 1");
+  assert.deepEqual(replaced.source, withReceipt.source);
   assert.deepEqual(replaced.states, withReceipt.states);
   assert.equal(replaced.states[0].phase, "draft");
   assert.equal(replaced.states[1].phase, "confirmed");
@@ -195,6 +196,97 @@ test("replaceContent 只改卡面，保留学习状态、稳定 index 与 Anki r
     repo.replaceContent(CARD_A, [basic("stale 0"), basic("stale 1")], {
       mutationId: "replace-stale",
       ifEntityRev: withReceipt.entityRev,
+    }),
+    (error) => error.code === "BW_CARD_REPOSITORY_CONFLICT",
+  );
+});
+
+test("replaceEntity 原子全量替换 source，保留 cards、状态与 Anki receipt", async () => {
+  const store = makeStore("replace-source");
+  let timestamp = 1_800_000_000_000;
+  const repo = repository(store, { clock: () => timestamp++ }).repo;
+  const draft = await repo.registerDraft({
+    id: CARD_A,
+    cards: [basic("source 0"), basic("source 1")],
+    source: source(),
+  }, { mutationId: "source-seed" });
+  const confirmed = await repo.saveConfirmedCard({
+    id: CARD_A,
+    cardIndex: 1,
+  }, {
+    mutationId: "source-confirm",
+    ifEntityRev: draft.entityRev,
+    ifStateRev: draft.stateRev,
+  });
+  const withReceipt = await repo.recordAnkiReceipt(CARD_A, 1, "desktop", {
+    status: "succeeded",
+    mutationId: "source-anki",
+    noteIds: [321],
+    cardIds: [654],
+  }, {
+    mutationId: "source-receipt",
+    ifStateRev: confirmed.stateRev,
+  });
+  const replacementSource = source({
+    sourceId: "book:chemistry:p7:selection-2",
+    documentId: "book:chemistry",
+    title: "Chemistry",
+    quote: "A completely replaced source excerpt",
+    location: { unit: "page", index: 7 },
+  });
+
+  const replaced = await repo.replaceEntity(CARD_A, {
+    source: replacementSource,
+  }, {
+    mutationId: "replace-source",
+    ifEntityRev: withReceipt.entityRev,
+  });
+
+  assert.deepEqual(replaced.source, replacementSource);
+  assert.deepEqual(replaced.cards, withReceipt.cards);
+  assert.deepEqual(replaced.states, withReceipt.states);
+  assert.equal(replaced.stateRev, withReceipt.stateRev);
+  assert.equal(replaced.createdAt, withReceipt.createdAt);
+  assert.ok(replaced.contentUpdatedAt > withReceipt.contentUpdatedAt);
+  assert.ok(replaced.entityRev > withReceipt.entityRev);
+  assert.deepEqual(
+    replaced.states[1].projections.anki.desktop,
+    withReceipt.states[1].projections.anki.desktop,
+  );
+
+  const both = await repo.replaceEntity(CARD_A, {
+    cards: [basic("both 0"), basic("both 1")],
+    source: source({ sourceId: "book:biology:p3" }),
+  }, {
+    mutationId: "replace-both",
+    ifEntityRev: replaced.entityRev,
+  });
+  assert.equal(both.cards[0].front, "both 0");
+  assert.equal(both.source.sourceId, "book:biology:p3");
+  assert.equal(both.stateRev, replaced.stateRev);
+
+  await assert.rejects(
+    repo.replaceEntity(CARD_A, {}, {
+      mutationId: "replace-empty",
+      ifEntityRev: both.entityRev,
+    }),
+    (error) => error.code === "BW_CARD_REPOSITORY_INPUT",
+  );
+  await assert.rejects(
+    repo.replaceEntity(CARD_A, {
+      source: source({ unexpected: "field" }),
+    }, {
+      mutationId: "replace-invalid-source",
+      ifEntityRev: both.entityRev,
+    }),
+    (error) => error.code === "BW_CARD_REPOSITORY_INPUT",
+  );
+  await assert.rejects(
+    repo.replaceEntity(CARD_A, {
+      source: source({ sourceId: "book:stale:p1" }),
+    }, {
+      mutationId: "replace-stale-source",
+      ifEntityRev: replaced.entityRev,
     }),
     (error) => error.code === "BW_CARD_REPOSITORY_CONFLICT",
   );

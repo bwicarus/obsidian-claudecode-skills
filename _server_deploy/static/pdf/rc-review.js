@@ -934,6 +934,13 @@
         // Projection receipts and other state-only writes must refresh the
         // optimistic-concurrency metadata without flashing the card face.
         queued._localReview = next._localReview;
+        // entityRev may change because only the batch-level provenance was
+        // replaced.  Keep the cached Review card's source projection in step
+        // even when its semantic face fingerprint is unchanged; otherwise the
+        // visible source action continues opening the stale material.
+        queued.source_ref = next.source_ref;
+        queued.source_url = next.source_url;
+        queued.source = Object.assign({}, next.source || {});
         if (next._legacyExternalCardId != null) {
           queued._legacyExternalCardId = next._legacyExternalCardId;
         } else {

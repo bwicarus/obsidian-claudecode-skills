@@ -2005,11 +2005,89 @@ if (window.__bwPwaProviderOnly) return;
             ? _caArgs[0] : null;
           var _caLearningOperation = _caLearning
             ? String(_caLearning.operation || '') : '';
+          var _caLearningHasCard = _caLearningOperation === 'edit' &&
+            Object.prototype.hasOwnProperty.call(_caLearning, 'card');
+          var _caLearningHasSource = _caLearningOperation === 'edit' &&
+            Object.prototype.hasOwnProperty.call(_caLearning, 'source');
           var _caLearningKeys = _caLearningOperation === 'edit'
             ? ['operation', 'mutationId', 'id', 'cardIndex',
-              'expectedEntityRev', 'externalPolicy', 'card']
+              'expectedEntityRev', 'externalPolicy']
             : ['operation', 'mutationId', 'id', 'cardIndex',
               'expectedStateRev', 'externalPolicy'];
+          if (_caLearningHasCard) _caLearningKeys.push('card');
+          if (_caLearningHasSource) _caLearningKeys.push('source');
+          function _caLearningBytes(input) {
+            var serialized;
+            try { serialized = typeof input === 'string'
+              ? input : JSON.stringify(input); }
+            catch (_) { return Infinity; }
+            return typeof TextEncoder === 'function'
+              ? new TextEncoder().encode(serialized).byteLength
+              : unescape(encodeURIComponent(serialized)).length;
+          }
+          function _caLearningJsonValid(input, seen, depth) {
+            if (input === null || typeof input === 'boolean') return true;
+            if (typeof input === 'string') return input.indexOf('\u0000') < 0;
+            if (typeof input === 'number') return Number.isFinite(input);
+            if (typeof input !== 'object' || depth > 64 ||
+                (!Array.isArray(input) &&
+                  Object.prototype.toString.call(input) !== '[object Object]') ||
+                seen.indexOf(input) >= 0) return false;
+            seen.push(input);
+            var valid = true;
+            if (Array.isArray(input)) {
+              for (var index = 0; index < input.length; index += 1) {
+                if (!Object.prototype.hasOwnProperty.call(input, index) ||
+                    !_caLearningJsonValid(input[index], seen, depth + 1)) {
+                  valid = false;
+                  break;
+                }
+              }
+            } else {
+              valid = Object.keys(input).every(function (key) {
+                return key.indexOf('\u0000') < 0 &&
+                  _caLearningJsonValid(input[key], seen, depth + 1);
+              });
+            }
+            seen.pop();
+            return valid;
+          }
+          function _caLearningSourceValid(source) {
+            if (!source || typeof source !== 'object' || Array.isArray(source)) {
+              return false;
+            }
+            var textLimits = {
+              kind: 80, sourceId: 4096, documentId: 4096, bookId: 4096,
+              url: 8192, title: 1024, quote: 32768, context: 65536,
+              tool: 160, draftId: 512, sourceInstanceId: 512,
+              requirement: 32768
+            };
+            var objectKeys = ['location', 'anchor', 'selection', 'legacy'];
+            var allowed = Object.keys(textLimits).concat(objectKeys);
+            if (Object.keys(source).some(function (key) {
+              return allowed.indexOf(key) < 0;
+            }) || typeof source.kind !== 'string' || !source.kind.trim()) {
+              return false;
+            }
+            if (Object.keys(textLimits).some(function (key) {
+              return Object.prototype.hasOwnProperty.call(source, key) &&
+                (typeof source[key] !== 'string' ||
+                  source[key].indexOf('\u0000') >= 0 ||
+                  _caLearningBytes(source[key]) > textLimits[key]);
+            })) return false;
+            if (objectKeys.some(function (key) {
+              var nested = source[key];
+              return Object.prototype.hasOwnProperty.call(source, key) &&
+                (!nested || typeof nested !== 'object' ||
+                  Array.isArray(nested) ||
+                  !_caLearningJsonValid(nested, [], 0));
+            })) return false;
+            if (!['sourceId', 'documentId', 'bookId', 'url', 'draftId',
+              'sourceInstanceId'].some(function (key) {
+                return typeof source[key] === 'string' && !!source[key].trim();
+              })) return false;
+            return _caLearningBytes(source) <= 128 * 1024;
+          }
           if (!_caLearning ||
               (_caLearningOperation !== 'edit' &&
                 _caLearningOperation !== 'delete') ||
@@ -2030,9 +2108,14 @@ if (window.__bwPwaProviderOnly) return;
               (_caLearningOperation === 'edit'
                 ? (!Number.isSafeInteger(_caLearning.expectedEntityRev) ||
                   _caLearning.expectedEntityRev < 0 ||
-                  !_caLearning.card || typeof _caLearning.card !== 'object' ||
-                  Array.isArray(_caLearning.card) ||
-                  JSON.stringify(_caLearning.card).length > 200000)
+                  (!_caLearningHasCard && !_caLearningHasSource) ||
+                  (_caLearningHasCard &&
+                    (!_caLearning.card ||
+                      typeof _caLearning.card !== 'object' ||
+                      Array.isArray(_caLearning.card) ||
+                      _caLearningBytes(_caLearning.card) > 200000)) ||
+                  (_caLearningHasSource &&
+                    !_caLearningSourceValid(_caLearning.source)))
                 : (!Number.isSafeInteger(_caLearning.expectedStateRev) ||
                   _caLearning.expectedStateRev < 0))) {
             throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);

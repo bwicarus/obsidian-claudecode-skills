@@ -1322,6 +1322,38 @@ test("the learning-card tool explicitly refreshes only the exact foreground revi
 
   await h.RC.review.reload();
   h.RC.review.setMode(true);
+  record = structuredClone(record);
+  record.entityRev += 1;
+  record.source = {
+    kind: "reader", sourceId: "tool-source-new",
+    url: "https://example.test/source-new",
+  };
+  const sourceOnly = h.RC.review.refreshLearningCard(
+    structuredClone(record), 0
+  );
+  assert.equal(sourceOnly.status, "rendered");
+  assert.equal(h.RC.review.currentCard().source_ref, "tool-source-new");
+  assert.equal(
+    h.RC.review.currentCard().source_url,
+    "https://example.test/source-new",
+  );
+  assert.equal(h.RC.review.currentCard().source.kind, record.source.kind);
+  assert.equal(
+    h.RC.review.currentCard().source.sourceId,
+    record.source.sourceId,
+  );
+  assert.equal(h.RC.review.currentCard().source.url, record.source.url,
+    "a source-only entity revision must replace the cached provenance");
+  h.RC.review.next();
+  assert.equal(h.RC.review.currentCard().entity_index, 1);
+  assert.equal(h.RC.review.currentCard().source_ref, "tool-source-new",
+    "batch provenance refreshes a queued sibling before it becomes current");
+  assert.equal(
+    h.RC.review.currentCard().source_url,
+    "https://example.test/source-new",
+  );
+  h.RC.review.previous();
+  assert.equal(h.RC.review.currentCard().entity_index, 0);
   const rendersBeforeHiddenSibling = h.learningCardRenders.length;
   record = structuredClone(record);
   record.entityRev += 1;

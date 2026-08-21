@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -41,7 +42,7 @@ internal sealed class ReaderContextMcpServer
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
-    internal const string ServerVersion = "1.7.0";
+    internal const string ServerVersion = "1.8.0";
     internal static readonly TimeSpan FreshnessWindow =
         TimeSpan.FromMinutes(3);
 
@@ -51,6 +52,11 @@ internal sealed class ReaderContextMcpServer
         FileDirectSnapshotContextAdapter.MaximumSnapshotBytes;
     private static readonly UTF8Encoding Utf8WithoutBom = new(
         encoderShouldEmitUTF8Identifier: false);
+    private static readonly JsonSerializerOptions LearningCardSourceJsonOptions =
+        new(DirectBridgeContract.JsonOptions)
+        {
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        };
 
     private readonly string _statePath;
     private readonly TextReader _input;
@@ -1048,9 +1054,13 @@ internal sealed class ReaderContextMcpServer
                 {
                     ["name"] = LearningCardEditToolName,
                     ["description"] =
-                        "Replace one canonical Reader learning card selected by "
+                        "Replace the semantic content and/or canonical source "
+                        + "of one Reader learning-card entity selected by "
                         + "card_* id and cardIndex, guarded by the exact current "
-                        + "entityRevision. By default externalPolicy="
+                        + "entityRevision. Pass card, source, or both. source is "
+                        + "a complete replacement, not a patch, and is shared by "
+                        + "every cardIndex in the same card_* batch. By default "
+                        + "externalPolicy="
                         + "sync-if-projected updates every already-projected "
                         + "Windows/Pi Anki note with AnkiConnect and requests "
                         + "AnkiWeb sync; reader-only intentionally leaves those "
@@ -1806,12 +1816,17 @@ internal sealed class ReaderContextMcpServer
         },
     };
 
-    private static JsonObject BuildLearningCardEditArgumentsSchema() => new()
+    internal static JsonObject BuildLearningCardEditArgumentsSchema() => new()
     {
         ["type"] = "object",
         ["additionalProperties"] = false,
         ["required"] = new JsonArray(
-            "id", "cardIndex", "expectedEntityRevision", "card"),
+            "id", "cardIndex", "expectedEntityRevision"),
+        ["anyOf"] = new JsonArray
+        {
+            new JsonObject { ["required"] = new JsonArray("card") },
+            new JsonObject { ["required"] = new JsonArray("source") },
+        },
         ["properties"] = new JsonObject
         {
             ["id"] = LearningCardIdSchema(),
@@ -1820,6 +1835,7 @@ internal sealed class ReaderContextMcpServer
                 "entityRevision returned by the latest read or list."),
             ["externalPolicy"] = LearningCardExternalPolicySchema(),
             ["card"] = BuildLearningCardContentSchema(),
+            ["source"] = BuildLearningCardSourceSchema(),
         },
     };
 
@@ -1939,6 +1955,74 @@ internal sealed class ReaderContextMcpServer
             },
         };
     }
+
+    private static JsonObject BuildLearningCardSourceSchema()
+    {
+        JsonObject properties = new()
+        {
+            ["kind"] = LearningCardSourceTextSchema(80, required: true),
+            ["sourceId"] = LearningCardSourceTextSchema(4096),
+            ["documentId"] = LearningCardSourceTextSchema(4096),
+            ["bookId"] = LearningCardSourceTextSchema(4096),
+            ["url"] = LearningCardSourceTextSchema(8192),
+            ["title"] = LearningCardSourceTextSchema(1024),
+            ["quote"] = LearningCardSourceTextSchema(32768),
+            ["context"] = LearningCardSourceTextSchema(65536),
+            ["tool"] = LearningCardSourceTextSchema(160),
+            ["draftId"] = LearningCardSourceTextSchema(512),
+            ["sourceInstanceId"] = LearningCardSourceTextSchema(512),
+            ["requirement"] = LearningCardSourceTextSchema(32768),
+            ["location"] = new JsonObject { ["type"] = "object" },
+            ["anchor"] = new JsonObject { ["type"] = "object" },
+            ["selection"] = new JsonObject { ["type"] = "object" },
+            ["legacy"] = new JsonObject { ["type"] = "object" },
+        };
+        JsonArray stableSource = new();
+        foreach (string field in new[]
+        {
+            "sourceId", "documentId", "bookId", "url", "draftId",
+            "sourceInstanceId",
+        })
+        {
+            stableSource.Add(new JsonObject
+            {
+                ["required"] = new JsonArray(field),
+                ["properties"] = new JsonObject
+                {
+                    [field] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["minLength"] = 1,
+                    },
+                },
+            });
+        }
+        return new JsonObject
+        {
+            ["type"] = "object",
+            ["additionalProperties"] = false,
+            ["required"] = new JsonArray("kind"),
+            ["anyOf"] = stableSource,
+            ["description"] =
+                "Complete canonical source replacement shared by every card "
+                + "in this card_* batch. file belongs in documentId, page or "
+                + "section belongs in location/anchor/selection, and a web "
+                + "link belongs in url. String byte limits are checked after "
+                + "CRLF normalization and trim, using UTF-8; the complete "
+                + "canonical source must not exceed 128 KiB of UTF-8 JSON.",
+            ["properties"] = properties,
+        };
+    }
+
+    private static JsonObject LearningCardSourceTextSchema(
+        int maximum,
+        bool required = false) =>
+        new()
+        {
+            ["type"] = "string",
+            ["minLength"] = required ? 1 : 0,
+            ["maxLength"] = maximum,
+        };
 
     private static JsonObject BuildPageCardEditArgumentsSchema()
     {
@@ -4588,17 +4672,30 @@ internal sealed class ReaderContextMcpServer
             DirectJsonValidation.RequireNoDuplicateKeys(arguments);
             HashSet<string> expected = new(
                 operation == "edit"
-                    ? ["id", "cardIndex", "expectedEntityRevision", "card"]
+                    ? ["id", "cardIndex", "expectedEntityRevision"]
                     : ["id", "cardIndex", "expectedStateRevision"],
                 StringComparer.Ordinal);
             if (arguments.TryGetProperty("externalPolicy", out _))
             {
                 expected.Add("externalPolicy");
             }
+            bool hasCard = operation == "edit"
+                && arguments.TryGetProperty("card", out _);
+            bool hasSource = operation == "edit"
+                && arguments.TryGetProperty("source", out _);
+            if (hasCard)
+            {
+                expected.Add("card");
+            }
+            if (hasSource)
+            {
+                expected.Add("source");
+            }
             HashSet<string> actual = arguments.EnumerateObject()
                 .Select(property => property.Name)
                 .ToHashSet(StringComparer.Ordinal);
             if (!actual.SetEquals(expected)
+                || (operation == "edit" && !hasCard && !hasSource)
                 || !arguments.TryGetProperty("id", out JsonElement idValue)
                 || idValue.ValueKind != JsonValueKind.String
                 || idValue.GetString() is not string id
@@ -4649,12 +4746,24 @@ internal sealed class ReaderContextMcpServer
             };
             if (operation == "edit")
             {
-                JsonElement card = arguments.GetProperty("card");
-                if (!ValidateLearningCardContent(card))
+                if (hasCard)
                 {
-                    return false;
+                    JsonElement card = arguments.GetProperty("card");
+                    if (!ValidateLearningCardContent(card))
+                    {
+                        return false;
+                    }
+                    mutation["card"] = JsonNode.Parse(card.GetRawText());
                 }
-                mutation["card"] = JsonNode.Parse(card.GetRawText());
+                if (hasSource)
+                {
+                    JsonElement source = arguments.GetProperty("source");
+                    if (!ValidateLearningCardSource(source))
+                    {
+                        return false;
+                    }
+                    mutation["source"] = JsonNode.Parse(source.GetRawText());
+                }
             }
             JsonObject candidate = new()
             {
@@ -4779,6 +4888,150 @@ internal sealed class ReaderContextMcpServer
         catch (DirectProtocolException)
         {
             return false;
+        }
+    }
+
+    internal static bool ValidateLearningCardSource(JsonElement source)
+    {
+        if (source.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(source);
+            HashSet<string> textFields = new(StringComparer.Ordinal)
+            {
+                "kind", "sourceId", "documentId", "bookId", "url", "title",
+                "quote", "context", "tool", "draftId", "sourceInstanceId",
+                "requirement",
+            };
+            HashSet<string> objectFields = new(StringComparer.Ordinal)
+            {
+                "location", "anchor", "selection", "legacy",
+            };
+            HashSet<string> allowed = new(textFields, StringComparer.Ordinal);
+            allowed.UnionWith(objectFields);
+            HashSet<string> actual = source.EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal);
+            if (!actual.IsSubsetOf(allowed)
+                || !TryReadLearningCardSourceText(
+                    source,
+                    "kind",
+                    80,
+                    required: true,
+                    out _))
+            {
+                return false;
+            }
+            foreach ((string name, int maximum) in new[]
+            {
+                ("sourceId", 4096), ("documentId", 4096),
+                ("bookId", 4096), ("url", 8192), ("title", 1024),
+                ("quote", 32768), ("context", 65536), ("tool", 160),
+                ("draftId", 512), ("sourceInstanceId", 512),
+                ("requirement", 32768),
+            })
+            {
+                if (source.TryGetProperty(name, out _)
+                    && !TryReadLearningCardSourceText(
+                        source,
+                        name,
+                        maximum,
+                        required: false,
+                        out _))
+                {
+                    return false;
+                }
+            }
+            foreach (string name in objectFields)
+            {
+                if (source.TryGetProperty(name, out JsonElement nested)
+                    && (nested.ValueKind != JsonValueKind.Object
+                        || !LearningCardSourceJsonIsValid(nested)))
+                {
+                    return false;
+                }
+            }
+            bool hasStableSource = new[]
+            {
+                "sourceId", "documentId", "bookId", "url", "draftId",
+                "sourceInstanceId",
+            }.Any(name =>
+                TryReadLearningCardSourceText(
+                    source,
+                    name,
+                    int.MaxValue,
+                    required: false,
+                    out string value)
+                && value.Length > 0);
+            return hasStableSource
+                && Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(
+                    source,
+                    LearningCardSourceJsonOptions))
+                    <= 128 * 1024;
+        }
+        catch (Exception exception) when (
+            exception is DirectProtocolException
+            or JsonException
+            or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryReadLearningCardSourceText(
+        JsonElement source,
+        string name,
+        int maximumBytes,
+        bool required,
+        out string value)
+    {
+        value = string.Empty;
+        if (!source.TryGetProperty(name, out JsonElement field))
+        {
+            return !required;
+        }
+        if (field.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+        value = (field.GetString() ?? string.Empty)
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Trim();
+        return (!required || value.Length > 0)
+            && value.IndexOf('\0') < 0
+            && Encoding.UTF8.GetByteCount(value) <= maximumBytes;
+    }
+
+    private static bool LearningCardSourceJsonIsValid(JsonElement value)
+    {
+        switch (value.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (JsonProperty property in value.EnumerateObject())
+                {
+                    if (property.Name.IndexOf('\0') >= 0
+                        || !LearningCardSourceJsonIsValid(property.Value))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            case JsonValueKind.Array:
+                return value.EnumerateArray().All(
+                    LearningCardSourceJsonIsValid);
+            case JsonValueKind.String:
+                return (value.GetString() ?? string.Empty).IndexOf('\0') < 0;
+            case JsonValueKind.Number:
+                return value.TryGetDouble(out double number)
+                    && double.IsFinite(number);
+            default:
+                return value.ValueKind is JsonValueKind.Null
+                    or JsonValueKind.True
+                    or JsonValueKind.False;
         }
     }
 

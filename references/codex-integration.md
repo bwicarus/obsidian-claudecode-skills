@@ -102,12 +102,17 @@ Direct 的 Reader MCP 暴露五个 canonical 学习卡工具：`reader_learning_
 `learning-card`、`review-current`；列表/单卡结果直接带完整卡片内容、出处、学习状态、稳定
 `card_*` ID、批内 `cardIndex` 与当前 revision，模型不必先读页面 placement 或逐卡补查。
 
-编辑必须提交 `id + cardIndex + expectedEntityRevision`，删除必须提交
+编辑必须提交 `id + cardIndex + expectedEntityRevision`，并至少给出 `card` 或 `source`；
+`card` 只替换该批内 index 的语义内容，`source` 是从读取结果取得的完整批级出处对象，替换后
+同一 `card_*` 的所有卡共同使用新出处。两者可在一次原子写中同时修改，也可只补旧卡出处，
+不会新建卡片。删除必须提交
 `id + cardIndex + expectedStateRevision`；严格字段、版本和稳定身份检查通过后，Direct 才发送
 `_nativeReaderLearningCardMutate`，并回读同一 canonical 卡验证结果。默认
 `externalPolicy=sync-if-projected`：Reader 本地仓是权威，已有 Windows 投影走本机
 `anki-card-operation-local`，已有 Pi 投影走受保护的 `/pdf/api/anki-card-operation`；成功修改后
-请求 AnkiWeb sync。结果把 `reader_applied`、`anki_local_applied`、`anki_web_sync` 分开，未知
+请求 AnkiWeb sync；批级出处变更会按各 index 保存的精确 note ID 更新该批所有已有投影的
+出处 footer/marker，并保留原 note 身份和复习调度。结果把 `reader_applied`、
+`anki_local_applied`、`anki_web_sync` 分开，未知
 结果禁止自动重试；删除 Anki 投影是 note 级。`reader-only` 只改 Reader，AnkiMobile 没有可靠
 按 ID 写通道时 fail closed。Direct 工具面更新后须新开 Codex Voice 任务才能载入新列表。
 

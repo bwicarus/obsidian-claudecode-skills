@@ -51,7 +51,7 @@ DEFAULT_CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
 
 PACKAGE_CONTRACT = "reader-computer-voice-direct-package/1"
 MANIFEST_SCHEMA = 1
-READER_CONTEXT_MCP_SERVER_VERSION = "1.7.0"
+READER_CONTEXT_MCP_SERVER_VERSION = "1.8.0"
 ARCHIVE_STAMP = (1980, 1, 1, 0, 0, 0)
 RID = "win-x64"
 VERSION_RE = re.compile(r"(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){0,3}\Z")

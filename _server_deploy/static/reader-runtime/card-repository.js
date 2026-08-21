@@ -1045,18 +1045,34 @@
       });
     }
 
-    // Replace only the semantic card faces of an existing entity.  Page-card
-    // editing must not reuse saveConfirmedCard: that transition also confirms
-    // a draft and rewrites review state.  Keeping this operation entity-only
-    // preserves every stable batch index, learning phase, review value and
-    // external projection receipt (including an already-exported Anki note).
-    function replaceContent(idValue, cardsValue, operationOptions) {
+    // Replace the semantic content and/or the complete source descriptor of an
+    // existing entity in one entity CAS.  Source belongs to the whole card_*
+    // batch rather than one stable card index, so callers must provide the
+    // complete future source object instead of a partial merge.  The state
+    // collection is intentionally untouched: every stable index, learning
+    // phase, review value and external projection receipt remains intact.
+    function replaceEntityCore(idValue, replacement, operationOptions, operation) {
       operationOptions = operationOptions || {};
       var id;
-      var cards;
+      var cards = null;
+      var source = null;
       try {
         id = normalizeId(idValue);
-        cards = normalizeCards(cardsValue);
+        if (!plain(replacement)) {
+          throw new CardRepositoryError(
+            'entity replacement 必须是对象',
+            'BW_CARD_REPOSITORY_INPUT'
+          );
+        }
+        allowedFields(replacement, { cards: true, source: true }, 'entity replacement');
+        if (!own(replacement, 'cards') && !own(replacement, 'source')) {
+          throw new CardRepositoryError(
+            'entity replacement 至少需要 cards 或 source',
+            'BW_CARD_REPOSITORY_INPUT'
+          );
+        }
+        if (own(replacement, 'cards')) cards = normalizeCards(replacement.cards);
+        if (own(replacement, 'source')) source = normalizeSource(replacement.source);
       } catch (error) { return Promise.reject(error); }
       return serialize(function () {
         return pair(id).then(function (records) {
@@ -1065,7 +1081,9 @@
             throw new CardRepositoryError('卡组不存在', 'BW_CARD_REPOSITORY_NOT_FOUND');
           }
           var previous = project(records, false);
-          if (cards.length !== previous.cards.length) {
+          var nextCards = cards || previous.cards;
+          var nextSource = source || previous.source;
+          if (nextCards.length !== previous.cards.length) {
             throw new CardRepositoryError(
               '内容修改不得改变批内卡片数量',
               'BW_CARD_REPOSITORY_TRANSITION'
@@ -1073,18 +1091,20 @@
           }
           // Validate the untouched state map before accepting an entity-only
           // write.  A partial/corrupt pair must never be hidden by an edit.
-          normalizeStateMap(records.state.value.states, cards.length);
-          if (same(previous.cards, cards)) return previous;
+          normalizeStateMap(records.state.value.states, nextCards.length);
+          if (same(previous.cards, nextCards) && same(previous.source, nextSource)) {
+            return previous;
+          }
           var entity = entityValue(
             id,
-            cards,
-            records.entity.value.source,
+            nextCards,
+            nextSource,
             records.entity.value.createdAt,
             now()
           );
           var base = mutationBase(
             operationOptions.mutationId,
-            'replace-content',
+            operation,
             id,
             mutationFactory
           );
@@ -1104,6 +1124,26 @@
           });
         });
       });
+    }
+
+    function replaceEntity(idValue, replacement, operationOptions) {
+      return replaceEntityCore(
+        idValue,
+        replacement,
+        operationOptions,
+        'replace-entity'
+      );
+    }
+
+    // Backwards-compatible face-only API.  Page-card editing keeps using this
+    // name and therefore cannot accidentally replace provenance metadata.
+    function replaceContent(idValue, cardsValue, operationOptions) {
+      return replaceEntityCore(
+        idValue,
+        { cards: cardsValue },
+        operationOptions,
+        'replace-content'
+      );
     }
 
     function removeDraftCard(idValue, cardIndex, operationOptions) {
@@ -1673,6 +1713,7 @@
       newCardId: newCardId,
       registerDraft: registerDraft,
       saveConfirmedCard: saveConfirmedCard,
+      replaceEntity: replaceEntity,
       replaceContent: replaceContent,
       removeDraftCard: removeDraftCard,
       removeCard: removeCard,
@@ -1723,6 +1764,7 @@
     newCardId: secureId,
     registerDraft: delegate('registerDraft'),
     saveConfirmedCard: delegate('saveConfirmedCard'),
+    replaceEntity: delegate('replaceEntity'),
     replaceContent: delegate('replaceContent'),
     removeDraftCard: delegate('removeDraftCard'),
     removeCard: delegate('removeCard'),
