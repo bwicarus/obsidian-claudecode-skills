@@ -4354,3 +4354,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证**：Reader Node 全量 `1616/1616`、Direct Release/完整自检与包内 MCP 前向、发布管线、Pi Linux 预检和生产 E2E 全过；Direct `/healthz ok=true` 且新工具白名单已生效。
 - **发布**：Reader `0.2.130` / KG `kg-0.2.130-8ca8936c7f7c1f7608cc`、WebExt `0.2.130`（SHA `ee2fb4e4…ab0e`）、Direct `0.1.175`；回滚点 `20260821T110943Z-177732` / `webext-channel-20260821T111507Z-ah107swm` / `install-0.1.175-20260821T111302Z-76e3e342`。
 - **iOS/边界**：Actions `32475825033` 上传 TestFlight `1.1.75 (419)`，`32476422452` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告；旧 Codex 语音任务不热加载工具 schema，验收需新建任务。
+
+## Codex：锚定卡片、轻量快照与 ReaderPC 非语音基础层正式发布（2026-08-22 JST）
+- **修复**：统一自由卡/锚定卡的 ID、内容、序号与 CRUD/撤销语义，补齐 Anki 读取修改删除、复习热更新/出处、图片比例与代理；快照仅输出 AI 所需语义，修复侧栏换行、叠层、文字层/下划线、历史同步和视觉来源竞态。
+- **验证**：Reader Node 全量 `1653/1653`、ReaderPC Python `143/143`、Direct Node `121/121`、C# Release/自检、卡片拖放、发布管线、Pi Linux 全门禁与真实 E2E、公开扩展浏览器矩阵均通过；Windows handoff 仅命中已登记的 POSIX `fcntl` 平台边界。
+- **Pi/扩展**：Reader `0.2.132` / KG `kg-0.2.132-4796c1d1fb4e4d902eed` 已原子部署，公开 WebExt `0.2.132` 摘要 `493491e0…fe9c`；回滚点 `20260821T173608Z-230956` / `webext-channel-20260821T173929Z-p35v4uxn`。
+- **Windows**：Direct `0.1.176` 已原子安装（回滚点 `install-0.1.176-20260821T173943Z-579674a1`）；ReaderPC `0.1.53` 已安装并保留原停机态，新增“Direct 基础层常驻 + 语音独立开关”，关闭语音不再影响快照、卡片、Anki、OCR、查询等能力。
+- **iOS/边界**：Actions `32509395308` 上传 TestFlight `1.1.77 (422)`，`32510102822` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告；无语音模式下旧“电脑语音”按钮仍可能短暂请求麦克风后被服务端拒绝，为非阻断已知边界。
