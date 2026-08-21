@@ -1292,6 +1292,128 @@ test("an open local second card follows repository edits in place and keeps reve
   assert.equal(h.RC.review.currentCard()._localReview.stateRev, record.stateRev);
 });
 
+test("the learning-card tool explicitly refreshes only the exact foreground review card", async () => {
+  const state = (confirmedAt) => ({
+    phase: "confirmed", removed: false, confirmedAt,
+    review: {
+      status: "new", dueAt: null, lastReviewedAt: null,
+      intervalDays: 0, ease: 0, reps: 0, lapses: 0,
+    },
+    flags: { archived: false }, projections: { anki: {} }, exactState: {},
+  });
+  let record = {
+    id: "card_tool", entityRev: 3, stateRev: 5, deleted: false,
+    source: { kind: "reader", sourceId: "tool-source" },
+    cards: [
+      { type: "basic", front: "CURRENT", back: "CURRENT BACK" },
+      { type: "basic", front: "NEXT OLD", back: "NEXT OLD BACK" },
+    ],
+    states: { 0: state(1), 1: state(2) },
+  };
+  const repository = {
+    async snapshot() { return [structuredClone(record)]; },
+    async patchState() { throw new Error("not used"); },
+    subscribe() { return () => {}; },
+  };
+  const h = harness({
+    context: {}, cardRepository: repository,
+    fetchImpl: async () => { throw new Error("local queue must not call Pi"); },
+  });
+
+  await h.RC.review.reload();
+  h.RC.review.setMode(true);
+  const rendersBeforeHiddenSibling = h.learningCardRenders.length;
+  record = structuredClone(record);
+  record.entityRev += 1;
+  record.cards[1].front = "NEXT CACHED";
+  record.cards[1].back = "NEXT CACHED BACK";
+  const cached = h.RC.review.refreshLearningCard(
+    structuredClone(record), 1
+  );
+  assert.equal(cached.status, "cached");
+  assert.equal(h.learningCardRenders.length, rendersBeforeHiddenSibling,
+    "editing a sibling must not redraw the foreground face");
+
+  h.RC.review.next();
+  h.RC.review.show();
+  h.RC.review.setImproveExpanded(true);
+  assert.equal(h.RC.review.currentCard().question, "NEXT CACHED");
+  const rendersBeforeForeground = h.learningCardRenders.length;
+  record = structuredClone(record);
+  record.entityRev += 1;
+  record.cards[1].front = "NEXT LIVE";
+  record.cards[1].back = "NEXT LIVE BACK";
+  const live = h.RC.review.refreshLearningCard(structuredClone(record), 1);
+  assert.equal(live.status, "rendered");
+  assert.equal(live.rendered, true);
+  assert.ok(h.learningCardRenders.length > rendersBeforeForeground);
+  assert.equal(h.RC.review.currentCard().question, "NEXT LIVE");
+  assert.match(h.pane.innerHTML, /NEXT LIVE BACK/,
+    "the exact foreground card keeps its revealed state while refreshing");
+  assert.equal(
+    h.findActions("toggle-improve")[0].getAttribute("aria-expanded"),
+    "true",
+  );
+
+  h.RC.review.setMode(false);
+  const rendersWhileHidden = h.learningCardRenders.length;
+  record = structuredClone(record);
+  record.entityRev += 1;
+  record.cards[1].front = "NEXT AFTER RETURN";
+  const hidden = h.RC.review.refreshLearningCard(structuredClone(record), 1);
+  assert.equal(hidden.status, "cached");
+  assert.equal(h.learningCardRenders.length, rendersWhileHidden,
+    "a hidden Review surface caches canonical content without repainting");
+  h.RC.review.setMode(true);
+  assert.ok(h.learningCardRenders.length > rendersWhileHidden);
+  assert.equal(h.RC.review.currentCard().question, "NEXT AFTER RETURN");
+});
+
+test("an explicit tool deletion rebuilds the visible pager even for a non-current card", async () => {
+  const state = (confirmedAt) => ({
+    phase: "confirmed", removed: false, confirmedAt,
+    review: {
+      status: "new", dueAt: null, lastReviewedAt: null,
+      intervalDays: 0, ease: 0, reps: 0, lapses: 0,
+    },
+    flags: { archived: false }, projections: { anki: {} }, exactState: {},
+  });
+  const record = {
+    id: "card_tool_delete", entityRev: 2, stateRev: 7, deleted: false,
+    source: { kind: "reader", sourceId: "tool-delete-source" },
+    cards: [
+      { type: "basic", front: "KEEP CURRENT", back: "A" },
+      { type: "basic", front: "REMOVE SIBLING", back: "B" },
+      { type: "basic", front: "KEEP LAST", back: "C" },
+    ],
+    states: { 0: state(1), 1: state(2), 2: state(3) },
+  };
+  const repository = {
+    async snapshot() { return [structuredClone(record)]; },
+    async patchState() { throw new Error("not used"); },
+    subscribe() { return () => {}; },
+  };
+  const h = harness({
+    context: {}, cardRepository: repository,
+    fetchImpl: async () => { throw new Error("local queue must not call Pi"); },
+  });
+
+  await h.RC.review.reload();
+  h.RC.review.setMode(true);
+  const removed = structuredClone(record);
+  removed.stateRev += 1;
+  removed.states[1].removed = true;
+  const rendersBefore = h.learningCardRenders.length;
+  const result = h.RC.review.refreshLearningCard(removed, 1);
+  assert.equal(result.rendered, true,
+    "visible pager structure must rebuild after any sibling removal");
+  assert.ok(h.learningCardRenders.length > rendersBefore);
+  assert.equal(h.RC.review.currentCard().question, "KEEP CURRENT");
+  assert.doesNotMatch(h.pane.innerHTML, /REMOVE SIBLING/);
+  assert.equal(h.currentPager().spec.slides.length, 2);
+  assert.equal(h.findActions("delete-card").length, 1);
+});
+
 test("repository removal drops only the exact local index and keeps its siblings", async () => {
   const state = (confirmedAt) => ({
     phase: "confirmed", removed: false, confirmedAt,

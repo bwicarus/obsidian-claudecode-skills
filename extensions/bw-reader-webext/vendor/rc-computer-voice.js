@@ -8191,11 +8191,15 @@ if (window.__bwPwaProviderOnly) return;
         // Exact replay of an already removed card is locally idempotent.  It
         // must not issue a second external Anki mutation or overwrite the
         // terminal/unknown projection receipt attached to the tombstone.
+        var replayViewUpdate = requestLearningCardViewRefresh(
+          before, cardIndex
+        );
         return {
           contract: "reader-learning-card-mutation/1",
           operation: operation,
           reader_applied: { status: "succeeded", dedup: true },
           external_results: {},
+          view_update: replayViewUpdate,
           record: selected,
         };
       }
@@ -8233,12 +8237,18 @@ if (window.__bwPwaProviderOnly) return;
         });
       }
       return Promise.resolve(local).then(function (applied) {
+        // Canonical Reader storage is authoritative.  Refresh the owning App
+        // immediately after that write, before AnkiConnect/media/sync work can
+        // delay the visible Review card.  The Review surface itself checks the
+        // stable id + cardIndex and only redraws the foreground card.
+        var viewUpdate = requestLearningCardViewRefresh(applied, cardIndex);
         if (value.externalPolicy === "reader-only") {
           return {
             contract: "reader-learning-card-mutation/1",
             operation: operation,
             reader_applied: { status: "succeeded" },
             external_results: {},
+            view_update: viewUpdate,
             record: learningCardPublic(applied, cardIndex),
           };
         }
@@ -8251,12 +8261,27 @@ if (window.__bwPwaProviderOnly) return;
               operation: operation,
               reader_applied: { status: "succeeded" },
               external_results: projection.external_results,
+              view_update: viewUpdate,
               record: learningCardPublic(latest, cardIndex),
             };
           });
         });
       });
     });
+  }
+
+  function requestLearningCardViewRefresh(record, cardIndex) {
+    try {
+      if (RC.review && typeof RC.review.refreshLearningCard === "function") {
+        return RC.review.refreshLearningCard(record, cardIndex) || {
+          status: "requested",
+          rendered: false,
+        };
+      }
+    } catch (_) {
+      return { status: "failed", rendered: false };
+    }
+    return { status: "unavailable", rendered: false };
   }
 
   window._nativeReaderLearningCardMutate = nativeReaderLearningCardMutate;

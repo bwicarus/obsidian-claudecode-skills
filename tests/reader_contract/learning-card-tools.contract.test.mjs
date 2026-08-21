@@ -205,6 +205,28 @@ test("默认 sync-if-projected 只投影已有外部 note，并保留 reader-onl
   assert.match(mutation, /external_results: \{\}/);
 });
 
+test("学习卡工具在外部同步前显式请求 App 刷新当前复习卡", () => {
+  const refresh = method(
+    COMPUTER,
+    "function requestLearningCardViewRefresh(",
+  );
+  assert.match(refresh, /RC\.review\.refreshLearningCard\(record, cardIndex\)/);
+  assert.match(refresh, /status: "unavailable"/);
+
+  const mutation = method(COMPUTER, "function nativeReaderLearningCardMutate(");
+  const localWrite = mutation.indexOf("Promise.resolve(local).then(function (applied)");
+  const appRefresh = mutation.indexOf(
+    "requestLearningCardViewRefresh(applied, cardIndex)",
+  );
+  const externalProjection = mutation.indexOf("projectLearningCardMutation(");
+  assert.ok(localWrite >= 0, "canonical Reader write completion must be explicit");
+  assert.ok(appRefresh > localWrite,
+    "the App refresh request follows the canonical Reader write");
+  assert.ok(externalProjection > appRefresh,
+    "the visible card refresh must not wait for AnkiConnect/media/sync");
+  assert.match(mutation, /view_update: viewUpdate/);
+});
+
 test("Windows 与 Pi 分流到各自 AnkiConnect 入口，且成功写入后请求同步", () => {
   const localClient = method(COMPUTER, "function operateLocalAnkiCard(");
   assert.match(localClient, /"anki-card-operation-local"/);

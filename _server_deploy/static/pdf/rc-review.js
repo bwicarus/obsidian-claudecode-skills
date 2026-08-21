@@ -883,7 +883,9 @@
   function _acceptCardRepositoryChange(event) {
     var entityId = String(event && event.cardId || '');
     var record = event && event.record;
-    if (!entityId || !_queue.length) return;
+    if (!entityId || !_queue.length) {
+      return { updated: false, rendered: false };
+    }
 
     var changedContent = false;
     var changedCurrentContent = false;
@@ -941,7 +943,9 @@
       }
     }
 
-    if (!removedAny && !changedContent && !changedMetadata) return;
+    if (!removedAny && !changedContent && !changedMetadata) {
+      return { updated: false, rendered: false };
+    }
     _idx = Math.max(0, Math.min(_idx, Math.max(0, _queue.length - 1)));
     if (removedCurrent) {
       _showingAnswer = false;
@@ -953,11 +957,59 @@
       _invalidateCardRequests(true);
     }
     _saveChangedQueue();
-    if (changedMetadata && !removedAny && !changedContent) return;
+    if (changedMetadata && !removedAny && !changedContent) {
+      return { updated: true, rendered: false };
+    }
+    if (event && event.renderCurrentOnly === true &&
+        (!_mode || (!removedAny && !changedCurrentContent))) {
+      return { updated: true, rendered: false };
+    }
     render();
     _activateCurrentSelections();
     _scheduleDecorate();
     _notifyAssistant(removedAny ? 'card-deleted-external' : 'card-updated');
+    return { updated: true, rendered: true };
+  }
+
+  // The Voice/Codex mutation tool already executes inside the owning Reader
+  // page.  Ask the open Review surface to consume the canonical write
+  // directly instead of relying only on an IndexedDB/BroadcastChannel change
+  // racing back through the repository subscription.  The stable id + card
+  // index gate keeps sibling cards distinct; a hidden/non-current edit only
+  // updates the cached queue, while foreground edits and visible pager
+  // deletions are rendered now.
+  function _refreshLearningCard(record, cardIndex) {
+    var entityId = String(record && record.id || '');
+    cardIndex = Number(cardIndex);
+    if (!entityId || !Number.isSafeInteger(cardIndex) || cardIndex < 0) {
+      return { status: 'invalid', rendered: false };
+    }
+    var queueIndex = _localQueueIndex(entityId, cardIndex);
+    var wasCurrent = _mode && queueIndex >= 0 && queueIndex === _idx;
+    var result = _acceptCardRepositoryChange({
+      contract: 'reader-card-repository/1',
+      cardId: entityId,
+      source: 'learning-card-tool',
+      renderCurrentOnly: true,
+      record: record
+    }) || { updated: false, rendered: false };
+
+    // A storage notification may have updated the queue just before the
+    // explicit tool callback.  Force one foreground render in that case so a
+    // successful tool call always refreshes the card the user is looking at.
+    if (wasCurrent && result.rendered !== true) {
+      render();
+      _activateCurrentSelections();
+      _scheduleDecorate();
+      _notifyAssistant('card-updated');
+      result.rendered = true;
+    }
+    return {
+      status: queueIndex < 0
+        ? 'not-loaded'
+        : (wasCurrent ? 'rendered' : 'cached'),
+      rendered: result.rendered === true
+    };
   }
 
   function _bindCardRepository(repository) {
@@ -3497,11 +3549,16 @@
     }
     _notifyAssistant('mode-toggle');
     if (_mode) {
-      _activateCurrentSelections();
-      _scheduleDecorate();
       var activeContextKey = _clientContextKey(_currentContext());
       if (!_queue.length || activeContextKey !== _contextCacheKey) {
         loadQueue(false);
+      } else {
+        // Hidden repository/tool updates refresh the queue without touching a
+        // background DOM.  Entering Review is the foreground boundary that
+        // materializes that canonical cached content.
+        render();
+        _activateCurrentSelections();
+        _scheduleDecorate();
       }
     }
     return _mode ? 'review' : 'normal';
@@ -3691,6 +3748,7 @@
       var card = _current();
       return card ? Object.assign({}, card) : null;
     },
+    refreshLearningCard: _refreshLearningCard,
     selectedPairs: selectedPairs,
     setMode: setMode,
     reload: function () {
