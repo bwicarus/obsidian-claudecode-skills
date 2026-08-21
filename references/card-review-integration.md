@@ -11,8 +11,15 @@
 - Pi `sync-v3` 同步 `card-entities`/`card-states`；首次升级只导入本机缺失的旧 Pi registry gid，
   不覆盖本机同 gid。下文 `/api/entity`、`/anki-add-cards` 与 Pi 复习接口是旧兼容/投影说明，
   不再是 App 卡库权威。
-- ReaderPC AnkiConnect 与 AnkiMobile `addnote` 都是用户触发的可选导出。外部写入使用
-  pending/succeeded/failed/unknown receipt；结果未知禁止盲重试，外部 ID 只存在投影 receipt。
+- 新建外部卡仍是用户触发的可选投影：ReaderPC 经本机 AnkiConnect，AnkiMobile 经
+  `addnote`。外部 note/card ID 只保存在投影 receipt，不参与 Reader 卡片身份。
+- Codex Voice 直接提供 canonical 学习卡的列表、按 ID 读取、编辑、删除和当前复习卡读取；返回项
+  包含完整卡片内容、出处、状态、`card_*` ID、批内 `cardIndex` 与当前 entity/state revision。
+  编辑用 entity revision，删除用 state revision，不能仅凭显示顺序修改。
+- canonical 编辑/删除先提交 Reader 本地仓；默认 `sync-if-projected` 只对已有可靠 note ID 的
+  Windows/Pi 投影调用 AnkiConnect，并请求 AnkiWeb sync；`reader-only` 可明确跳过外部投影。
+  回执分别记录 Reader、本机 Anki、AnkiWeb 三层结果，结果未知禁止盲重试。删除外部投影是
+  note 级删除；AnkiMobile 没有可靠按 ID 修改/删除通道时 fail closed。
 
 ### 当前页面词锚卡合同（2026-08-20，覆盖下文旧“句末注入”说明）
 

@@ -623,6 +623,21 @@
       "description": "Add reviewed cards through the Pi service."
     },
     {
+      "path": "/pdf/api/anki-card-operation",
+      "match": "exact",
+      "owner": "pi",
+      "methods": [
+        "POST"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": null,
+      "description": "Read or mutate explicitly identified Anki notes and cards, then report local and AnkiWeb sync outcomes separately."
+    },
+    {
       "path": "/pdf/api/anki-draft",
       "match": "exact",
       "owner": "pi",

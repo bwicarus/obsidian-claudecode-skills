@@ -512,6 +512,52 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
     h.addEventListener('contextmenu', function (e) { if (g || Date.now() < suppressUntil) e.preventDefault(); });
   }
 
+  function _sideBlankDismissTarget(event, side) {
+    if (!event || !side) return false;
+    var target = event.target;
+    try {
+      var path = typeof event.composedPath === 'function'
+        ? event.composedPath() : [];
+      if (path && path.length && path[0] && path[0].nodeType === 1) {
+        target = path[0];
+      }
+    } catch (e) {}
+    if (!target || target.nodeType !== 1 || !side.contains(event.target)) {
+      return false;
+    }
+    // Only genuine empty chrome dismisses transients.  Messages, cards,
+    // settings and every standard interactive control keep their own click.
+    var interactive =
+      'button,a,input,textarea,select,option,label,summary,details,' +
+      '[contenteditable="true"],[role="button"],[data-action],[data-q],' +
+      '[data-pane],[onclick],.vc-card,.rc-note,.bw-page-pin,' +
+      '.rv-improve-panel,.asst-msg,.rc-turn,.asst-tool,.ams-mask,' +
+      '#ep-side-settings,#asst-turnrail';
+    try { if (target.closest(interactive)) return false; } catch (e) {}
+    return true;
+  }
+
+  function _bindSideBlankDismiss(side) {
+    if (!side || side.__rcBlankDismissBound) return;
+    side.__rcBlankDismissBound = true;
+    side.addEventListener('pointerdown', function (event) {
+      if (!_sideBlankDismissTarget(event, side)) return;
+      try {
+        var adapter = RC.adapter && RC.adapter();
+        if (adapter && typeof adapter.clearSelection === 'function') {
+          Promise.resolve(adapter.clearSelection()).catch(function () {});
+        } else if (typeof window.__clearContentSelection === 'function') {
+          window.__clearContentSelection();
+        }
+      } catch (e) {}
+      try {
+        window.dispatchEvent(new CustomEvent('rc:dismiss-transients', {
+          detail: { source: 'sidebar-blank' }
+        }));
+      } catch (e) {}
+    }, true);
+  }
+
   // 建抽屉本体(模板没给则兜底创建空壳)+ 把手 + tab 栏(prepend 进抽屉)
   function buildChrome() {
     if (_built) return; _built = true;
@@ -521,6 +567,7 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
       side = document.createElement('aside'); side.id = 'ep-side';
       document.body.appendChild(side);
     }
+    _bindSideBlankDismiss(side);
 
     // 把手(竖排 grip pill):点击 toggle；长按后横拖调整侧栏宽度
     if (!document.getElementById('ep-side-handle')) {

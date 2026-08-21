@@ -51,7 +51,7 @@ DEFAULT_CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
 
 PACKAGE_CONTRACT = "reader-computer-voice-direct-package/1"
 MANIFEST_SCHEMA = 1
-READER_CONTEXT_MCP_SERVER_VERSION = "1.6.0"
+READER_CONTEXT_MCP_SERVER_VERSION = "1.7.0"
 ARCHIVE_STAMP = (1980, 1, 1, 0, 0, 0)
 RID = "win-x64"
 VERSION_RE = re.compile(r"(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){0,3}\Z")
@@ -103,6 +103,11 @@ CODEX_READER_PAGE_CARD_TOOLS = (
     "reader_page_card_read",
     "reader_page_card_edit",
     "reader_page_card_delete",
+    "reader_learning_cards",
+    "reader_learning_card_read",
+    "reader_learning_card_edit",
+    "reader_learning_card_delete",
+    "reader_review_current_card",
 )
 CODEX_CONFIG_BACKUP_REL = "codex-config.toml.before-reader-page-card-tools"
 
@@ -1828,6 +1833,8 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
         "reader_note_edit",
         "reader_page_card_edit",
         "reader_page_card_delete",
+        "reader_learning_card_edit",
+        "reader_learning_card_delete",
         "reader_note_create",
         "reader_paper_start",
         "reader_undo_last",
@@ -1836,6 +1843,9 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
         "reader_command",
         "reader_page_cards",
         "reader_page_card_read",
+        "reader_learning_cards",
+        "reader_learning_card_read",
+        "reader_review_current_card",
         "reader_notes",
         "reader_toc",
         "reader_lookup_word",

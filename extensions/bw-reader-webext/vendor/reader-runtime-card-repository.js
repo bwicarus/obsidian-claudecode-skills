@@ -1164,6 +1164,79 @@
       });
     }
 
+    // Remove one stable card index without deleting the sibling cards that
+    // share the same Reader entity.  This is deliberately separate from
+    // tombstone(id): an entity is a batch and external Anki note/card ids live
+    // on each index's projection receipt.  Keeping the entity and state map
+    // intact preserves both batch identity and auditability.
+    function removeCard(idValue, cardIndex, operationOptions) {
+      operationOptions = operationOptions || {};
+      var id;
+      var index;
+      try {
+        id = normalizeId(idValue);
+        index = integer(cardIndex, 'cardIndex', 0, false);
+      } catch (error) { return Promise.reject(error); }
+      return serialize(function () {
+        return pair(id).then(function (records) {
+          rejectDeleted(records, id);
+          if (!records.entity || !records.state) {
+            throw new CardRepositoryError('卡组不存在', 'BW_CARD_REPOSITORY_NOT_FOUND');
+          }
+          var cards = normalizeCards(records.entity.value.cards);
+          if (index >= cards.length) {
+            throw new CardRepositoryError(
+              'cardIndex 超出卡组',
+              'BW_CARD_REPOSITORY_CARD_INDEX'
+            );
+          }
+          var states = normalizeStateMap(records.state.value.states, cards.length);
+          var current = states[String(index)];
+          if (current.removed) {
+            // An idempotent replay still has to name the current state
+            // revision; otherwise a stale caller could mistake a later Anki
+            // receipt update for the mutation it originally observed.
+            revision(
+              records.state,
+              operationOptions.ifStateRev,
+              'ifStateRev'
+            );
+            return project(records, false);
+          }
+          states[String(index)] = cardState(
+            current.phase,
+            current.confirmedAt,
+            current.review,
+            current.flags,
+            current.projections,
+            current.exactState,
+            true
+          );
+          var next = stateValue(id, states, cards.length);
+          var base = mutationBase(
+            operationOptions.mutationId,
+            'remove-card-' + index,
+            id,
+            mutationFactory
+          );
+          return store.put(STATE_COLLECTION, next, {
+            id: id,
+            ifRev: revision(
+              records.state,
+              operationOptions.ifStateRev,
+              'ifStateRev'
+            ),
+            mutationId: base + ':state'
+          }).then(function (stateRecord) {
+            return project({
+              entity: records.entity,
+              state: verifyWrite(stateRecord, next, STATE_COLLECTION)
+            }, false);
+          });
+        });
+      });
+    }
+
     function patchState(idValue, cardIndex, patch, operationOptions) {
       operationOptions = operationOptions || {};
       var id;
@@ -1195,11 +1268,18 @@
           var states = normalizeStateMap(records.state.value.states, cards.length);
           var current = states[String(index)];
           if (current.removed) {
-            throw new CardRepositoryError(
-              '已删除的批内卡片不能再修改状态',
-              'BW_CARD_REPOSITORY_CARD_REMOVED',
-              { id: id, cardIndex: index }
-            );
+            var removedKeys = Object.keys(patch);
+            // External Anki deletion/sync is an asynchronous projection that
+            // finishes after the authoritative Reader removal.  Its receipt
+            // must still be recordable, but no other state field may mutate a
+            // removed card or accidentally make it reviewable again.
+            if (removedKeys.length !== 1 || removedKeys[0] !== 'ankiReceipt') {
+              throw new CardRepositoryError(
+                '已删除的批内卡片只能追加 Anki 投影回执',
+                'BW_CARD_REPOSITORY_CARD_REMOVED',
+                { id: id, cardIndex: index }
+              );
+            }
           }
           var projectionsPatch = patch.projections;
           if (patch.ankiReceipt != null) {
@@ -1224,7 +1304,7 @@
             own(patch, 'exactState')
               ? normalizeExactState(patch.exactState)
               : current.exactState,
-            false
+            current.removed === true
           );
           var next = stateValue(id, states, cards.length);
           if (same(records.state.value, next)) return project(records, false);
@@ -1595,6 +1675,7 @@
       saveConfirmedCard: saveConfirmedCard,
       replaceContent: replaceContent,
       removeDraftCard: removeDraftCard,
+      removeCard: removeCard,
       patchState: patchState,
       recordAnkiReceipt: recordAnkiReceipt,
       importLegacyBatch: importLegacyBatch,
@@ -1644,6 +1725,7 @@
     saveConfirmedCard: delegate('saveConfirmedCard'),
     replaceContent: delegate('replaceContent'),
     removeDraftCard: delegate('removeDraftCard'),
+    removeCard: delegate('removeCard'),
     patchState: delegate('patchState'),
     recordAnkiReceipt: delegate('recordAnkiReceipt'),
     importLegacyBatch: delegate('importLegacyBatch'),

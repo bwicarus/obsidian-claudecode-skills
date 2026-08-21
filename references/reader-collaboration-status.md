@@ -4313,3 +4313,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **发布**：提交 `0f03ff46`；Pi Reader/WebExt `0.2.124`、KG `kg-0.2.124-97b51962e0d5dc6ba650` 与公开 channel 已切换，回退点 `20260820T110950Z-48651` / `webext-channel-20260820T111332Z-idnrqhlb`。
 - **Windows/iOS**：Direct `0.1.171` 已原子安装、`/healthz ok=true`，回退点 `install-0.1.171-20260820T111506Z-21a36738`；Actions `32362974932` 上传 TestFlight `1.1.70 (401)`，`32363683378` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **验收边界**：旧 Codex Voice 任务不会热加载新增工具，必须新建语音任务；用户随后直接验收纵图比例、滚动同步及按 ID 查改删。
+
+## Codex：学习卡统一 CRUD、复习交互与 Anki 同步候选（2026-08-21 JST）
+- **改了什么**：自由/锚定卡统一按稳定 id+index 读改删，复习卡补删除、一步评分回退、出处跳转、改进底栏与侧栏空白收起；已删除卡拒绝编辑且幂等删除不再重放外部投影。
+- **Anki**：Windows Direct 与 Pi 均以精确 note/card ID 调 AnkiConnect，成功写入后分层报告本机结果与 AnkiWeb sync；未知结果保持 fenced，删除为 note 级且来源脚注随编辑保留。
+- **验证**：共享生成物、Reader Node 全量、网络审计、Pi 定向测试、Direct Release/包内自检、ReaderBundle 与发布管线已通过；Windows 全量仍仅命中已登记的 POSIX/fixture 环境基线。
+- **候选**：WebExt `0.2.126`、launcher v14、App `1.1.71`、Direct `0.1.172`；本地预生成的 `0.2.125` 未发布且因最终安全修复已作废，不覆盖其不可变文件。
+- **下一步**：提交推送后按用户授权直接走 Pi 原子部署、公开扩展 channel、Windows Direct 原子安装与 TestFlight 上传，再登记健康和回滚点。

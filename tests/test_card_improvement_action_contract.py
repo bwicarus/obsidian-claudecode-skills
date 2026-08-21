@@ -135,7 +135,7 @@ process.stdout.write(url);
         self.assertIn("function mountReview(", flashcard_source)
         self.assertIn("function renderEntity(", flashcard_source)
         for label in (
-            "打开原笔记",
+            "出处",
             "📝 详细",
             "✂️ 精炼",
             "更新到笔记",

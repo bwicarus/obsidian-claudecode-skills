@@ -45,6 +45,11 @@ if (window.__bwPwaProviderOnly) return;
   var _rejectedAnswers = Object.create(null);
   var _externalAnswerAids = Object.create(null);
   var _pager = null;
+  // A rating remains undoable until the next review action.  We never call
+  // Anki's global guiUndo: the staged card has not touched Reader state or an
+  // external scheduler yet, so undo is exact and scoped to this card.
+  var _stagedRating = null;
+  var _ratingCommitBusy = 0;
 
   function _esc(value) {
     return RC.esc ? RC.esc(value) : String(value == null ? '' : value);
@@ -316,7 +321,10 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function _bookSourceRef(value) {
-    var match = /^book:(.+)#p(\d{1,7})$/.exec(String(value || '').trim());
+    var raw = String(value || '').trim();
+    if (/^reader-book:/i.test(raw)) raw = 'book:' + raw.slice(12);
+    if (!/^book:/i.test(raw) && /#p\d{1,7}$/i.test(raw)) raw = 'book:' + raw;
+    var match = /^book:(.+)#p(\d{1,7})$/i.exec(raw);
     if (!match) return null;
     var file = String(match[1] || '').trim().replace(/\\/g, '/');
     if (!file || file.charAt(0) === '/' || /^[a-z]:\//i.test(file) ||
@@ -787,11 +795,13 @@ if (window.__bwPwaProviderOnly) return;
         source.url || ''
       ),
       source_url: String(source.url || ''),
+      source: Object.assign({}, source),
       _localReview: {
         gid: record.id,
         cardIndex: cardIndex,
         stateRev: Number(record.stateRev || 0),
         review: Object.assign({}, state.review || {}),
+        projections: Object.assign({}, state.projections || {}),
         wasDue: due === true
       }
     });
@@ -1020,9 +1030,34 @@ if (window.__bwPwaProviderOnly) return;
       done(localStorage.getItem(LS_RV_H_KEY));
     } catch (_) { done(null); }
   }
+  function _reviewHeightBounds() {
+    var pane = document.getElementById('side-pane-asst');
+    var workspace = _workspace();
+    var thread = document.getElementById('asst-thread');
+    var paneHeight = 0;
+    try { paneHeight = pane.getBoundingClientRect().height; } catch (_) {}
+    if (!(paneHeight > 0)) paneHeight = Number(window.innerHeight || 0);
+    var reserved = 0;
+    try {
+      Array.prototype.forEach.call(pane && pane.children || [], function (child) {
+        if (child === workspace || child === thread || child.hidden) return;
+        var style = window.getComputedStyle ? window.getComputedStyle(child) : null;
+        if (style && style.position === 'absolute') return;
+        var rect = child.getBoundingClientRect();
+        reserved += Math.max(0, Number(rect.height || 0));
+      });
+    } catch (_) {}
+    // Keep a real conversation viewport, but derive the ceiling from the
+    // actual pane rather than the browser window.  This remains correct when
+    // the drawer is resized or the on-screen keyboard changes its height.
+    var minThread = Math.max(96, Math.min(180, Math.round(paneHeight * 0.24)));
+    var hi = Math.max(96, Math.floor(paneHeight - reserved - minThread));
+    var lo = Math.min(150, hi);
+    return { lo: lo, hi: Math.max(lo, hi) };
+  }
   function _applyRvH(px) {
-    // 上下都留余量:卡片区不能小到看不见卡，也不能吃掉整个对话区。
-    var lo = 150, hi = Math.max(lo + 80, Math.round(window.innerHeight * 0.8));
+    var bounds = _reviewHeightBounds();
+    var lo = bounds.lo, hi = bounds.hi;
     var v = Math.max(lo, Math.min(Math.round(px), hi));
     try { document.documentElement.style.setProperty('--rv-h', v + 'px'); } catch (_) {}
     _rvHSet(v);
@@ -1031,7 +1066,7 @@ if (window.__bwPwaProviderOnly) return;
     _rvHGet(function (raw) {
       var v = parseInt(raw == null ? '' : String(raw), 10);
       if (v > 0) {
-        try { document.documentElement.style.setProperty('--rv-h', v + 'px'); } catch (_) {}
+        _applyRvH(v);
       }
     });
   }
@@ -1105,6 +1140,7 @@ if (window.__bwPwaProviderOnly) return;
 
   async function loadQueue(force) {
     if (!_mounted && !mount()) return;
+    _commitStagedRating('load-queue');
     var body = _body();
     if (!body) return;
     var context = _currentContext();
@@ -1466,11 +1502,6 @@ if (window.__bwPwaProviderOnly) return;
 
     var actions = document.createElement('div');
     actions.className = 'rv-actions';
-    actions.appendChild(_button(
-      'open-source',
-      '打开原笔记',
-      'rv-action'
-    ));
     var noteDraft = _button(
       'prepare-draft',
       '更新到笔记',
@@ -1618,6 +1649,19 @@ if (window.__bwPwaProviderOnly) return;
     stats.textContent = '相关 ' + _relatedTotal + ' · 到期 ' + _dueTotal +
       ' · 本批 ' + _queue.length;
     var reload = _button('reload', '⟳', 'rv-nav', '重新查找相关卡');
+    var undoRating = _button(
+      'undo-rating',
+      '↶ 回退',
+      'rv-nav rv-undo-rating',
+      '回到刚才评分的卡片并重新选择'
+    );
+    undoRating.disabled = !_stagedRating;
+    var openSource = _button(
+      'open-source',
+      '出处',
+      'rv-nav rv-open-source',
+      '打开这张卡记录的出处'
+    );
     var cardToggle = _button(
       'toggle-card',
       _cardExpanded ? '收起' : '展开卡片',
@@ -1625,6 +1669,8 @@ if (window.__bwPwaProviderOnly) return;
     );
     cardToggle.setAttribute('aria-expanded', String(_cardExpanded));
     toolbar.appendChild(stats);
+    toolbar.appendChild(undoRating);
+    toolbar.appendChild(openSource);
     toolbar.appendChild(reload);
     toolbar.appendChild(cardToggle);
     body.appendChild(toolbar);
@@ -1633,6 +1679,7 @@ if (window.__bwPwaProviderOnly) return;
     if (!card) {
       if (workspace) workspace.classList.add('rv-card-empty');
       cardToggle.disabled = true;
+      openSource.disabled = true;
       var empty = document.createElement('div');
       empty.className = 'rv-done';
       empty.textContent = _queueBusy
@@ -1701,6 +1748,16 @@ if (window.__bwPwaProviderOnly) return;
     // 「改进」挪到头部那一行（跟 ⟳ / 收起展开并列）——它原来挂在卡片面板底部，
     // 白占一行高度，而这一行本来就是放开关的地方（用户要求）。
     toolbar.appendChild(improveToggle);
+    if (card._localReview || _legacyReviewNoteId(card)) {
+      toolbar.appendChild(_button(
+        'delete-card',
+        '删除',
+        'rv-nav rv-delete-card',
+        card._localReview
+          ? '删除当前这一张卡，不影响同批其他卡'
+          : '按精确 note ID 删除当前 Anki note 并同步'
+      ));
+    }
     _appendImprovePanel(reviewControls, card);
     panel.appendChild(reviewControls);
   }
@@ -1714,6 +1771,7 @@ if (window.__bwPwaProviderOnly) return;
     if (!Number.isFinite(next)) next = 0;
     next = Math.round(next);
     if (next === _idx) return false;
+    _commitStagedRating('card-change');
     _rememberAndDeactivateSelections();
     _invalidateCardRequests(true);
     _idx = next;
@@ -1737,6 +1795,7 @@ if (window.__bwPwaProviderOnly) return;
 
   function _showAnswer() {
     if (!_current() || _showingAnswer) return;
+    _commitStagedRating('show-answer');
     _showingAnswer = true;
     render();
   }
@@ -1944,14 +2003,18 @@ if (window.__bwPwaProviderOnly) return;
       || status === 502 || status === 503 || status === 504;
   }
 
-  function _answerLocalCurrent(card, ease, pendingKey, originalIndex,
-      answerContextKey) {
+  function _commitLocalRating(stage) {
+    var card = stage.card;
+    var ease = stage.ease;
+    var pendingKey = stage.pendingKey;
+    var answerContextKey = stage.contextKey;
     var repository = _cardRepository();
     var local = card && card._localReview;
     if (!repository || !local) {
       delete _ratingPending[pendingKey];
-      _toast('本地卡库尚未就绪，评分未保存');
-      return;
+      _restoreCommittedStage(stage);
+      _toast('本地卡库尚未就绪，评分未保存，卡片已放回');
+      return Promise.resolve(false);
     }
     var aid = _answerAid();
     var reviewedAt = Date.now();
@@ -1974,7 +2037,7 @@ if (window.__bwPwaProviderOnly) return;
         ? String(card._legacyExternalCardId) : ''
     });
     var nextReview = _scheduledLocalReview(local.review, ease, reviewedAt);
-    repository.patchState(local.gid, local.cardIndex, {
+    return repository.patchState(local.gid, local.cardIndex, {
       review: nextReview
     }, {
       mutationId: 'review:' + local.gid + ':' + local.cardIndex + ':' + aid
@@ -1985,28 +2048,35 @@ if (window.__bwPwaProviderOnly) return;
         throw new Error('本地卡库未返回已保存的复习状态');
       }
       if (answerContextKey === _contextCacheKey) {
-        _rememberAndDeactivateSelections();
-        _invalidateCardRequests(true);
-        _queue.splice(originalIndex, 1);
-        if (local.wasDue) _dueTotal = Math.max(0, _dueTotal - 1);
-        _idx = Math.max(0, Math.min(originalIndex, _queue.length - 1));
-        _showingAnswer = false;
-        _improveExpanded = false;
         var snapshot = _currentQueueSnapshot();
         _saveLocal(snapshot, function () {
           return snapshot.client_context_key === _contextCacheKey;
         });
-        render();
-        _activateCurrentSelections();
-        _scheduleDecorate();
         _notifyAssistant('card-rated-local');
       }
       delete _ratingPending[pendingKey];
       _projectLegacyLocalAnswer(card, ease, aid, local, reviewedAt);
+      try {
+        window.dispatchEvent(new CustomEvent('rc:learning-card-rated', {
+          detail: {
+            entityId: String(local.gid || ''),
+            cardIndex: Number(local.cardIndex),
+            ease: ease,
+            aid: aid,
+            reviewedAt: reviewedAt,
+            projections: Object.assign({}, local.projections || {}),
+            record: patched || null,
+            source: 'review'
+          }
+        }));
+      } catch (_) {}
+      return true;
     }).catch(function (error) {
       delete _ratingPending[pendingKey];
-      _toast('评分未保存，卡片仍在当前队列：' +
+      _restoreCommittedStage(stage);
+      _toast('评分未保存，卡片已放回当前队列：' +
         String(error && error.message || '未知错误'));
+      return false;
     });
   }
 
@@ -2061,26 +2131,95 @@ if (window.__bwPwaProviderOnly) return;
     return true;
   }
 
+  function _restoreCommittedStage(stage) {
+    if (!stage) return false;
+    var card = stage.card;
+    _patchSharedCard(card, {
+      _st: 'learn',
+      _showBack: true,
+      _next: card && card._next || null,
+      _ratingPending: false,
+      _syncPending: false
+    }, 'review-staged-restored');
+    delete _ratingPending[stage.pendingKey];
+    if (stage.contextKey !== _contextCacheKey) return true;
+    _rememberAndDeactivateSelections();
+    _invalidateCardRequests(true);
+    var key = _cardKey(card);
+    _queue = _queue.filter(function (queued) {
+      return _cardKey(queued) !== key;
+    });
+    var insertAt = Math.max(
+      0,
+      Math.min(Number(stage.originalIndex || 0), _queue.length)
+    );
+    _queue.splice(insertAt, 0, card);
+    if (stage.dueDecremented) _dueTotal += 1;
+    if (stage.completedAdded) {
+      _completed = _completed.filter(function (cardId) {
+        return String(cardId) !== String(card.id);
+      });
+    }
+    _idx = insertAt;
+    _showingAnswer = true;
+    _improveExpanded = false;
+    _saveLocal(_currentQueueSnapshot());
+    render();
+    _activateCurrentSelections();
+    _scheduleDecorate();
+    _notifyAssistant('rating-restored');
+    return true;
+  }
+
+  function _undoStagedRating() {
+    var stage = _stagedRating;
+    if (!stage) return false;
+    _stagedRating = null;
+    var restored = _restoreCommittedStage(stage);
+    if (restored) _toast('已回到上一张卡，请重新选择评分');
+    return restored;
+  }
+
+  function _commitStagedRating(reason) {
+    var stage = _stagedRating;
+    if (!stage) return Promise.resolve(false);
+    _stagedRating = null;
+    _ratingCommitBusy += 1;
+    if (_mode) render();
+    var operation;
+    try {
+      operation = stage.card && stage.card._localReview
+        ? _commitLocalRating(stage)
+        : _commitExternalRating(stage);
+    } catch (error) {
+      operation = Promise.reject(error);
+    }
+    return Promise.resolve(operation).catch(function (error) {
+      _restoreCommittedStage(stage);
+      _toast('上一评分未保存，卡片已放回：' +
+        String(error && error.message || '未知错误'));
+      return false;
+    }).then(function (result) {
+      return result;
+    }).finally(function () {
+      _ratingCommitBusy = Math.max(0, _ratingCommitBusy - 1);
+    });
+  }
+
   function _answerCurrent(ease) {
     ease = Number(ease || 0);
     var card = _current();
     if (!card || !_showingAnswer || ease < 1 || ease > 4) return;
+    if (_ratingCommitBusy) {
+      _toast('上一张卡的评分正在保存，请稍候');
+      return;
+    }
     var originalIndex = _idx;
     var answerContextKey = _contextCacheKey;
     var pendingKey = answerContextKey + ':' + _cardKey(card) + ':' +
       originalIndex;
     if (_ratingPending[pendingKey]) return;
     _ratingPending[pendingKey] = true;
-    if (card._localReview) {
-      _answerLocalCurrent(
-        card,
-        ease,
-        pendingKey,
-        originalIndex,
-        answerContextKey
-      );
-      return;
-    }
     _patchSharedCard(card, {
       _st: 'done',
       _showBack: true,
@@ -2091,22 +2230,45 @@ if (window.__bwPwaProviderOnly) return;
     _rememberAndDeactivateSelections();
     _invalidateCardRequests(true);
     _queue.splice(originalIndex, 1);
-    if (ease !== 1 &&
-        _completed.map(String).indexOf(String(card.id)) < 0) {
+    var completedAdded = !card._localReview && ease !== 1 &&
+      _completed.map(String).indexOf(String(card.id)) < 0;
+    if (completedAdded) {
       _completed.push(card.id);
     }
+    var dueDecremented = !!(card._localReview &&
+      card._localReview.wasDue);
+    if (dueDecremented) _dueTotal = Math.max(0, _dueTotal - 1);
     _idx = Math.max(0, Math.min(originalIndex, _queue.length - 1));
     _showingAnswer = false;
     _improveExpanded = false;
-    var snapshot = _currentQueueSnapshot();
-    _saveLocal(snapshot, function () {
-      return snapshot.client_context_key === _contextCacheKey;
-    });
+    _stagedRating = {
+      card: card,
+      ease: ease,
+      pendingKey: pendingKey,
+      originalIndex: originalIndex,
+      contextKey: answerContextKey,
+      dueDecremented: dueDecremented,
+      completedAdded: completedAdded,
+      snapshot: _currentQueueSnapshot()
+    };
+    // Deliberately do not persist the shortened queue yet.  A reload/crash
+    // before the next action therefore brings the uncommitted card back.
     render();
     _activateCurrentSelections();
     _scheduleDecorate();
-    _notifyAssistant('card-rated');
+    _notifyAssistant('card-rating-staged');
+  }
 
+  function _commitExternalRating(stage) {
+    var card = stage.card;
+    var ease = stage.ease;
+    var pendingKey = stage.pendingKey;
+    var originalIndex = stage.originalIndex;
+    var answerContextKey = stage.contextKey;
+    var snapshot = stage.snapshot;
+    _saveLocal(snapshot, function () {
+      return snapshot.client_context_key === _contextCacheKey;
+    });
     var aid = _answerAid();
     var payload = {
       aid: aid,
@@ -2122,7 +2284,7 @@ if (window.__bwPwaProviderOnly) return;
       queue: 'pi'
     });
     // @interaction review.answer.submit
-    fetch('/pdf/api/review-answer', {
+    return fetch('/pdf/api/review-answer', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -2778,13 +2940,73 @@ if (window.__bwPwaProviderOnly) return;
     render();
   }
 
+  function _sourceLocationPage(source) {
+    source = source || {};
+    var candidates = [source.location, source.anchor, source.selection];
+    for (var index = 0; index < candidates.length; index++) {
+      var value = candidates[index];
+      if (!value || typeof value !== 'object') continue;
+      var page = value.page;
+      if (page == null && String(value.unit || '').toLowerCase() === 'page') {
+        page = value.index;
+      }
+      page = Number(page);
+      if (Number.isSafeInteger(page) && page > 0) return page;
+    }
+    return 0;
+  }
+
+  function _sourceDescriptor(card) {
+    card = card || {};
+    var source = card.source && typeof card.source === 'object'
+      ? card.source : {};
+    var legacySource = _legacyMaterialSource(card);
+    var refs = [
+      card.source_ref,
+      source.sourceId,
+      source.documentId,
+      source.bookId,
+      legacySource && legacySource.source_ref
+    ].map(function (value) { return String(value || '').trim(); })
+      .filter(Boolean);
+    var book = null;
+    refs.some(function (value) {
+      book = _bookSourceRef(value);
+      return !!book;
+    });
+    var page = _sourceLocationPage(source);
+    var documentId = String(source.documentId || source.bookId || '').trim();
+    if (!book && documentId && page) {
+      book = _bookSourceRef('book:' +
+        documentId.replace(/^(?:reader-)?book:/i, '') + '#p' + page);
+    }
+    var locations = [source.location, source.anchor, source.selection]
+      .filter(function (value) { return value && typeof value === 'object'; });
+    var urls = [
+      source.url,
+      card.source_url,
+      legacySource && legacySource.source_url
+    ];
+    locations.forEach(function (value) {
+      if (value.url) urls.push(value.url);
+      if (value.data && value.data.url) urls.push(value.data.url);
+    });
+    return {
+      source: source,
+      sourceRef: refs[0] || '',
+      book: book,
+      page: page,
+      documentId: documentId,
+      locations: locations,
+      urls: urls
+    };
+  }
+
   function _openSource() {
     var card = _current() || {};
-    var legacySource = _legacyMaterialSource(card);
-    var sourceRef = String(
-      card.source_ref || (legacySource && legacySource.source_ref) || ''
-    );
-    var bookSource = _bookSourceRef(sourceRef);
+    var descriptor = _sourceDescriptor(card);
+    var sourceRef = descriptor.sourceRef;
+    var bookSource = descriptor.book;
     if (bookSource) {
       try {
         var adapter = RC.adapter && RC.adapter();
@@ -2795,7 +3017,27 @@ if (window.__bwPwaProviderOnly) return;
         }
       } catch (_) {}
     }
-    var candidates = [String(card.source_url || '')];
+    // Typed local source locations are preferred when this document is
+    // already open.  PDF/EPUB/HTML adapters own their private anchor format.
+    var currentFile = String((_currentContext() || {}).file || '');
+    if (!descriptor.documentId || !currentFile ||
+        descriptor.documentId === currentFile ||
+        descriptor.documentId === 'reader-book:' + currentFile) {
+      for (var locationIndex = 0;
+        locationIndex < descriptor.locations.length;
+        locationIndex++) {
+        try {
+          var currentAdapter = RC.adapter && RC.adapter();
+          if (currentAdapter && typeof currentAdapter.navigate === 'function' &&
+              currentAdapter.navigate(descriptor.locations[locationIndex])) {
+            return true;
+          }
+        } catch (_) {}
+      }
+    }
+    var candidates = descriptor.urls.map(function (value) {
+      return String(value || '');
+    });
     if (/^(?:https?|obsidian):\/\//i.test(sourceRef)) {
       candidates.push(sourceRef);
     } else if (/^web:https?:\/\//i.test(sourceRef)) {
@@ -2831,6 +3073,7 @@ if (window.__bwPwaProviderOnly) return;
       handled: false,
       source_ref: sourceRef,
       source_url: '',
+      source: descriptor.source,
       card: _cardForAssistant(card)
     };
     try {
@@ -2842,6 +3085,141 @@ if (window.__bwPwaProviderOnly) return;
       _toast('这张卡尚未记录可直接打开的原笔记链接');
     }
     return !!detail.handled;
+  }
+
+  function _deleteCurrentCard() {
+    var card = _current();
+    var local = card && card._localReview;
+    var repository = _cardRepository();
+    if (card && !local && _legacyReviewNoteId(card)) {
+      return _deleteLegacyReviewCard(card);
+    }
+    if (!card || !local || !repository ||
+        typeof repository.removeCard !== 'function') {
+      _toast('这张卡没有可安全删除的 Reader 单卡身份');
+      return Promise.resolve(false);
+    }
+    var confirmed = true;
+    try {
+      confirmed = window.confirm(
+        '删除当前这一张卡？同批其他卡不会受影响。'
+      );
+    } catch (_) {}
+    if (!confirmed) return Promise.resolve(false);
+    _commitStagedRating('delete-card');
+    var originalIndex = _idx;
+    var entityId = String(local.gid || card.entity_id || '');
+    var cardIndex = Number(local.cardIndex);
+    var projections = Object.assign({}, local.projections || {});
+    return repository.removeCard(entityId, cardIndex, {
+      ifStateRev: Number(local.stateRev || 0),
+      mutationId: 'review-remove:' + entityId + ':' + cardIndex + ':' +
+        _answerAid()
+    }).then(function (removed) {
+      _rememberAndDeactivateSelections();
+      _invalidateCardRequests(true);
+      _queue.splice(originalIndex, 1);
+      if (local.wasDue) _dueTotal = Math.max(0, _dueTotal - 1);
+      _idx = Math.max(0, Math.min(originalIndex, _queue.length - 1));
+      _showingAnswer = false;
+      _improveExpanded = false;
+      var snapshot = _currentQueueSnapshot();
+      _saveLocal(snapshot, function () {
+        return snapshot.client_context_key === _contextCacheKey;
+      });
+      render();
+      _activateCurrentSelections();
+      _notifyAssistant('card-deleted');
+      try {
+        window.dispatchEvent(new CustomEvent('rc:learning-card-removed', {
+          detail: {
+            entityId: entityId,
+            cardIndex: cardIndex,
+            stateRev: Number(removed && removed.stateRev || 0),
+            projections: projections,
+            record: removed || null,
+            source: 'review'
+          }
+        }));
+      } catch (_) {}
+      _toast('已删除当前卡片');
+      return true;
+    }).catch(function (error) {
+      _toast('删除失败，卡片仍保留：' +
+        String(error && error.message || '未知错误'));
+      return false;
+    });
+  }
+
+  function _legacyReviewNoteId(card) {
+    var value = card && (card.note_id != null ? card.note_id : card.noteId);
+    value = Number(value);
+    return Number.isSafeInteger(value) && value > 0 ? value : null;
+  }
+
+  function _deleteLegacyReviewCard(card) {
+    var noteId = _legacyReviewNoteId(card);
+    if (!noteId) return Promise.resolve(false);
+    var confirmed = true;
+    try {
+      confirmed = window.confirm(
+        '删除当前 Anki note？同一 note 生成的全部 Anki 卡都会删除。'
+      );
+    } catch (_) {}
+    if (!confirmed) return Promise.resolve(false);
+    _commitStagedRating('delete-legacy-card');
+    var originalIndex = _idx;
+    var mutationId = 'review-delete:' + _answerAid();
+    // @interaction learning.anki-card.operate
+    return fetch('/pdf/api/anki-card-operation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        operation: 'delete-notes',
+        mutationId: mutationId,
+        noteIds: [noteId]
+      })
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok || !data || data.ok !== true) {
+          var failure = new Error(String(
+            data && (data.error || data.message) || ('HTTP ' + response.status)
+          ));
+          failure.outcomeUnknown = response.status === 409 &&
+            /unknown/i.test(String(data && data.code || ''));
+          throw failure;
+        }
+        return data;
+      });
+    }).then(function (result) {
+      _rememberAndDeactivateSelections();
+      _invalidateCardRequests(true);
+      _queue.splice(originalIndex, 1);
+      _dueTotal = Math.max(0, _dueTotal - 1);
+      _idx = Math.max(0, Math.min(originalIndex, _queue.length - 1));
+      _showingAnswer = false;
+      _improveExpanded = false;
+      var snapshot = _currentQueueSnapshot();
+      _saveLocal(snapshot, function () {
+        return snapshot.client_context_key === _contextCacheKey;
+      });
+      render();
+      _activateCurrentSelections();
+      _notifyAssistant('card-deleted');
+      var syncStatus = result && result.anki_web_sync &&
+        String(result.anki_web_sync.status || '');
+      _toast(syncStatus === 'succeeded'
+        ? '已删除当前 Anki note，并完成 AnkiWeb 同步'
+        : '已删除当前 Anki note；同步状态：' +
+          (syncStatus || 'unknown'));
+      return true;
+    }).catch(function (error) {
+      _toast(error && error.outcomeUnknown
+        ? '删除结果未知，未自动重试；请刷新 Anki 后再确认'
+        : '删除失败，卡片仍保留：' +
+          String(error && error.message || '未知错误'));
+      return false;
+    });
   }
 
   function _workspaceClick(event) {
@@ -2856,11 +3234,17 @@ if (window.__bwPwaProviderOnly) return;
     var action = button.getAttribute('data-action');
     if (action === 'previous') _changeCard(-1);
     else if (action === 'next') _changeCard(1);
-    else if (action === 'reload') loadQueue(true);
+    else if (action === 'reload') {
+      _commitStagedRating('reload');
+      loadQueue(true);
+    }
+    else if (action === 'undo-rating') _undoStagedRating();
+    else if (action === 'delete-card') _deleteCurrentCard();
     else if (action === 'toggle-card') {
       _cardExpanded = !_cardExpanded;
       render();
     } else if (action === 'toggle-improve') {
+      _commitStagedRating('toggle-improve');
       _cardExpanded = true;
       _improveExpanded = !_improveExpanded;
       render();
@@ -2880,8 +3264,10 @@ if (window.__bwPwaProviderOnly) return;
       }
       render();
     } else if (action === 'prepare-draft') {
+      _commitStagedRating('prepare-draft');
       _prepareDraft(button.getAttribute('data-target') || 'anki');
     } else if (action === 'commit') {
+      _commitStagedRating('commit-draft');
       _commitDraft(button.getAttribute('data-target') || '');
     }
   }
@@ -2912,6 +3298,7 @@ if (window.__bwPwaProviderOnly) return;
       return _mode ? 'review' : 'normal';
     }
     _rememberAndDeactivateSelections();
+    if (!on) _commitStagedRating('mode-exit');
     _mode = on;
     if (!_mode) {
       _queueRequestEpoch += 1;
@@ -2950,7 +3337,7 @@ if (window.__bwPwaProviderOnly) return;
     style.id = 'rc-review-css';
     style.textContent =
       '#asst-review-toggle.on{background:#2c2652!important;border-color:#8b7bd1!important;color:#eee8ff!important}' +
-      '#asst-review-workspace{flex:0 1 var(--rv-h,min(54vh,520px));height:var(--rv-h,min(54vh,520px));max-height:80%;min-height:0;overflow:hidden;padding:10px 10px 6px;border:0;background:transparent;color:var(--rc-text,#e6e6f0);font-family:var(--rc-font-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);overscroll-behavior:contain;touch-action:auto;scrollbar-width:none}' +
+      '#asst-review-workspace{flex:0 0 var(--rv-h,min(54vh,520px));height:var(--rv-h,min(54vh,520px));max-height:none;min-height:0;overflow:hidden;padding:10px 10px 6px;border:0;background:transparent;color:var(--rc-text,#e6e6f0);font-family:var(--rc-font-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);overscroll-behavior:contain;touch-action:auto;scrollbar-width:none}' +
       '#asst-review-workspace[hidden]{display:none!important}' +
       '#asst-review-workspace.rv-card-collapsed,#asst-review-workspace.rv-card-empty{flex-basis:auto;height:auto}' +
       '#asst-review-workspace::-webkit-scrollbar{display:none}' +
@@ -2962,7 +3349,7 @@ if (window.__bwPwaProviderOnly) return;
       '.rv-card-toggle,.rv-improve-toggle{border:1px solid var(--rc-border-control,#35446b);border-radius:var(--rc-radius-md,8px);padding:5px 8px;background:rgba(22,32,58,.72);color:var(--rc-text-strong,#cbd9f5);cursor:pointer;font:inherit;white-space:nowrap}' +
       '.rv-improve-toggle{border-color:rgba(185,168,255,.46);background:rgba(70,55,112,.34);color:#eee8ff}' +
       '.rv-card-toggle:disabled,.rv-improve-toggle:disabled{opacity:.4;cursor:default}' +
-      '.rv-card-panel{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;overflow:hidden}' +
+      '.rv-card-panel{position:relative;display:flex;flex:1 1 auto;flex-direction:column;min-height:0;overflow:hidden}' +
       '.rv-card-panel[hidden],.rv-improve-panel[hidden]{display:none!important}' +
       '.rv-card-track{width:100%;flex:1 1 auto;min-height:0;overflow-y:hidden;touch-action:auto}' +
       '.rv-card-dots{flex:0 0 auto}' +
@@ -2980,12 +3367,9 @@ if (window.__bwPwaProviderOnly) return;
       '.rv-card-extra[open]{padding-bottom:8px}.rv-card-extra[open]>summary{border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:7px}' +
       '.rv-review-controls{display:flex;flex:0 1 45%;flex-direction:column;min-height:0;max-height:45%;overflow:hidden;padding-top:7px}' +
       '.rv-review-controls>.rv-improve-toggle{flex:0 0 auto;width:100%}' +
-      // ★ 改进面板改成**浮层**(用户要求):原来它是 flex:1 1 auto 的兄弟节点,
-      //   一展开就把卡片挤扁 —— 而人展开它正是为了对着卡片改。现在覆盖在卡片区上方,
-      //   卡片尺寸完全不受影响;底色做实一点,盖住下面的卡才读得清。
-      '.rv-improve-panel{position:absolute;left:0;right:0;top:0;bottom:0;z-index:6;display:flex;flex-direction:column;gap:9px;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-width:none;margin:0;padding:11px 10px 8px;border:0;border-radius:12px;background:rgba(16,22,42,.94);box-shadow:0 -6px 26px rgba(0,0,0,.4)}' +
-      // 浮层要有定位基准 —— 没有它 absolute 会一路上溯到更外层，盖错地方。
-      '#rc-review-body{position:relative}' +
+      // 改进面板是卡片内部的底部 sheet：最多占卡片 62%，保留上半张卡作对照；
+      // 工具栏位于 card-panel 外，因此切换按钮永远露在最上方，可再次关闭。
+      '.rv-improve-panel{position:absolute;left:0;right:0;bottom:0;z-index:6;display:flex;flex-direction:column;gap:9px;max-height:min(62%,420px);min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-width:none;margin:0;padding:11px 10px 8px;border:1px solid rgba(185,168,255,.25);border-radius:12px 12px 0 0;background:rgba(16,22,42,.96);box-shadow:0 -6px 26px rgba(0,0,0,.4)}' +
       '.rv-improve-panel::-webkit-scrollbar{width:0;height:0;display:none}' +
       // 「改进」按钮移走后，这个容器只剩浮层面板(absolute)，自身不该再占高度。
       '.rv-review-controls{flex:0 0 auto;min-height:0}' +
@@ -2997,8 +3381,9 @@ if (window.__bwPwaProviderOnly) return;
       '.rv-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}' +
       '.rv-action{border:1px solid var(--rc-border-control,#35446b);border-radius:8px;padding:8px;background:rgba(22,32,58,.70);color:var(--rc-text-strong,#cbd9f5);font-size:12px;cursor:pointer;white-space:normal;line-height:1.35}' +
       '.rv-action:disabled{opacity:.45;cursor:default}' +
-      '.rv-action:first-child{grid-column:1/-1}' +
       '.rv-action.rv-all{border-color:#3d775c;background:#173025;color:#bce8d2}' +
+      '.rv-delete-card{border-color:rgba(248,113,113,.48);background:rgba(83,28,36,.52);color:#fecaca}' +
+      '.rv-undo-rating:not(:disabled){border-color:rgba(96,165,250,.55);background:rgba(25,64,112,.56);color:#dbeafe}' +
       '.rv-action-note{font-size:12px;line-height:1.45;color:var(--rc-text-muted,#687792)}' +
       '.rv-dim,.rv-done{color:#8a9bb4;font-size:12px;padding:14px;text-align:center}' +
       '.rv-draft{border:0;border-top:1px solid rgba(185,168,255,.20);padding:10px 0 0;background:transparent;display:flex;flex-direction:column;gap:8px}' +
@@ -3021,7 +3406,7 @@ if (window.__bwPwaProviderOnly) return;
       '.rv-selectable-segment.rv-covered{opacity:.62}' +
       '.asst-a.rv-picked{box-shadow:0 0 0 2px rgba(96,165,250,.7) inset}' +
       '#side-pane-asst:not(.review-mode) .rv-answer-picker,#side-pane-asst:not(.review-mode) .rv-segment-picker{display:none!important}' +
-      '@media(max-height:620px){#asst-review-workspace{flex-basis:var(--rv-h,min(48vh,360px));height:var(--rv-h,min(48vh,360px));max-height:72%;min-height:0}}' +
+      '@media(max-height:620px){#asst-review-workspace{flex-basis:var(--rv-h,min(48vh,360px));height:var(--rv-h,min(48vh,360px));min-height:0}}' +
       // 上下分隔手柄:拖它调整卡片区与对话区的比例(用户要求)。
       // touch-action:none —— 否则 iOS 会把纵向拖动解释成页面滚动，手柄根本拖不动。
       '.rv-split{flex:0 0 auto;height:16px;display:flex;align-items:center;justify-content:center;cursor:ns-resize;touch-action:none;-webkit-tap-highlight-color:transparent}' +
@@ -3141,6 +3526,11 @@ if (window.__bwPwaProviderOnly) return;
     previous: function () {
       _changeCard(-1);
     },
+    undoLastRating: _undoStagedRating,
+    commitPendingRating: function () {
+      return _commitStagedRating('api');
+    },
+    removeCurrent: _deleteCurrentCard,
     next: function () {
       _changeCard(1);
     },

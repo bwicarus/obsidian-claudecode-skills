@@ -1382,6 +1382,11 @@ internal sealed class DirectBridgeProtocolSession
                         message,
                         cancellationToken).ConfigureAwait(false);
                     break;
+                case "anki-card-operation-local":
+                    payload = await HandleLocalAnkiOperationAsync(
+                        message,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
                 case "context-mode":
                     payload = HandleContextMode(message);
                     break;
@@ -2193,6 +2198,264 @@ internal sealed class DirectBridgeProtocolSession
                 exception.Retryable,
                 exception);
         }
+    }
+
+    private async Task<object> HandleLocalAnkiOperationAsync(
+        JsonElement message,
+        CancellationToken cancellationToken)
+    {
+        RequireAuthenticated();
+        if (_phase != DirectProtocolPhase.ContextOnly)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ANKI_CONTEXT_ONLY_REQUIRED",
+                "Reader 本地 Anki 操作只允许在纯上下文连接中执行");
+        }
+        string sessionId = RequireSafeId(message, "sessionId");
+        _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        RequireContextOnlySession(sessionId);
+        if (_localAnkiWriter is null)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ANKI_LOCAL_UNAVAILABLE",
+                "ReaderPC 本地 Anki 操作尚未接线",
+                retryable: true);
+        }
+        string operation = RequireString(message, "operation", 32);
+        ReaderLocalAnkiOperationRequest request;
+        switch (operation)
+        {
+            case "read-notes":
+                RequireExactKeys(
+                    message,
+                    "contract",
+                    "type",
+                    "requestId",
+                    "sessionId",
+                    "operation",
+                    "noteIds");
+                request = new ReaderLocalAnkiOperationRequest(
+                    operation,
+                    MutationId: null,
+                    NoteIds: RequirePositiveIds(message, "noteIds", 20),
+                    CardIds: [],
+                    Fields: null,
+                    Answers: [],
+                    SyncMode: null);
+                break;
+            case "read-cards":
+                RequireExactKeys(
+                    message,
+                    "contract",
+                    "type",
+                    "requestId",
+                    "sessionId",
+                    "operation",
+                    "cardIds");
+                request = new ReaderLocalAnkiOperationRequest(
+                    operation,
+                    MutationId: null,
+                    NoteIds: [],
+                    CardIds: RequirePositiveIds(message, "cardIds", 20),
+                    Fields: null,
+                    Answers: [],
+                    SyncMode: null);
+                break;
+            case "update-note-fields":
+                RequireExactKeys(
+                    message,
+                    "contract",
+                    "type",
+                    "requestId",
+                    "sessionId",
+                    "operation",
+                    "mutationId",
+                    "noteId",
+                    "fields",
+                    "syncMode");
+                request = new ReaderLocalAnkiOperationRequest(
+                    operation,
+                    RequireSafeId(message, "mutationId"),
+                    [RequirePositiveId(message, "noteId")],
+                    CardIds: [],
+                    Fields: RequireJsonObject(message, "fields"),
+                    Answers: [],
+                    SyncMode: RequireString(message, "syncMode", 16));
+                break;
+            case "delete-notes":
+                RequireExactKeys(
+                    message,
+                    "contract",
+                    "type",
+                    "requestId",
+                    "sessionId",
+                    "operation",
+                    "mutationId",
+                    "noteIds",
+                    "syncMode");
+                request = new ReaderLocalAnkiOperationRequest(
+                    operation,
+                    RequireSafeId(message, "mutationId"),
+                    RequirePositiveIds(message, "noteIds", 20),
+                    CardIds: [],
+                    Fields: null,
+                    Answers: [],
+                    SyncMode: RequireString(message, "syncMode", 16));
+                break;
+            case "answer-cards":
+                RequireExactKeys(
+                    message,
+                    "contract",
+                    "type",
+                    "requestId",
+                    "sessionId",
+                    "operation",
+                    "mutationId",
+                    "answers",
+                    "syncMode");
+                request = new ReaderLocalAnkiOperationRequest(
+                    operation,
+                    RequireSafeId(message, "mutationId"),
+                    NoteIds: [],
+                    CardIds: [],
+                    Fields: null,
+                    Answers: RequireAnkiAnswers(message),
+                    SyncMode: RequireString(message, "syncMode", 16));
+                break;
+            case "sync":
+                RequireExactKeys(
+                    message,
+                    "contract",
+                    "type",
+                    "requestId",
+                    "sessionId",
+                    "operation",
+                    "mutationId");
+                request = new ReaderLocalAnkiOperationRequest(
+                    operation,
+                    RequireSafeId(message, "mutationId"),
+                    NoteIds: [],
+                    CardIds: [],
+                    Fields: null,
+                    Answers: [],
+                    SyncMode: null);
+                break;
+            default:
+                throw new DirectProtocolException(
+                    "BW_READER_ANKI_REQUEST_INVALID",
+                    "Reader 本地 Anki 操作类型无效");
+        }
+        try
+        {
+            return await _localAnkiWriter.OperateAsync(
+                request,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (ReaderLocalAnkiException exception)
+        {
+            throw new DirectProtocolException(
+                exception.Code,
+                exception.Message,
+                exception.Retryable,
+                exception);
+        }
+    }
+
+    private static long RequirePositiveId(
+        JsonElement message,
+        string name)
+    {
+        if (!message.TryGetProperty(name, out JsonElement value)
+            || value.ValueKind != JsonValueKind.Number
+            || !value.TryGetInt64(out long id)
+            || id <= 0)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ANKI_REQUEST_INVALID",
+                $"Reader 本地 Anki {name} 无效");
+        }
+        return id;
+    }
+
+    private static long[] RequirePositiveIds(
+        JsonElement message,
+        string name,
+        int maximum)
+    {
+        if (!message.TryGetProperty(name, out JsonElement value)
+            || value.ValueKind != JsonValueKind.Array
+            || value.GetArrayLength() is < 1
+            || value.GetArrayLength() > maximum)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ANKI_REQUEST_INVALID",
+                $"Reader 本地 Anki {name} 无效");
+        }
+        List<long> result = [];
+        foreach (JsonElement item in value.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Number
+                || !item.TryGetInt64(out long id)
+                || id <= 0
+                || result.Contains(id))
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_ANKI_REQUEST_INVALID",
+                    $"Reader 本地 Anki {name} 无效");
+            }
+            result.Add(id);
+        }
+        return result.ToArray();
+    }
+
+    private static JsonObject RequireJsonObject(
+        JsonElement message,
+        string name)
+    {
+        if (!message.TryGetProperty(name, out JsonElement value)
+            || value.ValueKind != JsonValueKind.Object)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ANKI_REQUEST_INVALID",
+                $"Reader 本地 Anki {name} 无效");
+        }
+        return JsonNode.Parse(value.GetRawText()) as JsonObject
+            ?? throw new DirectProtocolException(
+                "BW_READER_ANKI_REQUEST_INVALID",
+                $"Reader 本地 Anki {name} 无效");
+    }
+
+    private static ReaderLocalAnkiAnswer[] RequireAnkiAnswers(
+        JsonElement message)
+    {
+        if (!message.TryGetProperty("answers", out JsonElement value)
+            || value.ValueKind != JsonValueKind.Array
+            || value.GetArrayLength() is < 1 or > 20)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ANKI_REQUEST_INVALID",
+                "Reader 本地 Anki answers 无效");
+        }
+        List<ReaderLocalAnkiAnswer> result = [];
+        foreach (JsonElement answer in value.EnumerateArray())
+        {
+            RequireExactKeys(answer, "cardId", "ease");
+            long cardId = RequirePositiveId(answer, "cardId");
+            if (result.Any(item => item.CardId == cardId)
+                || !answer.TryGetProperty(
+                    "ease",
+                    out JsonElement easeValue)
+                || easeValue.ValueKind != JsonValueKind.Number
+                || !easeValue.TryGetInt32(out int ease)
+                || ease is < 1 or > 4)
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_ANKI_REQUEST_INVALID",
+                    "Reader 本地 Anki ease 无效");
+            }
+            result.Add(new ReaderLocalAnkiAnswer(cardId, ease));
+        }
+        return result.ToArray();
     }
 
     private object CodexVoicePayload(

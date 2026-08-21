@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from unittest.mock import patch
 
@@ -22,6 +23,14 @@ from flask import Flask
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "_server_deploy"))
+if sys.platform == "win32" and "fcntl" not in sys.modules:
+    fcntl_stub = types.ModuleType("fcntl")
+    fcntl_stub.LOCK_EX = 1
+    fcntl_stub.LOCK_SH = 2
+    fcntl_stub.LOCK_NB = 4
+    fcntl_stub.LOCK_UN = 8
+    fcntl_stub.flock = lambda *_args, **_kwargs: None
+    sys.modules["fcntl"] = fcntl_stub
 
 import pdf_reader  # noqa: E402
 
@@ -58,6 +67,11 @@ class ReviewAnswerIdempotencyTest(unittest.TestCase):
                 pdf_reader,
                 "_REVIEW_ANSWER_AID_LOCK_DIR",
                 state / "review-answer-aid-locks",
+            ),
+            patch.object(
+                pdf_reader,
+                "_anki_card_operation_sync_layer",
+                return_value={"status": "succeeded"},
             ),
         ]
         for item in self.patches:
@@ -170,6 +184,10 @@ class ReviewAnswerIdempotencyTest(unittest.TestCase):
 
         self.assertEqual(first_status, 200)
         self.assertTrue(first_data["ok"])
+        self.assertEqual(
+            first_data["anki_web_sync"]["status"],
+            "succeeded",
+        )
         self.assertEqual(second_status, 200)
         self.assertTrue(second_data["dedup"])
         self.assertTrue(second_data["durable"])

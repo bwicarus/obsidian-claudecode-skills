@@ -94,6 +94,23 @@
 - 保存 `threadId`+工作目录+模型,后续**续 thread 而非重塞历史**。
 - 完成状态只认 `turn/completed status=completed`;failed/interrupted 不得报成功。
 
+### Windows Codex Voice 的 Reader 学习卡工具
+
+Direct 的 Reader MCP 暴露五个 canonical 学习卡工具：`reader_learning_cards`、
+`reader_learning_card_read`、`reader_learning_card_edit`、`reader_learning_card_delete`、
+`reader_review_current_card`。三条读取查询在页面执行侧分别映射到 `learning-cards`、
+`learning-card`、`review-current`；列表/单卡结果直接带完整卡片内容、出处、学习状态、稳定
+`card_*` ID、批内 `cardIndex` 与当前 revision，模型不必先读页面 placement 或逐卡补查。
+
+编辑必须提交 `id + cardIndex + expectedEntityRevision`，删除必须提交
+`id + cardIndex + expectedStateRevision`；严格字段、版本和稳定身份检查通过后，Direct 才发送
+`_nativeReaderLearningCardMutate`，并回读同一 canonical 卡验证结果。默认
+`externalPolicy=sync-if-projected`：Reader 本地仓是权威，已有 Windows 投影走本机
+`anki-card-operation-local`，已有 Pi 投影走受保护的 `/pdf/api/anki-card-operation`；成功修改后
+请求 AnkiWeb sync。结果把 `reader_applied`、`anki_local_applied`、`anki_web_sync` 分开，未知
+结果禁止自动重试；删除 Anki 投影是 note 级。`reader-only` 只改 Reader，AnkiMobile 没有可靠
+按 ID 写通道时 fail closed。Direct 工具面更新后须新开 Codex Voice 任务才能载入新列表。
+
 ## 5. Realtime 语音探测(2026-07-11 初测;2026-07-25 复测)
 
 - ✅ 0.144.1 接口真实存在(`codex app-server generate-json-schema` 为准):`thread/realtime/start|appendAudio|appendText|appendSpeech|stop` + transcript/outputAudio 事件;**transport 有 `websocket` 型**(不需要浏览器 WebRTC,纯服务端可接,GPT 说明书没提);Schema 有 **RealtimeVoice 19 音色枚举**(alloy/cedar/marin/sage…,说明书说"无 voice 字段"是错的);音频块 = {data, sampleRate, numChannels}。

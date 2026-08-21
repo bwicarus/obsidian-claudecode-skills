@@ -2531,6 +2531,9 @@ if (window.__bwPwaProviderOnly) return;
       portalOut(c);   // 有活视频不降层:portalOut 的 reparent 会重载 iframe=播放中断(用户规格:点外面不碰播放)
     }
   }
+  // 侧栏与正文可能不共享同一事件宿主；侧栏发出的空白事件复用完全
+  // 相同的降层/收卡逻辑，保持阅读区和侧栏行为一致。
+  window.addEventListener('rc:dismiss-transients', onDocDown);
 
   // ─────────────────────────── 创建 ───────────────────────────
   function createRecord(anchor, fields, pendingMessage, mountedMessage, createIdentity) {

@@ -1329,6 +1329,31 @@ internal static class DirectBridgeSelfTest
     {
         string runtime = System.IO.Path.Combine(root, "local-anki");
         Directory.CreateDirectory(runtime);
+        string legacyRegistryPath = System.IO.Path.Combine(
+            runtime,
+            "legacy-reader-local-anki-registry.json");
+        await File.WriteAllTextAsync(
+            legacyRegistryPath,
+            new JsonObject
+            {
+                ["contract"] = "reader-local-anki-registry/1",
+                ["drafts"] = new JsonObject(),
+                ["receipts"] = new JsonObject(),
+            }.ToJsonString(DirectBridgeContract.JsonOptions))
+            .ConfigureAwait(false);
+        ReaderLocalAnkiRegistry legacyRegistry = new(
+            legacyRegistryPath,
+            () => DateTimeOffset.Parse("2026-08-13T04:00:00Z"));
+        ReaderLocalAnkiClaimOutcome legacyClaim =
+            await legacyRegistry.ClaimMutationAsync(
+                "migration-probe",
+                new string('a', 64),
+                CancellationToken.None).ConfigureAwait(false);
+        JsonObject migratedLegacy = JsonNode.Parse(
+            await File.ReadAllTextAsync(legacyRegistryPath)
+                .ConfigureAwait(false))?.AsObject()
+            ?? throw new InvalidOperationException(
+                "legacy local Anki registry migration missing");
         ReaderLocalAnkiRegistry registry = new(
             System.IO.Path.Combine(
                 runtime,
@@ -1505,6 +1530,172 @@ internal static class DirectBridgeSelfTest
             },
             events,
             frames).ConfigureAwait(false);
+        JsonElement readNote = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "anki-card-operation-local",
+                    requestId = "request-local-anki-read-note",
+                    sessionId,
+                    operation = "read-notes",
+                    noteIds = new long[] { 101 },
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "anki-card-operation-local");
+        JsonElement readCard = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "anki-card-operation-local",
+                    requestId = "request-local-anki-read-card",
+                    sessionId,
+                    operation = "read-cards",
+                    cardIds = new long[] { 201 },
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "anki-card-operation-local");
+        object unknownUpdateRequest = new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = "anki-card-operation-local",
+            requestId = "request-local-anki-update-unknown",
+            sessionId,
+            operation = "update-note-fields",
+            mutationId = "mutation-update-unknown",
+            noteId = 101,
+            fields = new Dictionary<string, string>
+            {
+                ["正面"] = "结果未知时不得重放",
+            },
+            syncMode = "wait",
+        };
+        anki.FailAction = "updateNoteFields";
+        JsonElement updateUnknownFirst = await SendAsync(
+            session,
+            unknownUpdateRequest,
+            events,
+            frames).ConfigureAwait(false);
+        anki.FailAction = null;
+        JsonElement updateUnknownReplay = await SendAsync(
+            session,
+            unknownUpdateRequest,
+            events,
+            frames).ConfigureAwait(false);
+        object updateRequest = new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = "anki-card-operation-local",
+            requestId = "request-local-anki-update",
+            sessionId,
+            operation = "update-note-fields",
+            mutationId = "mutation-update-success",
+            noteId = 101,
+            fields = new Dictionary<string, string>
+            {
+                ["正面"] = "修改后的问题",
+                ["背面"] = "修改后的答案",
+            },
+            syncMode = "wait",
+        };
+        JsonElement update = RequireSuccess(
+            await SendAsync(session, updateRequest, events, frames)
+                .ConfigureAwait(false),
+            "anki-card-operation-local");
+        JsonElement updateReplay = RequireSuccess(
+            await SendAsync(session, updateRequest, events, frames)
+                .ConfigureAwait(false),
+            "anki-card-operation-local");
+        JsonElement answer = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "anki-card-operation-local",
+                    requestId = "request-local-anki-answer",
+                    sessionId,
+                    operation = "answer-cards",
+                    mutationId = "mutation-answer-success",
+                    answers = new[]
+                    {
+                        new { cardId = 201, ease = 3 },
+                    },
+                    syncMode = "wait",
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "anki-card-operation-local");
+        JsonElement explicitSync = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "anki-card-operation-local",
+                    requestId = "request-local-anki-sync",
+                    sessionId,
+                    operation = "sync",
+                    mutationId = "mutation-sync-success",
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "anki-card-operation-local");
+        anki.FailAction = "sync";
+        anki.Failure = ReaderAnkiConnectFailure.RemoteError;
+        JsonElement delete = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "anki-card-operation-local",
+                    requestId = "request-local-anki-delete",
+                    sessionId,
+                    operation = "delete-notes",
+                    mutationId = "mutation-delete-success",
+                    noteIds = new long[] { 101 },
+                    syncMode = "wait",
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "anki-card-operation-local");
+        anki.FailAction = null;
+        JsonElement readDeleted = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "anki-card-operation-local",
+                    requestId = "request-local-anki-read-deleted",
+                    sessionId,
+                    operation = "read-notes",
+                    noteIds = new long[] { 101 },
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "anki-card-operation-local");
+        JsonElement operationExtraField = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-card-operation-local",
+                requestId = "request-local-anki-read-extra",
+                sessionId,
+                operation = "read-notes",
+                noteIds = new long[] { 101 },
+                unexpected = true,
+            },
+            events,
+            frames).ConfigureAwait(false);
+        await Task.Delay(350).ConfigureAwait(false);
         FakeReaderAnkiConnectClient preflightAnki = new()
         {
             FailAction = "modelNames",
@@ -1573,6 +1764,10 @@ internal static class DirectBridgeSelfTest
                 unknownAid,
                 CancellationToken.None).ConfigureAwait(false);
         string allowlistMessage = JsonSerializer.Serialize(addRequest);
+        string operationAllowlistMessage = JsonSerializer.Serialize(new
+        {
+            type = "anki-card-operation-local",
+        });
         string localAnkiEvidence = JsonSerializer.Serialize(new
         {
             first = first.GetRawText(),
@@ -1587,6 +1782,11 @@ internal static class DirectBridgeSelfTest
             anki.Actions,
         });
         bool localAnkiOk =
+            legacyClaim == ReaderLocalAnkiClaimOutcome.Claimed
+            && migratedLegacy["contract"]?.GetValue<string>()
+                == ReaderLocalAnkiRegistry.RegistryContract
+            && migratedLegacy["mutations"] is JsonObject
+            &&
             first.GetProperty("ok").GetBoolean()
             && !beforeOpen.GetProperty("ok").GetBoolean()
             && beforeOpen.GetProperty("error").GetProperty("code")
@@ -1604,6 +1804,54 @@ internal static class DirectBridgeSelfTest
             && !mismatch.GetProperty("ok").GetBoolean()
             && mismatch.GetProperty("error").GetProperty("code")
                 .GetString() == "BW_READER_ANKI_DRAFT_SOURCE_MISMATCH"
+            && readNote.GetProperty("ok").GetBoolean()
+            && readNote.GetProperty("anki_local_status").GetString()
+                == "read"
+            && readNote.GetProperty("notes").GetArrayLength() == 1
+            && readNote.GetProperty("notes")[0]
+                .GetProperty("noteId").GetInt64() == 101
+            && readNote.GetProperty("notes")[0]
+                .GetProperty("modelName").GetString() == "基础的"
+            && readNote.GetProperty("notes")[0]
+                .GetProperty("fields").TryGetProperty("正面", out _)
+            && readCard.GetProperty("cards").GetArrayLength() == 1
+            && readCard.GetProperty("cards")[0]
+                .GetProperty("cardId").GetInt64() == 201
+            && !updateUnknownFirst.GetProperty("ok").GetBoolean()
+            && updateUnknownFirst.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_OPERATION_OUTCOME_UNKNOWN"
+            && !updateUnknownReplay.GetProperty("ok").GetBoolean()
+            && updateUnknownReplay.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_OPERATION_OUTCOME_UNKNOWN"
+            && anki.Actions.Count(value => value == "updateNoteFields") == 2
+            && update.GetProperty("anki_local_applied").GetBoolean()
+            && update.GetProperty("anki_local_status").GetString()
+                == "succeeded"
+            && update.GetProperty("anki_web_sync").GetProperty("status")
+                .GetString() == "succeeded"
+            && updateReplay.GetProperty("dedup").GetBoolean()
+            && updateReplay.GetProperty("anki_local_status").GetString()
+                == "deduplicated"
+            && anki.UpdateNoteCount == 1
+            && answer.GetProperty("anki_local_applied").GetBoolean()
+            && answer.GetProperty("answers")[0]
+                .GetProperty("card_id").GetInt64() == 201
+            && anki.AnswerCardCount == 1
+            && explicitSync.GetProperty("anki_local_applied")
+                .GetBoolean() == false
+            && explicitSync.GetProperty("anki_web_sync")
+                .GetProperty("status").GetString() == "succeeded"
+            && delete.GetProperty("note_ids")[0].GetInt64() == 101
+            && delete.GetProperty("anki_local_applied").GetBoolean()
+            && delete.GetProperty("anki_web_sync").GetProperty("status")
+                .GetString() == "failed"
+            && anki.DeleteNoteCount == 1
+            && anki.Actions.Count(value => value == "sync") >= 5
+            && readDeleted.GetProperty("notes").GetArrayLength() == 0
+            && !operationExtraField.GetProperty("ok").GetBoolean()
+            && operationExtraField.GetProperty("error")
+                .GetProperty("code").GetString()
+                == "BW_COMPUTER_VOICE_DIRECT_MESSAGE_INVALID"
             && preflightFailure.Code
                 == "BW_READER_ANKI_CONNECT_UNREACHABLE"
             && preflightFailure.Retryable
@@ -1612,7 +1860,9 @@ internal static class DirectBridgeSelfTest
                 == "BW_READER_ANKI_ADD_OUTCOME_UNKNOWN"
             && unknownReceipt?.State == "pending"
             && DirectBridgeServer.IsContextEndpointActionAllowed(
-                allowlistMessage);
+                allowlistMessage)
+            && DirectBridgeServer.IsContextEndpointActionAllowed(
+                operationAllowlistMessage);
         if (!localAnkiOk)
         {
             throw new InvalidOperationException(
@@ -1620,7 +1870,7 @@ internal static class DirectBridgeSelfTest
         }
         Require(
             localAnkiOk,
-            "direct-local-anki-is-provenance-bound-editable-and-idempotent",
+            "direct-local-anki-crud-sync-is-provenance-bound-and-idempotent",
             checks);
         _ = store.SetContextDeliveryMode(
             DirectContextDeliveryMode.LegacyInject);
@@ -12981,8 +13231,23 @@ internal static class DirectBridgeSelfTest
         IReaderAnkiConnectClient
     {
         private bool _noteAdded;
+        private bool _noteDeleted;
+        private readonly Dictionary<string, string> _fields =
+            new(StringComparer.Ordinal)
+            {
+                ["正面"] = "用户编辑后的问题",
+                ["背面"] = "用户编辑后的答案",
+            };
 
         internal int AddNoteCount { get; private set; }
+
+        internal int UpdateNoteCount { get; private set; }
+
+        internal int DeleteNoteCount { get; private set; }
+
+        internal int AnswerCardCount { get; private set; }
+
+        internal int SyncCount { get; private set; }
 
         internal string? LastAddedFront { get; private set; }
 
@@ -13022,15 +13287,12 @@ internal static class DirectBridgeSelfTest
                 "addNote" => AddNote(parameters),
                 "findCards" => new JsonArray(201),
                 "changeDeck" => JsonValue.Create(true),
-                "notesInfo" => new JsonArray(new JsonObject
-                {
-                    ["noteId"] = 101,
-                    ["tags"] = new JsonArray(
-                        "pdf-snippets",
-                        "card-lab",
-                        "bw_reader_aid_fc_" + new string('b', 32),
-                        _fingerprintTag),
-                }),
+                "notesInfo" => NotesInfo(parameters),
+                "cardsInfo" => CardsInfo(parameters),
+                "updateNoteFields" => UpdateNoteFields(parameters),
+                "deleteNotes" => DeleteNotes(parameters),
+                "answerCards" => AnswerCards(parameters),
+                "sync" => Sync(),
                 _ => throw new ReaderAnkiConnectException(
                     ReaderAnkiConnectFailure.RemoteError,
                     "unsupported fake action"),
@@ -13046,7 +13308,13 @@ internal static class DirectBridgeSelfTest
             JsonObject fields = note["fields"]?.AsObject()
                 ?? throw new InvalidOperationException("missing fields");
             LastAddedFront = fields.First().Value?.GetValue<string>();
+            _fields.Clear();
+            foreach ((string name, JsonNode? value) in fields)
+            {
+                _fields[name] = value?.GetValue<string>() ?? "";
+            }
             _noteAdded = true;
+            _noteDeleted = false;
             _fingerprintTag = note["tags"]?.AsArray()
                 .Select(value => value?.GetValue<string>() ?? "")
                 .First(value => value.StartsWith(
@@ -13054,6 +13322,117 @@ internal static class DirectBridgeSelfTest
                 ?? throw new InvalidOperationException(
                     "missing fingerprint tag");
             return JsonValue.Create(101)!;
+        }
+
+        private JsonNode NotesInfo(JsonObject parameters)
+        {
+            long[] ids = parameters["notes"]?.AsArray()
+                .Select(value => value?.GetValue<long>() ?? 0)
+                .ToArray() ?? [];
+            if (!_noteAdded || _noteDeleted || !ids.Contains(101))
+            {
+                return new JsonArray();
+            }
+            JsonObject fields = new();
+            int order = 0;
+            foreach ((string name, string value) in _fields)
+            {
+                fields[name] = new JsonObject
+                {
+                    ["value"] = value,
+                    ["order"] = order++,
+                };
+            }
+            return new JsonArray(new JsonObject
+            {
+                ["noteId"] = 101,
+                ["modelName"] = "基础的",
+                ["fields"] = fields,
+                ["cards"] = new JsonArray(201),
+                ["tags"] = new JsonArray(
+                    "pdf-snippets",
+                    "card-lab",
+                    "bw_reader_aid_fc_" + new string('b', 32),
+                    _fingerprintTag),
+            });
+        }
+
+        private JsonNode CardsInfo(JsonObject parameters)
+        {
+            long[] ids = parameters["cards"]?.AsArray()
+                .Select(value => value?.GetValue<long>() ?? 0)
+                .ToArray() ?? [];
+            if (!_noteAdded || _noteDeleted || !ids.Contains(201))
+            {
+                return new JsonArray();
+            }
+            return new JsonArray(new JsonObject
+            {
+                ["cardId"] = 201,
+                ["note"] = 101,
+                ["modelName"] = "基础的",
+                ["question"] = _fields.Values.FirstOrDefault() ?? "",
+                ["answer"] = _fields.Values.Skip(1).FirstOrDefault() ?? "",
+            });
+        }
+
+        private JsonNode? UpdateNoteFields(JsonObject parameters)
+        {
+            UpdateNoteCount++;
+            JsonObject note = parameters["note"]?.AsObject()
+                ?? throw new InvalidOperationException("missing note");
+            if (note["id"]?.GetValue<long>() != 101
+                || !_noteAdded
+                || _noteDeleted)
+            {
+                throw new ReaderAnkiConnectException(
+                    ReaderAnkiConnectFailure.RemoteError,
+                    "note not found");
+            }
+            JsonObject fields = note["fields"]?.AsObject()
+                ?? throw new InvalidOperationException("missing fields");
+            foreach ((string name, JsonNode? value) in fields)
+            {
+                _fields[name] = value?.GetValue<string>() ?? "";
+            }
+            return null;
+        }
+
+        private JsonNode? DeleteNotes(JsonObject parameters)
+        {
+            DeleteNoteCount++;
+            long[] ids = parameters["notes"]?.AsArray()
+                .Select(value => value?.GetValue<long>() ?? 0)
+                .ToArray() ?? [];
+            if (!ids.Contains(101))
+            {
+                throw new ReaderAnkiConnectException(
+                    ReaderAnkiConnectFailure.RemoteError,
+                    "note not found");
+            }
+            _noteDeleted = true;
+            return null;
+        }
+
+        private JsonNode AnswerCards(JsonObject parameters)
+        {
+            JsonArray answers = parameters["answers"]?.AsArray()
+                ?? throw new InvalidOperationException("missing answers");
+            AnswerCardCount += answers.Count;
+            return new JsonArray(answers.Select(value =>
+            {
+                JsonObject answer = value?.AsObject()
+                    ?? throw new InvalidOperationException("missing answer");
+                return (JsonNode?)(!_noteDeleted
+                    && answer["cardId"]?.GetValue<long>() == 201
+                    && answer["ease"]?.GetValue<int>() is >= 1 and <= 4);
+            }).ToArray());
+        }
+
+        private JsonNode? Sync()
+        {
+            SyncCount++;
+            return null;
         }
 
         private string _fingerprintTag = "";

@@ -65,10 +65,41 @@ internal sealed record ReaderLocalAnkiPreparedNote(
     JsonObject Fields,
     string[] Tags);
 
+internal sealed record ReaderLocalAnkiAnswer(long CardId, int Ease);
+
+internal sealed record ReaderLocalAnkiOperationRequest(
+    string Operation,
+    string? MutationId,
+    long[] NoteIds,
+    long[] CardIds,
+    JsonObject? Fields,
+    ReaderLocalAnkiAnswer[] Answers,
+    string? SyncMode);
+
+internal sealed record ReaderLocalAnkiSyncOutcome(
+    string Status,
+    string? Error = null)
+{
+    internal JsonObject ToPayload()
+    {
+        JsonObject result = new() { ["status"] = Status };
+        if (!string.IsNullOrWhiteSpace(Error))
+        {
+            result["error"] = Error;
+        }
+        return result;
+    }
+}
+
 internal sealed record ReaderLocalAnkiReceipt(
     string State,
     string Fingerprint,
     ReaderLocalAnkiAddResult? Result);
+
+internal sealed record ReaderLocalAnkiMutationReceipt(
+    string State,
+    string Fingerprint,
+    JsonObject? Result);
 
 internal enum ReaderLocalAnkiClaimOutcome
 {
@@ -90,6 +121,8 @@ internal sealed record ReaderLocalAnkiClaim(
 internal sealed class ReaderLocalAnkiRegistry
 {
     internal const string RegistryContract =
+        "reader-local-anki-registry/2";
+    private const string LegacyRegistryContract =
         "reader-local-anki-registry/1";
     internal const string RegistryFileName =
         "reader-local-anki-registry.json";
@@ -98,6 +131,7 @@ internal sealed class ReaderLocalAnkiRegistry
         "Local\\BWReaderLocalAnkiRegistryV1";
     private const int MaximumDrafts = 128;
     private const int MaximumReceipts = 2_000;
+    private const int MaximumMutations = 2_000;
     private const long MaximumRegistryBytes = 64L * 1024 * 1024;
     private static readonly UTF8Encoding Utf8WithoutBom = new(
         encoderShouldEmitUTF8Identifier: false,
@@ -323,6 +357,149 @@ internal sealed class ReaderLocalAnkiRegistry
                 throw RegistryInvalid("Anki 本地写入 claim 无法安全释放");
             }
             return receipts.Remove(aid);
+        }, cancellationToken);
+    }
+
+    internal Task<ReaderLocalAnkiMutationReceipt?>
+        ReadMutationReceiptAsync(
+            string mutationId,
+            CancellationToken cancellationToken)
+    {
+        RequireMutationId(mutationId);
+        return WithLockAsync(root =>
+        {
+            JsonObject mutations = RequireObject(root, "mutations");
+            return mutations[mutationId] is JsonObject receipt
+                ? ParseMutationReceipt(mutationId, receipt)
+                : null;
+        }, write: false, cancellationToken);
+    }
+
+    internal Task<ReaderLocalAnkiClaimOutcome> ClaimMutationAsync(
+        string mutationId,
+        string fingerprint,
+        CancellationToken cancellationToken)
+    {
+        RequireMutationId(mutationId);
+        RequireFingerprint(fingerprint);
+        return WithLockAsync(root =>
+        {
+            JsonObject mutations = RequireObject(root, "mutations");
+            if (mutations[mutationId] is JsonObject existing)
+            {
+                ReaderLocalAnkiMutationReceipt receipt =
+                    ParseMutationReceipt(mutationId, existing);
+                if (!string.Equals(
+                    receipt.Fingerprint,
+                    fingerprint,
+                    StringComparison.Ordinal))
+                {
+                    return ReaderLocalAnkiClaimOutcome.Reused;
+                }
+                return receipt.State == "done"
+                    ? ReaderLocalAnkiClaimOutcome.Done
+                    : ReaderLocalAnkiClaimOutcome.Pending;
+            }
+            string now = _utcNow().ToString("O");
+            mutations[mutationId] = new JsonObject
+            {
+                ["state"] = "pending",
+                ["fingerprint"] = fingerprint,
+                ["createdAtUtc"] = now,
+                ["updatedAtUtc"] = now,
+                ["result"] = null,
+            };
+            TrimOldest(
+                mutations,
+                MaximumMutations,
+                "updatedAtUtc",
+                preservePending: true);
+            return ReaderLocalAnkiClaimOutcome.Claimed;
+        }, cancellationToken);
+    }
+
+    internal Task CommitMutationAsync(
+        string mutationId,
+        string fingerprint,
+        JsonObject result,
+        CancellationToken cancellationToken)
+    {
+        RequireMutationId(mutationId);
+        RequireFingerprint(fingerprint);
+        ValidateMutationResult(result);
+        return WithLockAsync(root =>
+        {
+            JsonObject mutations = RequireObject(root, "mutations");
+            if (mutations[mutationId] is not JsonObject existing)
+            {
+                throw RegistryInvalid("Anki 本地操作 claim 已丢失");
+            }
+            ReaderLocalAnkiMutationReceipt receipt =
+                ParseMutationReceipt(mutationId, existing);
+            if (receipt.Fingerprint != fingerprint
+                || receipt.State != "pending")
+            {
+                throw RegistryInvalid("Anki 本地操作 claim 已改变");
+            }
+            existing["state"] = "done";
+            existing["updatedAtUtc"] = _utcNow().ToString("O");
+            existing["result"] = result.DeepClone();
+            return true;
+        }, cancellationToken);
+    }
+
+    internal Task UpdateMutationResultAsync(
+        string mutationId,
+        string fingerprint,
+        JsonObject result,
+        CancellationToken cancellationToken)
+    {
+        RequireMutationId(mutationId);
+        RequireFingerprint(fingerprint);
+        ValidateMutationResult(result);
+        return WithLockAsync(root =>
+        {
+            JsonObject mutations = RequireObject(root, "mutations");
+            if (mutations[mutationId] is not JsonObject existing)
+            {
+                throw RegistryInvalid("Anki 本地操作回执已丢失");
+            }
+            ReaderLocalAnkiMutationReceipt receipt =
+                ParseMutationReceipt(mutationId, existing);
+            if (receipt.Fingerprint != fingerprint
+                || receipt.State != "done")
+            {
+                throw RegistryInvalid("Anki 本地操作回执已改变");
+            }
+            existing["updatedAtUtc"] = _utcNow().ToString("O");
+            existing["result"] = result.DeepClone();
+            return true;
+        }, cancellationToken);
+    }
+
+    internal Task ReleaseMutationClaimAsync(
+        string mutationId,
+        string fingerprint,
+        CancellationToken cancellationToken)
+    {
+        RequireMutationId(mutationId);
+        RequireFingerprint(fingerprint);
+        return WithLockAsync(root =>
+        {
+            JsonObject mutations = RequireObject(root, "mutations");
+            if (mutations[mutationId] is not JsonObject existing)
+            {
+                return false;
+            }
+            ReaderLocalAnkiMutationReceipt receipt =
+                ParseMutationReceipt(mutationId, existing);
+            if (receipt.State != "pending"
+                || receipt.Fingerprint != fingerprint)
+            {
+                throw RegistryInvalid(
+                    "Anki 本地操作 claim 无法安全释放");
+            }
+            return mutations.Remove(mutationId);
         }, cancellationToken);
     }
 
@@ -589,13 +766,24 @@ internal sealed class ReaderLocalAnkiRegistry
                     MaxDepth = 16,
                 }) as JsonObject
                 ?? throw RegistryInvalid("Reader 本地 Anki 登记表无效");
-            if (root.Count != 3
-                || root["contract"]?.GetValue<string>()
-                    != RegistryContract
+            string? contract = root["contract"]?.GetValue<string>();
+            if (contract == LegacyRegistryContract
+                && root.Count == 3
+                && root["drafts"] is JsonObject
+                && root["receipts"] is JsonObject)
+            {
+                root["contract"] = RegistryContract;
+                root["mutations"] = new JsonObject();
+                contract = RegistryContract;
+            }
+            if (root.Count != 4
+                || contract != RegistryContract
                 || root["drafts"] is not JsonObject drafts
                 || root["receipts"] is not JsonObject receipts
+                || root["mutations"] is not JsonObject mutations
                 || drafts.Count > MaximumDrafts
-                || receipts.Count > MaximumReceipts)
+                || receipts.Count > MaximumReceipts
+                || mutations.Count > MaximumMutations)
             {
                 throw RegistryInvalid("Reader 本地 Anki 登记表合同无效");
             }
@@ -614,6 +802,15 @@ internal sealed class ReaderLocalAnkiRegistry
                     throw RegistryInvalid("Reader 本地 Anki 回执无效");
                 }
                 _ = ParseReceipt(aid, receipt);
+            }
+            foreach ((string mutationId, JsonNode? node) in mutations)
+            {
+                if (node is not JsonObject receipt)
+                {
+                    throw RegistryInvalid(
+                        "Reader 本地 Anki 操作回执无效");
+                }
+                _ = ParseMutationReceipt(mutationId, receipt);
             }
             return root;
         }
@@ -707,6 +904,7 @@ internal sealed class ReaderLocalAnkiRegistry
         ["contract"] = RegistryContract,
         ["drafts"] = new JsonObject(),
         ["receipts"] = new JsonObject(),
+        ["mutations"] = new JsonObject(),
     };
 
     private static JsonObject RequireObject(JsonObject root, string name) =>
@@ -739,6 +937,80 @@ internal sealed class ReaderLocalAnkiRegistry
             _ => throw RegistryInvalid("Reader 本地 Anki 回执结果无效"),
         };
         return new ReaderLocalAnkiReceipt(state, fingerprint, result);
+    }
+
+    private static ReaderLocalAnkiMutationReceipt ParseMutationReceipt(
+        string mutationId,
+        JsonObject value)
+    {
+        RequireMutationId(mutationId);
+        if (value.Count != 5
+            || value["state"]?.GetValue<string>() is not string state
+            || state is not ("pending" or "done")
+            || value["fingerprint"]?.GetValue<string>()
+                is not string fingerprint
+            || !DateTimeOffset.TryParse(
+                value["createdAtUtc"]?.GetValue<string>(), out _)
+            || !DateTimeOffset.TryParse(
+                value["updatedAtUtc"]?.GetValue<string>(), out _))
+        {
+            throw RegistryInvalid("Reader 本地 Anki 操作回执无效");
+        }
+        RequireFingerprint(fingerprint);
+        JsonObject? result = value["result"] switch
+        {
+            null when state == "pending" => null,
+            JsonObject resultObject when state == "done" =>
+                resultObject.DeepClone().AsObject(),
+            _ => throw RegistryInvalid(
+                "Reader 本地 Anki 操作回执结果无效"),
+        };
+        if (result is not null)
+        {
+            ValidateMutationResult(result);
+        }
+        return new ReaderLocalAnkiMutationReceipt(
+            state,
+            fingerprint,
+            result);
+    }
+
+    private static void ValidateMutationResult(JsonObject value)
+    {
+        if (value.Count is < 7 or > 12
+            || value["ok"]?.GetValue<bool>() != true
+            || value["operation"]?.GetValue<string>() is not string operation
+            || operation is not (
+                "update-note-fields"
+                or "delete-notes"
+                or "answer-cards"
+                or "sync")
+            || value["dedup"]?.GetValue<bool>() is not bool
+            || value["anki_local_applied"]?.GetValue<bool>() is not bool
+            || value["anki_local_status"]?.GetValue<string>()
+                is not string localStatus
+            || localStatus is not (
+                "succeeded" or "deduplicated" or "not-applicable")
+            || value["anki_web_sync"] is not JsonObject sync
+            || sync["status"]?.GetValue<string>() is not string syncStatus
+            || syncStatus is not (
+                "not-requested"
+                or "requested"
+                or "succeeded"
+                or "failed"
+                or "unknown"))
+        {
+            throw RegistryInvalid(
+                "Reader 本地 Anki 操作回执结果无效");
+        }
+        if (sync.Count is < 1 or > 2
+            || (sync.Count == 2
+                && (sync["error"]?.GetValue<string>() is not string error
+                    || error.Length is < 1 or > 300)))
+        {
+            throw RegistryInvalid(
+                "Reader 本地 Anki 同步回执无效");
+        }
     }
 
     private static ReaderLocalAnkiAddResult ParseResult(JsonObject value)
@@ -849,6 +1121,14 @@ internal sealed class ReaderLocalAnkiRegistry
                     or >= 'a' and <= 'f')))
         {
             throw RegistryInvalid("Reader 本地 Anki payload 指纹无效");
+        }
+    }
+
+    private static void RequireMutationId(string value)
+    {
+        if (!DirectBridgeContract.IsSafeId(value))
+        {
+            throw Invalid("Reader 本地 Anki mutationId 无效");
         }
     }
 
@@ -1040,15 +1320,22 @@ internal interface IReaderLocalAnkiWriter
         string aid,
         JsonObject card,
         CancellationToken cancellationToken);
+
+    Task<JsonObject> OperateAsync(
+        ReaderLocalAnkiOperationRequest request,
+        CancellationToken cancellationToken);
 }
 
 internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
 {
     private const string DeckName = "QA";
     private static readonly SemaphoreSlim AddGate = new(1, 1);
+    private static readonly SemaphoreSlim OperationGate = AddGate;
 
     private readonly ReaderLocalAnkiRegistry _registry;
     private readonly IReaderAnkiConnectClient _client;
+    private readonly object _backgroundSyncLock = new();
+    private Task<ReaderLocalAnkiSyncOutcome>? _backgroundSync;
 
     internal ReaderLocalAnkiWriter(
         ReaderLocalAnkiRegistry registry,
@@ -1090,7 +1377,7 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
             }
             if (receipt?.State == "done" && receipt.Result is not null)
             {
-                return new ReaderLocalAnkiWriteOutcome(
+                return AddOutcomeWithBackgroundSync(
                     receipt.Result,
                     Dedup: true);
             }
@@ -1149,7 +1436,7 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
                     fingerprint,
                     recovered,
                     cancellationToken).ConfigureAwait(false);
-                return new ReaderLocalAnkiWriteOutcome(
+                return AddOutcomeWithBackgroundSync(
                     recovered,
                     Dedup: true);
             }
@@ -1197,7 +1484,7 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
             if (claim.Outcome == ReaderLocalAnkiClaimOutcome.Done
                 && claim.Result is not null)
             {
-                return new ReaderLocalAnkiWriteOutcome(
+                return AddOutcomeWithBackgroundSync(
                     claim.Result,
                     Dedup: true);
             }
@@ -1240,7 +1527,7 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
                     fingerprint,
                     result,
                     cancellationToken).ConfigureAwait(false);
-                return new ReaderLocalAnkiWriteOutcome(
+                return AddOutcomeWithBackgroundSync(
                     result,
                     Dedup: false);
             }
@@ -1254,6 +1541,1011 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
         {
             AddGate.Release();
         }
+    }
+
+    public async Task<JsonObject> OperateAsync(
+        ReaderLocalAnkiOperationRequest request,
+        CancellationToken cancellationToken)
+    {
+        ValidateOperationRequest(request);
+        if (request.Operation == "read-notes")
+        {
+            JsonArray notes = await ReadInfoAsync(
+                "notesInfo",
+                "notes",
+                request.NoteIds,
+                "noteId",
+                cancellationToken).ConfigureAwait(false);
+            JsonObject result = OperationPayload(
+                request.Operation,
+                mutationId: null,
+                dedup: false,
+                localApplied: false,
+                localStatus: "read",
+                new ReaderLocalAnkiSyncOutcome("not-requested"));
+            result["notes"] = notes;
+            return result;
+        }
+        if (request.Operation == "read-cards")
+        {
+            JsonArray cards = await ReadInfoAsync(
+                "cardsInfo",
+                "cards",
+                request.CardIds,
+                "cardId",
+                cancellationToken).ConfigureAwait(false);
+            JsonObject result = OperationPayload(
+                request.Operation,
+                mutationId: null,
+                dedup: false,
+                localApplied: false,
+                localStatus: "read",
+                new ReaderLocalAnkiSyncOutcome("not-requested"));
+            result["cards"] = cards;
+            return result;
+        }
+
+        string mutationId = request.MutationId!;
+        string fingerprint = OperationFingerprint(request);
+        await OperationGate.WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            ReaderLocalAnkiMutationReceipt? receipt =
+                await _registry.ReadMutationReceiptAsync(
+                    mutationId,
+                    cancellationToken).ConfigureAwait(false);
+            if (receipt is not null
+                && receipt.Fingerprint != fingerprint)
+            {
+                throw new ReaderLocalAnkiException(
+                    "BW_READER_ANKI_MUTATION_REUSED",
+                    "同一 mutationId 不能执行不同的 Anki 操作");
+            }
+            if (receipt?.State == "done" && receipt.Result is not null)
+            {
+                return Deduplicated(receipt.Result);
+            }
+
+            return request.Operation switch
+            {
+                "update-note-fields" =>
+                    await UpdateNoteFieldsAsync(
+                        request,
+                        fingerprint,
+                        receipt,
+                        cancellationToken).ConfigureAwait(false),
+                "delete-notes" =>
+                    await DeleteNotesAsync(
+                        request,
+                        fingerprint,
+                        receipt,
+                        cancellationToken).ConfigureAwait(false),
+                "answer-cards" =>
+                    await AnswerCardsAsync(
+                        request,
+                        fingerprint,
+                        receipt,
+                        cancellationToken).ConfigureAwait(false),
+                "sync" =>
+                    await SyncExplicitAsync(
+                        request,
+                        fingerprint,
+                        receipt,
+                        cancellationToken).ConfigureAwait(false),
+                _ => throw InvalidOperationRequest(
+                    "Reader 本地 Anki 操作类型无效"),
+            };
+        }
+        finally
+        {
+            OperationGate.Release();
+        }
+    }
+
+    private async Task<JsonObject> UpdateNoteFieldsAsync(
+        ReaderLocalAnkiOperationRequest request,
+        string fingerprint,
+        ReaderLocalAnkiMutationReceipt? receipt,
+        CancellationToken cancellationToken)
+    {
+        long noteId = request.NoteIds[0];
+        JsonObject desired = NormalizeFields(request.Fields!);
+        JsonArray info = await ReadInfoAsync(
+            "notesInfo",
+            "notes",
+            [noteId],
+            "noteId",
+            cancellationToken).ConfigureAwait(false);
+        if (info.Count != 1 || info[0] is not JsonObject note)
+        {
+            if (receipt?.State == "pending")
+            {
+                throw UnknownOperationOutcome();
+            }
+            throw new ReaderLocalAnkiException(
+                "BW_READER_ANKI_NOTE_NOT_FOUND",
+                "Anki 中找不到要修改的 note");
+        }
+        ValidateFieldsExist(note, desired);
+        bool alreadyApplied = FieldsMatch(note, desired);
+        if (receipt?.State == "pending")
+        {
+            if (!alreadyApplied)
+            {
+                throw UnknownOperationOutcome();
+            }
+            JsonObject recovered = WriteResult(
+                request,
+                dedup: true,
+                [noteId],
+                [],
+                new ReaderLocalAnkiSyncOutcome("requested"));
+            await _registry.CommitMutationAsync(
+                request.MutationId!,
+                fingerprint,
+                recovered,
+                cancellationToken).ConfigureAwait(false);
+            return await FinishSyncAsync(
+                request,
+                fingerprint,
+                recovered,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        ReaderLocalAnkiClaimOutcome claim =
+            await ClaimOperationAsync(
+                request.MutationId!,
+                fingerprint,
+                cancellationToken).ConfigureAwait(false);
+        if (claim == ReaderLocalAnkiClaimOutcome.Done)
+        {
+            return await ReadCommittedMutationAsync(
+                request.MutationId!,
+                cancellationToken).ConfigureAwait(false);
+        }
+        if (claim != ReaderLocalAnkiClaimOutcome.Claimed)
+        {
+            throw UnknownOperationOutcome();
+        }
+        if (alreadyApplied)
+        {
+            JsonObject unchanged = WriteResult(
+                request,
+                dedup: true,
+                [noteId],
+                [],
+                new ReaderLocalAnkiSyncOutcome("not-requested"));
+            await _registry.CommitMutationAsync(
+                request.MutationId!,
+                fingerprint,
+                unchanged,
+                cancellationToken).ConfigureAwait(false);
+            return unchanged;
+        }
+        try
+        {
+            JsonNode? response = await _client.CallAsync(
+                "updateNoteFields",
+                new JsonObject
+                {
+                    ["note"] = new JsonObject
+                    {
+                        ["id"] = noteId,
+                        ["fields"] = desired.DeepClone(),
+                    },
+                },
+                cancellationToken).ConfigureAwait(false);
+            RequireNullMutationResult(response, "updateNoteFields");
+        }
+        catch (ReaderAnkiConnectException exception)
+        {
+            await HandleClaimedMutationFailureAsync(
+                request.MutationId!,
+                fingerprint,
+                exception,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (
+            exception is JsonException
+            or InvalidOperationException
+            or FormatException)
+        {
+            throw UnknownOperationOutcome(exception);
+        }
+        JsonObject result = WriteResult(
+            request,
+            dedup: false,
+            [noteId],
+            [],
+            new ReaderLocalAnkiSyncOutcome("requested"));
+        await _registry.CommitMutationAsync(
+            request.MutationId!,
+            fingerprint,
+            result,
+            cancellationToken).ConfigureAwait(false);
+        return await FinishSyncAsync(
+            request,
+            fingerprint,
+            result,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<JsonObject> DeleteNotesAsync(
+        ReaderLocalAnkiOperationRequest request,
+        string fingerprint,
+        ReaderLocalAnkiMutationReceipt? receipt,
+        CancellationToken cancellationToken)
+    {
+        JsonArray info = await ReadInfoAsync(
+            "notesInfo",
+            "notes",
+            request.NoteIds,
+            "noteId",
+            cancellationToken).ConfigureAwait(false);
+        if (receipt?.State == "pending")
+        {
+            if (info.Count != 0)
+            {
+                throw UnknownOperationOutcome();
+            }
+            JsonObject recovered = WriteResult(
+                request,
+                dedup: true,
+                request.NoteIds,
+                [],
+                new ReaderLocalAnkiSyncOutcome("requested"));
+            await _registry.CommitMutationAsync(
+                request.MutationId!,
+                fingerprint,
+                recovered,
+                cancellationToken).ConfigureAwait(false);
+            return await FinishSyncAsync(
+                request,
+                fingerprint,
+                recovered,
+                cancellationToken).ConfigureAwait(false);
+        }
+        if (info.Count != request.NoteIds.Length)
+        {
+            throw new ReaderLocalAnkiException(
+                "BW_READER_ANKI_NOTE_NOT_FOUND",
+                "Anki 中找不到全部待删除 note");
+        }
+        ReaderLocalAnkiClaimOutcome claim =
+            await ClaimOperationAsync(
+                request.MutationId!,
+                fingerprint,
+                cancellationToken).ConfigureAwait(false);
+        if (claim == ReaderLocalAnkiClaimOutcome.Done)
+        {
+            return await ReadCommittedMutationAsync(
+                request.MutationId!,
+                cancellationToken).ConfigureAwait(false);
+        }
+        if (claim != ReaderLocalAnkiClaimOutcome.Claimed)
+        {
+            throw UnknownOperationOutcome();
+        }
+        try
+        {
+            JsonNode? response = await _client.CallAsync(
+                "deleteNotes",
+                new JsonObject
+                {
+                    ["notes"] = IdArray(request.NoteIds),
+                },
+                cancellationToken).ConfigureAwait(false);
+            RequireNullMutationResult(response, "deleteNotes");
+        }
+        catch (ReaderAnkiConnectException exception)
+        {
+            await HandleClaimedMutationFailureAsync(
+                request.MutationId!,
+                fingerprint,
+                exception,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (
+            exception is JsonException
+            or InvalidOperationException
+            or FormatException)
+        {
+            throw UnknownOperationOutcome(exception);
+        }
+        JsonObject result = WriteResult(
+            request,
+            dedup: false,
+            request.NoteIds,
+            [],
+            new ReaderLocalAnkiSyncOutcome("requested"));
+        await _registry.CommitMutationAsync(
+            request.MutationId!,
+            fingerprint,
+            result,
+            cancellationToken).ConfigureAwait(false);
+        return await FinishSyncAsync(
+            request,
+            fingerprint,
+            result,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<JsonObject> AnswerCardsAsync(
+        ReaderLocalAnkiOperationRequest request,
+        string fingerprint,
+        ReaderLocalAnkiMutationReceipt? receipt,
+        CancellationToken cancellationToken)
+    {
+        if (receipt?.State == "pending")
+        {
+            // cardsInfo cannot prove whether the scheduler already accepted
+            // a previous answer. Never submit it a second time.
+            throw UnknownOperationOutcome();
+        }
+        long[] cardIds = request.Answers
+            .Select(answer => answer.CardId)
+            .ToArray();
+        JsonArray info = await ReadInfoAsync(
+            "cardsInfo",
+            "cards",
+            cardIds,
+            "cardId",
+            cancellationToken).ConfigureAwait(false);
+        if (info.Count != cardIds.Length)
+        {
+            throw new ReaderLocalAnkiException(
+                "BW_READER_ANKI_CARD_NOT_FOUND",
+                "Anki 中找不到要评分的 card");
+        }
+        ReaderLocalAnkiClaimOutcome claim =
+            await ClaimOperationAsync(
+                request.MutationId!,
+                fingerprint,
+                cancellationToken).ConfigureAwait(false);
+        if (claim == ReaderLocalAnkiClaimOutcome.Done)
+        {
+            return await ReadCommittedMutationAsync(
+                request.MutationId!,
+                cancellationToken).ConfigureAwait(false);
+        }
+        if (claim != ReaderLocalAnkiClaimOutcome.Claimed)
+        {
+            throw UnknownOperationOutcome();
+        }
+        try
+        {
+            JsonNode? response = await _client.CallAsync(
+                "answerCards",
+                new JsonObject
+                {
+                    ["answers"] = new JsonArray(
+                        request.Answers.Select(answer =>
+                            (JsonNode?)new JsonObject
+                            {
+                                ["cardId"] = answer.CardId,
+                                ["ease"] = answer.Ease,
+                            }).ToArray()),
+                },
+                cancellationToken).ConfigureAwait(false);
+            if (response is not JsonArray accepted
+                || accepted.Count != request.Answers.Length
+                || accepted.Any(value => value?.GetValue<bool>() != true))
+            {
+                throw UnknownOperationOutcome();
+            }
+        }
+        catch (ReaderAnkiConnectException exception)
+        {
+            await HandleClaimedMutationFailureAsync(
+                request.MutationId!,
+                fingerprint,
+                exception,
+                cancellationToken).ConfigureAwait(false);
+        }
+        JsonObject result = WriteResult(
+            request,
+            dedup: false,
+            [],
+            cardIds,
+            new ReaderLocalAnkiSyncOutcome("requested"));
+        result["answers"] = new JsonArray(request.Answers.Select(answer =>
+            (JsonNode?)new JsonObject
+            {
+                ["card_id"] = answer.CardId,
+                ["ease"] = answer.Ease,
+            }).ToArray());
+        await _registry.CommitMutationAsync(
+            request.MutationId!,
+            fingerprint,
+            result,
+            cancellationToken).ConfigureAwait(false);
+        return await FinishSyncAsync(
+            request,
+            fingerprint,
+            result,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<JsonObject> SyncExplicitAsync(
+        ReaderLocalAnkiOperationRequest request,
+        string fingerprint,
+        ReaderLocalAnkiMutationReceipt? receipt,
+        CancellationToken cancellationToken)
+    {
+        if (receipt?.State == "pending")
+        {
+            throw UnknownOperationOutcome();
+        }
+        ReaderLocalAnkiClaimOutcome claim =
+            await ClaimOperationAsync(
+                request.MutationId!,
+                fingerprint,
+                cancellationToken).ConfigureAwait(false);
+        if (claim == ReaderLocalAnkiClaimOutcome.Done)
+        {
+            return await ReadCommittedMutationAsync(
+                request.MutationId!,
+                cancellationToken).ConfigureAwait(false);
+        }
+        if (claim != ReaderLocalAnkiClaimOutcome.Claimed)
+        {
+            throw UnknownOperationOutcome();
+        }
+        ReaderLocalAnkiSyncOutcome sync =
+            await RunSyncAsync(cancellationToken).ConfigureAwait(false);
+        JsonObject result = OperationPayload(
+            request.Operation,
+            request.MutationId,
+            dedup: false,
+            localApplied: false,
+            localStatus: "not-applicable",
+            sync);
+        await _registry.CommitMutationAsync(
+            request.MutationId!,
+            fingerprint,
+            result,
+            cancellationToken).ConfigureAwait(false);
+        return result;
+    }
+
+    private async Task<JsonObject> FinishSyncAsync(
+        ReaderLocalAnkiOperationRequest request,
+        string fingerprint,
+        JsonObject result,
+        CancellationToken cancellationToken)
+    {
+        if (request.SyncMode == "background")
+        {
+            _ = TrackBackgroundSyncAsync(
+                request.MutationId!,
+                fingerprint,
+                result.DeepClone().AsObject());
+            return result;
+        }
+        ReaderLocalAnkiSyncOutcome sync =
+            await RunSyncAsync(cancellationToken).ConfigureAwait(false);
+        result["anki_web_sync"] = sync.ToPayload();
+        await _registry.UpdateMutationResultAsync(
+            request.MutationId!,
+            fingerprint,
+            result,
+            cancellationToken).ConfigureAwait(false);
+        return result;
+    }
+
+    private async Task TrackBackgroundSyncAsync(
+        string mutationId,
+        string fingerprint,
+        JsonObject result)
+    {
+        try
+        {
+            ReaderLocalAnkiSyncOutcome sync =
+                await RequestBackgroundSyncAsync().ConfigureAwait(false);
+            result["anki_web_sync"] = sync.ToPayload();
+            await _registry.UpdateMutationResultAsync(
+                mutationId,
+                fingerprint,
+                result,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The durable receipt remains "requested". A later explicit sync
+            // can safely reconcile it without replaying the card mutation.
+        }
+    }
+
+    private Task<ReaderLocalAnkiSyncOutcome> RequestBackgroundSyncAsync()
+    {
+        lock (_backgroundSyncLock)
+        {
+            if (_backgroundSync is null || _backgroundSync.IsCompleted)
+            {
+                _backgroundSync = RunBackgroundSyncAsync();
+            }
+            return _backgroundSync;
+        }
+    }
+
+    private async Task<ReaderLocalAnkiSyncOutcome> RunBackgroundSyncAsync()
+    {
+        await Task.Delay(TimeSpan.FromMilliseconds(250))
+            .ConfigureAwait(false);
+        return await RunSyncAsync(CancellationToken.None)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<ReaderLocalAnkiSyncOutcome> RunSyncAsync(
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            JsonNode? response = await _client.CallAsync(
+                "sync",
+                new JsonObject(),
+                cancellationToken).ConfigureAwait(false);
+            if (response is not null)
+            {
+                return new ReaderLocalAnkiSyncOutcome(
+                    "unknown",
+                    "AnkiConnect sync 响应无效");
+            }
+            return new ReaderLocalAnkiSyncOutcome("succeeded");
+        }
+        catch (ReaderAnkiConnectException exception)
+        {
+            return exception.Failure == ReaderAnkiConnectFailure.RemoteError
+                ? new ReaderLocalAnkiSyncOutcome(
+                    "failed",
+                    SafeError(exception.Message))
+                : new ReaderLocalAnkiSyncOutcome(
+                    "unknown",
+                    SafeError(exception.Message));
+        }
+        catch (Exception exception) when (
+            exception is JsonException
+            or InvalidOperationException
+            or FormatException)
+        {
+            return new ReaderLocalAnkiSyncOutcome(
+                "unknown",
+                SafeError(exception.Message));
+        }
+    }
+
+    private ReaderLocalAnkiWriteOutcome AddOutcomeWithBackgroundSync(
+        ReaderLocalAnkiAddResult result,
+        bool Dedup)
+    {
+        _ = RequestBackgroundSyncAsync();
+        return new ReaderLocalAnkiWriteOutcome(result, Dedup);
+    }
+
+    private async Task<JsonArray> ReadInfoAsync(
+        string action,
+        string parameterName,
+        long[] ids,
+        string idProperty,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            JsonNode? response = await _client.CallAsync(
+                action,
+                new JsonObject { [parameterName] = IdArray(ids) },
+                cancellationToken).ConfigureAwait(false);
+            if (response is not JsonArray values || values.Count > ids.Length)
+            {
+                throw new ReaderAnkiConnectException(
+                    ReaderAnkiConnectFailure.InvalidResponse,
+                    $"AnkiConnect {action} 响应无效");
+            }
+            HashSet<long> requested = ids.ToHashSet();
+            HashSet<long> seen = [];
+            JsonArray result = new();
+            foreach (JsonNode? value in values)
+            {
+                if (value is not JsonObject item
+                    || !TryPositiveId(item[idProperty], out long id)
+                    || !requested.Contains(id)
+                    || !seen.Add(id))
+                {
+                    throw new ReaderAnkiConnectException(
+                        ReaderAnkiConnectFailure.InvalidResponse,
+                        $"AnkiConnect {action} 响应无效");
+                }
+                if (action == "notesInfo"
+                    && (item["modelName"] is not JsonValue modelValue
+                        || !modelValue.TryGetValue(out string? modelName)
+                        || string.IsNullOrWhiteSpace(modelName)
+                        || modelName.Length > 256
+                        || item["fields"] is not JsonObject))
+                {
+                    throw new ReaderAnkiConnectException(
+                        ReaderAnkiConnectFailure.InvalidResponse,
+                        "AnkiConnect notesInfo 缺少 modelName/fields");
+                }
+                result.Add(item.DeepClone());
+            }
+            return result;
+        }
+        catch (ReaderAnkiConnectException exception)
+        {
+            throw MapOperationConnectFailure(exception);
+        }
+        catch (Exception exception) when (
+            exception is JsonException
+            or InvalidOperationException
+            or FormatException)
+        {
+            throw MapOperationConnectFailure(
+                new ReaderAnkiConnectException(
+                    ReaderAnkiConnectFailure.InvalidResponse,
+                    "AnkiConnect 响应无效",
+                    exception));
+        }
+    }
+
+    private async Task<ReaderLocalAnkiClaimOutcome> ClaimOperationAsync(
+        string mutationId,
+        string fingerprint,
+        CancellationToken cancellationToken)
+    {
+        ReaderLocalAnkiClaimOutcome claim =
+            await _registry.ClaimMutationAsync(
+                mutationId,
+                fingerprint,
+                cancellationToken).ConfigureAwait(false);
+        if (claim == ReaderLocalAnkiClaimOutcome.Reused)
+        {
+            throw new ReaderLocalAnkiException(
+                "BW_READER_ANKI_MUTATION_REUSED",
+                "同一 mutationId 不能执行不同的 Anki 操作");
+        }
+        return claim;
+    }
+
+    private async Task<JsonObject> ReadCommittedMutationAsync(
+        string mutationId,
+        CancellationToken cancellationToken)
+    {
+        ReaderLocalAnkiMutationReceipt? receipt =
+            await _registry.ReadMutationReceiptAsync(
+                mutationId,
+                cancellationToken).ConfigureAwait(false);
+        if (receipt?.State != "done" || receipt.Result is null)
+        {
+            throw new ReaderLocalAnkiException(
+                "BW_READER_ANKI_REGISTRY_INVALID",
+                "Anki 本地操作回执状态无效");
+        }
+        return Deduplicated(receipt.Result);
+    }
+
+    private async Task HandleClaimedMutationFailureAsync(
+        string mutationId,
+        string fingerprint,
+        ReaderAnkiConnectException exception,
+        CancellationToken cancellationToken)
+    {
+        if (exception.Failure == ReaderAnkiConnectFailure.RemoteError)
+        {
+            await _registry.ReleaseMutationClaimAsync(
+                mutationId,
+                fingerprint,
+                cancellationToken).ConfigureAwait(false);
+            throw MapOperationConnectFailure(exception);
+        }
+        throw UnknownOperationOutcome(exception);
+    }
+
+    private static JsonObject NormalizeFields(JsonObject fields)
+    {
+        if (fields.Count is < 1 or > 32)
+        {
+            throw InvalidOperationRequest("Anki 字段数量无效");
+        }
+        JsonObject normalized = new();
+        foreach ((string name, JsonNode? node) in fields
+            .OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        {
+            if (name.Length is < 1 or > 128
+                || name.Any(char.IsControl)
+                || node is not JsonValue value
+                || !value.TryGetValue(out string? text)
+                || text.Length > 100_000
+                || text.Contains('\0'))
+            {
+                throw InvalidOperationRequest("Anki 字段内容无效");
+            }
+            normalized[name] = text;
+        }
+        return normalized;
+    }
+
+    private static void ValidateFieldsExist(
+        JsonObject note,
+        JsonObject desired)
+    {
+        if (note["fields"] is not JsonObject existing)
+        {
+            throw new ReaderLocalAnkiException(
+                "BW_READER_ANKI_CONNECT_RESPONSE_INVALID",
+                "AnkiConnect notesInfo 缺少字段结构");
+        }
+        foreach (string name in desired.Select(pair => pair.Key))
+        {
+            if (existing[name] is not JsonObject field
+                || field["value"] is not JsonValue value
+                || !value.TryGetValue(out string? _))
+            {
+                throw new ReaderLocalAnkiException(
+                    "BW_READER_ANKI_FIELD_NOT_FOUND",
+                    "Anki note 不包含字段：" + name);
+            }
+        }
+    }
+
+    private static bool FieldsMatch(
+        JsonObject note,
+        JsonObject desired)
+    {
+        JsonObject existing = (JsonObject)note["fields"]!;
+        foreach ((string name, JsonNode? node) in desired)
+        {
+            string desiredValue = node!.GetValue<string>();
+            string actual = existing[name]!["value"]!.GetValue<string>();
+            if (!string.Equals(actual, desiredValue, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static JsonObject WriteResult(
+        ReaderLocalAnkiOperationRequest request,
+        bool dedup,
+        long[] noteIds,
+        long[] cardIds,
+        ReaderLocalAnkiSyncOutcome sync)
+    {
+        JsonObject result = OperationPayload(
+            request.Operation,
+            request.MutationId,
+            dedup,
+            localApplied: true,
+            localStatus: dedup ? "deduplicated" : "succeeded",
+            sync);
+        result["note_ids"] = IdArray(noteIds);
+        result["card_ids"] = IdArray(cardIds);
+        return result;
+    }
+
+    private static JsonObject OperationPayload(
+        string operation,
+        string? mutationId,
+        bool dedup,
+        bool localApplied,
+        string localStatus,
+        ReaderLocalAnkiSyncOutcome sync) => new()
+        {
+            ["ok"] = true,
+            ["operation"] = operation,
+            ["mutation_id"] = mutationId,
+            ["dedup"] = dedup,
+            ["anki_local_applied"] = localApplied,
+            ["anki_local_status"] = localStatus,
+            ["anki_web_sync"] = sync.ToPayload(),
+        };
+
+    private static JsonObject Deduplicated(JsonObject result)
+    {
+        JsonObject clone = result.DeepClone().AsObject();
+        clone["dedup"] = true;
+        if (clone["anki_local_status"]?.GetValue<string>() == "succeeded")
+        {
+            clone["anki_local_status"] = "deduplicated";
+        }
+        return clone;
+    }
+
+    private static JsonArray IdArray(IEnumerable<long> ids) => new(
+        ids.Select(id => (JsonNode?)id).ToArray());
+
+    private static bool TryPositiveId(JsonNode? node, out long id)
+    {
+        id = 0;
+        if (node is not JsonValue value)
+        {
+            return false;
+        }
+        if (value.TryGetValue(out long parsedLong))
+        {
+            id = parsedLong;
+            return id > 0;
+        }
+        if (value.TryGetValue(out int parsedInt))
+        {
+            id = parsedInt;
+            return id > 0;
+        }
+        return false;
+    }
+
+    private static void RequireNullMutationResult(
+        JsonNode? result,
+        string action)
+    {
+        if (result is not null)
+        {
+            throw new InvalidOperationException(
+                $"AnkiConnect {action} 响应无效");
+        }
+    }
+
+    private static string OperationFingerprint(
+        ReaderLocalAnkiOperationRequest request)
+    {
+        JsonObject canonical = new()
+        {
+            ["operation"] = request.Operation,
+            ["noteIds"] = IdArray(request.NoteIds),
+            ["cardIds"] = IdArray(request.CardIds),
+            ["fields"] = request.Fields is null
+                ? null
+                : NormalizeFields(request.Fields),
+            ["answers"] = new JsonArray(request.Answers.Select(answer =>
+                (JsonNode?)new JsonObject
+                {
+                    ["cardId"] = answer.CardId,
+                    ["ease"] = answer.Ease,
+                }).ToArray()),
+            ["syncMode"] = request.SyncMode,
+        };
+        return Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes(canonical.ToJsonString(
+                DirectBridgeContract.JsonOptions))))
+            .ToLowerInvariant();
+    }
+
+    private static void ValidateOperationRequest(
+        ReaderLocalAnkiOperationRequest request)
+    {
+        if (request.Operation is not (
+            "read-notes"
+            or "read-cards"
+            or "update-note-fields"
+            or "delete-notes"
+            or "answer-cards"
+            or "sync"))
+        {
+            throw InvalidOperationRequest("Reader 本地 Anki 操作类型无效");
+        }
+        RequireDistinctPositiveIds(request.NoteIds, "note");
+        RequireDistinctPositiveIds(request.CardIds, "card");
+        if (request.Operation == "read-notes"
+            && (request.NoteIds.Length is < 1 or > 20
+                || request.CardIds.Length != 0
+                || request.Fields is not null
+                || request.Answers.Length != 0
+                || request.MutationId is not null
+                || request.SyncMode is not null))
+        {
+            throw InvalidOperationRequest("read-notes 请求无效");
+        }
+        if (request.Operation == "read-cards"
+            && (request.CardIds.Length is < 1 or > 20
+                || request.NoteIds.Length != 0
+                || request.Fields is not null
+                || request.Answers.Length != 0
+                || request.MutationId is not null
+                || request.SyncMode is not null))
+        {
+            throw InvalidOperationRequest("read-cards 请求无效");
+        }
+        if (request.Operation == "update-note-fields"
+            && (request.NoteIds.Length != 1
+                || request.CardIds.Length != 0
+                || request.Fields is null
+                || request.Answers.Length != 0
+                || !IsMutation(request)))
+        {
+            throw InvalidOperationRequest(
+                "update-note-fields 请求无效");
+        }
+        if (request.Operation == "delete-notes"
+            && (request.NoteIds.Length is < 1 or > 20
+                || request.CardIds.Length != 0
+                || request.Fields is not null
+                || request.Answers.Length != 0
+                || !IsMutation(request)))
+        {
+            throw InvalidOperationRequest("delete-notes 请求无效");
+        }
+        if (request.Operation == "answer-cards"
+            && (request.NoteIds.Length != 0
+                || request.CardIds.Length != 0
+                || request.Fields is not null
+                || request.Answers.Length is < 1 or > 20
+                || request.Answers.Any(answer =>
+                    answer.CardId <= 0 || answer.Ease is < 1 or > 4)
+                || request.Answers.Select(answer => answer.CardId)
+                    .Distinct().Count() != request.Answers.Length
+                || !IsMutation(request)))
+        {
+            throw InvalidOperationRequest("answer-cards 请求无效");
+        }
+        if (request.Operation == "sync"
+            && (request.NoteIds.Length != 0
+                || request.CardIds.Length != 0
+                || request.Fields is not null
+                || request.Answers.Length != 0
+                || request.SyncMode is not null
+                || request.MutationId is null
+                || !DirectBridgeContract.IsSafeId(request.MutationId)))
+        {
+            throw InvalidOperationRequest("sync 请求无效");
+        }
+        if (request.Fields is not null)
+        {
+            _ = NormalizeFields(request.Fields);
+        }
+    }
+
+    private static bool IsMutation(ReaderLocalAnkiOperationRequest request) =>
+        request.MutationId is not null
+        && DirectBridgeContract.IsSafeId(request.MutationId)
+        && request.SyncMode is "background" or "wait";
+
+    private static void RequireDistinctPositiveIds(
+        long[] ids,
+        string kind)
+    {
+        if (ids.Any(id => id <= 0)
+            || ids.Distinct().Count() != ids.Length)
+        {
+            throw InvalidOperationRequest($"Anki {kind} ID 无效");
+        }
+    }
+
+    private static ReaderLocalAnkiException MapOperationConnectFailure(
+        ReaderAnkiConnectException exception) => exception.Failure switch
+        {
+            ReaderAnkiConnectFailure.Unreachable => new(
+                "BW_READER_ANKI_CONNECT_UNREACHABLE",
+                "AnkiConnect 不可达，请先启动 Anki",
+                retryable: true,
+                innerException: exception),
+            ReaderAnkiConnectFailure.InvalidResponse => new(
+                "BW_READER_ANKI_CONNECT_RESPONSE_INVALID",
+                "AnkiConnect 响应无效",
+                innerException: exception),
+            _ => new(
+                "BW_READER_ANKI_CONNECT_ERROR",
+                "AnkiConnect 拒绝操作：" + SafeError(exception.Message),
+                retryable: true,
+                innerException: exception),
+        };
+
+    private static ReaderLocalAnkiException UnknownOperationOutcome(
+        Exception? exception = null) => new(
+            "BW_READER_ANKI_OPERATION_OUTCOME_UNKNOWN",
+            "上一次 Anki 操作结果未知；为避免重复修改，本次不会再次写入",
+            retryable: false,
+            innerException: exception);
+
+    private static ReaderLocalAnkiException InvalidOperationRequest(
+        string message) => new(
+            "BW_READER_ANKI_REQUEST_INVALID",
+            message);
+
+    private static string SafeError(string value)
+    {
+        string safe = value.Replace('\0', ' ').Trim();
+        return safe.Length <= 300 ? safe : safe[..300];
     }
 
     private async Task<ReaderLocalAnkiPreparedNote> PrepareNoteAsync(

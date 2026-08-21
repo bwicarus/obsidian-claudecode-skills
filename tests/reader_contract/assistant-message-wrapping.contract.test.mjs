@@ -35,3 +35,11 @@ for (const [name, source] of [["shared", SHARED], ["legacy", LEGACY]]) {
     );
   });
 }
+
+test("shared assistant thread can shrink below long-message min-content", () => {
+  assert.match(
+    SHARED,
+    /#asst-thread\{[^']*flex:1 1 0;[^']*min-width:0;[^']*max-width:100%/,
+    "a long unbroken card marker must wrap instead of forcing the review splitter to half-screen",
+  );
+});

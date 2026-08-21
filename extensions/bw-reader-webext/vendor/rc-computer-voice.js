@@ -1394,6 +1394,80 @@ if (window.__bwPwaProviderOnly) return;
           }
         }
         payload = { fn: actionFn, args: [normalizedMutation] };
+      } else if (actionFn === "_nativeReaderLearningCardMutate") {
+        if (p.args.length !== 1 || !plainObject(p.args[0])) {
+          throw directError(
+            "Reader 学习卡修改需要一个对象",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        var learningMutation = p.args[0];
+        var learningOperation = safeText(
+          learningMutation.operation,
+          "Reader 学习卡 operation",
+          16,
+          false
+        );
+        exactObject(
+          learningMutation,
+          learningOperation === "edit"
+            ? ["operation", "mutationId", "id", "cardIndex",
+              "expectedEntityRev", "externalPolicy", "card"]
+            : ["operation", "mutationId", "id", "cardIndex",
+              "expectedStateRev", "externalPolicy"],
+          [],
+          "Reader 学习卡修改"
+        );
+        if ((learningOperation !== "edit" && learningOperation !== "delete") ||
+            !/^lcard_[0-9a-f]{24}$/.test(String(learningMutation.mutationId || "")) ||
+            !/^card_[0-9a-f]{4,64}$/.test(String(learningMutation.id || "")) ||
+            !Number.isSafeInteger(learningMutation.cardIndex) ||
+            learningMutation.cardIndex < 0 || learningMutation.cardIndex > 255 ||
+            ["reader-only", "sync-if-projected"]
+              .indexOf(learningMutation.externalPolicy) < 0) {
+          throw directError(
+            "Reader 学习卡稳定引用无效",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        var normalizedLearningMutation = {
+          operation: learningOperation,
+          mutationId: learningMutation.mutationId,
+          id: learningMutation.id,
+          cardIndex: learningMutation.cardIndex,
+          externalPolicy: learningMutation.externalPolicy,
+        };
+        if (learningOperation === "edit") {
+          if (!Number.isSafeInteger(learningMutation.expectedEntityRev) ||
+              learningMutation.expectedEntityRev < 0 ||
+              !plainObject(learningMutation.card) ||
+              messageBytes(JSON.stringify(learningMutation.card)) > 200000) {
+            throw directError(
+              "Reader 学习卡编辑内容无效",
+              "BW_READER_REALTIME_OUTPUT_SCHEMA",
+              false
+            );
+          }
+          normalizedLearningMutation.expectedEntityRev =
+            learningMutation.expectedEntityRev;
+          normalizedLearningMutation.card = JSON.parse(
+            JSON.stringify(learningMutation.card)
+          );
+        } else {
+          if (!Number.isSafeInteger(learningMutation.expectedStateRev) ||
+              learningMutation.expectedStateRev < 0) {
+            throw directError(
+              "Reader 学习卡删除版本无效",
+              "BW_READER_REALTIME_OUTPUT_SCHEMA",
+              false
+            );
+          }
+          normalizedLearningMutation.expectedStateRev =
+            learningMutation.expectedStateRev;
+        }
+        payload = { fn: actionFn, args: [normalizedLearningMutation] };
       } else if (actionFn === "__upStartTask") {
         // 交互练习纸:与 Windows 侧同一套结构闸;内容级容错在纸的接收链里做。
         if (p.args.length !== 1 || !plainObject(p.args[0])) {
@@ -3523,6 +3597,15 @@ if (window.__bwPwaProviderOnly) return;
     "page-card": function (params) {
       return pageCard(params);
     },
+    "learning-cards": function (params) {
+      return learningCards(params);
+    },
+    "learning-card": function (params) {
+      return learningCard(params);
+    },
+    "review-current": function () {
+      return currentReviewCard();
+    },
     lookup: function (params) {
       var target = window._nativeReaderLookupWord;
       if (typeof target !== "function") return null;
@@ -4584,6 +4667,209 @@ if (window.__bwPwaProviderOnly) return;
         LOCAL_ANKI_ADD_TIMEOUT_MS
       );
     }).then(normalizeLocalAnkiAddResult).finally(function () {
+      if (lease && lease.owned) return lease.channel.close();
+    });
+  }
+
+  // Canonical Reader cards stay authoritative in the Reader repository.  This
+  // channel performs only the explicitly requested projection operation in the
+  // user's desktop Anki, then reports local collection and AnkiWeb sync as two
+  // separate outcomes.  Keeping this beside addLocalAnkiCard also guarantees
+  // that both paths acquire the same fresh, single-owner Windows bridge lease.
+  function normalizeLocalAnkiOperationRequest(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw directError(
+        "本机 Anki 操作必须是对象",
+        "BW_READER_LOCAL_ANKI_OPERATION_SCHEMA",
+        false
+      );
+    }
+    var operation = safeText(
+      value.operation,
+      "Anki operation",
+      32,
+      false
+    );
+    var allowed = {
+      "read-notes": ["operation", "noteIds"],
+      "read-cards": ["operation", "cardIds"],
+      "update-note-fields": [
+        "operation", "mutationId", "noteId", "fields", "syncMode"
+      ],
+      "delete-notes": [
+        "operation", "mutationId", "noteIds", "syncMode"
+      ],
+      "answer-cards": [
+        "operation", "mutationId", "answers", "syncMode"
+      ],
+      sync: ["operation", "mutationId"]
+    }[operation];
+    if (!allowed || Object.keys(value).length !== allowed.length ||
+        Object.keys(value).some(function (key) {
+          return allowed.indexOf(key) < 0;
+        })) {
+      throw directError(
+        "本机 Anki 操作字段无效",
+        "BW_READER_LOCAL_ANKI_OPERATION_SCHEMA",
+        false
+      );
+    }
+    function ids(name) {
+      var source = value[name];
+      if (!Array.isArray(source) || !source.length || source.length > 20 ||
+          source.some(function (id) {
+            return !Number.isSafeInteger(id) || id <= 0;
+          })) {
+        throw directError(
+          "本机 Anki 编号无效",
+          "BW_READER_LOCAL_ANKI_OPERATION_SCHEMA",
+          false
+        );
+      }
+      return source.slice();
+    }
+    var result = { operation: operation };
+    if (operation === "read-notes" || operation === "delete-notes") {
+      result.noteIds = ids("noteIds");
+    } else if (operation === "read-cards") {
+      result.cardIds = ids("cardIds");
+    }
+    if (operation === "update-note-fields") {
+      if (!Number.isSafeInteger(value.noteId) || value.noteId <= 0 ||
+          !plainObject(value.fields) || !Object.keys(value.fields).length ||
+          Object.keys(value.fields).length > 32) {
+        throw directError(
+          "本机 Anki 字段更新无效",
+          "BW_READER_LOCAL_ANKI_OPERATION_SCHEMA",
+          false
+        );
+      }
+      var fields = {};
+      Object.keys(value.fields).forEach(function (name) {
+        var fieldName = safeText(name, "Anki field name", 128, false);
+        var fieldValue = safeText(
+          value.fields[name],
+          "Anki field value",
+          100000,
+          true
+        );
+        fields[fieldName] = fieldValue;
+      });
+      result.noteId = value.noteId;
+      result.fields = fields;
+    }
+    if (operation === "answer-cards") {
+      if (!Array.isArray(value.answers) || !value.answers.length ||
+          value.answers.length > 20) {
+        throw directError(
+          "本机 Anki 评分无效",
+          "BW_READER_LOCAL_ANKI_OPERATION_SCHEMA",
+          false
+        );
+      }
+      result.answers = value.answers.map(function (answer) {
+        if (!plainObject(answer) ||
+            Object.keys(answer).sort().join(",") !== "cardId,ease" ||
+            !Number.isSafeInteger(answer.cardId) || answer.cardId <= 0 ||
+            !Number.isSafeInteger(answer.ease) || answer.ease < 1 ||
+            answer.ease > 4) {
+          throw directError(
+            "本机 Anki 评分无效",
+            "BW_READER_LOCAL_ANKI_OPERATION_SCHEMA",
+            false
+          );
+        }
+        return { cardId: answer.cardId, ease: answer.ease };
+      });
+    }
+    if (operation !== "read-notes" && operation !== "read-cards") {
+      var mutationId = safeText(
+        value.mutationId,
+        "Anki mutationId",
+        160,
+        false
+      );
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,159}$/.test(mutationId)) {
+        throw directError(
+          "本机 Anki mutationId 无效",
+          "BW_READER_LOCAL_ANKI_OPERATION_SCHEMA",
+          false
+        );
+      }
+      result.mutationId = mutationId;
+    }
+    if (operation === "update-note-fields" || operation === "delete-notes" ||
+        operation === "answer-cards") {
+      if (value.syncMode !== "background" && value.syncMode !== "wait") {
+        throw directError(
+          "本机 Anki syncMode 无效",
+          "BW_READER_LOCAL_ANKI_OPERATION_SCHEMA",
+          false
+        );
+      }
+      result.syncMode = value.syncMode;
+    }
+    return result;
+  }
+
+  function normalizeLocalAnkiOperationResult(value, operation) {
+    if (!value || typeof value !== "object" || Array.isArray(value) ||
+        (Object.prototype.hasOwnProperty.call(value, "ok") && value.ok !== true) ||
+        value.operation !== operation ||
+        typeof value.anki_local_applied !== "boolean" ||
+        !plainObject(value.anki_web_sync)) {
+      throw directError(
+        "本机 Anki 操作响应无效",
+        "BW_READER_LOCAL_ANKI_OPERATION_RESPONSE_INVALID",
+        false
+      );
+    }
+    var syncStatus = String(value.anki_web_sync.status || "");
+    if (["not-requested", "requested", "succeeded", "failed", "unknown"]
+        .indexOf(syncStatus) < 0) {
+      throw directError(
+        "本机 Anki 同步响应无效",
+        "BW_READER_LOCAL_ANKI_OPERATION_RESPONSE_INVALID",
+        false
+      );
+    }
+    return value;
+  }
+
+  function operateLocalAnkiCard(value) {
+    var request;
+    try {
+      request = normalizeLocalAnkiOperationRequest(value);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    var lease = null;
+    return acquireFreshAnkiChannel().catch(function (error) {
+      throw directError(
+        "本机 Anki 通道不可用:" +
+          String(error && error.message || error || "?").slice(0, 240),
+        "BW_READER_LOCAL_ANKI_CHANNEL_UNAVAILABLE",
+        true
+      );
+    }).then(function (acquired) {
+      lease = acquired;
+      return acquired.channel.request(
+        "anki-card-operation-local",
+        Object.assign({ sessionId: acquired.sessionId }, request),
+        LOCAL_ANKI_ADD_TIMEOUT_MS
+      );
+    }).then(function (result) {
+      return normalizeLocalAnkiOperationResult(result, request.operation);
+    }).catch(function (error) {
+      // The Windows host has already fenced this mutationId when it reports
+      // an unknown outcome.  Preserve that semantic bit so callers append an
+      // unknown receipt and never downgrade it to a retryable ordinary failure.
+      if (error && error.code ===
+          "BW_READER_ANKI_OPERATION_OUTCOME_UNKNOWN") {
+        error.outcomeUnknown = true;
+      }
+      throw error;
+    }).finally(function () {
       if (lease && lease.owned) return lease.channel.close();
     });
   }
@@ -7192,6 +7478,766 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
 
+  var LEARNING_CARD_CONTRACT = "reader-learning-card/1";
+  var LEARNING_CARD_LIST_BUDGET = 180 * 1024;
+
+  function learningCardRepository() {
+    var repository = window.BWReaderRuntime &&
+      window.BWReaderRuntime.cardRepository;
+    if (!repository || typeof repository.load !== "function" ||
+        typeof repository.snapshot !== "function" ||
+        typeof repository.replaceContent !== "function") {
+      throw directError(
+        "Reader 本地学习卡仓尚未就绪",
+        "BW_READER_LEARNING_CARD_UNAVAILABLE",
+        true
+      );
+    }
+    return repository;
+  }
+
+  function learningCardId(value) {
+    value = String(value == null ? "" : value).trim().toLowerCase();
+    if (!/^card_[a-f0-9]{4,64}$/.test(value)) {
+      throw directError(
+        "Reader 学习卡 id 无效",
+        "BW_READER_LEARNING_CARD_PARAMS",
+        false
+      );
+    }
+    return value;
+  }
+
+  function learningCardIndex(value) {
+    value = Number(value);
+    if (!Number.isSafeInteger(value) || value < 0 || value > 255) {
+      throw directError(
+        "Reader 学习卡 cardIndex 无效",
+        "BW_READER_LEARNING_CARD_PARAMS",
+        false
+      );
+    }
+    return value;
+  }
+
+  function learningCardPublic(record, cardIndex) {
+    if (!record || record.deleted || !Array.isArray(record.cards) ||
+        !record.states || cardIndex >= record.cards.length ||
+        !record.states[String(cardIndex)]) {
+      throw directError(
+        "Reader 找不到指定学习卡",
+        "BW_READER_LEARNING_CARD_NOT_FOUND",
+        false
+      );
+    }
+    return {
+      contract: LEARNING_CARD_CONTRACT,
+      id: record.id,
+      card_index: cardIndex,
+      entity_revision: Number(record.entityRev || 0),
+      state_revision: Number(record.stateRev || 0),
+      card: JSON.parse(JSON.stringify(record.cards[cardIndex])),
+      source: JSON.parse(JSON.stringify(record.source || {})),
+      state: JSON.parse(JSON.stringify(record.states[String(cardIndex)])),
+    };
+  }
+
+  function learningCards(rawParams) {
+    var params = rawParams && typeof rawParams === "object" ? rawParams : {};
+    exactObject(params, [], ["id", "contains", "limit", "includeRemoved"],
+      "Reader 学习卡列表参数");
+    var id = Object.prototype.hasOwnProperty.call(params, "id")
+      ? learningCardId(params.id) : "";
+    var contains = Object.prototype.hasOwnProperty.call(params, "contains")
+      ? safeText(params.contains, "contains", 256, false).trim().toLowerCase()
+      : "";
+    var limit = Object.prototype.hasOwnProperty.call(params, "limit")
+      ? Number(params.limit) : 50;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200 ||
+        (Object.prototype.hasOwnProperty.call(params, "includeRemoved") &&
+          typeof params.includeRemoved !== "boolean")) {
+      return Promise.reject(directError(
+        "Reader 学习卡列表参数无效",
+        "BW_READER_LEARNING_CARD_PARAMS",
+        false
+      ));
+    }
+    var includeRemoved = params.includeRemoved === true;
+    var repo;
+    try { repo = learningCardRepository(); }
+    catch (error) { return Promise.reject(error); }
+    return repo.snapshot().then(function (records) {
+      var all = [];
+      (Array.isArray(records) ? records : []).forEach(function (record) {
+        if (!record || record.deleted || (id && record.id !== id) ||
+            !Array.isArray(record.cards) || !record.states) return;
+        record.cards.forEach(function (_, index) {
+          var projected;
+          try { projected = learningCardPublic(record, index); }
+          catch (_) { return; }
+          if (!includeRemoved && projected.state.removed === true) return;
+          if (contains) {
+            var searchable = JSON.stringify({
+              card: projected.card,
+              source: projected.source,
+            }).toLowerCase();
+            if (searchable.indexOf(contains) < 0) return;
+          }
+          all.push(projected);
+        });
+      });
+      all.sort(function (left, right) {
+        return left.id.localeCompare(right.id) ||
+          left.card_index - right.card_index;
+      });
+      var kept = [];
+      for (var index = 0; index < all.length && kept.length < limit; index += 1) {
+        var candidate = kept.concat([all[index]]);
+        if (messageBytes(JSON.stringify({ cards: candidate })) >
+            LEARNING_CARD_LIST_BUDGET) break;
+        kept.push(all[index]);
+      }
+      return {
+        contract: "reader-learning-card-list/1",
+        matched: all.length,
+        returned: kept.length,
+        cards: kept,
+        truncated: kept.length < all.length,
+      };
+    });
+  }
+
+  function learningCard(rawParams) {
+    var params = rawParams && typeof rawParams === "object" ? rawParams : {};
+    exactObject(params, ["id", "cardIndex"], [], "Reader 学习卡读取参数");
+    var id;
+    var cardIndex;
+    var repo;
+    try {
+      id = learningCardId(params.id);
+      cardIndex = learningCardIndex(params.cardIndex);
+      repo = learningCardRepository();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return repo.load(id).then(function (record) {
+      return learningCardPublic(record, cardIndex);
+    });
+  }
+
+  function currentReviewCard() {
+    var current = RC.review && typeof RC.review.currentCard === "function"
+      ? RC.review.currentCard() : null;
+    if (!current) {
+      return Promise.resolve({
+        contract: "reader-review-current/1",
+        active: false,
+        card: null,
+      });
+    }
+    if (current.entity_id && Number.isSafeInteger(current.entity_index)) {
+      return learningCard({
+        id: current.entity_id,
+        cardIndex: current.entity_index,
+      }).then(function (card) {
+        return {
+          contract: "reader-review-current/1",
+          active: true,
+          revealed: current._showBack === true,
+          card: card,
+        };
+      });
+    }
+    return Promise.resolve({
+      contract: "reader-review-current/1",
+      active: true,
+      revealed: current._showBack === true,
+      card: {
+        legacy: true,
+        card_id: current.card_id || current.id || null,
+        note_id: current.note_id || current.noteId || null,
+        question: String(current.question || current.front || ""),
+        answer: String(current.answer || current.back || ""),
+        source_ref: String(current.source_ref || ""),
+        source_url: String(current.source_url || ""),
+      },
+    });
+  }
+
+  function compactAnkiOperationResult(value) {
+    value = value && typeof value === "object" ? value : {};
+    var localStatus = value.anki_local_applied &&
+      typeof value.anki_local_applied === "object"
+      ? String(value.anki_local_applied.status || "failed")
+      : (value.anki_local_applied === true
+        ? "succeeded"
+        : String(value.anki_local_status || "failed"));
+    return {
+      operation: String(value.operation || ""),
+      anki_local_applied: {
+        status: localStatus,
+      },
+      anki_web_sync: {
+        status: String(value.anki_web_sync &&
+          value.anki_web_sync.status || "not-requested"),
+        error: String(value.anki_web_sync &&
+          value.anki_web_sync.error || "").slice(0, 1000),
+      },
+    };
+  }
+
+  function ankiFieldsForReaderCard(note, card) {
+    var fields = note && note.fields && typeof note.fields === "object"
+      ? note.fields : {};
+    var names = Object.keys(fields);
+    function named(wanted) {
+      var lower = wanted.toLowerCase();
+      for (var index = 0; index < names.length; index += 1) {
+        if (names[index].toLowerCase() === lower) return names[index];
+      }
+      return null;
+    }
+    function ordered() {
+      return names.slice().sort(function (left, right) {
+        var leftOrder = Number(fields[left] && fields[left].order);
+        var rightOrder = Number(fields[right] && fields[right].order);
+        if (!Number.isFinite(leftOrder)) leftOrder = names.indexOf(left);
+        if (!Number.isFinite(rightOrder)) rightOrder = names.indexOf(right);
+        return leftOrder - rightOrder;
+      });
+    }
+    function currentValue(name) {
+      var field = name && fields[name];
+      if (field && typeof field === "object" &&
+          typeof field.value === "string") return field.value;
+      return typeof field === "string" ? field : "";
+    }
+    // Windows addNote owns this exact footer. Semantic edits replace card
+    // text, while the recorded source must remain available on the Anki card.
+    function provenanceFooter(name) {
+      var value = currentValue(name);
+      var marker = '<hr><div style="font-size:0.85em;color:#666;">来源：';
+      var offset = value.lastIndexOf(marker);
+      if (offset < 0) return "";
+      var suffix = value.slice(offset);
+      return /<\/div>\s*$/.test(suffix) ? suffix : "";
+    }
+    var result = {};
+    if (card.type === "cloze") {
+      var textField = named("Text") || named("Cloze") || ordered()[0];
+      if (!textField) throw directError(
+        "Anki note 没有可更新的挖空字段",
+        "BW_READER_ANKI_FIELD_MAP",
+        false
+      );
+      result[textField] = String(card.cloze || "") +
+        provenanceFooter(textField);
+      return result;
+    }
+    var front = named("Front") || named("正面");
+    var back = named("Back") || named("背面");
+    var fallbacks = ordered();
+    front = front || fallbacks[0];
+    back = back || fallbacks.filter(function (name) { return name !== front; })[0];
+    if (!front) throw directError(
+      "Anki note 没有可更新的正面字段",
+      "BW_READER_ANKI_FIELD_MAP",
+      false
+    );
+    if (!back) {
+      result[front] = String(card.front || "") + "<hr>" +
+        String(card.back || "") + provenanceFooter(front);
+      return result;
+    }
+    result[front] = String(card.front || "");
+    result[back] = String(card.back || "") + provenanceFooter(back);
+    return result;
+  }
+
+  function operatePiAnkiCard(payload) {
+    payload = Object.assign({}, payload);
+    // Pi owns the sync step for every successful mutation.  syncMode is a
+    // Windows bridge scheduling choice and is intentionally not part of the
+    // protected Pi endpoint contract.
+    delete payload.syncMode;
+    // @interaction learning.anki-card.operate
+    return fetch("/pdf/api/anki-card-operation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (body) {
+        if (!response.ok || !body || body.ok !== true) {
+          var error = directError(
+            String(body && (body.error || body.message) ||
+              "Pi AnkiConnect 操作失败").slice(0, 1000),
+            String(body && body.code || "BW_READER_PI_ANKI_OPERATION"),
+            response.status >= 500
+          );
+          error.outcomeUnknown = response.status === 409 &&
+            String(body && body.code || "").toLowerCase()
+              .indexOf("unknown") >= 0;
+          throw error;
+        }
+        return body;
+      });
+    });
+  }
+
+  function readProjectedAnkiNotes(target, noteIds) {
+    if (target === "readerpc") {
+      return operateLocalAnkiCard({
+        operation: "read-notes",
+        noteIds: noteIds,
+      });
+    }
+    if (target === "pi-legacy") {
+      return operatePiAnkiCard({
+        operation: "read-notes",
+        noteIds: noteIds,
+      });
+    }
+    return Promise.reject(directError(
+      "当前 Anki 投影不支持可靠的外部读取或修改:" + target,
+      "BW_READER_ANKI_TARGET_UNSUPPORTED",
+      false
+    ));
+  }
+
+  function writeProjectedAnki(target, operation, mutationId, receipt, card) {
+    var noteIds = Array.isArray(receipt && receipt.noteIds)
+      ? receipt.noteIds.map(Number).filter(function (id) {
+        return Number.isSafeInteger(id) && id > 0;
+      }) : [];
+    if (!noteIds.length) {
+      return Promise.reject(directError(
+        "Anki 投影没有可验证的 note ID",
+        "BW_READER_ANKI_NOTE_ID_MISSING",
+        false
+      ));
+    }
+    if (operation === "delete") {
+      var deletePayload = {
+        operation: "delete-notes",
+        mutationId: mutationId,
+        noteIds: noteIds,
+        syncMode: "background",
+      };
+      return target === "readerpc"
+        ? operateLocalAnkiCard(deletePayload)
+        : (target === "pi-legacy"
+          ? operatePiAnkiCard(deletePayload)
+          : Promise.reject(directError(
+            "AnkiMobile 目前没有可靠的按 ID 删除接口",
+            "BW_READER_ANKI_TARGET_UNSUPPORTED",
+            false
+          )));
+    }
+    return readProjectedAnkiNotes(target, noteIds).then(function (readResult) {
+      var notes = Array.isArray(readResult.notes)
+        ? readResult.notes
+        : (Array.isArray(readResult.result) ? readResult.result : []);
+      var byId = {};
+      notes.forEach(function (note) {
+        var noteId = Number(note.noteId != null ? note.noteId : note.note_id);
+        if (Number.isSafeInteger(noteId) && noteId > 0) byId[noteId] = note;
+      });
+      var chain = Promise.resolve([]);
+      noteIds.forEach(function (noteId, index) {
+        chain = chain.then(function (results) {
+          var note = byId[noteId];
+          if (!note) throw directError(
+            "Anki 找不到投影 note:" + noteId,
+            "BW_READER_ANKI_NOTE_NOT_FOUND",
+            false
+          );
+          var updatePayload = {
+            operation: "update-note-fields",
+            mutationId: mutationId + ":" + index,
+            noteId: noteId,
+            fields: ankiFieldsForReaderCard(note, card),
+            syncMode: "background",
+          };
+          return (target === "readerpc"
+            ? operateLocalAnkiCard(updatePayload)
+            : operatePiAnkiCard(updatePayload)).then(function (result) {
+              results.push(result);
+              return results;
+            });
+        });
+      });
+      return chain.then(function (results) {
+        var failedSync = results.find(function (result) {
+          var status = result && result.anki_web_sync &&
+            result.anki_web_sync.status;
+          return status === "failed" || status === "unknown";
+        });
+        return Object.assign({}, results[results.length - 1] || {}, {
+          operation: "update-note-fields",
+          anki_local_applied: results.every(function (result) {
+            return result.anki_local_applied === true ||
+              result.anki_local_applied &&
+                result.anki_local_applied.status === "succeeded";
+          }),
+          anki_local_status: "succeeded",
+          anki_web_sync: failedSync
+            ? failedSync.anki_web_sync
+            : (results[results.length - 1] || {}).anki_web_sync,
+        });
+      });
+    });
+  }
+
+  function persistLearningCardReceipt(repo, id, cardIndex, target, receipt,
+      storageMutationId) {
+    return repo.load(id).then(function (current) {
+      return repo.recordAnkiReceipt(id, cardIndex, target, receipt, {
+        ifStateRev: Number(current.stateRev || 0),
+        mutationId: storageMutationId,
+      });
+    });
+  }
+
+  function projectLearningCardMutation(repo, record, cardIndex, operation,
+      mutationId, card) {
+    var state = record.states[String(cardIndex)] || {};
+    var projections = state.projections && state.projections.anki || {};
+    var targets = Object.keys(projections).filter(function (target) {
+      var receipt = projections[target] || {};
+      // A known failed attempt still identifies a real external note and may
+      // be safely retried by a later, newly identified semantic mutation.
+      // Pending/unknown outcomes remain fenced because their side effect may
+      // already have happened.
+      return (receipt.status === "succeeded" || receipt.status === "failed") &&
+        Array.isArray(receipt.noteIds) && receipt.noteIds.length;
+    });
+    var results = {};
+    var chain = Promise.resolve(record);
+    targets.forEach(function (target, targetIndex) {
+      chain = chain.then(function (current) {
+        var externalMutation = mutationId + ":" + target;
+        return persistLearningCardReceipt(repo, record.id, cardIndex, target, {
+          status: "pending",
+          mutationId: externalMutation,
+          noteIds: projections[target].noteIds,
+          cardIds: projections[target].cardIds || [],
+          updatedAt: Date.now(),
+          detail: {
+            operation: operation,
+            reader_applied: { status: "succeeded" },
+            anki_local_applied: { status: "pending" },
+            anki_web_sync: { status: "not-requested" },
+          },
+        }, mutationId + ":pending:" + targetIndex).then(function (pending) {
+          return writeProjectedAnki(
+            target, operation, externalMutation, projections[target], card
+          ).then(function (external) {
+            var compact = compactAnkiOperationResult(external);
+            results[target] = compact;
+            return persistLearningCardReceipt(repo, record.id, cardIndex, target, {
+              status: compact.anki_local_applied.status === "succeeded"
+                ? "succeeded"
+                : (compact.anki_local_applied.status === "unknown"
+                  ? "unknown" : "failed"),
+              mutationId: externalMutation,
+              noteIds: projections[target].noteIds,
+              cardIds: projections[target].cardIds || [],
+              updatedAt: Date.now(),
+              error: compact.anki_local_applied.status === "succeeded"
+                ? "" : "AnkiConnect 操作未成功",
+              detail: Object.assign({
+                operation: operation,
+                reader_applied: { status: "succeeded" },
+              }, compact, operation === "delete" ? {
+                delete_scope: "note",
+                deleted_note_ids: projections[target].noteIds,
+              } : {}),
+            }, mutationId + ":final:" + targetIndex);
+          }).catch(function (error) {
+            var unknown = error && error.outcomeUnknown === true;
+            results[target] = {
+              operation: operation,
+              anki_local_applied: { status: unknown ? "unknown" : "failed" },
+              anki_web_sync: { status: "not-requested" },
+              code: String(error && error.code || "BW_READER_ANKI_OPERATION"),
+            };
+            return persistLearningCardReceipt(repo, record.id, cardIndex, target, {
+              status: unknown ? "unknown" : "failed",
+              mutationId: externalMutation,
+              noteIds: projections[target].noteIds,
+              cardIds: projections[target].cardIds || [],
+              updatedAt: Date.now(),
+              error: String(error && error.message || error || "AnkiConnect 操作失败")
+                .slice(0, 1000),
+              detail: Object.assign({
+                operation: operation,
+                reader_applied: { status: "succeeded" },
+              }, results[target]),
+            }, mutationId + ":failed:" + targetIndex);
+          });
+        });
+      });
+    });
+    return chain.then(function (latest) {
+      return { record: latest, external_results: results };
+    });
+  }
+
+  function nativeReaderLearningCardMutate(raw) {
+    var value = raw && typeof raw === "object" ? raw : {};
+    var operation = String(value.operation || "");
+    var required = operation === "edit"
+      ? ["operation", "mutationId", "id", "cardIndex", "expectedEntityRev",
+        "externalPolicy", "card"]
+      : ["operation", "mutationId", "id", "cardIndex", "expectedStateRev",
+        "externalPolicy"];
+    exactObject(value, required, [], "Reader 学习卡修改");
+    if (operation !== "edit" && operation !== "delete") {
+      return Promise.reject(directError(
+        "Reader 学习卡操作无效", "BW_READER_LEARNING_CARD_PARAMS", false
+      ));
+    }
+    var mutationId = safeText(value.mutationId, "mutationId", 160, false);
+    if (!/^lcard_[a-f0-9]{24}$/.test(mutationId) ||
+        (value.externalPolicy !== "reader-only" &&
+          value.externalPolicy !== "sync-if-projected")) {
+      return Promise.reject(directError(
+        "Reader 学习卡 mutationId 或外部策略无效",
+        "BW_READER_LEARNING_CARD_PARAMS",
+        false
+      ));
+    }
+    var id;
+    var cardIndex;
+    var repo;
+    try {
+      id = learningCardId(value.id);
+      cardIndex = learningCardIndex(value.cardIndex);
+      repo = learningCardRepository();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return repo.load(id).then(function (before) {
+      var selected = learningCardPublic(before, cardIndex);
+      if (selected.state.removed === true) {
+        if (operation === "edit") {
+          throw directError(
+            "Reader 学习卡已删除，不能再次编辑",
+            "BW_READER_LEARNING_CARD_REMOVED",
+            false
+          );
+        }
+        if (!Number.isSafeInteger(value.expectedStateRev) ||
+            value.expectedStateRev < 0) {
+          throw directError(
+            "Reader 学习卡删除参数无效",
+            "BW_READER_LEARNING_CARD_PARAMS",
+            false
+          );
+        }
+        if (value.expectedStateRev !== selected.state_revision) {
+          throw directError(
+            "Reader 学习卡状态版本已变化，请重新读取",
+            "BW_READER_LEARNING_CARD_CONFLICT",
+            false
+          );
+        }
+        // Exact replay of an already removed card is locally idempotent.  It
+        // must not issue a second external Anki mutation or overwrite the
+        // terminal/unknown projection receipt attached to the tombstone.
+        return {
+          contract: "reader-learning-card-mutation/1",
+          operation: operation,
+          reader_applied: { status: "succeeded", dedup: true },
+          external_results: {},
+          record: selected,
+        };
+      }
+      var local;
+      var nextCard = selected.card;
+      if (operation === "edit") {
+        if (!Number.isSafeInteger(value.expectedEntityRev) ||
+            value.expectedEntityRev < 0 ||
+            !plainObject(value.card)) {
+          throw directError(
+            "Reader 学习卡编辑参数无效",
+            "BW_READER_LEARNING_CARD_PARAMS",
+            false
+          );
+        }
+        var cards = before.cards.slice();
+        cards[cardIndex] = value.card;
+        nextCard = value.card;
+        local = repo.replaceContent(id, cards, {
+          ifEntityRev: value.expectedEntityRev,
+          mutationId: mutationId + ":reader",
+        });
+      } else {
+        if (!Number.isSafeInteger(value.expectedStateRev) ||
+            value.expectedStateRev < 0 || typeof repo.removeCard !== "function") {
+          throw directError(
+            "Reader 学习卡删除参数无效或仓库尚未升级",
+            "BW_READER_LEARNING_CARD_PARAMS",
+            false
+          );
+        }
+        local = repo.removeCard(id, cardIndex, {
+          ifStateRev: value.expectedStateRev,
+          mutationId: mutationId + ":reader",
+        });
+      }
+      return Promise.resolve(local).then(function (applied) {
+        if (value.externalPolicy === "reader-only") {
+          return {
+            contract: "reader-learning-card-mutation/1",
+            operation: operation,
+            reader_applied: { status: "succeeded" },
+            external_results: {},
+            record: learningCardPublic(applied, cardIndex),
+          };
+        }
+        return projectLearningCardMutation(
+          repo, applied, cardIndex, operation, mutationId, nextCard
+        ).then(function (projection) {
+          return repo.load(id).then(function (latest) {
+            return {
+              contract: "reader-learning-card-mutation/1",
+              operation: operation,
+              reader_applied: { status: "succeeded" },
+              external_results: projection.external_results,
+              record: learningCardPublic(latest, cardIndex),
+            };
+          });
+        });
+      });
+    });
+  }
+
+  window._nativeReaderLearningCardMutate = nativeReaderLearningCardMutate;
+
+  function projectReaderPcReviewRating(detail) {
+    detail = detail && typeof detail === "object" ? detail : {};
+    var record = detail.record;
+    var cardIndex = Number(detail.cardIndex);
+    var ease = Number(detail.ease);
+    if (!record || !Number.isSafeInteger(cardIndex) || cardIndex < 0 ||
+        !Number.isSafeInteger(ease) || ease < 1 || ease > 4 ||
+        !record.states || !record.states[String(cardIndex)]) {
+      return Promise.resolve(null);
+    }
+    var projections = record.states[String(cardIndex)].projections;
+    var receipt = projections && projections.anki &&
+      projections.anki.readerpc;
+    var cardIds = receipt && Array.isArray(receipt.cardIds)
+      ? receipt.cardIds.map(Number).filter(function (id) {
+        return Number.isSafeInteger(id) && id > 0;
+      }) : [];
+    if (!receipt || (receipt.status !== "succeeded" &&
+        receipt.status !== "failed") || cardIds.length !== 1) {
+      return Promise.resolve(null);
+    }
+    var repo = learningCardRepository();
+    var mutationId = randomId("lcard-review-rate");
+    var noteIds = Array.isArray(receipt.noteIds) ? receipt.noteIds : [];
+    return persistLearningCardReceipt(repo, record.id, cardIndex, "readerpc", {
+      status: "pending",
+      mutationId: mutationId,
+      noteIds: noteIds,
+      cardIds: cardIds,
+      updatedAt: Date.now(),
+      detail: {
+        operation: "answer-cards",
+        reader_applied: { status: "succeeded" },
+        anki_local_applied: { status: "pending" },
+        anki_web_sync: { status: "not-requested" },
+      },
+    }, mutationId + ":pending").then(function () {
+      return operateLocalAnkiCard({
+        operation: "answer-cards",
+        mutationId: mutationId,
+        answers: [{ cardId: cardIds[0], ease: ease }],
+        syncMode: "background",
+      });
+    }).then(function (external) {
+      var compact = compactAnkiOperationResult(external);
+      return persistLearningCardReceipt(repo, record.id, cardIndex, "readerpc", {
+        status: compact.anki_local_applied.status === "succeeded"
+          ? "succeeded"
+          : (compact.anki_local_applied.status === "unknown"
+            ? "unknown" : "failed"),
+        mutationId: mutationId,
+        noteIds: noteIds,
+        cardIds: cardIds,
+        updatedAt: Date.now(),
+        detail: Object.assign({
+          operation: "answer-cards",
+          reader_applied: { status: "succeeded" },
+        }, compact),
+      }, mutationId + ":final");
+    }).catch(function (error) {
+      var unknown = error && error.outcomeUnknown === true;
+      return persistLearningCardReceipt(repo, record.id, cardIndex, "readerpc", {
+        status: unknown ? "unknown" : "failed",
+        mutationId: mutationId,
+        noteIds: noteIds,
+        cardIds: cardIds,
+        updatedAt: Date.now(),
+        error: String(error && error.message || error || "AnkiConnect 评分失败")
+          .slice(0, 1000),
+        detail: {
+          operation: "answer-cards",
+          reader_applied: { status: "succeeded" },
+          anki_local_applied: { status: unknown ? "unknown" : "failed" },
+          anki_web_sync: { status: "not-requested" },
+        },
+      }, mutationId + ":failed");
+    });
+  }
+
+  window.addEventListener("rc:learning-card-rated", function (event) {
+    try {
+      Promise.resolve(projectReaderPcReviewRating(event && event.detail))
+        .catch(function () {});
+    } catch (_) {}
+  });
+
+  // Review-mode deletion has already committed the canonical Reader removal.
+  // Project that exact card index to its recorded Anki notes and append the
+  // external outcome to the removed state; never repeat the Reader mutation.
+  window.addEventListener("rc:learning-card-removed", function (event) {
+    var detail = event && event.detail && typeof event.detail === "object"
+      ? event.detail : {};
+    var record = detail.record;
+    var cardIndex = Number(detail.cardIndex);
+    if (!record || !Number.isSafeInteger(cardIndex) || cardIndex < 0 ||
+        !record.states || !record.states[String(cardIndex)] ||
+        record.states[String(cardIndex)].removed !== true) return;
+    var repo;
+    var mutationId;
+    try {
+      repo = learningCardRepository();
+      mutationId = randomId("lcard-review-delete");
+    } catch (_) { return; }
+    projectLearningCardMutation(
+      repo, record, cardIndex, "delete", mutationId, null
+    ).then(function (result) {
+      try {
+        window.dispatchEvent(new CustomEvent(
+          "rc:learning-card-removal-projected",
+          { detail: result }
+        ));
+      } catch (_) {}
+    }).catch(function (error) {
+      try {
+        window.dlog && window.dlog(
+          "复习卡已从 Reader 删除；Anki 投影回执保存失败：" +
+            String(error && error.message || error),
+          "#ff9f0a"
+        );
+      } catch (_) {}
+    });
+  });
+
   function escapeLocalContextText(value) {
     return String(value || "")
       .replace(/\\/g, "\\\\")
@@ -9568,6 +10614,7 @@ if (window.__bwPwaProviderOnly) return;
     },
     lookupJapaneseFallback: lookupJapaneseFallback,
     addLocalAnkiCard: addLocalAnkiCard,
+    operateLocalAnkiCard: operateLocalAnkiCard,
     cancelPreparedGesture: cancelPreparedGesture,
     registerComputerButton: registerComputerButton,
     registerPhoneButton: registerPhoneButton,

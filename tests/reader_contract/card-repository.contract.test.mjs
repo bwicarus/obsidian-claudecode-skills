@@ -252,6 +252,79 @@ test("删除已持久化草稿只写稳定 index tombstone，剩余卡保存与�
   );
 });
 
+test("已确认批次可删除单个稳定 index，删除后只允许追加 Anki 回执", async () => {
+  const { repo } = repository(makeStore("remove-confirmed-index"));
+  await repo.registerDraft({
+    id: CARD_A,
+    cards: [basic("confirmed 0"), basic("confirmed 1")],
+    source: source(),
+  }, { mutationId: "remove-confirmed-seed" });
+  await repo.saveConfirmedCard({
+    id: CARD_A,
+    cardIndex: 0,
+  }, { mutationId: "remove-confirmed-save-0" });
+  const confirmed = await repo.saveConfirmedCard({
+    id: CARD_A,
+    cardIndex: 1,
+  }, { mutationId: "remove-confirmed-save-1" });
+
+  const removed = await repo.removeCard(CARD_A, 0, {
+    mutationId: "remove-confirmed-card-0",
+    ifStateRev: confirmed.stateRev,
+  });
+  assert.equal(removed.cards.length, 2, "批内容不得 splice 或重编号");
+  assert.equal(removed.states["0"].removed, true);
+  assert.equal(removed.states["1"].removed, false);
+  assert.equal(removed.states["1"].phase, "confirmed");
+
+  const projected = await repo.recordAnkiReceipt(CARD_A, 0, "readerpc", {
+    status: "succeeded",
+    mutationId: "anki-delete-card-0",
+    noteIds: [1001],
+    cardIds: [2001],
+  }, {
+    mutationId: "remove-confirmed-receipt",
+    ifStateRev: removed.stateRev,
+  });
+  assert.equal(projected.states["0"].removed, true);
+  assert.equal(
+    projected.states["0"].projections.anki.readerpc.status,
+    "succeeded",
+  );
+
+  await assert.rejects(
+    repo.removeCard(CARD_A, 0, {
+      mutationId: "remove-confirmed-stale-replay",
+      ifStateRev: removed.stateRev,
+    }),
+    (error) => error.code === "BW_CARD_REPOSITORY_CONFLICT",
+  );
+  const replayed = await repo.removeCard(CARD_A, 0, {
+    mutationId: "remove-confirmed-current-replay",
+    ifStateRev: projected.stateRev,
+  });
+  assert.equal(replayed.stateRev, projected.stateRev);
+  assert.deepEqual(
+    replayed.states["0"].projections,
+    projected.states["0"].projections,
+    "重复删除不得覆盖已完成或未知的外部投影回执",
+  );
+
+  for (const forbidden of [
+    { review: { status: "new" } },
+    { flags: { archived: false } },
+    { exactState: { due: 1 } },
+    { projections: { anki: {} } },
+  ]) {
+    await assert.rejects(
+      repo.patchState(CARD_A, 0, forbidden, {
+        mutationId: `removed-forbidden-${Object.keys(forbidden)[0]}`,
+      }),
+      (error) => error.code === "BW_CARD_REPOSITORY_CARD_REMOVED",
+    );
+  }
+});
+
 test("草稿 gid 只允许 cards/source 精确幂等重放，已有记录必须带相同 draftId", async () => {
   const { repo } = repository();
   const originalSource = source({ draftId: "draft-stable-a" });

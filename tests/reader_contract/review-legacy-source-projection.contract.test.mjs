@@ -92,9 +92,21 @@ function loadProductionHelpers() {
     "_legacyMaterialSource",
     "_bookSourceRef",
   );
+  const bookSourceRef = functionSource(
+    "_bookSourceRef",
+    "_removeDisplayMetadata",
+  );
   const removeDisplayMetadata = functionSource(
     "_removeDisplayMetadata",
     "_foldSupplementary",
+  );
+  const sourceLocationPage = functionSource(
+    "_sourceLocationPage",
+    "_sourceDescriptor",
+  );
+  const sourceDescriptor = functionSource(
+    "_sourceDescriptor",
+    "_openSource",
   );
   const sandbox = {
     URL,
@@ -108,11 +120,16 @@ function loadProductionHelpers() {
   vm.runInContext(
     `${sourceFromMaterialNode}
 ${legacyMaterialSource}
+${bookSourceRef}
 ${removeDisplayMetadata}
+${sourceLocationPage}
+${sourceDescriptor}
 globalThis.helpers = {
   sourceFromMaterialNode: _sourceFromMaterialNode,
   legacyMaterialSource: _legacyMaterialSource,
-  removeDisplayMetadata: _removeDisplayMetadata
+  bookSourceRef: _bookSourceRef,
+  removeDisplayMetadata: _removeDisplayMetadata,
+  sourceDescriptor: _sourceDescriptor
 };`,
     sandbox,
   );
@@ -120,6 +137,35 @@ globalThis.helpers = {
 }
 
 const helpers = loadProductionHelpers();
+
+test("source resolver accepts canonical, legacy reader-book, and typed locations", () => {
+  for (const ref of [
+    "book:books/料理.pdf#p14",
+    "reader-book:books/料理.pdf#p14",
+  ]) {
+    const parsed = helpers.bookSourceRef(ref);
+    assert.equal(parsed.file, "books/料理.pdf");
+    assert.equal(parsed.page, 14);
+  }
+
+  const typed = helpers.sourceDescriptor({
+    source: {
+      kind: "reader",
+      documentId: "reader-book:books/typed.pdf",
+      location: { page: 23, anchor: { kind: "pdf-text" } },
+      url: "https://reader.example/pdf/view?file=books%2Ftyped.pdf&page=23",
+    },
+    question: "typed source",
+    answer: "answer",
+  });
+  assert.equal(typed.book.file, "books/typed.pdf");
+  assert.equal(typed.book.page, 23);
+  assert.equal(typed.locations.length, 1);
+  assert.equal(
+    typed.urls[0],
+    "https://reader.example/pdf/view?file=books%2Ftyped.pdf&page=23",
+  );
+});
 
 test("legacy .url and .src promote only strict safe PDF-view material links", () => {
   const urlCard = {

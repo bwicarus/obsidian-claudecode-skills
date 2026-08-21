@@ -1285,6 +1285,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 "context-clear" or
                 "dictionary-lookup" or
                 "anki-add-cards-local" or
+                "anki-card-operation-local" or
                 "log" or
                 ReaderVisualDeliveryProtocol.RegisterType or
                 ReaderVisualDeliveryProtocol.ChunkType or

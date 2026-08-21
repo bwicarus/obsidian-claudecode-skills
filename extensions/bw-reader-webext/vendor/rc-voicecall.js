@@ -1999,6 +1999,48 @@ if (window.__bwPwaProviderOnly) return;
             if (_caCardHasNumber) input.number = _caCardArg.number;
             return target.call(window, input);
           };
+        } else if (_caFn === '_nativeReaderLearningCardMutate') {
+          var _caLearning = _caArgs.length === 1 && _caArgs[0] &&
+            typeof _caArgs[0] === 'object' && !Array.isArray(_caArgs[0])
+            ? _caArgs[0] : null;
+          var _caLearningOperation = _caLearning
+            ? String(_caLearning.operation || '') : '';
+          var _caLearningKeys = _caLearningOperation === 'edit'
+            ? ['operation', 'mutationId', 'id', 'cardIndex',
+              'expectedEntityRev', 'externalPolicy', 'card']
+            : ['operation', 'mutationId', 'id', 'cardIndex',
+              'expectedStateRev', 'externalPolicy'];
+          if (!_caLearning ||
+              (_caLearningOperation !== 'edit' &&
+                _caLearningOperation !== 'delete') ||
+              Object.keys(_caLearning).length !== _caLearningKeys.length ||
+              Object.keys(_caLearning).some(function (key) {
+                return _caLearningKeys.indexOf(key) < 0;
+              }) ||
+              !/^lcard_[0-9a-f]{24}$/.test(
+                String(_caLearning.mutationId || '')
+              ) ||
+              !/^card_[0-9a-f]{4,64}$/.test(
+                String(_caLearning.id || '')
+              ) ||
+              !Number.isSafeInteger(_caLearning.cardIndex) ||
+              _caLearning.cardIndex < 0 || _caLearning.cardIndex > 255 ||
+              ['reader-only', 'sync-if-projected']
+                .indexOf(_caLearning.externalPolicy) < 0 ||
+              (_caLearningOperation === 'edit'
+                ? (!Number.isSafeInteger(_caLearning.expectedEntityRev) ||
+                  _caLearning.expectedEntityRev < 0 ||
+                  !_caLearning.card || typeof _caLearning.card !== 'object' ||
+                  Array.isArray(_caLearning.card) ||
+                  JSON.stringify(_caLearning.card).length > 200000)
+                : (!Number.isSafeInteger(_caLearning.expectedStateRev) ||
+                  _caLearning.expectedStateRev < 0))) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window._nativeReaderLearningCardMutate;
+          _caCall = function (target) {
+            return target.call(window, JSON.parse(JSON.stringify(_caLearning)));
+          };
         } else if (_caFn === '_nativeReaderCreateNote') {
           var _caNote = _caArgs.length === 1 && _caArgs[0] &&
             typeof _caArgs[0] === 'object' && !Array.isArray(_caArgs[0])
@@ -5376,6 +5418,20 @@ if (window.__bwPwaProviderOnly) return;
     } catch (e) {}
     _chipRender();
   }
+  // 正文与侧栏的真正空白共用这个事件。持久三态卡只收回标记态；
+  // 没有标记态的临时输出卡走原关闭流程，不删除任何固定卡仓记录。
+  window.addEventListener('rc:dismiss-transients', function () {
+    (_cards.list || []).slice().forEach(function (card) {
+      if (!card || !card.el || !card.el.isConnected) return;
+      if (card.el.classList.contains('vc-hasdot')) {
+        if (!card.el.classList.contains('vc-dot')) {
+          try { _cardForm(card.el, 'dot'); } catch (e) {}
+        }
+        return;
+      }
+      _cardClose(card);
+    });
+  });
   // 工具卡图层(用户设计:交错重叠,落点按画面当前占用情况算)——左上角锚定,不进右下堆叠
   function _tlayer() {
     var t = document.getElementById('vc-tlayer');

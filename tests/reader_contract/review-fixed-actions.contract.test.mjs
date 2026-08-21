@@ -89,12 +89,17 @@ test("controlled reveal supports answer-only replacement without changing other 
 });
 
 test("review workspace has one bounded face scroller and a fixed bottom improvement dock", () => {
-  // 高度改由用户拖动手柄决定（--rv-h），默认值仍是原来的 min(54vh,520px)：
-  // 用户要求「用一个拖动按钮线拖动调整上方 anki 和下方对话区域的大小」。
-  // 有界这一点没变（仍有 max-height + overflow:hidden），变的只是这个界谁说了算。
+  // 高度改由用户拖动手柄决定（--rv-h）。workspace 不能再用祖先的固定 80%
+  // 限制，否则长对话的 min-content 会把滑块卡死在半屏；实际边界由
+  // _reviewHeightBounds 按侧栏当前可用高度计算。
   assert.match(
     REVIEW,
-    /#asst-review-workspace\{[^}]*height:var\(--rv-h,min\(54vh,520px\)\)[^}]*max-height:80%[^}]*overflow:hidden/,
+    /#asst-review-workspace\{[^}]*flex:0 0 var\(--rv-h,min\(54vh,520px\)\)[^}]*height:var\(--rv-h,min\(54vh,520px\)\)[^}]*max-height:none[^}]*overflow:hidden/,
+  );
+  assert.match(
+    REVIEW,
+    /function _reviewHeightBounds\(\)[\s\S]*?paneHeight - reserved - minThread/,
+    "slider bounds must come from the live pane, not chat message width or min-content",
   );
   assert.match(REVIEW, /touch-action:none/, "拖动手柄必须自己吃掉纵向手势，否则 iOS 当页面滚动");
   assert.match(
@@ -122,16 +127,15 @@ test("review workspace has one bounded face scroller and a fixed bottom improvem
     REVIEW,
     /\.rv-review-controls>\.rv-improve-toggle\{[^}]*flex:0 0 auto[^}]*width:100%/,
   );
-  // 改进面板改成**浮层**（用户：展开的内容应该浮在 anki 卡片上方，而不是占掉实际空间）：
-  // 绝对定位铺满卡片区 + 自己滚动，展开时卡片尺寸一动不动。
+  // 改进面板是卡片内部的底部 sheet：不改变卡片布局，也保留上半张卡作对照。
   assert.match(
     REVIEW,
     /\.rv-improve-panel\{[^}]*position:absolute[^}]*overflow-y:auto/,
   );
   assert.match(
     REVIEW,
-    /\.rv-improve-panel\{[^}]*left:0;right:0;top:0;bottom:0/,
-    "浮层要盖住整个卡片区，而不是只压住底边",
+    /\.rv-improve-panel\{[^}]*left:0;right:0;bottom:0[^}]*max-height:min\(62%,420px\)/,
+    "bottom sheet must leave part of the card visible instead of covering it all",
   );
   assert.match(
     REVIEW,
@@ -158,5 +162,6 @@ test("review workspace has one bounded face scroller and a fixed bottom improvem
   assert.match(
     REVIEW.slice(dockMount, REVIEW.indexOf("function _selectCard", dockMount)),
     /toolbar\.appendChild\(improveToggle\)[\s\S]*?_appendImprovePanel\(reviewControls, card\)[\s\S]*?panel\.appendChild\(reviewControls\)/,
+    "the toggle stays in the toolbar outside the overlay so it can always close it",
   );
 });

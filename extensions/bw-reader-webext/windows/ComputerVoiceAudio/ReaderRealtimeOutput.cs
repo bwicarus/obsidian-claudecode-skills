@@ -349,6 +349,7 @@ internal static class ReaderRealtimeOutputProtocol
         if (fn is not (
             "_nativeReaderUndoLast"
             or "_nativeReaderPageCardMutate"
+            or "_nativeReaderLearningCardMutate"
             or "_nativeReaderCreateNote"
             or "_nativeReaderEditNote"
             or "_nativeReaderMakeNote"
@@ -540,6 +541,96 @@ internal static class ReaderRealtimeOutputProtocol
                     ValidatePageCardReplacementCards(
                         replacement.GetProperty("cards"));
                 }
+            }
+            return;
+        }
+        if (fn is "_nativeReaderLearningCardMutate")
+        {
+            if (args.GetArrayLength() != 1
+                || args[0].ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 学习卡修改需要一个对象");
+            }
+            JsonElement mutation = args[0];
+            DirectJsonValidation.RequireNoDuplicateKeys(mutation);
+            string operation = Text(mutation, "operation", 16);
+            if (operation == "edit")
+            {
+                Exact(
+                    mutation,
+                    "operation",
+                    "mutationId",
+                    "id",
+                    "cardIndex",
+                    "expectedEntityRev",
+                    "externalPolicy",
+                    "card");
+            }
+            else if (operation == "delete")
+            {
+                Exact(
+                    mutation,
+                    "operation",
+                    "mutationId",
+                    "id",
+                    "cardIndex",
+                    "expectedStateRev",
+                    "externalPolicy");
+            }
+            else
+            {
+                throw Invalid("Reader 学习卡操作无效");
+            }
+            string mutationId = Text(mutation, "mutationId", 32);
+            if (mutationId.Length != 30
+                || !mutationId.StartsWith("lcard_", StringComparison.Ordinal)
+                || mutationId[6..].Any(character => character is not (
+                    >= '0' and <= '9' or >= 'a' and <= 'f')))
+            {
+                throw Invalid("Reader 学习卡 mutationId 无效");
+            }
+            string cardId = Text(mutation, "id", 69);
+            if (cardId.Length is < 9 or > 69
+                || !cardId.StartsWith("card_", StringComparison.Ordinal)
+                || cardId[5..].Any(character => character is not (
+                    >= '0' and <= '9' or >= 'a' and <= 'f')))
+            {
+                throw Invalid("Reader 学习卡 id 无效");
+            }
+            if (!mutation.TryGetProperty(
+                    "cardIndex",
+                    out JsonElement indexValue)
+                || indexValue.ValueKind != JsonValueKind.Number
+                || !indexValue.TryGetInt32(out int cardIndex)
+                || cardIndex is < 0 or > 255)
+            {
+                throw Invalid("Reader 学习卡 cardIndex 无效");
+            }
+            string externalPolicy = Text(
+                mutation,
+                "externalPolicy",
+                32);
+            if (externalPolicy is not ("sync-if-projected" or "reader-only"))
+            {
+                throw Invalid("Reader 学习卡外部策略无效");
+            }
+            string revisionName = operation == "edit"
+                ? "expectedEntityRev"
+                : "expectedStateRev";
+            if (!mutation.TryGetProperty(
+                    revisionName,
+                    out JsonElement revisionValue)
+                || revisionValue.ValueKind != JsonValueKind.Number
+                || !revisionValue.TryGetInt64(out long revision)
+                || revision is < 0 or > 9_007_199_254_740_991L)
+            {
+                throw Invalid("Reader 学习卡版本无效");
+            }
+            if (operation == "edit"
+                && !ReaderContextMcpServer.ValidateLearningCardContent(
+                    mutation.GetProperty("card")))
+            {
+                throw Invalid("Reader 学习卡内容无效");
             }
             return;
         }
@@ -1249,7 +1340,9 @@ internal static class ReaderRealtimeOutputProtocol
         }
         return action["fn"] is JsonValue functionValue
             && functionValue.TryGetValue(out string? functionName)
-            && functionName == "_nativeReaderPageCardMutate";
+            && functionName is (
+                "_nativeReaderPageCardMutate"
+                or "_nativeReaderLearningCardMutate");
     }
 
     /// 必填字段全等 + 允许一组具名可选字段。

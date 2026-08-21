@@ -25,6 +25,11 @@ internal sealed class ReaderContextMcpServer
     internal const string PageCardReadToolName = "reader_page_card_read";
     internal const string PageCardEditToolName = "reader_page_card_edit";
     internal const string PageCardDeleteToolName = "reader_page_card_delete";
+    internal const string LearningCardsToolName = "reader_learning_cards";
+    internal const string LearningCardReadToolName = "reader_learning_card_read";
+    internal const string LearningCardEditToolName = "reader_learning_card_edit";
+    internal const string LearningCardDeleteToolName = "reader_learning_card_delete";
+    internal const string ReviewCurrentCardToolName = "reader_review_current_card";
     internal const string SearchToolName = "reader_search";
     internal const string TocToolName = "reader_toc";
     internal const string PageTextToolName = "reader_page_text";
@@ -36,7 +41,7 @@ internal sealed class ReaderContextMcpServer
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
-    internal const string ServerVersion = "1.6.0";
+    internal const string ServerVersion = "1.7.0";
     internal static readonly TimeSpan FreshnessWindow =
         TimeSpan.FromMinutes(3);
 
@@ -1037,6 +1042,54 @@ internal sealed class ReaderContextMcpServer
                     ["openWorldHint"] = false,
                 },
             });
+            if (_queryReaderAsync is not null)
+            {
+                tools.Add(new JsonObject
+                {
+                    ["name"] = LearningCardEditToolName,
+                    ["description"] =
+                        "Replace one canonical Reader learning card selected by "
+                        + "card_* id and cardIndex, guarded by the exact current "
+                        + "entityRevision. By default externalPolicy="
+                        + "sync-if-projected updates every already-projected "
+                        + "Windows/Pi Anki note with AnkiConnect and requests "
+                        + "AnkiWeb sync; reader-only intentionally leaves those "
+                        + "notes unchanged. The result reports Reader, local "
+                        + "Anki and AnkiWeb sync separately. AnkiMobile edits "
+                        + "fail closed when no reliable external note-ID channel "
+                        + "exists. Do not retry an unknown result; read the card.",
+                    ["inputSchema"] = BuildLearningCardEditArgumentsSchema(),
+                    ["annotations"] = new JsonObject
+                    {
+                        ["readOnlyHint"] = false,
+                        ["destructiveHint"] = false,
+                        ["idempotentHint"] = false,
+                        ["openWorldHint"] = false,
+                    },
+                });
+                tools.Add(new JsonObject
+                {
+                    ["name"] = LearningCardDeleteToolName,
+                    ["description"] =
+                        "Remove exactly one canonical Reader learning card "
+                        + "selected by card_* id and cardIndex, guarded by the "
+                        + "current stateRevision. Other cards in the same batch "
+                        + "remain intact. With externalPolicy=sync-if-projected, "
+                        + "the operation also deletes its known external Anki "
+                        + "notes through AnkiConnect, then requests AnkiWeb sync. "
+                        + "Anki deletion is note-level and is reported as such. "
+                        + "The result keeps Reader/local-Anki/AnkiWeb outcomes "
+                        + "separate. Do not retry an unknown result; read the card.",
+                    ["inputSchema"] = BuildLearningCardDeleteArgumentsSchema(),
+                    ["annotations"] = new JsonObject
+                    {
+                        ["readOnlyHint"] = false,
+                        ["destructiveHint"] = true,
+                        ["idempotentHint"] = false,
+                        ["openWorldHint"] = false,
+                    },
+                });
+            }
             tools.Add(new JsonObject
             {
                 ["name"] = NoteCreateToolName,
@@ -1425,6 +1478,50 @@ internal sealed class ReaderContextMcpServer
             });
             tools.Add(new JsonObject
             {
+                ["name"] = LearningCardsToolName,
+                ["description"] =
+                    "List canonical Reader learning cards across the local card "
+                    + "repository. Every item carries stable card_* id plus "
+                    + "cardIndex, full semantic card content, source, review "
+                    + "state, projection receipts, entityRevision and "
+                    + "stateRevision. Use id/contains to narrow large stores. "
+                    + "This is Reader's authoritative data; external Anki note "
+                    + "IDs are projection metadata, never Reader identity. Safe "
+                    + "to retry.",
+                ["inputSchema"] = BuildLearningCardsArgumentsSchema(),
+                ["annotations"] = ReadOnlyAnnotations(),
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = LearningCardReadToolName,
+                ["description"] =
+                    "Read one canonical Reader learning card by its stable "
+                    + "card_* id and stable zero-based cardIndex. Returns the "
+                    + "complete content, complete source, state, external Anki "
+                    + "note/card IDs and current revisions in one call. Use "
+                    + "those revisions directly for edit or delete; no page "
+                    + "placement lookup is required. Safe to retry.",
+                ["inputSchema"] = BuildLearningCardIdentitySchema(),
+                ["annotations"] = ReadOnlyAnnotations(),
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = ReviewCurrentCardToolName,
+                ["description"] =
+                    "Read the complete card currently shown in Reader review "
+                    + "mode, including canonical Reader identity/content/source "
+                    + "and whether the answer is revealed. Returns active=false "
+                    + "when review mode has no current card. Safe to retry.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["properties"] = new JsonObject(),
+                },
+                ["annotations"] = ReadOnlyAnnotations(),
+            });
+            tools.Add(new JsonObject
+            {
                 ["name"] = NotesToolName,
                 ["description"] =
                     "Read the sticky notes in the book that is open, from the "
@@ -1666,6 +1763,180 @@ internal sealed class ReaderContextMcpServer
         return new JsonObject
         {
             ["tools"] = tools,
+        };
+    }
+
+    private static JsonObject BuildLearningCardsArgumentsSchema() => new()
+    {
+        ["type"] = "object",
+        ["additionalProperties"] = false,
+        ["properties"] = new JsonObject
+        {
+            ["id"] = LearningCardIdSchema(),
+            ["contains"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["minLength"] = 1,
+                ["maxLength"] = 256,
+            },
+            ["limit"] = new JsonObject
+            {
+                ["type"] = "integer",
+                ["minimum"] = 1,
+                ["maximum"] = 200,
+                ["default"] = 50,
+            },
+            ["includeRemoved"] = new JsonObject
+            {
+                ["type"] = "boolean",
+                ["default"] = false,
+            },
+        },
+    };
+
+    private static JsonObject BuildLearningCardIdentitySchema() => new()
+    {
+        ["type"] = "object",
+        ["additionalProperties"] = false,
+        ["required"] = new JsonArray("id", "cardIndex"),
+        ["properties"] = new JsonObject
+        {
+            ["id"] = LearningCardIdSchema(),
+            ["cardIndex"] = LearningCardIndexSchema(),
+        },
+    };
+
+    private static JsonObject BuildLearningCardEditArgumentsSchema() => new()
+    {
+        ["type"] = "object",
+        ["additionalProperties"] = false,
+        ["required"] = new JsonArray(
+            "id", "cardIndex", "expectedEntityRevision", "card"),
+        ["properties"] = new JsonObject
+        {
+            ["id"] = LearningCardIdSchema(),
+            ["cardIndex"] = LearningCardIndexSchema(),
+            ["expectedEntityRevision"] = LearningCardRevisionSchema(
+                "entityRevision returned by the latest read or list."),
+            ["externalPolicy"] = LearningCardExternalPolicySchema(),
+            ["card"] = BuildLearningCardContentSchema(),
+        },
+    };
+
+    private static JsonObject BuildLearningCardDeleteArgumentsSchema() => new()
+    {
+        ["type"] = "object",
+        ["additionalProperties"] = false,
+        ["required"] = new JsonArray(
+            "id", "cardIndex", "expectedStateRevision"),
+        ["properties"] = new JsonObject
+        {
+            ["id"] = LearningCardIdSchema(),
+            ["cardIndex"] = LearningCardIndexSchema(),
+            ["expectedStateRevision"] = LearningCardRevisionSchema(
+                "stateRevision returned by the latest read or list."),
+            ["externalPolicy"] = LearningCardExternalPolicySchema(),
+        },
+    };
+
+    private static JsonObject LearningCardIdSchema() => new()
+    {
+        ["type"] = "string",
+        ["pattern"] = "^card_[a-f0-9]{4,64}$",
+        ["description"] = "Stable Reader batch id.",
+    };
+
+    private static JsonObject LearningCardIndexSchema() => new()
+    {
+        ["type"] = "integer",
+        ["minimum"] = 0,
+        ["maximum"] = 255,
+        ["description"] = "Stable zero-based card index inside the batch.",
+    };
+
+    private static JsonObject LearningCardRevisionSchema(string description) =>
+        new()
+        {
+            ["type"] = "integer",
+            ["minimum"] = 0,
+            ["maximum"] = MaximumSafeInteger,
+            ["description"] = description,
+        };
+
+    private static JsonObject LearningCardExternalPolicySchema() => new()
+    {
+        ["type"] = "string",
+        ["enum"] = new JsonArray("sync-if-projected", "reader-only"),
+        ["default"] = "sync-if-projected",
+        ["description"] =
+            "sync-if-projected updates/deletes known Windows or Pi Anki "
+            + "projections and requests AnkiWeb sync; reader-only changes "
+            + "only the Reader repository.",
+    };
+
+    private static JsonObject BuildLearningCardContentSchema()
+    {
+        JsonObject extras = new()
+        {
+            ["deck"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["maxLength"] = 512,
+            },
+            ["reason"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["maxLength"] = 4096,
+            },
+            ["tags"] = new JsonObject
+            {
+                ["type"] = "array",
+                ["maxItems"] = 32,
+                ["uniqueItems"] = true,
+                ["items"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["minLength"] = 1,
+                    ["maxLength"] = 128,
+                    ["pattern"] = "^\\S+$",
+                },
+            },
+        };
+        JsonObject basicProperties = new()
+        {
+            ["type"] = new JsonObject { ["const"] = "basic" },
+            ["front"] = PageCardFaceSchema(),
+            ["back"] = PageCardFaceSchema(),
+        };
+        JsonObject clozeProperties = new()
+        {
+            ["type"] = new JsonObject { ["const"] = "cloze" },
+            ["cloze"] = PageCardClozeFaceSchema(),
+        };
+        foreach ((string key, JsonNode? value) in extras)
+        {
+            basicProperties[key] = value?.DeepClone();
+            clozeProperties[key] = value?.DeepClone();
+        }
+        return new JsonObject
+        {
+            ["oneOf"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["required"] = new JsonArray("type", "front", "back"),
+                    ["properties"] = basicProperties,
+                },
+                new JsonObject
+                {
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["required"] = new JsonArray("type", "cloze"),
+                    ["properties"] = clozeProperties,
+                },
+            },
         };
     }
 
@@ -2650,6 +2921,73 @@ internal sealed class ReaderContextMcpServer
             return;
         }
         if (
+            toolName == LearningCardsToolName
+            && _queryReaderAsync is not null
+        )
+        {
+            if (!TryReadLearningCardsQuery(
+                    arguments,
+                    out JsonObject learningListParameters))
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid Reader learning-card list",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            await RunReaderQueryAsync(
+                id,
+                "learning-cards",
+                learningListParameters,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == LearningCardReadToolName
+            && _queryReaderAsync is not null
+        )
+        {
+            if (!TryReadLearningCardIdentity(
+                    arguments,
+                    out JsonObject learningCardParameters))
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid Reader learning-card identity",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            await RunReaderQueryAsync(
+                id,
+                "learning-card",
+                learningCardParameters,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == ReviewCurrentCardToolName
+            && _queryReaderAsync is not null
+        )
+        {
+            if (!HasNoArguments(arguments))
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid Reader current-review query",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            await RunReaderQueryAsync(
+                id,
+                "review-current",
+                new JsonObject(),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
             toolName == TocToolName
             && _queryReaderAsync is not null
         )
@@ -2807,6 +3145,38 @@ internal sealed class ReaderContextMcpServer
                 id,
                 "client-action",
                 pageCardPayload,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            (toolName == LearningCardEditToolName
+                || toolName == LearningCardDeleteToolName)
+            && _sendOutputAsync is not null
+            && _queryReaderAsync is not null
+        )
+        {
+            string operation = toolName == LearningCardEditToolName
+                ? "edit"
+                : "delete";
+            if (!TryReadLearningCardMutation(
+                    arguments,
+                    operation,
+                    out JsonObject learningPayload,
+                    out string learningId,
+                    out int learningIndex))
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid Reader learning-card mutation",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            await RunLearningCardMutationAsync(
+                id,
+                learningPayload,
+                learningId,
+                learningIndex,
                 cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -3423,12 +3793,110 @@ internal sealed class ReaderContextMcpServer
             cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task SendReaderOutputAsync(
+    private async Task RunLearningCardMutationAsync(
+        JsonNode id,
+        JsonObject payload,
+        string cardId,
+        int cardIndex,
+        CancellationToken cancellationToken)
+    {
+        ReaderRealtimeOutputAck? ack = await SendReaderOutputAsync(
+            id,
+            "client-action",
+            payload,
+            cancellationToken,
+            expectedRangeRef: null,
+            writeResult: false).ConfigureAwait(false);
+        if (ack is null)
+        {
+            return;
+        }
+
+        JsonObject result = new()
+        {
+            ["contract"] = "reader-learning-card-mutation-tool/1",
+            ["ok"] = true,
+            ["outcome"] = ack.Outcome,
+            ["id"] = cardId,
+            ["cardIndex"] = cardIndex,
+            ["verification"] = new JsonObject
+            {
+                ["status"] = "unavailable",
+                ["reason"] =
+                    "Reader mutation applied, but the updated card could not "
+                    + "be read back in this call.",
+            },
+        };
+        try
+        {
+            JsonObject snapshot = BuildToolPayload();
+            ReaderQueryRequest? request = BuildQueryRequest(
+                snapshot,
+                "learning-card",
+                new JsonObject
+                {
+                    ["id"] = cardId,
+                    ["cardIndex"] = cardIndex,
+                });
+            if (request is not null)
+            {
+                ReaderQueryResponse response = await _queryReaderAsync!(
+                    request,
+                    cancellationToken).ConfigureAwait(false);
+                if (response.Status == "ok"
+                    && response.SourceInstanceId == request.SourceInstanceId
+                    && response.SnapshotRevision == request.SnapshotRevision
+                    && response.File == request.File
+                    && response.Query == request.Query)
+                {
+                    ReaderQueryProtocol.RequireBoundedJson(
+                        response.Result,
+                        ReaderQueryProtocol.MaximumLearningCardResultBytes);
+                    result["verification"] = new JsonObject
+                    {
+                        ["status"] = "succeeded",
+                        ["card"] = JsonNode.Parse(
+                            response.Result.GetRawText()),
+                    };
+                }
+            }
+        }
+        catch (Exception exception) when (
+            exception is ReaderQueryException
+            or DirectProtocolException
+            or JsonException)
+        {
+            result["verification"] = new JsonObject
+            {
+                ["status"] = "unavailable",
+                ["reason"] = exception.Message,
+            };
+        }
+
+        await WriteResultAsync(
+            id,
+            new JsonObject
+            {
+                ["content"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = result.ToJsonString(
+                            DirectBridgeContract.JsonOptions),
+                    },
+                },
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<ReaderRealtimeOutputAck?> SendReaderOutputAsync(
         JsonNode id,
         string kind,
         JsonNode payload,
         CancellationToken cancellationToken,
-        JsonObject? expectedRangeRef = null)
+        JsonObject? expectedRangeRef = null,
+        bool writeResult = true)
     {
         await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
         JsonObject current = BuildToolPayload();
@@ -3445,7 +3913,7 @@ internal sealed class ReaderContextMcpServer
                 "BW_READER_HIGHLIGHT_RANGE_STALE",
                 "高亮 marker 范围已过期、顺序无效或不再属于当前书页。请重新读取 Reader 上下文；不会回退全文搜索。",
                 cancellationToken).ConfigureAwait(false);
-            return;
+            return null;
         }
         ReaderRealtimeOutputRequest? request;
         try
@@ -3464,7 +3932,7 @@ internal sealed class ReaderContextMcpServer
                 exception.Code,
                 exception.Message,
                 cancellationToken).ConfigureAwait(false);
-            return;
+            return null;
         }
         if (request is null)
         {
@@ -3473,7 +3941,7 @@ internal sealed class ReaderContextMcpServer
                 "BW_READER_REALTIME_OUTPUT_SOURCE_NOT_READY",
                 "当前快照没有可精确定位的在线 App 或扩展来源。请先重新读取 Reader 上下文。",
                 cancellationToken).ConfigureAwait(false);
-            return;
+            return null;
         }
 
         if (_probeOutputSourceAsync is not null)
@@ -3492,7 +3960,7 @@ internal sealed class ReaderContextMcpServer
                     exception.Code,
                     exception.Message,
                     cancellationToken).ConfigureAwait(false);
-                return;
+                return null;
             }
             if (!status.Online)
             {
@@ -3501,7 +3969,7 @@ internal sealed class ReaderContextMcpServer
                     "BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE",
                     "当前 Reader 页面仍可读取缓存，但实时来源已离线；请重新打开或唤醒该页面后再试。",
                     cancellationToken).ConfigureAwait(false);
-                return;
+                return null;
             }
         }
 
@@ -3520,7 +3988,7 @@ internal sealed class ReaderContextMcpServer
                     exception.Code,
                     exception.Message,
                     cancellationToken).ConfigureAwait(false);
-                return;
+                return null;
             }
         }
 
@@ -3537,7 +4005,12 @@ internal sealed class ReaderContextMcpServer
                 exception.Code,
                 exception.Message,
                 cancellationToken).ConfigureAwait(false);
-            return;
+            return null;
+        }
+
+        if (!writeResult)
+        {
+            return ack;
         }
 
         await WriteResultAsync(
@@ -3585,6 +4058,7 @@ internal sealed class ReaderContextMcpServer
                 },
             },
             cancellationToken).ConfigureAwait(false);
+        return ack;
     }
 
     private async Task HandleCapabilityGuideToolCallAsync(
@@ -3970,6 +4444,339 @@ internal sealed class ReaderContextMcpServer
             exception is JsonException
             or DirectProtocolException
             or ReaderRealtimeOutputException)
+        {
+            return false;
+        }
+    }
+
+    internal static bool TryReadLearningCardsQuery(
+        JsonElement arguments,
+        out JsonObject parameters)
+    {
+        parameters = new JsonObject();
+        if (arguments.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(arguments);
+            HashSet<string> allowed = new(
+                ["id", "contains", "limit", "includeRemoved"],
+                StringComparer.Ordinal);
+            if (arguments.EnumerateObject().Any(
+                    property => !allowed.Contains(property.Name)))
+            {
+                return false;
+            }
+            if (arguments.TryGetProperty("id", out JsonElement idValue))
+            {
+                if (idValue.ValueKind != JsonValueKind.String
+                    || idValue.GetString() is not string id
+                    || !IsLearningCardId(id))
+                {
+                    return false;
+                }
+                parameters["id"] = id;
+            }
+            if (arguments.TryGetProperty(
+                    "contains",
+                    out JsonElement containsValue))
+            {
+                if (containsValue.ValueKind != JsonValueKind.String
+                    || containsValue.GetString() is not string contains
+                    || string.IsNullOrWhiteSpace(contains)
+                    || contains.Length > 256)
+                {
+                    return false;
+                }
+                parameters["contains"] = contains;
+            }
+            if (arguments.TryGetProperty("limit", out JsonElement limitValue))
+            {
+                if (limitValue.ValueKind != JsonValueKind.Number
+                    || !limitValue.TryGetInt32(out int limit)
+                    || limit is < 1 or > 200)
+                {
+                    return false;
+                }
+                parameters["limit"] = limit;
+            }
+            if (arguments.TryGetProperty(
+                    "includeRemoved",
+                    out JsonElement removedValue))
+            {
+                if (removedValue.ValueKind
+                    is not (JsonValueKind.True or JsonValueKind.False))
+                {
+                    return false;
+                }
+                parameters["includeRemoved"] =
+                    removedValue.ValueKind == JsonValueKind.True;
+            }
+            return true;
+        }
+        catch (DirectProtocolException)
+        {
+            parameters = new JsonObject();
+            return false;
+        }
+    }
+
+    internal static bool TryReadLearningCardIdentity(
+        JsonElement arguments,
+        out JsonObject parameters)
+    {
+        parameters = new JsonObject();
+        if (arguments.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(arguments);
+            JsonProperty[] fields = arguments.EnumerateObject().ToArray();
+            if (fields.Length != 2
+                || !arguments.TryGetProperty("id", out JsonElement idValue)
+                || idValue.ValueKind != JsonValueKind.String
+                || idValue.GetString() is not string id
+                || !IsLearningCardId(id)
+                || !arguments.TryGetProperty(
+                    "cardIndex",
+                    out JsonElement indexValue)
+                || indexValue.ValueKind != JsonValueKind.Number
+                || !indexValue.TryGetInt32(out int cardIndex)
+                || cardIndex is < 0 or > 255)
+            {
+                return false;
+            }
+            HashSet<string> names = fields
+                .Select(field => field.Name)
+                .ToHashSet(StringComparer.Ordinal);
+            if (!names.SetEquals(new[] { "id", "cardIndex" }))
+            {
+                return false;
+            }
+            parameters["id"] = id;
+            parameters["cardIndex"] = cardIndex;
+            return true;
+        }
+        catch (DirectProtocolException)
+        {
+            parameters = new JsonObject();
+            return false;
+        }
+    }
+
+    internal static bool TryReadLearningCardMutation(
+        JsonElement arguments,
+        string operation,
+        out JsonObject payload,
+        out string cardId,
+        out int cardIndex)
+    {
+        payload = new JsonObject();
+        cardId = string.Empty;
+        cardIndex = -1;
+        if (arguments.ValueKind != JsonValueKind.Object
+            || operation is not ("edit" or "delete"))
+        {
+            return false;
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(arguments);
+            HashSet<string> expected = new(
+                operation == "edit"
+                    ? ["id", "cardIndex", "expectedEntityRevision", "card"]
+                    : ["id", "cardIndex", "expectedStateRevision"],
+                StringComparer.Ordinal);
+            if (arguments.TryGetProperty("externalPolicy", out _))
+            {
+                expected.Add("externalPolicy");
+            }
+            HashSet<string> actual = arguments.EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal);
+            if (!actual.SetEquals(expected)
+                || !arguments.TryGetProperty("id", out JsonElement idValue)
+                || idValue.ValueKind != JsonValueKind.String
+                || idValue.GetString() is not string id
+                || !IsLearningCardId(id)
+                || !arguments.TryGetProperty(
+                    "cardIndex",
+                    out JsonElement indexValue)
+                || indexValue.ValueKind != JsonValueKind.Number
+                || !indexValue.TryGetInt32(out int index)
+                || index is < 0 or > 255)
+            {
+                return false;
+            }
+            string externalPolicy = "sync-if-projected";
+            if (arguments.TryGetProperty(
+                    "externalPolicy",
+                    out JsonElement externalValue))
+            {
+                if (externalValue.ValueKind != JsonValueKind.String
+                    || externalValue.GetString() is not string policy
+                    || policy is not ("sync-if-projected" or "reader-only"))
+                {
+                    return false;
+                }
+                externalPolicy = policy;
+            }
+            string revisionName = operation == "edit"
+                ? "expectedEntityRevision"
+                : "expectedStateRevision";
+            JsonElement revisionValue = arguments.GetProperty(revisionName);
+            if (revisionValue.ValueKind != JsonValueKind.Number
+                || !revisionValue.TryGetInt64(out long revision)
+                || revision is < 0 or > MaximumSafeInteger)
+            {
+                return false;
+            }
+            JsonObject mutation = new()
+            {
+                ["operation"] = operation,
+                ["mutationId"] =
+                    "lcard_" + Guid.NewGuid().ToString("N")[..24],
+                ["id"] = id,
+                ["cardIndex"] = index,
+                ["externalPolicy"] = externalPolicy,
+                [operation == "edit"
+                    ? "expectedEntityRev"
+                    : "expectedStateRev"] = revision,
+            };
+            if (operation == "edit")
+            {
+                JsonElement card = arguments.GetProperty("card");
+                if (!ValidateLearningCardContent(card))
+                {
+                    return false;
+                }
+                mutation["card"] = JsonNode.Parse(card.GetRawText());
+            }
+            JsonObject candidate = new()
+            {
+                ["fn"] = "_nativeReaderLearningCardMutate",
+                ["args"] = new JsonArray { mutation },
+            };
+            payload = ReaderRealtimeOutputProtocol.ValidatePayload(
+                "client-action",
+                candidate) as JsonObject
+                ?? throw new JsonException(
+                    "Reader learning-card mutation is empty");
+            cardId = id;
+            cardIndex = index;
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is JsonException
+            or DirectProtocolException
+            or ReaderRealtimeOutputException
+            or InvalidOperationException
+            or KeyNotFoundException)
+        {
+            payload = new JsonObject();
+            cardId = string.Empty;
+            cardIndex = -1;
+            return false;
+        }
+    }
+
+    private static bool IsLearningCardId(string value) =>
+        value.Length is >= 9 and <= 69
+        && value.StartsWith("card_", StringComparison.Ordinal)
+        && value[5..].All(character => character is
+            >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    internal static bool ValidateLearningCardContent(JsonElement card)
+    {
+        if (card.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(card);
+            if (!card.TryGetProperty("type", out JsonElement typeValue)
+                || typeValue.ValueKind != JsonValueKind.String
+                || typeValue.GetString() is not string type)
+            {
+                return false;
+            }
+            HashSet<string> required = type == "basic"
+                ? new(["type", "front", "back"], StringComparer.Ordinal)
+                : type == "cloze"
+                    ? new(["type", "cloze"], StringComparer.Ordinal)
+                    : new(StringComparer.Ordinal);
+            if (!required.Any())
+            {
+                return false;
+            }
+            HashSet<string> allowed = new(required, StringComparer.Ordinal)
+            {
+                "deck", "reason", "tags",
+            };
+            HashSet<string> actual = card.EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal);
+            if (!required.IsSubsetOf(actual) || !actual.IsSubsetOf(allowed))
+            {
+                return false;
+            }
+            if (type == "basic"
+                && (!TryReadPageCardFace(card, "front", allowEmpty: false)
+                    || !TryReadPageCardFace(card, "back", allowEmpty: false)))
+            {
+                return false;
+            }
+            if (type == "cloze")
+            {
+                if (!TryReadPageCardFace(card, "cloze", allowEmpty: false)
+                    || !ContainsPageCardClozeDeletion(
+                        card.GetProperty("cloze").GetString() ?? string.Empty))
+                {
+                    return false;
+                }
+            }
+            foreach ((string name, int maximum) in new[]
+            {
+                ("deck", 512), ("reason", 4096),
+            })
+            {
+                if (card.TryGetProperty(name, out JsonElement value)
+                    && (value.ValueKind != JsonValueKind.String
+                        || (value.GetString() ?? string.Empty).Length > maximum
+                        || (value.GetString() ?? string.Empty).IndexOf('\0') >= 0))
+                {
+                    return false;
+                }
+            }
+            if (card.TryGetProperty("tags", out JsonElement tags))
+            {
+                if (tags.ValueKind != JsonValueKind.Array
+                    || tags.GetArrayLength() > 32)
+                {
+                    return false;
+                }
+                HashSet<string> seen = new(StringComparer.Ordinal);
+                foreach (JsonElement tagValue in tags.EnumerateArray())
+                {
+                    if (tagValue.ValueKind != JsonValueKind.String
+                        || tagValue.GetString() is not string tag
+                        || string.IsNullOrWhiteSpace(tag)
+                        || tag.Length > 128
+                        || tag.Any(character => char.IsWhiteSpace(character))
+                        || !seen.Add(tag))
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+        catch (DirectProtocolException)
         {
             return false;
         }

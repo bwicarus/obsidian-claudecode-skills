@@ -888,7 +888,7 @@
     '#asst-fab:active{transform:scale(.92)}' +
     '#side-pane-asst{position:relative}' +
     '#side-pane-asst.active{display:flex;flex-direction:column;overflow:hidden;height:100%}' +
-    '#asst-thread{flex:1 1 auto;overflow-y:auto;padding:12px 12px 12px 30px;display:flex;flex-direction:column;gap:10px;-webkit-overflow-scrolling:touch;min-width:0;min-height:0;max-width:100%;box-sizing:border-box;overscroll-behavior:contain;touch-action:pan-y;scrollbar-width:none}' +   // contain+pan-y:滚到头不把滚动链漏给底下 PDF(否则阅读器在浮层下偷偷滚→IO 渲页=卡)
+    '#asst-thread{flex:1 1 0;overflow-y:auto;padding:12px 12px 12px 30px;display:flex;flex-direction:column;gap:10px;-webkit-overflow-scrolling:touch;min-width:0;min-height:0;max-width:100%;box-sizing:border-box;overscroll-behavior:contain;touch-action:pan-y;scrollbar-width:none}' +   // 0 basis:历史消息再长也只在自己的滚动区内计算，不反向挤压复习区滑块
     '#asst-thread::-webkit-scrollbar,#asst-ta::-webkit-scrollbar,.ams-mask *::-webkit-scrollbar{width:0;height:0;display:none}' +
     '#asst-ta,.ams-mask *{scrollbar-width:none}' +
     /* Codex 式轮次导航：一问一答一短条；当前视口里的轮次提亮，悬停/触摸按曲线向外展开。 */

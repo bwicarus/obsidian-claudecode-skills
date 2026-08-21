@@ -67,7 +67,7 @@ class FakeStdioRunner:
                 "result": {
                     "serverInfo": {
                         "name": "bw-reader-context-snapshot",
-                        "version": "1.6.0",
+                        "version": "1.7.0",
                     },
                 },
             },
@@ -88,6 +88,8 @@ class FakeStdioRunner:
                         {"name": "reader_note_edit"},
                         {"name": "reader_page_card_edit"},
                         {"name": "reader_page_card_delete"},
+                        {"name": "reader_learning_card_edit"},
+                        {"name": "reader_learning_card_delete"},
                         {"name": "reader_note_create"},
                         {"name": "reader_paper_start"},
                         {"name": "reader_undo_last"},
@@ -115,6 +117,9 @@ class FakeStdioRunner:
                         },
                         {"name": "reader_page_cards"},
                         {"name": "reader_page_card_read"},
+                        {"name": "reader_learning_cards"},
+                        {"name": "reader_learning_card_read"},
+                        {"name": "reader_review_current_card"},
                         {"name": "reader_notes"},
                         {"name": "reader_toc"},
                         {"name": "reader_lookup_word"},
@@ -1093,7 +1098,7 @@ class DirectPackageTests(unittest.TestCase):
             responses[0]["result"]["serverInfo"]["version"] = "1.5.0"
             with self.assertRaisesRegex(
                 package.PackageError,
-                "serverInfo 不是 1.6.0 合同",
+                "serverInfo 不是 1.7.0 合同",
             ):
                 package._validate_mcp_smoke_output(
                     self._stdio_result(responses)
@@ -1109,7 +1114,7 @@ class DirectPackageTests(unittest.TestCase):
             ]
             with self.assertRaisesRegex(
                 package.PackageError,
-            "精确 26 工具合同",
+            "精确 31 工具合同",
             ):
                 package._validate_mcp_smoke_output(
                     self._stdio_result(responses)
@@ -1124,7 +1129,7 @@ class DirectPackageTests(unittest.TestCase):
                     item["name"] = "reader_highlight_text"
             with self.assertRaisesRegex(
                 package.PackageError,
-            "精确 26 工具合同",
+            "精确 31 工具合同",
             ):
                 package._validate_mcp_smoke_output(
                     self._stdio_result(responses)

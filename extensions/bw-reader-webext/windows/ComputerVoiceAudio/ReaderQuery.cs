@@ -78,6 +78,7 @@ internal static class ReaderQueryProtocol
     //
     // 所以这个数字由第二条定，不是由帧限定。
     internal const int MaximumResultBytes = 40 * 1024;
+    internal const int MaximumLearningCardResultBytes = 232 * 1024;
     internal const int MaximumResultDepth = 8;
     internal const int MaximumQueryTextCharacters = 256;
 
@@ -85,7 +86,8 @@ internal static class ReaderQueryProtocol
     // 名单之外的名字只可能是错误或攻击，两种都该当场拒绝。
     internal static bool IsQuery(string value) =>
         value is "highlights" or "notes" or "search" or "toc"
-            or "page-text" or "page-cards" or "page-card" or "lookup";
+            or "page-text" or "page-cards" or "page-card" or "lookup"
+            or "learning-cards" or "learning-card" or "review-current";
 
     // 每个查询各自声明适用哪种阅读界面。一刀切放开会让助手在网页上问目录、
     // 在书里问网页锚点 —— 那些请求会走到执行侧才失败，错误信息也说不清缘由。
@@ -105,6 +107,11 @@ internal static class ReaderQueryProtocol
                 kind is "pdf" or "epub",
             "page-cards" => kind is "pdf",
             "page-card" => kind is "pdf",
+            // The canonical learning-card repository is global to Reader, not
+            // scoped to one page.  Manual/free and anchored cards therefore
+            // remain addressable from every Reader surface.
+            "learning-cards" or "learning-card" or "review-current" =>
+                kind is "pdf" or "epub" or "web",
             "toc" => kind is "pdf",
             // 查词与界面无关
             "lookup" => kind is "pdf" or "epub" or "web",
@@ -187,7 +194,11 @@ internal static class ReaderQueryProtocol
         }
         // 执行侧构造结果，桥接不解释它的内容 —— 但必须限住它的体量与深度，
         // 否则一个页面就能让下游解析器陷进去。
-        RequireBoundedJson(result);
+        RequireBoundedJson(
+            result,
+            query is "learning-cards" or "learning-card" or "review-current"
+                ? MaximumLearningCardResultBytes
+                : MaximumResultBytes);
         if (query == "page-card" && status == "ok")
         {
             ValidatePageCardDetailResult(
@@ -467,11 +478,17 @@ internal static class ReaderQueryProtocol
         return false;
     }
 
-    internal static void RequireBoundedJson(JsonElement value)
+    internal static void RequireBoundedJson(JsonElement value) =>
+        RequireBoundedJson(value, MaximumResultBytes);
+
+    internal static void RequireBoundedJson(
+        JsonElement value,
+        int maximumBytes)
     {
         int bytes = System.Text.Encoding.UTF8.GetByteCount(
             value.GetRawText());
-        if (bytes > MaximumResultBytes)
+        if (maximumBytes < 1 || maximumBytes > DirectBridgeContract.MaximumMessageBytes
+            || bytes > maximumBytes)
         {
             throw Invalid("Reader 查询结果超出上限");
         }

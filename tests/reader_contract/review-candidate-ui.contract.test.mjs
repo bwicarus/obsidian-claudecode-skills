@@ -1182,7 +1182,7 @@ test("local repository enumerates confirmed due cards before new cards without P
   assert.doesNotMatch(h.pane.innerHTML, /ARCHIVED|REMOVED|FUTURE/);
 });
 
-test("local rating persists deterministic review state before advancing UI", async () => {
+test("local rating is staged for one action, then persists before external projection", async () => {
   const write = deferred();
   const patchCalls = [];
   let fetchCount = 0;
@@ -1232,10 +1232,15 @@ test("local rating persists deterministic review state before advancing UI", asy
   h.clickAction("show-answer");
   h.clickEase(3);
 
-  assert.equal(h.RC.review.currentCard().question, "LOCAL ONE",
-    "UI must not advance before patchState succeeds");
-  assert.match(h.pane.innerHTML, /ANSWER ONE/);
-  assert.equal(patchCalls.length, 1);
+  assert.equal(h.RC.review.currentCard().question, "LOCAL TWO",
+    "the staged card should advance immediately so Undo remains useful");
+  assert.equal(patchCalls.length, 0,
+    "the rating stays reversible until the next review action");
+  assert.ok(h.findActions("undo-rating").some((button) => !button.disabled));
+
+  h.clickAction("show-answer");
+  assert.equal(patchCalls.length, 1,
+    "revealing the next card commits the staged rating");
   assert.equal(patchCalls[0][0], "card_abcd");
   assert.equal(patchCalls[0][1], 0);
   const review = patchCalls[0][2].review;
@@ -1256,6 +1261,115 @@ test("local rating persists deterministic review state before advancing UI", asy
 
   assert.equal(h.RC.review.currentCard().question, "LOCAL TWO");
   assert.equal(fetchCount, 0);
+});
+
+test("undo restores the staged card exactly without touching Reader or Anki", async () => {
+  const patchCalls = [];
+  let fetchCount = 0;
+  const confirmed = (confirmedAt) => ({
+    phase: "confirmed", removed: false, confirmedAt,
+    review: {
+      status: "new", dueAt: null, lastReviewedAt: null,
+      intervalDays: 0, ease: 0, reps: 0, lapses: 0
+    },
+    flags: { archived: false }, projections: { anki: {} }, exactState: {}
+  });
+  const h = harness({
+    context: {},
+    cardRepository: {
+      async snapshot() {
+        return [{
+          id: "card_undo", stateRev: 3, deleted: false,
+          source: { kind: "reader", sourceId: "source-undo" },
+          cards: [
+            { type: "basic", front: "UNDO ONE", back: "ANSWER ONE" },
+            { type: "basic", front: "UNDO TWO", back: "ANSWER TWO" }
+          ],
+          states: { 0: confirmed(1), 1: confirmed(2) }
+        }];
+      },
+      async patchState(...args) { patchCalls.push(args); }
+    },
+    fetchImpl: async () => {
+      fetchCount += 1;
+      throw new Error("undo must not project to Anki");
+    }
+  });
+
+  await h.RC.review.reload();
+  h.clickAction("show-answer");
+  h.clickEase(2);
+  assert.equal(h.RC.review.currentCard().question, "UNDO TWO");
+
+  assert.equal(h.RC.review.undoLastRating(), true);
+  assert.equal(h.RC.review.currentCard().question, "UNDO ONE");
+  assert.match(h.pane.innerHTML, /ANSWER ONE/,
+    "the restored card remains revealed so the user can re-rate it");
+  assert.equal(patchCalls.length, 0);
+  assert.equal(fetchCount, 0);
+  assert.equal(h.RC.review.undoLastRating(), false,
+    "undo is exactly one step and cannot replay an older review action");
+});
+
+test("review delete removes only the current local card and emits its Anki projection", async () => {
+  const removeCalls = [];
+  const state = (confirmedAt, projections = { anki: {} }) => ({
+    phase: "confirmed", removed: false, confirmedAt,
+    review: {
+      status: "new", dueAt: null, lastReviewedAt: null,
+      intervalDays: 0, ease: 0, reps: 0, lapses: 0
+    },
+    flags: { archived: false }, projections, exactState: {}
+  });
+  const projection = {
+    anki: { "pi-legacy": { status: "succeeded", cardIds: [47001] } }
+  };
+  const h = harness({
+    context: {},
+    cardRepository: {
+      async snapshot() {
+        return [{
+          id: "card_delete", stateRev: 12, deleted: false,
+          source: { kind: "reader", sourceId: "source-delete" },
+          cards: [
+            { type: "basic", front: "DELETE ME", back: "A" },
+            { type: "basic", front: "KEEP ME", back: "B" }
+          ],
+          states: { 0: state(1, projection), 1: state(2) }
+        }];
+      },
+      async removeCard(...args) {
+        removeCalls.push(structuredClone(args));
+        return { id: "card_delete", stateRev: 13, states: {
+          0: { removed: true }, 1: state(2)
+        } };
+      },
+      async patchState() { throw new Error("rating is not part of this test"); }
+    },
+    fetchImpl: async () => { throw new Error("delete is projected by its event owner"); }
+  });
+
+  await h.RC.review.reload();
+  assert.ok(h.RC.review.currentCard(),
+    `missing local delete card: ${h.toasts.join(" | ")} / ${h.pane.innerHTML}`);
+  assert.equal(h.RC.review.currentCard().question, "DELETE ME");
+  assert.ok(h.RC.review.currentCard()._localReview,
+    "the repository queue must retain its local single-card identity");
+  assert.equal(h.findActions("delete-card").length, 1);
+  assert.equal(await h.RC.review.removeCurrent(), true);
+
+  assert.equal(h.RC.review.currentCard().question, "KEEP ME");
+  assert.equal(removeCalls.length, 1);
+  assert.deepEqual(removeCalls[0].slice(0, 2), ["card_delete", 0]);
+  assert.equal(removeCalls[0][2].ifStateRev, 12);
+  const removedEvent = h.events.find((event) =>
+    event.type === "rc:learning-card-removed"
+  );
+  assert.ok(removedEvent, "external Anki sync receives one explicit deletion event");
+  assert.equal(removedEvent.detail.entityId, "card_delete");
+  assert.equal(removedEvent.detail.cardIndex, 0);
+  assert.deepEqual(structuredClone(removedEvent.detail.projections), projection);
+  assert.equal(removedEvent.detail.record.stateRev, 13);
 });
 
 test("failed local patch leaves the revealed card and queue unchanged", async () => {
@@ -1284,7 +1398,9 @@ test("failed local patch leaves the revealed card and queue unchanged", async ()
   await h.RC.review.reload();
   h.clickAction("show-answer");
   h.clickEase(4);
-  await settleAsync();
+  assert.equal(h.RC.review.currentCard(), null,
+    "the only card is visually staged until commit");
+  await h.RC.review.commitPendingRating();
 
   assert.equal(h.RC.review.currentCard().question, "KEEP FRONT");
   assert.match(h.pane.innerHTML, /KEEP BACK/);
@@ -1339,7 +1455,7 @@ test("legacy Anki projection runs only after local Again is durable and cannot r
   await h.RC.review.reload();
   h.clickAction("show-answer");
   h.clickEase(1);
-  await settleAsync();
+  await h.RC.review.commitPendingRating();
 
   assert.deepEqual(order, ["patchState", "fetch"]);
   assert.equal(writtenReview.status, "relearning");
@@ -1376,7 +1492,7 @@ test("zero local cards retains the legacy external queue and answer path", async
   await h.RC.review.reload();
   h.clickAction("show-answer");
   h.clickEase(3);
-  await settleAsync();
+  await h.RC.review.commitPendingRating();
 
   assert.deepEqual(calls.map(([url]) => url), [
     "/pdf/api/review-queue?limit=30",
@@ -1452,14 +1568,14 @@ test("successful ratings complete a card while Again moves it to queue tail", as
 
   h.clickAction("show-answer");
   h.clickEase(3);
-  await settleAsync();
+  await h.RC.review.commitPendingRating();
   assert.equal(h.RC.review.currentCard().id, 82);
   assert.deepEqual(h.getStored().cards.map((card) => card.id), [82, 83]);
   assert.deepEqual(h.getStored().completed_ids, [81]);
 
   h.clickAction("show-answer");
   h.clickEase(1);
-  await settleAsync();
+  await h.RC.review.commitPendingRating();
   assert.equal(h.RC.review.currentCard().id, 83);
   assert.deepEqual(
     h.getStored().cards.map((card) => card.id),
@@ -1504,7 +1620,7 @@ test("HTTP or business rejection restores an optimistically removed card", async
 
   h.clickAction("show-answer");
   h.clickEase(3);
-  await settleAsync();
+  await h.RC.review.commitPendingRating();
 
   assert.deepEqual(h.getStored().cards.map((card) => card.id), [91, 92]);
   assert.deepEqual(h.getStored().completed_ids, []);
@@ -1733,7 +1849,7 @@ test("network TypeError preserves optimistic state and sends one durable outbox 
 
   h.clickAction("show-answer");
   h.clickEase(4);
-  await settleAsync();
+  await h.RC.review.commitPendingRating();
 
   // 同上：评分只该入队一次；事件日志是独立的一条，不参与这里的计数。
   const ratingCalls = h.outboxCalls.filter(([kind]) => kind === "rev");
@@ -1772,7 +1888,8 @@ test("open source permits safe Obsidian and HTTP URLs but rejects unsafe sources
       })
     });
     await h.RC.review.reload();
-    h.RC.review.setImproveExpanded(true);
+    assert.equal(h.findActions("open-source").length, 1,
+      "source must stay in the always-visible review toolbar");
     h.clickAction("open-source");
     return h;
   }

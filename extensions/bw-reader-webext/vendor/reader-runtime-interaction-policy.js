@@ -255,6 +255,15 @@
       { collection: 'card-states', projection: 'review-queue-local-state' },
       { transport: { outbox: true, extensionBridge: true, serviceWorker: 'none' } }
     ),
+    // Reader 本地卡仓先提交；只有已存在精确 Anki note/card ID 时，才通过
+    // 受保护端点执行远端 AnkiConnect 修改并同步 AnkiWeb。离线时不能伪装成功，
+    // 未知 mutation 也不能自动重放。
+    remoteRequired(
+      'learning.anki-card.operate',
+      ['/pdf/api/anki-card-operation'],
+      ['POST'],
+      'Exact Anki note/card mutation and sync require the protected Pi bridge.'
+    ),
     // 复习事件日志。**只记不改调度** —— 它不投影到任何本地集合，存在的意义是
     //   给补投留一份"真实复习时刻"的底账：answerCards 传不了时间戳，离线补投
     //   会被 Anki 记成"补投那一刻",只有这里存着真相。

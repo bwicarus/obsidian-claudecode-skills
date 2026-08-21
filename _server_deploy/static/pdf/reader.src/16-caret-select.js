@@ -284,31 +284,39 @@ function scheduleCheck(delay) {
 document.addEventListener('mouseup', () => scheduleCheck(20));
 document.addEventListener('touchend', () => scheduleCheck(250));   // iPad 长按完释放
 document.addEventListener('selectionchange', () => scheduleCheck(200));
-// 点 toolbar 外 + 既无 native selection 也无 char-layer 选中 + 不在 char-layer 上 → 关 toolbar
+// 点真正空白处统一关选中态。侧栏中的按钮/消息/卡片仍保留自己的交互；
+// char-layer 自己负责改变 PDF 字符选区，不能在 pointer 起点先把它清掉。
 function _shouldCloseToolbar(target) {
   if (toolbar.contains(target)) return false;            // 点在 toolbar 内
   if (target?.closest?.('.char-layer')) return false;    // 点在 char-layer 上（char-layer 自己处理）
-  const t = (window.getSelection().toString() || '').trim();
-  if (t) return false;
-  if (lastSelText && lastSelText.trim()) return false;   // char-layer 选中状态
+  if (target?.closest?.(
+    'button,a,input,textarea,select,option,label,summary,details,' +
+    '[contenteditable="true"],[role="button"],[data-action],[data-q],' +
+    '[data-pane],[onclick],.vc-card,.rc-note,.bw-page-pin,' +
+    '.rv-improve-panel,.asst-msg,.rc-turn,.asst-tool,.ams-mask,' +
+    '#ep-side-settings,#asst-turnrail'
+  )) return false;
   return true;
+}
+function _dismissSelectionTransients() {
+  toolbar.classList.remove('open');
+  document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
+  try { window.getSelection().removeAllRanges(); } catch (_) {}
+  lastSelText = '';
+  _charSel = null;
+  _updateSelPreview('');
 }
 document.addEventListener('mousedown', (e) => {
   if (_shouldCloseToolbar(e.target)) {
-    toolbar.classList.remove('open');
-    document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
-    lastSelText = '';
-    _updateSelPreview('');
+    _dismissSelectionTransients();
   }
 });
 document.addEventListener('touchstart', (e) => {
   if (_shouldCloseToolbar(e.target)) {
-    toolbar.classList.remove('open');
-    document.querySelectorAll('.sel-overlay').forEach(ov => ov.innerHTML = '');
-    lastSelText = '';
-    _updateSelPreview('');
+    _dismissSelectionTransients();
   }
 }, {passive: true});
+window.addEventListener('rc:dismiss-transients', _dismissSelectionTransients);
 
 // 手写起笔时调(pdf-tail._inkBeginGuard):把任何**已有选中/查词框**一把清掉 + 关选中工具栏。
 //   用户点子:画笔工作时选中内容全部取消选中(治 palm 抢在笔前落下、或第一笔误触已经选中的字)。
@@ -322,4 +330,3 @@ window.__clearContentSelection = function () {
   try { var _wp = document.getElementById('word-pop'); if (_wp) _wp.style.display = 'none'; } catch (_) {}   // 关查词/词组小框(共用 #word-pop)
   try { if (window.RC && RC.wordpop && RC.wordpop.clearHls) RC.wordpop.clearHls(); } catch (_) {}            // 清查词高亮
 };
-

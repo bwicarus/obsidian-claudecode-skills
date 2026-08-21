@@ -14421,6 +14421,816 @@ def _anki_review_card_meta(card: dict) -> dict:
     return out
 
 
+# Pi-side, authenticated gateway for explicit Anki note/card operations.  This
+# is intentionally separate from the Reader card repository: /pdf is protected
+# by app.py and the caller must still name exact Anki note/card IDs.  No query
+# strings, deck-wide selectors, or arbitrary AnkiConnect actions cross this
+# boundary.
+_ANKI_CARD_OPERATION_RECEIPTS = (
+    CLAUDE_DIR / "state" / "anki-card-operation-receipts.json"
+)
+_ANKI_CARD_OPERATION_LOCK_FILE = (
+    CLAUDE_DIR / "state" / "anki-card-operation-idempotency.lock"
+)
+_ANKI_CARD_OPERATION_MUTATION_LOCK_DIR = (
+    CLAUDE_DIR / "state" / "anki-card-operation-mutation-locks"
+)
+_ANKI_CARD_OPERATION_CONTRACT = "anki-card-operation-idempotency/1"
+_ANKI_CARD_OPERATION_RECEIPT_LIMIT = 2000
+_ANKI_CARD_OPERATION_COMPLETED_MEMORY = {}
+_ANKI_CARD_READ_OPERATIONS = {"read-notes", "read-cards"}
+_ANKI_CARD_WRITE_OPERATIONS = {
+    "update-note-fields", "delete-notes", "answer-cards", "sync",
+}
+
+
+class _AnkiCardTransportError(RuntimeError):
+    """AnkiConnect may or may not have received the request."""
+
+
+class _AnkiCardProtocolError(RuntimeError):
+    """AnkiConnect returned a response whose outcome cannot be proven."""
+
+
+class _AnkiCardActionError(RuntimeError):
+    """AnkiConnect explicitly rejected the requested action."""
+
+
+def _anki_card_operation_mutation_id(value) -> str:
+    if not isinstance(value, str):
+        return ""
+    mutation_id = value.strip()
+    if (
+        not mutation_id
+        or len(mutation_id) > 64
+        or not re.fullmatch(r"[A-Za-z0-9._:-]+", mutation_id)
+    ):
+        return ""
+    return mutation_id
+
+
+def _anki_card_operation_lock_path(mutation_id: str) -> Path:
+    digest = hashlib.sha256(mutation_id.encode("utf-8")).hexdigest()
+    return _ANKI_CARD_OPERATION_MUTATION_LOCK_DIR / (digest[:2] + ".lock")
+
+
+def _anki_card_operation_fingerprint(payload: dict) -> str:
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _anki_card_operation_receipts_load() -> dict:
+    try:
+        value = json.loads(_ANKI_CARD_OPERATION_RECEIPTS.read_text("utf-8"))
+    except FileNotFoundError:
+        return {"contract": _ANKI_CARD_OPERATION_CONTRACT, "entries": {}}
+    except Exception as ex:
+        raise RuntimeError(
+            "Anki card operation receipt ledger is unreadable"
+        ) from ex
+    if (
+        not isinstance(value, dict)
+        or value.get("contract") != _ANKI_CARD_OPERATION_CONTRACT
+        or not isinstance(value.get("entries"), dict)
+    ):
+        raise RuntimeError("Anki card operation receipt ledger is invalid")
+    for mutation_id, entry in value["entries"].items():
+        if (
+            not _anki_card_operation_mutation_id(mutation_id)
+            or not isinstance(entry, dict)
+            or entry.get("state") not in ("pending", "done")
+            or entry.get("operation") not in _ANKI_CARD_WRITE_OPERATIONS
+            or not re.fullmatch(
+                r"[a-f0-9]{64}", str(entry.get("fingerprint") or "")
+            )
+        ):
+            raise RuntimeError(
+                "Anki card operation receipt entry is invalid"
+            )
+        if entry["state"] == "done" and not isinstance(
+            entry.get("response"), dict
+        ):
+            raise RuntimeError(
+                "Anki card operation receipt response is invalid"
+            )
+    return value
+
+
+def _anki_card_operation_receipts_store(
+    value: dict,
+    protect: tuple[str, ...] = (),
+) -> None:
+    from reader_sidecar_store import atomic_write_json
+
+    entries = value.get("entries") or {}
+    if len(entries) > _ANKI_CARD_OPERATION_RECEIPT_LIMIT:
+        pending = {
+            mutation_id: entry
+            for mutation_id, entry in entries.items()
+            if (entry or {}).get("state") == "pending"
+        }
+        protected = {
+            mutation_id: entries[mutation_id]
+            for mutation_id in protect
+            if mutation_id in entries
+            and (entries[mutation_id] or {}).get("state") == "done"
+        }
+        if (
+            len(pending) + len(protected)
+            > _ANKI_CARD_OPERATION_RECEIPT_LIMIT
+        ):
+            raise RuntimeError(
+                "too many unresolved Anki card operation receipts"
+            )
+        done = sorted(
+            (
+                (mutation_id, entry)
+                for mutation_id, entry in entries.items()
+                if (entry or {}).get("state") == "done"
+                and mutation_id not in protected
+            ),
+            key=lambda pair: (
+                float((pair[1] or {}).get("updated_at") or 0), pair[0],
+            ),
+        )
+        budget = (
+            _ANKI_CARD_OPERATION_RECEIPT_LIMIT
+            - len(pending)
+            - len(protected)
+        )
+        keep_done = dict(done[-budget:]) if budget > 0 else {}
+        value = {
+            "contract": _ANKI_CARD_OPERATION_CONTRACT,
+            "entries": {**keep_done, **protected, **pending},
+        }
+    atomic_write_json(_ANKI_CARD_OPERATION_RECEIPTS, value, indent=None)
+
+
+def _anki_card_operation_claim(
+    mutation_id: str,
+    operation: str,
+    fingerprint: str,
+) -> tuple[str, dict | None]:
+    from reader_sidecar_store import exclusive_lock
+
+    with exclusive_lock(_ANKI_CARD_OPERATION_LOCK_FILE):
+        receipts = _anki_card_operation_receipts_load()
+        entry = receipts["entries"].get(mutation_id)
+        if entry is not None and (
+            entry.get("fingerprint") != fingerprint
+            or entry.get("operation") != operation
+        ):
+            return "reuse", None
+        if entry is not None and entry.get("state") == "done":
+            return "done", dict(entry["response"])
+        if entry is not None:
+            memory = _ANKI_CARD_OPERATION_COMPLETED_MEMORY.get(mutation_id)
+            if (
+                isinstance(memory, tuple)
+                and len(memory) == 2
+                and memory[0] == fingerprint
+                and isinstance(memory[1], dict)
+            ):
+                return "done-memory", dict(memory[1])
+            return "pending", None
+        now = time.time()
+        receipts["entries"][mutation_id] = {
+            "state": "pending",
+            "operation": operation,
+            "fingerprint": fingerprint,
+            "created_at": now,
+            "updated_at": now,
+        }
+        _anki_card_operation_receipts_store(receipts)
+        return "claimed", None
+
+
+def _anki_card_operation_release_claim(
+    mutation_id: str,
+    operation: str,
+    fingerprint: str,
+) -> bool:
+    """Release only when no mutating AnkiConnect call was issued."""
+    from reader_sidecar_store import exclusive_lock
+
+    try:
+        with exclusive_lock(_ANKI_CARD_OPERATION_LOCK_FILE):
+            receipts = _anki_card_operation_receipts_load()
+            entry = receipts["entries"].get(mutation_id)
+            if entry is None:
+                return True
+            if (
+                entry.get("state") != "pending"
+                or entry.get("operation") != operation
+                or entry.get("fingerprint") != fingerprint
+            ):
+                return False
+            del receipts["entries"][mutation_id]
+            _anki_card_operation_receipts_store(receipts)
+            return True
+    except Exception:
+        return False
+
+
+def _anki_card_operation_commit(
+    mutation_id: str,
+    operation: str,
+    fingerprint: str,
+    response: dict,
+) -> bool:
+    from reader_sidecar_store import exclusive_lock
+
+    with exclusive_lock(_ANKI_CARD_OPERATION_LOCK_FILE):
+        receipts = _anki_card_operation_receipts_load()
+        entry = receipts["entries"].get(mutation_id)
+        if (
+            entry is None
+            or entry.get("state") != "pending"
+            or entry.get("operation") != operation
+            or entry.get("fingerprint") != fingerprint
+        ):
+            raise RuntimeError(
+                "Anki card operation claim changed before commit"
+            )
+        done = dict(entry)
+        done.update({
+            "state": "done",
+            "response": response,
+            "updated_at": time.time(),
+        })
+        receipts["entries"][mutation_id] = done
+        try:
+            _anki_card_operation_receipts_store(receipts, (mutation_id,))
+        except Exception:
+            _ANKI_CARD_OPERATION_COMPLETED_MEMORY[mutation_id] = (
+                fingerprint, dict(response),
+            )
+            while (
+                len(_ANKI_CARD_OPERATION_COMPLETED_MEMORY)
+                > _ANKI_CARD_OPERATION_RECEIPT_LIMIT
+            ):
+                _ANKI_CARD_OPERATION_COMPLETED_MEMORY.pop(
+                    next(iter(_ANKI_CARD_OPERATION_COMPLETED_MEMORY))
+                )
+            return False
+        _ANKI_CARD_OPERATION_COMPLETED_MEMORY.pop(mutation_id, None)
+        return True
+
+
+def _anki_card_operation_connect(action: str, params: dict | None = None):
+    """Call one fixed AnkiConnect action and validate its envelope."""
+    import urllib.request
+
+    url = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
+    wire = json.dumps({
+        "action": action,
+        "version": 6,
+        "params": params or {},
+    }).encode("utf-8")
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(
+                url,
+                data=wire,
+                headers={"Content-Type": "application/json"},
+            ),
+            timeout=15,
+        ) as response:
+            raw = response.read()
+    except Exception as ex:
+        raise _AnkiCardTransportError(str(ex)[:160]) from ex
+    try:
+        envelope = json.loads(raw)
+    except Exception as ex:
+        raise _AnkiCardProtocolError("invalid AnkiConnect JSON") from ex
+    if (
+        not isinstance(envelope, dict)
+        or "result" not in envelope
+        or "error" not in envelope
+    ):
+        raise _AnkiCardProtocolError("invalid AnkiConnect response")
+    if envelope.get("error") is not None:
+        raise _AnkiCardActionError(str(envelope["error"])[:160])
+    return envelope.get("result")
+
+
+def _anki_card_operation_ids(value, field: str) -> list[int]:
+    if not isinstance(value, list) or not value or len(value) > 100:
+        raise ValueError(f"{field} must contain 1-100 explicit IDs")
+    result = []
+    for raw in value:
+        if (
+            isinstance(raw, bool)
+            or not isinstance(raw, int)
+            or raw <= 0
+            or raw > 9223372036854775807
+        ):
+            raise ValueError(f"{field} contains an invalid ID")
+        result.append(raw)
+    if len(set(result)) != len(result):
+        raise ValueError(f"{field} contains duplicate IDs")
+    return result
+
+
+def _anki_card_operation_validate(body: dict) -> tuple[str, dict, str]:
+    operation = str(body.get("operation") or "").strip()
+    if operation not in _ANKI_CARD_READ_OPERATIONS | _ANKI_CARD_WRITE_OPERATIONS:
+        raise ValueError("unsupported operation")
+    allowed = {
+        "read-notes": {"operation", "noteIds"},
+        "read-cards": {"operation", "cardIds"},
+        "update-note-fields": {
+            "operation", "mutationId", "noteId", "fields",
+        },
+        "delete-notes": {"operation", "mutationId", "noteIds"},
+        "answer-cards": {"operation", "mutationId", "answers"},
+        "sync": {"operation", "mutationId"},
+    }[operation]
+    unexpected = sorted(set(body) - allowed)
+    if unexpected:
+        raise ValueError("unexpected fields: " + ", ".join(unexpected))
+    payload = {"operation": operation}
+    if operation in ("read-notes", "delete-notes"):
+        payload["noteIds"] = _anki_card_operation_ids(
+            body.get("noteIds"), "noteIds"
+        )
+    elif operation == "read-cards":
+        payload["cardIds"] = _anki_card_operation_ids(
+            body.get("cardIds"), "cardIds"
+        )
+    elif operation == "update-note-fields":
+        note_id = _anki_card_operation_ids(
+            [body.get("noteId")], "noteId"
+        )[0]
+        fields = body.get("fields")
+        if not isinstance(fields, dict) or not fields or len(fields) > 100:
+            raise ValueError("fields must contain 1-100 string fields")
+        clean_fields = {}
+        total = 0
+        for name, value in fields.items():
+            if (
+                not isinstance(name, str)
+                or not name
+                or len(name) > 128
+                or not isinstance(value, str)
+                or len(value) > 1000000
+            ):
+                raise ValueError("fields contains an invalid name or value")
+            total += len(value)
+            clean_fields[name] = value
+        if total > 4000000:
+            raise ValueError("fields payload is too large")
+        payload.update({"noteId": note_id, "fields": clean_fields})
+    elif operation == "answer-cards":
+        answers = body.get("answers")
+        if not isinstance(answers, list) or not answers or len(answers) > 100:
+            raise ValueError("answers must contain 1-100 explicit answers")
+        clean_answers = []
+        card_ids = []
+        for answer in answers:
+            if not isinstance(answer, dict) or set(answer) != {"cardId", "ease"}:
+                raise ValueError("each answer requires only cardId and ease")
+            card_id = _anki_card_operation_ids(
+                [answer.get("cardId")], "cardId"
+            )[0]
+            ease = answer.get("ease")
+            if (
+                isinstance(ease, bool)
+                or not isinstance(ease, int)
+                or not 1 <= ease <= 4
+            ):
+                raise ValueError("ease must be an integer from 1 to 4")
+            card_ids.append(card_id)
+            clean_answers.append({"cardId": card_id, "ease": ease})
+        if len(set(card_ids)) != len(card_ids):
+            raise ValueError("answers contains duplicate card IDs")
+        payload["answers"] = clean_answers
+    mutation_id = ""
+    if operation in _ANKI_CARD_WRITE_OPERATIONS:
+        mutation_id = _anki_card_operation_mutation_id(body.get("mutationId"))
+        if not mutation_id:
+            raise ValueError("bad mutationId")
+    return operation, payload, mutation_id
+
+
+def _anki_card_operation_info_ids(
+    result,
+    key: str,
+    requested: list[int],
+) -> list[int]:
+    if not isinstance(result, list):
+        raise _AnkiCardProtocolError("Anki info result is not a list")
+    found = []
+    requested_set = set(requested)
+    for item in result:
+        if not isinstance(item, dict):
+            raise _AnkiCardProtocolError("Anki info item is invalid")
+        raw = item.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+            raise _AnkiCardProtocolError("Anki info item ID is invalid")
+        if raw not in requested_set or raw in found:
+            raise _AnkiCardProtocolError("Anki info result crossed ID boundary")
+        found.append(raw)
+    return found
+
+
+def _anki_card_operation_layers(
+    local_status: str,
+    sync_status: str,
+    *,
+    sync_error: str = "",
+) -> dict:
+    sync_layer = {"status": sync_status}
+    if sync_error:
+        sync_layer["error"] = sync_error[:160]
+    return {
+        "reader_applied": {"status": "not-owned"},
+        "anki_local_applied": {"status": local_status},
+        "anki_web_sync": sync_layer,
+    }
+
+
+def _anki_card_operation_sync_layer() -> dict:
+    try:
+        _anki_card_operation_connect("sync")
+        return {"status": "succeeded"}
+    except _AnkiCardActionError as ex:
+        return {"status": "failed", "error": str(ex)[:160]}
+    except (_AnkiCardTransportError, _AnkiCardProtocolError) as ex:
+        return {"status": "unknown", "error": str(ex)[:160]}
+
+
+@bp.route("/api/anki-card-operation", methods=["POST"])
+def pdf_api_anki_card_operation():
+    """Execute one bounded, exact-ID AnkiConnect operation.
+
+    ``/pdf`` is authenticated by app.py. Reader entities are intentionally not
+    mutated here. Every Anki mutation is claimed durably before its first
+    irreversible request; a lost response remains unknown and is never replayed
+    automatically under the same mutationId.
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({
+            "ok": False,
+            "error": "JSON object required",
+            **_anki_card_operation_layers("not-requested", "not-requested"),
+        }), 400
+    try:
+        operation, payload, mutation_id = _anki_card_operation_validate(body)
+    except ValueError as ex:
+        return jsonify({
+            "ok": False,
+            "error": str(ex),
+            **_anki_card_operation_layers("not-requested", "not-requested"),
+        }), 400
+
+    if operation in _ANKI_CARD_READ_OPERATIONS:
+        ids_key, action, result_key = (
+            ("noteIds", "notesInfo", "noteId")
+            if operation == "read-notes"
+            else ("cardIds", "cardsInfo", "cardId")
+        )
+        try:
+            result = _anki_card_operation_connect(
+                action,
+                {
+                    ("notes" if operation == "read-notes" else "cards"):
+                    payload[ids_key]
+                },
+            )
+            found = _anki_card_operation_info_ids(
+                result, result_key, payload[ids_key]
+            )
+        except (
+            _AnkiCardTransportError,
+            _AnkiCardProtocolError,
+            _AnkiCardActionError,
+        ) as ex:
+            return jsonify({
+                "ok": False,
+                "operation": operation,
+                "error": str(ex)[:160],
+                **_anki_card_operation_layers("failed", "not-requested"),
+            }), 502
+        found_set = set(found)
+        return jsonify({
+            "ok": True,
+            "operation": operation,
+            "result": result,
+            "missing_ids": [
+                value for value in payload[ids_key] if value not in found_set
+            ],
+            **_anki_card_operation_layers("not-requested", "not-requested"),
+        })
+
+    fingerprint = _anki_card_operation_fingerprint(payload)
+    from reader_sidecar_store import exclusive_lock
+
+    try:
+        with exclusive_lock(_anki_card_operation_lock_path(mutation_id)):
+            claim, previous = _anki_card_operation_claim(
+                mutation_id, operation, fingerprint
+            )
+            if claim in ("done", "done-memory"):
+                previous = dict(previous or {})
+                previous.update({
+                    "dedup": True,
+                    "durable": claim == "done",
+                })
+                return jsonify(previous)
+            if claim == "reuse":
+                return jsonify({
+                    "ok": False,
+                    "operation": operation,
+                    "mutationId": mutation_id,
+                    "code": "mutation_reused",
+                    "error": "mutationId reused with a different payload",
+                    **_anki_card_operation_layers(
+                        "not-requested", "not-requested"
+                    ),
+                }), 409
+            if claim == "pending":
+                pending_layers = (
+                    _anki_card_operation_layers("not-requested", "unknown")
+                    if operation == "sync"
+                    else _anki_card_operation_layers(
+                        "unknown", "not-requested"
+                    )
+                )
+                response = {
+                    "ok": False,
+                    "operation": operation,
+                    "mutationId": mutation_id,
+                    "code": "outcome_unknown",
+                    "error": "previous Anki operation outcome is unknown",
+                    **pending_layers,
+                }
+                if operation == "delete-notes":
+                    response["delete_scope"] = "note"
+                return jsonify(response), 409
+
+            # Exact-ID existence checks are read-only. An explicit failure can
+            # safely release the claim because no mutation has been issued.
+            try:
+                if operation in ("update-note-fields", "delete-notes"):
+                    note_ids = (
+                        [payload["noteId"]]
+                        if operation == "update-note-fields"
+                        else payload["noteIds"]
+                    )
+                    info = _anki_card_operation_connect(
+                        "notesInfo", {"notes": note_ids}
+                    )
+                    found = _anki_card_operation_info_ids(
+                        info, "noteId", note_ids
+                    )
+                    found_set = set(found)
+                    missing = [
+                        value for value in note_ids if value not in found_set
+                    ]
+                elif operation == "answer-cards":
+                    card_ids = [
+                        item["cardId"] for item in payload["answers"]
+                    ]
+                    info = _anki_card_operation_connect(
+                        "cardsInfo", {"cards": card_ids}
+                    )
+                    found = _anki_card_operation_info_ids(
+                        info, "cardId", card_ids
+                    )
+                    found_set = set(found)
+                    missing = [
+                        value for value in card_ids if value not in found_set
+                    ]
+                else:
+                    missing = []
+            except (
+                _AnkiCardTransportError,
+                _AnkiCardProtocolError,
+                _AnkiCardActionError,
+            ) as ex:
+                if not _anki_card_operation_release_claim(
+                    mutation_id, operation, fingerprint
+                ):
+                    return jsonify({
+                        "ok": False,
+                        "operation": operation,
+                        "mutationId": mutation_id,
+                        "code": "anki_card_operation_claim_persist",
+                        "error": "failed to release operation claim",
+                        **_anki_card_operation_layers(
+                            "not-requested", "not-requested"
+                        ),
+                    }), 503
+                return jsonify({
+                    "ok": False,
+                    "operation": operation,
+                    "mutationId": mutation_id,
+                    "error": str(ex)[:160],
+                    **_anki_card_operation_layers("failed", "not-requested"),
+                }), 502
+            if missing:
+                if not _anki_card_operation_release_claim(
+                    mutation_id, operation, fingerprint
+                ):
+                    return jsonify({
+                        "ok": False,
+                        "operation": operation,
+                        "mutationId": mutation_id,
+                        "code": "anki_card_operation_claim_persist",
+                        "error": "failed to release operation claim",
+                        **_anki_card_operation_layers(
+                            "not-requested", "not-requested"
+                        ),
+                    }), 503
+                response = {
+                    "ok": False,
+                    "operation": operation,
+                    "mutationId": mutation_id,
+                    "error": "explicit Anki IDs were not found",
+                    "missing_ids": missing,
+                    **_anki_card_operation_layers(
+                        "not-applied", "not-requested"
+                    ),
+                }
+                if operation == "delete-notes":
+                    response["delete_scope"] = "note"
+                return jsonify(response), 404
+
+            if operation == "sync":
+                try:
+                    _anki_card_operation_connect("sync")
+                except _AnkiCardActionError as ex:
+                    if not _anki_card_operation_release_claim(
+                        mutation_id, operation, fingerprint
+                    ):
+                        return jsonify({
+                            "ok": False,
+                            "operation": operation,
+                            "mutationId": mutation_id,
+                            "code": "anki_card_operation_claim_persist",
+                            "error": "failed to release operation claim",
+                            **_anki_card_operation_layers(
+                                "not-requested", "failed"
+                            ),
+                        }), 503
+                    return jsonify({
+                        "ok": False,
+                        "operation": operation,
+                        "mutationId": mutation_id,
+                        "error": str(ex)[:160],
+                        **_anki_card_operation_layers(
+                            "not-requested", "failed", sync_error=str(ex)
+                        ),
+                    }), 502
+                except (
+                    _AnkiCardTransportError,
+                    _AnkiCardProtocolError,
+                ) as ex:
+                    # sync may have completed before its response was lost.
+                    # Keep pending and refuse automatic replay.
+                    return jsonify({
+                        "ok": False,
+                        "operation": operation,
+                        "mutationId": mutation_id,
+                        "code": "outcome_unknown",
+                        "error": str(ex)[:160],
+                        **_anki_card_operation_layers(
+                            "not-requested", "unknown", sync_error=str(ex)
+                        ),
+                    }), 503
+                response = {
+                    "ok": True,
+                    "operation": operation,
+                    "mutationId": mutation_id,
+                    **_anki_card_operation_layers(
+                        "not-requested", "succeeded"
+                    ),
+                }
+            else:
+                try:
+                    if operation == "update-note-fields":
+                        result = _anki_card_operation_connect(
+                            "updateNoteFields",
+                            {"note": {
+                                "id": payload["noteId"],
+                                "fields": payload["fields"],
+                            }},
+                        )
+                        if result is not None:
+                            raise _AnkiCardProtocolError(
+                                "unexpected updateNoteFields result"
+                            )
+                    elif operation == "delete-notes":
+                        result = _anki_card_operation_connect(
+                            "deleteNotes", {"notes": payload["noteIds"]}
+                        )
+                        if result is not None:
+                            raise _AnkiCardProtocolError(
+                                "unexpected deleteNotes result"
+                            )
+                    else:
+                        result = _anki_card_operation_connect(
+                            "answerCards", {"answers": payload["answers"]}
+                        )
+                        if (
+                            not isinstance(result, list)
+                            or len(result) != len(payload["answers"])
+                            or any(item is not True for item in result)
+                        ):
+                            raise _AnkiCardProtocolError(
+                                "answerCards outcome is not fully proven"
+                            )
+                except _AnkiCardActionError as ex:
+                    if not _anki_card_operation_release_claim(
+                        mutation_id, operation, fingerprint
+                    ):
+                        return jsonify({
+                            "ok": False,
+                            "operation": operation,
+                            "mutationId": mutation_id,
+                            "code": "anki_card_operation_claim_persist",
+                            "error": "failed to release operation claim",
+                            **_anki_card_operation_layers(
+                                "unknown", "not-requested"
+                            ),
+                        }), 503
+                    return jsonify({
+                        "ok": False,
+                        "operation": operation,
+                        "mutationId": mutation_id,
+                        "error": str(ex)[:160],
+                        **_anki_card_operation_layers(
+                            "not-applied", "not-requested"
+                        ),
+                    }), 502
+                except (
+                    _AnkiCardTransportError,
+                    _AnkiCardProtocolError,
+                ) as ex:
+                    # The mutation may already be committed in Anki. Pending is
+                    # retained, so this mutationId cannot drive it a second time.
+                    response = {
+                        "ok": False,
+                        "operation": operation,
+                        "mutationId": mutation_id,
+                        "code": "outcome_unknown",
+                        "error": str(ex)[:160],
+                        **_anki_card_operation_layers(
+                            "unknown", "not-requested"
+                        ),
+                    }
+                    if operation == "delete-notes":
+                        response["delete_scope"] = "note"
+                    return jsonify(response), 503
+
+                sync_layer = _anki_card_operation_sync_layer()
+                response = {
+                    "ok": True,
+                    "complete": sync_layer.get("status") == "succeeded",
+                    "operation": operation,
+                    "mutationId": mutation_id,
+                    "reader_applied": {"status": "not-owned"},
+                    "anki_local_applied": {"status": "succeeded"},
+                    "anki_web_sync": sync_layer,
+                }
+                if operation == "update-note-fields":
+                    response.update({
+                        "note_id": payload["noteId"],
+                        "updated_fields": sorted(payload["fields"]),
+                    })
+                elif operation == "delete-notes":
+                    response.update({
+                        "delete_scope": "note",
+                        "deleted_note_ids": payload["noteIds"],
+                    })
+                else:
+                    response["answered_cards"] = payload["answers"]
+
+            durable = _anki_card_operation_commit(
+                mutation_id, operation, fingerprint, response
+            )
+            response = dict(response)
+            if not durable:
+                response["durable"] = False
+            return jsonify(response)
+    except Exception as ex:
+        current_app.logger.exception(
+            "Anki card operation idempotency ledger failure"
+        )
+        return jsonify({
+            "ok": False,
+            "operation": operation,
+            "mutationId": mutation_id,
+            "code": "anki_card_operation_idempotency_unavailable",
+            "error": str(ex)[:160],
+            **_anki_card_operation_layers("unknown", "not-requested"),
+        }), 503
+
+
 @bp.route("/api/anki-add-cards", methods=["POST"])
 def pdf_api_anki_add_cards(body_override=None):
     """B1 融合复习卡:确认后的草稿卡入库。
@@ -15730,7 +16540,15 @@ def pdf_api_review_answer():
         nxt = {"interval": ci.get("interval"), "due": ci.get("due"), "queue": ci.get("queue"), "type": ci.get("type")}
     except Exception:
         pass
-    response = {"ok": True, "next": nxt}
+    # The local scheduler mutation is already durable and must never be
+    # repeated merely because AnkiWeb is unavailable.  Report sync as its own
+    # layer so callers can distinguish "rated locally" from "cloud synced".
+    sync_layer = _anki_card_operation_sync_layer()
+    response = {
+        "ok": True,
+        "next": nxt,
+        "anki_web_sync": sync_layer,
+    }
     if not durable:
         # The Anki side effect succeeded and the durable pending claim prevents
         # repetition, but the terminal receipt could not be published.  Surface
