@@ -420,7 +420,15 @@ async function _refreshOnePageCharsW(pw, num, gen) {
     pw.__furigana = d.furigana;
     try { if (_rubyEnabled()) renderRubyLayer(pw); } catch (_) {}
   }
-  pw.__vocabMarks = (ov && ov.vocab_marks) || [];   // overlay 失败 → 清空(跟初加载降级一致,不留陈旧下划线)
+  // Native overlay 首包只含本机文字/公式；词汇由缓存/Pi 事件增量送达。
+  // 若事件先于 chars 完成，不能再用首包的空数组把新投影擦掉。
+  const enrichment = typeof _nativePageOverlayEnrichment !== 'undefined'
+    ? _nativePageOverlayEnrichment.get(num) : null;
+  const currentEnrichment = enrichment &&
+    enrichment.localRevision === String(d.revision || '')
+    ? enrichment : null;
+  pw.__vocabMarks = (currentEnrichment && currentEnrichment.vocab_marks) ||
+    (ov && ov.vocab_marks) || [];
   try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {}
 }
 async function refreshCharsWForAllPages() {

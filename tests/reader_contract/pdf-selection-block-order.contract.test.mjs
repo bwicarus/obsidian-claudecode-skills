@@ -18,7 +18,7 @@ function section(source, start, end) {
 
 const sandbox = vm.createContext({ Map, Math, Set });
 vm.runInContext(
-  `${section(CHAR_LAYER, "function _selectionUsesBlockFilter", "async function loadCharsAndBindLayer")}
+  `${section(CHAR_LAYER, "function _selectionUsesBlockFilter", "const _nativePageOverlayEnrichment")}
    ${section(SELECTION, "function _charBlockId", "// 找选中范围所在的句子")}
    ${section(SELECTION, "function _lineExpandFromChar", "// 段扩展（三击）")}
    globalThis.readerSelectionContract = {

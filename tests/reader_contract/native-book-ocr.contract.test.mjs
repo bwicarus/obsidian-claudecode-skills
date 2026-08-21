@@ -457,6 +457,33 @@ test("PDFKit image pages lazily recover the embedded selectable text layer", () 
   assert.doesNotMatch(readerFallback, /startLocal|forceVision:\s*true|startPi/);
 });
 
+test("first local PDF page exposes embedded text before the full digest finishes", () => {
+  const pageReply = BRIDGE.slice(
+    BRIDGE.indexOf("private static func pageReply("),
+    BRIDGE.indexOf("private static func statusReply("),
+  );
+  assert.match(
+    pageReply,
+    /if let expectedContentSHA256[\s\S]*manager\.readerPageCharacters\([\s\S]*else if let book[\s\S]*manager\.provisionalReaderPageCharacters\(/,
+  );
+  assert.match(pageReply, /book\.record\.format == \.pdf/);
+
+  const provisional = MANAGER.slice(
+    MANAGER.indexOf("func provisionalReaderPageCharacters("),
+    MANAGER.indexOf("func pageStatus("),
+  );
+  assert.match(provisional, /book\.record\.contentFingerprint\.lowercased\(\)/);
+  assert.match(provisional, /try Self\.validateCurrentBook\(book\)/);
+  assert.match(provisional, /cached\.byteCount == book\.record\.byteCount/);
+  assert.match(provisional, /cached\.modifiedAt == book\.record\.modifiedAt/);
+  assert.match(provisional, /processor\.processEmbeddedPage\(/);
+  assert.doesNotMatch(
+    provisional,
+    /store\.|waitUntilReady|ensureContentSHA256|startLocal|startPi/,
+    "the provisional render identity must stay in-memory and never touch sidecars",
+  );
+});
+
 test("native update event and page formula reply keep the exact public shape", () => {
   assert.match(BRIDGE, /'bw:native-page-text-updated'/);
   for (const key of [
@@ -473,6 +500,16 @@ test("native update event and page formula reply keep the exact public shape", (
   assert.match(BRIDGE, /"multiline": jsonNullable\(value\.multiline\)/);
   assert.match(BRIDGE, /"retryable": retryable/);
   assert.match(BRIDGE, /private static func pageRevision/);
+  const revision = BRIDGE.slice(
+    BRIDGE.indexOf("private static func pageRevision("),
+    BRIDGE.indexOf("private static func stageObject("),
+  );
+  assert.match(revision, /removeValue\(forKey: "created_at"\)/);
+  assert.ok(
+    revision.indexOf('removeValue(forKey: "created_at")') <
+      revision.indexOf("SHA256.hash(data: data)"),
+    "page revision must remove extraction time before hashing",
+  );
   assert.match(BRIDGE, /SHA256\.hash\(data: data\)/);
   assert.match(BRIDGE, /value\.engineRevision\.prefix\(72\)/);
   assert.match(BRIDGE, /return "\\\(engine\):\\\(String\(digest\.prefix\(72\)\)\)"/);

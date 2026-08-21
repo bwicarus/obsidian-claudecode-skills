@@ -154,6 +154,65 @@ function _mapCharBoxes(chars, scale, source, revision, characterGeometry) {
   return cb;
 }
 
+const _nativePageOverlayEnrichment = new Map();
+function _rememberNativePageOverlay(detail) {
+  if (!detail || detail.contract !== 'reader-native-page-overlay-enrichment/1' ||
+      !Number.isSafeInteger(detail.page) || detail.page < 1 ||
+      !Array.isArray(detail.vocab_marks) ||
+      !Array.isArray(detail.vocab_sentences) ||
+      !Array.isArray(detail.mastered_furi)) return null;
+  if (typeof FILE_REL !== 'undefined' && String(detail.file || '') !== String(FILE_REL || '')) {
+    return null;
+  }
+  const before = _nativePageOverlayEnrichment.get(detail.page);
+  const savedAt = Number(detail.savedAt || 0);
+  const localRevision = String(detail.localRevision || '');
+  if (!localRevision || localRevision.length > 512 ||
+      /[\u0000-\u001f\u007f]/.test(localRevision)) return null;
+  if (before && before.localRevision === localRevision &&
+      Number(before.savedAt || 0) > savedAt) return null;
+  const value = {
+    savedAt,
+    localRevision,
+    vocab_marks: detail.vocab_marks,
+    vocab_sentences: detail.vocab_sentences,
+    mastered_furi: detail.mastered_furi
+  };
+  if (_nativePageOverlayEnrichment.has(detail.page)) {
+    _nativePageOverlayEnrichment.delete(detail.page);
+  }
+  _nativePageOverlayEnrichment.set(detail.page, value);
+  while (_nativePageOverlayEnrichment.size > 24) {
+    _nativePageOverlayEnrichment.delete(_nativePageOverlayEnrichment.keys().next().value);
+  }
+  return value;
+}
+
+function _applyPageVocabOverlay(wrap, overlay) {
+  if (overlay && overlay.localRevision && wrap.__pageTextRevision &&
+      overlay.localRevision !== wrap.__pageTextRevision) return false;
+  wrap.__vocabMarks = (overlay && overlay.vocab_marks) || [];
+  wrap.__vocabSentences = (overlay && overlay.vocab_sentences) || [];
+  wrap.__masteredFuri = new Set((overlay && overlay.mastered_furi) || []);
+  try { renderVocabUnderlines(wrap, wrap.__vocabMarks); }
+  catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff6b6b'); }
+  try { renderRubyLayer(wrap); } catch (_) {}
+  try { renderVocabSentences(wrap, wrap.__vocabSentences); }
+  catch(e) { window.dlog?.('vocab sentence fail: '+e.message,'#ff6b6b'); }
+  return true;
+}
+
+(function _bindNativePageOverlayEnrichment() {
+  if (!window.__BW_NATIVE_LOCAL_READER__ || typeof window.addEventListener !== 'function') return;
+  window.addEventListener('bw:native-page-overlay-enrichment', (event) => {
+    const detail = _rememberNativePageOverlay(event && event.detail);
+    if (!detail) return;
+    document.querySelectorAll('[data-page-num="' + event.detail.page + '"]').forEach((wrap) => {
+      if (wrap && wrap.isConnected) _applyPageVocabOverlay(wrap, detail);
+    });
+  });
+})();
+
 async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   _retry = _retry || 0;
   if (!wrap.isConnected) return;   // 页已被连续模式释放 → 放弃
@@ -280,12 +339,11 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
         } catch (_) {}
       }
     }
-    wrap.__vocabMarks = (ov && ov.vocab_marks) || [];
-    wrap.__vocabSentences = (ov && ov.vocab_sentences) || [];
-    wrap.__masteredFuri = new Set((ov && ov.mastered_furi) || []);   // 已掌握词面 → ruby 跳过其注音
-    try { renderVocabUnderlines(wrap, wrap.__vocabMarks); } catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff6b6b'); }
-    try { renderRubyLayer(wrap); } catch (_) {}   // overlay 到了(含已掌握词集)→ 重画 ruby(首渲时还没这个集,此刻把已掌握词的注音去掉)
-    try { renderVocabSentences(wrap, wrap.__vocabSentences); } catch(e) { window.dlog?.('vocab sentence fail: '+e.message,'#ff6b6b'); }
+    const enrichment = _nativePageOverlayEnrichment.get(num);
+    const currentEnrichment = enrichment &&
+      enrichment.localRevision === String(wrap.__pageTextRevision || '')
+      ? enrichment : null;
+    _applyPageVocabOverlay(wrap, currentEnrichment || ov);
   });
 }
 
@@ -339,6 +397,24 @@ function _vocabularyStateMarkMastered(mark) {
   } catch (_) { return false; }
 }
 
+function _vocabMarkKeys(mark) {
+  const raw = [
+    mark && mark.lemma,
+    mark && mark.word,
+    mark && mark.surface,
+    ...((mark && Array.isArray(mark.forms)) ? mark.forms : [])
+  ];
+  const out = [];
+  raw.forEach((value) => {
+    if (value == null) return;
+    let key = String(value);
+    try { key = key.normalize('NFKC'); } catch (_) {}
+    key = key.trim().toLocaleLowerCase('en-US');
+    if (key && !out.includes(key)) out.push(key);
+  });
+  return out;
+}
+
 function renderVocabUnderlines(pw, marks) {
   if (!_vocabUnderlineEnabled()) return;
   // §18.5 local-first:服务端回**全候选**(含已掌握,label_slug='mastered'),渲染时本地过滤。
@@ -347,10 +423,18 @@ function renderVocabUnderlines(pw, marks) {
   try {
     const _ovr = window.__vocabOverride;
     marks = (marks || []).filter((m) => {
-      const k = String(m.lemma || m.word || '').toLowerCase();
+      const keys = _vocabMarkKeys(m);
       if (_vocabularyStateMarkMastered(m)) return false;
-      if (_ovr && _ovr.has(k)) return !_ovr.get(k);
-      if (window.__masteredLocal) return !window.__masteredLocal.has(k);
+      if (_ovr) {
+        const overrideKey = keys.find((key) => _ovr.has(key));
+        if (overrideKey != null) return !_ovr.get(overrideKey);
+      }
+      // __masteredLocal is a positive-set compatibility mirror. Absence is not
+      // an explicit "unknown" decision, so it must not override a fresh server
+      // label_slug='mastered'. Explicit local false lives in __vocabOverride.
+      if (window.__masteredLocal && keys.some((key) => window.__masteredLocal.has(key))) {
+        return false;
+      }
       return m.label_slug !== 'mastered';
     });
   } catch (_) {}

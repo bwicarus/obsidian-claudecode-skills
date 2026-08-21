@@ -547,6 +547,14 @@
   if (root.document && typeof root.document.addEventListener === 'function') {
     root.document.addEventListener('bw:reader-runtime-ready', autoAttach);
   }
+  // The native App publishes its storage router only after the local runtime
+  // has opened IndexedDB. The eager microtask above can therefore see the
+  // runtime API while storage() still returns null. Retry on the native ready
+  // edge instead of leaving the in-memory/legacy mirror detached for the rest
+  // of the book session.
+  if (root && typeof root.addEventListener === 'function') {
+    root.addEventListener('bw:native-local-runtime-ready', autoAttach);
+  }
   Promise.resolve().then(autoAttach);
 
   return Object.freeze({

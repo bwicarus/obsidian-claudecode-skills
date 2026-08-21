@@ -10931,84 +10931,188 @@
     }).catch(nativeEPUBActionError);
   }
 
-  function mergeNativePageOverlay(url, localResponse, piResponse) {
-    if (url.pathname !== '/pdf/api/page-overlay' || !localResponse || !localResponse.ok) {
-      return Promise.resolve(piResponse && piResponse.ok ? piResponse : localResponse);
+  var NATIVE_PAGE_OVERLAY_EVENT = 'bw:native-page-overlay-enrichment';
+  var NATIVE_PAGE_OVERLAY_CONTRACT = 'reader-native-page-overlay-enrichment/1';
+  var NATIVE_PAGE_OVERLAY_CACHE_KIND = 'page-overlay-enrichment-cache-v1';
+  var NATIVE_PAGE_OVERLAY_CACHE_PAGES = 24;
+  var NATIVE_PAGE_OVERLAY_CACHE_BYTES = 2 * 1024 * 1024;
+  var nativePageOverlaySequence = 0;
+  var nativePageOverlayLatest = Object.create(null);
+
+  function nativePageOverlayLocalRevision(payload) {
+    var revision = String(payload && payload.cv || '').trim();
+    if (!revision || revision.length > 512 || /[\u0000-\u001f\u007f]/.test(revision)) {
+      return '';
     }
-    if (!piResponse || !piResponse.ok) return Promise.resolve(localResponse);
-    // The App can always describe its local text/formula layer. Pi is an
-    // optional enrichment source for learned vocabulary, translated sentences
-    // and calibration. A missing Pi copy must never turn the local overlay into
-    // an error or erase formula regions that already exist on the device.
-    return Promise.all([
-      localResponse.clone().json(),
-      piResponse.clone().json()
-    ]).then(function (values) {
-      var local = values[0];
-      var remote = values[1];
-      if (!remote || typeof remote !== 'object' || Array.isArray(remote) ||
-          remote.ok !== true) return localResponse;
-      var payload = Object.assign({}, local, {
-        vocab_marks: Array.isArray(remote.vocab_marks) ? remote.vocab_marks : [],
-        vocab_sentences: Array.isArray(remote.vocab_sentences) ? remote.vocab_sentences : [],
-        mastered_furi: Array.isArray(remote.mastered_furi) ? remote.mastered_furi : [],
-        offset: remote.offset && typeof remote.offset === 'object'
-          ? remote.offset : local.offset
-      });
-      var remoteCV = String(remote.cv || '');
-      var localCV = String(local.cv || '');
-      payload.cv = remoteCV + (remoteCV && localCV ? '|' : '') +
-        (localCV ? 'native:' + localCV : '');
-      var headers = {};
-      piResponse.headers.forEach(function (value, name) {
-        var lower = String(name).toLowerCase();
-        if (lower !== 'content-length' && lower !== 'content-encoding') headers[name] = value;
-      });
-      headers['Content-Type'] = 'application/json; charset=utf-8';
-      headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0';
-      return new Response(JSON.stringify(payload), {
-        status: 200, headers: headers
-      });
-    }).catch(function () {
-      return localResponse;
+    return revision;
+  }
+
+  function normalizedNativePageOverlay(remote, page, localRevision) {
+    if (!remote || typeof remote !== 'object' || Array.isArray(remote) ||
+        remote.ok !== true || !nativePageOverlayLocalRevision({ cv: localRevision })) {
+      return null;
+    }
+    var payload = {
+      page: page,
+      localRevision: localRevision,
+      vocab_marks: Array.isArray(remote.vocab_marks) ? clone(remote.vocab_marks) : [],
+      vocab_sentences: Array.isArray(remote.vocab_sentences)
+        ? clone(remote.vocab_sentences) : [],
+      mastered_furi: Array.isArray(remote.mastered_furi)
+        ? clone(remote.mastered_furi) : [],
+      offset: remote.offset && typeof remote.offset === 'object' &&
+        !Array.isArray(remote.offset) ? clone(remote.offset) : null,
+      cv: String(remote.cv || ''),
+      savedAt: Date.now()
+    };
+    if (payload.vocab_marks.length > 8000 ||
+        payload.vocab_sentences.length > 2000 ||
+        payload.mastered_furi.length > 8000) return null;
+    var encoded;
+    try { encoded = JSON.stringify(payload); } catch (_) { return null; }
+    if (encoded.length > NATIVE_PAGE_OVERLAY_CACHE_BYTES) return null;
+    payload.byteSize = encoded.length;
+    return payload;
+  }
+
+  function nativePageOverlayCacheEntry(value, page, localRevision) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) ||
+        Number(value.page) !== page || !Array.isArray(value.vocab_marks) ||
+        !Array.isArray(value.vocab_sentences) || !Array.isArray(value.mastered_furi) ||
+        value.localRevision !== localRevision ||
+        !Number.isFinite(value.savedAt) || value.savedAt < 0) return null;
+    return normalizedNativePageOverlay({
+      ok: true,
+      vocab_marks: value.vocab_marks,
+      vocab_sentences: value.vocab_sentences,
+      mastered_furi: value.mastered_furi,
+      offset: value.offset,
+      cv: value.cv
+    }, page, localRevision);
+  }
+
+  function readNativePageOverlayCache(page, localRevision) {
+    return Promise.resolve(bootPromise).then(function () {
+      return readState(NATIVE_PAGE_OVERLAY_CACHE_KIND, []);
+    }).then(function (items) {
+      if (!Array.isArray(items)) return null;
+      for (var index = 0; index < items.length; index += 1) {
+        var entry = nativePageOverlayCacheEntry(items[index], page, localRevision);
+        if (entry) {
+          entry.savedAt = Number(items[index].savedAt);
+          return entry;
+        }
+      }
+      return null;
+    }).catch(function () { return null; });
+  }
+
+  function writeNativePageOverlayCache(entry, expectedGeneration) {
+    var lease = null;
+    return Promise.resolve().then(function () {
+      lease = acquireNativePDFWriterLease('page-overlay-cache');
+      if (nativeInterfaceSurface === 'pdf' &&
+          (!lease || lease.generation !== expectedGeneration)) {
+        throw outgoingRequestError(
+          '页面叠层缓存已跨过改页边界', 'BW_NATIVE_OVERLAY_STALE', 409
+        );
+      }
+      assertNativePDFWriterLease(lease);
+      return bootPromise;
+    }).then(function () {
+      return mutateDocumentState(
+        NATIVE_PAGE_OVERLAY_CACHE_KIND, [], function (items) {
+          items = Array.isArray(items) ? items.filter(function (item) {
+            return item && Number(item.page) !== entry.page;
+          }) : [];
+          items.unshift(clone(entry));
+          var bytes = 0;
+          items = items.filter(function (item, index) {
+            if (index >= NATIVE_PAGE_OVERLAY_CACHE_PAGES) return false;
+            var size = Number(item && item.byteSize || 0);
+            if (!Number.isFinite(size) || size < 0 || bytes + size > NATIVE_PAGE_OVERLAY_CACHE_BYTES) {
+              return false;
+            }
+            bytes += size;
+            return true;
+          });
+          return localStateMutationResult(items, true);
+        },
+        { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS }
+      );
+    }).then(function () {
+      assertNativePDFWriterLease(lease);
+      releaseNativePDFWriterLease(lease);
+      return true;
+    }, function () {
+      releaseNativePDFWriterLease(lease);
+      return false;
     });
   }
 
-  function nativePageOverlayFetch(input, init, url, route) {
-    var remote = new Promise(function (resolve) {
-      var settled = false;
-      var timer = root.setTimeout(function () {
-        settled = true;
-        resolve(null);
-      }, 750);
-      nativePiFetch(input, init, route).then(function (response) {
-        if (settled) {
-          try {
-            if (response && response.body && typeof response.body.cancel === 'function') {
-              var cancelled = response.body.cancel('native overlay deadline elapsed');
-              if (cancelled && typeof cancelled.catch === 'function') {
-                cancelled.catch(function () {});
-              }
-            }
-          } catch (_) {}
-          return;
+  function announceNativePageOverlay(url, entry, source) {
+    try {
+      root.dispatchEvent(new CustomEvent(NATIVE_PAGE_OVERLAY_EVENT, {
+        detail: {
+          contract: NATIVE_PAGE_OVERLAY_CONTRACT,
+          file: String(url.searchParams.get('file') || ''),
+          page: entry.page,
+          localRevision: entry.localRevision,
+          source: source,
+          savedAt: entry.savedAt,
+          vocab_marks: clone(entry.vocab_marks),
+          vocab_sentences: clone(entry.vocab_sentences),
+          mastered_furi: clone(entry.mastered_furi),
+          offset: clone(entry.offset),
+          cv: entry.cv
         }
-        settled = true;
-        root.clearTimeout(timer);
-        resolve(response);
-      }).catch(function () {
-        if (settled) return;
-        settled = true;
-        root.clearTimeout(timer);
-        resolve(null);
-      });
+      }));
+    } catch (_) {}
+  }
+
+  function nativePageOverlayFetch(input, init, url, route) {
+    var page = Number(url.searchParams.get('page') || 0);
+    var key = String(url.searchParams.get('file') || '') + '|' + String(page);
+    var sequence = ++nativePageOverlaySequence;
+    var writerGeneration = nativePDFWriterGeneration;
+    nativePageOverlayLatest[key] = sequence;
+    var remoteArrived = false;
+    var current = function () {
+      return nativePageOverlayLatest[key] === sequence &&
+        nativePDFWriterGeneration === writerGeneration &&
+        nativePDFWriterAccepting;
+    };
+    var local = localPageOverlay(url);
+    var localRevision = local.then(function (response) {
+      if (!response || !response.ok) return '';
+      return response.clone().json().then(nativePageOverlayLocalRevision);
+    }).catch(function () { return ''; });
+    var remote = nativePiFetch(input, init, route).then(function (response) {
+      if (!response || !response.ok) return null;
+      return response.clone().json().catch(function () { return null; });
+    }).catch(function () { return null; });
+
+    // Cache and Pi enrichment are deliberately detached from the fetch result.
+    // Local text/formula data can paint immediately; cached vocabulary follows
+    // from IndexedDB and Pi revalidates it without adding a network floor.
+    localRevision.then(function (revision) {
+      if (!revision || !current()) return null;
+      return readNativePageOverlayCache(page, revision);
+    }).then(function (entry) {
+      if (entry && current() && !remoteArrived) {
+        announceNativePageOverlay(url, entry, 'cache');
+      }
     });
-    return Promise.all([
-      localPageOverlay(url),
-      remote
-    ]).then(function (responses) {
-      return mergeNativePageOverlay(url, responses[0], responses[1]);
-    });
+    Promise.all([localRevision, remote]).then(function (values) {
+      var revision = values[0];
+      var entry = normalizedNativePageOverlay(values[1], page, revision);
+      if (!entry || !current()) return;
+      remoteArrived = true;
+      announceNativePageOverlay(url, entry, 'pi');
+      writeNativePageOverlayCache(entry, writerGeneration);
+    }).catch(function () {});
+
+    return local;
   }
 
   var NATIVE_SYNC_BATCH_CONTRACT = 'command-outbox/2';
@@ -12294,8 +12398,31 @@
     });
   }
 
-  // 助手把一个词标成已掌握/生词。这条同样落在 Pi 的生词库上；离线时会失败，
-  // 不会静默丢掉 —— 一次没记上的"已掌握"，下次阅读还会被划成生词。
+  function projectNativeReaderVocabulary(word, mark, japanese) {
+    var mastered = mark === 'known';
+    var state = root.BWReaderRuntime && root.BWReaderRuntime.vocabularyState;
+    if (state && state.CONTRACT === 'vocabulary-state/1' &&
+        typeof state.setMastered === 'function') {
+      try {
+        state.setMastered({
+          kind: 'word', language: japanese ? 'ja' : 'en',
+          lemma: word, word: word, surface: word, forms: []
+        }, mastered, { source: 'reader-query' });
+      } catch (_) {}
+    }
+    // Keep the legacy PDF projection in step during the migration. This call is
+    // synchronous and repaints only loaded pages containing the word.
+    try {
+      if (typeof root.applyVocabLocalOverride === 'function') {
+        root.applyVocabLocalOverride(word, mastered, {
+          word: word, surface: word, forms: [], jp: japanese
+        });
+      }
+    } catch (_) {}
+  }
+
+  // 助手把一个词标成已掌握/生词。Pi 仍是兼容词库的确认端；确认成功后同一调用
+  // 立即写 App 本地 vocabulary-state，让当前页在工具返回时就完成热更新。
   function nativeReaderMarkVocabulary(input) {
     var payload = input && typeof input === 'object' && !Array.isArray(input)
       ? input : {};
@@ -12317,9 +12444,11 @@
         '标记取值无效', 'BW_READER_VOCAB_MARK'
       ));
     }
+    var japanese = /[\u3040-\u30ff\u3400-\u9fff]/.test(word);
+    var endpoint = japanese ? '/pdf/api/jp-vocab-mark' : '/pdf/api/vocab-mark';
     return bootPromise.then(function () {
       // @interaction vocabulary.mastery.set
-      return root.fetch(localBasePath() + '/pdf/api/vocab-mark', {
+      return root.fetch(localBasePath() + endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ word: word, mark: mark })
@@ -12332,7 +12461,11 @@
             String((data && data.code) || 'BW_READER_VOCAB_FAILED')
           );
         }
-        return { ok: true, word: word, mark: mark };
+        projectNativeReaderVocabulary(word, mark, japanese);
+        return {
+          ok: true, word: word, mark: mark,
+          language: japanese ? 'ja' : 'en', localProjected: true
+        };
       });
     });
   }

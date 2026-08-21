@@ -876,9 +876,22 @@ test("搜索工具描述交代 incomplete 的含义", () => {
 });
 
 // ── 目录与页文本 ────────────────────────────────────────────────────
-function callFetching(name, { input, surface = "pdf", status = 200, data } = {}) {
+function callFetching(name, {
+  input,
+  surface = "pdf",
+  status = 200,
+  data,
+  vocabularyState = null,
+  applyVocabLocalOverride = null,
+} = {}) {
   const start = RUNTIME.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `找不到 ${name}`);
+  let dependency = "";
+  if (name === "nativeReaderMarkVocabulary") {
+    const helperStart = RUNTIME.indexOf("function projectNativeReaderVocabulary(");
+    assert.notEqual(helperStart, -1, "找不到本地词汇投影 helper");
+    dependency = balanced(RUNTIME, helperStart) + "\n";
+  }
   const sent = [];
   const context = {
     String, Number, Array, Promise, JSON, encodeURIComponent,
@@ -890,6 +903,8 @@ function callFetching(name, { input, surface = "pdf", status = 200, data } = {})
       constructor(message, code) { super(message); this.code = code; }
     },
     root: {
+      BWReaderRuntime: vocabularyState == null ? {} : { vocabularyState },
+      applyVocabLocalOverride,
       fetch: (url) => {
         sent.push(url);
         return Promise.resolve({
@@ -904,7 +919,7 @@ function callFetching(name, { input, surface = "pdf", status = 200, data } = {})
   context.globalThis = context;
   const call = input === undefined ? `${name}()` : `${name}(${JSON.stringify(input)})`;
   vm.runInNewContext(
-    `${balanced(RUNTIME, start)}
+    `${dependency}${balanced(RUNTIME, start)}
      out = ${call};`,
     context,
   );
@@ -1061,6 +1076,7 @@ test("生词标记只接受 known/unknown", async () => {
   const value = await ok.result;
   assert.equal(value.mark, "known");
   assert.equal(value.word, "w");
+  assert.equal(value.localProjected, true);
   assert.equal(ok.sent.length, 1, "合法取值必须真的发出去");
 
   for (const mark of ["", "yes", "KNOWN", null]) {
@@ -1071,16 +1087,71 @@ test("生词标记只接受 known/unknown", async () => {
   }
 });
 
+test("生词标记按语言写兼容词库并在确认后热更新 App 本地投影", async () => {
+  const stateCalls = [];
+  const legacyCalls = [];
+  const vocabularyState = {
+    CONTRACT: "vocabulary-state/1",
+    setMastered(spec, enabled, meta) {
+      stateCalls.push({
+        spec: structuredClone(spec),
+        enabled,
+        meta: structuredClone(meta),
+      });
+    },
+  };
+  const japanese = callFetching("nativeReaderMarkVocabulary", {
+    input: { word: "中学生", mark: "known" },
+    data: { ok: true },
+    vocabularyState,
+    applyVocabLocalOverride(word, mastered, meta) {
+      legacyCalls.push({ word, mastered, meta: structuredClone(meta) });
+    },
+  });
+  const value = await japanese.result;
+  assert.match(japanese.sent[0], /\/pdf\/api\/jp-vocab-mark$/);
+  assert.deepEqual(stateCalls[0], {
+    spec: {
+      kind: "word", language: "ja", lemma: "中学生",
+      word: "中学生", surface: "中学生", forms: [],
+    },
+    enabled: true,
+    meta: { source: "reader-query" },
+  });
+  assert.deepEqual(legacyCalls[0], {
+    word: "中学生",
+    mastered: true,
+    meta: { word: "中学生", surface: "中学生", forms: [], jp: true },
+  });
+  assert.equal(value.language, "ja");
+
+  const english = callFetching("nativeReaderMarkVocabulary", {
+    input: { word: "integral", mark: "unknown" },
+    data: { ok: true },
+    vocabularyState,
+  });
+  await english.result;
+  assert.match(english.sent[0], /\/pdf\/api\/vocab-mark$/);
+  assert.equal(stateCalls.at(-1).spec.language, "en");
+  assert.equal(stateCalls.at(-1).enabled, false);
+});
+
 test("生词标记未确认成功时如实报错，不当作已记上", async () => {
+  const stateCalls = [];
   const { result } = callFetching("nativeReaderMarkVocabulary", {
     input: { word: "w", mark: "known" },
     status: 503, data: { ok: false, error: "网关不可用" },
+    vocabularyState: {
+      CONTRACT: "vocabulary-state/1",
+      setMastered(...args) { stateCalls.push(args); },
+    },
   });
   await assert.rejects(
     result,
     (error) => error.code === "BW_READER_VOCAB_FAILED",
     "一次没记上的「已掌握」，下次阅读还会被划成生词",
   );
+  assert.deepEqual(stateCalls, [], "Pi 未确认时不能制造本地假成功");
 });
 
 test("查词与生词标记的工具描述交代了对 Pi 的依赖", () => {

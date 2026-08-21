@@ -136,7 +136,11 @@ test("charBoxes 就绪时必须重挂便签，否则首次开页一定退回浮�
   assert.ok(iBoxes >= 0 && iRemount > iBoxes, "重挂必须排在 __charBoxes 赋值之后");
   // 同一处也接 AI 那条 —— 两条路共用这个时机，别只接一条
   assert.ok(CHAR.indexOf("window.__pageBindRetry(num)") > iBoxes);
-  const corrected = CHAR.slice(CHAR.indexOf("const d2 = await"), CHAR.indexOf("wrap.__vocabMarks"));
+  const correctedStart = CHAR.indexOf("const d2 = await");
+  const corrected = CHAR.slice(
+    correctedStart,
+    CHAR.indexOf("const enrichment = _nativePageOverlayEnrichment.get(num);", correctedStart),
+  );
   assert.match(corrected, /window\.__pageBindRetry && window\.__pageBindRetry\(num\)/,
     "overlay 真 cv 替换字符几何后必须再次恢复词锚");
   assert.match(corrected, /RC\.stickynote\.repositionAll\(\)/,

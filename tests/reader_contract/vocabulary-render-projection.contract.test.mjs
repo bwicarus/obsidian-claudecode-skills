@@ -17,6 +17,13 @@ const PDF_VOCAB = readFileSync(
   ),
   "utf8",
 );
+const PDF_WORDPOP = readFileSync(
+  new URL(
+    "../../_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const EPUB = readFileSync(
   new URL("../../_server_deploy/static/pdf/epub-html.js", import.meta.url),
   "utf8",
@@ -87,6 +94,180 @@ test("PDF renderer resolves inflected surface through shared lemma before legacy
     sandbox,
   );
   assert.equal(sandbox.missing, false);
+});
+
+test("PDF renderer keeps server-mastered hidden unless an explicit local unknown overrides it", () => {
+  const renderer = between(
+    PDF_CHAR,
+    "function _vocabularyStateRepo()",
+    "function _vocabUnderlineEnabled()",
+  );
+  const appended = [];
+  const layer = {
+    innerHTML: "stale",
+    appendChild(value) { appended.push(value); },
+  };
+  const page = {
+    clientWidth: 100,
+    clientHeight: 100,
+    __pageWPt: 100,
+    __pageHPt: 100,
+    querySelector(selector) {
+      if (selector === ".vocab-layer") return layer;
+      if (selector === "canvas") return { clientWidth: 100, clientHeight: 100 };
+      return null;
+    },
+  };
+  const sandbox = {
+    _vocabUnderlineEnabled: () => true,
+    ensurePageLayer: () => layer,
+    document: {
+      createElement: () => ({ className: "", style: {} }),
+    },
+    window: {
+      BWReaderRuntime: {},
+      __masteredLocal: new Set(),
+      __vocabOverride: new Map(),
+    },
+    page,
+    marks: [{
+      word: "中学生",
+      lemma: "中学生",
+      surface: "中学生",
+      forms: ["中學生"],
+      label_slug: "mastered",
+      rects: [[1, 2, 20, 8]],
+    }],
+  };
+  vm.runInContext(
+    `${renderer}
+     renderVocabUnderlines(page, marks);`,
+    vm.createContext(sandbox),
+  );
+  assert.equal(layer.innerHTML, "");
+  assert.equal(appended.length, 0, "empty positive-set must not resurrect mastered marks");
+
+  sandbox.window.__vocabOverride.set("中学生", false);
+  vm.runInContext("renderVocabUnderlines(page, marks);", sandbox);
+  assert.equal(appended.length, 1, "explicit local unknown must win over stale server mastery");
+});
+
+test("native overlay enrichment repaints the loaded page and ignores stale or foreign events", () => {
+  const source = between(
+    PDF_CHAR,
+    "const _nativePageOverlayEnrichment",
+    "async function loadCharsAndBindLayer",
+  );
+  let listener = null;
+  const painted = [];
+  const wrap = { isConnected: true, __pageTextRevision: "local-revision-2" };
+  const sandbox = {
+    FILE_REL: "localbook:book-a",
+    document: {
+      querySelectorAll(selector) {
+        assert.equal(selector, '[data-page-num="3"]');
+        return [wrap];
+      },
+    },
+    renderVocabUnderlines(_wrap, marks) {
+      painted.push(marks.map((mark) => mark.word));
+    },
+    renderRubyLayer() {},
+    renderVocabSentences() {},
+    window: {
+      __BW_NATIVE_LOCAL_READER__: true,
+      addEventListener(type, callback) {
+        assert.equal(type, "bw:native-page-overlay-enrichment");
+        listener = callback;
+      },
+    },
+  };
+  vm.runInContext(source, vm.createContext(sandbox));
+  assert.equal(typeof listener, "function");
+  const detail = {
+    contract: "reader-native-page-overlay-enrichment/1",
+    file: "localbook:book-a",
+    page: 3,
+    localRevision: "local-revision-2",
+    savedAt: 20,
+    vocab_marks: [{ word: "new" }],
+    vocab_sentences: [{ text: "new sentence" }],
+    mastered_furi: ["既知"],
+  };
+  listener({ detail });
+  assert.deepEqual(painted, [["new"]]);
+  assert.deepEqual(wrap.__vocabSentences, detail.vocab_sentences);
+  assert.equal(wrap.__masteredFuri.has("既知"), true);
+
+  listener({ detail: { ...detail, savedAt: 10, vocab_marks: [{ word: "old" }] } });
+  assert.deepEqual(painted, [["new"]]);
+  listener({ detail: { ...detail, file: "localbook:book-b", savedAt: 30 } });
+  assert.deepEqual(painted, [["new"]]);
+  listener({
+    detail: {
+      ...detail,
+      localRevision: "replacement-revision",
+      savedAt: 30,
+      vocab_marks: [{ word: "replacement" }],
+    },
+  });
+  assert.deepEqual(painted, [["new"]], "rects for another text revision stay off this page");
+});
+
+test("phrase refresh cannot erase native enrichment that arrived before page chars", async () => {
+  const refresh = between(
+    PDF_WORDPOP,
+    "let _charsWGen = 0;",
+    "async function refreshCharsWForAllPages()",
+  );
+  const page = {
+    __charBoxes: [],
+    __pageTextRevision: "local-revision-2",
+  };
+  const painted = [];
+  const sandbox = {
+    FILE_REL: "localbook:book-a",
+    CHARS_VER: 8,
+    encodeURIComponent,
+    _nativePageOverlayEnrichment: new Map([[2, {
+      localRevision: "local-revision-2",
+      vocab_marks: [{ word: "cached", rects: [] }],
+    }]]),
+    localStorage: { setItem() {} },
+    fetch(url) {
+      return Promise.resolve({
+        json: () => Promise.resolve(
+          String(url).includes("page-overlay")
+            ? { ok: true, cv: "local-revision-2", vocab_marks: [] }
+            : {
+              ok: true,
+              revision: "local-revision-2",
+              chars: [],
+              furigana: [],
+            },
+        ),
+      });
+    },
+    _applyPhraseMergesLocal() {},
+    _rubyEnabled: () => false,
+    renderVocabUnderlines(_page, marks) {
+      painted.push(marks.map((mark) => mark.word));
+    },
+    page,
+    result: null,
+  };
+  vm.runInContext(
+    `${refresh}
+     _charsWGen = 1;
+     result = _refreshOnePageCharsW(page, 2, 1);`,
+    vm.createContext(sandbox),
+  );
+  await sandbox.result;
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(page.__vocabMarks)),
+    [{ word: "cached", rects: [] }],
+  );
+  assert.deepEqual(painted, [["cached"]]);
 });
 
 test("EPUB renderer queries word and phrase records with the host language", () => {

@@ -606,13 +606,17 @@ window.applyVocabLocalOverride = function (lemma, mastered, meta) {
     __vocabOverrideTs.set(k, Date.now());
     window.__vocabOverride.set(k, !!mastered);
     window.__vocabOverridePersist();
-    const keys = new Set([k, meta && meta.word, ...((meta && meta.forms) || [])]
+    const keys = new Set([k, meta && meta.word, meta && meta.surface, ...((meta && meta.forms) || [])]
       .filter(Boolean).map((value) => String(value).toLowerCase()));
     const paint = () => document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach((pw) => {
       if (!pw.__vocabMarks) return;
-      const hit = pw.__vocabMarks.some((mark) =>
-        keys.has(String(mark.lemma || '').toLowerCase()) ||
-        keys.has(String(mark.word || '').toLowerCase()));
+      const hit = pw.__vocabMarks.some((mark) => {
+        const aliases = typeof _vocabMarkKeys === 'function'
+          ? _vocabMarkKeys(mark)
+          : [mark.lemma, mark.word, mark.surface, ...((mark && mark.forms) || [])]
+            .filter(Boolean).map((value) => String(value).toLowerCase());
+        return aliases.some((alias) => keys.has(alias));
+      });
       if (hit) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} }
     });
     paint();

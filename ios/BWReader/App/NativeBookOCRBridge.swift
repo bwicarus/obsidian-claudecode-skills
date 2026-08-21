@@ -467,6 +467,17 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                 expectedContentSHA256: expectedContentSHA256,
                 page: pageNumber
             )
+        } else if let book,
+                  book.record.id == request.localBookID,
+                  book.record.format == .pdf {
+            // A missing full digest must not turn the first reading session
+            // into a bitmap-only page. Extract the embedded PDF text directly
+            // under the sampled local identity while the utility hash proceeds
+            // in the background. This path never touches persistent sidecars.
+            value = try await manager.provisionalReaderPageCharacters(
+                book: book,
+                page: pageNumber
+            )
         } else {
             value = nil
         }
@@ -843,7 +854,17 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         encoder.dateEncodingStrategy = .millisecondsSince1970
         encoder.outputFormatting = [.sortedKeys]
         let digest: String
-        if let data = try? encoder.encode(value) {
+        if let encoded = try? encoder.encode(value),
+           let decoded = try? JSONSerialization.jsonObject(with: encoded),
+           var object = decoded as? [String: Any] {
+            // createdAt records extraction time, not page content. Including it
+            // makes the same unchanged embedded page acquire a new revision on
+            // every App restart and prevents local overlay reuse.
+            object.removeValue(forKey: "created_at")
+            let data = (try? JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys, .withoutEscapingSlashes]
+            )) ?? encoded
             digest = SHA256.hash(data: data).map {
                 String(format: "%02x", $0)
             }.joined()

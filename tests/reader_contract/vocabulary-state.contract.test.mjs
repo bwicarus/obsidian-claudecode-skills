@@ -13,7 +13,7 @@ const SOURCE = readFileSync(
   "utf8",
 );
 
-function moduleInstance(extra = {}) {
+function moduleSandbox(extra = {}) {
   const sandbox = {
     console,
     Promise,
@@ -33,7 +33,11 @@ function moduleInstance(extra = {}) {
   vm.runInContext(SOURCE, vm.createContext(sandbox), {
     filename: "vocabulary-state.js",
   });
-  return sandbox.BWReaderRuntime.vocabularyState;
+  return sandbox;
+}
+
+function moduleInstance(extra = {}) {
+  return moduleSandbox(extra).BWReaderRuntime.vocabularyState;
 }
 
 function memoryAdapter(initial = [], identity = null) {
@@ -89,6 +93,53 @@ test("稳定编号由属性、类型、语言和规范词项共同决定", () =>
     () => state.idFor({ kind: "word", language: "en", key: "be" }, "favorite"),
     /只有词组可以收藏/,
   );
+});
+
+test("native runtime ready retries the eager storage attach and hydrates App vocabulary", async () => {
+  const listeners = new Map();
+  let storage = null;
+  const sandbox = moduleSandbox({
+    __USER__: { storage_namespace: "reader-user" },
+    __BW_READER_RUNTIME__: {
+      storage() { return storage; },
+    },
+    addEventListener(type, listener) {
+      const bucket = listeners.get(type) || [];
+      bucket.push(listener);
+      listeners.set(type, bucket);
+    },
+    dispatchEvent(event) {
+      for (const listener of listeners.get(event.type) || []) listener(event);
+    },
+  });
+  const state = sandbox.BWReaderRuntime.vocabularyState;
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(state.status().attached, false);
+
+  const record = state.normalizeRecord({
+    property: "mastered",
+    kind: "word",
+    language: "ja",
+    key: "中学生",
+    enabled: true,
+    changedAt: 1,
+  });
+  storage = {
+    list(collection) {
+      assert.equal(collection, "vocabulary-state");
+      return Promise.resolve([structuredClone(record)]);
+    },
+    get() { return Promise.resolve(null); },
+    put() { return Promise.resolve({ ok: true }); },
+    subscribe() { return () => {}; },
+  };
+  sandbox.dispatchEvent({ type: "bw:native-local-runtime-ready" });
+  await state.ready();
+  assert.equal(state.status().attached, true);
+  assert.equal(state.isMastered({
+    kind: "word", language: "ja", key: "中学生",
+  }), true);
 });
 
 test("持久化永不返回时，本地掌握投影仍同步生效", async () => {

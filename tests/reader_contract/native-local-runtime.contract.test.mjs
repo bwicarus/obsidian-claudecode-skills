@@ -1471,7 +1471,7 @@ test("native Pi fetch rejects forged or widened stream replies before loopback f
   }
 });
 
-test("native page-overlay keeps Pi vocabulary and offset while adding device formula regions", async () => {
+test("native page-overlay paints device data first and announces Pi vocabulary asynchronously", async () => {
   const formula = {
     id: "formula-device-1",
     x0: 10, y0: 20, x1: 90, y1: 60,
@@ -1510,17 +1510,107 @@ test("native page-overlay keeps Pi vocabulary and offset while adding device for
       };
     },
   });
+  const enrichments = [];
+  result.context.addEventListener("bw:native-page-overlay-enrichment", (event) => {
+    enrichments.push(clone(event.detail));
+  });
   const response = await result.context.fetch(
     "/pdf/api/page-overlay?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE) + "&page=2",
   );
   const payload = await response.json();
   assert.equal(response.status, 200);
-  assert.deepEqual(payload.vocab_marks, [{ word: "integral", rects: [[1, 2, 3, 4]] }]);
-  assert.deepEqual(payload.offset, { dx: 3, dy: -2, scale: 1.01 });
+  assert.deepEqual(payload.vocab_marks, [], "Pi must not add a network floor to first paint");
+  assert.deepEqual(payload.offset, { dx: 0, dy: 0, scale: 1 });
   assert.deepEqual(payload.formula_regions, [formula]);
   assert.equal(payload.native_formula_state, "ready");
   assert.equal(payload.native_formula_source, "apple");
-  assert.equal(payload.cv, "pi-cv-7|native:device-cv-3");
+  assert.equal(payload.cv, "device-cv-3");
+
+  for (let attempt = 0; attempt < 20 && enrichments.length === 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.equal(enrichments.length, 1);
+  assert.deepEqual(enrichments[0], {
+    contract: "reader-native-page-overlay-enrichment/1",
+    file: DEFAULT_LOCAL_FILE,
+    page: 2,
+    localRevision: "device-cv-3",
+    source: "pi",
+    savedAt: enrichments[0].savedAt,
+    vocab_marks: [{ word: "integral", rects: [[1, 2, 3, 4]] }],
+    vocab_sentences: [{ text: "an integral" }],
+    mastered_furi: ["既知"],
+    offset: { dx: 3, dy: -2, scale: 1.01 },
+    cv: "pi-cv-7",
+  });
+  assert.equal(Number.isFinite(enrichments[0].savedAt), true);
+
+  // The remote projection is also document-local IndexedDB state, so an
+  // offline reopen can restore it without delaying the local overlay reply.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const stored = [...result.dataStoresState.document.values.keys()].some(
+      (key) => key.includes("page-overlay-enrichment-cache-v1"),
+    );
+    if (stored) break;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  const reopened = await harness({
+    dataStoresState: result.dataStoresState,
+    localStorageState: result.localStorageState,
+    gatewayReply() { return new Promise(() => {}); },
+    pageTextReply(message) {
+      return {
+        ...nativePageReply(message, { text: "" }),
+        state: "readyEmpty",
+        revision: "device-cv-3",
+        chars: [],
+      };
+    },
+  });
+  const cached = [];
+  reopened.context.addEventListener("bw:native-page-overlay-enrichment", (event) => {
+    cached.push(clone(event.detail));
+  });
+  const reopenedResponse = await reopened.context.fetch(
+    "/pdf/api/page-overlay?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE) + "&page=2",
+  );
+  assert.deepEqual((await reopenedResponse.json()).vocab_marks, []);
+  for (let attempt = 0; attempt < 20 && cached.length === 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.equal(cached[0].source, "cache");
+  assert.equal(cached[0].localRevision, "device-cv-3");
+  assert.deepEqual(cached[0].vocab_marks, enrichments[0].vocab_marks);
+
+  const replaced = await harness({
+    dataStoresState: result.dataStoresState,
+    localStorageState: result.localStorageState,
+    gatewayReply() { return new Promise(() => {}); },
+    pageTextReply(message) {
+      return {
+        ...nativePageReply(message, { text: "" }),
+        state: "readyEmpty",
+        revision: "replacement-content-revision",
+        chars: [],
+      };
+    },
+  });
+  const stale = [];
+  replaced.context.addEventListener("bw:native-page-overlay-enrichment", (event) => {
+    stale.push(clone(event.detail));
+  });
+  await replaced.context.fetch(
+    "/pdf/api/page-overlay?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE) + "&page=2",
+  );
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.deepEqual(stale, [], "a different local text revision must reject old rects");
+  assert.match(SOURCE, /acquireNativePDFWriterLease\('page-overlay-cache'\)/);
+  assert.match(
+    SOURCE,
+    /NATIVE_PAGE_OVERLAY_CACHE_KIND[\s\S]*transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS/,
+  );
 });
 
 test("native page-overlay remains locally usable when Pi enrichment hangs", async () => {
@@ -1528,17 +1618,8 @@ test("native page-overlay remains locally usable when Pi enrichment hangs", asyn
     id: "formula-local-only", x0: 20, y0: 30, x1: 110, y1: 70,
     state: "ready", latex: "E=mc^2", multiline: false, error: null,
   };
-  const timeoutDelays = [];
   const result = await harness({
     gatewayReply() { return new Promise(() => {}); },
-    setTimeout(callback, delay, ...args) {
-      if (delay === 750) {
-        timeoutDelays.push(delay);
-        queueMicrotask(() => callback(...args));
-        return 750;
-      }
-      return setTimeout(callback, delay, ...args);
-    },
     pageTextReply(message) {
       return {
         ...nativePageReply(message, { text: "" }),
@@ -1559,7 +1640,67 @@ test("native page-overlay remains locally usable when Pi enrichment hangs", asyn
   assert.deepEqual(payload.formula_regions, [formula]);
   assert.deepEqual(payload.vocab_marks, []);
   assert.equal(payload.native_formula_source, "apple");
-  assert.deepEqual(timeoutDelays, [750]);
+  assert.doesNotMatch(SOURCE, /native overlay deadline elapsed|\}, 750\);/);
+});
+
+test("a Pi overlay started before PDF mutation cannot repopulate the new page map", async () => {
+  let releaseGateway;
+  const gatewayBarrier = new Promise((resolve) => { releaseGateway = resolve; });
+  const result = await harness({
+    interfaceManifest: withNativePDFMutationRoutesSupported(),
+    pdfMutationReply: nativePDFMutationResponder({ pageCount: 4 }),
+    gatewayReply() {
+      return gatewayBarrier.then(() => ({
+        contract: "reader-native-pi-response/2",
+        streamURL: "http://127.0.0.1:43129/r/" + "a".repeat(64) +
+          "/pi-proxy/" + "d".repeat(32),
+      }));
+    },
+    piProxyResponse: () => ({
+      ok: true,
+      vocab_marks: [{ word: "stale", rects: [[1, 2, 3, 4]] }],
+      vocab_sentences: [],
+      mastered_furi: [],
+      cv: "pi-before-mutation",
+    }),
+    pageTextReply(message) {
+      return {
+        ...nativePageReply(message, { text: "" }),
+        state: "readyEmpty",
+        revision: "local-before-mutation",
+        chars: [],
+      };
+    },
+  });
+  const enrichments = [];
+  result.context.addEventListener("bw:native-page-overlay-enrichment", (event) => {
+    enrichments.push(clone(event.detail));
+  });
+  const local = await result.context.fetch(
+    "/pdf/api/page-overlay?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE) + "&page=2",
+  );
+  assert.equal(local.status, 200);
+  assert.deepEqual((await local.json()).vocab_marks, []);
+
+  const mutation = await result.context.fetch("/pdf/api/pdf-insert-page", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, after: 1, md: "new page" }),
+  });
+  const receipt = await mutation.json();
+  assert.equal((await waitForNativePDFJob(result.context, receipt.job_id)).status, "done");
+
+  releaseGateway();
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.deepEqual(enrichments, []);
+  assert.equal(
+    [...result.dataStoresState.document.values.keys()].some(
+      (key) => key.includes("page-overlay-enrichment-cache-v1"),
+    ),
+    false,
+  );
 });
 
 test("voice page text reads embedded PDF content locally without opening Pi", async () => {

@@ -19,6 +19,8 @@ final class NativeBookOCRManager: ObservableObject {
     private struct ReaderEmbeddedProcessor {
         let contentSHA256: String
         let fileURL: URL
+        let byteCount: Int64
+        let modifiedAt: Date?
         let processor: NativeBookOCRProcessor
     }
     private var readerEmbeddedProcessors: [String: ReaderEmbeddedProcessor] = [:]
@@ -511,13 +513,17 @@ final class NativeBookOCRManager: ObservableObject {
         let processor: NativeBookOCRProcessor
         if let cached = readerEmbeddedProcessors[bookID],
            cached.contentSHA256 == normalized,
-           cached.fileURL == fileURL {
+           cached.fileURL == fileURL,
+           cached.byteCount == book.record.byteCount,
+           cached.modifiedAt == book.record.modifiedAt {
             processor = cached.processor
         } else {
             processor = try NativeBookOCRProcessor(fileURL: fileURL)
             readerEmbeddedProcessors[bookID] = ReaderEmbeddedProcessor(
                 contentSHA256: normalized,
                 fileURL: fileURL,
+                byteCount: book.record.byteCount,
+                modifiedAt: book.record.modifiedAt,
                 processor: processor
             )
         }
@@ -529,6 +535,49 @@ final class NativeBookOCRManager: ObservableObject {
         try Self.validateCurrentBook(book)
         guard activeContentSHA256[bookID] == normalized,
               invalidatedContentSHA256[bookID] != normalized else { return nil }
+        return value
+    }
+
+    /// Read-only fast path used while a newly discovered PDF is still hashing.
+    /// The sampled fingerprint is already bound to path, size and mtime by the
+    /// local-library record, so it is sufficient for an in-memory render
+    /// revision. Nothing from this path is read from or written to the OCR
+    /// sidecar; once the authoritative full digest arrives, activate() drops
+    /// this processor and the loaded pages are invalidated normally.
+    func provisionalReaderPageCharacters(
+        book: ReaderLocalBookAccess,
+        page: Int
+    ) async throws -> NativeBookOCRPageCharacters? {
+        let bookID = book.record.id
+        let provisionalIdentity = book.record.contentFingerprint.lowercased()
+        guard Self.isSHA256(provisionalIdentity), page >= 1,
+              book.record.format == .pdf else { return nil }
+        try Self.validateCurrentBook(book)
+
+        let fileURL = book.url.standardizedFileURL
+        let processor: NativeBookOCRProcessor
+        if let cached = readerEmbeddedProcessors[bookID],
+           cached.contentSHA256 == provisionalIdentity,
+           cached.fileURL == fileURL,
+           cached.byteCount == book.record.byteCount,
+           cached.modifiedAt == book.record.modifiedAt {
+            processor = cached.processor
+        } else {
+            processor = try NativeBookOCRProcessor(fileURL: fileURL)
+            readerEmbeddedProcessors[bookID] = ReaderEmbeddedProcessor(
+                contentSHA256: provisionalIdentity,
+                fileURL: fileURL,
+                byteCount: book.record.byteCount,
+                modifiedAt: book.record.modifiedAt,
+                processor: processor
+            )
+        }
+        let value = try await processor.processEmbeddedPage(
+            pageNumber: page,
+            contentSHA256: provisionalIdentity,
+            configuration: NativeBookOCRConfiguration()
+        )
+        try Self.validateCurrentBook(book)
         return value
     }
 
