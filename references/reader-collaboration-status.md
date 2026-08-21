@@ -4320,3 +4320,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证**：共享生成物、Reader Node 全量、网络审计、Pi 定向测试、Direct Release/包内自检、ReaderBundle 与发布管线已通过；Windows 全量仍仅命中已登记的 POSIX/fixture 环境基线。
 - **候选**：WebExt `0.2.126`、launcher v14、App `1.1.71`、Direct `0.1.172`；本地预生成的 `0.2.125` 未发布且因最终安全修复已作废，不覆盖其不可变文件。
 - **下一步**：提交推送后按用户授权直接走 Pi 原子部署、公开扩展 channel、Windows Direct 原子安装与 TestFlight 上传，再登记健康和回滚点。
+
+## Codex：学习卡统一 CRUD、复习交互与 Anki 同步正式发布（2026-08-21 JST）
+- **Pi**：Reader `0.2.126` / KG `kg-0.2.126-3062bef9f63a7f652c12` 原子部署，124 项 Linux 门禁、真实 E2E、webapp/voice-rt 健康均通过；回滚点 `/home/bwicarus/deploy-backups/reader/20260821T013728Z-88817`。
+- **扩展**：公开 channel 已切到 WebExt `0.2.126` / launcher v14，线上主包 SHA-256 `f3b461954ce400619cfb3b8a8abcaf086d566cb56b7444c8fdd346fc0addb2e5` 与候选一致；回滚点 `webext-channel-20260821T014820Z-souax6qn`。
+- **Windows**：Direct `0.1.172` 已原子安装并把 5 个学习卡/复习 MCP 工具迁入 Codex 配置；回滚点 `install-0.1.172-20260821T014847Z-162ee586`，旧任务不热加载，新语音任务自动加载。
+- **Anki/iOS**：Pi AnkiConnect v6 在线，写操作按稳定 ID 调本机 AnkiConnect 后独立报告 AnkiWeb sync；Actions `32437687870` 上传 TestFlight `1.1.71 (404)`，`32438398526` 确认 `COMPLETE / IN_BETA_TESTING` 且零错误警告。
+- **边界**：Windows 当前未启动 Anki，故本机 8765/Direct healthz 未监听；启动 Anki 与 ReaderPC/新 Codex 语音任务后由各自 owner 拉起，未绕过所有权手工常驻。
