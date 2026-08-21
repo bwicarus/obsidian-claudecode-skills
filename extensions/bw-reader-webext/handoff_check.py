@@ -1011,8 +1011,17 @@ def production_copy_matches(
         )
     if entry is None:
         return source.read_bytes() == target.read_bytes()
+    source_bytes = source.read_bytes()
+    if (
+        getattr(entry, "policy", None) == "reader_git_stamp"
+        and source.name == "reader.js"
+    ):
+        parts = sorted((source.parent / "reader.src").glob("*.js"))
+        if not parts:
+            return False
+        source_bytes = b"".join(part.read_bytes() for part in parts)
     return entry.deployed_content_matches(
-        source.read_bytes(),
+        source_bytes,
         target.read_bytes(),
     )
 

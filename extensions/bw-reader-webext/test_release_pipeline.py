@@ -25,8 +25,44 @@ import publish_test_channel as publish
 import release_preflight as release
 import package_safari as safari
 
+_HANDOFF_SPEC = importlib.util.spec_from_file_location(
+    "bw_reader_handoff_check",
+    HERE / "handoff_check.py",
+)
+assert _HANDOFF_SPEC is not None and _HANDOFF_SPEC.loader is not None
+handoff = importlib.util.module_from_spec(_HANDOFF_SPEC)
+_HANDOFF_SPEC.loader.exec_module(handoff)
+
 
 class ReleasePipelineTests(unittest.TestCase):
+    def test_production_reader_comparison_uses_generated_reader_parts(self) -> None:
+        class ReaderStampEntry:
+            policy = "reader_git_stamp"
+
+            @staticmethod
+            def deployed_content_matches(source: bytes, target: bytes) -> bool:
+                return target == source + b"\n;window.__READER_GIT='abc1234';\n"
+
+        with tempfile.TemporaryDirectory() as raw:
+            pdf = Path(raw) / "pdf"
+            parts = pdf / "reader.src"
+            parts.mkdir(parents=True)
+            (pdf / "reader.js").write_bytes(b"stale repository bundle")
+            (parts / "01-a.js").write_bytes(b"first\n")
+            (parts / "02-b.js").write_bytes(b"second\n")
+            deployed = Path(raw) / "deployed-reader.js"
+            deployed.write_bytes(
+                b"first\nsecond\n\n;window.__READER_GIT='abc1234';\n"
+            )
+
+            self.assertTrue(
+                handoff.production_copy_matches(
+                    pdf / "reader.js",
+                    deployed,
+                    entry=ReaderStampEntry(),
+                )
+            )
+
     def test_windows_process_lock_retries_only_contention_at_byte_zero(
         self,
     ) -> None:

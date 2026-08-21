@@ -242,7 +242,8 @@ class FocusHostWiringTest(unittest.TestCase):
 
     def test_cancel_wired_at_deselect(self) -> None:
         t = self._vc()
-        seg = t[t.index("function _pinForget"): t.index("function _pinForget") + 500]
+        start = t.index("function _pinForget")
+        seg = t[start:t.index("function _effectivePins", start)]
         self.assertIn("RC.outgoing.cancel()", seg,
                       "取消选中必须显式取消焦点,否则上游会拿已取消对象当现状")
 
@@ -420,7 +421,7 @@ class CharLayerSelectionWiringTest(unittest.TestCase):
         """清空时传空串 → _ctxSelReport 内部走 cancel 分支(显式取消,不是省略字段)。"""
         src = (self.S / "reader.src/16-caret-select.js").read_text("utf-8")
         i = src.index("function _ctxSelReport(txt)")
-        seg = src[i:i + 900]
+        seg = src[i:src.index("function checkSelection", i)]
         self.assertIn("RC?.outgoing?.cancel()", seg, "空串必须显式 cancel")
         self.assertIn("RC?.outgoing?.focus('text'", seg, "非空必须发 text 焦点")
 
