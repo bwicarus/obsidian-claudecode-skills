@@ -4347,3 +4347,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **Pi/扩展**：Reader `0.2.129` / KG `kg-0.2.129-d0011070f49f0969eb49` 已原子部署，`webapp/voice-rt` active；公开 WebExt `0.2.129` 摘要 `6b7bf7eb49aecbd2e0b2ad3ebd7bee6300332e6cbfae29ff17046a9f8a2f5150` 一致。
 - **回退**：Reader 回退点 `/home/bwicarus/deploy-backups/reader/20260821T100411Z-159937`；扩展 channel 回退点 `webext-channel-20260821T100815Z-3l4vy4su`。
 - **iOS/Windows**：Actions `32471288871` 上传 TestFlight `1.1.74 (414)`，`32472070767` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告；Direct `0.1.174` 未改且 `/healthz ok=true`。
+
+## Codex：既有学习卡出处原位修改正式发布（2026-08-21 JST）
+- **修复**：提交 `fb1f2ce3` 让 Codex Voice 按稳定 `id+cardIndex` 对旧卡执行 source-only 或 card+source 原子修改；同批卡共享出处，复习前台即时刷新，不新建替代卡。
+- **Anki**：source-only 只迁移出处 footer、不覆盖 Anki 正文；组合修改只改目标卡正文，同批兄弟仅更新出处；未知写结果保持 fenced，`reader-book:` 可回到真实文件与页码。
+- **验证**：Reader Node 全量 `1616/1616`、Direct Release/完整自检与包内 MCP 前向、发布管线、Pi Linux 预检和生产 E2E 全过；Direct `/healthz ok=true` 且新工具白名单已生效。
+- **发布**：Reader `0.2.130` / KG `kg-0.2.130-8ca8936c7f7c1f7608cc`、WebExt `0.2.130`（SHA `ee2fb4e4…ab0e`）、Direct `0.1.175`；回滚点 `20260821T110943Z-177732` / `webext-channel-20260821T111507Z-ah107swm` / `install-0.1.175-20260821T111302Z-76e3e342`。
+- **iOS/边界**：Actions `32475825033` 上传 TestFlight `1.1.75 (419)`，`32476422452` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告；旧 Codex 语音任务不热加载工具 schema，验收需新建任务。
