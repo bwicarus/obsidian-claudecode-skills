@@ -4334,3 +4334,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **Pi/扩展**：Reader `0.2.127` / KG `kg-0.2.127-7058efb4732e9ffb5ab2` 已原子部署；公开 WebExt `0.2.127` 下载摘要 `bceea351992b0e58385e5437adb840d7593c976ba8f9ebafd6272ffb36c7be12` 一致；回滚点 `20260821T050801Z-119553` / `webext-channel-20260821T051119Z-uxyq7vns`。
 - **Windows/iOS**：Direct `0.1.174` 已原子安装且进程/监听/包摘要一致，回滚点 `install-0.1.174-20260821T050453Z-a66ecde8`；Actions `32449645273` 上传 TestFlight `1.1.72 (408)`，`32450115413` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界**：Windows Anki 当前未启动，未直接改写用户现存异常图卡；新管线已上线，旧卡若只剩已过期外链仍需在 Anki 在线时重新提供有效图片后按 id 修改。
+
+## Codex：语音工具修改后复习卡显式热更新正式发布（2026-08-21 JST）
+- **修复**：提交 `0f6ddf9f` 让学习卡工具在权威 Reader 写入成功后、AnkiConnect/媒体/AnkiWeb 同步前显式请求 App 刷新；仅精确前台 `id+index` 编辑即时重绘，隐藏/兄弟编辑缓存，任何可见队列删除重建 pager。
+- **验证**：热更新/删除竞态合同 `42/42`、Reader Node 全量与专项 Python 通过；Windows handoff 只命中既有 POSIX `fcntl` 平台边界，Pi Linux 预检、原子部署与真实 E2E 全过，webapp/voice-rt active。
+- **Pi/扩展**：Reader `0.2.128` / KG `kg-0.2.128-b8e07f2fcd0ee32accd8` 已上线；公开 WebExt `0.2.128` 摘要 `4a87bcfa99a95c3cb1d695791747bca708d54561e0f72b5ce439b6df1be70e25` 一致；回滚点 `20260821T065116Z-139361` / `webext-channel-20260821T065555Z-gnoca8_5`。
+- **iOS/边界**：Actions `32456432640` 上传 TestFlight `1.1.73 (411)`，`32456932404` 确认 `COMPLETE / IN_BETA_TESTING` 且零错误警告；Direct `0.1.174` 协议未变，无需重装，下一步由用户在正式成品验收当前复习卡即时换面。
