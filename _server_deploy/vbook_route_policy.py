@@ -18,6 +18,7 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_active_reading': 'GLOBAL',   # /pdf/api/active-reading(设备状态,与合并无关;同 reading-pos)
     'pdf_reader.pdf_api_ai_stream_result': 'JOB_OR_RANGE',   # /pdf/api/ai-stream-result
     'pdf_reader.pdf_api_anki_add_cards': 'GLOBAL',   # /pdf/api/anki-add-cards
+    'pdf_reader.pdf_api_anki_card_operation': 'GLOBAL',   # 账户级稳定卡片 ID，不经 vbook 重写
     'pdf_reader.pdf_api_anki_draft': 'PAGE',   # /pdf/api/anki-draft (精确 PDF 页来源；EPUB 不走 vbook)
     'pdf_reader.pdf_api_asset': 'GLOBAL',   # /pdf/api/asset/<aid>
     'pdf_reader.pdf_api_book_briefs_get': 'BOOK_REP',   # /pdf/api/book-briefs
