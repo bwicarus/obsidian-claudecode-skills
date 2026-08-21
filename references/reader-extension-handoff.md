@@ -1,7 +1,7 @@
 # PWA 阅读器 / 浏览器扩展统一层交接
 
 当前候选由 `extensions/bw-reader-webext/manifest.json` 唯一确定；本轮登记版本为
-`0.2.128`。发布事实仍只写入 `reader-collaboration-status.md`，这里不把候选误写成已部署。
+`0.2.129`。发布事实仍只写入 `reader-collaboration-status.md`，这里不把候选误写成已部署。
 
 本文是该主线的唯一新会话入口。它记录用户已经确认的产品边界、现状和继续工作的门禁。
 不得用旧聊天中的 0.2.37 provider-only 方案覆盖本文。

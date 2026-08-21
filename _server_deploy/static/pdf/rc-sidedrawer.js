@@ -515,24 +515,30 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
   function _sideBlankDismissTarget(event, side) {
     if (!event || !side) return false;
     var target = event.target;
+    var path = [];
     try {
-      var path = typeof event.composedPath === 'function'
+      path = typeof event.composedPath === 'function'
         ? event.composedPath() : [];
       if (path && path.length && path[0] && path[0].nodeType === 1) {
         target = path[0];
       }
     } catch (e) {}
-    if (!target || target.nodeType !== 1 || !side.contains(event.target)) {
+    var insideSide = false;
+    try {
+      insideSide = (path && path.indexOf(side) >= 0) || side.contains(event.target);
+    } catch (e) {}
+    if (!target || target.nodeType !== 1 || !insideSide) {
       return false;
     }
-    // Only genuine empty chrome dismisses transients.  Messages, cards,
-    // settings and every standard interactive control keep their own click.
+    // Passive sidebar content (including a message body) behaves like reader
+    // blank space.  Only real controls and stateful panels keep transients open.
+    // Do not classify [data-pane] as interactive: every pane owns that
+    // attribute, so doing so disables dismissal for the entire sidebar body.
     var interactive =
       'button,a,input,textarea,select,option,label,summary,details,' +
       '[contenteditable="true"],[role="button"],[data-action],[data-q],' +
-      '[data-pane],[onclick],.vc-card,.rc-note,.bw-page-pin,' +
-      '.rv-improve-panel,.asst-msg,.rc-turn,.asst-tool,.ams-mask,' +
-      '#ep-side-settings,#asst-turnrail';
+      '[onclick],.vc-card,.rc-note,.bw-page-pin,' +
+      '.rv-improve-panel,.ams-mask,#ep-side-settings';
     try { if (target.closest(interactive)) return false; } catch (e) {}
     return true;
   }
