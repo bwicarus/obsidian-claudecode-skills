@@ -674,10 +674,13 @@ Vision 是字符、字框与 source index 的唯一权威；Manga 只提供漫�
 JS 间守恒；高置信页面输出四列稀疏漫画 Markdown 或标准 Markdown 表格，低置信、空页、公式
 改写或超限布局统一回退 Vision 原顺序，并提示 AI 按需调用页面图像。
 
-## 15. 2026-08-23 `0.2.136` OCR 多版本台账与崩溃安全发布候选
+## 15. 2026-08-23 `0.2.136` OCR 多版本台账与崩溃安全正式发布
 
 `releases-index.json.activeRunId` 是发布真相，旧 publication/current/result 仅是可修复镜像；同一
 revision 的多次运行保持各自 runId/jobId。删除先原子改名、再提交台账、最后锁外回收，崩溃恢复
 不会复活已提交删除。Pi 发布把台账与终态放在同一锁内；ReaderPC 使用持久 finalizer 三阶段，
 逐页/公式校验、复制、哈希与清理全部在全局锁外，发布期间冻结输入，且旧完成任务不能覆盖后续
-generation。既有内容寻址书籍别名的不可变 release 身份限制不在本候选中放宽。
+generation。既有内容寻址书籍别名的不可变 release 身份限制未在本次发布中放宽。
+
+提交 `e072ae9b` 已通过 Pi/Linux 原子门禁与真实 E2E；Reader/KG、公开 WebExt `0.2.136`
+及 ReaderPC `0.1.61` 已切换，精确回退点登记在 `reader-collaboration-status.md`。

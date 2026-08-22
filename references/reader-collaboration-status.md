@@ -4390,9 +4390,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证**：Reader Node 全量 `1690/1690`；OCR/API/PC 专项 `138` 项（`1` skipped）；发布流水线 `25` 项（`1` skipped）；共享构建、153 个 runtime 合同与网络门禁通过。
 - **发布**：提交 `36fd42ea`；Reader/WebExt `0.2.135`、ReaderPC `0.1.58`、TestFlight `1.1.81 (433)` 已上线；Reader 回退点 `20260822T142520Z-366798`，公开扩展回退点 `webext-channel-20260822T142950Z-q_x93v2g`。
 
-### 2026-08-23 OCR 多版本台账与崩溃安全发布候选（0.2.136 / ReaderPC 0.1.61）
+### 2026-08-23 OCR 多版本台账与崩溃安全正式发布（0.2.136 / ReaderPC 0.1.61）
 - **修复**：`activeRunId` 成为唯一发布真相，同 revision 多次运行保留独立 run/job 身份；删除采用 rename→index commit→锁外回收，崩溃后不复活且遗留 trash 可安全 GC。
 - **并发**：Pi index+terminal 同锁提交；ReaderPC 以持久 finalizer 三阶段运行，逐页/公式校验、复制、哈希与清理均在全局锁外，活跃 finalizer 冻结输入且不会覆盖后续 generation。
 - **验证**：OCR 故障注入 `116` 项通过（`1` skipped），Reader 合同 `1690/1690`、发布流水线 `25` 项（`1` skipped）、ReaderPC `0.1.61` 包验证/自检通过；两轮独立增量复审无 P1/P2。
-- **候选**：WebExt `0.2.136`、ReaderPC `0.1.61`；Windows handoff 仅保留既有 POSIX `fcntl` 平台边界，正式完整门禁由 Pi Linux 预检裁决。
-- **边界/下一步**：既有内容寻址书籍别名的不可变 release 身份仍是发布前已存在的限制，本轮未放宽完整性；提交推送后按正式 Pi 原子部署、公开扩展 channel 与 ReaderPC 原子安装发布。
+- **发布**：提交 `e072ae9b`；Reader `0.2.136` / KG `kg-0.2.136-4c14c02738b4818d4042` 与 WebExt `0.2.136` 已上线，回退点 `20260822T171815Z-391703` / `webext-channel-20260822T172142Z-f7pxm_kt`，扩展 SHA `79b4e77a…c813`。
+- **Windows/实跑/边界**：ReaderPC `0.1.61` 已原子安装并保留进程/监听为 0，旧 `0.1.58` release 保留；料理师 v6 台账已自愈到 `ocr_5d235cbd82943f1a580c`，25/26 页 Manga 四列与 46 页表格均 high；既有书籍 alias 限制未放宽，iOS 保持 `1.1.81 (433)`。
