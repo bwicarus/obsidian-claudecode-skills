@@ -11,6 +11,7 @@ and never replaces or edits the original PDF.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -80,7 +81,8 @@ PUBLICATION_CONTRACT = "reader-book-ocr-publication/1"
 # 所以另立 run 这一层：一个 revision 可被多条 run 引用，删除按 run 删，
 # 引用归零才删物理目录。目录布局一个字节不改（日期进目录名会破坏内容寻址与去重）。
 #
-# 台账是**纯派生物**：删掉它，旧代码按 publication.json 照常工作，一个字节不丢。
+# activeRunId 是发布真相；publication/current/result 只是兼容旧读者的可修复镜像。
+# 台账同时保存“同一不可变 revision 被多次运行引用”的历史，因此不能再按目录折叠。
 RELEASE_INDEX_CONTRACT = "reader-book-ocr-release-index/1"
 RUN_ID_RE = re.compile(r"ocrrun_[0-9a-f]{16}")
 MAX_PC_PAGE_BYTES_DEFAULT = 16 * 1024 * 1024
@@ -180,7 +182,7 @@ def _process_start_token(pid) -> str | None:
 def _safe_public_job(job: dict) -> dict:
     """Return the stable wire shape and never leak a filesystem path."""
     keys = (
-        "jobId", "bookId", "contentSha256", "engine", "executor",
+        "jobId", "runId", "bookId", "contentSha256", "engine", "executor",
         "processingProfile", "state", "phase",
         "processedPages", "totalPages", "successfulPages", "failedPages",
         "recognizedPages", "percent", "etaSeconds", "message", "canPause",
@@ -547,6 +549,8 @@ class ReaderBookOcrService:
         )) * 1000
         self._adoption_singleflight = threading.Lock()
         self._verified_source_cache: dict[tuple, bool] = {}
+        self._delete_trash_gc_lock = threading.Lock()
+        self._pending_delete_trash_gc: set[Path] = set()
 
     @staticmethod
     def _validate_identity(book_id: str, content_sha256: str) -> None:
@@ -1369,14 +1373,17 @@ class ReaderBookOcrService:
         except (TypeError, ValueError):
             expires_at = 0
         now = _now_ms()
-        if expires_at <= now:
+        live_finalizer = bool(
+            job.get("finalizerOwnerToken") and self._finalizer_owner_alive(job)
+        )
+        if expires_at <= now and not live_finalizer:
             raise ReaderBookOcrError(
                 "ocr-worker-lease-expired", "PC OCR lease expired; claim the job again", status=409
             )
         job_dir = version_dir / engine
         desired = self._pc_desired_state(job_dir)
-        worker = self._touch_pc_worker_locked(worker_id)
         if renew:
+            worker = self._touch_pc_worker_locked(worker_id)
             job = {
                 **job,
                 "leaseExpiresAtEpochMs": now + self.pc_lease_ms,
@@ -1414,6 +1421,10 @@ class ReaderBookOcrService:
                     engine not in worker["engines"]
                     or not isinstance(job, dict)
                     or job.get("executor") != "pc"
+                    or (
+                        job.get("phase") == "finalizing"
+                        and job.get("finalizerOwnerToken")
+                    )
                     or self._processing_identity(job)
                         != ("pc", PROCESSING_PROFILES["pc"])
                     or job.get("state") not in ACTIVE_STATES
@@ -1612,6 +1623,14 @@ class ReaderBookOcrService:
         self.resolve(str(payload.get("bookId") or ""), str(payload.get("contentSha256") or ""))
         with exclusive_lock(self.lock_path):
             _version_dir, job_dir, job, desired = self._pc_identity_job_locked(payload)
+            if job.get("finalizerOwnerToken") and self._finalizer_owner_alive(job):
+                if set(payload) != set(PC_IDENTITY_FIELDS):
+                    raise ReaderBookOcrError(
+                        "ocr-publication-finalizing",
+                        "PC OCR publication inputs are frozen",
+                        status=409,
+                    )
+                return self._pc_lease_wire(job, desired)
             total_pages = int(job.get("totalPages") or 0)
             self._validate_pc_progress(payload.get("progress"), total_pages)
             phase = payload.get("phase")
@@ -1845,7 +1864,15 @@ class ReaderBookOcrService:
         )
         self.resolve(str(payload.get("bookId") or ""), str(payload.get("contentSha256") or ""))
         with exclusive_lock(self.lock_path):
-            _version_dir, job_dir, job, desired = self._pc_identity_job_locked(payload)
+            _version_dir, job_dir, job, desired = self._pc_identity_job_locked(
+                payload, renew=False
+            )
+            if job.get("finalizerOwnerToken") and self._finalizer_owner_alive(job):
+                raise ReaderBookOcrError(
+                    "ocr-publication-finalizing",
+                    "PC OCR publication inputs are frozen",
+                    status=409,
+                )
             total_pages = int(job.get("totalPages") or 0)
             if page_number < 1 or page_number > total_pages:
                 raise ReaderBookOcrError(
@@ -1858,6 +1885,14 @@ class ReaderBookOcrService:
             already = existing_page == normalized
             was_done = self._page_for_pc_done(job_dir, page_number, job)
             old_recognized = bool((existing_page or {}).get("chars")) if was_done else False
+            now = _now_ms()
+            worker = self._touch_pc_worker_locked(str(payload["workerId"]))
+            job = {
+                **job,
+                "leaseExpiresAtEpochMs": now + self.pc_lease_ms,
+                "executorOnline": True,
+                "executorLastSeenAtEpochMs": worker["lastSeenAtEpochMs"],
+            }
             atomic_write_json(page_path, normalized, indent=None, mode=0o600)
             completed = min(total_pages, int(job.get("successfulPages") or 0) + (0 if was_done else 1))
             recognized = max(
@@ -1887,7 +1922,7 @@ class ReaderBookOcrService:
                 },
                 "percent": round(completed * 75 / max(1, total_pages), 1),
                 "message": f"PC 已上传文字页 {completed}/{total_pages}",
-                "updatedAtEpochMs": _now_ms(),
+                "updatedAtEpochMs": now,
             }
             atomic_write_json(job_dir / "job.json", job, indent=2, mode=0o600)
             response = self._pc_lease_wire(job, desired)
@@ -1906,7 +1941,15 @@ class ReaderBookOcrService:
         self._bounded_json_bytes(payload, self.max_pc_formula_bytes, "worker-formula-too-large")
         self.resolve(str(payload.get("bookId") or ""), str(payload.get("contentSha256") or ""))
         with exclusive_lock(self.lock_path):
-            _version_dir, job_dir, job, desired = self._pc_identity_job_locked(payload)
+            _version_dir, job_dir, job, desired = self._pc_identity_job_locked(
+                payload, renew=False
+            )
+            if job.get("finalizerOwnerToken") and self._finalizer_owner_alive(job):
+                raise ReaderBookOcrError(
+                    "ocr-publication-finalizing",
+                    "PC OCR publication inputs are frozen",
+                    status=409,
+                )
             total_pages = int(job.get("totalPages") or 0)
             self._validate_pc_progress(payload.get("progress"), total_pages)
             formula = payload.get("formula")
@@ -2027,6 +2070,14 @@ class ReaderBookOcrService:
                     status=409,
                 )
             formula_path = job_dir / "pc-formulas.json"
+            now = _now_ms()
+            worker = self._touch_pc_worker_locked(str(payload["workerId"]))
+            job = {
+                **job,
+                "leaseExpiresAtEpochMs": now + self.pc_lease_ms,
+                "executorOnline": True,
+                "executorLastSeenAtEpochMs": worker["lastSeenAtEpochMs"],
+            }
             atomic_write_json(formula_path, {"formulas": normalized}, indent=None, mode=0o600)
             formula_unavailable = formula_state == "unavailable"
             job = {
@@ -2051,7 +2102,7 @@ class ReaderBookOcrService:
                     if formula_unavailable
                     else f"PC 已上传公式结果 {recognized}/{len(normalized)}"
                 ),
-                "updatedAtEpochMs": _now_ms(),
+                "updatedAtEpochMs": now,
             }
             atomic_write_json(job_dir / "job.json", job, indent=2, mode=0o600)
             response = self._pc_lease_wire(job, desired)
@@ -2069,12 +2120,87 @@ class ReaderBookOcrService:
         resolved = self.resolve(
             str(payload.get("bookId") or ""), str(payload.get("contentSha256") or "")
         )
+        # Phase 1: persist a cross-process owner under the short global lock.
+        # No page/formula payload is opened until after this lock is released.
         with exclusive_lock(self.lock_path):
             version_dir, job_dir, job, desired = self._pc_identity_job_locked(payload)
+            if job.get("finalizerOwnerToken") and self._finalizer_owner_alive(job):
+                raise ReaderBookOcrError(
+                    "ocr-publication-finalizing",
+                    "PC OCR publication is already finalizing",
+                    status=409,
+                )
             if desired != "running":
                 raise ReaderBookOcrError(
                     "ocr-worker-stop-requested", "PC OCR must stop before publication", status=409
                 )
+            finalizer_token = "ocrfinal_" + uuid.uuid4().hex
+            previous_phase = job.get("phase")
+            finalizing_job = {
+                **job,
+                "phase": "finalizing",
+                "finalizerStage": "preflight",
+                "finalizerOwnerToken": finalizer_token,
+                "finalizerPid": os.getpid(),
+                "finalizerProcessStartToken": _process_start_token(os.getpid()),
+                "updatedAtEpochMs": _now_ms(),
+            }
+            atomic_write_json(
+                job_dir / "job.json", finalizing_job, indent=2, mode=0o600
+            )
+
+        def finish_preflight_failure() -> None:
+            """Release this owner without overwriting a concurrent stop request."""
+
+            with exclusive_lock(self.lock_path):
+                current = self._job_for_engine(version_dir, job["engine"])
+                if (
+                    not isinstance(current, dict)
+                    or current.get("finalizerOwnerToken") != finalizer_token
+                ):
+                    return
+                next_job = dict(current)
+                desired_now = self._pc_desired_state(job_dir)
+                if desired_now == "running":
+                    next_job.update({
+                        "phase": previous_phase,
+                        "message": job.get("message"),
+                        "updatedAtEpochMs": _now_ms(),
+                    })
+                else:
+                    stopped_state = (
+                        "cancelled" if desired_now == "cancelled" else "paused"
+                    )
+                    next_job.update({
+                        "state": stopped_state,
+                        "message": (
+                            "PC 任务已取消；已完成页面会保留"
+                            if stopped_state == "cancelled"
+                            else "PC 任务已暂停"
+                        ),
+                        "canPause": False,
+                        "canResume": stopped_state == "paused",
+                        "canCancel": stopped_state == "paused",
+                        "canRetry": stopped_state == "cancelled",
+                        "resultAvailable": False,
+                        "leaseId": None,
+                        "leaseWorkerId": None,
+                        "leaseExpiresAtEpochMs": None,
+                        "updatedAtEpochMs": _now_ms(),
+                    })
+                for field in (
+                    "finalizerStage",
+                    "finalizerOwnerToken",
+                    "finalizerPid",
+                    "finalizerProcessStartToken",
+                ):
+                    next_job.pop(field, None)
+                atomic_write_json(
+                    job_dir / "job.json", next_job, indent=2, mode=0o600
+                )
+
+        # Phase 2: all O(number-of-pages) and large formula JSON work is lock-free.
+        try:
             total_pages = int(job.get("totalPages") or 0)
             try:
                 reported_total = int(payload.get("totalPages"))
@@ -2142,86 +2268,265 @@ class ReaderBookOcrService:
                     "PC OCR formula result is not in a publishable terminal state",
                     status=409,
                 )
-            now = _now_ms()
-            final_job = {
-                key: value
-                for key, value in job.items()
-                if key not in ("leaseId", "leaseWorkerId", "leaseExpiresAtEpochMs")
-            }
-            final_job.update({
-                "state": "succeeded", "phase": "finalizing",
-                "textState": "succeeded", "processedPages": total_pages,
-                "successfulPages": total_pages, "failedPages": 0,
-                "textProgress": {
-                    "total": total_pages, "completed": total_pages,
-                    "pending": 0, "failed": 0, "unavailable": 0,
-                },
-                "wordProgress": {
-                    "total": total_pages, "completed": total_pages,
-                    "pending": 0, "failed": 0, "unavailable": 0,
-                },
-                "formulaProgress": ({
-                    "total": total_pages, "completed": 0,
-                    "pending": 0, "failed": 0, "unavailable": total_pages,
-                } if job.get("formulaState") == "unavailable" else {
-                    "total": total_pages, "completed": total_pages,
-                    "pending": 0, "failed": 0, "unavailable": 0,
-                }),
-                "currentPage": None, "percent": 100, "etaSeconds": 0,
-                "message": (
-                    f"PC 预处理完成：文字 {total_pages} 页；公式不可用（{job.get('formulaReason')}）"
-                    if job.get("formulaState") == "unavailable"
-                    else (
-                        f"PC 预处理完成：文字 {total_pages} 页，公式 "
-                        f"{int(job.get('formulaRecognized') or 0)}/{int(job.get('formulaTotal') or 0)}"
-                    )
-                ),
-                "canPause": False, "canResume": False, "canCancel": False,
-                "canRetry": False, "resultAvailable": True,
-                "pageCharsRevision": None, "updatedAtEpochMs": now,
-            })
-            atomic_write_json(job_dir / "job.json", {**job, "phase": "finalizing"}, indent=2, mode=0o600)
-            from reader_book_ocr_worker import _publish_release
+        except Exception:
+            finish_preflight_failure()
+            raise
 
-            args = SimpleNamespace(
-                book_id=job["bookId"], content_sha256=job["contentSha256"],
-                engine=job["engine"], max_bytes=self.max_pdf_bytes,
+        # Phase 3: re-check the persistent owner/generation and desired state
+        # under a second short lock.  Lease expiry is deliberately irrelevant
+        # while the live finalizer owns this generation.
+        with exclusive_lock(self.lock_path):
+            current = self._job_for_engine(version_dir, job["engine"])
+            identity_matches = (
+                isinstance(current, dict)
+                and current.get("jobId") == job.get("jobId")
+                and current.get("workerGeneration") == job.get("workerGeneration")
+                and current.get("runId") == job.get("runId")
+                and current.get("finalizerOwnerToken") == finalizer_token
             )
-            try:
-                revision = _publish_release(
-                    args,
-                    job_dir,
-                    formula_path,
-                    final_job,
-                    source_path=resolved.path,
+            if not identity_matches:
+                raise ReaderBookOcrError(
+                    "ocr-worker-lease-stale",
+                    "PC OCR finalizer is no longer current",
+                    status=409,
                 )
-            except Exception as exc:
-                failed = {
-                    **job,
-                    "state": "failed", "phase": "finalizing",
-                    "errorCode": "ocr-publication-failed",
-                    "error": self._sanitize_worker_error(exc),
-                    "message": "PC 结果发布失败；完成页保留，可重试",
-                    "canPause": False, "canResume": False, "canCancel": False,
-                    "canRetry": True, "resultAvailable": False,
-                    "leaseId": None, "leaseWorkerId": None, "leaseExpiresAtEpochMs": None,
-                    "updatedAtEpochMs": _now_ms(),
+            desired = self._pc_desired_state(job_dir)
+            if desired != "running":
+                # Reuse the common cleanup path outside this lock to avoid a
+                # nested acquisition.  The accepted control state is already
+                # durable in control.json and job.json.
+                current["finalizerStage"] = "stopped"
+                atomic_write_json(
+                    job_dir / "job.json", current, indent=2, mode=0o600
+                )
+                stop_requested = True
+            else:
+                stable_fields = (
+                    "totalPages",
+                    "formulaState",
+                    "formulaTotal",
+                    "formulaRecognized",
+                    "formulaReason",
+                )
+                if any(current.get(field) != job.get(field) for field in stable_fields):
+                    inputs_changed = True
+                    stop_requested = False
+                else:
+                    inputs_changed = False
+                    current = {
+                        **current,
+                        "finalizerStage": "publishing",
+                        "updatedAtEpochMs": _now_ms(),
+                    }
+                    atomic_write_json(
+                        job_dir / "job.json", current, indent=2, mode=0o600
+                    )
+                    stop_requested = False
+
+        if stop_requested:
+            finish_preflight_failure()
+            raise ReaderBookOcrError(
+                "ocr-worker-stop-requested",
+                "PC OCR must stop before publication",
+                status=409,
+            )
+        if inputs_changed:
+            finish_preflight_failure()
+            raise ReaderBookOcrError(
+                "ocr-worker-generation-changed",
+                "PC OCR publication inputs changed during preflight",
+                status=409,
+            )
+
+        now = _now_ms()
+        finalizer_fields = {
+            "leaseId",
+            "leaseWorkerId",
+            "leaseExpiresAtEpochMs",
+            "finalizerStage",
+            "finalizerOwnerToken",
+            "finalizerPid",
+            "finalizerProcessStartToken",
+        }
+        final_job = {
+            key: value for key, value in current.items() if key not in finalizer_fields
+        }
+        final_job.update({
+            "state": "succeeded", "phase": "finalizing",
+            "textState": "succeeded", "processedPages": total_pages,
+            "successfulPages": total_pages, "failedPages": 0,
+            "textProgress": {
+                "total": total_pages, "completed": total_pages,
+                "pending": 0, "failed": 0, "unavailable": 0,
+            },
+            "wordProgress": {
+                "total": total_pages, "completed": total_pages,
+                "pending": 0, "failed": 0, "unavailable": 0,
+            },
+            "formulaProgress": ({
+                "total": total_pages, "completed": 0,
+                "pending": 0, "failed": 0, "unavailable": total_pages,
+            } if current.get("formulaState") == "unavailable" else {
+                "total": total_pages, "completed": total_pages,
+                "pending": 0, "failed": 0, "unavailable": 0,
+            }),
+            "currentPage": None, "percent": 100, "etaSeconds": 0,
+            "message": (
+                f"PC 预处理完成：文字 {total_pages} 页；公式不可用（{current.get('formulaReason')}）"
+                if current.get("formulaState") == "unavailable"
+                else (
+                    f"PC 预处理完成：文字 {total_pages} 页，公式 "
+                    f"{int(current.get('formulaRecognized') or 0)}/{int(current.get('formulaTotal') or 0)}"
+                )
+            ),
+            "canPause": False, "canResume": False, "canCancel": False,
+            "canRetry": False, "resultAvailable": True,
+            "pageCharsRevision": None, "updatedAtEpochMs": now,
+        })
+
+        # Copying and hashing every page/source is intentionally outside the
+        # global jobs lock.  The persisted finalizer owner fences other server
+        # processes without guessing how long publication will take.
+        from reader_book_ocr_worker import _publish_release
+
+        args = SimpleNamespace(
+            book_id=job["bookId"],
+            content_sha256=job["contentSha256"],
+            engine=job["engine"],
+            max_bytes=self.max_pdf_bytes,
+        )
+        final_job["updatedAtEpochMs"] = _now_ms()
+        try:
+            revision = _publish_release(
+                args,
+                job_dir,
+                formula_path,
+                final_job,
+                source_path=resolved.path,
+                terminal_job=final_job,
+                finalizer_token=finalizer_token,
+            )
+        except Exception as exc:
+            # The release index is the atomic commit record.  Read only that
+            # small ledger outside jobs.lock: a terminal-job replace can fail
+            # after the index commit, and scanning/hashing the immutable
+            # release here would make the global lock unbounded again.
+            committed = self._indexed_run_for_job(
+                version_dir,
+                job["bookId"],
+                job["contentSha256"],
+                job,
+            )
+            if committed is not None:
+                committed_revision = committed["revision"]
+                # Repair only the original mutable generation when the index
+                # committed but its terminal replace failed.  A force-started
+                # replacement in the same engine directory is left byte-for-
+                # byte untouched.
+                with exclusive_lock(self.lock_path):
+                    current = self._job_for_engine(version_dir, job["engine"])
+                    if (
+                        isinstance(current, dict)
+                        and current.get("jobId") == job.get("jobId")
+                        and current.get("workerGeneration") == job.get("workerGeneration")
+                        and current.get("runId") == job.get("runId")
+                        and current.get("finalizerOwnerToken") == finalizer_token
+                    ):
+                        atomic_write_json(
+                            job_dir / "job.json",
+                            {
+                                **final_job,
+                                "pageCharsRevision": committed_revision,
+                                "updatedAtEpochMs": _now_ms(),
+                            },
+                            indent=2,
+                            mode=0o600,
+                        )
+                return {
+                    "published": True,
+                    "revision": committed_revision,
+                    "job": _safe_public_job({
+                        **final_job,
+                        "pageCharsRevision": committed_revision,
+                    }),
                 }
-                atomic_write_json(job_dir / "job.json", failed, indent=2, mode=0o600)
-                raise ReaderBookOcrError(
-                    "ocr-publication-failed", "PC OCR publication failed", status=500
-                ) from exc
-            final_job["pageCharsRevision"] = revision
-            final_job["updatedAtEpochMs"] = _now_ms()
-            atomic_write_json(job_dir / "job.json", final_job, indent=2, mode=0o600)
-            # The common publication path writes the immutable release and fence.
-            published = self._published_snapshot(job["bookId"], job["contentSha256"])
-            if published is None or published["revision"] != revision:
-                raise ReaderBookOcrError(
-                    "ocr-publication-incomplete", "PC OCR publication did not commit", status=500
-                )
-            self._activate_published_locked(version_dir, published)
-            return {"published": True, "revision": revision, "job": _safe_public_job(published["job"])}
+            with exclusive_lock(self.lock_path):
+                current = self._job_for_engine(version_dir, job["engine"])
+                desired = self._pc_desired_state(job_dir)
+                if (
+                    isinstance(current, dict)
+                    and current.get("jobId") == job.get("jobId")
+                    and current.get("workerGeneration") == job.get("workerGeneration")
+                    and current.get("runId") == job.get("runId")
+                    and current.get("finalizerOwnerToken") == finalizer_token
+                ):
+                    if desired == "running":
+                        failed = {
+                            **current,
+                            "state": "failed",
+                            "phase": "finalizing",
+                            "errorCode": "ocr-publication-failed",
+                            "error": self._sanitize_worker_error(exc),
+                            "message": "PC 结果发布失败；完成页保留，可重试",
+                            "canPause": False,
+                            "canResume": False,
+                            "canCancel": False,
+                            "canRetry": True,
+                            "resultAvailable": False,
+                            "leaseId": None,
+                            "leaseWorkerId": None,
+                            "leaseExpiresAtEpochMs": None,
+                            "updatedAtEpochMs": _now_ms(),
+                        }
+                    else:
+                        stopped_state = (
+                            "cancelled" if desired == "cancelled" else "paused"
+                        )
+                        failed = {
+                            **current,
+                            "state": stopped_state,
+                            "message": (
+                                "PC 任务已取消；已完成页面会保留"
+                                if stopped_state == "cancelled"
+                                else "PC 任务已暂停"
+                            ),
+                            "canPause": False,
+                            "canResume": stopped_state == "paused",
+                            "canCancel": stopped_state == "paused",
+                            "canRetry": stopped_state == "cancelled",
+                            "resultAvailable": False,
+                            "leaseId": None,
+                            "leaseWorkerId": None,
+                            "leaseExpiresAtEpochMs": None,
+                            "updatedAtEpochMs": _now_ms(),
+                        }
+                    for field in (
+                        "finalizerStage",
+                        "finalizerOwnerToken",
+                        "finalizerPid",
+                        "finalizerProcessStartToken",
+                    ):
+                        failed.pop(field, None)
+                    atomic_write_json(
+                        job_dir / "job.json", failed, indent=2, mode=0o600
+                    )
+            raise ReaderBookOcrError(
+                "ocr-publication-failed", "PC OCR publication failed", status=500
+            ) from exc
+
+        # Returning from _publish_release is itself the commit evidence: it
+        # wrote releases-index.json and the original terminal identity under
+        # jobs.lock.  Do not re-activate mutable mirrors here.  A force-start
+        # may already have installed a replacement after that lock was
+        # released, and the completed run must never overwrite it.
+        return {
+            "published": True,
+            "revision": revision,
+            "job": _safe_public_job({
+                **final_job,
+                "pageCharsRevision": revision,
+            }),
+        }
 
     def _pointer_engine(self, version_dir: Path, name: str) -> str | None:
         pointer = self._read_optional(version_dir / name)
@@ -2237,6 +2542,16 @@ class ReaderBookOcrService:
         if not _pid_alive(pid):
             return False
         expected = job.get("processStartToken")
+        current = _process_start_token(pid)
+        return not expected or not current or str(expected) == str(current)
+
+    @staticmethod
+    def _finalizer_owner_alive(job: dict) -> bool:
+        token = str(job.get("finalizerOwnerToken") or "")
+        pid = job.get("finalizerPid")
+        if not re.fullmatch(r"ocrfinal_[0-9a-f]{32}", token) or not _pid_alive(pid):
+            return False
+        expected = job.get("finalizerProcessStartToken")
         current = _process_start_token(pid)
         return not expected or not current or str(expected) == str(current)
 
@@ -2289,6 +2604,43 @@ class ReaderBookOcrService:
         if job.get("state") not in ACTIVE_STATES:
             return job
         if job.get("executor") == "pc":
+            if job.get("phase") == "finalizing" and job.get(
+                "finalizerOwnerToken"
+            ):
+                if self._finalizer_owner_alive(job):
+                    return job
+                desired = self._pc_desired_state(job_dir)
+                if desired == "paused":
+                    state, message = "paused", "PC 发布进程中断；任务已暂停"
+                elif desired == "cancelled":
+                    state, message = "cancelled", "PC 发布进程中断；任务已取消"
+                else:
+                    state, message = "failed", "PC 发布进程中断；可重试并复用完成页"
+                next_job = {
+                    **job,
+                    "state": state,
+                    "errorCode": (
+                        "ocr-publication-incomplete" if state == "failed" else None
+                    ),
+                    "message": message,
+                    "canPause": False,
+                    "canResume": state == "paused",
+                    "canCancel": state == "paused",
+                    "canRetry": state in ("failed", "cancelled"),
+                    "leaseId": None,
+                    "leaseWorkerId": None,
+                    "leaseExpiresAtEpochMs": None,
+                    "updatedAtEpochMs": _now_ms(),
+                }
+                for field in (
+                    "finalizerStage",
+                    "finalizerOwnerToken",
+                    "finalizerPid",
+                    "finalizerProcessStartToken",
+                ):
+                    next_job.pop(field, None)
+                atomic_write_json(job_dir / "job.json", next_job, indent=2, mode=0o600)
+                return next_job
             try:
                 lease_expires = int(job.get("leaseExpiresAtEpochMs") or 0)
             except (TypeError, ValueError):
@@ -2468,8 +2820,8 @@ class ReaderBookOcrService:
 
     # ── 运行台账（releases-index.json）─────────────────────────────────
     #
-    # 真相是 activeRunId；publication.json 降级为它的派生镜像。这样
-    # _published_snapshot 与全部读路由一行不改就继续正确工作，也随时可回滚。
+    # 真相是 activeRunId；publication.json 降级为它的派生镜像。正常读路由
+    # 先解析并验证台账，只有台账尚不存在的迁移期才读取旧 publication。
 
     @staticmethod
     def _index_path(version_dir: Path) -> Path:
@@ -2552,6 +2904,7 @@ class ReaderBookOcrService:
             total_pages = result.get("totalPages")
         return {
             "runId": run_id,
+            "jobId": str(job.get("jobId") or "") or None,
             "revision": revision,
             "engine": engine,
             "executor": executor,
@@ -2563,33 +2916,245 @@ class ReaderBookOcrService:
             "origin": "legacy-adopt" if engine == LEGACY_ENGINE else executor,
         }
 
+    def _read_release_index(
+        self, version_dir: Path, book_id: str, content_sha256: str
+    ) -> dict | None:
+        """Read an existing ledger without turning corruption into an empty ledger.
+
+        ``bookId`` may legitimately be the requested catalog id or the owner of
+        the content-addressed alias directory.  Everything else is an identity
+        mismatch and must fail closed instead of being overwritten by reconcile.
+        """
+
+        index_path = self._index_path(version_dir)
+        if not index_path.exists():
+            return None
+        try:
+            index = read_json(index_path)
+        except Exception as exc:
+            raise ReaderBookOcrError(
+                "ocr-publication-invalid", "OCR release index is invalid", status=500
+            ) from exc
+        stored_book_id = str(index.get("bookId") or "") if isinstance(index, dict) else ""
+        allowed_book_ids = {book_id, version_dir.parent.name}
+        if (
+            not isinstance(index, dict)
+            or index.get("contract") != RELEASE_INDEX_CONTRACT
+            or not BOOK_ID_RE.fullmatch(stored_book_id)
+            or stored_book_id not in allowed_book_ids
+            or index.get("contentSha256") != content_sha256
+            or not isinstance(index.get("generation"), int)
+            or isinstance(index.get("generation"), bool)
+            or index.get("generation", -1) < 0
+            or not isinstance(index.get("runs"), list)
+            or (
+                index.get("activeRunId") is not None
+                and not RUN_ID_RE.fullmatch(str(index.get("activeRunId") or ""))
+            )
+        ):
+            raise ReaderBookOcrError(
+                "ocr-publication-invalid", "OCR release index identity is invalid", status=500
+            )
+        seen_run_ids: set[str] = set()
+        for item in index["runs"]:
+            if not isinstance(item, dict):
+                raise ReaderBookOcrError(
+                    "ocr-publication-invalid", "OCR release index run is invalid", status=500
+                )
+            run_id = str(item.get("runId") or "")
+            job_id = item.get("jobId")
+            engine = str(item.get("engine") or "")
+            revision = str(item.get("revision") or "")
+            if (
+                not RUN_ID_RE.fullmatch(run_id)
+                or run_id in seen_run_ids
+                or (
+                    job_id is not None
+                    and (
+                        not isinstance(job_id, str)
+                        or not re.fullmatch(r"ocrjob_[A-Za-z0-9_-]{1,128}", job_id)
+                    )
+                )
+                or engine not in RESULT_ENGINES
+                or not re.fullmatch(r"ocr_[0-9a-f]{20}", revision)
+                or item.get("release") != self._release_rel_for(engine, revision)
+            ):
+                raise ReaderBookOcrError(
+                    "ocr-publication-invalid", "OCR release index run is invalid", status=500
+                )
+            seen_run_ids.add(run_id)
+        active_run_id = index.get("activeRunId")
+        if active_run_id is not None and active_run_id not in seen_run_ids:
+            raise ReaderBookOcrError(
+                "ocr-publication-invalid",
+                "OCR release index active run is invalid",
+                status=500,
+            )
+        return index
+
+    def _indexed_run_for_job(
+        self,
+        version_dir: Path,
+        book_id: str,
+        content_sha256: str,
+        job: dict,
+        *,
+        revision: str | None = None,
+    ) -> dict | None:
+        """Return one exact committed run without opening release attachments."""
+
+        index = self._read_release_index(version_dir, book_id, content_sha256)
+        if index is None:
+            return None
+        matches = [
+            item
+            for item in index["runs"]
+            if (
+                item.get("runId") == job.get("runId")
+                and item.get("jobId") == job.get("jobId")
+                and (revision is None or item.get("revision") == revision)
+            )
+        ]
+        return dict(matches[0]) if len(matches) == 1 else None
+
+    def _recover_delete_trash_locked(self, version_dir: Path, index: dict) -> None:
+        """Restore a release renamed before an index commit that never happened."""
+
+        referenced = {
+            (str(item.get("engine") or ""), str(item.get("revision") or ""))
+            for item in index.get("runs") or []
+            if isinstance(item, dict)
+        }
+        pattern = re.compile(
+            r"\.trash-delete-(vision|manga|legacy)-(ocr_[0-9a-f]{20})-[0-9a-f]{32}"
+        )
+        try:
+            entries = list(version_dir.iterdir())
+        except OSError:
+            return
+        for trash in entries:
+            match = pattern.fullmatch(trash.name)
+            if not match or not trash.is_dir():
+                continue
+            engine, revision = match.groups()
+            if (engine, revision) not in referenced:
+                # The index commit succeeded.  Queue the unreachable directory
+                # while the ledger is locked and therefore stable; recursive
+                # cleanup is drained only after jobs.lock has been released.
+                with self._delete_trash_gc_lock:
+                    self._pending_delete_trash_gc.add(trash)
+                continue
+            release_dir = self._release_dir_for(version_dir, engine, revision)
+            if release_dir.exists():
+                continue
+            release_dir.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.replace(trash, release_dir)
+            except OSError as exc:
+                raise ReaderBookOcrError(
+                    "ocr-publication-invalid",
+                    "OCR delete transaction recovery failed",
+                    status=500,
+                ) from exc
+
+    def _drain_delete_trash_gc(self) -> None:
+        with self._delete_trash_gc_lock:
+            pending = list(self._pending_delete_trash_gc)
+            self._pending_delete_trash_gc.clear()
+        strict = re.compile(
+            r"\.trash-delete-(vision|manga|legacy)-ocr_[0-9a-f]{20}-[0-9a-f]{32}"
+        )
+        for trash in pending:
+            if (
+                not strict.fullmatch(trash.name)
+                or trash.is_symlink()
+                or not trash.is_dir()
+            ):
+                continue
+            shutil.rmtree(trash, ignore_errors=True)
+
+    @contextmanager
+    def _delete_trash_gc_after_unlock(self):
+        try:
+            yield
+        finally:
+            self._drain_delete_trash_gc()
+
     def _reconcile_index_locked(self, book_id: str, content_sha256: str) -> dict:
         """按需回填/校正台账。惰性迁移：不写迁移脚本，也不删任何东西。"""
 
         version_dir = self._version_dir(book_id, content_sha256)
-        runs: list[dict] = []
+        existing = self._read_release_index(version_dir, book_id, content_sha256) or {}
+        if existing:
+            self._recover_delete_trash_locked(version_dir, existing)
+        releases: dict[tuple[str, str], dict] = {}
         for engine, revision in self._scan_release_dirs(version_dir):
             entry = self._run_entry_from_release(version_dir, engine, revision)
             if entry is not None:
+                releases[(engine, revision)] = entry
+        runs: list[dict] = []
+        referenced: set[tuple[str, str]] = set()
+        indexed_release_keys: set[tuple[str, str]] = set()
+        seen_run_ids: set[str] = set()
+        existing_runs = existing.get("runs")
+        if isinstance(existing_runs, list):
+            for old in existing_runs:
+                if not isinstance(old, dict):
+                    continue
+                run_id = str(old.get("runId") or "")
+                key = (str(old.get("engine") or ""), str(old.get("revision") or ""))
+                canonical = releases.get(key)
+                if canonical is None or not RUN_ID_RE.fullmatch(run_id) or run_id in seen_run_ids:
+                    continue
+                merged = dict(canonical)
+                merged["runId"] = run_id
+                for field in ("jobId", "startedAtEpochMs", "publishedAtEpochMs"):
+                    if field == "jobId" and isinstance(old.get(field), str):
+                        merged[field] = old[field]
+                    elif isinstance(old.get(field), int):
+                        merged[field] = old[field]
+                runs.append(merged)
+                referenced.add(key)
+                indexed_release_keys.add(key)
+                seen_run_ids.add(run_id)
+        # 首次迁移或台账缺项时，每个真实 release 补一条稳定的合成 run；
+        # 已经有一个或多个真实 run 引用时绝不能再按目录折叠或额外造一条。
+        for key, entry in releases.items():
+            if key not in referenced and entry["runId"] not in seen_run_ids:
                 runs.append(entry)
+                seen_run_ids.add(entry["runId"])
         runs.sort(
             key=lambda item: (item.get("publishedAtEpochMs") or 0, item["runId"]),
             reverse=True,
         )
-        existing = self._read_optional(self._index_path(version_dir)) or {}
         active = str(existing.get("activeRunId") or "")
+        # One-time migration for the production split state: old index still
+        # points at v5 while the successfully published v6 exists only in the
+        # legacy publication mirror.  Promote that mirror only when the old
+        # index has no run for the mirrored release at all.  Once represented,
+        # activeRunId is authoritative and a stale mirror can never switch it.
+        fence = self._read_optional(version_dir / "publication.json") or {}
+        fence_key = (
+            str(fence.get("engine") or ""),
+            str(fence.get("revision") or ""),
+        )
+        migrate_fence = (
+            fence_key in releases and fence_key not in indexed_release_keys
+        )
         known = {item["runId"] for item in runs}
-        if active not in known:
+        # _read_release_index already fails closed when activeRunId is not one
+        # of the *ledger* runs.  A represented run whose physical directory is
+        # gone is different: it is a recoverable delete/crash state.  A named
+        # delete trash was restored above; otherwise drop the unavailable run
+        # and let the book return to idle instead of bricking every read.
+        if active and active not in known:
             active = ""
-        if not active:
-            # 台账缺 active 时以围栏为准（这也是首次回填的入口）。
-            fence = self._read_optional(version_dir / "publication.json") or {}
-            fence_revision = str(fence.get("revision") or "")
-            fence_engine = str(fence.get("engine") or "")
-            for item in runs:
-                if item["revision"] == fence_revision and item["engine"] == fence_engine:
-                    active = item["runId"]
-                    break
+        if migrate_fence:
+            active = next(
+                item["runId"]
+                for item in runs
+                if (item["engine"], item["revision"]) == fence_key
+            )
         try:
             generation = int(existing.get("generation") or 0)
         except (TypeError, ValueError):
@@ -2605,6 +3170,122 @@ class ReaderBookOcrService:
         if version_dir.is_dir():
             atomic_write_json(self._index_path(version_dir), index, indent=2, mode=0o600)
         return index
+
+    def _active_index_fence(
+        self, book_id: str, content_sha256: str
+    ) -> tuple[dict | None, bool, dict | None]:
+        """Resolve the authoritative active run; publication is migration-only."""
+
+        version_dir = self._version_dir(book_id, content_sha256)
+        index_path = self._index_path(version_dir)
+        if not index_path.exists():
+            return None, False, None
+        index = self._read_release_index(version_dir, book_id, content_sha256)
+        if index is None:  # guarded by exists(); keeps the type checker honest
+            return None, False, None
+        active = index.get("activeRunId")
+        if active is None:
+            return None, True, None
+        if not RUN_ID_RE.fullmatch(str(active or "")):
+            raise ReaderBookOcrError(
+                "ocr-publication-invalid", "OCR active run id is invalid", status=500
+            )
+        matches = [
+            item
+            for item in index["runs"]
+            if isinstance(item, dict) and item.get("runId") == active
+        ]
+        if len(matches) != 1:
+            raise ReaderBookOcrError(
+                "ocr-publication-invalid", "OCR active run is unavailable", status=500
+            )
+        entry = matches[0]
+        engine = str(entry.get("engine") or "")
+        revision = str(entry.get("revision") or "")
+        if (
+            engine not in RESULT_ENGINES
+            or not re.fullmatch(r"ocr_[0-9a-f]{20}", revision)
+            or entry.get("release") != self._release_rel_for(engine, revision)
+        ):
+            raise ReaderBookOcrError(
+                "ocr-publication-invalid", "OCR active run identity is invalid", status=500
+            )
+        try:
+            return (
+                self._build_fence_from_release(
+                    book_id, content_sha256, engine, revision
+                ),
+                True,
+                dict(entry),
+            )
+        except ReaderBookOcrError as exc:
+            if exc.code == "ocr-release-missing":
+                return None, True, dict(entry)
+            raise
+
+    def _repair_active_mirrors_locked(
+        self, book_id: str, content_sha256: str, index: dict
+    ) -> None:
+        """Best-effort compatibility mirrors; activeRunId already committed truth."""
+
+        active = index.get("activeRunId")
+        version_dir = self._version_dir(book_id, content_sha256)
+        if active is None:
+            # publication/result are always release mirrors.  current also
+            # points at the active release when no mutable job is in flight;
+            # do not erase the current-job pointer created by start().
+            names = ["publication.json", "result.json"]
+            if not self._has_active_job_locked(version_dir):
+                names.append("current.json")
+            for name in names:
+                try:
+                    (version_dir / name).unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    continue
+            return
+        entry = next(
+            (
+                item
+                for item in index.get("runs") or []
+                if isinstance(item, dict) and item.get("runId") == active
+            ),
+            None,
+        )
+        if entry is None:
+            raise ReaderBookOcrError(
+                "ocr-publication-invalid", "OCR active run is unavailable", status=500
+            )
+        try:
+            fence = self._build_fence_from_release(
+                book_id, content_sha256, entry["engine"], entry["revision"]
+            )
+            release_dir = self._release_dir_for(
+                version_dir, entry["engine"], entry["revision"]
+            )
+            result = read_json(release_dir / "result.json")
+            atomic_write_json(
+                version_dir / "publication.json", fence, indent=2, mode=0o600
+            )
+            atomic_write_json(
+                version_dir / "result.json", result, indent=2, mode=0o600
+            )
+            if not self._has_active_job_locked(version_dir):
+                atomic_write_json(
+                    version_dir / "current.json",
+                    {
+                        "engine": entry["engine"],
+                        "executor": entry["executor"],
+                        "processingProfile": entry["processingProfile"],
+                        "revision": entry["revision"],
+                    },
+                    indent=2,
+                    mode=0o600,
+                )
+        except Exception:
+            # Mirrors never get to revoke an already committed activeRunId.
+            return
 
     def _build_fence_from_release(
         self, book_id: str, content_sha256: str, engine: str, revision: str
@@ -2748,6 +3429,7 @@ class ReaderBookOcrService:
                 "contract": CONTRACT,
                 "jobId": "ocrjob_" + uuid.uuid4().hex,
                 "workerGeneration": "ocrgen_" + uuid.uuid4().hex,
+                "runId": "ocrrun_" + uuid.uuid4().hex[:16],
                 "bookId": book_id,
                 "contentSha256": content_sha256,
                 "engine": engine,
@@ -2891,8 +3573,9 @@ class ReaderBookOcrService:
 
         self.resolve(book_id, content_sha256)
         version_dir = self._version_dir(book_id, content_sha256)
-        with exclusive_lock(self.lock_path):
+        with self._delete_trash_gc_after_unlock(), exclusive_lock(self.lock_path):
             index = self._reconcile_index_locked(book_id, content_sha256)
+            self._repair_active_mirrors_locked(book_id, content_sha256, index)
             return {
                 # 跟这一族其它响应同壳（ok + contract），客户端才能用同一套校验。
                 "ok": True,
@@ -2913,40 +3596,60 @@ class ReaderBookOcrService:
     ) -> None:
         """把 activeRunId 落到台账，并据此重建/清除派生镜像。
 
-        顺序固定：先写台账（真相），再重建围栏与镜像（派生）。反过来会出现
-        "围栏已指向新的、台账还说旧的"，而所有读路由都信围栏。
+        顺序固定：先完整验证目标，再写台账（真相），最后重建兼容镜像。
+        镜像失败可由 list/status 修复，不能反过来撤销 activeRunId。
         """
 
         version_dir = self._version_dir(book_id, content_sha256)
         index = dict(index)
+        published = None
+        if run_id is not None:
+            entry = next(
+                (
+                    item
+                    for item in index.get("runs") or []
+                    if isinstance(item, dict) and item.get("runId") == run_id
+                ),
+                None,
+            )
+            if entry is None:
+                raise ReaderBookOcrError(
+                    "ocr-run-unknown", "没有这条预处理记录", status=404
+                )
+            # Validate the complete release before changing the single source
+            # of truth.  A corrupt target must leave the previous active run in
+            # place, rather than committing an unusable activeRunId first.
+            fence = self._build_fence_from_release(
+                book_id, content_sha256, entry["engine"], entry["revision"]
+            )
+            published = self._published_snapshot(
+                book_id, content_sha256, fence_override=fence
+            )
+            if published is None:
+                raise ReaderBookOcrError(
+                    "ocr-release-invalid", "该预处理结果无法启用", status=409
+                )
+            published["job"] = {
+                **published["job"],
+                "runId": entry["runId"],
+                "jobId": entry.get("jobId") or published["job"].get("jobId"),
+            }
         index["activeRunId"] = run_id
         index["generation"] = int(index.get("generation") or 0) + 1
         self._write_index_locked(version_dir, index)
-        fence_path = version_dir / "publication.json"
         if run_id is None:
             # 没有生效结果：把围栏与镜像一并清掉，让 _published_snapshot
             # 走它已有的"围栏不存在 → None"合法分支。
-            for name in ("publication.json", "current.json", "result.json"):
-                try:
-                    (version_dir / name).unlink()
-                except FileNotFoundError:
-                    pass
+            self._repair_active_mirrors_locked(book_id, content_sha256, index)
             return
-        entry = next(
-            (item for item in index.get("runs") or [] if item["runId"] == run_id), None
-        )
-        if entry is None:
-            raise ReaderBookOcrError("ocr-run-unknown", "没有这条预处理记录", status=404)
-        fence = self._build_fence_from_release(
-            book_id, content_sha256, entry["engine"], entry["revision"]
-        )
-        atomic_write_json(fence_path, fence, indent=2, mode=0o600)
-        published = self._published_snapshot(book_id, content_sha256)
-        if published is None:
-            raise ReaderBookOcrError(
-                "ocr-release-invalid", "该预处理结果无法启用", status=409
-            )
-        self._activate_published_locked(version_dir, published)
+        self._repair_active_mirrors_locked(book_id, content_sha256, index)
+        assert published is not None
+        try:
+            self._activate_published_locked(version_dir, published)
+        except Exception:
+            # The ledger commit is authoritative.  status/list will repair any
+            # compatibility pointer that failed after the commit point.
+            pass
 
     def activate_run(self, book_id: str, content_sha256: str, run_id: str) -> dict:
         """把某一次预处理结果设为当前生效。"""
@@ -2955,7 +3658,7 @@ class ReaderBookOcrService:
         if not RUN_ID_RE.fullmatch(str(run_id or "")):
             raise ReaderBookOcrError("ocr-run-invalid", "预处理记录编号无效", status=400)
         version_dir = self._version_dir(book_id, content_sha256)
-        with exclusive_lock(self.lock_path):
+        with self._delete_trash_gc_after_unlock(), exclusive_lock(self.lock_path):
             if self._has_active_job_locked(version_dir):
                 raise ReaderBookOcrError(
                     "ocr-busy", "这本书正在预处理，请先等它结束", status=409
@@ -2980,46 +3683,77 @@ class ReaderBookOcrService:
         if not RUN_ID_RE.fullmatch(str(run_id or "")):
             raise ReaderBookOcrError("ocr-run-invalid", "预处理记录编号无效", status=400)
         version_dir = self._version_dir(book_id, content_sha256)
-        with exclusive_lock(self.lock_path):
-            if self._has_active_job_locked(version_dir):
-                raise ReaderBookOcrError(
-                    "ocr-busy", "这本书正在预处理，请先等它结束", status=409
+        delete_trash: Path | None = None
+        release_dir: Path | None = None
+        index_committed = False
+        try:
+            with self._delete_trash_gc_after_unlock(), exclusive_lock(self.lock_path):
+                if self._has_active_job_locked(version_dir):
+                    raise ReaderBookOcrError(
+                        "ocr-busy", "这本书正在预处理，请先等它结束", status=409
+                    )
+                index = self._reconcile_index_locked(book_id, content_sha256)
+                runs = list(index.get("runs") or [])
+                target = next((item for item in runs if item["runId"] == run_id), None)
+                if target is None:
+                    raise ReaderBookOcrError("ocr-run-unknown", "没有这条预处理记录", status=404)
+                remaining = [item for item in runs if item["runId"] != run_id]
+                was_active = index.get("activeRunId") == run_id
+                if was_active and not allow_deactivate:
+                    raise ReaderBookOcrError(
+                        "ocr-run-active",
+                        "这是当前生效的结果；请先切换到别的结果，或确认删除后暂不使用预处理",
+                        status=409,
+                    )
+                still_referenced = any(
+                    item["revision"] == target["revision"]
+                    and item["engine"] == target["engine"]
+                    for item in remaining
                 )
-            index = self._reconcile_index_locked(book_id, content_sha256)
-            runs = list(index.get("runs") or [])
-            target = next((item for item in runs if item["runId"] == run_id), None)
-            if target is None:
-                raise ReaderBookOcrError("ocr-run-unknown", "没有这条预处理记录", status=404)
-            remaining = [item for item in runs if item["runId"] != run_id]
-            was_active = index.get("activeRunId") == run_id
-            if was_active and not allow_deactivate:
-                # 不让系统进入"有结果但没有当前生效"的状态：要么先切走，
-                # 要么调用方明确表示"删了就先不用了"。
-                raise ReaderBookOcrError(
-                    "ocr-run-active",
-                    "这是当前生效的结果；请先切换到别的结果，或确认删除后暂不使用预处理",
-                    status=409,
-                )
-            # 先把 active 挪走（还有别的就顺位接上，没有就置空），再动磁盘。
-            if was_active:
-                next_active = remaining[0]["runId"] if remaining else None
-                index = {**index, "runs": remaining}
-                self._apply_active_locked(book_id, content_sha256, index, next_active)
-            else:
-                index = {**index, "runs": remaining}
-                self._write_index_locked(version_dir, index)
-            # 同一 revision 还被别的 run 引用时只减引用，不删物理目录。
-            still_referenced = any(
-                item["revision"] == target["revision"] and item["engine"] == target["engine"]
-                for item in remaining
-            )
-            if not still_referenced:
-                self._discard_release_dir(
-                    version_dir, target["engine"], target["revision"]
-                )
-            # 可变暂存若还指着被删的那一版，一并归档 —— 否则 status() 会拿它
-            # 编出"发布未完成，请重试"这种与事实不符的提示。
-            self._archive_stale_staging_locked(version_dir, target["revision"])
+                if not still_referenced:
+                    release_dir = self._release_dir_for(
+                        version_dir, target["engine"], target["revision"]
+                    )
+                    if release_dir.exists():
+                        delete_trash = version_dir / (
+                            f".trash-delete-{target['engine']}-{target['revision']}-"
+                            f"{uuid.uuid4().hex}"
+                        )
+                        try:
+                            os.replace(release_dir, delete_trash)
+                        except OSError as exc:
+                            raise ReaderBookOcrError(
+                                "ocr-run-delete-failed", "删除预处理结果失败", status=500
+                            ) from exc
+                try:
+                    if was_active:
+                        next_active = remaining[0]["runId"] if remaining else None
+                        index = {**index, "runs": remaining}
+                        self._apply_active_locked(
+                            book_id, content_sha256, index, next_active
+                        )
+                    else:
+                        index = {**index, "runs": remaining}
+                        self._write_index_locked(version_dir, index)
+                    index_committed = True
+                except Exception:
+                    if (
+                        delete_trash is not None
+                        and release_dir is not None
+                        and delete_trash.exists()
+                        and not release_dir.exists()
+                    ):
+                        release_dir.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(delete_trash, release_dir)
+                        delete_trash = None
+                    raise
+                # The mutable staging rename is small and atomic.  Physical
+                # recursive cleanup of the immutable release happens below,
+                # outside jobs.lock.
+                self._archive_stale_staging_locked(version_dir, target["revision"])
+        finally:
+            if index_committed and delete_trash is not None:
+                shutil.rmtree(delete_trash, ignore_errors=True)
         return self.list_releases(book_id, content_sha256)
 
     def _discard_release_dir(self, version_dir: Path, engine: str, revision: str) -> None:
@@ -3057,7 +3791,9 @@ class ReaderBookOcrService:
     def status(self, book_id: str, content_sha256: str) -> dict:
         self.resolve(book_id, content_sha256)
         version_dir = self._version_dir(book_id, content_sha256)
-        with exclusive_lock(self.lock_path):
+        with self._delete_trash_gc_after_unlock(), exclusive_lock(self.lock_path):
+            index = self._reconcile_index_locked(book_id, content_sha256)
+            self._repair_active_mirrors_locked(book_id, content_sha256, index)
             engine, job = self._current_job_locked(version_dir)
             published = self._published_snapshot(book_id, content_sha256)
             if not job:
@@ -3124,6 +3860,18 @@ class ReaderBookOcrService:
             engine, job = self._current_job_locked(version_dir)
             if not engine or not job:
                 raise ReaderBookOcrError("ocr-job-not-found", "OCR job not found", status=404)
+            published = self._published_snapshot(book_id, content_sha256)
+            if (
+                published is not None
+                and published["job"].get("runId") == job.get("runId")
+                and published["job"].get("jobId") == job.get("jobId")
+            ):
+                # The index commit may have survived a process crash before the
+                # mutable terminal write.  Repair before deciding whether a
+                # pause/cancel is still a meaningful state transition.
+                self._activate_published_locked(version_dir, published)
+                engine = published["engine"]
+                job = published["job"]
             job_dir = version_dir / engine
             state = job.get("state")
             if action == "pause":
@@ -3210,18 +3958,26 @@ class ReaderBookOcrService:
         require_legacy: bool = False,
         fence_override: dict | None = None,
     ) -> dict | None:
-        """Validate the single publication fence and every referenced artifact."""
+        """Validate the index-active release; migrate from a legacy fence if absent."""
         version_dir = self._version_dir(book_id, content_sha256)
         fence_path = version_dir / "publication.json"
+        active_run = None
         if fence_override is None:
-            if not fence_path.exists():
-                return None
-            try:
-                fence = read_json(fence_path)
-            except Exception as exc:
-                raise ReaderBookOcrError(
-                    "ocr-publication-invalid", "OCR publication fence is invalid", status=500
-                ) from exc
+            fence, has_index, active_run = self._active_index_fence(
+                book_id, content_sha256
+            )
+            if has_index:
+                if fence is None:
+                    return None
+            else:
+                if not fence_path.exists():
+                    return None
+                try:
+                    fence = read_json(fence_path)
+                except Exception as exc:
+                    raise ReaderBookOcrError(
+                        "ocr-publication-invalid", "OCR publication fence is invalid", status=500
+                    ) from exc
         else:
             fence = dict(fence_override)
         engine = fence.get("engine") if isinstance(fence, dict) else None
@@ -3564,6 +4320,15 @@ class ReaderBookOcrService:
             raise ReaderBookOcrError(
                 "ocr-publication-invalid", "OCR publication revision is not content-addressed", status=500
             )
+        if active_run is not None:
+            # One immutable revision may be referenced by several executions.
+            # Its stored job.json belongs to the first physical producer; the
+            # ledger preserves the logical identity of the active execution.
+            job = {
+                **job,
+                "runId": active_run["runId"],
+                "jobId": active_run.get("jobId") or job.get("jobId"),
+            }
         return {
             "engine": engine,
             "revision": revision,
@@ -3942,7 +4707,7 @@ class ReaderBookOcrService:
             release_dir = legacy_root / "releases" / revision
             releases_dir = release_dir.parent
             releases_dir.mkdir(parents=True, exist_ok=True)
-            with exclusive_lock(self.lock_path):
+            with self._delete_trash_gc_after_unlock(), exclusive_lock(self.lock_path):
                 existing = self._existing_adoption(book_id, content_sha256)
                 if existing is not None:
                     published = self._published_snapshot(
@@ -4031,44 +4796,52 @@ class ReaderBookOcrService:
                     raise ReaderBookOcrError(
                         "legacy-release-conflict", "legacy release pages are incomplete", status=500
                     )
-                atomic_write_json(
-                    version_dir / "result.json", committed_result, indent=2, mode=0o600
-                )
-                atomic_write_json(
-                    version_dir / "current.json",
-                    {"engine": LEGACY_ENGINE, "revision": revision},
-                    indent=2,
-                    mode=0o600,
-                )
-                fence_path = version_dir / "publication.json"
-                previous_fence = self._read_optional(fence_path)
-                fence = {
-                    "contract": PUBLICATION_CONTRACT,
-                    "bookId": book_id,
-                    "contentSha256": content_sha256,
-                    "engine": LEGACY_ENGINE,
-                    "revision": revision,
-                    "release": release_rel,
-                    "manifestSha256": hashlib.sha256(
-                        committed_manifest_path.read_bytes()
-                    ).hexdigest(),
-                    "sourceIdentity": dict(source_guard["identity"]),
-                }
                 self._assert_source_guard(source_guard, rehash=True)
-                atomic_write_json(fence_path, fence, indent=2, mode=0o600)
+                # The ledger is the only publication truth.  Reconcile first
+                # so a complete release left by a prior mirror failure is
+                # adopted exactly once, then validate and activate that run.
+                index = self._reconcile_index_locked(book_id, content_sha256)
+                committed_run_id = str(committed_job.get("runId") or "")
+                target = next(
+                    (
+                        item
+                        for item in index.get("runs") or []
+                        if item.get("engine") == LEGACY_ENGINE
+                        and item.get("revision") == revision
+                        and item.get("runId") == committed_run_id
+                    ),
+                    None,
+                )
+                if target is None:
+                    target = next(
+                        (
+                            item
+                            for item in index.get("runs") or []
+                            if item.get("engine") == LEGACY_ENGINE
+                            and item.get("revision") == revision
+                        ),
+                        None,
+                    )
+                if target is None:
+                    raise ReaderBookOcrError(
+                        "ocr-publication-invalid",
+                        "legacy adoption release was not indexed",
+                        status=500,
+                    )
+                previous_index = dict(index)
                 try:
-                    # The path identity check catches ordinary atomic replacement,
-                    # but an in-place writer can preserve size and mtime.  Rehash
-                    # after the fence as well so no content change can become
-                    # visible in the verify-to-publication window.
+                    self._apply_active_locked(
+                        book_id, content_sha256, index, target["runId"]
+                    )
+                    # Preserve the legacy adoption race guarantee: the index,
+                    # not publication.json, is now the commit point, so verify
+                    # the guarded source once more after that commit.
                     self._assert_source_guard(source_guard, rehash=True)
                 except Exception:
-                    if previous_fence is not None:
-                        atomic_write_json(
-                            fence_path, previous_fence, indent=2, mode=0o600
-                        )
-                    else:
-                        fence_path.unlink(missing_ok=True)
+                    self._write_index_locked(version_dir, previous_index)
+                    self._repair_active_mirrors_locked(
+                        book_id, content_sha256, previous_index
+                    )
                     raise
             snapshot = self._published_snapshot(
                 book_id, content_sha256, require_legacy=True

@@ -29,6 +29,8 @@ import uuid
 CONTRACT = "reader-library-ocr/1"
 PAGE_SCHEMA = "reader-page-chars/1"
 PUBLICATION_CONTRACT = "reader-book-ocr-publication/1"
+RELEASE_INDEX_CONTRACT = "reader-book-ocr-release-index/1"
+RUN_ID_RE = re.compile(r"ocrrun_[0-9a-f]{16}")
 PROCESSING_PROFILES = {"pi": "pi-default-v5", "pc": "quality-first-v6"}
 LEGACY_PROCESSING_PROFILES = {"pi": "pi-default-v1", "pc": "quality-first-v1"}
 _EXPECTED_JOB_ID: str | None = None
@@ -52,6 +54,170 @@ def _atomic_json(path: Path, value: dict) -> None:
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), "utf-8")
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
+
+
+def _file_snapshot(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _restore_file_snapshot(path: Path, payload: bytes | None) -> None:
+    if payload is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.rollback"
+    )
+    try:
+        temporary.write_bytes(payload)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _release_jobs_lock_path(version_dir: Path, *, book_id: str, content_sha256: str) -> Path:
+    """Return the service lock for a real version dir, with a local test fallback."""
+
+    del book_id  # bookId may drift while the content-addressed version dir is reused.
+    if (
+        version_dir.name == content_sha256
+        and re.fullmatch(r"book_[0-9a-f]{32}", version_dir.parent.name)
+    ):
+        return version_dir.parent.parent / "jobs.lock"
+    return version_dir / ".jobs.lock"
+
+
+def _migrated_run_id(engine: str, revision: str) -> str:
+    digest = hashlib.sha256(
+        f"{engine}\x00{revision}\x00migrated".encode("utf-8")
+    ).hexdigest()
+    return "ocrrun_" + digest[:16]
+
+
+def _load_release_index_for_publish(args, version_dir: Path) -> dict:
+    """Load an existing authoritative ledger, failing closed on corruption."""
+
+    path = version_dir / "releases-index.json"
+    if not path.exists():
+        return {}
+    try:
+        index = json.loads(path.read_text("utf-8"))
+    except Exception as exc:
+        raise RuntimeError("OCR release index is invalid") from exc
+    stored_book_id = str(index.get("bookId") or "") if isinstance(index, dict) else ""
+    allowed_book_ids = {str(args.book_id), version_dir.parent.name}
+    if (
+        not isinstance(index, dict)
+        or index.get("contract") != RELEASE_INDEX_CONTRACT
+        or not re.fullmatch(r"book_[0-9a-f]{32}", stored_book_id)
+        or stored_book_id not in allowed_book_ids
+        or index.get("contentSha256") != args.content_sha256
+        or not isinstance(index.get("generation"), int)
+        or isinstance(index.get("generation"), bool)
+        or index.get("generation", -1) < 0
+        or not isinstance(index.get("runs"), list)
+        or (
+            index.get("activeRunId") is not None
+            and not RUN_ID_RE.fullmatch(str(index.get("activeRunId") or ""))
+        )
+    ):
+        raise RuntimeError("OCR release index identity is invalid")
+    seen_run_ids: set[str] = set()
+    for item in index["runs"]:
+        run_id = str(item.get("runId") or "") if isinstance(item, dict) else ""
+        job_id = item.get("jobId") if isinstance(item, dict) else None
+        engine = str(item.get("engine") or "") if isinstance(item, dict) else ""
+        revision = str(item.get("revision") or "") if isinstance(item, dict) else ""
+        release = (
+            f"legacy/releases/{revision}" if engine == "legacy" else f"releases/{revision}"
+        )
+        if (
+            not isinstance(item, dict)
+            or not RUN_ID_RE.fullmatch(run_id)
+            or run_id in seen_run_ids
+            or (
+                job_id is not None
+                and (
+                    not isinstance(job_id, str)
+                    or not re.fullmatch(r"ocrjob_[A-Za-z0-9_-]{1,128}", job_id)
+                )
+            )
+            or engine not in ("vision", "manga", "legacy")
+            or not re.fullmatch(r"ocr_[0-9a-f]{20}", revision)
+            or item.get("release") != release
+        ):
+            raise RuntimeError("OCR release index run is invalid")
+        seen_run_ids.add(run_id)
+    active_run_id = index.get("activeRunId")
+    if active_run_id is not None and active_run_id not in seen_run_ids:
+        raise RuntimeError("OCR release index active run is invalid")
+    return index
+
+
+def _release_index_after_publish(
+    args,
+    version_dir: Path,
+    release_dir: Path,
+    revision: str,
+    run_job: dict,
+    run_result: dict,
+    manifest: dict,
+) -> dict:
+    """Upsert the one verified release without duplicating service-side scanning."""
+
+    executor, processing_profile = _processing_identity(run_job)
+    run_id = str(run_job.get("runId") or "")
+    if not RUN_ID_RE.fullmatch(run_id):
+        run_id = _migrated_run_id(args.engine, revision)
+    published_at = run_result.get("completedAtEpochMs")
+    if not isinstance(published_at, int):
+        try:
+            published_at = int(release_dir.stat().st_mtime * 1000)
+        except OSError:
+            published_at = None
+    started_at = run_job.get("createdAtEpochMs")
+    if not isinstance(started_at, int):
+        started_at = None
+    total_pages = manifest.get("totalPages")
+    if not isinstance(total_pages, int):
+        total_pages = None
+    entry = {
+        "runId": run_id,
+        "jobId": str(run_job.get("jobId") or "") or None,
+        "revision": revision,
+        "engine": args.engine,
+        "executor": executor,
+        "processingProfile": processing_profile,
+        "release": f"releases/{revision}",
+        "startedAtEpochMs": started_at,
+        "publishedAtEpochMs": published_at,
+        "totalPages": total_pages,
+        "origin": executor,
+    }
+    existing = _load_release_index_for_publish(args, version_dir)
+    old_runs = existing.get("runs")
+    runs = [
+        dict(item)
+        for item in old_runs
+        if isinstance(item, dict) and item.get("runId") != run_id
+    ] if isinstance(old_runs, list) else []
+    runs.insert(0, entry)
+    try:
+        generation = int(existing.get("generation") or 0)
+    except (TypeError, ValueError):
+        generation = 0
+    return {
+        "contract": RELEASE_INDEX_CONTRACT,
+        "bookId": args.book_id,
+        "contentSha256": args.content_sha256,
+        "generation": generation + 1,
+        "activeRunId": run_id,
+        "runs": runs,
+    }
 
 
 def _load(path: Path, default=None):
@@ -2981,6 +3147,134 @@ def _publish_attachments(
     return revision, manifest
 
 
+def _validate_release_artifacts(
+    args,
+    release_dir: Path,
+    revision: str,
+    *,
+    total_pages: int,
+    formula_state: str,
+    executor: str,
+    processing_profile: str,
+    source_identity: dict | None,
+) -> tuple[dict, dict, dict, dict]:
+    """Fully validate a staging or immutable release without holding jobs.lock."""
+
+    release_rel = f"releases/{revision}"
+    manifest_path = release_dir / "attachments.json"
+    committed_manifest = _load(manifest_path, {}) or {}
+    committed_job = _load(release_dir / "job.json", {}) or {}
+    committed_result = _load(release_dir / "result.json", {}) or {}
+    committed_current = _load(release_dir / "current.json", {}) or {}
+    if (
+        committed_manifest.get("contract") != "reader-book-attachments/1"
+        or committed_manifest.get("bookId") != args.book_id
+        or committed_manifest.get("contentSha256") != args.content_sha256
+        or committed_manifest.get("revision") != revision
+        or committed_manifest.get("engine") != args.engine
+        or _processing_identity(committed_manifest) != (executor, processing_profile)
+        or int(committed_manifest.get("totalPages") or 0) != total_pages
+        or committed_manifest.get("formulaState") != formula_state
+        or committed_job.get("bookId") != args.book_id
+        or committed_job.get("contentSha256") != args.content_sha256
+        or committed_job.get("engine") != args.engine
+        or _processing_identity(committed_job) != (executor, processing_profile)
+        or committed_job.get("state") != "succeeded"
+        or not committed_job.get("resultAvailable")
+        or committed_job.get("pageCharsRevision") != revision
+        or committed_job.get("formulaState") != formula_state
+        or int(committed_job.get("totalPages") or 0) != total_pages
+        or int(committed_job.get("successfulPages") or 0) != total_pages
+        or committed_result.get("engine") != args.engine
+        or _processing_identity(committed_result) != (executor, processing_profile)
+        or committed_result.get("pageCharsRevision") != revision
+        or committed_result.get("release") != release_rel
+        or not isinstance(committed_result.get("sourceIdentity"), dict)
+        or (
+            source_identity is not None
+            and committed_result.get("sourceIdentity") != source_identity
+        )
+        or committed_current != {
+            "engine": args.engine,
+            "executor": executor,
+            "processingProfile": processing_profile,
+            "revision": revision,
+        }
+    ):
+        raise RuntimeError("published OCR release metadata is inconsistent")
+    page_ids = [
+        int(match.group(1))
+        for entry in committed_manifest.get("files") or []
+        if (match := re.fullmatch(
+            r"ocr-page-(\d{6})", str(entry.get("attachmentId") or "")
+        ))
+    ]
+    if page_ids != list(range(1, total_pages + 1)):
+        raise RuntimeError("published OCR release has incomplete pages")
+    if len(committed_manifest.get("files") or []) != total_pages + 1:
+        raise RuntimeError("published OCR release has unexpected files")
+    for entry in committed_manifest.get("files") or []:
+        attachment_id = str(entry.get("attachmentId") or "")
+        match = re.fullmatch(r"ocr-page-(\d{6})", attachment_id)
+        if match:
+            path = release_dir / "pages" / f"p{int(match.group(1)):06d}.json"
+        elif attachment_id == "ocr-formulas":
+            path = release_dir / "formulas.json"
+        else:
+            raise RuntimeError("published OCR release has an unknown attachment")
+        payload = path.read_bytes()
+        if (
+            len(payload) != int(entry.get("size") or -1)
+            or hashlib.sha256(payload).hexdigest() != entry.get("sha256")
+        ):
+            raise RuntimeError("published OCR release digest mismatch")
+        try:
+            value = json.loads(payload.decode("utf-8"))
+        except Exception as exc:
+            raise RuntimeError("published OCR release JSON is invalid") from exc
+        if match:
+            page_number = int(match.group(1))
+            if (
+                not isinstance(value, dict)
+                or value.get("schema") != PAGE_SCHEMA
+                or value.get("bookId") != args.book_id
+                or value.get("contentSha256") != args.content_sha256
+                or value.get("engine") != args.engine
+                or _processing_identity(value) != (executor, processing_profile)
+                or value.get("pageNumber") != page_number
+                or not isinstance(value.get("chars"), list)
+                or not isinstance(value.get("furigana"), list)
+            ):
+                raise RuntimeError("published OCR page identity is invalid")
+        else:
+            formulas = value.get("formulas") if isinstance(value, dict) else None
+            if (
+                not isinstance(value, dict)
+                or value.get("schema") != "reader-formula-regions/1"
+                or value.get("bookId") != args.book_id
+                or value.get("contentSha256") != args.content_sha256
+                or not isinstance(formulas, list)
+                or len(formulas) != int(committed_manifest.get("formulaCount") or 0)
+            ):
+                raise RuntimeError("published OCR formula identity is invalid")
+            for formula in formulas:
+                try:
+                    formula_page = int(formula.get("page"))
+                    bbox = [float(number) for number in formula.get("bbox")]
+                except (AttributeError, TypeError, ValueError) as exc:
+                    raise RuntimeError("published OCR formula record is invalid") from exc
+                if (
+                    formula_page < 1
+                    or formula_page > total_pages
+                    or len(bbox) != 4
+                    or not all(math.isfinite(number) and 0 <= number <= 1 for number in bbox)
+                    or bbox[0] >= bbox[2]
+                    or bbox[1] >= bbox[3]
+                ):
+                    raise RuntimeError("published OCR formula record is invalid")
+    return committed_manifest, committed_job, committed_result, committed_current
+
+
 def _publish_release(
     args,
     job_dir: Path,
@@ -2989,8 +3283,12 @@ def _publish_release(
     *,
     source_path: Path | None = None,
     source_guard: dict | None = None,
+    lock_held: bool = False,
+    terminal_job: dict | None = None,
+    finalizer_token: str | None = None,
 ) -> str:
-    """Build one immutable release and flip the publication fence last."""
+    """Build/verify lock-free, then atomically activate one run under jobs.lock."""
+
     version_dir = job_dir.parent
     staging = version_dir / (".release-staging-" + uuid.uuid4().hex)
     own_source_guard = None
@@ -3051,145 +3349,55 @@ def _publish_release(
             "completedAtEpochMs": int(final_job.get("updatedAtEpochMs") or 0),
             "sourceIdentity": dict(source_guard["identity"]),
         }
+        release_current = {
+            "engine": args.engine,
+            "executor": executor,
+            "processingProfile": processing_profile,
+            "revision": revision,
+        }
         _atomic_json(staging / "job.json", release_job)
         _atomic_json(staging / "result.json", release_result)
-        _atomic_json(staging / "current.json", {
-            "engine": args.engine,
-            "executor": executor,
-            "processingProfile": processing_profile,
-            "revision": revision,
-        })
+        _atomic_json(staging / "current.json", release_current)
         _atomic_json(staging / "attachments.json", manifest)
+        _validate_release_artifacts(
+            args,
+            staging,
+            revision,
+            total_pages=total_pages,
+            formula_state=formula_state,
+            executor=executor,
+            processing_profile=processing_profile,
+            source_identity=source_guard["identity"],
+        )
         release_dir = version_dir / "releases" / revision
-        release_dir.parent.mkdir(parents=True, exist_ok=True)
+        staging_manifest = (staging / "attachments.json").read_bytes()
+        immutable_result = release_result
+        immutable_current = release_current
         if release_dir.exists():
-            existing_manifest = release_dir / "attachments.json"
-            if (
-                not existing_manifest.is_file()
-                or existing_manifest.read_bytes() != (staging / "attachments.json").read_bytes()
-            ):
+            (
+                _immutable_manifest,
+                _immutable_job,
+                immutable_result,
+                immutable_current,
+            ) = _validate_release_artifacts(
+                args,
+                release_dir,
+                revision,
+                total_pages=total_pages,
+                formula_state=formula_state,
+                executor=executor,
+                processing_profile=processing_profile,
+                # The release is content-addressed and immutable.  A rerun of
+                # the same bytes may legitimately open the source through a
+                # new inode; validate its stored identity shape, not equality
+                # with this execution's guarded descriptor.
+                source_identity=None,
+            )
+            if (release_dir / "attachments.json").read_bytes() != staging_manifest:
                 raise RuntimeError("content-addressed OCR release conflict")
-            shutil.rmtree(staging)
-            staging = None
-        else:
-            os.replace(staging, release_dir)
-            staging = None
-        manifest_path = release_dir / "attachments.json"
-        committed_manifest = _load(manifest_path, {}) or {}
-        committed_job = _load(release_dir / "job.json", {}) or {}
-        committed_result = _load(release_dir / "result.json", {}) or {}
-        committed_current = _load(release_dir / "current.json", {}) or {}
-        if (
-            committed_manifest.get("contract") != "reader-book-attachments/1"
-            or committed_manifest.get("bookId") != args.book_id
-            or committed_manifest.get("contentSha256") != args.content_sha256
-            or committed_manifest.get("revision") != revision
-            or committed_manifest.get("engine") != args.engine
-            or _processing_identity(committed_manifest) != (executor, processing_profile)
-            or int(committed_manifest.get("totalPages") or 0) != total_pages
-            or committed_manifest.get("formulaState") != formula_state
-            or committed_job.get("bookId") != args.book_id
-            or committed_job.get("contentSha256") != args.content_sha256
-            or committed_job.get("engine") != args.engine
-            or _processing_identity(committed_job) != (executor, processing_profile)
-            or committed_job.get("state") != "succeeded"
-            or not committed_job.get("resultAvailable")
-            or committed_job.get("pageCharsRevision") != revision
-            or committed_job.get("formulaState") != formula_state
-            or int(committed_job.get("totalPages") or 0) != total_pages
-            or int(committed_job.get("successfulPages") or 0) != total_pages
-            or committed_result.get("engine") != args.engine
-            or _processing_identity(committed_result) != (executor, processing_profile)
-            or committed_result.get("pageCharsRevision") != revision
-            or committed_result.get("release") != release_rel
-            or committed_result.get("sourceIdentity") != source_guard["identity"]
-            or committed_current != {
-                "engine": args.engine,
-                "executor": executor,
-                "processingProfile": processing_profile,
-                "revision": revision,
-            }
-        ):
-            raise RuntimeError("published OCR release metadata is inconsistent")
-        page_ids = [
-            int(match.group(1))
-            for entry in committed_manifest.get("files") or []
-            if (match := re.fullmatch(
-                r"ocr-page-(\d{6})", str(entry.get("attachmentId") or "")
-            ))
-        ]
-        if page_ids != list(range(1, total_pages + 1)):
-            raise RuntimeError("published OCR release has incomplete pages")
-        if len(committed_manifest.get("files") or []) != total_pages + 1:
-            raise RuntimeError("published OCR release has unexpected files")
-        for entry in committed_manifest.get("files") or []:
-            attachment_id = str(entry.get("attachmentId") or "")
-            match = re.fullmatch(r"ocr-page-(\d{6})", attachment_id)
-            if match:
-                path = release_dir / "pages" / f"p{int(match.group(1)):06d}.json"
-            elif attachment_id == "ocr-formulas":
-                path = release_dir / "formulas.json"
-            else:
-                raise RuntimeError("published OCR release has an unknown attachment")
-            payload = path.read_bytes()
-            if (
-                len(payload) != int(entry.get("size") or -1)
-                or hashlib.sha256(payload).hexdigest() != entry.get("sha256")
-            ):
-                raise RuntimeError("published OCR release digest mismatch")
-            try:
-                value = json.loads(payload.decode("utf-8"))
-            except Exception as exc:
-                raise RuntimeError("published OCR release JSON is invalid") from exc
-            if match:
-                page_number = int(match.group(1))
-                if (
-                    not isinstance(value, dict)
-                    or value.get("schema") != PAGE_SCHEMA
-                    or value.get("bookId") != args.book_id
-                    or value.get("contentSha256") != args.content_sha256
-                    or value.get("engine") != args.engine
-                    or _processing_identity(value) != (executor, processing_profile)
-                    or value.get("pageNumber") != page_number
-                    or not isinstance(value.get("chars"), list)
-                    or not isinstance(value.get("furigana"), list)
-                ):
-                    raise RuntimeError("published OCR page identity is invalid")
-            else:
-                formulas = value.get("formulas") if isinstance(value, dict) else None
-                if (
-                    not isinstance(value, dict)
-                    or value.get("schema") != "reader-formula-regions/1"
-                    or value.get("bookId") != args.book_id
-                    or value.get("contentSha256") != args.content_sha256
-                    or not isinstance(formulas, list)
-                    or len(formulas) != int(committed_manifest.get("formulaCount") or 0)
-                ):
-                    raise RuntimeError("published OCR formula identity is invalid")
-                for formula in formulas:
-                    try:
-                        formula_page = int(formula.get("page"))
-                        bbox = [float(number) for number in formula.get("bbox")]
-                    except (AttributeError, TypeError, ValueError) as exc:
-                        raise RuntimeError("published OCR formula record is invalid") from exc
-                    if (
-                        formula_page < 1
-                        or formula_page > total_pages
-                        or len(bbox) != 4
-                        or not all(math.isfinite(number) and 0 <= number <= 1 for number in bbox)
-                        or bbox[0] >= bbox[2]
-                        or bbox[1] >= bbox[3]
-                    ):
-                        raise RuntimeError("published OCR formula record is invalid")
-        _atomic_json(version_dir / "result.json", release_result)
-        _atomic_json(version_dir / "current.json", {
-            "engine": args.engine,
-            "executor": executor,
-            "processingProfile": processing_profile,
-            "revision": revision,
-        })
-        fence_path = version_dir / "publication.json"
-        previous_fence = _load(fence_path, None)
+        # The only expensive source hash in the final phase stays outside the
+        # global jobs lock.  The lock-held check below compares fd/path identity.
+        _assert_source_guard(source_guard, rehash=True)
         fence = {
             "contract": PUBLICATION_CONTRACT,
             "bookId": args.book_id,
@@ -3199,30 +3407,257 @@ def _publish_release(
             "processingProfile": processing_profile,
             "revision": revision,
             "release": release_rel,
-            "manifestSha256": _sha256(manifest_path),
-            "sourceIdentity": dict(source_guard["identity"]),
+            "manifestSha256": hashlib.sha256(staging_manifest).hexdigest(),
+            "sourceIdentity": dict(immutable_result["sourceIdentity"]),
         }
-        _assert_source_guard(source_guard, rehash=True)
-        _assert_worker_identity(job_dir / "job.json")
-        _atomic_json(fence_path, fence)
-        try:
-            # Recheck bytes, not only path metadata: an in-place writer can keep
-            # size/mtime stable while changing content during the fence write.
-            _assert_source_guard(source_guard, rehash=True)
-            # The service may have replaced this worker generation while the
-            # fence was being written.  A stale generation must not publish.
-            _assert_worker_identity(job_dir / "job.json")
-        except Exception:
-            if isinstance(previous_fence, dict):
-                _atomic_json(fence_path, previous_fence)
+
+        def commit() -> None:
+            nonlocal staging
+            current_job = _assert_worker_identity(job_dir / "job.json")
+            if finalizer_token is not None and current_job.get(
+                "finalizerOwnerToken"
+            ) != finalizer_token:
+                raise RuntimeError("OCR publication finalizer is no longer current")
+            if (
+                _desired(job_dir / "control.json") != "running"
+                or current_job.get("state") in ("pause-requested", "cancel-requested")
+            ):
+                raise RuntimeError("OCR worker stop requested before publication")
+            _assert_source_guard(source_guard, rehash=False)
+            release_dir.parent.mkdir(parents=True, exist_ok=True)
+            if release_dir.exists():
+                existing_manifest = release_dir / "attachments.json"
+                if (
+                    not existing_manifest.is_file()
+                    or existing_manifest.read_bytes() != staging_manifest
+                ):
+                    raise RuntimeError("content-addressed OCR release conflict")
+                # Keep the duplicate staging reachable until after jobs.lock
+                # is released; recursive cleanup can be large.
             else:
-                fence_path.unlink(missing_ok=True)
-            raise
+                os.replace(staging, release_dir)
+                staging = None
+            release_index = _release_index_after_publish(
+                args,
+                version_dir,
+                release_dir,
+                revision,
+                release_job,
+                release_result,
+                manifest,
+            )
+            index_path = version_dir / "releases-index.json"
+            previous_index = _file_snapshot(index_path)
+            try:
+                _atomic_json(index_path, release_index)
+                _assert_source_guard(source_guard, rehash=False)
+                _assert_worker_identity(job_dir / "job.json")
+            except Exception:
+                _restore_file_snapshot(index_path, previous_index)
+                raise
+            if terminal_job is not None:
+                committed_terminal = {
+                    **terminal_job,
+                    "state": "succeeded",
+                    "resultAvailable": True,
+                    "pageCharsRevision": revision,
+                }
+                for field in (
+                    "finalizerStage",
+                    "finalizerOwnerToken",
+                    "finalizerPid",
+                    "finalizerProcessStartToken",
+                ):
+                    committed_terminal.pop(field, None)
+                # The index and mutable terminal identity linearize under the
+                # same jobs.lock.  If this replace is interrupted after the
+                # index commit, status reconstructs this exact run identity
+                # from the immutable release plus the ledger entry.
+                _atomic_json(job_dir / "job.json", committed_terminal)
+            # Compatibility mirrors are repairable and may never revoke the
+            # already-committed activeRunId if one replace fails.
+            for path, value in (
+                (version_dir / "publication.json", fence),
+                (version_dir / "result.json", immutable_result),
+                (version_dir / "current.json", immutable_current),
+            ):
+                try:
+                    _atomic_json(path, value)
+                except Exception:
+                    continue
+
+        if lock_held:
+            commit()
+        else:
+            # ReaderPC imports this module without Pi's sidecar store; only the
+            # detached Pi commit path loads the shared process lock.
+            from reader_sidecar_store import exclusive_lock
+
+            with exclusive_lock(_release_jobs_lock_path(
+                version_dir,
+                book_id=args.book_id,
+                content_sha256=args.content_sha256,
+            )):
+                commit()
         return revision
     finally:
         if staging is not None and staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
         _close_source_guard(own_source_guard)
+
+
+def _worker_jobs_lock(args, job_dir: Path):
+    """Pi-only lazy lock import; ReaderPC can still import this module alone."""
+
+    from reader_sidecar_store import exclusive_lock
+
+    return exclusive_lock(_release_jobs_lock_path(
+        job_dir.parent,
+        book_id=args.book_id,
+        content_sha256=args.content_sha256,
+    ))
+
+
+def _publication_committed_for_job(args, job_dir: Path, job: dict) -> bool:
+    """Return true only when the authoritative active run is this execution."""
+
+    index = _load_release_index_for_publish(args, job_dir.parent)
+    active = index.get("activeRunId")
+    if active is None:
+        return False
+    entry = next(
+        (
+            item
+            for item in index.get("runs") or []
+            if isinstance(item, dict) and item.get("runId") == active
+        ),
+        None,
+    )
+    return bool(
+        entry is not None
+        and entry.get("runId") == job.get("runId")
+        and (
+            not entry.get("jobId")
+            or entry.get("jobId") == job.get("jobId")
+        )
+    )
+
+
+def _write_terminal_job(args, job_dir: Path, value: dict) -> None:
+    """Linearize the post-publication mutable success write by generation."""
+
+    job_path = job_dir / "job.json"
+    with _worker_jobs_lock(args, job_dir):
+        current = _assert_worker_identity(job_path)
+        if _publication_committed_for_job(args, job_dir, value):
+            current = {**current, "state": "succeeded"}
+        if current.get("state") in ("pause-requested", "cancel-requested"):
+            raise RuntimeError("OCR worker stop requested after publication")
+        _atomic_json(job_path, value)
+
+
+def _record_worker_failure(
+    args,
+    job_dir: Path,
+    exc: Exception,
+    pdf: Path,
+    project: Path,
+) -> bool:
+    """Write failure only while this exact worker generation still owns job.json."""
+
+    job_path = job_dir / "job.json"
+    try:
+        with _worker_jobs_lock(args, job_dir):
+            current = _load(job_path, {}) or {}
+            try:
+                _assert_worker_identity(job_path, current)
+            except RuntimeError:
+                return False
+            if _publication_committed_for_job(args, job_dir, current):
+                return False
+            if current.get("state") in ("pause-requested", "cancel-requested"):
+                return False
+            phase = current.get("phase") or "preparing"
+            text_progress = (
+                current.get("textProgress")
+                if isinstance(current.get("textProgress"), dict)
+                else _progress()
+            )
+            word_progress = (
+                current.get("wordProgress")
+                if isinstance(current.get("wordProgress"), dict)
+                else _progress()
+            )
+            formula_progress = (
+                current.get("formulaProgress")
+                if isinstance(current.get("formulaProgress"), dict)
+                else _progress()
+            )
+            failed_pages = int(current.get("failedPages") or 0)
+            if phase == "text-ocr":
+                text_progress = _progress(
+                    text_progress.get("total"),
+                    text_progress.get("completed"),
+                    failed=int(text_progress.get("failed") or 0) + 1,
+                )
+                word_progress = _progress(
+                    word_progress.get("total"),
+                    word_progress.get("completed"),
+                    failed=int(word_progress.get("failed") or 0) + 1,
+                )
+                failed_pages = max(1, failed_pages)
+            elif phase == "tokenizing":
+                word_progress = _progress(
+                    word_progress.get("total"),
+                    word_progress.get("completed"),
+                    failed=max(1, int(word_progress.get("failed") or 0)),
+                )
+            elif phase == "formula-detect":
+                formula_progress = _progress(
+                    formula_progress.get("total"),
+                    formula_progress.get("completed"),
+                    failed=max(
+                        1,
+                        int(formula_progress.get("total") or 0)
+                        - int(formula_progress.get("completed") or 0),
+                    ),
+                )
+            elif phase == "formula-latex":
+                current_pending = int(current.get("formulaPendingRegions") or 0)
+                current["formulaFailedRegions"] = max(
+                    int(current.get("formulaFailedRegions") or 0), current_pending
+                )
+                current["formulaPendingRegions"] = 0
+            failed = {
+                **current,
+                "state": "failed",
+                "phase": phase,
+                "textState": current.get("textState") or "failed",
+                "formulaState": (
+                    "failed"
+                    if phase in ("formula-detect", "formula-latex")
+                    else current.get("formulaState") or "idle"
+                ),
+                "failedPages": failed_pages,
+                "currentPage": current.get("currentPage"),
+                "textProgress": text_progress,
+                "wordProgress": word_progress,
+                "formulaProgress": formula_progress,
+                "formulaPendingRegions": int(current.get("formulaPendingRegions") or 0),
+                "formulaFailedRegions": int(current.get("formulaFailedRegions") or 0),
+                "errorCode": "ocr-worker-failed",
+                "error": _safe_error(exc, pdf, project),
+                "message": "Pi 预处理失败；已完成页保留，可重试",
+                "canPause": False,
+                "canResume": False,
+                "canCancel": False,
+                "canRetry": True,
+                "updatedAtEpochMs": int(time.time() * 1000),
+            }
+            _atomic_json(job_path, failed)
+            return True
+    except Exception:
+        return False
 
 
 def run(args) -> int:
@@ -3505,78 +3940,19 @@ def run(args) -> int:
             "resultAvailable": True,
             "pageCharsRevision": None,
         }
-        revision = _publish_release(
-            args, job_dir, formula_path, final_job, source_guard=source_guard
-        )
-        final_job["pageCharsRevision"] = revision
         final_job["updatedAtEpochMs"] = int(time.time() * 1000)
-        _atomic_json(job_path, final_job)
+        _publish_release(
+            args,
+            job_dir,
+            formula_path,
+            final_job,
+            source_guard=source_guard,
+            terminal_job=final_job,
+        )
         return 0
     except Exception as exc:
-        current = _load(job_path, {}) or {}
-        phase = current.get("phase") or "preparing"
-        text_progress = current.get("textProgress") if isinstance(current.get("textProgress"), dict) else _progress()
-        word_progress = current.get("wordProgress") if isinstance(current.get("wordProgress"), dict) else _progress()
-        formula_progress = current.get("formulaProgress") if isinstance(current.get("formulaProgress"), dict) else _progress()
-        failed_pages = int(current.get("failedPages") or 0)
-        if phase == "text-ocr":
-            text_progress = _progress(
-                text_progress.get("total"),
-                text_progress.get("completed"),
-                failed=int(text_progress.get("failed") or 0) + 1,
-            )
-            word_progress = _progress(
-                word_progress.get("total"),
-                word_progress.get("completed"),
-                failed=int(word_progress.get("failed") or 0) + 1,
-            )
-            failed_pages = max(1, failed_pages)
-        elif phase == "tokenizing":
-            word_progress = _progress(
-                word_progress.get("total"),
-                word_progress.get("completed"),
-                failed=max(1, int(word_progress.get("failed") or 0)),
-            )
-        elif phase == "formula-detect":
-            formula_progress = _progress(
-                formula_progress.get("total"),
-                formula_progress.get("completed"),
-                failed=max(
-                    1,
-                    int(formula_progress.get("total") or 0)
-                    - int(formula_progress.get("completed") or 0),
-                ),
-            )
-        elif phase == "formula-latex":
-            current_pending = int(current.get("formulaPendingRegions") or 0)
-            current["formulaFailedRegions"] = max(
-                int(current.get("formulaFailedRegions") or 0), current_pending
-            )
-            current["formulaPendingRegions"] = 0
-        _update_job(
-            job_path,
-            state="failed",
-            phase=phase,
-            textState=(current.get("textState") or "failed"),
-            formulaState=(
-                "failed"
-                if phase in ("formula-detect", "formula-latex")
-                else current.get("formulaState") or "idle"
-            ),
-            failedPages=failed_pages,
-            currentPage=current.get("currentPage"),
-            textProgress=text_progress,
-            wordProgress=word_progress,
-            formulaProgress=formula_progress,
-            formulaPendingRegions=int(current.get("formulaPendingRegions") or 0),
-            formulaFailedRegions=int(current.get("formulaFailedRegions") or 0),
-            errorCode="ocr-worker-failed",
-            error=_safe_error(exc, pdf, Path(args.project)),
-            message="Pi 预处理失败；已完成页保留，可重试",
-            canPause=False,
-            canResume=False,
-            canCancel=False,
-            canRetry=True,
+        _record_worker_failure(
+            args, job_dir, exc, pdf, Path(args.project)
         )
         return 1
     finally:

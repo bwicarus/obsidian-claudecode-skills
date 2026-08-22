@@ -13,12 +13,14 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from contextlib import contextmanager
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "_server_deploy"))
 
 from reader_book_library import BookLibrary  # noqa: E402
+from reader_sidecar_store import exclusive_lock  # noqa: E402
 import reader_book_ocr  # noqa: E402
 import reader_book_ocr_worker  # noqa: E402
 from reader_book_ocr import ReaderBookOcrError, ReaderBookOcrService  # noqa: E402
@@ -32,13 +34,22 @@ from reader_book_ocr_worker import (  # noqa: E402
     _manga_vision_line_chars,
     _proven_table_layout_grids,
     _publish_attachments,
-    _publish_release,
+    _publish_release as _raw_publish_release,
     _tokenize_chars,
     _vision_page_layout,
 )
 
 
 PDF_A = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n%%EOF\n"
+
+
+def _publish_release(args, job_dir, formula_path, final_job, **kwargs):
+    """Exercise the real publication precondition in direct worker tests."""
+
+    control_path = Path(job_dir) / "control.json"
+    if not control_path.exists():
+        control_path.write_text('{"desiredState":"running"}', "utf-8")
+    return _raw_publish_release(args, job_dir, formula_path, final_job, **kwargs)
 
 
 def _with_test_layout(page: dict) -> dict:
@@ -83,11 +94,22 @@ class ReaderBookOcrReleaseIndexTest(unittest.TestCase):
         self.version = self.service._version_dir(
             self.entry["bookId"], self.entry["contentSha256"]
         )
+        self.run_sequence = 0
 
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def _publish(self, engine: str, char: str) -> str:
+    def _publish(
+        self,
+        engine: str,
+        char: str,
+        *,
+        run_id: str | None = None,
+        updated_at: int | None = None,
+    ) -> str:
+        self.run_sequence += 1
+        run_id = run_id or f"ocrrun_{self.run_sequence:016x}"
+        updated_at = updated_at if updated_at is not None else self.run_sequence
         job_dir = self.version / engine
         pages = job_dir / "pages"
         pages.mkdir(parents=True, exist_ok=True)
@@ -106,7 +128,8 @@ class ReaderBookOcrReleaseIndexTest(unittest.TestCase):
         formula_path.write_text('{"formulas":[]}', "utf-8")
         final_job = {
             "contract": "reader-library-ocr/1",
-            "jobId": "ocrjob_" + engine,
+            "jobId": f"ocrjob_{engine}_{self.run_sequence}",
+            "runId": run_id,
             "bookId": self.entry["bookId"],
             "contentSha256": self.entry["contentSha256"],
             "engine": engine,
@@ -116,7 +139,8 @@ class ReaderBookOcrReleaseIndexTest(unittest.TestCase):
             "formulaState": "unavailable",
             "formulaTotal": 0,
             "resultAvailable": True,
-            "updatedAtEpochMs": 1,
+            "createdAtEpochMs": updated_at,
+            "updatedAtEpochMs": updated_at,
         }
         (job_dir / "job.json").write_text(json.dumps(final_job), "utf-8")
         return _publish_release(
@@ -140,6 +164,32 @@ class ReaderBookOcrReleaseIndexTest(unittest.TestCase):
     def test_two_runs_coexist_with_dates_and_one_is_active(self) -> None:
         first = self._publish("vision", "V")
         second = self._publish("manga", "M")
+        # The detached Pi publication path must commit the ledger immediately;
+        # list_releases() must not be required to repair split-brain state.
+        committed = json.loads(
+            (self.version / "releases-index.json").read_text("utf-8")
+        )
+        self.assertEqual(
+            {run["revision"] for run in committed["runs"]}, {first, second}
+        )
+        self.assertEqual(
+            next(
+                run["revision"]
+                for run in committed["runs"]
+                if run["runId"] == committed["activeRunId"]
+            ),
+            second,
+        )
+        self.assertEqual(
+            json.loads((self.version / "publication.json").read_text("utf-8"))["revision"],
+            second,
+        )
+        self.assertEqual(
+            json.loads((self.version / "current.json").read_text("utf-8"))["revision"],
+            second,
+        )
+        self.assertTrue(self.service.lock_path.is_file())
+        self.assertFalse((self.version / ".jobs.lock").exists())
         listing = self._list()
         revisions = {run["revision"] for run in listing["runs"]}
         self.assertEqual(revisions, {first, second})
@@ -155,6 +205,330 @@ class ReaderBookOcrReleaseIndexTest(unittest.TestCase):
         active = [run for run in listing["runs"] if run["isActive"]]
         self.assertEqual(len(active), 1)
         self.assertEqual(active[0]["revision"], second)
+
+    def test_same_revision_runs_remain_distinct_and_share_physical_release(self) -> None:
+        first_run = "ocrrun_00000000000000a1"
+        second_run = "ocrrun_00000000000000a2"
+        first_revision = self._publish(
+            "vision", "V", run_id=first_run, updated_at=100
+        )
+        second_revision = self._publish(
+            "vision", "V", run_id=second_run, updated_at=200
+        )
+        self.assertEqual(first_revision, second_revision)
+
+        listing = self._list()
+        self.assertEqual(
+            {run["runId"] for run in listing["runs"]},
+            {first_run, second_run},
+        )
+        self.assertEqual(listing["activeRunId"], second_run)
+        status = self.service.status(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.assertEqual(status["runId"], second_run)
+        self.assertEqual(status["jobId"], "ocrjob_vision_2")
+        mutable_job = json.loads(
+            (self.version / "vision" / "job.json").read_text("utf-8")
+        )
+        self.assertEqual(mutable_job["runId"], second_run)
+        self.assertEqual(mutable_job["jobId"], "ocrjob_vision_2")
+        self.assertEqual(
+            next(run for run in listing["runs"] if run["runId"] == first_run)[
+                "sameRevisionRunIds"
+            ],
+            [second_run],
+        )
+
+        switched = self.service.activate_run(
+            self.entry["bookId"], self.entry["contentSha256"], first_run
+        )
+        self.assertEqual(switched["activeRunId"], first_run)
+        after_one_delete = self.service.delete_run(
+            self.entry["bookId"], self.entry["contentSha256"], second_run
+        )
+        self.assertEqual([run["runId"] for run in after_one_delete["runs"]], [first_run])
+        self.assertTrue(
+            (self.version / "releases" / first_revision).is_dir(),
+            "the shared immutable release must survive while one run still references it",
+        )
+        after_last_delete = self.service.delete_run(
+            self.entry["bookId"],
+            self.entry["contentSha256"],
+            first_run,
+            allow_deactivate=True,
+        )
+        self.assertEqual(after_last_delete["runs"], [])
+        self.assertIsNone(after_last_delete["activeRunId"])
+        self.assertFalse((self.version / "releases" / first_revision).exists())
+
+    def test_status_repairs_same_revision_run_after_index_terminal_crash(self) -> None:
+        self._publish(
+            "vision", "V", run_id="ocrrun_00000000000000a1", updated_at=100
+        )
+        job_dir = self.version / "vision"
+        job_path = job_dir / "job.json"
+        second = {
+            "contract": "reader-library-ocr/1",
+            "jobId": "ocrjob_same_revision_second",
+            "runId": "ocrrun_00000000000000a2",
+            "workerGeneration": "ocrgen_same_revision_second",
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "engine": "vision",
+            "state": "running",
+            "totalPages": 1,
+            "successfulPages": 1,
+            "formulaState": "unavailable",
+            "formulaTotal": 0,
+            "resultAvailable": False,
+            "createdAtEpochMs": 200,
+            "updatedAtEpochMs": 200,
+        }
+        job_path.write_text(json.dumps(second), "utf-8")
+        terminal = {
+            **second,
+            "state": "succeeded",
+            "resultAvailable": True,
+        }
+        index_path = self.version / "releases-index.json"
+        real_atomic = reader_book_ocr_worker._atomic_json
+
+        def crash_before_terminal(path, value):
+            if Path(path) == job_path and index_path.exists():
+                index = json.loads(index_path.read_text("utf-8"))
+                if index.get("activeRunId") == second["runId"]:
+                    raise OSError("crash before mutable terminal replace")
+            return real_atomic(path, value)
+
+        with patch.object(
+            reader_book_ocr_worker,
+            "_atomic_json",
+            side_effect=crash_before_terminal,
+        ):
+            with self.assertRaises(OSError):
+                _raw_publish_release(
+                    SimpleNamespace(
+                        book_id=self.entry["bookId"],
+                        content_sha256=self.entry["contentSha256"],
+                        engine="vision",
+                        max_bytes=1024 * 1024,
+                    ),
+                    job_dir,
+                    job_dir / "formula-source.json",
+                    terminal,
+                    source_path=self.vault / "A.pdf",
+                    terminal_job=terminal,
+                )
+
+        committed = json.loads(index_path.read_text("utf-8"))
+        self.assertEqual(committed["activeRunId"], second["runId"])
+        self.assertEqual(json.loads(job_path.read_text("utf-8"))["state"], "running")
+        status = self.service.status(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.assertEqual(status["state"], "succeeded")
+        self.assertEqual(status["runId"], second["runId"])
+        self.assertEqual(status["jobId"], second["jobId"])
+
+    def test_reconcile_migrates_split_publication_once_then_index_stays_truth(self) -> None:
+        first_revision = self._publish("vision", "A")
+        first_fence = json.loads((self.version / "publication.json").read_text("utf-8"))
+        first_run = next(
+            run
+            for run in json.loads(
+                (self.version / "releases-index.json").read_text("utf-8")
+            )["runs"]
+            if run["revision"] == first_revision
+        )
+        second_revision = self._publish("manga", "B")
+        second_fence = json.loads((self.version / "publication.json").read_text("utf-8"))
+
+        # Production split shape: the immutable v6 release and publication
+        # exist, but the old v5-only ledger has never heard of that release.
+        stale_index = {
+            "contract": reader_book_ocr.RELEASE_INDEX_CONTRACT,
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "generation": 7,
+            "activeRunId": first_run["runId"],
+            "runs": [first_run],
+        }
+        (self.version / "releases-index.json").write_text(
+            json.dumps(stale_index), "utf-8"
+        )
+        (self.version / "publication.json").write_text(
+            json.dumps(second_fence), "utf-8"
+        )
+        migrated = self._list()
+        self.assertEqual({run["revision"] for run in migrated["runs"]}, {
+            first_revision,
+            second_revision,
+        })
+        active_revision = next(
+            run["revision"] for run in migrated["runs"] if run["isActive"]
+        )
+        self.assertEqual(active_revision, second_revision)
+
+        # Once both releases are represented, a stale compatibility mirror is
+        # no longer allowed to move activeRunId back to v5.
+        (self.version / "publication.json").write_text(
+            json.dumps(first_fence), "utf-8"
+        )
+        stable = self._list()
+        self.assertEqual(
+            next(run["revision"] for run in stable["runs"] if run["isActive"]),
+            second_revision,
+        )
+        self.assertEqual(
+            json.loads((self.version / "publication.json").read_text("utf-8"))[
+                "revision"
+            ],
+            second_revision,
+        )
+
+    def test_existing_corrupt_or_wrong_identity_index_fails_closed(self) -> None:
+        self._publish("vision", "V")
+        index_path = self.version / "releases-index.json"
+        valid = json.loads(index_path.read_text("utf-8"))
+        cases = (
+            b"{not-json",
+            json.dumps({**valid, "contentSha256": "0" * 64}).encode("utf-8"),
+            json.dumps({**valid, "bookId": "book_" + "f" * 32}).encode("utf-8"),
+            json.dumps(
+                {**valid, "activeRunId": "ocrrun_ffffffffffffffff"}
+            ).encode("utf-8"),
+        )
+        for payload in cases:
+            with self.subTest(payload=payload[:24]):
+                index_path.write_bytes(payload)
+                before = index_path.read_bytes()
+                with self.assertRaises(ReaderBookOcrError) as caught:
+                    self._list()
+                self.assertEqual(caught.exception.code, "ocr-publication-invalid")
+                self.assertEqual(index_path.read_bytes(), before)
+                index_path.write_text(json.dumps(valid), "utf-8")
+
+    def test_delete_index_failure_restores_release_before_unlock(self) -> None:
+        first = self._publish("vision", "A")
+        self._publish("manga", "B")
+        listing = self._list()
+        victim = next(run for run in listing["runs"] if run["revision"] == first)
+        release_dir = self.version / "releases" / first
+
+        with patch.object(
+            self.service, "_write_index_locked", side_effect=OSError("index failed")
+        ):
+            with self.assertRaises(OSError):
+                self.service.delete_run(
+                    self.entry["bookId"],
+                    self.entry["contentSha256"],
+                    victim["runId"],
+                )
+        self.assertTrue(release_dir.is_dir())
+        self.assertFalse(any(self.version.glob(".trash-delete-*")))
+        self.assertIn(victim["runId"], {run["runId"] for run in self._list()["runs"]})
+
+    def test_delete_commit_crash_trash_never_reenters_migration(self) -> None:
+        self._publish("vision", "A")
+        active = next(run for run in self._list()["runs"] if run["isActive"])
+        real_rmtree = shutil.rmtree
+
+        def leave_delete_trash(path, *args, **kwargs):
+            if Path(path).name.startswith(".trash-delete-"):
+                return None
+            return real_rmtree(path, *args, **kwargs)
+
+        with patch.object(
+            self.service, "_repair_active_mirrors_locked", return_value=None
+        ), patch.object(shutil, "rmtree", side_effect=leave_delete_trash):
+            deleted = self.service.delete_run(
+                self.entry["bookId"],
+                self.entry["contentSha256"],
+                active["runId"],
+                allow_deactivate=True,
+            )
+        self.assertEqual(deleted["runs"], [])
+        leftovers = list(self.version.glob(".trash-delete-*"))
+        self.assertEqual(len(leftovers), 1)
+        malformed = self.version / ".trash-delete-vision-not-a-revision-deadbeef"
+        malformed.mkdir()
+        real_lock = reader_book_ocr.exclusive_lock
+        real_rmtree = shutil.rmtree
+        lock_depth = 0
+
+        @contextmanager
+        def tracked_jobs_lock(path):
+            nonlocal lock_depth
+            with real_lock(path):
+                lock_depth += 1
+                try:
+                    yield
+                finally:
+                    lock_depth -= 1
+
+        def checked_gc(path, *args, **kwargs):
+            if Path(path).name.startswith(".trash-delete-"):
+                self.assertEqual(
+                    lock_depth, 0, "delete-trash GC must run outside jobs.lock"
+                )
+            return real_rmtree(path, *args, **kwargs)
+
+        with patch.object(
+            reader_book_ocr, "exclusive_lock", side_effect=tracked_jobs_lock
+        ), patch.object(shutil, "rmtree", side_effect=checked_gc):
+            after_restart = self._list()
+        self.assertEqual(after_restart["runs"], [])
+        self.assertIsNone(after_restart["activeRunId"])
+        self.assertFalse(leftovers[0].exists())
+        self.assertTrue(malformed.is_dir())
+
+    def test_delete_rename_crash_before_index_commit_is_recovered(self) -> None:
+        revision = self._publish("vision", "A")
+        before = self._list()
+        release_dir = self.version / "releases" / revision
+        trash = self.version / (
+            f".trash-delete-vision-{revision}-{'f' * 32}"
+        )
+        os.replace(release_dir, trash)
+
+        recovered = self._list()
+        self.assertEqual(recovered["activeRunId"], before["activeRunId"])
+        self.assertTrue(release_dir.is_dir())
+        self.assertFalse(trash.exists())
+
+    def test_activate_validates_target_before_committing_active_run(self) -> None:
+        first_revision = self._publish("vision", "A")
+        self._publish("manga", "B")
+        before = self._list()
+        target = next(run for run in before["runs"] if run["revision"] == first_revision)
+        release_result = self.version / "releases" / first_revision / "result.json"
+        damaged = json.loads(release_result.read_text("utf-8"))
+        damaged.pop("sourceIdentity", None)
+        release_result.write_text(json.dumps(damaged), "utf-8")
+
+        with self.assertRaises(ReaderBookOcrError):
+            self.service.activate_run(
+                self.entry["bookId"], self.entry["contentSha256"], target["runId"]
+            )
+        committed = json.loads(
+            (self.version / "releases-index.json").read_text("utf-8")
+        )
+        self.assertEqual(committed["activeRunId"], before["activeRunId"])
+
+    def test_none_active_repairs_stale_release_mirrors(self) -> None:
+        self._publish("vision", "V")
+        index_path = self.version / "releases-index.json"
+        index = json.loads(index_path.read_text("utf-8"))
+        index["activeRunId"] = None
+        index_path.write_text(json.dumps(index), "utf-8")
+        for name in ("publication.json", "result.json", "current.json"):
+            self.assertTrue((self.version / name).exists())
+
+        listing = self._list()
+        self.assertIsNone(listing["activeRunId"])
+        for name in ("publication.json", "result.json", "current.json"):
+            self.assertFalse((self.version / name).exists())
 
     def test_activate_switches_the_published_result(self) -> None:
         first = self._publish("vision", "V")
@@ -259,6 +633,14 @@ class ReaderBookOcrReleaseIndexTest(unittest.TestCase):
         stale = self.service.state_root / ("book_" + "9" * 32)
         stale.mkdir(parents=True, exist_ok=True)
         shutil.move(str(self.version), str(stale / self.entry["contentSha256"]))
+        # A content-addressed alias may retain the directory owner's historical
+        # bookId in the ledger; both that owner and the requested catalog id are
+        # legal, while unrelated ids still fail closed.
+        aliased_version = stale / self.entry["contentSha256"]
+        aliased_index_path = aliased_version / "releases-index.json"
+        aliased_index = json.loads(aliased_index_path.read_text("utf-8"))
+        aliased_index["bookId"] = stale.name
+        aliased_index_path.write_text(json.dumps(aliased_index), "utf-8")
         listing = self._list()
         self.assertEqual(len(listing["runs"]), 1)
         self.assertEqual(listing["runs"][0]["revision"], revision)
@@ -523,6 +905,7 @@ class ReaderBookOcrForcedRerunTest(unittest.TestCase):
         final_job = {
             "contract": "reader-library-ocr/1",
             "jobId": "ocrjob_seed",
+            "runId": "ocrrun_0000000000000001",
             "bookId": self.entry["bookId"],
             "contentSha256": self.entry["contentSha256"],
             "engine": "vision",
@@ -566,6 +949,27 @@ class ReaderBookOcrForcedRerunTest(unittest.TestCase):
         )
         self.assertFalse(already, "force=True 仍然返回了旧结果")
         self.assertEqual(job["state"], "queued")
+
+    def test_each_forced_start_gets_a_stable_unique_run_id(self) -> None:
+        self.service.start(
+            self.entry["bookId"], self.entry["contentSha256"], "vision", force=True
+        )
+        job_path = self.version / "vision" / "job.json"
+        first = json.loads(job_path.read_text("utf-8"))
+        self.assertRegex(first["runId"], r"^ocrrun_[0-9a-f]{16}$")
+
+        # End this generation without publishing, then explicitly start a new
+        # run.  Archiving/retry must not reuse the previous run identity.
+        job_path.write_text(
+            json.dumps({**first, "state": "failed", "resultAvailable": False}),
+            "utf-8",
+        )
+        self.service.start(
+            self.entry["bookId"], self.entry["contentSha256"], "vision", force=True
+        )
+        second = json.loads(job_path.read_text("utf-8"))
+        self.assertRegex(second["runId"], r"^ocrrun_[0-9a-f]{16}$")
+        self.assertNotEqual(second["runId"], first["runId"])
 
     def test_forced_start_does_not_resume_the_previous_staging(self) -> None:
         """新参数只作用于"还没做过的页"是最隐蔽的失败形态。
@@ -1116,6 +1520,238 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.pid_alive_patcher.stop()
         self.temp.cleanup()
 
+    def _publish_pc_release(
+        self,
+        service: ReaderBookOcrService,
+        *,
+        engine: str,
+        profile: str,
+        text: str,
+    ) -> str:
+        version_dir = service._version_dir(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        job_dir = version_dir / engine
+        pages_dir = job_dir / "pages"
+        pages_dir.mkdir(parents=True, exist_ok=True)
+        page = _with_test_layout({
+            "schema": "reader-page-chars/1",
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "engine": engine,
+            "executor": "pc",
+            "processingProfile": profile,
+            "pageNumber": 1,
+            "page_w": 10,
+            "page_h": 20,
+            "chars": [{"c": text, "x0": 1, "y0": 1, "x1": 2, "y1": 2}],
+            "furigana": [],
+        })
+        (pages_dir / "p000001.json").write_text(json.dumps(page), "utf-8")
+        formula_path = job_dir / "formula.json"
+        formula_path.write_text(json.dumps({
+            "schema": "reader-formula-regions/1",
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "formulas": [],
+        }), "utf-8")
+        job = {
+            "contract": "reader-library-ocr/1",
+            "jobId": "ocrjob_existing_" + engine,
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "engine": engine,
+            "executor": "pc",
+            "processingProfile": profile,
+            "state": "succeeded",
+            "totalPages": 1,
+            "successfulPages": 1,
+            "formulaState": "succeeded",
+            "formulaTotal": 0,
+            "resultAvailable": True,
+            "createdAtEpochMs": 50,
+            "updatedAtEpochMs": 100,
+        }
+        (job_dir / "job.json").write_text(json.dumps(job), "utf-8")
+        return _publish_release(
+            SimpleNamespace(
+                book_id=self.entry["bookId"],
+                content_sha256=self.entry["contentSha256"],
+                engine=engine,
+                max_bytes=1024 * 1024,
+            ),
+            job_dir,
+            formula_path,
+            job,
+            source_path=self.vault / "A.pdf",
+        )
+
+    def _prepare_pc_completion(
+        self, service: ReaderBookOcrService, *, engine: str = "vision"
+    ) -> tuple[dict, Path]:
+        job, already = service.start(
+            self.entry["bookId"],
+            self.entry["contentSha256"],
+            engine,
+            "pc",
+            force=True,
+        )
+        self.assertFalse(already)
+        claimed = service.claim_pc_worker("pc_test", {
+            "engines": [engine],
+            "maxPdfBytes": 1024 * 1024,
+            "maxPageBytes": 1024 * 1024,
+            "processingProfile": "quality-first-v6",
+        })
+        self.assertIsNotNone(claimed)
+        identity = {
+            "contract": reader_book_ocr.WORKER_CONTRACT,
+            "workerId": "pc_test",
+            "bookId": claimed["job"]["bookId"],
+            "contentSha256": claimed["job"]["contentSha256"],
+            "jobId": claimed["job"]["jobId"],
+            "generation": claimed["job"]["generation"],
+            "leaseId": claimed["lease"]["leaseId"],
+        }
+        page = _with_test_layout({
+            "schema": "reader-page-chars/1",
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "engine": engine,
+            "pageNumber": 1,
+            "page_w": 10,
+            "page_h": 20,
+            "chars": [],
+            "furigana": [],
+        })
+        service.upload_pc_page(1, {**identity, "page": page})
+        service.upload_pc_formulas({
+            **identity,
+            "formula": {
+                "schema": "reader-formula-regions/1",
+                "bookId": self.entry["bookId"],
+                "contentSha256": self.entry["contentSha256"],
+                "formulas": [],
+            },
+            "formulaState": "succeeded",
+        })
+        return identity, service._job_dir(
+            self.entry["bookId"], self.entry["contentSha256"], engine
+        )
+
+    def test_pc_finalizer_owner_is_persistent_and_control_is_not_swallowed(self) -> None:
+        service = ReaderBookOcrService(
+            self.library,
+            self.base / "pc-finalizer-ocr",
+            ROOT,
+            launcher=lambda *_args: self.fail("PC finalizer must not spawn Pi"),
+            max_pdf_bytes=1024 * 1024,
+            max_pages=100,
+            legacy_page_count_reader=lambda _path: 1,
+        )
+        version_dir = service._version_dir(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        job_dir = version_dir / "vision"
+        job_dir.mkdir(parents=True)
+        (version_dir / "current.json").write_text(
+            json.dumps({
+                "engine": "vision",
+                "executor": "pc",
+                "processingProfile": "quality-first-v6",
+            }),
+            "utf-8",
+        )
+        (job_dir / "control.json").write_text(
+            json.dumps({"desiredState": "running"}), "utf-8"
+        )
+        finalizing = {
+            "contract": "reader-library-ocr/1",
+            "jobId": "ocrjob_" + "1" * 32,
+            "runId": "ocrrun_00000000000000f1",
+            "workerGeneration": "ocrgen_" + "2" * 32,
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "engine": "vision",
+            "executor": "pc",
+            "processingProfile": "quality-first-v6",
+            "state": "running",
+            "phase": "finalizing",
+            "leaseId": "ocrlease_" + "3" * 32,
+            "leaseWorkerId": "pc_test",
+            "leaseExpiresAtEpochMs": 1,
+            "finalizerOwnerToken": "ocrfinal_" + "4" * 32,
+            "finalizerPid": self.fake_worker_pid,
+            "finalizerProcessStartToken": None,
+            "canPause": True,
+            "canCancel": True,
+            "resultAvailable": False,
+        }
+        job_path = job_dir / "job.json"
+        job_path.write_text(json.dumps(finalizing), "utf-8")
+
+        # Lease expiry alone cannot reassign work while the persisted server
+        # finalizer process is still alive.
+        with exclusive_lock(service.lock_path):
+            _engine, owned = service._current_job_locked(version_dir)
+        self.assertEqual(owned["state"], "running")
+        self.assertEqual(owned["finalizerOwnerToken"], finalizing["finalizerOwnerToken"])
+
+        identity = {
+            "contract": reader_book_ocr.WORKER_CONTRACT,
+            "workerId": finalizing["leaseWorkerId"],
+            "bookId": finalizing["bookId"],
+            "contentSha256": finalizing["contentSha256"],
+            "jobId": finalizing["jobId"],
+            "generation": finalizing["workerGeneration"],
+            "leaseId": finalizing["leaseId"],
+        }
+        pages_dir = job_dir / "pages"
+        pages_dir.mkdir()
+        page_path = pages_dir / "p000001.json"
+        page_path.write_bytes(b"existing-page")
+        formula_path = job_dir / "pc-formulas.json"
+        formula_path.write_bytes(b"existing-formulas")
+        for operation in (
+            lambda: service.upload_pc_page(1, {**identity, "page": {}}),
+            lambda: service.upload_pc_formulas({
+                **identity,
+                "formula": {},
+                "formulaState": "succeeded",
+            }),
+        ):
+            with self.assertRaises(ReaderBookOcrError) as frozen:
+                operation()
+            self.assertEqual(frozen.exception.code, "ocr-publication-finalizing")
+        self.assertEqual(page_path.read_bytes(), b"existing-page")
+        self.assertEqual(formula_path.read_bytes(), b"existing-formulas")
+        lease = service.pc_worker_heartbeat(identity)
+        self.assertEqual(lease["desiredState"], "running")
+        self.assertEqual(
+            json.loads(job_path.read_text("utf-8"))["finalizerOwnerToken"],
+            finalizing["finalizerOwnerToken"],
+        )
+
+        paused = service.pause(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.assertEqual(paused["state"], "pause-requested")
+        self.assertEqual(
+            json.loads((job_dir / "control.json").read_text("utf-8"))["desiredState"],
+            "paused",
+        )
+
+        # Once the owning process is gone, a different server process can
+        # recover the persisted finalizing generation instead of waiting for a
+        # guessed long lease.
+        stopped = json.loads(job_path.read_text("utf-8"))
+        stopped["finalizerPid"] = 999999999
+        job_path.write_text(json.dumps(stopped), "utf-8")
+        with exclusive_lock(service.lock_path):
+            _engine, recovered = service._current_job_locked(version_dir)
+        self.assertEqual(recovered["state"], "paused")
+        self.assertNotIn("finalizerOwnerToken", recovered)
+
     def test_current_profile_requires_layout_but_previous_profile_remains_readable(self) -> None:
         page_path = self.base / "page.json"
         page = {
@@ -1206,6 +1842,25 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             legacy_page_count_reader=lambda _path: 1,
             pc_lease_seconds=60,
             pc_online_seconds=60,
+        )
+        old_revision = self._publish_pc_release(
+            service,
+            engine="vision",
+            profile="quality-first-v5",
+            text="V",
+        )
+        version_dir = service._version_dir(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        index_path = version_dir / "releases-index.json"
+        old_index = json.loads(index_path.read_text("utf-8"))
+        self.assertEqual(
+            next(
+                run["revision"]
+                for run in old_index["runs"]
+                if run["runId"] == old_index["activeRunId"]
+            ),
+            old_revision,
         )
         job, already = service.start(
             self.entry["bookId"], self.entry["contentSha256"], "manga", "pc"
@@ -1322,12 +1977,75 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         )
         job_path.write_text(json.dumps(publishable_job), "utf-8")
 
-        completed = service.complete_pc_worker({
-            **identity,
-            "totalPages": 1,
-        })
+        real_lock = reader_book_ocr.exclusive_lock
+        real_page_done = service._page_for_pc_done
+        real_read_optional = service._read_optional
+        formula_path = job_path.parent / "pc-formulas.json"
+        lock_depth = 0
+
+        @contextmanager
+        def tracked_jobs_lock(path):
+            nonlocal lock_depth
+            with real_lock(path):
+                lock_depth += 1
+                try:
+                    yield
+                finally:
+                    lock_depth -= 1
+
+        def checked_page_preflight(*args, **kwargs):
+            self.assertEqual(
+                lock_depth, 0, "page JSON preflight must run outside jobs.lock"
+            )
+            return real_page_done(*args, **kwargs)
+
+        def checked_optional_read(path):
+            if Path(path) == formula_path:
+                self.assertEqual(
+                    lock_depth, 0, "formula JSON preflight must run outside jobs.lock"
+                )
+            return real_read_optional(path)
+
+        with patch.object(
+            reader_book_ocr, "exclusive_lock", side_effect=tracked_jobs_lock
+        ), patch.object(
+            service, "_page_for_pc_done", side_effect=checked_page_preflight
+        ), patch.object(
+            service, "_read_optional", side_effect=checked_optional_read
+        ), patch.object(
+            service,
+            "_published_snapshot",
+            side_effect=AssertionError(
+                "PC completion tail must not rescan published attachments"
+            ),
+        ):
+            completed = service.complete_pc_worker({
+                **identity,
+                "totalPages": 1,
+            })
         self.assertTrue(completed["published"])
         self.assertRegex(completed["revision"], r"^ocr_[0-9a-f]{20}$")
+        committed_index = json.loads(index_path.read_text("utf-8"))
+        self.assertEqual(
+            {run["revision"] for run in committed_index["runs"]},
+            {old_revision, completed["revision"]},
+        )
+        active_run = next(
+            run
+            for run in committed_index["runs"]
+            if run["runId"] == committed_index["activeRunId"]
+        )
+        self.assertEqual(active_run["revision"], completed["revision"])
+        self.assertEqual(active_run["processingProfile"], "quality-first-v6")
+        self.assertEqual(committed_index["generation"], old_index["generation"] + 1)
+        self.assertEqual(
+            json.loads((version_dir / "publication.json").read_text("utf-8"))["revision"],
+            completed["revision"],
+        )
+        self.assertEqual(
+            json.loads((version_dir / "current.json").read_text("utf-8"))["revision"],
+            completed["revision"],
+        )
         status = service.status(self.entry["bookId"], self.entry["contentSha256"])
         self.assertEqual(status["state"], "succeeded")
         self.assertEqual(status["executor"], "pc")
@@ -1349,6 +2067,133 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.assertEqual(
             snapshot["result"]["processingProfile"], "quality-first-v6"
         )
+        listing = service.list_releases(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.assertEqual(
+            next(run["revision"] for run in listing["runs"] if run["isActive"]),
+            completed["revision"],
+        )
+
+    def test_pc_post_commit_terminal_failure_uses_index_outside_lock(self) -> None:
+        service = ReaderBookOcrService(
+            self.library,
+            self.base / "pc-post-commit-ocr",
+            ROOT,
+            launcher=lambda *_args: self.fail("PC executor must not spawn a Pi worker"),
+            max_pdf_bytes=1024 * 1024,
+            max_pages=100,
+            legacy_page_count_reader=lambda _path: 1,
+        )
+        identity, job_dir = self._prepare_pc_completion(service)
+        job_path = job_dir / "job.json"
+        real_atomic = reader_book_ocr_worker._atomic_json
+        real_lock = reader_book_ocr.exclusive_lock
+        real_index_lookup = service._indexed_run_for_job
+        lock_depth = 0
+
+        def fail_terminal(path, value):
+            if Path(path) == job_path and value.get("state") == "succeeded":
+                raise OSError("fault after release-index commit")
+            return real_atomic(path, value)
+
+        @contextmanager
+        def tracked_jobs_lock(path):
+            nonlocal lock_depth
+            with real_lock(path):
+                lock_depth += 1
+                try:
+                    yield
+                finally:
+                    lock_depth -= 1
+
+        def checked_index_lookup(*args, **kwargs):
+            self.assertEqual(
+                lock_depth,
+                0,
+                "post-publish index validation must run outside jobs.lock",
+            )
+            return real_index_lookup(*args, **kwargs)
+
+        with patch.object(
+            reader_book_ocr_worker, "_atomic_json", side_effect=fail_terminal
+        ), patch.object(
+            reader_book_ocr, "exclusive_lock", side_effect=tracked_jobs_lock
+        ), patch.object(
+            service, "_indexed_run_for_job", side_effect=checked_index_lookup
+        ), patch.object(
+            service,
+            "_published_snapshot",
+            side_effect=AssertionError(
+                "post-commit recovery must not rescan published attachments"
+            ),
+        ):
+            completed = service.complete_pc_worker({
+                **identity,
+                "totalPages": 1,
+            })
+
+        self.assertTrue(completed["published"])
+        stored = json.loads(job_path.read_text("utf-8"))
+        self.assertEqual(stored["state"], "succeeded")
+        self.assertEqual(stored["jobId"], identity["jobId"])
+        self.assertEqual(stored["pageCharsRevision"], completed["revision"])
+        self.assertNotIn("finalizerOwnerToken", stored)
+
+    def test_pc_success_tail_preserves_post_commit_replacement(self) -> None:
+        service = ReaderBookOcrService(
+            self.library,
+            self.base / "pc-replacement-ocr",
+            ROOT,
+            launcher=lambda *_args: self.fail("PC executor must not spawn a Pi worker"),
+            max_pdf_bytes=1024 * 1024,
+            max_pages=100,
+            legacy_page_count_reader=lambda _path: 1,
+        )
+        identity, job_dir = self._prepare_pc_completion(service)
+        real_publish = reader_book_ocr_worker._publish_release
+        replacement: dict[str, object] = {}
+
+        def publish_then_replace(*args, **kwargs):
+            revision = real_publish(*args, **kwargs)
+            replacement_job, already = service.start(
+                self.entry["bookId"],
+                self.entry["contentSha256"],
+                "vision",
+                "pc",
+                force=True,
+            )
+            self.assertFalse(already)
+            replacement.update({
+                "job": replacement_job,
+                "bytes": (job_dir / "job.json").read_bytes(),
+            })
+            return revision
+
+        with patch.object(
+            reader_book_ocr_worker,
+            "_publish_release",
+            side_effect=publish_then_replace,
+        ), patch.object(
+            service,
+            "_published_snapshot",
+            wraps=service._published_snapshot,
+        ) as snapshot:
+            completed = service.complete_pc_worker({
+                **identity,
+                "totalPages": 1,
+            })
+
+        self.assertTrue(completed["published"])
+        self.assertEqual(completed["job"]["jobId"], identity["jobId"])
+        self.assertEqual((job_dir / "job.json").read_bytes(), replacement["bytes"])
+        self.assertEqual(
+            json.loads((job_dir / "job.json").read_text("utf-8"))["jobId"],
+            replacement["job"]["jobId"],
+        )
+        # start(force=True) performs its own published-result lookup.  The
+        # completion tail must not add a second scan or activation afterward.
+        self.assertEqual(snapshot.call_count, 1)
 
     def test_pc_expired_lease_is_reclaimable_and_old_upload_is_rejected(self) -> None:
         service = ReaderBookOcrService(
@@ -1985,7 +2830,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         })
         self.assertEqual(len(embedded_calls), 1)
 
-    def test_adoption_fence_failure_has_zero_visibility_and_retry_ignores_residue(self) -> None:
+    def test_adoption_mirror_failure_keeps_index_truth_and_retry_ignores_residue(self) -> None:
         state_root = self.base / "fence-ocr"
         service = ReaderBookOcrService(
             self.library,
@@ -2007,25 +2852,25 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             return real_atomic_write(path, *args, **kwargs)
 
         with patch.object(reader_book_ocr, "atomic_write_json", side_effect=fail_publication):
-            with self.assertRaises(OSError):
-                service.adopt_legacy(
-                    self.entry["bookId"], self.entry["contentSha256"]
-                )
+            first_job, first_adoption, first_already = service.adopt_legacy(
+                self.entry["bookId"], self.entry["contentSha256"]
+            )
+        self.assertFalse(first_already)
+        self.assertEqual(first_job["state"], "succeeded")
+        self.assertTrue(first_adoption["alreadyAdopted"])
         version = service._version_dir(
             self.entry["bookId"], self.entry["contentSha256"]
         )
         self.assertFalse((version / "publication.json").exists())
-        with self.assertRaises(ReaderBookOcrError) as status_error:
-            service.status(self.entry["bookId"], self.entry["contentSha256"])
-        self.assertEqual(status_error.exception.code, "ocr-publication-incomplete")
-        with self.assertRaises(ReaderBookOcrError) as page_error:
-            service.read_page(self.entry["bookId"], self.entry["contentSha256"], 1)
-        self.assertEqual(page_error.exception.code, "ocr-result-not-found")
-        with self.assertRaises(ReaderBookOcrError) as manifest_error:
-            service.attachment_manifest(
-                self.entry["bookId"], self.entry["contentSha256"]
-            )
-        self.assertEqual(manifest_error.exception.code, "ocr-attachments-not-found")
+        status = service.status(self.entry["bookId"], self.entry["contentSha256"])
+        self.assertEqual(status["state"], "succeeded")
+        index = json.loads((version / "releases-index.json").read_text("utf-8"))
+        self.assertIsNotNone(index["activeRunId"])
+        self.assertTrue((version / "publication.json").exists())
+        page, _path = service.read_page(
+            self.entry["bookId"], self.entry["contentSha256"], 1
+        )
+        self.assertEqual(page["pageNumber"], 1)
 
         residue = state_root / ".adopt-staging-residue" / "pages"
         residue.mkdir(parents=True)
@@ -2033,7 +2878,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         job, adoption, already = service.adopt_legacy(
             self.entry["bookId"], self.entry["contentSha256"]
         )
-        self.assertFalse(already)
+        self.assertTrue(already)
         self.assertTrue(adoption["alreadyAdopted"])
         self.assertEqual(job["state"], "succeeded")
         manifest = service.attachment_manifest(
@@ -2044,7 +2889,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             ["ocr-page-000001", "ocr-formulas"],
         )
 
-    def test_adoption_source_replaced_during_fence_write_is_rolled_back(self) -> None:
+    def test_adoption_source_replaced_during_index_write_is_rolled_back(self) -> None:
         state_root = self.base / "source-swap-adoption-ocr"
         service = ReaderBookOcrService(
             self.library,
@@ -2063,12 +2908,13 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             self.entry["bookId"], self.entry["contentSha256"]
         )
         fence_path = version / "publication.json"
+        index_path = version / "releases-index.json"
         real_atomic_write = reader_book_ocr.atomic_write_json
         swapped = False
 
-        def replace_source_at_fence(path, *args, **kwargs):
+        def replace_source_at_index(path, *args, **kwargs):
             nonlocal swapped
-            if Path(path) == fence_path and not swapped:
+            if Path(path) == index_path and not swapped:
                 swapped = True
                 replacement = self.vault / "replacement.pdf"
                 replacement.write_bytes(PDF_A + b"different")
@@ -2083,7 +2929,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             return real_atomic_write(path, *args, **kwargs)
 
         with patch.object(
-            reader_book_ocr, "atomic_write_json", side_effect=replace_source_at_fence
+            reader_book_ocr, "atomic_write_json", side_effect=replace_source_at_index
         ):
             with self.assertRaises(ReaderBookOcrError) as changed:
                 service.adopt_legacy(
@@ -2093,7 +2939,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.assertEqual(changed.exception.code, "book-version-changed")
         self.assertFalse(fence_path.exists())
 
-    def test_adoption_same_metadata_source_change_at_fence_is_rolled_back(self) -> None:
+    def test_adoption_same_metadata_source_change_at_index_is_rolled_back(self) -> None:
         state_root = self.base / "same-metadata-adoption-ocr"
         service = ReaderBookOcrService(
             self.library,
@@ -2116,12 +2962,13 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             self.entry["bookId"], self.entry["contentSha256"]
         )
         fence_path = version / "publication.json"
+        index_path = version / "releases-index.json"
         real_atomic_write = reader_book_ocr.atomic_write_json
         swapped = False
 
-        def change_source_at_fence(path, *args, **kwargs):
+        def change_source_at_index(path, *args, **kwargs):
             nonlocal swapped
-            if Path(path) == fence_path and not swapped:
+            if Path(path) == index_path and not swapped:
                 swapped = True
                 source.write_bytes(bytes(changed_bytes))
                 os.utime(
@@ -2134,7 +2981,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             return real_atomic_write(path, *args, **kwargs)
 
         with patch.object(
-            reader_book_ocr, "atomic_write_json", side_effect=change_source_at_fence
+            reader_book_ocr, "atomic_write_json", side_effect=change_source_at_index
         ):
             with self.assertRaises(ReaderBookOcrError) as changed:
                 service.adopt_legacy(
@@ -3791,7 +4638,7 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
                     )
                 self.assertFalse((job_dir.parent / "publication.json").exists())
 
-    def test_worker_source_replaced_during_fence_write_is_rolled_back(self) -> None:
+    def test_worker_source_replaced_during_index_commit_is_rolled_back(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
             source = base / "source.pdf"
@@ -3835,12 +4682,13 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
                 max_bytes=1024 * 1024,
             )
             fence_path = job_dir.parent / "publication.json"
+            index_path = job_dir.parent / "releases-index.json"
             real_atomic = reader_book_ocr_worker._atomic_json
             swapped = False
 
-            def replace_source_at_fence(path, value):
+            def replace_source_at_index(path, value):
                 nonlocal swapped
-                if Path(path) == fence_path and not swapped:
+                if Path(path) == index_path and not swapped:
                     swapped = True
                     replacement = base / "replacement.pdf"
                     replacement.write_bytes(PDF_A + b"different")
@@ -3854,7 +4702,7 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
             with patch.object(
                 reader_book_ocr_worker,
                 "_atomic_json",
-                side_effect=replace_source_at_fence,
+                side_effect=replace_source_at_index,
             ):
                 with self.assertRaisesRegex(RuntimeError, "changed before"):
                     _publish_release(
@@ -3866,8 +4714,9 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
                     )
             self.assertTrue(swapped)
             self.assertFalse(fence_path.exists())
+            self.assertFalse(index_path.exists())
 
-    def test_worker_same_metadata_source_change_at_fence_is_rolled_back(self) -> None:
+    def test_worker_full_rehash_detects_same_metadata_change_before_commit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
             source = base / "source.pdf"
@@ -3916,12 +4765,13 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
                 max_bytes=1024 * 1024,
             )
             fence_path = job_dir.parent / "publication.json"
-            real_atomic = reader_book_ocr_worker._atomic_json
+            index_path = job_dir.parent / "releases-index.json"
+            real_assert = reader_book_ocr_worker._assert_source_guard
             swapped = False
 
-            def change_source_at_fence(path, value):
+            def change_source_before_full_hash(guard, *, rehash):
                 nonlocal swapped
-                if Path(path) == fence_path and not swapped:
+                if rehash and not swapped:
                     swapped = True
                     source.write_bytes(bytes(changed_bytes))
                     os.utime(
@@ -3932,7 +4782,7 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
                         reader_book_ocr_worker._source_identity(source.stat()),
                         original_identity,
                     )
-                return real_atomic(path, value)
+                return real_assert(guard, rehash=rehash)
 
             reader_book_ocr_worker._set_worker_identity(
                 final_job["jobId"], final_job["workerGeneration"]
@@ -3940,8 +4790,8 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
             try:
                 with patch.object(
                     reader_book_ocr_worker,
-                    "_atomic_json",
-                    side_effect=change_source_at_fence,
+                    "_assert_source_guard",
+                    side_effect=change_source_before_full_hash,
                 ):
                     with self.assertRaisesRegex(RuntimeError, "changed before"):
                         _publish_release(
@@ -3956,8 +4806,9 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
             self.assertTrue(swapped)
             self.assertNotEqual(hashlib.sha256(source.read_bytes()).hexdigest(), content_sha)
             self.assertFalse(fence_path.exists())
+            self.assertFalse(index_path.exists())
 
-    def test_stale_worker_generation_at_fence_restores_previous_publication(self) -> None:
+    def test_stale_worker_generation_at_index_commit_restores_previous_truth(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
             source = base / "source.pdf"
@@ -4014,7 +4865,9 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
             finally:
                 reader_book_ocr_worker._set_worker_identity(None, None)
             fence_path = job_dir.parent / "publication.json"
+            index_path = job_dir.parent / "releases-index.json"
             previous_fence = fence_path.read_bytes()
+            previous_index = index_path.read_bytes()
 
             stale_job = {
                 **first_job,
@@ -4033,9 +4886,9 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
             real_atomic = reader_book_ocr_worker._atomic_json
             swapped = False
 
-            def replace_generation_at_fence(path, value):
+            def replace_generation_at_index(path, value):
                 nonlocal swapped
-                if Path(path) == fence_path and not swapped:
+                if Path(path) == index_path and not swapped:
                     swapped = True
                     real_atomic(job_dir / "job.json", replacement_job)
                 return real_atomic(path, value)
@@ -4047,7 +4900,7 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
                 with patch.object(
                     reader_book_ocr_worker,
                     "_atomic_json",
-                    side_effect=replace_generation_at_fence,
+                    side_effect=replace_generation_at_index,
                 ):
                     with self.assertRaisesRegex(RuntimeError, "no longer current"):
                         _publish_release(
@@ -4061,77 +4914,292 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
                 reader_book_ocr_worker._set_worker_identity(None, None)
             self.assertTrue(swapped)
             self.assertEqual(fence_path.read_bytes(), previous_fence)
+            self.assertEqual(index_path.read_bytes(), previous_index)
             self.assertEqual(
                 json.loads((job_dir / "job.json").read_text("utf-8"))["jobId"],
                 replacement_job["jobId"],
             )
 
-    def test_fence_write_failure_keeps_previous_release_visible(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            base = Path(temp)
-            book_id = "book_" + "a" * 32
-            source = base / "source.pdf"
-            source.write_bytes(PDF_A)
-            content_sha = hashlib.sha256(PDF_A).hexdigest()
+    def test_index_failure_rolls_back_but_mirror_failure_keeps_new_truth(self) -> None:
+        for failed_name in (
+            "releases-index.json",
+            "publication.json",
+            "result.json",
+            "current.json",
+        ):
+            with self.subTest(failed_name=failed_name), tempfile.TemporaryDirectory() as temp:
+                base = Path(temp)
+                book_id = "book_" + "a" * 32
+                source = base / "source.pdf"
+                source.write_bytes(PDF_A)
+                content_sha = hashlib.sha256(PDF_A).hexdigest()
 
-            def publish(engine: str, text: str, job_id: str) -> str:
-                job_dir = base / engine
-                pages = job_dir / "pages"
-                pages.mkdir(parents=True, exist_ok=True)
-                (pages / "p000001.json").write_text(json.dumps({
-                    "schema": "reader-page-chars/1",
-                    "bookId": book_id,
-                    "contentSha256": content_sha,
-                    "engine": engine,
-                    "pageNumber": 1,
-                    "page_w": 10,
-                    "page_h": 20,
-                    "chars": [{"c": text}],
-                    "furigana": [],
-                }), "utf-8")
-                formula = job_dir / "formula.json"
-                formula.write_text('{"formulas":[]}', "utf-8")
-                return _publish_release(
-                    SimpleNamespace(
-                        book_id=book_id,
-                        content_sha256=content_sha,
-                        engine=engine,
-                        max_bytes=1024 * 1024,
-                    ),
-                    job_dir,
-                    formula,
-                    {
-                        "jobId": job_id,
+                def publish(engine: str, text: str, job_id: str) -> str:
+                    job_dir = base / engine
+                    pages = job_dir / "pages"
+                    pages.mkdir(parents=True, exist_ok=True)
+                    (pages / "p000001.json").write_text(json.dumps({
+                        "schema": "reader-page-chars/1",
                         "bookId": book_id,
                         "contentSha256": content_sha,
                         "engine": engine,
-                        "state": "succeeded",
-                        "totalPages": 1,
-                        "successfulPages": 1,
-                        "formulaState": "succeeded",
-                        "formulaTotal": 0,
-                        "resultAvailable": True,
-                    },
-                    source_path=source,
+                        "pageNumber": 1,
+                        "page_w": 10,
+                        "page_h": 20,
+                        "chars": [{"c": text}],
+                        "furigana": [],
+                    }), "utf-8")
+                    formula = job_dir / "formula.json"
+                    formula.write_text('{"formulas":[]}', "utf-8")
+                    return _publish_release(
+                        SimpleNamespace(
+                            book_id=book_id,
+                            content_sha256=content_sha,
+                            engine=engine,
+                            max_bytes=1024 * 1024,
+                        ),
+                        job_dir,
+                        formula,
+                        {
+                            "jobId": job_id,
+                            "bookId": book_id,
+                            "contentSha256": content_sha,
+                            "engine": engine,
+                            "state": "succeeded",
+                            "totalPages": 1,
+                            "successfulPages": 1,
+                            "formulaState": "succeeded",
+                            "formulaTotal": 0,
+                            "resultAvailable": True,
+                        },
+                        source_path=source,
+                    )
+
+                first_revision = publish("vision", "A", "ocrjob_a")
+                fence_path = base / "publication.json"
+                index_path = base / "releases-index.json"
+                first_fence = fence_path.read_bytes()
+                first_index = index_path.read_bytes()
+                failed_path = base / failed_name
+                real_atomic = reader_book_ocr_worker._atomic_json
+
+                def fail_commit_file(path, value):
+                    if Path(path) == failed_path:
+                        raise OSError("fault before commit-file replace")
+                    return real_atomic(path, value)
+
+                with patch.object(
+                    reader_book_ocr_worker,
+                    "_atomic_json",
+                    side_effect=fail_commit_file,
+                ):
+                    if failed_name == "releases-index.json":
+                        with self.assertRaises(OSError):
+                            publish("manga", "B", "ocrjob_b")
+                        second_revision = None
+                    else:
+                        second_revision = publish("manga", "B", "ocrjob_b")
+                if failed_name == "releases-index.json":
+                    self.assertEqual(fence_path.read_bytes(), first_fence)
+                    self.assertEqual(index_path.read_bytes(), first_index)
+                    self.assertEqual(json.loads(first_fence)["revision"], first_revision)
+                    continue
+
+                committed_index = json.loads(index_path.read_text("utf-8"))
+                active = next(
+                    run
+                    for run in committed_index["runs"]
+                    if run["runId"] == committed_index["activeRunId"]
                 )
+                self.assertEqual(active["revision"], second_revision)
+                if failed_name == "publication.json":
+                    self.assertEqual(fence_path.read_bytes(), first_fence)
 
-            first_revision = publish("vision", "A", "ocrjob_a")
-            fence_path = base / "publication.json"
-            first_fence = fence_path.read_bytes()
-            real_atomic = reader_book_ocr_worker._atomic_json
+    def test_same_revision_new_inode_reuses_release_and_cleans_staging_after_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            source_a = base / "source-a.pdf"
+            source_b = base / "source-b.pdf"
+            source_a.write_bytes(PDF_A)
+            source_b.write_bytes(PDF_A)
+            content_sha = hashlib.sha256(PDF_A).hexdigest()
+            book_id = "book_" + "a" * 32
+            job_dir = base / "vision"
+            pages = job_dir / "pages"
+            pages.mkdir(parents=True)
+            (pages / "p000001.json").write_text(json.dumps({
+                "schema": "reader-page-chars/1",
+                "bookId": book_id,
+                "contentSha256": content_sha,
+                "engine": "vision",
+                "pageNumber": 1,
+                "page_w": 10,
+                "page_h": 20,
+                "chars": [],
+                "furigana": [],
+            }), "utf-8")
+            formula = job_dir / "formula.json"
+            formula.write_text('{"formulas":[]}', "utf-8")
+            args = SimpleNamespace(
+                book_id=book_id,
+                content_sha256=content_sha,
+                engine="vision",
+                max_bytes=1024 * 1024,
+            )
 
-            def fail_new_fence(path, value):
-                if Path(path) == fence_path:
-                    raise OSError("fault before fence replace")
-                return real_atomic(path, value)
+            def job(run_id: str, job_id: str) -> dict:
+                return {
+                    "jobId": job_id,
+                    "runId": run_id,
+                    "bookId": book_id,
+                    "contentSha256": content_sha,
+                    "engine": "vision",
+                    "state": "succeeded",
+                    "totalPages": 1,
+                    "successfulPages": 1,
+                    "formulaState": "succeeded",
+                    "formulaTotal": 0,
+                    "resultAvailable": True,
+                }
+
+            first = job("ocrrun_00000000000000a1", "ocrjob_first_inode")
+            (job_dir / "job.json").write_text(json.dumps(first), "utf-8")
+            first_revision = _publish_release(
+                args, job_dir, formula, first, source_path=source_a
+            )
+            first_result = json.loads(
+                (base / "releases" / first_revision / "result.json").read_text("utf-8")
+            )
+
+            second = job("ocrrun_00000000000000a2", "ocrjob_second_inode")
+            (job_dir / "job.json").write_text(json.dumps(second), "utf-8")
+            lock_held = False
+            real_rmtree = reader_book_ocr_worker.shutil.rmtree
+
+            @contextmanager
+            def tracked_lock(_path):
+                nonlocal lock_held
+                lock_held = True
+                try:
+                    yield
+                finally:
+                    lock_held = False
+
+            def checked_rmtree(path, *args, **kwargs):
+                if Path(path).name.startswith(".release-staging-"):
+                    self.assertFalse(lock_held)
+                return real_rmtree(path, *args, **kwargs)
+
+            import reader_sidecar_store
 
             with patch.object(
-                reader_book_ocr_worker, "_atomic_json", side_effect=fail_new_fence
+                reader_sidecar_store, "exclusive_lock", side_effect=tracked_lock
+            ), patch.object(
+                reader_book_ocr_worker.shutil,
+                "rmtree",
+                side_effect=checked_rmtree,
             ):
-                with self.assertRaises(OSError):
-                    publish("manga", "B", "ocrjob_b")
-            self.assertEqual(fence_path.read_bytes(), first_fence)
-            self.assertEqual(json.loads(first_fence)["revision"], first_revision)
+                second_revision = _publish_release(
+                    args, job_dir, formula, second, source_path=source_b
+                )
+            self.assertEqual(second_revision, first_revision)
+            index = json.loads((base / "releases-index.json").read_text("utf-8"))
+            self.assertEqual(index["activeRunId"], second["runId"])
+            self.assertEqual(
+                {item["jobId"] for item in index["runs"]},
+                {first["jobId"], second["jobId"]},
+            )
+            fence = json.loads((base / "publication.json").read_text("utf-8"))
+            self.assertEqual(fence["sourceIdentity"], first_result["sourceIdentity"])
+
+    def test_post_publication_replacement_generation_blocks_old_terminal_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            source = base / "source.pdf"
+            source.write_bytes(PDF_A)
+            content_sha = hashlib.sha256(PDF_A).hexdigest()
+            book_id = "book_" + "a" * 32
+            job_dir = base / "state" / "vision"
+            pages = job_dir / "pages"
+            pages.mkdir(parents=True)
+            (pages / "p000001.json").write_text(json.dumps({
+                "schema": "reader-page-chars/1",
+                "bookId": book_id,
+                "contentSha256": content_sha,
+                "engine": "vision",
+                "pageNumber": 1,
+                "page_w": 10,
+                "page_h": 20,
+                "chars": [],
+                "furigana": [],
+            }), "utf-8")
+            formula = job_dir / "formula.json"
+            formula.write_text('{"formulas":[]}', "utf-8")
+            args = SimpleNamespace(
+                book_id=book_id,
+                content_sha256=content_sha,
+                engine="vision",
+                max_bytes=1024 * 1024,
+            )
+            old_job = {
+                "jobId": "ocrjob_old",
+                "workerGeneration": "ocrgen_old",
+                "runId": "ocrrun_00000000000000f1",
+                "bookId": book_id,
+                "contentSha256": content_sha,
+                "engine": "vision",
+                "state": "running",
+                "totalPages": 1,
+                "successfulPages": 1,
+                "formulaState": "succeeded",
+                "formulaTotal": 0,
+                "resultAvailable": False,
+            }
+            job_path = job_dir / "job.json"
+            job_path.write_text(json.dumps(old_job), "utf-8")
+            terminal = {
+                **old_job,
+                "state": "succeeded",
+                "resultAvailable": True,
+                "updatedAtEpochMs": 100,
+            }
+            reader_book_ocr_worker._set_worker_identity(
+                old_job["jobId"], old_job["workerGeneration"]
+            )
+            try:
+                # Publication has returned successfully.  The generation is
+                # replaced in the exact window before run() writes terminal
+                # success (or its outer except tries to write failure).
+                _publish_release(
+                    args, job_dir, formula, terminal, source_path=source
+                )
+                replacement = {
+                    **old_job,
+                    "jobId": "ocrjob_replacement",
+                    "workerGeneration": "ocrgen_replacement",
+                    "runId": "ocrrun_00000000000000f2",
+                    "state": "queued",
+                }
+                job_path.write_text(json.dumps(replacement), "utf-8")
+                replacement_bytes = job_path.read_bytes()
+
+                with self.assertRaisesRegex(RuntimeError, "no longer current"):
+                    reader_book_ocr_worker._write_terminal_job(
+                        args, job_dir, terminal
+                    )
+                self.assertEqual(job_path.read_bytes(), replacement_bytes)
+                self.assertFalse(
+                    reader_book_ocr_worker._record_worker_failure(
+                        args,
+                        job_dir,
+                        RuntimeError("late failure"),
+                        source,
+                        base,
+                    )
+                )
+                self.assertEqual(job_path.read_bytes(), replacement_bytes)
+            finally:
+                reader_book_ocr_worker._set_worker_identity(None, None)
 
 
 if __name__ == "__main__":
