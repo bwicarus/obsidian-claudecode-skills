@@ -4375,3 +4375,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证**：Reader Node 全量、OCR/PC/书库专项 `115` 项（`1` skipped）、ReaderBundle `314` 文件、ReaderPC 包自检、Pi Linux 原子预检与生产 E2E 全部通过。
 - **部署**：Reader `0.2.134` / KG `kg-0.2.134-df84da8b13e0eed2a018` 已上线，回退点 `/home/bwicarus/deploy-backups/reader/20260822T043323Z-296766`；TestFlight 为 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **现有书**：`料理师part1.pdf` 已由 ReaderPC 以 `manga / quality-first-v4` 重跑完成，`53/53` 成功、零失败；current 已原子切换至 revision `ocr_f57d24d99a78536a3c83`，旧不可变 release 保留。
+
+### 2026-08-22 表格 Vision 精确字框与请求设备自动导入正式发布
+- **修复**：提交 `5e82534f` 让 Manga 只负责可靠表格分区，单元格内保留 Vision 字框；iOS 以持久化任务回执绑定请求设备，前台恢复、重复 revision 与已打开页面均可原位热刷新。
+- **验证**：Reader Node 全量、OCR/PC/书库专项 `125` 项（`1` skipped）、ReaderPC 包验证/自检、Pi Linux 原子预检与生产 E2E 全部通过；独立复审补齐缺字、面板误判、并发表格及旧状态竞态。
+- **部署**：Reader `0.2.134` / KG `kg-0.2.134-df84da8b13e0eed2a018` 已原子部署，事务 `20260822T074255Z-326589` complete；回退点 `/home/bwicarus/deploy-backups/reader/20260822T074255Z-326589`，webapp/voice-rt 均 active。
+- **Windows/iOS**：ReaderPC `0.1.57` 已运行且 OCR 空闲无错；Actions `32560299853` 上传 TestFlight `1.1.80 (431)`，App Store 上传明确成功；公开 WebExt channel 未改。
+- **实跑**：`料理师part1` 以 `quality-first-v5` 完成 `53/53`、零失败，current=`ocr_a9aeb3f7dac5c39f61e9`；第 46 页“ナン”由 `876.049` 回到 `903.121`（Vision `902.838`），旧 `ocr_f57d24d99a78536a3c83` 保留。
