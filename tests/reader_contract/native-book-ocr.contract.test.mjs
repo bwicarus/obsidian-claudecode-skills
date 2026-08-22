@@ -373,12 +373,12 @@ test("Pi and PC attachment receipts verify durable per-page character counts", (
 test("new manga geometry profiles import as a fresh engine revision", () => {
   const importBody = bodyOf(STORE, "importDerivedAttachments");
   const convertBody = bodyOf(STORE, "convertPiPage");
-  assert.match(STORE, /"quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4"/);
+  assert.match(STORE, /"quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4", "quality-first-v5"/);
   assert.match(importBody, /processingProfile: processingProfile/);
   assert.match(convertBody, /processingProfile: String/);
   assert.match(
     convertBody,
-    /"pi-default-v3", "quality-first-v4"[\s\S]*geometryVersion = 3/,
+    /"pi-default-v3", "pi-default-v4", "quality-first-v4", "quality-first-v5"[\s\S]*geometryVersion = 3/,
   );
   assert.match(convertBody, /"pi-default-v2", "quality-first-v3"[\s\S]*geometryVersion = 2/);
   assert.match(convertBody, /let revision = "\\\(executor\)-\\\(value\.engine\)\/\\\(geometryVersion\)"/);

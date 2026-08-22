@@ -28,7 +28,7 @@ import uuid
 CONTRACT = "reader-library-ocr/1"
 PAGE_SCHEMA = "reader-page-chars/1"
 PUBLICATION_CONTRACT = "reader-book-ocr-publication/1"
-PROCESSING_PROFILES = {"pi": "pi-default-v3", "pc": "quality-first-v4"}
+PROCESSING_PROFILES = {"pi": "pi-default-v4", "pc": "quality-first-v5"}
 LEGACY_PROCESSING_PROFILES = {"pi": "pi-default-v1", "pc": "quality-first-v1"}
 _EXPECTED_JOB_ID: str | None = None
 _EXPECTED_WORKER_GENERATION: str | None = None
@@ -461,6 +461,642 @@ def _manga_line_char_boxes(
     return cells
 
 
+def _detect_ruled_table_grids(
+    image_gray,
+    *,
+    sx: float,
+    sy: float,
+) -> list[dict]:
+    """Find conservative ruled-table grids in a rendered page.
+
+    MangaPageOcr intentionally owns ordinary page and manga-panel order, but a
+    long horizontal text line can cross several table cells.  Only a page area
+    with at least three matching horizontal rules and a long interior vertical
+    separator is considered a table.  This keeps the table correction out of
+    borderless prose, illustrations, and comic panels.
+    """
+    if image_gray is None or sx <= 0 or sy <= 0:
+        return []
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+
+        gray = np.asarray(image_gray)
+        if gray.ndim != 2 or gray.shape[0] < 80 or gray.shape[1] < 80:
+            return []
+        # The OCR render is 300 DPI and may exceed seventy million pixels.
+        # Rules survive a much smaller analysis image, so cap this one pass
+        # rather than adding several full-page masks to the OCR memory peak.
+        original_h, original_w = int(gray.shape[0]), int(gray.shape[1])
+        analysis_scale = min(1.0, 2400.0 / max(original_h, original_w))
+        if analysis_scale < 1.0:
+            gray = cv2.resize(
+                gray,
+                (
+                    max(80, int(round(original_w * analysis_scale))),
+                    max(80, int(round(original_h * analysis_scale))),
+                ),
+                interpolation=cv2.INTER_AREA,
+            )
+        map_sx = sx / analysis_scale
+        map_sy = sy / analysis_scale
+        image_h, image_w = int(gray.shape[0]), int(gray.shape[1])
+        _threshold, ink = cv2.threshold(
+            gray,
+            0,
+            255,
+            cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU,
+        )
+        horizontal = cv2.morphologyEx(
+            ink,
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(
+                cv2.MORPH_RECT,
+                (max(40, image_w // 24), 1),
+            ),
+        )
+        contours, _hierarchy = cv2.findContours(
+            horizontal,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+    except Exception:
+        return []
+
+    raw_rules: list[tuple[float, float, float]] = []
+    for contour in contours:
+        x, y, width, height = cv2.boundingRect(contour)
+        if width < image_w * 0.28 or height > max(32, image_h * 0.015):
+            continue
+        raw_rules.append((y + height / 2.0, float(x), float(x + width)))
+    if len(raw_rules) < 3:
+        return []
+
+    def overlap_ratio(
+        left: tuple[float, float, float],
+        right: tuple[float, float, float],
+    ) -> float:
+        overlap = max(0.0, min(left[2], right[2]) - max(left[1], right[1]))
+        return overlap / max(1.0, min(left[2] - left[1], right[2] - right[1]))
+
+    # Collapse the two edges of a thick/coloured rule into one y coordinate.
+    # Two disjoint rules at the same y are instead evidence of parallel tables
+    # or comic panels.  The single-track detector cannot safely separate those
+    # layouts, so keep MangaPageOcr's authoritative regions unchanged.
+    merged_rules: list[tuple[float, float, float]] = []
+    merge_distance = max(3.0, image_h * 0.0015)
+    for y, x0, x1 in sorted(raw_rules):
+        rule = (y, x0, x1)
+        if merged_rules and y - merged_rules[-1][0] <= merge_distance:
+            if overlap_ratio(rule, merged_rules[-1]) < 0.72:
+                return []
+            old_y, old_x0, old_x1 = merged_rules[-1]
+            merged_rules[-1] = (
+                (old_y + y) / 2.0,
+                min(old_x0, x0),
+                max(old_x1, x1),
+            )
+        else:
+            merged_rules.append(rule)
+
+    sequences: list[list[tuple[float, float, float]]] = []
+    max_rule_gap = max(45.0, image_h * 0.10)
+    for rule in merged_rules:
+        if (
+            not sequences
+            or rule[0] - sequences[-1][-1][0] > max_rule_gap
+            or overlap_ratio(rule, sequences[-1][-1]) < 0.72
+        ):
+            sequences.append([rule])
+        else:
+            sequences[-1].append(rule)
+
+    grids: list[dict] = []
+    for rules in sequences:
+        if len(rules) < 3 or rules[-1][0] - rules[0][0] < image_h * 0.055:
+            continue
+        x0_values = sorted(rule[1] for rule in rules)
+        x1_values = sorted(rule[2] for rule in rules)
+        table_x0 = x0_values[len(x0_values) // 2]
+        table_x1 = x1_values[len(x1_values) // 2]
+
+        # A nearby full-page border can overlap every table rule and otherwise
+        # become a false final row.  Trim only a leading/trailing rule whose
+        # span is materially wider than the consensus table span; ordinary
+        # outer table borders remain untouched.
+        median_width = max(1.0, table_x1 - table_x0)
+        span_tolerance = max(8.0, image_w * 0.04)
+
+        def is_outer_span_outlier(rule: tuple[float, float, float]) -> bool:
+            return (
+                rule[2] - rule[1] > median_width * 1.20
+                and (
+                    rule[1] < table_x0 - span_tolerance
+                    or rule[2] > table_x1 + span_tolerance
+                )
+            )
+
+        while len(rules) > 3 and is_outer_span_outlier(rules[0]):
+            rules = rules[1:]
+        while len(rules) > 3 and is_outer_span_outlier(rules[-1]):
+            rules = rules[:-1]
+        if len(rules) < 3 or rules[-1][0] - rules[0][0] < image_h * 0.055:
+            continue
+        x0_values = sorted(rule[1] for rule in rules)
+        x1_values = sorted(rule[2] for rule in rules)
+        table_x0 = x0_values[len(x0_values) // 2]
+        table_x1 = x1_values[len(x1_values) // 2]
+        table_y0 = rules[0][0]
+        table_y1 = rules[-1][0]
+        table_width = table_x1 - table_x0
+        table_height = table_y1 - table_y0
+        if table_width < image_w * 0.28 or table_height <= 0:
+            continue
+        try:
+            vertical = cv2.morphologyEx(
+                ink,
+                cv2.MORPH_OPEN,
+                cv2.getStructuringElement(
+                    cv2.MORPH_RECT,
+                    (1, max(40, int(table_height * 0.15))),
+                ),
+            )
+            vertical_contours, _hierarchy = cv2.findContours(
+                vertical,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )
+        except Exception:
+            continue
+        separator_centers: list[float] = []
+        for contour in vertical_contours:
+            x, y, width, height = cv2.boundingRect(contour)
+            overlap_y = max(
+                0.0,
+                min(float(y + height), table_y1) - max(float(y), table_y0),
+            )
+            center_x = x + width / 2.0
+            if (
+                overlap_y < table_height * 0.52
+                or width > max(36, image_w * 0.018)
+                or center_x <= table_x0 + table_width * 0.025
+                or center_x >= table_x1 - table_width * 0.025
+            ):
+                continue
+            separator_centers.append(center_x)
+        if not separator_centers:
+            continue
+        merged_separators: list[float] = []
+        x_merge_distance = max(4.0, image_w * 0.004)
+        for center in sorted(separator_centers):
+            if (
+                merged_separators
+                and center - merged_separators[-1] <= x_merge_distance
+            ):
+                merged_separators[-1] = (
+                    merged_separators[-1] + center
+                ) / 2.0
+            else:
+                merged_separators.append(center)
+        x_edges = [table_x0, *merged_separators, table_x1]
+        if any(
+            right - left < table_width * 0.07
+            for left, right in zip(x_edges, x_edges[1:])
+        ):
+            continue
+        y_edges = [rule[0] for rule in rules]
+        # A two-by-two rectangular manga panel grid has exactly the same line
+        # geometry as a tiny table.  This correction is intentionally scoped
+        # to denser ruled tables and must not override manga panel order.
+        if len(x_edges) == 3 and len(y_edges) == 3:
+            continue
+        grids.append({
+            "xEdges": [round(value * map_sx, 3) for value in x_edges],
+            "yEdges": [round(value * map_sy, 3) for value in y_edges],
+        })
+    return grids
+
+
+def _manga_vision_text_is_complete(manga_text: str, vision_text: str) -> bool:
+    """Accept complete Vision text plus the established one-glyph corrections."""
+    matcher = difflib.SequenceMatcher(
+        None, manga_text, vision_text, autojunk=False
+    )
+    if len(manga_text) == len(vision_text):
+        if matcher.ratio() < 0.75:
+            return False
+        return all(
+            tag in ("equal", "replace")
+            for tag, _i1, _i2, _j1, _j2 in matcher.get_opcodes()
+        )
+    opcodes = matcher.get_opcodes()
+    if len(vision_text) == len(manga_text) + 1:
+        edits = [opcode for opcode in opcodes if opcode[0] != "equal"]
+        return (
+            len(edits) == 1
+            and edits[0][0] == "insert"
+            and edits[0][1] == edits[0][2]
+            and edits[0][4] - edits[0][3] == 1
+        )
+    if len(manga_text) != len(vision_text) + 1:
+        return False
+    edits = [opcode for opcode in opcodes if opcode[0] != "equal"]
+    if (
+        len(edits) != 1
+        or edits[0][0] != "delete"
+        or edits[0][2] - edits[0][1] != 1
+        or edits[0][3] != edits[0][4]
+    ):
+        return False
+    deleted_at = edits[0][1]
+    deleted = manga_text[deleted_at]
+    return (
+        (deleted_at > 0 and manga_text[deleted_at - 1] == deleted)
+        or (
+            deleted_at + 1 < len(manga_text)
+            and manga_text[deleted_at + 1] == deleted
+        )
+    )
+
+
+def _cluster_table_cell_symbols(symbols: list[dict]) -> list[list[dict]]:
+    """Cluster exact Vision symbols into horizontal lines inside one cell."""
+    lines: list[dict] = []
+    ordered = sorted(
+        symbols,
+        key=lambda item: (
+            (float(item["y0"]) + float(item["y1"])) / 2.0,
+            float(item["x0"]),
+        ),
+    )
+    for symbol in ordered:
+        y0, y1 = float(symbol["y0"]), float(symbol["y1"])
+        center_y = (y0 + y1) / 2.0
+        height = max(0.001, y1 - y0)
+        best: tuple[float, int] | None = None
+        for index, line in enumerate(lines):
+            overlap = max(0.0, min(y1, line["y1"]) - max(y0, line["y0"]))
+            overlap_ratio = overlap / max(0.001, min(height, line["height"]))
+            center_distance = abs(center_y - line["center"])
+            if overlap_ratio < 0.42 and center_distance > max(height, line["height"]) * 0.55:
+                continue
+            score = overlap_ratio - center_distance / max(height, line["height"]) * 0.08
+            if best is None or score > best[0]:
+                best = (score, index)
+        if best is None:
+            lines.append({
+                "items": [symbol],
+                "y0": y0,
+                "y1": y1,
+                "center": center_y,
+                "height": height,
+            })
+            continue
+        line = lines[best[1]]
+        line["items"].append(symbol)
+        line["y0"] = min(line["y0"], y0)
+        line["y1"] = max(line["y1"], y1)
+        line["center"] = (line["y0"] + line["y1"]) / 2.0
+        line["height"] = max(0.001, line["y1"] - line["y0"])
+    lines.sort(key=lambda line: (line["y0"], line["center"]))
+    result: list[list[dict]] = []
+    for line in lines:
+        line["items"].sort(key=lambda item: (float(item["x0"]), float(item["y0"])))
+        result.append(line["items"])
+    return result
+
+
+def _table_cell_vision_is_complete(
+    manga_symbols: list[dict],
+    vision_symbols: list[dict],
+) -> bool:
+    """Prove that Vision did not omit ordinary Manga text in one cell.
+
+    Text agreement handles the established equal-length and one-glyph OCR
+    corrections.  Page OCR can also reorder or over-segment a few symbols even
+    when both engines cover the same ink, so otherwise require good text
+    similarity and spatial coverage for every Manga glyph.  One geometrically
+    uncovered duplicate is allowed only when the other copy is itself backed
+    by an overlapping same-character Vision symbol.
+    """
+    if not manga_symbols:
+        return True
+    if not vision_symbols:
+        return False
+    ordered_vision = [
+        symbol
+        for line in _cluster_table_cell_symbols(vision_symbols)
+        for symbol in line
+    ]
+    manga_text = "".join(str(symbol.get("c") or "") for symbol in manga_symbols)
+    vision_text = "".join(str(symbol.get("c") or "") for symbol in ordered_vision)
+    if not manga_text or not vision_text:
+        return False
+    if _manga_vision_text_is_complete(manga_text, vision_text):
+        return True
+
+    matcher = difflib.SequenceMatcher(
+        None, manga_text, vision_text, autojunk=False
+    )
+    short_one_substitution = (
+        len(manga_text) == len(vision_text)
+        and 2 <= len(manga_text) <= 3
+        and sum(
+            1
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+            if tag == "replace" and i2 - i1 == 1 and j2 - j1 == 1
+        ) == 1
+        and all(
+            tag in ("equal", "replace")
+            for tag, _i1, _i2, _j1, _j2 in matcher.get_opcodes()
+        )
+    )
+    if matcher.ratio() < 0.72 and not short_one_substitution:
+        return False
+
+    def overlap_ratio(source: dict, candidate: dict) -> float:
+        overlap_x = max(
+            0.0,
+            min(float(source["x1"]), float(candidate["x1"]))
+            - max(float(source["x0"]), float(candidate["x0"])),
+        )
+        overlap_y = max(
+            0.0,
+            min(float(source["y1"]), float(candidate["y1"]))
+            - max(float(source["y0"]), float(candidate["y0"])),
+        )
+        source_area = max(
+            0.001,
+            (float(source["x1"]) - float(source["x0"]))
+            * (float(source["y1"]) - float(source["y0"])),
+        )
+        candidate_area = max(
+            0.001,
+            (float(candidate["x1"]) - float(candidate["x0"]))
+            * (float(candidate["y1"]) - float(candidate["y0"])),
+        )
+        return overlap_x * overlap_y / min(source_area, candidate_area)
+
+    covered = [
+        any(overlap_ratio(source, candidate) >= 0.20 for candidate in ordered_vision)
+        for source in manga_symbols
+    ]
+    uncovered = [index for index, value in enumerate(covered) if not value]
+    if not uncovered:
+        return True
+    if len(uncovered) != 1:
+        return False
+
+    missing_index = uncovered[0]
+    missing_character = str(manga_symbols[missing_index].get("c") or "")
+    for neighbor_index in range(
+        max(0, missing_index - 2),
+        min(len(manga_symbols), missing_index + 3),
+    ):
+        if neighbor_index == missing_index or not covered[neighbor_index]:
+            continue
+        neighbor = manga_symbols[neighbor_index]
+        if str(neighbor.get("c") or "") != missing_character:
+            continue
+        if any(
+            str(candidate.get("c") or "") == missing_character
+            and overlap_ratio(neighbor, candidate) >= 0.20
+            for candidate in ordered_vision
+        ):
+            return True
+    return False
+
+
+def _manga_table_cell_lines(
+    lines: list[dict],
+    vision_chars: list[dict] | None,
+    grids: list[dict],
+    *,
+    sx: float = 1.0,
+    sy: float = 1.0,
+) -> list[dict]:
+    """Replace proven ruled-table regions with cell-scoped Vision lines.
+
+    The grid supplies ownership and row/column order; Vision supplies the exact
+    symbol boxes.  Every cell gets a distinct block identity so selecting text
+    in one cell cannot pull in a visually adjacent row or column.
+    """
+    if not lines or not vision_chars or not grids:
+        return lines
+    max_block = max((int(line.get("bk", -1)) for line in lines), default=-1)
+    max_line = max((int(line.get("line", -1)) for line in lines), default=-1)
+    next_block = max_block + 1
+    next_line = max_line + 1
+    consumed_all: set[int] = set()
+    generated_by_position: dict[int, list[dict]] = {}
+
+    for grid in sorted(grids, key=lambda item: item["yEdges"][0]):
+        x_edges = [float(value) for value in grid.get("xEdges") or []]
+        y_edges = [float(value) for value in grid.get("yEdges") or []]
+        if len(x_edges) < 3 or len(y_edges) < 3:
+            continue
+        if len(x_edges) == 3 and len(y_edges) == 3:
+            continue
+        consumed: list[int] = []
+        for index, line in enumerate(lines):
+            if index in consumed_all:
+                continue
+            try:
+                x0, y0, x1, y1 = (float(value) for value in line["bounds"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            center_y = (y0 + y1) / 2.0
+            overlap_x = max(0.0, min(x1, x_edges[-1]) - max(x0, x_edges[0]))
+            if (
+                y_edges[0] < center_y < y_edges[-1]
+                and overlap_x >= min(x1 - x0, x_edges[-1] - x_edges[0]) * 0.45
+            ):
+                consumed.append(index)
+        if not consumed:
+            continue
+        if any(lines[index].get("vertical") is True for index in consumed):
+            continue
+
+        cell_symbols: dict[tuple[int, int], list[dict]] = {}
+        for source in vision_chars:
+            character = unicodedata.normalize("NFKC", str(source.get("c") or ""))
+            if source.get("sp") or not character.strip():
+                continue
+            try:
+                x0 = float(source["x0"])
+                y0 = float(source["y0"])
+                x1 = float(source["x1"])
+                y1 = float(source["y1"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if x1 <= x0 or y1 <= y0:
+                continue
+            center_x = (x0 + x1) / 2.0
+            center_y = (y0 + y1) / 2.0
+            column = next((
+                index for index, (left, right) in enumerate(zip(x_edges, x_edges[1:]))
+                if left < center_x < right
+            ), None)
+            row = next((
+                index for index, (top, bottom) in enumerate(zip(y_edges, y_edges[1:]))
+                if top < center_y < bottom
+            ), None)
+            if row is None or column is None:
+                continue
+            cell_symbols.setdefault((row, column), []).append({
+                "c": character,
+                "x0": round(x0, 3),
+                "y0": round(y0, 3),
+                "x1": round(x1, 3),
+                "y1": round(y1, 3),
+                "w": int(source.get("w", -1)),
+                "b": int(source.get("b", 0)),
+            })
+
+        manga_count = sum(
+            1
+            for index in consumed
+            for character in unicodedata.normalize(
+                "NFKC", str(lines[index].get("text") or "")
+            )
+            if not character.isspace()
+        )
+        vision_count = sum(len(items) for items in cell_symbols.values())
+        populated_rows = {row for row, _column in cell_symbols}
+        populated_columns = {column for _row, column in cell_symbols}
+        manga_cell_symbols: dict[tuple[int, int], list[dict]] = {}
+        if sx > 0 and sy > 0:
+            for index in consumed:
+                for cell in lines[index].get("cells") or []:
+                    try:
+                        character, x0, y0, x1, y1 = cell
+                        if not unicodedata.normalize(
+                            "NFKC", str(character or "")
+                        ).strip():
+                            continue
+                        page_x0 = float(x0) * sx
+                        page_y0 = float(y0) * sy
+                        page_x1 = float(x1) * sx
+                        page_y1 = float(y1) * sy
+                        center_x = (page_x0 + page_x1) / 2.0
+                        center_y = (page_y0 + page_y1) / 2.0
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    column = next((
+                        cell_index
+                        for cell_index, (left, right) in enumerate(
+                            zip(x_edges, x_edges[1:])
+                        )
+                        if left < center_x < right
+                    ), None)
+                    row = next((
+                        cell_index
+                        for cell_index, (top, bottom) in enumerate(
+                            zip(y_edges, y_edges[1:])
+                        )
+                        if top < center_y < bottom
+                    ), None)
+                    if row is not None and column is not None:
+                        manga_cell_symbols.setdefault((row, column), []).append({
+                            "c": unicodedata.normalize("NFKC", str(character)),
+                            "x0": page_x0,
+                            "y0": page_y0,
+                            "x1": page_x1,
+                            "y1": page_y1,
+                        })
+        if (
+            vision_count < max(6, int(manga_count * 0.68))
+            or vision_count > max(10, int(manga_count * 1.45))
+            or len(populated_rows) < 2
+            or len(populated_columns) < 2
+            # A partial or whole-cell Vision omission must not delete Manga
+            # text.  Every Manga-populated cell must independently prove that
+            # Vision contains its ordinary characters.
+            or any(
+                not _table_cell_vision_is_complete(
+                    manga_symbols,
+                    cell_symbols.get(cell, []),
+                )
+                for cell, manga_symbols in manga_cell_symbols.items()
+            )
+        ):
+            continue
+
+        generated: list[dict] = []
+        for row in range(len(y_edges) - 1):
+            for column in range(len(x_edges) - 1):
+                symbols = cell_symbols.get((row, column))
+                if not symbols:
+                    continue
+                cell_block = next_block
+                next_block += 1
+                for clustered in _cluster_table_cell_symbols(symbols):
+                    table_chars = []
+                    for source in clustered:
+                        value = dict(source)
+                        value["bk"] = cell_block
+                        value["line"] = next_line
+                        value["vertical"] = False
+                        table_chars.append(value)
+                    text = "".join(item["c"] for item in table_chars)
+                    generated.append({
+                        "text": text,
+                        "cells": [],
+                        "bounds": (
+                            min(item["x0"] for item in table_chars),
+                            min(item["y0"] for item in table_chars),
+                            max(item["x1"] for item in table_chars),
+                            max(item["y1"] for item in table_chars),
+                        ),
+                        "polygon": None,
+                        "bk": cell_block,
+                        "line": next_line,
+                        "vertical": False,
+                        "vision_chars": table_chars,
+                    })
+                    next_line += 1
+        if not generated:
+            continue
+        start = min(consumed)
+        # Manga block order can put the first table row before its immediately
+        # preceding heading.  Move only past nearby, horizontally overlapping
+        # lines above the top rule; do not globally y-sort manga panels.
+        first_row_height = max(1.0, y_edges[1] - y_edges[0])
+        heading_gap = max(6.0, first_row_height * 1.5)
+        for index, line in enumerate(lines):
+            if index in consumed_all or index in consumed:
+                continue
+            try:
+                x0, _y0, x1, y1 = (
+                    float(value) for value in line["bounds"]
+                )
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            overlap_x = max(
+                0.0,
+                min(x1, x_edges[-1]) - max(x0, x_edges[0]),
+            )
+            if (
+                y1 <= y_edges[0] + 1.0
+                and y_edges[0] - y1 <= heading_gap
+                and overlap_x >= (
+                    min(x1 - x0, x_edges[-1] - x_edges[0]) * 0.45
+                )
+            ):
+                start = max(start, index + 1)
+        generated_by_position.setdefault(start, []).extend(generated)
+        consumed_all.update(consumed)
+
+    if not consumed_all:
+        return lines
+    result: list[dict] = []
+    for index in range(len(lines) + 1):
+        result.extend(generated_by_position.get(index, []))
+        if index < len(lines) and index not in consumed_all:
+            result.append(lines[index])
+    return result
+
+
 def _manga_character_ink_factor(character: str) -> float:
     """Expected ink width relative to an ordinary CJK glyph.
 
@@ -832,55 +1468,6 @@ def _manga_vision_line_chars(
             previous_x, previous_y = current_x, current_y
         return inside
 
-    def texts_are_complete(manga_text: str, vision_text: str) -> bool:
-        """Accept a complete line, plus the known one-glyph OCR corrections.
-
-        Equal-length candidates may correct recognizer substitutions.  A shorter
-        Vision line is accepted only when it removes exactly one adjacent
-        duplicate from Manga OCR; an ordinary prefix/suffix omission must never
-        erase the rest of an otherwise usable Manga line.  A single Vision
-        insertion is likewise allowed when every existing Manga character still
-        aligns exactly.
-        """
-        matcher = difflib.SequenceMatcher(
-            None, manga_text, vision_text, autojunk=False
-        )
-        if len(manga_text) == len(vision_text):
-            if matcher.ratio() < 0.75:
-                return False
-            return all(
-                tag in ("equal", "replace")
-                for tag, _i1, _i2, _j1, _j2 in matcher.get_opcodes()
-            )
-        opcodes = matcher.get_opcodes()
-        if len(vision_text) == len(manga_text) + 1:
-            edits = [opcode for opcode in opcodes if opcode[0] != "equal"]
-            return (
-                len(edits) == 1
-                and edits[0][0] == "insert"
-                and edits[0][1] == edits[0][2]
-                and edits[0][4] - edits[0][3] == 1
-            )
-        if len(manga_text) != len(vision_text) + 1:
-            return False
-        edits = [opcode for opcode in opcodes if opcode[0] != "equal"]
-        if (
-            len(edits) != 1
-            or edits[0][0] != "delete"
-            or edits[0][2] - edits[0][1] != 1
-            or edits[0][3] != edits[0][4]
-        ):
-            return False
-        deleted_at = edits[0][1]
-        deleted = manga_text[deleted_at]
-        return (
-            (deleted_at > 0 and manga_text[deleted_at - 1] == deleted)
-            or (
-                deleted_at + 1 < len(manga_text)
-                and manga_text[deleted_at + 1] == deleted
-            )
-        )
-
     assigned: dict[int, list[dict]] = {}
     for source in vision_chars:
         character = unicodedata.normalize("NFKC", str(source.get("c") or ""))
@@ -977,7 +1564,7 @@ def _manga_vision_line_chars(
         vision_text = "".join(item["c"] for item in candidates)
         if not manga_text or not vision_text:
             continue
-        if not texts_are_complete(manga_text, vision_text):
+        if not _manga_vision_text_is_complete(manga_text, vision_text):
             continue
         for item in candidates:
             item["bk"] = int(line["bk"])
@@ -1086,9 +1673,17 @@ def _manga_page(
             text_lines.append(text)
             line_no += 1
 
+    prepared_lines = _manga_table_cell_lines(
+        prepared_lines,
+        vision_chars,
+        _detect_ruled_table_grids(image_gray, sx=sx, sy=sy),
+        sx=sx,
+        sy=sy,
+    )
+    text_lines = [str(prepared.get("text") or "") for prepared in prepared_lines]
     vision_lines = _manga_vision_line_chars(prepared_lines, vision_chars)
     for prepared_index, prepared in enumerate(prepared_lines):
-        replacement = vision_lines.get(prepared_index)
+        replacement = prepared.get("vision_chars") or vision_lines.get(prepared_index)
         if replacement:
             chars.extend(replacement)
             text_lines[prepared_index] = "".join(item["c"] for item in replacement)

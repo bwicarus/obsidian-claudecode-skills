@@ -161,7 +161,7 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
                     "workerId": "pc_denied",
                     "capabilities": {
                         "engines": ["vision"],
-                        "processingProfile": "quality-first-v4",
+                        "processingProfile": "quality-first-v5",
                     },
                 },
             ).status_code,
@@ -313,7 +313,7 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
         self.assertEqual(started.status_code, 200)
         self.assertEqual(started.get_json()["job"]["executor"], "pc")
         self.assertEqual(
-            started.get_json()["job"]["processingProfile"], "quality-first-v4"
+            started.get_json()["job"]["processingProfile"], "quality-first-v5"
         )
 
         claimed = self.client.post(
@@ -325,7 +325,7 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
                     "engines": ["vision"],
                     "maxPdfBytes": 1024 * 1024,
                     "maxPageBytes": 1024 * 1024,
-                    "processingProfile": "quality-first-v4",
+                    "processingProfile": "quality-first-v5",
                 },
             },
         )
@@ -333,7 +333,7 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
         claim = claimed.get_json()
         self.assertEqual(claim["contract"], "reader-library-ocr-worker/1")
         self.assertEqual(
-            claim["job"]["processingProfile"], "quality-first-v4"
+            claim["job"]["processingProfile"], "quality-first-v5"
         )
         identity = {
             "contract": claim["contract"],
@@ -438,7 +438,7 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
                 "engines": ["vision"],
                 "maxPdfBytes": 1024 * 1024,
                 "maxPageBytes": 1024 * 1024,
-                "processingProfile": "quality-first-v4",
+                "processingProfile": "quality-first-v5",
             },
         }).encode("utf-8")
         accepted = open_chunked(valid)
@@ -446,7 +446,7 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
 
         oversized = (
             b'{"contract":"reader-library-ocr-worker/1","workerId":"pc_chunked",'
-            b'"capabilities":{"engines":["vision"],"processingProfile":"quality-first-v4"},'
+            b'"capabilities":{"engines":["vision"],"processingProfile":"quality-first-v5"},'
             b'"padding":"' + (b"x" * (64 * 1024)) + b'"}'
         )
         rejected = open_chunked(oversized)
@@ -465,7 +465,7 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
                         "engines": ["vision"],
                         "maxPdfBytes": 1024 * 1024,
                         "maxPageBytes": 1024 * 1024,
-                        "processingProfile": "quality-first-v4",
+                        "processingProfile": "quality-first-v5",
                     },
                 },
             )

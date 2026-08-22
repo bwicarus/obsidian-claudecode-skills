@@ -38,7 +38,7 @@ struct ReaderLocalLibraryView: View {
     @StateObject private var library = ReaderLocalLibraryManager.shared
     @StateObject private var remote: ReaderRemoteLibraryCoordinator
     @StateObject private var nativeOCR = NativeBookOCRManager.shared
-    @StateObject private var piOCR = ReaderPiOCRCoordinator()
+    @ObservedObject private var piOCR: ReaderPiOCRCoordinator
     @StateObject private var recognitionPreferences = ReaderTextRecognitionPreferences.shared
     // The shelf opens on the App-owned library. Pi is an explicit backup and
     // processing source, so merely opening the shelf must not start a network
@@ -65,10 +65,12 @@ struct ReaderLocalLibraryView: View {
     init(
         reader: ReaderWebViewModel,
         startupNotice: String? = nil,
-        remote: ReaderRemoteLibraryCoordinator? = nil
+        remote: ReaderRemoteLibraryCoordinator? = nil,
+        piOCR: ReaderPiOCRCoordinator = .shared
     ) {
         self.reader = reader
         self.startupNotice = startupNotice
+        _piOCR = ObservedObject(wrappedValue: piOCR)
         _remote = StateObject(
             wrappedValue: remote ?? ReaderRemoteLibraryCoordinator()
         )

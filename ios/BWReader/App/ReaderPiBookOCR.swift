@@ -382,6 +382,7 @@ final class ReaderPiOCRClient {
         guard let url = components?.url else { throw ReaderPiOCRError.invalidURL }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         apply(cookies: cookies, to: &request)
         return try await releaseListResponse(
@@ -492,6 +493,7 @@ final class ReaderPiOCRClient {
         guard let url = components?.url else { throw ReaderPiOCRError.invalidURL }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         apply(cookies: cookies, to: &request)
         return try await jobResponse(for: request, expectedPath: "/pdf/api/library/ocr/status")
@@ -838,7 +840,7 @@ final class ReaderPiOCRClient {
               manifest.executor.map({ ["pi", "pc"].contains($0) }) ?? true,
               manifest.processingProfile.map({ !$0.isEmpty && $0.count <= 80 }) ?? true,
               manifest.executor != "pc"
-                || ["quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4"].contains(
+                || ["quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4", "quality-first-v5"].contains(
                     manifest.processingProfile
                 ),
               manifest.files.count <= 5_001 else {
@@ -947,6 +949,8 @@ final class ReaderPiOCRClient {
 
 @MainActor
 final class ReaderPiOCRCoordinator: ObservableObject {
+    static let shared = ReaderPiOCRCoordinator()
+
     @Published private(set) var jobs: [String: ReaderPiOCRJob] = [:]
     @Published private(set) var adoptions: [String: ReaderPiOCRAdoption] = [:]
     @Published private(set) var executorStatuses: [String: ReaderOCRExecutorStatus] = [:]
@@ -959,8 +963,19 @@ final class ReaderPiOCRCoordinator: ObservableObject {
     @Published private(set) var errorBookID: String?
 
     private let client = ReaderPiOCRClient.shared
+    private let defaults: UserDefaults
+    private static let pendingImportsDefaultsKey =
+        "reader-pi-ocr-pending-imports/2"
+    private static let pendingImportTTLMilliseconds: Int64 =
+        7 * 24 * 60 * 60 * 1_000
     private var pollingTasks: [String: Task<Void, Never>] = [:]
+    private var pollingTaskTokens: [String: UUID] = [:]
     private var attachmentTasks: [String: Task<Void, Never>] = [:]
+    private var attachmentTaskTokens: [String: UUID] = [:]
+    /// Changes before every explicit server mutation. Passive status requests
+    /// may only publish the response for the exact epoch they started in, so a
+    /// late foreground refresh or poll cannot erase a newer request receipt.
+    private var commandEpochs: [String: UUID] = [:]
     private struct LocalBinding {
         let bookID: String
         let contentSHA256: String
@@ -970,7 +985,48 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         let message: String
         let isExplicit: Bool
     }
+    private struct PendingImport: Codable, Sendable {
+        let remoteBook: ReaderRemoteBook
+        let localBookID: String
+        let contentSHA256: String
+        let engine: String
+        let executor: String
+        let createdAtEpochMs: Int64
+        let generation: String
+        let jobID: String
+        var revision: String?
+    }
+    private struct PendingImportClaim: Sendable {
+        let remoteBookID: String
+        let localBookID: String
+        let contentSHA256: String
+        let generation: String
+        let jobID: String
+        let revision: String
+    }
+    private enum PendingOwnershipTransition {
+        case preserve
+        case replaceConfirmed(engine: String?, executor: String?)
+    }
     private var localBindings: [String: LocalBinding] = [:]
+    private var pendingImports: [String: PendingImport]
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        pendingImports = Self.loadPendingImports(from: defaults)
+        localBindings = Dictionary(
+            uniqueKeysWithValues: pendingImports.map { remoteBookID, pending in
+                (
+                    remoteBookID,
+                    LocalBinding(
+                        bookID: pending.localBookID,
+                        contentSHA256: pending.contentSHA256
+                    )
+                )
+            }
+        )
+        Self.persist(pendingImports, to: defaults)
+    }
 
     deinit {
         pollingTasks.values.forEach { $0.cancel() }
@@ -1059,12 +1115,21 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         localBookID: String? = nil,
         localContentSHA256: String? = nil
     ) async {
+        guard acquireExplicitCommand(for: book) else { return }
+        defer { releaseExplicitCommand(for: book.bookId) }
         remember(
             localBookID: localBookID,
             localContentSHA256: localContentSHA256,
             for: book
         )
-        await perform(book: book, cookies: cookies) {
+        await perform(
+            book: book,
+            cookies: cookies,
+            ownershipTransition: .replaceConfirmed(
+                engine: engine,
+                executor: executor
+            )
+        ) {
             try await self.client.start(
                 book: book,
                 engine: engine,
@@ -1082,14 +1147,20 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         localContentSHA256: String? = nil,
         previewsLegacyResults: Bool = false
     ) async {
-        remember(
+        guard activeBookID != book.bookId else { return }
+        reconcilePendingImport(
             localBookID: localBookID,
             localContentSHA256: localContentSHA256,
             for: book
         )
+        let requestEpoch = commandEpoch(for: book.bookId)
         do {
             let job = try await client.status(book: book, cookies: cookies)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled,
+                  isPassiveResponseCurrent(
+                    bookID: book.bookId,
+                    epoch: requestEpoch
+                  ) else { return }
             accept(job, book: book, cookies: cookies)
             if job.state == "idle", previewsLegacyResults {
                 if let previewingBookID {
@@ -1111,14 +1182,22 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                     book: book,
                     cookies: cookies
                 )
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled,
+                      isPassiveResponseCurrent(
+                        bookID: book.bookId,
+                        epoch: requestEpoch
+                      ) else { return }
                 adoptions[book.bookId] = adoption
                 clearPassiveError(for: book.bookId)
             } else if job.state != "idle" {
                 adoptions.removeValue(forKey: book.bookId)
             }
         } catch {
-            guard !isCancellation(error) else { return }
+            guard !isCancellation(error),
+                  isPassiveResponseCurrent(
+                    bookID: book.bookId,
+                    epoch: requestEpoch
+                  ) else { return }
             recordError(
                 error.localizedDescription,
                 for: book,
@@ -1133,27 +1212,28 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         localBookID: String? = nil,
         localContentSHA256: String? = nil
     ) async {
+        guard acquireExplicitCommand(for: book) else { return }
+        defer { releaseExplicitCommand(for: book.bookId) }
         remember(
             localBookID: localBookID,
             localContentSHA256: localContentSHA256,
             for: book
         )
-        guard activeBookID == nil || activeBookID == book.bookId else {
-            recordError(
-                "另一册书正在进行 Pi 预处理请求，请稍后再试",
-                for: book,
-                explicit: true
-            )
-            return
-        }
-        activeBookID = book.bookId
         clearError(for: book.bookId)
         notice = nil
-        defer { activeBookID = nil }
+        let requestedBinding = localBindings[book.bookId]
+        await stopPolling(for: book.bookId)
         do {
             let result = try await client.adoptExisting(
                 book: book,
                 cookies: cookies
+            )
+            let ownershipClaim = try await replacePendingImport(
+                book: book,
+                job: result.job,
+                expectedEngine: "legacy",
+                expectedExecutor: "pi",
+                requestedBinding: requestedBinding
             )
             adoptions[book.bookId] = result.adoption
             accept(
@@ -1166,17 +1246,20 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 ? "现有 Pi 预处理结果已经采用"
                 : result.job.message
             if let localBinding = localBindings[book.bookId] {
-                let imported = await importAvailableAttachments(
+                let imported = await importAvailableAttachmentsImpl(
                     book: book,
                     localBookID: localBinding.bookID,
                     localContentSHA256: localBinding.contentSHA256,
                     cookies: cookies,
                     requiresManifest: true,
-                    reportsExplicitFailure: true
+                    reportsExplicitFailure: true,
+                    forceReimport: false,
+                    ownershipClaim: ownershipClaim
                 )
                 if !imported { notice = nil }
             }
         } catch {
+            schedulePoll(book: book, cookies: cookies)
             guard !isCancellation(error) else { return }
             recordError(
                 error.localizedDescription,
@@ -1193,12 +1276,30 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         localBookID: String? = nil,
         localContentSHA256: String? = nil
     ) async {
+        guard acquireExplicitCommand(for: book) else { return }
+        defer { releaseExplicitCommand(for: book.bookId) }
         remember(
             localBookID: localBookID,
             localContentSHA256: localContentSHA256,
             for: book
         )
-        await perform(book: book, cookies: cookies) {
+        let replacesJob = ["resume", "retry"].contains(action)
+        let previous = jobs[book.bookId]
+        let expectedEngine = previous?.engine
+            ?? pendingImports[book.bookId]?.engine
+        let expectedExecutor = previous.map {
+            Self.normalizedExecutor($0.executor)
+        } ?? pendingImports[book.bookId]?.executor
+        await perform(
+            book: book,
+            cookies: cookies,
+            ownershipTransition: replacesJob
+                ? .replaceConfirmed(
+                    engine: expectedEngine,
+                    executor: expectedExecutor
+                )
+                : .preserve
+        ) {
             try await self.client.control(action, book: book, cookies: cookies)
         }
     }
@@ -1216,15 +1317,45 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         reportsExplicitFailure: Bool = false,
         forceReimport: Bool = false
     ) async -> Bool {
+        await importAvailableAttachmentsImpl(
+            book: book,
+            localBookID: localBookID,
+            localContentSHA256: localContentSHA256,
+            cookies: cookies,
+            requiresManifest: requiresManifest,
+            reportsExplicitFailure: reportsExplicitFailure,
+            forceReimport: forceReimport,
+            ownershipClaim: nil
+        )
+    }
+
+    private func importAvailableAttachmentsImpl(
+        book: ReaderRemoteBook,
+        localBookID: String,
+        localContentSHA256: String,
+        cookies: [HTTPCookie],
+        requiresManifest: Bool,
+        reportsExplicitFailure: Bool,
+        forceReimport: Bool,
+        ownershipClaim: PendingImportClaim?
+    ) async -> Bool {
         if reportsExplicitFailure {
             clearError(for: book.bookId)
         }
         do {
+            if let ownershipClaim,
+               !isCurrentPendingImport(ownershipClaim) {
+                return false
+            }
             guard localContentSHA256.caseInsensitiveCompare(
                 book.contentSha256
             ) == .orderedSame else {
                 throw ReaderPiOCRError.localContentMismatch
             }
+            try await validateLocalBookStillMatches(
+                localBookID: localBookID,
+                expectedContentSHA256: localContentSHA256
+            )
             remember(
                 localBookID: localBookID,
                 localContentSHA256: localContentSHA256,
@@ -1252,16 +1383,33 @@ final class ReaderPiOCRCoordinator: ObservableObject {
             ) == .orderedSame else {
                 throw ReaderPiOCRError.localContentMismatch
             }
+            if let ownershipClaim {
+                guard attachmentManifest.revision == ownershipClaim.revision,
+                      isCurrentPendingImport(ownershipClaim) else {
+                    throw ReaderPiOCRError.invalidManifest
+                }
+            }
+            let completionClaim = ownershipClaim
+                ?? pendingImportClaim(
+                    for: book,
+                    localBookID: localBookID,
+                    localContentSHA256: localContentSHA256,
+                    revision: attachmentManifest.revision
+                )
             if !forceReimport,
                try await NativeBookOCRManager.shared.hasImportedRevision(
                 expectedContentSHA256: localContentSHA256,
                 revision: attachmentManifest.revision
             ) {
-                _ = try await NativeBookOCRManager.shared.refreshLayerState(
+                _ = try await NativeBookOCRManager.shared
+                    .refreshLayerStateAndNotify(
                     bookID: localBookID,
                     expectedContentSHA256: localContentSHA256
                 )
                 clearPassiveError(for: book.bookId)
+                if let completionClaim {
+                    completePendingImport(completionClaim)
+                }
                 notice = attachmentManifest.executor == "pc"
                     ? "PC 高质量预处理结果已是最新"
                     : "Pi 预处理结果已是最新"
@@ -1272,6 +1420,10 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 manifest: attachmentManifest,
                 cookies: cookies
             )
+            if let ownershipClaim,
+               !isCurrentPendingImport(ownershipClaim) {
+                return false
+            }
             let manifest = NativeBookOCRDerivedAttachmentManifest(
                 contract: bundle.manifest.contract,
                 bookId: bundle.manifest.bookId,
@@ -1301,12 +1453,20 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 files: bundle.files
             )
             clearPassiveError(for: book.bookId)
+            if let completionClaim {
+                completePendingImport(completionClaim)
+            }
             notice = bundle.manifest.executor == "pc"
                 ? "已导入 PC 高质量预处理结果，可在文字层中选择"
                 : "已导入 Pi 预处理结果，可在文字层中选择"
             return true
         } catch {
             guard !isCancellation(error) else { return false }
+            if let ownershipClaim,
+               let piError = error as? ReaderPiOCRError,
+               case .localContentMismatch = piError {
+                discardPendingImport(ownershipClaim)
+            }
             recordError(
                 "Pi 预处理附件导入失败：\(error.localizedDescription)",
                 for: book,
@@ -1322,28 +1482,99 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         errorBookID = nil
     }
 
+    /// Resume request-owned imports after the App returns to the foreground.
+    /// Cookies are always reacquired by the App and are never persisted with
+    /// the local receipt.
+    func resumePendingImports(cookies: [HTTPCookie]) async {
+        for pending in Array(pendingImports.values) {
+            guard !Task.isCancelled else { return }
+            let book = pending.remoteBook
+            guard activeBookID != book.bookId else { continue }
+            guard isPendingImportFresh(pending) else {
+                discardPendingImport(
+                    remoteBookID: book.bookId,
+                    generation: pending.generation
+                )
+                continue
+            }
+            guard ReaderLocalLibraryManager.shared.books.contains(where: {
+                $0.id == pending.localBookID
+            }) else {
+                discardPendingImport(
+                    remoteBookID: book.bookId,
+                    generation: pending.generation
+                )
+                continue
+            }
+            let requestEpoch = commandEpoch(for: book.bookId)
+            do {
+                let job = try await client.status(book: book, cookies: cookies)
+                guard !Task.isCancelled,
+                      pendingImports[book.bookId]?.generation
+                        == pending.generation,
+                      isPassiveResponseCurrent(
+                        bookID: book.bookId,
+                        epoch: requestEpoch
+                      ) else { continue }
+                accept(job, book: book, cookies: cookies)
+            } catch {
+                guard !isCancellation(error),
+                      pendingImports[book.bookId]?.generation
+                        == pending.generation,
+                      isPassiveResponseCurrent(
+                        bookID: book.bookId,
+                        epoch: requestEpoch
+                      ) else { continue }
+                recordError(
+                    error.localizedDescription,
+                    for: book,
+                    explicit: false
+                )
+            }
+        }
+    }
+
     private func perform(
         book: ReaderRemoteBook,
         cookies: [HTTPCookie],
+        ownershipTransition: PendingOwnershipTransition,
         operation: @escaping () async throws -> ReaderPiOCRJob
     ) async {
-        guard activeBookID == nil || activeBookID == book.bookId else {
-            recordError(
-                "另一册书正在进行 Pi 预处理请求，请稍后再试",
-                for: book,
-                explicit: true
-            )
-            return
-        }
-        activeBookID = book.bookId
         clearError(for: book.bookId)
         notice = nil
-        defer { activeBookID = nil }
+        let requestedBinding: LocalBinding?
+        switch ownershipTransition {
+        case .replaceConfirmed(_, _):
+            // Freeze the caller's exact local identity before the network
+            // request suspends this actor. An older import may finish while the
+            // command is in flight and remove its own receipt/binding.
+            requestedBinding = localBindings[book.bookId]
+        case .preserve:
+            requestedBinding = nil
+        }
+        await stopPolling(for: book.bookId)
         do {
             let job = try await operation()
+            try validateJob(
+                job,
+                for: book,
+                expectedEngine: nil,
+                expectedExecutor: nil
+            )
+            if case let .replaceConfirmed(engine, executor) =
+                ownershipTransition {
+                _ = try await replacePendingImport(
+                    book: book,
+                    job: job,
+                    expectedEngine: engine,
+                    expectedExecutor: executor,
+                    requestedBinding: requestedBinding
+                )
+            }
             accept(job, book: book, cookies: cookies)
             notice = job.message
         } catch {
+            schedulePoll(book: book, cookies: cookies)
             guard !isCancellation(error) else { return }
             recordError(
                 error.localizedDescription,
@@ -1361,37 +1592,130 @@ final class ReaderPiOCRCoordinator: ObservableObject {
     ) {
         jobs[book.bookId] = job
         clearPassiveError(for: book.bookId)
+        let ownershipClaim = validatedPendingImport(for: job, book: book)
         if importsAttachments,
            job.resultAvailable,
-           let localBinding = localBindings[book.bookId] {
+           let ownershipClaim {
             scheduleAttachmentImport(
                 book: book,
-                localBinding: localBinding,
+                ownershipClaim: ownershipClaim,
                 cookies: cookies
             )
         }
         if job.isActive {
             schedulePoll(book: book, cookies: cookies)
         } else {
-            pollingTasks[book.bookId]?.cancel()
-            pollingTasks[book.bookId] = nil
+            cancelPollingTask(for: book.bookId)
+        }
+    }
+
+    private func acquireExplicitCommand(for book: ReaderRemoteBook) -> Bool {
+        guard activeBookID == nil else {
+            recordError(
+                "另一项 Pi 预处理请求正在进行，请稍后再试",
+                for: book,
+                explicit: true
+            )
+            return false
+        }
+        activeBookID = book.bookId
+        beginExplicitCommand(for: book.bookId)
+        return true
+    }
+
+    private func releaseExplicitCommand(for bookID: String) {
+        guard activeBookID == bookID else { return }
+        activeBookID = nil
+    }
+
+    private func beginExplicitCommand(for bookID: String) {
+        commandEpochs[bookID] = UUID()
+    }
+
+    private func commandEpoch(for bookID: String) -> UUID {
+        if let epoch = commandEpochs[bookID] { return epoch }
+        let epoch = UUID()
+        commandEpochs[bookID] = epoch
+        return epoch
+    }
+
+    private func isPassiveResponseCurrent(
+        bookID: String,
+        epoch: UUID
+    ) -> Bool {
+        commandEpochs[bookID] == epoch && activeBookID != bookID
+    }
+
+    private func isPollingTaskCurrent(bookID: String, token: UUID) -> Bool {
+        pollingTaskTokens[bookID] == token
+            && pollingTasks[bookID] != nil
+    }
+
+    private func finishPollingTask(bookID: String, token: UUID) {
+        guard pollingTaskTokens[bookID] == token else { return }
+        pollingTasks[bookID] = nil
+        pollingTaskTokens[bookID] = nil
+    }
+
+    private func cancelPollingTask(for bookID: String) {
+        pollingTasks[bookID]?.cancel()
+        pollingTasks[bookID] = nil
+        pollingTaskTokens[bookID] = nil
+    }
+
+    private func stopPolling(for bookID: String) async {
+        while let task = pollingTasks[bookID] {
+            let token = pollingTaskTokens[bookID]
+            task.cancel()
+            await task.value
+            if token == pollingTaskTokens[bookID] {
+                pollingTasks[bookID] = nil
+                pollingTaskTokens[bookID] = nil
+            }
         }
     }
 
     private func schedulePoll(book: ReaderRemoteBook, cookies: [HTTPCookie]) {
         guard pollingTasks[book.bookId] == nil else { return }
+        let token = UUID()
+        pollingTaskTokens[book.bookId] = token
         pollingTasks[book.bookId] = Task { @MainActor [weak self] in
-            defer { self?.pollingTasks[book.bookId] = nil }
+            defer {
+                self?.finishPollingTask(bookID: book.bookId, token: token)
+            }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
-                guard !Task.isCancelled, let self else { return }
+                guard !Task.isCancelled,
+                      let self,
+                      self.isPollingTaskCurrent(
+                        bookID: book.bookId,
+                        token: token
+                      ),
+                      self.activeBookID != book.bookId else { return }
+                let requestEpoch = self.commandEpoch(for: book.bookId)
                 do {
                     let job = try await self.client.status(book: book, cookies: cookies)
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled,
+                          self.isPollingTaskCurrent(
+                            bookID: book.bookId,
+                            token: token
+                          ),
+                          self.isPassiveResponseCurrent(
+                            bookID: book.bookId,
+                            epoch: requestEpoch
+                          ) else { return }
                     self.accept(job, book: book, cookies: cookies)
                     if !job.isActive { return }
                 } catch {
-                    guard !self.isCancellation(error) else { return }
+                    guard !self.isCancellation(error),
+                          self.isPollingTaskCurrent(
+                            bookID: book.bookId,
+                            token: token
+                          ),
+                          self.isPassiveResponseCurrent(
+                            bookID: book.bookId,
+                            epoch: requestEpoch
+                          ) else { return }
                     self.recordError(
                         error.localizedDescription,
                         for: book,
@@ -1469,21 +1793,427 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         )
     }
 
+    private func reconcilePendingImport(
+        localBookID: String?,
+        localContentSHA256: String?,
+        for book: ReaderRemoteBook
+    ) {
+        guard let pending = pendingImports[book.bookId] else { return }
+        guard let localBookID,
+              let localContentSHA256,
+              localBookID == pending.localBookID,
+              localContentSHA256.caseInsensitiveCompare(
+                pending.contentSHA256
+              ) == .orderedSame,
+              book.contentSha256.caseInsensitiveCompare(
+                pending.contentSHA256
+              ) == .orderedSame else {
+            return
+        }
+        localBindings[book.bookId] = LocalBinding(
+            bookID: pending.localBookID,
+            contentSHA256: pending.contentSHA256
+        )
+    }
+
+    /// Only an explicit, successfully decoded server response may establish
+    /// request ownership. If the App dies before receiving that response there
+    /// is no safe way to distinguish this request from another device's job
+    /// without a server nonce, so that narrow window deliberately fails closed.
+    private func replacePendingImport(
+        book: ReaderRemoteBook,
+        job: ReaderPiOCRJob,
+        expectedEngine: String?,
+        expectedExecutor: String?,
+        requestedBinding: LocalBinding?
+    ) async throws -> PendingImportClaim? {
+        try validateJob(
+            job,
+            for: book,
+            expectedEngine: expectedEngine,
+            expectedExecutor: expectedExecutor
+        )
+        // `requestedBinding` was frozen before the request itself suspended.
+        // The older attachment task may still finish during this second await
+        // and remove its own receipt plus localBindings entry; restore only the
+        // exact identity captured for this newer request.
+        await stopAttachmentImport(for: book.bookId)
+        guard let binding = requestedBinding,
+              binding.contentSHA256.caseInsensitiveCompare(book.contentSha256)
+                == .orderedSame else {
+            discardPendingImport(remoteBookID: book.bookId)
+            return nil
+        }
+        localBindings[book.bookId] = binding
+        guard let engine = job.engine,
+              let jobID = job.jobId else {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        let revision = job.resultAvailable ? job.pageCharsRevision : nil
+        let pending = PendingImport(
+            remoteBook: book,
+            localBookID: binding.bookID,
+            contentSHA256: binding.contentSHA256,
+            engine: engine,
+            executor: Self.normalizedExecutor(job.executor),
+            createdAtEpochMs: Int64(Date().timeIntervalSince1970 * 1_000),
+            generation: UUID().uuidString,
+            jobID: jobID,
+            revision: revision
+        )
+        pendingImports[book.bookId] = pending
+        persistPendingImports()
+        guard let revision else { return nil }
+        return Self.claim(for: pending, revision: revision)
+    }
+
+    private func validatedPendingImport(
+        for job: ReaderPiOCRJob,
+        book: ReaderRemoteBook
+    ) -> PendingImportClaim? {
+        guard var pending = pendingImports[book.bookId] else { return nil }
+        guard pending.contentSHA256.caseInsensitiveCompare(
+            book.contentSha256
+        ) == .orderedSame else {
+            discardPendingImport(
+                remoteBookID: book.bookId,
+                generation: pending.generation
+            )
+            return nil
+        }
+        guard isPendingImportFresh(pending) else {
+            discardPendingImport(
+                remoteBookID: book.bookId,
+                generation: pending.generation
+            )
+            return nil
+        }
+        // The status endpoint's intentional idle value has no engine or job ID.
+        // It means the owned job no longer exists, rather than that a different
+        // device's result should be adopted.
+        if job.state == "idle",
+           job.bookId == book.bookId,
+           job.contentSha256.caseInsensitiveCompare(book.contentSha256)
+            == .orderedSame {
+            discardPendingImport(
+                remoteBookID: book.bookId,
+                generation: pending.generation
+            )
+            return nil
+        }
+        do {
+            try validateJob(
+                job,
+                for: book,
+                expectedEngine: pending.engine,
+                expectedExecutor: pending.executor
+            )
+            guard job.jobId == pending.jobID else {
+                throw ReaderPiOCRError.invalidResponse
+            }
+        } catch {
+            recordError(
+                "服务器当前结果不属于这台设备发起的预处理请求，已停止自动导入",
+                for: book,
+                explicit: false
+            )
+            discardPendingImport(
+                remoteBookID: book.bookId,
+                generation: pending.generation
+            )
+            return nil
+        }
+        if job.resultAvailable, let revision = job.pageCharsRevision {
+            guard pending.revision == nil || pending.revision == revision else {
+                recordError(
+                    "服务器在同一预处理任务下返回了不同结果版本，已停止自动导入",
+                    for: book,
+                    explicit: false
+                )
+                discardPendingImport(
+                    remoteBookID: book.bookId,
+                    generation: pending.generation
+                )
+                return nil
+            }
+            pending.revision = revision
+            pendingImports[book.bookId] = pending
+            persistPendingImports()
+            localBindings[book.bookId] = LocalBinding(
+                bookID: pending.localBookID,
+                contentSHA256: pending.contentSHA256
+            )
+            return Self.claim(for: pending, revision: revision)
+        }
+        if ["idle", "failed", "cancelled"].contains(job.state) {
+            discardPendingImport(
+                remoteBookID: book.bookId,
+                generation: pending.generation
+            )
+        }
+        return nil
+    }
+
+    private func pendingImportClaim(
+        for book: ReaderRemoteBook,
+        localBookID: String,
+        localContentSHA256: String,
+        revision: String
+    ) -> PendingImportClaim? {
+        guard let pending = pendingImports[book.bookId] else { return nil }
+        guard isPendingImportFresh(pending) else {
+            discardPendingImport(
+                remoteBookID: book.bookId,
+                generation: pending.generation
+            )
+            return nil
+        }
+        guard
+              pending.localBookID == localBookID,
+              pending.contentSHA256.caseInsensitiveCompare(
+                localContentSHA256
+              ) == .orderedSame,
+              pending.revision == revision else { return nil }
+        return Self.claim(for: pending, revision: revision)
+    }
+
+    private func isCurrentPendingImport(_ claim: PendingImportClaim) -> Bool {
+        guard let pending = pendingImports[claim.remoteBookID] else {
+            return false
+        }
+        return pending.localBookID == claim.localBookID
+            && pending.contentSHA256.caseInsensitiveCompare(
+                claim.contentSHA256
+            ) == .orderedSame
+            && pending.generation == claim.generation
+            && pending.jobID == claim.jobID
+            && pending.revision == claim.revision
+    }
+
+    private func completePendingImport(_ claim: PendingImportClaim) {
+        discardPendingImport(
+            remoteBookID: claim.remoteBookID,
+            generation: claim.generation,
+            jobID: claim.jobID,
+            revision: claim.revision
+        )
+    }
+
+    private func discardPendingImport(_ claim: PendingImportClaim) {
+        discardPendingImport(
+            remoteBookID: claim.remoteBookID,
+            generation: claim.generation,
+            jobID: claim.jobID,
+            revision: claim.revision
+        )
+    }
+
+    private func discardPendingImport(
+        remoteBookID: String,
+        generation: String? = nil,
+        jobID: String? = nil,
+        revision: String? = nil
+    ) {
+        guard let pending = pendingImports[remoteBookID],
+              generation.map({ $0 == pending.generation }) ?? true,
+              jobID.map({ $0 == pending.jobID }) ?? true,
+              revision.map({ $0 == pending.revision }) ?? true else { return }
+        pendingImports.removeValue(forKey: remoteBookID)
+        if localBindings[remoteBookID]?.bookID == pending.localBookID {
+            localBindings.removeValue(forKey: remoteBookID)
+        }
+        persistPendingImports()
+    }
+
+    private func validateLocalBookStillMatches(
+        localBookID: String,
+        expectedContentSHA256: String
+    ) async throws {
+        let library = ReaderLocalLibraryManager.shared
+        guard let record = library.books.first(where: { $0.id == localBookID })
+        else { throw ReaderPiOCRError.localContentMismatch }
+        let digest = try await library.ensureContentSHA256(for: record)
+        guard digest.caseInsensitiveCompare(expectedContentSHA256)
+            == .orderedSame else {
+            throw ReaderPiOCRError.localContentMismatch
+        }
+    }
+
+    private func persistPendingImports() {
+        Self.persist(pendingImports, to: defaults)
+    }
+
+    private static func loadPendingImports(
+        from defaults: UserDefaults
+    ) -> [String: PendingImport] {
+        guard let data = defaults.data(forKey: pendingImportsDefaultsKey),
+              let decoded = try? JSONDecoder().decode(
+                [String: PendingImport].self,
+                from: data
+              ) else { return [:] }
+        let now = Int64(Date().timeIntervalSince1970 * 1_000)
+        return decoded.filter { remoteBookID, pending in
+            remoteBookID == pending.remoteBook.bookId
+                && !pending.localBookID.isEmpty
+                && isSHA256(pending.contentSHA256)
+                && pending.remoteBook.contentSha256.caseInsensitiveCompare(
+                    pending.contentSHA256
+                ) == .orderedSame
+                && ["vision", "manga", "legacy"].contains(pending.engine)
+                && ["pi", "pc"].contains(pending.executor)
+                && isJobID(pending.jobID)
+                && UUID(uuidString: pending.generation) != nil
+                && (pending.revision.map { isRevision($0) } ?? true)
+                && pending.createdAtEpochMs <= now + 5 * 60 * 1_000
+                && pending.createdAtEpochMs
+                    >= now - pendingImportTTLMilliseconds
+        }
+    }
+
+    private static func persist(
+        _ values: [String: PendingImport],
+        to defaults: UserDefaults
+    ) {
+        guard !values.isEmpty else {
+            defaults.removeObject(forKey: pendingImportsDefaultsKey)
+            return
+        }
+        guard let data = try? JSONEncoder().encode(values) else { return }
+        defaults.set(data, forKey: pendingImportsDefaultsKey)
+    }
+
+    private static func normalizedExecutor(_ executor: String?) -> String {
+        executor ?? "pi"
+    }
+
+    private static func isSHA256(_ value: String) -> Bool {
+        value.range(
+            of: #"^[0-9a-fA-F]{64}$"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func isJobID(_ value: String) -> Bool {
+        value.range(
+            of: #"^ocrjob_[0-9a-f]{32}$"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func isRevision(_ value: String) -> Bool {
+        value.range(
+            of: #"^ocr_[0-9a-f]{20}$"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private func isPendingImportFresh(_ pending: PendingImport) -> Bool {
+        let now = Int64(Date().timeIntervalSince1970 * 1_000)
+        return pending.createdAtEpochMs <= now + 5 * 60 * 1_000
+            && pending.createdAtEpochMs
+                >= now - Self.pendingImportTTLMilliseconds
+    }
+
+    private static func claim(
+        for pending: PendingImport,
+        revision: String
+    ) -> PendingImportClaim {
+        PendingImportClaim(
+            remoteBookID: pending.remoteBook.bookId,
+            localBookID: pending.localBookID,
+            contentSHA256: pending.contentSHA256,
+            generation: pending.generation,
+            jobID: pending.jobID,
+            revision: revision
+        )
+    }
+
+    private func validateJob(
+        _ job: ReaderPiOCRJob,
+        for book: ReaderRemoteBook,
+        expectedEngine: String?,
+        expectedExecutor: String?
+    ) throws {
+        guard job.bookId == book.bookId,
+              job.contentSha256.caseInsensitiveCompare(book.contentSha256)
+                == .orderedSame,
+              let jobID = job.jobId,
+              Self.isJobID(jobID),
+              let engine = job.engine,
+              ["vision", "manga", "legacy"].contains(engine),
+              (expectedEngine.map({ $0 == engine }) ?? true) else {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        let executor = Self.normalizedExecutor(job.executor)
+        guard ["pi", "pc"].contains(executor),
+              expectedExecutor.map({ $0 == executor }) ?? true else {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        if job.resultAvailable {
+            guard job.state == "succeeded",
+                  let revision = job.pageCharsRevision,
+                  Self.isRevision(revision) else {
+                throw ReaderPiOCRError.invalidResponse
+            }
+        }
+    }
+
+    private func stopAttachmentImport(for remoteBookID: String) async {
+        // Drain every slot observed before returning. MainActor is reentrant at
+        // task.value; a stale response could otherwise install a second old
+        // import in that gap and make the new revision skip scheduling.
+        while let task = attachmentTasks[remoteBookID] {
+            let token = attachmentTaskTokens[remoteBookID]
+            task.cancel()
+            await task.value
+            if token == attachmentTaskTokens[remoteBookID] {
+                attachmentTasks[remoteBookID] = nil
+                attachmentTaskTokens[remoteBookID] = nil
+            }
+        }
+    }
+
+    private func isAttachmentTaskCurrent(
+        bookID: String,
+        token: UUID
+    ) -> Bool {
+        attachmentTaskTokens[bookID] == token
+            && attachmentTasks[bookID] != nil
+    }
+
+    private func finishAttachmentTask(bookID: String, token: UUID) {
+        guard attachmentTaskTokens[bookID] == token else { return }
+        attachmentTasks[bookID] = nil
+        attachmentTaskTokens[bookID] = nil
+    }
+
     private func scheduleAttachmentImport(
         book: ReaderRemoteBook,
-        localBinding: LocalBinding,
+        ownershipClaim: PendingImportClaim,
         cookies: [HTTPCookie]
     ) {
-        guard attachmentTasks[book.bookId] == nil else { return }
+        guard isCurrentPendingImport(ownershipClaim),
+              attachmentTasks[book.bookId] == nil else { return }
+        let token = UUID()
+        attachmentTaskTokens[book.bookId] = token
         attachmentTasks[book.bookId] = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.attachmentTasks[book.bookId] = nil }
-            _ = await self.importAvailableAttachments(
+            guard let self,
+                  self.isAttachmentTaskCurrent(
+                    bookID: book.bookId,
+                    token: token
+                  ) else { return }
+            defer {
+                self.finishAttachmentTask(bookID: book.bookId, token: token)
+            }
+            _ = await self.importAvailableAttachmentsImpl(
                 book: book,
-                localBookID: localBinding.bookID,
-                localContentSHA256: localBinding.contentSHA256,
+                localBookID: ownershipClaim.localBookID,
+                localContentSHA256: ownershipClaim.contentSHA256,
                 cookies: cookies,
-                requiresManifest: true
+                requiresManifest: true,
+                reportsExplicitFailure: false,
+                forceReimport: false,
+                ownershipClaim: ownershipClaim
             )
         }
     }

@@ -23,6 +23,7 @@ private struct ReaderRootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var reader = ReaderWebViewModel()
     @StateObject private var remoteLibrary = ReaderRemoteLibraryCoordinator()
+    @StateObject private var piOCR = ReaderPiOCRCoordinator.shared
     @ObservedObject var voiceBridge: NativeVoiceBridge
     @ObservedObject var nativeCommandReceiver: ReaderNativeCommandReceiver
     @State private var showsDiagnostics = false
@@ -219,6 +220,8 @@ private struct ReaderRootView: View {
         }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
+            let cookies = await reader.remoteLibraryCookies()
+            await piOCR.resumePendingImports(cookies: cookies)
             consumePendingNativeFeatureRequest()
             await refreshNativeFeatureSnapshot()
             reader.probeReaderSnapshotLink()
@@ -251,7 +254,8 @@ private struct ReaderRootView: View {
             ReaderLocalLibraryView(
                 reader: reader,
                 startupNotice: libraryStartupNotice,
-                remote: remoteLibrary
+                remote: remoteLibrary,
+                piOCR: piOCR
             )
         }
         // 选文件夹**直接弹系统选择器**，不再套一层 sheet —— 用户 2026-08-18 要的

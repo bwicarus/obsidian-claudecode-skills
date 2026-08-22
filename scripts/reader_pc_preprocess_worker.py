@@ -34,7 +34,7 @@ import urllib.request
 
 
 WORKER_CONTRACT = "reader-library-ocr-worker/1"
-PROCESSING_PROFILE = "quality-first-v4"
+PROCESSING_PROFILE = "quality-first-v5"
 PAGE_SCHEMA = "reader-page-chars/1"
 FORMULA_SCHEMA = "reader-formula-regions/1"
 WORKER_PREFIX = "/pdf/api/library/ocr/worker"
@@ -60,8 +60,8 @@ PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/(?:home|tmp|var|opt|srv)/)[^\r\n]*")
 PROCESS_INSTANCE_NONCE = secrets.token_hex(16)
 
 QUALITY_PROFILE = {
-    "name": "quality-first-v4",
-    "textGeometry": "manga-regions-vision-symbols-v4",
+    "name": "quality-first-v5",
+    "textGeometry": "ruled-table-cells-vision-symbols-v5",
     "gpuRequired": True,
     # ⚠ 送 Vision 的那张图的分辨率**不在这里定** —— 由 Pi worker 的 _vision_render
     #   统一决定(目标 300dpi / 保底 200dpi / 按上传字节实测回退)。两边共用同一个

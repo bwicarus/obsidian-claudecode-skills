@@ -23,9 +23,11 @@ import reader_book_ocr  # noqa: E402
 import reader_book_ocr_worker  # noqa: E402
 from reader_book_ocr import ReaderBookOcrError, ReaderBookOcrService  # noqa: E402
 from reader_book_ocr_worker import (  # noqa: E402
+    _detect_ruled_table_grids,
     _manga_align_visual_segments,
     _manga_page,
     _manga_line_char_boxes,
+    _manga_table_cell_lines,
     _manga_vision_line_chars,
     _publish_attachments,
     _publish_release,
@@ -496,7 +498,7 @@ class ReaderBookOcrForcedRerunTest(unittest.TestCase):
             "contentSha256": self.entry["contentSha256"],
             "engine": "vision",
             "executor": "pi",
-            "processingProfile": "pi-default-v3",
+            "processingProfile": "pi-default-v4",
             "pageNumber": 1,
             "page_w": 10,
             "page_h": 20,
@@ -512,7 +514,7 @@ class ReaderBookOcrForcedRerunTest(unittest.TestCase):
             "contentSha256": self.entry["contentSha256"],
             "engine": "vision",
             "executor": "pi",
-            "processingProfile": "pi-default-v3",
+            "processingProfile": "pi-default-v4",
             "state": "succeeded",
             "totalPages": 1,
             "successfulPages": 1,
@@ -669,7 +671,7 @@ class ReaderBookOcrPageSchemaContractTest(unittest.TestCase):
             "contentSha256": entry["contentSha256"],
             "engine": "vision",
             "executor": "pc",
-            "processingProfile": "quality-first-v4",
+            "processingProfile": "quality-first-v5",
             "totalPages": 1,
         }
         page = {
@@ -983,7 +985,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["manga"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v4",
+            "processingProfile": "quality-first-v5",
         })
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed["job"]["completedPages"], [])
@@ -1105,13 +1107,13 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.assertEqual(manifest["revision"], completed["revision"])
         self.assertEqual(manifest["formulaReason"], "formula-model-unavailable")
         self.assertEqual(manifest["executor"], "pc")
-        self.assertEqual(manifest["processingProfile"], "quality-first-v4")
+        self.assertEqual(manifest["processingProfile"], "quality-first-v5")
         snapshot = service._published_snapshot(
             self.entry["bookId"], self.entry["contentSha256"]
         )
         self.assertEqual(snapshot["result"]["executor"], "pc")
         self.assertEqual(
-            snapshot["result"]["processingProfile"], "quality-first-v4"
+            snapshot["result"]["processingProfile"], "quality-first-v5"
         )
 
     def test_pc_expired_lease_is_reclaimable_and_old_upload_is_rejected(self) -> None:
@@ -1132,7 +1134,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["vision"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v4",
+            "processingProfile": "quality-first-v5",
         }
         first = service.claim_pc_worker("pc_first", capabilities)
         version_dir = service._version_dir(
@@ -1226,7 +1228,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         pi_job, _already = service.start(
             self.entry["bookId"], self.entry["contentSha256"], "vision", "pi"
         )
-        self.assertEqual(pi_job["processingProfile"], "pi-default-v3")
+        self.assertEqual(pi_job["processingProfile"], "pi-default-v4")
         job_dir = launches[0][0]
         page = {
             "schema": "reader-page-chars/1",
@@ -1234,7 +1236,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "contentSha256": self.entry["contentSha256"],
             "engine": "vision",
             "executor": "pi",
-            "processingProfile": "pi-default-v3",
+            "processingProfile": "pi-default-v4",
             "pageNumber": 1,
             "page_w": 10,
             "page_h": 20,
@@ -1289,14 +1291,14 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.assertTrue(release_dir.is_dir())
         manifest = json.loads((release_dir / "attachments.json").read_text("utf-8"))
         self.assertEqual(manifest["executor"], "pi")
-        self.assertEqual(manifest["processingProfile"], "pi-default-v3")
+        self.assertEqual(manifest["processingProfile"], "pi-default-v4")
 
         pc_job, already = service.start(
             self.entry["bookId"], self.entry["contentSha256"], "vision", "pc"
         )
         self.assertFalse(already)
         self.assertEqual(pc_job["executor"], "pc")
-        self.assertEqual(pc_job["processingProfile"], "quality-first-v4")
+        self.assertEqual(pc_job["processingProfile"], "quality-first-v5")
         self.assertEqual(pc_job["successfulPages"], 0)
         self.assertTrue(release_dir.is_dir(), "immutable Pi release must remain")
         self.assertFalse((job_dir / "pages" / "p000001.json").exists())
@@ -1307,14 +1309,14 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["vision"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v4",
+            "processingProfile": "quality-first-v5",
         })
         self.assertEqual(claimed["job"]["completedPages"], [])
         self.assertEqual(
-            claimed["job"]["processingProfile"], "quality-first-v4"
+            claimed["job"]["processingProfile"], "quality-first-v5"
         )
 
-    def test_historical_pc_v1_publication_remains_readable_and_can_restart_as_v4(self) -> None:
+    def test_historical_pc_v1_publication_remains_readable_and_can_restart_as_v5(self) -> None:
         service = ReaderBookOcrService(
             self.library,
             self.base / "pc-profile-upgrade-ocr",
@@ -1399,7 +1401,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         )
         self.assertFalse(already)
         self.assertEqual(restarted["executor"], "pc")
-        self.assertEqual(restarted["processingProfile"], "quality-first-v4")
+        self.assertEqual(restarted["processingProfile"], "quality-first-v5")
         self.assertEqual(restarted["state"], "queued")
         self.assertTrue((version_dir / "releases" / revision).is_dir())
         self.assertEqual(len(list((version_dir / "staging-archive").glob("*"))), 1)
@@ -1407,7 +1409,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
     def test_version_kind_and_unknown_fields_fail_closed(self) -> None:
         self.assertEqual(
             reader_book_ocr._safe_public_job({})["processingProfile"],
-            "pi-default-v3",
+            "pi-default-v4",
         )
         self.assertEqual(
             reader_book_ocr._safe_public_job({
@@ -1446,13 +1448,15 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
 
         self.assertEqual(
             reader_book_ocr.READABLE_PROCESSING_PROFILES["pi"],
-            frozenset(("pi-default-v1", "pi-default-v2", "pi-default-v3")),
+            frozenset((
+                "pi-default-v1", "pi-default-v2", "pi-default-v3", "pi-default-v4",
+            )),
         )
         self.assertEqual(
             reader_book_ocr.READABLE_PROCESSING_PROFILES["pc"],
             frozenset((
                 "quality-first-v1", "quality-first-v2", "quality-first-v3",
-                "quality-first-v4",
+                "quality-first-v4", "quality-first-v5",
             )),
         )
 
@@ -2051,7 +2055,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         )
         self.assertFalse(already)
         self.assertEqual(restored["state"], "queued")
-        self.assertEqual(restored["processingProfile"], "pi-default-v3")
+        self.assertEqual(restored["processingProfile"], "pi-default-v4")
         self.assertNotEqual(restored["jobId"], final_job["jobId"])
 
         current_vision = json.loads((job_dir / "job.json").read_text("utf-8"))
@@ -2234,6 +2238,319 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
 
 
 class ReaderBookOcrWorkerContractTest(unittest.TestCase):
+    def test_ruled_table_uses_cell_order_and_exact_vision_boxes(self) -> None:
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest("OpenCV table detector unavailable")
+        image = np.full((600, 900), 255, dtype=np.uint8)
+        for y in (200, 250, 300, 350):
+            cv2.line(image, (100, y), (800, y), 0, 3)
+        for x in (300, 520):
+            cv2.line(image, (x, 200), (x, 350), 0, 3)
+        cv2.line(image, (0, 400), (899, 400), 0, 3)
+        grids = _detect_ruled_table_grids(image, sx=1.0, sy=1.0)
+        self.assertEqual(len(grids), 1)
+        self.assertEqual(len(grids[0]["xEdges"]), 4)
+        self.assertEqual(len(grids[0]["yEdges"]), 4)
+        self.assertAlmostEqual(grids[0]["xEdges"][1], 300, delta=5)
+        self.assertAlmostEqual(grids[0]["xEdges"][2], 520, delta=5)
+        self.assertAlmostEqual(grids[0]["yEdges"][-1], 350, delta=5)
+
+        prepared = [
+            {"text": "表の前", "bounds": (100, 100, 250, 140), "bk": 0,
+             "line": 0, "vertical": False},
+            {"text": "国名特徴主な料理", "bounds": (120, 210, 780, 240), "bk": 1,
+             "line": 1, "vertical": False},
+            {"text": "韓国医食同源キムチ", "bounds": (120, 260, 780, 290), "bk": 2,
+             "line": 2, "vertical": False},
+            {"text": "印度香辛料ナン", "bounds": (120, 310, 780, 340), "bk": 3,
+             "line": 3, "vertical": False},
+        ]
+        values = [
+            (0, 0, "国名", 130, 212), (0, 1, "特徴", 330, 212),
+            (0, 2, "主な料理", 550, 212),
+            (1, 0, "韓国", 130, 262), (1, 1, "医食同源", 330, 262),
+            (1, 2, "キムチ", 550, 262),
+            (2, 0, "印度", 130, 312), (2, 1, "香辛料", 330, 312),
+            (2, 2, "ナン", 550, 312),
+        ]
+        vision = []
+        expected_x = {}
+        for row, column, text, start_x, start_y in values:
+            for offset, character in enumerate(text):
+                x0 = start_x + offset * 18
+                vision.append({
+                    "c": character, "x0": x0, "y0": start_y,
+                    "x1": x0 + 14, "y1": start_y + 24, "w": -1,
+                })
+                expected_x[(row, column, offset)] = x0
+        split = _manga_table_cell_lines(prepared, vision, grids)
+        self.assertEqual(split[0]["text"], "表の前")
+        table = split[1:]
+        self.assertEqual(
+            [line["text"] for line in table],
+            [value[2] for value in values],
+        )
+        self.assertEqual(table[-1]["vision_chars"][0]["x0"], 550)
+        self.assertEqual(
+            len({line["bk"] for line in table}),
+            len(table),
+            "each populated cell must keep an independent selection block",
+        )
+        self.assertTrue(all(line["vertical"] is False for line in table))
+
+    def test_borderless_layout_does_not_trigger_table_reordering(self) -> None:
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("NumPy unavailable")
+        image = np.full((400, 700), 255, dtype=np.uint8)
+        self.assertEqual(
+            _detect_ruled_table_grids(image, sx=1.0, sy=1.0),
+            [],
+        )
+
+    def test_two_by_two_manga_panel_grid_is_not_a_ruled_table(self) -> None:
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest("OpenCV table detector unavailable")
+        image = np.full((800, 900), 255, dtype=np.uint8)
+        for y in (100, 170, 240):
+            cv2.line(image, (100, y), (800, y), 0, 3)
+        for x in (100, 450, 800):
+            cv2.line(image, (x, 100), (x, 240), 0, 3)
+
+        self.assertEqual(
+            _detect_ruled_table_grids(image, sx=1.0, sy=1.0),
+            [],
+        )
+
+    def test_parallel_tables_fail_closed_instead_of_becoming_one_grid(self) -> None:
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest("OpenCV table detector unavailable")
+        image = np.full((800, 1200), 255, dtype=np.uint8)
+        for x0, separator, x1 in ((50, 250, 450), (650, 850, 1050)):
+            for y in (150, 210, 270):
+                cv2.line(image, (x0, y), (x1, y), 0, 3)
+            for x in (x0, separator, x1):
+                cv2.line(image, (x, 150), (x, 270), 0, 3)
+
+        self.assertEqual(
+            _detect_ruled_table_grids(image, sx=1.0, sy=1.0),
+            [],
+        )
+
+    def test_ruled_table_keeps_manga_when_vision_misses_a_populated_cell(self) -> None:
+        grids = [{
+            "xEdges": [0, 100, 200, 300],
+            "yEdges": [0, 100, 200, 300],
+        }]
+        prepared = []
+        vision = []
+        values = [
+            ["AAAA", "BBBB", "CCCC"],
+            ["DDDD", "EEEE", "FFFF"],
+            ["GGGG", "HHHH", "IIII"],
+        ]
+        for row, row_values in enumerate(values):
+            cells = []
+            for column, text in enumerate(row_values):
+                for offset, character in enumerate(text):
+                    x0 = 10 + column * 100 + offset * 10
+                    y0 = 10 + row * 100
+                    cells.append((character, x0, y0, x0 + 8, y0 + 20))
+                    if (row, column) != (2, 2):
+                        vision.append({
+                            "c": character,
+                            "x0": x0,
+                            "y0": y0,
+                            "x1": x0 + 8,
+                            "y1": y0 + 20,
+                            "w": -1,
+                            "b": 0,
+                        })
+            prepared.append({
+                "text": "".join(row_values),
+                "bounds": (10, 10 + row * 100, 290, 90 + row * 100),
+                "bk": row,
+                "line": row,
+                "vertical": False,
+                "cells": cells,
+                "polygon": None,
+            })
+
+        split = _manga_table_cell_lines(prepared, vision, grids)
+
+        self.assertEqual(split, prepared)
+        self.assertIn("IIII", "".join(line["text"] for line in split))
+
+    def test_ruled_table_keeps_manga_when_vision_partially_misses_a_cell(self) -> None:
+        grids = [{
+            "xEdges": [0, 100, 200, 300],
+            "yEdges": [0, 100, 200, 300],
+        }]
+        prepared = []
+        vision = []
+        values = [
+            ["AAAA", "BBBB", "CCCC"],
+            ["DDDD", "EEEE", "FFFF"],
+            ["GGGG", "HHHH", "IJKL"],
+        ]
+        for row, row_values in enumerate(values):
+            cells = []
+            for column, text in enumerate(row_values):
+                for offset, character in enumerate(text):
+                    x0 = 10 + column * 100 + offset * 10
+                    y0 = 10 + row * 100
+                    cells.append((character, x0, y0, x0 + 8, y0 + 20))
+                    if (row, column) != (2, 2) or offset != 1:
+                        vision.append({
+                            "c": character,
+                            "x0": x0,
+                            "y0": y0,
+                            "x1": x0 + 8,
+                            "y1": y0 + 20,
+                            "w": -1,
+                            "b": 0,
+                        })
+            prepared.append({
+                "text": "".join(row_values),
+                "bounds": (10, 10 + row * 100, 290, 90 + row * 100),
+                "bk": row,
+                "line": row,
+                "vertical": False,
+                "cells": cells,
+                "polygon": None,
+            })
+
+        split = _manga_table_cell_lines(prepared, vision, grids)
+
+        self.assertEqual(split, prepared)
+        self.assertIn("IJKL", "".join(line["text"] for line in split))
+
+    def test_ruled_table_never_overrides_vertical_manga_regions(self) -> None:
+        grids = [{
+            "xEdges": [0, 100, 200, 300],
+            "yEdges": [0, 100, 200, 300],
+        }]
+        prepared = []
+        vision = []
+        for row in range(3):
+            cells = []
+            text = "".join(chr(65 + row * 3 + column) * 2 for column in range(3))
+            for column in range(3):
+                for offset in range(2):
+                    character = chr(65 + row * 3 + column)
+                    x0 = 10 + column * 100 + offset * 12
+                    y0 = 10 + row * 100
+                    cells.append((character, x0, y0, x0 + 9, y0 + 20))
+                    vision.append({
+                        "c": character,
+                        "x0": x0,
+                        "y0": y0,
+                        "x1": x0 + 9,
+                        "y1": y0 + 20,
+                        "w": -1,
+                        "b": 0,
+                    })
+            prepared.append({
+                "text": text,
+                "bounds": (10, 10 + row * 100, 290, 90 + row * 100),
+                "bk": row,
+                "line": row,
+                "vertical": True,
+                "cells": cells,
+                "polygon": None,
+            })
+
+        self.assertEqual(
+            _manga_table_cell_lines(prepared, vision, grids),
+            prepared,
+        )
+
+    def test_ruled_table_stays_after_nearby_heading_despite_manga_block_order(self) -> None:
+        grids = [{
+            "xEdges": [100, 300, 500],
+            "yEdges": [200, 250, 300, 350],
+        }]
+        table_lines = [
+            {
+                "text": "甲甲乙乙",
+                "bounds": (120, 210, 480, 240),
+                "bk": 0,
+                "line": 0,
+                "vertical": False,
+                "cells": [("甲", 130, 212, 145, 235),
+                          ("甲", 150, 212, 165, 235),
+                          ("乙", 330, 212, 345, 235),
+                          ("乙", 350, 212, 365, 235)],
+                "polygon": None,
+            },
+            {
+                "text": "标题",
+                "bounds": (120, 160, 280, 190),
+                "bk": 1,
+                "line": 1,
+                "vertical": False,
+                "cells": [],
+                "polygon": None,
+            },
+            {
+                "text": "丙丙丁丁",
+                "bounds": (120, 260, 480, 290),
+                "bk": 2,
+                "line": 2,
+                "vertical": False,
+                "cells": [("丙", 130, 262, 145, 285),
+                          ("丙", 150, 262, 165, 285),
+                          ("丁", 330, 262, 345, 285),
+                          ("丁", 350, 262, 365, 285)],
+                "polygon": None,
+            },
+            {
+                "text": "戊戊己己",
+                "bounds": (120, 310, 480, 340),
+                "bk": 3,
+                "line": 3,
+                "vertical": False,
+                "cells": [("戊", 130, 312, 145, 335),
+                          ("戊", 150, 312, 165, 335),
+                          ("己", 330, 312, 345, 335),
+                          ("己", 350, 312, 365, 335)],
+                "polygon": None,
+            },
+        ]
+        vision = [
+            {"c": character, "x0": x0, "y0": y0,
+             "x1": x0 + 15, "y1": y0 + 23, "w": -1, "b": 0}
+            for character, x0, y0 in (
+                ("甲", 130, 212), ("甲", 150, 212),
+                ("乙", 330, 212), ("乙", 350, 212),
+                ("丙", 130, 262), ("丙", 150, 262),
+                ("丁", 330, 262), ("丁", 350, 262),
+                ("戊", 130, 312), ("戊", 150, 312),
+                ("己", 330, 312), ("己", 350, 312),
+            )
+        ]
+
+        split = _manga_table_cell_lines(table_lines, vision, grids)
+
+        self.assertEqual(
+            [line["text"] for line in split],
+            ["标题", "甲甲", "乙乙", "丙丙", "丁丁", "戊戊", "己己"],
+        )
+        self.assertTrue(all(
+            line.get("vision_chars")
+            for line in split[1:]
+        ))
+
     def test_manga_regions_use_vision_text_and_symbol_boxes(self) -> None:
         manga_text = (
             "次の表は、日本で言うう代表的なエスニック料理をまとめたものだ。試験に"
@@ -2548,16 +2865,16 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
                 "book_test",
                 "a" * 64,
                 "manga",
-                "pi-default-v3",
+                "pi-default-v4",
             ))
-            page["processingProfile"] = "pi-default-v3"
+            page["processingProfile"] = "pi-default-v4"
             page_path.write_text(json.dumps(page), "utf-8")
             self.assertTrue(reader_book_ocr_worker._page_done(
                 page_path,
                 "book_test",
                 "a" * 64,
                 "manga",
-                "pi-default-v3",
+                "pi-default-v4",
             ))
 
     def test_manga_page_preserves_authoritative_vertical_direction(self) -> None:

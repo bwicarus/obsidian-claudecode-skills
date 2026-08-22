@@ -288,6 +288,32 @@ final class NativeBookOCRManager: ObservableObject {
         return state
     }
 
+    /// Refresh a durable imported layer and invalidate every visible page.
+    /// The ordinary state reader above intentionally stays side-effect free;
+    /// attachment adoption uses this variant because an already-imported
+    /// revision must still replace stale WebView character caches immediately.
+    @discardableResult
+    func refreshLayerStateAndNotify(
+        bookID: String,
+        expectedContentSHA256: String
+    ) async throws -> NativeBookOCRLayerState {
+        let state = try await refreshLayerState(
+            bookID: bookID,
+            expectedContentSHA256: expectedContentSHA256
+        )
+        let current = status(
+            for: bookID,
+            expectedContentSHA256: expectedContentSHA256
+        )
+        lastUpdate = NativeBookOCRUpdate(
+            contract: NativeBookOCRUpdate.contract,
+            bookID: bookID,
+            page: nil,
+            status: current
+        )
+        return state
+    }
+
     /// 删除本机已导入的文字层。与 selectTextLayer 同一套规矩：
     /// 写锁 → 等就绪 → 校验身份 → activate → 落盘 → 刷新缓存并广播。
     /// 缓存按 **bookID** 键（不是 contentSHA256）。

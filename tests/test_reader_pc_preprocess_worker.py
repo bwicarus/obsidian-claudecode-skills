@@ -103,11 +103,11 @@ def claim_payload(digest, *, completed=None):
 
 class PiWorkerApiTest(unittest.TestCase):
     def test_quality_profile_invalidates_equal_width_manga_geometry(self):
-        self.assertEqual(worker.PROCESSING_PROFILE, "quality-first-v4")
-        self.assertEqual(worker.QUALITY_PROFILE["name"], "quality-first-v4")
+        self.assertEqual(worker.PROCESSING_PROFILE, "quality-first-v5")
+        self.assertEqual(worker.QUALITY_PROFILE["name"], "quality-first-v5")
         self.assertEqual(
             worker.QUALITY_PROFILE["textGeometry"],
-            "manga-regions-vision-symbols-v4",
+            "ruled-table-cells-vision-symbols-v5",
         )
 
     def test_wire_contract_is_bearer_authenticated_and_model_agnostic(self):

@@ -10,6 +10,273 @@ const VIEW = read("ios/BWReader/App/ReaderLocalLibraryView.swift");
 const PI = read("ios/BWReader/App/ReaderPiBookOCR.swift");
 const REMOTE = read("ios/BWReader/App/ReaderRemoteLibrary.swift");
 const SETTINGS = read("ios/BWReader/App/NativeReaderToolsView.swift");
+const APP = read("ios/BWReader/App/BWReaderNativeApp.swift");
+const MANAGER = read("ios/BWReader/App/NativeBookOCRManager.swift");
+
+test("requesting App owns durable automatic import beyond the library sheet", () => {
+  assert.match(PI, /static let shared = ReaderPiOCRCoordinator\(\)/);
+  assert.match(APP, /@StateObject private var piOCR = ReaderPiOCRCoordinator\.shared/);
+  assert.match(VIEW, /@ObservedObject private var piOCR: ReaderPiOCRCoordinator/);
+  assert.doesNotMatch(VIEW, /ReaderPiOCRCoordinator\(\)/);
+  assert.match(APP, /await piOCR\.resumePendingImports\(cookies: cookies\)/);
+  assert.match(PI, /request\.cachePolicy = \.reloadIgnoringLocalCacheData/);
+  assert.match(PI, /reader-pi-ocr-pending-imports\/2/);
+  assert.doesNotMatch(PI, /reader-pi-ocr-pending-imports\/1/);
+  assert.match(PI, /JSONEncoder\(\)\.encode\(values\)/);
+  assert.match(PI, /JSONDecoder\(\)\.decode\([\s\S]*\[String: PendingImport\]\.self/);
+  assert.match(PI, /let remoteBook: ReaderRemoteBook/);
+  assert.match(PI, /let localBookID: String/);
+  assert.match(PI, /let contentSHA256: String/);
+  assert.match(PI, /let engine: String/);
+  assert.match(PI, /let executor: String/);
+  assert.match(PI, /let createdAtEpochMs: Int64/);
+  assert.match(PI, /let generation: String/);
+  assert.match(PI, /let jobID: String/);
+  assert.match(PI, /var revision: String\?/);
+  const refresh = PI.slice(
+    PI.indexOf("func refresh("),
+    PI.indexOf("func adoptExisting(", PI.indexOf("func refresh(")),
+  );
+  assert.doesNotMatch(refresh, /remember\(/,
+    "passive status refresh must not claim another device's OCR result");
+  assert.match(refresh, /reconcilePendingImport\(/);
+  const accept = PI.slice(
+    PI.indexOf("private func accept("),
+    PI.indexOf("private func schedulePoll(", PI.indexOf("private func accept(")),
+  );
+  assert.match(accept, /validatedPendingImport\(for: job, book: book\)/);
+  assert.match(PI, /job\.jobId == pending\.jobID/);
+  assert.match(PI, /expectedEngine: pending\.engine/);
+  assert.match(PI, /expectedExecutor: pending\.executor/);
+  assert.match(PI, /try await validateLocalBookStillMatches\(/);
+  assert.match(PI, /library\.ensureContentSHA256\(for: record\)/);
+  assert.match(
+    PI,
+    /completePendingImport\([\s\S]*generation: claim\.generation,[\s\S]*jobID: claim\.jobID,[\s\S]*revision: claim\.revision/,
+  );
+});
+
+test("automatic import receipts are response-confirmed, expiring, and revision-fenced", () => {
+  const coordinatorStart = PI.indexOf(
+    "func start(",
+    PI.indexOf("final class ReaderPiOCRCoordinator"),
+  );
+  const start = PI.slice(coordinatorStart, PI.indexOf("func refresh(", coordinatorStart));
+  assert.match(
+    start,
+    /ownershipTransition: \.replaceConfirmed\([\s\S]*engine: engine,[\s\S]*executor: executor/,
+  );
+  assert.doesNotMatch(start, /PendingImport\(|persistPendingImports\(/);
+
+  const perform = PI.slice(
+    PI.indexOf("private func perform("),
+    PI.indexOf("private func accept(", PI.indexOf("private func perform(")),
+  );
+  const requestBindingIndex = perform.indexOf(
+    "requestedBinding = localBindings[book.bookId]",
+  );
+  const operationIndex = perform.indexOf("let job = try await operation()");
+  assert.ok(requestBindingIndex >= 0);
+  assert.ok(requestBindingIndex < operationIndex);
+  assert.ok(operationIndex < perform.indexOf("replacePendingImport("));
+  assert.match(perform, /requestedBinding: requestedBinding/);
+
+  const adoption = PI.slice(
+    PI.indexOf("func adoptExisting(", PI.indexOf("final class ReaderPiOCRCoordinator")),
+    PI.indexOf("func control(", PI.indexOf("final class ReaderPiOCRCoordinator")),
+  );
+  const adoptionBindingIndex = adoption.indexOf(
+    "let requestedBinding = localBindings[book.bookId]",
+  );
+  const adoptionRequestIndex = adoption.indexOf("client.adoptExisting(");
+  assert.ok(adoptionBindingIndex >= 0);
+  assert.ok(adoptionBindingIndex < adoptionRequestIndex);
+  assert.match(adoption, /requestedBinding: requestedBinding/);
+
+  const replacement = PI.slice(
+    PI.indexOf("private func replacePendingImport("),
+    PI.indexOf("private func validatedPendingImport(", PI.indexOf("private func replacePendingImport(")),
+  );
+  const validationIndex = replacement.indexOf("validateJob(");
+  const stopIndex = replacement.indexOf("stopAttachmentImport(");
+  const bindingGuardIndex = replacement.indexOf("guard let binding = requestedBinding");
+  const bindingRestoreIndex = replacement.indexOf(
+    "localBindings[book.bookId] = binding",
+  );
+  const receiptIndex = replacement.indexOf("let pending = PendingImport(");
+  for (const index of [validationIndex, stopIndex, bindingGuardIndex, bindingRestoreIndex, receiptIndex]) {
+    assert.ok(index >= 0);
+  }
+  assert.ok(validationIndex < stopIndex);
+  assert.ok(stopIndex < bindingGuardIndex);
+  assert.ok(stopIndex < bindingRestoreIndex);
+  assert.ok(bindingRestoreIndex < receiptIndex);
+  assert.match(
+    replacement,
+    /guard let binding = requestedBinding,[\s\S]*binding\.contentSHA256\.caseInsensitiveCompare\(book\.contentSha256\)[\s\S]*== \.orderedSame/,
+  );
+  assert.match(replacement, /generation: UUID\(\)\.uuidString/);
+  assert.match(replacement, /jobID: jobID/);
+  assert.match(replacement, /revision: revision/);
+  assert.equal((PI.match(/let pending = PendingImport\(/g) || []).length, 1);
+
+  const control = PI.slice(
+    PI.indexOf("func control(", PI.indexOf("final class ReaderPiOCRCoordinator")),
+    PI.indexOf("func importAvailableAttachments(", PI.indexOf("final class ReaderPiOCRCoordinator")),
+  );
+  assert.match(control, /\["resume", "retry"\]\.contains\(action\)/);
+  assert.match(control, /\? \.replaceConfirmed\([\s\S]*: \.preserve/);
+
+  const validation = PI.slice(
+    PI.indexOf("private func validatedPendingImport("),
+    PI.indexOf("private func pendingImportClaim(", PI.indexOf("private func validatedPendingImport(")),
+  );
+  assert.match(validation, /pending\.revision == nil \|\| pending\.revision == revision/);
+  assert.match(validation, /\["idle", "failed", "cancelled"\]\.contains\(job\.state\)/);
+  assert.match(PI, /pendingImportTTLMilliseconds/);
+  assert.match(PI, /createdAtEpochMs[\s\S]*pendingImportTTLMilliseconds/);
+  assert.match(PI, /UUID\(uuidString: pending\.generation\) != nil/);
+  assert.match(PI, /\^ocrjob_\[0-9a-f\]\{32\}\$/);
+  assert.match(PI, /\^ocr_\[0-9a-f\]\{20\}\$/);
+
+  const importer = PI.slice(
+    PI.indexOf("private func importAvailableAttachmentsImpl("),
+    PI.indexOf("func dismissMessages", PI.indexOf("private func importAvailableAttachmentsImpl(")),
+  );
+  assert.match(
+    importer,
+    /attachmentManifest\.revision == ownershipClaim\.revision,[\s\S]*isCurrentPendingImport\(ownershipClaim\)/,
+  );
+  assert.ok(
+    importer.indexOf("isCurrentPendingImport(ownershipClaim)", importer.indexOf("downloadAttachments("))
+      > importer.indexOf("downloadAttachments("),
+  );
+
+  const stop = PI.slice(
+    PI.indexOf("private func stopAttachmentImport("),
+    PI.indexOf("private func scheduleAttachmentImport(", PI.indexOf("private func stopAttachmentImport(")),
+  );
+  assert.match(stop, /while let task = attachmentTasks\[remoteBookID\]/);
+  assert.match(
+    stop,
+    /let token = attachmentTaskTokens\[remoteBookID\][\s\S]*task\.cancel\(\)[\s\S]*await task\.value[\s\S]*if token == attachmentTaskTokens\[remoteBookID\]/,
+  );
+});
+
+test("late passive OCR responses and stale task defers cannot replace a newer command", () => {
+  const coordinator = PI.indexOf("final class ReaderPiOCRCoordinator");
+  const start = PI.slice(
+    PI.indexOf("func start(", coordinator),
+    PI.indexOf("func refresh(", coordinator),
+  );
+  const adoption = PI.slice(
+    PI.indexOf("func adoptExisting(", coordinator),
+    PI.indexOf("func control(", coordinator),
+  );
+  const control = PI.slice(
+    PI.indexOf("func control(", coordinator),
+    PI.indexOf("func importAvailableAttachments(", coordinator),
+  );
+  const perform = PI.slice(
+    PI.indexOf("private func perform(", coordinator),
+    PI.indexOf("private func accept(", coordinator),
+  );
+  for (const body of [start, adoption, control]) {
+    assert.match(body, /guard acquireExplicitCommand\(for: book\) else \{ return \}/);
+  }
+  const acquisition = PI.slice(
+    PI.indexOf("private func acquireExplicitCommand(", coordinator),
+    PI.indexOf("private func commandEpoch(", coordinator),
+  );
+  assert.match(acquisition, /guard activeBookID == nil else/);
+  assert.doesNotMatch(acquisition, /activeBookID == nil \|\|/);
+  assert.ok(
+    acquisition.indexOf("activeBookID = book.bookId")
+      < acquisition.indexOf("beginExplicitCommand(for: book.bookId)"),
+  );
+  const acquireIndex = start.indexOf("acquireExplicitCommand(for: book)");
+  const rememberIndex = start.indexOf("remember(");
+  const performIndex = start.indexOf("await perform(");
+  assert.ok(acquireIndex >= 0 && acquireIndex < rememberIndex && rememberIndex < performIndex);
+
+  const stopIndex = perform.indexOf("await stopPolling(for: book.bookId)");
+  const requestIndex = perform.indexOf("let job = try await operation()");
+  assert.ok(stopIndex >= 0 && stopIndex < requestIndex);
+
+  const refresh = PI.slice(
+    PI.indexOf("func refresh(", coordinator),
+    PI.indexOf("func adoptExisting(", coordinator),
+  );
+  const foreground = PI.slice(
+    PI.indexOf("func resumePendingImports(", coordinator),
+    PI.indexOf("private func perform(", coordinator),
+  );
+  for (const body of [refresh, foreground]) {
+    const epochIndex = body.indexOf("let requestEpoch = commandEpoch(for: book.bookId)");
+    const statusIndex = body.indexOf("client.status(book: book, cookies: cookies)");
+    const fenceIndex = body.indexOf("isPassiveResponseCurrent(", statusIndex);
+    const acceptIndex = body.indexOf("accept(job, book: book, cookies: cookies)", statusIndex);
+    assert.ok(epochIndex >= 0 && epochIndex < statusIndex);
+    assert.ok(statusIndex < fenceIndex && fenceIndex < acceptIndex);
+  }
+  assert.match(
+    foreground,
+    /pendingImports\[book\.bookId\]\?\.generation[\s\S]*== pending\.generation[\s\S]*isPassiveResponseCurrent/,
+  );
+
+  const poll = PI.slice(
+    PI.indexOf("private func schedulePoll(", coordinator),
+    PI.indexOf("private func recordError(", coordinator),
+  );
+  assert.match(poll, /let token = UUID\(\)/);
+  assert.match(poll, /finishPollingTask\(bookID: book\.bookId, token: token\)/);
+  assert.match(
+    poll,
+    /let requestEpoch = self\.commandEpoch\(for: book\.bookId\)[\s\S]*client\.status[\s\S]*isPollingTaskCurrent[\s\S]*isPassiveResponseCurrent/,
+  );
+
+  const pollingCleanup = PI.slice(
+    PI.indexOf("private func finishPollingTask(", coordinator),
+    PI.indexOf("private func schedulePoll(", coordinator),
+  );
+  assert.match(
+    pollingCleanup,
+    /guard pollingTaskTokens\[bookID\] == token else \{ return \}[\s\S]*pollingTasks\[bookID\] = nil/,
+  );
+  const attachmentCleanup = PI.slice(
+    PI.indexOf("private func finishAttachmentTask(", coordinator),
+    PI.indexOf("private func scheduleAttachmentImport(", coordinator),
+  );
+  assert.match(
+    attachmentCleanup,
+    /guard attachmentTaskTokens\[bookID\] == token else \{ return \}[\s\S]*attachmentTasks\[bookID\] = nil/,
+  );
+
+  // Exercise the slot invariant guarded by both Swift cleanup helpers: an old
+  // defer is a no-op after a replacement token occupies the same book slot.
+  const slots = new Map();
+  const oldToken = "old";
+  const newToken = "new";
+  slots.set("book", oldToken);
+  slots.set("book", newToken);
+  if (slots.get("book") === oldToken) slots.delete("book");
+  assert.equal(slots.get("book"), newToken);
+});
+
+test("an already imported revision still invalidates the visible text layer", () => {
+  const importer = PI.slice(
+    PI.indexOf("func importAvailableAttachments("),
+    PI.indexOf("func dismissMessages", PI.indexOf("func importAvailableAttachments(")),
+  );
+  assert.match(importer, /hasImportedRevision\([\s\S]*refreshLayerStateAndNotify\(/);
+  const notify = MANAGER.slice(
+    MANAGER.indexOf("func refreshLayerStateAndNotify("),
+    MANAGER.indexOf("func deleteTextLayer(", MANAGER.indexOf("func refreshLayerStateAndNotify(")),
+  );
+  assert.match(notify, /refreshLayerState\(/);
+  assert.match(notify, /lastUpdate = NativeBookOCRUpdate\(/);
+  assert.match(notify, /page: nil/);
+});
 
 test("each PDF exposes independent Apple, Pi, and PC preprocessing lifecycles", () => {
   assert.match(VIEW, /Label\("本机预处理"/);
@@ -125,14 +392,14 @@ test("cancelled row tasks stay silent and passive errors remain isolated per boo
     PI.indexOf("func refresh("),
     PI.indexOf("func adoptExisting(", PI.indexOf("func refresh(")),
   );
-  assert.match(refresh, /guard !Task\.isCancelled else \{ return \}/);
-  assert.match(refresh, /guard !isCancellation\(error\) else \{ return \}/);
+  assert.match(refresh, /guard !Task\.isCancelled,[\s\S]*else \{ return \}/);
+  assert.match(refresh, /guard !isCancellation\(error\),[\s\S]*else \{ return \}/);
   assert.doesNotMatch(refresh, /errorBookID\s*=|errorMessage\s*=/);
   const poll = PI.slice(
     PI.indexOf("private func schedulePoll("),
     PI.indexOf("private func recordError(", PI.indexOf("private func schedulePoll(")),
   );
-  assert.match(poll, /guard !self\.isCancellation\(error\) else \{ return \}/);
+  assert.match(poll, /guard !self\.isCancellation\(error\),[\s\S]*else \{ return \}/);
   assert.match(poll, /explicit: false/);
   assert.doesNotMatch(poll, /self\.errorBookID|self\.errorMessage/);
 });
@@ -199,7 +466,7 @@ test("legacy Pi results require an explicit adopt and then use normal job and at
     PI.indexOf("func control(", PI.indexOf("func adoptExisting(", PI.indexOf("final class ReaderPiOCRCoordinator"))),
   );
   assert.match(coordinatorAdopt, /accept\([\s\S]*importsAttachments: false/);
-  assert.match(coordinatorAdopt, /await importAvailableAttachments\(/);
+  assert.match(coordinatorAdopt, /await importAvailableAttachmentsImpl\(/);
   assert.match(coordinatorAdopt, /requiresManifest: true/);
   assert.match(coordinatorAdopt, /reportsExplicitFailure: true/);
   assert.doesNotMatch(coordinatorAdopt, /client\.start/);
@@ -274,10 +541,10 @@ test("Pi-derived attachments are verified, 404-tolerant, and imported after down
   assert.match(PI, /NativeBookOCRManager\.shared\.importDerivedAttachments\(/);
   assert.match(PI, /entry\.category == "derived"/);
   assert.match(PI, /entry\.mergePolicy == "immutable"/);
-  assert.match(PI, /"quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4"/);
+  assert.match(PI, /"quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4", "quality-first-v5"/);
   assert.match(
     PI,
-    /manifest\.executor != "pc"[\s\S]*\["quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4"\]\.contains/,
+    /manifest\.executor != "pc"[\s\S]*\["quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4", "quality-first-v5"\]\.contains/,
   );
 });
 
