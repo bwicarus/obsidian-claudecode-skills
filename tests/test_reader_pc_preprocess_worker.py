@@ -545,6 +545,31 @@ class FakeApi:
 
 
 class WorkerRunnerTest(unittest.TestCase):
+    def test_successful_empty_claim_clears_stale_transport_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cache = worker.ContentCache(Path(temp))
+            cache.status(
+                state="failed",
+                phase="preparing",
+                jobId="old-job",
+                currentPage=9,
+                error="WorkerError: Pi worker API returned HTTP 502",
+            )
+            runner = worker.WorkerRunner(
+                FakeApi(None),
+                cache,
+                ROOT,
+                ("manga",),
+            )
+
+            self.assertFalse(runner.run_once())
+            status = json.loads(cache.status_path.read_text("utf-8"))
+            self.assertEqual(status["state"], "idle")
+            self.assertEqual(status["phase"], "preparing")
+            self.assertIsNone(status["jobId"])
+            self.assertIsNone(status["currentPage"])
+            self.assertIsNone(status["error"])
+
     def test_quality_profile_defaults_to_unimernet_and_requires_cuda(self):
         self.assertEqual(worker.QUALITY_PROFILE["formulaModel"], "unimernet-base")
         self.assertEqual(

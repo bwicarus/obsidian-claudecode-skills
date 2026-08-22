@@ -1282,6 +1282,17 @@ class WorkerRunner:
     def run_once(self) -> bool:
         claim = self.api.claim(self.engines)
         if claim is None:
+            # A successful empty claim proves that the Pi API is reachable and
+            # accepted this worker generation.  Do not leave an earlier 502 or
+            # profile-negotiation error visible forever while the queue is
+            # healthy but empty.
+            self.cache.status(
+                state="idle",
+                phase="preparing",
+                currentPage=None,
+                jobId=None,
+                error=None,
+            )
             return False
         monitor = self.monitor_factory(self.api, claim)
         pipeline = self.pipeline_factory(self.project_root)
@@ -1298,6 +1309,7 @@ class WorkerRunner:
             bookId=claim.book_id,
             contentSha256=claim.content_sha256,
             engine=claim.engine,
+            error=None,
         )
         try:
             monitor.update("downloading", None, _progress(total, text=text_done, words=word_done))
