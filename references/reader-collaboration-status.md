@@ -4369,8 +4369,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **Windows**：ReaderPC `0.1.55` 已单代运行，v3 worker 连续 claim `204` 且恢复后错误清空（提交 `c09f393e`）；Direct `0.1.177` 回退点 `install-0.1.177-20260822T004700Z-7bb8a2c4`。
 - **边界**：桌面公开 WebExt 未含本次运行时代码，正式 channel 保持 `0.2.132`；Safari 内嵌资源为 `0.2.133`。既有漫画书需主动重跑一次 Manga 预处理才会生成新几何。
 
-### 2026-08-22 Manga 分区 + Vision 文字层候选（Reader/WebExt `0.2.134`）
-- **改了什么**：Manga 保留分框、分行、顺序和方向，通过保守门槛的行内文字与字框改用 Vision；低一致度或 Vision 不可用时自动回退 Manga。
-- **同批修复**：去边设置改为存储确认后再切换画面，首次保存非零比例会真正开启去边；失败不再误报成功。
-- **已验证**：两个用户报告页面的离线双缓存对照通过，目标文字框改用 Vision；OCR、PC worker、书库 API 和去边专项回归通过。
-- **边界/下一步**：Windows 全量 handoff 仅保留已登记的 POSIX `fcntl` 平台边界；待 Pi Linux 原子预检后发布 Reader、TestFlight 与 ReaderPC。
+### 2026-08-22 Manga 分区 + Vision 文字层正式发布
+- **发布**：提交 `678ddd67`；Reader/WebExt `0.2.134`、ReaderPC `0.1.56`、iOS/TestFlight `1.1.79 (428)`。
+- **修复**：Manga 负责分框、分行、顺序和方向，安全对齐的行内文字与字框采用 Vision，低一致度自动回退 Manga；同批修复去边首次保存、持久化失败反馈与布局重算时序。
+- **验证**：Reader Node 全量、OCR/PC/书库专项 `115` 项（`1` skipped）、ReaderBundle `314` 文件、ReaderPC 包自检、Pi Linux 原子预检与生产 E2E 全部通过。
+- **部署**：Reader `0.2.134` / KG `kg-0.2.134-df84da8b13e0eed2a018` 已上线，回退点 `/home/bwicarus/deploy-backups/reader/20260822T043323Z-296766`；TestFlight 为 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **现有书**：`料理师part1.pdf` 已由 ReaderPC 以 `manga / quality-first-v4` 重跑完成，`53/53` 成功、零失败；current 已原子切换至 revision `ocr_f57d24d99a78536a3c83`，旧不可变 release 保留。
