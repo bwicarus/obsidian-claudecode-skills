@@ -142,12 +142,17 @@ window.openSettings = () => {
   }
   return _openSettingsNative();
 };
-window._applyCropSettings = () => {
+window._applyCropSettings = async () => {
   const num = (id) => Math.max(0, Math.min(45, parseFloat(document.getElementById(id)?.value) || 0));
   const crop = {l: num('set-crop-l'), r: num('set-crop-r'), t: num('set-crop-t'), b: num('set-crop-b')};
-  saveCropSettings(crop, true);   // 存后端 + 自动开启去边 + 重渲染
-  closeSettings();
-  _toast?.('去边已应用');
+  try {
+    await saveCropSettings(crop, true);   // 存后端 + 自动开启去边 + 重渲染
+    closeSettings();
+    _toast?.('去边已应用');
+  } catch (error) {
+    window.dlog?.('去边保存失败: ' + (error && error.message), '#ff6b6b');
+    _toast?.('去边保存失败，请重试');
+  }
 };
 // ── 书籍目录(provenance)：已有→显示「已存在」，无→给建立目录的页范围输入 ──
 window.loadTocStatus = async () => {

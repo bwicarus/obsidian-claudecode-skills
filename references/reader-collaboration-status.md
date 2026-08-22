@@ -4368,3 +4368,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **Pi/iOS**：Reader `0.2.133` / KG `kg-0.2.133-27276b128d20590e03fa` 已原子部署，回退点 `20260822T013451Z-267135`；Actions `32543336445` 上传 TestFlight `1.1.78 (425)`，`32543703175` 确认 `COMPLETE / VALID / IN_BETA_TESTING`。
 - **Windows**：ReaderPC `0.1.55` 已单代运行，v3 worker 连续 claim `204` 且恢复后错误清空（提交 `c09f393e`）；Direct `0.1.177` 回退点 `install-0.1.177-20260822T004700Z-7bb8a2c4`。
 - **边界**：桌面公开 WebExt 未含本次运行时代码，正式 channel 保持 `0.2.132`；Safari 内嵌资源为 `0.2.133`。既有漫画书需主动重跑一次 Manga 预处理才会生成新几何。
+
+### 2026-08-22 Manga 分区 + Vision 文字层候选（Reader/WebExt `0.2.134`）
+- **改了什么**：Manga 保留分框、分行、顺序和方向，通过保守门槛的行内文字与字框改用 Vision；低一致度或 Vision 不可用时自动回退 Manga。
+- **同批修复**：去边设置改为存储确认后再切换画面，首次保存非零比例会真正开启去边；失败不再误报成功。
+- **已验证**：两个用户报告页面的离线双缓存对照通过，目标文字框改用 Vision；OCR、PC worker、书库 API 和去边专项回归通过。
+- **边界/下一步**：Windows 全量 handoff 仅保留已登记的 POSIX `fcntl` 平台边界；待 Pi Linux 原子预检后发布 Reader、TestFlight 与 ReaderPC。

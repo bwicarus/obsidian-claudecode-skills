@@ -676,7 +676,12 @@ function _updateCropBtn() {
   if (b) b.classList.toggle('active', _cropActive());
 }
 window.toggleCrop = () => {
-  _cropOn = !_cropOn;   // 直接切换开/关(去边百分比只在 ⚙ 设置里配,不再点按钮就跳设置)
+  if (!_cropOn && !(_crop.l || _crop.r || _crop.t || _crop.b)) {
+    window.openSettings?.();
+    _toast?.('请先设置本书的去边比例');
+    return;
+  }
+  _cropOn = !_cropOn;   // 已配百分比时直接切换；未配时上面先引导到设置。
   try { localStorage.setItem(_cropKey(), _cropOn ? '1' : '0'); } catch (_) {}
   _updateCropBtn();
   if (_cropOn && !(_crop.l || _crop.r || _crop.t || _crop.b)) _toast?.('去边已开,但还没设隐藏百分比 → 在 ⚙ 设置里配');
@@ -685,16 +690,26 @@ window.toggleCrop = () => {
 };
 // 设置面板保存:写后端 + 本地刷新。autoOn:首次设置非零值时自动打开去边
 async function saveCropSettings(crop, autoOn) {
-  _crop = {l: +crop.l || 0, r: +crop.r || 0, t: +crop.t || 0, b: +crop.b || 0};
-  try {
-    await fetch('/pdf/api/book-crop', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({file: FILE_REL, crop: _crop}),
-    });
-  } catch (_) {}
-  if (autoOn && _cropActive()) { _cropOn = true; try { localStorage.setItem(_cropKey(), '1'); } catch (_) {} }
+  const nextCrop = {l: +crop.l || 0, r: +crop.r || 0, t: +crop.t || 0, b: +crop.b || 0};
+  // @interaction document.crop.commit
+  const response = await fetch('/pdf/api/book-crop', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({file: FILE_REL, crop: nextCrop}),
+  });
+  let result = null;
+  try { result = await response.json(); } catch (_) {}
+  if (!response.ok || !result || result.ok !== true) {
+    throw new Error((result && (result.error || result.message)) || ('HTTP ' + response.status));
+  }
+  _crop = nextCrop;
+  if (autoOn && (_crop.l || _crop.r || _crop.t || _crop.b)) {
+    _cropOn = true;
+    try { localStorage.setItem(_cropKey(), '1'); } catch (_) {}
+  }
   _updateCropBtn();
-  _refitToWidth(true);
+  await _refitToWidth(true);
+  window._rememberOrientLayout?.();
+  return true;
 }
 // 单页统一结构(PDF.js 思路):单页也渲进**唯一一个 .page-wrap**(page-container 的子元素),不再直接
 // 渲进 page-container。→ 缩放/适应/字符层/选中全走跟连续一模一样的 wrap 路径,根除「两套 DOM 结构来回
@@ -9731,12 +9746,17 @@ window.openSettings = () => {
   }
   return _openSettingsNative();
 };
-window._applyCropSettings = () => {
+window._applyCropSettings = async () => {
   const num = (id) => Math.max(0, Math.min(45, parseFloat(document.getElementById(id)?.value) || 0));
   const crop = {l: num('set-crop-l'), r: num('set-crop-r'), t: num('set-crop-t'), b: num('set-crop-b')};
-  saveCropSettings(crop, true);   // 存后端 + 自动开启去边 + 重渲染
-  closeSettings();
-  _toast?.('去边已应用');
+  try {
+    await saveCropSettings(crop, true);   // 存后端 + 自动开启去边 + 重渲染
+    closeSettings();
+    _toast?.('去边已应用');
+  } catch (error) {
+    window.dlog?.('去边保存失败: ' + (error && error.message), '#ff6b6b');
+    _toast?.('去边保存失败，请重试');
+  }
 };
 // ── 书籍目录(provenance)：已有→显示「已存在」，无→给建立目录的页范围输入 ──
 window.loadTocStatus = async () => {

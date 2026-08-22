@@ -6,7 +6,7 @@
     "cache-first-unannotated": 3,
     "dynamic-unannotated": 127,
     "local-immediate-unannotated": 6,
-    "unclassified-literal": 79
+    "unclassified-literal": 78
   },
   "allowances": {
     "cache-first-unannotated|_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js|fetch|fetch('/pdf/api/phrase-mark')|phrase.state.read must prove cached/local read before network": 1,
@@ -182,7 +182,6 @@
     "unclassified-literal|_server_deploy/static/pdf/reader.src/01-boot.js|fetch|fetch('/pdf/api/prefs', { headers: { Accept: 'application/json' } })|GET /pdf/api/prefs": 1,
     "unclassified-literal|_server_deploy/static/pdf/reader.src/01-boot.js|fetch|fetch('/pdf/api/prefs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ patch }) })|POST /pdf/api/prefs": 1,
     "unclassified-literal|_server_deploy/static/pdf/reader.src/01-boot.js|fetch|fetch('/pdf/api/prefs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ patch: _boot }) })|POST /pdf/api/prefs": 1,
-    "unclassified-literal|_server_deploy/static/pdf/reader.src/03-loader.js|fetch|fetch('/pdf/api/book-crop', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({file: FILE_REL, crop: _crop}), })|POST /pdf/api/book-crop": 1,
     "unclassified-literal|_server_deploy/static/pdf/reader.src/05-nav.js|fetch|fetch('/pdf/api/grammar-forget', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({sentence: block.dataset.src || '', text: block.dataset.text || '', file: FILE_REL, enabled_books: _grammarEnabledBooks})})|POST /pdf/api/grammar-forget": 1,
     "unclassified-literal|_server_deploy/static/pdf/reader.src/05-nav.js|fetch|fetch('/pdf/api/page-offset', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({file: FILE_REL, offset: off})})|POST /pdf/api/page-offset": 1,
     "unclassified-literal|_server_deploy/static/pdf/reader.src/05-nav.js|fetch|fetch('/pdf/api/vocab-anki', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({word: lemma}), })|POST /pdf/api/vocab-anki": 1,

@@ -1103,7 +1103,7 @@ actor NativeBookOCRSidecarStore {
             throw NativeBookOCRError.invalidAttachment("预处理执行器无效")
         }
         guard executor != "pc"
-            || ["quality-first-v1", "quality-first-v2", "quality-first-v3"].contains(
+            || ["quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4"].contains(
                 manifest.processingProfile
             ) else {
             throw NativeBookOCRError.invalidAttachment("PC 预处理配置无效")
@@ -1460,10 +1460,16 @@ actor NativeBookOCRSidecarStore {
         } else {
             segmentation = .ready
         }
-        let geometryVersion = value.engine == "manga"
-            && ["pi-default-v2", "quality-first-v3"].contains(processingProfile)
-            ? 2
-            : 1
+        let geometryVersion: Int
+        if value.engine == "manga"
+            && ["pi-default-v3", "quality-first-v4"].contains(processingProfile) {
+            geometryVersion = 3
+        } else if value.engine == "manga"
+            && ["pi-default-v2", "quality-first-v3"].contains(processingProfile) {
+            geometryVersion = 2
+        } else {
+            geometryVersion = 1
+        }
         let revision = "\(executor)-\(value.engine)/\(geometryVersion)"
         return NativeBookOCRPageCharacters(
             schema: NativeBookOCRPageCharacters.schema,

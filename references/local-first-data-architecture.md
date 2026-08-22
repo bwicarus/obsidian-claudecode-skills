@@ -283,11 +283,11 @@ Pi 上原有的 `summarize_section`（取整章而非逐页）、`auto_highlight
 编排在 `reader_book_ocr.py`，**两个维度正交**：
 
 - `engine = vision | manga` —— Google Vision 还是本地 manga OCR
-- `executor = pi | pc` —— Pi `pi-default-v2`（较轻默认链）
-  / PC `quality-first-v3`（Vision 目标 300 dpi 并按上传字节上限回退；manga 300 dpi、
-  mokuro 分框/分行 +
-  行内光学墨迹对齐字符几何、
-  DocLayout-YOLO、UniMERNet base）
+- `executor = pi | pc` —— Pi 与 PC 的当前 profile 由
+  `reader_book_ocr.PROCESSING_PROFILES` 查询，不在文档写死版本号。Vision 目标 300 dpi
+  并按上传字节上限回退；manga 由 mokuro 决定分框、分行、方向和阅读顺序，再以 Vision
+  替换高置信度行内文字与逐字框；Vision 不可用或行内匹配不足时回退光学墨迹几何。PC 另含
+  DocLayout-YOLO 与 UniMERNet base。
 
 ⚠ **正式执行器不是 `yolo_figures.py`/`mokuro_ocr_book.py`** —— 那两个是
 **Pi/旧 standalone 路径**，其 `device="cpu"` / `force_cpu=True` 是有意设置。

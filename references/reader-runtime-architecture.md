@@ -237,8 +237,9 @@ AnkiConnect 与 AnkiMobile 都是可选投影，外部 note/card ID 只能写入
 - 派生结果身份至少包含书籍内容摘要、引擎、执行器与 `processingProfile`。切换 Pi/PC 或质量档时
   必须使用干净的可变 staging，不能复用另一档的残页；已发布 release 保持不可变并可按 revision
   审计。原 PDF 永不因 OCR 被覆盖。
-- PC 默认使用 `quality-first-v3`：要求 CUDA；漫画页继续使用 MangaPageOcr 的分框、分行与方向，
-  仅在每个既有行内按实际墨迹对齐字符位置，不能以 Vision 替换漫画布局判断。模型按任务惰性加载
+- PC 当前 profile 以 `reader_book_ocr.PROCESSING_PROFILES` 为准：要求 CUDA；漫画页继续使用
+  MangaPageOcr 的分框、分行、方向与阅读顺序，在每个既有行内优先采用高置信度 Vision 文字和
+  逐字框；Vision 不能创建、合并、移动或重排 Manga 行，缺失/低置信度时回退光学墨迹几何。模型按任务惰性加载
   并在结束后释放，进程保持低优先级；
   空闲轮询不得占用 GPU。质量模型不可用时要显示明确原因，不能静默退回 CPU 或较轻模型。
 - PC worker 一次只持有一个短租约；页、公式和完成请求都绑定 worker instance、job、generation、

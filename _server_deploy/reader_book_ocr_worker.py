@@ -8,6 +8,7 @@ page in progress may be repeated after resume.  The original PDF is read-only.
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import json
 import math
@@ -27,7 +28,7 @@ import uuid
 CONTRACT = "reader-library-ocr/1"
 PAGE_SCHEMA = "reader-page-chars/1"
 PUBLICATION_CONTRACT = "reader-book-ocr-publication/1"
-PROCESSING_PROFILES = {"pi": "pi-default-v2", "pc": "quality-first-v3"}
+PROCESSING_PROFILES = {"pi": "pi-default-v3", "pc": "quality-first-v4"}
 LEGACY_PROCESSING_PROFILES = {"pi": "pi-default-v1", "pc": "quality-first-v1"}
 _EXPECTED_JOB_ID: str | None = None
 _EXPECTED_WORKER_GENERATION: str | None = None
@@ -768,7 +769,231 @@ def _manga_optical_char_boxes(
     return cells
 
 
-def _manga_page(page, engine) -> tuple[list[dict], str, int, int]:
+def _manga_vision_line_chars(
+    lines: list[dict],
+    vision_chars: list[dict] | None,
+) -> dict[int, list[dict]]:
+    """Put Vision symbols inside MangaPageOcr's authoritative line regions.
+
+    MangaPageOcr is materially better at separating manga panels and preserving
+    their reading order, while Vision exposes tighter symbol boxes and is less
+    prone to recognizer insertions that shift every following glyph.  Vision is
+    therefore allowed to replace *only* the contents of a Manga line.  It never
+    creates, merges, reorders, or moves a Manga region.
+
+    A symbol is assigned to at most one line by cross-axis overlap.  Lines with
+    implausible symbol counts or weak text agreement keep their existing Manga
+    geometry, which also makes a missing/offline Vision service a safe fallback.
+    """
+    if not lines or not vision_chars:
+        return {}
+
+    def polygon_contains_point(value, x: float, y: float) -> bool | None:
+        """Return None for unusable polygons so old AABB inputs still work."""
+        try:
+            points = [
+                (float(point[0]), float(point[1]))
+                for point in (value or [])
+                if isinstance(point, (list, tuple)) and len(point) >= 2
+            ]
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if len(points) != 4 or not all(
+            math.isfinite(number) for point in points for number in point
+        ):
+            return None
+        inside = False
+        previous_x, previous_y = points[-1]
+        for current_x, current_y in points:
+            edge_x = current_x - previous_x
+            edge_y = current_y - previous_y
+            cross = edge_x * (y - previous_y) - edge_y * (x - previous_x)
+            tolerance = 1e-7 * max(1.0, abs(edge_x), abs(edge_y))
+            if (
+                abs(cross) <= tolerance
+                and min(previous_x, current_x) - tolerance
+                <= x
+                <= max(previous_x, current_x) + tolerance
+                and min(previous_y, current_y) - tolerance
+                <= y
+                <= max(previous_y, current_y) + tolerance
+            ):
+                return True
+            crosses_ray = (current_y > y) != (previous_y > y)
+            if crosses_ray:
+                crossing_x = (
+                    (previous_x - current_x)
+                    * (y - current_y)
+                    / (previous_y - current_y)
+                    + current_x
+                )
+                if x < crossing_x:
+                    inside = not inside
+            previous_x, previous_y = current_x, current_y
+        return inside
+
+    def texts_are_complete(manga_text: str, vision_text: str) -> bool:
+        """Accept a complete line, plus the known one-glyph OCR corrections.
+
+        Equal-length candidates may correct recognizer substitutions.  A shorter
+        Vision line is accepted only when it removes exactly one adjacent
+        duplicate from Manga OCR; an ordinary prefix/suffix omission must never
+        erase the rest of an otherwise usable Manga line.  A single Vision
+        insertion is likewise allowed when every existing Manga character still
+        aligns exactly.
+        """
+        matcher = difflib.SequenceMatcher(
+            None, manga_text, vision_text, autojunk=False
+        )
+        if len(manga_text) == len(vision_text):
+            if matcher.ratio() < 0.75:
+                return False
+            return all(
+                tag in ("equal", "replace")
+                for tag, _i1, _i2, _j1, _j2 in matcher.get_opcodes()
+            )
+        opcodes = matcher.get_opcodes()
+        if len(vision_text) == len(manga_text) + 1:
+            edits = [opcode for opcode in opcodes if opcode[0] != "equal"]
+            return (
+                len(edits) == 1
+                and edits[0][0] == "insert"
+                and edits[0][1] == edits[0][2]
+                and edits[0][4] - edits[0][3] == 1
+            )
+        if len(manga_text) != len(vision_text) + 1:
+            return False
+        edits = [opcode for opcode in opcodes if opcode[0] != "equal"]
+        if (
+            len(edits) != 1
+            or edits[0][0] != "delete"
+            or edits[0][2] - edits[0][1] != 1
+            or edits[0][3] != edits[0][4]
+        ):
+            return False
+        deleted_at = edits[0][1]
+        deleted = manga_text[deleted_at]
+        return (
+            (deleted_at > 0 and manga_text[deleted_at - 1] == deleted)
+            or (
+                deleted_at + 1 < len(manga_text)
+                and manga_text[deleted_at + 1] == deleted
+            )
+        )
+
+    assigned: dict[int, list[dict]] = {}
+    for source in vision_chars:
+        character = unicodedata.normalize("NFKC", str(source.get("c") or ""))
+        if source.get("sp") or not character.strip():
+            continue
+        try:
+            x0 = float(source["x0"])
+            y0 = float(source["y0"])
+            x1 = float(source["x1"])
+            y1 = float(source["y1"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if not all(math.isfinite(value) for value in (x0, y0, x1, y1)):
+            continue
+        if x1 <= x0 or y1 <= y0:
+            continue
+        center_x = (x0 + x1) / 2.0
+        center_y = (y0 + y1) / 2.0
+        best: tuple[float, int] | None = None
+        for line_index, line in enumerate(lines):
+            line_x0, line_y0, line_x1, line_y1 = line["bounds"]
+            polygon_match = polygon_contains_point(
+                line.get("polygon"), center_x, center_y
+            )
+            if polygon_match is False:
+                continue
+            vertical = (
+                bool(line["vertical"])
+                if isinstance(line.get("vertical"), bool)
+                else (line_y1 - line_y0) > (line_x1 - line_x0) * 1.2
+            )
+            if vertical:
+                glyph_cross = x1 - x0
+                line_cross = max(0.001, line_x1 - line_x0)
+                overlap = max(0.0, min(x1, line_x1) - max(x0, line_x0))
+                main_inside = (
+                    line_y0 - line_cross * 0.30
+                    <= center_y
+                    <= line_y1 + line_cross * 0.30
+                )
+                cross_distance = abs(center_x - (line_x0 + line_x1) / 2.0)
+            else:
+                glyph_cross = y1 - y0
+                line_cross = max(0.001, line_y1 - line_y0)
+                overlap = max(0.0, min(y1, line_y1) - max(y0, line_y0))
+                main_inside = (
+                    line_x0 - line_cross * 0.30
+                    <= center_x
+                    <= line_x1 + line_cross * 0.30
+                )
+                cross_distance = abs(center_y - (line_y0 + line_y1) / 2.0)
+            overlap_ratio = overlap / max(0.001, glyph_cross)
+            if overlap_ratio < 0.35 or not main_inside:
+                continue
+            score = overlap_ratio - 0.12 * cross_distance / line_cross
+            if best is None or score > best[0]:
+                best = (score, line_index)
+        if best is None:
+            continue
+        candidate = {
+            "c": character,
+            "x0": round(x0, 3),
+            "y0": round(y0, 3),
+            "x1": round(x1, 3),
+            "y1": round(y1, 3),
+            "w": -1,
+            "b": 0,
+        }
+        assigned.setdefault(best[1], []).append(candidate)
+
+    accepted: dict[int, list[dict]] = {}
+    for line_index, candidates in assigned.items():
+        line = lines[line_index]
+        line_x0, line_y0, line_x1, line_y1 = line["bounds"]
+        vertical = (
+            bool(line["vertical"])
+            if isinstance(line.get("vertical"), bool)
+            else (line_y1 - line_y0) > (line_x1 - line_x0) * 1.2
+        )
+        candidates.sort(
+            key=(
+                (lambda item: (item["y0"], item["x0"]))
+                if vertical
+                else (lambda item: (item["x0"], item["y0"]))
+            )
+        )
+        manga_text = "".join(
+            character
+            for character in unicodedata.normalize(
+                "NFKC", str(line.get("text") or "")
+            )
+            if not character.isspace()
+        )
+        vision_text = "".join(item["c"] for item in candidates)
+        if not manga_text or not vision_text:
+            continue
+        if not texts_are_complete(manga_text, vision_text):
+            continue
+        for item in candidates:
+            item["bk"] = int(line["bk"])
+            item["line"] = int(line["line"])
+            if isinstance(line.get("vertical"), bool):
+                item["vertical"] = bool(line["vertical"])
+        accepted[line_index] = candidates
+    return accepted
+
+
+def _manga_page(
+    page,
+    engine,
+    *,
+    vision_chars: list[dict] | None = None,
+) -> tuple[list[dict], str, int, int]:
     pix = page.get_pixmap(dpi=300, alpha=False)
     image_w, image_h = pix.width, pix.height
     temp_name = None
@@ -805,6 +1030,7 @@ def _manga_page(page, engine) -> tuple[list[dict], str, int, int]:
     sy = float(page.rect.height) / image_h
     chars = []
     text_lines = []
+    prepared_lines = []
     line_no = 0
     for block_no, block in enumerate(raw.get("blocks") or []):
         lines = block.get("lines") or []
@@ -823,27 +1049,71 @@ def _manga_page(page, engine) -> tuple[list[dict], str, int, int]:
                 vertical=(block_vertical if isinstance(block_vertical, bool) else None),
                 image_gray=image_gray,
             )
-            for character, x0, y0, x1, y1 in cells:
-                char = {
-                    "c": character,
-                    "x0": round(x0 * sx, 3),
-                    "y0": round(y0 * sy, 3),
-                    "x1": round(x1 * sx, 3),
-                    "y1": round(y1 * sy, 3),
-                    "w": -1,
-                    "bk": block_no,
-                    "line": line_no,
-                    "b": 0,
-                }
-                # Preserve MangaPageOcr's authoritative writing direction.  A
-                # square block can contain several vertical lines, so the whole
-                # block aspect ratio is not a reliable substitute downstream.
-                if isinstance(block_vertical, bool):
-                    char["vertical"] = block_vertical
-                chars.append(char)
-            if cells:
-                text_lines.append(text)
-                line_no += 1
+            if not cells:
+                continue
+            try:
+                page_points = [
+                    (float(point[0]) * sx, float(point[1]) * sy)
+                    for point in points
+                    if isinstance(point, (list, tuple)) and len(point) >= 2
+                ]
+            except (TypeError, ValueError, OverflowError):
+                page_points = []
+            if len(page_points) == 4:
+                point_x = [point[0] for point in page_points]
+                point_y = [point[1] for point in page_points]
+                bounds = (
+                    min(point_x), min(point_y), max(point_x), max(point_y)
+                )
+            else:
+                bounds = (
+                    min(cell[1] * sx for cell in cells),
+                    min(cell[2] * sy for cell in cells),
+                    max(cell[3] * sx for cell in cells),
+                    max(cell[4] * sy for cell in cells),
+                )
+            prepared_lines.append({
+                "text": text,
+                "cells": cells,
+                "bounds": bounds,
+                "polygon": page_points if len(page_points) == 4 else None,
+                "bk": block_no,
+                "line": line_no,
+                "vertical": (
+                    block_vertical if isinstance(block_vertical, bool) else None
+                ),
+            })
+            text_lines.append(text)
+            line_no += 1
+
+    vision_lines = _manga_vision_line_chars(prepared_lines, vision_chars)
+    for prepared_index, prepared in enumerate(prepared_lines):
+        replacement = vision_lines.get(prepared_index)
+        if replacement:
+            chars.extend(replacement)
+            text_lines[prepared_index] = "".join(item["c"] for item in replacement)
+            continue
+        block_no = int(prepared["bk"])
+        line_no = int(prepared["line"])
+        block_vertical = prepared.get("vertical")
+        for character, x0, y0, x1, y1 in prepared["cells"]:
+            char = {
+                "c": character,
+                "x0": round(x0 * sx, 3),
+                "y0": round(y0 * sy, 3),
+                "x1": round(x1 * sx, 3),
+                "y1": round(y1 * sy, 3),
+                "w": -1,
+                "bk": block_no,
+                "line": line_no,
+                "b": 0,
+            }
+            # Preserve MangaPageOcr's authoritative writing direction.  A
+            # square block can contain several vertical lines, so the whole
+            # block aspect ratio is not a reliable substitute downstream.
+            if isinstance(block_vertical, bool):
+                char["vertical"] = block_vertical
+            chars.append(char)
     return chars, "\n".join(text_lines), image_w, image_h
 
 
@@ -1758,7 +2028,27 @@ def run(args) -> int:
                         page, Path(args.project)
                     )
                 else:
-                    chars, text, image_w, image_h = _manga_page(page, engine)
+                    vision_chars = None
+                    try:
+                        (
+                            vision_chars,
+                            _vision_text,
+                            _vision_image_w,
+                            _vision_image_h,
+                            effective_dpi,
+                        ) = _vision_page(page, Path(args.project))
+                    except Exception:
+                        # Manga segmentation remains independently usable when
+                        # Vision is temporarily unavailable.  Each low-quality
+                        # or missing Vision line also falls back inside
+                        # _manga_vision_line_chars instead of failing the page.
+                        vision_chars = None
+                        effective_dpi = None
+                    chars, text, image_w, image_h = _manga_page(
+                        page,
+                        engine,
+                        vision_chars=vision_chars,
+                    )
                 sidecar = {
                     "schema": PAGE_SCHEMA,
                     "bookId": args.book_id,

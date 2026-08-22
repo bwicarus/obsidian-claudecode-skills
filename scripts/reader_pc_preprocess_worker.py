@@ -34,7 +34,7 @@ import urllib.request
 
 
 WORKER_CONTRACT = "reader-library-ocr-worker/1"
-PROCESSING_PROFILE = "quality-first-v3"
+PROCESSING_PROFILE = "quality-first-v4"
 PAGE_SCHEMA = "reader-page-chars/1"
 FORMULA_SCHEMA = "reader-formula-regions/1"
 WORKER_PREFIX = "/pdf/api/library/ocr/worker"
@@ -60,8 +60,8 @@ PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/(?:home|tmp|var|opt|srv)/)[^\r\n]*")
 PROCESS_INSTANCE_NONCE = secrets.token_hex(16)
 
 QUALITY_PROFILE = {
-    "name": "quality-first-v3",
-    "textGeometry": "mokuro-optical-glyph-alignment-v3",
+    "name": "quality-first-v4",
+    "textGeometry": "manga-regions-vision-symbols-v4",
     "gpuRequired": True,
     # ⚠ 送 Vision 的那张图的分辨率**不在这里定** —— 由 Pi worker 的 _vision_render
     #   统一决定(目标 300dpi / 保底 200dpi / 按上传字节实测回退)。两边共用同一个
@@ -919,7 +919,25 @@ class QualityPipeline:
             # 服务器那趟看见这个标记就 continue,于是 PC 出的 vision 页永远没分词。
             chars = core._tokenize_chars(chars)
         else:
-            chars, text, image_w, image_h = core._manga_page(page, self._manga_engine())
+            vision_chars = None
+            try:
+                (
+                    vision_chars,
+                    _vision_text,
+                    _vision_image_w,
+                    _vision_image_h,
+                    effective_dpi,
+                ) = self._vision_page(page)
+            except Exception:
+                # Preserve a usable Manga-only result if Vision is offline.
+                # Lines that Vision cannot match also fall back independently.
+                vision_chars = None
+                effective_dpi = None
+            chars, text, image_w, image_h = core._manga_page(
+                page,
+                self._manga_engine(),
+                vision_chars=vision_chars,
+            )
             chars = core._tokenize_chars(chars)
         sidecar = {
             "schema": PAGE_SCHEMA,

@@ -37,8 +37,8 @@ ADOPTION_CONTRACT = "reader-library-ocr-adoption/1"
 ENGINES = frozenset(("vision", "manga"))
 EXECUTORS = frozenset(("pi", "pc"))
 PROCESSING_PROFILES = {
-    "pi": "pi-default-v2",
-    "pc": "quality-first-v3",
+    "pi": "pi-default-v3",
+    "pc": "quality-first-v4",
 }
 # Results created before processingProfile became mandatory were produced by
 # the first-generation pipelines.  This fallback must never follow the current
@@ -51,8 +51,11 @@ LEGACY_PROCESSING_PROFILES = {
 # current profile above strict for newly requested/claimed work, while allowing
 # already-published profiles that the App still knows how to import.
 READABLE_PROCESSING_PROFILES = {
-    "pi": frozenset(("pi-default-v1", "pi-default-v2")),
-    "pc": frozenset(("quality-first-v1", "quality-first-v2", "quality-first-v3")),
+    "pi": frozenset(("pi-default-v1", "pi-default-v2", "pi-default-v3")),
+    "pc": frozenset((
+        "quality-first-v1", "quality-first-v2", "quality-first-v3",
+        "quality-first-v4",
+    )),
 }
 LEGACY_ENGINE = "legacy"
 RESULT_ENGINES = ENGINES | frozenset((LEGACY_ENGINE,))
@@ -513,7 +516,7 @@ class ReaderBookOcrService:
             if capabilities.get("processingProfile") != PROCESSING_PROFILES["pc"]:
                 raise ReaderBookOcrError(
                     "invalid-processing-profile",
-                    "PC OCR worker requires processingProfile=quality-first-v3",
+                    "PC OCR worker requires processingProfile=quality-first-v4",
                     status=400,
                 )
             try:

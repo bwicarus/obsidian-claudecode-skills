@@ -26,6 +26,7 @@ from reader_book_ocr_worker import (  # noqa: E402
     _manga_align_visual_segments,
     _manga_page,
     _manga_line_char_boxes,
+    _manga_vision_line_chars,
     _publish_attachments,
     _publish_release,
     _tokenize_chars,
@@ -495,7 +496,7 @@ class ReaderBookOcrForcedRerunTest(unittest.TestCase):
             "contentSha256": self.entry["contentSha256"],
             "engine": "vision",
             "executor": "pi",
-            "processingProfile": "pi-default-v2",
+            "processingProfile": "pi-default-v3",
             "pageNumber": 1,
             "page_w": 10,
             "page_h": 20,
@@ -511,7 +512,7 @@ class ReaderBookOcrForcedRerunTest(unittest.TestCase):
             "contentSha256": self.entry["contentSha256"],
             "engine": "vision",
             "executor": "pi",
-            "processingProfile": "pi-default-v2",
+            "processingProfile": "pi-default-v3",
             "state": "succeeded",
             "totalPages": 1,
             "successfulPages": 1,
@@ -668,7 +669,7 @@ class ReaderBookOcrPageSchemaContractTest(unittest.TestCase):
             "contentSha256": entry["contentSha256"],
             "engine": "vision",
             "executor": "pc",
-            "processingProfile": "quality-first-v3",
+            "processingProfile": "quality-first-v4",
             "totalPages": 1,
         }
         page = {
@@ -982,7 +983,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["manga"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v3",
+            "processingProfile": "quality-first-v4",
         })
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed["job"]["completedPages"], [])
@@ -1104,13 +1105,13 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.assertEqual(manifest["revision"], completed["revision"])
         self.assertEqual(manifest["formulaReason"], "formula-model-unavailable")
         self.assertEqual(manifest["executor"], "pc")
-        self.assertEqual(manifest["processingProfile"], "quality-first-v3")
+        self.assertEqual(manifest["processingProfile"], "quality-first-v4")
         snapshot = service._published_snapshot(
             self.entry["bookId"], self.entry["contentSha256"]
         )
         self.assertEqual(snapshot["result"]["executor"], "pc")
         self.assertEqual(
-            snapshot["result"]["processingProfile"], "quality-first-v3"
+            snapshot["result"]["processingProfile"], "quality-first-v4"
         )
 
     def test_pc_expired_lease_is_reclaimable_and_old_upload_is_rejected(self) -> None:
@@ -1131,7 +1132,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["vision"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v3",
+            "processingProfile": "quality-first-v4",
         }
         first = service.claim_pc_worker("pc_first", capabilities)
         version_dir = service._version_dir(
@@ -1225,7 +1226,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         pi_job, _already = service.start(
             self.entry["bookId"], self.entry["contentSha256"], "vision", "pi"
         )
-        self.assertEqual(pi_job["processingProfile"], "pi-default-v2")
+        self.assertEqual(pi_job["processingProfile"], "pi-default-v3")
         job_dir = launches[0][0]
         page = {
             "schema": "reader-page-chars/1",
@@ -1233,7 +1234,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "contentSha256": self.entry["contentSha256"],
             "engine": "vision",
             "executor": "pi",
-            "processingProfile": "pi-default-v2",
+            "processingProfile": "pi-default-v3",
             "pageNumber": 1,
             "page_w": 10,
             "page_h": 20,
@@ -1288,14 +1289,14 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.assertTrue(release_dir.is_dir())
         manifest = json.loads((release_dir / "attachments.json").read_text("utf-8"))
         self.assertEqual(manifest["executor"], "pi")
-        self.assertEqual(manifest["processingProfile"], "pi-default-v2")
+        self.assertEqual(manifest["processingProfile"], "pi-default-v3")
 
         pc_job, already = service.start(
             self.entry["bookId"], self.entry["contentSha256"], "vision", "pc"
         )
         self.assertFalse(already)
         self.assertEqual(pc_job["executor"], "pc")
-        self.assertEqual(pc_job["processingProfile"], "quality-first-v3")
+        self.assertEqual(pc_job["processingProfile"], "quality-first-v4")
         self.assertEqual(pc_job["successfulPages"], 0)
         self.assertTrue(release_dir.is_dir(), "immutable Pi release must remain")
         self.assertFalse((job_dir / "pages" / "p000001.json").exists())
@@ -1306,14 +1307,14 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["vision"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v3",
+            "processingProfile": "quality-first-v4",
         })
         self.assertEqual(claimed["job"]["completedPages"], [])
         self.assertEqual(
-            claimed["job"]["processingProfile"], "quality-first-v3"
+            claimed["job"]["processingProfile"], "quality-first-v4"
         )
 
-    def test_historical_pc_v1_publication_remains_readable_and_can_restart_as_v3(self) -> None:
+    def test_historical_pc_v1_publication_remains_readable_and_can_restart_as_v4(self) -> None:
         service = ReaderBookOcrService(
             self.library,
             self.base / "pc-profile-upgrade-ocr",
@@ -1398,7 +1399,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         )
         self.assertFalse(already)
         self.assertEqual(restarted["executor"], "pc")
-        self.assertEqual(restarted["processingProfile"], "quality-first-v3")
+        self.assertEqual(restarted["processingProfile"], "quality-first-v4")
         self.assertEqual(restarted["state"], "queued")
         self.assertTrue((version_dir / "releases" / revision).is_dir())
         self.assertEqual(len(list((version_dir / "staging-archive").glob("*"))), 1)
@@ -1406,7 +1407,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
     def test_version_kind_and_unknown_fields_fail_closed(self) -> None:
         self.assertEqual(
             reader_book_ocr._safe_public_job({})["processingProfile"],
-            "pi-default-v2",
+            "pi-default-v3",
         )
         self.assertEqual(
             reader_book_ocr._safe_public_job({
@@ -1445,11 +1446,14 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
 
         self.assertEqual(
             reader_book_ocr.READABLE_PROCESSING_PROFILES["pi"],
-            frozenset(("pi-default-v1", "pi-default-v2")),
+            frozenset(("pi-default-v1", "pi-default-v2", "pi-default-v3")),
         )
         self.assertEqual(
             reader_book_ocr.READABLE_PROCESSING_PROFILES["pc"],
-            frozenset(("quality-first-v1", "quality-first-v2", "quality-first-v3")),
+            frozenset((
+                "quality-first-v1", "quality-first-v2", "quality-first-v3",
+                "quality-first-v4",
+            )),
         )
 
         epub = self.vault / "B.epub"
@@ -2047,7 +2051,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         )
         self.assertFalse(already)
         self.assertEqual(restored["state"], "queued")
-        self.assertEqual(restored["processingProfile"], "pi-default-v2")
+        self.assertEqual(restored["processingProfile"], "pi-default-v3")
         self.assertNotEqual(restored["jobId"], final_job["jobId"])
 
         current_vision = json.loads((job_dir / "job.json").read_text("utf-8"))
@@ -2230,6 +2234,131 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
 
 
 class ReaderBookOcrWorkerContractTest(unittest.TestCase):
+    def test_manga_regions_use_vision_text_and_symbol_boxes(self) -> None:
+        manga_text = (
+            "次の表は、日本で言うう代表的なエスニック料理をまとめたものだ。試験に"
+        )
+        vision_text = (
+            "次の表は、日本で言う代表的なエスニック料理をまとめたものだ。試験に"
+        )
+        vision_chars = []
+        for index, character in enumerate(vision_text):
+            x0 = 350.0 + index * 37.0
+            vision_chars.append({
+                "c": character,
+                "x0": x0,
+                "y0": 100.0,
+                "x1": x0 + 30.0,
+                "y1": 140.0,
+            })
+        lines = [{
+            "text": manga_text,
+            "bounds": (300.0, 90.0, 1800.0, 150.0),
+            "bk": 12,
+            "line": 16,
+            "vertical": False,
+        }]
+        fused = _manga_vision_line_chars(lines, vision_chars)[0]
+        fused_text = "".join(item["c"] for item in fused)
+        self.assertEqual(fused_text, vision_text)
+        self.assertNotIn("言うう", fused_text)
+        target = vision_text.index("まとめた")
+        self.assertEqual(
+            [item["x0"] for item in fused[target:target + 4]],
+            [350.0 + index * 37.0 for index in range(target, target + 4)],
+        )
+        self.assertTrue(all(item["bk"] == 12 for item in fused))
+        self.assertTrue(all(item["line"] == 16 for item in fused))
+        self.assertTrue(all(item["vertical"] is False for item in fused))
+
+    def test_manga_vision_line_rejects_low_agreement_and_large_omissions(self) -> None:
+        line = {
+            "text": "これは十分に長い漫画の一行です",
+            "bounds": (0.0, 0.0, 500.0, 50.0),
+            "bk": 1,
+            "line": 2,
+            "vertical": False,
+        }
+        unrelated = [
+            {"c": c, "x0": i * 20, "y0": 5, "x1": i * 20 + 15, "y1": 45}
+            for i, c in enumerate("無関係")
+        ]
+        self.assertEqual(_manga_vision_line_chars([line], unrelated), {})
+
+    def test_manga_vision_line_rejects_high_agreement_partial_prefix(self) -> None:
+        line = {
+            "text": "ABCDEFGH",
+            "bounds": (0.0, 0.0, 200.0, 20.0),
+            "bk": 1,
+            "line": 2,
+            "vertical": False,
+        }
+        partial = [
+            {"c": c, "x0": i * 20, "y0": 2, "x1": i * 20 + 15, "y1": 18}
+            for i, c in enumerate("ABCDEF")
+        ]
+        self.assertEqual(_manga_vision_line_chars([line], partial), {})
+
+    def test_manga_vision_symbol_belongs_to_only_one_adjacent_region(self) -> None:
+        lines = [
+            {"text": "共通", "bounds": (0, 0, 100, 24), "bk": 1, "line": 1,
+             "vertical": False},
+            {"text": "共通", "bounds": (0, 18, 100, 42), "bk": 2, "line": 2,
+             "vertical": False},
+        ]
+        symbols = [
+            {"c": "共", "x0": 10, "y0": 16, "x1": 30, "y1": 30},
+            {"c": "通", "x0": 35, "y0": 16, "x1": 55, "y1": 30},
+        ]
+        fused = _manga_vision_line_chars(lines, symbols)
+        self.assertEqual(sum(len(items) for items in fused.values()), 2)
+        self.assertEqual(len(fused), 1)
+
+    def test_manga_vision_slanted_polygon_prevents_aabb_cross_region(self) -> None:
+        lines = [
+            {
+                "text": "共通",
+                "bounds": (0, 0, 100, 40),
+                "polygon": [(0, 0), (100, 30), (100, 40), (0, 10)],
+                "bk": 1,
+                "line": 1,
+                "vertical": False,
+            },
+            {
+                "text": "共通",
+                "bounds": (0, 20, 100, 60),
+                "polygon": [(0, 20), (100, 50), (100, 60), (0, 30)],
+                "bk": 2,
+                "line": 2,
+                "vertical": False,
+            },
+        ]
+        # Both symbols are in the lower polygon.  Their y centers are closer to
+        # the upper AABB center, which used to assign them to the wrong region.
+        symbols = [
+            {"c": "共", "x0": 2, "y0": 20, "x1": 12, "y1": 27},
+            {"c": "通", "x0": 14, "y0": 23, "x1": 24, "y1": 30},
+        ]
+        fused = _manga_vision_line_chars(lines, symbols)
+        self.assertEqual(set(fused), {1})
+        self.assertTrue(all(item["bk"] == 2 for item in fused[1]))
+
+    def test_manga_vision_vertical_line_sorts_symbols_top_to_bottom(self) -> None:
+        lines = [{
+            "text": "縦書",
+            "bounds": (10, 0, 40, 120),
+            "bk": 3,
+            "line": 4,
+            "vertical": True,
+        }]
+        symbols = [
+            {"c": "書", "x0": 12, "y0": 60, "x1": 38, "y1": 100},
+            {"c": "縦", "x0": 12, "y0": 10, "x1": 38, "y1": 50},
+        ]
+        fused = _manga_vision_line_chars(lines, symbols)[0]
+        self.assertEqual("".join(item["c"] for item in fused), "縦書")
+        self.assertTrue(all(item["vertical"] is True for item in fused))
+
     def test_manga_alignment_handles_split_glyph_and_missing_quote(self) -> None:
         # Real p28 geometry from the reported regression.  Manga OCR omitted
         # the closing quote after る, while the two strokes of い arrived as two
@@ -2410,7 +2539,7 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
                 "bookId": "book_test",
                 "contentSha256": "a" * 64,
                 "engine": "manga",
-                "processingProfile": "pi-default-v1",
+                "processingProfile": "pi-default-v2",
                 "chars": [],
             }
             page_path.write_text(json.dumps(page), "utf-8")
@@ -2419,16 +2548,16 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
                 "book_test",
                 "a" * 64,
                 "manga",
-                "pi-default-v2",
+                "pi-default-v3",
             ))
-            page["processingProfile"] = "pi-default-v2"
+            page["processingProfile"] = "pi-default-v3"
             page_path.write_text(json.dumps(page), "utf-8")
             self.assertTrue(reader_book_ocr_worker._page_done(
                 page_path,
                 "book_test",
                 "a" * 64,
                 "manga",
-                "pi-default-v2",
+                "pi-default-v3",
             ))
 
     def test_manga_page_preserves_authoritative_vertical_direction(self) -> None:

@@ -103,11 +103,11 @@ def claim_payload(digest, *, completed=None):
 
 class PiWorkerApiTest(unittest.TestCase):
     def test_quality_profile_invalidates_equal_width_manga_geometry(self):
-        self.assertEqual(worker.PROCESSING_PROFILE, "quality-first-v3")
-        self.assertEqual(worker.QUALITY_PROFILE["name"], "quality-first-v3")
+        self.assertEqual(worker.PROCESSING_PROFILE, "quality-first-v4")
+        self.assertEqual(worker.QUALITY_PROFILE["name"], "quality-first-v4")
         self.assertEqual(
             worker.QUALITY_PROFILE["textGeometry"],
-            "mokuro-optical-glyph-alignment-v3",
+            "manga-regions-vision-symbols-v4",
         )
 
     def test_wire_contract_is_bearer_authenticated_and_model_agnostic(self):
@@ -242,7 +242,7 @@ class PiWorkerApiTest(unittest.TestCase):
         self.assertRegex(first, r"^pc_[a-f0-9]{24}$")
 
     def test_claim_rejects_incompatible_processing_profile(self):
-        for incompatible in ("quality-first-v2", "unknown-profile"):
+        for incompatible in ("quality-first-v2", "quality-first-v3", "unknown-profile"):
             with self.subTest(profile=incompatible):
                 payload = claim_payload(hashlib.sha256(PDF).hexdigest())
                 payload["job"]["processingProfile"] = incompatible
@@ -378,8 +378,8 @@ class CacheTest(unittest.TestCase):
             page_path.parent.mkdir(parents=True)
             old_profile = dict(worker.QUALITY_PROFILE)
             old_profile.update({
-                "name": "quality-first-v2",
-                "textGeometry": "mokuro-polygon-direction-v2",
+                "name": "quality-first-v3",
+                "textGeometry": "mokuro-optical-glyph-alignment-v3",
             })
             page_path.write_text(json.dumps({
                 "contract": "reader-pc-ocr-page-cache/1",

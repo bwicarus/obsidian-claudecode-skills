@@ -3109,6 +3109,12 @@
     {
       "surface": "epub",
       "resource": "static/reader-runtime/interaction-policy.js",
+      "path": "/pdf/api/book-crop",
+      "reason": "Shared policy declaration for the PDF surface, not a request from the EPUB shell."
+    },
+    {
+      "surface": "epub",
+      "resource": "static/reader-runtime/interaction-policy.js",
       "path": "/pdf/api/book-meta",
       "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
     },

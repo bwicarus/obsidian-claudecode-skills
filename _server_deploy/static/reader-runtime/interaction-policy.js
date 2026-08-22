@@ -508,6 +508,16 @@
         reason: '由当前运行时选择 App 本地原子存储或 PWA 服务端，并在该后端确认后更新动作卡。'
       }
     ),
+    networkMutation(
+      'document.crop.commit',
+      '/pdf/api/book-crop',
+      ['POST'],
+      {
+        local: { collection: 'document-preferences', projection: 'active-document' },
+        transport: { extensionBridge: true, serviceWorker: 'none' },
+        reason: '去边比例必须先由 App 本地存储或 PWA 服务端确认，失败时保留设置面板和旧画面。'
+      }
+    ),
     remoteRequired(
       'document.pdf-structure.mutate',
       ['/pdf/api/pdf-insert-page'],

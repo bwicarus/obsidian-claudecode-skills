@@ -274,10 +274,10 @@ test("Pi-derived attachments are verified, 404-tolerant, and imported after down
   assert.match(PI, /NativeBookOCRManager\.shared\.importDerivedAttachments\(/);
   assert.match(PI, /entry\.category == "derived"/);
   assert.match(PI, /entry\.mergePolicy == "immutable"/);
-  assert.match(PI, /"quality-first-v1", "quality-first-v2", "quality-first-v3"/);
+  assert.match(PI, /"quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4"/);
   assert.match(
     PI,
-    /manifest\.executor != "pc"[\s\S]*\["quality-first-v1", "quality-first-v2", "quality-first-v3"\]\.contains/,
+    /manifest\.executor != "pc"[\s\S]*\["quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4"\]\.contains/,
   );
 });
 
