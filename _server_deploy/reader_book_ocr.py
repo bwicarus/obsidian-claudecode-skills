@@ -37,8 +37,8 @@ ADOPTION_CONTRACT = "reader-library-ocr-adoption/1"
 ENGINES = frozenset(("vision", "manga"))
 EXECUTORS = frozenset(("pi", "pc"))
 PROCESSING_PROFILES = {
-    "pi": "pi-default-v4",
-    "pc": "quality-first-v5",
+    "pi": "pi-default-v5",
+    "pc": "quality-first-v6",
 }
 # Results created before processingProfile became mandatory were produced by
 # the first-generation pipelines.  This fallback must never follow the current
@@ -53,10 +53,11 @@ LEGACY_PROCESSING_PROFILES = {
 READABLE_PROCESSING_PROFILES = {
     "pi": frozenset((
         "pi-default-v1", "pi-default-v2", "pi-default-v3", "pi-default-v4",
+        "pi-default-v5",
     )),
     "pc": frozenset((
         "quality-first-v1", "quality-first-v2", "quality-first-v3",
-        "quality-first-v4", "quality-first-v5",
+        "quality-first-v4", "quality-first-v5", "quality-first-v6",
     )),
 }
 LEGACY_ENGINE = "legacy"
@@ -229,6 +230,256 @@ def _safe_public_job(job: dict) -> dict:
     out.pop("sourcePath", None)
     out.pop("pid", None)
     return out
+
+
+PAGE_LAYOUT_SCHEMA = "reader-page-layout/1"
+_MAX_PAGE_LAYOUT_TABLE_CELLS = 16_384
+_PAGE_LAYOUT_KEYS = {
+    "schema", "textSource", "layoutSource", "mode", "readingDirection",
+    "confidence", "gridColumns", "gridRows", "regions", "tables",
+}
+_PAGE_LAYOUT_REGION_KEYS = {
+    "id", "kind", "order", "bounds", "ranges", "gridRow", "gridColumn",
+    "rowSpan", "columnSpan", "vertical", "tableId", "row", "column",
+}
+_PAGE_LAYOUT_TABLE_KEYS = {
+    "id", "rows", "columns", "xEdges", "yEdges",
+}
+
+
+def unavailable_page_layout(*, reading_direction: str = "ltr") -> dict:
+    return {
+        "schema": PAGE_LAYOUT_SCHEMA,
+        "textSource": "unavailable",
+        "layoutSource": "vision",
+        "mode": "fallback",
+        "readingDirection": "rtl" if reading_direction == "rtl" else "ltr",
+        "confidence": "fallback",
+        "gridColumns": 4,
+        "gridRows": 0,
+        "regions": [],
+        "tables": [],
+    }
+
+
+def _normalize_page_layout(
+    layout,
+    chars: list,
+    page_w: float,
+    page_h: float,
+    *,
+    code: str,
+    status: int,
+) -> dict:
+    """Strictly validate ``reader-page-layout/1`` against final page chars."""
+    def fail(message: str = "invalid OCR page layout"):
+        raise ReaderBookOcrError(code, message, status=status)
+
+    if not isinstance(layout, dict) or set(layout) != _PAGE_LAYOUT_KEYS:
+        fail()
+    if (
+        not math.isfinite(page_w) or page_w <= 0
+        or not math.isfinite(page_h) or page_h <= 0
+    ):
+        fail()
+    if (
+        layout.get("schema") != PAGE_LAYOUT_SCHEMA
+        or layout.get("textSource") not in {"vision", "unavailable"}
+        or layout.get("layoutSource") not in {"manga", "ruled-table", "vision"}
+        or layout.get("mode") not in {"manga", "table", "vision", "fallback"}
+        or layout.get("readingDirection") not in {"ltr", "rtl"}
+        or layout.get("confidence") not in {"high", "low", "fallback"}
+    ):
+        fail()
+
+    def integer(value, *, minimum=0, maximum=None) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            fail()
+        if maximum is not None and value > maximum:
+            fail()
+        return value
+
+    grid_columns = integer(layout.get("gridColumns"), minimum=1, maximum=8)
+    grid_rows = integer(layout.get("gridRows"), maximum=4096)
+    regions = layout.get("regions")
+    tables = layout.get("tables")
+    if (
+        not isinstance(regions, list)
+        or len(regions) > 4096
+        or not isinstance(tables, list)
+        or len(tables) > 64
+    ):
+        fail()
+    if layout["textSource"] == "unavailable":
+        if (
+            layout["layoutSource"] != "vision"
+            or layout["mode"] != "fallback"
+            or layout["confidence"] != "fallback"
+            or regions
+            or tables
+            or grid_rows != 0
+        ):
+            fail()
+        return dict(layout)
+    if layout["mode"] == "fallback" or layout["confidence"] == "fallback":
+        fail()
+    if (layout["layoutSource"], layout["mode"]) not in {
+        ("manga", "manga"),
+        ("ruled-table", "table"),
+        ("vision", "vision"),
+    }:
+        fail()
+    if layout["mode"] == "manga" and grid_columns != 4:
+        fail()
+    if layout["layoutSource"] != "ruled-table" and tables:
+        fail()
+    if layout["mode"] == "table" and not tables:
+        fail()
+    if grid_rows == 0 and regions:
+        fail()
+
+    table_ids = set()
+    table_by_id = {}
+    normalized_tables = []
+    table_cell_count = 0
+    for table in tables:
+        if not isinstance(table, dict) or set(table) != _PAGE_LAYOUT_TABLE_KEYS:
+            fail()
+        table_id = integer(table.get("id"))
+        rows = integer(table.get("rows"), minimum=1, maximum=4096)
+        columns = integer(table.get("columns"), minimum=2, maximum=4096)
+        table_cell_count += rows * columns
+        if table_cell_count > _MAX_PAGE_LAYOUT_TABLE_CELLS:
+            fail()
+        if table_id in table_ids:
+            fail()
+        table_ids.add(table_id)
+        x_edges = table.get("xEdges")
+        y_edges = table.get("yEdges")
+        if (
+            not isinstance(x_edges, list)
+            or len(x_edges) != columns + 1
+            or not isinstance(y_edges, list)
+            or len(y_edges) != rows + 1
+        ):
+            fail()
+        normalized_edges = []
+        for raw_edges, maximum in ((x_edges, page_w), (y_edges, page_h)):
+            if any(isinstance(value, bool) for value in raw_edges):
+                fail()
+            try:
+                edges = [float(value) for value in raw_edges]
+            except (TypeError, ValueError, OverflowError):
+                fail()
+            if (
+                not all(math.isfinite(value) and 0 <= value <= maximum for value in edges)
+                or any(right <= left for left, right in zip(edges, edges[1:]))
+            ):
+                fail()
+            normalized_edges.append(edges)
+        normalized = dict(table)
+        normalized["xEdges"], normalized["yEdges"] = normalized_edges
+        normalized_tables.append(normalized)
+        table_by_id[table_id] = normalized
+
+    region_ids = set()
+    region_orders = set()
+    all_ranges = []
+    total_ranges = 0
+    normalized_regions = []
+    for region in regions:
+        if not isinstance(region, dict) or set(region) != _PAGE_LAYOUT_REGION_KEYS:
+            fail()
+        region_id = integer(region.get("id"))
+        order = integer(region.get("order"))
+        if region_id in region_ids or order in region_orders:
+            fail()
+        region_ids.add(region_id)
+        region_orders.add(order)
+        if region.get("kind") not in {
+            "manga-region", "vision-supplement", "table-cell", "vision-block",
+        }:
+            fail()
+        raw_bounds = region.get("bounds")
+        if not isinstance(raw_bounds, list) or len(raw_bounds) != 4:
+            fail()
+        if any(isinstance(value, bool) for value in raw_bounds):
+            fail()
+        try:
+            bounds = [float(value) for value in raw_bounds]
+        except (TypeError, ValueError, OverflowError):
+            fail()
+        if (
+            not all(math.isfinite(value) and value >= 0 for value in bounds)
+            or bounds[0] > bounds[2]
+            or bounds[1] > bounds[3]
+            or bounds[2] > page_w
+            or bounds[3] > page_h
+        ):
+            fail()
+        grid_row = integer(region.get("gridRow"))
+        grid_column = integer(region.get("gridColumn"))
+        row_span = integer(region.get("rowSpan"), minimum=1, maximum=4096)
+        column_span = integer(region.get("columnSpan"), minimum=1, maximum=8)
+        if (
+            grid_row >= grid_rows
+            or grid_column >= grid_columns
+            or grid_row + row_span > grid_rows
+            or grid_column + column_span > grid_columns
+            or not isinstance(region.get("vertical"), bool)
+        ):
+            fail()
+        ranges = region.get("ranges")
+        if not isinstance(ranges, list) or not ranges:
+            fail()
+        previous_end = -1
+        normalized_ranges = []
+        for value in ranges:
+            if not isinstance(value, list) or len(value) != 2:
+                fail()
+            start = integer(value[0])
+            end = integer(value[1])
+            if start > end or start <= previous_end or end >= len(chars):
+                fail()
+            previous_end = end
+            normalized_ranges.append([start, end])
+            all_ranges.append((start, end))
+            total_ranges += 1
+            if total_ranges > max(len(chars), 1):
+                fail()
+
+        table_id = region.get("tableId")
+        row = region.get("row")
+        column = region.get("column")
+        if region["kind"] == "table-cell":
+            table_id = integer(table_id)
+            row = integer(row)
+            column = integer(column)
+            table = table_by_id.get(table_id)
+            if (
+                table is None
+                or row + row_span > table["rows"]
+                or column + column_span > table["columns"]
+            ):
+                fail()
+        elif table_id is not None or row is not None or column is not None:
+            fail()
+        normalized = dict(region)
+        normalized["bounds"] = bounds
+        normalized["ranges"] = normalized_ranges
+        normalized_regions.append(normalized)
+
+    expected = 0
+    for start, end in sorted(all_ranges):
+        if start != expected:
+            fail("OCR page layout does not conserve character indices")
+        expected = end + 1
+    if expected != len(chars):
+        fail("OCR page layout does not conserve character indices")
+    normalized = dict(layout)
+    normalized["regions"] = normalized_regions
+    normalized["tables"] = normalized_tables
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -518,7 +769,8 @@ class ReaderBookOcrService:
             if capabilities.get("processingProfile") != PROCESSING_PROFILES["pc"]:
                 raise ReaderBookOcrError(
                     "invalid-processing-profile",
-                    "PC OCR worker requires processingProfile=quality-first-v5",
+                    "PC OCR worker requires processingProfile="
+                    + PROCESSING_PROFILES["pc"],
                     status=400,
                 )
             try:
@@ -1441,6 +1693,7 @@ class ReaderBookOcrService:
             "schema", "bookId", "contentSha256", "engine", "pageNumber",
             "page_w", "page_h", "imageWidth", "imageHeight", "chars",
             "furigana", "textCharCount", "generatedAtEpochMs", "tokenized",
+            "layout",
             # 送 Vision 那张图的实际有效 DPI。贴合度出问题时第一个要看的就是它，
             # 所以它必须跟着页一起存下来 —— 事后没法重算。
             #
@@ -1555,6 +1808,24 @@ class ReaderBookOcrService:
         normalized = dict(page)
         normalized["page_w"] = page_w
         normalized["page_h"] = page_h
+        if (
+            job.get("processingProfile") == PROCESSING_PROFILES["pc"]
+            and "layout" not in normalized
+        ):
+            raise ReaderBookOcrError(
+                "invalid-worker-page",
+                "current PC OCR pages require layout metadata",
+                status=400,
+            )
+        if "layout" in normalized:
+            normalized["layout"] = _normalize_page_layout(
+                normalized["layout"],
+                chars,
+                page_w,
+                page_h,
+                code="invalid-worker-page",
+                status=400,
+            )
         normalized["executor"] = "pc"
         normalized["processingProfile"] = job["processingProfile"]
         encoded = self._bounded_json_bytes(
@@ -3173,6 +3444,34 @@ class ReaderBookOcrService:
                     raise ReaderBookOcrError(
                         "ocr-publication-invalid", "OCR page attachment is inconsistent", status=500
                     )
+                current_profile_requires_layout = publication_identity in {
+                    ("pi", PROCESSING_PROFILES["pi"]),
+                    ("pc", PROCESSING_PROFILES["pc"]),
+                }
+                if current_profile_requires_layout and "layout" not in derived:
+                    raise ReaderBookOcrError(
+                        "ocr-publication-invalid",
+                        "current OCR page attachment is missing layout metadata",
+                        status=500,
+                    )
+                if "layout" in derived:
+                    try:
+                        page_w = float(derived.get("page_w"))
+                        page_h = float(derived.get("page_h"))
+                    except (TypeError, ValueError) as exc:
+                        raise ReaderBookOcrError(
+                            "ocr-publication-invalid",
+                            "OCR page layout geometry is invalid",
+                            status=500,
+                        ) from exc
+                    _normalize_page_layout(
+                        derived["layout"],
+                        derived["chars"],
+                        page_w,
+                        page_h,
+                        code="ocr-publication-invalid",
+                        status=500,
+                    )
             else:
                 formula_records = derived.get("formulas") if isinstance(derived, dict) else None
                 if (
@@ -3824,6 +4123,29 @@ class ReaderBookOcrService:
             or not isinstance(furigana, list)
         ):
             raise ReaderBookOcrError("ocr-sidecar-invalid", "OCR sidecar identity mismatch", status=500)
+        if (
+            self._processing_identity(snapshot.get("job"))
+            in {
+                ("pi", PROCESSING_PROFILES["pi"]),
+                ("pc", PROCESSING_PROFILES["pc"]),
+            }
+            and "layout" not in sidecar
+        ):
+            raise ReaderBookOcrError(
+                "ocr-sidecar-invalid",
+                "current OCR sidecar is missing layout metadata",
+                status=500,
+            )
+        if "layout" in sidecar:
+            sidecar = dict(sidecar)
+            sidecar["layout"] = _normalize_page_layout(
+                sidecar["layout"],
+                chars,
+                float(sidecar.get("page_w") or 0),
+                float(sidecar.get("page_h") or 0),
+                code="ocr-sidecar-invalid",
+                status=500,
+            )
         return sidecar, resolved.path
 
     def read_formulas(

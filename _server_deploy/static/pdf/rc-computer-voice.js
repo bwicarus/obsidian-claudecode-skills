@@ -7076,6 +7076,8 @@
       chars: [],
       after: [],
       lastSource: -1,
+      layout: null,
+      layoutFallback: false,
       truncated: false
     };
   }
@@ -7154,6 +7156,178 @@
     };
   }
 
+  function normalizeLocalPageLayout(raw, charCount, pageWidth, pageHeight) {
+    if (raw == null) return null;
+    try {
+      if (typeof pageWidth !== "number" || !Number.isFinite(pageWidth) ||
+          pageWidth <= 0 || typeof pageHeight !== "number" ||
+          !Number.isFinite(pageHeight) || pageHeight <= 0) {
+        throw new Error("本机页面布局缺少页面尺寸");
+      }
+      var topKeys = ["schema", "textSource", "layoutSource", "mode",
+        "readingDirection", "confidence", "gridColumns", "gridRows",
+        "regions", "tables"];
+      var regionKeys = ["id", "kind", "order", "bounds", "ranges",
+        "gridRow", "gridColumn", "rowSpan", "columnSpan", "vertical",
+        "tableId", "row", "column"];
+      var tableKeys = ["id", "rows", "columns", "xEdges", "yEdges"];
+      exactObject(raw, topKeys, [], "本机页面布局");
+      if (raw.schema !== "reader-page-layout/1" ||
+          ["vision", "unavailable"].indexOf(raw.textSource) < 0 ||
+          ["manga", "ruled-table", "vision"].indexOf(raw.layoutSource) < 0 ||
+          ["manga", "table", "vision", "fallback"].indexOf(raw.mode) < 0 ||
+          ["ltr", "rtl"].indexOf(raw.readingDirection) < 0 ||
+          ["high", "low", "fallback"].indexOf(raw.confidence) < 0 ||
+          !Number.isSafeInteger(raw.gridColumns) || raw.gridColumns < 1 ||
+          raw.gridColumns > 8 || !Number.isSafeInteger(raw.gridRows) ||
+          raw.gridRows < 0 || raw.gridRows > 4096 ||
+          !Array.isArray(raw.regions) || raw.regions.length > 4096 ||
+          !Array.isArray(raw.tables) || raw.tables.length > 64) {
+        throw new Error("本机页面布局无效");
+      }
+      if (raw.textSource === "unavailable") {
+        if (raw.mode !== "fallback" || raw.confidence !== "fallback" ||
+            raw.layoutSource !== "vision" || raw.gridRows !== 0 ||
+            raw.regions.length || raw.tables.length) {
+          throw new Error("本机页面布局无效");
+        }
+        return {
+          schema: raw.schema, textSource: raw.textSource,
+          layoutSource: raw.layoutSource, mode: raw.mode,
+          readingDirection: raw.readingDirection, confidence: raw.confidence,
+          gridColumns: raw.gridColumns, gridRows: 0, regions: [], tables: []
+        };
+      }
+      if (!charCount || !raw.regions.length || !raw.gridRows ||
+          raw.mode === "fallback" || raw.confidence === "fallback" ||
+          (raw.mode === "manga" &&
+            (raw.layoutSource !== "manga" || raw.gridColumns !== 4)) ||
+          (raw.mode === "table" && raw.layoutSource !== "ruled-table") ||
+          (raw.mode === "vision" && raw.layoutSource !== "vision")) {
+        throw new Error("本机页面布局无效");
+      }
+      var tablesById = Object.create(null);
+      var totalTableCells = 0;
+      var tables = raw.tables.map(function (table) {
+        exactObject(table, tableKeys, [], "本机页面表格布局");
+        if (!Number.isSafeInteger(table.id) || table.id < 0 ||
+            tablesById[table.id] || !Number.isSafeInteger(table.rows) ||
+            table.rows < 1 || table.rows > 4096 ||
+            !Number.isSafeInteger(table.columns) || table.columns < 2 ||
+            table.columns > 4096) {
+          throw new Error("本机页面表格布局无效");
+        }
+        totalTableCells += table.rows * table.columns;
+        if (totalTableCells > 16384) {
+          throw new Error("本机页面表格布局无效");
+        }
+        function normalizedEdges(values, count, maximum) {
+          if (!Array.isArray(values) || values.length !== count) {
+            throw new Error("本机页面表格布局无效");
+          }
+          return values.map(function (value, index) {
+            if (typeof value !== "number" || !Number.isFinite(value) || value < 0 ||
+                value > maximum || (index && value <= values[index - 1])) {
+              throw new Error("本机页面表格布局无效");
+            }
+            return value;
+          });
+        }
+        var normalized = {
+          id: table.id, rows: table.rows, columns: table.columns,
+          xEdges: normalizedEdges(table.xEdges, table.columns + 1, pageWidth),
+          yEdges: normalizedEdges(table.yEdges, table.rows + 1, pageHeight)
+        };
+        tablesById[table.id] = normalized;
+        return normalized;
+      });
+      if ((raw.mode === "table") !== (tables.length > 0)) {
+        throw new Error("本机页面布局无效");
+      }
+      var covered = new Uint8Array(charCount);
+      var ids = Object.create(null);
+      var orders = Object.create(null);
+      var totalRanges = 0;
+      var regions = raw.regions.map(function (region) {
+        exactObject(region, regionKeys, [], "本机页面区域布局");
+        if (!Number.isSafeInteger(region.id) || region.id < 0 || ids[region.id] ||
+            !Number.isSafeInteger(region.order) || region.order < 0 ||
+            orders[region.order] ||
+            ["manga-region", "vision-supplement", "table-cell", "vision-block"]
+              .indexOf(region.kind) < 0 ||
+            !Array.isArray(region.bounds) || region.bounds.length !== 4 ||
+            !region.bounds.every(function (value) {
+              return typeof value === "number" && Number.isFinite(value) && value >= 0;
+            }) || region.bounds[2] < region.bounds[0] ||
+            region.bounds[3] < region.bounds[1] ||
+            region.bounds[2] > pageWidth || region.bounds[3] > pageHeight ||
+            !Array.isArray(region.ranges) || !region.ranges.length ||
+            !Number.isSafeInteger(region.gridRow) || region.gridRow < 0 ||
+            !Number.isSafeInteger(region.gridColumn) || region.gridColumn < 0 ||
+            !Number.isSafeInteger(region.rowSpan) || region.rowSpan < 1 ||
+            !Number.isSafeInteger(region.columnSpan) || region.columnSpan < 1 ||
+            region.gridRow + region.rowSpan > raw.gridRows ||
+            region.gridColumn + region.columnSpan > raw.gridColumns ||
+            typeof region.vertical !== "boolean") {
+          throw new Error("本机页面区域布局无效");
+        }
+        ids[region.id] = true;
+        orders[region.order] = true;
+        var previousEnd = -1;
+        var ranges = region.ranges.map(function (range) {
+          totalRanges += 1;
+          if (!Array.isArray(range) || range.length !== 2 ||
+              totalRanges > Math.max(charCount, 1) ||
+              !Number.isSafeInteger(range[0]) || !Number.isSafeInteger(range[1]) ||
+              range[0] < 0 || range[1] < range[0] || range[1] >= charCount ||
+              range[0] <= previousEnd) {
+            throw new Error("本机页面区域范围无效");
+          }
+          previousEnd = range[1];
+          for (var index = range[0]; index <= range[1]; index += 1) {
+            if (covered[index]) throw new Error("本机页面区域范围重叠");
+            covered[index] = 1;
+          }
+          return [range[0], range[1]];
+        });
+        var tableId = region.tableId;
+        var row = region.row;
+        var column = region.column;
+        if (region.kind === "table-cell") {
+          var table = Number.isSafeInteger(tableId) && tableId >= 0
+            ? tablesById[tableId] : null;
+          if (!table || !Number.isSafeInteger(row) || row < 0 ||
+              !Number.isSafeInteger(column) || column < 0 ||
+              row + region.rowSpan > table.rows ||
+              column + region.columnSpan > table.columns) {
+            throw new Error("本机页面单元格布局无效");
+          }
+        } else if (tableId !== null || row !== null || column !== null) {
+          throw new Error("本机页面区域表格字段无效");
+        }
+        return {
+          id: region.id, kind: region.kind, order: region.order,
+          bounds: region.bounds.slice(), ranges: ranges,
+          gridRow: region.gridRow, gridColumn: region.gridColumn,
+          rowSpan: region.rowSpan, columnSpan: region.columnSpan,
+          vertical: region.vertical, tableId: tableId, row: row, column: column
+        };
+      });
+      for (var index = 0; index < covered.length; index += 1) {
+        if (!covered[index]) throw new Error("本机页面区域未完整覆盖字符");
+      }
+      return {
+        schema: raw.schema, textSource: raw.textSource,
+        layoutSource: raw.layoutSource, mode: raw.mode,
+        readingDirection: raw.readingDirection, confidence: raw.confidence,
+        gridColumns: raw.gridColumns, gridRows: raw.gridRows,
+        regions: regions, tables: tables
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
   function localPageRecord(page, fallbackText) {
     page = Number(page) || 0;
     var fallback = cleanLocalPageText(
@@ -7172,6 +7346,17 @@
         function (result) {
           var chars = result && Array.isArray(result.chars) ? result.chars : [];
           var record = normalizeLocalPageChars(chars, LOCAL_PAGE_CONTEXT_LIMIT);
+          record.layout = normalizeLocalPageLayout(
+            result && result.layout, record.chars.length,
+            Number(result && result.pageWidth), Number(result && result.pageHeight)
+          );
+          record.layoutFallback = !!(
+            result && (result.layoutFallback === true ||
+              (result.layout && (!record.layout ||
+                record.layout.textSource !== "vision" ||
+                record.layout.confidence !== "high" ||
+                record.layout.mode === "fallback")))
+          );
           return record.text ? record : emptyLocalPageRecord(fallback);
         }
       );
@@ -9016,6 +9201,200 @@
       '"⟧' + escapeLocalContextText(semanticBody) + '⟦CARD_END⟧';
   }
 
+  function localLayoutCardMarker(item) {
+    return localCardMarker(item)
+      .replace(/\|/g, "\\|")
+      .replace(/\r\n?|\n/g, "<br>");
+  }
+
+  function localLayoutBuilder(pageRecord) {
+    return {
+      text: "",
+      after: new Array(pageRecord.chars.length),
+      append: function (value) { this.text += String(value || ""); }
+    };
+  }
+
+  function escapeLocalLayoutText(value) {
+    return String(value || "")
+      .replace(/\\/g, "\\\\")
+      .replace(/\|/g, "\\|")
+      .replace(/⟦/g, "\\⟦")
+      .replace(/⟧/g, "\\⟧");
+  }
+
+  function appendLocalLayoutRegion(builder, pageRecord, region) {
+    var wrote = false;
+    region.ranges.forEach(function (range, rangeIndex) {
+      var pending = [];
+      var rangeWrote = false;
+      for (var sourceIndex = range[0]; sourceIndex <= range[1]; sourceIndex += 1) {
+        var source = pageRecord.chars[sourceIndex] || {};
+        var value = String(source.c == null ? "" : source.c)
+          .replace(/\u0000/g, "")
+          .replace(/\r\n?/g, "\n")
+          .replace(/\s+/g, " ");
+        var semantic = value.trim();
+        if (!semantic) {
+          pending.push(sourceIndex);
+          continue;
+        }
+        if (pending.length && (wrote || rangeWrote)) builder.append(" ");
+        pending.forEach(function (index) { builder.after[index] = builder.text.length; });
+        pending = [];
+        if (rangeIndex > 0 && !rangeWrote && wrote) builder.append("<br>");
+        builder.append(escapeLocalLayoutText(semantic));
+        builder.after[sourceIndex] = builder.text.length;
+        rangeWrote = true;
+        wrote = true;
+      }
+      pending.forEach(function (index) { builder.after[index] = builder.text.length; });
+    });
+    return wrote;
+  }
+
+  function appendLocalMangaLayout(builder, pageRecord, layout) {
+    var cells = [];
+    for (var row = 0; row < layout.gridRows; row += 1) {
+      cells[row] = [[], [], [], []];
+    }
+    layout.regions.forEach(function (region) {
+      cells[region.gridRow][region.gridColumn].push(region);
+    });
+    cells.forEach(function (row) {
+      row.forEach(function (regions) {
+        regions.sort(function (left, right) { return left.order - right.order; });
+      });
+    });
+    builder.append("| 左 | 中左 | 中右 | 右 |\n| --- | --- | --- | --- |\n");
+    cells.forEach(function (row) {
+      builder.append("|");
+      row.forEach(function (regions) {
+        builder.append(" ");
+        regions.forEach(function (region, index) {
+          if (index) builder.append("<br>");
+          builder.append("[" + String(region.order + 1).padStart(2, "0") + "] ");
+          appendLocalLayoutRegion(builder, pageRecord, region);
+        });
+        builder.append(" |");
+      });
+      builder.append("\n");
+    });
+  }
+
+  function appendLocalTableLayout(builder, pageRecord, layout) {
+    function sharesVisualLine(left, right) {
+      var overlap = Math.min(left.bounds[3], right.bounds[3]) -
+        Math.max(left.bounds[1], right.bounds[1]);
+      var shorterHeight = Math.min(
+        left.bounds[3] - left.bounds[1],
+        right.bounds[3] - right.bounds[1]
+      );
+      return overlap > 0 && shorterHeight > 0 && overlap >= shorterHeight / 2;
+    }
+    var blocks = [];
+    layout.regions.filter(function (region) {
+      return region.kind !== "table-cell";
+    }).forEach(function (region) {
+      blocks.push({ order: region.order, region: region, table: null });
+    });
+    layout.tables.forEach(function (table) {
+      var regions = layout.regions.filter(function (region) {
+        return region.kind === "table-cell" && region.tableId === table.id;
+      });
+      blocks.push({
+        order: regions.reduce(function (minimum, region) {
+          return Math.min(minimum, region.order);
+        }, Number.MAX_SAFE_INTEGER),
+        region: null,
+        table: table,
+        regions: regions
+      });
+    });
+    blocks.sort(function (left, right) { return left.order - right.order; });
+    blocks.forEach(function (block, blockIndex) {
+      if (blockIndex) builder.append("\n");
+      if (block.region) {
+        appendLocalLayoutRegion(builder, pageRecord, block.region);
+        builder.append("\n");
+        return;
+      }
+      var table = block.table;
+      var cells = [];
+      for (var row = 0; row < table.rows; row += 1) {
+        cells[row] = [];
+        for (var column = 0; column < table.columns; column += 1) {
+          cells[row][column] = [];
+        }
+      }
+      block.regions.forEach(function (region) {
+        cells[region.row][region.column].push(region);
+      });
+      cells.forEach(function (row) {
+        row.forEach(function (regions) {
+          regions.sort(function (left, right) { return left.order - right.order; });
+        });
+      });
+      cells.forEach(function (row, rowIndex) {
+        builder.append("|");
+        row.forEach(function (regions) {
+          builder.append(" ");
+          regions.forEach(function (region, index) {
+            if (index && !sharesVisualLine(regions[index - 1], region)) {
+              builder.append("<br>");
+            }
+            appendLocalLayoutRegion(builder, pageRecord, region);
+          });
+          builder.append(" |");
+        });
+        builder.append("\n");
+        if (rowIndex === 0) {
+          builder.append("|" + new Array(table.columns).fill(" --- ").join("|") + "|\n");
+        }
+      });
+    });
+  }
+
+  function localStructuredPageProjection(pageRecord, projected, revision) {
+    var layout = pageRecord.layout;
+    if (!layout || layout.textSource !== "vision" ||
+        layout.confidence !== "high" ||
+        (layout.mode !== "manga" && layout.mode !== "table")) return null;
+    var builder = localLayoutBuilder(pageRecord);
+    if (layout.mode === "manga") {
+      appendLocalMangaLayout(builder, pageRecord, layout);
+    } else {
+      appendLocalTableLayout(builder, pageRecord, layout);
+    }
+    if (builder.after.some(function (offset) { return !Number.isSafeInteger(offset); })) {
+      return null;
+    }
+    var inserts = Object.create(null);
+    for (var index = 0; index < projected.length; index += 1) {
+      var item = projected[index];
+      var offset = builder.after[item.range.hi];
+      if (!Number.isSafeInteger(offset)) return null;
+      if (!inserts[offset]) inserts[offset] = [];
+      inserts[offset].push(item);
+    }
+    var offsets = Object.keys(inserts).map(Number).sort(function (a, b) { return a - b; });
+    var output = "";
+    var cursor = 0;
+    offsets.forEach(function (offset) {
+      output += builder.text.slice(cursor, offset);
+      inserts[offset].forEach(function (item) {
+        output += localLayoutCardMarker(Object.assign({ revision: revision }, item));
+      });
+      cursor = offset;
+    });
+    output += builder.text.slice(cursor);
+    return {
+      text: output,
+      mode: layout.mode,
+      sourceAfter: builder.after
+    };
+  }
+
   function annotateLocalPageRange(pageRecord, projected, start, end, revision) {
     start = Math.max(0, Math.min(pageRecord.text.length, Number(start) || 0));
     end = Math.max(start, Math.min(pageRecord.text.length, Number(end) || 0));
@@ -9134,7 +9513,32 @@
       if (!visible) visible = currentText.slice(0, 5000);
       var exactIndex = visible ? currentText.indexOf(visible) : -1;
       var sections = [];
-      if (exactIndex >= 0) {
+      var structured = localStructuredPageProjection(
+        currentPage, projected, pageCardProjection.value.revision
+      );
+      if (structured) {
+        var previousStructured = localStructuredPageProjection(previous, [], null);
+        var nextStructured = localStructuredPageProjection(next, [], null);
+        var previousText = previousStructured
+          ? previousStructured.text : escapeLocalContextText(previous.text);
+        var nextText = nextStructured
+          ? nextStructured.text : escapeLocalContextText(next.text);
+        if (previousText) {
+          sections.push("【当前页之前】\n" + previousText.slice(-2200));
+        }
+        if (visible) {
+          sections.push("【当前屏幕可见原文】\n" + escapeLocalContextText(visible));
+        }
+        sections.push(
+          structured.mode === "manga"
+            ? "【当前页结构化文字（Markdown；按 [NN] 编号顺序阅读；四列为空表示该位置没有文字）】\n" +
+                structured.text
+            : "【当前页结构化文字（Markdown 表格）】\n" + structured.text
+        );
+        if (nextText) {
+          sections.push("【当前页之后】\n" + nextText.slice(0, 2200));
+        }
+      } else if (exactIndex >= 0) {
         var beforeParts = [];
         if (previous.text) {
           beforeParts.push(escapeLocalContextText(previous.text.slice(-2200)));
@@ -9183,6 +9587,12 @@
             escapeLocalContextText(next.text.slice(0, 2200)));
         }
       }
+      if (!structured && currentPage.layoutFallback) {
+        sections.push(
+          "【布局提示】布局信息置信度不足，已按 Vision 原顺序提供正文；" +
+          "如需确认人物、气泡或空间关系，可按需调用 reader_visual_image。"
+        );
+      }
       if (unboundMarkers.length) {
         sections.push("【当前页未锚定卡片（不参与正文及右侧标记序号）】\n" +
           unboundMarkers.join("\n"));
@@ -9199,7 +9609,8 @@
         title: current.title || "",
         text: text,
         textAvailable: !!text.trim(),
-        textSource: "app-local-visible-window",
+        textSource: structured
+          ? "app-local-structured-layout" : "app-local-visible-window",
         fallbackReason: text ? null : "本机文字层尚未提供当前页文字",
         truncated: bounded.truncated || currentPage.truncated ||
           previous.truncated || next.truncated || unboundTruncated

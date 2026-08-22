@@ -51,6 +51,41 @@ function contextCardFixture(card, replacement = null) {
   };
 }
 
+function pageLayoutRegion(overrides = {}) {
+  return {
+    id: 0,
+    kind: "manga-region",
+    order: 0,
+    bounds: [0, 0, 10, 10],
+    ranges: [[0, 0]],
+    gridRow: 0,
+    gridColumn: 0,
+    rowSpan: 1,
+    columnSpan: 1,
+    vertical: false,
+    tableId: null,
+    row: null,
+    column: null,
+    ...overrides,
+  };
+}
+
+function pageLayoutFixture(overrides = {}) {
+  return {
+    schema: "reader-page-layout/1",
+    textSource: "vision",
+    layoutSource: "manga",
+    mode: "manga",
+    readingDirection: "rtl",
+    confidence: "high",
+    gridColumns: 4,
+    gridRows: 1,
+    regions: [],
+    tables: [],
+    ...overrides,
+  };
+}
+
 function createAudioContextClass(scenario) {
   return class FakeAudioContext {
     constructor(options) {
@@ -1078,6 +1113,8 @@ function createHarness(overrides = {}) {
     nativePageContextPublishes: [],
     nativePageTexts: {},
     nativePageChars: {},
+    nativePageLayouts: {},
+    nativePageDimensions: {},
     nativePageCards: {},
     nativePageCardReads: [],
     nativePageCardRevision: 1,
@@ -1324,9 +1361,16 @@ function createHarness(overrides = {}) {
       pageTextProvider: {
         contract: "reader-page-text-provider/1",
         pageChars(page) {
+          const dimensions = scenario.nativePageDimensions[page] || {};
+          const pageWidth = Number(dimensions.pageWidth) || 100000;
+          const pageHeight = Number(dimensions.pageHeight) || 100000;
           if (Array.isArray(scenario.nativePageChars[page])) {
             return Promise.resolve({
               chars: structuredClone(scenario.nativePageChars[page]),
+              pageWidth,
+              pageHeight,
+              layout: scenario.nativePageLayouts[page]
+                ? structuredClone(scenario.nativePageLayouts[page]) : null,
             });
           }
           const text = String(scenario.nativePageTexts[page] || "");
@@ -1339,6 +1383,10 @@ function createHarness(overrides = {}) {
               y1: 12,
               sp: /\s/.test(character),
             })),
+            pageWidth,
+            pageHeight,
+            layout: scenario.nativePageLayouts[page]
+              ? structuredClone(scenario.nativePageLayouts[page]) : null,
           });
         },
       },
@@ -4029,6 +4077,226 @@ test("原生 App 本地书把当前视口前后正文写进本地 page.context",
   await disableSnapshot(harness);
 });
 
+test("高置信漫画布局生成四列 Markdown 且 CARD 仍按原字符下标插在绑定词后", async () => {
+  const chars = Array.from("左文右文", (character, index) => ({
+    c: character,
+    x0: index < 2 ? 10 + index * 10 : 70 + index * 10,
+    y0: 10,
+    x1: index < 2 ? 19 + index * 10 : 79 + index * 10,
+    y1: 22,
+    sp: false,
+  }));
+  const layout = pageLayoutFixture({
+    regions: [
+      pageLayoutRegion({
+        id: 10, order: 0, bounds: [70, 10, 110, 22],
+        ranges: [[2, 3]], gridColumn: 3,
+      }),
+      pageLayoutRegion({
+        id: 11, order: 1, bounds: [10, 10, 40, 22],
+        ranges: [[0, 1]], gridColumn: 0,
+      }),
+    ],
+  });
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeLocalPageContext: true,
+    contextSyncStorage: new Map([["eph-ctx-sync", "1"]]),
+    contextDeliveryMode: "snapshot-mcp",
+    nativePageChars: { 7: chars },
+    nativePageLayouts: { 7: layout },
+    nativePageCards: {
+      7: [contextCardFixture({
+        id: "c_layout0000000001",
+        kind: "card",
+        label: "右文",
+        text: "右|侧\n卡片",
+        bind: { kind: "page-chars", page: 7, from: 2, to: 3, text: "右文" },
+      })],
+    },
+    readerAdapterContext: { visible_text: "左文" },
+    activeReading: {
+      kind: "pdf", file: "localbook:manga-layout", title: "Manga layout", pos: 7,
+    },
+  });
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.nativePageContextPublishes.length === 1,
+    "manga Markdown page context",
+  );
+  const payload = harness.scenario.nativePageContextPublishes[0];
+  assert.equal(payload.textSource, "app-local-structured-layout");
+  assert.match(payload.text, /【当前屏幕可见原文】\n左文/);
+  assert.match(payload.text, /按 \[NN\] 编号顺序阅读/);
+  assert.match(payload.text, /\| 左 \| 中左 \| 中右 \| 右 \|/);
+  assert.match(
+    payload.text,
+    /\| \[02\] 左文 \|  \|  \| \[01\] 右文⟦CARD_START n="1" id="c_layout0000000001"/,
+  );
+  assert.doesNotMatch(payload.text, /reader_visual_image/);
+  assert.equal((payload.text.match(/⟦CARD_START /g) || []).length, 1);
+  assert.equal((payload.text.match(/⟦CARD_END⟧/g) || []).length, 1);
+  assert.match(payload.text, /⟧右\\\|侧<br>卡片⟦CARD_END⟧/);
+  await disableSnapshot(harness);
+});
+
+test("规则表格布局生成标准 Markdown 数据表", async () => {
+  const text = "国家特征韩国A旁C辣脆";
+  const positions = [
+    [0, 0], [10, 0], [50, 0], [60, 0],
+    [0, 20], [10, 20], [50, 20], [20, 20], [70, 21],
+    [50, 31], [60, 31],
+  ];
+  const chars = Array.from(text, (character, index) => ({
+    c: character, x0: positions[index][0], y0: positions[index][1],
+    x1: positions[index][0] + 9,
+    y1: positions[index][1] + (index < 4 ? 12 : index < 9 ? 9 : 8),
+    sp: false,
+  }));
+  const cell = (id, order, range, row, column, overrides = {}) => pageLayoutRegion({
+    id, kind: "table-cell", order, ranges: [range],
+    bounds: [column * 50, row * 20, column * 50 + 49, row * 20 + 19],
+    gridRow: row, gridColumn: column,
+    tableId: 3, row, column,
+    ...overrides,
+  });
+  const layout = pageLayoutFixture({
+    layoutSource: "ruled-table",
+    mode: "table",
+    readingDirection: "ltr",
+    gridColumns: 2,
+    gridRows: 2,
+    regions: [
+      cell(0, 0, [0, 1], 0, 0), cell(1, 1, [2, 3], 0, 1),
+      cell(2, 2, [4, 5], 1, 0),
+      cell(3, 3, [6, 6], 1, 1, { bounds: [50, 20, 65, 30] }),
+      cell(4, 4, [7, 7], 1, 0, { bounds: [20, 20, 35, 29] }),
+      cell(5, 5, [8, 8], 1, 1, { bounds: [70, 21, 85, 30] }),
+      cell(6, 6, [9, 10], 1, 1, { bounds: [50, 31, 85, 39] }),
+    ],
+    tables: [{
+      id: 3, rows: 2, columns: 2,
+      xEdges: [0, 50, 100], yEdges: [0, 20, 40],
+    }],
+  });
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeLocalPageContext: true,
+    contextSyncStorage: new Map([["eph-ctx-sync", "1"]]),
+    contextDeliveryMode: "snapshot-mcp",
+    nativePageChars: { 46: chars },
+    nativePageLayouts: { 46: layout },
+    readerAdapterContext: { visible_text: "韩国A旁C" },
+    activeReading: {
+      kind: "pdf", file: "localbook:table-layout", title: "Table layout", pos: 46,
+    },
+  });
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.nativePageContextPublishes.length === 1,
+    "table Markdown page context",
+  );
+  assert.match(
+    harness.scenario.nativePageContextPublishes[0].text,
+    /\| 国家 \| 特征 \|\n\| --- \| --- \|\n\| 韩国旁 \| AC<br>辣脆 \|/,
+  );
+  assert.doesNotMatch(
+    harness.scenario.nativePageContextPublishes[0].text,
+    /A<br>C/,
+  );
+  await disableSnapshot(harness);
+});
+
+test("低置信或不完整布局回退 Vision 原顺序并给出按需看图提示", async (t) => {
+  const baseRegions = [
+    pageLayoutRegion({ id: 1, order: 0, ranges: [[1, 1]], gridColumn: 3 }),
+    pageLayoutRegion({ id: 2, order: 1, ranges: [[0, 0]], gridColumn: 0 }),
+  ];
+  const tableFixture = (id, rows, columns) => ({
+    id, rows, columns,
+    xEdges: Array.from({ length: columns + 1 }, (_, index) =>
+      index * 100 / columns),
+    yEdges: Array.from({ length: rows + 1 }, (_, index) =>
+      index * 100 / rows),
+  });
+  for (const [name, layout] of [
+    ["low-confidence", pageLayoutFixture({ confidence: "low", regions: baseRegions })],
+    ["incomplete", pageLayoutFixture({ regions: [baseRegions[0]] })],
+    ["out-of-page", pageLayoutFixture({
+      regions: [
+        pageLayoutRegion({
+          id: 1, order: 0, bounds: [90, 0, 101, 10],
+          ranges: [[0, 0]], gridColumn: 0,
+        }),
+        pageLayoutRegion({
+          id: 2, order: 1, bounds: [10, 0, 20, 10],
+          ranges: [[1, 1]], gridColumn: 1,
+        }),
+      ],
+    })],
+    ["single-table-cell-limit", pageLayoutFixture({
+      layoutSource: "ruled-table",
+      mode: "table",
+      tables: [tableFixture(1, 128, 129)],
+      regions: baseRegions,
+    })],
+    ["cumulative-table-cell-limit", pageLayoutFixture({
+      layoutSource: "ruled-table",
+      mode: "table",
+      tables: [tableFixture(1, 100, 82), tableFixture(2, 100, 82)],
+      regions: baseRegions,
+    })],
+    ["unavailable-manga-source", pageLayoutFixture({
+      textSource: "unavailable",
+      layoutSource: "manga",
+      mode: "fallback",
+      confidence: "fallback",
+      gridRows: 0,
+      regions: [],
+    })],
+    ["unavailable-table-source", pageLayoutFixture({
+      textSource: "unavailable",
+      layoutSource: "ruled-table",
+      mode: "fallback",
+      confidence: "fallback",
+      gridRows: 0,
+      regions: [],
+    })],
+  ]) {
+    await t.test(name, async () => {
+      const harness = createHarness({
+        origin: NATIVE_APP_ORIGIN,
+        nativeComputerVoice: true,
+        nativeLocalPageContext: true,
+        contextSyncStorage: new Map([["eph-ctx-sync", "1"]]),
+        contextDeliveryMode: "snapshot-mcp",
+        nativePageTexts: { 9: "甲乙" },
+        nativePageLayouts: { 9: layout },
+        nativePageDimensions: {
+          9: { pageWidth: 100, pageHeight: 100 },
+        },
+        readerAdapterContext: { visible_text: "甲乙" },
+        activeReading: {
+          kind: "pdf", file: `localbook:${name}`, title: name, pos: 9,
+        },
+      });
+      await waitForRequest(harness, "context-open");
+      await waitForCondition(
+        () => harness.scenario.nativePageContextPublishes.length === 1,
+        `${name} fallback page context`,
+      );
+      const payload = harness.scenario.nativePageContextPublishes[0];
+      assert.equal(payload.textSource, "app-local-visible-window");
+      assert.match(payload.text, /甲乙/);
+      assert.doesNotMatch(payload.text, /\[01\]|\| 左 \|/);
+      assert.match(payload.text, /reader_visual_image/);
+      await disableSnapshot(harness);
+    });
+  }
+});
+
 test("本地卡片投影 capability 缺失时仍发布纯正文且不从 DOM 猜卡", async () => {
   const harness = createHarness({
     origin: NATIVE_APP_ORIGIN,
@@ -4521,6 +4789,31 @@ test("本地 page.context 截断不会留下半个 CARD marker", async () => {
       6: "P".repeat(3000),
       7: "A".repeat(230000),
       8: "N".repeat(3000),
+    },
+    nativePageLayouts: {
+      7: pageLayoutFixture({
+        layoutSource: "ruled-table",
+        mode: "table",
+        readingDirection: "ltr",
+        gridColumns: 2,
+        gridRows: 1,
+        regions: [
+          pageLayoutRegion({
+            id: 0, kind: "table-cell", order: 0,
+            bounds: [0, 0, 1, 1], ranges: [[0, 114999]],
+            gridColumn: 0, tableId: 0, row: 0, column: 0,
+          }),
+          pageLayoutRegion({
+            id: 1, kind: "table-cell", order: 1,
+            bounds: [1, 0, 2, 1], ranges: [[115000, 229999]],
+            gridColumn: 1, tableId: 0, row: 0, column: 1,
+          }),
+        ],
+        tables: [{
+          id: 0, rows: 1, columns: 2,
+          xEdges: [0, 1, 2], yEdges: [0, 1],
+        }],
+      }),
     },
     nativePageCards: {
       7: [

@@ -9,6 +9,7 @@ const PROCESSOR = read("ios/BWReader/App/NativeBookOCRProcessor.swift");
 const STORE = read("ios/BWReader/App/NativeBookOCRStore.swift");
 const MANAGER = read("ios/BWReader/App/NativeBookOCRManager.swift");
 const BRIDGE = read("ios/BWReader/App/NativeBookOCRBridge.swift");
+const PI_OCR = read("ios/BWReader/App/ReaderPiBookOCR.swift");
 
 /// 取一个方法的函数体：从 `func 名(` 到下一个同缩进的 `func`。
 ///
@@ -288,6 +289,7 @@ test("page sidecars bind full content identity, geometry, and engine revision", 
   ]) {
     assert.match(MODELS, new RegExp(`let ${key}:`));
   }
+  assert.match(MODELS, /(?:let|var) layout: NativeBookOCRPageLayout\?/);
   for (const key of [
     "c", "x0", "y0", "x1", "y1", "sp", "w", "b", "bk", "line", "vertical",
   ]) {
@@ -373,15 +375,81 @@ test("Pi and PC attachment receipts verify durable per-page character counts", (
 test("new manga geometry profiles import as a fresh engine revision", () => {
   const importBody = bodyOf(STORE, "importDerivedAttachments");
   const convertBody = bodyOf(STORE, "convertPiPage");
-  assert.match(STORE, /"quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4", "quality-first-v5"/);
+  assert.match(STORE, /"quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4", "quality-first-v5", "quality-first-v6"/);
+  assert.match(STORE, /"pi-default-v1", "pi-default-v2", "pi-default-v3", "pi-default-v4", "pi-default-v5"/);
+  assert.match(PI_OCR, /"quality-first-v5", "quality-first-v6"/);
+  assert.match(PI_OCR, /"pi-default-v4", "pi-default-v5"/);
   assert.match(importBody, /processingProfile: processingProfile/);
   assert.match(convertBody, /processingProfile: String/);
+  assert.match(
+    convertBody,
+    /"pi-default-v5", "quality-first-v6"[\s\S]*geometryVersion = 4/,
+  );
   assert.match(
     convertBody,
     /"pi-default-v3", "pi-default-v4", "quality-first-v4", "quality-first-v5"[\s\S]*geometryVersion = 3/,
   );
   assert.match(convertBody, /"pi-default-v2", "quality-first-v3"[\s\S]*geometryVersion = 2/);
   assert.match(convertBody, /let revision = "\\\(executor\)-\\\(value\.engine\)\/\\\(geometryVersion\)"/);
+});
+
+test("native imports preserve the strict Vision-backed page layout contract", () => {
+  assert.match(MODELS, /reader-page-layout\/1/);
+  assert.match(MODELS, /let layout: NativeBookOCRPageLayout\?/);
+  assert.doesNotMatch(MODELS, /var layout: NativeBookOCRPageLayout\? = nil/);
+  for (const field of [
+    "textSource", "layoutSource", "mode", "readingDirection", "confidence",
+    "gridColumns", "gridRows", "regions", "tables",
+  ]) {
+    assert.match(MODELS, new RegExp(`let ${field}:`));
+  }
+  for (const literal of [
+    "ruled-table", "manga-region", "vision-supplement", "table-cell",
+    "vision-block", "ltr", "rtl",
+  ]) {
+    assert.match(MODELS, new RegExp(`"${literal}"`));
+  }
+  assert.match(MODELS, /rejectUnknownOCRFields\(from: decoder/);
+  assert.match(MODELS, /OCR layout nullable fields are required/);
+  assert.match(MODELS, /func encode\(to encoder: Encoder\) throws/);
+  assert.match(MODELS, /encodeNil\(forKey: \.tableId\)/);
+  assert.match(MODELS, /encodeNil\(forKey: \.row\)/);
+  assert.match(MODELS, /encodeNil\(forKey: \.column\)/);
+  assert.match(MODELS, /var totalTableCells = 0/);
+  assert.match(MODELS, /tableCells <= 16_384 - totalTableCells/);
+  assert.match(MODELS, /OCR layout tables exceed the safe cell limit/);
+  assert.match(MODELS, /textSource == \.unavailable/);
+  assert.match(MODELS, /layoutSource == \.vision/);
+  assert.match(MODELS, /Unavailable OCR layout must use the Vision fallback shape/);
+
+  const validate = bodyOf(STORE, "validatePiPageLayout");
+  assert.match(validate, /\(1\.\.\.8\)\.contains\(layout\.gridColumns\)/);
+  assert.match(validate, /\(0\.\.\.4_096\)\.contains\(layout\.gridRows\)/);
+  assert.match(validate, /layout\.regions\.count <= 4_096/);
+  assert.match(validate, /layout\.tables\.count <= 64/);
+  assert.match(validate, /layout\.mode != \.fallback/);
+  assert.match(validate, /layout\.confidence != \.fallback/);
+  assert.match(validate, /layout\.mode != \.manga \|\| layout\.gridColumns == 4/);
+  assert.match(validate, /\(2\.\.\.4_096\)\.contains\(table\.columns\)/);
+  assert.match(validate, /regionIDs\.insert\(region\.id\)\.inserted/);
+  assert.match(validate, /regionOrders\.insert\(region\.order\)\.inserted/);
+  assert.match(validate, /tableByID\.updateValue\(table, forKey: table\.id\) == nil/);
+  assert.match(validate, /region\.gridRow < layout\.gridRows/);
+  assert.match(validate, /region\.ranges\.isEmpty/);
+  assert.match(validate, /range\[0\] > previousRangeEnd/);
+  assert.match(validate, /range\[1\] < chars\.count/);
+  assert.match(validate, /region\.rowSpan <= table\.rows - row/);
+  assert.match(validate, /region\.columnSpan <= table\.columns - column/);
+  assert.match(validate, /!coverage\[index\]/);
+  assert.match(validate, /coverage\.allSatisfy\(\{ \$0 \}\)/);
+  assert.match(validate, /layout\.mode == \.fallback/);
+  assert.match(validate, /layout\.regions\.isEmpty/);
+  assert.match(validate, /layout\.tables\.isEmpty/);
+  assert.match(
+    STORE,
+    /value\.engine == "manga" && layout\?\.textSource == \.vision[\s\S]*\? \.exact : \.estimated/,
+  );
+  assert.match(BRIDGE, /"chars": \[\],[\s\S]*"layout": NSNull\(\)/);
 });
 
 test("native page text bridge data is available without coupling the core to UI files", () => {
@@ -508,12 +576,15 @@ test("native update event and page formula reply keep the exact public shape", (
     assert.match(BRIDGE, new RegExp(`"${key}":`));
   }
   for (const key of [
-    "pageWidth", "pageHeight", "chars", "furigana", "wordSegmentation",
+    "pageWidth", "pageHeight", "chars", "layout", "furigana", "wordSegmentation",
     "characterGeometry", "formulaCoverage", "formulaRegions",
   ]) {
     assert.match(BRIDGE, new RegExp(`"${key}":`));
   }
   assert.match(BRIDGE, /"multiline": jsonNullable\(value\.multiline\)/);
+  assert.match(BRIDGE, /"layout": jsonNullable\(value\.layout\.map\(layoutObject\)\)/);
+  assert.match(BRIDGE, /private static func layoutRegionObject/);
+  assert.match(BRIDGE, /"tableId": jsonNullable\(value\.tableId\)/);
   assert.match(BRIDGE, /if let line = value\.line, line >= 0 \{ result\["line"\] = line \}/);
   assert.match(BRIDGE, /if let vertical = value\.vertical \{ result\["vertical"\] = vertical \}/);
   assert.match(BRIDGE, /"retryable": retryable/);

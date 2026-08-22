@@ -25,6 +25,14 @@ test("native PDF mutation prepares and validates a selectable sibling staging fi
   assert.match(PROJECT, /- path: App/);
 });
 
+test("native PDF mutation preserves immutable OCR layout for migrated pages", () => {
+  const migrated = MUTATION.slice(
+    MUTATION.indexOf("private static func migratedOCRPage("),
+    MUTATION.indexOf("private static func migratedFormulaRegion("),
+  );
+  assert.match(migrated, /chars: value\.chars,[\s\S]*layout: value\.layout,[\s\S]*furigana: value\.furigana/);
+});
+
 test("native PDF replacement has an old-byte fence, sibling backup and verified rollback", () => {
   assert.match(MUTATION, /currentIdentity\.byteCount == mutation\.oldIdentity\.byteCount/);
   assert.match(MUTATION, /currentIdentity\.modifiedAt == mutation\.oldIdentity\.modifiedAt/);

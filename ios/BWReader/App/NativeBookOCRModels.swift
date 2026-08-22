@@ -256,6 +256,271 @@ struct NativeBookOCRCharacter: Codable, Equatable, Sendable {
     }
 }
 
+private struct NativeBookOCRAnyCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
+    }
+}
+
+private func rejectUnknownOCRFields<Key: CodingKey & CaseIterable>(
+    from decoder: Decoder,
+    allowedBy _: Key.Type
+) throws where Key.AllCases: Sequence {
+    let container = try decoder.container(
+        keyedBy: NativeBookOCRAnyCodingKey.self
+    )
+    let allowed = Set(Key.allCases.map(\.stringValue))
+    let unknown = container.allKeys.map(\.stringValue).filter {
+        !allowed.contains($0)
+    }.sorted()
+    guard unknown.isEmpty else {
+        throw DecodingError.dataCorrupted(
+            DecodingError.Context(
+                codingPath: decoder.codingPath,
+                debugDescription: "Unknown OCR layout fields: \(unknown.joined(separator: ", "))"
+            )
+        )
+    }
+}
+
+enum NativeBookOCRPageLayoutTextSource: String, Codable, Equatable, Sendable {
+    case vision
+    case unavailable
+}
+
+enum NativeBookOCRPageLayoutSource: String, Codable, Equatable, Sendable {
+    case manga
+    case ruledTable = "ruled-table"
+    case vision
+}
+
+enum NativeBookOCRPageLayoutMode: String, Codable, Equatable, Sendable {
+    case manga
+    case table
+    case vision
+    case fallback
+}
+
+enum NativeBookOCRPageReadingDirection: String, Codable, Equatable, Sendable {
+    case leftToRight = "ltr"
+    case rightToLeft = "rtl"
+}
+
+enum NativeBookOCRPageLayoutConfidence: String, Codable, Equatable, Sendable {
+    case high
+    case low
+    case fallback
+}
+
+enum NativeBookOCRPageLayoutRegionKind: String, Codable, Equatable, Sendable {
+    case mangaRegion = "manga-region"
+    case visionSupplement = "vision-supplement"
+    case tableCell = "table-cell"
+    case visionBlock = "vision-block"
+}
+
+struct NativeBookOCRPageLayoutRegion: Codable, Equatable, Sendable {
+    let id: Int
+    let kind: NativeBookOCRPageLayoutRegionKind
+    let order: Int
+    let bounds: [Double]
+    let ranges: [[Int]]
+    let gridRow: Int
+    let gridColumn: Int
+    let rowSpan: Int
+    let columnSpan: Int
+    let vertical: Bool
+    let tableId: Int?
+    let row: Int?
+    let column: Int?
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case id, kind, order, bounds, ranges, gridRow, gridColumn
+        case rowSpan, columnSpan, vertical, tableId, row, column
+    }
+
+    init(from decoder: Decoder) throws {
+        try rejectUnknownOCRFields(from: decoder, allowedBy: CodingKeys.self)
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(Int.self, forKey: .id)
+        kind = try values.decode(
+            NativeBookOCRPageLayoutRegionKind.self,
+            forKey: .kind
+        )
+        order = try values.decode(Int.self, forKey: .order)
+        bounds = try values.decode([Double].self, forKey: .bounds)
+        ranges = try values.decode([[Int]].self, forKey: .ranges)
+        gridRow = try values.decode(Int.self, forKey: .gridRow)
+        gridColumn = try values.decode(Int.self, forKey: .gridColumn)
+        rowSpan = try values.decode(Int.self, forKey: .rowSpan)
+        columnSpan = try values.decode(Int.self, forKey: .columnSpan)
+        vertical = try values.decode(Bool.self, forKey: .vertical)
+        guard values.contains(.tableId),
+              values.contains(.row),
+              values.contains(.column) else {
+            throw DecodingError.keyNotFound(
+                !values.contains(.tableId)
+                    ? CodingKeys.tableId
+                    : (!values.contains(.row) ? CodingKeys.row : CodingKeys.column),
+                DecodingError.Context(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "OCR layout nullable fields are required"
+                )
+            )
+        }
+        tableId = try values.decodeIfPresent(Int.self, forKey: .tableId)
+        row = try values.decodeIfPresent(Int.self, forKey: .row)
+        column = try values.decodeIfPresent(Int.self, forKey: .column)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(kind, forKey: .kind)
+        try values.encode(order, forKey: .order)
+        try values.encode(bounds, forKey: .bounds)
+        try values.encode(ranges, forKey: .ranges)
+        try values.encode(gridRow, forKey: .gridRow)
+        try values.encode(gridColumn, forKey: .gridColumn)
+        try values.encode(rowSpan, forKey: .rowSpan)
+        try values.encode(columnSpan, forKey: .columnSpan)
+        try values.encode(vertical, forKey: .vertical)
+        if let tableId {
+            try values.encode(tableId, forKey: .tableId)
+        } else {
+            try values.encodeNil(forKey: .tableId)
+        }
+        if let row {
+            try values.encode(row, forKey: .row)
+        } else {
+            try values.encodeNil(forKey: .row)
+        }
+        if let column {
+            try values.encode(column, forKey: .column)
+        } else {
+            try values.encodeNil(forKey: .column)
+        }
+    }
+}
+
+struct NativeBookOCRPageLayoutTable: Codable, Equatable, Sendable {
+    let id: Int
+    let rows: Int
+    let columns: Int
+    let xEdges: [Double]
+    let yEdges: [Double]
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case id, rows, columns, xEdges, yEdges
+    }
+
+    init(from decoder: Decoder) throws {
+        try rejectUnknownOCRFields(from: decoder, allowedBy: CodingKeys.self)
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(Int.self, forKey: .id)
+        rows = try values.decode(Int.self, forKey: .rows)
+        columns = try values.decode(Int.self, forKey: .columns)
+        xEdges = try values.decode([Double].self, forKey: .xEdges)
+        yEdges = try values.decode([Double].self, forKey: .yEdges)
+    }
+}
+
+struct NativeBookOCRPageLayout: Codable, Equatable, Sendable {
+    static let schema = "reader-page-layout/1"
+
+    let schema: String
+    let textSource: NativeBookOCRPageLayoutTextSource
+    let layoutSource: NativeBookOCRPageLayoutSource
+    let mode: NativeBookOCRPageLayoutMode
+    let readingDirection: NativeBookOCRPageReadingDirection
+    let confidence: NativeBookOCRPageLayoutConfidence
+    let gridColumns: Int
+    let gridRows: Int
+    let regions: [NativeBookOCRPageLayoutRegion]
+    let tables: [NativeBookOCRPageLayoutTable]
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case schema, textSource, layoutSource, mode, readingDirection
+        case confidence, gridColumns, gridRows, regions, tables
+    }
+
+    init(from decoder: Decoder) throws {
+        try rejectUnknownOCRFields(from: decoder, allowedBy: CodingKeys.self)
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try values.decode(String.self, forKey: .schema)
+        textSource = try values.decode(
+            NativeBookOCRPageLayoutTextSource.self,
+            forKey: .textSource
+        )
+        layoutSource = try values.decode(
+            NativeBookOCRPageLayoutSource.self,
+            forKey: .layoutSource
+        )
+        mode = try values.decode(
+            NativeBookOCRPageLayoutMode.self,
+            forKey: .mode
+        )
+        readingDirection = try values.decode(
+            NativeBookOCRPageReadingDirection.self,
+            forKey: .readingDirection
+        )
+        confidence = try values.decode(
+            NativeBookOCRPageLayoutConfidence.self,
+            forKey: .confidence
+        )
+        gridColumns = try values.decode(Int.self, forKey: .gridColumns)
+        gridRows = try values.decode(Int.self, forKey: .gridRows)
+        regions = try values.decode(
+            [NativeBookOCRPageLayoutRegion].self,
+            forKey: .regions
+        )
+        tables = try values.decode(
+            [NativeBookOCRPageLayoutTable].self,
+            forKey: .tables
+        )
+        if textSource == .unavailable {
+            guard mode == .fallback,
+                  confidence == .fallback,
+                  layoutSource == .vision,
+                  gridRows == 0,
+                  regions.isEmpty,
+                  tables.isEmpty else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .layoutSource,
+                    in: values,
+                    debugDescription: "Unavailable OCR layout must use the Vision fallback shape"
+                )
+            }
+        }
+        var totalTableCells = 0
+        for table in tables {
+            let (tableCells, overflow) = table.rows.multipliedReportingOverflow(
+                by: table.columns
+            )
+            guard table.rows > 0,
+                  table.columns >= 2,
+                  !overflow,
+                  tableCells <= 16_384 - totalTableCells else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .tables,
+                    in: values,
+                    debugDescription: "OCR layout tables exceed the safe cell limit"
+                )
+            }
+            totalTableCells += tableCells
+        }
+    }
+}
+
 struct NativeBookOCRFormulaRegion: Codable, Equatable, Sendable {
     let id: String
     let x0: Double
@@ -282,6 +547,7 @@ struct NativeBookOCRPageCharacters: Codable, Equatable, Sendable {
     let status: NativeBookOCRPageState
     let source: NativeBookOCRSource?
     let chars: [NativeBookOCRCharacter]
+    let layout: NativeBookOCRPageLayout?
     let furigana: [NativeBookOCRFurigana]
     let wordSegmentation: NativeBookOCRWordSegmentationState
     let characterGeometry: NativeBookOCRCharacterGeometryState
@@ -303,6 +569,7 @@ struct NativeBookOCRPageCharacters: Codable, Equatable, Sendable {
         case status
         case source
         case chars
+        case layout
         case furigana
         case wordSegmentation = "word_segmentation"
         case characterGeometry = "character_geometry"
@@ -329,6 +596,7 @@ struct NativeBookOCRPageCharacters: Codable, Equatable, Sendable {
             status: status,
             source: source,
             chars: chars,
+            layout: layout,
             furigana: furigana,
             wordSegmentation: wordSegmentation,
             characterGeometry: characterGeometry,
@@ -353,6 +621,7 @@ struct NativeBookOCRPageCharacters: Codable, Equatable, Sendable {
             status: status,
             source: source,
             chars: chars,
+            layout: layout,
             furigana: furigana,
             wordSegmentation: wordSegmentation,
             characterGeometry: characterGeometry,
@@ -380,6 +649,7 @@ struct NativeBookOCRPageCharacters: Codable, Equatable, Sendable {
             status: status,
             source: source,
             chars: chars,
+            layout: layout,
             furigana: furigana,
             wordSegmentation: wordSegmentation,
             characterGeometry: characterGeometry,
@@ -416,6 +686,7 @@ struct NativeBookOCRPageCharacters: Codable, Equatable, Sendable {
             status: status,
             source: .pi,
             chars: chars,
+            layout: layout,
             furigana: furigana,
             wordSegmentation: wordSegmentation,
             characterGeometry: characterGeometry,

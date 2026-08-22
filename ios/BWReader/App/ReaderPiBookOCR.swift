@@ -839,10 +839,14 @@ final class ReaderPiOCRClient {
               manifest.engine.map({ ["vision", "manga", "legacy"].contains($0) }) ?? true,
               manifest.executor.map({ ["pi", "pc"].contains($0) }) ?? true,
               manifest.processingProfile.map({ !$0.isEmpty && $0.count <= 80 }) ?? true,
-              manifest.executor != "pc"
-                || ["quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4", "quality-first-v5"].contains(
-                    manifest.processingProfile
-                ),
+              (manifest.executor != "pc"
+                || (manifest.processingProfile.map({
+                    ["quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4", "quality-first-v5", "quality-first-v6"].contains($0)
+                }) ?? false)),
+              ((manifest.executor ?? "pi") != "pi"
+                || (manifest.processingProfile.map({
+                    ["pi-default-v1", "pi-default-v2", "pi-default-v3", "pi-default-v4", "pi-default-v5"].contains($0)
+                }) ?? true)),
               manifest.files.count <= 5_001 else {
             throw ReaderPiOCRError.invalidManifest
         }

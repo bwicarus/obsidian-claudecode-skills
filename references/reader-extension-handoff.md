@@ -666,3 +666,10 @@ Windows 真机必须验证：
 
 Manga 唯一决定分区、分行、方向与顺序；Vision 只在整行完整对齐且符号中心落在 Manga
 四边形内时替换文字与字框，否则回退 Manga 光学几何。同批修复去边首次开启、异步重排与失败误报。
+
+## 14. 2026-08-22 `0.2.135` Vision 原文与结构化页面布局候选
+
+Vision 是字符、字框与 source index 的唯一权威；Manga 只提供漫画区域和阅读顺序，已证明的
+三列以上规则表格只提供 cell 布局。严格 `reader-page-layout/1` 在 Server、App、Swift 与两处
+JS 间守恒；高置信页面输出四列稀疏漫画 Markdown 或标准 Markdown 表格，低置信、空页、公式
+改写或超限布局统一回退 Vision 原顺序，并提示 AI 按需调用页面图像。

@@ -503,6 +503,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                 "pageWidth": 0,
                 "pageHeight": 0,
                 "chars": [],
+                "layout": NSNull(),
                 "furigana": [],
                 "wordSegmentation": NativeBookOCRWordSegmentationState.unavailable.rawValue,
                 "characterGeometry": NativeBookOCRCharacterGeometryState.unavailable.rawValue,
@@ -530,6 +531,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
             "pageWidth": value.pageWidth,
             "pageHeight": value.pageHeight,
             "chars": value.chars.map(characterObject),
+            "layout": jsonNullable(value.layout.map(layoutObject)),
             "furigana": value.furigana.map(furiganaObject),
             "wordSegmentation": value.wordSegmentation.rawValue,
             "characterGeometry": value.characterGeometry.rawValue,
@@ -781,6 +783,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                 "pageWidth": 0,
                 "pageHeight": 0,
                 "chars": [],
+                "layout": NSNull(),
                 "furigana": [],
                 "wordSegmentation": NativeBookOCRWordSegmentationState.unavailable.rawValue,
                 "characterGeometry": NativeBookOCRCharacterGeometryState.unavailable.rawValue,
@@ -907,6 +910,55 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         if let line = value.line, line >= 0 { result["line"] = line }
         if let vertical = value.vertical { result["vertical"] = vertical }
         return result
+    }
+
+    private static func layoutObject(
+        _ value: NativeBookOCRPageLayout
+    ) -> [String: Any] {
+        [
+            "schema": value.schema,
+            "textSource": value.textSource.rawValue,
+            "layoutSource": value.layoutSource.rawValue,
+            "mode": value.mode.rawValue,
+            "readingDirection": value.readingDirection.rawValue,
+            "confidence": value.confidence.rawValue,
+            "gridColumns": value.gridColumns,
+            "gridRows": value.gridRows,
+            "regions": value.regions.map(layoutRegionObject),
+            "tables": value.tables.map(layoutTableObject),
+        ]
+    }
+
+    private static func layoutRegionObject(
+        _ value: NativeBookOCRPageLayoutRegion
+    ) -> [String: Any] {
+        [
+            "id": value.id,
+            "kind": value.kind.rawValue,
+            "order": value.order,
+            "bounds": value.bounds,
+            "ranges": value.ranges,
+            "gridRow": value.gridRow,
+            "gridColumn": value.gridColumn,
+            "rowSpan": value.rowSpan,
+            "columnSpan": value.columnSpan,
+            "vertical": value.vertical,
+            "tableId": jsonNullable(value.tableId),
+            "row": jsonNullable(value.row),
+            "column": jsonNullable(value.column),
+        ]
+    }
+
+    private static func layoutTableObject(
+        _ value: NativeBookOCRPageLayoutTable
+    ) -> [String: Any] {
+        [
+            "id": value.id,
+            "rows": value.rows,
+            "columns": value.columns,
+            "xEdges": value.xEdges,
+            "yEdges": value.yEdges,
+        ]
     }
 
     private static func furiganaObject(

@@ -26,16 +26,29 @@ from reader_book_ocr_worker import (  # noqa: E402
     _detect_ruled_table_grids,
     _manga_align_visual_segments,
     _manga_page,
+    _manga_page_layout,
     _manga_line_char_boxes,
     _manga_table_cell_lines,
     _manga_vision_line_chars,
+    _proven_table_layout_grids,
     _publish_attachments,
     _publish_release,
     _tokenize_chars,
+    _vision_page_layout,
 )
 
 
 PDF_A = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n%%EOF\n"
+
+
+def _with_test_layout(page: dict) -> dict:
+    value = dict(page)
+    value["layout"] = reader_book_ocr_worker._vision_page_layout(
+        value.get("chars") or [],
+        page_w=float(value["page_w"]),
+        page_h=float(value["page_h"]),
+    )
+    return value
 
 
 class _FakeProcess:
@@ -78,7 +91,7 @@ class ReaderBookOcrReleaseIndexTest(unittest.TestCase):
         job_dir = self.version / engine
         pages = job_dir / "pages"
         pages.mkdir(parents=True, exist_ok=True)
-        (pages / "p000001.json").write_text(json.dumps({
+        (pages / "p000001.json").write_text(json.dumps(_with_test_layout({
             "schema": "reader-page-chars/1",
             "bookId": self.entry["bookId"],
             "contentSha256": self.entry["contentSha256"],
@@ -88,7 +101,7 @@ class ReaderBookOcrReleaseIndexTest(unittest.TestCase):
             "page_h": 20,
             "chars": [{"c": char, "x0": 1, "y0": 1, "x1": 2, "y1": 2}],
             "furigana": [],
-        }), "utf-8")
+        })), "utf-8")
         formula_path = job_dir / "formula-source.json"
         formula_path.write_text('{"formulas":[]}', "utf-8")
         final_job = {
@@ -492,19 +505,19 @@ class ReaderBookOcrForcedRerunTest(unittest.TestCase):
         job_dir = self.version / "vision"
         pages = job_dir / "pages"
         pages.mkdir(parents=True, exist_ok=True)
-        (pages / "p000001.json").write_text(json.dumps({
+        (pages / "p000001.json").write_text(json.dumps(_with_test_layout({
             "schema": "reader-page-chars/1",
             "bookId": self.entry["bookId"],
             "contentSha256": self.entry["contentSha256"],
             "engine": "vision",
             "executor": "pi",
-            "processingProfile": "pi-default-v4",
+            "processingProfile": "pi-default-v5",
             "pageNumber": 1,
             "page_w": 10,
             "page_h": 20,
             "chars": [{"c": "x", "x0": 1, "y0": 1, "x1": 2, "y1": 2}],
             "furigana": [],
-        }), "utf-8")
+        })), "utf-8")
         formula_path = job_dir / "formula-source.json"
         formula_path.write_text('{"formulas":[]}', "utf-8")
         final_job = {
@@ -514,7 +527,7 @@ class ReaderBookOcrForcedRerunTest(unittest.TestCase):
             "contentSha256": self.entry["contentSha256"],
             "engine": "vision",
             "executor": "pi",
-            "processingProfile": "pi-default-v4",
+            "processingProfile": "pi-default-v5",
             "state": "succeeded",
             "totalPages": 1,
             "successfulPages": 1,
@@ -630,7 +643,7 @@ class ReaderBookOcrPageSchemaContractTest(unittest.TestCase):
             "schema", "bookId", "contentSha256", "engine", "pageNumber",
             "page_w", "page_h", "imageWidth", "imageHeight", "chars",
             "furigana", "textCharCount", "generatedAtEpochMs", "tokenized",
-            "visionEffectiveDpi", "visionDpiShortfall",
+            "visionEffectiveDpi", "visionDpiShortfall", "layout",
         ):
             self.assertIn(field, allowed, f"服务端白名单少了 {field}，PC 传页会被 400 拒")
 
@@ -671,7 +684,7 @@ class ReaderBookOcrPageSchemaContractTest(unittest.TestCase):
             "contentSha256": entry["contentSha256"],
             "engine": "vision",
             "executor": "pc",
-            "processingProfile": "quality-first-v5",
+            "processingProfile": "quality-first-v6",
             "totalPages": 1,
         }
         page = {
@@ -685,6 +698,32 @@ class ReaderBookOcrPageSchemaContractTest(unittest.TestCase):
             "imageWidth": 100,
             "imageHeight": 200,
             "chars": [{"c": "x", "x0": 1, "y0": 1, "x1": 2, "y1": 2}],
+            "layout": {
+                "schema": "reader-page-layout/1",
+                "textSource": "vision",
+                "layoutSource": "vision",
+                "mode": "vision",
+                "readingDirection": "ltr",
+                "confidence": "high",
+                "gridColumns": 1,
+                "gridRows": 1,
+                "regions": [{
+                    "id": 0,
+                    "kind": "vision-block",
+                    "order": 0,
+                    "bounds": [1, 1, 2, 2],
+                    "ranges": [[0, 0]],
+                    "gridRow": 0,
+                    "gridColumn": 0,
+                    "rowSpan": 1,
+                    "columnSpan": 1,
+                    "vertical": False,
+                    "tableId": None,
+                    "row": None,
+                    "column": None,
+                }],
+                "tables": [],
+            },
             "furigana": [],
             "textCharCount": 1,
             "generatedAtEpochMs": 1,
@@ -694,6 +733,155 @@ class ReaderBookOcrPageSchemaContractTest(unittest.TestCase):
         }
         normalized, _payload = service._normalize_pc_page(page, 1, job)
         self.assertEqual(normalized["visionEffectiveDpi"], 238.4)
+        self.assertEqual(normalized["layout"]["regions"][0]["ranges"], [[0, 0]])
+        without_layout = {key: value for key, value in page.items() if key != "layout"}
+        with self.assertRaises(ReaderBookOcrError):
+            service._normalize_pc_page(without_layout, 1, job)
+        old_job = {**job, "processingProfile": "quality-first-v5"}
+        old_page, _payload = service._normalize_pc_page(
+            without_layout, 1, old_job
+        )
+        self.assertNotIn("layout", old_page)
+
+    def test_layout_rejects_missing_or_overlapping_char_indices(self) -> None:
+        chars = [
+            {"c": "a", "x0": 1, "y0": 1, "x1": 2, "y1": 2},
+            {"c": " ", "sp": 1, "x0": 1, "y0": 1, "x1": 2, "y1": 2},
+        ]
+        layout = {
+            "schema": "reader-page-layout/1",
+            "textSource": "vision",
+            "layoutSource": "vision",
+            "mode": "vision",
+            "readingDirection": "ltr",
+            "confidence": "high",
+            "gridColumns": 1,
+            "gridRows": 1,
+            "regions": [{
+                "id": 0, "kind": "vision-block", "order": 0,
+                "bounds": [1, 1, 2, 2], "ranges": [[0, 0]],
+                "gridRow": 0, "gridColumn": 0,
+                "rowSpan": 1, "columnSpan": 1, "vertical": False,
+                "tableId": None, "row": None, "column": None,
+            }],
+            "tables": [],
+        }
+        with self.assertRaises(ReaderBookOcrError) as missing:
+            reader_book_ocr._normalize_page_layout(
+                layout, chars, 10, 10,
+                code="invalid-worker-page", status=400,
+            )
+        self.assertEqual(missing.exception.code, "invalid-worker-page")
+        invalid_manga_grid = {
+            **layout,
+            "layoutSource": "manga",
+            "mode": "manga",
+            "gridColumns": 3,
+            "regions": [{
+                **layout["regions"][0],
+                "kind": "manga-region",
+                "ranges": [[0, 1]],
+            }],
+        }
+        with self.assertRaises(ReaderBookOcrError):
+            reader_book_ocr._normalize_page_layout(
+                invalid_manga_grid, chars, 10, 10,
+                code="invalid-worker-page", status=400,
+            )
+        layout["regions"].append({
+            **layout["regions"][0],
+            "id": 1,
+            "order": 1,
+            "ranges": [[0, 1]],
+        })
+        with self.assertRaises(ReaderBookOcrError):
+            reader_book_ocr._normalize_page_layout(
+                layout, chars, 10, 10,
+                code="invalid-worker-page", status=400,
+            )
+
+    def test_layout_rejects_cross_platform_collection_overflow(self) -> None:
+        table_layout = {
+            "schema": "reader-page-layout/1",
+            "textSource": "vision",
+            "layoutSource": "ruled-table",
+            "mode": "table",
+            "readingDirection": "ltr",
+            "confidence": "high",
+            "gridColumns": 1,
+            "gridRows": 1,
+            "regions": [],
+            "tables": [
+                {
+                    "id": index,
+                    "rows": 1,
+                    "columns": 2,
+                    "xEdges": [0, 5, 10],
+                    "yEdges": [0, 10],
+                }
+                for index in range(65)
+            ],
+        }
+        with self.assertRaises(ReaderBookOcrError):
+            reader_book_ocr._normalize_page_layout(
+                table_layout, [], 10, 10,
+                code="invalid-worker-page", status=400,
+            )
+
+        table_cell_overflow = {
+            **table_layout,
+            "tables": [
+                {
+                    "id": index,
+                    "rows": 100,
+                    "columns": 100,
+                    "xEdges": list(range(101)),
+                    "yEdges": list(range(101)),
+                }
+                for index in range(2)
+            ],
+        }
+        with self.assertRaises(ReaderBookOcrError):
+            reader_book_ocr._normalize_page_layout(
+                table_cell_overflow, [], 100, 100,
+                code="invalid-worker-page", status=400,
+            )
+
+        chars = [
+            {"c": "x", "x0": 0, "y0": 0, "x1": 1, "y1": 1}
+            for _index in range(4097)
+        ]
+        region_layout = {
+            **table_layout,
+            "layoutSource": "vision",
+            "mode": "vision",
+            "gridColumns": 1,
+            "gridRows": 4096,
+            "tables": [],
+            "regions": [
+                {
+                    "id": index,
+                    "kind": "vision-block",
+                    "order": index,
+                    "bounds": [0, 0, 1, 1],
+                    "ranges": [[index, index]],
+                    "gridRow": min(index, 4095),
+                    "gridColumn": 0,
+                    "rowSpan": 1,
+                    "columnSpan": 1,
+                    "vertical": False,
+                    "tableId": None,
+                    "row": None,
+                    "column": None,
+                }
+                for index in range(4097)
+            ],
+        }
+        with self.assertRaises(ReaderBookOcrError):
+            reader_book_ocr._normalize_page_layout(
+                region_layout, chars, 10, 10,
+                code="invalid-worker-page", status=400,
+            )
 
 
 class ReaderBookOcrFormulaWorkerTest(unittest.TestCase):
@@ -928,6 +1116,51 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.pid_alive_patcher.stop()
         self.temp.cleanup()
 
+    def test_current_profile_requires_layout_but_previous_profile_remains_readable(self) -> None:
+        page_path = self.base / "page.json"
+        page = {
+            "schema": "reader-page-chars/1",
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "engine": "vision",
+            "executor": "pc",
+            "processingProfile": "quality-first-v5",
+            "pageNumber": 1,
+            "page_w": 10,
+            "page_h": 20,
+            "chars": [{"c": "A", "x0": 1, "y0": 1, "x1": 2, "y1": 2}],
+            "furigana": [],
+        }
+        page_path.write_text(json.dumps(page), "utf-8")
+
+        def snapshot(profile: str) -> dict:
+            return {
+                "engine": "vision",
+                "job": {"executor": "pc", "processingProfile": profile},
+                "attachmentPaths": {"ocr-page-000001": page_path},
+            }
+
+        with patch.object(
+            self.service,
+            "_published_snapshot",
+            return_value=snapshot("quality-first-v5"),
+        ):
+            readable, _path = self.service.read_page(
+                self.entry["bookId"], self.entry["contentSha256"], 1
+            )
+        self.assertNotIn("layout", readable)
+
+        with patch.object(
+            self.service,
+            "_published_snapshot",
+            return_value=snapshot("quality-first-v6"),
+        ):
+            with self.assertRaises(ReaderBookOcrError) as missing:
+                self.service.read_page(
+                    self.entry["bookId"], self.entry["contentSha256"], 1
+                )
+        self.assertEqual(missing.exception.code, "ocr-sidecar-invalid")
+
     def test_start_is_content_addressed_path_free_and_idempotent(self) -> None:
         job, already = self.service.start(
             self.entry["bookId"], self.entry["contentSha256"], "vision"
@@ -985,7 +1218,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["manga"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v5",
+            "processingProfile": "quality-first-v6",
         })
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed["job"]["completedPages"], [])
@@ -1024,6 +1257,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "textCharCount": 1,
             "tokenized": True,
         }
+        page = _with_test_layout(page)
         uploaded = service.upload_pc_page(1, {**identity, "page": page})
         self.assertTrue(uploaded["accepted"])
         self.assertEqual(uploaded["job"]["successfulPages"], 1)
@@ -1107,13 +1341,13 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.assertEqual(manifest["revision"], completed["revision"])
         self.assertEqual(manifest["formulaReason"], "formula-model-unavailable")
         self.assertEqual(manifest["executor"], "pc")
-        self.assertEqual(manifest["processingProfile"], "quality-first-v5")
+        self.assertEqual(manifest["processingProfile"], "quality-first-v6")
         snapshot = service._published_snapshot(
             self.entry["bookId"], self.entry["contentSha256"]
         )
         self.assertEqual(snapshot["result"]["executor"], "pc")
         self.assertEqual(
-            snapshot["result"]["processingProfile"], "quality-first-v5"
+            snapshot["result"]["processingProfile"], "quality-first-v6"
         )
 
     def test_pc_expired_lease_is_reclaimable_and_old_upload_is_rejected(self) -> None:
@@ -1134,7 +1368,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["vision"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v5",
+            "processingProfile": "quality-first-v6",
         }
         first = service.claim_pc_worker("pc_first", capabilities)
         version_dir = service._version_dir(
@@ -1228,7 +1462,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         pi_job, _already = service.start(
             self.entry["bookId"], self.entry["contentSha256"], "vision", "pi"
         )
-        self.assertEqual(pi_job["processingProfile"], "pi-default-v4")
+        self.assertEqual(pi_job["processingProfile"], "pi-default-v5")
         job_dir = launches[0][0]
         page = {
             "schema": "reader-page-chars/1",
@@ -1236,7 +1470,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "contentSha256": self.entry["contentSha256"],
             "engine": "vision",
             "executor": "pi",
-            "processingProfile": "pi-default-v4",
+            "processingProfile": "pi-default-v5",
             "pageNumber": 1,
             "page_w": 10,
             "page_h": 20,
@@ -1246,6 +1480,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             }],
             "furigana": [],
         }
+        page = _with_test_layout(page)
         (job_dir / "pages").mkdir(parents=True, exist_ok=True)
         (job_dir / "pages" / "p000001.json").write_text(
             json.dumps(page), "utf-8"
@@ -1291,14 +1526,14 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.assertTrue(release_dir.is_dir())
         manifest = json.loads((release_dir / "attachments.json").read_text("utf-8"))
         self.assertEqual(manifest["executor"], "pi")
-        self.assertEqual(manifest["processingProfile"], "pi-default-v4")
+        self.assertEqual(manifest["processingProfile"], "pi-default-v5")
 
         pc_job, already = service.start(
             self.entry["bookId"], self.entry["contentSha256"], "vision", "pc"
         )
         self.assertFalse(already)
         self.assertEqual(pc_job["executor"], "pc")
-        self.assertEqual(pc_job["processingProfile"], "quality-first-v5")
+        self.assertEqual(pc_job["processingProfile"], "quality-first-v6")
         self.assertEqual(pc_job["successfulPages"], 0)
         self.assertTrue(release_dir.is_dir(), "immutable Pi release must remain")
         self.assertFalse((job_dir / "pages" / "p000001.json").exists())
@@ -1309,11 +1544,11 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["vision"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v5",
+            "processingProfile": "quality-first-v6",
         })
         self.assertEqual(claimed["job"]["completedPages"], [])
         self.assertEqual(
-            claimed["job"]["processingProfile"], "quality-first-v5"
+            claimed["job"]["processingProfile"], "quality-first-v6"
         )
 
     def test_historical_pc_v1_publication_remains_readable_and_can_restart_as_v5(self) -> None:
@@ -1401,7 +1636,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         )
         self.assertFalse(already)
         self.assertEqual(restarted["executor"], "pc")
-        self.assertEqual(restarted["processingProfile"], "quality-first-v5")
+        self.assertEqual(restarted["processingProfile"], "quality-first-v6")
         self.assertEqual(restarted["state"], "queued")
         self.assertTrue((version_dir / "releases" / revision).is_dir())
         self.assertEqual(len(list((version_dir / "staging-archive").glob("*"))), 1)
@@ -1409,7 +1644,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
     def test_version_kind_and_unknown_fields_fail_closed(self) -> None:
         self.assertEqual(
             reader_book_ocr._safe_public_job({})["processingProfile"],
-            "pi-default-v4",
+            "pi-default-v5",
         )
         self.assertEqual(
             reader_book_ocr._safe_public_job({
@@ -1450,13 +1685,14 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             reader_book_ocr.READABLE_PROCESSING_PROFILES["pi"],
             frozenset((
                 "pi-default-v1", "pi-default-v2", "pi-default-v3", "pi-default-v4",
+                "pi-default-v5",
             )),
         )
         self.assertEqual(
             reader_book_ocr.READABLE_PROCESSING_PROFILES["pc"],
             frozenset((
                 "quality-first-v1", "quality-first-v2", "quality-first-v3",
-                "quality-first-v4", "quality-first-v5",
+                "quality-first-v4", "quality-first-v5", "quality-first-v6",
             )),
         )
 
@@ -1966,7 +2202,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         job_dir = version / "vision"
         pages = job_dir / "pages"
         pages.mkdir(parents=True)
-        (pages / "p000001.json").write_text(json.dumps({
+        (pages / "p000001.json").write_text(json.dumps(_with_test_layout({
             "schema": "reader-page-chars/1",
             "bookId": self.entry["bookId"],
             "contentSha256": self.entry["contentSha256"],
@@ -1976,7 +2212,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "page_h": 20,
             "chars": [{"c": "V", "x0": 1, "y0": 1, "x1": 2, "y1": 2}],
             "furigana": [],
-        }), "utf-8")
+        })), "utf-8")
         formula_path = job_dir / "formula-source.json"
         formula_path.write_text('{"formulas":[]}', "utf-8")
         final_job = {
@@ -2055,7 +2291,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         )
         self.assertFalse(already)
         self.assertEqual(restored["state"], "queued")
-        self.assertEqual(restored["processingProfile"], "pi-default-v4")
+        self.assertEqual(restored["processingProfile"], "pi-default-v5")
         self.assertNotEqual(restored["jobId"], final_job["jobId"])
 
         current_vision = json.loads((job_dir / "job.json").read_text("utf-8"))
@@ -2091,7 +2327,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
 
         manga_pages = manga_dir / "pages"
         manga_pages.mkdir()
-        (manga_pages / "p000001.json").write_text(json.dumps({
+        (manga_pages / "p000001.json").write_text(json.dumps(_with_test_layout({
             "schema": "reader-page-chars/1",
             "bookId": self.entry["bookId"],
             "contentSha256": self.entry["contentSha256"],
@@ -2103,7 +2339,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "page_h": 20,
             "chars": [{"c": "M", "x0": 1, "y0": 1, "x1": 2, "y1": 2}],
             "furigana": [],
-        }), "utf-8")
+        })), "utf-8")
         manga_formula = manga_dir / "formula-source.json"
         manga_formula.write_text('{"formulas":[]}', "utf-8")
         manga_final = {
@@ -2238,6 +2474,344 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
 
 
 class ReaderBookOcrWorkerContractTest(unittest.TestCase):
+    def test_empty_vision_layout_fails_closed(self) -> None:
+        self.assertEqual(
+            _vision_page_layout([], page_w=100, page_h=200),
+            reader_book_ocr_worker._unavailable_page_layout(),
+        )
+
+    def test_layout_table_is_row_major_and_conserves_final_char_indices(self) -> None:
+        chars = []
+        # Deliberately keep a non-row-major Vision source order. Layout ranges
+        # must point into this exact array while region.order becomes row-major.
+        for row, column, text in (
+            (1, 2, "F"), (0, 0, "A"), (2, 1, "H"),
+            (0, 2, "C"), (1, 0, "D"), (2, 2, "I"),
+            (0, 1, "B"), (1, 1, "E"), (2, 0, "G"),
+        ):
+            chars.append({
+                "c": text,
+                "x0": column * 100 + 20,
+                "y0": row * 100 + 120,
+                "x1": column * 100 + 40,
+                "y1": row * 100 + 150,
+                "w": -1,
+                "bk": row,
+                "b": 0,
+            })
+        # Spaces are real sidecar entries and must be conserved too.
+        chars.append({
+            "c": " ", "sp": 1,
+            "x0": 120, "y0": 120, "x1": 140, "y1": 150,
+            "w": -1, "bk": 0, "b": 0,
+        })
+        original = [dict(item) for item in chars]
+        layout = _manga_page_layout(
+            chars,
+            [],
+            [{
+                "xEdges": [0, 100, 200, 300],
+                "yEdges": [100, 200, 300, 400],
+            }],
+            page_w=400,
+            page_h=500,
+        )
+
+        self.assertEqual(chars, original)
+        self.assertEqual(layout["schema"], "reader-page-layout/1")
+        self.assertEqual(layout["mode"], "table")
+        self.assertEqual(layout["confidence"], "high")
+        cells = sorted(layout["regions"], key=lambda item: item["order"])
+        positions = [(item["row"], item["column"]) for item in cells]
+        self.assertEqual(
+            positions,
+            sorted(positions),
+            "multiple continuous runs in one cell must remain adjacent and row-major",
+        )
+        self.assertEqual(
+            set(positions),
+            {(row, column) for row in range(3) for column in range(3)},
+        )
+        covered = [
+            index
+            for region in cells
+            for start, end in region["ranges"]
+            for index in range(start, end + 1)
+        ]
+        self.assertEqual(sorted(covered), list(range(len(chars))))
+        self.assertEqual(len(covered), len(set(covered)))
+        self.assertIn(9, covered, "sp entries are part of the conserved index space")
+
+    def test_table_cell_regions_restore_geometry_after_source_index_wrap(self) -> None:
+        chars = [
+            {"c": "D", "x0": 40, "y0": 20, "x1": 48, "y1": 40, "w": -1, "bk": 0, "b": 0},
+            {"c": "E", "x0": 50, "y0": 20, "x1": 58, "y1": 40, "w": -1, "bk": 0, "b": 0},
+            {"c": "F", "x0": 60, "y0": 20, "x1": 68, "y1": 40, "w": -1, "bk": 0, "b": 0},
+            {"c": " ", "sp": 1, "x0": 69, "y0": 20, "x1": 72, "y1": 40, "w": -1, "bk": 0, "b": 0},
+            {"c": "X", "x0": 110, "y0": 20, "x1": 118, "y1": 40, "w": -1, "bk": 1, "b": 0},
+            {"c": "Y", "x0": 10, "y0": 120, "x1": 18, "y1": 140, "w": -1, "bk": 2, "b": 0},
+            {"c": "A", "x0": 10, "y0": 20, "x1": 18, "y1": 40, "w": -1, "bk": 0, "b": 0},
+            {"c": "B", "x0": 20, "y0": 20, "x1": 28, "y1": 40, "w": -1, "bk": 0, "b": 0},
+            {"c": "C", "x0": 30, "y0": 20, "x1": 38, "y1": 40, "w": -1, "bk": 0, "b": 0},
+            {"c": "Z", "x0": 110, "y0": 120, "x1": 118, "y1": 140, "w": -1, "bk": 3, "b": 0},
+            {"c": "G", "x0": 10, "y0": 60, "x1": 18, "y1": 80, "w": -1, "bk": 0, "b": 0},
+            {"c": "H", "x0": 20, "y0": 60, "x1": 28, "y1": 80, "w": -1, "bk": 0, "b": 0},
+        ]
+        original = [dict(item) for item in chars]
+        layout = _manga_page_layout(
+            chars,
+            [],
+            [{"xEdges": [0, 100, 200, 300], "yEdges": [0, 100, 200]}],
+            page_w=300,
+            page_h=200,
+        )
+
+        target_regions = [
+            region
+            for region in sorted(layout["regions"], key=lambda item: item["order"])
+            if region["kind"] == "table-cell"
+            and region["row"] == 0
+            and region["column"] == 0
+        ]
+        rendered = [
+            "".join(
+                chars[index]["c"]
+                for start, end in region["ranges"]
+                for index in range(start, end + 1)
+            )
+            for region in target_regions
+        ]
+        covered = sorted(
+            index
+            for region in layout["regions"]
+            for start, end in region["ranges"]
+            for index in range(start, end + 1)
+        )
+        self.assertEqual(rendered, ["ABC", "DEF ", "GH"])
+        self.assertLess(
+            max(target_regions[0]["bounds"][1], target_regions[1]["bounds"][1]),
+            min(target_regions[0]["bounds"][3], target_regions[1]["bounds"][3]),
+            "same visual line source-wrap runs must overlap vertically",
+        )
+        self.assertLessEqual(
+            target_regions[0]["bounds"][3],
+            target_regions[2]["bounds"][1],
+            "different visual lines must expose distinct vertical bounds",
+        )
+        self.assertEqual(chars, original)
+        self.assertEqual(covered, list(range(len(chars))))
+        self.assertEqual(len(covered), len(set(covered)))
+
+    def test_table_cell_regions_split_same_line_source_index_gaps(self) -> None:
+        chars = [
+            {"c": "A", "x0": 10, "y0": 20, "x1": 18, "y1": 40, "w": -1, "bk": 0, "b": 0},
+            {"c": "X", "x0": 110, "y0": 20, "x1": 118, "y1": 40, "w": -1, "bk": 1, "b": 0},
+            {"c": "C", "x0": 30, "y0": 20, "x1": 38, "y1": 40, "w": -1, "bk": 0, "b": 0},
+            {"c": "Y", "x0": 10, "y0": 120, "x1": 18, "y1": 140, "w": -1, "bk": 2, "b": 0},
+            {"c": "Z", "x0": 110, "y0": 120, "x1": 118, "y1": 140, "w": -1, "bk": 3, "b": 0},
+        ]
+        layout = _manga_page_layout(
+            chars,
+            [],
+            [{"xEdges": [0, 100, 200, 300], "yEdges": [0, 100, 200]}],
+            page_w=300,
+            page_h=200,
+        )
+        target_regions = [
+            region
+            for region in sorted(layout["regions"], key=lambda item: item["order"])
+            if region["kind"] == "table-cell"
+            and region["row"] == 0
+            and region["column"] == 0
+        ]
+        rendered = [
+            "".join(
+                chars[index]["c"]
+                for start, end in region["ranges"]
+                for index in range(start, end + 1)
+            )
+            for region in target_regions
+        ]
+        covered = sorted(
+            index
+            for region in layout["regions"]
+            for start, end in region["ranges"]
+            for index in range(start, end + 1)
+        )
+        self.assertEqual(rendered, ["A", "C"])
+        self.assertTrue(all(len(region["ranges"]) == 1 for region in layout["regions"]))
+        self.assertLess(
+            max(target_regions[0]["bounds"][1], target_regions[1]["bounds"][1]),
+            min(target_regions[0]["bounds"][3], target_regions[1]["bounds"][3]),
+        )
+        self.assertEqual(covered, list(range(len(chars))))
+        self.assertEqual(len(covered), len(set(covered)))
+
+    def test_layout_two_by_two_grid_does_not_misclassify_manga_panel(self) -> None:
+        chars = [
+            {"c": "右", "x0": 220, "y0": 20, "x1": 240, "y1": 50, "w": -1, "bk": 0, "b": 0},
+            {"c": "左", "x0": 20, "y0": 120, "x1": 40, "y1": 150, "w": -1, "bk": 1, "b": 0},
+        ]
+        lines = [
+            {"bounds": (210, 10, 250, 60), "bk": 0, "vertical": True},
+            {"bounds": (10, 110, 50, 160), "bk": 1, "vertical": True},
+        ]
+        layout = _manga_page_layout(
+            chars,
+            lines,
+            [{"xEdges": [0, 150, 300], "yEdges": [0, 100, 200]}],
+            page_w=300,
+            page_h=200,
+        )
+        self.assertEqual(layout["mode"], "manga")
+        self.assertEqual(layout["tables"], [])
+        self.assertEqual(layout["gridColumns"], 4)
+
+    def test_layout_rejects_every_two_column_ruled_grid(self) -> None:
+        chars = [
+            {"c": "右", "x0": 220, "y0": 20, "x1": 240, "y1": 50, "w": -1, "bk": 0, "b": 0},
+            {"c": "左", "x0": 20, "y0": 120, "x1": 40, "y1": 150, "w": -1, "bk": 1, "b": 0},
+        ]
+        lines = [
+            {"bounds": (210, 10, 250, 60), "bk": 0, "vertical": True},
+            {"bounds": (10, 110, 50, 160), "bk": 1, "vertical": True},
+        ]
+        layout = _manga_page_layout(
+            chars,
+            lines,
+            [{"xEdges": [0, 150, 300], "yEdges": [0, 100, 200, 300]}],
+            page_w=300,
+            page_h=300,
+        )
+        self.assertEqual(layout["mode"], "manga")
+        self.assertEqual(layout["tables"], [])
+
+    def test_layout_manga_uses_vision_only_and_adds_supplement(self) -> None:
+        chars = [
+            {"c": "右", "x0": 320, "y0": 20, "x1": 340, "y1": 50, "w": 1, "bk": 7, "b": 0},
+            {"c": " ", "sp": 1, "x0": 320, "y0": 20, "x1": 340, "y1": 50, "w": 1, "bk": 7, "b": 0},
+            {"c": "左", "x0": 20, "y0": 220, "x1": 40, "y1": 250, "w": 2, "bk": 8, "b": 0},
+            {"c": "外", "x0": 190, "y0": 390, "x1": 210, "y1": 420, "w": 3, "bk": 9, "b": 0},
+        ]
+        layout = _manga_page_layout(
+            chars,
+            [
+                {"bounds": (300, 0, 360, 80), "bk": 0, "vertical": True},
+                {"bounds": (0, 200, 70, 280), "bk": 1, "vertical": True},
+            ],
+            [],
+            page_w=400,
+            page_h=500,
+        )
+        self.assertEqual(layout["textSource"], "vision")
+        self.assertEqual(layout["layoutSource"], "manga")
+        self.assertEqual(layout["readingDirection"], "rtl")
+        self.assertEqual(layout["gridColumns"], 4)
+        self.assertEqual(layout["confidence"], "low")
+        self.assertEqual(
+            sum(region["kind"] == "vision-supplement" for region in layout["regions"]),
+            1,
+        )
+        covered = sorted(
+            index
+            for region in layout["regions"]
+            for start, end in region["ranges"]
+            for index in range(start, end + 1)
+        )
+        self.assertEqual(covered, list(range(len(chars))))
+
+    def test_table_confidence_uses_structured_visible_coverage(self) -> None:
+        table_chars = [
+            {"c": text, "x0": x, "y0": y, "x1": x + 10, "y1": y + 10,
+             "w": -1, "bk": index, "b": 0}
+            for index, (text, x, y) in enumerate((
+                ("A", 10, 110), ("B", 110, 110),
+                ("C", 10, 210), ("D", 110, 210),
+            ))
+        ]
+        supplements = [
+            {"c": chr(97 + index), "x0": 310 + index, "y0": 20,
+             "x1": 311 + index, "y1": 30, "w": -1, "bk": 10 + index, "b": 0}
+            for index in range(12)
+        ]
+        boundary = _manga_page_layout(
+            [*table_chars, *supplements],
+            [],
+            [{"xEdges": [0, 100, 200, 300], "yEdges": [100, 200, 300]}],
+            page_w=400,
+            page_h=400,
+        )
+        self.assertEqual(boundary["mode"], "table")
+        self.assertEqual(boundary["confidence"], "high")
+        below_boundary = _manga_page_layout(
+            [
+                *table_chars,
+                *supplements,
+                {"c": "!", "x0": 390, "y0": 20, "x1": 391, "y1": 30,
+                 "w": -1, "bk": 99, "b": 0},
+            ],
+            [],
+            [{"xEdges": [0, 100, 200, 300], "yEdges": [100, 200, 300]}],
+            page_w=400,
+            page_h=400,
+        )
+        self.assertEqual(below_boundary["confidence"], "low")
+
+    def test_table_and_ordinary_same_band_respect_rtl_column_order(self) -> None:
+        chars = [
+            {"c": "左", "x0": 20, "y0": 20, "x1": 40, "y1": 50, "w": -1, "bk": 0, "b": 0},
+            {"c": "右", "x0": 350, "y0": 20, "x1": 370, "y1": 50, "w": -1, "bk": 1, "b": 0},
+            {"c": "A", "x0": 10, "y0": 110, "x1": 20, "y1": 120, "w": -1, "bk": 2, "b": 0},
+            {"c": "B", "x0": 110, "y0": 110, "x1": 120, "y1": 120, "w": -1, "bk": 3, "b": 0},
+            {"c": "C", "x0": 10, "y0": 210, "x1": 20, "y1": 220, "w": -1, "bk": 4, "b": 0},
+            {"c": "D", "x0": 110, "y0": 210, "x1": 120, "y1": 220, "w": -1, "bk": 5, "b": 0},
+        ]
+        layout = _manga_page_layout(
+            chars,
+            [
+                {"bounds": (10, 10, 50, 60), "bk": 0, "vertical": True},
+                {"bounds": (340, 10, 380, 60), "bk": 1, "vertical": True},
+            ],
+            [{"xEdges": [0, 100, 200, 300], "yEdges": [100, 200, 300]}],
+            page_w=400,
+            page_h=400,
+        )
+        ordinary = [
+            region for region in sorted(layout["regions"], key=lambda item: item["order"])
+            if region["kind"] == "manga-region"
+        ]
+        self.assertEqual(layout["readingDirection"], "rtl")
+        self.assertEqual([region["ranges"] for region in ordinary], [[[1, 1]], [[0, 0]]])
+
+    def test_table_producer_caps_total_declared_cells(self) -> None:
+        first_y = list(range(0, 3001))
+        second_y = list(range(3001, 6002))
+        chars = [
+            {"c": "A", "x0": 10, "y0": 10, "x1": 20, "y1": 20, "w": -1, "bk": 0, "b": 0},
+            {"c": "B", "x0": 110, "y0": 10, "x1": 120, "y1": 20, "w": -1, "bk": 1, "b": 0},
+            {"c": "C", "x0": 10, "y0": 1010, "x1": 20, "y1": 1020, "w": -1, "bk": 2, "b": 0},
+            {"c": "D", "x0": 110, "y0": 1010, "x1": 120, "y1": 1020, "w": -1, "bk": 3, "b": 0},
+            {"c": "E", "x0": 10, "y0": 3011, "x1": 20, "y1": 3021, "w": -1, "bk": 4, "b": 0},
+            {"c": "F", "x0": 110, "y0": 3011, "x1": 120, "y1": 3021, "w": -1, "bk": 5, "b": 0},
+            {"c": "G", "x0": 10, "y0": 4011, "x1": 20, "y1": 4021, "w": -1, "bk": 6, "b": 0},
+            {"c": "H", "x0": 110, "y0": 4011, "x1": 120, "y1": 4021, "w": -1, "bk": 7, "b": 0},
+        ]
+        layout = _manga_page_layout(
+            chars,
+            [],
+            [
+                {"xEdges": [0, 100, 200, 300], "yEdges": first_y},
+                {"xEdges": [0, 100, 200, 300], "yEdges": second_y},
+            ],
+            page_w=400,
+            page_h=6001,
+        )
+        self.assertEqual(len(layout["tables"]), 1)
+        self.assertLessEqual(
+            sum(table["rows"] * table["columns"] for table in layout["tables"]),
+            16_384,
+        )
+
     def test_ruled_table_uses_cell_order_and_exact_vision_boxes(self) -> None:
         try:
             import cv2
@@ -2286,6 +2860,20 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
                     "x1": x0 + 14, "y1": start_y + 24, "w": -1,
                 })
                 expected_x[(row, column, offset)] = x0
+        for row in range(3):
+            prepared[row + 1]["cells"] = [
+                (
+                    character,
+                    start_x + offset * 18,
+                    start_y,
+                    start_x + offset * 18 + 14,
+                    start_y + 24,
+                )
+                for value_row, _column, text, start_x, start_y in values
+                if value_row == row
+                for offset, character in enumerate(text)
+            ]
+            prepared[row + 1]["polygon"] = None
         split = _manga_table_cell_lines(prepared, vision, grids)
         self.assertEqual(split[0]["text"], "表の前")
         table = split[1:]
@@ -2300,6 +2888,12 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
             "each populated cell must keep an independent selection block",
         )
         self.assertTrue(all(line["vertical"] is False for line in table))
+        self.assertEqual(
+            _proven_table_layout_grids(
+                prepared, vision, grids, sx=1.0, sy=1.0
+            ),
+            grids,
+        )
 
     def test_borderless_layout_does_not_trigger_table_reordering(self) -> None:
         try:
@@ -2477,20 +3071,22 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
 
     def test_ruled_table_stays_after_nearby_heading_despite_manga_block_order(self) -> None:
         grids = [{
-            "xEdges": [100, 300, 500],
+            "xEdges": [100, 300, 500, 700],
             "yEdges": [200, 250, 300, 350],
         }]
         table_lines = [
             {
-                "text": "甲甲乙乙",
-                "bounds": (120, 210, 480, 240),
+                "text": "甲甲乙乙庚庚",
+                "bounds": (120, 210, 680, 240),
                 "bk": 0,
                 "line": 0,
                 "vertical": False,
                 "cells": [("甲", 130, 212, 145, 235),
                           ("甲", 150, 212, 165, 235),
                           ("乙", 330, 212, 345, 235),
-                          ("乙", 350, 212, 365, 235)],
+                          ("乙", 350, 212, 365, 235),
+                          ("庚", 530, 212, 545, 235),
+                          ("庚", 550, 212, 565, 235)],
                 "polygon": None,
             },
             {
@@ -2503,27 +3099,31 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
                 "polygon": None,
             },
             {
-                "text": "丙丙丁丁",
-                "bounds": (120, 260, 480, 290),
+                "text": "丙丙丁丁辛辛",
+                "bounds": (120, 260, 680, 290),
                 "bk": 2,
                 "line": 2,
                 "vertical": False,
                 "cells": [("丙", 130, 262, 145, 285),
                           ("丙", 150, 262, 165, 285),
                           ("丁", 330, 262, 345, 285),
-                          ("丁", 350, 262, 365, 285)],
+                          ("丁", 350, 262, 365, 285),
+                          ("辛", 530, 262, 545, 285),
+                          ("辛", 550, 262, 565, 285)],
                 "polygon": None,
             },
             {
-                "text": "戊戊己己",
-                "bounds": (120, 310, 480, 340),
+                "text": "戊戊己己壬壬",
+                "bounds": (120, 310, 680, 340),
                 "bk": 3,
                 "line": 3,
                 "vertical": False,
                 "cells": [("戊", 130, 312, 145, 335),
                           ("戊", 150, 312, 165, 335),
                           ("己", 330, 312, 345, 335),
-                          ("己", 350, 312, 365, 335)],
+                          ("己", 350, 312, 365, 335),
+                          ("壬", 530, 312, 545, 335),
+                          ("壬", 550, 312, 565, 335)],
                 "polygon": None,
             },
         ]
@@ -2533,10 +3133,13 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
             for character, x0, y0 in (
                 ("甲", 130, 212), ("甲", 150, 212),
                 ("乙", 330, 212), ("乙", 350, 212),
+                ("庚", 530, 212), ("庚", 550, 212),
                 ("丙", 130, 262), ("丙", 150, 262),
                 ("丁", 330, 262), ("丁", 350, 262),
+                ("辛", 530, 262), ("辛", 550, 262),
                 ("戊", 130, 312), ("戊", 150, 312),
                 ("己", 330, 312), ("己", 350, 312),
+                ("壬", 530, 312), ("壬", 550, 312),
             )
         ]
 
@@ -2544,7 +3147,11 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
 
         self.assertEqual(
             [line["text"] for line in split],
-            ["标题", "甲甲", "乙乙", "丙丙", "丁丁", "戊戊", "己己"],
+            [
+                "标题", "甲甲", "乙乙", "庚庚",
+                "丙丙", "丁丁", "辛辛",
+                "戊戊", "己己", "壬壬",
+            ],
         )
         self.assertTrue(all(
             line.get("vision_chars")
@@ -2865,16 +3472,16 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
                 "book_test",
                 "a" * 64,
                 "manga",
-                "pi-default-v4",
+                "pi-default-v5",
             ))
-            page["processingProfile"] = "pi-default-v4"
+            page["processingProfile"] = "pi-default-v5"
             page_path.write_text(json.dumps(page), "utf-8")
             self.assertTrue(reader_book_ocr_worker._page_done(
                 page_path,
                 "book_test",
                 "a" * 64,
                 "manga",
-                "pi-default-v4",
+                "pi-default-v5",
             ))
 
     def test_manga_page_preserves_authoritative_vertical_direction(self) -> None:
@@ -2896,6 +3503,54 @@ class ReaderBookOcrWorkerContractTest(unittest.TestCase):
         }]}
         chars, _text, _image_w, _image_h = _manga_page(page, engine)
         self.assertEqual([char.get("vertical") for char in chars], [True, True])
+        _chars, _text, _image_w, _image_h, layout = _manga_page(
+            page, engine, include_layout=True
+        )
+        self.assertEqual(layout["textSource"], "unavailable")
+        self.assertEqual(layout["mode"], "fallback")
+        self.assertEqual(layout["regions"], [])
+
+    def test_manga_page_with_vision_preserves_source_chars_and_emits_layout(self) -> None:
+        class FakePixmap:
+            width = 100
+            height = 100
+            n = 0
+            samples = b""
+
+            def save(self, path) -> None:
+                Path(path).write_bytes(b"png")
+
+        page = SimpleNamespace(
+            rect=SimpleNamespace(width=100, height=100),
+            get_pixmap=lambda **_kwargs: FakePixmap(),
+        )
+        engine = lambda _path: {"blocks": [{
+            "vertical": True,
+            "lines": ["漫画誤字"],
+            "lines_coords": [[[60, 5], [95, 5], [95, 80], [60, 80]]],
+        }]}
+        vision = [
+            {"c": "正", "x0": 70, "y0": 10, "x1": 85, "y1": 30, "w": 4, "bk": 9, "b": 0},
+            {"c": " ", "sp": 1, "x0": 70, "y0": 10, "x1": 85, "y1": 30, "w": 4, "bk": 9, "b": 0},
+            {"c": "文", "x0": 70, "y0": 40, "x1": 85, "y1": 60, "w": 5, "bk": 9, "b": 0},
+        ]
+        original = [dict(item) for item in vision]
+        chars, _text, _image_w, _image_h, layout = _manga_page(
+            page,
+            engine,
+            vision_chars=vision,
+            include_layout=True,
+        )
+        self.assertEqual(chars, original)
+        self.assertEqual([item["c"] for item in chars], ["正", " ", "文"])
+        self.assertEqual(layout["textSource"], "vision")
+        covered = sorted(
+            index
+            for region in layout["regions"]
+            for start, end in region["ranges"]
+            for index in range(start, end + 1)
+        )
+        self.assertEqual(covered, [0, 1, 2])
 
     def test_manga_line_geometry_follows_vertical_japanese_writing(self) -> None:
         boxes = _manga_line_char_boxes(

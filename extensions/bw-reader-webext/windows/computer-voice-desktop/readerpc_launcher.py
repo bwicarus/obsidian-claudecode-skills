@@ -59,7 +59,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.57"
+APP_VERSION = "0.1.58"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status
@@ -1172,7 +1172,7 @@ class ReaderPCWindow:
         self.pc_status, self.pc_detail, self.pc_button = self._service_row(
             outer,
             "PC 预处理",
-            "文字、分词与公式 · quality-first-v5",
+            "文字、分词与公式 · quality-first-v6",
             self.toggle_pc,
         )
 

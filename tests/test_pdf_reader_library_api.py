@@ -33,7 +33,7 @@ import pdf_reader  # noqa: E402
 import reader_book_ocr  # noqa: E402
 from reader_book_library import BookLibrary, UploadTooLargeError  # noqa: E402
 from reader_book_ocr import ReaderBookOcrService  # noqa: E402
-from reader_book_ocr_worker import _publish_attachments  # noqa: E402
+from reader_book_ocr_worker import _publish_attachments, _vision_page_layout  # noqa: E402
 from reader_book_user_state import decode_package  # noqa: E402
 from reader_sidecar_store import SidecarStore  # noqa: E402
 
@@ -161,7 +161,7 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
                     "workerId": "pc_denied",
                     "capabilities": {
                         "engines": ["vision"],
-                        "processingProfile": "quality-first-v5",
+                        "processingProfile": "quality-first-v6",
                     },
                 },
             ).status_code,
@@ -203,6 +203,85 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
             ).status_code,
             401,
         )
+
+    def test_formula_replacement_keeps_chars_but_fails_layout_closed(self) -> None:
+        book_id = "book_" + "a" * 32
+        digest = "b" * 64
+        chars = [
+            {"c": "A", "x0": 10, "y0": 10, "x1": 20, "y1": 20, "w": 1, "bk": 1, "b": 0},
+            {"c": "B", "x0": 70, "y0": 70, "x1": 80, "y1": 80, "w": 2, "bk": 2, "b": 0},
+        ]
+        layout = {
+            "schema": "reader-page-layout/1",
+            "textSource": "vision",
+            "layoutSource": "vision",
+            "mode": "vision",
+            "readingDirection": "ltr",
+            "confidence": "high",
+            "gridColumns": 1,
+            "gridRows": 2,
+            "regions": [
+                {
+                    "id": index, "kind": "vision-block", "order": index,
+                    "bounds": [item["x0"], item["y0"], item["x1"], item["y1"]],
+                    "ranges": [[index, index]], "gridRow": index, "gridColumn": 0,
+                    "rowSpan": 1, "columnSpan": 1, "vertical": False,
+                    "tableId": None, "row": None, "column": None,
+                }
+                for index, item in enumerate(chars)
+            ],
+            "tables": [],
+        }
+        previous = pdf_reader._READER_BOOK_OCR
+        pdf_reader._READER_BOOK_OCR = types.SimpleNamespace(
+            read_page_bundle=lambda *_args: (
+                {
+                    "schema": "reader-page-chars/1",
+                    "engine": "vision",
+                    "page_w": 100,
+                    "page_h": 100,
+                    "chars": chars,
+                    "furigana": [],
+                    "layout": layout,
+                },
+                self.vault / "A.pdf",
+                [{"page": 1, "bbox": [0.05, 0.05, 0.30, 0.30], "latex": "x"}],
+            )
+        )
+        self.addCleanup(setattr, pdf_reader, "_READER_BOOK_OCR", previous)
+
+        response = self.client.get(
+            f"/pdf/api/library/ocr/page-chars/{book_id}/1",
+            query_string={"contentSha256": digest},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertIn("$", [item["c"] for item in payload["chars"]])
+        self.assertEqual(payload["layout"]["textSource"], "unavailable")
+        self.assertEqual(payload["layout"]["mode"], "fallback")
+        self.assertEqual(payload["layout"]["regions"], [])
+
+        pdf_reader._READER_BOOK_OCR = types.SimpleNamespace(
+            read_page_bundle=lambda *_args: (
+                {
+                    "schema": "reader-page-chars/1",
+                    "engine": "vision",
+                    "page_w": 100,
+                    "page_h": 100,
+                    "chars": chars,
+                    "furigana": [],
+                    "layout": layout,
+                },
+                self.vault / "A.pdf",
+                [],
+            )
+        )
+        unchanged = self.client.get(
+            f"/pdf/api/library/ocr/page-chars/{book_id}/1",
+            query_string={"contentSha256": digest},
+        )
+        self.assertEqual(unchanged.status_code, 200)
+        self.assertEqual(unchanged.get_json()["layout"], layout)
 
     def test_verified_non_owner_cannot_access_shared_vault_library(self) -> None:
         self.authorized = False
@@ -313,7 +392,7 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
         self.assertEqual(started.status_code, 200)
         self.assertEqual(started.get_json()["job"]["executor"], "pc")
         self.assertEqual(
-            started.get_json()["job"]["processingProfile"], "quality-first-v5"
+            started.get_json()["job"]["processingProfile"], "quality-first-v6"
         )
 
         claimed = self.client.post(
@@ -325,7 +404,7 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
                     "engines": ["vision"],
                     "maxPdfBytes": 1024 * 1024,
                     "maxPageBytes": 1024 * 1024,
-                    "processingProfile": "quality-first-v5",
+                    "processingProfile": "quality-first-v6",
                 },
             },
         )
@@ -333,7 +412,7 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
         claim = claimed.get_json()
         self.assertEqual(claim["contract"], "reader-library-ocr-worker/1")
         self.assertEqual(
-            claim["job"]["processingProfile"], "quality-first-v5"
+            claim["job"]["processingProfile"], "quality-first-v6"
         )
         identity = {
             "contract": claim["contract"],
@@ -379,6 +458,9 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
             "furigana": [],
             "tokenized": True,
         }
+        page["layout"] = _vision_page_layout(
+            page["chars"], page_w=10, page_h=20
+        )
         uploaded = self.client.put(
             "/pdf/api/library/ocr/worker/pages/1",
             json={**identity, "page": page},
@@ -438,7 +520,7 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
                 "engines": ["vision"],
                 "maxPdfBytes": 1024 * 1024,
                 "maxPageBytes": 1024 * 1024,
-                "processingProfile": "quality-first-v5",
+                "processingProfile": "quality-first-v6",
             },
         }).encode("utf-8")
         accepted = open_chunked(valid)
@@ -446,7 +528,7 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
 
         oversized = (
             b'{"contract":"reader-library-ocr-worker/1","workerId":"pc_chunked",'
-            b'"capabilities":{"engines":["vision"],"processingProfile":"quality-first-v5"},'
+            b'"capabilities":{"engines":["vision"],"processingProfile":"quality-first-v6"},'
             b'"padding":"' + (b"x" * (64 * 1024)) + b'"}'
         )
         rejected = open_chunked(oversized)
@@ -465,7 +547,7 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
                         "engines": ["vision"],
                         "maxPdfBytes": 1024 * 1024,
                         "maxPageBytes": 1024 * 1024,
-                        "processingProfile": "quality-first-v5",
+                        "processingProfile": "quality-first-v6",
                     },
                 },
             )

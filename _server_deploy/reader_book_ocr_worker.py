@@ -8,6 +8,7 @@ page in progress may be repeated after resume.  The original PDF is read-only.
 from __future__ import annotations
 
 import argparse
+import bisect
 import difflib
 import hashlib
 import json
@@ -28,7 +29,7 @@ import uuid
 CONTRACT = "reader-library-ocr/1"
 PAGE_SCHEMA = "reader-page-chars/1"
 PUBLICATION_CONTRACT = "reader-book-ocr-publication/1"
-PROCESSING_PROFILES = {"pi": "pi-default-v4", "pc": "quality-first-v5"}
+PROCESSING_PROFILES = {"pi": "pi-default-v5", "pc": "quality-first-v6"}
 LEGACY_PROCESSING_PROFILES = {"pi": "pi-default-v1", "pc": "quality-first-v1"}
 _EXPECTED_JOB_ID: str | None = None
 _EXPECTED_WORKER_GENERATION: str | None = None
@@ -665,16 +666,643 @@ def _detect_ruled_table_grids(
         ):
             continue
         y_edges = [rule[0] for rule in rules]
-        # A two-by-two rectangular manga panel grid has exactly the same line
-        # geometry as a tiny table.  This correction is intentionally scoped
-        # to denser ruled tables and must not override manga panel order.
-        if len(x_edges) == 3 and len(y_edges) == 3:
+        # Two-column ruled regions are too easily confused with adjacent manga
+        # panels.  Only grids with at least three columns are table evidence.
+        if len(x_edges) < 4:
             continue
         grids.append({
             "xEdges": [round(value * map_sx, 3) for value in x_edges],
             "yEdges": [round(value * map_sy, 3) for value in y_edges],
         })
     return grids
+
+
+_PAGE_LAYOUT_SCHEMA = "reader-page-layout/1"
+_MAX_PAGE_LAYOUT_TABLE_CELLS = 16_384
+
+
+def _unavailable_page_layout() -> dict:
+    """Return a fail-closed layout when Vision is not authoritative.
+
+    Manga OCR may still provide a useful visible character layer in this case,
+    but those characters are not the Vision sequence used by model-facing
+    spatial projections.  Empty ranges make that boundary explicit.
+    """
+    return {
+        "schema": _PAGE_LAYOUT_SCHEMA,
+        "textSource": "unavailable",
+        "layoutSource": "vision",
+        "mode": "fallback",
+        "readingDirection": "ltr",
+        "confidence": "fallback",
+        "gridColumns": 4,
+        "gridRows": 0,
+        "regions": [],
+        "tables": [],
+    }
+
+
+def _layout_ranges(indices: list[int]) -> list[list[int]]:
+    values = sorted(set(int(value) for value in indices))
+    if not values:
+        return []
+    result: list[list[int]] = []
+    start = previous = values[0]
+    for value in values[1:]:
+        if value == previous + 1:
+            previous = value
+            continue
+        result.append([start, previous])
+        start = previous = value
+    result.append([start, previous])
+    return result
+
+
+def _layout_bounds(
+    chars: list[dict],
+    indices: list[int],
+    *,
+    page_w: float,
+    page_h: float,
+    preferred=None,
+) -> list[float]:
+    values = []
+    for index in indices:
+        try:
+            item = chars[index]
+            values.append((
+                float(item["x0"]), float(item["y0"]),
+                float(item["x1"]), float(item["y1"]),
+            ))
+        except (IndexError, KeyError, TypeError, ValueError, OverflowError):
+            continue
+    if preferred is not None:
+        try:
+            x0, y0, x1, y1 = (float(value) for value in preferred)
+            if all(math.isfinite(value) for value in (x0, y0, x1, y1)):
+                return [
+                    round(max(0.0, min(page_w, x0)), 3),
+                    round(max(0.0, min(page_h, y0)), 3),
+                    round(max(0.0, min(page_w, x1)), 3),
+                    round(max(0.0, min(page_h, y1)), 3),
+                ]
+        except (TypeError, ValueError, OverflowError):
+            pass
+    if not values:
+        return [0.0, 0.0, 0.0, 0.0]
+    return [
+        round(max(0.0, min(page_w, min(value[0] for value in values))), 3),
+        round(max(0.0, min(page_h, min(value[1] for value in values))), 3),
+        round(max(0.0, min(page_w, max(value[2] for value in values))), 3),
+        round(max(0.0, min(page_h, max(value[3] for value in values))), 3),
+    ]
+
+
+def _layout_line_score(char: dict, line: dict) -> float | None:
+    """Return a geometry-only score; Manga text never participates."""
+    try:
+        x0, y0, x1, y1 = (
+            float(char["x0"]), float(char["y0"]),
+            float(char["x1"]), float(char["y1"]),
+        )
+        lx0, ly0, lx1, ly1 = (float(value) for value in line["bounds"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if not all(
+        math.isfinite(value)
+        for value in (x0, y0, x1, y1, lx0, ly0, lx1, ly1)
+    ):
+        return None
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    line_w = max(0.001, lx1 - lx0)
+    line_h = max(0.001, ly1 - ly0)
+    vertical = (
+        bool(line["vertical"])
+        if isinstance(line.get("vertical"), bool)
+        else line_h > line_w * 1.2
+    )
+    cross = line_w if vertical else line_h
+    margin = cross * 0.35
+    if not (
+        lx0 - margin <= cx <= lx1 + margin
+        and ly0 - margin <= cy <= ly1 + margin
+    ):
+        return None
+    overlap_x = max(0.0, min(x1, lx1) - max(x0, lx0))
+    overlap_y = max(0.0, min(y1, ly1) - max(y0, ly0))
+    char_area = max(0.001, (x1 - x0) * (y1 - y0))
+    overlap_ratio = overlap_x * overlap_y / char_area
+    if overlap_ratio < 0.08 and not (lx0 <= cx <= lx1 and ly0 <= cy <= ly1):
+        return None
+    center_x = (lx0 + lx1) / 2.0
+    center_y = (ly0 + ly1) / 2.0
+    cross_distance = abs(cx - center_x) / line_w if vertical else abs(cy - center_y) / line_h
+    return overlap_ratio - cross_distance * 0.08
+
+
+def _layout_row_bands(regions: list[dict], page_h: float) -> list[list[dict]]:
+    if not regions:
+        return []
+    heights = sorted(
+        max(0.001, float(item["bounds"][3]) - float(item["bounds"][1]))
+        for item in regions
+    )
+    median_height = heights[len(heights) // 2]
+    tolerance = max(page_h * 0.018, median_height * 0.38)
+    bands: list[dict] = []
+    for region in sorted(
+        regions,
+        key=lambda item: (float(item["bounds"][1]), float(item["bounds"][0])),
+    ):
+        top = float(region["bounds"][1])
+        target = None
+        for band in bands:
+            if abs(top - band["top"]) <= tolerance:
+                target = band
+                break
+        if target is None:
+            bands.append({"top": top, "items": [region]})
+        else:
+            target["items"].append(region)
+            target["top"] = sum(
+                float(item["bounds"][1]) for item in target["items"]
+            ) / len(target["items"])
+    bands.sort(key=lambda item: item["top"])
+    return [band["items"] for band in bands]
+
+
+def _table_cell_layout_runs(chars: list[dict], indices: list[int]) -> list[list[int]]:
+    """Return visual-line/source-wrap runs without reordering ``chars``.
+
+    Vision source order can jump backwards inside one ruled cell.  Regions are
+    therefore emitted in geometric line/x order, splitting whenever the source
+    index wraps.  Non-visible entries remain in the index space and attach to
+    the run owning their nearest preceding visible source index when possible.
+    """
+    visible_symbols = []
+    hidden_indices = []
+    for index in sorted(set(indices)):
+        char = chars[index]
+        if char.get("sp") or not str(char.get("c") or ""):
+            hidden_indices.append(index)
+            continue
+        try:
+            geometry = tuple(
+                float(char[key]) for key in ("x0", "y0", "x1", "y1")
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            hidden_indices.append(index)
+            continue
+        if not all(math.isfinite(value) for value in geometry):
+            hidden_indices.append(index)
+            continue
+        symbol = dict(char)
+        symbol["_layoutIndex"] = index
+        visible_symbols.append(symbol)
+
+    if not visible_symbols:
+        return [sorted(set(indices))] if indices else []
+
+    runs: list[list[int]] = []
+    visible_run_by_index: dict[int, list[int]] = {}
+    for line in _cluster_table_cell_symbols(visible_symbols):
+        current: list[int] = []
+        previous = -1
+        for symbol in line:
+            index = int(symbol["_layoutIndex"])
+            if current and index != previous + 1:
+                runs.append(current)
+                visible_run_by_index.update((value, current) for value in current)
+                current = []
+            current.append(index)
+            previous = index
+        if current:
+            runs.append(current)
+            visible_run_by_index.update((value, current) for value in current)
+
+    visible_indices = sorted(visible_run_by_index)
+    for index in hidden_indices:
+        insertion = bisect.bisect_left(visible_indices, index)
+        if insertion:
+            owner = visible_indices[insertion - 1]
+        elif insertion < len(visible_indices):
+            owner = visible_indices[insertion]
+        else:
+            preferred = runs[0]
+            if index == preferred[0] - 1 or index == preferred[-1] + 1:
+                preferred.append(index)
+            else:
+                runs.insert(0, [index])
+            continue
+        preferred = visible_run_by_index[owner]
+        if index == preferred[0] - 1 or index == preferred[-1] + 1:
+            preferred.append(index)
+            continue
+        adjacent = next((
+            run
+            for run in runs
+            if index == min(run) - 1 or index == max(run) + 1
+        ), None)
+        if adjacent is not None:
+            adjacent.append(index)
+            continue
+        position = next(
+            run_index
+            for run_index, run in enumerate(runs)
+            if run is preferred
+        )
+        runs.insert(position + (1 if index > owner else 0), [index])
+    return [sorted(run) for run in runs]
+
+
+def _vision_page_layout(
+    chars: list[dict],
+    *,
+    page_w: float,
+    page_h: float,
+) -> dict:
+    """Describe ordinary Vision order without changing the character array."""
+    if not chars:
+        return _unavailable_page_layout()
+    groups: dict[tuple[int, int], list[int]] = {}
+    for index, char in enumerate(chars):
+        key = (int(char.get("bk", -1)), int(char.get("line", -1)))
+        groups.setdefault(key, []).append(index)
+    grouped_indices = list(groups.values())
+    if len(grouped_indices) > 4096:
+        grouped_indices = [
+            *grouped_indices[:4095],
+            [index for group in grouped_indices[4095:] for index in group],
+        ]
+    regions = []
+    for order, indices in enumerate(grouped_indices):
+        regions.append({
+            "id": order,
+            "kind": "vision-block",
+            "order": order,
+            "bounds": _layout_bounds(
+                chars, indices, page_w=page_w, page_h=page_h
+            ),
+            "ranges": _layout_ranges(indices),
+            "gridRow": order,
+            "gridColumn": 0,
+            "rowSpan": 1,
+            "columnSpan": 1,
+            "vertical": False,
+            "tableId": None,
+            "row": None,
+            "column": None,
+        })
+    return {
+        "schema": _PAGE_LAYOUT_SCHEMA,
+        "textSource": "vision",
+        "layoutSource": "vision",
+        "mode": "vision",
+        "readingDirection": "ltr",
+        "confidence": "high" if chars else "low",
+        "gridColumns": 1,
+        "gridRows": max(1, len(regions)),
+        "regions": regions,
+        "tables": [],
+    }
+
+
+def _manga_page_layout(
+    chars: list[dict],
+    manga_lines: list[dict],
+    grids: list[dict],
+    *,
+    page_w: float,
+    page_h: float,
+) -> dict:
+    """Project authoritative Vision indices through Manga/table geometry.
+
+    Every range indexes ``chars`` exactly as sent to the App.  Table ownership
+    wins over Manga geometry; any remaining symbol that cannot be assigned by
+    geometry becomes an explicit Vision supplement instead of disappearing or
+    being replaced by Manga OCR text.
+    """
+    assigned: list[tuple[str, object] | None] = [None] * len(chars)
+    tables: list[dict] = []
+    region_drafts: list[dict] = []
+    table_cell_count = 0
+
+    for raw_grid in sorted(
+        grids or [], key=lambda item: (item.get("yEdges") or [0])[0]
+    )[:64]:
+        try:
+            x_edges = [float(value) for value in raw_grid.get("xEdges") or []]
+            y_edges = [float(value) for value in raw_grid.get("yEdges") or []]
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if (
+            len(x_edges) < 4
+            or len(y_edges) < 2
+            or len(x_edges) - 1 > 4096
+            or len(y_edges) - 1 > 4096
+            or any(not math.isfinite(value) for value in (*x_edges, *y_edges))
+            or any(right <= left for left, right in zip(x_edges, x_edges[1:]))
+            or any(bottom <= top for top, bottom in zip(y_edges, y_edges[1:]))
+        ):
+            continue
+        grid_cell_count = (len(x_edges) - 1) * (len(y_edges) - 1)
+        if table_cell_count + grid_cell_count > _MAX_PAGE_LAYOUT_TABLE_CELLS:
+            continue
+        cells: dict[tuple[int, int], list[int]] = {}
+        for index, char in enumerate(chars):
+            if assigned[index] is not None:
+                continue
+            try:
+                cx = (float(char["x0"]) + float(char["x1"])) / 2.0
+                cy = (float(char["y0"]) + float(char["y1"])) / 2.0
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            column = next((
+                value
+                for value, (left, right) in enumerate(zip(x_edges, x_edges[1:]))
+                if left <= cx <= right
+            ), None)
+            row = next((
+                value
+                for value, (top, bottom) in enumerate(zip(y_edges, y_edges[1:]))
+                if top <= cy <= bottom
+            ), None)
+            if row is not None and column is not None:
+                cells.setdefault((row, column), []).append(index)
+        visible_cells = {
+            cell: indices
+            for cell, indices in cells.items()
+            if any(not chars[index].get("sp") for index in indices)
+        }
+        if (
+            len({row for row, _column in visible_cells}) < 2
+            or len({column for _row, column in visible_cells}) < 2
+        ):
+            continue
+        table_cell_count += grid_cell_count
+        table_id = len(tables)
+        table = {
+            "id": table_id,
+            "rows": len(y_edges) - 1,
+            "columns": len(x_edges) - 1,
+            "xEdges": [round(value, 3) for value in x_edges],
+            "yEdges": [round(value, 3) for value in y_edges],
+        }
+        tables.append(table)
+        for (row, column), indices in sorted(cells.items()):
+            owned = [index for index in indices if assigned[index] is None]
+            if not owned:
+                continue
+            key = ("table", table_id, row, column)
+            for index in owned:
+                assigned[index] = ("table", key)
+            for run in _table_cell_layout_runs(chars, owned):
+                region_drafts.append({
+                    "kind": "table-cell",
+                    "bounds": _layout_bounds(
+                        chars,
+                        run,
+                        page_w=page_w,
+                        page_h=page_h,
+                    ),
+                    "indices": run,
+                    "vertical": False,
+                    "tableId": table_id,
+                    "row": row,
+                    "column": column,
+                })
+
+    manga_groups: dict[int, dict] = {}
+    for line in manga_lines or []:
+        try:
+            block = int(line.get("bk", -1))
+            bounds = tuple(float(value) for value in line["bounds"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if len(bounds) != 4 or not all(math.isfinite(value) for value in bounds):
+            continue
+        group = manga_groups.setdefault(block, {"lines": [], "bounds": [], "vertical": []})
+        group["lines"].append(line)
+        group["bounds"].append(bounds)
+        if isinstance(line.get("vertical"), bool):
+            group["vertical"].append(bool(line["vertical"]))
+
+    manga_indices: dict[int, list[int]] = {}
+    for index, char in enumerate(chars):
+        if assigned[index] is not None:
+            continue
+        best: tuple[float, int] | None = None
+        for block, group in manga_groups.items():
+            for line in group["lines"]:
+                score = _layout_line_score(char, line)
+                if score is not None and (best is None or score > best[0]):
+                    best = (score, block)
+        if best is None:
+            continue
+        block = best[1]
+        assigned[index] = ("manga", block)
+        manga_indices.setdefault(block, []).append(index)
+
+    for block, indices in manga_indices.items():
+        group = manga_groups[block]
+        group_bounds = group["bounds"]
+        preferred = (
+            min(value[0] for value in group_bounds),
+            min(value[1] for value in group_bounds),
+            max(value[2] for value in group_bounds),
+            max(value[3] for value in group_bounds),
+        )
+        vertical_flags = group["vertical"]
+        region_drafts.append({
+            "kind": "manga-region",
+            "bounds": _layout_bounds(
+                chars, indices, page_w=page_w, page_h=page_h,
+                preferred=preferred,
+            ),
+            "indices": indices,
+            "vertical": (
+                sum(1 for value in vertical_flags if value)
+                > len(vertical_flags) / 2.0
+                if vertical_flags else False
+            ),
+            "tableId": None,
+            "row": None,
+            "column": None,
+        })
+
+    supplements: dict[tuple[int, int], list[int]] = {}
+    for index, char in enumerate(chars):
+        if assigned[index] is not None:
+            continue
+        key = (int(char.get("bk", -1)), int(char.get("line", -1)))
+        supplements.setdefault(key, []).append(index)
+        assigned[index] = ("supplement", key)
+    for indices in supplements.values():
+        region_drafts.append({
+            "kind": "vision-supplement",
+            "bounds": _layout_bounds(
+                chars, indices, page_w=page_w, page_h=page_h
+            ),
+            "indices": indices,
+            "vertical": False,
+            "tableId": None,
+            "row": None,
+            "column": None,
+        })
+
+    if len(region_drafts) > 4096:
+        return _vision_page_layout(chars, page_w=page_w, page_h=page_h)
+
+    if not manga_indices and not tables:
+        return _vision_page_layout(chars, page_w=page_w, page_h=page_h)
+
+    non_table = [
+        draft for draft in region_drafts if draft["kind"] != "table-cell"
+    ]
+    bands = _layout_row_bands(non_table, page_h)
+    table_rows = max((int(table["rows"]) for table in tables), default=0)
+    grid_rows = max(1, len(bands), table_rows)
+    grid_columns = max(
+        4 if manga_indices else 1,
+        min(8, max((int(table["columns"]) for table in tables), default=1)),
+    )
+    band_for = {
+        id(region): row
+        for row, items in enumerate(bands)
+        for region in items
+    }
+    for draft in region_drafts:
+        if draft["kind"] == "table-cell":
+            columns = int(tables[int(draft["tableId"])]["columns"])
+            draft["gridRow"] = min(grid_rows - 1, int(draft["row"]))
+            draft["gridColumn"] = min(
+                grid_columns - 1,
+                int(int(draft["column"]) * grid_columns / max(1, columns)),
+            )
+        else:
+            center_x = (float(draft["bounds"][0]) + float(draft["bounds"][2])) / 2.0
+            draft["gridRow"] = min(grid_rows - 1, band_for.get(id(draft), 0))
+            draft["gridColumn"] = min(
+                grid_columns - 1,
+                max(0, int(center_x * grid_columns / max(0.001, page_w))),
+            )
+
+    vertical_weight = sum(
+        len(draft["indices"])
+        for draft in region_drafts
+        if draft["kind"] == "manga-region" and draft["vertical"]
+    )
+    horizontal_weight = sum(
+        len(draft["indices"])
+        for draft in region_drafts
+        if draft["kind"] == "manga-region" and not draft["vertical"]
+    )
+    reading_direction = "rtl" if vertical_weight > horizontal_weight else "ltr"
+
+    table_by_id = {int(table["id"]): table for table in tables}
+    table_cells: dict[int, list[dict]] = {}
+    ordinary = []
+    for draft in region_drafts:
+        if draft["kind"] == "table-cell":
+            table_cells.setdefault(int(draft["tableId"]), []).append(draft)
+        else:
+            ordinary.append(draft)
+    band_tops = {
+        row: min(float(item["bounds"][1]) for item in items)
+        for row, items in enumerate(bands)
+    }
+    ordered_units = [
+        (
+            band_tops.get(int(draft["gridRow"]), float(draft["bounds"][1])),
+            1,
+            -int(draft["gridColumn"])
+            if reading_direction == "rtl" else int(draft["gridColumn"]),
+            -float(draft["bounds"][0])
+            if reading_direction == "rtl" else float(draft["bounds"][0]),
+            draft,
+        )
+        for draft in ordinary
+    ] + [
+        (float(table["yEdges"][0]), 0, 0, 0.0, ("table", table_id))
+        for table_id, table in table_by_id.items()
+    ]
+    ordered_units.sort(key=lambda item: item[:4])
+    ordered_drafts: list[dict] = []
+    for _top, _kind, _column, _left, value in ordered_units:
+        if isinstance(value, tuple):
+            table_id = int(value[1])
+            ordered_drafts.extend(sorted(
+                table_cells.get(table_id, []),
+                key=lambda item: (int(item["row"]), int(item["column"])),
+            ))
+        else:
+            ordered_drafts.append(value)
+    if not tables:
+        ordered_drafts.sort(key=lambda item: (
+            int(item["gridRow"]),
+            -int(item["gridColumn"])
+            if reading_direction == "rtl" else int(item["gridColumn"]),
+            float(item["bounds"][1]),
+            -float(item["bounds"][0])
+            if reading_direction == "rtl" else float(item["bounds"][0]),
+        ))
+
+    regions = []
+    for order, draft in enumerate(ordered_drafts):
+        regions.append({
+            "id": order,
+            "kind": draft["kind"],
+            "order": order,
+            "bounds": [round(float(value), 3) for value in draft["bounds"]],
+            "ranges": _layout_ranges(draft["indices"]),
+            "gridRow": int(draft["gridRow"]),
+            "gridColumn": int(draft["gridColumn"]),
+            "rowSpan": 1,
+            "columnSpan": 1,
+            "vertical": bool(draft["vertical"]),
+            "tableId": draft["tableId"],
+            "row": draft["row"],
+            "column": draft["column"],
+        })
+
+    covered = sorted(
+        index
+        for region in regions
+        for start, end in region["ranges"]
+        for index in range(start, end + 1)
+    )
+    if covered != list(range(len(chars))):
+        raise RuntimeError("page layout did not conserve Vision character indices")
+    visible_indices = {
+        index
+        for index, char in enumerate(chars)
+        if not char.get("sp") and str(char.get("c") or "")
+    }
+    structured_indices = {
+        index
+        for draft in region_drafts
+        if draft["kind"] in {"table-cell", "manga-region"}
+        for index in draft["indices"]
+        if index in visible_indices
+    }
+    structured_coverage = (
+        len(structured_indices) / len(visible_indices)
+        if visible_indices else 0.0
+    )
+    confidence_threshold = 0.25 if tables else 0.75
+    confidence = "high" if structured_coverage >= confidence_threshold else "low"
+    return {
+        "schema": _PAGE_LAYOUT_SCHEMA,
+        "textSource": "vision",
+        "layoutSource": "ruled-table" if tables else "manga",
+        "mode": "table" if tables else "manga",
+        "readingDirection": reading_direction,
+        "confidence": confidence,
+        "gridColumns": grid_columns,
+        "gridRows": grid_rows,
+        "regions": regions,
+        "tables": tables,
+    }
 
 
 def _manga_vision_text_is_complete(manga_text: str, vision_text: str) -> bool:
@@ -893,9 +1521,7 @@ def _manga_table_cell_lines(
     for grid in sorted(grids, key=lambda item: item["yEdges"][0]):
         x_edges = [float(value) for value in grid.get("xEdges") or []]
         y_edges = [float(value) for value in grid.get("yEdges") or []]
-        if len(x_edges) < 3 or len(y_edges) < 3:
-            continue
-        if len(x_edges) == 3 and len(y_edges) == 3:
+        if len(x_edges) < 4 or len(y_edges) < 3:
             continue
         consumed: list[int] = []
         for index, line in enumerate(lines):
@@ -1095,6 +1721,66 @@ def _manga_table_cell_lines(
         if index < len(lines) and index not in consumed_all:
             result.append(lines[index])
     return result
+
+
+def _proven_table_layout_grids(
+    lines: list[dict],
+    vision_chars: list[dict] | None,
+    grids: list[dict],
+    *,
+    sx: float,
+    sy: float,
+) -> list[dict]:
+    """Return only grids that pass the established Manga/Vision proof gate."""
+    if not lines or not vision_chars or not grids:
+        return []
+    candidates = []
+    cell_count = 0
+    for grid in sorted(grids, key=lambda item: (item.get("yEdges") or [0])[0]):
+        x_edges = list(grid.get("xEdges") or [])
+        y_edges = list(grid.get("yEdges") or [])
+        if len(x_edges) < 4 or len(y_edges) < 2:
+            continue
+        grid_cells = (len(x_edges) - 1) * (len(y_edges) - 1)
+        if cell_count + grid_cells > _MAX_PAGE_LAYOUT_TABLE_CELLS:
+            continue
+        candidates.append(grid)
+        cell_count += grid_cells
+    if not candidates:
+        return []
+    proven_lines = _manga_table_cell_lines(
+        lines, vision_chars, candidates, sx=sx, sy=sy
+    )
+    generated = [line for line in proven_lines if line.get("vision_chars")]
+    accepted = []
+    for grid in candidates:
+        x_edges = [float(value) for value in grid.get("xEdges") or []]
+        y_edges = [float(value) for value in grid.get("yEdges") or []]
+        cells = set()
+        for line in generated:
+            try:
+                x0, y0, x1, y1 = (float(value) for value in line["bounds"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            center_x, center_y = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+            column = next((
+                index
+                for index, (left, right) in enumerate(zip(x_edges, x_edges[1:]))
+                if left <= center_x <= right
+            ), None)
+            row = next((
+                index
+                for index, (top, bottom) in enumerate(zip(y_edges, y_edges[1:]))
+                if top <= center_y <= bottom
+            ), None)
+            if row is not None and column is not None:
+                cells.add((row, column))
+        if (
+            len({row for row, _column in cells}) >= 2
+            and len({column for _row, column in cells}) >= 2
+        ):
+            accepted.append(grid)
+    return accepted
 
 
 def _manga_character_ink_factor(character: str) -> float:
@@ -1580,7 +2266,8 @@ def _manga_page(
     engine,
     *,
     vision_chars: list[dict] | None = None,
-) -> tuple[list[dict], str, int, int]:
+    include_layout: bool = False,
+):
     pix = page.get_pixmap(dpi=300, alpha=False)
     image_w, image_h = pix.width, pix.height
     temp_name = None
@@ -1673,10 +2360,38 @@ def _manga_page(
             text_lines.append(text)
             line_no += 1
 
+    grids = _detect_ruled_table_grids(image_gray, sx=sx, sy=sy)
+    if vision_chars is not None:
+        # Vision remains the sole authority for characters, geometry, and
+        # source order.  Manga/table inference is metadata only; it must never
+        # replace, omit, or reorder a symbol in the visible layer.
+        proven_grids = _proven_table_layout_grids(
+            prepared_lines,
+            vision_chars,
+            grids,
+            sx=sx,
+            sy=sy,
+        )
+        chars = [dict(item) for item in vision_chars]
+        layout = _manga_page_layout(
+            chars,
+            prepared_lines,
+            proven_grids,
+            page_w=float(page.rect.width),
+            page_h=float(page.rect.height),
+        )
+        result = (
+            chars,
+            "".join(str(item.get("c") or "") for item in chars),
+            image_w,
+            image_h,
+        )
+        return (*result, layout) if include_layout else result
+
     prepared_lines = _manga_table_cell_lines(
         prepared_lines,
-        vision_chars,
-        _detect_ruled_table_grids(image_gray, sx=sx, sy=sy),
+        None,
+        grids,
         sx=sx,
         sy=sy,
     )
@@ -1709,7 +2424,8 @@ def _manga_page(
             if isinstance(block_vertical, bool):
                 char["vertical"] = block_vertical
             chars.append(char)
-    return chars, "\n".join(text_lines), image_w, image_h
+    result = (chars, "\n".join(text_lines), image_w, image_h)
+    return (*result, _unavailable_page_layout()) if include_layout else result
 
 
 _CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
@@ -2622,6 +3338,11 @@ def run(args) -> int:
                     chars, text, image_w, image_h, effective_dpi = _vision_page(
                         page, Path(args.project)
                     )
+                    layout = _vision_page_layout(
+                        chars,
+                        page_w=float(page.rect.width),
+                        page_h=float(page.rect.height),
+                    )
                 else:
                     vision_chars = None
                     try:
@@ -2639,10 +3360,11 @@ def run(args) -> int:
                         # _manga_vision_line_chars instead of failing the page.
                         vision_chars = None
                         effective_dpi = None
-                    chars, text, image_w, image_h = _manga_page(
+                    chars, text, image_w, image_h, layout = _manga_page(
                         page,
                         engine,
                         vision_chars=vision_chars,
+                        include_layout=True,
                     )
                 sidecar = {
                     "schema": PAGE_SCHEMA,
@@ -2657,6 +3379,7 @@ def run(args) -> int:
                     "imageWidth": image_w,
                     "imageHeight": image_h,
                     "chars": chars,
+                    "layout": layout,
                     "furigana": [],
                     "textCharCount": len("".join(text.split())),
                     "generatedAtEpochMs": int(time.time() * 1000),

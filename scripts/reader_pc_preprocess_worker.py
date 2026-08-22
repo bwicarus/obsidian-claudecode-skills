@@ -34,7 +34,7 @@ import urllib.request
 
 
 WORKER_CONTRACT = "reader-library-ocr-worker/1"
-PROCESSING_PROFILE = "quality-first-v5"
+PROCESSING_PROFILE = "quality-first-v6"
 PAGE_SCHEMA = "reader-page-chars/1"
 FORMULA_SCHEMA = "reader-formula-regions/1"
 WORKER_PREFIX = "/pdf/api/library/ocr/worker"
@@ -60,8 +60,8 @@ PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/(?:home|tmp|var|opt|srv)/)[^\r\n]*")
 PROCESS_INSTANCE_NONCE = secrets.token_hex(16)
 
 QUALITY_PROFILE = {
-    "name": "quality-first-v5",
-    "textGeometry": "ruled-table-cells-vision-symbols-v5",
+    "name": "quality-first-v6",
+    "textGeometry": "vision-symbols-page-layout-v6",
     "gpuRequired": True,
     # ⚠ 送 Vision 的那张图的分辨率**不在这里定** —— 由 Pi worker 的 _vision_render
     #   统一决定(目标 300dpi / 保底 200dpi / 按上传字节实测回退)。两边共用同一个
@@ -915,6 +915,11 @@ class QualityPipeline:
         effective_dpi = None
         if claim.engine == "vision":
             chars, text, image_w, image_h, effective_dpi = self._vision_page(page)
+            layout = core._vision_page_layout(
+                chars,
+                page_w=float(page.rect.width),
+                page_h=float(page.rect.height),
+            )
             # vision 分支以前直接跳到下面标 tokenized=True,却从没真跑过分词 ——
             # 服务器那趟看见这个标记就 continue,于是 PC 出的 vision 页永远没分词。
             chars = core._tokenize_chars(chars)
@@ -933,10 +938,11 @@ class QualityPipeline:
                 # Lines that Vision cannot match also fall back independently.
                 vision_chars = None
                 effective_dpi = None
-            chars, text, image_w, image_h = core._manga_page(
+            chars, text, image_w, image_h, layout = core._manga_page(
                 page,
                 self._manga_engine(),
                 vision_chars=vision_chars,
+                include_layout=True,
             )
             chars = core._tokenize_chars(chars)
         sidecar = {
@@ -950,6 +956,7 @@ class QualityPipeline:
             "imageWidth": image_w,
             "imageHeight": image_h,
             "chars": chars,
+            "layout": layout,
             "furigana": [],
             "textCharCount": len("".join(text.split())),
             "tokenized": True,

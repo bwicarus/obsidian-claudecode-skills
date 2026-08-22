@@ -2889,7 +2889,7 @@
     'page-chars': new Set([
       'page', 'pageWidth', 'pageHeight', 'chars', 'furigana',
       'wordSegmentation', 'characterGeometry', 'formulaCoverage', 'formulaRegions',
-      'textAuthority'
+      'textAuthority', 'layout'
     ]),
     status: new Set(['progress']),
     search: new Set(['matches', 'total', 'pages', 'incomplete']),
@@ -2918,6 +2918,25 @@
   var PAGE_TEXT_FURIGANA_KEYS = new Set(['x0', 'y0', 'x1', 'y1', 'rt', 'wd', 'ctx']);
   var PAGE_TEXT_FORMULA_KEYS = new Set([
     'id', 'x0', 'y0', 'x1', 'y1', 'state', 'latex', 'multiline', 'error'
+  ]);
+  var PAGE_LAYOUT_KEYS = new Set([
+    'schema', 'textSource', 'layoutSource', 'mode', 'readingDirection',
+    'confidence', 'gridColumns', 'gridRows', 'regions', 'tables'
+  ]);
+  var PAGE_LAYOUT_REGION_KEYS = new Set([
+    'id', 'kind', 'order', 'bounds', 'ranges', 'gridRow', 'gridColumn',
+    'rowSpan', 'columnSpan', 'vertical', 'tableId', 'row', 'column'
+  ]);
+  var PAGE_LAYOUT_TABLE_KEYS = new Set([
+    'id', 'rows', 'columns', 'xEdges', 'yEdges'
+  ]);
+  var PAGE_LAYOUT_TEXT_SOURCES = new Set(['vision', 'unavailable']);
+  var PAGE_LAYOUT_SOURCES = new Set(['manga', 'ruled-table', 'vision']);
+  var PAGE_LAYOUT_MODES = new Set(['manga', 'table', 'vision', 'fallback']);
+  var PAGE_LAYOUT_DIRECTIONS = new Set(['ltr', 'rtl']);
+  var PAGE_LAYOUT_CONFIDENCE = new Set(['high', 'low', 'fallback']);
+  var PAGE_LAYOUT_REGION_KINDS = new Set([
+    'manga-region', 'vision-supplement', 'table-cell', 'vision-block'
   ]);
   var embeddedPageText = Object.create(null);
   var embeddedPageLoader = null;
@@ -3026,6 +3045,170 @@
     return out;
   }
 
+  function pageLayoutInteger(value, minimum, maximum) {
+    return typeof value === 'number' && Number.isSafeInteger(value) &&
+      value >= minimum && value <= maximum
+      ? value : null;
+  }
+
+  function normalizePageLayout(raw, chars, pageWidth, pageHeight) {
+    if (raw == null) return null;
+    function invalid() {
+      throw new RuntimeError('原生页面布局响应无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+    }
+    function exactKeys(value, allowed) {
+      return value && typeof value === 'object' && !Array.isArray(value) &&
+        !Object.keys(value).some(function (key) { return !allowed.has(key); }) &&
+        Array.from(allowed).every(function (key) {
+          return Object.prototype.hasOwnProperty.call(value, key);
+        });
+    }
+    function boundedBox(value) {
+      if (!Array.isArray(value) || value.length !== 4) return null;
+      if (!value.every(function (item) {
+        return typeof item === 'number' && Number.isFinite(item);
+      })) return null;
+      var box = value.slice();
+      if (box[0] < 0 || box[1] < 0 ||
+          box[2] < box[0] || box[3] < box[1] ||
+          box[2] > pageWidth || box[3] > pageHeight) return null;
+      return box;
+    }
+    function edges(value, expected, maximum) {
+      if (!Array.isArray(value) || value.length !== expected) return null;
+      if (!value.every(function (item) {
+        return typeof item === 'number' && Number.isFinite(item);
+      })) return null;
+      var out = value.slice();
+      for (var index = 0; index < out.length; index += 1) {
+        if (!Number.isFinite(out[index]) || out[index] < 0 ||
+            out[index] > maximum || (index && out[index] <= out[index - 1])) {
+          return null;
+        }
+      }
+      return out;
+    }
+    if (!exactKeys(raw, PAGE_LAYOUT_KEYS) ||
+        raw.schema !== 'reader-page-layout/1' ||
+        !PAGE_LAYOUT_TEXT_SOURCES.has(raw.textSource) ||
+        !PAGE_LAYOUT_SOURCES.has(raw.layoutSource) ||
+        !PAGE_LAYOUT_MODES.has(raw.mode) ||
+        !PAGE_LAYOUT_DIRECTIONS.has(raw.readingDirection) ||
+        !PAGE_LAYOUT_CONFIDENCE.has(raw.confidence)) invalid();
+    var gridColumns = pageLayoutInteger(raw.gridColumns, 1, 8);
+    var gridRows = pageLayoutInteger(raw.gridRows, 0, 4096);
+    if (gridColumns === null || gridRows === null ||
+        !Array.isArray(raw.regions) || raw.regions.length > 4096 ||
+        !Array.isArray(raw.tables) || raw.tables.length > 64) invalid();
+    if (raw.textSource === 'unavailable') {
+      if (raw.mode !== 'fallback' || raw.confidence !== 'fallback' ||
+          raw.layoutSource !== 'vision' || raw.regions.length ||
+          raw.tables.length || gridRows !== 0) invalid();
+      return {
+        schema: raw.schema, textSource: raw.textSource,
+        layoutSource: raw.layoutSource, mode: raw.mode,
+        readingDirection: raw.readingDirection, confidence: raw.confidence,
+        gridColumns: gridColumns, gridRows: gridRows, regions: [], tables: []
+      };
+    }
+    if (raw.mode === 'fallback' || raw.confidence === 'fallback' ||
+        (raw.mode === 'manga' &&
+          (raw.layoutSource !== 'manga' || gridColumns !== 4)) ||
+        (raw.mode === 'table' && raw.layoutSource !== 'ruled-table') ||
+        (raw.mode === 'vision' && raw.layoutSource !== 'vision') ||
+        !raw.regions.length || !chars.length || gridRows < 1) invalid();
+
+    var tablesById = Object.create(null);
+    var totalTableCells = 0;
+    var tables = raw.tables.map(function (item) {
+      if (!exactKeys(item, PAGE_LAYOUT_TABLE_KEYS)) invalid();
+      var id = pageLayoutInteger(item.id, 0, 1000000);
+      var rows = pageLayoutInteger(item.rows, 1, 4096);
+      var columns = item.columns;
+      if (id === null || rows === null || typeof columns !== 'number' ||
+          !Number.isSafeInteger(columns) ||
+          columns < 2 || columns > 4096 || tablesById[id]) invalid();
+      totalTableCells += rows * columns;
+      if (totalTableCells > 16384) invalid();
+      var xEdges = edges(item.xEdges, columns + 1, pageWidth);
+      var yEdges = edges(item.yEdges, rows + 1, pageHeight);
+      if (!xEdges || !yEdges) invalid();
+      var normalized = {
+        id: id, rows: rows, columns: columns,
+        xEdges: xEdges, yEdges: yEdges
+      };
+      tablesById[id] = normalized;
+      return normalized;
+    });
+    if ((raw.mode === 'table') !== (tables.length > 0)) invalid();
+
+    var covered = new Uint8Array(chars.length);
+    var regionIds = Object.create(null);
+    var regionOrders = Object.create(null);
+    var rangeCount = 0;
+    var regions = raw.regions.map(function (item) {
+      if (!exactKeys(item, PAGE_LAYOUT_REGION_KEYS) ||
+          !PAGE_LAYOUT_REGION_KINDS.has(item.kind) ||
+          typeof item.vertical !== 'boolean') invalid();
+      var id = pageLayoutInteger(item.id, 0, 1000000);
+      var order = pageLayoutInteger(item.order, 0, 1000000);
+      var gridRow = pageLayoutInteger(item.gridRow, 0, 4095);
+      var gridColumn = pageLayoutInteger(item.gridColumn, 0, 7);
+      var rowSpan = pageLayoutInteger(item.rowSpan, 1, 4096);
+      var columnSpan = pageLayoutInteger(item.columnSpan, 1, 8);
+      var bounds = boundedBox(item.bounds);
+      if (id === null || order === null || gridRow === null || gridColumn === null ||
+          rowSpan === null || columnSpan === null || !bounds || regionIds[id] ||
+          regionOrders[order] || gridRow + rowSpan > gridRows ||
+          gridColumn + columnSpan > gridColumns || !Array.isArray(item.ranges) ||
+          !item.ranges.length || item.ranges.length > chars.length) invalid();
+      regionIds[id] = true;
+      regionOrders[order] = true;
+      var previousEnd = -1;
+      var ranges = item.ranges.map(function (range) {
+        rangeCount += 1;
+        if (rangeCount > Math.max(chars.length, 1) ||
+            !Array.isArray(range) || range.length !== 2) invalid();
+        var start = pageLayoutInteger(range[0], 0, chars.length - 1);
+        var end = pageLayoutInteger(range[1], 0, chars.length - 1);
+        if (start === null || end === null || end < start || start <= previousEnd) invalid();
+        previousEnd = end;
+        for (var cursor = start; cursor <= end; cursor += 1) {
+          if (covered[cursor]) invalid();
+          covered[cursor] = 1;
+        }
+        return [start, end];
+      });
+      var tableId = item.tableId === null
+        ? null : pageLayoutInteger(item.tableId, 0, 1000000);
+      var row = item.row === null ? null : pageLayoutInteger(item.row, 0, 4095);
+      var column = item.column === null ? null : pageLayoutInteger(item.column, 0, 4095);
+      if (item.kind === 'table-cell') {
+        var table = tableId === null ? null : tablesById[tableId];
+        if (!table || row === null || column === null ||
+            row + rowSpan > table.rows || column + columnSpan > table.columns) invalid();
+      } else if (tableId !== null || row !== null || column !== null) {
+        invalid();
+      }
+      return {
+        id: id, kind: item.kind, order: order, bounds: bounds, ranges: ranges,
+        gridRow: gridRow, gridColumn: gridColumn,
+        rowSpan: rowSpan, columnSpan: columnSpan, vertical: item.vertical,
+        tableId: tableId, row: row, column: column
+      };
+    });
+    for (var charIndex = 0; charIndex < covered.length; charIndex += 1) {
+      if (covered[charIndex] !== 1) invalid();
+    }
+    return {
+      schema: raw.schema, textSource: raw.textSource,
+      layoutSource: raw.layoutSource, mode: raw.mode,
+      readingDirection: raw.readingDirection, confidence: raw.confidence,
+      gridColumns: gridColumns, gridRows: gridRows,
+      regions: regions, tables: tables
+    };
+  }
+
   function normalizePageTextFurigana(raw) {
     if (raw == null) return [];
     if (!Array.isArray(raw) || raw.length > 50000) return null;
@@ -3068,6 +3251,8 @@
       pageWidth: pageWidth,
       pageHeight: pageHeight,
       chars: chars,
+      layout: null,
+      layoutFallback: false,
       furigana: furigana,
       wordSegmentation: chars.some(function (item) { return item.w >= 0; }) ? 'ready' : 'unavailable',
       // PDF.js exposes item geometry, but per-character boxes below are bounded
@@ -3285,6 +3470,8 @@
       return {
         state: state, source: raw.source, revision: raw.revision,
         page: page, pageWidth: 0, pageHeight: 0, chars: null,
+        layout: null,
+        layoutFallback: false,
         furigana: [],
         wordSegmentation: wordSegmentation,
         characterGeometry: characterGeometry,
@@ -3309,8 +3496,28 @@
         (state === 'readyEmpty' && chars.length)) {
       throw new RuntimeError('原生文字页数据无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
     }
+    var layout = null;
+    var layoutFallback = false;
+    if (raw.layout != null) {
+      try {
+        layout = normalizePageLayout(raw.layout, chars, pageWidth, pageHeight);
+      } catch (_) {
+        // Spatial metadata is model-facing enrichment. A malformed optional
+        // layout must never erase an otherwise valid/selectable Vision layer.
+        layoutFallback = true;
+      }
+    }
     chars = applyFormulaRegions(chars, formulaRegions);
     furigana = furiganaOutsideFormulaRegions(furigana, formulaRegions);
+    if (layout && layout.textSource === 'vision' && formulaRegions.some(function (region) {
+      return region.state === 'ready';
+    })) {
+      // Ready formula replacement removes and inserts provider characters, so
+      // the persisted Vision ranges no longer address this result array. Keep
+      // the final character layer, but fail closed on spatial projection.
+      layout = null;
+      layoutFallback = true;
+    }
     if (!chars.length) {
       var formulaPending = formulaRegions.some(function (region) { return region.state === 'pending'; });
       var formulaFailed = formulaRegions.some(function (region) { return region.state === 'failed'; });
@@ -3323,6 +3530,8 @@
           pageWidth: pageWidth,
           pageHeight: pageHeight,
           chars: null,
+          layout: null,
+          layoutFallback: layoutFallback,
           furigana: furigana,
           wordSegmentation: wordSegmentation,
           characterGeometry: characterGeometry,
@@ -3343,7 +3552,8 @@
     return {
       state: state, source: raw.source, revision: raw.revision,
       page: page, pageWidth: pageWidth, pageHeight: pageHeight,
-      chars: chars, furigana: furigana,
+      chars: chars, layout: layout, layoutFallback: layoutFallback,
+      furigana: furigana,
       wordSegmentation: wordSegmentation,
       characterGeometry: characterGeometry,
       formulaCoverage: formulaCoverage,
@@ -3412,6 +3622,8 @@
       pageWidth: embedded.pageWidth,
       pageHeight: embedded.pageHeight,
       chars: chars,
+      layout: null,
+      layoutFallback: !!nativeResult.layoutFallback,
       furigana: furigana,
       wordSegmentation: embedded.wordSegmentation,
       characterGeometry: embedded.characterGeometry,
@@ -3484,6 +3696,8 @@
         return embedded || nativeResult || {
           state: 'idle', source: null, revision: '', page: page,
           pageWidth: 0, pageHeight: 0, chars: null, furigana: [],
+          layout: null,
+          layoutFallback: false,
           wordSegmentation: 'unavailable', characterGeometry: 'unavailable',
           formulaCoverage: 'unknown', formulaRegions: [],
           textAuthority: 'supplemental',

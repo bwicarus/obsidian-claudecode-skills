@@ -4382,3 +4382,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **部署**：Reader `0.2.134` / KG `kg-0.2.134-df84da8b13e0eed2a018` 已原子部署，事务 `20260822T074255Z-326589` complete；回退点 `/home/bwicarus/deploy-backups/reader/20260822T074255Z-326589`，webapp/voice-rt 均 active。
 - **Windows/iOS**：ReaderPC `0.1.57` 已运行且 OCR 空闲无错；Actions `32560299853` 上传 TestFlight `1.1.80 (431)`，`32561759864` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告；公开 WebExt channel 未改。
 - **实跑**：`料理师part1` 以 `quality-first-v5` 完成 `53/53`、零失败，current=`ocr_a9aeb3f7dac5c39f61e9`；第 46 页“ナン”由 `876.049` 回到 `903.121`（Vision `902.838`），旧 `ocr_f57d24d99a78536a3c83` 保留。
+
+### 2026-08-22 Vision 原文 + 结构化 Markdown 快照（0.2.135 / ReaderPC 0.1.58 / App 1.1.81 发布候选）
+- **实现**：Vision 继续独占字符与字框；Manga 只提供漫画分区/RTL 顺序，已证明的三列以上规则表格提供 cell 布局；快照输出四列稀疏漫画 Markdown 或标准 Markdown 表格，低置信度回退 Vision 原序并提示按需看图。
+- **合同**：新增严格 `reader-page-layout/1`，Pi `pi-default-v5` / PC `quality-first-v6` 强制携带；Server、App 存储/桥接、Swift、两处 JS 同步校验，表格累计最多 16384 cells，空页与公式后索引变化 fail closed。
+- **实页**：缓存 Vision + 真实 Manga/规则线证据生成第 25/26/46 页；前两页均 high-confidence 四列布局，第 46 页为 3x10 表格，796 个索引唯一完整覆盖，cell 内 source-index 回绕恢复为视觉文本顺序。
+- **验证**：Reader Node 全量 `1690/1690`；OCR/API/PC 专项 `138` 项（`1` skipped）；发布流水线 `25` 项（`1` skipped）；共享构建、153 个 runtime 合同与网络门禁通过。
+- **边界/下一步**：Windows 全量 Python 与 handoff 仍被既有 POSIX `fcntl` 导入和大小写不敏感的重复卷名负例阻断；未提交、推送、部署或发布，下一步需在 Pi Linux 完成全门禁与真实新 profile OCR 后再进入发布流程。

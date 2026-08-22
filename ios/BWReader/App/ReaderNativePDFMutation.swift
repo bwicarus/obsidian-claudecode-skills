@@ -1369,6 +1369,7 @@ actor ReaderNativePDFMutationActor {
             status: value.status,
             source: value.source,
             chars: value.chars,
+            layout: value.layout,
             furigana: value.furigana,
             wordSegmentation: value.wordSegmentation,
             characterGeometry: value.characterGeometry,

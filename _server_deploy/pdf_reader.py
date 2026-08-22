@@ -50,6 +50,7 @@ from reader_book_ocr import (
     WORKER_CONTRACT as READER_BOOK_OCR_WORKER_CONTRACT,
     ReaderBookOcrError,
     ReaderBookOcrService,
+    unavailable_page_layout as _reader_unavailable_page_layout,
     wire_payload as _reader_book_ocr_wire_payload,
 )
 from reader_book_user_state import (
@@ -4452,11 +4453,21 @@ def pdf_api_library_ocr_page_chars(book_id, page):
             book_id, content_sha256, page
         )
         chars = [dict(item) for item in sidecar.get("chars") or []]
+        source_chars = [dict(item) for item in chars]
         furigana = [dict(item) for item in sidecar.get("furigana") or []]
         page_w = float(sidecar.get("page_w") or 0)
         page_h = float(sidecar.get("page_h") or 0)
         _apply_formula_records(chars, furigana, formulas, page, page_w, page_h)
-        response = jsonify({
+        layout = sidecar.get("layout")
+        if layout is not None and chars != source_chars:
+            # Formula injection changes the response array, so immutable
+            # sidecar ranges no longer address it. Keep the enriched chars but
+            # fail closed on spatial projection rather than returning stale
+            # indices.
+            layout = _reader_unavailable_page_layout(
+                reading_direction=str(layout.get("readingDirection") or "ltr")
+            )
+        payload = {
             "ok": True,
             "contract": READER_BOOK_OCR_CONTRACT,
             "schema": sidecar.get("schema"),
@@ -4468,7 +4479,10 @@ def pdf_api_library_ocr_page_chars(book_id, page):
             "page_w": page_w,
             "page_h": page_h,
             "furigana": furigana,
-        })
+        }
+        if layout is not None:
+            payload["layout"] = layout
+        response = jsonify(payload)
         response.headers["Cache-Control"] = "private, no-store"
         return response
     except ReaderBookOcrError as exc:

@@ -791,6 +791,9 @@ actor NativeBookOCRSidecarStore {
             status: meaningful.isEmpty ? .readyEmpty : .ready,
             source: initial.source,
             chars: chars,
+            // A correction replaces the indexed character sequence. The old
+            // immutable layout ranges can no longer be referenced safely.
+            layout: nil,
             furigana: furigana,
             wordSegmentation: initial.wordSegmentation,
             characterGeometry: initial.characterGeometry,
@@ -1102,13 +1105,15 @@ actor NativeBookOCRSidecarStore {
         guard ["pi", "pc"].contains(executor) else {
             throw NativeBookOCRError.invalidAttachment("预处理执行器无效")
         }
+        let processingProfile = manifest.processingProfile ?? "pi-default-v1"
         guard executor != "pc"
-            || ["quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4", "quality-first-v5"].contains(
-                manifest.processingProfile
-            ) else {
+            || ["quality-first-v1", "quality-first-v2", "quality-first-v3", "quality-first-v4", "quality-first-v5", "quality-first-v6"].contains(processingProfile) else {
             throw NativeBookOCRError.invalidAttachment("PC 预处理配置无效")
         }
-        let processingProfile = manifest.processingProfile ?? "pi-default-v1"
+        guard executor != "pi"
+            || ["pi-default-v1", "pi-default-v2", "pi-default-v3", "pi-default-v4", "pi-default-v5"].contains(processingProfile) else {
+            throw NativeBookOCRError.invalidAttachment("Pi 预处理配置无效")
+        }
         let targetLayer: NativeBookOCRLayerID = executor == "pc" ? .pc : .pi
         let targetSource: NativeBookOCRSource = executor == "pc" ? .pc : .pi
         let target = contentDirectory(contentSHA256)
@@ -1363,6 +1368,7 @@ actor NativeBookOCRSidecarStore {
         let imageWidth: Int
         let imageHeight: Int
         let chars: [NativeBookOCRCharacter]
+        let layout: NativeBookOCRPageLayout?
         let furigana: [NativeBookOCRFurigana]
         let tokenized: Bool?
         let textCharCount: Int?
@@ -1372,7 +1378,7 @@ actor NativeBookOCRSidecarStore {
             case schema, bookId, contentSha256, engine, pageNumber
             case pageWidth = "page_w"
             case pageHeight = "page_h"
-            case imageWidth, imageHeight, chars, furigana, tokenized, textCharCount
+            case imageWidth, imageHeight, chars, layout, furigana, tokenized, textCharCount
             case generatedAtEpochMs
         }
     }
@@ -1450,6 +1456,12 @@ actor NativeBookOCRSidecarStore {
             renderPixelWidth: value.imageWidth,
             renderPixelHeight: value.imageHeight
         )
+        let layout = try validatePiPageLayout(
+            value.layout,
+            chars: value.chars,
+            pageWidth: value.pageWidth,
+            pageHeight: value.pageHeight
+        )
         let assigned = value.chars.filter { $0.sp == 0 && $0.w >= 0 }.count
         let meaningful = value.chars.filter { $0.sp == 0 }.count
         let segmentation: NativeBookOCRWordSegmentationState
@@ -1462,6 +1474,9 @@ actor NativeBookOCRSidecarStore {
         }
         let geometryVersion: Int
         if value.engine == "manga"
+            && ["pi-default-v5", "quality-first-v6"].contains(processingProfile) {
+            geometryVersion = 4
+        } else if value.engine == "manga"
             && ["pi-default-v3", "pi-default-v4", "quality-first-v4", "quality-first-v5"].contains(processingProfile) {
             geometryVersion = 3
         } else if value.engine == "manga"
@@ -1487,12 +1502,15 @@ actor NativeBookOCRSidecarStore {
             status: meaningful == 0 ? .readyEmpty : .ready,
             source: executor == "pc" ? .pc : .pi,
             chars: value.chars,
+            layout: layout,
             furigana: value.furigana,
             wordSegmentation: segmentation,
-            // Manga geometry aligns observed ink runs inside each recognized
-            // line, but it is still not symbol-exact and deliberately falls
-            // back to line division when optical alignment is unavailable.
-            characterGeometry: value.engine == "vision" ? .exact : .estimated,
+            // The v5/v6 Manga profile keeps the original Vision character
+            // sequence and geometry; Manga only supplies layout metadata.
+            // Older Manga payloads without that contract remain estimated.
+            characterGeometry: value.engine == "vision"
+                || (value.engine == "manga" && layout?.textSource == .vision)
+                ? .exact : .estimated,
             formulaCoverage: .unknown,
             formulaRegions: [],
             createdAt: Date(
@@ -1500,6 +1518,152 @@ actor NativeBookOCRSidecarStore {
             ),
             error: nil
         )
+    }
+
+    private func validatePiPageLayout(
+        _ layout: NativeBookOCRPageLayout?,
+        chars: [NativeBookOCRCharacter],
+        pageWidth: Double,
+        pageHeight: Double
+    ) throws -> NativeBookOCRPageLayout? {
+        guard let layout else { return nil }
+        guard layout.schema == NativeBookOCRPageLayout.schema,
+              (1...8).contains(layout.gridColumns),
+              (0...4_096).contains(layout.gridRows),
+              layout.regions.count <= 4_096,
+              layout.tables.count <= 64 else {
+            throw NativeBookOCRError.invalidAttachment("文字页布局合同无效")
+        }
+
+        if layout.textSource == .unavailable {
+            guard layout.mode == .fallback,
+                  layout.confidence == .fallback,
+                  layout.gridRows == 0,
+                  layout.regions.isEmpty,
+                  layout.tables.isEmpty else {
+                throw NativeBookOCRError.invalidAttachment("不可用文字页布局状态无效")
+            }
+            return layout
+        }
+
+        switch (layout.layoutSource, layout.mode) {
+        case (.manga, .manga), (.ruledTable, .table), (.vision, .vision):
+            break
+        default:
+            throw NativeBookOCRError.invalidAttachment("文字页布局来源与模式不匹配")
+        }
+        guard layout.mode != .fallback,
+              layout.confidence != .fallback,
+              layout.mode != .manga || layout.gridColumns == 4,
+              layout.mode == .vision || layout.gridRows > 0,
+              layout.layoutSource == .ruledTable
+                ? !layout.tables.isEmpty : layout.tables.isEmpty else {
+            throw NativeBookOCRError.invalidAttachment("文字页布局状态不一致")
+        }
+
+        var tableByID: [Int: NativeBookOCRPageLayoutTable] = [:]
+        for table in layout.tables {
+            guard table.id >= 0,
+                  tableByID.updateValue(table, forKey: table.id) == nil,
+                  (1...4_096).contains(table.rows),
+                  (2...4_096).contains(table.columns),
+                  table.xEdges.count >= 3,
+                  table.xEdges.count - 1 == table.columns,
+                  table.yEdges.count == table.rows + 1,
+                  validLayoutEdges(table.xEdges, upperBound: pageWidth),
+                  validLayoutEdges(table.yEdges, upperBound: pageHeight) else {
+                throw NativeBookOCRError.invalidAttachment("文字页表格布局无效")
+            }
+        }
+
+        var regionIDs = Set<Int>()
+        var regionOrders = Set<Int>()
+        var coverage = Array(repeating: false, count: chars.count)
+        var totalRanges = 0
+        for region in layout.regions {
+            guard region.id >= 0,
+                  regionIDs.insert(region.id).inserted,
+                  region.order >= 0,
+                  regionOrders.insert(region.order).inserted,
+                  region.bounds.count == 4,
+                  region.bounds.allSatisfy(\.isFinite),
+                  region.bounds[0] >= 0,
+                  region.bounds[1] >= 0,
+                  region.bounds[0] <= region.bounds[2],
+                  region.bounds[1] <= region.bounds[3],
+                  region.bounds[2] <= pageWidth,
+                  region.bounds[3] <= pageHeight,
+                  !region.ranges.isEmpty,
+                  region.gridRow >= 0,
+                  region.gridColumn >= 0,
+                  region.rowSpan >= 1,
+                  region.columnSpan >= 1,
+                  region.gridColumn < layout.gridColumns,
+                  region.columnSpan
+                    <= layout.gridColumns - region.gridColumn,
+                  region.gridRow < layout.gridRows,
+                  region.rowSpan <= layout.gridRows - region.gridRow else {
+                throw NativeBookOCRError.invalidAttachment("文字页布局区域无效")
+            }
+            let maximumRanges = max(chars.count, 1)
+            guard region.ranges.count <= maximumRanges - totalRanges else {
+                throw NativeBookOCRError.invalidAttachment("文字页布局范围过多")
+            }
+            totalRanges += region.ranges.count
+            var previousRangeEnd = -1
+            for range in region.ranges {
+                guard range.count == 2,
+                      range[0] >= 0,
+                      range[0] > previousRangeEnd,
+                      range[0] <= range[1],
+                      range[1] < chars.count else {
+                    throw NativeBookOCRError.invalidAttachment("文字页布局字符范围无效")
+                }
+                for index in range[0]...range[1] {
+                    guard !coverage[index] else {
+                        throw NativeBookOCRError.invalidAttachment("文字页布局字符范围重叠")
+                    }
+                    coverage[index] = true
+                }
+                previousRangeEnd = range[1]
+            }
+            if region.kind == .tableCell {
+                guard let tableID = region.tableId,
+                      let row = region.row,
+                      let column = region.column,
+                      let table = tableByID[tableID],
+                      row >= 0, row < table.rows,
+                      column >= 0, column < table.columns,
+                      region.rowSpan <= table.rows - row,
+                      region.columnSpan <= table.columns - column else {
+                    throw NativeBookOCRError.invalidAttachment("文字页表格单元格无效")
+                }
+            } else {
+                guard region.tableId == nil,
+                      region.row == nil,
+                      region.column == nil else {
+                    throw NativeBookOCRError.invalidAttachment("非表格区域带有表格坐标")
+                }
+            }
+        }
+        guard coverage.allSatisfy({ $0 }) else {
+            throw NativeBookOCRError.invalidAttachment("文字页布局未完整覆盖 Vision 字符")
+        }
+        return layout
+    }
+
+    private func validLayoutEdges(
+        _ edges: [Double],
+        upperBound: Double
+    ) -> Bool {
+        guard edges.allSatisfy(\.isFinite),
+              let first = edges.first,
+              let last = edges.last,
+              first >= 0,
+              last <= upperBound else { return false }
+        return zip(edges, edges.dropFirst()).allSatisfy { pair in
+            pair.0 < pair.1
+        }
     }
 
     private func convertPiFormula(

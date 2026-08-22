@@ -182,6 +182,41 @@ function nativePageReply(message, { text = "校正", authority = "local-override
   };
 }
 
+function nativeLayoutRegion(overrides = {}) {
+  return {
+    id: 0,
+    kind: "manga-region",
+    order: 0,
+    bounds: [0, 0, 20, 20],
+    ranges: [[0, 0]],
+    gridRow: 0,
+    gridColumn: 0,
+    rowSpan: 1,
+    columnSpan: 1,
+    vertical: false,
+    tableId: null,
+    row: null,
+    column: null,
+    ...overrides,
+  };
+}
+
+function nativeLayoutFixture(overrides = {}) {
+  return {
+    schema: "reader-page-layout/1",
+    textSource: "vision",
+    layoutSource: "manga",
+    mode: "manga",
+    readingDirection: "rtl",
+    confidence: "high",
+    gridColumns: 4,
+    gridRows: 1,
+    regions: [],
+    tables: [],
+    ...overrides,
+  };
+}
+
 function nativePDFMutationResponder(options = {}) {
   const durable = options.durableState || {
     pageCount: options.pageCount || 4,
@@ -4773,6 +4808,196 @@ test("PageTextProvider feeds embedded PDF text into the existing page-chars rout
   assert.equal(payload.page_w, 600);
   assert.equal(payload.page_h, 800);
   assert.equal(pageTextMessages.length, 0);
+});
+
+test("native page layout is strict provider-only metadata and never reorders page-chars HTTP", async () => {
+  const chars = Array.from("左右", (character, index) => ({
+    c: character, x0: 10 + index * 30, y0: 20,
+    x1: 20 + index * 30, y1: 40, w: index, bk: index, sp: false,
+  }));
+  const layout = nativeLayoutFixture({
+    regions: [
+      nativeLayoutRegion({
+        id: 7, order: 0, bounds: [40, 20, 50, 40],
+        ranges: [[1, 1]], gridColumn: 3,
+      }),
+      nativeLayoutRegion({
+        id: 8, order: 1, bounds: [10, 20, 10, 40],
+        ranges: [[0, 0]], gridColumn: 0,
+      }),
+    ],
+  });
+  const { context } = await harness({
+    pageTextReply(message) {
+      return {
+        ...nativePageReply(message),
+        source: "pi",
+        chars,
+        layout,
+      };
+    },
+  });
+  const providerResult = await context.BWReaderRuntime.pageTextProvider.pageChars(31);
+  assert.equal(providerResult.chars.map((item) => item.c).join(""), "左右");
+  assert.equal(providerResult.layout.schema, "reader-page-layout/1");
+  assert.deepEqual(
+    structuredClone(providerResult.layout.regions.map((region) => region.ranges)),
+    [[[1, 1]], [[0, 0]]],
+  );
+  const http = await (await context.fetch("/pdf/api/page-chars?page=31")).json();
+  assert.equal(http.chars.map((item) => item.c).join(""), "左右");
+  assert.equal(Object.hasOwn(http, "layout"), false);
+  assert.equal(Object.hasOwn(http, "layoutFallback"), false);
+});
+
+test("invalid optional page layout is discarded while valid Vision chars remain readable", async (t) => {
+  const chars = Array.from("正文", (character, index) => ({
+    c: character, x0: 10 + index * 20, y0: 20,
+    x1: 20 + index * 20, y1: 40, w: index, bk: index, sp: false,
+  }));
+  const base = nativeLayoutFixture({
+    regions: [
+      nativeLayoutRegion({ id: 1, order: 0, ranges: [[0, 0]] }),
+      nativeLayoutRegion({
+        id: 2, order: 1, bounds: [30, 20, 40, 40],
+        ranges: [[1, 1]], gridColumn: 3,
+      }),
+    ],
+  });
+  const tableFixture = (id, rows, columns) => ({
+    id, rows, columns,
+    xEdges: Array.from({ length: columns + 1 }, (_, index) =>
+      index * 100 / columns),
+    yEdges: Array.from({ length: rows + 1 }, (_, index) =>
+      index * 100 / rows),
+  });
+  const variants = [
+    ["unknown-field", { ...base, debug: true }],
+    ["nested-unknown-field", {
+      ...base,
+      regions: [{ ...base.regions[0], debug: true }, base.regions[1]],
+    }],
+    ["incomplete-ranges", {
+      ...base,
+      regions: [base.regions[0]],
+    }],
+    ["overlapping-ranges", {
+      ...base,
+      regions: [
+        base.regions[0],
+        { ...base.regions[1], ranges: [[0, 1]] },
+      ],
+    }],
+    ["unsorted-ranges", {
+      ...base,
+      regions: [
+        { ...base.regions[0], ranges: [[1, 1], [0, 0]] },
+      ],
+    }],
+    ["string-coordinate", {
+      ...base,
+      regions: [
+        { ...base.regions[0], bounds: ["0", 0, 20, 20] },
+        base.regions[1],
+      ],
+    }],
+    ["out-of-page-bounds", {
+      ...base,
+      regions: [
+        { ...base.regions[0], bounds: [-1, 0, 20, 20] },
+        base.regions[1],
+      ],
+    }],
+    ["single-table-cell-limit", {
+      ...base,
+      layoutSource: "ruled-table",
+      mode: "table",
+      tables: [tableFixture(1, 128, 129)],
+    }],
+    ["cumulative-table-cell-limit", {
+      ...base,
+      layoutSource: "ruled-table",
+      mode: "table",
+      tables: [tableFixture(1, 100, 82), tableFixture(2, 100, 82)],
+    }],
+    ["unavailable-manga-source", nativeLayoutFixture({
+      textSource: "unavailable",
+      layoutSource: "manga",
+      mode: "fallback",
+      confidence: "fallback",
+      gridRows: 0,
+      regions: [],
+    })],
+    ["unavailable-table-source", nativeLayoutFixture({
+      textSource: "unavailable",
+      layoutSource: "ruled-table",
+      mode: "fallback",
+      confidence: "fallback",
+      gridRows: 0,
+      regions: [],
+    })],
+  ];
+  for (const [name, layout] of variants) {
+    await t.test(name, async () => {
+      const { context } = await harness({
+        pageTextReply(message) {
+          return { ...nativePageReply(message), chars, layout };
+        },
+      });
+      const result = await context.BWReaderRuntime.pageTextProvider.pageChars(32);
+      assert.equal(result.chars.map((item) => item.c).join(""), "正文");
+      assert.equal(result.layout, null);
+      assert.equal(result.layoutFallback, true);
+    });
+  }
+});
+
+test("explicit unavailable layout preserves plain text as a safe fallback", async () => {
+  const { context } = await harness({
+    pageTextReply(message) {
+      return {
+        ...nativePageReply(message, { text: "公式正文" }),
+        layout: nativeLayoutFixture({
+          textSource: "unavailable",
+          layoutSource: "vision",
+          mode: "fallback",
+          readingDirection: "ltr",
+          confidence: "fallback",
+          gridRows: 0,
+          regions: [],
+        }),
+      };
+    },
+  });
+  const result = await context.BWReaderRuntime.pageTextProvider.pageChars(33);
+  assert.equal(result.chars.map((item) => item.c).join(""), "公式正文");
+  assert.equal(result.layout.textSource, "unavailable");
+  assert.equal(result.layout.mode, "fallback");
+});
+
+test("explicit unavailable layout accepts a genuinely blank page", async () => {
+  const { context } = await harness({
+    pageTextReply(message) {
+      return {
+        ...nativePageReply(message),
+        state: "readyEmpty",
+        chars: [],
+        layout: nativeLayoutFixture({
+          textSource: "unavailable",
+          layoutSource: "vision",
+          mode: "fallback",
+          readingDirection: "ltr",
+          confidence: "fallback",
+          gridRows: 0,
+          regions: [],
+        }),
+      };
+    },
+  });
+  const result = await context.BWReaderRuntime.pageTextProvider.pageChars(34);
+  assert.equal(result.chars.length, 0);
+  assert.equal(result.layout.textSource, "unavailable");
+  assert.equal(result.layout.mode, "fallback");
 });
 
 test("embedded PDF text drops isolated bad glyphs but distinguishes corrupt and empty pages", async () => {
