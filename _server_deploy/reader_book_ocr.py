@@ -37,15 +37,22 @@ ADOPTION_CONTRACT = "reader-library-ocr-adoption/1"
 ENGINES = frozenset(("vision", "manga"))
 EXECUTORS = frozenset(("pi", "pc"))
 PROCESSING_PROFILES = {
+    "pi": "pi-default-v2",
+    "pc": "quality-first-v3",
+}
+# Results created before processingProfile became mandatory were produced by
+# the first-generation pipelines.  This fallback must never follow the current
+# profile or an unversioned historical release could masquerade as new output.
+LEGACY_PROCESSING_PROFILES = {
     "pi": "pi-default-v1",
-    "pc": "quality-first-v2",
+    "pc": "quality-first-v1",
 }
 # Immutable releases outlive the worker profile that produced them.  Keep the
 # current profile above strict for newly requested/claimed work, while allowing
 # already-published profiles that the App still knows how to import.
 READABLE_PROCESSING_PROFILES = {
-    "pi": frozenset(("pi-default-v1",)),
-    "pc": frozenset(("quality-first-v1", "quality-first-v2")),
+    "pi": frozenset(("pi-default-v1", "pi-default-v2")),
+    "pc": frozenset(("quality-first-v1", "quality-first-v2", "quality-first-v3")),
 }
 LEGACY_ENGINE = "legacy"
 RESULT_ENGINES = ENGINES | frozenset((LEGACY_ENGINE,))
@@ -208,8 +215,9 @@ def _safe_public_job(job: dict) -> dict:
         if out.get(key) is None:
             out[key] = default
     if not out.get("processingProfile"):
-        out["processingProfile"] = PROCESSING_PROFILES.get(
-            out.get("executor"), PROCESSING_PROFILES["pi"]
+        profiles = LEGACY_PROCESSING_PROFILES if job else PROCESSING_PROFILES
+        out["processingProfile"] = profiles.get(
+            out.get("executor"), profiles["pi"]
         )
     if out.get("error"):
         out["error"] = _redact_sensitive_text(out["error"])
@@ -427,7 +435,7 @@ class ReaderBookOcrService:
         if executor not in EXECUTORS:
             executor = "pi"
         profile = str(
-            item.get("processingProfile") or PROCESSING_PROFILES[executor]
+            item.get("processingProfile") or LEGACY_PROCESSING_PROFILES[executor]
         ).strip().lower()
         return executor, profile
 
@@ -438,7 +446,7 @@ class ReaderBookOcrService:
         if executor not in EXECUTORS:
             return False
         profile = str(
-            item.get("processingProfile") or PROCESSING_PROFILES[executor]
+            item.get("processingProfile") or LEGACY_PROCESSING_PROFILES[executor]
         ).strip().lower()
         return profile in READABLE_PROCESSING_PROFILES[executor]
 
@@ -505,7 +513,7 @@ class ReaderBookOcrService:
             if capabilities.get("processingProfile") != PROCESSING_PROFILES["pc"]:
                 raise ReaderBookOcrError(
                     "invalid-processing-profile",
-                    "PC OCR worker requires processingProfile=quality-first-v2",
+                    "PC OCR worker requires processingProfile=quality-first-v3",
                     status=400,
                 )
             try:
@@ -1269,6 +1277,7 @@ class ReaderBookOcrService:
             job["bookId"],
             job["contentSha256"],
             job["engine"],
+            job["processingProfile"],
         ):
             return False
         value = ReaderBookOcrService._read_optional(

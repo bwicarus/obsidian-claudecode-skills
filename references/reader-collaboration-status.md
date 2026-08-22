@@ -4361,3 +4361,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **Pi/扩展**：Reader `0.2.132` / KG `kg-0.2.132-4796c1d1fb4e4d902eed` 已原子部署，公开 WebExt `0.2.132` 摘要 `493491e0…fe9c`；回滚点 `20260821T173608Z-230956` / `webext-channel-20260821T173929Z-p35v4uxn`。
 - **Windows**：Direct `0.1.176` 已原子安装（回滚点 `install-0.1.176-20260821T173943Z-579674a1`）；ReaderPC `0.1.53` 已安装并保留原停机态，新增“Direct 基础层常驻 + 语音独立开关”，关闭语音不再影响快照、卡片、Anki、OCR、查询等能力。
 - **iOS/边界**：Actions `32509395308` 上传 TestFlight `1.1.77 (422)`，`32510102822` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告；无语音模式下旧“电脑语音”按钮仍可能短暂请求麦克风后被服务端拒绝，为非阻断已知边界。
+
+## Codex：原位卡片快照与漫画文字层几何候选（2026-08-22 JST）
+- **修复**：Direct `0.1.177` 已让卡片 `n/id/revision/type/label + 完整正文` 保持在锚词后的成对 marker 内；漫画 OCR 保留 MangaPageOcr 分框/分行/方向，只在行内按墨迹做带置信度回退的字符对齐。
+- **缓存/App**：Pi `pi-default-v2`、PC `quality-first-v3` 会拒绝复用旧 staging/页缓存；历史无 profile 结果固定解释为 v1；App 以 `*-manga/2` 导入新几何并继续兼容旧发布。
+- **验证**：真实第 28 页“美味しい”新框与 Vision 对照四边误差均小于 1 页面单位；专项 Python、斜/旋转/噪声回退及 Reader Node 全量 `1654/1654` 通过，Windows handoff 仅余既有 POSIX `fcntl` 平台边界。
+- **候选/下一步**：Reader/Safari `0.2.133`、ReaderPC `0.1.54`、App `1.1.78`；完成 TestFlight、Pi 原子部署与 ReaderPC 安装后把本条补为正式发布事实和回退点。

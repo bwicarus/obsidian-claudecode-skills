@@ -23,6 +23,7 @@ import reader_book_ocr  # noqa: E402
 import reader_book_ocr_worker  # noqa: E402
 from reader_book_ocr import ReaderBookOcrError, ReaderBookOcrService  # noqa: E402
 from reader_book_ocr_worker import (  # noqa: E402
+    _manga_align_visual_segments,
     _manga_page,
     _manga_line_char_boxes,
     _publish_attachments,
@@ -493,6 +494,8 @@ class ReaderBookOcrForcedRerunTest(unittest.TestCase):
             "bookId": self.entry["bookId"],
             "contentSha256": self.entry["contentSha256"],
             "engine": "vision",
+            "executor": "pi",
+            "processingProfile": "pi-default-v2",
             "pageNumber": 1,
             "page_w": 10,
             "page_h": 20,
@@ -508,6 +511,7 @@ class ReaderBookOcrForcedRerunTest(unittest.TestCase):
             "contentSha256": self.entry["contentSha256"],
             "engine": "vision",
             "executor": "pi",
+            "processingProfile": "pi-default-v2",
             "state": "succeeded",
             "totalPages": 1,
             "successfulPages": 1,
@@ -664,7 +668,7 @@ class ReaderBookOcrPageSchemaContractTest(unittest.TestCase):
             "contentSha256": entry["contentSha256"],
             "engine": "vision",
             "executor": "pc",
-            "processingProfile": "quality-first-v2",
+            "processingProfile": "quality-first-v3",
             "totalPages": 1,
         }
         page = {
@@ -978,7 +982,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["manga"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v2",
+            "processingProfile": "quality-first-v3",
         })
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed["job"]["completedPages"], [])
@@ -1100,13 +1104,13 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.assertEqual(manifest["revision"], completed["revision"])
         self.assertEqual(manifest["formulaReason"], "formula-model-unavailable")
         self.assertEqual(manifest["executor"], "pc")
-        self.assertEqual(manifest["processingProfile"], "quality-first-v2")
+        self.assertEqual(manifest["processingProfile"], "quality-first-v3")
         snapshot = service._published_snapshot(
             self.entry["bookId"], self.entry["contentSha256"]
         )
         self.assertEqual(snapshot["result"]["executor"], "pc")
         self.assertEqual(
-            snapshot["result"]["processingProfile"], "quality-first-v2"
+            snapshot["result"]["processingProfile"], "quality-first-v3"
         )
 
     def test_pc_expired_lease_is_reclaimable_and_old_upload_is_rejected(self) -> None:
@@ -1127,7 +1131,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["vision"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v2",
+            "processingProfile": "quality-first-v3",
         }
         first = service.claim_pc_worker("pc_first", capabilities)
         version_dir = service._version_dir(
@@ -1221,7 +1225,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         pi_job, _already = service.start(
             self.entry["bookId"], self.entry["contentSha256"], "vision", "pi"
         )
-        self.assertEqual(pi_job["processingProfile"], "pi-default-v1")
+        self.assertEqual(pi_job["processingProfile"], "pi-default-v2")
         job_dir = launches[0][0]
         page = {
             "schema": "reader-page-chars/1",
@@ -1229,7 +1233,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "contentSha256": self.entry["contentSha256"],
             "engine": "vision",
             "executor": "pi",
-            "processingProfile": "pi-default-v1",
+            "processingProfile": "pi-default-v2",
             "pageNumber": 1,
             "page_w": 10,
             "page_h": 20,
@@ -1284,14 +1288,14 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.assertTrue(release_dir.is_dir())
         manifest = json.loads((release_dir / "attachments.json").read_text("utf-8"))
         self.assertEqual(manifest["executor"], "pi")
-        self.assertEqual(manifest["processingProfile"], "pi-default-v1")
+        self.assertEqual(manifest["processingProfile"], "pi-default-v2")
 
         pc_job, already = service.start(
             self.entry["bookId"], self.entry["contentSha256"], "vision", "pc"
         )
         self.assertFalse(already)
         self.assertEqual(pc_job["executor"], "pc")
-        self.assertEqual(pc_job["processingProfile"], "quality-first-v2")
+        self.assertEqual(pc_job["processingProfile"], "quality-first-v3")
         self.assertEqual(pc_job["successfulPages"], 0)
         self.assertTrue(release_dir.is_dir(), "immutable Pi release must remain")
         self.assertFalse((job_dir / "pages" / "p000001.json").exists())
@@ -1302,14 +1306,14 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["vision"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v2",
+            "processingProfile": "quality-first-v3",
         })
         self.assertEqual(claimed["job"]["completedPages"], [])
         self.assertEqual(
-            claimed["job"]["processingProfile"], "quality-first-v2"
+            claimed["job"]["processingProfile"], "quality-first-v3"
         )
 
-    def test_historical_pc_v1_publication_remains_readable_and_can_restart_as_v2(self) -> None:
+    def test_historical_pc_v1_publication_remains_readable_and_can_restart_as_v3(self) -> None:
         service = ReaderBookOcrService(
             self.library,
             self.base / "pc-profile-upgrade-ocr",
@@ -1394,12 +1398,35 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         )
         self.assertFalse(already)
         self.assertEqual(restarted["executor"], "pc")
-        self.assertEqual(restarted["processingProfile"], "quality-first-v2")
+        self.assertEqual(restarted["processingProfile"], "quality-first-v3")
         self.assertEqual(restarted["state"], "queued")
         self.assertTrue((version_dir / "releases" / revision).is_dir())
         self.assertEqual(len(list((version_dir / "staging-archive").glob("*"))), 1)
 
     def test_version_kind_and_unknown_fields_fail_closed(self) -> None:
+        self.assertEqual(
+            reader_book_ocr._safe_public_job({})["processingProfile"],
+            "pi-default-v2",
+        )
+        self.assertEqual(
+            reader_book_ocr._safe_public_job({
+                "executor": "pi",
+                "state": "succeeded",
+            })["processingProfile"],
+            "pi-default-v1",
+        )
+        self.assertEqual(
+            self.service._processing_identity({"executor": "pi"}),
+            ("pi", "pi-default-v1"),
+        )
+        self.assertEqual(
+            self.service._processing_identity({"executor": "pc"}),
+            ("pc", "quality-first-v1"),
+        )
+        self.assertNotEqual(
+            self.service._processing_identity({"executor": "pi"}),
+            ("pi", reader_book_ocr.PROCESSING_PROFILES["pi"]),
+        )
         with self.assertRaises(ReaderBookOcrError) as changed:
             self.service.start(self.entry["bookId"], "0" * 64, "vision")
         self.assertEqual(changed.exception.code, "book-version-changed")
@@ -1412,9 +1439,18 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
                 self.entry["contentSha256"],
                 "vision",
                 "pc",
-                "pi-default-v1",
+                "pi-default-v2",
             )
         self.assertEqual(profile.exception.code, "invalid-processing-profile")
+
+        self.assertEqual(
+            reader_book_ocr.READABLE_PROCESSING_PROFILES["pi"],
+            frozenset(("pi-default-v1", "pi-default-v2")),
+        )
+        self.assertEqual(
+            reader_book_ocr.READABLE_PROCESSING_PROFILES["pc"],
+            frozenset(("quality-first-v1", "quality-first-v2", "quality-first-v3")),
+        )
 
         epub = self.vault / "B.epub"
         epub.write_bytes(b"not-needed-for-catalog")
@@ -2009,8 +2045,14 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         restored, already = service.start(
             self.entry["bookId"], self.entry["contentSha256"], "vision"
         )
-        self.assertTrue(already)
-        self.assertEqual(restored["jobId"], final_job["jobId"])
+        self.assertFalse(already)
+        self.assertEqual(restored["state"], "queued")
+        self.assertEqual(restored["processingProfile"], "pi-default-v2")
+        self.assertNotEqual(restored["jobId"], final_job["jobId"])
+
+        current_vision = json.loads((job_dir / "job.json").read_text("utf-8"))
+        current_vision["state"] = "failed"
+        (job_dir / "job.json").write_text(json.dumps(current_vision), "utf-8")
 
         manga_dir = version / "manga"
         manga_dir.mkdir(parents=True)
@@ -2025,7 +2067,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.assertFalse(already)
         self.assertEqual(switched["state"], "queued")
         self.assertEqual(switched["engine"], "manga")
-        self.assertEqual(len(launches), 1)
+        self.assertEqual(len(launches), 2)
         self.assertEqual(
             service.attachment_manifest(
                 self.entry["bookId"], self.entry["contentSha256"]
@@ -2046,6 +2088,8 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "bookId": self.entry["bookId"],
             "contentSha256": self.entry["contentSha256"],
             "engine": "manga",
+            "executor": switched["executor"],
+            "processingProfile": switched["processingProfile"],
             "pageNumber": 1,
             "page_w": 10,
             "page_h": 20,
@@ -2186,6 +2230,207 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
 
 
 class ReaderBookOcrWorkerContractTest(unittest.TestCase):
+    def test_manga_alignment_handles_split_glyph_and_missing_quote(self) -> None:
+        # Real p28 geometry from the reported regression.  Manga OCR omitted
+        # the closing quote after る, while the two strokes of い arrived as two
+        # visual runs.  Equal line division moved 美味しい about 23 page units
+        # to the right; monotonic ink alignment must merge and skip in place.
+        text = list(
+            "そうだろ。調理師の役割は「美味しい料理をつくるだけじゃなく、栄養面"
+        )
+        intervals = [
+            (284.626, 315.345), (323.265, 349.663),
+            (359.743, 391.661), (396.941, 425.980),
+            (432.219, 442.299), (461.978, 496.296),
+            (496.296, 530.615), (535.895, 567.333),
+            (573.093, 604.291), (610.051, 644.129),
+            (644.129, 678.448), (685.647, 715.886),
+            (727.645, 736.045), (741.325, 776.603),
+            (776.603, 812.121), (821.241, 848.120),
+            (855.079, 868.279), (875.718, 884.118),
+            (890.118, 925.156), (925.156, 960.434),
+            (966.674, 995.233), (1003.872, 1035.071),
+            (1043.470, 1067.709), (1080.909, 1108.987),
+            (1116.427, 1124.827),  # visual closing quote, absent from OCR
+            (1138.746, 1170.904), (1176.904, 1206.423),
+            (1217.942, 1246.021), (1255.620, 1280.579),
+            (1290.659, 1321.137), (1331.217, 1356.176),
+            (1368.895, 1371.055), (1394.334, 1426.492),
+            (1431.772, 1465.130), (1470.410, 1502.809),
+        ]
+        aligned = _manga_align_visual_segments(
+            text,
+            [(start, end, 0.0, 100.0) for start, end in intervals],
+        )
+        self.assertEqual([item[0] for item in aligned], text)
+        word = aligned[text.index("美"):text.index("美") + 4]
+        self.assertAlmostEqual(word[0][1], 741.325, places=3)
+        self.assertAlmostEqual(word[-1][2], 884.118, places=3)
+        self.assertEqual((word[-1][1], word[-1][2]), (855.079, 884.118))
+        after_quote = text.index("だ", text.index("る") + 1)
+        self.assertEqual(
+            (aligned[after_quote][1], aligned[after_quote][2]),
+            (1138.746, 1170.904),
+        )
+
+    def test_manga_alignment_rejects_implausible_noise_geometry(self) -> None:
+        self.assertEqual(
+            _manga_align_visual_segments(
+                list("美味"),
+                [(0.0, 1.0, 0.0, 20.0), (2.0, 1002.0, 0.0, 20.0)],
+            ),
+            [],
+        )
+
+    def test_manga_optical_geometry_crops_detector_line_padding(self) -> None:
+        import numpy as np
+
+        image = np.full((120, 500), 255, dtype=np.uint8)
+        image[30:80, 40:140] = 0
+        image[30:80, 240:340] = 0
+        # A narrow omitted visual mark spans almost the whole detector line.
+        # It may be skipped by OCR/DP, but must not inflate both glyph boxes.
+        image[5:115, 430:435] = 0
+        boxes = _manga_line_char_boxes(
+            "美味",
+            [[0, 0], [500, 0], [500, 120], [0, 120]],
+            vertical=False,
+            image_gray=image,
+        )
+        self.assertEqual([item[0] for item in boxes], ["美", "味"])
+        self.assertTrue(all(25 <= item[2] <= 30 for item in boxes))
+        self.assertTrue(all(80 <= item[4] <= 85 for item in boxes))
+        self.assertTrue(all(item[4] - item[2] < 70 for item in boxes))
+
+    def test_manga_optical_geometry_keeps_vertical_line_direction(self) -> None:
+        import numpy as np
+
+        image = np.full((500, 120), 255, dtype=np.uint8)
+        image[40:140, 30:80] = 0
+        image[240:340, 30:80] = 0
+        boxes = _manga_line_char_boxes(
+            "縦書",
+            [[0, 0], [120, 0], [120, 500], [0, 500]],
+            vertical=True,
+            image_gray=image,
+        )
+        self.assertEqual([item[0] for item in boxes], ["縦", "書"])
+        self.assertTrue(all(25 <= item[1] <= 30 for item in boxes))
+        self.assertTrue(all(80 <= item[3] <= 85 for item in boxes))
+        self.assertLess(boxes[0][2], boxes[1][2])
+        self.assertTrue(all(item[3] - item[1] < 70 for item in boxes))
+
+    def test_manga_optical_geometry_inverse_maps_skewed_horizontal_line(self) -> None:
+        import cv2
+        import numpy as np
+
+        rectified = np.full((80, 300), 255, dtype=np.uint8)
+        rectified[15:65, 20:100] = 0
+        rectified[15:65, 200:280] = 0
+        polygon = np.asarray(
+            [[40, 40], [350, 80], [330, 170], [20, 130]],
+            dtype=np.float32,
+        )
+        transform = cv2.getPerspectiveTransform(
+            np.asarray([[0, 0], [300, 0], [300, 80], [0, 80]], dtype=np.float32),
+            polygon,
+        )
+        page = cv2.warpPerspective(
+            rectified,
+            transform,
+            (420, 220),
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=255,
+        )
+        boxes = _manga_line_char_boxes(
+            "美味",
+            polygon.tolist(),
+            vertical=False,
+            image_gray=page,
+        )
+        expected = cv2.perspectiveTransform(
+            np.asarray([[[60, 40], [240, 40]]], dtype=np.float32),
+            transform,
+        )[0]
+        centers = [
+            ((item[1] + item[3]) / 2.0, (item[2] + item[4]) / 2.0)
+            for item in boxes
+        ]
+        self.assertEqual([item[0] for item in boxes], ["美", "味"])
+        for actual, target in zip(centers, expected):
+            self.assertAlmostEqual(actual[0], float(target[0]), delta=1.0)
+            self.assertAlmostEqual(actual[1], float(target[1]), delta=1.0)
+
+    def test_manga_optical_geometry_inverse_maps_rotated_vertical_line(self) -> None:
+        import cv2
+        import numpy as np
+
+        rectified = np.full((300, 80), 255, dtype=np.uint8)
+        rectified[20:100, 15:65] = 0
+        rectified[200:280, 15:65] = 0
+        polygon = np.asarray(
+            [[250, 20], [340, 50], [250, 360], [160, 330]],
+            dtype=np.float32,
+        )
+        transform = cv2.getPerspectiveTransform(
+            np.asarray([[0, 0], [80, 0], [80, 300], [0, 300]], dtype=np.float32),
+            polygon,
+        )
+        page = cv2.warpPerspective(
+            rectified,
+            transform,
+            (420, 400),
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=255,
+        )
+        boxes = _manga_line_char_boxes(
+            "縦書",
+            polygon.tolist(),
+            vertical=True,
+            image_gray=page,
+        )
+        expected = cv2.perspectiveTransform(
+            np.asarray([[[40, 60], [40, 240]]], dtype=np.float32),
+            transform,
+        )[0]
+        centers = [
+            ((item[1] + item[3]) / 2.0, (item[2] + item[4]) / 2.0)
+            for item in boxes
+        ]
+        self.assertEqual([item[0] for item in boxes], ["縦", "書"])
+        for actual, target in zip(centers, expected):
+            self.assertAlmostEqual(actual[0], float(target[0]), delta=1.0)
+            self.assertAlmostEqual(actual[1], float(target[1]), delta=1.0)
+
+    def test_pi_page_cache_rejects_previous_geometry_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            page_path = Path(temp_dir) / "p000001.json"
+            page = {
+                "schema": reader_book_ocr_worker.PAGE_SCHEMA,
+                "bookId": "book_test",
+                "contentSha256": "a" * 64,
+                "engine": "manga",
+                "processingProfile": "pi-default-v1",
+                "chars": [],
+            }
+            page_path.write_text(json.dumps(page), "utf-8")
+            self.assertFalse(reader_book_ocr_worker._page_done(
+                page_path,
+                "book_test",
+                "a" * 64,
+                "manga",
+                "pi-default-v2",
+            ))
+            page["processingProfile"] = "pi-default-v2"
+            page_path.write_text(json.dumps(page), "utf-8")
+            self.assertTrue(reader_book_ocr_worker._page_done(
+                page_path,
+                "book_test",
+                "a" * 64,
+                "manga",
+                "pi-default-v2",
+            ))
+
     def test_manga_page_preserves_authoritative_vertical_direction(self) -> None:
         class FakePixmap:
             width = 100

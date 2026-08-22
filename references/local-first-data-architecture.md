@@ -283,8 +283,10 @@ Pi 上原有的 `summarize_section`（取整章而非逐页）、`auto_highlight
 编排在 `reader_book_ocr.py`，**两个维度正交**：
 
 - `engine = vision | manga` —— Google Vision 还是本地 manga OCR
-- `executor = pi | pc` —— Pi `pi-default-v1`（较轻默认链）
-  / PC `quality-first-v2`（400 dpi、长边 6000、JPEG95、mokuro polygon geometry、
+- `executor = pi | pc` —— Pi `pi-default-v2`（较轻默认链）
+  / PC `quality-first-v3`（Vision 目标 300 dpi 并按上传字节上限回退；manga 300 dpi、
+  mokuro 分框/分行 +
+  行内光学墨迹对齐字符几何、
   DocLayout-YOLO、UniMERNet base）
 
 ⚠ **正式执行器不是 `yolo_figures.py`/`mokuro_ocr_book.py`** —— 那两个是
@@ -302,7 +304,7 @@ CUDA，DocLayout 同一权重加载到 CUDA，公式走 UniMERNet CUDA。
   PC job 留队列等 Windows 出站 worker 领取，有**分页 checkpoint** 可续跑。
   PC 不在线**不会自动改投 Pi**（长期不开机需用户取消后重建 Pi job）。
   全局 active-job 容量阻止两 executor 同时处理同一本，**避免隐式混跑**
-  —— 不自动降级是对的：否则以为拿到 400 dpi、实得较轻链且无从察觉
+  —— 不自动降级是对的：否则以为拿到指定 PC profile、实得较轻链且无从察觉
 - **provenance**：canonical 产物（job/page/release/manifest/current）已写
   `engine`/`executor`/`processingProfile`，PC 缓存存完整 quality profile，
   公式写 `latexEngine`；executor/profile 不同的旧未完成 job 会归档后重建，
@@ -310,7 +312,10 @@ CUDA，DocLayout 同一权重加载到 CUDA，公式走 UniMERNet CUDA。
 - ⚠ **现有 provenance 缺口**：standalone `yolo_figures.py` 的 figure sidecar
   只写 `geom:"yolo"` / `fsrc:"yolo"` / `fconf` / `fcls`，**没有 model file /
   device / profile**。若要独立重跑插图几何，无法分辨哪些页是什么条件下产出的
-- ~~⚠ 已知文档漂移：架构文档写 `quality-first-v1`，代码已是 `v2`~~ → 2026-08-19 已修：`reader-runtime-architecture.md` 与代码（`reader_book_ocr.py::PROCESSING_PROFILES`）一致为 `quality-first-v2`。
+- 漫画 OCR 的 `bk` / `line` / 竖排方向仍由 MangaPageOcr 提供，不用 Vision
+  代替分框；只在既有行内按实际墨迹做单调字符对齐，低置信度时回退旧的四边形分割。
+  当前 profile 的唯一事实源是 `reader_book_ocr.py::PROCESSING_PROFILES`；profile
+  变化会让旧 staging/页缓存重算，已经发布的旧 profile 仍保持可读。
 
 **暂不做自动调度**：人工选的隐含好处是你知道每本书用了什么精度；自动调度
 要么按"PC 在不在线"选（等于精度随机），要么要一套优先级规则，当前痛点

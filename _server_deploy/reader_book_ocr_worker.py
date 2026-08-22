@@ -27,7 +27,8 @@ import uuid
 CONTRACT = "reader-library-ocr/1"
 PAGE_SCHEMA = "reader-page-chars/1"
 PUBLICATION_CONTRACT = "reader-book-ocr-publication/1"
-PROCESSING_PROFILES = {"pi": "pi-default-v1", "pc": "quality-first-v2"}
+PROCESSING_PROFILES = {"pi": "pi-default-v2", "pc": "quality-first-v3"}
+LEGACY_PROCESSING_PROFILES = {"pi": "pi-default-v1", "pc": "quality-first-v1"}
 _EXPECTED_JOB_ID: str | None = None
 _EXPECTED_WORKER_GENERATION: str | None = None
 
@@ -37,7 +38,9 @@ def _processing_identity(value: dict | None) -> tuple[str, str]:
     executor = str(item.get("executor") or "pi")
     if executor not in PROCESSING_PROFILES:
         executor = "pi"
-    profile = str(item.get("processingProfile") or PROCESSING_PROFILES[executor])
+    profile = str(
+        item.get("processingProfile") or LEGACY_PROCESSING_PROFILES[executor]
+    )
     return executor, profile
 
 
@@ -249,13 +252,20 @@ def _stop_state(job_path: Path, desired: str) -> int:
     return 21
 
 
-def _page_done(path: Path, book_id: str, content_sha256: str, engine: str) -> bool:
+def _page_done(
+    path: Path,
+    book_id: str,
+    content_sha256: str,
+    engine: str,
+    processing_profile: str,
+) -> bool:
     value = _load(path, {}) or {}
     return (
         value.get("schema") == PAGE_SCHEMA
         and value.get("bookId") == book_id
         and value.get("contentSha256") == content_sha256
         and value.get("engine") == engine
+        and value.get("processingProfile") == processing_profile
         and isinstance(value.get("chars"), list)
     )
 
@@ -361,6 +371,7 @@ def _manga_line_char_boxes(
     points: list,
     *,
     vertical: bool | None = None,
+    image_gray=None,
 ) -> list[tuple[str, float, float, float, float]]:
     """Approximate character geometry in the detector's actual writing direction.
 
@@ -394,6 +405,25 @@ def _manga_line_char_boxes(
     if width <= 0 or height <= 0:
         return []
     is_vertical = bool(vertical) if isinstance(vertical, bool) else height > width * 1.2
+
+    # MangaPageOcr only exposes one polygon for a whole line.  Equal division
+    # is a safe fallback, but it accumulates error as soon as the line contains
+    # narrow punctuation or the recognizer omits one glyph.  When the rendered
+    # page is available, rectify the polygon and recover the actual ink runs;
+    # the monotonic alignment below retains the manga block/line identity while
+    # giving the Reader the same kind of tight character geometry as Vision.
+    if image_gray is not None:
+        try:
+            optical = _manga_optical_char_boxes(
+                visible,
+                valid_points,
+                image_gray,
+                vertical=is_vertical,
+            )
+        except Exception:
+            optical = []
+        if len(optical) == len(visible):
+            return optical
 
     def between(start: tuple[float, float], end: tuple[float, float], ratio: float):
         return (
@@ -430,15 +460,340 @@ def _manga_line_char_boxes(
     return cells
 
 
+def _manga_character_ink_factor(character: str) -> float:
+    """Expected ink width relative to an ordinary CJK glyph.
+
+    This is used only to align already-observed ink runs.  It does not invent
+    geometry: the returned box still comes from pixels in the rectified line.
+    """
+    if character in "、，,":
+        return 0.08
+    if character in "。．.":
+        return 0.32
+    category = unicodedata.category(character)
+    if category in {"Pi", "Pf", "Ps", "Pe"}:
+        return 0.25
+    if category.startswith("P"):
+        return 0.20
+    if character.isascii():
+        return 0.62
+    return 1.0
+
+
+def _manga_align_visual_segments(
+    text: list[str],
+    segments: list[tuple[float, float, float, float]],
+) -> list[tuple[str, float, float, float, float]]:
+    """Monotonically align OCR characters to one or more observed ink runs.
+
+    A glyph such as ``い`` may be two visual runs, while manga OCR may omit a
+    narrow closing quote entirely.  The dynamic program therefore permits a
+    character to consume up to three adjacent runs and permits a bounded number
+    of unclaimed runs.  It never reorders characters or crosses a manga line.
+    """
+    if not text or not segments:
+        return []
+    count = len(text)
+    observed = len(segments)
+    if observed < max(1, count // 2) or observed > count + max(8, count // 3):
+        return []
+    widths = [max(0.0, item[1] - item[0]) for item in segments]
+    if not widths or any(not math.isfinite(value) or value <= 0 for value in widths):
+        return []
+    ordered = sorted(widths)
+    raw_median = ordered[len(ordered) // 2]
+    substantial = sorted(value for value in widths if value >= raw_median * 0.55)
+    base = substantial[len(substantial) // 2] if substantial else raw_median
+    if not math.isfinite(base) or base <= 0:
+        return []
+
+    infinity = float("inf")
+    costs = [[infinity] * (observed + 1) for _ in range(count + 1)]
+    previous = [[None] * (observed + 1) for _ in range(count + 1)]
+    costs[0][0] = 0.0
+    for char_index in range(count + 1):
+        for segment_index in range(observed + 1):
+            current = costs[char_index][segment_index]
+            if not math.isfinite(current):
+                continue
+            if segment_index < observed:
+                # Skipping a narrow run is cheap enough to represent a glyph
+                # omitted by OCR; skipping a full CJK glyph remains expensive.
+                skip_cost = 0.12 + 0.55 * min(2.0, widths[segment_index] / base)
+                if current + skip_cost < costs[char_index][segment_index + 1]:
+                    costs[char_index][segment_index + 1] = current + skip_cost
+                    previous[char_index][segment_index + 1] = (
+                        char_index,
+                        segment_index,
+                        None,
+                    )
+            if char_index >= count:
+                continue
+            for consumed in range(1, min(3, observed - segment_index) + 1):
+                first = segments[segment_index]
+                last = segments[segment_index + consumed - 1]
+                span = last[1] - first[0]
+                target = base * _manga_character_ink_factor(text[char_index])
+                if span <= 0 or target <= 0:
+                    continue
+                ratio = max(0.04, span / target)
+                assignment_cost = 3.2 * math.log(ratio) ** 2 + 0.08 * (consumed - 1)
+                if consumed > 1:
+                    assignment_cost += 0.15 * sum(
+                        max(0.0, segments[index + 1][0] - segments[index][1])
+                        for index in range(segment_index, segment_index + consumed - 1)
+                    ) / base
+                destination = current + assignment_cost
+                if destination < costs[char_index + 1][segment_index + consumed]:
+                    costs[char_index + 1][segment_index + consumed] = destination
+                    previous[char_index + 1][segment_index + consumed] = (
+                        char_index,
+                        segment_index,
+                        consumed,
+                    )
+
+    final_cost = costs[count][observed]
+    if (
+        not math.isfinite(final_cost)
+        or final_cost / max(1, count) > 2.25
+    ):
+        return []
+    operations = []
+    char_index, segment_index = count, observed
+    while char_index or segment_index:
+        step = previous[char_index][segment_index]
+        if step is None:
+            return []
+        operations.append((char_index, segment_index, step))
+        char_index, segment_index = step[0], step[1]
+    operations.reverse()
+
+    aligned = []
+    skipped = 0
+    consecutive_skipped = 0
+    maximum_consecutive_skipped = 0
+    output_index = 0
+    for _next_char, next_segment, step in operations:
+        consumed = step[2]
+        if consumed is None:
+            skipped += 1
+            consecutive_skipped += 1
+            maximum_consecutive_skipped = max(
+                maximum_consecutive_skipped,
+                consecutive_skipped,
+            )
+            continue
+        consecutive_skipped = 0
+        start_segment = step[1]
+        end_segment = next_segment
+        members = segments[start_segment:end_segment]
+        span = members[-1][1] - members[0][0]
+        target = base * _manga_character_ink_factor(text[output_index])
+        ratio = span / target if target > 0 else float("inf")
+        if not math.isfinite(ratio) or ratio < 0.12 or ratio > 5.0:
+            return []
+        aligned.append((
+            text[output_index],
+            members[0][0],
+            members[-1][1],
+            min(item[2] for item in members),
+            max(item[3] for item in members),
+        ))
+        output_index += 1
+    if (
+        len(aligned) != count
+        or skipped > max(3, math.ceil(count * 0.15))
+        or maximum_consecutive_skipped > 2
+    ):
+        return []
+    return aligned
+
+
+def _manga_optical_char_boxes(
+    text: list[str],
+    points: list[tuple[float, float]],
+    image_gray,
+    *,
+    vertical: bool,
+) -> list[tuple[str, float, float, float, float]]:
+    """Rectify one manga line, align ink runs, and map boxes to page pixels."""
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+
+    source = np.asarray(points, dtype=np.float32)
+    if source.shape != (4, 2) or getattr(image_gray, "ndim", 0) != 2:
+        return []
+    top, right, bottom, left = (
+        float(np.linalg.norm(source[1] - source[0])),
+        float(np.linalg.norm(source[2] - source[1])),
+        float(np.linalg.norm(source[2] - source[3])),
+        float(np.linalg.norm(source[3] - source[0])),
+    )
+    rect_width = max(2, int(round(max(top, bottom))))
+    rect_height = max(2, int(round(max(left, right))))
+    destination = np.asarray([
+        [0, 0],
+        [rect_width, 0],
+        [rect_width, rect_height],
+        [0, rect_height],
+    ], dtype=np.float32)
+    transform = cv2.getPerspectiveTransform(source, destination)
+    inverse = cv2.getPerspectiveTransform(destination, source)
+    rectified = cv2.warpPerspective(
+        image_gray,
+        transform,
+        (rect_width, rect_height),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=255,
+    )
+    if vertical:
+        working = rectified.T
+    else:
+        working = rectified
+    _threshold, binary = cv2.threshold(
+        working,
+        0,
+        255,
+        cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU,
+    )
+    ink = binary > 0
+    cross_extent, main_extent = ink.shape
+    if cross_extent < 2 or main_extent < 2:
+        return []
+    minimum_column_ink = max(1, int(round(cross_extent * 0.02)))
+    occupied = np.asarray(ink.sum(axis=0) >= minimum_column_ink, dtype=np.bool_)
+    runs = []
+    start = None
+    for index, present in enumerate(occupied.tolist() + [False]):
+        if present and start is None:
+            start = index
+        elif not present and start is not None:
+            if index - start >= max(1, int(round(cross_extent * 0.01))):
+                runs.append((start, index))
+            start = None
+    if not runs:
+        return []
+    merged = []
+    maximum_internal_gap = cross_extent * 0.05
+    for start, end in runs:
+        if merged and start - merged[-1][1] < maximum_internal_gap:
+            merged[-1] = (merged[-1][0], end)
+        else:
+            merged.append((start, end))
+
+    run_widths = sorted(end - start for start, end in merged)
+    median_width = run_widths[len(run_widths) // 2]
+    normalized = []
+    for start, end in merged:
+        width = end - start
+        if median_width > 0 and width > median_width * 1.55:
+            pieces = max(2, int(round(width / median_width)))
+            for offset in range(pieces):
+                normalized.append((
+                    int(round(start + width * offset / pieces)),
+                    int(round(start + width * (offset + 1) / pieces)),
+                ))
+        else:
+            normalized.append((start, end))
+
+    segments = []
+    for start, end in normalized:
+        sample = ink[:, start:end]
+        cross_positions = np.flatnonzero(sample.any(axis=1))
+        if cross_positions.size == 0:
+            continue
+        segments.append((
+            float(start),
+            float(end),
+            float(cross_positions[0]),
+            float(cross_positions[-1] + 1),
+        ))
+    aligned = _manga_align_visual_segments(text, segments)
+    if len(aligned) != len(text):
+        return []
+
+    # Each glyph keeps its own cross-axis ink band.  Using the union for the
+    # whole line makes one underline, ruby mark, or omitted visual glyph inflate
+    # every neighbouring selection box.  A small minimum span keeps punctuation
+    # easy to hit without reintroducing that line-wide padding.  Main-axis
+    # padding adds a side bearing without accumulating across the line.
+    cross_positions = np.flatnonzero(ink.any(axis=1))
+    if cross_positions.size == 0:
+        return []
+    line_cross_start = float(cross_positions[0])
+    line_cross_end = float(cross_positions[-1] + 1)
+    cross_padding = max(1.0, cross_extent * 0.04)
+    minimum_cross_span = max(2.0, (line_cross_end - line_cross_start) * 0.45)
+    main_padding = max(1.0, (line_cross_end - line_cross_start) * 0.05)
+    cells = []
+    for character, main_start, main_end, local_cross_start, local_cross_end in aligned:
+        main_start = max(0.0, main_start - main_padding)
+        main_end = min(float(main_extent), main_end + main_padding)
+        cross_start = max(0.0, local_cross_start - cross_padding)
+        cross_end = min(float(cross_extent), local_cross_end + cross_padding)
+        if cross_end - cross_start < minimum_cross_span:
+            center = (cross_start + cross_end) / 2.0
+            cross_start = max(0.0, center - minimum_cross_span / 2.0)
+            cross_end = min(float(cross_extent), cross_start + minimum_cross_span)
+            cross_start = max(0.0, cross_end - minimum_cross_span)
+        if vertical:
+            rect_points = np.asarray([[[
+                cross_start, main_start,
+            ], [
+                cross_end, main_start,
+            ], [
+                cross_end, main_end,
+            ], [
+                cross_start, main_end,
+            ]]], dtype=np.float32)
+        else:
+            rect_points = np.asarray([[[
+                main_start, cross_start,
+            ], [
+                main_end, cross_start,
+            ], [
+                main_end, cross_end,
+            ], [
+                main_start, cross_end,
+            ]]], dtype=np.float32)
+        mapped = cv2.perspectiveTransform(rect_points, inverse)[0]
+        xs = mapped[:, 0]
+        ys = mapped[:, 1]
+        cell_x0, cell_x1 = float(xs.min()), float(xs.max())
+        cell_y0, cell_y1 = float(ys.min()), float(ys.max())
+        if cell_x1 <= cell_x0 or cell_y1 <= cell_y0:
+            return []
+        cells.append((character, cell_x0, cell_y0, cell_x1, cell_y1))
+    return cells
+
+
 def _manga_page(page, engine) -> tuple[list[dict], str, int, int]:
     pix = page.get_pixmap(dpi=300, alpha=False)
     image_w, image_h = pix.width, pix.height
     temp_name = None
+    image_gray = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
             temp_name = handle.name
         pix.save(temp_name)
         raw = engine(temp_name) or {}
+        try:
+            import cv2  # type: ignore
+            import numpy as np  # type: ignore
+
+            channels = int(getattr(pix, "n", 0) or 0)
+            samples = np.frombuffer(pix.samples, dtype=np.uint8)
+            if channels > 0 and samples.size == image_w * image_h * channels:
+                image = samples.reshape(image_h, image_w, channels)
+                if channels >= 3:
+                    image_gray = cv2.cvtColor(image[:, :, :3], cv2.COLOR_RGB2GRAY)
+                else:
+                    image_gray = image[:, :, 0].copy()
+        except Exception:
+            # The line geometry has a deterministic polygon fallback.  Missing
+            # image/vision dependencies must not make manga OCR unusable.
+            image_gray = None
     finally:
         del pix
         if temp_name:
@@ -466,6 +821,7 @@ def _manga_page(page, engine) -> tuple[list[dict], str, int, int]:
                 text,
                 points,
                 vertical=(block_vertical if isinstance(block_vertical, bool) else None),
+                image_gray=image_gray,
             )
             for character, x0, y0, x1, y1 in cells:
                 char = {
@@ -1322,6 +1678,7 @@ def run(args) -> int:
                     args.book_id,
                     args.content_sha256,
                     args.engine,
+                    PROCESSING_PROFILES["pi"],
                 )
             )
             tokenized = (
@@ -1329,7 +1686,15 @@ def run(args) -> int:
                 if args.engine == "vision"
                 else sum(
                     1 for page_number in range(1, total + 1)
-                    if bool((_load(pages_dir / f"p{page_number:06d}.json", {}) or {}).get("tokenized"))
+                    if _page_done(
+                        pages_dir / f"p{page_number:06d}.json",
+                        args.book_id,
+                        args.content_sha256,
+                        args.engine,
+                        PROCESSING_PROFILES["pi"],
+                    ) and bool(
+                        (_load(pages_dir / f"p{page_number:06d}.json", {}) or {}).get("tokenized")
+                    )
                 )
             )
             _update_job(
@@ -1351,7 +1716,13 @@ def run(args) -> int:
                 if desired != "running":
                     return _stop_state(job_path, desired)
                 page_path = pages_dir / f"p{page_number:06d}.json"
-                if _page_done(page_path, args.book_id, args.content_sha256, args.engine):
+                if _page_done(
+                    page_path,
+                    args.book_id,
+                    args.content_sha256,
+                    args.engine,
+                    PROCESSING_PROFILES["pi"],
+                ):
                     value = _load(page_path, {}) or {}
                     if value.get("chars"):
                         recognized += 1

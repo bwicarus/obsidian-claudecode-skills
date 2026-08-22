@@ -838,7 +838,7 @@ final class ReaderPiOCRClient {
               manifest.executor.map({ ["pi", "pc"].contains($0) }) ?? true,
               manifest.processingProfile.map({ !$0.isEmpty && $0.count <= 80 }) ?? true,
               manifest.executor != "pc"
-                || ["quality-first-v1", "quality-first-v2"].contains(
+                || ["quality-first-v1", "quality-first-v2", "quality-first-v3"].contains(
                     manifest.processingProfile
                 ),
               manifest.files.count <= 5_001 else {

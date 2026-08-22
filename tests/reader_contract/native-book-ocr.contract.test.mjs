@@ -370,6 +370,19 @@ test("Pi and PC attachment receipts verify durable per-page character counts", (
   );
 });
 
+test("new manga geometry profiles import as a fresh engine revision", () => {
+  const importBody = bodyOf(STORE, "importDerivedAttachments");
+  const convertBody = bodyOf(STORE, "convertPiPage");
+  assert.match(STORE, /"quality-first-v1", "quality-first-v2", "quality-first-v3"/);
+  assert.match(importBody, /processingProfile: processingProfile/);
+  assert.match(convertBody, /processingProfile: String/);
+  assert.match(
+    convertBody,
+    /value\.engine == "manga"[\s\S]*"pi-default-v2", "quality-first-v3"[\s\S]*\? 2[\s\S]*: 1/,
+  );
+  assert.match(convertBody, /let revision = "\\\(executor\)-\\\(value\.engine\)\/\\\(geometryVersion\)"/);
+});
+
 test("native page text bridge data is available without coupling the core to UI files", () => {
   assert.match(MODELS, /reader-native-page-text-update\/1/);
   assert.match(MANAGER, /func pageCharacters\(/);

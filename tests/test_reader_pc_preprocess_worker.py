@@ -102,6 +102,14 @@ def claim_payload(digest, *, completed=None):
 
 
 class PiWorkerApiTest(unittest.TestCase):
+    def test_quality_profile_invalidates_equal_width_manga_geometry(self):
+        self.assertEqual(worker.PROCESSING_PROFILE, "quality-first-v3")
+        self.assertEqual(worker.QUALITY_PROFILE["name"], "quality-first-v3")
+        self.assertEqual(
+            worker.QUALITY_PROFILE["textGeometry"],
+            "mokuro-optical-glyph-alignment-v3",
+        )
+
     def test_wire_contract_is_bearer_authenticated_and_model_agnostic(self):
         digest = hashlib.sha256(PDF).hexdigest()
         transport = FakeTransport(
@@ -234,14 +242,16 @@ class PiWorkerApiTest(unittest.TestCase):
         self.assertRegex(first, r"^pc_[a-f0-9]{24}$")
 
     def test_claim_rejects_incompatible_processing_profile(self):
-        payload = claim_payload(hashlib.sha256(PDF).hexdigest())
-        payload["job"]["processingProfile"] = "unknown-profile"
-        with self.assertRaisesRegex(worker.WorkerError, "processing profile"):
-            worker.Claim.parse(
-                "pc_test",
-                payload,
-                {"max_pdf_bytes": 1024, "max_page_bytes": 1024},
-            )
+        for incompatible in ("quality-first-v2", "unknown-profile"):
+            with self.subTest(profile=incompatible):
+                payload = claim_payload(hashlib.sha256(PDF).hexdigest())
+                payload["job"]["processingProfile"] = incompatible
+                with self.assertRaisesRegex(worker.WorkerError, "processing profile"):
+                    worker.Claim.parse(
+                        "pc_test",
+                        payload,
+                        {"max_pdf_bytes": 1024, "max_page_bytes": 1024},
+                    )
 
     def test_mutation_responses_fail_closed_on_invalid_acknowledgements(self):
         claim = worker.Claim.parse(
@@ -347,6 +357,41 @@ class PiWorkerApiTest(unittest.TestCase):
 
 
 class CacheTest(unittest.TestCase):
+    def test_previous_manga_geometry_profile_is_not_reused(self):
+        digest = hashlib.sha256(PDF).hexdigest()
+        claim = worker.Claim.parse(
+            "pc_test",
+            claim_payload(digest),
+            {"max_pdf_bytes": 1024 * 1024, "max_page_bytes": 1024 * 1024},
+        )
+        page = {
+            "schema": worker.PAGE_SCHEMA,
+            "bookId": claim.book_id,
+            "contentSha256": claim.content_sha256,
+            "engine": claim.engine,
+            "pageNumber": 1,
+            "chars": [],
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            cache = worker.ContentCache(Path(temp))
+            page_path = cache.page_dir(claim) / "p000001.json"
+            page_path.parent.mkdir(parents=True)
+            old_profile = dict(worker.QUALITY_PROFILE)
+            old_profile.update({
+                "name": "quality-first-v2",
+                "textGeometry": "mokuro-polygon-direction-v2",
+            })
+            page_path.write_text(json.dumps({
+                "contract": "reader-pc-ocr-page-cache/1",
+                "profile": old_profile,
+                "visionRender": {},
+                "page": page,
+            }), "utf-8")
+            self.assertIsNone(cache.cached_page(claim, 1))
+
+            cache.save_page(claim, 1, page)
+            self.assertEqual(cache.cached_page(claim, 1), page)
+
     def test_download_is_content_addressed_and_resumes_only_matching_range(self):
         digest = hashlib.sha256(PDF).hexdigest()
         claim = worker.Claim.parse(

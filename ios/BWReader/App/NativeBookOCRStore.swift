@@ -1103,7 +1103,7 @@ actor NativeBookOCRSidecarStore {
             throw NativeBookOCRError.invalidAttachment("预处理执行器无效")
         }
         guard executor != "pc"
-            || ["quality-first-v1", "quality-first-v2"].contains(
+            || ["quality-first-v1", "quality-first-v2", "quality-first-v3"].contains(
                 manifest.processingProfile
             ) else {
             throw NativeBookOCRError.invalidAttachment("PC 预处理配置无效")
@@ -1140,7 +1140,8 @@ actor NativeBookOCRSidecarStore {
                     value,
                     expectedContentSHA256: contentSHA256,
                     expectedBookID: manifest.bookId,
-                    executor: executor
+                    executor: executor,
+                    processingProfile: processingProfile
                 )
                 guard incomingPages.updateValue(
                     converted,
@@ -1396,7 +1397,8 @@ actor NativeBookOCRSidecarStore {
         _ value: PiPageCharacters,
         expectedContentSHA256: String,
         expectedBookID: String,
-        executor: String
+        executor: String,
+        processingProfile: String
     ) throws -> NativeBookOCRPageCharacters {
         guard value.schema == PiPageCharacters.schema,
               value.bookId == expectedBookID,
@@ -1458,7 +1460,11 @@ actor NativeBookOCRSidecarStore {
         } else {
             segmentation = .ready
         }
-        let revision = "\(executor)-\(value.engine)/1"
+        let geometryVersion = value.engine == "manga"
+            && ["pi-default-v2", "quality-first-v3"].contains(processingProfile)
+            ? 2
+            : 1
+        let revision = "\(executor)-\(value.engine)/\(geometryVersion)"
         return NativeBookOCRPageCharacters(
             schema: NativeBookOCRPageCharacters.schema,
             contentSHA256: expectedContentSHA256,
@@ -1477,9 +1483,9 @@ actor NativeBookOCRSidecarStore {
             chars: value.chars,
             furigana: value.furigana,
             wordSegmentation: segmentation,
-            // The Pi manga engine currently divides a recognized line box
-            // across characters. Keep that approximation visible instead of
-            // claiming exact per-character geometry.
+            // Manga geometry aligns observed ink runs inside each recognized
+            // line, but it is still not symbol-exact and deliberately falls
+            // back to line division when optical alignment is unavailable.
             characterGeometry: value.engine == "vision" ? .exact : .estimated,
             formulaCoverage: .unknown,
             formulaRegions: [],
