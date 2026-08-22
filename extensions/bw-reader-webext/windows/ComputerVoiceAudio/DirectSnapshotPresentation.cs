@@ -105,7 +105,7 @@ internal static class DirectSnapshotMarkdown
 
         JsonObject? page = snapshot["currentPage"] as JsonObject;
         output.AppendLine();
-        output.AppendLine("## 当前页正文");
+        output.AppendLine("## 当前页正文（模型实际收到，含定位标记）");
         output.AppendLine();
         if (page is null)
         {
@@ -129,8 +129,8 @@ internal static class DirectSnapshotMarkdown
             AppendField(output, "已截断", Text(page["truncated"]));
             output.AppendLine();
             output.AppendLine(Fenced(
-                DirectSnapshotTerminal.ReadableReaderText(
-                    projection.PlainText)));
+                DirectSnapshotTerminal.ReadableAnnotatedReaderText(
+                    Text(page["text"]) ?? "")));
             AppendVisual(output, page["visual"] as JsonObject);
             AppendEmbeds(
                 output,
@@ -242,7 +242,7 @@ internal static class DirectSnapshotMarkdown
         }
 
         output.AppendLine();
-        output.AppendLine("### 协议卡片与便签");
+        output.AppendLine("### 正文定位卡片");
         output.AppendLine();
         if (projection.Cards.Count == 0)
         {
@@ -250,21 +250,11 @@ internal static class DirectSnapshotMarkdown
         }
         else
         {
-            int index = 1;
-            foreach (
-                DirectSnapshotTerminal.ReaderMarkedContent card
-                in projection.Cards)
-            {
-                output.Append(index++);
-                output.Append(". ");
-                output.AppendLine(EscapeInline(card.Text));
-                if (!string.IsNullOrEmpty(card.Attributes))
-                {
-                    output.AppendLine(
-                        "   - 属性："
-                        + EscapeInline(card.Attributes));
-                }
-            }
+            output.Append('_');
+            output.Append(projection.Cards.Count);
+            output.AppendLine(
+                " 张；编号、ID、修订、类型、锚定词与内容"
+                + "均已保留在上方正文定位标记中。_");
         }
 
         JsonArray? unanchored = embeds?["unanchored"] as JsonArray;
@@ -566,7 +556,7 @@ internal static class DirectSnapshotTerminal
             DirectSnapshotMarkdown.Text(page?["text"]) ?? "";
         ReaderTextProjection projection =
             ParseAnnotatedReaderText(annotatedText);
-        Section(output, "当前页正文");
+        Section(output, "当前页正文（模型实际收到，含定位标记）");
         if (page is null)
         {
             output.AppendLine("尚未收到稳定页正文。");
@@ -580,9 +570,9 @@ internal static class DirectSnapshotTerminal
             Field(output, "已截断", page["truncated"]);
             output.AppendLine();
             output.AppendLine(string.IsNullOrEmpty(
-                projection.PlainText)
+                annotatedText)
                 ? "（当前页无文字层）"
-                : ReadableReaderText(projection.PlainText));
+                : ReadableAnnotatedReaderText(annotatedText));
         }
 
         AppendEmbeds(output, page, projection);
@@ -729,21 +719,10 @@ internal static class DirectSnapshotTerminal
 
         if (projection.Cards.Count > 0)
         {
-            output.AppendLine("附属卡片/便签：");
-            int index = 1;
-            foreach (ReaderMarkedContent card in projection.Cards)
-            {
-                output.Append("  ");
-                output.Append(index++);
-                output.Append(". ");
-                if (!string.IsNullOrEmpty(card.Attributes))
-                {
-                    output.Append('[');
-                    output.Append(card.Attributes);
-                    output.Append("] ");
-                }
-                output.AppendLine(card.Text);
-            }
+            output.Append("正文定位卡片：");
+            output.Append(projection.Cards.Count);
+            output.AppendLine(
+                " 张（完整标记已保留在上方正文，不在此重复内容）");
         }
 
         JsonArray? unanchored = embeds?["unanchored"] as JsonArray;
@@ -981,6 +960,88 @@ internal static class DirectSnapshotTerminal
 
     internal static string ReadableReaderText(string value) =>
         NormalizePresentationLayout(value);
+
+    // Human-readable projections may clean scanner debris in ordinary page
+    // text, but every protocol block is the exact model-facing card/highlight
+    // payload. Preserve each complete block byte-for-byte so its position,
+    // attributes and semantic body cannot be changed by presentation cleanup.
+    internal static string ReadableAnnotatedReaderText(string value)
+    {
+        _ = ParseAnnotatedReaderText(value);
+        StringBuilder output = new(value.Length);
+        int plainStart = 0;
+        for (int index = 0; index < value.Length;)
+        {
+            if (value[index] == '\\')
+            {
+                index += 2;
+                continue;
+            }
+            if (value[index] != '⟦')
+            {
+                index++;
+                continue;
+            }
+            int headEnd = value.IndexOf('⟧', index + 1);
+            if (headEnd < 0)
+            {
+                throw ReaderTextInvalid();
+            }
+            ReadOnlySpan<char> marker = value.AsSpan(
+                index + 1,
+                headEnd - index - 1);
+            string? closingToken = StartsMarker(marker, "HIGHLIGHT")
+                ? "⟦/HIGHLIGHT⟧"
+                : StartsMarker(marker, "CARD_START")
+                    ? "⟦CARD_END⟧"
+                    : null;
+            if (closingToken is null)
+            {
+                index = headEnd + 1;
+                continue;
+            }
+            int closingIndex = IndexOfUnescapedToken(
+                value,
+                closingToken,
+                headEnd + 1);
+            if (closingIndex < 0)
+            {
+                throw ReaderTextInvalid();
+            }
+            output.Append(NormalizePresentationLayout(
+                value.Substring(plainStart, index - plainStart)));
+            int blockEnd = closingIndex + closingToken.Length;
+            output.Append(value.AsSpan(index, blockEnd - index));
+            plainStart = blockEnd;
+            index = blockEnd;
+        }
+        output.Append(NormalizePresentationLayout(
+            value.Substring(plainStart)));
+        return output.ToString();
+    }
+
+    private static int IndexOfUnescapedToken(
+        string value,
+        string token,
+        int start)
+    {
+        for (int index = start; index <= value.Length - token.Length;)
+        {
+            if (value[index] == '\\')
+            {
+                index += 2;
+                continue;
+            }
+            if (value.AsSpan(index).StartsWith(
+                token,
+                StringComparison.Ordinal))
+            {
+                return index;
+            }
+            index++;
+        }
+        return -1;
+    }
 
     internal static string UnescapeReaderText(string value) =>
         DecodeEscapedReaderText(value);
@@ -1577,12 +1638,12 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   <pre id="knowledge" class="muted">本页没有关联知识点。</pre>
                 </section>
                 <section class="wide">
-                  <h2>当前页正文</h2>
+                  <h2>当前页正文（模型实际收到，含定位标记）</h2>
                   <pre id="pageMeta" class="muted"></pre>
                   <pre id="pageBody" class="body">尚未收到稳定页正文。</pre>
                 </section>
                 <section>
-                  <h2>高亮、卡片与未锚定内容</h2>
+                  <h2>高亮与未锚定内容</h2>
                   <ul id="embeds"></ul>
                 </section>
                 <section>
@@ -1812,7 +1873,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
                       `降级原因：${valueText(page.fallbackReason)}`,
                       `已截断：${valueText(page.truncated)}`
                     ].join("  |  ");
-                    pageBody.textContent = projection.plain
+                    pageBody.textContent = page.text
                       || "（当前页无文字层）";
                   } else {
                     pageMeta.textContent = "";
@@ -1822,9 +1883,6 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   embeds.replaceChildren();
                   for (const item of projection.highlights) {
                     addEmbed("高亮：", item);
-                  }
-                  for (const item of projection.cards) {
-                    addEmbed("卡片：", item);
                   }
                   const unanchored = page?.embeds?.unanchored;
                   if (Array.isArray(unanchored)) {
@@ -1838,7 +1896,10 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   }
                   if (embeds.children.length === 0) {
                     const item = document.createElement("li");
-                    item.textContent = "当前没有高亮或附属内容。";
+                    item.textContent = projection.cards.length > 0
+                      ? `正文中的 ${projection.cards.length} 张定位卡片`
+                        + "已包含完整内容；此处不重复显示。"
+                      : "当前没有高亮或未锚定内容。";
                     embeds.append(item);
                   }
 

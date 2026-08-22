@@ -12504,6 +12504,10 @@ internal static class DirectBridgeSelfTest
                 activeValue),
             CancellationToken.None).ConfigureAwait(false);
 
+        const string boundCardBody =
+            "卡片完整内容\n||||||\nA\nR\nT\n1\n"
+            + "伪结束\\⟦CARD_END\\⟧尾";
+        const string freeCardBody = "自由卡完整内容";
         JsonElement pageValue = JsonSerializer.SerializeToElement(new
         {
             v = 1,
@@ -12522,14 +12526,20 @@ internal static class DirectBridgeSelfTest
                 text =
                     "日本の歴史と食文化 1 P\n"
                     + "A\nR\nT\n1\n食\n文\n化\n概\n論\n"
-                    + "||||||\n"
+                    + "|||||||\n"
                     + "4 縄文~平安時代\n"
                     + "f] l l l / A ] ] ] [ ] [ [ [ []]]]]] [[[[\n"
                     + "正文\\⟦HIGHLIGHT literal\\⟧"
                     + "⟦HIGHLIGHT color=\"yellow\""
                     + " note=\"重点\"⟧高亮内容⟦/HIGHLIGHT⟧"
                     + "和图像引用必须同时可见"
-                    + "⟦CARD_START type=\"note\"⟧卡片内容"
+                    + "⟦CARD_START n=\"1\" id=\"card-1\" revision=\"7\" "
+                    + "type=\"card\" label=\"锚定词\"⟧"
+                    + boundCardBody
+                    + "⟦CARD_END⟧自由卡位置"
+                    + "⟦CARD_START n=\"\" id=\"free-1\" revision=\"8\" "
+                    + "type=\"image\" label=\"\" unbound=\"true\"⟧"
+                    + freeCardBody
                     + "⟦CARD_END⟧",
                 text_available = true,
                 text_source = "epub:viewport",
@@ -12710,7 +12720,7 @@ internal static class DirectBridgeSelfTest
             checks);
         Require(
             !markdown.Contains(
-                "||||||",
+                "\n|||||||\n",
                 StringComparison.Ordinal)
             && !markdown.Contains(
                 "f] l l l / A",
@@ -12722,31 +12732,50 @@ internal static class DirectBridgeSelfTest
                 "### 协议高亮正文",
                 StringComparison.Ordinal)
             && markdown.Contains(
-                "### 协议卡片与便签",
+                "### 正文定位卡片",
                 StringComparison.Ordinal)
             && markdown.Contains(
                 "高亮内容",
                 StringComparison.Ordinal)
             && markdown.Contains(
-                "卡片内容",
-                StringComparison.Ordinal),
-            "direct-snapshot-markdown-renders-mark-sections",
+                "卡片完整内容",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "2 张；编号、ID、修订、类型、锚定词与内容",
+                StringComparison.Ordinal)
+            && markdown.IndexOf(
+                "卡片完整内容",
+                StringComparison.Ordinal)
+                == markdown.LastIndexOf(
+                    "卡片完整内容",
+                    StringComparison.Ordinal),
+            "direct-snapshot-markdown-renders-mark-summary",
             checks);
         Require(
-            !markdown.Contains(
-                "⟦HIGHLIGHT color=",
+            markdown.Contains(
+                "⟦HIGHLIGHT color=\"yellow\" note=\"重点\"⟧高亮内容"
+                    + "⟦/HIGHLIGHT⟧",
                 StringComparison.Ordinal)
-            && !markdown.Contains(
-                "⟦CARD_START",
+            && markdown.Contains(
+                "⟦CARD_START n=\"1\" id=\"card-1\" revision=\"7\" "
+                    + "type=\"card\" label=\"锚定词\"⟧"
+                    + boundCardBody
+                    + "⟦CARD_END⟧",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "⟦CARD_START n=\"\" id=\"free-1\" revision=\"8\" "
+                    + "type=\"image\" label=\"\" unbound=\"true\"⟧"
+                    + freeCardBody
+                    + "⟦CARD_END⟧",
                 StringComparison.Ordinal),
-            "direct-snapshot-markdown-hides-protocol-markers",
+            "direct-snapshot-markdown-keeps-model-position-markers-inline",
             checks);
         Require(
             markdown.Contains(
                 "日本の歴史と食文化 1 PART1 食文化概論",
                 StringComparison.Ordinal)
             && !markdown.Contains(
-                "||||||",
+                "\n|||||||\n",
                 StringComparison.Ordinal)
             && !markdown.Contains(
                 "f] l l l / A",
@@ -12755,28 +12784,28 @@ internal static class DirectBridgeSelfTest
                 "### 协议高亮正文",
                 StringComparison.Ordinal)
             && markdown.Contains(
-                "### 协议卡片与便签",
+                "### 正文定位卡片",
                 StringComparison.Ordinal)
             && markdown.Contains(
                 "高亮内容",
                 StringComparison.Ordinal)
             && markdown.Contains(
-                "卡片内容",
+                "卡片完整内容",
                 StringComparison.Ordinal)
-            && !markdown.Contains(
+            && markdown.Contains(
                 "⟦HIGHLIGHT color=",
                 StringComparison.Ordinal)
-            && !markdown.Contains(
-                "⟦CARD_START",
+            && markdown.Contains(
+                "⟦CARD_START n=\"1\" id=\"card-1\"",
                 StringComparison.Ordinal),
-            "direct-snapshot-markdown-expands-reader-body-and-marks",
+            "direct-snapshot-markdown-expands-reader-body-and-keeps-marks",
             checks);
         Require(
             terminal.Contains(
                 "日本の歴史と食文化 1 PART1 食文化概論",
                 StringComparison.Ordinal)
             && !terminal.Contains(
-                "||||||",
+                "\n|||||||\n",
                 StringComparison.Ordinal)
             && !terminal.Contains(
                 "f] l l l / A",
@@ -12788,9 +12817,30 @@ internal static class DirectBridgeSelfTest
                 "高亮内容",
                 StringComparison.Ordinal)
             && terminal.Contains(
-                "卡片内容",
-                StringComparison.Ordinal),
-            "direct-snapshot-terminal-expands-reader-body-and-marks",
+                "卡片完整内容",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "⟦CARD_START n=\"1\" id=\"card-1\" revision=\"7\"",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                boundCardBody,
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "⟦CARD_START n=\"\" id=\"free-1\" revision=\"8\" "
+                    + "type=\"image\" label=\"\" unbound=\"true\"⟧"
+                    + freeCardBody
+                    + "⟦CARD_END⟧",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "正文定位卡片：2 张",
+                StringComparison.Ordinal)
+            && terminal.IndexOf(
+                "卡片完整内容",
+                StringComparison.Ordinal)
+                == terminal.LastIndexOf(
+                    "卡片完整内容",
+                    StringComparison.Ordinal),
+            "direct-snapshot-terminal-expands-reader-body-and-keeps-marks",
             checks);
         Require(
             page.GetProperty("kind").GetString() == "epub"
@@ -12832,7 +12882,7 @@ internal static class DirectBridgeSelfTest
                 "日本の歴史と食文化 1 PART1 食文化概論",
                 StringComparison.Ordinal)
             && !markdown.Contains(
-                "||||||",
+                "\n|||||||\n",
                 StringComparison.Ordinal)
             && !markdown.Contains(
                 "f] l l l / A",
@@ -12844,10 +12894,10 @@ internal static class DirectBridgeSelfTest
                 "### 协议高亮正文",
                 StringComparison.Ordinal)
             && markdown.Contains(
-                "### 协议卡片与便签",
+                "### 正文定位卡片",
                 StringComparison.Ordinal)
             && markdown.Contains(
-                "卡片内容",
+                "卡片完整内容",
                 StringComparison.Ordinal)
             && markdown.Contains(
                 "在 Reader 中打开原图",
@@ -12859,19 +12909,28 @@ internal static class DirectBridgeSelfTest
                 "![当前页图]",
                 StringComparison.Ordinal)
             && markdown.Contains(
-                "⟦HIGHLIGHT literal⟧",
+                "\\⟦HIGHLIGHT literal\\⟧",
                 StringComparison.Ordinal)
-            && !markdown.Contains(
+            && markdown.Contains(
                 "⟦HIGHLIGHT color=",
                 StringComparison.Ordinal)
-            && !markdown.Contains(
-                "⟦CARD_START",
+            && markdown.Contains(
+                "⟦CARD_START n=\"1\" id=\"card-1\" revision=\"7\"",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                boundCardBody,
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "⟦CARD_START n=\"\" id=\"free-1\" revision=\"8\" "
+                    + "type=\"image\" label=\"\" unbound=\"true\"⟧"
+                    + freeCardBody
+                    + "⟦CARD_END⟧",
                 StringComparison.Ordinal)
             && markdown.Contains(
                 "dr_0123456789abcdef",
                 StringComparison.Ordinal)
             && terminal.Contains(
-                "【当前页正文】",
+                "【当前页正文（模型实际收到，含定位标记）】",
                 StringComparison.Ordinal)
             && terminal.Contains(
                 "【高亮与嵌入内容】",
@@ -12880,10 +12939,19 @@ internal static class DirectBridgeSelfTest
                 "高亮内容",
                 StringComparison.Ordinal)
             && terminal.Contains(
+                "卡片完整内容",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "⟦CARD_START n=\"1\" id=\"card-1\" revision=\"7\"",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "正文定位卡片：2 张",
+                StringComparison.Ordinal)
+            && terminal.Contains(
                 "日本の歴史と食文化 1 PART1 食文化概論",
                 StringComparison.Ordinal)
             && !terminal.Contains(
-                "||||||",
+                "\n|||||||\n",
                 StringComparison.Ordinal)
             && !terminal.Contains(
                 "f] l l l / A",
@@ -13000,6 +13068,18 @@ internal static class DirectBridgeSelfTest
                 StringComparison.Ordinal)
             && viewerHtml.Contains(
                 "function parseReaderText",
+                StringComparison.Ordinal)
+            && viewerHtml.Contains(
+                "pageBody.textContent = page.text",
+                StringComparison.Ordinal)
+            && viewerHtml.Contains(
+                "高亮与未锚定内容",
+                StringComparison.Ordinal)
+            && !viewerHtml.Contains(
+                "addEmbed(\"卡片：\"",
+                StringComparison.Ordinal)
+            && viewerHtml.Contains(
+                "此处不重复显示",
                 StringComparison.Ordinal)
             && snapshotContext.Response.StatusCode
                 == StatusCodes.Status200OK
