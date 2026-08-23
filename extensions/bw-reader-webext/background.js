@@ -6760,8 +6760,20 @@ async function readerPostSnapshot(prepared) {
   const bodySignature = `${page.url}|${page.title}|${page.viewKey}|${await sha256Hex(page.text)}|${visual.drawing?.drawingRevision || ""}`;
   const documentSignature = `${documentPayload.sourceInstanceId}|${documentPayload.documentKey}|${documentPayload.contentRevision}|${page.document.activationRevision}`;
   const bodyIsRepeat = prior.bodySignature === bodySignature;
+  // ⚠ viewport 载荷里**不能**带 selectionContext：桥侧 ValidateViewport 的允许集
+  //   是「11 个必填 + 唯一可选 controlCorrelation」，多一个字段整条快照 400
+  //   （DirectContextSnapshot.cs::ValidateViewport）。而 content.js 只要在网页上
+  //   选中一段文字、且所在块原文 ≠ 选区，selectionContext 就非空 —— 于是每次
+  //   带选区的上报都被拒，content.js 的 .catch 又按 THROTTLE_MS 重发同样的 body，
+  //   变成 1.5 秒一次的无限重试。
+  //
+  //   ⚠ 但**不能直接不算它**：下面 active 那份正是从 viewport.selectionContext
+  //   读出来的，而 active 侧的允许集是放行的（d0cb6109 只给 ValidateActiveReading
+  //   加了 selectionContext/selectionContextSource，漏了 ValidateViewport）。
+  //   所以这里只把它从**发出去的 viewport** 上剥掉，本地那份留着给 active 用。
+  const { selectionContext: _viewportSelectionContext, ...viewportPayload } = viewport;
   const body = {
-    viewport,
+    viewport: viewportPayload,
     active: {
       kind: "web", file: page.url, title: page.title, page: 0,
       selectionState: viewport.selectionState, selection: viewport.selection,

@@ -16,7 +16,9 @@
     "card-top-fields": {
       "what": "卡片顶层字段（kind/title/data + 可选 bind/brief/cid/sources）",
       "canonical": "_server_deploy/reader_card_contract.py",
-      "tests": ["tests/reader_contract/card-bind-whitelist-parity.contract.test.mjs"],
+      "tests": [
+        "tests/reader_contract/card-bind-whitelist-parity.contract.test.mjs"
+      ],
       "sites": [
         {
           "file": "_server_deploy/reader_card_contract.py",
@@ -122,6 +124,35 @@
           "role": "Safari 扩展",
           "note": "生成 vendor/ 自带副本，需重新打包"
         }
+      ]
+    },
+    "web-snapshot-post-body": {
+      "what": "网页快照 POST 的四个载荷（viewport / active / document / event）各自的字段允许集",
+      "canonical": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectContextSnapshot.cs",
+      "tests": [
+        "tests/reader_contract/web-viewport-payload.behavior.test.mjs"
+      ],
+      "sites": [
+        {
+          "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectContextSnapshot.cs",
+          "role": "权威闸（拒就是整条 400）",
+          "note": "ValidateViewport / ValidateActiveReading / ValidateDocument 各有一份 requiredFields，允许集 = 必填 ∪ 少数可选；**多一个字段就 throw**"
+        },
+        {
+          "file": "extensions/bw-reader-webext/background.js",
+          "role": "生产端（组装 POST body）",
+          "note": "readerPrepareSnapshot 造各载荷、readerPostSnapshot 拼 body；给某个载荷加字段前必须先看对应的 Validate* 放不放行"
+        },
+        {
+          "file": "extensions/bw-reader-webext/content.js",
+          "role": "采集端 + 失败重试",
+          "note": "字段的源头；⚠ 上报失败会 schedule(true) 按 THROTTLE_MS(1.5s) 重发**同样的 body**，所以一个字段级的拒绝会变成无限重试，不是一次性失败"
+        }
+      ],
+      "gotchas": [
+        "2026-08-15 的 d0cb6109 给模型加「选区所在句」时，JS 侧把 selectionContext 同时挂到了 viewport 和 active 上，而 C# 侧**只给 ValidateActiveReading 放行、漏了 ValidateViewport**。后果不是报错提示：用户在网页上一选中文字 → 整条快照 400 → 每 1.5s 重试一次，表现是「快照响应慢」。2026-08-23 修法是在 readerPostSnapshot 里把它从**发出去的 viewport** 上剥掉（active 那份仍从本地 viewport.selectionContext 读，不能一起删）。",
+        "⚠ 这四个载荷的允许集**互不相同**：某字段在 active 上合法不代表在 viewport 上合法。加字段时要逐个载荷确认，别按「同一份快照」想当然。",
+        "重试放大效应让这类错误的代价远高于一次性失败 —— 排查「慢」的时候优先怀疑它。"
       ]
     }
   }

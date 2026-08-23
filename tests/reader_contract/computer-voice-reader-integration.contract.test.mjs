@@ -1019,7 +1019,12 @@ test("普通网页上下文经后台一次 POST，通话页只认领同标签视
   const postBody = background.slice(postStart, postEnd);
   assert.match(
     postBody,
-    /const body = \{[\s\S]*viewport,[\s\S]*active:[\s\S]*if \(prior\.documentSignature !== documentSignature\) body\.document = documentPayload/,
+    // ⚠ 这里原本断言的是 `viewport,`（整个对象原样进 body）。那不是契约，
+    //   是当时代码的拓印 —— 而那个写法本身就是 bug：viewport 上挂着
+    //   selectionContext，桥侧 ValidateViewport 的允许集不认，一带选区就整条
+    //   400 + 每 1.5s 无限重试。现在必须先剥再发。
+    //   细节与规则实跑见 tests/reader_contract/web-viewport-payload.behavior.test.mjs。
+    /const body = \{[\s\S]*viewport: viewportPayload,[\s\S]*active:[\s\S]*if \(prior\.documentSignature !== documentSignature\) body\.document = documentPayload/,
   );
   assert.match(
     postBody,
