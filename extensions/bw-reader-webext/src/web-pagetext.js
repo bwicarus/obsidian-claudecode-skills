@@ -109,6 +109,11 @@
     return out;
   }
 
+  // 覆盖率只算**非空白**字符：块与块之间的 HTML 缩进换行本来就不属于任何块，
+  // 把它算成"AI 看不见的内容"会让这个信号一直停在 0.89 左右，从而失去意义 ——
+  // 一个永远不到 1 的指标，真出问题时也没人会注意到。
+  function nonWs(s) { return String(s || '').replace(/\s/g, '').length; }
+
   function read() {
     var idx = TL.build();
     if (!idx.text.length) {
@@ -142,7 +147,7 @@
       var raw = idx.text.slice(span.from, span.to).replace(/\s+/g, ' ').trim();
       if (!raw) continue;
       n += 1;
-      covered += span.to - span.from;
+      covered += nonWs(raw);
       var no = (n < 10 ? '0' : '') + n;
       var region = regionOf(el, root);
       lines.push('[' + no + '] ' + region + ' ' + prefixOf(el) + raw.slice(0, 200));
@@ -187,9 +192,11 @@
       // ⚠ 没盖住的部分是"确实存在但 AI 看不见"的文字 —— 不报出来的话，
       //   AI 会把「我看到的这些」当成「页面就这些」。真机实测就抓到过：
       //   <nav> 的文字在层里却不属于任何块，静默消失。
-      coverage: idx.text.length
-        ? Math.round((degraded ? idx.text.length : covered) / idx.text.length * 100) / 100
-        : 0,
+      coverage: (function () {
+        var total = nonWs(idx.text);
+        if (!total) return 0;
+        return Math.round((degraded ? total : covered) / total * 100) / 100;
+      })(),
       // 这份字符层的身份。AI 把它原样放进 bind.rev，页面变了就能察觉。
       rev: idx.rev,
       page: 1
