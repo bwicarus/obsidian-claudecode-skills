@@ -642,20 +642,61 @@ internal sealed class ReaderQueryBroker
         _router = router;
     }
 
+    /// 读操作也给一小段注册等待。
+    ///
+    /// ⚠ 在这之前读**比写更脆**：写有 2.5 秒注册窗口
+    /// （ReaderRealtimeOutputBroker.SourceRegistrationWait）、取图也有，
+    /// 唯独读是 TryGetLease 拿不到就立刻抛。于是 reader_page_text /
+    /// reader_search / reader_toc 这些在网络抖一下的瞬间**必然失败**，
+    /// 而它们恰恰是最常被调的。
+    ///
+    /// 读重试本来就是安全的（没有副作用），所以这里等一下纯赚。
+    /// 上限跟写侧保持一致 —— 用户是站着等的，再长不如直接说失败。
+    internal static readonly TimeSpan SourceRegistrationWait =
+        TimeSpan.FromMilliseconds(2_500);
+
+    private static readonly TimeSpan SourceRegistrationPoll =
+        TimeSpan.FromMilliseconds(50);
+
+    private async Task<ReaderContextSourceLease?> WaitForSourceAsync(
+        string sourceInstanceId,
+        CancellationToken cancellationToken)
+    {
+        DateTimeOffset deadline = DateTimeOffset.UtcNow + SourceRegistrationWait;
+        while (true)
+        {
+            if (
+                _router.TryGetLease(
+                    sourceInstanceId,
+                    out ReaderContextSourceLease? lease)
+                && lease is not null
+            )
+            {
+                return lease;
+            }
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                return null;
+            }
+            await Task.Delay(
+                SourceRegistrationPoll,
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     internal async Task<ReaderQueryResponse> RequestAsync(
         ReaderQueryRequest request,
         CancellationToken cancellationToken)
     {
-        if (
-            !_router.TryGetLease(
-                request.SourceInstanceId,
-                out ReaderContextSourceLease? lease)
-            || lease is null
-        )
+        ReaderContextSourceLease? lease = await WaitForSourceAsync(
+            request.SourceInstanceId,
+            cancellationToken).ConfigureAwait(false);
+        if (lease is null)
         {
             throw Failure(
                 "BW_READER_QUERY_SOURCE_OFFLINE",
-                "快照指定的 Reader 页面来源当前不在线（"
+                "快照指定的 Reader 页面来源当前不在线（已等待 "
+                    + $"{SourceRegistrationWait.TotalSeconds:0.#} 秒仍未注册；"
                     + _router.DescribeRegisteredSources() + "）",
                 retryable: true);
         }

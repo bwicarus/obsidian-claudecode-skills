@@ -306,20 +306,56 @@ internal sealed class ReaderBrowserControlBroker
         _router = router;
     }
 
+    /// 跟读/写两侧一致的注册等待。
+    ///
+    /// ⚠ 这里原来也是零等待。跟读那边同一个问题：网络抖一下的瞬间
+    /// 来源还没重新注册，一个用户明确要求的导航就直接失败了。
+    /// 等 2.5 秒再执行，比让用户重说一遍好。
+    internal static readonly TimeSpan SourceRegistrationWait =
+        TimeSpan.FromMilliseconds(2_500);
+
+    private static readonly TimeSpan SourceRegistrationPoll =
+        TimeSpan.FromMilliseconds(50);
+
+    private async Task<ReaderContextSourceLease?> WaitForSourceAsync(
+        string sourceInstanceId,
+        CancellationToken cancellationToken)
+    {
+        DateTimeOffset deadline = DateTimeOffset.UtcNow + SourceRegistrationWait;
+        while (true)
+        {
+            if (
+                _router.TryGetLease(
+                    sourceInstanceId,
+                    out ReaderContextSourceLease? lease)
+                && lease is not null
+            )
+            {
+                return lease;
+            }
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                return null;
+            }
+            await Task.Delay(
+                SourceRegistrationPoll,
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     internal async Task<ReaderBrowserControlResponse> RequestAsync(
         ReaderBrowserControlRequest request,
         CancellationToken cancellationToken)
     {
-        if (
-            !_router.TryGetLease(
-                request.SourceInstanceId,
-                out ReaderContextSourceLease? lease)
-            || lease is null
-        )
+        ReaderContextSourceLease? lease = await WaitForSourceAsync(
+            request.SourceInstanceId,
+            cancellationToken).ConfigureAwait(false);
+        if (lease is null)
         {
             throw Failure(
                 "BW_READER_BROWSER_CONTROL_SOURCE_OFFLINE",
-                "快照指定的 Reader 页面来源当前不在线",
+                "快照指定的 Reader 页面来源当前不在线（已等待 "
+                    + $"{SourceRegistrationWait.TotalSeconds:0.#} 秒仍未注册）",
                 retryable: true);
         }
         PendingControl pending = new(
