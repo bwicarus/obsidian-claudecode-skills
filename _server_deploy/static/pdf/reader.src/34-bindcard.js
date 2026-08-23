@@ -60,45 +60,90 @@
     return v;
   }
 
+  /// 把 bind 解成一段字符框。四条路，返回的 `how` 就是定位质量：
+  ///   exact / by-block / by-text / by-text-block-missed
+  ///
+  /// ⚠ from/to 现在是**可选**的（2026-08-23：助手可以只说「第 3 块 + 这句话」，
+  ///   换算由这里做）。所以不能再用 `want.from | 0` —— 那会把"没给"变成 0，
+  ///   于是消歧时偏向页首那一处，而且看不出它是猜的。
   function _resolveRange(boxes, want) {
-    var from = want.from | 0, to = Math.max(want.from | 0, want.to | 0);
+    var hasRange = Number.isFinite(want.from) && Number.isFinite(want.to);
+    var from = hasRange ? (want.from | 0) : -1;
+    var to = hasRange ? Math.max(want.from | 0, want.to | 0) : -1;
     var text = _stripWs(want.text);
+    var wantBlock = Number.isFinite(want.block) && want.block >= 1
+      ? (want.block | 0) : 0;
     var ord = _byOi(boxes);
 
-    // 序号是 _oi 语义：先按 _oi 取出这一段，比对文字
-    var got = '', hit = [];
-    for (var k = 0; k < ord.length; k++) {
-      var oi = ord[k]._oi | 0;
-      if (oi < from || oi > to) continue;
-      hit.push(ord[k]);
-      if (!ord[k].sp && ord[k].c) got += ord[k].c;
-    }
-    if (hit.length) {
-      if (!text) return { lo: from, hi: to, boxes: hit };
-      if (_stripWs(got) === text) return { lo: from, hi: to, boxes: hit };   // 序号仍然作数
+    // ① 序号是 _oi 语义：先按 _oi 取出这一段，比对文字
+    if (hasRange) {
+      var got = '', hit = [];
+      for (var k = 0; k < ord.length; k++) {
+        var oi = ord[k]._oi | 0;
+        if (oi < from || oi > to) continue;
+        hit.push(ord[k]);
+        if (!ord[k].sp && ord[k].c) got += ord[k].c;
+      }
+      if (hit.length) {
+        if (!text) return { lo: from, hi: to, boxes: hit, how: 'exact' };
+        if (_stripWs(got) === text) {
+          return { lo: from, hi: to, boxes: hit, how: 'exact' };   // 序号仍然作数
+        }
+      }
     }
 
-    // 序号对不上了（换过文字层 / 越界 / 那段字变了）→ 按文本重新找，
-    // 用原序号挑最近的一处 —— 这就是"同一个词重复出现"时的消歧依据。
+    // 序号对不上了（换过文字层 / 越界 / 那段字变了），或者压根没给序号
+    // → 按文本重新找。有块号就先只在那一块里找。
     if (!text) return null;
-    var joined = '', index = [];   // joined 每个字符 → ord 里的位置
-    for (var i = 0; i < ord.length; i++) {
-      var c = ord[i] && ord[i].c;
-      if (!c || ord[i].sp) continue;
-      joined += c;
-      index.push(i);
+
+    // 块号 → 从 1 起的连号，与 pageTextSegments 印给助手的 [NN] 同一套推导。
+    // ⚠ 两处必须用同一个推导，否则助手说的第 3 块跟这里算的不是同一块，
+    //   而两边各自都自洽 —— 最难查的那类错。
+    var blockNo = Object.create(null), blockSeq = 0;
+    function numberOf(bk) {
+      var key = String(bk);
+      if (!blockNo[key]) { blockSeq += 1; blockNo[key] = blockSeq; }
+      return blockNo[key];
     }
-    var best = -1, bestDist = Infinity, at = joined.indexOf(text);
-    while (at >= 0) {
-      var dist = Math.abs((ord[index[at]]._oi | 0) - from);
-      if (dist < bestDist) { bestDist = dist; best = at; }
-      at = joined.indexOf(text, at + 1);
+
+    function search(onlyBlock) {
+      var joined = '', index = [];   // joined 每个字符 → ord 里的位置
+      for (var i = 0; i < ord.length; i++) {
+        var c = ord[i] && ord[i].c;
+        if (!c || ord[i].sp) continue;
+        if (onlyBlock && numberOf(ord[i].bk) !== onlyBlock) continue;
+        joined += c;
+        index.push(i);
+      }
+      var best = -1, bestDist = Infinity, at = joined.indexOf(text);
+      while (at >= 0) {
+        // 没给序号时不做距离偏好 —— 否则等于假装知道它在哪。
+        var dist = hasRange ? Math.abs((ord[index[at]]._oi | 0) - from) : 0;
+        if (dist < bestDist) { bestDist = dist; best = at; }
+        at = joined.indexOf(text, at + 1);
+      }
+      if (best < 0) return null;
+      var a = index[best];
+      var b = index[Math.min(best + text.length - 1, index.length - 1)];
+      return {
+        lo: ord[a]._oi | 0, hi: ord[b]._oi | 0,
+        boxes: ord.slice(a, b + 1)
+      };
     }
-    if (best < 0) return null;
-    var a = index[best];
-    var b = index[Math.min(best + text.length - 1, index.length - 1)];
-    var picked = ord.slice(a, b + 1);
-    return { lo: ord[a]._oi | 0, hi: ord[b]._oi | 0, boxes: picked };
+
+    if (wantBlock) {
+      // 先把连号建满，保证 numberOf 的编号与整页一致（只扫指定块会算错号）
+      for (var n = 0; n < ord.length; n++) {
+        if (ord[n] && ord[n].c && !ord[n].sp) numberOf(ord[n].bk);
+      }
+      var inBlock = search(wantBlock);
+      if (inBlock) { inBlock.how = 'by-block'; return inBlock; }
+    }
+    var anywhere = search(0);
+    if (!anywhere) return null;
+    // ⚠ 如实说出走的哪条。带了块号却退回全页 = 块对不上了，必须看得见。
+    anywhere.how = wantBlock ? 'by-text-block-missed' : 'by-text';
+    return anywhere;
   }
 
   /// 按行切成多个矩形。整体包围盒不够用 —— 被锚的词跨行时，一个大框会把
@@ -567,9 +612,14 @@
     if (!pw || pw.dataset.loaded !== '1') return { ok: false, why: 'page-not-rendered', page: page };
     var boxes = pw.__charBoxes;
     if (!boxes || !boxes.length) return { ok: false, why: 'no-char-layer', page: page };
+    // ⚠ from/to 可选：**不能**用 `parseInt(...) || 0` 兜底 —— 那会把"没给"
+    //   变成 0，_resolveRange 就无从分辨"钉在开头"和"没说"。
+    var _bFrom = parseInt(bind.from, 10);
+    var _bTo = parseInt(bind.to, 10);
     var range = _resolveRange(boxes, {
-      from: parseInt(bind.from, 10) || 0,
-      to: parseInt(bind.to, 10) || 0,
+      from: Number.isFinite(_bFrom) ? _bFrom : undefined,
+      to: Number.isFinite(_bTo) ? _bTo : undefined,
+      block: parseInt(bind.block, 10) || 0,
       text: bind.text || ''
     });
     if (!range) {

@@ -3756,16 +3756,35 @@
   //
   //   ⚠ 空白（sp）不单独成段，但它**占序号** —— 序号必须与 chars 数组的真实下标
   //     一致，否则卡片会绑到偏掉的位置上。
+  // ⚠ 每条 segment 带 `block`：正文里印的 [NN] 与它一一对应。
+  //   块归属**本来就在数据里**（chars 的 `bk`，PyMuPDF rawdict 的块序号，
+  //   服务端提取时就算好了）—— 此前只是没往上带。这是同一个模式第三次出现：
+  //   生成端算出来，在给助手的边界上丢掉。
+  //   bk 本身可能不连续（跳号、分栏后重编），所以转成从 1 起的连号再印，
+  //   否则助手看到的 [NN] 跟内部 bk 对不上。
   function pageTextSegments(chars) {
     var segments = [];
     var currentWord = null;
     var start = 0;
     var buffer = [];
     var last = 0;
+    var blockNo = Object.create(null);   // bk → 从 1 起的连号
+    var blockSeq = 0;
+    var curBk = null;
+    function numberFor(bk) {
+      var key = String(bk);
+      if (!blockNo[key]) { blockSeq += 1; blockNo[key] = blockSeq; }
+      return blockNo[key];
+    }
     function flush(end) {
       if (!buffer.length) return;
       var text = buffer.join('').trim();
-      if (text) segments.push({ from: start, to: end, text: text.slice(0, 120) });
+      if (text) {
+        segments.push({
+          from: start, to: end, text: text.slice(0, 120),
+          block: curBk === null ? 0 : numberFor(curBk)
+        });
+      }
     }
     for (var index = 0; index < (chars || []).length; index += 1) {
       var item = chars[index];
@@ -3773,9 +3792,13 @@
       var value = String(item.c == null ? '' : item.c);
       if (!value.trim()) continue;
       var word = Number.isInteger(Number(item.w)) ? Number(item.w) : -1;
-      if (currentWord === null || word !== currentWord || word === -1) {
+      var bk = item.bk === undefined || item.bk === null ? null : item.bk;
+      // 换块也要断段：一个词组不可能跨两个版面块。
+      if (currentWord === null || word !== currentWord || word === -1 ||
+          String(bk) !== String(curBk)) {
         flush(last);
         currentWord = word;
+        curBk = bk;
         start = index;
         buffer = [];
       }

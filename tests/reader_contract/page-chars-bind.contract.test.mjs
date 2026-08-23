@@ -48,7 +48,20 @@ test("定位靠直接验证文本，不靠 revision 号推断", () => {
   // 比对前两边都去空白：字符层的 sp 条目不进 joined，而调用方送来的锚文本
   // 常常带分隔（segments 拼接、排版空隙）。2026-08-19 就是一个空格让整条锚定
   // 失效，而链路上没有任何一处说得出为什么。
-  assert.match(BINDCARD, /if \(_stripWs\(got\) === text\) return \{ lo: from, hi: to, boxes: hit \};/);
+  // 2026-08-23：from/to 变可选后这段包进了 if (hasRange)，且带上 how。
+  // **不变量不变**：序号取出来的那段文字要跟 text 对得上，序号才作数。
+  assert.match(
+    BINDCARD, /if \(_stripWs\(got\) === text\)/,
+    '序号仍要靠文字复核 —— 对不上就不能拿它当精确锚',
+  );
+  assert.match(
+    BINDCARD, /how: 'exact'/,
+    '走精确路径要如实标出来，好跟按文本找区分开',
+  );
+  assert.match(
+    BINDCARD, /how = wantBlock \? 'by-text-block-missed' : 'by-text'/,
+    '带了块号却退回全页必须看得见 —— 静默降级是最难查的形态',
+  );
   assert.match(BINDCARD, /function _stripWs/);
   assert.doesNotMatch(BINDCARD, /dataset\.charsRev/);
 });
