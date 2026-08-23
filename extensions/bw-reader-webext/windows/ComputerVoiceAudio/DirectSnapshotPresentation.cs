@@ -1684,6 +1684,32 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 section.wide { grid-column: 1 / -1; }
                 h2 { margin: 0 0 .75rem; color: #bad6ff;
                   font-size: 1rem; }
+                .view { font-size: .92rem; line-height: 1.55; }
+                .view h3 { margin: .9rem 0 .35rem; font-size: .86rem;
+                  letter-spacing: .04em; opacity: .75; font-weight: 600; }
+                .view h3:first-child { margin-top: 0; }
+                .view p { margin: .3rem 0; white-space: pre-wrap;
+                  overflow-wrap: anywhere; }
+                .view table { border-collapse: collapse; width: 100%;
+                  margin: .4rem 0; font-size: .86rem; }
+                .view td { border: 1px solid rgba(128,128,128,.32);
+                  padding: .25rem .4rem; vertical-align: top;
+                  white-space: pre-wrap; overflow-wrap: anywhere; }
+                .view td:empty { background: rgba(128,128,128,.06); }
+                .blk { display: inline-block; min-width: 1.6em;
+                  margin-right: .3em; padding: 0 .28em; border-radius: .28em;
+                  font-size: .78em; font-weight: 700;
+                  background: rgba(120,110,190,.22); }
+                .cardblk { margin: .35rem 0; padding: .3rem .45rem;
+                  border-left: 3px solid rgba(150,130,240,.75);
+                  background: rgba(150,130,240,.09); border-radius: .2rem; }
+                .cardblk .hd { font-size: .78rem; opacity: .78;
+                  margin-bottom: .15rem; }
+                .foldnote { margin: .35rem 0; padding: .25rem .45rem;
+                  font-size: .8rem; opacity: .62; font-style: italic;
+                  border: 1px dashed rgba(128,128,128,.4); border-radius: .2rem; }
+                .vpmark { margin: .5rem 0; font-size: .76rem; opacity: .6;
+                  letter-spacing: .06em; }
                 .rawline { display: block; margin: .25rem 0 .4rem;
                   font-size: .82rem; opacity: .72; cursor: pointer; }
                 .rawline input { vertical-align: -1px; margin-right: .3rem; }
@@ -1742,7 +1768,8 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   <pre id="pageMeta" class="muted"></pre>
                   <label class="rawline"><input type="checkbox" id="rawToggle">
                     显示原始文本（含标记与机读区块）</label>
-                  <pre id="pageBody" class="body">尚未收到稳定页正文。</pre>
+                  <div id="pageView" class="view">尚未收到稳定页正文。</div>
+                  <pre id="pageBody" class="body" hidden>尚未收到稳定页正文。</pre>
                 </section>
                 <section>
                   <h2>高亮与未锚定内容</h2>
@@ -1921,20 +1948,222 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 }
 
                 let lastPageText = "";
+                const pageView = document.getElementById("pageView");
                 const rawToggle = document.getElementById("rawToggle");
+
+                // 渲染视图与原文视图二选一显示。渲染失败一律退回原文 ——
+                // 面板宁可难看，不能空。
+                function showPageText(text, raw) {
+                  lastPageText = text || "";
+                  if (raw) {
+                    pageBody.textContent = lastPageText || "（当前页无文字层）";
+                    pageBody.hidden = false;
+                    pageView.hidden = true;
+                    return;
+                  }
+                  try {
+                    paintBlocks(pageView, parseReaderText(lastPageText).plain);
+                    pageView.hidden = false;
+                    pageBody.hidden = true;
+                  } catch {
+                    pageBody.textContent = lastPageText || "（当前页无文字层）";
+                    pageBody.hidden = false;
+                    pageView.hidden = true;
+                  }
+                }
                 if (rawToggle) {
                   rawToggle.addEventListener("change", () => {
                     // 就地切换，不等下一次快照 —— 调试时要能立刻对照
-                    if (!lastPageText) return;
-                    try {
-                      pageBody.textContent = rawToggle.checked
-                        ? lastPageText
-                        : parseReaderText(lastPageText).plain;
-                    } catch {
-                      // 解析不了就退回原文：宁可显示得难看，也别让面板空掉
-                      pageBody.textContent = lastPageText;
-                    }
+                    showPageText(lastPageText, rawToggle.checked);
                   });
+                }
+
+                // ── Markdown 视图 ──────────────────────────────────
+                // 只渲染这份快照真实会出现的形态，不做通用 Markdown：
+                //   【…】小节 / 管道表格 / [NN] 块号 / ⟦CARD_START…⟧ 卡片块 /
+                //   ⟦VIEWPORT⟧ 视口界 / 折叠说明 / 其余按段落。
+                //
+                // ⚠ 铁律 A：**先按未转义的分隔切结构，叶子文本最后才反转义**。
+                //   版式路径把字面竖线写成 \| ；先反转义再按 | 切列会多切一列。
+                // ⚠ 铁律 B：**表格必须由分隔行确认**，不能只看行首是 | 。
+                //   非版式路径不转义 | ，正文里天然可能出现行首竖线。
+                //   任一条件不满足就整段退回纯文本 —— 宁可不渲，别猜。
+                // ⚠ 全程 createElement + textContent，**零 innerHTML**：
+                //   page.text 里混着从网页抓来的不可信正文，而这个页面同源挂着
+                //   桥的控制端点。这是整份 ViewerDocument 的既有属性，别丢掉。
+                const MARK_L = '\u27E6';
+                const MARK_R = '\u27E7';
+
+                function splitUnescaped(line, sep) {
+                  const out = [];
+                  let cur = '';
+                  for (let i = 0; i < line.length; i++) {
+                    const ch = line.charAt(i);
+                    if (ch === '\\' && i + 1 < line.length) {
+                      cur += ch + line.charAt(i + 1);
+                      i += 1;
+                      continue;
+                    }
+                    if (ch === sep) { out.push(cur); cur = ''; continue; }
+                    cur += ch;
+                  }
+                  out.push(cur);
+                  return out;
+                }
+
+                function unescapeLeaf(value) {
+                  let out = '';
+                  for (let i = 0; i < value.length; i++) {
+                    const ch = value.charAt(i);
+                    if (ch === '\\' && i + 1 < value.length) {
+                      const next = value.charAt(i + 1);
+                      out += (next === '\\' || next === '|'
+                        || next === MARK_L || next === MARK_R) ? next : ch + next;
+                      i += 1;
+                      continue;
+                    }
+                    out += ch;
+                  }
+                  return out;
+                }
+
+                // 叶子里的 ⟦…⟧：切成 {text} 与 {card:{head, body}} 两种段。
+                function leafSegments(leaf) {
+                  const segs = [];
+                  let cursor = 0;
+                  let guard = 0;
+                  while (cursor < leaf.length && guard++ < 5000) {
+                    const open = leaf.indexOf(MARK_L + 'CARD_START', cursor);
+                    if (open < 0) break;
+                    const headEnd = leaf.indexOf(MARK_R, open);
+                    const close = headEnd < 0
+                      ? -1 : leaf.indexOf(MARK_L + 'CARD_END' + MARK_R, headEnd);
+                    if (headEnd < 0 || close < 0) break;
+                    if (open > cursor) segs.push({ text: leaf.slice(cursor, open) });
+                    segs.push({
+                      card: {
+                        head: leaf.slice(open + MARK_L.length + 'CARD_START'.length, headEnd).trim(),
+                        body: leaf.slice(headEnd + MARK_R.length, close)
+                      }
+                    });
+                    cursor = close + (MARK_L + 'CARD_END' + MARK_R).length;
+                  }
+                  if (cursor < leaf.length) segs.push({ text: leaf.slice(cursor) });
+                  return segs;
+                }
+
+                // [NN] 前缀 → 单独的块号徽标（它是 AI 和人共用的那个编号）
+                function paintLeaf(target, leaf) {
+                  for (const seg of leafSegments(leaf)) {
+                    if (seg.card) {
+                      const box = document.createElement('div');
+                      box.className = 'cardblk';
+                      const hd = document.createElement('div');
+                      hd.className = 'hd';
+                      hd.textContent = '🎴 ' + (seg.card.head || '卡片');
+                      box.appendChild(hd);
+                      const bd = document.createElement('div');
+                      bd.textContent = unescapeLeaf(seg.card.body).trim();
+                      box.appendChild(bd);
+                      target.appendChild(box);
+                      continue;
+                    }
+                    let text = unescapeLeaf(seg.text);
+                    const badge = /^\s*\[(\d{1,3})\]\s*/.exec(text);
+                    if (badge) {
+                      const chip = document.createElement('span');
+                      chip.className = 'blk';
+                      chip.textContent = badge[1];
+                      chip.title = '本页第 ' + badge[1] + ' 个区块（AI 看到的也是这个号）';
+                      target.appendChild(chip);
+                      text = text.slice(badge[0].length);
+                    }
+                    if (text) target.appendChild(document.createTextNode(text));
+                  }
+                }
+
+                function isSeparatorRow(line) {
+                  const cells = splitUnescaped(line, '|');
+                  const inner = cells.slice(1, -1);
+                  return inner.length > 0
+                    && inner.every((c) => /^\s*:?-{3,}:?\s*$/.test(c));
+                }
+
+                function paintBlocks(root, text) {
+                  root.replaceChildren();
+                  const lines = String(text || '').split('\n');
+                  let i = 0;
+                  let para = [];
+                  const flushPara = () => {
+                    if (!para.length) return;
+                    const p = document.createElement('p');
+                    paintLeaf(p, para.join('\n'));
+                    root.appendChild(p);
+                    para = [];
+                  };
+                  while (i < lines.length) {
+                    const line = lines[i];
+                    const trimmed = line.trim();
+                    if (!trimmed) { flushPara(); i += 1; continue; }
+
+                    if (/^【.*】$/.test(trimmed)) {
+                      flushPara();
+                      const h = document.createElement('h3');
+                      h.textContent = trimmed;
+                      root.appendChild(h);
+                      i += 1;
+                      continue;
+                    }
+                    if (trimmed === MARK_L + 'VIEWPORT' + MARK_R
+                      || trimmed === MARK_L + '/VIEWPORT' + MARK_R) {
+                      flushPara();
+                      const v = document.createElement('div');
+                      v.className = 'vpmark';
+                      v.textContent = trimmed === MARK_L + 'VIEWPORT' + MARK_R
+                        ? '── 屏幕可见范围开始 ──' : '── 屏幕可见范围结束 ──';
+                      root.appendChild(v);
+                      i += 1;
+                      continue;
+                    }
+                    if (/^_（.*）_$/.test(trimmed) || /^（锚点映射已折叠/.test(trimmed)) {
+                      flushPara();
+                      const f = document.createElement('div');
+                      f.className = 'foldnote';
+                      f.textContent = trimmed.replace(/^_|_$/g, '');
+                      root.appendChild(f);
+                      i += 1;
+                      continue;
+                    }
+                    // 表格：必须有分隔行确认（铁律 B）
+                    if (trimmed.charAt(0) === '|' && i + 1 < lines.length
+                      && isSeparatorRow(lines[i + 1])) {
+                      flushPara();
+                      const head = splitUnescaped(lines[i], '|').slice(1, -1);
+                      const table = document.createElement('table');
+                      let row = i + 2;
+                      while (row < lines.length && lines[row].trim().charAt(0) === '|') {
+                        const cells = splitUnescaped(lines[row], '|').slice(1, -1);
+                        if (cells.length !== head.length) break;
+                        const tr = document.createElement('tr');
+                        for (const cell of cells) {
+                          const td = document.createElement('td');
+                          paintLeaf(td, cell.trim());
+                          tr.appendChild(td);
+                        }
+                        table.appendChild(tr);
+                        row += 1;
+                      }
+                      root.appendChild(table);
+                      i = row;
+                      continue;
+                    }
+                    para.push(line);
+                    i += 1;
+                  }
+                  flushPara();
+                  if (!root.childNodes.length) {
+                    root.textContent = '（当前页无文字层）';
+                  }
                 }
 
                 function resetImage() {
@@ -1953,6 +2182,9 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   active.textContent = message;
                   selection.textContent = "当前没有可用选区。";
                   pageMeta.textContent = "";
+                  // 兜底路径也要把渲染视图藏掉,否则会残留上一次的内容
+                  if (pageView) { pageView.replaceChildren(); pageView.hidden = true; }
+                  pageBody.hidden = false;
                   pageBody.textContent = "没有可安全显示的正文。";
                   embeds.replaceChildren();
                   viewport.textContent = "当前没有 EPUB 视口。";
@@ -2022,12 +2254,12 @@ internal sealed class DirectSnapshotViewer : IDisposable
                     // page.text**，于是那几千字机读 JSON 在这个面板上整段占版面，
                     // 用户看到的就是"显示原始文字而不是渲染视图"。
                     // projection 早就算出来了，只是没人消费 .plain。
-                    lastPageText = page.text || "";
-                    pageBody.textContent =
-                      (rawToggle && rawToggle.checked ? page.text : projection.plain)
-                        || "（当前页无文字层）";
+                    showPageText(page.text, !!(rawToggle && rawToggle.checked));
                   } else {
                     pageMeta.textContent = "";
+                    lastPageText = "";
+                    pageView.hidden = true;
+                    pageBody.hidden = false;
                     pageBody.textContent = "尚未收到稳定页正文。";
                   }
 

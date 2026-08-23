@@ -13321,11 +13321,32 @@ internal static class DirectBridgeSelfTest
             //   文字而不是渲染好的 markdown 视图"。
             //   改成断言**行为**：正文取自 projection.plain，并保留一个
             //   看原文的开关（调试要用）。
+            // 正文栏走渲染视图（表格/[NN] 块号/卡片块），原文由开关切换。
+            // ⚠ 断言的是**行为的关键环节**，不是某一行的字面拓印 ——
+            //   这条已经因为"断言拓印"被改过两次了。
             && viewerHtml.Contains(
-                "rawToggle && rawToggle.checked ? page.text : projection.plain",
+                "showPageText(page.text",
+                StringComparison.Ordinal)
+            && viewerHtml.Contains(
+                "paintBlocks(pageView, parseReaderText(lastPageText).plain)",
                 StringComparison.Ordinal)
             && viewerHtml.Contains(
                 "id=\"rawToggle\"",
+                StringComparison.Ordinal)
+            && viewerHtml.Contains(
+                "id=\"pageView\"",
+                StringComparison.Ordinal)
+            // 表格必须由分隔行确认（正文里天然可能有行首竖线）
+            && viewerHtml.Contains(
+                "function isSeparatorRow",
+                StringComparison.Ordinal)
+            // 切列时必须跳过转义（\| 不是列分隔）
+            && viewerHtml.Contains(
+                "function splitUnescaped",
+                StringComparison.Ordinal)
+            // 不可信网页正文会进这个页面：零 innerHTML 是既有属性，别丢
+            && !viewerHtml.Contains(
+                ".innerHTML",
                 StringComparison.Ordinal)
             && viewerHtml.Contains(
                 "高亮与未锚定内容",
