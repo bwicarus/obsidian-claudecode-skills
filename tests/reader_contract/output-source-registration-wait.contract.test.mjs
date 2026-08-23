@@ -25,9 +25,15 @@ const OUTPUT = readFileSync(
 );
 
 function sendBody() {
-  const start = OUTPUT.indexOf("internal async Task<ReaderRealtimeOutputAck> SendAsync(");
-  assert.ok(start > 0, "找不到 SendAsync");
-  const end = OUTPUT.indexOf("\n    private", start);
+  // ⚠ 2026-08-23 起 SendAsync 拆成了两个：一个 internal 转发（保持外部签名）
+  //   + 一个 private 实现（多带 alreadyQueued，用于防重入，见该方法的说明）。
+  //   要切的是**实现**那个；切到转发那个只有三行，下面的断言会全部误报
+  //   "语义没了"，而实际语义完好 —— 第一次就是这么误报的。
+  const start = OUTPUT.indexOf(
+    "private async Task<ReaderRealtimeOutputAck> SendAsync(");
+  assert.ok(start > 0, "找不到 SendAsync 的实现体 —— 又拆过一次？");
+  // 实现体自己就是 private，所以不能用 "\n    private" 当结束标记
+  const end = OUTPUT.indexOf("\n    private", start + 10);
   return OUTPUT.slice(start, end > start ? end : start + 6000);
 }
 

@@ -5811,6 +5811,32 @@
     if (!opts.dot && !opts.mount && (!text || (!isHtml && !text.trim()))) return null;   // mount 模式(制卡状态机卡)无 text,放行
     if (_sideOpen() && !force && !opts.dot) return null;   // 侧栏开着=内容已在对话流,不弹;force=92 拖放例外
     injectCss();
+    // ── 按 cid 幂等：同一张卡再来一次是**替换**，不是多出一张 ──────────
+    //   这是"写入先落地、连上再重放"能成立的前提。原来 outbox 刻意把浮层卡
+    //   排除在持久队列之外，理由写在 ReaderRealtimeOutput.IsDurableMutation
+    //   的注释里：「replaying them after an unknown result could duplicate」。
+    //   那个顾虑在这之前是**成立的** —— 全文件没有任何一处在建卡前查过
+    //   "这个 cid 已经存在了吗"（cid 只在建卡时写、读取时用）。
+    //   把它变成不成立的，重放才安全，队列才能覆盖所有卡而不只是绑定卡。
+    //
+    //   ⚠ 只在调用方**明确给了 cid** 时去重。没给 cid 的是新卡，_mkCid()
+    //   每次都不同；不能拿"内容一样"当同一张 —— 用户完全可能要两张一样的。
+    if (cid) {
+      var _prior = null;
+      for (var _pi = 0; _pi < _cards.list.length; _pi++) {
+        var _pc = _cards.list[_pi];
+        if (_pc && _pc.el && _pc.el.dataset
+            && _pc.el.dataset.vcCid === String(cid)) { _prior = _pc; break; }
+      }
+      if (_prior) {
+        // 关掉旧的再往下建新的：比"就地改内容"简单，且天然覆盖
+        // 形态/尺寸/计时器全部重置。用户看到的是这张卡被刷新，不是多一张。
+        try {
+          console.warn('[card] 同 cid 重放，替换既有卡而不是新建', cid);
+        } catch (e) {}
+        try { _cardClose(_prior); } catch (e) {}
+      }
+    }
     var w = document.getElementById('vc-cards');
     if (!w) { w = document.createElement('div'); w.id = 'vc-cards'; document.body.appendChild(w); }
     if (force || opts.dot) _cardsVisSync();   // 92:侧栏开着 force 建卡→容器保持隐藏,关侧栏时浮现

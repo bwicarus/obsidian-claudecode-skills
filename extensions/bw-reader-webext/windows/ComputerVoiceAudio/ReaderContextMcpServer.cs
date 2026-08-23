@@ -449,8 +449,19 @@ internal sealed class ReaderContextMcpServer
                     + "quote. reader_highlight_text remains only for an old "
                     + "client that has no marker source. For a "
                     + "book-referencing Anki draft, copy the exact current "
-                    + "file identity and verbatim source text. Confirm "
-                    + "outputAccess.available before either mutation. A "
+                    + "file identity and verbatim source text. "
+                    // ⚠ 这里原来是 "Confirm outputAccess.available before either
+                    //   mutation"。用户 2026-08-23 指出这多一轮操作 —— 而且
+                    //   **先查后发本身是有竞态的**：查完到发出去之间连接照样
+                    //   可能掉，所以那一轮既费事又不保证正确。判定连接可用是
+                    //   系统的职责，不是模型的：写入路径要么送达、要么排队、
+                    //   要么给出可行动的错误，模型直接发即可。
+                    + "Just issue the mutation; do not pre-check "
+                    + "outputAccess for permission. Checking first costs a "
+                    + "round trip and is racy anyway - the source can drop "
+                    + "between the check and the write. The write path "
+                    + "itself reports what happened: delivered, queued for "
+                    + "replay, or a specific actionable error. A "
                     + "normal non-reference Anki draft "
                     + "passes cards only and does not claim the current page "
                     + "as its source. Source-bound calls reject a wrong book, "
@@ -520,9 +531,12 @@ internal sealed class ReaderContextMcpServer
                     + "visualAccess to discover whether the exact App "
                     + "surface can be requested on demand; page_image=null "
                     + "alone does not mean that no image is available. Read "
-                    + "outputAccess before calling a mutating Reader tool: "
-                    + "a readable cached page can remain ready after its "
-                    + "live App or extension source has disconnected. "
+                    + "outputAccess only to phrase what you tell the "
+                    + "user - not as a precondition for writing: a readable "
+                    + "cached page can remain ready after its live App or "
+                    + "extension source has disconnected. Never gate a "
+                    + "mutation on it; issue the write and let the write "
+                    + "path report delivered / queued / failed. "
                     // ⚠ 归因说明。2026-08-23：用户看到本工具失败时，模型回答
                     //   「这次 Reader 连接断开了」并据此说卡片没发出去 —— 那是
                     //   错误归因。本工具只读 Windows 本机的快照 JSON，App 是否

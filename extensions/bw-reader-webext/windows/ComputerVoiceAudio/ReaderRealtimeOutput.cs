@@ -1645,20 +1645,81 @@ internal sealed class ReaderRealtimeOutputBroker
             sourceInstanceId,
             _router.TryGetLease(sourceInstanceId, out _));
 
-    internal async Task<ReaderRealtimeOutputAck> SendAsync(
+    /// 正常发送路径上的销账。
+    ///
+    /// ⚠ <paramref name="alreadyQueued"/> 为 true 时**什么都不做**：那是重放
+    /// 路径，销账由重放循环自己按 bindOutcome 决定（绑定没落实的要留在队列里
+    /// 继续等，不能在这里一律标成 applied）。在这里抢着销会把那条判断绕过去。
+    private async Task SettleOutboxAsync(
         ReaderRealtimeOutputRequest request,
-        CancellationToken cancellationToken)
+        bool durable,
+        bool alreadyQueued)
     {
+        if (!durable || alreadyQueued || _outbox is null)
+        {
+            return;
+        }
+        try
+        {
+            await _outbox.MarkAppliedAsync(
+                request.Correlation,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            // 销账失败不该把一次成功的写入变成失败；但也不能不出声 ——
+            // 没销掉的记录会被重放，靠接收端的 cid 幂等兜住。
+            Console.Error.WriteLine(
+                "[outbox] 销账失败，该条将被重放（接收端按 cid 幂等）: "
+                    + exception.GetType().Name);
+        }
+    }
+
+    internal Task<ReaderRealtimeOutputAck> SendAsync(
+        ReaderRealtimeOutputRequest request,
+        CancellationToken cancellationToken) =>
+        SendAsync(request, cancellationToken, alreadyQueued: false);
+
+    /// <param name="alreadyQueued">
+    /// true 表示这条已经在队列里（重放路径）。
+    /// ⚠ 这个参数不是可选优化，是**防重入**：重放循环里就是
+    /// <c>await SendAsync(entry.Request, ...)</c>，如果它再走一次入队，
+    /// 就会在遍历队列的同时改写队列 —— 轻则语义混乱（刚销账又被加回来），
+    /// 重则跟 outbox 的 _gate 撞成死锁（打包自检里表现为整体超时，
+    /// 而不是任何一条断言失败，最难查）。
+    /// </param>
+    private async Task<ReaderRealtimeOutputAck> SendAsync(
+        ReaderRealtimeOutputRequest request,
+        CancellationToken cancellationToken,
+        bool alreadyQueued)
+    {
+        // ── 先落地，再送达 ────────────────────────────────────────
+        //   用户 2026-08-23：「就算当时没有连通也应该更新 windows 和 pi 本地的
+        //   文件，在 app 联通时自动进行内容更新」。
+        //
+        //   原来的顺序是"先等租约，等不到才排队"，于是**拿到租约之后**的任何
+        //   失败都直接丢：发送时租约没了、20 秒回执超时、页面回 rejected ——
+        //   而"网络抖一下、连接刚断"恰恰发生在拿到租约之后，正好落在覆盖不到
+        //   的洞里。
+        //
+        //   现在改成一律先入队：入队 = 这次写入已经不会丢了；随后照常尝试
+        //   实时送达，成功再销账。代价是每次写多一次本地落盘（有界文件，
+        //   MaximumEntries=64），换掉一整类"发出去就没了"。
+        bool durable = _outbox is not null
+            && ReaderRealtimeOutputProtocol.IsDurableMutation(request);
+        if (durable && !alreadyQueued)
+        {
+            await _outbox!.EnqueueAsync(request, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         ReaderContextSourceLease? lease = await WaitForSourceAsync(
             request.SourceInstanceId,
             cancellationToken).ConfigureAwait(false);
         if (lease is null)
         {
-            if (_outbox is not null
-                && ReaderRealtimeOutputProtocol.IsDurableMutation(request))
+            if (durable)
             {
-                await _outbox.EnqueueAsync(request, cancellationToken)
-                    .ConfigureAwait(false);
                 RequestReplay();
                 return new ReaderRealtimeOutputAck(
                     string.Empty,
@@ -1727,11 +1788,20 @@ internal sealed class ReaderRealtimeOutputBroker
                     await pending.Completion.Task.ConfigureAwait(false);
                 if (ack.Outcome == "rejected")
                 {
+                    // 页面明确拒收 —— 不是"没送到"，是"送到了但对方不要"。
+                    // 重放只会再被拒一次，销掉别留僵尸。
+                    await SettleOutboxAsync(request, durable, alreadyQueued)
+                        .ConfigureAwait(false);
                     throw Failure(
                         "BW_READER_REALTIME_OUTPUT_REJECTED",
                         ack.Error ?? "Reader 拒绝了输出",
                         retryable: false);
                 }
+                // ⚠ 送达成功必须销账。漏掉这一步，队列里会留着一条**已经生效**
+                //   的记录，下次重放就真的多出一张卡 —— 正是 IsDurableMutation
+                //   注释里担心的那个 duplicate。（接收端也按 cid 幂等，两道防线。）
+                await SettleOutboxAsync(request, durable, alreadyQueued)
+                    .ConfigureAwait(false);
                 return ack;
             }
             if (winner == lease.LeaseRetired)
@@ -1845,9 +1915,12 @@ internal sealed class ReaderRealtimeOutputBroker
                             };
                         try
                         {
+                            // ⚠ alreadyQueued: true —— 见 SendAsync 上的说明，
+                            //   重放时再入队会在遍历队列的同时改写队列。
                             ReaderRealtimeOutputAck ack = await SendAsync(
                                 replay,
-                                CancellationToken.None).ConfigureAwait(false);
+                                CancellationToken.None,
+                                alreadyQueued: true).ConfigureAwait(false);
                             if (ack.Outcome is "applied" or "replay")
                             {
                                 if (ReaderRealtimeOutputProtocol
