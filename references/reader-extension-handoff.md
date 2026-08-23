@@ -560,6 +560,17 @@ python3 extensions/bw-reader-webext/test_release_pipeline.py
 旧测试若仍断言 provider-only、五入口、`?ui=legacy` 或普通网页不注入，必须更新测试，而不是把
 实现退回旧模型。
 
+### 9.1 已知 flaky：`test_web_notes_local.py`（2026-08-23 实测）
+
+跑真机浏览器回归之前先知道这件事，免得把它当成自己刚改坏的：
+
+- **要挂 X server**。`handoff_check --full` 不会替你设，直接跑会报
+  `Missing X server or $DISPLAY`。Pi 上有 `xvfb-99`，加 `DISPLAY=:99` 即可。
+- **它本身有约 1/5 的概率超时**，卡在 patch 之后等便签文本回显那一处
+  （`Page.wait_for_function: Timeout 30000ms`）。实测：当前版本 3 次里红 1 次，
+  **把当次改动撤掉的对照组 5 次里也红 1 次** —— 所以红一次不构成"改坏了"的证据。
+  判断方法就是上面这个：**做对照组，不要靠推理**。
+
 ## 10. Windows 真机测试渠道
 
 本节只保留为按需渠道。2026-07-31 起，Reader/PWA 共享改动默认直接部署到生产 iPad
