@@ -103,7 +103,12 @@ internal static class ReaderQueryProtocol
             // （scoped repository，同样不经 Pi）
             "notes" => kind is "pdf" or "epub" or "web",
             // 全书搜索、目录、按页取文，都以「书有页码结构」为前提
-            "search" or "page-text" =>
+            // page-text 现在网页也有实现（扩展的 __bwWebPageText，字符层由
+            // web-textlayer 提供）。search 仍只在书里 —— 网页没有全文索引，
+            // 放行了也只会回 unsupported。
+            "page-text" =>
+                kind is "pdf" or "epub" or "web",
+            "search" =>
                 kind is "pdf" or "epub",
             "page-cards" => kind is "pdf",
             "page-card" => kind is "pdf",

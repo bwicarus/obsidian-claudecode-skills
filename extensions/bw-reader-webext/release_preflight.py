@@ -56,11 +56,14 @@ SRC_FILES = (
     "settings-sync.js",
     "shell.js",
     "web-adapter.js",
+    "web-bind.js",
     "web-decorations.js",
     "web-highlights.js",
     "web-ink.js",
     "web-notes.js",
+    "web-pagetext.js",
     "web-pins.js",
+    "web-textlayer.js",
 )
 ICON_FILES = (
     "icon-48-opaque.png",
@@ -389,6 +392,11 @@ def expected_runtime_js(source_root: Path = HERE) -> tuple[str, ...]:
         "vendor/rc-stickynote.js",
         "vendor/web-immersive.js",
         "src/pwa-adapter.js",
+        # 网页字符层必须排在所有消费它的层之前：web-bind 取锚、web-pagetext
+        # 出 segments、web-adapter 折选区，三者都从它拿坐标。
+        "src/web-textlayer.js",
+        "src/web-bind.js",
+        "src/web-pagetext.js",
         "src/web-adapter.js",
         "src/web-decorations.js",
         "src/web-highlights.js",

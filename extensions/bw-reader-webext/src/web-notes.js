@@ -46,6 +46,11 @@
       documentId,
       kind: 'web-dom',
       revision: 1,
+      // 网页整篇即一页。带上它，`currentLockedPageBind` 才认这张便签
+      //（它要求 note.anchor.page 与选区锚的 page 相等，见
+      //  vendor/rc-stickynote.js:1395）—— 否则「锁定元素」在网页上会
+      // 永远弹「没有可锚定的正文」，而且**链路上一处都不报错**。
+      page: 1,
       data: rawAnchor
     };
   };

@@ -3631,9 +3631,15 @@
       return target.call(window);
     },
     "page-text": function (params) {
+      // 与 highlights / notes 同构：书里走 App 本机运行时，网页走扩展的
+      // __bwWebPageText（字符层来自 web-textlayer，同样不经 Pi）。
       var target = window._nativeReaderPageText;
-      if (typeof target !== "function") return null;
-      return target.call(window, { page: params.page });
+      if (typeof target === "function") {
+        return target.call(window, { page: params.page });
+      }
+      var web = window.__bwWebPageText;
+      if (web && typeof web.read === "function") return web.read(params || {});
+      return null;
     },
     "page-cards": function (params) {
       var page = params && Object.prototype.hasOwnProperty.call(params, "page")

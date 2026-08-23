@@ -118,9 +118,18 @@ test("索引读保持有界，单卡读按稳定选择器分块返回完整源�
   assert.match(handler, /HasNoArguments\(arguments\)/);
   assert.match(handler, /RunReaderQueryAsync\([\s\S]*"page-cards"/);
   assert.match(QUERY, /or "page-text" or "page-cards" or "page-card" or "lookup"/);
+  // page-text 2026-08-23 起网页也支持（扩展的 __bwWebPageText，字符层由
+  // src/web-textlayer.js 提供），所以它从与 search 合并的那条分支里拆了出来。
+  // search 仍只在书里：网页没有全文索引，放行只会让 AI 反复重试。
   assert.match(
     QUERY,
-    /"search" or "page-text"[\s\S]*kind is "pdf" or "epub"[\s\S]*"page-cards" => kind is "pdf"/,
+    /"page-text" =>\s*kind is "pdf" or "epub" or "web"/,
+    "page-text 必须放行 web，否则请求在 C# 表面闸就被丢掉",
+  );
+  assert.match(
+    QUERY,
+    /"search" =>\s*kind is "pdf" or "epub",[\s\S]*"page-cards" => kind is "pdf"/,
+    "search 仍只限书；page-cards 仍只限 PDF",
   );
 });
 

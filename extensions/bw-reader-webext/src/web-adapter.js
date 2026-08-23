@@ -69,7 +69,15 @@
       var ctx = (blk ? (blk.textContent || "") : "").trim().slice(0, 1200);
       return RC.contract.selection({
         text: txt, context: ctx, ctx: ctx,
-        anchor: null,   // 网页持久锚(字符偏移 sidecar)属里程碑 3;先不给假锚
+        // 里程碑 3 已落地:网页字符层由 web-textlayer.js 提供,锚就是 page-chars
+        // (page 恒为 1)。**不新增 bind kind** —— 那份白名单有 17 份副本。
+        // 取不到时仍然给 null,绝不编一个 —— 假锚会把卡钉到无关的位置上。
+        anchor: (function () {
+          try {
+            return window.__bwWebTextLayer
+              ? window.__bwWebTextLayer.rangeToBind(rng) : null;
+          } catch (e) { return null; }
+        })(),
         rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
       });
     } catch (e) { return null; }
@@ -103,7 +111,21 @@
     fileInfo: function () { return { file: FREL, langs: _docLangs() }; },
     captureSelection: function () { return captureFromSelection(); },
     clearSelection: function () { clearNativeSel(); },
-    jumpToAnchor: function () {},   // 网页锚里程碑 3
+    // 网页锚现在解析得出真实 Range —— 滚过去并短暂选中,让用户看见落点。
+    jumpToAnchor: function (anchor) {
+      try {
+        var hit = window.__bwWebTextLayer && window.__bwWebTextLayer.locate(anchor);
+        if (!hit || !hit.range) return false;
+        var r = hit.range.getBoundingClientRect();
+        window.scrollTo({
+          top: window.scrollY + r.top - window.innerHeight * 0.3,
+          behavior: 'smooth'
+        });
+        var sel = window.getSelection();
+        if (sel) { sel.removeAllRanges(); sel.addRange(hit.range); }
+        return true;
+      } catch (e) { return false; }
+    },
     currentChapterText: function () { try { return (document.body.innerText || "").slice(0, 8000); } catch (e) { return ""; } },
     getContext: function (opts) {   // 照搬 HtmlAdapter.getContext,加 url(网页身份)
       opts = opts || {}; var sel = opts.selection || {};

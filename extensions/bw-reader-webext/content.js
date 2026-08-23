@@ -879,6 +879,10 @@
     return best || body;
   }
 
+  // 导出给 web-pagetext.js 用。**不复制这段判据** —— 两个分类器迟早会给出
+  // 不同答案，而"两边各自都自洽"是最难查的一类错。
+  window.__bwArticleRoot = articleRoot;
+
   var ARTICLE_BLOCK =
     "p,h1,h2,h3,h4,h5,h6,li,dd,dt,blockquote,figcaption,td,th,pre," +
     "article,main,section,div";
