@@ -65,12 +65,8 @@
   // envelope headroom while allowing normal long cards to remain complete.
   var LOCAL_PAGE_CONTEXT_LIMIT = 220000;
   var LOCAL_PAGE_CONTEXT_MAX_BYTES = 224 * 1024;
-  var LOCAL_STRUCTURED_ANCHOR_MAP_CONTRACT =
-    "reader-structured-anchor-map/1";
   var LOCAL_STRUCTURED_ANCHOR_MAP_MAX_SEGMENTS = 4096;
   var LOCAL_STRUCTURED_ANCHOR_SEGMENT_TEXT_LIMIT = 512;
-  var LOCAL_STRUCTURED_ANCHOR_MAP_MAX_CHARS = 90000;
-  var LOCAL_STRUCTURED_ANCHOR_MAP_MAX_BYTES = 96 * 1024;
   var LOCAL_PAGE_CARDS_CONTRACT = "reader-local-page-cards/1";
   var LOCAL_PAGE_CARD_SOURCE_CONTRACT = "reader-local-page-card-source/1";
   var LOCAL_PAGE_CARD_PROJECTION_CONTRACT =
@@ -9476,64 +9472,6 @@
     };
   }
 
-  function localStructuredAnchorMap(structured, page, revision, hardMaximum) {
-    var segments = Array.isArray(structured && structured.anchorSegments)
-      ? structured.anchorSegments : [];
-    var maximum = Math.min(
-      segments.length,
-      Number.isSafeInteger(hardMaximum) && hardMaximum >= 0
-        ? hardMaximum : LOCAL_STRUCTURED_ANCHOR_MAP_MAX_SEGMENTS
-    );
-
-    function render(count) {
-      var hasMore = !!(structured && structured.anchorOverflow) ||
-        count < segments.length;
-      var payload = {
-        schema: LOCAL_STRUCTURED_ANCHOR_MAP_CONTRACT,
-        page: Number(page) || 0,
-        notesRevision: revision == null ? null : revision,
-        indexSpace: "pageChars",
-        rangeBoundary: "inclusive",
-        segmentOrder: "layout-reading-order",
-        markdownOffsetsAreAnchorIndices: false,
-        segmentFormat: ["from", "to", "text"],
-        complete: !hasMore,
-        segments: segments.slice(0, count).map(function (segment) {
-          return [segment.from, segment.to, segment.text];
-        })
-      };
-      // Keep delimiter-like source text lossless JSON while preventing it from
-      // being mistaken for the framing tokens around this machine-readable map.
-      var json = JSON.stringify(payload)
-        .replace(/⟦/g, "\\u27e6")
-        .replace(/⟧/g, "\\u27e7");
-      return {
-        text:
-          "【当前页原始锚点映射（仅以下 from/to 可用于 bind；" +
-          "Markdown 字符位置不是锚点下标）】\n" +
-          "⟦ANCHOR_MAP_START⟧\n" + json + "\n⟦ANCHOR_MAP_END⟧",
-        truncated: hasMore
-      };
-    }
-
-    function fits(rendered) {
-      return rendered.text.length <= LOCAL_STRUCTURED_ANCHOR_MAP_MAX_CHARS &&
-        messageBytes(JSON.stringify(rendered.text)) <=
-          LOCAL_STRUCTURED_ANCHOR_MAP_MAX_BYTES;
-    }
-
-    var rendered = render(maximum);
-    if (fits(rendered)) return rendered;
-    var low = 0;
-    var high = maximum;
-    while (low < high) {
-      var middle = low + Math.ceil((high - low) / 2);
-      if (fits(render(middle))) low = middle;
-      else high = middle - 1;
-    }
-    return render(low);
-  }
-
   function annotateLocalPageRange(pageRecord, projected, start, end, revision) {
     start = Math.max(0, Math.min(pageRecord.text.length, Number(start) || 0));
     end = Math.max(start, Math.min(pageRecord.text.length, Number(end) || 0));
@@ -9746,39 +9684,33 @@
           unboundMarkers.join("\n"));
       }
       if (structured && structuredAnchorMapInsertAt >= 0) {
-        var anchorMap = localStructuredAnchorMap(
-          structured, page, pageCardProjection.value.revision
+        // ⚠ 这里原先内联一整张 ⟦ANCHOR_MAP_START⟧{…segments:[[from,to,text]×N]}⟦…END⟧
+        //   机读锚点表，实测占页面正文的 **41%**（5684 / 13633 字符）。
+        //
+        //   它是为了省掉一次 reader_page_text 工具调用 —— 用 41% 的上下文换
+        //   一次工具调用，这笔账不划算。而且它并没有消除「Markdown 位置」与
+        //   「pageChars 下标」两个坐标系长得一样这个陷阱，只是给陷阱加了说明书：
+        //   AI 面前仍然摆着两套编号，靠一句话约束它选对的那个，记错了照样
+        //   静默锚错。用户 2026-08-23 判定这个做法本身是错的。
+        //
+        //   现在只留**指路**：序号唯一来源是 reader_page_text 的 segments。
+        //   ⚠ 但那句「Markdown 字符位置不是锚点下标」的警告必须保留 ——
+        //   去掉表容易，去掉警告就等于默许 AI 拿 Markdown 位置当下标。
+        var noticeSections = sections.slice();
+        noticeSections.splice(
+          structuredAnchorMapInsertAt, 0,
+          "【锚点下标从哪来】上面这份 Markdown 是**排版投影**，" +
+          "它自身的字符位置不能当作 bind 的 from/to。" +
+          "要把卡片钉到某段文字上时，调 reader_page_text 取该页的 segments，" +
+          "从中挑区间；那些数值才是 pageChars 的闭区间。"
         );
-        var mappedSections = sections.slice();
-        mappedSections.splice(
-          structuredAnchorMapInsertAt, 0, anchorMap.text
-        );
-        var mappedText = mappedSections.join("\n\n");
-        if (mappedText.length <= LOCAL_PAGE_CONTEXT_LIMIT &&
-            messageBytes(JSON.stringify(mappedText)) <=
+        var noticeText = noticeSections.join("\n\n");
+        if (noticeText.length <= LOCAL_PAGE_CONTEXT_LIMIT &&
+            messageBytes(JSON.stringify(noticeText)) <=
               LOCAL_PAGE_CONTEXT_MAX_BYTES) {
-          sections = mappedSections;
-          structuredAnchorMapTruncated = anchorMap.truncated;
-        } else {
-          // Retain an explicit no-offset warning even when the page body leaves
-          // room only for mapping metadata, never silently invite the model to
-          // reuse Markdown positions as provider-array indices.
-          var compactAnchorMap = localStructuredAnchorMap(
-            Object.assign({}, structured, { anchorOverflow: true }),
-            page, pageCardProjection.value.revision, 0
-          );
-          var compactSections = sections.slice();
-          compactSections.splice(
-            structuredAnchorMapInsertAt, 0, compactAnchorMap.text
-          );
-          var compactText = compactSections.join("\n\n");
-          if (compactText.length <= LOCAL_PAGE_CONTEXT_LIMIT &&
-              messageBytes(JSON.stringify(compactText)) <=
-                LOCAL_PAGE_CONTEXT_MAX_BYTES) {
-            sections = compactSections;
-          }
-          structuredAnchorMapTruncated = true;
+          sections = noticeSections;
         }
+        structuredAnchorMapTruncated = false;
       }
       var bounded = truncateLocalPageContext(
         sections.join("\n\n"), LOCAL_PAGE_CONTEXT_LIMIT,

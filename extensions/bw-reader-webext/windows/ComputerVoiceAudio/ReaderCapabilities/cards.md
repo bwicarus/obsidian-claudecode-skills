@@ -55,9 +55,14 @@ Windows Codex 语音中，原生天气、新闻、图片、视频或事实类工
 `from` 取第一项的、`to` 取最后一项的。别自己数字符：空白在字符层里**占序号但不成段**，
 手数必错位。
 
-如果当前快照把漫画或表格正文整理成 Markdown，它会紧邻正文提供
-`reader-structured-anchor-map/1`。只能使用其中 `segments` 的 `[from,to,text]`；这些数值仍是
-原始 `pageChars` 的闭区间。Markdown 自身的字符位置只是显示排版，绝不能当成绑定下标。
+如果当前快照把漫画或表格正文整理成 Markdown，那份 Markdown 是**排版投影**：
+它自身的字符位置只是显示用的，**绝不能当成绑定下标**。要下标就调 `reader_page_text`，
+它返回的 `segments` 才是原始 `pageChars` 的闭区间。
+
+> 2026-08-23 起不再随正文内联 `reader-structured-anchor-map/1` 那张表。
+> 它是为了省掉这一次工具调用，实测却占了页面正文的 41%；而且它并没有消除
+> 「Markdown 位置」与「pageChars 下标」两个坐标系长得一样这个陷阱，
+> 只是给陷阱附了一张对照表。序号的唯一来源就是 `reader_page_text`。
 
 **尽量带上 `text`**：同一个词在一页里常出现好几次，文字层重跑（换 OCR 结果、
 重新预处理）之后下标会变。阅读器会拿 `text` 加上原始下标就近重新定位，

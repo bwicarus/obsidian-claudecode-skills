@@ -86,12 +86,37 @@ function pageLayoutFixture(overrides = {}) {
   };
 }
 
-function structuredAnchorMap(text) {
-  const match = String(text || "").match(
-    /⟦ANCHOR_MAP_START⟧\n(\{[^\n]*\})\n⟦ANCHOR_MAP_END⟧/,
+/** 2026-08-23 起页面上下文**不再内联**那张机读锚点表。
+ *
+ *  它是为了省掉一次 reader_page_text 调用，实测却占页面正文的 41%；
+ *  而且并没有消除「Markdown 位置」与「pageChars 下标」两个坐标系长得一样
+ *  这个陷阱，只是给陷阱附了张对照表。用户判定这个做法本身是错的。
+ *
+ *  ⚠ 去掉表容易，**去掉那句警告就等于默许 AI 拿 Markdown 位置当下标** ——
+ *  所以这里同时钉住「警告还在」。
+ */
+function assertNoAnchorMapButKeepsWarning(text) {
+  assert.doesNotMatch(
+    text,
+    /\u27E6ANCHOR_MAP_START\u27E7/,
+    "机读锚点表又被内联回正文了（41% 的上下文）",
   );
-  assert.ok(match, "structured page context must carry an anchor map");
-  return JSON.parse(match[1]);
+  assert.doesNotMatch(text, /reader-structured-anchor-map/);
+  assert.match(
+    text,
+    /Markdown 是\*\*排版投影\*\*/,
+    "指路说明没了 —— AI 会不知道下标该从哪来",
+  );
+  assert.match(
+    text,
+    /调 reader_page_text 取该页的 segments/,
+    "没告诉 AI 唯一的序号来源",
+  );
+  assert.match(
+    text,
+    /它自身的字符位置不能当作 bind 的 from\/to/,
+    "那句关键警告丢了 —— 等于默许拿 Markdown 位置当下标",
+  );
 }
 
 function createAudioContextClass(scenario) {
@@ -4242,20 +4267,7 @@ test("高置信漫画布局生成四列 Markdown 且 CARD 仍按原字符下标�
   assert.equal((payload.text.match(/⟦CARD_START /g) || []).length, 1);
   assert.equal((payload.text.match(/⟦CARD_END⟧/g) || []).length, 1);
   assert.match(payload.text, /⟧右\\\|侧<br>卡片⟦CARD_END⟧/);
-  const anchorMap = structuredAnchorMap(payload.text);
-  assert.equal(anchorMap.schema, "reader-structured-anchor-map/1");
-  assert.equal(anchorMap.page, 7);
-  assert.equal(anchorMap.notesRevision, 1);
-  assert.equal(anchorMap.indexSpace, "pageChars");
-  assert.equal(anchorMap.rangeBoundary, "inclusive");
-  assert.equal(anchorMap.segmentOrder, "layout-reading-order");
-  assert.equal(anchorMap.markdownOffsetsAreAnchorIndices, false);
-  assert.deepEqual(anchorMap.segmentFormat, ["from", "to", "text"]);
-  assert.equal(anchorMap.complete, true);
-  assert.deepEqual(anchorMap.segments, [
-    [2, 3, "右文"],
-    [0, 1, "左文"],
-  ]);
+  assertNoAnchorMapButKeepsWarning(payload.text);
   await disableSnapshot(harness);
 });
 
@@ -4325,19 +4337,8 @@ test("规则表格布局生成标准 Markdown 数据表", async () => {
     harness.scenario.nativePageContextPublishes[0].text,
     /A<br>C/,
   );
-  assert.deepEqual(
-    structuredAnchorMap(
-      harness.scenario.nativePageContextPublishes[0].text,
-    ).segments,
-    [
-      [0, 1, "国家"],
-      [2, 3, "特征"],
-      [4, 5, "韩国"],
-      [6, 6, "A"],
-      [7, 7, "旁"],
-      [8, 8, "C"],
-      [9, 10, "辣脆"],
-    ],
+  assertNoAnchorMapButKeepsWarning(
+    harness.scenario.nativePageContextPublishes[0].text,
   );
   await disableSnapshot(harness);
 });
