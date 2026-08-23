@@ -222,8 +222,7 @@ def main() -> int:
                     from: cur.anchor.from, to: cur.anchor.to, len: snap.length,
                     // ⚠ 别断言 from===0：字符层开头是 HTML 缩进空白，
                     //   而 Ctrl+A 会把边界规范化到第一个**可见**字符。
-                    //   真机实测 from=3（层首是 "
-  HOME"）。语义上正确的
+                    //   真机实测 from=3（层首是换行加两个空格再 HOME）。语义上正确的
                     //   判据是"选区去掉首尾空白后等于整篇去掉首尾空白"。
                     trimEq: snap.text.slice(cur.anchor.from, cur.anchor.to).trim()
                             === snap.text.trim()
