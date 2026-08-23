@@ -147,10 +147,11 @@
       ],
       "gotchas": [
         "两侧的迁移器**不是同一套**：Pi 19 个、App 7 个（App 只持有本地状态）。数量不等是正常的，但 notes / highlights / ink / reading-pos / userpages 这些两边都有的，语义必须一致。",
-        "词锚有**两个槽**：手动拖卡钉的落在 note.card.bind，AI 直绑的落在 note.html.bind（rc-stickynote.js::persistBoundCard）。前端 wordBindSlot() 两个都认，迁移只认一个 = 那一半卡片插删页后跟标记分家。",
+        "词锚有**两个槽**，按卡的类型分流（2026-08-22 与 Codex 对账后核实的完整版）：\n  · `note.card.bind` = 学习卡组（Anki 式，载荷是 cards 数组 + gid），写入点 rc-stickynote.js::createCardAt；\n  · `note.html.bind` = 通用卡的 HTML 快照（天气/搜索/图/文字），写入点 rc-stickynote.js::persistBoundCard（AI 直绑）。\n  ⚠ 但**手动拖放通用卡**那条路（createHtmlAt）今天的载荷里根本没有 bind 字段 —— 把天气卡/图片卡拖到词上不会出现词框和角标。这是 2026-08-20 只给 createCardAt 加词锚留下的不对称，不是本条契约的缺口，但排查时容易被当成迁移丢了。\n  前端 wordBindSlot() 两个槽都认；迁移只认一个 = 那一类卡插删页后跟标记分家。",
         "页被删时 anchor 和 bind 的处置**不同**：anchor 没了整条便签丢弃（无处安放），bind 没了只清 bind、留住便签（它还能当普通便签用）。改任一侧时别抹平这个差别。",
         "漏迁的表现从来不是报错，而是「卡片去了新页、描边和序号留在旧页」——看着像标记随机丢失。所以这条只能靠行为测试守，纯 match 断言守不住。",
-        "Python 里 True 是 int 的子类：页号判断必须显式排除 bool，否则 page=True 会被当成第 1 页迁走。"
+        "Python 里 True 是 int 的子类：页号判断必须显式排除 bool，否则 page=True 会被当成第 1 页迁走。",
+        "⚠ 「服务端兼容两个槽」有两种含义，别混：**存取**上 html 是整块不透明存的（pdf_reader.py:10670/10708），bind 放进去存得住读得回；但**页号迁移**是另一条路，2026-08-22 之前只遍历 card 槽。存得住 ≠ 插页时会跟着迁。"
       ]
     }
   }
