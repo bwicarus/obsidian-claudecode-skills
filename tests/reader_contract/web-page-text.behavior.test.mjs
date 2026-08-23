@@ -80,34 +80,52 @@ test("③ 三个网页文件都挂进了 content_scripts，且顺序正确", () 
 });
 
 // ── 行为测试：把真代码跑起来 ─────────────────────────────────────
-function makeEl(tag, text, opts = {}) {
-  return {
-    tagName: tag.toUpperCase(),
-    __text: text,
-    __chrome: opts.chrome || null,
-    __children: opts.children || [],
-    getAttribute: (k) => (opts.attrs || {})[k] || null,
-    closest(sel) {
-      if (sel.includes("role=navigation") || sel.includes("nav,")) {
-        return this.__chrome ? { tagName: this.__chrome.toUpperCase(), getAttribute: () => null } : null;
-      }
-      return null;
-    },
-    querySelector: () => (opts.children && opts.children.length ? opts.children[0] : null),
-    contains(node) { return node && node.__owner === this; },
+//
+// ⚠ 桩必须**有结构**（nodeType / parentElement / 祖先链），否则像 2026-08-23
+//   那次一样：桩全绿，真浏览器里整类情况失效。桩仍不能替代真机，
+//   真机覆盖见 extensions/bw-reader-webext/test_web_bind_local.py。
+function buildDom(blocks) {
+  const body = {
+    nodeType: 1, tagName: "BODY", childNodes: [],
+    closest: () => null, contains: () => true,
   };
+  const nodes = [];
+  const elements = [];
+  blocks.forEach((b) => {
+    // wrapper 让"嵌套块只取最内层"这条规则有真覆盖
+    const outer = b.wrap
+      ? { nodeType: 1, tagName: b.wrap.toUpperCase(), childNodes: [], parentElement: body,
+          closest: () => null, contains: () => true, __inner: true }
+      : null;
+    const el = {
+      nodeType: 1,
+      tagName: (b.tag || "P").toUpperCase(),
+      childNodes: [],
+      parentElement: outer || body,
+      closest(sel) {
+        if (b.chrome && sel.includes("role=navigation")) {
+          return { tagName: b.chrome.toUpperCase(), getAttribute: () => null };
+        }
+        return null;
+      },
+      contains: () => true,
+      __selfSel: b.tag || "p",
+    };
+    const t = { nodeType: 3, nodeValue: b.text, parentElement: el };
+    el.childNodes.push(t);
+    if (outer) { outer.childNodes.push(el); elements.push(outer); }
+    elements.push(el);
+    nodes.push(t);
+  });
+  return { body, nodes, elements };
 }
 
-function loadStack(blocks) {
-  // 文本节点按块顺序拼成整页字符层
-  const nodes = blocks.map((b) => {
-    const n = { nodeValue: b.text, parentElement: { closest: () => null } };
-    n.__owner = b.el;
-    return n;
-  });
+function loadStack(blocks, opts = {}) {
+  const { body, nodes, elements } = buildDom(blocks);
   const doc = {
-    body: {},
-    documentElement: {},
+    body,
+    documentElement: body,
+    head: { appendChild() {} },
     createTreeWalker(_r, _w, filter) {
       let i = -1;
       return {
@@ -124,29 +142,44 @@ function loadStack(blocks) {
       const r = {
         setStart(n, o) { r.startContainer = n; r.startOffset = o; },
         setEnd(n, o) { r.endContainer = n; r.endOffset = o; },
+        collapse() {}, comparePoint: () => 0,
       };
       return r;
     },
-    querySelectorAll: () => blocks.map((b) => b.el),
-    head: { appendChild() {} },
+    // 选择器匹配：只回答"这个元素算不算块"
+    querySelectorAll(sel) {
+      const wanted = sel.split(",").map((s) => s.trim().toLowerCase());
+      return elements.filter((e) => wanted.includes(e.tagName.toLowerCase()));
+    },
   };
+  // querySelector 用于 hasInner 判定：wrapper 里有内层块
+  elements.forEach((e) => {
+    e.querySelector = (sel) => {
+      const wanted = sel.split(",").map((s) => s.trim().toLowerCase());
+      const kid = (e.childNodes || []).find(
+        (c) => c.nodeType === 1 && wanted.includes(c.tagName.toLowerCase()),
+      );
+      return kid || null;
+    };
+  });
+
   const win = {};
   const NodeFilter = { SHOW_TEXT: 4, FILTER_REJECT: 2, FILTER_ACCEPT: 1 };
-  new Function("window", "document", "NodeFilter", TEXTLAYER_SRC)(win, doc, NodeFilter);
-  win.__bwArticleRoot = () => doc.body;
-  new Function("window", "document", "NodeFilter", PAGETEXT_SRC)(win, doc, NodeFilter);
-  return { api: win.__bwWebPageText, win, doc };
+  new Function("window", "document", "NodeFilter", "MutationObserver", TEXTLAYER_SRC)(
+    win, doc, NodeFilter, undefined,
+  );
+  if (opts.articleRoot !== false) win.__bwArticleRoot = () => body;
+  new Function("window", "document", "NodeFilter", "MutationObserver", PAGETEXT_SRC)(
+    win, doc, NodeFilter, undefined,
+  );
+  return { api: win.__bwWebPageText, win, doc, elements };
 }
 
-const H1 = makeEl("h1", "热力学导论");
-const P1 = makeEl("p", "第一定律说的是能量守恒。");
-const NAVP = makeEl("p", "首页 关于 联系", { chrome: "nav" });
-const P2 = makeEl("p", "第二定律说的是熵增。");
 const BLOCKS = [
-  { el: H1, text: "热力学导论" },
-  { el: P1, text: "第一定律说的是能量守恒。" },
-  { el: NAVP, text: "首页 关于 联系" },
-  { el: P2, text: "第二定律说的是熵增。" },
+  { tag: "h1", text: "热力学导论" },
+  { tag: "p", text: "第一定律说的是能量守恒。" },
+  { tag: "p", text: "首页 关于 联系", chrome: "nav" },
+  { tag: "p", text: "第二定律说的是熵增。" },
 ];
 
 test("④ 输出带 [NN] 编号和区域标签，导航块被标出来", () => {
@@ -162,6 +195,7 @@ test("④ 输出带 [NN] 编号和区域标签，导航块被标出来", () => {
     "导航块必须被标成导航 —— 这正是用户要的'为 ai 区分正文、边栏等块区'",
   );
   assert.match(lines[3], /^\[04\] 正文 第二定律/);
+  assert.equal(out.degraded, false, "认得出块结构时不该标降级");
 });
 
 test("⑤ segments 是字符层真坐标，不是 Markdown 里的位置", () => {
@@ -208,7 +242,7 @@ test("⑧ 空页面明确说不可用，且标为可重试", () => {
 test("⑨ 截断要说出来", () => {
   const many = [];
   for (let i = 0; i < 260; i += 1) {
-    many.push({ el: makeEl("p", "段落" + i), text: "这是一个足够长的段落用来把总量顶过上限。" + i });
+    many.push({ tag: "p", text: "这是一个足够长的段落用来把总量顶过上限。" + i });
   }
   const { api } = loadStack(many);
   const out = api.read({});
@@ -216,4 +250,47 @@ test("⑨ 截断要说出来", () => {
     out.truncated, true,
     "截断必须明说 —— 否则 AI 会把'只有这些'当成'全部就这些'然后据此下结论",
   );
+});
+
+// ── 2026-08-23 审计抓到的 high ────────────────────────────────────
+test("⑩ ⚠ 正文写在 div 里的站点必须认得出块，而不是返回'成功且空'", () => {
+  // x.com 的推文是 <div data-testid="tweetText">，多数 React/SPA 与 Gmail 同理。
+  // 原实现的 BLOCK_SEL 没有 div，一个块都选不出来，却仍返回 ok:true + 空 text
+  // + truncated:false —— 等于告诉 AI「整页就这些」。
+  const divPage = [
+    { tag: "div", text: "这是一条推文的正文内容。" },
+    { tag: "div", text: "这是第二条推文。" },
+  ];
+  const { api } = loadStack(divPage);
+  const out = api.read({});
+  assert.equal(out.ok, true);
+  assert.ok(out.text.length > 0, "div 站点绝不能返回空 text");
+  assert.match(out.text, /这是一条推文的正文内容/);
+  assert.equal(out.segments.length, 2, "两个 div 应该各出一条 segment");
+});
+
+test("⑪ 嵌套块只取最内层，同一段文字不重复出现", () => {
+  // 加了 div 之后最大的风险是每层包裹都出一块，同一段文字出现多次，
+  // 而且区间互相包含，AI 无从选择。
+  const nested = [{ tag: "p", text: "被包在 div 里的段落。", wrap: "div" }];
+  const { api } = loadStack(nested);
+  const out = api.read({});
+  assert.equal(out.segments.length, 1, "外层 div 不该再出一块");
+  assert.match(out.text, /^\[01\] .*被包在 div 里的段落。$/);
+});
+
+test("⑫ ⚠ 字符层非空却认不出块时，给降级视图并明说，绝不返回'成功且空'", () => {
+  // 认不出块的极端情况（自定义元素、shadow 化布局…）。
+  // 宁可给一份没有块结构的平铺文本，也不能让 AI 以为这页是空的。
+  const exotic = [{ tag: "custom-thing", text: "这段文字确实存在于页面上。" }];
+  const { api } = loadStack(exotic);
+  const out = api.read({});
+  assert.equal(out.ok, true);
+  assert.equal(out.degraded, true, "降级必须明说");
+  assert.match(
+    out.text, /这段文字确实存在于页面上/,
+    "降级视图必须包含真实内容 —— 空 text 会让 AI 断言这页没内容",
+  );
+  assert.equal(out.segments.length, 1);
+  assert.equal(out.segments[0].from, 0);
 });
