@@ -489,6 +489,31 @@ session-only 决定，不是推翻上面的视觉 **3A**。这些决定同时成
 - 网页临时绘图只存在内存/标签页会话，不覆盖或删除旧持久数据。
 - 页面没有书籍 capability 时不得显示页码、裁边、书籍设置等空按钮。
 
+### 6.1 网页字符层与卡片锚定（2026-08-23 落地）
+
+普通网页现在有一份**字符层**（`src/web-textlayer.js`），"加入卡片""锁定元素"
+"`reader_page_text`"都建在它上面。三条不变量：
+
+- **锚仍是 `page-chars`，不新增 bind kind。** 那份白名单在链路上有 17 份副本
+  （8 源 + 5 生成 + 4 说明）。网页 `page` 恒为 1，`from`/`to` 是**整页**（含导航
+  与边栏）的下标。要加"网页专用的锚"之前先想清楚为什么这一套不够。
+- **标记不能往正文流里插 DOM。** 插一个 `<mark>` 或角标 `<span>` 就会改变字符层，
+  于是所有已存在的锚点当场偏移 —— 而且偏移的是**别的卡**，查起来像"随机错位"。
+  描边走 CSS Custom Highlight API（零 DOM 变更），角标放 `#bw-pin-root`
+  （该容器被字符层排除在外）。没有 Highlight API 时**宁可不画描边**，
+  绝不退回 `surroundContents`。
+- **正文/边栏只有一个判据。** `articleRoot()` 定义在 `content.js`，由它导出
+  `window.__bwArticleRoot`；不要在别处再写一份 —— 两个分类器迟早给出不同答案，
+  而"两边各自都自洽"是最难查的一类错。
+
+落库仍走共享层 `RC.stickynote.persistBoundCard`；`currentLockedPageBind` 本来
+就认 `page-chars`，共享层一行未改。网页便签锚信封多带 `page: 1`，缺了它
+「锁定元素」会永远弹「没有可锚定的正文」且链路上一处不报错。
+
+`reader_page_text` 在网页上返回 `[NN] 区域 前缀 正文`，segment 多带
+`block`/`region`。⚠ `text` 是**排版投影**，它自己的字符位置不能当 bind 下标；
+只有 `segments[].from/to` 是真坐标 —— 与去掉 ANCHOR_MAP 时定的规矩一致。
+
 ## 7. 数据和 ID 门禁
 
 - 每个实体首次渲染前已有稳定 ID。
