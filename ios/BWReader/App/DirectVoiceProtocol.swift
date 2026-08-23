@@ -134,6 +134,14 @@ enum DirectVoiceEvent: Sendable, Equatable {
     case runtime(DirectVoiceRuntimeStatus)
     case downlinkPCM(DirectVoicePCMFrame)
     case error(DirectVoiceFailure)
+    /// 瞬时故障，**已经自行重试、连接还活着**。
+    ///
+    /// 跟 `.error` 的区别是这一条不代表通话结束。加它的理由是诊断：
+    /// 心跳从"一次失败就判死"改成"连续 N 次才判死"之后，中间那些被容忍掉的
+    /// 失败如果不出声，"网络抖了一下自愈了"和"一直很稳"在外部看起来一模一样 ——
+    /// 于是下次再有人报"经常断"，我们仍然没有数据可查。
+    /// （references/silent-failure-lessons.md 规则 1：每个提前退出都要出声。）
+    case transientRetry(DirectVoiceFailure, attempt: Int)
 }
 
 // MARK: - Strict JSON value

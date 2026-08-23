@@ -772,9 +772,24 @@ actor DirectVoiceSocket {
 
     // MARK: - Heartbeat
 
+    /// 心跳连续失败多少次才判定连接已死。
+    ///
+    /// ⚠ 这里原来是**一次失败就整条拆掉**，而单次请求超时是 7 秒
+    /// （DirectVoiceProtocol.requestTimeoutNanoseconds）—— 也就是说客户端比
+    /// **服务端还严**：桥的合同允许 15 秒收不到心跳才断
+    /// （DirectBridgeContract.ClientHeartbeatTimeoutMilliseconds = 15_000）。
+    /// 一次 >7s 的 RTT 抖动（iOS 切后台调度、Tailscale 路径切换、Wi-Fi→蜂窝）
+    /// 就足以把整通电话拆掉，而服务端此刻还愿意再等 8 秒。
+    /// 这正是用户 2026-08-23 说的"稍微有一点网络波动就断开"。
+    ///
+    /// 改成连续 2 次：坏连接最多晚 ~5 秒（一个心跳间隔）被发现，
+    /// 换掉一整类由瞬时抖动造成的误杀。服务端合同不用动。
+    private static let heartbeatFailuresBeforeGivingUp = 2
+
     private func startHeartbeat() {
         heartbeatTask?.cancel()
         heartbeatTask = Task { [weak self] in
+            var consecutiveFailures = 0
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(
@@ -785,15 +800,27 @@ actor DirectVoiceSocket {
                     )
                     guard !Task.isCancelled else { return }
                     try await self?.sendHeartbeat()
+                    consecutiveFailures = 0
                 } catch is CancellationError {
                     return
                 } catch {
                     guard let self else { return }
+                    consecutiveFailures += 1
+                    if consecutiveFailures
+                        < Self.heartbeatFailuresBeforeGivingUp {
+                        // 还没到判死线：留一声，别静默重试 ——
+                        // 否则"抖了一下"和"真断了"在日志里长得一样。
+                        await self.noteHeartbeatRetry(
+                            error,
+                            attempt: consecutiveFailures
+                        )
+                        continue
+                    }
                     let normalized = await self.normalize(
                         error,
                         code:
                             "BW_COMPUTER_VOICE_DIRECT_HEARTBEAT",
-                        message: "Windows 桥接器心跳失败",
+                        message: "Windows 桥接器心跳连续失败",
                         retryable: true
                     )
                     await self.failConnection(normalized)
@@ -958,6 +985,24 @@ actor DirectVoiceSocket {
     }
 
     // MARK: - Lifecycle helpers
+
+    /// 心跳瞬时失败但还没到判死线时的留痕。
+    ///
+    /// ⚠ 不能走 `.error` —— 那一档在上层被当作"通话结束"处理
+    /// （NativeVoiceBridge.handleSessionFailure），报一次就把会话收了，
+    /// 等于把"容忍"变成了"照样断"。
+    private func noteHeartbeatRetry(
+        _ error: Error,
+        attempt: Int
+    ) async {
+        let normalized = await normalize(
+            error,
+            code: "BW_COMPUTER_VOICE_DIRECT_HEARTBEAT_RETRY",
+            message: "Windows 桥接器心跳超时，正在重试",
+            retryable: true
+        )
+        eventHandler(.transientRetry(normalized, attempt: attempt))
+    }
 
     private func failConnection(_ error: DirectVoiceFailure) async {
         guard state != .failed || webSocket != nil else { return }

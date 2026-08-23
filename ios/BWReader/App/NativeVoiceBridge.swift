@@ -910,6 +910,18 @@ final class NativeVoiceBridge: ObservableObject {
             } catch {
                 await handleLocalAudioFailure(error)
             }
+        case .transientRetry(let failure, let attempt):
+            // 瞬时故障，连接还活着 —— **只留痕，不收会话**。
+            //
+            // 心跳判死从"一次失败"放宽到"连续 N 次"之后，中间被容忍掉的失败
+            // 如果不出声，"抖了一下自愈了"和"一直很稳"在外部一模一样，
+            // 下次再有人报"经常断"我们依然没有数据可查。
+            // ⚠ 绝不能走下面的 .error 分支：那一档会 handleSessionFailure，
+            //   等于把"容忍"又变回"照样断"。
+            recordDiagnostic(
+                category: "transient",
+                message: "\(failure.code) 第 \(attempt) 次: \(failure.message)"
+            )
         case .error(let failure):
             // connect()/start() propagate their own failure to the awaiting
             // start flow.  Runtime failures need an asynchronous full cleanup.

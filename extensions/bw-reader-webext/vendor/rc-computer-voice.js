@@ -29,6 +29,9 @@ if (window.__bwPwaProviderOnly) return;
   var REQUEST_TIMEOUT_MS = 7000;
   var START_TIMEOUT_MS = 45000;
   var HEARTBEAT_INTERVAL_MS = 5000;
+  // 心跳连续失败多少次才判定连接已死。见 scheduleHeartbeat 里的说明：
+  // 客户端单次超时 7s 比服务端的 15s 合同还严，一次抖动就误杀整通电话。
+  var HEARTBEAT_FAILURES_BEFORE_GIVING_UP = 2;
   var HEARTBEAT_TIMEOUT_MS = 15000;
   var START_GESTURE_LEASE_TTL_MS = 5000;
   var OUTGOING_CONTEXT_CONTRACT = "reader-outgoing-context/1";
@@ -10654,12 +10657,35 @@ if (window.__bwPwaProviderOnly) return;
           );
         }
         state.heartbeatInFlight = false;
+        state.heartbeatFailures = 0;
         scheduleHeartbeat(state);
       }).catch(function (error) {
         state.heartbeatInFlight = false;
-        if (active === state && !state.stopped) {
-          failActive(state, error, true);
+        if (active !== state || state.stopped) return;
+        // ⚠ 这里原来是**一次失败就整条拆掉**，而单次请求超时是 7 秒
+        //   （REQUEST_TIMEOUT_MS），也就是说客户端比**服务端还严**：
+        //   桥的合同允许 15 秒收不到心跳才断
+        //   （DirectBridgeContract.ClientHeartbeatTimeoutMilliseconds = 15_000）。
+        //   一次 >7s 的 RTT 抖动（切后台、Tailscale 换路径、Wi-Fi→蜂窝）
+        //   就足以拆掉整通电话，而服务端此刻还愿意再等 8 秒。
+        //   改成连续 N 次：坏连接最多晚一个心跳间隔被发现。
+        state.heartbeatFailures = (state.heartbeatFailures || 0) + 1;
+        if (state.heartbeatFailures < HEARTBEAT_FAILURES_BEFORE_GIVING_UP) {
+          // 留一声再重试 —— 不出声的话「抖了一下自愈了」和「一直很稳」
+          // 在外部一模一样，下次报"经常断"就没有数据可查。
+          try {
+            console.warn(
+              "[direct] 心跳超时，重试中",
+              state.heartbeatFailures,
+              "/",
+              HEARTBEAT_FAILURES_BEFORE_GIVING_UP,
+              (error && error.message) || error
+            );
+          } catch (_) {}
+          scheduleHeartbeat(state);
+          return;
         }
+        failActive(state, error, true);
       });
     }, HEARTBEAT_INTERVAL_MS);
   }
@@ -10961,6 +10987,9 @@ if (window.__bwPwaProviderOnly) return;
       heartbeatTimer: null,
       heartbeatInFlight: false,
       heartbeatSequence: 0,
+      // 每条新连接从 0 开始 —— 不重置的话上一条连接的失败计数会带进新连接，
+      // 表现是刚连上就被判死。
+      heartbeatFailures: 0,
       uplinkActive: false,
       uplinkSequence: 0,
       uplinkTimestampBase: Math.floor(Date.now() * 1000),

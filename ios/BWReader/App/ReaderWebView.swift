@@ -363,6 +363,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     let nativePencilInk = NativePencilInkController()
     private var readerForeground = true
     private var readerWasBackgrounded = false
+    /// .inactive 宽限期的定时任务；回到 .active 时取消（见 setReaderScenePhase）
+    private var readerInactiveGraceTask: Task<Void, Never>?
     private var webContentProcessNeedsReload = false
     private let ankiMobilePendingStore = ReaderAnkiMobilePendingStore.shared
     private var pendingAnkiMobileExports = [String: PendingAnkiMobileExport]()
@@ -2456,20 +2458,59 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         continuation.resume(returning: succeeded)
     }
 
+    /// `.inactive` 的宽限期。
+    ///
+    /// iOS 在**用户根本没离开 App** 的时候也会给 `.inactive`：下拉通知中心、
+    /// 上滑控制中心、进 App 切换器、系统权限弹窗、多任务尺寸变化 —— 这些
+    /// 大多在一两秒内就回到 `.active`。
+    ///
+    /// 而这里原来 `.inactive` 与 `.background` 走同一条路、**零缓冲**地
+    /// 拆掉上下文 WSS，于是"稍微碰一下就什么都做不了"（用户 2026-08-23 原话）。
+    ///
+    /// ⚠ 服务端不需要跟着改：Direct 对 context-only 阶段**本来就没有空闲期限**
+    /// （DirectConnectionPhaseDeadline.ContextOnly => null），断开完全是客户端
+    /// 自己的策略。所以这一刀只在客户端，代价可控。
+    ///
+    /// 真进后台（`.background`）仍然立刻断 —— iOS 会挂起进程，留着也没用，
+    /// 而且那才是"用户确实离开了"的可靠信号。
+    private static let readerInactiveGrace: TimeInterval = 12
+
     func setReaderScenePhase(_ phase: ScenePhase) {
         switch phase {
         case .background:
             readerWasBackgrounded = true
+            cancelReaderInactiveGrace()
             setReaderForeground(false, restartLocalRuntime: false)
         case .inactive:
-            setReaderForeground(false, restartLocalRuntime: false)
+            // 先不动连接，给一个宽限期；期间回到 .active 就当什么都没发生。
+            scheduleReaderInactiveGrace()
         case .active:
+            cancelReaderInactiveGrace()
             let shouldRestart = readerWasBackgrounded
             readerWasBackgrounded = false
             setReaderForeground(true, restartLocalRuntime: shouldRestart)
         @unknown default:
+            cancelReaderInactiveGrace()
             setReaderForeground(false, restartLocalRuntime: false)
         }
+    }
+
+    private func scheduleReaderInactiveGrace() {
+        cancelReaderInactiveGrace()
+        readerInactiveGraceTask = Task { [weak self] in
+            try? await Task.sleep(
+                nanoseconds: UInt64(Self.readerInactiveGrace * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            // 类已是 @MainActor，Task 继承 actor 上下文 —— 不需要再 MainActor.run
+            guard let self else { return }
+            self.readerInactiveGraceTask = nil
+            self.setReaderForeground(false, restartLocalRuntime: false)
+        }
+    }
+
+    private func cancelReaderInactiveGrace() {
+        readerInactiveGraceTask?.cancel()
+        readerInactiveGraceTask = nil
     }
 
     func setReaderForeground(
