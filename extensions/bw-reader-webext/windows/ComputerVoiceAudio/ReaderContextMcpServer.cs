@@ -523,6 +523,25 @@ internal sealed class ReaderContextMcpServer
                     + "outputAccess before calling a mutating Reader tool: "
                     + "a readable cached page can remain ready after its "
                     + "live App or extension source has disconnected. "
+                    // ⚠ 归因说明。2026-08-23：用户看到本工具失败时，模型回答
+                    //   「这次 Reader 连接断开了」并据此说卡片没发出去 —— 那是
+                    //   错误归因。本工具只读 Windows 本机的快照 JSON，App 是否
+                    //   在线完全不影响它；App 离线时它照样成功，只是 ageSec 变大。
+                    //   所以它**失败**只可能是本机 MCP 传输本身的问题（进程被
+                    //   替换/重启，例如刚安装过 Direct 新版），跟阅读器连接无关。
+                    //   模型拿到的错误文本（如 "Transport closed"）里没有任何
+                    //   信息能让它区分这两件事，所以必须在这里讲明白。
+                    + "This tool never contacts the App: it only reads the "
+                    + "Windows-local snapshot file, so it succeeds even when "
+                    + "the App is offline (ageSec simply grows). Therefore a "
+                    + "FAILURE of this tool means the local MCP transport "
+                    + "itself is unavailable - typically the MCP process was "
+                    + "just replaced or restarted, e.g. right after a Direct "
+                    + "bridge upgrade. It does NOT mean the Reader "
+                    + "disconnected, and it says nothing about whether cards "
+                    + "or other Reader writes went through. Do not report it "
+                    + "to the user as a Reader connection problem; say the "
+                    + "local tool connection dropped and retry. "
                     // 正文里的 ⟦…⟧ 标记此前从未向模型解释过。系统照样把标记
                     // 发出去,于是模型看到裸标记只能自己猜 —— 辛苦嵌进正文的
                     // 位置信息等于白给。
