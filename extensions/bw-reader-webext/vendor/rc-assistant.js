@@ -2053,9 +2053,100 @@ if (window.__bwPwaProviderOnly) return;
   };
   // ── 改动发生时**自动**生成「跳转 + 撤销/重做」卡片(系统在高亮/便签写入时生成,非 AI 文本生成)──
   var _assistEdits = {}, _aeCtr = 0;
+  // ── 自建页(插入页)的 AI 写操作:改 / 删 ─────────────────────────
+  //
+  // 用户 2026-08-23:「作为一个生成物,ai 那里并没有读取,修改,删除的手段」。
+  // /pdf/api/userpages 是 App 内本地执行,所以助手(在 Pi)只能把写操作交到这里来做。
+  //
+  // ⚠ 删除**必须能撤销**。AI 造纸此前是不可逆写操作 —— 用户说「刚才那张纸删掉」
+  //   之后如果反悔,内容就真没了。所以删之前把整条留在动作里,撤销时原样重建。
+  function _assistUserPage(d) {
+    var EP = '/pdf/api/userpages';
+    var fetchFn = (window.__bwReaderFetch || window.fetch).bind(window);
+    var undone = false;
+
+    function reload() {
+      // 真符号是 __upRerender(upId)（pdf-uishared.js:850）。
+      // notesReload 顺带重挂钉在这页上的卡片/便签。
+      try { window.__upRerender && window.__upRerender(d.id); } catch (_) {}
+      try { window.notesReload && window.notesReload(); } catch (_) {}
+    }
+    function req(method, body) {
+      return fetchFn(EP + '?file=' + encodeURIComponent(d.file || ''), {
+        method: method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }).then(function (r) { return r.ok ? r.json() : null; })
+        .catch(function () { return null; });
+    }
+
+    function apply() {
+      if (d.op === 'delete') return req('DELETE', { id: d.id });
+      var patch = { id: d.id };
+      Object.keys(d.after || {}).forEach(function (k) { patch[k] = d.after[k]; });
+      return req('PATCH', patch);
+    }
+    function revert() {
+      if (d.op === 'delete') {
+        // 原样重建。⚠ 新 id 由服务端发 —— 不要复用旧 id 假装没删过,
+        //   那会让引用旧 id 的东西指向一张语义上不同的页。
+        var body = { after: (d.before || {}).after || 0,
+                     title: (d.before || {}).title || '',
+                     md: (d.before || {}).md || '' };
+        return req('POST', body);
+      }
+      var patch = { id: d.id };
+      Object.keys(d.before || {}).forEach(function (k) { patch[k] = d.before[k]; });
+      return req('PATCH', patch);
+    }
+
+    var card = document.createElement('div');
+    card.className = 'asst-edit-card';
+    var head = document.createElement('div');
+    head.className = 'asst-edit-h';
+    var what = d.op === 'delete' ? '🗑 已删除自建页' : '✏️ 已改写自建页';
+    head.textContent = what + ' ' + (d.label || '') +
+                       (d.title ? ('「' + d.title + '」') : '');
+    card.appendChild(head);
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'asst-edit-b';
+    btn.textContent = '↩ 撤销';
+    btn.addEventListener('click', function () {
+      btn.disabled = true;
+      (undone ? apply() : revert()).then(function (r) {
+        btn.disabled = false;
+        if (!r || r.ok !== true) {
+          // ⚠ 失败要出声。静默失败会让用户以为撤销成功了。
+          head.textContent = what + ' ' + (d.label || '') + '（撤销失败，内容未变）';
+          return;
+        }
+        undone = !undone;
+        btn.textContent = undone ? '↪ 重做' : '↩ 撤销';
+        head.textContent = (undone ? '↩ 已撤销：' : what + ' ') +
+                           (d.label || '') + (d.title ? ('「' + d.title + '」') : '');
+        reload();
+      });
+    });
+    card.appendChild(btn);
+    // 与既有 _assistPageCard 同一处挂载：会话线程里，然后滚到底。
+    try { thread.appendChild(card); scrollDown(); } catch (_) {}
+
+    return apply().then(function (r) {
+      if (!r || r.ok !== true) {
+        head.textContent = '⚠ 自建页操作失败：' + (d.label || '') +
+                           '（内容未变）';
+        btn.remove();
+        return;
+      }
+      reload();
+    });
+  }
+
   window._assistEdit = function (d) {
     try {
       if (d && d.type === 'page-card') return _assistPageCard(d);
+      if (d && d.type === 'userpage') return _assistUserPage(d);
       if (!d || !Array.isArray(d.items) || !d.items.length) return;
       if (d.type === 'note') return _assistNoteCard(d);   // 便签写操作(notes_create/notes_edit)→ 便签版卡
       if (d.type !== 'highlight') return;

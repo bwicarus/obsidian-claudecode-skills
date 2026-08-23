@@ -2559,6 +2559,9 @@ def _upage_read_text(file_rel, pdf_page, ctx=None):
                 same_page = int(it.get("page") or 0) == int(pdf_page or 0)
             except (TypeError, ValueError):
                 same_page = False
+            # ⚠ EPUB 插入页没有 `page` 字段(只有 after + u_* id)，
+            #   所以 int(page)==pdf_page 永远不成立 —— 它们此前在 Pi 路径上
+            #   一个字都读不到。按 id 命中是它们唯一的入口。
             if same_page or (not it.get("page") and str(it.get("id") or "") == str(pdf_page)):
                 items.append(it)
     else:
@@ -2572,6 +2575,12 @@ def _upage_read_text(file_rel, pdf_page, ctx=None):
     out = []
     for it in items:
         out.append("【自建页「%s」(用户手写作答页,内容如下,别再找 PDF 正文)】" % (it.get("title") or ""))
+        # ⚠ 用户手打的 markdown 正文。此前**一个字都不返回** —— 只认 blocks。
+        #   于是用户在插入页写完笔记问「我这页写得对吗」，AI 只看得到标题。
+        #   （用户 2026-08-23 报的「作为一个生成物，ai 并没有读取的手段」的一半。）
+        _md = (it.get("md") or "").strip()
+        if _md:
+            out.append(_md[:8000])
         qn = 0
         for b in (it.get("blocks") or []):
             k = b.get("kind")
@@ -2626,7 +2635,12 @@ def _t_read_page(args, ctx):
     for pg in pages:
         up = _upage_read_text(file_rel, pg, ctx)   # 原生书读 App 快照;旧书读 Pi sidecar
         if up:
-            parts.append(up); up_hit = True; continue
+            parts.append(up)
+            up_hit = True
+            # ⚠ 不再 continue。自建页命中不等于这一页别的东西都不用读 ——
+            #   _read_one 还负责把钉在这页上的便签/卡片补进上下文
+            #   (_pin_context_annotations)。原来一 continue 就把它整条绕过了，
+            #   表现是"AI 看不到我钉在这页上的卡片"，而且不报错。
         b = _read_one(file_rel, ctx, pg, figd)
         if b:
             parts.append(b)
@@ -6037,8 +6051,181 @@ def _t_error_patterns(args, ctx):
             "样本数": d.get("n_samples")}
 
 
+
+# ── 自建页(插入页)的 AI 手段:列出 / 改 / 删 ─────────────────────────
+#
+# 用户 2026-08-23:「作为一个生成物,ai 那里并没有读取,修改,删除的手段」。
+# 调查确认三分之二成立:创建链相当完整,读取残缺(只认 blocks、不读用户手打的 md),
+# **修改和删除完全没有** —— 全仓没有任何面向 AI 的 userpage edit/delete,
+# undo_last 的 kind 白名单也不含它。于是 AI 造纸是**不可逆写操作**。
+#
+# ⚠ /pdf/api/userpages 是 **App 内本地执行**(owner=local + runtime 有本地分支,
+#   scripts/where_does_this_route_run.py 判定)。所以写操作不能在 Pi 直接落盘,
+#   必须经 client_action 交给 App —— 与 page_card_edit/delete 同一条路子。
+#   走 `_assistEdit` 的 type 判别(新增 'userpage'),不新增 client-action fn:
+#   那份白名单有 4 处副本且**没有契约测试**,能不碰就不碰。
+
+
+def _upages_for_ctx(file_rel, ctx):
+    """当前书的全部自建页。原生书读 App 快照,旧书读 Pi sidecar。"""
+    native = _native_pdf_items(ctx, "user_pages")
+    if native is not None:
+        return [it for it in native if isinstance(it, dict)]
+    try:
+        import pdf_reader as P
+        return list(P._upages_load(file_rel) or [])
+    except Exception:
+        return []
+
+
+def _upage_label(it, ctx=None):
+    """人能读、AI 也能复述的位置标签。
+
+    自建页**没有页码**(只有 id + after=插在原书第几页之后),而且它不进 PDF,
+    所以后面那页的页号不变 —— 用户 2026-08-23 实测确认。
+    于是标签由「前一页 + 字母」构成:46-a、46-b……同一 after 内按既有排序
+    (after, created, id) 决定字母,天然稳定。
+
+    ⚠ 标签**只用于显示和对话**,绝不进 bind.page / ?page= / 搜索索引的整数列。
+      一旦泄漏进去,parseInt("46-a") === 46 会把它静默当成真实的第 46 页。
+    """
+    try:
+        after = int(it.get("after") or 0)
+    except (TypeError, ValueError):
+        after = 0
+    disp = after
+    if ctx:
+        try:
+            disp = _to_disp(ctx, after)
+        except Exception:
+            disp = after
+    return "%s-%s" % (disp, it.get("_letter") or "a")
+
+
+def _upages_labeled(file_rel, ctx):
+    items = _upages_for_ctx(file_rel, ctx)
+
+    def _key(it):
+        try:
+            a = int(it.get("after") or 0)
+        except (TypeError, ValueError):
+            a = 0
+        return (a, int(it.get("created") or 0), str(it.get("id") or ""))
+
+    items = sorted(items, key=_key)
+    seen = {}
+    for it in items:
+        try:
+            a = int(it.get("after") or 0)
+        except (TypeError, ValueError):
+            a = 0
+        n = seen.get(a, 0)
+        seen[a] = n + 1
+        it["_letter"] = chr(ord("a") + n) if n < 26 else ("z%d" % (n - 25))
+    return items
+
+
+def _t_userpage_list(args, ctx):
+    file_rel = ctx.get("file_rel", "")
+    items = _upages_labeled(file_rel, ctx)
+    out = []
+    for it in items[:60]:
+        md = (it.get("md") or "").strip()
+        out.append({
+            "id": str(it.get("id") or ""),
+            "label": _upage_label(it, ctx),
+            "title": (it.get("title") or "")[:120],
+            "after": it.get("after"),
+            "kind": "blocks" if it.get("blocks") else ("md" if md else "empty"),
+            "preview": md[:160],
+        })
+    return {"ok": True, "pages": out, "count": len(items),
+            "note": "label 形如 46-a=「第46页之后的第一张自建页」。它是**显示标签不是页码**，"
+                    "钉卡片/跳页请用 id。"}
+
+
+def _upage_write_target(args, ctx):
+    file_rel = ctx.get("file_rel", "")
+    want = str(args.get("id") or "").strip()
+    items = _upages_labeled(file_rel, ctx)
+    if not items:
+        return None, None, {"ok": False, "error": "这本书里没有自建页"}
+    hit = None
+    if want:
+        for it in items:
+            if str(it.get("id") or "") == want or _upage_label(it, ctx) == want:
+                hit = it
+                break
+        if hit is None:
+            return None, None, {
+                "ok": False, "error": "找不到这张自建页",
+                "known": [{"id": it.get("id"), "label": _upage_label(it, ctx)} for it in items[:20]],
+            }
+    else:
+        # 不给 id 时**不猜**。改错一张纸没有撤销余地，宁可让调用方明确。
+        return None, None, {
+            "ok": False, "error": "要改哪一张？请给 id 或 label",
+            "known": [{"id": it.get("id"), "label": _upage_label(it, ctx),
+                       "title": it.get("title")} for it in items[:20]],
+        }
+    return file_rel, hit, None
+
+
+def _t_userpage_edit(args, ctx):
+    file_rel, hit, err = _upage_write_target(args, ctx)
+    if err:
+        return err
+    changes = {}
+    if isinstance(args.get("md"), str):
+        changes["md"] = args["md"][:100000]
+    if isinstance(args.get("title"), str):
+        changes["title"] = args["title"][:120]
+    if not changes:
+        return {"ok": False, "error": "没有要改的内容（给 md 或 title）"}
+    before = {k: hit.get(k) for k in changes}
+    return {
+        "ok": True, "pending": True, "op": "edit",
+        "id": hit.get("id"), "label": _upage_label(hit, ctx),
+        "client_action": {"fn": "_assistEdit", "args": [{
+            "type": "userpage", "op": "edit", "file": file_rel,
+            "id": hit.get("id"), "label": _upage_label(hit, ctx),
+            "title": hit.get("title") or "",
+            "before": before, "after": changes,
+        }]},
+        "note": "已交给 App 就地改写；会给出撤销卡。",
+    }
+
+
+def _t_userpage_delete(args, ctx):
+    file_rel, hit, err = _upage_write_target(args, ctx)
+    if err:
+        return err
+    return {
+        "ok": True, "pending": True, "op": "delete",
+        "id": hit.get("id"), "label": _upage_label(hit, ctx),
+        "client_action": {"fn": "_assistEdit", "args": [{
+            "type": "userpage", "op": "delete", "file": file_rel,
+            "id": hit.get("id"), "label": _upage_label(hit, ctx),
+            "title": hit.get("title") or "",
+            # 删除前把整条留在动作里 —— 撤销要靠它原样重建。
+            "before": {k: hit.get(k) for k in ("after", "title", "md", "blocks")
+                       if hit.get(k) is not None},
+        }]},
+        "note": "已交给 App 删除；会给出撤销卡。",
+    }
+
+
 TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
+    "userpage_list": ("列出这本书里用户自建的插入页(标题/位置标签/正文预览)。"
+                      "用户提到「我建的那张纸/上次那页」时先调它定位。"
+                      "label 形如 46-a=第46页之后的第一张,是**显示标签不是页码**。args {}",
+                      _t_userpage_list),
+    "userpage_edit": ("改一张自建页的正文或标题。先 userpage_list 拿 id。"
+                      "md 是**整体替换**,要保留原内容就先读出来再改。args {id, md?, title?}",
+                      _t_userpage_edit),
+    "userpage_delete": ("删掉一张自建页。先 userpage_list 拿 id。会给撤销卡。args {id}",
+                        _t_userpage_delete),
     "page_cards_query": ("读当前 PDF 页上的所有卡片（包括锚定卡和手动拖入的自由卡）。"
                          "返回当前序号 number、稳定 placement id、notes revision、锚定词 label、"
                          "简洁语义正文及 count/returned/truncated/content_truncated；不返回渲染 HTML、控件或代理地址。"
