@@ -1700,6 +1700,12 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   margin-right: .3em; padding: 0 .28em; border-radius: .28em;
                   font-size: .78em; font-weight: 700;
                   background: rgba(120,110,190,.22); }
+                math { font-size: 1.05em; }
+                math[display="block"] { display: block; margin: .45rem 0;
+                  text-align: center; }
+                .texraw { font-family: ui-monospace, Consolas, monospace;
+                  font-size: .86em; padding: 0 .25em; border-radius: .2em;
+                  background: rgba(200,120,80,.16); }
                 .cardblk { margin: .35rem 0; padding: .3rem .45rem;
                   border-left: 3px solid rgba(150,130,240,.75);
                   background: rgba(150,130,240,.09); border-radius: .2rem; }
@@ -1994,6 +2000,212 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 const MARK_L = '\u27E6';
                 const MARK_R = '\u27E7';
 
+                // ── 公式：TeX → MathML ────────────────────────────
+                // 为什么不是 MathJax/KaTeX：查看器的 CSP 是
+                //   script-src 'unsafe-inline'（**没有 'self'**）、default-src 'none'
+                // 所以外部脚本一律加载不了，KaTeX 还要 font-src。内联 MathJax
+                // (~1MB) 塞进 C# raw string 也不现实（审阅不能、diff 不可用）。
+                // MathML 是浏览器原生排版：零外部资源、零 innerHTML，
+                // Chromium 109+ / 本查看器用的 Edge 都支持。
+                //
+                // 只覆盖教科书与 AI 卡片里真实高频的子集。**遇到不认识的一律
+                // 原样显示 TeX 源码**（.texraw）—— 看得见才知道要补什么，
+                // 而不是渲成一个似是而非的东西。
+                const MATHNS = 'http://www.w3.org/1998/Math/MathML';
+                const TEX_SYM = {
+                  alpha: '\u03b1', beta: '\u03b2', gamma: '\u03b3', delta: '\u03b4',
+                  epsilon: '\u03b5', zeta: '\u03b6', eta: '\u03b7', theta: '\u03b8',
+                  lambda: '\u03bb', mu: '\u03bc', nu: '\u03bd', xi: '\u03be',
+                  pi: '\u03c0', rho: '\u03c1', sigma: '\u03c3', tau: '\u03c4',
+                  phi: '\u03c6', chi: '\u03c7', psi: '\u03c8', omega: '\u03c9',
+                  Gamma: '\u0393', Delta: '\u0394', Theta: '\u0398', Lambda: '\u039b',
+                  Xi: '\u039e', Pi: '\u03a0', Sigma: '\u03a3', Phi: '\u03a6',
+                  Psi: '\u03a8', Omega: '\u03a9',
+                  sum: '\u2211', prod: '\u220f', int: '\u222b', oint: '\u222e',
+                  infty: '\u221e', partial: '\u2202', nabla: '\u2207',
+                  pm: '\u00b1', mp: '\u2213', times: '\u00d7', div: '\u00f7',
+                  cdot: '\u22c5', cdots: '\u22ef', ldots: '\u2026',
+                  leq: '\u2264', le: '\u2264', geq: '\u2265', ge: '\u2265',
+                  neq: '\u2260', ne: '\u2260', approx: '\u2248', equiv: '\u2261',
+                  sim: '\u223c', propto: '\u221d',
+                  to: '\u2192', rightarrow: '\u2192', leftarrow: '\u2190',
+                  Rightarrow: '\u21d2', leftrightarrow: '\u2194',
+                  in: '\u2208', notin: '\u2209', subset: '\u2282',
+                  cup: '\u222a', cap: '\u2229', forall: '\u2200', exists: '\u2203',
+                  angle: '\u2220', perp: '\u22a5', circ: '\u2218',
+                  quad: '\u2003', qquad: '\u2003\u2003'
+                };
+                const TEX_FUNC = ['sin', 'cos', 'tan', 'log', 'ln', 'exp',
+                  'lim', 'max', 'min', 'det', 'dim', 'gcd', 'arg'];
+
+                function mel(name, text) {
+                  const el = document.createElementNS(MATHNS, name);
+                  if (text != null) el.textContent = text;
+                  return el;
+                }
+
+                // 词法：把 TeX 切成 {cmd} / {group} / {char} 三类
+                function texTokens(src) {
+                  const out = [];
+                  for (let i = 0; i < src.length;) {
+                    const ch = src.charAt(i);
+                    if (ch === '\\') {
+                      const m = /^[A-Za-z]+/.exec(src.slice(i + 1));
+                      if (m) { out.push({ cmd: m[0] }); i += 1 + m[0].length; continue; }
+                      out.push({ char: src.charAt(i + 1) || '\\' }); i += 2; continue;
+                    }
+                    if (ch === '{') {
+                      let depth = 1, j = i + 1;
+                      for (; j < src.length && depth; j++) {
+                        if (src.charAt(j) === '\\') { j++; continue; }
+                        if (src.charAt(j) === '{') depth++;
+                        else if (src.charAt(j) === '}') depth--;
+                      }
+                      if (depth) throw new Error('brace');
+                      out.push({ group: src.slice(i + 1, j - 1) });
+                      i = j; continue;
+                    }
+                    if (ch === '}') throw new Error('brace');
+                    if (/\s/.test(ch)) { i++; continue; }
+                    out.push({ char: ch }); i++;
+                  }
+                  return out;
+                }
+
+                function texAtom(token) {
+                  if (token == null) throw new Error('eof');
+                  if (token.group != null) return texRow(token.group);
+                  if (token.cmd) {
+                    if (TEX_SYM[token.cmd]) return mel('mo', TEX_SYM[token.cmd]);
+                    if (TEX_FUNC.indexOf(token.cmd) >= 0) return mel('mi', token.cmd);
+                    throw new Error('cmd:' + token.cmd);
+                  }
+                  const ch = token.char;
+                  if (/[0-9.]/.test(ch)) return mel('mn', ch);
+                  if (/[A-Za-z]/.test(ch)) return mel('mi', ch);
+                  return mel('mo', ch);
+                }
+
+                function texRow(src) {
+                  const tokens = texTokens(src);
+                  const row = mel('mrow');
+                  let i = 0;
+                  let guard = 0;
+                  while (i < tokens.length && guard++ < 4000) {
+                    const tk = tokens[i];
+                    let node;
+                    if (tk.cmd === 'frac' || tk.cmd === 'dfrac' || tk.cmd === 'tfrac') {
+                      const f = mel('mfrac');
+                      f.appendChild(texAtom(tokens[i + 1]));
+                      f.appendChild(texAtom(tokens[i + 2]));
+                      node = f; i += 3;
+                    } else if (tk.cmd === 'sqrt') {
+                      if (tokens[i + 1] && tokens[i + 1].char === '[') {
+                        // \sqrt[n]{x}：找到 ] 之前的内容当次数
+                        let j = i + 2, idx = '';
+                        while (j < tokens.length && tokens[j].char !== ']') {
+                          idx += tokens[j].char || tokens[j].group || '';
+                          j++;
+                        }
+                        const r = mel('mroot');
+                        r.appendChild(texAtom(tokens[j + 1]));
+                        r.appendChild(texRow(idx));
+                        node = r; i = j + 2;
+                      } else {
+                        const s = mel('msqrt');
+                        s.appendChild(texAtom(tokens[i + 1]));
+                        node = s; i += 2;
+                      }
+                    } else if (tk.cmd === 'text' || tk.cmd === 'mathrm'
+                      || tk.cmd === 'operatorname') {
+                      const g = tokens[i + 1];
+                      if (!g || g.group == null) throw new Error('text');
+                      node = mel('mtext', g.group); i += 2;
+                    } else if (tk.cmd === 'left' || tk.cmd === 'right') {
+                      const next = tokens[i + 1];
+                      const glyph = next && (next.char || '');
+                      node = glyph && glyph !== '.' ? mel('mo', glyph) : null;
+                      i += 2;
+                      if (!node) continue;
+                    } else {
+                      node = texAtom(tk); i += 1;
+                    }
+                    // 后缀 ^ 和 _（可同时出现）
+                    let sup = null, sub = null;
+                    let post = 0;
+                    while (post++ < 2 && i < tokens.length) {
+                      const nx = tokens[i];
+                      if (nx.char === '^' && sup === null) {
+                        sup = texAtom(tokens[i + 1]); i += 2; continue;
+                      }
+                      if (nx.char === '_' && sub === null) {
+                        sub = texAtom(tokens[i + 1]); i += 2; continue;
+                      }
+                      break;
+                    }
+                    if (sup && sub) {
+                      const w = mel('msubsup');
+                      w.appendChild(node); w.appendChild(sub); w.appendChild(sup);
+                      node = w;
+                    } else if (sup) {
+                      const w = mel('msup');
+                      w.appendChild(node); w.appendChild(sup); node = w;
+                    } else if (sub) {
+                      const w = mel('msub');
+                      w.appendChild(node); w.appendChild(sub); node = w;
+                    }
+                    row.appendChild(node);
+                  }
+                  return row;
+                }
+
+                function texToMathML(tex, display) {
+                  const math = document.createElementNS(MATHNS, 'math');
+                  if (display) math.setAttribute('display', 'block');
+                  math.appendChild(texRow(tex));
+                  return math;
+                }
+
+                // 把一段纯文本按 $…$ / $$…$$ 切成 {text} 与 {tex} 段。
+                // ⚠ 加了守卫，否则 "$5 和 $8" 会被当成公式：
+                //   界定符两侧不能紧邻空白，长度有上限，且内容要像数学。
+                function mathSegments(text) {
+                  const segs = [];
+                  const re = /\$\$([^$]{1,400})\$\$|\$([^$\n]{1,200})\$/g;
+                  let last = 0, m;
+                  while ((m = re.exec(text)) !== null) {
+                    const body = m[1] != null ? m[1] : m[2];
+                    const looksMath = /[\\^_={}]|[A-Za-z]\s*[0-9]|[+\-*/]/.test(body)
+                      && !/^\s|\s$/.test(body);
+                    if (!looksMath) continue;
+                    if (m.index > last) segs.push({ text: text.slice(last, m.index) });
+                    segs.push({ tex: body, display: m[1] != null });
+                    last = m.index + m[0].length;
+                  }
+                  if (last < text.length) segs.push({ text: text.slice(last) });
+                  return segs.length ? segs : [{ text: text }];
+                }
+
+                function paintText(target, text) {
+                  for (const seg of mathSegments(text)) {
+                    if (seg.tex == null) {
+                      if (seg.text) target.appendChild(document.createTextNode(seg.text));
+                      continue;
+                    }
+                    try {
+                      target.appendChild(texToMathML(seg.tex, seg.display));
+                    } catch {
+                      // 不认识的命令/坏语法 → 原样显示 TeX 源码。
+                      // 渲成似是而非的东西比不渲更糟：看得见才知道要补什么。
+                      const code = document.createElement('code');
+                      code.className = 'texraw';
+                      code.textContent = (seg.display ? '$$' : '$')
+                        + seg.tex + (seg.display ? '$$' : '$');
+                      target.appendChild(code);
+                    }
+                  }
+                }
+
                 function splitUnescaped(line, sep) {
                   const out = [];
                   let cur = '';
@@ -2063,7 +2275,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
                       hd.textContent = '🎴 ' + (seg.card.head || '卡片');
                       box.appendChild(hd);
                       const bd = document.createElement('div');
-                      bd.textContent = unescapeLeaf(seg.card.body).trim();
+                      paintText(bd, unescapeLeaf(seg.card.body).trim());
                       box.appendChild(bd);
                       target.appendChild(box);
                       continue;
@@ -2078,7 +2290,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
                       target.appendChild(chip);
                       text = text.slice(badge[0].length);
                     }
-                    if (text) target.appendChild(document.createTextNode(text));
+                    if (text) paintText(target, text);
                   }
                 }
 

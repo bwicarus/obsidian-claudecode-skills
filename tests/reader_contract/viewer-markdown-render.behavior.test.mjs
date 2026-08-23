@@ -31,16 +31,46 @@ class El {
     return this._text + this.children.map((c) => c.textContent ?? c.data ?? "").join("");
   }
   set title(v) { this.attrs.title = v; }
+  setAttribute(k, v) { this.attrs[k] = v; }
   appendChild(c) { this.children.push(c); return c; }
   replaceChildren() { this.children = []; this._text = ""; }
   get childNodes() { return this.children; }
 }
 const document = {
   createElement: (t) => new El(t),
+  createElementNS: (ns, t) => { const e = new El(t); e.ns = ns; return e; },
   createTextNode: (d) => ({ data: d, textContent: d, tag: "#text" }),
 };
 
+// ⚠ paintLeaf 现在会调 paintText（公式渲染），抠函数时必须带上它和它的依赖，
+//   否则跑起来是 ReferenceError —— 抠漏了要炸，不能静静地少抠一个。
+function extractConstLocal(name) {
+  const i = CS.indexOf(`const ${name} =`);
+  if (i < 0) throw new Error(`找不到常量 ${name}`);
+  let j = CS.indexOf("=", i) + 1;
+  while (/\s/.test(CS[j])) j++;
+  const open = CS[j];
+  if (open !== "{" && open !== "[") return CS.slice(i, CS.indexOf(";", j) + 1);
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  for (; j < CS.length; j++) {
+    if (CS[j] === open) depth++;
+    else if (CS[j] === close) { depth--; if (!depth) { j++; break; } }
+  }
+  return CS.slice(i, CS.indexOf(";", j) + 1);
+}
+
 const src = [
+  extractConstLocal("MATHNS"),
+  extractConstLocal("TEX_SYM"),
+  extractConstLocal("TEX_FUNC"),
+  extractFn("mel"),
+  extractFn("texTokens"),
+  extractFn("texAtom"),
+  extractFn("texRow"),
+  extractFn("texToMathML"),
+  extractFn("mathSegments"),
+  extractFn("paintText"),
   extractFn("splitUnescaped"),
   extractFn("unescapeLeaf"),
   extractFn("leafSegments"),
