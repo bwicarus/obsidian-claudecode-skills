@@ -95,12 +95,36 @@ test("侧栏开着时 AI 的补绑也要登记 —— toast 不能是空头支�
   assert.ok(VOICE.slice(iSide, iFix).includes("_cardPush"), "位置关系变了，重新确认这条");
 });
 
-test("插删页时 card.bind.page 跟着迁", () => {
+test("插删页时词锚跟着迁 —— 两个槽、两个表面，一个都不能少", () => {
   // 漏掉不报错：anchor 迁了、bind 留在旧页号 → 卡片去了新页，
   // 而描边和序号画在旧页号那一页（或那页没了就干脆不出现）。
-  const body = PY.slice(PY.indexOf("def _pam_notes(ctx):"), PY.indexOf("def _pam_notes(ctx):") + 2200);
-  assert.match(body, /b = \(\(n or \{\}\)\.get\("card"\) or \{\}\)\.get\("bind"\) or \{\}/);
-  assert.match(body, /if b\.get\("kind"\) == "page-chars"/);
-  // 被锚的页删了 → 撤掉词锚退回普通便签，别让它指向不存在的页
-  assert.match(body, /n\["card"\]\["bind"\] = None/);
+  //
+  // ⚠ 这条 2026-08-20 首次修时只覆盖了「Pi 的 card 槽」，两个方向都不全：
+  //   · 槽：AI 直绑的词锚落在 html.bind（persistBoundCard），不在 card.bind；
+  //     前端 wordBindSlot() 两个都认，迁移只认一个 = AI 钉的卡不迁。
+  //   · 表面：插删页在 App 内是**本地执行**的，走 native-local-runtime 那份，
+  //     Pi 这份根本不参与 —— 只改 Pi 等于在用户实际用的表面上没修。
+  const iPam = PY.indexOf("def _pam_notes(ctx):");
+  assert.ok(iPam >= 0, "_pam_notes 改名了？");
+  const body = PY.slice(iPam, iPam + 3000);
+  // Pi 侧：两个槽走同一段逻辑
+  assert.match(body, /for _slot in \("card", "html"\):/,
+    "Pi 侧只认一个槽 = AI 钉的卡插删页后跟标记分家");
+  assert.match(body, /if b\.get\("kind"\) != "page-chars":/);
+  // 被锚的页删了 → 只撤词锚、留住便签（跟 anchor 页被删时整条丢弃不同）
+  assert.match(body, /holder\["bind"\] = None/);
+
+  // App 侧：同一件事必须再做一遍
+  const RUNTIME = read("_server_deploy/static/pdf/native-local-runtime.js");
+  const iMig = RUNTIME.indexOf("function migrateNativePDFNotes(value, plan)");
+  const iNext = RUNTIME.indexOf("\n  function ", iMig + 10);
+  assert.ok(iMig >= 0 && iNext > iMig, "migrateNativePDFNotes 改名了？");
+  const mig = RUNTIME.slice(iMig, iNext);
+  assert.match(mig, /\['card', 'html'\]\.forEach\(function \(slot\)/,
+    "App 侧没迁词锚 —— 而插删页正是在 App 内本地执行的");
+  assert.match(mig, /bind\.kind !== 'page-chars'/);
+  // 页删了只清 bind、不丢便签；anchor 那一路才是丢弃（return output）
+  assert.match(mig, /if \(moved == null\) holder\.bind = null;/);
+  assert.match(mig, /if \(mapped == null\) return output;/,
+    "anchor 那一路的丢弃语义被动过了，重新确认这条");
 });

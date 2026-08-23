@@ -12048,20 +12048,33 @@ def _pam_notes(ctx):
                     changed = True; continue
                 if np != p:
                     a["page"] = np; changed = True
-            # 词锚（card.bind）也是按 PDF 页号定位的，同样要迁。
+            # 词锚也是按 PDF 页号定位的，同样要迁。
             # ⚠ 漏掉的话表现不是报错：anchor 迁了、bind 留在旧页号，于是卡片
             #   本体去了新页，而描边和序号画在**旧页号那一页**上（或者那页没了
             #   就干脆不出现）。两边各说各话，看着像"标记随机丢失"。
-            b = ((n or {}).get("card") or {}).get("bind") or {}
-            bp = b.get("page")
-            if b.get("kind") == "page-chars" and isinstance(bp, int) and not isinstance(bp, bool):
+            # ⚠ 词锚有**两个槽**：手动拖卡钉的落在 card.bind，AI 直绑的落在
+            #   html.bind（rc-stickynote.js::persistBoundCard，2026-08-20 起）。
+            #   前端 wordBindSlot() 两个都认，这里只认一个就等于 AI 钉的卡不迁。
+            for _slot in ("card", "html"):
+                holder = (n or {}).get(_slot)
+                if not isinstance(holder, dict):
+                    continue
+                b = holder.get("bind") or {}
+                bp = b.get("page")
+                if b.get("kind") != "page-chars":
+                    continue
+                if not isinstance(bp, int) or isinstance(bp, bool):
+                    continue
                 nbp = ctx["mv"](bp)
                 if nbp is None:
-                    # 被锚的那一页删了 —— 撤掉词锚退回普通便签，别让它指向不存在的页
-                    n["card"]["bind"] = None
+                    # 被锚的那一页删了 —— 撤掉词锚退回普通便签，别让它指向不存在的页。
+                    # 注意跟 anchor 的区别：anchor 没了这条便签无处安放（上面直接丢弃），
+                    # 词锚没了它还能作为普通便签继续存在，所以只清 bind、留住便签。
+                    holder["bind"] = None
                     changed = True
                 elif nbp != bp:
-                    b["page"] = nbp; changed = True
+                    b["page"] = nbp
+                    changed = True
             keep.append(n)
         if changed:
             d[:] = keep

@@ -5658,6 +5658,26 @@
         if (mapped == null) return output;
         anchor.page = mapped;
       }
+      // 词锚（page-chars）也按 PDF 页号定位，插删页时必须一起迁。
+      //   不迁的表现不是报错：anchor 去了新页，而描边和序号仍画在旧页号那一页
+      //   （或那页没了就干脆不出现）—— 卡片跟它的标记分家，看着像"标记随机丢失"。
+      // ⚠ 两个槽都要走：手动拖卡钉的落在 card.bind，AI 直绑的落在 html.bind
+      //   （rc-stickynote.js::persistBoundCard）。前端 wordBindSlot() 两个都认。
+      // ⚠ 页被删时的处置跟 anchor **不同**：anchor 没了这条便签无处安放，
+      //   所以上面整条丢弃；词锚没了它还能作为普通便签继续存在，所以只清 bind。
+      //   这也跟服务端 _pam_notes 的口径一致。
+      ['card', 'html'].forEach(function (slot) {
+        var holder = note && note[slot];
+        if (!holder || typeof holder !== 'object' || Array.isArray(holder)) return;
+        var bind = holder.bind;
+        if (!bind || typeof bind !== 'object' || bind.kind !== 'page-chars') return;
+        if (!Number.isInteger(bind.page)) return;
+        var moved = nativePDFPageMap(
+          bind.page, plan.operation, plan.pivotPage
+        );
+        if (moved == null) holder.bind = null;
+        else bind.page = moved;
+      });
       output.push(note);
       return output;
     }, []);

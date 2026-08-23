@@ -16,7 +16,9 @@
     "card-top-fields": {
       "what": "卡片顶层字段（kind/title/data + 可选 bind/brief/cid/sources）",
       "canonical": "_server_deploy/reader_card_contract.py",
-      "tests": ["tests/reader_contract/card-bind-whitelist-parity.contract.test.mjs"],
+      "tests": [
+        "tests/reader_contract/card-bind-whitelist-parity.contract.test.mjs"
+      ],
       "sites": [
         {
           "file": "_server_deploy/reader_card_contract.py",
@@ -122,6 +124,33 @@
           "role": "Safari 扩展",
           "note": "生成 vendor/ 自带副本，需重新打包"
         }
+      ]
+    },
+    "page-anchor-migration": {
+      "what": "插删 PDF 页时，所有按页号定位的状态都要跟着迁（含词锚 page-chars 的两个槽）",
+      "canonical": "_server_deploy/pdf_reader.py",
+      "tests": [
+        "tests/test_page_migration_word_bind.py",
+        "tests/reader_contract/page-migration-word-bind.behavior.test.mjs"
+      ],
+      "sites": [
+        {
+          "file": "_server_deploy/pdf_reader.py",
+          "role": "Pi / 桌面 / 扩展表面",
+          "note": "PAGE_ANCHOR_MIGRATIONS 注册表 + 19 个 _pam_* 迁移器；_pam_notes 里词锚要走 card 和 html 两个槽"
+        },
+        {
+          "file": "_server_deploy/static/pdf/native-local-runtime.js",
+          "role": "App 表面（插删页在 App 内本地执行）",
+          "note": "nativePDFMutationSnapshot 编排 7 个 migrateNativePDF*；⚠ 这一侧才是用户实际用的那条 —— 只改 Pi 等于没修"
+        }
+      ],
+      "gotchas": [
+        "两侧的迁移器**不是同一套**：Pi 19 个、App 7 个（App 只持有本地状态）。数量不等是正常的，但 notes / highlights / ink / reading-pos / userpages 这些两边都有的，语义必须一致。",
+        "词锚有**两个槽**：手动拖卡钉的落在 note.card.bind，AI 直绑的落在 note.html.bind（rc-stickynote.js::persistBoundCard）。前端 wordBindSlot() 两个都认，迁移只认一个 = 那一半卡片插删页后跟标记分家。",
+        "页被删时 anchor 和 bind 的处置**不同**：anchor 没了整条便签丢弃（无处安放），bind 没了只清 bind、留住便签（它还能当普通便签用）。改任一侧时别抹平这个差别。",
+        "漏迁的表现从来不是报错，而是「卡片去了新页、描边和序号留在旧页」——看着像标记随机丢失。所以这条只能靠行为测试守，纯 match 断言守不住。",
+        "Python 里 True 是 int 的子类：页号判断必须显式排除 bool，否则 page=True 会被当成第 1 页迁走。"
       ]
     }
   }
