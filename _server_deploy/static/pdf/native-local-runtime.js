@@ -3812,6 +3812,47 @@
 
   var PAGE_TEXT_MAX_MATCHES = 8;
 
+  // 把**字符**按块折成 `[NN] 正文` 的行。
+  //
+  // ⚠ 必须从 chars 拼，**不能从 segments 拼** —— 每条 segment 的 text 是
+  //   截断到 120 字的预览，拿它拼会把整页正文悄悄缩成一串摘要。
+  //   （既有契约测试抓到过这一点：1500 字的页变成了 125 字。）
+  //
+  // 助手要能说「第 3 块的这句话」,前提是它**看得见**块编号。此前只有
+  // 漫画/表格版面印 [NN],普通书页只有一整段平文本 —— 于是「第 3 块」
+  // 这句话在普通页上根本说不出口。
+  //
+  // ⚠ 行首的 [NN] 是**块地址**,不是字符下标。要下标只能用 segments。
+  //   两套编号长得一样,这是 ANCHOR_MAP 那个陷阱的同一形态。
+  function blockLines(chars, limit) {
+    var lines = [];
+    var cur = null, seq = 0;
+    var no = Object.create(null);
+    for (var i = 0; i < (chars || []).length; i += 1) {
+      var item = chars[i];
+      if (!item) continue;
+      var value = String(item.c == null ? '' : item.c);
+      if (!value) continue;
+      var bk = item.bk === undefined || item.bk === null ? '' : String(item.bk);
+      if (!cur || cur.bk !== bk) {
+        if (cur) lines.push(cur);
+        if (!no[bk]) { seq += 1; no[bk] = seq; }
+        cur = { bk: bk, n: no[bk], buf: '' };
+      }
+      cur.buf += value;
+    }
+    if (cur) lines.push(cur);
+    var out = [];
+    for (var j = 0; j < lines.length; j += 1) {
+      var body = lines[j].buf.replace(/\s+/g, ' ').trim();
+      if (!body) continue;
+      var n2 = lines[j].n;
+      out.push('[' + (n2 < 10 ? '0' : '') + n2 + '] ' + body);
+    }
+    var text = out.join('\n');
+    return limit && text.length > limit ? text.slice(0, limit) : text;
+  }
+
   // 按助手给的原文把整页收窄成"覆盖那句话的几条"。
   //
   // ⚠ 在**字符层**上找，不是在 searchableText 上找 —— 后者是给人读的投影，
@@ -3892,9 +3933,16 @@
         // 换个地方重来一遍。助手明明知道自己要钉哪句话。
         var narrowed = needle
           ? narrowPageSegments(result, all, needle) : null;
+        // 正文按块折行并印上 [NN],助手才说得出「第 3 块」。
+        // 认不出块时(bk 缺失)退回原来的平文本 —— 宁可没有编号,
+        // 也不要印一串全是 [00] 的假编号。
+        var hasBlocks = all.some(function (x) { return x.block > 0; });
         return {
           ok: true,
-          text: searchableText(result).slice(0, 1500),
+          text: hasBlocks
+            ? blockLines(result && result.chars, 1500)
+            : searchableText(result).slice(0, 1500),
+          blocks: hasBlocks,
           segments: narrowed ? narrowed.segments : all,
           // matchCount > 1 = 这句话在本页出现多次，光凭它定位不了。
           // 只回第一处会静默锚到用户没在看的那一段。

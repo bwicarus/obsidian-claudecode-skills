@@ -1754,7 +1754,14 @@ test("voice page text reads embedded PDF content locally without opening Pi", as
   assert.equal(response.status, 200);
   assert.equal(payload.ok, true);
   assert.equal(payload.text.length, 1500);
-  assert.equal(payload.text.startsWith("local voice context"), true);
+  // 2026-08-23：正文按块折行并印上 [NN]，助手才说得出「第 3 块」。
+  // ⚠ 不变量不变：正文必须是**整页真文本**，不是 segments 的 120 字预览拼接。
+  //   这条断言（1500 字）就抓到过那个退化：拿预览拼 → 1500 变 125。
+  assert.equal(payload.blocks, true, "有 bk 时必须印块编号");
+  assert.match(payload.text, /^\[01\] local voice context/,
+    "行首是块地址 [NN]，其后是该块正文");
+  assert.ok(payload.text.includes("local voice context local voice context"),
+    "正文必须连续、完整，不能是被截断的预览");
   assert.equal(result.gatewayMessages.length, 0);
 });
 
