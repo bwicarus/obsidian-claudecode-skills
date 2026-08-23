@@ -41,6 +41,11 @@ TESTS = (
     "test_card_drag.py",
     "test_sidebar_layout.py",
     "test_web_notes_local.py",
+    # 网页字符层与卡片锚定的真机回归。⚠ 必须在这张单子里 ——
+    # 那三个文件当初只用最小 DOM 桩测过就发了出去，桩全绿而真浏览器里有
+    # 五个 high（三击选段整类失效、对 AI 谎称页面为空、描边一个像素都不画…）。
+    # 没人跑的测试等于不存在。
+    "test_web_bind_local.py",
     "test_web_vocab_scheduler.py",
 )
 RUNTIME_TEST_GLOB = "tests/reader_contract/*.test.mjs"
