@@ -427,8 +427,27 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 // 这儿(扩展端各截 2400 字),只是从没被组装进 text。标记沿用 ⟦⟧
                 // 家族;真虚拟页编号不做——网页在配对协议里 page 恒为 0,
                 // 编号会震到 (file,page) 配对。
-                string beforePart = viewport.BeforeText ?? "";
-                string afterPart = viewport.AfterText ?? "";
+                // ⚠ 网页正文必须先转义再拼进注解格式。
+                //
+                //   这个格式（⟦…⟧ 标记族 + 反斜杠转义）有一条不变式：**正文里
+                //   出现的 ⟦ ⟧ \ 一律是转义过的**，所以解析器可以放心把未转义的
+                //   ⟦…⟧ 当成协议标记。PDF 那条路由 escapeLocalLayoutText 遵守它
+                //   （rc-computer-voice.js::escapeLocalLayoutText）。
+                //
+                //   网页这条路一直没有转义，而网页内容是**不可信输入**：
+                //   · 页面里出现一个裸 ⟧（数学记号页面完全可能）→ 解析器抛
+                //     ReaderTextInvalid → 整份 Markdown 投影 503；
+                //   · visibleText 是按 12000 字**硬切**的（content.js MAX_TEXT），
+                //     切在反斜杠上 → 末尾孤立转义 → 同样抛（自检 danglingEscapeRejected
+                //     明确要求这条必须抛，那是有意的：孤立转义说明上游格式坏了）；
+                //   · 更糟的是页面可以自带 ⟦CARD_START …⟧ 伪造标记。
+                //
+                //   所以修法不是放宽解析器，而是让这条生产端也遵守格式 ——
+                //   在**唯一入口**这里转义。桥自己加的 ⟦VIEWPORT⟧ 在转义之后拼，
+                //   所以它仍然是真标记。
+                string beforePart = EscapeAnnotatedReaderText(viewport.BeforeText ?? "");
+                string afterPart = EscapeAnnotatedReaderText(viewport.AfterText ?? "");
+                string visiblePart = EscapeAnnotatedReaderText(viewport.VisibleText ?? "");
                 bool hasAround =
                     !string.IsNullOrWhiteSpace(beforePart)
                     || !string.IsNullOrWhiteSpace(afterPart);
@@ -437,12 +456,12 @@ internal sealed class FileDirectSnapshotContextAdapter :
                           ? ""
                           : beforePart + "\n")
                       + "⟦VIEWPORT⟧\n"
-                      + viewport.VisibleText
+                      + visiblePart
                       + "\n⟦/VIEWPORT⟧"
                       + (string.IsNullOrWhiteSpace(afterPart)
                           ? ""
                           : "\n" + afterPart)
-                    : viewport.VisibleText;
+                    : visiblePart;
                 stable["textAvailable"] =
                     !string.IsNullOrWhiteSpace(viewport.VisibleText);
                 _revision = checked(_revision + 1);
@@ -1293,6 +1312,21 @@ internal sealed class FileDirectSnapshotContextAdapter :
         }
         return result;
     }
+
+    /// 把不可信正文（网页抓来的）转义成注解文本格式。
+    ///
+    /// ⚠ 必须是 DirectSnapshotTerminal 里 DecodeEscapedReaderText 的**严格逆运算**：
+    ///   那边只认 \\ 、 \⟦ 、 \⟧ 三种转义（其它 \x 原样保留两个字符），
+    ///   所以这里也只转这三个字符。多转或少转都会让往返对不上 ——
+    ///   少转 = 正文里的 ⟧ 被当成协议标记（轻则错渲，重则整份投影被拒）；
+    ///   多转 = 用户看到莫名其妙的反斜杠。
+    ///
+    /// 反斜杠必须**第一个**替换，否则后面插进去的反斜杠会被二次转义。
+    private static string EscapeAnnotatedReaderText(string value) =>
+        (value ?? string.Empty)
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("⟦", "\\⟦", StringComparison.Ordinal)
+            .Replace("⟧", "\\⟧", StringComparison.Ordinal);
 
     private static string RequiredViewportText(
         JsonElement value,

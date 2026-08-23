@@ -13313,8 +13313,19 @@ internal static class DirectBridgeSelfTest
             && viewerHtml.Contains(
                 "function parseReaderText",
                 StringComparison.Ordinal)
+            // ⚠ 这里原本断言的是字面量 "pageBody.textContent = page.text" ——
+            //   那是当时代码的拓印，不是契约，而且**那个写法本身就是缺陷**：
+            //   projection 早就算出来了（含 ANCHOR_MAP 折叠、去标记），却没人
+            //   消费 .plain，于是查看器显示的是原始文本，几千字机读 JSON
+            //   整段占版面。用户 2026-08-23 的原话是"快照页面还是显示的原始
+            //   文字而不是渲染好的 markdown 视图"。
+            //   改成断言**行为**：正文取自 projection.plain，并保留一个
+            //   看原文的开关（调试要用）。
             && viewerHtml.Contains(
-                "pageBody.textContent = page.text",
+                "rawToggle && rawToggle.checked ? page.text : projection.plain",
+                StringComparison.Ordinal)
+            && viewerHtml.Contains(
+                "id=\"rawToggle\"",
                 StringComparison.Ordinal)
             && viewerHtml.Contains(
                 "高亮与未锚定内容",

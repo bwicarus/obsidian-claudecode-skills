@@ -1684,6 +1684,9 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 section.wide { grid-column: 1 / -1; }
                 h2 { margin: 0 0 .75rem; color: #bad6ff;
                   font-size: 1rem; }
+                .rawline { display: block; margin: .25rem 0 .4rem;
+                  font-size: .82rem; opacity: .72; cursor: pointer; }
+                .rawline input { vertical-align: -1px; margin-right: .3rem; }
                 pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere;
                   font: 14px/1.65 "Cascadia Mono", "Microsoft YaHei UI", monospace; }
                 .body { min-height: 10rem; max-height: 54vh; overflow: auto;
@@ -1737,6 +1740,8 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 <section class="wide">
                   <h2>当前页正文（模型实际收到，含定位标记）</h2>
                   <pre id="pageMeta" class="muted"></pre>
+                  <label class="rawline"><input type="checkbox" id="rawToggle">
+                    显示原始文本（含标记与机读区块）</label>
                   <pre id="pageBody" class="body">尚未收到稳定页正文。</pre>
                 </section>
                 <section>
@@ -1915,6 +1920,23 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   return { plain, highlights, cards };
                 }
 
+                let lastPageText = "";
+                const rawToggle = document.getElementById("rawToggle");
+                if (rawToggle) {
+                  rawToggle.addEventListener("change", () => {
+                    // 就地切换，不等下一次快照 —— 调试时要能立刻对照
+                    if (!lastPageText) return;
+                    try {
+                      pageBody.textContent = rawToggle.checked
+                        ? lastPageText
+                        : parseReaderText(lastPageText).plain;
+                    } catch {
+                      // 解析不了就退回原文：宁可显示得难看，也别让面板空掉
+                      pageBody.textContent = lastPageText;
+                    }
+                  });
+                }
+
                 function resetImage() {
                   pageImage.removeAttribute("src");
                   pageImage.style.display = "none";
@@ -1995,8 +2017,15 @@ internal sealed class DirectSnapshotViewer : IDisposable
                       `降级原因：${valueText(page.fallbackReason)}`,
                       `已截断：${valueText(page.truncated)}`
                     ].join("  |  ");
-                    pageBody.textContent = page.text
-                      || "（当前页无文字层）";
+                    // parseReaderText 的 plain 已经把标记去掉、把 ANCHOR_MAP
+                    // 折叠成一行了 —— 但在 2026-08-23 之前这里显示的是**原始
+                    // page.text**，于是那几千字机读 JSON 在这个面板上整段占版面，
+                    // 用户看到的就是"显示原始文字而不是渲染视图"。
+                    // projection 早就算出来了，只是没人消费 .plain。
+                    lastPageText = page.text || "";
+                    pageBody.textContent =
+                      (rawToggle && rawToggle.checked ? page.text : projection.plain)
+                        || "（当前页无文字层）";
                   } else {
                     pageMeta.textContent = "";
                     pageBody.textContent = "尚未收到稳定页正文。";
