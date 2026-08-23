@@ -155,8 +155,15 @@
     // 遍历加两遍哈希（实测 ~220ms/卡）。
     var idx = TL.build();
     if (!idx.text.length) return { ok: false, why: 'no-char-layer' };
+    // 带了块号就把搜索范围锁在那一块里。块区间由 page-text 用**同一套**
+    // 块划分给出，保证助手看到的 [NN] 与这里算的是同一块。
+    var scope = null;
+    if (bind.block && window.__bwWebPageText &&
+        typeof window.__bwWebPageText.blockRange === 'function') {
+      try { scope = window.__bwWebPageText.blockRange(bind.block); } catch (_) {}
+    }
     var hit = null;
-    try { hit = TL.locate(bind, idx); } catch (e) {
+    try { hit = TL.locate(bind, idx, scope); } catch (e) {
       return { ok: false, why: 'exception', detail: { name: (e && e.name) || '' } };
     }
     if (!hit) return { ok: false, why: 'range-unresolved' };
@@ -258,7 +265,11 @@
         return {
           ok: true, page: 1,
           from: parseInt(bind.from, 10) || 0, to: parseInt(bind.to, 10) || 0,
-          noteId: result.noteId || '', persisted: true
+          noteId: result.noteId || '', persisted: true,
+          // 如实说出走的哪条：exact / by-block / by-text /
+          // by-text-block-missed（带了块号却没在块里找到 —— 块对不上了）。
+          // 不报出来的话，降级是完全沉默的。
+          how: g.how
         };
       }, function (error) {
         return { ok: false, why: 'persistence-failed',

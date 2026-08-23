@@ -122,7 +122,10 @@ test("resolve 只构建一次索引", () => {
     (fn.match(/TL\.build\(\)/g) || []).length, 1,
     "resolve 里只能构建一次索引",
   );
-  assert.match(fn, /TL\.locate\(bind, idx\)/, "locate 必须复用同一份索引");
+  assert.match(fn, /TL\.locate\(bind, idx, scope\)/,
+    "locate 必须复用同一份索引，并把块范围传进去");
+  assert.match(fn, /blockRange\(bind\.block\)/,
+    "块区间必须问 page-text 要 —— 与助手看到的 [NN] 用同一套划分");
   assert.doesNotMatch(fn, /TL\.snapshot\(\)/, "别再额外走一遍 snapshot");
 });
 

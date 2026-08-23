@@ -249,5 +249,24 @@
     };
   }
 
-  window.__bwWebPageText = { read: read };
+  /// 第 n 块（正文里印的 [NN]）在字符层里的闭区间。
+  /// bind 带 block 时用它把按文本找的范围锁住。
+  ///
+  /// ⚠ 必须与 read() 用**同一套**块划分，否则助手看到的 [03] 和这里算出的
+  ///   第 3 块不是同一块 —— 两边各自都自洽，是最难查的一类错。
+  ///   所以这里直接复用 read()，不另写一份遍历。
+  function blockRange(n) {
+    n = parseInt(n, 10);
+    if (!(n >= 1)) return null;
+    var out = read({});
+    if (!out || !out.ok) return null;
+    for (var i = 0; i < out.segments.length; i++) {
+      if (out.segments[i].block === n) {
+        return { from: out.segments[i].from, to: out.segments[i].to };
+      }
+    }
+    return null;
+  }
+
+  window.__bwWebPageText = { read: read, blockRange: blockRange };
 })();

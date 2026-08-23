@@ -267,7 +267,9 @@ test("解析②：DOM 变了退回按文本重找，并用原下标消歧", () =
   const after = load(shifted);
   const got = after.api.locate(bind);
 
-  assert.equal(got.how, "refound", "rev 对不上必须退回重找，而不是用旧下标");
+  // 2026-08-23 起 how 的取值改成能区分四条路：
+  //   exact / by-block / by-text / by-text-block-missed
+  assert.equal(got.how, "by-text", "rev 对不上必须退回重找，而不是用旧下标");
   assert.equal(
     got.range.startContainer, after.nodes[4],
     "同一个词重复出现时，必须用原下标挑最接近的那一处 —— 挑错就等于把卡钉到别的段落",
@@ -321,4 +323,59 @@ test("非 page-chars 锚一律不认", () => {
   const { api } = load(PAGE);
   assert.equal(api.locate({ kind: "upage-block", upage: "x", bid: "y" }), null);
   assert.equal(api.locate(null), null);
+});
+
+// ── (块, 块内文字) 寻址 —— 用户 2026-08-23 定的方式 ──────────────
+const DUP = [
+  { text: "第一段提到能量守恒。" },
+  { text: "第二段也提到能量守恒。" },
+  { text: "第三段还是能量守恒。" },
+];
+
+test("⚠ 块把重复消歧：同一句话出现三次，块号决定命中哪一处", () => {
+  const { api, nodes } = load(DUP);
+  const snap = api.snapshot();
+  // 第二块的区间
+  const b2From = snap.text.indexOf("第二段");
+  const b2To = b2From + DUP[1].text.length;
+  const got = api.locate(
+    { kind: "page-chars", page: 1, text: "能量守恒" },
+    null,
+    { from: b2From, to: b2To },
+  );
+  assert.ok(got, "块内应当命中");
+  assert.equal(got.how, "by-block", "命中块内时必须报 by-block");
+  assert.equal(
+    got.range.startContainer, nodes[1],
+    "必须落在第二块里 —— 这正是块寻址存在的理由",
+  );
+});
+
+test("⚠ 块对不上时退回全页，但**必须出声**", () => {
+  const { api } = load(DUP);
+  const got = api.locate(
+    { kind: "page-chars", page: 1, text: "能量守恒" },
+    null,
+    { from: 9990, to: 9999 },          // 一个不存在的块区间
+  );
+  assert.ok(got, "退回全页仍应命中");
+  assert.equal(
+    got.how, "by-text-block-missed",
+    "带了块号却没在块里找到 —— 这必须能看出来。静默降级是这条链上最难查的形态",
+  );
+});
+
+test("没带块号时按文本找，报 by-text", () => {
+  const { api } = load(DUP);
+  const got = api.locate({ kind: "page-chars", page: 1, text: "能量守恒" });
+  assert.equal(got.how, "by-text");
+});
+
+test("text-only 锚（无 from/to）不会被当成精确锚", () => {
+  const { api } = load(DUP);
+  const got = api.locate({ kind: "page-chars", page: 1, text: "能量守恒" });
+  assert.notEqual(
+    got.how, "exact",
+    "没有 from/to 就不可能是精确的；报成 exact 会掩盖真实的定位质量",
+  );
 });

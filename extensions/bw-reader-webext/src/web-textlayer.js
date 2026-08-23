@@ -233,7 +233,7 @@
   // 第 ② 步正是"同一个词在页内重复出现"时唯一能分辨的依据。
   //
   // `prebuilt` 让调用方复用同一份索引，避免一次操作里重复构建。
-  function locate(bind, prebuilt) {
+  function locate(bind, prebuilt, scope) {
     if (!bind || bind.kind !== 'page-chars') return null;
     var from = Number(bind.from), to = Number(bind.to);
     var idx = prebuilt || build();
@@ -251,6 +251,23 @@
     }
 
     if (!quote) return null;
+
+    // ① 块内优先。用户 2026-08-23 的寻址方式：助手读 Markdown 时本来就
+    //    看得见 [NN]，说出「第 3 块 + 这句话」零成本，而**块把范围锁住了** ——
+    //    同一句话在页内重复时不必再多问一轮。
+    //    ⚠ 块号是位置不是身份：页面重排后同一个 [03] 可能指向别的内容，
+    //      所以它只缩小范围，最终仍靠 text 命中；块内没有就退回全页。
+    if (scope && Number.isFinite(scope.from) && Number.isFinite(scope.to) &&
+        scope.to > scope.from) {
+      var inBlock = idx.text.slice(scope.from, scope.to).indexOf(quote);
+      if (inBlock >= 0) {
+        var at0 = scope.from + inBlock;
+        var r0 = rangeFor(idx, at0, at0 + quote.length);
+        if (r0) return { range: r0, how: 'by-block' };
+      }
+    }
+
+    // ② 全页按文本找，用原下标挑最接近的那一处消歧。
     var best = -1, bestDist = Infinity, at = 0;
     for (;;) {
       var hit = idx.text.indexOf(quote, at);
@@ -261,7 +278,10 @@
     }
     if (best < 0) return null;
     var found = rangeFor(idx, best, best + quote.length);
-    return found ? { range: found, how: 'refound' } : null;
+    if (!found) return null;
+    // ⚠ 如实说出走的哪条。带了块号却退回全页 = 块对不上了，
+    //   这必须看得见 —— 静默降级是这条链上最难查的形态。
+    return { range: found, how: scope ? 'by-text-block-missed' : 'by-text' };
   }
 
   window.__bwWebTextLayer = {
