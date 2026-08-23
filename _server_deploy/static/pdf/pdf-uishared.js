@@ -47,6 +47,7 @@ window._favOpenPicker = function () {
   var UP_LOCAL = String(UP_FILE).indexOf('localbook:') === 0;
   var _upCss = document.createElement('style');
   _upCss.textContent =
+    '.up2-content-hd .up2-lb{opacity:.72;font-variant-numeric:tabular-nums;font-size:.92em}' +
     '.up2-badge{position:absolute;left:6px;top:6px;z-index:40;background:rgba(26,37,64,.88);color:#9fcbff;border:1px solid rgba(91,118,184,.6);border-radius:999px;padding:2px 10px;font-size:12px;line-height:1.5;cursor:pointer;-webkit-user-select:none;user-select:none;box-shadow:0 1px 5px rgba(0,0,0,.35)}' +
     /* 就地编辑覆盖层:absolute 盖满目标 .page-wrap / 临时白纸页;磨砂深色底 + 内嵌编辑卡。
        对其下页面手势 stopPropagation(选词/ink/双击缩放点不到那一页)= 编辑期禁用阅读器功能 */
@@ -283,6 +284,16 @@ window._favOpenPicker = function () {
           } else if (j.step) { msg.textContent = j.step + '…(可继续阅读)'; }
         }).catch(function () {});   // 网络抖动:下一轮再试
     }, 1000);
+  }
+
+  // 自建页的位置标签(46-a)。用户 2026-08-23:「给他个前一页加上字母的虚拟页码」。
+  // ⚠ 只用于**显示**。绝不进 bind.page / ?page= —— parseInt('46-a')===46
+  //   会把它静默当成真实的第 46 页。
+  function _upLabel(rec) {
+    try {
+      var l = RC.userpages && RC.userpages.label && RC.userpages.label(rec);
+      return l || '';
+    } catch (_) { return ''; }
   }
 
   // ── 真实页角标(📝 我的页)+ ✏️/🗑 菜单 ──
@@ -792,7 +803,10 @@ window._favOpenPicker = function () {
     // ★ 任务运行时(references/adr-task-runtime.md):这一页有结构化块 → 走块渲染;否则原 md 路径不动。
     if (rec.blocks && rec.blocks.length) { _upRenderBlocks(ov, rec); return; }
     var md = (rec.md || '').trim();
-    ov.innerHTML = '<div class="up2-content-hd">📝 ' + (rec.title ? RC.esc(rec.title) : '我的页') + '</div>' +
+    var _ovLb = _upLabel(rec);
+    ov.innerHTML = '<div class="up2-content-hd">📝 ' +
+      (_ovLb ? ('<span class="up2-lb">' + RC.esc(_ovLb) + '</span> ') : '') +
+      (rec.title ? RC.esc(rec.title) : '我的页') + '</div>' +
                    '<div class="up2-content-body' + (md ? '' : ' empty') + '"></div>';
     var body = ov.querySelector('.up2-content-body');
     if (md) { body.innerHTML = (window.RC && RC.md) ? RC.md(rec.md) : RC.esc(rec.md); _ovTypesetThenHl(body, rec); }   // 批次3:typeset 后按 offset 复原高亮(口径一致)
@@ -1784,7 +1798,9 @@ window._favOpenPicker = function () {
       // baked 老页:角标(点它走重排 job 编辑)
       if (pw.querySelector('.up2-badge')) return;
       var b = document.createElement('div'); b.className = 'up2-badge';
-      b.textContent = '📝 我的页'; b.title = (p.title || '我的页') + '(点击编辑)';
+      var _lb = _upLabel(p);
+      b.textContent = '📝 ' + (_lb || '我的页');
+      b.title = (p.title || '我的页') + (_lb ? ('（' + _lb + '）') : '') + '(点击编辑)';
       b.addEventListener('click', function (e) {
         e.stopPropagation();
         var rec = _upRealPages().filter(function (x) { return x.id === p.id; })[0] || p;

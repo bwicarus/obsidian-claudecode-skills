@@ -471,6 +471,41 @@
     mountOne: mountOne,   // 收藏夹:把单页绑到原书 (file,id) 挂进 fav 容器,与原书同一份编辑器/改高/存
     elOf: function (id) { return _els[id] || null; },   // 便签 host 用:u_* 锚 → 容器 el(未插入时也返回,调用方自查 isConnected)
     pages: function () { return _pages.slice(); },
+    // 自建页的位置标签：前一页 + 字母，如 46-a、46-b。
+    //
+    // 用户 2026-08-23:「给他个前一页加上字母的虚拟页码，比如 44-a 之类的」。
+    // 自建页**没有页码**（只有 id + after），而且它不进 PDF，所以后面那页的
+    // 页号不变（用户实测确认）—— 因此这个标签天生稳定。
+    //
+    // ⚠ 它**只用于显示和对话**。绝不能进 bind.page / ?page= / 搜索索引的
+    //   整数列 —— `parseInt('46-a') === 46` 会把它静默当成真实的第 46 页，
+    //   表现是「卡片跑到别的页去了」而且不报错。
+    label: function (rec) {
+      if (!rec) return '';
+      var after = parseInt(rec.after, 10);
+      if (!Number.isFinite(after)) after = 0;
+      var same = [];
+      for (var i = 0; i < _pages.length; i++) {
+        var q = parseInt(_pages[i].after, 10);
+        if ((Number.isFinite(q) ? q : 0) === after) same.push(_pages[i]);
+      }
+      // 与服务端 _upages_sorted 同一个排序键 (after, created, id)，
+      // 两边算出的字母才一致。
+      same.sort(function (a, b) {
+        return (Number(a.created || 0) - Number(b.created || 0)) ||
+               String(a.id || '').localeCompare(String(b.id || ''));
+      });
+      var n = 0;
+      for (var j = 0; j < same.length; j++) {
+        if (String(same[j].id) === String(rec.id)) { n = j; break; }
+      }
+      var disp = after;
+      try {
+        if (typeof window._dispPage === 'function') disp = window._dispPage(after);
+      } catch (_) {}
+      var letter = n < 26 ? String.fromCharCode(97 + n) : ('z' + (n - 25));
+      return String(disp) + '-' + letter;
+    },
     // 纯本地移除(不调服务端)——PDF 删页的服务端删除走异步改页 job,前端必须**立刻**把这条从
     //   _pages 剔除,否则 mountAll/_upMountBadges 会从陈旧列表把已删页重挂回 DOM(删了还显示的根因)。
     removeLocal: function (id) {
