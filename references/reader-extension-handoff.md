@@ -571,6 +571,40 @@ python3 extensions/bw-reader-webext/test_release_pipeline.py
   **把当次改动撤掉的对照组 5 次里也红 1 次** —— 所以红一次不构成"改坏了"的证据。
   判断方法就是上面这个：**做对照组，不要靠推理**。
 
+### 9.2 跑测试的两条操作纪律（2026-08-23 花了 5 小时 CPU 换来的）
+
+**一次 `node --test` 在 Windows 上无人察觉地跑了 5 小时 41 分**，另有两个更早的
+同类孤儿各跑了 9 小时 20 分（父进程早已退出，没人在等它们的结果）。
+
+能确证的：
+
+- 全套契约测试是健康的：**1759 项、24 秒、退出码 0**。套件本身不挂。
+- 挂死那次启动于测试文件**正被批量重写的中途**（临时脚本时间戳佐证）。
+  跑的是一个中间状态。
+- **不是管道的锅。** 试过两次假设 `... | grep | head -N` 会留下孤儿，
+  两次都被实验证伪：`head` 提前退出后整条管道仍完整跑完 25 秒、零残留。
+
+不能确证的：那三次到底卡在哪。**我在抓栈之前就把进程杀了，证据没了** ——
+正是 `evidence-quality-lessons.md` 记的那条。下次遇到挂死进程，
+先 `Get-CimInstance Win32_Process` 存下命令行、再抓栈，然后才清理。
+
+两条纪律，与根因无关都该守：
+
+1. **可能长跑的命令一律加 `timeout N`。** 挂死的代价就从 5 小时降到 N 秒。
+   ⚠ 工具层的 timeout **不保证杀掉进程**：那次工具早就返回了"完成"，
+   而进程又活了 5 个多小时。
+2. **定期扫孤儿**，尤其是 `node --test` 和 Playwright：
+
+   ```powershell
+   Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+     Where-Object { $_.CommandLine -like '*--test*' } |
+     Select-Object ProcessId,CreationDate,CommandLine
+   ```
+
+   ⚠ 清理时**别误伤常驻服务**：`BWAgentBridgeLite/src/cli.mjs`、
+   `@openai/codex/bin/codex.js`、`mcp/server.*` 都是长期活着的，不是孤儿。
+   判据是看父进程还在不在（父进程没了 = 没人在等结果 = 可清理）。
+
 ## 10. Windows 真机测试渠道
 
 本节只保留为按需渠道。2026-07-31 起，Reader/PWA 共享改动默认直接部署到生产 iPad
