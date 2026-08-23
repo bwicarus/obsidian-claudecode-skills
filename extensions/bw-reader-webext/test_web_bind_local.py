@@ -416,7 +416,9 @@ def main() -> int:
                         kind:'page-chars', page:1, from: 9999, to: 10010,
                         text:'energy is conserved', rev:'stale'
                       });
-                      return !!(hit && hit.how === 'refound');
+                      // how 的取值就是定位质量：exact / by-block /
+                      // by-text / by-text-block-missed（2026-08-23 起）
+                      return !!(hit && hit.how === 'by-text');
                     })()"""
                 )),
             )
