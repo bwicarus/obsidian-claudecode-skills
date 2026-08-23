@@ -806,6 +806,135 @@ def _extract_tool_json(buf: str) -> str | None:
         return None
 
 
+# ── client_action 反向队列（Pi → 客户端）───────────────────────────
+#
+# 用户 2026-08-23：「就算当时没有连通也应该更新 windows 和 pi 本地的文件，
+# 在 app 联通时自动进行内容更新不是么，不然我们的 Windows 和 pi 本地化的
+# 文件还有传输链路就没有被利用上」。
+#
+# 这条链此前是**裸** `await bws.send(...)`：socket 一断就抛异常，不但卡片没了，
+# 整条工具结果处理（包括后面要口播的内容）也一起中断。而 App 只要进
+# .inactive 就会拆链 —— 于是"卡片传输总是失败"。
+#
+# ⚠ 方向说明：Pi 上已有的 `command-outbox/2` 是**客户端 → Pi**（阅读器离线时
+#   攒着写操作，回来批量提交），跟这里相反，不能复用。
+#
+# 重放安全性由接收端保证：rc-voicecall._cardPush 现在按 cid 幂等，同 cid 重放
+# 是替换而不是新建。没有 cid 的动作（跳页/高亮）不入队 —— 它们重放会作用在
+# 用户当时已经不在的位置上，比丢掉更糟。
+_CLIENT_ACTION_OUTBOX_DIR = os.path.join(
+    os.environ.get("CLAUDE_PROJECT", "."), "state", "reader-action-outbox")
+_CLIENT_ACTION_OUTBOX_MAX = 32          # 每本书最多攒这么多，超了丢最旧的
+_CLIENT_ACTION_OUTBOX_TTL = 7 * 86400   # 超过这么久没取走就不再有意义
+
+
+def _action_outbox_path(file_rel: str) -> str:
+    key = hashlib.sha256(str(file_rel or "_").encode("utf-8")).hexdigest()[:32]
+    return os.path.join(_CLIENT_ACTION_OUTBOX_DIR, key + ".json")
+
+
+def _action_is_replayable(ca: dict) -> bool:
+    """只有带稳定 cid 的动作能安全重放。
+
+    ⚠ 判据是**接收端能不能去重**，不是"这个动作重不重要"。
+    跳页、滚动、高亮这类没有身份的动作重放会落在用户当时已经不在的位置上 ——
+    那比丢掉更糟，因为用户会看到界面莫名其妙地跳走。
+    """
+    if not isinstance(ca, dict):
+        return False
+    args = ca.get("args")
+    payload = args[0] if isinstance(args, list) and args else None
+    if not isinstance(payload, dict):
+        return False
+    cid = payload.get("cid") or (payload.get("card") or {}).get("cid")
+    return bool(cid and isinstance(cid, str) and cid.strip())
+
+
+def _action_outbox_append(file_rel: str, ca: dict) -> None:
+    try:
+        os.makedirs(_CLIENT_ACTION_OUTBOX_DIR, exist_ok=True)
+        path = _action_outbox_path(file_rel)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                items = json.load(fh) or []
+        except (OSError, ValueError):
+            items = []
+        now = int(time.time())
+        items = [
+            it for it in items
+            if isinstance(it, dict) and now - int(it.get("ts") or 0) < _CLIENT_ACTION_OUTBOX_TTL
+        ]
+        items.append({"ts": now, "file": str(file_rel or ""), "action": ca})
+        items = items[-_CLIENT_ACTION_OUTBOX_MAX:]
+        tmp = path + ".tmp." + str(os.getpid())
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(items, fh, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception as ex:
+        # 落地失败不该把一次工具调用变成失败，但必须出声 ——
+        # 否则"投递失败"和"投递失败且没存下来"在日志里一模一样。
+        print(f"[action-outbox] 落地失败 {type(ex).__name__}: {ex}", flush=True)
+
+
+async def _replay_client_actions(bws, file_rel: str) -> int:
+    """客户端（重新）连上时补投积压。返回补投条数。
+
+    ⚠ 先删文件再投递，不是投完再删：崩在中间时，宁可丢一次补投，
+    也不要让同一批在每次重连时反复涌出来（那比丢更难受，而且用户会以为
+    界面失控）。接收端按 cid 幂等，所以真丢了下次生成同一张卡也能对上。
+    """
+    path = _action_outbox_path(file_rel)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            items = json.load(fh) or []
+    except (OSError, ValueError):
+        return 0
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    now = int(time.time())
+    sent = 0
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if now - int(it.get("ts") or 0) >= _CLIENT_ACTION_OUTBOX_TTL:
+            continue
+        ca = it.get("action")
+        if not isinstance(ca, dict) or not ca.get("fn"):
+            continue
+        try:
+            await bws.send(json.dumps(
+                {"event": "client_action", "payload": ca}, ensure_ascii=False))
+            sent += 1
+        except Exception:
+            # 刚连上就又断了 —— 剩下的重新入队，别在这里硬扛
+            _action_outbox_append(file_rel, ca)
+    if sent:
+        print(f"[action-outbox] 重连补投 {sent} 条 file={file_rel}", flush=True)
+    return sent
+
+
+async def _send_client_action(bws, ca: dict, file_rel: str) -> bool:
+    """投递一个 client_action；失败则落地等重放。返回是否当场送达。"""
+    try:
+        await bws.send(json.dumps(
+            {"event": "client_action", "payload": ca}, ensure_ascii=False))
+        return True
+    except Exception as ex:
+        if _action_is_replayable(ca):
+            _action_outbox_append(file_rel, ca)
+            print(
+                f"[action-outbox] 投递失败已入队 fn={ca.get('fn')} "
+                f"{type(ex).__name__}", flush=True)
+        else:
+            # 明确说出"丢了"以及为什么 —— 这类动作重放会更糟，是有意丢的
+            print(
+                f"[action-outbox] 投递失败且不可重放，已丢弃 fn={ca.get('fn')} "
+                f"（无稳定 cid，重放会落在用户已不在的位置）", flush=True)
+        return False
+
+
 async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
                           book: dict | None = None, push_sp=None):
     """把 S2S 的命令文本交给 webapp 统一端点(解析+修补+dispatch 同源)→ 结果三路分发。
@@ -908,7 +1037,7 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
         res = d.get("result") or {}
         ca = res.get("client_action")
         if isinstance(ca, dict) and ca.get("fn"):   # 页面副作用照旧(视频卡进侧栏/跳页/高亮…)
-            await bws.send(json.dumps({"event": "client_action", "payload": ca}, ensure_ascii=False))
+            await _send_client_action(bws, ca, file_rel)
         # 剔控制字段(_开头=_fed_images 的 b64 等 / client_action):否则 b64 ①烧进喂豆包的 content ②裸露在前端
         #   详情卡 result_brief(用户实测那串 base64)。图单独走 vision 展示。
         _vision = []
@@ -2489,6 +2618,10 @@ async def handle_agent(bws, file_rel: str = "", page: int = 0):
             await aws.send(_sauc_frame(0b0001, 0b0001, 1, json.dumps(asr_cfg, ensure_ascii=False).encode()))
             await aws.recv()   # 握手回包(空 result)
             await bws.send(json.dumps({"event": "agent_ready"}, ensure_ascii=False))
+            # 客户端刚连上 —— 把上次没送出去的 client_action 补投。
+            # ⚠ 必须排在 agent_ready **之后**：客户端在收到 agent_ready 之前
+            #   还没装好 client_action 的处理器，早发等于又丢一次。
+            await _replay_client_actions(bws, file_rel)
             seq = 1
             buf = bytearray()
 
