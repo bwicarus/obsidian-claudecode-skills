@@ -33,9 +33,14 @@
   //   AI 会据此下结论说这页没内容。这比报错糟得多。
   //
   //   加了 div 不会导致"每层包裹都出一块"：下面的 hasInner 只取最内层。
+  //   ⚠ 还必须含 nav/header/footer/aside：真机实测发现 `<nav>HOME ABOUT</nav>`
+  //   的文字**在字符层里，却不属于任何块** —— 于是 AI 根本看不见它，
+  //   也就无从把它标成「导航」。而用户要的正是"为 ai 区分正文、边栏等块区"：
+  //   看不见的东西没法区分。它们同时也是 CHROME_SEL 的成员，所以一旦成块
+  //   就会被正确标上导航/页眉/页脚。
   var BLOCK_SEL =
     'p,li,blockquote,h1,h2,h3,h4,h5,h6,td,th,figcaption,pre,dd,dt,' +
-    'div,section,article';
+    'div,section,article,nav,header,footer,aside,main';
 
   // 区域标签。判据全部来自 content.js 已有的那套（导出复用，不另写一份 ——
   // 两个分类器迟早会给出不同答案，而"两边各自都自洽"是最难查的一类错）。
@@ -127,6 +132,7 @@
     var lines = [];
     var segments = [];
     var n = 0;
+    var covered = 0;
     var truncated = !!idx.truncated;
 
     for (var j = 0; j < leaves.length && n < MAX_BLOCKS; j++) {
@@ -136,6 +142,7 @@
       var raw = idx.text.slice(span.from, span.to).replace(/\s+/g, ' ').trim();
       if (!raw) continue;
       n += 1;
+      covered += span.to - span.from;
       var no = (n < 10 ? '0' : '') + n;
       var region = regionOf(el, root);
       lines.push('[' + no + '] ' + region + ' ' + prefixOf(el) + raw.slice(0, 200));
@@ -176,6 +183,13 @@
       truncated: truncated,
       // 这一页没能分出块结构，上面那条是整页平铺的降级视图。
       degraded: degraded,
+      // 块一共盖住了字符层的多大比例（0~1）。
+      // ⚠ 没盖住的部分是"确实存在但 AI 看不见"的文字 —— 不报出来的话，
+      //   AI 会把「我看到的这些」当成「页面就这些」。真机实测就抓到过：
+      //   <nav> 的文字在层里却不属于任何块，静默消失。
+      coverage: idx.text.length
+        ? Math.round((degraded ? idx.text.length : covered) / idx.text.length * 100) / 100
+        : 0,
       // 这份字符层的身份。AI 把它原样放进 bind.rev，页面变了就能察觉。
       rev: idx.rev,
       page: 1

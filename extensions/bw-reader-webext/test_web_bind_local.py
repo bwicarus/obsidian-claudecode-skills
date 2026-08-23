@@ -218,14 +218,23 @@ def main() -> int:
                   const cur = window.__bwSelectionController.current();
                   if (!cur || !cur.anchor) return null;
                   const snap = window.__bwWebTextLayer.snapshot();
-                  return { from: cur.anchor.from, to: cur.anchor.to, len: snap.length };
+                  return {
+                    from: cur.anchor.from, to: cur.anchor.to, len: snap.length,
+                    // ⚠ 别断言 from===0：字符层开头是 HTML 缩进空白，
+                    //   而 Ctrl+A 会把边界规范化到第一个**可见**字符。
+                    //   真机实测 from=3（层首是 "
+  HOME"）。语义上正确的
+                    //   判据是"选区去掉首尾空白后等于整篇去掉首尾空白"。
+                    trimEq: snap.text.slice(cur.anchor.from, cur.anchor.to).trim()
+                            === snap.text.trim()
+                  };
                 })()"""
             )
             check("Ctrl+A 全选能折出锚", bool(allsel), "current() 返回 null")
             if allsel:
                 check(
-                    "全选锚从 0 开始且覆盖整篇",
-                    allsel["from"] == 0 and allsel["to"] >= allsel["len"] - 2,
+                    "全选锚覆盖整篇（按去空白后相等判定）",
+                    allsel.get("trimEq") is True,
                     str(allsel),
                 )
 
@@ -247,6 +256,11 @@ def main() -> int:
                     for s in (data.get("segments") or [])
                 ),
                 str([s.get("region") for s in (data.get("segments") or [])]),
+            )
+            check(
+                "块覆盖了绝大部分字符层（没盖住的文字 AI 看不见）",
+                (data.get("coverage") or 0) >= 0.9,
+                f"coverage={data.get('coverage')}",
             )
             seg = next(
                 (s for s in (data.get("segments") or []) if "bare div" in s.get("text", "")),
