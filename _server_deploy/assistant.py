@@ -6412,6 +6412,7 @@ SURFACE_DOUBAO_S2S = "doubao_s2s"
 _TOOL_NAMESPACE_DESCRIPTIONS = {
     "annotation": "查看页面视觉内容并管理高亮、标注和撤销。",
     "creation": "创建卡片、笔记、后台任务和交互纸。",
+    "userpages": "读、改、删用户自己在书里插入的自建页。",
     "knowledge": "连接笔记、知识图谱、学习焦点和元认知记录。",
     "language_notes": "翻译、词汇掌握、词典与书页便签。",
     "media_web": "联网检索网页、图片和教学视频。",
@@ -6442,6 +6443,16 @@ _TOOL_NAMES_BY_NAMESPACE = {
     "creation": {
         "make_anki", "make_note", "do_task", "make_paper", "page_new",
         "page_add", "page_show", "start_dictation",
+    },
+    # 自建页(插入页)自成一族:它们是对**已有生成物**的读改删，
+    # 跟 creation 那族"造新东西"语义不同；而且 creation 已经到 8 个，
+    # 每个命名空间上限 9 —— 塞进去会当场超限。
+    #
+    # ⚠ 这张映射表是 fail-closed 的（_build_tool_registry 在 import 时校验
+    #   missing/stale 并抛）。新工具**必须**同时登记，只注册进 TOOLS
+    #   会让整个 assistant 模块 import 失败 —— 门禁就是这么抓到我的。
+    "userpages": {
+        "userpage_list", "userpage_edit", "userpage_delete",
     },
     "recipes": {
         "save_intent_tool", "run_saved_task", "list_saved_tasks",
