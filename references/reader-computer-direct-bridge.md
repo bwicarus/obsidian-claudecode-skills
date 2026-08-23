@@ -144,3 +144,75 @@ PCM 只在 Tailscale 加密直连中出现，不写 Pi、磁盘、日志或浏�
 - 仍有低风险本机 TOCTOU：Windows Task Scheduler CLI 只能在 ownership 查询后按任务名
   `/Run`/`End`/`Delete`；Tailscale Serve CLI 也没有查询结果 ETag。两者均做严格前后检查并
   对混合状态 fail closed，但同权限进程并发替换时不能提供内核级原子身份保证。
+
+## 2026-08-23 传输韧性：连接为什么断、断了以后东西去哪
+
+用户报的两个症状是同一件事的两面：
+
+> 「app 的语音连接稍微有一点网络波动就会断开」
+> 「其他功能都能使用但是卡片传输等功能总是失败」
+
+### 先看真实数据，不要照直觉修
+
+直觉会说"服务端心跳判死太急"。**实测把这个假设否掉了**：
+失败日志 531 条里，`VOICE_START_NOT_CONFIRMED` 466 条，
+`HEARTBEAT_TIMEOUT` 只有 **1 条**。
+
+真正的形状是：**客户端比服务端契约更严**。服务端给 15s，客户端 7s 就放弃；
+再加上一次瞬时抖动就判死、App 一进 `.inactive` 就拆链。于是"网络好好的，
+但连接没了"。
+
+### 四处改动
+
+| 位置 | 改动 | 为什么 |
+|---|---|---|
+| `ReaderWebView.swift` | `.inactive` 给 12s 宽限（`readerInactiveGrace`），不再立刻拆链 | iOS 上拉通知栏、来个横幅都会进 `.inactive`，那不是"用户走了" |
+| `DirectVoiceSocket.swift` | 心跳**连续**失败 2 次才判死（`heartbeatFailuresBeforeGivingUp`） | 单次失败是抖动，连续失败才是断线 |
+| `DirectVoiceProtocol.swift` | 新增 `transientRetry(_:attempt:)` | ⚠ 这条分支**只能** `recordDiagnostic`，**绝不能**调 `handleSessionFailure` —— 否则"记一笔重试"本身就把会话杀了，等于没改 |
+| `ReaderQuery.cs` / `ReaderBrowserControl.cs` | 补 `SourceRegistrationWait = 2500ms` 注册等待 | 读路径比写路径**更**脆：写有租约等待，读之前直接裸调 |
+
+### 断了以后东西去哪：两条链各有一个队列
+
+⚠ **两条链是分开的，装一个救不了另一个**：
+
+```
+Windows Direct 链   AI(Windows) → Direct 桥 → 前端      ← ReaderRealtimeOutput.cs 的 outbox
+App 通话链          AI → Pi relay → /voice-rt → 页面    ← voice_realtime_relay.py 的反向队列
+```
+
+用户 App 内通话走的是**下面那条**，跟 Windows Direct 桥完全无关。
+所以 `17350c83` 装的 outbox 对他报的症状**无效**，必须 `1c507c8d` 才行。
+
+两条链的共同规则：
+
+- **先落地再投递**（不是投递失败才想起来存）。拿到租约之后的失败不再丢。
+- **`correlation` / `cid` 做去重键**，补投按 id 幂等，重放是替换不是新建。
+- **`alreadyQueued` 重入闸**：补投路径不能再走一遍入队，否则同一条会自我繁殖。
+  ⚠ 我在这里踩过一次：`SettleOutboxAsync` 也跑在补投路径上，绕过了
+  `bindOutcome` 检查，表现为自测**超时**（不是报错），靠二分法才定位到。
+
+### Pi 反向队列的三个有意取舍
+
+（`_server_deploy/voice_realtime_relay.py`，测试 `tests/test_client_action_outbox.py`）
+
+1. **只有带稳定 `cid` 的动作入队**。判据是"接收端能不能去重"，
+   **不是**"这个动作重不重要"。跳页/滚动/高亮没有身份，重放会落在用户
+   当时已经不在的位置上——那比丢掉更糟。不可重放的失败**明确说出
+   "丢了以及为什么"**，不静默。
+2. **补投前先删文件，不是投完再删**。崩在中间宁可丢一次补投，也不要让
+   同一批在每次重连时反复涌出来。
+3. **补投排在 `agent_ready` 之后**：客户端在收到 `agent_ready` 之前还没装好
+   `client_action` 处理器，早发等于又丢一次。
+
+⚠ 方向说明：Pi 上已有的 `command-outbox/2` 是**客户端 → Pi**（离线攒写操作），
+跟这套相反，**不能复用**。
+
+### MCP 失败的归因
+
+`reader_context_snapshot` 失败时 AI 会说"阅读器断了"——**这是错的归因**。
+该工具**从不联系 App**，它失败只意味着本地 MCP 传输不可用。
+工具说明里已经写死这句话（`ReaderContextMcpServer.cs`）。
+
+同时删掉了"先确认 `outputAccess.available` 再改"的建议：
+**多一轮往返，而且本来就是竞态的**——确认完到真正写入之间连接照样会断。
+直接发，失败由队列兜住。
