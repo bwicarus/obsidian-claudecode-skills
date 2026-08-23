@@ -1666,13 +1666,25 @@ if (window.__bwPwaProviderOnly) return;
   // 兼容分支扩大成远程脚本入口。
   var _readerOutputSeen = Object.create(null);
   var _readerOutputPending = Object.create(null);
+  // page-chars 卡只有真正写进 document-notes 才算完成。第一次写入失败时已经
+  // 给用户显示过一次回退卡；后续 durable replay 只重试 placement，不能再往
+  // 对话流/浮层各复制一张。
+  var _readerOutputAwaitingBind = Object.create(null);
   var _readerOutputOrder = [];
-  function _rememberReaderOutput(id) {
-    _readerOutputSeen[id] = 1;
+  function _rememberReaderOutput(id, receipt) {
+    _readerOutputSeen[id] = {
+      bindOutcome: receipt && receipt.bindOutcome || null,
+      bindReason: receipt && receipt.bindReason || null
+    };
     _readerOutputOrder.push(id);
     while (_readerOutputOrder.length > 256) {
       delete _readerOutputSeen[_readerOutputOrder.shift()];
     }
+  }
+  function _readerOutputNeedsBound(delivery) {
+    var card = delivery && delivery.kind === 'card' && delivery.payload &&
+      delivery.payload.card;
+    return !!(card && card.bind && card.bind.kind === 'page-chars');
   }
   function _readerOutputReject(error) {
     return {
@@ -1783,6 +1795,7 @@ if (window.__bwPwaProviderOnly) return;
   function _applyReaderRealtimeOutput(delivery) {
     try {
       var p = delivery.payload || {}, work;
+      var _bindOnlyReplay = !!_readerOutputAwaitingBind[delivery.correlation];
       if (delivery.kind === 'assistant-turn') {
         if (typeof window.__asstVoiceMsg !== 'function' ||
             typeof window.__asstVoiceLog !== 'function') {
@@ -1820,7 +1833,8 @@ if (window.__bwPwaProviderOnly) return;
         // 沿途要过 11 道闸/重建点，字段每多一个就多 11 处 —— 而 kind/detail
         // 对助手的下一步决策没有影响，它需要知道的是「钉上了没有、为什么」。
         work = Promise.resolve(renderInfo(p.card, {
-          uid: String(delivery.correlation || '')
+          uid: String(delivery.correlation || ''),
+          bindOnly: _bindOnlyReplay
         })).then(function (result) {
           if (!result || result.rendered !== true) {
             throw new Error('BW_READER_CARD_RENDER_FAILED');
@@ -2248,7 +2262,6 @@ if (window.__bwPwaProviderOnly) return;
         throw new Error('BW_READER_REALTIME_OUTPUT_KIND_UNSUPPORTED');
       }
       return Promise.resolve(work).then(function (value) {
-        _rememberReaderOutput(delivery.correlation);
         var receipt = { outcome: 'applied' };
         // ⚠ 回调原先**不接参数**，各分支辛苦拼的结构化结果在这里被整个丢掉，
         //   回执永远是那个固定字面量。2026-08-19 用户连问两轮「AI 说成功但
@@ -2258,6 +2271,12 @@ if (window.__bwPwaProviderOnly) return;
         if (value && typeof value === 'object') {
           if (value.bindOutcome) receipt.bindOutcome = value.bindOutcome;
           if (value.bindReason) receipt.bindReason = value.bindReason;
+        }
+        if (_readerOutputNeedsBound(delivery) && receipt.bindOutcome !== 'bound') {
+          _readerOutputAwaitingBind[delivery.correlation] = 1;
+        } else {
+          delete _readerOutputAwaitingBind[delivery.correlation];
+          _rememberReaderOutput(delivery.correlation, receipt);
         }
         return receipt;
       }, function (error) {
@@ -2272,7 +2291,15 @@ if (window.__bwPwaProviderOnly) return;
       return Promise.resolve(_readerOutputReject('BW_READER_REALTIME_OUTPUT_INVALID'));
     }
     var correlation = String(delivery.correlation);
-    if (_readerOutputSeen[correlation]) return Promise.resolve({ outcome: 'replay' });
+    var seen = _readerOutputSeen[correlation];
+    if (seen) {
+      var replay = { outcome: 'replay' };
+      // Durable page-chars 卡收到 bound 后，桥接端还可能在落本地 outbox 状态前
+      // 崩溃。重放必须继续证明它已 bound，不能退化成无结果的 replay。
+      if (seen.bindOutcome) replay.bindOutcome = seen.bindOutcome;
+      if (seen.bindReason) replay.bindReason = seen.bindReason;
+      return Promise.resolve(replay);
+    }
     // 同一 correlation 在第一次落库尚未完成时可能被桥接层重送。共享同一 Promise，
     // 既不重复写 placement，也让两个调用者得到同一条真实回执。
     if (_readerOutputPending[correlation]) return _readerOutputPending[correlation];
@@ -3563,6 +3590,16 @@ if (window.__bwPwaProviderOnly) return;
           }
         } else _pr = { ok: false, why: 'persistence-unavailable' };
         if (_pr && _pr.ok === true) return _renderInfoResult(true, 'bound');
+        // durable replay 的第一次失败已经生成过回退卡并登记补绑。后续只重试
+        // 权威 placement：再次走下面的 turnCard / 浮层分支会让同一 correlation
+        // 每重放一次就多出一张卡。rendered:true 表示首轮回退视图仍是已应用结果。
+        if (options.bindOnly === true) {
+          return _renderInfoResult(
+            true,
+            'floating',
+            (_pr && _pr.why) || 'unknown'
+          );
+        }
         _bindOutcome = {
           outcome: 'floating',
           reason: (_pr && _pr.why) || 'unknown'

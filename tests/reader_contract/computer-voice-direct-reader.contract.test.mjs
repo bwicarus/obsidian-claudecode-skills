@@ -86,6 +86,14 @@ function pageLayoutFixture(overrides = {}) {
   };
 }
 
+function structuredAnchorMap(text) {
+  const match = String(text || "").match(
+    /⟦ANCHOR_MAP_START⟧\n(\{[^\n]*\})\n⟦ANCHOR_MAP_END⟧/,
+  );
+  assert.ok(match, "structured page context must carry an anchor map");
+  return JSON.parse(match[1]);
+}
+
 function createAudioContextClass(scenario) {
   return class FakeAudioContext {
     constructor(options) {
@@ -517,6 +525,12 @@ function createServer(scenario) {
       }
       if (request.type === "visual-register") {
         scenario.readerVisualRegistrations.push(structuredClone(request));
+        if (typeof scenario.readerRealtimeOutputDuringVisualRegister === "function") {
+          server.emitReaderRealtimeOutput(
+            scenario.readerRealtimeOutputDuringVisualRegister(request),
+            this,
+          );
+        }
         result(this, request, {
           sessionId: request.sessionId,
           sourceInstanceId: request.sourceInstanceId,
@@ -1089,6 +1103,7 @@ function createHarness(overrides = {}) {
     readerRealtimeOutputDeliveries: [],
     readerRealtimeOutputAcks: [],
     readerRealtimeOutputReceipt: { outcome: "applied" },
+    readerRealtimeOutputDuringVisualRegister: null,
     readerRealtimeOutputDiagnostics: [],
     readerVisualChunks: [],
     readerVisualRegistrations: [],
@@ -2051,6 +2066,59 @@ test("snapshot-mcp 常驻 WSS 接收严格结果卡并回 rendered ACK，不发�
   await disableSnapshot(harness);
 });
 
+test("visual-register 回执前到达的首条 durable output 已能关联当前来源", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      title: "Snapshot Book",
+      pos: 24,
+    },
+    readerRealtimeOutputDuringVisualRegister(request) {
+      return {
+        contract: REALTIME_OUTPUT_CONTRACT,
+        commandKind: "realtime-output",
+        correlation: "output-first-register-replay",
+        sourceInstanceId: request.sourceInstanceId,
+        snapshotRevision: 1,
+        file: "book.pdf",
+        page: 24,
+        kind: "card",
+        payload: {
+          card: {
+            kind: "general",
+            title: "首次重放",
+            data: { text: "注册回执前已经到达" },
+            bind: {
+              kind: "page-chars",
+              page: 24,
+              from: 2,
+              to: 3,
+              text: "测试",
+            },
+          },
+        },
+      };
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+
+  await waitForCondition(
+    () => harness.scenario.readerRealtimeOutputAcks.length === 1,
+    "first replay during visual-register ACK",
+  );
+  assert.equal(harness.scenario.readerRealtimeOutputDeliveries.length, 1);
+  assert.equal(
+    harness.scenario.readerRealtimeOutputDeliveries[0].correlation,
+    "output-first-register-replay",
+  );
+  assert.equal(harness.scenario.readerRealtimeOutputAcks[0].outcome, "applied");
+  assert.equal(harness.scenario.readerRealtimeOutputAcks[0].error, null);
+  await disableSnapshot(harness);
+});
+
 test("snapshot-mcp 将结构化输出交给现有 Realtime 渲染入口并回精确 ACK", async () => {
   const harness = createHarness({
     contextDeliveryMode: "snapshot-mcp",
@@ -2149,6 +2217,41 @@ test("snapshot-mcp 将结构化输出交给现有 Realtime 渲染入口并回精
     harness.scenario.readerRealtimeOutputAcks[1].error,
     "BW_READER_REALTIME_OUTPUT_STALE",
   );
+
+  harness.server.emitReaderRealtimeOutput(
+    {
+      ...delivery,
+      correlation: "output-bound-card-background-25",
+      page: 25,
+      kind: "card",
+      payload: {
+        card: {
+          kind: "general",
+          title: "跨页卡片",
+          data: { text: "目标页未显示时仍应持久化" },
+          bind: {
+            kind: "page-chars",
+            page: 25,
+            from: 18,
+            to: 21,
+            text: "目标词",
+          },
+        },
+      },
+    },
+    harness.server.sockets[0],
+  );
+  await waitForCondition(
+    () => harness.scenario.readerRealtimeOutputAcks.length === 3,
+    "same-book background page bind ACK",
+  );
+  assert.equal(harness.scenario.readerRealtimeOutputDeliveries.length, 2);
+  assert.equal(
+    harness.scenario.readerRealtimeOutputDeliveries[1].payload.card.bind.page,
+    25,
+  );
+  assert.equal(harness.scenario.readerRealtimeOutputAcks[2].outcome, "applied");
+  assert.equal(harness.scenario.readerRealtimeOutputAcks[2].error, null);
   await disableSnapshot(harness);
 });
 
@@ -4080,6 +4183,7 @@ test("原生 App 本地书把当前视口前后正文写进本地 page.context",
 test("高置信漫画布局生成四列 Markdown 且 CARD 仍按原字符下标插在绑定词后", async () => {
   const chars = Array.from("左文右文", (character, index) => ({
     c: character,
+    w: index < 2 ? 10 : 11,
     x0: index < 2 ? 10 + index * 10 : 70 + index * 10,
     y0: 10,
     x1: index < 2 ? 19 + index * 10 : 79 + index * 10,
@@ -4138,6 +4242,20 @@ test("高置信漫画布局生成四列 Markdown 且 CARD 仍按原字符下标�
   assert.equal((payload.text.match(/⟦CARD_START /g) || []).length, 1);
   assert.equal((payload.text.match(/⟦CARD_END⟧/g) || []).length, 1);
   assert.match(payload.text, /⟧右\\\|侧<br>卡片⟦CARD_END⟧/);
+  const anchorMap = structuredAnchorMap(payload.text);
+  assert.equal(anchorMap.schema, "reader-structured-anchor-map/1");
+  assert.equal(anchorMap.page, 7);
+  assert.equal(anchorMap.notesRevision, 1);
+  assert.equal(anchorMap.indexSpace, "pageChars");
+  assert.equal(anchorMap.rangeBoundary, "inclusive");
+  assert.equal(anchorMap.segmentOrder, "layout-reading-order");
+  assert.equal(anchorMap.markdownOffsetsAreAnchorIndices, false);
+  assert.deepEqual(anchorMap.segmentFormat, ["from", "to", "text"]);
+  assert.equal(anchorMap.complete, true);
+  assert.deepEqual(anchorMap.segments, [
+    [2, 3, "右文"],
+    [0, 1, "左文"],
+  ]);
   await disableSnapshot(harness);
 });
 
@@ -4150,6 +4268,7 @@ test("规则表格布局生成标准 Markdown 数据表", async () => {
   ];
   const chars = Array.from(text, (character, index) => ({
     c: character, x0: positions[index][0], y0: positions[index][1],
+    w: [0, 0, 1, 1, 2, 2, 3, 4, 5, 6, 6][index],
     x1: positions[index][0] + 9,
     y1: positions[index][1] + (index < 4 ? 12 : index < 9 ? 9 : 8),
     sp: false,
@@ -4205,6 +4324,20 @@ test("规则表格布局生成标准 Markdown 数据表", async () => {
   assert.doesNotMatch(
     harness.scenario.nativePageContextPublishes[0].text,
     /A<br>C/,
+  );
+  assert.deepEqual(
+    structuredAnchorMap(
+      harness.scenario.nativePageContextPublishes[0].text,
+    ).segments,
+    [
+      [0, 1, "国家"],
+      [2, 3, "特征"],
+      [4, 5, "韩国"],
+      [6, 6, "A"],
+      [7, 7, "旁"],
+      [8, 8, "C"],
+      [9, 10, "辣脆"],
+    ],
   );
   await disableSnapshot(harness);
 });

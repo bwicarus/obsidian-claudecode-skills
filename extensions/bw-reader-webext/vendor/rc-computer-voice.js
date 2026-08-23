@@ -68,6 +68,12 @@ if (window.__bwPwaProviderOnly) return;
   // envelope headroom while allowing normal long cards to remain complete.
   var LOCAL_PAGE_CONTEXT_LIMIT = 220000;
   var LOCAL_PAGE_CONTEXT_MAX_BYTES = 224 * 1024;
+  var LOCAL_STRUCTURED_ANCHOR_MAP_CONTRACT =
+    "reader-structured-anchor-map/1";
+  var LOCAL_STRUCTURED_ANCHOR_MAP_MAX_SEGMENTS = 4096;
+  var LOCAL_STRUCTURED_ANCHOR_SEGMENT_TEXT_LIMIT = 512;
+  var LOCAL_STRUCTURED_ANCHOR_MAP_MAX_CHARS = 90000;
+  var LOCAL_STRUCTURED_ANCHOR_MAP_MAX_BYTES = 96 * 1024;
   var LOCAL_PAGE_CARDS_CONTRACT = "reader-local-page-cards/1";
   var LOCAL_PAGE_CARD_SOURCE_CONTRACT = "reader-local-page-card-source/1";
   var LOCAL_PAGE_CARD_PROJECTION_CONTRACT =
@@ -3130,6 +3136,19 @@ if (window.__bwPwaProviderOnly) return;
 
   function readerRealtimeOutputMatchesLive(delivery, channel) {
     var current = localActiveReadingSnapshot();
+    // page-chars 已经携带自己的目标页和原始字符区间。只要还是同一本书，
+    // 它就能由 __pageBindPersist 在目标页未渲染时写成 deferred PDF anchor；
+    // 不应再拿生成快照时的可见页阻挡后台/跨页绑定。其它输出继续要求页面
+    // 完全一致，避免导航、高亮或按当前页序号修改卡片时误投。
+    var card = delivery && delivery.kind === "card" && delivery.payload &&
+      delivery.payload.card;
+    var bind = card && card.bind;
+    var action = delivery && delivery.kind === "client-action" &&
+      delivery.payload;
+    var documentScopedMutation = !!(
+      (bind && bind.kind === "page-chars") ||
+      (action && action.fn === "_nativeReaderLearningCardMutate")
+    );
     return !!(
       contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT &&
       channel &&
@@ -3138,7 +3157,8 @@ if (window.__bwPwaProviderOnly) return;
       current &&
       current.sourceInstanceId === delivery.sourceInstanceId &&
       current.file === delivery.file &&
-      sameActiveScalar(current.page, delivery.page)
+      (sameActiveScalar(current.page, delivery.page) ||
+        documentScopedMutation)
     );
   }
 
@@ -9256,6 +9276,60 @@ if (window.__bwPwaProviderOnly) return;
     return wrote;
   }
 
+  function localStructuredAnchorSegments(pageRecord, layout) {
+    var segments = [];
+    var overflow = false;
+    var group = 0;
+    var regions = layout.regions.slice().sort(function (left, right) {
+      return left.order - right.order;
+    });
+
+    outer:
+    for (var regionIndex = 0; regionIndex < regions.length; regionIndex += 1) {
+      var region = regions[regionIndex];
+      for (var rangeIndex = 0; rangeIndex < region.ranges.length;
+          rangeIndex += 1) {
+        group += 1;
+        var range = region.ranges[rangeIndex];
+        for (var sourceIndex = range[0]; sourceIndex <= range[1];
+            sourceIndex += 1) {
+          var source = pageRecord.chars[sourceIndex] || {};
+          var semantic = String(source.c == null ? "" : source.c)
+            .replace(/\u0000/g, "")
+            .replace(/\r\n?/g, "\n")
+            .replace(/\s+/g, " ")
+            .trim();
+          if (!semantic) continue;
+          var rawWord = source.w;
+          var word = rawWord != null && rawWord !== "" &&
+            Number.isSafeInteger(Number(rawWord)) && Number(rawWord) >= 0
+            ? Number(rawWord) : -1;
+          var previous = segments.length ? segments[segments.length - 1] : null;
+          if (previous && previous._group === group && word >= 0 &&
+              previous._word === word &&
+              previous.text.length + semantic.length <=
+                LOCAL_STRUCTURED_ANCHOR_SEGMENT_TEXT_LIMIT) {
+            previous.to = sourceIndex;
+            previous.text += semantic;
+            continue;
+          }
+          if (segments.length >= LOCAL_STRUCTURED_ANCHOR_MAP_MAX_SEGMENTS) {
+            overflow = true;
+            break outer;
+          }
+          segments.push({
+            from: sourceIndex,
+            to: sourceIndex,
+            text: semantic,
+            _word: word,
+            _group: group
+          });
+        }
+      }
+    }
+    return { segments: segments, overflow: overflow };
+  }
+
   function appendLocalMangaLayout(builder, pageRecord, layout) {
     var cells = [];
     for (var row = 0; row < layout.gridRows; row += 1) {
@@ -9358,7 +9432,9 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
 
-  function localStructuredPageProjection(pageRecord, projected, revision) {
+  function localStructuredPageProjection(
+    pageRecord, projected, revision, withAnchors
+  ) {
     var layout = pageRecord.layout;
     if (!layout || layout.textSource !== "vision" ||
         layout.confidence !== "high" ||
@@ -9369,6 +9445,9 @@ if (window.__bwPwaProviderOnly) return;
     } else {
       appendLocalTableLayout(builder, pageRecord, layout);
     }
+    var anchors = withAnchors === false
+      ? { segments: [], overflow: false }
+      : localStructuredAnchorSegments(pageRecord, layout);
     if (builder.after.some(function (offset) { return !Number.isSafeInteger(offset); })) {
       return null;
     }
@@ -9394,8 +9473,68 @@ if (window.__bwPwaProviderOnly) return;
     return {
       text: output,
       mode: layout.mode,
-      sourceAfter: builder.after
+      sourceAfter: builder.after,
+      anchorSegments: anchors.segments,
+      anchorOverflow: anchors.overflow
     };
+  }
+
+  function localStructuredAnchorMap(structured, page, revision, hardMaximum) {
+    var segments = Array.isArray(structured && structured.anchorSegments)
+      ? structured.anchorSegments : [];
+    var maximum = Math.min(
+      segments.length,
+      Number.isSafeInteger(hardMaximum) && hardMaximum >= 0
+        ? hardMaximum : LOCAL_STRUCTURED_ANCHOR_MAP_MAX_SEGMENTS
+    );
+
+    function render(count) {
+      var hasMore = !!(structured && structured.anchorOverflow) ||
+        count < segments.length;
+      var payload = {
+        schema: LOCAL_STRUCTURED_ANCHOR_MAP_CONTRACT,
+        page: Number(page) || 0,
+        notesRevision: revision == null ? null : revision,
+        indexSpace: "pageChars",
+        rangeBoundary: "inclusive",
+        segmentOrder: "layout-reading-order",
+        markdownOffsetsAreAnchorIndices: false,
+        segmentFormat: ["from", "to", "text"],
+        complete: !hasMore,
+        segments: segments.slice(0, count).map(function (segment) {
+          return [segment.from, segment.to, segment.text];
+        })
+      };
+      // Keep delimiter-like source text lossless JSON while preventing it from
+      // being mistaken for the framing tokens around this machine-readable map.
+      var json = JSON.stringify(payload)
+        .replace(/⟦/g, "\\u27e6")
+        .replace(/⟧/g, "\\u27e7");
+      return {
+        text:
+          "【当前页原始锚点映射（仅以下 from/to 可用于 bind；" +
+          "Markdown 字符位置不是锚点下标）】\n" +
+          "⟦ANCHOR_MAP_START⟧\n" + json + "\n⟦ANCHOR_MAP_END⟧",
+        truncated: hasMore
+      };
+    }
+
+    function fits(rendered) {
+      return rendered.text.length <= LOCAL_STRUCTURED_ANCHOR_MAP_MAX_CHARS &&
+        messageBytes(JSON.stringify(rendered.text)) <=
+          LOCAL_STRUCTURED_ANCHOR_MAP_MAX_BYTES;
+    }
+
+    var rendered = render(maximum);
+    if (fits(rendered)) return rendered;
+    var low = 0;
+    var high = maximum;
+    while (low < high) {
+      var middle = low + Math.ceil((high - low) / 2);
+      if (fits(render(middle))) low = middle;
+      else high = middle - 1;
+    }
+    return render(low);
   }
 
   function annotateLocalPageRange(pageRecord, projected, start, end, revision) {
@@ -9516,12 +9655,18 @@ if (window.__bwPwaProviderOnly) return;
       if (!visible) visible = currentText.slice(0, 5000);
       var exactIndex = visible ? currentText.indexOf(visible) : -1;
       var sections = [];
+      var structuredAnchorMapInsertAt = -1;
+      var structuredAnchorMapTruncated = false;
       var structured = localStructuredPageProjection(
-        currentPage, projected, pageCardProjection.value.revision
+        currentPage, projected, pageCardProjection.value.revision, true
       );
       if (structured) {
-        var previousStructured = localStructuredPageProjection(previous, [], null);
-        var nextStructured = localStructuredPageProjection(next, [], null);
+        var previousStructured = localStructuredPageProjection(
+          previous, [], null, false
+        );
+        var nextStructured = localStructuredPageProjection(
+          next, [], null, false
+        );
         var previousText = previousStructured
           ? previousStructured.text : escapeLocalContextText(previous.text);
         var nextText = nextStructured
@@ -9534,10 +9679,13 @@ if (window.__bwPwaProviderOnly) return;
         }
         sections.push(
           structured.mode === "manga"
-            ? "【当前页结构化文字（Markdown；按 [NN] 编号顺序阅读；四列为空表示该位置没有文字）】\n" +
+            ? "【当前页结构化文字（Markdown；按 [NN] 编号顺序阅读；四列为空表示该位置没有文字；" +
+                "Markdown 字符位置不可用作 bind 下标）】\n" +
                 structured.text
-            : "【当前页结构化文字（Markdown 表格）】\n" + structured.text
+            : "【当前页结构化文字（Markdown 表格；Markdown 字符位置不可用作 bind 下标）】\n" +
+                structured.text
         );
+        structuredAnchorMapInsertAt = sections.length;
         if (nextText) {
           sections.push("【当前页之后】\n" + nextText.slice(0, 2200));
         }
@@ -9600,6 +9748,41 @@ if (window.__bwPwaProviderOnly) return;
         sections.push("【当前页未锚定卡片（不参与正文及右侧标记序号）】\n" +
           unboundMarkers.join("\n"));
       }
+      if (structured && structuredAnchorMapInsertAt >= 0) {
+        var anchorMap = localStructuredAnchorMap(
+          structured, page, pageCardProjection.value.revision
+        );
+        var mappedSections = sections.slice();
+        mappedSections.splice(
+          structuredAnchorMapInsertAt, 0, anchorMap.text
+        );
+        var mappedText = mappedSections.join("\n\n");
+        if (mappedText.length <= LOCAL_PAGE_CONTEXT_LIMIT &&
+            messageBytes(JSON.stringify(mappedText)) <=
+              LOCAL_PAGE_CONTEXT_MAX_BYTES) {
+          sections = mappedSections;
+          structuredAnchorMapTruncated = anchorMap.truncated;
+        } else {
+          // Retain an explicit no-offset warning even when the page body leaves
+          // room only for mapping metadata, never silently invite the model to
+          // reuse Markdown positions as provider-array indices.
+          var compactAnchorMap = localStructuredAnchorMap(
+            Object.assign({}, structured, { anchorOverflow: true }),
+            page, pageCardProjection.value.revision, 0
+          );
+          var compactSections = sections.slice();
+          compactSections.splice(
+            structuredAnchorMapInsertAt, 0, compactAnchorMap.text
+          );
+          var compactText = compactSections.join("\n\n");
+          if (compactText.length <= LOCAL_PAGE_CONTEXT_LIMIT &&
+              messageBytes(JSON.stringify(compactText)) <=
+                LOCAL_PAGE_CONTEXT_MAX_BYTES) {
+            sections = compactSections;
+          }
+          structuredAnchorMapTruncated = true;
+        }
+      }
       var bounded = truncateLocalPageContext(
         sections.join("\n\n"), LOCAL_PAGE_CONTEXT_LIMIT,
         LOCAL_PAGE_CONTEXT_MAX_BYTES
@@ -9616,7 +9799,8 @@ if (window.__bwPwaProviderOnly) return;
           ? "app-local-structured-layout" : "app-local-visible-window",
         fallbackReason: text ? null : "本机文字层尚未提供当前页文字",
         truncated: bounded.truncated || currentPage.truncated ||
-          previous.truncated || next.truncated || unboundTruncated
+          previous.truncated || next.truncated || unboundTruncated ||
+          structuredAnchorMapTruncated
       };
     });
   }
@@ -10425,6 +10609,12 @@ if (window.__bwPwaProviderOnly) return;
         if (snapshotLink !== state || state.stopped) return null;
         var sourceInstanceId = currentReaderSourceInstanceId();
         state.channel.readerVisualSessionId = state.sessionId;
+        // Attach() can synchronously wake the durable-output replay before the
+        // visual-register result is sent back.  Publish the source identity
+        // before sending the registration request so that the first replayed
+        // event can be correlated instead of being rejected as stale.  A
+        // failed registration closes and discards this channel below.
+        state.channel.readerVisualSourceId = sourceInstanceId;
         return state.channel.request("visual-register", {
           sessionId: state.sessionId,
           sourceInstanceId: sourceInstanceId,
@@ -10445,7 +10635,6 @@ if (window.__bwPwaProviderOnly) return;
               "BW_READER_VISUAL_REGISTER_ACK"
             );
           }
-          state.channel.readerVisualSourceId = sourceInstanceId;
           if (snapshotLink !== state || state.stopped) return null;
           snapshotTransportState = "open";
           snapshotReconnectAttempt = 0;

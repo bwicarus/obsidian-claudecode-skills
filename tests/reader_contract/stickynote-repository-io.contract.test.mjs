@@ -187,9 +187,11 @@ function loadStickynote({
   noteWordRect = null,
   selectionController = null,
   pageBindCard = null,
+  anchorFromPoint = null,
   fetchImpl = null,
   file = null,
   source = SOURCE,
+  toasts = [],
 }) {
   const head = new FakeElement("head");
   head._connected = true;
@@ -258,11 +260,11 @@ function loadStickynote({
     repository,
     disablePortal: true,
     mount: mount || (() => ({ el: container, left: 20, top: 30 })),
-    anchorFromPoint: () => anchor(documentId),
+    anchorFromPoint: anchorFromPoint || (() => anchor(documentId)),
     noteWordRect: noteWordRect || undefined,
-    toast() {},
+    toast(message) { toasts.push(String(message)); },
   });
-  return { sandbox, documentId, container, fetchCalls };
+  return { sandbox, documentId, container, fetchCalls, toasts };
 }
 
 test("native Pencil tool/style sync is atomic, updates mounted note UI, and keeps regions on the page", async () => {
@@ -763,6 +765,510 @@ test("PDF legacy PATCH 成功后同一会话立即从自由卡切成正文词锚
   assert.equal(root.classList.contains("rc-note-free-card-open"), false);
 });
 
+test("legacy 初始 LIST 水合前 durable 绑定不写；命中相同 sourceUid 后直接复用", async () => {
+  const file = "localbook:localbook-" + "4".repeat(64);
+  const listGate = deferred();
+  const bind = { kind: "page-chars", page: 9, from: 10, to: 13, text: "既存卡" };
+  const payload = {
+    uid: "output-existing-before-hydration",
+    raw: "<b>已经持久化的卡</b>",
+    text: "已经持久化的卡",
+    isHtml: true,
+    label: "既存卡",
+  };
+  let posts = 0;
+  const existing = note("web:https://example.test/article", "nexisting01", 0, "", {
+    anchor: { kind: "pdf", page: 9, x: 0.5, y: 0.5 },
+    html: {
+      cid: payload.uid,
+      sourceUid: payload.uid,
+      content: payload.raw,
+      contextText: payload.text,
+      bind: structuredClone(bind),
+    },
+  });
+  const loaded = loadStickynote({
+    file,
+    fetchImpl: async (_url, init) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "GET") return listGate.promise;
+      posts += 1;
+      throw new Error("初始 LIST 前不得 POST");
+    },
+  });
+
+  const operation = loaded.sandbox.RC.stickynote.persistBoundCard(
+    bind, payload, { deferredPdfPage: 9 },
+  );
+  await tick();
+  assert.equal(posts, 0);
+  listGate.resolve({
+    ok: true,
+    json: async () => ({ ok: true, notes: [structuredClone(existing)] }),
+  });
+  const result = await operation;
+
+  assert.equal(result.ok, true);
+  assert.equal(result.reused, true);
+  assert.equal(result.noteId, existing.id);
+  assert.equal(posts, 0, "水合后按 sourceUid 找到旧卡时不能再建一张");
+});
+
+test("legacy 初始 LIST 为空后才允许 durable POST，旧快照不会再抹掉新投影", async () => {
+  const file = "localbook:localbook-" + "5".repeat(64);
+  const listGate = deferred();
+  const bind = { kind: "page-chars", page: 10, from: 4, to: 7, text: "新卡" };
+  const posts = [];
+  const loaded = loadStickynote({
+    file,
+    fetchImpl: async (_url, init) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "GET") return listGate.promise;
+      const body = JSON.parse(init.body);
+      posts.push(structuredClone(body));
+      return {
+        ok: true,
+        json: async () => ({ ok: true, note: { ...structuredClone(body), id: body.id } }),
+      };
+    },
+  });
+  const operation = loaded.sandbox.RC.stickynote.persistBoundCard(bind, {
+    uid: "output-created-after-hydration",
+    raw: "<b>列表完成后创建</b>",
+    text: "列表完成后创建",
+    isHtml: true,
+  }, { deferredPdfPage: 10 });
+  await tick();
+  assert.equal(posts.length, 0);
+
+  listGate.resolve({ ok: true, json: async () => ({ ok: true, notes: [] }) });
+  const result = await operation;
+  assert.equal(result.ok, true);
+  assert.equal(posts.length, 1);
+  assert.equal(loaded.sandbox.RC.stickynote.notes().length, 1);
+  assert.equal(loaded.sandbox.RC.stickynote.notes()[0].id, posts[0].id);
+});
+
+test("legacy 初始 LIST 失败后显式 loadAll 成功会解除 gate，无需重开页面", async () => {
+  let gets = 0;
+  let posts = 0;
+  const loaded = loadStickynote({
+    file: "localbook:localbook-" + "6".repeat(64),
+    fetchImpl: async (_url, init) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "GET") {
+        gets += 1;
+        if (gets === 1) return { ok: false, status: 500 };
+        return { ok: true, json: async () => ({ ok: true, notes: [] }) };
+      }
+      posts += 1;
+      const body = JSON.parse(init.body);
+      return {
+        ok: true,
+        json: async () => ({ ok: true, note: { ...structuredClone(body), id: body.id } }),
+      };
+    },
+  });
+  await tick();
+  await tick();
+
+  assert.equal(await loaded.sandbox.RC.stickynote.loadAll(), true);
+  const result = await loaded.sandbox.RC.stickynote.persistBoundCard({
+    kind: "page-chars", page: 12, from: 2, to: 5, text: "恢复",
+  }, {
+    uid: "output-after-list-recovery",
+    raw: "<b>恢复后创建</b>",
+    text: "恢复后创建",
+    isHtml: true,
+  }, { deferredPdfPage: 12 });
+
+  assert.equal(gets, 2);
+  assert.equal(result.ok, true);
+  assert.equal(posts, 1, "第二次 LIST 成功后 durable create 应恢复");
+});
+
+test("legacy 重叠 loadAll 只允许最新序号投影，迟到旧快照不能覆盖 UI", async () => {
+  const firstList = deferred();
+  const secondList = deferred();
+  let gets = 0;
+  const file = "localbook:localbook-" + "7".repeat(64);
+  const loaded = loadStickynote({
+    file,
+    fetchImpl: async (_url, init) => {
+      assert.equal(String(init.method || "GET").toUpperCase(), "GET");
+      gets += 1;
+      return gets === 1 ? firstList.promise : secondList.promise;
+    },
+  });
+  const latestLoad = loaded.sandbox.RC.stickynote.loadAll();
+  const newest = note("web:https://example.test/article", "nnewest01", 0, "新列表", {
+    anchor: { kind: "pdf", page: 1, x: 0.2, y: 0.2 },
+  });
+  secondList.resolve({
+    ok: true,
+    json: async () => ({ ok: true, notes: [structuredClone(newest)] }),
+  });
+  assert.equal(await latestLoad, true);
+
+  const stale = note("web:https://example.test/article", "nstale001", 0, "旧列表", {
+    anchor: { kind: "pdf", page: 1, x: 0.1, y: 0.1 },
+  });
+  firstList.resolve({
+    ok: true,
+    json: async () => ({ ok: true, notes: [structuredClone(stale)] }),
+  });
+  await tick();
+  await tick();
+
+  assert.equal(gets, 2);
+  assert.deepEqual(
+    loaded.sandbox.RC.stickynote.notes().map((item) => item.id),
+    [newest.id],
+  );
+});
+
+test("page-chars 的 noteId 与 mutationId 跨 WebView 重建保持确定", async () => {
+  const bind = { kind: "page-chars", page: 11, from: 30, to: 33, text: "确定" };
+  const payload = {
+    uid: "output-stable-across-webview-restart",
+    raw: "<b>跨重启同一逻辑卡</b>",
+    text: "跨重启同一逻辑卡",
+    isHtml: true,
+  };
+  const creates = [];
+  let randomIdCalls = 0;
+  function repository() {
+    return {
+      newId() {
+        randomIdCalls += 1;
+        return `c_${String(randomIdCalls).padStart(32, "0")}`;
+      },
+      list: async () => [],
+      get: async () => null,
+      create(input, options) {
+        creates.push({ input: structuredClone(input), options: structuredClone(options) });
+        return Promise.resolve({
+          ...structuredClone(input), id: input.noteId, noteId: input.noteId,
+          rev: 1, deleted: false,
+        });
+      },
+      patch: async () => null,
+      remove: async () => null,
+      subscribe: () => () => {},
+    };
+  }
+
+  const first = loadStickynote({ repository: repository() });
+  await tick();
+  assert.equal((await first.sandbox.RC.stickynote.persistBoundCard(
+    bind, payload, { x: 40, y: 50 },
+  )).ok, true);
+  const second = loadStickynote({ repository: repository() });
+  await tick();
+  assert.equal((await second.sandbox.RC.stickynote.persistBoundCard(
+    bind, payload, { x: 40, y: 50 },
+  )).ok, true);
+
+  assert.equal(randomIdCalls, 0, "durable 绑定不能在新 WebView 重新取随机 noteId");
+  assert.equal(creates.length, 2);
+  assert.match(creates[0].input.noteId, /^c_[a-f0-9]{32}$/);
+  assert.equal(creates[1].input.noteId, creates[0].input.noteId);
+  assert.equal(creates[1].options.mutationId, creates[0].options.mutationId);
+});
+
+test("PDF legacy POST 用稳定 client id 对 5xx 安全补投且不会创建第二张卡", async () => {
+  const file = "localbook:localbook-" + "a".repeat(64);
+  const posts = [];
+  const committed = new Map();
+  const loaded = loadStickynote({
+    file,
+    fetchImpl: async (_url, init) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "GET") {
+        return { ok: true, json: async () => ({ ok: true, notes: [] }) };
+      }
+      assert.equal(method, "POST");
+      const body = JSON.parse(init.body);
+      posts.push(structuredClone(body));
+      // 模拟第一次其实已经提交，只是回执在链路上变成 500；第二次必须
+      // 依靠相同 client id upsert，而不是在持久层留下两张。
+      committed.set(body.id, structuredClone(body));
+      if (posts.length === 1) {
+        return {
+          ok: false,
+          status: 500,
+          headers: { get: () => "application/json" },
+          text: async () => JSON.stringify({ code: "BW_LOCAL_TRANSIENT", error: "暂时不可写" }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ ok: true, note: { ...structuredClone(body), id: body.id } }),
+      };
+    },
+  });
+  await tick();
+
+  assert.equal(loaded.sandbox.RC.stickynote.createHtmlAt(20, 20, {
+    content: "<b>可安全补投的卡片</b>",
+    isHtml: true,
+    label: "可安全补投的卡片",
+  }), true);
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  await tick();
+
+  assert.equal(posts.length, 2);
+  assert.match(posts[0].id, /^c_[a-f0-9]{32}$/);
+  assert.deepEqual(posts[1], posts[0], "补投必须保持相同 id、锚点和卡片正文");
+  assert.equal(committed.size, 1, "首次已提交但回执失败时补投也不能产生第二条记录");
+  assert.equal(loaded.sandbox.RC.stickynote.notes().length, 1);
+  assert.equal(loaded.sandbox.RC.stickynote.notes()[0].id, posts[0].id);
+});
+
+test("PDF legacy 补投受页面 generation 约束，切书后不再写旧 file", async () => {
+  const oldFile = "localbook:localbook-" + "1".repeat(64);
+  const nextFile = "localbook:localbook-" + "2".repeat(64);
+  const posts = [];
+  const loaded = loadStickynote({
+    file: oldFile,
+    fetchImpl: async (_url, init) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "GET") {
+        return { ok: true, json: async () => ({ ok: true, notes: [] }) };
+      }
+      assert.equal(method, "POST");
+      posts.push(JSON.parse(init.body));
+      throw new TypeError("network changed while switching books");
+    },
+  });
+  await tick();
+  loaded.sandbox.RC.stickynote.createHtmlAt(20, 20, {
+    content: "<b>旧书卡片</b>",
+    isHtml: true,
+    label: "旧书卡片",
+  });
+  await tick();
+  loaded.sandbox.RC.stickynote.init({
+    documentId: "web:https://example.test/next",
+    file: nextFile,
+    disablePortal: true,
+    mount: () => ({ el: loaded.container, left: 20, top: 30 }),
+    anchorFromPoint: () => anchor("web:https://example.test/next"),
+    toast() {},
+  });
+  await new Promise((resolve) => setTimeout(resolve, 90));
+
+  assert.equal(posts.length, 1, "切书后旧 generation 的延迟补投必须取消");
+  assert.equal(posts[0].file, oldFile);
+});
+
+test("PDF legacy POST 的确定性 4xx 不自动补投", async () => {
+  let posts = 0;
+  const loaded = loadStickynote({
+    file: "localbook:localbook-" + "3".repeat(64),
+    fetchImpl: async (_url, init) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "GET") {
+        return { ok: true, json: async () => ({ ok: true, notes: [] }) };
+      }
+      posts += 1;
+      return {
+        ok: false,
+        status: 400,
+        headers: { get: () => "application/json" },
+        text: async () => JSON.stringify({ code: "BW_LOCAL_BAD_NOTE", error: "非法便签" }),
+      };
+    },
+  });
+  await tick();
+  loaded.sandbox.RC.stickynote.createHtmlAt(20, 20, {
+    content: "<b>非法卡片</b>",
+    isHtml: true,
+    label: "非法卡片",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.equal(posts, 1);
+});
+
+test("PDF legacy 创建与保存失败保留原文案并追加受限服务端详情", async () => {
+  const file = "localbook:localbook-" + "e".repeat(64);
+  const createToasts = [];
+  let createPosts = 0;
+  const createBodies = [];
+  const create = loadStickynote({
+    file,
+    toasts: createToasts,
+    fetchImpl: async (_url, init) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "GET") {
+        return { ok: true, json: async () => ({ ok: true, notes: [] }) };
+      }
+      assert.equal(method, "POST");
+      createPosts += 1;
+      createBodies.push(JSON.parse(init.body));
+      if (createPosts > 2) {
+        return {
+          ok: false,
+          status: 500,
+          headers: { get: () => "application/json" },
+          text: async () => JSON.stringify({
+            code: "BW_NOTE_DIAGNOSTIC_TOO_LONG",
+            error: "诊断详情 " + "很长".repeat(180) + " password=must-stay-hidden",
+          }),
+        };
+      }
+      return {
+        ok: false,
+        status: 500,
+        headers: { get: () => "application/json; charset=utf-8" },
+        text: async () => JSON.stringify({
+          ok: false,
+          code: "BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE",
+          error: "当前 Reader 页面实时来源已离线",
+          message: "Bearer should-never-reach-the-toast",
+          debug: "token=also-hidden",
+        }),
+      };
+    },
+  });
+  await tick();
+  assert.equal(create.sandbox.RC.stickynote.createHtmlAt(20, 20, {
+    content: "<b>待绑定卡片</b>",
+    isHtml: true,
+    label: "待绑定卡片",
+  }), true);
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  await tick();
+  assert.equal(createPosts, 2, "持续 5xx 只允许补投一次");
+  assert.deepEqual(createBodies[1], createBodies[0], "失败补投必须复用完整请求和稳定 id");
+  assert.equal(
+    createToasts.at(-1),
+    "✗ 便签创建失败：HTTP 500 · BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE · 当前 Reader 页面实时来源已离线",
+  );
+  assert.doesNotMatch(createToasts.at(-1), /should-never|also-hidden|token=/i);
+
+  create.sandbox.RC.stickynote.createHtmlAt(30, 30, {
+    content: "<b>第二张待绑定卡片</b>",
+    isHtml: true,
+    label: "第二张待绑定卡片",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  await tick();
+  assert.equal(createPosts, 4, "第二次逻辑创建同样只允许补投一次");
+  assert.deepEqual(createBodies[3], createBodies[2]);
+  assert.notEqual(createBodies[2].id, createBodies[0].id, "不同逻辑创建必须使用不同稳定 id");
+  assert.match(
+    createToasts.at(-1),
+    /^✗ 便签创建失败：HTTP 500 · BW_NOTE_DIAGNOSTIC_TOO_LONG · 诊断详情 /,
+  );
+  assert.match(createToasts.at(-1), /…$/);
+  assert.ok(createToasts.at(-1).length < 300, "错误 toast 必须保持有界");
+  assert.doesNotMatch(createToasts.at(-1), /must-stay-hidden/);
+
+  const id = `c_${"d".repeat(32)}`;
+  const initial = note("web:https://example.test/article", id, 0, "", {
+    anchor: { kind: "pdf", page: 7, x: 0.25, y: 0.4 },
+    html: { cid: "legacy-html", content: "<b>旧工具卡</b>" },
+  });
+  const saveToasts = [];
+  const save = loadStickynote({
+    file,
+    toasts: saveToasts,
+    selectionController: {
+      current: () => ({
+        text: "锁定元素",
+        anchor: { kind: "pdf-char", page: 7, startIdx: 22, endIdx: 24 },
+      }),
+    },
+    fetchImpl: async (_url, init) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "GET") {
+        return { ok: true, json: async () => ({ ok: true, notes: [structuredClone(initial)] }) };
+      }
+      assert.equal(method, "PATCH");
+      return {
+        ok: false,
+        status: 409,
+        headers: { get: () => "text/plain; charset=utf-8" },
+        text: async () => "版本冲突\n请重新读取后再试 token=private-value",
+      };
+    },
+  });
+  await tick();
+  await tick();
+  const root = save.container.children.find((child) => child.dataset.noteId === id);
+  root.querySelector(".rc-note-anchor").dispatch("click");
+  await tick();
+  await tick();
+  assert.equal(
+    saveToasts.at(-1),
+    "✗ 便签保存失败：HTTP 409 · 版本冲突 请重新读取后再试 token=[已隐藏]",
+  );
+  assert.doesNotMatch(saveToasts.at(-1), /private-value/);
+});
+
+test("目标 PDF 页未渲染时先持久化 deferred anchor，页加载后才投影词锚", async () => {
+  const file = "localbook:localbook-" + "f".repeat(64);
+  const bind = { kind: "page-chars", page: 7, from: 42, to: 45, text: "目标词" };
+  const markerCalls = [];
+  let posted = null;
+  let rendered = false;
+  let targetContainer = null;
+  let anchorCalls = 0;
+  const loaded = loadStickynote({
+    file,
+    anchorFromPoint() {
+      anchorCalls += 1;
+      return { kind: "pdf", page: 2, x: 0.1, y: 0.1 };
+    },
+    mount(noteAnchor) {
+      if (!rendered || !noteAnchor || noteAnchor.page !== 7) return null;
+      return { el: targetContainer, left: 320, top: 400 };
+    },
+    pageBindCard(actualBind, payload) {
+      markerCalls.push({ bind: structuredClone(actualBind), payload });
+      return { ok: true, key: "p7b42_45" };
+    },
+    fetchImpl: async (_url, init) => {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "GET") {
+        return { ok: true, json: async () => ({ ok: true, notes: [] }) };
+      }
+      assert.equal(method, "POST");
+      posted = JSON.parse(init.body);
+      return {
+        ok: true,
+        json: async () => ({ ok: true, note: { ...structuredClone(posted), id: "ndeferred01" } }),
+      };
+    },
+  });
+  targetContainer = loaded.container;
+  await tick();
+
+  const result = await loaded.sandbox.RC.stickynote.persistBoundCard(bind, {
+    uid: "deferred-image-card",
+    raw: "<figure>目标页图片卡</figure>",
+    text: "目标页图片卡",
+    isHtml: true,
+    category: "image",
+  }, { deferredPdfPage: 7 });
+
+  assert.equal(result.ok, true);
+  assert.equal(anchorCalls, 0, "deferred 写入不能借当前可见页的屏幕点求锚");
+  assert.deepEqual(posted.anchor, { kind: "pdf", page: 7, x: 0.5, y: 0.5 });
+  assert.deepEqual(posted.html.bind, bind);
+  assert.equal(markerCalls.length, 0, "目标页未渲染时不能画临时成功标记");
+  assert.equal(targetContainer.children.length, 0, "目标页未渲染时不能挂临时卡片 DOM");
+
+  rendered = true;
+  loaded.sandbox.RC.stickynote.mountPending();
+  assert.equal(markerCalls.length, 1);
+  assert.deepEqual(markerCalls[0].bind, bind);
+  const root = targetContainer.children.find((child) => child.dataset.noteId === "ndeferred01");
+  assert.ok(root, "目标页加载后应由已持久化 note 创建宿主");
+  assert.equal(root.style.display, "none", "词锚投影成功后宿主卡片保持收起");
+});
+
 test("AI page-chars 只在 repository create 与本地投影完成后报告持久化成功", async () => {
   const id = `c_${"9".repeat(32)}`;
   const gate = deferred();
@@ -874,7 +1380,7 @@ test("AI page-chars 回执未知后以同一 noteId+mutationId 重放，不创�
   assert.equal(first.ok, false);
   const second = await sandbox.RC.stickynote.persistBoundCard(bind, payload, { x: 55, y: 65 });
   assert.equal(second.ok, true);
-  assert.equal(newIdCalls, 1, "结果未知后不能重新取 ID");
+  assert.equal(newIdCalls, 0, "durable page-chars 从稳定 uid 派生 ID，不能再取随机 ID");
   assert.equal(creates.length, 2, "第二次只重放同一逻辑 create");
   assert.equal(creates[0].input.noteId, creates[1].input.noteId);
   assert.equal(creates[0].options.mutationId, creates[1].options.mutationId);

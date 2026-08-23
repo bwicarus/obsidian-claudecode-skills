@@ -101,6 +101,7 @@
   var _writeQueues = Object.create(null);   // noteId -> Promise；同一便签严格串行写
   var _seenRevs = Object.create(null);      // CHANGE 先于 LIST/RESULT 时阻止旧快照回灌
   var _boundCardWrites = Object.create(null);   // document+sourceUid+词区间 -> 稳定 create intent；结果未知也复用同一事务
+  var _initialLegacyLoad = null;   // {generation,promise,ready,failed}；防初次 GET 与 durable create 竞态
   var _wordPortalBound = false, _wordPortalRaf = 0;
   var _mutationSeq = 0;
 
@@ -376,6 +377,82 @@
     if (!random) random = Date.now().toString(36) + '-' + (++_mutationSeq).toString(36);
     return 'rc-note:' + kind + ':' + String(noteId || 'new') + ':' + random;
   }
+  function legacyCreateIdentity() {
+    var hex = '';
+    try {
+      if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+        var bytes = new Uint8Array(16);
+        window.crypto.getRandomValues(bytes);
+        for (var i = 0; i < bytes.length; i++) hex += bytes[i].toString(16).padStart(2, '0');
+      }
+    } catch (_) {}
+    // 老 WebView 没有 getRandomValues 时仍生成合同允许的稳定 client id。它只承担
+    // 幂等键，不是凭据；一次逻辑创建的所有补投都会复用同一个值。
+    while (hex.length < 32) {
+      hex += Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, '0');
+    }
+    var noteId = 'c_' + hex.slice(0, 32).toLowerCase();
+    return { noteId: noteId, mutationId: mutationId('create', noteId) };
+  }
+  function fallbackStableHex32(value) {
+    value = String(value == null ? '' : value);
+    var seeds = [0x811c9dc5, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35];
+    var words = [];
+    for (var s = 0; s < seeds.length; s++) {
+      var h = seeds[s] >>> 0;
+      for (var i = 0; i < value.length; i++) {
+        var code = value.charCodeAt(i);
+        h ^= code & 255;
+        h = Math.imul(h, 0x01000193);
+        h ^= code >>> 8;
+        h = Math.imul(h, 0x01000193);
+      }
+      h ^= value.length;
+      h ^= h >>> 16;
+      h = Math.imul(h, 0x85ebca6b);
+      h ^= h >>> 13;
+      h = Math.imul(h, 0xc2b2ae35);
+      h ^= h >>> 16;
+      words.push((h >>> 0).toString(16).padStart(8, '0'));
+    }
+    return words.join('');
+  }
+  function stableHex32(value) {
+    var fallback = function () { return fallbackStableHex32(value); };
+    try {
+      var Encoder = window.TextEncoder;
+      if (window.crypto && window.crypto.subtle &&
+          typeof window.crypto.subtle.digest === 'function' && typeof Encoder === 'function') {
+        return Promise.resolve(window.crypto.subtle.digest(
+          'SHA-256', new Encoder().encode(String(value == null ? '' : value))
+        )).then(function (buffer) {
+          var bytes = new Uint8Array(buffer), hex = '';
+          for (var i = 0; i < bytes.length; i++) hex += bytes[i].toString(16).padStart(2, '0');
+          return /^[a-f0-9]{64}$/.test(hex) ? hex.slice(0, 32) : fallback();
+        }, fallback);
+      }
+    } catch (_) {}
+    return Promise.resolve(fallback());
+  }
+  function stableBoundCreateIdentity(seed) {
+    return stableHex32(seed).then(function (hex) {
+      var noteId = 'c_' + hex;
+      return {
+        noteId: noteId,
+        // 跨 App/桥接重启仍必须是同一仓库事务；仅 noteId 相同而 mutationId
+        // 改变会被 document-note repository 正确视为 exists 冲突。
+        mutationId: 'rc-note:create:' + noteId + ':bound-v1'
+      };
+    });
+  }
+  function initialLegacyReady(generation) {
+    if (repoMode()) return Promise.resolve(generation === _generation);
+    var gate = _initialLegacyLoad;
+    if (!gate || gate.generation !== generation) return Promise.resolve(false);
+    if (gate.ready) return Promise.resolve(true);
+    if (gate.failed) return Promise.resolve(false);
+    return gate.promise || Promise.resolve(false);
+  }
   function noteIdOf(note) { return String(note && (note.noteId || note.id) || ''); }
   function cardPayloadSlot(note) {
     if (note && note.card && typeof note.card === 'object') return 'card';
@@ -507,15 +584,99 @@
     });
     return operation;
   }
+  var LEGACY_ERROR_BODY_LIMIT = 8192;
+  var LEGACY_ERROR_DETAIL_LIMIT = 240;
+  function legacyErrorText(value) {
+    var text = String(value == null ? '' : value)
+      .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+      .replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    // 错误详情会进入页面 toast；只保留诊断文字，常见凭据形态必须先遮蔽。
+    text = text
+      .replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+\/=:-]+/gi, '[凭据已隐藏]')
+      .replace(/((?:authorization|cookie|token|secret|password|api[-_ ]?key)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1[已隐藏]')
+      .replace(/([?&](?:access_token|token|key|secret|password|api_key)=)[^&\s]+/gi, '$1[已隐藏]')
+      .replace(/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{10,})?\b/g, '[凭据已隐藏]');
+    return text.length > LEGACY_ERROR_DETAIL_LIMIT
+      ? text.slice(0, LEGACY_ERROR_DETAIL_LIMIT - 1).trimEnd() + '…'
+      : text;
+  }
+  function legacyErrorCode(value) {
+    var code = String(value == null ? '' : value).trim();
+    return /^[A-Za-z][A-Za-z0-9_.:-]{0,95}$/.test(code) ? code : '';
+  }
+  function legacyErrorObject(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return '';
+    var nested = payload.error && typeof payload.error === 'object' && !Array.isArray(payload.error)
+      ? payload.error : null;
+    var code = legacyErrorCode(payload.code || (nested && nested.code));
+    var detail = '';
+    if (typeof payload.error === 'string' || typeof payload.error === 'number') {
+      detail = legacyErrorText(payload.error);
+    } else if (nested) {
+      detail = legacyErrorText(nested.message || nested.error);
+    }
+    if (!detail) detail = legacyErrorText(payload.message);
+    if (code && detail && detail !== code) return code + ' · ' + detail;
+    return code || detail;
+  }
+  function legacyErrorDetail(response) {
+    var contentType = '';
+    try { contentType = String(response && response.headers && response.headers.get('content-type') || '').toLowerCase(); } catch (_) {}
+    function fromText(raw) {
+      raw = String(raw == null ? '' : raw);
+      if (!raw || raw.length > LEGACY_ERROR_BODY_LIMIT) return '';
+      var trimmed = raw.trim();
+      var looksJson = /^[\[{]/.test(trimmed);
+      if (looksJson || contentType.indexOf('json') >= 0) {
+        try { return legacyErrorObject(JSON.parse(trimmed)); } catch (_) { return ''; }
+      }
+      // HTML/代理错误页及未知二进制类型不应原样进入 UI。
+      if (/^\s*</.test(trimmed) || (contentType && contentType.indexOf('text/plain') < 0)) return '';
+      return legacyErrorText(trimmed);
+    }
+    if (response && typeof response.text === 'function') {
+      return response.text().then(fromText, function () { return ''; });
+    }
+    // 测试桩和旧 WebView Response 可能只有 json()；仍只抽取白名单字段。
+    if (response && typeof response.json === 'function') {
+      return response.json().then(legacyErrorObject, function () { return ''; });
+    }
+    return Promise.resolve('');
+  }
   function legacyJson(method, body) {
     return fetch(API, {
       method: method,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     }).then(function (response) {
-      if (!response.ok) throw new Error('HTTP ' + response.status);
+      if (!response.ok) {
+        return legacyErrorDetail(response).then(function (detail) {
+          var error = new Error('HTTP ' + response.status + (detail ? ' · ' + detail : ''));
+          error.httpStatus = Number(response.status) || 0;
+          throw error;
+        });
+      }
       return response.json();
     });
+  }
+  function legacyCreateJson(body, generation) {
+    var retried = false;
+    function attempt() {
+      if (generation !== _generation) return Promise.reject(staleError());
+      return legacyJson('POST', body).catch(function (error) {
+        var status = Number(error && error.httpStatus) || 0;
+        // POST 带稳定 c_ id，两端都按该 id upsert；因此只对未送达/5xx 做一次
+        // 有界补投是安全的。4xx 是确定性请求错误，立即显示，不能反复请求。
+        if (retried || (status > 0 && status < 500)) throw error;
+        retried = true;
+        return new Promise(function (resolve) { setTimeout(resolve, 60); }).then(function () {
+          if (generation !== _generation) throw staleError();
+          return attempt();
+        });
+      });
+    }
+    return attempt();
   }
   function ioList(generation) {
     if (repoMode()) {
@@ -567,9 +728,11 @@
         return O.repository.create(input, { mutationId: mid });
       });
     }
-    var body = { file: O.file };
+    var legacyIdentity = createIdentity && createIdentity.noteId
+      ? createIdentity : legacyCreateIdentity();
+    var body = { file: O.file, id: legacyIdentity.noteId };
     for (var key in fields) if (Object.prototype.hasOwnProperty.call(fields, key)) body[key] = fields[key];
-    return legacyJson('POST', body).then(function (data) {
+    return legacyCreateJson(body, generation).then(function (data) {
       if (!data || !data.ok || !data.note) throw new Error('便签创建响应无效');
       return data.note;
     });
@@ -2586,7 +2749,11 @@
     var generation = _generation;
     fields = fields || {};
     fields.anchor = anchor;
-    return ioCreate(fields, generation, createIdentity).then(function (note) {
+    return initialLegacyReady(generation).then(function (ready) {
+      if (!ready) throw new Error('便签初始列表尚未可靠加载');
+      if (generation !== _generation) throw staleError();
+      return ioCreate(fields, generation, createIdentity);
+    }).then(function (note) {
       if (generation !== _generation) return null;
       // legacy vbook 响应锚可能使用成员局部页；当前视图应继续使用请求时锚。
       if (note && note.anchor && anchor) note.anchor = anchor;
@@ -2787,7 +2954,7 @@
   }
   function _boundCardKey(bind, payload, content) {
     var uid = String(payload && payload.uid || '').trim();
-    return [String(O && O.documentId || ''), uid || String(content || '').slice(0, 256), parseInt(bind.page, 10) || 0,
+    return [String(O && (O.documentId || O.file) || ''), uid || String(content || '').slice(0, 256), parseInt(bind.page, 10) || 0,
       parseInt(bind.from, 10) || 0, parseInt(bind.to, 10) || 0].join('|');
   }
   function _existingBoundCard(bind, payload, content) {
@@ -2801,9 +2968,24 @@
   }
 
   function _prepareBoundCardIdentity(state) {
-    if (!state.repository) return Promise.resolve(null);
     if (state.identity) return Promise.resolve(state.identity);
     if (state.identityPromise) return state.identityPromise;
+    if (state.identitySeed) {
+      state.identityPromise = stableBoundCreateIdentity(state.identitySeed).then(function (identity) {
+        if (state.generation !== _generation || !O ||
+            String(O.documentId || O.file || '') !== state.storageScope) throw staleError();
+        state.identity = identity;
+        return identity;
+      }).catch(function (error) {
+        if (!state.identity) state.identityPromise = null;
+        throw error;
+      });
+      return state.identityPromise;
+    }
+    if (!state.repository) {
+      state.identity = legacyCreateIdentity();
+      return Promise.resolve(state.identity);
+    }
     if (!repoReady()) return Promise.reject(new Error('便签 repository 合同不完整'));
     state.identityPromise = Promise.resolve(O.repository.newId()).then(function (noteId) {
       if (state.generation !== _generation || !O || O.documentId !== state.documentId) throw staleError();
@@ -2833,8 +3015,17 @@
     if (!bind || bind.kind !== 'page-chars') return Promise.resolve({ ok: false, why: 'bad-bind' });
     var page = parseInt(bind.page, 10), from = parseInt(bind.from, 10), to = parseInt(bind.to, 10);
     if (!(page > 0) || !(from >= 0) || !(to >= from)) return Promise.resolve({ ok: false, why: 'bad-bind' });
+    // 目标页还没进入 DOM 时，34-bindcard 无法给出真实屏幕点，但绑定本身已经
+    // 包含目标页和原字符区间。此时只允许显式、同页的 deferred 信号；持久 anchor
+    // 固定落在目标 PDF 页中心，绝不借当前可见页的 screen point 误绑到另一页。
+    // 这个比例锚只是 page-chars 暂未可解时的宿主兜底；页加载后仍由 html.bind
+    // 解析真实字符框并隐藏宿主卡片。
+    var hasDeferredPage = Object.prototype.hasOwnProperty.call(screenPoint, 'deferredPdfPage');
+    var deferredPage = parseInt(screenPoint.deferredPdfPage, 10);
+    var deferredPdf = hasDeferredPage && deferredPage === page;
+    if (hasDeferredPage && !deferredPdf) return Promise.resolve({ ok: false, why: 'bad-deferred-page' });
     var x = Number(screenPoint.x), y = Number(screenPoint.y);
-    if (!isFinite(x) || !isFinite(y)) return Promise.resolve({ ok: false, why: 'bad-screen-point' });
+    if (!deferredPdf && (!isFinite(x) || !isFinite(y))) return Promise.resolve({ ok: false, why: 'bad-screen-point' });
     var content = String(payload.raw || payload.text || '');
     if (!content.trim()) return Promise.resolve({ ok: false, why: 'empty-card' });
     if (content.length > PAGE_CARD_CONTENT_LIMIT) {
@@ -2843,6 +3034,21 @@
     var contextText = String(payload.contextText || payload.text || '');
     if (contextText.length > PAGE_CARD_CONTENT_LIMIT) {
       return Promise.resolve({ ok: false, why: 'card-context-too-large' });
+    }
+
+    var generation = _generation;
+    if (!repoMode()) {
+      var gate = _initialLegacyLoad;
+      if (gate && gate.generation === generation && !gate.ready) {
+        if (gate.failed) return Promise.resolve({ ok: false, why: 'initial-list-unavailable' });
+        return initialLegacyReady(generation).then(function (ready) {
+          if (!ready || generation !== _generation) {
+            return { ok: false, why: 'initial-list-unavailable' };
+          }
+          // 初始列表现在是权威投影；重新进入 existing 检查，不能沿用加载前的空 notes。
+          return persistBoundCard(cloneValue(bind), cloneValue(payload), cloneValue(screenPoint));
+        });
+      }
     }
 
     var key = _boundCardKey(bind, payload, content);
@@ -2856,8 +3062,10 @@
     if (state && state.inFlight) return state.inFlight;
     if (state && state.terminal) return Promise.resolve(state.terminal);
     if (!state) {
-      var anchor = null;
-      try { anchor = O.anchorFromPoint(x, y); } catch (e) {}
+      var anchor = deferredPdf ? { kind: 'pdf', page: page, x: 0.5, y: 0.5 } : null;
+      if (!anchor) {
+        try { anchor = O.anchorFromPoint(x, y); } catch (e) {}
+      }
       if (!anchor) return Promise.resolve({ ok: false, why: 'anchor-unresolved' });
 
       var category = wordCardCategory(payload.category, payload.label, payload.tone, 'text');
@@ -2885,10 +3093,19 @@
         bind: cloneValue(bind),
         base_w: baseW
       };
+      var stableUid = String(payload.uid || '').trim();
+      var storageScope = String(O.documentId || O.file || '');
       state = {
         generation: _generation,
         documentId: String(O.documentId || ''),
+        storageScope: storageScope,
         repository: repoMode(),
+        // Direct 的 correlation 作为 sourceUid 跨进程稳定；连同文档与精确词区间
+        // 生成确定性 noteId/mutationId，解决“已提交但桥在清 outbox 前崩溃”。
+        identitySeed: stableUid ? [
+          'reader-bound-card/1', storageScope, stableUid,
+          page, from, to
+        ].join('\u001f') : '',
         anchor: cloneValue(anchor),
         fields: { color: '#0d1322', w: w, h: 210, collapsed: false, html: html },
         identity: null, identityPromise: null, inFlight: null, terminal: null
@@ -2916,9 +3133,8 @@
       if (_boundCardWrites[key] !== state) return;
       state.inFlight = null;
       if (result && result.ok === true) delete _boundCardWrites[key];
-      // 旧 HTTP POST 没有稳定 noteId/mutationId。结果未知后宁可维持失败，
-      // 也不能盲重试造副本；document-notes repository 才允许同事务重放。
-      else if (!state.repository) state.terminal = result || { ok: false, why: 'create-failed' };
+      // repository 与 legacy POST 都有稳定 noteId；失败后保留同一 identity，
+      // 下一次显式调用只会重放同一逻辑创建，不会生成第二张卡。
     }, function () {
       if (_boundCardWrites[key] === state) state.inFlight = null;
     });
@@ -2978,6 +3194,7 @@
     _writeQueues = Object.create(null);
     _seenRevs = Object.create(null);
     _boundCardWrites = Object.create(null);
+    _initialLegacyLoad = null;
     // teardown 只撤销当前交互，不允许 resize/pen 的收尾 PATCH 在 O 被下一页替换后
     // 错写到新 document；正常 pagehide/visibilitychange 已有独立 flush。
     O = null;
@@ -3030,13 +3247,31 @@
           ioError(error, '便签订阅失败');
         }
       }
+      var legacyGate = null;
+      if (!repoMode()) {
+        legacyGate = {
+          generation: generation, promise: null, ready: false, failed: false, loadSeq: 0
+        };
+        _initialLegacyLoad = legacyGate;
+      }
       this.loadAll();
     },
     // LIST 全部便签。repository 模式增量合并（CHANGE 可先于 LIST）；
     // legacy PWA 保持旧的全量替换语义。
     loadAll: function () {
-      if (!O || (!repoMode() && !O.file)) return;
+      if (!O || (!repoMode() && !O.file)) return Promise.resolve(false);
       var generation = _generation;
+      var legacyGate = !repoMode() && _initialLegacyLoad &&
+        _initialLegacyLoad.generation === generation ? _initialLegacyLoad : null;
+      var loadSeq = 0;
+      if (legacyGate) {
+        loadSeq = (Number(legacyGate.loadSeq) || 0) + 1;
+        legacyGate.loadSeq = loadSeq;
+        // 显式重载是失败后的恢复入口。新请求开始后，create 会等待这次新
+        // promise；旧失败不能永久要求用户重开页面。
+        legacyGate.ready = false;
+        legacyGate.failed = false;
+      }
       // 只允许清理“加载开始时已经存在、且整个 LIST 期间 revision 没变”的
       // absent note。CHANGE 在分页途中创建/更新的记录不在快照或 rev 已提高，
       // 不会被旧 LIST 误删。
@@ -3046,8 +3281,8 @@
           before[noteIdOf(notes[n])] = Number(notes[n].rev) || 0;
         }
       }
-      ioList(generation).then(function (items) {
-        if (generation !== _generation) return;
+      var operation = ioList(generation).then(function (items) {
+        if (generation !== _generation) return false;
         if (repoMode()) {
           var returned = Object.create(null);
           for (var i = 0; i < items.length; i++) {
@@ -3084,16 +3319,37 @@
             }
           });
           return Promise.all(reconcile).then(function () {
-            if (generation === _generation) mountAll();
+            if (generation !== _generation) return false;
+            mountAll();
+            return true;
           });
         } else {
+          // 两个 legacy LIST 可因前台恢复/手动刷新重叠；只允许最新 loadSeq
+          // 全量替换投影。序号若等到 notes=items 之后再看，迟到旧快照仍会先抹掉新 UI。
+          if (legacyGate && (_initialLegacyLoad !== legacyGate ||
+              legacyGate.loadSeq !== loadSeq)) return false;
           removeAllEls();
           notes = items || [];
           mountAll();
+          return true;
         }
       }).catch(function (error) {
         ioError(error, '便签加载失败');
+        return false;
       });
+      if (!legacyGate) return operation;
+      legacyGate.promise = Promise.resolve(operation).then(function (ok) {
+        if (generation !== _generation || _initialLegacyLoad !== legacyGate ||
+            legacyGate.loadSeq !== loadSeq) return false;
+        legacyGate.ready = ok === true;
+        legacyGate.failed = !legacyGate.ready;
+        return legacyGate.ready;
+      }, function () {
+        if (generation === _generation && _initialLegacyLoad === legacyGate &&
+            legacyGate.loadSeq === loadSeq) legacyGate.failed = true;
+        return false;
+      });
+      return legacyGate.promise;
     },
     // 容器就绪(EPUB 章节加载完 / PDF 页渲染完)时由 reader 调:幂等重挂未挂/被重渲清掉的便签
     mountPending: mountAll,

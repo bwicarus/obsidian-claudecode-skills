@@ -1,7 +1,7 @@
 # PWA 阅读器 / 浏览器扩展统一层交接
 
 当前候选由 `extensions/bw-reader-webext/manifest.json` 唯一确定；本轮登记版本为
-`0.2.132`。发布事实仍只写入 `reader-collaboration-status.md`，这里不把候选误写成已部署。
+`0.2.137`。发布事实仍只写入 `reader-collaboration-status.md`，这里不把候选误写成已部署。
 
 本文是该主线的唯一新会话入口。它记录用户已经确认的产品边界、现状和继续工作的门禁。
 不得用旧聊天中的 0.2.37 provider-only 方案覆盖本文。
@@ -684,3 +684,10 @@ generation。既有内容寻址书籍别名的不可变 release 身份限制未�
 
 提交 `e072ae9b` 已通过 Pi/Linux 原子门禁与真实 E2E；Reader/KG、公开 WebExt `0.2.136`
 及 ReaderPC `0.1.61` 已切换，精确回退点登记在 `reader-collaboration-status.md`。
+
+## 16. 2026-08-23 `0.2.137` 跨页锚定与 Direct 离线可靠投递候选
+
+快照同时给出适合阅读的 Markdown 与紧邻的 `reader-structured-anchor-map/1` 原始字符坐标；
+同一本书的离屏页可直接锚定。Direct 只对稳定 page-chars/learning-card mutation 持久排队，
+以确定性身份和权威列表水合实现幂等恢复；手动自由卡绑定只对网络/5xx 使用同一 ID 重试一次，
+4xx 与未知写入结果继续 fail closed。ReaderPC 协议与数据 schema 未变。

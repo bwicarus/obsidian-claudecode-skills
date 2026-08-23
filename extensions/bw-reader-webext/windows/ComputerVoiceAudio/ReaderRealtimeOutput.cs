@@ -64,6 +64,46 @@ internal static class ReaderRealtimeOutputProtocol
         or "anki-draft"
         or "client-action";
 
+    // Only mutations with a stable replay identity and a document-independent
+    // receiver may enter the durable outbox. A bound result card uses
+    // correlation as its stable uid; learning-card edits carry their own
+    // validated mutationId. Page-card edits still depend on the live page
+    // projection/number revision, so they remain live-only until their payload
+    // carries an independently addressable target page. Navigation,
+    // highlights, free notes and ordinary floating cards also remain live-only
+    // because replaying them after an unknown result could duplicate or target
+    // stale content.
+    internal static bool IsDurableMutation(
+        ReaderRealtimeOutputRequest request)
+    {
+        if (IsPageCharsCardMutation(request))
+        {
+            return true;
+        }
+        if (request.Kind != "client-action"
+            || request.Payload is not JsonObject action
+            || action["fn"]?.GetValue<string>() is not string fn
+            || fn != "_nativeReaderLearningCardMutate"
+            || action["args"] is not JsonArray { Count: 1 } args
+            || args[0] is not JsonObject mutation
+            || mutation["mutationId"]?.GetValue<string>() is not string id)
+        {
+            return false;
+        }
+        return DirectBridgeContract.IsSafeId(id);
+    }
+
+    internal static bool IsPageCharsCardMutation(
+        ReaderRealtimeOutputRequest request) =>
+        request.Kind == "card"
+            && request.Payload is JsonObject cardPayload
+            && cardPayload["card"] is JsonObject card
+            && card["bind"] is JsonObject bind
+            && string.Equals(
+                bind["kind"]?.GetValue<string>(),
+                "page-chars",
+                StringComparison.Ordinal);
+
     internal static object Event(ReaderRealtimeOutputRequest request) =>
         new
         {
@@ -1582,13 +1622,22 @@ internal sealed class ReaderRealtimeOutputBroker
         TaskCompletionSource<ReaderRealtimeOutputAck> Completion);
 
     private readonly ReaderContextSourceRouter _router;
+    private readonly ReaderRealtimeOutputOutbox? _outbox;
+    private readonly SemaphoreSlim _replayGate = new(1, 1);
+    private int _replayRequested;
     private readonly object _gate = new();
     private readonly Dictionary<string, PendingOutput> _pending =
         new(StringComparer.Ordinal);
 
-    internal ReaderRealtimeOutputBroker(ReaderContextSourceRouter router)
+    internal ReaderRealtimeOutputBroker(
+        ReaderContextSourceRouter router,
+        string? outboxPath = null)
     {
         _router = router;
+        _outbox = string.IsNullOrWhiteSpace(outboxPath)
+            ? null
+            : new ReaderRealtimeOutputOutbox(outboxPath);
+        _router.SourceAttached += OnSourceAttached;
     }
 
     internal ReaderRealtimeOutputSourceStatus GetSourceStatus(
@@ -1605,6 +1654,21 @@ internal sealed class ReaderRealtimeOutputBroker
             cancellationToken).ConfigureAwait(false);
         if (lease is null)
         {
+            if (_outbox is not null
+                && ReaderRealtimeOutputProtocol.IsDurableMutation(request))
+            {
+                await _outbox.EnqueueAsync(request, cancellationToken)
+                    .ConfigureAwait(false);
+                RequestReplay();
+                return new ReaderRealtimeOutputAck(
+                    string.Empty,
+                    request.Correlation,
+                    request.SourceInstanceId,
+                    "queued",
+                    null,
+                    "unknown",
+                    "source-offline-queued");
+            }
             throw Failure(
                 "BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE",
                 "指定 Reader 页面来源当前不在线（已等待 "
@@ -1726,6 +1790,157 @@ internal sealed class ReaderRealtimeOutputBroker
             _pending.Remove(ack.Correlation);
             pending.Completion.TrySetResult(ack);
         }
+    }
+
+    internal Task<int> GetOutboxCountAsync(
+        CancellationToken cancellationToken) =>
+        _outbox is null
+            ? Task.FromResult(0)
+            : _outbox.CountAsync(cancellationToken);
+
+    private void OnSourceAttached(ReaderContextSourceLease unusedLease)
+    {
+        _ = unusedLease;
+        if (_outbox is not null)
+        {
+            RequestReplay();
+        }
+    }
+
+    private void RequestReplay()
+    {
+        Interlocked.Exchange(ref _replayRequested, 1);
+        _ = ReplayAvailableAsync();
+    }
+
+    private async Task ReplayAvailableAsync()
+    {
+        if (_outbox is null
+            || !await _replayGate.WaitAsync(0).ConfigureAwait(false))
+        {
+            return;
+        }
+        try
+        {
+            // SourceAttached may arrive while an older source is still waiting
+            // for its ACK. Keep one coalesced replay request bit so that event
+            // cannot be lost merely because the non-blocking gate was busy.
+            while (Interlocked.Exchange(ref _replayRequested, 0) == 1)
+            {
+                IReadOnlyList<ReaderRealtimeOutputOutboxEntry> entries =
+                    await _outbox.ReplayableAsync(CancellationToken.None)
+                        .ConfigureAwait(false);
+                foreach (ReaderRealtimeOutputOutboxEntry entry in entries)
+                {
+                    bool complete = false;
+                    foreach (ReaderContextSourceLease lease in
+                        _router.CurrentLeases())
+                    {
+                        ReaderRealtimeOutputRequest replay =
+                            entry.Request with
+                            {
+                                SourceInstanceId = lease.SourceInstanceId,
+                                Page = entry.Request.Page.DeepClone(),
+                                Payload = entry.Request.Payload.DeepClone(),
+                            };
+                        try
+                        {
+                            ReaderRealtimeOutputAck ack = await SendAsync(
+                                replay,
+                                CancellationToken.None).ConfigureAwait(false);
+                            if (ack.Outcome is "applied" or "replay")
+                            {
+                                if (ReaderRealtimeOutputProtocol
+                                        .IsPageCharsCardMutation(entry.Request)
+                                    && ack.BindOutcome != "bound")
+                                {
+                                    await _outbox.MarkDeferredAsync(
+                                        entry.Request.Correlation,
+                                        "BW_READER_REALTIME_OUTPUT_BIND_NOT_PERSISTED:"
+                                            + (ack.BindReason ?? "unknown"),
+                                        CancellationToken.None)
+                                        .ConfigureAwait(false);
+                                    continue;
+                                }
+                                await _outbox.MarkAppliedAsync(
+                                    entry.Request.Correlation,
+                                    CancellationToken.None).ConfigureAwait(false);
+                                complete = true;
+                                break;
+                            }
+                        }
+                        catch (ReaderRealtimeOutputException exception)
+                        {
+                            if (ReplayMayWaitForAnotherSource(exception))
+                            {
+                                await _outbox.MarkDeferredAsync(
+                                    entry.Request.Correlation,
+                                    exception.Code + ":" + exception.Message,
+                                    CancellationToken.None).ConfigureAwait(false);
+                                continue;
+                            }
+                            await _outbox.MarkFailedAsync(
+                                entry.Request.Correlation,
+                                exception.Code + ":" + exception.Message,
+                                CancellationToken.None).ConfigureAwait(false);
+                            // Rejection belongs to this source/WebView.  Keep
+                            // the durable failure visible, but do not let an
+                            // old still-online WebView prevent another current
+                            // healthy source from applying the same stable
+                            // mutation during this replay cycle.
+                            continue;
+                        }
+                        catch (Exception exception) when (
+                            exception is IOException
+                            or UnauthorizedAccessException
+                            or JsonException)
+                        {
+                            await _outbox.MarkDeferredAsync(
+                                entry.Request.Correlation,
+                                exception.GetType().Name,
+                                CancellationToken.None).ConfigureAwait(false);
+                        }
+                    }
+                    if (complete)
+                    {
+                        continue;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // The queue remains on disk.  A later source registration or tool
+            // call retries it; background replay must never crash Direct.
+        }
+        finally
+        {
+            _replayGate.Release();
+            if (Volatile.Read(ref _replayRequested) == 1)
+            {
+                _ = ReplayAvailableAsync();
+            }
+        }
+    }
+
+    private static bool ReplayMayWaitForAnotherSource(
+        ReaderRealtimeOutputException exception)
+    {
+        if (exception.Code is
+            "BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE"
+            or "BW_READER_REALTIME_OUTPUT_TIMEOUT"
+            or "BW_READER_REALTIME_OUTPUT_CAPACITY"
+            or "BW_READER_REALTIME_OUTPUT_DUPLICATE_PENDING")
+        {
+            return true;
+        }
+        return exception.Code == "BW_READER_REALTIME_OUTPUT_REJECTED"
+            && (exception.Message.Contains(
+                    "STALE",
+                    StringComparison.OrdinalIgnoreCase)
+                || exception.Message.Contains(
+                    "UNAVAILABLE",
+                    StringComparison.OrdinalIgnoreCase));
     }
 
     // 等这个 source 完成注册。等到了给租约,等不到给 null。

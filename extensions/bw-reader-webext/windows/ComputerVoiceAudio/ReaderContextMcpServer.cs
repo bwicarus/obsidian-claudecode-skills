@@ -1377,7 +1377,13 @@ internal sealed class ReaderContextMcpServer
                     + "target is not on screen. Binding is meant to be "
                     + "**automatic**: call reader_page_text, choose the passage "
                     + "from its `segments`, and bind - do not ask the user to "
-                    + "select text first.",
+                    + "select text first."
+                    + " A page-chars bound card applies directly when the "
+                    + "matching App document is online, even if another page "
+                    + "is visible. It is durably queued only while that source "
+                    + "is offline/backgrounded; status=queued means accepted "
+                    + "for later application, so do not create it again. Floating cards "
+                    + "and other live-only actions are never queued.",
                 ["inputSchema"] = BuildTypedCardArgumentsSchema(),
                 ["annotations"] = new JsonObject
                 {
@@ -3910,54 +3916,63 @@ internal sealed class ReaderContextMcpServer
             {
                 ["status"] = "unavailable",
                 ["reason"] =
-                    "Reader mutation applied, but the updated card could not "
-                    + "be read back in this call.",
+                    ack.Outcome == "queued"
+                        ? "Reader mutation is durably queued and will be "
+                            + "applied when the matching App document is online."
+                        : "Reader mutation applied, but the updated card could "
+                            + "not be read back in this call.",
             },
         };
-        try
+        if (ack.Outcome != "queued")
         {
-            JsonObject snapshot = BuildToolPayload();
-            ReaderQueryRequest? request = BuildQueryRequest(
-                snapshot,
-                "learning-card",
-                new JsonObject
-                {
-                    ["id"] = cardId,
-                    ["cardIndex"] = cardIndex,
-                });
-            if (request is not null)
+            try
             {
-                ReaderQueryResponse response = await _queryReaderAsync!(
-                    request,
-                    cancellationToken).ConfigureAwait(false);
-                if (response.Status == "ok"
-                    && response.SourceInstanceId == request.SourceInstanceId
-                    && response.SnapshotRevision == request.SnapshotRevision
-                    && response.File == request.File
-                    && response.Query == request.Query)
-                {
-                    ReaderQueryProtocol.RequireBoundedJson(
-                        response.Result,
-                        ReaderQueryProtocol.MaximumLearningCardResultBytes);
-                    result["verification"] = new JsonObject
+                JsonObject snapshot = BuildToolPayload();
+                ReaderQueryRequest? request = BuildQueryRequest(
+                    snapshot,
+                    "learning-card",
+                    new JsonObject
                     {
-                        ["status"] = "succeeded",
-                        ["card"] = JsonNode.Parse(
-                            response.Result.GetRawText()),
-                    };
+                        ["id"] = cardId,
+                        ["cardIndex"] = cardIndex,
+                    });
+                if (request is not null)
+                {
+                    ReaderQueryResponse response = await _queryReaderAsync!(
+                        request,
+                        cancellationToken).ConfigureAwait(false);
+                    if (response.Status == "ok"
+                        && response.SourceInstanceId
+                            == request.SourceInstanceId
+                        && response.SnapshotRevision
+                            == request.SnapshotRevision
+                        && response.File == request.File
+                        && response.Query == request.Query)
+                    {
+                        ReaderQueryProtocol.RequireBoundedJson(
+                            response.Result,
+                            ReaderQueryProtocol
+                                .MaximumLearningCardResultBytes);
+                        result["verification"] = new JsonObject
+                        {
+                            ["status"] = "succeeded",
+                            ["card"] = JsonNode.Parse(
+                                response.Result.GetRawText()),
+                        };
+                    }
                 }
             }
-        }
-        catch (Exception exception) when (
-            exception is ReaderQueryException
-            or DirectProtocolException
-            or JsonException)
-        {
-            result["verification"] = new JsonObject
+            catch (Exception exception) when (
+                exception is ReaderQueryException
+                or DirectProtocolException
+                or JsonException)
             {
-                ["status"] = "unavailable",
-                ["reason"] = exception.Message,
-            };
+                result["verification"] = new JsonObject
+                {
+                    ["status"] = "unavailable",
+                    ["reason"] = exception.Message,
+                };
+            }
         }
 
         await WriteResultAsync(
@@ -4049,7 +4064,8 @@ internal sealed class ReaderContextMcpServer
                     cancellationToken).ConfigureAwait(false);
                 return null;
             }
-            if (!status.Online)
+            if (!status.Online
+                && !ReaderRealtimeOutputProtocol.IsDurableMutation(request))
             {
                 await WriteReaderOutputToolErrorAsync(
                     id,
@@ -4123,13 +4139,15 @@ internal sealed class ReaderContextMcpServer
                             //   card」，跟卡片有没有钉上毫无关系。2026-08-19 助手正是
                             //   照它转述成「已绑定并已送达」，而页面上什么都没有。
                             //   真正的答案在下面 bind_outcome 里。
-                            ["status"] = request.Kind switch
-                            {
-                                "anki-draft" => "draft_delivered",
-                                "highlight-text" => "highlight_saved",
-                                "highlight-range" => "highlight_saved",
-                                _ => "delivered",
-                            },
+                            ["status"] = ack.Outcome == "queued"
+                                ? "queued"
+                                : request.Kind switch
+                                {
+                                    "anki-draft" => "draft_delivered",
+                                    "highlight-text" => "highlight_saved",
+                                    "highlight-range" => "highlight_saved",
+                                    _ => "delivered",
+                                },
                             // 卡片是钉在正文上了，还是退回了浮层。
                             //   bound=钉上了 / floating=没钉上退回浮层（reason 说明为什么）
                             //   none=这张卡本来就没带 bind / unknown=超时或过期，没执行过

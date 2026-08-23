@@ -447,6 +447,8 @@ internal sealed class ReaderContextSourceRouter
         new(StringComparer.Ordinal);
     private long _generation;
 
+    internal event Action<ReaderContextSourceLease>? SourceAttached;
+
     internal ReaderContextSourceLease Attach(
         string sourceInstanceId,
         string connectionId,
@@ -480,6 +482,12 @@ internal sealed class ReaderContextSourceRouter
                 sendAsync);
         }
         retired?.Retire();
+        try { SourceAttached?.Invoke(lease); }
+        catch
+        {
+            // Registration is authoritative.  A background consumer failing
+            // to notice it must not tear down the live Reader connection.
+        }
         return lease;
     }
 
@@ -522,6 +530,16 @@ internal sealed class ReaderContextSourceRouter
         }
         lease = null;
         return false;
+    }
+
+    internal IReadOnlyList<ReaderContextSourceLease> CurrentLeases()
+    {
+        lock (_gate)
+        {
+            return _sources.Values
+                .Select(registration => registration.Lease)
+                .ToArray();
+        }
     }
 
     // 找不到租约时，桥自己知道一件能立刻分清病因的事：它到底注册了几个来源。

@@ -68,6 +68,100 @@ test("同一投递在落库完成前共享 single-flight，不会重复写卡", 
   assert.match(VOICECALL, /_readerOutputPending\[correlation\] = pending/);
 });
 
+test("page-chars 回退后真实重放只重试绑定，成功回执可再次证明 bound", async () => {
+  const start = VOICECALL.indexOf("var _readerOutputSeen = Object.create(null)");
+  const end = VOICECALL.indexOf("// 把已登记的草稿镜像到当前对话流", start);
+  assert.ok(start >= 0 && end > start, "找不到 Reader output 接收器源码");
+  const lifecycle = VOICECALL.slice(start, end);
+  const renderCalls = [];
+  const accept = new Function(
+    "renderInfo",
+    "window",
+    "RC",
+    `${lifecycle}\nreturn _acceptReaderRealtimeOutput;`,
+  )(
+    async (_card, options) => {
+      renderCalls.push({ ...options });
+      return renderCalls.length === 1
+        ? { rendered: true, bindOutcome: "floating", bindReason: "create-failed" }
+        : { rendered: true, bindOutcome: "bound", bindReason: null };
+    },
+    {},
+    {},
+  );
+  const delivery = {
+    correlation: "output-durable-page-card-1",
+    kind: "card",
+    payload: {
+      card: {
+        kind: "general",
+        title: "重放绑定",
+        data: { text: "只显示一次" },
+        bind: { kind: "page-chars", page: 25, from: 8, to: 11, text: "目标词" },
+      },
+    },
+  };
+
+  assert.deepEqual(await accept(delivery), {
+    outcome: "applied",
+    bindOutcome: "floating",
+    bindReason: "create-failed",
+  });
+  assert.deepEqual(await accept(delivery), {
+    outcome: "applied",
+    bindOutcome: "bound",
+  });
+  assert.deepEqual(await accept(delivery), {
+    outcome: "replay",
+    bindOutcome: "bound",
+  });
+  assert.deepEqual(renderCalls, [
+    { uid: delivery.correlation, bindOnly: false },
+    { uid: delivery.correlation, bindOnly: true },
+  ], "第一次失败后不能把 correlation 提前记成完成，重放也不能再次完整渲染");
+});
+
+test("bindOnly 使用真实 renderInfo 时不会再生成第二张回退卡", async () => {
+  const start = VOICECALL.indexOf("function _renderInfoResult(rendered, outcome, reason)");
+  const end = VOICECALL.indexOf("function renderImgs(imgs)", start);
+  assert.ok(start >= 0 && end > start, "找不到 renderInfo 源码");
+  const renderSource = VOICECALL.slice(start, end);
+  let persistCalls = 0;
+  let toastCalls = 0;
+  const renderInfo = new Function(
+    "window",
+    "RC",
+    "_infoHtml",
+    "_infoText",
+    `${renderSource}\nreturn renderInfo;`,
+  )(
+    {
+      async __pageBindPersist() {
+        persistCalls += 1;
+        return { ok: false, why: "create-failed" };
+      },
+    },
+    { toast() { toastCalls += 1; } },
+    () => "<p>卡片内容</p>",
+    () => "卡片内容",
+  );
+
+  const result = await renderInfo({
+    kind: "general",
+    title: "只重试落库",
+    data: { text: "卡片内容" },
+    bind: { kind: "page-chars", page: 25, from: 8, to: 11, text: "目标词" },
+  }, { uid: "output-durable-page-card-1", bindOnly: true });
+
+  assert.deepEqual(result, {
+    rendered: true,
+    bindOutcome: "floating",
+    bindReason: "create-failed",
+  });
+  assert.equal(persistCalls, 1);
+  assert.equal(toastCalls, 0, "重放失败不能重复 toast，更不能继续进入浮层/对话渲染");
+});
+
 test("frame 回执等待时间覆盖 document-notes 的合法写入预算", () => {
   assert.match(CALL, /const REALTIME_OUTPUT_RECEIPT_TIMEOUT_MS = 18000/);
   assert.match(CALL, /\}, REALTIME_OUTPUT_RECEIPT_TIMEOUT_MS\)/);

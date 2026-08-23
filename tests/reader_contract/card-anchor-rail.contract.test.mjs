@@ -138,16 +138,81 @@ test("词锚展开态只有明确的垃圾桶删除，失败不先收卡，成�
 
 test("AI 直绑只有持久化 Promise 成功后才可报告 bound", () => {
   assert.match(BIND, /window\.__pageBindPersist = function \(bind, payload\)/);
-  assert.match(BIND, /RC\.stickynote\.persistBoundCard\(bind, normalized, _bindScreenPoint\(g\)\)/);
+  assert.match(BIND, /var placement = deferred \? \{ deferredPdfPage: g\.page \} : _bindScreenPoint\(g\)/);
+  assert.match(BIND, /RC\.stickynote\.persistBoundCard\(bind, normalized, placement\)/);
   assert.match(BIND, /persisted: true/);
   assert.match(BIND, /why: 'persistence-required'/,
     "旧调用方直画临时 DOM 时必须 fail closed");
   assert.match(NOTE, /function persistBoundCard\(bind, payload, screenPoint\)/);
-  assert.match(NOTE, /return ioCreate\(fields, generation, createIdentity\)\.then/);
-  assert.match(NOTE, /state\.identity = \{ noteId: noteId, mutationId: mutationId\('create', noteId\) \}/,
-    "回执未知后的重试必须复用同一 noteId+mutationId");
+  assert.match(NOTE, /initialLegacyReady\(generation\)\.then/,
+    "首次 legacy LIST 未完成时不能让 durable create 抢跑");
+  assert.match(NOTE, /return ioCreate\(fields, generation, createIdentity\)/);
+  assert.match(NOTE, /stableBoundCreateIdentity\(state\.identitySeed\)/);
+  assert.match(NOTE, /mutationId: 'rc-note:create:' \+ noteId \+ ':bound-v1'/,
+    "回执未知及跨 WebView 重放必须复用确定的 noteId+mutationId");
   assert.match(NOTE, /var projected = upsertRecord\(note, generation\)/);
   assert.match(NOTE, /persistBoundCard: persistBoundCard/);
+});
+
+test("未渲染目标页持久化 deferred placement，已渲染页仍使用真实字符屏幕点", async () => {
+  const renderedPage = {
+    dataset: { loaded: "1" },
+    __charsBaseW: 600,
+    __charBoxes: [{ _oi: 1, c: "词", sp: false, left: 20, top: 30, width: 10, height: 12 }],
+    __charLayer: {
+      clientWidth: 600,
+      getBoundingClientRect: () => ({ left: 100, top: 200, width: 600, height: 800 }),
+    },
+  };
+  const calls = [];
+  const sandbox = {
+    console,
+    Promise,
+    setTimeout,
+    clearTimeout,
+    innerWidth: 1200,
+    innerHeight: 800,
+    pdfDoc: { numPages: 10 },
+    document: {
+      querySelector(selector) {
+        return selector.includes('data-page-num="5"') ? renderedPage : null;
+      },
+    },
+    RC: {
+      stickynote: {
+        persistBoundCard(bind, payload, placement) {
+          calls.push({ bind, payload, placement });
+          return Promise.resolve({ ok: true, noteId: `note-${calls.length}`, persisted: true });
+        },
+      },
+    },
+  };
+  sandbox.window = sandbox;
+  vm.runInContext(BIND, vm.createContext(sandbox), { filename: "34-bindcard.js" });
+
+  const deferredResult = await sandbox.__pageBindPersist(
+    { kind: "page-chars", page: 4, from: 8, to: 9, text: "目标" },
+    { uid: "deferred-card", raw: "<b>目标</b>", isHtml: true },
+  );
+  assert.equal(deferredResult.ok, true);
+  assert.equal(deferredResult.deferred, true);
+  assert.deepEqual(structuredClone(calls[0].placement), { deferredPdfPage: 4 });
+
+  const invalidPageResult = await sandbox.__pageBindPersist(
+    { kind: "page-chars", page: 11, from: 1, to: 1, text: "越界" },
+    { uid: "invalid-page", raw: "<b>越界</b>", isHtml: true },
+  );
+  assert.equal(invalidPageResult.ok, false);
+  assert.equal(invalidPageResult.why, "bad-page");
+  assert.equal(calls.length, 1, "书外页码不能被当作未渲染页持久化");
+
+  const renderedResult = await sandbox.__pageBindPersist(
+    { kind: "page-chars", page: 5, from: 1, to: 1, text: "词" },
+    { uid: "rendered-card", raw: "<b>词</b>", isHtml: true },
+  );
+  assert.equal(renderedResult.ok, true);
+  assert.equal(renderedResult.deferred, false);
+  assert.deepEqual(structuredClone(calls[1].placement), { x: 125, y: 236 });
 });
 
 test("刷新缩放会重建词框与浮标；删除会同步撤标并重排编号", () => {

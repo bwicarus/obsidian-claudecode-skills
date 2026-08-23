@@ -560,6 +560,9 @@
     if (!bind || bind.kind !== 'page-chars') return { ok: false, why: 'not-page-chars' };
     var page = parseInt(bind.page, 10);
     if (!(page > 0)) return { ok: false, why: 'bad-page' };
+    var pageCount = 0;
+    try { pageCount = (typeof pdfDoc !== 'undefined' && pdfDoc) ? (parseInt(pdfDoc.numPages, 10) || 0) : 0; } catch (e) {}
+    if (pageCount > 0 && page > pageCount) return { ok: false, why: 'bad-page', page: page };
     var pw = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
     if (!pw || pw.dataset.loaded !== '1') return { ok: false, why: 'page-not-rendered', page: page };
     var boxes = pw.__charBoxes;
@@ -607,7 +610,11 @@
     try { g = _resolvePageBind(bind); } catch (e) {
       return Promise.resolve({ ok: false, why: 'exception', detail: { name: (e && e.name) || '' } });
     }
-    if (!g || !g.ok) return Promise.resolve(g || { ok: false, why: 'unresolved' });
+    // 同一本书的目标页尚未渲染，并不等于 bind 无效。不能拿当前页的屏幕点
+    // 代替它，也不能等翻页后才首次写仓库；交给 stickynote 用目标页号生成
+    // 确定性 PDF deferred anchor。其它失败（已有页但文字层/区间不成立）仍 fail closed。
+    var deferred = !!(g && !g.ok && g.why === 'page-not-rendered');
+    if (!g || (!g.ok && !deferred)) return Promise.resolve(g || { ok: false, why: 'unresolved' });
     if (!(window.RC && RC.stickynote && typeof RC.stickynote.persistBoundCard === 'function')) {
       return Promise.resolve({ ok: false, why: 'persistence-unavailable' });
     }
@@ -617,11 +624,14 @@
       text: payload.text || '', raw: payload.raw || '', isHtml: !!payload.isHtml,
       icon: payload.icon || '', category: _bindCategory(payload), tone: _bindColor(payload)
     };
-    return Promise.resolve(RC.stickynote.persistBoundCard(bind, normalized, _bindScreenPoint(g)))
+    var placement = deferred ? { deferredPdfPage: g.page } : _bindScreenPoint(g);
+    return Promise.resolve(RC.stickynote.persistBoundCard(bind, normalized, placement))
       .then(function (result) {
         if (!result || result.ok !== true) return result || { ok: false, why: 'persistence-failed' };
-        return { ok: true, page: g.page, from: g.range.lo, to: g.range.hi,
-                 noteId: result.noteId || '', persisted: true };
+        return { ok: true, page: g.page,
+                 from: g.ok ? g.range.lo : (parseInt(bind.from, 10) || 0),
+                 to: g.ok ? g.range.hi : (parseInt(bind.to, 10) || 0),
+                 noteId: result.noteId || '', persisted: true, deferred: deferred };
       }, function (error) {
         return { ok: false, why: 'persistence-failed',
                  detail: { name: (error && error.name) || '' } };

@@ -244,7 +244,7 @@ internal static class ReaderRealtimeOutputRpcProtocol
         }
         RequireEcho(root, expected);
         string outcome = RequiredString(root, "outcome", 16);
-        if (outcome is not ("applied" or "replay"))
+        if (outcome is not ("applied" or "replay" or "queued"))
         {
             throw Invalid("Reader 输出 RPC outcome 无效");
         }

@@ -475,7 +475,10 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         _readerQueryRpcServer = new NamedPipeReaderQueryRpcServer(
             _readerQueryBroker);
         _readerRealtimeOutputBroker = new ReaderRealtimeOutputBroker(
-            _readerSourceRouter);
+            _readerSourceRouter,
+            Path.Combine(
+                runtimeDirectory,
+                ReaderRealtimeOutputOutbox.FileName));
         _readerRealtimeOutputRpcServer =
             new NamedPipeReaderRealtimeOutputRpcServer(
                 _readerRealtimeOutputBroker);

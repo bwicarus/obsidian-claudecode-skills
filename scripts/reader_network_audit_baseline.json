@@ -4,7 +4,7 @@
   "note": "Existing debt only. Retired allowances must be removed in the same change; new fingerprints or higher counts fail --check.",
   "summary": {
     "cache-first-unannotated": 3,
-    "dynamic-unannotated": 127,
+    "dynamic-unannotated": 124,
     "local-immediate-unannotated": 6,
     "unclassified-literal": 78
   },
@@ -66,9 +66,6 @@
     "dynamic-unannotated|_server_deploy/static/pdf/rc-snippets.js|RC.reqJson|RC.reqJson('GET', url)|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/rc-snippets.js|RC.reqJson|RC.reqJson('POST', ep.snippetsTo, body)|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/rc-snippets.js|RC.reqJson|RC.reqJson('POST', ep.toNote, body)|dynamic endpoint/method needs @interaction <id>": 1,
-    "dynamic-unannotated|_server_deploy/static/pdf/rc-stickynote.js|fetch|fetch('/pdf/api/entity/' + card.gid)|dynamic endpoint/method needs @interaction <id>": 1,
-    "dynamic-unannotated|_server_deploy/static/pdf/rc-stickynote.js|fetch|fetch(API + '?file=' + encodeURIComponent(O.file))|dynamic endpoint/method needs @interaction <id>": 1,
-    "dynamic-unannotated|_server_deploy/static/pdf/rc-stickynote.js|fetch|fetch(API, { method: method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/rc-turncard.js|RC.reqJson|RC.reqJson('DELETE', '/pdf/api/highlights?file=' + encodeURIComponent(file) + '&id=' + encodeURIComponent(it.id || ''), null)|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/rc-turncard.js|fetch|fetch('/api/voice/task-status?id=' + encodeURIComponent(taskId))|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/rc-userpages.js|RC.reqJson|RC.reqJson(method, url, body)|dynamic endpoint/method needs @interaction <id>": 1,

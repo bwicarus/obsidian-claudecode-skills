@@ -160,6 +160,7 @@ WINDOWS_SOURCE_FILES = (
     "ComputerVoiceAudio/ReaderQuery.cs",
     "ComputerVoiceAudio/ReaderQueryRpc.cs",
     "ComputerVoiceAudio/ReaderRealtimeOutput.cs",
+    "ComputerVoiceAudio/ReaderRealtimeOutputOutbox.cs",
     "ComputerVoiceAudio/ReaderRealtimeOutputRpc.cs",
     "ComputerVoiceAudio/ReaderVisualDelivery.cs",
     "ComputerVoiceAudio/ReaderVisualRpc.cs",

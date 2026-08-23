@@ -9947,6 +9947,241 @@ internal static class DirectBridgeSelfTest
         }
         router.Detach(leaseA);
 
+        string outboxPath = System.IO.Path.Combine(
+            root,
+            "reader-output-outbox",
+            ReaderRealtimeOutputOutbox.FileName);
+        ReaderRealtimeOutputRequest queuedCardRequest =
+            ReaderRealtimeOutputProtocol.Create(
+                "output-queued-card",
+                "source-went-away",
+                43,
+                "library/output-book.pdf",
+                JsonValue.Create(8)!,
+                "card",
+                new JsonObject
+                {
+                    ["card"] = new JsonObject
+                    {
+                        ["kind"] = "general",
+                        ["title"] = "后台锚定卡",
+                        ["data"] = new JsonObject
+                        {
+                            ["text"] = "App 离线时仍先保存",
+                        },
+                        ["bind"] = new JsonObject
+                        {
+                            ["kind"] = "page-chars",
+                            ["page"] = 8,
+                            ["from"] = 11,
+                            ["to"] = 14,
+                            ["text"] = "保存",
+                        },
+                    },
+                });
+        ReaderContextSourceRouter queueRouter = new();
+        ReaderRealtimeOutputBroker queueBroker = new(
+            queueRouter,
+            outboxPath);
+        ReaderRealtimeOutputAck queuedAck = await queueBroker.SendAsync(
+            queuedCardRequest,
+            CancellationToken.None).ConfigureAwait(false);
+        int queuedBeforeRestart = await queueBroker.GetOutboxCountAsync(
+            CancellationToken.None).ConfigureAwait(false);
+
+        ReaderContextSourceRouter replayRouter = new();
+        ReaderRealtimeOutputBroker replayBroker = new(
+            replayRouter,
+            outboxPath);
+        TaskCompletionSource<bool> replaySent = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        ReaderContextSourceLease replayLease = replayRouter.Attach(
+            "source-after-restart",
+            "output-connection-after-restart",
+            (_, _) =>
+            {
+                replaySent.TrySetResult(true);
+                return Task.CompletedTask;
+            });
+        await replaySent.Task.WaitAsync(TimeSpan.FromSeconds(2))
+            .ConfigureAwait(false);
+        replayBroker.Accept(
+            replayLease,
+            new ReaderRealtimeOutputAck(
+                "session-BBBBBBBBBBBBBBBBBBBBBB",
+                queuedCardRequest.Correlation,
+                replayLease.SourceInstanceId,
+                "applied",
+                null,
+                "floating",
+                "create-failed"));
+        await Task.Delay(100).ConfigureAwait(false);
+        int queuedAfterFloating = await replayBroker.GetOutboxCountAsync(
+            CancellationToken.None).ConfigureAwait(false);
+        replayRouter.Detach(replayLease);
+
+        TaskCompletionSource<bool> boundReplaySent = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        ReaderContextSourceLease boundReplayLease = replayRouter.Attach(
+            "source-after-retry",
+            "output-connection-after-retry",
+            (_, _) =>
+            {
+                boundReplaySent.TrySetResult(true);
+                return Task.CompletedTask;
+            });
+        await boundReplaySent.Task.WaitAsync(TimeSpan.FromSeconds(2))
+            .ConfigureAwait(false);
+        replayBroker.Accept(
+            boundReplayLease,
+            new ReaderRealtimeOutputAck(
+                "session-CCCCCCCCCCCCCCCCCCCCCC",
+                queuedCardRequest.Correlation,
+                boundReplayLease.SourceInstanceId,
+                "applied",
+                null,
+                "bound",
+                null));
+        DateTimeOffset outboxDeadline = DateTimeOffset.UtcNow
+            .AddSeconds(2);
+        int queuedAfterReplay;
+        do
+        {
+            await Task.Delay(20).ConfigureAwait(false);
+            queuedAfterReplay = await replayBroker.GetOutboxCountAsync(
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        while (queuedAfterReplay != 0
+            && DateTimeOffset.UtcNow < outboxDeadline);
+
+        string rejectedOutboxPath = System.IO.Path.Combine(
+            root,
+            "reader-output-rejected-outbox",
+            ReaderRealtimeOutputOutbox.FileName);
+        ReaderRealtimeOutputRequest rejectedThenRecoveredRequest =
+            queuedCardRequest with
+            {
+                Correlation = "output-queued-rejected-then-recovered",
+                Page = queuedCardRequest.Page.DeepClone(),
+                Payload = queuedCardRequest.Payload.DeepClone(),
+            };
+        ReaderContextSourceRouter rejectedQueueRouter = new();
+        ReaderRealtimeOutputBroker rejectedQueueBroker = new(
+            rejectedQueueRouter,
+            rejectedOutboxPath);
+        _ = await rejectedQueueBroker.SendAsync(
+            rejectedThenRecoveredRequest,
+            CancellationToken.None).ConfigureAwait(false);
+        ReaderContextSourceRouter rejectedReplayRouter = new();
+        ReaderRealtimeOutputBroker rejectedReplayBroker = new(
+            rejectedReplayRouter,
+            rejectedOutboxPath);
+        TaskCompletionSource<bool> rejectedReplaySent = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        int rejectingDispatches = 0;
+        ReaderContextSourceLease? rejectingLease = null;
+        rejectingLease = rejectedReplayRouter.Attach(
+            "source-rejects-valid-queued-card",
+            "output-connection-rejects-valid-queued-card",
+            (_, _) =>
+            {
+                int dispatch = Interlocked.Increment(
+                    ref rejectingDispatches);
+                rejectedReplaySent.TrySetResult(true);
+                if (dispatch > 1)
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(10).ConfigureAwait(false);
+                        rejectedReplayBroker.Accept(
+                            rejectingLease!,
+                            new ReaderRealtimeOutputAck(
+                                "session-DDDDDDDDDDDDDDDDDDDDDD",
+                                rejectedThenRecoveredRequest.Correlation,
+                                rejectingLease!.SourceInstanceId,
+                                "rejected",
+                                "BW_READER_CARD_RENDER_FAILED",
+                                "unknown",
+                                "render-failed"));
+                    });
+                }
+                return Task.CompletedTask;
+            });
+        await rejectedReplaySent.Task.WaitAsync(TimeSpan.FromSeconds(2))
+            .ConfigureAwait(false);
+        rejectedReplayBroker.Accept(
+            rejectingLease,
+            new ReaderRealtimeOutputAck(
+                "session-DDDDDDDDDDDDDDDDDDDDDD",
+                rejectedThenRecoveredRequest.Correlation,
+                rejectingLease.SourceInstanceId,
+                "rejected",
+                "BW_READER_CARD_RENDER_FAILED",
+                "unknown",
+                "render-failed"));
+        DateTimeOffset rejectedFailureDeadline = DateTimeOffset.UtcNow
+            .AddSeconds(2);
+        bool rejectedFailureStayedVisible = false;
+        do
+        {
+            await Task.Delay(20).ConfigureAwait(false);
+            using JsonDocument rejectedOutboxDocument = JsonDocument.Parse(
+                await File.ReadAllTextAsync(rejectedOutboxPath)
+                    .ConfigureAwait(false));
+            rejectedFailureStayedVisible =
+                rejectedOutboxDocument.RootElement.GetProperty("entries")[0]
+                    .GetProperty("state").GetString() == "failed";
+        }
+        while (!rejectedFailureStayedVisible
+            && DateTimeOffset.UtcNow < rejectedFailureDeadline);
+
+        TaskCompletionSource<bool> recoveredReplaySent = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        ReaderContextSourceLease recoveredLease = rejectedReplayRouter.Attach(
+            "source-recovers-valid-queued-card",
+            "output-connection-recovers-valid-queued-card",
+            (_, _) =>
+            {
+                recoveredReplaySent.TrySetResult(true);
+                return Task.CompletedTask;
+            });
+        await recoveredReplaySent.Task.WaitAsync(TimeSpan.FromSeconds(2))
+            .ConfigureAwait(false);
+        rejectedReplayBroker.Accept(
+            recoveredLease,
+            new ReaderRealtimeOutputAck(
+                "session-EEEEEEEEEEEEEEEEEEEEEE",
+                rejectedThenRecoveredRequest.Correlation,
+                recoveredLease.SourceInstanceId,
+                "applied",
+                null,
+                "bound",
+                null));
+        DateTimeOffset rejectedRecoveryDeadline = DateTimeOffset.UtcNow
+            .AddSeconds(2);
+        int rejectedAfterRecovery;
+        do
+        {
+            await Task.Delay(20).ConfigureAwait(false);
+            rejectedAfterRecovery = await rejectedReplayBroker
+                .GetOutboxCountAsync(CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        while (rejectedAfterRecovery != 0
+            && DateTimeOffset.UtcNow < rejectedRecoveryDeadline);
+
+        JsonObject queuedRpcResponse =
+            ReaderRealtimeOutputRpcProtocol.Success(
+                queuedCardRequest,
+                queuedAck);
+        using JsonDocument queuedRpcDocument = JsonDocument.Parse(
+            queuedRpcResponse.ToJsonString(
+                DirectBridgeContract.JsonOptions));
+        ReaderRealtimeOutputAck queuedRpcAck =
+            ReaderRealtimeOutputRpcProtocol.ValidateResponse(
+                queuedRpcDocument.RootElement,
+                queuedCardRequest);
+
         JsonElement ackElement = JsonSerializer.SerializeToElement(new
         {
             contract = DirectBridgeContract.Contract,
@@ -9992,6 +10227,15 @@ internal static class DirectBridgeSelfTest
             && validatedStatusSource == routeRequest.SourceInstanceId
             && validatedStatus.Online
             && noFallback
+            && queuedAck.Outcome == "queued"
+            && queuedAck.BindOutcome == "unknown"
+            && queuedBeforeRestart == 1
+            && queuedAfterFloating == 1
+            && queuedAfterReplay == 0
+            && rejectedFailureStayedVisible
+            && rejectingDispatches >= 2
+            && rejectedAfterRecovery == 0
+            && queuedRpcAck.Outcome == "queued"
             && validatedRequest.Kind == "tool-status"
             && validatedResponse.Outcome == "applied"
             && NamedPipeReaderRealtimeOutputRpcClient.RequiredPipeOptions
