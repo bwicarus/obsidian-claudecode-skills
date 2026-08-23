@@ -990,6 +990,33 @@ internal static class DirectSnapshotTerminal
             ReadOnlySpan<char> marker = value.AsSpan(
                 index + 1,
                 headEnd - index - 1);
+            if (marker.SequenceEqual("ANCHOR_MAP_START"))
+            {
+                // 机读锚点表：几千字 JSON，不属于给人看的投影。
+                // 折叠成一行 —— 不折叠的话这个面板会被它整个淹掉
+                // （实测 5684 字 / 占页面正文 41%）。
+                int mapEnd = IndexOfUnescapedToken(
+                    value,
+                    AnchorMapEndToken,
+                    headEnd + 1);
+                if (mapEnd < 0)
+                {
+                    // 配对丢了（多半是上游截断）——当普通未知标记跳过，
+                    // 不要抛：整份投影消失比多显示一段 JSON 糟得多。
+                    index = headEnd + 1;
+                    continue;
+                }
+                output.Append(NormalizePresentationLayout(
+                    value.Substring(plainStart, index - plainStart)));
+                output.Append(
+                    "_（锚点映射已折叠："
+                    + (mapEnd - headEnd - 1)
+                    + " 字符，机读内容见 JSON 快照）_");
+                int mapBlockEnd = mapEnd + AnchorMapEndToken.Length;
+                plainStart = mapBlockEnd;
+                index = mapBlockEnd;
+                continue;
+            }
             string? closingToken = StartsMarker(marker, "HIGHLIGHT")
                 ? "⟦/HIGHLIGHT⟧"
                 : StartsMarker(marker, "CARD_START")
@@ -1157,12 +1184,52 @@ internal static class DirectSnapshotTerminal
                     markedAttributes = null;
                     markedText = null;
                 }
+                else if (marker.SequenceEqual("ANCHOR_MAP_START"))
+                {
+                    // 机读区块：整段是给模型用的 JSON 锚点表，不是正文。
+                    // 找到配对的 END 直接跳过，只在投影里留一行说明 ——
+                    // 把它当正文渲染会让这个面板被几千字 JSON 淹掉
+                    // （实测占页面正文的 41%）。
+                    // ⚠ 必须用 IndexOfUnescapedToken 而不是裸 IndexOf：
+                    //   生产端会把正文里出现的 ⟦⟧ 转义掉，裸查会命中被转义的那种。
+                    int mapEnd = IndexOfUnescapedToken(
+                        value,
+                        AnchorMapEndToken,
+                        close + 1);
+                    if (mapEnd < 0)
+                    {
+                        // START 有、END 没有 —— 多半是上游截断把尾巴切了。
+                        // 当未知标记处理（原样保留），不要整份拒绝。
+                        AppendVerbatimMarker(plain, markedText, value, index, close);
+                        index = close + 1;
+                        continue;
+                    }
+                    AppendVerbatimText(
+                        plain,
+                        markedText,
+                        "（锚点映射已折叠：" + (mapEnd - close - 1) + " 字符）");
+                    index = mapEnd + AnchorMapEndToken.Length;
+                    continue;
+                }
+                else if (marker.SequenceEqual("ANCHOR_MAP_END"))
+                {
+                    // 只可能是配对的 START 没了（截断）。同样原样保留。
+                    AppendVerbatimMarker(plain, markedText, value, index, close);
+                }
                 else
                 {
-                    // Original brackets are always backslash-escaped by the
-                    // producer. An unescaped unknown marker is malformed, so
-                    // displaying a guessed projection would be unsafe.
-                    throw ReaderTextInvalid();
+                    // 未知标记 —— **原样保留，不再整份拒绝**。
+                    //
+                    // 原来这里是 throw：生产端加一个新标记类型，整份 Markdown
+                    // 投影就消失（503「正文标记无效」），而 JSON 那条路完全正常。
+                    // 2026-08-23 的 ⟦ANCHOR_MAP_START⟧ 就是这么让快照查看器挂掉的，
+                    // 而且从界面上看像是"快照连接不上"，跟真正的原因差得很远。
+                    //
+                    // 原注释担心的是"显示一个猜出来的投影不安全" —— 原样保留
+                    // 不是猜：它把收到的东西照实摆出来，看得见才知道要去补消费端。
+                    // 这条闭集在这个仓库已经咬过两次（另一次是 CopyEmbeds 的
+                    // unanchored._reason），见 references/silent-failure-lessons.md。
+                    AppendVerbatimMarker(plain, markedText, value, index, close);
                 }
                 index = close + 1;
                 continue;
@@ -1486,6 +1553,36 @@ internal static class DirectSnapshotTerminal
         marked?.Append(value);
     }
 
+    internal const string AnchorMapEndToken = "\u27E6ANCHOR_MAP_END\u27E7";
+
+    /// 把一段文字照原样写进投影（同时进 marked，保持与正文一致）。
+    private static void AppendVerbatimText(
+        StringBuilder plain,
+        StringBuilder? marked,
+        string text)
+    {
+        foreach (char value in text)
+        {
+            AppendReaderCharacter(plain, marked, value);
+        }
+    }
+
+    /// 把 [open, close] 这一整个标记（含两侧括号）照原样写进投影。
+    /// 未知标记走这里 —— 让人看得见"收到了什么不认识的东西"，
+    /// 而不是让整份投影消失。
+    private static void AppendVerbatimMarker(
+        StringBuilder plain,
+        StringBuilder? marked,
+        string value,
+        int open,
+        int close)
+    {
+        for (int cursor = open; cursor <= close; cursor++)
+        {
+            AppendReaderCharacter(plain, marked, value[cursor]);
+        }
+    }
+
     private static bool StartsMarker(
         ReadOnlySpan<char> marker,
         string name) =>
@@ -1772,9 +1869,34 @@ internal sealed class DirectSnapshotViewer : IDisposable
                         markedKind = null;
                         markedAttributes = "";
                         marked = "";
+                      } else if (marker === "ANCHOR_MAP_START") {
+                        // 机读锚点表：几千字 JSON，不是给人看的正文。
+                        // 折叠成一行；找配对 END 时要跳过被转义的那种。
+                        const endToken = "⟦ANCHOR_MAP_END⟧";
+                        let mapEnd = -1;
+                        for (let scan = close + 1; scan < value.length;) {
+                          if (value.charAt(scan) === "\\") { scan += 2; continue; }
+                          if (value.startsWith(endToken, scan)) { mapEnd = scan; break; }
+                          scan += 1;
+                        }
+                        if (mapEnd < 0) {
+                          // 配对丢了（多半是上游截断）——原样保留，别整份拒绝
+                          append(value.slice(index, close + 1));
+                        } else {
+                          append(
+                            "（锚点映射已折叠：" +
+                            (mapEnd - close - 1) +
+                            " 字符，机读内容见 JSON 快照）");
+                          index = mapEnd + endToken.length;
+                          continue;
+                        }
                       } else {
-                        throw new Error(
-                          "BW_READER_CONTEXT_MARK_ESCAPE_INVALID");
+                        // 未知标记 —— **原样保留，不再整份拒绝**。
+                        // 这是同一个闭集在本文件里的第三份副本（另两份是 C# 的
+                        // ParseAnnotatedReaderText 和 ReadableAnnotatedReaderText）。
+                        // 2026-08-23：生产端加了 ANCHOR_MAP，三份全炸，
+                        // 表现是查看器"连接不上"，跟真原因差得很远。
+                        append(value.slice(index, close + 1));
                       }
                       index = close + 1;
                       continue;
