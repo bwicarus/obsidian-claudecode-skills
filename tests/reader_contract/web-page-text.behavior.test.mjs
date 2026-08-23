@@ -43,7 +43,9 @@ test("② 页面侧 query 表有网页回退（源与扩展副本都要有）", 
   for (const [name, src] of [["源", INBOUND], ["扩展副本", VENDOR]]) {
     const at = src.indexOf('"page-text": function');
     assert.ok(at > 0, `${name} 里找不到 page-text handler`);
-    const body = src.slice(at, at + 520);
+    // ⚠ 窗口要够宽：handler 每次加分支都会变长，窗口太窄会让断言
+    //   莫名其妙地红，而看起来像功能坏了。
+    const body = src.slice(at, at + 1200);
     // ⚠ 只断言"标识符出现过"是不够的：把调用那行改成 `if (false)` 之后
     //   变量声明还在，断言照样通过 —— 变异验证抓到的正是这一点。
     //   要钉住的是**回退真的被调用**。

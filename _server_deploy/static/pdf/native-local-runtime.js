@@ -3787,13 +3787,57 @@
     return segments.slice(0, 400);
   }
 
+  var PAGE_TEXT_MAX_MATCHES = 8;
+
+  // 按助手给的原文把整页收窄成"覆盖那句话的几条"。
+  //
+  // ⚠ 在**字符层**上找，不是在 searchableText 上找 —— 后者是给人读的投影，
+  //   它的位置换算不回 chars 下标。这正是 ANCHOR_MAP 那个陷阱的同一形态。
+  // ⚠ 跳过空白与 sp：它们**占序号但不成段**，不跳过就永远匹配不上跨词的句子。
+  function narrowPageSegments(result, segments, needle) {
+    var chars = (result && result.chars) || [];
+    var matches = [];
+    for (var start = 0; start < chars.length; start += 1) {
+      if (matches.length >= PAGE_TEXT_MAX_MATCHES) break;
+      var cursor = start;
+      var taken = 0;
+      while (cursor < chars.length && taken < needle.length) {
+        var item = chars[cursor];
+        var value = String((item && item.c) == null ? '' : item.c);
+        if (!value || (item && item.sp) || !value.trim()) { cursor += 1; continue; }
+        if (value !== needle.charAt(taken)) break;
+        taken += 1;
+        cursor += 1;
+      }
+      if (taken === needle.length) matches.push({ from: start, to: cursor - 1 });
+    }
+    if (!matches.length) return { matches: [], matchCount: 0, segments: [] };
+    var keep = [];
+    for (var i = 0; i < segments.length; i += 1) {
+      var seg = segments[i];
+      for (var m = 0; m < matches.length; m += 1) {
+        if (seg.to >= matches[m].from && seg.from <= matches[m].to) {
+          keep.push(seg);
+          break;
+        }
+      }
+    }
+    return { matches: matches, matchCount: matches.length, segments: keep };
+  }
+
   function nativeVoicePageText(url) {
     var code = 'BW_LOCAL_VOICE_PAGE_TEXT';
     return localJSONRoute(function () {
-      localFileQuery(url, ['file', 'page'], ['file', 'page'], code);
+      // ⚠ 第 2 个是**允许**表、第 3 个是**必需**表。contains 是可选的，
+      //   只进允许表；进了必需表会让不带它的老调用当场被拒。
+      //   （这张精确参数表是 2026-08-19 咬过的五处之一。）
+      localFileQuery(
+        url, ['file', 'page', 'contains'], ['file', 'page'], code
+      );
       var page = strictInteger(
         url.searchParams.get('page'), 1, 10000000, 'page', code
       );
+      var needle = String(url.searchParams.get('contains') || '').trim();
       if (nativeInterfaceSurface === 'epub') {
         return loadEPUB().then(function (epub) {
           var index = page - 1;
@@ -3808,16 +3852,31 @@
             // EPUB 这条走的是可见文本，没有字符层，也就没有可用的序号。
             // 给空数组而不是省略字段：省略会让调用方分不清"这个表面没有这项能力"
             // 和"这一页恰好没有内容"。
-            segments: []
+            segments: [],
+            // 传了 contains 也一样没有序号可给。**明确说出来** ——
+            // 静默忽略会让助手以为"筛过了，就这些"，然后据此下结论。
+            matchCount: needle ? 0 : undefined,
+            containsUnsupported: needle ? true : undefined
           };
         });
       }
       return pageTextForPage(page).then(function (result) {
+        var all = pageTextSegments(result && result.chars);
+        // 助手据此自己挑段落绑卡片，不必要求用户先选中。
+        //
+        // contains 给了就只回覆盖那句话的几条。旧的内联 ANCHOR_MAP 正是
+        // segments 的同一份数据（370 条 / 5718 字符）—— 整页发回去等于把它
+        // 换个地方重来一遍。助手明明知道自己要钉哪句话。
+        var narrowed = needle
+          ? narrowPageSegments(result, all, needle) : null;
         return {
           ok: true,
           text: searchableText(result).slice(0, 1500),
-          // 助手据此自己挑段落绑卡片，不必要求用户先选中。
-          segments: pageTextSegments(result && result.chars)
+          segments: narrowed ? narrowed.segments : all,
+          // matchCount > 1 = 这句话在本页出现多次，光凭它定位不了。
+          // 只回第一处会静默锚到用户没在看的那一段。
+          matches: narrowed ? narrowed.matches : undefined,
+          matchCount: narrowed ? narrowed.matchCount : undefined
         };
       });
     }, code);

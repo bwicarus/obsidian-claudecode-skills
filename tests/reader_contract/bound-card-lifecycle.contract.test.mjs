@@ -187,8 +187,19 @@ test("跨机信封放行 bind，但形状不对就拒收", () => {
   // 两种 kind 都认
   assert.match(output, /case "upage-block":/);
   assert.match(output, /case "page-chars":/);
-  // 歪掉的区间要拒 —— 与其在页面上定出荒唐位置，不如让调用方立刻知道发错了
-  assert.match(output, /if \(page < 1 \|\| from < 0 \|\| to < from\)/);
+  // 歪掉的区间要拒 —— 与其在页面上定出荒唐位置，不如让调用方立刻知道发错了。
+  // 2026-08-23 起 from/to 可选（序号与原文二选一），所以判定拆成两段：
+  // 页码单独校验；区间只有真给了才校验。
+  assert.match(output, /if \(page < 1\)/, "页码必须校验");
+  assert.match(output, /if \(from < 0 \|\| to < from\)/, "给了区间就必须校验它");
+  assert.match(
+    output, /if \(hasFrom != hasTo\)/,
+    "只给一半是发错了，必须拒 —— 放过去会得到一个看起来合法却半截的锚",
+  );
+  assert.match(
+    output, /if \(!hasFrom && string\.IsNullOrEmpty\(bindText\)\)/,
+    "既没序号也没原文的锚指不向任何地方，必须拒",
+  );
   assert.match(output, /Reader 卡片 bind 类型无效/);
 });
 
@@ -221,7 +232,12 @@ test("AI 能自己定位到正文的一段 —— 不必要求用户先选中", 
   // ② App 侧**本地**实现 —— 这条路由在 manifest 里是 owner:'local'，
   //    runtime 用 nativeVoicePageText 自己算，**不打 Pi**。
   assert.match(runtime, /function pageTextSegments\(chars\)/);
-  assert.match(runtime, /segments: pageTextSegments\(result && result\.chars\)/);
+  // 2026-08-23：加了 contains 收窄后不再是一行直出，但**不变量不变** ——
+  // segments 仍由本地 chars 现算、不打 Pi，且没传 contains 时行为与从前一致。
+  assert.match(runtime, /pageTextSegments\(result && result\.chars\)/,
+    'segments 必须由本地 chars 现算，不打 Pi');
+  assert.match(runtime, /segments: narrowed \? narrowed\.segments : all/,
+    '没传 contains 时必须回落到整页 segments，行为不变');
   // 空白不成段但**占序号** —— 否则卡片会绑到偏掉的位置
   assert.match(runtime, /if \(!item \|\| item\.sp\) continue;/);
   // 按 w 聚合（fugashi 分词后 w 才是有意义的词边界）

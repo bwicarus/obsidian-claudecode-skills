@@ -1690,7 +1690,12 @@ internal sealed class ReaderContextMcpServer
                     + "bind={kind:'page-chars',page,from,to,text} to pin a card "
                     + "onto that exact passage. **You do not need the user to "
                     + "select anything first** - read the page, pick the "
-                    + "passage yourself, and bind to it.",
+                    + "passage yourself, and bind to it. "
+                    + "When you already know the passage, pass `contains` - "
+                    + "you then get back only the few segments covering it "
+                    + "plus `matches`, instead of the whole page. A page can "
+                    + "run to hundreds of segments, so this is the difference "
+                    + "between a hundred characters and several thousand.",
                 ["inputSchema"] = new JsonObject
                 {
                     ["type"] = "object",
@@ -1702,6 +1707,21 @@ internal sealed class ReaderContextMcpServer
                             ["minimum"] = 1,
                             ["description"] =
                                 "The page (PDF) or section index (EPUB).",
+                        },
+                        ["contains"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] =
+                                ReaderQueryProtocol.MaximumQueryTextCharacters,
+                            ["description"] =
+                                "Optional. The passage you intend to bind to. "
+                                + "Narrows `segments` to the run covering it "
+                                + "and adds `matches`: [{from,to}] for every "
+                                + "occurrence on the page, with `matchCount`. "
+                                + "More than one match means the phrase is "
+                                + "ambiguous - lengthen it rather than "
+                                + "guessing which one the user meant.",
                         },
                     },
                     ["required"] = new JsonArray { "page" },
@@ -2366,7 +2386,9 @@ internal sealed class ReaderContextMcpServer
                             {
                                 ["type"] = "object",
                                 ["additionalProperties"] = false,
-                                ["required"] = new JsonArray("kind", "page", "from", "to"),
+                                // 序号与原文二选一：带 from/to 就精确定位，
+                                // 只给 text（可加 block 限定块）由阅读器自己解析。
+                                ["required"] = new JsonArray("kind", "page"),
                                 ["properties"] = new JsonObject
                                 {
                                     ["kind"] = new JsonObject
@@ -2397,6 +2419,18 @@ internal sealed class ReaderContextMcpServer
                                     {
                                         ["type"] = "string",
                                         ["maxLength"] = 200,
+                                    },
+                                    ["block"] = new JsonObject
+                                    {
+                                        ["type"] = "integer",
+                                        ["minimum"] = 1,
+                                        ["description"] =
+                                            "Optional. The [NN] block number "
+                                            + "you are reading in the page "
+                                            + "Markdown. Scopes the `text` "
+                                            + "lookup to that block, which is "
+                                            + "what makes a repeated phrase "
+                                            + "unambiguous. Requires `text`.",
                                     },
                                 },
                             },
@@ -3144,10 +3178,35 @@ internal sealed class ReaderContextMcpServer
                     cancellationToken).ConfigureAwait(false);
                 return;
             }
+            JsonObject pageTextParameters = new JsonObject
+            {
+                ["page"] = pageIndex,
+            };
+            // 与 highlights / notes 同一套 contains 校验 —— 三处必须一致，
+            // 否则同一个参数在不同工具上行为不同，助手会以为自己传错了。
+            if (arguments.TryGetProperty(
+                    "contains",
+                    out JsonElement pageTextContains))
+            {
+                if (pageTextContains.ValueKind != JsonValueKind.String
+                    || pageTextContains.GetString() is not string pageNeedle
+                    || pageNeedle.Length == 0
+                    || pageNeedle.Length
+                        > ReaderQueryProtocol.MaximumQueryTextCharacters)
+                {
+                    await WriteErrorAsync(
+                        id,
+                        -32602,
+                        "Invalid Reader page-text filter",
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+                pageTextParameters["contains"] = pageNeedle;
+            }
             await RunReaderQueryAsync(
                 id,
                 "page-text",
-                new JsonObject { ["page"] = pageIndex },
+                pageTextParameters,
                 cancellationToken).ConfigureAwait(false);
             return;
         }

@@ -1450,21 +1450,58 @@ internal static class ReaderRealtimeOutputProtocol
                 _ = Text(bind, "bid", 200);
                 break;
             case "page-chars":
+                // 序号与原文二选一；block 可选，把"按文本找"限定在某一块里。
+                // 形状与服务端 _norm_bind、阅读器 normalizeCardBind 一致。
                 ExactWithOptional(
                     bind,
-                    new[] { "kind", "page", "from", "to" },
-                    new[] { "text", "rev" });
+                    new[] { "kind", "page" },
+                    new[] { "from", "to", "text", "rev", "block" });
                 int page = CardInt(bind, "page");
-                int from = CardInt(bind, "from");
-                int to = CardInt(bind, "to");
-                // 歪掉的区间不如没有：与其在页面上定出一个荒唐的位置，
-                // 不如让调用方立刻知道自己发错了。
-                if (page < 1 || from < 0 || to < from)
+                if (page < 1)
                 {
-                    throw Invalid("Reader 卡片 bind 的字符区间无效");
+                    throw Invalid("Reader 卡片 bind 的页码无效");
                 }
-                OptionalCardText(bind, "text");
+                bool hasFrom = bind.TryGetProperty("from", out _);
+                bool hasTo = bind.TryGetProperty("to", out _);
+                if (hasFrom != hasTo)
+                {
+                    // 只给一半是发错了，不是"想按文本找"。
+                    throw Invalid("Reader 卡片 bind 的 from/to 必须成对出现");
+                }
+                if (hasFrom)
+                {
+                    int from = CardInt(bind, "from");
+                    int to = CardInt(bind, "to");
+                    // 歪掉的区间不如没有：与其在页面上定出一个荒唐的位置，
+                    // 不如让调用方立刻知道自己发错了。
+                    if (from < 0 || to < from)
+                    {
+                        throw Invalid("Reader 卡片 bind 的字符区间无效");
+                    }
+                }
+                // ⚠ OptionalCardText 返回 void，这里需要值 —— 用 CardText 取。
+                string bindText = bind.TryGetProperty("text", out _)
+                    ? CardText(bind, "text") : string.Empty;
                 OptionalCardText(bind, "rev");
+                if (bind.TryGetProperty("block", out JsonElement blockValue)
+                    && blockValue.ValueKind != JsonValueKind.Null)
+                {
+                    int block = CardInt(bind, "block");
+                    if (block < 1)
+                    {
+                        throw Invalid("Reader 卡片 bind 的块号无效");
+                    }
+                    if (string.IsNullOrEmpty(bindText))
+                    {
+                        // 块号必须配原文：只给块号不是一个位置。
+                        throw Invalid(
+                            "Reader 卡片 bind 的块号必须与 text 同时给出");
+                    }
+                }
+                if (!hasFrom && string.IsNullOrEmpty(bindText))
+                {
+                    throw Invalid("Reader 卡片 bind 必须给出字符区间或原文");
+                }
                 break;
             default:
                 throw Invalid("Reader 卡片 bind 类型无效");

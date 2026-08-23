@@ -151,10 +151,16 @@ _CARD_TOP_OPT = ("title", "brief", "cid", "sources", "bind")
 _BIND_KINDS = {"upage-block", "page-chars"}
 _BIND_FIELDS = {
     "upage-block": ("upage", "bid"),
-    "page-chars": ("page", "from", "to"),
+    # ⚠ page-chars 只有 page 是无条件必需的。序号与原文**二选一即可**：
+    #   带了 from/to 就精确定位；只给 text 由阅读器自己按文本解析。
+    #   （用户 2026-08-23：「ai 需要多进行一次思考和判断不是么，而我之前
+    #     提出的方案就是依靠自动可靠的位置换算省掉 ai 的这一步」。
+    #     换算能力阅读器本来就有 —— locate() 在 rev 失效时走的就是按文本找，
+    #     是契约在逼助手先自己算一遍。）
+    "page-chars": ("page",),
 }
 # 可空字段：缺了不影响锚成立，只是降级成"按文本找"或"没有原文记录"。
-_BIND_OPTIONAL = {"page-chars": ("text", "rev")}
+_BIND_OPTIONAL = {"page-chars": ("from", "to", "text", "rev", "block")}
 
 
 def _norm_bind(value, kind: str) -> dict:
@@ -176,15 +182,49 @@ def _norm_bind(value, kind: str) -> dict:
         if isinstance(v, (str, int)) and str(v).strip():
             out[f] = _clip(str(v))
     if akind == "page-chars":
-        # 序号必须是能比大小的数，且 from <= to。歪掉的区间不如没有 ——
-        # 让它退回浮层，别在页面上定出一个荒唐的位置。
-        try:
-            lo, hi = int(out["from"]), int(out["to"])
-        except (TypeError, ValueError):
+        has_range = "from" in out and "to" in out
+        if has_range:
+            # 序号必须是能比大小的数，且 from <= to。歪掉的区间不如没有 ——
+            # 让它退回浮层，别在页面上定出一个荒唐的位置。
+            try:
+                lo, hi = int(out["from"]), int(out["to"])
+            except (TypeError, ValueError):
+                return None
+            if lo < 0 or hi < lo:
+                return None
+            out["from"], out["to"] = str(lo), str(hi)
+        elif "from" in out or "to" in out:
+            # 只给一半是**发错了**，不是"想按文本找"。放过去会得到一个
+            # 看起来合法却半截的锚，比整条拒掉难查得多。
             return None
-        if lo < 0 or hi < lo:
+        elif not out.get("text"):
+            # 既没有序号也没有原文 —— 这个锚指不向任何地方。
             return None
-        out["from"], out["to"] = str(lo), str(hi)
+        if "block" in out:
+            # 块号：把"按文本找"的范围限定在某一块里。
+            #
+            # 用户 2026-08-23 定的寻址方式：「ai 其实要做的就是用 markdown 里的
+            # 分区加上分区里的内容进行锁定…系统要做到利用生成 markdown 时的
+            # 对应关系，将这段命令文本换算成原先的对应范围」。
+            #
+            # 它比"只给原文"严格更准：同一句话在页内出现多次时，**块把范围锁住了**，
+            # 不必再报 matchCount 让助手把引用加长（那是多一轮）。
+            # 而块号助手本来就在读（Markdown 里印着 [NN]），说出来零成本。
+            #
+            # ⚠ 块号是**位置**不是身份：页面重排、换一份 OCR 之后同一个 [03]
+            #   可能指向别的内容。所以它只用来缩小搜索范围，最终仍靠 text 命中；
+            #   块内找不到就退回全页找，并在回执里说明走了哪条。
+            try:
+                blk = int(out["block"])
+            except (TypeError, ValueError):
+                return None
+            if blk < 1:
+                return None
+            if not out.get("text"):
+                # 块号必须配原文。只给块号等于"钉在第 3 块的某处" ——
+                # 那不是一个位置，放过去只会得到一个看起来合法的假锚。
+                return None
+            out["block"] = str(blk)
     return out
 
 PART_FIELD_SPECS: dict[str, dict] = {

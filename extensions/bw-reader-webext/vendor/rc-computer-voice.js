@@ -499,27 +499,52 @@ if (window.__bwPwaProviderOnly) return;
       };
     }
     if (kind === "page-chars") {
+      // 序号与原文二选一；block 可选，把"按文本找"限定在某一块里。
+      // 形状与服务端 reader_card_contract._norm_bind、C# ValidateCardBind 一致。
       exactObject(
         value,
-        ["kind", "page", "from", "to"],
-        ["text", "rev"],
+        ["kind", "page"],
+        ["from", "to", "text", "rev", "block"],
         "Reader 卡片 bind"
       );
       var page = value.page;
-      var from = value.from;
-      var to = value.to;
-      if (
-        !Number.isSafeInteger(page) || page < 1 ||
-        !Number.isSafeInteger(from) || from < 0 ||
-        !Number.isSafeInteger(to) || to < from
-      ) {
+      if (!Number.isSafeInteger(page) || page < 1) {
         throw directError(
-          "Reader 卡片 bind 的字符区间无效",
+          "Reader 卡片 bind 的页码无效",
           "BW_READER_REALTIME_OUTPUT_SCHEMA",
           false
         );
       }
-      var bind = { kind: kind, page: page, from: from, to: to };
+      // ⚠ 这里是**重建**不是透传 —— 放行了字段还必须显式搬过来。
+      //   只放行不搬的表现是「校验全过、卡片照常出现、就是不钉」，
+      //   链路上没有一处报错（见 CLAUDE.md 与 card-bind-whitelist-parity 测试）。
+      var bind = { kind: kind, page: page };
+      var hasFrom = Object.prototype.hasOwnProperty.call(value, "from");
+      var hasTo = Object.prototype.hasOwnProperty.call(value, "to");
+      if (hasFrom !== hasTo) {
+        // 只给一半是发错了，不是"想按文本找"。
+        throw directError(
+          "Reader 卡片 bind 的 from/to 必须成对出现",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
+      }
+      if (hasFrom) {
+        var from = value.from;
+        var to = value.to;
+        if (
+          !Number.isSafeInteger(from) || from < 0 ||
+          !Number.isSafeInteger(to) || to < from
+        ) {
+          throw directError(
+            "Reader 卡片 bind 的字符区间无效",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        bind.from = from;
+        bind.to = to;
+      }
       ["text", "rev"].forEach(function (field) {
         if (
           Object.prototype.hasOwnProperty.call(value, field) &&
@@ -530,6 +555,34 @@ if (window.__bwPwaProviderOnly) return;
           );
         }
       });
+      if (Object.prototype.hasOwnProperty.call(value, "block") &&
+          value.block !== null) {
+        var block = value.block;
+        if (!Number.isSafeInteger(block) || block < 1) {
+          throw directError(
+            "Reader 卡片 bind 的块号无效",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        if (!bind.text) {
+          // 块号必须配原文：只给块号等于"钉在第 3 块的某处"，那不是一个位置。
+          throw directError(
+            "Reader 卡片 bind 的块号必须与 text 同时给出",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        bind.block = block;
+      }
+      if (!hasFrom && !bind.text) {
+        // 既没有序号也没有原文 —— 这个锚指不向任何地方。
+        throw directError(
+          "Reader 卡片 bind 必须给出字符区间或原文",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
+      }
       return bind;
     }
     throw directError(
@@ -3638,7 +3691,12 @@ if (window.__bwPwaProviderOnly) return;
       // __bwWebPageText（字符层来自 web-textlayer，同样不经 Pi）。
       var target = window._nativeReaderPageText;
       if (typeof target === "function") {
-        return target.call(window, { page: params.page });
+        // ⚠ contains 必须透传。不传的话 C# 侧放行了、页面侧却丢掉，
+        //   表现是"参数写了但没生效" —— 整页照旧返回，没有一处报错。
+        return target.call(window, {
+          page: params.page,
+          contains: params.contains
+        });
       }
       var web = window.__bwWebPageText;
       if (web && typeof web.read === "function") return web.read(params || {});

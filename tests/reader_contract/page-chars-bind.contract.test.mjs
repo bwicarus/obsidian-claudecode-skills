@@ -20,8 +20,16 @@ const CSS = read("_server_deploy/static/pdf/pdf-styles.css");
 test("bind 契约四处都认识 page-chars", () => {
   // 四处同步是这个仓库的硬规矩：服务端规范化、跨机信封校验、两份规范文档。
   assert.match(CONTRACT, /_BIND_KINDS = \{"upage-block", "page-chars"\}/);
-  assert.match(CONTRACT, /"page-chars": \("page", "from", "to"\)/);
-  assert.match(BRIDGE, /"page-chars": \("page", "from", "to"\)/);
+  // 2026-08-23：序号与原文**二选一**，并可带 block 把按文本找限定在某一块里。
+  // 用户定的寻址方式：助手读 Markdown 时本来就看得见 [NN]，说出「第 3 块 + 这句话」
+  // 零成本，而块把范围锁住 —— 同一句话在页内重复时不必再多问一轮。
+  // 只有 page 是无条件必需的。
+  assert.match(CONTRACT, /"page-chars": \("page",\)/);
+  assert.match(BRIDGE, /"page-chars": \("page",\)/);
+  assert.match(
+    CONTRACT, /_BIND_OPTIONAL = \{"page-chars": \("from", "to", "text", "rev", "block"\)\}/,
+    "from/to/text/rev/block 都是可选，规则由 _norm_bind 的二选一判定守住",
+  );
   assert.match(ENVELOPE, /"kind": "page-chars"/);
   assert.match(AGENTS, /kind:'page-chars'/);
 });

@@ -22,6 +22,7 @@
   var MAX_TEXT = 1500;          // 与 App 版同一上限，避免两个表面给 AI 的量不同
   var MAX_SEGMENTS = 400;       // 同上
   var MAX_BLOCKS = 200;
+  var MAX_MATCHES = 8;          // 超过这个数说明这句话根本不足以定位
 
   // ⚠ 必须包含 div/section/article。
   //
@@ -114,7 +115,41 @@
   // 一个永远不到 1 的指标，真出问题时也没人会注意到。
   function nonWs(s) { return String(s || '').replace(/\s/g, '').length; }
 
-  function read() {
+  /// 按 `contains` 把整页收窄成"你要的那几条"。
+  ///
+  /// 为什么要有它（用户 2026-08-23 一问点破的）：旧的内联 ANCHOR_MAP 是
+  /// `segments:[[from,to,text] x 370]`、5718 字符 —— 而 `reader_page_text`
+  /// 返回的**是同一份东西**。删掉内联表只解决了"每轮重发"，没解决"真要钉的
+  /// 那一轮仍然吃掉几千字"。AI 明明知道自己要钉哪句话，不该整页拉回来自己找。
+  ///
+  /// ⚠ 命中多处时**必须报出来**。只回第一处会静默锚到用户没在看的那一段；
+  ///   而"这句话在本页出现了几次"只有这里知道，AI 无从自己判断。
+  function narrow(idx, segments, needle) {
+    var text = idx.text;
+    var matches = [];
+    var at = 0;
+    while (matches.length < MAX_MATCHES) {
+      var hit = text.indexOf(needle, at);
+      if (hit < 0) break;
+      matches.push({ from: hit, to: hit + needle.length });
+      at = hit + Math.max(1, needle.length);
+    }
+    if (!matches.length) return { matches: [], matchCount: 0, segments: [] };
+    // 只留与命中区间相交的 segment，AI 据此拼 from/to 仍走原来那套。
+    var keep = [];
+    for (var i = 0; i < segments.length; i++) {
+      var seg = segments[i];
+      for (var m = 0; m < matches.length; m++) {
+        if (seg.to >= matches[m].from && seg.from <= matches[m].to) {
+          keep.push(seg);
+          break;
+        }
+      }
+    }
+    return { matches: matches, matchCount: matches.length, segments: keep };
+  }
+
+  function read(params) {
     var idx = TL.build();
     if (!idx.text.length) {
       return { ok: false, code: 'BW_PAGE_TEXT_EMPTY', message: '页面还没有可读文字', retryable: true };
@@ -176,6 +211,13 @@
     }
 
     var text = lines.join('\n');
+    // 收窄：AI 已经知道要钉哪句话时，不该把整页几百条都发回去。
+    var needle = String((params && params.contains) || '').trim();
+    var narrowed = null;
+    if (needle) {
+      narrowed = narrow(idx, segments, needle);
+      segments = narrowed.segments;
+    }
     if (text.length > MAX_TEXT) { text = text.slice(0, MAX_TEXT); truncated = true; }
     if (n >= MAX_BLOCKS || segments.length >= MAX_SEGMENTS) truncated = true;
 
@@ -199,7 +241,11 @@
       })(),
       // 这份字符层的身份。AI 把它原样放进 bind.rev，页面变了就能察觉。
       rev: idx.rev,
-      page: 1
+      page: 1,
+      // contains 给了才有。matchCount > 1 = 这句话在本页出现多次，
+      // 光凭它定位不了 —— AI 应该把引用加长，而不是猜用户指的是哪一处。
+      matches: narrowed ? narrowed.matches : undefined,
+      matchCount: narrowed ? narrowed.matchCount : undefined
     };
   }
 

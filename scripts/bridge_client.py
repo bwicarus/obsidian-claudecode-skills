@@ -402,7 +402,9 @@ def _normalize_flashcards(raw) -> list[dict]:
 
 _BIND_FIELDS = {
     "upage-block": ("upage", "bid"),
-    "page-chars": ("page", "from", "to"),
+    # 序号与原文二选一，另可带 block 把搜索范围限定在某一块里。
+    # 形状与 _server_deploy/reader_card_contract.py 的 _BIND_FIELDS 一致。
+    "page-chars": ("page",),
 }
 _BIND_OPTIONAL = {"page-chars": ("text", "rev")}
 

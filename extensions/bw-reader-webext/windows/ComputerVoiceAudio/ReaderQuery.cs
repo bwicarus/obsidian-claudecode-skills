@@ -368,7 +368,14 @@ internal static class ReaderQueryProtocol
         {
             throw Invalid("Reader 已绑定卡片序号或锚点无效");
         }
-        RequireExactFields(bind, "kind", "page", "from", "to", "text");
+        // 回执里的 bind：序号与原文二选一，可带 block。
+        // 形状与 ReaderRealtimeOutput.ValidateCardBind 一致。
+        // ⚠ 本文件的 RequireExactFields 是**全等**语义（没有可选版），
+        //   所以这里就地判定：必需项必须在，其余项必须落在允许集里。
+        RequireBindFields(
+            bind,
+            new[] { "kind", "page" },
+            new[] { "from", "to", "text", "rev", "block" });
         if (RequiredString(bind, "kind", 32) != "page-chars"
             || RequiredSafeInteger(bind, "page", 1, 10_000_000) != page)
         {
@@ -519,6 +526,39 @@ internal static class ReaderQueryProtocol
             foreach (JsonElement item in value.EnumerateArray())
             {
                 RequireDepth(item, depth + 1);
+            }
+        }
+    }
+
+    // 必需 + 可选两段式。RequireExactFields 是全等语义，对 bind 不适用 ——
+    // bind 的 page-chars 分支里 from/to/text/rev/block 都是可选的。
+    private static void RequireBindFields(
+        JsonElement bind,
+        string[] required,
+        string[] optional)
+    {
+        if (bind.ValueKind != JsonValueKind.Object)
+        {
+            throw Invalid("Reader 卡片 bind 必须是对象");
+        }
+        DirectJsonValidation.RequireNoDuplicateKeys(bind);
+        HashSet<string> allowed = new(required, StringComparer.Ordinal);
+        foreach (string name in optional)
+        {
+            allowed.Add(name);
+        }
+        foreach (JsonProperty property in bind.EnumerateObject())
+        {
+            if (!allowed.Contains(property.Name))
+            {
+                throw Invalid("Reader 卡片 bind 含未知字段");
+            }
+        }
+        foreach (string name in required)
+        {
+            if (!bind.TryGetProperty(name, out _))
+            {
+                throw Invalid("Reader 卡片 bind 缺少字段");
             }
         }
     }
