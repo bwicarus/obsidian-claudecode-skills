@@ -192,9 +192,7 @@ test("⚠ 白名单闸存在 —— 防的是未来，不是现在", () => {
     "闸必须真的判白名单，不能只声明常量",
   );
   assert.match(
-    fnBody, /
-            return
-/,
+    fnBody, /\n {12}return\n/,
     "不在白名单里必须**直接返回** —— 否则闸判了也不拦",
   );
   const at = RELAY.indexOf("_LEDGER_MUTATE_COLLECTIONS = frozenset({");
@@ -236,8 +234,7 @@ test("⚠ 表外集合要出声，但每个只出一次", () => {
     "喊过要记下来 —— 不记就成了每条都喊，日志会被刷爆",
   );
   assert.match(
-    fn, /print\(\s*
-?\s*"\[ledger\] 集合 %s 的改\/删不进账本"/,
+    fn, /print\(\s*"\[ledger\] 集合 %s 的改\/删不进账本"/,
     "必须真的打印出来 —— 静默跳过会让'新集合没有版本记录'永远无人发现",
   );
 });
