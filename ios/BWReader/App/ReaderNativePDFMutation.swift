@@ -334,8 +334,18 @@ actor ReaderNativePDFMutationActor {
                     .split(whereSeparator: { $0.isWhitespace })
                     .first
                     .map(String.init) ?? "用户插入页"
-                guard actualText.contains(requiredProbe)
-                        || actualText.contains("用户插入页") else {
+                // ⚠ 2026-08-24 真机实锤：PDFKit 从写盘重开的 PDF 提取文字时，
+                // 系统字体写出的部分汉字会映射成**康熙部首区变体码点**
+                // （⽤ U+2F92≠用 U+7528，字形相同），且会散布空格
+                // （"Co n t ent s"）。按码点 contains 必然误判 → 空白插入页
+                // 被回滚"自动消失"。比较前 NFKC 兼容归一 + 剥除空白。
+                let normalizedActual = Self.probeComparableText(actualText)
+                guard normalizedActual.contains(
+                    Self.probeComparableText(requiredProbe)
+                )
+                        || normalizedActual.contains(
+                            Self.probeComparableText("用户插入页")
+                        ) else {
                     // 诊断要能分辨两种根因：读错页（相邻扫描页无文字层，
                     // actual 为空）还是 PDFKit 跨文档插页写出后丢文字
                     // （actual 为空但邻页有字/页数对）。把现场带全。
@@ -1561,12 +1571,21 @@ actor ReaderNativePDFMutationActor {
         }
         guard let document = PDFDocument(data: data),
               let page = document.page(at: 0),
-              page.string?.contains("用户插入页") == true else {
+              Self.probeComparableText(page.string ?? "").contains(
+                  Self.probeComparableText("用户插入页")
+              ) else {
             throw ReaderNativePDFMutationError.stagingFailed(
                 "无法生成带文字层的 PDF 页面"
             )
         }
         return RenderedPage(page: page, warnings: warnings)
+    }
+
+    /// PDF 文字提取的码点归一：NFKC 把康熙部首变体映回统一汉字，
+    /// 再剥除提取时散布的空白 —— 校验比较的两端都必须过这一层。
+    private static func probeComparableText(_ value: String) -> String {
+        return value.precomposedStringWithCompatibilityMapping
+            .filter { !$0.isWhitespace }
     }
 
     private static func renderedAttributedText(
