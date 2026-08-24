@@ -13,6 +13,7 @@ const read = (p) => readFileSync(new URL(p, ROOT), "utf8");
 
 const ASSIST = read("_server_deploy/assistant.py");
 const ATTN = read("scripts/attention_profile.py");
+const RELAY = read("_server_deploy/reader_sync_relay.py");
 
 test("mutate 埋点存在，且用 append_raw 而不是直写 events.db", () => {
   assert.match(ASSIST, /def _ledger_mutate\(/, "埋点必须存在");
@@ -106,4 +107,67 @@ test("⚠ 豁免面不能扩大", () => {
     line.match(/"/g).length, 2,
     "只有 mutate 一个 —— 扩大会让画像被无词噪声灌满",
   );
+});
+
+
+// ── 用户 2026-08-24 指出的更好的路子 ───────────────────────────────
+//   「我在 app 或者扩展里进行删除之类的操作时不还是会留下记录然后需要
+//     同步到 pi 和 windows 么，那这个时候进行记录不就好了么」
+//   他是对的：删除本来就以 tombstone 越界到同步中继，在那里记
+//   **不用改任何客户端**，而且连用户自己手动删的也记得上。
+test("⚠ 同步流上的改/删也要记账 —— 不用改客户端的那条路", () => {
+  assert.match(RELAY, /def _ledger_sync_mutation\(/, "同步侧埋点必须存在");
+  assert.match(
+    RELAY, /_ledger_sync_mutation\(connection, change, device_id, now\)/,
+    "必须真的接在变更落库之后，不能只定义不调用",
+  );
+});
+
+test("同步侧的 client 直接读 owner lease，不猜", () => {
+  const fn = RELAY.slice(
+    RELAY.indexOf("def _ledger_sync_mutation("),
+    RELAY.indexOf("def _push_locked("),
+  );
+  assert.match(
+    fn, /SELECT owner_role FROM sync_owner_leases/,
+    "ownerRole 是服务端本来就在强校验的三值枚举 —— 比任何推断都硬",
+  );
+  assert.match(
+    fn, /pwa-install-v1-/,
+    "注释里要写明为什么不能拿 deviceId 前缀判：App 内 JS 铸的也是这个前缀",
+  );
+});
+
+test("⚠ 两处埋点要能分辨来源，否则同一次改动可能出现两条", () => {
+  const fn = RELAY.slice(
+    RELAY.indexOf("def _ledger_sync_mutation("),
+    RELAY.indexOf("def _push_locked("),
+  );
+  assert.match(fn, /"via": "sync"/, "同步侧标 via:sync");
+});
+
+test("⚠ 记账失败绝不能让同步失败", () => {
+  const fn = RELAY.slice(
+    RELAY.indexOf("def _ledger_sync_mutation("),
+    RELAY.indexOf("def _push_locked("),
+  );
+  assert.match(fn, /except Exception:\s+pass/);
+  assert.match(fn, /同步是用户数据的生命线/, "取舍要写在代码里");
+});
+
+test("⚠ 覆盖面边界要写清：高亮/便签/笔迹今天不跨设备同步", () => {
+  assert.match(
+    RELAY, /unsupportedDomains/,
+    "必须指向那份写死的清单，否则读代码的人会以为改删全覆盖了",
+  );
+});
+
+test("账本脚本路径不得硬编码 Pi 绝对路径", () => {
+  const at = RELAY.indexOf("_LEDGER_SCRIPTS");
+  const line = RELAY.slice(at, at + 260);
+  assert.doesNotMatch(
+    line, /\/home\/bwicarus/,
+    "assistant.py 里那处历史写法硬编码了 Pi 路径，换机就断 —— 别再犯",
+  );
+  assert.match(line, /CLAUDE_PROJECT/);
 });

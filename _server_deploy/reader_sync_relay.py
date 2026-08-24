@@ -26,6 +26,10 @@ from reader_sidecar_store import NAMESPACE_RE
 
 
 CONTRACT = "sync-gateway/2"
+# 账本脚本目录（append_raw）。⚠ 不写死 Pi 绝对路径 —— assistant.py 里那处
+#   历史写法硬编码了 /home/bwicarus/claude/scripts，换机就断。
+_LEDGER_SCRIPTS = os.path.join(
+    os.environ.get("CLAUDE_PROJECT", "."), "scripts")
 SYNC_CONTRACT = "sync-v3"
 SYNC_CHANGE_CONTRACT = "record-parent-state/1"
 REGISTRY_DIGEST_PREFIX = (
@@ -942,6 +946,54 @@ def _public_change(change: dict, cursor: int | None = None) -> dict:
     return out
 
 
+def _ledger_sync_mutation(connection, change, device_id, now):
+    """同步流上的一次改/删 → 账本 channel=mutate。
+
+    失败静默：记账失败绝不能让同步本身失败 —— 同步是用户数据的生命线，
+    账本只是旁观者。
+    """
+    try:
+        import sys as _sys
+        _sys.path.insert(0, _LEDGER_SCRIPTS)
+        import attention_profile as AP
+        deleted = bool(change.get("_deleted"))
+        # ⚠ 「哪个端」不猜：直接读 owner lease 里的 ownerRole。
+        #   服务端本来就在强校验它（native|extension|pwa），
+        #   比任何从 UA / deviceId 前缀推断的办法都硬 ——
+        #   App 内 JS 层铸的 deviceId 前缀恰恰也是 pwa-install-v1-。
+        role = ""
+        try:
+            row = connection.execute(
+                "SELECT owner_role FROM sync_owner_leases WHERE device_id=? "
+                "ORDER BY rowid DESC LIMIT 1",
+                (str(device_id or ""),),
+            ).fetchone()
+            if row is not None:
+                role = str(row[0] or "")
+        except Exception:
+            role = ""
+        AP.append_raw(
+            "mutate",
+            "%s %s %s" % ("delete" if deleted else "edit",
+                          change.get("collection") or "",
+                          change.get("_record_id") or ""),
+            ts=int(now or 0) or None,
+            actor="user",          # 同步流上的变更来自客户端 = 用户那一侧
+            client=role if role in ("native", "extension", "pwa") else None,
+            device=str(device_id or "") or None,
+            extra={
+                "op": "delete" if deleted else "edit",
+                "kind": str(change.get("collection") or ""),
+                "target_id": str(change.get("_record_id") or ""),
+                # ⚠ 标出来源。助手侧那个埋点也写 mutate；不标的话
+                #   同一次 AI 改动可能在账本里出现两条而无从分辨。
+                "via": "sync",
+            },
+        )
+    except Exception:
+        pass
+
+
 def _push_locked(
     connection: sqlite3.Connection,
     *,
@@ -1107,6 +1159,23 @@ def _push_locked(
                     cursor,
                 ),
             )
+            # ── 活动账本 §3.2：改/删的版本记录 ─────────────────────
+            #
+            # 用户 2026-08-24 一句话点破：「我在 app 或者扩展里进行删除之类的
+            # 操作时不还是会留下记录然后需要同步到 pi 和 windows 么，
+            # 那这个时候进行记录不就好了么」。
+            #
+            # 他是对的，而且这条路明显更好：
+            #   · **不用改任何客户端** —— 删除本来就以 tombstone 越界到这里；
+            #   · 覆盖面更全 —— 连**用户自己手动删的**也记得上，
+            #     而助手侧那个埋点只记 AI 发起的。
+            #
+            # ⚠ 覆盖面仍有边界，别当成"改删全有记录了"：只覆盖**进了同步注册表
+            #   的集合**（card-entities / card-states / user-settings /
+            #   vocabulary-state）。高亮 / 便签 / 笔迹 / 阅读进度 / 卡片位置
+            #   在 ReaderPiSyncCoordinator 的 `unsupportedDomains` 里，
+            #   今天**根本不跨设备同步**，于是也不会经过这里。
+            _ledger_sync_mutation(connection, change, device_id, now)
             outcome = {
                 "mutationId": mutation_id,
                 "status": "acked",
