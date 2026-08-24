@@ -2366,6 +2366,24 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 $0.id == book.id && $0.relativePath == book.relativePath
             }) ?? book
             var access = try library.makeOpenAccess(for: openingBook)
+            // 打开前对账磁盘：真实改页/事务恢复会在会话间改写 PDF 文件，
+            // 索引缓存滞后一拍就会让 open 与后续所有 validateCurrentFile
+            // 连锁拒绝（BW_LOCAL_BOOK_CHANGED，2026-08-25 手动打开也中招）。
+            // 记录过期时重扫一次并重取记录，而不是把陈旧的 access 一路
+            // 带进 settle / runtime boot。
+            if (try? access.validateCurrentFile(
+                maximumEPUBBytes: Int64.max
+            )) == nil {
+                await library.rescan()
+                for _ in 0..<100 where library.isScanning {
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+                openingBook = library.books.first(where: {
+                    $0.id == book.id
+                        && $0.relativePath == book.relativePath
+                }) ?? openingBook
+                access = try library.makeOpenAccess(for: openingBook)
+            }
             var openingContentSHA256 = openingBook.contentSha256
             if openingContentSHA256 == nil,
                let verified = remoteLibraryCoordinator?
