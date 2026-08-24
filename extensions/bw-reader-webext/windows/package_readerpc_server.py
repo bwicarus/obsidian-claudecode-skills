@@ -448,10 +448,74 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
                 creationflags=flags,
                 close_fds=True,
             )
+            # ⚠ Popen 成功 ≠ 新代际在跑。2026-08-24 实锤：新实例发现旧
+            # ReaderPC 未完成正常退出会**按设计拒绝接管并自行退出**（痕迹在
+            # readerpc-server.log），旧版本继续跑 —— 而"心跳新鲜"是旧进程
+            # 刷的，验证心跳等于什么都没验。这里必须验证到"所有 ReaderPC
+            # 进程都来自新 release"，否则安装静默失败。
+            verify_running_generation(release)
         return release
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
+
+
+def _running_readerpc_exe_paths() -> list[str]:
+    completed = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process -Filter \"Name='ReaderPC-Server.exe'\""
+            " | ForEach-Object { $_.ExecutablePath }",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=25,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if completed.returncode != 0:
+        _fail("无法枚举 ReaderPC 进程；不能确认新代际是否在跑。")
+    return [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+
+
+def verify_running_generation(
+    release: Path,
+    *,
+    probe: Any = None,
+    sleeper: Any = None,
+    timeout_seconds: float = 90.0,
+) -> None:
+    """--launch 后的接管验证：所有 ReaderPC 进程都必须来自新 release。
+
+    三种失败形态，全部出声：
+    - 旧代际仍在（新实例拒绝接管后自退）→ 指向 readerpc-server.log；
+    - 没有任何进程（新实例起了又崩）；
+    - 超时仍混着新旧。
+    """
+    import time as _time
+
+    probe = probe or _running_readerpc_exe_paths
+    sleeper = sleeper or _time.sleep
+    release_text = str(release.resolve()).lower()
+    deadline = _time.monotonic() + timeout_seconds
+    last: list[str] = []
+    while _time.monotonic() < deadline:
+        last = probe()
+        if last and all(release_text in path.lower() for path in last):
+            return
+        sleeper(3.0)
+    log_hint = str(_default_install_root().parent / "readerpc-server.log")
+    if not last:
+        _fail(
+            "安装后没有任何 ReaderPC 进程在跑（新实例可能起了又退）；"
+            f"看 {log_hint}"
+        )
+    _fail(
+        "安装后仍有旧代际 ReaderPC 在跑（新实例可能拒绝接管后自退）："
+        f"{last}；看 {log_hint} 里的'启动接管'记录，"
+        "手动退出旧实例后重新 --launch 或直接启动新 release 的 exe。"
+    )
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
