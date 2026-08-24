@@ -62,8 +62,10 @@ SPOOL_LINE_CONTRACT = "replication-spool-line/1"
 _SPOOL_FILE_RE = re.compile(r"^inbox-(\d{8})\.jsonl$")
 _SPOOL_LINE_KEYS = frozenset(("contract", "receivedAtUtcMs", "envelope"))
 
-# Direct 桥单帧 256 KiB 双端硬校验；给 {contract,type,requestId,…} 包裹留余量。
-MAX_ENVELOPE_BYTES = 200 * 1024
+# 信封上限是**账本层**的（最大单命令：真实页 blocks 4MB + 转义余量）。
+# 传输层的 256KiB 单帧硬限由分片协议解决（replication-command-chunk，
+# 超帧信封切 base64 片、C# 聚合重组后走同一验证）——两层上限别混为一谈。
+MAX_ENVELOPE_BYTES = 6 * 1024 * 1024
 MAX_PULL_LIMIT = 100
 
 _DEVICE_ID_RE = re.compile(

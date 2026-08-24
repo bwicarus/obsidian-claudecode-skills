@@ -4786,18 +4786,10 @@ if (window.__bwPwaProviderOnly) return;
       var chain = Promise.resolve();
       envelopes.forEach(function (envelope) {
         chain = chain.then(function () {
-          return channel.request("replication-command", {
-            sessionId: session.id,
-            envelope: envelope,
-          }).then(function (reply) {
-            exactObject(
-              reply, ["contract", "mutationId", "outcome"], [], "复制命令回执"
-            );
-            results.push({
-              mutationId: safeText(reply.mutationId, "mutationId", 64, false),
-              outcome: safeText(reply.outcome, "outcome", 16, false),
+          return sendReplicationEnvelope(channel, session, envelope)
+            .then(function (reply) {
+              results.push(reply);
             });
-          });
         });
       });
       return chain.then(function () { return results; });
@@ -4806,6 +4798,74 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
   window.__BW_REPLICATION_PUSH__ = pushReplicationCommands;
+
+  // 单帧装不下的信封（大便签/真实页 blocks/大域 resync）切 base64 片，
+  // 一片一帧走 replication-command-chunk；服务端会话级聚合重组后走与
+  // 单帧完全相同的验证+落盘。中间片回 partial，末片才可能 accepted。
+  var REPLICATION_SINGLE_FRAME_BYTES = 195 * 1024;
+  var REPLICATION_CHUNK_PART_CHARS = 160 * 1024;
+  function base64OfUtf8(text) {
+    var bytes = new TextEncoder().encode(text);
+    var out = "";
+    for (var i = 0; i < bytes.length; i += 0x8000) {
+      out += String.fromCharCode.apply(
+        null, bytes.subarray(i, Math.min(i + 0x8000, bytes.length))
+      );
+    }
+    return btoa(out);
+  }
+  function validReplicationReply(reply) {
+    exactObject(
+      reply, ["contract", "mutationId", "outcome"],
+      ["received"], "复制命令回执"
+    );
+    return {
+      mutationId: safeText(reply.mutationId, "mutationId", 64, false),
+      outcome: safeText(reply.outcome, "outcome", 16, false),
+    };
+  }
+  function sendReplicationEnvelope(channel, session, envelope) {
+    var serialized = JSON.stringify(envelope);
+    if (messageBytes(serialized) <= REPLICATION_SINGLE_FRAME_BYTES) {
+      return channel.request("replication-command", {
+        sessionId: session.id,
+        envelope: envelope,
+      }).then(validReplicationReply);
+    }
+    var encoded = base64OfUtf8(serialized);
+    var total = Math.ceil(encoded.length / REPLICATION_CHUNK_PART_CHARS);
+    var mutationId = String(envelope.op.mutationId);
+    var chain = Promise.resolve(null);
+    for (var seq = 0; seq < total; seq += 1) {
+      (function (index) {
+        chain = chain.then(function () {
+          return channel.request("replication-command-chunk", {
+            sessionId: session.id,
+            chunk: {
+              mutationId: mutationId,
+              seq: index,
+              total: total,
+              part: encoded.slice(
+                index * REPLICATION_CHUNK_PART_CHARS,
+                (index + 1) * REPLICATION_CHUNK_PART_CHARS
+              ),
+            },
+          }).then(function (reply) {
+            var checked = validReplicationReply(reply);
+            if (index < total - 1 && checked.outcome !== "partial") {
+              throw directError(
+                "复制分片中间片回执异常",
+                "BW_REPLICATION_PUSH_CHUNK_INVALID",
+                false
+              );
+            }
+            return checked;
+          });
+        });
+      })(seq);
+    }
+    return chain;
+  }
 
   // 对账查询（规格 §6）：取 Windows 端每域摘要视图。连接形态同上。
   function queryReplicationDigests(replicationBookId) {

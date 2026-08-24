@@ -1248,6 +1248,7 @@ internal sealed class DirectBridgeProtocolSession
         CancellationToken,
         Task<ReplicationCommandIntakeReceipt>> _acceptReplicationCommand;
     private readonly Func<string, object> _queryReplicationDigests;
+    private readonly ReplicationChunkAssembler _replicationChunkAssembler = new();
     private readonly Action<string> _contextDeliveryModeChanged;
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly bool _bridgeOnlyMode;
@@ -1484,6 +1485,11 @@ internal sealed class DirectBridgeProtocolSession
                     break;
                 case ReplicationCommandProtocol.DigestQueryType:
                     payload = HandleReplicationDigestQuery(message);
+                    break;
+                case ReplicationCommandProtocol.ChunkType:
+                    payload = await HandleReplicationChunkAsync(
+                        message,
+                        cancellationToken).ConfigureAwait(false);
                     break;
                 case "start":
                     DirectStartActionResult start =
@@ -2114,6 +2120,97 @@ internal sealed class DirectBridgeProtocolSession
         {
             contract = ReplicationCommandProtocol.EnvelopeContract,
             mutationId = envelope.MutationId,
+            outcome = receipt.Outcome,
+        };
+    }
+
+    // 超帧命令的分片入口：与单帧命令同一 context-only 闸；重组后走
+    // **完全相同**的 ValidateEnvelope + spool 流程。中间片 ack partial
+    // （不是 accepted —— accepted 的语义是已 fsync 落盘，中间片没有）。
+    private async Task<object> HandleReplicationChunkAsync(
+        JsonElement message,
+        CancellationToken cancellationToken)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "sessionId",
+            "chunk");
+        RequireAuthenticated();
+        if (
+            RequireContextDeliveryMode()
+                != DirectContextDeliveryMode.SnapshotMcp
+            || _phase != DirectProtocolPhase.ContextOnly
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_REPLICATION_COMMAND_CONTEXT_ONLY_REQUIRED",
+                "复制命令分片只允许在纯上下文连接中投递");
+        }
+        RequireContextOnlySession(RequireSafeId(message, "sessionId"));
+        JsonElement chunk = message.GetProperty("chunk");
+        DirectJsonValidation.RequireNoDuplicateKeys(chunk);
+        HashSet<string> chunkKeys = chunk.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        if (!chunkKeys.SetEquals(["mutationId", "seq", "total", "part"]))
+        {
+            throw new DirectProtocolException(
+                "BW_REPLICATION_COMMAND_INVALID",
+                "分片字段不符");
+        }
+        string mutationId = RequireString(chunk, "mutationId", 64);
+        if (!ReplicationCommandProtocol.IsMutationId(mutationId))
+        {
+            throw new DirectProtocolException(
+                "BW_REPLICATION_COMMAND_INVALID",
+                "分片 mutationId 形状非法");
+        }
+        if (
+            !chunk.GetProperty("seq").TryGetInt32(out int seq)
+            || !chunk.GetProperty("total").TryGetInt32(out int total)
+            || chunk.GetProperty("part").GetString() is not string part
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_REPLICATION_COMMAND_INVALID",
+                "分片参数非法");
+        }
+        (string? envelopeJson, int received) =
+            _replicationChunkAssembler.Accept(mutationId, seq, total, part);
+        if (envelopeJson is null)
+        {
+            return new
+            {
+                contract = ReplicationCommandProtocol.EnvelopeContract,
+                mutationId,
+                outcome = "partial",
+                received,
+            };
+        }
+        ReplicationCommandEnvelope envelope;
+        using (JsonDocument document = JsonDocument.Parse(envelopeJson))
+        {
+            envelope = ReplicationCommandProtocol.ValidateEnvelope(
+                document.RootElement);
+        }
+        if (envelope.MutationId != mutationId)
+        {
+            // 片头的 mutationId 决定聚合分组；信封若报另一个 id，
+            // 幂等与重投判定会互相错认 —— 拒收整组。
+            throw new DirectProtocolException(
+                "BW_REPLICATION_COMMAND_INVALID",
+                "分片 mutationId 与重组信封不一致");
+        }
+        ReplicationCommandIntakeReceipt receipt =
+            await _acceptReplicationCommand(envelope, cancellationToken)
+                .ConfigureAwait(false);
+        return new
+        {
+            contract = ReplicationCommandProtocol.EnvelopeContract,
+            mutationId,
             outcome = receipt.Outcome,
         };
     }

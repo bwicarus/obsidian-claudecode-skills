@@ -20,14 +20,18 @@ namespace BwReader.ComputerVoiceAudio;
 internal static partial class ReplicationCommandProtocol
 {
     internal const string CommandType = "replication-command";
+    internal const string ChunkType = "replication-command-chunk";
     internal const string DigestQueryType = "replication-digest-query";
     internal const string EnvelopeContract = "replication-command/1";
     internal const string DigestsFileName = "replication-digests.json";
     internal const string DigestsViewContract = "replication-digests-view/1";
 
-    // Direct 桥单帧 256KiB 双端硬校验；给 {contract,type,requestId} 包裹留余量。
-    // 与 Python 权威的 MAX_ENVELOPE_BYTES 同值。
-    internal const int MaxEnvelopeBytes = 200 * 1024;
+    // 信封上限是**账本层**的（最大单命令：真实页 blocks 4MB + 转义余量），
+    // 与 Python 权威的 MAX_ENVELOPE_BYTES 同值。传输层的 256KiB 单帧硬限
+    // 由分片协议（ChunkType，base64 片 + 会话级聚合重组）解决。
+    internal const int MaxEnvelopeBytes = 6 * 1024 * 1024;
+    internal const int MaxChunkCount = 64;
+    internal const int MaxChunkPartChars = 200 * 1024;
 
     [GeneratedRegex("^(?:native-app|pwa-install|server-node)-v1-[a-f0-9]{32}$")]
     private static partial Regex DeviceIdPattern();
@@ -147,6 +151,9 @@ internal static partial class ReplicationCommandProtocol
     internal static bool IsReplicationBookId(string value) =>
         ReplicationBookIdPattern().IsMatch(value);
 
+    internal static bool IsMutationId(string value) =>
+        MutationIdPattern().IsMatch(value);
+
     // 对账查询（规格 §6）：读 Python 摄取线程每轮导出的摘要文件，
     // 只回被问的那本书。文件缺失 = 还没跑过一轮 → 空视图（不是错误）；
     // 文件损坏必须出声 —— 静默回空会让 App 以为"两端都空、一致"。
@@ -252,6 +259,90 @@ internal sealed record ReplicationCommandIntakeReceipt(
 // 段文件按 UTC 日期滚动（inbox-<yyyyMMdd>.jsonl），C# 只追加；
 // 段的回收由 Python 账本做（全部行入账且冷却后删除），两个进程
 // 永不同时写同一文件。
+// 超帧信封的分片聚合：会话级、一次一组（连接断即弃，App 按
+// at-least-once 语义整组重投；重组后的信封走与单帧完全相同的
+// 验证 + 落 spool 流程，幂等仍由账本按 mutationId 判）。
+internal sealed class ReplicationChunkAssembler
+{
+    private string? _mutationId;
+    private int _total;
+    private string?[] _parts = [];
+    private int _received;
+
+    internal (string? EnvelopeJson, int Received) Accept(
+        string mutationId,
+        int seq,
+        int total,
+        string part)
+    {
+        if (
+            total < 1
+            || total > ReplicationCommandProtocol.MaxChunkCount
+            || seq < 0
+            || seq >= total
+            || part.Length == 0
+            || part.Length > ReplicationCommandProtocol.MaxChunkPartChars
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_REPLICATION_COMMAND_INVALID",
+                "分片参数非法");
+        }
+        if (_mutationId != mutationId || _total != total)
+        {
+            // 新组开始：旧的未完组直接丢弃（发送端会整组重投）
+            _mutationId = mutationId;
+            _total = total;
+            _parts = new string?[total];
+            _received = 0;
+        }
+        if (_parts[seq] is null)
+        {
+            _received += 1;
+        }
+        _parts[seq] = part;
+        if (_received < _total)
+        {
+            return (null, _received);
+        }
+        long totalChars = 0;
+        foreach (string? piece in _parts)
+        {
+            totalChars += piece!.Length;
+        }
+        if (totalChars / 4 * 3 > ReplicationCommandProtocol.MaxEnvelopeBytes)
+        {
+            Reset();
+            throw new DirectProtocolException(
+                "BW_REPLICATION_COMMAND_INVALID",
+                "分片重组超过信封上限");
+        }
+        string joined = string.Concat(_parts);
+        int received = _received;
+        Reset();
+        byte[] decoded;
+        try
+        {
+            decoded = Convert.FromBase64String(joined);
+        }
+        catch (FormatException)
+        {
+            throw new DirectProtocolException(
+                "BW_REPLICATION_COMMAND_INVALID",
+                "分片 base64 无效");
+        }
+        return (Encoding.UTF8.GetString(decoded), received);
+    }
+
+    private void Reset()
+    {
+        _mutationId = null;
+        _total = 0;
+        _parts = [];
+        _received = 0;
+    }
+}
+
 internal sealed class ReplicationCommandSpool
 {
     internal const string DirectoryName = "replication-spool";

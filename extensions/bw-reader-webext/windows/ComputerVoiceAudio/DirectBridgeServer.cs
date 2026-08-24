@@ -1627,6 +1627,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 ReaderQueryProtocol.ResponseType or
                 ReaderRealtimeOutputProtocol.AckType or
                 ReplicationCommandProtocol.CommandType or
+                ReplicationCommandProtocol.ChunkType or
                 ReplicationCommandProtocol.DigestQueryType;
         }
         catch (JsonException)

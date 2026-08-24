@@ -997,6 +997,131 @@ internal static class DirectBridgeSelfTest
                 })),
             "replication-digest-query-round-trips-and-corrupt-file-is-loud",
             checks);
+
+        // 分片：超帧信封切 base64 片 → 中间片 ack partial（不是 accepted），
+        // 末片重组走同一验证+落 spool。信封 mutationId 与片头不一致拒收。
+        string bigMutation = "mut-v2-" + new string('b', 32);
+        string bigEnvelopeJson = JsonSerializer.Serialize(new
+        {
+            contract = "replication-command/1",
+            deviceId = "native-app-v1-" + new string('a', 32),
+            replicationBookId = "repbook-" + new string('c', 32),
+            actor = "user",
+            op = new
+            {
+                mutationId = bigMutation,
+                url = "/pdf/api/notes",
+                method = "POST",
+                body = new { id = "c_" + new string('1', 16), text = new string('大', 200_000) },
+            },
+        });
+        string encodedEnvelope = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes(bigEnvelopeJson));
+        const int partChars = 160 * 1024;
+        int chunkTotal = (encodedEnvelope.Length + partChars - 1) / partChars;
+        Require(chunkTotal >= 2, "replication-chunk-fixture-spans-frames", checks);
+        object Chunk(string requestId, int seq) => new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = ReplicationCommandProtocol.ChunkType,
+            requestId,
+            sessionId = "session-AAAAAAAAAAAAAAAAAAAAAA",
+            chunk = new
+            {
+                mutationId = bigMutation,
+                seq,
+                total = chunkTotal,
+                part = encodedEnvelope.Substring(
+                    seq * partChars,
+                    Math.Min(partChars, encodedEnvelope.Length - seq * partChars)),
+            },
+        };
+        for (int seq = 0; seq < chunkTotal - 1; seq += 1)
+        {
+            JsonElement partial = RequireSuccess(
+                await SendAsync(
+                    session,
+                    Chunk("replication-chunk-" + seq, seq),
+                    events,
+                    pcm).ConfigureAwait(false),
+                ReplicationCommandProtocol.ChunkType);
+            Require(
+                partial.GetProperty("outcome").GetString() == "partial",
+                "replication-chunk-middle-ack-is-partial-" + seq,
+                checks);
+        }
+        JsonElement assembled = RequireSuccess(
+            await SendAsync(
+                session,
+                Chunk("replication-chunk-last", chunkTotal - 1),
+                events,
+                pcm).ConfigureAwait(false),
+            ReplicationCommandProtocol.ChunkType);
+        string[] spoolLines = await File.ReadAllLinesAsync(spoolFile)
+            .ConfigureAwait(false);
+        using JsonDocument bigLine = JsonDocument.Parse(spoolLines[^1]);
+        Require(
+            assembled.GetProperty("outcome").GetString() == "accepted"
+            && bigLine.RootElement
+                .GetProperty("envelope")
+                .GetProperty("op")
+                .GetProperty("mutationId")
+                .GetString() == bigMutation
+            && bigLine.RootElement
+                .GetProperty("envelope")
+                .GetProperty("op")
+                .GetProperty("body")
+                .GetProperty("text")
+                .GetString()!.Length == 200_000,
+            "replication-chunk-reassembles-and-spools-the-full-envelope",
+            checks);
+        // 片头 mutationId 与重组信封不一致 → 拒收（用**单帧装得下**的
+        // 小信封，确保走到重组比对而不是先撞消息帧限）
+        string smallEnvelopeJson = JsonSerializer.Serialize(new
+        {
+            contract = "replication-command/1",
+            deviceId = "native-app-v1-" + new string('a', 32),
+            replicationBookId = "repbook-" + new string('c', 32),
+            actor = "user",
+            op = new
+            {
+                mutationId = "mut-v2-" + new string('d', 32),
+                url = "/pdf/api/notes",
+                method = "POST",
+                body = new { id = "c_" + new string('1', 16) },
+            },
+        });
+        string mismatched = "mut-v2-" + new string('e', 32);
+        JsonElement mismatchReply = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = ReplicationCommandProtocol.ChunkType,
+                requestId = "replication-chunk-mismatch",
+                sessionId = "session-AAAAAAAAAAAAAAAAAAAAAA",
+                chunk = new
+                {
+                    mutationId = mismatched,
+                    seq = 0,
+                    total = 1,
+                    part = Convert.ToBase64String(Encoding.UTF8.GetBytes(
+                        smallEnvelopeJson)),
+                },
+            },
+            events,
+            pcm).ConfigureAwait(false);
+        Require(
+            !mismatchReply.GetProperty("ok").GetBoolean()
+            && mismatchReply.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_REPLICATION_COMMAND_INVALID"
+            && DirectBridgeServer.IsContextEndpointActionAllowed(
+                JsonSerializer.Serialize(new
+                {
+                    type = ReplicationCommandProtocol.ChunkType,
+                })),
+            "replication-chunk-rejects-mutation-id-mismatch",
+            checks);
     }
 
     private static void CheckReaderPageCardQueryContract(

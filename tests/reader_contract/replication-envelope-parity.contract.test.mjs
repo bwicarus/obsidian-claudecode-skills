@@ -170,3 +170,33 @@ test("idle reconcile loop exists and never blocks process exit", () => {
   assert.match(RUNTIME, /scheduleReplicationIdleReconcile\(\);\s*\}\s*try \{/,
     "boot 就绪后挂上空闲对账链");
 });
+
+test("chunk protocol constants agree across transport and receiver", () => {
+  const CS_INTAKE = read(
+    "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReplicationCommandIntake.cs",
+  );
+  // 账本层信封上限：Python 权威 ↔ C# 同值（6MB）；帧限是传输层的事
+  assert.match(PY, /MAX_ENVELOPE_BYTES = 6 \* 1024 \* 1024/);
+  assert.match(CS_INTAKE, /MaxEnvelopeBytes = 6 \* 1024 \* 1024/);
+  // 发送端切片 ≤ 接收端单片上限；App 入队闸 < 账本层上限（留余量提前拒）
+  assert.match(VOICE, /REPLICATION_CHUNK_PART_CHARS = 160 \* 1024/);
+  assert.match(CS_INTAKE, /MaxChunkPartChars = 200 \* 1024/);
+  assert.match(RUNTIME, /byteLength > 5 \* 1024 \* 1024/);
+  // 片数上限覆盖最大命令：64 × 160KiB base64 ≈ 7.6MB 原文 > 6MB
+  assert.match(CS_INTAKE, /MaxChunkCount = 64/);
+  // action 名与片字段两端一致
+  assert.match(VOICE, /request\("replication-command-chunk"/);
+  assert.match(CS_INTAKE, /ChunkType = "replication-command-chunk"/);
+  assert.match(VOICE, /mutationId: mutationId,\s*seq: index,\s*total: total,/);
+  const CS_PROTO = read(
+    "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectBridgeProtocol.cs",
+  );
+  assert.match(CS_PROTO, /\["mutationId", "seq", "total", "part"\]/);
+  // 中间片绝不谎称 accepted：发送端校验 partial，接收端只在末片落盘后 accepted
+  const send = VOICE.slice(
+    VOICE.indexOf("function sendReplicationEnvelope"),
+    VOICE.indexOf("function queryReplicationDigests"),
+  );
+  assert.match(send, /index < total - 1 && checked\.outcome !== "partial"/);
+  assert.match(CS_PROTO, /outcome = "partial",/);
+});

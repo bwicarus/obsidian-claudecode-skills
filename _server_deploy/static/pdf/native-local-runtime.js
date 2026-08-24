@@ -1409,9 +1409,10 @@
         ]).then(function () { return minted; });
       }).then(function (replicationBookId) {
         var envelope = buildReplicationEnvelope(replicationBookId, url, method, body);
-        // 服务端信封上限 200KiB；这里提前拒并出声，
-        // 否则命令会在队列里每轮被对端拒、永远赖着不走。
-        if (utf8(JSON.stringify(envelope)).byteLength > 195 * 1024) {
+        // 超单帧的信封由传输层分片（rc-computer-voice 的 chunk 协议）；
+        // 这里只拦真正超账本层上限（6MB）的命令 —— 留 1MB 余量提前拒
+        // 并出声，否则命令会在队列里每轮被对端拒、永远赖着不走。
+        if (utf8(JSON.stringify(envelope)).byteLength > 5 * 1024 * 1024) {
           throw new RuntimeError(
             '复制命令超过信封上限', 'BW_REPLICATION_ENVELOPE_TOO_LARGE'
           );
