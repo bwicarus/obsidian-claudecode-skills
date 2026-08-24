@@ -42,9 +42,18 @@
 C:\Users\bwica\.claude\projects\C--claude\fc5f8953-8bae-4c7e-a5db-c32382b13bec\subagents\workflows\wf_62af4db4-c76\journal.jsonl
 ```
 
-每行一个 `{"type":"result",...}` 是一个 agent 的完整返回。**先读它再动前提 A**——
-如果读不到或没跑完，就按同样四个方向重新调查（问题定义在
-`...\workflows\scripts\book-identity-and-envelope-wf_62af4db4-c76.js`）。
+每行一个 `{"type":"result",...}` 是一个 agent 的完整返回。**先读它再动前提 A**。
+
+⚠ 第一轮 4 个 agent **全灭于 API 529 Overloaded**（服务端过载，一个都没跑），
+已重试一次。所以 journal 里可能是：重试的完整结果 / 部分结果 / 仍然是空。
+**读之前别假设它有内容**；空或不全就重新跑 —— 四个方向的问题定义原样保存在：
+
+```
+C:\Users\bwica\.claude\projects\C--claude\fc5f8953-8bae-4c7e-a5db-c32382b13bec\workflows\scripts\book-identity-and-envelope-wf_62af4db4-c76.js
+```
+
+（直接 `Workflow({scriptPath: 上面这个路径})` 即可全新跑一遍；
+问题本身比某次运行的结果更有价值，别怕重跑。）
 
 已知的关键悬念（调查要回答的）：
 - `contentFingerprint` 是纯内容派生（SHA256 of 格式+大小+头尾各256KB，
