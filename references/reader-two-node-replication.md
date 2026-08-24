@@ -287,10 +287,17 @@ items = items.filter(function (item) { return item && item.id !== request.id; })
       的 `validate_command_envelope`（`replication-command/1`，字段见 §9；
       多副本约定已登记 `reader-specs/contract-sites.json` 的
       `replication-command-envelope`，C# 闸与 App 发送端两处副本随步骤 2/3 落地）
-- [~] 2 Windows 服务端 —— **账本半边已落地**：`ReplicationCommandLedger`
-      （SQLite 照 relay 模式：落账分配游标 / mutationId+摘要幂等 / 同 id 不同
-      内容出声冲突 / entries_after 拉取，测试 10 条 + 3 处变异破坏即红）。
-      **待做**：C# Direct 桥新 action 对（接收）+ 分发到 Windows 数据副本
+- [~] 2 Windows 服务端 —— **接收 + 落账已落地，剩分发**：
+      · C# 接收（`ReplicationCommandIntake.cs` + DirectBridgeProtocol 的
+        action `replication-command`）：exact-shape 闸（与 Python 权威同字段）、
+        只走纯上下文连接、**fsync 落 spool 后才 ack**（ack=accepted 的语义是
+        "断电不丢"，不是"已应用"）；自测 3 条 + 3 处变异破坏即红；
+      · Python 账本（`ReplicationCommandLedger`，SQLite 照 relay 模式）：
+        落账分配游标 / mutationId+摘要幂等 / 同 id 不同内容出声冲突 /
+        spool 摄取（毒行收集出声不阻塞）/ 段回收（只删非当日且全部入账的段，
+        无 TOCTOU；毒段保留当证据）；测试 14 条 + 5 处变异破坏即红。
+      **待做**：spool 摄取接进 readerpc 周期任务 + 分发（按 op 应用到
+      Windows 数据副本并写活动账本 channel=mutate）
 - [ ] 3 App 队列
 - [ ] 4 对账
 - [ ] 5 账本

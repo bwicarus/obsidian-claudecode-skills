@@ -764,6 +764,168 @@ internal static class DirectBridgeSelfTest
             checks).ConfigureAwait(false);
         await CheckReaderPcOwnerLeaseAsync(checks)
             .ConfigureAwait(false);
+        await CheckReplicationCommandIntakeAsync(
+            root,
+            checks).ConfigureAwait(false);
+    }
+
+    // 两节点复制的命令入口：验形状 → fsync 落 spool → 才 ack。
+    // spool 允许重复行（幂等在 Python 账本），但绝不允许"ack 了却没落盘"。
+    private static async Task CheckReplicationCommandIntakeAsync(
+        string root,
+        ICollection<string> checks)
+    {
+        string installationRoot = System.IO.Path.Combine(
+            root,
+            "replication-intake");
+        string configPath = System.IO.Path.Combine(
+            installationRoot,
+            "native-host",
+            "direct.json");
+        string statusPath = System.IO.Path.Combine(
+            installationRoot,
+            "runtime",
+            "computer-voice-direct.status.json");
+        await WriteConfigAsync(
+            configPath,
+            statusPath,
+            "https://bwicarus.taile44d0c.ts.net",
+            localOptIn: true,
+            contextDeliveryMode: DirectContextDeliveryMode.SnapshotMcp)
+            .ConfigureAwait(false);
+        DirectBridgeConfigStore store = new(configPath);
+        await using DirectBridgeCoordinator coordinator = new(
+            store,
+            new FakeDirectAppLauncher(),
+            new FakeDirectMediaAdapter());
+        string spoolDirectory = System.IO.Path.Combine(
+            installationRoot,
+            "runtime",
+            ReplicationCommandSpool.DirectoryName);
+        ReplicationCommandSpool spool = new(
+            spoolDirectory,
+            () => new DateTimeOffset(2026, 8, 24, 12, 0, 0, TimeSpan.Zero));
+        DirectBridgeProtocolSession session = new(
+            "connection-replication-intake",
+            "https://bwicarus.taile44d0c.ts.net",
+            store,
+            coordinator,
+            acceptReplicationCommand: spool.AcceptAsync);
+        List<object> events = [];
+        List<byte[]> pcm = [];
+        object Envelope(string actor, string mutationSuffix) => new
+        {
+            contract = "replication-command/1",
+            deviceId = "native-app-v1-" + new string('a', 32),
+            replicationBookId = "repbook-" + new string('c', 32),
+            actor,
+            op = new
+            {
+                mutationId = "mut-v2-" + new string(mutationSuffix[0], 32),
+                url = "/pdf/api/highlights",
+                method = "POST",
+                body = new { page = 3, text = "复制过来的高亮" },
+            },
+        };
+        object Command(string requestId, object envelope) => new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = ReplicationCommandProtocol.CommandType,
+            requestId,
+            sessionId = "session-AAAAAAAAAAAAAAAAAAAAAA",
+            envelope,
+        };
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "replication-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                pcm).ConfigureAwait(false),
+            "hello");
+        JsonElement premature = await SendAsync(
+            session,
+            Command("replication-early", Envelope("user", "1")),
+            events,
+            pcm).ConfigureAwait(false);
+        Require(
+            !premature.GetProperty("ok").GetBoolean()
+            && premature.GetProperty("error").GetProperty("code").GetString()
+                == "BW_REPLICATION_COMMAND_CONTEXT_ONLY_REQUIRED"
+            && !Directory.Exists(spoolDirectory),
+            "replication-command-requires-context-only-connection",
+            checks);
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "context-open",
+                    requestId = "replication-open",
+                    sessionId = "session-AAAAAAAAAAAAAAAAAAAAAA",
+                },
+                events,
+                pcm).ConfigureAwait(false),
+            "context-open");
+        JsonElement accepted = RequireSuccess(
+            await SendAsync(
+                session,
+                Command("replication-first", Envelope("user", "1")),
+                events,
+                pcm).ConfigureAwait(false),
+            ReplicationCommandProtocol.CommandType);
+        string spoolFile = System.IO.Path.Combine(
+            spoolDirectory,
+            "inbox-20260824.jsonl");
+        string[] lines = await File.ReadAllLinesAsync(spoolFile)
+            .ConfigureAwait(false);
+        using JsonDocument firstLine = JsonDocument.Parse(lines[0]);
+        Require(
+            accepted.GetProperty("outcome").GetString() == "accepted"
+            && accepted.GetProperty("mutationId").GetString()
+                == "mut-v2-" + new string('1', 32)
+            && lines.Length == 1
+            && firstLine.RootElement.GetProperty("contract").GetString()
+                == "replication-spool-line/1"
+            && firstLine.RootElement
+                .GetProperty("envelope")
+                .GetProperty("op")
+                .GetProperty("mutationId")
+                .GetString() == "mut-v2-" + new string('1', 32),
+            "replication-command-ack-means-fsynced-spool-line",
+            checks);
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                Command("replication-repeat", Envelope("user", "1")),
+                events,
+                pcm).ConfigureAwait(false),
+            ReplicationCommandProtocol.CommandType);
+        JsonElement rejected = await SendAsync(
+            session,
+            Command("replication-bad-actor", Envelope("assistant", "2")),
+            events,
+            pcm).ConfigureAwait(false);
+        string[] afterLines = await File.ReadAllLinesAsync(spoolFile)
+            .ConfigureAwait(false);
+        Require(
+            afterLines.Length == 2
+            && !rejected.GetProperty("ok").GetBoolean()
+            && rejected.GetProperty("error").GetProperty("code").GetString()
+                == "BW_REPLICATION_COMMAND_INVALID"
+            && DirectBridgeServer.IsContextEndpointActionAllowed(
+                JsonSerializer.Serialize(new
+                {
+                    type = ReplicationCommandProtocol.CommandType,
+                })),
+            "replication-command-spool-keeps-duplicates-and-rejects-invalid",
+            checks);
     }
 
     private static void CheckReaderPageCardQueryContract(

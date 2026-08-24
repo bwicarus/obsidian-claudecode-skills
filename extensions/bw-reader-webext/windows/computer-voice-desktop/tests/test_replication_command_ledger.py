@@ -143,6 +143,88 @@ class LedgerTests(unittest.TestCase):
             self.ledger.append(envelope(actor="assistant"))
         self.assertEqual(self.ledger.head_cursor(), 0)
 
+    def test_received_at_override_is_persisted(self) -> None:
+        entry = self.ledger.append(envelope(), received_at_utc_ms=42)
+        self.assertEqual(entry.received_at_utc_ms, 42)
+        with self.assertRaises(ReplicationCommandError):
+            self.ledger.append(
+                envelope(op={"mutationId": "mut-v2-" + "9" * 32}),
+                received_at_utc_ms=True,
+            )
+
+
+def spool_line(value, received_at=7_000):
+    return json.dumps({
+        "contract": "replication-spool-line/1",
+        "receivedAtUtcMs": received_at,
+        "envelope": value,
+    })
+
+
+class SpoolIngestTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        root = Path(self.temporary.name)
+        self.spool = root / "replication-spool"
+        self.spool.mkdir()
+        self.ledger = ReplicationCommandLedger(root / "ledger.sqlite3")
+
+    def tearDown(self) -> None:
+        self.ledger.close()
+        self.temporary.cleanup()
+
+    def _write(self, name: str, lines: list[str]) -> Path:
+        path = self.spool / name
+        path.write_text("\n".join(lines) + "\n", "utf-8")
+        return path
+
+    def test_ingest_counts_duplicates_as_replayed_once_in_ledger(self) -> None:
+        self._write("inbox-20260823.jsonl", [
+            spool_line(envelope()),
+            spool_line(envelope()),  # C# 崩在 ack 前重投出的重复行
+            spool_line(envelope(op={"mutationId": "mut-v2-" + "2" * 32})),
+        ])
+        report = self.ledger.ingest_spool_directory(self.spool)
+        self.assertEqual(report["ingested"], 2)
+        self.assertEqual(report["replayed"], 1)
+        self.assertEqual(report["conflicts"], [])
+        self.assertEqual(report["invalid"], [])
+        self.assertEqual(self.ledger.head_cursor(), 2)
+        entry = self.ledger.entries_after(0)[0]
+        self.assertEqual(entry.received_at_utc_ms, 7_000)
+
+    def test_poison_lines_are_reported_loudly_but_do_not_block_the_rest(self) -> None:
+        conflicting = envelope(op={"body": {"file": "changed", "page": 9}})
+        self._write("inbox-20260823.jsonl", [
+            spool_line(envelope()),
+            "not json at all",
+            spool_line({"contract": "wrong/1"}),
+            spool_line(conflicting),  # 同 mutationId 不同内容
+            spool_line(envelope(op={"mutationId": "mut-v2-" + "3" * 32})),
+        ])
+        report = self.ledger.ingest_spool_directory(self.spool)
+        self.assertEqual(report["ingested"], 2)
+        self.assertEqual(len(report["invalid"]), 2)
+        self.assertEqual(len(report["conflicts"]), 1)
+        self.assertEqual(report["conflicts"][0]["line"], 4)
+        self.assertEqual(self.ledger.head_cursor(), 2)
+
+    def test_compact_deletes_only_past_fully_ingested_segments(self) -> None:
+        self._write("inbox-20260823.jsonl", [spool_line(envelope())])
+        self._write("inbox-20260824.jsonl", [
+            spool_line(envelope(op={"mutationId": "mut-v2-" + "4" * 32})),
+        ])
+        self._write("inbox-20260822.jsonl", ["not json"])
+        outcome = self.ledger.compact_spool(self.spool, today_utc="20260824")
+        self.assertEqual(outcome["deleted"], ["inbox-20260823.jsonl"])
+        kept = {item["file"]: item["reason"] for item in outcome["kept"]}
+        self.assertEqual(kept["inbox-20260824.jsonl"], "active-day")
+        self.assertEqual(kept["inbox-20260822.jsonl"], "poison-lines")
+        self.assertFalse((self.spool / "inbox-20260823.jsonl").exists())
+        self.assertTrue((self.spool / "inbox-20260822.jsonl").exists())
+        # compact 的重扫本身就把段入了账
+        self.assertEqual(self.ledger.head_cursor(), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

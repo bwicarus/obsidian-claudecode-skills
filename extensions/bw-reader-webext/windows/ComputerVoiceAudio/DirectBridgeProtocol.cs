@@ -1243,6 +1243,10 @@ internal sealed class DirectBridgeProtocolSession
         _acceptReaderQuery;
     private readonly Action<ReaderRealtimeOutputAck>
         _acceptReaderRealtimeOutput;
+    private readonly Func<
+        ReplicationCommandEnvelope,
+        CancellationToken,
+        Task<ReplicationCommandIntakeReceipt>> _acceptReplicationCommand;
     private readonly Action<string> _contextDeliveryModeChanged;
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly bool _bridgeOnlyMode;
@@ -1276,6 +1280,11 @@ internal sealed class DirectBridgeProtocolSession
             acceptReaderQuery = null,
         Action<ReaderRealtimeOutputAck>?
             acceptReaderRealtimeOutput = null,
+        Func<
+            ReplicationCommandEnvelope,
+            CancellationToken,
+            Task<ReplicationCommandIntakeReceipt>>?
+            acceptReplicationCommand = null,
         Action<string>? contextDeliveryModeChanged = null,
         IReaderDictionaryFallback? dictionaryFallback = null,
         IReaderLocalAnkiWriter? localAnkiWriter = null,
@@ -1320,6 +1329,11 @@ internal sealed class DirectBridgeProtocolSession
             ?? (_ => throw new DirectProtocolException(
                 "BW_READER_REALTIME_OUTPUT_UNAVAILABLE",
                 "Reader 输出接收器尚未接线",
+                retryable: true));
+        _acceptReplicationCommand = acceptReplicationCommand
+            ?? ((_, _) => throw new DirectProtocolException(
+                "BW_REPLICATION_COMMAND_UNAVAILABLE",
+                "复制命令接收器尚未接线",
                 retryable: true));
         _contextDeliveryModeChanged = contextDeliveryModeChanged
             ?? (_ => { });
@@ -1455,6 +1469,11 @@ internal sealed class DirectBridgeProtocolSession
                     break;
                 case ReaderRealtimeOutputProtocol.AckType:
                     payload = HandleReaderRealtimeOutput(message);
+                    break;
+                case ReplicationCommandProtocol.CommandType:
+                    payload = await HandleReplicationCommandAsync(
+                        message,
+                        cancellationToken).ConfigureAwait(false);
                     break;
                 case "start":
                     DirectStartActionResult start =
@@ -2044,6 +2063,48 @@ internal sealed class DirectBridgeProtocolSession
             correlation = ack.Correlation,
             outcome = ack.Outcome,
             matched = true,
+        };
+    }
+
+    // 两节点复制的命令入口（App→服务端方向）。只走纯上下文连接 ——
+    // 命令是数据面，跟随 reader 源，与语音会话无关。
+    // ack=accepted 的含义是"已 fsync 落 spool"，不是"已应用"；
+    // 幂等/游标/冲突由 Python 账本入账时判。
+    private async Task<object> HandleReplicationCommandAsync(
+        JsonElement message,
+        CancellationToken cancellationToken)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "sessionId",
+            "envelope");
+        RequireAuthenticated();
+        if (
+            RequireContextDeliveryMode()
+                != DirectContextDeliveryMode.SnapshotMcp
+            || _phase != DirectProtocolPhase.ContextOnly
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_REPLICATION_COMMAND_CONTEXT_ONLY_REQUIRED",
+                "复制命令只允许在纯上下文连接中投递");
+        }
+        string sessionId = RequireSafeId(message, "sessionId");
+        RequireContextOnlySession(sessionId);
+        ReplicationCommandEnvelope envelope =
+            ReplicationCommandProtocol.ValidateEnvelope(
+                message.GetProperty("envelope"));
+        ReplicationCommandIntakeReceipt receipt =
+            await _acceptReplicationCommand(envelope, cancellationToken)
+                .ConfigureAwait(false);
+        return new
+        {
+            contract = ReplicationCommandProtocol.EnvelopeContract,
+            mutationId = envelope.MutationId,
+            outcome = receipt.Outcome,
         };
     }
 

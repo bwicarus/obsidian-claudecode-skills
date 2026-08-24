@@ -41,6 +41,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -53,6 +54,13 @@ from typing import Any, Callable
 
 REPLICATION_COMMAND_CONTRACT = "replication-command/1"
 REPLICATION_COMMAND_LEDGER_FILE_NAME = "replication-command-ledger.sqlite3"
+
+# C# Direct 桥落的 spool（ReplicationCommandIntake.cs）：一行一命令，
+# fsync 后才 ack。行允许重复（幂等在这里），段文件按 UTC 日期滚动，
+# C# 只追加当日文件 —— 所以**非当日**的段永远不会再被写入，回收才无竞态。
+SPOOL_LINE_CONTRACT = "replication-spool-line/1"
+_SPOOL_FILE_RE = re.compile(r"^inbox-(\d{8})\.jsonl$")
+_SPOOL_LINE_KEYS = frozenset(("contract", "receivedAtUtcMs", "envelope"))
 
 # Direct 桥单帧 256 KiB 双端硬校验；给 {contract,type,requestId,…} 包裹留余量。
 MAX_ENVELOPE_BYTES = 200 * 1024
@@ -204,11 +212,23 @@ class ReplicationCommandLedger:
     def close(self) -> None:
         self._db.close()
 
-    def append(self, envelope: object) -> LedgerEntry:
-        """落账。同 mutationId 同内容 = 重放（返回原行）；不同内容 = 出声冲突。"""
+    def append(
+        self, envelope: object, *, received_at_utc_ms: int | None = None
+    ) -> LedgerEntry:
+        """落账。同 mutationId 同内容 = 重放（返回原行）；不同内容 = 出声冲突。
+
+        ``received_at_utc_ms`` 给 spool 摄取用：采集时刻（C# ack 的那一刻）
+        比入账时刻更真实（evidence-quality：采集不可重来）。
+        """
         value = validate_command_envelope(envelope)
         op = value["op"]
         digest = hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+        if received_at_utc_ms is not None and (
+            isinstance(received_at_utc_ms, bool)
+            or not isinstance(received_at_utc_ms, int)
+            or received_at_utc_ms < 0
+        ):
+            raise ReplicationCommandError("receivedAtUtcMs 非法")
         with self._db:
             self._db.execute("BEGIN IMMEDIATE")
             row = self._db.execute(
@@ -221,7 +241,7 @@ class ReplicationCommandLedger:
                         f"mutationId {op['mutationId']} 已用于不同内容，拒绝静默覆盖"
                     )
                 return self._entry_at(row[0], replayed=True)
-            now = self._clock()
+            now = received_at_utc_ms if received_at_utc_ms is not None else self._clock()
             inserted = self._db.execute(
                 """
                 INSERT INTO commands (
@@ -250,6 +270,90 @@ class ReplicationCommandLedger:
             (cursor, limit),
         ).fetchall()
         return [self._entry_at(int(row[0]), replayed=False) for row in rows]
+
+    def ingest_spool_file(self, path: Path) -> dict[str, Any]:
+        """把一个 spool 段逐行入账。毒行（无效/冲突）**收集出声**而不中断整段 ——
+        一条毒行不应挡住后面的正常命令，但也绝不能静默跳过。"""
+        report: dict[str, Any] = {
+            "file": path.name, "ingested": 0, "replayed": 0,
+            "conflicts": [], "invalid": [],
+        }
+        try:
+            raw = path.read_text(encoding="utf-8-sig")
+        except OSError as error:
+            raise ReplicationCommandError(
+                f"spool 段读取失败（{path}）：{error}"
+            ) from error
+        for line_number, line in enumerate(raw.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+                if (
+                    not isinstance(value, dict)
+                    or set(value.keys()) != _SPOOL_LINE_KEYS
+                    or value["contract"] != SPOOL_LINE_CONTRACT
+                ):
+                    raise ReplicationCommandError(
+                        "spool 行不符合 replication-spool-line/1"
+                    )
+                entry = self.append(
+                    value["envelope"],
+                    received_at_utc_ms=value["receivedAtUtcMs"],
+                )
+            except ReplicationCommandConflict as error:
+                report["conflicts"].append(
+                    {"file": path.name, "line": line_number, "error": str(error)}
+                )
+                continue
+            except (ReplicationCommandError, json.JSONDecodeError) as error:
+                report["invalid"].append(
+                    {"file": path.name, "line": line_number, "error": str(error)}
+                )
+                continue
+            report["replayed" if entry.replayed else "ingested"] += 1
+        return report
+
+    def ingest_spool_directory(self, directory: Path) -> dict[str, Any]:
+        totals: dict[str, Any] = {
+            "files": [], "ingested": 0, "replayed": 0,
+            "conflicts": [], "invalid": [],
+        }
+        for path in sorted(directory.glob("inbox-*.jsonl")):
+            if not _SPOOL_FILE_RE.fullmatch(path.name):
+                continue
+            report = self.ingest_spool_file(path)
+            totals["files"].append(path.name)
+            totals["ingested"] += report["ingested"]
+            totals["replayed"] += report["replayed"]
+            totals["conflicts"].extend(report["conflicts"])
+            totals["invalid"].extend(report["invalid"])
+        return totals
+
+    def compact_spool(
+        self, directory: Path, *, today_utc: str | None = None
+    ) -> dict[str, Any]:
+        """回收已全部入账的段。只删**非当日**的段（C# 只追加当日文件，
+        非当日的段永远不会再被写入 —— 回收因此无 TOCTOU 竞态）；
+        含毒行（invalid/conflict）的段保留在原地当证据，不静默清掉。"""
+        today = today_utc or datetime.now(timezone.utc).strftime("%Y%m%d")
+        if not re.fullmatch(r"\d{8}", today):
+            raise ReplicationCommandError("today_utc 必须是 yyyymmdd")
+        outcome: dict[str, Any] = {"deleted": [], "kept": []}
+        for path in sorted(directory.glob("inbox-*.jsonl")):
+            match = _SPOOL_FILE_RE.fullmatch(path.name)
+            if not match:
+                continue
+            if match.group(1) >= today:
+                outcome["kept"].append({"file": path.name, "reason": "active-day"})
+                continue
+            report = self.ingest_spool_file(path)
+            if report["conflicts"] or report["invalid"]:
+                outcome["kept"].append({"file": path.name, "reason": "poison-lines"})
+                continue
+            path.unlink()
+            outcome["deleted"].append(path.name)
+        return outcome
 
     def _entry_at(self, cursor: int, *, replayed: bool) -> LedgerEntry:
         row = self._db.execute(

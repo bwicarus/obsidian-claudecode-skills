@@ -139,9 +139,9 @@
           "note": "validate_command_envelope；url 只做形状校验，端点白名单由执行端把守（刻意不在账本层再抄一份）"
         },
         {
-          "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectBridgeContract.cs",
-          "role": "跨机信封校验（计划中，步骤2）",
-          "note": "C# Direct 桥新 action 对的 exact-shape 闸——落地时必须与 Python 权威逐字段一致"
+          "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReplicationCommandIntake.cs",
+          "role": "跨机信封校验（C# 闸）",
+          "note": "ReplicationCommandProtocol.ValidateEnvelope + action 'replication-command'（只走纯上下文连接）；与 Python 权威逐字段一致，改任何 regex/白名单两处同步。另：spool 行 replication-spool-line/1 是 C#（写）↔ Python ingest_spool_file（读）的第二层两副本约定"
         },
         {
           "file": "_server_deploy/static/pdf/native-local-runtime.js",
