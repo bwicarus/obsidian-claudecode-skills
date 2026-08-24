@@ -13358,7 +13358,11 @@ window.__upReconcileDelete = function (newMeta) {
     const entries = Object.entries(acc).filter(([, s]) => s >= 3);   // <3s 碎片=翻过,不上报
     if (!entries.length) return;
     entries.forEach(([k]) => delete acc[k]);
-    const body = JSON.stringify({ file: FILE_REL, dwell: entries.map(([k, s]) => (
+    // 活动账本 §3.3：带上「我是哪个端」。服务端补不出来 ——
+    // 它从不读 UA/Origin，而认证形态只能二分（扩展 Bearer / App 与桌面都是
+    // session cookie），三分只能由客户端自报。
+    const client = (window.RC && RC.clientRole) ? RC.clientRole() : '';
+    const body = JSON.stringify({ file: FILE_REL, client: client, dwell: entries.map(([k, s]) => (
       k.charAt(0) === 'u' ? { upage: k.slice(2), secs: s } : { page: +k.slice(2), secs: s })) });
     try {
       if (useBeacon && navigator.sendBeacon) {

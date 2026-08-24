@@ -1929,6 +1929,12 @@ def pdf_api_read_dwell():
     p = CLAUDE_DIR / "state" / "attention" / "dwell.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
     uid = str(session.get("user_id") or "")
+    # 活动账本 §3.3：哪个端读的。⚠ 这是**重建式**处理器（下面逐个显式搬字段），
+    #   body 里多一个键不搬就被静默丢弃且返回 200 —— 正是 CLAUDE.md 记的
+    #   「只放行不搬」形态，表现是「客户端发了、测试也过了、落盘里没有」。
+    _client = str(b.get("client") or "")[:16]
+    if _client not in ("native", "extension", "pwa"):
+        _client = ""   # 认不出就留空，别猜 —— 猜错的数据比没有更糟
     now = int(__import__("time").time())
     try:
         with open(p, "a", encoding="utf-8") as f:
@@ -1936,6 +1942,8 @@ def pdf_api_read_dwell():
                 try:
                     rec = {"ts": now, "secs": max(0, min(600, int(it.get("secs") or 0))),
                            "file": rel, "uid": uid}
+                    if _client:
+                        rec["client"] = _client
                     _up = str(it.get("upage") or "")[:40]
                     if _up:   # 虚拟页码(自建页 uid):插删页都不漂移(用户设计)
                         rec["upage"] = _up

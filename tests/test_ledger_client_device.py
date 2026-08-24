@@ -154,3 +154,65 @@ class NamingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DwellClientTests(unittest.TestCase):
+    """§3.3 点名的那条：「同一条 dwell，App 打来的和桌面打来的落盘后长得一模一样」。"""
+
+    def _prep(self):
+        A = _fresh_module()
+        A._page_text = lambda rel, page, user_id="": "热力学 第一定律 能量守恒"
+        A.extract_terms = lambda txt, lang=None: ["热力学", "能量守恒"]
+        return A
+
+    def _write(self, A, rows):
+        with open(A.ATT_DIR / "dwell.jsonl", "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    def test_single_client_recorded(self):
+        A = self._prep()
+        self._write(A, [{"ts": 1756000000, "secs": 100, "file": "b.pdf",
+                         "page": 5, "uid": "", "client": "native"}])
+        c = A._db()
+        A.import_dwell(c)
+        self.assertEqual(
+            c.execute("SELECT client FROM events").fetchone()[0], "native")
+
+    def test_two_clients_both_kept_ordered_by_seconds(self):
+        """⚠ 同一天同一页在两个端都读过 —— 这正是 §3.3 最想回答的情况。
+
+        只留一个就是静默丢信息。按秒数降序拼，主力端在前。
+        """
+        A = self._prep()
+        self._write(A, [
+            {"ts": 1756000000, "secs": 40, "file": "b.pdf", "page": 5, "uid": "", "client": "pwa"},
+            {"ts": 1756000000, "secs": 100, "file": "b.pdf", "page": 5, "uid": "", "client": "native"},
+        ])
+        c = A._db()
+        A.import_dwell(c)
+        self.assertEqual(
+            c.execute("SELECT client FROM events").fetchone()[0], "native+pwa",
+            "两个端都要留，且读得多的在前")
+
+    def test_client_not_in_aggregation_key(self):
+        """⚠ client 进聚合键会改 src_key —— 存量账本二次入库，权重翻倍。"""
+        A = self._prep()
+        self._write(A, [
+            {"ts": 1756000000, "secs": 40, "file": "b.pdf", "page": 5, "uid": "", "client": "pwa"},
+            {"ts": 1756000000, "secs": 100, "file": "b.pdf", "page": 5, "uid": "", "client": "native"},
+        ])
+        c = A._db()
+        A.import_dwell(c)
+        n = c.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        self.assertEqual(n, 1, "两个端读同一页仍是**一条**事件；client 只是它的属性")
+
+    def test_unknown_client_value_is_dropped_not_guessed(self):
+        A = self._prep()
+        self._write(A, [{"ts": 1756000000, "secs": 100, "file": "b.pdf",
+                         "page": 5, "uid": "", "client": "desktop"}])
+        c = A._db()
+        A.import_dwell(c)
+        self.assertIsNone(
+            c.execute("SELECT client FROM events").fetchone()[0],
+            "认不出的取值留空，别猜 —— 猜错的数据比没有更糟")

@@ -629,7 +629,34 @@
   };
 
   var _pre = window.RC || {};   // 先到的成员(如 rc-outbox.outbox)保留
+  // ── 我是哪个端 ────────────────────────────────────────────────
+  //
+  // 活动账本 §3.3：记录里必须能还原「App / 桌面网页 / 浏览器扩展」。
+  // 今天任何一条落盘记录都带不了这个信息（dwell 行只有 ts/secs/file/page/uid），
+  // 于是「你在 App 上读得多还是桌面上读得多」这类问题一个都答不了。
+  //
+  // ⚠ 取值照抄仓库既有的 `ownerRole` 词汇（native|extension|pwa），
+  //   **不新造第四套**。服务端 reader_sync_relay.py 已经在强校验这三个值。
+  //
+  // ⚠ **不要拿 deviceId 前缀来判**：App 内 JS 层铸的恰恰也是 `pwa-install-v1-`
+  //   （native-local-runtime.js 的注释明说是为了落进服务端认的命名空间），
+  //   扩展的 install id 同前缀 —— 三端里两端同前缀，拿它判会把 App 判成桌面。
+  //
+  // ⚠ 也不要拿 `web:` 前缀判扩展：ReaderBundle 里同样有生成它的代码，
+  //   那样会把 App 内的网页语境误判成扩展。
+  function _clientRole() {
+    try {
+      if (window.__BW_NATIVE_LOCAL_READER__ === true) return 'native';
+    } catch (_) {}
+    try {
+      // 扩展把自己的存储门面注进页面；桌面 PWA 没有这个。
+      if (window.__bwExtensionStore) return 'extension';
+    } catch (_) {}
+    return 'pwa';
+  }
+
   var RC = window.RC = {
+    clientRole: _clientRole,
     _adapter: null,
     // 各 reader 在自己脚本末尾 RC.use(adapter) 注册整套适配器方法
     use: function (adapter) {

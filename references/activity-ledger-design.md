@@ -15,7 +15,23 @@
 >   都不命中才进 `state/cold-archive/`。**默认 dry-run，归档不是删除。**
 >   测试 `tests/test_artifact_lifecycle.py`，5 处变异「破坏即红」。
 >   ⚠ 尚未接定时器 —— 要不要自动跑、多久跑一次，等你看过报告再定。
-> - §3.2 / §3.3 / §3.4（版本记录 / 界面维度 / 地点维度）**未动工**。
+> - §3.2 修改/删除的版本记录 → **助手侧已落地**：`assistant.py::_ledger_mutate`
+>   写 `channel=mutate` 事件，`extra` 带 `{op, kind, target_id, before_hash, before_len}`，
+>   `actor=ai`。⚠ **只覆盖助手发起的改删**：用户自己在界面上删高亮/便签/插入页/墨迹
+>   走的是 App 内本地路由（四条都是 `owner=local` + 有本地分支，逐条查证过），
+>   根本不出网，Pi 侧看不见。那一半要等 App 侧自己的账本写入器。
+> - §3.3 界面维度 → **已落地**，但**改了用词**：叫 `client` 不叫 `surface` ——
+>   `event_mentions.surface` 在**同一个库里**已经是「命中的词形」，同库两义的
+>   SELECT/JOIN 取错列**不报错只算错**。取值照抄仓库既有的 `ownerRole`
+>   （`native|extension|pwa`），不新造第四套。采集面：`RC.clientRole()` +
+>   dwell 上报 + dwell 导入器（同一天同一页两个端都读过时**两个都留**，
+>   如 `native+pwa`，按秒数降序）。
+>   ⚠ **不要拿 deviceId 前缀判端**：App 内 JS 层铸的恰恰也是 `pwa-install-v1-`。
+> - §3.4 地点维度 → **已落地字段，但改了用词也降了预期**：叫 `device` 不叫 `place`。
+>   记的是"哪台机"不是地点。真定位全仓零基础设施，IP 那条路也是死的
+>   （请求都经 nginx 反代 `remote_addr` 恒 127.0.0.1；Tailscale 地址与所在网络无关）。
+>   字段已通到派生索引，**采集端尚未接**（要接哪个标识等你定）。
+> - §6 压缩策略 → 你说「按你的建议」，即**冷归档不删除**，见上面 §3.1。
 > - 本文件此前只在分支 `codex/reader-tools-release-20260815` 上，
 >   当前树查不到 —— 已搬过来。
 

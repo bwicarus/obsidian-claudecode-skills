@@ -1506,7 +1506,12 @@ def import_dwell(c):
         )
     else:
         c.execute("DELETE FROM events WHERE channel='read' AND file LIKE 'web:%'")
-    agg = defaultdict(lambda: [0, 0])          # (file,page,day,uid) → [secs, last_ts]
+    # (file,page,day,uid) → [secs, last_ts, {client: secs}]
+    #
+    # ⚠ client **不进聚合键**。加进去会改 src_key，raw 里全部历史行重算出新 key →
+    #   老行留着、新行再进一遍，同一件事权重翻倍且无处报错。所以改成
+    #   「这一格由哪些端贡献了多少秒」，键一个字不动。
+    agg = defaultdict(lambda: [0, 0, defaultdict(int)])
     for ln in f.read_text("utf-8").splitlines():
         try:
             d = json.loads(ln)
@@ -1527,10 +1532,14 @@ def import_dwell(c):
             int((d.get("ts") or 0) // 86400),
             uid,
         )
-        agg[k][0] += min(600, int(d.get("secs") or 0))
+        _sec = min(600, int(d.get("secs") or 0))
+        agg[k][0] += _sec
         agg[k][1] = max(agg[k][1], int(d.get("ts") or 0))
+        _cl = str(d.get("client") or "")
+        if _cl in ("native", "extension", "pwa"):
+            agg[k][2][_cl] += _sec
     n = 0
-    for (rel, page, day, uid), (secs, ts) in agg.items():
+    for (rel, page, day, uid), (secs, ts, by_client) in agg.items():
         if secs < DWELL_MIN_S or not page:
             continue
         if isinstance(page, str):        # 自建页(虚拟页码):正文在 sidecar,不在 PDF 字符层
@@ -1548,10 +1557,17 @@ def import_dwell(c):
         terms = extract_terms(txt, lang=_book_lang(rel))   # 页文本按书语言分词(纯汉字日语必须)
         if not terms:
             continue
-        c.execute("INSERT OR REPLACE INTO events(id,ts,channel,weight,text,terms,file,page,uid,src_key,xver)"
-                  " VALUES((SELECT id FROM events WHERE src_key=?),?,?,?,?,?,?,?,?,?,?)",
+        # 这一格由哪些端贡献。同一天同一页在两个端都读过时**两个都留**
+        # （按秒数降序，如 "native+pwa"）—— 丢掉一个就是静默丢信息，
+        # 而这恰恰是 §3.3 最想回答的那种情况。
+        _clients = "+".join(
+            k2 for k2, _ in sorted(by_client.items(), key=lambda kv: -kv[1])
+        )
+        c.execute("INSERT OR REPLACE INTO events(id,ts,channel,weight,text,terms,file,page,uid,src_key,xver,client)"
+                  " VALUES((SELECT id FROM events WHERE src_key=?),?,?,?,?,?,?,?,?,?,?,?)",
                   (key, ts, "read", w, txt[:TEXT_MAX], json.dumps(terms[:TERMS_MAX], ensure_ascii=False),
-                   rel, page_no, uid, key, EXTRACTOR_VER))
+                   rel, page_no, uid, key, EXTRACTOR_VER,
+                   (_clients or None)))
         n += 1
     return n
 

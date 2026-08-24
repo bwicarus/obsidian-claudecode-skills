@@ -6192,6 +6192,9 @@ def _t_userpage_edit(args, ctx):
             "title": hit.get("title") or "",
             "before": before, "after": changes,
         }]},
+        "_ledger": _ledger_mutate(
+            ctx.get("uid"), "edit", "userpage", hit.get("id"),
+            label=_upage_label(hit, ctx), before=before, ctx=ctx),
         "note": "已交给 App 就地改写；会给出撤销卡。",
     }
 
@@ -6211,6 +6214,11 @@ def _t_userpage_delete(args, ctx):
             "before": {k: hit.get(k) for k in ("after", "title", "md", "blocks")
                        if hit.get(k) is not None},
         }]},
+        "_ledger": _ledger_mutate(
+            ctx.get("uid"), "delete", "userpage", hit.get("id"),
+            label=_upage_label(hit, ctx),
+            before={k: hit.get(k) for k in ("after", "title", "md") if hit.get(k)},
+            ctx=ctx),
         "note": "已交给 App 删除；会给出撤销卡。",
     }
 
@@ -6943,6 +6951,54 @@ def _attn_tool_event(uid, name, targs, res, ctx):
                       lang=[],          # 查询词的语言 = 用户话语的语言,不是书语言
                       turn_id=str((ctx or {}).get("turn_id") or "") or None,
                       extra={"tool": name})
+    except Exception:
+        pass
+
+
+# ── 活动账本 · mutate 渠道（改/删的版本记录，设计稿 §3.2）─────────────
+#
+# 设计稿的原话：「不给每类生成物各造一套。走账本 —— 修改/删除各写一条
+# channel=mutate 的事件，extra 里带 {op, target_id, before_hash, diff}。」
+#
+# ⚠ 覆盖面要说清楚，别让人以为「改删都有记录了」：
+#   这里只记**助手发起的**改删。用户自己在界面上删一条高亮/便签，
+#   走的是 App 内本地路由（/pdf/api/highlights、/pdf/api/notes、
+#   /pdf/api/userpages、/pdf/api/ink 全是 owner=local + 有本地分支，
+#   经 scripts/where_does_this_route_run.py 逐条查证），**根本不出网**，
+#   Pi 这一侧看不见。那一半要等 App 侧自己的账本写入器 —— 见
+#   references/activity-ledger-design.md 的进度标注。
+#
+# ⚠ before 只存**摘要不存全文**：全文进冷归档（scripts/artifact_lifecycle.py），
+#   账本里留 hash + 长度就够回答「是不是被改过、改了多少」。
+#   账本是 append-only 永不删的，往里灌全文会让它无界膨胀。
+def _ledger_mutate(uid, op, kind, target_id, label="", before=None, ctx=None):
+    """把一次改/删写进账本。失败静默 —— 记账失败不该让业务操作跟着失败。"""
+    try:
+        import hashlib as _h
+        import json as _j
+        import sys as _sys
+        _sys.path.insert(0, str(CLAUDE_DIR / "scripts"))
+        import attention_profile as AP
+        extra = {"op": str(op), "kind": str(kind), "target_id": str(target_id or "")}
+        if before is not None:
+            try:
+                blob = _j.dumps(before, ensure_ascii=False, sort_keys=True)
+            except Exception:
+                blob = str(before)
+            extra["before_hash"] = _h.sha1(blob.encode("utf-8")).hexdigest()[:16]
+            extra["before_len"] = len(blob)
+        rel = str((ctx or {}).get("file_rel") or "")
+        if "/.sandbox/" in rel:
+            return
+        AP.append_raw(
+            "mutate",
+            "%s %s %s" % (op, kind, label or target_id or ""),
+            file=rel, page=int((ctx or {}).get("page") or 0), uid=str(uid or ""),
+            actor="ai",          # 助手发起的改删 —— 冲突判定要靠它（用户永远赢）
+            client="pi",         # 这条是在 Pi 上产生的，不是某个前端
+            turn_id=str((ctx or {}).get("turn_id") or "") or None,
+            extra=extra,
+        )
     except Exception:
         pass
 
