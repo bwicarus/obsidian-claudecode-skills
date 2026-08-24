@@ -185,6 +185,29 @@ return "localbook-\(digest)"
 libraryID —— 要么另立一个**跨设备的书身份**（`contentFingerprint` 已经在
 输入里，它是内容指纹，天然跨设备），要么建立两者的映射。
 
+**设计定稿（2026-08-24 四方向调查后，依据见
+`references/book-identity-investigation-20260824.md`）：选映射，不选内容派生。**
+
+- `contentFingerprint` 不能当锚：不但随插入页漂移，且两端各自插入页后漂向
+  **不同**的值，永远无法重新会合；连本地书库自己都不拿它当身份
+  （扫描路径匹配优先，指纹只做改名兜底）。已核实**插入页后 localbook-id
+  其实不变**（路径没变就沿用旧记录）——前提 A 的问题只剩「跨设备」一层。
+- 方案 = 推广仓库已有两处的 `ReaderLibrarySyncLink` 模式：
+  1. **配对时铸 `replicationBookId`**（内容无关随机 GUID，铸后永不重算）；
+  2. 两端各存持久链接表（结构照 `reader-library-sync-links/1`：
+     本端书 id ↔ replicationBookId + lastSyncedSha256 合并基线）；
+  3. 首次配对用**全文件 contentSha256**（不是采样指纹）做会合信号，
+     配对完成即降级为仅存档；
+  4. **摘要分叉不断链**（吸取 `verifiedNativeRemoteBookBinding` 的教训——
+     它要求两端 sha 逐字节相等，插入页后 Pi 通道断到重新上传为止）；
+     分叉期继续传命令，重放失败/基线对不上才升级为冲突；
+  5. **监听身份断裂**：改名+改字节同扫描间隔发生会铸新 localbook-id
+     （旧 id 消失、新 id 出现）——用 lastSyncedSha256/size 做一次性重配对，
+     否则复制链静默断开。
+- ⚠ Windows 侧今天**没有任何映射表**，且命令通道的 file 闸在 ≥4 处拒绝
+  带冒号的引用（reader_bridge / bridge_client / rc-computer-voice 结果闸 /
+  DirectContextSnapshot）——信封若带新形状书引用，先数副本再动。
+
 ### 前提 B：App 本地高亮是「整册一条记录一个大数组」，删除不留墓碑
 
 ```js
@@ -228,7 +251,12 @@ items = items.filter(function (item) { return item && item.id !== request.id; })
 
 ## 9. 落地顺序
 
-1. 命令信封定稿（`{mutationId, origin, cursor, url, method, body}`）
+1. 命令信封定稿 —— 2026-08-24 调查后草案修正：命令体原样用 command-outbox/2
+   的 op `{mutationId, url, method, body}`；批次级带 `{contract, deviceId
+   (设备族格式，不用 sourceInstanceId), book 身份(replicationBookId)}`；
+   **cursor 不进发送信封**（游标由接收端落账时分配，发送端只在 pull 带自己的
+   游标）；单帧 ≤256KiB 双端硬校验，一帧一命令；ack 沿用
+   outcome∈{applied,replay,rejected}(+离线合成 queued) + bindOutcome 副结果
 2. Windows 侧接收 + 存 + 分发（扩 `ReaderPC-Server`）
 3. App 侧本地优先 + 命令入队 + 可达即推
 4. 对账摘要
@@ -238,8 +266,10 @@ items = items.filter(function (item) { return item && item.id !== request.id; })
 ## 进度
 
 - [x] 规格定稿（本文件）
-- [ ] **A 跨设备书身份**（前提，见 §8.5）
-- [ ] **B 高亮拆成一条一记录 + 墓碑**（前提，见 §8.5）
+- [x] 前提 A/B + 信封的四方向调查（结论归档
+      `references/book-identity-investigation-20260824.md`，设计已回写 §8.5/§9）
+- [ ] **A 跨设备书身份**（前提，见 §8.5；设计已定稿，待实现）
+- [ ] **B 高亮拆成一条一记录 + 墓碑**（前提，见 §8.5；改动面清单在调查归档方向三）
 - [ ] 1 命令信封
 - [ ] 2 Windows 服务端
 - [ ] 3 App 队列
