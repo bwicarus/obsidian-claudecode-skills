@@ -7258,3 +7258,45 @@ test("matching digests after drain do not trigger a resync", async () => {
     "摘要一致不得触发重同步",
   );
 });
+
+test("local note writes enqueue replication commands like highlights do", async () => {
+  const result = await harness();
+  const created = await result.context.fetch("/pdf/api/notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE,
+      id: "c_bbbbbbbbbbbbbbbb",
+      anchor: { kind: "pdf", page: 3, x: 0.2, y: 0.4 },
+      text: "复制这条便签",
+    }),
+  });
+  assert.equal(created.status, 200);
+  const patched = await result.context.fetch("/pdf/api/notes", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE, id: "c_bbbbbbbbbbbbbbbb", text: "改过",
+    }),
+  });
+  assert.equal(patched.status, 200);
+  const removed = await result.context.fetch("/pdf/api/notes", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, id: "c_bbbbbbbbbbbbbbbb" }),
+  });
+  assert.equal(removed.status, 200);
+  const envelopes = replicationOutboxRecords(result.dataStoresState)
+    .map((record) => record.payload.envelope);
+  const noteOps = envelopes.filter((e) => e.op.url === "/pdf/api/notes");
+  assert.deepEqual(noteOps.map((e) => e.op.method), ["POST", "PATCH", "DELETE"]);
+  for (const envelope of noteOps) assertReplicationEnvelopeShape(envelope);
+  // POST 带已落库完整条目（含 created/updated），PATCH 只带改的字段
+  assert.equal(typeof noteOps[0].op.body.created, "number");
+  assert.deepEqual(noteOps[0].op.body.anchor.page, 3);
+  assert.deepEqual(Object.keys(noteOps[1].op.body).sort(), ["file", "id", "text"]);
+  // 便签与高亮共用同一个铸好的书身份（pair 公告只发一次）
+  assert.equal(
+    envelopes.filter((e) => e.op.url === "/replication/pair").length, 1,
+  );
+});

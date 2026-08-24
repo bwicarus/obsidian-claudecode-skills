@@ -1549,9 +1549,33 @@
   // 让对端收敛 —— 这就是规格说的"允许一次显式的整域重同步"。
   var REPLICATION_RECONCILE_MIN_INTERVAL_MS = 5 * 60 * 1000;
   var REPLICATION_RESYNC_COOLDOWN_MS = 30 * 60 * 1000;
+  // read() 返回本域的物化数组（对账输入）。高亮走门面（order→存活条目），
+  // 便签仍是整册数组存储、原序即物化序 —— 两端规则一致即可比。
   var REPLICATION_DOMAINS = [
-    { kind: 'document-highlights', domain: 'pdf-highlights', url: '/pdf/api/highlights' },
-    { kind: 'epub-highlights', domain: 'epub-highlights', url: '/pdf/api/epub-highlights' }
+    {
+      domain: 'pdf-highlights',
+      read: function () {
+        return readHighlightCollection('document-highlights').then(function (read) {
+          return read.payload;
+        });
+      }
+    },
+    {
+      domain: 'epub-highlights',
+      read: function () {
+        return readHighlightCollection('epub-highlights').then(function (read) {
+          return read.payload;
+        });
+      }
+    },
+    {
+      domain: 'document-notes',
+      read: function () {
+        return readState('document-notes-legacy', []).then(function (items) {
+          return Array.isArray(items) ? items : [];
+        });
+      }
+    }
   ];
   var replicationLastReconcileMs = 0;
   var replicationLastResyncMs = Object.create(null);
@@ -1571,19 +1595,18 @@
       stores.document, REPLICATION_LINK_KIND, 'documentId', bookId, null
     ).then(function (link) {
       if (!link.payload || !link.payload.replicationBookId) return null;
-      return Promise.all([
-        Promise.resolve(query(link.payload.replicationBookId)),
-        readHighlightCollection('document-highlights'),
-        readHighlightCollection('epub-highlights')
-      ]).then(function (values) {
+      return Promise.all(
+        [Promise.resolve(query(link.payload.replicationBookId))].concat(
+          REPLICATION_DOMAINS.map(function (spec) { return spec.read(); })
+        )
+      ).then(function (values) {
         var view = values[0];
         var domains = view && view.domains && typeof view.domains === 'object'
           ? view.domains : {};
-        var reads = { 'document-highlights': values[1], 'epub-highlights': values[2] };
         var chain = Promise.resolve();
-        REPLICATION_DOMAINS.forEach(function (spec) {
+        REPLICATION_DOMAINS.forEach(function (spec, index) {
           chain = chain.then(function () {
-            var payload = reads[spec.kind].payload;
+            var payload = values[index + 1];
             return sha256Hex(canonicalJSONString(payload)).then(function (localDigest) {
               var remote = domains[spec.domain];
               var remoteDigest = remote && typeof remote.digest === 'string'
@@ -5842,6 +5865,11 @@
             items = items.filter(function (item) { return item && item.id !== request.id; });
             if (items.length === before) throw outgoingRequestError('未找到便签', code, 404);
             return localStateMutationResult(items, { ok: true });
+          }).then(function (value) {
+            enqueueReplicationCommand('/pdf/api/notes', 'DELETE', {
+              file: localFileRef(), id: request.id
+            });
+            return value;
           });
         });
       }, code);
@@ -5879,6 +5907,12 @@
             });
             items.push(note);
             return localStateMutationResult(items, { ok: true, id: note.id, note: note });
+          }).then(function (value) {
+            enqueueReplicationCommand(
+              '/pdf/api/notes', 'POST',
+              Object.assign({ file: localFileRef() }, clone(value.note))
+            );
+            return value;
           });
         }
         var id = localRecordId(body.id, code);
@@ -5925,6 +5959,12 @@
           }
           note.updated = nowSeconds();
           return localStateMutationResult(items, { ok: true, note: note });
+        }).then(function (value) {
+          enqueueReplicationCommand(
+            '/pdf/api/notes', 'PATCH',
+            Object.assign({}, clone(body), { file: localFileRef(), id: id })
+          );
+          return value;
         });
       });
     }, code);

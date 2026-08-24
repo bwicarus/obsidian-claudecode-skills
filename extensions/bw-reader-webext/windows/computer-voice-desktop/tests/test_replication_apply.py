@@ -124,8 +124,8 @@ class ApplierTests(unittest.TestCase):
             {"file": "x", "id": "h_ffffff", "note": "条目不存在"},
         ))
         self.ledger.append(envelope(
-            "2", "/pdf/api/notes", "POST", {"id": "c_" + "1" * 16},
-        ))  # 执行映射表外
+            "2", "/pdf/api/ink", "POST", {"id": "c_" + "1" * 16},
+        ))  # 执行映射表外（墨迹域尚未接）
         self.ledger.append(envelope(
             "3", "/pdf/api/highlights", "POST", highlight_item("h_aaaaaa"),
         ))
@@ -256,6 +256,39 @@ class ResyncAndDigestTests(unittest.TestCase):
             self.store.load(BOOK, "pdf-highlights")["order"],
             ["h_cccccc", "h_aaaaaa"],
         )
+
+    def test_notes_domain_roundtrip_with_note_id_shape(self) -> None:
+        note = {
+            "file": "localbook:x", "id": "n1a2b3c4d5e6",
+            "anchor": {"kind": "pdf", "page": 2, "x": 0.1, "y": 0.2},
+            "text": "便签正文", "color": "#fff8c5", "w": 260, "h": 180,
+            "collapsed": False, "strokes": [], "video": None, "card": None,
+            "html": None, "iar": None, "created": 100, "updated": 100,
+        }
+        self.ledger.append(envelope("1", "/pdf/api/notes", "POST", note))
+        self.ledger.append(envelope(
+            "2", "/pdf/api/notes", "PATCH",
+            {"file": "x", "id": "n1a2b3c4d5e6", "text": "改过", "collapsed": True},
+        ))
+        report = self.applier.apply_pending()
+        self.assertEqual(report["deadLetters"], [])
+        data = self.store.load(BOOK, "document-notes")
+        self.assertEqual(data["items"]["n1a2b3c4d5e6"]["text"], "改过")
+        self.assertEqual(data["items"]["n1a2b3c4d5e6"]["collapsed"], True)
+        self.assertEqual(data["items"]["n1a2b3c4d5e6"]["anchor"]["page"], 2)
+        # PATCH 表外字段（created 不许改）→ 死信
+        self.ledger.append(envelope(
+            "3", "/pdf/api/notes", "PATCH",
+            {"file": "x", "id": "n1a2b3c4d5e6", "created": 999},
+        ))
+        self.ledger.append(envelope(
+            "4", "/pdf/api/notes", "DELETE", {"file": "x", "id": "n1a2b3c4d5e6"},
+        ))
+        report = self.applier.apply_pending()
+        self.assertEqual(len(report["deadLetters"]), 1)
+        data = self.store.load(BOOK, "document-notes")
+        self.assertIn("n1a2b3c4d5e6", data["tombstones"])
+        self.assertEqual(data["items"], {})
 
     def test_resync_rejects_unknown_domain_loudly(self) -> None:
         self.ledger.append(envelope(

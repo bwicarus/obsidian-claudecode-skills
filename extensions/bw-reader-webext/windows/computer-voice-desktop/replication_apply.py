@@ -61,13 +61,21 @@ APPLY_STATE_FILE_NAME = "replication-apply-state.json"
 APPLY_STATUS_FILE_NAME = "replication-apply.status.json"
 DEAD_LETTER_FILE_NAME = "replication-dead-letter.jsonl"
 
-_ITEM_ID_RE = re.compile(r"^(?:c_[a-f0-9]{8,32}|h_[a-f0-9]{6,32}|e[a-f0-9]{6,16})$")
+# 条目 id 形状：高亮 c_/h_/e…、便签 n<hex>（App 路由 'n'+randomHex(6).slice(0,11)）。
+_ITEM_ID_RE = re.compile(
+    r"^(?:c_[a-f0-9]{8,32}|h_[a-f0-9]{6,32}|e[a-f0-9]{6,16}|n[a-f0-9]{6,16})$"
+)
 
 # PATCH 允许改的字段，照 App 路由的允许集（native-local-runtime.js 的
-# localPDFHighlights / localEPUBHighlights）。POST 是整条 upsert 不看这张表。
+# localPDFHighlights / localEPUBHighlights / localNotes）。
+# POST 是整条 upsert 不看这张表。
 _PATCH_FIELDS = {
     "pdf-highlights": frozenset(("color", "text", "note", "kind", "sentence", "body")),
     "epub-highlights": frozenset(("color", "note", "kind", "sentence", "body")),
+    "document-notes": frozenset((
+        "anchor", "text", "color", "w", "h", "collapsed",
+        "strokes", "video", "card", "html", "iar",
+    )),
 }
 
 _EXECUTORS: dict[tuple[str, str], tuple[str, str]] = {
@@ -78,6 +86,9 @@ _EXECUTORS: dict[tuple[str, str], tuple[str, str]] = {
     ("/pdf/api/epub-highlights", "POST"): ("epub-highlights", "upsert"),
     ("/pdf/api/epub-highlights", "PATCH"): ("epub-highlights", "patch"),
     ("/pdf/api/epub-highlights", "DELETE"): ("epub-highlights", "tombstone"),
+    ("/pdf/api/notes", "POST"): ("document-notes", "upsert"),
+    ("/pdf/api/notes", "PATCH"): ("document-notes", "patch"),
+    ("/pdf/api/notes", "DELETE"): ("document-notes", "tombstone"),
 }
 
 # 配对公告（前提 A 的 App 半边）：App 铸 replicationBookId 后作为一条命令
@@ -89,7 +100,7 @@ _PAIR_BODY_KEYS = frozenset(("peerBookId", "replicationBookId", "displayName"))
 # 按序重发，服务端整域替换（全量 upsert + 差集写墓碑）。幂等。
 RESYNC_URL = "/replication/resync"
 _RESYNC_BODY_KEYS = frozenset(("domain", "items"))
-_RESYNC_DOMAINS = frozenset(("pdf-highlights", "epub-highlights"))
+_RESYNC_DOMAINS = frozenset(("pdf-highlights", "epub-highlights", "document-notes"))
 
 REPLICATION_DIGESTS_FILE_NAME = "replication-digests.json"
 REPLICATION_DIGESTS_CONTRACT = "replication-digests/1"

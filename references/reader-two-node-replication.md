@@ -348,7 +348,11 @@ items = items.filter(function (item) { return item && item.id !== request.id; })
       （内容会合材料）；对账目前只覆盖高亮两域，随步骤 6 扩
 - [ ] 5 账本（Windows 侧 commands 表即原始层，已随步骤 2 落地；
       Pi 派生层桥接等消费端出现再做）
-- [~] 6 四个域 —— 高亮已通（随步骤 3）；便签 → 插入页 → 墨迹待接
+- [~] 6 四个域 —— 高亮已通（随步骤 3）；**便签已通**（2026-08-24 深夜：
+      App 三条路由入队 + Windows 执行器 document-notes 域 + PATCH 白名单
+      照路由允许集 + 对账第三域；n<hex> 便签 id 进条目闸；大便签
+      （video/card/html 近 2MB 上限）超 195KiB 信封闸会拒并出声 ——
+      分帧传输是已知待办）；插入页 → 墨迹待接
 
 ## 相关
 
