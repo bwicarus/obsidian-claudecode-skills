@@ -7372,3 +7372,74 @@ test("ink replication waits for the settle timer and captures the latest strokes
   assert.equal(inkOps[0].op.body.page, 12);
   assert.equal(inkOps[0].op.body.strokes.length, 2, "入队的是最新整页，不是第一笔");
 });
+
+test("inserted real page survives runtime restart and idle recover", async () => {
+  const durable = { pageCount: 4, contentSHA256: "a".repeat(64), journal: null };
+  const dataStoresState = {
+    global: { values: new Map(), revision: 0 },
+    document: { values: new Map(), revision: 0 },
+    device: { values: new Map(), revision: 0 },
+  };
+  const first = await harness({
+    dataStoresState,
+    interfaceManifest: withNativePDFMutationRoutesSupported(),
+    pdfMutationReply: nativePDFMutationResponder({ durableState: durable }),
+  });
+  const mutation = await first.context.fetch("/pdf/api/pdf-insert-page", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, after: 1, md: "测试插入页" }),
+  });
+  assert.equal(mutation.status, 200);
+  const receipt = await mutation.json();
+  assert.equal((await waitForNativePDFJob(first.context, receipt.job_id)).status, "done");
+  const listedAfterInsert = await (await first.context.fetch(
+    "/pdf/api/userpages?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listedAfterInsert.pages.length, 1, "插入完成后用户页应存在");
+  const pageId = listedAfterInsert.pages[0].id;
+
+  // 重启（同一持久存储 + 同一 PDF durable 状态）
+  const second = await harness({
+    dataStoresState,
+    interfaceManifest: withNativePDFMutationRoutesSupported(),
+    pdfMutationReply: nativePDFMutationResponder({ durableState: durable }),
+  });
+  const listedAfterRestart = await (await second.context.fetch(
+    "/pdf/api/userpages?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listedAfterRestart.pages.length, 1, "重启后插入页必须还在");
+  assert.equal(listedAfterRestart.pages[0].id, pageId);
+
+  // 再重启一次（模拟"放着不动"期间又一轮 recover）
+  const third = await harness({
+    dataStoresState,
+    interfaceManifest: withNativePDFMutationRoutesSupported(),
+    pdfMutationReply: nativePDFMutationResponder({ durableState: durable }),
+  });
+  const listedThird = await (await third.context.fetch(
+    "/pdf/api/userpages?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listedThird.pages.length, 1, "反复 recover 不得吃掉插入页");
+});
+
+test("virtual user page (pre-realization) survives restart", async () => {
+  const dataStoresState = {
+    global: { values: new Map(), revision: 0 },
+    document: { values: new Map(), revision: 0 },
+    device: { values: new Map(), revision: 0 },
+  };
+  const first = await harness({ dataStoresState });
+  const created = await first.context.fetch("/pdf/api/userpages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, after: 12, md: "虚拟页" }),
+  });
+  assert.equal(created.status, 200);
+  const second = await harness({ dataStoresState });
+  const listed = await (await second.context.fetch(
+    "/pdf/api/userpages?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.pages.length, 1, "虚拟页重启后必须还在");
+  assert.equal(listed.pages[0].after, 12);
+});
