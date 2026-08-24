@@ -372,6 +372,11 @@ class ResyncAndDigestTests(unittest.TestCase):
         self.ledger.append(envelope(
             "1", "/pdf/api/highlights", "POST", highlight_item("h_aaaaaa"),
         ))
+        # 书目录里混着诊断留痕文件：导出必须跳过它而不是整轮报错
+        self.ledger.append(envelope(
+            "2", "/replication/diagnostic", "POST",
+            {"kind": "pdf-mutation-error", "error": "x", "at": 1},
+        ))
         self.applier.apply_pending()
         output = self.root / "replication-digests.json"
         value = module.export_replication_digests(
@@ -390,6 +395,7 @@ class ResyncAndDigestTests(unittest.TestCase):
         ).encode("utf-8")).hexdigest()
         self.assertEqual(entry["digest"], expected)
         self.assertTrue(output.exists())
+        self.assertNotIn("diagnostics", value["books"][BOOK])
 
 
 class RunOnceTests(unittest.TestCase):

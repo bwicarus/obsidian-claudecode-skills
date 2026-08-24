@@ -492,6 +492,11 @@ def export_replication_digests(
                 continue
             domains: dict[str, Any] = {}
             for path in sorted(book_dir.glob("*.json")):
+                # 书目录下不止数据域：诊断留痕文件与摘要无关，跳过——
+                # 否则 contract 不符会把整轮 run_once 打成 error（2026-08-25
+                # 实锤：0.1.65 引入诊断文件后每轮导出都失败、对账视图停更）。
+                if path.name == DIAGNOSTICS_FILE_NAME:
+                    continue
                 domain = path.stem
                 data = store.load(book_dir.name, domain)
                 domains[domain] = {
