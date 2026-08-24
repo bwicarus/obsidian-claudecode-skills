@@ -93,6 +93,57 @@ internal static class DirectSnapshotMarkdown
             AppendField(output, "年龄（秒）", Text(active["ageSec"]));
         }
 
+        output.AppendLine();
+        output.AppendLine("## 复习模式");
+        output.AppendLine();
+        JsonObject? review = active?["review"] as JsonObject;
+        if (review is null)
+        {
+            output.AppendLine("_未进入复习模式。_");
+        }
+        else
+        {
+            AppendField(output, "待复习数量", Text(review["dueTotal"]));
+            AppendField(
+                output,
+                "当前位置",
+                Text(review["index"]) is string reviewIndex
+                    ? $"第 {reviewIndex} 张（从 0 计）"
+                    : null);
+            AppendField(
+                output,
+                "已翻面",
+                Text(review["showingAnswer"]));
+            if (review["queueIds"] is JsonArray reviewQueue
+                && reviewQueue.Count > 0)
+            {
+                AppendField(
+                    output,
+                    "队列卡片编号",
+                    string.Join(
+                        ", ",
+                        reviewQueue.Select(entry => Text(entry) ?? "?")));
+            }
+            if (review["current"] is JsonObject reviewCard)
+            {
+                AppendField(output, "当前卡片", Text(reviewCard["id"]));
+                string? cardFront = Text(reviewCard["front"]);
+                if (!string.IsNullOrWhiteSpace(cardFront))
+                {
+                    output.AppendLine();
+                    output.AppendLine("正面：");
+                    output.AppendLine(Fenced(cardFront));
+                }
+                string? cardBack = Text(reviewCard["back"]);
+                if (!string.IsNullOrWhiteSpace(cardBack))
+                {
+                    output.AppendLine();
+                    output.AppendLine("背面：");
+                    output.AppendLine(Fenced(cardBack));
+                }
+            }
+        }
+
         JsonObject? selection = snapshot["selection"] as JsonObject;
         output.AppendLine();
         output.AppendLine("## 当前选区");
@@ -540,6 +591,47 @@ internal static class DirectSnapshotTerminal
             Field(output, "类型", active["kind"]);
             Field(output, "新鲜", active["fresh"]);
             Field(output, "年龄（秒）", active["ageSec"]);
+        }
+
+        Section(output, "复习模式");
+        JsonObject? terminalReview = active?["review"] as JsonObject;
+        if (terminalReview is null)
+        {
+            output.AppendLine("未进入复习模式。");
+        }
+        else
+        {
+            Field(output, "待复习数量", terminalReview["dueTotal"]);
+            Field(output, "当前位置（从 0 计）", terminalReview["index"]);
+            Field(output, "已翻面", terminalReview["showingAnswer"]);
+            if (terminalReview["queueIds"] is JsonArray terminalQueue
+                && terminalQueue.Count > 0)
+            {
+                output.AppendLine(
+                    "队列卡片编号："
+                    + string.Join(
+                        ", ",
+                        terminalQueue.Select(entry =>
+                            DirectSnapshotMarkdown.Text(entry) ?? "?")));
+            }
+            if (terminalReview["current"] is JsonObject terminalCard)
+            {
+                Field(output, "当前卡片", terminalCard["id"]);
+                string front =
+                    DirectSnapshotMarkdown.Text(terminalCard["front"])
+                    ?? "";
+                if (!string.IsNullOrWhiteSpace(front))
+                {
+                    output.AppendLine("正面：" + front);
+                }
+                string back =
+                    DirectSnapshotMarkdown.Text(terminalCard["back"])
+                    ?? "";
+                if (!string.IsNullOrWhiteSpace(back))
+                {
+                    output.AppendLine("背面：" + back);
+                }
+            }
         }
 
         Section(output, "当前选区");
@@ -2426,7 +2518,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
                     `revision ${valueText(snapshot.revision)}`;
 
                   const reading = snapshot.activeReading;
-                  active.textContent = reading
+                  const readingLines = reading
                     ? [
                         `书名：${valueText(reading.title)}`,
                         `文件：${valueText(reading.file)}`,
@@ -2434,7 +2526,36 @@ internal sealed class DirectSnapshotViewer : IDisposable
                         `类型：${valueText(reading.kind)}`,
                         `新鲜：${valueText(reading.fresh)}`,
                         `年龄（秒）：${valueText(reading.ageSec)}`
-                      ].join("\n")
+                      ]
+                    : null;
+                  const review = reading && reading.review;
+                  if (readingLines) {
+                    if (review && typeof review === "object") {
+                      readingLines.push(
+                        `复习模式：进行中（待复习 ${valueText(review.dueTotal)}`
+                        + `，第 ${valueText(review.index)} 张`
+                        + `，已翻面 ${valueText(review.showingAnswer)}）`);
+                      if (Array.isArray(review.queueIds)
+                          && review.queueIds.length > 0) {
+                        readingLines.push(
+                          `队列卡片编号：${review.queueIds.join(", ")}`);
+                      }
+                      if (review.current && typeof review.current === "object") {
+                        readingLines.push(
+                          `当前卡片：${valueText(review.current.id)}`);
+                        if (review.current.front) {
+                          readingLines.push(`正面：${review.current.front}`);
+                        }
+                        if (review.current.back) {
+                          readingLines.push(`背面：${review.current.back}`);
+                        }
+                      }
+                    } else {
+                      readingLines.push("复习模式：未进入复习模式");
+                    }
+                  }
+                  active.textContent = readingLines
+                    ? readingLines.join("\n")
                     : "尚未收到活动书页。";
 
                   const selected = snapshot.selection;

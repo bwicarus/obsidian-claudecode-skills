@@ -152,9 +152,12 @@ test("可选文本字段宽进严出", () => {
 });
 
 test("record 新增成员,ForwardActiveReading 真的把它传下去", () => {
-  assert.match(SNAPSHOT, /string\? SelectionContext = null,\s*\n\s*string\? SelectionContextSource = null\);/);
+  assert.match(SNAPSHOT, /string\? SelectionContext = null,\s*\n\s*string\? SelectionContextSource = null,/);
   // 这一处最容易漏:record 上加了成员,但折叠时的手抄块不补就无声消失。
   assert.match(SNAPSHOT, /activeReading\.SelectionContext,\s*\n\s*activeReading\.SelectionContextSource\);/);
+  // review 同一条纪律:record 成员 + 校验放行 + 折叠手抄块,三处齐才算传下去。
+  assert.match(SNAPSHOT, /JsonElement\? Review = null\);/);
+  assert.match(SNAPSHOT, /activeReading\.Review is JsonElement reviewState/);
 });
 
 test("上下文进快照的 selection 节,缺席时不放 null 占位", () => {

@@ -187,7 +187,8 @@
       "gotchas": [
         "2026-08-15 的 d0cb6109 给模型加「选区所在句」时，JS 侧把 selectionContext 同时挂到了 viewport 和 active 上，而 C# 侧**只给 ValidateActiveReading 放行、漏了 ValidateViewport**。后果不是报错提示：用户在网页上一选中文字 → 整条快照 400 → 每 1.5s 重试一次，表现是「快照响应慢」。2026-08-23 修法是在 readerPostSnapshot 里把它从**发出去的 viewport** 上剥掉（active 那份仍从本地 viewport.selectionContext 读，不能一起删）。",
         "⚠ 这四个载荷的允许集**互不相同**：某字段在 active 上合法不代表在 viewport 上合法。加字段时要逐个载荷确认，别按「同一份快照」想当然。",
-        "重试放大效应让这类错误的代价远高于一次性失败 —— 排查「慢」的时候优先怀疑它。"
+        "重试放大效应让这类错误的代价远高于一次性失败 —— 排查「慢」的时候优先怀疑它。",
+        "2026-08-25 active 载荷新增可选字段 review（App 内复习模式投影：dueTotal/index/queueIds/showingAnswer/current）。**缺席 = 未进入复习模式**，扩展 background.js 与旧 App 构建不发它，天然合法；在场时 ValidateReviewState 整形校验（越界键整条 400）。生产端在 rc-computer-voice.js localReviewSnapshot（白名单重建），契约测试 tests/reader_contract/review-snapshot.contract.test.mjs。它故意不进 PreserveActiveReadingContinuity 的保留名单——复活旧 review 会让 AI 以为用户还停在复习里。"
       ]
     }
   }

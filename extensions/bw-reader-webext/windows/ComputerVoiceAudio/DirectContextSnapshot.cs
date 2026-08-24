@@ -23,7 +23,10 @@ internal sealed record DirectActiveReading(
     // 链上有多处按 typeof selection === "string" 把关,改它的形状会让旧版
     // 前端的选中被整条静默清空。
     string? SelectionContext = null,
-    string? SelectionContextSource = null);
+    string? SelectionContextSource = null,
+    // 复习模式投影。可选:缺席 = 未进入复习模式,旧版前端不发这个字段,
+    // 缺席就是今天的行为。在场时形状由 ValidateReviewState 把守。
+    JsonElement? Review = null);
 
 internal sealed record DirectViewportContext(
     string SourceInstanceId,
@@ -285,6 +288,14 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 {
                     next["highlightSource"] = JsonNode.Parse(
                         source.GetRawText());
+                }
+                // 复习投影跟着本次上报走:缺席就是缺席(= 已退出复习模式),
+                // 不进 PreserveActiveReadingContinuity 的保留名单 ——
+                // 一个"复活"的旧 review 会让 AI 以为用户还停在复习里。
+                if (activeReading.Review is JsonElement reviewState)
+                {
+                    next["review"] = JsonNode.Parse(
+                        reviewState.GetRawText());
                 }
                 if (_activeReading is JsonObject priorActive)
                 {
@@ -572,6 +583,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             .Append("highlightSource")
             .Append("selectionContext")
             .Append("selectionContextSource")
+            .Append("review")
             .ToHashSet(StringComparer.Ordinal);
         if (
             requiredKeys.Any(key => !keys.Contains(key))
@@ -739,6 +751,11 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             throw ActiveReadingInvalid();
         }
+        JsonElement? review = null;
+        if (keys.Contains("review"))
+        {
+            review = ValidateReviewState(value.GetProperty("review"));
+        }
         return new DirectActiveReading(
             kind,
             file,
@@ -753,7 +770,122 @@ internal sealed class FileDirectSnapshotContextAdapter :
             selectionRegions,
             highlightSource,
             selectionContext,
-            selectionContextSource);
+            selectionContextSource,
+            review);
+    }
+
+    // 复习模式投影:在场必须整形合规,否则整条 active-reading 拒绝 ——
+    // 与 selectionRegions/highlightSource 同一条纪律。字段缺席表示
+    // 未进入复习模式,所以这里永远不产出"空的 review"。
+    private static JsonElement ValidateReviewState(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            throw ActiveReadingInvalid();
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(value);
+        }
+        catch (DirectProtocolException exception)
+        {
+            throw ActiveReadingInvalid(exception);
+        }
+        HashSet<string> keys = value.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        string[] requiredKeys =
+        {
+            "dueTotal",
+            "index",
+            "queueIds",
+            "showingAnswer",
+        };
+        HashSet<string> allowedKeys = requiredKeys
+            .Append("current")
+            .ToHashSet(StringComparer.Ordinal);
+        if (
+            requiredKeys.Any(key => !keys.Contains(key))
+            || keys.Any(key => !allowedKeys.Contains(key))
+            || !value.GetProperty("dueTotal").TryGetInt64(
+                out long dueTotal)
+            || dueTotal is < 0 or > 100_000
+            || !value.GetProperty("index").TryGetInt64(out long index)
+            || index is < 0 or > 100_000
+            || value.GetProperty("showingAnswer").ValueKind
+                is not (JsonValueKind.True or JsonValueKind.False)
+            || value.GetProperty("queueIds").ValueKind
+                != JsonValueKind.Array
+        )
+        {
+            throw ActiveReadingInvalid();
+        }
+        JsonElement queueIds = value.GetProperty("queueIds");
+        int queueCount = 0;
+        foreach (JsonElement entry in queueIds.EnumerateArray())
+        {
+            queueCount += 1;
+            if (
+                queueCount > 200
+                || entry.ValueKind != JsonValueKind.String
+                || entry.GetString() is not string entryId
+                || entryId.Length is < 1 or > 120
+                || !DirectBridgeContract.IsSafeId(entryId)
+            )
+            {
+                throw ActiveReadingInvalid();
+            }
+        }
+        if (keys.Contains("current"))
+        {
+            JsonElement current = value.GetProperty("current");
+            if (current.ValueKind != JsonValueKind.Object)
+            {
+                throw ActiveReadingInvalid();
+            }
+            try
+            {
+                DirectJsonValidation.RequireNoDuplicateKeys(current);
+            }
+            catch (DirectProtocolException exception)
+            {
+                throw ActiveReadingInvalid(exception);
+            }
+            HashSet<string> currentKeys = current.EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal);
+            string[] currentRequired = { "id", "front", "back" };
+            if (
+                currentKeys.Count != currentRequired.Length
+                || currentRequired.Any(key => !currentKeys.Contains(key))
+                || current.GetProperty("id").ValueKind
+                    != JsonValueKind.String
+                || current.GetProperty("id").GetString()
+                    is not string currentId
+                || currentId.Length is < 1 or > 120
+                || !DirectBridgeContract.IsSafeId(currentId)
+            )
+            {
+                throw ActiveReadingInvalid();
+            }
+            foreach (string face in new[] { "front", "back" })
+            {
+                if (
+                    current.GetProperty(face).ValueKind
+                        != JsonValueKind.String
+                    || current.GetProperty(face).GetString()
+                        is not string text
+                    || text.Length > 2000
+                    || text.Any(character =>
+                        char.IsControl(character)
+                        && character is not ('\n' or '\t'))
+                )
+                {
+                    throw ActiveReadingInvalid();
+                }
+            }
+        }
+        return value.Clone();
     }
 
     // active 里的可选文本字段:缺席/null → null;字符串超限或含控制字符、
