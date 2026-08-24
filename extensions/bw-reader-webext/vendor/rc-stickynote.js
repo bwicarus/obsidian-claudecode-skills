@@ -1221,7 +1221,9 @@ if (window.__bwPwaProviderOnly) return;
     };
     try {
       if (window.RC && RC.voiceCard && RC.voiceCard.renderInto)
-        cardEl = RC.voiceCard.renderInto(box, { text: null, label: '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''), isHtml: false, type: card.bind ? wordCardPresentation(ctl.note).tone : (card.type || '#b9a8ff'), icon: '🎴', form: card.form, cid: card.cid || card.gid,
+        // 绑定卡（bind 到正文元素）**只有展开模式**（2026-08-25 用户拍板）：
+        // 点击元素打开必须直接见内容，不恢复历史收起态。
+        cardEl = RC.voiceCard.renderInto(box, { text: null, label: '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''), isHtml: false, type: card.bind ? wordCardPresentation(ctl.note).tone : (card.type || '#b9a8ff'), icon: '🎴', form: card.bind ? 'full' : card.form, cid: card.cid || card.gid,
           onSize: function (size) {
             ctl._cardPresentationSize = size || null;
             try { ctl.body.style.width = _formW(ctl, card.form); } catch (_) {}
@@ -1245,7 +1247,7 @@ if (window.__bwPwaProviderOnly) return;
             }
           },
           onClose: function () { try { ctl.del.click(); } catch (e) {} },
-          onForm: function (f) { try { card.form = f; ctl.note.card = card; ctl.body.style.width = _formW(ctl, f); syncFreeCardAnchorUi(ctl); patchNote(ctl.note, { card: card }); } catch (e) {} } });
+          onForm: function (f) { try { card.form = card.bind ? 'full' : f; ctl.note.card = card; ctl.body.style.width = _formW(ctl, f); syncFreeCardAnchorUi(ctl); patchNote(ctl.note, { card: card }); } catch (e) {} } });
       done = !!cardEl;
     } catch (e) {}
     if (!done) { try { stateBody = box; RC.flashcard.mountState(box, card.cards, { bare: true, gid: card.gid, nopin: true, onStateChange: onPlacementStateChange }); } catch (e) {} }   // voiceCard 未载兜底
@@ -1286,7 +1288,7 @@ if (window.__bwPwaProviderOnly) return;
     var done = false, el2 = null;
     try {
       if (window.RC && RC.voiceCard && RC.voiceCard.renderInto)
-        el2 = RC.voiceCard.renderInto(box, { text: h.content, label: h.label || '卡片', isHtml: !!h.isHtml, type: h.bind ? wordCardPresentation(ctl.note).tone : h.type, icon: h.icon, form: h.form, cid: h.cid,
+        el2 = RC.voiceCard.renderInto(box, { text: h.content, label: h.label || '卡片', isHtml: !!h.isHtml, type: h.bind ? wordCardPresentation(ctl.note).tone : h.type, icon: h.icon, form: h.bind ? 'full' : h.form, cid: h.cid,
           onSize: function (size) {
             ctl._cardPresentationSize = size || null;
             try {
@@ -1297,7 +1299,7 @@ if (window.__bwPwaProviderOnly) return;
             } catch (_) {}
           },
           onClose: function () { try { ctl.del.click(); } catch (e) {} },
-          onForm: function (f) { try { h.form = f; ctl.note.html = h; ctl.body.style.width = _formW(ctl, f); syncFreeCardAnchorUi(ctl); patchNote(ctl.note, { html: h }); } catch (e) {} } });
+          onForm: function (f) { try { h.form = h.bind ? 'full' : f; ctl.note.html = h; ctl.body.style.width = _formW(ctl, f); syncFreeCardAnchorUi(ctl); patchNote(ctl.note, { html: h }); } catch (e) {} } });
       done = !!el2;
       // 成功装进真 .vc-card 才打这个标记:回退分支(下面的 fb)仍是普通 HTML,
       // 那时壳的 padding/限高/滚动照旧需要。

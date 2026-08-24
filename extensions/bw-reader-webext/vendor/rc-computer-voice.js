@@ -6930,7 +6930,71 @@ if (window.__bwPwaProviderOnly) return;
       activeReading.viewFile = sourceFile;
       activeReading.viewPage = source.pos;
     }
+    var review = localReviewSnapshot();
+    if (review) {
+      activeReading.review = review;
+    }
     return activeReading;
+  }
+
+  // 复习模式投影:字段缺席 = 未进入复习模式(旧构建天然一致)。
+  // 这里按白名单**重建**而不是透传 —— 桥对 active-reading 是整条拒绝的
+  // 合同,一个越界字段会让位置和选中一起陪葬。卡片正文按 selectionContext
+  // 同一条纪律清洗控制字符;编号不合形状的条目丢弃而不是拒绝整个投影。
+  var REVIEW_CARD_ID_RE = /^[A-Za-z0-9_-]{1,120}$/;
+  function reviewCardText(value) {
+    if (typeof value !== "string") return "";
+    return value
+      .replace(/\r\n?/g, "\n")
+      .replace(/[ ---]/g, "")
+      .slice(0, 2000);
+  }
+  function localReviewSnapshot() {
+    var raw;
+    try {
+      raw = RC.review && typeof RC.review.snapshotState === "function"
+        ? RC.review.snapshotState()
+        : null;
+    } catch (_) {
+      return null;
+    }
+    if (!plainObject(raw)) return null;
+    var dueTotal = Number(raw.dueTotal);
+    var index = Number(raw.index);
+    if (
+      !Number.isSafeInteger(dueTotal) || dueTotal < 0 ||
+      !Number.isSafeInteger(index) || index < 0
+    ) {
+      return null;
+    }
+    var queueIds = [];
+    if (Array.isArray(raw.queueIds)) {
+      for (var i = 0; i < raw.queueIds.length && queueIds.length < 200; i++) {
+        var id = raw.queueIds[i];
+        if (typeof id === "string" && REVIEW_CARD_ID_RE.test(id)) {
+          queueIds.push(id);
+        }
+      }
+    }
+    var review = {
+      dueTotal: Math.min(dueTotal, 100000),
+      index: Math.min(index, 100000),
+      queueIds: queueIds,
+      showingAnswer: raw.showingAnswer === true,
+    };
+    var current = raw.current;
+    if (
+      plainObject(current) &&
+      typeof current.id === "string" &&
+      REVIEW_CARD_ID_RE.test(current.id)
+    ) {
+      review.current = {
+        id: current.id,
+        front: reviewCardText(current.front),
+        back: reviewCardText(current.back),
+      };
+    }
+    return review;
   }
 
   function localHighlightTarget(current) {

@@ -60,7 +60,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.66"
+APP_VERSION = "0.1.67"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status

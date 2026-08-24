@@ -3758,6 +3758,29 @@ if (window.__bwPwaProviderOnly) return;
       var card = _current();
       return card ? Object.assign({}, card) : null;
     },
+    // 给上下文快照的只读投影。非复习模式返回 null —— 快照链以「字段缺席」
+    // 表达未进入复习模式，旧构建不发这个字段也是同一语义。
+    snapshotState: function () {
+      if (!_mode) return null;
+      var state = {
+        dueTotal: Math.max(0, Number(_dueTotal) || 0),
+        index: Math.max(0, Number(_idx) || 0),
+        queueIds: _queue.slice(0, 200).map(function (card) {
+          return String(_stableCardId(card)).slice(0, 120);
+        }),
+        showingAnswer: !!_showingAnswer,
+        current: null
+      };
+      var card = _current();
+      if (card) {
+        state.current = {
+          id: String(_stableCardId(card)).slice(0, 120),
+          front: String(card.question || card.front || '').slice(0, 2000),
+          back: String(card.answer || card.back || '').slice(0, 2000)
+        };
+      }
+      return state;
+    },
     refreshLearningCard: _refreshLearningCard,
     selectedPairs: selectedPairs,
     setMode: setMode,
