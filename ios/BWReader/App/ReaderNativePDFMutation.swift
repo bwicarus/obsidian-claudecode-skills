@@ -336,8 +336,20 @@ actor ReaderNativePDFMutationActor {
                     .map(String.init) ?? "用户插入页"
                 guard actualText.contains(requiredProbe)
                         || actualText.contains("用户插入页") else {
+                    // 诊断要能分辨两种根因：读错页（相邻扫描页无文字层，
+                    // actual 为空）还是 PDFKit 跨文档插页写出后丢文字
+                    // （actual 为空但邻页有字/页数对）。把现场带全。
+                    let neighborText = verified.page(
+                        at: max(0, replacementIndex - 1)
+                    )?.string ?? ""
                     throw ReaderNativePDFMutationError.stagingFailed(
                         "新页没有可验证的文字层"
+                        + "（index=\(replacementIndex)/共\(verified.pageCount)页"
+                        + "，probe=\(requiredProbe.prefix(12))"
+                        + "，该页文字[\(actualText.count)字]="
+                        + "\(actualText.prefix(40))"
+                        + "，前一页文字[\(neighborText.count)字]="
+                        + "\(neighborText.prefix(20))）"
                     )
                 }
             }
