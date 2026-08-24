@@ -4804,6 +4804,53 @@
   }
   window.__BW_REPLICATION_PUSH__ = pushReplicationCommands;
 
+  // 对账查询（规格 §6）：取 Windows 端每域摘要视图。连接形态同上。
+  function queryReplicationDigests(replicationBookId) {
+    var id = safeText(replicationBookId, "replicationBookId", 64, false);
+    var session = randomSession();
+    var channel = null;
+    return openDirect({ endpoint: CONTEXT_ENDPOINT }).then(function (opened) {
+      channel = opened;
+      return channel.request("context-open", { sessionId: session.id });
+    }).then(function (value) {
+      exactObject(
+        value, ["sessionId", "state", "mode"], [], "复制摘要 CONTEXT-OPEN 响应"
+      );
+      if (value.sessionId !== session.id ||
+          value.state !== "context-only" ||
+          value.mode !== CONTEXT_DELIVERY_SNAPSHOT) {
+        throw directError(
+          "复制摘要上下文连接响应无效",
+          "BW_REPLICATION_PUSH_CONTEXT_INVALID",
+          false
+        );
+      }
+      return channel.request("replication-digest-query", {
+        sessionId: session.id,
+        replicationBookId: id,
+      });
+    }).then(function (reply) {
+      exactObject(
+        reply,
+        ["contract", "replicationBookId", "generatedAtUtcMs", "domains"],
+        [],
+        "复制摘要视图"
+      );
+      if (reply.replicationBookId !== id ||
+          !plainObject(reply.domains)) {
+        throw directError(
+          "复制摘要视图与请求不匹配",
+          "BW_REPLICATION_DIGESTS_VIEW_INVALID",
+          false
+        );
+      }
+      return reply;
+    }).finally(function () {
+      if (channel) return channel.close();
+    });
+  }
+  window.__BW_REPLICATION_DIGESTS__ = queryReplicationDigests;
+
   function lookupJapaneseFallback(value) {
     var request;
     try {

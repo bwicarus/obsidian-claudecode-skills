@@ -368,6 +368,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly NamedPipeReaderQueryRpcServer _readerQueryRpcServer;
     private readonly ReaderRealtimeOutputBroker _readerRealtimeOutputBroker;
     private readonly ReplicationCommandSpool _replicationCommandSpool;
+    private readonly string _replicationDigestsPath;
     private readonly NamedPipeReaderRealtimeOutputRpcServer
         _readerRealtimeOutputRpcServer;
     private readonly IDirectCodexVoiceControl _codexVoiceControl;
@@ -487,6 +488,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             Path.Combine(
                 runtimeDirectory,
                 ReplicationCommandSpool.DirectoryName));
+        _replicationDigestsPath = Path.Combine(
+            runtimeDirectory,
+            ReplicationCommandProtocol.DigestsFileName);
     }
 
     internal async Task<int> RunAsync(CancellationToken cancellationToken)
@@ -1459,6 +1463,10 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 _replicationCommandSpool.AcceptAsync(
                     envelope,
                     cancellationToken),
+            queryReplicationDigests: replicationBookId =>
+                ReplicationCommandProtocol.ReadDigestsView(
+                    _replicationDigestsPath,
+                    replicationBookId),
             acceptReaderVisual: chunk =>
             {
                 ReaderContextSourceLease lease = sourceLease
@@ -1618,7 +1626,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 ReaderBrowserControlProtocol.ResponseType or
                 ReaderQueryProtocol.ResponseType or
                 ReaderRealtimeOutputProtocol.AckType or
-                ReplicationCommandProtocol.CommandType;
+                ReplicationCommandProtocol.CommandType or
+                ReplicationCommandProtocol.DigestQueryType;
         }
         catch (JsonException)
         {

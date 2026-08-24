@@ -331,7 +331,21 @@ items = items.filter(function (item) { return item && item.id !== request.id; })
         逐字段钉死）+ runtime 出箱测试 3 条 + 3 处变异破坏即红。
       ⚠ v1 只挂用户手动路径（actor=user）：助手直接高亮 / undo /
       user-state 导入的复制未挂 —— 两端会分叉，步骤 4 对账要能抓到
-- [ ] 4 对账（下一步；含身份重配对 + Swift 全文 sha 桥）
+- [~] 4 对账（2026-08-24 深夜，主链路已落地）——
+      · Windows：`export_replication_digests` 每轮把每书每域物化摘要写
+        `replication-digests.json`（桥 runtime 目录）；物化规则 =
+        order→存活条目、序外按 id 补末尾，与 App 门面逐位一致；
+        canonical JSON 与 JS `JSON.stringify` 逐位一致（parity 测试钉住）；
+      · C#：action `replication-digest-query`（同 context-only 闸）回摘要
+        视图；文件缺失=空视图、损坏出声（静默回空会被当成"两端都空一致"）；
+      · App：队列排空后对账（5min 时间闸）：本端物化 sha256 vs 视图摘要，
+        不一致 dlog 出声并入队 `/replication/resync` 整域重同步
+        （全量条目 ≤195KiB 信封闸；每域 30min 冷却防循环）；
+      · Windows 执行器 `_apply_resync`：整域替换 + 差集写墓碑，幂等。
+      对账同时兜住 v1 未挂复制的路径（助手/undo/导入）——分叉会被摘要
+      比对抓到并收敛。
+      **待做**：身份重配对（App 重装重铸场景）+ Swift 全文 sha 桥
+      （内容会合材料）；对账目前只覆盖高亮两域，随步骤 6 扩
 - [ ] 5 账本（Windows 侧 commands 表即原始层，已随步骤 2 落地；
       Pi 派生层桥接等消费端出现再做）
 - [~] 6 四个域 —— 高亮已通（随步骤 3）；便签 → 插入页 → 墨迹待接

@@ -20,7 +20,10 @@ namespace BwReader.ComputerVoiceAudio;
 internal static partial class ReplicationCommandProtocol
 {
     internal const string CommandType = "replication-command";
+    internal const string DigestQueryType = "replication-digest-query";
     internal const string EnvelopeContract = "replication-command/1";
+    internal const string DigestsFileName = "replication-digests.json";
+    internal const string DigestsViewContract = "replication-digests-view/1";
 
     // Direct 桥单帧 256KiB 双端硬校验；给 {contract,type,requestId} 包裹留余量。
     // 与 Python 权威的 MAX_ENVELOPE_BYTES 同值。
@@ -139,6 +142,87 @@ internal static partial class ReplicationCommandProtocol
             throw Invalid($"信封 {name} 无效");
         }
         return text;
+    }
+
+    internal static bool IsReplicationBookId(string value) =>
+        ReplicationBookIdPattern().IsMatch(value);
+
+    // 对账查询（规格 §6）：读 Python 摄取线程每轮导出的摘要文件，
+    // 只回被问的那本书。文件缺失 = 还没跑过一轮 → 空视图（不是错误）；
+    // 文件损坏必须出声 —— 静默回空会让 App 以为"两端都空、一致"。
+    internal static object ReadDigestsView(
+        string digestsPath,
+        string replicationBookId)
+    {
+        string? raw = null;
+        try
+        {
+            if (File.Exists(digestsPath))
+            {
+                raw = File.ReadAllText(digestsPath);
+            }
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            throw new DirectProtocolException(
+                "BW_REPLICATION_DIGESTS_UNAVAILABLE",
+                "复制摘要文件读取失败：" + exception.Message,
+                retryable: true);
+        }
+        long generatedAtUtcMs = 0;
+        Dictionary<string, object> domains = new(StringComparer.Ordinal);
+        if (raw is not null)
+        {
+            JsonElement root;
+            try
+            {
+                using JsonDocument document = JsonDocument.Parse(raw);
+                root = document.RootElement.Clone();
+            }
+            catch (JsonException exception)
+            {
+                throw new DirectProtocolException(
+                    "BW_REPLICATION_DIGESTS_CORRUPT",
+                    "复制摘要文件损坏：" + exception.Message,
+                    retryable: true);
+            }
+            if (
+                root.ValueKind != JsonValueKind.Object
+                || root.GetProperty("contract").GetString()
+                    != "replication-digests/1"
+            )
+            {
+                throw new DirectProtocolException(
+                    "BW_REPLICATION_DIGESTS_CORRUPT",
+                    "复制摘要文件 contract 不符",
+                    retryable: true);
+            }
+            generatedAtUtcMs = root.GetProperty("atUtcMs").GetInt64();
+            if (
+                root.TryGetProperty("books", out JsonElement books)
+                && books.ValueKind == JsonValueKind.Object
+                && books.TryGetProperty(replicationBookId, out JsonElement book)
+                && book.ValueKind == JsonValueKind.Object
+            )
+            {
+                foreach (JsonProperty domain in book.EnumerateObject())
+                {
+                    domains[domain.Name] = new
+                    {
+                        digest = domain.Value.GetProperty("digest").GetString(),
+                        count = domain.Value.GetProperty("count").GetInt64(),
+                    };
+                }
+            }
+        }
+        return new
+        {
+            contract = DigestsViewContract,
+            replicationBookId,
+            generatedAtUtcMs,
+            domains,
+        };
     }
 
     private static DirectProtocolException Invalid(string message) =>

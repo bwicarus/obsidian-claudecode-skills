@@ -7174,3 +7174,87 @@ test("replication enqueue failure never breaks the local write", async () => {
   assert.equal(listed.length, 1);
   assert.equal(replicationOutboxRecords(result.dataStoresState).length, 0);
 });
+
+// ── 对账：队列排空后比对两端摘要，不一致触发整域重同步 ─────────────────
+import { createHash } from "node:crypto";
+
+function canonicalForDigest(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return "[" + value.map(canonicalForDigest).join(",") + "]";
+  }
+  return "{" + Object.keys(value).sort().map((key) =>
+    JSON.stringify(key) + ":" + canonicalForDigest(value[key])
+  ).join(",") + "}";
+}
+function digestOf(value) {
+  return createHash("sha256").update(canonicalForDigest(value), "utf8").digest("hex");
+}
+async function waitForPushedUrl(pushedEnvelopes, url) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const hit = pushedEnvelopes.find((envelope) => envelope.op.url === url);
+    if (hit) return hit;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail("没有等到推送: " + url);
+}
+
+test("digest mismatch after drain triggers a loud full-domain resync command", async () => {
+  const result = await harness();
+  const pushedEnvelopes = [];
+  result.context.__BW_REPLICATION_PUSH__ = async (envelopes) => {
+    pushedEnvelopes.push(...envelopes.map((e) => JSON.parse(JSON.stringify(e))));
+    return envelopes.map((envelope) => ({
+      mutationId: envelope.op.mutationId, outcome: "accepted",
+    }));
+  };
+  result.context.__BW_REPLICATION_DIGESTS__ = async (replicationBookId) => ({
+    contract: "replication-digests-view/1",
+    replicationBookId,
+    generatedAtUtcMs: 1,
+    domains: {
+      "pdf-highlights": { digest: "9".repeat(64), count: 99 },  // 必然不一致
+    },
+  });
+  await hlPost(result.context, "c_9999999999999999", 4, "resync me");
+  const resync = await waitForPushedUrl(pushedEnvelopes, "/replication/resync");
+  assert.equal(resync.op.method, "POST");
+  assert.equal(resync.op.body.domain, "pdf-highlights");
+  assert.equal(resync.op.body.items.length, 1);
+  assert.equal(resync.op.body.items[0].id, "c_9999999999999999");
+  assertReplicationEnvelopeShape(resync);
+});
+
+test("matching digests after drain do not trigger a resync", async () => {
+  const result = await harness();
+  const pushedEnvelopes = [];
+  result.context.__BW_REPLICATION_PUSH__ = async (envelopes) => {
+    pushedEnvelopes.push(...envelopes.map((e) => JSON.parse(JSON.stringify(e))));
+    return envelopes.map((envelope) => ({
+      mutationId: envelope.op.mutationId, outcome: "accepted",
+    }));
+  };
+  result.context.__BW_REPLICATION_DIGESTS__ = async (replicationBookId) => {
+    // 用刚推上来的 POST 条目算出与 App 端物化一致的摘要（剥掉 file）。
+    const post = pushedEnvelopes.find((e) => e.op.url === "/pdf/api/highlights");
+    const item = { ...post.op.body };
+    delete item.file;
+    return {
+      contract: "replication-digests-view/1",
+      replicationBookId,
+      generatedAtUtcMs: 1,
+      domains: {
+        "pdf-highlights": { digest: digestOf([item]), count: 1 },
+        "epub-highlights": { digest: digestOf([]), count: 0 },
+      },
+    };
+  };
+  await hlPost(result.context, "c_aaaaaaaaaaaaaaaa", 6, "in sync");
+  await waitForPushedUrl(pushedEnvelopes, "/pdf/api/highlights");
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  assert.equal(
+    pushedEnvelopes.filter((e) => e.op.url === "/replication/resync").length,
+    0,
+    "摘要一致不得触发重同步",
+  );
+});

@@ -805,12 +805,20 @@ internal static class DirectBridgeSelfTest
         ReplicationCommandSpool spool = new(
             spoolDirectory,
             () => new DateTimeOffset(2026, 8, 24, 12, 0, 0, TimeSpan.Zero));
+        string digestsPath = System.IO.Path.Combine(
+            installationRoot,
+            "runtime",
+            ReplicationCommandProtocol.DigestsFileName);
         DirectBridgeProtocolSession session = new(
             "connection-replication-intake",
             "https://bwicarus.taile44d0c.ts.net",
             store,
             coordinator,
-            acceptReplicationCommand: spool.AcceptAsync);
+            acceptReplicationCommand: spool.AcceptAsync,
+            queryReplicationDigests: replicationBookId =>
+                ReplicationCommandProtocol.ReadDigestsView(
+                    digestsPath,
+                    replicationBookId));
         List<object> events = [];
         List<byte[]> pcm = [];
         object Envelope(string actor, string mutationSuffix) => new
@@ -925,6 +933,69 @@ internal static class DirectBridgeSelfTest
                     type = ReplicationCommandProtocol.CommandType,
                 })),
             "replication-command-spool-keeps-duplicates-and-rejects-invalid",
+            checks);
+
+        // 对账查询：摘要文件缺失 = 空视图（不是错误）；写入后按书回摘要；
+        // 文件损坏必须出声 —— 静默回空会让 App 以为"两端都空、一致"。
+        object DigestQuery(string requestId) => new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = ReplicationCommandProtocol.DigestQueryType,
+            requestId,
+            sessionId = "session-AAAAAAAAAAAAAAAAAAAAAA",
+            replicationBookId = "repbook-" + new string('c', 32),
+        };
+        JsonElement emptyView = RequireSuccess(
+            await SendAsync(
+                session,
+                DigestQuery("replication-digest-empty"),
+                events,
+                pcm).ConfigureAwait(false),
+            ReplicationCommandProtocol.DigestQueryType);
+        await File.WriteAllTextAsync(digestsPath, JsonSerializer.Serialize(new
+        {
+            contract = "replication-digests/1",
+            atUtcMs = 1_756_000_000_000L,
+            books = new Dictionary<string, object>
+            {
+                ["repbook-" + new string('c', 32)] = new Dictionary<string, object>
+                {
+                    ["pdf-highlights"] = new { digest = new string('9', 64), count = 2L },
+                },
+            },
+        })).ConfigureAwait(false);
+        JsonElement view = RequireSuccess(
+            await SendAsync(
+                session,
+                DigestQuery("replication-digest-view"),
+                events,
+                pcm).ConfigureAwait(false),
+            ReplicationCommandProtocol.DigestQueryType);
+        await File.WriteAllTextAsync(digestsPath, "{broken")
+            .ConfigureAwait(false);
+        JsonElement corrupt = await SendAsync(
+            session,
+            DigestQuery("replication-digest-corrupt"),
+            events,
+            pcm).ConfigureAwait(false);
+        Require(
+            emptyView.GetProperty("generatedAtUtcMs").GetInt64() == 0
+            && emptyView.GetProperty("domains").EnumerateObject().Count() == 0
+            && view.GetProperty("generatedAtUtcMs").GetInt64()
+                == 1_756_000_000_000L
+            && view.GetProperty("domains").GetProperty("pdf-highlights")
+                .GetProperty("digest").GetString() == new string('9', 64)
+            && view.GetProperty("domains").GetProperty("pdf-highlights")
+                .GetProperty("count").GetInt64() == 2
+            && !corrupt.GetProperty("ok").GetBoolean()
+            && corrupt.GetProperty("error").GetProperty("code").GetString()
+                == "BW_REPLICATION_DIGESTS_CORRUPT"
+            && DirectBridgeServer.IsContextEndpointActionAllowed(
+                JsonSerializer.Serialize(new
+                {
+                    type = ReplicationCommandProtocol.DigestQueryType,
+                })),
+            "replication-digest-query-round-trips-and-corrupt-file-is-loud",
             checks);
     }
 

@@ -206,6 +206,102 @@ class ApplierTests(unittest.TestCase):
         self.assertIn("损坏", report["deadLetters"][0]["error"])
 
 
+class ResyncAndDigestTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.ledger = ReplicationCommandLedger(self.root / "ledger.sqlite3")
+        self.store = ReplicationDataStore(self.root / "replication-data")
+        self.applier = ReplicationCommandApplier(
+            self.ledger, self.store,
+            self.root / "state.json", self.root / "dead.jsonl",
+        )
+
+    def tearDown(self) -> None:
+        self.ledger.close()
+        self.temporary.cleanup()
+
+    def test_resync_replaces_domain_and_tombstones_the_difference(self) -> None:
+        self.ledger.append(envelope(
+            "1", "/pdf/api/highlights", "POST", highlight_item("h_aaaaaa"),
+        ))
+        self.ledger.append(envelope(
+            "2", "/pdf/api/highlights", "POST", highlight_item("h_bbbbbb", 5),
+        ))
+        self.applier.apply_pending()
+        # App 端权威：只有 h_cccccc 和 h_aaaaaa（h_bbbbbb 已在 App 删除但
+        # 删除命令丢了）——重同步必须让本端收敛并给 h_bbbbbb 补墓碑。
+        resync_items = [
+            {k: v for k, v in highlight_item("h_cccccc", 9).items()},
+            {k: v for k, v in highlight_item("h_aaaaaa").items()},
+        ]
+        self.ledger.append(envelope(
+            "3", "/replication/resync", "POST",
+            {"domain": "pdf-highlights", "items": resync_items},
+        ))
+        report = self.applier.apply_pending()
+        self.assertEqual(report["deadLetters"], [])
+        data = self.store.load(BOOK, "pdf-highlights")
+        self.assertEqual(data["order"], ["h_cccccc", "h_aaaaaa"])
+        self.assertIn("h_bbbbbb", data["tombstones"])
+        self.assertNotIn("h_bbbbbb", data["items"])
+        self.assertNotIn("file", data["items"]["h_cccccc"])
+        # 幂等：同 resync 重放（新 mutationId）结果不变
+        self.ledger.append(envelope(
+            "4", "/replication/resync", "POST",
+            {"domain": "pdf-highlights", "items": resync_items},
+        ))
+        self.applier.apply_pending()
+        self.assertEqual(
+            self.store.load(BOOK, "pdf-highlights")["order"],
+            ["h_cccccc", "h_aaaaaa"],
+        )
+
+    def test_resync_rejects_unknown_domain_loudly(self) -> None:
+        self.ledger.append(envelope(
+            "1", "/replication/resync", "POST",
+            {"domain": "ink", "items": []},
+        ))
+        report = self.applier.apply_pending()
+        self.assertEqual(len(report["deadLetters"]), 1)
+
+    def test_digest_matches_javascript_canonical_shape(self) -> None:
+        import replication_apply as module
+
+        # 与 JS JSON.stringify(canonicalJSONValue(...)) 逐位一致的钉子：
+        # 键排序、紧凑分隔、非 ASCII 不转义、int 无小数点、float 最短往返。
+        value = [{"b": 1, "a": [1.5, 3, 0.25], "文": "高亮"}]
+        self.assertEqual(
+            module.canonical_json_for_digest(value),
+            '[{"a":[1.5,3,0.25],"b":1,"文":"高亮"}]',
+        )
+
+    def test_export_digests_covers_books_and_orders_items(self) -> None:
+        import replication_apply as module
+
+        self.ledger.append(envelope(
+            "1", "/pdf/api/highlights", "POST", highlight_item("h_aaaaaa"),
+        ))
+        self.applier.apply_pending()
+        output = self.root / "replication-digests.json"
+        value = module.export_replication_digests(
+            self.root / "replication-data", output,
+        )
+        self.assertEqual(value["contract"], "replication-digests/1")
+        entry = value["books"][BOOK]["pdf-highlights"]
+        self.assertEqual(entry["count"], 1)
+        self.assertRegex(entry["digest"], r"^[a-f0-9]{64}$")
+        # 摘要 = 物化数组的 canonical sha —— App 端按同一规则可复算
+        import hashlib as _hashlib
+
+        data = self.store.load(BOOK, "pdf-highlights")
+        expected = _hashlib.sha256(module.canonical_json_for_digest(
+            module.materialize_domain_items(data)
+        ).encode("utf-8")).hexdigest()
+        self.assertEqual(entry["digest"], expected)
+        self.assertTrue(output.exists())
+
+
 class RunOnceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()

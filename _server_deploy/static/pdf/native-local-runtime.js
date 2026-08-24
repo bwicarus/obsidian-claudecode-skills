@@ -1332,6 +1332,7 @@
   var REPLICATION_LINK_KIND = 'replication-link';
   var REPLICATION_OUTBOX_COLLECTION = 'native-replication-outbox';
   var REPLICATION_PAIR_URL = '/replication/pair';
+  var REPLICATION_RESYNC_URL = '/replication/resync';
   var REPLICATION_DRAIN_INTERVAL_MS = 30000;
   var replicationSeqCounter = 0;
   var replicationDraining = false;
@@ -1407,11 +1408,16 @@
           )
         ]).then(function () { return minted; });
       }).then(function (replicationBookId) {
+        var envelope = buildReplicationEnvelope(replicationBookId, url, method, body);
+        // 服务端信封上限 200KiB；这里提前拒并出声，
+        // 否则命令会在队列里每轮被对端拒、永远赖着不走。
+        if (utf8(JSON.stringify(envelope)).byteLength > 195 * 1024) {
+          throw new RuntimeError(
+            '复制命令超过信封上限', 'BW_REPLICATION_ENVELOPE_TOO_LARGE'
+          );
+        }
         return stores.document.batch([
-          replicationOutboxItemMutation(
-            buildReplicationEnvelope(replicationBookId, url, method, body),
-            randomHex(8)
-          )
+          replicationOutboxItemMutation(envelope, randomHex(8))
         ]);
       });
     }).then(function () {
@@ -1492,6 +1498,9 @@
             record.payload.envelope.op.mutationId || ''
           ));
         });
+        if (settled.length === records.length) {
+          replicationDrainHadBacklog = false;
+        }
         var chain = Promise.resolve();
         settled.forEach(function (record) {
           chain = chain.then(function () {
@@ -1503,6 +1512,7 @@
         return chain;
       });
     }).catch(function (error) {
+      replicationDrainHadBacklog = true;
       if (typeof root.dlog === 'function') {
         root.dlog('复制推送失败,下轮重试:' + String(error && error.code || error), '#ffb020');
       }
@@ -1512,6 +1522,8 @@
       // 队列空则彻底静默（也让测试进程能自然退出）。
       if (replicationDrainHadBacklog) {
         scheduleReplicationDrain(REPLICATION_DRAIN_INTERVAL_MS);
+      } else {
+        maybeReconcileReplication();
       }
     });
   }
@@ -1527,6 +1539,86 @@
     // Node（vm 测试环境）里的 Timeout 对象可 unref —— 挂起的重试兜底
     // 不该阻止进程退出；浏览器里 setTimeout 返回数字，此调用自然无害。
     if (timer && typeof timer.unref === 'function') timer.unref();
+  }
+
+  // ---- 对账（规格 §6：命令复制的必需品）----
+  //
+  // 队列排空后比对两端每域摘要（本端物化数组的 canonical sha256 vs
+  // Windows 摄取线程导出的摘要视图）。不一致必须出声，并入队一条
+  // /replication/resync 整域重同步命令（全量 upsert + 差集墓碑，幂等）
+  // 让对端收敛 —— 这就是规格说的"允许一次显式的整域重同步"。
+  var REPLICATION_RECONCILE_MIN_INTERVAL_MS = 5 * 60 * 1000;
+  var REPLICATION_RESYNC_COOLDOWN_MS = 30 * 60 * 1000;
+  var REPLICATION_DOMAINS = [
+    { kind: 'document-highlights', domain: 'pdf-highlights', url: '/pdf/api/highlights' },
+    { kind: 'epub-highlights', domain: 'epub-highlights', url: '/pdf/api/epub-highlights' }
+  ];
+  var replicationLastReconcileMs = 0;
+  var replicationLastResyncMs = Object.create(null);
+  var replicationReconciling = false;
+
+  function maybeReconcileReplication() {
+    if (replicationReconciling || !replicationEligible()) return Promise.resolve();
+    var now = Date.now();
+    if (now - replicationLastReconcileMs < REPLICATION_RECONCILE_MIN_INTERVAL_MS) {
+      return Promise.resolve();
+    }
+    var query = root.__BW_REPLICATION_DIGESTS__;
+    if (typeof query !== 'function') return Promise.resolve();
+    replicationReconciling = true;
+    replicationLastReconcileMs = now;
+    return storedStateRecord(
+      stores.document, REPLICATION_LINK_KIND, 'documentId', bookId, null
+    ).then(function (link) {
+      if (!link.payload || !link.payload.replicationBookId) return null;
+      return Promise.all([
+        Promise.resolve(query(link.payload.replicationBookId)),
+        readHighlightCollection('document-highlights'),
+        readHighlightCollection('epub-highlights')
+      ]).then(function (values) {
+        var view = values[0];
+        var domains = view && view.domains && typeof view.domains === 'object'
+          ? view.domains : {};
+        var reads = { 'document-highlights': values[1], 'epub-highlights': values[2] };
+        var chain = Promise.resolve();
+        REPLICATION_DOMAINS.forEach(function (spec) {
+          chain = chain.then(function () {
+            var payload = reads[spec.kind].payload;
+            return sha256Hex(canonicalJSONString(payload)).then(function (localDigest) {
+              var remote = domains[spec.domain];
+              var remoteDigest = remote && typeof remote.digest === 'string'
+                ? remote.digest : null;
+              if (remoteDigest === null) {
+                // 对端还没有这个域：本端也为空即视为一致；
+                // 本端非空则按不一致走重同步（首次搬运也走同一条路）。
+                if (!payload.length) return null;
+              } else if (remoteDigest === localDigest) {
+                return null;
+              }
+              var lastResync = Number(replicationLastResyncMs[spec.domain] || 0);
+              if (now - lastResync < REPLICATION_RESYNC_COOLDOWN_MS) return null;
+              replicationLastResyncMs[spec.domain] = now;
+              if (typeof root.dlog === 'function') {
+                root.dlog(
+                  '复制对账不一致:' + spec.domain + ',触发整域重同步(' +
+                    payload.length + '条)',
+                  '#ffb020'
+                );
+              }
+              return enqueueReplicationCommand(REPLICATION_RESYNC_URL, 'POST', {
+                domain: spec.domain,
+                items: clone(payload)
+              });
+            });
+          });
+        });
+        return chain;
+      });
+    }).catch(function (error) {
+      if (typeof root.dlog === 'function') {
+        root.dlog('复制对账失败:' + String(error && error.code || error), '#ffb020');
+      }
+    }).then(function () { replicationReconciling = false; });
   }
 
   function placementEntityIds(note) {

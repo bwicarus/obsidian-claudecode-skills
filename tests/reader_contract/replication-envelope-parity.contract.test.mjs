@@ -105,3 +105,33 @@ test("drain settles only accepted commands (at-least-once, server-side idempoten
   assert.match(drain, /accepted\.has\(/);
   assert.doesNotMatch(drain, /outcome === 'applied'/, "接收端从不谎称 applied");
 });
+
+test("resync and digest-query names agree across all sites", () => {
+  // 整域重同步：runtime 发送端 ↔ Windows 执行器
+  assert.match(RUNTIME, /REPLICATION_RESYNC_URL = '\/replication\/resync'/);
+  assert.match(APPLY, /RESYNC_URL = "\/replication\/resync"/);
+  assert.match(APPLY, /_RESYNC_DOMAINS = frozenset\(\("pdf-highlights", "epub-highlights"\)\)/);
+  assert.match(RUNTIME, /domain: 'pdf-highlights'/);
+  assert.match(RUNTIME, /domain: 'epub-highlights'/);
+  // 摘要查询：C# action ↔ 传输层 ↔ 视图 contract ↔ Python 导出 contract
+  const CS_INTAKE = read(
+    "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReplicationCommandIntake.cs",
+  );
+  assert.match(CS_INTAKE, /DigestQueryType = "replication-digest-query"/);
+  assert.match(VOICE, /request\("replication-digest-query"/);
+  assert.match(CS_INTAKE, /DigestsViewContract = "replication-digests-view\/1"/);
+  assert.match(VOICE, /"contract", "replicationBookId", "generatedAtUtcMs", "domains"/);
+  assert.match(APPLY, /REPLICATION_DIGESTS_CONTRACT = "replication-digests\/1"/);
+  assert.match(CS_INTAKE, /!= "replication-digests\/1"/);
+});
+
+test("both ends materialize domains by the same rule before digesting", () => {
+  // Python：order → 存活条目，序外存活条目按 id 排序补末尾
+  assert.match(APPLY, /def materialize_domain_items/);
+  assert.match(APPLY, /for item_id in sorted\(items\):/);
+  // App：readHighlightCollection 的物化即对账输入（canonical + sha256）
+  assert.match(RUNTIME, /sha256Hex\(canonicalJSONString\(payload\)\)/);
+  // Python canonical 与 JS JSON.stringify 逐位一致的三要素
+  assert.match(APPLY, /sort_keys=True, separators=\(",", ":"\)/);
+  assert.match(APPLY, /ensure_ascii=False/);
+});

@@ -1247,6 +1247,7 @@ internal sealed class DirectBridgeProtocolSession
         ReplicationCommandEnvelope,
         CancellationToken,
         Task<ReplicationCommandIntakeReceipt>> _acceptReplicationCommand;
+    private readonly Func<string, object> _queryReplicationDigests;
     private readonly Action<string> _contextDeliveryModeChanged;
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly bool _bridgeOnlyMode;
@@ -1285,6 +1286,7 @@ internal sealed class DirectBridgeProtocolSession
             CancellationToken,
             Task<ReplicationCommandIntakeReceipt>>?
             acceptReplicationCommand = null,
+        Func<string, object>? queryReplicationDigests = null,
         Action<string>? contextDeliveryModeChanged = null,
         IReaderDictionaryFallback? dictionaryFallback = null,
         IReaderLocalAnkiWriter? localAnkiWriter = null,
@@ -1334,6 +1336,11 @@ internal sealed class DirectBridgeProtocolSession
             ?? ((_, _) => throw new DirectProtocolException(
                 "BW_REPLICATION_COMMAND_UNAVAILABLE",
                 "复制命令接收器尚未接线",
+                retryable: true));
+        _queryReplicationDigests = queryReplicationDigests
+            ?? (_ => throw new DirectProtocolException(
+                "BW_REPLICATION_DIGESTS_UNAVAILABLE",
+                "复制摘要查询尚未接线",
                 retryable: true));
         _contextDeliveryModeChanged = contextDeliveryModeChanged
             ?? (_ => { });
@@ -1474,6 +1481,9 @@ internal sealed class DirectBridgeProtocolSession
                     payload = await HandleReplicationCommandAsync(
                         message,
                         cancellationToken).ConfigureAwait(false);
+                    break;
+                case ReplicationCommandProtocol.DigestQueryType:
+                    payload = HandleReplicationDigestQuery(message);
                     break;
                 case "start":
                     DirectStartActionResult start =
@@ -2106,6 +2116,42 @@ internal sealed class DirectBridgeProtocolSession
             mutationId = envelope.MutationId,
             outcome = receipt.Outcome,
         };
+    }
+
+    // 对账查询（规格 §6）：回 Windows 端每域摘要视图，App 与本端物化摘要
+    // 比对，不一致触发整域重同步。与命令入口同一 context-only 闸。
+    private object HandleReplicationDigestQuery(JsonElement message)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "sessionId",
+            "replicationBookId");
+        RequireAuthenticated();
+        if (
+            RequireContextDeliveryMode()
+                != DirectContextDeliveryMode.SnapshotMcp
+            || _phase != DirectProtocolPhase.ContextOnly
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_REPLICATION_COMMAND_CONTEXT_ONLY_REQUIRED",
+                "复制摘要查询只允许在纯上下文连接中进行");
+        }
+        RequireContextOnlySession(RequireSafeId(message, "sessionId"));
+        string replicationBookId = RequireString(
+            message,
+            "replicationBookId",
+            64);
+        if (!ReplicationCommandProtocol.IsReplicationBookId(replicationBookId))
+        {
+            throw new DirectProtocolException(
+                "BW_REPLICATION_COMMAND_INVALID",
+                "replicationBookId 形状非法");
+        }
+        return _queryReplicationDigests(replicationBookId);
     }
 
     private object HandleStatus(JsonElement message)
