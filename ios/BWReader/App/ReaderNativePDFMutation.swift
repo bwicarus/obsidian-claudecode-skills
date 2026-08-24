@@ -343,9 +343,7 @@ actor ReaderNativePDFMutationActor {
                 guard normalizedActual.contains(
                     Self.probeComparableText(requiredProbe)
                 )
-                        || normalizedActual.contains(
-                            Self.probeComparableText("用户插入页")
-                        ) else {
+                        || normalizedActual.contains("BWPAGE") else {
                     // 诊断要能分辨两种根因：读错页（相邻扫描页无文字层，
                     // actual 为空）还是 PDFKit 跨文档插页写出后丢文字
                     // （actual 为空但邻页有字/页数对）。把现场带全。
@@ -1562,7 +1560,10 @@ actor ReaderNativePDFMutationActor {
                 context: nil
             )
             NSAttributedString(
-                string: "— 用户插入页 —",
+                // BWPAGE 是校验锚点：CJK 字符经 PDF 提取会变形成部首区
+                // 码点（⻚ 在 CJK 部首补充区甚至没有 NFKC 映射），只有
+                // ASCII 标记提取永不变形。
+                string: "— 用户插入页 · BWPAGE —",
                 attributes: [
                     .font: UIFont.systemFont(ofSize: 9),
                     .foregroundColor: UIColor.secondaryLabel,
@@ -1571,9 +1572,8 @@ actor ReaderNativePDFMutationActor {
         }
         guard let document = PDFDocument(data: data),
               let page = document.page(at: 0),
-              Self.probeComparableText(page.string ?? "").contains(
-                  Self.probeComparableText("用户插入页")
-              ) else {
+              Self.probeComparableText(page.string ?? "")
+                  .contains("BWPAGE") else {
             throw ReaderNativePDFMutationError.stagingFailed(
                 "无法生成带文字层的 PDF 页面"
             )
