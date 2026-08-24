@@ -230,8 +230,16 @@ test("去边豁免用户插入页：白纸文字页不得被书页的裁切窗�
   const RENDER = read("_server_deploy/static/pdf/reader.src/04-render.js");
   const UISHARED = read("_server_deploy/static/pdf/pdf-uishared.js");
   const crop = section(RENDER, "function _applyCropToWrap(", "function _prefetch");
-  // 豁免必须发生在 crop 生效判断里（走 remove 分支），且按页号查用户页
+  // 正解 = 同宽同高、零位移：用户页与书页同裁后尺寸（行列对齐），
+  // 但 --crop-l/-t 置 0 不位移内容 —— 覆盖层 HTML(inset:0) 随窄宽
+  // 自动换行重排，不裁字。完全豁免（比书页宽一截）与套书页位移
+  // （文字被裁）都是真机验证过的错误形态。
   assert.match(crop, /_upIsRealPage/);
-  assert.match(crop, /!_cropActive\(\) \|\| _isUserPage/);
+  assert.match(crop, /setProperty\('--crop-l', '0px'\)/);
+  assert.match(crop, /setProperty\('--crop-t', '0px'\)/);
+  // 用户页分支也要设与书页同款的裁后宽高（同一公式）
+  const userBranch = crop.slice(crop.indexOf("_upIsRealPage"), crop.indexOf("--full-h"));
+  assert.match(userBranch, /cw \* \(1 - fl - fr\)/);
+  assert.match(userBranch, /ch \* \(1 - ft - fb\)/);
   assert.match(UISHARED, /window\._upIsRealPage = function/);
 });

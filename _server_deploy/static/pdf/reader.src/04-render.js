@@ -44,19 +44,29 @@ async function renderPage(num) {
 // 纯位移→各层相对位置不变、选中坐标(ptToLocal 用 getBoundingClientRect)自动跟随,不会错位。
 // canvas/层 CSS 尺寸仍是整页(cw×ch);裁切只靠 wrap 窗口 + 子层位移。
 function _applyCropToWrap(wrap, cw, ch) {
-  // 用户插入页豁免去边：裁切参数按**书页内容包围盒**（漫画/扫描正文）算，
-  // 白纸文字页的内容在左上、大片留白 —— 套同一窗口会把正文裁出可见区
-  // （2026-08-25 真机：放大触发去边后自建页文字被左缘裁半）。
-  const _pn = wrap && wrap.dataset ? parseInt(wrap.dataset.pageNum, 10) : 0;
-  const _isUserPage = _pn > 0 &&
-    typeof window._upIsRealPage === 'function' && window._upIsRealPage(_pn);
-  if (!_cropActive() || _isUserPage) {
+  if (!_cropActive()) {
     wrap.classList.remove('crop-on');
     wrap.style.removeProperty('--crop-l');
     wrap.style.removeProperty('--crop-t');
     return;
   }
   const fl = _crop.l / 100, fr = _crop.r / 100, ft = _crop.t / 100, fb = _crop.b / 100;
+  // 用户插入页：裁切参数按**书页内容包围盒**算，套同一位移会把白纸页
+  // 左上的正文裁出可见区（2026-08-25 真机：文字被左缘裁半）；完全豁免
+  // 又会比裁窄的书页宽出一截（同日真机二连）。正解 = **同宽同高、零位移**：
+  // wrap 收成与书页一致的裁后尺寸，覆盖层 HTML（inset:0）随窄宽自动换行
+  // 重排，不裁字；被盖住的底图页边无所谓。
+  const _pn = wrap && wrap.dataset ? parseInt(wrap.dataset.pageNum, 10) : 0;
+  if (_pn > 0 && typeof window._upIsRealPage === 'function' && window._upIsRealPage(_pn)) {
+    wrap.classList.add('crop-on');
+    wrap.style.width = Math.max(1, Math.floor(cw * (1 - fl - fr))) + 'px';
+    wrap.style.height = Math.max(1, Math.floor(ch * (1 - ft - fb))) + 'px';
+    wrap.style.setProperty('--crop-l', '0px');
+    wrap.style.setProperty('--crop-t', '0px');
+    wrap.style.setProperty('--full-w', cw + 'px');
+    wrap.style.setProperty('--full-h', ch + 'px');
+    return;
+  }
   wrap.classList.add('crop-on');
   wrap.style.width = Math.max(1, Math.floor(cw * (1 - fl - fr))) + 'px';
   wrap.style.height = Math.max(1, Math.floor(ch * (1 - ft - fb))) + 'px';
