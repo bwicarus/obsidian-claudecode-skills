@@ -1976,6 +1976,16 @@ window._favOpenPicker = function () {
   function _upTempFail(tempId) {   // job error:移除临时元素(缓冲的字仍在 _upTextSnap[tempId],不静默丢)
     var el = _upTempEls[tempId]; if (el) { try { el.remove(); } catch (_) {} }
     delete _upTempEls[tempId];
+    // 乐观新建是"建页即进编辑"：失败拆页时编辑面板随元素消失，但编辑态
+    // (_upEditing 句柄 + body.up-editing)若不清，之后每次点 ➕ 都弹
+    // "先完成当前正在编辑的页"——2026-08-25 用户实锤的残留态，直到重开书
+    // 才解除。必须走 _upCloseInline 连句柄一起清:只摘 class 的话,
+    // 入口检查的另一半(_upEditing)仍拦着。
+    if (_upEditing && el && el.contains(_upEditing.el)) {
+      _upCloseInline();
+    } else {
+      document.body.classList.remove('up-editing');
+    }
   }
   function _upWatchCreate(jobId, tempId, rec, mini) {
     var t = setInterval(function () {
