@@ -30,6 +30,27 @@ CONTRACT = "sync-gateway/2"
 #   历史写法硬编码了 /home/bwicarus/claude/scripts，换机就断。
 _LEDGER_SCRIPTS = os.path.join(
     os.environ.get("CLAUDE_PROJECT", "."), "scripts")
+
+# 哪些集合的改/删值得进账本。
+#
+# 用户 2026-08-24 定的判据:「对于本身不落库的内容我们可以暂时认为其不够重要
+# 不需要落库,或者像选中和高亮事件这种本身频率就太高」。
+#
+# ⚠ 这张表存在的理由是**防未来**,不是防现在。今天同步注册表里恰好只有这四个,
+#   都是低频的。但只要哪天把高亮/便签加进同步(它们今天在
+#   ReaderPiSyncCoordinator 的 unsupportedDomains 里),账本就会**突然被
+#   高频事件灌满**,而且没有任何一处会提醒 —— 那正是"改一个地方,另一个地方
+#   悄悄变样"的形态。所以这里用白名单而不是照单全收。
+#
+# ⚠ 但白名单本身也会静默:新集合进了同步却不在这张表里,就永远没有版本记录,
+#   而且没人知道。所以下面遇到表外集合时**每个集合出一次声**(只一次,不刷屏)。
+_LEDGER_MUTATE_COLLECTIONS = frozenset({
+    "card-entities",
+    "card-states",
+    "user-settings",
+    "vocabulary-state",
+})
+_LEDGER_UNKNOWN_SEEN: set[str] = set()
 SYNC_CONTRACT = "sync-v3"
 SYNC_CHANGE_CONTRACT = "record-parent-state/1"
 REGISTRY_DIGEST_PREFIX = (
@@ -956,6 +977,19 @@ def _ledger_sync_mutation(connection, change, device_id, now):
         import sys as _sys
         _sys.path.insert(0, _LEDGER_SCRIPTS)
         import attention_profile as AP
+        collection = str(change.get("collection") or "")
+        if collection not in _LEDGER_MUTATE_COLLECTIONS:
+            # 出一次声就够 —— 静默跳过会让"新集合没有版本记录"永远无人发现,
+            # 而每条都喊会把日志刷爆(高频集合正是被挡在这里的那种)。
+            if collection and collection not in _LEDGER_UNKNOWN_SEEN:
+                _LEDGER_UNKNOWN_SEEN.add(collection)
+                print(
+                    "[ledger] 集合 %s 的改/删不进账本"
+                    "(不在 _LEDGER_MUTATE_COLLECTIONS 白名单里)。"
+                    "若它值得留版本记录,把它加进那张表。" % collection,
+                    flush=True,
+                )
+            return
         deleted = bool(change.get("_deleted"))
         # ⚠ 「哪个端」不猜：直接读 owner lease 里的 ownerRole。
         #   服务端本来就在强校验它（native|extension|pwa），
@@ -975,7 +1009,7 @@ def _ledger_sync_mutation(connection, change, device_id, now):
         AP.append_raw(
             "mutate",
             "%s %s %s" % ("delete" if deleted else "edit",
-                          change.get("collection") or "",
+                          collection,
                           change.get("_record_id") or ""),
             ts=int(now or 0) or None,
             actor="user",          # 同步流上的变更来自客户端 = 用户那一侧
@@ -983,7 +1017,7 @@ def _ledger_sync_mutation(connection, change, device_id, now):
             device=str(device_id or "") or None,
             extra={
                 "op": "delete" if deleted else "edit",
-                "kind": str(change.get("collection") or ""),
+                "kind": collection,
                 "target_id": str(change.get("_record_id") or ""),
                 # ⚠ 标出来源。助手侧那个埋点也写 mutate；不标的话
                 #   同一次 AI 改动可能在账本里出现两条而无从分辨。

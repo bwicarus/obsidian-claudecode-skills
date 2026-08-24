@@ -171,3 +171,73 @@ test("账本脚本路径不得硬编码 Pi 绝对路径", () => {
   );
   assert.match(line, /CLAUDE_PROJECT/);
 });
+
+// ── 用户 2026-08-24 定的判据 ───────────────────────────────────────
+//   「对于本身不落库的内容我们可以暂时认为其不够重要不需要落库，
+//     或者像选中和高亮事件这种本身频率就太高」
+test("⚠ 白名单闸存在 —— 防的是未来，不是现在", () => {
+  assert.match(
+    RELAY, /_LEDGER_MUTATE_COLLECTIONS = frozenset\(\{/,
+    "必须是白名单而不是照单全收",
+  );
+  // ⚠ 断言"符号出现过"是不够的：把判定改成 `if False:` 之后常量还在，
+  //   断言照样通过 —— 变异验证抓到的正是这一点（今晚第二次栽在同一形态上）。
+  //   要钉住的是**闸真的挡在路上**。
+  const fnBody = RELAY.slice(
+    RELAY.indexOf("def _ledger_sync_mutation("),
+    RELAY.indexOf("def _push_locked("),
+  );
+  assert.match(
+    fnBody, /if collection not in _LEDGER_MUTATE_COLLECTIONS:/,
+    "闸必须真的判白名单，不能只声明常量",
+  );
+  assert.match(
+    fnBody, /
+            return
+/,
+    "不在白名单里必须**直接返回** —— 否则闸判了也不拦",
+  );
+  const at = RELAY.indexOf("_LEDGER_MUTATE_COLLECTIONS = frozenset({");
+  const block = RELAY.slice(at, at + 260);
+  for (const c of ["card-entities", "card-states", "user-settings", "vocabulary-state"]) {
+    assert.ok(block.includes(c), `白名单里少了 ${c}`);
+  }
+});
+
+test("⚠ 白名单必须与同步注册表一致 —— 两边分叉就是静默漏记", () => {
+  // 同步注册表摘要决定"什么会越界到这里"；白名单决定"越界了记不记"。
+  // 前者多一个而后者没跟上 → 那类东西永远没有版本记录，而且没人知道。
+  const digestAt = RELAY.indexOf("CARD_REGISTRY_DIGEST = (");
+  const digest = RELAY.slice(digestAt, digestAt + 320);
+  const inDigest = [...digest.matchAll(/"([a-z-]+):explicit/g)].map((m) => m[1]);
+  const wlAt = RELAY.indexOf("_LEDGER_MUTATE_COLLECTIONS = frozenset({");
+  const wl = RELAY.slice(wlAt, wlAt + 260);
+  assert.ok(inDigest.length >= 4, `注册表里只解析出 ${inDigest.length} 个集合`);
+  for (const c of inDigest) {
+    assert.ok(
+      wl.includes(`"${c}"`),
+      `${c} 进了同步注册表却不在账本白名单里 —— 它的改/删将永远没有记录`,
+    );
+  }
+});
+
+test("⚠ 表外集合要出声，但每个只出一次", () => {
+  const fn = RELAY.slice(
+    RELAY.indexOf("def _ledger_sync_mutation("),
+    RELAY.indexOf("def _push_locked("),
+  );
+  // 同样不能只断言符号出现：要钉住**判定**和**记录**两件事都在。
+  assert.match(
+    fn, /if collection and collection not in _LEDGER_UNKNOWN_SEEN:/,
+    "必须真的按集合去重判定，不能只提到那个集合名",
+  );
+  assert.match(
+    fn, /_LEDGER_UNKNOWN_SEEN\.add\(collection\)/,
+    "喊过要记下来 —— 不记就成了每条都喊，日志会被刷爆",
+  );
+  assert.match(
+    fn, /print\(\s*
+?\s*"\[ledger\] 集合 %s 的改\/删不进账本"/,
+    "必须真的打印出来 —— 静默跳过会让'新集合没有版本记录'永远无人发现",
+  );
+});
