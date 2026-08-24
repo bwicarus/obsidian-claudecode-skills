@@ -32,6 +32,7 @@ from bridge_core import (
     start_direct_service,
     stop_direct_service,
 )
+import replication_apply
 from control_plane import (
     ControlPaths,
     SubprocessExactCommandRunner,
@@ -1130,6 +1131,21 @@ class ReaderPCWindow:
                 name="readerpc-autostart-converge",
                 daemon=True,
             ).start()
+        # 两节点复制的摄取/分发线程：spool → 账本 → 数据副本。
+        # ⚠ spool 在 C# 桥的 runtime 目录（bw-computer-voice-bridge/runtime），
+        # 账本与数据副本在 BWReader —— 两个根不是一个地方，传错会静默空转。
+        # 每轮结果写 replication-apply.status.json（诊断出口），
+        # 任何一轮失败都不杀线程。daemon 随进程退出，无需 stop 协议。
+        threading.Thread(
+            target=replication_apply.worker_loop,
+            args=(
+                self.readerpc_paths.local_root,
+                self.bridge_paths.runtime_status.parent
+                / "replication-spool",
+            ),
+            name="readerpc-replication-apply",
+            daemon=True,
+        ).start()
 
         root.title(PRODUCT_NAME)
         # 高度要装下 3 个服务行 + 6 行选项 + 页脚。

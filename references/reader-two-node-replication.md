@@ -296,8 +296,23 @@ items = items.filter(function (item) { return item && item.id !== request.id; })
         落账分配游标 / mutationId+摘要幂等 / 同 id 不同内容出声冲突 /
         spool 摄取（毒行收集出声不阻塞）/ 段回收（只删非当日且全部入账的段，
         无 TOCTOU；毒段保留当证据）；测试 14 条 + 5 处变异破坏即红。
-      **待做**：spool 摄取接进 readerpc 周期任务 + 分发（按 op 应用到
-      Windows 数据副本并写活动账本 channel=mutate）
+      · 分发（`replication_apply.py`，2026-08-24 落地）：数据副本
+        `replication-data/<repbookId>/<domain>.json`（条目+墓碑+序，与 App
+        前提 B 同构，可对账）；执行映射 `_EXECUTORS` 就是端点白名单的把守者
+        （高亮 PDF/EPUB 六条，POST=整条 upsert / PATCH=白名单字段 /
+        DELETE=墓碑，全部幂等；先落数据后推游标）；毒命令进死信 jsonl
+        出声不堵管（命令仍在账本可按游标 redrive）；readerpc 启动即挂
+        常驻线程（30s 一轮），每轮写 `replication-apply.status.json`
+        诊断出口。测试 10 条 + 3 处变异破坏即红。
+        ⚠ **spool 在 C# 桥的 runtime 目录**（`bw-computer-voice-bridge/
+        runtime/replication-spool`），账本/数据副本在 `%LOCALAPPDATA%/
+        BWReader` —— 两个根不是一处，接线时差点静默空转，已用显式传参
+        + 测试钉死。
+      ⚠ **发送端约定（步骤 3 必须遵守）**：POST 的 op.body = 发送端
+      **已落库的完整条目**（含 id/time），不是原始请求 —— 否则两端条目
+      内容永远对不齐，对账一直红。
+      账本 SQLite 的 commands 表本身就是活动账本原始层（§8：一条命令既是
+      载荷也是记录），暂不另写 jsonl；与 Pi 派生层的桥接等消费端出现再做
 - [ ] 3 App 队列
 - [ ] 4 对账
 - [ ] 5 账本
