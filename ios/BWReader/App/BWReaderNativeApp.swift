@@ -307,6 +307,15 @@ private struct ReaderRootView: View {
             )
             return
         }
+        // 启动恢复此前抢在书库后台扫描之前：索引缓存里这本书的
+        // byteCount/mtime 还是上一会话（真实插入页改写文件）之前的旧值，
+        // 拿旧记录开书必然 BW_LOCAL_BOOK_CHANGED，每次重启都回到书库
+        // （2026-08-25 横幅实锤）。先重扫（只是 stat 全部文件，很快），
+        // 再查记录 —— 手动打开一直成功正是因为那时扫描早已完成。
+        await library.rescan()
+        for _ in 0..<100 where library.isScanning {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
         guard reference.libraryID == library.stableLibraryID else {
             failInitialRestore(
                 "当前书籍文件夹与上次书库不一致；请从当前书库重新打开。"
