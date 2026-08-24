@@ -782,6 +782,16 @@ def _db():
         c.execute("ALTER TABLE events ADD COLUMN xver INTEGER DEFAULT 0")
     except Exception:
         pass
+    # 账本 v3:哪个端做的 / 哪台机做的。照 xver 的补列先例，老库自动升。
+    #
+    # ⚠ **叫 client 不叫 surface** —— 下面 event_mentions 表里的 `surface`
+    #   是「命中的词形」，同一个库里两个语义不同的 surface，任何
+    #   SELECT/JOIN 取错列**不报错、只算错**。
+    for _col, _type in (("client", "TEXT"), ("device", "TEXT")):
+        try:
+            c.execute("ALTER TABLE events ADD COLUMN %s %s" % (_col, _type))
+        except Exception:
+            pass
     c.execute("""CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)""")
     # ★mention 迁移(审查采纳增量双写):每个词的每次出现=一行,带 span/lang/method/conf/parent。
     #   与 events.terms **并存**(不动老打分);新打分器读这张表,一周对账后再切读路径。
@@ -796,11 +806,17 @@ def _db():
 RAW = ATT_DIR / "raw-events.jsonl"   # ★没有天然源文件的渠道的**账本**(append-only,永不删;--rebuild 也重导它)
 
 
-LEDGER_SCHEMA = 2   # 账本行协议版本(加字段就 +1;读侧按此兼容老行)
+# 抽不出词也要入库的渠道。**记账类事件的价值在事件本身,不在词** ——
+# "删除了卡片 c_ab12" 抽不出任何有意义的词,但它正是版本记录要留的那条。
+TERMLESS_CHANNELS = {"mutate"}
+
+LEDGER_SCHEMA = 3   # 账本行协议版本(加字段就 +1;读侧按此兼容老行)
+                    # v3(2026-08-24):+client(native|extension|pwa) +device(哪台机)
 
 
 def append_raw(channel, text, ts=None, file="", page=0, uid="", weight=None, hint="", lang=None,
-               extra=None, actor="user", session_id=None, turn_id=None, call_id=None, anchor=None):
+               extra=None, actor="user", session_id=None, turn_id=None, call_id=None, anchor=None,
+               client=None, device=None):
     """★统一事件入口(给**没有天然源文件**的渠道:眼镜 gaze / 工具调用 / 外部 App…)。
     写 append-only 账本 raw-events.jsonl,由 import_raw() 导进派生索引 —— 于是新渠道
     **既不用各造一套源日志格式,也不会被 --rebuild 删掉**。
@@ -815,11 +831,27 @@ def append_raw(channel, text, ts=None, file="", page=0, uid="", weight=None, hin
     #   v/ts/channel/text/file/page/uid  = 基本;actor = user|ai|system(谁做的);
     #   session_id/turn_id/call_id       = 追溯锚(哪轮对话/哪次工具调用产生的);
     #   anchor/extra                     = 结构化补充(选区/坐标/任意 payload)
+    #   client                           = 哪个端做的:native|extension|pwa
+    #   device                           = 哪台机(粗粒度,不是真定位)
+    #
+    # ⚠ 为什么叫 client 不叫 surface(设计稿 §3.3 用的词):
+    #   **本文件里 `surface` 已经被占用**,而且是完全不同的意思 ——
+    #   `event_mentions.surface` 指的是命中的**词形/表层形式**(见下方建表处)。
+    #   同一个库里两个语义不同的 surface,任何 SELECT/JOIN 取错列**不会报错,
+    #   只会算错**。取值仍照抄仓库既有的 ownerRole 词汇(native|extension|pwa),
+    #   不新造第四套。
+    #
+    # ⚠ 为什么叫 device 不叫 place(设计稿 §3.4 用的词):
+    #   诚实一点 —— 我们记的**不是地点**,是"哪台机"。真定位全仓零基础设施,
+    #   而 IP 这条路是死的(请求都经 nginx 反代,remote_addr 恒 127.0.0.1;
+    #   Tailscale 地址与所在网络无关,区分不了在家/在外)。叫 place 会让
+    #   后来的人以为这里有地理信息。
     rec = {"v": LEDGER_SCHEMA, "ts": int(ts or time.time()), "channel": str(channel),
            "actor": str(actor or "user"), "text": str(text or ""),
            "file": file or "", "page": int(page or 0), "uid": str(uid or "")}
     for k, v in (("weight", weight), ("hint", hint), ("lang", lang),
-                 ("session_id", session_id), ("turn_id", turn_id), ("call_id", call_id)):
+                 ("session_id", session_id), ("turn_id", turn_id), ("call_id", call_id),
+                 ("client", client), ("device", device)):
         if v is not None and v != "":
             rec[k] = v
     for k, v in (("anchor", anchor), ("extra", extra)):
@@ -940,9 +972,13 @@ def import_raw(c):
         if "/.sandbox/" in (d.get("file") or ""):
             continue
         # v1 行没有 v/actor 字段 —— 照收(账本协议向后兼容,老数据不丢)
+        # ⚠ client/device 必须**显式往下传**。此前 extra/anchor/actor/session_id
+        #   就是因为没传，写进了账本却在派生索引里查不到 —— 账本里有、
+        #   查询里没有，是最容易被当成"功能没做"的一种沉默。
         n += add_event(c, d.get("ts") or 0, d.get("channel") or "raw", d.get("text") or "",
                        d.get("file") or "", d.get("page") or 0, uid=d.get("uid") or "",
-                       weight=d.get("weight"), hint=d.get("hint") or "", lang=d.get("lang"))
+                       weight=d.get("weight"), hint=d.get("hint") or "", lang=d.get("lang"),
+                       client=d.get("client"), device=d.get("device"))
     return n
 
 
@@ -979,10 +1015,16 @@ def _known_terms(c, file=""):
 
 
 def add_event(c, ts, channel, text, file="", page=0, uid="", weight=None, hint="", lang=None,
-              known_only=False):
+              known_only=False, client=None, device=None):
     """把一条事件写进**派生索引**(自动抽词、按 src_key 幂等)。
     ⚠ 这是内部函数:调用方必须是导入器(读的是 append-only 的源)。
       新渠道请用 **append_raw()**(写账本)—— 直写本表的数据 --rebuild 时会丢。"""
+    # ⚠⚠ **src_key 绝不能掺 client/device。**
+    #   一旦掺进这串，raw-events.jsonl 里全部历史行会重算出新 key →
+    #   INSERT OR REPLACE 匹配不到老行 → 老行留着、新行再进一遍，
+    #   **同一件事在画像里权重翻倍**，而且没有任何地方会报错。
+    #   代价是「同一秒同一页不同界面」两条事件会被合成一条 —— 这是
+    #   有意接受的取舍：把历史数据搞脏比丢一条并发事件贵得多。
     key = hashlib.sha1(f"{channel}|{int(ts)}|{hint}|{(text or '')[:80]}|{file}|{page}".encode()).hexdigest()[:20]
     # ★及时性:同版本已存在 → 直接跳过(**别白跑分词**,它是增量导入的瓶颈)。
     #   抽取器升版(EXTRACTOR_VER)时旧行会被重抽(下面 REPLACE),所以升版即自动全量刷新。
@@ -1001,13 +1043,21 @@ def add_event(c, ts, channel, text, file="", page=0, uid="", weight=None, hint="
         #   这比穷举停用词稳健,也顺带堵死「AI 造词→焦点→概念」的自强化环。
         known = _known_terms(c, file)   # 在书里聊 → 只认这本书的词;不在书里 → 全局已知词
         terms = [t for t in terms if (norm_key(t) or t) in known]
-    if not terms:
+    if not terms and channel not in TERMLESS_CHANNELS:
+        # ⚠ 这道门槛此前是**完全无声**的:抽不出词就 return 0,没有任何日志。
+        #   对"删除了卡片 c_ab12"这类记账事件是致命的 —— 文本里本来就没有
+        #   可抽的词,于是导入计数看着正常、查询里却永远找不到它。
+        #   TERMLESS_CHANNELS 里的渠道豁免这道门槛(它们的价值在事件本身,
+        #   不在词);其余渠道行为完全不变。
         return 0
-    cur = c.execute("INSERT OR REPLACE INTO events(id,ts,channel,weight,text,terms,file,page,uid,src_key,xver)"
-                    " VALUES((SELECT id FROM events WHERE src_key=?),?,?,?,?,?,?,?,?,?,?)",
+    cur = c.execute("INSERT OR REPLACE INTO events(id,ts,channel,weight,text,terms,file,page,uid,src_key,xver,client,device)"
+                    " VALUES((SELECT id FROM events WHERE src_key=?),?,?,?,?,?,?,?,?,?,?,?,?)",
                     (key, int(ts), channel, float(weight if weight is not None else W.get(channel, 1.0)),
                      (text or "")[:TEXT_MAX], json.dumps(terms[:TERMS_MAX], ensure_ascii=False),
-                     file or "", int(page or 0), str(uid or ""), key, EXTRACTOR_VER))
+                     file or "", int(page or 0), str(uid or ""), key, EXTRACTOR_VER,
+                     # ⚠ 列加了值也必须加 —— 只在列清单里加名字、参数元组不补，
+                     #   sqlite 会直接报参数个数不符（这次会报错，算幸运的一种）。
+                     (client or None), (device or None)))
     return cur.rowcount
 
 
