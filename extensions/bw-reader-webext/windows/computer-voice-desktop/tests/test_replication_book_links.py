@@ -187,6 +187,53 @@ class ReplicationBookLinkStoreTests(unittest.TestCase):
         finally:
             replication_book_links.MAX_LINKS = original
 
+    def test_register_minted_pairs_without_content_material(self) -> None:
+        store = self._store()
+        minted = "repbook-" + "d" * 32
+        link = store.register_minted(
+            peer_book_id=PEER_A,
+            replication_book_id=minted,
+            display_name="LADR.pdf",
+        )
+        self.assertEqual(link.replication_book_id, minted)
+        self.assertIsNone(link.paired_sha256)
+        self.assertIsNone(link.paired_file_size)
+        # 幂等：同 peer 同 id 原样返回
+        again = store.register_minted(
+            peer_book_id=PEER_A,
+            replication_book_id=minted,
+            display_name="LADR-renamed.pdf",
+        )
+        self.assertEqual(again.replication_book_id, minted)
+        self.assertEqual(len(store.links()), 1)
+        # 无内容材料的链接不参与会合候选
+        self.assertEqual(store.find_rendezvous_candidates(SHA_1, 0), [])
+        # 基线由之后的 record_sync 补
+        synced = store.record_sync(minted, SHA_2)
+        self.assertEqual(synced.last_synced_sha256, SHA_2)
+        # 重开文件仍认识 None 材料
+        reloaded = ReplicationBookLinkStore(self.path)
+        self.assertIsNotNone(reloaded.resolve_by_peer(PEER_A))
+
+    def test_register_minted_refuses_silent_identity_swap(self) -> None:
+        store = self._store()
+        minted = "repbook-" + "d" * 32
+        store.register_minted(
+            peer_book_id=PEER_A, replication_book_id=minted, display_name="a",
+        )
+        with self.assertRaises(ReplicationLinkStoreError):
+            store.register_minted(  # App 重装重铸：同 peer 不同 id
+                peer_book_id=PEER_A,
+                replication_book_id="repbook-" + "e" * 32,
+                display_name="a",
+            )
+        with self.assertRaises(ReplicationLinkStoreError):
+            store.register_minted(  # 同 id 抢别的书
+                peer_book_id=PEER_B,
+                replication_book_id=minted,
+                display_name="b",
+            )
+
     def test_invalid_minted_id_is_rejected(self) -> None:
         store = ReplicationBookLinkStore(self.path, mint_id=lambda: "not-a-repbook-id")
         with self.assertRaises(ReplicationLinkStoreError):

@@ -130,7 +130,8 @@
       "what": "两节点复制的命令信封 replication-command/1（deviceId 设备族 / repbook 书身份 / actor / command-outbox op 原形）",
       "canonical": "extensions/bw-reader-webext/windows/computer-voice-desktop/replication_command_ledger.py",
       "tests": [
-        "extensions/bw-reader-webext/windows/computer-voice-desktop/tests/test_replication_command_ledger.py"
+        "extensions/bw-reader-webext/windows/computer-voice-desktop/tests/test_replication_command_ledger.py",
+        "tests/reader_contract/replication-envelope-parity.contract.test.mjs"
       ],
       "sites": [
         {
@@ -145,8 +146,13 @@
         },
         {
           "file": "_server_deploy/static/pdf/native-local-runtime.js",
-          "role": "App 发送端（计划中，步骤3）",
-          "note": "nativeSyncBatchOperation 分发层组装信封；新命令路径同时要进 NATIVE_SYNC_BATCH_ENDPOINTS 与 manifest 两处"
+          "role": "App 发送端",
+          "note": "buildReplicationEnvelope 构造信封（deviceId=stableDeviceId 的 pwa-install 族）；enqueueReplicationCommand 挂在高亮六条本地路由成功之后；出箱 drain 只删 outcome=accepted 的条目"
+        },
+        {
+          "file": "_server_deploy/static/pdf/rc-computer-voice.js",
+          "role": "传输层（透传+投递）",
+          "note": "pushReplicationCommands / window.__BW_REPLICATION_PUSH__：一次性 context-only 连接、一帧一命令、回执 exactObject 校验。⚠ 有 vendor 自带副本（build.py 生成）与 App bundle 副本，改完要重新生成/重新打包"
         }
       ],
       "gotchas": [

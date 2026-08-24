@@ -7068,3 +7068,109 @@ test("patching one highlight rewrites only that item record", async () => {
     "edited",
   );
 });
+
+// ── 两节点复制：App 侧命令出箱（步骤 3）─────────────────────────────────
+// 本地写立刻生效，操作入队；推送成功（服务端 fsync 确认）才删条目。
+// 信封形状必须与 Windows 权威（replication_command_ledger.py）逐字段一致。
+
+function replicationOutboxRecords(dataStoresState) {
+  return [...dataStoresState.document.values.entries()]
+    .filter(([key]) => key.startsWith("native-replication-outbox:"))
+    .map(([, record]) => record.value)
+    .sort((a, b) => (a.id < b.id ? -1 : 1));
+}
+
+function assertReplicationEnvelopeShape(envelope) {
+  assert.deepEqual(Object.keys(envelope).sort(),
+    ["actor", "contract", "deviceId", "op", "replicationBookId"]);
+  assert.equal(envelope.contract, "replication-command/1");
+  assert.match(envelope.deviceId, /^pwa-install-v1-[a-f0-9]{32}$/);
+  assert.match(envelope.replicationBookId, /^repbook-[a-f0-9]{32}$/);
+  assert.equal(envelope.actor, "user");
+  assert.deepEqual(Object.keys(envelope.op).sort(),
+    ["body", "method", "mutationId", "url"]);
+  assert.match(envelope.op.mutationId, /^mut-v2-[a-f0-9]{32}$/);
+}
+
+async function waitForOutboxLength(dataStoresState, expected) {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (replicationOutboxRecords(dataStoresState).length === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail("复制出箱没有达到预期长度 " + expected + "，当前 "
+    + replicationOutboxRecords(dataStoresState).length);
+}
+
+test("local highlight writes enqueue replication commands with a minted pair announcement", async () => {
+  const result = await harness();
+  await hlPost(result.context, "c_5555555555555555", 2, "replicate me");
+  const removed = await result.context.fetch("/pdf/api/highlights", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, id: "c_5555555555555555" }),
+  });
+  assert.equal(removed.status, 200);
+  const records = replicationOutboxRecords(result.dataStoresState);
+  assert.equal(records.length, 3, "pair 公告 + POST + DELETE");
+  const envelopes = records.map((record) => record.payload.envelope);
+  for (const envelope of envelopes) assertReplicationEnvelopeShape(envelope);
+  assert.equal(envelopes[0].op.url, "/replication/pair");
+  assert.deepEqual(Object.keys(envelopes[0].op.body).sort(),
+    ["displayName", "peerBookId", "replicationBookId"]);
+  assert.equal(envelopes[0].op.body.peerBookId, DEFAULT_LOCAL_BOOK_ID);
+  assert.equal(envelopes[0].op.body.replicationBookId,
+    envelopes[0].replicationBookId, "公告 body 与信封身份一致");
+  // 三条信封共享同一个铸好的书身份
+  assert.equal(new Set(envelopes.map((e) => e.replicationBookId)).size, 1);
+  // POST 带完整已落库条目（发送端约定：含 id/time），DELETE 只带 id
+  const post = envelopes[1];
+  assert.equal(post.op.method, "POST");
+  assert.equal(post.op.body.id, "c_5555555555555555");
+  assert.equal(typeof post.op.body.time, "number");
+  assert.equal(post.op.body.text, "replicate me");
+  assert.equal(envelopes[2].op.method, "DELETE");
+  assert.deepEqual(Object.keys(envelopes[2].op.body).sort(), ["file", "id"]);
+  // 链接记录持久且与信封一致
+  const link = result.dataStoresState.document.values.get(
+    `native-replication-link:${DEFAULT_LOCAL_BOOK_ID}:replication-link`,
+  );
+  assert.equal(link.value.payload.replicationBookId,
+    envelopes[0].replicationBookId);
+});
+
+test("replication drain deletes only server-accepted commands and retries the rest", async () => {
+  const result = await harness();
+  const pushed = [];
+  result.context.__BW_REPLICATION_PUSH__ = async (envelopes) => {
+    pushed.push(envelopes.map((e) => e.op.url));
+    // 只确认前两条（pair + POST），第三条留队
+    return envelopes.map((envelope, index) => ({
+      mutationId: envelope.op.mutationId,
+      outcome: index < 2 ? "accepted" : "rejected",
+    }));
+  };
+  await hlPost(result.context, "c_6666666666666666", 1, "first");
+  await hlPost(result.context, "c_7777777777777777", 2, "second");
+  await waitForOutboxLength(result.dataStoresState, 1);
+  const left = replicationOutboxRecords(result.dataStoresState);
+  assert.equal(left[0].payload.envelope.op.body.id, "c_7777777777777777",
+    "未被确认的命令必须留队重试");
+  assert.ok(pushed.length >= 1);
+  assert.equal(pushed[0][0], "/replication/pair", "配对公告先于数据命令投递");
+});
+
+test("replication enqueue failure never breaks the local write", async () => {
+  const result = await harness();
+  const originalBatch = result.documentStore.batch.bind(result.documentStore);
+  result.documentStore.batch = (mutations, options) => {
+    if (mutations.some((m) => m.collection === "native-replication-outbox")) {
+      return Promise.reject(new Error("outbox storage broken"));
+    }
+    return originalBatch(mutations, options);
+  };
+  const response = await hlPost(result.context, "c_8888888888888888", 3, "still saved");
+  assert.equal(response.status, 200, "本地写不因入队失败而失败");
+  const listed = await hlList(result.context);
+  assert.equal(listed.length, 1);
+  assert.equal(replicationOutboxRecords(result.dataStoresState).length, 0);
+});

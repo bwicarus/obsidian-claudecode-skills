@@ -4752,6 +4752,58 @@
     });
   }
 
+  // 两节点复制（references/reader-two-node-replication.md 步骤 3）的推送通道。
+  // 纯传输：信封由 runtime 构造（发送端副本见 contract-sites 的
+  // replication-command-envelope），这里透传并逐条投递 —— 一帧一命令是
+  // 256KiB 帧限下最稳的形态。连接形态照 Anki 通道：一次性独立 context-only
+  // 连接，不与语音/快照链路抢队，用完即关。
+  function pushReplicationCommands(envelopes) {
+    if (!Array.isArray(envelopes) || !envelopes.length) {
+      return Promise.resolve([]);
+    }
+    var session = randomSession();
+    var channel = null;
+    return openDirect({ endpoint: CONTEXT_ENDPOINT }).then(function (opened) {
+      channel = opened;
+      return channel.request("context-open", { sessionId: session.id });
+    }).then(function (value) {
+      exactObject(
+        value, ["sessionId", "state", "mode"], [], "复制命令 CONTEXT-OPEN 响应"
+      );
+      if (value.sessionId !== session.id ||
+          value.state !== "context-only" ||
+          value.mode !== CONTEXT_DELIVERY_SNAPSHOT) {
+        throw directError(
+          "复制命令上下文连接响应无效",
+          "BW_REPLICATION_PUSH_CONTEXT_INVALID",
+          false
+        );
+      }
+      var results = [];
+      var chain = Promise.resolve();
+      envelopes.forEach(function (envelope) {
+        chain = chain.then(function () {
+          return channel.request("replication-command", {
+            sessionId: session.id,
+            envelope: envelope,
+          }).then(function (reply) {
+            exactObject(
+              reply, ["contract", "mutationId", "outcome"], [], "复制命令回执"
+            );
+            results.push({
+              mutationId: safeText(reply.mutationId, "mutationId", 64, false),
+              outcome: safeText(reply.outcome, "outcome", 16, false),
+            });
+          });
+        });
+      });
+      return chain.then(function () { return results; });
+    }).finally(function () {
+      if (channel) return channel.close();
+    });
+  }
+  window.__BW_REPLICATION_PUSH__ = pushReplicationCommands;
+
   function lookupJapaneseFallback(value) {
     var request;
     try {
@@ -12058,6 +12110,7 @@
       return !!(state && !state.stopped && directChannelLive(state.channel));
     },
     lookupJapaneseFallback: lookupJapaneseFallback,
+    pushReplicationCommands: pushReplicationCommands,
     addLocalAnkiCard: addLocalAnkiCard,
     operateLocalAnkiCard: operateLocalAnkiCard,
     cancelPreparedGesture: cancelPreparedGesture,

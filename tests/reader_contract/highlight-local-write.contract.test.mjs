@@ -41,8 +41,13 @@ async function exactHighlightRuntime(options = {}) {
       },
       batch(mutations, options) {
         if (!documentStore) return Promise.resolve(mutations.map(() => ({ ok: true })));
-        batchOptions.push(options == null ? null : JSON.parse(JSON.stringify(options)));
-        batchMutations.push(mutations.map((mutation) => mutation.collection));
+        // 复制出箱的入队批与高亮 IDB 超时契约无关，不进观测记录。
+        const replicationOnly = mutations.every((mutation) =>
+          String(mutation.collection).startsWith("native-replication-"));
+        if (!replicationOnly) {
+          batchOptions.push(options == null ? null : JSON.parse(JSON.stringify(options)));
+          batchMutations.push(mutations.map((mutation) => mutation.collection));
+        }
         if (options?.transactionTimeoutMs && failFirstExactBatch) {
           failFirstExactBatch = false;
           const error = new Error("bounded IndexedDB transaction aborted");

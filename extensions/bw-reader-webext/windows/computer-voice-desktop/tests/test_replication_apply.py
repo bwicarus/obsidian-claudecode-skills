@@ -145,6 +145,49 @@ class ApplierTests(unittest.TestCase):
         # 表外字段的 PATCH 整条拒收，rects 保持原样
         self.assertEqual(data["items"]["h_aaaaaa"]["rects"], [[1, 2, 3, 4]])
 
+    def test_pair_announcement_registers_minted_link(self) -> None:
+        from replication_book_links import ReplicationBookLinkStore
+
+        links = ReplicationBookLinkStore(self.root / "links.json")
+        applier = ReplicationCommandApplier(
+            self.ledger, self.store, self.state, self.dead, link_store=links,
+        )
+        peer = "localbook-" + "b" * 64
+        self.ledger.append(envelope(
+            "1", "/replication/pair", "POST",
+            {"peerBookId": peer, "replicationBookId": BOOK,
+             "displayName": "LADR.pdf"},
+        ))
+        self.ledger.append(envelope(
+            "2", "/pdf/api/highlights", "POST", highlight_item(),
+        ))
+        report = applier.apply_pending()
+        self.assertEqual(report["applied"], 2)
+        self.assertEqual(report["deadLetters"], [])
+        link = links.resolve_by_peer(peer)
+        self.assertIsNotNone(link)
+        self.assertEqual(link.replication_book_id, BOOK)
+        # body 与信封身份不一致 → 死信出声
+        self.ledger.append(envelope(
+            "3", "/replication/pair", "POST",
+            {"peerBookId": peer,
+             "replicationBookId": "repbook-" + "f" * 32,
+             "displayName": "x"},
+        ))
+        report = applier.apply_pending()
+        self.assertEqual(len(report["deadLetters"]), 1)
+        self.assertIn("不一致", report["deadLetters"][0]["error"])
+
+    def test_pair_without_link_store_dead_letters(self) -> None:
+        self.ledger.append(envelope(
+            "1", "/replication/pair", "POST",
+            {"peerBookId": "localbook-" + "b" * 64,
+             "replicationBookId": BOOK, "displayName": "x"},
+        ))
+        report = self.applier.apply_pending()
+        self.assertEqual(report["applied"], 0)
+        self.assertEqual(len(report["deadLetters"]), 1)
+
     def test_corrupt_state_file_is_loud(self) -> None:
         self.state.write_text("{broken", "utf-8")
         with self.assertRaises(ReplicationApplyError):

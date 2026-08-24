@@ -1316,6 +1316,219 @@
     }, Promise.resolve());
   }
 
+  // ---- 两节点复制：App 侧命令出箱（规格步骤 3）----
+  //
+  // 用户在 App 上的高亮写入本地立刻生效（绝不等网络），随后把"操作"入队，
+  // 服务端可达时经 Direct 桥推送（rc-computer-voice 暴露的
+  // __BW_REPLICATION_PUSH__，一帧一命令）。信封 replication-command/1 的
+  // 权威定义在 Windows 侧 replication_command_ledger.py —— 这里是发送端
+  // 副本（contract-sites: replication-command-envelope）。
+  //
+  // 身份（前提 A 的 App 半边）：App 铸 replicationBookId（内容无关、铸后
+  // 不变），与配对公告 op(/replication/pair) **同一批原子落库** —— 链接
+  // 记录与公告要么都在要么都不在。POST 的 body 是**已落库的完整条目**
+  // （发送端约定，见规格 §9）；投递 at-least-once，服务端按 mutationId
+  // 幂等，所以推成功才删队列条目（先投后删）。
+  var REPLICATION_LINK_KIND = 'replication-link';
+  var REPLICATION_OUTBOX_COLLECTION = 'native-replication-outbox';
+  var REPLICATION_PAIR_URL = '/replication/pair';
+  var REPLICATION_DRAIN_INTERVAL_MS = 30000;
+  var replicationSeqCounter = 0;
+  var replicationDraining = false;
+  var replicationPushMissingLogged = false;
+
+  function replicationEligible() {
+    // 欢迎书不是用户内容；其 id 也过不了对端的 peerBookId 闸。
+    return bookId !== 'localbook-welcome';
+  }
+
+  function buildReplicationEnvelope(replicationBookId, url, method, body) {
+    return {
+      contract: 'replication-command/1',
+      deviceId: deviceId,
+      replicationBookId: replicationBookId,
+      actor: 'user',
+      op: {
+        mutationId: 'mut-v2-' + randomHex(16),
+        url: url,
+        method: method,
+        body: clone(body)
+      }
+    };
+  }
+
+  function replicationOutboxItemMutation(envelope, suffix) {
+    replicationSeqCounter += 1;
+    // 字典序 ≈ 入队序：毫秒时间戳 + 实例内单调计数。投递按这个序。
+    var sequence = 'ro-' +
+      Date.now().toString(16).padStart(12, '0') + '-' +
+      replicationSeqCounter.toString(16).padStart(6, '0');
+    return {
+      operation: 'put',
+      collection: REPLICATION_OUTBOX_COLLECTION,
+      value: {
+        id: bookId + ':' + sequence,
+        documentId: bookId,
+        payload: { envelope: clone(envelope) },
+        updatedAt: Date.now()
+      },
+      options: { mutationId: 'native-replication-outbox-' + suffix }
+    };
+  }
+
+  function enqueueReplicationCommand(url, method, body) {
+    if (!replicationEligible()) return Promise.resolve(false);
+    return serializeLocalStateMutation('document', 'replication-outbox', function () {
+      return storedStateRecord(
+        stores.document, REPLICATION_LINK_KIND, 'documentId', bookId, null
+      ).then(function (link) {
+        if (link.payload && link.payload.replicationBookId) {
+          return link.payload.replicationBookId;
+        }
+        var minted = 'repbook-' + randomHex(16);
+        var displayName = String(
+          (root.document && root.document.title) || bookId
+        ).slice(0, 512) || bookId;
+        var suffix = randomHex(8);
+        return stores.document.batch([
+          stateRecordMutation(
+            REPLICATION_LINK_KIND,
+            { replicationBookId: minted, pairedAt: nowSeconds() },
+            suffix + '-link',
+            link.rev
+          ),
+          replicationOutboxItemMutation(
+            buildReplicationEnvelope(minted, REPLICATION_PAIR_URL, 'POST', {
+              peerBookId: bookId,
+              replicationBookId: minted,
+              displayName: displayName
+            }),
+            suffix + '-pair'
+          )
+        ]).then(function () { return minted; });
+      }).then(function (replicationBookId) {
+        return stores.document.batch([
+          replicationOutboxItemMutation(
+            buildReplicationEnvelope(replicationBookId, url, method, body),
+            randomHex(8)
+          )
+        ]);
+      });
+    }).then(function () {
+      scheduleReplicationDrain(500);
+      return true;
+    }).catch(function (error) {
+      // 入队失败绝不能影响已经完成的本地写 —— 但必须出声，
+      // 静默丢队列就是静默分叉。
+      if (typeof root.dlog === 'function') {
+        root.dlog('复制命令入队失败:' + String(error && error.code || error), '#ff6b6b');
+      }
+      return false;
+    });
+  }
+
+  function listReplicationOutbox() {
+    var seen = new Set();
+    var output = [];
+    function page(afterId) {
+      var query = { documentId: bookId, orderBy: 'id', limit: 1000 };
+      if (afterId != null) query.afterId = afterId;
+      return stores.document.list(REPLICATION_OUTBOX_COLLECTION, query)
+        .then(function (records) {
+          var added = 0;
+          var lastId = afterId == null ? '' : String(afterId);
+          (Array.isArray(records) ? records : []).forEach(function (record) {
+            var value = record && record.value;
+            if (!value || String(value.documentId || '') !== bookId) return;
+            var recordId = String(value.id || '');
+            if (!recordId || seen.has(recordId)) return;
+            seen.add(recordId);
+            added += 1;
+            output.push(value);
+            if (recordId > lastId) lastId = recordId;
+          });
+          if (!added || (Array.isArray(records) && records.length < 1000)) {
+            output.sort(function (a, b) {
+              return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);
+            });
+            return output;
+          }
+          return page(lastId);
+        });
+    }
+    return page(null);
+  }
+
+  var replicationDrainHadBacklog = false;
+  function drainReplicationOutbox() {
+    if (replicationDraining || !replicationEligible()) return Promise.resolve();
+    replicationDraining = true;
+    replicationDrainHadBacklog = false;
+    return listReplicationOutbox().then(function (records) {
+      if (!records.length) return null;
+      replicationDrainHadBacklog = true;
+      var push = root.__BW_REPLICATION_PUSH__;
+      if (typeof push !== 'function') {
+        if (!replicationPushMissingLogged && typeof root.dlog === 'function') {
+          replicationPushMissingLogged = true;
+          root.dlog('复制推送通道未接线,命令留在队列', '#ffb020');
+        }
+        return null;
+      }
+      var envelopes = records.map(function (record) {
+        return clone(record.payload.envelope);
+      });
+      return Promise.resolve(push(envelopes)).then(function (results) {
+        var accepted = new Set();
+        (Array.isArray(results) ? results : []).forEach(function (item) {
+          if (item && item.outcome === 'accepted') {
+            accepted.add(String(item.mutationId || ''));
+          }
+        });
+        // 服务端已持久（fsync）确认的才删；其余留队下轮重投，
+        // 重复投递由服务端 mutationId 幂等吸收。
+        var settled = records.filter(function (record) {
+          return accepted.has(String(
+            record.payload.envelope.op.mutationId || ''
+          ));
+        });
+        var chain = Promise.resolve();
+        settled.forEach(function (record) {
+          chain = chain.then(function () {
+            return stores.document.remove(
+              REPLICATION_OUTBOX_COLLECTION, record.id
+            );
+          });
+        });
+        return chain;
+      });
+    }).catch(function (error) {
+      if (typeof root.dlog === 'function') {
+        root.dlog('复制推送失败,下轮重试:' + String(error && error.code || error), '#ffb020');
+      }
+    }).then(function () {
+      replicationDraining = false;
+      // 没有常驻 interval：队列仍有积压才重排下一轮。
+      // 队列空则彻底静默（也让测试进程能自然退出）。
+      if (replicationDrainHadBacklog) {
+        scheduleReplicationDrain(REPLICATION_DRAIN_INTERVAL_MS);
+      }
+    });
+  }
+
+  var replicationDrainTimer = null;
+  function scheduleReplicationDrain(delayMs) {
+    if (replicationDrainTimer != null) return;
+    var timer = root.setTimeout(function () {
+      replicationDrainTimer = null;
+      drainReplicationOutbox();
+    }, delayMs);
+    replicationDrainTimer = timer;
+    // Node（vm 测试环境）里的 Timeout 对象可 unref —— 挂起的重试兜底
+    // 不该阻止进程退出；浏览器里 setTimeout 返回数字，此调用自然无害。
+    if (timer && typeof timer.unref === 'function') timer.unref();
+  }
+
   function placementEntityIds(note) {
     var values = [];
     function add(value) {
@@ -5081,7 +5294,14 @@
       });
       // 上界与 independent 无关：普通高亮写入同样会挂住 object store，
       // 一旦挂住，后面连精确高亮也进不来。independent 只决定走哪个入口。
-    }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
+    }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS }).then(function (value) {
+      // 本地已落库，事件入复制队列（POST 带完整条目 —— 发送端约定）。
+      enqueueReplicationCommand(
+        '/pdf/api/highlights', 'POST',
+        Object.assign({ file: localFileRef() }, clone(value.highlight))
+      );
+      return value;
+    });
   }
 
   // Direct reader_highlight_text must create the highlight and its undo entry in
@@ -5193,7 +5413,12 @@
               throw outgoingRequestError('未找到高亮', code, 404);
             }
             return localStateMutationResult(items, { ok: true });
-          }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
+          }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS }).then(function (value) {
+            enqueueReplicationCommand('/pdf/api/highlights', 'DELETE', {
+              file: localFileRef(), id: request.id
+            });
+            return value;
+          });
         });
       }, code);
     }
@@ -5232,7 +5457,13 @@
             found.kind = body.kind;
           }
           return localStateMutationResult(items, { ok: true, highlight: found });
-        }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
+        }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS }).then(function (value) {
+          enqueueReplicationCommand(
+            '/pdf/api/highlights', 'PATCH',
+            Object.assign({}, clone(body), { file: localFileRef(), id: id })
+          );
+          return value;
+        });
       });
     }, code);
   }
@@ -5258,7 +5489,12 @@
             items = items.filter(function (item) { return item && item.id !== request.id; });
             if (items.length === before) throw outgoingRequestError('未找到高亮', code, 404);
             return localStateMutationResult(items, { ok: true });
-          }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
+          }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS }).then(function (value) {
+            enqueueReplicationCommand('/pdf/api/epub-highlights', 'DELETE', {
+              file: localFileRef(), id: request.id
+            });
+            return value;
+          });
         });
       }, code);
     }
@@ -5283,7 +5519,13 @@
             return localStateMutationResult(items, {
               ok: true, id: highlight.id, highlight: highlight
             });
-          }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
+          }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS }).then(function (value) {
+            enqueueReplicationCommand(
+              '/pdf/api/epub-highlights', 'POST',
+              Object.assign({ file: localFileRef() }, clone(value.highlight))
+            );
+            return value;
+          });
         }
         var id = localRecordId(body.id, code);
         return mutateHighlightCollection('epub-highlights', function (items) {
@@ -5305,7 +5547,13 @@
             found.kind = boundedLocalString(body.kind, 32, '', code, '高亮类型', true);
           }
           return localStateMutationResult(items, { ok: true, highlight: found });
-        }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
+        }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS }).then(function (value) {
+          enqueueReplicationCommand(
+            '/pdf/api/epub-highlights', 'PATCH',
+            Object.assign({}, clone(body), { file: localFileRef(), id: id })
+          );
+          return value;
+        });
       });
     }, code);
   }
@@ -13427,6 +13675,11 @@
       }).then(function () {
         bootState = 'ready';
         if (typeof root.dlog === 'function') root.dlog('本机启动:运行时已就绪');
+        // 复制出箱：开书先冲一次积压。之后的节奏是"入队即触发 +
+        // 有积压才按 30s 重排"，队列空时没有任何常驻定时器。
+        if (replicationEligible()) {
+          scheduleReplicationDrain(2000);
+        }
         try {
           root.dispatchEvent(new CustomEvent('bw:native-local-runtime-ready', {
             detail: api.status()

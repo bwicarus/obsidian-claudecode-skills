@@ -42,6 +42,11 @@ import re
 import time
 from typing import Any, Callable
 
+from replication_book_links import (
+    ReplicationBookLinkStore,
+    ReplicationLinkStoreError,
+    default_links_path,
+)
 from replication_command_ledger import (
     LedgerEntry,
     ReplicationCommandError,
@@ -73,6 +78,11 @@ _EXECUTORS: dict[tuple[str, str], tuple[str, str]] = {
     ("/pdf/api/epub-highlights", "PATCH"): ("epub-highlights", "patch"),
     ("/pdf/api/epub-highlights", "DELETE"): ("epub-highlights", "tombstone"),
 }
+
+# 配对公告（前提 A 的 App 半边）：App 铸 replicationBookId 后作为一条命令
+# 发来登记。它操作链接表而不是某个域的数据文件，单列不进 _EXECUTORS。
+PAIR_URL = "/replication/pair"
+_PAIR_BODY_KEYS = frozenset(("peerBookId", "replicationBookId", "displayName"))
 
 
 class ReplicationApplyError(RuntimeError):
@@ -190,11 +200,32 @@ class ReplicationCommandApplier:
         data_store: ReplicationDataStore,
         state_path: Path,
         dead_letter_path: Path,
+        link_store: ReplicationBookLinkStore | None = None,
     ) -> None:
         self._ledger = ledger
         self._data = data_store
         self._state_path = state_path
         self._dead_letter_path = dead_letter_path
+        self._links = link_store
+
+    def _apply_pair(self, entry: LedgerEntry) -> None:
+        if self._links is None:
+            raise ReplicationApplyError("链接表未接线，无法处理配对公告")
+        body = entry.body
+        if not isinstance(body, dict) or set(body.keys()) != _PAIR_BODY_KEYS:
+            raise ReplicationApplyError("配对公告 body 字段不符")
+        if body["replicationBookId"] != entry.replication_book_id:
+            raise ReplicationApplyError(
+                "配对公告 body 与信封的 replicationBookId 不一致"
+            )
+        try:
+            self._links.register_minted(
+                peer_book_id=str(body["peerBookId"]),
+                replication_book_id=str(body["replicationBookId"]),
+                display_name=str(body["displayName"]),
+            )
+        except ReplicationLinkStoreError as error:
+            raise ReplicationApplyError(str(error)) from error
 
     def applied_cursor(self) -> int:
         try:
@@ -237,6 +268,16 @@ class ReplicationCommandApplier:
             if not entries:
                 return report
             for entry in entries:
+                if entry.url == PAIR_URL and entry.method == "POST":
+                    try:
+                        self._apply_pair(entry)
+                        report["applied"] += 1
+                    except ReplicationApplyError as error:
+                        report["deadLetters"].append(
+                            self._dead_letter(entry, error)
+                        )
+                    self._advance(entry.cursor)
+                    continue
                 executor = _EXECUTORS.get((entry.url, entry.method))
                 if executor is None:
                     # 表外端点：命令留在账本（可按游标 redrive），死信出声，
@@ -294,6 +335,9 @@ def run_once(
                 ReplicationDataStore(local_root / REPLICATION_DATA_DIRECTORY_NAME),
                 local_root / APPLY_STATE_FILE_NAME,
                 local_root / DEAD_LETTER_FILE_NAME,
+                link_store=ReplicationBookLinkStore(
+                    local_root / default_links_path().name
+                ),
             )
             apply_report = applier.apply_pending()
             status.update(

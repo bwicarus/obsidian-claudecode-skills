@@ -85,9 +85,9 @@ def _valid_display_name(value: str) -> bool:
 class ReplicationBookLink:
     replication_book_id: str
     peer_book_id: str
-    paired_sha256: str
-    paired_file_size: int
-    last_synced_sha256: str
+    paired_sha256: str | None
+    paired_file_size: int | None
+    last_synced_sha256: str | None
     display_name: str
     local_ref: str | None
     paired_at_utc_ms: int
@@ -124,16 +124,21 @@ class ReplicationBookLink:
             or not _REPLICATION_BOOK_ID_RE.fullmatch(replication_book_id)
             or not isinstance(peer_book_id, str)
             or not _PEER_BOOK_ID_RE.fullmatch(peer_book_id)
-            or not isinstance(paired_sha256, str)
-            or not _SHA256_RE.fullmatch(paired_sha256)
-            or not isinstance(last_synced_sha256, str)
-            or not _SHA256_RE.fullmatch(last_synced_sha256)
+            # sha 允许 None：App 铸 id 的公告式配对（register_minted）没有
+            # 内容会合材料；内容会合只在"两端独立看到同一本书"的重配对场景需要。
+            or not (paired_sha256 is None
+                    or (isinstance(paired_sha256, str)
+                        and _SHA256_RE.fullmatch(paired_sha256)))
+            or not (last_synced_sha256 is None
+                    or (isinstance(last_synced_sha256, str)
+                        and _SHA256_RE.fullmatch(last_synced_sha256)))
             or not isinstance(display_name, str)
             or not _valid_display_name(display_name)
             or not (local_ref is None or (isinstance(local_ref, str) and _valid_local_ref(local_ref)))
-            or isinstance(paired_file_size, bool)
-            or not isinstance(paired_file_size, int)
-            or paired_file_size < 0
+            or not (paired_file_size is None
+                    or (not isinstance(paired_file_size, bool)
+                        and isinstance(paired_file_size, int)
+                        and paired_file_size >= 0))
             or isinstance(paired_at, bool)
             or not isinstance(paired_at, int)
             or paired_at < 0
@@ -332,6 +337,61 @@ class ReplicationBookLinkStore:
             updated_at_utc_ms=now,
         )
         self._links[minted] = link
+        self._save()
+        return link
+
+    def register_minted(
+        self,
+        *,
+        peer_book_id: str,
+        replication_book_id: str,
+        display_name: str,
+    ) -> ReplicationBookLink:
+        """公告式配对：**App 铸的** replicationBookId 在服务端登记。
+
+        无内容会合材料（sha/size 为 None）——App runtime 拿不到全文 sha，
+        而 peerBookId+铸好的 id 直接握手也不需要内容会合；内容基线由之后的
+        record_sync 补。幂等：同 peer 同 id 原样返回；同 peer **不同 id**
+        出声拒绝（App 重装重铸的场景，须人工/重配对流程裁决，绝不静默换身份）。
+        """
+        if not _PEER_BOOK_ID_RE.fullmatch(peer_book_id):
+            raise ReplicationLinkStoreError("peerBookId 形状非法（期望 localbook-…）")
+        if not _REPLICATION_BOOK_ID_RE.fullmatch(replication_book_id):
+            raise ReplicationLinkStoreError("replicationBookId 形状非法")
+        if not _valid_display_name(display_name):
+            raise ReplicationLinkStoreError("displayName 非法")
+        existing = self.resolve_by_peer(peer_book_id)
+        holder = self._links.get(replication_book_id)
+        now = self._clock()
+        if existing is not None:
+            if existing.replication_book_id != replication_book_id:
+                raise ReplicationLinkStoreError(
+                    "该 peerBookId 已绑定另一个 replicationBookId，拒绝静默换身份"
+                )
+            refreshed = replace(
+                existing, display_name=display_name, updated_at_utc_ms=now,
+            )
+            self._links[replication_book_id] = refreshed
+            self._save()
+            return refreshed
+        if holder is not None:
+            raise ReplicationLinkStoreError(
+                "该 replicationBookId 已绑定另一本书，拒绝静默抢占"
+            )
+        if len(self._links) >= MAX_LINKS:
+            raise ReplicationLinkStoreError(f"链接表已达上限 {MAX_LINKS} 条")
+        link = ReplicationBookLink(
+            replication_book_id=replication_book_id,
+            peer_book_id=peer_book_id,
+            paired_sha256=None,
+            paired_file_size=None,
+            last_synced_sha256=None,
+            display_name=display_name,
+            local_ref=None,
+            paired_at_utc_ms=now,
+            updated_at_utc_ms=now,
+        )
+        self._links[replication_book_id] = link
         self._save()
         return link
 

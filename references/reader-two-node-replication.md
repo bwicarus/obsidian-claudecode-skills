@@ -268,11 +268,15 @@ items = items.filter(function (item) { return item && item.id !== request.id; })
 - [x] 规格定稿（本文件）
 - [x] 前提 A/B + 信封的四方向调查（结论归档
       `references/book-identity-investigation-20260824.md`，设计已回写 §8.5/§9）
-- [~] **A 跨设备书身份**（前提，见 §8.5）——**Windows 侧链接表已落地**：
-      `extensions/bw-reader-webext/windows/computer-voice-desktop/replication_book_links.py`
-      （铸 repbook-id / 幂等 pair / 显式 rebind / 合并基线 record_sync /
-      会合候选查询 / 损坏出声，测试 11 条 + 3 处变异验证破坏即红）。
-      **App 侧配对握手（公告身份材料 + 存本端链接）随步骤 3 落地**
+- [x] **A 跨设备书身份**（前提，见 §8.5）——两端落地：
+      · Windows 链接表 `replication_book_links.py`（幂等 pair / 显式 rebind /
+        合并基线 / 会合候选 / **register_minted** 公告式配对，sha 可空）；
+      · App 半边（2026-08-24 晚）：**App 铸 repbook-id**（内容无关，与
+        `/replication/pair` 公告同一批原子落库），存 per-book 记录
+        `replication-link`；Windows apply 端 `_apply_pair` 登记，同 peer
+        不同 id 出声拒绝（App 重装重铸场景留给重配对流程）。
+      ⚠ 内容会合材料（全文 sha）runtime 拿不到 —— v1 公告不带；
+      基线由 record_sync 补，重配对随步骤 4 对账与 Swift 桥一起做
 - [x] **B 高亮拆成一条一记录 + 墓碑**（PDF+EPUB 两域，2026-08-24 落地）——
       只拆存储层：`native-<kind>-items` 一条高亮一条记录、删除写
       `{id, deleted:true, time}` 墓碑、`<kind>-split-meta` 记录存顺序且其 rev
@@ -313,10 +317,24 @@ items = items.filter(function (item) { return item && item.id !== request.id; })
       内容永远对不齐，对账一直红。
       账本 SQLite 的 commands 表本身就是活动账本原始层（§8：一条命令既是
       载荷也是记录），暂不另写 jsonl；与 Pi 派生层的桥接等消费端出现再做
-- [ ] 3 App 队列
-- [ ] 4 对账
-- [ ] 5 账本
-- [ ] 6 四个域
+- [x] 3 App 队列（2026-08-24 晚）—— 本地优先 + 命令入队 + 可达即推：
+      · 高亮六条本地路由（PDF/EPUB × POST/PATCH/DELETE）成功后入队
+        `native-replication-outbox`（字典序=入队序；入队失败出声但绝不
+        影响已完成的本地写）；POST 带已落库完整条目（发送端约定）；
+      · 传输 `rc-computer-voice.js::pushReplicationCommands`
+        （`__BW_REPLICATION_PUSH__`）：一次性 context-only 连接照 Anki
+        通道形态，一帧一命令，回执 exactObject；
+      · drain 只删 outcome=accepted 的条目（at-least-once，服务端幂等）；
+        节奏=入队即触发 + 有积压才 30s 重排，队列空时零常驻定时器；
+      · 跨语言一致性契约测试
+        `replication-envelope-parity.contract.test.mjs`（8 条，四处副本
+        逐字段钉死）+ runtime 出箱测试 3 条 + 3 处变异破坏即红。
+      ⚠ v1 只挂用户手动路径（actor=user）：助手直接高亮 / undo /
+      user-state 导入的复制未挂 —— 两端会分叉，步骤 4 对账要能抓到
+- [ ] 4 对账（下一步；含身份重配对 + Swift 全文 sha 桥）
+- [ ] 5 账本（Windows 侧 commands 表即原始层，已随步骤 2 落地；
+      Pi 派生层桥接等消费端出现再做）
+- [~] 6 四个域 —— 高亮已通（随步骤 3）；便签 → 插入页 → 墨迹待接
 
 ## 相关
 
