@@ -47,9 +47,9 @@ function readHighlights({ input = {}, surface = "pdf", stored = [] } = {}) {
     nativeInterfaceSurface: surface,
     bootPromise: Promise.resolve(),
     EXACT_HIGHLIGHT_IDB_TIMEOUT_MS: 4000,
-    readState: (kind, fallback, options) => {
+    readHighlightCollection: (kind, options) => {
       reads.push({ kind, options });
-      return Promise.resolve(stored);
+      return Promise.resolve({ payload: stored, rev: 1, state: null });
     },
     RuntimeError: class RuntimeError extends Error {
       constructor(message, code) { super(message); this.code = code; }

@@ -33,6 +33,12 @@ async function exactHighlightRuntime(options = {}) {
       },
       put() { return Promise.resolve({ ok: true }); },
       remove() { return Promise.resolve({ ok: true }); },
+      list(collection) {
+        const prefix = `${collection}:`;
+        return Promise.resolve([...records.entries()]
+          .filter(([key]) => key.startsWith(prefix))
+          .map(([, value]) => JSON.parse(JSON.stringify(value))));
+      },
       batch(mutations, options) {
         if (!documentStore) return Promise.resolve(mutations.map(() => ({ ok: true })));
         batchOptions.push(options == null ? null : JSON.parse(JSON.stringify(options)));
@@ -148,6 +154,21 @@ async function exactHighlightRuntime(options = {}) {
 }
 
 function documentState(records, kind) {
+  // 高亮已拆 per-item + meta 序记录：物化回数组，语义与旧整册记录一致。
+  if (kind === "document-highlights" || kind === "epub-highlights") {
+    const meta = [...records.entries()].find(
+      ([key]) => key.startsWith(`native-${kind}-split-meta:`),
+    )?.[1];
+    if (!meta) return [];
+    const byId = new Map(
+      [...records.entries()]
+        .filter(([key]) => key.startsWith(`native-${kind}-items:`))
+        .map(([, record]) => [String(record.value.payload.id), record.value.payload]),
+    );
+    return (meta.value?.payload?.order || [])
+      .map((id) => byId.get(String(id)))
+      .filter((item) => item && item.deleted !== true);
+  }
   const record = [...records.values()].find(
     (item) => item?.value?.id?.endsWith(`:${kind}`),
   );
@@ -240,11 +261,9 @@ test("an aborted exact-highlight batch releases its writer and a later write set
     [4000, 4000],
     "only the exact-highlight direct batches receive the inner IDB timeout",
   );
-  const record = [...records.values()].find(
-    (item) => item?.value?.id?.endsWith(":document-highlights"),
-  );
-  assert.equal(record.value.payload.length, 1);
-  assert.equal(record.value.payload[0].id, "c_2222222222222222");
+  const items = documentState(records, "document-highlights");
+  assert.equal(items.length, 1);
+  assert.equal(items[0].id, "c_2222222222222222");
 });
 
 test("Direct PDF highlight and undo are one replay-safe local authority chain", async () => {
@@ -276,7 +295,8 @@ test("Direct PDF highlight and undo are one replay-safe local authority chain", 
     },
   });
   assert.deepEqual(JSON.parse(JSON.stringify(batchMutations[0])), [
-    "native-document-highlights",
+    "native-document-highlights-items",
+    "native-document-highlights-split-meta",
     "native-pdf-assistant-undo",
     "native-pdf-assistant-ops",
   ]);

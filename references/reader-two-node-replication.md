@@ -273,7 +273,15 @@ items = items.filter(function (item) { return item && item.id !== request.id; })
       （铸 repbook-id / 幂等 pair / 显式 rebind / 合并基线 record_sync /
       会合候选查询 / 损坏出声，测试 11 条 + 3 处变异验证破坏即红）。
       **App 侧配对握手（公告身份材料 + 存本端链接）随步骤 3 落地**
-- [ ] **B 高亮拆成一条一记录 + 墓碑**（前提，见 §8.5；改动面清单在调查归档方向三）
+- [x] **B 高亮拆成一条一记录 + 墓碑**（PDF+EPUB 两域，2026-08-24 落地）——
+      只拆存储层：`native-<kind>-items` 一条高亮一条记录、删除写
+      `{id, deleted:true, time}` 墓碑、`<kind>-split-meta` 记录存顺序且其 rev
+      即集合修订号（与旧整册记录逐位同算术，助手 undo/user-state 契约零漂移）；
+      HTTP 路由与出箱回放白名单零改动；开书时一次性原子迁移（meta 存在即标记，
+      legacy 记录保留）。契约测试 1811 全绿 + 3 处变异破坏即红。
+      ⚠ ink 按页拆分（同构、更简单）刻意推迟：先让高亮在真机站稳再动（调查
+      归档方向三的建议顺序）。重放防复活不在本地路由层（显式重建覆盖墓碑是
+      有意的，redo/导入靠它）——由复制层按 actor/mutationId 判
 - [ ] 1 命令信封
 - [ ] 2 Windows 服务端
 - [ ] 3 App 队列

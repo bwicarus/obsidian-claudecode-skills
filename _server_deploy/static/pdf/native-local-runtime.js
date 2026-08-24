@@ -1059,6 +1059,263 @@
     };
   }
 
+  // ---- 高亮集合门面：一条高亮一条记录 + 墓碑 + meta 序/CAS ----
+  //
+  // 两节点复制（references/reader-two-node-replication.md §8.5 前提 B）要求
+  // 高亮以"独立记录 + 删除留墓碑"存储，事件才有可传播的形状。这里只拆
+  // 存储记录层：HTTP 路由与所有消费方仍然拿到 (整册数组, 集合修订号)，
+  // 由门面从 per-item 记录物化——命令出箱回放白名单因此零改动。
+  //
+  // 形状：
+  //   条目记录  collection 'native-<kind>-items'
+  //             id 'native-<kind>-item-v1:<bookId.length>:<bookId>:<itemId>'
+  //             payload = 高亮对象；墓碑 payload = { id, deleted:true, time }
+  //   meta 记录 kind '<kind>-split-meta'，payload = { order: [itemId…] }
+  //             它的 rev 就是整个集合的修订号（每次写集合都随批 CAS +1，
+  //             与旧的整册记录 rev 算术逐位一致，助手 undo 的
+  //             expectedRevision 契约因此原样成立）；它的存在同时是
+  //             启动迁移的完成标记。
+  //   顺序保存在 meta.order 里——物化数组与拆分前逐位同序，
+  //   user-state 摘要不因拆分而漂移。
+  var HIGHLIGHT_SPLIT_KINDS = { 'document-highlights': true, 'epub-highlights': true };
+  function highlightMetaKind(kind) { return kind + '-split-meta'; }
+  function highlightItemsCollection(kind) { return 'native-' + kind + '-items'; }
+  function highlightItemRecordId(kind, itemId) {
+    return 'native-' + kind + '-item-v1:' + bookId.length + ':' + bookId + ':' + itemId;
+  }
+
+  function listHighlightItemRecords(kind) {
+    var collection = highlightItemsCollection(kind);
+    var seen = new Set();
+    var output = [];
+    function page(afterId) {
+      var query = {
+        documentId: bookId, includeDeleted: true,
+        orderBy: 'id', limit: 1000
+      };
+      if (afterId != null) query.afterId = afterId;
+      return stores.document.list(collection, query).then(function (records) {
+        var added = 0;
+        var lastId = afterId == null ? '' : String(afterId);
+        (Array.isArray(records) ? records : []).forEach(function (record) {
+          var value = record && record.value;
+          if (!value || typeof value !== 'object') return;
+          // 真实存储按 query.documentId 过滤；测试替身可能忽略 query，
+          // 这里必须再筛一次，否则会读进别的书的条目。
+          if (String(value.documentId || '') !== bookId) return;
+          var recordId = String(value.id || '');
+          if (!recordId || seen.has(recordId)) return;
+          seen.add(recordId);
+          added += 1;
+          output.push({ value: value, rev: Number(record.rev || 0) });
+          if (recordId > lastId) lastId = recordId;
+        });
+        // 终止判据两条都要：真实存储按页翻完（<limit），
+        // 忽略分页参数的替身靠"没有新条目"终止。
+        if (!added || (Array.isArray(records) && records.length < 1000)) {
+          return output;
+        }
+        return page(lastId);
+      });
+    }
+    return page(null);
+  }
+
+  function readHighlightCollection(kind, queryOptions) {
+    return Promise.all([
+      storedStateRecord(
+        stores.document, highlightMetaKind(kind), 'documentId', bookId,
+        null, queryOptions
+      ),
+      listHighlightItemRecords(kind)
+    ]).then(function (values) {
+      var meta = values[0];
+      var order = meta.payload && Array.isArray(meta.payload.order)
+        ? meta.payload.order.map(String) : [];
+      var itemsById = Object.create(null);
+      var tombstones = Object.create(null);
+      values[1].forEach(function (record) {
+        var payload = record.value.payload;
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return;
+        var itemId = String(payload.id || '');
+        if (!itemId) return;
+        if (payload.deleted === true) {
+          tombstones[itemId] = clone(payload);
+          return;
+        }
+        itemsById[itemId] = clone(payload);
+      });
+      var used = new Set();
+      var orderedIds = [];
+      order.forEach(function (id) {
+        if (itemsById[id] && !used.has(id)) { used.add(id); orderedIds.push(id); }
+      });
+      // meta.order 与条目记录理论上同批提交、不会分叉；这里仍把序里没有的
+      // 存活条目按 id 排序补在末尾，宁可顺序退化也不静默丢数据。
+      Object.keys(itemsById).sort().forEach(function (id) {
+        if (!used.has(id)) { used.add(id); orderedIds.push(id); }
+      });
+      return {
+        payload: orderedIds.map(function (id) { return clone(itemsById[id]); }),
+        rev: meta.rev,
+        state: { itemsById: itemsById, tombstones: tombstones, metaRev: meta.rev }
+      };
+    });
+  }
+
+  function highlightItemMutation(kind, payload, suffix) {
+    var itemId = String(payload.id);
+    return {
+      operation: 'put',
+      collection: highlightItemsCollection(kind),
+      value: {
+        id: highlightItemRecordId(kind, itemId),
+        documentId: bookId,
+        payload: clone(payload),
+        updatedAt: Date.now()
+      },
+      options: { mutationId: 'native-' + kind + '-item-' + suffix + '-' + itemId }
+    };
+  }
+
+  function highlightCollectionMutations(kind, state, nextItems, suffix) {
+    if (!Array.isArray(nextItems)) {
+      throw new RuntimeError('高亮集合必须是数组', 'BW_LOCAL_STATE_MUTATION');
+    }
+    var mutations = [];
+    var nextIds = [];
+    var seen = new Set();
+    nextItems.forEach(function (item) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        throw new RuntimeError('高亮记录不是对象', 'BW_LOCAL_STATE_MUTATION');
+      }
+      var itemId = String(item.id || '');
+      // deleted 是墓碑的保留字段；带着它的"存活"条目宁可当场拒绝，
+      // 也不能静默存成一条读不回来的记录。
+      if (!itemId || itemId.length > 200 || seen.has(itemId) || item.deleted === true) {
+        throw new RuntimeError('高亮记录 id 无效或重复', 'BW_LOCAL_STATE_MUTATION');
+      }
+      seen.add(itemId);
+      nextIds.push(itemId);
+      var prior = state.itemsById[itemId];
+      if (!prior || canonicalJSONString(prior) !== canonicalJSONString(item)) {
+        mutations.push(highlightItemMutation(kind, item, suffix));
+      }
+    });
+    Object.keys(state.itemsById).forEach(function (itemId) {
+      if (!seen.has(itemId)) {
+        mutations.push(highlightItemMutation(kind, {
+          id: itemId, deleted: true, time: nowSeconds()
+        }, suffix));
+      }
+    });
+    // meta 永远随批写入并 CAS：它的 rev 就是集合修订号，
+    // 每次写集合 +1 的算术必须与旧的整册记录逐位一致。
+    mutations.push(stateRecordMutation(
+      highlightMetaKind(kind), { order: nextIds }, suffix + '-meta', state.metaRev
+    ));
+    return mutations;
+  }
+
+  function mutateHighlightCollectionNow(kind, mutator, batchOptions) {
+    var attempts = 0;
+    function attempt() {
+      attempts += 1;
+      return readHighlightCollection(kind, batchOptions).then(function (current) {
+        var outcome = mutator(clone(current.payload));
+        if (!outcome || !Object.prototype.hasOwnProperty.call(outcome, 'payload')) {
+          throw new RuntimeError(
+            '本机文档状态修改器响应无效', 'BW_LOCAL_STATE_MUTATION'
+          );
+        }
+        var mutations = highlightCollectionMutations(
+          kind, current.state, outcome.payload, randomHex(12)
+        );
+        return stores.document.batch(mutations, batchOptions).then(function () {
+          return clone(outcome.value);
+        });
+      }).catch(function (error) {
+        if (error && error.code === 'BW_DATA_CONFLICT' && attempts < 5) {
+          return attempt();
+        }
+        throw error;
+      });
+    }
+    return attempt();
+  }
+
+  function mutateHighlightCollection(kind, mutator, batchOptions) {
+    return serializeLocalStateMutation('document', kind, function () {
+      return mutateHighlightCollectionNow(kind, mutator, batchOptions);
+    });
+  }
+
+  // 启动迁移：整册数组 → per-item 记录。meta 记录的存在即完成标记；
+  // 单批原子提交（要么全成要么全无），mutationId 固定所以重试即重放；
+  // legacy 整册记录刻意保留不清（迁移一半崩了重启续跑，数据不丢）。
+  function migrateHighlightSplitOnBoot() {
+    return Object.keys(HIGHLIGHT_SPLIT_KINDS).reduce(function (chain, kind) {
+      return chain.then(function () {
+        return storedStateRecord(
+          stores.document, highlightMetaKind(kind), 'documentId', bookId, null
+        ).then(function (meta) {
+          if (meta.rev > 0) return null;
+          return readState(kind, []).then(function (legacy) {
+            var items = Array.isArray(legacy) ? legacy : [];
+            // 空集合不写 meta：首写时以 ifRev=0 创建（rev 从 1 起），
+            // 修订号算术与旧的整册记录逐位一致（旧测试断言 rev===1）。
+            // 代价只是无高亮的书每次开书多两次 miss 读。
+            if (!items.length) return null;
+            var mutations = [];
+            var order = [];
+            var seen = new Set();
+            items.forEach(function (item) {
+              if (!item || typeof item !== 'object' || Array.isArray(item)) return;
+              var itemId = String(item.id || '');
+              if (!itemId || itemId.length > 200 || seen.has(itemId) ||
+                  item.deleted === true) return;
+              seen.add(itemId);
+              order.push(itemId);
+              mutations.push({
+                operation: 'put',
+                collection: highlightItemsCollection(kind),
+                value: {
+                  id: highlightItemRecordId(kind, itemId),
+                  documentId: bookId,
+                  payload: clone(item),
+                  updatedAt: Date.now()
+                },
+                options: { mutationId: 'hl-split:' + kind + ':' + bookId + ':' + itemId }
+              });
+            });
+            if (order.length !== items.length && typeof root.dlog === 'function') {
+              root.dlog(
+                '高亮拆分迁移丢弃了 ' + (items.length - order.length) +
+                  ' 条无 id 条目:' + kind,
+                '#ff6b6b'
+              );
+            }
+            mutations.push({
+              operation: 'put',
+              collection: 'native-' + highlightMetaKind(kind),
+              value: {
+                id: stateId(highlightMetaKind(kind)),
+                documentId: bookId,
+                payload: { order: order },
+                updatedAt: Date.now()
+              },
+              options: {
+                mutationId: 'hl-split:' + kind + ':' + bookId + ':meta',
+                ifRev: 0
+              }
+            });
+            return stores.document.batch(mutations);
+          });
+        });
+      });
+    }, Promise.resolve());
+  }
+
   function placementEntityIds(note) {
     var values = [];
     function add(value) {
@@ -1203,13 +1460,34 @@
         '本机书籍数据快照接口不可用', 'BW_USER_STATE_SNAPSHOT_UNAVAILABLE'
       ));
     }
-    return stores.document.getMany(USER_STATE_RECORD_KINDS.map(function (kind) {
-      return { collection: 'native-' + kind, id: stateId(kind) };
-    })).then(function (records) {
+    var directKinds = USER_STATE_RECORD_KINDS.filter(function (kind) {
+      return !HIGHLIGHT_SPLIT_KINDS[kind];
+    });
+    return Promise.all([
+      stores.document.getMany(directKinds.map(function (kind) {
+        return { collection: 'native-' + kind, id: stateId(kind) };
+      })),
+      readHighlightCollection('document-highlights'),
+      readHighlightCollection('epub-highlights')
+    ]).then(function (values) {
       var output = Object.create(null);
-      USER_STATE_RECORD_KINDS.forEach(function (kind, index) {
-        output[kind] = records[index] || null;
+      directKinds.forEach(function (kind, index) {
+        output[kind] = values[0][index] || null;
       });
+      // 高亮已拆 per-item：合成与旧整册记录同形的 {value:{payload}, rev}，
+      // recordPayload / userStateDomainRevision 因此零改动；state 供导入端
+      // 用门面 diff 出条目级写入与墓碑。
+      [['document-highlights', values[1]], ['epub-highlights', values[2]]]
+        .forEach(function (entry) {
+          output[entry[0]] = {
+            value: {
+              id: stateId(entry[0]), documentId: bookId,
+              payload: entry[1].payload, updatedAt: 0
+            },
+            rev: entry[1].rev,
+            state: entry[1].state
+          };
+        });
       return output;
     });
   }
@@ -1546,13 +1824,22 @@
           'user-state-domain-meta': domainMeta
         };
         var suffix = parsed.transaction.transactionId.slice(3);
-        var mutations = Array.from(kinds).map(function (kind) {
-          return stateRecordMutation(
+        var mutations = [];
+        Array.from(kinds).forEach(function (kind) {
+          if (HIGHLIGHT_SPLIT_KINDS[kind]) {
+            // 导入是权威整域覆盖：门面 diff 出条目级 put 与墓碑，
+            // suffix 来自 transactionId，重试即按 mutationId 重放。
+            mutations.push.apply(mutations, highlightCollectionMutations(
+              kind, records[kind].state, payloads[kind], suffix + '-' + kind
+            ));
+            return;
+          }
+          mutations.push(stateRecordMutation(
             kind,
             payloads[kind],
             suffix + '-' + kind,
             Number(records[kind] && records[kind].rev || 0)
-          );
+          ));
         });
         return stores.document.batch(mutations).then(function () {
           var digests = {};
@@ -4783,8 +5070,8 @@
 
   function persistLocalPDFHighlight(body, code, independent) {
     var highlight = normalizedLocalPDFHighlight(body, code);
-    var mutate = independent ? mutateDocumentStateNow : mutateDocumentState;
-    return mutate('document-highlights', [], function (items) {
+    var mutate = independent ? mutateHighlightCollectionNow : mutateHighlightCollection;
+    return mutate('document-highlights', function (items) {
       items = storedList(items, code).filter(function (item) {
         return !item || item.id !== highlight.id;
       });
@@ -4812,9 +5099,7 @@
     var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
     return serializeLocalStateMutation('document', 'pdf-assistant-bundle', function () {
       return Promise.all([
-        storedStateRecord(
-          stores.document, 'document-highlights', 'documentId', bookId, [], bound
-        ),
+        readHighlightCollection('document-highlights', bound),
         storedStateRecord(
           stores.document, 'pdf-assistant-undo', 'documentId', bookId, [], bound
         ),
@@ -4863,17 +5148,16 @@
         undo = undo.slice(-80);
         receipts = boundedAssistantOperationReceipts(receipts);
         var suffix = randomHex(12);
-        return stores.document.batch([
-          stateRecordMutation(
-            'document-highlights', highlights, suffix + '-highlights', records[0].rev
-          ),
+        return stores.document.batch(highlightCollectionMutations(
+          'document-highlights', records[0].state, highlights, suffix + '-highlights'
+        ).concat([
           stateRecordMutation(
             'pdf-assistant-undo', undo, suffix + '-undo', records[1].rev
           ),
           stateRecordMutation(
             'pdf-assistant-ops', receipts, suffix + '-ops', records[2].rev
           )
-        ], bound).then(function () {
+        ]), bound).then(function () {
           return { ok: true, id: highlight.id, highlight: clone(highlight), replayed: false };
         });
       });
@@ -4885,10 +5169,10 @@
     if (method === 'GET') {
       return localJSONRoute(function () {
         localFileQuery(url, ['file'], ['file'], code);
-        return readState('document-highlights', [], {
+        return readHighlightCollection('document-highlights', {
           transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS
-        }).then(function (items) {
-          items = storedList(items, code).slice().sort(function (a, b) {
+        }).then(function (read) {
+          var items = storedList(read.payload, code).slice().sort(function (a, b) {
             return Number(a.page || 0) - Number(b.page || 0) ||
               Number(a.time || 0) - Number(b.time || 0);
           });
@@ -4901,7 +5185,7 @@
         return deleteRecordRequest(input, init, url, code).then(function (request) {
           // 删除同样需要事务上界。一次不 settle 的删除会占住 object store,
           // 之后每一次高亮读写都排在它后面 —— 挂起源只是从写入换到了删除。
-          return mutateDocumentState('document-highlights', [], function (items) {
+          return mutateHighlightCollection('document-highlights', function (items) {
             items = storedList(items, code);
             var before = items.length;
             items = items.filter(function (item) { return item && item.id !== request.id; });
@@ -4926,7 +5210,7 @@
           return persistLocalPDFHighlight(body, code, false);
         }
         var id = localRecordId(body.id, code);
-        return mutateDocumentState('document-highlights', [], function (items) {
+        return mutateHighlightCollection('document-highlights', function (items) {
           items = storedList(items, code);
           var found = items.find(function (item) { return item && item.id === id; });
           if (!found) throw outgoingRequestError('未找到高亮', code, 404);
@@ -4958,17 +5242,17 @@
     if (method === 'GET') {
       return localJSONRoute(function () {
         localFileQuery(url, ['file'], ['file'], code);
-        return readState('epub-highlights', [], {
+        return readHighlightCollection('epub-highlights', {
           transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS
-        }).then(function (items) {
-          return { ok: true, highlights: storedList(items, code) };
+        }).then(function (read) {
+          return { ok: true, highlights: storedList(read.payload, code) };
         });
       }, code);
     }
     if (method === 'DELETE') {
       return localJSONRoute(function () {
         return deleteRecordRequest(input, init, url, code).then(function (request) {
-          return mutateDocumentState('epub-highlights', [], function (items) {
+          return mutateHighlightCollection('epub-highlights', function (items) {
             items = storedList(items, code);
             var before = items.length;
             items = items.filter(function (item) { return item && item.id !== request.id; });
@@ -4991,7 +5275,7 @@
           if (typeof body.id === 'string' && /^c_[a-f0-9]{8,32}$/.test(body.id)) {
             return persistAssistantEPUBHighlight(highlight, code);
           }
-          return mutateDocumentState('epub-highlights', [], function (items) {
+          return mutateHighlightCollection('epub-highlights', function (items) {
             items = storedList(items, code).filter(function (item) {
               return !item || item.id !== highlight.id;
             });
@@ -5002,7 +5286,7 @@
           }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
         }
         var id = localRecordId(body.id, code);
-        return mutateDocumentState('epub-highlights', [], function (items) {
+        return mutateHighlightCollection('epub-highlights', function (items) {
           items = storedList(items, code);
           var found = items.find(function (item) { return item && item.id === id; });
           if (!found) throw outgoingRequestError('未找到高亮', code, 404);
@@ -5073,9 +5357,7 @@
     var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
     return serializeLocalStateMutation('document', 'epub-assistant-bundle', function () {
       return Promise.all([
-        storedStateRecord(
-          stores.document, 'epub-highlights', 'documentId', bookId, [], bound
-        ),
+        readHighlightCollection('epub-highlights', bound),
         storedStateRecord(
           stores.document, 'epub-assistant-undo', 'documentId', bookId, [], bound
         ),
@@ -5128,17 +5410,16 @@
         });
         receipts = receipts.slice(-160);
         var suffix = randomHex(12);
-        return stores.document.batch([
-          stateRecordMutation(
-            'epub-highlights', highlights, suffix + '-highlights', records[0].rev
-          ),
+        return stores.document.batch(highlightCollectionMutations(
+          'epub-highlights', records[0].state, highlights, suffix + '-highlights'
+        ).concat([
           stateRecordMutation(
             'epub-assistant-undo', stack, suffix + '-undo', records[1].rev
           ),
           stateRecordMutation(
             'epub-assistant-ops', receipts, suffix + '-ops', records[2].rev
           )
-        ], bound).then(function () {
+        ]), bound).then(function () {
           return {
             ok: true,
             id: highlight.id,
@@ -6208,6 +6489,13 @@
       'entity-references': []
     };
     return Promise.all(PDF_MUTATION_DOCUMENT_KINDS.map(function (kind) {
+      if (HIGHLIGHT_SPLIT_KINDS[kind]) {
+        // journal 契约不变：before[kind] 仍是 {payload, rev}，
+        // 只是 payload 由门面物化、rev 是集合 meta 的修订号。
+        return readHighlightCollection(kind).then(function (read) {
+          return { kind: kind, payload: read.payload, rev: read.rev };
+        });
+      }
       return storedStateRecord(
         stores.document, kind, 'documentId', bookId, fallbackByKind[kind]
       ).then(function (record) {
@@ -6429,6 +6717,15 @@
   function reconcileNativePDFMutationDocuments(transaction, desired, phase) {
     return Promise.all(PDF_MUTATION_DOCUMENT_KINDS.map(function (kind) {
       var fallback = transaction.before[kind].payload;
+      if (HIGHLIGHT_SPLIT_KINDS[kind]) {
+        return readHighlightCollection(kind).then(function (read) {
+          return {
+            kind: kind,
+            record: { payload: read.payload, rev: read.rev },
+            hlState: read.state
+          };
+        });
+      }
       return storedStateRecord(
         stores.document, kind, 'documentId', bookId, fallback
       ).then(function (record) { return { kind: kind, record: record }; });
@@ -6456,9 +6753,15 @@
         }
         var wanted = desired === 'after' ? after : before;
         if (!nativePDFMutationPayloadEqual(current, wanted)) {
-          mutations.push(stateRecordMutation(
-            item.kind, wanted, suffix + '-' + item.kind, item.record.rev
-          ));
+          if (HIGHLIGHT_SPLIT_KINDS[item.kind]) {
+            mutations.push.apply(mutations, highlightCollectionMutations(
+              item.kind, item.hlState, wanted, suffix + '-' + item.kind
+            ));
+          } else {
+            mutations.push(stateRecordMutation(
+              item.kind, wanted, suffix + '-' + item.kind, item.record.rev
+            ));
+          }
         }
       });
       var nextJournal = clone(journalRecord.payload);
@@ -8319,7 +8622,7 @@
 
   function nativePDFAuthoritySnapshot(context) {
     return Promise.all([
-      storedStateRecord(stores.document, 'document-highlights', 'documentId', bookId, []),
+      readHighlightCollection('document-highlights'),
       storedStateRecord(stores.document, 'document-notes-legacy', 'documentId', bookId, []),
       storedStateRecord(stores.document, 'ink', 'documentId', bookId, {}),
       storedStateRecord(stores.document, 'user-pages', 'documentId', bookId, [])
@@ -8879,6 +9182,9 @@
       ['pdf-assistant-ops', []]
     ];
     return Promise.all(specs.map(function (spec) {
+      if (HIGHLIGHT_SPLIT_KINDS[spec[0]]) {
+        return readHighlightCollection(spec[0], queryOptions);
+      }
       return storedStateRecord(
         stores.document, spec[0], 'documentId', bookId, spec[1], queryOptions
       );
@@ -10092,9 +10398,9 @@
         var suffix = randomHex(12);
         var mutations = [];
         if (touchedHighlights) {
-          mutations.push(stateRecordMutation(
-            'document-highlights', highlights, suffix + '-highlights',
-            recordSet.records[0].rev
+          mutations.push.apply(mutations, highlightCollectionMutations(
+            'document-highlights', recordSet.records[0].state, highlights,
+            suffix + '-highlights'
           ));
         }
         if (touchedNotes) {
@@ -10128,9 +10434,7 @@
         return stores.document.batch(mutations, bound).then(function () {
           assertNativePDFWriterLease(writerLease);
           return Promise.all([
-            storedStateRecord(
-              stores.document, 'document-highlights', 'documentId', bookId, [], bound
-            ),
+            readHighlightCollection('document-highlights', bound),
             storedStateRecord(
               stores.document, 'document-notes-legacy', 'documentId', bookId, [], bound
             )
@@ -10160,9 +10464,7 @@
     var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
     return withNativePDFWriter('assistant-undo-last', function (lease) {
       return Promise.all([
-        storedStateRecord(
-          stores.document, 'document-highlights', 'documentId', bookId, [], bound
-        ),
+        readHighlightCollection('document-highlights', bound),
         storedStateRecord(
           stores.document, 'document-notes-legacy', 'documentId', bookId, [], bound
         ),
@@ -10404,7 +10706,7 @@
 
   function nativeEPUBAuthoritySnapshot() {
     return Promise.all([
-      storedStateRecord(stores.document, 'epub-highlights', 'documentId', bookId, []),
+      readHighlightCollection('epub-highlights'),
       storedStateRecord(stores.document, 'document-notes-legacy', 'documentId', bookId, []),
       storedStateRecord(stores.document, 'epub-ink', 'documentId', bookId, {})
     ]).then(function (records) {
@@ -10785,10 +11087,11 @@
       kinds = kinds.concat(['epub-assistant-undo']);
     }
     return Promise.all(kinds.map(function (item) {
+      if (HIGHLIGHT_SPLIT_KINDS[item]) {
+        return readHighlightCollection(item, queryOptions);
+      }
       return storedStateRecord(
-        stores.document, item, 'documentId', bookId,
-        item === 'document-notes-legacy' || item === 'epub-highlights' ? [] : [],
-        queryOptions
+        stores.document, item, 'documentId', bookId, [], queryOptions
       );
     })).then(function (records) {
       return { kinds: kinds, records: records, targetCount: targetCount };
@@ -10796,16 +11099,25 @@
   }
 
   function nativeEPUBRecordMutations(recordSet, payload, suffix, revisionDelta) {
-    return recordSet.kinds.slice(0, recordSet.targetCount).map(function (kind, index) {
+    var mutations = [];
+    recordSet.kinds.slice(0, recordSet.targetCount).forEach(function (kind, index) {
       var value;
       if (kind === recordSet.kinds[0]) value = payload;
       else if (kind === 'card-placements') value = deriveCardPlacements(payload);
       else value = deriveEntityReferences(deriveCardPlacements(payload));
-      return stateRecordMutation(
+      if (HIGHLIGHT_SPLIT_KINDS[kind]) {
+        // 现役调用点 revisionDelta 恒为 0；门面用 meta rev 做同一套 CAS。
+        mutations.push.apply(mutations, highlightCollectionMutations(
+          kind, recordSet.records[index].state, value, suffix + '-' + index
+        ));
+        return;
+      }
+      mutations.push(stateRecordMutation(
         kind, value, suffix + '-' + index,
         recordSet.records[index].rev + (revisionDelta || 0)
-      );
+      ));
     });
+    return mutations;
   }
 
   function nativeEPUBFieldsEqual(note, fields) {
@@ -12079,11 +12391,11 @@
     var needle = contains.trim().toLowerCase();
     var kind = surface === 'epub' ? 'epub-highlights' : 'document-highlights';
     return bootPromise.then(function () {
-      return readState(kind, [], {
+      return readHighlightCollection(kind, {
         transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS
       });
-    }).then(function (stored) {
-      var items = Array.isArray(stored) ? stored : [];
+    }).then(function (read) {
+      var items = Array.isArray(read.payload) ? read.payload : [];
       var matched = [];
       for (var index = 0; index < items.length; index += 1) {
         var item = items[index];
@@ -13104,6 +13416,10 @@
       // write/read/delete probe on every book switch duplicated real work and
       // could itself queue behind the page being replaced.
       Promise.resolve().then(function () {
+        // 高亮拆分迁移必须先于 PDF 改页恢复：恢复用门面读当前状态做比对，
+        // 旧 journal 里的整册数组要能与迁移后的物化结果逐位相等。
+        return migrateHighlightSplitOnBoot();
+      }).then(function () {
         return recoverNativePDFMutationOnBoot();
       }).then(function () {
         if (typeof root.dlog === 'function') root.dlog('本机启动:PDF 恢复检查已完成');

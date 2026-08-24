@@ -1981,10 +1981,18 @@ test("local sidecar mutations serialize concurrent creates and retain every reco
   )).json();
   assert.equal(listed.highlights.length, 24);
   assert.equal(new Set(listed.highlights.map((item) => item.id)).size, 24);
-  const record = dataStoresState.document.values.get(
-    `native-document-highlights:${DEFAULT_LOCAL_BOOK_ID}:document-highlights`,
+  // 拆分后的存储契约：meta 记录的 rev 是集合修订号（24 次串行写 = 24），
+  // 每条高亮一条独立 item 记录。
+  const meta = dataStoresState.document.values.get(
+    `native-document-highlights-split-meta:${DEFAULT_LOCAL_BOOK_ID}` +
+      ":document-highlights-split-meta",
   );
-  assert.equal(record.rev, 24);
+  assert.equal(meta.rev, 24);
+  assert.equal(meta.value.payload.order.length, 24);
+  const itemKeys = [...dataStoresState.document.values.keys()].filter(
+    (key) => key.startsWith("native-document-highlights-items:"),
+  );
+  assert.equal(itemKeys.length, 24);
   assert.match(SOURCE, /ifRev: ifRev == null \? undefined : ifRev/);
 });
 
@@ -5998,7 +6006,8 @@ test("Direct EPUB highlight and generic undo share one replay-safe App transacti
     JSON.parse(JSON.stringify(batches[0])),
     {
       kinds: [
-        "native-epub-highlights",
+        "native-epub-highlights-items",
+        "native-epub-highlights-split-meta",
         "native-epub-assistant-undo",
         "native-epub-assistant-ops",
       ],
@@ -6935,4 +6944,127 @@ test("native sync-batch fails closed when the owner lease changes mid-batch", as
     "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
   )).json();
   assert.deepEqual(notes.notes, []);
+});
+
+// ── 高亮拆分存储（两节点复制前提 B）────────────────────────────────────
+// 一条高亮一条记录 + 删除留墓碑 + meta 序记录当集合修订号。
+// 这些测试断言的是新存储契约本身：迁移、墓碑、条目级写入粒度、顺序保持。
+
+const HL_META_KEY = "native-document-highlights-split-meta:" +
+  `${DEFAULT_LOCAL_BOOK_ID}:document-highlights-split-meta`;
+function hlItemKey(itemId) {
+  return "native-document-highlights-items:native-document-highlights-item-v1:" +
+    `${DEFAULT_LOCAL_BOOK_ID.length}:${DEFAULT_LOCAL_BOOK_ID}:${itemId}`;
+}
+function hlPost(context, id, page, text) {
+  return context.fetch("/pdf/api/highlights", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE, id, page,
+      rects: [[10, 20, 30, 40]], color: "#ffd54a", text,
+    }),
+  });
+}
+async function hlList(context) {
+  return (await (await context.fetch(
+    "/pdf/api/highlights?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json()).highlights;
+}
+
+test("boot migrates a legacy whole-array highlight record into per-item records once", async () => {
+  const legacyItems = [
+    { id: "h_aaaaaaaaaaaa", page: 2, rects: [[1, 2, 3, 4]], color: "#ffd54a",
+      text: "second", note: "", kind: "note", sentence: "", body: "", time: 100 },
+    { id: "h_bbbbbbbbbbbb", page: 1, rects: [[1, 2, 3, 4]], color: "#80d8ff",
+      text: "first", note: "", kind: "note", sentence: "", body: "", time: 200 },
+  ];
+  const legacyKey =
+    `native-document-highlights:${DEFAULT_LOCAL_BOOK_ID}:document-highlights`;
+  const dataStoresState = {
+    global: { values: new Map(), revision: 0 },
+    document: { values: new Map(), revision: 0 },
+    device: { values: new Map(), revision: 0 },
+  };
+  dataStoresState.document.values.set(legacyKey, {
+    value: {
+      id: `${DEFAULT_LOCAL_BOOK_ID}:document-highlights`,
+      documentId: DEFAULT_LOCAL_BOOK_ID,
+      payload: clone(legacyItems),
+      updatedAt: 1,
+    },
+    rev: 7,
+    updatedAt: 1,
+  });
+  const first = await harness({ dataStoresState });
+  const listed = await hlList(first.context);
+  assert.deepEqual(listed.map((item) => item.id),
+    ["h_bbbbbbbbbbbb", "h_aaaaaaaaaaaa"], "GET 按页排序");
+  const meta = dataStoresState.document.values.get(HL_META_KEY);
+  assert.equal(meta.rev, 1, "迁移写入一次 meta");
+  assert.deepEqual(meta.value.payload.order,
+    ["h_aaaaaaaaaaaa", "h_bbbbbbbbbbbb"], "meta 序保持 legacy 数组原序");
+  assert.deepEqual(
+    dataStoresState.document.values.get(hlItemKey("h_aaaaaaaaaaaa")).value.payload,
+    legacyItems[0],
+  );
+  assert.ok(
+    dataStoresState.document.values.get(legacyKey),
+    "legacy 记录保留不清",
+  );
+  // 第二次开书（同一份存储）：meta 已在 → 迁移跳过，不重复也不再涨 rev。
+  const second = await harness({ dataStoresState });
+  assert.equal((await hlList(second.context)).length, 2);
+  assert.equal(dataStoresState.document.values.get(HL_META_KEY).rev, 1);
+});
+
+test("deleting a highlight leaves a tombstone record and an explicit re-create revives it", async () => {
+  const result = await harness();
+  const state = result.dataStoresState.document;
+  assert.equal((await hlPost(result.context, "c_1111111111111111", 1, "keep")).status, 200);
+  assert.equal((await hlPost(result.context, "c_2222222222222222", 2, "drop")).status, 200);
+  const removed = await result.context.fetch("/pdf/api/highlights", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, id: "c_2222222222222222" }),
+  });
+  assert.equal(removed.status, 200);
+  const tombstone = state.values.get(hlItemKey("c_2222222222222222"));
+  assert.equal(tombstone.value.payload.deleted, true, "删除必须留墓碑，不是物理消失");
+  assert.equal(typeof tombstone.value.payload.time, "number");
+  assert.deepEqual((await hlList(result.context)).map((item) => item.id),
+    ["c_1111111111111111"], "GET 不返回墓碑");
+  const meta = state.values.get(HL_META_KEY);
+  assert.deepEqual(meta.value.payload.order, ["c_1111111111111111"]);
+  // 显式重建（用户重做/新写入同 id）覆盖墓碑复活——重放防复活由复制层按
+  // actor/mutationId 判，不在本地路由层。
+  assert.equal((await hlPost(result.context, "c_2222222222222222", 2, "again")).status, 200);
+  assert.equal(state.values.get(hlItemKey("c_2222222222222222")).value.payload.deleted,
+    undefined);
+  assert.equal((await hlList(result.context)).length, 2);
+});
+
+test("patching one highlight rewrites only that item record", async () => {
+  const result = await harness();
+  const state = result.dataStoresState.document;
+  await hlPost(result.context, "c_3333333333333333", 1, "untouched");
+  await hlPost(result.context, "c_4444444444444444", 2, "patch me");
+  const untouchedBefore = state.values.get(hlItemKey("c_3333333333333333")).rev;
+  const patched = await result.context.fetch("/pdf/api/highlights", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE, id: "c_4444444444444444", note: "edited",
+    }),
+  });
+  assert.equal(patched.status, 200);
+  assert.equal(
+    state.values.get(hlItemKey("c_3333333333333333")).rev,
+    untouchedBefore,
+    "改一条不能整册重写：另一条的记录 rev 必须不动",
+  );
+  assert.equal(
+    state.values.get(hlItemKey("c_4444444444444444")).value.payload.note,
+    "edited",
+  );
 });

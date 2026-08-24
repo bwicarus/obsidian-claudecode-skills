@@ -24,8 +24,9 @@ test("each native PDF assistant request carries the four complete App authoritie
     "nativePDFAuthoritySnapshot",
     "nativePDFAssistantContext",
   );
+  // 高亮已拆 per-item 存储，权威快照经门面物化；其余三个仍是整册记录。
+  assert.match(snapshot, /readHighlightCollection\('document-highlights'\)/);
   for (const kind of [
-    "document-highlights",
     "document-notes-legacy",
     "ink",
     "user-pages",
