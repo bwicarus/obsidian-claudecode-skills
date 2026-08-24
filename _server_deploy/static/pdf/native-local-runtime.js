@@ -7459,6 +7459,15 @@
         updateNativePDFMutationJob(jobId, {
           status: 'error', step: '失败', error: failures.join('；')
         });
+        // 诊断出口（silent-failure 规则5：无控制台设备上沉默=不可诊断）。
+        // 改页失败的错误文本只在 UI 横幅一闪而过 —— 经复制通道送到
+        // 服务端持久留痕，远程就能看到真机到底失败在哪一步。
+        enqueueReplicationCommand('/replication/diagnostic', 'POST', {
+          kind: 'pdf-mutation-error',
+          operation: String((plan && plan.operation) || ''),
+          error: failures.join('；').slice(0, 4000),
+          at: nowSeconds()
+        });
       });
     }).then(function () {
       endNativePDFWriterBarrier(writerBarrier);

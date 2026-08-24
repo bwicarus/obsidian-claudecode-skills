@@ -492,3 +492,56 @@ class RunOnceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiagnosticTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.ledger = ReplicationCommandLedger(self.root / "ledger.sqlite3")
+        self.store = ReplicationDataStore(self.root / "replication-data")
+        self.applier = ReplicationCommandApplier(
+            self.ledger, self.store,
+            self.root / "state.json", self.root / "dead.jsonl",
+        )
+
+    def tearDown(self) -> None:
+        self.ledger.close()
+        self.temporary.cleanup()
+
+    def test_diagnostic_command_is_persisted_and_capped(self) -> None:
+        self.ledger.append(envelope(
+            "1", "/replication/diagnostic", "POST",
+            {"kind": "pdf-mutation-error", "operation": "insert",
+             "error": "本机 PDF 改页失败：测试错误", "at": 100},
+        ))
+        report = self.applier.apply_pending()
+        self.assertEqual(report["deadLetters"], [])
+        path = self.root / "replication-data" / BOOK / "diagnostics.json"
+        data = json.loads(path.read_text("utf-8"))
+        self.assertEqual(data["contract"], "replication-diagnostics/1")
+        self.assertEqual(len(data["entries"]), 1)
+        self.assertIn("测试错误", data["entries"][0]["body"]["error"])
+        # 上限截断：塞满后旧的被挤掉
+        import replication_apply as module
+        original = module.MAX_DIAGNOSTIC_ENTRIES
+        module.MAX_DIAGNOSTIC_ENTRIES = 3
+        try:
+            for index in range(5):
+                self.ledger.append(envelope(
+                    format(index + 10, "x"), "/replication/diagnostic", "POST",
+                    {"kind": "k", "n": index},
+                ))
+            self.applier.apply_pending()
+        finally:
+            module.MAX_DIAGNOSTIC_ENTRIES = original
+        data = json.loads(path.read_text("utf-8"))
+        self.assertEqual(len(data["entries"]), 3)
+        self.assertEqual(data["entries"][-1]["body"]["n"], 4)
+
+    def test_diagnostic_without_kind_dead_letters(self) -> None:
+        self.ledger.append(envelope(
+            "1", "/replication/diagnostic", "POST", {"error": "no kind"},
+        ))
+        report = self.applier.apply_pending()
+        self.assertEqual(len(report["deadLetters"]), 1)

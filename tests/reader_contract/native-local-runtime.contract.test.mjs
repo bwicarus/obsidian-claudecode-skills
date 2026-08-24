@@ -7443,3 +7443,29 @@ test("virtual user page (pre-realization) survives restart", async () => {
   assert.equal(listed.pages.length, 1, "虚拟页重启后必须还在");
   assert.equal(listed.pages[0].after, 12);
 });
+
+test("pdf mutation failure enqueues a diagnostic replication command", async () => {
+  const durable = { pageCount: 4, contentSHA256: "a".repeat(64), journal: null };
+  const result = await harness({
+    interfaceManifest: withNativePDFMutationRoutesSupported(),
+    pdfMutationReply: nativePDFMutationResponder({
+      durableState: durable, failCommit: true,
+    }),
+  });
+  const mutation = await result.context.fetch("/pdf/api/pdf-insert-page", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, after: 1, md: "会失败的页" }),
+  });
+  const receipt = await mutation.json();
+  const job = await waitForNativePDFJob(result.context, receipt.job_id);
+  assert.equal(job.status, "error");
+  // 诊断出口：无控制台设备上的失败必须留下可远程读取的痕迹
+  const diagnostics = replicationOutboxRecords(result.dataStoresState)
+    .map((record) => record.payload.envelope)
+    .filter((e) => e.op.url === "/replication/diagnostic");
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].op.body.kind, "pdf-mutation-error");
+  assert.equal(diagnostics[0].op.body.operation, "insert");
+  assert.match(diagnostics[0].op.body.error, /native replace failed/);
+});

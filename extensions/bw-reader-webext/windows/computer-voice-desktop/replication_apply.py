@@ -108,6 +108,12 @@ _EXECUTORS: dict[tuple[str, str], tuple[str, str]] = {
 PAIR_URL = "/replication/pair"
 _PAIR_BODY_KEYS = frozenset(("peerBookId", "replicationBookId", "displayName"))
 
+# 诊断留痕（silent-failure 规则5）：App 无控制台，改页失败等错误只在 UI
+# 一闪而过 —— App 把错误文本作为诊断命令发来，这里持久 append，远程可查。
+DIAGNOSTIC_URL = "/replication/diagnostic"
+DIAGNOSTICS_FILE_NAME = "diagnostics.json"
+MAX_DIAGNOSTIC_ENTRIES = 200
+
 # 整域重同步（对账不一致后的显式收敛，规格 §6）：App 把该域**全部存活条目**
 # 按序重发，服务端整域替换（全量 upsert + 差集写墓碑）。幂等。
 RESYNC_URL = "/replication/resync"
@@ -191,6 +197,7 @@ class ReplicationDataStore:
 
     def __init__(self, directory: Path) -> None:
         self._directory = directory
+        self.directory = directory
 
     def _path(self, replication_book_id: str, domain: str) -> Path:
         if not re.fullmatch(r"^repbook-[a-f0-9]{32}$", replication_book_id):
@@ -363,6 +370,28 @@ class ReplicationCommandApplier:
             data["tombstones"].pop(item_id, None)
         self._data.save(entry.replication_book_id, domain, data)
 
+    def _apply_diagnostic(self, entry: LedgerEntry) -> None:
+        body = entry.body
+        if not isinstance(body, dict) or not isinstance(body.get("kind"), str):
+            raise ReplicationApplyError("诊断命令 body 非法")
+        path = (
+            self._data.directory / entry.replication_book_id
+            / DIAGNOSTICS_FILE_NAME
+        )
+        try:
+            entries = json.loads(path.read_text(encoding="utf-8-sig"))["entries"]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            entries = []
+        entries.append({
+            "receivedAtUtcMs": entry.received_at_utc_ms,
+            "mutationId": entry.mutation_id,
+            "body": body,
+        })
+        _atomic_write_json(path, {
+            "contract": "replication-diagnostics/1",
+            "entries": entries[-MAX_DIAGNOSTIC_ENTRIES:],
+        })
+
     def applied_cursor(self) -> int:
         try:
             raw = self._state_path.read_text(encoding="utf-8-sig")
@@ -409,6 +438,8 @@ class ReplicationCommandApplier:
                     special = self._apply_pair
                 elif entry.url == RESYNC_URL and entry.method == "POST":
                     special = self._apply_resync
+                elif entry.url == DIAGNOSTIC_URL and entry.method == "POST":
+                    special = self._apply_diagnostic
                 if special is not None:
                     try:
                         special(entry)
