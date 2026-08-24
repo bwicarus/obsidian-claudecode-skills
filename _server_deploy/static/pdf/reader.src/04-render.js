@@ -44,7 +44,13 @@ async function renderPage(num) {
 // 纯位移→各层相对位置不变、选中坐标(ptToLocal 用 getBoundingClientRect)自动跟随,不会错位。
 // canvas/层 CSS 尺寸仍是整页(cw×ch);裁切只靠 wrap 窗口 + 子层位移。
 function _applyCropToWrap(wrap, cw, ch) {
-  if (!_cropActive()) {
+  // 用户插入页豁免去边：裁切参数按**书页内容包围盒**（漫画/扫描正文）算，
+  // 白纸文字页的内容在左上、大片留白 —— 套同一窗口会把正文裁出可见区
+  // （2026-08-25 真机：放大触发去边后自建页文字被左缘裁半）。
+  const _pn = wrap && wrap.dataset ? parseInt(wrap.dataset.pageNum, 10) : 0;
+  const _isUserPage = _pn > 0 &&
+    typeof window._upIsRealPage === 'function' && window._upIsRealPage(_pn);
+  if (!_cropActive() || _isUserPage) {
     wrap.classList.remove('crop-on');
     wrap.style.removeProperty('--crop-l');
     wrap.style.removeProperty('--crop-t');

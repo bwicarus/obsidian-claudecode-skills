@@ -225,3 +225,13 @@ test("原地重排必须把乐观插入页(.pdf-upage)一并重设为统一 fit 
     "禁止拷邻居 style.width（zoom 过渡期是旧值）",
   );
 });
+
+test("去边豁免用户插入页：白纸文字页不得被书页的裁切窗口裁", () => {
+  const RENDER = read("_server_deploy/static/pdf/reader.src/04-render.js");
+  const UISHARED = read("_server_deploy/static/pdf/pdf-uishared.js");
+  const crop = section(RENDER, "function _applyCropToWrap(", "function _prefetch");
+  // 豁免必须发生在 crop 生效判断里（走 remove 分支），且按页号查用户页
+  assert.match(crop, /_upIsRealPage/);
+  assert.match(crop, /!_cropActive\(\) \|\| _isUserPage/);
+  assert.match(UISHARED, /window\._upIsRealPage = function/);
+});

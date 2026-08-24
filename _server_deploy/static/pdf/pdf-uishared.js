@@ -304,6 +304,12 @@ window._favOpenPicker = function () {
     } catch (_) {}
     return out;
   }
+  // 渲染层（04-render 去边豁免）用：该页号是否用户插入的真实页。
+  window._upIsRealPage = function (pageNum) {
+    var recs = _upRealPages();
+    for (var i = 0; i < recs.length; i++) if (recs[i].page === pageNum) return true;
+    return false;
+  };
   // 编辑现有真实页 = 就地在那一页覆盖编辑面板(删除按钮内嵌);保存/删除都走乐观横幅(不阻塞、不整页硬刷新)
   function _upEditReal(rec) {
     var pw = document.querySelector('.page-wrap[data-page-num="' + rec.page + '"]');
