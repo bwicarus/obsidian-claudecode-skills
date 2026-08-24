@@ -282,8 +282,15 @@ items = items.filter(function (item) { return item && item.id !== request.id; })
       ⚠ ink 按页拆分（同构、更简单）刻意推迟：先让高亮在真机站稳再动（调查
       归档方向三的建议顺序）。重放防复活不在本地路由层（显式重建覆盖墓碑是
       有意的，redo/导入靠它）——由复制层按 actor/mutationId 判
-- [ ] 1 命令信封
-- [ ] 2 Windows 服务端
+- [x] 1 命令信封 —— **可执行权威**：
+      `extensions/bw-reader-webext/windows/computer-voice-desktop/replication_command_ledger.py`
+      的 `validate_command_envelope`（`replication-command/1`，字段见 §9；
+      多副本约定已登记 `reader-specs/contract-sites.json` 的
+      `replication-command-envelope`，C# 闸与 App 发送端两处副本随步骤 2/3 落地）
+- [~] 2 Windows 服务端 —— **账本半边已落地**：`ReplicationCommandLedger`
+      （SQLite 照 relay 模式：落账分配游标 / mutationId+摘要幂等 / 同 id 不同
+      内容出声冲突 / entries_after 拉取，测试 10 条 + 3 处变异破坏即红）。
+      **待做**：C# Direct 桥新 action 对（接收）+ 分发到 Windows 数据副本
 - [ ] 3 App 队列
 - [ ] 4 对账
 - [ ] 5 账本

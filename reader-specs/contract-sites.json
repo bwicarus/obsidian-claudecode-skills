@@ -126,6 +126,35 @@
         }
       ]
     },
+    "replication-command-envelope": {
+      "what": "两节点复制的命令信封 replication-command/1（deviceId 设备族 / repbook 书身份 / actor / command-outbox op 原形）",
+      "canonical": "extensions/bw-reader-webext/windows/computer-voice-desktop/replication_command_ledger.py",
+      "tests": [
+        "extensions/bw-reader-webext/windows/computer-voice-desktop/tests/test_replication_command_ledger.py"
+      ],
+      "sites": [
+        {
+          "file": "extensions/bw-reader-webext/windows/computer-voice-desktop/replication_command_ledger.py",
+          "role": "权威定义 + 账本落账校验",
+          "note": "validate_command_envelope；url 只做形状校验，端点白名单由执行端把守（刻意不在账本层再抄一份）"
+        },
+        {
+          "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectBridgeContract.cs",
+          "role": "跨机信封校验（计划中，步骤2）",
+          "note": "C# Direct 桥新 action 对的 exact-shape 闸——落地时必须与 Python 权威逐字段一致"
+        },
+        {
+          "file": "_server_deploy/static/pdf/native-local-runtime.js",
+          "role": "App 发送端（计划中，步骤3）",
+          "note": "nativeSyncBatchOperation 分发层组装信封；新命令路径同时要进 NATIVE_SYNC_BATCH_ENDPOINTS 与 manifest 两处"
+        }
+      ],
+      "gotchas": [
+        "deviceId 用设备族格式 (native-app|pwa-install|server-node)-v1-<32hex>，绝不用 sourceInstanceId（它属于单个 WebView 生命周期，C# outbox 刻意不持久化它）。server-node 是服务端角色的设备族——角色不绑机器，刻意不叫 windows。",
+        "cursor 不在信封里：游标由接收端落账时分配（C# outbox 与 Pi relay 都是这个语义）。",
+        "幂等 = mutationId + 整信封 canonical JSON 的 sha256；同 id 不同内容是出声冲突，不是覆盖。"
+      ]
+    },
     "web-snapshot-post-body": {
       "what": "网页快照 POST 的四个载荷（viewport / active / document / event）各自的字段允许集",
       "canonical": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectContextSnapshot.cs",
