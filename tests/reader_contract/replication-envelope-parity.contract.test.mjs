@@ -156,3 +156,17 @@ test("both ends materialize domains by the same rule before digesting", () => {
   assert.match(APPLY, /sort_keys=True, separators=\(",", ":"\)/);
   assert.match(APPLY, /ensure_ascii=False/);
 });
+
+test("idle reconcile loop exists and never blocks process exit", () => {
+  // 对账只在队列排空后触发的缺口：无命令活动（如真实插入页走 mutation
+  // 不入队）时永不对账。必须有 unref 的周期对账链兜底。
+  const idle = RUNTIME.slice(
+    RUNTIME.indexOf("function scheduleReplicationIdleReconcile"),
+    RUNTIME.indexOf("var REPLICATION_DOMAINS"),
+  );
+  assert.match(idle, /maybeReconcileReplication\(\)/);
+  assert.match(idle, /scheduleReplicationIdleReconcile\(\);/, "自我重排成链");
+  assert.match(idle, /timer\.unref === 'function'\) timer\.unref\(\)/);
+  assert.match(RUNTIME, /scheduleReplicationIdleReconcile\(\);\s*\}\s*try \{/,
+    "boot 就绪后挂上空闲对账链");
+});

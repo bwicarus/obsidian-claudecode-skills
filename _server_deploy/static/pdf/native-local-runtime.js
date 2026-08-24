@@ -1582,6 +1582,15 @@
   // /replication/resync 整域重同步命令（全量 upsert + 差集墓碑，幂等）
   // 让对端收敛 —— 这就是规格说的"允许一次显式的整域重同步"。
   var REPLICATION_RECONCILE_MIN_INTERVAL_MS = 5 * 60 * 1000;
+  var REPLICATION_IDLE_RECONCILE_MS = 10 * 60 * 1000;
+  function scheduleReplicationIdleReconcile() {
+    var timer = root.setTimeout(function () {
+      Promise.resolve(maybeReconcileReplication())
+        .catch(function () {})
+        .then(function () { scheduleReplicationIdleReconcile(); });
+    }, REPLICATION_IDLE_RECONCILE_MS);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+  }
   var REPLICATION_RESYNC_COOLDOWN_MS = 30 * 60 * 1000;
   // read() 返回本域的物化数组（对账输入）。高亮走门面（order→存活条目），
   // 便签仍是整册数组存储、原序即物化序 —— 两端规则一致即可比。
@@ -13909,9 +13918,13 @@
         bootState = 'ready';
         if (typeof root.dlog === 'function') root.dlog('本机启动:运行时已就绪');
         // 复制出箱：开书先冲一次积压。之后的节奏是"入队即触发 +
-        // 有积压才按 30s 重排"，队列空时没有任何常驻定时器。
+        // 有积压才按 30s 重排"，队列空时没有阻塞性的常驻定时器。
+        // 另挂一条**周期对账**链（unref，不阻进程退出）：此前对账只在
+        // 队列排空后触发 —— 没有命令活动时永不对账，走 PDF mutation
+        // 等不入队路径的改动（真实插入页）只能靠它兜底收敛。
         if (replicationEligible()) {
           scheduleReplicationDrain(2000);
+          scheduleReplicationIdleReconcile();
         }
         try {
           root.dispatchEvent(new CustomEvent('bw:native-local-runtime-ready', {
