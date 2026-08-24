@@ -32,28 +32,28 @@
 3. `references/activity-ledger-design.md` —— 活动账本；§0 是同步范围表（高亮/便签/
    插入页=事件同步、墨迹=静置后、阅读进度/选中=不同步）
 
-## 2. ⚠ 有一个调查在飞，结果落在磁盘上
+## 2. ⚠ 新会话的第一件事：重跑前提 A/B 的四方向调查
 
-交接时刚发出一个四方向调查（前提 A 的身份生命周期、各表面书引用形状、
-前提 B 的改动面与迁移、命令信封的既有约束）。**新会话不会收到它的完成通知**，
-但结果在磁盘上：
+旧会话末尾发过一个四方向调查（前提 A 的身份生命周期、各表面书引用形状、
+前提 B 的改动面与迁移、命令信封的既有约束）。第一轮 4 个 agent **全灭于
+API 529 Overloaded**（一个都没跑），重试也在切换会话前被有意停掉了——
+**没有任何在飞的工作，没有可用的调查结果**。
 
-```
-C:\Users\bwica\.claude\projects\C--claude\fc5f8953-8bae-4c7e-a5db-c32382b13bec\subagents\workflows\wf_62af4db4-c76\journal.jsonl
-```
-
-每行一个 `{"type":"result",...}` 是一个 agent 的完整返回。**先读它再动前提 A**。
-
-⚠ 第一轮 4 个 agent **全灭于 API 529 Overloaded**（服务端过载，一个都没跑），
-已重试一次。所以 journal 里可能是：重试的完整结果 / 部分结果 / 仍然是空。
-**读之前别假设它有内容**；空或不全就重新跑 —— 四个方向的问题定义原样保存在：
+四个方向的问题定义原样保存在（问题本身比某次运行的结果更有价值）：
 
 ```
 C:\Users\bwica\.claude\projects\C--claude\fc5f8953-8bae-4c7e-a5db-c32382b13bec\workflows\scripts\book-identity-and-envelope-wf_62af4db4-c76.js
 ```
 
-（直接 `Workflow({scriptPath: 上面这个路径})` 即可全新跑一遍；
-问题本身比某次运行的结果更有价值，别怕重跑。）
+新会话直接 `Workflow({scriptPath: 上面这个路径})` 全新跑一遍，
+消化结果后再动前提 A。它要回答的核心悬念：
+
+- `contentFingerprint` 纯内容派生、跨设备一致（已核实），
+  **但插入页会真的改 PDF 字节 → 指纹会漂** —— 跨设备身份锚在哪？
+- 各表面今天用什么字符串指代一本书（localbook-/book_<32hex>/vault rel/web:），
+  命令信封的 book 字段两端各自怎么解析？
+- 前提 B 拆记录的全部消费点 + 存量设备上整册数组的迁移做法？
+- 命令信封在 Direct 桥 256KB 上限与既有 outbox 形状下怎么定稿？
 
 已知的关键悬念（调查要回答的）：
 - `contentFingerprint` 是纯内容派生（SHA256 of 格式+大小+头尾各256KB，
