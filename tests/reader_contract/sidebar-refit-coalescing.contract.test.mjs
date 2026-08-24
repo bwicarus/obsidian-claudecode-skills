@@ -206,3 +206,22 @@ test("用户主动缩放只高清化视口与邻页，远页留给 IntersectionO
   assert.match(DRAWER, /addEventListener\('input',[\s\S]*?setWidth\(this\.value, false\)/);
   assert.match(DRAWER, /addEventListener\('change',[\s\S]*?setWidth\(this\.value, true\)/);
 });
+
+test("原地重排必须把乐观插入页(.pdf-upage)一并重设为统一 fit 宽", () => {
+  // 2026-08-25 真机：缩放/侧栏开合后整列只有插入页不缩放——它不在
+  // .page-wrap 集合里，创建时"跟前一张同宽"是一次性拷贝。重排尾部
+  // 必须按统一 fit 宽 estW 重设；且不能拷邻居 style.width（已渲染页
+  // 过渡期视觉尺寸靠补偿 zoom 撑，style.width 还是旧值）。
+  const rescale = section(
+    CONTINUOUS,
+    "async function _rescaleContinuousInPlace(",
+    "window._rescaleContinuousInPlace",
+  );
+  assert.match(rescale, /querySelectorAll\('\.pdf-upage'\)/);
+  assert.match(rescale, /up\.style\.width = estW \+ 'px'/);
+  assert.doesNotMatch(
+    rescale,
+    /pdf-upage[\s\S]{0,400}neighbor\.style\.width/,
+    "禁止拷邻居 style.width（zoom 过渡期是旧值）",
+  );
+});

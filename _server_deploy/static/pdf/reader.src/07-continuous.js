@@ -199,6 +199,17 @@ async function _rescaleContinuousInPlace(options) {
       w.style.width = estW + 'px'; w.style.height = estH + 'px';
     }
   }
+  // 乐观插入页(虚拟 .pdf-upage,无 data-page-num)不在 wraps 里:它的宽度
+  // 是创建时一次性"跟前一张真页同宽"拷来的,缩放/侧栏开合后没人再执行
+  // 这条规则 → 停留在旧宽度上,整列里只有它不缩放(2026-08-25 真机)。
+  // 用循环外的统一 fit 宽 estW 重设(创建时"跟前一张同宽"的本质就是它);
+  // ⚠ 不能拷邻居 style.width——已渲染页过渡期视觉尺寸靠补偿 zoom 撑,
+  // style.width 还是旧值。
+  if (estW) {
+    container.querySelectorAll('.pdf-upage').forEach((up) => {
+      up.style.width = estW + 'px';
+    });
+  }
   return true;
 }
 window._rescaleContinuousInPlace = _rescaleContinuousInPlace;
