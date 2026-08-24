@@ -6946,7 +6946,7 @@ if (window.__bwPwaProviderOnly) return;
     if (typeof value !== "string") return "";
     return value
       .replace(/\r\n?/g, "\n")
-      .replace(/[ ---]/g, "")
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "")
       .slice(0, 2000);
   }
   function localReviewSnapshot() {

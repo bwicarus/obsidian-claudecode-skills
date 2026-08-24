@@ -7521,3 +7521,73 @@ test("a second PDF mutation on the same book succeeds after the first one's jour
   assert.equal(editJob.status, "done",
     "同一本书的第二次改页必须成功: " + JSON.stringify(editJob.error || ""));
 });
+
+test("insert-page migrates word binds (card/html bind.page) together with anchors", async () => {
+  // 2026-08-25 实锤：迁移只搬了壳锚 anchor.page，词锚 bind.page 停在原页号，
+  // 词框在错误的页找文本 → 绑不上就藏 → "绑定的卡都消失了"。
+  const durable = { pageCount: 4, contentSHA256: "b".repeat(64), journal: null };
+  const first = await harness({
+    interfaceManifest: withNativePDFMutationRoutesSupported(),
+    pdfMutationReply: nativePDFMutationResponder({ durableState: durable }),
+  });
+  const created = await first.context.fetch("/pdf/api/notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE,
+      anchor: { kind: "pdf", page: 2, x: 0.2, y: 0.3 },
+      html: {
+        content: "<b>bound</b>", isHtml: true,
+        bind: { kind: "page-chars", page: 2, from: 10, to: 14, text: "料理" },
+      },
+    }),
+  });
+  assert.equal(created.status, 200);
+  const receipt = await (await first.context.fetch("/pdf/api/pdf-insert-page", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, after: 1, md: "插入页" }),
+  })).json();
+  assert.equal((await waitForNativePDFJob(first.context, receipt.job_id)).status, "done");
+  const after = await (await first.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  const note = after.notes.find((item) => item.html && item.html.bind);
+  assert.ok(note, "带词锚的便签仍在");
+  assert.equal(note.anchor.page, 3, "壳锚移位");
+  assert.equal(note.html.bind.page, 3, "词锚必须与壳锚一起移位");
+  assert.equal(note.html.bind.from, 10, "页内字符下标不动");
+});
+
+test("boot repairs stored word-bind page drift (bind.page !== anchor.page)", async () => {
+  // 存量修复：已被旧版迁移弄错位的数据（bind 停在移位前页号）在下次
+  // 开书时对齐到壳锚页。幂等：对齐后条件不再命中。
+  const dataStoresState = {
+    global: { values: new Map(), revision: 0 },
+    document: { values: new Map(), revision: 0 },
+    device: { values: new Map(), revision: 0 },
+  };
+  const first = await harness({ dataStoresState });
+  const created = await first.context.fetch("/pdf/api/notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE,
+      anchor: { kind: "pdf", page: 45, x: 0.2, y: 0.3 },
+      card: {
+        id: "drift-card", cid: "drift-card", gid: "drift-card",
+        cards: [{ front: "Q", back: "A" }],
+        bind: { kind: "page-chars", page: 43, from: 5, to: 9, text: "特徴" },
+      },
+    }),
+  });
+  assert.equal(created.status, 200);
+  const second = await harness({ dataStoresState });
+  const listed = await (await second.context.fetch(
+    "/pdf/api/notes?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  const note = listed.notes.find((item) => item.card && item.card.bind);
+  assert.ok(note, "便签仍在");
+  assert.equal(note.card.bind.page, 45, "词锚对齐到壳锚页");
+  assert.equal(note.card.bind.from, 5, "字符下标保留");
+});

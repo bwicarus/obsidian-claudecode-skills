@@ -6785,6 +6785,56 @@
     return output;
   }
 
+  // 一次性存量修复(2026-08-25 实锤):插入页迁移曾只搬壳锚 anchor.page、
+  // 漏了词锚 card/html.bind.page(migrateNativePDFNotes 已补),已插过页的书
+  // 里词锚停在移位前的页号,词框在错误的页找文本,绑不上就藏 ——
+  // 用户看到'绑定的卡都消失了'。绑定创建时词锚与壳锚同页,所以
+  // anchor.kind==='pdf' 且 bind.page !== anchor.page 的都是这次错位,
+  // 直接对齐。幂等:对齐后条件不再命中,之后每次开书只是一次探测读。
+  // 修复只写本地;Windows 副本靠周期对账(摘要变化 → resync)自动收敛。
+  function noteBindPageDrifted(note) {
+    if (!note || typeof note !== 'object') return false;
+    var anchor = note.anchor;
+    if (!anchor || anchor.kind !== 'pdf' ||
+        !Number.isInteger(anchor.page)) return false;
+    return ['card', 'html'].some(function (slot) {
+      var bind = note[slot] && note[slot].bind;
+      return !!bind && bind.kind === 'page-chars' &&
+        Number.isInteger(Number(bind.page)) &&
+        Number(bind.page) !== anchor.page;
+    });
+  }
+  function repairNoteBindPageDrift() {
+    if (nativeInterfaceSurface !== 'pdf') return Promise.resolve(null);
+    return readState('document-notes-legacy', []).then(function (probe) {
+      if (!Array.isArray(probe) || !probe.some(noteBindPageDrifted)) {
+        return null;
+      }
+      return mutateDocumentState('document-notes-legacy', [], function (items) {
+        items = Array.isArray(items) ? items : [];
+        items.forEach(function (note) {
+          if (!noteBindPageDrifted(note)) return;
+          ['card', 'html'].forEach(function (slot) {
+            var bind = note[slot] && note[slot].bind;
+            if (!bind || bind.kind !== 'page-chars' ||
+                !Number.isInteger(Number(bind.page)) ||
+                Number(bind.page) === note.anchor.page) return;
+            bind.page = note.anchor.page;
+          });
+        });
+        return localStateMutationResult(items, { ok: true });
+      });
+    }).catch(function (error) {
+      // 修复失败不拦启动(卡片照旧隐身而不是书打不开),但必须留痕。
+      enqueueReplicationCommand('/replication/diagnostic', 'POST', {
+        kind: 'note-bind-repair-error',
+        error: String(error && error.message || error).slice(0, 2000),
+        at: nowSeconds()
+      });
+      return null;
+    });
+  }
+
   function migrateNativePDFNotes(value, plan) {
     if (!Array.isArray(value)) {
       throw new RuntimeError(
@@ -6801,6 +6851,21 @@
         if (mapped == null) return output;
         anchor.page = mapped;
       }
+      // 词锚(card/html.bind.page)必须与壳锚同步移位(2026-08-25 实锤:
+      // 只搬 anchor.page 的话,插入页后词框在错误的页找文本,绑不上就
+      // 藏起来,用户看到的是'绑定的卡都消失了')。字符下标 from/to 属于
+      // 该页自身的字符层,页内容未变,只映射页号。被删页上的词锚降级成
+      // 自由卡(去掉 bind),便签本体与内容保留 —— 锚没了不等于笔记没了。
+      ['card', 'html'].forEach(function (slot) {
+        var payload = note && note[slot];
+        var bind = payload && payload.bind;
+        if (!bind || !Number.isInteger(Number(bind.page))) return;
+        var mappedBind = nativePDFPageMap(
+          Number(bind.page), plan.operation, plan.pivotPage
+        );
+        if (mappedBind == null) delete payload.bind;
+        else bind.page = mappedBind;
+      });
       output.push(note);
       return output;
     }, []);
@@ -13912,6 +13977,10 @@
         return migrateHighlightSplitOnBoot();
       }).then(function () {
         return recoverNativePDFMutationOnBoot();
+      }).then(function () {
+        // 词锚错位修复要在 PDF 恢复之后:恢复可能回滚 journal,把 notes
+        // 换回另一份;对着恢复前的数据修等于白修。
+        return repairNoteBindPageDrift();
       }).then(function () {
         if (typeof root.dlog === 'function') root.dlog('本机启动:PDF 恢复检查已完成');
         return attachPreferenceStore();
