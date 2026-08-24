@@ -1,5 +1,11 @@
 # 会话交接 2026-08-24 —— 新会话从这里接手
 
+> ⚠ **2026-08-24 深夜二更：规格步骤 1-6 全部落地**。四个域（高亮/便签/
+> 插入页/墨迹）全部接通复制与对账；Windows 桥 0.1.198 与 ReaderPC 0.1.64
+> 已装机在跑；TestFlight 多次构建成功。当前权威进度看
+> `references/reader-two-node-replication.md` 文末清单；剩余待办 =
+> 身份重配对 + Swift 全文 sha 桥、大条目分帧传输、真机端到端验收（用户）。
+>
 > ⚠ **2026-08-24 晚更新：本文 §2 的调查已经跑完并归档**
 > （`references/book-identity-investigation-20260824.md`，4/4 全 verified），
 > **不要再重跑那个 workflow**。前提 A（Windows 侧链接表）、前提 B（高亮拆
