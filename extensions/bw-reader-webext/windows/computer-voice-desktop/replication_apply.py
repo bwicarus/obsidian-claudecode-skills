@@ -61,10 +61,15 @@ APPLY_STATE_FILE_NAME = "replication-apply-state.json"
 APPLY_STATUS_FILE_NAME = "replication-apply.status.json"
 DEAD_LETTER_FILE_NAME = "replication-dead-letter.jsonl"
 
-# 条目 id 形状：高亮 c_/h_/e…、便签 n<hex>（App 路由 'n'+randomHex(6).slice(0,11)）。
+# 条目 id 形状：高亮 c_/h_/e…、便签 n<hex>（App 路由 'n'+randomHex(6).slice(0,11)）、
+# 插入页 u_<hex>。
 _ITEM_ID_RE = re.compile(
-    r"^(?:c_[a-f0-9]{8,32}|h_[a-f0-9]{6,32}|e[a-f0-9]{6,16}|n[a-f0-9]{6,16})$"
+    r"^(?:c_[a-f0-9]{8,32}|h_[a-f0-9]{6,32}|e[a-f0-9]{6,16}|n[a-f0-9]{6,16}"
+    r"|u_[a-fA-F0-9]{4,16})$"
 )
+
+# 墨迹域的条目 id = 页键：PDF 页号 / EPUB 章节号 / 插入页段 u_<hex>。
+_INK_KEY_RE = re.compile(r"^(?:[0-9]{1,7}|u_[a-fA-F0-9]{4,16})$")
 
 # PATCH 允许改的字段，照 App 路由的允许集（native-local-runtime.js 的
 # localPDFHighlights / localEPUBHighlights / localNotes）。
@@ -76,6 +81,7 @@ _PATCH_FIELDS = {
         "anchor", "text", "color", "w", "h", "collapsed",
         "strokes", "video", "card", "html", "iar",
     )),
+    "user-pages": frozenset(("title", "md", "after", "h", "blocks")),
 }
 
 _EXECUTORS: dict[tuple[str, str], tuple[str, str]] = {
@@ -89,6 +95,12 @@ _EXECUTORS: dict[tuple[str, str], tuple[str, str]] = {
     ("/pdf/api/notes", "POST"): ("document-notes", "upsert"),
     ("/pdf/api/notes", "PATCH"): ("document-notes", "patch"),
     ("/pdf/api/notes", "DELETE"): ("document-notes", "tombstone"),
+    ("/pdf/api/userpages", "POST"): ("user-pages", "upsert"),
+    ("/pdf/api/userpages", "PATCH"): ("user-pages", "patch"),
+    ("/pdf/api/userpages", "DELETE"): ("user-pages", "tombstone"),
+    # 墨迹：一页一条目、整页替换；空笔画 = 删键 = 墓碑（App 静置后发）。
+    ("/pdf/api/ink", "POST"): ("pdf-ink", "ink-set"),
+    ("/pdf/api/epub-ink", "POST"): ("epub-ink", "ink-set"),
 }
 
 # 配对公告（前提 A 的 App 半边）：App 铸 replicationBookId 后作为一条命令
@@ -100,7 +112,10 @@ _PAIR_BODY_KEYS = frozenset(("peerBookId", "replicationBookId", "displayName"))
 # 按序重发，服务端整域替换（全量 upsert + 差集写墓碑）。幂等。
 RESYNC_URL = "/replication/resync"
 _RESYNC_BODY_KEYS = frozenset(("domain", "items"))
-_RESYNC_DOMAINS = frozenset(("pdf-highlights", "epub-highlights", "document-notes"))
+_RESYNC_DOMAINS = frozenset((
+    "pdf-highlights", "epub-highlights", "document-notes",
+    "user-pages", "pdf-ink", "epub-ink",
+))
 
 REPLICATION_DIGESTS_FILE_NAME = "replication-digests.json"
 REPLICATION_DIGESTS_CONTRACT = "replication-digests/1"
@@ -118,10 +133,19 @@ def canonical_json_for_digest(value: Any) -> str:
     )
 
 
-def materialize_domain_items(data: dict[str, Any]) -> list[dict[str, Any]]:
-    """order → 存活条目（排除墓碑；序里没有的存活条目按 id 排序补末尾）。
-    规则与 App 门面 readHighlightCollection 逐位一致。"""
+def materialize_domain_items(
+    data: dict[str, Any], domain: str = ""
+) -> list[dict[str, Any]]:
+    """物化 = 对账摘要的输入，两端规则必须逐位一致：
+
+    - 常规域：order → 存活条目（序外存活条目按 id 排序补末尾），
+      与 App 门面 readHighlightCollection / 整册数组原序一致；
+    - 墨迹域（*-ink）：**按键字典序**，与 App 端
+      Object.keys(map).sort() 一致 —— 墨迹在 App 端是 map，没有插入序。
+    """
     items = data.get("items") or {}
+    if domain.endswith("-ink"):
+        return [items[item_id] for item_id in sorted(items)]
     order = [str(value) for value in (data.get("order") or [])]
     used: set[str] = set()
     ordered: list[str] = []
@@ -135,8 +159,8 @@ def materialize_domain_items(data: dict[str, Any]) -> list[dict[str, Any]]:
     return [items[item_id] for item_id in ordered]
 
 
-def domain_digest(data: dict[str, Any]) -> str:
-    materialized = materialize_domain_items(data)
+def domain_digest(data: dict[str, Any], domain: str = "") -> str:
+    materialized = materialize_domain_items(data, domain)
     return hashlib.sha256(
         canonical_json_for_digest(materialized).encode("utf-8")
     ).hexdigest()
@@ -211,6 +235,25 @@ class ReplicationDataStore:
 def _apply_to_domain(
     data: dict[str, Any], operation: str, domain: str, body: dict[str, Any]
 ) -> None:
+    if operation == "ink-set":
+        raw_key = body.get("page") if "page" in body else body.get("idx")
+        key = str(raw_key)
+        if not _INK_KEY_RE.fullmatch(key):
+            raise ReplicationApplyError(f"墨迹页键非法：{key!r}")
+        strokes = body.get("strokes")
+        if not isinstance(strokes, list):
+            raise ReplicationApplyError("墨迹 strokes 必须是数组")
+        if strokes:
+            data["items"][key] = {"id": key, "strokes": strokes}
+            data["tombstones"].pop(key, None)
+            if key not in data["order"]:
+                data["order"].append(key)
+        else:
+            # 空笔画 = 整页擦除 = 墓碑（与 App 路由的 delete map[key] 同语义）
+            data["items"].pop(key, None)
+            data["order"] = [value for value in data["order"] if value != key]
+            data["tombstones"][key] = {"time": int(time.time())}
+        return
     item_id = body.get("id")
     if not isinstance(item_id, str) or not _ITEM_ID_RE.fullmatch(item_id):
         raise ReplicationApplyError(
@@ -295,13 +338,14 @@ class ReplicationCommandApplier:
         data = self._data.load(entry.replication_book_id, domain)
         next_items: dict[str, Any] = {}
         next_order: list[str] = []
+        id_pattern = _INK_KEY_RE if domain.endswith("-ink") else _ITEM_ID_RE
         for item in items:
             if not isinstance(item, dict):
                 raise ReplicationApplyError("重同步条目不是对象")
             item_id = item.get("id")
             if (
                 not isinstance(item_id, str)
-                or not _ITEM_ID_RE.fullmatch(item_id)
+                or not id_pattern.fullmatch(item_id)
                 or item_id in next_items
             ):
                 raise ReplicationApplyError("重同步条目 id 非法或重复")
@@ -420,8 +464,8 @@ def export_replication_digests(
                 domain = path.stem
                 data = store.load(book_dir.name, domain)
                 domains[domain] = {
-                    "digest": domain_digest(data),
-                    "count": len(materialize_domain_items(data)),
+                    "digest": domain_digest(data, domain),
+                    "count": len(materialize_domain_items(data, domain)),
                 }
             if domains:
                 books[book_dir.name] = domains

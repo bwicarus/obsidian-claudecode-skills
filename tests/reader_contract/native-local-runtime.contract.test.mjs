@@ -7300,3 +7300,75 @@ test("local note writes enqueue replication commands like highlights do", async 
     envelopes.filter((e) => e.op.url === "/replication/pair").length, 1,
   );
 });
+
+test("user pages enqueue replication commands and real-page 409 gates stay local", async () => {
+  const result = await harness();
+  const created = await result.context.fetch("/pdf/api/userpages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE, after: 3, title: "补充页", md: "# 手写",
+    }),
+  });
+  assert.equal(created.status, 200);
+  const pageId = (await created.json()).id;
+  const patched = await result.context.fetch("/pdf/api/userpages", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, id: pageId, md: "改过" }),
+  });
+  assert.equal(patched.status, 200);
+  const removed = await result.context.fetch("/pdf/api/userpages", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, id: pageId }),
+  });
+  assert.equal(removed.status, 200);
+  const ops = replicationOutboxRecords(result.dataStoresState)
+    .map((record) => record.payload.envelope)
+    .filter((e) => e.op.url === "/pdf/api/userpages");
+  assert.deepEqual(ops.map((e) => e.op.method), ["POST", "PATCH", "DELETE"]);
+  assert.equal(ops[0].op.body.id, pageId, "POST 带已落库完整条目（含分配的 id）");
+  assert.equal(typeof ops[0].op.body.created, "number");
+});
+
+test("ink replication waits for the settle timer and captures the latest strokes", async () => {
+  const settleTimers = [];
+  const clearedTimers = [];
+  const result = await harness({
+    setTimeout: (fn, ms) => {
+      if (ms === 60000) {
+        const handle = { settle: fn, unref() {} };
+        settleTimers.push(handle);
+        return handle;
+      }
+      return setTimeout(fn, ms);
+    },
+    clearTimeout: (handle) => {
+      if (handle && handle.settle) { clearedTimers.push(handle); return; }
+      clearTimeout(handle);
+    },
+  });
+  const inkPost = (strokes) => result.context.fetch("/pdf/api/ink", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, page: 12, strokes }),
+  });
+  assert.equal((await inkPost([{ t: "pen", pts: [1, 2] }])).status, 200);
+  assert.equal((await inkPost([{ t: "pen", pts: [1, 2] }, { t: "pen", pts: [3, 4] }])).status, 200);
+  // 静置期内没有任何墨迹命令入队
+  assert.equal(replicationOutboxRecords(result.dataStoresState)
+    .filter((r) => r.payload.envelope.op.url === "/pdf/api/ink").length, 0,
+    "静置前不得入队");
+  assert.equal(settleTimers.length, 2, "每次写都重排定时器");
+  assert.equal(clearedTimers.length, 1, "上一个定时器被重置");
+  // 静置到点：取当时最新整页笔画入队
+  settleTimers[1].settle();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const inkOps = replicationOutboxRecords(result.dataStoresState)
+    .map((record) => record.payload.envelope)
+    .filter((e) => e.op.url === "/pdf/api/ink");
+  assert.equal(inkOps.length, 1);
+  assert.equal(inkOps[0].op.body.page, 12);
+  assert.equal(inkOps[0].op.body.strokes.length, 2, "入队的是最新整页，不是第一笔");
+});

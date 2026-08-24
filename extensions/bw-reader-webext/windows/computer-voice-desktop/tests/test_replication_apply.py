@@ -124,8 +124,8 @@ class ApplierTests(unittest.TestCase):
             {"file": "x", "id": "h_ffffff", "note": "条目不存在"},
         ))
         self.ledger.append(envelope(
-            "2", "/pdf/api/ink", "POST", {"id": "c_" + "1" * 16},
-        ))  # 执行映射表外（墨迹域尚未接）
+            "2", "/pdf/api/reading-pos", "POST", {"id": "c_" + "1" * 16},
+        ))  # 执行映射表外（阅读进度按规格明确不同步，永远表外）
         self.ledger.append(envelope(
             "3", "/pdf/api/highlights", "POST", highlight_item("h_aaaaaa"),
         ))
@@ -289,6 +289,63 @@ class ResyncAndDigestTests(unittest.TestCase):
         data = self.store.load(BOOK, "document-notes")
         self.assertIn("n1a2b3c4d5e6", data["tombstones"])
         self.assertEqual(data["items"], {})
+
+    def test_user_pages_and_ink_domains_roundtrip(self) -> None:
+        self.ledger.append(envelope(
+            "1", "/pdf/api/userpages", "POST",
+            {"file": "localbook:x", "id": "u_ab12cd34", "after": 3,
+             "title": "补充页", "md": "# 手写补充", "created": 1, "updated": 1},
+        ))
+        self.ledger.append(envelope(
+            "2", "/pdf/api/userpages", "PATCH",
+            {"file": "x", "id": "u_ab12cd34", "md": "改过的正文"},
+        ))
+        self.ledger.append(envelope(
+            "3", "/pdf/api/ink", "POST",
+            {"file": "x", "page": 12, "strokes": [{"t": "pen", "pts": [1, 2]}]},
+        ))
+        self.ledger.append(envelope(
+            "4", "/pdf/api/epub-ink", "POST",
+            {"file": "x", "idx": "u_ab12cd34", "strokes": [{"t": "pen"}]},
+        ))
+        report = self.applier.apply_pending()
+        self.assertEqual(report["deadLetters"], [])
+        pages = self.store.load(BOOK, "user-pages")
+        self.assertEqual(pages["items"]["u_ab12cd34"]["md"], "改过的正文")
+        ink = self.store.load(BOOK, "pdf-ink")
+        self.assertEqual(ink["items"]["12"]["strokes"][0]["t"], "pen")
+        # 空笔画 = 整页擦除 = 墓碑
+        self.ledger.append(envelope(
+            "5", "/pdf/api/ink", "POST", {"file": "x", "page": 12, "strokes": []},
+        ))
+        self.applier.apply_pending()
+        ink = self.store.load(BOOK, "pdf-ink")
+        self.assertNotIn("12", ink["items"])
+        self.assertIn("12", ink["tombstones"])
+        # 墨迹页键闸：非法键死信
+        self.ledger.append(envelope(
+            "6", "/pdf/api/ink", "POST",
+            {"file": "x", "page": "abc", "strokes": [{"t": "pen"}]},
+        ))
+        report = self.applier.apply_pending()
+        self.assertEqual(len(report["deadLetters"]), 1)
+
+    def test_ink_digest_orders_by_key_not_arrival(self) -> None:
+        import replication_apply as module
+
+        self.ledger.append(envelope(
+            "1", "/pdf/api/ink", "POST",
+            {"file": "x", "page": 9, "strokes": [{"t": "pen"}]},
+        ))
+        self.ledger.append(envelope(
+            "2", "/pdf/api/ink", "POST",
+            {"file": "x", "page": 10, "strokes": [{"t": "pen"}]},
+        ))
+        self.applier.apply_pending()
+        data = self.store.load(BOOK, "pdf-ink")
+        materialized = module.materialize_domain_items(data, "pdf-ink")
+        # 字典序：'10' < '9'（与 App 端 Object.keys().sort() 一致）
+        self.assertEqual([item["id"] for item in materialized], ["10", "9"])
 
     def test_resync_rejects_unknown_domain_loudly(self) -> None:
         self.ledger.append(envelope(

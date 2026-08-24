@@ -110,14 +110,30 @@ test("resync and digest-query names agree across all sites", () => {
   // 整域重同步：runtime 发送端 ↔ Windows 执行器
   assert.match(RUNTIME, /REPLICATION_RESYNC_URL = '\/replication\/resync'/);
   assert.match(APPLY, /RESYNC_URL = "\/replication\/resync"/);
-  // 对账/重同步的域名单：Windows 白名单 ↔ App 对账域一一对应
-  assert.match(APPLY, /_RESYNC_DOMAINS = frozenset\(\("pdf-highlights", "epub-highlights", "document-notes"\)\)/);
-  for (const domain of ["pdf-highlights", "epub-highlights", "document-notes"]) {
+  // 对账/重同步的域名单：Windows 白名单 ↔ App 对账域一一对应（六域）
+  const RESYNC_BLOCK = APPLY.slice(
+    APPLY.indexOf("_RESYNC_DOMAINS = frozenset(("),
+    APPLY.indexOf("))", APPLY.indexOf("_RESYNC_DOMAINS")),
+  );
+  const DOMAINS = [
+    "pdf-highlights", "epub-highlights", "document-notes",
+    "user-pages", "pdf-ink", "epub-ink",
+  ];
+  for (const domain of DOMAINS) {
+    assert.ok(RESYNC_BLOCK.includes(`"${domain}"`), "windows resync 域 " + domain);
     assert.match(RUNTIME, new RegExp(`domain: '${domain}'`), "runtime 对账域 " + domain);
   }
-  // 便签执行映射与 PATCH 白名单跟 App 路由允许集一致
+  // 便签/插入页执行映射与 PATCH 白名单跟 App 路由允许集一致
   assert.match(APPLY, /\("\/pdf\/api\/notes", "POST"\): \("document-notes", "upsert"\)/);
   assert.match(APPLY, /"anchor", "text", "color", "w", "h", "collapsed",\s*"strokes", "video", "card", "html", "iar",/);
+  assert.match(APPLY, /\("\/pdf\/api\/userpages", "POST"\): \("user-pages", "upsert"\)/);
+  assert.match(APPLY, /"user-pages": frozenset\(\("title", "md", "after", "h", "blocks"\)\)/);
+  // 墨迹：一页一条目、空笔画=墓碑；两端物化都按键排序
+  assert.match(APPLY, /\("\/pdf\/api\/ink", "POST"\): \("pdf-ink", "ink-set"\)/);
+  assert.match(APPLY, /if domain\.endswith\("-ink"\):\s*\n\s*return \[items\[item_id\] for item_id in sorted\(items\)\]/);
+  assert.match(RUNTIME, /Object\.keys\(map\)\.sort\(\)\.map/);
+  // 墨迹静置后才入队（规格 §3）
+  assert.match(RUNTIME, /REPLICATION_INK_SETTLE_MS = 60000/);
   // 摘要查询：C# action ↔ 传输层 ↔ 视图 contract ↔ Python 导出 contract
   const CS_INTAKE = read(
     "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReplicationCommandIntake.cs",

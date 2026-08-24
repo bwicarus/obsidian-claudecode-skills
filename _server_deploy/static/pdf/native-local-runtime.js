@@ -1541,6 +1541,40 @@
     if (timer && typeof timer.unref === 'function') timer.unref();
   }
 
+  // 墨迹静置后同步（规格 §3：一定时间不变动才同步，粒度 = 一页笔画）。
+  // 每页一个防抖定时器：再写重置；到点取**当时最新**整页笔画入队。
+  var REPLICATION_INK_SETTLE_MS = 60000;
+  var replicationInkTimers = Object.create(null);
+  function scheduleInkReplication(kind, key) {
+    if (!replicationEligible()) return;
+    var timerKey = kind + ':' + key;
+    if (replicationInkTimers[timerKey] != null) {
+      root.clearTimeout(replicationInkTimers[timerKey]);
+    }
+    var timer = root.setTimeout(function () {
+      delete replicationInkTimers[timerKey];
+      readState(kind, {}).then(function (map) {
+        var strokes = map && Array.isArray(map[key]) ? map[key] : [];
+        var body = { file: localFileRef(), strokes: clone(strokes) };
+        if (kind === 'epub-ink') {
+          body.idx = /^u_/.test(key) ? key : Number(key);
+        } else {
+          body.page = Number(key);
+        }
+        return enqueueReplicationCommand(
+          kind === 'epub-ink' ? '/pdf/api/epub-ink' : '/pdf/api/ink',
+          'POST', body
+        );
+      }).catch(function (error) {
+        if (typeof root.dlog === 'function') {
+          root.dlog('墨迹复制入队失败:' + String(error && error.code || error), '#ffb020');
+        }
+      });
+    }, REPLICATION_INK_SETTLE_MS);
+    replicationInkTimers[timerKey] = timer;
+    if (timer && typeof timer.unref === 'function') timer.unref();
+  }
+
   // ---- 对账（规格 §6：命令复制的必需品）----
   //
   // 队列排空后比对两端每域摘要（本端物化数组的 canonical sha256 vs
@@ -1575,8 +1609,35 @@
           return Array.isArray(items) ? items : [];
         });
       }
+    },
+    {
+      domain: 'user-pages',
+      read: function () {
+        return readState('user-pages', []).then(function (items) {
+          return Array.isArray(items) ? items : [];
+        });
+      }
+    },
+    // 墨迹物化：map → [{id, strokes}] 按键字典序 —— 两端排序规则必须
+    // 逐位一致（Python 端 ink 域同为 sorted(items)），否则摘要永远对不上。
+    {
+      domain: 'pdf-ink',
+      read: function () { return replicationInkMaterialize('ink'); }
+    },
+    {
+      domain: 'epub-ink',
+      read: function () { return replicationInkMaterialize('epub-ink'); }
     }
   ];
+
+  function replicationInkMaterialize(kind) {
+    return readState(kind, {}).then(function (map) {
+      if (!map || typeof map !== 'object' || Array.isArray(map)) return [];
+      return Object.keys(map).sort().map(function (key) {
+        return { id: key, strokes: clone(map[key]) };
+      });
+    });
+  }
   var replicationLastReconcileMs = 0;
   var replicationLastResyncMs = Object.create(null);
   var replicationReconciling = false;
@@ -5997,6 +6058,11 @@
             return localStateMutationResult(items.filter(function (item) {
               return item && item.id !== request.id;
             }), { ok: true });
+          }).then(function (value) {
+            enqueueReplicationCommand('/pdf/api/userpages', 'DELETE', {
+              file: localFileRef(), id: request.id
+            });
+            return value;
           });
         });
       }, code);
@@ -6023,6 +6089,12 @@
             items = storedList(items, code);
             items.push(page);
             return localStateMutationResult(items, { ok: true, id: page.id, page: page });
+          }).then(function (value) {
+            enqueueReplicationCommand(
+              '/pdf/api/userpages', 'POST',
+              Object.assign({ file: localFileRef() }, clone(value.page))
+            );
+            return value;
           });
         }
         var id = localRecordId(body.id, code);
@@ -6064,6 +6136,12 @@
           return localStateMutationResult(items, {
             ok: true, page: page, md_ver: real ? page.md_ver : undefined
           });
+        }).then(function (value) {
+          enqueueReplicationCommand(
+            '/pdf/api/userpages', 'PATCH',
+            Object.assign({}, clone(body), { file: localFileRef(), id: id })
+          );
+          return value;
         });
       });
     }, code);
@@ -6117,6 +6195,9 @@
           if (strokes.length) map[key] = strokes;
           else delete map[key];
           return localStateMutationResult(map, { ok: true, count: strokes.length });
+        }).then(function (value) {
+          scheduleInkReplication(kind, key);
+          return value;
         });
       });
     }, code);

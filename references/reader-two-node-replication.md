@@ -348,11 +348,17 @@ items = items.filter(function (item) { return item && item.id !== request.id; })
       （内容会合材料）；对账目前只覆盖高亮两域，随步骤 6 扩
 - [ ] 5 账本（Windows 侧 commands 表即原始层，已随步骤 2 落地；
       Pi 派生层桥接等消费端出现再做）
-- [~] 6 四个域 —— 高亮已通（随步骤 3）；**便签已通**（2026-08-24 深夜：
-      App 三条路由入队 + Windows 执行器 document-notes 域 + PATCH 白名单
-      照路由允许集 + 对账第三域；n<hex> 便签 id 进条目闸；大便签
-      （video/card/html 近 2MB 上限）超 195KiB 信封闸会拒并出声 ——
-      分帧传输是已知待办）；插入页 → 墨迹待接
+- [x] 6 四个域 —— **全部接通**（2026-08-24 深夜）：
+      · 高亮（随步骤 3）、便签（App 三路由入队 + document-notes 执行器 +
+        PATCH 白名单照路由允许集）；
+      · 插入页 user-pages（三路由入队 + u_<hex> id 闸；⚠ **真实插入页的
+        创建不走这三条路由**（PDF mutation 事务写入），事件不入队 ——
+        由对账 resync 兜底全量搬运；真实页 blocks 上限 4MB 超信封闸
+        拒并出声，同大便签限制）；
+      · 墨迹 pdf-ink/epub-ink（**静置 60s** 防抖：每页一个定时器、重写
+        重置、到点取当时最新整页笔画入队；空笔画=整页擦除=墓碑；
+        对账物化按键字典序，两端逐位一致）。
+      大条目分帧传输仍是已知待办（便签 video/card/html、真实页 blocks）
 
 ## 相关
 
