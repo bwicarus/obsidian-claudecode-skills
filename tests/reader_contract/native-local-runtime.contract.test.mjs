@@ -358,22 +358,27 @@ function makeDataStore(gateEvents, state = { values: new Map(), revision: 0 }) {
       if (String(value.id).startsWith("native-idb-gate-")) gateEvents.push("put");
       return Promise.resolve({ ok: true });
     },
-    get(collection, id) {
+    get(collection, id, queryOptions = {}) {
       const key = `${collection}:${id}`;
       const value = values.get(key);
       if (String(id).startsWith("native-idb-gate-")) gateEvents.push("get");
-      return Promise.resolve(value == null ? null : clone(value));
+      if (value == null) return Promise.resolve(null);
+      // 真机语义：墓碑默认不可见，includeDeleted 才露出（rev 仍在）
+      if (value.deleted && !queryOptions.includeDeleted) return Promise.resolve(null);
+      return Promise.resolve(clone(value));
     },
     getMany(requests) {
       return Promise.resolve(requests.map(({ collection, id }) => {
         const value = values.get(`${collection}:${id}`);
-        return value == null ? null : clone(value);
+        if (value == null || value.deleted) return null;
+        return clone(value);
       }));
     },
-    list(collection) {
+    list(collection, query = {}) {
       const prefix = `${collection}:`;
       return Promise.resolve([...values.entries()]
-        .filter(([key]) => key.startsWith(prefix))
+        .filter(([key, value]) => key.startsWith(prefix)
+          && (query.includeDeleted || !value.deleted))
         .map(([, value]) => clone(value)));
     },
     batch(mutations) {
@@ -402,7 +407,20 @@ function makeDataStore(gateEvents, state = { values: new Map(), revision: 0 }) {
       return Promise.resolve(mutations.map(() => ({ ok: true })));
     },
     remove(collection, id) {
-      values.delete(`${collection}:${id}`);
+      // 真机 IndexedDB 语义：remove 留**墓碑**（rev 继续递增），不物理删除。
+      // 2026-08-25 实锤：替身物理删除掩盖了"journal 首写 ifRev:0 撞上
+      // 上一次 mutation 的墓碑"——每本书第二次改页必炸的存量 bug。
+      const key = `${collection}:${id}`;
+      const current = values.get(key);
+      if (current != null) {
+        state.revision += 1;
+        values.set(key, {
+          value: clone(current.value),
+          rev: (current.rev || 0) + 1,
+          deleted: true,
+          updatedAt: state.revision,
+        });
+      }
       if (String(id).startsWith("native-idb-gate-")) gateEvents.push("remove");
       return Promise.resolve({ ok: true });
     },
@@ -7075,7 +7093,8 @@ test("patching one highlight rewrites only that item record", async () => {
 
 function replicationOutboxRecords(dataStoresState) {
   return [...dataStoresState.document.values.entries()]
-    .filter(([key]) => key.startsWith("native-replication-outbox:"))
+    .filter(([key, record]) => key.startsWith("native-replication-outbox:")
+      && !record.deleted)   // remove 留墓碑（真机语义），已投递的不算在队
     .map(([, record]) => record.value)
     .sort((a, b) => (a.id < b.id ? -1 : 1));
 }
@@ -7468,4 +7487,37 @@ test("pdf mutation failure enqueues a diagnostic replication command", async () 
   assert.equal(diagnostics[0].op.body.kind, "pdf-mutation-error");
   assert.equal(diagnostics[0].op.body.operation, "insert");
   assert.match(diagnostics[0].op.body.error, /native replace failed/);
+});
+
+test("a second PDF mutation on the same book succeeds after the first one's journal tombstone", async () => {
+  // 2026-08-25 真机实锤：insert 成功后 journal 被 remove（真机留墓碑、
+  // rev 仍在），下一次 mutation 的 journal 首写用 ifRev:0 → 版本冲突 →
+  // **每本书第二次改页必炸**（用户：插入页里写字保存即失败）。
+  const durable = { pageCount: 4, contentSHA256: "a".repeat(64), journal: null };
+  const result = await harness({
+    interfaceManifest: withNativePDFMutationRoutesSupported(),
+    pdfMutationReply: nativePDFMutationResponder({ durableState: durable }),
+  });
+  const insert = await result.context.fetch("/pdf/api/pdf-insert-page", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, after: 1, md: "第一次" }),
+  });
+  const insertJob = await waitForNativePDFJob(
+    result.context, (await insert.json()).job_id,
+  );
+  assert.equal(insertJob.status, "done");
+  const pageId = (await (await result.context.fetch(
+    "/pdf/api/userpages?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json()).pages[0].id;
+  const edit = await result.context.fetch("/pdf/api/pdf-insert-page", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: DEFAULT_LOCAL_FILE, id: pageId, md: "第二次改写" }),
+  });
+  const editJob = await waitForNativePDFJob(
+    result.context, (await edit.json()).job_id,
+  );
+  assert.equal(editJob.status, "done",
+    "同一本书的第二次改页必须成功: " + JSON.stringify(editJob.error || ""));
 });

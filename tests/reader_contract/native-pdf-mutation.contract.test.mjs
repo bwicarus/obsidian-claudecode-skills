@@ -21,7 +21,11 @@ test("native PDF mutation prepares and validates a selectable sibling staging fi
   assert.match(MUTATION, /source\.removePage\(at:/);
   assert.match(MUTATION, /guard source\.write\(to: stagingURL\)/);
   assert.match(MUTATION, /PDFDocument\(url: stagingURL\)/);
-  assert.match(MUTATION, /page\.string\?\.contains\("用户插入页"\)/);
+  // 2026-08-25：文字层校验锚点改 ASCII（PDF 提取会把 CJK 变形成部首区
+  // 码点，⻚ 甚至无 NFKC 映射）——校验必须认 BWPAGE 且比较前归一。
+  assert.match(MUTATION, /string: "— 用户插入页 · BWPAGE —"/);
+  assert.match(MUTATION, /probeComparableText\(page\.string \?\? ""\)\s*\.contains\("BWPAGE"\)/);
+  assert.match(MUTATION, /precomposedStringWithCompatibilityMapping/);
   assert.match(PROJECT, /- path: App/);
 });
 

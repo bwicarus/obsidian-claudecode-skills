@@ -7089,14 +7089,25 @@
           'BW_NATIVE_PDF_MUTATION_BUSY'
         );
       }
-      return stores.document.batch([
-        stateRecordMutation(
-          NATIVE_PDF_MUTATION_JOURNAL_KIND,
-          transaction.journal,
-          randomHex(12),
-          0
-        )
-      ]);
+      // ⚠ 真机 IndexedDB 的 remove 留**墓碑**（rev 继续存在）：上一次
+      // mutation 收尾清掉 journal 后，物理记录仍在且 rev>0 —— 这里若用
+      // ifRev:0（要求记录不存在）,同一本书的第二次改页必然版本冲突
+      // （2026-08-25 真机实锤）。CAS 基线必须取**含墓碑**的当前 rev；
+      // 并发首写保护不受影响（两个并发写仍会有一个 CAS 失败）。
+      return stores.document.get(
+        'native-' + NATIVE_PDF_MUTATION_JOURNAL_KIND,
+        stateId(NATIVE_PDF_MUTATION_JOURNAL_KIND),
+        { includeDeleted: true }
+      ).then(function (tombstoned) {
+        return stores.document.batch([
+          stateRecordMutation(
+            NATIVE_PDF_MUTATION_JOURNAL_KIND,
+            transaction.journal,
+            randomHex(12),
+            Number(tombstoned && tombstoned.rev || 0)
+          )
+        ]);
+      });
     }).then(function () {
       return nativePDFMutationJournalRecord();
     }).then(function (record) {
