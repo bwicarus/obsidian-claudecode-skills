@@ -1221,9 +1221,7 @@ if (window.__bwPwaProviderOnly) return;
     };
     try {
       if (window.RC && RC.voiceCard && RC.voiceCard.renderInto)
-        // 绑定卡（bind 到正文元素）**只有展开模式**（2026-08-25 用户拍板）：
-        // 点击元素打开必须直接见内容，不恢复历史收起态。
-        cardEl = RC.voiceCard.renderInto(box, { text: null, label: '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''), isHtml: false, type: card.bind ? wordCardPresentation(ctl.note).tone : (card.type || '#b9a8ff'), icon: '🎴', form: card.bind ? 'full' : card.form, cid: card.cid || card.gid,
+        cardEl = RC.voiceCard.renderInto(box, { text: null, label: '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''), isHtml: false, type: card.bind ? wordCardPresentation(ctl.note).tone : (card.type || '#b9a8ff'), icon: '🎴', form: card.form, cid: card.cid || card.gid,
           onSize: function (size) {
             ctl._cardPresentationSize = size || null;
             try { ctl.body.style.width = _formW(ctl, card.form); } catch (_) {}
@@ -1247,7 +1245,7 @@ if (window.__bwPwaProviderOnly) return;
             }
           },
           onClose: function () { try { ctl.del.click(); } catch (e) {} },
-          onForm: function (f) { try { card.form = card.bind ? 'full' : f; ctl.note.card = card; ctl.body.style.width = _formW(ctl, f); syncFreeCardAnchorUi(ctl); patchNote(ctl.note, { card: card }); } catch (e) {} } });
+          onForm: function (f) { try { card.form = f; ctl.note.card = card; ctl.body.style.width = _formW(ctl, f); syncFreeCardAnchorUi(ctl); patchNote(ctl.note, { card: card }); } catch (e) {} } });
       done = !!cardEl;
     } catch (e) {}
     if (!done) { try { stateBody = box; RC.flashcard.mountState(box, card.cards, { bare: true, gid: card.gid, nopin: true, onStateChange: onPlacementStateChange }); } catch (e) {} }   // voiceCard 未载兜底
@@ -1288,7 +1286,7 @@ if (window.__bwPwaProviderOnly) return;
     var done = false, el2 = null;
     try {
       if (window.RC && RC.voiceCard && RC.voiceCard.renderInto)
-        el2 = RC.voiceCard.renderInto(box, { text: h.content, label: h.label || '卡片', isHtml: !!h.isHtml, type: h.bind ? wordCardPresentation(ctl.note).tone : h.type, icon: h.icon, form: h.bind ? 'full' : h.form, cid: h.cid,
+        el2 = RC.voiceCard.renderInto(box, { text: h.content, label: h.label || '卡片', isHtml: !!h.isHtml, type: h.bind ? wordCardPresentation(ctl.note).tone : h.type, icon: h.icon, form: h.form, cid: h.cid,
           onSize: function (size) {
             ctl._cardPresentationSize = size || null;
             try {
@@ -1299,7 +1297,7 @@ if (window.__bwPwaProviderOnly) return;
             } catch (_) {}
           },
           onClose: function () { try { ctl.del.click(); } catch (e) {} },
-          onForm: function (f) { try { h.form = h.bind ? 'full' : f; ctl.note.html = h; ctl.body.style.width = _formW(ctl, f); syncFreeCardAnchorUi(ctl); patchNote(ctl.note, { html: h }); } catch (e) {} } });
+          onForm: function (f) { try { h.form = f; ctl.note.html = h; ctl.body.style.width = _formW(ctl, f); syncFreeCardAnchorUi(ctl); patchNote(ctl.note, { html: h }); } catch (e) {} } });
       done = !!el2;
       // 成功装进真 .vc-card 才打这个标记:回退分支(下面的 fb)仍是普通 HTML,
       // 那时壳的 padding/限高/滚动照旧需要。
@@ -1908,6 +1906,21 @@ if (window.__bwPwaProviderOnly) return;
   //   实现上**不换一套便签**：卡片壳、学习状态、拖动、删除全是原来那份，
   //   这里只做两件事 —— 画标记、把便签默认收起来。绑不上时（页没渲染出来、
   //   文字层换过）**原样显示便签**，不制造「卡不见了」。
+  // 把已渲染的卡片形态一步切到完全展开。已建卡的 __sig 守卫会跳过重建，
+  // 所以不能靠 syncCtl 改形态；直接摘 class 后经 __bwCardFormApply 走
+  // onForm 同一条持久化/壳宽路径。
+  function forceOpenCardFull(ctl) {
+    try {
+      var cardEl = ctl.root.querySelector('.vc-card');
+      if (!cardEl) return;
+      if (!cardEl.classList.contains('vc-dot') && !cardEl.classList.contains('vc-min')) return;
+      cardEl.classList.remove('vc-dot');
+      cardEl.classList.remove('vc-min');
+      if (cardEl.__bwCardFormApply) cardEl.__bwCardFormApply();
+      else ctl.body.style.width = _formW(ctl, 'full');
+    } catch (e) {}
+  }
+
   function _applyWordBind(ctl) {
     var presentation = wordCardPresentation(ctl.note);
     var b = presentation.bind;
@@ -1954,6 +1967,10 @@ if (window.__bwPwaProviderOnly) return;
           // 卡是在 display:none 里 mount 的 —— 那时 _formW 量到的宽是 0。
           // 显出来之后补跑一次 syncCtl；__sig 守卫保证不重建卡片状态机。
           try { syncCtl(ctl); } catch (e) {}
+          // 点标记打开 = 用户要看内容（2026-08-25 拍板）：无论上次收成什么
+          // 形态，这个动作总是直达完全展开。只动这一个入口 —— 渲染层继续
+          // 尊重 form 记忆，收起状态（圆点"锁定"）在其它场景原样保留。
+          forceOpenCardFull(ctl);
           setWordDeleteUi(ctl, true);
           wordPortalIn(ctl);   // body-fixed：逃出 #main/page-wrap 的 zoom 与 overflow 裁剪
           _placeWordCard(ctl, meta && meta.source);

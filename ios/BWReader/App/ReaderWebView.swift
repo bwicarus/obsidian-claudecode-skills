@@ -2291,7 +2291,13 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 }
                 Task { @MainActor [weak self] in
                     do {
-                        try await Task.sleep(nanoseconds: 15_000_000_000)
+                        // 90s：这不是"页面该多快"的预算，是"永远没信号"的兜底。
+                        // 15s 时被实锤误报过（2026-08-25）：升级重启后首开要做
+                        // 改页事务恢复 + OCR 状态重建 + 93MB PDF 首渲，超过 15s
+                        // 就弹"上次阅读的书无法打开"并清掉记忆——书其实正在打开。
+                        // 真正打不开有自己的失败信号（recordLoadFailure / catch），
+                        // 不靠这个计时器。
+                        try await Task.sleep(nanoseconds: 90_000_000_000)
                     } catch {
                         return
                     }

@@ -17,18 +17,34 @@ const STICKY = readFileSync(
 const UISHARED = readFileSync(
   join(root, "_server_deploy/static/pdf/pdf-uishared.js"), "utf8");
 
-test("绑定卡渲染永远展开:两处 renderInto 都按 bind 强制 full", () => {
-  const sites = STICKY.match(/form: card\.bind \? 'full' : card\.form/g) || [];
-  assert.equal(sites.length, 1, "card 渲染点强制 full");
-  const htmlSites = STICKY.match(/form: h\.bind \? 'full' : h\.form/g) || [];
-  assert.equal(htmlSites.length, 1, "html 卡渲染点强制 full");
+// ⚠ 第一版修法（渲染层永远锁 full）被用户实锤打回：它把**所有**常驻显示
+// 绑定卡的收起状态（圆点"锁定"）一并打散了。正确语义是分场景的：
+// 渲染层尊重 form 记忆（锁定保留），只有"点标记打开"这个动作直达展开。
+test("渲染层尊重 form 记忆 —— 不许按 bind 无差别强制 full", () => {
+  assert.ok(!/form: card\.bind \? 'full'/.test(STICKY),
+    "card 渲染点不强制（第一版的误伤形态）");
+  assert.ok(!/form: h\.bind \? 'full'/.test(STICKY),
+    "html 卡渲染点不强制");
+  assert.ok(!/card\.form = card\.bind \? 'full'/.test(STICKY),
+    "onForm 持久化不锁（用户收起的选择要被记住）");
+  assert.match(STICKY, /form: card\.form/, "card 渲染仍传记忆形态");
+  assert.match(STICKY, /form: h\.form/, "html 卡渲染仍传记忆形态");
 });
 
-test("绑定卡不持久化折叠形态:两处 onForm 回写也按 bind 锁 full", () => {
-  assert.match(STICKY, /card\.form = card\.bind \? 'full' : f/,
-    "card onForm 持久化被锁");
-  assert.match(STICKY, /h\.form = h\.bind \? 'full' : f/,
-    "html 卡 onForm 持久化被锁");
+test("点标记打开直达完全展开 —— 只动这一个入口", () => {
+  const at = STICKY.indexOf("function forceOpenCardFull(ctl)");
+  assert.ok(at >= 0, "展开函数存在");
+  const body = STICKY.slice(at, at + 700);
+  assert.match(body, /classList\.remove\('vc-dot'\)/);
+  assert.match(body, /classList\.remove\('vc-min'\)/);
+  assert.match(body, /__bwCardFormApply/,
+    "经 onForm 同一条持久化/壳宽路径，不另造旁路");
+  const calls = STICKY.match(/forceOpenCardFull\(ctl\);/g) || [];
+  assert.equal(calls.length, 1, "只有 onToggle 打开分支一个调用点");
+  const openAt = STICKY.indexOf("ctl._bindOpen = true;");
+  const callAt = STICKY.indexOf("forceOpenCardFull(ctl);");
+  assert.ok(openAt >= 0 && callAt > openAt && callAt - openAt < 800,
+    "调用点在打开分支内");
 });
 
 test("乐观新建失败必须清干净编辑态,句柄和 class 一个都不能剩", () => {
