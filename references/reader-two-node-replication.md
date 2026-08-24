@@ -268,7 +268,11 @@ items = items.filter(function (item) { return item && item.id !== request.id; })
 - [x] 规格定稿（本文件）
 - [x] 前提 A/B + 信封的四方向调查（结论归档
       `references/book-identity-investigation-20260824.md`，设计已回写 §8.5/§9）
-- [ ] **A 跨设备书身份**（前提，见 §8.5；设计已定稿，待实现）
+- [~] **A 跨设备书身份**（前提，见 §8.5）——**Windows 侧链接表已落地**：
+      `extensions/bw-reader-webext/windows/computer-voice-desktop/replication_book_links.py`
+      （铸 repbook-id / 幂等 pair / 显式 rebind / 合并基线 record_sync /
+      会合候选查询 / 损坏出声，测试 11 条 + 3 处变异验证破坏即红）。
+      **App 侧配对握手（公告身份材料 + 存本端链接）随步骤 3 落地**
 - [ ] **B 高亮拆成一条一记录 + 墓碑**（前提，见 §8.5；改动面清单在调查归档方向三）
 - [ ] 1 命令信封
 - [ ] 2 Windows 服务端
