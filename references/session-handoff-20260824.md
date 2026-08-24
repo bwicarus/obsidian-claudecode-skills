@@ -1,5 +1,14 @@
 # 会话交接 2026-08-24 —— 新会话从这里接手
 
+> ⚠ **2026-08-24 晚更新：本文 §2 的调查已经跑完并归档**
+> （`references/book-identity-investigation-20260824.md`，4/4 全 verified），
+> **不要再重跑那个 workflow**。前提 A（Windows 侧链接表）、前提 B（高亮拆
+> per-item + 墓碑，TestFlight 构建已触发）、步骤 1（信封定稿）与步骤 2 的
+> 账本半边均已落地——当前权威进度看
+> `references/reader-two-node-replication.md` 文末清单。下一步 = 步骤 2 的
+> C# Direct 桥接收 action 对（C#→Python 账本的持久交接点要先设计：
+> 建议 C# 先落 spool 再 ack，Python 按 mutationId 幂等入账）。
+
 > 上一段会话极长（两天、60+ 提交、多轮用户拍板）。这份是**唯一入口**：
 > 按顺序读完本文件与它指向的三份规格，再动手。
 > ⚠ 本文写作时的教训之一就是"只凭摘要接手会理解错"——所以下面把
