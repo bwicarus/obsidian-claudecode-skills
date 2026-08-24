@@ -346,6 +346,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var currentLocalBookContentSHA256: String?
     private var pendingLocalBookNavigation: PendingLocalBookNavigation?
     private var remoteBookNavigationTask: Task<Void, Never>?
+    // 最近一次 openLocalBook 抛错的人话原因。只为启动恢复失败的横幅服务:
+    // 那个时点没有别的诊断出口(runtime 未起、复制通道未连)。
+    private(set) var lastLocalBookOpenFailure: String?
     private var localBookRestoreContinuations = [
         UUID: CheckedContinuation<Bool, Never>
     ]()
@@ -2429,11 +2432,16 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 libraryID: library.stableLibraryID,
                 restorationToken: restorationToken
             )
+            lastLocalBookOpenFailure = nil
             return true
         } catch {
             if didClearOutgoingRemoteBinding {
                 nativePiGateway?.updateTrustedRemoteBookBinding(nil)
             }
+            // 启动自动恢复失败时这是唯一的真因记录 —— 恢复发生在书库 sheet
+            // 弹出之前，横幅只能靠它转述（2026-08-25 实锤：没有它，用户只能
+            // 看到一句猜测性的"可能已移动或权限失效"，连续排查三轮都在猜）。
+            lastLocalBookOpenFailure = error.localizedDescription
             library.reportError(error)
             showBookUserStateMessage(
                 "无法打开目标书籍：\(error.localizedDescription)",

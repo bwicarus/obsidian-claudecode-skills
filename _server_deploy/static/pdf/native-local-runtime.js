@@ -6826,11 +6826,15 @@
       });
     }).catch(function (error) {
       // 修复失败不拦启动(卡片照旧隐身而不是书打不开),但必须留痕。
-      enqueueReplicationCommand('/replication/diagnostic', 'POST', {
-        kind: 'note-bind-repair-error',
-        error: String(error && error.message || error).slice(0, 2000),
-        at: nowSeconds()
-      });
+      // 留痕本身也不许抛:启动链上这个 catch 是最后一道,它再抛就是
+      // bootState 永远不 ready、整本书打不开 —— 比没修复糟一个量级。
+      try {
+        enqueueReplicationCommand('/replication/diagnostic', 'POST', {
+          kind: 'note-bind-repair-error',
+          error: String(error && error.message || error).slice(0, 2000),
+          at: nowSeconds()
+        });
+      } catch (_) {}
       return null;
     });
   }

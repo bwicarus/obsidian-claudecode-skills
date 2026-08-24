@@ -328,9 +328,16 @@ private struct ReaderRootView: View {
             libraryStartupNotice = nil
             showsLibrary = false
         } else {
-            failInitialRestore(
-                "上次阅读的书无法打开，可能已移动或文件夹权限失效；请在书库中重新选择。"
-            )
+            // 打开失败但书就在索引里 —— **保留记忆**,下次启动再试;手动打开
+            // 成功也会重写记忆。此前这里走 failInitialRestore(清记忆),后果是
+            // 一次启动期抖动就让用户从此每次开 App 都要手动选书(2026-08-25
+            // 实锤)。横幅带上真实原因,不再只给"可能已移动或权限失效"的猜测。
+            let detail = reader.lastLocalBookOpenFailure
+            libraryStartupNotice = detail.map {
+                "上次阅读的书自动恢复失败：\($0)。可直接在书库中重新点开。"
+            } ?? "上次阅读的书恢复超时（90 秒内未完成加载）；可直接在书库中重新点开。"
+            reader.finishInitialBookDecision()
+            showsLibrary = true
         }
     }
 
