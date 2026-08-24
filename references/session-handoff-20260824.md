@@ -132,3 +132,24 @@ errors=0（`test_web_notes_local.py` 是**已知 flaky**，约 1/5 超时，
 - `ownerRole` 词汇表将需要为 AI 运行环境加一个值（别叫 windows，将来可能是 Mac mini）。
 - 高亮/便签/墨迹/插入页今天在 App 上**没有异地副本**（backup_data.sh 只备 Pi）——
   两节点复制落地前，这个风险一直在。
+
+## 7. 2026-08-25 增量（复习快照 + 两个 UI 修复 + 发布链健康）
+
+- **复习模式进上下文快照**（用户三项诉求的第 3 项）已全链落地：
+  active-reading 可选字段 `review:{dueTotal,index,queueIds,showingAnswer,current}`，
+  **缺席 = 未进入复习模式**（旧构建/扩展生产端不发，天然合法）。
+  生产端 `rc-computer-voice.js localReviewSnapshot`（白名单重建）←
+  `RC.review.snapshotState()`；Windows `ValidateReviewState`（越界键整条拒）+
+  三处呈现（markdown/终端/HTML 实时页）。故意不进
+  PreserveActiveReadingContinuity —— 复活旧 review 会谎报"还在复习"。
+  契约测试 `tests/reader_contract/review-snapshot.contract.test.mjs`（突变验证过），
+  contract-sites `web-snapshot-post-body` 已补 gotcha。
+- **绑定卡只有展开模式** + **乐观新建失败清干净编辑态**（_upEditing 句柄和
+  body.up-editing 双条件都要清）已修，测试
+  `bound-card-and-upedit-state.contract.test.mjs`。
+- 部署状态：桥 **0.1.200**（含 review 校验）+ ReaderPC **0.1.67**（含
+  digests 跳过 diagnostics.json 修复，实机验证 digests 恢复导出且只含 4 个数据域）
+  已装机运行；Pi 已部署（E2E 过）；TestFlight run 32760607352 构建中。
+- **release_preflight 白名单**补录了上一轮漏登记的 replication 源与测试文件
+  （漏登记会让 package_source_snapshot 拒发并连锁打红 manifest 门禁——
+  handoff --full 从 5 错回到 3 个纯环境错：两组 fcntl + 浏览器门禁）。
