@@ -44,6 +44,10 @@ RUNTIME_SOURCES = {
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "replication_activity.py"
     ),
+    "readerpc-runtime/replication_notifications.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "replication_notifications.py"
+    ),
     "readerpc-runtime/scripts/reader_pc_preprocess_worker.py": (
         PROJECT_ROOT / "scripts" / "reader_pc_preprocess_worker.py"
     ),
@@ -436,11 +440,12 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             if _sha256(installed.read_bytes()) != item["sha256"]:
                 _fail(f"安装 staging 摘要不匹配: {item['path']}")
         staging.replace(release)
-        stable_cli = root.parent / "replication_activity.py"
-        stable_cli.write_bytes(
-            (release / "readerpc-runtime" / "replication_activity.py")
-            .read_bytes()
-        )
+        for stable_name in (
+            "replication_activity.py", "replication_notifications.py",
+        ):
+            (root.parent / stable_name).write_bytes(
+                (release / "readerpc-runtime" / stable_name).read_bytes()
+            )
         shortcuts = _write_shortcuts(release / EXE_REL)
         _atomic_json(
             root / "current.json",

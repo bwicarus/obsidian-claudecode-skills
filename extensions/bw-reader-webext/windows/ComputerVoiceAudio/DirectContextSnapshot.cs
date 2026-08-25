@@ -3879,3 +3879,78 @@ internal sealed class FileDirectSnapshotContextAdapter :
             retryable: true,
             innerException: inner);
 }
+
+
+// 通知投影(2026-08-25 用户拍板:通知与复习提醒放入快照,AI 读取快照即知
+// 待办)。真值在 ReaderPC 的通知表;它每轮对账把 open 通知导出到 runtime
+// 目录,这里在快照**读取投影**时合并 —— 快照真值文件本身不含通知,
+// 两个真值各归各家,读的人看到合体。白名单重建;任何失败折成"无通知",
+// 通知是增强,坏了不拦快照本体。
+internal static class ReaderNotificationsProjection
+{
+    internal const string FileName = "notifications-open.json";
+    private const int MaximumBytes = 256 * 1024;
+
+    internal static void Apply(JsonObject snapshot, string directory)
+    {
+        try
+        {
+            snapshot.Remove("notifications");
+            string path = System.IO.Path.Combine(directory, FileName);
+            FileInfo info = new(path);
+            if (!info.Exists || info.Length is <= 0 or > MaximumBytes)
+            {
+                return;
+            }
+            JsonObject? parsed = JsonNode.Parse(
+                File.ReadAllText(path)) as JsonObject;
+            if (
+                parsed?["contract"]?.GetValue<string>()
+                    != "reader-notifications/1"
+                || parsed["items"] is not JsonArray items
+            )
+            {
+                return;
+            }
+            JsonArray projected = new();
+            foreach (JsonNode? node in items)
+            {
+                if (node is not JsonObject item)
+                {
+                    continue;
+                }
+                string? id = item["id"]?.GetValue<string>();
+                string? title = item["title"]?.GetValue<string>();
+                string? state = item["state"]?.GetValue<string>();
+                if (
+                    id is null || title is null
+                    || state is not ("pending" or "acknowledged")
+                )
+                {
+                    continue;
+                }
+                projected.Add(new JsonObject
+                {
+                    ["id"] = id,
+                    ["kind"] = item["kind"]?.GetValue<string>() ?? "",
+                    ["title"] = title,
+                    ["body"] = item["body"]?.GetValue<string>() ?? "",
+                    ["state"] = state,
+                    ["createdAtUtcMs"] =
+                        item["createdAtUtcMs"]?.GetValue<long>() ?? 0,
+                });
+                if (projected.Count >= 20)
+                {
+                    break;
+                }
+            }
+            if (projected.Count > 0)
+            {
+                snapshot["notifications"] = projected;
+            }
+        }
+        catch
+        {
+        }
+    }
+}

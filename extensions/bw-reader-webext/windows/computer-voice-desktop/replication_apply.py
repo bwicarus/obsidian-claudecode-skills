@@ -674,6 +674,30 @@ def run_once(
                 )
             except Exception as activity_error:  # noqa: BLE001
                 status["activityReportError"] = str(activity_error)[:500]
+            # 通知维护:过期清理 + 自动消除检测(对照最近 24h 账本记录,
+            # 幂等) + 导出 open 投影给桥的快照 join。同样不拦对账。
+            try:
+                import replication_activity
+                import replication_notifications
+                notify_store = replication_notifications.NotificationStore(
+                    local_root
+                )
+                expired = notify_store.expire_due()
+                recent = replication_activity.load_mutations(
+                    local_root, int((time.time() - 86400) * 1000)
+                )
+                auto = notify_store.auto_resolve_against(recent)
+                notify_store.export_open(
+                    digests_path.parent
+                    / replication_notifications.EXPORT_FILE_NAME
+                )
+                status["notifications"] = {
+                    "open": len(notify_store.open_items()),
+                    "expired": expired,
+                    "autoResolved": auto,
+                }
+            except Exception as notify_error:  # noqa: BLE001
+                status["notificationsError"] = str(notify_error)[:500]
             status.update(
                 ok=True,
                 digestBooks=len(digests["books"]),

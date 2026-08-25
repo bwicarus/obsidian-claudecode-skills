@@ -6803,6 +6803,15 @@ internal sealed class ReaderContextMcpServer
     {
         try
         {
+            // 通知投影每次读取都刷新:快照 rev 不变时 _latestSnapshot 被
+            // 缓存复用,而通知(ReaderPC 每轮导出)独立变化 —— 不刷新的话
+            // AI 会一直看到旧待办。
+            if (_latestSnapshot is JsonObject cachedSnapshot)
+            {
+                ReaderNotificationsProjection.Apply(
+                    cachedSnapshot,
+                    System.IO.Path.GetDirectoryName(_statePath)!);
+            }
             FileInfo info = new(_statePath);
             if (
                 !info.Exists
@@ -6867,6 +6876,9 @@ internal sealed class ReaderContextMcpServer
                 revision,
                 producerInstanceId))
             {
+                ReaderNotificationsProjection.Apply(
+                    parsed,
+                    System.IO.Path.GetDirectoryName(_statePath)!);
                 _latestSnapshot = parsed;
                 _latestRevision = revision;
                 _latestProducerInstanceId = producerInstanceId;
