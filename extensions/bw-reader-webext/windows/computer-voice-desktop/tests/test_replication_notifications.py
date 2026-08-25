@@ -245,3 +245,34 @@ class NotificationCommandTests(unittest.TestCase):
         report = self.applier.apply_pending()
         self.assertEqual(report["deadLetters"], [],
                          "已消失的通知按幂等成功,不死信")
+
+
+class AudienceSplitTests(unittest.TestCase):
+    """两个收件箱(2026-08-26):快照=AI 方向;侧边栏 tab=用户方向。"""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.store = NotificationStore(self.root)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_projections_split_by_audience(self) -> None:
+        ai = self.store.create(kind="review-due", title="该提醒复习了")
+        user = self.store.create(kind="task-report", title="X 已更新",
+                                 audience="user")
+        snap = self.root / "notifications-open.json"
+        tab = self.root / "notifications-user.json"
+        self.store.export_open(snap)
+        self.store.export_user_open(tab)
+        snap_ids = [i["id"] for i in
+                    json.loads(snap.read_text("utf-8"))["items"]]
+        tab_ids = [i["id"] for i in
+                   json.loads(tab.read_text("utf-8"))["items"]]
+        self.assertEqual(snap_ids, [ai["id"]], "快照只装 AI 方向")
+        self.assertEqual(tab_ids, [user["id"]], "tab 只装用户方向")
+
+    def test_bad_audience_rejected(self) -> None:
+        with self.assertRaises(NotificationError):
+            self.store.create(kind="x", title="y", audience="everyone")

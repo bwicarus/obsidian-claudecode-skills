@@ -36,6 +36,7 @@ from typing import Any
 OPEN_FILE_NAME = "notifications.json"
 ARCHIVE_FILE_NAME = "notifications-archive.jsonl"
 EXPORT_FILE_NAME = "notifications-open.json"
+USER_EXPORT_FILE_NAME = "notifications-user.json"
 OPEN_CONTRACT = "reader-notifications/1"
 MAX_OPEN = 50
 MAX_TEXT = 400
@@ -114,9 +115,12 @@ class NotificationStore:
         expires_at_ms: int | None = None,
         dedupe_key: str | None = None,
         activate_at_ms: int | None = None,
+        audience: str = "ai",
     ) -> dict[str, Any]:
         if not kind or len(kind) > 40 or not title:
             raise NotificationError("通知 kind/title 非法")
+        if audience not in ("ai", "user"):
+            raise NotificationError("audience 必须是 ai 或 user")
         if auto_resolve is not None:
             if (
                 not isinstance(auto_resolve, dict)
@@ -138,6 +142,10 @@ class NotificationStore:
             "body": body[:MAX_TEXT],
             "source": source[:40],
             "state": "pending",
+            # 受众(2026-08-26 用户拍板):快照只给 ai 方向(待 AI 处理的);
+            # 侧边栏 tab 只给 user 方向(AI 整理后投递给用户的)。两个
+            # 收件箱,一张表,按 audience 分流。
+            "audience": audience,
             "createdAtUtcMs": _now_ms(),
         }
         if auto_resolve is not None:
@@ -294,9 +302,13 @@ class NotificationStore:
             or item["activateAtUtcMs"] <= now
         ]
 
-    def export_open(self, export_path: Path) -> None:
-        """给桥的快照 join 用：**已生效**通知的只读投影。"""
-        items = self.visible_items()
+    def _export_projection(
+        self, export_path: Path, audience: str
+    ) -> None:
+        items = [
+            item for item in self.visible_items()
+            if item.get("audience", "ai") == audience
+        ]
         _atomic_write_json(export_path, {
             "contract": OPEN_CONTRACT,
             "exportedAtUtcMs": _now_ms(),
@@ -312,6 +324,14 @@ class NotificationStore:
                 for item in items
             ],
         })
+
+    def export_open(self, export_path: Path) -> None:
+        """快照 join 用：**AI 方向**的已生效通知（AI 的收件箱）。"""
+        self._export_projection(export_path, "ai")
+
+    def export_user_open(self, export_path: Path) -> None:
+        """侧边栏 tab 用：**用户方向**的已生效通知（用户的收件箱）。"""
+        self._export_projection(export_path, "user")
 
 
 def count_due_cards(root: Path) -> tuple[int, int]:
@@ -384,6 +404,7 @@ def render_list(items: list[dict[str, Any]]) -> str:
             "%m-%d %H:%M", time.localtime(item["createdAtUtcMs"] / 1000)
         )
         marker = "[新]" if item["state"] == "pending" else "[已获取]"
+        marker += "[给用户]" if item.get("audience") == "user" else ""
         lines.append("  %s %s %s  %s（%s）" % (
             marker, item["id"], stamp, item["title"], item["kind"],
         ))
@@ -424,6 +445,9 @@ def main() -> int:
                         help="生效日期 YYYY-MM-DD（当天 00:00 起可见并保持到"
                              " resolve；持续待办用这个，不用定时任务）")
     create.add_argument("--activate-in-hours", type=float, default=None)
+    create.add_argument("--audience", default="ai", choices=("ai", "user"),
+                        help="ai=快照(你的收件箱,默认) / user=侧边栏 tab"
+                             "(整理后投递给用户)")
     create.add_argument("--auto-item", default=None,
                         help="itemId：该条目在账本出现操作即自动入库")
     create.add_argument("--auto-card", default=None,
@@ -478,7 +502,7 @@ def main() -> int:
                 kind=args.kind, title=args.title, body=args.body,
                 source=args.source, auto_resolve=auto,
                 expires_at_ms=expires, dedupe_key=args.dedupe_key,
-                activate_at_ms=activate,
+                activate_at_ms=activate, audience=args.audience,
             )
             print("已创建：%s" % item["id"])
     except NotificationError as error:

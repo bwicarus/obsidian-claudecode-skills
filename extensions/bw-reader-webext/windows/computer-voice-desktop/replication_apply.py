@@ -735,6 +735,10 @@ def run_once(
                     digests_path.parent
                     / replication_notifications.EXPORT_FILE_NAME
                 )
+                notify_store.export_user_open(
+                    digests_path.parent
+                    / replication_notifications.USER_EXPORT_FILE_NAME
+                )
                 import replication_places
                 replication_places.export_current_place(
                     local_root,

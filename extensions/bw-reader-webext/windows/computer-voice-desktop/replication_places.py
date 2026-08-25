@@ -240,6 +240,7 @@ def export_current_place(root: Path, export_path: Path) -> dict | None:
                 kind="place-named",
                 title="已把当前位置命名为「%s」" % consumed,
                 source="place-pending",
+                audience="user",
                 dedupe_key="place-named:" + consumed,
                 expires_at_ms=int(time.time() * 1000) + 24 * 3600 * 1000,
             )

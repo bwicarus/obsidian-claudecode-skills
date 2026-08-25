@@ -1478,7 +1478,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     System.IO.Path.Combine(
                         System.IO.Path.GetDirectoryName(
                             _replicationDigestsPath)!,
-                        "notifications-open.json")),
+                        "notifications-user.json")),
             acceptReaderVisual: chunk =>
             {
                 ReaderContextSourceLease lease = sourceLease
