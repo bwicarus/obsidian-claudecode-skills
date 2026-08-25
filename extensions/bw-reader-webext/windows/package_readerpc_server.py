@@ -48,6 +48,10 @@ RUNTIME_SOURCES = {
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "replication_notifications.py"
     ),
+    "readerpc-runtime/replication_places.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "replication_places.py"
+    ),
     "readerpc-runtime/scripts/reader_pc_preprocess_worker.py": (
         PROJECT_ROOT / "scripts" / "reader_pc_preprocess_worker.py"
     ),
@@ -442,6 +446,7 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
         staging.replace(release)
         for stable_name in (
             "replication_activity.py", "replication_notifications.py",
+            "replication_places.py",
         ):
             (root.parent / stable_name).write_bytes(
                 (release / "readerpc-runtime" / stable_name).read_bytes()

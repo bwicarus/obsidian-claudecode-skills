@@ -702,6 +702,12 @@ def run_once(
                     digests_path.parent
                     / replication_notifications.EXPORT_FILE_NAME
                 )
+                import replication_places
+                replication_places.export_current_place(
+                    local_root,
+                    digests_path.parent
+                    / replication_places.CURRENT_PLACE_FILE_NAME,
+                )
                 status["notifications"] = {
                     "open": len(notify_store.open_items()),
                     "expired": expired,

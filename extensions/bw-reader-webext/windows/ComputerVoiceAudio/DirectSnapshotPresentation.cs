@@ -109,6 +109,16 @@ internal static class DirectSnapshotMarkdown
                 + " `ack <id>`；判断目标完成后 `resolve <id>`。_");
         }
 
+        JsonObject? place = snapshot["currentPlace"] as JsonObject;
+        if (place is not null)
+        {
+            output.AppendLine();
+            output.AppendLine("## 当前位置");
+            output.AppendLine();
+            AppendField(output, "位置", Text(place["name"]) ?? "（未命名坐标）");
+            AppendField(output, "新鲜（分钟）", Text(place["ageMinutes"]));
+        }
+
         JsonObject? active = snapshot["activeReading"] as JsonObject;
         output.AppendLine();
         output.AppendLine("## 当前阅读位置");
@@ -3221,6 +3231,9 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 snapshot,
                 System.IO.Path.GetDirectoryName(_snapshotPath)!);
             ReaderRecentActivityProjection.Apply(
+                snapshot,
+                System.IO.Path.GetDirectoryName(_snapshotPath)!);
+            ReaderCurrentPlaceProjection.Apply(
                 snapshot,
                 System.IO.Path.GetDirectoryName(_snapshotPath)!);
             return snapshot;

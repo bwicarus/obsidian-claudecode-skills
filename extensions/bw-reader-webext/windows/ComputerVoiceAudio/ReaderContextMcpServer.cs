@@ -6814,6 +6814,9 @@ internal sealed class ReaderContextMcpServer
                 ReaderRecentActivityProjection.Apply(
                     cachedSnapshot,
                     System.IO.Path.GetDirectoryName(_statePath)!);
+                ReaderCurrentPlaceProjection.Apply(
+                    cachedSnapshot,
+                    System.IO.Path.GetDirectoryName(_statePath)!);
             }
             FileInfo info = new(_statePath);
             if (
@@ -6883,6 +6886,9 @@ internal sealed class ReaderContextMcpServer
                     parsed,
                     System.IO.Path.GetDirectoryName(_statePath)!);
                 ReaderRecentActivityProjection.Apply(
+                    parsed,
+                    System.IO.Path.GetDirectoryName(_statePath)!);
+                ReaderCurrentPlaceProjection.Apply(
                     parsed,
                     System.IO.Path.GetDirectoryName(_statePath)!);
                 _latestSnapshot = parsed;

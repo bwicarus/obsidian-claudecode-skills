@@ -4051,3 +4051,58 @@ internal static class ReaderRecentActivityProjection
         }
     }
 }
+
+
+// 「当前位置」投影(2026-08-25 用户:位置信息现在就该进快照 —— AI 据此
+// 判断通知该不该提醒:在公司就别提倒垃圾)。真值由 ReaderPC 从最近的
+// 带坐标 dwell(≤30 分钟)派生,别名(place-aliases)优先于反解地名。
+// 缺席 = 不知道在哪 —— 旧位置冒充当前比不知道更糟。
+internal static class ReaderCurrentPlaceProjection
+{
+    internal const string FileName = "current-place.json";
+
+    internal static void Apply(JsonObject snapshot, string directory)
+    {
+        try
+        {
+            snapshot.Remove("currentPlace");
+            string path = System.IO.Path.Combine(directory, FileName);
+            FileInfo info = new(path);
+            if (!info.Exists || info.Length is <= 0 or > 16 * 1024)
+            {
+                return;
+            }
+            JsonObject? parsed = JsonNode.Parse(
+                File.ReadAllText(path)) as JsonObject;
+            if (
+                parsed?["contract"]?.GetValue<string>()
+                    != "reader-current-place/1"
+            )
+            {
+                return;
+            }
+            long observed =
+                parsed["observedAtUtcMs"]?.GetValue<long>() ?? 0;
+            long age = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                - observed;
+            if (age is < 0 or > 30 * 60_000L)
+            {
+                return;
+            }
+            string? alias = parsed["alias"]?.GetValue<string>();
+            string? geoName = parsed["geoName"]?.GetValue<string>();
+            snapshot["currentPlace"] = new JsonObject
+            {
+                ["name"] = alias ?? (
+                    string.IsNullOrEmpty(geoName) ? null : geoName),
+                ["named"] = alias is not null,
+                ["ageMinutes"] = age / 60_000L,
+                ["lat"] = parsed["lat"]?.GetValue<double>() ?? 0,
+                ["lon"] = parsed["lon"]?.GetValue<double>() ?? 0,
+            };
+        }
+        catch
+        {
+        }
+    }
+}

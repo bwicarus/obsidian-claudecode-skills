@@ -185,6 +185,51 @@ class NotificationStore:
                 return item
         raise NotificationError(f"通知不存在或已入库：{notification_id}")
 
+    def update(
+        self,
+        notification_id: str,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+        activate_at_ms: int | None = None,
+        expires_at_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """修改一条 open 通知（标题/正文/生效/过期）。状态机不受影响。"""
+        items = self._load()
+        for item in items:
+            if item["id"] == notification_id:
+                if title is not None:
+                    item["title"] = title[:MAX_TEXT]
+                if body is not None:
+                    item["body"] = body[:MAX_TEXT]
+                if activate_at_ms is not None:
+                    item["activateAtUtcMs"] = int(activate_at_ms)
+                if expires_at_ms is not None:
+                    item["expiresAtUtcMs"] = int(expires_at_ms)
+                item["updatedAtUtcMs"] = _now_ms()
+                self._save(items)
+                return item
+        raise NotificationError(f"通知不存在或已入库：{notification_id}")
+
+    def cancel(
+        self, notification_id: str, *, by: str = "ai", note: str = ""
+    ) -> dict[str, Any]:
+        """删除 = 撤销入库（cancelled）。与 resolve 的区别是语义：
+        resolve=目标达成；cancel=不再需要/建错了。都留档，绝不静默蒸发。"""
+        items = self._load()
+        for index, item in enumerate(items):
+            if item["id"] == notification_id:
+                item["state"] = "cancelled"
+                item["cancelledAtUtcMs"] = _now_ms()
+                item["cancelledBy"] = by[:20]
+                if note:
+                    item["cancelNote"] = note[:MAX_TEXT]
+                del items[index]
+                self._save(items)
+                self._archive(item)
+                return item
+        raise NotificationError(f"通知不存在或已入库：{notification_id}")
+
     # ── 系统维护 ──
 
     def expire_due(self) -> int:
@@ -358,7 +403,17 @@ def main() -> int:
         "resolve", help="完成入库（AI 判断目标达成后调）")
     resolve.add_argument("id")
     resolve.add_argument("--note", default="", help="完成说明（入库留档）")
-    create = sub.add_parser("create", help="生产通知（系统侧；AI 不用这个）")
+    update = sub.add_parser("update", help="修改 open 通知（标题/正文/时间）")
+    update.add_argument("id")
+    update.add_argument("--title", default=None)
+    update.add_argument("--body", default=None)
+    update.add_argument("--activate-date", default=None)
+    update.add_argument("--expires-hours", type=float, default=None)
+    cancel = sub.add_parser(
+        "cancel", help="撤销入库（不再需要/建错了；与 resolve 语义区分）")
+    cancel.add_argument("id")
+    cancel.add_argument("--note", default="")
+    create = sub.add_parser("create", help="生产通知（系统或经用户授权的 AI）")
     create.add_argument("--kind", required=True)
     create.add_argument("--title", required=True)
     create.add_argument("--body", default="")
@@ -385,6 +440,23 @@ def main() -> int:
         elif args.command == "resolve":
             item = store.resolve(args.id, by="ai", note=args.note)
             print("已完成入库：%s（%s）" % (item["id"], item["title"]))
+        elif args.command == "update":
+            activate = None
+            if args.activate_date:
+                activate = int(time.mktime(time.strptime(
+                    args.activate_date, "%Y-%m-%d"))) * 1000
+            expires = (
+                _now_ms() + int(args.expires_hours * 3600 * 1000)
+                if args.expires_hours else None
+            )
+            item = store.update(
+                args.id, title=args.title, body=args.body,
+                activate_at_ms=activate, expires_at_ms=expires,
+            )
+            print("已修改：%s（%s）" % (item["id"], item["title"]))
+        elif args.command == "cancel":
+            item = store.cancel(args.id, by="ai", note=args.note)
+            print("已撤销入库：%s（%s）" % (item["id"], item["title"]))
         elif args.command == "create":
             auto = None
             if args.auto_item:
