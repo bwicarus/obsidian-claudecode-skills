@@ -36,6 +36,13 @@
 >   `/pdf/api/device-location-pref`。坐标与地名两者都存（采集不可重来）。
 >   扩展半边（navigator.geolocation）与消费端（import_dwell 把 loc 进
 >   extra）**尚未接**。早前的 `device`（哪台机）字段仍然成立，与 loc 互补。
+>   **后续方向（用户 2026-08-25）：自定义地名标记（place alias）**——
+>   用户给某片坐标起自己的名字（"家"/"研究室"），形如
+>   `{name, lat, lon, radius}` 的别名表。⚠ 设计定位：别名属于**派生/
+>   消费层**，不进采集层 —— 采集永远只存事实（坐标 + 反解地名），
+>   显示与聚合时按坐标就近命中别名。这样别名**后配、可改、且追溯
+>   适用于全部历史记录**（正是"坐标与地名两者都存"买来的能力：
+>   反解名只是当时的猜测，坐标才是可重算的原料）。
 > - §3.1 定时器 → **已接（2026-08-25 用户拍板"单独做一个带开关的 daily"）**：
 >   `artifact-lifecycle.timer`（Pi 每日 04:10），开关在 server-config
 >   `artifact_lifecycle` 段（enabled 默认 true=dry-run 报告；archive 默认
