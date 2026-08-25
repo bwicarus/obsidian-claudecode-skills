@@ -91,7 +91,28 @@ class ActivityApplyAndQueryTests(unittest.TestCase):
         self.assertEqual(book["places"], {"図書館": 180})
         self.assertEqual(len(book["mutations"]), 1)
         self.assertEqual(book["mutations"][0]["kind"], "高亮")
-        self.assertEqual(book["mutations"][0]["op"], "新建")
+        self.assertEqual(book["mutations"][0]["ops"], ["新建"])
+        self.assertEqual(book["mutations"][0]["count"], 1)
+        self.assertEqual(book["mutationsOmitted"], 0)
+
+    def test_l0_folds_consecutive_edits_and_caps_output(self) -> None:
+        # AI 读取范围设计:同条目连续修改折一行;超 limit 只报"还有 N 条"。
+        for index in range(30):
+            e = envelope("0", "/pdf/api/notes", "PATCH", None)
+            e["op"]["mutationId"] = "mut-v2-" + format(index + 100, "032x")
+            e["op"]["body"] = {"file": "localbook:x",
+                "id": "n%011d" % (index // 3), "html": {}}
+            self.ledger.append(e)
+        self.applier.apply_pending()
+        summary = replication_activity.summarize(self.root, 1.0, limit=5)
+        book = summary["books"][0]
+        self.assertEqual(len(book["mutations"]), 5, "L0 截断到 limit")
+        self.assertEqual(book["mutationsOmitted"], 5, "10 组折叠后超出 5 组")
+        self.assertTrue(all(m["count"] == 3 for m in book["mutations"]),
+                        "每组连续 3 次 PATCH 折成一行 ×3")
+        detail = replication_activity.summarize(self.root, 1.0, detail=True)
+        self.assertEqual(len(detail["books"][0]["mutations"]), 30,
+                         "L1 明细不折不截")
 
     def test_activity_command_is_idempotent_and_shape_gated(self) -> None:
         first = envelope("1", "/replication/activity", "POST", self._dwell_body(False))

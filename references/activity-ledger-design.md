@@ -47,6 +47,12 @@
 >   `artifact-lifecycle.timer`（Pi 每日 04:10），开关在 server-config
 >   `artifact_lifecycle` 段（enabled 默认 true=dry-run 报告；archive 默认
 >   false，真归档须显式打开）。
+> - **AI 读取范围（2026-08-25 用户拍板"全部读取太多了"）**：照
+>   creation-store 的分层模式 —— **L0 摘要默认**（每书分钟/地点/改删
+>   合并视图：同条目连续操作折一行 ×N，每书 ≤20 行，超出只报计数；
+>   默认时间窗 1 天）；**L1 明细 --detail** 只在用户追问具体某条时用；
+>   原始层（账本 SQLite / activity jsonl）**永远不整体喂给 AI**。
+>   实现在 `replication_activity.py`。快照注入仍按约束不做。
 > - §6 压缩策略 → 你说「按你的建议」，即**冷归档不删除**，见上面 §3.1。
 > - 本文件此前只在分支 `codex/reader-tools-release-20260815` 上，
 >   当前树查不到 —— 已搬过来。
