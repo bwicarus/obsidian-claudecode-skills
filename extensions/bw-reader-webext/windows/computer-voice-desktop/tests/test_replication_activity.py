@@ -90,7 +90,7 @@ class ActivityApplyAndQueryTests(unittest.TestCase):
         self.assertEqual(book["minutes"], 3.0)
         self.assertEqual(book["places"], {"図書館": 180})
         self.assertEqual(len(book["mutations"]), 1)
-        self.assertEqual(book["mutations"][0]["kind"], "高亮")
+        self.assertEqual(book["mutations"][0]["kind"], "highlight")
         self.assertEqual(book["mutations"][0]["ops"], ["新建"])
         self.assertEqual(book["mutations"][0]["count"], 1)
         self.assertEqual(book["mutationsOmitted"], 0)
@@ -143,3 +143,74 @@ class ActivityApplyAndQueryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LayeredQueryTests(unittest.TestCase):
+    """分层读取设计(2026-08-25):内容窗/编号窗/recall/筛选/详细度。"""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.ledger = ReplicationCommandLedger(
+            self.root / "replication-command-ledger.sqlite3"
+        )
+        self.store = ReplicationDataStore(self.root / "replication-data")
+        self.applier = ReplicationCommandApplier(
+            self.ledger, self.store, self.root / "state.json",
+            self.root / "dead-letter.jsonl",
+        )
+        self.ledger.append(envelope(
+            "1", "/pdf/api/notes", "POST",
+            {"file": "localbook:x", "id": "c_11112222333344445555666677778888",
+             "anchor": {"kind": "pdf", "page": 3},
+             "card": {"cid": "c1", "gid": "c1",
+                      "cards": [{"front": "<b>Q1</b>", "back": "A1"}]}},
+        ))
+        self.ledger.append(envelope(
+            "2", "/pdf/api/highlights", "POST",
+            {"file": "localbook:x", "id": "h_cafe01", "page": 3,
+             "rects": [[1, 2, 3, 4]], "color": "#fff", "text": "划的句子",
+             "note": "旁注", "kind": "note", "sentence": "", "body": "",
+             "time": 100},
+        ))
+        self.applier.apply_pending()
+
+    def tearDown(self) -> None:
+        self.ledger.close()
+        self.temporary.cleanup()
+
+    def test_content_window_joins_current_content(self) -> None:
+        report = replication_activity.summarize(self.root, 1.0)
+        by_id = {m["itemId"]: m for b in report["books"]
+                 for m in b["mutations"]}
+        self.assertEqual(
+            by_id["c_11112222333344445555666677778888"]["content"],
+            "Q1 ⇄ A1", "卡片内容直接可读且剥掉 HTML")
+        self.assertEqual(by_id["h_cafe01"]["content"], "划的句子 · 旁注")
+
+    def test_verbosity_ids_strips_content(self) -> None:
+        report = replication_activity.summarize(
+            self.root, 1.0, verbosity="ids")
+        for book in report["books"]:
+            for item in book["mutations"]:
+                self.assertNotIn("content", item, "仅编号模式不带内容")
+
+    def test_kind_filter(self) -> None:
+        report = replication_activity.summarize(
+            self.root, 1.0, kinds={"highlight"})
+        kinds = {m["kind"] for b in report["books"] for m in b["mutations"]}
+        self.assertEqual(kinds, {"highlight"})
+
+    def test_recall_alive_and_deleted(self) -> None:
+        alive = replication_activity.recall(self.root, "h_cafe01")
+        self.assertTrue(alive["alive"])
+        self.assertEqual(alive["content"], "划的句子 · 旁注")
+        self.assertEqual(len(alive["history"]), 1)
+        self.ledger.append(envelope(
+            "3", "/pdf/api/highlights", "DELETE",
+            {"file": "localbook:x", "id": "h_cafe01"},
+        ))
+        self.applier.apply_pending()
+        gone = replication_activity.recall(self.root, "h_cafe01")
+        self.assertFalse(gone["alive"])
+        self.assertEqual(len(gone["history"]), 2, "删除也进历史")

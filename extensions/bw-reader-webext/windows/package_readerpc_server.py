@@ -37,6 +37,13 @@ ARCHIVE_STAMP = (1980, 1, 1, 0, 0, 0)
 EXE_REL = "ReaderPC-Server.exe"
 MANIFEST_REL = "manifest.json"
 RUNTIME_SOURCES = {
+    # AI 查询 CLI(自包含,仅标准库)。安装时另复制到稳定路径
+    # %LOCALAPPDATA%/BWReader/replication_activity.py,供 AGENTS 指令引用 ——
+    # 路径跨版本不变,内容随每次安装刷新。
+    "readerpc-runtime/replication_activity.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "replication_activity.py"
+    ),
     "readerpc-runtime/scripts/reader_pc_preprocess_worker.py": (
         PROJECT_ROOT / "scripts" / "reader_pc_preprocess_worker.py"
     ),
@@ -423,6 +430,11 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             if _sha256(installed.read_bytes()) != item["sha256"]:
                 _fail(f"安装 staging 摘要不匹配: {item['path']}")
         staging.replace(release)
+        stable_cli = root / "replication_activity.py"
+        stable_cli.write_bytes(
+            (release / "readerpc-runtime" / "replication_activity.py")
+            .read_bytes()
+        )
         shortcuts = _write_shortcuts(release / EXE_REL)
         _atomic_json(
             root / "current.json",
