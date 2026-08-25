@@ -1927,56 +1927,73 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 "use strict";
 
                 // ── 学习活动 tab（2026-08-25 用户:并进快照页做切换）──
-                const tabSnapshot = document.getElementById("tab-snapshot");
-                const tabActivity = document.getElementById("tab-activity");
-                const viewSnapshot = document.getElementById("view-snapshot");
-                const viewActivity = document.getElementById("view-activity");
-                const actEsc = (v) => String(v ?? "").replace(/[&<>"]/g,
-                  (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+                // ⚠ 本页契约:零 innerHTML(不可信网页正文会进这个页面,
+                //   自检 direct-snapshot-viewer-* 把关)。活动数据里书名/
+                //   地名同样来自外部输入,全部走 DOM API + textContent。
+                const tabSnapshot = byId("tab-snapshot");
+                const tabActivity = byId("tab-activity");
+                const viewSnapshot = byId("view-snapshot");
+                const viewActivity = byId("view-activity");
+                function actEl(tag, className, text) {
+                  const node = document.createElement(tag);
+                  if (className) node.className = className;
+                  if (text !== undefined) node.textContent = text;
+                  return node;
+                }
                 function renderActivity() {
-                  const box = document.getElementById("act-main");
+                  const box = byId("act-main");
                   fetch("/activity-report.json").then((r) => {
                     if (!r.ok) throw new Error("unavailable");
                     return r.json();
                   }).then((report) => {
-                    document.getElementById("act-stamp").textContent =
-                      "生成于 " + new Date(report.generatedAtUtcMs)
-                        .toLocaleString();
+                    byId("act-stamp").textContent = "生成于 "
+                      + new Date(report.generatedAtUtcMs).toLocaleString();
+                    box.replaceChildren();
                     const books = report.books || [];
                     if (!books.length) {
                       box.textContent = "这段时间没有学习活动记录。";
                       return;
                     }
-                    box.innerHTML = books.map((book) => {
-                      const places = Object.entries(book.places || {}).map(
-                        ([name, secs]) => `<span class="act-place">📍 ` +
-                          `${actEsc(name)} ${(secs / 60).toFixed(1)} 分钟</span>`
-                      ).join("　");
-                      const rows = (book.mutations || []).map((m) => {
-                        const at = new Date(m.atUtcMs).toLocaleString(
-                          "zh-CN", { month: "2-digit", day: "2-digit",
-                                     hour: "2-digit", minute: "2-digit" });
-                        const ops = (m.ops || [m.op]).join("/");
-                        const times = m.count > 1 ? "×" + m.count : "";
-                        return `<tr><td class="act-t">${actEsc(at)}</td>` +
-                          `<td>${actEsc(ops)}${actEsc(m.kind)}${times}</td>` +
-                          `<td class="act-id">${actEsc(m.itemId)}</td></tr>`;
-                      }).join("");
-                      const omitted = book.mutationsOmitted
-                        ? `<div class="act-omitted">…更早还有 ` +
-                          `${book.mutationsOmitted} 条（终端跑 ` +
-                          `replication_activity.py --detail 查看）</div>`
-                        : "";
-                      return `<section class="act-book">` +
-                        `<h3>${actEsc(book.book)}</h3>` +
-                        `<div class="act-meta">阅读 ${book.minutes} 分钟` +
-                        (places ? "　" + places : "") + `</div>` +
-                        (rows ? `<table class="act-table">${rows}</table>` : "") +
-                        omitted + `</section>`;
-                    }).join("");
+                    for (const book of books) {
+                      const card = actEl("section", "act-book");
+                      card.appendChild(actEl("h3", "", book.book));
+                      const meta = actEl("div", "act-meta",
+                        `阅读 ${book.minutes} 分钟`);
+                      for (const [name, secs] of
+                           Object.entries(book.places || {})) {
+                        meta.appendChild(document.createTextNode("　"));
+                        meta.appendChild(actEl("span", "act-place",
+                          `📍 ${name} ${(secs / 60).toFixed(1)} 分钟`));
+                      }
+                      card.appendChild(meta);
+                      const mutations = book.mutations || [];
+                      if (mutations.length) {
+                        const table = actEl("table", "act-table");
+                        for (const m of mutations) {
+                          const row = actEl("tr");
+                          row.appendChild(actEl("td", "act-t",
+                            new Date(m.atUtcMs).toLocaleString("zh-CN",
+                              { month: "2-digit", day: "2-digit",
+                                hour: "2-digit", minute: "2-digit" })));
+                          const ops = (m.ops || [m.op]).join("/");
+                          const times = m.count > 1 ? "×" + m.count : "";
+                          row.appendChild(actEl("td", "",
+                            ops + m.kind + times));
+                          row.appendChild(actEl("td", "act-id", m.itemId));
+                          table.appendChild(row);
+                        }
+                        card.appendChild(table);
+                      }
+                      if (book.mutationsOmitted) {
+                        card.appendChild(actEl("div", "act-omitted",
+                          `…更早还有 ${book.mutationsOmitted} 条`
+                          + `（终端跑 replication_activity.py --detail 查看）`));
+                      }
+                      box.appendChild(card);
+                    }
                   }).catch(() => {
-                    box.textContent = "报告暂不可读 —— ReaderPC 的下一轮对账" +
-                      "（约 1 分钟内）会生成它，稍后切回来。";
+                    box.textContent = "报告暂不可读 —— ReaderPC 的下一轮对账"
+                      + "（约 1 分钟内）会生成它，稍后切回来。";
                   });
                 }
                 function selectTab(activity) {
