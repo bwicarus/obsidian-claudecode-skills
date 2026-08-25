@@ -110,11 +110,20 @@ internal static class DirectSnapshotMarkdown
         }
 
         JsonObject? place = snapshot["currentPlace"] as JsonObject;
-        if (place is not null)
+        output.AppendLine();
+        output.AppendLine("## 当前位置");
+        output.AppendLine();
+        if (place is null)
         {
-            output.AppendLine();
-            output.AppendLine("## 当前位置");
-            output.AppendLine();
+            // 缺席要出声（silent-failure 规则）：看不到位置时用户必须能
+            // 分清"功能没生效"和"数据没来"。
+            output.AppendLine(
+                "_未知 —— 最近 30 分钟没有定位记录。需要最新 App 构建、"
+                + "设置里开启「记录学习地点」并授予系统定位权限；"
+                + "开启后阅读时会自动携带。_");
+        }
+        else
+        {
             AppendField(output, "位置", Text(place["name"]) ?? "（未命名坐标）");
             AppendField(output, "新鲜（分钟）", Text(place["ageMinutes"]));
         }
@@ -1973,6 +1982,10 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   <pre id="notifications" class="muted">当前没有待办通知。</pre>
                 </section>
                 <section>
+                  <h2>当前位置</h2>
+                  <pre id="currentPlace" class="muted">未知</pre>
+                </section>
+                <section>
                   <h2>当前阅读位置</h2>
                   <pre id="active" class="muted">尚未收到活动书页。</pre>
                 </section>
@@ -2804,6 +2817,15 @@ internal sealed class DirectSnapshotViewer : IDisposable
                         : "");
                   revision.textContent =
                     `revision ${valueText(snapshot.revision)}`;
+
+                  const placeEl = document.getElementById("currentPlace");
+                  const place = snapshot.currentPlace;
+                  placeEl.textContent = place
+                    ? `${place.name ?? "（未命名坐标）"}` +
+                      `${place.named ? "" : "（未命名，可让 AI 命名）"}` +
+                      `　${place.ageMinutes} 分钟前` +
+                      `　(${place.lat}, ${place.lon})`
+                    : "未知 —— 最近 30 分钟没有定位记录（需开启「记录学习地点」）。";
 
                   const ntf = document.getElementById("notifications");
                   const ntfItems = snapshot.notifications || [];
