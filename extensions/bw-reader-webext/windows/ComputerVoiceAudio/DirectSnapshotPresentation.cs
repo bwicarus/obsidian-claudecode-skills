@@ -1793,6 +1793,10 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 main { width: min(1180px, 100%); margin: 0 auto;
                   padding: 1rem; display: grid; gap: 1rem;
                   grid-template-columns: repeat(2, minmax(0, 1fr)); }
+                /* display:grid 会顶掉 hidden 属性的 UA display:none ——
+                   没有这条,两个视图同屏堆叠(2026-08-25 用户实锤:
+                   "你怎么把快照内容和记录做到一起了") */
+                main[hidden] { display: none; }
                 section { min-width: 0; border: 1px solid #263655;
                   border-radius: 14px; padding: 1rem;
                   background: rgba(18, 26, 47, .92);
