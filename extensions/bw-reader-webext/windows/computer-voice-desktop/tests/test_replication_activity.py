@@ -214,3 +214,45 @@ class LayeredQueryTests(unittest.TestCase):
         gone = replication_activity.recall(self.root, "h_cafe01")
         self.assertFalse(gone["alive"])
         self.assertEqual(len(gone["history"]), 2, "删除也进历史")
+
+
+class ReviewEventTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.ledger = ReplicationCommandLedger(
+            self.root / "replication-command-ledger.sqlite3"
+        )
+        self.store = ReplicationDataStore(self.root / "replication-data")
+        self.applier = ReplicationCommandApplier(
+            self.ledger, self.store, self.root / "state.json",
+            self.root / "dead-letter.jsonl",
+        )
+
+    def tearDown(self) -> None:
+        self.ledger.close()
+        self.temporary.cleanup()
+
+    def test_review_command_lands_and_feeds_auto_resolve(self) -> None:
+        self.ledger.append(envelope(
+            "1", "/replication/activity", "POST",
+            {"kind": "review", "file": "localbook:x",
+             "key": "g1:0:aid9", "gid": "g1", "index": 0,
+             "ankiCardId": "1234", "ease": 3, "at": int(time.time())},
+        ))
+        report = self.applier.apply_pending()
+        self.assertEqual(report["deadLetters"], [])
+        reviews = replication_activity.load_reviews(self.root, 0)
+        ids = {r["itemId"] for r in reviews}
+        self.assertEqual(ids, {"g1", "1234", "g1:0:aid9"},
+                         "三种标识都可作 card-reviewed 命中键")
+        self.assertTrue(all(r["kind"] == "review" for r in reviews))
+
+    def test_review_command_shape_gated(self) -> None:
+        self.ledger.append(envelope(
+            "2", "/replication/activity", "POST",
+            {"kind": "review", "file": "localbook:x", "extra": 1,
+             "at": int(time.time())},
+        ))
+        report = self.applier.apply_pending()
+        self.assertEqual(len(report["deadLetters"]), 1)

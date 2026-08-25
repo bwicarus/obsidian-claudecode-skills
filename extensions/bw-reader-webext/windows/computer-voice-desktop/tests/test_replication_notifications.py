@@ -100,3 +100,56 @@ class NotificationLifecycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewProducerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.store = NotificationStore(self.root)
+        self.book = self.root / "replication-data" / ("repbook-" + "a" * 32)
+        self.book.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _write_notes(self, cards: list[dict]) -> None:
+        (self.book / "document-notes.json").write_text(json.dumps({
+            "contract": "replication-book-data/1",
+            "items": {"n1": {"id": "n1", "card": {"cards": cards}}},
+            "tombstones": {}, "order": ["n1"],
+        }, ensure_ascii=False), "utf-8")
+
+    def test_due_creates_once_per_day_and_clears_on_zero(self) -> None:
+        from replication_notifications import ensure_review_due
+        now_ms = int(time.time() * 1000)
+        self._write_notes([
+            {"front": "Q", "_next": now_ms - 1000, "_st": "review"},
+            {"front": "Q2", "_next": None, "_st": "learn"},
+        ])
+        first = ensure_review_due(self.store, self.root)
+        self.assertEqual(first, {"due": 1, "new": 1})
+        again = ensure_review_due(self.store, self.root)
+        self.assertEqual(len(self.store.open_items()), 1,
+                         "dedupe 按日,一天最多一条")
+        self.assertEqual(again["due"], 1)
+        # 复习完(副本 _next 推到未来) → due 清零 → 自动入库
+        self._write_notes([
+            {"front": "Q", "_next": now_ms + 86400_000, "_st": "review"},
+        ])
+        cleared = ensure_review_due(self.store, self.root)
+        self.assertEqual(cleared["due"], 0)
+        self.assertEqual(self.store.open_items(), [])
+        archived = [json.loads(x) for x in
+                    (self.root / "notifications-archive.jsonl")
+                    .read_text("utf-8").splitlines()]
+        self.assertEqual(archived[-1]["resolvedBy"], "auto")
+        self.assertEqual(archived[-1]["resolutionNote"], "到期清零")
+
+    def test_seconds_epoch_next_is_also_understood(self) -> None:
+        from replication_notifications import count_due_cards
+        self._write_notes([
+            {"front": "Q", "_next": int(time.time()) - 10, "_st": "review"},
+        ])
+        due, _new = count_due_cards(self.root)
+        self.assertEqual(due, 1, "秒级 _next 也判到期")

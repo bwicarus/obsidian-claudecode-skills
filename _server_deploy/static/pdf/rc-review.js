@@ -2067,6 +2067,15 @@
         source: 'reader',
         file: (window.UP_FILE || (window.RC && RC.file) || '')
       }, fields || {}));
+      // 活动记录旁路(2026-08-25):复习事件也进 Windows 账本 —— 通知的
+      // card-reviewed 自动消除靠它。App 内才有 runtime;失败静默不拖主路。
+      try {
+        if (window.BWReaderRuntime && window.BWReaderRuntime.reportActivity) {
+          window.BWReaderRuntime.reportActivity({
+            review: Object.assign({ key: key }, fields || {})
+          });
+        }
+      } catch (e2) {}
     } catch (e) {
       try {
         window.dlog && window.dlog(

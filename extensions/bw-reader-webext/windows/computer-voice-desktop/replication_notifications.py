@@ -254,6 +254,67 @@ class NotificationStore:
         })
 
 
+def count_due_cards(root: Path) -> tuple[int, int]:
+    """从数据域副本数到期/新卡（Windows 自主计算，不依赖 App 在线）。
+
+    due = 卡片 `_next` 非空且已到时；new = `_next` 为空且未移除的学习卡。
+    副本由两节点复制保持新鲜，App 评分后 PATCH 会把 `_next` 推过来。
+    """
+    import json as _json
+    data_dir = root / "replication-data"
+    due = 0
+    new = 0
+    if not data_dir.is_dir():
+        return 0, 0
+    now_ms = _now_ms()
+    for book_dir in data_dir.iterdir():
+        path = book_dir / "document-notes.json"
+        try:
+            value = _json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        for item in (value.get("items") or {}).values():
+            card = item.get("card") if isinstance(item, dict) else None
+            if not isinstance(card, dict):
+                continue
+            for one in card.get("cards") or []:
+                if not isinstance(one, dict) or one.get("_removed"):
+                    continue
+                next_at = one.get("_next")
+                if isinstance(next_at, (int, float)) and next_at > 0:
+                    # _next 语义按秒或毫秒都可能;>1e12 视为毫秒。
+                    next_ms = next_at if next_at > 1e12 else next_at * 1000
+                    if next_ms <= now_ms:
+                        due += 1
+                elif one.get("_st") in ("learn", None):
+                    new += 1
+    return due, new
+
+
+def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
+    """复习到期生产者（每轮对账调用）。
+
+    - due>0：确保当天有一条 review-due 通知（dedupe 按日，防打扰）。
+    - due==0：把 open 的 review-due 通知自动入库（目标已达成）。
+    """
+    due, new = count_due_cards(root)
+    day = time.strftime("%Y%m%d")
+    if due > 0:
+        store.create(
+            kind="review-due",
+            title="有 %d 张卡片到期待复习" % due,
+            body=("另有 %d 张新卡待学习。" % new) if new else "",
+            source="review-scheduler",
+            dedupe_key="review-due:" + day,
+            expires_at_ms=_now_ms() + 24 * 3600 * 1000,
+        )
+    else:
+        for item in list(store.open_items()):
+            if item.get("kind") == "review-due":
+                store.resolve(item["id"], by="auto", note="到期清零")
+    return {"due": due, "new": new}
+
+
 def render_list(items: list[dict[str, Any]]) -> str:
     if not items:
         return "当前没有待办通知。"

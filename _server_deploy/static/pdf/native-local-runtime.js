@@ -1385,6 +1385,30 @@
   function reportActivity(payload) {
     try {
       if (!payload || typeof payload !== 'object') return;
+      var review = payload.review;
+      if (review && typeof review === 'object') {
+        var ease = Number(review.ease);
+        var reviewBody = {
+          kind: 'review',
+          file: localFileRef(),
+          at: nowSeconds()
+        };
+        if (typeof review.key === 'string' && review.key) {
+          reviewBody.key = review.key.slice(0, 200);
+        }
+        if (typeof review.gid === 'string' && review.gid) {
+          reviewBody.gid = review.gid.slice(0, 120);
+        }
+        if (Number.isInteger(Number(review.index))) {
+          reviewBody.index = Number(review.index);
+        }
+        if (typeof review.ankiCardId === 'string' && review.ankiCardId) {
+          reviewBody.ankiCardId = review.ankiCardId.slice(0, 40);
+        }
+        if (Number.isFinite(ease)) reviewBody.ease = ease;
+        enqueueReplicationCommand(ACTIVITY_URL, 'POST', reviewBody);
+        return;
+      }
       var entries = Array.isArray(payload.dwell) ? payload.dwell : [];
       var clean = [];
       for (var i = 0; i < entries.length && clean.length < 200; i++) {

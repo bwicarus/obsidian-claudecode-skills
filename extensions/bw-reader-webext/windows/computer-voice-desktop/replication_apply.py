@@ -445,14 +445,20 @@ class ReplicationCommandApplier:
         .json —— digests 导出按 *.json 扫,天然不相撞。
         """
         body = entry.body
-        if (
-            not isinstance(body, dict)
-            or body.get("kind") != "dwell"
-            or not isinstance(body.get("entries"), list)
-            or len(body["entries"]) > MAX_ACTIVITY_ENTRIES_PER_COMMAND
-        ):
+        if not isinstance(body, dict):
             raise ReplicationApplyError("活动命令 body 非法")
-        allowed = {"kind", "file", "client", "entries", "loc", "at"}
+        if body.get("kind") == "dwell":
+            if (
+                not isinstance(body.get("entries"), list)
+                or len(body["entries"]) > MAX_ACTIVITY_ENTRIES_PER_COMMAND
+            ):
+                raise ReplicationApplyError("活动命令 body 非法")
+            allowed = {"kind", "file", "client", "entries", "loc", "at"}
+        elif body.get("kind") == "review":
+            allowed = {"kind", "file", "at", "key", "gid", "index",
+                       "ankiCardId", "ease"}
+        else:
+            raise ReplicationApplyError("活动命令 kind 非法")
         if not set(body.keys()) <= allowed:
             raise ReplicationApplyError("活动命令 body 字段不符")
         record = {
@@ -683,10 +689,15 @@ def run_once(
                     local_root
                 )
                 expired = notify_store.expire_due()
-                recent = replication_activity.load_mutations(
-                    local_root, int((time.time() - 86400) * 1000)
+                since_ms = int((time.time() - 86400) * 1000)
+                recent = (
+                    replication_activity.load_mutations(local_root, since_ms)
+                    + replication_activity.load_reviews(local_root, since_ms)
                 )
                 auto = notify_store.auto_resolve_against(recent)
+                review_due = replication_notifications.ensure_review_due(
+                    notify_store, local_root
+                )
                 notify_store.export_open(
                     digests_path.parent
                     / replication_notifications.EXPORT_FILE_NAME
@@ -695,6 +706,7 @@ def run_once(
                     "open": len(notify_store.open_items()),
                     "expired": expired,
                     "autoResolved": auto,
+                    "reviewDue": review_due,
                 }
             except Exception as notify_error:  # noqa: BLE001
                 status["notificationsError"] = str(notify_error)[:500]

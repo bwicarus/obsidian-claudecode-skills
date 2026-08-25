@@ -231,6 +231,47 @@ def load_dwell(root: Path, since_utc_ms: int) -> list[dict[str, Any]]:
     return out
 
 
+def load_reviews(root: Path, since_utc_ms: int) -> list[dict[str, Any]]:
+    """activity jsonl 里的复习事件（通知 card-reviewed 自动消除的信号源）。
+
+    形状对齐 auto_resolve_against 的期望：kind='review'，itemId 依次取
+    gid / ankiCardId / key —— 匹配任一即命中，通知创建方引用哪个都行。
+    """
+    data_dir = root / REPLICATION_DATA_DIRECTORY_NAME
+    out: list[dict[str, Any]] = []
+    if not data_dir.is_dir():
+        return out
+    for book_dir in sorted(data_dir.iterdir()):
+        path = book_dir / ACTIVITY_FILE_NAME
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if int(record.get("receivedAtUtcMs") or 0) < since_utc_ms:
+                continue
+            body = record.get("body") or {}
+            if body.get("kind") != "review":
+                continue
+            for identity in ("gid", "ankiCardId", "key"):
+                value = body.get(identity)
+                if isinstance(value, str) and value:
+                    out.append({
+                        "atUtcMs": int(record.get("receivedAtUtcMs") or 0),
+                        "book": book_dir.name,
+                        "kind": "review",
+                        "op": "复习",
+                        "itemId": value,
+                        "ease": body.get("ease"),
+                    })
+    return out
+
+
 def _fold_mutations(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """同一条目的连续操作折成一行（收纳/拖动噪音 ×5 → 一行）。"""
     folded: list[dict[str, Any]] = []

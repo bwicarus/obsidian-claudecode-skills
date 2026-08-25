@@ -7700,3 +7700,24 @@ test("dwell activity report failures never break the caller", async () => {
     (r) => r.payload.envelope.op.url === "/replication/activity"
   ).length, 0, "垃圾入参不产生命令");
 });
+
+test("review sidecar enqueues a review activity command with whitelist rebuild", async () => {
+  const result = await harness();
+  result.context.BWReaderRuntime.reportActivity({
+    review: {
+      key: "g1:0:aid9", gid: "g1", index: 0,
+      ankiCardId: "1234", ease: 3, evil: "dropped",
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const records = replicationOutboxRecords(result.dataStoresState);
+  const activity = records.map((r) => r.payload.envelope)
+    .find((e) => e.op.url === "/replication/activity");
+  assert.ok(activity, "复习活动命令已入队");
+  const body = activity.op.body;
+  assert.deepEqual(Object.keys(body).sort(),
+    ["ankiCardId", "at", "ease", "file", "gid", "index", "key", "kind"]);
+  assert.equal(body.kind, "review");
+  assert.equal(body.gid, "g1");
+  assert.equal(body.ease, 3);
+});
