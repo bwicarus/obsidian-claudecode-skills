@@ -159,6 +159,7 @@ WINDOWS_SOURCE_FILES = (
     "ComputerVoiceAudio/ReaderContextReadLedger.cs",
     "ComputerVoiceAudio/ReaderDictionaryFallback.cs",
     "ComputerVoiceAudio/ReaderDocumentCorpus.cs",
+    "ComputerVoiceAudio/ReaderHttpPickup.cs",
     "ComputerVoiceAudio/ReaderLocalAnki.cs",
     "ComputerVoiceAudio/ReaderQuery.cs",
     "ComputerVoiceAudio/ReaderQueryRpc.cs",

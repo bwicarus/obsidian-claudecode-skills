@@ -117,6 +117,34 @@ if (P) P.skip("模块名", "为什么提前返回");
 
 ---
 
+## 四之二、实时输出下行（2026-08-26 方案 A，随 Direct 0.1.213 发布）
+
+上行（快照 POST）打通后一直缺对应的**下行**：App 内有常驻 WSS 推送，
+网页没有，AI 往 Safari 网页送卡报"来源不在线"。方案 A = **HTTP 取件型
+lease**，与上行同一个 Tailscale HTTPS 面：
+
+- 扩展 background 对每个活跃绑定 source 跑一条长轮询循环：
+  `GET /reader-output/pending?sourceInstanceId=…&wait=25`。
+  **GET 即在场心跳**；桥收到即向 `ReaderContextSourceRouter.Attach` 一个
+  lease（sendAsync = 入队 + 唤醒长轮询），60 秒无心跳 `Detach` 收租。
+- 上游 `ReaderRealtimeOutput` **完全无感知**：`WaitForSourceAsync` 拿到的
+  就是普通 lease，回执经 `POST /reader-output/receipt` 走同一个
+  `Accept` —— AI 端拿到的是真实送达回执（applied/rejected），语义与
+  App WSS 场景逐字一致。回执丢失由桥端 20s 送达超时兜底，可幂等的
+  durable 卡片另有 outbox 重放。
+- 页面执行入口 `executePickedRealtimeOutput`（rc-computer-voice.js）：
+  同一 normalize + 同一 receiver（`RC.voicecall.acceptRealtimeOutput`），
+  扩展经 `chrome.runtime` 消息投达（content script 全 ISOLATED world）。
+- 两端点 CORS/来源纪律与快照 POST 同款（同一批扩展 origin +
+  `Tailscale-User-Login` 校验）。合同测试
+  `tests/reader_contract/web-output-pickup.contract.test.mjs` 锁住关键断言。
+- ⚠ Tailscale serve 同样需要**单独的路由**（与上文快照那条同一个坑）：
+  `/reader-output/pending`、`/reader-output/receipt` → `127.0.0.1:43128`。
+  本机已于 2026-08-26 配好（`tailscale serve --bg --set-path=…`），
+  换机或重置 serve 配置时记得补这两条。
+
+---
+
 ## 五、未完成与待发布
 
 （本节其余两项仍未完成；30 秒断连看门狗已随 Direct 0.1.107+ 发布，说明移至上文。）

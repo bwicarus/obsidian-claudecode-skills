@@ -9,7 +9,13 @@ identity returned here, never from a client-supplied path or uid.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    # Windows（本地 Flask 实例）没有 fcntl。票据/URL 守卫是跨平台的，
+    # 只有 profile 租约依赖 flock —— 那两处在无 fcntl 平台上响亮失败，
+    # 而不是让整条服务端导入链在 Windows 上炸掉。
+    fcntl = None  # type: ignore[assignment]
 import hashlib
 import hmac
 import ipaddress
@@ -424,6 +430,8 @@ def acquire_rbi_profile_lease(
 
     if not isinstance(identity, RbiIdentity):
         raise TypeError("verified RBI identity required")
+    if fcntl is None:
+        raise OSError("RBI profile leases require flock (POSIX only)")
     root = Path(profile_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     lock_root = root / ".locks"

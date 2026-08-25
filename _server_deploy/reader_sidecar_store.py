@@ -202,7 +202,7 @@ def atomic_write_bytes(path: str | Path, payload: bytes, *, mode: int = 0o600) -
     target = Path(path)
     _ensure_dir(target.parent, label="atomic-write parent")
     _reject_symlink(target.parent, label="atomic-write parent")
-    temp = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    temp = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp")
     fd: int | None = None
     try:
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
@@ -411,7 +411,7 @@ def _copy_inventory(
             flags |= os.O_NOFOLLOW
         source_fd = os.open(source, flags)
         temp = destination.with_name(
-            f".{destination.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            f".{destination.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp"
         )
         destination_fd: int | None = None
         digest = hashlib.sha256()
@@ -590,7 +590,7 @@ class SidecarStore:
                 )
             return
         staging = self.by_user_root / (
-            f".account-{identity.user_id}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            f".account-{identity.user_id}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp"
         )
         try:
             _ensure_dir(staging, label="empty account staging")
@@ -804,7 +804,7 @@ class SidecarStore:
             )
 
         staging = self.backups_root / (
-            f".{claim_id}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            f".{claim_id}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp"
         )
         try:
             staging_data = staging / "data"
@@ -908,7 +908,7 @@ class SidecarStore:
             return account_root, inventory, metadata
 
         staging = self.by_user_root / (
-            f".claim-{identity.user_id}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            f".claim-{identity.user_id}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp"
         )
         try:
             _ensure_dir(staging, label="legacy account staging")
@@ -1039,7 +1039,7 @@ class SidecarStore:
         """
 
         staging = self.by_user_root / (
-            f".extend-{account_root.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            f".extend-{account_root.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp"
         )
         try:
             _ensure_dir(staging, label="legacy extension staging")
