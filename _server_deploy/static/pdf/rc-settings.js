@@ -707,6 +707,7 @@
   function _fillLocRow() {
     var on = $('rcset-nat-loc-on'), st = $('rcset-nat-loc-st');
     if (!on || !st) return;
+    // @interaction settings.device-location.pref
     fetch('/pdf/api/device-location-pref').then(function (r) {
       if (r.status === 404) throw new Error('no-bridge');
       return r.json();
@@ -734,6 +735,7 @@
     on.addEventListener('change', function () {
       var want = !!on.checked;
       on.disabled = true;
+      // @interaction settings.device-location.pref
       fetch('/pdf/api/device-location-pref', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enable: want })

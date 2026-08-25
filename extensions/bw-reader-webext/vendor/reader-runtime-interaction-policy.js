@@ -291,6 +291,13 @@
         transport: { outbox: true, extensionBridge: true, serviceWorker: 'none' }
       }
     ),
+    remoteRequired(
+      'settings.device-location.pref',
+      ['/pdf/api/device-location-pref'],
+      ['GET', 'POST'],
+      '学习地点记录开关只在 App 内有意义(Swift 定位桥);状态必须实时读写,离线排队一个旧开关毫无意义',
+      { kind: 'command', surfaces: ['pwa'] }
+    ),
     backgroundMutation(
       'learning.read-dwell.report',
       '/pdf/api/read-dwell',
