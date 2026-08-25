@@ -853,6 +853,8 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
             payload["cleared"] = false
             payload["cv"] = statusRevision(status)
             payload["textAuthority"] = NativeBookOCRTextAuthority.supplemental.rawValue
+        case .bookIdentity:
+            payload["contentSha256"] = NSNull()
         }
         return payload
     }
