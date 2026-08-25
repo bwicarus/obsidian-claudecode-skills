@@ -58,6 +58,83 @@ const READER_RELAY_MESSAGES = new Set([
 ]);
 const READER_CONTEXT_POST_URL =
   "https://bwicarus-2.taile44d0c.ts.net/reader-context/snapshot";
+// 网页表面的实时输出下行(方案 A):对与快照 POST 同一个 Windows HTTPS 面
+// 做长轮询取件。每个活跃绑定 tab 的 source 一条循环;GET 即在场心跳,
+// 60s 无心跳桥端自动收租约。
+const READER_OUTPUT_PENDING_URL =
+  "https://bwicarus-2.taile44d0c.ts.net/reader-output/pending";
+const READER_OUTPUT_RECEIPT_URL =
+  "https://bwicarus-2.taile44d0c.ts.net/reader-output/receipt";
+const readerOutputPickupLoops = new Map();   // sourceInstanceId → {stop}
+
+function readerEnsurePickupLoop(sourceInstanceId, tabId) {
+  if (readerOutputPickupLoops.has(sourceInstanceId)) {
+    readerOutputPickupLoops.get(sourceInstanceId).tabId = tabId;
+    return;
+  }
+  const state = { tabId, stopped: false };
+  readerOutputPickupLoops.set(sourceInstanceId, state);
+  (async () => {
+    while (!state.stopped) {
+      // 绑定过期(5min 无上下文更新)即停:桥端租约随之超时。
+      const bound = readerContextStateByTab.get(state.tabId);
+      const identity = bound?.visualContext?.identity;
+      if (!identity || identity.sourceInstanceId !== sourceInstanceId) {
+        break;
+      }
+      let events = [];
+      try {
+        // @interaction computer-voice.bridge.request
+        const response = await fetch(
+          `${READER_OUTPUT_PENDING_URL}?sourceInstanceId=${
+            encodeURIComponent(sourceInstanceId)}&wait=25`,
+          { cache: "no-store" });
+        if (response.ok) {
+          const body = await response.json();
+          if (body?.contract === "reader-output-pickup/1"
+              && Array.isArray(body.events)) {
+            events = body.events;
+          }
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+        }
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        continue;
+      }
+      for (const event of events) {
+        const payload = event?.payload;
+        if (!payload || payload.sourceInstanceId !== sourceInstanceId) {
+          continue;
+        }
+        let receipt = null;
+        try {
+          const reply = await chrome.tabs.sendMessage(state.tabId, {
+            type: "bw-realtime-output-pickup",
+            payload,
+          });
+          if (reply?.ok && reply.receipt) receipt = reply.receipt;
+        } catch {
+          // tab 已死:不回执,桥端 20s 送达超时自会回收(durable 的重放)。
+        }
+        if (receipt) {
+          try {
+            // @interaction computer-voice.bridge.request
+            await fetch(READER_OUTPUT_RECEIPT_URL, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(receipt),
+              cache: "no-store",
+            });
+          } catch {
+            // 回执丢失 → 桥端超时按未送达处理;durable 卡片幂等重放兜底。
+          }
+        }
+      }
+    }
+    readerOutputPickupLoops.delete(sourceInstanceId);
+  })();
+}
 const READER_CONTEXT_VISUAL_KEY = "bwReaderVisualBindingsV1";
 const READER_CONTEXT_MAX_DOCUMENT_UTF8_BYTES = 768 * 1024;
 const READER_CONTEXT_MAX_DOCUMENT_CHARACTERS = 256 * 1024;
@@ -6828,6 +6905,7 @@ async function readerPostSnapshot(prepared) {
     visualContext,
   });
   await readerPersistVisualBinding(binding.tabId, visualContext);
+  readerEnsurePickupLoop(viewport.sourceInstanceId, binding.tabId);
   return { snapshotRevision, visualContext };
 }
 

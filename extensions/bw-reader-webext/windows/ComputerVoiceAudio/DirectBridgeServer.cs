@@ -369,6 +369,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly ReaderRealtimeOutputBroker _readerRealtimeOutputBroker;
     private readonly ReplicationCommandSpool _replicationCommandSpool;
     private readonly string _replicationDigestsPath;
+    private readonly ReaderHttpPickupService _readerHttpPickup;
     private readonly NamedPipeReaderRealtimeOutputRpcServer
         _readerRealtimeOutputRpcServer;
     private readonly IDirectCodexVoiceControl _codexVoiceControl;
@@ -484,6 +485,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         _readerRealtimeOutputRpcServer =
             new NamedPipeReaderRealtimeOutputRpcServer(
                 _readerRealtimeOutputBroker);
+        _readerHttpPickup = new ReaderHttpPickupService(
+            _readerSourceRouter);
         _replicationCommandSpool = new ReplicationCommandSpool(
             Path.Combine(
                 runtimeDirectory,
@@ -581,6 +584,14 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         // -- reported as "Load failed", indistinguishable from the host being
         // unreachable. It also explains why this endpoint tested clean from
         // Python: a script issues no preflight, only browsers do.
+        app.MapMethods(
+            "/reader-output/pending",
+            new[] { "GET", "OPTIONS" },
+            context => HandleOutputPendingAsync(context, serviceToken));
+        app.MapMethods(
+            "/reader-output/receipt",
+            new[] { "POST", "OPTIONS" },
+            context => HandleOutputReceiptAsync(context, serviceToken));
         app.MapMethods(
             "/reader-context/snapshot",
             new[] { "POST", "OPTIONS" },
@@ -1074,6 +1085,142 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
     // Accepts a whole snapshot in one request: page context, active reading, or
     // both. Same origin rule as the socket endpoints -- this opens no new door.
+    // 网页表面的实时输出下行（方案 A，2026-08-26）：长轮询取件 + 回执。
+    // CORS/来源纪律与 snapshot POST 完全同款 —— 同一批扩展 origin。
+    private bool PrepareOutputCors(HttpContext context, string methods)
+    {
+        bool originOk = OriginAllowed(
+            context, requireOrigin: true, out string origin);
+        if (originOk)
+        {
+            context.Response.Headers["Access-Control-Allow-Origin"] = origin;
+            context.Response.Headers["Vary"] = "Origin";
+        }
+        if (HttpMethods.IsOptions(context.Request.Method))
+        {
+            if (!originOk)
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return false;
+            }
+            context.Response.Headers["Access-Control-Allow-Methods"] = methods;
+            context.Response.Headers["Access-Control-Allow-Headers"] =
+                "Content-Type";
+            context.Response.Headers["Access-Control-Max-Age"] = "600";
+            context.Response.StatusCode = StatusCodes.Status204NoContent;
+            return false;
+        }
+        if (!originOk)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return false;
+        }
+        return true;
+    }
+
+    private async Task HandleOutputPendingAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!PrepareOutputCors(context, "GET, OPTIONS"))
+        {
+            return;
+        }
+        if (!HttpMethods.IsGet(context.Request.Method))
+        {
+            context.Response.StatusCode =
+                StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        string? source = context.Request.Query["sourceInstanceId"];
+        int wait = int.TryParse(
+            context.Request.Query["wait"], out int parsed)
+            ? Math.Clamp(parsed, 0, 30) : 0;
+        if (source is null || !DirectBridgeContract.IsSafeId(source))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return;
+        }
+        using CancellationTokenSource linked =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                serviceCancellationToken,
+                context.RequestAborted);
+        IReadOnlyList<object> events;
+        try
+        {
+            events = await _readerHttpPickup.PollAsync(
+                source, wait, linked.Token).ConfigureAwait(false);
+        }
+        catch (ReaderRealtimeOutputException exception)
+        {
+            context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            await context.Response.WriteAsJsonAsync(
+                new { error = exception.Code },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        context.Response.ContentType = "application/json; charset=utf-8";
+        await context.Response.WriteAsJsonAsync(
+            new { contract = "reader-output-pickup/1", events },
+            serviceCancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleOutputReceiptAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!PrepareOutputCors(context, "POST, OPTIONS"))
+        {
+            return;
+        }
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode =
+                StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        JsonDocument body;
+        try
+        {
+            body = await JsonDocument.ParseAsync(
+                context.Request.Body,
+                cancellationToken: serviceCancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (JsonException)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return;
+        }
+        using (body)
+        {
+            try
+            {
+                ReaderRealtimeOutputAck ack =
+                    ReaderHttpPickupService.ParseReceipt(body.RootElement);
+                _readerHttpPickup.AcceptReceipt(
+                    _readerRealtimeOutputBroker, ack);
+            }
+            catch (ReaderRealtimeOutputException exception)
+            {
+                context.Response.StatusCode =
+                    StatusCodes.Status409Conflict;
+                await context.Response.WriteAsJsonAsync(
+                    new { error = exception.Code, detail = exception.Message },
+                    serviceCancellationToken).ConfigureAwait(false);
+                return;
+            }
+        }
+        context.Response.ContentType = "application/json; charset=utf-8";
+        await context.Response.WriteAsJsonAsync(
+            new { ok = true },
+            serviceCancellationToken).ConfigureAwait(false);
+    }
+
     private async Task HandleSnapshotPostAsync(
         HttpContext context,
         CancellationToken serviceCancellationToken)

@@ -4952,6 +4952,77 @@
   }
   window.__BW_NOTIFICATIONS_QUERY__ = queryNotifications;
 
+  // ── 网页表面的实时输出取件执行(方案 A,2026-08-26)──
+  // App 内输出走 WSS 推送(_handleReaderRealtimeOutput);网页没有常驻
+  // socket,由扩展 background 长轮询 Windows 取件后经 runtime 消息送到
+  // 这里。同一套 normalize + 同一个 receiver(RC.voicecall
+  // .acceptRealtimeOutput),回执由调用方送回 Windows —— AI 端语义与
+  // App 场景逐字一致。
+  function executePickedRealtimeOutput(rawPayload) {
+    return Promise.resolve().then(function () {
+      var delivery = normalizeReaderRealtimeOutput(rawPayload);
+      var receiver = RC.voicecall && RC.voicecall.acceptRealtimeOutput;
+      if (typeof receiver !== "function") {
+        throw directError(
+          "Reader 实时输出接收器尚未挂载",
+          "BW_READER_REALTIME_OUTPUT_RECEIVER_UNAVAILABLE",
+          true
+        );
+      }
+      return Promise.resolve(receiver(delivery)).then(function (receipt) {
+        exactObject(
+          receipt, ["outcome"], ["error", "bindOutcome", "bindReason"],
+          "Reader 输出回执"
+        );
+        return {
+          correlation: delivery.correlation,
+          sourceInstanceId: delivery.sourceInstanceId,
+          outcome: receipt.outcome,
+          error: receipt.error,
+          bindOutcome: receipt.bindOutcome,
+          bindReason: receipt.bindReason,
+        };
+      });
+    }).catch(function (error) {
+      var correlation = readerRealtimeOutputCorrelation(rawPayload);
+      if (!correlation) throw error;
+      return {
+        correlation: correlation.correlation,
+        sourceInstanceId: correlation.sourceInstanceId,
+        outcome: "rejected",
+        error: String(
+          (error && error.code) || (error && error.message) || error
+        ).slice(0, 500),
+      };
+    });
+  }
+  window.__BW_REALTIME_OUTPUT_PICKUP__ = executePickedRealtimeOutput;
+
+  // 扩展环境(ISOLATED world 有 chrome.runtime):background 取件后经
+  // 运行时消息送达。App 内没有 chrome.runtime,这段自然不挂。
+  (function wirePickupMessage() {
+    try {
+      if (typeof chrome === "undefined" || !chrome.runtime ||
+          !chrome.runtime.onMessage) return;
+      chrome.runtime.onMessage.addListener(
+        function (message, _sender, sendResponse) {
+          if (!message || message.type !== "bw-realtime-output-pickup") {
+            return undefined;
+          }
+          executePickedRealtimeOutput(message.payload).then(function (receipt) {
+            sendResponse({ ok: true, receipt: receipt });
+          }).catch(function (error) {
+            sendResponse({
+              ok: false,
+              error: String((error && error.message) || error).slice(0, 300),
+            });
+          });
+          return true;   // 异步 sendResponse
+        }
+      );
+    } catch (_) {}
+  })();
+
   // ── 侧边栏通知 tab(App/扩展;照 rc-assistant 的 asst tab 自插模式,
   //    shared-drawer 接管后 #ep-side-tabs / 接管前 #side-tabs 都能挂)──
   (function mountNotificationsTab() {
