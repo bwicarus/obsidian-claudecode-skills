@@ -66,13 +66,55 @@ def _atomic_write_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
+class _FileLock:
+    """跨进程互斥：ReaderPC 每轮维护与 CLI(AI/系统)同时读-改-写通知表,
+    没有锁就是丢失更新(2026-08-26 实锤:CLI create 成功返回、条目却被
+    并发的 run_once save 覆盖蒸发)。O_EXCL 锁文件 + 有限重试;持锁者
+    崩溃留下的陈锁按 mtime 超时(30s)强夺。"""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def __enter__(self) -> "_FileLock":
+        deadline = time.monotonic() + 15.0
+        while True:
+            try:
+                handle = os.open(
+                    self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(handle)
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - self._path.stat().st_mtime > 30:
+                        self._path.unlink(missing_ok=True)
+                        continue
+                except OSError:
+                    pass
+                if time.monotonic() > deadline:
+                    raise NotificationError(
+                        f"通知表锁等待超时（{self._path}）")
+                time.sleep(0.05)
+
+    def __exit__(self, *_exc: object) -> None:
+        try:
+            self._path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 class NotificationStore:
-    """open 表原地更新（状态机），resolved/expired append 进归档。"""
+    """open 表原地更新（状态机），resolved/expired append 进归档。
+    全部写路径持文件锁 —— 见 _FileLock。"""
 
     def __init__(self, root: Path) -> None:
         self._root = root
         self._open_path = root / OPEN_FILE_NAME
         self._archive_path = root / ARCHIVE_FILE_NAME
+        self._lock_path = root / (OPEN_FILE_NAME + ".lock")
+
+    def _locked(self) -> "_FileLock":
+        self._open_path.parent.mkdir(parents=True, exist_ok=True)
+        return _FileLock(self._lock_path)
 
     def _load(self) -> list[dict[str, Any]]:
         try:
@@ -117,68 +159,71 @@ class NotificationStore:
         activate_at_ms: int | None = None,
         audience: str = "ai",
     ) -> dict[str, Any]:
-        if not kind or len(kind) > 40 or not title:
-            raise NotificationError("通知 kind/title 非法")
-        if audience not in ("ai", "user"):
-            raise NotificationError("audience 必须是 ai 或 user")
-        if auto_resolve is not None:
-            if (
-                not isinstance(auto_resolve, dict)
-                or auto_resolve.get("type") not in _AUTO_TYPES
-            ):
-                raise NotificationError(
-                    "autoResolve.type 必须是 %s 之一" % (_AUTO_TYPES,))
-        items = self._load()
-        if dedupe_key:
-            for existing in items:
-                if existing.get("dedupeKey") == dedupe_key:
-                    return existing   # 幂等:同 key 的 open 通知只有一条
-        if len(items) >= MAX_OPEN:
-            raise NotificationError(f"open 通知已达上限 {MAX_OPEN} 条")
-        item = {
-            "id": "ntf-" + secrets.token_hex(6),
-            "kind": kind[:40],
-            "title": title[:MAX_TEXT],
-            "body": body[:MAX_TEXT],
-            "source": source[:40],
-            "state": "pending",
-            # 受众(2026-08-26 用户拍板):快照只给 ai 方向(待 AI 处理的);
-            # 侧边栏 tab 只给 user 方向(AI 整理后投递给用户的)。两个
-            # 收件箱,一张表,按 audience 分流。
-            "audience": audience,
-            "createdAtUtcMs": _now_ms(),
-        }
-        if auto_resolve is not None:
-            item["autoResolve"] = auto_resolve
-        if expires_at_ms is not None:
-            item["expiresAtUtcMs"] = int(expires_at_ms)
-        if dedupe_key:
-            item["dedupeKey"] = dedupe_key[:120]
-        if activate_at_ms is not None:
-            # 定时生效(2026-08-25 用户:「某一天通知我倒垃圾」是持续待办,
-            # 不是时间点提醒):到时之前不出现在快照/list,到时后自动可见
-            # 并**保持到 resolve** —— 这正是 Codex 原生定时任务做不到的。
-            item["activateAtUtcMs"] = int(activate_at_ms)
-        items.append(item)
-        self._save(items)
-        return item
+        with self._locked():
+            if not kind or len(kind) > 40 or not title:
+                raise NotificationError("通知 kind/title 非法")
+            if audience not in ("ai", "user"):
+                raise NotificationError("audience 必须是 ai 或 user")
+            if auto_resolve is not None:
+                if (
+                    not isinstance(auto_resolve, dict)
+                    or auto_resolve.get("type") not in _AUTO_TYPES
+                ):
+                    raise NotificationError(
+                        "autoResolve.type 必须是 %s 之一" % (_AUTO_TYPES,))
+            items = self._load()
+            if dedupe_key:
+                for existing in items:
+                    if existing.get("dedupeKey") == dedupe_key:
+                        return existing   # 幂等:同 key 的 open 通知只有一条
+            if len(items) >= MAX_OPEN:
+                raise NotificationError(f"open 通知已达上限 {MAX_OPEN} 条")
+            item = {
+                "id": "ntf-" + secrets.token_hex(6),
+                "kind": kind[:40],
+                "title": title[:MAX_TEXT],
+                "body": body[:MAX_TEXT],
+                "source": source[:40],
+                "state": "pending",
+                # 受众(2026-08-26 用户拍板):快照只给 ai 方向(待 AI 处理的);
+                # 侧边栏 tab 只给 user 方向(AI 整理后投递给用户的)。两个
+                # 收件箱,一张表,按 audience 分流。
+                "audience": audience,
+                "createdAtUtcMs": _now_ms(),
+            }
+            if auto_resolve is not None:
+                item["autoResolve"] = auto_resolve
+            if expires_at_ms is not None:
+                item["expiresAtUtcMs"] = int(expires_at_ms)
+            if dedupe_key:
+                item["dedupeKey"] = dedupe_key[:120]
+            if activate_at_ms is not None:
+                # 定时生效(2026-08-25 用户:「某一天通知我倒垃圾」是持续待办,
+                # 不是时间点提醒):到时之前不出现在快照/list,到时后自动可见
+                # 并**保持到 resolve** —— 这正是 Codex 原生定时任务做不到的。
+                item["activateAtUtcMs"] = int(activate_at_ms)
+            items.append(item)
+            self._save(items)
+            return item
 
-    # ── 消费（AI 侧的两个动作） ──
+        # ── 消费（AI 侧的两个动作） ──
 
     def acknowledge(self, notification_id: str) -> dict[str, Any]:
-        items = self._load()
-        for item in items:
-            if item["id"] == notification_id:
-                if item["state"] == "pending":
-                    item["state"] = "acknowledged"
-                    item["acknowledgedAtUtcMs"] = _now_ms()
-                    self._save(items)
-                return item
-        raise NotificationError(f"通知不存在或已入库：{notification_id}")
+        with self._locked():
+            items = self._load()
+            for item in items:
+                if item["id"] == notification_id:
+                    if item["state"] == "pending":
+                        item["state"] = "acknowledged"
+                        item["acknowledgedAtUtcMs"] = _now_ms()
+                        self._save(items)
+                    return item
+            raise NotificationError(f"通知不存在或已入库：{notification_id}")
 
-    def resolve(
-        self, notification_id: str, *, by: str = "ai", note: str = ""
+    def _resolve_unlocked(
+        self, notification_id: str, *, by: str, note: str
     ) -> dict[str, Any]:
+        """假定调用方已持锁（auto_resolve_against 循环内复用）。"""
         items = self._load()
         for index, item in enumerate(items):
             if item["id"] == notification_id:
@@ -193,6 +238,13 @@ class NotificationStore:
                 return item
         raise NotificationError(f"通知不存在或已入库：{notification_id}")
 
+    def resolve(
+        self, notification_id: str, *, by: str = "ai", note: str = ""
+    ) -> dict[str, Any]:
+        with self._locked():
+            return self._resolve_unlocked(
+                notification_id, by=by, note=note)
+
     def update(
         self,
         notification_id: str,
@@ -203,92 +255,96 @@ class NotificationStore:
         expires_at_ms: int | None = None,
     ) -> dict[str, Any]:
         """修改一条 open 通知（标题/正文/生效/过期）。状态机不受影响。"""
-        items = self._load()
-        for item in items:
-            if item["id"] == notification_id:
-                if title is not None:
-                    item["title"] = title[:MAX_TEXT]
-                if body is not None:
-                    item["body"] = body[:MAX_TEXT]
-                if activate_at_ms is not None:
-                    item["activateAtUtcMs"] = int(activate_at_ms)
-                if expires_at_ms is not None:
-                    item["expiresAtUtcMs"] = int(expires_at_ms)
-                item["updatedAtUtcMs"] = _now_ms()
-                self._save(items)
-                return item
-        raise NotificationError(f"通知不存在或已入库：{notification_id}")
+        with self._locked():
+            items = self._load()
+            for item in items:
+                if item["id"] == notification_id:
+                    if title is not None:
+                        item["title"] = title[:MAX_TEXT]
+                    if body is not None:
+                        item["body"] = body[:MAX_TEXT]
+                    if activate_at_ms is not None:
+                        item["activateAtUtcMs"] = int(activate_at_ms)
+                    if expires_at_ms is not None:
+                        item["expiresAtUtcMs"] = int(expires_at_ms)
+                    item["updatedAtUtcMs"] = _now_ms()
+                    self._save(items)
+                    return item
+            raise NotificationError(f"通知不存在或已入库：{notification_id}")
 
     def cancel(
         self, notification_id: str, *, by: str = "ai", note: str = ""
     ) -> dict[str, Any]:
         """删除 = 撤销入库（cancelled）。与 resolve 的区别是语义：
         resolve=目标达成；cancel=不再需要/建错了。都留档，绝不静默蒸发。"""
-        items = self._load()
-        for index, item in enumerate(items):
-            if item["id"] == notification_id:
-                item["state"] = "cancelled"
-                item["cancelledAtUtcMs"] = _now_ms()
-                item["cancelledBy"] = by[:20]
-                if note:
-                    item["cancelNote"] = note[:MAX_TEXT]
-                del items[index]
-                self._save(items)
-                self._archive(item)
-                return item
-        raise NotificationError(f"通知不存在或已入库：{notification_id}")
+        with self._locked():
+            items = self._load()
+            for index, item in enumerate(items):
+                if item["id"] == notification_id:
+                    item["state"] = "cancelled"
+                    item["cancelledAtUtcMs"] = _now_ms()
+                    item["cancelledBy"] = by[:20]
+                    if note:
+                        item["cancelNote"] = note[:MAX_TEXT]
+                    del items[index]
+                    self._save(items)
+                    self._archive(item)
+                    return item
+            raise NotificationError(f"通知不存在或已入库：{notification_id}")
 
-    # ── 系统维护 ──
+        # ── 系统维护 ──
 
     def expire_due(self) -> int:
-        now = _now_ms()
-        items = self._load()
-        keep: list[dict[str, Any]] = []
-        expired = 0
-        for item in items:
-            if item.get("expiresAtUtcMs") and item["expiresAtUtcMs"] < now:
-                item["state"] = "expired"
-                item["expiredAtUtcMs"] = now
-                self._archive(item)
-                expired += 1
-            else:
-                keep.append(item)
-        if expired:
-            self._save(keep)
-        return expired
+        with self._locked():
+            now = _now_ms()
+            items = self._load()
+            keep: list[dict[str, Any]] = []
+            expired = 0
+            for item in items:
+                if item.get("expiresAtUtcMs") and item["expiresAtUtcMs"] < now:
+                    item["state"] = "expired"
+                    item["expiredAtUtcMs"] = now
+                    self._archive(item)
+                    expired += 1
+                else:
+                    keep.append(item)
+            if expired:
+                self._save(keep)
+            return expired
 
     def auto_resolve_against(
         self, mutations: list[dict[str, Any]]
     ) -> int:
         """对照一批账本记录（load_mutations 形状），命中条件的通知自动入库。"""
-        items = self._load()
-        resolved_ids: list[str] = []
-        for item in items:
-            condition = item.get("autoResolve")
-            if not isinstance(condition, dict):
-                continue
-            ctype = condition.get("type")
-            hit = False
-            if ctype == "item-mutated":
-                want_id = str(condition.get("itemId") or "")
-                want_op = condition.get("op")
-                hit = any(
-                    m.get("itemId") == want_id
-                    and (want_op is None or m.get("op") == want_op)
-                    for m in mutations
-                )
-            elif ctype == "card-reviewed":
-                want_card = str(condition.get("cardId") or "")
-                hit = any(
-                    m.get("kind") == "review"
-                    and m.get("itemId") == want_card
-                    for m in mutations
-                )
-            if hit:
-                resolved_ids.append(item["id"])
-        for notification_id in resolved_ids:
-            self.resolve(notification_id, by="auto")
-        return len(resolved_ids)
+        with self._locked():
+            items = self._load()
+            resolved_ids: list[str] = []
+            for item in items:
+                condition = item.get("autoResolve")
+                if not isinstance(condition, dict):
+                    continue
+                ctype = condition.get("type")
+                hit = False
+                if ctype == "item-mutated":
+                    want_id = str(condition.get("itemId") or "")
+                    want_op = condition.get("op")
+                    hit = any(
+                        m.get("itemId") == want_id
+                        and (want_op is None or m.get("op") == want_op)
+                        for m in mutations
+                    )
+                elif ctype == "card-reviewed":
+                    want_card = str(condition.get("cardId") or "")
+                    hit = any(
+                        m.get("kind") == "review"
+                        and m.get("itemId") == want_card
+                        for m in mutations
+                    )
+                if hit:
+                    resolved_ids.append(item["id"])
+            for notification_id in resolved_ids:
+                self._resolve_unlocked(notification_id, by="auto", note="")
+            return len(resolved_ids)
 
     def open_items(self) -> list[dict[str, Any]]:
         return self._load()
