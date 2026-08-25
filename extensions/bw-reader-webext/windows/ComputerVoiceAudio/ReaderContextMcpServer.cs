@@ -6811,6 +6811,9 @@ internal sealed class ReaderContextMcpServer
                 ReaderNotificationsProjection.Apply(
                     cachedSnapshot,
                     System.IO.Path.GetDirectoryName(_statePath)!);
+                ReaderRecentActivityProjection.Apply(
+                    cachedSnapshot,
+                    System.IO.Path.GetDirectoryName(_statePath)!);
             }
             FileInfo info = new(_statePath);
             if (
@@ -6877,6 +6880,9 @@ internal sealed class ReaderContextMcpServer
                 producerInstanceId))
             {
                 ReaderNotificationsProjection.Apply(
+                    parsed,
+                    System.IO.Path.GetDirectoryName(_statePath)!);
+                ReaderRecentActivityProjection.Apply(
                     parsed,
                     System.IO.Path.GetDirectoryName(_statePath)!);
                 _latestSnapshot = parsed;

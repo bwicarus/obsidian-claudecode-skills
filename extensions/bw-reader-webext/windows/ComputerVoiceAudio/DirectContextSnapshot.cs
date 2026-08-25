@@ -3954,3 +3954,100 @@ internal static class ReaderNotificationsProjection
         }
     }
 }
+
+
+// 「最近操作」的账本化替代(2026-08-25 用户拍板:用记录功能的信息代替
+// 快照里的 recentActions)。旧实现是内存态 ≤5 条/30s 窗,重启即空、
+// 覆盖面窄;账本派生的最近条目落盘可靠、带条目号可追。留一个兜底:
+// 近 30 分钟账本无条目时保留桥内原值(翻页/画笔那几类不进账本)。
+internal static class ReaderRecentActivityProjection
+{
+    private const int WindowMinutes = 30;
+    private const int MaximumItems = 8;
+    private static readonly (string Method, string Url, string Label)[]
+        Labels =
+    {
+        ("POST", "/pdf/api/highlights", "新建高亮"),
+        ("PATCH", "/pdf/api/highlights", "修改高亮"),
+        ("DELETE", "/pdf/api/highlights", "删除高亮"),
+        ("POST", "/pdf/api/epub-highlights", "新建高亮"),
+        ("PATCH", "/pdf/api/epub-highlights", "修改高亮"),
+        ("DELETE", "/pdf/api/epub-highlights", "删除高亮"),
+        ("POST", "/pdf/api/notes", "新建便签/卡片"),
+        ("PATCH", "/pdf/api/notes", "修改便签/卡片"),
+        ("DELETE", "/pdf/api/notes", "删除便签/卡片"),
+        ("POST", "/pdf/api/userpages", "新建用户页"),
+        ("PATCH", "/pdf/api/userpages", "修改用户页"),
+        ("DELETE", "/pdf/api/userpages", "删除用户页"),
+        ("POST", "/pdf/api/ink", "手写墨迹"),
+        ("POST", "/pdf/api/epub-ink", "手写墨迹"),
+        ("POST", "/replication/activity", "阅读/复习活动"),
+    };
+
+    internal static void Apply(JsonObject snapshot, string directory)
+    {
+        try
+        {
+            string path = System.IO.Path.Combine(
+                directory, "activity-report.json");
+            FileInfo info = new(path);
+            if (!info.Exists || info.Length is <= 0 or > 2 * 1024 * 1024)
+            {
+                return;
+            }
+            JsonObject? report = JsonNode.Parse(
+                File.ReadAllText(path)) as JsonObject;
+            if (report?["raw"]?["commands"] is not JsonArray commands)
+            {
+                return;
+            }
+            long cutoff = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                - WindowMinutes * 60_000L;
+            JsonArray projected = new();
+            foreach (JsonNode? node in commands)
+            {
+                if (node is not JsonObject command)
+                {
+                    continue;
+                }
+                long at = command["atUtcMs"]?.GetValue<long>() ?? 0;
+                if (at < cutoff)
+                {
+                    continue;
+                }
+                string method = command["method"]?.GetValue<string>() ?? "";
+                string url = command["url"]?.GetValue<string>() ?? "";
+                string? label = null;
+                foreach ((string m, string u, string l) in Labels)
+                {
+                    if (m == method && u == url)
+                    {
+                        label = l;
+                        break;
+                    }
+                }
+                if (label is null)
+                {
+                    continue;
+                }
+                projected.Add(new JsonObject
+                {
+                    ["kind"] = label,
+                    ["atMs"] = at,
+                    ["source"] = "ledger",
+                });
+                if (projected.Count >= MaximumItems)
+                {
+                    break;
+                }
+            }
+            if (projected.Count > 0)
+            {
+                snapshot["recentActions"] = projected;
+            }
+        }
+        catch
+        {
+        }
+    }
+}

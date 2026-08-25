@@ -3220,6 +3220,9 @@ internal sealed class DirectSnapshotViewer : IDisposable
             ReaderNotificationsProjection.Apply(
                 snapshot,
                 System.IO.Path.GetDirectoryName(_snapshotPath)!);
+            ReaderRecentActivityProjection.Apply(
+                snapshot,
+                System.IO.Path.GetDirectoryName(_snapshotPath)!);
             return snapshot;
         }
         catch (OperationCanceledException)
