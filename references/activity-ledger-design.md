@@ -53,6 +53,15 @@
 >   默认时间窗 1 天）；**L1 明细 --detail** 只在用户追问具体某条时用；
 >   原始层（账本 SQLite / activity jsonl）**永远不整体喂给 AI**。
 >   实现在 `replication_activity.py`。快照注入仍按约束不做。
+>   **接口定稿（2026-08-25 用户设计拍板，同日落地）**：时间三层 ——
+>   内容窗(48h,条目直接带内容)/编号窗(折叠为编号,`--id` recall 单条
+>   全量+操作历史,已删条目从账本抢救最后已知内容)/窗外(默认不出现,
+>   显式 --since 才见)。筛选指令:--kind(6 类多选)×--since×
+>   --verbosity ids|summary|full。**服务方式研究结论:AGENTS.md+CLI
+>   最快最稳**(零协议 round-trip/零常驻进程,Codex exec 一跳;MCP 的
+>   server 生命周期在纯本地只读场景没有回报)。发现层在
+>   `~/.codex/AGENTS.md`;CLI 稳定路径 `%LOCALAPPDATA%/BWReader/
+>   replication_activity.py`(打包器随每次安装刷新,路径跨版本不变)。
 > - §6 压缩策略 → 你说「按你的建议」，即**冷归档不删除**，见上面 §3.1。
 > - 本文件此前只在分支 `codex/reader-tools-release-20260815` 上，
 >   当前树查不到 —— 已搬过来。
