@@ -65,6 +65,18 @@
 |---|---|---|
 | `auto_upload_after_register` | `false` | 客户端「立即运行登记新笔记」按钮跑完后是否自动接「刷新并上传网页」|
 
+### `artifact_lifecycle.*` —— 生成物冷归档（daily 定时任务）
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `artifact_lifecycle.enabled` | `true`（dry-run 只读无害，默认开着才有报告可看） | `artifact-lifecycle.timer`（每日 04:10）是否执行 |
+| `artifact_lifecycle.archive` | `false`（真归档必须显式打开） | `true` 时真的把冷条目移进 `state/cold-archive/`；否则只报告 |
+| `artifact_lifecycle.days` | `90` | 冷却期（天） |
+
+消费方：`scripts/artifact_lifecycle.py --from-config`。三条保留判据（已贴页
+`local` / 被持久记录引用 / 未过冷却期）任一命中即保留；归档不是删除。
+设计出处 `references/activity-ledger-design.md` §3.1/§6。
+
 ### `weak_card_refresh.*` —— 薄弱卡 AI 改写
 
 `refresh_weak_cards.py --task weak`：找连续 lapses 多的卡，AI L1 改写问法 / L2 拆分。

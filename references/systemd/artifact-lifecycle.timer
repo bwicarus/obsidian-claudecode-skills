@@ -1,0 +1,10 @@
+[Unit]
+Description=每日触发生成物冷归档判定(04:10,避开 01:00 daily/02:30 figures/03:30 backup)
+
+[Timer]
+OnCalendar=*-*-* 04:10:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

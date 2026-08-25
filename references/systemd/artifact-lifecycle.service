@@ -1,0 +1,12 @@
+[Unit]
+Description=生成物生命周期:冷归档判定(默认 dry-run,开关在 server-config.json artifact_lifecycle 段)
+After=network.target
+
+[Service]
+Type=oneshot
+User=bwicarus
+Group=bwicarus
+WorkingDirectory=/home/bwicarus/claude
+ExecStart=/usr/bin/python3 /home/bwicarus/claude/scripts/artifact_lifecycle.py --from-config
+Nice=15
+IOSchedulingClass=idle

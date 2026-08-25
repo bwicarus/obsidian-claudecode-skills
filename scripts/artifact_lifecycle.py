@@ -204,6 +204,22 @@ def archive(cold: list[dict], reg_path: Path = ASSET_REG,
     return out_dir
 
 
+def _server_config_section() -> dict:
+    """读 server-config.json 的 artifact_lifecycle 段（daily 定时任务的开关）。
+
+    形状 {enabled, archive, days}。enabled 默认 **true**（dry-run 只读无害，
+    默认开着才有报告可看）；archive 默认 **false**（真归档必须显式打开 ——
+    与 CLI 的 --archive 同一条纪律：动用户数据的开关不许有"顺手为真"）。
+    """
+    path = STATE / "server-config.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    section = value.get("artifact_lifecycle")
+    return section if isinstance(section, dict) else {}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--days", type=int, default=DEFAULT_COLD_DAYS,
@@ -211,7 +227,21 @@ def main() -> int:
     ap.add_argument("--archive", action="store_true",
                     help="真的归档（不带就只报告，什么都不动）")
     ap.add_argument("--json", action="store_true", help="机器可读输出")
+    ap.add_argument("--from-config", action="store_true",
+                    help="定时任务模式：参数从 server-config.json 的 "
+                         "artifact_lifecycle 段读（enabled/archive/days），"
+                         "enabled=false 时直接跳过")
     args = ap.parse_args()
+    if args.from_config:
+        section = _server_config_section()
+        if section.get("enabled", True) is not True:
+            print("artifact_lifecycle.enabled=false，跳过")
+            return 0
+        args.archive = section.get("archive") is True
+        try:
+            args.days = int(section.get("days", DEFAULT_COLD_DAYS))
+        except (TypeError, ValueError):
+            args.days = DEFAULT_COLD_DAYS
 
     reg = _load_registry()
     if not reg:
