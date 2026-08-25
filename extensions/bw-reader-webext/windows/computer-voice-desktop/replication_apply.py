@@ -663,6 +663,17 @@ def run_once(
             digests = export_replication_digests(
                 local_root / REPLICATION_DATA_DIRECTORY_NAME, digests_path
             )
+            # 活动报告(用户查看端,viewer /activity-view 消费)。L0 折叠
+            # 7 天窗口,文件常年 KB 级。失败不拦对账:报告是查看层,
+            # 它坏了不该影响复制本体,但要在状态文件里出声。
+            try:
+                import replication_activity
+                _atomic_write_json(
+                    digests_path.parent / "activity-report.json",
+                    replication_activity.summarize(local_root, 7.0),
+                )
+            except Exception as activity_error:  # noqa: BLE001
+                status["activityReportError"] = str(activity_error)[:500]
             status.update(
                 ok=True,
                 digestBooks=len(digests["books"]),

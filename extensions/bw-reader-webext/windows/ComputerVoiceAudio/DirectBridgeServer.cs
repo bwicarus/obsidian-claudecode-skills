@@ -549,6 +549,12 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         app.MapGet(
             DirectSnapshotViewer.MarkdownPath,
             _snapshotViewer.HandleMarkdownAsync);
+        app.MapGet(
+            DirectSnapshotViewer.ActivityViewerPath,
+            _snapshotViewer.HandleActivityViewerAsync);
+        app.MapGet(
+            DirectSnapshotViewer.ActivityReportPath,
+            _snapshotViewer.HandleActivityReportAsync);
         app.Map(
             "/reader-computer-voice/v1",
             context => HandleBridgeAsync(context, serviceToken));
