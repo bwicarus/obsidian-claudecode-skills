@@ -153,3 +153,23 @@ errors=0（`test_web_notes_local.py` 是**已知 flaky**，约 1/5 超时，
 - **release_preflight 白名单**补录了上一轮漏登记的 replication 源与测试文件
   （漏登记会让 package_source_snapshot 拒发并连锁打红 manifest 门禁——
   handoff --full 从 5 错回到 3 个纯环境错：两组 fcntl + 浏览器门禁）。
+
+## 8. 2026-08-25 下午增量（真实改页余波清完 + 规格收官）
+
+- **真实改页的全部余波已清**（都是插入页成功后才显形的存量缺陷，非绑定卡
+  改动引入——那次只造成"锁定被解"一项，已撤销重做为 onToggle 打开时展开）：
+  词锚 bind.page 迁移缺失（+启动存量修复，副本已验证 47/47 对齐）、
+  启动恢复清记忆 + 15s 超时误报（保留记忆 + 90s + 横幅带真因）、
+  BW_LOCAL_BOOK_CHANGED（索引缓存滞后于被改写的文件：恢复前 rescan +
+  openLocalBook 打开前对账磁盘过期即重扫重试）。诊断出口横幅一张截图
+  定位根因——先给出口再猜，比连猜三轮省得多。
+- **规格最后两项落地**：Swift `book-identity` action（外借全文 sha）→
+  pair 公告可选带 contentSha256 → Windows `links.remint` 内容会合接续
+  身份 + `migrate_book` 数据目录移交 + `_apply_resync` 重装保护
+  （全空对非空拒绝）。两节点复制规格全部条目完成。
+- 部署：ReaderPC **0.1.68** 运行中（重配对+重装保护）；App 侧随
+  TestFlight（book-identity 首个构建 32800738125 因错误响应 switch 不
+  exhaustive 失败，261c2525 修复后 32800940795 重跑）。
+- ⚠ 教训又+1：bash heredoc/双引号 python -c 传 `\uXXXX` 会变成真实控制
+  字节（rc-computer-voice.js 与规格 md 各中招一次，文件变 binary）——
+  写含反斜杠转义的行必须用 chr() 拼或 Edit 工具。
