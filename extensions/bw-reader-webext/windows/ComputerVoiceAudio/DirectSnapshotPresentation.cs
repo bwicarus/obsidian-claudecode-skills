@@ -1926,6 +1926,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
               <script>
                 "use strict";
 
+                const byId = id => document.getElementById(id);
                 // ── 学习活动 tab（2026-08-25 用户:并进快照页做切换）──
                 // ⚠ 本页契约:零 innerHTML(不可信网页正文会进这个页面,
                 //   自检 direct-snapshot-viewer-* 把关)。活动数据里书名/
@@ -2006,7 +2007,6 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 tabSnapshot.addEventListener("click", () => selectTab(false));
                 tabActivity.addEventListener("click", () => selectTab(true));
                 if (location.hash === "#activity") selectTab(true);
-                const byId = id => document.getElementById(id);
                 const status = byId("status");
                 const revision = byId("revision");
                 const active = byId("active");
