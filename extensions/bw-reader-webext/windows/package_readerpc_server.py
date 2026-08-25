@@ -106,6 +106,12 @@ def _source_inputs() -> list[dict[str, str]]:
     for path in sorted(DESKTOP_SOURCE.glob("*.py")):
         if path.name != "__init__.py":
             paths.append(path)
+    # 同一文件可能既在 RUNTIME_SOURCES(要打进 zip)又被 desktop glob 收进
+    # 取证清单(replication_activity.py) —— 取证按内容一份就够,去重。
+    seen: set[str] = set()
+    paths = [p for p in paths
+             if str(p.resolve()) not in seen
+             and not seen.add(str(p.resolve()))]
     result = []
     for path in paths:
         try:
