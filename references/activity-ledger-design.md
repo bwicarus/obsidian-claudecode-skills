@@ -27,10 +27,19 @@
 >   dwell 上报 + dwell 导入器（同一天同一页两个端都读过时**两个都留**，
 >   如 `native+pwa`，按秒数降序）。
 >   ⚠ **不要拿 deviceId 前缀判端**：App 内 JS 层铸的恰恰也是 `pwa-install-v1-`。
-> - §3.4 地点维度 → **已落地字段，但改了用词也降了预期**：叫 `device` 不叫 `place`。
->   记的是"哪台机"不是地点。真定位全仓零基础设施，IP 那条路也是死的
->   （请求都经 nginx 反代 `remote_addr` 恒 127.0.0.1；Tailscale 地址与所在网络无关）。
->   字段已通到派生索引，**采集端尚未接**（要接哪个标识等你定）。
+> - §3.4 地点维度 → **真定位已落地（2026-08-25，用户拍板：使用期间权限、
+>   建筑物级、带地名）**：App 端 `ReaderLocationProvider`（CLLocationManager
+>   whenInUse + NearestTenMeters + CLGeocoder 反解节流）→
+>   `window.__BW_DEVICE_LOCATION__` → dwell flush 带 `loc:{lat,lon,acc,name,at}`
+>   （只带 ≤30min 新鲜位置）→ Pi read-dwell 显式校验搬运进 dwell.jsonl 每条。
+>   开关默认关：设置面板「App 本机」tab「记录学习地点」，本地路由
+>   `/pdf/api/device-location-pref`。坐标与地名两者都存（采集不可重来）。
+>   扩展半边（navigator.geolocation）与消费端（import_dwell 把 loc 进
+>   extra）**尚未接**。早前的 `device`（哪台机）字段仍然成立，与 loc 互补。
+> - §3.1 定时器 → **已接（2026-08-25 用户拍板"单独做一个带开关的 daily"）**：
+>   `artifact-lifecycle.timer`（Pi 每日 04:10），开关在 server-config
+>   `artifact_lifecycle` 段（enabled 默认 true=dry-run 报告；archive 默认
+>   false，真归档须显式打开）。
 > - §6 压缩策略 → 你说「按你的建议」，即**冷归档不删除**，见上面 §3.1。
 > - 本文件此前只在分支 `codex/reader-tools-release-20260815` 上，
 >   当前树查不到 —— 已搬过来。
