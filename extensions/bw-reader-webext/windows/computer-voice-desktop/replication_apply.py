@@ -114,6 +114,7 @@ _PAIR_SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 # 一闪而过 —— App 把错误文本作为诊断命令发来，这里持久 append，远程可查。
 DIAGNOSTIC_URL = "/replication/diagnostic"
 ACTIVITY_URL = "/replication/activity"
+NOTIFICATION_URL = "/replication/notification"
 ACTIVITY_FILE_NAME = "activity-dwell.jsonl"
 MAX_ACTIVITY_ENTRIES_PER_COMMAND = 200
 DIAGNOSTICS_FILE_NAME = "diagnostics.json"
@@ -436,6 +437,36 @@ class ReplicationCommandApplier:
             data["tombstones"].pop(item_id, None)
         self._data.save(entry.replication_book_id, domain, data)
 
+    def _apply_notification(self, entry: LedgerEntry) -> None:
+        """App 侧用户对通知的操作(侧边栏通知 tab):ack/resolve/cancel。
+
+        by='user' —— 状态机三个来源(auto/ai/user)至此齐全。通知不存在
+        (已被别的通道处理过)按幂等成功:at-least-once 投递下重放不该死信。
+        """
+        body = entry.body
+        allowed = {"action", "id", "note"}
+        if (
+            not isinstance(body, dict)
+            or not set(body.keys()) <= allowed
+            or body.get("action") not in ("ack", "resolve", "cancel")
+            or not isinstance(body.get("id"), str)
+        ):
+            raise ReplicationApplyError("通知操作 body 非法")
+        import replication_notifications
+        store = replication_notifications.NotificationStore(
+            self._data.directory.parent
+        )
+        note = str(body.get("note") or "")[:400]
+        try:
+            if body["action"] == "ack":
+                store.acknowledge(body["id"])
+            elif body["action"] == "resolve":
+                store.resolve(body["id"], by="user", note=note)
+            else:
+                store.cancel(body["id"], by="user", note=note)
+        except replication_notifications.NotificationError:
+            pass   # 已处理过:幂等成功
+
     def _apply_activity(self, entry: LedgerEntry) -> None:
         """活动记录(dwell 等)追加进本书的 activity jsonl。
 
@@ -547,6 +578,8 @@ class ReplicationCommandApplier:
                     special = self._apply_diagnostic
                 elif entry.url == ACTIVITY_URL and entry.method == "POST":
                     special = self._apply_activity
+                elif entry.url == NOTIFICATION_URL and entry.method == "POST":
+                    special = self._apply_notification
                 if special is not None:
                     try:
                         special(entry)

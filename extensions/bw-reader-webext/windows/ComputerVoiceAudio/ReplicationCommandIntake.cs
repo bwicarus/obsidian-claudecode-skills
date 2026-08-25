@@ -22,6 +22,8 @@ internal static partial class ReplicationCommandProtocol
     internal const string CommandType = "replication-command";
     internal const string ChunkType = "replication-command-chunk";
     internal const string DigestQueryType = "replication-digest-query";
+    internal const string NotificationsQueryType =
+        "replication-notifications-query";
     internal const string EnvelopeContract = "replication-command/1";
     internal const string DigestsFileName = "replication-digests.json";
     internal const string DigestsViewContract = "replication-digests-view/1";
@@ -157,6 +159,93 @@ internal static partial class ReplicationCommandProtocol
     // 对账查询（规格 §6）：读 Python 摄取线程每轮导出的摘要文件，
     // 只回被问的那本书。文件缺失 = 还没跑过一轮 → 空视图（不是错误）；
     // 文件损坏必须出声 —— 静默回空会让 App 以为"两端都空、一致"。
+    // 通知 tab(2026-08-26 用户拍板:侧边栏通知 tab,Windows 通知经此
+    // 下发到 App/扩展)。真值仍是 ReaderPC 的通知表;这里只端 runtime 的
+    // open 投影 —— 桥不管状态机,ack/resolve 走复制命令流回 Windows。
+    internal static object ReadNotificationsView(string notificationsPath)
+    {
+        string json;
+        try
+        {
+            FileInfo info = new(notificationsPath);
+            if (!info.Exists || info.Length is <= 0 or > 256 * 1024)
+            {
+                return new
+                {
+                    contract = "reader-notifications/1",
+                    items = Array.Empty<object>(),
+                };
+            }
+            json = File.ReadAllText(notificationsPath);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            return new
+            {
+                contract = "reader-notifications/1",
+                items = Array.Empty<object>(),
+            };
+        }
+        using JsonDocument parsed = JsonDocument.Parse(json);
+        if (
+            parsed.RootElement.ValueKind != JsonValueKind.Object
+            || parsed.RootElement.TryGetProperty(
+                "contract", out JsonElement contract) is false
+            || contract.GetString() != "reader-notifications/1"
+            || !parsed.RootElement.TryGetProperty(
+                "items", out JsonElement items)
+            || items.ValueKind != JsonValueKind.Array
+        )
+        {
+            return new
+            {
+                contract = "reader-notifications/1",
+                items = Array.Empty<object>(),
+            };
+        }
+        List<object> projected = new();
+        foreach (JsonElement item in items.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+            string? id = item.TryGetProperty("id", out JsonElement idValue)
+                ? idValue.GetString() : null;
+            string? title = item.TryGetProperty(
+                "title", out JsonElement titleValue)
+                ? titleValue.GetString() : null;
+            if (id is null || title is null)
+            {
+                continue;
+            }
+            projected.Add(new
+            {
+                id,
+                kind = item.TryGetProperty("kind", out JsonElement k)
+                    ? (k.GetString() ?? "") : "",
+                title,
+                body = item.TryGetProperty("body", out JsonElement b)
+                    ? (b.GetString() ?? "") : "",
+                state = item.TryGetProperty("state", out JsonElement s)
+                    ? (s.GetString() ?? "pending") : "pending",
+                createdAtUtcMs = item.TryGetProperty(
+                    "createdAtUtcMs", out JsonElement c)
+                    && c.TryGetInt64(out long created) ? created : 0,
+            });
+            if (projected.Count >= 20)
+            {
+                break;
+            }
+        }
+        return new
+        {
+            contract = "reader-notifications/1",
+            items = projected.ToArray(),
+        };
+    }
+
     internal static object ReadDigestsView(
         string digestsPath,
         string replicationBookId)

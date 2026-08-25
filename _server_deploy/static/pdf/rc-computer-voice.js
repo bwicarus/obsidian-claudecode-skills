@@ -4911,6 +4911,188 @@
   }
   window.__BW_REPLICATION_DIGESTS__ = queryReplicationDigests;
 
+  // 通知 tab(2026-08-26):查询 Windows 的 open 通知。一次性 context-only
+  // 连接,照复制摘要同款;失败折成空列表(通知是增强,桥不在就没有)。
+  function queryNotifications() {
+    var session = randomSession();
+    var channel = null;
+    return openDirect({ endpoint: CONTEXT_ENDPOINT }).then(function (opened) {
+      channel = opened;
+      return channel.request("context-open", { sessionId: session.id });
+    }).then(function (value) {
+      exactObject(
+        value, ["sessionId", "state", "mode"], [], "通知查询 CONTEXT-OPEN 响应"
+      );
+      if (value.sessionId !== session.id ||
+          value.state !== "context-only" ||
+          value.mode !== CONTEXT_DELIVERY_SNAPSHOT) {
+        throw directError(
+          "通知查询上下文连接响应无效",
+          "BW_NOTIFICATIONS_QUERY_INVALID",
+          false
+        );
+      }
+      return channel.request("replication-notifications-query", {
+        sessionId: session.id,
+      });
+    }).then(function (reply) {
+      exactObject(
+        reply, ["contract", "items"], [], "通知视图"
+      );
+      if (reply.contract !== "reader-notifications/1" ||
+          !Array.isArray(reply.items)) {
+        throw directError(
+          "通知视图形状无效", "BW_NOTIFICATIONS_QUERY_INVALID", false
+        );
+      }
+      return reply.items;
+    }).finally(function () {
+      if (channel) return channel.close();
+    });
+  }
+  window.__BW_NOTIFICATIONS_QUERY__ = queryNotifications;
+
+  // ── 侧边栏通知 tab(App/扩展;照 rc-assistant 的 asst tab 自插模式,
+  //    shared-drawer 接管后 #ep-side-tabs / 接管前 #side-tabs 都能挂)──
+  (function mountNotificationsTab() {
+    // 无 DOM 环境(测试沙盒/worker)不挂 UI —— 查询函数本体不受影响。
+    if (typeof document === 'undefined' ||
+        typeof setInterval !== 'function') return;
+    var mounted = false;
+    var lastItems = [];
+    var hiddenIds = {};   // 乐观移除:操作已入队,列表先行消失
+    function bar() {
+      return document.getElementById('ep-side-tabs')
+        || document.getElementById('side-tabs');
+    }
+    function panel() {
+      return document.getElementById('ep-side')
+        || document.getElementById('grammar-panel');
+    }
+    function esc(value) {
+      return String(value == null ? '' : value).replace(/[&<>"]/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+      });
+    }
+    function render(box, items) {
+      var visible = items.filter(function (item) {
+        return !hiddenIds[item.id];
+      });
+      if (!visible.length) {
+        box.innerHTML =
+          '<div style="color:#5a6680;font-size:12.5px;padding:8px 2px">' +
+          '没有待办通知。</div>';
+        return;
+      }
+      box.innerHTML = visible.map(function (item) {
+        var stamp = '';
+        try {
+          stamp = new Date(item.createdAtUtcMs).toLocaleString('zh-CN', {
+            month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit'
+          });
+        } catch (e) {}
+        return '<div class="bw-ntf-card" data-id="' + esc(item.id) + '"' +
+          ' style="background:rgba(20,30,56,.7);border:1px solid #263655;' +
+          'border-radius:10px;padding:9px 11px;margin-bottom:8px">' +
+          '<div style="display:flex;gap:6px;align-items:baseline">' +
+          (item.state === 'pending'
+            ? '<span style="color:#ffd28a;font-size:11px;flex:none">[新]</span>'
+            : '') +
+          '<div style="font-size:13px;color:#dbe4f8;font-weight:600;' +
+          'min-width:0">' + esc(item.title) + '</div></div>' +
+          (item.body
+            ? '<div style="font-size:12px;color:#9aa7c4;margin-top:3px">' +
+              esc(item.body) + '</div>'
+            : '') +
+          '<div style="display:flex;gap:8px;align-items:center;margin-top:7px">' +
+          '<span style="color:#5a6680;font-size:11px;flex:1">' + esc(stamp) +
+          '　' + esc(item.kind) + '</span>' +
+          '<button type="button" data-ntf-act="resolve" style="background:#1a2540;' +
+          'border:1px solid #2a3550;color:#9fe6b8;border-radius:6px;' +
+          'padding:4px 10px;cursor:pointer;font-size:12px">✔ 完成</button>' +
+          '<button type="button" data-ntf-act="cancel" style="background:#1a2540;' +
+          'border:1px solid #2a3550;color:#8fa5c8;border-radius:6px;' +
+          'padding:4px 10px;cursor:pointer;font-size:12px">✕ 不再需要</button>' +
+          '</div></div>';
+      }).join('');
+    }
+    function refresh() {
+      var box = document.getElementById('bw-ntf-list');
+      if (!box) return;
+      box.innerHTML =
+        '<div style="color:#5a6680;font-size:12.5px;padding:8px 2px">加载…</div>';
+      queryNotifications().then(function (items) {
+        lastItems = items;
+        render(box, items);
+      }).catch(function () {
+        box.innerHTML =
+          '<div style="color:#5a6680;font-size:12.5px;padding:8px 2px">' +
+          '通知暂不可读（电脑桥离线时没有通知）。</div>';
+      });
+    }
+    function act(id, action) {
+      hiddenIds[id] = true;
+      var box = document.getElementById('bw-ntf-list');
+      if (box) render(box, lastItems);
+      fetch('/pdf/api/notification-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: action, id: id })
+      }).catch(function () {
+        delete hiddenIds[id];
+        if (box) render(box, lastItems);
+      });
+    }
+    function tryMount() {
+      if (mounted) return true;
+      var tabs = bar();
+      var host = panel();
+      if (!tabs || !host) return false;
+      mounted = true;
+      var shared = tabs.id === 'ep-side-tabs';
+      var btn = document.createElement('button');
+      btn.className = shared ? 'ep-side-tab' : 'side-tab';
+      btn.dataset.pane = 'ntf';
+      btn.innerHTML = '<svg class="si" viewBox="0 0 24 24" fill="none" ' +
+        'stroke="currentColor" stroke-width="1.7" stroke-linecap="round" ' +
+        'stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9' +
+        'h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>' +
+        '<span class="ep-side-tab-lb">通知</span>';
+      btn.title = '通知';
+      btn.onclick = function () {
+        try { window.switchSideTab && window.switchSideTab('ntf'); } catch (e) {}
+        refresh();
+      };
+      tabs.appendChild(btn);
+      var pane = document.createElement('div');
+      pane.className = shared ? 'ep-side-pane' : 'side-pane';
+      pane.dataset.pane = 'ntf';
+      pane.innerHTML =
+        '<div style="padding:10px 12px">' +
+        '<div id="bw-ntf-list"></div>' +
+        '<div style="color:#5a6680;font-size:11px;margin-top:6px">' +
+        '完成/不再需要会同步回电脑并入库留档；确定性的待办(如复习)' +
+        '完成后会自动消失。</div></div>';
+      host.appendChild(pane);
+      return true;
+    }
+    // shared-drawer 接管发生在启动后:轮询挂载(≤30s),挂上即停。
+    var tries = 0;
+    var timer = setInterval(function () {
+      tries += 1;
+      if (tryMount() || tries > 60) clearInterval(timer);
+    }, 500);
+    document.addEventListener('click', function (event) {
+      var button = event.target && event.target.closest
+        ? event.target.closest('[data-ntf-act]') : null;
+      if (!button) return;
+      var card = button.closest('.bw-ntf-card');
+      if (!card) return;
+      act(card.dataset.id, button.dataset.ntfAct);
+    });
+  })();
+
   function lookupJapaneseFallback(value) {
     var request;
     try {

@@ -299,6 +299,9 @@ NATIVE_RUNTIME_INTERFACE_ENTRIES = {
         "local", ("GET", "POST", "PATCH", "DELETE"),
         ("epub", "pdf"), "handleLocalState"
     ),
+    "/pdf/api/notification-action": (
+        "local", ("POST",), ("epub", "pdf"), "handleLocalState"
+    ),
     "/pdf/api/ocr-selection": (
         "local", ("POST",), ("pdf",), "handleLocalState"
     ),

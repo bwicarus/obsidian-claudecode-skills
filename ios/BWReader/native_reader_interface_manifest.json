@@ -2114,6 +2114,21 @@
       "remoteBook": null,
       "description": "Store notes in the native-local sidecar."
     },
+  {
+   "path": "/pdf/api/notification-action",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Sidebar notifications tab: user ack/resolve/cancel enqueued into the replication command stream back to the Windows notification store."
+  },
     {
       "path": "/pdf/api/ocr-selection",
       "match": "exact",

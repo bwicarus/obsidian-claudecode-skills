@@ -1473,6 +1473,12 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 ReplicationCommandProtocol.ReadDigestsView(
                     _replicationDigestsPath,
                     replicationBookId),
+            queryReplicationNotifications: () =>
+                ReplicationCommandProtocol.ReadNotificationsView(
+                    System.IO.Path.Combine(
+                        System.IO.Path.GetDirectoryName(
+                            _replicationDigestsPath)!,
+                        "notifications-open.json")),
             acceptReaderVisual: chunk =>
             {
                 ReaderContextSourceLease lease = sourceLease
@@ -1634,7 +1640,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 ReaderRealtimeOutputProtocol.AckType or
                 ReplicationCommandProtocol.CommandType or
                 ReplicationCommandProtocol.ChunkType or
-                ReplicationCommandProtocol.DigestQueryType;
+                ReplicationCommandProtocol.DigestQueryType or
+                ReplicationCommandProtocol.NotificationsQueryType;
         }
         catch (JsonException)
         {

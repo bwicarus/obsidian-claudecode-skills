@@ -1248,6 +1248,7 @@ internal sealed class DirectBridgeProtocolSession
         CancellationToken,
         Task<ReplicationCommandIntakeReceipt>> _acceptReplicationCommand;
     private readonly Func<string, object> _queryReplicationDigests;
+    private readonly Func<object> _queryReplicationNotifications;
     private readonly ReplicationChunkAssembler _replicationChunkAssembler = new();
     private readonly Action<string> _contextDeliveryModeChanged;
     private readonly Func<DateTimeOffset> _utcNow;
@@ -1288,6 +1289,7 @@ internal sealed class DirectBridgeProtocolSession
             Task<ReplicationCommandIntakeReceipt>>?
             acceptReplicationCommand = null,
         Func<string, object>? queryReplicationDigests = null,
+        Func<object>? queryReplicationNotifications = null,
         Action<string>? contextDeliveryModeChanged = null,
         IReaderDictionaryFallback? dictionaryFallback = null,
         IReaderLocalAnkiWriter? localAnkiWriter = null,
@@ -1343,6 +1345,12 @@ internal sealed class DirectBridgeProtocolSession
                 "BW_REPLICATION_DIGESTS_UNAVAILABLE",
                 "复制摘要查询尚未接线",
                 retryable: true));
+        _queryReplicationNotifications = queryReplicationNotifications
+            ?? (static () => new
+            {
+                contract = "reader-notifications/1",
+                items = Array.Empty<object>(),
+            });
         _contextDeliveryModeChanged = contextDeliveryModeChanged
             ?? (_ => { });
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
@@ -1485,6 +1493,9 @@ internal sealed class DirectBridgeProtocolSession
                     break;
                 case ReplicationCommandProtocol.DigestQueryType:
                     payload = HandleReplicationDigestQuery(message);
+                    break;
+                case ReplicationCommandProtocol.NotificationsQueryType:
+                    payload = HandleReplicationNotificationsQuery(message);
                     break;
                 case ReplicationCommandProtocol.ChunkType:
                     payload = await HandleReplicationChunkAsync(
@@ -2249,6 +2260,29 @@ internal sealed class DirectBridgeProtocolSession
                 "replicationBookId 形状非法");
         }
         return _queryReplicationDigests(replicationBookId);
+    }
+
+    private object HandleReplicationNotificationsQuery(JsonElement message)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "sessionId");
+        RequireAuthenticated();
+        if (
+            RequireContextDeliveryMode()
+                != DirectContextDeliveryMode.SnapshotMcp
+            || _phase != DirectProtocolPhase.ContextOnly
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_REPLICATION_COMMAND_CONTEXT_ONLY_REQUIRED",
+                "通知查询只允许在纯上下文连接中进行");
+        }
+        RequireContextOnlySession(RequireSafeId(message, "sessionId"));
+        return _queryReplicationNotifications();
     }
 
     private object HandleStatus(JsonElement message)

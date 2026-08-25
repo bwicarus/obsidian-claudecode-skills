@@ -7831,6 +7831,30 @@
         ['POST', 'PATCH', 'DELETE'].indexOf(method) >= 0) {
       return localPDFInsertPage(input, init, url, method);
     }
+    if (path === '/pdf/api/notification-action' && method === 'POST') {
+      // 侧边栏通知 tab 的操作出口:入队复制命令流回 Windows(通知真值
+      // 在那边)。UI 乐观移除,at-least-once + 服务端幂等保证最终一致。
+      return localJSONRoute(function () {
+        return requestObject(
+          input, init, ['action', 'id', 'note'], ['action', 'id'],
+          'BW_LOCAL_NOTIFICATION_ACTION', 16 * 1024
+        ).then(function (body) {
+          if (['ack', 'resolve', 'cancel'].indexOf(body.action) < 0 ||
+              typeof body.id !== 'string' || !/^ntf-[a-f0-9]{12}$/.test(body.id)) {
+            throw new RuntimeError(
+              '通知操作字段无效', 'BW_LOCAL_NOTIFICATION_ACTION'
+            );
+          }
+          var command = { action: body.action, id: body.id };
+          if (typeof body.note === 'string' && body.note) {
+            command.note = body.note.slice(0, 400);
+          }
+          return enqueueReplicationCommand(
+            '/replication/notification', 'POST', command
+          ).then(function () { return { ok: true }; });
+        });
+      }, 'BW_LOCAL_NOTIFICATION_ACTION');
+    }
     if (path === '/pdf/api/device-location-pref') {
       // 活动账本「地点」维度的开关(设置面板用)。真正的权限申请与定位
       // 在 Swift(ReaderLocationProvider);这里只是把开关转发过桥并回读

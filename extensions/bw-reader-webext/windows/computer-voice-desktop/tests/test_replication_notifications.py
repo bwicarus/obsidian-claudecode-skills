@@ -189,3 +189,59 @@ class StandingTodoTests(unittest.TestCase):
                          "无 expires 的持续待办永不自动过期")
         self.store.resolve(item["id"], by="ai", note="用户说倒完了")
         self.assertEqual(self.store.visible_items(), [])
+
+
+class NotificationCommandTests(unittest.TestCase):
+    """侧边栏通知 tab 的操作经复制命令流回 Windows。"""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        from replication_apply import (
+            ReplicationCommandApplier, ReplicationDataStore,
+        )
+        from replication_command_ledger import ReplicationCommandLedger
+        self.ledger = ReplicationCommandLedger(
+            self.root / "replication-command-ledger.sqlite3")
+        self.applier = ReplicationCommandApplier(
+            self.ledger,
+            ReplicationDataStore(self.root / "replication-data"),
+            self.root / "state.json", self.root / "dead-letter.jsonl",
+        )
+        self.store = NotificationStore(self.root)
+
+    def tearDown(self) -> None:
+        self.ledger.close()
+        self.temporary.cleanup()
+
+    def _cmd(self, suffix: str, body: dict) -> dict:
+        return {
+            "contract": "replication-command/1",
+            "deviceId": "native-app-v1-" + "a" * 32,
+            "replicationBookId": "repbook-" + "c" * 32,
+            "actor": "user",
+            "op": {"mutationId": "mut-v2-" + suffix * 32,
+                   "url": "/replication/notification", "method": "POST",
+                   "body": body},
+        }
+
+    def test_user_resolve_via_command_stream(self) -> None:
+        item = self.store.create(kind="user-todo", title="倒垃圾")
+        self.ledger.append(self._cmd("1", {
+            "action": "resolve", "id": item["id"], "note": "倒完了"}))
+        report = self.applier.apply_pending()
+        self.assertEqual(report["deadLetters"], [])
+        self.assertEqual(self.store.open_items(), [])
+        archived = json.loads(
+            (self.root / "notifications-archive.jsonl")
+            .read_text("utf-8").splitlines()[-1])
+        self.assertEqual(archived["resolvedBy"], "user",
+                         "App 侧操作 by=user —— 三来源齐全")
+        self.assertEqual(archived["resolutionNote"], "倒完了")
+
+    def test_replayed_action_on_gone_notification_is_idempotent(self) -> None:
+        self.ledger.append(self._cmd("2", {
+            "action": "ack", "id": "ntf-000000000000"}))
+        report = self.applier.apply_pending()
+        self.assertEqual(report["deadLetters"], [],
+                         "已消失的通知按幂等成功,不死信")
