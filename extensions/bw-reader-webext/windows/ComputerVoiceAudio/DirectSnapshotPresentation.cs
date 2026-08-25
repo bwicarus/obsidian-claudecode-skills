@@ -1782,6 +1782,14 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   font-size: .78rem; word-break: break-all; }
                 .act-omitted { color: #8fa5c8; font-size: .8rem;
                   padding-top: .4rem; }
+                .act-bar { display: flex; align-items: center; gap: 1rem;
+                  justify-content: space-between; flex-wrap: wrap;
+                  margin-bottom: .6rem; }
+                .act-pre { background: #0d1428; border: 1px solid #1d2a45;
+                  border-radius: 10px; padding: .8rem 1rem;
+                  font-size: .82rem; line-height: 1.6; overflow-x: auto;
+                  white-space: pre-wrap; }
+                .act-pre[hidden], .act-raw-block[hidden] { display: none; }
                 a { color: #8ec5ff; }
                 .status { display: flex; gap: .55rem; align-items: center;
                   flex-wrap: wrap; justify-content: flex-end; }
@@ -1875,8 +1883,20 @@ internal sealed class DirectSnapshotViewer : IDisposable
               <main id="view-activity" hidden>
                 <section class="wide">
                   <h2>学习活动（最近 7 天）</h2>
-                  <div id="act-stamp" class="muted" style="margin-bottom:.6rem"></div>
+                  <div class="act-bar">
+                    <div id="act-stamp" class="muted"></div>
+                    <nav class="tabs">
+                      <button type="button" id="act-sub-derived"
+                              class="tab on">处理后</button>
+                      <button type="button" id="act-sub-ai"
+                              class="tab">AI 读取版</button>
+                      <button type="button" id="act-sub-raw"
+                              class="tab">元数据</button>
+                    </nav>
+                  </div>
                   <div id="act-main">读取中…</div>
+                  <pre id="act-ai" class="act-pre" hidden>读取中…</pre>
+                  <div id="act-raw" hidden>读取中…</div>
                 </section>
               </main>
               <main id="view-snapshot">
@@ -1955,6 +1975,8 @@ internal sealed class DirectSnapshotViewer : IDisposable
                       + new Date(report.generatedAtUtcMs).toLocaleString();
                     box.replaceChildren();
                     const books = report.books || [];
+                    renderActivityAi(report);
+                    renderActivityRaw(report);
                     if (!books.length) {
                       box.textContent = "这段时间没有学习活动记录。";
                       return;
@@ -2000,6 +2022,80 @@ internal sealed class DirectSnapshotViewer : IDisposable
                     box.textContent = "报告暂不可读 —— ReaderPC 的下一轮对账"
                       + "（约 1 分钟内）会生成它，稍后切回来。";
                   });
+                }
+                // 三层子视图(2026-08-25 用户:分别显示元数据/处理后/AI 读取版)。
+                // aiText 由 Python render_text 生成,与 CLI/AI 上下文逐字同源;
+                // 元数据是采集层原样但有上限(原始层永不整体外泄)。
+                const actSubButtons = {
+                  derived: byId("act-sub-derived"),
+                  ai: byId("act-sub-ai"),
+                  raw: byId("act-sub-raw"),
+                };
+                const actSubViews = {
+                  derived: byId("act-main"),
+                  ai: byId("act-ai"),
+                  raw: byId("act-raw"),
+                };
+                function selectActSub(which) {
+                  for (const key of Object.keys(actSubButtons)) {
+                    actSubButtons[key].classList.toggle("on", key === which);
+                    actSubViews[key].hidden = key !== which;
+                  }
+                }
+                for (const key of Object.keys(actSubButtons)) {
+                  actSubButtons[key].addEventListener(
+                    "click", () => selectActSub(key));
+                }
+                function renderActivityAi(report) {
+                  byId("act-ai").textContent =
+                    report.aiText || "（报告里没有 AI 读取版）";
+                }
+                function renderActivityRaw(report) {
+                  const box = byId("act-raw");
+                  box.replaceChildren();
+                  const rawData = report.raw || {};
+                  const commands = rawData.commands || [];
+                  const dwell = rawData.dwell || [];
+                  box.appendChild(actEl("div", "act-meta",
+                    `采集层原样（各最多 ${rawData.limit ?? 40} 条，` +
+                    `更早去终端看账本/jsonl 本体）`));
+                  const cmdTitle = actEl("h3", "", `复制命令账本（${commands.length} 条）`);
+                  box.appendChild(cmdTitle);
+                  const cmdTable = actEl("table", "act-table");
+                  for (const c of commands) {
+                    const row = actEl("tr");
+                    row.appendChild(actEl("td", "act-t",
+                      new Date(c.atUtcMs).toLocaleString("zh-CN",
+                        { month: "2-digit", day: "2-digit",
+                          hour: "2-digit", minute: "2-digit" })));
+                    row.appendChild(actEl("td", "", `${c.method} ${c.url}`));
+                    row.appendChild(actEl("td", "act-id",
+                      `${c.actor} · ${c.mutationId}`));
+                    cmdTable.appendChild(row);
+                  }
+                  box.appendChild(cmdTable);
+                  const dwellTitle = actEl("h3", "",
+                    `读页停留批（${dwell.length} 条）`);
+                  box.appendChild(dwellTitle);
+                  if (!dwell.length) {
+                    box.appendChild(actEl("div", "act-meta",
+                      "还没有 dwell 批到达 Windows（要最新 App 构建 + 开始阅读）。"));
+                  } else {
+                    const dwellTable = actEl("table", "act-table");
+                    for (const d of dwell) {
+                      const row = actEl("tr");
+                      row.appendChild(actEl("td", "act-t",
+                        new Date(d.atUtcMs).toLocaleString("zh-CN",
+                          { month: "2-digit", day: "2-digit",
+                            hour: "2-digit", minute: "2-digit" })));
+                      row.appendChild(actEl("td", "",
+                        `${Math.round(d.secs)} 秒 · ${d.client || "?"}` +
+                        (d.place ? ` · 📍${d.place}` : "")));
+                      row.appendChild(actEl("td", "act-id", d.book));
+                      dwellTable.appendChild(row);
+                    }
+                    box.appendChild(dwellTable);
+                  }
                 }
                 function selectTab(activity) {
                   tabSnapshot.classList.toggle("on", !activity);

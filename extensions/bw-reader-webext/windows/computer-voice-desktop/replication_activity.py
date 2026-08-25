@@ -236,6 +236,89 @@ def summarize(
     }
 
 
+def render_text(report: dict) -> str:
+    """把 summarize 输出格式化成 CLI/AI 看到的文本。
+
+    **这就是 AI 读取到的版本** —— CLI main() 与看板"AI 读取版"面板都
+    调这里，三处（终端/看板/AI 上下文）逐字一致，杜绝"看板显示的与
+    AI 拿到的对不上"这类排查黑洞。
+    """
+    lines: list[str] = []
+    lines.append("学习活动  最近 %.1f 天" % report["sinceDays"])
+    if not report["books"]:
+        lines.append("  （这段时间没有记录）")
+        return "\n".join(lines)
+    for book in report["books"]:
+        lines.append("  《%s》 阅读 %.1f 分钟" % (book["book"], book["minutes"]))
+        for place, secs in book["places"].items():
+            lines.append("    📍 %s  %.1f 分钟" % (place, secs / 60))
+        if book.get("mutationsOmitted"):
+            lines.append("    …更早还有 %d 条（--detail 或调大 --limit 查看）"
+                         % book["mutationsOmitted"])
+        for item in book["mutations"]:
+            stamp = time.strftime(
+                "%m-%d %H:%M", time.localtime(item["atUtcMs"] / 1000)
+            )
+            actor = "" if item["actor"] == "user" else "（%s）" % item["actor"]
+            if "count" in item:
+                op = "/".join(item["ops"])
+                times = ("×%d" % item["count"]) if item["count"] > 1 else ""
+                lines.append("    %s %s%s%s%s %s" % (
+                    stamp, op, item["kind"], times, actor, item["itemId"],
+                ))
+            else:
+                lines.append("    %s %s%s%s %s" % (
+                    stamp, item["op"], item["kind"], actor, item["itemId"],
+                ))
+    return "\n".join(lines)
+
+
+def raw_tail(root: Path, since_days: float, limit: int = 40) -> dict:
+    """元数据面板的原始记录尾巴。
+
+    看板"元数据"层给用户看**采集层原样**（账本命令 + dwell 批），但
+    有上限 —— 原始层永不整体外泄的纪律对页面同样成立；看更早的去
+    终端（sqlite3 / jsonl 本体）。
+    """
+    since_ms = int((time.time() - since_days * 86400) * 1000)
+    commands: list[dict] = []
+    path = root / LEDGER_FILE_NAME
+    if path.is_file():
+        connection = sqlite3.connect(
+            "file:" + str(path).replace("\\", "/") + "?mode=ro", uri=True
+        )
+        try:
+            rows = connection.execute(
+                "SELECT received_at_utc_ms, replication_book_id, actor,"
+                " url, method, mutation_id FROM commands"
+                " WHERE received_at_utc_ms >= ? ORDER BY cursor DESC LIMIT ?",
+                (since_ms, limit),
+            ).fetchall()
+        finally:
+            connection.close()
+        for received, book, actor, url, method, mutation in rows:
+            commands.append({
+                "atUtcMs": int(received), "book": str(book),
+                "actor": str(actor), "url": str(url),
+                "method": str(method), "mutationId": str(mutation),
+            })
+    dwell_rows = load_dwell(root, since_ms)
+    dwell_rows.sort(key=lambda item: -item["atUtcMs"])
+    return {
+        "limit": limit,
+        "commands": commands,
+        "dwell": dwell_rows[:limit],
+    }
+
+
+def export_report(root: Path, since_days: float = 7.0) -> dict:
+    """看板三层一次导出：summary(处理后) / aiText(AI 读取版) / raw(元数据)。"""
+    report = summarize(root, since_days)
+    report["aiText"] = render_text(report)
+    report["raw"] = raw_tail(root, since_days)
+    return report
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=None,
@@ -256,6 +339,8 @@ def main() -> int:
     if args.json:
         print(json.dumps(report, ensure_ascii=False))
         return 0
+    print(render_text(report))
+    return 0
     print("学习活动  最近 %.1f 天" % report["sinceDays"])
     if not report["books"]:
         print("  （这段时间没有记录）")

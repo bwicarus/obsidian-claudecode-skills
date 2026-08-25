@@ -670,7 +670,7 @@ def run_once(
                 import replication_activity
                 _atomic_write_json(
                     digests_path.parent / "activity-report.json",
-                    replication_activity.summarize(local_root, 7.0),
+                    replication_activity.export_report(local_root, 7.0),
                 )
             except Exception as activity_error:  # noqa: BLE001
                 status["activityReportError"] = str(activity_error)[:500]
