@@ -62,6 +62,18 @@
 >   server 生命周期在纯本地只读场景没有回报)。发现层在
 >   `~/.codex/AGENTS.md`;CLI 稳定路径 `%LOCALAPPDATA%/BWReader/
 >   replication_activity.py`(打包器随每次安装刷新,路径跨版本不变)。
+> - **通知系统（2026-08-25 用户设计，同日全栈落地）**：
+>   `replication_notifications.py`（Windows）—— pending→acknowledged
+>   （AI 显式 ack）→resolved（by=auto/ai，归档 jsonl 入库）；autoResolve
+>   条件（item-mutated/card-reviewed）由 ReaderPC 对账循环每轮检测；
+>   复习到期生产者**全在 Windows**（副本卡片自带 _next/_st，due>0 建
+>   通知、dedupe 按日、due==0 自动入库）；复习评分经 runtime 旁路进账本
+>   （App 构建）。快照读取投影合并 `notifications` 节（viewer+MCP 每次
+>   读取刷新）；recentActions 改由账本近 30 分钟条目派生（无近期条目时
+>   保留桥内原值兜底）。AI 端口=CLI 两动作（ack/resolve，稳定路径
+>   `%LOCALAPPDATA%/BWReader/replication_notifications.py`）；AGENTS 已
+>   写纪律与「与 Codex 原生定时任务的分工」准则（事实驱动/需存活审计
+>   走这套；对话短时效走原生）。
 > - §6 压缩策略 → 你说「按你的建议」，即**冷归档不删除**，见上面 §3.1。
 > - 本文件此前只在分支 `codex/reader-tools-release-20260815` 上，
 >   当前树查不到 —— 已搬过来。
