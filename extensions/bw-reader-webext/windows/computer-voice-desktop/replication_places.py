@@ -31,6 +31,10 @@ from pathlib import Path
 from typing import Any
 
 ALIASES_FILE_NAME = "place-aliases.json"
+PENDING_NAME_FILE_NAME = "place-pending-name.json"
+PENDING_NAME_TTL_MS = 2 * 3600 * 1000   # 「现在这里是X」的语义窗口:
+                                        # 过时不绑,免得明天在公司的首条
+                                        # 定位被错误命名成家。
 CURRENT_PLACE_FILE_NAME = "current-place.json"
 ALIASES_CONTRACT = "reader-place-aliases/1"
 CLUSTER_RADIUS_M = 120.0     # 微小位置变化不分裂成多个位置
@@ -173,6 +177,44 @@ def resolve_alias(
     return best[1] if best else None
 
 
+def set_pending_name(root: Path, name: str) -> None:
+    """挂起待命名：下一条到达的定位自动命名为 name（TTL 内）。
+
+    场景：用户说「现在这个地方是我家」而定位数据还没流进来 ——
+    挂起后首条定位一到（run_once 每轮消费）即自动绑定。
+    """
+    path = root / PENDING_NAME_FILE_NAME
+    path.write_text(json.dumps({
+        "name": name[:80],
+        "createdAtUtcMs": int(time.time() * 1000),
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _consume_pending_name(root: Path, lat: float, lon: float) -> str | None:
+    path = root / PENDING_NAME_FILE_NAME
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    created = int(value.get("createdAtUtcMs") or 0)
+    name = str(value.get("name") or "")
+    path.unlink(missing_ok=True)
+    if not name or int(time.time() * 1000) - created > PENDING_NAME_TTL_MS:
+        return None   # 过时:丢弃并出声由调用方处理(绝不错绑)
+    save_alias(root, name, lat, lon)
+    return name
+
+
+def name_latest(root: Path, name: str) -> dict | None:
+    """把最近一条定位命名（「现在这里是X」且数据已在时的直接路径）。"""
+    rows = _load_located_dwell(root)
+    if not rows:
+        return None
+    latest = max(rows, key=lambda r: r["atUtcMs"])
+    save_alias(root, name, latest["lat"], latest["lon"])
+    return latest
+
+
 def export_current_place(root: Path, export_path: Path) -> dict | None:
     """最近 30 分钟内的位置 → 别名优先 → 导出给桥的快照 join。
 
@@ -190,6 +232,19 @@ def export_current_place(root: Path, export_path: Path) -> dict | None:
             pass
         return None
     latest = max(fresh, key=lambda r: r["atUtcMs"])
+    consumed = _consume_pending_name(root, latest["lat"], latest["lon"])
+    if consumed:
+        try:
+            import replication_notifications
+            replication_notifications.NotificationStore(root).create(
+                kind="place-named",
+                title="已把当前位置命名为「%s」" % consumed,
+                source="place-pending",
+                dedupe_key="place-named:" + consumed,
+                expires_at_ms=int(time.time() * 1000) + 24 * 3600 * 1000,
+            )
+        except Exception:
+            pass
     value = {
         "contract": "reader-current-place/1",
         "lat": round(latest["lat"], 6),
@@ -215,9 +270,31 @@ def main() -> int:
     name.add_argument("index", type=int)
     name.add_argument("alias")
     sub.add_parser("aliases", help="看已命名的位置")
+    latest = sub.add_parser(
+        "name-latest", help="把最近一条定位命名（「现在这里是X」）")
+    latest.add_argument("alias")
+    nxt = sub.add_parser(
+        "name-next",
+        help="挂起待命名：下一条定位到达自动绑定（2 小时内有效；"
+             "定位还没流进来时用这个）")
+    nxt.add_argument("alias")
     args = parser.parse_args()
     root = args.root or default_root()
 
+    if args.command == "name-latest":
+        hit = name_latest(root, args.alias)
+        if hit is None:
+            print("还没有定位记录 —— 用 name-next 挂起，"
+                  "首条定位到达后自动命名。")
+            return 2
+        print("已命名：%s → (%.5f, %.5f)" % (
+            args.alias, hit["lat"], hit["lon"]))
+        return 0
+    if args.command == "name-next":
+        set_pending_name(root, args.alias)
+        print("已挂起：下一条定位（2 小时内）到达后自动命名为「%s」，"
+              "完成时会出一条通知。" % args.alias)
+        return 0
     if args.command == "aliases":
         aliases = load_aliases(root)
         if not aliases:

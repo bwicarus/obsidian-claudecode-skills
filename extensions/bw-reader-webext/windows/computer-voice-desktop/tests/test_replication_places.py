@@ -92,3 +92,55 @@ class PlacesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManualNamingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.book = self.root / "replication-data" / ("repbook-" + "a" * 32)
+        self.book.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_name_latest(self) -> None:
+        now = int(time.time() * 1000)
+        (self.book / "activity-dwell.jsonl").write_text(
+            _dwell_line(now - 1000, 35.0, 139.0) + "\n", "utf-8")
+        hit = replication_places.name_latest(self.root, "家")
+        self.assertIsNotNone(hit)
+        self.assertEqual(
+            replication_places.resolve_alias(self.root, 35.0, 139.0), "家")
+
+    def test_pending_name_binds_first_arrival_within_ttl(self) -> None:
+        replication_places.set_pending_name(self.root, "家")
+        now = int(time.time() * 1000)
+        (self.book / "activity-dwell.jsonl").write_text(
+            _dwell_line(now - 1000, 35.0, 139.0) + "\n", "utf-8")
+        export = self.root / "runtime" / "current-place.json"
+        value = replication_places.export_current_place(self.root, export)
+        self.assertEqual(value["alias"], "家", "首条定位自动绑定")
+        self.assertFalse(
+            (self.root / "place-pending-name.json").exists(),
+            "挂起标记消费即删")
+        # 完成通知已生成
+        notes = json.loads(
+            (self.root / "notifications.json").read_text("utf-8"))
+        self.assertEqual(notes["items"][0]["kind"], "place-named")
+
+    def test_stale_pending_never_binds(self) -> None:
+        import replication_places as rp
+        (self.root / rp.PENDING_NAME_FILE_NAME).write_text(json.dumps({
+            "name": "家",
+            "createdAtUtcMs": int(time.time() * 1000)
+            - rp.PENDING_NAME_TTL_MS - 1,
+        }), "utf-8")
+        now = int(time.time() * 1000)
+        (self.book / "activity-dwell.jsonl").write_text(
+            _dwell_line(now - 1000, 35.0, 139.0) + "\n", "utf-8")
+        export = self.root / "runtime" / "current-place.json"
+        value = replication_places.export_current_place(self.root, export)
+        self.assertIsNone(value["alias"], "过时挂起绝不错绑")
+        self.assertFalse(
+            (self.root / rp.PENDING_NAME_FILE_NAME).exists())
