@@ -2555,6 +2555,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         if let latest = ReaderLocationProvider.shared.latest {
             pushDeviceLocationToPage(latest)
         }
+        // 首次接线顺带取一次定位:开关已开而本会话还没定位过的场景
+        // (刚打开 App 直接读书)不该等到下一次后台往返。
+        ReaderLocationProvider.shared.refresh()
     }
 
     private func pushDeviceLocationToPage(_ snapshot: [String: Any]) {
@@ -2573,11 +2576,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     ) {
         let wasForeground = readerForeground
         readerForeground = foreground
+        if foreground {
+            // 接线必须无条件(幂等):readerForeground 初始值就是 true,
+            // 依赖"后台→前台转换"意味着首启动直读的会话永远接不上线,
+            // 位置推不进页面、dwell 永远不带 loc(2026-08-25 实锤:设置
+            // 显示定位正常而快照始终未知)。
+            wireDeviceLocationPushIfNeeded()
+        }
         if foreground, !wasForeground {
             // 地点维度:进前台取一次定位(开关关着时 refresh 是空操作)。
-            // 快照经 onUpdate 推 window.__BW_DEVICE_LOCATION__,dwell 的
-            // beacon flush 才能同步拿到。
-            wireDeviceLocationPushIfNeeded()
             ReaderLocationProvider.shared.refresh()
         }
         if foreground, !wasForeground, isLocalRuntimeURL(webView.url) {
