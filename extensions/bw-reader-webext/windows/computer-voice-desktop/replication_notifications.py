@@ -113,6 +113,7 @@ class NotificationStore:
         auto_resolve: dict[str, Any] | None = None,
         expires_at_ms: int | None = None,
         dedupe_key: str | None = None,
+        activate_at_ms: int | None = None,
     ) -> dict[str, Any]:
         if not kind or len(kind) > 40 or not title:
             raise NotificationError("通知 kind/title 非法")
@@ -145,6 +146,11 @@ class NotificationStore:
             item["expiresAtUtcMs"] = int(expires_at_ms)
         if dedupe_key:
             item["dedupeKey"] = dedupe_key[:120]
+        if activate_at_ms is not None:
+            # 定时生效(2026-08-25 用户:「某一天通知我倒垃圾」是持续待办,
+            # 不是时间点提醒):到时之前不出现在快照/list,到时后自动可见
+            # 并**保持到 resolve** —— 这正是 Codex 原生定时任务做不到的。
+            item["activateAtUtcMs"] = int(activate_at_ms)
         items.append(item)
         self._save(items)
         return item
@@ -234,9 +240,18 @@ class NotificationStore:
     def open_items(self) -> list[dict[str, Any]]:
         return self._load()
 
+    def visible_items(self) -> list[dict[str, Any]]:
+        """快照/list 看到的:已生效的 open 通知(未到 activateAt 的还蛰伏着)。"""
+        now = _now_ms()
+        return [
+            item for item in self._load()
+            if item.get("activateAtUtcMs") is None
+            or item["activateAtUtcMs"] <= now
+        ]
+
     def export_open(self, export_path: Path) -> None:
-        """给桥的快照 join 用：open 通知的只读投影（上限内全量）。"""
-        items = self._load()
+        """给桥的快照 join 用：**已生效**通知的只读投影。"""
+        items = self.visible_items()
         _atomic_write_json(export_path, {
             "contract": OPEN_CONTRACT,
             "exportedAtUtcMs": _now_ms(),
@@ -350,6 +365,10 @@ def main() -> int:
     create.add_argument("--source", default="cli")
     create.add_argument("--dedupe-key", default=None)
     create.add_argument("--expires-hours", type=float, default=None)
+    create.add_argument("--activate-date", default=None,
+                        help="生效日期 YYYY-MM-DD（当天 00:00 起可见并保持到"
+                             " resolve；持续待办用这个，不用定时任务）")
+    create.add_argument("--activate-in-hours", type=float, default=None)
     create.add_argument("--auto-item", default=None,
                         help="itemId：该条目在账本出现操作即自动入库")
     create.add_argument("--auto-card", default=None,
@@ -359,7 +378,7 @@ def main() -> int:
 
     try:
         if args.command == "list":
-            print(render_list(store.open_items()))
+            print(render_list(store.visible_items()))
         elif args.command == "ack":
             item = store.acknowledge(args.id)
             print("已获取：%s（%s）" % (item["id"], item["title"]))
@@ -376,10 +395,18 @@ def main() -> int:
                 _now_ms() + int(args.expires_hours * 3600 * 1000)
                 if args.expires_hours else None
             )
+            activate = None
+            if args.activate_date:
+                activate = int(time.mktime(time.strptime(
+                    args.activate_date, "%Y-%m-%d"))) * 1000
+            elif args.activate_in_hours:
+                activate = _now_ms() + int(
+                    args.activate_in_hours * 3600 * 1000)
             item = store.create(
                 kind=args.kind, title=args.title, body=args.body,
                 source=args.source, auto_resolve=auto,
                 expires_at_ms=expires, dedupe_key=args.dedupe_key,
+                activate_at_ms=activate,
             )
             print("已创建：%s" % item["id"])
     except NotificationError as error:

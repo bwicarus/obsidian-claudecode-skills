@@ -153,3 +153,39 @@ class ReviewProducerTests(unittest.TestCase):
         ])
         due, _new = count_due_cards(self.root)
         self.assertEqual(due, 1, "秒级 _next 也判到期")
+
+
+class StandingTodoTests(unittest.TestCase):
+    """持续待办(2026-08-25 用户洞察):定时生效后保持到 resolve。"""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.store = NotificationStore(self.root)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_dormant_until_activation_then_persists(self) -> None:
+        future = int(time.time() * 1000) + 3600_000
+        item = self.store.create(
+            kind="user-todo", title="倒垃圾",
+            source="ai-on-user-request", activate_at_ms=future)
+        self.assertEqual(self.store.visible_items(), [],
+                         "生效前不可见(不进快照/list)")
+        self.assertEqual(len(self.store.open_items()), 1,
+                         "但在 open 表里活着(维护循环能看到)")
+        export = self.root / "notifications-open.json"
+        self.store.export_open(export)
+        self.assertEqual(
+            json.loads(export.read_text("utf-8"))["items"], [],
+            "导出同样过滤蛰伏项")
+        # 把生效时间拨到过去 → 可见,且没有任何自动消失:保持到 resolve
+        items = self.store.open_items()
+        items[0]["activateAtUtcMs"] = int(time.time() * 1000) - 1
+        self.store._save(items)
+        self.assertEqual(len(self.store.visible_items()), 1)
+        self.assertEqual(self.store.expire_due(), 0,
+                         "无 expires 的持续待办永不自动过期")
+        self.store.resolve(item["id"], by="ai", note="用户说倒完了")
+        self.assertEqual(self.store.visible_items(), [])
