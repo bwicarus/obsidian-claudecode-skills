@@ -70,6 +70,13 @@
       }
     }
     const body = JSON.stringify(payload);
+    // 活动记录旁路(2026-08-25 方向:记录的家在 Windows):同一份 flush 批
+    // 经 runtime 进复制命令流。App 内才有 runtime;失败静默 —— 旁路不拖主路。
+    try {
+      if (window.BWReaderRuntime && window.BWReaderRuntime.reportActivity) {
+        window.BWReaderRuntime.reportActivity(payload);
+      }
+    } catch (e) {}
     try {
       if (useBeacon && navigator.sendBeacon) {
         // The native App owns this same-origin route through a synchronous

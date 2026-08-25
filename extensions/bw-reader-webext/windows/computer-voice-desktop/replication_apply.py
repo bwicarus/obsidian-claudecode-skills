@@ -113,6 +113,9 @@ _PAIR_SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 # 诊断留痕（silent-failure 规则5）：App 无控制台，改页失败等错误只在 UI
 # 一闪而过 —— App 把错误文本作为诊断命令发来，这里持久 append，远程可查。
 DIAGNOSTIC_URL = "/replication/diagnostic"
+ACTIVITY_URL = "/replication/activity"
+ACTIVITY_FILE_NAME = "activity-dwell.jsonl"
+MAX_ACTIVITY_ENTRIES_PER_COMMAND = 200
 DIAGNOSTICS_FILE_NAME = "diagnostics.json"
 MAX_DIAGNOSTIC_ENTRIES = 200
 
@@ -433,6 +436,39 @@ class ReplicationCommandApplier:
             data["tombstones"].pop(item_id, None)
         self._data.save(entry.replication_book_id, domain, data)
 
+    def _apply_activity(self, entry: LedgerEntry) -> None:
+        """活动记录(dwell 等)追加进本书的 activity jsonl。
+
+        方向(2026-08-25 用户拍板):记录的家在 Windows,AI 贴数据零传输。
+        这是**追加式原始层**(evidence-quality:采集不可重来),查询/汇总
+        由 replication_activity.py 派生。.jsonl 后缀刻意不同于数据域的
+        .json —— digests 导出按 *.json 扫,天然不相撞。
+        """
+        body = entry.body
+        if (
+            not isinstance(body, dict)
+            or body.get("kind") != "dwell"
+            or not isinstance(body.get("entries"), list)
+            or len(body["entries"]) > MAX_ACTIVITY_ENTRIES_PER_COMMAND
+        ):
+            raise ReplicationApplyError("活动命令 body 非法")
+        allowed = {"kind", "file", "client", "entries", "loc", "at"}
+        if not set(body.keys()) <= allowed:
+            raise ReplicationApplyError("活动命令 body 字段不符")
+        record = {
+            "receivedAtUtcMs": entry.received_at_utc_ms,
+            "mutationId": entry.mutation_id,
+            "deviceId": entry.device_id,
+            "body": body,
+        }
+        path = (
+            self._data.directory / entry.replication_book_id
+            / ACTIVITY_FILE_NAME
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
     def _apply_diagnostic(self, entry: LedgerEntry) -> None:
         body = entry.body
         if not isinstance(body, dict) or not isinstance(body.get("kind"), str):
@@ -503,6 +539,8 @@ class ReplicationCommandApplier:
                     special = self._apply_resync
                 elif entry.url == DIAGNOSTIC_URL and entry.method == "POST":
                     special = self._apply_diagnostic
+                elif entry.url == ACTIVITY_URL and entry.method == "POST":
+                    special = self._apply_activity
                 if special is not None:
                     try:
                         special(entry)

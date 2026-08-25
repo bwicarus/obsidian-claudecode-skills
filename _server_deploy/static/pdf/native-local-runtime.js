@@ -1377,6 +1377,55 @@
     };
   }
 
+  // 活动记录旁路(方向 2026-08-25:记录的家在 Windows)。30-dwell 的 flush
+  // 在发 Pi 的同时调这里,把同一份 dwell 批送进复制命令流,落到 Windows 的
+  // activity jsonl。白名单重建;任何失败都吞掉 —— 记录是旁路,绝不拖累
+  // 上报本体,更不拖累阅读。
+  var ACTIVITY_URL = '/replication/activity';
+  function reportActivity(payload) {
+    try {
+      if (!payload || typeof payload !== 'object') return;
+      var entries = Array.isArray(payload.dwell) ? payload.dwell : [];
+      var clean = [];
+      for (var i = 0; i < entries.length && clean.length < 200; i++) {
+        var it = entries[i];
+        if (!it || typeof it !== 'object') continue;
+        var secs = Number(it.secs);
+        if (!Number.isFinite(secs) || secs <= 0) continue;
+        var row = { secs: Math.min(86400, Math.round(secs)) };
+        if (typeof it.upage === 'string' && it.upage) {
+          row.upage = it.upage.slice(0, 40);
+        } else if (Number.isInteger(Number(it.page)) && Number(it.page) > 0) {
+          row.page = Number(it.page);
+        } else continue;
+        clean.push(row);
+      }
+      if (!clean.length) return;
+      var body = {
+        kind: 'dwell',
+        file: localFileRef(),
+        entries: clean,
+        at: nowSeconds()
+      };
+      var client = payload.client;
+      if (client === 'native' || client === 'extension' || client === 'pwa') {
+        body.client = client;
+      }
+      var loc = payload.loc;
+      if (loc && typeof loc === 'object' &&
+          Number.isFinite(loc.lat) && Number.isFinite(loc.lon) &&
+          Number.isFinite(loc.at)) {
+        body.loc = { lat: loc.lat, lon: loc.lon, at: Math.floor(loc.at) };
+        if (Number.isFinite(loc.acc)) body.loc.acc = loc.acc;
+        if (typeof loc.name === 'string' && loc.name) {
+          body.loc.name = loc.name.slice(0, 80);
+        }
+      }
+      enqueueReplicationCommand(ACTIVITY_URL, 'POST', body);
+    } catch (_) {}
+  }
+  runtimeRoot.reportActivity = reportActivity;
+
   // 全文件 contentSha256:两节点复制的内容会合材料(App 重装重铸 repbook
   // 后,服务端靠它把新身份接回旧数据)。任何失败都折成 null —— 会合材料
   // 是增强,v1 公告本来就不带;它坏了不该拦配对本身。

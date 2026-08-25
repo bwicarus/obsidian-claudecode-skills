@@ -552,6 +552,13 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
   Pi 的存在主要是两件事 —— ① 把 **CLI 调用抽象成一种 AI 的 API**（Claude/Codex 包成
   HTTP 服务）；② 做**设备间的同步中继**。它**不是**阅读器的数据权威，也不是业务逻辑
   所在地：高亮/笔记/词组/复习状态这些的权威在 **App 本地**，Pi 只在中继时经手。
+  **（2026-08-25 用户再拍板，方向进一步收敛）：目标形态 = Windows 服务器端 +
+  App 等前端的结合，Pi 已基本脱离系统。**新的服务端能力（活动记录派生层、
+  AI 查询工具等）一律放 **Windows（ReaderPC/桥）** —— AI 就跑在 Windows，
+  贴数据零传输；不要再给 Pi 建新的数据链路（dwell 等存量打 Pi 的通道保持
+  现状，迁移时机另定，但新东西不去 Pi）。活动记录的查看端将来放快照 viewer；
+  但**暂时不把活动内容直接塞入快照**（context.md / 快照 JSON）—— 形态细节
+  未定，AI 用记录只走**主动查询工具**。
 
   **所以「改了 `_server_deploy/*.py` 就要部署 Pi」是错的**，动手前先查这条路由到底
   由谁执行：

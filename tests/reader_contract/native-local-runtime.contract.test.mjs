@@ -7652,3 +7652,51 @@ test("pair announcement omits contentSha256 when the bridge answers idle or garb
   assert.deepEqual(Object.keys(pair.op.body).sort(),
     ["displayName", "peerBookId", "replicationBookId"]);
 });
+
+test("dwell activity sidecar enqueues a replication command with whitelist rebuild", async () => {
+  // 方向(2026-08-25):记录的家在 Windows。30-dwell flush 双发,runtime 的
+  // reportActivity 白名单重建后入队 /replication/activity。
+  const result = await harness();
+  result.context.BWReaderRuntime.reportActivity({
+    file: "ignored-by-runtime",
+    client: "native",
+    dwell: [
+      { page: 43, secs: 120.6 },
+      { upage: "u_1234", secs: 60 },
+      { page: -1, secs: 5 },          // 非法页被丢弃
+      { page: 2, secs: 0 },            // 零秒被丢弃
+    ],
+    loc: { lat: 35, lon: 139, acc: 12, name: "図書館", at: 1787600000 },
+    evil: "must not survive",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const records = replicationOutboxRecords(result.dataStoresState);
+  const activity = records.map((r) => r.payload.envelope)
+    .find((e) => e.op.url === "/replication/activity");
+  assert.ok(activity, "活动命令已入队");
+  assert.equal(activity.op.method, "POST");
+  const body = activity.op.body;
+  assert.deepEqual(Object.keys(body).sort(),
+    ["at", "client", "entries", "file", "kind", "loc"]);
+  assert.equal(body.kind, "dwell");
+  assert.equal(body.file, `localbook:${DEFAULT_LOCAL_BOOK_ID}`,
+    "file 由 runtime 自证,不信调用方");
+  assert.deepEqual(body.entries, [
+    { page: 43, secs: 121 },
+    { upage: "u_1234", secs: 60 },
+  ]);
+  assert.equal(body.loc.name, "図書館");
+});
+
+test("dwell activity report failures never break the caller", async () => {
+  const result = await harness();
+  // 各种垃圾入参都必须静默吞掉 —— 旁路不拖主路。
+  for (const garbage of [null, 42, "x", {}, { dwell: "no" }, { dwell: [] }]) {
+    result.context.BWReaderRuntime.reportActivity(garbage);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const records = replicationOutboxRecords(result.dataStoresState);
+  assert.equal(records.filter(
+    (r) => r.payload.envelope.op.url === "/replication/activity"
+  ).length, 0, "垃圾入参不产生命令");
+});
