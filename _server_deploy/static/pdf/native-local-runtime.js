@@ -3600,7 +3600,10 @@
     'ocr-selection': new Set(['page', 'text', 'cv', 'persisted', 'textAuthority']),
     'reocr-page': new Set(['page', 'chars', 'cv', 'textAuthority']),
     'clear-reocr-page': new Set(['page', 'cleared', 'cv', 'textAuthority']),
-    'book-identity': new Set(['contentSha256'])
+    'book-identity': new Set(['contentSha256']),
+    'device-location-status': new Set(['enabled', 'authorized', 'hasFix']),
+    'device-location-enable': new Set(['enabled', 'authorized', 'hasFix']),
+    'device-location-disable': new Set(['enabled', 'authorized', 'hasFix'])
   });
   var PAGE_TEXT_WORD_STATES = new Set(['ready', 'partial', 'unavailable']);
   var PAGE_TEXT_GEOMETRY_STATES = new Set(['exact', 'estimated', 'unavailable']);
@@ -7754,6 +7757,54 @@
     if (path === '/pdf/api/pdf-insert-page' &&
         ['POST', 'PATCH', 'DELETE'].indexOf(method) >= 0) {
       return localPDFInsertPage(input, init, url, method);
+    }
+    if (path === '/pdf/api/device-location-pref') {
+      // 活动账本「地点」维度的开关(设置面板用)。真正的权限申请与定位
+      // 在 Swift(ReaderLocationProvider);这里只是把开关转发过桥并回读
+      // 状态,web/扩展环境没有这座桥 → 404,面板据此隐藏开关。
+      var locAction = null;
+      if (method === 'GET') locAction = 'device-location-status';
+      else if (method === 'POST') locAction = null;
+      else {
+        return Promise.resolve(jsonResponse({
+          ok: false, code: 'BW_LOCAL_DEVICE_LOCATION_METHOD',
+          error: '地点开关只接受 GET/POST'
+        }, 405));
+      }
+      return Promise.resolve().then(function () {
+        if (method === 'GET') return { enable: null };
+        return bodyJSON(input, init).then(function (body) {
+          if (!exactKeys(body, ['enable']) || typeof body.enable !== 'boolean') {
+            throw new RuntimeError(
+              '地点开关请求字段无效', 'BW_LOCAL_DEVICE_LOCATION_BODY'
+            );
+          }
+          return body;
+        });
+      }).then(function (body) {
+        var action = locAction ||
+          (body.enable ? 'device-location-enable' : 'device-location-disable');
+        return nativePageTextRequest(action, {});
+      }).then(function (reply) {
+        if (!reply) {
+          return jsonResponse({
+            ok: false, code: 'BW_LOCAL_DEVICE_LOCATION_UNAVAILABLE',
+            error: '当前环境没有定位桥'
+          }, 404);
+        }
+        return jsonResponse({
+          ok: true,
+          enabled: reply.enabled === true,
+          authorized: reply.authorized === true,
+          hasFix: reply.hasFix === true
+        });
+      }).catch(function (error) {
+        return jsonResponse({
+          ok: false,
+          code: error.code || 'BW_LOCAL_DEVICE_LOCATION_FAILED',
+          error: error.message
+        }, 400);
+      });
     }
     if (path === '/pdf/api/context-sync') {
       if (method === 'GET') {

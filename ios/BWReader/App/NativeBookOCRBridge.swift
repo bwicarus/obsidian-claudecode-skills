@@ -178,6 +178,26 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                         request: request,
                         contentSHA256: expectedContentSHA256
                     )
+                case .locationStatus, .locationEnable, .locationDisable:
+                    let provider = ReaderLocationProvider.shared
+                    if request.action == .locationEnable {
+                        provider.setEnabled(true)
+                    } else if request.action == .locationDisable {
+                        provider.setEnabled(false)
+                    }
+                    payload = [
+                        "contract": Self.responseContract,
+                        "action": request.action.rawValue,
+                        "requestId": request.requestID,
+                        "ok": true,
+                        "state": "ready",
+                        "source": NSNull(),
+                        "revision": "device-location/1",
+                        "error": NSNull(),
+                        "enabled": provider.isEnabled,
+                        "authorized": provider.isAuthorized,
+                        "hasFix": provider.latest != nil,
+                    ]
                 case .search:
                     payload = try await Self.searchReply(
                         request: request,
@@ -294,7 +314,13 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         case status
         // 全文件 contentSha256(两节点复制的内容会合材料)。runtime 自己
         // 拿不到文件字节;打开链路已算好/校验过的完整摘要由这里外借。
-        case bookIdentity = "book-identity" 
+        case bookIdentity = "book-identity"
+        // 活动账本「地点」维度的开关与状态(位置本体不走请求-响应,由
+        // ReaderWebView 推 window.__BW_DEVICE_LOCATION__,beacon flush
+        // 才能同步取到)。
+        case locationStatus = "device-location-status"
+        case locationEnable = "device-location-enable"
+        case locationDisable = "device-location-disable" 
         case search
         case recognizeSelection = "ocr-selection"
         case reOCRPage = "reocr-page"
@@ -347,7 +373,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                     limit: nil,
                     bbox: nil
                 )
-            case .status, .bookIdentity:
+            case .status, .bookIdentity, .locationStatus, .locationEnable, .locationDisable:
                 guard Set(value.keys) == common else {
                     throw BridgeError.invalidRequest
                 }
@@ -855,6 +881,10 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
             payload["textAuthority"] = NativeBookOCRTextAuthority.supplemental.rawValue
         case .bookIdentity:
             payload["contentSha256"] = NSNull()
+        case .locationStatus, .locationEnable, .locationDisable:
+            payload["enabled"] = false
+            payload["authorized"] = false
+            payload["hasFix"] = false
         }
         return payload
     }

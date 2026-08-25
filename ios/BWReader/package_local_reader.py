@@ -248,6 +248,9 @@ NATIVE_RUNTIME_INTERFACE_ENTRIES = {
     "/pdf/api/context-sync": (
         "pi", ("GET", "POST"), ("epub", "pdf"), "localFetch"
     ),
+    "/pdf/api/device-location-pref": (
+        "local", ("GET", "POST"), ("epub", "pdf"), "handleLocalState"
+    ),
     "/pdf/api/epub-action": (
         "pi", ("POST",), ("epub",), "localFetch"
     ),

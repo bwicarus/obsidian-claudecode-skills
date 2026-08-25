@@ -1935,6 +1935,29 @@ def pdf_api_read_dwell():
     _client = str(b.get("client") or "")[:16]
     if _client not in ("native", "extension", "pwa"):
         _client = ""   # 认不出就留空，别猜 —— 猜错的数据比没有更糟
+    # 活动账本 §3.4「地点」：坐标+精度+地名，形状不合规整个丢弃（位置是
+    # 增强，坏字段不该拖累 dwell 本体）。⚠ 同 client：重建式处理器必须
+    # **显式搬**，只放行不搬 = 客户端发了、落盘里没有。
+    _loc = None
+    _raw_loc = b.get("loc")
+    if isinstance(_raw_loc, dict):
+        try:
+            _lat, _lon = float(_raw_loc["lat"]), float(_raw_loc["lon"])
+            _at = int(_raw_loc["at"])
+            if -90 <= _lat <= 90 and -180 <= _lon <= 180 and _at > 0:
+                _loc = {"lat": round(_lat, 6), "lon": round(_lon, 6), "at": _at}
+                _acc = _raw_loc.get("acc")
+                if isinstance(_acc, (int, float)) and 0 <= _acc <= 100000:
+                    _loc["acc"] = round(float(_acc), 1)
+                _name = _raw_loc.get("name")
+                if isinstance(_name, str):
+                    _name = "".join(
+                        ch for ch in _name[:80] if ch.isprintable()
+                    ).strip()
+                    if _name:
+                        _loc["name"] = _name
+        except (KeyError, TypeError, ValueError):
+            _loc = None
     now = int(__import__("time").time())
     try:
         with open(p, "a", encoding="utf-8") as f:
@@ -1944,6 +1967,8 @@ def pdf_api_read_dwell():
                            "file": rel, "uid": uid}
                     if _client:
                         rec["client"] = _client
+                    if _loc:
+                        rec["loc"] = _loc
                     _up = str(it.get("upage") or "")[:40]
                     if _up:   # 虚拟页码(自建页 uid):插删页都不漂移(用户设计)
                         rec["upage"] = _up

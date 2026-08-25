@@ -2545,12 +2545,41 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         readerInactiveGraceTask = nil
     }
 
+    private var deviceLocationPushWired = false
+    private func wireDeviceLocationPushIfNeeded() {
+        guard !deviceLocationPushWired else { return }
+        deviceLocationPushWired = true
+        ReaderLocationProvider.shared.onUpdate = { [weak self] snapshot in
+            self?.pushDeviceLocationToPage(snapshot)
+        }
+        if let latest = ReaderLocationProvider.shared.latest {
+            pushDeviceLocationToPage(latest)
+        }
+    }
+
+    private func pushDeviceLocationToPage(_ snapshot: [String: Any]) {
+        guard isLocalRuntimeURL(webView.url),
+              let data = try? JSONSerialization.data(withJSONObject: snapshot),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript(
+            "window.__BW_DEVICE_LOCATION__ = \(json); undefined;",
+            completionHandler: nil
+        )
+    }
+
     func setReaderForeground(
         _ foreground: Bool,
         restartLocalRuntime: Bool = false
     ) {
         let wasForeground = readerForeground
         readerForeground = foreground
+        if foreground, !wasForeground {
+            // 地点维度:进前台取一次定位(开关关着时 refresh 是空操作)。
+            // 快照经 onUpdate 推 window.__BW_DEVICE_LOCATION__,dwell 的
+            // beacon flush 才能同步拿到。
+            wireDeviceLocationPushIfNeeded()
+            ReaderLocationProvider.shared.refresh()
+        }
         if foreground, !wasForeground, isLocalRuntimeURL(webView.url) {
             if restartLocalRuntime, let localRuntimeServer {
                 Task { @MainActor [weak self, localRuntimeServer] in

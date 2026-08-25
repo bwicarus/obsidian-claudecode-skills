@@ -52,8 +52,24 @@
     // 它从不读 UA/Origin，而认证形态只能二分（扩展 Bearer / App 与桌面都是
     // session cookie），三分只能由客户端自报。
     const client = (window.RC && RC.clientRole) ? RC.clientRole() : '';
-    const body = JSON.stringify({ file: FILE_REL, client: client, dwell: entries.map(([k, s]) => (
-      k.charAt(0) === 'u' ? { upage: k.slice(2), secs: s } : { page: +k.slice(2), secs: s })) });
+    // 活动账本 §3.4「地点」：App 的 Swift 侧把最近定位推在这个全局变量里
+    //（开关关着/没授权/非 App 环境就没有）。必须走全局而不是异步取 ——
+    // pagehide 的 beacon flush 是同步的，等不了任何 Promise。
+    // 只带新鲜的（≤30min）：一条 dwell 配一个两小时前的位置是错误数据。
+    const payload = { file: FILE_REL, client: client, dwell: entries.map(([k, s]) => (
+      k.charAt(0) === 'u' ? { upage: k.slice(2), secs: s } : { page: +k.slice(2), secs: s })) };
+    const loc = window.__BW_DEVICE_LOCATION__;
+    if (loc && typeof loc === 'object' &&
+        Number.isFinite(loc.lat) && Number.isFinite(loc.lon) &&
+        Number.isFinite(loc.at) && (Date.now() / 1000 - loc.at) < 1800) {
+      payload.loc = { lat: loc.lat, lon: loc.lon,
+                      acc: Number.isFinite(loc.acc) ? loc.acc : null,
+                      at: Math.floor(loc.at) };
+      if (typeof loc.name === 'string' && loc.name) {
+        payload.loc.name = loc.name.slice(0, 80);
+      }
+    }
+    const body = JSON.stringify(payload);
     try {
       if (useBeacon && navigator.sendBeacon) {
         // The native App owns this same-origin route through a synchronous

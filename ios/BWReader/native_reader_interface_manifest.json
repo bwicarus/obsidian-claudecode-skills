@@ -871,7 +871,7 @@
       },
       "description": "Resolve character offsets for a verified Pi PDF copy."
     },
-    {
+      {
       "path": "/pdf/api/context-sync",
       "match": "exact",
       "owner": "pi",
@@ -887,7 +887,23 @@
       "remoteBook": null,
       "description": "Keep the native context-WSS preference local and reconcile the legacy Pi context setting without blocking the local link."
     },
-    {
+
+  {
+   "path": "/pdf/api/device-location-pref",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Activity-ledger place dimension: toggle/read the device location recording preference. Pure local bridge to ReaderLocationProvider; never leaves the device except inside dwell reports the user opted into."
+  },{
       "path": "/pdf/api/dict",
       "match": "exact",
       "owner": "pi",

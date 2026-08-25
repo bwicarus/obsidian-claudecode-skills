@@ -703,6 +703,50 @@
     });
   }
 
+  // 学习地点开关:走本地路由(App 内 Swift 桥;web/扩展 404 → 整段隐藏)。
+  function _fillLocRow() {
+    var on = $('rcset-nat-loc-on'), st = $('rcset-nat-loc-st');
+    if (!on || !st) return;
+    fetch('/pdf/api/device-location-pref').then(function (r) {
+      if (r.status === 404) throw new Error('no-bridge');
+      return r.json();
+    }).then(function (d) {
+      if (!d || d.ok !== true) throw new Error('bad');
+      on.checked = d.enabled === true;
+      st.textContent = !d.enabled ? '未开启'
+        : (!d.authorized ? '已开启，但系统定位权限未授予（去 设置 App 里允许）'
+          : (d.hasFix ? '已开启，定位正常' : '已开启，等待首次定位…'));
+      st.style.color = (d.enabled && !d.authorized) ? '#ffcf8a' : '#8fa5c8';
+    }).catch(function () {
+      var row = on.closest('label');
+      if (row) row.style.display = 'none';
+      st.style.display = 'none';
+      var prev = row && row.previousElementSibling;
+      if (prev) prev.style.display = 'none';
+      var next = st.nextElementSibling;
+      if (next) next.style.display = 'none';
+    });
+  }
+  function _wireLocRow() {
+    var on = $('rcset-nat-loc-on');
+    if (!on || on.__wired) return;
+    on.__wired = true;
+    on.addEventListener('change', function () {
+      var want = !!on.checked;
+      on.disabled = true;
+      fetch('/pdf/api/device-location-pref', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enable: want })
+      }).then(function (r) { return r.json(); }).then(function () {
+        on.disabled = false;
+        _fillLocRow();
+      }).catch(function () {
+        on.disabled = false; on.checked = !want;
+        try { RC.toast && RC.toast('地点开关保存失败'); } catch (e) {}
+      });
+    });
+  }
+
   // 每次打开面板都重读一次。原生那边是 @Published、SwiftUI 自动刷；
   // 网页这侧没有推送通道，只能主动取（下载中另开轮询，见 _wireNativePane）。
   function _fillNativePane() {
@@ -738,6 +782,7 @@
 
       var von = $('rcset-nat-vault-on');
       if (von) { von.checked = !!v.enabled; von.disabled = !v.configured; }
+      _fillLocRow();
       var vst = $('rcset-nat-vault-st');
       if (vst) {
         vst.textContent = v.error ? String(v.error)
@@ -771,6 +816,7 @@
     if (!api) return;
     var tab = $('rcset-tab-native');
     if (tab) tab.style.display = '';
+    _wireLocRow();
     Object.keys(_NAT_KEYS).forEach(function (id) {
       var el = $(id); if (!el) return;
       el.addEventListener('change', function () {
@@ -1180,6 +1226,13 @@
           '<button type="button" id="rcset-nat-vault-clr" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">移除授权</button>' +
         '</div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">选文件夹必须走 App 的系统选择器 —— 只有它给出的授权能长期保存，网页拿不到也不该拿到你的文件路径。</div>' +
+        HR +
+        '<label style="' + LBL + '">📍 学习地点记录</label>' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;cursor:pointer;margin-bottom:6px">' +
+          '<input type="checkbox" id="rcset-nat-loc-on" style="width:16px;height:16px"> 记录学习地点' +
+        '</label>' +
+        '<div id="rcset-nat-loc-st" style="font-size:12px;color:#8fa5c8;margin:-2px 0 8px">读取中…</div>' +
+        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">开着时，读页停留记录会带上当时的位置（坐标与地名，建筑物级），用于以后回答"我在哪学的"。首次打开会请求系统定位权限（使用期间）。位置只随学习记录存到你自己的服务器，不发给任何第三方。</div>' +
         HR +
         '<label style="' + LBL + '">🔑 凭据</label>' +
         '<div id="rcset-nat-key-st" style="font-size:12px;color:#8fa5c8;margin:-2px 0 8px">读取中…</div>' +
