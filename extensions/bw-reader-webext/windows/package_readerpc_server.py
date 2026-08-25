@@ -436,7 +436,7 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             if _sha256(installed.read_bytes()) != item["sha256"]:
                 _fail(f"安装 staging 摘要不匹配: {item['path']}")
         staging.replace(release)
-        stable_cli = root / "replication_activity.py"
+        stable_cli = root.parent / "replication_activity.py"
         stable_cli.write_bytes(
             (release / "readerpc-runtime" / "replication_activity.py")
             .read_bytes()
