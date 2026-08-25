@@ -1730,105 +1730,6 @@ internal sealed class DirectSnapshotViewer : IDisposable
     internal const string ActivityViewerPath = "/activity-view";
     internal const string ActivityReportPath = "/activity-report.json";
 
-    private static readonly byte[] ActivityViewerDocument =
-        Encoding.UTF8.GetBytes(
-            """
-            <!doctype html>
-            <html lang="zh-CN">
-            <head>
-              <meta charset="utf-8">
-              <meta name="viewport" content="width=device-width,initial-scale=1">
-              <title>学习活动</title>
-              <style>
-                :root { color-scheme: dark;
-                  font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
-                  background: #0b1020; color: #e8edf8; }
-                * { box-sizing: border-box; }
-                body { margin: 0; min-height: 100vh; background:
-                  radial-gradient(circle at top right, #173464 0, transparent 36rem),
-                  #0b1020; }
-                header { display: flex; gap: 1rem; align-items: center;
-                  justify-content: space-between; padding: .9rem 1.25rem;
-                  border-bottom: 1px solid #263655; }
-                h1 { margin: 0; font-size: 1.1rem; }
-                main { max-width: 60rem; margin: 0 auto; padding: 1.2rem; }
-                .book { background: rgba(20, 30, 56, .7);
-                  border: 1px solid #263655; border-radius: 12px;
-                  padding: 1rem 1.2rem; margin-bottom: 1rem; }
-                .book h2 { margin: 0 0 .4rem; font-size: 1rem; }
-                .meta { color: #8fa5c8; font-size: .85rem; margin-bottom: .6rem; }
-                .place { color: #ffd28a; }
-                table { width: 100%; border-collapse: collapse; font-size: .85rem; }
-                td { padding: .28rem .4rem; border-top: 1px solid #1d2a45;
-                  vertical-align: top; }
-                td.t { color: #8fa5c8; white-space: nowrap; }
-                td.id { color: #6f81a5; font-family: Consolas, monospace;
-                  font-size: .78rem; word-break: break-all; }
-                .omitted { color: #8fa5c8; font-size: .8rem; padding-top: .4rem; }
-                .empty { color: #8fa5c8; padding: 2rem 0; text-align: center; }
-                a { color: #8ab8ff; }
-              </style>
-            </head>
-            <body>
-              <header>
-                <h1>学习活动（最近 7 天）</h1>
-                <div><span id="stamp" class="meta"></span>
-                  <a href="/reader-context-view">实时快照</a></div>
-              </header>
-              <main id="main"><div class="empty">读取中…</div></main>
-              <script>
-                "use strict";
-                const esc = (v) => String(v ?? "").replace(/[&<>"]/g,
-                  (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-                fetch("/activity-report.json").then((r) => {
-                  if (!r.ok) throw new Error("unavailable");
-                  return r.json();
-                }).then((report) => {
-                  const main = document.getElementById("main");
-                  document.getElementById("stamp").textContent =
-                    "生成于 " + new Date(report.generatedAtUtcMs)
-                      .toLocaleString();
-                  const books = report.books || [];
-                  if (!books.length) {
-                    main.innerHTML =
-                      '<div class="empty">这段时间没有学习活动记录。</div>';
-                    return;
-                  }
-                  main.innerHTML = books.map((book) => {
-                    const places = Object.entries(book.places || {}).map(
-                      ([name, secs]) => `<span class="place">📍 ${esc(name)}` +
-                        ` ${(secs / 60).toFixed(1)} 分钟</span>`).join("　");
-                    const rows = (book.mutations || []).map((m) => {
-                      const at = new Date(m.atUtcMs).toLocaleString(
-                        "zh-CN", { month: "2-digit", day: "2-digit",
-                                   hour: "2-digit", minute: "2-digit" });
-                      const ops = (m.ops || [m.op]).join("/");
-                      const times = m.count > 1 ? "×" + m.count : "";
-                      return `<tr><td class="t">${esc(at)}</td>` +
-                        `<td>${esc(ops)}${esc(m.kind)}${times}</td>` +
-                        `<td class="id">${esc(m.itemId)}</td></tr>`;
-                    }).join("");
-                    const omitted = book.mutationsOmitted
-                      ? `<div class="omitted">…更早还有 ${book.mutationsOmitted}` +
-                        ` 条（终端跑 replication_activity.py --detail 查看）</div>`
-                      : "";
-                    return `<section class="book">` +
-                      `<h2>${esc(book.book)}</h2>` +
-                      `<div class="meta">阅读 ${book.minutes} 分钟` +
-                      (places ? "　" + places : "") + `</div>` +
-                      (rows ? `<table>${rows}</table>` : "") + omitted +
-                      `</section>`;
-                  }).join("");
-                }).catch(() => {
-                  document.getElementById("main").innerHTML =
-                    '<div class="empty">报告暂不可读 —— ReaderPC 的下一轮' +
-                    '对账（约 1 分钟内）会生成它，稍后刷新。</div>';
-                });
-              </script>
-            </body>
-            </html>
-            """);
-
     private static readonly byte[] ViewerDocument =
         Encoding.UTF8.GetBytes(
             """
@@ -1859,6 +1760,28 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   backdrop-filter: blur(12px);
                 }
                 h1 { margin: 0; font-size: 1.1rem; }
+                .tabs { display: flex; gap: .4rem; }
+                .tab { background: transparent; border: 1px solid #263655;
+                  color: #8fa5c8; border-radius: 8px; padding: .35rem .9rem;
+                  cursor: pointer; font-size: .9rem; font-family: inherit; }
+                .tab.on { background: #1a2c52; color: #e8edf8;
+                  border-color: #3a5588; }
+                .act-book { background: rgba(20, 30, 56, .7);
+                  border: 1px solid #263655; border-radius: 12px;
+                  padding: 1rem 1.2rem; margin-bottom: 1rem; }
+                .act-book h3 { margin: 0 0 .4rem; font-size: 1rem; }
+                .act-meta { color: #8fa5c8; font-size: .85rem;
+                  margin-bottom: .6rem; }
+                .act-place { color: #ffd28a; }
+                .act-table { width: 100%; border-collapse: collapse;
+                  font-size: .85rem; }
+                .act-table td { padding: .28rem .4rem;
+                  border-top: 1px solid #1d2a45; vertical-align: top; }
+                .act-t { color: #8fa5c8; white-space: nowrap; }
+                .act-id { color: #6f81a5; font-family: Consolas, monospace;
+                  font-size: .78rem; word-break: break-all; }
+                .act-omitted { color: #8fa5c8; font-size: .8rem;
+                  padding-top: .4rem; }
                 a { color: #8ec5ff; }
                 .status { display: flex; gap: .55rem; align-items: center;
                   flex-wrap: wrap; justify-content: flex-end; }
@@ -1934,15 +1857,25 @@ internal sealed class DirectSnapshotViewer : IDisposable
             <body>
               <header>
                 <h1>Reader 实时快照</h1>
+                <nav class="tabs">
+                  <button type="button" id="tab-snapshot" class="tab on">实时快照</button>
+                  <button type="button" id="tab-activity" class="tab">学习活动</button>
+                </nav>
                 <div class="status">
                   <span id="status" class="pill">等待快照</span>
                   <span id="revision" class="pill">revision —</span>
-                  <a href="/activity-view">学习活动</a>
                   <a href="/reader-context-live.md" target="_blank"
                      rel="noreferrer">Markdown</a>
                 </div>
               </header>
-              <main>
+              <main id="view-activity" hidden>
+                <section class="wide">
+                  <h2>学习活动（最近 7 天）</h2>
+                  <div id="act-stamp" class="muted" style="margin-bottom:.6rem"></div>
+                  <div id="act-main">读取中…</div>
+                </section>
+              </main>
+              <main id="view-snapshot">
                 <section>
                   <h2>当前阅读位置</h2>
                   <pre id="active" class="muted">尚未收到活动书页。</pre>
@@ -1992,6 +1925,70 @@ internal sealed class DirectSnapshotViewer : IDisposable
               </main>
               <script>
                 "use strict";
+
+                // ── 学习活动 tab（2026-08-25 用户:并进快照页做切换）──
+                const tabSnapshot = document.getElementById("tab-snapshot");
+                const tabActivity = document.getElementById("tab-activity");
+                const viewSnapshot = document.getElementById("view-snapshot");
+                const viewActivity = document.getElementById("view-activity");
+                const actEsc = (v) => String(v ?? "").replace(/[&<>"]/g,
+                  (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+                function renderActivity() {
+                  const box = document.getElementById("act-main");
+                  fetch("/activity-report.json").then((r) => {
+                    if (!r.ok) throw new Error("unavailable");
+                    return r.json();
+                  }).then((report) => {
+                    document.getElementById("act-stamp").textContent =
+                      "生成于 " + new Date(report.generatedAtUtcMs)
+                        .toLocaleString();
+                    const books = report.books || [];
+                    if (!books.length) {
+                      box.textContent = "这段时间没有学习活动记录。";
+                      return;
+                    }
+                    box.innerHTML = books.map((book) => {
+                      const places = Object.entries(book.places || {}).map(
+                        ([name, secs]) => `<span class="act-place">📍 ` +
+                          `${actEsc(name)} ${(secs / 60).toFixed(1)} 分钟</span>`
+                      ).join("　");
+                      const rows = (book.mutations || []).map((m) => {
+                        const at = new Date(m.atUtcMs).toLocaleString(
+                          "zh-CN", { month: "2-digit", day: "2-digit",
+                                     hour: "2-digit", minute: "2-digit" });
+                        const ops = (m.ops || [m.op]).join("/");
+                        const times = m.count > 1 ? "×" + m.count : "";
+                        return `<tr><td class="act-t">${actEsc(at)}</td>` +
+                          `<td>${actEsc(ops)}${actEsc(m.kind)}${times}</td>` +
+                          `<td class="act-id">${actEsc(m.itemId)}</td></tr>`;
+                      }).join("");
+                      const omitted = book.mutationsOmitted
+                        ? `<div class="act-omitted">…更早还有 ` +
+                          `${book.mutationsOmitted} 条（终端跑 ` +
+                          `replication_activity.py --detail 查看）</div>`
+                        : "";
+                      return `<section class="act-book">` +
+                        `<h3>${actEsc(book.book)}</h3>` +
+                        `<div class="act-meta">阅读 ${book.minutes} 分钟` +
+                        (places ? "　" + places : "") + `</div>` +
+                        (rows ? `<table class="act-table">${rows}</table>` : "") +
+                        omitted + `</section>`;
+                    }).join("");
+                  }).catch(() => {
+                    box.textContent = "报告暂不可读 —— ReaderPC 的下一轮对账" +
+                      "（约 1 分钟内）会生成它，稍后切回来。";
+                  });
+                }
+                function selectTab(activity) {
+                  tabSnapshot.classList.toggle("on", !activity);
+                  tabActivity.classList.toggle("on", activity);
+                  viewSnapshot.hidden = activity;
+                  viewActivity.hidden = !activity;
+                  if (activity) renderActivity();
+                }
+                tabSnapshot.addEventListener("click", () => selectTab(false));
+                tabActivity.addEventListener("click", () => selectTab(true));
+                if (location.hash === "#activity") selectTab(true);
                 const byId = id => document.getElementById(id);
                 const status = byId("status");
                 const revision = byId("revision");
@@ -2907,14 +2904,9 @@ internal sealed class DirectSnapshotViewer : IDisposable
 
     internal Task HandleActivityViewerAsync(HttpContext context)
     {
-        if (!PrepareLocalResponse(context, "text/html; charset=utf-8"))
-        {
-            return Task.CompletedTask;
-        }
-        return WriteBytesAsync(
-            context,
-            ActivityViewerDocument,
-            StatusCodes.Status200OK);
+        // 活动看板已并进快照页做 tab(2026-08-25 用户拍板);旧地址跳过去。
+        context.Response.Redirect(ViewerPath + "#activity");
+        return Task.CompletedTask;
     }
 
     internal async Task HandleSnapshotAsync(HttpContext context)
