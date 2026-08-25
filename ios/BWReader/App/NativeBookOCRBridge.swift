@@ -173,6 +173,11 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                         request: request,
                         status: status
                     )
+                case .bookIdentity:
+                    payload = Self.bookIdentityReply(
+                        request: request,
+                        contentSHA256: expectedContentSHA256
+                    )
                 case .search:
                     payload = try await Self.searchReply(
                         request: request,
@@ -287,6 +292,9 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
     private enum Action: String {
         case pageCharacters = "page-chars"
         case status
+        // 全文件 contentSha256(两节点复制的内容会合材料)。runtime 自己
+        // 拿不到文件字节;打开链路已算好/校验过的完整摘要由这里外借。
+        case bookIdentity = "book-identity" 
         case search
         case recognizeSelection = "ocr-selection"
         case reOCRPage = "reocr-page"
@@ -339,7 +347,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                     limit: nil,
                     bbox: nil
                 )
-            case .status:
+            case .status, .bookIdentity:
                 guard Set(value.keys) == common else {
                     throw BridgeError.invalidRequest
                 }
@@ -540,6 +548,25 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
             "textAuthority": (
                 value.textAuthority ?? .supplemental
             ).rawValue,
+        ]
+    }
+
+    private static func bookIdentityReply(
+        request: Request,
+        contentSHA256: String?
+    ) -> [String: Any] {
+        // 缺摘要不是错误:打开路径允许 sha 迟到(大 PDF 先出首页)。
+        // 会合材料"没有"与"无效"必须可区分,所以 state 用 idle 表达缺席。
+        [
+            "contract": responseContract,
+            "action": request.action.rawValue,
+            "requestId": request.requestID,
+            "ok": contentSHA256 != nil,
+            "state": contentSHA256 != nil ? "ready" : "idle",
+            "source": NSNull(),
+            "revision": "book-identity/1",
+            "error": NSNull(),
+            "contentSha256": jsonNullable(contentSHA256),
         ]
     }
 

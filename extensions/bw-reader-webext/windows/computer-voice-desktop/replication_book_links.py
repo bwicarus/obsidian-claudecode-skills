@@ -346,6 +346,7 @@ class ReplicationBookLinkStore:
         peer_book_id: str,
         replication_book_id: str,
         display_name: str,
+        content_sha256: str | None = None,
     ) -> ReplicationBookLink:
         """公告式配对：**App 铸的** replicationBookId 在服务端登记。
 
@@ -360,6 +361,8 @@ class ReplicationBookLinkStore:
             raise ReplicationLinkStoreError("replicationBookId 形状非法")
         if not _valid_display_name(display_name):
             raise ReplicationLinkStoreError("displayName 非法")
+        if content_sha256 is not None and not _SHA256_RE.fullmatch(content_sha256):
+            raise ReplicationLinkStoreError("contentSha256 形状非法")
         existing = self.resolve_by_peer(peer_book_id)
         holder = self._links.get(replication_book_id)
         now = self._clock()
@@ -369,7 +372,12 @@ class ReplicationBookLinkStore:
                     "该 peerBookId 已绑定另一个 replicationBookId，拒绝静默换身份"
                 )
             refreshed = replace(
-                existing, display_name=display_name, updated_at_utc_ms=now,
+                existing,
+                display_name=display_name,
+                # sha 首见即补记(此前 v1 公告不带);已有基线不覆盖 ——
+                # 配对时的摘要只是初值,合并基线归 record_sync 管。
+                paired_sha256=existing.paired_sha256 or content_sha256,
+                updated_at_utc_ms=now,
             )
             self._links[replication_book_id] = refreshed
             self._save()
@@ -383,7 +391,7 @@ class ReplicationBookLinkStore:
         link = ReplicationBookLink(
             replication_book_id=replication_book_id,
             peer_book_id=peer_book_id,
-            paired_sha256=None,
+            paired_sha256=content_sha256,
             paired_file_size=None,
             last_synced_sha256=None,
             display_name=display_name,
@@ -394,6 +402,59 @@ class ReplicationBookLinkStore:
         self._links[replication_book_id] = link
         self._save()
         return link
+
+    def remint(
+        self,
+        *,
+        peer_book_id: str,
+        new_replication_book_id: str,
+        content_sha256: str,
+    ) -> tuple[ReplicationBookLink, str]:
+        """App 重装重铸后的身份接续:同 peer 的新 repbook id 接管旧链接。
+
+        会合条件是**全文件 contentSha256** 命中旧链接的合并基线或配对摘要
+        (规格 §8.5 第 5 条)。命不中就拒绝 —— 内容对不上时接续身份等于把
+        两本可能不同的书焊在一起。成功后旧 id 的链接消失、新 id 延续全部
+        基线;调用方负责把数据目录一并迁移。返回 (新链接, 旧 id)。
+        """
+        if not _PEER_BOOK_ID_RE.fullmatch(peer_book_id):
+            raise ReplicationLinkStoreError("peerBookId 形状非法（期望 localbook-…）")
+        if not _REPLICATION_BOOK_ID_RE.fullmatch(new_replication_book_id):
+            raise ReplicationLinkStoreError("replicationBookId 形状非法")
+        if not _SHA256_RE.fullmatch(content_sha256):
+            raise ReplicationLinkStoreError("contentSha256 形状非法")
+        existing = self.resolve_by_peer(peer_book_id)
+        if existing is None:
+            raise ReplicationLinkStoreError("该 peerBookId 没有可接续的链接")
+        if existing.replication_book_id == new_replication_book_id:
+            return existing, existing.replication_book_id
+        if self._links.get(new_replication_book_id) is not None:
+            raise ReplicationLinkStoreError(
+                "新 replicationBookId 已被占用，拒绝静默抢占"
+            )
+        rendezvous = {
+            value for value in (
+                existing.last_synced_sha256, existing.paired_sha256,
+            ) if value
+        }
+        if content_sha256 not in rendezvous:
+            raise ReplicationLinkStoreError(
+                "内容会合失败：新公告的 contentSha256 与旧链接的基线都不相符，"
+                "拒绝把新身份接到旧数据上"
+            )
+        now = self._clock()
+        old_id = existing.replication_book_id
+        rebound = replace(
+            existing,
+            replication_book_id=new_replication_book_id,
+            paired_sha256=content_sha256,
+            paired_at_utc_ms=now,
+            updated_at_utc_ms=now,
+        )
+        del self._links[old_id]
+        self._links[new_replication_book_id] = rebound
+        self._save()
+        return rebound, old_id
 
     def rebind_peer(
         self, replication_book_id: str, new_peer_book_id: str

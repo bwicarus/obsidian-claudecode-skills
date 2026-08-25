@@ -1377,6 +1377,19 @@
     };
   }
 
+  // 全文件 contentSha256:两节点复制的内容会合材料(App 重装重铸 repbook
+  // 后,服务端靠它把新身份接回旧数据)。任何失败都折成 null —— 会合材料
+  // 是增强,v1 公告本来就不带;它坏了不该拦配对本身。
+  function fetchReplicationContentSha() {
+    return Promise.resolve().then(function () {
+      return nativePageTextRequest('book-identity', {});
+    }).then(function (reply) {
+      var sha = reply && reply.contentSha256;
+      return typeof sha === 'string' && /^[a-f0-9]{64}$/.test(sha)
+        ? sha : null;
+    }).catch(function () { return null; });
+  }
+
   function enqueueReplicationCommand(url, method, body) {
     if (!replicationEligible()) return Promise.resolve(false);
     return serializeLocalStateMutation('document', 'replication-outbox', function () {
@@ -1391,22 +1404,27 @@
           (root.document && root.document.title) || bookId
         ).slice(0, 512) || bookId;
         var suffix = randomHex(8);
-        return stores.document.batch([
-          stateRecordMutation(
-            REPLICATION_LINK_KIND,
-            { replicationBookId: minted, pairedAt: nowSeconds() },
-            suffix + '-link',
-            link.rev
-          ),
-          replicationOutboxItemMutation(
-            buildReplicationEnvelope(minted, REPLICATION_PAIR_URL, 'POST', {
-              peerBookId: bookId,
-              replicationBookId: minted,
-              displayName: displayName
-            }),
-            suffix + '-pair'
-          )
-        ]).then(function () { return minted; });
+        return fetchReplicationContentSha().then(function (contentSha) {
+          var pairBody = {
+            peerBookId: bookId,
+            replicationBookId: minted,
+            displayName: displayName
+          };
+          // 缺席而不是 null 占位:对端 body 键集校验按可选字段处理。
+          if (contentSha) pairBody.contentSha256 = contentSha;
+          return stores.document.batch([
+            stateRecordMutation(
+              REPLICATION_LINK_KIND,
+              { replicationBookId: minted, pairedAt: nowSeconds() },
+              suffix + '-link',
+              link.rev
+            ),
+            replicationOutboxItemMutation(
+              buildReplicationEnvelope(minted, REPLICATION_PAIR_URL, 'POST', pairBody),
+              suffix + '-pair'
+            )
+          ]);
+        }).then(function () { return minted; });
       }).then(function (replicationBookId) {
         var envelope = buildReplicationEnvelope(replicationBookId, url, method, body);
         // 超单帧的信封由传输层分片（rc-computer-voice 的 chunk 协议）；
@@ -3581,7 +3599,8 @@
     search: new Set(['matches', 'total', 'pages', 'incomplete']),
     'ocr-selection': new Set(['page', 'text', 'cv', 'persisted', 'textAuthority']),
     'reocr-page': new Set(['page', 'chars', 'cv', 'textAuthority']),
-    'clear-reocr-page': new Set(['page', 'cleared', 'cv', 'textAuthority'])
+    'clear-reocr-page': new Set(['page', 'cleared', 'cv', 'textAuthority']),
+    'book-identity': new Set(['contentSha256'])
   });
   var PAGE_TEXT_WORD_STATES = new Set(['ready', 'partial', 'unavailable']);
   var PAGE_TEXT_GEOMETRY_STATES = new Set(['exact', 'estimated', 'unavailable']);

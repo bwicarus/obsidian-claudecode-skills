@@ -169,7 +169,7 @@ Pi 侧已有同构实现（`reader_sync_relay.py::_ledger_sync_mutation`，
 
 ```swift
 // ios/BWReader/App/ReaderLocalLibrary.swift:631
-hasher.update(data: Data("reader-local-book-instance/1 ".utf8))
+hasher.update(data: Data("reader-local-book-instance/1\0".utf8))
 hasher.update(data: Data(libraryID.utf8))       // ← 每台设备一个随机 UUID
 hasher.update(data: Data(relativePath.utf8))
 hasher.update(data: Data(contentFingerprint.utf8))
@@ -344,8 +344,15 @@ items = items.filter(function (item) { return item && item.id !== request.id; })
       · Windows 执行器 `_apply_resync`：整域替换 + 差集写墓碑，幂等。
       对账同时兜住 v1 未挂复制的路径（助手/undo/导入）——分叉会被摘要
       比对抓到并收敛。
-      **待做**：身份重配对（App 重装重铸场景）+ Swift 全文 sha 桥
-      （内容会合材料）。已补：六域全量（随步骤 6）+ **空闲周期对账**
+      ~~待做~~ **已落地（2026-08-25）**：身份重配对 + Swift 全文 sha 桥 ——
+      · Swift `NativeBookOCRBridge` 新 action `book-identity`（外借打开链路
+        已校验的全文 contentSha256，缺席用 state=idle 表达）；
+      · runtime pair 公告可选带 `contentSha256`（任何失败折成字段缺席）；
+      · Windows `links.remint`（同 peer 新 repbook id + sha 命中旧基线才
+        接续身份）+ `_apply_pair` 重配对分支 + `migrate_book` 数据目录移交；
+      · `_apply_resync` **重装保护**：全空 resync 对上非空副本拒绝
+        （合法删光要么逐条 DELETE 要么带墓碑，连墓碑都没有的全空=新库）。
+      已补：六域全量（随步骤 6）+ **空闲周期对账**
       （2026-08-25：10min unref 定时链——没有命令活动时也对账，真实
       插入页等不入队路径的改动靠它兜底收敛）
 - [ ] 5 账本（Windows 侧 commands 表即原始层，已随步骤 2 落地；

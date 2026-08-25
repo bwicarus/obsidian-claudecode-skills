@@ -107,6 +107,8 @@ _EXECUTORS: dict[tuple[str, str], tuple[str, str]] = {
 # 发来登记。它操作链接表而不是某个域的数据文件，单列不进 _EXECUTORS。
 PAIR_URL = "/replication/pair"
 _PAIR_BODY_KEYS = frozenset(("peerBookId", "replicationBookId", "displayName"))
+_PAIR_BODY_OPTIONAL_KEYS = frozenset(("contentSha256",))
+_PAIR_SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
 # 诊断留痕（silent-failure 规则5）：App 无控制台，改页失败等错误只在 UI
 # 一闪而过 —— App 把错误文本作为诊断命令发来，这里持久 append，远程可查。
@@ -238,6 +240,29 @@ class ReplicationDataStore:
     ) -> None:
         _atomic_write_json(self._path(replication_book_id, domain), value)
 
+    def migrate_book(self, old_id: str, new_id: str) -> bool:
+        """重配对时把旧 repbook 的整个数据目录移交给新 id。
+
+        新 id 刚铸,目录不该存在;若已存在且非空说明有并发写入或 id 冲突,
+        拒绝(链接表那边的占用检查先行,这里是最后一道)。旧目录不存在 =
+        没有历史数据要接,直接成功。
+        """
+        for value, name in ((old_id, "旧"), (new_id, "新")):
+            if not re.fullmatch(r"^repbook-[a-f0-9]{32}$", value):
+                raise ReplicationApplyError(f"{name} replicationBookId 形状非法")
+        old_dir = self._directory / old_id
+        new_dir = self._directory / new_id
+        if not old_dir.is_dir():
+            return False
+        if new_dir.exists() and any(new_dir.iterdir()):
+            raise ReplicationApplyError(
+                "重配对目标数据目录已存在且非空，拒绝覆盖"
+            )
+        if new_dir.exists():
+            new_dir.rmdir()
+        old_dir.rename(new_dir)
+        return True
+
 
 def _apply_to_domain(
     data: dict[str, Any], operation: str, domain: str, body: dict[str, Any]
@@ -319,17 +344,47 @@ class ReplicationCommandApplier:
         if self._links is None:
             raise ReplicationApplyError("链接表未接线，无法处理配对公告")
         body = entry.body
-        if not isinstance(body, dict) or set(body.keys()) != _PAIR_BODY_KEYS:
+        if not isinstance(body, dict):
+            raise ReplicationApplyError("配对公告 body 字段不符")
+        keys = set(body.keys())
+        if not (_PAIR_BODY_KEYS <= keys <= _PAIR_BODY_KEYS | _PAIR_BODY_OPTIONAL_KEYS):
             raise ReplicationApplyError("配对公告 body 字段不符")
         if body["replicationBookId"] != entry.replication_book_id:
             raise ReplicationApplyError(
                 "配对公告 body 与信封的 replicationBookId 不一致"
             )
+        content_sha = body.get("contentSha256")
+        if content_sha is not None and (
+            not isinstance(content_sha, str)
+            or not _PAIR_SHA256_RE.fullmatch(content_sha)
+        ):
+            raise ReplicationApplyError("配对公告 contentSha256 形状非法")
+        peer = str(body["peerBookId"])
+        new_id = str(body["replicationBookId"])
         try:
+            existing = self._links.resolve_by_peer(peer)
+            if (
+                existing is not None
+                and existing.replication_book_id != new_id
+                and content_sha is not None
+            ):
+                # App 重装重铸场景:同一 peer 公告了新 repbook id,且带着
+                # 内容会合材料。remint 只在 sha 命中旧基线时接续身份,
+                # 数据目录随之移交 —— 旧副本一字节都不丢。命不中会抛,
+                # 与旧行为(拒绝静默换身份)同一条纪律。
+                _link, old_id = self._links.remint(
+                    peer_book_id=peer,
+                    new_replication_book_id=new_id,
+                    content_sha256=content_sha,
+                )
+                if old_id != new_id:
+                    self._data.migrate_book(old_id, new_id)
+                return
             self._links.register_minted(
-                peer_book_id=str(body["peerBookId"]),
-                replication_book_id=str(body["replicationBookId"]),
+                peer_book_id=peer,
+                replication_book_id=new_id,
                 display_name=str(body["displayName"]),
+                content_sha256=content_sha,
             )
         except ReplicationLinkStoreError as error:
             raise ReplicationApplyError(str(error)) from error
@@ -360,6 +415,14 @@ class ReplicationCommandApplier:
                 key: value for key, value in item.items() if key != "file"
             }
             next_order.append(item_id)
+        # 重装保护:全空 resync 对上非空副本,像是 App 重装后的空库在要求
+        # 清空唯一的异地副本。合法的"删光"要么走逐条 DELETE 命令(副本
+        # 已随之清空,这里空对空),要么条目还带墓碑 —— 连墓碑都没有的
+        # 全空只可能是新库。拒绝并留在账本里出声,绝不静默清空。
+        if not next_items and data["items"]:
+            raise ReplicationApplyError(
+                "重同步为全空而副本非空，疑似重装后的空库，拒绝清空副本"
+            )
         # 差集写墓碑：本端多出的存活条目就是"App 已删而命令没到"的那部分。
         for item_id in data["items"]:
             if item_id not in next_items:

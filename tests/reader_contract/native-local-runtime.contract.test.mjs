@@ -7591,3 +7591,64 @@ test("boot repairs stored word-bind page drift (bind.page !== anchor.page)", asy
   assert.equal(note.card.bind.page, 45, "词锚对齐到壳锚页");
   assert.equal(note.card.bind.from, 5, "字符下标保留");
 });
+
+test("pair announcement carries full-file contentSha256 when the Swift bridge has it", async () => {
+  // 内容会合材料(App 重装重铸后服务端把新身份接回旧数据的唯一凭据)。
+  const sha = "e".repeat(64);
+  const result = await harness({
+    pageTextReply(message) {
+      if (message.action === "book-identity") {
+        return {
+          contract: "reader-native-page-text-response/1",
+          action: message.action,
+          requestId: message.requestId,
+          ok: true,
+          state: "ready",
+          source: null,
+          revision: "book-identity/1",
+          error: null,
+          contentSha256: sha,
+        };
+      }
+      throw new Error(`unexpected action ${message.action}`);
+    },
+  });
+  await hlPost(result.context, "c_6666666666666666", 2, "with sha");
+  const records = replicationOutboxRecords(result.dataStoresState);
+  const pair = records.map((r) => r.payload.envelope)
+    .find((e) => e.op.url === "/replication/pair");
+  assert.ok(pair, "pair 公告存在");
+  assert.deepEqual(Object.keys(pair.op.body).sort(),
+    ["contentSha256", "displayName", "peerBookId", "replicationBookId"]);
+  assert.equal(pair.op.body.contentSha256, sha);
+});
+
+test("pair announcement omits contentSha256 when the bridge answers idle or garbage", async () => {
+  // 会合材料是增强:桥答不上来(idle)或答非所问都折成字段缺席,
+  // 绝不拦配对本身,也绝不发一个格式坏的 sha 去炸对端整条信封。
+  const result = await harness({
+    pageTextReply(message) {
+      if (message.action === "book-identity") {
+        return {
+          contract: "reader-native-page-text-response/1",
+          action: message.action,
+          requestId: message.requestId,
+          ok: false,
+          state: "idle",
+          source: null,
+          revision: "book-identity/1",
+          error: null,
+          contentSha256: "NOT-A-SHA",
+        };
+      }
+      throw new Error(`unexpected action ${message.action}`);
+    },
+  });
+  await hlPost(result.context, "c_7777777777777777", 2, "no sha");
+  const records = replicationOutboxRecords(result.dataStoresState);
+  const pair = records.map((r) => r.payload.envelope)
+    .find((e) => e.op.url === "/replication/pair");
+  assert.ok(pair, "pair 公告仍然发出");
+  assert.deepEqual(Object.keys(pair.op.body).sort(),
+    ["displayName", "peerBookId", "replicationBookId"]);
+});

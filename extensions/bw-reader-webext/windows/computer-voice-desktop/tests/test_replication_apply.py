@@ -551,3 +551,115 @@ class DiagnosticTests(unittest.TestCase):
         ))
         report = self.applier.apply_pending()
         self.assertEqual(len(report["deadLetters"]), 1)
+
+
+class RemintTests(unittest.TestCase):
+    """App 重装重铸场景:同 peer 新 repbook id + 内容会合 → 身份接续。"""
+
+    NEW_BOOK = "repbook-" + "d" * 32
+    PEER = "localbook-" + "b" * 64
+    SHA = "e" * 64
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.ledger = ReplicationCommandLedger(self.root / "ledger.sqlite3")
+        self.store = ReplicationDataStore(self.root / "replication-data")
+        from replication_book_links import ReplicationBookLinkStore
+        self.links = ReplicationBookLinkStore(self.root / "links.json")
+        self.applier = ReplicationCommandApplier(
+            self.ledger, self.store, self.root / "state.json",
+            self.root / "dead-letter.jsonl", link_store=self.links,
+        )
+
+    def tearDown(self) -> None:
+        self.ledger.close()
+        self.temporary.cleanup()
+
+    def _envelope(self, suffix: str, book: str, body: dict) -> dict:
+        value = envelope(suffix, "/replication/pair", "POST", body)
+        value["replicationBookId"] = book
+        return value
+
+    def _pair_body(self, book: str, sha: str | None = None) -> dict:
+        body = {
+            "peerBookId": self.PEER,
+            "replicationBookId": book,
+            "displayName": "LADR.pdf",
+        }
+        if sha is not None:
+            body["contentSha256"] = sha
+        return body
+
+    def _seed_old_identity(self) -> None:
+        self.ledger.append(self._envelope(
+            "1", BOOK, self._pair_body(BOOK, self.SHA)))
+        report = self.applier.apply_pending()
+        self.assertEqual(report["deadLetters"], [])
+        self.store.save(BOOK, "pdf-highlights", {
+            "contract": "replication-book-data/1",
+            "items": {"h_aaaaaa": {"id": "h_aaaaaa", "page": 3}},
+            "tombstones": {}, "order": ["h_aaaaaa"],
+        })
+
+    def test_pair_with_sha_records_paired_baseline(self) -> None:
+        self._seed_old_identity()
+        link = self.links.resolve_by_peer(self.PEER)
+        self.assertEqual(link.paired_sha256, self.SHA)
+
+    def test_remint_with_matching_sha_migrates_identity_and_data(self) -> None:
+        self._seed_old_identity()
+        self.ledger.append(self._envelope(
+            "2", self.NEW_BOOK, self._pair_body(self.NEW_BOOK, self.SHA)))
+        report = self.applier.apply_pending()
+        self.assertEqual(report["deadLetters"], [])
+        link = self.links.resolve_by_peer(self.PEER)
+        self.assertEqual(link.replication_book_id, self.NEW_BOOK)
+        # 旧 id 的链接消失,数据目录整体移交
+        self.assertIsNone(
+            next((l for l in self.links.links()
+                  if l.replication_book_id == BOOK), None))
+        migrated = self.store.load(self.NEW_BOOK, "pdf-highlights")
+        self.assertIn("h_aaaaaa", migrated["items"])
+        self.assertFalse((self.root / "replication-data" / BOOK).exists())
+
+    def test_remint_without_sha_still_refuses(self) -> None:
+        self._seed_old_identity()
+        self.ledger.append(self._envelope(
+            "2", self.NEW_BOOK, self._pair_body(self.NEW_BOOK)))
+        report = self.applier.apply_pending()
+        self.assertEqual(len(report["deadLetters"]), 1)
+        self.assertIn("拒绝静默换身份", report["deadLetters"][0]["error"])
+        # 旧身份与数据原样
+        link = self.links.resolve_by_peer(self.PEER)
+        self.assertEqual(link.replication_book_id, BOOK)
+        self.assertIn("h_aaaaaa",
+                      self.store.load(BOOK, "pdf-highlights")["items"])
+
+    def test_remint_with_wrong_sha_refuses(self) -> None:
+        self._seed_old_identity()
+        self.ledger.append(self._envelope(
+            "2", self.NEW_BOOK, self._pair_body(self.NEW_BOOK, "f" * 64)))
+        report = self.applier.apply_pending()
+        self.assertEqual(len(report["deadLetters"]), 1)
+        self.assertIn("会合失败", report["deadLetters"][0]["error"])
+
+    def test_empty_resync_against_nonempty_copy_refuses(self) -> None:
+        self._seed_old_identity()
+        resync = envelope("3", "/replication/resync", "POST",
+                          {"domain": "pdf-highlights", "items": []})
+        self.ledger.append(resync)
+        report = self.applier.apply_pending()
+        self.assertEqual(len(report["deadLetters"]), 1)
+        self.assertIn("拒绝清空副本", report["deadLetters"][0]["error"])
+        self.assertIn("h_aaaaaa",
+                      self.store.load(BOOK, "pdf-highlights")["items"])
+
+    def test_empty_resync_against_empty_copy_is_fine(self) -> None:
+        self.ledger.append(self._envelope(
+            "1", BOOK, self._pair_body(BOOK, self.SHA)))
+        resync = envelope("2", "/replication/resync", "POST",
+                          {"domain": "pdf-highlights", "items": []})
+        self.ledger.append(resync)
+        report = self.applier.apply_pending()
+        self.assertEqual(report["deadLetters"], [])
