@@ -77,3 +77,21 @@ test("取件看门狗:内容脚本每 20s 唤醒 SW 拉活循环(352s 停摆的�
     "SW 冷启后必须从持久化存储恢复绑定 —— 只查内存表等于看门狗白叫");
   assert.match(body, /readerEnsurePickupLoop/);
 });
+
+test("地图卡:静态图是基底,活地图是叠加(渐进增强)", () => {
+  const VOICE = read("_server_deploy/static/pdf/rc-voicecall.js");
+  // 为什么这条重要:侧栏/钉页/回放等实例不走 _igWire,那里只有静态图。
+  // 若把 <img> 换成占位 div,那些实例会变成空框 —— 用户看到的是"图没了"。
+  assert.match(VOICE, /class="vc-ig-img"/,
+    "静态 <img> 必须始终渲染,不能被占位 div 取代");
+  assert.match(VOICE, /_upgradeMapCells\(root\)/,
+    "活地图在 _igWire 里叠加上去");
+  assert.match(VOICE, /cell\.classList\.add\('vc-map-ready'\)/,
+    "就位后才盖住静态图 —— 挂载失败时看到的仍是图");
+  // 引擎唯一实现:卡内与全屏共用,否则两处行为会漂移
+  const mounts = VOICE.match(/_mountMapView\(/g) || [];
+  assert.ok(mounts.length >= 3,
+    "卡内与全屏共用同一个 _mountMapView(定义 + 两处调用)");
+  assert.match(VOICE, /destroy: function \(\)/,
+    "必须能销毁:每张关掉的地图卡都留一对监听会随卡片数量累积");
+});

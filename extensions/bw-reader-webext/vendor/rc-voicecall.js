@@ -410,6 +410,10 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-flow-cap{font-size:11px;color:#7f92b8;margin-bottom:4px}' +
       '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#b9a8ff;margin-bottom:6px;flex:none}' +
       '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
+      '.vc-map-live{position:absolute;inset:0;z-index:1;overflow:hidden;touch-action:none;cursor:grab;background:#0f1420;opacity:0;transition:opacity .18s}' +
+      '.vc-ig-cell.vc-map-ready .vc-map-live{opacity:1}' +
+      '.vc-ig-cell[data-map-url] .vc-ig-img{pointer-events:none}' +
+      '.vc-ig-cell[data-map-url]{min-height:150px}' +
       '.vc-ig-map{position:absolute;left:6px;top:6px;z-index:3;width:26px;height:26px;border-radius:13px;border:none;background:rgba(16,23,38,.78);color:#fff;font-size:14px;cursor:pointer;padding:0}' +
       '.vc-mapov{position:fixed;inset:0;z-index:2147483200;background:#101726;display:flex;flex-direction:column}' +
       '.vc-map-hd{display:flex;align-items:center;gap:8px;padding:10px 14px;color:#dbe4f8;font-size:14px;background:#0b111f}' +
@@ -2584,9 +2588,11 @@ if (window.__bwPwaProviderOnly) return;
       h = '<div class="vc-ig">' + (d.items || []).map(function (it, i) {
         if (it._gone) return '';   // ✕删除的图不再渲染(拖整框/回放/三态重渲都不带回;data-i 保原索引供 ✕ 定位)
         var aid = _cardAssetID(it.aid), media = _cardImageURL(it);
-        return '<div class="vc-ig-cell" data-i="' + i + '">' +
+        var mapUrl = _mapMetaFromUrl(it.url) ? it.url : '';
+        return '<div class="vc-ig-cell" data-i="' + i + '"' +
+          (mapUrl ? ' data-map-url="' + esc(mapUrl) + '"' : '') + '>' +
           '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除">✕</button>' +
-          (_mapMetaFromUrl(it.url) ? '<button type="button" class="vc-ig-map" data-i="' + i + '" aria-label="打开地图">🗺</button>' : '') +
+          (mapUrl ? '<button type="button" class="vc-ig-map" data-i="' + i + '" aria-label="全屏地图">⛶</button>' : '') +
           (media ? '<img class="vc-ig-img" data-i="' + i + '"' + (aid ? ' data-aid="' + esc(aid) + '"' : '') +
             ' data-source-url="' + esc(it.url || '') + '" src="' + esc(media) + '" alt="' + esc(it.title || '') + '">' :
             '<span class="rc-img-broken">🖼 图片地址无效</span>') +
@@ -2621,14 +2627,19 @@ if (window.__bwPwaProviderOnly) return;
     }
     return h;
   }
-  // ── 内嵌交互地图（2026-08-26 用户拍板：静态地图卡要能点开真地图）──
-  // 零新协议：坐标直接从静态图 URL 解析（Google staticmap / Yandex），
-  // AI 侧什么都不用改。查看器是手写的 OSM tile 滑动地图（拖动/缩放/
-  // 标记，~180 行）—— 不引 Leaflet：一个"看看这在哪"的浮层不值得
-  // 一份 40KB 的外部依赖（手搓 EPUB 阅读器同款哲学）。
-  // tile 加载：App 壳（127.0.0.1）经 /pdf/api/img-proxy 原生代理；
-  // 网页/桌面表面直连 OSM（被宿主 CSP 拦时显示不出，卡上的静态图
-  // 仍是兜底）。
+  // ── 交互地图（2026-08-26 用户拍板：卡片内直接能拖能缩，全屏另给按钮）──
+  //
+  // 为什么不用 Apple 原生地图：卡片是网页（App 内是 WKWebView、Safari 里
+  // 就是网页），MKMapView 是原生视图 —— 只能悬浮在网页**之上**，得靠坐标
+  // 同步跟着卡片拖动/折叠/滚动，而且只在 App 里有。Apple 给网页的 MapKit JS
+  // 要开发者密钥 + 自建 JWT 签名 + 外部脚本（撞 CSP）。这套手写瓦片引擎是
+  // 纯本地的，三个表面（App / Safari / 桌面）同一份代码。
+  //
+  // 性能：一屏可见区域只有几张 256px 瓦片，平移是纯定位、缩放整层重建，
+  // 比一张大静态图重不了多少。
+  //
+  // 坐标：坐标直接从静态图 URL 解析（Google staticmap / Yandex），AI 侧
+  // 什么都不用改。
   function _mapMetaFromUrl(url) {
     var u = String(url || '');
     var m, lat, lon, zoom = 5, marks = [];
@@ -2657,7 +2668,11 @@ if (window.__bwPwaProviderOnly) return;
     if (!marks.length) marks.push([lat, lon]);
     return { lat: lat, lon: lon, zoom: Math.max(2, Math.min(19, zoom)), marks: marks };
   }
-  function _openMapViewer(meta, title) {
+
+  /// 把一个容器变成活地图。inline 与全屏共用这一个引擎（唯一实现）。
+  /// 返回 { destroy } —— 卡片被移除时要断掉监听，否则每张关掉的地图卡
+  /// 都会在 window 上留一对 scroll/resize 监听（泄漏会随卡片数量累积）。
+  function _mountMapView(viewport, meta) {
     var TS = 256;
     var useProxy = /^127\.0\.0\.1$|^localhost$/.test(location.hostname);
     function tileSrc(z, x, y) {
@@ -2681,21 +2696,13 @@ if (window.__bwPwaProviderOnly) return;
       return [x, y];
     }
     var st = { lat: meta.lat, lon: meta.lon, z: meta.zoom };
-    var ov = document.createElement('div');
-    ov.className = 'vc-mapov';
-    ov.innerHTML =
-      '<div class="vc-map-hd"><span>' + esc(title || '地图') + '</span>' +
-      '<span class="vc-map-attr">© OpenStreetMap</span>' +
-      '<button type="button" class="vc-map-z" data-d="1">＋</button>' +
-      '<button type="button" class="vc-map-z" data-d="-1">－</button>' +
-      '<button type="button" class="vc-map-x">✕</button></div>' +
-      '<div class="vc-map-vp"><div class="vc-map-world"></div></div>';
-    document.body.appendChild(ov);
-    var vp = ov.querySelector('.vc-map-vp');
-    var world = ov.querySelector('.vc-map-world');
+    var world = document.createElement('div');
+    world.className = 'vc-map-world';
+    viewport.appendChild(world);
     var tiles = {};
     function render() {
-      var vw = vp.clientWidth, vh = vp.clientHeight;
+      var vw = viewport.clientWidth, vh = viewport.clientHeight;
+      if (!vw || !vh) return;   // 还没布局(折叠态/未挂载):这一拍跳过
       var c = ll2w(st.lat, st.lon, st.z);
       var left = c[0] - vw / 2, top = c[1] - vh / 2;
       var x0 = Math.floor(left / TS), y0 = Math.floor(top / TS);
@@ -2734,7 +2741,7 @@ if (window.__bwPwaProviderOnly) return;
     function zoomTo(dz, px, py) {
       var nz = Math.max(2, Math.min(19, st.z + dz));
       if (nz === st.z) return;
-      var vw = vp.clientWidth, vh = vp.clientHeight;
+      var vw = viewport.clientWidth, vh = viewport.clientHeight;
       var fx = px == null ? vw / 2 : px, fy = py == null ? vh / 2 : py;
       var c = ll2w(st.lat, st.lon, st.z);
       var focus = w2ll(c[0] - vw / 2 + fx, c[1] - vh / 2 + fy, st.z);
@@ -2745,15 +2752,16 @@ if (window.__bwPwaProviderOnly) return;
       render();
     }
     var drag = null, pinch = null;
-    vp.addEventListener('pointerdown', function (ev) {
+    function onDown(ev) {
       if (drag && pinch == null && ev.pointerId !== drag.id) {
-        pinch = { a: drag.id, b: ev.pointerId, ax: drag.lx, ay: drag.ly, bx: ev.clientX, by: ev.clientY, base: null };
+        pinch = { a: drag.id, b: ev.pointerId, ax: drag.lx, ay: drag.ly,
+                  bx: ev.clientX, by: ev.clientY, base: null };
       } else {
         drag = { id: ev.pointerId, lx: ev.clientX, ly: ev.clientY };
       }
-      vp.setPointerCapture(ev.pointerId);
-    });
-    vp.addEventListener('pointermove', function (ev) {
+      try { viewport.setPointerCapture(ev.pointerId); } catch (e) {}
+    }
+    function onMove(ev) {
       if (pinch) {
         if (ev.pointerId === pinch.a) { pinch.ax = ev.clientX; pinch.ay = ev.clientY; }
         else if (ev.pointerId === pinch.b) { pinch.bx = ev.clientX; pinch.by = ev.clientY; }
@@ -2771,29 +2779,95 @@ if (window.__bwPwaProviderOnly) return;
       var nc = w2ll(c[0] - dx, c[1] - dy, st.z);
       st.lat = nc[0]; st.lon = nc[1];
       render();
-    });
-    function endPointer(ev) {
+    }
+    function onUp(ev) {
       if (pinch && (ev.pointerId === pinch.a || ev.pointerId === pinch.b)) pinch = null;
       if (drag && ev.pointerId === drag.id) drag = null;
     }
-    vp.addEventListener('pointerup', endPointer);
-    vp.addEventListener('pointercancel', endPointer);
-    vp.addEventListener('wheel', function (ev) {
+    function onWheel(ev) {
       ev.preventDefault();
-      zoomTo(ev.deltaY < 0 ? 1 : -1, ev.clientX - vp.getBoundingClientRect().left,
-             ev.clientY - vp.getBoundingClientRect().top);
-    }, { passive: false });
-    vp.addEventListener('dblclick', function (ev) {
-      zoomTo(1, ev.clientX - vp.getBoundingClientRect().left,
-             ev.clientY - vp.getBoundingClientRect().top);
+      var r = viewport.getBoundingClientRect();
+      zoomTo(ev.deltaY < 0 ? 1 : -1, ev.clientX - r.left, ev.clientY - r.top);
+    }
+    function onDouble(ev) {
+      ev.preventDefault();
+      var r = viewport.getBoundingClientRect();
+      zoomTo(1, ev.clientX - r.left, ev.clientY - r.top);
+    }
+    viewport.addEventListener('pointerdown', onDown);
+    viewport.addEventListener('pointermove', onMove);
+    viewport.addEventListener('pointerup', onUp);
+    viewport.addEventListener('pointercancel', onUp);
+    viewport.addEventListener('wheel', onWheel, { passive: false });
+    viewport.addEventListener('dblclick', onDouble);
+    // 卡片可以被拉伸/折叠/展开,尺寸变了要重排瓦片。ResizeObserver 只盯
+    // 这一个元素,比在 window 上挂 resize 更准也更省。
+    var ro = null;
+    try {
+      ro = new ResizeObserver(function () { render(); });
+      ro.observe(viewport);
+    } catch (e) {}
+    render();
+    return {
+      zoom: zoomTo,
+      state: st,
+      destroy: function () {
+        try { if (ro) ro.disconnect(); } catch (e) {}
+        viewport.removeEventListener('pointerdown', onDown);
+        viewport.removeEventListener('pointermove', onMove);
+        viewport.removeEventListener('pointerup', onUp);
+        viewport.removeEventListener('pointercancel', onUp);
+        viewport.removeEventListener('wheel', onWheel);
+        viewport.removeEventListener('dblclick', onDouble);
+        world.remove();
+      }
+    };
+  }
+
+  function _openMapViewer(meta, title) {
+    var ov = document.createElement('div');
+    ov.className = 'vc-mapov';
+    ov.innerHTML =
+      '<div class="vc-map-hd"><span>' + esc(title || '地图') + '</span>' +
+      '<span class="vc-map-attr">© OpenStreetMap</span>' +
+      '<button type="button" class="vc-map-z" data-d="1">＋</button>' +
+      '<button type="button" class="vc-map-z" data-d="-1">－</button>' +
+      '<button type="button" class="vc-map-x">✕</button></div>' +
+      '<div class="vc-map-vp"></div>';
+    document.body.appendChild(ov);
+    var view = _mountMapView(ov.querySelector('.vc-map-vp'), {
+      lat: meta.lat, lon: meta.lon, zoom: meta.zoom, marks: meta.marks
     });
     ov.querySelectorAll('.vc-map-z').forEach(function (btn) {
-      btn.addEventListener('click', function () { zoomTo(+btn.dataset.d); });
+      btn.addEventListener('click', function () { view.zoom(+btn.dataset.d); });
     });
-    ov.querySelector('.vc-map-x').addEventListener('click', function () { ov.remove(); });
-    render();
+    function close() { try { view.destroy(); } catch (e) {} ov.remove(); }
+    ov.querySelector('.vc-map-x').addEventListener('click', close);
     return ov;
   }
+
+  /// 把图卡里的静态地图升级成活地图（渐进增强）：静态 <img> 始终在，
+  /// 这里只是叠一层可交互瓦片。任何一处没跑到这个函数（侧栏/钉页/回放
+  /// 等实例），看到的仍是那张静态图，而不是空框。
+  function _upgradeMapCells(root) {
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll('.vc-ig-cell[data-map-url]').forEach(function (cell) {
+      if (cell.__bwMapView) return;
+      var meta = _mapMetaFromUrl(cell.getAttribute('data-map-url'));
+      if (!meta) return;
+      var live = document.createElement('div');
+      live.className = 'vc-map-live';
+      cell.appendChild(live);
+      try {
+        cell.__bwMapView = _mountMapView(live, meta);
+        cell.__bwMapMeta = meta;
+        cell.classList.add('vc-map-ready');   // 就位后才盖住静态图
+      } catch (e) {
+        live.remove();
+      }
+    });
+  }
+
 
   function _infoText(card) {   // 双击带入上下文用的纯文本化
     var d = card.data || {}, k = card.kind;
@@ -3575,6 +3649,9 @@ if (window.__bwPwaProviderOnly) return;
   }
   function _igWire(root, card) {   // 88/98:图卡+视频卡交互——✕移除;点封面=只选中这一张(带入上下文,再点取消);视频▶=播放
     if (!card || (card.kind !== 'images' && card.kind !== 'videos')) return;
+    // 地图项就地升级成可拖可缩的活地图(用户 2026-08-26:卡片内直接能动,
+    // 全屏另给按钮)。静态图仍是基底,升级失败就退回看得见的图。
+    try { _upgradeMapCells(root); } catch (e) {}
     if (card.kind === 'videos') root.addEventListener('error', function (ev) {
       var img = ev.target;
       if (!img || !img.classList || !img.classList.contains('vc-ig-img')) return;
@@ -3602,7 +3679,19 @@ if (window.__bwPwaProviderOnly) return;
         ev.stopPropagation();
         var im = +mb.getAttribute('data-i');
         var mit = ((card.data || {}).items || [])[im] || {};
+        var mcell = mb.closest && mb.closest('.vc-ig-cell');
         var mmeta = _mapMetaFromUrl(mit.url);
+        // 全屏接着卡内**当前**的视角走：用户在卡里拖到了别处再点全屏，
+        // 却跳回初始位置，是最容易让人以为"点错了"的那种不连贯。
+        try {
+          var liveState = mcell && mcell.__bwMapView && mcell.__bwMapView.state;
+          if (mmeta && liveState) {
+            mmeta = {
+              lat: liveState.lat, lon: liveState.lon, zoom: liveState.z,
+              marks: (mcell.__bwMapMeta || mmeta).marks
+            };
+          }
+        } catch (e) {}
         if (mmeta) _openMapViewer(mmeta, mit.title || card.title || '地图');
         return;
       }
@@ -3617,6 +3706,7 @@ if (window.__bwPwaProviderOnly) return;
         return;
       }
       var img = ev.target.closest('.vc-ig-img');
+      if (img && img.closest('.vc-ig-cell.vc-map-ready')) return;   // 活地图上的点击=操作地图,不是选中
       if (img) {
         ev.stopPropagation();
         var i1 = +img.getAttribute('data-i');
