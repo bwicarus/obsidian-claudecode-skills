@@ -1,3 +1,4 @@
+import CoreLocation
 import EventKit
 import Foundation
 import UserNotifications
@@ -40,6 +41,19 @@ final class ReaderSystemProjection {
         // 到期时刻（行程/赶车类）：投影成苹果提醒的 dueDate + 闹钟，
         // 到点响铃由苹果系统负责 —— 比任何轮询都可靠。
         let dueAtMs: Int64?
+        // 地点触发（「到家时提醒我倒垃圾」）：投影成苹果提醒的地理围栏
+        // 闹钟。围栏由**系统提醒 App** 监控与触发，我们只要提醒事项
+        // 权限 —— 不需要定位权限，也不占我们自己的 region 配额。
+        let place: Place?
+    }
+
+    struct Place {
+        let name: String
+        let latitude: Double
+        let longitude: Double
+        let radiusMeters: Double
+        /// "enter"（到达时）/ "leave"（离开时）
+        let proximity: String
     }
 
     struct Outcome {
@@ -68,18 +82,22 @@ final class ReaderSystemProjection {
             syncAtMs: syncAtMs)
         let notificationsState =
             await postLocalNotificationsForNewPending(notifications)
-        // 到点触发（2026-08-26 用户诉求「提醒要真的叫醒我」第一层）：
-        // 带 dueAt 的条目在到点时刻**排一条本地通知** —— 一旦排上，
-        // App 关掉、桥离线、iPad 断网都照响，这是唯一不依赖任何在线
-        // 环节的提醒通道。
-        await scheduleDueNotifications(notifications)
-        let alarms = await ReaderSystemAlarms.shared.sync(notifications)
+        // ⚠ 顺序有讲究：**先**对账苹果提醒事项，拿到用户刚勾掉的
+        // resolvedIds，再用"去掉已完成的"那批去排程。反过来的话，用户
+        // 在提醒 App 里勾完成、这一轮却又把它的通知和闹钟重排一遍，
+        // 到点还会响一次 —— 对已经做完的事，那一响比不响更糟。
         let (resolved, state) = await projectReminders(notifications)
+        let armable = notifications.filter { !resolved.contains($0.id) }
+        // 到点触发（用户诉求「提醒要真的叫醒我」第一层）：带 dueAt 的
+        // 条目在到点时刻**排一条本地通知** —— 一旦排上，App 关掉、桥
+        // 离线、iPad 断网都照响，这是唯一不依赖任何在线环节的通道。
+        let dueState = await scheduleDueNotifications(armable)
+        let alarms = await ReaderSystemAlarms.shared.sync(armable)
         return Outcome(
             resolvedIds: resolved,
             remindersState: state,
             alarmsState: alarms,
-            notificationsState: notificationsState)
+            notificationsState: notificationsState + "/" + dueState)
     }
 
     // MARK: - 小组件数据
@@ -166,14 +184,19 @@ final class ReaderSystemProjection {
     /// 幂等：每轮按当前条目全量重排（同 identifier 的 add 是替换语义），
     /// 已消失/已过期的条目撤销排程。iOS 对单 App 未触发的本地通知有 64
     /// 条硬上限（超了静默丢弃最远的），这里只排最近的 32 条留足余量。
-    private func scheduleDueNotifications(_ items: [Item]) async {
+    private func scheduleDueNotifications(_ items: [Item]) async -> String {
         let center = UNUserNotificationCenter.current()
         guard await center.notificationSettings().authorizationStatus
-            == .authorized else { return }
+            == .authorized else { return "due=denied" }
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        // 已过点却还没被 resolve 的条目：不再静默丢弃。不补响（几小时后
+        // 才响的赶车提醒没有意义、还会打扰），但要计数带进回执 —— 否则
+        // "它到底响没响过"在设备上无从查起。
+        var late = 0
         let due = items
             .compactMap { item -> (Item, Int64)? in
-                guard let at = item.dueAtMs, at > nowMs else { return nil }
+                guard let at = item.dueAtMs else { return nil }
+                if at <= nowMs { late += 1; return nil }
                 return (item, at)
             }
             .sorted { $0.1 < $1.1 }
@@ -185,6 +208,7 @@ final class ReaderSystemProjection {
         if !stale.isEmpty {
             center.removePendingNotificationRequests(withIdentifiers: stale)
         }
+        var failed = 0
         for (item, at) in due {
             let content = UNMutableNotificationContent()
             content.title = item.title
@@ -192,15 +216,34 @@ final class ReaderSystemProjection {
             content.sound = .default
             content.interruptionLevel = .timeSensitive
             let fire = Date(timeIntervalSince1970: Double(at) / 1000)
-            let components = Calendar.current.dateComponents(
+            var components = Calendar.current.dateComponents(
                 [.year, .month, .day, .hour, .minute],
                 from: fire)
-            try? await center.add(UNNotificationRequest(
-                identifier: Self.duePrefix + item.id,
-                content: content,
-                trigger: UNCalendarNotificationTrigger(
-                    dateMatching: components, repeats: false)))
+            // ⚠ 必须钉住时区。不带 timeZone 的 components 是**浮动墙钟
+            // 时间**：iOS 按"到时候设备在哪个时区"解析，出趟远门就会
+            // 响在另一个绝对时刻，而 AlarmKit 与 EKAlarm 用的都是绝对
+            // 时刻 —— 三条通道会各响各的。
+            components.timeZone = Calendar.current.timeZone
+            do {
+                try await center.add(UNNotificationRequest(
+                    identifier: Self.duePrefix + item.id,
+                    content: content,
+                    trigger: UNCalendarNotificationTrigger(
+                        dateMatching: components, repeats: false)))
+            } catch {
+                // 排不上必须留痕：用户以为到点会响，实际这条根本没进
+                // 系统。原来这里是 try? —— 失败与成功长得一模一样。
+                failed += 1
+            }
         }
+        // 用系统**实际持有的**排程对账，而不是相信自己刚才的调用。
+        let armed = (await center.pendingNotificationRequests())
+            .filter { $0.identifier.hasPrefix(Self.duePrefix) }
+            .count
+        var state = "due=" + String(armed) + "/" + String(due.count)
+        if failed > 0 { state += ";failed=" + String(failed) }
+        if late > 0 { state += ";late=" + String(late) }
+        return state
     }
 
     // MARK: - 提醒事项显示副本
@@ -221,6 +264,7 @@ final class ReaderSystemProjection {
         }
         var map = (defaults?.dictionary(forKey: mapKey) as? [String: String])
             ?? [:]
+        var failures = 0
         let liveIds = Set(items.map(\.id))
         var resolved: [String] = []
 
@@ -253,27 +297,66 @@ final class ReaderSystemProjection {
             }
             reminder.title = item.title
             reminder.notes = item.body.isEmpty ? nil : item.body
+            // 优先级：赶车/行程这类错过就没意义的排高，其余中等。
+            // ⚠ reminder.priority 是 Int 而枚举 rawValue 是 UInt，必须显式
+            // 转换；且只有 0-9 合法，其它值保存会失败（EKError
+            // .priorityIsInvalid）。
+            reminder.priority = Int(
+                (item.kind == "trip" || item.dueAtMs != nil)
+                    ? EKReminderPriority.high.rawValue
+                    : EKReminderPriority.medium.rawValue)
+            // 只保留由我们管理的闹钟，重复投影不叠加。
+            reminder.alarms?.forEach(reminder.removeAlarm)
             if let dueMs = item.dueAtMs, dueMs > 0 {
                 let due = Date(
                     timeIntervalSince1970: Double(dueMs) / 1000)
-                reminder.dueDateComponents = Calendar.current
-                    .dateComponents(
-                        [.year, .month, .day, .hour, .minute],
-                        from: due)
-                // 只保留一个由我们管理的闹钟，重复投影不叠加。
-                reminder.alarms?.forEach(reminder.removeAlarm)
+                var components = Calendar.current.dateComponents(
+                    [.year, .month, .day, .hour, .minute], from: due)
+                components.timeZone = Calendar.current.timeZone
+                // ⚠⚠ iOS 上设了 due 就**必须**同时设 start，否则 save 抛
+                // EKError.noStartDate —— 而下面的 catch 原来是 continue，
+                // 于是"带到点时刻的提醒"可能从来就没进过苹果提醒，回执
+                // 却一路全绿。这一条是 Apple 文档里 iOS 独有的约束
+                // （macOS 没有），最容易在别处抄代码时漏掉。
+                reminder.startDateComponents = components
+                reminder.dueDateComponents = components
                 reminder.addAlarm(EKAlarm(absoluteDate: due))
+            }
+            if let place = item.place {
+                // 地理围栏闹钟：到达/离开某个已命名地点时由系统提醒 App
+                // 触发。radius 单位是米；0 表示"用系统默认"而不是零米。
+                let structured = EKStructuredLocation(title: place.name)
+                structured.geoLocation = CLLocation(
+                    latitude: place.latitude, longitude: place.longitude)
+                structured.radius = place.radiusMeters
+                let alarm = EKAlarm()
+                alarm.structuredLocation = structured
+                alarm.proximity = place.proximity == "leave"
+                    ? .leave : .enter
+                reminder.addAlarm(alarm)
+                reminder.location = place.name
             }
             do {
                 try eventStore.save(reminder, commit: false)
                 map[item.id] = reminder.calendarItemIdentifier
             } catch {
+                // 存不进去必须留痕：用户以为提醒建好了，实际苹果那边
+                // 一条都没有。原来这里是裸 continue —— 与成功无法区分。
+                failures += 1
                 continue
             }
         }
-        try? eventStore.commit()
+        do {
+            try eventStore.commit()
+        } catch {
+            // commit 失败 = 这一轮**全部**提醒都没落地。以前它被
+            // try? 吞掉，回执还报 projected。
+            defaults?.set(map, forKey: mapKey)
+            return (resolved, "commit-failed")
+        }
         defaults?.set(map, forKey: mapKey)
-        return (resolved, "projected")
+        return (resolved,
+                failures > 0 ? "partial:" + String(failures) : "projected")
     }
 
     private func ensureCalendar() -> EKCalendar? {

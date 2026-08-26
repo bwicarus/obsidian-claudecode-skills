@@ -1346,11 +1346,10 @@ internal sealed class DirectBridgeProtocolSession
                 "复制摘要查询尚未接线",
                 retryable: true));
         _queryReplicationNotifications = queryReplicationNotifications
-            ?? (static () => new
-            {
-                contract = "reader-notifications/1",
-                items = Array.Empty<object>(),
-            });
+            ?? (static object () => throw new DirectProtocolException(
+                "BW_REPLICATION_NOTIFICATIONS_UNAVAILABLE",
+                "通知查询尚未接线",
+                retryable: true));
         _contextDeliveryModeChanged = contextDeliveryModeChanged
             ?? (_ => { });
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);

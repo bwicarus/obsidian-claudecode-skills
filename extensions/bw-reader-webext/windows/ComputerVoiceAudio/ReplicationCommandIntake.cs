@@ -164,30 +164,97 @@ internal static partial class ReplicationCommandProtocol
     // open 投影 —— 桥不管状态机,ack/resolve 走复制命令流回 Windows。
     internal static object ReadNotificationsView(string notificationsPath)
     {
+        // ⚠ 读不到**绝不能**折成空列表（2026-08-26 对抗式复核抓到的最严重
+        // 一条）：这份视图现在驱动的是**破坏性撤销** —— App 与 widget 都
+        // 按它算 stale 并 removePendingNotificationRequests / EKReminder
+        // remove / AlarmManager.cancel。一次瞬时 IO 错误、或对账循环还没
+        // 跑过第一轮，就会把三条"互不重叠"的提醒通道一起抹掉，而回执还是
+        // 全绿。姊妹函数 ReadDigestsView 对同样的失败一直是抛错的，这里
+        // 曾与自己头顶的注释相反。
         string json;
         try
         {
             FileInfo info = new(notificationsPath);
-            if (!info.Exists || info.Length is <= 0 or > 256 * 1024)
+            if (!info.Exists)
             {
-                return new
-                {
-                    contract = "reader-notifications/1",
-                    items = Array.Empty<object>(),
-                };
+                throw new DirectProtocolException(
+                    "BW_REPLICATION_NOTIFICATIONS_UNAVAILABLE",
+                    "通知导出尚未生成（对账循环还没跑过一轮）",
+                    retryable: true);
+            }
+            if (info.Length is <= 0 or > 256 * 1024)
+            {
+                throw new DirectProtocolException(
+                    "BW_REPLICATION_NOTIFICATIONS_UNAVAILABLE",
+                    "通知导出大小异常：" + info.Length + " 字节",
+                    retryable: true);
             }
             json = File.ReadAllText(notificationsPath);
         }
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException)
         {
-            return new
-            {
-                contract = "reader-notifications/1",
-                items = Array.Empty<object>(),
-            };
+            throw new DirectProtocolException(
+                "BW_REPLICATION_NOTIFICATIONS_UNAVAILABLE",
+                "通知导出读取失败：" + exception.Message,
+                retryable: true);
         }
-        using JsonDocument parsed = JsonDocument.Parse(json);
+        JsonDocument parsed;
+        try
+        {
+            parsed = JsonDocument.Parse(json);
+        }
+        catch (JsonException exception)
+        {
+            throw new DirectProtocolException(
+                "BW_REPLICATION_NOTIFICATIONS_CORRUPT",
+                "通知导出 JSON 损坏：" + exception.Message,
+                retryable: true);
+        }
+        using (parsed)
+        {
+        return ProjectNotifications(parsed);
+        }
+    }
+
+    /// 通知条目上的地点绑定 → 值类型投影（不留 JsonElement 引用）。
+    /// 字段不全就整条返回 null：半个坐标比没有更糟。
+    private static object? ReadPlace(JsonElement item)
+    {
+        if (!item.TryGetProperty("place", out JsonElement place)
+            || place.ValueKind != JsonValueKind.Object
+            || !place.TryGetProperty("name", out JsonElement nameValue)
+            || nameValue.GetString() is not string name
+            || name.Length == 0
+            || !place.TryGetProperty("lat", out JsonElement latValue)
+            || latValue.ValueKind != JsonValueKind.Number
+            || !latValue.TryGetDouble(out double latitude)
+            || !place.TryGetProperty("lon", out JsonElement lonValue)
+            || lonValue.ValueKind != JsonValueKind.Number
+            || !lonValue.TryGetDouble(out double longitude))
+        {
+            return null;
+        }
+        string proximity =
+            place.TryGetProperty("proximity", out JsonElement proximityValue)
+            && proximityValue.GetString() == "leave" ? "leave" : "enter";
+        double radius =
+            place.TryGetProperty("radiusMeters", out JsonElement radiusValue)
+            && radiusValue.ValueKind == JsonValueKind.Number
+            && radiusValue.TryGetDouble(out double parsedRadius)
+                ? parsedRadius : 200;
+        return new
+        {
+            name,
+            lat = latitude,
+            lon = longitude,
+            proximity,
+            radiusMeters = radius,
+        };
+    }
+
+    private static object ProjectNotifications(JsonDocument parsed)
+    {
         if (
             parsed.RootElement.ValueKind != JsonValueKind.Object
             || parsed.RootElement.TryGetProperty(
@@ -198,12 +265,21 @@ internal static partial class ReplicationCommandProtocol
             || items.ValueKind != JsonValueKind.Array
         )
         {
-            return new
-            {
-                contract = "reader-notifications/1",
-                items = Array.Empty<object>(),
-            };
+            throw new DirectProtocolException(
+                "BW_REPLICATION_NOTIFICATIONS_CORRUPT",
+                "通知导出形状不符合 reader-notifications/1",
+                retryable: true);
         }
+        // 数据时刻：显式搬（重建不是透传）。消费端靠它区分"桥在但对账
+        // 循环已经死了"——否则 widget 会拿"拉取成功时刻"冒充数据新鲜度，
+        // 亮着绿灯显示一份不再更新的数据。
+        long exportedAtUtcMs =
+            parsed.RootElement.TryGetProperty(
+                "exportedAtUtcMs", out JsonElement exportedAt)
+            && exportedAt.ValueKind == JsonValueKind.Number
+            && exportedAt.TryGetInt64(out long exportedMs) ? exportedMs : 0;
+        List<(long? Due, int Order, object Payload)> candidates = new();
+        int order = 0;
         List<object> projected = new();
         foreach (JsonElement item in items.EnumerateArray())
         {
@@ -220,7 +296,16 @@ internal static partial class ReplicationCommandProtocol
             {
                 continue;
             }
-            projected.Add(new
+            // 到期时刻（行程场景）：投影成设备侧的到点通知与闹钟。
+            // ⚠ TryGetInt64 对 Null 元素**抛异常**而不是返回 false，
+            // 而我们对"没有到点时刻"的条目导出的正是 JSON null —— 少了
+            // 这个 ValueKind 判断，整个端点会 500（实测）。
+            long? due = item.TryGetProperty(
+                "dueAtUtcMs", out JsonElement itemDue)
+                && itemDue.ValueKind == JsonValueKind.Number
+                && itemDue.TryGetInt64(out long dueAt)
+                ? (long?)dueAt : null;
+            candidates.Add((due, order++, new
             {
                 id,
                 kind = item.TryGetProperty("kind", out JsonElement k)
@@ -232,18 +317,27 @@ internal static partial class ReplicationCommandProtocol
                     ? (s.GetString() ?? "pending") : "pending",
                 createdAtUtcMs = item.TryGetProperty(
                     "createdAtUtcMs", out JsonElement c)
+                    && c.ValueKind == JsonValueKind.Number
                     && c.TryGetInt64(out long created) ? created : 0,
-                // 到期时刻（2026-08-27 行程场景）：投影成苹果提醒的到点
-                // 闹钟。可空 —— null 时序列化为 null，消费端跳过。
-                dueAtUtcMs = item.TryGetProperty(
-                    "dueAtUtcMs", out JsonElement itemDue)
-                    && itemDue.TryGetInt64(out long dueAt)
-                    ? (long?)dueAt : null,
-            });
-            if (projected.Count >= 20)
-            {
-                break;
-            }
+                dueAtUtcMs = due,
+                // 地点绑定：**显式重建成基本类型**。原来这里塞的是
+                // Dictionary<string, JsonElement>，而那些 JsonElement 背靠
+                // 的 JsonDocument 在序列化之前就已经 Dispose —— 实测直接
+                // 500。序列化发生在方法返回之后这件事很容易忘，凡是从
+                // JsonDocument 里取出来要往外传的，都得先落成值类型。
+                place = ReadPlace(item),
+            }));
+        }
+        // 上限按**紧急度**取，不按文件顺序（文件顺序=创建顺序，原来的
+        // `break` 永远丢最新建的那条 —— 恰恰是刚排好的到点提醒）。
+        // 生产端 MAX_OPEN=50，这里放到同一水位，正常情况一条都不丢。
+        foreach ((long? Due, int Order, object Payload) one in candidates
+            .OrderBy(x => x.Due.HasValue ? 0 : 1)
+            .ThenBy(x => x.Due ?? long.MaxValue)
+            .ThenBy(x => x.Order)
+            .Take(50))
+        {
+            projected.Add(one.Payload);
         }
         // review 摘要（到期/新卡数）搭通知视图的车下发：App 用它喂 iOS
         // 小组件（2026-08-27）。缺失时为 null —— 消费端显示"暂无数据"。
@@ -253,8 +347,10 @@ internal static partial class ReplicationCommandProtocol
                 "review", out JsonElement reviewValue)
             && reviewValue.ValueKind == JsonValueKind.Object
             && reviewValue.TryGetProperty("due", out JsonElement dueValue)
+            && dueValue.ValueKind == JsonValueKind.Number
             && dueValue.TryGetInt64(out long dueCount)
             && reviewValue.TryGetProperty("new", out JsonElement newValue)
+            && newValue.ValueKind == JsonValueKind.Number
             && newValue.TryGetInt64(out long newCount)
         )
         {
@@ -263,6 +359,7 @@ internal static partial class ReplicationCommandProtocol
                 due = dueCount,
                 @new = newCount,
                 atMs = reviewValue.TryGetProperty("atMs", out JsonElement at)
+                    && at.ValueKind == JsonValueKind.Number
                     && at.TryGetInt64(out long atMs) ? atMs : 0,
             };
         }
@@ -271,6 +368,10 @@ internal static partial class ReplicationCommandProtocol
             contract = "reader-notifications/1",
             items = projected.ToArray(),
             review,
+            exportedAtUtcMs,
+            // 被上限丢掉的条数。静默截断会让"创建成功但设备上没有"
+            // 无从查起；宁可多一个恒为 0 的字段。
+            dropped = Math.Max(0, candidates.Count - projected.Count),
         };
     }
 

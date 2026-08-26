@@ -166,6 +166,25 @@ def save_alias(root: Path, name: str, lat: float, lon: float) -> None:
     temporary.replace(path)
 
 
+def resolve_name(root: Path, name: str) -> dict | None:
+    """名字 → {name, lat, lon}。反方向查找（原来只有坐标→名字）。
+
+    找不到返回 None —— 调用方必须出声。静默跳过的话，用户说"到家提醒我"
+    却因为还没命名过"家"而什么都没绑上，且没有任何人告诉他。
+    """
+    want = (name or "").strip()
+    if not want:
+        return None
+    for alias in load_aliases(root):
+        if str(alias.get("name") or "").strip() == want:
+            return {
+                "name": want,
+                "lat": float(alias["lat"]),
+                "lon": float(alias["lon"]),
+            }
+    return None
+
+
 def resolve_alias(
     root: Path, lat: float, lon: float
 ) -> str | None:

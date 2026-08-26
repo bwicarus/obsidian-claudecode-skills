@@ -4942,7 +4942,10 @@ if (window.__bwPwaProviderOnly) return;
       // review（到期/新卡数）搭通知视图的车下发（2026-08-27，小组件数据）。
       // ⚠ 放行了字段还要显式搬 —— 这里是重建不是透传（CLAUDE.md 那课）。
       exactObject(
-        reply, ["contract", "items"], ["review"], "通知视图"
+        reply, ["contract", "items"],
+        // exportedAtUtcMs=数据时刻(区分"桥在但对账循环死了")；
+        // dropped=被上限丢掉的条数(静默截断会让"建了却没有"无从查起)。
+        ["review", "exportedAtUtcMs", "dropped"], "通知视图"
       );
       if (reply.contract !== "reader-notifications/1" ||
           !Array.isArray(reply.items)) {
@@ -5247,13 +5250,31 @@ if (window.__bwPwaProviderOnly) return;
             revision: String(result.revision || ''),
             atMs: Date.now(),
           };
-          if (!alarmNoticeShown &&
-              /alarms=(unsupported-os|sdk-unavailable|denied)/
-                .test(String(result.revision || '')) &&
-              syncedItems.some(function (one) { return one && one.dueAtUtcMs; })) {
-            alarmNoticeShown = true;
-            if (RC && typeof RC.toast === 'function') {
-              RC.toast('到点闹钟需要 iPadOS 26；当前用系统通知提醒');
+          // 三段状态各自判断,别用一句硬编码的话概括 —— 通知权限被拒
+          // 时说"闹钟需要 iPadOS 26"是**答非所问**,用户会去查系统版本,
+          // 而真正的原因是他自己拒过通知权限。
+          var rev = String(result.revision || '');
+          var hasDue = syncedItems.some(function (one) {
+            return one && one.dueAtUtcMs;
+          });
+          if (!alarmNoticeShown && hasDue) {
+            var reasons = [];
+            if (/notifications=denied/.test(rev)) {
+              reasons.push('通知权限被拒（到点通知不会响，去设置里打开）');
+            }
+            if (/reminders=(denied|calendar-unavailable)/.test(rev)) {
+              reasons.push('提醒事项权限没给（不会同步到苹果提醒）');
+            }
+            if (/alarms=(unsupported-os|sdk-unavailable)/.test(rev)) {
+              reasons.push('系统闹钟需要 iPadOS 26');
+            } else if (/alarms=denied/.test(rev)) {
+              reasons.push('闹钟权限被拒');
+            }
+            if (reasons.length) {
+              alarmNoticeShown = true;
+              if (RC && typeof RC.toast === 'function') {
+                RC.toast('到点提醒：' + reasons.join('；'));
+              }
             }
           }
         } catch (e) {}

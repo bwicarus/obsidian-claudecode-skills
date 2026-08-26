@@ -13,6 +13,7 @@ sys.path.insert(0, str(SOURCE_ROOT))
 from replication_notifications import (  # noqa: E402
     NotificationError,
     NotificationStore,
+    _now_ms,
 )
 
 
@@ -324,3 +325,53 @@ class DueAtTests(unittest.TestCase):
             due_at_ms=1_800_000_000_000)
         self.assertEqual(item["activateAtUtcMs"], 1_700_000_000_000)
         self.assertEqual(item["dueAtUtcMs"], 1_800_000_000_000)
+
+
+class DueAtGuardTests(unittest.TestCase):
+    """create 的三条校验(2026-08-26 对抗式复核):这三种组合都能建出
+    「创建成功、到点永远不响」的条目,而链路上没有任何一处会报错。"""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.store = NotificationStore(self.root)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_past_due_rejected(self) -> None:
+        with self.assertRaises(NotificationError) as caught:
+            self.store.create(kind="trip", title="早就过了", audience="user",
+                              due_at_ms=1_000_000_000_000)
+        self.assertIn("已经过去", str(caught.exception))
+
+    def test_due_after_expiry_rejected(self) -> None:
+        """条目会在响之前就入库消失 —— 比不设更糟,因为看着是设了的。"""
+        soon = _now_ms() + 60_000
+        later = _now_ms() + 600_000
+        with self.assertRaises(NotificationError):
+            self.store.create(kind="trip", title="过期早于到点",
+                              audience="user",
+                              due_at_ms=later, expires_at_ms=soon)
+
+    def test_ai_audience_with_due_rejected(self) -> None:
+        """设备侧只投影用户方向的条目;ai 方向的到点时刻没有消费端。"""
+        with self.assertRaises(NotificationError) as caught:
+            self.store.create(kind="trip", title="方向错了", audience="ai",
+                              due_at_ms=_now_ms() + 600_000)
+        self.assertIn("audience user", str(caught.exception))
+
+    def test_dedupe_hit_applies_new_due_and_reports(self) -> None:
+        """同 key 命中时不能静默丢掉新参数:AI 以为自己刚设好了到点时刻,
+        实际什么都没变、也没有任何报错。"""
+        first = self.store.create(
+            kind="trip", title="回家", audience="user",
+            dedupe_key="trip:home", due_at_ms=_now_ms() + 600_000)
+        target = _now_ms() + 1_200_000
+        again = self.store.create(
+            kind="trip", title="回家", audience="user",
+            dedupe_key="trip:home", due_at_ms=target)
+        self.assertEqual(again["id"], first["id"], "仍然幂等,不新建")
+        self.assertEqual(again["dueAtUtcMs"], target, "新的到点时刻要生效")
+        self.assertIn("dueAtUtcMs", again.get("_dedupeUpdated") or [],
+                      "并且要报告改了什么")

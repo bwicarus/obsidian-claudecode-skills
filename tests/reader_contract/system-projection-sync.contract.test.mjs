@@ -33,10 +33,18 @@ test("非 App 环境彻底安静,不空转", () => {
     "runtime 在但没有原生 handler = 扩展/桌面表面,系统投影只属于 App");
 });
 
-test("闹钟不可用却有到点提醒时,必须让用户知道", () => {
+test("提醒通道缺席时必须让用户知道,且要说对是哪一条", () => {
   const body = syncBlock();
-  assert.match(body, /alarms=\(unsupported-os\|sdk-unavailable\|denied\)/,
-    "三种闹钟缺席状态都要认出来");
+  // ⚠ 三段状态**各自**判断,不能用一句硬编码的话概括:通知权限被拒时
+  // 说"闹钟需要 iPadOS 26"是答非所问 —— 用户会去查系统版本,而真正的
+  // 原因是他自己拒过通知权限(2026-08-26 对抗式复核确认)。
+  assert.match(body, /notifications=denied/, "通知权限被拒要单独认出来");
+  assert.match(body, /reminders=\(denied\|calendar-unavailable\)/,
+    "提醒事项权限缺席要单独认出来");
+  assert.match(body, /alarms=\(unsupported-os\|sdk-unavailable\)/,
+    "系统闹钟不可用要单独认出来");
+  assert.match(body, /reasons\.join/,
+    "多条同时缺席时要一次说全,不是只报第一条");
   assert.match(body, /dueAtUtcMs/,
     "只在**确有到点提醒**时才提示 —— 没有提醒时提示是纯噪音");
   assert.match(body, /alarmNoticeShown/,

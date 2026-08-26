@@ -3938,6 +3938,11 @@ internal static class ReaderNotificationsProjection
                     ["state"] = state,
                     ["createdAtUtcMs"] =
                         item["createdAtUtcMs"]?.GetValue<long>() ?? 0,
+                    // 到点时刻:AI 要看得见自己排的提醒几点响。此前这处
+                    // 白名单重建漏搬了它 —— 字段在文件里、在用户方向的
+                    // 视图里都有,唯独 AI 方向没有(放行不等于搬过来)。
+                    ["dueAtUtcMs"] = item["dueAtUtcMs"] is JsonNode dueNode
+                        ? dueNode.GetValue<long>() : null,
                 });
                 if (projected.Count >= 20)
                 {

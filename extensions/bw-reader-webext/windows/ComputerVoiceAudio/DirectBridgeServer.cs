@@ -1187,6 +1187,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             config,
             context.Request.Headers["Tailscale-User-Login"]))
         {
+            // 拒绝也要出声:同款拒绝在 snapshot POST 那边一直有日志,
+            // 这里没有 —— "widget 一直没数据"时会完全看不到它来过。
+            AppendOutputPickupLog("widget-denied\tidentity");
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             return;
         }
@@ -1197,14 +1200,49 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         {
             AppendOutputPickupLog("widget-fetch	" + widgetSchedule);
         }
-        object view = ReplicationCommandProtocol.ReadNotificationsView(
-            System.IO.Path.Combine(
-                System.IO.Path.GetDirectoryName(_replicationDigestsPath)!,
-                "notifications-user.json"));
+        object view;
+        try
+        {
+            view = ReplicationCommandProtocol.ReadNotificationsView(
+                System.IO.Path.Combine(
+                    System.IO.Path.GetDirectoryName(_replicationDigestsPath)!,
+                    "notifications-user.json"));
+        }
+        catch (DirectProtocolException exception)
+        {
+            // 读不到就明说读不到。返回假的空列表会让 widget 把它当权威,
+            // 撤销掉所有已排的到点通知(复核确认的最严重一条)。
+            AppendOutputPickupLog("widget-error\t" + exception.Code);
+            context.Response.StatusCode =
+                StatusCodes.Status503ServiceUnavailable;
+            await context.Response.WriteAsJsonAsync(
+                new { error = exception.Code },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        catch (Exception exception)
+        {
+            // 兜底留痕：ASP.NET 把未处理异常变成一个**没有任何线索**的
+            // 500，在真机上等价于静默。先把类型与消息写进日志再抛回去。
+            AppendOutputPickupLog(
+                "widget-crash\t" + exception.GetType().Name + ": "
+                + exception.Message.Replace('\n', ' ').Replace('\t', ' '));
+            throw;
+        }
         context.Response.ContentType = "application/json; charset=utf-8";
         context.Response.Headers["Cache-Control"] = "no-store";
-        await context.Response.WriteAsJsonAsync(
-            view, serviceCancellationToken).ConfigureAwait(false);
+        try
+        {
+            await context.Response.WriteAsJsonAsync(
+                view, serviceCancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            AppendOutputPickupLog(
+                "widget-serialize\t" + exception.GetType().Name + ": "
+                + exception.Message.Replace('\n', ' ').Replace('\t', ' '));
+            throw;
+        }
     }
 
     private async Task HandleOutputPendingAsync(

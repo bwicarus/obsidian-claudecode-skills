@@ -56,6 +56,14 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _format_ms(value: int) -> str:
+    """毫秒时刻 → 人能直接核对的本地时间。报错里印一串毫秒等于没报。"""
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(value / 1000))
+    except (OverflowError, OSError, ValueError):
+        return str(value)
+
+
 def _atomic_write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + f".tmp-{os.getpid()}")
@@ -158,6 +166,7 @@ class NotificationStore:
         dedupe_key: str | None = None,
         activate_at_ms: int | None = None,
         due_at_ms: int | None = None,
+        place: dict[str, Any] | None = None,
         audience: str = "ai",
     ) -> dict[str, Any]:
         with self._locked():
@@ -165,6 +174,23 @@ class NotificationStore:
                 raise NotificationError("通知 kind/title 非法")
             if audience not in ("ai", "user"):
                 raise NotificationError("audience 必须是 ai 或 user")
+            # 到点时刻的三条校验（2026-08-26 对抗式复核）：这三种组合都
+            # 能建出「创建成功、到点永远不响」的条目，而链路上没有任何
+            # 一处会报错 —— AI 和用户都以为设好了。
+            if due_at_ms is not None:
+                due_ms = int(due_at_ms)
+                if due_ms <= _now_ms():
+                    raise NotificationError(
+                        "到点时刻已经过去了（%s）；要么给未来的时刻，"
+                        "要么别带 --due-at" % _format_ms(due_ms))
+                if expires_at_ms is not None and due_ms > int(expires_at_ms):
+                    raise NotificationError(
+                        "到点时刻晚于过期时刻：条目会在响之前就入库消失")
+                if audience != "user":
+                    raise NotificationError(
+                        "带 --due-at 的条目必须 --audience user："
+                        "设备侧的通知/闹钟只投影用户方向的条目，"
+                        "ai 方向的到点时刻没有任何消费端")
             if auto_resolve is not None:
                 if (
                     not isinstance(auto_resolve, dict)
@@ -175,8 +201,25 @@ class NotificationStore:
             items = self._load()
             if dedupe_key:
                 for existing in items:
-                    if existing.get("dedupeKey") == dedupe_key:
-                        return existing   # 幂等:同 key 的 open 通知只有一条
+                    if existing.get("dedupeKey") != dedupe_key:
+                        continue
+                    # 幂等:同 key 的 open 通知只有一条。但**不能静默**把
+                    # 新参数丢掉 —— 原来这里直接 return,AI 以为自己刚设
+                    # 好了到点时刻,实际什么都没变、也没有任何报错。
+                    changed = []
+                    if due_at_ms is not None and \
+                            existing.get("dueAtUtcMs") != int(due_at_ms):
+                        existing["dueAtUtcMs"] = int(due_at_ms)
+                        changed.append("dueAtUtcMs")
+                    if activate_at_ms is not None and \
+                            existing.get("activateAtUtcMs") != int(activate_at_ms):
+                        existing["activateAtUtcMs"] = int(activate_at_ms)
+                        changed.append("activateAtUtcMs")
+                    if changed:
+                        self._save(items)
+                    existing["_dedupeHit"] = True
+                    existing["_dedupeUpdated"] = changed
+                    return existing
             if len(items) >= MAX_OPEN:
                 raise NotificationError(f"open 通知已达上限 {MAX_OPEN} 条")
             item = {
@@ -210,6 +253,24 @@ class NotificationStore:
                 # 的分工:activate=何时开始出现,due=何时到点。行程通常
                 # 立即可见+带 due;垃圾日待办则用 activate 当天出现。
                 item["dueAtUtcMs"] = int(due_at_ms)
+            if place is not None:
+                # 地点触发（「到家时提醒我倒垃圾」）。真值表里**只存名字与
+                # 触发方式**，坐标留到导出那刻再解析 —— 归档 jsonl 不该变成
+                # 坐标副本，而且用户日后重命名/移动地点时导出会自动跟上。
+                name = str(place.get("name") or "").strip()
+                if not name:
+                    raise NotificationError("地点绑定缺少名字")
+                proximity = str(place.get("proximity") or "enter")
+                if proximity not in ("enter", "leave"):
+                    raise NotificationError(
+                        "地点触发方式只能是 enter（到达）或 leave（离开）")
+                if audience != "user":
+                    raise NotificationError(
+                        "带地点绑定的条目必须 --audience user")
+                item["place"] = {"name": name[:80], "proximity": proximity}
+                radius = place.get("radiusMeters")
+                if radius is not None:
+                    item["place"]["radiusMeters"] = float(radius)
             items.append(item)
             self._save(items)
             return item
@@ -366,6 +427,34 @@ class NotificationStore:
             or item["activateAtUtcMs"] <= now
         ]
 
+    def _resolve_place(self, place: Any) -> dict[str, Any] | None:
+        """地点名 → 带坐标的投影。名字查不到就返回 None 并**出声** ——
+        静默返回 None 会让"到家提醒我"变成一条永远不会触发的普通提醒。"""
+        if not isinstance(place, dict) or not place.get("name"):
+            return None
+        try:
+            import replication_places
+            found = replication_places.resolve_name(
+                self._root, str(place["name"]))
+        except Exception as error:
+            print("警告：地点解析失败（%s）：%s" % (place.get("name"), error),
+                  file=sys.stderr)
+            return None
+        if not found:
+            print("警告：通知绑定的地点「%s」还没有命名过，地点提醒不会触发"
+                  % place.get("name"), file=sys.stderr)
+            return None
+        out = {
+            "name": found["name"],
+            "lat": round(found["lat"], 6),
+            "lon": round(found["lon"], 6),
+            "proximity": place.get("proximity") or "enter",
+        }
+        # 200m 是系统里"算不算在这儿"的既有口径（ALIAS_HIT_RADIUS_M）；
+        # 触发半径低于它会与 resolve_alias 自相矛盾。
+        out["radiusMeters"] = float(place.get("radiusMeters") or 200)
+        return out
+
     def _export_projection(
         self, export_path: Path, audience: str
     ) -> None:
@@ -385,6 +474,7 @@ class NotificationStore:
                     "state": item["state"],
                     "createdAtUtcMs": item["createdAtUtcMs"],
                     "dueAtUtcMs": item.get("dueAtUtcMs"),
+                    "place": self._resolve_place(item.get("place")),
                 }
                 for item in items
             ],
@@ -528,6 +618,12 @@ def main() -> int:
     create.add_argument("--due-at", default=None,
                         help="到期时刻 'YYYY-MM-DD HH:MM'（本地时间）。投影成"
                              "苹果提醒的到点闹钟；行程/赶车类必带")
+    create.add_argument("--at-place", default=None,
+                        help="绑定到一个**已命名**的地点（如 家 / 工作地点），"
+                             "到达时由系统提醒 App 触发。名字要与 "
+                             "replication_places.py aliases 里的一致")
+    create.add_argument("--on-leave", action="store_true",
+                        help="改成离开该地点时触发（默认是到达时）")
     create.add_argument("--audience", default="ai", choices=("ai", "user"),
                         help="ai=快照(你的收件箱,默认) / user=侧边栏 tab"
                              "(整理后投递给用户)")
@@ -585,14 +681,39 @@ def main() -> int:
             if args.due_at:
                 due = int(time.mktime(time.strptime(
                     args.due_at, "%Y-%m-%d %H:%M"))) * 1000
+            place = None
+            if args.at_place:
+                place = {
+                    "name": args.at_place,
+                    "proximity": "leave" if args.on_leave else "enter",
+                }
             item = store.create(
                 kind=args.kind, title=args.title, body=args.body,
                 source=args.source, auto_resolve=auto,
                 expires_at_ms=expires, dedupe_key=args.dedupe_key,
-                activate_at_ms=activate, due_at_ms=due,
+                activate_at_ms=activate, due_at_ms=due, place=place,
                 audience=args.audience,
             )
-            print("已创建：%s" % item["id"])
+            if item.get("_dedupeHit"):
+                updated = item.get("_dedupeUpdated") or []
+                print("已存在同 key 的条目：%s（%s）" % (
+                    item["id"],
+                    ("已更新 " + "、".join(updated)) if updated else "未改动"))
+            else:
+                print("已创建：%s" % item["id"])
+            if item.get("place"):
+                # 回显并当场验证地点名能不能解析出坐标 —— 拼错名字时
+                # 立刻看得见,而不是等到该响的那天发现没响。
+                bound = store._resolve_place(item["place"])
+                print("  地点：%s（%s）%s" % (
+                    item["place"]["name"],
+                    "到达时" if item["place"]["proximity"] == "enter"
+                    else "离开时",
+                    "" if bound else " ⚠ 这个名字还没命名过，不会触发"))
+            if item.get("dueAtUtcMs"):
+                # 回显给 AI 与用户核对：--due-at 按**本机本地时间**解析,
+                # 印出来才看得出是不是差了时区或写错了日期。
+                print("  到点：%s" % _format_ms(int(item["dueAtUtcMs"])))
     except NotificationError as error:
         print("错误：%s" % error)
         return 2

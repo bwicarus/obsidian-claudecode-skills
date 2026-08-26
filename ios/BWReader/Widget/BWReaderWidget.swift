@@ -295,9 +295,13 @@ private struct SystemDataProvider: TimelineProvider {
             if let body = item.body, !body.isEmpty { content.body = body }
             content.sound = .default
             content.interruptionLevel = .timeSensitive
-            let components = Calendar.current.dateComponents(
+            var components = Calendar.current.dateComponents(
                 [.year, .month, .day, .hour, .minute],
                 from: Date(timeIntervalSince1970: Double(at) / 1000))
+            // 与 App 侧同一处理：不钉时区就是浮动墙钟时间。两份副本
+            // 共用同一批 identifier，只改一处会让两边互相覆盖出不同的
+            // 触发时刻。
+            components.timeZone = Calendar.current.timeZone
             try? await center.add(UNNotificationRequest(
                 identifier: "bw-due-" + item.id,
                 content: content,
