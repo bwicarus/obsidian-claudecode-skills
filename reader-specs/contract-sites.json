@@ -1,195 +1,240 @@
 {
-  "_why": [
-    "同一份约定散落在多个进程/语言里时，'改了一处'和'改好了'是两件事。",
-    "2026-08-19 一天之内这个模式咬了五次：_normalize_pc_page 的允许字段、",
-    "MCP additionalProperties、localFileQuery 的精确参数表、Xcode target 的",
-    "sources 清单、卡片顶层字段白名单。最后一次让用户来回问了四轮，因为我",
-    "一层一层地找：schema → 指南 → 发现层 → 入站闸。",
-    "",
-    "这份登记表不判对错，只回答'有几份、分别在哪、各自管什么'。",
-    "⚠ 刻意不做'所有站点必须都有所有字段'的通用校验 —— 实测那是错的：",
-    "cid 在服务端契约里有、在阅读器入站闸里没有，各道闸的字段范围本来就不同。",
-    "照那个做只会得到一个满口误报的检查，而误报比没有检查更糟。",
-    "要 pass/fail 的，写成针对性的契约测试（见各 contract 的 tests 字段）。"
-  ],
-  "contracts": {
-    "card-top-fields": {
-      "what": "卡片顶层字段（kind/title/data + 可选 bind/brief/cid/sources）",
-      "canonical": "_server_deploy/reader_card_contract.py",
-      "tests": [
-        "tests/reader_contract/card-bind-whitelist-parity.contract.test.mjs"
-      ],
-      "sites": [
-        {
-          "file": "_server_deploy/reader_card_contract.py",
-          "role": "权威定义",
-          "note": "_CARD_TOP_OPT / _CARD_SPECS；服务端持久化与规范化"
-        },
-        {
-          "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderContextMcpServer.cs",
-          "role": "AI 能看见什么",
-          "note": "BuildTypedCardArgumentsSchema 的 inputSchema；不在这里 AI 就不会传"
-        },
-        {
-          "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderRealtimeOutput.cs",
-          "role": "跨机信封校验",
-          "note": "ValidateCard / ValidateCardBind；Exact 是全等，可选字段要用 ExactWithOptional"
-        },
-        {
-          "file": "_server_deploy/static/pdf/rc-computer-voice.js",
-          "role": "阅读器入站闸",
-          "note": "两道：card 分支的 exactObject + normalizeResultCard；⚠ 两处都是**重建**对象，放行之后还要显式搬字段，只放行不搬的表现是'校验全过就是不生效'"
-        },
-        {
-          "file": "extensions/bw-reader-webext/vendor/rc-computer-voice.js",
-          "role": "扩展自带副本",
-          "note": "由 extensions/bw-reader-webext/build.py 生成；忘了重新生成时表现跟没改过一样"
-        },
-        {
-          "file": "extensions/bw-reader-webext/call.js",
-          "role": "扩展侧投递闸",
-          "note": "exactKeys(p.card, …) 全等；⚠ **这一处是第六份，前五份全放行之后用户拿到的仍是 SCHEMA 拒绝** —— 它不在部署清单里，只随扩展/App 打包到达，改完必须出新构建。payload 透传不重建，放行即可"
-        },
-        {
-          "file": "_server_deploy/static/pdf/rc-voicecall.js",
-          "role": "执行映射",
-          "note": "读 card.bind → __upBindCard / __pageBindCard；到这里字段已经被前面几道剥过一轮"
-        },
-        {
-          "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderCapabilities/cards.md",
-          "role": "AI 读的说明",
-          "note": "助手实际读这份而不是 inputSchema。⚠ 说明写反（'必须且只能有三个字段'）比没写更糟：没写它可能去翻 schema，写反了它直接放弃"
-        },
-        {
-          "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderCapabilities/index.md",
-          "role": "AI 的能力发现层",
-          "note": "助手先扫这份决定'我有没有这个能力'，扫不到就答做不到、根本不会打开 cards.md。用**用户会说的词**（锚定/钉住/固定）而不是字段名"
-        },
-        {
-          "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderCapabilityCatalog.cs",
-          "role": "AI 的能力发现层",
-          "note": "resources/list 的一句话描述，同上"
-        },
-        {
-          "file": "reader-specs/AGENTS.md",
-          "role": "另一套 AI 文档",
-          "note": "直接命令接口那条路的助手说明。⚠ 与 ReaderCapabilities/ 是**两套并行维护**的面向 AI 文档，覆盖面重叠 —— bind 在这份里早就写了，在那套里漏了三层"
-        }
-      ]
+ "_why": [
+  "同一份约定散落在多个进程/语言里时，'改了一处'和'改好了'是两件事。",
+  "2026-08-19 一天之内这个模式咬了五次：_normalize_pc_page 的允许字段、",
+  "MCP additionalProperties、localFileQuery 的精确参数表、Xcode target 的",
+  "sources 清单、卡片顶层字段白名单。最后一次让用户来回问了四轮，因为我",
+  "一层一层地找：schema → 指南 → 发现层 → 入站闸。",
+  "",
+  "这份登记表不判对错，只回答'有几份、分别在哪、各自管什么'。",
+  "⚠ 刻意不做'所有站点必须都有所有字段'的通用校验 —— 实测那是错的：",
+  "cid 在服务端契约里有、在阅读器入站闸里没有，各道闸的字段范围本来就不同。",
+  "照那个做只会得到一个满口误报的检查，而误报比没有检查更糟。",
+  "要 pass/fail 的，写成针对性的契约测试（见各 contract 的 tests 字段）。"
+ ],
+ "contracts": {
+  "card-top-fields": {
+   "what": "卡片顶层字段（kind/title/data + 可选 bind/brief/cid/sources）",
+   "canonical": "_server_deploy/reader_card_contract.py",
+   "tests": [
+    "tests/reader_contract/card-bind-whitelist-parity.contract.test.mjs"
+   ],
+   "sites": [
+    {
+     "file": "_server_deploy/reader_card_contract.py",
+     "role": "权威定义",
+     "note": "_CARD_TOP_OPT / _CARD_SPECS；服务端持久化与规范化"
     },
-    "voice-client-action": {
-      "what": "语音 client-action 白名单",
-      "canonical": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderRealtimeOutput.cs",
-      "tests": [],
-      "sites": [
-        {
-          "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderRealtimeOutput.cs",
-          "role": "跨机信封校验",
-          "note": "ValidatePayload"
-        },
-        {
-          "file": "_server_deploy/static/pdf/rc-computer-voice.js",
-          "role": "阅读器入站闸",
-          "note": "入站校验"
-        },
-        {
-          "file": "_server_deploy/static/pdf/rc-voicecall.js",
-          "role": "执行映射",
-          "note": "动作 → 实现的映射"
-        },
-        {
-          "file": "extensions/bw-reader-webext/vendor/rc-computer-voice.js",
-          "role": "扩展自带副本",
-          "note": "build.py 生成"
-        }
-      ]
+    {
+     "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderContextMcpServer.cs",
+     "role": "AI 能看见什么",
+     "note": "BuildTypedCardArgumentsSchema 的 inputSchema；不在这里 AI 就不会传"
     },
-    "reader-frontend-delivery": {
-      "what": "阅读器前端文件的投递表面（不是字段白名单，但同样'改一处≠到达'）",
-      "canonical": "scripts/reader_deploy_manifest.py",
-      "tests": [],
-      "sites": [
-        {
-          "file": "scripts/deploy_reader.sh",
-          "role": "桌面/网页表面",
-          "note": "→ Pi 的 /var/www/html/static/pdf/；Flask :5000 的 /static/ 是陈旧副本"
-        },
-        {
-          "file": "ios/BWReader/package_local_reader.py",
-          "role": "iPad App",
-          "note": "烤进 ReaderBundle 随包发 —— 只能靠新的 TestFlight 构建到达"
-        },
-        {
-          "file": "extensions/bw-reader-webext/build.py",
-          "role": "Safari 扩展",
-          "note": "生成 vendor/ 自带副本，需重新打包"
-        }
-      ]
+    {
+     "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderRealtimeOutput.cs",
+     "role": "跨机信封校验",
+     "note": "ValidateCard / ValidateCardBind；Exact 是全等，可选字段要用 ExactWithOptional"
     },
-    "replication-command-envelope": {
-      "what": "两节点复制的命令信封 replication-command/1（deviceId 设备族 / repbook 书身份 / actor / command-outbox op 原形）",
-      "canonical": "extensions/bw-reader-webext/windows/computer-voice-desktop/replication_command_ledger.py",
-      "tests": [
-        "extensions/bw-reader-webext/windows/computer-voice-desktop/tests/test_replication_command_ledger.py",
-        "tests/reader_contract/replication-envelope-parity.contract.test.mjs"
-      ],
-      "sites": [
-        {
-          "file": "extensions/bw-reader-webext/windows/computer-voice-desktop/replication_command_ledger.py",
-          "role": "权威定义 + 账本落账校验",
-          "note": "validate_command_envelope；url 只做形状校验，端点白名单由执行端把守（刻意不在账本层再抄一份）"
-        },
-        {
-          "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReplicationCommandIntake.cs",
-          "role": "跨机信封校验（C# 闸）",
-          "note": "ReplicationCommandProtocol.ValidateEnvelope + action 'replication-command'（只走纯上下文连接）；与 Python 权威逐字段一致，改任何 regex/白名单两处同步。另：spool 行 replication-spool-line/1 是 C#（写）↔ Python ingest_spool_file（读）的第二层两副本约定"
-        },
-        {
-          "file": "_server_deploy/static/pdf/native-local-runtime.js",
-          "role": "App 发送端",
-          "note": "buildReplicationEnvelope 构造信封（deviceId=stableDeviceId 的 pwa-install 族）；enqueueReplicationCommand 挂在高亮六条本地路由成功之后；出箱 drain 只删 outcome=accepted 的条目"
-        },
-        {
-          "file": "_server_deploy/static/pdf/rc-computer-voice.js",
-          "role": "传输层（透传+投递）",
-          "note": "pushReplicationCommands / window.__BW_REPLICATION_PUSH__：一次性 context-only 连接、一帧一命令、回执 exactObject 校验。⚠ 有 vendor 自带副本（build.py 生成）与 App bundle 副本，改完要重新生成/重新打包"
-        }
-      ],
-      "gotchas": [
-        "deviceId 用设备族格式 (native-app|pwa-install|server-node)-v1-<32hex>，绝不用 sourceInstanceId（它属于单个 WebView 生命周期，C# outbox 刻意不持久化它）。server-node 是服务端角色的设备族——角色不绑机器，刻意不叫 windows。",
-        "cursor 不在信封里：游标由接收端落账时分配（C# outbox 与 Pi relay 都是这个语义）。",
-        "幂等 = mutationId + 整信封 canonical JSON 的 sha256；同 id 不同内容是出声冲突，不是覆盖。"
-      ]
+    {
+     "file": "_server_deploy/static/pdf/rc-computer-voice.js",
+     "role": "阅读器入站闸",
+     "note": "两道：card 分支的 exactObject + normalizeResultCard；⚠ 两处都是**重建**对象，放行之后还要显式搬字段，只放行不搬的表现是'校验全过就是不生效'"
     },
-    "web-snapshot-post-body": {
-      "what": "网页快照 POST 的四个载荷（viewport / active / document / event）各自的字段允许集",
-      "canonical": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectContextSnapshot.cs",
-      "tests": [
-        "tests/reader_contract/web-viewport-payload.behavior.test.mjs"
-      ],
-      "sites": [
-        {
-          "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectContextSnapshot.cs",
-          "role": "权威闸（拒就是整条 400）",
-          "note": "ValidateViewport / ValidateActiveReading / ValidateDocument 各有一份 requiredFields，允许集 = 必填 ∪ 少数可选；**多一个字段就 throw**"
-        },
-        {
-          "file": "extensions/bw-reader-webext/background.js",
-          "role": "生产端（组装 POST body）",
-          "note": "readerPrepareSnapshot 造各载荷、readerPostSnapshot 拼 body；给某个载荷加字段前必须先看对应的 Validate* 放不放行"
-        },
-        {
-          "file": "extensions/bw-reader-webext/content.js",
-          "role": "采集端 + 失败重试",
-          "note": "字段的源头；⚠ 上报失败会 schedule(true) 按 THROTTLE_MS(1.5s) 重发**同样的 body**，所以一个字段级的拒绝会变成无限重试，不是一次性失败"
-        }
-      ],
-      "gotchas": [
-        "2026-08-15 的 d0cb6109 给模型加「选区所在句」时，JS 侧把 selectionContext 同时挂到了 viewport 和 active 上，而 C# 侧**只给 ValidateActiveReading 放行、漏了 ValidateViewport**。后果不是报错提示：用户在网页上一选中文字 → 整条快照 400 → 每 1.5s 重试一次，表现是「快照响应慢」。2026-08-23 修法是在 readerPostSnapshot 里把它从**发出去的 viewport** 上剥掉（active 那份仍从本地 viewport.selectionContext 读，不能一起删）。",
-        "⚠ 这四个载荷的允许集**互不相同**：某字段在 active 上合法不代表在 viewport 上合法。加字段时要逐个载荷确认，别按「同一份快照」想当然。",
-        "重试放大效应让这类错误的代价远高于一次性失败 —— 排查「慢」的时候优先怀疑它。",
-        "2026-08-25 active 载荷新增可选字段 review（App 内复习模式投影：dueTotal/index/queueIds/showingAnswer/current）。**缺席 = 未进入复习模式**，扩展 background.js 与旧 App 构建不发它，天然合法；在场时 ValidateReviewState 整形校验（越界键整条 400）。生产端在 rc-computer-voice.js localReviewSnapshot（白名单重建），契约测试 tests/reader_contract/review-snapshot.contract.test.mjs。它故意不进 PreserveActiveReadingContinuity 的保留名单——复活旧 review 会让 AI 以为用户还停在复习里。"
-      ]
+    {
+     "file": "extensions/bw-reader-webext/vendor/rc-computer-voice.js",
+     "role": "扩展自带副本",
+     "note": "由 extensions/bw-reader-webext/build.py 生成；忘了重新生成时表现跟没改过一样"
+    },
+    {
+     "file": "extensions/bw-reader-webext/call.js",
+     "role": "扩展侧投递闸",
+     "note": "exactKeys(p.card, …) 全等；⚠ **这一处是第六份，前五份全放行之后用户拿到的仍是 SCHEMA 拒绝** —— 它不在部署清单里，只随扩展/App 打包到达，改完必须出新构建。payload 透传不重建，放行即可"
+    },
+    {
+     "file": "_server_deploy/static/pdf/rc-voicecall.js",
+     "role": "执行映射",
+     "note": "读 card.bind → __upBindCard / __pageBindCard；到这里字段已经被前面几道剥过一轮"
+    },
+    {
+     "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderCapabilities/cards.md",
+     "role": "AI 读的说明",
+     "note": "助手实际读这份而不是 inputSchema。⚠ 说明写反（'必须且只能有三个字段'）比没写更糟：没写它可能去翻 schema，写反了它直接放弃"
+    },
+    {
+     "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderCapabilities/index.md",
+     "role": "AI 的能力发现层",
+     "note": "助手先扫这份决定'我有没有这个能力'，扫不到就答做不到、根本不会打开 cards.md。用**用户会说的词**（锚定/钉住/固定）而不是字段名"
+    },
+    {
+     "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderCapabilityCatalog.cs",
+     "role": "AI 的能力发现层",
+     "note": "resources/list 的一句话描述，同上"
+    },
+    {
+     "file": "reader-specs/AGENTS.md",
+     "role": "另一套 AI 文档",
+     "note": "直接命令接口那条路的助手说明。⚠ 与 ReaderCapabilities/ 是**两套并行维护**的面向 AI 文档，覆盖面重叠 —— bind 在这份里早就写了，在那套里漏了三层"
     }
+   ]
+  },
+  "voice-client-action": {
+   "what": "语音 client-action 白名单",
+   "canonical": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderRealtimeOutput.cs",
+   "tests": [],
+   "sites": [
+    {
+     "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderRealtimeOutput.cs",
+     "role": "跨机信封校验",
+     "note": "ValidatePayload"
+    },
+    {
+     "file": "_server_deploy/static/pdf/rc-computer-voice.js",
+     "role": "阅读器入站闸",
+     "note": "入站校验"
+    },
+    {
+     "file": "_server_deploy/static/pdf/rc-voicecall.js",
+     "role": "执行映射",
+     "note": "动作 → 实现的映射"
+    },
+    {
+     "file": "extensions/bw-reader-webext/vendor/rc-computer-voice.js",
+     "role": "扩展自带副本",
+     "note": "build.py 生成"
+    }
+   ]
+  },
+  "reader-frontend-delivery": {
+   "what": "阅读器前端文件的投递表面（不是字段白名单，但同样'改一处≠到达'）",
+   "canonical": "scripts/reader_deploy_manifest.py",
+   "tests": [],
+   "sites": [
+    {
+     "file": "scripts/deploy_reader.sh",
+     "role": "桌面/网页表面",
+     "note": "→ Pi 的 /var/www/html/static/pdf/；Flask :5000 的 /static/ 是陈旧副本"
+    },
+    {
+     "file": "ios/BWReader/package_local_reader.py",
+     "role": "iPad App",
+     "note": "烤进 ReaderBundle 随包发 —— 只能靠新的 TestFlight 构建到达"
+    },
+    {
+     "file": "extensions/bw-reader-webext/build.py",
+     "role": "Safari 扩展",
+     "note": "生成 vendor/ 自带副本，需重新打包"
+    }
+   ]
+  },
+  "replication-command-envelope": {
+   "what": "两节点复制的命令信封 replication-command/1（deviceId 设备族 / repbook 书身份 / actor / command-outbox op 原形）",
+   "canonical": "extensions/bw-reader-webext/windows/computer-voice-desktop/replication_command_ledger.py",
+   "tests": [
+    "extensions/bw-reader-webext/windows/computer-voice-desktop/tests/test_replication_command_ledger.py",
+    "tests/reader_contract/replication-envelope-parity.contract.test.mjs"
+   ],
+   "sites": [
+    {
+     "file": "extensions/bw-reader-webext/windows/computer-voice-desktop/replication_command_ledger.py",
+     "role": "权威定义 + 账本落账校验",
+     "note": "validate_command_envelope；url 只做形状校验，端点白名单由执行端把守（刻意不在账本层再抄一份）"
+    },
+    {
+     "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReplicationCommandIntake.cs",
+     "role": "跨机信封校验（C# 闸）",
+     "note": "ReplicationCommandProtocol.ValidateEnvelope + action 'replication-command'（只走纯上下文连接）；与 Python 权威逐字段一致，改任何 regex/白名单两处同步。另：spool 行 replication-spool-line/1 是 C#（写）↔ Python ingest_spool_file（读）的第二层两副本约定"
+    },
+    {
+     "file": "_server_deploy/static/pdf/native-local-runtime.js",
+     "role": "App 发送端",
+     "note": "buildReplicationEnvelope 构造信封（deviceId=stableDeviceId 的 pwa-install 族）；enqueueReplicationCommand 挂在高亮六条本地路由成功之后；出箱 drain 只删 outcome=accepted 的条目"
+    },
+    {
+     "file": "_server_deploy/static/pdf/rc-computer-voice.js",
+     "role": "传输层（透传+投递）",
+     "note": "pushReplicationCommands / window.__BW_REPLICATION_PUSH__：一次性 context-only 连接、一帧一命令、回执 exactObject 校验。⚠ 有 vendor 自带副本（build.py 生成）与 App bundle 副本，改完要重新生成/重新打包"
+    }
+   ],
+   "gotchas": [
+    "deviceId 用设备族格式 (native-app|pwa-install|server-node)-v1-<32hex>，绝不用 sourceInstanceId（它属于单个 WebView 生命周期，C# outbox 刻意不持久化它）。server-node 是服务端角色的设备族——角色不绑机器，刻意不叫 windows。",
+    "cursor 不在信封里：游标由接收端落账时分配（C# outbox 与 Pi relay 都是这个语义）。",
+    "幂等 = mutationId + 整信封 canonical JSON 的 sha256；同 id 不同内容是出声冲突，不是覆盖。"
+   ]
+  },
+  "web-snapshot-post-body": {
+   "what": "网页快照 POST 的四个载荷（viewport / active / document / event）各自的字段允许集",
+   "canonical": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectContextSnapshot.cs",
+   "tests": [
+    "tests/reader_contract/web-viewport-payload.behavior.test.mjs"
+   ],
+   "sites": [
+    {
+     "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectContextSnapshot.cs",
+     "role": "权威闸（拒就是整条 400）",
+     "note": "ValidateViewport / ValidateActiveReading / ValidateDocument 各有一份 requiredFields，允许集 = 必填 ∪ 少数可选；**多一个字段就 throw**"
+    },
+    {
+     "file": "extensions/bw-reader-webext/background.js",
+     "role": "生产端（组装 POST body）",
+     "note": "readerPrepareSnapshot 造各载荷、readerPostSnapshot 拼 body；给某个载荷加字段前必须先看对应的 Validate* 放不放行"
+    },
+    {
+     "file": "extensions/bw-reader-webext/content.js",
+     "role": "采集端 + 失败重试",
+     "note": "字段的源头；⚠ 上报失败会 schedule(true) 按 THROTTLE_MS(1.5s) 重发**同样的 body**，所以一个字段级的拒绝会变成无限重试，不是一次性失败"
+    }
+   ],
+   "gotchas": [
+    "2026-08-15 的 d0cb6109 给模型加「选区所在句」时，JS 侧把 selectionContext 同时挂到了 viewport 和 active 上，而 C# 侧**只给 ValidateActiveReading 放行、漏了 ValidateViewport**。后果不是报错提示：用户在网页上一选中文字 → 整条快照 400 → 每 1.5s 重试一次，表现是「快照响应慢」。2026-08-23 修法是在 readerPostSnapshot 里把它从**发出去的 viewport** 上剥掉（active 那份仍从本地 viewport.selectionContext 读，不能一起删）。",
+    "⚠ 这四个载荷的允许集**互不相同**：某字段在 active 上合法不代表在 viewport 上合法。加字段时要逐个载荷确认，别按「同一份快照」想当然。",
+    "重试放大效应让这类错误的代价远高于一次性失败 —— 排查「慢」的时候优先怀疑它。",
+    "2026-08-25 active 载荷新增可选字段 review（App 内复习模式投影：dueTotal/index/queueIds/showingAnswer/current）。**缺席 = 未进入复习模式**，扩展 background.js 与旧 App 构建不发它，天然合法；在场时 ValidateReviewState 整形校验（越界键整条 400）。生产端在 rc-computer-voice.js localReviewSnapshot（白名单重建），契约测试 tests/reader_contract/review-snapshot.contract.test.mjs。它故意不进 PreserveActiveReadingContinuity 的保留名单——复活旧 review 会让 AI 以为用户还停在复习里。"
+   ]
+  },
+  "mcp-tool-roster": {
+   "what": "Reader MCP 的工具清单（加一个工具要同步的所有地方）",
+   "canonical": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderContextMcpServer.cs 的工具声明",
+   "tests": [
+    "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectBridgeSelfTest.cs（--self-test，四处计数）",
+    "extensions/bw-reader-webext/windows/computer-voice-desktop/tests/test_camera_capture.py::ErrorCodeContractTests"
+   ],
+   "sites": [
+    {
+     "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderContextMcpServer.cs",
+     "role": "权威定义",
+     "note": "工具名常量 + tools.Add 声明 + CallTool 分派。三者缺一：声明少了模型看不见；分派少了调用报未知工具"
+    },
+    {
+     "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectBridgeSelfTest.cs",
+     "role": "自检钉住的计数",
+     "note": "**四处**：最小配置工具数、接 visual 回调时的工具数、完整披露工具数、能力主题(resources)数。改工具/主题不同步这里，打包自检会拦住发布"
+    },
+    {
+     "file": "extensions/bw-reader-webext/windows/package_computer_voice_direct.py",
+     "role": "打包合同",
+     "note": "expected_tools 元组，**顺序与内容都锁死**。注释写明：实测 tools/list 后照抄，别手写"
+    },
+    {
+     "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderCapabilityCatalog.cs",
+     "role": "发现层",
+     "note": "Entries 里的能力主题。⚠ 最容易漏也最致命：助手先扫主题列表决定自己能做什么，扫不到关键词就直接答『没有这个能力』，根本不会去读指南"
+    },
+    {
+     "file": "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderCapabilities/<主题>.md",
+     "role": "能力指南",
+     "note": "配 index.md 里的一行。指南写反比没写更糟——没写它可能去翻 schema，写反了它直接放弃"
+    },
+    {
+     "file": "C:/Users/bwica/.codex/config.toml",
+     "role": "Codex 侧启用",
+     "note": "mcp_servers.reader_snapshot 的 enabled_tools 数组 + 每个工具的 approval_mode 块。不加=工具存在但 Codex 不暴露给模型。装包时的迁移只**追加**固定列表，不会自动认识新工具"
+    },
+    {
+     "file": "extensions/bw-reader-webext/release_preflight.py",
+     "role": "发布白名单",
+     "note": "windows/ 目录下的精确清单，新增 .cs/.md/.py 都要登记"
+    }
+   ]
   }
+ }
 }

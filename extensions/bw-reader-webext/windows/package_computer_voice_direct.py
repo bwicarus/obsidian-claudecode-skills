@@ -1824,6 +1824,7 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
         "reader_context_snapshot",
         "reader_capability_guide",
         "reader_visual_image",
+        "reader_camera_snap",
         "reader_browser_control",
         "reader_highlight_range",
         "reader_web_note",
