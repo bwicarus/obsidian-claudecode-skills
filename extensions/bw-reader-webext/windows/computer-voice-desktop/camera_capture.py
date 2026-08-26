@@ -66,21 +66,24 @@ _DEFAULT_SOURCES = [
         "rotate": 0,
     },
     {
-        "id": "c920",
-        "label": "C920（外接）",
+        "id": "usb",
+        "label": "本机外接",
         "kind": "local",
-        "device": "HD Pro Webcam C920",
+        "device": "ELECOM 8MP Webcam",
         "size": "1280x720",
         "rotate": 0,
     },
-    # ⚠ 下面两台是机身自带的（ASUS ROG Flow Z13），2026-08-27 实测**出全黑帧**。
-    # 排查过程记在这里，免得以后再走一遍：设备在、驱动 ProblemCode=0、
-    # Windows 隐私策略三级全 Allow、Frame Server 在跑；ffmpeg 的 dshow 直接
-    # I/O error，OpenCV 的 dshow 后端能打开、能出帧，但**亮度恒为 0 且每帧
-    # 读取要 1 秒**（超时）；MSMF 后端打得开读不出。同一时刻外接的 C920 一切正常。
-    # 内外之别而非 API 之别 —— 是 ASUS 机身摄像头被硬件/固件级关掉了
-    # （管这个开关的 ArmouryCrateControlInterface / ASUSOptimization 服务当时都是停的）。
-    # 软件侧绕不过去。开关打开后它们应当自动可用，不需要改这里。
+    # ⚠ 机身自带的两台（ASUS ROG Flow Z13）有一个非常费时间的坑，记在这里：
+    # **键盘上的静音键会同时关掉麦克风和机身摄像头**。按下时的表现是
+    # ——机身两台出全黑帧或 ffmpeg 直接 I/O error，而外接摄像头一切正常；
+    # 同时 **Windows 音频服务进入崩溃循环**（audiosrv.dll 访问违例，每 1-3
+    # 分钟崩一次，设置里显示"无法找到输入/输出设备"），且**熬得过重启**。
+    # 2026-08-27 为此查了很久，排除过：驱动状态（ProblemCode=0）、Windows
+    # 隐私策略（三级全 Allow）、Frame Server、ASUS WMI（本机没有摄像头开关
+    # 那个设备 ID）、ffmpeg/OpenCV-dshow/OpenCV-MSMF/WinRT MediaCapture 四条
+    # 取图路径、以及 Windows 相机应用本身（也是黑的）。全都不是原因。
+    # ⚠ **看到"机身摄像头黑 + 音频服务崩溃循环"这个组合，先去看静音键。**
+    # 解除后两边都会恢复（音频可能要几分钟才不再崩）。
     {
         "id": "builtin",
         "label": "机身后置（13MP）",
