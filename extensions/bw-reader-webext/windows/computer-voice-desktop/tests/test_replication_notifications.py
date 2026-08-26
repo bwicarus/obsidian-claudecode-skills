@@ -375,3 +375,76 @@ class DueAtGuardTests(unittest.TestCase):
         self.assertEqual(again["dueAtUtcMs"], target, "新的到点时刻要生效")
         self.assertIn("dueAtUtcMs", again.get("_dedupeUpdated") or [],
                       "并且要报告改了什么")
+
+
+class PlaceBindingTests(unittest.TestCase):
+    """地点触发(2026-08-26):真值表只存名字+触发方式,坐标在导出那刻解析。
+    这样归档不会变成坐标副本,用户日后重命名地点时导出会自动跟上。"""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.store = NotificationStore(self.root)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _name_place(self, name: str, lat: float, lon: float) -> None:
+        import replication_places
+        replication_places.save_alias(self.root, name, lat, lon)
+
+    def test_place_stored_by_name_not_coordinates(self) -> None:
+        item = self.store.create(
+            kind="user-todo", title="倒垃圾", audience="user",
+            place={"name": "家", "proximity": "enter"})
+        self.assertEqual(item["place"], {"name": "家", "proximity": "enter"},
+                         "真值表里不该有坐标")
+
+    def test_export_resolves_coordinates(self) -> None:
+        self._name_place("家", 35.6586, 139.7454)
+        self.store.create(kind="user-todo", title="倒垃圾", audience="user",
+                          place={"name": "家", "proximity": "enter"})
+        out = self.root / "notifications-user.json"
+        self.store.export_user_open(out)
+        place = json.loads(out.read_text("utf-8"))["items"][0]["place"]
+        self.assertEqual(place["name"], "家")
+        self.assertAlmostEqual(place["lat"], 35.6586, places=4)
+        self.assertAlmostEqual(place["lon"], 139.7454, places=4)
+        self.assertEqual(place["proximity"], "enter")
+        self.assertEqual(place["radiusMeters"], 200,
+                         "默认半径与别名命中半径同口径,否则自相矛盾")
+
+    def test_unknown_place_exports_null(self) -> None:
+        """名字查不到时导出 null（并在 stderr 出声）—— 而不是导出一个
+        没有坐标的半截对象让下游去猜。"""
+        self.store.create(kind="user-todo", title="买菜", audience="user",
+                          place={"name": "还没命名过的地方",
+                                 "proximity": "enter"})
+        out = self.root / "notifications-user.json"
+        self.store.export_user_open(out)
+        self.assertIsNone(
+            json.loads(out.read_text("utf-8"))["items"][0]["place"])
+
+    def test_place_requires_user_audience(self) -> None:
+        with self.assertRaises(NotificationError):
+            self.store.create(kind="user-todo", title="方向错了",
+                              audience="ai",
+                              place={"name": "家", "proximity": "enter"})
+
+    def test_bad_proximity_rejected(self) -> None:
+        with self.assertRaises(NotificationError):
+            self.store.create(kind="user-todo", title="触发方式错了",
+                              audience="user",
+                              place={"name": "家", "proximity": "nearby"})
+
+    def test_rename_place_follows_on_next_export(self) -> None:
+        """坐标不进真值表的好处:地点被移动/重命名后,已有的提醒自动跟上。"""
+        self._name_place("家", 35.0, 139.0)
+        self.store.create(kind="user-todo", title="倒垃圾", audience="user",
+                          place={"name": "家", "proximity": "enter"})
+        self._name_place("家", 36.0, 140.0)   # 用户重新标定了「家」
+        out = self.root / "notifications-user.json"
+        self.store.export_user_open(out)
+        place = json.loads(out.read_text("utf-8"))["items"][0]["place"]
+        self.assertAlmostEqual(place["lat"], 36.0, places=4,
+                               msg="导出要用当前坐标,不是创建时的快照")

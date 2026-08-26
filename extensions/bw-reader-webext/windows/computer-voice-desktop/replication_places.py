@@ -147,16 +147,40 @@ def load_aliases(root: Path) -> list[dict[str, Any]]:
 
 
 def save_alias(root: Path, name: str, lat: float, lon: float) -> None:
+    """命名一个位置。名字唯一：同名再命名 = **把这个地方挪过去**。
+
+    ⚠ 原来只按坐标就近合并（200m 内更新，否则追加）。于是"搬家后在新家
+    说这里是家"会产生**第二条**叫「家」的记录，而按名字查坐标只会取到
+    第一条 —— 地点提醒会继续在旧家触发，且没有任何地方报错
+    （2026-08-26 由地点提醒的回归测试抓到）。
+
+    坐标→名字那个方向对重复不敏感（各自就近命中），是名字→坐标这个
+    新方向让重名变成了硬歧义，所以在写入侧消除它。
+    """
     aliases = load_aliases(root)
+    want = (name or "").strip()
     for alias in aliases:
-        if _distance_m(lat, lon, alias["lat"], alias["lon"]) \
-                <= ALIAS_HIT_RADIUS_M:
-            alias["name"] = name
-            alias["lat"] = lat
-            alias["lon"] = lon
-            break
+        if str(alias.get("name") or "").strip() != want:
+            continue
+        moved = _distance_m(lat, lon, alias["lat"], alias["lon"])
+        alias["lat"] = lat
+        alias["lon"] = lon
+        if moved > ALIAS_HIT_RADIUS_M:
+            # 挪了很远：多半是搬家/换公司，但也可能是想给另一个地方起
+            # 同一个名字。出声让人当场发现，不要静默改掉。
+            print("提示：「%s」已从原位置挪动约 %d 米" % (want, moved),
+                  file=sys.stderr)
+        break
     else:
-        aliases.append({"name": name, "lat": lat, "lon": lon})
+        for alias in aliases:
+            if _distance_m(lat, lon, alias["lat"], alias["lon"]) \
+                    <= ALIAS_HIT_RADIUS_M:
+                alias["name"] = want
+                alias["lat"] = lat
+                alias["lon"] = lon
+                break
+        else:
+            aliases.append({"name": want, "lat": lat, "lon": lon})
     path = root / ALIASES_FILE_NAME
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps({
