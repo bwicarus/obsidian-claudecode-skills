@@ -54,7 +54,10 @@ label 是位置描述（比如「玄关」「书桌」），**这就是你判断
 | `BW_CAMERA_TIMEOUT` | 摄像头那台机器没反应 | 摄像头所在的机器可能关了或断网了 |
 | `BW_CAMERA_FAILED` | 那台机器给了具体原因 | 把 message 里的原话转达 |
 | `BW_CAMERA_NOT_INSTALLED` | 这台电脑上没装取图组件 | 桌面端还没部署过 |
-| `BW_CAMERA_BAD_ID` | 摄像头名写错了 | 换个名字，或问用户有哪几台 |
+| `BW_CAMERA_BAD_ID` | id 里有非法字符（只允许小写字母数字和 -） | 按元数据里的 `cameras` 重发 |
+
+⚠ 名字**拼错但形状合法**时不是 `BW_CAMERA_BAD_ID`，而是 `BW_CAMERA_FAILED`，
+message 里会直接列出已登记的有哪几台 —— 照着改一次即可，别问用户。
 
 有些摄像头**能被系统看见却读不出**（驱动只认另一套接口）。这种会以
 `BW_CAMERA_FAILED` 出现，message 里是 ffmpeg 的原话。不是你调用错了，
