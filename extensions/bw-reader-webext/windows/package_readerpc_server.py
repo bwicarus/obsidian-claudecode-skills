@@ -52,6 +52,10 @@ RUNTIME_SOURCES = {
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "replication_places.py"
     ),
+    "readerpc-runtime/transit_search.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "transit_search.py"
+    ),
     "readerpc-runtime/scripts/reader_pc_preprocess_worker.py": (
         PROJECT_ROOT / "scripts" / "reader_pc_preprocess_worker.py"
     ),
@@ -446,11 +450,17 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
         staging.replace(release)
         for stable_name in (
             "replication_activity.py", "replication_notifications.py",
-            "replication_places.py",
+            "replication_places.py", "transit_search.py",
         ):
             (root.parent / stable_name).write_bytes(
                 (release / "readerpc-runtime" / stable_name).read_bytes()
             )
+        # 配额闸 CLI 也要稳定路径(AGENTS 引用) —— 它在 scripts/ 子目录打包,
+        # 复制口径与上面不同,单列。
+        (root.parent / "google_api_quota.py").write_bytes(
+            (release / "readerpc-runtime" / "scripts"
+             / "google_api_quota.py").read_bytes()
+        )
         shortcuts = _write_shortcuts(release / EXE_REL)
         _atomic_json(
             root / "current.json",

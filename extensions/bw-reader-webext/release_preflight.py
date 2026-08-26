@@ -187,6 +187,7 @@ WINDOWS_SOURCE_FILES = (
     "computer-voice-desktop/replication_apply.py",
     "computer-voice-desktop/replication_notifications.py",
     "computer-voice-desktop/replication_places.py",
+    "computer-voice-desktop/transit_search.py",
     "computer-voice-desktop/replication_book_links.py",
     "computer-voice-desktop/replication_command_ledger.py",
     "computer-voice-desktop/sidebar_bridge_client.py",
