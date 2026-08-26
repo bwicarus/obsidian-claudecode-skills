@@ -28,8 +28,14 @@ test("HTTP 取件 lease 接在同一个 router 上,回执走同一个 Accept", (
 });
 
 test("端点 CORS 纪律与 snapshot POST 同款,GET 长轮询有上限", () => {
-  assert.match(SERVER, /"\/reader-output\/pending",\s*\n\s*new\[\] \{ "GET", "OPTIONS" \}/);
+  // ⚠ 轮询必须 POST 不是风格:扩展特权 fetch 的 GET 不带 Origin 头
+  // (POST 一律带),GET 版在真机上 100% origin-refused;而放宽无 Origin
+  // 的 GET 会让恶意网页用 no-cors GET 无声排空队列(2026-08-26 实锤)。
+  assert.match(SERVER, /"\/reader-output\/pending",\s*\n\s*new\[\] \{ "POST", "OPTIONS" \}/);
   assert.match(SERVER, /"\/reader-output\/receipt",\s*\n\s*new\[\] \{ "POST", "OPTIONS" \}/);
+  assert.match(BACKGROUND,
+    /fetch\(READER_OUTPUT_PENDING_URL, \{\s*\n\s*method: "POST"/,
+    "扩展轮询必须 POST —— GET 不带 Origin 过不了白名单");
   assert.match(SERVER, /Math\.Clamp\(parsed, 0, 30\)/, "wait 有上限");
   assert.match(SERVER, /PrepareOutputCors/, "同一套 origin 允许集");
 });

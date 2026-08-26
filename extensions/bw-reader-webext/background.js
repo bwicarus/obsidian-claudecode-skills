@@ -84,11 +84,16 @@ function readerEnsurePickupLoop(sourceInstanceId, tabId) {
       }
       let events = [];
       try {
+        // ⚠ 必须 POST：扩展特权 fetch 的 GET 不带 Origin 头（POST 一律带），
+        // 桥的 origin 白名单看不到来源只能拒（2026-08-26 真机实锤：
+        // 快照 POST 一直 origin-ok，取件 GET 全是 origin-refused）。
         // @interaction computer-voice.bridge.request
-        const response = await fetch(
-          `${READER_OUTPUT_PENDING_URL}?sourceInstanceId=${
-            encodeURIComponent(sourceInstanceId)}&wait=25`,
-          { cache: "no-store" });
+        const response = await fetch(READER_OUTPUT_PENDING_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sourceInstanceId, wait: 25 }),
+          cache: "no-store",
+        });
         if (response.ok) {
           const body = await response.json();
           if (body?.contract === "reader-output-pickup/1"

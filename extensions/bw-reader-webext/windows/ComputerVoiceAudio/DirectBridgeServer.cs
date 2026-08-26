@@ -586,7 +586,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         // Python: a script issues no preflight, only browsers do.
         app.MapMethods(
             "/reader-output/pending",
-            new[] { "GET", "OPTIONS" },
+            new[] { "POST", "OPTIONS" },
             context => HandleOutputPendingAsync(context, serviceToken));
         app.MapMethods(
             "/reader-output/receipt",
@@ -1168,20 +1168,50 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         HttpContext context,
         CancellationToken serviceCancellationToken)
     {
-        if (!PrepareOutputCors(context, "GET, OPTIONS"))
+        // ⚠ 轮询必须是 POST，这不是风格问题（2026-08-26 真机实锤）：
+        // 浏览器对扩展特权 fetch 的 GET **不带 Origin 头**（POST 一律带，
+        // 快照上行因此一直没事），白名单看不到来源只能拒。而反过来放宽
+        // "无 Origin 的 GET"也不行——恶意网页可以发 no-cors GET（同样无
+        // Origin、经 Tailscale serve 还自带合法身份头），响应虽读不到，
+        // 队列却被无声排空。POST + JSON 必触发预检，预检必带 Origin。
+        if (!PrepareOutputCors(context, "POST, OPTIONS"))
         {
             return;
         }
-        if (!HttpMethods.IsGet(context.Request.Method))
+        if (!HttpMethods.IsPost(context.Request.Method))
         {
             context.Response.StatusCode =
                 StatusCodes.Status405MethodNotAllowed;
             return;
         }
-        string? source = context.Request.Query["sourceInstanceId"];
-        int wait = int.TryParse(
-            context.Request.Query["wait"], out int parsed)
-            ? Math.Clamp(parsed, 0, 30) : 0;
+        string? source = null;
+        int wait = 0;
+        try
+        {
+            using JsonDocument pollBody = await JsonDocument.ParseAsync(
+                context.Request.Body,
+                cancellationToken: serviceCancellationToken)
+                .ConfigureAwait(false);
+            if (pollBody.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                if (pollBody.RootElement.TryGetProperty(
+                    "sourceInstanceId", out JsonElement sourceValue))
+                {
+                    source = sourceValue.GetString();
+                }
+                if (pollBody.RootElement.TryGetProperty(
+                    "wait", out JsonElement waitValue)
+                    && waitValue.TryGetInt32(out int parsed))
+                {
+                    wait = Math.Clamp(parsed, 0, 30);
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return;
+        }
         if (source is null || !DirectBridgeContract.IsSafeId(source))
         {
             context.Response.StatusCode = StatusCodes.Status400BadRequest;
