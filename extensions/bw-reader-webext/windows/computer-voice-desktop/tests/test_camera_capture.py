@@ -74,7 +74,7 @@ class SnapTests(unittest.TestCase):
         # 症状是测试悄悄跑去连真的 Pi）。
         return mock.patch.dict(
             camera_capture._CAPTURERS,
-            {"ssh-v4l2": lambda source, size: dict(envelope)})
+            {"ssh": lambda source, size: dict(envelope)})
 
     def test_snap_writes_a_file_and_returns_its_path(self):
         root = _root()
@@ -129,7 +129,7 @@ class LatestTests(unittest.TestCase):
         root = _root()
         with mock.patch.dict(
                 camera_capture._CAPTURERS,
-                {"ssh-v4l2": lambda source, size: _envelope()}):
+                {"ssh": lambda source, size: _envelope()}):
             meta = camera_capture.snap("pi", root=root)
         Path(meta["path"]).unlink()
         self.assertIsNone(camera_capture.latest("pi", root))
@@ -148,12 +148,12 @@ class InjectionTests(unittest.TestCase):
                 stdout=json.dumps(_envelope()), stderr="", returncode=0)
 
         source = {
-            "id": "x", "kind": "ssh-v4l2", "host": "pi",
+            "id": "x", "kind": "ssh", "host": "pi",
             "script": "/tmp/s.py",
             "device": "/dev/video0; rm -rf ~",
         }
         with mock.patch.object(camera_capture.subprocess, "run", fake_run):
-            camera_capture._capture_ssh_v4l2(source, None)
+            camera_capture._capture_ssh(source, None)
         remote = shlex.split(captured["command"][-1])
         self.assertEqual(
             remote[remote.index("--device") + 1], "/dev/video0; rm -rf ~")
@@ -166,7 +166,7 @@ class FailureTests(unittest.TestCase):
 
     def test_remote_error_is_passed_through_verbatim(self):
         """Pi 那边说了原因就原样带上来 —— 这段文字最终会给到 AI 和用户。"""
-        source = {"id": "x", "kind": "ssh-v4l2", "host": "pi",
+        source = {"id": "x", "kind": "ssh", "host": "pi",
                   "script": "/tmp/s.py"}
         payload = json.dumps({"ok": False, "error": "这台机器上没有 ffmpeg"})
         with mock.patch.object(
@@ -174,12 +174,12 @@ class FailureTests(unittest.TestCase):
                 return_value=self._run(stdout=payload, stderr="",
                                        returncode=2)):
             with self.assertRaises(camera_capture.CameraError) as caught:
-                camera_capture._capture_ssh_v4l2(source, None)
+                camera_capture._capture_ssh(source, None)
         self.assertIn("ffmpeg", str(caught.exception))
 
     def test_silent_remote_reports_the_exit_code_and_stderr(self):
         """一个字都没有时最容易被写成'取图失败'四个字。那样就没法查了。"""
-        source = {"id": "x", "kind": "ssh-v4l2", "host": "pi",
+        source = {"id": "x", "kind": "ssh", "host": "pi",
                   "script": "/tmp/s.py"}
         with mock.patch.object(
                 camera_capture.subprocess, "run",
@@ -187,7 +187,7 @@ class FailureTests(unittest.TestCase):
                     stdout="", stderr="ssh: Could not resolve hostname pi",
                     returncode=255)):
             with self.assertRaises(camera_capture.CameraError) as caught:
-                camera_capture._capture_ssh_v4l2(source, None)
+                camera_capture._capture_ssh(source, None)
         self.assertIn("resolve hostname", str(caught.exception))
 
     def test_unknown_kind_names_what_is_supported(self):
@@ -200,7 +200,7 @@ class FailureTests(unittest.TestCase):
         }), encoding="utf-8")
         with self.assertRaises(camera_capture.CameraError) as caught:
             camera_capture.snap("x", root=root)
-        self.assertIn("ssh-v4l2", str(caught.exception))
+        self.assertIn("ssh", str(caught.exception))
 
 
 class SnapshotIsolationTests(unittest.TestCase):

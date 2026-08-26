@@ -3,8 +3,9 @@
 
 用户 2026-08-27 定的形状：
 
-- 摄像头挂在别的机器上（第一台在 Pi），**图像最终落到 Windows 本地**，
-  于是 AI 在本地跑任务时直接读文件就能看见。
+- 摄像头有的挂在别的机器上（Pi），有的就接在这台 Windows 上。无论哪种，
+  **图像最终都落到 Windows 本地**，于是 AI 在本地跑任务时直接读文件就
+  能看见。
 - 快照页会有一个「摄像头」tab，但那**只是给用户看的显示口**。
   ⚠ 图像绝不进快照载荷 —— AI 不该每取一次快照就被塞一张照片，
   它只在自己决定要看的时候来拍。这条是用户明说的。
@@ -20,8 +21,10 @@
 留好的扩展位（用户说后面会换带云台、补光的高清摄像头）：
 
 - 摄像头登记在 `camera-sources.json`，一台一条，`kind` 决定怎么取图。
-  现在只有 `ssh-v4l2`（ssh 到那台机器跑 ffmpeg）；将来的网络摄像头
-  加一个 `http` kind 即可，调用方那句 `snap <id>` 一个字都不用改。
+  现在有 `local`（就接在这台机器上）和 `ssh`（在别的机器上，ssh 过去拍）；
+  将来的网络摄像头加一个 `http` kind 即可，调用方那句 `snap <id>` 一个字
+  都不用改。两条路跑的是**同一个取图脚本**（scripts/camera_snap.py），
+  只有"怎么打开设备"那一句不同。
 - `--size` 已经通到底层，换高分辨率不用改形状。
 - 云台/补光将来作为新子命令（`pan` / `light`），与 `snap` 平级。
 """
@@ -44,19 +47,46 @@ SOURCES_CONTRACT = "camera-sources/1"
 # 每台摄像头留最近多少张。够回看"刚才那下是什么"，又不会慢慢吃满盘。
 KEEP_FRAMES = 20
 SSH_TIMEOUT_SECONDS = 120
+# 本机 dshow 打开设备就要 ~3.3 秒（实测），比 Pi 的 v4l2 慢不少。
+LOCAL_TIMEOUT_SECONDS = 120
 
 # 第一台摄像头。找不到登记文件时按这个建，省得用户手写 JSON。
 _DEFAULT_SOURCES = [
+    # 摄像头装歪时把 rotate 填 90/180/270 —— 在取图那一层转正，下游
+    # （AI、快照页）就都不必各自补偿。装正了就留 0。
+    # label 按位置改比按型号好（"玄关""厨房"），等角度定下来再改。
     {
         "id": "pi",
         "label": "Pi 摄像头",
-        "kind": "ssh-v4l2",
+        "kind": "ssh",
         "host": "pi",
-        "script": "/home/bwicarus/claude/scripts/pi_camera_snap.py",
+        "script": "/home/bwicarus/claude/scripts/camera_snap.py",
         "device": "/dev/video0",
         "size": "1280x720",
-        # 摄像头装歪时填 90/180/270 把画面转正 —— 在这里转，下游（AI、
-        # 快照页）就都不必各自补偿。装正了就留 0。
+        "rotate": 0,
+    },
+    {
+        "id": "c920",
+        "label": "C920（外接）",
+        "kind": "local",
+        "device": "HD Pro Webcam C920",
+        "size": "1280x720",
+        "rotate": 0,
+    },
+    {
+        "id": "builtin",
+        "label": "笔记本内置",
+        "kind": "local",
+        "device": "OV13B10",
+        "size": "1280x720",
+        "rotate": 0,
+    },
+    {
+        "id": "usb5m",
+        "label": "USB 5M",
+        "kind": "local",
+        "device": "USB2.0 5M UVC WebCam",
+        "size": "1280x720",
         "rotate": 0,
     },
 ]
@@ -122,7 +152,7 @@ def _prune(directory: Path) -> None:
             pass
 
 
-def _capture_ssh_v4l2(source: dict[str, Any], size: str | None) -> dict:
+def _capture_ssh(source: dict[str, Any], size: str | None) -> dict:
     """ssh 到摄像头所在的机器跑取图脚本，拿回 JSON 信封。
 
     ⚠ ssh 把 argv **拼成一条字符串交给远端 shell**。这里的参数目前都来自
@@ -154,23 +184,75 @@ def _capture_ssh_v4l2(source: dict[str, Any], size: str | None) -> dict:
             "连「%s」取图超时（%d 秒）——那台机器睡了或网络断了"
             % (host, SSH_TIMEOUT_SECONDS)) from error
 
-    stdout = (result.stdout or "").strip()
-    if not stdout:
+    return _parse_envelope(
+        result.stdout, result.stderr, result.returncode, "「%s」" % host)
+
+
+def _snap_script_path() -> Path:
+    """取图脚本（与 Pi 上是同一份源码，见 scripts/camera_snap.py）。
+
+    ⚠ 一份而不是两份：两个平台真正不同的只有"怎么打开设备"那一句 ffmpeg
+    参数，挑帧、转正、信封格式、错误措辞全都一样。拆开的话这些共同部分
+    会各自慢慢漂移，而漂移那天没有任何地方会报错。
+    """
+    return default_root() / "camera_snap.py"
+
+
+def _capture_local(source: dict[str, Any], size: str | None) -> dict:
+    """这台机器上直接接着的摄像头（Windows DirectShow）。
+
+    与 ssh 那条路唯一的区别是不出网 —— 跑的是同一个脚本、拿的是同一种
+    信封，所以下游一个字都不用改。
+    """
+    script = _snap_script_path()
+    if not script.is_file():
         raise CameraError(
-            "「%s」没有任何输出（退出码 %s）：%s"
-            % (host, result.returncode, (result.stderr or "").strip()[:300]))
+            "找不到取图脚本 %s（桌面端还没部署过？）" % script)
+    device = str(source.get("device") or "")
+    if not device:
+        raise CameraError(
+            "摄像头「%s」的登记缺 device" % source.get("id"))
+    argv = [sys.executable, str(script), "snap",
+            "--device", device,
+            "--size", str(size or source.get("size") or "1280x720")]
+    rotate = int(source.get("rotate") or 0)
+    if rotate:
+        argv += ["--rotate", str(rotate)]
     try:
-        payload = json.loads(stdout.splitlines()[-1])
+        result = subprocess.run(
+            argv, capture_output=True, text=True, encoding="utf-8",
+            timeout=LOCAL_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        raise CameraError(
+            "本机取图超时（%d 秒）——摄像头被别的程序占着？"
+            % LOCAL_TIMEOUT_SECONDS) from error
+    return _parse_envelope(
+        result.stdout, result.stderr, result.returncode, "本机")
+
+
+def _parse_envelope(
+    stdout: str | None, stderr: str | None, code: int, who: str
+) -> dict:
+    """两条取图路共用的信封解析。**失败必须带上原因** —— 这段文字是
+    AI 唯一能告诉用户"为什么没拍到"的依据。"""
+    text = (stdout or "").strip()
+    if not text:
+        raise CameraError(
+            "%s取图没有任何输出（退出码 %s）：%s"
+            % (who, code, (stderr or "").strip()[:300]))
+    try:
+        payload = json.loads(text.splitlines()[-1])
     except json.JSONDecodeError as error:
         raise CameraError(
-            "「%s」的输出不是 JSON：%s" % (host, stdout[:300])) from error
+            "%s取图的输出不是 JSON：%s" % (who, text[:300])) from error
     if not payload.get("ok"):
         raise CameraError(str(payload.get("error") or "取图失败但没说原因"))
     return payload
 
 
 _CAPTURERS = {
-    "ssh-v4l2": _capture_ssh_v4l2,
+    "ssh": _capture_ssh,
+    "local": _capture_local,
     # 将来的网络摄像头挂这里：{"kind": "http", "url": ...} → _capture_http。
     # 调用方那句 snap <id> 一个字都不用改。
 }
@@ -239,6 +321,38 @@ def latest(camera_id: str, root: Path | None = None) -> dict[str, Any] | None:
     return meta
 
 
+def probe_all(root: Path | None = None) -> list[dict[str, Any]]:
+    """逐台试拍，报告谁能用谁不能用。
+
+    ⚠ 这是这套东西的**诊断出口**（silent-failure-lessons 规则4：新功能
+    落地时诊断出口必须已在）。摄像头会被拔、被别的程序占、被系统的隐私
+    策略挡 —— 没有这条命令，表现就只是"AI 说它看不到"，而没人知道是哪
+    一环。实测就用它发现了两台设备**能被枚举但读不出**。
+    """
+    rows = []
+    for source in load_sources(root):
+        camera_id = str(source.get("id"))
+        row = {
+            "id": camera_id,
+            "label": source.get("label") or camera_id,
+            "kind": source.get("kind"),
+            "device": source.get("device"),
+        }
+        started = time.time()
+        try:
+            meta = snap(camera_id, root=root)
+            row["ok"] = True
+            row["elapsedMs"] = int((time.time() - started) * 1000)
+            for key in ("width", "height", "brightness", "sharpness"):
+                if key in meta:
+                    row[key] = meta[key]
+        except CameraError as error:
+            row["ok"] = False
+            row["error"] = str(error)[:300]
+        rows.append(row)
+    return rows
+
+
 def describe_all(root: Path | None = None) -> list[dict[str, Any]]:
     """给快照页用：每台摄像头 + 它最近一张的情况。"""
     rows = []
@@ -261,6 +375,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("list", help="列出已登记的摄像头及各自最近一张")
+    sub.add_parser("probe", help="逐台试拍，看谁能用（诊断用）")
 
     snap_command = sub.add_parser("snap", help="拍一张，打印本地路径")
     snap_command.add_argument("id", nargs="?", default="pi")
@@ -279,6 +394,9 @@ def main() -> int:
             print(json.dumps(
                 {"ok": True, "cameras": describe_all(root)},
                 ensure_ascii=False, indent=1))
+        elif args.command == "probe":
+            print(json.dumps({"ok": True, "cameras": probe_all(root)},
+                             ensure_ascii=False, indent=1))
         elif args.command == "snap":
             print(json.dumps(
                 {"ok": True, **snap(args.id, size=args.size, root=root)},

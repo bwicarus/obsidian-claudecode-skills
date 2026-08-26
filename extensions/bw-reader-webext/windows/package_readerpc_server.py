@@ -69,6 +69,9 @@ RUNTIME_SOURCES = {
     "readerpc-runtime/scripts/reader_unimernet_base.yaml": (
         PROJECT_ROOT / "scripts" / "reader_unimernet_base.yaml"
     ),
+    "readerpc-runtime/scripts/camera_snap.py": (
+        PROJECT_ROOT / "scripts" / "camera_snap.py"
+    ),
     "readerpc-runtime/scripts/google_vision_ocr.py": (
         PROJECT_ROOT / "scripts" / "google_vision_ocr.py"
     ),
@@ -465,6 +468,11 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
         (root.parent / "google_api_quota.py").write_bytes(
             (release / "readerpc-runtime" / "scripts"
              / "google_api_quota.py").read_bytes()
+        )
+        # 取图脚本同理:它与 Pi 上跑的是同一份源码,本机摄像头也用它。
+        (root.parent / "camera_snap.py").write_bytes(
+            (release / "readerpc-runtime" / "scripts"
+             / "camera_snap.py").read_bytes()
         )
         shortcuts = _write_shortcuts(release / EXE_REL)
         _atomic_json(
