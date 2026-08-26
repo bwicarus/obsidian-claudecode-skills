@@ -219,6 +219,11 @@ struct ReaderWidgetSystemData: Codable, Equatable, Sendable {
         var title: String
         var kind: String
         var state: String
+        // 两个后加的字段都设成可选：老缓存里没有它们，非可选会让
+        // 整份缓存解码失败（"升级把旧数据全废掉"是最容易忽略的一种
+        // 回归）。widget 侧排到点通知需要这两个。
+        var body: String?
+        var dueAtMs: Int64?
     }
 
     var review: Review?

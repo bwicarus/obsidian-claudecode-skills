@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UserNotifications
 import WidgetKit
 
 private struct ReaderSnapshotEntry: TimelineEntry {
@@ -155,6 +156,37 @@ private struct SystemDataEntry: TimelineEntry {
     let data: ReaderWidgetSystemData?
 }
 
+/// Widget 自己的缓存（2026-08-26 调研实锤：Widget target 在 project.yml
+/// 里**没有** CODE_SIGN_ENTITLEMENTS —— App 与 Safari 扩展都有，唯独它
+/// 没有。于是 `containerURL(forSecurityApplicationGroupIdentifier:)` 在
+/// widget 进程里返回 nil，App Group 的读写一直静默无效（这也解释了
+/// 「最近阅读」小组件为何长年显示占位内容）。
+///
+/// 修法选了零签名风险的一条：widget 既然已经自己拉数据，就**不需要**跟
+/// App 共享容器 —— 缓存写进自己的沙箱即可。真要修 App Group 得在 Apple
+/// 后台给 widget 的 App ID 开 App Groups 能力并重签描述文件，那是另一件
+/// 事（会动到目前全绿的签名链），留作独立改动。
+private enum WidgetLocalCache {
+    private static var url: URL? {
+        FileManager.default
+            .urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("bw-widget-system.json")
+    }
+
+    static func read() -> ReaderWidgetSystemData? {
+        guard let url, let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(
+            ReaderWidgetSystemData.self, from: data)
+    }
+
+    static func write(_ value: ReaderWidgetSystemData) {
+        guard let url, let data = try? JSONEncoder().encode(value) else {
+            return
+        }
+        try? data.write(to: url, options: [.atomic])
+    }
+}
+
 private struct SystemDataProvider: TimelineProvider {
     private let store = ReaderNativeFeatureStore()
 
@@ -180,7 +212,7 @@ private struct SystemDataProvider: TimelineProvider {
             date: Date(),
             data: context.isPreview
                 ? placeholder(in: context).data
-                : store.readWidgetSystemData()))
+                : (WidgetLocalCache.read() ?? store.readWidgetSystemData())))
     }
 
     func getTimeline(
@@ -196,9 +228,13 @@ private struct SystemDataProvider: TimelineProvider {
             let now = Date()
             var data = await Self.fetchRemote()
             if let fresh = data {
+                WidgetLocalCache.write(fresh)
+                await Self.scheduleDueNotifications(fresh)
+                // App Group 目前在 widget 侧无效（见 WidgetLocalCache 注释），
+                // 这行是"修好之后自动受益"的顺水人情，不承担正确性。
                 try? store.writeWidgetSystemData(fresh)
             } else {
-                data = store.readWidgetSystemData()
+                data = WidgetLocalCache.read() ?? store.readWidgetSystemData()
             }
             completion(Timeline(
                 entries: [SystemDataEntry(date: now, data: data)],
@@ -206,9 +242,69 @@ private struct SystemDataProvider: TimelineProvider {
         }
     }
 
+    /// widget 侧的到点通知排程（2026-08-26）。
+    ///
+    /// 为什么放在 widget 里：AI 在电脑上建的提醒，如果 iPad 到点前**没
+    /// 打开过 App**，就没有任何人去排那条本地通知 —— 提醒到点不会响。
+    /// widget 的 timeline 每 15–60 分钟被系统唤起一次（App 关着也跑），
+    /// 顺路把到点通知排上，这个洞就补住了。
+    ///
+    /// 依据（Apple 官方，2026-08-26 实取）：UNUserNotificationCenter 的
+    /// 文档原文是 "for your app **or app extension**"，UNError
+    /// .notificationsNotAllowed 也明写 "your app or app extension"；
+    /// App Extension Programming Guide 的禁止清单里没有通知。
+    ///
+    /// 纪律：
+    /// - **绝不在 widget 里请求权限**（没有可交互的宿主），只在已授权时排；
+    /// - identifier 与 App 侧**故意相同** —— 同 id 是替换语义，两边算的是
+    ///   同一份服务器数据，谁先排都一样，不会重复打扰；
+    /// - 排程结果随下次拉取上报给桥（见 fetchRemote 的 query），否则
+    ///   widget 里的失败在真机上等价于静默。
+    private static func scheduleDueNotifications(
+        _ data: ReaderWidgetSystemData
+    ) async {
+        let center = UNUserNotificationCenter.current()
+        guard await center.notificationSettings().authorizationStatus
+            == .authorized else {
+            lastScheduleOutcome = "denied"
+            return
+        }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let due = data.notifications
+            .compactMap { item -> (ReaderWidgetSystemData.NotificationItem, Int64)? in
+                guard let at = item.dueAtMs, at > nowMs else { return nil }
+                return (item, at)
+            }
+            .sorted { $0.1 < $1.1 }
+            .prefix(32)
+        for (item, at) in due {
+            let content = UNMutableNotificationContent()
+            content.title = item.title
+            if let body = item.body, !body.isEmpty { content.body = body }
+            content.sound = .default
+            content.interruptionLevel = .timeSensitive
+            let components = Calendar.current.dateComponents(
+                [.year, .month, .day, .hour, .minute],
+                from: Date(timeIntervalSince1970: Double(at) / 1000))
+            try? await center.add(UNNotificationRequest(
+                identifier: "bw-due-" + item.id,
+                content: content,
+                trigger: UNCalendarNotificationTrigger(
+                    dateMatching: components, repeats: false)))
+        }
+        lastScheduleOutcome = "scheduled=" + String(due.count)
+    }
+
+    /// 上一轮排程结果，随下次拉取捎给桥做诊断（widget 里没有控制台）。
+    private static var lastScheduleOutcome = "init"
+
     private static func fetchRemote() async -> ReaderWidgetSystemData? {
+        let reported = lastScheduleOutcome
+            .addingPercentEncoding(
+                withAllowedCharacters: .alphanumerics) ?? "unknown"
         guard let url = URL(
-            string: "https://bwicarus-2.taile44d0c.ts.net/widget/system-data")
+            string: "https://bwicarus-2.taile44d0c.ts.net"
+                + "/widget/system-data?widgetSchedule=" + reported)
         else { return nil }
         var request = URLRequest(url: url)
         request.timeoutInterval = 8
@@ -223,11 +319,14 @@ private struct SystemDataProvider: TimelineProvider {
             one -> ReaderWidgetSystemData.NotificationItem? in
             guard let id = one["id"] as? String,
                   let title = one["title"] as? String else { return nil }
+            let body = one["body"] as? String
             return ReaderWidgetSystemData.NotificationItem(
                 id: id,
                 title: title,
                 kind: one["kind"] as? String ?? "",
-                state: one["state"] as? String ?? "pending")
+                state: one["state"] as? String ?? "pending",
+                body: (body?.isEmpty ?? true) ? nil : body,
+                dueAtMs: (one["dueAtUtcMs"] as? NSNumber)?.int64Value)
         }
         var review: ReaderWidgetSystemData.Review?
         if let raw = root["review"] as? [String: Any],

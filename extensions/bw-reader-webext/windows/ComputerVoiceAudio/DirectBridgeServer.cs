@@ -1190,6 +1190,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             return;
         }
+        // widget 侧上报的上一轮排程结果。widget extension 里没有控制台,
+        // 它排通知成没成在真机上等价于静默 —— 让它捎在拉取请求里回来。
+        string? widgetSchedule = context.Request.Query["widgetSchedule"];
+        if (!string.IsNullOrEmpty(widgetSchedule) && widgetSchedule.Length <= 40)
+        {
+            AppendOutputPickupLog("widget-fetch	" + widgetSchedule);
+        }
         object view = ReplicationCommandProtocol.ReadNotificationsView(
             System.IO.Path.Combine(
                 System.IO.Path.GetDirectoryName(_replicationDigestsPath)!,

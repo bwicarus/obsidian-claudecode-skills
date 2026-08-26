@@ -46,6 +46,9 @@ final class ReaderSystemProjection {
         let resolvedIds: [String]
         let remindersState: String
         let alarmsState: String
+        // 通知权限被拒时整条横幅+到点通道都是哑的,而回执原来完全看不出
+        // 来 —— 与本文件自己写的纪律相悖(见 silent-failure-lessons)。
+        let notificationsState: String
     }
 
     // MARK: - 入口（bridge 的 system-projection action 调用）
@@ -63,7 +66,8 @@ final class ReaderSystemProjection {
             reviewNew: reviewNew,
             reviewAtMs: reviewAtMs,
             syncAtMs: syncAtMs)
-        await postLocalNotificationsForNewPending(notifications)
+        let notificationsState =
+            await postLocalNotificationsForNewPending(notifications)
         // 到点触发（2026-08-26 用户诉求「提醒要真的叫醒我」第一层）：
         // 带 dueAt 的条目在到点时刻**排一条本地通知** —— 一旦排上，
         // App 关掉、桥离线、iPad 断网都照响，这是唯一不依赖任何在线
@@ -74,7 +78,8 @@ final class ReaderSystemProjection {
         return Outcome(
             resolvedIds: resolved,
             remindersState: state,
-            alarmsState: alarms)
+            alarmsState: alarms,
+            notificationsState: notificationsState)
     }
 
     // MARK: - 小组件数据
@@ -96,7 +101,9 @@ final class ReaderSystemProjection {
             notifications: notifications.prefix(Self.maximumItems).map {
                 ReaderWidgetSystemData.NotificationItem(
                     id: $0.id, title: $0.title,
-                    kind: $0.kind, state: $0.state)
+                    kind: $0.kind, state: $0.state,
+                    body: $0.body.isEmpty ? nil : $0.body,
+                    dueAtMs: $0.dueAtMs)
             },
             lastSyncAtMs: syncAtMs,
             updatedAtMs: Int64(Date().timeIntervalSince1970 * 1000))
@@ -111,7 +118,9 @@ final class ReaderSystemProjection {
 
     // MARK: - 本地横幅（新 pending 才响，去重持久化防重复打扰）
 
-    private func postLocalNotificationsForNewPending(_ items: [Item]) async {
+    private func postLocalNotificationsForNewPending(
+        _ items: [Item]
+    ) async -> String {
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
         if settings.authorizationStatus == .notDetermined {
@@ -119,7 +128,7 @@ final class ReaderSystemProjection {
                 options: [.alert, .badge, .sound])
         }
         guard await center.notificationSettings().authorizationStatus
-            == .authorized else { return }
+            == .authorized else { return "denied" }
         var seen = Set(defaults?.stringArray(forKey: seenKey) ?? [])
         for item in items where item.state == "pending"
             && !seen.contains(item.id) {
@@ -143,6 +152,7 @@ final class ReaderSystemProjection {
         defaults?.set(
             Array(seen.filter { live.contains($0) }.prefix(200)),
             forKey: seenKey)
+        return "authorized"
     }
 
     // MARK: - 到点触发（本地通知排程）

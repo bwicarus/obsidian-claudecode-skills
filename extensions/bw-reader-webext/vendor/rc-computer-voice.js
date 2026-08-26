@@ -5131,6 +5131,12 @@ if (window.__bwPwaProviderOnly) return;
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: action, id: id })
+      }).then(function () {
+        try {
+          if (typeof window.__BW_SYSTEM_PROJECTION_TRIGGER__ === 'function') {
+            window.__BW_SYSTEM_PROJECTION_TRIGGER__();
+          }
+        } catch (e) {}
       }).catch(function () {
         delete hiddenIds[id];
         if (box) render(box, lastItems);
@@ -5268,6 +5274,12 @@ if (window.__bwPwaProviderOnly) return;
       }).finally(function () { syncing = false; });
     }
     scheduleNext(RETRY_LADDER_MS[0]);
+    // 用户在通知 tab 完成/取消后,过一轮 Windows 对账周期再同步一次:
+    // 否则已排的到点通知/闹钟要等 30 分钟巡航才撤销 —— 用户已经处理掉
+    // 的事情却在到点时又响一次,比不响更糟。
+    window.__BW_SYSTEM_PROJECTION_TRIGGER__ = function () {
+      setTimeout(sync, 75000);
+    };
   })();
 
   function lookupJapaneseFallback(value) {
