@@ -95,3 +95,29 @@ test("地图卡:静态图是基底,活地图是叠加(渐进增强)", () => {
   assert.match(VOICE, /destroy: function \(\)/,
     "必须能销毁:每张关掉的地图卡都留一对监听会随卡片数量累积");
 });
+
+test("地图瓦片尺寸必须钉死 —— 卡片的全局图片样式会把它压出缝", () => {
+  const VOICE = read("_server_deploy/static/pdf/rc-voicecall.js");
+  // 实测:.vc-card-bd img{max-width:100%;border-radius:6px} 把每张 256px
+  // 瓦片压窄并倒角,而定位仍按 256 步进 —— 2×2 时缝隙正好拼成一个十字。
+  const at = VOICE.indexOf(".vc-map-tile{");
+  assert.ok(at >= 0, "瓦片样式在场");
+  const rule = VOICE.slice(at, at + 260);
+  assert.match(rule, /width:256px!important/, "宽度要压过全局 img 规则");
+  assert.match(rule, /height:256px!important/);
+  assert.match(rule, /max-width:none!important/, "全局 max-width 必须被压过");
+  assert.match(rule, /border-radius:0!important/, "倒角会让瓦片之间露缝");
+});
+
+test("瓦片来源:谷歌经桥代取,凭据不出本机;失败整体退回 OSM", () => {
+  const VOICE = read("_server_deploy/static/pdf/rc-voicecall.js");
+  assert.match(VOICE, /\/map\/tile\?z=/,
+    "设备端 URL 不带 session/key —— 官方瓦片接口两者都要,只能由桥代取");
+  // ⚠ 只查真实 URL 用法,别查字面量 —— 代码里的注释正解释了'不要用那个
+  // 端点',宽泛的正则会把注释也判成违规(第一次写就撞上了)。
+  assert.doesNotMatch(VOICE, /https:\/\/mt[0-9]\.google\.com/,
+    "那个到处能搜到的端点是未公开的,用它违反服务条款");
+  assert.match(VOICE, /_mapProviderDown/, "挂过一次就整轮不再试,避免抖动");
+  assert.match(VOICE, /onProvider/,
+    "用谁的图就署谁的名 —— 退回 OSM 还挂着 © Google 是错的");
+});

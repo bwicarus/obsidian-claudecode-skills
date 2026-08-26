@@ -410,6 +410,8 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-flow-cap{font-size:11px;color:#7f92b8;margin-bottom:4px}' +
       '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#b9a8ff;margin-bottom:6px;flex:none}' +
       '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
+      '.vc-map-credit{position:absolute;right:5px;bottom:4px;z-index:2;font:10px/1.4 system-ui,sans-serif;color:#e8e8ee;background:rgba(16,23,38,.55);border-radius:4px;padding:0 4px;pointer-events:none;opacity:0;transition:opacity .18s}' +
+      '.vc-ig-cell.vc-map-ready .vc-map-credit{opacity:1}' +
       '.vc-map-live{position:absolute;inset:0;z-index:1;overflow:hidden;touch-action:none;cursor:grab;background:#0f1420;opacity:0;transition:opacity .18s}' +
       '.vc-ig-cell.vc-map-ready .vc-map-live{opacity:1}' +
       '.vc-ig-cell[data-map-url] .vc-ig-img{pointer-events:none}' +
@@ -422,7 +424,7 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-map-z,.vc-map-x{width:34px;height:34px;border-radius:8px;border:1px solid #2a3550;background:#1a2540;color:#dbe4f8;font-size:16px;cursor:pointer;flex:none;padding:0}' +
       '.vc-map-vp{flex:1;position:relative;overflow:hidden;touch-action:none;cursor:grab}' +
       '.vc-map-world{position:absolute;inset:0}' +
-      '.vc-map-tile{position:absolute;width:256px;height:256px;pointer-events:none;user-select:none}' +
+      '.vc-map-tile{position:absolute;width:256px!important;height:256px!important;max-width:none!important;min-width:0;border-radius:0!important;margin:0!important;pointer-events:none;user-select:none;display:block}' +
       '.vc-map-pin{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:#e5484d;border:2.5px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,.5);pointer-events:none}' +
       '.vc-card-pin{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
       '.vc-card-pin svg{width:11px;height:11px}' +
@@ -2672,15 +2674,35 @@ if (window.__bwPwaProviderOnly) return;
   /// 把一个容器变成活地图。inline 与全屏共用这一个引擎（唯一实现）。
   /// 返回 { destroy } —— 卡片被移除时要断掉监听，否则每张关掉的地图卡
   /// 都会在 window 上留一对 scroll/resize 监听（泄漏会随卡片数量累积）。
-  function _mountMapView(viewport, meta) {
+  // 瓦片来源：优先谷歌（与卡片上的静态图、与用户手机里的地图同一套
+  // 样式），桥不可用时整体退回 OpenStreetMap。
+  //
+  // 谷歌那条**必须**经桥代取：官方 Map Tiles API 每个瓦片都要带
+  // session + key，让设备端拼这个 URL 等于把密钥发到每个表面、写进每条
+  // 请求。桥代取之后设备端只看到 /map/tile?z=&x=&y=。
+  // （顺带：那个到处都能搜到的 mt0.google.com/vt 端点是未公开的，
+  //   用它违反服务条款，不要图省事。）
+  var _mapBridgeBase = 'https://bwicarus-2.taile44d0c.ts.net';
+  var _mapProviderDown = false;   // 谷歌那条挂过一次就整轮不再试
+  function _mapTileUrl(z, x, y, useOsm) {
+    var proxied = /^127\.0\.0\.1$|^localhost$/.test(location.hostname);
+    if (useOsm) {
+      var osm = 'https://tile.openstreetmap.org/' + z + '/' + x + '/' + y + '.png';
+      return proxied ? '/pdf/api/img-proxy?url=' + encodeURIComponent(osm) : osm;
+    }
+    var google = _mapBridgeBase + '/map/tile?z=' + z + '&x=' + x + '&y=' + y;
+    return proxied ? '/pdf/api/img-proxy?url=' + encodeURIComponent(google) : google;
+  }
+
+  function _mountMapView(viewport, meta, opts) {
+    opts = opts || {};
     var TS = 256;
-    var useProxy = /^127\.0\.0\.1$|^localhost$/.test(location.hostname);
+    var useOsm = _mapProviderDown;
     function tileSrc(z, x, y) {
       var n = 1 << z;
       x = ((x % n) + n) % n;
       if (y < 0 || y >= n) return '';
-      var remote = 'https://tile.openstreetmap.org/' + z + '/' + x + '/' + y + '.png';
-      return useProxy ? '/pdf/api/img-proxy?url=' + encodeURIComponent(remote) : remote;
+      return _mapTileUrl(z, x, y, useOsm);
     }
     function w2ll(wx, wy, z) {
       var s = TS * (1 << z);
@@ -2718,6 +2740,20 @@ if (window.__bwPwaProviderOnly) return;
           img = document.createElement('img');
           img.className = 'vc-map-tile';
           img.decoding = 'async';
+          img.addEventListener('error', function () {
+            // 谷歌那条挂了（桥离线 / 拿不到密钥 / 额度问题）：**整体**
+            // 换成 OSM 重画，而不是留一堆破图。只切一次，避免抖动。
+            if (useOsm) return;
+            useOsm = true;
+            _mapProviderDown = true;
+            Object.keys(tiles).forEach(function (k) {
+              tiles[k].remove(); delete tiles[k];
+            });
+            if (typeof opts.onProvider === 'function') {
+              try { opts.onProvider('osm'); } catch (e) {}
+            }
+            render();
+          }, { once: true });
           img.src = src;
           tiles[key] = img;
           world.appendChild(img);
@@ -2829,14 +2865,21 @@ if (window.__bwPwaProviderOnly) return;
     ov.className = 'vc-mapov';
     ov.innerHTML =
       '<div class="vc-map-hd"><span>' + esc(title || '地图') + '</span>' +
-      '<span class="vc-map-attr">© OpenStreetMap</span>' +
+      '<span class="vc-map-attr">© Google</span>' +
       '<button type="button" class="vc-map-z" data-d="1">＋</button>' +
       '<button type="button" class="vc-map-z" data-d="-1">－</button>' +
       '<button type="button" class="vc-map-x">✕</button></div>' +
       '<div class="vc-map-vp"></div>';
     document.body.appendChild(ov);
+    var attr = ov.querySelector('.vc-map-attr');
     var view = _mountMapView(ov.querySelector('.vc-map-vp'), {
       lat: meta.lat, lon: meta.lon, zoom: meta.zoom, marks: meta.marks
+    }, {
+      // 用谁的图就署谁的名 —— 退回 OSM 了还挂着 © Google 是错的。
+      onProvider: function (which) {
+        if (attr) attr.textContent = which === 'osm'
+          ? '© OpenStreetMap' : '© Google';
+      }
     });
     ov.querySelectorAll('.vc-map-z').forEach(function (btn) {
       btn.addEventListener('click', function () { view.zoom(+btn.dataset.d); });
@@ -2858,8 +2901,17 @@ if (window.__bwPwaProviderOnly) return;
       var live = document.createElement('div');
       live.className = 'vc-map-live';
       cell.appendChild(live);
+      var credit = document.createElement('span');
+      credit.className = 'vc-map-credit';
+      credit.textContent = '© Google';
+      cell.appendChild(credit);
       try {
-        cell.__bwMapView = _mountMapView(live, meta);
+        cell.__bwMapView = _mountMapView(live, meta, {
+          onProvider: function (which) {
+            credit.textContent = which === 'osm'
+              ? '© OpenStreetMap' : '© Google';
+          }
+        });
         cell.__bwMapMeta = meta;
         cell.classList.add('vc-map-ready');   // 就位后才盖住静态图
       } catch (e) {

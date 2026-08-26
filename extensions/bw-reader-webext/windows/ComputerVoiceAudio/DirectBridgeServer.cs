@@ -370,6 +370,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly ReplicationCommandSpool _replicationCommandSpool;
     private readonly string _replicationDigestsPath;
     private readonly ReaderHttpPickupService _readerHttpPickup;
+    private readonly ReaderMapTiles _mapTiles = new();
     private readonly NamedPipeReaderRealtimeOutputRpcServer
         _readerRealtimeOutputRpcServer;
     private readonly IDirectCodexVoiceControl _codexVoiceControl;
@@ -592,6 +593,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/widget/system-data",
             new[] { "GET" },
             context => HandleWidgetSystemDataAsync(context, serviceToken));
+        // 地图瓦片代取：密钥与会话都留在本机，设备端 URL 不带任何凭据。
+        app.MapMethods(
+            "/map/tile",
+            new[] { "GET" },
+            context => HandleMapTileAsync(context, serviceToken));
         app.MapMethods(
             "/reader-output/pending",
             new[] { "POST", "OPTIONS" },
@@ -1170,6 +1176,60 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             return false;
         }
         return true;
+    }
+
+    private async Task HandleMapTileAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!HttpMethods.IsGet(context.Request.Method))
+        {
+            context.Response.StatusCode =
+                StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        DirectBridgeConfig config = _configStore.Load();
+        if (!TailscaleLoginMatches(
+            config,
+            context.Request.Headers["Tailscale-User-Login"]))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+        // ⚠ 参数校验必须在这里判成 400,不能让它掉进下面的 503:503 是
+        // "谷歌那边不可用"的信号,前端见了会**整体**退回 OSM。一个越界
+        // 的瓦片请求就把整轮地图样式换掉,而且没人看得出为什么。
+        if (!int.TryParse(context.Request.Query["z"], out int zoom)
+            || !int.TryParse(context.Request.Query["x"], out int x)
+            || !int.TryParse(context.Request.Query["y"], out int y)
+            || zoom is < 0 or > 22
+            || x < 0 || x >= (1 << zoom)
+            || y < 0 || y >= (1 << zoom))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return;
+        }
+        byte[]? tile = await _mapTiles
+            .TileAsync(zoom, x, y, serviceCancellationToken)
+            .ConfigureAwait(false);
+        if (tile is null)
+        {
+            // 503 而不是空图片：前端据此**整体**退回 OpenStreetMap，
+            // 而不是显示一片破图。失败原因写日志，否则"地图怎么变样了"
+            // 无从查起。
+            AppendOutputPickupLog(
+                "map-tile-unavailable\t" + (_mapTiles.LastError ?? "unknown"));
+            context.Response.StatusCode =
+                StatusCodes.Status503ServiceUnavailable;
+            return;
+        }
+        context.Response.ContentType = "image/png";
+        // 瓦片是纯静态内容，值得长缓存（省配额也省流量）。
+        context.Response.Headers["Cache-Control"] =
+            "private, max-age=604800, immutable";
+        await context.Response.Body
+            .WriteAsync(tile, serviceCancellationToken)
+            .ConfigureAwait(false);
     }
 
     private async Task HandleWidgetSystemDataAsync(
