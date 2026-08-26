@@ -348,6 +348,27 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         )
     }
 
+    /// 通知条目上的地点绑定 → 地理围栏闹钟的输入。字段不全就整条丢掉
+    /// （半个坐标比没有更糟：会在地图上定出一个荒唐的位置）。
+    static func parsePlace(_ value: Any?) -> ReaderSystemProjection.Place? {
+        guard let raw = value as? [String: Any],
+              let name = raw["name"] as? String, !name.isEmpty,
+              let latitude = (raw["lat"] as? NSNumber)?.doubleValue,
+              let longitude = (raw["lon"] as? NSNumber)?.doubleValue,
+              latitude.isFinite, longitude.isFinite,
+              abs(latitude) <= 90, abs(longitude) <= 180 else {
+            return nil
+        }
+        let radius = (raw["radiusMeters"] as? NSNumber)?.doubleValue ?? 200
+        let proximity = raw["proximity"] as? String ?? "enter"
+        return ReaderSystemProjection.Place(
+            name: String(name.prefix(80)),
+            latitude: latitude,
+            longitude: longitude,
+            radiusMeters: min(max(radius, 50), 5000),
+            proximity: proximity == "leave" ? "leave" : "enter")
+    }
+
     private enum Action: String {
         case pageCharacters = "page-chars"
         case status
@@ -516,28 +537,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
             }
         }
 
-        /// 通知条目上的地点绑定 → 地理围栏闹钟的输入。字段不全就整条丢掉
-    /// （半个坐标比没有更糟：会在地图上定出一个荒唐的位置）。
-    static func parsePlace(_ value: Any?) -> ReaderSystemProjection.Place? {
-        guard let raw = value as? [String: Any],
-              let name = raw["name"] as? String, !name.isEmpty,
-              let latitude = (raw["lat"] as? NSNumber)?.doubleValue,
-              let longitude = (raw["lon"] as? NSNumber)?.doubleValue,
-              latitude.isFinite, longitude.isFinite,
-              abs(latitude) <= 90, abs(longitude) <= 180 else {
-            return nil
-        }
-        let radius = (raw["radiusMeters"] as? NSNumber)?.doubleValue ?? 200
-        let proximity = raw["proximity"] as? String ?? "enter"
-        return ReaderSystemProjection.Place(
-            name: String(name.prefix(80)),
-            latitude: latitude,
-            longitude: longitude,
-            radiusMeters: min(max(radius, 50), 5000),
-            proximity: proximity == "leave" ? "leave" : "enter")
-    }
-
-    private static func strictInteger(_ value: Any?) -> Int? {
+        private static func strictInteger(_ value: Any?) -> Int? {
             guard let number = value as? NSNumber,
                   CFGetTypeID(number) != CFBooleanGetTypeID() else {
                 return nil
