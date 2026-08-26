@@ -571,6 +571,10 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             DirectSnapshotViewer.CameraSnapPath,
             new[] { "POST" },
             _snapshotViewer.HandleCameraSnapAsync);
+        app.MapMethods(
+            DirectSnapshotViewer.CameraLabelPath,
+            new[] { "POST" },
+            _snapshotViewer.HandleCameraLabelAsync);
         app.Map(
             "/reader-computer-voice/v1",
             context => HandleBridgeAsync(context, serviceToken));

@@ -1828,6 +1828,11 @@ internal sealed class DirectSnapshotViewer : IDisposable
     internal const string CameraListPath = "/camera/list.json";
     internal const string CameraFramePath = "/camera/frame";
     internal const string CameraSnapPath = "/camera/snap";
+    // 改名（2026-08-27 用户："放到快照页面上方的名字点击改动不好么"）。
+    // label 是 AI 判断该用哪台的唯一依据，而它在调角度时会频繁变 ——
+    // 让人去手编 JSON 是个糟糕的要求。
+    internal const string CameraLabelPath = "/camera/label";
+    private const int MaximumCameraLabelBytes = 200;
     // 摄像头 id 只允许这个形状。它来自查询串，直接拼进路径就是任意
     // 文件读取 —— 而这台机器上正好有一堆比照片更敏感的东西。
     private static readonly System.Text.RegularExpressions.Regex
@@ -1887,6 +1892,10 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 .cam-meta { margin-top: .5rem; font-size: .82rem;
                   color: #8ea2c8; line-height: 1.6; }
                 .cam-err { color: #ff9b9b; white-space: pre-wrap; }
+                .cam-rename { color: #e8edf8; background: #101a2e;
+                  border: 1px solid #3b6fd4; font: inherit; padding: .2rem .5rem;
+                  border-radius: 6px; min-width: 8rem; }
+                .cam-hint { color: #6f80a0; font-size: .78rem; }
                 .act-table { width: 100%; border-collapse: collapse;
                   font-size: .85rem; }
                 .act-table td { padding: .28rem .4rem;
@@ -2018,7 +2027,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 <section class="wide">
                   <h2>摄像头</h2>
                   <div class="act-bar">
-                    <div id="cam-stamp" class="muted"></div>
+                    <div id="cam-stamp" class="cam-hint">双击摄像头名字可改名（写位置，如「垃圾桶」）</div>
                     <nav class="tabs" id="cam-picker"></nav>
                   </div>
                   <div id="cam-body" class="muted">读取中…</div>
@@ -2239,6 +2248,8 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 const camStamp = byId("cam-stamp");
                 let camCurrent = null;
                 let camBusy = false;
+                const CAM_HINT =
+                  "双击摄像头名字可改名（写位置，如「垃圾桶」）";
 
                 function camAge(ms) {
                   const seconds = Math.max(0, Math.round((Date.now() - ms) / 1000));
@@ -2304,6 +2315,13 @@ internal sealed class DirectSnapshotViewer : IDisposable
                       camRenderPicker(cameras);
                       camShow(camera);
                     });
+                    // 双击就地改名。label 是 AI 判断该用哪台的唯一依据,
+                    // 而调角度时它会频繁变 —— 让人去手编 JSON 太别扭。
+                    button.title = "双击改名（写位置，如「垃圾桶」）";
+                    button.addEventListener("dblclick", (event) => {
+                      event.preventDefault();
+                      camRename(camera, cameras, button);
+                    });
                     camPicker.appendChild(button);
                   }
                   const shoot = actEl("button", "tab");
@@ -2312,6 +2330,52 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   shoot.disabled = camBusy || !camCurrent;
                   shoot.addEventListener("click", () => camSnap(cameras));
                   camPicker.appendChild(shoot);
+                }
+
+                function camRename(camera, cameras, button) {
+                  const input = document.createElement("input");
+                  input.className = "tab cam-rename";
+                  input.value = camera.label || camera.id;
+                  input.maxLength = 40;
+                  let done = false;
+                  const finish = async (save) => {
+                    if (done) return;
+                    done = true;
+                    const next = input.value.trim();
+                    if (!save || !next || next === camera.label) {
+                      camRenderPicker(cameras);
+                      return;
+                    }
+                    try {
+                      const response = await fetch(
+                        "/camera/label?id=" + encodeURIComponent(camera.id)
+                          + "&label=" + encodeURIComponent(next),
+                        { method: "POST" });
+                      const payload = await response.json();
+                      if (!payload.ok) {
+                        camError(payload.error || "改名失败但没说原因");
+                        return;
+                      }
+                      camera.label = payload.label;
+                    } catch (error) {
+                      // 改名失败要出声 —— 静默失败的话用户会以为改好了,
+                      // 而 AI 还在用旧名字。
+                      camError("改名请求没发出去：" + error);
+                      return;
+                    }
+                    camRenderPicker(cameras);
+                    if (camCurrent && camCurrent.id === camera.id) {
+                      camShow(camCurrent);
+                    }
+                  };
+                  input.addEventListener("keydown", (event) => {
+                    if (event.key === "Enter") finish(true);
+                    if (event.key === "Escape") finish(false);
+                  });
+                  input.addEventListener("blur", () => finish(true));
+                  button.replaceWith(input);
+                  input.focus();
+                  input.select();
                 }
 
                 async function camSnap(cameras) {
@@ -2335,7 +2399,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
                     camError("拍摄请求没发出去：" + error);
                   } finally {
                     camBusy = false;
-                    camStamp.textContent = "";
+                    camStamp.textContent = CAM_HINT;
                     camRenderPicker(cameras);
                   }
                 }
@@ -3450,6 +3514,34 @@ internal sealed class DirectSnapshotViewer : IDisposable
         }
         (_, string output) = await RunCameraCliAsync(
             ["snap", id], context.RequestAborted).ConfigureAwait(false);
+        await WriteBytesAsync(
+            context, Encoding.UTF8.GetBytes(output), StatusCodes.Status200OK)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task HandleCameraLabelAsync(HttpContext context)
+    {
+        if (!PrepareLocalResponse(
+            context, "application/json; charset=utf-8", "POST"))
+        {
+            return;
+        }
+        string id = context.Request.Query["id"].ToString();
+        string label = context.Request.Query["label"].ToString();
+        if (!CameraIdPattern.IsMatch(id)
+            || label.Length == 0
+            || Encoding.UTF8.GetByteCount(label) > MaximumCameraLabelBytes)
+        {
+            await WriteBytesAsync(
+                context,
+                Encoding.UTF8.GetBytes(
+                    """{"ok":false,"error":"摄像头 id 或名字不合法"}"""),
+                StatusCodes.Status400BadRequest).ConfigureAwait(false);
+            return;
+        }
+        (_, string output) = await RunCameraCliAsync(
+            ["set-label", id, label], context.RequestAborted)
+            .ConfigureAwait(false);
         await WriteBytesAsync(
             context, Encoding.UTF8.GetBytes(output), StatusCodes.Status200OK)
             .ConfigureAwait(false);

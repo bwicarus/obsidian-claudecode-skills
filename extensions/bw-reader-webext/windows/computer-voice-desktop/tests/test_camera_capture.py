@@ -240,6 +240,65 @@ class ErrorCodeContractTests(unittest.TestCase):
             "BW_CAMERA_FAILED 没有贴在「对方报了原因」那一处")
 
 
+class SetLabelTests(unittest.TestCase):
+    """改名（快照页双击摄像头名字走的就是这里）。
+
+    label 是 AI 判断"该用哪台"的唯一依据，所以这条路要么改对、要么出声，
+    绝不能"看起来改好了其实没改"。
+    """
+
+    def _seeded(self):
+        root = _root()
+        camera_capture.load_sources(root)   # 建出默认登记表
+        return root
+
+    def test_rename_sticks(self):
+        root = self._seeded()
+        camera_capture.set_label("pi", "垃圾桶", root)
+        self.assertEqual(
+            camera_capture.find_source("pi", root)["label"], "垃圾桶")
+
+    def test_other_fields_are_untouched(self):
+        """整份重写会把 device/rotate 这些'改错就拍不到'的字段置于风险中。"""
+        root = self._seeded()
+        before = dict(camera_capture.find_source("pi", root))
+        camera_capture.set_label("pi", "玄关", root)
+        after = camera_capture.find_source("pi", root)
+        for key in ("kind", "host", "script", "device", "size", "rotate"):
+            self.assertEqual(before.get(key), after.get(key), key)
+
+    def test_blank_is_refused(self):
+        root = self._seeded()
+        with self.assertRaises(camera_capture.CameraError):
+            camera_capture.set_label("pi", "   ", root)
+
+    def test_overlong_is_refused(self):
+        root = self._seeded()
+        with self.assertRaises(camera_capture.CameraError):
+            camera_capture.set_label("pi", "长" * 200, root)
+
+    def test_unknown_id_lists_what_exists(self):
+        root = self._seeded()
+        with self.assertRaises(camera_capture.CameraError) as caught:
+            camera_capture.set_label("nope", "x", root)
+        self.assertIn("pi", str(caught.exception))
+
+    def test_newlines_are_folded_not_stored(self):
+        """名字会被塞进日志、页面按钮和给 AI 的元数据里，别让换行漏进去。"""
+        root = self._seeded()
+        camera_capture.set_label("pi", "  垃圾\n桶  ", root)
+        self.assertEqual(
+            camera_capture.find_source("pi", root)["label"], "垃圾 桶")
+
+    def test_a_failed_write_does_not_corrupt_the_registry(self):
+        """原子替换：改名途中出事也不能留下半份登记表。"""
+        root = self._seeded()
+        camera_capture.set_label("pi", "玄关", root)
+        raw = camera_capture.sources_path(root).read_text(encoding="utf-8")
+        self.assertIn('"contract"', raw)
+        self.assertEqual(len(camera_capture.load_sources(root)), 4)
+
+
 class SnapshotIsolationTests(unittest.TestCase):
     """用户 2026-08-27 明说：快照那个 tab **只是显示口**，
     AI 不该每取一次快照就被塞一张家里的照片。"""

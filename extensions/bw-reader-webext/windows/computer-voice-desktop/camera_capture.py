@@ -140,6 +140,46 @@ def load_sources(root: Path | None = None) -> list[dict[str, Any]]:
     return value["sources"]
 
 
+MAX_LABEL = 40
+
+
+def set_label(camera_id: str, label: str, root: Path | None = None) -> dict[str, Any]:
+    """给摄像头改名（label = 位置描述）。
+
+    label 是 AI 判断"该用哪台"的唯一依据，所以调完角度就该顺手改 ——
+    而不是让人去手编 JSON。快照页的改名按钮走的就是这里。
+
+    ⚠ 原地改**只动 label**：登记表里还有 device / rotate / size 这些
+    改错了就拍不到的字段，整份重写会把它们置于风险中。
+    """
+    clean = " ".join(str(label).split())        # 折叠换行与多余空白
+    clean = "".join(c for c in clean if c.isprintable())
+    if not clean:
+        raise CameraError("名字不能为空")
+    if len(clean) > MAX_LABEL:
+        raise CameraError("名字最多 %d 个字（收到 %d 个）" % (MAX_LABEL, len(clean)))
+
+    path = sources_path(root)
+    sources = load_sources(root)                # 顺带校验 contract
+    hit = None
+    for source in sources:
+        if str(source.get("id")) == camera_id:
+            source["label"] = clean
+            hit = source
+    if hit is None:
+        known = "、".join(str(s.get("id")) for s in sources) or "一台都没有"
+        raise CameraError(
+            "没有叫「%s」的摄像头（已登记：%s）" % (camera_id, known))
+
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps({"contract": SOURCES_CONTRACT, "sources": sources},
+                   ensure_ascii=False, indent=1),
+        encoding="utf-8")
+    temporary.replace(path)                     # 原子替换：改名途中断电也不会留半份
+    return {"id": camera_id, "label": clean}
+
+
 def find_source(camera_id: str, root: Path | None = None) -> dict[str, Any]:
     sources = load_sources(root)
     for source in sources:
@@ -395,6 +435,10 @@ def main() -> int:
     sub.add_parser("list", help="列出已登记的摄像头及各自最近一张")
     sub.add_parser("probe", help="逐台试拍，看谁能用（诊断用）")
 
+    rename = sub.add_parser("set-label", help="给摄像头改名（写位置，如「垃圾桶」）")
+    rename.add_argument("id")
+    rename.add_argument("label")
+
     snap_command = sub.add_parser("snap", help="拍一张，打印本地路径")
     snap_command.add_argument("id", nargs="?", default="pi")
     snap_command.add_argument("--size", default=None,
@@ -415,6 +459,10 @@ def main() -> int:
         elif args.command == "probe":
             print(json.dumps({"ok": True, "cameras": probe_all(root)},
                              ensure_ascii=False, indent=1))
+        elif args.command == "set-label":
+            print(json.dumps(
+                {"ok": True, **set_label(args.id, args.label, root)},
+                ensure_ascii=False))
         elif args.command == "snap":
             print(json.dumps(
                 {"ok": True, **snap(args.id, size=args.size, root=root)},
