@@ -4090,15 +4090,16 @@ internal static class ReaderCurrentPlaceProjection
                 return;
             }
             string? alias = parsed["alias"]?.GetValue<string>();
-            string? geoName = parsed["geoName"]?.GetValue<string>();
+            // ⚠ 快照只放**登记过的名字**（2026-08-27 用户拍板）：不放坐标、
+            // 不放未登记的地理名。快照是判断用的整理视图，不是位置数据源 ——
+            // 真机实锤 AI 为了拿一个地址去读整个实时快照（还连败两次），
+            // 而正确来源本地 replication_places CLI 一直都在。这里少给，
+            // 它就不会再把快照当位置接口。
             snapshot["currentPlace"] = new JsonObject
             {
-                ["name"] = alias ?? (
-                    string.IsNullOrEmpty(geoName) ? null : geoName),
+                ["name"] = alias,
                 ["named"] = alias is not null,
                 ["ageMinutes"] = age / 60_000L,
-                ["lat"] = parsed["lat"]?.GetValue<double>() ?? 0,
-                ["lon"] = parsed["lon"]?.GetValue<double>() ?? 0,
             };
         }
         catch

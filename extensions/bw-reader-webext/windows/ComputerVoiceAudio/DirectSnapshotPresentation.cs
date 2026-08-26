@@ -122,10 +122,20 @@ internal static class DirectSnapshotMarkdown
                 + "设置里开启「记录学习地点」并授予系统定位权限；"
                 + "开启后阅读时会自动携带。_");
         }
+        else if (place["named"]?.GetValue<bool>() == true)
+        {
+            AppendField(output, "位置", Text(place["name"]));
+            AppendField(output, "新鲜（分钟）", Text(place["ageMinutes"]));
+        }
         else
         {
-            AppendField(output, "位置", Text(place["name"]) ?? "（未命名坐标）");
-            AppendField(output, "新鲜（分钟）", Text(place["ageMinutes"]));
+            // 快照只展示登记过的名字（2026-08-27 用户拍板）。坐标、候选、
+            // 命名操作全在本地 CLI —— 把出口写在这里，AI 就不必为一个
+            // 地址读整份快照。
+            output.AppendLine(
+                "_有最近定位但未登记名字。位置的查看/命名一律用本地"
+                + " `replication_places.py`（`name-latest <名字>` 命名最新定位、"
+                + "`analyze` 看常在位置候选），不要为拿位置读快照。_");
         }
 
         JsonObject? active = snapshot["activeReading"] as JsonObject;
@@ -2821,10 +2831,10 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   const placeEl = document.getElementById("currentPlace");
                   const place = snapshot.currentPlace;
                   placeEl.textContent = place
-                    ? `${place.name ?? "（未命名坐标）"}` +
-                      `${place.named ? "" : "（未命名，可让 AI 命名）"}` +
-                      `　${place.ageMinutes} 分钟前` +
-                      `　(${place.lat}, ${place.lon})`
+                    ? (place.named
+                        ? `${place.name}　${place.ageMinutes} 分钟前`
+                        : `未登记名字（${place.ageMinutes} 分钟前有定位；` +
+                          `坐标与命名在本地 replication_places.py）`)
                     : "未知 —— 最近 30 分钟没有定位记录（需开启「记录学习地点」）。";
 
                   const ntf = document.getElementById("notifications");
