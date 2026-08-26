@@ -1,0 +1,301 @@
+# -*- coding: utf-8 -*-
+"""摄像头取图（Windows 侧）—— AI 要看一眼现场时走这里。
+
+用户 2026-08-27 定的形状：
+
+- 摄像头挂在别的机器上（第一台在 Pi），**图像最终落到 Windows 本地**，
+  于是 AI 在本地跑任务时直接读文件就能看见。
+- 快照页会有一个「摄像头」tab，但那**只是给用户看的显示口**。
+  ⚠ 图像绝不进快照载荷 —— AI 不该每取一次快照就被塞一张照片，
+  它只在自己决定要看的时候来拍。这条是用户明说的。
+- 摄像头是通用测试设备，不是为某个场景（垃圾桶）造的。这里不做任何
+  画面判断，判断归 AI。
+
+**给 AI 的用法**（也写在 AGENTS.md 里）::
+
+    python %LOCALAPPDATA%\\BWReader\\camera_capture.py snap pi
+
+打印一行 JSON，`path` 就是刚拍的照片。读它即可。
+
+留好的扩展位（用户说后面会换带云台、补光的高清摄像头）：
+
+- 摄像头登记在 `camera-sources.json`，一台一条，`kind` 决定怎么取图。
+  现在只有 `ssh-v4l2`（ssh 到那台机器跑 ffmpeg）；将来的网络摄像头
+  加一个 `http` kind 即可，调用方那句 `snap <id>` 一个字都不用改。
+- `--size` 已经通到底层，换高分辨率不用改形状。
+- 云台/补光将来作为新子命令（`pan` / `light`），与 `snap` 平级。
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+SOURCES_FILE_NAME = "camera-sources.json"
+FRAMES_DIR_NAME = "camera"
+SOURCES_CONTRACT = "camera-sources/1"
+# 每台摄像头留最近多少张。够回看"刚才那下是什么"，又不会慢慢吃满盘。
+KEEP_FRAMES = 20
+SSH_TIMEOUT_SECONDS = 120
+
+# 第一台摄像头。找不到登记文件时按这个建，省得用户手写 JSON。
+_DEFAULT_SOURCES = [
+    {
+        "id": "pi",
+        "label": "Pi 摄像头",
+        "kind": "ssh-v4l2",
+        "host": "pi",
+        "script": "/home/bwicarus/claude/scripts/pi_camera_snap.py",
+        "device": "/dev/video0",
+        "size": "1280x720",
+        # 摄像头装歪时填 90/180/270 把画面转正 —— 在这里转，下游（AI、
+        # 快照页）就都不必各自补偿。装正了就留 0。
+        "rotate": 0,
+    },
+]
+
+
+class CameraError(RuntimeError):
+    """取图失败。消息会原样转给 AI 和快照页，所以要说人话。"""
+
+
+def default_root() -> Path:
+    return Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "BWReader"
+
+
+def sources_path(root: Path | None = None) -> Path:
+    return (root or default_root()) / SOURCES_FILE_NAME
+
+
+def load_sources(root: Path | None = None) -> list[dict[str, Any]]:
+    """读摄像头登记表；没有就按默认建一份。
+
+    ⚠ 文件坏了要**报错**而不是悄悄退回默认值 —— 用户可能刚在里面登记了
+    第二台摄像头，静默重置会让那台凭空消失，而且哪儿都不会说。
+    """
+    path = sources_path(root)
+    if not path.is_file():
+        payload = {"contract": SOURCES_CONTRACT, "sources": _DEFAULT_SOURCES}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=1),
+            encoding="utf-8")
+        return list(_DEFAULT_SOURCES)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as error:
+        raise CameraError(
+            "摄像头登记表 JSON 坏了（%s），拒绝静默重置：%s" % (path, error)
+        ) from error
+    if not isinstance(value, dict) or not isinstance(value.get("sources"), list):
+        raise CameraError("摄像头登记表 contract 不符：%s" % path)
+    return value["sources"]
+
+
+def find_source(camera_id: str, root: Path | None = None) -> dict[str, Any]:
+    sources = load_sources(root)
+    for source in sources:
+        if str(source.get("id")) == camera_id:
+            return source
+    known = "、".join(str(s.get("id")) for s in sources) or "一台都没有"
+    raise CameraError(
+        "没有叫「%s」的摄像头（已登记：%s）" % (camera_id, known))
+
+
+def frames_dir(camera_id: str, root: Path | None = None) -> Path:
+    return (root or default_root()) / FRAMES_DIR_NAME / camera_id
+
+
+def _prune(directory: Path) -> None:
+    frames = sorted(directory.glob("*.jpg"))
+    for stale in frames[:-KEEP_FRAMES]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
+def _capture_ssh_v4l2(source: dict[str, Any], size: str | None) -> dict:
+    """ssh 到摄像头所在的机器跑取图脚本，拿回 JSON 信封。
+
+    ⚠ ssh 把 argv **拼成一条字符串交给远端 shell**。这里的参数目前都来自
+    登记表（不是用户自由文本），但登记表将来会被 AI 或用户编辑 ——
+    逐个 shlex.quote，别留这个口子。
+    """
+    host = str(source.get("host") or "")
+    script = str(source.get("script") or "")
+    if not host or not script:
+        raise CameraError(
+            "摄像头「%s」的登记缺 host 或 script" % source.get("id"))
+    remote_argv = ["python3", script, "snap",
+                   "--device", str(source.get("device") or "/dev/video0"),
+                   "--size", str(size or source.get("size") or "1280x720")]
+    rotate = int(source.get("rotate") or 0)
+    if rotate:
+        remote_argv += ["--rotate", str(rotate)]
+    remote = " ".join(shlex.quote(part) for part in remote_argv)
+    command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+               host, remote]
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True,
+            timeout=SSH_TIMEOUT_SECONDS)
+    except FileNotFoundError as error:
+        raise CameraError("这台机器上没有 ssh") from error
+    except subprocess.TimeoutExpired as error:
+        raise CameraError(
+            "连「%s」取图超时（%d 秒）——那台机器睡了或网络断了"
+            % (host, SSH_TIMEOUT_SECONDS)) from error
+
+    stdout = (result.stdout or "").strip()
+    if not stdout:
+        raise CameraError(
+            "「%s」没有任何输出（退出码 %s）：%s"
+            % (host, result.returncode, (result.stderr or "").strip()[:300]))
+    try:
+        payload = json.loads(stdout.splitlines()[-1])
+    except json.JSONDecodeError as error:
+        raise CameraError(
+            "「%s」的输出不是 JSON：%s" % (host, stdout[:300])) from error
+    if not payload.get("ok"):
+        raise CameraError(str(payload.get("error") or "取图失败但没说原因"))
+    return payload
+
+
+_CAPTURERS = {
+    "ssh-v4l2": _capture_ssh_v4l2,
+    # 将来的网络摄像头挂这里：{"kind": "http", "url": ...} → _capture_http。
+    # 调用方那句 snap <id> 一个字都不用改。
+}
+
+
+def snap(
+    camera_id: str, size: str | None = None, root: Path | None = None
+) -> dict[str, Any]:
+    """拍一张，落到本地磁盘，返回带 path 的元数据。"""
+    source = find_source(camera_id, root)
+    kind = str(source.get("kind") or "")
+    capturer = _CAPTURERS.get(kind)
+    if capturer is None:
+        raise CameraError(
+            "不认识的摄像头类型「%s」（支持：%s）"
+            % (kind, "、".join(_CAPTURERS)))
+
+    payload = capturer(source, size)
+    encoded = payload.pop("jpegBase64", None)
+    if not encoded:
+        raise CameraError("对方没有回图片数据")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as error:
+        raise CameraError("图片数据解不开（传输中被改动了？）") from error
+    if not data.startswith(b"\xff\xd8"):
+        # 拿到的不是 JPEG。不检查的话会写下一个坏文件，然后 AI 打开时
+        # 得到一个跟"摄像头没插"完全不同却同样没用的错误。
+        raise CameraError("拿回来的不是 JPEG（开头 %r）" % data[:8])
+
+    directory = frames_dir(camera_id, root)
+    directory.mkdir(parents=True, exist_ok=True)
+    captured_ms = int(payload.get("capturedAtUtcMs") or time.time() * 1000)
+    frame_path = directory / ("%d.jpg" % captured_ms)
+    frame_path.write_bytes(data)
+    _prune(directory)
+
+    meta = dict(payload)
+    meta.update({
+        "id": camera_id,
+        "label": source.get("label") or camera_id,
+        "path": str(frame_path),
+        "bytes": len(data),
+        "capturedAtUtcMs": captured_ms,
+    })
+    (directory / "latest.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    return meta
+
+
+def latest(camera_id: str, root: Path | None = None) -> dict[str, Any] | None:
+    """最近一张的元数据；从没拍过就是 None（不是错误）。"""
+    path = frames_dir(camera_id, root) / "latest.json"
+    if not path.is_file():
+        return None
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not Path(str(meta.get("path") or "")).is_file():
+        # 元数据在但图没了（被清理/被删）。当成没有，别让调用方拿到一个
+        # 指向空气的路径。
+        return None
+    meta["ageSeconds"] = int(
+        time.time() - int(meta.get("capturedAtUtcMs") or 0) / 1000)
+    return meta
+
+
+def describe_all(root: Path | None = None) -> list[dict[str, Any]]:
+    """给快照页用：每台摄像头 + 它最近一张的情况。"""
+    rows = []
+    for source in load_sources(root):
+        camera_id = str(source.get("id"))
+        rows.append({
+            "id": camera_id,
+            "label": source.get("label") or camera_id,
+            "kind": source.get("kind"),
+            "host": source.get("host"),
+            "latest": latest(camera_id, root),
+        })
+    return rows
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", default=None,
+                        help="数据根目录（默认 %%LOCALAPPDATA%%\\BWReader）")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("list", help="列出已登记的摄像头及各自最近一张")
+
+    snap_command = sub.add_parser("snap", help="拍一张，打印本地路径")
+    snap_command.add_argument("id", nargs="?", default="pi")
+    snap_command.add_argument("--size", default=None,
+                              help="分辨率，如 1920x1080（不给用登记表里的）")
+
+    latest_command = sub.add_parser(
+        "latest", help="最近一张的路径（不重新拍）")
+    latest_command.add_argument("id", nargs="?", default="pi")
+
+    args = parser.parse_args()
+    root = Path(args.root) if args.root else None
+
+    try:
+        if args.command == "list":
+            print(json.dumps(
+                {"ok": True, "cameras": describe_all(root)},
+                ensure_ascii=False, indent=1))
+        elif args.command == "snap":
+            print(json.dumps(
+                {"ok": True, **snap(args.id, size=args.size, root=root)},
+                ensure_ascii=False))
+        else:
+            meta = latest(args.id, root)
+            print(json.dumps(
+                {"ok": True, "latest": meta} if meta else
+                {"ok": False, "error": "「%s」还没拍过（先跑 snap）" % args.id},
+                ensure_ascii=False))
+            return 0 if meta else 2
+        return 0
+    except CameraError as error:
+        print(json.dumps({"ok": False, "error": str(error)},
+                         ensure_ascii=False))
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

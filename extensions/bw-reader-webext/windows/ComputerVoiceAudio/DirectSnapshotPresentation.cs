@@ -1817,6 +1817,28 @@ internal sealed class DirectSnapshotViewer : IDisposable
     internal const string ActivityViewerPath = "/activity-view";
     internal const string ActivityReportPath = "/activity-report.json";
 
+    // 摄像头（2026-08-27 用户拍板）。三条路由各司其职：
+    //   list.json  有哪些摄像头、各自最近一张的情况
+    //   frame      把最近那张 JPEG 端出来
+    //   snap       现在去拍一张（唯一有副作用的一条，所以是 POST）
+    //
+    // ⚠ 这个 tab **只是给用户看的显示口**：图像不进快照载荷。AI 不该每
+    // 取一次快照就被塞一张家里的照片 —— 它要看时自己去拍（走
+    // camera_capture.py，见 AGENTS.md）。
+    internal const string CameraListPath = "/camera/list.json";
+    internal const string CameraFramePath = "/camera/frame";
+    internal const string CameraSnapPath = "/camera/snap";
+    // 摄像头 id 只允许这个形状。它来自查询串，直接拼进路径就是任意
+    // 文件读取 —— 而这台机器上正好有一堆比照片更敏感的东西。
+    private static readonly System.Text.RegularExpressions.Regex
+        CameraIdPattern = new(
+            "^[a-z0-9][a-z0-9-]{0,31}$",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+    // 拍一张实测约 1.5 秒（含 UVC 预热与 ssh 往返）。给足余量，
+    // 但不能没有上限：摄像头被拔时 ssh 会一直挂着。
+    private static readonly TimeSpan CameraSnapTimeout =
+        TimeSpan.FromSeconds(150);
+
     private static readonly byte[] ViewerDocument =
         Encoding.UTF8.GetBytes(
             """
@@ -1860,6 +1882,11 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 .act-meta { color: #8fa5c8; font-size: .85rem;
                   margin-bottom: .6rem; }
                 .act-place { color: #ffd28a; }
+                .cam-shot { max-width: 100%; border: 1px solid #263655;
+                  border-radius: 6px; display: block; background: #0b1020; }
+                .cam-meta { margin-top: .5rem; font-size: .82rem;
+                  color: #8ea2c8; line-height: 1.6; }
+                .cam-err { color: #ff9b9b; white-space: pre-wrap; }
                 .act-table { width: 100%; border-collapse: collapse;
                   font-size: .85rem; }
                 .act-table td { padding: .28rem .4rem;
@@ -1959,6 +1986,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 <nav class="tabs">
                   <button type="button" id="tab-snapshot" class="tab on">实时快照</button>
                   <button type="button" id="tab-activity" class="tab">学习活动</button>
+                  <button type="button" id="tab-camera" class="tab">摄像头</button>
                 </nav>
                 <div class="status">
                   <span id="status" class="pill">等待快照</span>
@@ -1984,6 +2012,16 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   <div id="act-main">读取中…</div>
                   <pre id="act-ai" class="act-pre" hidden>读取中…</pre>
                   <div id="act-raw" hidden>读取中…</div>
+                </section>
+              </main>
+              <main id="view-camera" hidden>
+                <section class="wide">
+                  <h2>摄像头</h2>
+                  <div class="act-bar">
+                    <div id="cam-stamp" class="muted"></div>
+                    <nav class="tabs" id="cam-picker"></nav>
+                  </div>
+                  <div id="cam-body" class="muted">读取中…</div>
                 </section>
               </main>
               <main id="view-snapshot">
@@ -2192,16 +2230,162 @@ internal sealed class DirectSnapshotViewer : IDisposable
                     box.appendChild(dwellTable);
                   }
                 }
-                function selectTab(activity) {
-                  tabSnapshot.classList.toggle("on", !activity);
-                  tabActivity.classList.toggle("on", activity);
-                  viewSnapshot.hidden = activity;
-                  viewActivity.hidden = !activity;
-                  if (activity) renderActivity();
+                // ── 摄像头 tab（2026-08-27 用户拍板）──
+                // 这里**只是显示口**：图像不进快照载荷，AI 要看时自己去拍。
+                const tabCamera = byId("tab-camera");
+                const viewCamera = byId("view-camera");
+                const camPicker = byId("cam-picker");
+                const camBody = byId("cam-body");
+                const camStamp = byId("cam-stamp");
+                let camCurrent = null;
+                let camBusy = false;
+
+                function camAge(ms) {
+                  const seconds = Math.max(0, Math.round((Date.now() - ms) / 1000));
+                  if (seconds < 60) return seconds + " 秒前";
+                  if (seconds < 3600) return Math.round(seconds / 60) + " 分钟前";
+                  return Math.round(seconds / 3600) + " 小时前";
                 }
-                tabSnapshot.addEventListener("click", () => selectTab(false));
-                tabActivity.addEventListener("click", () => selectTab(true));
-                if (location.hash === "#activity") selectTab(true);
+
+                function camShow(camera) {
+                  camBody.textContent = "";
+                  camBody.classList.remove("muted");
+                  const latest = camera && camera.latest;
+                  if (!latest) {
+                    // 没拍过不是故障 —— 说清楚下一步该干什么。
+                    camBody.classList.add("muted");
+                    camBody.textContent = "还没拍过。点上面的「拍一张」。";
+                    return;
+                  }
+                  const image = document.createElement("img");
+                  image.className = "cam-shot";
+                  image.alt = camera.label || camera.id;
+                  // 带上拍摄时刻做 cache buster,否则刷新后还是旧图。
+                  image.src = "/camera/frame?id="
+                    + encodeURIComponent(camera.id)
+                    + "&t=" + latest.capturedAtUtcMs;
+                  camBody.appendChild(image);
+                  const meta = document.createElement("div");
+                  meta.className = "cam-meta";
+                  const bits = [
+                    camAge(latest.capturedAtUtcMs),
+                    (latest.width || "?") + "×" + (latest.height || "?"),
+                    Math.round((latest.bytes || 0) / 1024) + " KB",
+                  ];
+                  // 亮度如实报出来 —— 画面黑的时候用户一眼能看出是"太暗"
+                  // 而不是"没拍到"，这两件事该做的处理完全不同。
+                  if (typeof latest.brightness === "number") {
+                    bits.push("亮度 " + latest.brightness
+                      + (latest.brightness < 35 ? "（很暗）" : ""));
+                  }
+                  meta.textContent = bits.join(" · ");
+                  camBody.appendChild(meta);
+                }
+
+                function camError(message) {
+                  camBody.textContent = "";
+                  camBody.classList.remove("muted");
+                  const box = document.createElement("div");
+                  box.className = "cam-err";
+                  box.textContent = message;
+                  camBody.appendChild(box);
+                }
+
+                function camRenderPicker(cameras) {
+                  camPicker.textContent = "";
+                  for (const camera of cameras) {
+                    const button = actEl("button", "tab");
+                    button.type = "button";
+                    button.textContent = camera.label || camera.id;
+                    button.classList.toggle(
+                      "on", camCurrent && camCurrent.id === camera.id);
+                    button.addEventListener("click", () => {
+                      camCurrent = camera;
+                      camRenderPicker(cameras);
+                      camShow(camera);
+                    });
+                    camPicker.appendChild(button);
+                  }
+                  const shoot = actEl("button", "tab");
+                  shoot.type = "button";
+                  shoot.textContent = camBusy ? "拍摄中…" : "拍一张";
+                  shoot.disabled = camBusy || !camCurrent;
+                  shoot.addEventListener("click", () => camSnap(cameras));
+                  camPicker.appendChild(shoot);
+                }
+
+                async function camSnap(cameras) {
+                  if (camBusy || !camCurrent) return;
+                  camBusy = true;
+                  camRenderPicker(cameras);
+                  camStamp.textContent = "正在拍…（约 2 秒）";
+                  try {
+                    const response = await fetch(
+                      "/camera/snap?id=" + encodeURIComponent(camCurrent.id),
+                      { method: "POST" });
+                    const payload = await response.json();
+                    if (!payload.ok) {
+                      camError(payload.error || "拍摄失败但没说原因");
+                    } else {
+                      camCurrent = Object.assign({}, camCurrent,
+                        { latest: payload });
+                      camShow(camCurrent);
+                    }
+                  } catch (error) {
+                    camError("拍摄请求没发出去：" + error);
+                  } finally {
+                    camBusy = false;
+                    camStamp.textContent = "";
+                    camRenderPicker(cameras);
+                  }
+                }
+
+                async function renderCamera() {
+                  try {
+                    const response = await fetch("/camera/list.json");
+                    const payload = await response.json();
+                    if (!payload.ok) {
+                      camPicker.textContent = "";
+                      camError(payload.error || "读不到摄像头登记表");
+                      return;
+                    }
+                    const cameras = payload.cameras || [];
+                    if (!cameras.length) {
+                      camPicker.textContent = "";
+                      camError("还没有登记任何摄像头。");
+                      return;
+                    }
+                    if (!camCurrent
+                        || !cameras.some((c) => c.id === camCurrent.id)) {
+                      camCurrent = cameras[0];
+                    } else {
+                      camCurrent = cameras.find((c) => c.id === camCurrent.id);
+                    }
+                    camRenderPicker(cameras);
+                    camShow(camCurrent);
+                  } catch (error) {
+                    camPicker.textContent = "";
+                    camError("读不到摄像头列表：" + error);
+                  }
+                }
+
+                function selectTab(name) {
+                  tabSnapshot.classList.toggle("on", name === "snapshot");
+                  tabActivity.classList.toggle("on", name === "activity");
+                  tabCamera.classList.toggle("on", name === "camera");
+                  viewSnapshot.hidden = name !== "snapshot";
+                  viewActivity.hidden = name !== "activity";
+                  viewCamera.hidden = name !== "camera";
+                  if (name === "activity") renderActivity();
+                  if (name === "camera") renderCamera();
+                }
+                tabSnapshot.addEventListener(
+                  "click", () => selectTab("snapshot"));
+                tabActivity.addEventListener(
+                  "click", () => selectTab("activity"));
+                tabCamera.addEventListener("click", () => selectTab("camera"));
+                if (location.hash === "#activity") selectTab("activity");
+                if (location.hash === "#camera") selectTab("camera");
                 const status = byId("status");
                 const revision = byId("revision");
                 const active = byId("active");
@@ -3132,6 +3316,204 @@ internal sealed class DirectSnapshotViewer : IDisposable
             .ConfigureAwait(false);
     }
 
+    // ── 摄像头 ──
+    //
+    // 桥在这里只做两件事：**端文件**和**按一下快门**。取图怎么取、
+    // 摄像头登记在哪、图片留几张，全在 camera_capture.py 里 ——
+    // 与本文件其它地方同一个分工：桥不算账，算账归 Python。
+
+    private static string BwReaderRoot() => System.IO.Path.Combine(
+        Environment.GetFolderPath(
+            Environment.SpecialFolder.LocalApplicationData),
+        "BWReader");
+
+    private static string CameraCliPath() => System.IO.Path.Combine(
+        BwReaderRoot(), "camera_capture.py");
+
+    private static string CameraPythonPath() => System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        "AppData", "Local", "Programs", "Python", "Python313", "python.exe");
+
+    /// <summary>跑一次 camera_capture.py，把它那行 JSON 原样带回。</summary>
+    private static async Task<(int Code, string Output)> RunCameraCliAsync(
+        string[] arguments,
+        CancellationToken cancellationToken)
+    {
+        string python = CameraPythonPath();
+        string cli = CameraCliPath();
+        if (!File.Exists(python) || !File.Exists(cli))
+        {
+            // 缺件要说清**缺哪一件**。只报一句"摄像头不可用"，
+            // 排查时要把两条路径都猜一遍。
+            return (-1, JsonSerializer.Serialize(new Dictionary<string, object>
+            {
+                ["ok"] = false,
+                ["error"] = !File.Exists(python)
+                    ? "找不到 Python：" + python
+                    : "找不到 camera_capture.py：" + cli
+                      + "（桌面端还没部署过？）",
+            }));
+        }
+        ProcessStartInfo start = new()
+        {
+            FileName = python,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+        };
+        start.ArgumentList.Add(cli);
+        foreach (string argument in arguments)
+        {
+            start.ArgumentList.Add(argument);
+        }
+        using CancellationTokenSource timeout =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(CameraSnapTimeout);
+        try
+        {
+            using Process? process = Process.Start(start);
+            if (process is null)
+            {
+                return (-1, """{"ok":false,"error":"启动取图进程失败"}""");
+            }
+            Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync(timeout.Token)
+                .ConfigureAwait(false);
+            string output = (await stdout.ConfigureAwait(false)).Trim();
+            if (output.Length == 0)
+            {
+                // 一个字都没有，说明它在打印之前就崩了。把 stderr 带上 ——
+                // 否则这里只会显示"取图失败"，而真正的原因谁也看不到。
+                string error = (await stderr.ConfigureAwait(false)).Trim();
+                return (process.ExitCode, JsonSerializer.Serialize(
+                    new Dictionary<string, object>
+                    {
+                        ["ok"] = false,
+                        ["error"] = "取图进程没有输出（退出码 "
+                            + process.ExitCode + "）："
+                            + (error.Length > 400 ? error[..400] : error),
+                    }));
+            }
+            return (process.ExitCode, output);
+        }
+        catch (OperationCanceledException)
+        {
+            return (-1, """{"ok":false,"error":"取图超时（摄像头被拔了？）"}""");
+        }
+        catch (Exception exception) when (
+            exception is IOException or System.ComponentModel.Win32Exception)
+        {
+            return (-1, JsonSerializer.Serialize(
+                new Dictionary<string, object>
+                {
+                    ["ok"] = false,
+                    ["error"] = "启动取图进程出错：" + exception.Message,
+                }));
+        }
+    }
+
+    internal async Task HandleCameraListAsync(HttpContext context)
+    {
+        if (!PrepareLocalResponse(context, "application/json; charset=utf-8"))
+        {
+            return;
+        }
+        (int code, string output) = await RunCameraCliAsync(
+            ["list"], context.RequestAborted).ConfigureAwait(false);
+        await WriteBytesAsync(
+            context,
+            Encoding.UTF8.GetBytes(output),
+            code == 0 ? StatusCodes.Status200OK : StatusCodes.Status200OK)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task HandleCameraSnapAsync(HttpContext context)
+    {
+        if (!PrepareLocalResponse(
+            context, "application/json; charset=utf-8", "POST"))
+        {
+            return;
+        }
+        string id = context.Request.Query["id"].ToString();
+        if (!CameraIdPattern.IsMatch(id))
+        {
+            await WriteBytesAsync(
+                context,
+                Encoding.UTF8.GetBytes(
+                    """{"ok":false,"error":"摄像头 id 形状非法"}"""),
+                StatusCodes.Status400BadRequest).ConfigureAwait(false);
+            return;
+        }
+        (_, string output) = await RunCameraCliAsync(
+            ["snap", id], context.RequestAborted).ConfigureAwait(false);
+        await WriteBytesAsync(
+            context, Encoding.UTF8.GetBytes(output), StatusCodes.Status200OK)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task HandleCameraFrameAsync(HttpContext context)
+    {
+        if (!PrepareLocalResponse(context, "image/jpeg"))
+        {
+            return;
+        }
+        string id = context.Request.Query["id"].ToString();
+        if (!CameraIdPattern.IsMatch(id))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return;
+        }
+        string directory = System.IO.Path.Combine(
+            BwReaderRoot(), "camera", id);
+        string indexPath = System.IO.Path.Combine(directory, "latest.json");
+        string? framePath = null;
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(
+                await File.ReadAllBytesAsync(
+                    indexPath, context.RequestAborted).ConfigureAwait(false));
+            if (document.RootElement.TryGetProperty("path", out JsonElement p)
+                && p.ValueKind == JsonValueKind.String)
+            {
+                framePath = p.GetString();
+            }
+        }
+        catch (Exception exception) when (
+            exception is IOException or JsonException
+                or UnauthorizedAccessException)
+        {
+            framePath = null;
+        }
+        // 还没拍过 = 404，不是错误。快照页据此显示"点一下拍一张"，
+        // 而不是一个吓人的报错。
+        if (string.IsNullOrEmpty(framePath))
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+        string resolved = System.IO.Path.GetFullPath(framePath);
+        // 纵深防御：latest.json 是我们自己写的，但它指到哪儿就读哪儿
+        // 等于把一个任意文件读取的开关放在磁盘上。钉死在这台摄像头
+        // 自己的目录里。
+        string root = System.IO.Path.GetFullPath(directory)
+            + System.IO.Path.DirectorySeparatorChar;
+        if (!resolved.StartsWith(root, StringComparison.OrdinalIgnoreCase)
+            || !File.Exists(resolved))
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+        byte[] payload = await File
+            .ReadAllBytesAsync(resolved, context.RequestAborted)
+            .ConfigureAwait(false);
+        await WriteBytesAsync(context, payload, StatusCodes.Status200OK)
+            .ConfigureAwait(false);
+    }
+
     internal Task HandleActivityViewerAsync(HttpContext context)
     {
         // 活动看板已并进快照页做 tab(2026-08-25 用户拍板);旧地址跳过去。
@@ -3557,13 +3939,17 @@ internal sealed class DirectSnapshotViewer : IDisposable
 
     private bool PrepareLocalResponse(
         HttpContext context,
-        string contentType)
+        string contentType,
+        string method = "GET")
     {
-        if (!HttpMethods.IsGet(context.Request.Method))
+        // 方法这一档可以放宽（拍照有副作用，得是 POST），但**下面那道
+        // 回环闸一个字都不能动** —— 它是这台机器上家庭画面的唯一屏障。
+        if (!string.Equals(
+            context.Request.Method, method, StringComparison.Ordinal))
         {
             context.Response.StatusCode =
                 StatusCodes.Status405MethodNotAllowed;
-            context.Response.Headers.Allow = HttpMethods.Get;
+            context.Response.Headers.Allow = method;
             return false;
         }
         System.Net.IPAddress? remote =

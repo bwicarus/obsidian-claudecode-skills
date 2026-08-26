@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -9,6 +10,9 @@ internal sealed class ReaderContextMcpServer
 {
     internal const string ToolName = "reader_context_snapshot";
     internal const string VisualToolName = "reader_visual_image";
+    // 摄像头取图（2026-08-27 用户拍板）。与 reader_visual_image 是两件事：
+    // 那个拍的是**阅读器页面**，这个拍的是**现实世界**。
+    internal const string CameraToolName = "reader_camera_snap";
     internal const string BrowserControlToolName = "reader_browser_control";
     internal const string HighlightTextToolName = "reader_highlight_text";
     internal const string HighlightRangeToolName =
@@ -694,6 +698,37 @@ internal sealed class ReaderContextMcpServer
                 ["annotations"] = ReadOnlyAnnotations(),
             });
         }
+        tools.Add(new JsonObject
+        {
+            ["name"] = CameraToolName,
+            ["description"] =
+                "Take a photo right now with a physical camera in the user's "
+                + "home and return it inline. Cameras are general-purpose: "
+                + "the frame shows whatever the camera happens to point at, "
+                + "so look at the image rather than assuming a subject. "
+                + "Camera frames are NOT part of the context snapshot -- call "
+                + "this only when you actually need to see the physical "
+                + "world, and say why. Takes about two seconds. The reply "
+                + "carries a JSON line (brightness, size, capture time) and "
+                + "the image. If brightness is low the room is dark: say so "
+                + "instead of guessing at what you cannot make out. Omit "
+                + "cameraId for the default camera; use reader_capability_"
+                + "guide topic 'camera' to list them.",
+            ["inputSchema"] = new JsonObject
+            {
+                ["type"] = "object",
+                ["additionalProperties"] = false,
+                ["properties"] = new JsonObject
+                {
+                    ["cameraId"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["pattern"] = "^[a-z0-9][a-z0-9-]{0,31}$",
+                    },
+                },
+            },
+            ["annotations"] = ReadOnlyAnnotations(),
+        });
         if (_controlBrowserAsync is not null)
         {
             tools.Add(new JsonObject
@@ -2804,6 +2839,14 @@ internal sealed class ReaderContextMcpServer
         if (toolName == CapabilityGuideToolName)
         {
             await HandleCapabilityGuideToolCallAsync(
+                id,
+                arguments,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (toolName == CameraToolName)
+        {
+            await HandleCameraToolCallAsync(
                 id,
                 arguments,
                 cancellationToken).ConfigureAwait(false);
@@ -6126,6 +6169,254 @@ internal sealed class ReaderContextMcpServer
                         },
                     },
                 },
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    // ── 摄像头取图 ──
+    //
+    // 拍照的活儿在 camera_capture.py 里（摄像头登记表、ssh、留几张都归它）；
+    // 这里只负责把它那行 JSON 拆成"元数据 + 一张图"交给模型。
+    //
+    // ⚠ 这条通道**只在模型主动调用时**才走。摄像头画面不进快照 ——
+    // 用户 2026-08-27 明说不要每取一次快照就被塞一张家里的照片。
+    private static string CameraCliPath() => Path.Combine(
+        Environment.GetFolderPath(
+            Environment.SpecialFolder.LocalApplicationData),
+        "BWReader",
+        "camera_capture.py");
+
+    private static string CameraPythonPath() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        "AppData", "Local", "Programs", "Python", "Python313", "python.exe");
+
+    private async Task HandleCameraToolCallAsync(
+        JsonNode id,
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        string cameraId = "pi";
+        if (arguments.ValueKind == JsonValueKind.Object
+            && arguments.TryGetProperty("cameraId", out JsonElement raw)
+            && raw.ValueKind == JsonValueKind.String)
+        {
+            cameraId = raw.GetString() ?? "pi";
+        }
+        if (!System.Text.RegularExpressions.Regex.IsMatch(
+                cameraId, "^[a-z0-9][a-z0-9-]{0,31}$"))
+        {
+            await WriteCameraToolErrorAsync(
+                id,
+                "BW_CAMERA_BAD_ID", "cameraId 形状非法", cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        string python = CameraPythonPath();
+        string cli = CameraCliPath();
+        if (!File.Exists(python) || !File.Exists(cli))
+        {
+            // 缺件要说清缺哪一件 —— 否则模型只会转述"摄像头不可用",
+            // 而用户无从知道是没装 Python 还是没部署过桌面端。
+            await WriteCameraToolErrorAsync(
+                id,
+                "BW_CAMERA_NOT_INSTALLED",
+                !File.Exists(python)
+                    ? "找不到 Python：" + python
+                    : "找不到 camera_capture.py：" + cli
+                      + "（桌面端还没部署过？）",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        ProcessStartInfo start = new()
+        {
+            FileName = python,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+        };
+        start.ArgumentList.Add(cli);
+        start.ArgumentList.Add("snap");
+        start.ArgumentList.Add(cameraId);
+
+        string output;
+        string errorText;
+        int exitCode;
+        using (CancellationTokenSource timeout =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            timeout.CancelAfter(TimeSpan.FromSeconds(150));
+            try
+            {
+                using Process? process = Process.Start(start);
+                if (process is null)
+                {
+                    await WriteCameraToolErrorAsync(
+                        id,
+                        "BW_CAMERA_BAD_ID", "启动取图进程失败", cancellationToken)
+                        .ConfigureAwait(false);
+                    return;
+                }
+                Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = process.StandardError.ReadToEndAsync();
+                await process.WaitForExitAsync(timeout.Token)
+                    .ConfigureAwait(false);
+                output = (await stdout.ConfigureAwait(false)).Trim();
+                errorText = (await stderr.ConfigureAwait(false)).Trim();
+                exitCode = process.ExitCode;
+            }
+            catch (OperationCanceledException)
+                when (!cancellationToken.IsCancellationRequested)
+            {
+                await WriteCameraToolErrorAsync(
+                    id,
+                    "BW_CAMERA_BAD_ID", "取图超时（摄像头被拔了？）", cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (Exception exception) when (
+                exception is IOException
+                    or System.ComponentModel.Win32Exception)
+            {
+                await WriteCameraToolErrorAsync(
+                    id,
+                    "BW_CAMERA_NOT_INSTALLED", "启动取图进程出错：" + exception.Message,
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+        }
+
+        if (output.Length == 0)
+        {
+            await WriteCameraToolErrorAsync(
+                id,
+                "BW_CAMERA_SPAWN_FAILED",
+                "取图进程没有输出（退出码 " + exitCode + "）："
+                    + (errorText.Length > 300 ? errorText[..300] : errorText),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        JsonNode? parsed;
+        try
+        {
+            parsed = JsonNode.Parse(output);
+        }
+        catch (JsonException)
+        {
+            parsed = null;
+        }
+        if (parsed is not JsonObject payload)
+        {
+            await WriteCameraToolErrorAsync(
+                id,
+                "BW_CAMERA_TIMEOUT",
+                "取图进程的输出不是 JSON："
+                    + (output.Length > 300 ? output[..300] : output),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (payload["ok"]?.GetValue<bool>() != true)
+        {
+            // 失败原因原样转给模型 —— 它是唯一会把这句话说给用户听的人。
+            await WriteCameraToolErrorAsync(
+                id,
+                "BW_CAMERA_SPAWN_FAILED",
+                payload["error"]?.GetValue<string>() ?? "取图失败但没说原因",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        string? framePath = payload["path"]?.GetValue<string>();
+        byte[] image;
+        try
+        {
+            image = await File.ReadAllBytesAsync(
+                framePath ?? string.Empty, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException
+                or ArgumentException)
+        {
+            await WriteCameraToolErrorAsync(
+                id,
+                "BW_CAMERA_NO_OUTPUT", "照片写下来了却读不回：" + exception.Message,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // 元数据里不带 path（模型不需要文件系统路径，给了反而会去猜别的
+        // 文件），但亮度、尺寸、时刻要给 —— 尤其是亮度：它决定模型该说
+        // "太暗看不清"还是硬猜。
+        JsonObject metadata = new()
+        {
+            ["camera"] = payload["id"]?.DeepClone(),
+            ["label"] = payload["label"]?.DeepClone(),
+            ["capturedAtUtcMs"] = payload["capturedAtUtcMs"]?.DeepClone(),
+            ["width"] = payload["width"]?.DeepClone(),
+            ["height"] = payload["height"]?.DeepClone(),
+            ["brightness"] = payload["brightness"]?.DeepClone(),
+            ["note"] = "brightness is the mean grey level 0-255; "
+                + "below about 35 the room is dark and detail is unreliable.",
+        };
+        await WriteResultAsync(
+            id,
+            new JsonObject
+            {
+                ["content"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = metadata.ToJsonString(
+                            DirectBridgeContract.JsonOptions),
+                    },
+                    new JsonObject
+                    {
+                        ["type"] = "image",
+                        ["data"] = Convert.ToBase64String(image),
+                        ["mimeType"] = "image/jpeg",
+                        ["_meta"] = new JsonObject
+                        {
+                            ["codex/imageDetail"] = "original",
+                        },
+                    },
+                },
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>摄像头工具的失败回复。与 reader_visual_image 同构：
+    /// 带错误码的 JSON + isError，模型据此如实转述而不是自己编原因。</summary>
+    private async Task WriteCameraToolErrorAsync(
+        JsonNode id,
+        string code,
+        string message,
+        CancellationToken cancellationToken)
+    {
+        await WriteResultAsync(
+            id,
+            new JsonObject
+            {
+                ["content"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = new JsonObject
+                        {
+                            ["ok"] = false,
+                            ["code"] = code,
+                            ["message"] = message,
+                        }.ToJsonString(DirectBridgeContract.JsonOptions),
+                    },
+                },
+                ["isError"] = true,
             },
             cancellationToken).ConfigureAwait(false);
     }

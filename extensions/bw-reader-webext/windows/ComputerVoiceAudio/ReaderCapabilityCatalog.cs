@@ -28,6 +28,8 @@ internal sealed class ReaderCapabilityCatalog
         new("cards", "卡片输出",
             "发送现有 Realtime 卡片；可用 bind 把卡片钉在正文某一段上"
             + "（页面锚定 / 固定 / 绑定元素）"),
+        new("camera", "摄像头",
+            "用实体摄像头当场拍一张看现实世界（不在快照里，要主动调）"),
         new("navigation", "导航输出", "滚动、定位、跳页与跳章节"),
         new("highlight", "高亮输出", "保存当前稳定选区"),
         new("tool-status", "工具状态输出", "发送现有 Realtime 工具状态"),

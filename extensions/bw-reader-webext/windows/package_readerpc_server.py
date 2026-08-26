@@ -52,6 +52,10 @@ RUNTIME_SOURCES = {
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "replication_places.py"
     ),
+    "readerpc-runtime/camera_capture.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "camera_capture.py"
+    ),
     "readerpc-runtime/transit_search.py": (
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "transit_search.py"
@@ -451,6 +455,7 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
         for stable_name in (
             "replication_activity.py", "replication_notifications.py",
             "replication_places.py", "transit_search.py",
+            "camera_capture.py",
         ):
             (root.parent / stable_name).write_bytes(
                 (release / "readerpc-runtime" / stable_name).read_bytes()

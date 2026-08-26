@@ -559,6 +559,18 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         app.MapGet(
             DirectSnapshotViewer.ActivityReportPath,
             _snapshotViewer.HandleActivityReportAsync);
+        // 摄像头（2026-08-27）。全部经 PrepareLocalResponse 的回环闸 ——
+        // 家里的实时画面只在这台机器上打得开,不经 Tailscale、不经网页。
+        app.MapGet(
+            DirectSnapshotViewer.CameraListPath,
+            _snapshotViewer.HandleCameraListAsync);
+        app.MapGet(
+            DirectSnapshotViewer.CameraFramePath,
+            _snapshotViewer.HandleCameraFrameAsync);
+        app.MapMethods(
+            DirectSnapshotViewer.CameraSnapPath,
+            new[] { "POST" },
+            _snapshotViewer.HandleCameraSnapAsync);
         app.Map(
             "/reader-computer-voice/v1",
             context => HandleBridgeAsync(context, serviceToken));
