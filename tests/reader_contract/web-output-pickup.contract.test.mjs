@@ -62,3 +62,18 @@ test("background 长轮询:绑定驱动、按 source 校验、回执尽力送达
   assert.match(BACKGROUND, /readerEnsurePickupLoop\(viewport\.sourceInstanceId/,
     "快照 POST 成功即启动/续期取件");
 });
+
+test("取件看门狗:内容脚本每 20s 唤醒 SW 拉活循环(352s 停摆的修复)", () => {
+  const CONTENT = read("extensions/bw-reader-webext/content.js");
+  assert.match(CONTENT, /BW_READER_PICKUP_KEEPALIVE/,
+    "content 侧看门狗在场 —— 页面安静时 SW 被杀后循环才有人拉活");
+  assert.match(BACKGROUND,
+    /READER_RELAY_MESSAGES = new Set\(\[[^\]]*"BW_READER_PICKUP_KEEPALIVE"/s,
+    "keepalive 必须在 relay 白名单里,否则消息被静默丢弃");
+  const at = BACKGROUND.indexOf('message.type === "BW_READER_PICKUP_KEEPALIVE"');
+  assert.ok(at >= 0, "background 有 keepalive 处理分支");
+  const body = BACKGROUND.slice(at, at + 1200);
+  assert.match(body, /readerStoredVisualBinding/,
+    "SW 冷启后必须从持久化存储恢复绑定 —— 只查内存表等于看门狗白叫");
+  assert.match(body, /readerEnsurePickupLoop/);
+});

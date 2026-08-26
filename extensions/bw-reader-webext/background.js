@@ -54,7 +54,8 @@ const READER_RELAY_MESSAGES = new Set([
   "BW_READER_CALL_CLAIM_BIND",
   "BW_READER_VISUAL_CONTEXT_GET",
   "BW_READER_VISUAL_CAPTURE",
-  "BW_READER_BROWSER_CONTROL"
+  "BW_READER_BROWSER_CONTROL",
+  "BW_READER_PICKUP_KEEPALIVE"
 ]);
 const READER_CONTEXT_POST_URL =
   "https://bwicarus-2.taile44d0c.ts.net/reader-context/snapshot";
@@ -7076,6 +7077,23 @@ function readerValidateControlReply(result, request) {
 }
 
 async function handleReaderRelayMessage(message, sender) {
+  if (message.type === "BW_READER_PICKUP_KEEPALIVE") {
+    // 取件循环的看门狗（2026-08-26）：内容脚本每 20s 唤醒本 service worker。
+    // SW 冷启后内存绑定表是空的 —— readerStoredVisualBinding 从持久化存储
+    // 恢复（命中会顺带写回内存表），随后把长轮询循环拉活；已在跑时 no-op。
+    const binding = readerContentSender(sender);
+    if (!readerExactKeys(message, ["type", "sourceInstanceId"]) ||
+        !/^[A-Za-z0-9_-]{22}$/.test(String(message.sourceInstanceId || ""))) {
+      throw readerRelayError("BW_READER_PICKUP_KEEPALIVE", "取件看门狗字段无效");
+    }
+    const committed = await readerStoredVisualBinding(
+      binding.tabId, binding.url, message.sourceInstanceId
+    );
+    // 还没提交过快照就没有可拉活的绑定 —— 不是错误，页面稍后自己会 POST。
+    if (!committed) return { running: false };
+    readerEnsurePickupLoop(message.sourceInstanceId, binding.tabId);
+    return { running: true };
+  }
   if (message.type === "BW_READER_CALL_CLAIM_CREATE") {
     const binding = readerContentSender(sender);
     if (!readerExactKeys(message, ["type", "capability", "sourceInstanceId", "appKind"]) ||

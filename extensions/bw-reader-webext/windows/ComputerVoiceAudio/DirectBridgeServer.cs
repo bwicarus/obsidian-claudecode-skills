@@ -1285,7 +1285,10 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     _readerRealtimeOutputBroker, ack);
                 AppendOutputPickupLog(
                     "receipt	" + ack.SourceInstanceId
-                    + "	" + ack.Correlation + "	" + ack.Outcome);
+                    + "	" + ack.Correlation + "	" + ack.Outcome
+                    + "	bind=" + (ack.BindOutcome ?? "-")
+                    + (string.IsNullOrEmpty(ack.BindReason)
+                        ? "" : "	why=" + ack.BindReason));
             }
             catch (ReaderRealtimeOutputException exception)
             {

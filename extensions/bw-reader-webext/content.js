@@ -1595,6 +1595,22 @@
       try { if (!document.hasFocus()) return; } catch (_) {}
       claimCallFrame();
     }, 15000);
+    // 取件循环的看门狗（2026-08-26 真机实锤：352 秒无轮询 = 对话记录/卡片
+    // 投递报离线）。长轮询循环活在 background service worker 里，iOS 会
+    // 掐死它，而重启它的唯一契机原本是下一次快照 POST —— 页面安静时就是
+    // 永远。这条 ping 每 20 秒唤醒 SW 并让它按持久化的视觉绑定把循环拉活；
+    // 循环已在跑时是 no-op。只在页面可见且聚焦时发 —— 页面不在前台时
+    // 本来就没有可投递的对象。
+    window.setInterval(function () {
+      if (document.visibilityState !== "visible") return;
+      try { if (!document.hasFocus()) return; } catch (_) {}
+      try {
+        runtime.sendMessage({
+          type: "BW_READER_PICKUP_KEEPALIVE",
+          sourceInstanceId: sourceInstanceId,
+        }, function () { void chrome.runtime.lastError; });
+      } catch (_) {}
+    }, 20000);
 
     // Asks the switch itself, rather than a copy of it.
     //
