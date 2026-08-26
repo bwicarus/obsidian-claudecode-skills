@@ -229,8 +229,9 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                         "ok": true,
                         "state": "ready",
                         "source": NSNull(),
-                        "revision": "system-projection/1:"
-                            + outcome.remindersState,
+                        "revision": "system-projection/1:reminders="
+                            + outcome.remindersState
+                            + ";alarms=" + outcome.alarmsState,
                         "error": NSNull(),
                         "resolvedIds": outcome.resolvedIds,
                     ]

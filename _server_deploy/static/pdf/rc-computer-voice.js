@@ -5201,6 +5201,8 @@
     var syncing = false;
     var succeededOnce = false;
     var retryIndex = 0;
+    var alarmNoticeShown = false;
+    var syncedItems = [];
     function scheduleNext(delayMs) {
       setTimeout(sync, delayMs);
     }
@@ -5215,6 +5217,7 @@
       if (syncing) return;
       syncing = true;
       queryNotifications().then(function (items) {
+        syncedItems = items || [];
         return native({
           notifications: items,
           review: items.__bwReview || null,
@@ -5227,6 +5230,24 @@
           syncing = false;
           return;
         }
+        // 投影状态（revision 里带 reminders=/alarms=）留给诊断，并在
+        // **闹钟不可用却确有到点提醒**时提醒用户一次 —— 这种能力缺席
+        // 必须出声：用户会以为到点会被叫醒，实际只有普通通知。
+        try {
+          window.__BW_SYSTEM_PROJECTION_STATE__ = {
+            revision: String(result.revision || ''),
+            atMs: Date.now(),
+          };
+          if (!alarmNoticeShown &&
+              /alarms=(unsupported-os|sdk-unavailable|denied)/
+                .test(String(result.revision || '')) &&
+              syncedItems.some(function (one) { return one && one.dueAtUtcMs; })) {
+            alarmNoticeShown = true;
+            if (RC && typeof RC.toast === 'function') {
+              RC.toast('到点闹钟需要 iPadOS 26；当前用系统通知提醒');
+            }
+          }
+        } catch (e) {}
         var resolved = result && Array.isArray(result.resolvedIds)
           ? result.resolvedIds : [];
         resolved.forEach(function (id) {

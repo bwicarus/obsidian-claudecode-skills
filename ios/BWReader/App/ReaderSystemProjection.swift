@@ -27,6 +27,9 @@ final class ReaderSystemProjection {
     private let calendarKey = "bwReminderCalendarIdV1"
     private static let calendarTitle = "BW 待办"
     private static let maximumItems = 20
+    private static let duePrefix = "bw-due-"
+    // iOS 单 App 未触发的本地通知硬上限是 64（超出静默丢弃），留足余量。
+    private static let maximumScheduledDue = 32
 
     struct Item {
         let id: String
@@ -42,6 +45,7 @@ final class ReaderSystemProjection {
     struct Outcome {
         let resolvedIds: [String]
         let remindersState: String
+        let alarmsState: String
     }
 
     // MARK: - 入口（bridge 的 system-projection action 调用）
@@ -60,8 +64,17 @@ final class ReaderSystemProjection {
             reviewAtMs: reviewAtMs,
             syncAtMs: syncAtMs)
         await postLocalNotificationsForNewPending(notifications)
+        // 到点触发（2026-08-26 用户诉求「提醒要真的叫醒我」第一层）：
+        // 带 dueAt 的条目在到点时刻**排一条本地通知** —— 一旦排上，
+        // App 关掉、桥离线、iPad 断网都照响，这是唯一不依赖任何在线
+        // 环节的提醒通道。
+        await scheduleDueNotifications(notifications)
+        let alarms = await ReaderSystemAlarms.shared.sync(notifications)
         let (resolved, state) = await projectReminders(notifications)
-        return Outcome(resolvedIds: resolved, remindersState: state)
+        return Outcome(
+            resolvedIds: resolved,
+            remindersState: state,
+            alarmsState: alarms)
     }
 
     // MARK: - 小组件数据
@@ -114,6 +127,11 @@ final class ReaderSystemProjection {
             content.title = item.title
             if !item.body.isEmpty { content.body = item.body }
             content.sound = .default
+            // 时效级别：有 Time Sensitive entitlement 时可穿透专注模式；
+            // 没有该 entitlement 时系统静默降级成普通级别（不会崩、不会
+            // 拒发），所以这里无条件设 —— 想真正穿透专注模式需要在
+            // 开发者后台给 App ID 开 capability 并重签描述文件。
+            content.interruptionLevel = .timeSensitive
             try? await center.add(UNNotificationRequest(
                 identifier: "bw-ntf-" + item.id,
                 content: content,
@@ -125,6 +143,54 @@ final class ReaderSystemProjection {
         defaults?.set(
             Array(seen.filter { live.contains($0) }.prefix(200)),
             forKey: seenKey)
+    }
+
+    // MARK: - 到点触发（本地通知排程）
+
+    /// 带 dueAt 的条目排成到点本地通知。
+    ///
+    /// 为什么这条通道最重要：本地通知**一旦排上就归系统管**，App 被杀、
+    /// 桥离线、iPad 断网都照响；而横幅只在同步那一刻响一次、苹果提醒
+    /// 依赖提醒事项权限。三条并行，互为兜底。
+    ///
+    /// 幂等：每轮按当前条目全量重排（同 identifier 的 add 是替换语义），
+    /// 已消失/已过期的条目撤销排程。iOS 对单 App 未触发的本地通知有 64
+    /// 条硬上限（超了静默丢弃最远的），这里只排最近的 32 条留足余量。
+    private func scheduleDueNotifications(_ items: [Item]) async {
+        let center = UNUserNotificationCenter.current()
+        guard await center.notificationSettings().authorizationStatus
+            == .authorized else { return }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let due = items
+            .compactMap { item -> (Item, Int64)? in
+                guard let at = item.dueAtMs, at > nowMs else { return nil }
+                return (item, at)
+            }
+            .sorted { $0.1 < $1.1 }
+            .prefix(Self.maximumScheduledDue)
+        let wanted = Set(due.map { Self.duePrefix + $0.0.id })
+        let stale = (await center.pendingNotificationRequests())
+            .map(\.identifier)
+            .filter { $0.hasPrefix(Self.duePrefix) && !wanted.contains($0) }
+        if !stale.isEmpty {
+            center.removePendingNotificationRequests(withIdentifiers: stale)
+        }
+        for (item, at) in due {
+            let content = UNMutableNotificationContent()
+            content.title = item.title
+            if !item.body.isEmpty { content.body = item.body }
+            content.sound = .default
+            content.interruptionLevel = .timeSensitive
+            let fire = Date(timeIntervalSince1970: Double(at) / 1000)
+            let components = Calendar.current.dateComponents(
+                [.year, .month, .day, .hour, .minute],
+                from: fire)
+            try? await center.add(UNNotificationRequest(
+                identifier: Self.duePrefix + item.id,
+                content: content,
+                trigger: UNCalendarNotificationTrigger(
+                    dateMatching: components, repeats: false)))
+        }
     }
 
     // MARK: - 提醒事项显示副本
