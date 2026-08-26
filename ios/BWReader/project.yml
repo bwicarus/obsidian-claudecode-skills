@@ -44,6 +44,9 @@ targets:
       # 于是 CI 连挂四次（cannot find type 'ReaderOfflineDictionaryInfo'）。
       # ⚠ Shared/ 下的文件**每个 target 都要单独列**，加一处不等于加好了。
       - path: Shared/ReaderOfflineDictionaryCore.swift
+      # 手表载荷契约。⚠ 上面那条警告的活例子：2026-08-27 我只加进了手表
+      # target,漏了这里,CI 立刻 cannot find type 'ReaderWatchVoice'。
+      - path: Shared/ReaderWatchPayload.swift
       # Generated deterministically before XcodeGen. It is a folder resource so
       # the loopback host receives a stable ReaderBundle document root rather
       # than hundreds of flattened files.

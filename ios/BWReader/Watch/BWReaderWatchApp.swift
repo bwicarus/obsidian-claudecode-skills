@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import WatchConnectivity
 
 // BWReader 手表伴侣 app（2026-08-27 用户要的）。

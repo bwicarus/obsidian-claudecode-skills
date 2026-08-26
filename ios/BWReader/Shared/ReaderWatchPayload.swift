@@ -109,3 +109,23 @@ enum ReaderWatchCommand: String, Codable {
 
     static let key = "command"
 }
+
+/// 快照的序列化。**必须放在 Shared/**：手机侧要 encode、手表侧要 decode，
+/// 放在任一侧都会让另一侧 cannot find type —— 2026-08-27 就是这么挂的。
+enum WatchSnapshotCoder {
+    static func decode(_ payload: [String: Any]) -> ReaderWatchSnapshot? {
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload)
+        else { return nil }
+        return try? JSONDecoder().decode(ReaderWatchSnapshot.self, from: data)
+    }
+
+    static func encode(_ snapshot: ReaderWatchSnapshot) -> [String: Any]? {
+        guard let data = try? JSONEncoder().encode(snapshot),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dictionary = object as? [String: Any]
+        else { return nil }
+        return dictionary
+    }
+}
+

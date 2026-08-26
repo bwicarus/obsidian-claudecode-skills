@@ -125,25 +125,6 @@ extension WatchLink: WCSessionDelegate {
     }
 }
 
-/// 快照的序列化。手机与手表各有一份**同名同形**的实现，
-/// 两边都从 Shared/ 引用同一个 Codable 结构，所以不会各自漂。
-enum WatchSnapshotCoder {
-    static func decode(_ payload: [String: Any]) -> ReaderWatchSnapshot? {
-        guard JSONSerialization.isValidJSONObject(payload),
-              let data = try? JSONSerialization.data(withJSONObject: payload)
-        else { return nil }
-        return try? JSONDecoder().decode(ReaderWatchSnapshot.self, from: data)
-    }
-
-    static func encode(_ snapshot: ReaderWatchSnapshot) -> [String: Any]? {
-        guard let data = try? JSONEncoder().encode(snapshot),
-              let object = try? JSONSerialization.jsonObject(with: data),
-              let dictionary = object as? [String: Any]
-        else { return nil }
-        return dictionary
-    }
-}
-
 /// 冷启动先显示上次的（并标明多旧），比先给一屏空白诚实也好用。
 enum WatchSnapshotCache {
     private static var url: URL? {
