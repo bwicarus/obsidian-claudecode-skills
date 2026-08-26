@@ -187,11 +187,63 @@ private struct SystemDataProvider: TimelineProvider {
         in context: Context,
         completion: @escaping (Timeline<SystemDataEntry>) -> Void
     ) {
-        let now = Date()
-        completion(Timeline(
-            entries: [SystemDataEntry(
-                date: now, data: store.readWidgetSystemData())],
-            policy: .after(now.addingTimeInterval(15 * 60))))
+        // 小组件自己拉数据（2026-08-26 用户拍板：更新不能依赖 App 开启，
+        // 也不该绑定某本书）。timeline 每 15 分钟刷新时直接经 Tailscale
+        // 拉 Windows 桥的只读端点；成功写回 App Group 缓存（App 那条
+        // 投影链仍在，两边共用同一份缓存），失败用缓存兜底 —— 缓存自带
+        // 数据时刻，旧了用户看得出来。
+        Task {
+            let now = Date()
+            var data = await Self.fetchRemote()
+            if let fresh = data {
+                try? store.writeWidgetSystemData(fresh)
+            } else {
+                data = store.readWidgetSystemData()
+            }
+            completion(Timeline(
+                entries: [SystemDataEntry(date: now, data: data)],
+                policy: .after(now.addingTimeInterval(15 * 60))))
+        }
+    }
+
+    private static func fetchRemote() async -> ReaderWidgetSystemData? {
+        guard let url = URL(
+            string: "https://bwicarus-2.taile44d0c.ts.net/widget/system-data")
+        else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        guard let (payload, response) = try? await URLSession.shared
+            .data(for: request),
+            (response as? HTTPURLResponse)?.statusCode == 200,
+            let root = try? JSONSerialization.jsonObject(with: payload)
+                as? [String: Any],
+            root["contract"] as? String == "reader-notifications/1"
+        else { return nil }
+        let items = (root["items"] as? [[String: Any]] ?? []).compactMap {
+            one -> ReaderWidgetSystemData.NotificationItem? in
+            guard let id = one["id"] as? String,
+                  let title = one["title"] as? String else { return nil }
+            return ReaderWidgetSystemData.NotificationItem(
+                id: id,
+                title: title,
+                kind: one["kind"] as? String ?? "",
+                state: one["state"] as? String ?? "pending")
+        }
+        var review: ReaderWidgetSystemData.Review?
+        if let raw = root["review"] as? [String: Any],
+           let due = (raw["due"] as? NSNumber)?.intValue,
+           let fresh = (raw["new"] as? NSNumber)?.intValue {
+            review = ReaderWidgetSystemData.Review(
+                due: due,
+                newCards: fresh,
+                atMs: (raw["atMs"] as? NSNumber)?.int64Value ?? 0)
+        }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        return ReaderWidgetSystemData(
+            review: review,
+            notifications: items,
+            lastSyncAtMs: now,
+            updatedAtMs: now)
     }
 }
 

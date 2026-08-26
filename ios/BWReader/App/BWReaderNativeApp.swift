@@ -362,10 +362,20 @@ private struct ReaderRootView: View {
     private func handleNativeFeatureRoute(_ route: ReaderNativeActivityRoute) {
         startupRouteOverrideRequested = true
         startupResolutionPending = false
-        if let localBookID = route.localBookID,
-           let localBook = ReaderLocalLibraryManager.shared.books.first(
-            where: { $0.id == localBookID }
-           ) {
+        // 深链没带书号时不再直接回书库（2026-08-26 用户：点小组件应该
+        // 打开最后看的书，而不是让我重新选书）——先落回最近打开的书；
+        // 只有连最近书都没有/找不到时才回书库。
+        var targetBook: ReaderLocalBookRecord?
+        if let localBookID = route.localBookID {
+            targetBook = ReaderLocalLibraryManager.shared.books.first(
+                where: { $0.id == localBookID })
+        }
+        if targetBook == nil,
+           let last = ReaderLastLocalBookStore.shared.load() {
+            targetBook = ReaderLocalLibraryManager.shared.books.first(
+                where: { $0.id == last.bookID })
+        }
+        if let localBook = targetBook {
             showsLibrary = false
             Task { @MainActor in
                 _ = await reader.openLocalBook(
@@ -374,8 +384,8 @@ private struct ReaderRootView: View {
                 )
             }
         } else {
-            // Old Spotlight records without an opaque local book identity
-            // return to the App-owned shelf. The main Reader never loads Pi.
+            // 连最近书都没有 —— 回 App 自有书架。The main Reader never
+            // loads Pi.
             showsLibrary = true
         }
         switch route.action {

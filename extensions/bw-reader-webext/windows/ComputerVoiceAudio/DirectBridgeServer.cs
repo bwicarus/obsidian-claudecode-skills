@@ -584,6 +584,14 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         // -- reported as "Load failed", indistinguishable from the host being
         // unreachable. It also explains why this endpoint tested clean from
         // Python: a script issues no preflight, only browsers do.
+        // iOS 小组件的只读数据端点（2026-08-26 用户拍板：小组件更新不能
+        // 依赖 App 开启）。widget extension 的 timeline provider 每 15 分钟
+        // 直接经 Tailscale 拉这里 —— 与快照/取件同一个 HTTPS 面。非浏览器
+        // 客户端，无 CORS；身份闸 = Tailscale serve 注入的登录头。
+        app.MapMethods(
+            "/widget/system-data",
+            new[] { "GET" },
+            context => HandleWidgetSystemDataAsync(context, serviceToken));
         app.MapMethods(
             "/reader-output/pending",
             new[] { "POST", "OPTIONS" },
@@ -1162,6 +1170,34 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             return false;
         }
         return true;
+    }
+
+    private async Task HandleWidgetSystemDataAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!HttpMethods.IsGet(context.Request.Method))
+        {
+            context.Response.StatusCode =
+                StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        DirectBridgeConfig config = _configStore.Load();
+        if (!TailscaleLoginMatches(
+            config,
+            context.Request.Headers["Tailscale-User-Login"]))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+        object view = ReplicationCommandProtocol.ReadNotificationsView(
+            System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(_replicationDigestsPath)!,
+                "notifications-user.json"));
+        context.Response.ContentType = "application/json; charset=utf-8";
+        context.Response.Headers["Cache-Control"] = "no-store";
+        await context.Response.WriteAsJsonAsync(
+            view, serviceCancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleOutputPendingAsync(
