@@ -118,6 +118,21 @@ SDKROOT / SKIP_INSTALL / TARGETED_DEVICE_FAMILY）。手表 target 必须自己�
 契约测试 `bind-receipt-truthful` 会把 `renderInfo` 单独抽出来 eval，那时同文件
 的函数不在作用域里。
 
+## ⚠ 语音路由**故意不进** native_reader_interface_manifest.json
+
+手表说话走 `/api/voice/transcribe` + `/api/voice/agent`，但这两条**不在**
+那份清单里，是刻意的：
+
+- 那份清单是 **WebView 网关（ReaderNativePiGateway）的授权表**。手机侧这段
+  代码用 `URLSession` 直连 Pi 并附 cookie，压根不经过网关。
+- `native-local-runtime.js` 的校验器只放行 `/pdf/api/` 与 `/api/assistant/`
+  两个前缀（第 158 行那条正则）。那条规则**存在的意义就是圈住 WebView 能
+  代理的范围** —— 为了一个用不着网关的功能去放宽它，是拿安全边界换零收益。
+- 2026-08-27 我先加了、被那个校验器拒了，然后撤掉。**撤掉是对的，不是绕过。**
+
+代价：`scripts/where_does_this_route_run.py` 查不到这两条。可以接受 —— 那个
+工具回答的是「阅读器路由由谁执行」，而这两条不是阅读器路由。
+
 ## 加 target 要同步几处
 
 ```bash

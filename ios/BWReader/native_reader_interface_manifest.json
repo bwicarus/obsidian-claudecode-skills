@@ -560,36 +560,6 @@
    "description": "Execute voice tools from supplied native-local context, rewriting a verified Pi book identity when available."
   },
   {
-   "path": "/api/voice/agent",
-   "match": "exact",
-   "owner": "pi",
-   "methods": [
-    "POST"
-   ],
-   "surfaces": [
-    "epub",
-    "pdf"
-   ],
-   "status": "supported",
-   "remoteBook": null,
-   "description": "Turn one transcript into a spoken reply and client actions on Pi. Pairs with /api/voice/transcribe."
-  },
-  {
-   "path": "/api/voice/transcribe",
-   "match": "exact",
-   "owner": "pi",
-   "methods": [
-    "POST"
-   ],
-   "surfaces": [
-    "epub",
-    "pdf"
-   ],
-   "status": "supported",
-   "remoteBook": null,
-   "description": "Transcribe one recorded clip on Pi (multipart 'audio', WAV 16k LINEAR16 goes straight to Cloud STT). Turn-based, not streaming -- this is what the watch push-to-talk uses."
-  },
-  {
    "path": "/pdf/api/active-reading",
    "match": "exact",
    "owner": "pi",
