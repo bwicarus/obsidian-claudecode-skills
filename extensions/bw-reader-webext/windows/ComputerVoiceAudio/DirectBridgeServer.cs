@@ -2724,25 +2724,43 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         while (await timer.WaitForNextTickAsync(cancellationToken)
             .ConfigureAwait(false))
         {
-            DirectBridgeConfig config = _configStore.Load();
-            _snapshotViewer.SynchronizeServiceIntent(
-                config.ContextDeliveryMode,
-                SnapshotServiceRequested);
-            string state;
-            bool readerConnected;
-            bool captureActive;
-            lock (_runtimeStateGate)
+            try
             {
-                state = _runtimeState;
-                readerConnected = _runtimeReaderConnected;
-                captureActive = _runtimeCaptureActive;
+                DirectBridgeConfig config = _configStore.Load();
+                _snapshotViewer.SynchronizeServiceIntent(
+                    config.ContextDeliveryMode,
+                    SnapshotServiceRequested);
+                string state;
+                bool readerConnected;
+                bool captureActive;
+                lock (_runtimeStateGate)
+                {
+                    state = _runtimeState;
+                    readerConnected = _runtimeReaderConnected;
+                    captureActive = _runtimeCaptureActive;
+                }
+                await _statusWriter.WriteAsync(
+                    state,
+                    readerConnected,
+                    captureActive,
+                    _coordinator.LastError,
+                    cancellationToken).ConfigureAwait(false);
             }
-            await _statusWriter.WriteAsync(
-                state,
-                readerConnected,
-                captureActive,
-                _coordinator.LastError,
-                cancellationToken).ConfigureAwait(false);
+            catch (Exception exception)
+                when (exception is not OperationCanceledException)
+            {
+                // 心跳循环是本进程的生命线（2026-08-26 实锤 1249 次
+                // service-start 对 76 次体面关停的主嫌）：这里每 5 秒读
+                // 配置、写状态文件，与 MCP 实例/安装器/查看器共用同一批
+                // 文件 —— 一次瞬时共享冲突把异常冒出去 = 心跳任务整个
+                // 死掉 = 状态文件停更 = supervisor 15-30 秒后判死并
+                // **无日志强杀**。单次失败跳过本拍，留下痕迹，下一拍
+                // 照常 —— supervisor 只应在进程真死时接管。
+                Console.Error.WriteLine(
+                    "[heartbeat] 单拍失败(已跳过): "
+                    + exception.GetType().Name + ": "
+                    + exception.Message);
+            }
         }
     }
 
