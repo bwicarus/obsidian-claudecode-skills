@@ -30,6 +30,14 @@ Pi 的 `/voice-rt`）都只在 tailnet 内可达，**认证方式就是「你在
 另外两条硬约束（就算愿意开公网也绕不过）：48kHz 双工音频经手机中继不现实；
 watchOS 不给持续后台录音。
 
+## 状态
+
+2026-08-27 首个构建已上传 TestFlight（CI run 33002752800，三轮：
+第一轮挂在 Shared/ 文件漏加进 App target，第二轮挂在嵌入目录搞反了，
+第三轮全过）。bundle ID 与描述文件都是 CI 自动建的，Apple 后台没动手。
+
+**装法**：iPhone 的「Watch」App → 可用 App → BWReader → 安装。
+
 ## 文件
 
 | 文件 | 作用 |
