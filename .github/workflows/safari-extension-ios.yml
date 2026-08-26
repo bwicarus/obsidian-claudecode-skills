@@ -238,51 +238,6 @@ jobs:
           test -d "$PROJECT_FILE"
           xcodebuild -project "$PROJECT_FILE" -list
 
-      # XcodeGen 2.46.0 把手表 app 嵌进 <App>.app/Watch/，而 Xcode 16 以后
-      # 要求嵌进 PlugIns/，否则报 "is a Foundation extension and must be
-      # embedded in the parent app bundle's PlugIns directory"。
-      # 上游 issue #1613 至今 open、修复 PR #1614 未合并未发版,而 env 里
-      # 固定的就是 2.46.0 —— 所以这个补丁是必需的,不是保险。
-      #
-      # ⚠ 匹配不上就 **exit 1**：将来 XcodeGen 修好了这里会静默变成空操作,
-      # 而"补丁没打上"的表现是构建过了、上传或装到表上才炸 —— 那种失败
-      # 最难追。宁可让 CI 在这里响。
-      - name: Patch watch app embed phase for Xcode 16+
-        shell: bash
-        run: |
-          set -euo pipefail
-          PBX="$PROJECT_FILE/project.pbxproj"
-          test -f "$PBX"
-          if ! grep -q 'CONTENTS_FOLDER_PATH)/Watch' "$PBX"; then
-            echo "::error::没找到 XcodeGen 的 Watch 嵌入路径。"
-            echo "::error::要么 XcodeGen 已修复(去掉本步骤),要么手表 target 没生成。"
-            exit 1
-          fi
-          python3 - "$PBX" <<'PY'
-          import re
-          import sys
-
-          path = sys.argv[1]
-          with open(path, encoding="utf-8") as handle:
-              text = handle.read()
-
-          # 只动带 Watch dstPath 的那个 CopyFiles 段,别误伤扩展/小组件那两个。
-          pattern = re.compile(
-              r'(dstPath = "\$\(CONTENTS_FOLDER_PATH\)/Watch";\s*'
-              r'dstSubfolderSpec = )16(;)')
-          patched, count = pattern.subn(r'\g<1>13\g<2>', text)
-          if count != 1:
-              # 0 = 形状变了；>1 = 意外命中多处。两种都必须响,不能猜。
-              sys.exit(
-                  "预期恰好 1 处 Watch 嵌入阶段,实际 %d 处" % count)
-          patched = patched.replace(
-              'dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";',
-              'dstPath = "";')
-          with open(path, "w", encoding="utf-8") as handle:
-              handle.write(patched)
-          print("patched watch embed phase -> PlugIns")
-          PY
-          grep -q 'dstSubfolderSpec = 13' "$PBX"
 
       - name: Build unsigned simulator candidate
         shell: bash
@@ -613,19 +568,23 @@ jobs:
           test -d "$APPEX_PATH" || { echo "embedded Safari extension is missing"; exit 1; }
           WIDGET_PATH="$APP_PATH/PlugIns/BWReaderWidget.appex"
           test -d "$WIDGET_PATH" || { echo "embedded Reader widget is missing"; exit 1; }
-          # ⚠ 手表 app 必须在 PlugIns/ 而不是 Watch/ —— XcodeGen 2.46.0 生成的是
-          # 后者,Xcode 16+ 只认前者。上面那个 pbxproj 补丁打没打上,只有这里能
-          # 查出来；嵌错目录时 archive 可能通过,装到表上才炸。
-          WATCH_PATH="$APP_PATH/PlugIns/BWReaderWatch.app"
+          # ⚠ 手表 app 必须在 <App>.app/Watch/ 下，**不能在 PlugIns/**。
+          # PlugIns/ 是给 .appex 扩展的；把一个 watchOS app bundle 放进去，
+          # 归档和本步骤之前的校验都会过,但 altool 上传时判不出平台,报
+          # "Cannot determine the 'platform' from the info.plist" —— 2026-08-27
+          # 我照着 XcodeGen issue #1613 打补丁把它挪进 PlugIns,就是这么挂的。
+          # 那个 issue 说的是 "Foundation extension"(扩展),不是手表 app,
+          # 不该照搬。
+          WATCH_PATH="$APP_PATH/Watch/BWReaderWatch.app"
           if [ ! -d "$WATCH_PATH" ]; then
-            echo "::error::手表 app 不在 PlugIns/ 下"
-            if [ -d "$APP_PATH/Watch/BWReaderWatch.app" ]; then
-              echo "::error::它在 Watch/ 下 —— XcodeGen 嵌入阶段的补丁没生效"
+            echo "::error::手表 app 不在 Watch/ 下"
+            if [ -d "$APP_PATH/PlugIns/BWReaderWatch.app" ]; then
+              echo "::error::它在 PlugIns/ 下 —— 那是扩展的位置,上传会失败"
             fi
             ls -la "$APP_PATH" || true
             exit 1
           fi
-          test ! -d "$APP_PATH/Watch"
+          test ! -d "$APP_PATH/PlugIns/BWReaderWatch.app"
           READER_BUNDLE="$APP_PATH/ReaderBundle"
           test -d "$READER_BUNDLE" || { echo "embedded ReaderBundle is missing"; exit 1; }
           python "$GITHUB_WORKSPACE/$PROJECT_DIR/package_local_reader.py" \

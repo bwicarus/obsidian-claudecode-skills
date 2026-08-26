@@ -43,19 +43,20 @@ watchOS 不给持续后台录音。
 
 ## 三个会烧掉构建的坑（都已处理，改动前先看）
 
-### 1. XcodeGen 2.46.0 把手表 app 嵌错目录
+### 1. 手表 app 必须在 `Watch/`，**不能在 `PlugIns/`**
 
-生成的是 `<App>.app/Watch/`，而 **Xcode 16+ 只认 `PlugIns/`**，否则报
-`is a Foundation extension and must be embedded in the parent app bundle's
-PlugIns directory`。上游 issue #1613 至今 open，修复 PR #1614 未合并未发版，
-而 CI 里 `XCODEGEN_VERSION` 固定就是 2.46.0。
+`PlugIns/` 是给 `.appex` 扩展的。把一个 watchOS app bundle 放进去，**归档会过、
+校验会过**，但 `altool` 上传时判不出平台，报
+`Cannot determine the 'platform' from the info.plist`。
 
-CI 里有一步 `Patch watch app embed phase for Xcode 16+` 改 pbxproj，
-**匹配不上就 exit 1**：将来上游修好了这里会静默变成空操作，而「补丁没打上」
-的表现是构建过了、上传或装到表上才炸。
+⚠ 2026-08-27 我在这里绕了一圈：调研引 XcodeGen issue #1613 说 Xcode 16+ 要求
+嵌进 `PlugIns/`，我照着打了 pbxproj 补丁，结果就是上面那个上传失败。
+**那个 issue 说的是 "Foundation extension"（扩展），不是手表 app**，不该照搬。
+补丁已撤，XcodeGen 生成的 `Watch/` 本来就是对的。
 
-⚠ **CI 绿灯不等于成功**。验收出口是校验段里那条「手表 app 必须在 `PlugIns/`
-而不是 `Watch/`」的断言。
+CI 校验段有一条位置断言（必须在 `Watch/`、且不能出现在 `PlugIns/`）——
+就是它把这件事钉出来的。**留着它**：这类错误归档不报、上传才报，而上传
+在流水线最后，错一次要等很久。
 
 ### 2. `SUPPORTED_PLATFORMS` 会漏进手表 target
 
