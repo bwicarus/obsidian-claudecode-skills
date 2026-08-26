@@ -407,6 +407,16 @@
       '.rc-flow-cap{font-size:11px;color:#7f92b8;margin-bottom:4px}' +
       '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#b9a8ff;margin-bottom:6px;flex:none}' +
       '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
+      '.vc-ig-map{position:absolute;left:6px;top:6px;z-index:3;width:26px;height:26px;border-radius:13px;border:none;background:rgba(16,23,38,.78);color:#fff;font-size:14px;cursor:pointer;padding:0}' +
+      '.vc-mapov{position:fixed;inset:0;z-index:2147483200;background:#101726;display:flex;flex-direction:column}' +
+      '.vc-map-hd{display:flex;align-items:center;gap:8px;padding:10px 14px;color:#dbe4f8;font-size:14px;background:#0b111f}' +
+      '.vc-map-hd span:first-child{font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.vc-map-attr{color:#5a6680;font-size:11px;flex:none}' +
+      '.vc-map-z,.vc-map-x{width:34px;height:34px;border-radius:8px;border:1px solid #2a3550;background:#1a2540;color:#dbe4f8;font-size:16px;cursor:pointer;flex:none;padding:0}' +
+      '.vc-map-vp{flex:1;position:relative;overflow:hidden;touch-action:none;cursor:grab}' +
+      '.vc-map-world{position:absolute;inset:0}' +
+      '.vc-map-tile{position:absolute;width:256px;height:256px;pointer-events:none;user-select:none}' +
+      '.vc-map-pin{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:#e5484d;border:2.5px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,.5);pointer-events:none}' +
       '.vc-card-pin{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
       '.vc-card-pin svg{width:11px;height:11px}' +
       // 钉入书页态(便签壳内的真 vc-card):脱离浮层定位,静态占满便签宽
@@ -2573,6 +2583,7 @@
         var aid = _cardAssetID(it.aid), media = _cardImageURL(it);
         return '<div class="vc-ig-cell" data-i="' + i + '">' +
           '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除">✕</button>' +
+          (_mapMetaFromUrl(it.url) ? '<button type="button" class="vc-ig-map" data-i="' + i + '" aria-label="打开地图">🗺</button>' : '') +
           (media ? '<img class="vc-ig-img" data-i="' + i + '"' + (aid ? ' data-aid="' + esc(aid) + '"' : '') +
             ' data-source-url="' + esc(it.url || '') + '" src="' + esc(media) + '" alt="' + esc(it.title || '') + '">' :
             '<span class="rc-img-broken">🖼 图片地址无效</span>') +
@@ -2607,6 +2618,180 @@
     }
     return h;
   }
+  // ── 内嵌交互地图（2026-08-26 用户拍板：静态地图卡要能点开真地图）──
+  // 零新协议：坐标直接从静态图 URL 解析（Google staticmap / Yandex），
+  // AI 侧什么都不用改。查看器是手写的 OSM tile 滑动地图（拖动/缩放/
+  // 标记，~180 行）—— 不引 Leaflet：一个"看看这在哪"的浮层不值得
+  // 一份 40KB 的外部依赖（手搓 EPUB 阅读器同款哲学）。
+  // tile 加载：App 壳（127.0.0.1）经 /pdf/api/img-proxy 原生代理；
+  // 网页/桌面表面直连 OSM（被宿主 CSP 拦时显示不出，卡上的静态图
+  // 仍是兜底）。
+  function _mapMetaFromUrl(url) {
+    var u = String(url || '');
+    var m, lat, lon, zoom = 5, marks = [];
+    if (/maps\.googleapis\.com\/maps\/api\/staticmap/.test(u)) {
+      m = u.match(/[?&]center=(-?[0-9.]+)(?:,|%2C)(-?[0-9.]+)/);
+      if (m) { lat = +m[1]; lon = +m[2]; }
+      m = u.match(/[?&]zoom=([0-9]+)/); if (m) zoom = +m[1];
+      var mm = u.match(/[?&]markers=([^&]+)/g) || [];
+      mm.forEach(function (piece) {
+        var mk = decodeURIComponent(piece).match(/(-?[0-9.]+),(-?[0-9.]+)\s*$/);
+        if (mk) marks.push([+mk[1], +mk[2]]);
+      });
+      if (lat == null && marks.length) { lat = marks[0][0]; lon = marks[0][1]; }
+    } else if (/static-maps\.yandex\.ru/.test(u)) {
+      m = u.match(/[?&]ll=(-?[0-9.]+)(?:,|%2C)(-?[0-9.]+)/);
+      if (m) { lon = +m[1]; lat = +m[2]; }   // Yandex 经度在前
+      m = u.match(/[?&]z=([0-9]+)/); if (m) zoom = +m[1];
+      var pt = u.match(/[?&]pt=([^&]+)/);
+      if (pt) decodeURIComponent(pt[1]).split('~').forEach(function (piece) {
+        var mk = piece.match(/^(-?[0-9.]+),(-?[0-9.]+)/);
+        if (mk) marks.push([+mk[2], +mk[1]]);
+      });
+      if (lat == null && marks.length) { lat = marks[0][0]; lon = marks[0][1]; }
+    }
+    if (lat == null || lon == null || !isFinite(lat) || !isFinite(lon)) return null;
+    if (!marks.length) marks.push([lat, lon]);
+    return { lat: lat, lon: lon, zoom: Math.max(2, Math.min(19, zoom)), marks: marks };
+  }
+  function _openMapViewer(meta, title) {
+    var TS = 256;
+    var useProxy = /^127\.0\.0\.1$|^localhost$/.test(location.hostname);
+    function tileSrc(z, x, y) {
+      var n = 1 << z;
+      x = ((x % n) + n) % n;
+      if (y < 0 || y >= n) return '';
+      var remote = 'https://tile.openstreetmap.org/' + z + '/' + x + '/' + y + '.png';
+      return useProxy ? '/pdf/api/img-proxy?url=' + encodeURIComponent(remote) : remote;
+    }
+    function w2ll(wx, wy, z) {
+      var s = TS * (1 << z);
+      var lon = wx / s * 360 - 180;
+      var n = Math.PI - 2 * Math.PI * wy / s;
+      return [180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n))), lon];
+    }
+    function ll2w(lat, lon, z) {
+      var s = TS * (1 << z);
+      var x = (lon + 180) / 360 * s;
+      var r = lat * Math.PI / 180;
+      var y = (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * s;
+      return [x, y];
+    }
+    var st = { lat: meta.lat, lon: meta.lon, z: meta.zoom };
+    var ov = document.createElement('div');
+    ov.className = 'vc-mapov';
+    ov.innerHTML =
+      '<div class="vc-map-hd"><span>' + esc(title || '地图') + '</span>' +
+      '<span class="vc-map-attr">© OpenStreetMap</span>' +
+      '<button type="button" class="vc-map-z" data-d="1">＋</button>' +
+      '<button type="button" class="vc-map-z" data-d="-1">－</button>' +
+      '<button type="button" class="vc-map-x">✕</button></div>' +
+      '<div class="vc-map-vp"><div class="vc-map-world"></div></div>';
+    document.body.appendChild(ov);
+    var vp = ov.querySelector('.vc-map-vp');
+    var world = ov.querySelector('.vc-map-world');
+    var tiles = {};
+    function render() {
+      var vw = vp.clientWidth, vh = vp.clientHeight;
+      var c = ll2w(st.lat, st.lon, st.z);
+      var left = c[0] - vw / 2, top = c[1] - vh / 2;
+      var x0 = Math.floor(left / TS), y0 = Math.floor(top / TS);
+      var x1 = Math.floor((left + vw) / TS), y1 = Math.floor((top + vh) / TS);
+      var want = {};
+      for (var ty = y0; ty <= y1; ty++) for (var tx = x0; tx <= x1; tx++) {
+        var key = st.z + '/' + tx + '/' + ty;
+        want[key] = 1;
+        var img = tiles[key];
+        if (!img) {
+          var src = tileSrc(st.z, tx, ty);
+          if (!src) continue;
+          img = document.createElement('img');
+          img.className = 'vc-map-tile';
+          img.decoding = 'async';
+          img.src = src;
+          tiles[key] = img;
+          world.appendChild(img);
+        }
+        img.style.left = (tx * TS - left) + 'px';
+        img.style.top = (ty * TS - top) + 'px';
+      }
+      Object.keys(tiles).forEach(function (key) {
+        if (!want[key]) { tiles[key].remove(); delete tiles[key]; }
+      });
+      world.querySelectorAll('.vc-map-pin').forEach(function (el) { el.remove(); });
+      meta.marks.forEach(function (mk) {
+        var w = ll2w(mk[0], mk[1], st.z);
+        var pin = document.createElement('div');
+        pin.className = 'vc-map-pin';
+        pin.style.left = (w[0] - left) + 'px';
+        pin.style.top = (w[1] - top) + 'px';
+        world.appendChild(pin);
+      });
+    }
+    function zoomTo(dz, px, py) {
+      var nz = Math.max(2, Math.min(19, st.z + dz));
+      if (nz === st.z) return;
+      var vw = vp.clientWidth, vh = vp.clientHeight;
+      var fx = px == null ? vw / 2 : px, fy = py == null ? vh / 2 : py;
+      var c = ll2w(st.lat, st.lon, st.z);
+      var focus = w2ll(c[0] - vw / 2 + fx, c[1] - vh / 2 + fy, st.z);
+      var fw = ll2w(focus[0], focus[1], nz);
+      var nc = w2ll(fw[0] + (vw / 2 - fx), fw[1] + (vh / 2 - fy), nz);
+      st.lat = nc[0]; st.lon = nc[1]; st.z = nz;
+      Object.keys(tiles).forEach(function (key) { tiles[key].remove(); delete tiles[key]; });
+      render();
+    }
+    var drag = null, pinch = null;
+    vp.addEventListener('pointerdown', function (ev) {
+      if (drag && pinch == null && ev.pointerId !== drag.id) {
+        pinch = { a: drag.id, b: ev.pointerId, ax: drag.lx, ay: drag.ly, bx: ev.clientX, by: ev.clientY, base: null };
+      } else {
+        drag = { id: ev.pointerId, lx: ev.clientX, ly: ev.clientY };
+      }
+      vp.setPointerCapture(ev.pointerId);
+    });
+    vp.addEventListener('pointermove', function (ev) {
+      if (pinch) {
+        if (ev.pointerId === pinch.a) { pinch.ax = ev.clientX; pinch.ay = ev.clientY; }
+        else if (ev.pointerId === pinch.b) { pinch.bx = ev.clientX; pinch.by = ev.clientY; }
+        else return;
+        var d = Math.hypot(pinch.ax - pinch.bx, pinch.ay - pinch.by);
+        if (pinch.base == null) { pinch.base = d; return; }
+        if (d > pinch.base * 1.35) { zoomTo(1, (pinch.ax + pinch.bx) / 2, (pinch.ay + pinch.by) / 2); pinch.base = d; }
+        else if (d < pinch.base / 1.35) { zoomTo(-1, (pinch.ax + pinch.bx) / 2, (pinch.ay + pinch.by) / 2); pinch.base = d; }
+        return;
+      }
+      if (!drag || ev.pointerId !== drag.id) return;
+      var dx = ev.clientX - drag.lx, dy = ev.clientY - drag.ly;
+      drag.lx = ev.clientX; drag.ly = ev.clientY;
+      var c = ll2w(st.lat, st.lon, st.z);
+      var nc = w2ll(c[0] - dx, c[1] - dy, st.z);
+      st.lat = nc[0]; st.lon = nc[1];
+      render();
+    });
+    function endPointer(ev) {
+      if (pinch && (ev.pointerId === pinch.a || ev.pointerId === pinch.b)) pinch = null;
+      if (drag && ev.pointerId === drag.id) drag = null;
+    }
+    vp.addEventListener('pointerup', endPointer);
+    vp.addEventListener('pointercancel', endPointer);
+    vp.addEventListener('wheel', function (ev) {
+      ev.preventDefault();
+      zoomTo(ev.deltaY < 0 ? 1 : -1, ev.clientX - vp.getBoundingClientRect().left,
+             ev.clientY - vp.getBoundingClientRect().top);
+    }, { passive: false });
+    vp.addEventListener('dblclick', function (ev) {
+      zoomTo(1, ev.clientX - vp.getBoundingClientRect().left,
+             ev.clientY - vp.getBoundingClientRect().top);
+    });
+    ov.querySelectorAll('.vc-map-z').forEach(function (btn) {
+      btn.addEventListener('click', function () { zoomTo(+btn.dataset.d); });
+    });
+    ov.querySelector('.vc-map-x').addEventListener('click', function () { ov.remove(); });
+    render();
+    return ov;
+  }
+
   function _infoText(card) {   // 双击带入上下文用的纯文本化
     var d = card.data || {}, k = card.kind;
     if (k === 'weather') return (card.title || '天气') + ':' + [d.loc, d.date, d.cond, (d.lo != null ? d.lo + '-' + d.hi + '°C' : ''), (d.precip != null ? '降水' + d.precip + '%' : ''), d.tip].filter(Boolean).join(',');
@@ -3408,6 +3593,16 @@
       }
     });
     root.addEventListener('click', function (ev) {
+      var mb = ev.target.closest && ev.target.closest('.vc-ig-map');
+      if (mb) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        var im = +mb.getAttribute('data-i');
+        var mit = ((card.data || {}).items || [])[im] || {};
+        var mmeta = _mapMetaFromUrl(mit.url);
+        if (mmeta) _openMapViewer(mmeta, mit.title || card.title || '地图');
+        return;
+      }
       var x = ev.target.closest('.vc-ig-x');
       if (x) {
         ev.stopPropagation();
