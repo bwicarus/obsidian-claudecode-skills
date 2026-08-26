@@ -73,9 +73,17 @@ _DEFAULT_SOURCES = [
         "size": "1280x720",
         "rotate": 0,
     },
+    # ⚠ 下面两台是机身自带的（ASUS ROG Flow Z13），2026-08-27 实测**出全黑帧**。
+    # 排查过程记在这里，免得以后再走一遍：设备在、驱动 ProblemCode=0、
+    # Windows 隐私策略三级全 Allow、Frame Server 在跑；ffmpeg 的 dshow 直接
+    # I/O error，OpenCV 的 dshow 后端能打开、能出帧，但**亮度恒为 0 且每帧
+    # 读取要 1 秒**（超时）；MSMF 后端打得开读不出。同一时刻外接的 C920 一切正常。
+    # 内外之别而非 API 之别 —— 是 ASUS 机身摄像头被硬件/固件级关掉了
+    # （管这个开关的 ArmouryCrateControlInterface / ASUSOptimization 服务当时都是停的）。
+    # 软件侧绕不过去。开关打开后它们应当自动可用，不需要改这里。
     {
         "id": "builtin",
-        "label": "笔记本内置",
+        "label": "机身后置（13MP）",
         "kind": "local",
         "device": "OV13B10",
         "size": "1280x720",
@@ -83,7 +91,7 @@ _DEFAULT_SOURCES = [
     },
     {
         "id": "usb5m",
-        "label": "USB 5M",
+        "label": "机身前置（5MP）",
         "kind": "local",
         "device": "USB2.0 5M UVC WebCam",
         "size": "1280x720",
