@@ -208,6 +208,31 @@ private struct ReaderRootView: View {
         .task {
             BWReaderAppShortcuts.updateAppShortcutParameters()
         }
+        // 手表伴侣 app 的手机端。手表够不到 tailnet，手机是它唯一的数据源
+        // （原因见 Shared/ReaderWatchPayload.swift 文件头）。
+        // ⚠ 这里**注入**回调而不是让 ReaderWatchLink 自己去找 voiceBridge ——
+        // 后者会多一条谁也说不清的持有关系，而 voiceBridge 是 @StateObject。
+        .task {
+            let link = ReaderWatchLink.shared
+            link.voiceStatusProvider = { [weak voiceBridge] in
+                guard let state = voiceBridge?.state else { return .unknown }
+                return ReaderWatchVoice(
+                    active: state.isActive,
+                    busy: state.isBusy,
+                    phase: ReaderWatchVoicePhrase.of(state),
+                    detail: state.detail)
+            }
+            link.onVoiceStart = { [weak voiceBridge] in
+                await voiceBridge?.start()
+            }
+            link.onVoiceStop = { [weak voiceBridge] in
+                await voiceBridge?.stop()
+            }
+            link.activate()
+        }
+        .onChange(of: voiceBridge.state) { _, _ in
+            ReaderWatchLink.shared.voiceStatusChanged()
+        }
         .task {
             while !Task.isCancelled {
                 await ReaderLocalNotesManager.shared.drainPendingCreates()

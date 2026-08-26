@@ -198,6 +198,17 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                         "authorized": provider.isAuthorized,
                         "hasFix": provider.latest != nil,
                     ]
+                case .watchCard:
+                    let raw = request.card ?? [:]
+                    let outcome = await ReaderWatchLink.shared.mirror(raw)
+                    payload = [
+                        "contract": Self.responseContract,
+                        "action": request.action.rawValue,
+                        "requestId": request.requestID,
+                        "ok": true,
+                        "delivered": outcome.delivered,
+                        "reason": outcome.reason
+                    ]
                 case .systemProjection:
                     let raw = request.projection ?? [:]
                     let items = (raw["notifications"] as? [[String: Any]] ?? [])
@@ -216,6 +227,17 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                                 place: Self.parsePlace(one["place"]))
                         }
                     let review = raw["review"] as? [String: Any]
+                    // 顺路把待办镜像到手表。挂在**已有的投影链路**上而不是
+                    // 另起一套轮询 —— 待办的权威在 Windows 那边，这里只是
+                    // 它到达手机的那一刻，正好也是该告诉手表的那一刻。
+                    await ReaderWatchLink.shared.replaceNotifications(
+                        items.filter { $0.state != "resolved" }.map {
+                            ReaderWatchNotification(
+                                id: $0.id,
+                                title: $0.title,
+                                body: $0.body,
+                                dueAtMs: $0.dueAtMs.map(Double.init))
+                        })
                     let outcome = await ReaderSystemProjection.shared.apply(
                         notifications: items,
                         reviewDue: (review?["due"] as? NSNumber)?.intValue,
@@ -370,6 +392,10 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
     }
 
     private enum Action: String {
+        // 手表卡片镜像（2026-08-27）：把已渲染的卡片压扁交给手机侧的
+        // ReaderWatchLink，由 WCSession 转给手表。手表够不到 tailnet，
+        // 所以图要随载荷过去而不是给 URL。
+        case watchCard = "watch-card"
         case pageCharacters = "page-chars"
         case status
         // 全文件 contentSha256(两节点复制的内容会合材料)。runtime 自己
@@ -399,6 +425,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         let bbox: [Double]?
         // 有默认值 → 既有 5 处构造点不必逐一补 nil。
         var projection: [String: Any]? = nil
+        var card: [String: Any]? = nil
 
         static func parse(
             _ body: Any,
@@ -465,6 +492,22 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                     limit: nil,
                     bbox: nil,
                     projection: projection
+                )
+            case .watchCard:
+                guard Set(value.keys) == common.union(["card"]),
+                      let card = value["card"] as? [String: Any]
+                else {
+                    throw BridgeError.invalidRequest
+                }
+                return Request(
+                    action: action,
+                    requestID: requestID,
+                    localBookID: localBookID,
+                    page: nil,
+                    query: nil,
+                    limit: nil,
+                    bbox: nil,
+                    card: card
                 )
             case .search:
                 guard Set(value.keys) == common.union(["query", "limit"]),
@@ -967,6 +1010,11 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
             payload["hasFix"] = false
         case .systemProjection:
             payload["resolvedIds"] = [String]()
+        case .watchCard:
+            // 没送到就要说没送到。静默成功会让"手表上一直没卡片"
+            // 变成一个查不出原因的问题。
+            payload["delivered"] = false
+            payload["reason"] = "passive"
         }
         return payload
     }

@@ -36,6 +36,7 @@ env:
   BUNDLE_ID: space.bwicarus.bwreader2
   EXTENSION_BUNDLE_ID: space.bwicarus.bwreader2.Extension
   WIDGET_BUNDLE_ID: space.bwicarus.bwreader2.Widget
+  WATCH_BUNDLE_ID: space.bwicarus.bwreader2.watchkitapp
   APP_GROUP_ID: group.space.bwicarus.bwreader2
   EXT_DIR: extensions/bw-reader-webext
   PROJECT_DIR: ios/BWReader
@@ -237,6 +238,52 @@ jobs:
           test -d "$PROJECT_FILE"
           xcodebuild -project "$PROJECT_FILE" -list
 
+      # XcodeGen 2.46.0 把手表 app 嵌进 <App>.app/Watch/，而 Xcode 16 以后
+      # 要求嵌进 PlugIns/，否则报 "is a Foundation extension and must be
+      # embedded in the parent app bundle's PlugIns directory"。
+      # 上游 issue #1613 至今 open、修复 PR #1614 未合并未发版,而 env 里
+      # 固定的就是 2.46.0 —— 所以这个补丁是必需的,不是保险。
+      #
+      # ⚠ 匹配不上就 **exit 1**：将来 XcodeGen 修好了这里会静默变成空操作,
+      # 而"补丁没打上"的表现是构建过了、上传或装到表上才炸 —— 那种失败
+      # 最难追。宁可让 CI 在这里响。
+      - name: Patch watch app embed phase for Xcode 16+
+        shell: bash
+        run: |
+          set -euo pipefail
+          PBX="$PROJECT_FILE/project.pbxproj"
+          test -f "$PBX"
+          if ! grep -q 'CONTENTS_FOLDER_PATH)/Watch' "$PBX"; then
+            echo "::error::没找到 XcodeGen 的 Watch 嵌入路径。"
+            echo "::error::要么 XcodeGen 已修复(去掉本步骤),要么手表 target 没生成。"
+            exit 1
+          fi
+          python3 - "$PBX" <<'PY'
+          import re
+          import sys
+
+          path = sys.argv[1]
+          with open(path, encoding="utf-8") as handle:
+              text = handle.read()
+
+          # 只动带 Watch dstPath 的那个 CopyFiles 段,别误伤扩展/小组件那两个。
+          pattern = re.compile(
+              r'(dstPath = "\$\(CONTENTS_FOLDER_PATH\)/Watch";\s*'
+              r'dstSubfolderSpec = )16(;)')
+          patched, count = pattern.subn(r'\g<1>13\g<2>', text)
+          if count != 1:
+              # 0 = 形状变了；>1 = 意外命中多处。两种都必须响,不能猜。
+              sys.exit(
+                  "预期恰好 1 处 Watch 嵌入阶段,实际 %d 处" % count)
+          patched = patched.replace(
+              'dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";',
+              'dstPath = "";')
+          with open(path, "w", encoding="utf-8") as handle:
+              handle.write(patched)
+          print("patched watch embed phase -> PlugIns")
+          PY
+          grep -q 'dstSubfolderSpec = 13' "$PBX"
+
       - name: Build unsigned simulator candidate
         shell: bash
         run: |
@@ -418,6 +465,125 @@ jobs:
 
       # All three targets now use deterministic App Store profiles and the one
       # imported distribution certificate; no development certificate is made.
+
+      # 手表 app 的描述文件（2026-08-27）。整段照抄上面 Widget 那条路：
+      # 先用 App Store Connect API 查/建 bundle ID,再 fastlane sigh 出
+      # profile —— 两步都是**不存在就创建**,所以 Apple 后台不用人去点。
+      # ⚠ 手表 target 刻意**零 capability**：本仓库 2026-08-05 试过用 ASC API
+      # 自动开 App Groups(ac119d01),失败后整段回退(64e5ab2e)。要 capability
+      # 只能人去后台点,所以设计上不要。
+      - name: Prepare Watch App Store profile
+        env:
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          FASTLANE_SKIP_UPDATE_CHECK: "1"
+          FASTLANE_HIDE_CHANGELOG: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v fastlane >/dev/null || sudo gem install fastlane --no-document
+          API_JSON="$RUNNER_TEMP/fastlane-api-key.json"
+          API_KEY_ID="$API_KEY_ID" API_ISSUER_ID="$API_ISSUER_ID" \
+          API_KEY_PATH="$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
+          WATCH_BUNDLE_ID="$WATCH_BUNDLE_ID" \
+          API_JSON="$API_JSON" python <<'PY'
+          import json
+          import os
+          import time
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          import jwt
+
+          key = Path(os.environ["API_KEY_PATH"]).read_text()
+          token = jwt.encode(
+              {
+                  "iss": os.environ["API_ISSUER_ID"],
+                  "iat": int(time.time()) - 30,
+                  "exp": int(time.time()) + 600,
+                  "aud": "appstoreconnect-v1",
+              },
+              key,
+              algorithm="ES256",
+              headers={"kid": os.environ["API_KEY_ID"], "typ": "JWT"},
+          )
+
+          def request(method, path, payload=None):
+              body = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(
+                  "https://api.appstoreconnect.apple.com" + path,
+                  data=body,
+                  method=method,
+                  headers={
+                      "Authorization": "Bearer " + token,
+                      "Content-Type": "application/json",
+                  },
+              )
+              with urllib.request.urlopen(req) as response:
+                  return json.load(response)
+
+          def find_bundle(identifier):
+              query = urllib.parse.urlencode({"filter[identifier]": identifier})
+              values = request("GET", "/v1/bundleIds?" + query)["data"]
+              return values[0] if values else None
+
+          watch_bundle = find_bundle(os.environ["WATCH_BUNDLE_ID"])
+          if watch_bundle is None:
+              watch_bundle = request(
+                  "POST",
+                  "/v1/bundleIds",
+                  {
+                      "data": {
+                          "type": "bundleIds",
+                          "attributes": {
+                              "identifier": os.environ["WATCH_BUNDLE_ID"],
+                              "name": "BWReader Watch",
+                              "platform": "IOS",
+                          },
+                      }
+                  },
+              )["data"]
+              print("registered Watch bundle ID")
+
+          Path(os.environ["API_JSON"]).write_text(
+              json.dumps({
+                  "key_id": os.environ["API_KEY_ID"],
+                  "issuer_id": os.environ["API_ISSUER_ID"],
+                  "key": Path(os.environ["API_KEY_PATH"]).read_text(),
+                  "in_house": False,
+              }),
+              encoding="utf-8",
+          )
+          PY
+          fastlane sigh \
+            --api_key_path "$API_JSON" \
+            --app_identifier "$WATCH_BUNDLE_ID" \
+            --provisioning_name "BWReader App Store Watch" \
+            --ignore_profiles_with_different_name true \
+            --output_path "$RUNNER_TEMP" \
+            --filename "BWReaderWatch.mobileprovision" \
+            --skip_install false
+          test -s "$RUNNER_TEMP/BWReaderWatch.mobileprovision"
+          security cms -D -i "$RUNNER_TEMP/BWReaderWatch.mobileprovision" \
+            > "$RUNNER_TEMP/watch-profile.plist"
+          WATCH_BUNDLE_ID="$WATCH_BUNDLE_ID" PROFILE="$RUNNER_TEMP/watch-profile.plist" \
+          python <<'PY'
+          import os
+          import plistlib
+
+          with open(os.environ["PROFILE"], "rb") as handle:
+              profile = plistlib.load(handle)
+          application_identifier = profile.get("Entitlements", {}).get(
+              "application-identifier", ""
+          )
+          if not application_identifier.endswith("." + os.environ["WATCH_BUNDLE_ID"]):
+              raise SystemExit("Widget profile bundle identifier mismatch")
+          print("validated Widget distribution profile")
+          PY
+
+      # All three targets now use deterministic App Store profiles and the one
+      # imported distribution certificate; no development certificate is made.
       - name: Archive signed device candidate
         env:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -447,6 +613,19 @@ jobs:
           test -d "$APPEX_PATH" || { echo "embedded Safari extension is missing"; exit 1; }
           WIDGET_PATH="$APP_PATH/PlugIns/BWReaderWidget.appex"
           test -d "$WIDGET_PATH" || { echo "embedded Reader widget is missing"; exit 1; }
+          # ⚠ 手表 app 必须在 PlugIns/ 而不是 Watch/ —— XcodeGen 2.46.0 生成的是
+          # 后者,Xcode 16+ 只认前者。上面那个 pbxproj 补丁打没打上,只有这里能
+          # 查出来；嵌错目录时 archive 可能通过,装到表上才炸。
+          WATCH_PATH="$APP_PATH/PlugIns/BWReaderWatch.app"
+          if [ ! -d "$WATCH_PATH" ]; then
+            echo "::error::手表 app 不在 PlugIns/ 下"
+            if [ -d "$APP_PATH/Watch/BWReaderWatch.app" ]; then
+              echo "::error::它在 Watch/ 下 —— XcodeGen 嵌入阶段的补丁没生效"
+            fi
+            ls -la "$APP_PATH" || true
+            exit 1
+          fi
+          test ! -d "$APP_PATH/Watch"
           READER_BUNDLE="$APP_PATH/ReaderBundle"
           test -d "$READER_BUNDLE" || { echo "embedded ReaderBundle is missing"; exit 1; }
           python "$GITHUB_WORKSPACE/$PROJECT_DIR/package_local_reader.py" \
@@ -458,8 +637,9 @@ jobs:
           test ! -e "$APPEX_PATH/Resources/manifest.json"
 
           APP_PATH="$APP_PATH" APPEX_PATH="$APPEX_PATH" WIDGET_PATH="$WIDGET_PATH" \
+          WATCH_PATH="$WATCH_PATH" \
           APP_BUNDLE_ID="$BUNDLE_ID" EXT_BUNDLE_ID="$EXTENSION_BUNDLE_ID" \
-          WIDGET_BUNDLE_ID="$WIDGET_BUNDLE_ID" \
+          WIDGET_BUNDLE_ID="$WIDGET_BUNDLE_ID" WATCH_BUNDLE_ID="$WATCH_BUNDLE_ID" \
           SAFARI_PACKAGE="$SAFARI_PACKAGE" python <<'PY'
           import os
           import plistlib
@@ -481,11 +661,18 @@ jobs:
               label: str,
               bundle_id: str,
               expected_families: list[int],
+              # 手表跑的是 watchOS,最低版本自然不是 17.0。原来这里写死,
+              # 加手表后会误报失败 —— 参数化而不是放宽,四个 target 各自
+              # 仍被钉住。
+              expected_min_os: str = "17.0",
           ) -> None:
               if info.get("CFBundleIdentifier") != bundle_id:
                   raise SystemExit(f"{label} bundle ID mismatch: {info.get('CFBundleIdentifier')!r}")
-              if str(info.get("MinimumOSVersion")) != "17.0":
-                  raise SystemExit(f"{label} MinimumOSVersion must be 17.0: {info.get('MinimumOSVersion')!r}")
+              if str(info.get("MinimumOSVersion")) != expected_min_os:
+                  raise SystemExit(
+                      f"{label} MinimumOSVersion must be {expected_min_os}: "
+                      f"{info.get('MinimumOSVersion')!r}"
+                  )
               families = [int(value) for value in info.get("UIDeviceFamily", [])]
               if families != expected_families:
                   raise SystemExit(
@@ -493,9 +680,11 @@ jobs:
                       f"UIDeviceFamily={families!r}, expected={expected_families!r}"
                   )
 
+          watch = Path(os.environ["WATCH_PATH"])
           app_info = load_info(app)
           extension_info = load_info(appex)
           widget_info = load_info(widget)
+          watch_info = load_info(watch)
           validate_platform(
               app_info,
               label="app",
@@ -517,6 +706,25 @@ jobs:
               bundle_id=os.environ["WIDGET_BUNDLE_ID"],
               expected_families=[1, 2],
           )
+          validate_platform(
+              watch_info,
+              label="watch",
+              bundle_id=os.environ["WATCH_BUNDLE_ID"],
+              # 4 = Apple Watch。跟上面三个的 [1, 2] 一样,这里也是刻意钉住:
+              # 家族漂了要当场响,而不是装到设备上才发现。
+              expected_families=[4],
+              expected_min_os="11.0",
+          )
+          # 手表 app 必须声明它的伴侣是主 app,否则 iPhone 的 Watch App 里
+          # 根本不会出现"安装"这个选项 —— 而这不会让构建失败,只会让功能
+          # 悄悄不存在。
+          if watch_info.get("WKApplication") is not True:
+              raise SystemExit("watch Info.plist 缺 WKApplication=true")
+          companion = watch_info.get("WKCompanionAppBundleIdentifier")
+          if companion != os.environ["APP_BUNDLE_ID"]:
+              raise SystemExit(
+                  f"watch WKCompanionAppBundleIdentifier mismatch: {companion!r}"
+              )
 
           app_version = (
               str(app_info.get("CFBundleShortVersionString")),
@@ -530,6 +738,15 @@ jobs:
               str(widget_info.get("CFBundleShortVersionString")),
               str(widget_info.get("CFBundleVersion")),
           )
+          watch_version = (
+              str(watch_info.get("CFBundleShortVersionString")),
+              str(watch_info.get("CFBundleVersion")),
+          )
+          if app_version != watch_version:
+              raise SystemExit(
+                  f"watch version mismatch: app={app_version!r} "
+                  f"watch={watch_version!r}"
+              )
           if app_version != extension_version:
               raise SystemExit(
                   f"app/extension version mismatch: {app_version!r} != {extension_version!r}"
@@ -600,6 +817,8 @@ jobs:
             > "$RUNNER_TEMP/widget-profile.plist"
           WIDGET_PROFILE="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/widget-profile.plist")"
           test -n "$WIDGET_PROFILE" || { echo "Widget profile name is empty"; exit 1; }
+          WATCH_PROFILE="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/watch-profile.plist")"
+          test -n "$WATCH_PROFILE" || { echo "Watch profile name is empty"; exit 1; }
           cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -615,6 +834,7 @@ jobs:
               <key>space.bwicarus.bwreader2</key><string>BWReader App Store App</string>
               <key>space.bwicarus.bwreader2.Extension</key><string>BWReader App Store Extension</string>
               <key>space.bwicarus.bwreader2.Widget</key><string>${WIDGET_PROFILE}</string>
+              <key>space.bwicarus.bwreader2.watchkitapp</key><string>${WATCH_PROFILE}</string>
             </dict>
             <key>uploadSymbols</key><true/>
           </dict>

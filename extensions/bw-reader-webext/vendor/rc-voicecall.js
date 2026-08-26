@@ -2930,6 +2930,40 @@ if (window.__bwPwaProviderOnly) return;
     if (k === 'videos') return (card.title || '视频') + ':' + (d.items || []).map(function (it) { return (it.title || '') + '(' + (it.channel || '') + ')' + (it.url || ''); }).join(';');
     return d.text || card.brief || card.title || '';
   }
+  // 手表镜像（2026-08-27 用户要的手表伴侣 app）。卡片渲染时顺路压一份
+  // 给原生侧，由手机经 WCSession 转给手表。
+  //
+  // ⚠ 三条刻意的设计：
+  // ① **只投影不新增契约**：kind/字段权威仍是 reader_card_contract.py，
+  //    这里压成 {id,kind,title,text,thumbnail}，加字段不用碰那份契约。
+  // ② **文本保底**：用现成的 _infoText(card)，任何 kind 至少有字能看。
+  //    手表上原生视图只是"有则更好"。
+  // ③ **绝不影响渲染**：整段吞掉异常。手表是附属品，它出问题不该让
+  //    用户眼前的卡片渲染失败。
+  function _mirrorCardToWatch(card) {
+    try {
+      var mirror = window.__bwWatchCardMirror;
+      if (typeof mirror !== 'function') return;   // 不在 App 里，什么都不做
+      var thumb = null;
+      try {
+        // images 卡的第一张图当缩略图。手表够不到 tailnet，给 URL 它取不到,
+        // 所以只在已经是 data: 的时候带过去（原生侧再降采样）。
+        var items = (card.data && card.data.items) || [];
+        var first = items.filter(function (it) { return it && !it._gone; })[0];
+        var src = first && (first.url || first.src);
+        if (typeof src === 'string' && src.indexOf('data:image/') === 0) {
+          thumb = src;
+        }
+      } catch (e) {}
+      mirror({
+        id: String(card.cid || card.id || (card.kind + ':' + Date.now())),
+        kind: String(card.kind || ''),
+        title: String(card.title || ''),
+        text: String(_infoText(card) || ''),
+        thumbnail: thumb
+      });
+    } catch (e) {}
+  }
   // 77 pin 状态中心:选中集合为唯一真相(卡片紫框只是视图)。注入改**覆盖式快照**(防抖 1.2s+指纹):
   // 反复选中/取消若最终状态没变=零注入;变了=一条"当前带入清单(以本条为准,旧声明作废)"——历史不膨胀、语义无歧义
   var _pins = { map: {}, fp: null, t: null, els: {}, cids: {}, ids: {} };   // 95:cids={卡片稳定编号:label}；ids={label:语义上下文编号}
@@ -3872,6 +3906,11 @@ if (window.__bwPwaProviderOnly) return;
   async function renderInfo(card, options) {
     if (!card || !card.kind) return _renderInfoResult(false);
     options = options || {};
+    // ⚠ typeof 守卫不是保险,是必需：契约测试会把 renderInfo 单独抽出来
+    // eval（bind-receipt-truthful 那条），那时同文件的函数不在作用域里。
+    // 手表镜像是附属品,任何情况下都不该让眼前的卡片渲染失败。
+    if (typeof _mirrorCardToWatch === 'function') _mirrorCardToWatch(card);
+
     var _bindOutcome = null;
     var label = card.title || '搜索结果';
     var _pendBind = null;   // 绑不上时记下"它想去哪"，浮层卡建出来后一起入列

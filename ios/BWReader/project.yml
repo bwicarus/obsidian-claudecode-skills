@@ -4,6 +4,7 @@ options:
   createIntermediateGroups: true
   deploymentTarget:
     iOS: "17.0"
+    watchOS: "11.0"
 
 settings:
   base:
@@ -77,6 +78,12 @@ targets:
         codeSign: true
         copy:
           destination: plugins
+      # ⚠ 手表 app 这条**不能写 copy.destination** —— XcodeGen 对
+      # platform: watchOS 的依赖会自己生成 Embed Watch Content 阶段，
+      # 手写 copy 会跟它打架。跟上面两条形状不同是有原因的。
+      - target: BWReaderWatch
+        embed: true
+        codeSign: true
       - package: flyingFox
         product: FlyingFox
       - package: flyingFox
@@ -185,6 +192,45 @@ targets:
         PROVISIONING_PROFILE_SPECIFIER: BWReader App Store Widget
         SKIP_INSTALL: YES
         TARGETED_DEVICE_FAMILY: "1,2"
+
+  # 手表伴侣 app（2026-08-27 用户要的）。三件事：看 AI 卡片、看待办、
+  # 开关电脑语音桥。数据全部经 WatchConnectivity 由手机转发 ——
+  # 手表够不到 tailnet（watchOS 没有 Tailscale 客户端），而那三样东西的
+  # 数据源只在 tailnet 内可达。原因详见 Shared/ReaderWatchPayload.swift。
+  BWReaderWatch:
+    # ⚠ 必须是 platform: watchOS,**不能用 supportedDestinations** ——
+    # 后者会让 XcodeGen 不生成 "Embed Watch Content" 阶段,手表 app 根本
+    # 不会被嵌进 iOS app 里(XcodeGen issue #1463)。
+    type: application
+    platform: watchOS
+    deploymentTarget: "11.0"
+    sources:
+      - path: Watch
+        excludes:
+          - Info.plist
+      # ⚠ Shared/ 下的文件**每个 target 都要单独列**（同 App target 那条
+      # 注释：漏列让 CI 连挂过四次）。手表只需要这一个契约文件。
+      - path: Shared/ReaderWatchPayload.swift
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_IDENTITY: Apple Distribution
+        CODE_SIGN_STYLE: Manual
+        CURRENT_PROJECT_VERSION: "2"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Watch/Info.plist
+        MARKETING_VERSION: "1.1.82"
+        PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2.watchkitapp
+        PRODUCT_MODULE_NAME: BWReaderWatch
+        PRODUCT_NAME: BWReaderWatch
+        PROVISIONING_PROFILE_SPECIFIER: BWReader App Store Watch
+        SKIP_INSTALL: YES
+        # ⚠ 项目级 settings.base 写死了 SUPPORTED_PLATFORMS 为 iphoneos,
+        # 而 XcodeGen 的 watchOS preset 里**没有**这一项压不住它 ——
+        # 不覆写的话手表 target 会被当成 iOS 编。
+        SUPPORTED_PLATFORMS: "watchos watchsimulator"
+        TARGETED_DEVICE_FAMILY: "4"
+        WATCHOS_DEPLOYMENT_TARGET: "11.0"
 
 schemes:
   BWReader:

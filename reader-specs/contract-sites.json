@@ -235,6 +235,45 @@
      "note": "windows/ 目录下的精确清单，新增 .cs/.md/.py 都要登记"
     }
    ]
+  },
+  "ios-target-roster": {
+   "what": "iOS 工程的 target 清单（加一个 target 要同步的所有地方）",
+   "canonical": "ios/BWReader/project.yml 的 targets",
+   "tests": [
+    ".github/workflows/safari-extension-ios.yml 的「Validate archived app and extension」步骤（bundle id / 设备家族 / 最低系统版本 / 版本一致性,四个 target 各一组）"
+   ],
+   "sites": [
+    {
+     "file": "ios/BWReader/project.yml",
+     "role": "权威定义",
+     "note": "target 本身 + 主 app 的 dependencies 里要嵌它。⚠ watchOS target 必须写 platform: watchOS（不能用 supportedDestinations,否则不生成 Embed Watch Content）,且要覆写 SUPPORTED_PLATFORMS —— 项目级写死了 iphoneos,而 watchOS preset 里没有这一项压不住"
+    },
+    {
+     "file": "ios/BWReader/project.yml (MARKETING_VERSION)",
+     "role": "版本一致性",
+     "note": "2026-08-27 起**四处**（App/Extension/Widget/Watch）。CI 会校验四者相等,漏改一处构建失败"
+    },
+    {
+     "file": ".github/workflows/safari-extension-ios.yml (env)",
+     "role": "bundle id",
+     "note": "BUNDLE_ID / EXTENSION_BUNDLE_ID / WIDGET_BUNDLE_ID / WATCH_BUNDLE_ID"
+    },
+    {
+     "file": ".github/workflows/safari-extension-ios.yml (描述文件)",
+     "role": "签名",
+     "note": "App/Extension 走 base64 secret；Widget/Watch 走 ASC API 建 bundle ID + fastlane sigh 自动创建 —— **后一条路 Apple 后台不用人动手**。⚠ 但 capability（App Groups/推送）自动开这条路 2026-08-05 试过并整段回退（ac119d01→64e5ab2e），要 capability 只能人去后台点"
+    },
+    {
+     "file": ".github/workflows/safari-extension-ios.yml (校验段)",
+     "role": "验收",
+     "note": "validate_platform 每个 target 一次,各自钉住 bundle id / 设备家族 / 最低系统版本；末尾还有版本一致性。⚠ 手表另有 PlugIns/ 位置断言 —— XcodeGen 2.46.0 会嵌进 Watch/ 而 Xcode 16+ 只认 PlugIns/,嵌错时 archive 可能过、装到设备才炸"
+    },
+    {
+     "file": ".github/workflows/safari-extension-ios.yml (ExportOptions)",
+     "role": "导出",
+     "note": "provisioningProfiles 字典每个 bundle id 一条"
+    }
+   ]
   }
  }
 }

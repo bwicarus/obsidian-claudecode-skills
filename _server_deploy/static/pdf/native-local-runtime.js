@@ -3679,7 +3679,11 @@
     'device-location-disable': new Set(['enabled', 'authorized', 'hasFix']),
     // iOS 系统投影（2026-08-27）：提醒事项显示副本/本地通知/小组件数据。
     // resolvedIds = 用户在苹果提醒里勾完成的通知 id（调用方走 resolve 回流）。
-    'system-projection': new Set(['resolvedIds'])
+    'system-projection': new Set(['resolvedIds']),
+    // 手表卡片镜像（2026-08-27）：把已渲染的卡片压成手表能显示的形状交给
+    // 原生侧，由 WCSession 转给手表。手表够不到 tailnet,所以图必须随载荷
+    // 过去 —— delivered 表示原生侧是否真的把它排给了手表。
+    'watch-card': new Set(['delivered', 'reason'])
   });
   var PAGE_TEXT_WORD_STATES = new Set(['ready', 'partial', 'unavailable']);
   var PAGE_TEXT_GEOMETRY_STATES = new Set(['exact', 'estimated', 'unavailable']);
@@ -4137,6 +4141,18 @@
       projection: projection && typeof projection === 'object'
         ? projection : {}
     });
+  };
+  // 手表卡片镜像入口（App 专属，2026-08-27 用户要的手表伴侣 app）。
+  // 与 __bwSystemProjectionSync 同构：App 外没有 message handler，返回
+  // null，调用方据此什么都不做。
+  //
+  // ⚠ 这里**只投影不新增契约**：卡片的 kind/字段权威仍是
+  // _server_deploy/reader_card_contract.py，手表拿到的是压扁后的
+  // {id,kind,title,text,thumbnail}，加字段不用碰那份契约。
+  root.__bwWatchCardMirror = function (card) {
+    if (!nativePageTextHandler()) return Promise.resolve(null);
+    if (!card || typeof card !== 'object') return Promise.resolve(null);
+    return nativePageTextRequest('watch-card', { card: card });
   };
   function normalizeFormulaRegions(raw) {
     if (raw == null) return [];
