@@ -9915,11 +9915,16 @@ internal static class DirectBridgeSelfTest
                     .GetProperty("serverInfo")
                     .GetProperty("version").GetString()
                     == ReaderContextMcpServer.ServerVersion
-                && tools.GetArrayLength() == 2
+                // 最小配置（没接 visual/browser/output 回调）下暴露的三个：
+                // 快照、能力指南、摄像头。摄像头不依赖任何注入回调（它只是
+                // 去起一个 CLI），所以跟前两个一样**总是**在。
+                && tools.GetArrayLength() == 3
                 && tools[0].GetProperty("name").GetString()
                     == ReaderContextMcpServer.ToolName
                 && tools[1].GetProperty("name").GetString()
                     == ReaderContextMcpServer.CapabilityGuideToolName
+                && tools[2].GetProperty("name").GetString()
+                    == ReaderContextMcpServer.CameraToolName
                 && first.RootElement.GetProperty("schema").GetString()
                     == FileDirectSnapshotContextAdapter.SnapshotContract
                 && first.RootElement.GetProperty("contextStatus")
@@ -11201,7 +11206,10 @@ internal static class DirectBridgeSelfTest
                     .Contains(
                         "Do not infer a card from final assistant text",
                         StringComparison.Ordinal)
-                && resources.GetArrayLength() == 14
+                // 15 = 能力主题数（2026-08-27 加了 camera）。这个数被钉住
+                // 是有道理的：主题列表就是**发现层**,助手扫不到关键词就
+                // 直接答"没有这个能力",漏登记等于功能不存在。
+                && resources.GetArrayLength() == 15
                 && resources[0].GetProperty("uri").GetString()
                     == ReaderCapabilityCatalog.IndexUri
                 && contents.GetArrayLength() == 1
@@ -11212,7 +11220,7 @@ internal static class DirectBridgeSelfTest
                 // 这个 server 只注入了 sendOutput，没注入查询客户端：因此
                 // 只该看到两个无条件工具和 14 个 output 工具。查询工具一个
                 // 都不该出现 —— 列出一个调不动的工具，比不列更坏。
-                && tools.GetArrayLength() == 16
+                && tools.GetArrayLength() == 17
                 && tools.EnumerateArray().Any(tool =>
                     tool.GetProperty("name").GetString()
                         == ReaderContextMcpServer.WebHighlightToolName)
@@ -12451,11 +12459,15 @@ internal static class DirectBridgeSelfTest
                     .GetProperty("content")[1]
                     .GetProperty("type").GetString() == "image";
             Require(
-                tools.GetArrayLength() == 3
+                // 接了 visual 回调时的四个：快照、能力指南、页面视觉图、
+                // 摄像头。前者拍的是**阅读器页面**,后者拍的是**现实世界**。
+                tools.GetArrayLength() == 4
                 && tools[1].GetProperty("name").GetString()
                     == ReaderContextMcpServer.CapabilityGuideToolName
                 && tools[2].GetProperty("name").GetString()
                     == ReaderContextMcpServer.VisualToolName
+                && tools[3].GetProperty("name").GetString()
+                    == ReaderContextMcpServer.CameraToolName
                 && content.GetArrayLength() == 2
                 && content[1].GetProperty("type").GetString()
                     == "image"
