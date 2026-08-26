@@ -165,6 +165,48 @@
     }
     const hd=body.querySelector('.vc-card-hd')||body.querySelector('.fc-card')||body;
     bindDrag(box,[hd,body.querySelector('.vc-card-dot')],p);
+    // ⚓ 锚定到正文（2026-08-27 用户对齐诉求：App 的自由便签卡有这个按钮，
+    // 网页钉页卡一直没有）。行为对齐 rc-stickynote.anchorFreeCard 的选区
+    // 路径：先在网页上选中一段文字，点 ⚓ → web-bind 的选区控制器折成
+    // page-chars(page=1) 锚 → persistBoundCard 共享层落库（仓库写入/幂等/
+    // tombstone 原样）→ 本卡转移（删除钉页实例，角标由 web-bind 渲染）。
+    // 没有选区就明确提示，绝不猜一个位置。flash（学习卡）走 note payload
+    // 的锚定通道，形状不同，这里先只做 html 卡（AI 结果卡=实际场景）。
+    if(p.kind==='html'){
+      const hd0=body.querySelector('.vc-card-hd');
+      if(hd0&&!hd0.querySelector('.bw-pin-anchor')){
+        const ab=document.createElement('button');
+        ab.type='button';ab.className='bw-pin-anchor';ab.title='锚定到正文';
+        ab.setAttribute('aria-label','锚定到正文');
+        ab.innerHTML='<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3"/><path d="M12 8v14"/><path d="M5 12H2a10 10 0 0 0 20 0h-3"/></svg>';
+        ab.style.cssText='margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none';
+        ab.addEventListener('pointerdown',e=>e.stopPropagation());
+        ab.addEventListener('click',async e=>{
+          e.stopPropagation();e.preventDefault();
+          const sel=window.__bwSelectionController?.current?.();
+          if(!sel||!sel.anchor){RC.toast?.('请先选中网页正文的一段文字，再点锚定');return;}
+          ab.disabled=true;
+          let pt={x:innerWidth/2,y:innerHeight/2};
+          try{const r=getSelection().getRangeAt(0).getBoundingClientRect();if(r)pt={x:r.left+r.width/2,y:r.top+r.height/2};}catch(_){}
+          const h=p.html||{};
+          const res=await Promise.resolve(RC.stickynote?.persistBoundCard?.(sel.anchor,{
+            raw:h.content||'',isHtml:!!h.isHtml,text:h.content||'',
+            label:h.label||'卡片',contextText:sel.context||'',
+            uid:p.cid||'',tone:h.type||''
+          },pt)).catch(err=>({ok:false,why:String(err?.message||err).slice(0,80)}));
+          ab.disabled=false;
+          if(res&&res.ok===true){
+            // 转移不并存（与 pinCardToPage 同规矩）：绑定卡即唯一实例。
+            pins=pins.filter(q=>q.id!==p.id);box.remove();persist();
+            RC.toast?.('✅ 已锚定到选中文字');
+          }else{
+            // 失败要出声且卡原地不动 —— 不能先删卡再报失败。
+            RC.toast?.('锚定失败：'+((res&&res.why)||'共享落库层不可用'));
+          }
+        });
+        hd0.appendChild(ab);
+      }
+    }
   }
   function newPin(kind,x,y,extra){const p={id:'wp_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),kind,x:scrollX+x,y:scrollY+y,anchor:anchorAt(x,y),...extra};ensureIdentity(p);pins.push(p);mount(p);persist();return p;}
   RC.stickynote=RC.stickynote||{};
