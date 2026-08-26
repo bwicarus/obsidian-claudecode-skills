@@ -239,10 +239,32 @@ internal static partial class ReplicationCommandProtocol
                 break;
             }
         }
+        // review 摘要（到期/新卡数）搭通知视图的车下发：App 用它喂 iOS
+        // 小组件（2026-08-27）。缺失时为 null —— 消费端显示"暂无数据"。
+        object? review = null;
+        if (
+            parsed.RootElement.TryGetProperty(
+                "review", out JsonElement reviewValue)
+            && reviewValue.ValueKind == JsonValueKind.Object
+            && reviewValue.TryGetProperty("due", out JsonElement dueValue)
+            && dueValue.TryGetInt64(out long dueCount)
+            && reviewValue.TryGetProperty("new", out JsonElement newValue)
+            && newValue.TryGetInt64(out long newCount)
+        )
+        {
+            review = new
+            {
+                due = dueCount,
+                @new = newCount,
+                atMs = reviewValue.TryGetProperty("atMs", out JsonElement at)
+                    && at.TryGetInt64(out long atMs) ? atMs : 0,
+            };
+        }
         return new
         {
             contract = "reader-notifications/1",
             items = projected.ToArray(),
+            review,
         };
     }
 

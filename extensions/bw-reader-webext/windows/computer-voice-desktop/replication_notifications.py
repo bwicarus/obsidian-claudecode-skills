@@ -386,8 +386,23 @@ class NotificationStore:
         self._export_projection(export_path, "ai")
 
     def export_user_open(self, export_path: Path) -> None:
-        """侧边栏 tab 用：**用户方向**的已生效通知（用户的收件箱）。"""
+        """侧边栏 tab 用：**用户方向**的已生效通知（用户的收件箱）。
+
+        顺带附 review 摘要（到期/新卡数）：App 拉这份数据喂 iOS 小组件
+        （2026-08-27 用户拍板做分功能小组件），复习数就搭这趟车下发 ——
+        不另开通道。数据源是 Windows 副本的 count_due_cards，新鲜度 =
+        run_once 周期，对小组件的分钟级刷新绰绰有余。
+        """
         self._export_projection(export_path, "user")
+        try:
+            due, new = count_due_cards(self._root)
+            value = json.loads(export_path.read_text(encoding="utf-8"))
+            value["review"] = {"due": due, "new": new, "atMs": _now_ms()}
+            _atomic_write_json(export_path, value)
+        except Exception:
+            # review 摘要是增强：算不出来时通知本体照常导出，
+            # 小组件那侧对缺失字段显示"暂无数据"而不是空白。
+            pass
 
 
 def count_due_cards(root: Path) -> tuple[int, int]:

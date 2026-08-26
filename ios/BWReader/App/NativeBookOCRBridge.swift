@@ -198,6 +198,40 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                         "authorized": provider.isAuthorized,
                         "hasFix": provider.latest != nil,
                     ]
+                case .systemProjection:
+                    let raw = request.projection ?? [:]
+                    let items = (raw["notifications"] as? [[String: Any]] ?? [])
+                        .compactMap { one -> ReaderSystemProjection.Item? in
+                            guard let id = one["id"] as? String,
+                                  let title = one["title"] as? String
+                            else { return nil }
+                            return ReaderSystemProjection.Item(
+                                id: id,
+                                title: title,
+                                kind: one["kind"] as? String ?? "",
+                                state: one["state"] as? String ?? "pending",
+                                body: one["body"] as? String ?? "")
+                        }
+                    let review = raw["review"] as? [String: Any]
+                    let outcome = await ReaderSystemProjection.shared.apply(
+                        notifications: items,
+                        reviewDue: (review?["due"] as? NSNumber)?.intValue,
+                        reviewNew: (review?["new"] as? NSNumber)?.intValue,
+                        reviewAtMs: (review?["atMs"] as? NSNumber)?.int64Value,
+                        syncAtMs: (raw["syncAtMs"] as? NSNumber)?.int64Value
+                            ?? Int64(Date().timeIntervalSince1970 * 1000))
+                    payload = [
+                        "contract": Self.responseContract,
+                        "action": request.action.rawValue,
+                        "requestId": request.requestID,
+                        "ok": true,
+                        "state": "ready",
+                        "source": NSNull(),
+                        "revision": "system-projection/1:"
+                            + outcome.remindersState,
+                        "error": NSNull(),
+                        "resolvedIds": outcome.resolvedIds,
+                    ]
                 case .search:
                     payload = try await Self.searchReply(
                         request: request,
@@ -320,7 +354,9 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         // 才能同步取到)。
         case locationStatus = "device-location-status"
         case locationEnable = "device-location-enable"
-        case locationDisable = "device-location-disable" 
+        case locationDisable = "device-location-disable"
+        // iOS 系统投影（2026-08-27）：提醒事项显示副本/本地通知/小组件。
+        case systemProjection = "system-projection"
         case search
         case recognizeSelection = "ocr-selection"
         case reOCRPage = "reocr-page"
@@ -335,6 +371,8 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         let query: String?
         let limit: Int?
         let bbox: [Double]?
+        // 有默认值 → 既有 5 处构造点不必逐一补 nil。
+        var projection: [String: Any]? = nil
 
         static func parse(
             _ body: Any,
@@ -385,6 +423,22 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                     query: nil,
                     limit: nil,
                     bbox: nil
+                )
+            case .systemProjection:
+                guard Set(value.keys) == common.union(["projection"]),
+                      let projection = value["projection"] as? [String: Any]
+                else {
+                    throw BridgeError.invalidRequest
+                }
+                return Request(
+                    action: action,
+                    requestID: requestID,
+                    localBookID: localBookID,
+                    page: nil,
+                    query: nil,
+                    limit: nil,
+                    bbox: nil,
+                    projection: projection
                 )
             case .search:
                 guard Set(value.keys) == common.union(["query", "limit"]),
@@ -885,6 +939,8 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
             payload["enabled"] = false
             payload["authorized"] = false
             payload["hasFix"] = false
+        case .systemProjection:
+            payload["resolvedIds"] = [String]()
         }
         return payload
     }

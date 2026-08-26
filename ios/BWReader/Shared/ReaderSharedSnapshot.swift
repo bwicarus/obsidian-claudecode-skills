@@ -205,6 +205,28 @@ struct ReaderLocalNotesSharedState: Codable, Equatable, Sendable {
     )
 }
 
+/// 系统投影共享数据（2026-08-27）：App 写、widget 读，一份 JSON 三个
+/// 功能分区（复习 / 待办通知 / 同步状态），对应三个独立小组件。
+struct ReaderWidgetSystemData: Codable, Equatable, Sendable {
+    struct Review: Codable, Equatable, Sendable {
+        var due: Int
+        var newCards: Int
+        var atMs: Int64
+    }
+
+    struct NotificationItem: Codable, Equatable, Sendable {
+        var id: String
+        var title: String
+        var kind: String
+        var state: String
+    }
+
+    var review: Review?
+    var notifications: [NotificationItem]
+    var lastSyncAtMs: Int64
+    var updatedAtMs: Int64
+}
+
 struct ReaderNativeFeatureStore: Sendable {
     private static let directoryName = "NativeFeatures"
     private static let snapshotName = "reader-snapshot.json"
@@ -300,6 +322,20 @@ struct ReaderNativeFeatureStore: Sendable {
     func readLocalNotesState() -> ReaderLocalNotesSharedState {
         (try? loadLocalNotesState()) ?? .unavailable
     }
+
+    // ── 系统投影数据（2026-08-27，分功能小组件）─────────────────────
+    // App 每次系统投影同步时写入；widget timeline provider 只读。
+    // 快照模型（不假装实时）：每份数据带 updatedAtMs，widget 界面上
+    // 永远显示"数据时刻"。
+    func writeWidgetSystemData(_ value: ReaderWidgetSystemData) throws {
+        try write(value, named: Self.widgetSystemDataName)
+    }
+
+    func readWidgetSystemData() -> ReaderWidgetSystemData? {
+        try? read(ReaderWidgetSystemData.self, named: Self.widgetSystemDataName)
+    }
+
+    private static let widgetSystemDataName = "widget-system.json"
 
     func loadLocalNotesState() throws -> ReaderLocalNotesSharedState? {
         try read(

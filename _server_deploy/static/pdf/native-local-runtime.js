@@ -3676,7 +3676,10 @@
     'book-identity': new Set(['contentSha256']),
     'device-location-status': new Set(['enabled', 'authorized', 'hasFix']),
     'device-location-enable': new Set(['enabled', 'authorized', 'hasFix']),
-    'device-location-disable': new Set(['enabled', 'authorized', 'hasFix'])
+    'device-location-disable': new Set(['enabled', 'authorized', 'hasFix']),
+    // iOS 系统投影（2026-08-27）：提醒事项显示副本/本地通知/小组件数据。
+    // resolvedIds = 用户在苹果提醒里勾完成的通知 id（调用方走 resolve 回流）。
+    'system-projection': new Set(['resolvedIds'])
   });
   var PAGE_TEXT_WORD_STATES = new Set(['ready', 'partial', 'unavailable']);
   var PAGE_TEXT_GEOMETRY_STATES = new Set(['exact', 'estimated', 'unavailable']);
@@ -4124,6 +4127,17 @@
       });
     });
   }
+  // iOS 系统投影入口（App 专属，2026-08-27）：rc-computer-voice 的通知
+  // 模块定期调用，把用户向通知 + review 摘要交给原生侧（苹果提醒事项
+  // 显示副本 / 本地横幅 / 小组件数据）。App 外没有 message handler，
+  // 返回 null —— 调用方据此识别"非 App 环境"并且什么都不做。
+  root.__bwSystemProjectionSync = function (projection) {
+    if (!nativePageTextHandler()) return Promise.resolve(null);
+    return nativePageTextRequest('system-projection', {
+      projection: projection && typeof projection === 'object'
+        ? projection : {}
+    });
+  };
   function normalizeFormulaRegions(raw) {
     if (raw == null) return [];
     if (!Array.isArray(raw) || raw.length > 1000) {

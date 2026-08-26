@@ -4936,8 +4936,10 @@
         sessionId: session.id,
       });
     }).then(function (reply) {
+      // review（到期/新卡数）搭通知视图的车下发（2026-08-27，小组件数据）。
+      // ⚠ 放行了字段还要显式搬 —— 这里是重建不是透传（CLAUDE.md 那课）。
       exactObject(
-        reply, ["contract", "items"], [], "通知视图"
+        reply, ["contract", "items"], ["review"], "通知视图"
       );
       if (reply.contract !== "reader-notifications/1" ||
           !Array.isArray(reply.items)) {
@@ -4945,7 +4947,23 @@
           "通知视图形状无效", "BW_NOTIFICATIONS_QUERY_INVALID", false
         );
       }
-      return reply.items;
+      var review = null;
+      if (reply.review && typeof reply.review === "object" &&
+          Number.isSafeInteger(reply.review.due) &&
+          Number.isSafeInteger(reply.review["new"])) {
+        review = {
+          due: reply.review.due,
+          "new": reply.review["new"],
+          atMs: Number.isSafeInteger(reply.review.atMs)
+            ? reply.review.atMs : 0,
+        };
+      }
+      var items = reply.items;
+      try {
+        Object.defineProperty(items, "__bwReview",
+          { value: review, configurable: true });
+      } catch (e) {}
+      return items;
     }).finally(function () {
       if (channel) return channel.close();
     });
@@ -5162,6 +5180,46 @@
       if (!card) return;
       act(card.dataset.id, button.dataset.ntfAct);
     });
+  })();
+
+  // ── iOS 系统投影同步（App 环境专属，2026-08-27 用户拍板）──
+  // 定期把用户向通知 + review 摘要交给原生侧做三件事：苹果提醒事项
+  // 显示副本（我们的通知系统是真值）、新 pending 的本地横幅、小组件
+  // 共享数据。runtime 只在 App 里暴露 __bwSystemProjectionSync ——
+  // 桌面/扩展没有该函数，这段自然不跑。返回的 resolvedIds 是用户在
+  // 苹果提醒里勾完成的条目：逐条走既有 resolve 回流，与侧栏「完成」
+  // 按钮语义完全等价（苹果侧勾选 = 用户 resolve）。
+  (function wireSystemProjection() {
+    if (typeof document === 'undefined' ||
+        typeof setInterval !== 'function') return;   // 测试沙箱无 DOM/计时器
+    var SYNC_EVERY_MS = 30 * 60 * 1000;
+    var syncing = false;
+    function sync() {
+      var native = window.__bwSystemProjectionSync;
+      if (typeof native !== 'function' || syncing) return;
+      syncing = true;
+      queryNotifications().then(function (items) {
+        return native({
+          notifications: items,
+          review: items.__bwReview || null,
+          syncAtMs: Date.now(),
+        });
+      }).then(function (result) {
+        var resolved = result && Array.isArray(result.resolvedIds)
+          ? result.resolvedIds : [];
+        resolved.forEach(function (id) {
+          fetch('/pdf/api/notification-action', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'resolve', id: id })
+          }).catch(function () {});
+        });
+      }).catch(function () {
+        // 桥离线时没有数据可投影 —— 下个周期再试；投影是增强，不打扰。
+      }).finally(function () { syncing = false; });
+    }
+    setTimeout(sync, 8000);
+    setInterval(sync, SYNC_EVERY_MS);
   })();
 
   function lookupJapaneseFallback(value) {
