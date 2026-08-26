@@ -41,7 +41,7 @@ OPEN_CONTRACT = "reader-notifications/1"
 MAX_OPEN = 50
 MAX_TEXT = 400
 _STATES = ("pending", "acknowledged")
-_AUTO_TYPES = ("item-mutated", "card-reviewed")
+_AUTO_TYPES = ("item-mutated", "card-reviewed", "place-arrived")
 
 
 def default_root() -> Path:
@@ -198,6 +198,15 @@ class NotificationStore:
                 ):
                     raise NotificationError(
                         "autoResolve.type 必须是 %s 之一" % (_AUTO_TYPES,))
+                if auto_resolve.get("type") == "place-arrived":
+                    # 地点名拼错 = 这条待办永远不会自动关闭,而且没有任何
+                    # 地方会说出来 —— 当场拒绝比事后困惑好。
+                    import replication_places
+                    if not replication_places.resolve_name(
+                            self._root, str(auto_resolve.get("place") or "")):
+                        raise NotificationError(
+                            "自动完成绑定的地点「%s」还没有命名过"
+                            % auto_resolve.get("place"))
             items = self._load()
             if dedupe_key:
                 for existing in items:
@@ -504,6 +513,35 @@ class NotificationStore:
             pass
 
 
+def auto_resolve_on_arrival(store: "NotificationStore", root: Path) -> int:
+    """把「到达某地即完成」的待办结掉（每轮对账顺路跑）。
+
+    这是待办三种自动关闭条件里的第三种。前两种看账本（条目被改动、
+    卡片被复习），这一种看位置记录。
+    """
+    import replication_places
+    closed = 0
+    for item in list(store.open_items()):
+        auto = item.get("autoResolve") or {}
+        if auto.get("type") != "place-arrived":
+            continue
+        name = str(auto.get("place") or "")
+        if not name:
+            continue
+        arrived = replication_places.arrived_at(
+            root, name, int(item.get("createdAtUtcMs") or 0))
+        if arrived is None:
+            continue
+        try:
+            store.resolve(item["id"], by="auto",
+                          note="已到达「%s」" % name)
+            closed += 1
+        except NotificationError:
+            # 并发下条目可能已被别处关掉 —— 幂等跳过,不算失败。
+            pass
+    return closed
+
+
 def count_due_cards(root: Path) -> tuple[int, int]:
     """从数据域副本数到期/新卡（Windows 自主计算，不依赖 App 在线）。
 
@@ -631,6 +669,10 @@ def main() -> int:
                         help="itemId：该条目在账本出现操作即自动入库")
     create.add_argument("--auto-card", default=None,
                         help="cardId：该卡被复习即自动入库")
+    create.add_argument("--auto-place", default=None,
+                        help="地点名：**到达**该地即自动完成（判的是到达"
+                             "这个事件，不是此刻在不在，所以在目的地创建"
+                             "也不会当场自我了断）")
     args = parser.parse_args()
     store = NotificationStore(args.root or default_root())
 
@@ -666,6 +708,8 @@ def main() -> int:
                 auto = {"type": "item-mutated", "itemId": args.auto_item}
             elif args.auto_card:
                 auto = {"type": "card-reviewed", "cardId": args.auto_card}
+            elif args.auto_place:
+                auto = {"type": "place-arrived", "place": args.auto_place}
             expires = (
                 _now_ms() + int(args.expires_hours * 3600 * 1000)
                 if args.expires_hours else None

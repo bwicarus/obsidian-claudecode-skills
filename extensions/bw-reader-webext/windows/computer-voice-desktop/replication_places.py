@@ -190,6 +190,29 @@ def save_alias(root: Path, name: str, lat: float, lon: float) -> None:
     temporary.replace(path)
 
 
+def arrived_at(root: Path, name: str, since_ms: int) -> int | None:
+    """`since_ms` 之后有没有到过叫 `name` 的地方？有就返回到达时刻。
+
+    ⚠ 判「到达」而不是「在不在」：待办常常就是在目的地创建的
+    （「到家提醒我倒垃圾」多半是在外面说的，但「明天到公司记得交表」
+    可能就是在公司说的）。用状态判断会让后者当场自我了断，
+    用事件判断则要求确实**又去了一次**。
+    """
+    place = resolve_name(root, name)
+    if place is None:
+        return None
+    best: int | None = None
+    for row in _load_located_dwell(root):
+        if row["atUtcMs"] <= since_ms:
+            continue
+        if _distance_m(row["lat"], row["lon"],
+                       place["lat"], place["lon"]) > ALIAS_HIT_RADIUS_M:
+            continue
+        if best is None or row["atUtcMs"] < best:
+            best = row["atUtcMs"]
+    return best
+
+
 def resolve_name(root: Path, name: str) -> dict | None:
     """名字 → {name, lat, lon}。反方向查找（原来只有坐标→名字）。
 

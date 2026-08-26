@@ -728,6 +728,11 @@ def run_once(
                     + replication_activity.load_reviews(local_root, since_ms)
                 )
                 auto = notify_store.auto_resolve_against(recent)
+                # 第三种自动关闭条件:到达某地(用户 2026-08-26:「我都到家
+                # 很久了但还是显示那个坐车回家的待办」)。
+                auto += replication_notifications.auto_resolve_on_arrival(
+                    notify_store, local_root
+                )
                 review_due = replication_notifications.ensure_review_due(
                     notify_store, local_root
                 )

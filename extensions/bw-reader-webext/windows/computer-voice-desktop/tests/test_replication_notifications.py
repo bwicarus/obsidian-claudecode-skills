@@ -448,3 +448,78 @@ class PlaceBindingTests(unittest.TestCase):
         place = json.loads(out.read_text("utf-8"))["items"][0]["place"]
         self.assertAlmostEqual(place["lat"], 36.0, places=4,
                                msg="导出要用当前坐标,不是创建时的快照")
+
+
+class ArrivalAutoResolveTests(unittest.TestCase):
+    """到达即完成(2026-08-26 用户:「我都到家很久了但还是显示那个坐车
+    回家的待办」)。原则:待办在创建时就该定义它怎么结束。"""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.store = NotificationStore(self.root)
+        import replication_places
+        self.places = replication_places
+        self.places.save_alias(self.root, "家", 35.0, 139.0)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _dwell(self, at_ms: int, lat: float, lon: float) -> None:
+        """写一条带定位的停留记录。
+
+        ⚠ 形状必须与真实账本一致（replication-data/<书>/activity-dwell.jsonl，
+        坐标在 body.loc、时刻在 receivedAtUtcMs）。第一版测试自己编了个
+        形状，于是"到达没关掉待办" —— 那是测试错了不是代码错了，但它也
+        正说明这条链只认真实形状。
+        """
+        import replication_activity
+        book = self.root / "replication-data" / "book-test"
+        book.mkdir(parents=True, exist_ok=True)
+        path = book / replication_activity.ACTIVITY_FILE_NAME
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "receivedAtUtcMs": at_ms,
+                "body": {
+                    "kind": "dwell",
+                    "loc": {"lat": lat, "lon": lon, "name": "测试点"},
+                    "entries": [{"secs": 600}],
+                },
+            }, ensure_ascii=False) + "\n")
+
+    def test_arrival_after_creation_closes_it(self) -> None:
+        import replication_notifications as rn
+        item = self.store.create(
+            kind="trip", title="坐车回家", audience="user",
+            auto_resolve={"type": "place-arrived", "place": "家"})
+        self._dwell(int(item["createdAtUtcMs"]) + 60_000, 35.0, 139.0)
+        closed = rn.auto_resolve_on_arrival(self.store, self.root)
+        self.assertEqual(closed, 1)
+        self.assertEqual(self.store.open_items(), [],
+                         "到家之后这条待办就该自己消失")
+
+    def test_being_there_at_creation_does_not_self_close(self) -> None:
+        """判的是「到达」这个事件,不是「此刻在不在」。否则「到公司记得
+        交表」在公司说出口的瞬间就自我了断了。"""
+        import replication_notifications as rn
+        item = self.store.create(
+            kind="user-todo", title="到家倒垃圾", audience="user",
+            auto_resolve={"type": "place-arrived", "place": "家"})
+        self._dwell(int(item["createdAtUtcMs"]) - 60_000, 35.0, 139.0)
+        self.assertEqual(rn.auto_resolve_on_arrival(self.store, self.root), 0)
+        self.assertEqual(len(self.store.open_items()), 1)
+
+    def test_arrival_elsewhere_does_not_close(self) -> None:
+        import replication_notifications as rn
+        item = self.store.create(
+            kind="trip", title="坐车回家", audience="user",
+            auto_resolve={"type": "place-arrived", "place": "家"})
+        self._dwell(int(item["createdAtUtcMs"]) + 60_000, 36.0, 140.0)
+        self.assertEqual(rn.auto_resolve_on_arrival(self.store, self.root), 0)
+
+    def test_unknown_place_rejected_at_creation(self) -> None:
+        """地点名拼错 = 这条待办永远关不掉,且没有任何地方会说出来。"""
+        with self.assertRaises(NotificationError):
+            self.store.create(
+                kind="trip", title="回没命名过的地方", audience="user",
+                auto_resolve={"type": "place-arrived", "place": "月球"})
