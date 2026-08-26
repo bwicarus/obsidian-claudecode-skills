@@ -276,3 +276,51 @@ class AudienceSplitTests(unittest.TestCase):
     def test_bad_audience_rejected(self) -> None:
         with self.assertRaises(NotificationError):
             self.store.create(kind="x", title="y", audience="everyone")
+
+
+class DueAtTests(unittest.TestCase):
+    """到点时刻(2026-08-26):它要穿过四个进程(Python→C#桥→JS→Swift)才能
+    变成设备上的闹钟,任何一跳把它丢了都表现为「提醒到点不响」且沿途
+    无人报错 —— 所以在源头锁住它的存在与形状。"""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.store = NotificationStore(self.root)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_due_at_persisted_and_exported(self) -> None:
+        due = 1_800_000_000_000
+        item = self.store.create(
+            kind="trip", title="14:20 出门", audience="user",
+            due_at_ms=due)
+        self.assertEqual(item["dueAtUtcMs"], due, "落库要带到点时刻")
+        tab = self.root / "notifications-user.json"
+        self.store.export_user_open(tab)
+        exported = json.loads(tab.read_text("utf-8"))["items"][0]
+        self.assertEqual(
+            exported["dueAtUtcMs"], due,
+            "导出必须显式搬这个字段 —— 只在落库存下、导出漏搬,"
+            "表现是「校验全过就是不响」")
+
+    def test_missing_due_at_exports_as_null(self) -> None:
+        self.store.create(kind="user-todo", title="倒垃圾", audience="user")
+        tab = self.root / "notifications-user.json"
+        self.store.export_user_open(tab)
+        exported = json.loads(tab.read_text("utf-8"))["items"][0]
+        self.assertIsNone(
+            exported["dueAtUtcMs"],
+            "没有到点时刻的条目要显式给 null,不是缺键 —— "
+            "缺键会让下游的严格字段校验整条拒收")
+
+    def test_activate_and_due_are_independent(self) -> None:
+        """两个时间字段的分工:activate=何时开始出现,due=何时到点。
+        混用会让「垃圾日当天才出现的待办」变成「到点响一次就完」。"""
+        item = self.store.create(
+            kind="user-todo", title="倒垃圾", audience="user",
+            activate_at_ms=1_700_000_000_000,
+            due_at_ms=1_800_000_000_000)
+        self.assertEqual(item["activateAtUtcMs"], 1_700_000_000_000)
+        self.assertEqual(item["dueAtUtcMs"], 1_800_000_000_000)

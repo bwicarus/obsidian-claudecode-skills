@@ -277,6 +277,18 @@ private struct SystemDataProvider: TimelineProvider {
             }
             .sorted { $0.1 < $1.1 }
             .prefix(32)
+        // 撤销也要做，不能只加不删：用户已完成/取消的提醒若只由 App 侧
+        // 清理，而用户恰恰长期不开 App（这正是 widget 排程存在的前提），
+        // 那条通知到点还会响一次 —— 比不响更糟。
+        // 只在**本轮真的拿到了新数据**时清理（调用点保证了这一点），
+        // 拉取失败时绝不动已排好的通知。
+        let wanted = Set(due.map { "bw-due-" + $0.0.id })
+        let stale = (await center.pendingNotificationRequests())
+            .map(\.identifier)
+            .filter { $0.hasPrefix("bw-due-") && !wanted.contains($0) }
+        if !stale.isEmpty {
+            center.removePendingNotificationRequests(withIdentifiers: stale)
+        }
         for (item, at) in due {
             let content = UNMutableNotificationContent()
             content.title = item.title
