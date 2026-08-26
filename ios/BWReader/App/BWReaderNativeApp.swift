@@ -228,6 +228,12 @@ private struct ReaderRootView: View {
             link.onVoiceStop = { [weak voiceBridge] in
                 await voiceBridge?.stop()
             }
+            // 手表「按住说话」要拿 Pi 的会话 cookie 去打 /api/voice/*。
+            // cookie 在 WebView 的 datastore 里 —— 注入而不是让 ReaderWatchLink
+            // 自己去碰 WebView。
+            link.piCookies = { [weak reader] in
+                await reader?.remoteLibraryCookies() ?? []
+            }
             link.activate()
         }
         .onChange(of: voiceBridge.state) { _, _ in

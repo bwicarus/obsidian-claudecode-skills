@@ -20,6 +20,9 @@ final class ReaderWatchLink: NSObject, ObservableObject {
     var onVoiceStop: (() async -> Void)?
     /// 当前语音状态的读取口（同上，注入而不是自己抓）。
     var voiceStatusProvider: (() -> ReaderWatchVoice)?
+    /// Pi 的会话 cookie。手表说话要用它去打 /api/voice/*。
+    /// 同样是注入：cookie 在 WebView 的 datastore 里，这个类不该去碰 WebView。
+    var piCookies: (() async -> [HTTPCookie])?
 
     private var session: WCSession?
     private var cards: [ReaderWatchCard] = []
@@ -182,6 +185,41 @@ extension ReaderWatchLink: WCSessionDelegate {
     nonisolated func sessionDidDeactivate(_ session: WCSession) {
         // 换表之后必须重新激活,否则从此再也不同步而且一声不吭。
         WCSession.default.activate()
+    }
+
+    /// 手表按住说话录来的一段音频（AAC/m4a）。跑完一轮把结果回过去。
+    ///
+    /// ⚠ 走的是 **Pi 的回合制链路**（/api/voice/transcribe → /api/voice/agent），
+    /// 不是电脑上那条常连的语音桥 —— 原因见 ReaderWatchVoiceTurn 的文件头。
+    nonisolated func session(
+        _ session: WCSession,
+        didReceiveMessageData messageData: Data,
+        replyHandler: @escaping (Data) -> Void
+    ) {
+        Task { @MainActor in
+            func answer(_ payload: [String: Any]) {
+                replyHandler(
+                    (try? JSONSerialization.data(withJSONObject: payload))
+                    ?? Data())
+            }
+            guard let cookies = await self.piCookies?() else {
+                // 拿不到 cookie 说明 App 还没接上 —— 说清该去哪儿修,
+                // 别让手表上只显示"失败"。
+                ReaderWatchLinkDiagnostics.note("手表说话：拿不到 Pi cookie")
+                answer(["error": "手机 App 还没准备好，先打开一次"])
+                return
+            }
+            do {
+                let outcome = try await ReaderWatchVoiceTurn.run(
+                    clip: messageData, cookies: cookies)
+                answer(["heard": outcome.transcript, "reply": outcome.reply])
+            } catch {
+                let why = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+                ReaderWatchLinkDiagnostics.note("手表说话失败：" + why)
+                answer(["error": why])
+            }
+        }
     }
 
     nonisolated func session(

@@ -1,893 +1,922 @@
 {
-  "contract": "reader-native-interface-manifest/2",
-  "routes": [
-    {
-      "path": "/api/assistant/action-pref",
-      "match": "exact",
-      "owner": "pi",
+ "contract": "reader-native-interface-manifest/2",
+ "routes": [
+  {
+   "path": "/api/assistant/action-pref",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Store one assistant action preference on Pi."
+  },
+  {
+   "path": "/api/assistant/action-prefs",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read assistant action preferences from Pi."
+  },
+  {
+   "path": "/api/assistant/card-improvement-commit",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Commit a reviewed card improvement on Pi."
+  },
+  {
+   "path": "/api/assistant/card-improvement-draft",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Draft a card improvement on Pi."
+  },
+  {
+   "path": "/api/assistant/chat",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Store one assistant action preference on Pi."
-    },
-    {
-      "path": "/api/assistant/action-prefs",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/context/file_rel",
+      "transform": "exact"
+     },
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read assistant action preferences from Pi."
-    },
-    {
-      "path": "/api/assistant/card-improvement-commit",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/context/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": {
+     "kind": "rid",
+     "pointer": "/rid",
+     "fromPointer": "/from"
+    }
+   },
+   "description": "Run assistant chat from supplied native-local context, rewriting a verified Pi book identity when available."
+  },
+  {
+   "path": "/api/assistant/clear",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Clear the selected assistant conversation."
+  },
+  {
+   "path": "/api/assistant/clip-attach",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Attach a previously uploaded voice clip."
+  },
+  {
+   "path": "/api/assistant/compact-history",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Commit a reviewed card improvement on Pi."
-    },
-    {
-      "path": "/api/assistant/card-improvement-draft",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Compact assistant history on Pi."
+  },
+  {
+   "path": "/api/assistant/creations-brief",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read the assistant creations brief."
+  },
+  {
+   "path": "/api/assistant/history",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read assistant conversation history."
+  },
+  {
+   "path": "/api/assistant/log",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Draft a card improvement on Pi."
-    },
-    {
-      "path": "/api/assistant/chat",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Write bounded assistant diagnostics."
+  },
+  {
+   "path": "/api/assistant/pref-profiles",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read or update assistant preference profiles."
+  },
+  {
+   "path": "/api/assistant/prewarm",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Warm or release the assistant worker."
+  },
+  {
+   "path": "/api/assistant/route-text",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/context/file_rel",
-            "transform": "exact"
-          },
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/context/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": {
-          "kind": "rid",
-          "pointer": "/rid",
-          "fromPointer": "/from"
-        }
-      },
-      "description": "Run assistant chat from supplied native-local context, rewriting a verified Pi book identity when available."
-    },
-    {
-      "path": "/api/assistant/clear",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Route text with a verified current-book identity into the assistant."
+  },
+  {
+   "path": "/api/assistant/rtc-bind",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Bind one direct OpenAI Realtime call to the authenticated Reader control channel."
+  },
+  {
+   "path": "/api/assistant/rtc-call",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Clear the selected assistant conversation."
-    },
-    {
-      "path": "/api/assistant/clip-attach",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Start an assistant real-time call."
+  },
+  {
+   "path": "/api/assistant/rtc-client-secret",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Attach a previously uploaded voice clip."
-    },
-    {
-      "path": "/api/assistant/compact-history",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Mint a short-lived OpenAI Realtime client credential using server-owned policy."
+  },
+  {
+   "path": "/api/assistant/rtc-hangup",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Stop an assistant real-time call."
+  },
+  {
+   "path": "/api/assistant/rtc-session",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Compact assistant history on Pi."
-    },
-    {
-      "path": "/api/assistant/creations-brief",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Create an assistant RTC session."
+  },
+  {
+   "path": "/api/assistant/rtc-usage",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Record assistant RTC usage."
+  },
+  {
+   "path": "/api/assistant/tool-prompt",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read or update the assistant tool prompt."
+  },
+  {
+   "path": "/api/assistant/undo",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Undo a server-recorded assistant mutation."
+  },
+  {
+   "path": "/api/assistant/voice-cards",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read or update voice interaction cards."
+  },
+  {
+   "path": "/api/assistant/voice-clip",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Upload a voice clip."
+  },
+  {
+   "path": "/api/assistant/voice-clip/",
+   "match": "segment",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Fetch one voice clip by opaque server ID."
+  },
+  {
+   "path": "/api/assistant/voice-config",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read or update voice configuration."
+  },
+  {
+   "path": "/api/assistant/voice-page-text",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Provide bounded current-page text from the native-local document source to voice."
+  },
+  {
+   "path": "/api/assistant/voice-tool",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read the assistant creations brief."
-    },
-    {
-      "path": "/api/assistant/history",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/ctx/file_rel",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Execute voice tools from supplied native-local context, rewriting a verified Pi book identity when available."
+  },
+  {
+   "path": "/api/voice/agent",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Turn one transcript into a spoken reply and client actions on Pi. Pairs with /api/voice/transcribe."
+  },
+  {
+   "path": "/api/voice/transcribe",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Transcribe one recorded clip on Pi (multipart 'audio', WAV 16k LINEAR16 goes straight to Cloud STT). Turn-based, not streaming -- this is what the watch push-to-talk uses."
+  },
+  {
+   "path": "/pdf/api/active-reading",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read assistant conversation history."
-    },
-    {
-      "path": "/api/assistant/log",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Persist active reading locally for the Windows context WSS and relay the legacy Pi record through a digest-bound identity."
+  },
+  {
+   "path": "/pdf/api/ai-stream-result",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read one asynchronous AI stream result."
+  },
+  {
+   "path": "/pdf/api/anki-add-cards",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Add reviewed cards through the Pi service."
+  },
+  {
+   "path": "/pdf/api/anki-card-operation",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read or mutate explicitly identified Anki notes and cards, then report local and AnkiWeb sync outcomes separately."
+  },
+  {
+   "path": "/pdf/api/anki-draft",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Write bounded assistant diagnostics."
-    },
-    {
-      "path": "/api/assistant/pref-profiles",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Verify exact source text and register a private source-bound draft without writing Anki."
+  },
+  {
+   "path": "/pdf/api/asset/",
+   "match": "segment",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Fetch one server-owned attachment by opaque ID."
+  },
+  {
+   "path": "/pdf/api/book-crop",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Save or read whole-book crop inset ratios for the current local PDF."
+  },
+  {
+   "path": "/pdf/api/book-figures",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "GET",
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET",
-        "POST"
+       "GET"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read or update assistant preference profiles."
-    },
-    {
-      "path": "/api/assistant/prewarm",
-      "match": "exact",
-      "owner": "pi",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     },
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Warm or release the assistant worker."
-    },
-    {
-      "path": "/api/assistant/route-text",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Read or update the Pi figure-analysis setting for the verified matching book."
+  },
+  {
+   "path": "/pdf/api/book-langs",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read or store per-book language preferences locally."
+  },
+  {
+   "path": "/pdf/api/book-meta",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read native-local book identity metadata."
+  },
+  {
+   "path": "/pdf/api/build-toc",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Route text with a verified current-book identity into the assistant."
-    },
-    {
-      "path": "/api/assistant/rtc-bind",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Build a table of contents for a verified Pi book copy."
+  },
+  {
+   "path": "/pdf/api/build-toc-status",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read a Pi table-of-contents job status."
+  },
+  {
+   "path": "/pdf/api/card-repository/bootstrap",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read a private paginated legacy card snapshot for the App-local repository bootstrap."
+  },
+  {
+   "path": "/pdf/api/char-offset",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "GET",
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "GET"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Bind one direct OpenAI Realtime call to the authenticated Reader control channel."
-    },
-    {
-      "path": "/api/assistant/rtc-call",
-      "match": "exact",
-      "owner": "pi",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     },
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Start an assistant real-time call."
-    },
-    {
-      "path": "/api/assistant/rtc-client-secret",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Mint a short-lived OpenAI Realtime client credential using server-owned policy."
-    },
-    {
-      "path": "/api/assistant/rtc-hangup",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Stop an assistant real-time call."
-    },
-    {
-      "path": "/api/assistant/rtc-session",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Create an assistant RTC session."
-    },
-    {
-      "path": "/api/assistant/rtc-usage",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Record assistant RTC usage."
-    },
-    {
-      "path": "/api/assistant/tool-prompt",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read or update the assistant tool prompt."
-    },
-    {
-      "path": "/api/assistant/undo",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Undo a server-recorded assistant mutation."
-    },
-    {
-      "path": "/api/assistant/voice-cards",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read or update voice interaction cards."
-    },
-    {
-      "path": "/api/assistant/voice-clip",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Upload a voice clip."
-    },
-    {
-      "path": "/api/assistant/voice-clip/",
-      "match": "segment",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Fetch one voice clip by opaque server ID."
-    },
-    {
-      "path": "/api/assistant/voice-config",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read or update voice configuration."
-    },
-    {
-      "path": "/api/assistant/voice-page-text",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Provide bounded current-page text from the native-local document source to voice."
-    },
-    {
-      "path": "/api/assistant/voice-tool",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/ctx/file_rel",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Execute voice tools from supplied native-local context, rewriting a verified Pi book identity when available."
-    },
-    {
-      "path": "/pdf/api/active-reading",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Persist active reading locally for the Windows context WSS and relay the legacy Pi record through a digest-bound identity."
-    },
-    {
-      "path": "/pdf/api/ai-stream-result",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read one asynchronous AI stream result."
-    },
-    {
-      "path": "/pdf/api/anki-add-cards",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Add reviewed cards through the Pi service."
-    },
-    {
-      "path": "/pdf/api/anki-card-operation",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read or mutate explicitly identified Anki notes and cards, then report local and AnkiWeb sync outcomes separately."
-    },
-    {
-      "path": "/pdf/api/anki-draft",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Verify exact source text and register a private source-bound draft without writing Anki."
-    },
-    {
-      "path": "/pdf/api/asset/",
-      "match": "segment",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Fetch one server-owned attachment by opaque ID."
-    },
-    {
-      "path": "/pdf/api/book-crop",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Save or read whole-book crop inset ratios for the current local PDF."
-    },
-    {
-      "path": "/pdf/api/book-figures",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "GET",
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          },
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Read or update the Pi figure-analysis setting for the verified matching book."
-    },
-    {
-      "path": "/pdf/api/book-langs",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read or store per-book language preferences locally."
-    },
-    {
-      "path": "/pdf/api/book-meta",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read native-local book identity metadata."
-    },
-    {
-      "path": "/pdf/api/build-toc",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Build a table of contents for a verified Pi book copy."
-    },
-    {
-      "path": "/pdf/api/build-toc-status",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read a Pi table-of-contents job status."
-    },
-    {
-      "path": "/pdf/api/card-repository/bootstrap",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read a private paginated legacy card snapshot for the App-local repository bootstrap."
-    },
-    {
-      "path": "/pdf/api/char-offset",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "GET",
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          },
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Resolve character offsets for a verified Pi PDF copy."
-    },
-      {
-      "path": "/pdf/api/context-sync",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Keep the native context-WSS preference local and reconcile the legacy Pi context setting without blocking the local link."
-    },
-
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Resolve character offsets for a verified Pi PDF copy."
+  },
+  {
+   "path": "/pdf/api/context-sync",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Keep the native context-WSS preference local and reconcile the legacy Pi context setting without blocking the local link."
+  },
   {
    "path": "/pdf/api/device-location-pref",
    "match": "exact",
@@ -903,1217 +932,1218 @@
    "status": "supported",
    "remoteBook": null,
    "description": "Activity-ledger place dimension: toggle/read the device location recording preference. Pure local bridge to ReaderLocationProvider; never leaves the device except inside dwell reports the user opted into."
-  },{
-      "path": "/pdf/api/dict",
-      "match": "exact",
-      "owner": "pi",
+  },
+  {
+   "path": "/pdf/api/dict",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "GET"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Run the general dictionary service."
-    },
-    {
-      "path": "/pdf/api/dict-jp",
-      "match": "exact",
-      "owner": "pi",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Run the general dictionary service."
+  },
+  {
+   "path": "/pdf/api/dict-jp",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "GET"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Run the Japanese dictionary service."
-    },
-    {
-      "path": "/pdf/api/dict-jp-ai",
-      "match": "exact",
-      "owner": "pi",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Run the Japanese dictionary service."
+  },
+  {
+   "path": "/pdf/api/dict-jp-ai",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Run AI-assisted Japanese dictionary lookup."
+  },
+  {
+   "path": "/pdf/api/dict-jp-zh",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Run Japanese-to-Chinese dictionary lookup."
+  },
+  {
+   "path": "/pdf/api/dict-quick",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "GET"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Run AI-assisted Japanese dictionary lookup."
-    },
-    {
-      "path": "/pdf/api/dict-jp-zh",
-      "match": "exact",
-      "owner": "pi",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Run a quick dictionary lookup."
+  },
+  {
+   "path": "/pdf/api/ebook-convert-status",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read one Pi ebook conversion job status."
+  },
+  {
+   "path": "/pdf/api/entity/",
+   "match": "segment",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "PATCH"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Fetch one server entity by opaque ID."
+  },
+  {
+   "path": "/pdf/api/epub-action",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Run Japanese-to-Chinese dictionary lookup."
-    },
-    {
-      "path": "/pdf/api/dict-quick",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Apply an EPUB action to a verified Pi book copy."
+  },
+  {
+   "path": "/pdf/api/epub-assistant",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Run a quick dictionary lookup."
-    },
-    {
-      "path": "/pdf/api/ebook-convert-status",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/context/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": {
+     "kind": "rid",
+     "pointer": "/rid",
+     "fromPointer": "/from"
+    }
+   },
+   "description": "Run EPUB assistant from supplied native-local context, rewriting a verified Pi book identity when available."
+  },
+  {
+   "path": "/pdf/api/epub-convo",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "GET"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "GET"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read one Pi ebook conversion job status."
-    },
-    {
-      "path": "/pdf/api/entity/",
-      "match": "segment",
-      "owner": "pi",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Read conversation history for a verified Pi EPUB copy."
+  },
+  {
+   "path": "/pdf/api/epub-convo/append",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET",
-        "PATCH"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Fetch one server entity by opaque ID."
-    },
-    {
-      "path": "/pdf/api/epub-action",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Append conversation history for a verified Pi EPUB copy."
+  },
+  {
+   "path": "/pdf/api/epub-convo/clear",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Apply an EPUB action to a verified Pi book copy."
-    },
-    {
-      "path": "/pdf/api/epub-assistant",
-      "match": "exact",
-      "owner": "pi",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Clear conversation history for a verified Pi EPUB copy."
+  },
+  {
+   "path": "/pdf/api/epub-css",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read sanitized EPUB CSS from the local archive."
+  },
+  {
+   "path": "/pdf/api/epub-dbg",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Write bounded EPUB diagnostics to Pi."
+  },
+  {
+   "path": "/pdf/api/epub-furigana",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/context/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": {
-          "kind": "rid",
-          "pointer": "/rid",
-          "fromPointer": "/from"
-        }
-      },
-      "description": "Run EPUB assistant from supplied native-local context, rewriting a verified Pi book identity when available."
-    },
-    {
-      "path": "/pdf/api/epub-convo",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Generate furigana for a verified Pi EPUB copy."
+  },
+  {
+   "path": "/pdf/api/epub-furigana-verify",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Verify furigana for a verified Pi EPUB copy."
+  },
+  {
+   "path": "/pdf/api/epub-highlights",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET",
+    "POST",
+    "PATCH",
+    "DELETE"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Store EPUB highlights in the native-local sidecar."
+  },
+  {
+   "path": "/pdf/api/epub-img-describe",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Describe an image from a verified Pi EPUB copy."
+  },
+  {
+   "path": "/pdf/api/epub-ink",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Store EPUB ink in the native-local sidecar."
+  },
+  {
+   "path": "/pdf/api/epub-ink-shot",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "GET"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Read conversation history for a verified Pi EPUB copy."
-    },
-    {
-      "path": "/pdf/api/epub-convo/append",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Store a composite ink image for a verified Pi EPUB copy."
+  },
+  {
+   "path": "/pdf/api/epub-manifest",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read the validated local EPUB manifest."
+  },
+  {
+   "path": "/pdf/api/epub-nodes",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "GET"
+    ],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "GET"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Append conversation history for a verified Pi EPUB copy."
-    },
-    {
-      "path": "/pdf/api/epub-convo/clear",
-      "match": "exact",
-      "owner": "pi",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Read analysis nodes for a verified Pi EPUB copy."
+  },
+  {
+   "path": "/pdf/api/epub-resource",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read one validated resource from the local EPUB."
+  },
+  {
+   "path": "/pdf/api/epub-search",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Search the validated local EPUB spine."
+  },
+  {
+   "path": "/pdf/api/epub-section",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read one sanitized local EPUB section."
+  },
+  {
+   "path": "/pdf/api/epub-to-full",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Clear conversation history for a verified Pi EPUB copy."
-    },
-    {
-      "path": "/pdf/api/epub-css",
-      "match": "exact",
-      "owner": "local",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Convert a verified Pi EPUB copy to full mode."
+  },
+  {
+   "path": "/pdf/api/epub-tokenize",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Tokenize text using settings from a verified Pi EPUB copy."
+  },
+  {
+   "path": "/pdf/api/epub-translate-section",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Translate App-supplied section texts through Pi without requiring a verified Pi book copy."
+  },
+  {
+   "path": "/pdf/api/explain",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Explain supplied text with the Pi AI service."
+  },
+  {
+   "path": "/pdf/api/fav-meta",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read favorite metadata for a verified Pi book copy."
+  },
+  {
+   "path": "/pdf/api/favorites",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST",
+    "PATCH",
+    "DELETE"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "catalog",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read sanitized EPUB CSS from the local archive."
-    },
-    {
-      "path": "/pdf/api/epub-dbg",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/item/file",
+      "transform": "exact"
+     },
+     {
       "methods": [
-        "POST"
+       "PATCH"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Write bounded EPUB diagnostics to Pi."
-    },
-    {
-      "path": "/pdf/api/epub-furigana",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/remove_item/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Read or mutate favorites for a verified Pi book copy."
+  },
+  {
+   "path": "/pdf/api/figure-crop",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "catalog",
+    "requiredMethods": [
+     "GET",
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "GET"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Generate furigana for a verified Pi EPUB copy."
-    },
-    {
-      "path": "/pdf/api/epub-furigana-verify",
-      "match": "exact",
-      "owner": "pi",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     },
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Verify furigana for a verified Pi EPUB copy."
-    },
-    {
-      "path": "/pdf/api/epub-highlights",
-      "match": "exact",
-      "owner": "local",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Crop a detected figure from a verified Pi PDF copy."
+  },
+  {
+   "path": "/pdf/api/formula-ocr",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET",
-        "POST",
-        "PATCH",
-        "DELETE"
+       "POST"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Store EPUB highlights in the native-local sidecar."
-    },
-    {
-      "path": "/pdf/api/epub-img-describe",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Start Pi formula recognition for the verified matching PDF."
+  },
+  {
+   "path": "/pdf/api/formula-ocr-status",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "GET"
+    ],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "GET"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Describe an image from a verified Pi EPUB copy."
-    },
-    {
-      "path": "/pdf/api/epub-ink",
-      "match": "exact",
-      "owner": "local",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Read Pi formula-recognition progress for the verified matching PDF."
+  },
+  {
+   "path": "/pdf/api/furigana-verify",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "GET"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET",
-        "POST"
+       "GET"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Store EPUB ink in the native-local sidecar."
-    },
-    {
-      "path": "/pdf/api/epub-ink-shot",
-      "match": "exact",
-      "owner": "pi",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Verify furigana against a verified Pi PDF copy."
+  },
+  {
+   "path": "/pdf/api/grammar-analyze",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Store a composite ink image for a verified Pi EPUB copy."
-    },
-    {
-      "path": "/pdf/api/epub-manifest",
-      "match": "exact",
-      "owner": "local",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Analyze supplied grammar."
+  },
+  {
+   "path": "/pdf/api/grammar-books",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read grammar reference books."
+  },
+  {
+   "path": "/pdf/api/grammar-forget",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read the validated local EPUB manifest."
-    },
-    {
-      "path": "/pdf/api/epub-nodes",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Forget a tracked grammar item."
+  },
+  {
+   "path": "/pdf/api/grammar-history",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "GET"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "GET"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "GET"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Read analysis nodes for a verified Pi EPUB copy."
-    },
-    {
-      "path": "/pdf/api/epub-resource",
-      "match": "exact",
-      "owner": "local",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Read grammar history."
+  },
+  {
+   "path": "/pdf/api/grammar-history-save",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read one validated resource from the local EPUB."
-    },
-    {
-      "path": "/pdf/api/epub-search",
-      "match": "exact",
-      "owner": "local",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Save one grammar history item."
+  },
+  {
+   "path": "/pdf/api/grammar-stream",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Search the validated local EPUB spine."
-    },
-    {
-      "path": "/pdf/api/epub-section",
-      "match": "exact",
-      "owner": "local",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Start a streamed grammar analysis."
+  },
+  {
+   "path": "/pdf/api/grammar-tracked",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "GET",
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "GET"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read one sanitized local EPUB section."
-    },
-    {
-      "path": "/pdf/api/epub-to-full",
-      "match": "exact",
-      "owner": "pi",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     },
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Convert a verified Pi EPUB copy to full mode."
-    },
-    {
-      "path": "/pdf/api/epub-tokenize",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Read or update tracked grammar."
+  },
+  {
+   "path": "/pdf/api/highlights",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET",
+    "POST",
+    "PATCH",
+    "DELETE"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Store PDF-style highlights in the native-local sidecar."
+  },
+  {
+   "path": "/pdf/api/html-highlights",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST",
+    "PATCH",
+    "DELETE"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "catalog",
+    "requiredMethods": [
+     "GET",
+     "POST",
+     "PATCH",
+     "DELETE"
+    ],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "GET",
+       "DELETE"
       ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Tokenize text using settings from a verified Pi EPUB copy."
-    },
-    {
-      "path": "/pdf/api/epub-translate-section",
-      "match": "exact",
-      "owner": "pi",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "prefix-before-delimiter"
+     },
+     {
       "methods": [
-        "POST"
+       "POST",
+       "PATCH"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Translate App-supplied section texts through Pi without requiring a verified Pi book copy."
-    },
-    {
-      "path": "/pdf/api/explain",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "prefix-before-delimiter"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Use the Pi sidecar for HTML overlay highlights after verified mapping."
+  },
+  {
+   "path": "/pdf/api/img-proxy",
+   "match": "exact",
+   "owner": "native",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Fetch a public HTTPS image through the bounded on-device proxy."
+  },
+  {
+   "path": "/pdf/api/ink",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Store PDF ink in the native-local sidecar."
+  },
+  {
+   "path": "/pdf/api/job-status",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read one asynchronous Pi job status."
+  },
+  {
+   "path": "/pdf/api/jp-vocab-mark",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Store one Japanese vocabulary mark."
+  },
+  {
+   "path": "/pdf/api/lookup-event",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Explain supplied text with the Pi AI service."
-    },
-    {
-      "path": "/pdf/api/fav-meta",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read favorite metadata for a verified Pi book copy."
-    },
-    {
-      "path": "/pdf/api/favorites",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST",
-        "PATCH",
-        "DELETE"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "catalog",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/item/file",
-            "transform": "exact"
-          },
-          {
-            "methods": [
-              "PATCH"
-            ],
-            "location": "json",
-            "pointer": "/remove_item/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Read or mutate favorites for a verified Pi book copy."
-    },
-    {
-      "path": "/pdf/api/figure-crop",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "catalog",
-        "requiredMethods": [
-          "GET",
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          },
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Crop a detected figure from a verified Pi PDF copy."
-    },
-    {
-      "path": "/pdf/api/formula-ocr",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Start Pi formula recognition for the verified matching PDF."
-    },
-    {
-      "path": "/pdf/api/formula-ocr-status",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "GET"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Read Pi formula-recognition progress for the verified matching PDF."
-    },
-    {
-      "path": "/pdf/api/furigana-verify",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "GET"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Verify furigana against a verified Pi PDF copy."
-    },
-    {
-      "path": "/pdf/api/grammar-analyze",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Analyze supplied grammar."
-    },
-    {
-      "path": "/pdf/api/grammar-books",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read grammar reference books."
-    },
-    {
-      "path": "/pdf/api/grammar-forget",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Forget a tracked grammar item."
-    },
-    {
-      "path": "/pdf/api/grammar-history",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "GET"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Read grammar history."
-    },
-    {
-      "path": "/pdf/api/grammar-history-save",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Save one grammar history item."
-    },
-    {
-      "path": "/pdf/api/grammar-stream",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Start a streamed grammar analysis."
-    },
-    {
-      "path": "/pdf/api/grammar-tracked",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "GET",
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          },
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Read or update tracked grammar."
-    },
-    {
-      "path": "/pdf/api/highlights",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "GET",
-        "POST",
-        "PATCH",
-        "DELETE"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Store PDF-style highlights in the native-local sidecar."
-    },
-    {
-      "path": "/pdf/api/html-highlights",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST",
-        "PATCH",
-        "DELETE"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "catalog",
-        "requiredMethods": [
-          "GET",
-          "POST",
-          "PATCH",
-          "DELETE"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET",
-              "DELETE"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "prefix-before-delimiter"
-          },
-          {
-            "methods": [
-              "POST",
-              "PATCH"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "prefix-before-delimiter"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Use the Pi sidecar for HTML overlay highlights after verified mapping."
-    },
-    {
-      "path": "/pdf/api/img-proxy",
-      "match": "exact",
-      "owner": "native",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Fetch a public HTTPS image through the bounded on-device proxy."
-    },
-    {
-      "path": "/pdf/api/ink",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Store PDF ink in the native-local sidecar."
-    },
-    {
-      "path": "/pdf/api/job-status",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read one asynchronous Pi job status."
-    },
-    {
-      "path": "/pdf/api/jp-vocab-mark",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Store one Japanese vocabulary mark."
-    },
-    {
-      "path": "/pdf/api/lookup-event",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Record a bounded dictionary lookup event."
-    },
-    {
-      "path": "/pdf/api/note-composite",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Render a local note background, wrapped text, and every ink stroke as a 2x PNG."
-    },
-    {
-      "path": "/pdf/api/notes",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "GET",
-        "POST",
-        "PATCH",
-        "DELETE"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Store notes in the native-local sidecar."
-    },
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Record a bounded dictionary lookup event."
+  },
+  {
+   "path": "/pdf/api/note-composite",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Render a local note background, wrapped text, and every ink stroke as a 2x PNG."
+  },
+  {
+   "path": "/pdf/api/notes",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET",
+    "POST",
+    "PATCH",
+    "DELETE"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Store notes in the native-local sidecar."
+  },
   {
    "path": "/pdf/api/notification-action",
    "match": "exact",
@@ -2129,1127 +2159,1127 @@
    "remoteBook": null,
    "description": "Sidebar notifications tab: user ack/resolve/cancel enqueued into the replication command stream back to the Windows notification store."
   },
-    {
-      "path": "/pdf/api/ocr-selection",
-      "match": "exact",
-      "owner": "local",
+  {
+   "path": "/pdf/api/ocr-selection",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "OCR a selection into the native-local PDF text layer."
+  },
+  {
+   "path": "/pdf/api/outgoing/drawing",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read the latest native-local drawing context."
+  },
+  {
+   "path": "/pdf/api/outgoing/focus",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Persist one bounded native-local focus event."
+  },
+  {
+   "path": "/pdf/api/outgoing/journal",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read the bounded native-local outgoing event journal."
+  },
+  {
+   "path": "/pdf/api/outgoing/state",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read the current native-local outgoing context state."
+  },
+  {
+   "path": "/pdf/api/page-chars",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read local page character geometry."
+  },
+  {
+   "path": "/pdf/api/page-figures",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "catalog",
+    "requiredMethods": [
+     "GET"
+    ],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "GET"
       ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "OCR a selection into the native-local PDF text layer."
-    },
-    {
-      "path": "/pdf/api/outgoing/drawing",
-      "match": "exact",
-      "owner": "local",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Read detected figures for a verified Pi book copy."
+  },
+  {
+   "path": "/pdf/api/page-image",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Render the current local PDF page with device PDFKit."
+  },
+  {
+   "path": "/pdf/api/page-nodes",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "GET"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "GET"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read the latest native-local drawing context."
-    },
-    {
-      "path": "/pdf/api/outgoing/focus",
-      "match": "exact",
-      "owner": "local",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Read analysis nodes for a verified Pi PDF copy."
+  },
+  {
+   "path": "/pdf/api/page-offset",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Persist one bounded native-local focus event."
-    },
-    {
-      "path": "/pdf/api/outgoing/journal",
-      "match": "exact",
-      "owner": "local",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Mirror a page offset to the verified matching Pi PDF copy."
+  },
+  {
+   "path": "/pdf/api/page-overlay",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "GET"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "GET"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read the bounded native-local outgoing event journal."
-    },
-    {
-      "path": "/pdf/api/outgoing/state",
-      "match": "exact",
-      "owner": "local",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Read the verified Pi analysis overlay for the matching local PDF."
+  },
+  {
+   "path": "/pdf/api/page-text-status",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read native-local text-layer status."
+  },
+  {
+   "path": "/pdf/api/page-translate",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read local PDF page text geometry and translate only supplied sentences through Pi."
+  },
+  {
+   "path": "/pdf/api/page-vocab-marks",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "GET"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "GET"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read the current native-local outgoing context state."
-    },
-    {
-      "path": "/pdf/api/page-chars",
-      "match": "exact",
-      "owner": "local",
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Read vocabulary marks for a verified Pi PDF copy."
+  },
+  {
+   "path": "/pdf/api/pdf-insert-page",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "POST",
+    "PATCH",
+    "DELETE"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Insert, edit or remove a page in the App-owned local PDF."
+  },
+  {
+   "path": "/pdf/api/phrase-mark",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Store one phrase mark."
+  },
+  {
+   "path": "/pdf/api/phrases",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST",
+    "DELETE"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read or update phrase records."
+  },
+  {
+   "path": "/pdf/api/ping",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read Pi reader service health."
+  },
+  {
+   "path": "/pdf/api/prefs",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read or store native-local reader preferences."
+  },
+  {
+   "path": "/pdf/api/prewarm-async",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Acknowledge that PDF.js needs no server-side image prewarm."
+  },
+  {
+   "path": "/pdf/api/prewarm-status",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Report PDF.js image prewarm as locally not applicable."
+  },
+  {
+   "path": "/pdf/api/read-dwell",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read local page character geometry."
-    },
-    {
-      "path": "/pdf/api/page-figures",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Record dwell for a verified Pi PDF copy."
+  },
+  {
+   "path": "/pdf/api/reader-events",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Subscribe to Pi reader events."
+  },
+  {
+   "path": "/pdf/api/reading-pos",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read or store native-local reading position."
+  },
+  {
+   "path": "/pdf/api/reocr-page",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Re-run native OCR for the current local PDF page."
+  },
+  {
+   "path": "/pdf/api/reocr-page/clear",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Clear the native manual page OCR override."
+  },
+  {
+   "path": "/pdf/api/review-answer",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Submit one review answer."
+  },
+  {
+   "path": "/pdf/api/review-event",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Record one review grading event; never schedules."
+  },
+  {
+   "path": "/pdf/api/review-queue",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "catalog",
-        "requiredMethods": [
-          "GET"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Read detected figures for a verified Pi book copy."
-    },
-    {
-      "path": "/pdf/api/page-image",
-      "match": "exact",
-      "owner": "local",
+      "location": "json",
+      "pointer": "/context/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Read the review queue."
+  },
+  {
+   "path": "/pdf/api/run-attach",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Attach bounded data to an assistant run."
+  },
+  {
+   "path": "/pdf/api/run-event",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Render the current local PDF page with device PDFKit."
-    },
-    {
-      "path": "/pdf/api/page-nodes",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Append an assistant run event."
+  },
+  {
+   "path": "/pdf/api/run-save",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Save an assistant run."
+  },
+  {
+   "path": "/pdf/api/run-start",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "GET"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Read analysis nodes for a verified Pi PDF copy."
-    },
-    {
-      "path": "/pdf/api/page-offset",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Start an assistant run."
+  },
+  {
+   "path": "/pdf/api/run-status",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read assistant run status."
+  },
+  {
+   "path": "/pdf/api/search",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Search the native-local PDF text layer."
+  },
+  {
+   "path": "/pdf/api/sentence-dismiss",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "POST"
+       "POST"
       ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Mirror a page offset to the verified matching Pi PDF copy."
-    },
-    {
-      "path": "/pdf/api/page-overlay",
-      "match": "exact",
-      "owner": "pi",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Dismiss a sentence for a verified Pi PDF copy."
+  },
+  {
+   "path": "/pdf/api/snippets-to-async",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "required",
+    "scope": "current",
+    "requiredMethods": [
+     "POST"
+    ],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "GET"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Read the verified Pi analysis overlay for the matching local PDF."
-    },
-    {
-      "path": "/pdf/api/page-text-status",
-      "match": "exact",
-      "owner": "local",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Create an asynchronous task from supplied snippets."
+  },
+  {
+   "path": "/pdf/api/sync-batch",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Split a bounded native command batch by each declared route owner."
+  },
+  {
+   "path": "/pdf/api/to-note",
+   "match": "exact",
+   "owner": "native",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Create a local note through the App-owned native bridge."
+  },
+  {
+   "path": "/pdf/api/toc",
+   "match": "exact",
+   "owner": "native",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read the current local PDF outline through PDFKit."
+  },
+  {
+   "path": "/pdf/api/translate",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Translate supplied text."
+  },
+  {
+   "path": "/pdf/api/translate-config",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read or update translation configuration."
+  },
+  {
+   "path": "/pdf/api/translate-sentence",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "GET"
+       "POST"
       ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read native-local text-layer status."
-    },
-    {
-      "path": "/pdf/api/page-translate",
-      "match": "exact",
-      "owner": "local",
+      "location": "json",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Translate one supplied sentence."
+  },
+  {
+   "path": "/pdf/api/turn-ack",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Acknowledge one assistant turn."
+  },
+  {
+   "path": "/pdf/api/ui-version",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read the native-local UI compatibility version."
+  },
+  {
+   "path": "/pdf/api/userpages",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET",
+    "POST",
+    "PATCH",
+    "DELETE"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Store user-inserted pages in the native-local sidecar."
+  },
+  {
+   "path": "/pdf/api/video-player-prefs",
+   "match": "exact",
+   "owner": "local",
+   "methods": [
+    "GET",
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read or update App-owned video player preferences locally."
+  },
+  {
+   "path": "/pdf/api/video-subtitles/",
+   "match": "segment",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Fetch one server-owned subtitle resource."
+  },
+  {
+   "path": "/pdf/api/vocab-anki",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Add one vocabulary item to Anki."
+  },
+  {
+   "path": "/pdf/api/vocab-audio",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Fetch vocabulary audio."
+  },
+  {
+   "path": "/pdf/api/vocab-list",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": {
+    "mode": "conditional",
+    "scope": "current",
+    "requiredMethods": [],
+    "identities": [
+     {
       "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read local PDF page text geometry and translate only supplied sentences through Pi."
-    },
-    {
-      "path": "/pdf/api/page-vocab-marks",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "GET"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Read vocabulary marks for a verified Pi PDF copy."
-    },
-    {
-      "path": "/pdf/api/pdf-insert-page",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "POST",
-        "PATCH",
-        "DELETE"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Insert, edit or remove a page in the App-owned local PDF."
-    },
-    {
-      "path": "/pdf/api/phrase-mark",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Store one phrase mark."
-    },
-    {
-      "path": "/pdf/api/phrases",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST",
-        "DELETE"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read or update phrase records."
-    },
-    {
-      "path": "/pdf/api/ping",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read Pi reader service health."
-    },
-    {
-      "path": "/pdf/api/prefs",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read or store native-local reader preferences."
-    },
-    {
-      "path": "/pdf/api/prewarm-async",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Acknowledge that PDF.js needs no server-side image prewarm."
-    },
-    {
-      "path": "/pdf/api/prewarm-status",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Report PDF.js image prewarm as locally not applicable."
-    },
-    {
-      "path": "/pdf/api/read-dwell",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Record dwell for a verified Pi PDF copy."
-    },
-    {
-      "path": "/pdf/api/reader-events",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Subscribe to Pi reader events."
-    },
-    {
-      "path": "/pdf/api/reading-pos",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read or store native-local reading position."
-    },
-    {
-      "path": "/pdf/api/reocr-page",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Re-run native OCR for the current local PDF page."
-    },
-    {
-      "path": "/pdf/api/reocr-page/clear",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Clear the native manual page OCR override."
-    },
-    {
-      "path": "/pdf/api/review-answer",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Submit one review answer."
-    },
-    {
-      "path": "/pdf/api/review-event",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Record one review grading event; never schedules."
-    },
-    {
-      "path": "/pdf/api/review-queue",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/context/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Read the review queue."
-    },
-    {
-      "path": "/pdf/api/run-attach",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Attach bounded data to an assistant run."
-    },
-    {
-      "path": "/pdf/api/run-event",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Append an assistant run event."
-    },
-    {
-      "path": "/pdf/api/run-save",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Save an assistant run."
-    },
-    {
-      "path": "/pdf/api/run-start",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Start an assistant run."
-    },
-    {
-      "path": "/pdf/api/run-status",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read assistant run status."
-    },
-    {
-      "path": "/pdf/api/search",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Search the native-local PDF text layer."
-    },
-    {
-      "path": "/pdf/api/sentence-dismiss",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Dismiss a sentence for a verified Pi PDF copy."
-    },
-    {
-      "path": "/pdf/api/snippets-to-async",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "current",
-        "requiredMethods": [
-          "POST"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Create an asynchronous task from supplied snippets."
-    },
-    {
-      "path": "/pdf/api/sync-batch",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Split a bounded native command batch by each declared route owner."
-    },
-    {
-      "path": "/pdf/api/to-note",
-      "match": "exact",
-      "owner": "native",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Create a local note through the App-owned native bridge."
-    },
-    {
-      "path": "/pdf/api/toc",
-      "match": "exact",
-      "owner": "native",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read the current local PDF outline through PDFKit."
-    },
-    {
-      "path": "/pdf/api/translate",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Translate supplied text."
-    },
-    {
-      "path": "/pdf/api/translate-config",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read or update translation configuration."
-    },
-    {
-      "path": "/pdf/api/translate-sentence",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "POST"
-            ],
-            "location": "json",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Translate one supplied sentence."
-    },
-    {
-      "path": "/pdf/api/turn-ack",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Acknowledge one assistant turn."
-    },
-    {
-      "path": "/pdf/api/ui-version",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read the native-local UI compatibility version."
-    },
-    {
-      "path": "/pdf/api/userpages",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "GET",
-        "POST",
-        "PATCH",
-        "DELETE"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Store user-inserted pages in the native-local sidecar."
-    },
-    {
-      "path": "/pdf/api/video-player-prefs",
-      "match": "exact",
-      "owner": "local",
-      "methods": [
-        "GET",
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read or update App-owned video player preferences locally."
-    },
-    {
-      "path": "/pdf/api/video-subtitles/",
-      "match": "segment",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Fetch one server-owned subtitle resource."
-    },
-    {
-      "path": "/pdf/api/vocab-anki",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Add one vocabulary item to Anki."
-    },
-    {
-      "path": "/pdf/api/vocab-audio",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Fetch vocabulary audio."
-    },
-    {
-      "path": "/pdf/api/vocab-list",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": {
-        "mode": "conditional",
-        "scope": "current",
-        "requiredMethods": [],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Read vocabulary records."
-    },
-    {
-      "path": "/pdf/api/vocab-mark",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "POST"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Store one vocabulary mark."
-    },
-    {
-      "path": "/pdf/api/vocab-mastery-map",
-      "match": "exact",
-      "owner": "pi",
-      "methods": [
-        "GET"
-      ],
-      "surfaces": [
-        "epub",
-        "pdf"
-      ],
-      "status": "supported",
-      "remoteBook": null,
-      "description": "Read vocabulary mastery state."
-    }
-  ],
-  "scanIgnores": [
-    {
-      "surface": "epub",
-      "resource": "static/pdf/rc-toolchip.js",
-      "path": "/pdf/api/toolshot/x.png",
-      "reason": "Documentation example inside a comment, not a request."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/book-crop",
-      "reason": "Shared policy declaration for the PDF surface, not a request from the EPUB shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/book-meta",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/build-toc",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/page-chars",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/page-image",
-      "reason": "Shared policy declaration for the PDF surface, not a request from the EPUB shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/page-overlay",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/pdf-insert-page",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/read-dwell",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/reocr-page",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/reocr-page/clear",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/toc",
-      "reason": "Shared policy declaration for the PDF surface; the query channel opens toc to PDF only."
-    },
-    {
-      "surface": "epub",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/web-translate",
-      "reason": "Policy declaration for the excluded web adapter, not a native request."
-    },
-    {
-      "surface": "pdf",
-      "resource": "static/pdf/rc-toolchip.js",
-      "path": "/pdf/api/toolshot/x.png",
-      "reason": "Documentation example inside a comment, not a request."
-    },
-    {
-      "surface": "pdf",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/epub-action",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "pdf",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/epub-assistant",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "pdf",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/epub-manifest",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "pdf",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/epub-section",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "pdf",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/epub-translate-section",
-      "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
-    },
-    {
-      "surface": "pdf",
-      "resource": "static/reader-runtime/interaction-policy.js",
-      "path": "/pdf/api/web-translate",
-      "reason": "Policy declaration for the excluded web adapter, not a native request."
-    }
-  ]
+       "GET"
+      ],
+      "location": "query",
+      "pointer": "/file",
+      "transform": "exact"
+     }
+    ],
+    "continuation": null
+   },
+   "description": "Read vocabulary records."
+  },
+  {
+   "path": "/pdf/api/vocab-mark",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "POST"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Store one vocabulary mark."
+  },
+  {
+   "path": "/pdf/api/vocab-mastery-map",
+   "match": "exact",
+   "owner": "pi",
+   "methods": [
+    "GET"
+   ],
+   "surfaces": [
+    "epub",
+    "pdf"
+   ],
+   "status": "supported",
+   "remoteBook": null,
+   "description": "Read vocabulary mastery state."
+  }
+ ],
+ "scanIgnores": [
+  {
+   "surface": "epub",
+   "resource": "static/pdf/rc-toolchip.js",
+   "path": "/pdf/api/toolshot/x.png",
+   "reason": "Documentation example inside a comment, not a request."
+  },
+  {
+   "surface": "epub",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/book-crop",
+   "reason": "Shared policy declaration for the PDF surface, not a request from the EPUB shell."
+  },
+  {
+   "surface": "epub",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/book-meta",
+   "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+  },
+  {
+   "surface": "epub",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/build-toc",
+   "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+  },
+  {
+   "surface": "epub",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/page-chars",
+   "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+  },
+  {
+   "surface": "epub",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/page-image",
+   "reason": "Shared policy declaration for the PDF surface, not a request from the EPUB shell."
+  },
+  {
+   "surface": "epub",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/page-overlay",
+   "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+  },
+  {
+   "surface": "epub",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/pdf-insert-page",
+   "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+  },
+  {
+   "surface": "epub",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/read-dwell",
+   "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+  },
+  {
+   "surface": "epub",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/reocr-page",
+   "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+  },
+  {
+   "surface": "epub",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/reocr-page/clear",
+   "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+  },
+  {
+   "surface": "epub",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/toc",
+   "reason": "Shared policy declaration for the PDF surface; the query channel opens toc to PDF only."
+  },
+  {
+   "surface": "epub",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/web-translate",
+   "reason": "Policy declaration for the excluded web adapter, not a native request."
+  },
+  {
+   "surface": "pdf",
+   "resource": "static/pdf/rc-toolchip.js",
+   "path": "/pdf/api/toolshot/x.png",
+   "reason": "Documentation example inside a comment, not a request."
+  },
+  {
+   "surface": "pdf",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/epub-action",
+   "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+  },
+  {
+   "surface": "pdf",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/epub-assistant",
+   "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+  },
+  {
+   "surface": "pdf",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/epub-manifest",
+   "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+  },
+  {
+   "surface": "pdf",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/epub-section",
+   "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+  },
+  {
+   "surface": "pdf",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/epub-translate-section",
+   "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+  },
+  {
+   "surface": "pdf",
+   "resource": "static/reader-runtime/interaction-policy.js",
+   "path": "/pdf/api/web-translate",
+   "reason": "Policy declaration for the excluded web adapter, not a native request."
+  }
+ ]
 }

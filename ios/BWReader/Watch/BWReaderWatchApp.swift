@@ -29,6 +29,7 @@ struct RootView: View {
 
     var body: some View {
         TabView {
+            TalkView()
             CardsView()
             NotificationsView()
             VoiceView()
@@ -170,6 +171,73 @@ struct NotificationsView: View {
                 }
             }
             .navigationTitle("待办")
+        }
+    }
+}
+
+// ── 按住说话 ──
+//
+// 这一屏跟下面那屏「语音桥」是**两件不同的事**，别混：
+//   这屏 = 手表当麦克风,借手机问 Pi 的语音助手,一问一答
+//   下屏 = 遥控电脑上那条常连的语音桥的开关
+// 为什么不能在表上直接连电脑那条桥,见 App/ReaderWatchVoiceTurn.swift 文件头。
+
+struct TalkView: View {
+    @StateObject private var voice = WatchVoice()
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 10) {
+                    switch voice.phase {
+                    case .idle:
+                        Text("按住说话")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    case .recording:
+                        Label("在听……", systemImage: "waveform")
+                            .foregroundStyle(.red)
+                    case .sending:
+                        Text("发送中…").font(.footnote)
+                    case .thinking:
+                        ProgressView().padding(.vertical, 4)
+                    case .done(let heard, let reply):
+                        VStack(alignment: .leading, spacing: 6) {
+                            // 把"听到了什么"显示出来 —— 答非所问时用户
+                            // 一眼能看出是听岔了还是答错了,这两件事该做的
+                            // 处理完全不同。
+                            if !heard.isEmpty {
+                                Text("「" + heard + "」")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(reply).font(.footnote)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    case .failed(let why):
+                        Text(why)
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .multilineTextAlignment(.center)
+                    }
+
+                    Button {
+                    } label: {
+                        Label(
+                            voice.phase == .recording ? "松开发送" : "按住说话",
+                            systemImage: "mic.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .tint(voice.phase == .recording ? .red : .accentColor)
+                    // 按住/松开而不是点一下 —— 边界由手指定,省掉一套 VAD,
+                    // 也省掉"它到底还在不在听"的猜测。
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { _ in voice.begin() }
+                            .onEnded { _ in voice.finish() })
+                }
+            }
+            .navigationTitle("说话")
         }
     }
 }
