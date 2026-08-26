@@ -1595,6 +1595,27 @@ class CaptureBoundHistorySynchronizer:
         self._structured_signature: tuple[int, int] | None = None
         self._structured_followup_polls = 0
         self.last_result: dict[str, Any] | None = None
+        self._diag_path = root / "runtime" / "voice-history-sync.log"
+        self._service_was_online = True
+
+    def _diag(self, message: str) -> None:
+        """诊断留痕(2026-08-26)。这个文件没有测试覆盖,失败历来只写进
+        没人看的 last_result —— 侧栏「历史缺失严重」查了一轮才发现全链
+        静默:桥抖动 cancel、结构化回填失败、采集门控翻转,一处日志
+        都没有。此后每个状态翻转与失败都要在这里出声。"""
+        try:
+            self._diag_path.parent.mkdir(parents=True, exist_ok=True)
+            if (self._diag_path.exists()
+                    and self._diag_path.stat().st_size > 256 * 1024):
+                lines = self._diag_path.read_text(
+                    encoding="utf-8").splitlines()[-200:]
+                self._diag_path.write_text(
+                    "\n".join(lines) + "\n", encoding="utf-8")
+            with open(self._diag_path, "a", encoding="utf-8") as handle:
+                handle.write("%s\t%s\n" % (
+                    datetime.now(timezone.utc).isoformat(), message))
+        except OSError:
+            pass
 
     def _release_lease(self) -> None:
         if self.structured_history_client is not None:
@@ -1612,6 +1633,9 @@ class CaptureBoundHistorySynchronizer:
 
     def cancel(self) -> None:
         """Drop the in-memory capture lease without publishing a final turn."""
+        if self._lease_thread_id is not None:
+            self._diag("cancel(): dropping lease thread=%s"
+                       % self._lease_thread_id)
         self.was_active = False
         self.tail_polls = 0
         self._capture_generation = None
@@ -1697,6 +1721,11 @@ class CaptureBoundHistorySynchronizer:
                     "structured history unavailable: "
                     + type(exc).__name__
                 )
+                # 回填失败 = 窗口滚动的丢失将无法弥补 —— 必须出声。
+                self._diag(
+                    "structured recovery FAILED thread=%s: %s: %s" % (
+                        thread_id, type(exc).__name__,
+                        str(exc)[:160]))
                 self._failure_backoff_polls = (
                     PUBLISH_FAILURE_BACKOFF_POLLS
                 )
@@ -2024,8 +2053,19 @@ class CaptureBoundHistorySynchronizer:
             self.cancel()
             return None
         if service_online is not True:
-            self.cancel()
+            # 桥每隔几分钟就自重启一次(慢性抖动,单日 50-250 次实测)。
+            # 原来这里直接 cancel() —— 租约/代际/结构化基线全清,恢复后
+            # 重新 arm;而上游 continuity 每线程只有 10 条滚动窗口,停摆
+            # 期间滚过的轮次**永久丢失**(侧栏「历史缺失严重」的主耦合点)。
+            # 桥离线只是「发布暂时不可达」,不是「会话结束」:保持全部
+            # 状态,本轮跳过,桥回来后从原地继续。
+            if self._service_was_online:
+                self._service_was_online = False
+                self._diag("service offline - holding sync state (was: cancel)")
             return None
+        if not self._service_was_online:
+            self._service_was_online = True
+            self._diag("service back online - resuming from held state")
         active = bool(service_online and capture_active)
         if active:
             if not self.was_active:
