@@ -41,6 +41,8 @@
     <true/>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>仅在你打开「记录学习地点」开关时，用于在学习记录中标注阅读发生的地点（如图书馆、自习室）。位置数据只保存在你自己的服务器，不发给任何第三方。</string>
+    <key>NSAlarmKitUsageDescription</key>
+    <string>用于把到点必须知道的提醒（如赶车、出门时间）排成系统闹钟，确保在静音或专注模式下也能叫住你。只为你自己创建的提醒排闹钟。</string>
     <key>NSRemindersFullAccessUsageDescription</key>
     <string>用于把 AI 待办同步到「BW 待办」提醒列表，并读回你勾选完成的状态。只操作该专用列表，不读取你自己的提醒。</string>
     <key>NSMicrophoneUsageDescription</key>
