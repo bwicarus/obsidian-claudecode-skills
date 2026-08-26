@@ -34,6 +34,9 @@ final class ReaderSystemProjection {
         let kind: String
         let state: String
         let body: String
+        // 到期时刻（行程/赶车类）：投影成苹果提醒的 dueDate + 闹钟，
+        // 到点响铃由苹果系统负责 —— 比任何轮询都可靠。
+        let dueAtMs: Int64?
     }
 
     struct Outcome {
@@ -174,6 +177,17 @@ final class ReaderSystemProjection {
             }
             reminder.title = item.title
             reminder.notes = item.body.isEmpty ? nil : item.body
+            if let dueMs = item.dueAtMs, dueMs > 0 {
+                let due = Date(
+                    timeIntervalSince1970: Double(dueMs) / 1000)
+                reminder.dueDateComponents = Calendar.current
+                    .dateComponents(
+                        [.year, .month, .day, .hour, .minute],
+                        from: due)
+                // 只保留一个由我们管理的闹钟，重复投影不叠加。
+                reminder.alarms?.forEach(reminder.removeAlarm)
+                reminder.addAlarm(EKAlarm(absoluteDate: due))
+            }
             do {
                 try eventStore.save(reminder, commit: false)
                 map[item.id] = reminder.calendarItemIdentifier

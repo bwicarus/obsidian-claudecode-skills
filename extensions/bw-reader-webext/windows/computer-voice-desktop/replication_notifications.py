@@ -157,6 +157,7 @@ class NotificationStore:
         expires_at_ms: int | None = None,
         dedupe_key: str | None = None,
         activate_at_ms: int | None = None,
+        due_at_ms: int | None = None,
         audience: str = "ai",
     ) -> dict[str, Any]:
         with self._locked():
@@ -202,6 +203,13 @@ class NotificationStore:
                 # 不是时间点提醒):到时之前不出现在快照/list,到时后自动可见
                 # 并**保持到 resolve** —— 这正是 Codex 原生定时任务做不到的。
                 item["activateAtUtcMs"] = int(activate_at_ms)
+            if due_at_ms is not None:
+                # 到期时刻(2026-08-27 行程场景:「14:32 的电车」):纯展示字段,
+                # 不影响可见性/状态机 —— 它投影成苹果提醒的 dueDate+闹钟,
+                # **到点响铃由苹果系统负责**,比 AI 轮询可靠。与 activate_at
+                # 的分工:activate=何时开始出现,due=何时到点。行程通常
+                # 立即可见+带 due;垃圾日待办则用 activate 当天出现。
+                item["dueAtUtcMs"] = int(due_at_ms)
             items.append(item)
             self._save(items)
             return item
@@ -376,6 +384,7 @@ class NotificationStore:
                     "body": item.get("body") or "",
                     "state": item["state"],
                     "createdAtUtcMs": item["createdAtUtcMs"],
+                    "dueAtUtcMs": item.get("dueAtUtcMs"),
                 }
                 for item in items
             ],
@@ -516,6 +525,9 @@ def main() -> int:
                         help="生效日期 YYYY-MM-DD（当天 00:00 起可见并保持到"
                              " resolve；持续待办用这个，不用定时任务）")
     create.add_argument("--activate-in-hours", type=float, default=None)
+    create.add_argument("--due-at", default=None,
+                        help="到期时刻 'YYYY-MM-DD HH:MM'（本地时间）。投影成"
+                             "苹果提醒的到点闹钟；行程/赶车类必带")
     create.add_argument("--audience", default="ai", choices=("ai", "user"),
                         help="ai=快照(你的收件箱,默认) / user=侧边栏 tab"
                              "(整理后投递给用户)")
@@ -569,11 +581,16 @@ def main() -> int:
             elif args.activate_in_hours:
                 activate = _now_ms() + int(
                     args.activate_in_hours * 3600 * 1000)
+            due = None
+            if args.due_at:
+                due = int(time.mktime(time.strptime(
+                    args.due_at, "%Y-%m-%d %H:%M"))) * 1000
             item = store.create(
                 kind=args.kind, title=args.title, body=args.body,
                 source=args.source, auto_resolve=auto,
                 expires_at_ms=expires, dedupe_key=args.dedupe_key,
-                activate_at_ms=activate, audience=args.audience,
+                activate_at_ms=activate, due_at_ms=due,
+                audience=args.audience,
             )
             print("已创建：%s" % item["id"])
     except NotificationError as error:

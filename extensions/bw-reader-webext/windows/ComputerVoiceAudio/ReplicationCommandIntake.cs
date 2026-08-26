@@ -233,6 +233,12 @@ internal static partial class ReplicationCommandProtocol
                 createdAtUtcMs = item.TryGetProperty(
                     "createdAtUtcMs", out JsonElement c)
                     && c.TryGetInt64(out long created) ? created : 0,
+                // 到期时刻（2026-08-27 行程场景）：投影成苹果提醒的到点
+                // 闹钟。可空 —— null 时序列化为 null，消费端跳过。
+                dueAtUtcMs = item.TryGetProperty(
+                    "dueAtUtcMs", out JsonElement itemDue)
+                    && itemDue.TryGetInt64(out long dueAt)
+                    ? (long?)dueAt : null,
             });
             if (projected.Count >= 20)
             {

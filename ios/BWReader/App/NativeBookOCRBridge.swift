@@ -210,7 +210,9 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                                 title: title,
                                 kind: one["kind"] as? String ?? "",
                                 state: one["state"] as? String ?? "pending",
-                                body: one["body"] as? String ?? "")
+                                body: one["body"] as? String ?? "",
+                                dueAtMs: (one["dueAtUtcMs"] as? NSNumber)?
+                                    .int64Value)
                         }
                     let review = raw["review"] as? [String: Any]
                     let outcome = await ReaderSystemProjection.shared.apply(
