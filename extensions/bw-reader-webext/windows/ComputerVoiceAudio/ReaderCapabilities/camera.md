@@ -3,10 +3,19 @@
 用户家里接着实体摄像头。要看现场时调 `reader_camera_snap`，它**当场拍一张**
 并把照片直接给你。
 
-    reader_camera_snap  {}                  // 默认那台
-    reader_camera_snap  { "cameraId": "pi" } // 指定某台
+    reader_camera_snap  {}                    // 默认那台
+    reader_camera_snap  { "cameraId": "pi" }  // 指定某台
 
-约两秒。回复是两段：一段 JSON 元数据（亮度、尺寸、拍摄时刻），一段图片。
+2-5 秒（接在本机上的比远程的慢，因为打开设备本身就要三秒）。回复是两段：
+一段 JSON 元数据，一段图片。
+
+## 有哪几台
+
+**别背清单** —— 用户会调角度、改名字、加摄像头。每次拍照的元数据里都带
+当前的 `cameras`（id + label），照它说。名字写错时报错也会列出可用的。
+
+label 是位置描述（比如「玄关」「书桌」），**这就是你判断该用哪台的依据**。
+用户说「看看门口」，就挑 label 像门口的那台；实在拿不准就问，别乱拍一台。
 
 ## 什么时候调
 
@@ -46,6 +55,11 @@
 | `BW_CAMERA_FAILED` | 那台机器给了具体原因 | 把 message 里的原话转达 |
 | `BW_CAMERA_NOT_INSTALLED` | 这台电脑上没装取图组件 | 桌面端还没部署过 |
 | `BW_CAMERA_BAD_ID` | 摄像头名写错了 | 换个名字，或问用户有哪几台 |
+
+有些摄像头**能被系统看见却读不出**（驱动只认另一套接口）。这种会以
+`BW_CAMERA_FAILED` 出现，message 里是 ffmpeg 的原话。不是你调用错了，
+换一台或告诉用户即可。人要排查时跑
+`python %LOCALAPPDATA%\BWReader\camera_capture.py probe` 逐台试拍。
 
 ⚠ **拍不到 ≠ 画面里没有那个东西**。这两件事该说的话完全不同：
 前者是「我看不到」，后者是「我看了，没有」。别把前者说成后者。

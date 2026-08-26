@@ -294,6 +294,13 @@ def snap(
     meta.update({
         "id": camera_id,
         "label": source.get("label") or camera_id,
+        # 花名册随每次拍照带回。AI 没有别的途径知道有哪几台、各自对着
+        # 哪儿，而这个名单会变（用户会调角度、改名字、加摄像头）——
+        # 与其在说明书里写一份会过期的清单，不如每次如实报当前的。
+        "cameras": [
+            {"id": str(s.get("id")), "label": s.get("label") or s.get("id")}
+            for s in load_sources(root)
+        ],
         "path": str(frame_path),
         "bytes": len(data),
         "capturedAtUtcMs": captured_ms,

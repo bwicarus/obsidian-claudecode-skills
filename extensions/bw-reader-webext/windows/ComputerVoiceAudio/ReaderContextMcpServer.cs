@@ -6257,7 +6257,7 @@ internal sealed class ReaderContextMcpServer
                 {
                     await WriteCameraToolErrorAsync(
                         id,
-                        "BW_CAMERA_BAD_ID", "启动取图进程失败", cancellationToken)
+                        "BW_CAMERA_SPAWN_FAILED", "启动取图进程失败", cancellationToken)
                         .ConfigureAwait(false);
                     return;
                 }
@@ -6274,7 +6274,7 @@ internal sealed class ReaderContextMcpServer
             {
                 await WriteCameraToolErrorAsync(
                     id,
-                    "BW_CAMERA_BAD_ID", "取图超时（摄像头被拔了？）", cancellationToken)
+                    "BW_CAMERA_TIMEOUT", "取图超时（摄像头被拔了？）", cancellationToken)
                     .ConfigureAwait(false);
                 return;
             }
@@ -6284,7 +6284,7 @@ internal sealed class ReaderContextMcpServer
             {
                 await WriteCameraToolErrorAsync(
                     id,
-                    "BW_CAMERA_NOT_INSTALLED", "启动取图进程出错：" + exception.Message,
+                    "BW_CAMERA_SPAWN_FAILED", "启动取图进程出错：" + exception.Message,
                     cancellationToken).ConfigureAwait(false);
                 return;
             }
@@ -6294,7 +6294,7 @@ internal sealed class ReaderContextMcpServer
         {
             await WriteCameraToolErrorAsync(
                 id,
-                "BW_CAMERA_SPAWN_FAILED",
+                "BW_CAMERA_NO_OUTPUT",
                 "取图进程没有输出（退出码 " + exitCode + "）："
                     + (errorText.Length > 300 ? errorText[..300] : errorText),
                 cancellationToken).ConfigureAwait(false);
@@ -6314,7 +6314,7 @@ internal sealed class ReaderContextMcpServer
         {
             await WriteCameraToolErrorAsync(
                 id,
-                "BW_CAMERA_TIMEOUT",
+                "BW_CAMERA_BAD_OUTPUT",
                 "取图进程的输出不是 JSON："
                     + (output.Length > 300 ? output[..300] : output),
                 cancellationToken).ConfigureAwait(false);
@@ -6325,7 +6325,7 @@ internal sealed class ReaderContextMcpServer
             // 失败原因原样转给模型 —— 它是唯一会把这句话说给用户听的人。
             await WriteCameraToolErrorAsync(
                 id,
-                "BW_CAMERA_SPAWN_FAILED",
+                "BW_CAMERA_FAILED",
                 payload["error"]?.GetValue<string>() ?? "取图失败但没说原因",
                 cancellationToken).ConfigureAwait(false);
             return;
@@ -6345,7 +6345,7 @@ internal sealed class ReaderContextMcpServer
         {
             await WriteCameraToolErrorAsync(
                 id,
-                "BW_CAMERA_NO_OUTPUT", "照片写下来了却读不回：" + exception.Message,
+                "BW_CAMERA_UNREADABLE", "照片写下来了却读不回：" + exception.Message,
                 cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -6361,6 +6361,9 @@ internal sealed class ReaderContextMcpServer
             ["width"] = payload["width"]?.DeepClone(),
             ["height"] = payload["height"]?.DeepClone(),
             ["brightness"] = payload["brightness"]?.DeepClone(),
+            // 花名册每次带回：这个名单会变（用户会调角度、改名字、加机器），
+            // 说明书里写死一份只会过期。
+            ["cameras"] = payload["cameras"]?.DeepClone(),
             ["note"] = "brightness is the mean grey level 0-255; "
                 + "below about 35 the room is dark and detail is unreliable.",
         };

@@ -203,6 +203,43 @@ class FailureTests(unittest.TestCase):
         self.assertIn("ssh", str(caught.exception))
 
 
+class ErrorCodeContractTests(unittest.TestCase):
+    """能力指南按错误码告诉 AI 该怎么跟用户说。码一旦对不上，AI 就会照着
+    错的那条说 —— 而这在项目里有明确教训：面向 AI 的说明**写反比没写更糟**
+    （没写它可能去翻代码，写反了它直接照做）。
+
+    这条测试是有来历的：第一版的码按"出现顺序"贴上去，结果全线错位 ——
+    取图失败报成了"启动进程失败"。真机跑一次才发现。
+    """
+
+    def _sources(self):
+        base = Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
+        return (
+            (base / "ReaderContextMcpServer.cs").read_text(
+                encoding="utf-8", errors="replace"),
+            (base / "ReaderCapabilities" / "camera.md").read_text(
+                encoding="utf-8", errors="replace"),
+        )
+
+    def test_every_documented_code_exists_in_code(self):
+        import re
+        server, guide = self._sources()
+        documented = set(re.findall(r"BW_CAMERA_[A-Z_]+", guide))
+        emitted = set(re.findall(r'"(BW_CAMERA_[A-Z_]+)"', server))
+        self.assertTrue(documented, "指南里一个错误码都没有？")
+        missing = documented - emitted
+        self.assertFalse(
+            missing, "指南里写了代码根本不会发出的码：%s" % sorted(missing))
+
+    def test_capture_failure_code_sits_next_to_the_capture_failure(self):
+        """最容易贴错、也最要紧的一条：对方明确报了失败原因。"""
+        server, _ = self._sources()
+        marker = '"BW_CAMERA_FAILED",\n                payload["error"]'
+        self.assertIn(
+            marker, server,
+            "BW_CAMERA_FAILED 没有贴在「对方报了原因」那一处")
+
+
 class SnapshotIsolationTests(unittest.TestCase):
     """用户 2026-08-27 明说：快照那个 tab **只是显示口**，
     AI 不该每取一次快照就被塞一张家里的照片。"""
