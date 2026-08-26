@@ -5193,10 +5193,26 @@
     if (typeof document === 'undefined' ||
         typeof setInterval !== 'function') return;   // 测试沙箱无 DOM/计时器
     var SYNC_EVERY_MS = 30 * 60 * 1000;
+    // 首次成功前退避重试(2026-08-26 真机实锤:小组件全空 —— 原来首次
+    // 只在 8 秒时试一次,那一刻 runtime 入口未挂/桥不可达就要干等
+    // 30 分钟。首次成功前 8s→30s→60s→120s 封顶持续重试,成功后
+    // 转 30 分钟巡航)。
+    var RETRY_LADDER_MS = [8000, 30000, 60000, 120000];
     var syncing = false;
+    var succeededOnce = false;
+    var retryIndex = 0;
+    function scheduleNext(delayMs) {
+      setTimeout(sync, delayMs);
+    }
+    function retryAfterFailure() {
+      if (succeededOnce) { scheduleNext(SYNC_EVERY_MS); return; }
+      retryIndex = Math.min(retryIndex + 1, RETRY_LADDER_MS.length - 1);
+      scheduleNext(RETRY_LADDER_MS[retryIndex]);
+    }
     function sync() {
       var native = window.__bwSystemProjectionSync;
-      if (typeof native !== 'function' || syncing) return;
+      if (typeof native !== 'function') { retryAfterFailure(); return; }
+      if (syncing) return;
       syncing = true;
       queryNotifications().then(function (items) {
         return native({
@@ -5205,6 +5221,12 @@
           syncAtMs: Date.now(),
         });
       }).then(function (result) {
+        if (result === null) {
+          // runtime 在但没有原生 handler = 非 App 环境（扩展/桌面）——
+          // 系统投影只属于 App，彻底安静，不再空转。
+          syncing = false;
+          return;
+        }
         var resolved = result && Array.isArray(result.resolvedIds)
           ? result.resolvedIds : [];
         resolved.forEach(function (id) {
@@ -5214,12 +5236,14 @@
             body: JSON.stringify({ action: 'resolve', id: id })
           }).catch(function () {});
         });
+        succeededOnce = true;
+        scheduleNext(SYNC_EVERY_MS);
       }).catch(function () {
-        // 桥离线时没有数据可投影 —— 下个周期再试；投影是增强，不打扰。
+        // 桥离线/查询失败 —— 首次成功前按梯子重试,之后 30 分钟巡航。
+        retryAfterFailure();
       }).finally(function () { syncing = false; });
     }
-    setTimeout(sync, 8000);
-    setInterval(sync, SYNC_EVERY_MS);
+    scheduleNext(RETRY_LADDER_MS[0]);
   })();
 
   function lookupJapaneseFallback(value) {
