@@ -55,6 +55,42 @@ Xcode，`#if canImport(AlarmKit)` 会**静默**把整块编译掉 —— 绿色�
 
 ---
 
+## 一之二、地点触发（2026-08-26 补）
+
+除时刻外，提醒还能绑定**已命名的地点**（`--at-place 家`，可加
+`--on-leave`）。链路：Python 真值表只存名字与触发方式 → 导出那一刻由
+`replication_places.resolve_name` 解析坐标 → 桥显式重建 → Swift 建
+`EKAlarm.structuredLocation` + `proximity`。
+
+三条实取的事实（都与直觉不同）：
+
+- **地理围栏由系统提醒 App 监控与触发**，不是我们的 App。因此只需要
+  提醒事项权限，**不需要定位权限**，也不占我们自己的 CoreLocation
+  region 配额（那 20 个上限是 per-app 的，我们根本没用）。
+- EventKit 对地点提醒的数量**没有文档化的上限**。
+- radius 单位是米；**0 表示"用系统默认"而不是零米**。我们默认 200m，
+  与别名命中半径 `ALIAS_HIT_RADIUS_M` 同口径 —— 触发半径低于它会与
+  `resolve_alias` 自相矛盾。
+
+⚠ 为什么坐标不进真值表：`notifications.json` 与归档 jsonl 会长期留存，
+不该变成坐标副本；而且用户日后重命名或移动某个地点时，导出会自动跟上
+新坐标。代价是导出时若名字查不到会**打印警告**（不是静默返回 None）。
+
+## 一之三、EventKit 的硬约束（吃过亏的）
+
+- **iOS 上设了 `dueDateComponents` 就必须同时设 `startDateComponents`**，
+  否则 `save` 抛 `EKError.noStartDate`。macOS 没有这条。我们曾把它吞在
+  `catch { continue }` 里 —— 表现是"带到点时刻的提醒从来没进过苹果提醒，
+  而回执一路 projected"。
+- `priority` 只接受 0–9（0=无、1=最高、9=最低），其它值保存失败
+  （`EKError.priorityIsInvalid`）。`reminder.priority` 是 `Int` 而
+  `EKReminderPriority.rawValue` 是 `UInt`，必须显式转换。
+- **一条提醒只支持一条重复规则**，`addRecurrenceRule` 是替换不是追加。
+  周期性提醒还要求必须有 due date。
+- `dueDateComponents` 里不带 hour/minute 会变成**全天提醒**。
+- 文档从未承诺"设了 due date 就会响" —— 唯一被承诺能提醒用户的机制是
+  `EKAlarm`。所以要保证响就必须 `addAlarm`。
+
 ## 二、剩下的洞
 
 三条通道都要求**有人在到点之前把提醒排上**。目前排程只发生在 App 打开
