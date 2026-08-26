@@ -34,6 +34,9 @@ DAILY_LIMITS = {
     "vision":  1_000,       # 我们 OCR 用的
     "gemini":  None,        # 付费(prepay)按 token 计费、无固定日限;助手侧 units 记的是 token 数(只累计用量,真余额去 AI Studio billing 控制台看)
     "stt":     None,        # Cloud Speech-to-Text 无固定免费日限(按 Free Trial 赠金计费)
+    "routes":  50,          # Routes API(电车路线,2026-08-27 用户拍板):个人查询护栏。
+    #                         Google 免费层每月数千次,这里的 50/日是**我们自设的硬闸**,
+    #                         防 AI 抽风狂查 —— 超了就该停,不是该收钱。
 }
 
 # 重置时区(PT)
@@ -170,7 +173,23 @@ def fmt_secs(s: int) -> str:
 
 
 def _cli():
-    """命令行:python google_api_quota.py [service]"""
+    """命令行:python google_api_quota.py [service]
+    或记账+查闸:python google_api_quota.py record <service> [units] [action]
+    (record 先查当日限额,超了打印 BLOCKED 并退出码 3 —— 调用方看到
+    BLOCKED 就不要再发真实请求;未超则记一笔并打印剩余。)"""
+    if len(sys.argv) >= 3 and sys.argv[1] == "record":
+        service = sys.argv[2]
+        units = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+        action = sys.argv[4] if len(sys.argv) > 4 else ""
+        r = report(service)
+        if r["limit"] and r["used"] + units > r["limit"]:
+            print(f"BLOCKED: {service} 今日已用 {r['used']}/{r['limit']},"
+                  f" 重置于 {r['next_reset_utc']} UTC")
+            sys.exit(3)
+        log_usage(service, units, action)
+        left = (r["limit"] - r["used"] - units) if r["limit"] else "∞"
+        print(f"OK: {service} +{units} (今日剩余 {left})")
+        return
     service = sys.argv[1] if len(sys.argv) > 1 else "youtube"
     r = report(service)
     print(f"=== {r['service'].upper()} Data API 配额 ===")
