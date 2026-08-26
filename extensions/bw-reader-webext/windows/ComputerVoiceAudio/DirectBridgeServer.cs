@@ -1087,6 +1087,46 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     // both. Same origin rule as the socket endpoints -- this opens no new door.
     // 网页表面的实时输出下行（方案 A，2026-08-26）：长轮询取件 + 回执。
     // CORS/来源纪律与 snapshot POST 完全同款 —— 同一批扩展 origin。
+    // 取件端点的到达日志（与 reader-context-post.log 同一课的产物：
+    // "什么都没来"和"来了但被拒"在网络另一端看完全一样，必须能一眼分开。
+    // 2026-08-26 排查网页送卡时正是因为缺这行日志，无法区分
+    // "iPad 扩展没在轮询"和"轮询了但事件没匹配"）。
+    private void AppendOutputPickupLog(string what)
+    {
+        try
+        {
+            DirectBridgeConfig config = _configStore.Load();
+            string? directory = System.IO.Path.GetDirectoryName(
+                config.RuntimeStatusPath);
+            if (string.IsNullOrEmpty(directory))
+            {
+                return;
+            }
+            string path = System.IO.Path.Combine(
+                directory,
+                "reader-output-pickup.log");
+            System.IO.File.AppendAllText(
+                path,
+                string.Format(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    "{0:O}	{1}",
+                    DateTimeOffset.Now,
+                    what) + Environment.NewLine,
+                new System.Text.UTF8Encoding(false));
+            var info = new System.IO.FileInfo(path);
+            if (info.Length > 128 * 1024)
+            {
+                string[] all = System.IO.File.ReadAllLines(path);
+                System.IO.File.WriteAllLines(
+                    path,
+                    all.Skip(Math.Max(0, all.Length - 200)));
+            }
+        }
+        catch
+        {
+        }
+    }
+
     private bool PrepareOutputCors(HttpContext context, string methods)
     {
         bool originOk = OriginAllowed(
@@ -1095,6 +1135,12 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         {
             context.Response.Headers["Access-Control-Allow-Origin"] = origin;
             context.Response.Headers["Vary"] = "Origin";
+        }
+        if (!originOk && !HttpMethods.IsOptions(context.Request.Method))
+        {
+            AppendOutputPickupLog(
+                "origin-refused	"
+                + (string.IsNullOrEmpty(origin) ? "(no-origin)" : origin));
         }
         if (HttpMethods.IsOptions(context.Request.Method))
         {
@@ -1163,6 +1209,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         {
             return;
         }
+        AppendOutputPickupLog(
+            "pending	" + source + "	wait=" + wait
+            + "	events=" + events.Count);
         context.Response.ContentType = "application/json; charset=utf-8";
         await context.Response.WriteAsJsonAsync(
             new { contract = "reader-output-pickup/1", events },
@@ -1204,9 +1253,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     ReaderHttpPickupService.ParseReceipt(body.RootElement);
                 _readerHttpPickup.AcceptReceipt(
                     _readerRealtimeOutputBroker, ack);
+                AppendOutputPickupLog(
+                    "receipt	" + ack.SourceInstanceId
+                    + "	" + ack.Correlation + "	" + ack.Outcome);
             }
             catch (ReaderRealtimeOutputException exception)
             {
+                AppendOutputPickupLog("receipt-error	" + exception.Code);
                 context.Response.StatusCode =
                     StatusCodes.Status409Conflict;
                 await context.Response.WriteAsJsonAsync(
