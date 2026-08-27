@@ -70,9 +70,44 @@ final class WatchVoiceCall: ObservableObject {
     @Published private(set) var routeNote = ""
 
     private static let maximumReconnects = 30
+
+    /// 音频会话模式。**做成可切是因为"哪个更响"只能在真机上比出来。**
+    ///
+    /// 实测背景（2026-08-28）：入声峰值 0.28（≈ -11 dBFS，语音的正常电平），
+    /// 也就是**下行数据没问题**；而 4× 增益已经在削顶了。数字信号接近满刻度
+    /// 还是小声 → 问题在物理输出路径，最可疑的就是 `.voiceChat` 那套自带 AGC
+    /// 的语音处理链。
+    ///
+    /// ⚠ 每一档的代价都写出来，不然切了不知道自己换到了什么：
+    enum Mode: String, CaseIterable, Identifiable {
+        /// 带回声消除。⚠ 去掉它，手表扬声器的声音会被自己的麦克风录回去，
+        /// 绕一圈送回电脑 —— 轻则回声，重则啸叫。
+        case voiceChat = "通话（有回声消除）"
+        /// 不做语音处理，通常最响。⚠ **没有回声消除** —— 外放时可能啸叫，
+        /// 戴耳机则没这个问题。
+        case plain = "默认（更响·可能回声）"
+        /// 视频通话档，处理比 voiceChat 轻一些。
+        case videoChat = "视频通话档"
+
+        var id: String { rawValue }
+
+        var session: AVAudioSession.Mode {
+            switch self {
+            case .voiceChat: return .voiceChat
+            case .plain: return .default
+            case .videoChat: return .videoChat
+            }
+        }
+    }
+
+    /// 当前档。默认仍是最安全的那个（有回声消除）。
+    @Published var mode: Mode = .voiceChat
     /// 播放增益。手表扬声器本来就小,语音的动态范围又窄。
     /// ⚠ 配合硬限幅使用 —— 削波的破音比小声更难听。
-    private static let playbackGain: Float = 4.0
+    /// ⚠ 实测入声峰值 0.28,乘 4 会到 1.12 —— **已经在削顶**。
+    /// 削波的破音比小声更难听,所以退到刚好推满而不过头。
+    /// 再想更响只能从输出路径（Mode）想办法,加增益已经没有余量了。
+    private static let playbackGain: Float = 3.2
 
     // ── 开始 ──
 
@@ -133,7 +168,7 @@ final class WatchVoiceCall: ObservableObject {
         // 保留 `.voiceChat` 是有代价的取舍：它带回声消除，而手表的扬声器和
         // 麦克风挨着，去掉它会把自己的输出录回去、绕一圈送回电脑。
         // 宁可小声也不要啸叫 —— 音量靠下面的软件增益补。
-        try session.setCategory(.playAndRecord, mode: .voiceChat)
+        try session.setCategory(.playAndRecord, mode: mode.session)
         try await session.activate(options: [])
 
         let made = AVAudioEngine()

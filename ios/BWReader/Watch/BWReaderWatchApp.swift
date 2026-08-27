@@ -517,6 +517,17 @@ struct CallView: View {
 
                     switch call.phase {
                     case .idle:
+                        // ⚠ 只在待机时能改 —— 音频会话起来之后换模式要重建
+                        // 整条链路,而**重建音频会话在后台是不可恢复的**
+                        // (Apple 的红线)。所以宁可不让改,也不给一个
+                        // "改了之后通话悄悄哑掉"的按钮。
+                        Picker("音频档", selection: $call.mode) {
+                            ForEach(WatchVoiceCall.Mode.allCases) { one in
+                                Text(one.rawValue).tag(one)
+                            }
+                        }
+                        .font(.system(size: 11))
+                        .frame(height: 52)
                         startButton("呼叫电脑")
                     case .connecting, .live, .reconnecting:
                         Button("挂断", role: .destructive) { call.stop() }
