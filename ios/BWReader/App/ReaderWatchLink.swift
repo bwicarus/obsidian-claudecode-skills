@@ -295,7 +295,12 @@ extension ReaderWatchLink: WCSessionDelegate {
         syncToWatch()
     }
 
-    private static func encode(_ payload: [String: Any]) -> Data {
+    /// ⚠ 必须 `nonisolated`：调用点是 `didReceiveMessageData` 那个 **nonisolated**
+    /// 的代理方法，而且要在**让出之前**同步回执 —— WCSession 的 reply 有超时，
+    /// 等活干完再回必然超时（那一轮最坏 105 秒）。类是 `@MainActor`，所以不标
+    /// nonisolated 的静态方法会继承隔离，在那里同步调用就编译不过。
+    /// 这个函数是纯的，没有任何 actor 状态要保护。
+    private nonisolated static func encode(_ payload: [String: Any]) -> Data {
         (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
     }
 
