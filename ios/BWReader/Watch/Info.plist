@@ -20,9 +20,9 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>按住手表上的按钮说话时，需要用麦克风把这句话录下来交给手机转写。</string>
-	<key>UIBackgroundModes</key>
+	<key>WKBackgroundModes</key>
 	<array>
-		<string>voip</string>
+		<string>audio</string>
 	</array>
 	<key>WKApplication</key>
 	<true/>

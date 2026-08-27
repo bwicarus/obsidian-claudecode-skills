@@ -266,7 +266,7 @@
     {
      "file": ".github/workflows/safari-extension-ios.yml (校验段)",
      "role": "验收",
-     "note": "validate_platform 每个 target 一次,各自钉住 bundle id / 设备家族 / 最低系统版本；末尾还有版本一致性。⚠ 手表另有 PlugIns/ 位置断言 —— XcodeGen 2.46.0 会嵌进 Watch/ 而 Xcode 16+ 只认 PlugIns/,嵌错时 archive 可能过、装到设备才炸"
+     "note": "validate_platform 每个 target 一次,各自钉住 bundle id / 设备家族 / 最低系统版本；末尾还有版本一致性。⚠ 手表另有位置断言:**必须在 Watch/,不能在 PlugIns/**(后者是给 .appex 扩展的)。2026-08-27 曾照 XcodeGen issue #1613 反过来打补丁 —— 那个 issue 说的是 Foundation extension 不是手表 app —— 结果 archive 过、校验过,altool 上传才报 Cannot determine the 'platform' from the info.plist。XcodeGen 生成的 Watch/ 本来就对,补丁已撤。断言留着:这类错误只在流水线最后暴露,错一次要等很久"
     },
     {
      "file": ".github/workflows/safari-extension-ios.yml (ExportOptions)",

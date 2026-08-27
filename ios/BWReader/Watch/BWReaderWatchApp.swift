@@ -33,6 +33,7 @@ struct RootView: View {
             CardsView()
             NotificationsView()
             VoiceView()
+            ProbeView()
         }
         .tabViewStyle(.page)
         .onAppear { link.activate() }
@@ -311,5 +312,132 @@ enum WatchTime {
         if seconds < 3600 { return "\(Int(seconds / 60)) 分钟前" }
         if seconds < 86_400 { return "\(Int(seconds / 3600)) 小时前" }
         return "\(Int(seconds / 86_400)) 天前"
+    }
+}
+
+// ── 网络豁免探针 ──
+//
+// ⚠ 这是**临时的诊断屏**，验完就删。留着它的一天里，它是这个 app 里唯一
+// 一个"给开发者看的"界面。
+//
+// 它在验：`.playAndRecord`（双工要的）配异步 activate 能不能解禁低层网络。
+// 背景与判据见 Watch/WatchNetworkProbe.swift 的文件头。
+//
+// ⚠ **屏幕上的东西不是判据** —— 真正要看的在落盘的 jsonl 里，因为要测的
+// 恰恰是"放下手腕、按数码表冠之后还活不活着"，那时候没人在看屏幕。
+
+struct ProbeView: View {
+    @State private var probe = WatchNetworkProbe()
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    statusLine
+
+                    if case .idle = probe.state {
+                        Text("挑一档开始。先跑 A 确认探针本身是好的。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        ForEach(WatchNetworkProbe.Mode.allCases) { mode in
+                            Button {
+                                probe.start(mode)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(mode.rawValue).font(.system(size: 13, weight: .medium))
+                                    Text(mode.expectation)
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    } else {
+                        Button("停止", role: .destructive) { probe.stop() }
+                            .buttonStyle(.bordered)
+                        Button("回到选择") { probe.reset() }
+                            .buttonStyle(.bordered)
+                    }
+
+                    if !probe.tail.isEmpty {
+                        Divider()
+                        // 只是"它在跑"的证据，不是判据。
+                        ForEach(Array(probe.tail.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    // ── 战报 ──
+                    // ⚠ 这一段是整个探针存在的理由。屏幕上的 tail 只能告诉你
+                    // "现在连着"，而实验真正要回答的是「放下手腕、按了表冠
+                    // 之后还活着吗」—— 那时候没人在看屏幕，只能事后从落盘的
+                    // 日志里把答案算出来。
+                    let verdicts = probe.verdicts()
+                    if !verdicts.isEmpty {
+                        Divider()
+                        Text("战报").font(.system(size: 12, weight: .semibold))
+                        ForEach(verdicts) { verdict in
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(verdict.mode)
+                                    .font(.system(size: 10, weight: .medium))
+                                Text(verdict.line)
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.secondary)
+                                // 前台/后台的心跳分开显示：两个数一起看才知道
+                                // "没测到后台"是因为没进后台，还是进了就断。
+                                Text("前台 \(verdict.beatsWhileActive) · 后台 \(verdict.beatsWhileBackground) · \(verdict.heldSeconds)s")
+                                    .font(.system(size: 8, design: .monospaced))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+
+                    Divider()
+                    Text("日志 \(probe.logSize) 字节")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                    Button("清空日志") { probe.clearLog() }
+                        .buttonStyle(.bordered)
+                }
+                .padding(.horizontal, 2)
+            }
+            .navigationTitle("网络探针")
+        }
+    }
+
+    @ViewBuilder private var statusLine: some View {
+        switch probe.state {
+        case .idle:
+            Text("待命").font(.system(size: 13, weight: .semibold))
+        case .preparing:
+            Text("准备中…").font(.system(size: 13, weight: .semibold))
+        case .waiting(let why):
+            VStack(alignment: .leading, spacing: 2) {
+                Text("⏳ 等待中").font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.orange)
+                // ⚠ 原文照抄不做翻译：POSIX 50 / "Network is down" 正是豁免
+                // 被拒的签名，把它折成"连接失败"就把唯一的诊断信息扔了。
+                Text(why).font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        case .connected(let echoes):
+            Text("✅ 连上了 · 回声 \(echoes)")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.green)
+        case .failed(let why):
+            VStack(alignment: .leading, spacing: 2) {
+                Text("❌ 失败").font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.red)
+                Text(why).font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        case .stopped(let echoes, let held):
+            Text("已停 · 回声 \(echoes) · 撑了 \(held) 秒")
+                .font(.system(size: 13, weight: .semibold))
+        }
     }
 }
