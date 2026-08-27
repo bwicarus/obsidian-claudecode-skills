@@ -44,6 +44,15 @@ final class WatchVoiceCall: ObservableObject {
     /// 收到的音频峰值(0~1)。**摆在界面上是为了分辨"下行本来就轻"和
     /// "手表放不响"** —— 这两者修法完全不同,光听分不出来。
     @Published private(set) var inboundPeak: Float = 0
+    /// 通话中收到的卡片。⚠ 只留最近几张:手表屏幕小,而且**通话中的卡片
+    /// 是即时信息**,翻历史不是这个界面该干的事。
+    @Published private(set) var liveCards: [LiveCard] = []
+
+    struct LiveCard: Identifiable {
+        let id = UUID()
+        let title: String
+        let text: String
+    }
 
     private static let endpoint = URL(
         string: "wss://bwicarus.taile44d0c.ts.net:8443/watch-voice")!
@@ -128,6 +137,7 @@ final class WatchVoiceCall: ObservableObject {
         restartedOnce = false
         routeNote = ""
         inboundPeak = 0
+        liveCards = []
         pending.removeAll(keepingCapacity: true)
         Task { await begin() }
     }
@@ -368,6 +378,18 @@ final class WatchVoiceCall: ObservableObject {
         if let stream = row["streamId"] as? String {
             streamId = WatchVoiceWire.streamIdBytes(stream)
             if streamId != nil { phase = .live }
+        }
+        // 通话中 AI 发来的卡片。⚠ 它走的是**下行文本通道**,不是手机那条
+        // WCSession 镜像 —— 手表单独在线时手机可能根本没开。
+        // 两条路都保留:有手机时走手机(带缩略图),没手机时走这条(纯文字)。
+        if let event = row["ev"] as? String, event == "card" {
+            let card = row["card"] as? [String: Any] ?? [:]
+            let title = (card["title"] as? String) ?? (card["kind"] as? String) ?? "卡片"
+            let text = (card["text"] as? String)
+                ?? (card["body"] as? String) ?? ""
+            liveCards.insert(LiveCard(title: title, text: text), at: 0)
+            if liveCards.count > 6 { liveCards.removeLast() }
+            return
         }
         if let event = row["ev"] as? String, event == "error" {
             // 服务端的中文原文照抄 —— 它本来就写给人看，折成"失败"就把

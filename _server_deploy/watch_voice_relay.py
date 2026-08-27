@@ -964,6 +964,44 @@ class Relay:
         self.downlink_no_watch = 0
         self._no_watch_logged_at = 0.0
         self.killed = False
+        # 卡片桥。⚠ 跑在**独立线程**里,不进这个事件循环 —— 它要发同步 HTTP,
+        # 一次慢请求进了这里就会让 50Hz 的音频节拍卡一下。
+        self._card_bridge = None
+        self._card_thread = None
+
+    # ── 卡片桥（手表单独在线时,让 AI 的卡片有地方可去）──────────────────
+    def start_card_bridge(self, leg) -> None:
+        """手表接上了 → 向 Windows 注册成一个 Reader 来源。
+
+        ⚠ 失败**不影响通话**:卡片是附加能力,音频才是主线。所以这里的任何
+        错误都只出声、不上抛。
+        """
+        self.stop_card_bridge()
+        try:
+            import threading
+
+            import watch_card_bridge
+            bridge = watch_card_bridge.WatchCardBridge(
+                # 复用手表这一路的 streamId 当来源标识:它本来就是**每条连接
+                # 一个新的**,天然满足"来源随连接生灭"。
+                leg.stream_id,
+                deliver=lambda payload: leg.send_json(**payload),
+                log=lambda ev, **kw: _log(ev, watch=leg.id, **kw))
+            thread = threading.Thread(
+                target=bridge.run, name="watch-card-bridge", daemon=True)
+            thread.start()
+            self._card_bridge = bridge
+            self._card_thread = thread
+        except Exception as error:                    # noqa: BLE001
+            _log("card.bridge_failed_to_start",
+                 detail="%s: %s" % (type(error).__name__, error))
+
+    def stop_card_bridge(self) -> None:
+        bridge = self._card_bridge
+        if bridge is not None:
+            bridge.stop()
+        self._card_bridge = None
+        self._card_thread = None
 
     # ── 鉴权 ──────────────────────────────────────────────────────────────
     def authorize(self, headers, query_token: Optional[str]) -> Optional[str]:
@@ -1081,6 +1119,7 @@ class Relay:
                  current=self._watch.id if self._watch else None)
             return
         self._watch = None
+        self.stop_card_bridge()
         _log("watch.detached", watch=leg.id, state=self.state.value,
              held_seconds=round(time.time() - leg.attached_at, 1),
              downlink_sent=leg.downlink_sent, downlink_dropped=leg.downlink_dropped)
@@ -1442,6 +1481,10 @@ def make_watch_handler(relay: Relay):
         _log("watch.attached", watch=leg.id, peer=peer, stream=leg.stream_id,
              state=snapshot["state"], session=snapshot["session"],
              killed=snapshot["killed"])
+        # ⚠ 卡片桥跟**这一路手表连接**同生共死:手表来了才向 Windows 注册成
+        # 一个 Reader 来源,走了就撤。不这样的话 AI 会把卡片投给一个根本没人
+        # 看的地方,**而它还以为送到了**。
+        relay.start_card_bridge(leg)
         # streamId 必须先于任何音频到达手表：它要盖进自己每一帧的 session 字段，
         # 用旧的会被抖动缓冲判 FOREIGN 全部丢掉（且那时只有服务端日志看得见）。
         leg.send_json(ev="hello", protocol=WATCH_PROTOCOL, streamId=leg.stream_id,

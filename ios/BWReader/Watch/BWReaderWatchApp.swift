@@ -562,6 +562,22 @@ struct CallView: View {
                             .foregroundStyle(.tertiary)
                             .multilineTextAlignment(.center)
                     }
+                    // 通话中 AI 发来的卡片。放在数字上面 —— 它是内容,
+                    // 那些是诊断。
+                    ForEach(call.liveCards) { card in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(card.title)
+                                .font(.system(size: 12, weight: .semibold))
+                            if !card.text.isEmpty {
+                                Text(card.text).font(.system(size: 11))
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(6)
+                        .background(Color.gray.opacity(0.18))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+
                     if call.framesSent > 0 || call.framesPlayed > 0 {
                         Text("发 \(call.framesSent) · 收 \(call.framesPlayed)")
                             .font(.system(size: 9, design: .monospaced))

@@ -89,6 +89,7 @@ WEBAPP_SOURCE_FILES = (
     #   好消息是改漏了会**立刻炸**:本清单 require_sources 找不到文件即抛。
     "watch_voice_wire.py",
     "watch_voice_relay.py",
+    "watch_card_bridge.py",
     "task_runtime.py",
     # 纸张模型/格子布局器:assistant.py 顶层 import 它,task_runtime._set_blocks 也
     # 函数内 import。此前一直漏登记,Pi 上没炸纯靠旧版手工副本残留——正是本清单
@@ -332,6 +333,12 @@ _REQUIRED_EXACT_IDENTITIES = frozenset(
             "_server_deploy/watch_voice_relay.py",
             "webapp",
             "watch_voice_relay.py",
+            POLICY_EXACT,
+        ),
+        (
+            "_server_deploy/watch_card_bridge.py",
+            "webapp",
+            "watch_card_bridge.py",
             POLICY_EXACT,
         ),
         (
