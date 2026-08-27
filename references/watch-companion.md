@@ -157,8 +157,14 @@ withdrawn/restored，掉一次线 ≠ 豁免失效。
 - **音频中断不可后台恢复**：来电/Siri 打断后 watchOS 不允许在后台重新激活
   录音。长通话期间高概率发生，无软件侧规避，只能提示用户回前台。
 - **电池**：估算 15–25%/小时，**无实测数字**。
-- **`Watch/Info.plist` 里还留着 `UIBackgroundModes: [voip]`** —— CallKit 时代的
-  遗留，现在是死键，该清掉。
+- **后台模式键已从 `UIBackgroundModes: [voip]` 改成 `UIBackgroundModes: [audio]`**。
+  ⚠ 两个坑：① `voip` 是 CallKit 时代的遗留，在没有 CallKit 的 watchOS app 上是
+  死键；② **watchOS 用 `UIBackgroundModes` 不是 `WKBackgroundModes`** ——
+  后者存在但取值只有 self-care / mindfulness / physical-therapy / alarm /
+  workout-processing，填 `audio` 会被 App Store 判 90362，**而且只在 altool
+  上传时才报**（归档、签名、校验全过）。2026-08-27 为此烧掉一整轮流水线，
+  已在 CI 校验段加断言提前拦。依据是参考实现 `f3c6fa1` 提交移除的正是
+  `UIBackgroundModes[audio]`。
 
 ### 顺带验证到的事实
 

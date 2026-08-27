@@ -585,6 +585,28 @@ jobs:
             exit 1
           fi
           test ! -d "$APP_PATH/PlugIns/BWReaderWatch.app"
+
+          # ⚠ 手表的后台模式键：**watchOS 用 UIBackgroundModes,不是
+          # WKBackgroundModes**。后者确实存在,但取值只有 self-care /
+          # mindfulness / physical-therapy / alarm / workout-processing 那几种;
+          # 填 "audio" 会被 App Store 判 90362 "Invalid Info.plist value" ——
+          # 而这个错**只在 altool 上传时报**,归档、签名、本步骤之前的校验全过。
+          # 2026-08-27 就这么烧掉一整轮(第二次栽在只有上传才报的错上,
+          # 上一次是 PlugIns/ 位置)。所以在这里提前拦。
+          # 依据:参考实现 leptos-null/WatchOS-WebSocket 的 f3c6fa1 提交,
+          # 被它移除的正是 UIBackgroundModes[audio]。
+          if /usr/libexec/PlistBuddy -c "Print :WKBackgroundModes" \
+               "$WATCH_PATH/Info.plist" >/dev/null 2>&1; then
+            WK_MODES=$(/usr/libexec/PlistBuddy -c "Print :WKBackgroundModes" \
+                         "$WATCH_PATH/Info.plist" 2>/dev/null || true)
+            case "$WK_MODES" in
+              *audio*)
+                echo "::error::WKBackgroundModes 里有 audio —— watchOS 该用 UIBackgroundModes"
+                echo "::error::这样传上去会报 90362,而归档和校验都不会拦"
+                exit 1 ;;
+            esac
+          fi
+
           READER_BUNDLE="$APP_PATH/ReaderBundle"
           test -d "$READER_BUNDLE" || { echo "embedded ReaderBundle is missing"; exit 1; }
           python "$GITHUB_WORKSPACE/$PROJECT_DIR/package_local_reader.py" \
