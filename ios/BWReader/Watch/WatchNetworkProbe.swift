@@ -226,6 +226,20 @@ final class WatchNetworkProbe: ObservableObject {
     /// 必须跟运行中的失败分开记，否则每一轮都会以一条误导性的错误收场。
     private var stopping = false
     private var audioActivated = false
+    /// 最后一次收到回声的时刻。
+    ///
+    /// ⚠ 2026-08-27 第四轮实测暴露的洞：息屏再打开后**数字停止变化但没有
+    /// 任何报错** —— 因为原来只在 .ready/.waiting/.failed 时更新状态，
+    /// 连接若不报错地停止投递，屏幕就永远显示着那个陈旧的「已连上」。
+    ///
+    /// 这个 app 里本来就有防这个的东西（每屏顶部的 FreshnessBar：
+    /// 「宁可让人看见陈旧，也不让陈旧冒充现状」），而探针屏恰恰没加。
+    private var lastEchoAt: Date?
+    /// 已经报过一次静默，别刷屏。恢复投递时清掉。
+    private var stallReported = false
+    private var watchdog: Task<Void, Never>?
+    /// 整轮里最长的一段没有回声。**这是「它冻住了」唯一能量化的证据。**
+    private var longestSilence: TimeInterval = 0
     /// ⚠ 这个是第二版加的，用来**分辨两种长得一样的失败**：
     /// 「豁免被系统收回」还是「进程被挂起」。TN3135 点名：被拦时 path 恒
     /// `.unsatisfied`。如果息屏后日志里出现 unsatisfied → 是豁免没了；
@@ -310,6 +324,9 @@ final class WatchNetworkProbe: ObservableObject {
         echoes = 0
         sent = 0
         stopping = false
+        lastEchoAt = nil
+        stallReported = false
+        longestSilence = 0
         startedAt = Date()
         log("start", ["expect": picked.expectation])
         Task { await run() }
@@ -326,7 +343,49 @@ final class WatchNetworkProbe: ObservableObject {
             return
         }
         startPathMonitor()
+        startWatchdog()
         openSocket()
+    }
+
+    /// 看门狗：**没有回声也要出声**。
+    ///
+    /// ⚠ 这是第四轮实测倒逼出来的。用户报告「息屏再打开后数字停止变化但
+    /// 没有报错」—— 那正是最该被记下来的时刻，却什么都没记。
+    ///
+    /// 它跟 `NWPathMonitor` 分工不同：路径监视回答「网络还在不在」，
+    /// 看门狗回答「**数据还在不在流动**」。连接可以路径正常、状态还是
+    /// `.ready`，但一个字节都不再来 —— 那种情况只有这里看得见。
+    ///
+    /// ⚠ 它自己也可能被系统连同进程一起挂起。那没关系：那种情况下日志会
+    /// **直接断掉**，而「日志断掉」和「日志里写着 stalled」是两个不同的
+    /// 结论（进程被挂起 vs 进程活着但连接死了），事后分得开。
+    private func startWatchdog() {
+        watchdog?.cancel()
+        watchdog = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3))
+                guard let self, !self.stopping else { return }
+                guard case .connected = self.state else { continue }
+                let since = Date().timeIntervalSince(
+                    self.lastEchoAt ?? self.startedAt ?? Date())
+                if since > 5, !self.stallReported {
+                    self.stallReported = true
+                    self.log("stalled", ["silentSeconds": Int(since)])
+                }
+                // 让屏幕上的秒数走起来 —— 陈旧必须看得见。
+                self.objectWillChange.send()
+            }
+        }
+    }
+
+    /// 距上次回声多久。屏幕上一直显示它。
+    ///
+    /// ⚠ 这条存在的唯一理由：**不让陈旧冒充现状**。这个 app 每一屏顶部
+    /// 都有同样语义的 FreshnessBar，而探针屏原来没有，于是冻住了也看不出来。
+    var silentSeconds: Int? {
+        guard case .connected = state else { return nil }
+        guard let reference = lastEchoAt ?? startedAt else { return nil }
+        return Int(Date().timeIntervalSince(reference))
     }
 
     /// 监视网络路径。
@@ -551,6 +610,18 @@ final class WatchNetworkProbe: ObservableObject {
                     self.log("receive-error", ["why": String(describing: error)])
                     return
                 }
+                let now = Date()
+                if let previous = self.lastEchoAt {
+                    let gap = now.timeIntervalSince(previous)
+                    if gap > self.longestSilence { self.longestSilence = gap }
+                    // 从静默中恢复了 —— 这条**必须记**：它把「冻住之后又活了」
+                    // 和「冻住就再没起来」分开，两者结论完全不同。
+                    if self.stallReported {
+                        self.stallReported = false
+                        self.log("resumed", ["afterSeconds": Int(gap)])
+                    }
+                }
+                self.lastEchoAt = now
                 self.echoes += 1
                 // 每 10 次记一条就够 —— 密了会把「断在哪一刻」淹掉。
                 if self.echoes % 10 == 1 { self.log("echo", ["n": self.echoes]) }
@@ -658,7 +729,13 @@ final class WatchNetworkProbe: ObservableObject {
         stopping = true
         let held = Int(Date().timeIntervalSince(startedAt ?? Date()))
         let hertz = held > 0 ? Double(sent) / Double(held) : 0
+        // 收尾时把最后一段静默也算进去 —— 用户往往正是因为"数字不动了"
+        // 才来按停止的,那一段恰恰是最该记下来的。
+        if let last = lastEchoAt {
+            longestSilence = max(longestSilence, Date().timeIntervalSince(last))
+        }
         log("stop", ["echoes": echoes, "sent": sent, "heldSeconds": held,
+                     "longestSilenceSeconds": Int(longestSilence),
                      // 实际达到的速率。⚠ 别假设它等于设定值：Task.sleep 在
                      // 循环里有调度开销，实测只有设定值的三分之一左右。
                      "achievedHertz": (hertz * 10).rounded() / 10])
@@ -669,6 +746,8 @@ final class WatchNetworkProbe: ObservableObject {
     private func teardown() {
         beat?.cancel()
         beat = nil
+        watchdog?.cancel()
+        watchdog = nil
         pathMonitor?.cancel()
         pathMonitor = nil
         connection?.cancel()
@@ -721,6 +800,12 @@ final class WatchNetworkProbe: ObservableObject {
         /// 设 50 Hz 只跑出 16.4 Hz（Task.sleep 在循环里的调度开销）。
         /// 真实现要靠**音频 tap 驱动节奏**，它本来就按缓冲区回调。
         var achievedHertz = 0.0
+        /// 整轮里最长一段没有回声。**「它冻住了」唯一能量化的证据。**
+        var longestSilence = 0
+        /// 冻住过几次(看门狗报的),又恢复过几次。
+        /// 两个数一起看才知道是"卡一下又好了"还是"卡了就再没起来"。
+        var stalls = 0
+        var resumes = 0
         /// 运行**中**的第一个发送失败（不含收尾时拆连接导致的）。
         var firstErrorAtSeconds: Int?
         var firstErrorWhy: String?
@@ -738,6 +823,17 @@ final class WatchNetworkProbe: ObservableObject {
             // 整轮数据白采。收尾时的失败已在采集侧另记，不会走到这。
             if let at = firstErrorAtSeconds {
                 return "🔴 第 \(at)s 起发送失败：\(firstErrorWhy ?? "无原因")"
+            }
+            // ⚠ 「冻住过」优先于「后台还在跳」——第四轮实测就是这种形态：
+            // 前期一切正常，某次息屏之后**数字停止变化但一个错都没报**。
+            // 不把它单独拎出来的话，它会被下面那句 ✅ 盖过去。
+            if stalls > 0 {
+                let ending = resumes > 0
+                    ? "又恢复 \(resumes) 次" : "**再没恢复**"
+                return "🔴 中途冻住 \(stalls) 次（最长静默 \(longestSilence)s），\(ending)"
+            }
+            if longestSilence > 5 {
+                return "🟠 有过 \(longestSilence)s 的静默，但看门狗没来得及记（进程可能被挂起）"
             }
             if beatsWhileBackground > 0 {
                 return "✅ 连上了，且**后台仍在跳** \(beatsWhileBackground) 次"
@@ -791,6 +887,8 @@ final class WatchNetworkProbe: ObservableObject {
             case "stop":
                 verdict.sent = (row["sent"] as? Int) ?? verdict.sent
                 verdict.echoes = (row["echoes"] as? Int) ?? verdict.echoes
+                verdict.longestSilence =
+                    (row["longestSilenceSeconds"] as? Int) ?? verdict.longestSilence
                 verdict.achievedHertz =
                     (row["achievedHertz"] as? Double) ?? verdict.achievedHertz
             case "send-error":
@@ -800,6 +898,12 @@ final class WatchNetworkProbe: ObservableObject {
                     verdict.firstErrorAtSeconds = (row["atSeconds"] as? Int) ?? 0
                     verdict.firstErrorWhy = row["why"] as? String
                 }
+            case "stalled":
+                verdict.stalls += 1
+                verdict.longestSilence = max(
+                    verdict.longestSilence, (row["silentSeconds"] as? Int) ?? 0)
+            case "resumed":
+                verdict.resumes += 1
             case "send-error-teardown":
                 break                       // 拆连接的正常结果，不算失败
             case "path":

@@ -437,9 +437,20 @@ struct ProbeView: View {
                     .foregroundStyle(.secondary)
             }
         case .connected(let echoes):
-            Text("✅ 连上了 · 回声 \(echoes)")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.green)
+            // ⚠ 光有回声数是不够的：第四轮实测里「数字停止变化但没有报错」
+            // 就是靠人盯着数字才发现的。**陈旧必须自己说出来** ——
+            // 这跟每屏顶部 FreshnessBar 是同一个道理，探针屏原来漏了。
+            let silent = probe.silentSeconds ?? 0
+            VStack(alignment: .leading, spacing: 1) {
+                Text("✅ 连上了 · 回声 \(echoes)")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(silent > 5 ? .orange : .green)
+                Text(silent > 5
+                     ? "⚠️ 已经 \(silent) 秒没有回声了"
+                     : "上次回声 \(silent)s 前")
+                    .font(.system(size: 10))
+                    .foregroundStyle(silent > 5 ? .orange : .secondary)
+            }
         case .failed(let why):
             VStack(alignment: .leading, spacing: 2) {
                 Text("❌ 失败").font(.system(size: 13, weight: .semibold))
