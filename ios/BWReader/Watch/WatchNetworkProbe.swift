@@ -250,6 +250,12 @@ final class WatchNetworkProbe: ObservableObject {
     /// 如果日志直接断掉、恢复前台才继续 → 是进程被挂起。
     /// 这两件事的修法完全不同，第一版分不出来，等于白测一半。
     private var pathMonitor: NWPathMonitor?
+    /// 最近一次看到的网络路径状态。静默发生时要跟引擎状态一起记。
+    private var pathSatisfied = true
+    /// 这一轮重连了几次。**它本身就是结论**：
+    /// 重连能成 = 方案可行,只是需要重连逻辑；
+    /// 重连不成 = 才轮到怀疑平台。
+    private var reconnects = 0
 
     private static let endpoint = URL(string: "wss://echo.websocket.org")!
     /// 记录层自己的字段,额外信息不许覆盖(见 log 里那段注释)。
@@ -329,6 +335,17 @@ final class WatchNetworkProbe: ObservableObject {
         if let why = extra["why"] as? String {
             return "\(stamp) \(event)\(index) \(why)"
         }
+        // ⚠ path 事件的全部价值就在这个状态字上。第五轮实测里屏幕上只显示
+        // 了一个光秃秃的「path」,而那一条恰恰是整场最决定性的证据 ——
+        // 它出现在最后一个回声的**一秒之后**。
+        if let satisfied = extra["satisfied"] as? Bool {
+            return "\(stamp) \(event) " + (satisfied ? "✓通" : "✗断")
+                + ((extra["status"] as? String).map { " " + $0 } ?? "")
+        }
+        if let running = extra["engineRunning"] as? Bool {
+            return "\(stamp) \(event)\(index) 引擎"
+                + (running ? "在跑" : "已停")
+        }
         return "\(stamp) \(event)\(index)"
     }
 
@@ -342,6 +359,8 @@ final class WatchNetworkProbe: ObservableObject {
         sent = 0
         stopping = false
         consecutiveSendErrors = 0
+        pathSatisfied = true
+        reconnects = 0
         lastEchoAt = nil
         stallReported = false
         longestSilence = 0
@@ -466,7 +485,14 @@ final class WatchNetworkProbe: ObservableObject {
                     // 两者的修法完全不同,所以必须同时记。
                     var extra: [String: Any] = ["silentSeconds": Int(since)]
                     self.audioSnapshot().forEach { extra[$0.key] = $0.value }
+                    // ⚠ 路径状态跟引擎状态**必须并列记**。第五轮实测里
+                    // 引擎还在跑(排除了音频),而路径事件恰好出现在静默前
+                    // 一秒 —— 只有两个都记下来,才能一眼看出是哪一个。
+                    extra["pathSatisfied"] = self.pathSatisfied
                     self.log("stalled", extra)
+                    // 静默确认之后试着自己活回来 —— 这才是真正的产品问题：
+                    // 不是「能不能撑住」,而是「断了能不能自己恢复」。
+                    self.reconnect()
                 }
                 // 主动查引擎：它可能被系统停掉而**不发任何通知**。
                 // 只在状态**变化**时记,否则会把日志淹掉。
@@ -483,6 +509,40 @@ final class WatchNetworkProbe: ObservableObject {
             }
         }
     }
+
+    /// 掉线后自己活回来。
+    ///
+    /// ## ⚠ 只重建 socket，**绝不碰音频会话**
+    ///
+    /// 这是整个方案能不能成立的关键细节。Apple 框架工程师明说：
+    /// 「在 watchOS 上，app 处于后台时**录音无法恢复**，必须由前台的用户
+    /// 操作发起。」所以一旦在后台把音频会话停掉或重新激活，就再也起不来了。
+    ///
+    /// 而网络路径变化（手表息屏时 Wi-Fi 掉了、切到手机中继）是**另一回事**，
+    /// 它只需要重建连接。音频会话全程不动，豁免就一直在。
+    ///
+    /// 2026-08-27 第五轮实测正是这个形态：静默前一秒有 `path` 事件，
+    /// 而**引擎还在跑** —— 排除了音频，指向了路径。
+    private func reconnect() {
+        guard !stopping, reconnects < Self.maximumReconnects else {
+            if reconnects >= Self.maximumReconnects {
+                log("reconnect-give-up", ["tried": reconnects])
+            }
+            return
+        }
+        reconnects += 1
+        log("reconnect-attempt", ["n": reconnects,
+                                  "pathSatisfied": pathSatisfied])
+        // 只拆连接。音频引擎、播放器、会话**一律不动**。
+        connection?.cancel()
+        connection = nil
+        consecutiveSendErrors = 0
+        openSocket()
+    }
+
+    /// 重连上限。不设上限的话，路径长期不通时会变成无限重试 ——
+    /// 那既烧电又把日志淹掉，而且掩盖了"它其实一直没回来"这个事实。
+    private static let maximumReconnects = 20
 
     /// 距上次回声多久。屏幕上一直显示它。
     ///
@@ -509,6 +569,7 @@ final class WatchNetworkProbe: ObservableObject {
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
             Task { @MainActor in
+                self?.pathSatisfied = path.status == .satisfied
                 self?.log("path", [
                     "status": String(describing: path.status),
                     // 被拦时恒 unsatisfied，所以这一位单独拎出来。
@@ -876,6 +937,7 @@ final class WatchNetworkProbe: ObservableObject {
         }
         log("stop", ["echoes": echoes, "sent": sent, "heldSeconds": held,
                      "longestSilenceSeconds": Int(longestSilence),
+                     "reconnects": reconnects,
                      // 实际达到的速率。⚠ 别假设它等于设定值：Task.sleep 在
                      // 循环里有调度开销，实测只有设定值的三分之一左右。
                      "achievedHertz": (hertz * 10).rounded() / 10])
@@ -955,6 +1017,13 @@ final class WatchNetworkProbe: ObservableObject {
         var audioEvents = 0
         /// 静默那一刻引擎在不在跑（看门狗随 stalled 一起记的关联证据）。
         var engineRunningAtStall: Bool?
+        /// 静默那一刻网络路径断没断。**跟引擎状态并列,谁真谁负责。**
+        var pathLostAtStall: Bool?
+        /// 重连了几次、成了几次。**这两个数就是最终结论**：
+        /// 能重连上 = 方案可行,只是需要重连逻辑;
+        /// 重连不上 = 才轮到怀疑平台。
+        var reconnectTries = 0
+        var reconnectOK = 0
         /// 运行**中**的第一个发送失败（不含收尾时拆连接导致的）。
         var firstErrorAtSeconds: Int?
         var firstErrorWhy: String?
@@ -982,11 +1051,31 @@ final class WatchNetworkProbe: ObservableObject {
             // ⚠ 「冻住过」优先于「后台还在跳」——第四轮实测就是这种形态：
             // 前期一切正常，某次息屏之后**数字停止变化但一个错都没报**。
             // 不把它单独拎出来的话，它会被下面那句 ✅ 盖过去。
+            // ⚠ **重连成功是压倒一切的好消息**,要排在所有失败叙述之前。
+            // 掉线过但每次都自己活回来了 —— 那不是"有问题",那是"能用"。
+            if reconnectOK > 0, reconnectOK >= reconnectTries - 1 {
+                return "✅ 掉线 \(reconnectTries) 次但**每次都自己重连上了** —— "
+                    + "方案可行,要做的只是重连逻辑"
+            }
+            if reconnectTries > 0, reconnectOK == 0 {
+                return "🔴 试了 \(reconnectTries) 次重连**一次都没成** —— "
+                    + "这才轮到怀疑平台"
+            }
             if stalls > 0 {
                 let ending = resumes > 0
                     ? "又恢复 \(resumes) 次" : "**再没恢复**"
                 // ⚠ 有引擎状态就先报它 —— 那是能定因的一条,
                 // 「冻了几次」只是现象。
+                // ⚠ **路径先报,引擎后报。** 第五轮实测:引擎还在跑(排除了
+                // 音频),而路径事件出现在最后一个回声的一秒之后 —— 真正的
+                // 原因是路径。原来这条判断排在最后,永远走不到,于是屏幕上
+                // 只说了"不是音频的锅",没说是什么的锅。
+                // **排除了什么** 远不如 **是什么** 有用。
+                if pathLostAtStall == true {
+                    return "🔵 冻住时**网络路径已经断了** —— 手表切网了，"
+                        + "不是平台限制，要做的是重连"
+                        + "（\(stalls) 次，最长 \(longestSilence)s，\(ending)）"
+                }
                 if engineRunningAtStall == false {
                     return "🔴 冻住时**音频引擎已经停了** —— 豁免随音频一起没的"
                         + "（\(stalls) 次，最长 \(longestSilence)s，\(ending)）"
@@ -1072,6 +1161,9 @@ final class WatchNetworkProbe: ObservableObject {
 
             switch event {
             case "connected":
+                // 第一次 connected 是初次连上;之后每一次都是**重连成功**。
+                // 分开数,否则"它自己活回来了"这个最关键的事实读不出来。
+                if verdict.connected { verdict.reconnectOK += 1 }
                 verdict.connected = true
             case "mic-permission":
                 if (row["granted"] as? Bool) == false { verdict.micDenied = true }
@@ -1084,6 +1176,8 @@ final class WatchNetworkProbe: ObservableObject {
                     (row["longestSilenceSeconds"] as? Int) ?? verdict.longestSilence
                 verdict.achievedHertz =
                     (row["achievedHertz"] as? Double) ?? verdict.achievedHertz
+                verdict.reconnectTries =
+                    (row["reconnects"] as? Int) ?? verdict.reconnectTries
             case "send-error":
                 // ⚠ 只记**第一个**：后面的多半是同一个原因的回响，
                 // 而"第几秒开始出错"才是能拿来判断的东西。
@@ -1102,9 +1196,13 @@ final class WatchNetworkProbe: ObservableObject {
                 // 原因的回响,而第一次那一刻才是因果发生的地方。
                 if verdict.engineRunningAtStall == nil {
                     verdict.engineRunningAtStall = row["engineRunning"] as? Bool
+                    verdict.pathLostAtStall =
+                        (row["pathSatisfied"] as? Bool).map { !$0 }
                 }
                 verdict.longestSilence = max(
                     verdict.longestSilence, (row["silentSeconds"] as? Int) ?? 0)
+            case "reconnect-attempt":
+                verdict.reconnectTries += 1
             case "resumed":
                 verdict.resumes += 1
             case "send-error-teardown":
