@@ -105,6 +105,15 @@ final class WatchLink: NSObject, ObservableObject {
         if let note = payload["commandError"] as? String {
             lastCommandNote = note
         }
+        // 一次性配给：手机把语音桥 token 送来了，收进 Keychain。
+        // ⚠ **必须看 save 的返回值**：Keychain 写失败是静默的，而「以为存进去了
+        // 其实没有」会在下次通话时表现为「按了没反应」—— 这个项目已经为这种
+        // 沉默付过太多学费。
+        if let token = payload[ReaderWatchCommand.tokenKey] as? String {
+            lastCommandNote = WatchTokenStore.save(token)
+                ? "语音 token 已配好，之后通话不再需要手机"
+                : "token 存不进 Keychain（收到 \(token.count) 字符）"
+        }
         guard let decoded = WatchSnapshotCoder.decode(payload) else {
             lastCommandNote = "手机发来的数据解不开"
             return

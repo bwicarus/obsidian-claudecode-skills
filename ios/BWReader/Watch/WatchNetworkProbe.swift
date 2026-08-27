@@ -123,7 +123,8 @@ final class WatchNetworkProbe: ObservableObject {
 
     /// 五档配置。顺序即建议的测试顺序：先跑正对照确认探针本身是好的。
     enum Mode: String, CaseIterable, Identifiable {
-        case loadedCall      = "G 真通话节奏（主力）"
+        case piRelay         = "H 打真 Pi·真帧长（主力）"
+        case loadedCall      = "G 真通话节奏（80B）"
         case duplexCall      = "F 边放边录"
         case playbackControl = "A 正对照·只放"
         case duplexQuiet     = "B 双工·不跑麦"
@@ -136,8 +137,10 @@ final class WatchNetworkProbe: ObservableObject {
         /// 这一档预期是什么结果。写在 UI 上，免得测完了还要回来查文档。
         var expectation: String {
             switch self {
+            case .piRelay:
+                return "🎯 真端点 + 真帧长(1956B×50)—— 就看这档"
             case .loadedCall:
-                return "🎯 真通话节奏（50 包/秒）—— 就看这档"
+                return "真节奏但只有 80B/帧,是真实量的 1/24"
             case .duplexCall:
                 return "✅ 已实测后台能活（但只是闲连接）"
             case .playbackControl: return "应当连上（参考实现验过）"
@@ -150,7 +153,7 @@ final class WatchNetworkProbe: ObservableObject {
         /// 要不要跑音频引擎，跑的话放不放声音。
         var engine: (running: Bool, playing: Bool) {
             switch self {
-            case .duplexCall, .loadedCall: return (true, true)
+            case .duplexCall, .loadedCall, .piRelay: return (true, true)
             case .duplexLive: return (true, false)
             default: return (false, false)
             }
@@ -179,7 +182,11 @@ final class WatchNetworkProbe: ObservableObject {
         /// 既不礼貌，测的也不是我们真要跑的东西。
         var load: (hertz: Double, payloadBytes: Int) {
             switch self {
-            case .loadedCall: return (50, 80)      // 4 KB/s，压缩后的真实量级
+            // ⚠ H 档是**真实量**:relay 期望裸 48kHz PCM,1956 字节一帧、
+            // 50 帧/秒 = 96 KB/s。这比 G 档大 24 倍,而"能扛住 4 KB/s"
+            // 推不出"能扛住 96 KB/s" —— 电池、无线电、发热全是另一回事。
+            case .piRelay: return (50, 1956)
+            case .loadedCall: return (50, 80)      // 4 KB/s，压缩后的量级
             default: return (0.5, 0)               // 2 秒一个心跳
             }
         }
@@ -252,6 +259,8 @@ final class WatchNetworkProbe: ObservableObject {
     private var pathMonitor: NWPathMonitor?
     /// 最近一次看到的网络路径状态。静默发生时要跟引擎状态一起记。
     private var pathSatisfied = true
+    /// Pi 在 hello 里下发的 streamId(已解成 16 字节)。**每条连接一个新的。**
+    private var streamId: Data?
     /// 这一轮重连了几次。**它本身就是结论**：
     /// 重连能成 = 方案可行,只是需要重连逻辑；
     /// 重连不成 = 才轮到怀疑平台。
@@ -260,7 +269,12 @@ final class WatchNetworkProbe: ObservableObject {
     /// 而不是只试一次就放弃。
     private var lastReconnectAt: Date?
 
-    private static let endpoint = URL(string: "wss://echo.websocket.org")!
+    /// 公共 echo 服务：A~G 用它，验的是「手表这台设备扛不扛得住」。
+    /// ⚠ 它有限流，回声率低不代表 watchOS 有问题。
+    private static let echoEndpoint = URL(string: "wss://echo.websocket.org")!
+    /// 我们自己的 relay。H 档用它 —— 真端点、真帧长、真鉴权。
+    private static let piEndpoint = URL(
+        string: "wss://bwicarus.taile44d0c.ts.net:8443/watch-voice")!
     /// 记录层自己的字段,额外信息不许覆盖(见 log 里那段注释)。
     private static let reservedKeys: Set<String> = ["at", "mode", "event", "appState"]
 
@@ -363,6 +377,7 @@ final class WatchNetworkProbe: ObservableObject {
         stopping = false
         consecutiveSendErrors = 0
         pathSatisfied = true
+        streamId = nil
         reconnects = 0
         lastReconnectAt = nil
         lastEchoAt = nil
@@ -612,7 +627,7 @@ final class WatchNetworkProbe: ObservableObject {
             log("audio-active", ["category": "playback", "how": "async activate",
                                  "route": routeNames(session)])
 
-        case .duplexQuiet, .duplexLive, .duplexCall, .loadedCall:
+        case .duplexQuiet, .duplexLive, .duplexCall, .loadedCall, .piRelay:
             // ⚠ **必须先要麦克风权限**，否则 `.playAndRecord` 激活会失败，
             // 而那个失败长得跟"豁免不解禁"一模一样 —— 会把整个实验带偏。
             // 这正是 evidence-quality-lessons 那条「一个信号只有一种解释时
@@ -734,8 +749,20 @@ final class WatchNetworkProbe: ObservableObject {
     // ── WebSocket ──
 
     private func openSocket() {
+        let toPi = mode == .piRelay
+        let endpoint = toPi ? Self.piEndpoint : Self.echoEndpoint
         let options = NWProtocolWebSocket.Options()
         options.autoReplyPing = true
+        if toPi {
+            // ⚠ 取不到 token 就**当场说清**,不要连上去再被 4401 拒 ——
+            // 那种失败长得像"平台问题",而实际是"还没配给过"。
+            guard let token = WatchTokenStore.load() else {
+                log("token-missing")
+                state = .failed("还没配语音 token：去「语音」屏点一次配给")
+                return
+            }
+            options.setAdditionalHeaders([("Authorization", "Bearer " + token)])
+        }
 
         let parameters: NWParameters = .tls
         parameters.defaultProtocolStack.applicationProtocols.insert(options, at: 0)
@@ -745,7 +772,7 @@ final class WatchNetworkProbe: ObservableObject {
         // ⚠ 用 NWConnection 而不是 URLSessionWebSocketTask —— Apple DTS 的 Quinn
         // 点名：watchOS 上「每个 session 都有点像后台 session，实际工作在进程外做」，
         // 所以 URLSession 那条在手表上行为不同，不能拿来判豁免。
-        let made = NWConnection(to: .url(Self.endpoint), using: parameters)
+        let made = NWConnection(to: .url(endpoint), using: parameters)
         connection = made
 
         made.stateUpdateHandler = { [weak self] newState in
@@ -795,7 +822,7 @@ final class WatchNetworkProbe: ObservableObject {
     }
 
     private func receiveNext(on connection: NWConnection) {
-        connection.receiveMessage { [weak self] _, _, _, error in
+        connection.receiveMessage { [weak self] data, _, _, error in
             Task { @MainActor in
                 guard let self else { return }
                 if let error {
@@ -814,6 +841,25 @@ final class WatchNetworkProbe: ObservableObject {
                     }
                 }
                 self.lastEchoAt = now
+                // ⚠ Pi 的 hello 里带着**这条连接专用**的 streamId。
+                // 用上一条连接的会被判 FOREIGN 静默丢掉 —— 表现为「连着但
+                // 对面听不见」,是这条链路上最难查的一种失败。所以每次
+                // 收到 hello 都覆盖,重连之后自然拿到新的。
+                if let data, let text = String(data: data, encoding: .utf8),
+                   text.hasPrefix("{"),
+                   let object = try? JSONSerialization.jsonObject(with: data),
+                   let row = object as? [String: Any] {
+                    if let stream = row["streamId"] as? String {
+                        self.streamId = WatchVoiceWire.streamIdBytes(stream)
+                        self.log("stream-id", ["ok": self.streamId != nil,
+                                               "raw": stream])
+                    }
+                    // 服务端的错误原文照抄 —— 它是中文的,本来就写给人看。
+                    if let code = row["code"] as? String {
+                        self.log("relay-error", ["why": code,
+                                                 "message": row["message"] as? String ?? ""])
+                    }
+                }
                 self.echoes += 1
                 // 每 10 次记一条就够 —— 密了会把「断在哪一刻」淹掉。
                 if self.echoes % 10 == 1 { self.log("echo", ["n": self.echoes]) }
@@ -886,7 +932,28 @@ final class WatchNetworkProbe: ObservableObject {
                 n += 1
 
                 let data: Data
-                if filler.isEmpty {
+                if plan.payloadBytes == WatchVoiceWire.frameBytes {
+                    // H 档：真帧。⚠ 没拿到 streamId 就**不发** —— 发出去也会被
+                    // 判 FOREIGN 静默丢掉,而"发了但对面收不到"比"没发"难查得多。
+                    guard let stream = self.streamId else {
+                        if n % 50 == 1 { self.log("waiting-stream-id") }
+                        continue
+                    }
+                    // 近静音而不是真零:跟播放那边同一个理由,零流有可能被
+                    // 当成"没在发"。内容不重要,大小和节奏才是被测的东西。
+                    let payload = Data(repeating: n % 2 == 0 ? 0x01 : 0xFF,
+                                       count: WatchVoiceWire.payloadBytes)
+                    guard let frame = WatchVoiceWire.encode(
+                        streamId: stream,
+                        sequence: UInt32(truncatingIfNeeded: n),
+                        timestampUs: UInt64(n) * WatchVoiceWire.frameDurationUs,
+                        payload: payload)
+                    else {
+                        self.log("encode-failed", ["n": n])
+                        continue
+                    }
+                    data = frame
+                } else if filler.isEmpty {
                     let payload = ["n": n, "appState": Self.appStateName()] as [String: Any]
                     guard let encoded = try? JSONSerialization.data(withJSONObject: payload)
                     else { continue }

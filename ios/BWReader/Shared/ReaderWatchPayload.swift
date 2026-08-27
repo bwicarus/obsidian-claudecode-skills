@@ -121,8 +121,17 @@ enum ReaderWatchCommand: String, Codable {
     case voiceStop = "voice-stop"
     /// 手表主动要一份最新快照（下拉刷新、或刚打开 app）。
     case refresh = "refresh"
+    /// 手表要一把语音桥的 token。
+    ///
+    /// ⚠ 这是**一次性配给**，不是每次通话的依赖：拿到后存进手表 Keychain，
+    /// 之后通话由手表**直连 Pi**，手机开不开都行。
+    /// 说清这点是因为用户最初的抱怨正是「完全依赖手机 app 是否打开」——
+    /// 卡片/待办确实那样，但语音不是，两条链路别混。
+    case provisionToken = "provision-token"
 
     static let key = "command"
+    /// 配给回复里放 token 的键。
+    static let tokenKey = "watchVoiceToken"
 }
 
 /// 快照的序列化。**必须放在 Shared/**：手机侧要 encode、手表侧要 decode，

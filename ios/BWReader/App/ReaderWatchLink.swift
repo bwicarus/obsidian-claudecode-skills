@@ -187,6 +187,22 @@ final class ReaderWatchLink: NSObject, ObservableObject {
             await onVoiceStart?()
         case .voiceStop:
             await onVoiceStop?()
+        case .provisionToken:
+            // ⚠ 这一条**不需要前台**：它只是拿 cookie 打一次 Pi，不碰麦克风。
+            // 所以它跟上面 voiceStart 那条限制无关，被后台唤醒时照样能做。
+            var snapshot = WatchSnapshotCoder.encode(currentSnapshot()) ?? [:]
+            do {
+                snapshot[ReaderWatchCommand.tokenKey] =
+                    try await ReaderWatchTokenProvisioning.fetchToken()
+            } catch {
+                // 原文透出：「还没登录」和「Pi 上还没配」是两件事，
+                // 折成一句"配给失败"，用户就不知道该去做什么。
+                let why = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+                snapshot["commandError"] = why
+                ReaderWatchLinkDiagnostics.note("手表 token 配给失败：" + why)
+            }
+            return snapshot
         case .refresh, .none:
             break                       // 下面统一回一份最新快照
         }

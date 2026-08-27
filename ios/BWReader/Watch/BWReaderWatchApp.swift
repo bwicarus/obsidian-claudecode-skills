@@ -265,6 +265,27 @@ struct VoiceView: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
+                    // ── 一次性配给 ──
+                    // ⚠ 这跟上面那个开关是**两条完全不同的链路**：
+                    // 开关是遥控手机（手机不在前台就用不了）；
+                    // 配给是把 token 存进手表 Keychain，配好之后语音由手表
+                    // **直连 Pi**，手机开不开都行。
+                    // 用户最初的抱怨正是「完全依赖手机 app 是否打开」，
+                    // 所以这两件事必须在界面上就分得开。
+                    Divider()
+                    let provisioned = WatchTokenStore.load() != nil
+                    Text(provisioned
+                         ? "✅ 语音 token 已配好（直连，不经手机）"
+                         : "⚠️ 还没配语音 token")
+                        .font(.system(size: 10))
+                        .foregroundStyle(provisioned ? .secondary : .orange)
+                    Button(provisioned ? "重新配给" : "配给语音 token") {
+                        link.send(.provisionToken)
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.system(size: 12))
+                    Divider()
+
                     Button {
                         link.send(link.snapshot.voice.active
                                   ? .voiceStop : .voiceStart)

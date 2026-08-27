@@ -700,6 +700,46 @@ def voice_ping():
     return jsonify({"ok": True, "has_gcp_key": bool(_gcp_key()), "ffmpeg": _has_ffmpeg()})
 
 
+@bp.route("/watch-token")
+def voice_watch_token():
+    """把手表语音桥的 token 发给**已登录**的手机，由手机转存进手表 Keychain。
+
+    ## 为什么需要这条路由
+
+    手表上没有键盘也没有登录界面，token 只能由别人送进去。而手机本来就持有
+    Pi 的会话 cookie —— 复用它，不必再造一套配对流程。
+
+    ## ⚠ 这把 token 的分量
+
+    它能启动电脑上的语音助手并双向串音频。**被偷等于一条通到用户 PC 的活麦。**
+    所以：只对已登录会话发；`Cache-Control: no-store` 不许任何中间层留副本；
+    响应里只有 token 本身，不带用户名之类可用于关联的东西。
+
+    ⚠ 刻意**不做**「每次访问轮换」：手表和手机各存一份，轮换会让另一份在下次
+    通话时静默失效，而那种失效在表上表现为「按了没反应」。要作废就作废得干脆 ——
+    删掉 Pi 上那个文件，两边一起失效，而且下次取的时候会明确报错。
+    """
+    if not _logged_in():
+        return jsonify({"ok": False, "error": "未登录"}), 401
+    path = Path(
+        os.environ.get("WATCH_VOICE_TOKEN_FILE")
+        or (Path.home() / ".config" / "watch-voice-token")
+    ).expanduser()
+    try:
+        token = path.read_text("utf-8").strip()
+    except Exception as error:            # noqa: BLE001
+        # 说清是"还没配"而不是"坏了"——两者该做的事完全不同。
+        return jsonify({
+            "ok": False,
+            "error": "Pi 上还没有手表 token(%s)" % type(error).__name__,
+        }), 503
+    if len(token) < 32:
+        return jsonify({"ok": False, "error": "Pi 上的手表 token 太短,拒绝下发"}), 503
+    response = jsonify({"ok": True, "token": token})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @bp.route("/prewarm", methods=["POST"])
 def voice_prewarm():
     """聆听开始→预热待命大脑;聆听结束→回收,不长期空挂。fire-and-forget。"""
