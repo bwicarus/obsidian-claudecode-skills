@@ -336,8 +336,12 @@ struct ProbeView: View {
                     statusLine
 
                     if case .idle = probe.state {
-                        Text("挑一档开始。先跑 A 确认探针本身是好的。")
-                            .font(.system(size: 11))
+                        // ⚠ 第一轮实测里 D/E 两个负对照**都没有失败**，
+                        // 最可能是被前面跑过的档留下的音频会话搭了便车。
+                        // 负对照一旦没失败，正面结果就什么都证明不了 ——
+                        // 所以把测试顺序直接写在按钮上方，而不是指望人记得。
+                        Text("先测 F。\n要测 D/E 请**先杀掉 app 重开**，它们必须是本次启动第一个跑的。")
+                            .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                         ForEach(WatchNetworkProbe.Mode.allCases) { mode in
                             Button {

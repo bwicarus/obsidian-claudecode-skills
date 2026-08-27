@@ -27,22 +27,45 @@ import WatchKit
 /// 所以 `.syncTrap` 这一档是**负对照**：它应当失败。它失败才证明这套探针
 /// 真的在测豁免，而不是在测别的什么东西。
 ///
+/// ## 📋 2026-08-27 第一轮真机实测结果（决定了第二版长什么样）
+///
+/// **A/B/C/D/E 全部连上，包括两个负对照。** 然后：
+///
+/// > **一息屏或者切后台就断**（`POSIXErrorCode 57: Socket is not connected`）。
+///
+/// 两条结论，第二条才是要害：
+///
+/// 1. **负对照没失败 → 这一轮不能把「连上」归因于音频豁免。**
+///    最可能是测试顺序污染（先跑了 A，音频会话在进程里留下状态，后面搭便车）。
+///    ⚠ 所以 D/E 必须在**刚打开 app、还没跑过任何其它档**时第一个测。
+/// 2. **前台能连、后台就断** —— 这才是决定设计成不成立的那条。
+///
+/// 而第一版有个盲点让第 2 条没法往下查：**它分不清「豁免被收回」和「进程被
+/// 挂起」**。第二版加了 `NWPathMonitor`（TN3135 点名：被拦时恒 `.unsatisfied`）
+/// 来区分。
+///
+/// 还有个更可能的直接原因：**第一版从头到尾没有真的"播放"过声音**。
+/// `UIBackgroundModes: [audio]` 的保活语义是「app **正在播放**音频时给额外
+/// 运行时」，而 C 档只装了输入 tap（只录不放）。所以第二版加了 `.duplexCall`：
+/// 边放（近静音循环）边录 —— 这也正是一通真通话的形状。
+///
 /// ## ⚠ 为什么必须有对照组
 ///
 /// 只测「我们要的那一档」是不够的：它失败时分不清是 `.playAndRecord` 不行、
-/// 还是构建/网络/服务端哪里坏了。所以五档里有一正两负：
+/// 还是构建/网络/服务端哪里坏了。所以：
 ///
-/// | 档 | 作用 | 预期 |
+/// | 档 | 作用 | 实测 |
 /// |---|---|---|
-/// | `.playbackControl` | **正对照** —— 参考实现的原配置 | 应当通 |
-/// | `.duplexQuiet` | 我们要的：双工会话，不跑引擎 | ? |
-/// | `.duplexLive` | 我们要的：双工会话 + 麦克风真的在跑 | ? |
-/// | `.syncTrap` | **负对照** —— 同样配置但用同步 setActive | 应当失败 |
-/// | `.noAudio` | **负对照** —— 完全不碰音频会话 | 应当失败 |
+/// | `.duplexCall` | **主力** —— 边放边录，真通话的形状 | 第二版新增 |
+/// | `.playbackControl` | **正对照** —— 参考实现的原配置 | 前台通 |
+/// | `.duplexQuiet` | 双工会话，不跑引擎 | 前台通，后台断 |
+/// | `.duplexLive` | 双工会话 + 只录不放 | 前台通，后台断 |
+/// | `.syncTrap` | **负对照** —— 同步 setActive | ⚠ 本该失败，却通了 |
+/// | `.noAudio` | **负对照** —— 完全不碰音频会话 | ⚠ 本该失败，却通了 |
 ///
-/// 两个负对照都失败、正对照通过，中间两档的结果才可信。
 /// 这是 `references/evidence-quality-lessons.md` 那条「一个信号只有一种解释时
-/// 才能单独采」的落地。
+/// 才能单独采」的落地 —— 而第一轮恰好演示了反面：负对照一旦没失败，
+/// 正面结果就**什么都证明不了**。
 ///
 /// ## ⚠ 判据只从落盘的日志读，不从屏幕上读
 ///
@@ -62,9 +85,10 @@ final class WatchNetworkProbe: ObservableObject {
 
     /// 五档配置。顺序即建议的测试顺序：先跑正对照确认探针本身是好的。
     enum Mode: String, CaseIterable, Identifiable {
+        case duplexCall      = "F 边放边录（主力）"
         case playbackControl = "A 正对照·只放"
         case duplexQuiet     = "B 双工·不跑麦"
-        case duplexLive      = "C 双工·麦在跑"
+        case duplexLive      = "C 双工·只录不放"
         case syncTrap        = "D 负对照·同步"
         case noAudio         = "E 负对照·无音频"
 
@@ -73,19 +97,36 @@ final class WatchNetworkProbe: ObservableObject {
         /// 这一档预期是什么结果。写在 UI 上，免得测完了还要回来查文档。
         var expectation: String {
             switch self {
+            case .duplexCall:
+                return "🎯 后台能不能活下来，就看这档"
             case .playbackControl: return "应当连上（参考实现验过）"
-            case .duplexQuiet, .duplexLive: return "未知 —— 这就是要测的"
-            case .syncTrap: return "应当连不上（同步 setActive 的陷阱）"
-            case .noAudio: return "应当连不上（没有豁免）"
+            case .duplexQuiet, .duplexLive: return "前台能连，后台已实测会断"
+            case .syncTrap: return "本该连不上，但 2026-08-27 实测连上了"
+            case .noAudio: return "本该连不上，但 2026-08-27 实测连上了"
+            }
+        }
+
+        /// 要不要跑音频引擎，跑的话放不放声音。
+        var engine: (running: Bool, playing: Bool) {
+            switch self {
+            case .duplexCall: return (true, true)
+            case .duplexLive: return (true, false)
+            default: return (false, false)
             }
         }
     }
 
     enum ProbeError: LocalizedError {
         case microphoneDenied
+        case playbackBufferFailed
         var errorDescription: String? {
-            // 说清该去哪儿修 —— 手表上没有设置入口，光说"失败"用户没法动。
-            "没有麦克风权限，去手机的 Watch App 里开"
+            switch self {
+            case .microphoneDenied:
+                // 说清该去哪儿修 —— 手表上没有设置入口，光说"失败"用户没法动。
+                return "没有麦克风权限，去手机的 Watch App 里开"
+            case .playbackBufferFailed:
+                return "建不出播放缓冲（这一档没测成，不是豁免的结论）"
+            }
         }
     }
 
@@ -107,10 +148,17 @@ final class WatchNetworkProbe: ObservableObject {
 
     private var connection: NWConnection?
     private var engine: AVAudioEngine?
+    private var player: AVAudioPlayerNode?
     private var beat: Task<Void, Never>?
     private var startedAt: Date?
     private var echoes = 0
     private var audioActivated = false
+    /// ⚠ 这个是第二版加的，用来**分辨两种长得一样的失败**：
+    /// 「豁免被系统收回」还是「进程被挂起」。TN3135 点名：被拦时 path 恒
+    /// `.unsatisfied`。如果息屏后日志里出现 unsatisfied → 是豁免没了；
+    /// 如果日志直接断掉、恢复前台才继续 → 是进程被挂起。
+    /// 这两件事的修法完全不同，第一版分不出来，等于白测一半。
+    private var pathMonitor: NWPathMonitor?
 
     private static let endpoint = URL(string: "wss://echo.websocket.org")!
     /// 心跳间隔。2 秒是权衡：够密才能看清「哪一刻断的」，又不至于把日志淹掉。
@@ -193,7 +241,34 @@ final class WatchNetworkProbe: ObservableObject {
             state = .failed("音频会话没起来：\(error.localizedDescription)")
             return
         }
+        startPathMonitor()
         openSocket()
+    }
+
+    /// 监视网络路径。
+    ///
+    /// ⚠ 这是第二版补的**诊断出口**，它回答第一版回答不了的那个问题：
+    /// 息屏之后断掉，到底是「豁免被收回」还是「进程被挂起」？
+    ///
+    /// - 日志里出现 `path unsatisfied` → **豁免被收回**（TN3135 点名的形态），
+    ///   要改的是音频会话怎么维持；
+    /// - 日志直接断在息屏那一刻、恢复前台才继续 → **进程被挂起**，
+    ///   要改的是后台模式怎么声明。
+    ///
+    /// 两者的修法完全不同，分不清就只能瞎试。
+    private func startPathMonitor() {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor in
+                self?.log("path", [
+                    "status": String(describing: path.status),
+                    // 被拦时恒 unsatisfied，所以这一位单独拎出来。
+                    "satisfied": path.status == .satisfied,
+                ])
+            }
+        }
+        monitor.start(queue: .main)
+        pathMonitor = monitor
     }
 
     /// 按当前档位准备音频会话。
@@ -213,7 +288,7 @@ final class WatchNetworkProbe: ObservableObject {
             log("audio-active", ["category": "playback", "how": "async activate",
                                  "route": routeNames(session)])
 
-        case .duplexQuiet, .duplexLive:
+        case .duplexQuiet, .duplexLive, .duplexCall:
             // ⚠ **必须先要麦克风权限**，否则 `.playAndRecord` 激活会失败，
             // 而那个失败长得跟"豁免不解禁"一模一样 —— 会把整个实验带偏。
             // 这正是 evidence-quality-lessons 那条「一个信号只有一种解释时
@@ -231,7 +306,8 @@ final class WatchNetworkProbe: ObservableObject {
             audioActivated = true
             log("audio-active", ["category": "playAndRecord", "mode": "voiceChat",
                                  "how": "async activate", "route": routeNames(session)])
-            if mode == .duplexLive { try startEngine() }
+            let plan = mode.engine
+            if plan.running { try startEngine(playing: plan.playing) }
 
         case .syncTrap:
             // 同上：先排除权限这个干扰项，否则失败有两种解释。
@@ -255,22 +331,77 @@ final class WatchNetworkProbe: ObservableObject {
         session.currentRoute.outputs.map(\.portName)
     }
 
-    /// 真的把麦克风跑起来（C 档）。
+    /// 让音频真的流动起来。
     ///
-    /// 有一种可能是「活动会话」还不够、要真的有音频在流动。参考实现那条
-    /// `4e322c1 Remove unneeded audio playback` 说明对 `.playback` 不需要，
-    /// 但对 `.playAndRecord` 没人验过 —— 所以 B 和 C 分开测。
-    private func startEngine() throws {
+    /// - Parameter playing: 除了录，是否**同时持续播放**一段近静音。
+    ///
+    /// ## ⚠ 为什么「播放」是单独一个变量（2026-08-27 实测倒逼出来的）
+    ///
+    /// 第一版探针只装了输入 tap（**只录不放**），实测结果是：前台连得上，
+    /// **一息屏或切后台就断**（POSIX 57 Socket is not connected）。
+    ///
+    /// 而 `UIBackgroundModes: [audio]` 的保活语义是「app **正在播放**音频时
+    /// 给额外运行时」—— 只录不放很可能压根不满足它。参考实现那条
+    /// `4e322c1 Remove unneeded audio playback` 移除的正是一段持续的近静音
+    /// 循环，它敢标 "unneeded" 是**因为那个 demo 只在前台跑**。
+    ///
+    /// 我们要的恰恰是后台存活，所以那段不是多余的，是必需的。
+    ///
+    /// ⚠ 音量不能是**真正的**零：系统对完全无声的流有可能不认账。
+    /// 用一个听不见但非零的幅度。
+    private func startEngine(playing: Bool) throws {
         let made = AVAudioEngine()
+
         let input = made.inputNode
         input.installTap(onBus: 0, bufferSize: 1024,
                          format: input.outputFormat(forBus: 0)) { _, _ in
-            // 刻意什么都不做：这里只是让音频真的流动起来。
+            // 刻意什么都不做：这里只是让采集真的在跑。
             // **绝不把音频写进日志或送出去** —— 这是个网络探针，不是录音机。
         }
+
+        if playing {
+            let player = AVAudioPlayerNode()
+            made.attach(player)
+            let format = made.outputNode.inputFormat(forBus: 0)
+            made.connect(player, to: made.mainMixerNode, format: format)
+            guard let buffer = Self.nearSilentBuffer(format: format) else {
+                throw ProbeError.playbackBufferFailed
+            }
+            try made.start()
+            // 循环播放，永不结束 —— 一旦停了，保活的前提就没了。
+            player.scheduleBuffer(buffer, at: nil, options: .loops)
+            player.play()
+            self.player = player
+            engine = made
+            log("engine-started", ["playing": true,
+                                   "sampleRate": format.sampleRate])
+            return
+        }
+
         try made.start()
         engine = made
-        log("engine-started")
+        log("engine-started", ["playing": false])
+    }
+
+    /// 一段听不见但**不是零**的缓冲。
+    ///
+    /// 幅度取 1/32768（16 位量化的最小一档）：人耳听不到，但它是真实的样本
+    /// 而不是静音，系统不会把它当成"没在播"。
+    private static func nearSilentBuffer(format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let frames = AVAudioFrameCount(format.sampleRate)   // 一秒，循环播
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: format, frameCapacity: frames) else { return nil }
+        buffer.frameLength = frames
+        guard let channels = buffer.floatChannelData else { return nil }
+        let amplitude: Float = 1.0 / 32768.0
+        for channel in 0..<Int(format.channelCount) {
+            let data = channels[channel]
+            for frame in 0..<Int(frames) {
+                // 交替正负，避免变成直流偏置。
+                data[frame] = (frame % 2 == 0) ? amplitude : -amplitude
+            }
+        }
+        return buffer
     }
 
     // ── WebSocket ──
@@ -384,8 +515,12 @@ final class WatchNetworkProbe: ObservableObject {
     private func teardown() {
         beat?.cancel()
         beat = nil
+        pathMonitor?.cancel()
+        pathMonitor = nil
         connection?.cancel()
         connection = nil
+        player?.stop()
+        player = nil
         engine?.stop()
         engine?.inputNode.removeTap(onBus: 0)
         engine = nil
@@ -421,6 +556,9 @@ final class WatchNetworkProbe: ObservableObject {
         /// **这是整个实验的核心问题**：app 已经不在前台时，还有没有心跳。
         var beatsWhileBackground = 0
         var beatsWhileActive = 0
+        /// 网络路径报过 unsatisfied —— TN3135 说豁免被拒时恒是这个状态。
+        /// 有它 = 豁免被收回；没它但日志断掉 = 进程被挂起。**修法不同。**
+        var pathLost = false
 
         var id: String { mode }
 
@@ -428,13 +566,17 @@ final class WatchNetworkProbe: ObservableObject {
         /// 前者要重测，后者是答案。
         var line: String {
             if micDenied { return "⚠️ 麦克风没权限，这一档没测成" }
-            if denied { return "🚫 豁免被拒（这正是 setActive 陷阱的签名）" }
+            if denied { return "🚫 豁免被拒（POSIX 50 签名）" }
             if !connected { return "❌ 没连上（原因见原始日志）" }
             if beatsWhileBackground > 0 {
                 return "✅ 连上了，且**后台仍在跳** \(beatsWhileBackground) 次"
             }
             if heldSeconds < 20 { return "🟡 连上了但很快就停（\(heldSeconds)s），没测到后台" }
-            return "🟡 连上了（\(heldSeconds)s），但全程都在前台 —— 后台没测到"
+            // ⚠ 这两条是第二版才分得开的，也正是整个第二轮要答的问题。
+            if pathLost {
+                return "🔴 连上了但**网络路径被收回**（\(heldSeconds)s）—— 豁免没扛住息屏"
+            }
+            return "🟠 连上了（\(heldSeconds)s），后台无心跳且路径没报错 —— 更像**进程被挂起**"
         }
     }
 
@@ -466,6 +608,10 @@ final class WatchNetworkProbe: ObservableObject {
                 if (row["granted"] as? Bool) == false { verdict.micDenied = true }
             case "waiting":
                 if (row["isDenial"] as? Bool) == true { verdict.denied = true }
+            case "path":
+                // 只认「明确报了不满足」，不把"没记录"当成失去 —— 缺记录
+                // 是另一回事（进程被挂起），两者必须分开。
+                if (row["satisfied"] as? Bool) == false { verdict.pathLost = true }
             case "alive", "echo":
                 // 「后台还在跳」是这份记录里唯一无法从屏幕上取得的信号。
                 if appState == "background" || appState == "inactive" {
