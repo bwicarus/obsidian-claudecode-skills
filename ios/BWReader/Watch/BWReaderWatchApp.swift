@@ -278,7 +278,10 @@ struct VoiceView: View {
                          ? "✅ 语音 token 已配好（直连，不经手机）"
                          : "⚠️ 还没配语音 token")
                         .font(.system(size: 10))
-                        .foregroundStyle(provisioned ? .secondary : .orange)
+                        // ⚠ 两边必须是同一个类型：`.secondary` 是
+                        // HierarchicalShapeStyle 而 `.orange` 是 Color，
+                        // 混着写编译不过。统一成 Color。
+                        .foregroundStyle(provisioned ? Color.secondary : Color.orange)
                     Button(provisioned ? "重新配给" : "配给语音 token") {
                         link.send(.provisionToken)
                     }
