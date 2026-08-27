@@ -1,6 +1,7 @@
 #if os(watchOS)
 
 import AVFoundation
+import Combine
 import Foundation
 import Network
 import WatchKit
@@ -57,8 +58,7 @@ import WatchKit
 /// 打的是公共 echo 服务（跟参考实现同一个）。**只发序号和 app 状态**，不发
 /// 音频、不发任何个人数据。这样也就不需要在 Pi 上开端口、不需要动 Funnel。
 @MainActor
-@Observable
-final class WatchNetworkProbe {
+final class WatchNetworkProbe: ObservableObject {
 
     /// 五档配置。顺序即建议的测试顺序：先跑正对照确认探针本身是好的。
     enum Mode: String, CaseIterable, Identifiable {
@@ -100,10 +100,10 @@ final class WatchNetworkProbe {
         case stopped(echoes: Int, heldSeconds: Int)
     }
 
-    private(set) var state: State = .idle
-    private(set) var mode: Mode = .playbackControl
+    @Published private(set) var state: State = .idle
+    @Published private(set) var mode: Mode = .playbackControl
     /// 屏幕上滚动显示的最近几行。**只是给人看的**，判据在文件里。
-    private(set) var tail: [String] = []
+    @Published private(set) var tail: [String] = []
 
     private var connection: NWConnection?
     private var engine: AVAudioEngine?

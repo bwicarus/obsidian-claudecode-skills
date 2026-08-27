@@ -327,7 +327,7 @@ enum WatchTime {
 // 恰恰是"放下手腕、按数码表冠之后还活不活着"，那时候没人在看屏幕。
 
 struct ProbeView: View {
-    @State private var probe = WatchNetworkProbe()
+    @StateObject private var probe = WatchNetworkProbe()
 
     var body: some View {
         NavigationStack {

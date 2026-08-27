@@ -41,7 +41,10 @@ final class BWReaderAppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions options:
             [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        ReaderWatchLink.shared.activateFromLaunch()
+        // ⚠ 静态调用，**不是** `.shared.` —— `activateFromLaunch` 声明成
+        // `nonisolated static` 正是为了能在这里（不在 MainActor 上）直接调。
+        // 真正的激活在它内部切回主线程做。
+        ReaderWatchLink.activateFromLaunch()
         return true
     }
 }
