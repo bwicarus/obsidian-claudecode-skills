@@ -240,6 +240,9 @@ final class WatchNetworkProbe: ObservableObject {
     private var watchdog: Task<Void, Never>?
     /// 整轮里最长的一段没有回声。**这是「它冻住了」唯一能量化的证据。**
     private var longestSilence: TimeInterval = 0
+    private var audioObservers: [NSObjectProtocol] = []
+    /// 上一次看到的引擎状态。只在**变化**时记日志。
+    private var engineWasRunning = false
     /// ⚠ 这个是第二版加的，用来**分辨两种长得一样的失败**：
     /// 「豁免被系统收回」还是「进程被挂起」。TN3135 点名：被拦时 path 恒
     /// `.unsatisfied`。如果息屏后日志里出现 unsatisfied → 是豁免没了；
@@ -327,6 +330,7 @@ final class WatchNetworkProbe: ObservableObject {
         lastEchoAt = nil
         stallReported = false
         longestSilence = 0
+        engineWasRunning = false
         startedAt = Date()
         log("start", ["expect": picked.expectation])
         Task { await run() }
@@ -343,8 +347,79 @@ final class WatchNetworkProbe: ObservableObject {
             return
         }
         startPathMonitor()
+        startAudioObservers()
         startWatchdog()
         openSocket()
+    }
+
+    /// 盯住音频会话本身。
+    ///
+    /// ## ⚠ 为什么这层不能少（2026-08-27 第四轮之后补的）
+    ///
+    /// 用户报告「息屏再打开后数字停止变化但没有报错」，并怀疑是某种后台
+    /// 回收。这个怀疑指向一条我原本完全没观测的链：
+    ///
+    ///   息屏 → 系统事件中断音频 → **引擎停了** → 活动音频会话没了
+    ///        → **豁免随之消失** → 网络悄悄不动了
+    ///
+    /// **这正好解释了「没有报错」**：网络层根本没出错，是音频先停的。
+    /// 而早先调研里有一条对得上 —— 中断发生时 app 在后台的话，系统回收
+    /// 音频会激进得多，中断结束后往往无法在后台恢复。
+    ///
+    /// 少了这层，「冻住了」只是一个现象；有了它，才能变成
+    /// 「冻住了**而且当时引擎已经停了**」—— 那才是能定因的证据。
+    private func startAudioObservers() {
+        stopAudioObservers()
+        let center = NotificationCenter.default
+        let session = AVAudioSession.sharedInstance()
+
+        func observe(_ name: Notification.Name, _ label: String) {
+            let token = center.addObserver(
+                forName: name, object: session, queue: .main
+            ) { [weak self] note in
+                Task { @MainActor in
+                    var extra: [String: Any] = [:]
+                    // 中断类型原样记下来：began / ended 的含义完全不同，
+                    // 折成一个布尔就分不出「正在被打断」和「打断结束了」。
+                    if let raw = note.userInfo?[
+                        AVAudioSessionInterruptionTypeKey] as? UInt {
+                        extra["interruptionType"] = raw
+                    }
+                    if let raw = note.userInfo?[
+                        AVAudioSessionRouteChangeReasonKey] as? UInt {
+                        extra["routeChangeReason"] = raw
+                    }
+                    self?.log("audio-" + label, extra)
+                }
+            }
+            audioObservers.append(token)
+        }
+
+        observe(AVAudioSession.interruptionNotification, "interruption")
+        observe(AVAudioSession.routeChangeNotification, "route-change")
+        observe(AVAudioSession.mediaServicesWereResetNotification, "services-reset")
+        observe(AVAudioSession.mediaServicesWereLostNotification, "services-lost")
+    }
+
+    private func stopAudioObservers() {
+        for token in audioObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        audioObservers = []
+    }
+
+    /// 引擎和播放器现在还在跑吗。
+    ///
+    /// ⚠ **通知不一定会来**。引擎可能被系统悄悄停掉而不发任何通知 ——
+    /// 所以除了监听事件，还要**主动去问**。这跟 silent-failure-lessons
+    /// 那条「每个提前退出都要出声」是同一件事：不能只等着别人告诉你。
+    private func audioSnapshot() -> [String: Any] {
+        [
+            "engineRunning": engine?.isRunning ?? false,
+            "playerPlaying": player?.isPlaying ?? false,
+            "sessionOutputs": AVAudioSession.sharedInstance()
+                .currentRoute.outputs.map(\.portName),
+        ]
     }
 
     /// 看门狗：**没有回声也要出声**。
@@ -370,7 +445,23 @@ final class WatchNetworkProbe: ObservableObject {
                     self.lastEchoAt ?? self.startedAt ?? Date())
                 if since > 5, !self.stallReported {
                     self.stallReported = true
-                    self.log("stalled", ["silentSeconds": Int(since)])
+                    // ⚠ 静默那一刻的**音频状态**是全场最关键的一条关联证据：
+                    // 引擎还在跑 → 豁免应该还在,冻住的是别的东西；
+                    // 引擎停了   → 就是它,豁免随音频一起没了。
+                    // 两者的修法完全不同,所以必须同时记。
+                    var extra: [String: Any] = ["silentSeconds": Int(since)]
+                    self.audioSnapshot().forEach { extra[$0.key] = $0.value }
+                    self.log("stalled", extra)
+                }
+                // 主动查引擎：它可能被系统停掉而**不发任何通知**。
+                // 只在状态**变化**时记,否则会把日志淹掉。
+                if self.mode.engine.running {
+                    let running = self.engine?.isRunning ?? false
+                    if running != self.engineWasRunning {
+                        self.engineWasRunning = running
+                        self.log(running ? "engine-resumed" : "engine-stopped",
+                                 self.audioSnapshot())
+                    }
                 }
                 // 让屏幕上的秒数走起来 —— 陈旧必须看得见。
                 self.objectWillChange.send()
@@ -516,14 +607,17 @@ final class WatchNetworkProbe: ObservableObject {
             player.play()
             self.player = player
             engine = made
+            engineWasRunning = made.isRunning
             log("engine-started", ["playing": true,
-                                   "sampleRate": format.sampleRate])
+                                   "sampleRate": format.sampleRate,
+                                   "running": made.isRunning])
             return
         }
 
         try made.start()
         engine = made
-        log("engine-started", ["playing": false])
+        engineWasRunning = made.isRunning
+        log("engine-started", ["playing": false, "running": made.isRunning])
     }
 
     /// 一段听不见但**不是零**的缓冲。
@@ -748,6 +842,7 @@ final class WatchNetworkProbe: ObservableObject {
         beat = nil
         watchdog?.cancel()
         watchdog = nil
+        stopAudioObservers()
         pathMonitor?.cancel()
         pathMonitor = nil
         connection?.cancel()
@@ -806,6 +901,14 @@ final class WatchNetworkProbe: ObservableObject {
         /// 两个数一起看才知道是"卡一下又好了"还是"卡了就再没起来"。
         var stalls = 0
         var resumes = 0
+        /// 音频引擎中途停过。**这是能定因的那一条**：
+        /// 冻住时引擎还在跑 = 豁免应该还在,问题在别处；
+        /// 冻住时引擎已停   = 就是它,豁免随音频一起没了。
+        var engineStopped = false
+        /// 收到过音频中断/服务重置这类系统事件。
+        var audioEvents = 0
+        /// 静默那一刻引擎在不在跑（看门狗随 stalled 一起记的关联证据）。
+        var engineRunningAtStall: Bool?
         /// 运行**中**的第一个发送失败（不含收尾时拆连接导致的）。
         var firstErrorAtSeconds: Int?
         var firstErrorWhy: String?
@@ -830,6 +933,16 @@ final class WatchNetworkProbe: ObservableObject {
             if stalls > 0 {
                 let ending = resumes > 0
                     ? "又恢复 \(resumes) 次" : "**再没恢复**"
+                // ⚠ 有引擎状态就先报它 —— 那是能定因的一条,
+                // 「冻了几次」只是现象。
+                if engineRunningAtStall == false {
+                    return "🔴 冻住时**音频引擎已经停了** —— 豁免随音频一起没的"
+                        + "（\(stalls) 次，最长 \(longestSilence)s，\(ending)）"
+                }
+                if engineRunningAtStall == true {
+                    return "🟠 冻住时**引擎还在跑** —— 不是音频的锅，问题在别处"
+                        + "（\(stalls) 次，最长 \(longestSilence)s，\(ending)）"
+                }
                 return "🔴 中途冻住 \(stalls) 次（最长静默 \(longestSilence)s），\(ending)"
             }
             if longestSilence > 5 {
@@ -898,8 +1011,18 @@ final class WatchNetworkProbe: ObservableObject {
                     verdict.firstErrorAtSeconds = (row["atSeconds"] as? Int) ?? 0
                     verdict.firstErrorWhy = row["why"] as? String
                 }
+            case "engine-stopped":
+                verdict.engineStopped = true
+            case "audio-interruption", "audio-services-reset",
+                 "audio-services-lost":
+                verdict.audioEvents += 1
             case "stalled":
                 verdict.stalls += 1
+                // ⚠ 只取**第一次**静默时的引擎状态 —— 后面几次多半是同一个
+                // 原因的回响,而第一次那一刻才是因果发生的地方。
+                if verdict.engineRunningAtStall == nil {
+                    verdict.engineRunningAtStall = row["engineRunning"] as? Bool
+                }
                 verdict.longestSilence = max(
                     verdict.longestSilence, (row["silentSeconds"] as? Int) ?? 0)
             case "resumed":
