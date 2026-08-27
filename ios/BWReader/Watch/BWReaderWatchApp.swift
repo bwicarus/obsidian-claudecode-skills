@@ -395,6 +395,14 @@ struct ProbeView: View {
                                 Text("前台 \(verdict.beatsWhileActive) · 后台 \(verdict.beatsWhileBackground) · \(verdict.heldSeconds)s")
                                     .font(.system(size: 8, design: .monospaced))
                                     .foregroundStyle(.tertiary)
+                                // ⚠ 吞吐单独一行：它常常**解释**上面那句结论。
+                                // 「后台活下来了」配上「实际只有 16Hz」，
+                                // 意思跟配上「实际 50Hz」完全不同。
+                                if !verdict.throughput.isEmpty {
+                                    Text(verdict.throughput)
+                                        .font(.system(size: 8, design: .monospaced))
+                                        .foregroundStyle(.tertiary)
+                                }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                         }

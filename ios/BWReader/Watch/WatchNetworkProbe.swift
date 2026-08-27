@@ -81,6 +81,30 @@ import WatchKit
 /// 才能单独采」的落地 —— 而第一轮恰好演示了反面：负对照一旦没失败，
 /// 正面结果就**什么都证明不了**。
 ///
+/// ## 📋 2026-08-27 第三轮：G 档的数字读不出结论（三处采集缺陷）
+///
+/// 实测：`撑了 198 秒 · 回声 1005 · send-error #3245`。三个问题一起暴露：
+///
+/// 1. **实际只跑了 16.4 Hz，不是设定的 50 Hz**（3245 包 / 198 秒），
+///    而且**一声不吭**。原因是 `sleep(for:)` 每轮从"现在"重新起算，
+///    循环体耗时和调度延迟一圈圈累积。→ 改成按**绝对时刻**排程
+///    （`sleep(until:clock:)`），追不上时 `pace-lagging` 出声并重新对表
+///    （不重新对表会变成烧 CPU 的空转，那测的就不是通话负载了）。
+/// 2. **唯一那条 send-error 出现在最后一个包上** —— 很可能就是按「停止」时
+///    拆连接的收尾竞态，而不是"跑着跑着断了"。→ 收尾期间的失败改记
+///    `send-error-teardown`，跟运行中的失败分开。
+/// 3. **屏幕上只有包序号，没有错误原文**。`brief()` 写成「有 n 就显示 n」，
+///    于是把唯一能判断的东西折叠掉了 —— 对端限流 / 系统掐了 / 收尾竞态
+///    三种解释都活着，整轮数据白采。→ **原因永远优先于序号。**
+///
+/// ⚠ 三处都是同一个毛病：**采集时把能分辨的信息丢了**。分析层再怎么写
+/// 也救不回来（`evidence-quality-lessons.md`）。
+///
+/// ⚠ 还有一条没解决的：回声率 31%。打的是免费公共 echo 服务，
+/// 50 包/秒很可能触发它的限流 —— 那样的话失败**归因于对端而不是 watchOS**。
+/// 下一轮先看错误原文：说"连接被重置"就是对端，说别的才轮到平台。
+/// 真要定论得换成自己的端点（Pi 的 Funnel），但在知道需要之前不先要基础设施。
+///
 /// ## ⚠ 判据只从落盘的日志读，不从屏幕上读
 ///
 /// 挂着 Xcode 调试器时 app 不会被挂起 —— 那测的是调试器不是系统；不挂调试器
@@ -197,6 +221,10 @@ final class WatchNetworkProbe: ObservableObject {
     private var beat: Task<Void, Never>?
     private var startedAt: Date?
     private var echoes = 0
+    private var sent = 0
+    /// 已经进入收尾。收尾时 send 失败是正常的（连接正在被拆），
+    /// 必须跟运行中的失败分开记，否则每一轮都会以一条误导性的错误收场。
+    private var stopping = false
     private var audioActivated = false
     /// ⚠ 这个是第二版加的，用来**分辨两种长得一样的失败**：
     /// 「豁免被系统收回」还是「进程被挂起」。TN3135 点名：被拦时 path 恒
@@ -254,12 +282,23 @@ final class WatchNetworkProbe: ObservableObject {
         }
     }
 
+    /// ⚠ **原因永远优先于序号。**
+    ///
+    /// 第一版写成「有 `n` 就显示 `n`，否则才显示 `why`」，于是 `send-error`
+    /// 两者都有时把**原始错误文本折叠掉了** —— 屏幕上只剩「send-error #3245」，
+    /// 而那个数字回答不了任何问题。2026-08-27 实测就卡在这里：三种解释
+    /// （对端限流 / 系统掐了 / 只是按停止时的收尾竞态）都活着，分不出来。
+    ///
+    /// 这是 `silent-failure-lessons.md` 规则二在自己身上犯了一次：
+    /// **折成简写之前先报原始值。**
     private static func brief(_ event: String, _ extra: [String: Any]) -> String {
         let stamp = DateFormatter.localizedString(
             from: Date(), dateStyle: .none, timeStyle: .medium)
-        if let n = extra["n"] as? Int { return "\(stamp) \(event) #\(n)" }
-        if let why = extra["why"] as? String { return "\(stamp) \(event) \(why)" }
-        return "\(stamp) \(event)"
+        let index = (extra["n"] as? Int).map { " #\($0)" } ?? ""
+        if let why = extra["why"] as? String {
+            return "\(stamp) \(event)\(index) \(why)"
+        }
+        return "\(stamp) \(event)\(index)"
     }
 
     // ── 开始 ──
@@ -269,6 +308,8 @@ final class WatchNetworkProbe: ObservableObject {
         mode = picked
         state = .preparing
         echoes = 0
+        sent = 0
+        stopping = false
         startedAt = Date()
         log("start", ["expect": picked.expectation])
         Task { await run() }
@@ -537,8 +578,37 @@ final class WatchNetworkProbe: ObservableObject {
             let filler = plan.payloadBytes > 0
                 ? Data(repeating: 0x5A, count: plan.payloadBytes) : Data()
 
+            // ⚠ **按绝对时刻排程，不要 `sleep(for:)` 累加。**
+            // 2026-08-27 实测：设 50 Hz 只跑出 16.4 Hz —— `sleep(for:)` 每轮都
+            // 从"现在"重新起算，于是循环体的耗时和调度延迟一圈圈累积。
+            // 更糟的是它**一声不吭**：屏幕上写着 50 Hz，实际三分之一，
+            // 而拿这个数据去推真通话是错的。
+            let clock = ContinuousClock()
+            var due = clock.now
+            var lagWarned = false
+
             while !Task.isCancelled {
-                try? await Task.sleep(for: interval)
+                due = due.advanced(by: interval)
+                let now = clock.now
+                if due < now {
+                    // 追不上了。**说出来**，然后重新对表 —— 不重新对表的话
+                    // 后面每次 sleep 都立刻返回，变成烧 CPU 的空转，
+                    // 那测的就不是通话负载而是死循环了。
+                    let behind = now - due
+                    due = now.advanced(by: interval)
+                    if let self, !lagWarned {
+                        lagWarned = true
+                        self.log("pace-lagging", [
+                            "targetHertz": plan.hertz,
+                            "behindMillis": Int(behind.components.attoseconds
+                                                / 1_000_000_000_000_000)
+                                + Int(behind.components.seconds) * 1000,
+                            "atPacket": n,
+                        ])
+                    }
+                } else {
+                    try? await Task.sleep(until: due, clock: clock)
+                }
                 guard let self, let connection = self.connection else { return }
                 n += 1
 
@@ -555,11 +625,17 @@ final class WatchNetworkProbe: ObservableObject {
                 let meta = NWProtocolWebSocket.Metadata(
                     opcode: filler.isEmpty ? .text : .binary)
                 let context = NWConnection.ContentContext(identifier: "beat", metadata: [meta])
+                self.sent = n
                 connection.send(content: data, contentContext: context,
                                 isComplete: true, completion: .contentProcessed { error in
                     if let error {
                         Task { @MainActor in
-                            self.log("send-error", ["n": n, "why": String(describing: error)])
+                            // 收尾期间的失败单独标记 —— 那是拆连接的正常结果，
+                            // 不是「跑着跑着断了」。混在一起会让整轮读不出结论。
+                            self.log(self.stopping ? "send-error-teardown" : "send-error",
+                                     ["n": n, "why": String(describing: error),
+                                      "atSeconds": Int(Date().timeIntervalSince(
+                                          self.startedAt ?? Date()))])
                         }
                     }
                 })
@@ -575,8 +651,17 @@ final class WatchNetworkProbe: ObservableObject {
     // ── 停止 ──
 
     func stop() {
+        // ⚠ 先立起这面旗再拆 —— 拆连接会让正在飞的 send 失败，
+        // 那个失败必须能跟「运行中真的出错」分开。2026-08-27 实测里唯一那条
+        // send-error 就出现在最后一个包上，很可能就是这个收尾竞态，
+        // 而当时的记录分不出来，于是整轮数据读不出结论。
+        stopping = true
         let held = Int(Date().timeIntervalSince(startedAt ?? Date()))
-        log("stop", ["echoes": echoes, "heldSeconds": held])
+        let hertz = held > 0 ? Double(sent) / Double(held) : 0
+        log("stop", ["echoes": echoes, "sent": sent, "heldSeconds": held,
+                     // 实际达到的速率。⚠ 别假设它等于设定值：Task.sleep 在
+                     // 循环里有调度开销，实测只有设定值的三分之一左右。
+                     "achievedHertz": (hertz * 10).rounded() / 10])
         state = .stopped(echoes: echoes, heldSeconds: held)
         teardown()
     }
@@ -628,6 +713,14 @@ final class WatchNetworkProbe: ObservableObject {
         /// 网络路径报过 unsatisfied —— TN3135 说豁免被拒时恒是这个状态。
         /// 有它 = 豁免被收回；没它但日志断掉 = 进程被挂起。**修法不同。**
         var pathLost = false
+        var sent = 0
+        /// 实际达到的发包速率。⚠ 别假设它等于设定值 —— 2026-08-27 实测
+        /// 设 50 Hz 只跑出 16.4 Hz（Task.sleep 在循环里的调度开销）。
+        /// 真实现要靠**音频 tap 驱动节奏**，它本来就按缓冲区回调。
+        var achievedHertz = 0.0
+        /// 运行**中**的第一个发送失败（不含收尾时拆连接导致的）。
+        var firstErrorAtSeconds: Int?
+        var firstErrorWhy: String?
 
         var id: String { mode }
 
@@ -637,15 +730,30 @@ final class WatchNetworkProbe: ObservableObject {
             if micDenied { return "⚠️ 麦克风没权限，这一档没测成" }
             if denied { return "🚫 豁免被拒（POSIX 50 签名）" }
             if !connected { return "❌ 没连上（原因见原始日志）" }
+            // ⚠ 运行**中**出错优先报，而且**原文照抄**。第三版之前这里只显示
+            // 包序号，于是三种解释（对端限流 / 系统掐了 / 收尾竞态）分不出来，
+            // 整轮数据白采。收尾时的失败已在采集侧另记，不会走到这。
+            if let at = firstErrorAtSeconds {
+                return "🔴 第 \(at)s 起发送失败：\(firstErrorWhy ?? "无原因")"
+            }
             if beatsWhileBackground > 0 {
                 return "✅ 连上了，且**后台仍在跳** \(beatsWhileBackground) 次"
             }
             if heldSeconds < 20 { return "🟡 连上了但很快就停（\(heldSeconds)s），没测到后台" }
-            // ⚠ 这两条是第二版才分得开的，也正是整个第二轮要答的问题。
             if pathLost {
                 return "🔴 连上了但**网络路径被收回**（\(heldSeconds)s）—— 豁免没扛住息屏"
             }
             return "🟠 连上了（\(heldSeconds)s），后台无心跳且路径没报错 —— 更像**进程被挂起**"
+        }
+
+        /// 发包的实际情况。**跟结论分开显示**，因为它常常解释结论。
+        ///
+        /// ⚠ 2026-08-27 实测：设 50 Hz 只跑出 16.4 Hz。所以看到「后台活下来了」
+        /// 也要看这行 —— 活下来的可能只是三分之一的负载。
+        var throughput: String {
+            guard sent > 0 else { return "" }
+            let ratio = heldSeconds > 0 ? echoes * 100 / max(sent, 1) : 0
+            return "发 \(sent) · 实际 \(achievedHertz)Hz · 回声率 \(ratio)%"
         }
     }
 
@@ -677,6 +785,19 @@ final class WatchNetworkProbe: ObservableObject {
                 if (row["granted"] as? Bool) == false { verdict.micDenied = true }
             case "waiting":
                 if (row["isDenial"] as? Bool) == true { verdict.denied = true }
+            case "stop":
+                verdict.sent = (row["sent"] as? Int) ?? verdict.sent
+                verdict.achievedHertz =
+                    (row["achievedHertz"] as? Double) ?? verdict.achievedHertz
+            case "send-error":
+                // ⚠ 只记**第一个**：后面的多半是同一个原因的回响，
+                // 而"第几秒开始出错"才是能拿来判断的东西。
+                if verdict.firstErrorAtSeconds == nil {
+                    verdict.firstErrorAtSeconds = (row["atSeconds"] as? Int) ?? 0
+                    verdict.firstErrorWhy = row["why"] as? String
+                }
+            case "send-error-teardown":
+                break                       // 拆连接的正常结果，不算失败
             case "path":
                 // 只认「明确报了不满足」，不把"没记录"当成失去 —— 缺记录
                 // 是另一回事（进程被挂起），两者必须分开。
