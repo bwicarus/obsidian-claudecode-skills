@@ -256,6 +256,9 @@ final class WatchNetworkProbe: ObservableObject {
     /// 重连能成 = 方案可行,只是需要重连逻辑；
     /// 重连不成 = 才轮到怀疑平台。
     private var reconnects = 0
+    /// 上次重连是什么时候。用来在持续静默期间**按节奏重试**,
+    /// 而不是只试一次就放弃。
+    private var lastReconnectAt: Date?
 
     private static let endpoint = URL(string: "wss://echo.websocket.org")!
     /// 记录层自己的字段,额外信息不许覆盖(见 log 里那段注释)。
@@ -361,6 +364,7 @@ final class WatchNetworkProbe: ObservableObject {
         consecutiveSendErrors = 0
         pathSatisfied = true
         reconnects = 0
+        lastReconnectAt = nil
         lastEchoAt = nil
         stallReported = false
         longestSilence = 0
@@ -491,8 +495,17 @@ final class WatchNetworkProbe: ObservableObject {
                     extra["pathSatisfied"] = self.pathSatisfied
                     self.log("stalled", extra)
                     // 静默确认之后试着自己活回来 —— 这才是真正的产品问题：
-                    // 不是「能不能撑住」,而是「断了能不能自己恢复」。
+                    // 不是「能不能撑住」，而是「断了能不能自己恢复」。
                     self.reconnect()
+                } else if since > 5, self.stallReported {
+                    // ⚠ **还在静默就要接着试。**
+                    // 原来只在"首次判定静默"那一刻试一次，失败了就再也不试 ——
+                    // 而网络恢复往往需要几秒到几十秒。一次试不成就放弃，
+                    // 测出来的是"第一次重连的运气"，不是"能不能恢复"。
+                    // 每 6 秒一次，上限由 maximumReconnects 兜住。
+                    let sinceRetry = Date().timeIntervalSince(
+                        self.lastReconnectAt ?? .distantPast)
+                    if sinceRetry > 6 { self.reconnect() }
                 }
                 // 主动查引擎：它可能被系统停掉而**不发任何通知**。
                 // 只在状态**变化**时记,否则会把日志淹掉。
@@ -531,6 +544,7 @@ final class WatchNetworkProbe: ObservableObject {
             return
         }
         reconnects += 1
+        lastReconnectAt = Date()
         log("reconnect-attempt", ["n": reconnects,
                                   "pathSatisfied": pathSatisfied])
         // 只拆连接。音频引擎、播放器、会话**一律不动**。
@@ -858,7 +872,17 @@ final class WatchNetworkProbe: ObservableObject {
                 } else {
                     try? await Task.sleep(until: due, clock: clock)
                 }
-                guard let self, let connection = self.connection else { return }
+                guard let self else { return }
+                // ⚠ **不能写成 `guard let connection … else { return }`。**
+                // `return` 退出的是整个 Task —— 而 `reconnect()` 恰恰会把
+                // connection 置空一小会儿，于是重连制造的那个空档，把发包
+                // 循环**永久杀掉**了。之后 socket 就算接回来，也再没有东西
+                // 被发出去，没有回声，于是判成「重连失败」。
+                //
+                // 2026-08-27 第七轮实测报的「重连 0/1」就是这么来的 ——
+                // **我亲手做了个必然失败的实验**：被测的东西被测量装置本身
+                // 弄坏了。空档要等下一拍，不是退出。
+                guard let connection = self.connection else { continue }
                 n += 1
 
                 let data: Data
