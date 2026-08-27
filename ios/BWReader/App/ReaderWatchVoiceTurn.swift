@@ -11,10 +11,21 @@ import WebKit
 ///    （`DirectVoiceProtocol.swift:20-25`）。协议里根本没有「轮次」这个概念 ——
 ///    对端是 PC 上桌面 app 的语音模式，桥只是它的虚拟耳机，说完没说完由那个
 ///    桌面 app 自己判。一来一回的形态接不上去。
-/// 2. 就算能接：**watchOS 禁用 `URLSessionWebSocketTask`**（Apple TN3135 把
-///    整个 Network framework 归为低层网络，三个豁免场景外一律不给）。所以
-///    「把 Windows 桥暴露到公网让手表直连」这条路买不到任何东西 —— 手表压根
-///    开不了 WebSocket。这一条跟安全取舍无关，是纯技术死路。
+/// 2. watchOS 默认禁用 `URLSessionWebSocketTask`（TN3135 把整个 Network
+///    framework 归为低层网络）。
+///
+///    ⚠ **但这不是死路** —— 我 2026-08-27 早先在这里写过「纯技术死路」，
+///    那是**错的**，漏了 TN3135 的第二条豁免：
+///      "It allows a VoIP app to use low-level networking while running a
+///       call using CallKit. Support for this was added in watchOS 9."
+///    也就是说 **CallKit 通话进行中 WebSocket 是解禁的**，手表直连是可能的。
+///    用户 2026-08-27 已拍板走那条路（方案 A：Windows 经 Funnel 暴露 +
+///    OAuth）。本文件这条「按住说话经手机打 Pi」的链路是它做成之前的过渡，
+///    两者并存不冲突。
+///
+///    ⚠ 但那条路有一个 Apple **从未文档化**的前提：CallKit 的网络豁免在
+///    **熄屏 / 放下手腕之后是否存续**。第 0 步真机实验就是验这个
+///    （见 Watch/WatchCallProbe.swift）。不成立的话方案 A 整个不成立。
 ///
 /// ## 走的是哪条
 ///
