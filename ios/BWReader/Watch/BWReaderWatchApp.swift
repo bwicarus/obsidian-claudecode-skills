@@ -29,6 +29,7 @@ struct RootView: View {
 
     var body: some View {
         TabView {
+            CallView()
             TalkView()
             CardsView()
             NotificationsView()
@@ -491,6 +492,112 @@ struct ProbeView: View {
         case .stopped(let echoes, let held):
             Text("已停 · 回声 \(echoes) · 撑了 \(held) 秒")
                 .font(.system(size: 13, weight: .semibold))
+        }
+    }
+}
+
+// ── 连续通话 ──
+//
+// 这一屏跟「按住说话」是**两条完全不同的链路**，别混：
+//   这屏 = 手表**直连 Pi**,连续双工,手机开不开都行
+//   TalkView = 借手机打 Pi 的回合制问答(手机不在前台就用不了)
+//
+// 为什么这条能不经手机：手表用**活动音频会话**解禁了低层网络
+// （TN3135 豁免①,不是 CallKit —— CallKit 会锁死界面）。
+// 全链路实测见 references/watch-companion.md。
+
+struct CallView: View {
+    @StateObject private var call = WatchVoiceCall()
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 10) {
+                    statusBlock
+
+                    switch call.phase {
+                    case .idle:
+                        startButton("呼叫电脑")
+                    case .connecting, .live, .reconnecting:
+                        Button("挂断", role: .destructive) { call.stop() }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.red)
+                    case .ended:
+                        startButton("再打一次")
+                        Button("返回") { call.reset() }
+                            .buttonStyle(.bordered)
+                            .font(.system(size: 12))
+                    }
+
+                    // ⚠ 数字一直显示。这条链路上最常见的失败是「还连着但没声音」,
+                    // 而那种失败在界面上跟正常通话长得一模一样 —— 除非把
+                    // 收发计数摆出来。
+                    if call.framesSent > 0 || call.framesPlayed > 0 {
+                        Text("发 \(call.framesSent) · 收 \(call.framesPlayed)")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.horizontal, 2)
+            }
+            .navigationTitle("通话")
+        }
+    }
+
+    private func startButton(_ title: String) -> some View {
+        Button {
+            call.start()
+        } label: {
+            Label(title, systemImage: "phone.fill")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+    }
+
+    @ViewBuilder private var statusBlock: some View {
+        switch call.phase {
+        case .idle:
+            Text("按一下,接通电脑上的语音助手")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        case .connecting:
+            VStack(spacing: 4) {
+                ProgressView()
+                Text("接通中…").font(.system(size: 11))
+            }
+        case .live:
+            VStack(spacing: 2) {
+                Label("通话中", systemImage: "waveform")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.green)
+                // 沉默秒数一直走。陈旧必须看得见 ——
+                // 这跟每屏顶部 FreshnessBar 是同一个道理。
+                if call.silentSeconds > 1 {
+                    Text("已 \(call.silentSeconds) 秒没有声音")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Color.orange)
+                }
+            }
+        case .reconnecting(let why):
+            VStack(spacing: 2) {
+                Label("重连中", systemImage: "arrow.clockwise")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.orange)
+                // 原文照抄:重连原因决定了是等一等还是去修什么。
+                Text(why)
+                    .font(.system(size: 8, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+        case .ended(let why):
+            VStack(spacing: 2) {
+                Text("已结束").font(.system(size: 13, weight: .semibold))
+                Text(why)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
         }
     }
 }
