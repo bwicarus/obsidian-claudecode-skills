@@ -81,7 +81,10 @@ final class WatchVoiceCall: ObservableObject {
     /// 上是否被接受、实际走了哪个输出口 —— 这些**只能在真机上看见**。
     @Published private(set) var routeNote = ""
 
-    private static let maximumReconnects = 30
+    /// socket 级重连的次数上限。⚠ 从 30 降到 5:实测掉线多半是 ENETDOWN
+    /// (豁免没了),那种情况下重建 socket 注定失败 —— 试 30 次只是把"整体
+    /// 重来"这个唯一有效的手段推迟了半分钟。
+    private static let maximumReconnects = 5
 
     /// 音频会话模式。**做成可切是因为"哪个更响"只能在真机上比出来。**
     ///
@@ -345,7 +348,16 @@ final class WatchVoiceCall: ObservableObject {
             lastInboundAt = Date()
             command("start")
         case .waiting(let error):
-            phase = .reconnecting(String(describing: error))
+            let why = String(describing: error)
+            // ⚠ **ENETDOWN 不是"网络抖了一下"** —— 它是 TN3135 拒绝低层网络的
+            // 签名(POSIX 50 / "Network is down"),意味着音频会话那个豁免没了。
+            // 那种情况下**重建 socket 永远没用**,只有重新激活音频会话才可能救。
+            // 所以直接跳过 socket 级重试,整体重来。
+            if why.contains("rawValue: 50") || why.contains("Network is down") {
+                autoRestartIfPossible("低层网络被拒（音频豁免没了）")
+                return
+            }
+            phase = .reconnecting(why)
         case .failed(let error):
             phase = .reconnecting(String(describing: error))
             reconnect()
@@ -433,6 +445,10 @@ final class WatchVoiceCall: ObservableObject {
             return
         }
         reconnects += 1
+        // ⚠ 必须重置:不重置的话 quiet 一直在涨,看门狗每秒都判"卡住"并再次
+        // 重连,几秒就把重试额度烧光 —— 看上去像"试了很多次",其实一次都没
+        // 给新连接握手的时间。
+        lastInboundAt = Date()
         phase = .reconnecting("第 \(reconnects) 次重连…")
         streamId = nil                        // 新连接会下发新的
         connection?.cancel()
@@ -504,7 +520,16 @@ final class WatchVoiceCall: ObservableObject {
     /// 变成一个"看起来在重试、其实永远起不来"的循环。
     /// 后台就如实说「抬腕回到 App」,不假装能修。
     private func autoRestartIfPossible(_ reason: String) {
-        guard !restartedOnce else { return }
+        // ⚠ 已经整体重来过一次还是不行 —— **必须说出来**。
+        // 原来这里是 `guard !restartedOnce else { return }`,悄悄什么都不做,
+        // phase 就永远停在「重连中」。用户 2026-08-28 看到的正是这个:
+        // 界面写着在重连,实际上早就放弃了。
+        // 这是同一个错误在这一天里的第六次:**放弃要出声。**
+        guard !restartedOnce else {
+            phase = .ended(reason + "，重来一次也没成 —— 手动再打一次试试")
+            teardown()
+            return
+        }
         guard WKApplication.shared().applicationState == .active else {
             phase = .ended(reason + "（回到 App 重新开始）")
             return
@@ -521,6 +546,10 @@ final class WatchVoiceCall: ObservableObject {
     }
 
     private func beginRestart() {
+        // ⚠ 不清的话会叠成「输出: 扬声器 · 输出: 扬声器」——
+        // 用户 2026-08-28 的截图正是靠这个重复才看出"重来确实发生过"。
+        // 保留这条线索的价值,但让它以正确的形式出现:重来的次数单独记。
+        routeNote = ""
         phase = .connecting
         framesSent = 0
         framesPlayed = 0
