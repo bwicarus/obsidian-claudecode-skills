@@ -41,12 +41,17 @@ final class WatchVoiceCall: ObservableObject {
     /// 最后一次从 Pi 收到任何东西的时刻。陈旧必须看得见 —— 这条链路上
     /// 「悄悄不动了」是最常见的失败形态。
     @Published private(set) var silentSeconds = 0
+    /// 收到的音频峰值(0~1)。**摆在界面上是为了分辨"下行本来就轻"和
+    /// "手表放不响"** —— 这两者修法完全不同,光听分不出来。
+    @Published private(set) var inboundPeak: Float = 0
 
     private static let endpoint = URL(
         string: "wss://bwicarus.taile44d0c.ts.net:8443/watch-voice")!
     /// 多久没收到东西就认为断了。Pi 在通话中会持续回下行音频，
     /// 所以 3 秒的沉默已经不正常。
     private static let stallSeconds: TimeInterval = 3
+    /// 重连中每隔多久再试一次。比 stallSeconds 长一点,给新连接握手的时间。
+    private static let retrySeconds: TimeInterval = 6
 
     private var connection: NWConnection?
     private var engine: AVAudioEngine?
@@ -60,8 +65,14 @@ final class WatchVoiceCall: ObservableObject {
     private var reconnects = 0
     private var audioReady = false
     private var interrupted = false
+    /// 路由与音量相关的实况。⚠ 摆在界面上：`.defaultToSpeaker` 在 watchOS
+    /// 上是否被接受、实际走了哪个输出口 —— 这些**只能在真机上看见**。
+    @Published private(set) var routeNote = ""
 
     private static let maximumReconnects = 30
+    /// 播放增益。手表扬声器本来就小,语音的动态范围又窄。
+    /// ⚠ 配合硬限幅使用 —— 削波的破音比小声更难听。
+    private static let playbackGain: Float = 4.0
 
     // ── 开始 ──
 
@@ -73,6 +84,8 @@ final class WatchVoiceCall: ObservableObject {
         sequence = 0
         reconnects = 0
         interrupted = false
+        routeNote = ""
+        inboundPeak = 0
         pending.removeAll(keepingCapacity: true)
         Task { await begin() }
     }
@@ -113,7 +126,18 @@ final class WatchVoiceCall: ObservableObject {
         }
         guard granted else { throw CallError.microphoneDenied }
 
-        try session.setCategory(.playAndRecord, mode: .voiceChat)
+        // ⚠ `.playAndRecord` 默认**不一定**走那条响的输出路径。
+        // 用户实测「手表音量开到最大还是很小」,这是第一嫌疑。
+        // `.defaultToSpeaker` 在 watchOS 上不一定被支持,所以带着它先试,
+        // 失败就退回不带 —— **但要出声说退回了**,否则下次查这个问题的人
+        // 会以为这一行生效了。
+        do {
+            try session.setCategory(
+                .playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker])
+        } catch {
+            routeNote = "扬声器选项不被支持，已退回默认路由"
+            try session.setCategory(.playAndRecord, mode: .voiceChat)
+        }
         try await session.activate(options: [])
 
         let made = AVAudioEngine()
@@ -139,8 +163,15 @@ final class WatchVoiceCall: ObservableObject {
         made.attach(node)
         made.connect(node, to: made.mainMixerNode,
                      format: made.outputNode.inputFormat(forBus: 0))
+        // 显式拉满 —— 默认就是 1.0,写出来是为了让"音量在哪被压低"这个问题
+        // 少一个可疑对象。
+        made.mainMixerNode.outputVolume = 1.0
+        node.volume = 1.0
         try made.start()
         node.play()
+        routeNote = (routeNote.isEmpty ? "" : routeNote + " · ")
+            + "输出：" + session.currentRoute.outputs
+                .map(\.portName).joined(separator: "/")
 
         engine = made
         player = node
@@ -215,15 +246,26 @@ final class WatchVoiceCall: ObservableObject {
         buffer.frameLength = AVAudioFrameCount(samples)
         guard let channels = buffer.floatChannelData else { return }
 
+        // ⚠ **先量峰值再放大。**
+        // 「声音太小」有两种完全不同的原因：下行音频**本身**就轻(Windows 那头
+        // 采到的就小),或者手表的播放路径不对。两者修法完全不同,而光听是
+        // 分不出来的 —— 所以把收到的峰值量出来摆在界面上。
+        // 这跟这个项目一路走来的那条规则是同一件事：**先能分辨,再谈修。**
+        var peak: Float = 0
         payload.withUnsafeBytes { raw in
             let source = raw.bindMemory(to: Int16.self)
-            for channel in 0..<Int(format.channelCount) {
-                let out = channels[channel]
-                for index in 0..<samples {
-                    out[index] = Float(Int16(littleEndian: source[index])) / 32768.0
+            for index in 0..<samples {
+                let sample = Float(Int16(littleEndian: source[index])) / 32768.0
+                if abs(sample) > peak { peak = abs(sample) }
+                // 软件增益。手表扬声器本来就小,而语音的动态范围窄,
+                // 适度放大是常规做法。⚠ 必须硬限幅,否则削波的破音比小声更难听。
+                let boosted = max(-1.0, min(1.0, sample * Self.playbackGain))
+                for channel in 0..<Int(format.channelCount) {
+                    channels[channel][index] = boosted
                 }
             }
         }
+        inboundPeak = max(inboundPeak * 0.95, peak)   // 慢衰减,便于人眼读
         player.scheduleBuffer(buffer, completionHandler: nil)
         framesPlayed += 1
     }
@@ -346,9 +388,18 @@ final class WatchVoiceCall: ObservableObject {
                 guard let self, !self.isEnded else { return }
                 let quiet = Date().timeIntervalSince(self.lastInboundAt)
                 self.silentSeconds = Int(quiet)
-                if quiet > Self.stallSeconds, case .live = self.phase {
-                    self.reconnect()
+                // ⚠ **重连中也要接着试。** 原来只在 .live 时重连,于是第一次
+                // 重连失败之后 phase 停在 .reconnecting,看门狗从此不管它 ——
+                // 表现就是"断了不会自己接回来"。
+                // 这是同一个错误的第五次:**实验/实现里只试一次就放弃**,
+                // 而网络恢复往往要几秒到几十秒。
+                let stuck: Bool
+                switch self.phase {
+                case .live: stuck = quiet > Self.stallSeconds
+                case .reconnecting: stuck = quiet > Self.retrySeconds
+                default: stuck = false
                 }
+                if stuck { self.reconnect() }
             }
         }
     }

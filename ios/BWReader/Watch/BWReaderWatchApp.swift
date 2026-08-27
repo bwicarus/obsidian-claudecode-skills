@@ -532,6 +532,25 @@ struct CallView: View {
                     // ⚠ 数字一直显示。这条链路上最常见的失败是「还连着但没声音」,
                     // 而那种失败在界面上跟正常通话长得一模一样 —— 除非把
                     // 收发计数摆出来。
+                    // ⚠ 收到的音频峰值。**这一行是用来分辨"下行本来就轻"和
+                    // "手表放不响"的** —— 两者修法完全不同,光听分不出来。
+                    // 峰值接近 0 = 对面送来的就是静音;峰值很高但听不见 = 播放路径的锅。
+                    if call.inboundPeak > 0 {
+                        HStack(spacing: 3) {
+                            Text("入声").font(.system(size: 8))
+                            ProgressView(value: Double(call.inboundPeak))
+                                .frame(width: 70)
+                            Text(String(format: "%.2f", call.inboundPeak))
+                                .font(.system(size: 8, design: .monospaced))
+                        }
+                        .foregroundStyle(.secondary)
+                    }
+                    if !call.routeNote.isEmpty {
+                        Text(call.routeNote)
+                            .font(.system(size: 8))
+                            .foregroundStyle(.tertiary)
+                            .multilineTextAlignment(.center)
+                    }
                     if call.framesSent > 0 || call.framesPlayed > 0 {
                         Text("发 \(call.framesSent) · 收 \(call.framesPlayed)")
                             .font(.system(size: 9, design: .monospaced))
