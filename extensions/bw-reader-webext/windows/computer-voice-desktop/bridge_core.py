@@ -41,6 +41,14 @@ SELF_TEST_CONTRACT = "reader-computer-voice-desktop-self-test/1"
 FIXED_LISTEN_HOST = "127.0.0.1"
 FIXED_LISTEN_PORT = 43128
 DIRECT_SERVE_PATH = "/reader-computer-voice/v1"
+DIRECT_SERVE_SIBLING_PATHS = (
+    "/reader-context/v1",
+    "/reader-context/snapshot",
+    "/reader-output/pending",
+    "/reader-output/receipt",
+    "/widget/system-data",
+    "/map/tile",
+)
 DIRECT_WSS_URL = (
     "wss://bwicarus-2.taile44d0c.ts.net"
     f"{DIRECT_SERVE_PATH}"

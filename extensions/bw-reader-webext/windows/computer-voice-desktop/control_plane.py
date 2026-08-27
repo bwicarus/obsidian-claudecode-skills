@@ -17,6 +17,7 @@ from bridge_core import (
     BridgePaths,
     CREATE_NO_WINDOW,
     DIRECT_SERVE_PATH,
+    DIRECT_SERVE_SIBLING_PATHS,
     FIXED_LISTEN_HOST,
     FIXED_LISTEN_PORT,
     TASK_NAME,
@@ -33,6 +34,7 @@ TASK_DESCRIPTION_MARKER = (
 TASK_TEMP_PREFIX = "bw-computer-voice-task-"
 TASK_XML_NAME = "computer-voice-bootstrap-task.xml"
 SERVE_PATH = DIRECT_SERVE_PATH
+ALLOWED_SERVE_PATHS = (SERVE_PATH,) + DIRECT_SERVE_SIBLING_PATHS
 SERVE_TARGET = (
     f"http://{FIXED_LISTEN_HOST}:{FIXED_LISTEN_PORT}{SERVE_PATH}"
 )
@@ -685,33 +687,48 @@ def _collect_handlers(value: object) -> list[tuple[str, str]]:
     return handlers
 
 
+def _expected_serve_proxy(path: str) -> str:
+    return f"http://{FIXED_LISTEN_HOST}:{FIXED_LISTEN_PORT}{path}"
+
+
+def _prune_empty(value: dict) -> dict:
+    return {k: v for k, v in value.items() if v not in ({}, [], None)}
+
+
+def _mounted_paths(inspection: "ServeInspection") -> set[str]:
+    return {path for path, _ in inspection.handlers}
+
+
 def classify_serve_status(value: object) -> ServeInspection:
-    if value == {}:
-        return ServeInspection("empty", ())
+    if not isinstance(value, dict):
+        return ServeInspection("foreign", ())
     handlers = tuple(_collect_handlers(value))
-    expected = {
-        "TCP": {
-            SERVE_TCP_PORT: {
-                "HTTPS": True,
-            },
-        },
-        "Web": {
-            SERVE_WEB_HOST: {
-                "Handlers": {
-                    SERVE_PATH: {
-                        "Proxy": SERVE_TARGET,
-                    },
-                },
-            },
-        },
-    }
-    # ServeConfig can also contain Services, Foreground and AllowFunnel.
-    # Equality is intentional: a correct handler under the wrong host/port, a
-    # TCP forward, Funnel enablement, or any mixed/unknown structure is foreign
-    # and must never authorize apply/off.
-    if value == expected:
-        return ServeInspection("ours", handlers)
-    return ServeInspection("foreign", handlers)
+    foreign = ServeInspection("foreign", handlers)
+    top = _prune_empty(value)
+    # Only TCP/Web may be present with content.  Services, Foreground and a
+    # non-empty AllowFunnel stay foreign -- Funnel must never be authorised.
+    if set(top) - {"TCP", "Web"}:
+        return foreign
+    tcp = top.get("TCP")
+    if tcp is not None and tcp != {SERVE_TCP_PORT: {"HTTPS": True}}:
+        return foreign
+    web = top.get("Web", {})
+    if not isinstance(web, dict) or set(web) - {SERVE_WEB_HOST}:
+        return foreign
+    host = web.get(SERVE_WEB_HOST, {})
+    if not isinstance(host, dict) or set(host) - {"Handlers"}:
+        return foreign
+    mounts = host.get("Handlers", {})
+    if not isinstance(mounts, dict):
+        return foreign
+    for path, handler in mounts.items():
+        if path not in ALLOWED_SERVE_PATHS:
+            return foreign
+        if handler != {"Proxy": _expected_serve_proxy(path)}:
+            return foreign
+    if not mounts:
+        return ServeInspection("empty", ())
+    return ServeInspection("ours", handlers)
 
 
 def inspect_tailscale_serve(
@@ -741,24 +758,26 @@ def apply_tailscale_serve(
     runner: ExactCommandRunner,
 ) -> bool:
     before = inspect_tailscale_serve(control_paths, runner)
-    if before.state == "ours":
-        return False
-    if before.state != "empty":
+    if before.state not in ("empty", "ours"):
         raise BridgeError(
             "检测到其它 Tailscale Serve 配置；拒绝覆盖。"
         )
+    if SERVE_PATH in _mounted_paths(before):
+        return False
     control = _validate_control_paths(control_paths)
     plan = build_tailscale_command_plan(control.tailscale_exe)
     applied = _run(runner, plan.apply_serve)
     if applied.returncode != 0:
         raise BridgeError("Tailscale Serve 配置失败。")
     after = inspect_tailscale_serve(control_paths, runner)
-    if after.state == "ours":
-        return True
-    raise BridgeError(
-        "Tailscale Serve 配置后完整 ownership 无法证明；"
-        "拒绝对混合、Funnel 或未知配置执行 off。"
-    )
+    if after.state != "ours" or (
+        _mounted_paths(after) != _mounted_paths(before) | {SERVE_PATH}
+    ):
+        raise BridgeError(
+            "Tailscale Serve 配置后完整 ownership 无法证明；"
+            "拒绝对混合、Funnel 或未知配置执行 off。"
+        )
+    return True
 
 
 def remove_tailscale_serve(
@@ -766,21 +785,23 @@ def remove_tailscale_serve(
     runner: ExactCommandRunner,
 ) -> bool:
     before = inspect_tailscale_serve(control_paths, runner)
-    if before.state == "empty":
-        return False
-    if before.state != "ours":
+    if before.state not in ("empty", "ours"):
         raise BridgeError(
             "当前 Serve 路径并非本桥接器独占；拒绝关闭。"
         )
+    if SERVE_PATH not in _mounted_paths(before):
+        return False
     control = _validate_control_paths(control_paths)
     plan = build_tailscale_command_plan(control.tailscale_exe)
     removed = _run(runner, plan.rollback_serve)
     if removed.returncode != 0:
         raise BridgeError("Tailscale Serve 精确关闭失败。")
     after = inspect_tailscale_serve(control_paths, runner)
-    if after.state != "empty":
+    if after.state not in ("empty", "ours") or (
+        _mounted_paths(after) != _mounted_paths(before) - {SERVE_PATH}
+    ):
         raise BridgeError(
-            "Tailscale Serve 关闭后不是精确空配置；"
+            "Tailscale Serve 关闭影响了本桥接器以外的挂载；"
             "拒绝继续改动未知状态。"
         )
     return True

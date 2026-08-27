@@ -16,6 +16,7 @@ sys.path.insert(0, str(SOURCE_ROOT))
 from bridge_core import (  # noqa: E402
     BridgeError,
     BridgePaths,
+    DIRECT_SERVE_SIBLING_PATHS,
     DIRECT_WSS_URL,
 )
 from control_plane import (  # noqa: E402
@@ -142,6 +143,33 @@ class ControlPlaneTests(unittest.TestCase):
                 }
             }
         )
+        # ⚠ 上面那份是**理想形状**：只有我们这一条 handler。
+        # 现实里这台机上有七条 —— 桥自己的其它路由是历次按文档手工
+        # `tailscale serve --set-path=...` 加的（见 web-context-snapshot-handoff.md）。
+        # 判定器原来用整份全等比较，于是恒判 foreign，apply/off 全线瘫痪；
+        # 而测试因为只见过单 handler 的世界，一直是绿的。
+        # **这份 fixture 存在的意义就是让测试看见现实。**
+        self.sibling_paths = list(DIRECT_SERVE_SIBLING_PATHS)
+        self.serve_real_json = json.dumps(self._serve_config(
+            [SERVE_PATH] + self.sibling_paths))
+        self.serve_siblings_only_json = json.dumps(
+            self._serve_config(self.sibling_paths))
+
+    @staticmethod
+    def _serve_config(paths: list[str]) -> dict:
+        return {
+            "TCP": {SERVE_TCP_PORT: {"HTTPS": True}},
+            "Web": {
+                SERVE_WEB_HOST: {
+                    "Handlers": {
+                        path: {
+                            "Proxy": "http://127.0.0.1:43128" + path
+                        }
+                        for path in paths
+                    }
+                }
+            },
+        }
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -480,6 +508,61 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("--yes", off)
         self.assertIn("--set-path=/reader-computer-voice/v1", off)
         self.assertEqual(off[-1], "off")
+
+    def test_status_classifier_accepts_the_real_multi_handler_config(self) -> None:
+        """线上七条 handler 必须判 ours。
+
+        ⚠ 这条是 2026-08-27 的回归闸：原判定用整份全等比较、期望唯一
+        handler，于是这台机上的真实配置恒判 foreign，控制面的 apply/off
+        全线拒绝。**但测试一直是绿的** —— 因为 fixture 只有一条 handler。
+        测试没见过的世界，测试保护不了。
+        """
+        inspection = classify_serve_status(
+            json.loads(self.serve_real_json))
+        self.assertEqual("ours", inspection.state)
+        self.assertEqual(
+            1 + len(self.sibling_paths), len(inspection.handlers))
+
+    def test_serve_apply_and_off_keep_sibling_mounts_intact(self) -> None:
+        """多 handler 世界里 apply/off 仍然只动我们那一条。"""
+        apply_runner = ScriptedRunner(
+            [
+                result(0, self.serve_siblings_only_json),
+                result(0),
+                result(0, self.serve_real_json),
+            ]
+        )
+        self.assertTrue(apply_tailscale_serve(self.control, apply_runner))
+        self.assertIn(
+            "--set-path=/reader-computer-voice/v1", apply_runner.calls[1])
+
+        off_runner = ScriptedRunner(
+            [
+                result(0, self.serve_real_json),
+                result(0),
+                result(0, self.serve_siblings_only_json),
+            ]
+        )
+        self.assertTrue(remove_tailscale_serve(self.control, off_runner))
+        self.assertEqual("off", off_runner.calls[1][-1])
+
+    def test_serve_off_rejects_when_a_sibling_mount_disappeared(self) -> None:
+        """撤自己那条时**顺手少了别人一条**，必须报错。
+
+        原来的后置是「关闭后必须是空配置」，在七条并存的现实里它永远失败；
+        换成挂载集合差分之后，它才真正在检查「有没有殃及别人」——
+        这是从隐含假设变成显式断言。
+        """
+        damaged = json.dumps(self._serve_config(self.sibling_paths[1:]))
+        runner = ScriptedRunner(
+            [
+                result(0, self.serve_real_json),
+                result(0),
+                result(0, damaged),
+            ]
+        )
+        with self.assertRaises(BridgeError):
+            remove_tailscale_serve(self.control, runner)
 
     def test_serve_never_overwrites_or_removes_foreign_config(self) -> None:
         foreign_json = json.dumps(
