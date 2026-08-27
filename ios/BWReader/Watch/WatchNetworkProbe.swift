@@ -1040,7 +1040,15 @@ final class WatchNetworkProbe: ObservableObject {
         /// 前者要重测，后者是答案。
         var line: String {
             if micDenied { return "⚠️ 麦克风没权限，这一档没测成" }
-            if denied { return "🚫 豁免被拒（POSIX 50 签名）" }
+            // ⚠ **不要说成「豁免被拒」。** POSIX 50 字面就是 ENETDOWN
+            // ——「网络断了」。TN3135 的拒绝会长成这样，**手表息屏时 Wi-Fi
+            // 真的掉了也长成这样**，从 app 内部分不开这两者。
+            // 2026-08-27 我先写成了「豁免被拒」，那是过度断言：
+            // 把一个有两种解释的信号，报成了其中一种。
+            if denied {
+                return "⚠️ 出现过 ENETDOWN（网络断了）—— 可能是切网，"
+                    + "也可能是豁免被收回，**从表内分不开**"
+            }
             if !connected { return "❌ 没连上（原因见原始日志）" }
             // ⚠ 运行**中**出错优先报，而且**原文照抄**。第三版之前这里只显示
             // 包序号，于是三种解释（对端限流 / 系统掐了 / 收尾竞态）分不出来，
@@ -1097,6 +1105,34 @@ final class WatchNetworkProbe: ObservableObject {
                 return "🔴 连上了但**网络路径被收回**（\(heldSeconds)s）—— 豁免没扛住息屏"
             }
             return "🟠 连上了（\(heldSeconds)s），后台无心跳且路径没报错 —— 更像**进程被挂起**"
+        }
+
+        /// 全部信号，一个不落。
+        ///
+        /// ## ⚠ 为什么不再"挑最重要的那条"
+        ///
+        /// `line` 只有一行，于是优先级会把别的信号**全挡住**。这个错犯了三次：
+        /// - `pathLost` 排在"冻住"之后 → 永远走不到，屏幕上只说了"不是音频的
+        ///   锅"，没说**是什么的锅**；
+        /// - "豁免被拒"排在最前 → 那一轮到底冻没冻、重连几次，全看不见；
+        /// - 更早一次是 `brief()` 里"有序号就不显示原因"。
+        ///
+        /// 根因是同一个：**一直在替看的人挑重点，而判断需要的是全部信号一起
+        /// 看**。所以这一行不挑了，能有的都摆出来 ——
+        /// **挑重点是人的事，采集方只负责别丢。**
+        var signals: String {
+            var parts: [String] = []
+            if stalls > 0 { parts.append("冻\(stalls)") }
+            if resumes > 0 { parts.append("复\(resumes)") }
+            if reconnectTries > 0 {
+                parts.append("重连\(reconnectOK)/\(reconnectTries)")
+            }
+            if pathLost { parts.append("路径断过") }
+            if denied { parts.append("ENETDOWN") }
+            if engineStopped { parts.append("引擎停过") }
+            if audioEvents > 0 { parts.append("音频事件\(audioEvents)") }
+            if longestSilence > 0 { parts.append("最长静默\(longestSilence)s") }
+            return parts.isEmpty ? "无异常" : parts.joined(separator: " · ")
         }
 
         /// 发包的实际情况。**跟结论分开显示**，因为它常常解释结论。

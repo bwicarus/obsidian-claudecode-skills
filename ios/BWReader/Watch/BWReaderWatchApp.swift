@@ -390,6 +390,12 @@ struct ProbeView: View {
                                 Text(verdict.line)
                                     .font(.system(size: 9))
                                     .foregroundStyle(.secondary)
+                                // ⚠ 全部信号单独一行。上面那句 line 只有一行，
+                                // 优先级会把别的信号挡住 —— 这个错已经犯了三次。
+                                // **挑重点是人的事，这里只负责别丢。**
+                                Text(verdict.signals)
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.orange)
                                 // 前台/后台的心跳分开显示：两个数一起看才知道
                                 // "没测到后台"是因为没进后台，还是进了就断。
                                 Text("前台 \(verdict.beatsWhileActive) · 后台 \(verdict.beatsWhileBackground) · \(verdict.heldSeconds)s")
