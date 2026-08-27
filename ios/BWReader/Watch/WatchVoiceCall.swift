@@ -126,18 +126,14 @@ final class WatchVoiceCall: ObservableObject {
         }
         guard granted else { throw CallError.microphoneDenied }
 
-        // ⚠ `.playAndRecord` 默认**不一定**走那条响的输出路径。
-        // 用户实测「手表音量开到最大还是很小」,这是第一嫌疑。
-        // `.defaultToSpeaker` 在 watchOS 上不一定被支持,所以带着它先试,
-        // 失败就退回不带 —— **但要出声说退回了**,否则下次查这个问题的人
-        // 会以为这一行生效了。
-        do {
-            try session.setCategory(
-                .playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker])
-        } catch {
-            routeNote = "扬声器选项不被支持，已退回默认路由"
-            try session.setCategory(.playAndRecord, mode: .voiceChat)
-        }
+        // ⚠ **`.defaultToSpeaker` 在 watchOS 上不存在**（编译器直接拒绝，
+        // 2026-08-28 验证）。所以「音量小是因为没走扬声器」这条猜测被排除了 ——
+        // 不是"设了没生效"，是压根没有这个开关。
+        //
+        // 保留 `.voiceChat` 是有代价的取舍：它带回声消除，而手表的扬声器和
+        // 麦克风挨着，去掉它会把自己的输出录回去、绕一圈送回电脑。
+        // 宁可小声也不要啸叫 —— 音量靠下面的软件增益补。
+        try session.setCategory(.playAndRecord, mode: .voiceChat)
         try await session.activate(options: [])
 
         let made = AVAudioEngine()
