@@ -225,6 +225,7 @@ final class WatchNetworkProbe: ObservableObject {
     /// 已经进入收尾。收尾时 send 失败是正常的（连接正在被拆），
     /// 必须跟运行中的失败分开记，否则每一轮都会以一条误导性的错误收场。
     private var stopping = false
+    private var consecutiveSendErrors = 0
     private var audioActivated = false
     /// 最后一次收到回声的时刻。
     ///
@@ -251,6 +252,8 @@ final class WatchNetworkProbe: ObservableObject {
     private var pathMonitor: NWPathMonitor?
 
     private static let endpoint = URL(string: "wss://echo.websocket.org")!
+    /// 记录层自己的字段,额外信息不许覆盖(见 log 里那段注释)。
+    private static let reservedKeys: Set<String> = ["at", "mode", "event", "appState"]
 
     // ── 落盘 ──
 
@@ -271,7 +274,18 @@ final class WatchNetworkProbe: ObservableObject {
             // 决定了结论是「豁免不存续」还是「进程被收走」——两者的修法完全不同。
             "appState": Self.appStateName(),
         ]
-        extra.forEach { row[$0.key] = $0.value }
+        // ⚠ **额外字段不许覆盖保留字段。**
+        // 2026-08-27 实测暴露：activateAudio 记 ["mode": "voiceChat"] 当额外
+        // 信息,把真正的档位覆盖了,战报里于是冒出一个根本不存在的
+        // 「voiceChat」档。**记录层自己把数据弄脏是最难查的一类**,
+        // 因为它看上去像真的。
+        for (key, value) in extra where !Self.reservedKeys.contains(key) {
+            row[key] = value
+        }
+        // 撞名的额外字段加前缀保留,而不是默默丢掉 —— 丢掉又是一次静默失败。
+        for (key, value) in extra where Self.reservedKeys.contains(key) {
+            row["x_" + key] = value
+        }
 
         guard let data = try? JSONSerialization.data(withJSONObject: row),
               var line = String(data: data, encoding: .utf8) else { return }
@@ -327,6 +341,7 @@ final class WatchNetworkProbe: ObservableObject {
         echoes = 0
         sent = 0
         stopping = false
+        consecutiveSendErrors = 0
         lastEchoAt = nil
         stallReported = false
         longestSilence = 0
@@ -676,8 +691,16 @@ final class WatchNetworkProbe: ObservableObject {
             // ⚠ **豁免被拒就落在这里**，不是 .failed。
             // POSIX 50 / "Network is down" 是拒绝的签名（TN3135 的形态）。
             let why = String(describing: error)
-            log("waiting", ["why": why,
-                            "isDenial": why.contains("50") || why.contains("Network is down")])
+            // ⚠ **精确匹配，不能用 `contains("50")`。**
+            // 原来那么写会把任何含 "50" 的错误文本判成豁免被拒 ——
+            // 2026-08-27 实测里屏幕上只出现过 65（No route to host）和
+            // 32（Broken pipe），战报却报了「豁免被拒（POSIX 50 签名）」，
+            // 多半就是这个子串误报。**折成布尔之前先看清原始值**
+            // （silent-failure-lessons 规则二）。
+            let denied = why.contains("rawValue: 50")
+                || why.contains("Network is down")
+                || why.contains("ENETDOWN")
+            log("waiting", ["why": why, "isDenial": denied])
             state = .waiting(why)
 
         case .failed(let error):
@@ -791,16 +814,39 @@ final class WatchNetworkProbe: ObservableObject {
                     opcode: filler.isEmpty ? .text : .binary)
                 let context = NWConnection.ContentContext(identifier: "beat", metadata: [meta])
                 self.sent = n
+                // 只要还有一次成功,就不算"连续"。
+                if self.consecutiveSendErrors > 0 && self.lastEchoAt != nil {
+                    self.consecutiveSendErrors = 0
+                }
                 connection.send(content: data, contentContext: context,
                                 isComplete: true, completion: .contentProcessed { error in
                     if let error {
                         Task { @MainActor in
                             // 收尾期间的失败单独标记 —— 那是拆连接的正常结果，
                             // 不是「跑着跑着断了」。混在一起会让整轮读不出结论。
-                            self.log(self.stopping ? "send-error-teardown" : "send-error",
-                                     ["n": n, "why": String(describing: error),
-                                      "atSeconds": Int(Date().timeIntervalSince(
-                                          self.startedAt ?? Date()))])
+                            // ⚠ 连续失败要**熔断**,不能一直往死连接里灌。
+                            // 2026-08-27 实测日志里同一个包号连着出现五次,
+                            // 就是这么来的:连接死了循环还在跑,每次立刻失败、
+                            // 立刻记一条 —— 既刷屏又烧 CPU,还把真正有用的
+                            // 第一条错误淹在噪音里。
+                            self.consecutiveSendErrors += 1
+                            let why = String(describing: error)
+                            if self.stopping {
+                                self.log("send-error-teardown", ["n": n, "why": why])
+                            } else if self.consecutiveSendErrors <= 3 {
+                                self.log("send-error", [
+                                    "n": n, "why": why,
+                                    "consecutive": self.consecutiveSendErrors,
+                                    "atSeconds": Int(Date().timeIntervalSince(
+                                        self.startedAt ?? Date()))])
+                            }
+                            // 连着 10 次就认定这条连接没救了,当场收工并**说清楚**。
+                            // 静默地继续跑一条死连接,就是这个项目一直在防的那件事。
+                            if !self.stopping, self.consecutiveSendErrors == 10 {
+                                self.log("give-up", ["after": n, "why": why])
+                                self.state = .failed("连续 10 次发送失败：" + why)
+                                self.stop()
+                            }
                         }
                     }
                 })
@@ -913,7 +959,13 @@ final class WatchNetworkProbe: ObservableObject {
         var firstErrorAtSeconds: Int?
         var firstErrorWhy: String?
 
-        var id: String { mode }
+        /// 这一次运行是什么时候开始的（用来当唯一标识 + 显示时刻）。
+        var startedAt: Double = 0
+
+        /// ⚠ 必须带上开始时刻：同一档会跑很多次,只用 mode 当 id 会撞,
+        /// ForEach 渲染就会错乱 —— 而那种错乱看上去像"数据不对"而不是
+        /// "显示不对",很容易把人往错方向带。
+        var id: String { mode + "@" + String(Int(startedAt)) }
 
         /// 一句话结论。刻意分「没测到」和「测到了但是否定的」——
         /// 前者要重测，后者是答案。
@@ -974,9 +1026,15 @@ final class WatchNetworkProbe: ObservableObject {
         guard let data = try? Data(contentsOf: Self.logURL),
               let text = String(data: data, encoding: .utf8) else { return [] }
 
-        var byMode: [String: Verdict] = [:]
-        var firstAt: [String: Double] = [:]
-        var lastAt: [String: Double] = [:]
+        // ⚠ **按「运行」分组,不是按「档位」。**
+        // 2026-08-27 实测：同一档跑了好几次,战报把它们合并成一条,于是
+        // heldSeconds 变成 2970 秒(横跨了没在跑的间隙),而 sent 只来自最后
+        // 一次 —— 两个数根本不是同一次运行的,算出来的 Hz 毫无意义。
+        // 合并不同次的观测,比不观测更糟:它给出一个看着像真的假数。
+        var runs: [Verdict] = []
+        var current: Verdict?
+        var firstAt: Double = 0
+        var lastAt: Double = 0
 
         for line in text.split(whereSeparator: \.isNewline) {
             guard let row = try? JSONSerialization.jsonObject(
@@ -984,11 +1042,33 @@ final class WatchNetworkProbe: ObservableObject {
                   let mode = row["mode"] as? String,
                   let event = row["event"] as? String else { continue }
 
-            var verdict = byMode[mode] ?? Verdict(mode: mode)
             let at = (row["at"] as? Double) ?? 0
             let appState = (row["appState"] as? String) ?? ""
-            if firstAt[mode] == nil { firstAt[mode] = at }
-            lastAt[mode] = at
+
+            // 一次 `start` 开一段新运行。上一段就此封存 —— 这样两次运行的
+            // 数字永远不会串到一起。
+            if event == "start" {
+                if var finished = current {
+                    finished.heldSeconds = Int(lastAt - firstAt)
+                    runs.append(finished)
+                }
+                var fresh = Verdict(mode: mode)
+                fresh.startedAt = at
+                current = fresh
+                firstAt = at
+                lastAt = at
+                continue
+            }
+            // start 之前的孤儿行（比如日志被清过一半）也要有个去处，
+            // 否则它们会被默默丢掉。
+            if current == nil {
+                var orphan = Verdict(mode: mode)
+                orphan.startedAt = at
+                current = orphan
+                firstAt = at
+            }
+            var verdict = current ?? Verdict(mode: mode)
+            lastAt = at
 
             switch event {
             case "connected":
@@ -1043,14 +1123,17 @@ final class WatchNetworkProbe: ObservableObject {
             default:
                 break
             }
-            byMode[mode] = verdict
+            current = verdict
         }
 
-        return byMode.map { key, value in
-            var one = value
-            one.heldSeconds = Int((lastAt[key] ?? 0) - (firstAt[key] ?? 0))
-            return one
-        }.sorted { $0.mode < $1.mode }
+        if var last = current {
+            last.heldSeconds = Int(lastAt - firstAt)
+            runs.append(last)
+        }
+        // 最近的排最前 —— 屏幕小，先看到刚跑的那次。
+        // ⚠ 只留最近 6 次：再多手表上也翻不完，而且旧的那几次多半是
+        // 探针自己还没修好时采的，价值更低。
+        return Array(runs.reversed().prefix(6))
     }
 
     /// 把落盘的日志读回来。
