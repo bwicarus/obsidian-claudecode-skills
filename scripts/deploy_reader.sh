@@ -307,9 +307,38 @@ print(digest.hexdigest())
 PY
 }
 
+assert_digest_shape() {
+  # 摘要必须是 64 位十六进制。**算不出来 ≠ 没变化。**
+  local label="$1" value="$2"
+  case "$value" in
+    *[!0-9a-f]*|"")
+      echo "验证摘要($label)不是有效的 sha256: '${value:0:80}'" >&2
+      return 2 ;;
+  esac
+  if [ "${#value}" -ne 64 ]; then
+    echo "验证摘要($label)长度 ${#value} != 64" >&2
+    return 2
+  fi
+}
+
 verify_validation_digest() {
-  local actual
+  local actual status
   actual="$(hash_validation_inputs)"
+  status=$?
+  # ⚠ 2026-08-27 实测发现的静默失效：这里原来只比字符串。
+  #   `hash_validation_inputs` 失败时 `actual` 是空的,而 VALIDATION_DIGEST
+  #   若也是同样失败得来的空值,**两个空相等 → 判定「没漂移」→ 放行**。
+  #   于是一个用来检测篡改的安全控制,在自己坏掉的时候选择了放行。
+  #   触发它的是往 inputs 里加了 `_server_deploy/tests` 而测试夹具没跟上：
+  #   两次调用都 SystemExit —— **失败得一模一样,看起来就像「一致」**。
+  #
+  #   **一个安全控制在自己坏掉时必须喊,而不是放行。**
+  if [ "$status" -ne 0 ]; then
+    echo "验证摘要算不出来(rc=$status) —— 拒绝据此放行" >&2
+    return 2
+  fi
+  assert_digest_shape "本次" "$actual" || return 2
+  assert_digest_shape "基线" "$VALIDATION_DIGEST" || return 2
   if [ "$actual" != "$VALIDATION_DIGEST" ]; then
     echo "验证合同/夹具在预检期间发生漂移" >&2
     return 2
@@ -1416,7 +1445,9 @@ python3 -B \
 # 固定测试/夹具摘要，并逐文件证明所有部署输入仍与私有候选相等。
 # 这样并行编辑只会让部署失败，不会出现“测试新字节、安装旧字节”。
 VALIDATION_DIGEST="$(hash_validation_inputs)"
-[ -n "$VALIDATION_DIGEST" ]
+# ⚠ 原来只有 `[ -n ]`：非空的垃圾照样通过,而基线一旦是垃圾,后面每一次
+#   比对都在拿垃圾比垃圾。基线必须当场证明自己是个合法摘要。
+assert_digest_shape "基线" "$VALIDATION_DIGEST"
 verify_checkout_inputs_match_candidate
 python3 -B scripts/audit_reader_network.py --check
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest -v \

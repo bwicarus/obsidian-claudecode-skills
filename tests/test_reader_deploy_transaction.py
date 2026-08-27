@@ -491,6 +491,12 @@ exit 0
                 "scripts/audit_reader_network.py",
                 "scripts/reader_network_audit_baseline.json",
                 "scripts/vocab/test_batch_protocol.py",
+                # ⚠ 夹具必须覆盖 hash_validation_inputs 的**每一个**输入。
+                # 漏掉一个的表现不是"测试报缺文件",而是**篡改检测静默失效**：
+                # 两次调用都因为同一个缺失而 SystemExit,两个空摘要相等,
+                # 于是判定「没漂移」并放行。2026-08-27 加 _server_deploy/tests
+                # 时就是这么把这条护栏悄悄关掉的。
+                "_server_deploy/tests/test_watch_voice_wire.py",
             )
             for relative in required:
                 path = root / relative
