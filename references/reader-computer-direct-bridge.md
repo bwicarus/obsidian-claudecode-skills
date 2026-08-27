@@ -40,20 +40,60 @@ loopback 目标。关闭桌面控制窗不等于关闭 bootstrap；bootstrap 空
 
 ## 配对与认证
 
+### ⚠ 实际实现（2026-08-27 读代码核实）
+
+**桥上没有配对码、没有 ECDSA、没有 challenge-response。** 全仓
+`pair` / `auth` / `challenge` 消息**零命中**。真实的闸只有三道：
+
+| 闸 | 在哪 | 强度 |
+|---|---|---|
+| Origin 白名单 | HTTP 升级时，`OriginAllowed(requireOrigin: true)` | 浏览器外**可伪造** |
+| `Tailscale-User-Login` 头 | 同上，逐字相等 | 由 `tailscale serve` 注入，客户端设的会被覆盖 |
+| `hello` | `DirectBridgeProtocol.cs:1584-1619` | **只校验 `protocolVersion == 3`,然后直接 `_authenticated = true`** |
+
+代码自己写明了原因：`v3 仅支持固定单用户实验模式`
+（`ExperimentalSingleUserMode` 为假就拒绝握手）。
+
+> **所以真正的安全边界是「你在 tailnet 里，且 serve 给你注入的身份对得上」。**
+> 不是密码学，是网络边界。Kestrel 只绑 `IPAddress.Loopback`
+> （`DirectBridgeServer.cs:530`），唯一入口就是 `tailscale serve`，
+> 而 serve 正是身份头的注入方 —— 客户端伪造不了它。
+
+**这条对任何要接进来的新客户端都是决定性的**：
+把这条链路暴露到 tailnet 之外（例如经 Pi 中继给手表），
+**那个中继本身就成了安全边界**，因为桥这头不会再做第二次校验。
+
+### 📌 下面这段是被 v3 取代的旧设计，**不是现状**
+
+保留它是为了记录当时打算做什么、以及为什么没做成 —— 直接删掉的话，
+后来的人会以为桥有密码学配对而据此做安全推理，那比不写更危险。
+
+⚠ 两处已经不成立：① 它的客户端是 **PWA，2026-08-14 已退役**（路由 410）；
+② 描述的机制一行代码都没有。
+
+<details>
+<summary>旧设计原文（勿据此推断现状）</summary>
+
 1. Windows EXE 显式打开短期配对窗口并显示一次性配对码；Reader 不再生成配对码。
 2. PWA 用 WebCrypto 生成不可导出的 ECDSA P-256 私钥，私钥只存 IndexedDB。
 3. 配对请求只提交 SPKI 公钥和一次性配对码。Windows 消费配对码后只保存公钥、指纹、代际和
    撤销状态，不保存长期 bearer token。
 4. 每条新 WebSocket 连接先由 Windows 发随机 challenge；PWA 对以下精确 UTF-8 字节串签名：
-   `reader-computer-voice-auth/1\n<challengeId>\n<nonce>\n<Origin>`。认证成功前只允许
+   `reader-computer-voice-auth/1` + 换行 + `<challengeId>` + 换行 + `<nonce>`
+   + 换行 + `<Origin>`。认证成功前只允许
    `PAIR`/`AUTH`，不允许状态、启动或媒体。连接建立后 10 秒内未认证即
    `AUTH_TIMEOUT`；认证后 30 秒内未收到首个有效 `START` 即 `START_TIMEOUT`，普通状态读取、
    重复或无效消息均不能续期。
+
+</details>
+
+### 仍然成立的两条
+
 5. Windows 必须校验精确 HTTPS Origin；经 Tailscale Serve 进入时还要校验可信 identity header。
    本机隔离测试只能通过显式 test adapter 放宽，生产配置不得接受通配 Origin。
 
 配对码、challenge、签名、私钥和音频不得写入日志。日志只保留时间、阶段、会话 ID 摘要和有界
-错误码。
+错误码。（前半句现在是空条款 —— 那些东西不存在。）
 
 ## 生命周期
 
