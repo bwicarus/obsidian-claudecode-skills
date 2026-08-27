@@ -199,6 +199,18 @@ withdrawn/restored，掉一次线 ≠ 豁免失效。
 第一轮挂在 Shared/ 文件漏加进 App target，第二轮挂在嵌入目录搞反了，
 第三轮全过）。bundle ID 与描述文件都是 CI 自动建的，Apple 后台没动手。
 
+**2026-08-27 第二个构建（含网络豁免探针）已上传**（CI run 33044146611，
+build 498）。这一轮又烧了四次，三个错**没有一个在探针本身**：
+
+1. `encode` 是 @MainActor 类的静态方法，却要在 nonisolated 的 WCSession
+   代理里同步调用（早先「replyHandler 立刻回执」那个修复留下的）；
+2. `activateFromLaunch` 是 nonisolated static，被写成了 `.shared.` 实例调用；
+3. 我把 `UIBackgroundModes` 整个换成了 `WKBackgroundModes` —— 只该换值。
+
+⚠ 第 3 条**编译、归档、签名、校验全过，只在 altool 上传时报 90362**。
+这是本仓库第二次栽在「只有上传才报」的错上（上一次是 PlugIns/ 位置）。
+已在 CI 校验段加断言提前拦。
+
 **装法**：iPhone 的「Watch」App → 可用 App → BWReader → 安装。
 
 ## 文件
