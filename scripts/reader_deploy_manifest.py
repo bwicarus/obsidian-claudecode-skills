@@ -78,6 +78,17 @@ WEBAPP_SOURCE_FILES = (
     # voice-rt.service executes the installed webapp copy, never the mutable
     # checkout.  It is therefore part of the same atomic reader release.
     "voice_realtime_relay.py",
+    # 手表语音桥(watch-voice.service)。同理跑的是**已安装副本**,不是 checkout。
+    # 两个文件必须同批原子安装:wire 是线格式与节拍的纯函数层,relay 是进程入口
+    # (两侧 socket + 自己拼控制面消息)。只上其中一个 = 入口引用一个版本不同的
+    # 协议层,而 Windows 对上行序号是 fail-closed 的(错一帧即 InvalidSequence
+    # 挂断整通电话):表现不是报错,是通话建立后立刻被对端掐掉。
+    # ⚠ 进程入口的文件名跟 watch-voice.service 的 ExecStart、deploy_reader.sh 的
+    #   `systemctl cat` 断言、tests/test_reader_deploy_manifest.py 是同一个约定;
+    #   要改名就四处一起改(python3 scripts/contract_sites.py pi-service-registration)。
+    #   好消息是改漏了会**立刻炸**:本清单 require_sources 找不到文件即抛。
+    "watch_voice_wire.py",
+    "watch_voice_relay.py",
     "task_runtime.py",
     # 纸张模型/格子布局器:assistant.py 顶层 import 它,task_runtime._set_blocks 也
     # 函数内 import。此前一直漏登记,Pi 上没炸纯靠旧版手工副本残留——正是本清单
@@ -200,6 +211,7 @@ KG_RUNTIME_SOURCE_FILES = (
 
 SYSTEMD_UNIT_SOURCES = (
     "references/systemd/voice-rt.service",
+    "references/systemd/watch-voice.service",
     "references/systemd/bwicarus-quick-sync.service",
     "references/systemd/bwicarus-quick-sync.timer",
     "references/systemd/bwicarus-daily.service",
@@ -305,6 +317,21 @@ _REQUIRED_EXACT_IDENTITIES = frozenset(
             "_server_deploy/voice_realtime_relay.py",
             "webapp",
             "voice_realtime_relay.py",
+            POLICY_EXACT,
+        ),
+        # 手表语音桥的两个文件是 release 不变量,不是可选行:漏掉任何一个,
+        # deploy_reader.sh 会照常成功,而 watch-voice.service 继续跑旧字节 ——
+        # 部署"成功"与桥其实没更新之间没有任何声音。
+        (
+            "_server_deploy/watch_voice_wire.py",
+            "webapp",
+            "watch_voice_wire.py",
+            POLICY_EXACT,
+        ),
+        (
+            "_server_deploy/watch_voice_relay.py",
+            "webapp",
+            "watch_voice_relay.py",
             POLICY_EXACT,
         ),
         (

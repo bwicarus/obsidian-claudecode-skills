@@ -274,6 +274,61 @@
      "note": "provisioningProfiles 字典每个 bundle id 一条"
     }
    ]
+  },
+  "pi-service-registration": {
+   "what": "给 Pi 加一个常驻 service：代码进清单、unit 进清单、部署脚本认它 —— 三样各自独立，漏哪样都不报错",
+   "canonical": "scripts/reader_deploy_manifest.py",
+   "tests": [
+    "tests/test_reader_deploy_manifest.py::test_service_units_are_exact_manifest_rows_and_use_stable_copies",
+    "tests/test_reader_deploy_transaction.py::test_health_checks_cover_voice_lazy_cards_and_runtime_imports"
+   ],
+   "sites": [
+    {
+     "file": "scripts/reader_deploy_manifest.py",
+     "role": "代码进清单",
+     "note": "WEBAPP_SOURCE_FILES 决定文件发不发；漏了 = deploy 成功而生产跑旧字节，无声"
+    },
+    {
+     "file": "scripts/reader_deploy_manifest.py",
+     "role": "代码是不变量",
+     "note": "_REQUIRED_EXACT_IDENTITIES：只进上面那张表的话，将来被人删掉不会红"
+    },
+    {
+     "file": "scripts/reader_deploy_manifest.py",
+     "role": "unit 进清单",
+     "note": "SYSTEMD_UNIT_SOURCES：unit 文件本身也要逐字节管起来，否则线上那份可以被手改"
+    },
+    {
+     "file": "scripts/deploy_reader.sh",
+     "role": "服务生命周期",
+     "note": "MANAGED_SERVICES + start + 运行时稳定性断言；漏了 = 新代码装上了但进程没重启"
+    },
+    {
+     "file": "scripts/deploy_reader.sh",
+     "role": "unit 语法预检",
+     "note": "systemd-analyze verify 的显式文件列表，不是目录通配"
+    },
+    {
+     "file": "tests/test_reader_deploy_manifest.py",
+     "role": "契约测试",
+     "note": "systemd unit 集合是精确断言；ExecStart 必须指向已安装副本而不是 checkout"
+    },
+    {
+     "file": "tests/test_reader_deploy_transaction.py",
+     "role": "契约测试",
+     "note": "断言健康检查确实覆盖这个 unit，防止将来有人把断言删掉"
+    },
+    {
+     "file": "references/raspberry-pi-deployment.md",
+     "role": "首次上线",
+     "note": "enable --now 要在第一次 deploy 之前；脚本会先 stop 一个 systemd 还不认识的 unit 而中止"
+    },
+    {
+     "file": "CLAUDE.md",
+     "role": "清单概览",
+     "note": "systemd 服务那一行 —— 新 session 靠它知道机器上有什么"
+    }
+   ]
   }
  }
 }

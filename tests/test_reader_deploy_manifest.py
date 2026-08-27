@@ -37,6 +37,8 @@ class ReaderDeployManifestTests(unittest.TestCase):
                 "tool_registry.py",
                 "voice.py",
                 "voice_realtime_relay.py",
+                "watch_voice_wire.py",
+                "watch_voice_relay.py",
                 "task_runtime.py",
                 "kg_runtime.py",
                 "control.py",
@@ -267,6 +269,7 @@ class ReaderDeployManifestTests(unittest.TestCase):
             set(unit_entries),
             {
                 "voice-rt.service",
+                "watch-voice.service",
                 "bwicarus-quick-sync.service",
                 "bwicarus-quick-sync.timer",
                 "bwicarus-daily.service",
@@ -285,6 +288,9 @@ class ReaderDeployManifestTests(unittest.TestCase):
         )
 
         voice = unit_entries["voice-rt.service"].source_path().read_text(
+            "utf-8"
+        )
+        watch = unit_entries["watch-voice.service"].source_path().read_text(
             "utf-8"
         )
         quick = unit_entries[
@@ -307,6 +313,17 @@ class ReaderDeployManifestTests(unittest.TestCase):
             "/home/bwicarus/claude/_server_deploy/"
             "voice_realtime_relay.py",
             voice,
+        )
+        # 同一条不变量：unit 必须指向已安装副本。指回 checkout 的后果不是报错，
+        # 而是「改了代码不部署也生效」，于是生产跑的是谁没人说得清。
+        self.assertIn(
+            "/home/bwicarus/webapp/watch_voice_relay.py",
+            watch,
+        )
+        self.assertNotIn(
+            "/home/bwicarus/claude/_server_deploy/"
+            "watch_voice_relay.py",
+            watch,
         )
         self.assertIn(
             "/home/bwicarus/reader-runtime/kg/current/"

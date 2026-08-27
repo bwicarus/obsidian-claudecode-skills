@@ -1,0 +1,49 @@
+[Unit]
+Description=Apple Watch voice bridge (watch WSS <-> Windows direct bridge; Pi is the shock absorber)
+Documentation=file:///home/bwicarus/claude/references/watch-voice-bridge.md
+After=network-online.target
+Wants=network-online.target
+# 崩溃循环必须变成 failed（可见），而不是无限快重启（不可见）。
+# 这是全系统唯一「悄悄不在了 = 用户按下按键什么都不发生」的服务。
+StartLimitIntervalSec=60
+StartLimitBurst=8
+
+[Service]
+Type=simple
+User=bwicarus
+WorkingDirectory=/home/bwicarus/webapp
+EnvironmentFile=/home/bwicarus/claude/.env
+ExecStart=/home/bwicarus/mcp-venv/bin/python /home/bwicarus/webapp/watch_voice_relay.py
+
+# ── 延迟预算：这条链路上唯一有硬实时要求的进程 ──────────────────────────
+# 上行必须按 50Hz 恒定节拍推给 Windows（一格 20ms）。晚一格 = 一次可闻的断续；
+# 而 Windows 侧没有 resume，只要 Pi 自己乱了节拍就是整通电话挂断。
+#
+# ⚠ Nice= 一个人不够：cgroup v2 打开 cpu 控制器后（本机 yolo-figures /
+#   figures-describe 都设了 CPUWeight，控制器就是开的），跨 service 的 CPU
+#   分配由 cpu.weight 决定，nice 只在**同一个 cgroup 内部**分配。
+#   这个 service 的 cgroup 里只有它自己 —— 光设 Nice 等于没设。
+#   所以两个都写：CPUWeight 管跨服务，Nice 管本进程的唤醒/vruntime。
+Nice=-5
+CPUWeight=300
+
+# ── 内存：宁可被杀掉重来，也不要边跑边换页 ──────────────────────────────
+# Pi 上同时跑着 webapp/anki/OCR/YOLO，内存常年紧张。对延迟敏感的进程来说
+# **一次 page-in 就吃光整个抖动预算**，而换页是静默的：日志里什么都不会写，
+# 只表现为通话偶尔卡一下。所以禁用 swap，让「内存不够」变成一个响亮的事件。
+MemorySwapMax=0
+# 硬上限，不设 MemoryHigh：MemoryHigh 的做法是**回收内存并把进程拖住**，
+# 那正是我们要避免的停顿。宁可超限即 OOM-kill → Restart 拉起 → 掉一通电话，
+# 也不要一个还活着但一直卡顿、且没人看得出原因的进程。
+# 320M 对一个 asyncio + websockets 的中继是宽裕的（帧 1956B × 50/s）。
+MemoryMax=320M
+
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+NoNewPrivileges=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

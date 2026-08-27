@@ -113,6 +113,9 @@ Quinn 另外点名：**用 `NWConnection` 不要用 `URLSessionWebSocketTask`** 
 
 ### ⚠ Pi 必须是「减震器」，不是「转发器」
 
+> Pi 侧的落地（unit、部署清单、鉴权边界、排错）在
+> `references/watch-voice-bridge.md`。下面只留下这条设计的由来。
+
 Windows 桥的序号是 **fail-closed 硬校验**（`DirectPcmSequenceGuard` /
 `DirectUplinkSequenceGuard`：帧序号必须恰好等于上一帧 +1，否则
 `InvalidSequence`，无 resume）。那对 LAN/USB 级链路是合理契约，**对手表射频

@@ -804,6 +804,18 @@ exit 0
         self.assertIn('HTTP/1.1 101', SCRIPT)
         self.assertIn("VOICE_RT_PORT=8767", SCRIPT)
         self.assertIn("WEBAPP_PORT=5000", SCRIPT)
+        # 手表桥的代码在部署清单里，但只有这三样能保证它**被重启并被证明**。
+        # 少了它们 deploy 会照常成功，而 watch-voice 继续跑旧字节 —— 部署
+        # "成功" 与桥其实没更新之间，不会有任何声音。
+        self.assertIn("assert_watch_voice_runtime_stable", SCRIPT)
+        # 代码进清单、服务会重启，都不代表**测试跑过**。这两个文件不在 tests/ 包里，
+        # 预检那串 `tests.X` 抓不到它们；漏掉这一行的表现是两条铁律的断言从来没跑过，
+        # 而部署一路绿灯。
+        self.assertIn("-s _server_deploy/tests", SCRIPT)
+        self.assertIn('-p "test_watch_voice*.py"', SCRIPT)
+        self.assertIn('root / "_server_deploy" / "tests"', SCRIPT)
+        self.assertIn("wait_watch_voice_tcp 30", SCRIPT)
+        self.assertIn("WATCH_VOICE_PORT=8768", SCRIPT)
         self.assertIn("pdf_reader._review_candidate_service()", SCRIPT)
         self.assertIn(
             'PYTHONPATH="$STAGE_DIR/webapp"',

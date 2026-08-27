@@ -82,7 +82,8 @@ Windows `C:/claude`，绕过 git 覆盖工作树，与跨机边界冲突。
   `/home/bwicarus/deploy-backups/reader/<DEPLOY_ID>/`
 - KG 作为不可变 release 发布，并断言部署过程未意外写入 KG 状态
 - 冻结写者 timer、记录/恢复 active units
-- 健康检查：`webapp.service`(5000) / `voice-rt.service`(8767) HTTP+TCP 探针与运行时稳定性断言
+- 健康检查：`webapp.service`(5000) / `voice-rt.service`(8767) HTTP+TCP 探针与运行时稳定性断言；
+  `watch-voice.service`(8768) 只探到 listen —— 它的端点有鉴权闸，断言 101 等于为了让脚本好看而开口子
 - E2E 冒烟 `scripts/reader_e2e.py`
 
 **失败即回滚并报错**。所以证据是"脚本退出 0 + 事务目录路径"，不是一段手工核对散文。

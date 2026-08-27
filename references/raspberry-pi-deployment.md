@@ -322,6 +322,9 @@ sudo systemctl enable --now anki-sync-refresh.timer bwicarus-quick-sync.timer pu
 # Pi 当前两项核心职责（AI 调用中继 / 设备间同步中继）对应的 unit，别漏：
 sudo systemctl enable --now voice-rt.service        # 语音 realtime 中继 :8767，deploy_reader.sh 的健康门禁会探它
 sudo systemctl enable --now reader-context-push.service mcp-server.service rbi-server.service
+# 手表语音桥。⚠ 必须在第一次跑 deploy_reader.sh **之前** enable：部署脚本会在
+# 安装新 unit 文件之前先 stop 它，对 systemd 还不认识的 unit 执行 stop 会让整次部署中止。
+sudo systemctl enable --now watch-voice.service   # :8768，见 references/watch-voice-bridge.md
 sudo systemctl start bwicarus-daily.service        # 首次手动跑，验证所有 step 全 ok
 ```
 sudo systemctl enable --now bwicarus-daily.timer

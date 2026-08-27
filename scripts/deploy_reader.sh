@@ -51,6 +51,9 @@ DEPLOY_LOCK="$KG_RUNTIME_ROOT/deploy.lock"
 ACTIVE_MARKER="$KG_RUNTIME_ROOT/deploy-in-progress.json"
 VOICE_RT_UNIT="voice-rt.service"
 VOICE_RT_PORT=8767
+WATCH_VOICE_UNIT="watch-voice.service"
+# 8765=AnkiConnect、8766=mcp-server、8767=voice-rt，手表桥往下顺一位。
+WATCH_VOICE_PORT=8768
 WEBAPP_UNIT="webapp.service"
 WEBAPP_PORT=5000
 OBSIDIAN_VAULT_ROOT="${OBSIDIAN_VAULT:-/home/bwicarus/obsidian}"
@@ -86,7 +89,12 @@ INTERRUPTIBLE_WRITERS=(
   "yolo-figures.service"
   "figures-describe.service"
 )
-MANAGED_SERVICES=("webapp.service" "$VOICE_RT_UNIT")
+# ⚠ 这里列的 unit **必须已经存在于 /etc/systemd/system**：freeze_writers 会在
+#   安装新 unit 文件之前就 `systemctl stop` 它们，而对一个 systemd 还不认识的
+#   unit 执行 stop 会退 5，整次部署 fail-closed 中止。
+#   新 unit 的首次上线因此是一次性手工步骤（装 unit + daemon-reload + enable），
+#   之后才由本清单接管。详见 references/watch-voice-bridge.md「首次上线」。
+MANAGED_SERVICES=("webapp.service" "$VOICE_RT_UNIT" "$WATCH_VOICE_UNIT")
 KG_MUTABLE_PATHS=(
   # Core KG outputs owned by the three frozen jobs.  The same exact inventory
   # is used for both the before/after digest and the forensic tar snapshot.
@@ -263,6 +271,9 @@ inputs = (
     root / "scripts" / "audit_reader_network.py",
     root / "scripts" / "reader_network_audit_baseline.json",
     root / "scripts" / "vocab" / "test_batch_protocol.py",
+    # 手表语音桥的测试不在 tests/ 下（它跟被测模块同住 _server_deploy/），
+    # 不显式列进来的话，预检期间改它不会被摘要发现。
+    root / "_server_deploy" / "tests",
 )
 files = []
 for source in inputs:
@@ -536,6 +547,9 @@ restore_active_units() {
   fi
   if was_active "$VOICE_RT_UNIT"; then
     assert_voice_runtime_stable
+  fi
+  if was_active "$WATCH_VOICE_UNIT"; then
+    assert_watch_voice_runtime_stable
   fi
 }
 
@@ -927,6 +941,33 @@ if not response.startswith(b"HTTP/1.1 101"):
 PY
 }
 
+watch_voice_tcp_probe() {
+  # ⚠ 故意**只探到 listen**，不像 voice_tcp_probe 那样断言 101。
+  #   手表端点是有闸的（Origin + OAuth），要它对一个裸 upgrade 回 101，等于
+  #   为了让部署脚本好看而在鉴权上开个口 —— 而 Pi 正是这条链路的安全边界
+  #   （Windows 那头不会再校验一次）。宁可证据弱一点，也不要为证据松闸。
+  #   "端口在听" 能证明的东西：进程起来了、没在 import 阶段炸、端口没被占。
+  python3 -B - "$WATCH_VOICE_PORT" <<'PY'
+import socket
+import sys
+
+with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=3):
+    pass
+PY
+}
+
+wait_watch_voice_tcp() {
+  local attempts="${1:-30}" i
+  for ((i = 0; i <= attempts; i += 1)); do
+    if watch_voice_tcp_probe; then
+      return 0
+    fi
+    [ "$i" -lt "$attempts" ] && sleep 1
+  done
+  echo "watch-voice 端口 ${WATCH_VOICE_PORT} 在 ${attempts}s 内未就绪" >&2
+  return 2
+}
+
 webapp_http_probe() {
   local code
   if ! code="$(
@@ -1029,6 +1070,44 @@ assert_voice_runtime_stable() {
       return 2
     }
   voice_tcp_probe
+}
+
+assert_watch_voice_runtime_stable() {
+  # 与 voice-rt 同构。稳定窗口这一条对手表桥尤其要紧：它 Restart=always +
+  # RestartSec=2，一个「起来 → 崩 → 又起来」的循环在 is-active 上看永远是
+  # active。只有比对 MainPID/NRestarts 才分得出「活着」和「一直在复活」。
+  local pid_before pid_after restarts_before restarts_after
+  wait_unit_active "$WATCH_VOICE_UNIT" 15
+  pid_before="$(
+    systemctl show --property=MainPID --value "$WATCH_VOICE_UNIT"
+  )"
+  restarts_before="$(
+    systemctl show --property=NRestarts --value "$WATCH_VOICE_UNIT"
+  )"
+  case "$pid_before" in
+    ''|*[!0-9]*|0)
+      echo "watch-voice MainPID 无效: $pid_before" >&2; return 2 ;;
+  esac
+  case "$restarts_before" in
+    ''|*[!0-9]*)
+      echo "watch-voice NRestarts 无效: $restarts_before" >&2; return 2 ;;
+  esac
+  wait_watch_voice_tcp 30
+  sleep "$VOICE_STABILITY_SECONDS"
+  wait_unit_active "$WATCH_VOICE_UNIT" 0
+  pid_after="$(
+    systemctl show --property=MainPID --value "$WATCH_VOICE_UNIT"
+  )"
+  restarts_after="$(
+    systemctl show --property=NRestarts --value "$WATCH_VOICE_UNIT"
+  )"
+  [ "$pid_before" = "$pid_after" ] \
+    && [ "$restarts_before" = "$restarts_after" ] || {
+      echo "watch-voice 在稳定窗口内重启: pid $pid_before->$pid_after," \
+        "restarts $restarts_before->$restarts_after" >&2
+      return 2
+    }
+  watch_voice_tcp_probe
 }
 
 assert_deployed_python_health() {
@@ -1353,11 +1432,16 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest -v \
   tests.test_vbook_route_policy \
   tests.test_web_translate_upgrade
 python3 -B scripts/vocab/test_batch_protocol.py
+# 手表语音桥（wire 纯函数层 + relay 进程接线）。⚠ 它们不在 tests/ 包里，`-m unittest
+# tests.X` 那串抓不到；不单独跑的话，这两条铁律的可执行断言等于不存在。
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -v \
+  -s _server_deploy/tests -p "test_watch_voice*.py"
 node --test \
   tests/reader_contract/book-extension-handoff.contract.test.mjs \
   tests/reader_contract/reader-service-worker.contract.test.mjs
 systemd-analyze verify \
   "$STAGE_DIR/systemd/voice-rt.service" \
+  "$STAGE_DIR/systemd/watch-voice.service" \
   "$STAGE_DIR/systemd/bwicarus-quick-sync.service" \
   "$STAGE_DIR/systemd/bwicarus-quick-sync.timer" \
   "$STAGE_DIR/systemd/bwicarus-daily.service" \
@@ -1487,10 +1571,17 @@ verify_deploy_payload_digest
 
 sudo systemctl start "$WEBAPP_UNIT"
 sudo systemctl start "$VOICE_RT_UNIT"
+sudo systemctl start "$WATCH_VOICE_UNIT"
 assert_webapp_runtime_stable
 assert_voice_runtime_stable
+assert_watch_voice_runtime_stable
 systemctl cat "$VOICE_RT_UNIT" \
   | grep -F -- "/home/bwicarus/webapp/voice_realtime_relay.py" >/dev/null
+# 同一条不变量：生效的 unit 必须执行已安装副本。这里读的是 systemd 眼里的
+# unit（systemctl cat），不是 stage 里那份 —— 否则证明的是"我打算装什么"，
+# 而不是"现在真的在跑什么"。
+systemctl cat "$WATCH_VOICE_UNIT" \
+  | grep -F -- "/home/bwicarus/webapp/watch_voice_relay.py" >/dev/null
 systemctl cat bwicarus-quick-sync.service \
   | grep -F -- "$KG_RUNTIME_ROOT/current/scripts/quick_sync.py" >/dev/null
 systemctl cat concept-graph.service \
