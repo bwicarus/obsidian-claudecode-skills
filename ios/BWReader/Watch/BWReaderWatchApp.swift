@@ -184,6 +184,7 @@ struct NotificationsView: View {
 
 struct TalkView: View {
     @StateObject private var voice = WatchVoice()
+    @EnvironmentObject private var link: WatchLink
 
     var body: some View {
         NavigationStack {
@@ -239,6 +240,8 @@ struct TalkView: View {
             }
             .navigationTitle("说话")
         }
+        // 结果是异步另发一条回来的（见 WatchVoice.send 的注释）。
+        .onChange(of: link.lastTurn) { _, _ in voice.observe(link) }
     }
 }
 

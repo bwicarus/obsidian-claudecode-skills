@@ -20,18 +20,26 @@ final class ReaderWatchLink: NSObject, ObservableObject {
     var onVoiceStop: (() async -> Void)?
     /// 当前语音状态的读取口（同上，注入而不是自己抓）。
     var voiceStatusProvider: (() -> ReaderWatchVoice)?
-    /// Pi 的会话 cookie。手表说话要用它去打 /api/voice/*。
-    /// 同样是注入：cookie 在 WebView 的 datastore 里，这个类不该去碰 WebView。
-    var piCookies: (() async -> [HTTPCookie])?
 
     private var session: WCSession?
     private var cards: [ReaderWatchCard] = []
+    /// 最近一轮说话的结果。随快照一起送 —— 手表锁屏时 sendMessage 到不了，
+    /// 靠它在下次打开时补上。
+    private var lastVoiceTurn: ReaderWatchTurn?
     private var notifications: [ReaderWatchNotification] = []
     /// 手表屏幕就那么大，留最近 12 张够翻了；更重要的是**载荷有硬上限**，
     /// 超了整份都送不到，而 WCSession 那个错误在手表上根本看不见。
     private let maximumCards = 12
 
     override private init() { super.init() }
+
+    /// 进程启动时调（含被 WatchConnectivity 后台唤醒那次）。
+    ///
+    /// 声明成 nonisolated 是为了能在 `App.init()` 里直接调 —— 那个位置不在
+    /// MainActor 上。真正的激活仍然回到主线程做。
+    nonisolated static func activateFromLaunch() {
+        Task { @MainActor in ReaderWatchLink.shared.activate() }
+    }
 
     func activate() {
         guard WCSession.isSupported() else { return }
@@ -91,7 +99,8 @@ final class ReaderWatchLink: NSObject, ObservableObject {
             generatedAtMs: Date().timeIntervalSince1970 * 1000,
             voice: voiceStatusProvider?() ?? .unknown,
             cards: cards,
-            notifications: notifications)
+            notifications: notifications,
+            lastTurn: lastVoiceTurn)
     }
 
     @discardableResult
@@ -155,7 +164,25 @@ final class ReaderWatchLink: NSObject, ObservableObject {
     // ── 手表按下的按钮 ──
 
     fileprivate func handle(_ raw: String) async -> [String: Any] {
-        switch ReaderWatchCommand(rawValue: raw) {
+        let command = ReaderWatchCommand(rawValue: raw)
+        // ⚠ 这几个回调只在**视图起来后**才被注入。手机被手表从后台唤醒时
+        // 它们全是 nil —— 原来写的是 `await onVoiceStart?()`，nil 就是
+        // **静默 no-op**，然后照样回一份快照。手表上表现为「按了、没报错、
+        // 什么也没发生」，正是 silent-failure-lessons 规则一说的那种。
+        //
+        // 而这**不是**能靠改代码绕过去的：启动语音桥要激活麦克风会话，
+        // 而 iOS 不允许后台唤醒的进程去激活非混音的 playAndRecord 会话
+        // （用户截图里那个 avfaudio 'what' 错误就是撞在这），也没有任何 API
+        // 能把手机 app 拉到前台。所以**如实告诉手表**，别假装做了。
+        if command == .voiceStart || command == .voiceStop {
+            guard onVoiceStart != nil, onVoiceStop != nil else {
+                var snapshot = WatchSnapshotCoder.encode(currentSnapshot()) ?? [:]
+                snapshot["commandError"] =
+                    "手机 App 没在前台，语音桥开关用不了"
+                return snapshot
+            }
+        }
+        switch command {
         case .voiceStart:
             await onVoiceStart?()
         case .voiceStop:
@@ -187,39 +214,89 @@ extension ReaderWatchLink: WCSessionDelegate {
         WCSession.default.activate()
     }
 
-    /// 手表按住说话录来的一段音频（AAC/m4a）。跑完一轮把结果回过去。
+    /// 手表按住说话录来的一段音频（AAC/m4a）。
     ///
-    /// ⚠ 走的是 **Pi 的回合制链路**（/api/voice/transcribe → /api/voice/agent），
+    /// ⚠ **replyHandler 必须立刻回，不能等活干完。**
+    /// WCSession 的 reply 有超时（`WCError.messageReplyTimedOut`），而这一轮
+    /// 最坏要 105 秒（转写 45s + 问答 60s）—— 在 reply 里同步跑完必然超时，
+    /// 而且这跟手机开没开无关。所以：**先回执，再干活，结果另发一条**。
+    ///
+    /// ⚠ 代理方法跑在后台线程上，而下面第一件事就是切 MainActor —— 让出之后
+    /// 进程随时可能被挂起。所以后台断言要在**让出之前**取，不能取在异步中间。
+    ///
+    /// 走的是 Pi 的回合制链路（/api/voice/transcribe → /api/voice/agent），
     /// 不是电脑上那条常连的语音桥 —— 原因见 ReaderWatchVoiceTurn 的文件头。
     nonisolated func session(
         _ session: WCSession,
         didReceiveMessageData messageData: Data,
         replyHandler: @escaping (Data) -> Void
     ) {
+        // 先占住后台时间（这里还在代理线程上，没让出）。
+        var assertion = UIBackgroundTaskIdentifier.invalid
+        assertion = UIApplication.shared.beginBackgroundTask(
+            withName: "watch-voice-turn"
+        ) {
+            UIApplication.shared.endBackgroundTask(assertion)
+            assertion = .invalid
+        }
+
+        // 立刻回执。手表据此从"发送中"切到"处理中"，并开始等结果那条消息。
+        replyHandler(Self.encode(["accepted": true]))
+
         Task { @MainActor in
-            func answer(_ payload: [String: Any]) {
-                replyHandler(
-                    (try? JSONSerialization.data(withJSONObject: payload))
-                    ?? Data())
+            defer {
+                if assertion != .invalid {
+                    UIApplication.shared.endBackgroundTask(assertion)
+                }
             }
-            guard let cookies = await self.piCookies?() else {
-                // 拿不到 cookie 说明 App 还没接上 —— 说清该去哪儿修,
-                // 别让手表上只显示"失败"。
-                ReaderWatchLinkDiagnostics.note("手表说话：拿不到 Pi cookie")
-                answer(["error": "手机 App 还没准备好，先打开一次"])
-                return
-            }
+            let cookies = await ReaderWatchVoiceTurn.piCookies()
+            var result: [String: Any]
             do {
                 let outcome = try await ReaderWatchVoiceTurn.run(
                     clip: messageData, cookies: cookies)
-                answer(["heard": outcome.transcript, "reply": outcome.reply])
+                result = ["heard": outcome.transcript, "reply": outcome.reply]
             } catch {
                 let why = (error as? LocalizedError)?.errorDescription
                     ?? error.localizedDescription
                 ReaderWatchLinkDiagnostics.note("手表说话失败：" + why)
-                answer(["error": why])
+                result = ["error": why]
             }
+            self.deliverTurn(result)
         }
+    }
+
+    /// 把这一轮的结果送回手表。
+    ///
+    /// 两条路都走：`sendMessage` 即时（手表 app 在前台时成立），
+    /// `updateApplicationContext` 兜底（手表锁屏/切走了也能在下次打开时看到）。
+    /// **不要只走前者** —— 用户抬腕说完就放下手是常态，那时结果会丢，
+    /// 而丢了不会有任何地方说。
+    private func deliverTurn(_ result: [String: Any]) {
+        let turn = ReaderWatchTurn(
+            heard: (result["heard"] as? String) ?? "",
+            reply: (result["reply"] as? String) ?? "",
+            error: result["error"] as? String,
+            turnAtMs: Date().timeIntervalSince1970 * 1000)
+        lastVoiceTurn = turn
+        let session = WCSession.default
+        if session.activationState == .activated, session.isReachable,
+           let encoded = try? JSONEncoder().encode(turn),
+           let object = try? JSONSerialization.jsonObject(with: encoded),
+           let dictionary = object as? [String: Any] {
+            session.sendMessage(
+                ["voiceTurn": dictionary], replyHandler: nil,
+                errorHandler: { error in
+                    // 到不了很正常（手表锁屏了）—— 快照那条兜底还在，
+                    // 所以这里只留痕不报警。
+                    ReaderWatchLinkDiagnostics.note(
+                        "即时回结果没送到（快照会兜底）：" + error.localizedDescription)
+                })
+        }
+        syncToWatch()
+    }
+
+    private static func encode(_ payload: [String: Any]) -> Data {
+        (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
     }
 
     nonisolated func session(

@@ -80,6 +80,19 @@ struct ReaderWatchNotification: Codable, Equatable, Identifiable {
     var dueAtMs: Double?
 }
 
+/// 一轮「按住说话」的结果。
+///
+/// ⚠ 它**随快照走**是有原因的：结果是异步回来的（手机要跑 45s+60s 的 HTTP，
+/// 不可能在 WCSession 的 reply 里等完），而即时那条 `sendMessage` 只在手表
+/// app 前台时到得了 —— 用户说完就放下手腕是常态。放进快照当兜底，
+/// 下次打开手表就能看到，而不是无声无息地丢掉。
+struct ReaderWatchTurn: Codable, Equatable {
+    var heard: String
+    var reply: String
+    var error: String?
+    var turnAtMs: Double
+}
+
 /// 手表收到的完整一份快照。
 struct ReaderWatchSnapshot: Codable, Equatable {
     var contract: String = ReaderWatchPayload.contract
@@ -87,12 +100,14 @@ struct ReaderWatchSnapshot: Codable, Equatable {
     var voice: ReaderWatchVoice
     var cards: [ReaderWatchCard]
     var notifications: [ReaderWatchNotification]
+    var lastTurn: ReaderWatchTurn?
 
     static let empty = ReaderWatchSnapshot(
         generatedAtMs: 0,
         voice: .unknown,
         cards: [],
-        notifications: [])
+        notifications: [],
+        lastTurn: nil)
 
     /// 这份数据有多旧。手表 UI 必须显示它 —— 见文件头那条语义。
     func ageSeconds(now: Date = Date()) -> Double {

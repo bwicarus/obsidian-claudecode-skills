@@ -18,6 +18,9 @@ final class WatchLink: NSObject, ObservableObject {
     @Published private(set) var reachable = false
     /// 上一条指令的结果。失败必须显示出来 —— 按了没反应又不说话是最糟的。
     @Published private(set) var lastCommandNote: String?
+    /// 最近一轮说话的结果。WCSession 只能有一个 delegate，所以由这里统一收，
+    /// WatchVoice 观察它 —— 而不是两个类抢同一个 delegate。
+    @Published private(set) var lastTurn: ReaderWatchTurn?
 
     private var session: WCSession?
     private var tick: Timer?
@@ -81,6 +84,14 @@ final class WatchLink: NSObject, ObservableObject {
         reachable = session?.isReachable ?? false
     }
 
+    fileprivate func applyTurn(_ raw: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: raw),
+              let turn = try? JSONDecoder().decode(
+                ReaderWatchTurn.self, from: data)
+        else { return }
+        if turn.turnAtMs > (lastTurn?.turnAtMs ?? 0) { lastTurn = turn }
+    }
+
     fileprivate func apply(_ payload: [String: Any], from source: String) {
         guard let contract = payload[ReaderWatchPayload.Key.contract] as? String
         else { return }                       // 不是我们的载荷，安静忽略
@@ -89,11 +100,22 @@ final class WatchLink: NSObject, ObservableObject {
             lastCommandNote = "手机与手表版本不匹配（\(contract)）"
             return
         }
+        // 手机明确说了这条指令没做成（比如 app 不在前台，开关用不了）。
+        // 这一句必须显示 —— 否则就是"按了、没报错、什么也没发生"。
+        if let note = payload["commandError"] as? String {
+            lastCommandNote = note
+        }
         guard let decoded = WatchSnapshotCoder.decode(payload) else {
             lastCommandNote = "手机发来的数据解不开"
             return
         }
         snapshot = decoded
+        // 快照里也带着最近一轮的结果 —— 即时那条到不了时（锁屏、放下手腕）
+        // 靠它补上。谁先到用谁，按时刻取新的。
+        if let carried = decoded.lastTurn,
+           carried.turnAtMs > (lastTurn?.turnAtMs ?? 0) {
+            lastTurn = carried
+        }
         WatchSnapshotCache.save(payload)
         if source == "reply" { lastCommandNote = nil }
     }
@@ -122,6 +144,18 @@ extension WatchLink: WCSessionDelegate {
         didReceiveApplicationContext context: [String: Any]
     ) {
         Task { @MainActor in self.apply(context, from: "context") }
+    }
+
+    /// 手机把一轮说话的结果送回来了。
+    ///
+    /// ⚠ 结果**不从 reply 回来**：那一轮最坏要 105 秒（转写 45s + 问答 60s），
+    /// 而 WCSession 的 reply 有超时。所以手机先回执、再干活、结果另发一条。
+    nonisolated func session(
+        _ session: WCSession,
+        didReceiveMessage message: [String: Any]
+    ) {
+        guard let raw = message["voiceTurn"] as? [String: Any] else { return }
+        Task { @MainActor in self.applyTurn(raw) }
     }
 }
 

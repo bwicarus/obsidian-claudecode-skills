@@ -1,5 +1,6 @@
 import CoreSpotlight
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 import WidgetKit
 
@@ -9,6 +10,20 @@ struct BWReaderNativeApp: App {
     @StateObject private var nativeCommandReceiver =
         ReaderNativeCommandReceiver()
 
+    // ⚠ 手表连接必须在**进程启动最早期**激活，不能放在 View 的 .task 里。
+    //
+    // WatchConnectivity 会为了送手表的消息把后台/已退出的 iOS app 唤醒 ——
+    // 但那次唤醒**不连接场景**（Apple:「starts your app's main event loop
+    // before connecting to one or more of your app's scenes」），所以
+    // WindowGroup 的内容不被求值、View 的 .task 不跑。激活写在那里 =
+    // 只有用户手动打开过 App 才收得到手表消息，表现正是用户说的
+    // 「完全依赖手机 app 是否打开」。
+    //
+    // 位置按 WWDC21 session 10003 的原话选：「preferably when your app
+    // finishes launching in your app or extension delegate」。
+    @UIApplicationDelegateAdaptor(BWReaderAppDelegate.self)
+    private var appDelegate
+
     var body: some Scene {
         WindowGroup {
             ReaderRootView(
@@ -16,6 +31,18 @@ struct BWReaderNativeApp: App {
                 nativeCommandReceiver: nativeCommandReceiver
             )
         }
+    }
+}
+
+/// 只为一件事存在：在进程启动最早期激活手表连接（理由见 App 里那段注释）。
+final class BWReaderAppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions options:
+            [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        ReaderWatchLink.shared.activateFromLaunch()
+        return true
     }
 }
 
@@ -212,6 +239,9 @@ private struct ReaderRootView: View {
         // （原因见 Shared/ReaderWatchPayload.swift 文件头）。
         // ⚠ 这里**注入**回调而不是让 ReaderWatchLink 自己去找 voiceBridge ——
         // 后者会多一条谁也说不清的持有关系，而 voiceBridge 是 @StateObject。
+        // 语音开关要遥控 voiceBridge，而它是视图层的 @StateObject ——
+        // 这部分只能在视图起来后接。**但接收手表消息不依赖它**（见 App.init）：
+        // 「说话」那条链只发 HTTP，没有视图也能跑完。
         .task {
             let link = ReaderWatchLink.shared
             link.voiceStatusProvider = { [weak voiceBridge] in
@@ -227,12 +257,6 @@ private struct ReaderRootView: View {
             }
             link.onVoiceStop = { [weak voiceBridge] in
                 await voiceBridge?.stop()
-            }
-            // 手表「按住说话」要拿 Pi 的会话 cookie 去打 /api/voice/*。
-            // cookie 在 WebView 的 datastore 里 —— 注入而不是让 ReaderWatchLink
-            // 自己去碰 WebView。
-            link.piCookies = { [weak reader] in
-                await reader?.remoteLibraryCookies() ?? []
             }
             link.activate()
         }

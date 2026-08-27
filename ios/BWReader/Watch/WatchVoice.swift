@@ -38,6 +38,9 @@ final class WatchVoice: NSObject, ObservableObject {
     private var recorder: AVAudioRecorder?
     private var fileURL: URL?
     private var autoStop: Timer?
+    /// 这一轮是什么时候发出去的。用来分辨"刚回来的结果"和"上次的旧结果"——
+    /// 快照里带着上一轮，不加这道闸会把旧答案当成新答案显示。
+    private var sentAtMs: Double = 0
     private let speaker = AVSpeechSynthesizer()
 
     // ── 按下 ──
@@ -143,11 +146,14 @@ final class WatchVoice: NSObject, ObservableObject {
             return
         }
         phase = .thinking
+        sentAtMs = Date().timeIntervalSince1970 * 1000
+        // ⚠ 这里的 reply **只是回执**，不是结果。
+        // 那一轮最坏要 105 秒（转写 45s + 问答 60s），而 WCSession 的 reply
+        // 有超时（WCError.messageReplyTimedOut）—— 在 reply 里等完必然超时。
+        // 手机先回执、再干活，结果经 WatchLink 另发一条回来（见 observe）。
         session.sendMessageData(
             data,
-            replyHandler: { [weak self] reply in
-                Task { @MainActor in self?.receive(reply) }
-            },
+            replyHandler: { _ in },
             errorHandler: { [weak self] error in
                 Task { @MainActor in
                     self?.phase = .failed("发送失败：" + error.localizedDescription)
@@ -155,21 +161,21 @@ final class WatchVoice: NSObject, ObservableObject {
             })
     }
 
-    private func receive(_ raw: Data) {
-        guard let object = try? JSONSerialization.jsonObject(with: raw),
-              let payload = object as? [String: Any]
-        else {
-            phase = .failed("手机回的东西看不懂")
-            return
-        }
-        if let error = payload["error"] as? String {
+    /// 观察 WatchLink 收到的结果。
+    ///
+    /// WCSession 只能有一个 delegate（WatchLink 占着），所以结果由它统一收，
+    /// 这里只是取用 —— 而不是两个类抢同一个 delegate。
+    func observe(_ link: WatchLink) {
+        guard let turn = link.lastTurn, turn.turnAtMs > sentAtMs else { return }
+        // ⚠ 状态闸要在**错误分支之前** —— 否则上一轮迟到的失败会把用户
+        // 正在录的这一轮打断成"失败"。只有在等结果时才接受结果。
+        guard phase == .thinking || phase == .sending else { return }
+        if let error = turn.error {
             phase = .failed(error)
             return
         }
-        let heard = (payload["heard"] as? String) ?? ""
-        let reply = (payload["reply"] as? String) ?? ""
-        phase = .done(heard: heard, reply: reply)
-        speak(reply)
+        phase = .done(heard: turn.heard, reply: turn.reply)
+        speak(turn.reply)
     }
 
     /// 用手表本地的合成器念回答。

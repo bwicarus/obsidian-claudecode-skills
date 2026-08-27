@@ -1,4 +1,5 @@
 import Foundation
+import WebKit
 
 /// 手表「按住说话」的手机端：把手表录来的一段音频跑完一轮问答。
 ///
@@ -59,6 +60,17 @@ enum ReaderWatchVoiceTurn {
             case .agentFailed(let why): return "助手没回应：" + why
             }
         }
+    }
+
+    /// Pi 的会话 cookie。
+    ///
+    /// ⚠ 直接读**进程级**的 `WKWebsiteDataStore.default()`，不经过 WebView ——
+    /// 手机被 WatchConnectivity 从后台唤醒时根本没有 WebView 实例，
+    /// 从视图层取 cookie 那条路在那个时刻是空的。
+    /// （ReaderWebView.swift:397 确认用的就是 .default()，所以这里读得到。）
+    static func piCookies() async -> [HTTPCookie] {
+        let all = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+        return all.filter { $0.domain.contains("bwicarus") }
     }
 
     /// 跑完一轮：音频 → 文字 → 回答。
