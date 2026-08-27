@@ -65,6 +65,9 @@ final class WatchVoiceCall: ObservableObject {
     private var reconnects = 0
     private var audioReady = false
     private var interrupted = false
+    /// 这一通电话已经自动重来过一次了。**只重来一次** ——
+    /// 无限重来会变成一个自己转圈的东西,而人看不出它在转圈。
+    private var restartedOnce = false
     /// 路由与音量相关的实况。⚠ 摆在界面上：`.defaultToSpeaker` 在 watchOS
     /// 上是否被接受、实际走了哪个输出口 —— 这些**只能在真机上看见**。
     @Published private(set) var routeNote = ""
@@ -119,6 +122,7 @@ final class WatchVoiceCall: ObservableObject {
         sequence = 0
         reconnects = 0
         interrupted = false
+        restartedOnce = false
         routeNote = ""
         inboundPeak = 0
         pending.removeAll(keepingCapacity: true)
@@ -393,8 +397,8 @@ final class WatchVoiceCall: ObservableObject {
     private func reconnect() {
         guard !isEnded, reconnects < Self.maximumReconnects else {
             if reconnects >= Self.maximumReconnects {
-                phase = .ended("重连 \(reconnects) 次都没成，先停下")
-                teardown()
+                // 轻量重连试到头了 —— 换成整个重来一次(前台才行)。
+                autoRestartIfPossible("重连 \(reconnects) 次都没成")
             }
             return
         }
@@ -449,13 +453,58 @@ final class WatchVoiceCall: ObservableObject {
                 // ⚠ watchOS 不允许在后台重新激活录音（Apple 框架工程师原话），
                 // 所以这里**不尝试恢复** —— 假装能恢复只会变成一个还连着、
                 // 但永远没有声音的通话。如实说，让人回到 App 重新发起。
-                self.phase = .ended("被系统打断了（Siri/来电等）——回到 App 重新开始")
-                self.teardown()
+                    // ⚠ 音频被打断在**后台**是不可恢复的(Apple 明说),
+                // 但在前台整个重来是可以的 —— 所以交给 autoRestartIfPossible
+                // 去分辨,而不是一律判死。
+                self.autoRestartIfPossible("被系统打断了（Siri/来电等）")
             }
         }
     }
 
     // ── 停止 ──
+
+    /// 掉线之后整个重来一次。
+    ///
+    /// ## ⚠ 为什么是「整个重来」而不是更聪明的重连
+    ///
+    /// 用户 2026-08-28 实测:分层重连(只重建 socket、保留音频会话)**没真的
+    /// 接回来**,而他的判断是「断开后再自动开启一次就好了,不需要搞得很复杂」。
+    /// 这是对的 —— 一个复杂的恢复路径,如果它自己也可能坏,那它只是多了一处
+    /// 会静默失败的地方。
+    ///
+    /// ## ⚠ 但有一条边界:只在**前台**重来
+    ///
+    /// 整个重来意味着重新激活音频会话,而 Apple 明说 **watchOS 后台无法重新
+    /// 激活录音**。所以在后台自动重来必然失败 —— 而且失败得悄无声息,
+    /// 变成一个"看起来在重试、其实永远起不来"的循环。
+    /// 后台就如实说「抬腕回到 App」,不假装能修。
+    private func autoRestartIfPossible(_ reason: String) {
+        guard !restartedOnce else { return }
+        guard WKApplication.shared().applicationState == .active else {
+            phase = .ended(reason + "（回到 App 重新开始）")
+            return
+        }
+        restartedOnce = true
+        phase = .reconnecting("断了，自动重来…")
+        teardown()
+        Task {
+            // 给音频栈一点时间彻底放开,否则重新激活会撞上还没释放的会话。
+            try? await Task.sleep(for: .seconds(1))
+            self.restartedOnce = true          // teardown 不清它
+            self.beginRestart()
+        }
+    }
+
+    private func beginRestart() {
+        phase = .connecting
+        framesSent = 0
+        framesPlayed = 0
+        sequence = 0
+        reconnects = 0
+        interrupted = false
+        pending.removeAll(keepingCapacity: true)
+        Task { await begin() }
+    }
 
     func stop() {
         command("stop")
