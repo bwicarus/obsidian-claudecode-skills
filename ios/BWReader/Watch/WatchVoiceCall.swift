@@ -83,14 +83,15 @@ final class WatchVoiceCall: ObservableObject {
     ///
     /// ⚠ 每一档的代价都写出来，不然切了不知道自己换到了什么：
     enum Mode: String, CaseIterable, Identifiable {
-        /// 带回声消除。⚠ 去掉它，手表扬声器的声音会被自己的麦克风录回去，
-        /// 绕一圈送回电脑 —— 轻则回声，重则啸叫。
-        case voiceChat = "通话（有回声消除）"
-        /// 不做语音处理，通常最响。⚠ **没有回声消除** —— 外放时可能啸叫，
-        /// 戴耳机则没这个问题。
-        case plain = "默认（更响·可能回声）"
-        /// 视频通话档，处理比 voiceChat 轻一些。
-        case videoChat = "视频通话档"
+        /// ✅ **实测最好的一档**（用户 2026-08-28）。带回声消除。
+        /// ⚠ 去掉它，手表扬声器的声音会被自己的麦克风录回去，绕一圈送回
+        /// 电脑 —— 轻则回声，重则啸叫。
+        case voiceChat = "通话·有回声消除（推荐）"
+        /// 不做语音处理。⚠ **没有回声消除** —— 外放时可能啸叫，戴耳机没事。
+        case plain = "默认（无回声消除）"
+        /// ⚠ **实测最小声的一档**，比 voiceChat 还轻。留着只是为了记录
+        /// 「已经试过、更差」—— 删掉的话下次有人还会去试一遍。
+        case videoChat = "视频通话档（实测最小声）"
 
         var id: String { rawValue }
 
@@ -103,7 +104,9 @@ final class WatchVoiceCall: ObservableObject {
         }
     }
 
-    /// 当前档。默认仍是最安全的那个（有回声消除）。
+    /// 当前档。⚠ 默认 `.voiceChat` 不只是"最安全"，**实测它也是最好的**
+    /// （2026-08-28：videoChat 最小声，voiceChat + 3.2× 增益音量正常）。
+    /// 所以这个默认值是有依据的，别为了"试试别的"随手改。
     @Published var mode: Mode = .voiceChat
     /// 播放增益。手表扬声器本来就小,语音的动态范围又窄。
     /// ⚠ 配合硬限幅使用 —— 削波的破音比小声更难听。
