@@ -714,6 +714,9 @@ final class WatchNetworkProbe: ObservableObject {
         /// 有它 = 豁免被收回；没它但日志断掉 = 进程被挂起。**修法不同。**
         var pathLost = false
         var sent = 0
+        /// 收到的回声数。⚠ 它是 `Verdict` 自己的字段,不是外层类那个 ——
+        /// 战报是从落盘日志重建出来的,跟当前这一轮的运行时状态无关。
+        var echoes = 0
         /// 实际达到的发包速率。⚠ 别假设它等于设定值 —— 2026-08-27 实测
         /// 设 50 Hz 只跑出 16.4 Hz（Task.sleep 在循环里的调度开销）。
         /// 真实现要靠**音频 tap 驱动节奏**，它本来就按缓冲区回调。
@@ -787,6 +790,7 @@ final class WatchNetworkProbe: ObservableObject {
                 if (row["isDenial"] as? Bool) == true { verdict.denied = true }
             case "stop":
                 verdict.sent = (row["sent"] as? Int) ?? verdict.sent
+                verdict.echoes = (row["echoes"] as? Int) ?? verdict.echoes
                 verdict.achievedHertz =
                     (row["achievedHertz"] as? Double) ?? verdict.achievedHertz
             case "send-error":
