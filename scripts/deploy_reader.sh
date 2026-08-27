@@ -246,8 +246,18 @@ PY
 }
 
 verify_deploy_payload_digest() {
-  local actual
+  local actual status
   actual="$(hash_deploy_payload)"
+  status=$?
+  # ⚠ 跟 verify_validation_digest **同一个病**(2026-08-27 一起发现)：
+  #   只比字符串的话,hash_deploy_payload 失败时两边都是空,空 == 空 → 放行。
+  #   这一处守的是"装上去的字节 == 测过的字节",它静默失效的后果比另一处更重。
+  if [ "$status" -ne 0 ]; then
+    echo "payload 摘要算不出来(rc=$status) —— 拒绝据此放行" >&2
+    return 2
+  fi
+  assert_digest_shape "payload 本次" "$actual" || return 2
+  assert_digest_shape "payload 基线" "$PAYLOAD_DIGEST" || return 2
   if [ "$actual" != "$PAYLOAD_DIGEST" ]; then
     echo "实际部署 payload 摘要漂移: expected=$PAYLOAD_DIGEST actual=$actual" >&2
     return 2
@@ -1379,7 +1389,7 @@ for payload_dir in \
   find "$payload_dir" -type f -exec chmod 0444 {} +
 done
 PAYLOAD_DIGEST="$(hash_deploy_payload)"
-[ -n "$PAYLOAD_DIGEST" ]
+assert_digest_shape "payload 基线" "$PAYLOAD_DIGEST"
 verify_deploy_payload_digest
 
 # 用临时 current 验证 resolver、完整摘要及关键入口的代码来源；数据根也是临时目录。

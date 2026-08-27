@@ -415,6 +415,7 @@ exit 0
                 )
             source = "\n".join(
                 (
+                    _function_source("assert_digest_shape"),
                     _function_source("hash_deploy_payload"),
                     _function_source("verify_deploy_payload_digest"),
                 )
@@ -504,6 +505,7 @@ exit 0
                 path.write_text(relative + "\n", encoding="utf-8")
             source = "\n".join(
                 (
+                    _function_source("assert_digest_shape"),
                     _function_source("hash_validation_inputs"),
                     _function_source("verify_validation_digest"),
                 )
