@@ -56,12 +56,26 @@ import WatchKit
 ///
 /// | 档 | 作用 | 实测 |
 /// |---|---|---|
-/// | `.duplexCall` | **主力** —— 边放边录，真通话的形状 | 第二版新增 |
+/// | `.loadedCall` | **主力** —— F 的配置 + 真通话节奏（50 包/秒） | 第三版新增 |
+/// | `.duplexCall` | 边放边录，闲连接 | ✅ **后台活下来了** |
 /// | `.playbackControl` | **正对照** —— 参考实现的原配置 | 前台通 |
 /// | `.duplexQuiet` | 双工会话，不跑引擎 | 前台通，后台断 |
 /// | `.duplexLive` | 双工会话 + 只录不放 | 前台通，后台断 |
 /// | `.syncTrap` | **负对照** —— 同步 setActive | ⚠ 本该失败，却通了 |
 /// | `.noAudio` | **负对照** —— 完全不碰音频会话 | ⚠ 本该失败，却通了 |
+///
+/// ## 📋 2026-08-27 第二轮：F 档后台活下来了
+///
+/// **而且这次的对照是干净的**：B/C 与 F 的唯一差别就是「放不放声音」，
+/// B/C 在后台断了、F 没断。所以「持续播放音频是后台存活的前提」这条
+/// 有内部对照撑着，不是孤证。
+///
+/// 参考实现那条 `4e322c1 "Remove unneeded audio playback"` 的注解现在可以
+/// 补完了：**对那个 demo 确实 unneeded，因为它只在前台跑。**
+///
+/// ⚠ **但 F 证明的是「一条闲着的连接」能活下来** —— 它每 2 秒发几个字节。
+/// 真通话是每秒 50 个包，在 CPU、无线电唤醒频率、发热上完全不是一回事，
+/// 而 `exceededResourceLimits` 恰恰被这些触发。所以有了 `.loadedCall`。
 ///
 /// 这是 `references/evidence-quality-lessons.md` 那条「一个信号只有一种解释时
 /// 才能单独采」的落地 —— 而第一轮恰好演示了反面：负对照一旦没失败，
@@ -85,7 +99,8 @@ final class WatchNetworkProbe: ObservableObject {
 
     /// 五档配置。顺序即建议的测试顺序：先跑正对照确认探针本身是好的。
     enum Mode: String, CaseIterable, Identifiable {
-        case duplexCall      = "F 边放边录（主力）"
+        case loadedCall      = "G 真通话节奏（主力）"
+        case duplexCall      = "F 边放边录"
         case playbackControl = "A 正对照·只放"
         case duplexQuiet     = "B 双工·不跑麦"
         case duplexLive      = "C 双工·只录不放"
@@ -97,8 +112,10 @@ final class WatchNetworkProbe: ObservableObject {
         /// 这一档预期是什么结果。写在 UI 上，免得测完了还要回来查文档。
         var expectation: String {
             switch self {
+            case .loadedCall:
+                return "🎯 真通话节奏（50 包/秒）—— 就看这档"
             case .duplexCall:
-                return "🎯 后台能不能活下来，就看这档"
+                return "✅ 已实测后台能活（但只是闲连接）"
             case .playbackControl: return "应当连上（参考实现验过）"
             case .duplexQuiet, .duplexLive: return "前台能连，后台已实测会断"
             case .syncTrap: return "本该连不上，但 2026-08-27 实测连上了"
@@ -109,9 +126,37 @@ final class WatchNetworkProbe: ObservableObject {
         /// 要不要跑音频引擎，跑的话放不放声音。
         var engine: (running: Bool, playing: Bool) {
             switch self {
-            case .duplexCall: return (true, true)
+            case .duplexCall, .loadedCall: return (true, true)
             case .duplexLive: return (true, false)
             default: return (false, false)
+            }
+        }
+
+        /// 发包的节奏与大小。
+        ///
+        /// ## ⚠ 为什么必须单独测「负载」这一档
+        ///
+        /// F 档证明的是「**一条闲着的连接**能在后台活下来」—— 它每 2 秒发
+        /// 几个字节。而真通话是**每秒 50 个包**，两者在 CPU、无线电唤醒频率、
+        /// 发热上完全不是一回事。
+        ///
+        /// 而 `exceededResourceLimits`（系统因持续高 CPU 收回运行时）恰恰
+        /// 是被这些东西触发的，Apple **故意不公布阈值**、明确要求实测。
+        /// 拿闲连接的结果去推真通话，等于没测。
+        ///
+        /// ## 为什么是 4 KB/s 而不是 96 KB/s
+        ///
+        /// Windows 桥那头是 48kHz 裸 PCM（每方向 97.8 KB/s），**但手表这条腿
+        /// 永远不会那样发** —— 电池和无线电都扛不住，一定要压。AAC-ELD
+        /// 约 32 kbps ≈ 4 KB/s，那才是真要发的量。
+        ///
+        /// **50 Hz 这个节奏才是关键变量**（它决定唤醒频率），字节数按实际
+        /// 会用的压缩后大小给。照 96 KB/s 打一个免费公共 echo 服务，
+        /// 既不礼貌，测的也不是我们真要跑的东西。
+        var load: (hertz: Double, payloadBytes: Int) {
+            switch self {
+            case .loadedCall: return (50, 80)      // 4 KB/s，压缩后的真实量级
+            default: return (0.5, 0)               // 2 秒一个心跳
             }
         }
     }
@@ -161,8 +206,6 @@ final class WatchNetworkProbe: ObservableObject {
     private var pathMonitor: NWPathMonitor?
 
     private static let endpoint = URL(string: "wss://echo.websocket.org")!
-    /// 心跳间隔。2 秒是权衡：够密才能看清「哪一刻断的」，又不至于把日志淹掉。
-    private static let beatSeconds: UInt64 = 2
 
     // ── 落盘 ──
 
@@ -288,7 +331,7 @@ final class WatchNetworkProbe: ObservableObject {
             log("audio-active", ["category": "playback", "how": "async activate",
                                  "route": routeNames(session)])
 
-        case .duplexQuiet, .duplexLive, .duplexCall:
+        case .duplexQuiet, .duplexLive, .duplexCall, .loadedCall:
             // ⚠ **必须先要麦克风权限**，否则 `.playAndRecord` 激活会失败，
             // 而那个失败长得跟"豁免不解禁"一模一样 —— 会把整个实验带偏。
             // 这正是 evidence-quality-lessons 那条「一个信号只有一种解释时
@@ -478,15 +521,39 @@ final class WatchNetworkProbe: ObservableObject {
 
     private func startBeating() {
         beat?.cancel()
+        let plan = mode.load
+        // 每多久发一个包。G 档是 20ms（50 Hz，真通话的节奏）。
+        let interval = Duration.nanoseconds(Int(1_000_000_000.0 / plan.hertz))
+        // 「多久留一条活着的证据」按时间算而不是按包数算 —— 否则 50 Hz 那档
+        // 每 15 个包就写一次文件，光 I/O 就够把结论搅浑了。
+        let markEvery = max(1, Int(plan.hertz * 30))
+        log("beat-plan", ["hertz": plan.hertz, "payloadBytes": plan.payloadBytes,
+                          "bytesPerSecond": Int(plan.hertz) * max(plan.payloadBytes, 16)])
+
         beat = Task { [weak self] in
             var n = 0
+            // G 档的负载：一段固定的假音频帧。内容无所谓，**大小和节奏才是
+            // 被测的东西**（唤醒频率决定发热，发热触发 exceededResourceLimits）。
+            let filler = plan.payloadBytes > 0
+                ? Data(repeating: 0x5A, count: plan.payloadBytes) : Data()
+
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(Self.beatSeconds))
+                try? await Task.sleep(for: interval)
                 guard let self, let connection = self.connection else { return }
                 n += 1
-                let payload = ["n": n, "appState": Self.appStateName()] as [String: Any]
-                guard let data = try? JSONSerialization.data(withJSONObject: payload) else { continue }
-                let meta = NWProtocolWebSocket.Metadata(opcode: .text)
+
+                let data: Data
+                if filler.isEmpty {
+                    let payload = ["n": n, "appState": Self.appStateName()] as [String: Any]
+                    guard let encoded = try? JSONSerialization.data(withJSONObject: payload)
+                    else { continue }
+                    data = encoded
+                } else {
+                    data = filler
+                }
+
+                let meta = NWProtocolWebSocket.Metadata(
+                    opcode: filler.isEmpty ? .text : .binary)
                 let context = NWConnection.ContentContext(identifier: "beat", metadata: [meta])
                 connection.send(content: data, contentContext: context,
                                 isComplete: true, completion: .contentProcessed { error in
@@ -496,9 +563,11 @@ final class WatchNetworkProbe: ObservableObject {
                         }
                     }
                 })
-                // 每 15 次（30 秒）留一个活着的证据，这样即使一直没断，
-                // 也能从日志读出「它撑了多久」而不是只有开头一条。
-                if n % 15 == 0 { self.log("alive", ["n": n]) }
+                // 每 30 秒留一个活着的证据，这样即使一直没断，也能从日志读出
+                // 「它撑了多久」而不是只有开头一条。
+                if n % markEvery == 0 {
+                    self.log("alive", ["n": n, "sentBytes": n * max(data.count, 1)])
+                }
             }
         }
     }
