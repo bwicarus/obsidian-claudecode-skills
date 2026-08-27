@@ -872,6 +872,7 @@ final class WatchNetworkProbe: ObservableObject {
     private func startBeating() {
         beat?.cancel()
         let plan = mode.load
+        let toPi = mode == .piRelay
         // 每多久发一个包。G 档是 20ms（50 Hz，真通话的节奏）。
         let interval = Duration.nanoseconds(Int(1_000_000_000.0 / plan.hertz))
         // 「多久留一条活着的证据」按时间算而不是按包数算 —— 否则 50 Hz 那档
@@ -965,6 +966,25 @@ final class WatchNetworkProbe: ObservableObject {
                 let meta = NWProtocolWebSocket.Metadata(
                     opcode: filler.isEmpty ? .text : .binary)
                 let context = NWConnection.ContentContext(identifier: "beat", metadata: [meta])
+                // ⚠ **打 Pi 时必须自己制造回声。**
+                // 看门狗靠"有没有回声"判活,而 Pi 在**没有通话时本来就没有
+                // 东西可回** —— 之前打公共 echo 服务每帧都被回弹,换成 Pi 之后
+                // 就变成:连上 → 一条 hello → 没了 → 5 秒判静默 → 重连,
+                // 六秒一个循环。2026-08-28 实测:整整 752 秒里连接只有约 12%
+                // 的时间是通的,而那些「冻6·复6」大半是探针自己制造的。
+                //
+                // 不能发 {"op":"start"} 来解决 —— 那会真的去拉起用户电脑上的
+                // Codex Desktop 并打开麦克风。用协议自带的 ping/pong:
+                // 不开通话,纯粹证明链路活着。
+                if toPi, n % 100 == 0 {                 // 2 秒一次
+                    let meta = NWProtocolWebSocket.Metadata(opcode: .text)
+                    let context = NWConnection.ContentContext(
+                        identifier: "ping", metadata: [meta])
+                    connection.send(
+                        content: Data("{\"op\":\"ping\"}".utf8),
+                        contentContext: context, isComplete: true,
+                        completion: .contentProcessed { _ in })
+                }
                 self.sent = n
                 // 只要还有一次成功,就不算"连续"。
                 if self.consecutiveSendErrors > 0 && self.lastEchoAt != nil {
