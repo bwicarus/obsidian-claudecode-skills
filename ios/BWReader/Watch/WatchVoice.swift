@@ -4,12 +4,20 @@ import WatchConnectivity
 
 /// 手表「按住说话」。
 ///
-/// ## 为什么是按住说话，不是连续对话
+/// ## 为什么这一版是按住说话
 ///
-/// 详见 `App/ReaderWatchVoiceTurn.swift` 的文件头。一句话：Windows 那条语音桥
-/// 是 48kHz 连续双工、每方向 97.8 KB/s，而 WCSession 最快的通道单条上限 64KB
+/// ⚠ **这是过渡形态。** 用户要的是「按一下开始桥接电脑上的通话」，
+/// 终态设计见 `references/watch-companion.md`。
+///
+/// 这一版之所以是回合制：走的是 WCSession 经手机中转，而 Windows 那条语音桥
+/// 是 48kHz 连续双工、每方向 97.8 KB/s，WCSession 最快的通道单条上限 64KB
 /// 且是串行的电源管理 IPC 队列 —— **传输类型不对**，不是调优问题。
-/// 而 watchOS 又禁用了 WebSocket（Apple TN3135），所以手表也不可能自己直连。
+///
+/// 手表自己直连的路：WebSocket 被 watchOS 禁（TN3135），而解禁它要 CallKit，
+/// 但 CallKit 通话中手表只显示系统通话 UI（用户 2026-08-27 实测）——
+/// 我们自己的界面显示不出来，所以那条路作废。
+/// 现在的方向是**普通 HTTPS 流式 + WKExtendedRuntimeSession**，
+/// 不需要任何豁免，界面归我们。
 ///
 /// ## 为什么录 m4a 不录 WAV
 ///

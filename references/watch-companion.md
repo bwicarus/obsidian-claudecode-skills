@@ -15,54 +15,76 @@ Pi 的 `/voice-rt`）都只在 tailnet 内可达，**认证方式就是「你在
 
 每一屏顶部都显示「这份数据有多旧」。宁可让人看见陈旧，也不让陈旧冒充现状。
 
-## 手表直连电脑语音（方案 A，2026-08-27 用户拍板）
+## 🔴 方案 A（CallKit 直连）已作废 —— 2026-08-27 用户真机实测
 
-⚠ **本节推翻了下一节。** 下一节那三条理由里两条已经不成立，保留它是为了
-记录当时的判断错在哪 —— 直接删掉的话，后来的人会重新推一遍同样的错误。
+**作废理由不是网络，是界面：通话进行中手表只显示系统通话 UI，
+我们自己的界面一点都显示不出来。**
 
-**关键事实（当时漏掉的）**：TN3135 有三条豁免，第二条是
-「**CallKit 通话进行中，低层网络解禁**」（watchOS 9+），
-`URLSessionWebSocketTask` 正在解禁之列。所以手表直连**不是死路**。
+用户当天先用原生通话实测确认了这一点。它跟 Apple DTS 的说法对得上 ——
+watchOS 的 VoIP 支持「basically locks the screen into the CallUI」。
 
-Apple 工程师在论坛原话：「Your Apple Watch does not need to be in proximity
-with your iPhone in order to receive VoIP calls via a watchOS app that uses
-CallKit; the Watch just needs a WiFi or cellular connection.」—— 这正是
-「手机 app 关着也行」。
+于是整条推理链塌了一半：CallKit 是**用来换 WebSocket 的**（TN3135 豁免②），
+而换来的代价是锁死界面。**只要走 CallKit，就没有我们自己的 UI。**
+所以「第 0 步验豁免存不存续」也不必做了 —— 就算存续，形态也不可接受。
 
-### 已定的取舍
+`scripts/watch_probe_server.py` 与 `Watch/WatchCallProbe.swift` 保留但不再需要跑。
 
-| 决定 | 结果 |
+### 作废前已定、现在一并失效的取舍
+
+| 当时的决定 | 现状 |
 |---|---|
-| 路线 | **A**：Windows 经 Funnel 暴露 + OAuth，手表直连（不走 Pi 中继） |
-| 方向 | **只要手表呼叫电脑**，不要电脑呼叫手表 |
+| 路线 A：Windows 经 Funnel 暴露 + OAuth，手表直连 | ❌ 界面被锁，作废 |
+| 只要手表呼叫电脑，不要电脑呼叫手表 | 这条**仍然成立**，见下 |
 
-第二条省掉一大块：来电唤醒要 PushKit → App ID 上的 Push Notifications
+第二条之所以还成立：来电唤醒要 PushKit → App ID 上的 Push Notifications
 capability → **那是唯一需要人去 Apple 后台点的东西**，而 ASC API 自动开
 capability 这条路本仓库 2026-08-05 试过并整段回退（ac119d01 → 64e5ab2e）。
-去电全程 controller→transaction→delegate，不碰 push。
-**所以方案 A 现在零 Apple 后台操作。**
 
-`UIBackgroundModes = ["voip"]` 是 Info.plist 属性**不是 entitlement**：
-不进 App ID、不进描述文件，手表 target「零 capability」的约束不破。
+### ⚠ 顺带作废：「打电话过来汇报」也不成立（免费约束下）
 
-### ⚠ 第 0 步：一个 Apple 从未文档化的前提
+2026-08-27 调研（workflow `wn2mn6tsw`）结论：**iOS 没有音频注入 API**。
+FaceTime 吃的是物理麦克风，第三方 app 无法把 TTS 送进通话 ——
+macOS 有 BlackHole 那类虚拟音频设备，iOS 没有对应物。
+所以 iPad 发起的 FaceTime **接起来是静音的**。
 
-**CallKit 的网络豁免在熄屏 / 放下手腕之后是否存续 —— Apple 没写过。**
-不成立的话方案 A 整个不成立（形态退化成「抬腕才能说话」）。
+> **FaceTime 只能当门铃，不能当话筒。**
 
-实验在 `Watch/WatchCallProbe.swift` + `scripts/watch_probe_server.py`。
-两条会让实验白做的坑（都已避开）：
+另有一条 Apple 文档化的拦路虎：「运行会打开 app 的快捷指令时，设备锁定要先
+解锁」，而 `打开 URL: facetime-audio://` 正是打开 FaceTime app。
 
-- **模拟器恒通**。TN3135 原文：「the simulator always allows low-level
-  networking」。只能真机，而且**不能挂 Xcode 调试器**（挂着 app 不会被挂起，
-  测的是调试器不是系统）。所以证据必须落盘 + 服务端旁证。
-- **判据是时间序列，不是单次事件**。已有报告称豁免生效期间网络路径本身就会
-  周期性 withdrawn/restored ——「掉一次线」≠「豁免没了」。
+「AI 主动把人叫住」和「叫住之后跟他说话」是**两件事**：前者免费可做（见下），
+后者在手表上只有第一方通话能干，而第一方通话不对第三方开放音频。
 
-另两处纠正：被拦住的 `URLSessionWebSocketTask` 报 `NSURLErrorDomain -1009`
-而**不是** `ENETDOWN=50`（那是 NWConnection 的形态，守着 50 会一直等不到）；
-主信号用 `NWPathMonitor`（TN3135 点名：被拦时恒 `.unsatisfied`），
-它区分得开「豁免没了」和「网断了」，WebSocket 通不通区分不开。
+用户已确认：**电话只作为通知手段保留，不为手表做任何迁就。**
+
+## 正在设计：连续双工，但**不用** CallKit
+
+用户要的是「按一下按键开始桥接电脑上的通话」——连续双工，不是按住说话。
+
+CallKit 排除之后剩下的路：
+
+- 拿不到低层网络豁免 → **不能用 WebSocket**
+- 但**普通 HTTPS 在 watchOS 完全放行**（TN3135：「watchOS allows all apps to
+  use high-level networking equally」），且支持流式：
+  上行 `uploadTask(withStreamedRequest:)`、下行 `didReceive data`
+  → **两条 HTTP 流做双工**
+- 「前台离开即挂」用 `WKExtendedRuntimeSession` 解（mindfulness 型 1 小时，
+  官方：「The watch screen doesn't need to remain on to keep your app alive」）
+
+```
+手表（我们自己的界面 + 扩展运行时会话）
+   ── 两条 HTTP 流（不需要任何豁免）──→
+Pi（已有公网 Funnel + OAuth）
+   ── WSS，走 tailnet ──→
+Windows 语音桥
+```
+
+Pi 在中间顺手干两件 A 路绕不开的活：**Opus 转码**（不然手表电池扛不住
+1.56 Mbps）和**切网重编号**（桥两端硬校验序号连续，手表切网必断）。
+代价是**音频明文过 Pi** —— 这是 A 路本来要避开的，现在得接受。
+
+⚠ 调研中（workflow `wb5sa6zne`）：扩展运行时会话撑不撑得住持续音频 + 网络、
+HTTP 双工的延迟够不够通话、Pi 转不转得动。**结论出来前别动手写。**
 
 ### 顺带验证到的事实
 
@@ -70,7 +92,7 @@ capability 这条路本仓库 2026-08-05 试过并整段回退（ac119d01 → 64
   拿到 HTTP 401（OAuth 闸正常拦截）。⚠ 但公共 DoH 查 `bwicarus.taile44d0c.ts.net`
   返回 NXDOMAIN —— **那是假阴性**，Funnel 的名字解析不走那条路。
   **能实测的别去推断。**
-- `--set-path` 是 A 路要用的机制，第 0 步顺带先验一遍。
+- `--set-path` 仍然是要用的机制（现在用来挂 Pi 的语音路径，不再是暴露 Windows）。
 
 ## ⚠ 为什么不做「手表直接语音对话」
 

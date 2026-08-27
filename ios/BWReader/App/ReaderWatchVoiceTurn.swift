@@ -3,9 +3,12 @@ import WebKit
 
 /// 手表「按住说话」的手机端：把手表录来的一段音频跑完一轮问答。
 ///
-/// ## 为什么是「按住说话」而不是像打电话那样连续对话
+/// ## 为什么这条是「按住说话」，以及它现在的定位
 ///
-/// 手表接不上 Windows 那条语音桥，原因有两层，**第二层才是决定性的**：
+/// 这条链路是**过渡形态**，不是终态。用户要的是「按一下开始桥接电脑上的
+/// 通话」——连续双工。终态设计见 `references/watch-companion.md`。
+///
+/// 手表接不上 Windows 那条语音桥，有两层原因：
 ///
 /// 1. 那条桥是 48kHz/mono/s16le、20ms 定长帧、序号严格连续的**纯双工电话**
 ///    （`DirectVoiceProtocol.swift:20-25`）。协议里根本没有「轮次」这个概念 ——
@@ -14,18 +17,19 @@ import WebKit
 /// 2. watchOS 默认禁用 `URLSessionWebSocketTask`（TN3135 把整个 Network
 ///    framework 归为低层网络）。
 ///
-///    ⚠ **但这不是死路** —— 我 2026-08-27 早先在这里写过「纯技术死路」，
-///    那是**错的**，漏了 TN3135 的第二条豁免：
-///      "It allows a VoIP app to use low-level networking while running a
-///       call using CallKit. Support for this was added in watchOS 9."
-///    也就是说 **CallKit 通话进行中 WebSocket 是解禁的**，手表直连是可能的。
-///    用户 2026-08-27 已拍板走那条路（方案 A：Windows 经 Funnel 暴露 +
-///    OAuth）。本文件这条「按住说话经手机打 Pi」的链路是它做成之前的过渡，
-///    两者并存不冲突。
+/// ⚠ **两条关于第 2 点的历史记录，都已被推翻，按顺序读：**
 ///
-///    ⚠ 但那条路有一个 Apple **从未文档化**的前提：CallKit 的网络豁免在
-///    **熄屏 / 放下手腕之后是否存续**。第 0 步真机实验就是验这个
-///    （见 Watch/WatchCallProbe.swift）。不成立的话方案 A 整个不成立。
+/// - 我最早写「纯技术死路」——**错的**，漏了 TN3135 豁免②：CallKit 通话
+///   进行中低层网络解禁（watchOS 9+）。
+/// - 然后据此定了方案 A（手表用 CallKit 直连）——**也废了**。
+///   用户 2026-08-27 真机实测：**通话中手表只显示系统通话 UI，我们自己的
+///   界面一点都显示不出来**。CallKit 是用来换 WebSocket 的，而代价是锁死
+///   界面 —— 这个交换不成立。
+///
+/// **现在的方向：不用 CallKit。** 普通 HTTPS 在 watchOS 完全放行且支持流式
+/// （`uploadTask(withStreamedRequest:)` + `didReceive data`），配
+/// `WKExtendedRuntimeSession` 撑住进程，手表直接打 Pi 的公网 Funnel，
+/// Pi 再桥到 Windows。可行性调研中，结论落在 watch-companion.md。
 ///
 /// ## 走的是哪条
 ///
