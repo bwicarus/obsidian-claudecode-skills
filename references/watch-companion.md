@@ -8,10 +8,14 @@
 VPN 隧道。而这三样东西的数据源（Windows 桥 `bwicarus-2.taile44d0c.ts.net`、
 Pi 的 `/voice-rt`）都只在 tailnet 内可达，**认证方式就是「你在 tailnet 里」**。
 
-所以 iPhone 是手表**唯一**的数据源，走 WatchConnectivity。由此推出一条必须
-写在 UI 上的语义：
+所以**卡片和待办**这两样，iPhone 是手表唯一的数据源，走 WatchConnectivity。
+由此推出一条必须写在 UI 上的语义：
 
 > 手机 App 不在跑时，手表上不会有新卡片。这不是 bug，是这个架构的定义。
+
+⚠ **语音是例外，别把这句推广过去**：语音走手表**直连 Pi 的公网 Funnel**
+（见下「连续双工」节），不经手机、不需要 tailnet。「手表够不到 tailnet」限制的
+是 tailnet-only 的端点，而 Funnel 恰恰是把端点搬出 tailnet 的机制。
 
 每一屏顶部都显示「这份数据有多旧」。宁可让人看见陈旧，也不让陈旧冒充现状。
 
@@ -57,34 +61,104 @@ macOS 有 BlackHole 那类虚拟音频设备，iOS 没有对应物。
 
 用户已确认：**电话只作为通知手段保留，不为手表做任何迁就。**
 
-## 正在设计：连续双工，但**不用** CallKit
+## 连续双工：不用 CallKit，也不用 HTTP 凑合 —— 用音频会话豁免
 
 用户要的是「按一下按键开始桥接电脑上的通话」——连续双工，不是按住说话。
 
-CallKit 排除之后剩下的路：
+### 🔑 关键事实：TN3135 有**三条**豁免，CallKit 只是第二条
 
-- 拿不到低层网络豁免 → **不能用 WebSocket**
-- 但**普通 HTTPS 在 watchOS 完全放行**（TN3135：「watchOS allows all apps to
-  use high-level networking equally」），且支持流式：
-  上行 `uploadTask(withStreamedRequest:)`、下行 `didReceive data`
-  → **两条 HTTP 流做双工**
-- 「前台离开即挂」用 `WKExtendedRuntimeSession` 解（mindfulness 型 1 小时，
-  官方：「The watch screen doesn't need to remain on to keep your app alive」）
+**第一条是「app 有活动音频会话时」（watchOS 6+）** —— 而语音通话本来就有
+音频会话。所以 **WebSocket 在手表上是可用的，不需要 CallKit，界面归我们。**
+
+所有人（包括本仓库前两版判断）以为这条路不通，是因为一个**静默陷阱**：
+
+> `AVAudioSession.setActive()` **不抛错，但也不解禁 WebSocket。**
+> 必须用异步的 `activate(options:completionHandler:)`。
+
+出处（2026-08-27 一手核实，不是转述）：
+
+- Apple 开发者论坛 thread 773362。开发者在 Series 7 + Series 10 /
+  watchOS 26.6 双机实测得出上面那句；Apple DTS 的 Quinn 在同帖回复。
+- 公开参考实现 `github.com/leptos-null/WatchOS-WebSocket`，提交历史就是全部故事：
+  `57d5899` "Migrate to asynchronous AVAudioSession activate call"（**修好的那一行**）、
+  `4e322c1` "Remove unneeded audio playback"（**不用真的放声音**，有活动会话就够）、
+  `f3c6fa1` "Remove unneeded UIBackgroundModes"（**连后台模式都不用**）。
+  它的 `Info.plist` 是空的 `<dict/>`：零 capability、零后台模式、不用 AirPods。
+
+⚠ **这正是 `silent-failure-lessons.md` 规则一的形状**：提前退出不出声，于是
+十个人撞上同一堵墙、都以为是平台限制。那两个「证明双工不可能」的论坛帖
+（777373、781095）用的都是 `setActive`，都在模拟器通、真机报 POSIX 50 ——
+**那不是硬件限制，那是拒绝的签名**。而 TN3135 明写「the simulator always
+allows low-level networking」，所以模拟器永远给假阳性。
+
+### 由此定下的形状
 
 ```
-手表（我们自己的界面 + 扩展运行时会话）
-   ── 两条 HTTP 流（不需要任何豁免）──→
-Pi（已有公网 Funnel + OAuth）
-   ── WSS，走 tailnet ──→
-Windows 语音桥
+手表（我们自己的界面 + 活动音频会话解禁 WebSocket）
+   ── WSS ──→ Pi（已有公网 Funnel + OAuth）
+   ── WSS，走 tailnet ──→ Windows 语音桥
 ```
 
-Pi 在中间顺手干两件 A 路绕不开的活：**Opus 转码**（不然手表电池扛不住
-1.56 Mbps）和**切网重编号**（桥两端硬校验序号连续，手表切网必断）。
-代价是**音频明文过 Pi** —— 这是 A 路本来要避开的，现在得接受。
+| | 前一版（已废）的以为 | 现在 |
+|---|---|---|
+| 传输 | HTTP 双流（无先例，三个坑） | **`NWConnection` + `NWProtocolWebSocket`** |
+| 进程存活 | `WKExtendedRuntimeSession` | **活动音频会话** |
 
-⚠ 调研中（workflow `wb5sa6zne`）：扩展运行时会话撑不撑得住持续音频 + 网络、
-HTTP 双工的延迟够不够通话、Pi 转不转得动。**结论出来前别动手写。**
+后者一并解决了 ERS 的两个毛病：**没有 1 小时硬顶**，且**扛得住按数码表冠**
+（frontmost 型 ERS 一离开 app 就 `.resignedFrontmost`）。
+
+Quinn 另外点名：**用 `NWConnection` 不要用 `URLSessionWebSocketTask`** ——
+「watchOS 上每个 session 都有点像后台 session，实际工作在进程外做」。
+参数用 `parameters.serviceClass = .interactiveVoice`。
+
+### ⚠ Pi 必须是「减震器」，不是「转发器」
+
+Windows 桥的序号是 **fail-closed 硬校验**（`DirectPcmSequenceGuard` /
+`DirectUplinkSequenceGuard`：帧序号必须恰好等于上一帧 +1，否则
+`InvalidSequence`，无 resume）。那对 LAN/USB 级链路是合理契约，**对手表射频
+是致命的 —— 掉一帧就挂断整通电话**。
+
+所以 Pi 侧：**自己当上行序号的唯一来源**，按 50Hz 恒定节拍发帧，手表的帧只是
+「这一格填什么」，没来就填静音（尾部淡出防咔哒），迟到即丢。
+`seq = up_seq++`、`ts = up_t0 + seq*20000` 天然满足严格递增。
+
+> **严格的一侧永不断，容错的一侧随便断。**
+
+同理 **零转发**：Pi 只接受 `op ∈ {start,stop,ping}` 枚举，自己拼 hello/start/
+heartbeat/stop。代码里不存在「把手表来的 JSON 塞给 Windows」的路径 ——
+所以 `anki-*` / `browser-control` / `codex-voice-set` 那一族**在结构上够不到**，
+而不是靠黑名单拦。这是 CLAUDE.md「改白名单先数有几份副本」的正面版本：
+**不存在的代码路径不会被顺手加一条绕过。**
+
+### 🚧 唯一未验证的一环（动手前必须先测）
+
+参考实现验的是 **`.playback`（只放不录）**。双工要 **`.playAndRecord`**，
+**那个组合没有任何硬件验证报告。**
+
+Apple 的 `activate` 文档暗示它正是用来授权非 playback 类别的，
+**但那是推断不是实测。**
+
+测法（用户没有 Mac，跑不了那个参考工程）：把探针做进**已在 TestFlight 上的
+手表 app**，走 CI 发出去。一次构建杀四个未知：
+
+1. `.playAndRecord` + `.voiceChat` + async `activate` 到底解不解禁
+2. 放下手腕断不断
+3. 按数码表冠断不断
+4. 连续 15 分钟稳不稳
+
+⚠ **判据只从服务端日志读，不从手表自述** —— 挂着 Xcode 调试器时 app 不会被
+挂起，测的是调试器不是系统；不挂就没有 stdout。理由同
+`scripts/watch_probe_server.py` 头部那段。
+⚠ **判据是时间序列不是单次事件**：已知豁免生效期间 network path 本身会周期性
+withdrawn/restored，掉一次线 ≠ 豁免失效。
+
+### 测不掉、只能承受的
+
+- **音频中断不可后台恢复**：来电/Siri 打断后 watchOS 不允许在后台重新激活
+  录音。长通话期间高概率发生，无软件侧规避，只能提示用户回前台。
+- **电池**：估算 15–25%/小时，**无实测数字**。
+- **`Watch/Info.plist` 里还留着 `UIBackgroundModes: [voip]`** —— CallKit 时代的
+  遗留，现在是死键，该清掉。
 
 ### 顺带验证到的事实
 
@@ -93,21 +167,25 @@ HTTP 双工的延迟够不够通话、Pi 转不转得动。**结论出来前别�
   返回 NXDOMAIN —— **那是假阴性**，Funnel 的名字解析不走那条路。
   **能实测的别去推断。**
 - `--set-path` 仍然是要用的机制（现在用来挂 Pi 的语音路径，不再是暴露 Windows）。
+- **模拟器永远给假阳性**：TN3135 原文「the simulator always allows low-level
+  networking」。手表侧任何网络结论只认真机。
 
-## ⚠ 为什么不做「手表直接语音对话」
+## ⚠ 「不做手表直接语音对话」——这个旧结论已作废，留着记录错在哪
 
-用户原本要的第四件事。**明确不做**，理由不是工作量：
+原文说不做，给了三条理由。**三条现在全部不成立**，逐条对照：
 
-要让手表直连语音端点，只能把 Windows 桥暴露到公网。而那台机器能控浏览器、
-能开麦克风、能操作 Anki —— 这个交换不划算。仓库里本来就有代码在拦这条路
-（`references/reader-computer-direct-bridge.md`「Funnel 永不启用」；
-`control_plane.py` 会把带 `AllowFunnel` 的配置判成 foreign 拒绝操作）。
+| 当时写的 | 现在 |
+|---|---|
+| 「只能把 Windows 桥暴露到公网」 | ❌ 不用。走 Pi 的**已有** Funnel 中继，Windows 一行不改、一个端口不开 |
+| 「48kHz 双工音频经手机中继不现实」 | ✅ 这条**对**，但结论下错了 —— 不现实的是**经手机**（WCSession 单条 64KB 上限），手表**直连**不经手机 |
+| 「watchOS 不给持续后台录音」 | ❌ 给。Apple 框架工程师原话：前台、用户发起的录音，**进后台可继续**。真正的约束是「不能在后台**重新**激活」，不是「不能持续」 |
 
-替代形态：**手表当遥控，手机当耳朵嘴** —— 戴耳机对手机说话，手表管开关和
-看状态。这跟「语音桥开关」是同一件工程，增量几乎为零。
+⚠ 这一段之所以留着不删：**同一段推理已经错了三次**（先「纯技术死路」、
+再「必须 CallKit」、再「只能 HTTP 双流」），每次都是因为漏看一条豁免或者
+把一个约束的适用范围放大了。删掉的话下一个人还会重推一遍。
 
-另外两条硬约束（就算愿意开公网也绕不过）：48kHz 双工音频经手机中继不现实；
-watchOS 不给持续后台录音。
+替代形态「手表当遥控、手机当耳朵嘴」仍然作为 **fallback 保留**
+（`WatchVoice.swift` 那条按住说话），不删 —— 它不依赖上面任何一条未验证假设。
 
 ## 状态
 
