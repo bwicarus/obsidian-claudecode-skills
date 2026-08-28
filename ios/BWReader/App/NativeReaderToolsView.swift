@@ -158,6 +158,9 @@ private enum ReaderTouchDoubleTapAction: String, CaseIterable, Identifiable {
 }
 
 struct NativeReaderToolsView: View {
+    @State private var storageRows: [ReaderCacheHygiene.Entry] = []
+    @State private var storageNote = "点「量一次」看本地占了多少"
+    @State private var storageMeasuring = false
     @Environment(\.dismiss) private var dismiss
     @StateObject private var coordinator = NativeReaderToolsCoordinator()
     @StateObject private var localNotes = ReaderLocalNotesManager.shared
@@ -194,6 +197,7 @@ struct NativeReaderToolsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                storageSection
                 currentPageSection
                 nativeActionsSection
                 recognitionSection
@@ -605,6 +609,56 @@ struct NativeReaderToolsView: View {
     }
 
     @ViewBuilder
+    /// 本地占用。
+    ///
+    /// ⚠ **放在第一个 Section,而且必须在能看见的地方。**
+    /// 2026-08-28:用户 App 涨到 54 GB 撑爆 IndexedDB 配额,而我第一次把这个
+    /// 面板塞进了「长按左下角两秒」那个隐藏手势后面 —— 用户的原话是
+    /// 「看不到就按不到啊」。
+    ///
+    /// 那个隐藏入口是给支持人员用的,不该承载**用户自己要解决问题时需要的
+    /// 东西**。一个查不到的诊断和没有诊断没有区别。
+    private var storageSection: some View {
+        Section("本地占用") {
+            Text(storageNote)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            ForEach(storageRows) { entry in
+                LabeledContent(
+                    entry.path,
+                    value: entry.bytes < 0 ? "量不到" : entry.readable)
+            }
+            Button(storageMeasuring ? "量着…" : "量一次") {
+                storageMeasuring = true
+                Task {
+                    let rows = await Task.detached(priority: .utility) {
+                        ReaderCacheHygiene.breakdown()
+                    }.value
+                    storageRows = rows
+                    storageNote = String(
+                        format: "合计 %.2f GB",
+                        Double(ReaderCacheHygiene.totalBytes(rows)) / 1_073_741_824)
+                    storageMeasuring = false
+                }
+            }
+            .disabled(storageMeasuring)
+            // ⚠ 按钮上写明"不动什么"。这个区别正是系统设置里「卸载 App」
+            // 做不到的:那个会把高亮和笔记一起清掉,而它们的权威副本就在本地。
+            Button("清掉页图等派生缓存（不动高亮/笔记）") {
+                Task {
+                    let cleared = await ReaderCacheHygiene.purgeDerived()
+                    let rows = await Task.detached(priority: .utility) {
+                        ReaderCacheHygiene.breakdown()
+                    }.value
+                    storageRows = rows
+                    storageNote = String(
+                        format: "清了 %d 条，现在 %.2f GB", cleared,
+                        Double(ReaderCacheHygiene.totalBytes(rows)) / 1_073_741_824)
+                }
+            }
+        }
+    }
+
     private var currentPageSection: some View {
         Section("当前阅读位置") {
             if let snapshot = coordinator.snapshot {
