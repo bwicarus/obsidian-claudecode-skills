@@ -114,6 +114,21 @@ struct ReaderLocalLibraryView: View {
                 statusSections
             }
             .navigationTitle("书库")
+            // ⚠ 备份闸拦住时**必须说为什么**。这条规矩最常见的失败是
+            // 「服务器没开」,而那跟「这本书有问题」该做的事完全不同 ——
+            // 只拦不说的话,用户看到的是"点了没反应"。
+            .alert(
+                "还不能打开",
+                isPresented: Binding(
+                    get: { backupNotice != nil },
+                    set: { if !$0 { backupNotice = nil } })
+            ) {
+                Button("知道了", role: .cancel) { backupNotice = nil }
+            } message: {
+                Text((backupNotice ?? "")
+                     + "\n\n规矩：书要先传到\(ReaderServer.displayName)才能打开，"
+                     + "这样任何一本能用的书，两边都有。")
+            }
             .navigationBarTitleDisplayMode(.inline)
             .searchable(
                 text: $searchText,
@@ -1403,15 +1418,59 @@ struct ReaderLocalLibraryView: View {
         await openLocal(localBook, allowAutomaticPreprocessing: false)
     }
 
+    // 备份闸的提示。⚠ 必须显示出来:这条规矩最常见的失败是"服务器没开",
+    // 而那跟"书坏了"该做的事完全不同。
+    @State private var backupNotice: String?
+
     private func openLocal(
         _ book: ReaderLocalBookRecord,
         allowAutomaticPreprocessing: Bool = true
     ) async {
+        // ⚠ **规矩(用户 2026-08-28 拍板 A):本地的书必须先上传服务器才能用。**
+        //
+        // 落点在"打开"而不是"导入",因为这套没有导入这一步 ——
+        // 书是靠扫描你选的那个文件夹自己出现的,唯一能真正拦住的地方就是这里。
+        //
+        // 它买到的是一个不变量:**任何一本能用的书,两边都有**。
+        // 代价是服务器没开时新书打不开 —— 用户知道这个代价而仍然选了它,
+        // 理由是另一条路(能读但标"未备份")会留下一个需要人注意的标记,
+        // 而那种标记迟早被忽略,然后在重装时才发现。
+        if !(await passesBackupGate(book)) { return }
         if await reader.openLocalBook(book, library: library) {
             if allowAutomaticPreprocessing {
                 scheduleAutomaticNativeOCR(for: book)
             }
             dismiss()
+        }
+    }
+
+    /// 备份闸。通过才让开书。
+    ///
+    /// ⚠ **"还不知道"不等于"没备份"。** 服务器问不到时不能一律拦 ——
+    /// 那会在服务器只是网络抖了一下的时候平白拦住人;也不能一律放 ——
+    /// 那等于规矩不存在。所以这里如实把两者分开,并把原因显示出来。
+    private func passesBackupGate(_ book: ReaderLocalBookRecord) async -> Bool {
+        let gate = ReaderBookBackupGate.shared
+        if gate.serverHashes == nil { await gate.refresh() }
+        switch gate.status(of: book) {
+        case .backed:
+            return true
+        case .notBacked:
+            // 自动传一次 —— 规矩是"必须先上传",不是"必须先手动上传"。
+            // 能自动完成的事让用户点一次按钮,只是把规矩变成负担。
+            guard let access = try? library.makeOpenAccess(for: book) else {
+                backupNotice = "读不到这本书的文件，没法上传"
+                return false
+            }
+            backupNotice = "正在上传到\(ReaderServer.displayName)…"
+            let ok = await gate.ensureBacked(book, fileURL: access.url)
+            backupNotice = ok ? nil : (gate.lastError ?? "上传没成功")
+            return ok
+        case .unknown(let why):
+            // ⚠ 不拦也不放,而是**说清楚现在处于哪种状态** ——
+            // 直接拦会让"服务器暂时没答应"看起来像"这本书有问题"。
+            backupNotice = why + "——先确认\(ReaderServer.displayName)开着"
+            return false
         }
     }
 
