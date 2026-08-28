@@ -61,9 +61,20 @@
 
   function backendError(error, message) {
     if (error && error.code && String(error.code).indexOf('BW_') === 0) return error;
-    return new DataStoreError(message || 'IndexedDB 操作失败', 'BW_DATA_BACKEND', {
-      cause: String(error && error.message || error || 'unknown')
-    });
+    // ⚠ **DOMException 的区分字段是 `name`,不是 `message`。**
+    // QuotaExceededError(存储满)/ VersionError(本地库比代码新)/
+    // UnknownError(iOS 上多半是库损坏)/ InvalidStateError(隐私模式)——
+    // 这四种的处理完全不同,而它们的 message 常常是空的或一句套话。
+    // 只捞 message 等于把唯一能分辨的东西丢了(2026-08-28 实测:用户看到的
+    // 面板只有"无法打开 IndexedDB",没有任何能指导下一步的信息)。
+    var name = String((error && error.name) || '');
+    var detail = String((error && error.message) || error || 'unknown');
+    return new DataStoreError(
+      message ? (name ? message + '（' + name + '）' : message)
+              : 'IndexedDB 操作失败',
+      'BW_DATA_BACKEND',
+      { cause: detail, name: name }
+    );
   }
 
   function normalizeBatchOptions(options) {

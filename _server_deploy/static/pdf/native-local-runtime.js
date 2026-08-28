@@ -631,9 +631,26 @@
       panel.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:#111827;color:#fff;display:grid;place-items:center;padding:28px;font:16px/1.6 -apple-system,sans-serif';
       var content = root.document.createElement('div');
       content.style.cssText = 'max-width:680px;background:#7f1d1d;border:1px solid #ef4444;border-radius:16px;padding:24px;white-space:pre-wrap';
+      // ⚠ **把 details 也印出来。** 底层原因（DOMException 的 name、配额、
+      // 版本冲突）一直被存在 error.details 里，但面板只印我们自己写的那句话
+      // —— 于是用户看到的是「无法打开 IndexedDB」，跟「它坏了」一样没用。
+      // 2026-08-28 实测撞上这个：**信息一直在，只是没送到需要它的人眼前。**
+      var extra = '';
+      try {
+        var details = error && error.details;
+        if (details && typeof details === 'object') {
+          var parts = [];
+          for (var key in details) {
+            if (!Object.prototype.hasOwnProperty.call(details, key)) continue;
+            if (details[key] == null || details[key] === '') continue;
+            parts.push(key + '=' + String(details[key]));
+          }
+          if (parts.length) extra = '\n' + parts.join('  ');
+        }
+      } catch (_) {}
       content.textContent = '本机 Reader 无法安全启动\n' +
         String(error && error.code || 'BW_LOCAL_STORE_UNAVAILABLE') + '\n' +
-        String(error && error.message || error);
+        String(error && error.message || error) + extra;
       panel.appendChild(content);
       (root.document.body || root.document.documentElement).appendChild(panel);
     }
