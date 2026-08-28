@@ -51,10 +51,13 @@ final class BWReaderAppDelegate: NSObject, UIApplicationDelegate {
         // 「本机 Reader 无法安全启动」,跟真正的原因看不出任何关系。
         // 缓存头已改成 5 分钟,但**存量得有人清**。
         // 只清派生数据(页图),高亮/笔记那些权威数据一个字节都不碰。
-        Task.detached(priority: .utility) {
-            if let note = await ReaderCacheHygiene.purgeIfBloated() {
-                await ReaderWatchLinkDiagnostics.note(note)
-            }
+        // ⚠ **无论清没清都要记一句。** 上一版只在"超阈值且清了"时才说话,
+        // 于是"目录量错了"和"本来就不大"表现完全一样 —— 而实测正是前者:
+        // 我只量了 Library、失败还返回 0,结果什么都没清而且一声不吭。
+        // 一个只在成功时说话的诊断,等于在失败时撒谎。
+        Task {
+            let note = await ReaderCacheHygiene.inspectAndPurge()
+            ReaderWatchLinkDiagnostics.note(note)
         }
         return true
     }
@@ -493,10 +496,55 @@ private struct ReaderRootView: View {
 private struct NativeVoiceDiagnosticsView: View {
     @ObservedObject var bridge: NativeVoiceBridge
     @Environment(\.dismiss) private var dismiss
+    // ⚠ 本地占用必须**看得见**。2026-08-28 用户 App 涨到 54 GB 撑爆
+    // IndexedDB 配额,而当时没有任何地方能看出是什么在涨 —— 我只能靠推理,
+    // 推错了还一声不吭。这一段存在的意义就是让下次不必再猜。
+    @State private var storage: [ReaderCacheHygiene.Entry] = []
+    @State private var storageNote = "还没量"
+    @State private var measuring = false
 
     var body: some View {
         NavigationStack {
             List {
+                Section("本地占用") {
+                    Text(storageNote)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    ForEach(storage) { entry in
+                        LabeledContent(
+                            entry.path,
+                            value: entry.bytes < 0 ? "量不到" : entry.readable)
+                    }
+                    Button(measuring ? "量着…" : "量一次") {
+                        measuring = true
+                        Task {
+                            let rows = await Task.detached(priority: .utility) {
+                                ReaderCacheHygiene.breakdown()
+                            }.value
+                            storage = rows
+                            let total = ReaderCacheHygiene.totalBytes(rows)
+                            storageNote = String(
+                                format: "合计 %.2f GB",
+                                Double(total) / 1_073_741_824)
+                            measuring = false
+                        }
+                    }
+                    .disabled(measuring)
+                    // ⚠ 按钮上写清楚"不动什么" —— 否则没人敢按。
+                    Button("清掉页图等派生缓存（不动高亮/笔记）") {
+                        Task {
+                            let cleared = await ReaderCacheHygiene.purgeDerived()
+                            let rows = await Task.detached(priority: .utility) {
+                                ReaderCacheHygiene.breakdown()
+                            }.value
+                            storage = rows
+                            storageNote = String(
+                                format: "清了 %d 条,现在 %.2f GB", cleared,
+                                Double(ReaderCacheHygiene.totalBytes(rows))
+                                    / 1_073_741_824)
+                        }
+                    }
+                }
                 Section("当前状态") {
                     LabeledContent("App build", value: nativeAppBuildVersion)
                     LabeledContent("通话", value: bridge.state.title)
