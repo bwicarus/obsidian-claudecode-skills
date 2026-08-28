@@ -618,11 +618,12 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
   相比，这次是进一步收窄：PWA 直接不投入。
 
 ## 授权（2026-08-18 用户明确）
-- ⚠ **TestFlight 每天有上传次数上限**(altool 90382 "Upload limit reached...wait 1 day")。
-  2026-08-28 实测:当天第 7 次上传被拒,**前 6 次成功**。它**只在上传那一步报**,
-  编译全绿 —— 所以 `gh run watch` 说 failure 时先看是不是这条,别去查代码。
-  代价是**当天没法再发修复版**:所以一旦发出去的那版有问题,要么等一天,
-  要么走别的通道(改服务端)补救。**别把"规矩"和"它依赖的端点"分在两个通道里发。**
+- ⚠ **altool 90382「Upload limit reached」是短时节流，不是每天配额** ——
+  它自己说的 "Please wait 1 day" **不可信**：2026-08-28 连发 6 次后第 7 次被拒，
+  **十几分钟后原样重试就过了**。所以撞到它**先直接重试**，不要按它说的等一天，
+  更不要据此改代码或改发布计划。
+  另外它**只在上传那一步报，编译是全绿的** —— `gh run watch` 说 failure 时
+  先看是不是这条，别去翻代码。
 
 - **iOS CI 构建不必逐次确认**：`gh workflow run safari-extension-ios.yml --ref <分支> -f upload=true`
   （含 TestFlight 上传）在改动需要上设备时**直接触发**即可。
