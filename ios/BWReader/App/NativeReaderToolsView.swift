@@ -197,6 +197,7 @@ struct NativeReaderToolsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                dataHubSection
                 storageSection
                 currentPageSection
                 nativeActionsSection
@@ -205,7 +206,7 @@ struct NativeReaderToolsView: View {
                 offlineDictionarySection
                 localLibrarySection
                 realtimeCredentialsSection
-                piSyncSection
+                piSyncDetailSection
                 localNotesSection
                 quickNotesSection
                 NativePencilSettingsSection()
@@ -453,9 +454,31 @@ struct NativeReaderToolsView: View {
         }
     }
 
+    /// 统一入口:账号 + 同步 + **每类数据在哪**。
+    ///
+    /// ⚠ 放在第一个,而且刻意**不出现「Pi」这个词** —— Pi 是中继不是数据
+    /// 权威(CLAUDE.md),把实现细节摆在界面第一层正是这次混乱的来源之一。
+    private var dataHubSection: some View {
+        ReaderDataHubSection(
+            localBookCount: ReaderLocalLibraryManager.shared.books.count,
+            isSignedIn: piSyncLooksSignedIn,
+            isSyncing: piSync.isRunning,
+            lastSyncSummary: piSync.report.map { "上次：" + $0.state.title },
+            onSignIn: { presentsPiLogin = true },
+            onSync: { Task { await piSync.syncToPi(using: reader) } })
+    }
+
+    /// ⚠ 登录状态目前只能**推断**:没有一个"我登录了吗"的接口。
+    /// 所以这里如实按"上次同步有没有报未登录"来判断,而不是编一个布尔。
+    /// 补一个真正的状态查询是下一步,不是现在悄悄糊过去。
+    private var piSyncLooksSignedIn: Bool {
+        guard let report = piSync.report else { return true }   // 没试过就别说没登录
+        return !report.state.title.contains("登录")
+    }
+
     @ViewBuilder
-    private var piSyncSection: some View {
-        Section("Pi 同步") {
+    private var piSyncDetailSection: some View {
+        Section("同步细节（排错用）") {
             Button {
                 presentsPiLogin = true
             } label: {
