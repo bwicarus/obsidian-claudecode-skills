@@ -45,6 +45,17 @@ final class BWReaderAppDelegate: NSObject, UIApplicationDelegate {
         // `nonisolated static` 正是为了能在这里（不在 MainActor 上）直接调。
         // 真正的激活在它内部切回主线程做。
         ReaderWatchLink.activateFromLaunch()
+        // ⚠ 启动时看一眼本地缓存有没有胀大。
+        // 2026-08-28:页图带着一年 immutable 缓存头,整本预热又渲染每一页、
+        // 每页多个宽度 —— 涨到 54 GB 把 IndexedDB 配额撑爆,表现是
+        // 「本机 Reader 无法安全启动」,跟真正的原因看不出任何关系。
+        // 缓存头已改成 5 分钟,但**存量得有人清**。
+        // 只清派生数据(页图),高亮/笔记那些权威数据一个字节都不碰。
+        Task.detached(priority: .utility) {
+            if let note = await ReaderCacheHygiene.purgeIfBloated() {
+                await ReaderWatchLinkDiagnostics.note(note)
+            }
+        }
         return true
     }
 }

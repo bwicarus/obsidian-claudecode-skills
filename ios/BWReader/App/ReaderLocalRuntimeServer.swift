@@ -1027,7 +1027,20 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 request,
                 data: data,
                 contentType: "image/jpeg",
-                cacheControl: "private, max-age=31536000, immutable",
+                // ⚠ **不要用一年的 immutable。**
+                //
+                // 这个头是从服务端设计继承来的:那边页图要从 Pi 走网络,
+                // 一年缓存省下的是一次真实往返。**而在 App 里渲染是本地
+                // PDFKit,省的只是一次函数调用** —— 原来那个取舍在这个表面上
+                // 根本不成立。
+                //
+                // 代价是实打实的:整本预热会渲染**每一页**,而每页还按**多个
+                // 宽度**各缓存一份。2026-08-28 用户实测 App 数据涨到 **54 GB**,
+                // 直接把 IndexedDB 的配额撑爆 —— 表现是「本机 Reader 无法安全
+                // 启动」,而那时看不出跟页图有任何关系。
+                //
+                // 5 分钟足够翻页/来回滚动复用,又不会攒成几十 GB。
+                cacheControl: "private, max-age=300",
                 additionalHeaders: [
                     HTTPHeader("X-BW-PDF-Renderer"): "pdfkit"
                 ]
