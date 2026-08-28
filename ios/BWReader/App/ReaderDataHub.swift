@@ -73,9 +73,13 @@ enum ReaderDataHub {
             Category(name: "便签", localCount: nil, replicated: true, caveat: nil),
             Category(name: "插入页", localCount: nil, replicated: true, caveat: nil),
             Category(name: "手写墨迹", localCount: nil, replicated: true, caveat: nil),
+            // ⚠ 规矩变了(用户 2026-08-28 拍板 A):**本地的书必须先上传服务器
+            // 才能开始使用**。做完之后这一行就恒为"已备份" ——
+            // 因为不备份的书根本打不开。在那之前如实说现状。
             Category(
                 name: "书籍", localCount: localBooks, replicated: false,
-                caveat: "书在你选的文件夹里；电脑上那份是另一批，不会自动互相补齐"),
+                caveat: "规矩已定：以后新书要先传到服务器才能打开（还没做完；"
+                        + "现在两边各是各的，不会自动互相补齐）"),
             // ⚠ 钉在页面上的卡片**作为便签存**（native-local-runtime.js 的
             // 原注释：「A card or generic result pinned on the page is a note
             // placement」），所以它随便签一起备份。没钉的那些不在。
@@ -98,6 +102,7 @@ enum ReaderDataHub {
 
 /// 数据与同步的统一入口。
 struct ReaderDataHubSection: View {
+    @State private var serverHost = ReaderServer.host
     let localBookCount: Int?
     let isSignedIn: Bool
     let isSyncing: Bool
@@ -110,6 +115,10 @@ struct ReaderDataHubSection: View {
             // 账号。⚠ 刻意**不叫「Pi」**：Pi 是中继不是数据权威,
             // 把实现细节放在界面第一层,是这次混乱的来源之一。
             LabeledContent("账号", value: isSignedIn ? "已登录" : "未登录")
+            // ⚠ 服务器地址可改 —— 用户 2026-08-28 说了将来可能换 Mac mini。
+            // 界面上只说「我的服务器」,不出现具体是哪台机器:那是实现细节,
+            // 而且它会变。把机器名当一等公民正是这次混乱的来源。
+            LabeledContent(ReaderServer.displayName, value: serverHost)
             if !isSignedIn {
                 Button("登录", action: onSignIn)
             }
