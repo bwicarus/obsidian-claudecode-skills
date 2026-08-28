@@ -626,6 +626,17 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-context/snapshot",
             new[] { "POST", "OPTIONS" },
             context => HandleSnapshotPostAsync(context, serviceToken));
+        // 书库：设备把书传到这台服务器,也从这里取回。
+        // ⚠ 它服务的是用户 2026-08-28 拍板的那条规矩 ——「本地的书必须先上传
+        // 服务器才能开始使用」,所以它的可靠性直接决定书能不能打开。
+        app.MapMethods(
+            "/reader-library/upload",
+            new[] { "POST", "OPTIONS" },
+            context => HandleLibraryUploadAsync(context, serviceToken));
+        app.MapMethods(
+            "/reader-library/list",
+            new[] { "POST", "OPTIONS" },
+            context => HandleLibraryListAsync(context, serviceToken));
         app.MapFallback(context =>
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
@@ -1403,6 +1414,94 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         await context.Response.WriteAsJsonAsync(
             new { contract = "reader-output-pickup/1", events },
             serviceCancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleLibraryUploadAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        // 与其它出站端点同一道闸:Origin 白名单 + Tailscale 注入的身份头。
+        if (!PrepareOutputCors(context, "POST, OPTIONS")) return;
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        // ⚠ 用框架自带的 multipart 解析,不手搓 —— 手搓 multipart 是 bug 的
+        // 温床,而这条链路一旦出错的表现是「书打不开而且不知道为什么」。
+        if (!context.Request.HasFormContentType)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(
+                new
+                {
+                    ok = false,
+                    code = "BW_LIBRARY_FORM_REQUIRED",
+                    message = "需要 multipart/form-data(字段名 file)",
+                },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        IFormCollection form;
+        try
+        {
+            form = await context.Request
+                .ReadFormAsync(serviceCancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception error)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(
+                new
+                {
+                    ok = false,
+                    code = "BW_LIBRARY_FORM_INVALID",
+                    // 原因原样透出:「表单坏了」和「书太大」该做的事完全不同。
+                    message = "表单解析失败:" + error.GetType().Name,
+                },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        IFormFile? file = form.Files["file"] ?? form.Files.FirstOrDefault();
+        if (file is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(
+                new
+                {
+                    ok = false,
+                    code = "BW_LIBRARY_FILE_MISSING",
+                    message = "表单里没有文件",
+                },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        string name = (form["name"].FirstOrDefault() ?? file.FileName ?? "")
+            .Trim();
+        await using Stream source = file.OpenReadStream();
+        ReaderLibraryStore.SaveOutcome outcome = await ReaderLibraryStore
+            .SaveAsync(name, source, serviceCancellationToken)
+            .ConfigureAwait(false);
+        AppendOutputPickupLog(
+            "library-upload	" + name + "	" + outcome.Code);
+        await ReaderLibraryStore
+            .WriteOutcomeAsync(context, outcome, serviceCancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task HandleLibraryListAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!PrepareOutputCors(context, "POST, OPTIONS")) return;
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        await ReaderLibraryStore
+            .WriteListAsync(context, serviceCancellationToken)
+            .ConfigureAwait(false);
     }
 
     private async Task HandleOutputReceiptAsync(
