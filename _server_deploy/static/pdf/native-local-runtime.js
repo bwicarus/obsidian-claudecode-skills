@@ -6480,6 +6480,11 @@
     return value;
   }
 
+  // 上一次已经备份出去的页码。只在**真的翻页**时才入队 ——
+  // 阅读位置每翻一页写一次,无条件入队会把复制账本淹掉,
+  // 而账本被淹的后果是真正重要的那些命令排在后面迟迟发不出去。
+  var lastReplicatedPosition = null;
+
   function localReadingPosition(input, init, url, method) {
     var code = 'BW_LOCAL_READING_POSITION';
     var identity = localFileRef();
@@ -6517,6 +6522,20 @@
             positions = validReadingPositions(positions, code);
             positions[identity] = value;
             return localStateMutationResult(positions, { ok: true, pos: value.pos });
+          }).then(function (result) {
+            // ⚠ **阅读位置也要备份。** 2026-08-28 用户被迫重装 App 之后
+            // 才发现:复制账本只覆盖高亮/便签/插入页/墨迹四类,而
+            // 「读到第几页」这种最日常的东西一直只在本机 —— 重装即失。
+            //
+            // 它跟高亮不同的地方在于**写得极频繁**(翻一页写一次),
+            // 所以只在**页码真的变了**时入队,否则会把账本淹掉。
+            if (lastReplicatedPosition !== value.pos) {
+              lastReplicatedPosition = value.pos;
+              enqueueReplicationCommand('/pdf/api/reading-pos', 'POST', {
+                file: localFileRef(), kind: value.kind, pos: value.pos
+              });
+            }
+            return result;
           });
         });
       });

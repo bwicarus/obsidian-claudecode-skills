@@ -57,6 +57,12 @@ enum ReaderDataHub {
     ///
     /// 改复制覆盖范围时**必须同步改这里**，否则它会以最坏的方式过期：
     /// 显示"已备份"而其实没有。
+    ///
+    /// ⚠ **改之前先用仓库自己的工具查，别凭印象填。**
+    /// 第一版我把「聊天记录」写成"只在本机、重装会丢"，而
+    /// `scripts/where_does_this_route_run.py /api/assistant/history` 的答案是
+    /// **owner=pi、无本地分支** —— 它在 Pi 上，重装根本不丢。
+    /// 一张写错的状态表比没有更糟：它会让人按错误的前提去清设备。
     static func categories(localBooks: Int?) -> [Category] {
         [
             Category(name: "高亮", localCount: nil, replicated: true, caveat: nil),
@@ -66,15 +72,22 @@ enum ReaderDataHub {
             Category(
                 name: "书籍", localCount: localBooks, replicated: false,
                 caveat: "书在你选的文件夹里；电脑上那份是另一批，不会自动互相补齐"),
+            // ⚠ 钉在页面上的卡片**作为便签存**（native-local-runtime.js 的
+            // 原注释：「A card or generic result pinned on the page is a note
+            // placement」），所以它随便签一起备份。没钉的那些不在。
             Category(
-                name: "卡片", localCount: nil, replicated: false,
-                caveat: "重装 App 会丢"),
+                name: "卡片（已钉在页上的）", localCount: nil, replicated: true,
+                caveat: nil),
+            // ⚠ 聊天记录**在 Pi 上**，不是本机 —— 这一条我一开始写错了，
+            // 靠 `scripts/where_does_this_route_run.py /api/assistant/history`
+            // 查出来的（owner=pi，runtime 无本地分支）。
+            // 一张写错的状态表比没有更糟：它会让人按错误的前提去清设备。
             Category(
-                name: "聊天记录", localCount: nil, replicated: false,
-                caveat: "重装 App 会丢"),
+                name: "聊天记录", localCount: nil, replicated: true,
+                caveat: "存在 Pi 上，登录后就在，重装不丢"),
             Category(
-                name: "阅读位置", localCount: nil, replicated: false,
-                caveat: "重装 App 会丢"),
+                name: "阅读位置", localCount: nil, replicated: true,
+                caveat: nil),
         ]
     }
 }
