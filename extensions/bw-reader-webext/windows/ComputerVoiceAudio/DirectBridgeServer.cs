@@ -438,6 +438,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             manageSnapshotViewerProcess
                 && !ReadSnapshotViewerHidden(runtimeDirectory));
         _runtimeDirectory = runtimeDirectory;
+        // 提示板从这里读已有的 notifications-*.json —— 它不存数据，
+        // 只是把本来就在实时更新的东西挑一挑再渲出来。
+        ReaderAttentionBoard.Configure(runtimeDirectory);
         _bridgeOnlyMode = ReadBridgeOnlyMode(runtimeDirectory);
         _voiceEnabled = ReadVoiceEnabled(runtimeDirectory);
         // 桥接模式语义(2026-08-17 用户更正):语音**留在电脑**——Codex 照常自动
@@ -637,17 +640,15 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-library/list",
             new[] { "POST", "OPTIONS" },
             context => HandleLibraryListAsync(context, serviceToken));
-        // 语音助手的主动提示板。它盯着 BoardPath 一个地方就够 ——
-        // 「现在该不该开口」在**这一侧**算好，它只照做。
-        // ⚠ GET 是唯一一条给它读的；notify 给生产方写；ack 只为量延迟和遗忘率。
+        // 语音助手的主动提示板。它盯着 BoardPath 一个地方就够。
+        // ⚠ 板子**不存数据** —— 只是把 runtime 目录里已有的
+        // notifications-*.json 和位置挑一挑、渲成一份很小的文本。
+        // 曾经还有一条 /notify 投递口，2026-08-29 拆掉了：那是重复造，
+        // Windows 侧本来就在实时更新这些文件。
         app.MapMethods(
             ReaderAttentionBoard.BoardPath,
             new[] { "GET", "OPTIONS" },
             context => HandleAttentionBoardAsync(context, serviceToken));
-        app.MapMethods(
-            ReaderAttentionBoard.NotifyPath,
-            new[] { "POST", "OPTIONS" },
-            context => HandleAttentionNotifyAsync(context, serviceToken));
         app.MapMethods(
             ReaderAttentionBoard.AckPath,
             new[] { "GET", "POST", "OPTIONS" },
@@ -1534,21 +1535,6 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             .ConfigureAwait(false);
     }
 
-    private async Task HandleAttentionNotifyAsync(
-        HttpContext context,
-        CancellationToken serviceCancellationToken)
-    {
-        if (!PrepareOutputCors(context, "POST, OPTIONS")) return;
-        if (!HttpMethods.IsPost(context.Request.Method))
-        {
-            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
-            return;
-        }
-        await ReaderAttentionBoard
-            .AcceptNoticeAsync(context, serviceCancellationToken)
-            .ConfigureAwait(false);
-    }
-
     private async Task HandleAttentionAckAsync(
         HttpContext context,
         CancellationToken serviceCancellationToken)
@@ -1875,7 +1861,6 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     string.IsNullOrWhiteSpace(viewport.Title)
                         ? viewport.Url
                         : viewport.Title,
-                    viewport.Url,
                     DateTimeOffset.UtcNow);
             }
             if (documentValue is JsonElement documentEntryValue)
