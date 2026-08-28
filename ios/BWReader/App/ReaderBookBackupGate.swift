@@ -43,6 +43,9 @@ final class ReaderBookBackupGate: ObservableObject {
     /// 调用方面对这个区别。
     @Published private(set) var serverHashes: Set<String>?
     @Published private(set) var lastError: String?
+    /// 服务器还没有书库端点(旧版)。**这时规矩不生效** ——
+    /// 强制一条根本不可能被满足的规则,等于把所有书锁死。
+    @Published private(set) var capabilityMissing = false
     @Published private(set) var uploading: Set<String> = []
 
     func refresh() async {
@@ -50,6 +53,16 @@ final class ReaderBookBackupGate: ObservableObject {
             let books = try await ReaderServerLibrary.list()
             serverHashes = Set(books.map(\.sha256))
             lastError = nil
+            capabilityMissing = false
+        } catch ReaderServerLibrary.Failure.capabilityMissing {
+            // ⚠ 服务器还是旧版 —— **规矩在它那边还没落地**。
+            // 这时候拦人等于强制一条不可能被满足的规则:书全打不开,
+            // 而且用户做什么都没用(他没法给服务器装端点)。
+            // 所以放行,但**说出来** —— 沉默的放行会让人以为规矩生效了。
+            capabilityMissing = true
+            serverHashes = nil
+            lastError = "\(ReaderServer.displayName)上还没有书库功能，"
+                + "「先上传才能用」这条规矩暂时没生效"
         } catch {
             // ⚠ 失败时**不要**把 serverHashes 设成空集合 —— 那等于说
             // 「服务器上一本书都没有」，会让每一本书都显示成未备份。
@@ -65,9 +78,13 @@ final class ReaderBookBackupGate: ObservableObject {
         case notBacked
         /// 还不知道 —— 服务器没问到。**这是一个独立状态，不是"没备份"。**
         case unknown(String)
+        /// 服务器还没有书库端点。**放行**，但界面要说清规矩没生效。
+        case ruleNotReady
     }
 
     func status(of book: ReaderLocalBookRecord) -> Status {
+        // 规矩还没在服务器上落地 → 不拦。见 capabilityMissing 的注释。
+        if capabilityMissing { return .ruleNotReady }
         guard let hashes = serverHashes else {
             return .unknown(lastError ?? "还没问过\(ReaderServer.displayName)")
         }

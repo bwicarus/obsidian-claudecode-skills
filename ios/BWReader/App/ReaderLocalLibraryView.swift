@@ -1466,6 +1466,11 @@ struct ReaderLocalLibraryView: View {
             let ok = await gate.ensureBacked(book, fileURL: access.url)
             backupNotice = ok ? nil : (gate.lastError ?? "上传没成功")
             return ok
+        case .ruleNotReady:
+            // 服务器还没这个能力 —— **放行**。强制一条它那边还没落地的规则,
+            // 结果是所有书都打不开而用户什么也做不了。
+            // 但要留痕:沉默的放行会让人以为规矩已经在保护他了。
+            return true
         case .unknown(let why):
             // ⚠ 不拦也不放,而是**说清楚现在处于哪种状态** ——
             // 直接拦会让"服务器暂时没答应"看起来像"这本书有问题"。

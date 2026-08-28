@@ -45,6 +45,15 @@ enum ReaderServerLibrary {
         case serverUnreachable(String)
         case rejected(code: String, message: String)
         case malformed
+        /// 服务器在，但**还没有这个端点**（404）。
+        ///
+        /// ⚠ 这跟「服务器没开」是两件完全不同的事,必须分开：
+        /// 没开 → 等它开机,规矩照常生效;
+        /// **没有这个能力** → 规矩在服务器上还没落地,
+        /// 而**强制一条根本不可能被满足的规则,等于把书全锁死**。
+        /// 2026-08-28 我差点就这么发出去了:App 侧规矩先上线,服务器端点还在
+        /// 另一个发布通道里没走 —— 那样每一本书都打不开。
+        case capabilityMissing
 
         var errorDescription: String? {
             switch self {
@@ -58,6 +67,8 @@ enum ReaderServerLibrary {
                 // 服务端的中文原文照抄。它本来就写给人看,而且区分了
                 // "同名不同内容"和"名字不合法"这类需要不同处理的情况。
                 return message + "（\(code)）"
+            case .capabilityMissing:
+                return "\(ReaderServer.displayName)上还没有书库功能"
             case .malformed:
                 return "\(ReaderServer.displayName)返回的内容看不懂"
             }
@@ -124,6 +135,11 @@ enum ReaderServerLibrary {
         request.httpBody = body
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse,
+               http.statusCode == 404 || http.statusCode == 405 {
+                // 端点不存在 —— 服务器还是旧版。**不是**它没开。
+                throw Failure.capabilityMissing
+            }
             if let http = response as? HTTPURLResponse,
                http.statusCode != 200,
                (try? JSONDecoder().decode(UploadResponse.self, from: data)) == nil {
