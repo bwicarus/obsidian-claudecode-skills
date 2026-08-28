@@ -585,11 +585,59 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 // A downloaded package remains in native staging. Opening the
                 // book will show the initialization error and can retry after
                 // a later App launch; nothing is silently discarded here.
+                //
+                // ⚠ 但**原因必须留下来**。这里原先只是置 nil:一旦初始化失败,
+                // 整个 App 生命周期里适配器都是 nil,于是**每本书每次都失败**,
+                // 而现场只剩一句「尚未准备好」—— 跟"脚本没跑"完全分不开。
+                // 这正是 silent-failure-lessons.md 那条:
+                // **每个提前退出都要出声**。
                 bookUserStateWebAdapter = nil
                 bookUserStateCoordinator = nil
+                Self.bookUserStateSetupFailure =
+                    (error as? LocalizedError)?.errorDescription
+                    ?? String(describing: error)
             }
         }
         configureBookUserStateNotifications()
+        // 最早的一段脚本：把页面自己的报错记下来。
+        //
+        // ⚠ 它必须**在别的脚本之前**跑，否则 runtime 抛的错就已经过去了。
+        // 这是 silent-failure-lessons.md 那条「无控制台设备上沉默等于不可诊断」
+        // 的落点：iPad 上没有控制台，页面抛了什么在设备上是**看不到**的，
+        // 所以要在它抛的当下就存下来，等有人来问再报。
+        contentController.addUserScript(WKUserScript(
+            source: #"""
+            (() => {
+              if (window.__BW_BOOT_ERRORS__) return;
+              const box = [];
+              window.__BW_BOOT_ERRORS__ = box;
+              const push = (text) => {
+                if (box.length >= 8) return;   // 只留最早的几条：真正的病因在最前面
+                box.push(String(text).slice(0, 300));
+              };
+              window.addEventListener("error", (event) => {
+                if (event && event.message) {
+                  const where = event.filename
+                    ? String(event.filename).split("/").pop() : "?";
+                  push(where + ":" + (event.lineno || 0) + " " + event.message);
+                } else if (event && event.target && event.target.src) {
+                  // 资源加载失败（404 / 被 CSP 挡）——它没有 message，
+                  // 只能从 target 上认出来。漏掉这一支就会把"脚本没下来"
+                  // 误判成"脚本没报错"。
+                  push("资源没加载：" +
+                    String(event.target.src).split("/").pop());
+                }
+              }, true);
+              window.addEventListener("unhandledrejection", (event) => {
+                push("未捕获的 Promise：" +
+                  ((event && event.reason && event.reason.message)
+                    || String(event && event.reason)));
+              });
+            })();
+            """#,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
         contentController.addUserScript(WKUserScript(
             source: """
             (() => {
@@ -1485,34 +1533,104 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         localBookId: String,
         generation: UInt64
     ) async throws {
+        // ⚠ 探针返回的是**原始事实**,不是一个 Bool。
+        //
+        // 原来这里把一切压成 `ready: Bool`,于是超时后四种完全不同的病因
+        // ——脚本没跑 / 跑了但半路抛了 / 页面不是本机壳 / 在子框里——
+        // 只剩同一句「尚未准备好」。分不开就只能猜,而这次是"每次都失败",
+        // 猜错一轮就是一个 TestFlight 来回。
+        //
+        // 决定性的那一条是 `runtimeRoot`:`window.BWReaderRuntime` 在
+        // native-local-runtime.js **第 63 行**就建好了,而 `nativeLocalRuntime`
+        // 在**末尾第 14138 行**才挂上。所以:
+        //   runtimeRoot 有、nativeLocalRuntime 没有 → **脚本跑了但中途抛了**
+        //   两个都没有                             → **脚本根本没跑**
+        var lastObserved = "没拿到现场"
         for _ in 0..<40 {
             try Task.checkCancellation()
             guard generation == bookUserStateContextGeneration,
                   currentLocalBook?.id == localBookId else {
                 throw CancellationError()
             }
-            if isLocalRuntimeURL(webView.url),
-               let ready = try? await webView.callAsyncJavaScript(
+            let trustedURL = isLocalRuntimeURL(webView.url)
+            if trustedURL,
+               let raw = try? await webView.callAsyncJavaScript(
                 """
-                return window.top === window && Boolean(
-                  window.BWReaderRuntime?.nativeLocalRuntime?.bookUserState &&
-                  typeof window.BWReaderRuntime.nativeLocalRuntime
-                    .bookUserState.snapshotHeaders === "function" &&
-                  typeof window.BWReaderRuntime.nativeLocalRuntime
-                    .bookUserState.applyAtomically === "function"
-                );
+                const rt = window.BWReaderRuntime;
+                const nlr = rt && rt.nativeLocalRuntime;
+                const us = nlr && nlr.bookUserState;
+                return {
+                  isTop: window.top === window,
+                  hasRuntimeRoot: Boolean(rt),
+                  hasNativeRuntime: Boolean(nlr),
+                  hasUserState: Boolean(us),
+                  snapshotFn: us ? typeof us.snapshotHeaders : "none",
+                  applyFn: us ? typeof us.applyAtomically : "none",
+                  scriptTag: Boolean(document.querySelector(
+                    'script[src*="native-local-runtime"]')),
+                  bootErrors: (window.__BW_BOOT_ERRORS__ || [])
+                    .slice(0, 2).join(" | ").slice(0, 240),
+                  path: String(location.pathname).slice(-40)
+                };
                 """,
                 arguments: [:],
                 in: nil,
                 contentWorld: .page
-               ) as? Bool,
-               ready {
-                return
+               ) as? [String: Any] {
+                let ready = (raw["isTop"] as? Bool ?? false)
+                    && (raw["snapshotFn"] as? String) == "function"
+                    && (raw["applyFn"] as? String) == "function"
+                if ready { return }
+                lastObserved = Self.describeUserStateProbe(raw)
+            } else if !trustedURL {
+                lastObserved = "当前页不是本机阅读页（"
+                    + (webView.url?.path.suffix(40).description ?? "无 URL") + "）"
+            } else {
+                lastObserved = "页面里的探针没能执行"
             }
             try await Task.sleep(nanoseconds: 250_000_000)
         }
-        throw ReaderBookUserStateWebAdapterError.unavailable
+        // 初始化那一步就失败的话，页面再正常也没用 —— 优先报它。
+        if let setup = Self.bookUserStateSetupFailure {
+            throw ReaderBookUserStateWebAdapterError
+                .unavailableDetailed("App 侧初始化就失败了：" + setup)
+        }
+        throw ReaderBookUserStateWebAdapterError
+            .unavailableDetailed(lastObserved)
     }
+
+    /// 把探针的原始事实翻成**指向病因**的一句话。
+    ///
+    /// ⚠ 不做"归纳"——每一支都对应一个不同的下一步动作，混起来就白探了。
+    private static func describeUserStateProbe(_ raw: [String: Any]) -> String {
+        let hasRoot = raw["hasRuntimeRoot"] as? Bool ?? false
+        let hasNative = raw["hasNativeRuntime"] as? Bool ?? false
+        let scriptTag = raw["scriptTag"] as? Bool ?? false
+        let bootErrors = (raw["bootErrors"] as? String) ?? ""
+        let path = (raw["path"] as? String) ?? "?"
+        if !(raw["isTop"] as? Bool ?? false) {
+            return "阅读页在子框里，主框没有这个接口"
+        }
+        if !scriptTag {
+            return "壳页面(\(path))里根本没有 runtime 脚本标签"
+        }
+        if !hasRoot {
+            return "脚本标签在但一行都没执行"
+                + (bootErrors.isEmpty ? "（可能被 CSP 挡了或 404）"
+                                      : "：\(bootErrors)")
+        }
+        if !hasNative {
+            return "脚本跑到一半抛了"
+                + (bootErrors.isEmpty ? "（没抓到报错）" : "：\(bootErrors)")
+        }
+        let snapshotFn = (raw["snapshotFn"] as? String) ?? "?"
+        let applyFn = (raw["applyFn"] as? String) ?? "?"
+        return "接口在但方法不全（snapshot=\(snapshotFn)，apply=\(applyFn)）"
+    }
+
+    /// App 启动时适配器初始化失败的原因。整个进程共用一份 ——
+    /// 它一旦失败就**不会**自己恢复，所以必须能一直报出来。
+    private static var bookUserStateSetupFailure: String?
 
     private func currentLocalContentDigest(
         localBookId: String,

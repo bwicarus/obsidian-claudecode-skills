@@ -4,6 +4,13 @@ import WebKit
 
 enum ReaderBookUserStateWebAdapterError: LocalizedError {
     case unavailable
+    /// 等本地接口超时,并**带上当时真正看到的东西**。
+    ///
+    /// ⚠ 这一档存在的理由:原来超时只报「尚未准备好」,而那句话对
+    /// 「脚本没跑」「页面不对」「在子框里」「跑了但半路抛了」一视同仁 ——
+    /// 四种完全不同的病因,同一句话,于是每次都只能靠猜。
+    /// 见 `references/silent-failure-lessons.md`「折成布尔前先报原始值」。
+    case unavailableDetailed(String)
     case untrustedDocument
     case contextChanged
     case invalidRequest
@@ -13,6 +20,8 @@ enum ReaderBookUserStateWebAdapterError: LocalizedError {
         switch self {
         case .unavailable:
             return "本机书籍数据桥尚未准备好"
+        case .unavailableDetailed(let observed):
+            return "本机书籍数据桥尚未准备好（\(observed)）"
         case .untrustedDocument:
             return "本机书籍数据桥拒绝了非本机阅读页"
         case .contextChanged:
