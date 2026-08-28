@@ -14,6 +14,13 @@ enum ReaderBookUserStateWebAdapterError: LocalizedError {
     case untrustedDocument
     case contextChanged
     case invalidRequest
+    /// 受信上下文没通过校验,**并带上当时真正看到的值**。
+    ///
+    /// ⚠ 2026-08-28:这里原来只抛 `.invalidRequest`,报出来是一句
+    /// 「本机书籍数据事务无效」—— 而它对「地址不对」「书 id 不对」
+    /// 一视同仁,也不说到底哪一项不对、看到的是什么。
+    /// 于是只能靠读代码猜,而猜一轮就是一个 TestFlight 来回。
+    case invalidTrustedContext(String)
     case invalidResponse
 
     var errorDescription: String? {
@@ -28,6 +35,8 @@ enum ReaderBookUserStateWebAdapterError: LocalizedError {
             return "读取期间已切换到另一本书，请重试"
         case .invalidRequest:
             return "本机书籍数据事务无效"
+        case .invalidTrustedContext(let observed):
+            return "本机阅读页地址没通过校验（\(observed)）"
         case .invalidResponse:
             return "本机书籍数据桥返回了无法验证的结果"
         }
@@ -52,9 +61,13 @@ final class ReaderBookUserStateWebAdapter: ReaderBookUserStateAtomicApplying {
         trustedBaseURL: URL,
         localBookId: String
     ) throws {
-        guard Self.validTrustedBaseURL(trustedBaseURL),
-              Self.validLocalBookId(localBookId) else {
-            throw ReaderBookUserStateWebAdapterError.invalidRequest
+        guard Self.validTrustedBaseURL(trustedBaseURL) else {
+            throw ReaderBookUserStateWebAdapterError
+                .invalidTrustedContext(Self.describeBaseURL(trustedBaseURL))
+        }
+        guard Self.validLocalBookId(localBookId) else {
+            throw ReaderBookUserStateWebAdapterError
+                .invalidTrustedContext("书 id 不合法：" + localBookId)
         }
         self.webView = webView
         self.trustedBaseURL = trustedBaseURL
@@ -346,6 +359,20 @@ final class ReaderBookUserStateWebAdapter: ReaderBookUserStateAtomicApplying {
         return number.int64Value
     }
 
+    /// 把地址拆成**逐项事实**。哪一项不对一眼就能看见 ——
+    /// 不要给一句"不合法"就完事，那等于没说。
+    private static func describeBaseURL(_ url: URL) -> String {
+        var parts: [String] = []
+        parts.append("scheme=" + (url.scheme ?? "无"))
+        parts.append("host=" + (url.host ?? "无"))
+        parts.append("port=" + (effectivePort(url).map(String.init) ?? "无"))
+        parts.append("path=" + url.path)
+        if url.query != nil { parts.append("有query") }
+        if url.fragment != nil { parts.append("有fragment") }
+        parts.append("期望port=\(Int(ReaderLocalRuntimeServer.port))")
+        return parts.joined(separator: " ")
+    }
+
     private static func validTrustedBaseURL(_ url: URL) -> Bool {
         guard url.scheme?.lowercased() == "http",
               url.host?.lowercased() == ReaderLocalRuntimeServer.host,
@@ -354,8 +381,18 @@ final class ReaderBookUserStateWebAdapter: ReaderBookUserStateAtomicApplying {
               url.password == nil,
               url.query == nil,
               url.fragment == nil,
+              // ⚠ 尾斜杠**可有可无**。
+              //
+              // baseURL 造出来时是带尾斜杠的（"…/r/<token>/"），但
+              // `URL.path` 在不同 Foundation 实现下对尾斜杠的处理**不一样**：
+              // 旧实现会把它去掉，swift-foundation 的新实现保留。
+              // 原来的正则硬要求那个斜杠 —— 在会去掉它的系统上，
+              // 这个适配器**永远建不起来**，于是每本书每次都失败。
+              //
+              // 这不是放松边界：`/r/<64位小写hex>` 这个集合本身没变，
+              // 变的只是不再依赖一个跨版本不稳定的表示细节。
               url.path.range(
-                of: #"^/r/[a-f0-9]{64}/$"#,
+                of: #"^/r/[a-f0-9]{64}/?$"#,
                 options: .regularExpression
               ) != nil else {
             return false
