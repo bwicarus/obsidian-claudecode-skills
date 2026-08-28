@@ -530,8 +530,20 @@ final class WatchVoiceCall: ObservableObject {
             teardown()
             return
         }
-        guard WKApplication.shared().applicationState == .active else {
-            phase = .ended(reason + "（回到 App 重新开始）")
+        // ⚠ **只在真的进了后台才拒绝,`.inactive` 要试。**
+        //
+        // 原来写的是 `== .active`,太严了:手表上**放下手腕、屏幕变暗**时状态
+        // 就是 `.inactive`,而通话时人多半正是放下手腕的 —— 也就是说自动重来
+        // 在真实场景里几乎永远不会触发(用户 2026-08-28 截图里那句
+        // 「回到 App 重新开始」就是这么来的)。
+        //
+        // 而 Apple 只说了**后台**不能重新激活录音,**没说 inactive 不行**。
+        // 我不该替它拒绝 —— **能试的别去推断**。试了失败会有明确的错误,
+        // 那比一个"其实可能成功却被我挡下"的沉默好得多。
+        let state = WKApplication.shared().applicationState
+        guard state != .background else {
+            phase = .ended(reason + "（App 在后台，watchOS 不允许重新激活录音"
+                           + "——抬腕回到 App 再打一次）")
             return
         }
         restartedOnce = true
