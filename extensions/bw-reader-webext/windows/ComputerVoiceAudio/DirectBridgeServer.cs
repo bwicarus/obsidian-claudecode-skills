@@ -637,6 +637,21 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-library/list",
             new[] { "POST", "OPTIONS" },
             context => HandleLibraryListAsync(context, serviceToken));
+        // 语音助手的主动提示板。它盯着 BoardPath 一个地方就够 ——
+        // 「现在该不该开口」在**这一侧**算好，它只照做。
+        // ⚠ GET 是唯一一条给它读的；notify 给生产方写；ack 只为量延迟和遗忘率。
+        app.MapMethods(
+            ReaderAttentionBoard.BoardPath,
+            new[] { "GET", "OPTIONS" },
+            context => HandleAttentionBoardAsync(context, serviceToken));
+        app.MapMethods(
+            ReaderAttentionBoard.NotifyPath,
+            new[] { "POST", "OPTIONS" },
+            context => HandleAttentionNotifyAsync(context, serviceToken));
+        app.MapMethods(
+            ReaderAttentionBoard.AckPath,
+            new[] { "GET", "POST", "OPTIONS" },
+            context => HandleAttentionAckAsync(context, serviceToken));
         app.MapFallback(context =>
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
@@ -1504,6 +1519,46 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             .ConfigureAwait(false);
     }
 
+    private async Task HandleAttentionBoardAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!PrepareOutputCors(context, "GET, OPTIONS")) return;
+        if (!HttpMethods.IsGet(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        await ReaderAttentionBoard
+            .WriteBoardAsync(context, serviceCancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task HandleAttentionNotifyAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!PrepareOutputCors(context, "POST, OPTIONS")) return;
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        await ReaderAttentionBoard
+            .AcceptNoticeAsync(context, serviceCancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task HandleAttentionAckAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!PrepareOutputCors(context, "GET, POST, OPTIONS")) return;
+        await ReaderAttentionBoard
+            .WriteAckAsync(context, serviceCancellationToken)
+            .ConfigureAwait(false);
+    }
+
     private async Task HandleOutputReceiptAsync(
         HttpContext context,
         CancellationToken serviceCancellationToken)
@@ -1811,6 +1866,17 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     serviceCancellationToken).ConfigureAwait(false);
                 appliedRevision = result.Revision;
                 applied += 1;
+                // 提示板只要「人在哪儿」，**不要正文**。
+                // DocumentKey 当身份（稳定），Title/Url 只作显示（会变）。
+                // 是不是一次注意力转移由板子自己判（停留门槛 + 迟滞），
+                // 这里不做判断 —— 每一帧都报，让判据只有一处。
+                ReaderAttentionBoard.NoteLocation(
+                    viewport.DocumentKey,
+                    string.IsNullOrWhiteSpace(viewport.Title)
+                        ? viewport.Url
+                        : viewport.Title,
+                    viewport.Url,
+                    DateTimeOffset.UtcNow);
             }
             if (documentValue is JsonElement documentEntryValue)
             {

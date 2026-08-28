@@ -25,6 +25,7 @@ internal static class ContractSelfTest
         CodexVoiceActivitySelfTest.Run(checks);
         CodexVoiceHistorySelfTest.Run(checks);
         DirectBridgeSelfTest.Run(checks);
+        ReaderAttentionBoardSelfTest.Run(checks);
         DisconnectCleanupWatchdogSelfTest.Run(checks);
 
         return new
