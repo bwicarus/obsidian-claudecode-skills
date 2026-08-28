@@ -1443,11 +1443,38 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         guard pending.contentSha256 == digest else {
             throw ReaderBookUserStatePendingImportError.contentVersionMismatch
         }
-        guard generation == bookUserStateContextGeneration,
-              currentLocalBook?.id == pending.localBookId,
-              let coordinator = bookUserStateCoordinator,
-              let adapter = bookUserStateWebAdapter else {
-            throw ReaderBookUserStateWebAdapterError.unavailable
+        // ⚠ 这四个条件**必须分开报**。
+        //
+        // 它们此前挤在一个 guard 里共用一句「尚未准备好」——
+        // 2026-08-28 就栽在这:我给等待循环加了详细诊断,结果横幅一字未变,
+        // 因为真正抛错的是**这里**,而这里抛的是光秃秃的 .unavailable。
+        // 「加了诊断却什么都没变」本身花掉了一整个 TestFlight 来回。
+        //
+        // 而且这四条指向完全不同的下一步：
+        //   前两条 = 期间换了书/换了上下文（正常，重开即可）
+        //   后两条 = **App 启动时就初始化失败了**，它不会自愈，
+        //            所以每本书每次都失败 —— 正是本次的现象。
+        guard generation == bookUserStateContextGeneration else {
+            throw ReaderBookUserStateWebAdapterError
+                .unavailableDetailed("期间切换过阅读上下文")
+        }
+        guard currentLocalBook?.id == pending.localBookId else {
+            throw ReaderBookUserStateWebAdapterError.unavailableDetailed(
+                "当前书跟暂存包对不上（当前 "
+                + (currentLocalBook?.id ?? "无")
+                + "，包里 " + pending.localBookId + "）")
+        }
+        guard let coordinator = bookUserStateCoordinator else {
+            throw ReaderBookUserStateWebAdapterError.unavailableDetailed(
+                "打包协调器没建起来"
+                + (Self.bookUserStateSetupFailure.map { "：" + $0 }
+                   ?? "（启动时没记下原因）"))
+        }
+        guard let adapter = bookUserStateWebAdapter else {
+            throw ReaderBookUserStateWebAdapterError.unavailableDetailed(
+                "写入适配器没建起来"
+                + (Self.bookUserStateSetupFailure.map { "：" + $0 }
+                   ?? "（启动时没记下原因）"))
         }
         try await verifyCurrentBookUserStateAccountScope(
             pending,
@@ -1631,6 +1658,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// App 启动时适配器初始化失败的原因。整个进程共用一份 ——
     /// 它一旦失败就**不会**自己恢复，所以必须能一直报出来。
     private static var bookUserStateSetupFailure: String?
+
+    /// 这次跑的是哪个 build。用来分辨「诊断没生效」和「新版没装上」。
+    static let bundleBuildNumber =
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion")
+            as? String ?? "?"
 
     private func currentLocalContentDigest(
         localBookId: String,
@@ -2222,8 +2254,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             deferredBookUserStateMessage = (message, isError)
             return
         }
+        // ⚠ 横幅带上 build 号。
+        //
+        // 2026-08-28 的教训:我加了诊断、发了新版,横幅**一字未变** ——
+        // 那一刻有两种解释:「诊断没打到点上」和「新版根本没装上」,
+        // 而它们指向完全相反的下一步。当时分不开,白花了一个来回。
+        // 一个 build 号就能永久消灭这个歧义,代价是几个字符。
         let payload: [String: Any] = [
-            "message": String(message.prefix(1_000)),
+            "message": "[b\(Self.bundleBuildNumber)] "
+                + String(message.prefix(1_000)),
             "isError": isError,
         ]
         guard JSONSerialization.isValidJSONObject(payload),
