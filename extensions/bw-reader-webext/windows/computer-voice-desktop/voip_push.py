@@ -54,7 +54,18 @@ TOKEN_FILE_NAME = "voip-token.json"
 CALL_STATE_FILE_NAME = "voip-calls.json"
 HANGUP_FILE_NAME = "voip-hangup.json"
 
-MISC_NOTIFICATION_ID = "misc"
+#: 待办以外的电话用这个保留号（用户 2026-08-29 要的那个"特别的号码"）。
+#:
+#: ⚠ 它跟真待办的区别只有一条：**不做自动降级**（没有待办可降），
+#: 也不被对账循环碰。重拨逻辑照旧 —— 没人接还是值得再打一次。
+#:
+#: ⚠ 必须跟 replication_apply._MISC_CALL_ID 一致。两边写岔的话，
+#: misc 通话会被当成"某条不存在的待办"，记录每轮被删一次，
+#: 而正阻塞着等结局的这个进程会读不到，当成没人接再打一遍 ——
+#: 一通凭空多出来的电话，且没有任何一处报错。
+MISC_CALL_ID = "misc"
+
+_NTF_ID_PREFIX = "ntf-"
 
 # 一通电话响多久算"没人接"。CallKit 的响铃周期约 30-45 秒，
 # 留出余量再加上回报的往返。
@@ -224,6 +235,26 @@ def _wait_for_outcome(ntf_id: str, after_ms: int, deadline: float) -> str:
     return "unanswered"
 
 
+def _require_valid_ntf(ntf_id: str) -> str:
+    """`--ntf` 只接受两种取值。
+
+    ⚠ 写错一个字的后果是**静默的**：电话照样打得出去、照样响，但结局会被
+    记到一条不存在的待办上 —— 于是拒接不降级、没接不重拨，而没有一处报错。
+    与其让它错得无声无息，不如在这里就停下。
+    """
+    value = (ntf_id or "").strip()
+    if value == MISC_CALL_ID:
+        return value
+    if value.startswith(_NTF_ID_PREFIX) and len(value) > len(_NTF_ID_PREFIX):
+        return value
+    raise VoipPushError(
+        "--ntf 只接受两种：真待办的编号（ntf-… ，用 "
+        "replication_notifications.py list 查），或待办以外的电话用保留号 "
+        "%r。收到 %r。\n"
+        "⚠ 它是必填的：有了它，接听状态才能自动回落到那条待办上"
+        "（拒接→降级、没接→重拨）。" % (MISC_CALL_ID, ntf_id))
+
+
 def place_call(root: Path, ntf_id: str, title: str,
                reason: str = "") -> dict[str, Any]:
     """打电话并**等到有终局为止**。这是给语音 AI 用的那一个。
@@ -235,6 +266,7 @@ def place_call(root: Path, ntf_id: str, title: str,
     ⚠ 重拨不返回给调用方：从第一次拨打、到等待、到第二次拨打，
     调用方就是在等这一个进程（用户 2026-08-29 明说）。
     """
+    ntf_id = _require_valid_ntf(ntf_id)
     attempts = 0
     while True:
         attempts += 1
@@ -286,8 +318,9 @@ def main() -> int:
     call = sub.add_parser("call", help="打电话并等到有结果（阻塞）")
     call.add_argument(
         "--ntf", required=True,
-        help="为哪条待办打的（ntf-…）。**必填** —— 有了它，接听状态才能"
-             "自动回落到那条待办。待办以外的电话用保留号 misc")
+        help="为哪条待办打的。**必填**,两种取值:真待办编号 ntf-… ,"
+             "或待办以外的电话用保留号 misc。有了它,接听状态才能自动回落到"
+             "那条待办上(拒接→降级、没接→重拨)")
     call.add_argument("--title", required=True, help="来电界面上显示的一句话")
     call.add_argument("--reason", default="")
 

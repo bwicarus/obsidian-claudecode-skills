@@ -107,3 +107,50 @@ class VoipFollowupTests(unittest.TestCase):
         replication_apply._voip_followup(self.store, self.root)
         self.assertNotIn(
             self.item["id"], replication_apply._load_call_state(self.root))
+
+
+class MiscCallIdTests(unittest.TestCase):
+    """待办以外的电话用保留号 misc（用户 2026-08-29 要的"特别的号码"）。
+
+    ⚠ 它跟真待办只差一条：**不做自动降级**（没有待办可降）。
+    但更要紧的是跟进循环**必须完全不碰它** —— misc 永远不在 live 里，
+    落进"待办已完成"那条分支就会被每轮删掉一次，而 voip_push 正阻塞着
+    等这条记录：删早了它读不到结局，当成没人接再打一遍。
+    那是一通凭空多出来的电话，且没有任何一处会报错。
+    """
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp())
+        self.store = NotificationStore(self.root)
+        self._saved_profile = os.environ.get("USERPROFILE")
+        os.environ["USERPROFILE"] = str(self.root)
+
+    def tearDown(self) -> None:
+        if self._saved_profile is None:
+            os.environ.pop("USERPROFILE", None)
+        else:
+            os.environ["USERPROFILE"] = self._saved_profile
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_misc_record_survives_followup(self) -> None:
+        replication_apply._save_call_state(self.root, {
+            replication_apply._MISC_CALL_ID: {
+                "outcome": "unanswered", "attempts": 1,
+                "lastAtUtcMs": int(time.time() * 1000),
+            }
+        })
+        replication_apply._voip_followup(self.store, self.root)
+        calls = replication_apply._load_call_state(self.root)
+        self.assertIn(
+            replication_apply._MISC_CALL_ID, calls,
+            "misc 的通话记录被跟进循环删掉了 —— 等结局的进程会读不到")
+        self.assertEqual(
+            calls[replication_apply._MISC_CALL_ID]["outcome"], "unanswered",
+            "misc 不该被自动降级：它没有待办可降")
+
+    def test_both_sides_agree_on_the_reserved_id(self) -> None:
+        # ⚠ 两边写岔的话，misc 通话会被当成"某条不存在的待办"。
+        # 这条断言就是为了让那种写岔当场失败，而不是几天后在电话上显形。
+        import voip_push
+        self.assertEqual(
+            replication_apply._MISC_CALL_ID, voip_push.MISC_CALL_ID)

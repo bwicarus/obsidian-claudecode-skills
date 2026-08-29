@@ -657,6 +657,11 @@ def export_replication_digests(
 
 _CALL_STATE_FILE_NAME = "voip-calls.json"
 
+# 待办以外的电话用这个保留号（用户 2026-08-29：「给他一个特别的号码用来
+# 处理待办以外的电话需求」）。⚠ 必须跟 voip_push.MISC_CALL_ID 一致 ——
+# 两边写岔的话，misc 通话会被当成"某条不存在的待办"，每轮被删一次。
+_MISC_CALL_ID = "misc"
+
 # 没人接 → 隔多久再打一次。只再打**一次**（用户 2026-08-29 定的）。
 _RETRY_AFTER_SECONDS = 5 * 60
 
@@ -724,6 +729,14 @@ def _voip_followup(store: Any, root: Path) -> int:
     live = {item["id"] for item in store.open_items()}
     changed = 0
     for ntf_id, record in list(calls.items()):
+        if ntf_id == _MISC_CALL_ID:
+            # ⚠ **待办以外的电话，跟进循环一律不碰。**
+            #
+            # 它没有待办可降级；更要紧的是：misc 永远不在 live 里，
+            # 落到下面那条就会被**每轮删掉一次** —— 而 voip_push 正阻塞着
+            # 等这条记录，删早了它就读不到结局，当成"没人接"再打一遍。
+            # 那是一通凭空多出来的电话，且没有任何一处会报错。
+            continue
         if ntf_id not in live:
             # 待办已经完成/取消 —— 跟进没有意义了。
             calls.pop(ntf_id, None)
