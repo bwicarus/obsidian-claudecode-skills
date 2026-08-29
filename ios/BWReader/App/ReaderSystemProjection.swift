@@ -268,33 +268,72 @@ final class ReaderSystemProjection {
         let liveIds = Set(items.map(\.id))
         var resolved: [String] = []
 
-        // 勾选回流 + 真值退场清理。
-        for (ntfId, reminderId) in map {
-            guard let reminder = eventStore.calendarItem(
-                withIdentifier: reminderId) as? EKReminder else {
-                map.removeValue(forKey: ntfId)
-                continue
+        // ⚠ **先扫一遍苹果那边，用提醒自带的标记重建对应关系。**
+        //
+        // 2026-08-29 实锤：每条待办在提醒事项里出现了 **3 份**。
+        // 根因不是 upsert 写错了，是**认领方式错了** —— 去重完全依赖
+        // UserDefaults 里那张 ntfId→reminderId 的表，而：
+        //
+        //   提醒事项活在 iCloud 里，**重装 App 不会带走它们**；
+        //   UserDefaults 会被重装清空。
+        //
+        // 于是每重装一次，旧提醒还在、表没了，下一轮就照着"没有"再建一份。
+        // 用户前几天 iPad 卡死后重装过 —— 那几份就是这么来的。
+        //
+        // 真值在苹果那边，所以认领也必须以苹果那边为准：每条提醒带一个
+        // `bwreader://ntf/<id>` 的 url 标记，每轮扫描重建映射。
+        // 这样重装后自愈，而且能把已经产生的重复收拾掉。
+        var byMarker: [String: [EKReminder]] = [:]
+        for reminder in await fetchReminders(in: calendar) {
+            guard let ntfId = Self.markerId(of: reminder) else { continue }
+            byMarker[ntfId, default: []].append(reminder)
+        }
+        // 同一个 id 多份 → 留一份，其余删掉（**修复存量重复**）。
+        for (ntfId, duplicates) in byMarker where duplicates.count > 1 {
+            for extra in duplicates.dropFirst() {
+                try? eventStore.remove(extra, commit: false)
             }
+            byMarker[ntfId] = [duplicates[0]]
+        }
+
+        // 勾选回流 + 真值退场清理。
+        // 以扫描结果为主、旧映射为辅 —— 旧映射只用来认领**还没有标记**的
+        // 存量提醒（它们是这次改动之前建的）。
+        var claimed: [String: EKReminder] = [:]
+        for (ntfId, list) in byMarker {
+            claimed[ntfId] = list[0]
+        }
+        for (ntfId, reminderId) in map where claimed[ntfId] == nil {
+            if let reminder = eventStore.calendarItem(
+                withIdentifier: reminderId) as? EKReminder {
+                claimed[ntfId] = reminder
+            }
+        }
+        map = [:]
+        for (ntfId, reminder) in claimed {
             if !liveIds.contains(ntfId) {
                 // Windows 侧已 resolve/cancel/expire → 显示副本退场。
                 try? eventStore.remove(reminder, commit: false)
-                map.removeValue(forKey: ntfId)
-            } else if reminder.isCompleted {
+                continue
+            }
+            if reminder.isCompleted {
                 resolved.append(ntfId)
             }
+            map[ntfId] = reminder.calendarItemIdentifier
         }
         // upsert（用户已勾完成的不重建 —— 等回流让真值先退场）。
         for item in items.prefix(Self.maximumItems)
             where !resolved.contains(item.id) {
             let reminder: EKReminder
-            if let existingId = map[item.id],
-               let existing = eventStore.calendarItem(
-                   withIdentifier: existingId) as? EKReminder {
+            if let existing = claimed[item.id] {
                 reminder = existing
             } else {
                 reminder = EKReminder(eventStore: eventStore)
                 reminder.calendar = calendar
             }
+            // 每次都盖一遍标记：存量提醒（改动之前建的）也就此获得身份，
+            // 下一轮起就不再依赖那张会被重装清空的表。
+            reminder.url = Self.marker(for: item.id)
             reminder.title = item.title
             reminder.notes = item.body.isEmpty ? nil : item.body
             // 优先级：赶车/行程这类错过就没意义的排高，其余中等。
@@ -357,6 +396,32 @@ final class ReaderSystemProjection {
         defaults?.set(map, forKey: mapKey)
         return (resolved,
                 failures > 0 ? "partial:" + String(failures) : "projected")
+    }
+
+    /// 提醒自带的身份标记。**这是重装之后还能认出自己人的唯一依据** ——
+    /// UserDefaults 会被重装清空，iCloud 里的提醒不会。
+    private static func marker(for ntfId: String) -> URL? {
+        URL(string: "bwreader://ntf/" + ntfId)
+    }
+
+    private static func markerId(of reminder: EKReminder) -> String? {
+        guard let url = reminder.url,
+              url.scheme == "bwreader",
+              url.host == "ntf" else { return nil }
+        let id = url.path.hasPrefix("/")
+            ? String(url.path.dropFirst()) : url.path
+        return id.isEmpty ? nil : id
+    }
+
+    /// 把我们那个列表里的提醒全取出来。
+    /// ⚠ EventKit 这个查询只有回调版，没有 async 版，所以这里桥一下。
+    private func fetchReminders(in calendar: EKCalendar) async -> [EKReminder] {
+        let predicate = eventStore.predicateForReminders(in: [calendar])
+        return await withCheckedContinuation { continuation in
+            eventStore.fetchReminders(matching: predicate) { found in
+                continuation.resume(returning: found ?? [])
+            }
+        }
     }
 
     private func ensureCalendar() -> EKCalendar? {

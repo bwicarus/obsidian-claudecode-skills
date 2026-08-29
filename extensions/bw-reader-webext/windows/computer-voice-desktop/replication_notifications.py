@@ -168,6 +168,7 @@ class NotificationStore:
         due_at_ms: int | None = None,
         place: dict[str, Any] | None = None,
         audience: str = "ai",
+        never_ends: bool = False,
     ) -> dict[str, Any]:
         with self._locked():
             if not kind or len(kind) > 40 or not title:
@@ -191,6 +192,35 @@ class NotificationStore:
                         "带 --due-at 的条目必须 --audience user："
                         "设备侧的通知/闹钟只投影用户方向的条目，"
                         "ai 方向的到点时刻没有任何消费端")
+            # 「创建成功、永远不会结束」—— 跟上面那三条同族的第四种
+            # （2026-08-29 实锤）：08-27 和 08-28 的垃圾提醒到 08-29 还挂在
+            # 提醒事项里，因为它们 autoResolve / dueAt / expiresAt **全是
+            # null**。带 place 只决定"什么时候提醒"，不决定"什么时候结束"，
+            # 而这两件事看起来很像，最容易被当成一件。
+            #
+            # 建条目的人（AI）不会注意到自己漏了终止条件，链路上也没有
+            # 任何一处会报错 —— 症状要过几天、待办堆起来了才显形。
+            # 所以在**创建的那一刻**就拦住，并且把可选项列出来让他挑。
+            #
+            # ⚠ **只管 audience=user。** 我第一版对全部条目都拦，当场挂掉
+            # 12 个既有用例 —— 那说明"没有终止条件"对系统/AI 方向的条目
+            # 是**正常**的：它们靠同 dedupe_key 覆盖、靠下一轮对账退场，
+            # 本来就不需要谁去结束。真正会堆起来的是**要人去做**的那些，
+            # 因为只有人做完了才算完，而人不会记得回来销账。
+            if (
+                audience == "user"
+                and due_at_ms is None
+                and expires_at_ms is None
+                and auto_resolve is None
+                and not never_ends
+            ):
+                raise NotificationError(
+                    "这个条目没有任何终止条件，会永远挂着。四选一：\n"
+                    "  --due-at      到点就该做的事\n"
+                    "  --expires-at  过了这个时刻就不用做了（垃圾回收日这种）\n"
+                    "  --auto-resolve 满足条件自动完成（%s）\n"
+                    "  --never-ends  确实要一直留着（明知而选）"
+                    % (", ".join(_AUTO_TYPES),))
             if auto_resolve is not None:
                 if (
                     not isinstance(auto_resolve, dict)

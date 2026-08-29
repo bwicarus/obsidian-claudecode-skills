@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import time
@@ -262,7 +263,7 @@ class AudienceSplitTests(unittest.TestCase):
     def test_projections_split_by_audience(self) -> None:
         ai = self.store.create(kind="review-due", title="该提醒复习了")
         user = self.store.create(kind="task-report", title="X 已更新",
-                                 audience="user")
+                                 audience="user", never_ends=True)
         snap = self.root / "notifications-open.json"
         tab = self.root / "notifications-user.json"
         self.store.export_open(snap)
@@ -307,7 +308,7 @@ class DueAtTests(unittest.TestCase):
             "表现是「校验全过就是不响」")
 
     def test_missing_due_at_exports_as_null(self) -> None:
-        self.store.create(kind="user-todo", title="倒垃圾", audience="user")
+        self.store.create(kind="user-todo", title="倒垃圾", audience="user", never_ends=True)
         tab = self.root / "notifications-user.json"
         self.store.export_user_open(tab)
         exported = json.loads(tab.read_text("utf-8"))["items"][0]
@@ -396,14 +397,14 @@ class PlaceBindingTests(unittest.TestCase):
     def test_place_stored_by_name_not_coordinates(self) -> None:
         item = self.store.create(
             kind="user-todo", title="倒垃圾", audience="user",
-            place={"name": "家", "proximity": "enter"})
+            place={"name": "家", "proximity": "enter"}, never_ends=True)
         self.assertEqual(item["place"], {"name": "家", "proximity": "enter"},
                          "真值表里不该有坐标")
 
     def test_export_resolves_coordinates(self) -> None:
         self._name_place("家", 35.6586, 139.7454)
         self.store.create(kind="user-todo", title="倒垃圾", audience="user",
-                          place={"name": "家", "proximity": "enter"})
+                          place={"name": "家", "proximity": "enter"}, never_ends=True)
         out = self.root / "notifications-user.json"
         self.store.export_user_open(out)
         place = json.loads(out.read_text("utf-8"))["items"][0]["place"]
@@ -419,7 +420,7 @@ class PlaceBindingTests(unittest.TestCase):
         没有坐标的半截对象让下游去猜。"""
         self.store.create(kind="user-todo", title="买菜", audience="user",
                           place={"name": "还没命名过的地方",
-                                 "proximity": "enter"})
+                                 "proximity": "enter"}, never_ends=True)
         out = self.root / "notifications-user.json"
         self.store.export_user_open(out)
         self.assertIsNone(
@@ -429,7 +430,7 @@ class PlaceBindingTests(unittest.TestCase):
         with self.assertRaises(NotificationError):
             self.store.create(kind="user-todo", title="方向错了",
                               audience="ai",
-                              place={"name": "家", "proximity": "enter"})
+                              place={"name": "家", "proximity": "enter"}, never_ends=True)
 
     def test_bad_proximity_rejected(self) -> None:
         with self.assertRaises(NotificationError):
@@ -441,7 +442,7 @@ class PlaceBindingTests(unittest.TestCase):
         """坐标不进真值表的好处:地点被移动/重命名后,已有的提醒自动跟上。"""
         self._name_place("家", 35.0, 139.0)
         self.store.create(kind="user-todo", title="倒垃圾", audience="user",
-                          place={"name": "家", "proximity": "enter"})
+                          place={"name": "家", "proximity": "enter"}, never_ends=True)
         self._name_place("家", 36.0, 140.0)   # 用户重新标定了「家」
         out = self.root / "notifications-user.json"
         self.store.export_user_open(out)
@@ -523,3 +524,48 @@ class ArrivalAutoResolveTests(unittest.TestCase):
             self.store.create(
                 kind="trip", title="回没命名过的地方", audience="user",
                 auto_resolve={"type": "place-arrived", "place": "月球"})
+
+
+class TerminationGuardTests(unittest.TestCase):
+    """「创建成功、永远不会结束」—— 跟到点那三条同族的第四种。
+
+    2026-08-29 实锤：08-27 / 08-28 的垃圾提醒到 08-29 还挂在提醒事项里，
+    因为 autoResolve / dueAt / expiresAt 全是 null。带 place 只决定
+    **什么时候提醒**，不决定**什么时候结束** —— 这两件事看起来很像。
+    """
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp())
+        self.store = NotificationStore(self.root)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_user_todo_without_any_termination_is_refused(self) -> None:
+        with self.assertRaises(NotificationError) as e:
+            self.store.create(
+                kind="user-todo", title="倒垃圾", audience="user")
+        # 报错必须**能照做**：把四个可选项列出来，而不是只说"无效"。
+        message = str(e.exception)
+        for option in ("--due-at", "--expires-at",
+                       "--auto-resolve", "--never-ends"):
+            self.assertIn(option, message)
+
+    def test_each_termination_option_is_accepted(self) -> None:
+        future = _now_ms() + 3600 * 1000
+        self.store.create(kind="trip", title="A", audience="user",
+                          due_at_ms=future)
+        self.store.create(kind="user-todo", title="B", audience="user",
+                          expires_at_ms=future)
+        self.store.create(kind="user-todo", title="C", audience="user",
+                          auto_resolve={"type": "item-mutated"})
+        self.store.create(kind="user-todo", title="D", audience="user",
+                          never_ends=True)
+        self.assertEqual(len(list(self.store.open_items())), 4)
+
+    def test_ai_audience_is_not_affected(self) -> None:
+        # ⚠ 负对照：系统/AI 方向的条目**本来就**不需要终止条件
+        # （靠同 dedupe_key 覆盖、靠下一轮对账退场）。第一版我对全部条目
+        # 都拦，当场挂掉 12 个既有用例 —— 那正是这条边界的证据。
+        self.store.create(kind="hint", title="随便", audience="ai")
+        self.assertEqual(len(list(self.store.open_items())), 1)
