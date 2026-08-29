@@ -28,6 +28,13 @@ final class NativeAudioEngine {
     }
 
     static let sampleRate: Double = 48_000
+
+    /// 现在是不是在一通 CallKit 通话里。
+    ///
+    /// ⚠ 通话期间**系统拥有音频会话**，我们不能自己 setCategory/setActive。
+    /// 由 ReaderVoipCall 在接通/结束时翻这个牌子 —— 只用一个布尔，
+    /// 是因为同时只可能有一通电话（provider 配置里 maximumCallGroups = 1）。
+    static var isUnderSystemCall = false
     static let samplesPerFrame = 960
     static let maximumScheduledFrames = 20
 
@@ -173,14 +180,26 @@ final class NativeAudioEngine {
         }
 
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(
-            .playAndRecord,
-            mode: .voiceChat,
-            options: [.allowBluetoothHFP, .defaultToSpeaker]
-        )
+        // ⚠ **CallKit 通话里不要自己配会话。**
+        //
+        // 通话期间系统才是音频会话的主人：它已经把 category/mode 设好，
+        // 并会在 `provider(_:didActivate:)` 里把会话交给我们。这时再
+        // setCategory / setActive 就是跟它抢 —— 表现是没声音或刚起就断，
+        // 而这两种表现跟"麦克风坏了"看起来一模一样，会把人带去查错方向。
+        //
+        // 采样率和缓冲照样提：那只是偏好，系统会按通话的约束去裁。
+        if !NativeAudioEngine.isUnderSystemCall {
+            try session.setCategory(
+                .playAndRecord,
+                mode: .voiceChat,
+                options: [.allowBluetoothHFP, .defaultToSpeaker]
+            )
+        }
         try session.setPreferredSampleRate(Self.sampleRate)
         try session.setPreferredIOBufferDuration(0.02)
-        try session.setActive(true)
+        if !NativeAudioEngine.isUnderSystemCall {
+            try session.setActive(true)
+        }
         var startCompleted = false
         defer {
             if !startCompleted {

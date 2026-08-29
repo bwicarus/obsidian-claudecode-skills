@@ -1,3 +1,4 @@
+import AVFoundation
 import CallKit
 import Foundation
 import PushKit
@@ -84,6 +85,11 @@ final class ReaderVoipCall: NSObject {
     }
 
     private var hangupWatch: Task<Void, Never>?
+
+    /// 通话音频就绪 / 结束时要做什么。由 App 在启动时接上既有的语音桥 ——
+    /// 这个文件不直接引用桥，免得它跟着语音那一大套一起长。
+    var onCallAudioReady: (() async -> Void)?
+    var onCallAudioEnded: (() async -> Void)?
 
     /// 通话期间盯着"该挂了吗"。
     ///
@@ -267,6 +273,39 @@ extension ReaderVoipCall: CXProviderDelegate {
             await ReaderVoipOutcomeUpload.send(outcome: outcome)
             call.currentNotificationId = nil
             action.fulfill()
+        }
+    }
+
+    /// 通话音频**真正可用**的那一刻。
+    ///
+    /// ⚠ 不是 CXAnswerCallAction，是 `provider(_:didActivate:)`。
+    /// CallKit 通话里**系统才是音频会话的主人** —— 我们自己
+    /// `setCategory`/`setActive` 会跟它打架（表现是没声音或立刻断，
+    /// 而两者看起来一样）。所以接通后要等这一下，再起语音链路。
+    ///
+    /// 起的是**跟平时完全一样的那条链路**（用户 2026-08-29：「其实电脑那边
+    /// 要做的是一样的事，只是这回设备端是电话接听的方式」）——
+    /// 不为电话另造一套上层。
+    nonisolated func provider(
+        _ provider: CXProvider,
+        didActivate audioSession: AVAudioSession
+    ) {
+        Task { @MainActor in
+            // ⚠ **先翻牌子再起音频**：音频引擎据此不去动会话。
+            // 顺序反了就有一瞬间跟系统抢，而那一瞬间足以让通话哑掉。
+            NativeAudioEngine.isUnderSystemCall = true
+            ReaderVoipCall.shared.status = "通话音频已就绪"
+            await ReaderVoipCall.shared.onCallAudioReady?()
+        }
+    }
+
+    nonisolated func provider(
+        _ provider: CXProvider,
+        didDeactivate audioSession: AVAudioSession
+    ) {
+        Task { @MainActor in
+            await ReaderVoipCall.shared.onCallAudioEnded?()
+            NativeAudioEngine.isUnderSystemCall = false
         }
     }
 

@@ -49,6 +49,18 @@ final class BWReaderAppDelegate: NSObject, UIApplicationDelegate {
         // ⚠ 晚注册 = token 迟迟拿不到，而没有 token 就永远打不进来 ——
         // 且这个失败完全静默：发送方推了、APNs 收下了、设备上什么也没发生。
         Task { @MainActor in ReaderVoipCall.shared.start() }
+        // 接通之后走**跟平时完全一样的那条语音链路**
+        // （用户 2026-08-29：「其实电脑那边要做的是一样的事，
+        //   只是这回设备端是电话接听的方式」）—— 不为电话另造上层。
+        //
+        // ⚠ 接的是 `didActivate` 而不是"接听"那一刻：CallKit 通话里
+        // 系统才是音频会话的主人，早一步起音频就是跟它抢。
+        ReaderVoipCall.shared.onCallAudioReady = { [weak voiceBridge] in
+            await voiceBridge?.start()
+        }
+        ReaderVoipCall.shared.onCallAudioEnded = { [weak voiceBridge] in
+            await voiceBridge?.stop()
+        }
         // ⚠ 启动时看一眼本地缓存有没有胀大。
         // 2026-08-28:页图带着一年 immutable 缓存头,整本预热又渲染每一页、
         // 每页多个宽度 —— 涨到 54 GB 把 IndexedDB 配额撑爆,表现是
@@ -283,6 +295,21 @@ private struct ReaderRootView: View {
         }
         .onChange(of: voiceBridge.state) { _, _ in
             ReaderWatchLink.shared.voiceStatusChanged()
+        }
+        .task {
+            // 电话接通后走**跟平时完全一样的那条语音链路**
+            // （用户 2026-08-29：「其实电脑那边要做的是一样的事，
+            //   只是这回设备端是电话接听的方式」）—— 不为电话另造上层。
+            //
+            // ⚠ 挂的是 `didActivate` 而不是"接听"那一刻：CallKit 通话里
+            // **系统才是音频会话的主人**，早一步起音频就是跟它抢，
+            // 而抢的结果（没声音 / 刚起就断）跟"麦克风坏了"看起来一样。
+            ReaderVoipCall.shared.onCallAudioReady = { [weak voiceBridge] in
+                await voiceBridge?.start()
+            }
+            ReaderVoipCall.shared.onCallAudioEnded = { [weak voiceBridge] in
+                await voiceBridge?.stop()
+            }
         }
         .task {
             while !Task.isCancelled {
