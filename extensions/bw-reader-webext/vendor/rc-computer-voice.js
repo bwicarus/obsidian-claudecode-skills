@@ -5257,23 +5257,36 @@ if (window.__bwPwaProviderOnly) return;
           var hasDue = syncedItems.some(function (one) {
             return one && one.dueAtUtcMs;
           });
-          if (!alarmNoticeShown && hasDue) {
+          // ⚠ **权限类的原因跟有没有到点时刻无关。**
+          //
+          // 原来整段都被 hasDue 挡着。而现实里的待办（比如倒垃圾）
+          // dueAtUtcMs 是 null —— 于是"提醒事项权限没给"这条永远不显示，
+          // 用户看到的就是**什么都没发生、也没有任何解释**
+          // （2026-08-29 实锤：两条待办没建出苹果提醒，查了一路才发现
+          // 诊断其实早就算好了，只是被这个条件挡住了）。
+          //
+          // 只有"到点才生效"的那两条（本地到点通知、系统闹钟）
+          // 才该跟着 hasDue 走。
+          if (!alarmNoticeShown && syncedItems.length) {
             var reasons = [];
-            if (/notifications=denied/.test(rev)) {
+            if (/reminders=(denied|calendar-unavailable)/.test(rev)) {
+              reasons.push('提醒事项权限没给（不会同步到苹果提醒，'
+                + '去 设置 → BWReader → 提醒事项 打开）');
+            }
+            if (hasDue && /notifications=denied/.test(rev)) {
               reasons.push('通知权限被拒（到点通知不会响，去设置里打开）');
             }
-            if (/reminders=(denied|calendar-unavailable)/.test(rev)) {
-              reasons.push('提醒事项权限没给（不会同步到苹果提醒）');
-            }
-            if (/alarms=(unsupported-os|sdk-unavailable)/.test(rev)) {
-              reasons.push('系统闹钟需要 iPadOS 26');
-            } else if (/alarms=denied/.test(rev)) {
-              reasons.push('闹钟权限被拒');
+            if (hasDue) {
+              if (/alarms=(unsupported-os|sdk-unavailable)/.test(rev)) {
+                reasons.push('系统闹钟需要 iPadOS 26');
+              } else if (/alarms=denied/.test(rev)) {
+                reasons.push('闹钟权限被拒');
+              }
             }
             if (reasons.length) {
               alarmNoticeShown = true;
               if (RC && typeof RC.toast === 'function') {
-                RC.toast('到点提醒：' + reasons.join('；'));
+                RC.toast('待办提醒：' + reasons.join('；'));
               }
             }
           }
