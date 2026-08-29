@@ -219,12 +219,39 @@ extension ReaderVoipCall: CXProviderDelegate {
         _ provider: CXProvider,
         perform action: CXAnswerCallAction
     ) {
-        // 接通 —— 把已有的语音通道接起来，AI 那边收到"已接通"就开始说。
+        // ⚠⚠ **必须在 fulfill 之前把音频会话配好** —— 这是 CallKit 的规矩，
+        // 不是可选步骤。
+        //
+        // 没配就 fulfill 的话，系统**不会回调 `didActivate`**。而我们起
+        // 语音链路正挂在 didActivate 上 —— 于是它从没被调用过，
+        // voiceBridge.start() 也从没跑过，桥那边 state 一直是 idle、
+        // 连一条失败记录都没有。
+        //
+        // 现象是「电话通了、能听见 AI，但声音还在电脑上」：CallKit 那一侧
+        // 一切正常，只有该切音频的那一步整个没发生。2026-08-29 为此白查了
+        // 三轮 —— 每一轮都在找"谁把它挡回去了"，而真相是它压根没被调起。
+        //
+        // ⚠ 这里只 setCategory，**不要 setActive** —— 通话期间会话由系统
+        // 激活（就是 didActivate 那一下）。自己激活就是跟它抢。
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(
+                .playAndRecord,
+                mode: .voiceChat,
+                options: [.allowBluetoothHFP])
+        } catch {
+            // 配不上也要继续 fulfill：不 fulfill 的话通话会卡在"接通中"，
+            // 那比没有声音更糟。原因留在状态里。
+            Task { @MainActor in
+                ReaderVoipCall.shared.status =
+                    "音频会话配置失败：" + error.localizedDescription
+            }
+        }
         Task { @MainActor in
             NotificationCenter.default.post(
                 name: ReaderVoipCall.answeredNotification, object: nil)
             ReaderVoipCall.shared.answeredAt = Date()
-            ReaderVoipCall.shared.status = "通话中"
+            ReaderVoipCall.shared.status = "已接通，等系统交出音频会话"
             // AI 说完话会调 voip_push hangup，那边写下信号；这里轮询它。
             // ⚠ 为什么不用推送来挂断：再推一次会**再响一次铃**，
             // 而我们要的是结束当前这通。轮询土但对，通话只有几十秒。
