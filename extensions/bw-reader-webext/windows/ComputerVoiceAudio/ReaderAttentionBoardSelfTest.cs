@@ -181,10 +181,10 @@ internal static class ReaderAttentionBoardSelfTest
         }
         checks.Add("attention-board-skips-ai-audience");
 
-        // ⑧ 笔画：稳定 → 立旗；**持续画 → 一个字都不改**。
+        // ⑧ 笔画：有动作就立旗（不等稳定）；**持续画 → 一个字都不改**。
         ReaderAttentionBoard.ResetForSelfTest(dir);
         WriteTodos(dir);
-        ReaderAttentionBoard.NoteDrawingStable(t0);
+        ReaderAttentionBoard.NoteDrawing(t0);
         // ⚠ 渲染要传**同一条时间轴**上的时刻。不传的话默认用真实时钟，
         // 而夹具的 t0 是 1970 —— 一渲染就被判成"停笔十几万小时"，
         // 笔画那行当场退场。第一版就栽在这里，报的却是"没上板子"。
@@ -198,7 +198,7 @@ internal static class ReaderAttentionBoardSelfTest
         // 被更新」。对面是"变了就读"，多一次变化就是白花它一次读取。
         for (int i = 1; i <= 5; i++)
         {
-            ReaderAttentionBoard.NoteDrawingStable(
+            ReaderAttentionBoard.NoteDrawing(
                 t0 + TimeSpan.FromSeconds(10 * i));
         }
         if (ReaderAttentionBoard.Health().Sequence != afterInk)

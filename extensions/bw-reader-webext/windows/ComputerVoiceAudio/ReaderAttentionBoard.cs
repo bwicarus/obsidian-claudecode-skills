@@ -64,13 +64,17 @@ internal static class ReaderAttentionBoard
     /// 不违背「桥不算账」那条（算账是指聚合、推导、判定）。
     private static string? _storeDirectory;
 
-    /// 停笔多久之后，「有笔画」这条才该退场。
+    /// 停笔多久之后，「有笔画」这条才够格退场。
+    ///
     /// ⚠ 退场**不是**到点自己走：到点只是变得「可以走」，真正消失要等
     /// 下一次本来就要发生的变化 —— 用户 2026-08-29：「一段时间没有绘图
     /// 且其他方面的信息进行了更新后伴随着消失」。一次纯由时钟驱动的
     /// 消失，对面读到的新情报是零。
+    ///
+    /// 两分钟是用户定的。它只影响"多久之后**可以**走"，不影响立旗 ——
+    /// 立旗是即时的（见 NoteDrawing）。
     private static readonly TimeSpan DrawingIdleWindow =
-        TimeSpan.FromMinutes(15);
+        TimeSpan.FromMinutes(2);
 
     private static bool _hasDrawing;
     private static DateTimeOffset _drawingLastAt;
@@ -173,17 +177,19 @@ internal static class ReaderAttentionBoard
         }
     }
 
-    /// 笔画**刚刚变稳定**（快照那边已经算好了 `visual.drawing.stable`，
-    /// 这里只接结论，不重算 —— 判据只有一处）。
+    /// 有绘图动作。**立刻立旗，不等它稳定。**
     ///
-    /// ⚠ **一直在画的时候不要更新板子。** 用户 2026-08-29 明说：
-    /// 「即使我持续在绘图，这个信息也不需要被更新」。所以已经立着的旗
-    /// 再来多少次稳定信号都**不算变化** —— 对面是"变了就读"，
-    /// 每一次无谓的变化都在白花它一次读取。
+    /// ⚠ 2026-08-29 用户改的：既然板子给的是**状态**不是事件，就没有
+    /// "要等它稳下来才敢报"的问题 —— 反正持续画也不会再刷新（见下）。
+    /// 早报晚报对下游的动作没有区别，而早报少一层等待。
     ///
-    /// 这一条是**静默**的：它进「状态」不进「开口」。它要说的是
+    /// ⚠ **一直在画的时候不要更新板子。** 用户明说：「即使我持续在绘图，
+    /// 这个信息也不需要被更新」。所以旗已经立着就**直接返回** ——
+    /// 对面是"变了就读"，每一次无谓的变化都在白花它一次读取。
+    ///
+    /// 这一条是**静默**的：进「状态」不进「开口」。它要说的是
     /// 「用户问到相关内容时，先去看当前的绘图」，不是「现在打断他」。
-    internal static void NoteDrawingStable(DateTimeOffset now)
+    internal static void NoteDrawing(DateTimeOffset now)
     {
         lock (Gate)
         {
@@ -194,15 +200,6 @@ internal static class ReaderAttentionBoard
             }
             _hasDrawing = true;
             _sequence++;
-        }
-    }
-
-    /// 笔画在动（还没稳定）。只记时间，**不动板子**。
-    internal static void NoteDrawingActivity(DateTimeOffset now)
-    {
-        lock (Gate)
-        {
-            _drawingLastAt = now;
         }
     }
 

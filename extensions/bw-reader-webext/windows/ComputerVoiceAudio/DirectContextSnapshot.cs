@@ -1748,16 +1748,13 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     lastEditedAtSeconds is double seconds
                         ? (long)(seconds * 1000)
                         : 0);
-                // 顺路告诉提示板。**只传结论，不重算稳定判据** ——
-                // "什么算稳定"留在这一处，板子那边不该有第二套。
-                ReaderAttentionBoard.NoteDrawingStable(DateTimeOffset.UtcNow);
             }
-            else
-            {
-                // 还在画（或这次折叠没让它变稳定）：只记时间，不动板子。
-                // 用户明说持续绘图时板子不该更新。
-                ReaderAttentionBoard.NoteDrawingActivity(DateTimeOffset.UtcNow);
-            }
+            // ⚠ 提示板那条**不看 stable**：板子给的是状态不是事件，
+            // 有动作就立刻算"有绘图"（用户 2026-08-29 改的）。
+            // 放在 if 外面，是因为"还在画"同样是有绘图 —— 只有这样，
+            // 一直画的人才不会因为迟迟不稳定而在板子上显示成"没画过"。
+            // 旗已经立着时这个调用不产生任何变化，所以放外面也不会抖。
+            ReaderAttentionBoard.NoteDrawing(DateTimeOffset.UtcNow);
         }
         else if (contextEvent.Type == "command-failed")
         {
