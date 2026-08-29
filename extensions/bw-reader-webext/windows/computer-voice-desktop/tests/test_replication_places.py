@@ -81,14 +81,37 @@ class PlacesTests(unittest.TestCase):
         value = replication_places.export_current_place(self.root, export)
         self.assertEqual(value["alias"], "公司", "别名优先")
         self.assertEqual(value["geoName"], "会社")
-        # 只剩过期位置 → 导出文件删除（缺席=不知道在哪）
+        # 只剩过期位置 → **仍然导出**，靠 observedAtUtcMs 表达它有多旧
+        # （2026-08-30 用户：「没有新的当然应该显示为最后一次的定位记录啊」）。
+        # 位置变化慢，扔掉它不如给出来 + 让消费方自己判断新旧。
+        stale_at = now - 2 * 3600_000
         self._write([
-            _dwell_line(now - 2 * 3600_000, 35.0, 139.0, 60),
+            _dwell_line(stale_at, 35.0, 139.0, 60),
         ])
+        kept = replication_places.export_current_place(self.root, export)
+        self.assertIsNotNone(kept, "旧记录也该给出来，不该整个丢掉")
+        self.assertTrue(export.exists())
+        self.assertLess(
+            kept["observedAtUtcMs"], now - 3600_000,
+            "时间戳必须是那条**旧记录**的 —— 冒充成当前就等于撒谎，"
+            "而这是消费方唯一能据以判断新旧的东西")
+
+    def test_current_place_absent_only_when_never_located(self) -> None:
+        """⚠ 负对照：**一条定位都没有**才算「不知道在哪」。
+
+        守的是改动后仍然成立的那一半语义。没有它，"保留旧记录"很容易滑成
+        "任何情况都写点什么"，于是「从没定位过」和「两小时前在家」变得
+        看不出区别 —— 而这两件事要做的处置完全不同。
+        """
+        export = self.root / "runtime" / "current-place.json"
+        export.parent.mkdir(parents=True, exist_ok=True)
+        export.write_text("{}", encoding="utf-8")
+        self._write([])
         gone = replication_places.export_current_place(self.root, export)
         self.assertIsNone(gone)
-        self.assertFalse(export.exists(),
-                         "旧位置绝不冒充当前 —— 文件删除表达缺席")
+        self.assertFalse(
+            export.exists(),
+            "一条定位都没有时必须删掉文件 —— 缺席才是「不知道在哪」")
 
 
 if __name__ == "__main__":

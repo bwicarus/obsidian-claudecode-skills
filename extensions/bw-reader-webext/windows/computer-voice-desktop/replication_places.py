@@ -62,9 +62,13 @@ def place_state(alias: str | None) -> str:
     """别名 → 状态。**不认识就是 elsewhere，绝不猜。**
 
     ⚠ 「不知道在哪」和「在别处」是两回事，由调用方区分：
-    没有 current-place.json = 不知道（见 export_current_place 的说明），
-    有文件但别名不认识 = 确实在别处。把两者混起来，会让"没有位置数据"
-    悄悄变成"他不在家"，于是该出声的时候不出声 —— 而且不会报错。
+    没有 current-place.json = 不知道，有文件但别名不认识 = 确实在别处。
+    把两者混起来，会让"没有位置数据"悄悄变成"他不在家"，于是该出声的
+    时候不出声 —— 而且不会报错。
+
+    ⚠ 2026-08-30 起「没有文件」的门槛变严了：现在只有**从来没有过定位
+    记录**才没文件；仅仅是"最近 30 分钟没新的"会照常导出最后一条，
+    新旧看 `observedAtUtcMs`。详见 export_current_place。
     """
     if not alias:
         return "elsewhere"
@@ -311,22 +315,37 @@ def name_latest(root: Path, name: str) -> dict | None:
 
 
 def export_current_place(root: Path, export_path: Path) -> dict | None:
-    """最近 30 分钟内的位置 → 别名优先 → 导出给桥的快照 join。
+    """最后一次已知位置 → 别名优先 → 导出给桥的快照 join。
 
-    没有新鲜位置时**删除导出文件**（缺席=不知道在哪；一个两小时前的
-    位置冒充"当前"比不知道更糟 —— 拿旧状态冒充当前是本仓库反复吃亏
-    的形态）。
+    ## ⚠ 2026-08-30 改：不再因为"不新鲜"就删掉文件
+
+    原来只导出 30 分钟内的，更旧的一律删文件（缺席=不知道在哪）。它防的
+    东西是对的 ——「一个两小时前的位置冒充'当前'比不知道更糟」—— 但手段
+    过头了：位置变化慢，两小时前在家现在多半还在家，直接说"不知道"是把
+    一条有用的信息整个丢掉。用户 2026-08-30：「没有新的当然应该显示为
+    最后一次的定位记录啊」。
+
+    改成**始终导出最后一条**，新旧由 `observedAtUtcMs` 表达，消费方按
+    自己的需要判断。冒充当前的风险仍然被挡住，只是挡它的从"丢弃数据"
+    换成了"带上时间戳"。
+
+    现在的语义：
+      文件不存在 = 从来没有过定位记录（不再是"最近没有"）
+      文件存在   = 最后一次已知位置，多旧看 observedAtUtcMs
+
+    ⚠ 快照那一侧（DirectContextSnapshot）**自己另有 30 分钟门槛**，
+    没有跟着放宽 —— 快照是"判断用的整理视图"，只收新鲜的是它自己的语义。
+    提示板则读文件、自己标注新旧。两处门槛各管各的，别合并成一处。
     """
     rows = _load_located_dwell(root)
-    cutoff = int((time.time() - CURRENT_WINDOW_MINUTES * 60) * 1000)
-    fresh = [r for r in rows if r["atUtcMs"] >= cutoff]
-    if not fresh:
+    if not rows:
+        # 一条都没有 —— 这才是真正的"不知道在哪"。
         try:
             export_path.unlink()
         except FileNotFoundError:
             pass
         return None
-    latest = max(fresh, key=lambda r: r["atUtcMs"])
+    latest = max(rows, key=lambda r: r["atUtcMs"])
     consumed = _consume_pending_name(root, latest["lat"], latest["lon"])
     if consumed:
         try:

@@ -102,8 +102,10 @@ internal static class ReaderAttentionBoard
             "还没跟用户说过的待办（pending）—— 该开口说的事"),
         new("slow", "地理位置", "- 地点｜",
             "在家 / 在公司 / 在别处。据此判断该不该现在提 —— 人在公司时"
-            + "倒垃圾的待办看到了也不必说。没有新鲜定位时写「不知道」，"
-            + "**「不知道」和「在别处」是两回事**，别混"),
+            + "倒垃圾的待办看到了也不必说。超过 30 分钟没有新定位时，给的"
+            + "是**最后一次已知位置**并注明「旧记录」（位置变化慢，"
+            + "扔掉它不如给出来 + 标明）。只有从来没有过定位记录才写"
+            + "「不知道」——**「不知道」和「在别处」是两回事**，别混"),
         new("slow", "注意力焦点", "- 焦点｜",
             "他在看哪本书哪一页（不是地理位置）。停留满 45 秒才算数，"
             + "来回切 10 分钟内不重报"),
@@ -570,6 +572,23 @@ internal static class ReaderAttentionBoard
             {
                 return "不知道";
             }
+            // ⚠ 不新鲜就**标出来**，但不要因此丢掉它（用户 2026-08-30：
+            // 「没有新的当然应该显示为最后一次的定位记录啊」）。位置变化
+            // 慢，一小时前在家现在多半还在家 —— 说"不知道"是把有用的信息
+            // 整个扔了；直接当"当前"又会骗它。所以：给出来，并注明旧。
+            //
+            // ⚠ 标记必须是**离散的**，绝不能写"几分钟前"这种走字的量。
+            // 板子的规矩是"状态没变就一个字节都不许变"，而一个每分钟都在
+            // 变的数字会让板子一直抖 —— 那正是拆板要消灭的东西。
+            // 这里只有两档，跨过 30 分钟那一刻变一次，那一次是有情报的。
+            long observed = root.TryGetProperty(
+                "observedAtUtcMs", out JsonElement at)
+                && at.ValueKind == JsonValueKind.Number
+                ? at.GetInt64() : 0;
+            long age = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                - observed;
+            string suffix = observed > 0 && age > 30 * 60_000L
+                ? "（旧记录，不是刚测的）" : string.Empty;
             // alias = 用户命名过的地方（「家」「工作地点」）。有名字就用
             // 名字，那是他自己的说法，比 state 更贴切。
             if (root.TryGetProperty("alias", out JsonElement alias)
@@ -578,7 +597,7 @@ internal static class ReaderAttentionBoard
                 string? named = alias.GetString();
                 if (!string.IsNullOrWhiteSpace(named))
                 {
-                    return Clip(named, 40);
+                    return Clip(named, 40) + suffix;
                 }
             }
             // 没命名过就只说 state。⚠ 认不出的一律「别处」，**不猜** ——
@@ -588,9 +607,9 @@ internal static class ReaderAttentionBoard
                 ? one.GetString() ?? "" : "";
             return state switch
             {
-                "home" => "家",
-                "work" => "工作地点",
-                _ => "别处（没命名过）",
+                "home" => "家" + suffix,
+                "work" => "工作地点" + suffix,
+                _ => "别处（没命名过）" + suffix,
             };
         }
         catch (Exception)
