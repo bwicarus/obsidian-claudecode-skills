@@ -283,8 +283,9 @@ final class ReaderSystemProjection {
         // 真值在苹果那边，所以认领也必须以苹果那边为准：每条提醒带一个
         // `bwreader://ntf/<id>` 的 url 标记，每轮扫描重建映射。
         // 这样重装后自愈，而且能把已经产生的重复收拾掉。
+        let allInList = await fetchReminders(in: calendar)
         var byMarker: [String: [EKReminder]] = [:]
-        for reminder in await fetchReminders(in: calendar) {
+        for reminder in allInList {
             guard let ntfId = Self.markerId(of: reminder) else { continue }
             byMarker[ntfId, default: []].append(reminder)
         }
@@ -309,6 +310,23 @@ final class ReaderSystemProjection {
                 claimed[ntfId] = reminder
             }
         }
+        // ⚠ **认领不到的一律清掉**（用户 2026-08-29 明确要求）。
+        //
+        // 这个列表是我们自己建的（title = "BW 待办"），里面的东西全是这条
+        // 链路放进去的。所以"认不出来"只有一种解释：**它是残留** ——
+        // 旧版建的没有标记、而映射表又被重装清空了，于是两条认领路径
+        // 都够不着它。这类残留不会自己消失，只能用户手动删
+        // （2026-08-29 用户就手动删了一次 6 条重复）。
+        //
+        // 代价说清楚：用户**手动**往「BW 待办」里加的条目也会被清掉。
+        // 这是明知而选的 —— 那个列表由本链路托管，不是用来手写的；
+        // 留一个"有时候会被清掉"的灰色地带，比明确清空更难解释。
+        let keep = Set(claimed.values.map(\.calendarItemIdentifier))
+        for stray in allInList
+            where !keep.contains(stray.calendarItemIdentifier) {
+            try? eventStore.remove(stray, commit: false)
+        }
+
         map = [:]
         for (ntfId, reminder) in claimed {
             if !liveIds.contains(ntfId) {
