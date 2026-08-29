@@ -268,6 +268,18 @@ extension ReaderVoipCall: CXProviderDelegate {
             call.status = "上一通电话：" + outcome
             NotificationCenter.default.post(
                 name: ReaderVoipCall.declinedNotification, object: nil)
+            // ⚠ **挂断这条路上也要收语音链路**，不能只靠 didDeactivate。
+            //
+            // 通话结束后 App 很可能立刻被系统挂起（它本来就是被 PushKit
+            // 叫醒的），didDeactivate 里的异步任务不一定跑得完。而那一步
+            // 没跑完的后果是：Windows 侧收不到 STOP，音频路由**不还原** ——
+            // 电话挂了，电脑的声音还留在通话通道上。
+            // 2026-08-29 用户实测到的正是这个。
+            //
+            // stop() 是幂等的，didDeactivate 再来一次也无害；
+            // 宁可多收一次，也不要靠一个可能不执行的回调。
+            await ReaderVoipCall.shared.onCallAudioEnded?()
+            NativeAudioEngine.isUnderSystemCall = false
             // ⚠ 回报**之后**才清 notificationId —— 清早了 Windows 侧
             // 就不知道这个结局属于哪条待办，那条会永远卡在"已拨出"。
             await ReaderVoipOutcomeUpload.send(outcome: outcome)
