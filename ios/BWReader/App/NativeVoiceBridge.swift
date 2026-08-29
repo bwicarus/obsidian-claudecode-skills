@@ -69,6 +69,18 @@ struct NativeVoiceBridgeState: Equatable {
 
 @MainActor
 final class NativeVoiceBridge: ObservableObject {
+    /// 全 App 唯一的一份。
+    ///
+    /// ⚠ 加它不是为了图方便，是因为**有些时刻界面根本不存在**：
+    /// PushKit 来电把 App 唤到**后台**，SwiftUI 的视图层不出现，
+    /// 挂在 `.task` 里的接线于是永远不跑 —— 表现是"电话接通了、
+    /// 也能通话，但声音还在电脑上"，而桥那边 readerConnected 一直是
+    /// false（2026-08-29 实测正是如此：state=idle / captureActive=false）。
+    ///
+    /// 来电这条路必须从 AppDelegate 接（后台唤醒时它一定会跑），
+    /// 而 AppDelegate 看不到视图里的 @StateObject。所以要有这一份。
+    static let shared = NativeVoiceBridge()
+
     private static let reconnectDelayNanoseconds: [UInt64] = [
         650_000_000,
         2_000_000_000,
