@@ -39,6 +39,16 @@ final class ReaderVoipCall: NSObject {
     /// 最近一次拿到的推送 token（十六进制）。上报给 Windows 用。
     private(set) var deviceToken: String?
 
+    /// 这条链路现在到哪一步了。**iPad 上没有控制台**，不把它显示出来的话
+    /// "电话打不进来"就永远只能靠猜（2026-08-29 就卡在这里：token 没上去，
+    /// 而"发了被拒"和"根本没发"完全分不开）。显示在「数据与同步」里。
+    private(set) var status: String = "还没开始注册"
+
+    /// 记一步。⚠ 覆盖式的，只留最新一句 —— 这不是日志，是"现在什么状态"。
+    static func note(_ text: String) async {
+        await MainActor.run { ReaderVoipCall.shared.status = text }
+    }
+
     /// App 启动时调一次。
     func start() {
         guard registry == nil else { return }
@@ -46,6 +56,7 @@ final class ReaderVoipCall: NSObject {
         registry.delegate = self
         registry.desiredPushTypes = [.voIP]
         self.registry = registry
+        status = "已向系统注册，等 token"
 
         let configuration = CXProviderConfiguration()
         configuration.supportsVideo = false
@@ -103,6 +114,7 @@ extension ReaderVoipCall: PKPushRegistryDelegate {
             .joined()
         Task { @MainActor in
             ReaderVoipCall.shared.deviceToken = hex
+            ReaderVoipCall.shared.status = "拿到 token，正在上报"
             await ReaderVoipTokenUpload.send(token: hex)
         }
     }
@@ -111,7 +123,12 @@ extension ReaderVoipCall: PKPushRegistryDelegate {
         _ registry: PKPushRegistry,
         didInvalidatePushTokenFor type: PKPushType
     ) {
-        Task { @MainActor in ReaderVoipCall.shared.deviceToken = nil }
+        Task { @MainActor in
+            ReaderVoipCall.shared.deviceToken = nil
+            // ⚠ 系统主动作废 token 时**必须显示**：这时候电话打不进来，
+            // 而设备上不会有任何其它迹象。
+            ReaderVoipCall.shared.status = "系统作废了 token（需重新注册）"
+        }
     }
 
     nonisolated func pushRegistry(
@@ -171,18 +188,40 @@ extension ReaderVoipCall: CXProviderDelegate {
 /// 不做"只报一次"的优化。少报一次的代价是**电话永远打不进来**，
 /// 而多报一次只是一个几百字节的请求。
 enum ReaderVoipTokenUpload {
+    /// ⚠ **不发 Origin 头。**
+    ///
+    /// 2026-08-29 实测：小组件用同一个地址、同一台机器打桥是通的，而它
+    /// **不发 Origin**；桥那条路由只查 `Tailscale-User-Login`（由
+    /// tailscale serve 注入）。我第一版显式发了 `ReaderServer.origin`
+    /// （bwicarus-2.…），而桥的白名单里根本没有这个 origin —— 发了反而被拒。
+    ///
+    /// 结论：跟着**已经被证明能通的那条路**走，不要自己另配一套。
     static func send(token: String) async {
-        guard let url = ReaderServer.url("/reader-voip/token") else { return }
+        let target = "https://bwicarus-2.taile44d0c.ts.net/reader-voip/token"
+        guard let url = URL(string: target) else {
+            await ReaderVoipCall.note("上报地址拼不出来")
+            return
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(ReaderServer.origin, forHTTPHeaderField: "Origin")
         request.timeoutInterval = 15
         request.httpBody = try? JSONSerialization.data(withJSONObject: [
             "token": token,
             "bundleId": Bundle.main.bundleIdentifier ?? "",
             "environment": "production",
         ])
-        _ = try? await URLSession.shared.data(for: request)
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            // ⚠ **成功也要留痕**。第一版这里是 `_ = try? await …`，
+            // 把一切吞了 —— 于是 token 没上去时，完全分不清是
+            // 「发了被拒」还是「根本没发」，只能靠猜。
+            await ReaderVoipCall.note(
+                code == 200 ? "已上报（HTTP 200）" : "上报被拒 HTTP \(code)")
+        } catch {
+            await ReaderVoipCall.note(
+                "上报失败：" + error.localizedDescription)
+        }
     }
 }

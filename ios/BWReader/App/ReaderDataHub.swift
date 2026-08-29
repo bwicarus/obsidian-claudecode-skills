@@ -119,6 +119,10 @@ struct ReaderDataHubSection: View {
             // 界面上只说「我的服务器」,不出现具体是哪台机器:那是实现细节,
             // 而且它会变。把机器名当一等公民正是这次混乱的来源。
             LabeledContent(ReaderServer.displayName, value: serverHost)
+            // 来电通道现在到哪一步。⚠ **iPad 上没有控制台** —— 不显示的话
+            // 「电话打不进来」永远只能靠猜：2026-08-29 就卡在这里，
+            // token 没上去，而"发了被拒"和"根本没发"完全分不开。
+            LabeledContent("来电通道", value: ReaderVoipCall.shared.status)
             if !isSignedIn {
                 Button("登录", action: onSignIn)
             }

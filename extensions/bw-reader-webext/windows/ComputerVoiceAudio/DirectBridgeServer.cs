@@ -1550,10 +1550,31 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         HttpContext context,
         CancellationToken serviceCancellationToken)
     {
-        if (!PrepareOutputCors(context, "POST, OPTIONS")) return;
+        // ⚠ **不要求 Origin**，只查 Tailscale 身份 —— 跟小组件那条路一样。
+        //
+        // 2026-08-29 实测：小组件用同一个地址打到这台机器是通的，而它
+        // 不发 Origin；我第一版用 PrepareOutputCors（要 Origin 且要在白名单
+        // 里），App 发的 origin 又不在白名单 —— 结果 token 上不来，
+        // 而且看不出是"发了被拒"还是"根本没发"。
+        // 安全边界没有变松：Tailscale-User-Login 由 tailscale serve 注入，
+        // 伪造不了；Kestrel 也只绑回环。
+        if (HttpMethods.IsOptions(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status204NoContent;
+            return;
+        }
         if (!HttpMethods.IsPost(context.Request.Method))
         {
             context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        if (!TailscaleLoginMatches(
+            _configStore.Load(),
+            context.Request.Headers["Tailscale-User-Login"]))
+        {
+            // 拒绝也要出声 —— 否则"token 一直没上来"时完全看不到它来过。
+            AppendOutputPickupLog("voip-token-denied\tidentity");
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
             return;
         }
         string token;
