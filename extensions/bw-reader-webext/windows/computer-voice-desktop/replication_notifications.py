@@ -231,8 +231,14 @@ class NotificationStore:
                     "  silent 一定不出声\n"
                     "  voice  一定出声（明确要打断时才用）\n"
                     "  call   打一通电话（穿透静音/专注，接通后 AI 直接说）\n"
-                    "⚠ call 只用在**必须现在让他知道**的事上：iOS 规定每一个"
-                    "VoIP 推送都必须真的响铃，它不能当'更响一点的通知'用。"
+                    "⚠ call 只用在**必须现在让他知道**的事上。两条代价，"
+                    "都不是可以调的选项：\n"
+                    "  1. iOS 规定每一个 VoIP 推送都必须真的响铃 —— "
+                    "它不能当'更响一点的通知'用；\n"
+                    "  2. 他一按接听，**iPad 会强制切到 BWReader 前台**，"
+                    "不管他当时在干什么。这是 CallKit 自 iOS 10 起的固定"
+                    "行为，没有任何 API 能阻止（2026-08-30 实测确认）。\n"
+                    "  也就是说这一档不只是吵，它会**打断他手上的事**。"
                     % (", ".join(_DELIVER_MODES), deliver))
             # 到点时刻的三条校验（2026-08-26 对抗式复核）：这三种组合都
             # 能建出「创建成功、到点永远不响」的条目，而链路上没有任何
@@ -787,8 +793,14 @@ def main() -> int:
     create.add_argument(
         "--deliver", default="auto", choices=_DELIVER_MODES,
         help="怎么送到用户面前：auto=按位置决定（在家可出声，在工作只静音，"
-             "默认）/ silent=一定不出声 / voice=一定出声。"
-             "⚠ 打电话那一档还没有（缺 APNs 通道），所以这里没有它")
+             "默认）/ silent=一定不出声 / voice=一定出声 / "
+             "call=打一通真电话（穿透静音与专注模式，接通后你直接开口说）。"
+             "⚠ call 的代价有两条，都不是可以调的选项：① iOS 规定每个 VoIP "
+             "推送都必须真的响铃，它不能当'更响一点的通知'用；② 他一按接听，"
+             "iPad 会强制切到 BWReader 前台，不管他当时在干什么（CallKit 自 "
+             "iOS 10 起的固定行为，没有 API 能阻止，2026-08-30 实测确认）。"
+             "所以这一档不只是吵，它会打断他手上的事 —— "
+             "只用在必须现在让他知道的事上")
     args = parser.parse_args()
     store = NotificationStore(args.root or default_root())
 
