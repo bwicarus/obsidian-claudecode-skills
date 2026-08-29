@@ -565,10 +565,38 @@ class TerminationGuardTests(unittest.TestCase):
         self.store.create(kind="user-todo", title="B", audience="user",
                           expires_at_ms=future)
         self.store.create(kind="user-todo", title="C", audience="user",
-                          auto_resolve={"type": "item-mutated"})
+                          auto_resolve={"type": "item-mutated",
+                                        "itemId": "it-1"})
         self.store.create(kind="user-todo", title="D", audience="user",
                           end="never")
         self.assertEqual(len(list(self.store.open_items())), 4)
+
+    def test_auto_condition_requires_something_to_bind_to(self) -> None:
+        # 一个 auto 条件没绑到具体对象上就**永远不会命中** —— 建出来的是
+        # 一条永不结束的待办，而链路上没有一处会说出来。2026-08-30 之前
+        # 只拦了 place-arrived，另外两个照样「已创建」。
+        for auto_type, flag in (("item-mutated", "--auto-item"),
+                                ("card-reviewed", "--auto-card")):
+            with self.assertRaises(NotificationError) as caught:
+                self.store.create(kind="user-todo", title="X",
+                                  audience="user",
+                                  auto_resolve={"type": auto_type})
+            # 报错要说清该补哪个参数，否则等于只说"不行"。
+            self.assertIn(flag, str(caught.exception))
+
+    def test_auto_condition_with_binding_is_accepted(self) -> None:
+        # ⚠ 负对照。这条同时钉住另一件事：`end=auto:` 分支**不许重建**
+        # autoResolve —— 它曾无条件 `= {"type": condition}`，把命令行传进
+        # 来的绑定字段整个盖掉，表现是「参数给了、校验也过了，就是不生效」。
+        for auto_type, field, value in (
+                ("item-mutated", "itemId", "it-9"),
+                ("card-reviewed", "cardId", "card-9")):
+            item = self.store.create(
+                kind="user-todo", title="Y", audience="user",
+                end="auto:" + auto_type,
+                auto_resolve={"type": auto_type, field: value})
+            # 光是"建出来了"不够，绑定字段必须**真的还在**。
+            self.assertEqual(item["autoResolve"].get(field), value)
 
     def test_ai_audience_is_not_affected(self) -> None:
         # ⚠ 负对照：系统/AI 方向的条目**本来就**不需要终止条件

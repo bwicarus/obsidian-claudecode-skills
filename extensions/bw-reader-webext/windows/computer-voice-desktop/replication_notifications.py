@@ -43,6 +43,13 @@ MAX_TEXT = 400
 _STATES = ("pending", "acknowledged")
 _AUTO_TYPES = ("item-mutated", "card-reviewed", "place-arrived")
 
+#: 每个 auto 条件必须绑到哪个字段上（place-arrived 另有查名字的校验）。
+#: 条件 → (记录里的字段名, 命令行参数名)。见创建时的校验。
+_AUTO_BINDINGS = {
+    "item-mutated": ("itemId", "--auto-item"),
+    "card-reviewed": ("cardId", "--auto-card"),
+}
+
 # 怎么送到用户面前（2026-08-29 用户要的"选择权"）。
 #
 # 在此之前只有"发"没有"怎么发"：一条待办建出来就同时走七条通道
@@ -211,8 +218,21 @@ class NotificationStore:
                     raise NotificationError(
                         "end=auto: 的条件必须是 %s 之一，收到 %r"
                         % (", ".join(_AUTO_TYPES), condition))
-                auto_resolve = {"type": condition}
-                if condition == "place-arrived" and place:
+                # ⚠ **不要在这里重建对象。** 调用方可能已经用
+                # `--auto-item/--auto-card/--auto-place` 把绑定对象组装好
+                # 传进来了；无条件 `= {"type": condition}` 会把它整个盖掉,
+                # 表现是「参数给了、校验也过了,就是不生效」—— 这正是
+                # CLAUDE.md 记的那个形态:有些站点是**重建**而不是透传,
+                # 放行了还得显式搬字段。2026-08-30 实测撞上。
+                if (isinstance(auto_resolve, dict)
+                        and auto_resolve.get("type") == condition):
+                    pass  # 已经有同类型的绑定,原样留着
+                else:
+                    auto_resolve = {"type": condition}
+                if condition == "place-arrived" and not auto_resolve.get(
+                        "place") and place:
+                    # `--at-place` 兼作绑定来源:只在没有显式 `--auto-place`
+                    # 时才用它,否则会把更具体的那个覆盖掉。
                     auto_resolve["place"] = place.get("name")
             else:
                 raise NotificationError(
@@ -301,7 +321,13 @@ class NotificationStore:
                 ):
                     raise NotificationError(
                         "autoResolve.type 必须是 %s 之一" % (_AUTO_TYPES,))
-                if auto_resolve.get("type") == "place-arrived":
+                # ⚠ 每个 auto 条件都得**绑到一个具体对象**上,否则它永远
+                # 不会命中。三个条件同一个道理,但 2026-08-30 之前只拦了
+                # place —— 另外两个缺了绑定对象照样「已创建」,建出来的是
+                # 一条**永远不会结束**的待办,而链路上没有一处会说出来。
+                # 这正是这个模块开头列的那类事故,只是漏在了自己身上。
+                auto_type = auto_resolve.get("type")
+                if auto_type == "place-arrived":
                     # 地点名拼错 = 这条待办永远不会自动关闭,而且没有任何
                     # 地方会说出来 —— 当场拒绝比事后困惑好。
                     import replication_places
@@ -310,6 +336,14 @@ class NotificationStore:
                         raise NotificationError(
                             "自动完成绑定的地点「%s」还没有命名过"
                             % auto_resolve.get("place"))
+                elif auto_type in _AUTO_BINDINGS:
+                    field, flag = _AUTO_BINDINGS[auto_type]
+                    if not str(auto_resolve.get(field) or "").strip():
+                        raise NotificationError(
+                            "end=auto:%s 必须同时给 %s —— 没有它,这个条件"
+                            "永远不会命中,建出来的是一条永不结束的待办。\n"
+                            "不知道该填哪个就别用 auto:,改用 expires: 或"
+                            "回去问用户。" % (auto_type, flag))
             items = self._load()
             if dedupe_key:
                 for existing in items:
@@ -788,6 +822,12 @@ def main() -> int:
         help="终止方式，三选一：expires:<毫秒时刻>（到点作废）/ "
              "auto:<item-mutated|card-reviewed|place-arrived>（条件达成"
              "自动完成）/ never（一直留着，明知而选）。"
+             "⚠ 用 auto: 就**必须**同时给绑定对象："
+             "item-mutated→--auto-item / card-reviewed→--auto-card / "
+             "place-arrived→--auto-place。没绑对象的条件永远不会命中，"
+             "建出来的是一条永不结束的待办。填不出那个 id 就别用 auto:，"
+             "改用 expires: 或回去问用户 —— 猜一个 id 比不写更糟，"
+             "它让条目看起来是有终点的。"
              "⚠ --due-at 不是终止条件：到点之后条目照样挂着。"
              "判断不了就回来问用户 —— 「不知道」是合法结果，随便填不是")
     create.add_argument(
