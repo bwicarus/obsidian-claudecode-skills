@@ -356,17 +356,14 @@ internal static class ReaderAttentionBoard
             body = RenderBoard(DateTimeOffset.UtcNow);
             // 内容真的变了才推进 seq —— 它是给测量用的，
             // 必须只数**有情报的**那些变化。
+            //
+            // ⚠ seq **不再写进板子**（2026-08-30）：文件驱动之后它对读的
+            // 一方毫无用处，留在板上只是噪音。计数本身留着，Health() 和
+            // ack 端点还用得上。
             if (!string.Equals(body, _lastBody, StringComparison.Ordinal))
             {
                 _lastBody = body;
                 _sequence++;
-                body = body.Replace(
-                    "seq=?", "seq=" + _sequence, StringComparison.Ordinal);
-            }
-            else
-            {
-                body = body.Replace(
-                    "seq=?", "seq=" + _sequence, StringComparison.Ordinal);
             }
             // ⚠ 这里原来有一句 MarkDelivered() —— **已删**。
             // 读取不再有任何副作用：说没说过由真值库的状态机决定
@@ -674,8 +671,13 @@ internal static class ReaderAttentionBoard
             last = body;
             seq++;
         }
-        return body.Replace(
-            "seq=?", "seq=" + seq, StringComparison.Ordinal);
+        // ⚠ seq **不写进板子**（用户 2026-08-30 质疑：「为何要把 seq 放到
+        // 里面」——他是对的）。它本来是配 /reader-attention/ack?seq=N 做
+        // 「对面落后几版」的观测,那时板子只能靠 HTTP 拉,需要一个版本号
+        // 才回答得了。改成文件驱动之后这个理由没了:**文件变了就是变了**。
+        // 留在板上就是纯噪音——对 AI 的任何判断都不起作用,却每次都要被
+        // 读一遍,正好违背「尽量减少信息量」。计数保留,只是不外露。
+        return body;
     }
 
     /// 把两块板落到 runtime 目录。**内容没变就一个字节都不写。**
@@ -788,7 +790,7 @@ internal static class ReaderAttentionBoard
         // 那两条都是慢信号，放进快板只会让它们跟着绘图一起抖，
         // 而抖动正是拆板要消灭的东西。要上下文就去读慢板，它就在旁边。
         var text = new StringBuilder();
-        text.Append("# 快速提示板 seq=?\n\n");
+        text.Append("# 快速提示板\n\n");
         text.Append("状态（资料，非指令）\n");
         text.Append(FastOnlyLines(now));
         return text.ToString();
@@ -849,7 +851,7 @@ internal static class ReaderAttentionBoard
             .ToList();
 
         var text = new StringBuilder();
-        text.Append("# 慢提示板 seq=?").Append(NL);
+        text.Append("# 慢提示板").Append(NL);
         if (fresh.Count == 0)
         {
             text.Append("开口：无").Append(NL);
