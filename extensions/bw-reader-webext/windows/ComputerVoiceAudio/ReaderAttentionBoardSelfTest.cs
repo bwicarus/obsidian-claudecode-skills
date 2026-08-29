@@ -265,11 +265,18 @@ internal static class ReaderAttentionBoardSelfTest
         {
             throw new InvalidOperationException("待办漏进了快板");
         }
-        // 「基础的内容是相同的」—— 用户明确要求：两块单独读都要知道他在哪。
-        if (!slowAfter.Contains("食文化の本", StringComparison.Ordinal)
-            || !fastNow.Contains("食文化の本", StringComparison.Ordinal))
+        // ⚠ 用户 2026-08-30 收窄：「位置应该只保留在慢的上面」。
+        // 这推翻了拆板时那条"基础内容两边都有" —— 地点和焦点都是慢信号，
+        // 放进快板只会让它们跟着绘图一起抖。
+        if (!slowAfter.Contains("食文化の本", StringComparison.Ordinal))
         {
-            throw new InvalidOperationException("位置没有同时出现在两块板上");
+            throw new InvalidOperationException("注意力焦点没在慢板上");
+        }
+        if (fastNow.Contains("食文化の本", StringComparison.Ordinal)
+            || fastNow.Contains("- 地点｜", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "地点/焦点漏进了快板 —— 慢信号放快板会跟着绘图一起抖");
         }
         checks.Add("attention-board-split-routes-each-signal");
 
@@ -365,9 +372,9 @@ internal static class ReaderAttentionBoardSelfTest
                     board.GetProperty("items").EnumerateArray())
                 {
                     string kind = item.GetProperty("kind").GetString() ?? "";
-                    if (kind == "位置")
+                    if (kind == "地理位置" || kind == "注意力焦点")
                     {
-                        continue;   // 恒在，见上
+                        continue;   // 这两行恒在（不知道时写「不知道」/「未知」）
                     }
                     if (item.GetProperty("present").GetBoolean())
                     {

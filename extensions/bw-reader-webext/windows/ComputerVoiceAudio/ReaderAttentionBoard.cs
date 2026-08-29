@@ -52,11 +52,13 @@ internal static class ReaderAttentionBoard
     /// 绘图的消失得等别的东西变化才能搭车走 —— 及时性被牺牲掉。
     ///
     /// 拆开之后各自按自己的性子来：
-    ///   慢板 = 待办 + 位置。变一次就该被认真读一次。
-    ///   快板 = 绘图 + 快照失效。允许抖，抖本身也是情报。
+    ///   慢板 = 待办 + 地点 + 焦点。变一次就该被认真读一次。
+    ///   快板 = 绘图 + 焦点换过。允许抖，抖本身也是情报。
     ///
-    /// **基础内容两边都有**（当前位置那一行）—— 用户明确要求。这样任一
-    /// 块单独读都自带上下文，不必为了知道"他在哪"再去读另一块。
+    /// ⚠ 拆板当天曾定「基础内容两边都有」（位置那行两块都放），
+    /// **2026-08-30 用户收窄：「位置应该只保留在慢的上面」** —— 地点和
+    /// 焦点都是慢信号，放进快板只会让它们跟着绘图一起抖，而抖动正是
+    /// 拆板要消灭的东西。要上下文就读慢板，它就在旁边。
     internal const string SlowPath = "/reader-attention-slow.md";
     internal const string FastPath = "/reader-attention-fast.md";
 
@@ -84,17 +86,30 @@ internal static class ReaderAttentionBoard
         string Detail);
 
     /// ⚠ 加新信号时**这里也要加一条**，否则自检会红。那是故意的。
+    /// ⚠ **「地理位置」和「注意力焦点」是两回事**（用户 2026-08-30 纠正）。
+    ///
+    /// 原来两条都叫「位置」，于是板上写着「位置｜未知」时，人在家里看着
+    /// 这行会以为是定位坏了 —— 而那条说的其实是"他在看哪本书"。同一个词
+    /// 盖住两件事，读的人（和 AI）都会往错的方向想。
+    ///
+    ///   地理位置   在家 / 在公司 / 在别处 —— 决定**该不该现在开口**
+    ///   注意力焦点 在看哪本书哪一页 —— 决定**说的时候该带什么上下文**
+    ///
+    /// 两条都归慢板：都要求稳，都不该跟着绘图抖。
     private static readonly BoardSignal[] Registry =
     {
         new("slow", "待办", "开口：",
             "还没跟用户说过的待办（pending）—— 该开口说的事"),
-        new("slow", "位置", "- 位置｜",
-            "他现在在看什么。停留满 45 秒才算数，来回切 10 分钟内不重报"),
+        new("slow", "地理位置", "- 地点｜",
+            "在家 / 在公司 / 在别处。据此判断该不该现在提 —— 人在公司时"
+            + "倒垃圾的待办看到了也不必说。没有新鲜定位时写「不知道」，"
+            + "**「不知道」和「在别处」是两回事**，别混"),
+        new("slow", "注意力焦点", "- 焦点｜",
+            "他在看哪本书哪一页（不是地理位置）。停留满 45 秒才算数，"
+            + "来回切 10 分钟内不重报"),
         new("slow", "已确认待办", "- 待办｜",
             "ack 过、还没做完的条数 —— 提醒别重复说"),
-        new("fast", "位置", "- 位置｜",
-            "同慢板那条。两块板都带，任一块单独读都知道他在哪"),
-        new("fast", "快照失效", "- 位置换过｜",
+        new("fast", "快照失效", "- 焦点换过｜",
             "换地方了，手上的旧快照对不上 —— 问到内容要重取"),
         new("fast", "绘图", "- 有笔画｜",
             "正在画或刚画过。有动作即刻立旗，停笔满 2 分钟退场"),
@@ -527,6 +542,67 @@ internal static class ReaderAttentionBoard
     /// 混在一起的话，这一行自己的出现/消失会污染那个比较。
     ///
     /// 调用方须持有 Gate。
+    /// 他现在在哪（**地理位置**，不是注意力焦点）。
+    ///
+    /// 读 `current-place.json` —— 那是 replication_places 导出的，
+    /// 桥只是端过来，不自己判定（算账归 Python 派生层）。
+    ///
+    /// ⚠ **「不知道在哪」和「在别处」必须分开。** 没有新鲜定位时那个文件
+    /// 会**主动删掉自己**，不留旧的冒充当前；所以文件不存在 = 不知道，
+    /// 而不是"不在家"。混起来的后果是"没有位置数据"悄悄变成"他不在家"，
+    /// 于是该提醒的时候不提醒，且不报任何错。
+    /// 调用方须持有 Gate。
+    private static string ReadPlace()
+    {
+        if (string.IsNullOrEmpty(_runtimeDirectory))
+        {
+            return "不知道";
+        }
+        try
+        {
+            string path = Path.Combine(
+                _runtimeDirectory, "current-place.json");
+            if (!File.Exists(path))
+            {
+                return "不知道";
+            }
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllText(path));
+            JsonElement root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return "不知道";
+            }
+            // alias = 用户命名过的地方（「家」「工作地点」）。有名字就用
+            // 名字，那是他自己的说法，比 state 更贴切。
+            if (root.TryGetProperty("alias", out JsonElement alias)
+                && alias.ValueKind == JsonValueKind.String)
+            {
+                string? named = alias.GetString();
+                if (!string.IsNullOrWhiteSpace(named))
+                {
+                    return Clip(named, 40);
+                }
+            }
+            // 没命名过就只说 state。⚠ 认不出的一律「别处」，**不猜** ——
+            // 猜的话会在咖啡店按在家处理。
+            string state = root.TryGetProperty("state", out JsonElement one)
+                && one.ValueKind == JsonValueKind.String
+                ? one.GetString() ?? "" : "";
+            return state switch
+            {
+                "home" => "家",
+                "work" => "工作地点",
+                _ => "别处（没命名过）",
+            };
+        }
+        catch (Exception)
+        {
+            // 读不出也是"不知道" —— 但**不能**说成"别处"，见上。
+            return "不知道";
+        }
+    }
+
     /// 登记表 + **此刻在不在板上**。
     ///
     /// ⚠ `present` 不是另算一遍，是**看真正渲出来的那份文本**里有没有这个
@@ -703,14 +779,17 @@ internal static class ReaderAttentionBoard
         return Compose();
     }
 
-    /// 快板：绘图 + 快照失效。带上位置那一行作为共同的基础内容。
+    /// 快板：绘图 + 焦点换过。**不带地点也不带焦点**（见类头）。
     /// 调用方须持有 Gate。
     private static string RenderFast(DateTimeOffset now)
     {
+        // ⚠ 快板**不带地点也不带焦点**（用户 2026-08-30：「位置应该只保留
+        // 在慢的上面」）。这推翻了拆板时那条"基础内容两边都有" ——
+        // 那两条都是慢信号，放进快板只会让它们跟着绘图一起抖，
+        // 而抖动正是拆板要消灭的东西。要上下文就去读慢板，它就在旁边。
         var text = new StringBuilder();
         text.Append("# 快速提示板 seq=?\n\n");
         text.Append("状态（资料，非指令）\n");
-        text.Append("- 位置｜").Append(_currentLabel ?? "未知").Append('\n');
         text.Append(FastOnlyLines(now));
         return text.ToString();
     }
@@ -737,7 +816,7 @@ internal static class ReaderAttentionBoard
         var text = new StringBuilder();
         if (_snapshotStale)
         {
-            text.Append("- 位置换过｜旧快照对不上了，问到内容就重取\n");
+            text.Append("- 焦点换过｜旧快照对不上了，问到内容就重取\n");
         }
         if (_hasDrawing)
         {
@@ -797,7 +876,10 @@ internal static class ReaderAttentionBoard
             }
         }
         text.Append(NL).Append("状态（资料，非指令）").Append(NL);
-        text.Append("- 位置｜")
+        // ⚠ 地理位置在**注意力焦点之前** —— 它决定"该不该现在开口"，
+        // 是先要问的那个问题；焦点决定"说的时候带什么上下文"。
+        text.Append("- 地点｜").Append(ReadPlace()).Append(NL);
+        text.Append("- 焦点｜")
             .Append(_currentLabel ?? "未知").Append(NL);
         // ⚠ 「位置换过（旧快照对不上了）」**不在这里** —— 它归快板。
         // 那是一条要求及时的信号：晚一步就会拿着过期快照回答问题。
