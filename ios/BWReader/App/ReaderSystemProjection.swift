@@ -45,6 +45,31 @@ final class ReaderSystemProjection {
         // 闹钟。围栏由**系统提醒 App** 监控与触发，我们只要提醒事项
         // 权限 —— 不需要定位权限，也不占我们自己的 region 配额。
         let place: Place?
+        /// 怎么送到用户面前：auto / silent / voice / call。
+        ///
+        /// ⚠ 2026-08-29 加。在此之前**一条待办建出来就同时走七条通道**，
+        /// 建它的人插不上话，"在公司别出声"这种要求无处表达。
+        ///
+        /// 缺省 auto —— 老条目没有这个字段，行为要跟它们被创建时一致。
+        let deliver: String
+    }
+
+    /// 这条待办该不该发出声音。
+    ///
+    /// ⚠ **只管"响不响"，不管"存不存"。** 无论哪一档，提醒事项、侧栏、
+    /// 小组件、手表都照常写 —— 那是"这件事存在"的记录，不是打扰。
+    /// 把两者混起来会让 silent 变成"这件事消失了"，那不是用户要的。
+    private static func makesNoise(_ item: Item) -> Bool {
+        switch item.deliver {
+        case "silent":
+            return false
+        case "voice", "call":
+            // ⚠ call 也算"要出声"：电话本身就是最强的打断，
+            // 再叠一个横幅只是吵两遍。
+            return item.deliver == "voice"
+        default:
+            return true   // auto
+        }
     }
 
     struct Place {
@@ -91,8 +116,12 @@ final class ReaderSystemProjection {
         // 到点触发（用户诉求「提醒要真的叫醒我」第一层）：带 dueAt 的
         // 条目在到点时刻**排一条本地通知** —— 一旦排上，App 关掉、桥
         // 离线、iPad 断网都照响，这是唯一不依赖任何在线环节的通道。
-        let dueState = await scheduleDueNotifications(armable)
-        let alarms = await ReaderSystemAlarms.shared.sync(armable)
+        // ⚠ 到点通知与系统闹钟**都属于"出声"**，所以 silent 的条目要挡在
+        // 外面 —— 只挡横幅而放行闹钟的话，用户在会议里照样被响一次，
+        // 那时他会正确地认为"这个开关没用"。
+        let noisy = armable.filter(Self.makesNoise)
+        let dueState = await scheduleDueNotifications(noisy)
+        let alarms = await ReaderSystemAlarms.shared.sync(noisy)
         return Outcome(
             resolvedIds: resolved,
             remindersState: state,
@@ -150,6 +179,13 @@ final class ReaderSystemProjection {
         var seen = Set(defaults?.stringArray(forKey: seenKey) ?? [])
         for item in items where item.state == "pending"
             && !seen.contains(item.id) {
+            // ⚠ silent 的条目**不弹横幅**，但下面仍会 seen.insert ——
+            // 否则每一轮都会重新考虑它一次，而"考虑"本身没有代价却
+            // 让这段逻辑显得像在漏事。它照样进提醒事项和侧栏。
+            guard Self.makesNoise(item) else {
+                seen.insert(item.id)
+                continue
+            }
             let content = UNMutableNotificationContent()
             content.title = item.title
             if !item.body.isEmpty { content.body = item.body }

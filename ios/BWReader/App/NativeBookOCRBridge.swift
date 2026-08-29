@@ -224,7 +224,10 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                                 body: one["body"] as? String ?? "",
                                 dueAtMs: (one["dueAtUtcMs"] as? NSNumber)?
                                     .int64Value,
-                                place: Self.parsePlace(one["place"]))
+                                place: Self.parsePlace(one["place"]),
+                                // 缺省 auto：老条目没有这个字段，
+                                // 行为必须跟它们被创建时一致。
+                                deliver: one["deliver"] as? String ?? "auto")
                         }
                     let review = raw["review"] as? [String: Any]
                     // 顺路把待办镜像到手表。挂在**已有的投影链路**上而不是

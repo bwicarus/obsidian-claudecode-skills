@@ -654,6 +654,70 @@ def export_replication_digests(
     return value
 
 
+_CALLED_FILE_NAME = "voip-called.json"
+
+
+def _place_voip_calls(store: Any, root: Path) -> int:
+    """给 `deliver=call` 且还没打过的待办各打一通电话。
+
+    ## ⚠ 每条只打一次
+
+    电话是最强的打断。打第二次不会让人更快去做那件事，只会让他下次
+    直接静音这个 App —— 那时连普通通知也一起失去了。所以打过就记下，
+    **靠文件跨重启存活**（内存里记的话，ReaderPC 一重启就会重打一遍）。
+
+    ## ⚠ 打不通不重试
+
+    APNs 拒绝（token 失效、环境不匹配）是**配置问题**，重试一百次也一样，
+    只会把日志刷满。如实记下原因，等人来看。
+
+    ## ⚠ 失败不能拖垮对账循环
+
+    这一整段包在调用方的 try 里，但这里也各自兜住 —— 打电话失败不该
+    让复习到期、自动关闭这些正事跟着一起不做。
+    """
+    called_path = root / _CALLED_FILE_NAME
+    try:
+        already = set(json.loads(
+            called_path.read_text(encoding="utf-8-sig")).get("ids") or [])
+    except (OSError, json.JSONDecodeError):
+        already = set()
+
+    targets = [
+        item for item in store.open_items()
+        if item.get("deliver") == "call"
+        and item.get("audience") == "user"
+        and item["id"] not in already
+    ]
+    if not targets:
+        return 0
+
+    placed = 0
+    try:
+        import voip_push
+    except ImportError:
+        return 0
+    for item in targets:
+        try:
+            result = voip_push.send_call(
+                root, item.get("title") or "BWReader", item.get("body") or "")
+        except Exception:  # noqa: BLE001
+            # 配置没就绪（没 token/没密钥）—— 记下来别再试，
+            # 但**不要**把这条待办标成打过：配置修好后它还该响。
+            continue
+        # ⚠ 只有**真的被 APNs 收下**才算打过。失败就不记 ——
+        # 记了的话配置修好之后它永远不会再响，而没人会发现。
+        if result.get("ok"):
+            already.add(item["id"])
+            placed += 1
+    if placed:
+        called_path.write_text(
+            json.dumps({"contract": "reader-voip-called/1",
+                        "ids": sorted(already)}, ensure_ascii=False),
+            encoding="utf-8")
+    return placed
+
+
 def run_once(
     local_root: Path, spool_directory: Path | None = None
 ) -> dict[str, Any]:
@@ -750,11 +814,17 @@ def run_once(
                     digests_path.parent
                     / replication_places.CURRENT_PLACE_FILE_NAME,
                 )
+                # deliver=call 的条目：真的打一通电话过去。
+                # ⚠ 放在**自动关闭之后**：可能这一轮它刚被 resolve 掉，
+                # 那就不该再打 —— 为一件已经完成的事把人吵醒，
+                # 是最伤信任的一种打扰。
+                called = _place_voip_calls(notify_store, local_root)
                 status["notifications"] = {
                     "open": len(notify_store.open_items()),
                     "expired": expired,
                     "autoResolved": auto,
                     "reviewDue": review_due,
+                    "called": called,
                 }
             except Exception as notify_error:  # noqa: BLE001
                 status["notificationsError"] = str(notify_error)[:500]

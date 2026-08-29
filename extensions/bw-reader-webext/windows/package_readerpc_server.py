@@ -56,6 +56,13 @@ RUNTIME_SOURCES = {
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "camera_capture.py"
     ),
+    # ⚠ 漏了它的话，对账循环里 `import voip_push` 会 ImportError，
+    # 而那处是 `except ImportError: return 0` —— 于是 deliver=call 的待办
+    # **静默地永远不响**，没有任何一处会报错（2026-08-29 差点漏掉）。
+    "readerpc-runtime/voip_push.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "voip_push.py"
+    ),
     "readerpc-runtime/transit_search.py": (
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "transit_search.py"
@@ -455,10 +462,16 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             if _sha256(installed.read_bytes()) != item["sha256"]:
                 _fail(f"安装 staging 摘要不匹配: {item['path']}")
         staging.replace(release)
+        # ⚠ **这是第二份清单。** 上面 RUNTIME_SOURCES 决定"打进包里"，
+        # 这里决定"铺到稳定路径"（%LOCALAPPDATA%/BWReader/*.py，AI 直接跑的
+        # 就是这些）。2026-08-29 只加了第一份，结果 voip_push.py 在包里、
+        # 却不在运行位置 —— 而调用方是 `except ImportError: return 0`，
+        # 于是 deliver=call **静默地永远不响**。
+        # 加新 CLI 时两份都要动。
         for stable_name in (
             "replication_activity.py", "replication_notifications.py",
             "replication_places.py", "transit_search.py",
-            "camera_capture.py",
+            "camera_capture.py", "voip_push.py",
         ):
             (root.parent / stable_name).write_bytes(
                 (release / "readerpc-runtime" / stable_name).read_bytes()
