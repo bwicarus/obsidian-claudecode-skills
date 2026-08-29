@@ -610,14 +610,15 @@ class DeliverModeTests(unittest.TestCase):
         for mode in ("auto", "silent", "voice"):
             self.assertIn(mode, message)
 
-    def test_call_mode_is_refused_because_it_does_not_exist(self) -> None:
-        # ⚠ 打电话在设计里但没有 APNs 通道。**不接受**它 ——
-        # 接受了就是承诺一个不存在的能力，而失败会是静默的：
-        # 调用方以为选了就有效，用户什么也收不到，没有一处会报错。
-        with self.assertRaises(NotificationError):
-            self.store.create(
-                kind="user-todo", title="x", audience="user",
-                end="never", deliver="call")
+    def test_call_mode_is_accepted_now_that_the_channel_exists(self) -> None:
+        # 2026-08-29 开放。这条用例此前断言的是**拒绝**，理由写着
+        # "不接受一个不存在的能力" —— 那条理由随通道建成而不成立了
+        # （Production APNs 密钥 + App 侧 PushKit/CallKit + Windows 推送器）。
+        # 规则变了就改断言，而不是留一条测过时行为的绿灯。
+        item = self.store.create(
+            kind="user-todo", title="必须现在知道的事", audience="user",
+            end="never", deliver="call")
+        self.assertEqual(item["deliver"], "call")
 
     def test_export_carries_deliver(self) -> None:
         # 设备侧要靠它决定出不出声，所以必须导出去 —— 只落库不导出的话，

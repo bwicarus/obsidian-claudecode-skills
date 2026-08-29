@@ -6,6 +6,11 @@
     <array>
         <string>group.space.bwicarus.bwreader2</string>
     </array>
+    <!-- VoIP 来电推送（2026-08-29）。用户在开发者后台把这把 APNs 密钥
+         配成 **Production** —— TestFlight 装的 App 走的正是 production
+         环境，选 Sandbox 的话推送永远到不了设备，而那个选项不可更改。 -->
+    <key>aps-environment</key>
+    <string>production</string>
     <key>keychain-access-groups</key>
     <array>
         <string>$(AppIdentifierPrefix)space.bwicarus.bwreader2.realtime</string>

@@ -62,6 +62,11 @@
     <key>UIBackgroundModes</key>
     <array>
         <string>audio</string>
+        <!-- VoIP：收到 PushKit 推送时被唤醒并向 CallKit 报来电。
+             ⚠ iOS 13 起这是**硬性要求** —— 每一个 VoIP push 都必须
+             立刻报一通来电，否则 App 会被系统杀掉、后续 push 被封。
+             所以这条通道只能真的响铃，不能拿来做普通通知。 -->
+        <string>voip</string>
     </array>
     <key>UILaunchScreen</key>
     <dict/>

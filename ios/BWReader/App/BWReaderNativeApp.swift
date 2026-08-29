@@ -45,6 +45,10 @@ final class BWReaderAppDelegate: NSObject, UIApplicationDelegate {
         // `nonisolated static` 正是为了能在这里（不在 MainActor 上）直接调。
         // 真正的激活在它内部切回主线程做。
         ReaderWatchLink.activateFromLaunch()
+        // VoIP 来电（通知阶梯最响的一级）。**必须在启动时注册**：
+        // ⚠ 晚注册 = token 迟迟拿不到，而没有 token 就永远打不进来 ——
+        // 且这个失败完全静默：发送方推了、APNs 收下了、设备上什么也没发生。
+        Task { @MainActor in ReaderVoipCall.shared.start() }
         // ⚠ 启动时看一眼本地缓存有没有胀大。
         // 2026-08-28:页图带着一年 immutable 缓存头,整本预热又渲染每一页、
         // 每页多个宽度 —— 涨到 54 GB 把 IndexedDB 配额撑爆,表现是

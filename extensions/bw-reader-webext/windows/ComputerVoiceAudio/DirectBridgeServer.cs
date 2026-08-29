@@ -653,6 +653,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             ReaderAttentionBoard.AckPath,
             new[] { "GET", "POST", "OPTIONS" },
             context => HandleAttentionAckAsync(context, serviceToken));
+        // VoIP 来电的设备 token。App 每次拿到都会上报（token 会因重装、
+        // 恢复备份、系统更新而变）。⚠ 没有它就永远打不进来，而且失败
+        // 完全静默：推送方推了、APNs 收下了、设备上什么也没发生。
+        app.MapMethods(
+            "/reader-voip/token",
+            new[] { "POST", "OPTIONS" },
+            context => HandleVoipTokenAsync(context, serviceToken));
         app.MapFallback(context =>
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
@@ -1533,6 +1540,62 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         await ReaderAttentionBoard
             .WriteBoardAsync(context, serviceCancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// 收下 App 上报的 VoIP 推送 token，写进 runtime 目录给推送方读。
+    ///
+    /// ⚠ 每次上报都覆盖写，不做"没变就跳过"的优化：少存一次的代价是
+    /// 电话永远打不进来，多存一次只是一次几百字节的写。
+    private async Task HandleVoipTokenAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!PrepareOutputCors(context, "POST, OPTIONS")) return;
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        string token;
+        try
+        {
+            using JsonDocument body = await JsonDocument
+                .ParseAsync(
+                    context.Request.Body,
+                    cancellationToken: serviceCancellationToken)
+                .ConfigureAwait(false);
+            token = body.RootElement.TryGetProperty("token", out JsonElement t)
+                && t.ValueKind == JsonValueKind.String
+                ? (t.GetString() ?? string.Empty)
+                : string.Empty;
+        }
+        catch (JsonException)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return;
+        }
+        // APNs 的 device token 是十六进制串。形状不对就拒 —— 存下一个
+        // 坏 token 的表现是 APNs 回 BadDeviceToken，而那看起来像别的问题。
+        if (token.Length is < 32 or > 200
+            || !token.All(Uri.IsHexDigit))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, code = "BW_VOIP_TOKEN_SHAPE" },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        string path = Path.Combine(_runtimeDirectory, "voip-token.json");
+        string temporary = path + ".tmp-" + Environment.ProcessId;
+        await File.WriteAllTextAsync(
+            temporary,
+            "{\"contract\":\"reader-voip-token/1\",\"token\":\""
+                + token.ToLowerInvariant() + "\"}",
+            serviceCancellationToken).ConfigureAwait(false);
+        File.Move(temporary, path, overwrite: true);
+        await context.Response.WriteAsJsonAsync(
+            new { ok = true },
+            serviceCancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleAttentionAckAsync(
