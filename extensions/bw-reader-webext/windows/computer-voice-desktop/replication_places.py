@@ -41,6 +41,35 @@ CLUSTER_RADIUS_M = 120.0     # 微小位置变化不分裂成多个位置
 ALIAS_HIT_RADIUS_M = 200.0   # 别名命中的宽容半径
 CURRENT_WINDOW_MINUTES = 30  # 「当前位置」的新鲜度窗口
 
+# 「在哪」→「处于什么状态」。用户 2026-08-29：把位置扩展成一种状态
+# （在家 / 在工作 / …）。下游要的从来不是坐标，是**该怎么打扰他**：
+# 在家可以出声，在工作只能无声。
+#
+# ⚠ 为什么按**别名的名字**匹配，而不是给别名加一个 kind 字段：
+# 命名发生在语音里随口一句「这里是家」，那一刻没有地方问他"这属于哪一类"。
+# 加 kind 就等于要求命名时先选类型，会把一个零摩擦的动作变成一次问答。
+# 所以名字本身就是分类依据 —— 这里只是把**已经存在的那份命名**读出来。
+PLACE_STATE_BY_ALIAS = {
+    "家": "home",
+    "自宅": "home",
+    "工作地点": "work",
+    "公司": "work",
+    "职场": "work",
+}
+
+
+def place_state(alias: str | None) -> str:
+    """别名 → 状态。**不认识就是 elsewhere，绝不猜。**
+
+    ⚠ 「不知道在哪」和「在别处」是两回事，由调用方区分：
+    没有 current-place.json = 不知道（见 export_current_place 的说明），
+    有文件但别名不认识 = 确实在别处。把两者混起来，会让"没有位置数据"
+    悄悄变成"他不在家"，于是该出声的时候不出声 —— 而且不会报错。
+    """
+    if not alias:
+        return "elsewhere"
+    return PLACE_STATE_BY_ALIAS.get(alias.strip(), "elsewhere")
+
 
 def default_root() -> Path:
     return Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "BWReader"
@@ -312,12 +341,16 @@ def export_current_place(root: Path, export_path: Path) -> dict | None:
             )
         except Exception:
             pass
+    alias = resolve_alias(root, latest["lat"], latest["lon"])
     value = {
         "contract": "reader-current-place/1",
         "lat": round(latest["lat"], 6),
         "lon": round(latest["lon"], 6),
         "geoName": latest["name"],
-        "alias": resolve_alias(root, latest["lat"], latest["lon"]),
+        "alias": alias,
+        # 归好类再导出，省得每个下游各自去认那几个名字 ——
+        # 各认各的迟早认岔（改了别名却只改了一处）。
+        "state": place_state(alias),
         "observedAtUtcMs": latest["atUtcMs"],
     }
     temporary = export_path.with_suffix(".tmp")

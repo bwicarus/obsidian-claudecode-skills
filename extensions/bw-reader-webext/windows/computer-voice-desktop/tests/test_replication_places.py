@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+import shutil
 import tempfile
 import time
 import unittest
@@ -144,3 +145,58 @@ class ManualNamingTests(unittest.TestCase):
         self.assertIsNone(value["alias"], "过时挂起绝不错绑")
         self.assertFalse(
             (self.root / rp.PENDING_NAME_FILE_NAME).exists())
+
+
+class PlaceStateTests(unittest.TestCase):
+    """位置 → 状态。这层存在的理由是下游要的不是坐标，是「该怎么打扰他」。"""
+
+    def test_known_aliases_map_to_states(self) -> None:
+        self.assertEqual(replication_places.place_state("家"), "home")
+        self.assertEqual(replication_places.place_state("工作地点"), "work")
+
+    def test_unknown_alias_is_elsewhere_not_a_guess(self) -> None:
+        # ⚠ 不认识就是 elsewhere。猜的话会在「在咖啡店」时按在家处理，
+        # 而那正是会出声打扰人的那一档。
+        self.assertEqual(replication_places.place_state("星巴克"), "elsewhere")
+
+    def test_no_alias_is_elsewhere(self) -> None:
+        self.assertEqual(replication_places.place_state(None), "elsewhere")
+        self.assertEqual(replication_places.place_state(""), "elsewhere")
+
+    def test_export_carries_state(self) -> None:
+        # 归类要在导出时就做好 —— 让每个下游自己去认那几个名字，
+        # 迟早认岔（改了别名却只改了一处）。
+        # ⚠ 夹具必须按 _load_located_dwell 真正读的那个形状写
+        # （replication-data/<book>/<活动文件>，body.kind=dwell + body.loc）。
+        # 第一版我写成了另一种形状，于是用例自己 skip 掉了 ——
+        # 一个 skip 就是一个静默的洞：它看起来是绿的，其实什么都没验。
+        import replication_activity
+        root = Path(tempfile.mkdtemp())
+        try:
+            replication_places.save_alias(root, "家", 35.65318, 139.31593)
+            book = root / "replication-data" / "bk"
+            book.mkdir(parents=True, exist_ok=True)
+            record = {
+                "receivedAtUtcMs": int(time.time() * 1000),
+                "body": {
+                    "kind": "dwell",
+                    "loc": {
+                        "lat": 35.65318,
+                        "lon": 139.31593,
+                        "name": "散田町",
+                    },
+                    "entries": [{"secs": 600}],
+                },
+            }
+            (book / replication_activity.ACTIVITY_FILE_NAME).write_text(
+                json.dumps(record, ensure_ascii=False) + "\n",
+                encoding="utf-8")
+            export = root / "runtime" / "current-place.json"
+            value = replication_places.export_current_place(root, export)
+            self.assertIsNotNone(
+                value,
+                "夹具没被 _load_located_dwell 认出来 —— 这是测试写错了")
+            self.assertEqual(value["alias"], "家")
+            self.assertEqual(value["state"], "home")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
