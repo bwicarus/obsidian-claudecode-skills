@@ -66,6 +66,14 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     internal static readonly TimeSpan ShutdownRequestPollInterval =
         TimeSpan.FromMilliseconds(100);
 
+    /// 多久把两块提示板落一次盘。
+    ///
+    /// 1 秒 —— 跟对面原来轮询这块板的频率一样（2026-08-29 实测每秒 1 次），
+    /// 所以这不是新增负担，是把同一份工作从"它来拉"改成"我们来推"。
+    /// 空转一轮不写盘，只在内容变化时才落。
+    internal static readonly TimeSpan AttentionBoardFlushInterval =
+        TimeSpan.FromSeconds(1);
+
     internal static bool TryConsumeShutdownRequest(
         string runtimeDirectory,
         string serviceInstanceId)
@@ -653,6 +661,17 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             ReaderAttentionBoard.AckPath,
             new[] { "GET", "POST", "OPTIONS" },
             context => HandleAttentionAckAsync(context, serviceToken));
+        // ⚠ 新增路由记得同时加进 `tailscale serve` 的白名单 —— 那是
+        // 一份**逐条**的路径清单，没加的新地址一律 404。这个坑 2026-08-29
+        // 踩过两次（/reader-voip/token，然后 outcome+hangup）。
+        app.MapMethods(
+            ReaderAttentionBoard.SlowPath,
+            new[] { "GET", "OPTIONS" },
+            context => HandleAttentionSlowAsync(context, serviceToken));
+        app.MapMethods(
+            ReaderAttentionBoard.FastPath,
+            new[] { "GET", "OPTIONS" },
+            context => HandleAttentionFastAsync(context, serviceToken));
         // VoIP 来电的设备 token。App 每次拿到都会上报（token 会因重装、
         // 恢复备份、系统更新而变）。⚠ 没有它就永远打不进来，而且失败
         // 完全静默：推送方推了、APNs 收下了、设备上什么也没发生。
@@ -694,6 +713,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         Task? queryRpcTask = null;
         CancellationTokenSource? shutdownRequestLifetime = null;
         Task? shutdownRequestTask = null;
+        Task? attentionBoardTask = null;
         try
         {
             await app.StartAsync(serviceToken).ConfigureAwait(false);
@@ -706,6 +726,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     serviceLifetime.Cancel();
                     app.Lifetime.StopApplication();
                 },
+                shutdownRequestLifetime.Token);
+            // 两块提示板落盘（对面靠文件变化触发读取）。跟着服务的生命周期走。
+            attentionBoardTask = MonitorAttentionBoardAsync(
                 shutdownRequestLifetime.Token);
             visualRpcLifetime =
                 CancellationTokenSource.CreateLinkedTokenSource(
@@ -766,6 +789,19 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 try
                 {
                     await shutdownRequestTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+            // 提示板落盘循环跟 shutdownRequestLifetime 共用一个 token，
+            // 上面 Cancel 过了 —— 这里只是等它真的停下来再 Dispose，
+            // 否则 PeriodicTimer 会在已释放的 token 上醒来。
+            if (attentionBoardTask is not null)
+            {
+                try
+                {
+                    await attentionBoardTask.ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -1585,6 +1621,70 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         await ReaderAttentionBoard
             .WriteBoardAsync(context, serviceCancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// 慢板 / 快板各自的地址（2026-08-30 拆板）。文件才是主消费方式，
+    /// 这两个地址给「想立刻看一眼」的场合用。
+    private async Task HandleAttentionSlowAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!PrepareOutputCors(context, "GET, OPTIONS")) return;
+        if (!HttpMethods.IsGet(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        await ReaderAttentionBoard
+            .WriteSlowAsync(context, serviceCancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task HandleAttentionFastAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!PrepareOutputCors(context, "GET, OPTIONS")) return;
+        if (!HttpMethods.IsGet(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        await ReaderAttentionBoard
+            .WriteFastAsync(context, serviceCancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// 周期把两块板落成文件。
+    ///
+    /// ⚠ 为什么要一个循环，而不是在状态变化时顺手写：待办的真值库是
+    /// **别的进程**在改（replication_notifications.py），桥不会被通知。
+    /// 而且绘图那条到点退场也需要有人在到点后推一把 —— 没有循环的话，
+    /// 停笔之后板子会一直挂着"有笔画"，直到下一次碰巧有人读它。
+    ///
+    /// 空转一轮的代价是读一个小 JSON + 拼几十字节字符串；真正的写盘
+    /// 只在内容变化时发生（见 FlushFilesAsync）。
+    private static async Task MonitorAttentionBoardAsync(
+        CancellationToken cancellationToken)
+    {
+        using PeriodicTimer timer = new(AttentionBoardFlushInterval);
+        try
+        {
+            await ReaderAttentionBoard
+                .FlushFilesAsync(cancellationToken)
+                .ConfigureAwait(false);
+            while (await timer.WaitForNextTickAsync(cancellationToken)
+                .ConfigureAwait(false))
+            {
+                await ReaderAttentionBoard
+                    .FlushFilesAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 正常收摊。
+        }
     }
 
     /// 收下 App 上报的 VoIP 推送 token，写进 runtime 目录给推送方读。

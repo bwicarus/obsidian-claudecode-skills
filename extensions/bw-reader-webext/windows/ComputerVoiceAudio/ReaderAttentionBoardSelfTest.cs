@@ -208,6 +208,60 @@ internal static class ReaderAttentionBoardSelfTest
         }
         checks.Add("attention-board-ink-does-not-churn");
 
+        // ⑨ 拆板（用户 2026-08-30）：慢板要稳，快板要及时。
+        //
+        // 这一组的核心是**负控制**那条 —— 「慢板不因绘图而变」。没有它，
+        // 拆板等于没拆：两块板照样一起抖，而表面上看一切正常。
+        ReaderAttentionBoard.ResetForSelfTest(dir);
+        WriteTodos(dir, "垃圾投放提醒");
+        ReaderAttentionBoard.NoteLocation("bk", "食文化の本 p.26", t0);
+        DateTimeOffset t1 = t0 + TimeSpan.FromMinutes(2);
+        ReaderAttentionBoard.NoteLocation("bk", "食文化の本 p.26", t1);
+        string slowBefore = ReaderAttentionBoard.RenderSlowForSelfTest(t1);
+        ReaderAttentionBoard.NoteDrawing(t1);
+        string slowAfter = ReaderAttentionBoard.RenderSlowForSelfTest(t1);
+        if (!string.Equals(slowBefore, slowAfter, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "开始绘图把慢板也改了 —— 拆板就是为了让待办不跟着抖");
+        }
+        checks.Add("attention-board-slow-ignores-ink");
+
+        string fastNow = ReaderAttentionBoard.RenderFastForSelfTest(t1);
+        if (!fastNow.Contains("有笔画", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("快板上没有笔画");
+        }
+        if (slowAfter.Contains("有笔画", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("笔画漏进了慢板");
+        }
+        if (!slowAfter.Contains("垃圾投放提醒", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("待办没在慢板上");
+        }
+        if (fastNow.Contains("垃圾投放提醒", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("待办漏进了快板");
+        }
+        // 「基础的内容是相同的」—— 用户明确要求：两块单独读都要知道他在哪。
+        if (!slowAfter.Contains("食文化の本", StringComparison.Ordinal)
+            || !fastNow.Contains("食文化の本", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("位置没有同时出现在两块板上");
+        }
+        checks.Add("attention-board-split-routes-each-signal");
+
+        // 快板到点就退场，**不用等别的变化搭车**（那条规矩只对慢板成立）。
+        DateTimeOffset t2 = t1 + TimeSpan.FromMinutes(3);
+        if (ReaderAttentionBoard.RenderFastForSelfTest(t2)
+            .Contains("有笔画", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "停笔够久了快板还挂着笔画 —— 快板要的是及时，不是稳定");
+        }
+        checks.Add("attention-board-fast-retires-on-time");
+
         // 把一份典型的板子带进结果：格式的活文档，也让"悄悄变啰嗦"看得见。
         ReaderAttentionBoard.ResetForSelfTest(dir);
         WriteTodos(dir, "垃圾投放提醒");
