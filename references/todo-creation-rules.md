@@ -117,13 +117,16 @@ python replication_notifications.py create \
 
 条目有唯一编号（`ntf-` + 12 位 hex）。
 
+⚠ **编号是位置参数，不是 `--id`。**（我第一版把它写成 `--id` 了，
+而且是在说完"逐条核实过"之后 —— 实测时当场报 `unrecognized arguments`。）
+
 ```bash
-python replication_notifications.py ack     --id ntf-xxxx   # 我看到了
-python replication_notifications.py resolve --id ntf-xxxx   # 完成
-python replication_notifications.py cancel  --id ntf-xxxx   # 撤销
-python replication_notifications.py update  --id ntf-xxxx \
+python replication_notifications.py ack     ntf-xxxx           # 我看到了
+python replication_notifications.py resolve ntf-xxxx [--note …] # 完成
+python replication_notifications.py cancel  ntf-xxxx [--note …] # 撤销
+python replication_notifications.py update  ntf-xxxx \
     [--title …] [--body …] [--activate-date …] [--expires-hours …]
-python replication_notifications.py list                    # 看现在有哪些
+python replication_notifications.py list                        # 看现在有哪些
 ```
 
 ⚠ `update` **只能改这四项**（title / body / activate-date / expires-hours）。
