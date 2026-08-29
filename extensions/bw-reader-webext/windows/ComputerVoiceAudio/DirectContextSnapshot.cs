@@ -1748,6 +1748,15 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     lastEditedAtSeconds is double seconds
                         ? (long)(seconds * 1000)
                         : 0);
+                // 顺路告诉提示板。**只传结论，不重算稳定判据** ——
+                // "什么算稳定"留在这一处，板子那边不该有第二套。
+                ReaderAttentionBoard.NoteDrawingStable(DateTimeOffset.UtcNow);
+            }
+            else
+            {
+                // 还在画（或这次折叠没让它变稳定）：只记时间，不动板子。
+                // 用户明说持续绘图时板子不该更新。
+                ReaderAttentionBoard.NoteDrawingActivity(DateTimeOffset.UtcNow);
             }
         }
         else if (contextEvent.Type == "command-failed")

@@ -181,6 +181,33 @@ internal static class ReaderAttentionBoardSelfTest
         }
         checks.Add("attention-board-skips-ai-audience");
 
+        // ⑧ 笔画：稳定 → 立旗；**持续画 → 一个字都不改**。
+        ReaderAttentionBoard.ResetForSelfTest(dir);
+        WriteTodos(dir);
+        ReaderAttentionBoard.NoteDrawingStable(t0);
+        // ⚠ 渲染要传**同一条时间轴**上的时刻。不传的话默认用真实时钟，
+        // 而夹具的 t0 是 1970 —— 一渲染就被判成"停笔十几万小时"，
+        // 笔画那行当场退场。第一版就栽在这里，报的却是"没上板子"。
+        if (!ReaderAttentionBoard.RenderForSelfTest(t0)
+            .Contains("有笔画", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("笔画稳定了却没上板子");
+        }
+        long afterInk = ReaderAttentionBoard.Health().Sequence;
+        // ⚠ 关键那条：用户 2026-08-29「即使我持续在绘图，这个信息也不需要
+        // 被更新」。对面是"变了就读"，多一次变化就是白花它一次读取。
+        for (int i = 1; i <= 5; i++)
+        {
+            ReaderAttentionBoard.NoteDrawingStable(
+                t0 + TimeSpan.FromSeconds(10 * i));
+        }
+        if (ReaderAttentionBoard.Health().Sequence != afterInk)
+        {
+            throw new InvalidOperationException(
+                "持续绘图把板子刷新了 —— 每一次都白花对面一次读取");
+        }
+        checks.Add("attention-board-ink-does-not-churn");
+
         // 把一份典型的板子带进结果：格式的活文档，也让"悄悄变啰嗦"看得见。
         ReaderAttentionBoard.ResetForSelfTest(dir);
         WriteTodos(dir, "垃圾投放提醒");

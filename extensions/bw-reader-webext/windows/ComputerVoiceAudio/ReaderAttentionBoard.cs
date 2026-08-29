@@ -64,6 +64,17 @@ internal static class ReaderAttentionBoard
     /// 不违背「桥不算账」那条（算账是指聚合、推导、判定）。
     private static string? _storeDirectory;
 
+    /// 停笔多久之后，「有笔画」这条才该退场。
+    /// ⚠ 退场**不是**到点自己走：到点只是变得「可以走」，真正消失要等
+    /// 下一次本来就要发生的变化 —— 用户 2026-08-29：「一段时间没有绘图
+    /// 且其他方面的信息进行了更新后伴随着消失」。一次纯由时钟驱动的
+    /// 消失，对面读到的新情报是零。
+    private static readonly TimeSpan DrawingIdleWindow =
+        TimeSpan.FromMinutes(15);
+
+    private static bool _hasDrawing;
+    private static DateTimeOffset _drawingLastAt;
+
     private static string? _currentKey;
     private static string? _currentLabel;
     private static bool _snapshotStale;
@@ -83,6 +94,10 @@ internal static class ReaderAttentionBoard
     private static DateTimeOffset _lastReadAt;
     private static long _readCount;
     private static string _lastBody = string.Empty;
+
+    /// 上一次的**主体**（不含「有笔画」那一行）。用来判断"别的东西变了
+    /// 没有" —— 见 WriteBoardAsync 里的说明。
+    private static string _lastCore = string.Empty;
 
     /// runtime 目录 —— 那几个已有的 json 就在这里。
     internal static void Configure(string runtimeDirectory)
@@ -158,6 +173,39 @@ internal static class ReaderAttentionBoard
         }
     }
 
+    /// 笔画**刚刚变稳定**（快照那边已经算好了 `visual.drawing.stable`，
+    /// 这里只接结论，不重算 —— 判据只有一处）。
+    ///
+    /// ⚠ **一直在画的时候不要更新板子。** 用户 2026-08-29 明说：
+    /// 「即使我持续在绘图，这个信息也不需要被更新」。所以已经立着的旗
+    /// 再来多少次稳定信号都**不算变化** —— 对面是"变了就读"，
+    /// 每一次无谓的变化都在白花它一次读取。
+    ///
+    /// 这一条是**静默**的：它进「状态」不进「开口」。它要说的是
+    /// 「用户问到相关内容时，先去看当前的绘图」，不是「现在打断他」。
+    internal static void NoteDrawingStable(DateTimeOffset now)
+    {
+        lock (Gate)
+        {
+            _drawingLastAt = now;
+            if (_hasDrawing)
+            {
+                return;   // 已经立着了 —— 一个字都不改
+            }
+            _hasDrawing = true;
+            _sequence++;
+        }
+    }
+
+    /// 笔画在动（还没稳定）。只记时间，**不动板子**。
+    internal static void NoteDrawingActivity(DateTimeOffset now)
+    {
+        lock (Gate)
+        {
+            _drawingLastAt = now;
+        }
+    }
+
     /// 它去取了一次新快照 —— 「你手上的快照对不上」这句不再成立。
     /// 按事实清除，不按时间清除。
     internal static void NoteSnapshotFetched()
@@ -182,7 +230,7 @@ internal static class ReaderAttentionBoard
         {
             _lastReadAt = DateTimeOffset.UtcNow;
             _readCount++;
-            body = Compose();
+            body = RenderBoard(DateTimeOffset.UtcNow);
             // 内容真的变了才推进 seq —— 它是给测量用的，
             // 必须只数**有情报的**那些变化。
             if (!string.Equals(body, _lastBody, StringComparison.Ordinal))
@@ -356,6 +404,34 @@ internal static class ReaderAttentionBoard
         }
     }
 
+    /// 板子的**唯一**组装口。HTTP 路径和自检都走这里 ——
+    /// ⚠ 分成两条的话，自检测的就不是真正端出去的那份
+    /// （2026-08-29 犯过：笔画行只拼在 HTTP 路径里，自检看不见它，
+    /// 于是自检报"笔画稳定了却没上板子"，而真实路径其实是对的）。
+    ///
+    /// 「有笔画」这一行**在主体之外拼**：它的退场规则是
+    /// "停笔够久 **且** 别的东西变了才走"（用户 2026-08-29）。要判断
+    /// "别的东西变了"，就得先有一份**不含这一行**的主体去跟上一次比 ——
+    /// 混在一起的话，这一行自己的出现/消失会污染那个比较。
+    ///
+    /// 调用方须持有 Gate。
+    private static string RenderBoard(DateTimeOffset now)
+    {
+        string core = Compose();
+        if (_hasDrawing
+            && now - _drawingLastAt > DrawingIdleWindow
+            && !string.Equals(core, _lastCore, StringComparison.Ordinal))
+        {
+            // 停笔够久，而且这一轮别的东西确实变了 —— 搭这趟车走。
+            // 它的消失并进这次变化，不自成一次没有情报的变化。
+            _hasDrawing = false;
+        }
+        _lastCore = core;
+        return core + (_hasDrawing
+            ? "- 有笔画｜用户问到相关内容时，先看当前的绘图\n"
+            : string.Empty);
+    }
+
     /// ⚠ 状态的纯函数：同样的状态必须产出同样的字节。
     /// seq 由调用方填 —— 它是"第几次有情报的变化"，不属于状态本身。
     private static string Compose()
@@ -426,11 +502,13 @@ internal static class ReaderAttentionBoard
     }
 
     /// 只给自检用。
-    internal static string RenderForSelfTest()
+    internal static string RenderForSelfTest(DateTimeOffset? now = null)
     {
         lock (Gate)
         {
-            return Compose();
+            // ⚠ 必须走 RenderBoard，不能直接 Compose ——
+            // 直接 Compose 的话自检看到的就不是真正端出去的那份。
+            return RenderBoard(now ?? DateTimeOffset.UtcNow);
         }
     }
 
@@ -463,6 +541,9 @@ internal static class ReaderAttentionBoard
             _lastReadAt = default;
             _readCount = 0;
             _lastBody = string.Empty;
+            _lastCore = string.Empty;
+            _hasDrawing = false;
+            _drawingLastAt = default;
         }
     }
 
