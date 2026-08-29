@@ -43,6 +43,14 @@ final class ReaderVoipCall: NSObject {
     private var ringingSince: Date?
     private var answeredAt: Date?
 
+    /// 接通那一刻的 answered 有没有**真的报上去**。
+    ///
+    /// 挂断那一路照旧要回报（declined / unanswered 只有那时才判得出），
+    /// 但对 answered 就成了重复 —— 而桥每收一次上报就把 attempts 加一，
+    /// 于是一通电话看起来像打了两通。所以：接通时报成功了，挂断时就跳过；
+    /// 接通时那次失败了，挂断时正好补上。
+    fileprivate var answeredReported = false
+
     /// 这通电话是为哪条待办打的。AI 发起时经推送载荷带进来，
     /// 挂断时随结局一起回报 —— 没有它，Windows 侧不知道该给谁记账。
     private var currentNotificationId: String?
@@ -163,6 +171,7 @@ final class ReaderVoipCall: NSObject {
         // 而"拒接还是没接"全靠它们分辨。
         ringingSince = Date()
         answeredAt = nil
+        answeredReported = false
         let update = CXCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: title)
         update.hasVideo = false
@@ -273,6 +282,32 @@ extension ReaderVoipCall: CXProviderDelegate {
             // 而我们要的是结束当前这通。轮询土但对，通话只有几十秒。
             ReaderVoipCall.shared.startHangupWatch()
             action.fulfill()
+            // ⚠⚠ **接通就要立刻回报，不能等挂断。**
+            //
+            // 2026-08-30 用户实测：「虽然能够立刻接通但是 AI 迟迟不确定
+            // 通话是否接通」。原因是回报只写在 CXEndCallAction 里 ——
+            // 也就是**挂断时**。于是形成一个死锁：
+            //
+            //   AI 阻塞等 answered → 这个信号只在挂断时发出
+            //   → AI 不开口 → 用户不知道该不该挂 → 一直僵着
+            //
+            // 上一次实测拿到 answered，是因为用户自己先挂了电话。
+            //
+            // ⚠ 放在 fulfill **之后**：CallKit 对 action 有超时，
+            // 不能让一次网络往返把它拖过去。
+            //
+            // ⚠ 报的是「电话被接起来了」，不是「音频链路好了」。这两件
+            // 事故意分开：链路失败已经由拨号前的闸拦掉了
+            // （voip_push 的 voice_route_block），而把回报押在链路成功
+            // 上的话，一旦 start() 失败 AI 就永远等不到，只能超时后
+            // 当成没人接去重拨 —— 明明用户接了。
+            //
+            // 挂断那一路的回报**照旧保留**：declined / unanswered 只有
+            // 那时才判得出；对 answered 是幂等的重复，正好兜住这一次
+            // POST 失败的情况。
+            let reported = await ReaderVoipOutcomeUpload.send(
+                outcome: "answered")
+            ReaderVoipCall.shared.answeredReported = reported
         }
     }
 
@@ -325,7 +360,14 @@ extension ReaderVoipCall: CXProviderDelegate {
             NativeAudioEngine.isUnderSystemCall = false
             // ⚠ 回报**之后**才清 notificationId —— 清早了 Windows 侧
             // 就不知道这个结局属于哪条待办，那条会永远卡在"已拨出"。
-            await ReaderVoipOutcomeUpload.send(outcome: outcome)
+            //
+            // ⚠ answered 可能在**接通那一刻**已经报过了（见 CXAnswerCall）。
+            // 报过就不再报：桥每收一次上报就把 attempts 加一，重复会让
+            // 一通电话看起来像打了两通。没报成功才在这里补。
+            if !(outcome == "answered" && call.answeredReported) {
+                await ReaderVoipOutcomeUpload.send(outcome: outcome)
+            }
+            call.answeredReported = false
             call.currentNotificationId = nil
             action.fulfill()
         }
@@ -373,12 +415,16 @@ extension ReaderVoipCall: CXProviderDelegate {
 /// ⚠ 报不上去的后果是"这条待办卡在'已拨出'状态"：不会重拨、也不会降级，
 /// 用户什么也收不到。所以这里跟 token 上报一样 —— **失败必须留痕**。
 enum ReaderVoipOutcomeUpload {
-    static func send(outcome: String) async {
+    /// 返回**是否真的报上去了**。调用方据此决定要不要在下一个时机补一次
+    /// —— 桥每收到一次上报就把 attempts 加一，所以"为保险起见多报一次"
+    /// 是有代价的：attempts 虚增会让一通电话看起来像打了两通。
+    @discardableResult
+    static func send(outcome: String) async -> Bool {
         let ntfId = await MainActor.run {
             ReaderVoipCall.shared.currentNotificationIdForReport
         }
         let target = "https://bwicarus-2.taile44d0c.ts.net/reader-voip/outcome"
-        guard let url = URL(string: target) else { return }
+        guard let url = URL(string: target) else { return false }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -392,10 +438,13 @@ enum ReaderVoipOutcomeUpload {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             if code != 200 {
                 await ReaderVoipCall.note("结局回报被拒 HTTP \(code)")
+                return false
             }
+            return true
         } catch {
             await ReaderVoipCall.note(
                 "结局回报失败：" + error.localizedDescription)
+            return false
         }
     }
 }
