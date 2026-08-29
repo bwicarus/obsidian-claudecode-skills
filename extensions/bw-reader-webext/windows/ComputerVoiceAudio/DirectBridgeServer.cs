@@ -1439,12 +1439,41 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             serviceCancellationToken).ConfigureAwait(false);
     }
 
+    /// App 直连这台机器时的鉴权：**只查 Tailscale 身份，不要求 Origin**。
+    ///
+    /// ⚠ 为什么不用 PrepareOutputCors（2026-08-29 实测的教训）：
+    /// 它要 Origin 且要在白名单里，而 App 用 URLSession 直连时发的 origin
+    /// 是 `https://bwicarus-2.…`，白名单里没有 —— 结果 403。
+    /// 小组件走的正是这条不要 Origin 的路，而它一直是通的。
+    ///
+    /// 安全边界没有变松：`Tailscale-User-Login` 由 tailscale serve 注入，
+    /// 客户端伪造不了；Kestrel 只绑回环，外部只能经 tailscale serve 进来。
+    ///
+    /// 返回 false = 响应已写好，调用方直接 return。
+    private bool AllowTailscaleClient(HttpContext context, string what)
+    {
+        if (HttpMethods.IsOptions(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status204NoContent;
+            return false;
+        }
+        if (!TailscaleLoginMatches(
+            _configStore.Load(),
+            context.Request.Headers["Tailscale-User-Login"]))
+        {
+            // 拒绝也要出声 —— 否则"一直不通"时完全看不到它来过。
+            AppendOutputPickupLog(what + "-denied\tidentity");
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return false;
+        }
+        return true;
+    }
+
     private async Task HandleLibraryUploadAsync(
         HttpContext context,
         CancellationToken serviceCancellationToken)
     {
-        // 与其它出站端点同一道闸:Origin 白名单 + Tailscale 注入的身份头。
-        if (!PrepareOutputCors(context, "POST, OPTIONS")) return;
+        if (!AllowTailscaleClient(context, "library-upload")) return;
         if (!HttpMethods.IsPost(context.Request.Method))
         {
             context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
@@ -1516,7 +1545,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         HttpContext context,
         CancellationToken serviceCancellationToken)
     {
-        if (!PrepareOutputCors(context, "POST, OPTIONS")) return;
+        if (!AllowTailscaleClient(context, "library-list")) return;
         if (!HttpMethods.IsPost(context.Request.Method))
         {
             context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
@@ -1558,23 +1587,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         // 而且看不出是"发了被拒"还是"根本没发"。
         // 安全边界没有变松：Tailscale-User-Login 由 tailscale serve 注入，
         // 伪造不了；Kestrel 也只绑回环。
-        if (HttpMethods.IsOptions(context.Request.Method))
-        {
-            context.Response.StatusCode = StatusCodes.Status204NoContent;
-            return;
-        }
+        // ⚠ 走同一个 helper，不要在这里抄一份 —— 三条 App 直连路由
+        // （voip-token / library-upload / library-list）鉴权必须一致，
+        // 抄成三份的话改一处漏两处，而漏掉的那两处会静默地 403。
+        if (!AllowTailscaleClient(context, "voip-token")) return;
         if (!HttpMethods.IsPost(context.Request.Method))
         {
             context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
-            return;
-        }
-        if (!TailscaleLoginMatches(
-            _configStore.Load(),
-            context.Request.Headers["Tailscale-User-Login"]))
-        {
-            // 拒绝也要出声 —— 否则"token 一直没上来"时完全看不到它来过。
-            AppendOutputPickupLog("voip-token-denied\tidentity");
-            context.Response.StatusCode = StatusCodes.Status403Forbidden;
             return;
         }
         string token;
