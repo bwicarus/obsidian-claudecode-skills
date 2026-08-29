@@ -37,10 +37,29 @@ internal static class ReaderAttentionBoardSelfTest
             items.Add(
                 "{\"id\":\"ntf-" + index + "\",\"kind\":\"user-todo\","
                 + "\"title\":\"" + titles[index] + "\",\"state\":\"pending\","
+                // ⚠ 真值库里两种 audience 混在一起，板子只该拿 user 的。
+                + "\"audience\":\"user\","
                 + "\"place\":{\"name\":\"家\"}}");
         }
         File.WriteAllText(
-            Path.Combine(dir, "notifications-user.json"),
+            Path.Combine(dir, "notifications.json"),
+            "{\"contract\":\"reader-notifications/1\",\"items\":["
+            + string.Join(",", items) + "]}");
+    }
+
+    /// 同一批待办，但 state 是 acknowledged（助手已经 ack 过）。
+    private static void WriteAcknowledged(string dir, params string[] titles)
+    {
+        var items = new List<string>();
+        for (int index = 0; index < titles.Length; index++)
+        {
+            items.Add(
+                "{\"id\":\"ntf-" + index + "\",\"kind\":\"user-todo\","
+                + "\"title\":\"" + titles[index] + "\","
+                + "\"state\":\"acknowledged\",\"audience\":\"user\"}");
+        }
+        File.WriteAllText(
+            Path.Combine(dir, "notifications.json"),
             "{\"contract\":\"reader-notifications/1\",\"items\":["
             + string.Join(",", items) + "]}");
     }
@@ -78,24 +97,27 @@ internal static class ReaderAttentionBoardSelfTest
         }
         checks.Add("attention-board-shows-pending-todo");
 
-        // ③ 说过一次之后不再重复 —— 待办的 state 会一直是 pending，
-        //    没有这条就会每次都当成新消息重报。
-        ReaderAttentionBoard.MarkDeliveredForSelfTest();
+        // ③ 助手 ack 过之后不再重复。
+        //
+        // ⚠ 判据是**真值库的状态机**（pending → acknowledged），不是
+        // "板子被读过"。2026-08-29 实测板子每秒被读一次，读一次就消费的话，
+        // 新待办会在一秒内被轮询吃掉，而没有任何人听见。
+        WriteAcknowledged(dir, "垃圾投放提醒");
         string afterSaid = ReaderAttentionBoard.RenderForSelfTest();
         if (afterSaid.Contains("开口：\n- 垃圾投放提醒", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                "说过的待办又进了「开口」—— 事实一直成立就会一直吵");
+                "已 ack 的待办又进了「开口」—— 事实一直成立就会一直吵");
         }
         if (!afterSaid.Contains("待办", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                "说过之后待办彻底消失了 —— 它还没完成，"
+                "ack 之后待办彻底消失了 —— 它还没完成，"
                 + "该留在状态里让它知道，只是不要再说");
         }
-        checks.Add("attention-board-does-not-repeat-said-todo");
+        checks.Add("attention-board-does-not-repeat-acked-todo");
 
-        // ④ 负对照：**内容变了**就是新消息，必须重新说。
+        // ④ 负对照：还是 pending 的**必须**进开口，别被 ③ 一起吃掉。
         WriteTodos(dir, "垃圾投放提醒（今天是可燃）");
         if (!ReaderAttentionBoard.RenderForSelfTest()
             .Contains("开口：", StringComparison.Ordinal))
@@ -133,7 +155,7 @@ internal static class ReaderAttentionBoardSelfTest
         // ⑥ 待办文件坏掉/缺失，板子仍要能端出位置 ——
         //    一个来源出问题不该让整块板子变哑。
         File.WriteAllText(
-            Path.Combine(dir, "notifications-user.json"), "{ 这不是 json");
+            Path.Combine(dir, "notifications.json"), "{ 这不是 json");
         string degraded = ReaderAttentionBoard.RenderForSelfTest();
         if (!degraded.Contains("书 B", StringComparison.Ordinal))
         {
@@ -141,6 +163,23 @@ internal static class ReaderAttentionBoardSelfTest
                 "待办文件坏了就连位置也不端了 —— 一个来源不该拖垮整块板子");
         }
         checks.Add("attention-board-survives-broken-source");
+
+        // ⑦ 负对照：audience=ai 的条目**不该**上板子（那是助手自己的原料，
+        //    不是"要告诉用户的事"）。直接读真值库之后这个过滤归我们做，
+        //    漏掉的话板子会开始念系统内部消息。
+        ReaderAttentionBoard.ResetForSelfTest(dir);
+        File.WriteAllText(
+            Path.Combine(dir, "notifications.json"),
+            "{\"contract\":\"reader-notifications/1\",\"items\":["
+            + "{\"id\":\"ntf-a\",\"title\":\"给助手的原料\","
+            + "\"state\":\"pending\",\"audience\":\"ai\"}]}");
+        if (ReaderAttentionBoard.RenderForSelfTest()
+            .Contains("给助手的原料", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "audience=ai 的条目上了板子 —— 板子会开始念系统内部消息");
+        }
+        checks.Add("attention-board-skips-ai-audience");
 
         // 把一份典型的板子带进结果：格式的活文档，也让"悄悄变啰嗦"看得见。
         ReaderAttentionBoard.ResetForSelfTest(dir);

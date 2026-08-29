@@ -51,6 +51,19 @@ internal static class ReaderAttentionBoard
 
     private static string? _runtimeDirectory;
 
+    /// 待办的**真值库**（`%LOCALAPPDATA%\BWReader\notifications.json`）。
+    ///
+    /// ⚠ 2026-08-29 改：原来读的是 runtime 目录里的导出副本
+    /// （notifications-user.json）。那是 ReaderPC 每轮对账时才刷新的，
+    /// 于是「建完待办、板子上没有」会持续一整轮 —— 实测那一轮是 6 秒，
+    /// 但对账变慢时就是几分钟，而这段时间里板子在**如实地撒谎**：
+    /// 它说"没有待办"，而真值库里明明有。
+    ///
+    /// 真值库就在本机、就是一个 JSON，没有理由隔一层副本去读。
+    /// 读它需要自己按 audience 过滤 —— 那只是一个字段比较，不是"算账"，
+    /// 不违背「桥不算账」那条（算账是指聚合、推导、判定）。
+    private static string? _storeDirectory;
+
     private static string? _currentKey;
     private static string? _currentLabel;
     private static bool _snapshotStale;
@@ -77,6 +90,12 @@ internal static class ReaderAttentionBoard
         lock (Gate)
         {
             _runtimeDirectory = runtimeDirectory;
+            // 真值库跟 replication_notifications.py 的 default_root 同一处：
+            // %LOCALAPPDATA%\BWReader。写死这一句而不是再加一个配置项 ——
+            // 多一个配置项就多一处能配错、且配错时表现是"板子永远空"。
+            string local = Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData);
+            _storeDirectory = Path.Combine(local, "BWReader");
         }
     }
 
@@ -178,7 +197,11 @@ internal static class ReaderAttentionBoard
                 body = body.Replace(
                     "seq=?", "seq=" + _sequence, StringComparison.Ordinal);
             }
-            MarkDelivered();
+            // ⚠ 这里原来有一句 MarkDelivered() —— **已删**。
+            // 读取不再有任何副作用：说没说过由真值库的状态机决定
+            // （pending / acknowledged），不由"谁读过"决定。
+            // 理由见 Compose 里那段：板子每秒被读一次，读一次就消费的话，
+            // 通知会在一秒内被轮询吃掉，而没有任何人听见。
         }
         string etag = "\"" + Convert.ToHexString(
             SHA256.HashData(Encoding.UTF8.GetBytes(body)))[..32]
@@ -230,22 +253,33 @@ internal static class ReaderAttentionBoard
             token).ConfigureAwait(false);
     }
 
-    internal readonly record struct Todo(string Id, string Title, string Where);
+    internal readonly record struct Todo(
+        string Id, string Title, string Where, bool Acknowledged);
 
-    /// 从已有的 notifications-*.json 里读出**还没完成**的待办。
+    /// 读出**还没完成**、且是**给用户看**的待办。
+    ///
+    /// ⚠ 读的是**真值库**，不是 runtime 里的导出副本 —— 副本要等
+    /// ReaderPC 下一轮对账才刷新，那段时间板子会如实地撒谎（说"没有待办"，
+    /// 而真值库里明明有）。实测那一轮 6 秒，对账变慢时就是几分钟。
+    ///
+    /// ⚠ 只取 audience=user：ai 方向的是给助手自己的原料，不该当成
+    /// "要告诉用户的事"。这个过滤在导出侧本来是分成两个文件做的，
+    /// 直接读真值库就得自己做 —— 一个字段比较而已。
+    ///
     /// 只取 id / title / place.name —— 正文不进板子（太长，且它需要时
     /// 自己能去取）。读不到就当没有：这块板子不该因为一个文件缺失而变哑。
     private static List<Todo> ReadTodos()
     {
         var todos = new List<Todo>();
-        if (_runtimeDirectory is null)
+        if (_storeDirectory is null)
         {
             return todos;
         }
-        foreach (string name in
-            new[] { "notifications-user.json", "notifications-open.json" })
+        foreach (string path in new[]
         {
-            string path = Path.Combine(_runtimeDirectory, name);
+            Path.Combine(_storeDirectory, "notifications.json"),
+        })
+        {
             try
             {
                 if (!File.Exists(path))
@@ -263,7 +297,17 @@ internal static class ReaderAttentionBoard
                 foreach (JsonElement item in items.EnumerateArray())
                 {
                     string state = Text(item, "state");
-                    if (!string.Equals(state, "pending", StringComparison.Ordinal))
+                    // pending = 还没被助手确认收到；acknowledged = 收到了
+                    // 但还没完成。两者都还没做完，都该在板子上。
+                    if (!string.Equals(state, "pending", StringComparison.Ordinal)
+                        && !string.Equals(
+                            state, "acknowledged", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+                    // ⚠ 只要给用户的。ai 方向的是助手自己的原料。
+                    if (!string.Equals(
+                        Text(item, "audience"), "user", StringComparison.Ordinal))
                     {
                         continue;
                     }
@@ -279,7 +323,10 @@ internal static class ReaderAttentionBoard
                     {
                         where = Text(place, "name");
                     }
-                    todos.Add(new Todo(id, Clip(title, 80), Clip(where, 20)));
+                    todos.Add(new Todo(
+                        id, Clip(title, 80), Clip(where, 20),
+                        string.Equals(state, "acknowledged",
+                            StringComparison.Ordinal)));
                 }
             }
             catch (Exception)
@@ -314,10 +361,21 @@ internal static class ReaderAttentionBoard
     private static string Compose()
     {
         const string NL = "\n";
+        // ⚠ **「说没说过」由真值库的状态机决定，不由"读过没读过"决定。**
+        //
+        // 原来是读一次就标记已送达。2026-08-29 实测：板子**每秒被读 1 次**
+        // （8 秒里 35→43）。于是新待办会在一秒内被一次轮询消费掉，
+        // 而那一秒里没有任何人听见任何话 —— 通知就这么静默地没了。
+        //
+        // 「读到」不等于「送达」。真正表示"我看到了"的动作是助手自己调的
+        //   replication_notifications.py ack <id>
+        // 它把 pending 变成 acknowledged。用这个当判据：
+        //   pending      → 进「开口」，还没人跟用户说过
+        //   acknowledged → 进「状态」，看到了但还没做完，别重复说
+        // 好处是：判据在真值库里、跨重启存活，而且它本来就存在。
         List<Todo> todos = ReadTodos();
         List<Todo> fresh = todos
-            .Where(todo => !Delivered.TryGetValue(todo.Id, out string? sent)
-                || !string.Equals(sent, todo.Title, StringComparison.Ordinal))
+            .Where(todo => !todo.Acknowledged)
             .OrderBy(todo => todo.Id, StringComparer.Ordinal)
             .ToList();
 
@@ -351,7 +409,10 @@ internal static class ReaderAttentionBoard
         if (waiting > 0)
         {
             text.Append("- 待办｜还有 ").Append(waiting)
-                .Append(" 条未完成（已说过，别重复）").Append(NL);
+                // 「已确认」而不是「已说过」：ack 表示助手收到了，
+                // 不表示它真的对用户开过口。说成"已说过"会让下一轮
+                // 误以为用户已经知道 —— 那是我们无法验证的事。
+                .Append(" 条已确认、还没做完（别重复说）").Append(NL);
         }
         return text.ToString();
     }
@@ -388,6 +449,9 @@ internal static class ReaderAttentionBoard
         lock (Gate)
         {
             _runtimeDirectory = runtimeDirectory;
+            // ⚠ 真值库目录也要设。忘了这一句时自检报「待办没有出现在
+            // 板子上」—— 看着像被测代码坏了，其实是夹具没接上。
+            _storeDirectory = runtimeDirectory;
             Delivered.Clear();
             RecentPlaces.Clear();
             _currentKey = null;
