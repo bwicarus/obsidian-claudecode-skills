@@ -76,9 +76,9 @@ final class BWReaderAppDelegate: NSObject, UIApplicationDelegate {
             let before = bridge.state.phase
             await bridge.start()
             let after = bridge.state.phase
-            ReaderVoipCall.shared.status =
+            await ReaderVoipCall.note(
                 "语音链路：\(before) → \(after)"
-                + (bridge.state.detail.map { "（\($0)）" } ?? "")
+                + (bridge.state.detail.map { "（\($0)）" } ?? ""))
         }
         ReaderVoipCall.shared.onCallAudioEnded = {
             await NativeVoiceBridge.shared.stop()
