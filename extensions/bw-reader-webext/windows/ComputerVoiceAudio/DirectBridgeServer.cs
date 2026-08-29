@@ -660,6 +660,14 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-voip/token",
             new[] { "POST", "OPTIONS" },
             context => HandleVoipTokenAsync(context, serviceToken));
+        // 这通电话的结局：answered / declined / unanswered。
+        // ⚠ 「拒接」和「没接」必须分开 —— 前者立刻降级成普通通知，
+        // 后者隔几分钟再打一次。合成一种的话，要么在他说了"别烦我"之后
+        // 再骚扰，要么把真的没听见的情况白白漏掉。
+        app.MapMethods(
+            "/reader-voip/outcome",
+            new[] { "POST", "OPTIONS" },
+            context => HandleVoipOutcomeAsync(context, serviceToken));
         app.MapFallback(context =>
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
@@ -1635,6 +1643,113 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         File.Move(temporary, path, overwrite: true);
         await context.Response.WriteAsJsonAsync(
             new { ok = true },
+            serviceCancellationToken).ConfigureAwait(false);
+    }
+
+    /// 收下一通电话的结局，并进 voip-calls.json 供对账循环推进。
+    ///
+    /// ⚠ 只认三种取值。收到别的就拒 —— 静默接受一个认不出的结局，
+    /// 会让那条待办永远卡在"已拨出"：既不重拨也不降级，用户什么也收不到。
+    private async Task HandleVoipOutcomeAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "voip-outcome")) return;
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        string outcome;
+        string ntfId;
+        try
+        {
+            using JsonDocument body = await JsonDocument
+                .ParseAsync(
+                    context.Request.Body,
+                    cancellationToken: serviceCancellationToken)
+                .ConfigureAwait(false);
+            outcome = body.RootElement
+                .TryGetProperty("outcome", out JsonElement o)
+                && o.ValueKind == JsonValueKind.String
+                ? (o.GetString() ?? string.Empty) : string.Empty;
+            ntfId = body.RootElement
+                .TryGetProperty("notificationId", out JsonElement n)
+                && n.ValueKind == JsonValueKind.String
+                ? (n.GetString() ?? string.Empty) : string.Empty;
+        }
+        catch (JsonException)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return;
+        }
+        if (outcome is not ("answered" or "declined" or "unanswered")
+            || ntfId.Length is < 4 or > 64)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, code = "BW_VOIP_OUTCOME_SHAPE" },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        AppendOutputPickupLog("voip-outcome\t" + ntfId + "\t" + outcome);
+        string path = Path.Combine(_runtimeDirectory, "voip-calls.json");
+        // 读-改-写。并发只可能来自"同一台设备连着两通电话"，实际不存在；
+        // 真撞上时最坏是丢一条结局，而那条会被下一轮当成 unanswered 处理 ——
+        // 比引一把锁进来简单，且失败方向是安全的（多打一次，不是不打）。
+        var calls = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        try
+        {
+            if (File.Exists(path))
+            {
+                using JsonDocument existing = JsonDocument.Parse(
+                    await File.ReadAllBytesAsync(
+                        path, serviceCancellationToken).ConfigureAwait(false));
+                if (existing.RootElement.TryGetProperty(
+                        "calls", out JsonElement had)
+                    && had.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (JsonProperty one in had.EnumerateObject())
+                    {
+                        calls[one.Name] = one.Value.Clone();
+                    }
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // 坏文件不该让这次结局丢掉 —— 从空开始重建。
+        }
+        int attempts = 1;
+        if (calls.TryGetValue(ntfId, out JsonElement prior)
+            && prior.TryGetProperty("attempts", out JsonElement a)
+            && a.TryGetInt32(out int had2))
+        {
+            attempts = had2 + 1;
+        }
+        var payload = new Dictionary<string, object>(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, JsonElement> one in calls)
+        {
+            if (one.Key != ntfId) payload[one.Key] = one.Value;
+        }
+        payload[ntfId] = new
+        {
+            outcome,
+            attempts,
+            lastAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        };
+        string temporary = path + ".tmp-" + Environment.ProcessId;
+        await File.WriteAllTextAsync(
+            temporary,
+            JsonSerializer.Serialize(new
+            {
+                contract = "reader-voip-calls/1",
+                calls = payload,
+            }),
+            serviceCancellationToken).ConfigureAwait(false);
+        File.Move(temporary, path, overwrite: true);
+        await context.Response.WriteAsJsonAsync(
+            new { ok = true, attempts },
             serviceCancellationToken).ConfigureAwait(false);
     }
 

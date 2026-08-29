@@ -299,7 +299,8 @@ internal static class ReaderAttentionBoard
     }
 
     internal readonly record struct Todo(
-        string Id, string Title, string Where, bool Acknowledged);
+        string Id, string Title, string Where, bool Acknowledged,
+        bool WantsCall);
 
     /// 读出**还没完成**、且是**给用户看**的待办。
     ///
@@ -371,6 +372,9 @@ internal static class ReaderAttentionBoard
                     todos.Add(new Todo(
                         id, Clip(title, 80), Clip(where, 20),
                         string.Equals(state, "acknowledged",
+                            StringComparison.Ordinal),
+                        string.Equals(
+                            Text(item, "deliver"), "call",
                             StringComparison.Ordinal)));
                 }
             }
@@ -467,6 +471,14 @@ internal static class ReaderAttentionBoard
                 if (todo.Where.Length > 0)
                 {
                     text.Append("（在").Append(todo.Where).Append("时）");
+                }
+                if (todo.WantsCall)
+                {
+                    // ⚠ 电话必须由**你**发起（用户 2026-08-29）：你打过去
+                    // 是为了接通后把这件事说清楚，并在那一刻把电脑的语音
+                    // 链路切到这通电话上。循环自己拨的话，他接起来只有沉默。
+                    text.Append("｜**打电话**：voip_push.py --title <一句话> ")
+                        .Append("--ntf ").Append(todo.Id);
                 }
                 text.Append(NL);
             }

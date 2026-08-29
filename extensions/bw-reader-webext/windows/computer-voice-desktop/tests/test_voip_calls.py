@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -13,91 +15,95 @@ import replication_apply  # noqa: E402
 from replication_notifications import NotificationStore  # noqa: E402
 
 
-class _FakeVoip:
-    """假的推送器。真推一次就是真响一次 —— 测试里绝不能碰真的。"""
+class VoipFollowupTests(unittest.TestCase):
+    """电话打完之后怎么办。
 
-    def __init__(self, ok: bool = True) -> None:
-        self.ok = ok
-        self.calls: list[str] = []
+    ## ⚠ 拨号本身不在这里
 
-    def send_call(self, root, title, reason=""):
-        self.calls.append(title)
-        if not self.ok:
-            raise RuntimeError("配置没就绪")
-        return {"ok": True, "status": 200}
+    用户 2026-08-29 纠正：电话必须由**语音 AI** 发起 —— 它打过来是为了
+    接通后把事情说清楚，并在那一刻把电脑的语音链路切到这通电话上。
+    对账循环自己拨的话，用户接起来只有沉默，比不打更糟。
+    （我最初正是那么做的，这套测试也跟着重写了。）
 
+    ## 三种结局三种处置
 
-class PlaceVoipCallsTests(unittest.TestCase):
-    """deliver=call 的待办要真的打电话，而且**每条只打一次**。
-
-    电话是最强的打断。打第二次不会让人更快去做那件事，只会让他直接
-    静音这个 App —— 那时连普通通知也一起失去了。
+        answered    不动 —— AI 自己判断用户听懂没有，然后 ack
+        declined    立刻降级：他知道有事，只是现在不想接
+        unanswered  隔几分钟标成待重拨；第二次还没人接才降级
     """
 
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp())
+        # ⚠ **把 USERPROFILE 指到临时目录。**
+        #
+        # _call_state_path 优先用桥的 runtime 目录（那是唯一的写者），
+        # 而那个目录在开发机上是**真实存在**的 —— 不隔离的话，测试会直接
+        # 读写生产文件。2026-08-29 实测：跑完一轮之后，真实的
+        # voip-calls.json 里躺着测试造的假 ntf id。
+        # 测试污染生产数据不会报错，只会在某天让一通电话打错人。
+        self._saved_profile = os.environ.get("USERPROFILE")
+        os.environ["USERPROFILE"] = str(self.root)
         self.store = NotificationStore(self.root)
-        self.fake = _FakeVoip()
-        self._real = replication_apply.__dict__.get("voip_push")
-        sys.modules["voip_push"] = self.fake  # type: ignore[assignment]
+        self.item = self.store.create(
+            kind="user-todo", title="要打电话的事", audience="user",
+            end="never", deliver="call")
 
     def tearDown(self) -> None:
-        sys.modules.pop("voip_push", None)
+        if self._saved_profile is None:
+            os.environ.pop("USERPROFILE", None)
+        else:
+            os.environ["USERPROFILE"] = self._saved_profile
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def _make(self, title: str, deliver: str) -> None:
-        self.store.create(
-            kind="user-todo", title=title, audience="user",
-            end="never", deliver=deliver)
+    def _record(self, outcome: str, attempts: int = 1,
+                age_seconds: float = 0.0) -> None:
+        replication_apply._save_call_state(self.root, {
+            self.item["id"]: {
+                "outcome": outcome,
+                "attempts": attempts,
+                "lastAtUtcMs": int((time.time() - age_seconds) * 1000),
+            }
+        })
 
-    def test_only_call_deliver_rings(self) -> None:
-        self._make("要打电话的", "call")
-        self._make("安静的", "silent")
-        self._make("默认的", "auto")
-        placed = replication_apply._place_voip_calls(self.store, self.root)
-        self.assertEqual(placed, 1)
-        self.assertEqual(self.fake.calls, ["要打电话的"])
+    def _current(self) -> str:
+        return replication_apply._load_call_state(
+            self.root)[self.item["id"]]["outcome"]
 
-    def test_does_not_ring_twice(self) -> None:
-        self._make("只该响一次", "call")
-        replication_apply._place_voip_calls(self.store, self.root)
-        again = replication_apply._place_voip_calls(self.store, self.root)
-        self.assertEqual(again, 0, "同一条待办打了第二通电话")
-        self.assertEqual(len(self.fake.calls), 1)
+    def test_declined_downgrades_immediately(self) -> None:
+        # 主动拒接 = 明确的"现在别烦我"。再打一次是骚扰。
+        self._record("declined")
+        replication_apply._voip_followup(self.store, self.root)
+        self.assertEqual(self._current(), "downgraded")
 
-    def test_survives_restart(self) -> None:
-        # ⚠ 记在内存里的话，ReaderPC 一重启就会把所有 call 待办重打一遍。
-        # 所以"打过没打过"必须落盘。
-        self._make("重启后不该再响", "call")
-        replication_apply._place_voip_calls(self.store, self.root)
-        record = json.loads(
-            (self.root / replication_apply._CALLED_FILE_NAME)
-            .read_text(encoding="utf-8"))
-        self.assertTrue(record["ids"], "打过的记录没落盘")
-        fresh = NotificationStore(self.root)
-        self.assertEqual(
-            replication_apply._place_voip_calls(fresh, self.root), 0)
+    def test_unanswered_waits_before_retrying(self) -> None:
+        # 刚打完还没到重试时刻 —— 不能立刻再打，那跟连打两通没区别。
+        self._record("unanswered", age_seconds=10)
+        replication_apply._voip_followup(self.store, self.root)
+        self.assertEqual(self._current(), "unanswered")
 
-    def test_failure_is_not_recorded_as_called(self) -> None:
-        # ⚠ 打失败（没 token / 没密钥）**不能**标成打过 ——
-        # 标了的话配置修好之后它永远不会再响，而没人会发现。
-        self.fake.ok = False
-        self._make("失败后还该重试", "call")
-        placed = replication_apply._place_voip_calls(self.store, self.root)
-        self.assertEqual(placed, 0)
-        self.assertFalse(
-            (self.root / replication_apply._CALLED_FILE_NAME).exists(),
-            "失败却记成了打过")
-        # 配置修好之后，同一条应该还能响。
-        self.fake.ok = True
-        self.assertEqual(
-            replication_apply._place_voip_calls(self.store, self.root), 1)
+    def test_unanswered_becomes_retry_due_after_the_wait(self) -> None:
+        self._record("unanswered", age_seconds=10 * 60)
+        replication_apply._voip_followup(self.store, self.root)
+        # ⚠ 是 retry-due（待 AI 重拨），**不是**直接拨出去 ——
+        # 拨号的人必须是要说话的那个。
+        self.assertEqual(self._current(), "retry-due")
 
-    def test_resolved_items_are_not_called(self) -> None:
-        # 为一件已经完成的事把人吵醒，是最伤信任的一种打扰。
-        self._make("已经做完了", "call")
-        item = list(self.store.open_items())[0]
-        self.store.resolve(item["id"], by="user", note="做完了")
-        self.assertEqual(
-            replication_apply._place_voip_calls(self.store, self.root), 0)
-        self.assertEqual(self.fake.calls, [])
+    def test_second_unanswered_downgrades(self) -> None:
+        # 试过一次就够了。第二次还没人接，说明他现在接不了电话。
+        self._record("unanswered", attempts=2, age_seconds=10 * 60)
+        replication_apply._voip_followup(self.store, self.root)
+        self.assertEqual(self._current(), "downgraded")
+
+    def test_answered_is_left_alone(self) -> None:
+        # 接通之后归 AI 判断（用户可能在通话里说"我知道了"）。
+        self._record("answered")
+        replication_apply._voip_followup(self.store, self.root)
+        self.assertEqual(self._current(), "answered")
+
+    def test_resolved_todo_drops_its_call_record(self) -> None:
+        # 待办已经完成 —— 再跟进就是为一件做完的事继续折腾人。
+        self._record("unanswered", age_seconds=10 * 60)
+        self.store.resolve(self.item["id"], by="user", note="做完了")
+        replication_apply._voip_followup(self.store, self.root)
+        self.assertNotIn(
+            self.item["id"], replication_apply._load_call_state(self.root))

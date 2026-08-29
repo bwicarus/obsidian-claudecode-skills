@@ -36,6 +36,19 @@ final class ReaderVoipCall: NSObject {
     private var provider: CXProvider?
     private var currentCallId: UUID?
 
+    /// 开始响铃的时刻 / 接通的时刻。用来分辨"拒接"与"没接" ——
+    /// 见 CXEndCallAction 那段。这两个必须在**报来电时**就记，
+    /// 不能等到挂断再回推，那时已经没有依据了。
+    private var ringingSince: Date?
+    private var answeredAt: Date?
+
+    /// 这通电话是为哪条待办打的。AI 发起时经推送载荷带进来，
+    /// 挂断时随结局一起回报 —— 没有它，Windows 侧不知道该给谁记账。
+    private var currentNotificationId: String?
+
+    /// 给回报用的只读出口（回报发生在挂断之后，那时字段正要被清空）。
+    var currentNotificationIdForReport: String? { currentNotificationId }
+
     /// 最近一次拿到的推送 token（十六进制）。上报给 Windows 用。
     private(set) var deviceToken: String?
 
@@ -88,6 +101,10 @@ final class ReaderVoipCall: NSObject {
         }
         let callId = UUID()
         currentCallId = callId
+        // ⚠ 这两个必须在**报来电的这一刻**记下。等到挂断再回推就没有依据了 ——
+        // 而"拒接还是没接"全靠它们分辨。
+        ringingSince = Date()
+        answeredAt = nil
         let update = CXCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: title)
         update.hasVideo = false
@@ -141,7 +158,11 @@ extension ReaderVoipCall: PKPushRegistryDelegate {
         // 推送被永久拒发。载荷再离谱也要先响，再决定挂不挂。
         let title = (payload.dictionaryPayload["title"] as? String)
             ?? "BWReader"
+        // 这通电话是为哪条待办打的。回报结局时要用 —— 没有它，
+        // Windows 侧不知道该给谁记「拒接 / 没接」。
+        let ntfId = payload.dictionaryPayload["notificationId"] as? String
         Task { @MainActor in
+            ReaderVoipCall.shared.currentNotificationId = ntfId
             ReaderVoipCall.shared.reportCall(title: title, completion: completion)
         }
     }
@@ -160,6 +181,8 @@ extension ReaderVoipCall: CXProviderDelegate {
         Task { @MainActor in
             NotificationCenter.default.post(
                 name: ReaderVoipCall.answeredNotification, object: nil)
+            ReaderVoipCall.shared.answeredAt = Date()
+            ReaderVoipCall.shared.status = "通话中"
             action.fulfill()
         }
     }
@@ -168,18 +191,77 @@ extension ReaderVoipCall: CXProviderDelegate {
         _ provider: CXProvider,
         perform action: CXEndCallAction
     ) {
-        // 挂断。⚠ 这**不是**失败，是一次明确的"现在别烦我" ——
-        // 上层据此降级到普通通知，而不是重拨。
+        // ⚠ **「拒接」和「没接」必须分开**（用户 2026-08-29）：
+        //
+        //   拒接 = 他知道有事找他，只是现在不想接 → 立刻降级，别再打
+        //   没接 = 可能没听见               → 隔几分钟再打一次
+        //
+        // 合成哪一边都是错的：当成拒接会漏掉真的没听见的情况；
+        // 当成没接会在他明确说了"别烦我"之后再骚扰一次。
+        //
+        // CallKit 不直接告诉我们是哪一种 —— EndCall 两种情况都会来。
+        // 判据是**有没有先收到 Answer**，以及响了多久：
+        // 用户主动按拒接是在铃响期间的一个动作，而系统超时挂断要等
+        // 一整个响铃周期（约 30-45 秒）。
         Task { @MainActor in
-            ReaderVoipCall.shared.currentCallId = nil
+            let call = ReaderVoipCall.shared
+            let outcome: String
+            if call.answeredAt != nil {
+                outcome = "answered"
+            } else if let began = call.ringingSince,
+                      Date().timeIntervalSince(began) < 25 {
+                outcome = "declined"
+            } else {
+                outcome = "unanswered"
+            }
+            call.currentCallId = nil
+            call.answeredAt = nil
+            call.ringingSince = nil
+            call.status = "上一通电话：" + outcome
             NotificationCenter.default.post(
                 name: ReaderVoipCall.declinedNotification, object: nil)
+            // ⚠ 回报**之后**才清 notificationId —— 清早了 Windows 侧
+            // 就不知道这个结局属于哪条待办，那条会永远卡在"已拨出"。
+            await ReaderVoipOutcomeUpload.send(outcome: outcome)
+            call.currentNotificationId = nil
             action.fulfill()
         }
     }
 
     static let answeredNotification = Notification.Name("bw.voip.answered")
     static let declinedNotification = Notification.Name("bw.voip.declined")
+}
+
+/// 回报这通电话的结局。**Windows 侧据此决定重拨还是降级。**
+///
+/// ⚠ 报不上去的后果是"这条待办卡在'已拨出'状态"：不会重拨、也不会降级，
+/// 用户什么也收不到。所以这里跟 token 上报一样 —— **失败必须留痕**。
+enum ReaderVoipOutcomeUpload {
+    static func send(outcome: String) async {
+        let ntfId = await MainActor.run {
+            ReaderVoipCall.shared.currentNotificationIdForReport
+        }
+        let target = "https://bwicarus-2.taile44d0c.ts.net/reader-voip/outcome"
+        guard let url = URL(string: target) else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 15
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "outcome": outcome,
+            "notificationId": ntfId ?? "",
+        ])
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            if code != 200 {
+                await ReaderVoipCall.note("结局回报被拒 HTTP \(code)")
+            }
+        } catch {
+            await ReaderVoipCall.note(
+                "结局回报失败：" + error.localizedDescription)
+        }
+    }
 }
 
 /// 把推送 token 送到 Windows —— 没有它，发送方不知道往哪推。

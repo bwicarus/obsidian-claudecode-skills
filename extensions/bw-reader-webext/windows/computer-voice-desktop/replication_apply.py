@@ -654,68 +654,105 @@ def export_replication_digests(
     return value
 
 
-_CALLED_FILE_NAME = "voip-called.json"
+
+_CALL_STATE_FILE_NAME = "voip-calls.json"
+
+# 没人接 → 隔多久再打一次。只再打**一次**（用户 2026-08-29 定的）。
+_RETRY_AFTER_SECONDS = 5 * 60
 
 
-def _place_voip_calls(store: Any, root: Path) -> int:
-    """给 `deliver=call` 且还没打过的待办各打一通电话。
+def _call_state_path(root: Path) -> Path:
+    """通话结局文件在哪。
 
-    ## ⚠ 每条只打一次
+    ⚠ **写它的和读它的不是同一个目录**（2026-08-29 第二次踩到同一个坑）：
+    桥写在自己的 runtime 目录（bw-computer-voice-bridge/runtime），
+    而这里的 root 是 %LOCALAPPDATA%/BWReader。
 
-    电话是最强的打断。打第二次不会让人更快去做那件事，只会让他下次
-    直接静音这个 App —— 那时连普通通知也一起失去了。所以打过就记下，
-    **靠文件跨重启存活**（内存里记的话，ReaderPC 一重启就会重打一遍）。
+    第一次是 voip-token.json，我在读取侧兼容了两处；**但没有把那条经验
+    带到这个新文件上**，于是原样重演 —— 结局回报 200、文件也写了，
+    而跟进循环一直看不到，表现是"拒接了却永远不降级"，没有一处报错。
 
-    ## ⚠ 打不通不重试
-
-    APNs 拒绝（token 失效、环境不匹配）是**配置问题**，重试一百次也一样，
-    只会把日志刷满。如实记下原因，等人来看。
-
-    ## ⚠ 失败不能拖垮对账循环
-
-    这一整段包在调用方的 try 里，但这里也各自兜住 —— 打电话失败不该
-    让复习到期、自动关闭这些正事跟着一起不做。
+    这次直接以桥写的那处为准（它是唯一的写者），不存在就退回本地。
     """
-    called_path = root / _CALLED_FILE_NAME
+    bridge = (
+        Path(os.environ.get("USERPROFILE") or Path.home())
+        / "bw-computer-voice-bridge" / "runtime" / _CALL_STATE_FILE_NAME)
+    return bridge if bridge.parent.is_dir() else root / _CALL_STATE_FILE_NAME
+
+
+def _load_call_state(root: Path) -> dict[str, Any]:
     try:
-        already = set(json.loads(
-            called_path.read_text(encoding="utf-8-sig")).get("ids") or [])
+        value = json.loads(
+            _call_state_path(root).read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
-        already = set()
+        return {}
+    calls = value.get("calls")
+    return calls if isinstance(calls, dict) else {}
 
-    targets = [
-        item for item in store.open_items()
-        if item.get("deliver") == "call"
-        and item.get("audience") == "user"
-        and item["id"] not in already
-    ]
-    if not targets:
-        return 0
 
-    placed = 0
-    try:
-        import voip_push
-    except ImportError:
+def _save_call_state(root: Path, calls: dict[str, Any]) -> None:
+    _atomic_write_json(_call_state_path(root), {
+        "contract": "reader-voip-calls/1",
+        "calls": calls,
+    })
+
+
+def _voip_followup(store: Any, root: Path) -> int:
+    """电话打完之后的跟进：该重拨的标成待重拨，该降级的降级。
+
+    ## ⚠ 拨号本身**不在这里**（用户 2026-08-29 纠正了我）
+
+    电话必须由**语音 AI** 发起 —— 它打过来是为了接通后由它把事情说清楚，
+    并在那一刻把电脑的语音链路切到这通电话上。循环自己拨的话，用户接起来
+    只有沉默，比不打更糟。所以这里只推进"打过之后怎么办"。
+
+    ## 三种结局，三种处置（用户定的）
+
+        answered    接通了 —— AI 自己判断用户听懂没有，然后 ack。这里不动。
+        declined    **主动拒接** —— 他知道有事找他，只是现在不想接。
+                    立刻降级成普通通知，不再打。
+        unanswered  **没人理** —— 可能没听见。隔几分钟标成待重拨；
+                    第二次还是没人理就降级。
+
+    ⚠ 「拒接」和「没接」必须分开：前者是明确的"现在别烦我"，再打一次是
+    骚扰；后者只是没听见，不再试一次就白白漏掉。合成哪一边都是错的。
+    """
+    calls = _load_call_state(root)
+    if not calls:
         return 0
-    for item in targets:
-        try:
-            result = voip_push.send_call(
-                root, item.get("title") or "BWReader", item.get("body") or "")
-        except Exception:  # noqa: BLE001
-            # 配置没就绪（没 token/没密钥）—— 记下来别再试，
-            # 但**不要**把这条待办标成打过：配置修好后它还该响。
+    now_ms = int(time.time() * 1000)
+    live = {item["id"] for item in store.open_items()}
+    changed = 0
+    for ntf_id, record in list(calls.items()):
+        if ntf_id not in live:
+            # 待办已经完成/取消 —— 跟进没有意义了。
+            calls.pop(ntf_id, None)
+            changed += 1
             continue
-        # ⚠ 只有**真的被 APNs 收下**才算打过。失败就不记 ——
-        # 记了的话配置修好之后它永远不会再响，而没人会发现。
-        if result.get("ok"):
-            already.add(item["id"])
-            placed += 1
-    if placed:
-        called_path.write_text(
-            json.dumps({"contract": "reader-voip-called/1",
-                        "ids": sorted(already)}, ensure_ascii=False),
-            encoding="utf-8")
-    return placed
+        outcome = record.get("outcome")
+        if outcome in ("answered", "downgraded", "retry-due"):
+            continue
+        if outcome == "declined":
+            record["outcome"] = "downgraded"
+            record["reason"] = "declined"
+            changed += 1
+            continue
+        if outcome == "unanswered":
+            if int(record.get("attempts") or 1) >= 2:
+                record["outcome"] = "downgraded"
+                record["reason"] = "unanswered-twice"
+                changed += 1
+                continue
+            if now_ms - int(record.get("lastAtUtcMs") or 0) \
+                    < _RETRY_AFTER_SECONDS * 1000:
+                continue
+            # ⚠ 到了该重拨的时刻，但**这里不拨** —— 只标成"待重拨"，
+            # 由板子端给 AI。理由同上：拨号的人必须是要说话的那个。
+            record["outcome"] = "retry-due"
+            changed += 1
+    if changed:
+        _save_call_state(root, calls)
+    return changed
 
 
 def run_once(
@@ -814,11 +851,17 @@ def run_once(
                     digests_path.parent
                     / replication_places.CURRENT_PLACE_FILE_NAME,
                 )
-                # deliver=call 的条目：真的打一通电话过去。
-                # ⚠ 放在**自动关闭之后**：可能这一轮它刚被 resolve 掉，
-                # 那就不该再打 —— 为一件已经完成的事把人吵醒，
-                # 是最伤信任的一种打扰。
-                called = _place_voip_calls(notify_store, local_root)
+                # ⚠ **这里不再自动拨号**（2026-08-29 用户纠正）。
+                #
+                # 我最初把拨号放在对账循环里自动打。那是错的：**电话必须由
+                # 语音 AI 发起** —— 它打过来是为了"接通后由它把事情说清楚"，
+                # 并在这一刻把电脑的语音链路切到这通电话上。
+                # 对账循环自己拨的话，用户接起来只有沉默 —— 比不打更糟。
+                #
+                # 现在的分工：板子告诉 AI「这条需要打电话」，AI 调
+                # voip_push 发起；重试与降级的策略在 _voip_followup 里，
+                # 那部分才该由循环推进（因为它要等时间）。
+                called = _voip_followup(notify_store, local_root)
                 status["notifications"] = {
                     "open": len(notify_store.open_items()),
                     "expired": expired,

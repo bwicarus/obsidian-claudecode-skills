@@ -134,7 +134,8 @@ def load_device_token(root: Path) -> str | None:
     return newest[1] if newest else None
 
 
-def send_call(root: Path, title: str, reason: str = "") -> dict[str, Any]:
+def send_call(root: Path, title: str, reason: str = "",
+              notification_id: str = "") -> dict[str, Any]:
     """推一通来电。
 
     ⚠ 返回值一定要看：APNs 会用 200 之外的状态码带上原因
@@ -155,6 +156,11 @@ def send_call(root: Path, title: str, reason: str = "") -> dict[str, Any]:
         ) from error
 
     payload = {"title": title[:80], "reason": reason[:200]}
+    if notification_id:
+        # ⚠ 带上是哪条待办。挂断时 App 会连着结局一起回报 ——
+        # 没有它，Windows 侧不知道该给谁记「拒接 / 没接」，那条会永远
+        # 卡在"已拨出"：既不重拨也不降级，用户什么也收不到。
+        payload["notificationId"] = notification_id[:64]
     headers = {
         "authorization": "bearer " + _provider_jwt(config),
         # ⚠ VoIP 推送的 topic **必须**带 .voip 后缀，用普通 bundleId
@@ -191,6 +197,10 @@ def main() -> int:
     parser.add_argument("--title", default="BWReader")
     parser.add_argument("--reason", default="")
     parser.add_argument(
+        "--ntf", default="",
+        help="这通电话是为哪条待办打的（ntf-…）。带上它，挂断后的"
+             "「拒接/没接」才会记到那条待办上")
+    parser.add_argument(
         "--check", action="store_true",
         help="只检查配置与 token 是否就绪，**不推送**（推一次就是响一次）")
     args = parser.parse_args()
@@ -209,7 +219,7 @@ def main() -> int:
                         "没有设备 token —— 装了新版 App 并启动一次才会有",
             }, ensure_ascii=False, indent=1))
             return 0 if token else 3
-        result = send_call(root, args.title, args.reason)
+        result = send_call(root, args.title, args.reason, args.ntf)
     except VoipPushError as error:
         print("错误：%s" % error)
         return 2
