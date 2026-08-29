@@ -5266,9 +5266,36 @@
           // 才该跟着 hasDue 走。
           if (!alarmNoticeShown && syncedItems.length) {
             var reasons = [];
-            if (/reminders=(denied|calendar-unavailable)/.test(rev)) {
-              reasons.push('提醒事项权限没给（不会同步到苹果提醒，'
-                + '去 设置 → BWReader → 提醒事项 打开）');
+            // ⚠ denied 和 calendar-unavailable **必须分开说**。
+            //
+            // 我第一版把两者合成一句「权限没给」，而用户当场截图证明
+            // 权限是开的 —— 那句话会把人送去反复检查一个本来就对的开关。
+            // 一条**指向错误方向**的诊断比没有诊断更贵：没有诊断至少
+            // 不会浪费时间。
+            if (/reminders=denied/.test(rev)) {
+              reasons.push('提醒事项权限没给（去 设置 → BWReader → '
+                + '提醒事项 打开）');
+            } else if (/reminders=calendar-unavailable/.test(rev)) {
+              reasons.push('权限是好的，但建不出提醒列表 '
+                + '(calendar-unavailable) —— 多半是 iCloud 提醒事项没启用，'
+                + '或本机没有能放提醒的账户');
+            } else if (/reminders=commit-failed/.test(rev)) {
+              reasons.push('提醒写入失败 (commit-failed)，这一轮一条都没落地');
+            } else if (/reminders=partial:/.test(rev)) {
+              reasons.push('有 ' + (rev.match(/reminders=partial:(\d+)/)
+                || [, '?'])[1] + ' 条提醒没写进去');
+            } else if (/reminders=projected/.test(rev)) {
+              // ⚠ **成功也要说一次。**
+              //
+              // 「同步成功但你在别处找」和「根本没同步」，在用户眼里
+              // 一模一样：都是"什么都没发生"。所以成功时报一次列表名，
+              // 一个 App 生命周期只报一次，不烦人。
+              reasons.push('待办已同步到提醒事项的「BW 待办」列表');
+            } else if (/reminders=/.test(rev)) {
+              // 兜底：状态是别的值就**原样报出来**，不要归类成已知的几种 ——
+              // 归错类正是上一版的错误来源。
+              reasons.push('提醒事项同步状态：'
+                + (rev.match(/reminders=([^;]*)/) || [, '?'])[1]);
             }
             if (hasDue && /notifications=denied/.test(rev)) {
               reasons.push('通知权限被拒（到点通知不会响，去设置里打开）');
@@ -5283,7 +5310,7 @@
             if (reasons.length) {
               alarmNoticeShown = true;
               if (RC && typeof RC.toast === 'function') {
-                RC.toast('待办提醒：' + reasons.join('；'));
+                RC.toast('待办同步：' + reasons.join('；'));
               }
             }
           }
