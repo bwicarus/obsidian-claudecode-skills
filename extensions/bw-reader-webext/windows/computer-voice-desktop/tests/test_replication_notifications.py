@@ -263,7 +263,7 @@ class AudienceSplitTests(unittest.TestCase):
     def test_projections_split_by_audience(self) -> None:
         ai = self.store.create(kind="review-due", title="该提醒复习了")
         user = self.store.create(kind="task-report", title="X 已更新",
-                                 audience="user", never_ends=True)
+                                 audience="user", end="never")
         snap = self.root / "notifications-open.json"
         tab = self.root / "notifications-user.json"
         self.store.export_open(snap)
@@ -297,7 +297,7 @@ class DueAtTests(unittest.TestCase):
         due = 1_800_000_000_000
         item = self.store.create(
             kind="trip", title="14:20 出门", audience="user",
-            due_at_ms=due)
+            due_at_ms=due, end="never")
         self.assertEqual(item["dueAtUtcMs"], due, "落库要带到点时刻")
         tab = self.root / "notifications-user.json"
         self.store.export_user_open(tab)
@@ -308,7 +308,7 @@ class DueAtTests(unittest.TestCase):
             "表现是「校验全过就是不响」")
 
     def test_missing_due_at_exports_as_null(self) -> None:
-        self.store.create(kind="user-todo", title="倒垃圾", audience="user", never_ends=True)
+        self.store.create(kind="user-todo", title="倒垃圾", audience="user", end="never")
         tab = self.root / "notifications-user.json"
         self.store.export_user_open(tab)
         exported = json.loads(tab.read_text("utf-8"))["items"][0]
@@ -323,7 +323,7 @@ class DueAtTests(unittest.TestCase):
         item = self.store.create(
             kind="user-todo", title="倒垃圾", audience="user",
             activate_at_ms=1_700_000_000_000,
-            due_at_ms=1_800_000_000_000)
+            due_at_ms=1_800_000_000_000, end="never")
         self.assertEqual(item["activateAtUtcMs"], 1_700_000_000_000)
         self.assertEqual(item["dueAtUtcMs"], 1_800_000_000_000)
 
@@ -359,7 +359,7 @@ class DueAtGuardTests(unittest.TestCase):
         """设备侧只投影用户方向的条目;ai 方向的到点时刻没有消费端。"""
         with self.assertRaises(NotificationError) as caught:
             self.store.create(kind="trip", title="方向错了", audience="ai",
-                              due_at_ms=_now_ms() + 600_000)
+                              due_at_ms=_now_ms() + 600_000, end="never")
         self.assertIn("audience user", str(caught.exception))
 
     def test_dedupe_hit_applies_new_due_and_reports(self) -> None:
@@ -367,11 +367,11 @@ class DueAtGuardTests(unittest.TestCase):
         实际什么都没变、也没有任何报错。"""
         first = self.store.create(
             kind="trip", title="回家", audience="user",
-            dedupe_key="trip:home", due_at_ms=_now_ms() + 600_000)
+            dedupe_key="trip:home", due_at_ms=_now_ms() + 600_000, end="never")
         target = _now_ms() + 1_200_000
         again = self.store.create(
             kind="trip", title="回家", audience="user",
-            dedupe_key="trip:home", due_at_ms=target)
+            dedupe_key="trip:home", due_at_ms=target, end="never")
         self.assertEqual(again["id"], first["id"], "仍然幂等,不新建")
         self.assertEqual(again["dueAtUtcMs"], target, "新的到点时刻要生效")
         self.assertIn("dueAtUtcMs", again.get("_dedupeUpdated") or [],
@@ -397,14 +397,14 @@ class PlaceBindingTests(unittest.TestCase):
     def test_place_stored_by_name_not_coordinates(self) -> None:
         item = self.store.create(
             kind="user-todo", title="倒垃圾", audience="user",
-            place={"name": "家", "proximity": "enter"}, never_ends=True)
+            place={"name": "家", "proximity": "enter"}, end="never")
         self.assertEqual(item["place"], {"name": "家", "proximity": "enter"},
                          "真值表里不该有坐标")
 
     def test_export_resolves_coordinates(self) -> None:
         self._name_place("家", 35.6586, 139.7454)
         self.store.create(kind="user-todo", title="倒垃圾", audience="user",
-                          place={"name": "家", "proximity": "enter"}, never_ends=True)
+                          place={"name": "家", "proximity": "enter"}, end="never")
         out = self.root / "notifications-user.json"
         self.store.export_user_open(out)
         place = json.loads(out.read_text("utf-8"))["items"][0]["place"]
@@ -420,7 +420,7 @@ class PlaceBindingTests(unittest.TestCase):
         没有坐标的半截对象让下游去猜。"""
         self.store.create(kind="user-todo", title="买菜", audience="user",
                           place={"name": "还没命名过的地方",
-                                 "proximity": "enter"}, never_ends=True)
+                                 "proximity": "enter"}, end="never")
         out = self.root / "notifications-user.json"
         self.store.export_user_open(out)
         self.assertIsNone(
@@ -430,7 +430,7 @@ class PlaceBindingTests(unittest.TestCase):
         with self.assertRaises(NotificationError):
             self.store.create(kind="user-todo", title="方向错了",
                               audience="ai",
-                              place={"name": "家", "proximity": "enter"}, never_ends=True)
+                              place={"name": "家", "proximity": "enter"}, end="never")
 
     def test_bad_proximity_rejected(self) -> None:
         with self.assertRaises(NotificationError):
@@ -442,7 +442,7 @@ class PlaceBindingTests(unittest.TestCase):
         """坐标不进真值表的好处:地点被移动/重命名后,已有的提醒自动跟上。"""
         self._name_place("家", 35.0, 139.0)
         self.store.create(kind="user-todo", title="倒垃圾", audience="user",
-                          place={"name": "家", "proximity": "enter"}, never_ends=True)
+                          place={"name": "家", "proximity": "enter"}, end="never")
         self._name_place("家", 36.0, 140.0)   # 用户重新标定了「家」
         out = self.root / "notifications-user.json"
         self.store.export_user_open(out)
@@ -545,22 +545,29 @@ class TerminationGuardTests(unittest.TestCase):
         with self.assertRaises(NotificationError) as e:
             self.store.create(
                 kind="user-todo", title="倒垃圾", audience="user")
-        # 报错必须**能照做**：把四个可选项列出来，而不是只说"无效"。
+        # 报错必须**能照做**：把模式列出来，而不是只说"无效"。
         message = str(e.exception)
-        for option in ("--due-at", "--expires-at",
-                       "--auto-resolve", "--never-ends"):
+        for option in ("end=expires:", "end=auto:", "end=never"):
             self.assertIn(option, message)
+        # ⚠ 还要说清「判断不了」怎么办 —— 用户 2026-08-29：
+        # 「如果无法回答某个内容可能他需要回来询问我或者自己分析」。
+        # 不写这句的话，被拦住的 AI 最可能的反应是**随便挑一个**，
+        # 那比不拦更糟：它会造出一个看着合理、实际错误的终止条件，
+        # 而错误的终止条件是查不出来的（待办悄悄提前消失或永远不消失）。
+        self.assertIn("回去问用户", message)
+        # due 不是终止条件这件事也必须写在报错里 —— 我自己第一版就搞错了。
+        self.assertIn("due", message)
 
     def test_each_termination_option_is_accepted(self) -> None:
         future = _now_ms() + 3600 * 1000
         self.store.create(kind="trip", title="A", audience="user",
-                          due_at_ms=future)
+                          due_at_ms=future, end="never")
         self.store.create(kind="user-todo", title="B", audience="user",
                           expires_at_ms=future)
         self.store.create(kind="user-todo", title="C", audience="user",
                           auto_resolve={"type": "item-mutated"})
         self.store.create(kind="user-todo", title="D", audience="user",
-                          never_ends=True)
+                          end="never")
         self.assertEqual(len(list(self.store.open_items())), 4)
 
     def test_ai_audience_is_not_affected(self) -> None:

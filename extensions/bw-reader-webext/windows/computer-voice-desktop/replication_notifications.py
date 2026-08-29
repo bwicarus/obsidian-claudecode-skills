@@ -169,7 +169,36 @@ class NotificationStore:
         place: dict[str, Any] | None = None,
         audience: str = "ai",
         never_ends: bool = False,
+        end: str | None = None,
     ) -> dict[str, Any]:
+        # 「模式 + 参数」入口（用户 2026-08-29 定的形状）。
+        #
+        # 为什么不是三个各自独立的 kwargs：三个可以**同时为空**，而"同时
+        # 为空"恰恰是最容易发生、后果最久的那种错 —— 它不报错、不显形，
+        # 几天后待办堆起来才被发现。收成一个字段之后，"没选"就是一个
+        # **明确的状态**，一眼看得出来。
+        #
+        # ⚠ 取值是**闭集**：AI 只从里面挑一个，不自由发挥。
+        if end is not None:
+            text = str(end).strip()
+            if text == "never":
+                never_ends = True
+            elif text.startswith("expires:"):
+                expires_at_ms = int(text.split(":", 1)[1])
+            elif text.startswith("auto:"):
+                condition = text.split(":", 1)[1]
+                if condition not in _AUTO_TYPES:
+                    raise NotificationError(
+                        "end=auto: 的条件必须是 %s 之一，收到 %r"
+                        % (", ".join(_AUTO_TYPES), condition))
+                auto_resolve = {"type": condition}
+                if condition == "place-arrived" and place:
+                    auto_resolve["place"] = place.get("name")
+            else:
+                raise NotificationError(
+                    "end 只接受 expires:<毫秒时刻> / auto:<条件> / never，"
+                    "收到 %r" % text)
+
         with self._locked():
             if not kind or len(kind) > 40 or not title:
                 raise NotificationError("通知 kind/title 非法")
@@ -207,19 +236,27 @@ class NotificationStore:
             # 是**正常**的：它们靠同 dedupe_key 覆盖、靠下一轮对账退场，
             # 本来就不需要谁去结束。真正会堆起来的是**要人去做**的那些，
             # 因为只有人做完了才算完，而人不会记得回来销账。
+            #
+            # ⚠⚠ **due_at_ms 不算终止条件。**
+            # 我第一版把它算进去了 —— 错的。`due` 是"什么时候提醒"，
+            # 到点之后条目照样挂着。垃圾提醒就算设了 due 也一样会堆。
+            # 「什么时候提醒」和「什么时候结束」是两件事，这正是本次
+            # 事故的根源（用户以为 place 就是完成条件）。
             if (
                 audience == "user"
-                and due_at_ms is None
                 and expires_at_ms is None
                 and auto_resolve is None
                 and not never_ends
             ):
                 raise NotificationError(
-                    "这个条目没有任何终止条件，会永远挂着。四选一：\n"
-                    "  --due-at      到点就该做的事\n"
-                    "  --expires-at  过了这个时刻就不用做了（垃圾回收日这种）\n"
-                    "  --auto-resolve 满足条件自动完成（%s）\n"
-                    "  --never-ends  确实要一直留着（明知而选）"
+                    "这个条目没有终止条件，会永远挂着。**选一个模式 + 参数**：\n"
+                    "  end=expires:<毫秒时刻>  到这个时刻还没做完就作废\n"
+                    "                          （垃圾回收日这种，过了就没意义）\n"
+                    "  end=auto:<条件>         满足条件自动完成，条件取值：%s\n"
+                    "  end=never               确实要一直留着（明知而选）\n"
+                    "⚠ due（到点提醒）不是终止条件：到点之后条目照样挂着。\n"
+                    "判断不了就**回去问用户**或先去查清楚 —— "
+                    "「不知道」是合法的结果，随便填一个不是。"
                     % (", ".join(_AUTO_TYPES),))
             if auto_resolve is not None:
                 if (
@@ -703,6 +740,15 @@ def main() -> int:
                         help="地点名：**到达**该地即自动完成（判的是到达"
                              "这个事件，不是此刻在不在，所以在目的地创建"
                              "也不会当场自我了断）")
+    # 「模式 + 参数」—— 用户 2026-08-29 定的形状：AI 只从闭集里挑一个，
+    # 不自由发挥。给 audience=user 的条目必填（否则会永远挂着）。
+    create.add_argument(
+        "--end", default=None,
+        help="终止方式，三选一：expires:<毫秒时刻>（到点作废）/ "
+             "auto:<item-mutated|card-reviewed|place-arrived>（条件达成"
+             "自动完成）/ never（一直留着，明知而选）。"
+             "⚠ --due-at 不是终止条件：到点之后条目照样挂着。"
+             "判断不了就回来问用户 —— 「不知道」是合法结果，随便填不是")
     args = parser.parse_args()
     store = NotificationStore(args.root or default_root())
 
@@ -766,7 +812,7 @@ def main() -> int:
                 source=args.source, auto_resolve=auto,
                 expires_at_ms=expires, dedupe_key=args.dedupe_key,
                 activate_at_ms=activate, due_at_ms=due, place=place,
-                audience=args.audience,
+                audience=args.audience, end=args.end,
             )
             if item.get("_dedupeHit"):
                 updated = item.get("_dedupeUpdated") or []
