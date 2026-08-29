@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace BwReader.ComputerVoiceAudio;
 
 /// 提示板的自检。它守的是**三条支点规矩**，每一条坏掉都没有症状：
@@ -337,6 +339,46 @@ internal static class ReaderAttentionBoardSelfTest
             }
         }
         checks.Add("attention-registry-has-nothing-imaginary");
+
+        // ⑪ 空状态下 present 必须**全是 false**。
+        //
+        // 上面两条只验证了"全都有值"的那一头，而错法恰恰出在另一头：
+        // 我最初用 body.Contains("开口：") 判 present，而空板子写的是
+        // 「开口：无」—— 含那个子串，于是一条待办都没有时登记表报
+        // 「待办 · 现在在板上」。两条正向检查全绿，清单照样在撒谎。
+        ReaderAttentionBoard.ResetForSelfTest(dir);
+        File.WriteAllText(
+            Path.Combine(dir, "notifications.json"),
+            "{\"contract\":\"reader-notifications/1\",\"items\":[]}");
+        string emptyRegistry =
+            ReaderAttentionBoard.RenderRegistryForSelfTest(t0);
+        // ⚠ 不能笼统断言"全 false"：「位置」那一行是**恒在**的（不知道时
+        // 写「位置｜未知」），它报 true 是事实而非缺陷。第一版就是这么写
+        // 的，于是断言逼着我去改一个本来正确的行为 —— 太粗的断言会把人
+        // 引向错误的修复。所以按项断言。
+        using (JsonDocument parsed = JsonDocument.Parse(emptyRegistry))
+        {
+            foreach (JsonElement board in
+                parsed.RootElement.GetProperty("boards").EnumerateArray())
+            {
+                foreach (JsonElement item in
+                    board.GetProperty("items").EnumerateArray())
+                {
+                    string kind = item.GetProperty("kind").GetString() ?? "";
+                    if (kind == "位置")
+                    {
+                        continue;   // 恒在，见上
+                    }
+                    if (item.GetProperty("present").GetBoolean())
+                    {
+                        throw new InvalidOperationException(
+                            $"空状态下「{kind}」却报在板上 —— 清单在撒谎。"
+                            + "登记表：\n" + emptyRegistry);
+                    }
+                }
+            }
+        }
+        checks.Add("attention-registry-empty-means-empty");
 
         // 把一份典型的板子带进结果：格式的活文档，也让"悄悄变啰嗦"看得见。
         ReaderAttentionBoard.ResetForSelfTest(dir);

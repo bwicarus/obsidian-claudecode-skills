@@ -547,6 +547,17 @@ internal static class ReaderAttentionBoard
             ("fast", "快速提示板", "要快：允许抖，抖本身也是情报", fast),
         })
         {
+            // ⚠ present **必须走 MarkersInBody**，不能自己 Contains 一下。
+            //
+            // 2026-08-30 我先写的就是直接 Contains，当场翻车：慢板上是
+            // 「开口：无」，而它含子串「开口：」，于是登记表报「待办 ·
+            // 现在在板上」—— 明明一条待办都没有。
+            //
+            // 讽刺的是这正是这个文件里反复写的那条：**判断条件只能有一份**。
+            // 自检的反向核对用的是 MarkersInBody（它特判了「开口：无」），
+            // 这里另写一份，两份说的话就不一样了。
+            var onBoard = new HashSet<string>(
+                MarkersInBody(body), StringComparer.Ordinal);
             var items = new List<object>();
             foreach (BoardSignal signal in Registry)
             {
@@ -559,8 +570,7 @@ internal static class ReaderAttentionBoard
                     kind = signal.Kind,
                     marker = signal.Marker,
                     detail = signal.Detail,
-                    present = body.Contains(
-                        signal.Marker, StringComparison.Ordinal),
+                    present = onBoard.Contains(signal.Marker),
                 });
             }
             boards.Add(new { board = id, title, nature, items });
