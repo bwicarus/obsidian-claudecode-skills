@@ -58,9 +58,25 @@ final class ReaderVoipCall: NSObject {
     /// 而"发了被拒"和"根本没发"完全分不开）。显示在「数据与同步」里。
     private(set) var status: String = "还没开始注册"
 
-    /// 记一步。⚠ 覆盖式的，只留最新一句 —— 这不是日志，是"现在什么状态"。
+    /// 最近几步。见 `note(_:)` —— 只留最新一句会把排查要的证据擦掉。
+    private var recentSteps: [String] = []
+
+    /// 记一步。**留最近几步，不是只留最新一句。**
+    ///
+    /// ⚠ 2026-08-29 的教训：原来是覆盖式的，理由写着"这不是日志，是现在
+    /// 什么状态"。对通知是对的，**对排查是错的** —— 一通电话结束后写的
+    /// 「上一通电话：answered」把中间那句「语音链路：idle → …」盖掉了，
+    /// 而后者正是我加这一行要看的东西。诊断把自己的证据擦了。
+    ///
+    /// 留 4 步：够看清一通电话的完整经过，又不至于长到没法在一行里读。
     static func note(_ text: String) async {
-        await MainActor.run { ReaderVoipCall.shared.status = text }
+        await MainActor.run {
+            var steps = ReaderVoipCall.shared.recentSteps
+            steps.append(text)
+            if steps.count > 4 { steps.removeFirst(steps.count - 4) }
+            ReaderVoipCall.shared.recentSteps = steps
+            ReaderVoipCall.shared.status = steps.joined(separator: " · ")
+        }
     }
 
     /// App 启动时调一次。
@@ -70,7 +86,7 @@ final class ReaderVoipCall: NSObject {
         registry.delegate = self
         registry.desiredPushTypes = [.voIP]
         self.registry = registry
-        status = "已向系统注册，等 token"
+        Task { await ReaderVoipCall.note("已向系统注册，等 token") }
 
         let configuration = CXProviderConfiguration()
         configuration.supportsVideo = false
@@ -173,7 +189,7 @@ extension ReaderVoipCall: PKPushRegistryDelegate {
             .joined()
         Task { @MainActor in
             ReaderVoipCall.shared.deviceToken = hex
-            ReaderVoipCall.shared.status = "拿到 token，正在上报"
+            await ReaderVoipCall.note("拿到 token，正在上报")
             await ReaderVoipTokenUpload.send(token: hex)
         }
     }
@@ -186,7 +202,7 @@ extension ReaderVoipCall: PKPushRegistryDelegate {
             ReaderVoipCall.shared.deviceToken = nil
             // ⚠ 系统主动作废 token 时**必须显示**：这时候电话打不进来，
             // 而设备上不会有任何其它迹象。
-            ReaderVoipCall.shared.status = "系统作废了 token（需重新注册）"
+            await ReaderVoipCall.note("系统作废了 token（需重新注册）")
         }
     }
 
@@ -251,7 +267,7 @@ extension ReaderVoipCall: CXProviderDelegate {
             NotificationCenter.default.post(
                 name: ReaderVoipCall.answeredNotification, object: nil)
             ReaderVoipCall.shared.answeredAt = Date()
-            ReaderVoipCall.shared.status = "已接通，等系统交出音频会话"
+            await ReaderVoipCall.note("已接通，等系统交出音频会话")
             // AI 说完话会调 voip_push hangup，那边写下信号；这里轮询它。
             // ⚠ 为什么不用推送来挂断：再推一次会**再响一次铃**，
             // 而我们要的是结束当前这通。轮询土但对，通话只有几十秒。
@@ -292,7 +308,7 @@ extension ReaderVoipCall: CXProviderDelegate {
             call.currentCallId = nil
             call.answeredAt = nil
             call.ringingSince = nil
-            call.status = "上一通电话：" + outcome
+            await ReaderVoipCall.note("上一通电话：" + outcome)
             NotificationCenter.default.post(
                 name: ReaderVoipCall.declinedNotification, object: nil)
             // ⚠ **挂断这条路上也要收语音链路**，不能只靠 didDeactivate。
@@ -333,7 +349,7 @@ extension ReaderVoipCall: CXProviderDelegate {
             // ⚠ **先翻牌子再起音频**：音频引擎据此不去动会话。
             // 顺序反了就有一瞬间跟系统抢，而那一瞬间足以让通话哑掉。
             NativeAudioEngine.isUnderSystemCall = true
-            ReaderVoipCall.shared.status = "通话音频已就绪"
+            await ReaderVoipCall.note("通话音频已就绪")
             await ReaderVoipCall.shared.onCallAudioReady?()
         }
     }
