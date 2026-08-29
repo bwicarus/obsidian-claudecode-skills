@@ -65,7 +65,20 @@ final class BWReaderAppDelegate: NSObject, UIApplicationDelegate {
         // ⚠ 挂的是 didActivate 而不是"接听"那一刻：CallKit 通话里
         // 系统才是音频会话的主人，早一步起音频就是跟它抢。
         ReaderVoipCall.shared.onCallAudioReady = {
-            await NativeVoiceBridge.shared.start()
+            let bridge = NativeVoiceBridge.shared
+            // ⚠ **起之前先记下它当时是什么相位。**
+            //
+            // start() 的第一句是 `guard !state.isActive, !state.isBusy`
+            // —— 也就是说它可能**一声不响地直接返回**。2026-08-29 就卡在
+            // 这里查不下去：桥那边 state=idle、连失败记录都没有，
+            // 说明 START 根本没发出去，而 App 侧看不出是"没调"还是"调了
+            // 但被守卫挡回"。两者要做的事完全不同。
+            let before = bridge.state.phase
+            await bridge.start()
+            let after = bridge.state.phase
+            ReaderVoipCall.shared.status =
+                "语音链路：\(before) → \(after)"
+                + (bridge.state.detail.map { "（\($0)）" } ?? "")
         }
         ReaderVoipCall.shared.onCallAudioEnded = {
             await NativeVoiceBridge.shared.stop()

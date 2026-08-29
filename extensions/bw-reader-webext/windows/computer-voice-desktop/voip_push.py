@@ -267,6 +267,19 @@ def place_call(root: Path, ntf_id: str, title: str,
     调用方就是在等这一个进程（用户 2026-08-29 明说）。
     """
     ntf_id = _require_valid_ntf(ntf_id)
+    # ⚠ **拨号前先清掉残留的挂断信号。**
+    #
+    # 那个信号是"读一次就消失"的，但写了却没人来读时它会留着 ——
+    # 通话没接通、进程被打断、或者有人手动跑了一次 hangup。
+    # 下一通一接起来，App 的轮询立刻读到它，表现是**点了接听就消失**。
+    #
+    # 2026-08-29 我自己撞的：打电话前跑了一次 hangup，以为那是"清除"，
+    # 其实那个子命令是"写入"。清在这里，因为**拨号这一刻**才是
+    # "上一通确实已经结束"的证据。
+    try:
+        (_bridge_runtime() / HANGUP_FILE_NAME).unlink()
+    except OSError:
+        pass
     attempts = 0
     while True:
         attempts += 1
