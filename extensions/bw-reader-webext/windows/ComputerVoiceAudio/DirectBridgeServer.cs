@@ -570,6 +570,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         app.MapGet(
             DirectSnapshotViewer.ActivityReportPath,
             _snapshotViewer.HandleActivityReportAsync);
+        app.MapGet(
+            DirectSnapshotViewer.AttentionBoardsPath,
+            _snapshotViewer.HandleAttentionBoardsAsync);
         // 摄像头（2026-08-27）。全部经 PrepareLocalResponse 的回环闸 ——
         // 家里的实时画面只在这台机器上打得开,不经 Tailscale、不经网页。
         app.MapGet(

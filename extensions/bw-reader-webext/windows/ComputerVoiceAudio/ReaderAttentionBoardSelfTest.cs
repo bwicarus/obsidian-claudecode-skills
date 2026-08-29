@@ -47,6 +47,25 @@ internal static class ReaderAttentionBoardSelfTest
             + string.Join(",", items) + "]}");
     }
 
+    /// 一条 pending + 一条 acknowledged 混在一起。
+    ///
+    /// 登记表核对要的就是这种状态：只有这样「开口：」和「- 待办｜N 条
+    /// 已确认」才会**同时**出现在慢板上。用纯 pending 的夹具时，
+    /// 「已确认待办」那条登记项永远缺席 —— 2026-08-30 我就是这么被
+    /// 自检抓住的（注释里还写着"夹具里有"，其实没有）。
+    private static void WriteMixedTodos(string dir)
+    {
+        File.WriteAllText(
+            Path.Combine(dir, "notifications.json"),
+            "{\"contract\":\"reader-notifications/1\",\"items\":["
+            + "{\"id\":\"ntf-p\",\"kind\":\"user-todo\","
+            + "\"title\":\"登记表核对用\",\"state\":\"pending\","
+            + "\"audience\":\"user\",\"place\":{\"name\":\"家\"}},"
+            + "{\"id\":\"ntf-a\",\"kind\":\"user-todo\","
+            + "\"title\":\"已经确认过的\",\"state\":\"acknowledged\","
+            + "\"audience\":\"user\"}]}");
+    }
+
     /// 同一批待办，但 state 是 acknowledged（助手已经 ack 过）。
     private static void WriteAcknowledged(string dir, params string[] titles)
     {
@@ -261,6 +280,63 @@ internal static class ReaderAttentionBoardSelfTest
                 "停笔够久了快板还挂着笔画 —— 快板要的是及时，不是稳定");
         }
         checks.Add("attention-board-fast-retires-on-time");
+
+        // ⑩ 登记表**双向**跟渲染对齐（用户 2026-08-30 要的那个清单）。
+        //
+        // 清单类的东西错了没有任何症状 —— 它会信誓旦旦地报一个不存在的
+        // 种类，或者漏报一个真在用的。所以两个方向都要锁：
+        //   正向：登记的标识，在"全都有值"时必须真的出现在那块板上
+        //   反向：板上出现的标识，必须都在登记表里
+        // 只做正向的话，新加一个信号忘了登记，自检照样是绿的。
+        ReaderAttentionBoard.ResetForSelfTest(dir);
+        WriteMixedTodos(dir);
+        DateTimeOffset t3 = t0 + TimeSpan.FromMinutes(2);
+        // 把能立的旗都立起来：位置（要满足停留门槛）、快照失效、绘图。
+        ReaderAttentionBoard.NoteLocation("aa", "第一处", t0);
+        ReaderAttentionBoard.NoteLocation("aa", "第一处", t3);
+        ReaderAttentionBoard.NoteLocation("bb", "第二处", t3);
+        ReaderAttentionBoard.NoteLocation(
+            "bb", "第二处", t3 + TimeSpan.FromMinutes(2));
+        DateTimeOffset t4 = t3 + TimeSpan.FromMinutes(2);
+        ReaderAttentionBoard.NoteDrawing(t4);
+        string slowFull = ReaderAttentionBoard.RenderSlowForSelfTest(t4);
+        string fastFull = ReaderAttentionBoard.RenderFastForSelfTest(t4);
+        foreach ((string board, string body) in new[]
+        {
+            ("slow", slowFull), ("fast", fastFull),
+        })
+        {
+            var registered = new HashSet<string>(
+                ReaderAttentionBoard.MarkersForSelfTest(board),
+                StringComparer.Ordinal);
+            foreach (string marker in ReaderAttentionBoard.MarkersInBody(body))
+            {
+                if (!registered.Contains(marker))
+                {
+                    throw new InvalidOperationException(
+                        $"{board} 板上有「{marker}」但登记表里没有 —— "
+                        + "新信号忘了登记，清单在撒谎");
+                }
+            }
+        }
+        checks.Add("attention-registry-covers-everything-on-the-boards");
+
+        // 正向那一半：登记的每一条在这个"全都有值"的状态下都必须出现。
+        // 夹具是 WriteMixedTodos（pending + acknowledged 各一条），
+        // 「已确认待办」那条登记项要靠 acknowledged 那条才会出现。
+        string registryJson =
+            ReaderAttentionBoard.RenderRegistryForSelfTest(t4);
+        foreach (string missing in new[] { "\"present\": false" })
+        {
+            if (registryJson.Contains(missing, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "「全都有值」的状态下仍有登记项没出现在板上：登记表里有"
+                    + "渲染逻辑并不会产出的种类。原始登记表 JSON：\n"
+                    + registryJson);
+            }
+        }
+        checks.Add("attention-registry-has-nothing-imaginary");
 
         // 把一份典型的板子带进结果：格式的活文档，也让"悄悄变啰嗦"看得见。
         ReaderAttentionBoard.ResetForSelfTest(dir);

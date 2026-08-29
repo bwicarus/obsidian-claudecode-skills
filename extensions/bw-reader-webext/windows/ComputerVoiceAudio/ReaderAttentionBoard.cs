@@ -66,6 +66,40 @@ internal static class ReaderAttentionBoard
     internal const string SlowFileName = "reader-attention-slow.md";
     internal const string FastFileName = "reader-attention-fast.md";
 
+    /// 两块板各自**登记了哪些种类的监控项**（用户 2026-08-30 要的清单）。
+    internal const string RegistryFileName = "reader-attention-registry.json";
+
+    /// 一个登记项。
+    ///
+    /// `Marker` 是它在板子文本里的**标识**，登记表和渲染逻辑靠它对齐 ——
+    /// 自检双向核对（见 ReaderAttentionBoardSelfTest）：
+    ///   · 板上出现了表里没有的标识 → 有信号没登记
+    ///   · 表里的标识在"全都有值"时也没出现 → 登记了不存在的东西
+    /// 没有这道核对，这张表迟早会变成一份**看起来对**的谎：渲染改了它
+    /// 不会跟着改，而清单类的东西错了没有任何症状。
+    internal readonly record struct BoardSignal(
+        string Board,
+        string Kind,
+        string Marker,
+        string Detail);
+
+    /// ⚠ 加新信号时**这里也要加一条**，否则自检会红。那是故意的。
+    private static readonly BoardSignal[] Registry =
+    {
+        new("slow", "待办", "开口：",
+            "还没跟用户说过的待办（pending）—— 该开口说的事"),
+        new("slow", "位置", "- 位置｜",
+            "他现在在看什么。停留满 45 秒才算数，来回切 10 分钟内不重报"),
+        new("slow", "已确认待办", "- 待办｜",
+            "ack 过、还没做完的条数 —— 提醒别重复说"),
+        new("fast", "位置", "- 位置｜",
+            "同慢板那条。两块板都带，任一块单独读都知道他在哪"),
+        new("fast", "快照失效", "- 位置换过｜",
+            "换地方了，手上的旧快照对不上 —— 问到内容要重取"),
+        new("fast", "绘图", "- 有笔画｜",
+            "正在画或刚画过。有动作即刻立旗，停笔满 2 分钟退场"),
+    };
+
     /// 停留多久才算「真的到了这一页」。没有门槛的话翻页就让板子抖，
     /// 而对面是"变了就读"，抖动直接等于持续烧额度。
     private static readonly TimeSpan DwellThreshold = TimeSpan.FromSeconds(45);
@@ -134,10 +168,10 @@ internal static class ReaderAttentionBoard
     private static string _lastSlowBody = string.Empty;
     private static string _lastFastBody = string.Empty;
 
-    /// 上一次**写进文件**的内容（跟上面两个分开：文件可能因为进程重启
-    /// 而落后于内存）。用来保证「内容没变就绝不重写」。
-    private static string _lastSlowFile = string.Empty;
-    private static string _lastFastFile = string.Empty;
+    /// 上一次**写进每个文件**的内容（路径 → 内容）。跟上面那两个分开：
+    /// 文件可能因为进程重启而落后于内存。用来保证「内容没变就绝不重写」。
+    private static readonly Dictionary<string, string> LastWritten =
+        new(StringComparer.OrdinalIgnoreCase);
 
     /// runtime 目录 —— 那几个已有的 json 就在这里。
     internal static void Configure(string runtimeDirectory)
@@ -493,6 +527,56 @@ internal static class ReaderAttentionBoard
     /// 混在一起的话，这一行自己的出现/消失会污染那个比较。
     ///
     /// 调用方须持有 Gate。
+    /// 登记表 + **此刻在不在板上**。
+    ///
+    /// ⚠ `present` 不是另算一遍，是**看真正渲出来的那份文本**里有没有这个
+    /// 标识。另算一遍就等于把判断条件抄第二份，而抄本迟早跟正本说的不一样
+    /// —— 那时这个清单会信誓旦旦地报一个错的状态。
+    /// 调用方须持有 Gate。
+    private static string RenderRegistry(DateTimeOffset now)
+    {
+        // ⚠ 顺序同 FlushFilesAsync：先快后慢（FastOnlyLines 会让到点的
+        // 绘图退场，两块要看到同一轮的结果）。
+        string fast = RenderFast(now);
+        string slow = RenderSlow(now);
+        var boards = new List<object>();
+        foreach ((string id, string title, string nature, string body) in new[]
+        {
+            ("slow", "慢提示板", "要稳：不看时钟，变一次就该被认真读一次",
+                slow),
+            ("fast", "快速提示板", "要快：允许抖，抖本身也是情报", fast),
+        })
+        {
+            var items = new List<object>();
+            foreach (BoardSignal signal in Registry)
+            {
+                if (!string.Equals(signal.Board, id, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                items.Add(new
+                {
+                    kind = signal.Kind,
+                    marker = signal.Marker,
+                    detail = signal.Detail,
+                    present = body.Contains(
+                        signal.Marker, StringComparison.Ordinal),
+                });
+            }
+            boards.Add(new { board = id, title, nature, items });
+        }
+        // ⚠ 关掉 Unicode 转义：这份文件是**给人看的**（服务器界面上那一页）。
+        // 默认策略会把中文全转成 \uXXXX，直接读文件时一个字都认不出来。
+        return JsonSerializer.Serialize(
+            new { contract = "reader-attention-registry/1", boards },
+            new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder
+                    .UnsafeRelaxedJsonEscaping,
+            }) + "\n";
+    }
+
     /// 渲一块板并填上它自己的 seq。内容变了才推进 seq。
     /// 调用方须持有 Gate。
     private static string Stamp(string body, bool slow)
@@ -522,6 +606,7 @@ internal static class ReaderAttentionBoard
         string? directory;
         string slow;
         string fast;
+        string registry;
         lock (Gate)
         {
             directory = _runtimeDirectory;
@@ -530,6 +615,10 @@ internal static class ReaderAttentionBoard
             // 而合并视图要看到同一轮的结果。
             fast = Stamp(RenderFast(now), slow: false);
             slow = Stamp(RenderSlow(now), slow: true);
+            // ⚠ 登记表**在同一次加锁里**渲，用的是同一个 now。分开渲的话
+            // 它报的 present 属于另一个瞬间，而"清单跟板子对不上"这种错
+            // 看起来就像是登记表写错了 —— 查错方向直接被带偏。
+            registry = RenderRegistry(now);
         }
         if (string.IsNullOrEmpty(directory))
         {
@@ -537,24 +626,27 @@ internal static class ReaderAttentionBoard
         }
         await WriteIfChangedAsync(
             Path.Combine(directory, SlowFileName), slow,
-            isSlow: true, token).ConfigureAwait(false);
+            token).ConfigureAwait(false);
         await WriteIfChangedAsync(
             Path.Combine(directory, FastFileName), fast,
-            isSlow: false, token).ConfigureAwait(false);
+            token).ConfigureAwait(false);
+        await WriteIfChangedAsync(
+            Path.Combine(directory, RegistryFileName), registry,
+            token).ConfigureAwait(false);
     }
 
     private static async Task WriteIfChangedAsync(
-        string path, string body, bool isSlow, CancellationToken token)
+        string path, string body, CancellationToken token)
     {
         lock (Gate)
         {
-            string had = isSlow ? _lastSlowFile : _lastFastFile;
-            if (string.Equals(had, body, StringComparison.Ordinal)
+            if (LastWritten.TryGetValue(path, out string? had)
+                && string.Equals(had, body, StringComparison.Ordinal)
                 && File.Exists(path))
             {
                 return;
             }
-            if (isSlow) { _lastSlowFile = body; } else { _lastFastFile = body; }
+            LastWritten[path] = body;
         }
         try
         {
@@ -570,14 +662,7 @@ internal static class ReaderAttentionBoard
             // 是一块停在过去某一刻的板子，且没有任何迹象说明它停了。
             lock (Gate)
             {
-                if (isSlow)
-                {
-                    _lastSlowFile = string.Empty;
-                }
-                else
-                {
-                    _lastFastFile = string.Empty;
-                }
+                LastWritten.Remove(path);
             }
         }
     }
@@ -758,6 +843,49 @@ internal static class ReaderAttentionBoard
         }
     }
 
+    internal static string RenderRegistryForSelfTest(DateTimeOffset? now = null)
+    {
+        lock (Gate)
+        {
+            return RenderRegistry(now ?? DateTimeOffset.UtcNow);
+        }
+    }
+
+    /// 只给自检用：登记表里某块板登记了哪些标识。
+    internal static IReadOnlyList<string> MarkersForSelfTest(string board) =>
+        Registry
+            .Where(one => string.Equals(
+                one.Board, board, StringComparison.Ordinal))
+            .Select(one => one.Marker)
+            .ToList();
+
+    /// 只给自检用：把板子文本里出现的「- 种类｜」标识全挑出来。
+    ///
+    /// ⚠ 这是**从渲染结果反推**，不是另抄一份规则 —— 双向核对的"反向"
+    /// 那一半全靠它：板上冒出登记表里没有的东西，这里能看见。
+    internal static IReadOnlyList<string> MarkersInBody(string body)
+    {
+        var found = new List<string>();
+        foreach (string line in body.Split('\n'))
+        {
+            if (!line.StartsWith("- ", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            int bar = line.IndexOf('｜');
+            if (bar > 0)
+            {
+                found.Add(line[..(bar + 1)]);
+            }
+        }
+        if (body.Contains("开口：", StringComparison.Ordinal)
+            && !body.Contains("开口：无", StringComparison.Ordinal))
+        {
+            found.Add("开口：");
+        }
+        return found;
+    }
+
     /// 只给自检用：走同一条登记路径（不能抄一份 —— 抄一份的话真实路径
     /// 改了而副本没改时，自检照样是绿的。这一版先犯过一次）。
     internal static void MarkDeliveredForSelfTest()
@@ -791,8 +919,7 @@ internal static class ReaderAttentionBoard
             _fastSeq = 0;
             _lastSlowBody = string.Empty;
             _lastFastBody = string.Empty;
-            _lastSlowFile = string.Empty;
-            _lastFastFile = string.Empty;
+            LastWritten.Clear();
             _hasDrawing = false;
             _drawingLastAt = default;
         }

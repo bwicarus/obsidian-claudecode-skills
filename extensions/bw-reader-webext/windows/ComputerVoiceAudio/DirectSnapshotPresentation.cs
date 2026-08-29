@@ -1816,6 +1816,8 @@ internal sealed class DirectSnapshotViewer : IDisposable
         "/reader-context-live.md";
     internal const string ActivityViewerPath = "/activity-view";
     internal const string ActivityReportPath = "/activity-report.json";
+    /// 提示板 tab 的数据口（2026-08-30 用户：显示放快照里，新加一个 tab）。
+    internal const string AttentionBoardsPath = "/attention-boards.json";
 
     // 摄像头（2026-08-27 用户拍板）。三条路由各司其职：
     //   list.json  有哪些摄像头、各自最近一张的情况
@@ -1880,6 +1882,27 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   cursor: pointer; font-size: .9rem; font-family: inherit; }
                 .tab.on { background: #1a2c52; color: #e8edf8;
                   border-color: #3a5588; }
+                .brd-grid { display: grid; gap: 1.2rem;
+                  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+                .brd-col { background: rgba(20, 30, 56, .7);
+                  border: 1px solid #263655; border-radius: 12px;
+                  padding: 1rem 1.2rem; }
+                .brd-col h3 { margin: 0 0 .2rem; font-size: 1rem; }
+                .brd-col h4 { margin: 1rem 0 .5rem; font-size: .85rem;
+                  color: #8fa5c8; font-weight: normal; }
+                .brd-nature { color: #8fa5c8; font-size: .82rem;
+                  margin-bottom: .7rem; }
+                .brd-item { border-top: 1px solid #1e2b48;
+                  padding: .5rem 0; display: flex; gap: .6rem;
+                  align-items: baseline; }
+                .brd-dot { flex: none; width: .5rem; height: .5rem;
+                  border-radius: 50%; background: #33415e; }
+                .brd-on .brd-dot { background: #6ee7a8; }
+                .brd-kind { flex: none; min-width: 5.5rem;
+                  font-size: .88rem; color: #c8d6ef; }
+                .brd-on .brd-kind { color: #e8edf8; }
+                .brd-detail { color: #8fa5c8; font-size: .8rem;
+                  line-height: 1.45; }
                 .act-book { background: rgba(20, 30, 56, .7);
                   border: 1px solid #263655; border-radius: 12px;
                   padding: 1rem 1.2rem; margin-bottom: 1rem; }
@@ -1996,6 +2019,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   <button type="button" id="tab-snapshot" class="tab on">实时快照</button>
                   <button type="button" id="tab-activity" class="tab">学习活动</button>
                   <button type="button" id="tab-camera" class="tab">摄像头</button>
+                  <button type="button" id="tab-boards" class="tab">提示板</button>
                 </nav>
                 <div class="status">
                   <span id="status" class="pill">等待快照</span>
@@ -2021,6 +2045,30 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   <div id="act-main">读取中…</div>
                   <pre id="act-ai" class="act-pre" hidden>读取中…</pre>
                   <div id="act-raw" hidden>读取中…</div>
+                </section>
+              </main>
+              <main id="view-boards" hidden>
+                <section class="wide">
+                  <h2>提示板 · 语音助手正在读的两块</h2>
+                  <div class="act-bar">
+                    <div id="brd-stamp" class="muted">读取中…</div>
+                  </div>
+                  <div class="brd-grid">
+                    <div class="brd-col">
+                      <h3>慢提示板</h3>
+                      <div class="brd-nature">要稳：不看时钟，变一次就该被认真读一次</div>
+                      <pre id="brd-slow" class="act-pre">读取中…</pre>
+                      <h4>登记的监控项目</h4>
+                      <div id="brd-slow-items" class="muted">读取中…</div>
+                    </div>
+                    <div class="brd-col">
+                      <h3>快速提示板</h3>
+                      <div class="brd-nature">要快：允许抖，抖本身也是情报</div>
+                      <pre id="brd-fast" class="act-pre">读取中…</pre>
+                      <h4>登记的监控项目</h4>
+                      <div id="brd-fast-items" class="muted">读取中…</div>
+                    </div>
+                  </div>
                 </section>
               </main>
               <main id="view-camera" hidden>
@@ -2433,23 +2481,110 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   }
                 }
 
+                // ── 提示板 tab（2026-08-30 用户：显示放快照里）──
+                //
+                // ⚠ 显示的是**文件本身**，不在这里重新渲染板子。这一页要
+                // 回答的是「语音助手现在到底看到了什么」，所以必须看它看
+                // 的那份；自己再渲一遍的话，两者不一致时这页会掩盖问题。
+                const tabBoards = byId("tab-boards");
+                const viewBoards = byId("view-boards");
+                let boardsTimer = null;
+                function renderBoardItems(box, items) {
+                  box.className = "";
+                  // ⚠ 本页契约：零 innerHTML（见本文件顶部那条）。清空用
+                  // replaceChildren，别图省事赋空串 —— 一处破例就把整条
+                  // 安全属性废了。2026-08-30 我先写了那个省事写法，被自检
+                  // 拦下；改完又因为**注释里写出了那个词**再被拦一次 ——
+                  // 断言是纯文本包含，注释同样会进页面。
+                  box.replaceChildren();
+                  if (!items || !items.length) {
+                    box.className = "muted";
+                    box.textContent = "登记表还没读到。";
+                    return;
+                  }
+                  for (const item of items) {
+                    const row = document.createElement("div");
+                    row.className = "brd-item" + (item.present ? " brd-on" : "");
+                    const dot = document.createElement("span");
+                    dot.className = "brd-dot";
+                    const kind = document.createElement("span");
+                    kind.className = "brd-kind";
+                    kind.textContent = item.kind;
+                    const detail = document.createElement("span");
+                    detail.className = "brd-detail";
+                    // present 说的是「此刻在不在板上」，不是「有没有启用」。
+                    // 两者混起来会让"现在没在画画"看着像"绘图监控坏了"。
+                    detail.textContent =
+                      (item.present ? "现在在板上 · " : "此刻无 · ")
+                      + item.detail;
+                    row.append(dot, kind, detail);
+                    box.append(row);
+                  }
+                }
+                async function renderBoards() {
+                  const stamp = byId("brd-stamp");
+                  let payload;
+                  try {
+                    const response = await fetch("/attention-boards.json", {
+                      cache: "no-store",
+                    });
+                    payload = await response.json();
+                  } catch (error) {
+                    stamp.textContent = "读不到：" + error;
+                    return;
+                  }
+                  // ⚠ 「文件还没有」和「板子上没内容」要分开说 ——
+                  // 前者是桥没在跑或版本旧，后者是一切正常只是没事。
+                  const missing =
+                    "（还没有这个文件。桥每秒渲一次、内容变了才写盘；"
+                    + "看不到通常是直连服务没跑，或跑的是不带这功能的旧版本。）";
+                  byId("brd-slow").textContent = payload.slow || missing;
+                  byId("brd-fast").textContent = payload.fast || missing;
+                  let registry = null;
+                  try {
+                    registry = payload.registry
+                      ? JSON.parse(payload.registry) : null;
+                  } catch (error) {
+                    registry = null;
+                  }
+                  const byBoard = {};
+                  for (const board of (registry && registry.boards) || []) {
+                    byBoard[board.board] = board.items;
+                  }
+                  renderBoardItems(byId("brd-slow-items"), byBoard.slow);
+                  renderBoardItems(byId("brd-fast-items"), byBoard.fast);
+                  const now = new Date();
+                  stamp.textContent = "刷新于 " + now.toLocaleTimeString();
+                }
                 function selectTab(name) {
                   tabSnapshot.classList.toggle("on", name === "snapshot");
                   tabActivity.classList.toggle("on", name === "activity");
                   tabCamera.classList.toggle("on", name === "camera");
+                  tabBoards.classList.toggle("on", name === "boards");
                   viewSnapshot.hidden = name !== "snapshot";
                   viewActivity.hidden = name !== "activity";
                   viewCamera.hidden = name !== "camera";
+                  viewBoards.hidden = name !== "boards";
                   if (name === "activity") renderActivity();
                   if (name === "camera") renderCamera();
+                  // ⚠ 只在这一页开着的时候轮询，切走就停。否则它会在后台
+                  // 一直打这个接口 —— 白耗，而且没有任何人在看。
+                  if (boardsTimer) { clearInterval(boardsTimer); }
+                  boardsTimer = null;
+                  if (name === "boards") {
+                    renderBoards();
+                    boardsTimer = setInterval(renderBoards, 2000);
+                  }
                 }
                 tabSnapshot.addEventListener(
                   "click", () => selectTab("snapshot"));
                 tabActivity.addEventListener(
                   "click", () => selectTab("activity"));
                 tabCamera.addEventListener("click", () => selectTab("camera"));
+                tabBoards.addEventListener("click", () => selectTab("boards"));
                 if (location.hash === "#activity") selectTab("activity");
                 if (location.hash === "#camera") selectTab("camera");
+                if (location.hash === "#boards") selectTab("boards");
                 const status = byId("status");
                 const revision = byId("revision");
                 const active = byId("active");
@@ -3332,6 +3467,56 @@ internal sealed class DirectSnapshotViewer : IDisposable
             context,
             ViewerDocument,
             StatusCodes.Status200OK);
+    }
+
+    /// 提示板 tab 的数据口：两块板 + 登记表，一次取回。
+    ///
+    /// ⚠ **读文件，不重新渲染。** 渲染逻辑就在同一个进程里，调一下就有，
+    /// 但那样页面显示的是"另一个渲染结果" —— 跟语音助手实际读到的那份
+    /// 可能不一样，而不一样的时候这个页面会**掩盖**问题而不是暴露问题。
+    /// 这一页存在的全部价值就是回答「助手现在到底看到了什么」。
+    ///
+    /// ⚠ 缺文件不当错误：桥刚起来、或装的是不带这功能的旧版本时就是没有。
+    /// 缺的那块回 null 而不是整个 503 —— 前端据此说"还没有这个文件"，
+    /// 跟"板子上没内容"分开。这两件事要做的处置完全不同。
+    internal async Task HandleAttentionBoardsAsync(HttpContext context)
+    {
+        if (!PrepareLocalResponse(
+            context,
+            "application/json; charset=utf-8"))
+        {
+            return;
+        }
+        string directory =
+            System.IO.Path.GetDirectoryName(_snapshotPath)!;
+        var parts = new List<string>();
+        foreach ((string key, string name) in new[]
+        {
+            ("slow", ReaderAttentionBoard.SlowFileName),
+            ("fast", ReaderAttentionBoard.FastFileName),
+            ("registry", ReaderAttentionBoard.RegistryFileName),
+        })
+        {
+            string? body;
+            try
+            {
+                body = await File.ReadAllTextAsync(
+                    System.IO.Path.Combine(directory, name),
+                    context.RequestAborted).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+                body = null;
+            }
+            parts.Add(
+                "\"" + key + "\":"
+                + (body is null ? "null" : JsonSerializer.Serialize(body)));
+        }
+        await WriteBytesAsync(
+            context,
+            Encoding.UTF8.GetBytes("{" + string.Join(",", parts) + "}"),
+            StatusCodes.Status200OK).ConfigureAwait(false);
     }
 
     // 学习活动看板(2026-08-25 用户:"我希望能查看这些内容")。数据由

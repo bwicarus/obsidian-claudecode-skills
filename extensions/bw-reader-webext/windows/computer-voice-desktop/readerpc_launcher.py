@@ -71,17 +71,6 @@ SERVICE_MODE_FULL = "full"
 SERVICE_MODE_BRIDGE_ONLY = "bridge-only"
 SERVICE_MODES = frozenset((SERVICE_MODE_FULL, SERVICE_MODE_BRIDGE_ONLY))
 
-#: 两块提示板的文件名。
-#:
-#: ⚠ **这是第二份副本** —— 真正写这两个文件的是 C# 那边
-#: （`ReaderAttentionBoard.SlowFileName` / `FastFileName`）。改名要两处
-#: 一起改，否则表现是「提示板页永远显示『还没有这个文件』」，而桥那边
-#: 一切正常、日志里也不会有任何异常。
-#:
-#: 这里只**读**，不写、不渲染：页面要回答的是「助手现在到底看到了什么」，
-#: 所以必须看它看的那份文件。
-BOARD_SLOW_FILE = "reader-attention-slow.md"
-BOARD_FAST_FILE = "reader-attention-fast.md"
 POLL_INTERVAL_MS = 2_500
 STATUS_PUBLISH_INTERVAL_SECONDS = 10.0
 # 保活退避(2026-08-17 重启风暴修):基础 30s,连败指数升级封顶 15 分钟,成功清零。
@@ -1172,14 +1161,8 @@ class ReaderPCWindow:
         style.configure("ReaderPC.Title.TLabel", font=("Microsoft YaHei UI", 18, "bold"))
         style.configure("ReaderPC.Heading.TLabel", font=("Microsoft YaHei UI", 11, "bold"))
 
-        # 标签页（2026-08-30 加）。原来是单页，所有控件直接挂在 outer 上；
-        # 现在 outer 变成第一页的容器，**下面那一大段一个字都不用改** ——
-        # 它们的 parent 仍然是 outer。
-        notebook = ttk.Notebook(root)
-        notebook.pack(fill="both", expand=True)
-        outer = ttk.Frame(notebook, padding=18)
-        notebook.add(outer, text="服务")
-        self._build_boards_tab(notebook)
+        outer = ttk.Frame(root, padding=18)
+        outer.pack(fill="both", expand=True)
         ttk.Label(outer, text=PRODUCT_NAME, style="ReaderPC.Title.TLabel").pack(anchor="w")
         ttk.Label(
             outer,
@@ -1291,91 +1274,6 @@ class ReaderPCWindow:
         root.after(250, self.refresh)
         root.after(600, self._ensure_pc_online)
         root.after(800, self._ensure_voice_online)
-
-    def _build_boards_tab(self, notebook: ttk.Notebook) -> None:
-        """「提示板」页：把语音助手正在读的那两个文件**原样**显示出来。
-
-        ⚠ **这里不重新渲染板子，只读文件。**
-
-        重新渲一遍是很自然的念头（渲染逻辑就在桥里，调一下就有），但那样
-        这个页面就变成了"另一个渲染结果"—— 它跟助手实际读到的那份可能
-        不一样，而不一样的时候这个页面会**掩盖**问题而不是暴露问题。
-        这一页存在的全部价值就是回答「助手现在到底看到了什么」，
-        所以它必须看文件，且只看文件。
-
-        文件是桥每秒渲一次、内容变了才写的（见 ReaderAttentionBoard）。
-        """
-        page = ttk.Frame(notebook, padding=18)
-        notebook.add(page, text="提示板")
-        ttk.Label(
-            page,
-            text="语音助手正在读的两块板",
-            style="ReaderPC.Title.TLabel",
-        ).pack(anchor="w")
-        ttk.Label(
-            page,
-            text=(
-                "这里显示的就是它读到的文件本身。慢板要稳（待办），"
-                "快板要快（绘图、快照失效）—— 两块都带当前位置。"
-            ),
-            foreground="#596579",
-            wraplength=570,
-        ).pack(anchor="w", pady=(4, 12))
-        self._board_views: dict[str, tuple[tk.Text, ttk.Label]] = {}
-        for name, title in (
-            (BOARD_SLOW_FILE, "慢提示板"),
-            (BOARD_FAST_FILE, "快速提示板"),
-        ):
-            frame = ttk.LabelFrame(page, padding=(12, 10))
-            frame.pack(fill="both", expand=True, pady=(0, 9))
-            top = ttk.Frame(frame)
-            top.pack(fill="x")
-            ttk.Label(
-                top, text=title, style="ReaderPC.Heading.TLabel"
-            ).pack(side="left")
-            stamp = ttk.Label(top, text="…", foreground="#6b7280")
-            stamp.pack(side="right")
-            view = tk.Text(
-                frame,
-                height=8,
-                wrap="word",
-                relief="flat",
-                background="#f6f7f9",
-                font=("Consolas", 10),
-            )
-            view.pack(fill="both", expand=True, pady=(6, 0))
-            view.configure(state="disabled")
-            self._board_views[name] = (view, stamp)
-        self._refresh_boards()
-
-    def _refresh_boards(self) -> None:
-        """每秒看一眼两个文件。**内容没变就不动控件** —— 动了的话选中的
-        文字会被清掉、滚动位置会跳，而这一页多半是在盯着看的时候用的。"""
-        for name, (view, stamp) in getattr(self, "_board_views", {}).items():
-            path = self.bridge_paths.runtime_status.parent / name
-            try:
-                body = path.read_text("utf-8")
-                mark = time.strftime("%H:%M:%S", time.localtime(
-                    path.stat().st_mtime))
-            except FileNotFoundError:
-                # ⚠ 说清是"还没有"而不是留空 —— 留空跟"板子上没内容"
-                # 长得一样，而这两件事要做的处置完全不同。
-                body = (
-                    "（还没有这个文件）\n\n"
-                    "桥每秒渲一次板子并在内容变化时写盘。看不到文件通常是"
-                    "直连服务没在跑，或者跑的是不带这个功能的旧版本。"
-                )
-                mark = "—"
-            except OSError as exc:
-                body = "（读不出来：%s）" % exc
-                mark = "—"
-            if view.get("1.0", "end-1c") != body:
-                view.configure(state="normal")
-                view.delete("1.0", "end")
-                view.insert("1.0", body)
-                view.configure(state="disabled")
-            stamp.configure(text=mark)
-        self.root.after(1000, self._refresh_boards)
 
     def _service_row(
         self,
