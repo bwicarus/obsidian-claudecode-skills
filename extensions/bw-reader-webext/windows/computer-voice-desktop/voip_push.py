@@ -1,26 +1,44 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""给 iPad 打一通电话 —— 通知阶梯最响的那一级（用户 2026-08-29 拍板）。
+"""给 iPad 打一通电话，**并且等到有结果为止**。
 
-普通通知会被专注模式、静音、锁屏挡住。当有一条**必须现在让他知道**的事、
-而他又不在语音会话里也没在用 App 时，唯一能穿透的就是系统来电 ——
-像 LINE / 微信那样。接通后复用已有的语音通道，AI 直接说。
+用户 2026-08-29 定的形状：
+
+> 这个程序应该包办包括等待和重拨的工作，也就是说在语音 AI 看来就只是在
+> 等待这个进程的结果。
+
+所以这不是"推一下就返回"的工具，是一次**阻塞的通话尝试**：
+
+    python voip_push.py call --ntf ntf-xxxx --title "垃圾今晚要放出去"
+
+它会一直跑到出一个终局，然后打印一行 JSON：
+
+    {"outcome": "answered"}    接通了 —— 你现在开口说
+    {"outcome": "downgraded"}  被拒接、或两次没人接 —— 别再管了，走通知
+
+**重拨不需要告诉你**：第一次没人接 → 等 5 分钟 → 再打一次 → 还没人接才
+返回 downgraded。这整段时间你就是在等这个进程。
+
+接通之后：说完话调 `hangup` 主动挂断；也可以等用户自己挂 ——
+那时提示板会显示「已挂断」，你据此收尾。
+
+## ⚠ --ntf 是必填的
+
+每一通电话都必须说清楚"为哪条待办打的"。有了它，接听状态才能自动
+回落到那条待办上（拒接→降级、没接→重拨）。**待办以外的电话需求**用
+保留号 `misc`：那种电话不做自动降级，因为没有待办可降。
 
 ## ⚠ 这条通道只能真的响铃
 
-iOS 13 起，每一个 VoIP 推送都**必须**让 App 立刻向 CallKit 报一通来电，
-否则 App 被杀、后续推送被永久拒发。所以：
-
-- 不要拿它做"更响一点的通知"。它在 deliver 里是独立的一档。
-- 不要用它试探设备在不在线。推一次就是响一次。
+iOS 13 起，每个 VoIP 推送都必须让 App 立刻向 CallKit 报一通来电，否则
+App 被杀、后续推送被永久拒发。所以不要拿它做"更响的通知"，
+也不要用它试探设备在不在线 —— 推一次就是响一次。
 
 ## ⚠ Production 环境
 
-密钥在开发者后台配成 Production（用户 2026-08-29 选的，不可更改），
-TestFlight 装的 App 走的正是这个环境。所以主机名固定
-api.push.apple.com，**不是** api.sandbox.push.apple.com。
-配错的表现是 APNs 返回 BadDeviceToken —— 看起来像 token 坏了，
-其实是环境不匹配。这条写在这里，免得下次照着症状去查错方向。
+密钥在开发者后台配成 Production（不可更改），TestFlight 装的 App 走的
+正是这个环境，主机名固定 api.push.apple.com。配错的表现是 APNs 返回
+BadDeviceToken —— 看起来像 token 坏了，其实是环境不匹配。
 """
 from __future__ import annotations
 
@@ -33,10 +51,19 @@ from typing import Any
 
 APNS_HOST = "api.push.apple.com"
 TOKEN_FILE_NAME = "voip-token.json"
+CALL_STATE_FILE_NAME = "voip-calls.json"
+HANGUP_FILE_NAME = "voip-hangup.json"
 
-# JWT 有效期 Apple 规定最长 1 小时；低于 20 分钟重签会被限流
-# （同一把 key 频繁签发会收到 TooManyProviderTokenUpdates）。
-# 取 45 分钟：既不碰上限，也不至于频繁重签。
+MISC_NOTIFICATION_ID = "misc"
+
+# 一通电话响多久算"没人接"。CallKit 的响铃周期约 30-45 秒，
+# 留出余量再加上回报的往返。
+_RING_TIMEOUT_SECONDS = 75
+
+# 没人接 → 隔多久重拨。只重拨一次（用户定的）。
+_RETRY_AFTER_SECONDS = 5 * 60
+
+# JWT 有效期 Apple 规定最长 1 小时；低于 20 分钟频繁重签会被限流。
 _TOKEN_TTL_SECONDS = 45 * 60
 
 _cached_jwt: tuple[str, float] | None = None
@@ -46,36 +73,45 @@ def default_root() -> Path:
     return Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "BWReader"
 
 
+def _bridge_runtime() -> Path:
+    """桥的 runtime 目录 —— 结局与挂断信号都由桥写在这里。
+
+    ⚠ **写它的和读它的不是同一个目录**，这个坑我踩过两次
+    （voip-token.json、voip-calls.json）：路由回 200、文件也写了，
+    而读的一方一直看不到，表现是"永远不降级"且没有一处报错。
+    """
+    return (Path(os.environ.get("USERPROFILE") or Path.home())
+            / "bw-computer-voice-bridge" / "runtime")
+
+
 class VoipPushError(RuntimeError):
     pass
 
 
 def _load_config(root: Path) -> dict[str, Any]:
-    """读 APNs 配置。**缺什么就说缺什么** —— 一句"配置无效"会让人
-    把三个字段全查一遍。"""
+    """读 APNs 配置。**缺什么就说缺什么** —— 一句"配置无效"会让人把
+    三个字段全查一遍。"""
     path = root / "voip-push-config.json"
     try:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError as error:
         raise VoipPushError(
-            "没有 %s。需要一个 JSON，含 keyId / teamId / keyPath "
-            "（keyPath 指向 .p8 私钥文件）" % path) from error
+            "没有 %s。需要一个 JSON，含 keyId / teamId / keyPath / bundleId"
+            % path) from error
     except json.JSONDecodeError as error:
         raise VoipPushError("%s 不是合法 JSON：%s" % (path, error)) from error
     missing = [k for k in ("keyId", "teamId", "keyPath", "bundleId")
                if not value.get(k)]
     if missing:
-        raise VoipPushError(
-            "%s 缺字段：%s" % (path, "、".join(missing)))
+        raise VoipPushError("%s 缺字段：%s" % (path, "、".join(missing)))
     if not Path(value["keyPath"]).is_file():
         raise VoipPushError(
-            "keyPath 指向的私钥不存在：%s（.p8 只能下载一次，"
-            "丢了要在开发者后台重建）" % value["keyPath"])
+            "keyPath 指向的私钥不存在：%s（.p8 只能下载一次，丢了要重建）"
+            % value["keyPath"])
     return value
 
 
 def _provider_jwt(config: dict[str, Any]) -> str:
-    """签一个 provider token。缓存 45 分钟，见 _TOKEN_TTL_SECONDS。"""
     global _cached_jwt
     now = time.time()
     if _cached_jwt and now < _cached_jwt[1]:
@@ -85,10 +121,9 @@ def _provider_jwt(config: dict[str, Any]) -> str:
     except ImportError as error:
         raise VoipPushError(
             "缺 PyJWT：pip install pyjwt cryptography") from error
-    private_key = Path(config["keyPath"]).read_text(encoding="utf-8")
     token = jwt.encode(
         {"iss": config["teamId"], "iat": int(now)},
-        private_key,
+        Path(config["keyPath"]).read_text(encoding="utf-8"),
         algorithm="ES256",
         headers={"kid": config["keyId"]},
     )
@@ -96,29 +131,11 @@ def _provider_jwt(config: dict[str, Any]) -> str:
     return token
 
 
-def _token_paths(root: Path) -> list[Path]:
-    """token 可能落在哪。
-
-    ⚠ **写它的和读它的不是同一个目录** —— 桥写在自己的 runtime 目录
-    （bw-computer-voice-bridge/runtime），而这里的 root 默认是
-    %LOCALAPPDATA%\\BWReader。2026-08-29 实测踩到：路由回 ok、
-    文件也确实写了，而 --check 说"没有 token" —— 两边都没错，
-    只是各说各的路径。
-
-    与其挑一个"正确的"再去改另一边（那会让已经在跑的东西对不上），
-    不如**两个都找**：这个文件很小、只增不减，多看一处的代价近乎零，
-    而看漏一处的代价是电话永远打不进来且没人报错。
-    """
-    bridge_runtime = (
-        Path(os.environ.get("USERPROFILE") or Path.home())
-        / "bw-computer-voice-bridge" / "runtime")
-    return [root / TOKEN_FILE_NAME, bridge_runtime / TOKEN_FILE_NAME]
-
-
 def load_device_token(root: Path) -> str | None:
-    """设备上报的 VoIP token。没有 = 打不进去，**这不是可以忽略的状态**。"""
+    """设备上报的 VoIP token。没有 = 打不进去，**不是可以忽略的状态**。"""
     newest: tuple[float, str] | None = None
-    for path in _token_paths(root):
+    for path in (root / TOKEN_FILE_NAME,
+                 _bridge_runtime() / TOKEN_FILE_NAME):
         try:
             value = json.loads(path.read_text(encoding="utf-8-sig"))
             token = value.get("token")
@@ -127,104 +144,181 @@ def load_device_token(root: Path) -> str | None:
             stamp = path.stat().st_mtime
         except (OSError, json.JSONDecodeError):
             continue
-        # 两处都有时取**最新的那份**：token 会变（重装/恢复备份/系统更新），
+        # 两处都有就取最新 —— token 会变（重装/恢复备份/系统更新），
         # 拿旧的推等于推给一个已经不存在的设备。
         if newest is None or stamp > newest[0]:
             newest = (stamp, token)
     return newest[1] if newest else None
 
 
-def send_call(root: Path, title: str, reason: str = "",
-              notification_id: str = "") -> dict[str, Any]:
-    """推一通来电。
-
-    ⚠ 返回值一定要看：APNs 会用 200 之外的状态码带上原因
-    （BadDeviceToken / TopicDisallowed / …）。吞掉它的话，
-    表现就是"推了但没响"，而没有任何一处会报错。
-    """
+def _push(root: Path, title: str, reason: str, ntf_id: str) -> dict[str, Any]:
+    """推一通来电（不等待）。"""
     config = _load_config(root)
     device_token = load_device_token(root)
     if not device_token:
         raise VoipPushError(
-            "还没有设备 token（%s 不存在或为空）。App 启动时会上报一次；"
-            "没有它就永远打不进来，而且失败是静默的" % (root / TOKEN_FILE_NAME))
+            "还没有设备 token。App 启动时会上报一次；没有它就永远打不进来，"
+            "而且失败是静默的")
     try:
         import httpx
     except ImportError as error:
         raise VoipPushError(
             "缺 httpx（APNs 要 HTTP/2）：pip install 'httpx[http2]'"
         ) from error
-
-    payload = {"title": title[:80], "reason": reason[:200]}
-    if notification_id:
-        # ⚠ 带上是哪条待办。挂断时 App 会连着结局一起回报 ——
-        # 没有它，Windows 侧不知道该给谁记「拒接 / 没接」，那条会永远
-        # 卡在"已拨出"：既不重拨也不降级，用户什么也收不到。
-        payload["notificationId"] = notification_id[:64]
-    headers = {
-        "authorization": "bearer " + _provider_jwt(config),
-        # ⚠ VoIP 推送的 topic **必须**带 .voip 后缀，用普通 bundleId
-        # 会被 APNs 以 TopicDisallowed 拒掉。
-        "apns-topic": config["bundleId"] + ".voip",
-        "apns-push-type": "voip",
-        "apns-priority": "10",
-        "apns-expiration": "0",
-    }
     with httpx.Client(http2=True, timeout=15.0) as client:
         response = client.post(
             "https://%s/3/device/%s" % (APNS_HOST, device_token),
-            headers=headers,
-            json=payload,
+            headers={
+                "authorization": "bearer " + _provider_jwt(config),
+                # ⚠ VoIP 的 topic **必须**带 .voip 后缀，
+                # 用裸 bundleId 会被 APNs 以 TopicDisallowed 拒掉。
+                "apns-topic": config["bundleId"] + ".voip",
+                "apns-push-type": "voip",
+                "apns-priority": "10",
+                "apns-expiration": "0",
+            },
+            json={
+                "title": title[:80],
+                "reason": reason[:200],
+                "notificationId": ntf_id[:64],
+            },
         )
     ok = response.status_code == 200
     detail = ""
     if not ok:
         try:
             detail = response.json().get("reason", "")
-        except Exception:
+        except Exception:  # noqa: BLE001
             detail = response.text[:200]
-    return {
-        "ok": ok,
-        "status": response.status_code,
-        "reason": detail,
-        "apnsId": response.headers.get("apns-id", ""),
-    }
+    return {"ok": ok, "status": response.status_code, "reason": detail}
+
+
+def _read_outcome(ntf_id: str, after_ms: int) -> str | None:
+    """读这通电话的结局。只认 after_ms 之后写下的那条 —— 否则会把
+    上一通电话的旧结局当成这一通的。"""
+    try:
+        value = json.loads(
+            (_bridge_runtime() / CALL_STATE_FILE_NAME)
+            .read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    record = (value.get("calls") or {}).get(ntf_id)
+    if not isinstance(record, dict):
+        return None
+    if int(record.get("lastAtUtcMs") or 0) < after_ms:
+        return None
+    outcome = record.get("outcome")
+    return outcome if isinstance(outcome, str) else None
+
+
+def _wait_for_outcome(ntf_id: str, after_ms: int, deadline: float) -> str:
+    """等一通电话的结局。超时算 unanswered。"""
+    while time.time() < deadline:
+        outcome = _read_outcome(ntf_id, after_ms)
+        if outcome in ("answered", "declined", "unanswered"):
+            return outcome
+        time.sleep(1.0)
+    # ⚠ 超时**当成没人接**，不是当成失败：设备可能根本没网、App 可能
+    # 没来得及回报。两者对用户的意义一样 —— 他没接到 —— 而当成失败会让
+    # 上层不知道该重拨还是该降级。
+    return "unanswered"
+
+
+def place_call(root: Path, ntf_id: str, title: str,
+               reason: str = "") -> dict[str, Any]:
+    """打电话并**等到有终局为止**。这是给语音 AI 用的那一个。
+
+    返回 outcome：
+        answered    接通了 —— 现在开口说
+        downgraded  拒接、或两次没人接 —— 别再管，走通知
+
+    ⚠ 重拨不返回给调用方：从第一次拨打、到等待、到第二次拨打，
+    调用方就是在等这一个进程（用户 2026-08-29 明说）。
+    """
+    attempts = 0
+    while True:
+        attempts += 1
+        started_ms = int(time.time() * 1000)
+        pushed = _push(root, title, reason, ntf_id)
+        if not pushed["ok"]:
+            # APNs 拒了 —— 配置问题，重试一百次也一样。
+            return {
+                "outcome": "failed",
+                "attempts": attempts,
+                "status": pushed["status"],
+                "reason": pushed["reason"],
+            }
+        outcome = _wait_for_outcome(
+            ntf_id, started_ms, time.time() + _RING_TIMEOUT_SECONDS)
+        if outcome == "answered":
+            return {"outcome": "answered", "attempts": attempts}
+        if outcome == "declined":
+            # 主动拒接 = 明确的"现在别烦我"。再打一次是骚扰。
+            return {"outcome": "downgraded", "attempts": attempts,
+                    "reason": "declined"}
+        if attempts >= 2:
+            return {"outcome": "downgraded", "attempts": attempts,
+                    "reason": "unanswered-twice"}
+        # 没人接 —— 可能没听见。等一会儿再试一次。
+        time.sleep(_RETRY_AFTER_SECONDS)
+
+
+def request_hangup(root: Path) -> dict[str, Any]:
+    """请 App 挂断当前这通电话（说完了）。
+
+    ⚠ 这是"请求"不是"命令"：App 可能已经挂了、或者用户先挂了。
+    那种情况下这里成功返回也没有副作用 —— 挂一个已经结束的电话是幂等的。
+    """
+    path = _bridge_runtime() / HANGUP_FILE_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"contract": "reader-voip-hangup/1",
+                    "atUtcMs": int(time.time() * 1000)}),
+        encoding="utf-8")
+    return {"ok": True}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=None)
-    parser.add_argument("--title", default="BWReader")
-    parser.add_argument("--reason", default="")
-    parser.add_argument(
-        "--ntf", default="",
-        help="这通电话是为哪条待办打的（ntf-…）。带上它，挂断后的"
-             "「拒接/没接」才会记到那条待办上")
-    parser.add_argument(
-        "--check", action="store_true",
-        help="只检查配置与 token 是否就绪，**不推送**（推一次就是响一次）")
+    sub = parser.add_subparsers(dest="command")
+
+    call = sub.add_parser("call", help="打电话并等到有结果（阻塞）")
+    call.add_argument(
+        "--ntf", required=True,
+        help="为哪条待办打的（ntf-…）。**必填** —— 有了它，接听状态才能"
+             "自动回落到那条待办。待办以外的电话用保留号 misc")
+    call.add_argument("--title", required=True, help="来电界面上显示的一句话")
+    call.add_argument("--reason", default="")
+
+    sub.add_parser("hangup", help="主动挂断当前通话（说完之后）")
+    sub.add_parser("check", help="只检查配置与 token，**不推送**")
+
     args = parser.parse_args()
     root = Path(args.root) if args.root else default_root()
     try:
-        if args.check:
+        if args.command == "check" or args.command is None:
             config = _load_config(root)
             token = load_device_token(root)
             print(json.dumps({
                 "ok": bool(token),
                 "keyId": config["keyId"],
-                "teamId": config["teamId"],
                 "topic": config["bundleId"] + ".voip",
                 "hasDeviceToken": bool(token),
                 "note": "" if token else
                         "没有设备 token —— 装了新版 App 并启动一次才会有",
             }, ensure_ascii=False, indent=1))
             return 0 if token else 3
-        result = send_call(root, args.title, args.reason, args.ntf)
+        if args.command == "hangup":
+            print(json.dumps(request_hangup(root), ensure_ascii=False))
+            return 0
+        result = place_call(root, args.ntf, args.title, args.reason)
     except VoipPushError as error:
-        print("错误：%s" % error)
+        print(json.dumps({"outcome": "failed", "error": str(error)},
+                         ensure_ascii=False))
         return 2
     print(json.dumps(result, ensure_ascii=False))
-    return 0 if result["ok"] else 1
+    return 0 if result["outcome"] in ("answered", "downgraded") else 1
 
 
 if __name__ == "__main__":

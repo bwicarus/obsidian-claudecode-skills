@@ -83,6 +83,42 @@ final class ReaderVoipCall: NSObject {
         self.provider = provider
     }
 
+    private var hangupWatch: Task<Void, Never>?
+
+    /// 通话期间盯着"该挂了吗"。
+    ///
+    /// ⚠ **必须有上限**（这里 5 分钟）：轮询本身不会自己停，而 CallKit 的
+    /// 通话可能因为各种原因结束却没走到我们的 EndCall 分支 —— 那样这个
+    /// 循环会一直转下去，在后台悄悄耗电，且没有任何症状。
+    private func startHangupWatch() {
+        hangupWatch?.cancel()
+        hangupWatch = Task { @MainActor [weak self] in
+            let deadline = Date().addingTimeInterval(5 * 60)
+            while !Task.isCancelled, Date() < deadline {
+                guard self?.currentCallId != nil else { return }
+                if await ReaderVoipCall.shouldHangUp() {
+                    self?.endCurrentCall()
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    private static func shouldHangUp() async -> Bool {
+        let target = "https://bwicarus-2.taile44d0c.ts.net/reader-voip/hangup"
+        guard let url = URL(string: target) else { return false }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        guard let (data, response) = try? await URLSession.shared
+            .data(for: request),
+            (response as? HTTPURLResponse)?.statusCode == 200,
+            let root = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any]
+        else { return false }
+        return root["hangup"] as? Bool ?? false
+    }
+
     /// 结束当前通话（AI 说完了，或用户挂断）。
     func endCurrentCall() {
         guard let callId = currentCallId else { return }
@@ -183,6 +219,10 @@ extension ReaderVoipCall: CXProviderDelegate {
                 name: ReaderVoipCall.answeredNotification, object: nil)
             ReaderVoipCall.shared.answeredAt = Date()
             ReaderVoipCall.shared.status = "通话中"
+            // AI 说完话会调 voip_push hangup，那边写下信号；这里轮询它。
+            // ⚠ 为什么不用推送来挂断：再推一次会**再响一次铃**，
+            // 而我们要的是结束当前这通。轮询土但对，通话只有几十秒。
+            ReaderVoipCall.shared.startHangupWatch()
             action.fulfill()
         }
     }
@@ -214,6 +254,8 @@ extension ReaderVoipCall: CXProviderDelegate {
             } else {
                 outcome = "unanswered"
             }
+            call.hangupWatch?.cancel()
+            call.hangupWatch = nil
             call.currentCallId = nil
             call.answeredAt = nil
             call.ringingSince = nil

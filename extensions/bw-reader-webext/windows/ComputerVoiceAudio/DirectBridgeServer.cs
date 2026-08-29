@@ -668,6 +668,14 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-voip/outcome",
             new[] { "POST", "OPTIONS" },
             context => HandleVoipOutcomeAsync(context, serviceToken));
+        // 通话中 App 轮询这里问"该挂了吗"。AI 说完话就调 voip_push hangup，
+        // 那边写下信号，这里端出来。
+        // ⚠ 为什么不用推送：再推一次会**再响一次铃**，而我们要的是结束
+        // 当前这通。轮询土但对；通话本来就只持续几十秒。
+        app.MapMethods(
+            "/reader-voip/hangup",
+            new[] { "GET", "OPTIONS" },
+            context => HandleVoipHangupAsync(context, serviceToken));
         app.MapFallback(context =>
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
@@ -1750,6 +1758,36 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         File.Move(temporary, path, overwrite: true);
         await context.Response.WriteAsJsonAsync(
             new { ok = true, attempts },
+            serviceCancellationToken).ConfigureAwait(false);
+    }
+
+    /// 「该挂断了吗」。App 在通话中每两秒问一次。
+    ///
+    /// ⚠ 读完就**删掉信号**：一次挂断请求只该结束一通电话。留着的话，
+    /// 下一通刚接起来就会被上一次的信号挂掉 —— 而那看起来像"电话打不通"，
+    /// 跟真正的故障完全分不开。
+    private async Task HandleVoipHangupAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "voip-hangup")) return;
+        string path = Path.Combine(_runtimeDirectory, "voip-hangup.json");
+        bool wanted = false;
+        try
+        {
+            if (File.Exists(path))
+            {
+                wanted = true;
+                File.Delete(path);
+            }
+        }
+        catch (Exception)
+        {
+            // 删不掉也照样回 true —— 宁可多挂一次，也不要因为清不掉信号
+            // 而让 AI 那句"说完了"永远送不到。
+        }
+        await context.Response.WriteAsJsonAsync(
+            new { ok = true, hangup = wanted },
             serviceCancellationToken).ConfigureAwait(false);
     }
 
