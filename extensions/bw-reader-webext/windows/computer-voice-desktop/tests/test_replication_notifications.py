@@ -576,3 +576,56 @@ class TerminationGuardTests(unittest.TestCase):
         # 都拦，当场挂掉 12 个既有用例 —— 那正是这条边界的证据。
         self.store.create(kind="hint", title="随便", audience="ai")
         self.assertEqual(len(list(self.store.open_items())), 1)
+
+
+class DeliverModeTests(unittest.TestCase):
+    """怎么送到用户面前。此前只有"发"没有"怎么发" —— 一条待办建出来就
+    同时走七条通道，建它的人一个字都插不上话，"在公司别出声"无处表达。"""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp())
+        self.store = NotificationStore(self.root)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_default_is_auto(self) -> None:
+        item = self.store.create(
+            kind="user-todo", title="倒垃圾", audience="user", end="never")
+        self.assertEqual(item["deliver"], "auto")
+
+    def test_each_mode_accepted_and_persisted(self) -> None:
+        for mode in ("auto", "silent", "voice"):
+            item = self.store.create(
+                kind="user-todo", title="t-" + mode, audience="user",
+                end="never", deliver=mode)
+            self.assertEqual(item["deliver"], mode)
+
+    def test_unknown_mode_is_refused_with_options(self) -> None:
+        with self.assertRaises(NotificationError) as e:
+            self.store.create(
+                kind="user-todo", title="x", audience="user",
+                end="never", deliver="telepathy")
+        message = str(e.exception)
+        for mode in ("auto", "silent", "voice"):
+            self.assertIn(mode, message)
+
+    def test_call_mode_is_refused_because_it_does_not_exist(self) -> None:
+        # ⚠ 打电话在设计里但没有 APNs 通道。**不接受**它 ——
+        # 接受了就是承诺一个不存在的能力，而失败会是静默的：
+        # 调用方以为选了就有效，用户什么也收不到，没有一处会报错。
+        with self.assertRaises(NotificationError):
+            self.store.create(
+                kind="user-todo", title="x", audience="user",
+                end="never", deliver="call")
+
+    def test_export_carries_deliver(self) -> None:
+        # 设备侧要靠它决定出不出声，所以必须导出去 —— 只落库不导出的话，
+        # 这个字段在真正用到它的地方是不存在的。
+        self.store.create(
+            kind="user-todo", title="安静的事", audience="user",
+            end="never", deliver="silent")
+        out = self.root / "notifications-user.json"
+        self.store.export_user_open(out)
+        item = json.loads(out.read_text("utf-8"))["items"][0]
+        self.assertEqual(item["deliver"], "silent")

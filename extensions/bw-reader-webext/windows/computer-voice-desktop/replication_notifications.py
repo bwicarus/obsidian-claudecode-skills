@@ -43,6 +43,21 @@ MAX_TEXT = 400
 _STATES = ("pending", "acknowledged")
 _AUTO_TYPES = ("item-mutated", "card-reviewed", "place-arrived")
 
+# 怎么送到用户面前（2026-08-29 用户要的"选择权"）。
+#
+# 在此之前只有"发"没有"怎么发"：一条待办建出来就同时走七条通道
+# （横幅 / 苹果提醒 / 到点通知 / 系统闹钟 / 小组件 / 手表 / 侧栏 tab），
+# 建它的人一个字都插不上话。于是"在公司别出声"这种要求根本无处表达。
+#
+# ⚠ 这里**只放已经存在的能力**。打电话（CallKit/PushKit）在设计里但
+# 没有 APNs 通道 —— 放进来就是承诺一个不存在的东西，那比没有更糟：
+# 调用方会以为选了就有效，而失败是静默的。
+_DELIVER_MODES = (
+    "auto",     # 按位置状态决定：在家可出声，在工作只静音（默认）
+    "silent",   # 一定不出声：只进通知/提醒事项/侧栏
+    "voice",    # 一定出声：明确要求打断时才用
+)
+
 
 def default_root() -> Path:
     return Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "BWReader"
@@ -170,6 +185,7 @@ class NotificationStore:
         audience: str = "ai",
         never_ends: bool = False,
         end: str | None = None,
+        deliver: str = "auto",
     ) -> dict[str, Any]:
         # 「模式 + 参数」入口（用户 2026-08-29 定的形状）。
         #
@@ -204,6 +220,15 @@ class NotificationStore:
                 raise NotificationError("通知 kind/title 非法")
             if audience not in ("ai", "user"):
                 raise NotificationError("audience 必须是 ai 或 user")
+            if deliver not in _DELIVER_MODES:
+                raise NotificationError(
+                    "deliver 必须是 %s 之一，收到 %r。\n"
+                    "  auto   按位置决定：在家可出声，在工作只静音（默认）\n"
+                    "  silent 一定不出声\n"
+                    "  voice  一定出声（明确要打断时才用）\n"
+                    "⚠ 打电话那一档**还没有**（缺 APNs 通道）——"
+                    "写了也不会生效，所以这里不接受它。"
+                    % (", ".join(_DELIVER_MODES), deliver))
             # 到点时刻的三条校验（2026-08-26 对抗式复核）：这三种组合都
             # 能建出「创建成功、到点永远不响」的条目，而链路上没有任何
             # 一处会报错 —— AI 和用户都以为设好了。
@@ -309,6 +334,8 @@ class NotificationStore:
                 # 侧边栏 tab 只给 user 方向(AI 整理后投递给用户的)。两个
                 # 收件箱,一张表,按 audience 分流。
                 "audience": audience,
+                # 怎么送。默认 auto = 交给位置状态决定。
+                "deliver": deliver,
                 "createdAtUtcMs": _now_ms(),
             }
             if auto_resolve is not None:
@@ -548,6 +575,9 @@ class NotificationStore:
                     "title": item["title"],
                     "body": item.get("body") or "",
                     "state": item["state"],
+                    # 怎么送。设备侧据此决定要不要出声（auto 时看位置状态）。
+                    # ⚠ 老条目没有这个字段 —— 缺省 auto，跟建它时的行为一致。
+                    "deliver": item.get("deliver") or "auto",
                     "createdAtUtcMs": item["createdAtUtcMs"],
                     "dueAtUtcMs": item.get("dueAtUtcMs"),
                     "place": self._resolve_place(item.get("place")),
@@ -749,6 +779,11 @@ def main() -> int:
              "自动完成）/ never（一直留着，明知而选）。"
              "⚠ --due-at 不是终止条件：到点之后条目照样挂着。"
              "判断不了就回来问用户 —— 「不知道」是合法结果，随便填不是")
+    create.add_argument(
+        "--deliver", default="auto", choices=_DELIVER_MODES,
+        help="怎么送到用户面前：auto=按位置决定（在家可出声，在工作只静音，"
+             "默认）/ silent=一定不出声 / voice=一定出声。"
+             "⚠ 打电话那一档还没有（缺 APNs 通道），所以这里没有它")
     args = parser.parse_args()
     store = NotificationStore(args.root or default_root())
 
@@ -812,7 +847,7 @@ def main() -> int:
                 source=args.source, auto_resolve=auto,
                 expires_at_ms=expires, dedupe_key=args.dedupe_key,
                 activate_at_ms=activate, due_at_ms=due, place=place,
-                audience=args.audience, end=args.end,
+                audience=args.audience, end=args.end, deliver=args.deliver,
             )
             if item.get("_dedupeHit"):
                 updated = item.get("_dedupeUpdated") or []
