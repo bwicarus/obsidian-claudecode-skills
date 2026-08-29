@@ -15,6 +15,16 @@
 
     {"outcome": "answered"}    接通了 —— 你现在开口说
     {"outcome": "downgraded"}  被拒接、或两次没人接 —— 别再管了，走通知
+    {"outcome": "blocked"}     **根本没拨**（见下）—— 改走通知，并把
+                               reason 原话转告用户，那是他要动手改的东西
+
+## ⚠ blocked：铃没响过
+
+ReaderPC 的「语音功能」关着、或它处在桥接模式时，电话即使接通，音频
+也接不到 App 上。那种情况下**响铃是纯粹的打扰** —— 用户被真实地叫了
+一次，换来什么也没发生。所以这里在拨号前就拦下来，一声都不响。
+
+reason 里已经写好了该怎么办（勾哪个开关、要重启服务），转告即可。
 
 **重拨不需要告诉你**：第一次没人接 → 等 5 分钟 → 再打一次 → 还没人接才
 返回 downgraded。这整段时间你就是在等这个进程。
@@ -97,6 +107,56 @@ def _bridge_runtime() -> Path:
 
 class VoipPushError(RuntimeError):
     pass
+
+
+SERVICE_MODE_FILE_NAME = "readerpc-service-mode.json"
+
+
+def voice_route_block() -> str | None:
+    """拨号**之前**先问一句：接通了音频真能过来吗？不能就别响这个铃。
+
+    返回 None = 可以拨；返回字符串 = 拒拨的理由（已经是给人看的话）。
+
+    ⚠ 这个闸是 2026-08-29 那次实测逼出来的。当时整条链路其实早就通了 ——
+    CallKit 接听、系统交出音频会话、App 连上桥、发出 START —— 桥在最后
+    一步按设置拒了（`BW_COMPUTER_VOICE_DIRECT_VOICE_DISABLED`）。
+    用户那一侧看到的只有「电话接通了，声音还在电脑上」，跟"某处代码写错了"
+    长得一模一样，为此白查了好几轮。
+
+    **拒绝发生在最后一步，而铃在第一步就响了** —— 这是最差的形态：
+    用户被真实地打扰了一次，换来的是什么也没发生。所以宁可不拨。
+
+    读的是**桥自己启动时读的那一份**（`_bridge_runtime()` 下的模式文件），
+    不是 GUI 偏好 —— 两者可能不一致，而决定行为的是前者。
+    ⚠ 但 C# **只在启动时读它**：文件改了、服务没重启，这里就会判错。
+    所以话要说全，把"改完要重启"一起讲出来。
+    """
+    path = _bridge_runtime() / SERVICE_MODE_FILE_NAME
+    try:
+        value = json.loads(path.read_text("utf-8"))
+    except FileNotFoundError:
+        # 没有文件 = 完整模式（跟 C# 的默认一致）。放行。
+        return None
+    except (OSError, ValueError):
+        # 读不出就放行:宁可白响一次铃,也不要因为一个坏文件把整条
+        # 通道悄悄关掉 —— 那种失败比白响一次难查得多。
+        return None
+    if not isinstance(value, dict):
+        return None
+    if value.get("voiceEnabled") is False:
+        return (
+            "ReaderPC 的「语音功能」是关闭的，电话接通了音频也接不过来，"
+            "所以这一通没有拨。请用户在 ReaderPC 服务器界面勾上「语音功能」"
+            "并重启直连服务（C# 只在启动时读这个设置）。"
+            "在那之前，这条消息请走通知。"
+        )
+    if value.get("mode") == "bridge-only":
+        return (
+            "ReaderPC 现在是「桥接模式」：语音留在电脑本机，通话不接到 App，"
+            "所以这一通没有拨。要把通话接过来请切回完整模式并重启直连服务。"
+            "在那之前，这条消息请走通知。"
+        )
+    return None
 
 
 def _load_config(root: Path) -> dict[str, Any]:
@@ -267,6 +327,11 @@ def place_call(root: Path, ntf_id: str, title: str,
     调用方就是在等这一个进程（用户 2026-08-29 明说）。
     """
     ntf_id = _require_valid_ntf(ntf_id)
+    # ⚠ 先问"接通了音频过得来吗" —— 过不来就**根本不要响这个铃**。
+    # 见 voice_route_block()：拒绝发生在最后一步，而铃在第一步就响了。
+    blocked = voice_route_block()
+    if blocked is not None:
+        return {"outcome": "blocked", "attempts": 0, "reason": blocked}
     # ⚠ **拨号前先清掉残留的挂断信号。**
     #
     # 那个信号是"读一次就消失"的，但写了却没人来读时它会留着 ——
