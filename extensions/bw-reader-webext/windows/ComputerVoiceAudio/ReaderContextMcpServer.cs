@@ -3813,12 +3813,15 @@ internal sealed class ReaderContextMcpServer
         JsonElement arguments,
         CancellationToken cancellationToken)
     {
-        if (!TryReadReaderCard(arguments, out JsonNode payload))
+        if (!TryReadReaderCard(
+            arguments, out JsonNode payload, out string? invalidReason))
         {
             await WriteErrorAsync(
                 id,
                 -32602,
-                "Invalid Reader card",
+                string.IsNullOrWhiteSpace(invalidReason)
+                    ? "Invalid Reader card"
+                    : "Invalid Reader card: " + invalidReason,
                 cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -4712,8 +4715,15 @@ internal sealed class ReaderContextMcpServer
 
     private static bool TryReadReaderCard(
         JsonElement arguments,
-        out JsonNode payload)
+        out JsonNode payload) =>
+        TryReadReaderCard(arguments, out payload, out _);
+
+    private static bool TryReadReaderCard(
+        JsonElement arguments,
+        out JsonNode payload,
+        out string? reason)
     {
+        reason = null;
         payload = new JsonObject();
         if (arguments.ValueKind != JsonValueKind.Object)
         {
@@ -4746,6 +4756,11 @@ internal sealed class ReaderContextMcpServer
             or DirectProtocolException
             or ReaderRealtimeOutputException)
         {
+            // ⚠ 原因必须带出去（2026-08-31）：校验里写了指路的错误文本
+            // （"资产编号不存在,该给原始外链…"），在这里被吞成统一的
+            // "Invalid Reader card"，AI 拿到的永远是那四个词 —— 指路
+            // 白写,它只能盲试。深夜实录:连试几次全是这句,最后绕进旁门。
+            reason = exception.Message;
             return false;
         }
     }
