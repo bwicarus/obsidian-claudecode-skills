@@ -122,31 +122,50 @@ class ReviewProducerTests(unittest.TestCase):
             "tombstones": {}, "order": ["n1"],
         }, ensure_ascii=False), "utf-8")
 
-    def test_due_creates_once_per_day_and_clears_on_zero(self) -> None:
-        from replication_notifications import ensure_review_due
+    def test_due_speaks_only_at_threshold(self) -> None:
+        """2026-08-30 砍收件箱后的契约：
+
+        - 阈值以下**一条通知都不建**（数字由桥直接渲到慢板，陈述句）；
+        - 积到 32 建一条 **audience=user** 的真通知（按日 dedupe）；
+        - 回落到阈值之下自动入库（due 下降的唯一途径是他在复习）。
+        """
+        from replication_notifications import (
+            REVIEW_DUE_SPEAK_THRESHOLD, ensure_review_due)
         now_ms = int(time.time() * 1000)
-        self._write_notes([
-            {"front": "Q", "_next": now_ms - 1000, "_st": "review"},
-            {"front": "Q2", "_next": None, "_st": "learn"},
-        ])
-        first = ensure_review_due(self.store, self.root)
-        self.assertEqual(first, {"due": 1, "new": 1})
-        again = ensure_review_due(self.store, self.root)
+
+        def due_notes(count):
+            return [{"front": "Q%d" % i, "_next": now_ms - 1000,
+                     "_st": "review"} for i in range(count)]
+
+        # ① 阈值以下：只报数，不建通知 —— 建了就等于 AI 每天被喊一次
+        #    去说一件不值得说的事。
+        self._write_notes(due_notes(REVIEW_DUE_SPEAK_THRESHOLD - 1))
+        below = ensure_review_due(self.store, self.root)
+        self.assertEqual(below["due"], REVIEW_DUE_SPEAK_THRESHOLD - 1)
+        self.assertEqual(self.store.open_items(), [],
+                         "阈值以下不该产生任何通知")
+
+        # ② 到阈值：建一条 audience=user（要走慢板/ack 状态机，
+        #    audience=ai 的话没人会醒 —— 那正是砍收件箱的原因）。
+        self._write_notes(due_notes(REVIEW_DUE_SPEAK_THRESHOLD))
+        ensure_review_due(self.store, self.root)
+        items = self.store.open_items()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["audience"], "user")
+        ensure_review_due(self.store, self.root)
         self.assertEqual(len(self.store.open_items()), 1,
                          "dedupe 按日,一天最多一条")
-        self.assertEqual(again["due"], 1)
-        # 复习完(副本 _next 推到未来) → due 清零 → 自动入库
-        self._write_notes([
-            {"front": "Q", "_next": now_ms + 86400_000, "_st": "review"},
-        ])
-        cleared = ensure_review_due(self.store, self.root)
-        self.assertEqual(cleared["due"], 0)
+
+        # ③ 回落（他在复习）→ 自动入库，别让 AI 拿过时数字去说。
+        self._write_notes(due_notes(REVIEW_DUE_SPEAK_THRESHOLD - 5))
+        fallen = ensure_review_due(self.store, self.root)
+        self.assertEqual(fallen["due"], REVIEW_DUE_SPEAK_THRESHOLD - 5)
         self.assertEqual(self.store.open_items(), [])
         archived = [json.loads(x) for x in
                     (self.root / "notifications-archive.jsonl")
                     .read_text("utf-8").splitlines()]
         self.assertEqual(archived[-1]["resolvedBy"], "auto")
-        self.assertEqual(archived[-1]["resolutionNote"], "到期清零")
+        self.assertIn("回落", archived[-1]["resolutionNote"])
 
     def test_seconds_epoch_next_is_also_understood(self) -> None:
         from replication_notifications import count_due_cards

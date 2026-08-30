@@ -331,7 +331,17 @@ internal static class ReaderAttentionBoardSelfTest
         ReaderAttentionBoard.NoteDrawing(t4);
         // 通话挂断也要立起来 —— 它是快板登记表的一项，缺了正向检查会红。
         ReaderAttentionBoard.NoteCallEnded(t4);
+        // 复习计数同理（慢板登记项）。37 张 → 4 张一档 → 板上该写 36。
+        File.WriteAllText(
+            Path.Combine(dir, "replication-apply.status.json"),
+            "{\"notifications\":{\"reviewDue\":{\"due\":37,\"new\":2}}}");
         string slowFull = ReaderAttentionBoard.RenderSlowForSelfTest(t4);
+        if (!slowFull.Contains("现在到期待复习卡共 36 张", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "37 张到期卡该按 4 张一档写成 36 —— 档位就是这行的抖动阈值。"
+                + "板面：\n" + slowFull);
+        }
         string fastFull = ReaderAttentionBoard.RenderFastForSelfTest(t4);
         foreach ((string board, string body) in new[]
         {
@@ -380,6 +390,9 @@ internal static class ReaderAttentionBoardSelfTest
         File.WriteAllText(
             Path.Combine(dir, "notifications.json"),
             "{\"contract\":\"reader-notifications/1\",\"items\":[]}");
+        // ⚠ ResetForSelfTest 只重置内存，不动目录 —— 上一段留下的
+        // apply-status 夹具（due=37）要自己清掉，否则"空状态"不空。
+        File.Delete(Path.Combine(dir, "replication-apply.status.json"));
         string emptyRegistry =
             ReaderAttentionBoard.RenderRegistryForSelfTest(t0);
         // ⚠ 不能笼统断言"全 false"：「位置」那一行是**恒在**的（不知道时
@@ -409,6 +422,53 @@ internal static class ReaderAttentionBoardSelfTest
             }
         }
         checks.Add("attention-registry-empty-means-empty");
+
+        // ⑫ 慢板两级写盘（用户 2026-08-30：「不重要的信息应该有一个积累的
+        // 过程…当重要信息更新时一起更新或者积累到一定数量后一起更新」）。
+        //
+        // 写盘就是唤醒对面 —— 这组断言钉的是唤醒的节流：
+        //   祈使句变 → 立刻落；纯上下文 → 攒满 4 个不同状态才落；
+        //   同一状态渲一百遍 → 一次都不算。
+        ReaderAttentionBoard.ResetForSelfTest(dir);
+        if (!ReaderAttentionBoard.DecideSlowFlushForSelfTest("上下文A", ""))
+        {
+            throw new InvalidOperationException(
+                "第一次必须落盘 —— 文件不存在会被对面误读成服务没跑");
+        }
+        foreach ((string state, int round) in new[]
+        {
+            ("上下文B", 1), ("上下文C", 2), ("上下文D", 3),
+        })
+        {
+            if (ReaderAttentionBoard.DecideSlowFlushForSelfTest(state, ""))
+            {
+                throw new InvalidOperationException(
+                    $"第 {round} 个纯上下文变化就落盘了 —— 攒批没起作用");
+            }
+            // 负对照：同一状态再渲一遍不许计入积累。
+            if (ReaderAttentionBoard.DecideSlowFlushForSelfTest(state, ""))
+            {
+                throw new InvalidOperationException(
+                    "同一状态渲两遍被当成了两次变化 —— 积累会被空转灌满");
+            }
+        }
+        if (!ReaderAttentionBoard.DecideSlowFlushForSelfTest("上下文E", ""))
+        {
+            throw new InvalidOperationException(
+                "攒满 4 个不同上下文状态仍不落盘 —— 上下文永远到不了对面");
+        }
+        // 祈使句出现 → 不等积累，立刻落，攒着的上下文搭车。
+        if (ReaderAttentionBoard.DecideSlowFlushForSelfTest("上下文F", ""))
+        {
+            throw new InvalidOperationException("刚落盘过的下一个上下文变化不该立刻再落");
+        }
+        if (!ReaderAttentionBoard.DecideSlowFlushForSelfTest(
+            "上下文F\n待办 x「事」还没跟他说过。", "待办 x「事」还没跟他说过。"))
+        {
+            throw new InvalidOperationException(
+                "祈使句出现却没立刻落盘 —— 该唤醒的没唤醒");
+        }
+        checks.Add("attention-board-slow-flush-batches-context");
 
         // 把一份典型的板子带进结果：格式的活文档，也让"悄悄变啰嗦"看得见。
         ReaderAttentionBoard.ResetForSelfTest(dir);

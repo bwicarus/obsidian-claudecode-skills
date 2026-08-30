@@ -721,27 +721,50 @@ def count_due_cards(root: Path) -> tuple[int, int]:
     return due, new
 
 
+#: 到期卡积到多少张才值得让 AI 开口（用户 2026-08-30 定的 32）。
+#: 低于它时只在慢板上摆一行**陈述句**的计数（那是桥直接读对账状态渲的，
+#: 不经过这里），AI 看到不用动。
+REVIEW_DUE_SPEAK_THRESHOLD = 32
+
+
 def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
     """复习到期生产者（每轮对账调用）。
 
-    - due>0：确保当天有一条 review-due 通知（dedupe 按日，防打扰）。
-    - due==0：把 open 的 review-due 通知自动入库（目标已达成）。
+    ## 2026-08-30 改：收件箱砍掉之后的形态
+
+    原来 due>0 就每天建一条 audience=ai 的"原料"，等 AI 整理 —— 那条
+    判断通道只有这一个生产者、而它根本不需要判断（措辞已是成品），盯板
+    架构落地后更是没人会去读它。用户拍板砍掉。
+
+    现在分两层，判断权各归其位：
+      - due 的**数字**由桥直接读对账状态渲到慢板（陈述句，4 张一档），
+        AI 看到不用动 —— 这里不产任何东西；
+      - 积到 REVIEW_DUE_SPEAK_THRESHOLD 才建一条 **audience=user** 的
+        真通知 → 慢板上变祈使句，走 ack 状态机 ——「只触发一次」不用
+        另写逻辑：AI 说过一次、ack，就转"已确认"不再催。
+
+    回落即自动入库：due 掉到阈值之下只可能是**他在复习**（这是 due 下降的
+    唯一途径），目标已达成，别再让 AI 拿着过时的数字去说。回落 + 按日
+    dedupe 一起兜住阈值附近的抖动：同一天重新越线不会再建。
     """
     due, new = count_due_cards(root)
     day = time.strftime("%Y%m%d")
-    if due > 0:
+    if due >= REVIEW_DUE_SPEAK_THRESHOLD:
         store.create(
             kind="review-due",
-            title="有 %d 张卡片到期待复习" % due,
+            title="到期待复习的卡片已积到 %d 张" % due,
             body=("另有 %d 张新卡待学习。" % new) if new else "",
             source="review-scheduler",
+            audience="user",
             dedupe_key="review-due:" + day,
-            expires_at_ms=_now_ms() + 24 * 3600 * 1000,
+            end="expires:%d" % (_now_ms() + 24 * 3600 * 1000),
         )
     else:
         for item in list(store.open_items()):
             if item.get("kind") == "review-due":
-                store.resolve(item["id"], by="auto", note="到期清零")
+                store.resolve(
+                    item["id"], by="auto",
+                    note="已回落到 %d 张（他在复习）" % due)
     return {"due": due, "new": new}
 
 
@@ -805,8 +828,11 @@ def main() -> int:
     create.add_argument("--on-leave", action="store_true",
                         help="改成离开该地点时触发（默认是到达时）")
     create.add_argument("--audience", default="ai", choices=("ai", "user"),
-                        help="ai=快照(你的收件箱,默认) / user=侧边栏 tab"
-                             "(整理后投递给用户)")
+                        help="一律用 user（进慢板/侧边栏/苹果提醒）。"
+                             "ai 这档 2026-08-30 起**休眠**：收件箱流程已"
+                             "废除，写进去没有任何东西会醒来读它。默认值"
+                             "仍是 ai 只为兼容旧脚本 —— 所以 user 方向"
+                             "必须显式写 --audience user")
     create.add_argument("--auto-item", default=None,
                         help="itemId：该条目在账本出现操作即自动入库")
     create.add_argument("--auto-card", default=None,
