@@ -550,6 +550,16 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
 
 - 做改动时不必再为 PWA 表面做兼容取舍（此前"App 内隐藏而不删，因为 PWA 还要用"
   这类折中可以直接改成删）。
+- ⚠⚠ **Pi 已出局（2026-08-30 用户拍板，覆盖下面 2026-08-19 那节）**：
+  Pi 已从「Windows 服务器 + App 客户端」的运行架构中**去除**。现行架构：
+  **Windows 桥就是 App 的服务器**（`bwicarus-2.taile44d0c.ts.net`，
+  tailscale serve → `127.0.0.1:43128`，语音/VoIP/上下文快照/图书上传/
+  提示板都已在它上面）。**新能力的存储、抓取、服务一律落 Windows**，
+  不再落 Pi；Pi 只剩纯备份/历史表面。
+  ⚠ 代码里仍有残留指向（App 的 `ReaderNativePiGateway.piHost` 还指
+  `bwicarus.taile44d0c.ts.net` 等）—— 那是**迁移未完成的痕迹，不是方向**。
+  别据此把新功能建到 Pi 上：2026-08-30 图片资产一事，我就因为看到
+  Pi 上有现成资产系统而差点把新链路接回 Pi，被用户拦下。
 - ⚠ **Pi 是什么、不是什么（2026-08-19 用户重新定义，之前那句概括把人带偏过多次）**：
   Pi 的存在主要是两件事 —— ① 把 **CLI 调用抽象成一种 AI 的 API**（Claude/Codex 包成
   HTTP 服务）；② 做**设备间的同步中继**。它**不是**阅读器的数据权威，也不是业务逻辑
