@@ -43,8 +43,11 @@ test("native image transport is bounded at every external-input boundary", () =>
   assert.match(PROXY, /url\.user == nil, url\.password == nil/);
   assert.match(PROXY, /url\.fragment == nil/);
   assert.match(PROXY, /getaddrinfo\(/);
-  assert.match(PROXY, /guard isPublicIPv4\(bytes\)/);
-  assert.match(PROXY, /guard isPublicIPv6\(bytes\)/);
+  // 2026-08-30 起桥资产主机（CGNAT 100.64/10）经 trustedPrivateHosts 豁免
+  // 公网检查 —— guard 带上豁免位。豁免面本身也要锁：只认精确主机名集合。
+  assert.match(PROXY, /guard hostIsTrusted \|\| isPublicIPv4\(bytes\)/);
+  assert.match(PROXY, /guard hostIsTrusted \|\| isPublicIPv6\(bytes\)/);
+  assert.match(PROXY, /trustedPrivateHosts\.contains\(hostname\)/);
   assert.match(
     PROXY,
     /for redirectCount in 0\.\.\.5[\s\S]*ReaderNativeImageProxyPolicy\.resolve\(current\)/,

@@ -16,7 +16,12 @@ const RUNTIME = readFileSync(
 function syncBlock() {
   const at = VOICE.indexOf("function wireSystemProjection");
   assert.ok(at >= 0, "系统投影同步循环在场");
-  return VOICE.slice(at, at + 4200);
+  // 按 IIFE 收尾截取,不用固定字符窗口 —— 4200 字符的旧窗口在实现每次
+  // 加长后就悄悄掉断言(2026-08-31 实锤:诊断文案变详细,reasons.join
+  // 掉出窗口,断言失败却与被锁的坑无关)。
+  const end = VOICE.indexOf("\n  })();", at);
+  assert.ok(end > at, "同步循环 IIFE 有收尾");
+  return VOICE.slice(at, end);
 }
 
 test("首次成功前退避重试 —— 一次失败不该干等 30 分钟", () => {
@@ -39,8 +44,12 @@ test("提醒通道缺席时必须让用户知道,且要说对是哪一条", () =
   // 说"闹钟需要 iPadOS 26"是答非所问 —— 用户会去查系统版本,而真正的
   // 原因是他自己拒过通知权限(2026-08-26 对抗式复核确认)。
   assert.match(body, /notifications=denied/, "通知权限被拒要单独认出来");
-  assert.match(body, /reminders=\(denied\|calendar-unavailable\)/,
-    "提醒事项权限缺席要单独认出来");
+  // 2026-08-29 实锤后实现把两种缺席**分开说**（denied 是权限被拒,
+  // calendar-unavailable 是权限好但建不出列表 —— 归错类会把用户送去
+  // 反复检查一个本来就对的开关）,断言跟着分开。
+  assert.match(body, /reminders=denied/, "提醒事项权限被拒要单独认出来");
+  assert.match(body, /reminders=calendar-unavailable/,
+    "建不出提醒列表要与权限被拒分开认出来");
   assert.match(body, /alarms=\(unsupported-os\|sdk-unavailable\)/,
     "系统闹钟不可用要单独认出来");
   assert.match(body, /reasons\.join/,

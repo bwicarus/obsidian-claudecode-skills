@@ -33,6 +33,9 @@ const SyncConflictControl = require(
 );
 const COORDINATOR = read("ios/BWReader/App/ReaderPiSyncCoordinator.swift");
 const TOOLS_VIEW = read("ios/BWReader/App/NativeReaderToolsView.swift");
+// 2026-08-28 688fff07「数据与同步」统一入口：Section 壳搬进 ReaderDataHub，
+// 同步按钮细节区（piSyncDetailSection）留在 ToolsView —— 断言分头指。
+const DATA_HUB = read("ios/BWReader/App/ReaderDataHub.swift");
 const NATIVE_BOOTSTRAP = read(
   "_server_deploy/static/reader-runtime/native-sync-bootstrap.js",
 );
@@ -301,7 +304,7 @@ async function nativeBootstrapHarness({
 }
 
 test("Pi sync button is explicit, serialized, and reports partial support honestly", () => {
-  assert.match(TOOLS_VIEW, /Section\("Pi 同步"\)/);
+  assert.match(DATA_HUB, /Section\("数据与同步"\)/);
   assert.match(TOOLS_VIEW, /piSync\.syncToPi\(using: reader\)/);
   assert.match(TOOLS_VIEW, /\.disabled\(piSync\.isRunning\)/);
   assert.match(TOOLS_VIEW, /ProgressView\(\)/);
@@ -1121,7 +1124,9 @@ test("Swift sync bridge keeps namespace and capabilities private and exposes log
   assert.match(PI_LOGIN, /ReaderNativePiSyncBridge\.loginURL/);
   assert.match(PI_LOGIN, /websiteDataStore = dataStore/);
   assert.match(PI_LOGIN, /bwicarus\.taile44d0c\.ts\.net/);
-  assert.match(PI_LOGIN, /"\/login", "\/logout", "\/register", "\/dashboard\/"/);
+  // loginFlowPaths 语义修正后只含登录流程本身；dashboard 是登录后的
+  // 落点（跳到列表之外即视为登录成功），不再在列表里。
+  assert.match(PI_LOGIN, /"\/login", "\/logout", "\/register",/);
   assert.match(TOOLS_VIEW, /登录或重新登录 Pi/);
 });
 

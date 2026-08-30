@@ -100,7 +100,8 @@ test("local PDF page pixels are rendered and bounded by PDFKit without Pi", () =
   assert.match(SERVER, /imageCache\.totalCostLimit = 96 \* 1_024 \* 1_024/);
   assert.match(SERVER, /let pixelWidth = min\(3_000, max\(400, requestedWidth\)\)/);
   assert.match(SERVER, /"X-BW-PDF-Renderer"\): "pdfkit"/);
-  assert.match(SERVER, /cacheControl: "private, max-age=31536000, immutable"/);
+  // 2026-08-28 fcbaac15：一年 immutable 是 54GB 占用的根因，降 7 天。
+  assert.match(SERVER, /cacheControl: "private, max-age=604800, immutable"/);
 });
 
 test("PDFKit serves the legacy TOC shape locally without a Pi book dependency", () => {

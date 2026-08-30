@@ -54,8 +54,11 @@ test("derived OCR and mutable user state finish independently", () => {
 test("trusted local page readiness gates one conflict-aware atomic import", () => {
   assert.match(WEB, /waitForBookUserStateAPI/);
   assert.match(WEB, /window\.top === window/);
-  assert.match(WEB, /bookUserState\.snapshotHeaders/);
-  assert.match(WEB, /bookUserState\.applyAtomically/);
+  // 2026-08-28 诊断重构后取值先落局部变量（us = nlr.bookUserState），
+  // 字面 bookUserState.snapshotHeaders 不复存在 —— 断到 API 名即可，
+  // 别把"取值路径"当契约：换个局部变量它就假失败。
+  assert.match(WEB, /\.snapshotHeaders/);
+  assert.match(WEB, /\.applyAtomically/);
   assert.match(WEB, /localIsNewOrEmpty: true/);
   assert.match(WEB, /coordinator\.prepareImport/);
   assert.match(WEB, /coordinator\.commitImport/);
