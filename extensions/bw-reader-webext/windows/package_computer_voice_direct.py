@@ -62,7 +62,12 @@ SOURCE_EXCLUDED_PARTS = frozenset({"bin", "obj", "tests", "__pycache__"})
 # are build inputs just as surely as the .cs files which read them.
 SOURCE_INPUT_SUFFIXES = frozenset({".cs", ".csproj", ".md", ".py"})
 BUILD_COMMAND_TIMEOUT_SECONDS = 600
-SELF_TEST_TIMEOUT_SECONDS = 30
+# ⚠ 这是"防挂死"的上限，不是性能指标。2026-08-30 自检套件长到 ~32s
+# （提示板一天加了十几项检查），30s 开始把**通过中的**自检杀掉 ——
+# 症状是 exit=124、安装事务回滚，而包在构建期的自检明明是绿的
+# （构建期跑在刚解包的冷目录，时长略有出入，边界上就是能一边绿一边红）。
+# 给足余量；真挂死的自检 120s 同样兜得住。
+SELF_TEST_TIMEOUT_SECONDS = 120
 DETERMINISTIC_BUILD_ENV = {
     "PYTHONHASHSEED": "0",
     "SOURCE_DATE_EPOCH": "315532800",
