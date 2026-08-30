@@ -115,7 +115,8 @@ internal static class ReaderAttentionBoard
         new("fast", "快照失效", "他换了地方，",
             "换地方了，手上的旧快照对不上 —— 问到内容要重取"),
         new("fast", "绘图", "他正在画或刚画过",
-            "正在画或刚画过。有动作即刻立旗，停笔满 2 分钟退场"),
+            "这是状态不是事件：有动作即刻立旗，持续画不刷新；停笔满 2 分钟"
+            + "后**搭快板下一次真实变化的车**一起退场，不自己到点就走"),
     };
 
     /// 停留多久才算「真的到了这一页」。没有门槛的话翻页就让板子抖，
@@ -156,6 +157,10 @@ internal static class ReaderAttentionBoard
 
     private static bool _hasDrawing;
     private static DateTimeOffset _drawingLastAt;
+
+    /// 上一轮**快板里除笔迹之外**的内容。笔迹退场要搭它的车 ——
+    /// 见 FastOnlyLines 里那段说明。
+    private static string _lastFastOthers = string.Empty;
 
     private static string? _currentKey;
     private static string? _currentLabel;
@@ -825,31 +830,41 @@ internal static class ReaderAttentionBoard
     /// 调用方须持有 Gate。
     private static string FastOnlyLines(DateTimeOffset now)
     {
-        // ⚠ **快板里到点就退场，不搭车。**
+        // ⚠⚠ **笔迹退场要搭车，不许自己到点就走。**
         //
-        // 这推翻了合并时期的一条规矩（「一段时间没有绘图且其他方面的信息
-        // 进行了更新后伴随着消失」）。当时那么定，是因为一块板上一次纯由
-        // 时钟驱动的消失，对面读到的新情报是零 —— 那个理由**只在慢板成立**。
+        // 用户 2026-08-29 定的：「一段时间没有绘图且其他方面的信息进行了
+        // 更新后伴随着消失」。2026-08-30 拆板时我把它改成了"到点直接退场"，
+        // 理由写的是"快板要及时" —— **那是我擅自推翻的，而且理由站不住**，
+        // 用户当天就纠正了：「笔迹只是状态更新，而且消失时是伴随着其他的
+        // 更新进行更新」。
         //
-        // 快板的定位就是「要求及时性不要求稳定」（用户 2026-08-30），
-        // 而"他停笔了"本身就是情报。挂着一条两分钟前的"有笔画"，才是
-        // 真正在骗它。
+        // 有了主动推送之后这条比原来更要紧：纯时钟驱动的消失 = 停笔两分钟
+        // 主动唤醒对面一次，只为告诉它"他不画了"。那一次唤醒什么也做不了。
+        //
+        // 「其他方面的信息」= **快板自己的其它行**。慢板变了不算 ——
+        // 那时被读的是慢板，快板在那一刻退场没有任何人看得到。
         //
         // ⚠ 立旗仍然是即时的、且持续画画时一个字都不改（见 NoteDrawing）。
-        if (_hasDrawing && now - _drawingLastAt > DrawingIdleWindow)
-        {
-            _hasDrawing = false;
-        }
-        // 两行都是**自包含的祈使句**：读完就知道要做什么，不必先认出
-        // 自己在哪个分节里（用户 2026-08-30：「每一条都自己负责自己」）。
         var text = new StringBuilder();
         if (_snapshotStale)
         {
             text.Append("他换了地方，你手上的旧快照对不上了；")
                 .Append("问到页面内容时先重新取一次快照。\n");
         }
+        // 先算出"除笔迹之外的快板内容"，再决定笔迹能不能搭这趟车走。
+        string others = text.ToString();
+        if (_hasDrawing
+            && now - _drawingLastAt > DrawingIdleWindow
+            && !string.Equals(others, _lastFastOthers, StringComparison.Ordinal))
+        {
+            // 停笔够久，而且这一轮别的东西确实变了 —— 搭这趟车走。
+            _hasDrawing = false;
+        }
+        _lastFastOthers = others;
         if (_hasDrawing)
         {
+            // ⚠ 这是**状态**不是事件（用户 2026-08-30：「笔迹只是状态更新」）：
+            // 它说的是"他问起时先看绘图"，不是"现在打断他"。
             text.Append("他正在画或刚画过；")
                 .Append("问到相关内容时先看当前的绘图。\n");
         }
@@ -1059,6 +1074,7 @@ internal static class ReaderAttentionBoard
             _fastSeq = 0;
             _lastSlowBody = string.Empty;
             _lastFastBody = string.Empty;
+            _lastFastOthers = string.Empty;
             LastWritten.Clear();
             _hasDrawing = false;
             _drawingLastAt = default;

@@ -283,15 +283,33 @@ internal static class ReaderAttentionBoardSelfTest
         }
         checks.Add("attention-board-split-routes-each-signal");
 
-        // 快板到点就退场，**不用等别的变化搭车**（那条规矩只对慢板成立）。
+        // ⚠ 笔迹退场**必须搭车**（用户 2026-08-29 定、2026-08-30 重申：
+        // 「消失时是伴随着其他的更新进行更新」。拆板当天我改成过"到点直接
+        // 退场"，是擅自推翻 —— 有主动推送后那等于停笔两分钟就唤醒对面一次，
+        // 只为说"他不画了"）。
+        //
+        // 所以分两步断言：
+        //   ① 光是时间到了、别的没变 → 笔迹**还在**
+        //   ② 时间到了且快板别的行变了 → 跟着那次变化一起走
         DateTimeOffset t2 = t1 + TimeSpan.FromMinutes(3);
-        if (ReaderAttentionBoard.RenderFastForSelfTest(t2)
+        if (!ReaderAttentionBoard.RenderFastForSelfTest(t2)
             .Contains("正在画或刚画过", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                "停笔够久了快板还挂着笔画 —— 快板要的是及时，不是稳定");
+                "只是时间到了笔迹就自己走了 —— 纯时钟驱动的消失会白唤醒对面一次");
         }
-        checks.Add("attention-board-fast-retires-on-time");
+        // 制造一次"别的行变了"：助手重取快照 → 「快照对不上」退场。
+        // ⚠ 不能用"再转移一次焦点"当车 —— 那时「快照失效」**已经在板上**，
+        // 再转移不改变快板的字节，没有车可搭。第一版夹具就是这么错的：
+        // 断言喊"车来了它没上"，实际上车根本没来。
+        ReaderAttentionBoard.NoteSnapshotFetched();
+        string afterRide = ReaderAttentionBoard.RenderFastForSelfTest(t2);
+        if (afterRide.Contains("正在画或刚画过", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "别的行都变了笔迹还挂着 —— 搭车的车来了它没上");
+        }
+        checks.Add("attention-board-ink-retires-with-the-next-change");
 
         // ⑩ 登记表**双向**跟渲染对齐（用户 2026-08-30 要的那个清单）。
         //
