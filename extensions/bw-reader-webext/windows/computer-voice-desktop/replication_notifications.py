@@ -820,6 +820,76 @@ def route_open_user_items(
     return payload
 
 
+def ensure_codex_voice_health(
+    store: "NotificationStore", root: Path, runtime_dir: Path,
+) -> None:
+    """Codex 语音连续启动失败 → 一条真通知；恢复 → 自动入库。
+
+    2026-08-30 一晚的教训落地：App 卡在崩溃页/热键僵死时，keepalive 的
+    按键**按到天亮也没用**，而没有任何一处会告诉用户 —— 表现就是
+    「语音怎么一直起不来」。这类失败要人看一眼（点掉错误框 / File→Quit
+    彻底重启），程序自己修不了（keepalive 有意不杀用户开着的 App）。
+
+    判据全部电平化，不带时钟进通知内容：
+      连续失败 ≥4 次（前三次是正常冷启动的预算，见 C# BackoffFor）
+      且此刻语音未激活 → 建通知（dedupe 按失败首见时间戳，同一轮不重报）
+      语音激活 → 自动入库。
+    """
+    try:
+        status = json.loads(
+            (root / "readerpc-server.status.json").read_text("utf-8-sig"))
+        voice_active = bool(
+            (status.get("voice") or {}).get("codexVoiceActive"))
+    except (OSError, ValueError):
+        voice_active = False
+    if voice_active:
+        for item in list(store.open_items()):
+            if item.get("kind") == "codex-voice-stuck":
+                store.resolve(item["id"], by="auto", note="语音已恢复")
+        return
+    try:
+        lines = (
+            runtime_dir / "computer-voice-direct.failures.jsonl"
+        ).read_text("utf-8-sig").splitlines()
+    except OSError:
+        return
+    now_ms = _now_ms()
+    recent = []
+    for line in lines[-40:]:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if record.get("code") != (
+            "BW_COMPUTER_VOICE_DIRECT_VOICE_START_NOT_CONFIRMED"
+        ):
+            continue
+        at = record.get("atUtc")
+        if not at:
+            continue
+        import datetime as _dt
+        try:
+            t_ms = int(_dt.datetime.fromisoformat(at).timestamp() * 1000)
+        except ValueError:
+            continue
+        # 只看最近 15 分钟 —— 历史失败不该在恢复后还阴魂不散。
+        if now_ms - t_ms < 15 * 60_000:
+            recent.append(t_ms)
+    if len(recent) < 4:
+        return
+    store.create(
+        kind="codex-voice-stuck",
+        title="Codex 语音连续 %d 次没能启动，App 可能卡在错误界面" % len(recent),
+        body=("需要看一眼电脑上的 ChatGPT/Codex 窗口：若是「意外停止」"
+              "错误页，用 文件→Quit 彻底退出再打开（错误页上的「重启」"
+              "按钮只重载页面，救不了热键）。"),
+        source="codex-voice-keepalive",
+        audience="user",
+        dedupe_key="codex-voice-stuck:%d" % (min(recent) // 60000),
+        end="expires:%d" % (now_ms + 12 * 3600 * 1000),
+    )
+
+
 #: 到期卡积到多少张才值得让 AI 开口（用户 2026-08-30 定的 32）。
 #: 低于它时只在慢板上摆一行**陈述句**的计数（那是桥直接读对账状态渲的，
 #: 不经过这里），AI 看到不用动。

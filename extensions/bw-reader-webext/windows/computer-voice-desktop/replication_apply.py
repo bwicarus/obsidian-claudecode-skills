@@ -871,6 +871,11 @@ def run_once(
                 replication_notifications.route_open_user_items(
                     notify_store, local_root, digests_path.parent
                 )
+                # 语音链健康（2026-08-30 一晚的教训）：keepalive 连败说明
+                # App 卡在要人看的界面上,按到天亮也没用 —— 出一条通知喊人。
+                replication_notifications.ensure_codex_voice_health(
+                    notify_store, local_root, digests_path.parent
+                )
                 # ⚠ **这里不再自动拨号**（2026-08-29 用户纠正）。
                 #
                 # 我最初把拨号放在对账循环里自动打。那是错的：**电话必须由

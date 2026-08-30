@@ -975,15 +975,26 @@ internal sealed class DirectCodexVoiceControl :
         }
     }
 
-    /// <summary>连败 n 次后该等多久：20s 起，每次翻倍，封顶 5 分钟。</summary>
+    /// <summary>连败 n 次后该等多久：前三次固定 20s，之后翻倍，封顶 5 分钟。</summary>
+    /// <remarks>
+    /// ⚠ 前三次**不翻倍**（2026-08-30 实测定的）：正常冷启动里热键在启动后
+    /// 45-60 秒才接得住，第一按（+5s）注定落空 —— 指数退避在恰好要成的
+    /// 那个窗口跨大步错过，用户看到的"等很久"一半是它贡献的。
+    /// 前三次平铺让按键落在 ~40s/~62s/~84s，盖住正常就绪窗口；
+    /// 之后仍翻倍 —— 连败到第四次说明不是"还没就绪"而是卡死
+    /// （实测：崩溃页/僵死的 App 按到天亮也没用），该退避并交给
+    /// 健康通知去喊人，而不是继续密集敲一扇死门。
+    /// </remarks>
     internal static TimeSpan BackoffFor(int priorFailureCount)
     {
         if (priorFailureCount <= 0)
         {
             return TimeSpan.Zero;
         }
-        double seconds = AutomaticRecoveryRetryDelay.TotalSeconds
-            * Math.Pow(2, Math.Min(priorFailureCount - 1, 8));
+        double seconds = priorFailureCount <= 3
+            ? AutomaticRecoveryRetryDelay.TotalSeconds
+            : AutomaticRecoveryRetryDelay.TotalSeconds
+                * Math.Pow(2, Math.Min(priorFailureCount - 3, 8));
         double capped = Math.Min(
             seconds,
             AutomaticRecoveryMaximumRetryDelay.TotalSeconds);

@@ -777,3 +777,76 @@ class RouterTests(unittest.TestCase):
         }), encoding="utf-8")
         self._place("work", "工作地点")
         self.assertEqual(self._route_of()["action"], "hold")
+
+
+class VoiceHealthTests(unittest.TestCase):
+    """语音链健康通知（2026-08-30）：连败喊人，恢复自动收。"""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "root"
+        self.runtime = Path(self.temporary.name) / "runtime"
+        self.root.mkdir()
+        self.runtime.mkdir()
+        self.store = NotificationStore(self.root)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _failures(self, count, minutes_ago=1.0):
+        import datetime
+        at = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(minutes=minutes_ago)).isoformat()
+        lines = "\n".join(
+            json.dumps({
+                "atUtc": at,
+                "code": "BW_COMPUTER_VOICE_DIRECT_VOICE_START_NOT_CONFIRMED",
+            }) for _ in range(count))
+        (self.runtime / "computer-voice-direct.failures.jsonl").write_text(
+            lines, encoding="utf-8")
+
+    def _voice(self, active):
+        (self.root / "readerpc-server.status.json").write_text(json.dumps({
+            "voice": {"codexVoiceActive": active}}), encoding="utf-8")
+
+    def test_three_failures_stay_quiet(self) -> None:
+        # 前三次是正常冷启动的预算（热键 45-60s 才就绪，第一按注定落空），
+        # 报出去就是每次冷启动都喊一次狼来了。
+        from replication_notifications import ensure_codex_voice_health
+        self._voice(False)
+        self._failures(3)
+        ensure_codex_voice_health(self.store, self.root, self.runtime)
+        self.assertEqual(self.store.open_items(), [])
+
+    def test_four_failures_speak_up(self) -> None:
+        from replication_notifications import ensure_codex_voice_health
+        self._voice(False)
+        self._failures(4)
+        ensure_codex_voice_health(self.store, self.root, self.runtime)
+        items = self.store.open_items()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["audience"], "user")
+        self.assertIn("卡在错误界面", items[0]["title"])
+        # 同一轮不重报
+        ensure_codex_voice_health(self.store, self.root, self.runtime)
+        self.assertEqual(len(self.store.open_items()), 1)
+
+    def test_recovery_resolves(self) -> None:
+        from replication_notifications import ensure_codex_voice_health
+        self._voice(False)
+        self._failures(5)
+        ensure_codex_voice_health(self.store, self.root, self.runtime)
+        self.assertEqual(len(self.store.open_items()), 1)
+        self._voice(True)
+        ensure_codex_voice_health(self.store, self.root, self.runtime)
+        self.assertEqual(self.store.open_items(), [],
+                         "语音恢复必须自动入库 —— 别让旧警报继续吓人")
+
+    def test_stale_failures_do_not_alarm(self) -> None:
+        # 负对照：一小时前的连败已成历史（多半早就恢复过又断过电），
+        # 不该在此刻拉响。
+        from replication_notifications import ensure_codex_voice_health
+        self._voice(False)
+        self._failures(6, minutes_ago=60)
+        ensure_codex_voice_health(self.store, self.root, self.runtime)
+        self.assertEqual(self.store.open_items(), [])

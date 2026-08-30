@@ -6493,15 +6493,20 @@ internal static class DirectBridgeSelfTest
             },
             "direct-codex-voice-automatic-failure-keeps-retrying-and-is-visible",
             checks);
+        // 2026-08-30 改：前三次**平铺**不翻倍 —— 正常冷启动热键 45-60s 才
+        // 就绪，第一按注定落空；指数退避会在恰好要成的窗口跨大步错过。
+        // 第四次起才翻倍：连败到那儿是卡死，不是还没就绪。
         Require(
             DirectCodexVoiceControl.BackoffFor(1)
                 == DirectCodexVoiceControl.AutomaticRecoveryRetryDelay
-            && DirectCodexVoiceControl.BackoffFor(2)
-                > DirectCodexVoiceControl.BackoffFor(1)
+            && DirectCodexVoiceControl.BackoffFor(3)
+                == DirectCodexVoiceControl.AutomaticRecoveryRetryDelay
+            && DirectCodexVoiceControl.BackoffFor(4)
+                > DirectCodexVoiceControl.BackoffFor(3)
             && DirectCodexVoiceControl.BackoffFor(99)
                 == DirectCodexVoiceControl
                     .AutomaticRecoveryMaximumRetryDelay,
-            "direct-codex-voice-backoff-grows-and-is-capped",
+            "direct-codex-voice-backoff-flat-early-then-grows-capped",
             checks);
 
         string transientAutomaticFailurePath = System.IO.Path.Combine(
