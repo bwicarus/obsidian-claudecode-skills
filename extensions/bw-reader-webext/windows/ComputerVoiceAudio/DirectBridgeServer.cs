@@ -2230,14 +2230,21 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 applied += 1;
                 // 提示板只要「人在哪儿」，**不要正文**。
                 // DocumentKey 当身份（稳定），Title/Url 只作显示（会变）。
-                // 是不是一次注意力转移由板子自己判（停留门槛 + 迟滞），
+                // 是不是一次注意力转移由板子自己判（停留门槛 + 操作确认），
                 // 这里不做判断 —— 每一帧都报，让判据只有一处。
+                // source = 客户端实例 id：换了实例 ≈ 换了设备（板上只在
+                // 两边都知道且不同时才说"换了设备"）。
+                // interacted = 这一帧带着划选 —— 在新页面上**操作了**
+                // 就立刻确认转移，不等 45 秒（用户 2026-08-30）。
                 ReaderAttentionBoard.NoteLocation(
                     viewport.DocumentKey,
                     string.IsNullOrWhiteSpace(viewport.Title)
                         ? viewport.Url
                         : viewport.Title,
-                    DateTimeOffset.UtcNow);
+                    DateTimeOffset.UtcNow,
+                    source: viewport.SourceInstanceId,
+                    interacted: !string.IsNullOrWhiteSpace(
+                        viewport.Selection));
             }
             if (documentValue is JsonElement documentEntryValue)
             {

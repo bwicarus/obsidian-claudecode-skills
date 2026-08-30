@@ -268,18 +268,23 @@ internal static class ReaderAttentionBoardSelfTest
         {
             throw new InvalidOperationException("待办漏进了快板");
         }
-        // ⚠ 用户 2026-08-30 收窄：「位置应该只保留在慢的上面」。
-        // 这推翻了拆板时那条"基础内容两边都有" —— 地点和焦点都是慢信号，
-        // 放进快板只会让它们跟着绘图一起抖。
-        if (!slowAfter.Contains("食文化の本", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("注意力焦点没在慢板上");
-        }
-        if (fastNow.Contains("食文化の本", StringComparison.Ordinal)
-            || fastNow.Contains("现在地点：", StringComparison.Ordinal))
+        // ⚠ 2026-08-30 二改：焦点**整个归快板**（「焦点不应该被分开到
+        // 两个板子上」），慢板只剩地点/待办/计数 —— 从此没有外来文本。
+        if (slowAfter.Contains("食文化の本", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                "地点/焦点漏进了快板 —— 慢信号放快板会跟着绘图一起抖");
+                "焦点漏回了慢板 —— 它已整个搬去快板的转移语句");
+        }
+        if (!fastNow.Contains("焦点落在「食文化の本 p.26」上",
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "首个焦点没在快板上落座。快板：\n" + fastNow);
+        }
+        if (fastNow.Contains("现在地点：", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "地点漏进了快板 —— 慢信号放快板会跟着绘图一起抖");
         }
         checks.Add("attention-board-split-routes-each-signal");
 
@@ -298,12 +303,19 @@ internal static class ReaderAttentionBoardSelfTest
             throw new InvalidOperationException(
                 "只是时间到了笔迹就自己走了 —— 纯时钟驱动的消失会白唤醒对面一次");
         }
-        // 制造一次"别的行变了"：助手重取快照 → 「快照对不上」退场。
-        // ⚠ 不能用"再转移一次焦点"当车 —— 那时「快照失效」**已经在板上**，
-        // 再转移不改变快板的字节，没有车可搭。第一版夹具就是这么错的：
-        // 断言喊"车来了它没上"，实际上车根本没来。
-        ReaderAttentionBoard.NoteSnapshotFetched();
+        // 制造一次"别的行变了"：焦点转移（带 interacted 立刻确认）——
+        // 转移语句一变，快板就有了真实变化，笔迹搭这趟车走。
+        // 这同时顺手验证了**确定转移机制**：没等 45 秒。
+        ReaderAttentionBoard.NoteLocation(
+            "doc-ride", "换过去的页面", t2, interacted: true);
         string afterRide = ReaderAttentionBoard.RenderFastForSelfTest(t2);
+        if (!afterRide.Contains("焦点从「食文化の本 p.26」转移到「换过去的页面」",
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "带操作的转移没有立刻确认 —— 确定转移机制失效。快板：\n"
+                + afterRide);
+        }
         if (afterRide.Contains("正在画或刚画过", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
