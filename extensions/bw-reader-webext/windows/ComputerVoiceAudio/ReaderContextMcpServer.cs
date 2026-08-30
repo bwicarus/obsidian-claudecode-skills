@@ -4727,6 +4727,7 @@ internal sealed class ReaderContextMcpServer
         payload = new JsonObject();
         if (arguments.ValueKind != JsonValueKind.Object)
         {
+            reason = "arguments 必须是对象";
             return false;
         }
         try
@@ -4739,6 +4740,10 @@ internal sealed class ReaderContextMcpServer
                 || fields[0].Value.ValueKind != JsonValueKind.Object
             )
             {
+                // 形状不对也要指路：唯一合法形状是 {"card": {...}} 单字段包裹。
+                // 铺开字段、多带字段都会走到这 —— 不说清楚,调用方只能瞎猜。
+                reason =
+                    "参数只能是 {\"card\": {...}} 单字段包裹的卡片对象";
                 return false;
             }
             JsonNode card = JsonNode.Parse(fields[0].Value.GetRawText())
