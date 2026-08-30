@@ -81,6 +81,35 @@ enum ReaderNativeImageProxyError: LocalizedError {
     }
 }
 
+/// 连接看门狗的超时旗（waitUntilReady 用）。跨队列读写，锁一下。
+private final class ReaderNativeImageConnectFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.lock(); value = true; lock.unlock() }
+    func get() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
+}
+
+/// 图片代理的健康状态 —— 显示在「数据与同步」。
+///
+/// ⚠ 2026-08-30 的教训直通车：所有卡片图全裂时，Swift 端明明按十几种
+/// 情况返回了具体错误码（DNS/被拒/超时/格式…），但 <img> 裂了只画一个
+/// 问号 —— 错误码没有任何人看得到，排查只能整层整层地猜。
+/// 「无控制台设备上沉默等于不可诊断」。
+@MainActor
+enum ReaderImageProxyHealth {
+    private(set) static var line = "还没取过图"
+    private static var failures = 0
+
+    static func noteSuccess(host: String) {
+        line = "正常（最近成功：\(host)）"
+    }
+
+    static func noteFailure(code: String, host: String) {
+        failures += 1
+        line = "失败：\(code) @ \(host)（本次运行累计 \(failures) 次）"
+    }
+}
+
 /// Fetches display-only card images on-device. DNS policy and TCP routing use
 /// the exact same address result, removing the DNS-rebinding window between a
 /// public-address preflight and the actual connection. Every redirect gets a
@@ -201,11 +230,23 @@ private enum ReaderNativeImageProxyPolicy {
         guard !endpoints.isEmpty else {
             throw ReaderNativeImageProxyError.dnsUnavailable
         }
+        // ⚠ IPv4 排最前（2026-08-30「所有卡片图全裂」排查的产物）。
+        // 家庭网络常见"设备拿到了 IPv6 地址但路由是坏的"：getaddrinfo 把
+        // AAAA 排在前面，而这里是逐个端点顺序尝试的裸 NWConnection ——
+        // 没有 happy-eyeballs，先撞进坏 IPv6 就把整段预算耗光。
+        // 取一张卡片图不需要 v6 优先，先走最可能通的那条。
+        let ordered = endpoints.filter {
+            if case .ipv4 = $0 { return true }
+            return false
+        } + endpoints.filter {
+            if case .ipv4 = $0 { return false }
+            return true
+        }
         return ReaderNativeImageResolvedHop(
             url: url,
             hostname: hostname,
             port: port,
-            addresses: endpoints
+            addresses: ordered
         )
     }
 
@@ -453,7 +494,30 @@ private final class ReaderNativeImageProxyTransport: @unchecked Sendable {
     }
 
     private func waitUntilReady(_ connection: NWConnection) async throws {
-        try await withCheckedThrowingContinuation { continuation in
+        // ⚠ 连接阶段自带 5 秒上限（2026-08-30「所有卡片图全裂」的修复）。
+        //
+        // 原来只认 .ready/.failed/.cancelled，而 NWConnection 对"路由不通"
+        // 给的是 **.waiting** —— 它会一直等下去、不算失败。于是第一个
+        // 连不上的端点（典型：坏 IPv6）把外层 15 秒整段耗光，逐端点回退
+        // 一次都轮不到，每张图都以 timeout 收场，且没有任何一处报错。
+        //
+        // 修法两条腿：.waiting 立即按不可达处理（对顺序回退来说，"现在
+        // 连不上"就该马上换下一个地址）；外加 5 秒连接看门狗兜住
+        // .preparing 里 SYN 黑洞那种连 .waiting 都不给的情况。
+        //
+        // 看门狗跑在 networkQueue 自己身上、通过 connection.cancel() 收口：
+        // 只有 stateUpdateHandler 一条完成路径，续体不会泄。超时导致的
+        // .cancelled 用旗子跟真正的任务取消区分开 —— 混起来的话，一个
+        // 端点超时会被当成整个请求被取消，逐端点回退就废了。
+        let timedOut = ReaderNativeImageConnectFlag()
+        let watchdog = DispatchWorkItem {
+            timedOut.set()
+            connection.cancel()
+        }
+        networkQueue.asyncAfter(deadline: .now() + 5, execute: watchdog)
+        defer { watchdog.cancel() }
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
             var finished = false
             connection.stateUpdateHandler = { state in
                 guard !finished else { return }
@@ -461,7 +525,7 @@ private final class ReaderNativeImageProxyTransport: @unchecked Sendable {
                 case .ready:
                     finished = true
                     continuation.resume()
-                case .failed:
+                case .failed, .waiting:
                     finished = true
                     continuation.resume(
                         throwing: ReaderNativeImageProxyError.transport
@@ -469,7 +533,9 @@ private final class ReaderNativeImageProxyTransport: @unchecked Sendable {
                 case .cancelled:
                     finished = true
                     continuation.resume(
-                        throwing: ReaderNativeImageProxyError.cancelled
+                        throwing: timedOut.get()
+                            ? ReaderNativeImageProxyError.transport
+                            : ReaderNativeImageProxyError.cancelled
                     )
                 default:
                     break

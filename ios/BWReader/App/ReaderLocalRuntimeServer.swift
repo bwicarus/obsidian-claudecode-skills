@@ -482,8 +482,13 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 ]
             )
         }
+        // 健康行只记 host 不记完整 URL —— 排查要的是"哪个源、什么错"。
+        let host = URLComponents(string: rawURL)?.host ?? "?"
         do {
             let payload = try await imageProxyBroker.fetch(rawURL: rawURL)
+            await MainActor.run {
+                ReaderImageProxyHealth.noteSuccess(host: host)
+            }
             return dataResponse(
                 request,
                 data: payload.data,
@@ -494,6 +499,10 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 ]
             )
         } catch let error as ReaderNativeImageProxyError {
+            await MainActor.run {
+                ReaderImageProxyHealth.noteFailure(
+                    code: error.diagnosticCode, host: host)
+            }
             let phrase = HTTPURLResponse.localizedString(
                 forStatusCode: error.httpStatus
             ).capitalized
@@ -505,6 +514,10 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 ]
             )
         } catch {
+            await MainActor.run {
+                ReaderImageProxyHealth.noteFailure(
+                    code: "transport", host: host)
+            }
             return response(
                 status: .badGateway,
                 text: "BW_NATIVE_IMAGE_TRANSPORT：图片请求失败",

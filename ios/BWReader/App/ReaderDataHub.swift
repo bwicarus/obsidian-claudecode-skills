@@ -123,6 +123,10 @@ struct ReaderDataHubSection: View {
             // 「电话打不进来」永远只能靠猜：2026-08-29 就卡在这里，
             // token 没上去，而"发了被拒"和"根本没发"完全分不开。
             LabeledContent("来电通道", value: ReaderVoipCall.shared.status)
+            // 图片代理现在什么状态。⚠ 同一条教训的另一处应用：2026-08-30
+            // 所有卡片图全裂，Swift 端返回着十几种具体错误码，而 <img>
+            // 只画一个问号 —— 没有这行，排查只能整层整层地猜。
+            LabeledContent("图片代理", value: ReaderImageProxyHealth.line)
             if !isSignedIn {
                 Button("登录", action: onSignIn)
             }
