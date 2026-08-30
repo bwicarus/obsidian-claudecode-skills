@@ -677,3 +677,103 @@ class DeliverModeTests(unittest.TestCase):
         self.store.export_user_open(out)
         item = json.loads(out.read_text("utf-8"))["items"][0]
         self.assertEqual(item["deliver"], "silent")
+
+
+class RouterTests(unittest.TestCase):
+    """路由层（2026-08-30）。守的是那张路由表本身 —— 每行一条断言，
+    表改了测试就该跟着改，反过来测试红了说明表被悄悄动了。"""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "root"
+        self.runtime = Path(self.temporary.name) / "runtime"
+        self.root.mkdir()
+        self.runtime.mkdir()
+        self.store = NotificationStore(self.root)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _place(self, state, alias):
+        (self.runtime / "current-place.json").write_text(json.dumps({
+            "state": state, "alias": alias,
+            "observedAtUtcMs": int(time.time() * 1000)}), encoding="utf-8")
+
+    def _devices(self, voice=False, reading=False):
+        now_ms = int(time.time() * 1000)
+        (self.root / "readerpc-server.status.json").write_text(json.dumps({
+            "updatedAtEpochMs": now_ms,
+            "voice": {"readerConnected": voice, "captureActive": voice},
+            "readerContext": {
+                "title": "书" if reading else "",
+                "updatedAtEpochMs": now_ms},
+        }), encoding="utf-8")
+
+    def _route_of(self, **kwargs):
+        from replication_notifications import route_open_user_items
+        item = self.store.create(
+            kind="user-todo", title="事", audience="user",
+            end="never", **kwargs)
+        payload = route_open_user_items(self.store, self.root, self.runtime)
+        return payload["routes"][item["id"]]
+
+    def test_call_punches_through_everything(self) -> None:
+        # 在工作、没用设备 —— call 照样打：选那档时就已决定"必须现在知道"。
+        self._place("work", "工作地点")
+        self._devices()
+        self.assertEqual(self._route_of(deliver="call")["action"], "call")
+
+    def test_silent_never_reaches_the_board(self) -> None:
+        self._place("home", "家")
+        self.assertEqual(self._route_of(deliver="silent")["action"], "hold")
+
+    def test_auto_at_work_idle_holds(self) -> None:
+        # 用户的原话场景：在上班场所且没在用 app 也没连语音 = 在工作。
+        self._place("work", "工作地点")
+        self._devices(voice=False, reading=False)
+        route = self._route_of()
+        self.assertEqual(route["action"], "hold")
+        self.assertIn("在工作", route["reason"])
+
+    def test_auto_engaged_speaks_even_at_work(self) -> None:
+        # 连着语音 = 说话够得着且不算打扰，位置不再是障碍。
+        self._place("work", "工作地点")
+        self._devices(voice=True)
+        self.assertEqual(self._route_of()["action"], "speak")
+
+    def test_auto_at_home_speaks(self) -> None:
+        self._place("home", "家")
+        self._devices()
+        self.assertEqual(self._route_of()["action"], "speak")
+
+    def test_auto_unknown_place_goes_to_judge_with_reason(self) -> None:
+        # 「不知道在哪」≠「不在家」：程序判不了就如实交给 AI，
+        # 且必须写明为什么判不了 —— 不写原因等于只说"不行"。
+        self._devices()
+        route = self._route_of()
+        self.assertEqual(route["action"], "judge")
+        self.assertTrue(route["reason"])
+
+    def test_place_bound_todo_waits_for_that_place(self) -> None:
+        self._place("work", "工作地点")
+        route = self._route_of(place={"name": "家"})
+        self.assertEqual(route["action"], "hold")
+        self.assertIn("家", route["reason"])
+        self._place("home", "家")
+        from replication_notifications import route_open_user_items
+        payload = route_open_user_items(self.store, self.root, self.runtime)
+        self.assertEqual(
+            list(payload["routes"].values())[0]["action"], "speak",
+            "到了指定地点必须翻案 —— 条件本身就是闹钟")
+
+    def test_stale_heartbeat_is_not_engagement(self) -> None:
+        # 心跳停了的「语音已连」是旧话 —— 拿旧话当现状会在他早已离开后
+        # 还判"够得着"。陈旧状态必须落回地点分支。
+        now_ms = int(time.time() * 1000)
+        (self.root / "readerpc-server.status.json").write_text(json.dumps({
+            "updatedAtEpochMs": now_ms - 30 * 60_000,
+            "voice": {"readerConnected": True, "captureActive": True},
+            "readerContext": {"title": "书", "updatedAtEpochMs": now_ms},
+        }), encoding="utf-8")
+        self._place("work", "工作地点")
+        self.assertEqual(self._route_of()["action"], "hold")

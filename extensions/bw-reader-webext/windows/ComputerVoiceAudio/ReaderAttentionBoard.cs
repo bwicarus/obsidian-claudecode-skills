@@ -924,8 +924,9 @@ internal static class ReaderAttentionBoard
     /// 调用方须持有 Gate。
     private static string RenderSlow(DateTimeOffset now)
     {
-        _ = now;   // 慢板刻意不看时钟：看了就会自己抖起来
-        return Compose();
+        // ⚠ now 只用来判**路由文件本身**新不新鲜（5 分钟粗粒度），
+        // 不进任何板面文字 —— 慢板不放会走字的量的规矩不变。
+        return Compose(now);
     }
 
     /// 快板：绘图 + 焦点换过。**不带地点也不带焦点**（见类头）。
@@ -1061,7 +1062,70 @@ internal static class ReaderAttentionBoard
         }
     }
 
-    private static string Compose()
+    /// 路由结论（Python 路由层每轮对账写 notification-routing.json）。
+    /// id → (action, reason)。**没有文件或文件陈旧 → null = 路由不可用**。
+    ///
+    /// ⚠ 路由不可用时**放行**（按旧样式渲所有 pending），不是压住：
+    /// 路由层死了不能让通知从此静音 —— 静默失败清单里的形态。宁可多念，
+    /// 不可漏掉。陈旧阈值 5 分钟：对账循环每 ~6 秒一轮，5 分钟没写 =
+    /// 它确实不在了，不是慢。
+    private static Dictionary<string, (string Action, string Reason)>?
+        ReadRouting(DateTimeOffset now)
+    {
+        if (string.IsNullOrEmpty(_storeDirectory))
+        {
+            return null;
+        }
+        try
+        {
+            string path = Path.Combine(
+                _storeDirectory, "notification-routing.json");
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllText(path));
+            JsonElement root = document.RootElement;
+            long at = root.TryGetProperty("atUtcMs", out JsonElement stamp)
+                && stamp.ValueKind == JsonValueKind.Number
+                ? stamp.GetInt64() : 0;
+            if (Math.Abs(now.ToUnixTimeMilliseconds() - at) > 5 * 60_000)
+            {
+                return null;
+            }
+            if (!root.TryGetProperty("routes", out JsonElement routes)
+                || routes.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+            var map = new Dictionary<string, (string, string)>(
+                StringComparer.Ordinal);
+            foreach (JsonProperty one in routes.EnumerateObject())
+            {
+                if (one.Value.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+                string action = one.Value.TryGetProperty(
+                    "action", out JsonElement a)
+                    && a.ValueKind == JsonValueKind.String
+                    ? a.GetString() ?? "" : "";
+                string reason = one.Value.TryGetProperty(
+                    "reason", out JsonElement r)
+                    && r.ValueKind == JsonValueKind.String
+                    ? r.GetString() ?? "" : "";
+                map[one.Name] = (action, reason);
+            }
+            return map;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static string Compose(DateTimeOffset now)
     {
         const string NL = "\n";
         // ⚠ **「说没说过」由真值库的状态机决定，不由"读过没读过"决定。**
@@ -1123,17 +1187,37 @@ internal static class ReaderAttentionBoard
         }
         // ⚠ 「焦点换过（旧快照对不上了）」**不在这里** —— 它归快板。
         // 那是一条要求及时的信号：晚一步就会拿着过期快照回答问题。
+        // 路由层的结论决定谁上板（用户 2026-08-30 定稿的第②问归程序）。
+        // null = 路由不可用 → 放行全部 pending 按旧样式渲（见 ReadRouting）。
+        var routing = ReadRouting(now);
         foreach (Todo todo in fresh)
         {
+            string action;
+            string reason = string.Empty;
+            if (routing is null)
+            {
+                action = "legacy";
+            }
+            else if (routing.TryGetValue(todo.Id, out (string, string) route))
+            {
+                (action, reason) = route;
+            }
+            else
+            {
+                // 刚建的待办要等下一轮对账才有路由结论（~6 秒）。慢板
+                // 求稳不求快 —— 等一轮，别抢跑出一条没判过时机的祈使句。
+                continue;
+            }
+            if (action == "hold")
+            {
+                // 压着不上板。不丢：静默渠道已送达，现状一变下一轮翻案。
+                continue;
+            }
             // 需要动作的行**明确写出动作**，并且把 id 带在同一行 ——
             // 读的一方不必再去别处查"这条是哪个"。
             imperatives.Append("待办 ").Append(todo.Id)
                 .Append("「").Append(todo.Title).Append("」还没跟他说过");
-            if (todo.Where.Length > 0)
-            {
-                imperatives.Append("，他在").Append(todo.Where).Append("时说");
-            }
-            if (todo.WantsCall)
+            if (action == "call" || (action == "legacy" && todo.WantsCall))
             {
                 // ⚠ 电话必须由**你**发起（用户 2026-08-29）：你打过去
                 // 是为了接通后把这件事说清楚，并在那一刻把电脑的语音
@@ -1141,6 +1225,23 @@ internal static class ReaderAttentionBoard
                 imperatives.Append("；这条要打电话，你来发起：")
                     .Append("voip_push.py call --ntf ").Append(todo.Id)
                     .Append(" --title <一句话>");
+            }
+            else if (action == "speak")
+            {
+                imperatives.Append("，现在用语音说");
+            }
+            else if (action == "judge")
+            {
+                // 程序判不了 → 把**为什么判不了**原样端出来，AI 先跑
+                // judgment_basis 拿全依据再定 —— 不写原因等于只说"不行"。
+                imperatives.Append("；说不说你来定（")
+                    .Append(reason.Length > 0 ? reason : "路由层没给出原因")
+                    .Append("），先跑 judgment_basis.py 再决定");
+            }
+            else if (action == "legacy" && todo.Where.Length > 0)
+            {
+                // 路由不可用时的旧样式：时机条件写在行内，AI 自己掂量。
+                imperatives.Append("，他在").Append(todo.Where).Append("时说");
             }
             imperatives.Append("。").Append(NL);
         }

@@ -864,6 +864,13 @@ def run_once(
                     digests_path.parent
                     / replication_places.CURRENT_PLACE_FILE_NAME,
                 )
+                # 路由层（2026-08-30）：对每条 pending 判「现在能不能说、
+                # 怎么说」，结论写 notification-routing.json，板子照着渲。
+                # ⚠ 必须排在 export_current_place **之后** —— 路由的第一个
+                # 输入就是位置，顺序反了会拿上一轮的旧位置判这一轮。
+                replication_notifications.route_open_user_items(
+                    notify_store, local_root, digests_path.parent
+                )
                 # ⚠ **这里不再自动拨号**（2026-08-29 用户纠正）。
                 #
                 # 我最初把拨号放在对账循环里自动打。那是错的：**电话必须由

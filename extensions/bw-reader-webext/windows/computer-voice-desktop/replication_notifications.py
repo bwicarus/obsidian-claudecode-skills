@@ -721,6 +721,105 @@ def count_due_cards(root: Path) -> tuple[int, int]:
     return due, new
 
 
+#: 路由层的输出（写在 BWReader 根，桥的板子读它渲祈使句）。
+ROUTING_FILE_NAME = "notification-routing.json"
+
+
+def route_open_user_items(
+    store: "NotificationStore", root: Path, runtime_dir: Path,
+) -> dict[str, Any]:
+    """路由层：对每条 pending 的 audience=user 通知判「现在能不能说、怎么说」。
+
+    通知链三问的第 ② 问（用户 2026-08-30 定稿）：值不值得说在创建时定
+    （deliver 档），**是不是时机由这里判**，AI 只当嘴 + 裁歧义。
+
+    输出四种 action：
+      speak  现在用语音说（板上出祈使句）
+      call   打电话（deliver=call **穿透一切场合** —— 选那档时就已决定
+             "必须现在知道"，这里再拦就是两层规则打架）
+      hold   压着不上板。⚠ 不上板 ≠ 丢了：静默渠道（苹果提醒/横幅）在
+             创建时刻已送达；现状一变（他到家/拿起设备）下一轮自动翻案
+      judge  程序判不了 → 板上写明**为什么判不了**，AI 跑 judgment_basis
+             后自己定（证据规则：判不出就如实记歧义，别假装能判）
+
+    没有「下次重试时间」：电平触发，每轮对账重判，条件本身就是闹钟。
+    """
+    now_ms = _now_ms()
+
+    def _read(path: Path) -> dict[str, Any] | None:
+        try:
+            value = json.loads(path.read_text("utf-8-sig"))
+            return value if isinstance(value, dict) else None
+        except (OSError, ValueError):
+            return None
+
+    place = _read(runtime_dir / "current-place.json")
+    status = _read(root / "readerpc-server.status.json")
+    # 心跳陈旧的状态不算数 —— 「语音已连」是旧话时按不知道处理，
+    # 让判定落回地点分支，而不是拿旧话当现状。
+    heartbeat_fresh = bool(status) and (
+        now_ms - int(status.get("updatedAtEpochMs") or 0) < 5 * 60_000)
+    voice = (status or {}).get("voice") or {}
+    voice_connected = heartbeat_fresh and bool(
+        voice.get("readerConnected")) and bool(voice.get("captureActive"))
+    context = (status or {}).get("readerContext") or {}
+    reading_active = heartbeat_fresh and bool(
+        str(context.get("title") or "").strip()) and (
+        now_ms - int(context.get("updatedAtEpochMs") or 0) < 10 * 60_000)
+    place_state = place.get("state") if place else None
+    place_alias = (place or {}).get("alias")
+
+    routes: dict[str, dict[str, str]] = {}
+    for item in store.open_items():
+        if item.get("audience") != "user":
+            continue
+        if item.get("state") != "pending":
+            continue  # acked 的本来就不出祈使句
+        deliver = str(item.get("deliver") or "auto")
+        condition = str(((item.get("place") or {}).get("name")) or "")
+        if deliver == "call":
+            action, reason = "call", ""
+        elif deliver == "silent":
+            action, reason = "hold", "silent 档：静默渠道已送达"
+        elif deliver == "voice":
+            # voice = 明确要打断时才用的档 —— 建的时候就决定了要出声。
+            action, reason = "speak", ""
+        elif condition:
+            # 「在 X 时说」：条件在，位置说了算。
+            if place is None:
+                action = "judge"
+                reason = "这条要在「%s」时说，但从来没有过定位记录" % condition
+            elif place_alias == condition:
+                action, reason = "speak", ""
+            else:
+                action, reason = "hold", "等他到「%s」" % condition
+        elif voice_connected or reading_active:
+            # 正在用设备/连着语音 —— 说话够得着，且不算打扰。
+            action, reason = "speak", ""
+        elif place is None:
+            action = "judge"
+            reason = "地点没有任何记录，设备也没动静 —— 判不了在不在场"
+        elif place_state == "home":
+            action, reason = "speak", ""
+        elif place_state == "work":
+            action, reason = "hold", "在工作且没在用设备"
+        else:
+            action, reason = "hold", "在别处且设备没动静（语音够不着）"
+        routes[str(item.get("id"))] = {"action": action, "reason": reason}
+
+    payload = {
+        "contract": "notification-routing/1",
+        "atUtcMs": now_ms,
+        "routes": routes,
+    }
+    target = root / ROUTING_FILE_NAME
+    temporary = target.with_suffix(".json.tmp-%d" % os.getpid())
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    os.replace(temporary, target)
+    return payload
+
+
 #: 到期卡积到多少张才值得让 AI 开口（用户 2026-08-30 定的 32）。
 #: 低于它时只在慢板上摆一行**陈述句**的计数（那是桥直接读对账状态渲的，
 #: 不经过这里），AI 看到不用动。

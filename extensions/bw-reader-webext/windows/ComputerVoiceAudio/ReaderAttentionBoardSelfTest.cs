@@ -470,6 +470,76 @@ internal static class ReaderAttentionBoardSelfTest
         }
         checks.Add("attention-board-slow-flush-batches-context");
 
+        // ⑬ 路由消费（2026-08-30 通知链定稿）：板子按路由结论决定谁上板。
+        //
+        // 四种都要钉，且互为对照：speak 上板带渠道 / hold 整条消失 /
+        // judge 带原因 / 路由文件**陈旧**时放行为旧样式（fail-open ——
+        // 路由层死了不能让通知从此静音）。
+        ReaderAttentionBoard.ResetForSelfTest(dir);
+        File.WriteAllText(
+            Path.Combine(dir, "notifications.json"),
+            "{\"contract\":\"reader-notifications/1\",\"items\":["
+            + "{\"id\":\"ntf-s\",\"kind\":\"user-todo\",\"title\":\"该说的\","
+            + "\"state\":\"pending\",\"audience\":\"user\"},"
+            + "{\"id\":\"ntf-h\",\"kind\":\"user-todo\",\"title\":\"压着的\","
+            + "\"state\":\"pending\",\"audience\":\"user\"},"
+            + "{\"id\":\"ntf-j\",\"kind\":\"user-todo\",\"title\":\"拿不准的\","
+            + "\"state\":\"pending\",\"audience\":\"user\"},"
+            + "{\"id\":\"ntf-n\",\"kind\":\"user-todo\",\"title\":\"还没路由的\","
+            + "\"state\":\"pending\",\"audience\":\"user\"}]}");
+        File.WriteAllText(
+            Path.Combine(dir, "notification-routing.json"),
+            "{\"contract\":\"notification-routing/1\",\"atUtcMs\":"
+            + t0.ToUnixTimeMilliseconds()
+            + ",\"routes\":{"
+            + "\"ntf-s\":{\"action\":\"speak\",\"reason\":\"\"},"
+            + "\"ntf-h\":{\"action\":\"hold\",\"reason\":\"在工作且没在用设备\"},"
+            + "\"ntf-j\":{\"action\":\"judge\",\"reason\":\"地点没有任何记录\"}"
+            + "}}");
+        string routed = ReaderAttentionBoard.RenderSlowForSelfTest(t0);
+        if (!routed.Contains("「该说的」还没跟他说过，现在用语音说",
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "speak 结论没变成带渠道的祈使句。板面：\n" + routed);
+        }
+        if (routed.Contains("压着的", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "hold 的待办上板了 —— 路由的「压着」没生效");
+        }
+        if (!routed.Contains("地点没有任何记录", StringComparison.Ordinal)
+            || !routed.Contains("judgment_basis", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "judge 行必须带原因和 judgment_basis 指引。板面：\n" + routed);
+        }
+        if (routed.Contains("还没路由的", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "没有路由结论的新待办抢跑上板了 —— 该等下一轮对账");
+        }
+        checks.Add("attention-board-routing-drives-imperatives");
+
+        // 路由文件陈旧（对账循环死了）→ fail-open：全部按旧样式放行。
+        // 静默失败清单的直接应用：坏掉的过滤器必须放行，不能变成静音器。
+        File.WriteAllText(
+            Path.Combine(dir, "notification-routing.json"),
+            "{\"contract\":\"notification-routing/1\",\"atUtcMs\":"
+            + (t0.ToUnixTimeMilliseconds() - 30 * 60_000)
+            + ",\"routes\":{}}");
+        string failOpen = ReaderAttentionBoard.RenderSlowForSelfTest(t0);
+        foreach (string title in new[] { "该说的", "压着的", "还没路由的" })
+        {
+            if (!failOpen.Contains(title, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "路由陈旧时「" + title + "」被漏掉了 —— "
+                    + "路由层死了不能让通知从此静音");
+            }
+        }
+        checks.Add("attention-board-routing-fails-open");
+
         // 把一份典型的板子带进结果：格式的活文档，也让"悄悄变啰嗦"看得见。
         ReaderAttentionBoard.ResetForSelfTest(dir);
         WriteTodos(dir, "垃圾投放提醒");
