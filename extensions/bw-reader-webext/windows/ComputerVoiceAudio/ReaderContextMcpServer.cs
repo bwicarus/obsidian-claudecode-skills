@@ -3823,11 +3823,57 @@ internal sealed class ReaderContextMcpServer
             return;
         }
 
+        // 图片卡在**创建这一刻、这台机器上**把图抓下来留底，卡里的 url
+        // 改写成本桥的资产地址（用户 2026-08-30 拍板：Windows 保存 →
+        // 传输给 App）。设备从此不为卡片图直连公网。
+        // ⚠ 抓取失败不改写 —— 保留原 URL 走设备端代理的旧路兜底。
+        await LocalizeCardImagesAsync(payload, cancellationToken)
+            .ConfigureAwait(false);
+
         await SendReaderOutputAsync(
             id,
             "card",
             payload,
             cancellationToken).ConfigureAwait(false);
+    }
+
+    /// 把 images 卡里的外链图换成本桥资产地址。逐条独立：一张失败不拖
+    /// 其它张。校验发生在**改写之前**（TryReadReaderCard 已过），改写只
+    /// 替换 url 的取值、不增删字段 —— 不会撞 card 合同的字段白名单。
+    private static async Task LocalizeCardImagesAsync(
+        JsonNode payload,
+        CancellationToken cancellationToken)
+    {
+        if (payload is not JsonObject root
+            || root["card"] is not JsonObject card
+            || !string.Equals(
+                card["kind"]?.GetValue<string>(), "images",
+                StringComparison.Ordinal)
+            || card["data"] is not JsonObject data
+            || data["items"] is not JsonArray items)
+        {
+            return;
+        }
+        foreach (JsonNode? entry in items)
+        {
+            if (entry is not JsonObject item)
+            {
+                continue;
+            }
+            string url = item["url"]?.GetValue<string>() ?? "";
+            if (url.Length == 0)
+            {
+                continue;
+            }
+            string? assetId = await ReaderCardAssetStore.EnsureAsync(
+                url, cancellationToken).ConfigureAwait(false);
+            if (assetId is null)
+            {
+                continue;
+            }
+            item["url"] = "https://bwicarus-2.taile44d0c.ts.net"
+                + ReaderCardAssetStore.RoutePrefix + assetId;
+        }
     }
 
     private async Task HandleExactSourceOutputToolCallAsync(

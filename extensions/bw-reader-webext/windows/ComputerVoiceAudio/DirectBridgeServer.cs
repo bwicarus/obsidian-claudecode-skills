@@ -667,6 +667,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         // ⚠ 新增路由记得同时加进 `tailscale serve` 的白名单 —— 那是
         // 一份**逐条**的路径清单，没加的新地址一律 404。这个坑 2026-08-29
         // 踩过两次（/reader-voip/token，然后 outcome+hangup）。
+        // 卡片图片资产（2026-08-30 用户拍板：Windows 留底 + Windows 服务）。
+        // App 端的图片代理经 Tailscale 来取；tailscale serve 的路径处理是
+        // **前缀**匹配，所以白名单加一条 /reader-card-asset 即覆盖全部 id。
+        app.MapMethods(
+            ReaderCardAssetStore.RoutePrefix + "{assetId}",
+            new[] { "GET", "OPTIONS" },
+            context => HandleCardAssetAsync(context, serviceToken));
         app.MapMethods(
             ReaderAttentionBoard.SlowPath,
             new[] { "GET", "OPTIONS" },
@@ -1624,6 +1631,44 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         await ReaderAttentionBoard
             .WriteBoardAsync(context, serviceCancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// 端出一张已留底的卡片图。只认 Tailscale 身份（App 的图片代理经
+    /// tailscale serve 来取，serve 会按连接方节点注入身份头，不可伪造）。
+    ///
+    /// immutable 一年：id = sha256(URL)，同 id 内容不可能变 —— 设备端
+    /// WebView 据此长缓存，"传输到 App 保存"的保存就落在这一层。
+    private async Task HandleCardAssetAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "card-asset")) return;
+        if (!HttpMethods.IsGet(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        string assetId =
+            context.Request.RouteValues["assetId"]?.ToString() ?? "";
+        string? path = ReaderCardAssetStore.FindStoredFile(assetId);
+        if (path is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, code = "BW_CARD_ASSET_MISSING" },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        byte[] body = await File.ReadAllBytesAsync(
+            path, serviceCancellationToken).ConfigureAwait(false);
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.ContentType =
+            ReaderCardAssetStore.ContentTypeForFile(path);
+        context.Response.Headers["Cache-Control"] =
+            "private, max-age=31536000, immutable";
+        context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+        await context.Response.Body.WriteAsync(
+            body, serviceCancellationToken).ConfigureAwait(false);
     }
 
     /// 慢板 / 快板各自的地址（2026-08-30 拆板）。文件才是主消费方式，

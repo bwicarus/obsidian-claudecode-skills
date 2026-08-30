@@ -134,6 +134,15 @@ private struct ReaderNativeImageResolvedHop: Sendable {
 }
 
 private enum ReaderNativeImageProxyPolicy {
+    /// 自己的服务器（Windows 桥）。卡片图 2026-08-30 起在 Windows 留底、
+    /// 由桥经 Tailscale 端给设备 —— 而 Tailscale 地址落在 100.64/10
+    /// （CGNAT，公网检查会拦）。**只对这一个主机放行私网地址**：
+    /// 它是用户自己的机器，取自己的留底不构成 SSRF。
+    /// 其余主机的公网限制一律照旧。
+    static let trustedPrivateHosts: Set<String> = [
+        "bwicarus-2.taile44d0c.ts.net",
+    ]
+
     static let supportedContentTypes: Set<String> = [
         "image/avif",
         "image/bmp",
@@ -199,6 +208,8 @@ private enum ReaderNativeImageProxyPolicy {
             guard let numeric, !numeric.isEmpty else {
                 throw ReaderNativeImageProxyError.dnsUnavailable
             }
+            // 自己的桥放行私网地址（Tailscale 100.64/10），其余照旧。
+            let hostIsTrusted = trustedPrivateHosts.contains(hostname)
             if entry.pointee.ai_family == AF_INET {
                 let bytes = address.withMemoryRebound(
                     to: sockaddr_in.self,
@@ -206,7 +217,8 @@ private enum ReaderNativeImageProxyPolicy {
                 ) { pointer in
                     withUnsafeBytes(of: pointer.pointee.sin_addr) { Array($0) }
                 }
-                guard isPublicIPv4(bytes), let ip = IPv4Address(numeric) else {
+                guard hostIsTrusted || isPublicIPv4(bytes),
+                      let ip = IPv4Address(numeric) else {
                     throw ReaderNativeImageProxyError.blockedAddress
                 }
                 if seen.insert(numeric).inserted {
@@ -219,7 +231,8 @@ private enum ReaderNativeImageProxyPolicy {
                 ) { pointer in
                     withUnsafeBytes(of: pointer.pointee.sin6_addr) { Array($0) }
                 }
-                guard isPublicIPv6(bytes), let ip = IPv6Address(numeric) else {
+                guard hostIsTrusted || isPublicIPv6(bytes),
+                      let ip = IPv6Address(numeric) else {
                     throw ReaderNativeImageProxyError.blockedAddress
                 }
                 if seen.insert(numeric).inserted {
