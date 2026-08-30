@@ -2542,9 +2542,42 @@
     // capture on the Reader root works in both the Shadow DOM host and PWA.
     var eventRoot = document.body && document.body.addEventListener
       ? document.body : document;
+    // ── 破图复活（2026-08-31）：兜底阶梯（资产→外链→桥重试）是一次性的，
+    //   走完仍失败就永远破着 —— 可失败常常只是**当时**失败（限流、服务重启窗口）。
+    //   实录：钉在书页上的卡开书时渲染撞上限流 → 破图；同一张卡在对话流里
+    //   handoff 后才渲染 → 正常。同一张卡左破右好，差的只是渲染时机。
+    //   办法：失败的图交给 IntersectionObserver，**进入视口**（含浮窗从
+    //   display:none 展开）且距上次尝试 ≥45s 才重来一轮，每张至多 4 次 ——
+    //   用户在看的图才值得试，间隔和上限保证不骚扰源站。
+    var _imgReviveObs = (typeof IntersectionObserver === 'function')
+      ? new IntersectionObserver(function (entries) {
+          entries.forEach(function (en) {
+            if (!en.isIntersecting) return;
+            var img = en.target;
+            _imgReviveObs.unobserve(img);
+            if (!(img.complete && img.naturalWidth === 0)) return;   // 没破/还在加载 → 不管
+            var n = parseInt(img.getAttribute('data-revive') || '0', 10);
+            if (n >= 4) return;
+            var at = parseInt(img.getAttribute('data-revive-at') || '0', 10);
+            var wait = 45000 - (Date.now() - at);
+            if (at && wait > 0) {   // 还没到间隔:到点后重新入观察(仍要求在视口内)
+              setTimeout(function () { try { _imgReviveObs.observe(img); } catch (e) {} }, wait + 50);
+              return;
+            }
+            img.setAttribute('data-revive', String(n + 1));
+            img.setAttribute('data-revive-at', String(Date.now()));
+            img.removeAttribute('data-asset-fallback-done');   // 整条兜底阶梯重新可用
+            img.removeAttribute('data-bridge-retry');
+            var src0 = String(img.getAttribute('src') || '');
+            try { img.removeAttribute('src'); img.setAttribute('src', src0); } catch (e) {}
+          });
+        })
+      : null;
     eventRoot.addEventListener('error', function (event) {
       var image = event.target;
       if (!image || String(image.tagName || '').toLowerCase() !== 'img') return;
+      // 每次失败都登记复活观察:回调里会判断它是否已被兜底救活/还在重试中。
+      if (_imgReviveObs) { try { _imgReviveObs.observe(image); } catch (e0) {} }
       // ── 自己服务器上的资产：**重试，不判死刑**（2026-08-31）。
       //
       // 桥会重启（升级、看护替换都是常态），重启空档里渲的卡取图必失败；
