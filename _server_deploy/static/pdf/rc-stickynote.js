@@ -2966,10 +2966,18 @@
   }
 
   function _sameWordBind(a, b) {
-    return !!(a && b && a.kind === 'page-chars' && b.kind === 'page-chars' &&
-      parseInt(a.page, 10) === parseInt(b.page, 10) &&
-      parseInt(a.from, 10) === parseInt(b.from, 10) &&
-      parseInt(a.to, 10) === parseInt(b.to, 10));
+    if (!(a && b && a.kind === 'page-chars' && b.kind === 'page-chars' &&
+      parseInt(a.page, 10) === parseInt(b.page, 10))) return false;
+    var af = parseInt(a.from, 10), bf = parseInt(b.from, 10);
+    var at = parseInt(a.to, 10), bt = parseInt(b.to, 10);
+    // deferred+text 卡两边 from/to 都是 NaN，而 NaN===NaN 恒 false —— 同一张卡
+    // 重放会匹配不到自己、重复创建。区间双方都没有时退回比原文。
+    if (!Number.isFinite(af) && !Number.isFinite(bf) &&
+        !Number.isFinite(at) && !Number.isFinite(bt)) {
+      var atx = String(a.text || '').slice(0, 40), btx = String(b.text || '').slice(0, 40);
+      return !!atx && atx === btx;
+    }
+    return af === bf && at === bt;
   }
   function _boundCardKey(bind, payload, content) {
     var uid = String(payload && payload.uid || '').trim();
@@ -3031,9 +3039,17 @@
   function persistBoundCard(bind, payload, screenPoint) {
     payload = payload || {}; screenPoint = screenPoint || {};
     if (!O || !O.anchorFromPoint) return Promise.resolve({ ok: false, why: 'stickynote-unavailable' });
-    if (!bind || bind.kind !== 'page-chars') return Promise.resolve({ ok: false, why: 'bad-bind' });
+    if (!bind || bind.kind !== 'page-chars') return Promise.resolve({ ok: false, why: 'bad-bind:kind' });
     var page = parseInt(bind.page, 10), from = parseInt(bind.from, 10), to = parseInt(bind.to, 10);
-    if (!(page > 0) || !(from >= 0) || !(to >= from)) return Promise.resolve({ ok: false, why: 'bad-bind' });
+    if (!(page > 0)) return Promise.resolve({ ok: false, why: 'bad-bind:page' });
+    // 区间与原文二选一（2026-08-31）：目标页已渲染时上游已把 block+text 解析成
+    // from/to 补进来；页面**未渲染**（deferred）时 text 解析不了，此时保留
+    // text 存进仓库、页面出现后由 html.bind 再解析 —— 只有两者都没有才拒。
+    // why 带上是哪一段不合法：光秃秃的 bad-bind 让 AI 只能盲试（实录：Codex
+    // 自己做对照实验才猜出是锚点格式，还抱怨"拒绝日志没有更细原因"）。
+    var hasRange = (from >= 0) && (to >= from);
+    var hasText = String(bind.text || '').trim().length > 0;
+    if (!hasRange && !hasText) return Promise.resolve({ ok: false, why: 'bad-bind:no-range-or-text' });
     // 目标页还没进入 DOM 时，34-bindcard 无法给出真实屏幕点，但绑定本身已经
     // 包含目标页和原字符区间。此时只允许显式、同页的 deferred 信号；持久 anchor
     // 固定落在目标 PDF 页中心，绝不借当前可见页的 screen point 误绑到另一页。
@@ -3121,9 +3137,13 @@
         repository: repoMode(),
         // Direct 的 correlation 作为 sourceUid 跨进程稳定；连同文档与精确词区间
         // 生成确定性 noteId/mutationId，解决“已提交但桥在清 outbox 前崩溃”。
+        // hasRange 时与旧版完全一致（不动存量卡身份）；deferred+text 卡用
+        // 原文片段顶区间位 —— NaN 进 seed 会让每次重放身份看似稳定实则脏。
         identitySeed: stableUid ? [
           'reader-bound-card/1', storageScope, stableUid,
-          page, from, to
+          page,
+          hasRange ? from : 't',
+          hasRange ? to : String(bind.text || '').slice(0, 40)
         ].join('\u001f') : '',
         anchor: cloneValue(anchor),
         fields: { color: '#0d1322', w: w, h: 210, collapsed: false, html: html },

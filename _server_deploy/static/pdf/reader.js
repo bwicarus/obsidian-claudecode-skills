@@ -14611,7 +14611,20 @@ window._lbClick = _lbClick;
       icon: payload.icon || '', category: _bindCategory(payload), tone: _bindColor(payload)
     };
     var placement = deferred ? { deferredPdfPage: g.page } : _bindScreenPoint(g);
-    return Promise.resolve(RC.stickynote.persistBoundCard(bind, normalized, placement))
+    // ⚠ block+text 形式的 bind 在 _resolvePageBind 里已经解析出了字符区间，
+    //   但传下去的还是原始 bind —— persistBoundCard 只认数字 from/to，于是
+    //   "解析明明成功了却被拒 bad-bind"。把算出的区间写回再传（拷贝，不改
+    //   调用方对象）；identitySeed/去重 key 也因此拿到干净的数字区间。
+    var bindOut = bind;
+    if (g.ok && g.range) {
+      bindOut = {};
+      for (var bk in bind) {
+        if (Object.prototype.hasOwnProperty.call(bind, bk)) bindOut[bk] = bind[bk];
+      }
+      bindOut.from = g.range.lo;
+      bindOut.to = g.range.hi;
+    }
+    return Promise.resolve(RC.stickynote.persistBoundCard(bindOut, normalized, placement))
       .then(function (result) {
         if (!result || result.ok !== true) return result || { ok: false, why: 'persistence-failed' };
         return { ok: true, page: g.page,
