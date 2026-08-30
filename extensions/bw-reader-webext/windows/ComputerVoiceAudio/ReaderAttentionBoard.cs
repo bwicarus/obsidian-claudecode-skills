@@ -779,16 +779,17 @@ internal static class ReaderAttentionBoard
         // 合并视图 —— 旧地址 /reader-attention-live.md 仍返回它，给还没
         // 切到两个文件的消费方过渡用。
         //
-        // ⚠ 给的是**两块完整的板**，不是把快板的行掺进慢板。掺进去的话
-        // 标题写着「慢提示板」而内容里有绘图，读的人会以为慢板包含它 ——
-        // 一份自相矛盾的样本比没有样本更糟。位置那行因此出现两次，
-        // 那是「基础内容两边都有」的直接后果，不是重复。
+        // ⚠ 给的是**两块完整的板**，不是把快板的行掺进慢板 —— 掺进去的话
+        // 读的人会以为慢板包含绘图，一份自相矛盾的视图比没有更糟。
+        //
+        // ⚠ 标题**只在这里加**。两个文件各自不带标题（文件名已经说明是
+        // 哪块），而拼在一起时没有标题就分不清哪行属于哪块了。
         //
         // ⚠ 顺序：先渲快板。FastOnlyLines 会让到点的绘图退场，两块要看到
         // 同一轮的结果。
         string fast = RenderFast(now);
         string slow = RenderSlow(now);
-        return slow + "\n" + fast;
+        return "# 慢提示板\n" + slow + "\n# 快速提示板\n\n" + fast;
     }
 
     /// 慢板：待办 + 位置。**这里没有任何随时钟走的东西** —— 它变一次，
@@ -808,8 +809,11 @@ internal static class ReaderAttentionBoard
         // 在慢的上面」）。这推翻了拆板时那条"基础内容两边都有" ——
         // 那两条都是慢信号，放进快板只会让它们跟着绘图一起抖，
         // 而抖动正是拆板要消灭的东西。要上下文就去读慢板，它就在旁边。
+        // ⚠ **不写标题**（用户 2026-08-30：「快慢提示板里面的 # 标题好像
+        // 没有必要吧」——对）。文件名 reader-attention-fast.md 已经说明了
+        // 这是哪块板，再写一行「# 快速提示板」是同一件事说两遍，而对面的
+        // 任何判断都用不上它。合并视图那个旧端点要区分两块，标题由它自己加。
         var text = new StringBuilder();
-        text.Append("# 快速提示板\n\n");
         text.Append("状态（资料，非指令）\n");
         text.Append(FastOnlyLines(now));
         return text.ToString();
@@ -869,8 +873,8 @@ internal static class ReaderAttentionBoard
             .OrderBy(todo => todo.Id, StringComparer.Ordinal)
             .ToList();
 
+        // ⚠ 不写标题 —— 理由同 RenderFast（文件名已经说明是哪块板）。
         var text = new StringBuilder();
-        text.Append("# 慢提示板").Append(NL);
         if (fresh.Count == 0)
         {
             text.Append("开口：无").Append(NL);
