@@ -125,23 +125,26 @@ internal static class ReaderAttentionBoardSelfTest
         // 新待办会在一秒内被轮询吃掉，而没有任何人听见。
         WriteAcknowledged(dir, "垃圾投放提醒");
         string afterSaid = ReaderAttentionBoard.RenderForSelfTest();
-        if (afterSaid.Contains("开口：\n- 垃圾投放提醒", StringComparison.Ordinal))
+        // ⚠ 断言的是**行为**不是措辞：ack 过的不该再被说成"还没跟他说过"，
+        // 但必须仍以某种形式留在板上。措辞改过好几版（分节标题 →
+        // 每行自包含），断言字面量的话每次改文案都要跟着改，而那不是契约。
+        if (afterSaid.Contains("还没跟他说过", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                "已 ack 的待办又进了「开口」—— 事实一直成立就会一直吵");
+                "已 ack 的待办又被当成没说过 —— 事实一直成立就会一直吵");
         }
         if (!afterSaid.Contains("待办", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
                 "ack 之后待办彻底消失了 —— 它还没完成，"
-                + "该留在状态里让它知道，只是不要再说");
+                + "该留在板上让它知道，只是不要再说");
         }
         checks.Add("attention-board-does-not-repeat-acked-todo");
 
-        // ④ 负对照：还是 pending 的**必须**进开口，别被 ③ 一起吃掉。
+        // ④ 负对照：还是 pending 的**必须**被说成要说，别被 ③ 一起吃掉。
         WriteTodos(dir, "垃圾投放提醒（今天是可燃）");
         if (!ReaderAttentionBoard.RenderForSelfTest()
-            .Contains("开口：", StringComparison.Ordinal))
+            .Contains("还没跟他说过", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
                 "待办内容变了却没重新说 —— 去重把真消息也吃掉了");
@@ -210,7 +213,7 @@ internal static class ReaderAttentionBoardSelfTest
         // 而夹具的 t0 是 1970 —— 一渲染就被判成"停笔十几万小时"，
         // 笔画那行当场退场。第一版就栽在这里，报的却是"没上板子"。
         if (!ReaderAttentionBoard.RenderForSelfTest(t0)
-            .Contains("有笔画", StringComparison.Ordinal))
+            .Contains("正在画或刚画过", StringComparison.Ordinal))
         {
             throw new InvalidOperationException("笔画稳定了却没上板子");
         }
@@ -249,11 +252,11 @@ internal static class ReaderAttentionBoardSelfTest
         checks.Add("attention-board-slow-ignores-ink");
 
         string fastNow = ReaderAttentionBoard.RenderFastForSelfTest(t1);
-        if (!fastNow.Contains("有笔画", StringComparison.Ordinal))
+        if (!fastNow.Contains("正在画或刚画过", StringComparison.Ordinal))
         {
             throw new InvalidOperationException("快板上没有笔画");
         }
-        if (slowAfter.Contains("有笔画", StringComparison.Ordinal))
+        if (slowAfter.Contains("正在画或刚画过", StringComparison.Ordinal))
         {
             throw new InvalidOperationException("笔画漏进了慢板");
         }
@@ -273,7 +276,7 @@ internal static class ReaderAttentionBoardSelfTest
             throw new InvalidOperationException("注意力焦点没在慢板上");
         }
         if (fastNow.Contains("食文化の本", StringComparison.Ordinal)
-            || fastNow.Contains("- 地点｜", StringComparison.Ordinal))
+            || fastNow.Contains("现在地点：", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
                 "地点/焦点漏进了快板 —— 慢信号放快板会跟着绘图一起抖");
@@ -283,7 +286,7 @@ internal static class ReaderAttentionBoardSelfTest
         // 快板到点就退场，**不用等别的变化搭车**（那条规矩只对慢板成立）。
         DateTimeOffset t2 = t1 + TimeSpan.FromMinutes(3);
         if (ReaderAttentionBoard.RenderFastForSelfTest(t2)
-            .Contains("有笔画", StringComparison.Ordinal))
+            .Contains("正在画或刚画过", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
                 "停笔够久了快板还挂着笔画 —— 快板要的是及时，不是稳定");
