@@ -1085,11 +1085,54 @@ internal static class ReaderRealtimeOutputProtocol
             || !string.IsNullOrEmpty(parsed.UserInfo)
             || text != text.Trim()
             || text.Contains('\\')
-            || IsPrivateCardHost(parsed)
         )
         {
             throw Invalid("Reader 卡片 URL 无效");
         }
+        if (!IsPrivateCardHost(parsed))
+        {
+            return;
+        }
+        // ## 唯一放行的私网形状：本桥自己的卡片资产（2026-08-31）
+        //
+        // 2026-08-30 起图片卡在创建时被改写成
+        //   https://bwicarus-2.taile44d0c.ts.net/reader-card-asset/<16hex>
+        // —— 这成了卡片的**存储形态**。AI 读到页面上成功卡的这种地址后，
+        // 新建时照抄是完全合理的行为；一律按 .ts.net 拒掉，就把它逼进
+        // "改卡加图"的旁门 —— 而旁门没有抓图钩子，图又直连外站撞限流。
+        // 当晚实录：「系统一直拒绝图片网址，所以那几次其实都没建出来卡」。
+        //
+        // 放行收得很窄：仅此主机 + 仅此路径形状 + **资产必须真实存在**
+        // （AI 自编一个 id 的卡渲出来就是死图；当场拒绝并告诉它该怎么做，
+        // 比让它建出一张永远破图的卡诚实得多）。其余 .ts.net/内网一律照拒，
+        // SSRF 立场不变。
+        const string bridgePrefix = "/reader-card-asset/";
+        if (
+            string.Equals(
+                parsed.Host,
+                "bwicarus-2.taile44d0c.ts.net",
+                StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrEmpty(parsed.Query)
+            && string.IsNullOrEmpty(parsed.Fragment)
+            && parsed.AbsolutePath.StartsWith(
+                bridgePrefix, StringComparison.Ordinal)
+        )
+        {
+            string assetId = parsed.AbsolutePath[bridgePrefix.Length..];
+            if (!ReaderCardAssetStore.IsValidAssetID(assetId))
+            {
+                throw Invalid("Reader 卡片 URL 无效");
+            }
+            if (ReaderCardAssetStore.FindStoredFile(assetId) is null)
+            {
+                throw Invalid(
+                    "这个卡片资产编号在本机不存在 —— 资产地址只能照抄"
+                    + "已有卡片上的，不能自己编。新图请直接给原始 https "
+                    + "外链，本机会抓取留底后自动改写");
+            }
+            return;
+        }
+        throw Invalid("Reader 卡片 URL 无效");
     }
 
     // 卡片图片和缩略图由 App 直接去请求。一张卡片没有任何理由指向本机或内网 ——
