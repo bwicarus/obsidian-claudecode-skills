@@ -51,6 +51,10 @@ final class ReaderVoipCall: NSObject {
     /// 接通时那次失败了，挂断时正好补上。
     fileprivate var answeredReported = false
 
+    /// 这通电话的挂断是 AI 自己发起的（voip_push hangup → 轮询命中）。
+    /// 见 startHangupWatch 里的说明。每通来电报到时清零。
+    fileprivate var hangupRequestedByAI = false
+
     /// 这通电话是为哪条待办打的。AI 发起时经推送载荷带进来，
     /// 挂断时随结局一起回报 —— 没有它，Windows 侧不知道该给谁记账。
     private var currentNotificationId: String?
@@ -127,6 +131,11 @@ final class ReaderVoipCall: NSObject {
             while !Task.isCancelled, Date() < deadline {
                 guard self?.currentCallId != nil else { return }
                 if await ReaderVoipCall.shouldHangUp() {
+                    // ⚠ 记下"这次是 AI 自己要挂的"。EndCall 分支据此决定
+                    // 要不要上报 phase=ended —— 那个信号的语义是**用户**
+                    // 主动挂断（AI 正对着通话说话，得立刻知道对面没人了）；
+                    // AI 自己收线的不算，报了反而让它给自己收错尾。
+                    self?.hangupRequestedByAI = true
                     self?.endCurrentCall()
                     return
                 }
@@ -172,6 +181,7 @@ final class ReaderVoipCall: NSObject {
         ringingSince = Date()
         answeredAt = nil
         answeredReported = false
+        hangupRequestedByAI = false
         let update = CXCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: title)
         update.hasVideo = false
@@ -367,7 +377,20 @@ extension ReaderVoipCall: CXProviderDelegate {
             if !(outcome == "answered" && call.answeredReported) {
                 await ReaderVoipOutcomeUpload.send(outcome: outcome)
             }
+            // ⚠ **用户主动挂断**要单独上报一次 phase=ended（2026-08-30）。
+            //
+            // 结局记账在接通那一刻已经完成，AI 的拨号进程早就拿着 answered
+            // 退出了 —— 挂断这一刻 Windows 侧原本**收不到任何信号**，
+            // 而 AI 多半正对着通话说话。这个信号让快板立一行「他挂断了」。
+            //
+            // AI 自己 hangup 收线的不报：那不是"对面没人了"，报了反而
+            // 让它给自己收错尾。
+            if outcome == "answered" && !call.hangupRequestedByAI {
+                await ReaderVoipOutcomeUpload.send(
+                    outcome: "answered", phase: "ended")
+            }
             call.answeredReported = false
+            call.hangupRequestedByAI = false
             call.currentNotificationId = nil
             action.fulfill()
         }
@@ -419,7 +442,9 @@ enum ReaderVoipOutcomeUpload {
     /// —— 桥每收到一次上报就把 attempts 加一，所以"为保险起见多报一次"
     /// 是有代价的：attempts 虚增会让一通电话看起来像打了两通。
     @discardableResult
-    static func send(outcome: String) async -> Bool {
+    /// `phase: "ended"` = 用户在通话中主动挂断的那一刻（不是第四种结局，
+    /// 结局记账在接通时已完成）。Windows 收到后上快板、不动 attempts。
+    static func send(outcome: String, phase: String? = nil) async -> Bool {
         let ntfId = await MainActor.run {
             ReaderVoipCall.shared.currentNotificationIdForReport
         }
@@ -429,10 +454,14 @@ enum ReaderVoipOutcomeUpload {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 15
-        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+        var payload: [String: Any] = [
             "outcome": outcome,
             "notificationId": ntfId ?? "",
-        ])
+        ]
+        if let phase {
+            payload["phase"] = phase
+        }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1

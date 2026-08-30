@@ -1788,6 +1788,20 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 .TryGetProperty("notificationId", out JsonElement n)
                 && n.ValueKind == JsonValueKind.String
                 ? (n.GetString() ?? string.Empty) : string.Empty;
+            // phase=ended：**用户在通话中主动挂断**的那一刻（2026-08-30）。
+            // 它不是第四种结局 —— 结局记账在接通时已经完成，这里只是
+            // "对面没人了"的即时信号。所以：上快板、不动 attempts、直接返回。
+            if (body.RootElement.TryGetProperty("phase", out JsonElement p)
+                && p.ValueKind == JsonValueKind.String
+                && p.GetString() == "ended")
+            {
+                AppendOutputPickupLog("voip-outcome\t" + ntfId + "\tended");
+                ReaderAttentionBoard.NoteCallEnded(DateTimeOffset.UtcNow);
+                await context.Response.WriteAsJsonAsync(
+                    new { ok = true, phase = "ended" },
+                    serviceCancellationToken).ConfigureAwait(false);
+                return;
+            }
         }
         catch (JsonException)
         {
@@ -1804,6 +1818,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             return;
         }
         AppendOutputPickupLog("voip-outcome\t" + ntfId + "\t" + outcome);
+        // 新的一通有了结局 —— 上一次「他挂断了」的旗子已无意义，立刻清掉，
+        // 否则新通话进行中板上还挂着旧的挂断，AI 会收错尾。
+        ReaderAttentionBoard.NoteCallSuperseded();
         string path = Path.Combine(_runtimeDirectory, "voip-calls.json");
         // 读-改-写。并发只可能来自"同一台设备连着两通电话"，实际不存在；
         // 真撞上时最坏是丢一条结局，而那条会被下一轮当成 unanswered 处理 ——

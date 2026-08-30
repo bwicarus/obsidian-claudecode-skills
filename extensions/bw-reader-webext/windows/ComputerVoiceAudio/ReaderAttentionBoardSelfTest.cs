@@ -329,6 +329,8 @@ internal static class ReaderAttentionBoardSelfTest
             "bb", "第二处", t3 + TimeSpan.FromMinutes(2));
         DateTimeOffset t4 = t3 + TimeSpan.FromMinutes(2);
         ReaderAttentionBoard.NoteDrawing(t4);
+        // 通话挂断也要立起来 —— 它是快板登记表的一项，缺了正向检查会红。
+        ReaderAttentionBoard.NoteCallEnded(t4);
         string slowFull = ReaderAttentionBoard.RenderSlowForSelfTest(t4);
         string fastFull = ReaderAttentionBoard.RenderFastForSelfTest(t4);
         foreach ((string board, string body) in new[]

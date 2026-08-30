@@ -114,6 +114,10 @@ internal static class ReaderAttentionBoard
             "ack 过、还没做完的条数 —— 提醒别重复说"),
         new("fast", "快照失效", "他换了地方，",
             "换地方了，手上的旧快照对不上 —— 问到内容要重取"),
+        new("fast", "通话挂断", "他主动挂断了电话",
+            "用户在通话中主动挂断（AI 自己 hangup 的不算）。看到就停止向"
+            + "通话说话。满 2 分钟后搭快板下一次真实变化退场；新的一通"
+            + "有结局时立刻清掉"),
         new("fast", "绘图", "他正在画或刚画过",
             "这是状态不是事件：有动作即刻立旗，持续画不刷新；停笔满 2 分钟"
             + "后**搭快板下一次真实变化的车**一起退场，不自己到点就走"),
@@ -158,9 +162,16 @@ internal static class ReaderAttentionBoard
     private static bool _hasDrawing;
     private static DateTimeOffset _drawingLastAt;
 
-    /// 上一轮**快板里除笔迹之外**的内容。笔迹退场要搭它的车 ——
-    /// 见 FastOnlyLines 里那段说明。
-    private static string _lastFastOthers = string.Empty;
+    /// 上一轮快板渲出来的内容（退场判定用）。可退场的信号（笔迹、挂断）
+    /// 只在这一轮跟它不同 —— 即有真实变化可搭 —— 时才离场。
+    private static string _lastFastKeep = string.Empty;
+
+    /// 用户主动挂断了电话（App 在挂断那一刻经 /reader-voip/outcome 的
+    /// phase=ended 上报）。AI 多半正在对着通话说话，这是它唯一能知道
+    /// "对面已经没人了"的途径。状态语义：满 2 分钟后搭车退场；
+    /// 新的一通有结局时立刻清掉（旧的那次挂断已无意义）。
+    private static bool _callEnded;
+    private static DateTimeOffset _callEndedAt;
 
     private static string? _currentKey;
     private static string? _currentLabel;
@@ -303,6 +314,30 @@ internal static class ReaderAttentionBoard
         lock (Gate)
         {
             _snapshotStale = false;
+        }
+    }
+
+    /// 用户在通话中主动挂断了（App 上报 phase=ended 时由桥调用）。
+    ///
+    /// ⚠ 这是快板上第一条**必须立刻推到对面**的信号：AI 那一刻多半正在
+    /// 对着通话说话，晚一秒它就多对着空气说一秒。立旗即时；已立着就只
+    /// 刷新时刻，不再改字节（同 NoteDrawing 的纪律）。
+    internal static void NoteCallEnded(DateTimeOffset now)
+    {
+        lock (Gate)
+        {
+            _callEndedAt = now;
+            _callEnded = true;
+        }
+    }
+
+    /// 新的一通电话有了结局 —— 上一次挂断的旗子已无意义，立刻清掉。
+    /// 不清的话，新通话进行中板上还挂着「他挂断了」，AI 会收错尾。
+    internal static void NoteCallSuperseded()
+    {
+        lock (Gate)
+        {
+            _callEnded = false;
         }
     }
 
@@ -845,30 +880,54 @@ internal static class ReaderAttentionBoard
         // 那时被读的是慢板，快板在那一刻退场没有任何人看得到。
         //
         // ⚠ 立旗仍然是即时的、且持续画画时一个字都不改（见 NoteDrawing）。
-        var text = new StringBuilder();
-        if (_snapshotStale)
+        //
+        // ## 搭车的统一写法（2026-08-30 加入第二个可退场信号后收拢）
+        //
+        // 先按当前旗子渲一遍；跟上一轮渲出来的比 —— **只有真的变了**，
+        // 才让到点的退场者搭这趟车走，然后按新旗子重渲。这样任何真实变化
+        // （包括另一个可退场信号的出现或离开）都是合法的车，而"只有时间
+        // 在走"的那些轮次一个字都不动。
+        string Build()
         {
-            text.Append("他换了地方，你手上的旧快照对不上了；")
-                .Append("问到页面内容时先重新取一次快照。\n");
+            var text = new StringBuilder();
+            if (_snapshotStale)
+            {
+                text.Append("他换了地方，你手上的旧快照对不上了；")
+                    .Append("问到页面内容时先重新取一次快照。\n");
+            }
+            if (_callEnded)
+            {
+                // ⚠ 只在**用户**挂断时立旗（AI 自己调 hangup 结束的那种，
+                // App 侧不上报 —— 见 ReaderVoipCall 的 phase=ended 逻辑）。
+                text.Append("他主动挂断了电话；这通已结束，")
+                    .Append("别再往通话里说话，收尾即可。\n");
+            }
+            if (_hasDrawing)
+            {
+                // ⚠ 这是**状态**不是事件（用户 2026-08-30：「笔迹只是状态
+                // 更新」）：说的是"他问起时先看绘图"，不是"现在打断他"。
+                text.Append("他正在画或刚画过；")
+                    .Append("问到相关内容时先看当前的绘图。\n");
+            }
+            return text.ToString();
         }
-        // 先算出"除笔迹之外的快板内容"，再决定笔迹能不能搭这趟车走。
-        string others = text.ToString();
-        if (_hasDrawing
-            && now - _drawingLastAt > DrawingIdleWindow
-            && !string.Equals(others, _lastFastOthers, StringComparison.Ordinal))
+
+        string keep = Build();
+        if (!string.Equals(keep, _lastFastKeep, StringComparison.Ordinal))
         {
-            // 停笔够久，而且这一轮别的东西确实变了 —— 搭这趟车走。
-            _hasDrawing = false;
+            // 这一轮有真实变化 —— 到点的退场者搭车。
+            if (_hasDrawing && now - _drawingLastAt > DrawingIdleWindow)
+            {
+                _hasDrawing = false;
+            }
+            if (_callEnded && now - _callEndedAt > DrawingIdleWindow)
+            {
+                _callEnded = false;
+            }
+            keep = Build();
         }
-        _lastFastOthers = others;
-        if (_hasDrawing)
-        {
-            // ⚠ 这是**状态**不是事件（用户 2026-08-30：「笔迹只是状态更新」）：
-            // 它说的是"他问起时先看绘图"，不是"现在打断他"。
-            text.Append("他正在画或刚画过；")
-                .Append("问到相关内容时先看当前的绘图。\n");
-        }
-        return text.ToString();
+        _lastFastKeep = keep;
+        return keep;
     }
 
     /// ⚠ 状态的纯函数：同样的状态必须产出同样的字节。
@@ -1074,7 +1133,9 @@ internal static class ReaderAttentionBoard
             _fastSeq = 0;
             _lastSlowBody = string.Empty;
             _lastFastBody = string.Empty;
-            _lastFastOthers = string.Empty;
+            _lastFastKeep = string.Empty;
+            _callEnded = false;
+            _callEndedAt = default;
             LastWritten.Clear();
             _hasDrawing = false;
             _drawingLastAt = default;
