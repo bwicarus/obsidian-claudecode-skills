@@ -2544,8 +2544,29 @@
       ? document.body : document;
     eventRoot.addEventListener('error', function (event) {
       var image = event.target;
-      if (!image || String(image.tagName || '').toLowerCase() !== 'img' ||
-          image.getAttribute('data-asset-fallback-done') === '1') return;
+      if (!image || String(image.tagName || '').toLowerCase() !== 'img') return;
+      // ── 自己服务器上的资产：**重试，不判死刑**（2026-08-31）。
+      //
+      // 桥会重启（升级、看护替换都是常态），重启空档里渲的卡取图必失败；
+      // 原来失败一次就永久摆破图 —— 桥两秒后活了，卡却再也不试。
+      // 用户实录：「自由卡片成功显示过但是重启后显示失败」。
+      // 只对指向自己桥的地址重试（外链失败多半是真死，重试是骚扰源站）；
+      // 2.5s/5s/7.5s 三次，足够跨过一次服务重启。
+      var src0 = String(image.getAttribute('src') || '');
+      var toBridge = /^\/pdf\/api\/img-proxy\?url=https%3A%2F%2Fbwicarus-2\./.test(src0) ||
+                     /^\/reader-card-asset\//.test(src0);
+      if (toBridge) {
+        var n = parseInt(image.getAttribute('data-bridge-retry') || '0', 10);
+        if (n < 3) {
+          image.setAttribute('data-bridge-retry', String(n + 1));
+          setTimeout(function () {
+            // 同 URL 重设不一定重发请求，先清空再设回。
+            try { image.removeAttribute('src'); image.setAttribute('src', src0); } catch (e) {}
+          }, 2500 * (n + 1));
+          return;
+        }
+      }
+      if (image.getAttribute('data-asset-fallback-done') === '1') return;
       var aid = _cardAssetID(image.getAttribute('data-aid'));
       var primary = _cardAssetURL(aid);
       if (!aid || image.getAttribute('src') !== primary) return;

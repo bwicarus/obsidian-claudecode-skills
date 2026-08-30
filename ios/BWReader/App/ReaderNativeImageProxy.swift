@@ -43,7 +43,9 @@ enum ReaderNativeImageProxyError: LocalizedError {
         case .blockedAddress: return "blocked-address"
         case .dnsUnavailable: return "dns-unavailable"
         case .tooManyRedirects: return "too-many-redirects"
-        case .upstreamStatus: return "upstream-status"
+        // 带上具体状态码（2026-08-31）：健康行只显示这个 code，没有数字的
+        // "upstream-status" 逼人去猜是 403 还是 429 —— 而那正是它该回答的。
+        case .upstreamStatus(let status): return "upstream-\(status)"
         case .unsupportedContentType: return "unsupported-content-type"
         case .tooLarge: return "too-large"
         case .empty: return "empty-image"
