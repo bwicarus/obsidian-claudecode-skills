@@ -563,13 +563,53 @@ internal sealed class DirectCodexVoiceControl :
                     shortcutSender.Send(target, DirectVoiceCommand.Start);
                     CodexVoiceShortcutReceipt receipt =
                         controller.RecordShortcutSent(baseline, target);
-                    CodexVoiceStartConfirmation confirmation =
-                        await controller.ConfirmStartedAsync(
+                    CodexVoiceStartConfirmation confirmation;
+                    try
+                    {
+                        confirmation = await controller.ConfirmStartedAsync(
                             baseline,
                             receipt,
                             CodexVoiceActivityController.StartObservationTimeout,
                             CodexVoiceActivityController.MonitorInterval,
                             cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (DirectProtocolException exception) when (
+                        exception.Code == CodexVoiceActivityController
+                            .StartNotConfirmedCode)
+                    {
+                        // ## 死按重试（2026-08-30，用户：「每次都会出现一次
+                        // 已发送快捷键但失败，然后等很久才真的启动成功」）
+                        //
+                        // 冷启动时窗口句柄出现得比全局热键注册早：沉降 5 秒
+                        // 后的第一按常常**落空**。落空的代价原来是一整轮
+                        // 「记失败 → 20 秒自动恢复 → 第二按成功」≈ 35 秒。
+                        //
+                        // 整个观察窗（10s）过去台账**一点没动** = 按键没被
+                        // 接住。此时不存在"正在初始化的会话"可被第二按
+                        // 撤销 —— 翻转必在观察窗内发生，正是那 10 秒的定义
+                        // （2026-08-18 误杀的前提是确认没走完就按，这里
+                        // 确认已经走完，外层冷却的本义也因此满足）。
+                        // 同一次尝试内立刻补按一次，只补这一次。
+                        //
+                        // ⚠ 只在台账**仍未激活**时才补按：若 Active 已翻转
+                        // 只是时间戳没对上确认条件，再按就是把开着的关掉 ——
+                        // 那种情况原样抛，交给外层如实报。
+                        CodexVoiceActivitySnapshot? fresh = source.Read();
+                        if (fresh is null || fresh.Active)
+                        {
+                            throw;
+                        }
+                        CodexVoiceStartBaseline second = new(fresh);
+                        shortcutSender.Send(target, DirectVoiceCommand.Start);
+                        receipt = controller.RecordShortcutSent(
+                            second, target);
+                        confirmation = await controller.ConfirmStartedAsync(
+                            second,
+                            receipt,
+                            CodexVoiceActivityController.StartObservationTimeout,
+                            CodexVoiceActivityController.MonitorInterval,
+                            cancellationToken).ConfigureAwait(false);
+                    }
                     confirmation = await controller.ConfirmUsableAsync(
                         confirmation,
                         CodexVoiceActivityController.StartUsableSettleDelay,
