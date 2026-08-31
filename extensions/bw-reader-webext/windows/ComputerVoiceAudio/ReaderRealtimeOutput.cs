@@ -1438,7 +1438,8 @@ internal static class ReaderRealtimeOutputProtocol
             && functionValue.TryGetValue(out string? functionName)
             && functionName is (
                 "_nativeReaderPageCardMutate"
-                or "_nativeReaderLearningCardMutate");
+                or "_nativeReaderLearningCardMutate"
+                or "_nativeReaderWordCardsConsolidate");
     }
 
     /// 必填字段全等 + 允许一组具名可选字段。

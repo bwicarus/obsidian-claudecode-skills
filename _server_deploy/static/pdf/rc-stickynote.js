@@ -1160,6 +1160,79 @@
       return content;
     }
   }
+  // ── 词卡整理的开卷对账（用户 2026-08-31）：整理只即时改词典入口的
+  //   索引；各原书里的卡实体在**下次渲染到**时跟上 —— 与 pending-bind
+  //   「等页归位」同一哲学。cid 反查索引，索引内容更新且更新时间比本卡
+  //   新 → patchNote 覆写本地内容（sig 变化自然触发重渲）。
+  function reconcileConsolidatedWordCard(ctl, h) {
+    try {
+      // 索引路由只在 App 本地 runtime 存在；别的宿主（含契约沙箱）不发。
+      if (!(window.BWReaderRuntime &&
+        window.BWReaderRuntime.nativeLocalRuntime)) return;
+      if (!h || !h.bind || !h.cid) return;
+      var note = ctl && ctl.note;
+      if (!note) return;
+      if (h._wcReconciledAt &&
+          Date.now() - h._wcReconciledAt < 60 * 1000) return;
+      // @interaction wordcard.index.sync
+      fetch('/pdf/api/word-card-index?cid=' + encodeURIComponent(h.cid))
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d || d.ok !== true || !d.cards || !d.cards.length) return;
+          var idx = d.cards[0];
+          var at = d.consolidatedAt || 0;
+          if (!at || !idx || typeof idx.content !== 'string') return;
+          var current = String(h.content || '');
+          if (!idx.content || idx.content === current) return;
+          if (h._wcAppliedAt && h._wcAppliedAt >= at) return;
+          h.content = idx.content;
+          h._wcAppliedAt = at;
+          h._wcReconciledAt = Date.now();
+          note.html = h;
+          patchNote(note, { html: h });
+        })
+        .catch(function () {});
+      h._wcReconciledAt = Date.now();
+    } catch (e) {}
+  }
+
+  // ── 词锚卡 × 字典（用户 2026-08-31）：锁定的元素本身有字典词条时，
+  //   打开卡片就把释义带上 —— 显示层组合，字典内容实时拉不复制，
+  //   词条以后升级（AI 深解重生成）这里自动是新的。查不到就安静缺席。
+  function appendWordDictLine(box, bind) {
+    try {
+      // 词典行 v1 只在 App 内出（runtime 在场才发请求,契约沙箱不发）。
+      if (!(window.BWReaderRuntime &&
+        window.BWReaderRuntime.nativeLocalRuntime)) return;
+      var text = String((bind && bind.text) || '').trim();
+      if (!text || text.length > 32 || text.indexOf(String.fromCharCode(10)) >= 0) return;
+      if (text.split(/\s+/).length > 3) return;
+      if (box.querySelector('.rc-note-dict')) return;
+      // @interaction dictionary.quick.read
+      fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(text)
+        + '&prewarm=1')
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d || d.ok !== true || !box.isConnected) return;
+          if (box.querySelector('.rc-note-dict')) return;
+          var zh = String(d.translation || d.definition || d.zh || '').trim();
+          if (!zh) return;
+          var head = String(d.lemma || d.word || text);
+          var phon = String(d.phonetic || d.reading || '').trim();
+          var div = document.createElement('div');
+          div.className = 'rc-note-dict';
+          div.style.cssText = 'margin-top:6px;padding:6px 8px;'
+            + 'border-top:1px dashed rgba(160,160,180,.35);'
+            + 'font-size:12px;line-height:1.5;opacity:.88';
+          div.textContent = '\u{1F4D6} ' + head
+            + (phon ? '\u3000[' + phon + ']' : '')
+            + ' \u2014 ' + zh.slice(0, 200);
+          box.appendChild(div);
+        })
+        .catch(function () {});
+    } catch (e) {}
+  }
+
   function bindHtmlCardSelection(el, htmlOrGetter, cid, hostKind) {
     cid = String(cid || '');
     if (!el || !cid ||
@@ -1307,6 +1380,8 @@
       h.cid,
       'pwa-page-placement'
     );
+    appendWordDictLine(box, h.bind);
+    reconcileConsolidatedWordCard(ctl, h);
     try { window.RC && RC.typeset && RC.typeset(box); } catch (e) {}
   }
   function setNoteVideo(ctl, id) {   // 供拖放/入口共用:给便签设视频(保留已有起止等设置)

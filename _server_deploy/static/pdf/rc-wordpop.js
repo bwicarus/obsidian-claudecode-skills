@@ -970,6 +970,55 @@
     }
     _positionPop(pop, rect);
     _scheduleUnderlineRefresh(80);   // 查过即记入生词库；多次 SWR 渲染合并成一次无闪烁重扫
+    _attachWordCards(pop, word, _wordPopState.lemma, rect);
+  }
+
+  // ── 词锚卡 × 字典（用户 2026-08-31）：这个词若有绑定卡，小框顶部
+  //   渲组合卡段 —— 点到同词看到的是"卡 + 字典"，不是裸字典。
+  //   路由只在 App 本地 runtime 存在；扩展/桌面 404 → 静默跳过。
+  function _attachWordCards(pop, word, lemma, rect) {
+    try {
+      // 索引路由只在 App 本地 runtime 存在；别的宿主（含契约沙箱）不发。
+      if (!(window.BWReaderRuntime &&
+        window.BWReaderRuntime.nativeLocalRuntime)) return;
+      var key = String(lemma || word || '').trim().toLowerCase();
+      if (!key) return;
+      // @interaction wordcard.index.sync
+      fetch('/pdf/api/word-card-index?lemma=' + encodeURIComponent(key))
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d || d.ok !== true || !Array.isArray(d.cards)
+            || !d.cards.length) return;
+          // 竞态守卫：回来时框已切到别的词 → 丢弃。
+          if (!_wordPopState || _wordPopState.word !== word) return;
+          if (pop.querySelector('.wp-cards')) return;
+          var wrap = document.createElement('div');
+          wrap.className = 'wp-cards';
+          wrap.style.cssText = 'margin:0 0 6px;padding:6px 8px;'
+            + 'border:1px solid rgba(140,120,255,.4);border-radius:8px;'
+            + 'background:rgba(140,120,255,.10);max-height:180px;'
+            + 'overflow:auto';
+          // 多卡按加入时间顺序全部显示（用户 2026-08-31），空间靠
+          // 外层 max-height 滚动，不截断。存储序即时间正序。
+          d.cards.forEach(function (c) {
+            var item = document.createElement('div');
+            item.className = 'wp-card-item';
+            var head = document.createElement('div');
+            head.style.cssText =
+              'font-weight:600;font-size:12px;opacity:.9;margin:2px 0';
+            head.textContent = '🔖 ' + String(c.label || '卡片');
+            item.appendChild(head);
+            var body = document.createElement('div');
+            // content 是本机 _infoHtml 的产物（生成时已净化），同源复渲。
+            body.innerHTML = String(c.content || '');
+            item.appendChild(body);
+            wrap.appendChild(item);
+          });
+          pop.insertBefore(wrap, pop.firstChild);
+          _positionPop(pop, rect);   // 高度变了重新定位
+        })
+        .catch(function () {});
+    } catch (e) {}
   }
 
   // ─────────────────────────── 小框动作按钮 ───────────────────────────

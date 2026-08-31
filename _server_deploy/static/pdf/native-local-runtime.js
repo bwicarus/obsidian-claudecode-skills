@@ -6362,6 +6362,119 @@
     return value;
   }
 
+  // ── 词卡关联索引（用户 2026-08-31：词锚卡 × 字典）────────────────
+  // 按 lemma 键 —— 数据主体归字典域，不按书/页组织。卡内容存**显示副本**
+  // （词锚卡由 AI 建、基本不再编辑；跨书取各自便签仓太重）；字典内容
+  // 不进索引 —— 显示时实时拉，词条升级组合卡自动新。
+  function localWordCardIndex(input, init, url, method) {
+    var code = 'BW_LOCAL_WORD_CARD_INDEX';
+    if (method === 'GET') {
+      return localJSONRoute(function () {
+        strictQuery(url, ['lemma', 'cid'], [], code);
+        var lemma = String(url.searchParams.get('lemma') || '')
+          .trim().toLowerCase();
+        var cid = String(url.searchParams.get('cid') || '').trim();
+        if ((lemma ? 1 : 0) + (cid ? 1 : 0) !== 1) {
+          throw outgoingRequestError('lemma 与 cid 二选一', code, 400);
+        }
+        if (lemma.length > 64 || cid.length > 64) {
+          throw outgoingRequestError('查询键无效', code, 400);
+        }
+        return readDeviceState('word-card-index', {}).then(function (map) {
+          if (!map || typeof map !== 'object' || Array.isArray(map)) {
+            map = {};
+          }
+          if (lemma) {
+            var entry = map[lemma];
+            return {
+              ok: true, lemma: lemma,
+              consolidatedAt:
+                (entry && entry.consolidatedAt) || 0,
+              cards: (entry && Array.isArray(entry.cards))
+                ? entry.cards : []
+            };
+          }
+          // 按 cid 反查（开卷对账用）：遍历上限 2000 词，开卡一次可接受。
+          var found = null, foundLemma = '';
+          Object.keys(map).some(function (key) {
+            var cards = (map[key] && map[key].cards) || [];
+            for (var i = 0; i < cards.length; i++) {
+              if (cards[i] && cards[i].cid === cid) {
+                found = cards[i]; foundLemma = key;
+                return true;
+              }
+            }
+            return false;
+          });
+          return {
+            ok: true, lemma: foundLemma,
+            consolidatedAt:
+              (foundLemma && map[foundLemma].consolidatedAt) || 0,
+            cards: found ? [found] : []
+          };
+        });
+      }, code);
+    }
+    return localJSONRoute(function () {
+      strictQuery(url, [], [], code);
+      return requestObject(
+        input, init, ['lemma', 'card'], ['lemma', 'card'], code, 256 * 1024
+      ).then(function (body) {
+        var lemma = String(body.lemma || '').trim().toLowerCase();
+        if (!lemma || lemma.length > 64) {
+          throw outgoingRequestError('lemma 无效', code, 400);
+        }
+        var card = body.card;
+        if (!card || typeof card !== 'object' || Array.isArray(card)) {
+          throw outgoingRequestError('card 无效', code, 400);
+        }
+        var cid = String(card.cid || '').slice(0, 64);
+        var doc = String(card.doc || '').slice(0, 200);
+        var label = String(card.label || '').slice(0, 120);
+        var content = String(card.content || '');
+        var page = parseInt(card.page, 10);
+        if (!Number.isFinite(page) || page < 0) page = 0;
+        if (!cid || !content || content.length > 64 * 1024) {
+          throw outgoingRequestError('card 字段无效', code, 400);
+        }
+        var at = Date.now();
+        return mutateDeviceState('word-card-index', {}, function (map) {
+          if (!map || typeof map !== 'object' || Array.isArray(map)) map = {};
+          var entry = map[lemma];
+          var cards = (entry && Array.isArray(entry.cards)) ? entry.cards : [];
+          cards = cards.filter(function (one) {
+            return one && one.cid !== cid;
+          });
+          // 按加入时间正序（用户 2026-08-31：多卡按时间顺序显示），
+          // 超限裁最旧的。
+          cards.push(
+            { cid: cid, doc: doc, page: page, label: label,
+              content: content, at: at });
+          if (cards.length > 8) cards = cards.slice(-8);
+          map[lemma] = {
+            cards: cards,
+            consolidatedAt: (entry && entry.consolidatedAt) || 0,
+            prev: (entry && entry.prev) || null
+          };
+          var keys = Object.keys(map);
+          if (keys.length > 2000) {
+            // 按最新卡时间裁最旧的词 —— 上限防膨胀，不是业务语义。
+            keys.sort(function (a, b) {
+              var av = ((map[a].cards && map[a].cards[0]) || {}).at || 0;
+              var bv = ((map[b].cards && map[b].cards[0]) || {}).at || 0;
+              return av - bv;
+            });
+            keys.slice(0, keys.length - 2000).forEach(function (k) {
+              delete map[k];
+            });
+          }
+          return localStateMutationResult(
+            map, { ok: true, lemma: lemma, count: cards.length });
+        });
+      });
+    }, code);
+  }
+
   function localPreferences(input, init, url, method) {
     var code = 'BW_LOCAL_PREFS';
     if (method === 'GET') {
@@ -8161,6 +8274,9 @@
     }
     if (path === '/pdf/api/prefs') {
       return localPreferences(input, init, url, method);
+    }
+    if (path === '/pdf/api/word-card-index') {
+      return localWordCardIndex(input, init, url, method);
     }
     if (path === '/pdf/api/video-player-prefs') {
       return localVideoPlayerPreferences(input, init, url, method);
@@ -14004,6 +14120,76 @@
     });
   }
 
+  /// 词卡整理（用户 2026-08-31）：把一个词名下所有绑定卡统一为同一内容。
+  /// 索引是词典入口的显示源 —— 这里改完，词典处立即统一；各原书里的卡
+  /// 实体由开卷对账跟上（与 pending-bind「等页归位」同一哲学）。
+  /// 撤销：整理前把每张卡旧内容存 prev（单层），undo:true 恢复。
+  function nativeReaderWordCardsConsolidate(input) {
+    input = (input && typeof input === 'object') ? input : {};
+    var lemma = String(input.lemma || '').trim().toLowerCase();
+    var content = typeof input.content === 'string' ? input.content : null;
+    var undo = input.undo === true;
+    if (!lemma || lemma.length > 64 || (content === null && !undo) ||
+        (content !== null && (undo || !content.trim() ||
+          content.length > 64 * 1024))) {
+      return Promise.reject(new RuntimeError(
+        '词卡整理参数无效', 'BW_NATIVE_WORD_CARDS_ARGS'
+      ));
+    }
+    return bootPromise.then(function () {
+      return mutateDeviceState('word-card-index', {}, function (map) {
+        if (!map || typeof map !== 'object' || Array.isArray(map)) map = {};
+        var entry = map[lemma];
+        var cards = (entry && Array.isArray(entry.cards)) ? entry.cards : [];
+        if (undo) {
+          var prev = entry && entry.prev;
+          if (!prev || !Array.isArray(prev.cards)) {
+            throw new RuntimeError(
+              '这个词没有可撤销的整理记录', 'BW_NATIVE_WORD_CARDS_NO_UNDO'
+            );
+          }
+          var restoredCount = 0;
+          var byCid = {};
+          prev.cards.forEach(function (one) {
+            if (one && one.cid) byCid[one.cid] = one.content;
+          });
+          cards.forEach(function (one) {
+            if (one && Object.prototype.hasOwnProperty.call(byCid, one.cid)) {
+              one.content = byCid[one.cid];
+              restoredCount++;
+            }
+          });
+          map[lemma] = { cards: cards, consolidatedAt: prev.at || 0,
+            prev: null };
+          return localStateMutationResult(map, {
+            ok: true, lemma: lemma, restored: restoredCount
+          });
+        }
+        if (!cards.length) {
+          throw new RuntimeError(
+            '这个词没有绑定卡片', 'BW_NATIVE_WORD_CARDS_EMPTY'
+          );
+        }
+        var prevCards = cards.map(function (one) {
+          return { cid: one.cid, content: one.content };
+        });
+        var now = Date.now();
+        cards.forEach(function (one) { one.content = content; });
+        map[lemma] = {
+          cards: cards,
+          consolidatedAt: now,
+          prev: {
+            at: (entry && entry.consolidatedAt) || 0,
+            cards: prevCards
+          }
+        };
+        return localStateMutationResult(map, {
+          ok: true, lemma: lemma, updated: cards.length
+        });
+      });
+    });
+  }
+
   function nativeReaderUndoLast(operationID) {
     operationID = String(operationID || '');
     if (!/^rundo_[0-9a-f]{24}$/.test(operationID)) {
@@ -14040,6 +14226,7 @@
     localBookId: bookId,
     ready: function () { return bootPromise; },
     undoLast: nativeReaderUndoLast,
+    wordCardsConsolidate: nativeReaderWordCardsConsolidate,
     pageCardMutate: nativeReaderPageCardMutate,
     pageCardAction: nativeReaderPageCardAction,
     createNote: nativeReaderCreateNote,
@@ -14138,6 +14325,9 @@
   runtimeRoot.nativeLocalRuntime = api;
   root._nativeReaderUndoLast = function (operationID) {
     return api.undoLast(operationID);
+  };
+  root._nativeReaderWordCardsConsolidate = function (input) {
+    return api.wordCardsConsolidate(input);
   };
   root._nativeReaderPageCardMutate = function (input) {
     return api.pageCardMutate(input);

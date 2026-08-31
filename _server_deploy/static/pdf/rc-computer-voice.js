@@ -1560,6 +1560,57 @@
             learningMutation.expectedStateRev;
         }
         payload = { fn: actionFn, args: [normalizedLearningMutation] };
+      } else if (actionFn === "_nativeReaderWordCardsConsolidate") {
+        // 词卡整理（用户 2026-08-31）：{lemma, content} 统一 / {lemma,
+        // undo:true} 撤销。二选一，跟 C# 侧 ValidatePayload 同一形状。
+        if (p.args.length !== 1 || !plainObject(p.args[0])) {
+          throw directError(
+            "Reader 词卡整理需要一个对象",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        var wcReq = p.args[0];
+        var wcHasContent = Object.prototype.hasOwnProperty.call(
+          wcReq, "content");
+        exactObject(
+          wcReq,
+          wcHasContent ? ["lemma", "content"] : ["lemma", "undo"],
+          [],
+          "Reader 词卡整理"
+        );
+        var wcLemma = safeText(wcReq.lemma, "Reader 词卡 lemma", 64, false)
+          .trim().toLowerCase();
+        if (!wcLemma) {
+          throw directError(
+            "Reader 词卡 lemma 无效",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        var wcNorm = { lemma: wcLemma };
+        if (wcHasContent) {
+          var wcContent = safeText(
+            wcReq.content, "Reader 词卡 content", 65536, false);
+          if (!wcContent.trim()) {
+            throw directError(
+              "Reader 词卡 content 不能为空",
+              "BW_READER_REALTIME_OUTPUT_SCHEMA",
+              false
+            );
+          }
+          wcNorm.content = wcContent;
+        } else {
+          if (wcReq.undo !== true) {
+            throw directError(
+              "Reader 词卡整理需要 content 或 undo:true 之一",
+              "BW_READER_REALTIME_OUTPUT_SCHEMA",
+              false
+            );
+          }
+          wcNorm.undo = true;
+        }
+        payload = { fn: actionFn, args: [wcNorm] };
       } else if (actionFn === "__upStartTask") {
         // 交互练习纸:与 Windows 侧同一套结构闸;内容级容错在纸的接收链里做。
         if (p.args.length !== 1 || !plainObject(p.args[0])) {
@@ -3698,6 +3749,22 @@
       var web = window.__bwWebPageText;
       if (web && typeof web.read === "function") return web.read(params || {});
       return null;
+    },
+    "word-cards": function (params) {
+      // 一轮拿全（judgment_basis 同一条教义：依据不该让 AI 多轮自己拼）。
+      // 路由只在 App 本地 runtime 存在；别的宿主 404 → null = unsupported。
+      var wcLemma = String((params && params.lemma) || "")
+        .trim().toLowerCase();
+      if (!wcLemma || wcLemma.length > 64) return null;
+      // @interaction wordcard.index.sync
+      return fetch(
+        "/pdf/api/word-card-index?lemma=" + encodeURIComponent(wcLemma)
+      ).then(function (r) {
+        return r.ok ? r.json() : null;
+      }).then(function (d) {
+        if (!d || d.ok !== true) return null;
+        return { lemma: d.lemma, cards: d.cards || [] };
+      }).catch(function () { return null; });
     },
     "page-cards": function (params) {
       var page = params && Object.prototype.hasOwnProperty.call(params, "page")

@@ -594,6 +594,16 @@
         }
       }
     ),
+    networkRead(
+      'wordcard.index.sync',
+      ['/pdf/api/word-card-index'],
+      {
+        methods: ['GET', 'POST'],
+        transport: { extensionBridge: false, serviceWorker: 'none' },
+        reason: '词锚卡×字典关联索引（设备本地路由，App runtime 内闭环）；'
+          + '其它表面无此路由，404 由调用方静默跳过。'
+      }
+    ),
     cachedRead(
       'dictionary.quick.read',
       ['/pdf/api/dict-quick'],

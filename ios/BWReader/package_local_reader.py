@@ -339,6 +339,9 @@ NATIVE_RUNTIME_INTERFACE_ENTRIES = {
     "/pdf/api/prefs": (
         "local", ("GET", "POST"), ("epub", "pdf"), "handleLocalState"
     ),
+    "/pdf/api/word-card-index": (
+        "local", ("GET", "POST"), ("epub", "pdf"), "handleLocalState"
+    ),
     "/pdf/api/video-player-prefs": (
         "local", ("GET", "POST"), ("epub", "pdf"), "handleLocalState"
     ),

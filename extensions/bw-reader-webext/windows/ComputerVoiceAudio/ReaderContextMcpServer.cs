@@ -21,6 +21,7 @@ internal sealed class ReaderContextMcpServer
     internal const string CardToolName = "reader_card";
     internal const string CommandToolName = "reader_command";
     internal const string UndoLastToolName = "reader_undo_last";
+    internal const string WordCardsToolName = "reader_word_cards";
     internal const string NoteCreateToolName = "reader_note_create";
     internal const string NoteEditToolName = "reader_note_edit";
     internal const string PaperStartToolName = "reader_paper_start";
@@ -1513,6 +1514,61 @@ internal sealed class ReaderContextMcpServer
                             },
                         },
                         BuildTypedCardArgumentsSchema(),
+                    },
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
+        }
+
+        // 词卡整理是双通道工具：list 半边走查询、consolidate 半边走
+        // sendOutput —— 两个依赖都在才声明（缺一半就是"列得出调不动"）。
+        if (_queryReaderAsync is not null && _sendOutputAsync is not null)
+        {
+            tools.Add(new JsonObject
+            {
+                ["name"] = WordCardsToolName,
+                ["description"] =
+                    "Inspect or consolidate every anchored card attached to "
+                    + "one dictionary word (lemma). With only {lemma}: "
+                    + "returns ALL cards bound to that word across books in "
+                    + "one round (content, book, page, cid, createdAt) - do "
+                    + "not gather them yourself over multiple calls. With "
+                    + "{lemma, content}: rewrites every bound card of that "
+                    + "word to the same new content (the dictionary popup "
+                    + "updates immediately; cards inside each book reconcile "
+                    + "when that book is next opened). With {lemma, "
+                    + "undo: true}: restores the contents from before the "
+                    + "most recent consolidation of that word. content and "
+                    + "undo are mutually exclusive.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["required"] = new JsonArray("lemma"),
+                    ["properties"] = new JsonObject
+                    {
+                        ["lemma"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 64,
+                        },
+                        ["content"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 65536,
+                        },
+                        ["undo"] = new JsonObject
+                        {
+                            ["type"] = "boolean",
+                        },
                     },
                 },
                 ["annotations"] = new JsonObject
@@ -3522,6 +3578,18 @@ internal sealed class ReaderContextMcpServer
             return;
         }
         if (
+            toolName == WordCardsToolName
+            && _sendOutputAsync is not null
+            && _queryReaderAsync is not null
+        )
+        {
+            await HandleWordCardsToolCallAsync(
+                id,
+                arguments,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
             toolName == AnkiDraftToolName
             && _sendOutputAsync is not null
         )
@@ -3940,6 +4008,89 @@ internal sealed class ReaderContextMcpServer
             payload,
             cancellationToken,
             rangeRef).ConfigureAwait(false);
+    }
+
+    /// 词卡整理三合一（用户 2026-08-31）：查全 / 统一 / 撤销。查询走
+    /// query 通道一轮拿全（依据不该让 AI 多轮自己拼 —— judgment_basis
+    /// 同一条教义）；统一与撤销走 client-action，App 端改索引并对账。
+    private async Task HandleWordCardsToolCallAsync(
+        JsonNode id,
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        string? lemma = null;
+        string? content = null;
+        bool undo = false;
+        bool valid = arguments.ValueKind == JsonValueKind.Object;
+        if (valid)
+        {
+            foreach (JsonProperty property in arguments.EnumerateObject())
+            {
+                switch (property.Name)
+                {
+                    case "lemma" when
+                        property.Value.ValueKind == JsonValueKind.String:
+                        lemma = property.Value.GetString();
+                        break;
+                    case "content" when
+                        property.Value.ValueKind == JsonValueKind.String:
+                        content = property.Value.GetString();
+                        break;
+                    case "undo" when
+                        property.Value.ValueKind is JsonValueKind.True
+                            or JsonValueKind.False:
+                        undo = property.Value.ValueKind == JsonValueKind.True;
+                        break;
+                    default:
+                        valid = false;
+                        break;
+                }
+            }
+        }
+        lemma = lemma?.Trim().ToLowerInvariant();
+        if (!valid || string.IsNullOrWhiteSpace(lemma) || lemma.Length > 64
+            || (content is not null && undo)
+            || (content is not null
+                && (content.Length == 0 || content.Length > 65536)))
+        {
+            await WriteErrorAsync(
+                id,
+                -32602,
+                "Invalid reader_word_cards request: lemma is required; "
+                + "content and undo are mutually exclusive",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (content is null && !undo)
+        {
+            await RunReaderQueryAsync(
+                id,
+                "word-cards",
+                new JsonObject { ["lemma"] = lemma },
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        var request = new JsonObject { ["lemma"] = lemma };
+        if (undo)
+        {
+            request["undo"] = true;
+        }
+        else
+        {
+            request["content"] = content;
+        }
+        JsonNode payload = ReaderRealtimeOutputProtocol.ValidatePayload(
+            "client-action",
+            new JsonObject
+            {
+                ["fn"] = "_nativeReaderWordCardsConsolidate",
+                ["args"] = new JsonArray(request),
+            });
+        await SendReaderOutputAsync(
+            id,
+            "client-action",
+            payload,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleUndoLastToolCallAsync(

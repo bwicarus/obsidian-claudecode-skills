@@ -152,7 +152,8 @@ test("失败原因分类与 rc-stickynote 的两类处置对得上", () => {
 test("__pageBindPersist 的返回形状与 rc-voicecall 的消费一致", () => {
   const at = VOICECALL.indexOf("__pageBindPersist");
   assert.ok(at > 0);
-  const consume = VOICECALL.slice(at, at + 700);
+  // 900：词卡登记行（2026-08-31）站在 bound 之前，700 的窗口装不下了。
+  const consume = VOICECALL.slice(at, at + 900);
   assert.match(consume, /_pr\s*&&\s*_pr\.ok === true/, "调用方按 ok===true 判成功");
   const impl = BIND.slice(BIND.indexOf("window.__pageBindPersist"), BIND.indexOf("function currentSelection"));
   assert.match(impl, /ok: true/, "成功分支必须给 ok:true");

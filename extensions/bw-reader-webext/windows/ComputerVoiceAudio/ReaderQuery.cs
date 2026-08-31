@@ -87,7 +87,8 @@ internal static class ReaderQueryProtocol
     internal static bool IsQuery(string value) =>
         value is "highlights" or "notes" or "search" or "toc"
             or "page-text" or "page-cards" or "page-card" or "lookup"
-            or "learning-cards" or "learning-card" or "review-current";
+            or "learning-cards" or "learning-card" or "review-current"
+            or "word-cards";
 
     // 每个查询各自声明适用哪种阅读界面。一刀切放开会让助手在网页上问目录、
     // 在书里问网页锚点 —— 那些请求会走到执行侧才失败，错误信息也说不清缘由。
@@ -111,6 +112,9 @@ internal static class ReaderQueryProtocol
             "search" =>
                 kind is "pdf" or "epub",
             "page-cards" => kind is "pdf",
+            // 词卡关联索引是设备级全局状态，但承载它的本地路由只在 App
+            // 的书内 runtime 存在 —— 网页表面放行了也只会 404。
+            "word-cards" => kind is "pdf" or "epub",
             "page-card" => kind is "pdf",
             // The canonical learning-card repository is global to Reader, not
             // scoped to one page.  Manual/free and anchored cards therefore
