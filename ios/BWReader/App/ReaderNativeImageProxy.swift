@@ -122,9 +122,48 @@ actor ReaderNativeImageProxyBroker {
 
     func fetch(rawURL: String) async throws -> ReaderNativeImageProxyPayload {
         let url = try ReaderNativeImageProxyPolicy.initialURL(rawURL)
-        return try await ReaderNativeImageProxyTransport(
-            maximumBytes: Self.maximumBytes
-        ).start(url)
+        if let host = url.host?.lowercased(),
+           ReaderNativeImageHostCooldown.shared.isCoolingDown(host) {
+            // 429 冷却中：直接拒绝，不再打这个源站 —— 持续撞限流会让
+            // 封禁续期（2026-08-31 实锤：破图重试把设备撞进 429，累计
+            // 27 次越撞越封）。冷却是设备保护自己也保护源站。
+            throw ReaderNativeImageProxyError.upstreamStatus(429)
+        }
+        do {
+            let payload = try await ReaderNativeImageProxyTransport(
+                maximumBytes: Self.maximumBytes
+            ).start(url)
+            return payload
+        } catch let error as ReaderNativeImageProxyError {
+            if case .upstreamStatus(let status) = error, status == 429,
+               let host = url.host?.lowercased() {
+                ReaderNativeImageHostCooldown.shared.noteRateLimited(host)
+            }
+            throw error
+        }
+    }
+}
+
+/// 每主机 429 冷却：被限流的源站 10 分钟内不再请求。线程安全、进程级。
+final class ReaderNativeImageHostCooldown: @unchecked Sendable {
+    static let shared = ReaderNativeImageHostCooldown()
+    private let lock = NSLock()
+    private var until: [String: Date] = [:]
+    private let cooldown: TimeInterval = 10 * 60
+
+    func noteRateLimited(_ host: String) {
+        lock.lock(); defer { lock.unlock() }
+        until[host] = Date().addingTimeInterval(cooldown)
+    }
+
+    func isCoolingDown(_ host: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let deadline = until[host] else { return false }
+        if deadline <= Date() {
+            until.removeValue(forKey: host)
+            return false
+        }
+        return true
     }
 }
 

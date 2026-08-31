@@ -2569,6 +2569,14 @@
             _imgReviveObs.unobserve(img);
             if (!(img.complete && img.naturalWidth === 0)) return;   // 没破/还在加载 → 不管
             var n = parseInt(img.getAttribute('data-revive') || '0', 10);
+            // 外链失败大多是源站限流/真死 —— 反复复活就是在帮限流续期
+            // （2026-08-31 实锤:设备 429 累计 27 次,复活是帮凶之一）。
+            // 只有自己桥的地址值得多试;外链一次为限。
+            var src1 = String(img.getAttribute('src') || '');
+            var toOwnBridge =
+              /^\/pdf\/api\/img-proxy\?url=https%3A%2F%2Fbwicarus-2\./.test(src1) ||
+              /^\/reader-card-asset\//.test(src1);
+            if (!toOwnBridge && n >= 1) return;
             if (n >= 4) return;
             var at = parseInt(img.getAttribute('data-revive-at') || '0', 10);
             var wait = 45000 - (Date.now() - at);

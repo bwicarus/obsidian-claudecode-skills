@@ -1134,6 +1134,10 @@ if (window.__bwPwaProviderOnly) return;
     RC.toast('语法分析暂未接入');
   };
 
+  // 音调线渲染借给卡片词典区用（rc-stickynote）：同一份拆拍/标高逻辑，
+  // 别让第二处再长出一份走样的。样式类由借用方在自己的作用域重建。
+  RC.wordpopPitchHtml = _renderPitch;
+
   // ─────────────────────────── 入口:RC.wordpop.show(opts)───────────────────────────
   function show(opts) {
     opts = opts || {};

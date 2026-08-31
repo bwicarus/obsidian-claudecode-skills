@@ -303,6 +303,21 @@ if (window.__bwPwaProviderOnly) return;
       '@media (pointer:coarse){.rc-note.rc-note-free-card-dot .vc-card.vc-dot .vc-card-dot::after{content:"";position:absolute;left:50%;top:50%;width:max(40px,100%);height:max(40px,100%);transform:translate(-50%,-50%)}}',
       '.rc-note.rc-note-hashtml .rc-note-text,.rc-note.rc-note-hashtml .rc-note-tools,.rc-note.rc-note-hashtml .rc-note-ink{display:none!important}',
       '.rc-note.rc-note-hashtml.rc-note-collapsed .rc-note-html{display:none}',
+      // ── 卡内完整词条区（用户 2026-08-31：把词典小框那套放进卡里）──
+      '.rc-note-dict{margin-top:6px;padding:8px 10px;border-top:1px dashed rgba(160,160,180,.35);font-size:13px;line-height:1.55;color:#cfe6ff}',
+      '.rc-note-dict .rnd-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px}',
+      '.rc-note-dict .rnd-word{font-size:16px;font-weight:600;color:#fff}',
+      '.rc-note-dict .rnd-speak{background:none;border:1px solid #2a3450;border-radius:50%;width:26px;height:26px;color:#9fb6ff;cursor:pointer;font-size:13px;line-height:1}',
+      '.rc-note-dict .rnd-def{margin:2px 0 6px;white-space:pre-wrap}',
+      '.rc-note-dict .rnd-ex{margin-top:4px;padding-top:4px;border-top:1px solid rgba(160,160,180,.15)}',
+      '.rc-note-dict .rnd-ex-ja{color:#dff1ff}',
+      '.rc-note-dict .rnd-ex-zh{color:#8fa3c8;font-size:12px}',
+      // 音调线（移植 wordpop 同款视觉）
+      '.rc-note-dict .wp-pitch{display:inline-flex;align-items:flex-end;gap:0;font-size:14px;color:#cfe6ff}',
+      '.rc-note-dict .wp-pitch .pm{position:relative;padding:3px 1px 0;line-height:1.1;border-top:2px solid transparent}',
+      '.rc-note-dict .wp-pitch .pm.hi{border-top:2px solid #6fd3ff;color:#dff1ff}',
+      '.rc-note-dict .wp-pitch .pm.drop::after{content:"";position:absolute;right:-1px;top:0;height:9px;border-right:2px solid #ff8a8a}',
+      '.rc-note-dict .wp-pitch .pm-type{margin-left:6px;font-size:10px;color:#5a6680;border:1px solid #2a3450;border-radius:4px;padding:0 4px;align-self:center}',
       '.rc-note.rc-note-hasvideo .rc-vid-embed{border-radius:9px 9px 0 0;overflow:hidden}',
       '.rc-vc-rm{margin-left:auto;border:1px solid rgba(0,0,0,.2);background:rgba(255,255,255,.6);border-radius:5px;width:22px;height:20px;line-height:1;font-size:12px;cursor:pointer;color:#a33;padding:0}',
       // 暗底自动对比色(applyColor 按便签本色亮度 toggle .rc-note-darkbg):文字/placeholder/光标 →
@@ -1263,18 +1278,64 @@ if (window.__bwPwaProviderOnly) return;
         .then(function (d) {
           if (!d || d.ok !== true || !box.isConnected) return;
           if (box.querySelector('.rc-note-dict')) return;
-          var zh = String(d.translation || d.definition || d.zh || '').trim();
-          if (!zh) return;
+          var zh = String(d.translation || d.zh || '').trim();
+          var defText = String(d.definition || '').trim();
+          if (!zh && !defText) return;
+          var esc = function (v) {
+            return String(v == null ? '' : v)
+              .replace(/&/g, '&amp;').replace(/</g, '&lt;');
+          };
           var head = String(d.lemma || d.word || text);
-          var phon = String(d.phonetic || d.reading || '').trim();
+          var reading = String(d.reading || '').trim();
+          var phon = String(d.phonetic || '').trim();
+          // 音调线借 wordpop 的同一份渲染；拿不到或无数据退回读音文本。
+          var pitch = '';
+          try {
+            if (d.jp && reading && d.accent != null &&
+                typeof window.RC.wordpopPitchHtml === 'function') {
+              pitch = window.RC.wordpopPitchHtml(reading, d.accent);
+            }
+          } catch (e1) {}
+          var h2 = '<div class="rnd-head">'
+            + '<span class="rnd-word">' + esc(head) + '</span>'
+            + (pitch || (reading || phon
+                ? '<span>' + esc(reading || phon) + '</span>' : ''))
+            + '<button type="button" class="rnd-speak" '
+            + 'title="\u53D1\u97F3">\uD83D\uDD0A</button>'
+            + '</div>'
+            + (zh ? '<div class="rnd-def">' + esc(zh) + '</div>' : '');
+          var examples = Array.isArray(d.examples) ? d.examples : [];
+          examples.slice(0, 2).forEach(function (ex) {
+            if (!ex) return;
+            var ja = String(ex.ja || '').trim();
+            var exZh = String(ex.zh || ex.en || '').trim();
+            if (!ja) return;
+            h2 += '<div class="rnd-ex">'
+              + '<div class="rnd-ex-ja">' + esc(ja) + '</div>'
+              + (exZh ? '<div class="rnd-ex-zh">' + esc(exZh) + '</div>' : '')
+              + '</div>';
+          });
+          if (!examples.length && defText && defText !== zh) {
+            // 英语词无结构化例句时给例句/英释文本段
+            h2 += '<div class="rnd-ex"><div class="rnd-ex-zh">'
+              + esc(defText.slice(0, 400)) + '</div></div>';
+          }
           var div = document.createElement('div');
           div.className = 'rc-note-dict';
-          div.style.cssText = 'margin-top:6px;padding:6px 8px;'
-            + 'border-top:1px dashed rgba(160,160,180,.35);'
-            + 'font-size:12px;line-height:1.5;opacity:.88';
-          div.textContent = '\u{1F4D6} ' + head
-            + (phon ? '\u3000[' + phon + ']' : '')
-            + ' \u2014 ' + zh.slice(0, 200);
+          div.innerHTML = h2;
+          var speakBtn = div.querySelector('.rnd-speak');
+          if (speakBtn) {
+            speakBtn.addEventListener('click', function (ev) {
+              ev.stopPropagation();
+              try {
+                var u = new SpeechSynthesisUtterance(
+                  d.jp ? (reading || head) : head);
+                u.lang = d.jp ? 'ja-JP' : 'en-US';
+                window.speechSynthesis.cancel();
+                window.speechSynthesis.speak(u);
+              } catch (e2) {}
+            });
+          }
           box.appendChild(div);
         })
         .catch(function () {});
