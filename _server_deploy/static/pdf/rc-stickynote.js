@@ -1277,16 +1277,52 @@
       var cached = _dictLineCache[text];
       if (cached && cached.failAt &&
           Date.now() - cached.failAt < 60 * 1000) return;
+      // 带上书的语言声明与文件：纯汉字菜名在没有 langs/context 时会被
+      // 服务端判成英语词走 ECDICT → 查无 → 静默缺席（2026-09-01 实锤）。
+      var extra = '';
+      try {
+        if (window.BOOK_LANGS && window.BOOK_LANGS.length) {
+          extra += '&langs='
+            + encodeURIComponent(window.BOOK_LANGS.join(','));
+        }
+      } catch (e3) {}
+      try {
+        var bf = (window.RC && RC.core && RC.core.file
+          && RC.core.file()) || '';
+        if (bf) extra += '&file=' + encodeURIComponent(bf);
+      } catch (e4) {}
       var ready = (cached && cached.d)
         ? Promise.resolve(cached.d)
         // @interaction dictionary.quick.read
         : fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(text)
-            + '&prewarm=1')
-            .then(function (r) { return r.ok ? r.json() : null; })
+            + '&prewarm=1' + extra)
+            .then(function (r) {
+              if (!r.ok) throw new Error('http-' + r.status);
+              return r.json();
+            })
             .then(function (d) {
               _dictLineCache[text] = (d && d.ok === true)
                 ? { d: d } : { failAt: Date.now() };
               return d;
+            })
+            .catch(function (err) {
+              _dictLineCache[text] = { failAt: Date.now() };
+              // 静默失败教训：没有控制台的设备上，沉默 = 不可诊断。
+              // 网络层失败渲一行淡字说明原因；查无词条（ok:false）才安静。
+              if (box.isConnected &&
+                  !box.querySelector('.rc-note-dict-err')) {
+                var errLine = document.createElement('div');
+                errLine.className = 'rc-note-dict-err';
+                errLine.style.cssText = 'margin-top:4px;font-size:11px;'
+                  + 'opacity:.5;color:#cfe6ff';
+                errLine.textContent = '📖 词典暂不可用：'
+                  + String(err && err.message || 'network').slice(0, 60);
+                box.appendChild(errLine);
+                setTimeout(function () {
+                  try { errLine.remove(); } catch (e5) {}
+                }, 8000);
+              }
+              return null;
             });
       ready
         .then(function (d) {
