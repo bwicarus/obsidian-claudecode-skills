@@ -292,6 +292,22 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             )
         }
 
+        if decodedPath == "/pdf/api/card-asset" {
+            guard request.method == .GET else {
+                return response(
+                    status: .methodNotAllowed,
+                    text: "method not allowed",
+                    headers: [HTTPHeader("Allow"): "GET"]
+                )
+            }
+            guard trustedResourceSurface(
+                referer: request.headers[HTTPHeader("Referer")]
+            ) != nil else {
+                return response(status: .forbidden, text: "invalid referer")
+            }
+            return await serveNativeCardAsset(request)
+        }
+
         if decodedPath == "/pdf/api/img-proxy" {
             guard request.method == .GET else {
                 return response(
@@ -468,6 +484,80 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             && path.count > "/pdf/api/asset/".count
             || path.hasPrefix("/api/assistant/voice-clip/")
             && path.count > "/api/assistant/voice-clip/".count
+    }
+
+    /// 卡片图片：本地资产优先，未命中拉桥留底一份再回（渲染即同步）——
+    /// 「数据都 App 本地化」的图片半边（用户 2026-09-01）。桥离线只影响
+    /// 还没同步过的图；已同步的永远本地秒回。
+    /// 缓存头用 7 天而不是 1 年：本地 store 自身有 512MB 上限管容量，
+    /// HTTP 缓存层再存一份是双份 —— 1 年 immutable 是 54GB 事故的老路。
+    private func serveNativeCardAsset(
+        _ request: HTTPRequest
+    ) async -> HTTPResponse {
+        guard let assetID = request.query["id"],
+              ReaderCardAssetLocalStore.isValidAssetID(assetID) else {
+            return response(
+                status: .badRequest,
+                text: "invalid card asset id",
+                headers: [
+                    HTTPHeader("X-BW-Reader-Error"): "invalid-card-asset-id"
+                ]
+            )
+        }
+        if let hit = await ReaderCardAssetLocalStore.shared.load(assetID) {
+            return dataResponse(
+                request,
+                data: hit.data,
+                contentType: hit.contentType,
+                cacheControl: "private, max-age=604800, immutable",
+                additionalHeaders: [
+                    HTTPHeader("X-BW-Card-Asset"): "local-hit"
+                ]
+            )
+        }
+        let bridgeURL =
+            "https://bwicarus-2.taile44d0c.ts.net/reader-card-asset/"
+            + assetID
+        do {
+            let payload = try await imageProxyBroker.fetch(rawURL: bridgeURL)
+            await ReaderCardAssetLocalStore.shared.save(
+                assetID, data: payload.data, contentType: payload.contentType)
+            await MainActor.run {
+                ReaderImageProxyHealth.noteSuccess(host: "card-asset:bridge")
+            }
+            return dataResponse(
+                request,
+                data: payload.data,
+                contentType: payload.contentType,
+                cacheControl: "private, max-age=604800, immutable",
+                additionalHeaders: [
+                    HTTPHeader("X-BW-Card-Asset"): "bridge-fill"
+                ]
+            )
+        } catch let error as ReaderNativeImageProxyError {
+            await MainActor.run {
+                ReaderImageProxyHealth.noteFailure(
+                    code: error.diagnosticCode, host: "card-asset:bridge")
+            }
+            let phrase = HTTPURLResponse.localizedString(
+                forStatusCode: error.httpStatus
+            ).capitalized
+            return response(
+                status: HTTPStatusCode(error.httpStatus, phrase: phrase),
+                text: error.localizedDescription,
+                headers: [
+                    HTTPHeader("X-BW-Reader-Error"): error.diagnosticCode
+                ]
+            )
+        } catch {
+            return response(
+                status: .badGateway,
+                text: "card asset unavailable",
+                headers: [
+                    HTTPHeader("X-BW-Reader-Error"): "card-asset-unavailable"
+                ]
+            )
+        }
     }
 
     private func serveNativeImageProxy(

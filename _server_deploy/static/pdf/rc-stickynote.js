@@ -1136,12 +1136,29 @@
   }
   function normalizeHtmlCardImageAssets(content) {
     content = String(content || '');
-    if (!content || content.indexOf('data-aid') < 0) return content;
+    var hasBridgeAsset =
+      content.indexOf('bwicarus-2.taile44d0c.ts.net/reader-card-asset/') >= 0;
+    if (!content ||
+        (content.indexOf('data-aid') < 0 && !hasBridgeAsset)) return content;
     var shell;
     try {
       shell = document.createElement('div');
       shell.innerHTML = content;
       var changed = false;
+      // 桥直连地址 → App 本地资产路由（用户 2026-09-01「数据都 App 本地
+      // 化」）：patchNote 回写后存量卡永久迁移，显示不再依赖桥在线。
+      // 只在 App 内做 —— 别的宿主没有这条路由。
+      if (hasBridgeAsset && window.BWReaderRuntime &&
+          window.BWReaderRuntime.nativeLocalRuntime) {
+        Array.prototype.forEach.call(
+          shell.querySelectorAll('img'), function (image) {
+            var src = String(image.getAttribute('src') || '');
+            var m = /^(?:https:\/\/bwicarus-2\.taile44d0c\.ts\.net\/reader-card-asset\/|\/pdf\/api\/img-proxy\?url=https%3A%2F%2Fbwicarus-2\.taile44d0c\.ts\.net%2Freader-card-asset%2F)([0-9a-f]{16})$/.exec(src);
+            if (!m) return;
+            image.setAttribute('src', '/pdf/api/card-asset?id=' + m[1]);
+            changed = true;
+          });
+      }
       Array.prototype.forEach.call(shell.querySelectorAll('img[data-aid]'), function (image) {
         var aid = String(image.getAttribute('data-aid') || '').trim();
         if (!/^[a-z]{2,4}_[a-f0-9]{4,12}$/.test(aid)) return;

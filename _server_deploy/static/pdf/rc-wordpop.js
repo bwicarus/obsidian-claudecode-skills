@@ -1045,6 +1045,16 @@
             var body = document.createElement('div');
             // content 是本机 _infoHtml 的产物（生成时已净化），同源复渲。
             body.innerHTML = String(c.content || '');
+            // 索引副本里固化的桥直连地址 → 本地资产路由（App 内）。
+            try {
+              Array.prototype.forEach.call(
+                body.querySelectorAll('img'), function (img2) {
+                  var m2 = /^(?:https:\/\/bwicarus-2\.taile44d0c\.ts\.net\/reader-card-asset\/|\/pdf\/api\/img-proxy\?url=https%3A%2F%2Fbwicarus-2\.taile44d0c\.ts\.net%2Freader-card-asset%2F)([0-9a-f]{16})$/.exec(
+                    String(img2.getAttribute('src') || ''));
+                  if (m2) img2.setAttribute(
+                    'src', '/pdf/api/card-asset?id=' + m2[1]);
+                });
+            } catch (e2) {}
             item.appendChild(body);
             wrap.appendChild(item);
           });

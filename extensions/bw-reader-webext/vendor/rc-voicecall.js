@@ -2400,12 +2400,29 @@ if (window.__bwPwaProviderOnly) return;
       return parsed.href;
     } catch (e) { return ''; }
   }
+  // 桥资产地址 → App 本地资产路由（用户 2026-09-01「数据都 App 本地化」）。
+  // 本地路由未命中会自己拉桥补货,显示从此不依赖桥在线。非 App 宿主
+  // 没有这条路由,保持 img-proxy 直取。
+  function _bridgeCardAssetID(raw) {
+    var m = /^https:\/\/bwicarus-2\.taile44d0c\.ts\.net\/reader-card-asset\/([0-9a-f]{16})$/.exec(String(raw || ''));
+    return m ? m[1] : '';
+  }
+  function _hasNativeRuntime() {
+    try {
+      return !!(window.BWReaderRuntime &&
+        window.BWReaderRuntime.nativeLocalRuntime);
+    } catch (e) { return false; }
+  }
   function _cardMediaURL(value) {
     var raw = String(value == null ? '' : value).trim();
     if (!raw) return '';
+    var aid0 = _bridgeCardAssetID(raw);
+    if (aid0 && _hasNativeRuntime()) {
+      return '/pdf/api/card-asset?id=' + aid0;
+    }
     // 这些地址已由 Reader 自己签发或持有；外部 card 合同只额外允许 HTTPS。
     if (/^(?:blob:|data:image\/)/i.test(raw) ||
-        /^\/pdf\/api\/(?:page-image(?:\?|$)|asset\/|img-proxy(?:\?|$))/.test(raw)) return raw;
+        /^\/pdf\/api\/(?:page-image(?:\?|$)|asset\/|img-proxy(?:\?|$)|card-asset(?:\?|$))/.test(raw)) return raw;
     var remote = _cardHttpsURL(raw);
     return remote ? '/pdf/api/img-proxy?url=' + encodeURIComponent(remote) : '';
   }
@@ -2609,7 +2626,22 @@ if (window.__bwPwaProviderOnly) return;
       // 只对指向自己桥的地址重试（外链失败多半是真死，重试是骚扰源站）；
       // 2.5s/5s/7.5s 三次，足够跨过一次服务重启。
       var src0 = String(image.getAttribute('src') || '');
+      // 固化在旧卡 content 里的桥直连地址：失败时一次性迁移到本地
+      // 资产路由（未命中自动补货），而不是原地反复撞桥。
+      if (_hasNativeRuntime()) {
+        var srcAid = _bridgeCardAssetID(src0) ||
+          (function () {
+            var m = /^\/pdf\/api\/img-proxy\?url=(https%3A%2F%2Fbwicarus-2[^&]+)$/.exec(src0);
+            return m ? _bridgeCardAssetID(decodeURIComponent(m[1])) : '';
+          })();
+        if (srcAid && !image.hasAttribute('data-asset-localized')) {
+          image.setAttribute('data-asset-localized', '1');
+          image.setAttribute('src', '/pdf/api/card-asset?id=' + srcAid);
+          return;
+        }
+      }
       var toBridge = /^\/pdf\/api\/img-proxy\?url=https%3A%2F%2Fbwicarus-2\./.test(src0) ||
+                     /^\/pdf\/api\/card-asset(?:\?|$)/.test(src0) ||
                      /^\/reader-card-asset\//.test(src0);
       if (toBridge) {
         var n = parseInt(image.getAttribute('data-bridge-retry') || '0', 10);

@@ -264,6 +264,9 @@ NATIVE_RUNTIME_INTERFACE_ENTRIES = {
         "local", ("GET", "POST", "PATCH", "DELETE"),
         ("epub",), "handleLocalState"
     ),
+    "/pdf/api/card-asset": (
+        "native", ("GET",), ("epub", "pdf"), "__native_owner__"
+    ),
     "/pdf/api/img-proxy": (
         "native", ("GET",), ("epub", "pdf"), "__native_owner__"
     ),

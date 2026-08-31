@@ -816,6 +816,21 @@
       "description": "Read a Pi table-of-contents job status."
     },
     {
+      "path": "/pdf/api/card-asset",
+      "match": "exact",
+      "owner": "native",
+      "methods": [
+        "GET"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": null,
+      "description": "Serve a bridge card image from the device-local asset store, filling from the Windows bridge on first miss."
+    },
+    {
       "path": "/pdf/api/card-repository/bootstrap",
       "match": "exact",
       "owner": "pi",
