@@ -1847,6 +1847,7 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
         "reader_anki_draft",
         "reader_card",
         "reader_command",
+        "reader_word_cards",
         "reader_page_cards",
         "reader_page_card_read",
         "reader_learning_cards",

@@ -79,6 +79,7 @@ class FakeStdioRunner:
                         {"name": "reader_context_snapshot"},
                         {"name": "reader_capability_guide"},
                         {"name": "reader_visual_image"},
+                        {"name": "reader_camera_snap"},
                         {"name": "reader_browser_control"},
                         {"name": "reader_highlight_range"},
                         {"name": "reader_web_note"},
@@ -115,6 +116,7 @@ class FakeStdioRunner:
                                 ]
                             },
                         },
+                        {"name": "reader_word_cards"},
                         {"name": "reader_page_cards"},
                         {"name": "reader_page_card_read"},
                         {"name": "reader_learning_cards"},
@@ -1114,7 +1116,7 @@ class DirectPackageTests(unittest.TestCase):
             ]
             with self.assertRaisesRegex(
                 package.PackageError,
-            "精确 31 工具合同",
+            "精确 33 工具合同",
             ):
                 package._validate_mcp_smoke_output(
                     self._stdio_result(responses)
@@ -1129,7 +1131,7 @@ class DirectPackageTests(unittest.TestCase):
                     item["name"] = "reader_highlight_text"
             with self.assertRaisesRegex(
                 package.PackageError,
-            "精确 31 工具合同",
+            "精确 33 工具合同",
             ):
                 package._validate_mcp_smoke_output(
                     self._stdio_result(responses)
