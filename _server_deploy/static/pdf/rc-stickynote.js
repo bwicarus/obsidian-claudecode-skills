@@ -1229,19 +1229,34 @@
     } catch (e) { return ''; }
   }
 
-  function appendWordDictLine(box, bind) {
+  function appendWordDictLine(box, bind, label) {
     try {
       // 词典行 v1 只在 App 内出（runtime 在场才发请求,契约沙箱不发）。
       if (!(window.BWReaderRuntime &&
         window.BWReaderRuntime.nativeLocalRuntime)) return;
-      var text = bindWordTextOf(bind);
+      // ⚠ 实据修正（2026-08-31 深夜）：用户的卡是浮层卡（bind:null,
+      //   unbound）—— 只靠 bind 取词，这批卡的词典行**永远缺席**。
+      //   卡名（label）就是词名（キムチ/ローストビーフ…），bind 取不到
+      //   时用 label —— unbound 卡零门槛受益。
+      var text = bindWordTextOf(bind) || String(label || '').trim();
       if (!text || text.length > 32 || text.indexOf(String.fromCharCode(10)) >= 0) return;
       if (text.split(/\s+/).length > 3) return;
       if (box.querySelector('.rc-note-dict')) return;
-      // @interaction dictionary.quick.read
-      fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(text)
-        + '&prewarm=1')
-        .then(function (r) { return r.ok ? r.json() : null; })
+      var cached = _dictLineCache[text];
+      if (cached && cached.failAt &&
+          Date.now() - cached.failAt < 60 * 1000) return;
+      var ready = (cached && cached.d)
+        ? Promise.resolve(cached.d)
+        // @interaction dictionary.quick.read
+        : fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(text)
+            + '&prewarm=1')
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) {
+              _dictLineCache[text] = (d && d.ok === true)
+                ? { d: d } : { failAt: Date.now() };
+              return d;
+            });
+      ready
         .then(function (d) {
           if (!d || d.ok !== true || !box.isConnected) return;
           if (box.querySelector('.rc-note-dict')) return;
@@ -1380,7 +1395,7 @@
       );
       // 词典行/对账在 sig 不变时也要有机会补（幂等：各自有已存在早退）——
       // 开书首渲时字符层可能还没就绪，取词失败一次不该等于永远没有。
-      appendWordDictLine(box, h.bind);
+      appendWordDictLine(box, h.bind, h.label);
       reconcileConsolidatedWordCard(ctl, h);
       return;
     }
@@ -1414,7 +1429,7 @@
       h.cid,
       'pwa-page-placement'
     );
-    appendWordDictLine(box, h.bind);
+    appendWordDictLine(box, h.bind, h.label);
     reconcileConsolidatedWordCard(ctl, h);
     try { window.RC && RC.typeset && RC.typeset(box); } catch (e) {}
   }

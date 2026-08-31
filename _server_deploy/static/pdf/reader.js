@@ -4643,8 +4643,32 @@ function _selByCharRange(pw, sIdx, eIdx) {
   const chars = pw.__charBoxes;
   if (sIdx < 0 || eIdx >= chars.length) return;
   // 拖选两端自动对齐词边界（英文 \w 词；CJK 字符不动 - isWord 不匹配自动跳过）
+  const _tapIdx = (sIdx === eIdx) ? sIdx : -1;   // 单击特征,拖选不进下面的 mark 覆盖
   sIdx = _expandToWordStart(chars, sIdx);
   eIdx = _expandToWordEnd(chars, eIdx);
+  // 单击落在生词下划线内 → 选中范围与下划线一致（用户 2026-08-31 实锤:
+  // 跨行词下划线画得对,点击却按行断开,下半行还可能独立成词被判已掌握）。
+  // 下划线 mark 是分词后的**整词**(rects 跨行分段),从 rects 反推字符集,
+  // 一次选全。拖选(_tapIdx<0)是手动范围,不覆盖。
+  if (_tapIdx >= 0) {
+    const _vm = _findVocabMarkAt(pw, _tapIdx);
+    if (_vm && Array.isArray(_vm.rects) && _vm.rects.length) {
+      let _lo = -1, _hi = -1;
+      for (let _i = 0; _i < chars.length; _i++) {
+        const _c = chars[_i];
+        if (!_c || _c._x0 === undefined) continue;
+        const _cx = (_c._x0 + _c._x1) / 2, _cy = (_c._y0 + _c._y1) / 2;
+        for (const _r of _vm.rects) {
+          if (_cx >= _r[0] && _cx <= _r[2] && _cy >= _r[1] && _cy <= _r[3]) {
+            if (_lo < 0) _lo = _i;
+            _hi = _i;
+            break;
+          }
+        }
+      }
+      if (_lo >= 0 && _hi >= _lo) { sIdx = _lo; eIdx = _hi; }
+    }
+  }
   // 同块严格限在该 bk；跨块只接受两端之间的几何连通路径。
   // bk 缺失才回退 w//1e6，无任何块信息时保持旧行为。
   const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);

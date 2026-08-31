@@ -983,12 +983,46 @@
         window.BWReaderRuntime.nativeLocalRuntime)) return;
       var key = String(lemma || word || '').trim().toLowerCase();
       if (!key) return;
+      // 本地来源（实据修正 2026-08-31）：本书钉着的卡里 label=查询词的
+      // 直接算这个词的卡 —— 用户的存量卡是浮层卡（bind:null），不在
+      // lemma 索引里；卡名即词名，label 匹配让它们零门槛进组合段。
+      var localCards = [];
+      try {
+        var _sn = window.RC && RC.stickynote &&
+          typeof RC.stickynote.notes === 'function'
+            ? RC.stickynote.notes() : [];
+        (Array.isArray(_sn) ? _sn : []).forEach(function (n) {
+          var hh = n && n.html;
+          if (!hh || !hh.content) return;
+          var lb = String(hh.label || '').trim();
+          if (!lb) return;
+          var norm = lb.toLowerCase();
+          if (norm !== key &&
+              norm !== String(word || '').trim().toLowerCase()) return;
+          localCards.push({
+            cid: String(hh.cid || ''), label: lb,
+            content: String(hh.content || ''), at: 0
+          });
+        });
+      } catch (e0) {}
       // @interaction wordcard.index.sync
       fetch('/pdf/api/word-card-index?lemma=' + encodeURIComponent(key))
-        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (r) { return r.ok ? r.json() : null; },
+              function () { return null; })   // 索引失败不牵连本地卡
         .then(function (d) {
-          if (!d || d.ok !== true || !Array.isArray(d.cards)
-            || !d.cards.length) return;
+          var indexed = (d && d.ok === true && Array.isArray(d.cards))
+            ? d.cards : [];
+          // 合并：本地在前（就是眼前这本书的卡），索引补跨书的；按 cid 去重。
+          var seen = {};
+          var merged = [];
+          localCards.concat(indexed).forEach(function (c) {
+            var ck = String(c && c.cid || '');
+            if (!c || !c.content || (ck && seen[ck])) return;
+            if (ck) seen[ck] = true;
+            merged.push(c);
+          });
+          if (!merged.length) return;
+          d = { ok: true, cards: merged };
           // 竞态守卫：回来时框已切到别的词 → 丢弃。
           if (!_wordPopState || _wordPopState.word !== word) return;
           if (pop.querySelector('.wp-cards')) return;

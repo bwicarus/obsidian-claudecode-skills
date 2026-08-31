@@ -10337,8 +10337,13 @@ if (window.__bwPwaProviderOnly) return;
   function buildLocalPageContext(current, runtime) {
     var page = Number(current.page) || 0;
     var visible = localAdapterVisibleText() || localDOMPageText(page, true);
-    var previousPage = page > 1 ? page - 1 : 0;
-    var nextPage = page ? page + 1 : 0;
+    // 有选中内容时正文窗口收缩到**当前页**（用户 2026-08-31）：选中 =
+    // 注意力已聚焦到具体位置，前后页只稀释语境；选中消失时恢复三页窗。
+    // payload 变化经既有 signature 机制自动重发，无需额外触发。
+    var hasSelection = current.selectionState === "active" ||
+      (typeof current.selection === "string" && current.selection.trim());
+    var previousPage = (!hasSelection && page > 1) ? page - 1 : 0;
+    var nextPage = (!hasSelection && page) ? page + 1 : 0;
     return Promise.all([
       previousPage ? localPageRecord(previousPage, "")
         : Promise.resolve(emptyLocalPageRecord("")),
