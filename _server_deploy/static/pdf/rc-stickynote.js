@@ -1378,6 +1378,10 @@
         h.cid,
         'pwa-page-placement'
       );
+      // 词典行/对账在 sig 不变时也要有机会补（幂等：各自有已存在早退）——
+      // 开书首渲时字符层可能还没就绪，取词失败一次不该等于永远没有。
+      appendWordDictLine(box, h.bind);
+      reconcileConsolidatedWordCard(ctl, h);
       return;
     }
     box.__sig = sig; box.innerHTML = '';
