@@ -1202,12 +1202,42 @@ if (window.__bwPwaProviderOnly) return;
   // ── 词锚卡 × 字典（用户 2026-08-31）：锁定的元素本身有字典词条时，
   //   打开卡片就把释义带上 —— 显示层组合，字典内容实时拉不复制，
   //   词条以后升级（AI 深解重生成）这里自动是新的。查不到就安静缺席。
+  // bind 里的词文本：text 字段优先；旧卡（2026-08-31 之前建的）没传
+  // text，只带 from/to —— 从页面字符层把词取回来（卡钉在那页，展开时
+  // 页面多半已渲染；取不到就安静缺席，下次展开再试）。
+  // ⚠ from/to 是 _oi 阅读序坐标，跟数组下标不是一回事。
+  function bindWordTextOf(bind) {
+    var text = String((bind && bind.text) || '').trim();
+    if (text) return text;
+    var page = parseInt(bind && bind.page, 10);
+    var from = parseInt(bind && bind.from, 10);
+    var to = parseInt(bind && bind.to, 10);
+    if (!(page > 0) || !(from >= 0) || !(to >= from) || to - from > 48) {
+      return '';
+    }
+    try {
+      var pw = document.querySelector(
+        '.page-wrap[data-page-num="' + page + '"]');
+      var boxes = pw && pw.__charBoxes;
+      if (!boxes || !boxes.length) return '';
+      var out = '';
+      for (var i = 0; i < boxes.length; i++) {
+        var b = boxes[i];
+        if (!b) continue;
+        var oi = (b._oi != null ? b._oi : i) | 0;
+        if (oi < from || oi > to) continue;
+        if (!b.sp && b.c) out += b.c;
+      }
+      return out.trim();
+    } catch (e) { return ''; }
+  }
+
   function appendWordDictLine(box, bind) {
     try {
       // 词典行 v1 只在 App 内出（runtime 在场才发请求,契约沙箱不发）。
       if (!(window.BWReaderRuntime &&
         window.BWReaderRuntime.nativeLocalRuntime)) return;
-      var text = String((bind && bind.text) || '').trim();
+      var text = bindWordTextOf(bind);
       if (!text || text.length > 32 || text.indexOf(String.fromCharCode(10)) >= 0) return;
       if (text.split(/\s+/).length > 3) return;
       if (box.querySelector('.rc-note-dict')) return;

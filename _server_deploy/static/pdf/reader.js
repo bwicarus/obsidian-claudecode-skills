@@ -5130,7 +5130,37 @@ function _bindCharLayer(cl, pw) {
           // 母语(不需要翻译的语言)单击选词 = 毫无意义 → 单击中文汉字词(纯汉字无假名、本书非日语)不弹任何东西、清掉选中。
           // 拖选/双击行/三击段仍照常弹(走别的分支)。
           const isNativeHan = hasKanji(_t) && !hasKana(_t) && !(declared && BOOK_LANGS.includes('ja'));
-          if (_t && _t.length <= 30 && (isJa || engOk)) {
+          // ── 词上有锚卡 → 点字也展开卡（用户 2026-08-31：点开已是
+          //   整合内容，没必要再按命中像素分「字=旧词典框/标记=卡」两种
+          //   结果）。几何相交判定：字符盒中心落进任一 .pgmark 矩形即命中,
+          //   存量标记零改动适用。命中就把点击交给标记自己的展开逻辑。
+          const _bindMk = (() => {
+            try {
+              if (!_t || _t.length > 30 || !_charSel || !_charSel.pw) return null;
+              const _bl = _charSel.pw.querySelector('.pgbind-layer');
+              if (!_bl) return null;
+              const _marks = _bl.querySelectorAll('.pgmark');
+              if (!_marks.length) return null;
+              const _bx = _charSel.pw.__charBoxes || [];
+              const _a = Math.min(_charSel.startIdx, _charSel.endIdx);
+              const _b = Math.max(_charSel.startIdx, _charSel.endIdx);
+              for (let _i = _a; _i <= _b && _i < _bx.length; _i++) {
+                const _c = _bx[_i]; if (!_c) continue;
+                const _cx = (_c.x0 + _c.x1) / 2, _cy = (_c.y0 + _c.y1) / 2;
+                for (let _m = 0; _m < _marks.length; _m++) {
+                  const _mk = _marks[_m];
+                  const _L = parseFloat(_mk.style.left), _T = parseFloat(_mk.style.top);
+                  const _W = parseFloat(_mk.style.width), _H = parseFloat(_mk.style.height);
+                  if (_cx >= _L && _cx <= _L + _W && _cy >= _T && _cy <= _T + _H) return _mk;
+                }
+              }
+              return null;
+            } catch (_) { return null; }
+          })();
+          if (_bindMk) {
+            toolbar.classList.remove('open');
+            try { _bindMk.click(); } catch (_) {}
+          } else if (_t && _t.length <= 30 && (isJa || engOk)) {
             // 同步关掉刚被 _selByCharRange 打开的工具栏:同一事件 tick 内移除 → 浏览器根本不画它。
             // 此前靠 30ms 后的 showWordPopover 去关 → 工具栏闪一帧再消失(慢词时=「弹框闪烁后消失」)。
             toolbar.classList.remove('open');
