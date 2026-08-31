@@ -1277,9 +1277,26 @@ if (window.__bwPwaProviderOnly) return;
       if (!text || text.length > 32 || text.indexOf(String.fromCharCode(10)) >= 0) return;
       if (text.split(/\s+/).length > 3) return;
       if (box.querySelector('.rc-note-dict')) return;
+      if (box.querySelector('.rc-note-dict-wait')) return;   // 已在查
       var cached = _dictLineCache[text];
       if (cached && cached.failAt &&
-          Date.now() - cached.failAt < 60 * 1000) return;
+          Date.now() - cached.failAt < 20 * 1000) return;
+      // 查询中占位（2026-09-01 实锤「每次点开结果不同」）：这类词条是
+      // AI 现场生成（2-8 秒），首开时词条在路上 —— 没有占位的话用户
+      // 分不清「在查」和「没有」，等不到就关卡，第二次命中缓存才看到。
+      var waitLine = null;
+      if (!(cached && cached.d)) {
+        waitLine = document.createElement('div');
+        waitLine.className = 'rc-note-dict-wait';
+        waitLine.style.cssText =
+          'margin-top:4px;font-size:11px;opacity:.5;color:#cfe6ff';
+        waitLine.textContent = '📖 词典查询中…';
+        box.appendChild(waitLine);
+      }
+      var clearWait = function () {
+        try { if (waitLine) waitLine.remove(); } catch (e6) {}
+        waitLine = null;
+      };
       // 带上书的语言声明与文件：纯汉字菜名在没有 langs/context 时会被
       // 服务端判成英语词走 ECDICT → 查无 → 静默缺席（2026-09-01 实锤）。
       var extra = '';
@@ -1298,7 +1315,14 @@ if (window.__bwPwaProviderOnly) return;
         ? Promise.resolve(cached.d)
         // @interaction dictionary.quick.read
         : fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(text)
-            + '&prewarm=1' + extra)
+            + '&prewarm=1' + extra,
+            (function () {
+              try {
+                var ctl8 = new AbortController();
+                setTimeout(function () { ctl8.abort(); }, 8000);
+                return { signal: ctl8.signal };
+              } catch (e7) { return {}; }
+            })())
             .then(function (r) {
               if (!r.ok) throw new Error('http-' + r.status);
               return r.json();
@@ -1309,6 +1333,7 @@ if (window.__bwPwaProviderOnly) return;
               return d;
             })
             .catch(function (err) {
+              clearWait();
               _dictLineCache[text] = { failAt: Date.now() };
               // 静默失败教训：没有控制台的设备上，沉默 = 不可诊断。
               // 网络层失败渲一行淡字说明原因；查无词条（ok:false）才安静。
@@ -1329,6 +1354,7 @@ if (window.__bwPwaProviderOnly) return;
             });
       ready
         .then(function (d) {
+          clearWait();
           if (!d || d.ok !== true || !box.isConnected) return;
           if (box.querySelector('.rc-note-dict')) return;
           var zh = String(d.translation || d.zh || '').trim();
