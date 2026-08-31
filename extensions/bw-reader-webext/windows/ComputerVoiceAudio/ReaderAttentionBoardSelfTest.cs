@@ -51,10 +51,9 @@ internal static class ReaderAttentionBoardSelfTest
 
     /// 一条 pending + 一条 acknowledged 混在一起。
     ///
-    /// 登记表核对要的就是这种状态：只有这样「开口：」和「- 待办｜N 条
-    /// 已确认」才会**同时**出现在慢板上。用纯 pending 的夹具时，
-    /// 「已确认待办」那条登记项永远缺席 —— 2026-08-30 我就是这么被
-    /// 自检抓住的（注释里还写着"夹具里有"，其实没有）。
+    /// 2026-08-31 起 acknowledged 不再产出任何板上行（「另有 N 条已确认」
+    /// 记账行连同登记项一起裁掉），这个夹具的价值变成反向的：
+    /// 混着 acknowledged 时板上**只**能出现 pending 那条。
     private static void WriteMixedTodos(string dir)
     {
         File.WriteAllText(
@@ -133,11 +132,12 @@ internal static class ReaderAttentionBoardSelfTest
             throw new InvalidOperationException(
                 "已 ack 的待办又被当成没说过 —— 事实一直成立就会一直吵");
         }
-        if (!afterSaid.Contains("待办", StringComparison.Ordinal))
+        // 用户 2026-08-31：ack 过的**彻底退场** —— 板是唤醒过滤器不是
+        // 记账本，「另有 N 条已确认」只在添阅读量。状态在真值库里。
+        if (afterSaid.Contains("另有", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                "ack 之后待办彻底消失了 —— 它还没完成，"
-                + "该留在板上让它知道，只是不要再说");
+                "已 ack 的待办还在板上记账 —— 那行已裁定为多余");
         }
         checks.Add("attention-board-does-not-repeat-acked-todo");
 
@@ -481,6 +481,23 @@ internal static class ReaderAttentionBoardSelfTest
                 "祈使句出现却没立刻落盘 —— 该唤醒的没唤醒");
         }
         checks.Add("attention-board-slow-flush-batches-context");
+
+        // 祈使句**退场**（ack 后消失）不值得一次唤醒 —— 搭车
+        // （用户 2026-08-31）。忘了 ack 的句子会留到下一轮，自愈。
+        if (ReaderAttentionBoard.DecideSlowFlushForSelfTest("上下文F", ""))
+        {
+            throw new InvalidOperationException(
+                "祈使句退场（ack）也立刻落盘了 —— 退场没有新动作，该搭车");
+        }
+        // 退场攒着期间来了**新**祈使句 → 仍要立刻落盘。
+        if (!ReaderAttentionBoard.DecideSlowFlushForSelfTest(
+            "上下文F\n待办 y「新事」还没跟他说过。",
+            "待办 y「新事」还没跟他说过。"))
+        {
+            throw new InvalidOperationException(
+                "退场攒着期间来了新祈使句却没立刻落盘");
+        }
+        checks.Add("attention-board-imperative-retire-rides-along");
 
         // ⑬ 路由消费（2026-08-30 通知链定稿）：板子按路由结论决定谁上板。
         //

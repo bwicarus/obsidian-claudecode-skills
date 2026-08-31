@@ -108,8 +108,9 @@ internal static class ReaderAttentionBoard
             + "扔掉它不如给出来 + 标明）。只有从来没有过定位记录才写"
             + "「不知道」——**「不知道」和「在别处」是两回事**，别混"),
 
-        new("slow", "已确认待办", "另有 ",
-            "ack 过、还没做完的条数 —— 提醒别重复说"),
+        // 「已确认待办」登记项已随记账行一起裁掉（用户 2026-08-31）：
+        // 板是唤醒过滤器不是记账本 —— 不该重复说的东西根本不在板上，
+        // 一条计数行只在给读的一方添阅读量。完成与否由真值库追踪。
         new("slow", "复习到期", "现在到期待复习卡共",
             "到期 Anki 卡的数量，4 张一档取整（陈述句，看到不用动）。"
             + "积到 32 会由生产者另建一条真待办变成祈使句 —— 那条走 ack "
@@ -845,10 +846,7 @@ internal static class ReaderAttentionBoard
     private static bool DecideSlowFlush(string full, string imperative)
     {
         bool flush;
-        if (!_slowFlushedOnce
-            || !string.Equals(
-                imperative, _lastFlushedSlowImperative,
-                StringComparison.Ordinal))
+        if (!_slowFlushedOnce || HasNewImperativeLine(imperative))
         {
             flush = true;
         }
@@ -872,6 +870,32 @@ internal static class ReaderAttentionBoard
             _contextChangesSinceFlush = 0;
         }
         return flush;
+    }
+
+    /// 祈使句只有**新增**才值得立刻唤醒（用户 2026-08-31）：ack 之后的
+    /// 退场是"少了一件事"，没有新动作要做，搭下一次落盘的车。两个好处
+    /// 都是用户点出来的：① 忘了 ack（= 忘了登记通知）的句子会留到下一次
+    /// 更新继续出现 —— 自愈重试；② 退场本身不再作为一次唤醒去打扰对面。
+    private static bool HasNewImperativeLine(string imperative)
+    {
+        if (string.Equals(
+            imperative, _lastFlushedSlowImperative, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        var flushed = new HashSet<string>(
+            _lastFlushedSlowImperative.Split(
+                '\n', StringSplitOptions.RemoveEmptyEntries),
+            StringComparer.Ordinal);
+        foreach (string line in imperative.Split(
+            '\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!flushed.Contains(line))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// 只给自检用：走真实的落盘判定（同一份状态机，不抄副本）。
@@ -1270,15 +1294,9 @@ internal static class ReaderAttentionBoard
             imperatives.Append("。").Append(NL);
         }
         text.Append(imperatives);
-        int waiting = todos.Count - fresh.Count;
-        if (waiting > 0)
-        {
-            // 「已确认」而不是「已说过」：ack 表示助手收到了，不表示它真的
-            // 对用户开过口。说成"已说过"会让下一轮误以为用户已经知道 ——
-            // 那是我们无法验证的事。
-            text.Append("另有 ").Append(waiting)
-                .Append(" 条待办你已确认、还没做完，别重复说。").Append(NL);
-        }
+        // ack 过的待办不再以任何形式出现（用户 2026-08-31 裁掉了
+        // 「另有 N 条已确认」的记账行）：不该重复说的东西根本不在板上，
+        // 计数只是阅读量。ack 状态与完成与否都在真值库里。
         // 写盘层据此判断"这轮有没有值得立刻唤醒对面的变化"。
         _renderedSlowImperative = imperatives.ToString();
         return text.ToString();
