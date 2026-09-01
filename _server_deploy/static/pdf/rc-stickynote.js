@@ -2268,10 +2268,51 @@
     } catch (e) {}
   }
 
+  // ── bind 质量自愈（2026-09-02,桥留底 document-notes 实锤两类坏数据）:
+  //   「パンセオ」卡 bind.text="パンセ"(跨行断尾少一字,点 オ 不开卡)、
+  //   另一副本 bind.text="よ" from=to=341(建卡时区间整个指错,点词永远
+  //   不开卡而是漏进字典)。词卡的 label 就是词本身 —— 用它在字符层重新
+  //   解析,解析出的文本与 label 逐字一致才写回;不一致宁可不动。
+  //   每卡 30s 内只试一次(页面未渲染时失败,下次挂载再试)。
+  function _healWordBind(ctl, presentation, b) {
+    try {
+      if (!window.__pageBindResolveOnly) return null;
+      if (!b || b.kind !== 'page-chars') return null;
+      var label = String(presentation.label || '').trim();
+      var norm = function (s) { return String(s || '').replace(/\s+/g, ''); };
+      var want = norm(label);
+      if (!want || want.length < 2 || want.length > 32) return null;
+      if (norm(b.text) === want) return null;   // bind 文本与词一致=没病
+      if (ctl._bindHealAt && Date.now() - ctl._bindHealAt < 30000) return null;
+      ctl._bindHealAt = Date.now();
+      var r = window.__pageBindResolveOnly({
+        kind: 'page-chars', page: parseInt(b.page, 10) || 0, text: label
+      });
+      if (!r || r.ok !== true || norm(r.text) !== want) return null;
+      var slot = wordBindSlot(ctl.note);
+      if (!slot || !ctl.note[slot]) return null;
+      var healed = {};
+      for (var k in b) {
+        if (Object.prototype.hasOwnProperty.call(b, k)) healed[k] = b[k];
+      }
+      healed.from = r.from; healed.to = r.to; healed.text = label;
+      ctl.note[slot].bind = healed;
+      var pf = {}; pf[slot] = ctl.note[slot];
+      patchNote(ctl.note, pf);
+      try {
+        console.info('[bind] 自愈', label,
+          b.from + '-' + b.to + '(' + String(b.text || '') + ')',
+          '→', r.from + '-' + r.to);
+      } catch (e) {}
+      return healed;
+    } catch (e) { return null; }
+  }
+
   function _applyWordBind(ctl) {
     var presentation = wordCardPresentation(ctl.note);
     var b = presentation.bind;
     if (!b || !window.__pageBindCard) return;
+    b = _healWordBind(ctl, presentation, b) || b;
     // ⚠ 先藏起来再试。挂载点是 04-render.js 的 dataset.loaded='1'，那时
     //   `wrap.__charBoxes` 还没挂上（08-charlayer 的 fetch 是异步的），
     //   所以第一次必然拿到 no-char-layer。不先藏的话，每次翻页/缩放都会先

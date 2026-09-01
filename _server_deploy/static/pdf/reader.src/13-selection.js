@@ -1137,7 +1137,10 @@ function _bindCharLayer(cl, pw) {
                     const _t2 = parseInt(_bd.to, 10);
                     if (!(_f2 >= 0 && _t2 >= _f2)) continue;
                     if (_hi >= _f2 && _lo <= _t2) {
-                      const _cands = [_n2.id, _n2.html.cid, _n2.html.sourceUid];
+                      // noteId 第一优先:noteIdOf = noteId || id,标记挂载键
+                      // 跟着它走 —— 只查 id 会在 noteId 卡上永远 miss。
+                      const _cands = [_n2.noteId, _n2.id,
+                                      _n2.html.cid, _n2.html.sourceUid];
                       for (const _cd of _cands) {
                         const _uid = String(_cd || '').replace(/[^\w-]/g, '');
                         const _mk2 = _uid && _bl.querySelector(
