@@ -292,6 +292,22 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             )
         }
 
+        if decodedPath == "/pdf/api/card-asset-ensure" {
+            guard request.method == .GET else {
+                return response(
+                    status: .methodNotAllowed,
+                    text: "method not allowed",
+                    headers: [HTTPHeader("Allow"): "GET"]
+                )
+            }
+            guard trustedResourceSurface(
+                referer: request.headers[HTTPHeader("Referer")]
+            ) != nil else {
+                return response(status: .forbidden, text: "invalid referer")
+            }
+            return await serveNativeCardAssetEnsure(request)
+        }
+
         if decodedPath == "/pdf/api/card-asset" {
             guard request.method == .GET else {
                 return response(
@@ -491,6 +507,66 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
     /// 还没同步过的图；已同步的永远本地秒回。
     /// 缓存头用 7 天而不是 1 年：本地 store 自身有 512MB 上限管容量，
     /// HTTP 缓存层再存一份是双份 —— 1 年 immutable 是 54GB 事故的老路。
+    /// 按需补留底的设备侧代理（2026-09-01）：把渲染失败的原始外链投给
+    /// 桥现场抓一份，拿回资产 id —— 之后那张图走本地资产路由，源站
+    /// 限流期建的存量卡由此零迁移救活。
+    private func serveNativeCardAssetEnsure(
+        _ request: HTTPRequest
+    ) async -> HTTPResponse {
+        guard let raw = request.query["url"],
+              raw.count <= 4_096,
+              let target = URL(string: raw),
+              target.scheme?.lowercased() == "https" else {
+            return response(
+                status: .badRequest,
+                text: "invalid url",
+                headers: [HTTPHeader("X-BW-Reader-Error"): "invalid-url"]
+            )
+        }
+        var ensure = URLRequest(url: URL(
+            string: "https://bwicarus-2.taile44d0c.ts.net/reader-card-asset/ensure"
+        )!)
+        ensure.httpMethod = "POST"
+        ensure.setValue(
+            "application/json", forHTTPHeaderField: "Content-Type")
+        ensure.httpBody = try? JSONSerialization.data(
+            withJSONObject: ["url": raw])
+        ensure.timeoutInterval = 25
+        do {
+            let (data, reply) = try await URLSession.shared.data(for: ensure)
+            let status = (reply as? HTTPURLResponse)?.statusCode ?? 0
+            guard status == 200,
+                  let object = try? JSONSerialization.jsonObject(with: data)
+                    as? [String: Any],
+                  let assetId = object["assetId"] as? String,
+                  ReaderCardAssetLocalStore.isValidAssetID(assetId) else {
+                return response(
+                    status: .init(422, phrase: "Unprocessable Entity"),
+                    text: "ensure failed (bridge status \(status))",
+                    headers: [
+                        HTTPHeader("X-BW-Reader-Error"): "ensure-failed"
+                    ]
+                )
+            }
+            return dataResponse(
+                request,
+                data: try JSONSerialization.data(
+                    withJSONObject: ["ok": true, "assetId": assetId]),
+                contentType: "application/json; charset=utf-8",
+                cacheControl: "no-store",
+                additionalHeaders: [:]
+            )
+        } catch {
+            return response(
+                status: .badGateway,
+                text: "bridge unreachable",
+                headers: [
+                    HTTPHeader("X-BW-Reader-Error"): "ensure-bridge-unreachable"
+                ]
+            )
+        }
+    }
+
     private func serveNativeCardAsset(
         _ request: HTTPRequest
     ) async -> HTTPResponse {
@@ -509,7 +585,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 request,
                 data: hit.data,
                 contentType: hit.contentType,
-                cacheControl: "private, max-age=604800, immutable",
+                cacheControl: "no-store",
                 additionalHeaders: [
                     HTTPHeader("X-BW-Card-Asset"): "local-hit"
                 ]
@@ -529,7 +605,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 request,
                 data: payload.data,
                 contentType: payload.contentType,
-                cacheControl: "private, max-age=604800, immutable",
+                cacheControl: "no-store",
                 additionalHeaders: [
                     HTTPHeader("X-BW-Card-Asset"): "bridge-fill"
                 ]

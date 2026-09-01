@@ -290,6 +290,7 @@ if (window.__bwPwaProviderOnly) return;
   var NOTE_LP_KEY = 'rc-note-longpress';   // 长按进入编辑时长(毫秒;rc-stickynote.lpMs 读,钳 200–800 缺省 350)
   var NOTE_BLUR_KEY = 'rc-note-blur';      // 磨砂强度(blur px;rc-stickynote.noteBlur 读,钳 0–24 缺省 10)
   var INK_DOUBLE_TAP_KEY = 'rc-ink-double-tap-action';
+  var BINDRAIL_HIDE_KEY = 'rc-bindrail-hidden';   // '1'=隐藏右侧锚定角标轨
   function _fillNotePane() {
     var op = $('rcset-note-op'), ov = $('rcset-note-op-val'), ac = $('rcset-note-autoc');
     if (!op) return;
@@ -315,11 +316,21 @@ if (window.__bwPwaProviderOnly) return;
       bl.value = px;
       if (bv) bv.textContent = px;
     }
+    var br = $('rcset-bindrail-show');
+    if (br) {
+      lsSet(BINDRAIL_HIDE_KEY, br.checked ? '0' : '1');
+      try {
+        document.documentElement.classList.toggle(
+          'bw-hide-bindrail', !br.checked);
+      } catch (e) {}
+    }
     var dt = $('rcset-ink-double-tap');
     if (dt) {
       var action = lsGet(INK_DOUBLE_TAP_KEY) || 'eraser';
       dt.value = /^(eraser|selection|none)$/.test(action) ? action : 'eraser';
     }
+    var br = $('rcset-bindrail-show');
+    if (br) br.checked = (lsGet(BINDRAIL_HIDE_KEY) !== '1');
   }
   function _saveNotePane() {
     var op = $('rcset-note-op'), ac = $('rcset-note-autoc');
@@ -1149,6 +1160,8 @@ if (window.__bwPwaProviderOnly) return;
         '<div class="ep-set-slrow"><span>磨砂强度 <small id="rcset-note-blur-val">10</small> px</span><input type="range" id="rcset-note-blur" min="0" max="24" step="2" value="10"></div>' +
         '<div class="ep-set-note" style="margin:-2px 0 12px">透过便签看到的下方正文的模糊程度：0 = 不模糊（纯半透明），越大越朦胧。</div>' +
         '<label class="ep-set-chk"><input type="checkbox" id="rcset-note-autoc"> 文字 / 手写笔自动对比色</label>' +
+        '<label class="ep-set-chk"><input type="checkbox" id="rcset-bindrail-show" checked> 显示右侧锚定角标轨</label>' +
+        '<div class="ep-set-note">关：隐藏页面右缘那排锚定卡片的圆点角标（卡片与词上的标记不受影响）。保存后立即生效。</div>' +
         '<div class="ep-set-note">开：按便签底色深浅自动选前景色——浅色便签配深字深笔，深色便签（石墨/墨绿）配浅字浅笔；<b>已画的笔迹不改色</b>，只影响文字显示和新笔画。关：固定深色文字＋红笔。</div>' +
         '<hr class="ep-set-hr">' +
         '<label style="' + LBL + '">👆 触屏双击动作</label>' +

@@ -659,6 +659,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-library/user-state",
             new[] { "GET", "POST", "OPTIONS" },
             context => HandleLibraryUserStateAsync(context, serviceToken));
+        // 按需补留底（2026-09-01）：建卡时本机被源站限流而保留原链的
+        // 存量卡，设备在渲染失败时把原链投回来，这里现场抓一份 ——
+        // 抓成了以后那张图就永远走本地资产，不再依赖源站。
+        app.MapMethods(
+            "/reader-card-asset/ensure",
+            new[] { "POST", "OPTIONS" },
+            context => HandleCardAssetEnsureAsync(context, serviceToken));
         // 语音助手的主动提示板。它盯着 BoardPath 一个地方就够。
         // ⚠ 板子**不存数据** —— 只是把 runtime 目录里已有的
         // notifications-*.json 和位置挑一挑、渲成一份很小的文本。
@@ -1537,6 +1544,54 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             return false;
         }
         return true;
+    }
+
+    private async Task HandleCardAssetEnsureAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "card-asset-ensure")) return;
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        string url = "";
+        try
+        {
+            using var reader = new StreamReader(context.Request.Body);
+            string raw = await reader.ReadToEndAsync(
+                serviceCancellationToken).ConfigureAwait(false);
+            if (raw.Length <= 8192 &&
+                System.Text.Json.Nodes.JsonNode.Parse(raw)
+                    is System.Text.Json.Nodes.JsonObject body)
+            {
+                url = (body["url"]?.GetValue<string>() ?? "").Trim();
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+        string? assetId = url.Length > 0
+            ? await ReaderCardAssetStore.EnsureAsync(
+                url, serviceCancellationToken).ConfigureAwait(false)
+            : null;
+        AppendOutputPickupLog(
+            "card-asset-ensure	"
+            + (assetId ?? "FAIL")
+            + "	" + url[..Math.Min(80, url.Length)]);
+        context.Response.StatusCode = assetId is null
+            ? StatusCodes.Status422UnprocessableEntity
+            : StatusCodes.Status200OK;
+        await context.Response.WriteAsJsonAsync(
+            new
+            {
+                ok = assetId is not null,
+                assetId,
+                code = assetId is null
+                    ? "BW_CARD_ASSET_ENSURE_FAILED" : "BW_CARD_ASSET_ENSURED",
+            },
+            serviceCancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleLibraryUserStateAsync(

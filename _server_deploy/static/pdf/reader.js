@@ -5163,6 +5163,43 @@ function _bindCharLayer(cl, pw) {
               if (!_t || _t.length > 30 || !_charSel || !_charSel.pw) return null;
               const _bl = _charSel.pw.querySelector('.pgbind-layer');
               if (!_bl) return null;
+              // ①区间判定（用户 2026-09-01：边缘像素还会漏到翻译卡）——
+              // 选中词的 _oi 区间与本页词锚卡的 bind 区间有交集就开卡，
+              // 不看命中像素；几何检测降为兜底（老数据/uid 对不上时）。
+              try {
+                const _sn = (window.RC && RC.stickynote &&
+                  typeof RC.stickynote.notes === 'function')
+                    ? RC.stickynote.notes() : [];
+                if (_sn && _sn.length) {
+                  const _pg = +(_charSel.pw.dataset.pageNum || 0);
+                  const _bx0 = _charSel.pw.__charBoxes || [];
+                  const _ia = Math.min(_charSel.startIdx, _charSel.endIdx);
+                  const _ib = Math.max(_charSel.startIdx, _charSel.endIdx);
+                  let _lo = Infinity, _hi = -1;
+                  for (let _i2 = _ia; _i2 <= _ib && _i2 < _bx0.length; _i2++) {
+                    const _c2 = _bx0[_i2]; if (!_c2) continue;
+                    const _oi2 = (_c2._oi != null ? _c2._oi : _i2) | 0;
+                    if (_oi2 < _lo) _lo = _oi2;
+                    if (_oi2 > _hi) _hi = _oi2;
+                  }
+                  for (const _n2 of _sn) {
+                    const _bd = _n2 && _n2.html && _n2.html.bind;
+                    if (!_bd || _bd.kind !== 'page-chars') continue;
+                    if ((parseInt(_bd.page, 10) || 0) !== _pg) continue;
+                    const _f2 = parseInt(_bd.from, 10);
+                    const _t2 = parseInt(_bd.to, 10);
+                    if (!(_f2 >= 0 && _t2 >= _f2)) continue;
+                    if (_hi >= _f2 && _lo <= _t2) {
+                      const _uid = String(
+                        _n2.html.cid || _n2.html.sourceUid || ''
+                      ).replace(/[^\w-]/g, '');
+                      const _mk2 = _uid && _bl.querySelector(
+                        '.pgmark[data-bindkey="u' + _uid + '"]');
+                      if (_mk2) return _mk2;
+                    }
+                  }
+                }
+              } catch (_) {}
               const _marks = _bl.querySelectorAll('.pgmark');
               if (!_marks.length) return null;
               const _bx = _charSel.pw.__charBoxes || [];
@@ -14612,6 +14649,11 @@ window._lbClick = _lbClick;
       block: parseInt(bind.block, 10) || 0,
       text: bind.text || ''
     });
+    // 分词扩展（用户 2026-09-01：「真正按照分词支持跨行」）——
+    // AI 给的 text 常在行尾截断（它读到的页面文本按行分块，跨行词只有
+    // 前半，实锤 コチュジャ|ン）。解析结果命中生词分词标记（fugashi
+    // 整词、rects 天然跨行）时扩展到整词；没有标记的词保持原匹配。
+    if (range) range = _expandRangeToVocabMark(pw, boxes, range);
     if (!range) {
       return {
         ok: false, why: 'range-unresolved', page: page,
@@ -14629,6 +14671,56 @@ window._lbClick = _lbClick;
     if (!rects) return { ok: false, why: 'no-rect', page: page };
     return { ok: true, page: page, pw: pw, boxes: boxes, range: range,
              rects: rects, last: rects[rects.length - 1] };
+  }
+
+  function _expandRangeToVocabMark(pw, boxes, range) {
+    try {
+      var marks = pw && pw.__vocabMarks;
+      if (!marks || !marks.length || !range || !range.boxes ||
+          !range.boxes.length) return range;
+      var probe = [range.boxes[0],
+                   range.boxes[range.boxes.length - 1]];
+      var mark = null;
+      for (var p0 = 0; p0 < probe.length && !mark; p0++) {
+        var c = probe[p0];
+        if (!c || c._x0 === undefined) continue;
+        var cx = (c._x0 + c._x1) / 2, cy = (c._y0 + c._y1) / 2;
+        for (var m = 0; m < marks.length && !mark; m++) {
+          for (var r0 = 0; r0 < (marks[m].rects || []).length; r0++) {
+            var r = marks[m].rects[r0];
+            if (cx >= r[0] && cx <= r[2] && cy >= r[1] && cy <= r[3]) {
+              mark = marks[m];
+              break;
+            }
+          }
+        }
+      }
+      if (!mark) return range;
+      var lo = range.lo, hi = range.hi, hit = [];
+      for (var i = 0; i < boxes.length; i++) {
+        var b = boxes[i];
+        if (!b || b._x0 === undefined) continue;
+        var bx = (b._x0 + b._x1) / 2, by = (b._y0 + b._y1) / 2;
+        for (var r1 = 0; r1 < (mark.rects || []).length; r1++) {
+          var rr = mark.rects[r1];
+          if (bx >= rr[0] && bx <= rr[2] && by >= rr[1] && by <= rr[3]) {
+            var oi = (b._oi != null ? b._oi : i) | 0;
+            if (oi < lo) lo = oi;
+            if (oi > hi) hi = oi;
+            break;
+          }
+        }
+      }
+      if (lo === range.lo && hi === range.hi) return range;
+      var expanded = [];
+      var ord = _byOi(boxes);
+      for (var k = 0; k < ord.length; k++) {
+        var oi2 = ord[k]._oi | 0;
+        if (oi2 >= lo && oi2 <= hi) expanded.push(ord[k]);
+      }
+      return { lo: lo, hi: hi, boxes: expanded,
+               how: (range.how || 'text') + '+vocab' };
+    } catch (e) { return range; }
   }
 
   function _bindScreenPoint(g) {

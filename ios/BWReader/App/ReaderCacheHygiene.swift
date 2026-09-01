@@ -42,6 +42,12 @@ enum ReaderCacheHygiene {
             WKWebsiteDataTypeDiskCache,
             WKWebsiteDataTypeMemoryCache,
             WKWebsiteDataTypeOfflineWebApplicationCache,
+            // 2026-09-01 实锤 10.16GB 堆在 Library/WebKit：SWR 页图走的
+            // CacheStorage 属 FetchCache —— 不在清单里,启动清理每次
+            // "清了"却清不到大头。FetchCache 是纯缓存,清后按需重拉。
+            // ⚠ IndexedDB/LocalStorage 是权威数据(精确高亮/词汇态),
+            // 永远不进这个清单。
+            WKWebsiteDataTypeFetchCache,
         ]
     }
 
@@ -96,6 +102,32 @@ enum ReaderCacheHygiene {
             } else {
                 entries.append(Entry(
                     path: root.lastPathComponent, bytes: measure(root)))
+            }
+        }
+        // WebKit 里面再拆一层（2026-09-01：10GB 只写「WebKit」等于没说 ——
+        // 是页图缓存还是 IndexedDB,决定能不能清、怎么清）。
+        let webkitData = FileManager.default.urls(
+            for: .libraryDirectory, in: .userDomainMask
+        ).first?.appendingPathComponent("WebKit", isDirectory: true)
+        if let webkitData,
+           let subs = try? FileManager.default.contentsOfDirectory(
+               at: webkitData, includingPropertiesForKeys: nil) {
+            for sub in subs {
+                var isDir: ObjCBool = false
+                guard FileManager.default.fileExists(
+                    atPath: sub.path, isDirectory: &isDir),
+                    isDir.boolValue else { continue }
+                if let inner = try? FileManager.default.contentsOfDirectory(
+                    at: sub, includingPropertiesForKeys: nil) {
+                    for one in inner {
+                        let bytes = measure(one)
+                        if bytes > 64 * 1024 * 1024 {
+                            entries.append(Entry(
+                                path: "WebKit/…/" + one.lastPathComponent,
+                                bytes: bytes))
+                        }
+                    }
+                }
             }
         }
         return entries.sorted { $0.bytes > $1.bytes }

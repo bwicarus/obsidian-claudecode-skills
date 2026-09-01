@@ -2640,6 +2640,32 @@ if (window.__bwPwaProviderOnly) return;
           return;
         }
       }
+      // 按需补留底(2026-09-01):源站限流期建的卡保留了原始外链,
+      // 设备一直直连一直挨 429。外链失败时把原链投给桥现场抓一份,
+      // 抓成换本地资产路由 —— 存量卡零迁移救活,以后永远走本地。
+      if (_hasNativeRuntime() && !image.hasAttribute('data-ensure-tried')) {
+        var extSrc = '';
+        var mProxy = /^\/pdf\/api\/img-proxy\?url=(https%3A%2F%2F[^&]+)$/.exec(src0);
+        if (mProxy) {
+          try { extSrc = decodeURIComponent(mProxy[1]); } catch (eDec) {}
+        } else if (/^https:\/\//.test(src0)) {
+          extSrc = src0;
+        }
+        if (extSrc && extSrc.indexOf('bwicarus-2.taile44d0c.ts.net') < 0) {
+          image.setAttribute('data-ensure-tried', '1');
+          // @interaction cardasset.ensure.request
+          fetch('/pdf/api/card-asset-ensure?url=' + encodeURIComponent(extSrc))
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) {
+              if (d && d.ok && d.assetId && image.isConnected) {
+                image.setAttribute(
+                  'src', '/pdf/api/card-asset?id=' + d.assetId);
+              }
+            })
+            .catch(function () {});
+          return;
+        }
+      }
       var toBridge = /^\/pdf\/api\/img-proxy\?url=https%3A%2F%2Fbwicarus-2\./.test(src0) ||
                      /^\/pdf\/api\/card-asset(?:\?|$)/.test(src0) ||
                      /^\/reader-card-asset\//.test(src0);

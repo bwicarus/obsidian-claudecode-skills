@@ -267,6 +267,9 @@ NATIVE_RUNTIME_INTERFACE_ENTRIES = {
     "/pdf/api/card-asset": (
         "native", ("GET",), ("epub", "pdf"), "__native_owner__"
     ),
+    "/pdf/api/card-asset-ensure": (
+        "native", ("GET",), ("epub", "pdf"), "__native_owner__"
+    ),
     "/pdf/api/img-proxy": (
         "native", ("GET",), ("epub", "pdf"), "__native_owner__"
     ),

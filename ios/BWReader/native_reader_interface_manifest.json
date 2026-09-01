@@ -831,6 +831,21 @@
       "description": "Serve a bridge card image from the device-local asset store, filling from the Windows bridge on first miss."
     },
     {
+      "path": "/pdf/api/card-asset-ensure",
+      "match": "exact",
+      "owner": "native",
+      "methods": [
+        "GET"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": null,
+      "description": "Ask the Windows bridge to fetch and store one external card image on demand."
+    },
+    {
       "path": "/pdf/api/card-repository/bootstrap",
       "match": "exact",
       "owner": "pi",

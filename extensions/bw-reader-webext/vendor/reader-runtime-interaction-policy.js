@@ -595,6 +595,15 @@
       }
     ),
     networkRead(
+      'cardasset.ensure.request',
+      ['/pdf/api/card-asset-ensure'],
+      {
+        transport: { extensionBridge: false, serviceWorker: 'none' },
+        reason: '外链图片失败时请桥现场补留底（设备本地路由,App 内闭环）;'
+          + '其它表面无此路由,404 由调用方静默跳过。'
+      }
+    ),
+    networkRead(
       'wordcard.index.sync',
       ['/pdf/api/word-card-index'],
       {

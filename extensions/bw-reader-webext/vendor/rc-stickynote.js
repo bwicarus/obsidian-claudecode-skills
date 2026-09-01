@@ -163,6 +163,11 @@ if (window.__bwPwaProviderOnly) return;
   var _cssIn = false;
   function injectCss() {
     if (_cssIn) return; _cssIn = true;
+    // 浮标轨开关（设置·便签）：启动按设备级键应用；保存时即时翻转。
+    try {
+      document.documentElement.classList.toggle(
+        'bw-hide-bindrail', lsGet('rc-bindrail-hidden') === '1');
+    } catch (e) {}
     var css = document.createElement('style'); css.id = 'rc-stickynote-css';
     css.textContent = [
       // 根:absolute 挂内容容器内(pw / .ep-sec 均 position:relative),left/top=锚点百分比 → 随内容滚动
@@ -303,6 +308,7 @@ if (window.__bwPwaProviderOnly) return;
       '@media (pointer:coarse){.rc-note.rc-note-free-card-dot .vc-card.vc-dot .vc-card-dot::after{content:"";position:absolute;left:50%;top:50%;width:max(40px,100%);height:max(40px,100%);transform:translate(-50%,-50%)}}',
       '.rc-note.rc-note-hashtml .rc-note-text,.rc-note.rc-note-hashtml .rc-note-tools,.rc-note.rc-note-hashtml .rc-note-ink{display:none!important}',
       '.rc-note.rc-note-hashtml.rc-note-collapsed .rc-note-html{display:none}',
+      '.bw-hide-bindrail .pgbind-rail-dot,.bw-hide-bindrail .pgbind-rail{display:none !important}',
       // ── 卡内完整词条区（用户 2026-08-31：把词典小框那套放进卡里）──
       '.rc-note-dict{margin-top:6px;padding:8px 10px;border-top:1px dashed rgba(160,160,180,.35);font-size:13px;line-height:1.55;color:#cfe6ff}',
       '.rc-note-dict .rnd-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px}',
@@ -1289,7 +1295,7 @@ if (window.__bwPwaProviderOnly) return;
   //   展开瞬间自动补 —— 性能与功能语义都保住。
   function appendDictWhenVisible(ctl, box, h) {
     var run = function () {
-      appendWordDictLine(box, h.bind, h.label);
+      appendWordDictLine(ctl, box, h.bind, h.label);
       reconcileConsolidatedWordCard(ctl, h);
     };
     var visible = false;
@@ -1313,11 +1319,18 @@ if (window.__bwPwaProviderOnly) return;
     } catch (e2) { run(); }
   }
 
-  function appendWordDictLine(box, bind, label) {
+  function appendWordDictLine(ctl, box, bind, label) {
     try {
       // 词典行 v1 只在 App 内出（runtime 在场才发请求,契约沙箱不发）。
       if (!(window.BWReaderRuntime &&
         window.BWReaderRuntime.nativeLocalRuntime)) return;
+      // 已固化进 content 的卡不再查（用户方案：词典文字是卡的一部分）。
+      try {
+        var hh0 = ctl && ctl.note && ctl.note.html;
+        if (hh0 && String(hh0.content || '').indexOf('vc-dict-sec') >= 0) {
+          return;
+        }
+      } catch (eC) {}
       // ⚠ 实据修正（2026-08-31 深夜）：用户的卡是浮层卡（bind:null,
       //   unbound）—— 只靠 bind 取词，这批卡的词典行**永远缺席**。
       //   卡名（label）就是词名（キムチ/ローストビーフ…），bind 取不到
@@ -1443,8 +1456,6 @@ if (window.__bwPwaProviderOnly) return;
             + '<span class="rnd-word">' + esc(head) + '</span>'
             + (pitch || (reading || phon
                 ? '<span>' + esc(reading || phon) + '</span>' : ''))
-            + '<button type="button" class="rnd-speak" '
-            + 'title="\u53D1\u97F3">\uD83D\uDD0A</button>'
             + '</div>';
           // 变形行（用户 2026-09-01：卡内词典要跟词典框同级）——
           // 当前形 ≠ 原形时显示「当前形 X 原形 Y ＋语法标签」。
@@ -1482,23 +1493,17 @@ if (window.__bwPwaProviderOnly) return;
             h2 += '<div class="rnd-ex"><div class="rnd-ex-zh">'
               + esc(defText.slice(0, 400)) + '</div></div>';
           }
-          var div = document.createElement('div');
-          div.className = 'rc-note-dict';
-          div.innerHTML = h2;
-          var speakBtn = div.querySelector('.rnd-speak');
-          if (speakBtn) {
-            speakBtn.addEventListener('click', function (ev) {
-              ev.stopPropagation();
-              try {
-                var u = new SpeechSynthesisUtterance(
-                  d.jp ? (reading || head) : head);
-                u.lang = d.jp ? 'ja-JP' : 'en-US';
-                window.speechSynthesis.cancel();
-                window.speechSynthesis.speak(u);
-              } catch (e2) {}
-            });
-          }
-          box.appendChild(div);
+          // 用户 2026-09-01 方案：词典文字**写进卡片 content** ——
+          // 独立 DOM 会被卡片的固定高度/滚动体系裁掉（诊断行跑到框外
+          // 实锤）；content 走卡片自己的渲染流，天然可见，patchNote
+          // 持久化后下次开卡零查询、跨设备随包同步。
+          var hh = ctl && ctl.note && ctl.note.html;
+          if (!hh) return;
+          if (String(hh.content || '').indexOf('vc-dict-sec') >= 0) return;
+          hh.content = String(hh.content || '')
+            + '<div class="rc-note-dict vc-dict-sec">' + h2 + '</div>';
+          ctl.note.html = hh;
+          patchNote(ctl.note, { html: hh });
         })
         .catch(function () {});
     } catch (e) {}
