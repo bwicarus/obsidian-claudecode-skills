@@ -627,6 +627,15 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
 - 与 2026-07-25 那条旧边界（"普通网页装扩展才启用完整 BW 功能；PWA 只读 PDF/EPUB…"）
   相比，这次是进一步收窄：PWA 直接不投入。
 
+- 🧭 **服务归属终局（2026-09-01 用户定稿）**：
+  **App=商业 API 直连**（翻译/OCR/TTS 等：直连取结果立即展现，异步推
+  Windows 留底 —— 三层缓存 App 本地→桥→API）；**Windows=AI CLI 包装**
+  （词典 AI/深解/助手走订阅内额度，CLI 从 Pi 搬桥 —— 直连 API 会把
+  高频 AI 调用变成按 token 付费，这是 CLI 套壳存在的经济学理由）
+  **+浏览器抓取+重计算常驻**（spacy/批量 OCR）**+桥接语音+全量留底**；
+  **Pi=纯备份**。翻译已按此落地（桥 /reader-translate-cache 与
+  translate.py 同键共享；App 直连 Google=下一班）。
+
 ## 授权（2026-08-18 用户明确）
 - ⚠ **TestFlight 上传上限 = 滚动 24 小时内 20 次**（altool 90382）。
   **不是**"每天 N 次"，也**不会**在午夜重置 —— 它是个滑动窗口。
