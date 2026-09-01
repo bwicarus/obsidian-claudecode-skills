@@ -10419,9 +10419,9 @@ if (window.__bwPwaProviderOnly) return;
         if (previousText) {
           sections.push("【当前页之前】\n" + previousText.slice(-2200));
         }
-        if (visible) {
-          sections.push("【当前屏幕可见原文】\n" + escapeLocalContextText(visible));
-        }
+        // 结构化投影在场时不再重复可见原文（2026-09-01 用户实锤：同一页
+        // 内容写了两遍，且可见原文是交错烂序的劣质版本 —— 双份浪费
+        // token 还给 AI 两个矛盾版本）。无结构化的普通页走别的分支照旧。
         sections.push(
           structured.mode === "manga"
             ? "【当前页结构化文字（Markdown；按 [NN] 编号顺序阅读；四列为空表示该位置没有文字；" +

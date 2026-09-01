@@ -212,7 +212,8 @@ if (window.__bwPwaProviderOnly) return;
   // 电话按钮是软禁用：保留键盘焦点和点击反馈，但绝不进入拨号逻辑。
   // 麦克风仍可单击走系统听写，只把长按连续 ASR 标成不可用。
   function _syncReviewVoiceUi() {
-    var blocked = _assistantInReview();
+    // 与 _reviewVoiceGate 同步取消（用户 2026-09-01）：不再渲禁用态。
+    var blocked = false;
     ['asst-call', 'vc-top-call', 'asst-computer', 'vc-top-computer'].forEach(function (id) {
       var el = document.getElementById(id);
       if (!el) return;
@@ -239,10 +240,9 @@ if (window.__bwPwaProviderOnly) return;
     return blocked;
   }
   function _reviewVoiceGate(notify) {
-    if (!_assistantInReview()) return false;
-    _syncReviewVoiceUi();
-    if (notify !== false) _voiceReviewNotice();
-    return true;
+    // 用户 2026-09-01：复习模式的语音限制取消 —— 通话/长按连续语音
+    // 全部放开。门保留壳（调用点零改动），恒不拦。
+    return false;
   }
 
   // ── ⑧ 通话生命周期独立于侧栏/网络波动 ──

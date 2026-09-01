@@ -24,6 +24,13 @@ if (window.__bwPwaProviderOnly) return;
   var _completed = [];
   var _improveMode = 'verbose';
   var _mode = false;
+  // 复习范围（用户 2026-09-01）：'current'=只看与当前内容相关的卡
+  // （暂以出处/related 区分，节点关系版后续接）；'all'=全部到期卡。
+  var _scopeMode = (function () {
+    try {
+      return localStorage.getItem('rv-scope') === 'all' ? 'all' : 'current';
+    } catch (e) { return 'current'; }
+  })();
   var _mounted = false;
   var _observer = null;
   var _decorateTimer = 0;
@@ -1461,7 +1468,7 @@ if (window.__bwPwaProviderOnly) return;
     }
 
     _setBusy('⏳ 查找当前内容的相关卡…');
-    var hasContext = Boolean(
+    var hasContext = _scopeMode !== 'all' && Boolean(
       context.file || context.url || context.source_ref ||
       context.selection || context.visible_text
     );
@@ -1488,14 +1495,22 @@ if (window.__bwPwaProviderOnly) return;
       if (!response.ok || !data.ok) {
         throw new Error(data.error || ('HTTP ' + response.status));
       }
+      var scopedCards = Array.isArray(data.cards) ? data.cards : [];
+      var relatedCount = Number(data.related_total || 0);
+      if (_scopeMode === 'current') {
+        // 「当前」只收 related 之内的卡：服务端 degraded/无匹配时
+        // related_total=0 却塞满无关到期卡 —— 那正是「载入相关却出现
+        // 无关卡片」的来源。宁可空着提示，不喂无关。
+        scopedCards = scopedCards.slice(0, relatedCount);
+      }
       var snapshot = _consumeRejectedSnapshot(
         contextKey,
         _queueSnapshot(
           contextKey,
-          Array.isArray(data.cards) ? data.cards : [],
+          scopedCards,
           0,
           data.due_total,
-          data.related_total,
+          relatedCount,
           completed
         )
       );
@@ -1894,6 +1909,21 @@ if (window.__bwPwaProviderOnly) return;
       'rv-nav rv-open-source',
       '打开这张卡记录的出处'
     );
+    var scopeToggle = _button(
+      'scope-toggle',
+      _scopeMode === 'all' ? '全部' : '当前',
+      'rv-nav rv-scope-toggle',
+      _scopeMode === 'all'
+        ? '正在复习全部到期卡；点击切换为只看与当前内容相关的卡'
+        : '正在只看与当前内容相关的卡（按出处）；点击切换为全部到期卡'
+    );
+    scopeToggle.addEventListener('click', function () {
+      _scopeMode = _scopeMode === 'all' ? 'current' : 'all';
+      try { localStorage.setItem('rv-scope', _scopeMode); } catch (e) {}
+      _contextCacheKey = '';
+      _commitStagedRating('scope');
+      loadQueue(true);
+    });
     var cardToggle = _button(
       'toggle-card',
       _cardExpanded ? '收起' : '展开卡片',
@@ -1901,6 +1931,7 @@ if (window.__bwPwaProviderOnly) return;
     );
     cardToggle.setAttribute('aria-expanded', String(_cardExpanded));
     toolbar.appendChild(stats);
+    toolbar.appendChild(scopeToggle);
     toolbar.appendChild(undoRating);
     toolbar.appendChild(openSource);
     toolbar.appendChild(reload);
@@ -1916,6 +1947,8 @@ if (window.__bwPwaProviderOnly) return;
       empty.className = 'rv-done';
       empty.textContent = _queueBusy
         ? '正在加载复习卡…'
+        : (_scopeMode === 'current' && !_queue.length && _dueTotal > 0)
+          ? '当前内容暂无相关卡；点上方「当前」切到「全部」复习到期卡'
         : '🎉 当前这一批已经完成。';
       body.appendChild(empty);
       return;

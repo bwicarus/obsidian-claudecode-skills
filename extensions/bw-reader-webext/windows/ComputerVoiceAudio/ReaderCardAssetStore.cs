@@ -117,6 +117,17 @@ internal static class ReaderCardAssetStore
     ///
     /// ⚠ 失败也要留痕：写进 registry 的 lastError —— 回填或重试时能看到
     /// "这个源上次为什么没下来"，而不是每次从零猜。
+    // ── 同站节流（2026-09-01 实锤：Codex 批量建卡几十张并发抓
+    //   wikimedia，把本机 IP 撞进 429，整波留底失败）。同一 host 串行
+    //   且间隔 ≥1.5s；收到 429 该 host 冷却 10 分钟内直接快速失败 ——
+    //   持续撞只会让封禁续期。
+    private static readonly SemaphoreSlim FetchGate = new(1, 1);
+    private static readonly Dictionary<string, DateTime> HostCooldown =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, DateTime> HostLastFetch =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object ThrottleGate = new();
+
     internal static async Task<string?> EnsureAsync(
         string url,
         CancellationToken cancellationToken)
@@ -130,6 +141,59 @@ internal static class ReaderCardAssetStore
         {
             return id;
         }
+        string host = parsed.Host.ToLowerInvariant();
+        lock (ThrottleGate)
+        {
+            if (HostCooldown.TryGetValue(host, out DateTime coolUntil))
+            {
+                if (coolUntil > DateTime.UtcNow)
+                {
+                    RecordFailure(id, url, "host-cooldown");
+                    return null;
+                }
+                HostCooldown.Remove(host);
+            }
+        }
+        await FetchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            TimeSpan wait = TimeSpan.Zero;
+            lock (ThrottleGate)
+            {
+                if (HostLastFetch.TryGetValue(host, out DateTime last))
+                {
+                    TimeSpan since = DateTime.UtcNow - last;
+                    if (since < TimeSpan.FromMilliseconds(1500))
+                    {
+                        wait = TimeSpan.FromMilliseconds(1500) - since;
+                    }
+                }
+            }
+            if (wait > TimeSpan.Zero)
+            {
+                await Task.Delay(wait, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            lock (ThrottleGate)
+            {
+                HostLastFetch[host] = DateTime.UtcNow;
+            }
+            return await FetchOnceAsync(url, parsed, id, host, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            FetchGate.Release();
+        }
+    }
+
+    private static async Task<string?> FetchOnceAsync(
+        string url,
+        Uri parsed,
+        string id,
+        string host,
+        CancellationToken cancellationToken)
+    {
         try
         {
             using HttpResponseMessage response = await Client.GetAsync(
@@ -138,6 +202,14 @@ internal static class ReaderCardAssetStore
                 cancellationToken).ConfigureAwait(false);
             if ((int)response.StatusCode != 200)
             {
+                if ((int)response.StatusCode == 429)
+                {
+                    lock (ThrottleGate)
+                    {
+                        HostCooldown[host] =
+                            DateTime.UtcNow + TimeSpan.FromMinutes(10);
+                    }
+                }
                 RecordFailure(id, url, "http-" + (int)response.StatusCode);
                 return null;
             }
