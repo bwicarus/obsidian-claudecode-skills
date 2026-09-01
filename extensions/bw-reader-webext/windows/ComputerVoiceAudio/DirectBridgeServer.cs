@@ -666,6 +666,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-card-asset/ensure",
             new[] { "POST", "OPTIONS" },
             context => HandleCardAssetEnsureAsync(context, serviceToken));
+        // 翻译留底收发（用户 2026-09-01 定稿：App 直连 Google 翻译，结果
+        // 推回来共享 —— 三层缓存的中间层。与 translate.py 同键同格式，
+        // 桥端回退服务读的就是同一批文件。
+        app.MapMethods(
+            "/reader-translate-cache",
+            new[] { "GET", "POST", "OPTIONS" },
+            context => HandleTranslateCacheAsync(context, serviceToken));
         // 语音助手的主动提示板。它盯着 BoardPath 一个地方就够。
         // ⚠ 板子**不存数据** —— 只是把 runtime 目录里已有的
         // notifications-*.json 和位置挑一挑、渲成一份很小的文本。
@@ -1544,6 +1551,111 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             return false;
         }
         return true;
+    }
+
+    private static readonly string TranslateCacheDirectory =
+        System.IO.Path.Combine("C:\\claude", "state", "dict-cache");
+
+    private static bool IsValidTranslateSha(string value) =>
+        value.Length == 16 && value.All(
+            static ch => ch is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private async Task HandleTranslateCacheAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "translate-cache")) return;
+        if (HttpMethods.IsGet(context.Request.Method))
+        {
+            string sha = (context.Request.Query["sha"]
+                .FirstOrDefault() ?? "").Trim().ToLowerInvariant();
+            if (!IsValidTranslateSha(sha))
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                await context.Response.WriteAsJsonAsync(
+                    new { ok = false, code = "BW_TR_SHA" },
+                    serviceCancellationToken).ConfigureAwait(false);
+                return;
+            }
+            string path = System.IO.Path.Combine(
+                TranslateCacheDirectory, "tr-" + sha + ".json");
+            if (!File.Exists(path))
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                await context.Response.WriteAsJsonAsync(
+                    new { ok = false, code = "BW_TR_MISS" },
+                    serviceCancellationToken).ConfigureAwait(false);
+                return;
+            }
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            context.Response.ContentType = "application/json; charset=utf-8";
+            await context.Response.WriteAsync(
+                await File.ReadAllTextAsync(
+                    path, serviceCancellationToken).ConfigureAwait(false),
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        System.Text.Json.Nodes.JsonObject? body = null;
+        try
+        {
+            using var reader = new StreamReader(context.Request.Body);
+            string raw = await reader.ReadToEndAsync(
+                serviceCancellationToken).ConfigureAwait(false);
+            if (raw.Length <= 64 * 1024)
+            {
+                body = System.Text.Json.Nodes.JsonNode.Parse(raw)
+                    as System.Text.Json.Nodes.JsonObject;
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+        string sha2 = (body?["sha"]?.GetValue<string>() ?? "")
+            .Trim().ToLowerInvariant();
+        string src = body?["src"]?.GetValue<string>() ?? "";
+        string tr = body?["tr"]?.GetValue<string>() ?? "";
+        string target = body?["target"]?.GetValue<string>() ?? "";
+        string source = body?["source"]?.GetValue<string>() ?? "device";
+        if (!IsValidTranslateSha(sha2) || src.Length == 0 || tr.Length == 0 ||
+            target.Length is 0 or > 16 || source.Length > 32)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, code = "BW_TR_BODY" },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        Directory.CreateDirectory(TranslateCacheDirectory);
+        string outPath = System.IO.Path.Combine(
+            TranslateCacheDirectory, "tr-" + sha2 + ".json");
+        // 已有的不覆盖：先到先得,与 translate.py 的永久缓存语义一致。
+        if (!File.Exists(outPath))
+        {
+            var record = new System.Text.Json.Nodes.JsonObject
+            {
+                ["src"] = src,
+                ["tr"] = tr,
+                ["target"] = target,
+                ["source"] = source,
+            };
+            await File.WriteAllTextAsync(
+                outPath, record.ToJsonString(
+                    new System.Text.Json.JsonSerializerOptions
+                    {
+                        WriteIndented = true,
+                        Encoder = System.Text.Encodings.Web
+                            .JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+                    }),
+                serviceCancellationToken).ConfigureAwait(false);
+        }
+        await context.Response.WriteAsJsonAsync(
+            new { ok = true },
+            serviceCancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleCardAssetEnsureAsync(
