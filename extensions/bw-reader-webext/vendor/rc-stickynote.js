@@ -1264,6 +1264,54 @@ if (window.__bwPwaProviderOnly) return;
     } catch (e) { return ''; }
   }
 
+  // 581 真凶（2026-09-01）：这个声明曾因补丁脚本中断而从未写入 ——
+  // 使用处全在、声明缺席，每次调用第一行 ReferenceError 被 try/catch
+  // 吞掉，词典区整体静默死亡。声明与使用必须同一笔提交。
+  var _dictLineCache = {};   // 词 → {d}(成功,永久) / {failAt}(失败,20s 冷却)
+
+  // ── 词典区诊断出口（七轮盲猜的教训 —— 每个早退都要出声）──────────
+  function dictLineNote(box, reason) {
+    try {
+      if (!box || !box.isConnected) return;
+      if (box.querySelector('.rc-note-dict-note')) return;
+      var line = document.createElement('div');
+      line.className = 'rc-note-dict-note';
+      line.style.cssText =
+        'margin-top:4px;font-size:10px;opacity:.45;color:#cfe6ff';
+      line.textContent = '📖 ' + reason;
+      box.appendChild(line);
+      setTimeout(function () { try { line.remove(); } catch (e) {} }, 8000);
+    } catch (e) {}
+  }
+
+  // ── 词典区按真实可见性调度：看得见才拉；看不见挂一次性观察者，
+  //   展开瞬间自动补 —— 性能与功能语义都保住。
+  function appendDictWhenVisible(ctl, box, h) {
+    var run = function () {
+      appendWordDictLine(box, h.bind, h.label);
+      reconcileConsolidatedWordCard(ctl, h);
+    };
+    var visible = false;
+    try { visible = box.offsetParent !== null; } catch (e0) {}
+    if (visible) { run(); return; }
+    if (box.__dictVisWatch) return;
+    if (typeof IntersectionObserver !== 'function') { run(); return; }
+    try {
+      var obs = new IntersectionObserver(function (entries) {
+        for (var i = 0; i < entries.length; i++) {
+          if (entries[i].isIntersecting) {
+            try { obs.disconnect(); } catch (e1) {}
+            box.__dictVisWatch = null;
+            run();
+            return;
+          }
+        }
+      });
+      box.__dictVisWatch = obs;
+      obs.observe(box);
+    } catch (e2) { run(); }
+  }
+
   function appendWordDictLine(box, bind, label) {
     try {
       // 词典行 v1 只在 App 内出（runtime 在场才发请求,契约沙箱不发）。
@@ -1274,13 +1322,20 @@ if (window.__bwPwaProviderOnly) return;
       //   卡名（label）就是词名（キムチ/ローストビーフ…），bind 取不到
       //   时用 label —— unbound 卡零门槛受益。
       var text = bindWordTextOf(bind) || String(label || '').trim();
-      if (!text || text.length > 32 || text.indexOf(String.fromCharCode(10)) >= 0) return;
-      if (text.split(/\s+/).length > 3) return;
+      if (!text) { dictLineNote(box, '词典：取不到词（bind/label 皆空）'); return; }
+      if (text.length > 32 || text.indexOf(String.fromCharCode(10)) >= 0) {
+        dictLineNote(box, '词典：标题不是词（过长/多行）'); return;
+      }
+      if (text.split(/\s+/).length > 3) {
+        dictLineNote(box, '词典：标题不是词（词数>3）'); return;
+      }
       if (box.querySelector('.rc-note-dict')) return;
       if (box.querySelector('.rc-note-dict-wait')) return;   // 已在查
       var cached = _dictLineCache[text];
       if (cached && cached.failAt &&
-          Date.now() - cached.failAt < 20 * 1000) return;
+          Date.now() - cached.failAt < 20 * 1000) {
+        dictLineNote(box, '词典：上次失败，冷却 20 秒'); return;
+      }
       // 查询中占位（2026-09-01 实锤「每次点开结果不同」）：这类词条是
       // AI 现场生成（2-8 秒），首开时词条在路上 —— 没有占位的话用户
       // 分不清「在查」和「没有」，等不到就关卡，第二次命中缓存才看到。
@@ -1314,7 +1369,14 @@ if (window.__bwPwaProviderOnly) return;
       var ready = (cached && cached.d)
         ? Promise.resolve(cached.d)
         // @interaction dictionary.quick.read
-        : fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(text)
+        : fetch(
+            (function () {
+              try {
+                var bp = String(window.__BW_NATIVE_LOCAL_BASE_PATH__ || '');
+                if (/^\/r\/[a-f0-9]{64}$/.test(bp)) return bp;
+              } catch (e9) {}
+              return '';
+            })() + '/pdf/api/dict-quick?word=' + encodeURIComponent(text)
             + '&prewarm=1' + extra,
             (function () {
               try {
@@ -1355,7 +1417,12 @@ if (window.__bwPwaProviderOnly) return;
       ready
         .then(function (d) {
           clearWait();
-          if (!d || d.ok !== true || !box.isConnected) return;
+          if (!box.isConnected) return;
+          if (d && d.ok !== true) {
+            dictLineNote(box, '词典：查无词条（' + text + '）');
+            return;
+          }
+          if (!d) return;
           if (box.querySelector('.rc-note-dict')) return;
           var zh = String(d.translation || d.zh || '').trim();
           var defText = String(d.definition || '').trim();
@@ -1557,8 +1624,7 @@ if (window.__bwPwaProviderOnly) return;
       );
       // 词典行/对账在 sig 不变时也要有机会补（幂等：各自有已存在早退）——
       // 开书首渲时字符层可能还没就绪，取词失败一次不该等于永远没有。
-      appendWordDictLine(box, h.bind, h.label);
-      reconcileConsolidatedWordCard(ctl, h);
+      appendDictWhenVisible(ctl, box, h);
       return;
     }
     box.__sig = sig; box.innerHTML = '';
@@ -1591,8 +1657,7 @@ if (window.__bwPwaProviderOnly) return;
       h.cid,
       'pwa-page-placement'
     );
-    appendWordDictLine(box, h.bind, h.label);
-    reconcileConsolidatedWordCard(ctl, h);
+    appendDictWhenVisible(ctl, box, h);
     try { window.RC && RC.typeset && RC.typeset(box); } catch (e) {}
   }
   function setNoteVideo(ctl, id) {   // 供拖放/入口共用:给便签设视频(保留已有起止等设置)
