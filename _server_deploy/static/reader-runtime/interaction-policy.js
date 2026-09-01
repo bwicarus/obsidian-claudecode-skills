@@ -595,6 +595,25 @@
       }
     ),
     networkRead(
+      'translate.cache.read',
+      ['/reader-translate-cache'],
+      {
+        transport: { extensionBridge: false, serviceWorker: 'none' },
+        reason: '翻译三层缓存中间层:同键查桥留底,命中秒回省一次 Pi AI/'
+          + 'API 调用;桥不在线=miss 照旧打 Pi(App 内 runtime 专用)。'
+      }
+    ),
+    networkMutation(
+      'translate.cache.write',
+      '/reader-translate-cache',
+      ['POST'],
+      {
+        transport: { extensionBridge: false, serviceWorker: 'none' },
+        reason: 'Pi 翻译成功后异步推桥留底(first-write-wins),全设备下次'
+          + '命中;失败静默,不拖翻译主路。'
+      }
+    ),
+    networkRead(
       'cardasset.ensure.request',
       ['/pdf/api/card-asset-ensure'],
       {

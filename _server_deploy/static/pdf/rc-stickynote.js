@@ -2240,6 +2240,10 @@
     } catch (e) {}
     if (old && nb && nb.page === old.page && nb.from === old.from && nb.to === old.to) return false;
     try { if (old && window.__pageBindRemove) window.__pageBindRemove(old, ctl.note.id); } catch (e) {}
+    // 手动重绑标记（2026-09-02 实锤）：拖到新词后 bind.text=新词而卡片
+    // label 还是旧词,自愈把这种"不一致"当坏数据滚回原词 —— 用户显式
+    // 动作必须凌驾数据医生。manual 随 bind 持久化,自愈永久免疫。
+    if (nb) nb.manual = true;
     ctl.note[slot].bind = nb;
     ctl._bindMarked = false;
     if (!nb) ctl.root.style.display = '';   // 退回普通便签，别把卡藏没了
@@ -2282,6 +2286,7 @@
       var norm = function (s) { return String(s || '').replace(/\s+/g, ''); };
       var want = norm(label);
       if (!want || want.length < 2 || want.length > 32) return null;
+      if (b.manual) return null;   // 手动重绑（拖放换锚）：用户显式动作,自愈永不碰
       if (norm(b.text) === want) return null;   // bind 文本与词一致=没病
       if (ctl._bindHealAt && Date.now() - ctl._bindHealAt < 30000) return null;
       ctl._bindHealAt = Date.now();

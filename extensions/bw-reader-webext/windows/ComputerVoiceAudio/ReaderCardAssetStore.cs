@@ -190,8 +190,22 @@ internal static class ReaderCardAssetStore
             {
                 HostLastFetch[host] = DateTime.UtcNow;
             }
-            return await FetchOnceAsync(url, parsed, id, host, cancellationToken)
-                .ConfigureAwait(false);
+            (string? fetched, int status) = await FetchOnceAsync(
+                url, parsed, id, host, cancellationToken).ConfigureAwait(false);
+            if (fetched is null
+                && status == 404
+                && TryWikimediaThumbOriginal(url, out Uri? original)
+                && original is not null)
+            {
+                // wikimedia thumb 死链降级原图（2026-09-02 实锤：
+                // Various_kimchi 的 960px thumb 已 404 而原图健在）。
+                // 仍按**原 URL 的 id** 留底 —— 卡片引用的就是它。
+                // 只在 404 降级：429 换个 URL 立刻再撞同 host 只是骚扰。
+                (fetched, _) = await FetchOnceAsync(
+                    url, original, id, host, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            return fetched;
         }
         finally
         {
@@ -199,7 +213,29 @@ internal static class ReaderCardAssetStore
         }
     }
 
-    private static async Task<string?> FetchOnceAsync(
+    /// wikimedia thumb URL → 原图 URL（thumb/X/XX/Name.ext/NNNpx-Name.ext
+    /// → X/XX/Name.ext）。thumb 尺寸档会随源站清理失效，原图路径稳定。
+    internal static bool TryWikimediaThumbOriginal(
+        string url, out Uri? original)
+    {
+        original = null;
+        System.Text.RegularExpressions.Match matched =
+            System.Text.RegularExpressions.Regex.Match(
+                url,
+                "^https://upload\\.wikimedia\\.org/wikipedia/commons/thumb/"
+                + "([0-9a-f]/[0-9a-f]{2}/[^/]+)/[^/]+$");
+        if (!matched.Success)
+        {
+            return false;
+        }
+        return Uri.TryCreate(
+            "https://upload.wikimedia.org/wikipedia/commons/"
+            + matched.Groups[1].Value,
+            UriKind.Absolute,
+            out original);
+    }
+
+    private static async Task<(string? id, int status)> FetchOnceAsync(
         string url,
         Uri parsed,
         string id,
@@ -226,7 +262,7 @@ internal static class ReaderCardAssetStore
                     }
                 }
                 RecordFailure(id, url, "http-" + (int)response.StatusCode);
-                return null;
+                return (null, (int)response.StatusCode);
             }
             string contentType = (response.Content.Headers.ContentType
                 ?.MediaType ?? "").ToLowerInvariant();
@@ -234,7 +270,7 @@ internal static class ReaderCardAssetStore
                 contentType, out string? extension))
             {
                 RecordFailure(id, url, "type-" + contentType);
-                return null;
+                return (null, 200);
             }
             byte[] body;
             await using (Stream stream = await response.Content
@@ -253,7 +289,7 @@ internal static class ReaderCardAssetStore
                     if (buffer.Length + read > MaximumBytes)
                     {
                         RecordFailure(id, url, "too-large");
-                        return null;
+                        return (null, 200);
                     }
                     buffer.Write(chunk, 0, read);
                 }
@@ -262,7 +298,7 @@ internal static class ReaderCardAssetStore
             if (body.Length < 100)
             {
                 RecordFailure(id, url, "empty");
-                return null;
+                return (null, 200);
             }
             Directory.CreateDirectory(StoreDirectory);
             string target = Path.Combine(StoreDirectory, id + extension);
@@ -271,7 +307,7 @@ internal static class ReaderCardAssetStore
                 temporary, body, cancellationToken).ConfigureAwait(false);
             File.Move(temporary, target, overwrite: true);
             RecordSuccess(id, url, contentType, body.Length);
-            return id;
+            return (id, 200);
         }
         catch (OperationCanceledException)
         {
@@ -282,7 +318,7 @@ internal static class ReaderCardAssetStore
             RecordFailure(
                 id, url,
                 "transport-" + exception.GetType().Name);
-            return null;
+            return (null, 0);
         }
     }
 

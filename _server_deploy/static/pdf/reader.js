@@ -4478,10 +4478,15 @@ function _charRangeBlockFilter(chars, sIdx, eIdx) {
 // 把字符区间投影成视觉矩形。实时蓝选区与保存后的持久高亮共用这一份：
 // 横排按 Y 重叠与 X 间距合并，竖排按 X 重叠与 Y 间距合并。过去两条路径
 // 各抄一份横排算法，结果竖排漫画必然逐字显示成一摞小方块。
-function _charRangeToVisualRects(chars, sIdx, eIdx, coordinateSpace) {
+function _charRangeToVisualRects(chars, sIdx, eIdx, coordinateSpace, keepSet) {
   if (sIdx > eIdx) { const t = sIdx; sIdx = eIdx; eIdx = t; }
   if (sIdx < 0 || eIdx >= chars.length) return [];
-  const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
+  const _inBlkRaw = _charRangeBlockFilter(chars, sIdx, eIdx);
+  // keepSet=程序性整词选中的精确字符集(2026-09-02):有它时高亮框只画
+  // 集合内字符 —— [min,max] 区间在 OCR 行贯通表格列的页面会把别列画进去。
+  const _inBlk = keepSet
+    ? (c) => _inBlkRaw(c) && (c.sp || keepSet.has(chars.indexOf(c)))
+    : _inBlkRaw;
   const blocks = _charBlockGeometry(chars, sIdx, eIdx);
   const lines = _charLineGeometry(chars, sIdx, eIdx);
   const pointSpace = coordinateSpace === 'point';
@@ -4708,6 +4713,9 @@ function _selBindRange(pw, from, to) {
 }
 
 function _selByCharRange(pw, sIdx, eIdx) {
+  // 程序性整词选中的精确集合（一次性消费,任何早退都不能让它漏到下一次）
+  const _keep = _pendingSelKeep;
+  _pendingSelKeep = null;
   if (!pw || !pw.__charBoxes) return;
   if (sIdx > eIdx) { const t = sIdx; sIdx = eIdx; eIdx = t; }
   const chars = pw.__charBoxes;
@@ -4749,6 +4757,7 @@ function _selByCharRange(pw, sIdx, eIdx) {
   const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
+    if (_keep && !_keep.has(i) && !c.sp) continue;   // 程序性选中=精确集,别列夹带剔除
     if (!_inBlk(c)) continue;   // 跨块过滤：别块(题号/另一栏)字符不计入选中文本
     if (lastChar) {
       // 两边都是 CJK(日/中,无词间空格)→ 跨行/间隙都直接拼,不插换行或空格(公表する 跨行不再被拆「公 表する」)
@@ -4801,7 +4810,7 @@ function _selByCharRange(pw, sIdx, eIdx) {
   const ov = pw.querySelector('.sel-overlay');
   if (ov) {
     ov.innerHTML = '';
-    for (const rect of _charRangeToVisualRects(chars, sIdx, eIdx, 'css')) {
+    for (const rect of _charRangeToVisualRects(chars, sIdx, eIdx, 'css', _keep)) {
       const div = document.createElement('div');
       div.className = 'hl';
       div.style.left = rect[0] + 'px';
@@ -4850,6 +4859,12 @@ function _clampToolbarIntoView(mainEl, selTopY) {
 //   tap 字符落在任一登记词组匹配段内 → 整段选中(取最长匹配)。
 //   竖直跳变 >2.2 行高拒并 —— 服务端同款守卫,防 reading-order 相邻但
 //   视觉分离的字误并。选区闭区间交给 _selByCharRange 既有跨块过滤。
+// 程序性整词选中的**精确字符集**:词组兜底/同 w 收集算出的命中集合,
+// 经此变量交给紧随其后的 _selByCharRange 做逐字符过滤 —— [min,max]
+// 裸区间在"OCR 行贯通表格列"的页面会夹带别列字符(2026-09-02 实锤:
+// 选词组得到 トートマ+味がある。+ン 10 字)。一次性消费,用后即清。
+let _pendingSelKeep = null;
+
 function _phraseExpandFromChar(chars, idx) {
   try {
     const favs = (typeof _phraseFavSet !== 'undefined' && _phraseFavSet) ? _phraseFavSet : null;
@@ -4901,6 +4916,9 @@ function _phraseExpandFromChar(chars, idx) {
       if (ci < lo) lo = ci;
       if (ci > hi) hi = ci;
     }
+    const keep = new Set();
+    for (let k = best.at; k < best.at + best.len; k++) keep.add(ord[k]);
+    _pendingSelKeep = keep;
     return { start: lo, end: hi };
   } catch (e) { return null; }
 }
@@ -4934,6 +4952,11 @@ function _wordExpandFromChar(chars, idx) {
       let s0 = mn, e0 = mx;
       while (s0 < e0 && !isWord(chars[s0].c) && !isCJK(chars[s0].c)) s0++;
       while (e0 > s0 && !isWord(chars[e0].c) && !isCJK(chars[e0].c)) e0--;
+      const keepW = new Set();
+      for (let i = s0; i <= e0; i++) {
+        if (chars[i] && chars[i].w === wid) keepW.add(i);
+      }
+      _pendingSelKeep = keepW;
       return {start: s0, end: e0};
     }
     let s = idx, e = idx;
@@ -6175,9 +6198,19 @@ function _applyPhraseMergesLocal(pw) {
   for (const cb of chars) if (cb._w0 !== undefined) cb.w = cb._w0;   // 先整体还原
   const favs = (typeof _phraseFavSet !== 'undefined' && _phraseFavSet) ? [..._phraseFavSet] : [];
   if (!favs.length) return;
+  // #55b（2026-09-02）:流必须按 **_oi 原序**建,不能用重排数组序 ——
+  // 表格页重排后跨行词组两半之间插着别列同 baseline 字符,indexOf
+  // 永远匹配不上(App 里"登记了词组却不合并"的真身);染 w 也必须按
+  // 命中集合精确点射,扫 [sIdx,eIdx] 闭区间会把夹带的别列字符染进
+  // 词组。服务端 _merge_favorite_phrases 用的就是原序 compact +
+  // 2.2 行高竖直跳变守卫,两端从此同构。
+  const ordIdx = [];
+  for (let i = 0; i < chars.length; i++) if (!chars[i].sp) ordIdx.push(i);
+  ordIdx.sort((a, b) =>
+    ((chars[a]._oi != null ? chars[a]._oi : a) | 0) -
+    ((chars[b]._oi != null ? chars[b]._oi : b) | 0));
   let str = ''; const pos = [];
-  for (let i = 0; i < chars.length; i++) {
-    if (chars[i].sp) continue;   // #55:跳空格 char → str 无空白,与归一化词组对齐
+  for (const i of ordIdx) {
     const cc = chars[i].c != null ? String(chars[i].c) : '';
     for (let j = 0; j < cc.length; j++) { str += cc[j]; pos.push(i); }
   }
@@ -6187,12 +6220,28 @@ function _applyPhraseMergesLocal(pw) {
     let from = 0, idx;
     while ((idx = str.indexOf(t, from)) >= 0) {
       from = idx + t.length;
-      const sIdx = pos[idx], eIdx = pos[idx + t.length - 1];
-      if (sIdx == null || eIdx == null) continue;
+      const hit = [];
+      for (let q = idx; q < idx + t.length; q++) {
+        if (pos[q] != null && hit[hit.length - 1] !== pos[q]) hit.push(pos[q]);
+      }
+      if (!hit.length) continue;
+      // 竖直跳变守卫:reading-order 相邻但视觉分离(>2.2 行高)不是同一词组
+      let bad = false, prev = null;
+      for (const k of hit) {
+        const cb = chars[k];
+        const y0 = cb._y0 != null ? cb._y0 : cb.top;
+        if (prev) {
+          const p0 = prev._y0 != null ? prev._y0 : prev.top;
+          const p1 = prev._y1 != null ? prev._y1 : (prev.top + prev.height);
+          if (Math.abs(y0 - p0) > Math.max(1, p1 - p0) * 2.2) { bad = true; break; }
+        }
+        prev = cb;
+      }
+      if (bad) continue;
       let wUse = -1;
-      for (let k = sIdx; k <= eIdx; k++) if (chars[k].w != null && chars[k].w >= 0) { wUse = chars[k].w; break; }
+      for (const k of hit) if (chars[k].w != null && chars[k].w >= 0) { wUse = chars[k].w; break; }
       if (wUse < 0) continue;   // 无既有词 id 可借(w 编码含块 id)→ 保守跳过
-      for (let k = sIdx; k <= eIdx; k++) { const cb = chars[k]; if (cb._w0 === undefined) cb._w0 = cb.w; cb.w = wUse; }
+      for (const k of hit) { const cb = chars[k]; if (cb._w0 === undefined) cb._w0 = cb.w; cb.w = wUse; }
     }
   }
 }

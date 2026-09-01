@@ -10027,6 +10027,14 @@
 
   function appendLocalLayoutRegion(builder, pageRecord, region) {
     var wrote = false;
+    // 跨行词重接（2026-09-02 结构化二期）:range 边界=视觉行边界,但
+    // 跨行的同一个分词(fugashi 的 コチュジャ|ン、合并后的收藏词组)不能
+    // 被 <br> 拆开;sp 空白盒两侧都是 CJK 时也不产空格(CJK 无词间空格,
+    // 快照里"パンセ オ"就是它漏的)。lastReal=上一个已输出的实字符。
+    var cjk = function (ch) {
+      return /[\u3000-\u303f\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uff00-\uffef]/.test(ch || "");
+    };
+    var lastReal = null;
     region.ranges.forEach(function (range, rangeIndex) {
       var pending = [];
       var rangeWrote = false;
@@ -10041,12 +10049,22 @@
           pending.push(sourceIndex);
           continue;
         }
-        if (pending.length && (wrote || rangeWrote)) builder.append(" ");
+        var cjkJoin = lastReal && cjk(semantic.charAt(0)) &&
+          cjk(String(lastReal.c || "").slice(-1));
+        if (pending.length && (wrote || rangeWrote) && !cjkJoin) builder.append(" ");
         pending.forEach(function (index) { builder.after[index] = builder.text.length; });
         pending = [];
-        if (rangeIndex > 0 && !rangeWrote && wrote) builder.append("<br>");
+        if (rangeIndex > 0 && !rangeWrote && wrote) {
+          // <br> 只让位于**同一个分词**(w 相等):普通两行 CJK 对话之间
+          // 的换行必须保留 —— cjkJoin 只管空白盒不产空格,不管换行。
+          var sameWord = lastReal &&
+            lastReal.w != null && lastReal.w >= 0 &&
+            source.w === lastReal.w;
+          if (!sameWord) builder.append("<br>");
+        }
         builder.append(escapeLocalLayoutText(semantic));
         builder.after[sourceIndex] = builder.text.length;
+        lastReal = source;
         rangeWrote = true;
         wrote = true;
       }

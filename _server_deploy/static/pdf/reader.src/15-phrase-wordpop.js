@@ -352,9 +352,19 @@ function _applyPhraseMergesLocal(pw) {
   for (const cb of chars) if (cb._w0 !== undefined) cb.w = cb._w0;   // 先整体还原
   const favs = (typeof _phraseFavSet !== 'undefined' && _phraseFavSet) ? [..._phraseFavSet] : [];
   if (!favs.length) return;
+  // #55b（2026-09-02）:流必须按 **_oi 原序**建,不能用重排数组序 ——
+  // 表格页重排后跨行词组两半之间插着别列同 baseline 字符,indexOf
+  // 永远匹配不上(App 里"登记了词组却不合并"的真身);染 w 也必须按
+  // 命中集合精确点射,扫 [sIdx,eIdx] 闭区间会把夹带的别列字符染进
+  // 词组。服务端 _merge_favorite_phrases 用的就是原序 compact +
+  // 2.2 行高竖直跳变守卫,两端从此同构。
+  const ordIdx = [];
+  for (let i = 0; i < chars.length; i++) if (!chars[i].sp) ordIdx.push(i);
+  ordIdx.sort((a, b) =>
+    ((chars[a]._oi != null ? chars[a]._oi : a) | 0) -
+    ((chars[b]._oi != null ? chars[b]._oi : b) | 0));
   let str = ''; const pos = [];
-  for (let i = 0; i < chars.length; i++) {
-    if (chars[i].sp) continue;   // #55:跳空格 char → str 无空白,与归一化词组对齐
+  for (const i of ordIdx) {
     const cc = chars[i].c != null ? String(chars[i].c) : '';
     for (let j = 0; j < cc.length; j++) { str += cc[j]; pos.push(i); }
   }
@@ -364,12 +374,28 @@ function _applyPhraseMergesLocal(pw) {
     let from = 0, idx;
     while ((idx = str.indexOf(t, from)) >= 0) {
       from = idx + t.length;
-      const sIdx = pos[idx], eIdx = pos[idx + t.length - 1];
-      if (sIdx == null || eIdx == null) continue;
+      const hit = [];
+      for (let q = idx; q < idx + t.length; q++) {
+        if (pos[q] != null && hit[hit.length - 1] !== pos[q]) hit.push(pos[q]);
+      }
+      if (!hit.length) continue;
+      // 竖直跳变守卫:reading-order 相邻但视觉分离(>2.2 行高)不是同一词组
+      let bad = false, prev = null;
+      for (const k of hit) {
+        const cb = chars[k];
+        const y0 = cb._y0 != null ? cb._y0 : cb.top;
+        if (prev) {
+          const p0 = prev._y0 != null ? prev._y0 : prev.top;
+          const p1 = prev._y1 != null ? prev._y1 : (prev.top + prev.height);
+          if (Math.abs(y0 - p0) > Math.max(1, p1 - p0) * 2.2) { bad = true; break; }
+        }
+        prev = cb;
+      }
+      if (bad) continue;
       let wUse = -1;
-      for (let k = sIdx; k <= eIdx; k++) if (chars[k].w != null && chars[k].w >= 0) { wUse = chars[k].w; break; }
+      for (const k of hit) if (chars[k].w != null && chars[k].w >= 0) { wUse = chars[k].w; break; }
       if (wUse < 0) continue;   // 无既有词 id 可借(w 编码含块 id)→ 保守跳过
-      for (let k = sIdx; k <= eIdx; k++) { const cb = chars[k]; if (cb._w0 === undefined) cb._w0 = cb.w; cb.w = wUse; }
+      for (const k of hit) { const cb = chars[k]; if (cb._w0 === undefined) cb._w0 = cb.w; cb.w = wUse; }
     }
   }
 }

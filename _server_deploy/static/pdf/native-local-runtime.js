@@ -568,6 +568,78 @@
     nativePDFWriterAccepting = true;
   }
 
+
+  // ── device 库空间回收（2026-09-02 实锤：单库 16.47GB、半天 +0.6GB）──
+  //   病灶=outgoing journal 每事件整本重写,WebKit IndexedDB 不回收
+  //   旧版本页,存量墓碑只能删库重建。usage>6GB 才动手 + 72h 节流;
+  //   抢救 reader-positions → close → deleteDatabase → 重建 → 写回。
+  //   journal/焦点是发往 Windows 的事件缓冲,显式放弃(桥侧已有留底)。
+  //   任何失败=放弃回收照常启动;库删除后 store 实例必换新。
+  function maintainDeviceStoreOnBoot() {
+    var LS_KEY = 'bw-device-rebuild-at';
+    return Promise.resolve().then(function () {
+      if (!(navigator.storage && navigator.storage.estimate)) return null;
+      return navigator.storage.estimate();
+    }).then(function (estimate) {
+      if (!estimate || !(estimate.usage > 6 * 1024 * 1024 * 1024)) return;
+      try {
+        var last = parseInt(localStorage.getItem(LS_KEY) || '0', 10);
+        if (last && Date.now() - last < 72 * 3600 * 1000) return;
+        localStorage.setItem(LS_KEY, String(Date.now()));
+      } catch (_) {}
+      var savedPositions = null;
+      return storedStateRecord(
+        stores.device, 'reader-positions', 'deviceId', deviceId, null
+      ).then(function (record) {
+        savedPositions = record && record.payload ? record.payload : null;
+      }, function () {
+        savedPositions = null;
+      }).then(function () {
+        try { stores.device.close(); } catch (_) {}
+        return new Promise(function (resolve) {
+          var request;
+          try {
+            request = indexedDB.deleteDatabase('bw-reader-native-v1-device');
+          } catch (_) { resolve(false); return; }
+          var settled = false;
+          var finish = function (ok) {
+            if (!settled) { settled = true; resolve(ok); }
+          };
+          request.onsuccess = function () { finish(true); };
+          request.onerror = function () { finish(false); };
+          request.onblocked = function () { finish(false); };
+          setTimeout(function () { finish(false); }, 15000);
+        });
+      }).then(function (deleted) {
+        // 无论删没删成,store 已 close —— 换新实例接管,别留死实例。
+        var indexed = required('indexedDBStore', 'createIndexedDBDataStore');
+        stores.device = indexed.createIndexedDBDataStore({
+          dbName: 'bw-reader-native-v1-device', deviceId: deviceId,
+          channelName: 'bw-reader-native-v1-device-events',
+          causalCollections: []
+        });
+        try {
+          if (window.__bwProbe) {
+            window.__bwProbe.probe(
+              'device-rebuild',
+              deleted ? '已删库重建,回收墓碑空间' : '删库未成(blocked?),仅换实例'
+            );
+          }
+        } catch (_) {}
+        if (!deleted || !savedPositions) return;
+        return storedStateRecord(
+          stores.device, 'reader-positions', 'deviceId', deviceId, {}
+        ).then(function (fresh) {
+          return stores.device.batch([
+            deviceStateMutation(
+              'reader-positions', savedPositions, randomHex(12), fresh.rev
+            )
+          ]);
+        }).catch(function () {});
+      });
+    }).catch(function () {});
+  }
+
   function createStores() {
     var indexed = required('indexedDBStore', 'createIndexedDBDataStore');
     var registry = required('dataRegistry', 'syncCollections');
@@ -13065,6 +13137,9 @@
       )));
     }
     if (route.owner === 'pi') {
+      if (url.pathname === '/pdf/api/translate-sentence') {
+        return nativeTranslateSentenceFetch(input, init, url, route);
+      }
       if (nativeInterfaceSurface === 'pdf' && url.pathname === '/api/assistant/chat') {
         return nativePDFChatFetch(input, init, url, route);
       }
@@ -14052,6 +14127,84 @@
     });
   }
 
+  // ── 翻译句子的桥缓存前置（2026-09-02 翻译二期保守层）────────────────
+  //   架构终局「三层缓存」的中间层:键 sha1('zh-CN::'+text)[:16] 与
+  //   translate.py(_cache_path 无 ns 形态)/桥 /reader-translate-cache
+  //   三方共享 —— Windows 上翻过的句子这里直接命中,App 翻过的推回去
+  //   全家共享。带 fresh(重新翻译,语义=必出新结果)或 file+sentence
+  //   (服务端要写 sidecar 句子标记,命中短路会丢副作用)的请求不前置。
+  //   任何缓存层错误=静默回原路;桥不在线=GET 失败=miss=照旧打 Pi。
+  var TRANSLATE_CACHE_URL =
+    'https://bwicarus-2.taile44d0c.ts.net/reader-translate-cache';
+
+  function translateCacheSha(text) {
+    try {
+      var data = new TextEncoder().encode('zh-CN::' + text);
+      return crypto.subtle.digest('SHA-1', data).then(function (digest) {
+        var bytes = new Uint8Array(digest);
+        var hex = '';
+        for (var i = 0; i < bytes.length; i += 1) {
+          hex += (bytes[i] + 256).toString(16).slice(1);
+        }
+        return hex.slice(0, 16);
+      }, function () { return ''; });
+    } catch (_) { return Promise.resolve(''); }
+  }
+
+  function nativeTranslateSentenceFetch(input, init, url, route) {
+    var fallback = function () {
+      return nativePiFetch(input, init, route).catch(function (error) {
+        var failure = nativePiFailure(error);
+        return jsonResponse({
+          ok: false, code: failure.code, error: failure.message
+        }, failure.status);
+      });
+    };
+    return Promise.resolve().then(function () {
+      var body = null;
+      try { body = JSON.parse((init && init.body) || '{}'); } catch (_) {}
+      var text = body && typeof body.text === 'string' ? body.text.trim() : '';
+      if (!text || text.length > 2000 ||
+          !body || body.fresh || body.file || body.sentence) {
+        return fallback();
+      }
+      return translateCacheSha(text).then(function (sha) {
+        if (!sha) return fallback();
+        // @interaction translate.cache.read
+        return originalFetch(TRANSLATE_CACHE_URL + '?sha=' + sha, {
+          method: 'GET'
+        }).then(function (response) {
+          return response.ok ? response.json() : null;
+        }, function () { return null; }).then(function (hit) {
+          if (hit && typeof hit.tr === 'string' && hit.tr) {
+            return jsonResponse(
+              { ok: true, zh: hit.tr, source: 'bridge-cache' }, 200
+            );
+          }
+          return fallback().then(function (piResponse) {
+            try {
+              piResponse.clone().json().then(function (d) {
+                if (d && d.ok === true &&
+                    typeof d.zh === 'string' && d.zh) {
+                  // @interaction translate.cache.write
+                  originalFetch(TRANSLATE_CACHE_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      sha: sha, src: text, tr: d.zh,
+                      target: 'zh-CN', source: 'app-pi'
+                    })
+                  }).catch(function () {});
+                }
+              }).catch(function () {});
+            } catch (_) {}
+            return piResponse;
+          });
+        });
+      });
+    }).catch(function () { return fallback(); });
+  }
+
   function projectNativeReaderVocabulary(word, mark, japanese) {
     var mastered = mark === 'known';
     var state = root.BWReaderRuntime && root.BWReaderRuntime.vocabularyState;
@@ -14403,6 +14556,9 @@
       // write/read/delete probe on every book switch duplicated real work and
       // could itself queue behind the page being replaced.
       Promise.resolve().then(function () {
+        // device 库回收放最前:它可能整库重建,别让后续迁移读到半途库。
+        return maintainDeviceStoreOnBoot();
+      }).then(function () {
         // 高亮拆分迁移必须先于 PDF 改页恢复：恢复用门面读当前状态做比对，
         // 旧 journal 里的整册数组要能与迁移后的物化结果逐位相等。
         return migrateHighlightSplitOnBoot();

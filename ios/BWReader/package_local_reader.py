@@ -372,6 +372,11 @@ NATIVE_RUNTIME_INTERFACE_ENTRIES = {
     "/pdf/api/sync-batch": (
         "pi", ("POST",), ("epub", "pdf"), "localFetch"
     ),
+    "/pdf/api/translate-sentence": (
+        # 翻译二期保守层(2026-09-02):桥缓存前置的有界混合处理器 ——
+        # 命中回缓存,miss 照旧打 Pi 并异步推桥留底。owner 仍是 pi。
+        "pi", ("POST",), ("epub", "pdf"), "localFetch"
+    ),
     "/pdf/api/to-note": (
         "native", ("POST",), ("epub", "pdf"), "__native_owner__"
     ),
