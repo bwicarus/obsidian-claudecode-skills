@@ -4360,9 +4360,16 @@ function _charBlocksConnected(a, b) {
   const horizontal = a.axis !== 'vertical' && b.axis !== 'vertical'
     && xOverlap >= 0.3
     && yGap <= Math.max(a.charHeight, b.charHeight) * 1.8;
+  // 左右相邻的 1.8 字宽容差是给**纵排行间**的（纵排书的"行"就是左右
+  // 排列）。横排/未知块的左右连接只有"同一行被 OCR 拆成两块"一种合法
+  // 场景 —— 间隙≈字间距。表格相邻单元格的格线+边距恰好落在 0.6~1.8
+  // 字宽之间,1.8 一刀切会让选区逐格传染整行(2026-09-01 实锤:
+  // スペイン料理→ルを使用→サングリ 三格连选)。
+  const bothVertical = a.axis === 'vertical' && b.axis === 'vertical';
   const vertical = a.axis !== 'horizontal' && b.axis !== 'horizontal'
     && yOverlap >= 0.3
-    && xGap <= Math.max(a.charWidth, b.charWidth) * 1.8;
+    && xGap <= Math.max(a.charWidth, b.charWidth)
+       * (bothVertical ? 1.8 : 0.6);
   return horizontal || vertical;
 }
 
@@ -14737,6 +14744,21 @@ window._lbClick = _lbClick;
   /// AI page-chars 的唯一持久化入口。返回 Promise；只有便签仓完成 create 且
   /// 本地投影已 upsert 后才 resolve ok:true。rc-voicecall 不得先调 __pageBindCard
   /// 画临时 DOM 再宣称 bound。
+  /// 只解析不建卡（2026-09-01 自动认领锚定用）：浮层卡的标题在页面
+  /// 字符层能解析出区间时，把 bind 补进**现有**卡 —— persistBoundCard
+  /// 是 create 流，不适用于已存在的卡。
+  window.__pageBindResolveOnly = function (bind) {
+    try {
+      var g = _resolvePageBind(bind);
+      if (!g || g.ok !== true || !g.range) {
+        return { ok: false, why: (g && g.why) || 'unresolved' };
+      }
+      return { ok: true, page: g.page, from: g.range.lo, to: g.range.hi };
+    } catch (e) {
+      return { ok: false, why: 'exception' };
+    }
+  };
+
   window.__pageBindPersist = function (bind, payload) {
     var g = null;
     try { g = _resolvePageBind(bind); } catch (e) {
