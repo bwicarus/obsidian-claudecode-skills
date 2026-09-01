@@ -764,6 +764,22 @@ function _applyCropToWrap(wrap, cw, ch) {
     return;
   }
   const fl = _crop.l / 100, fr = _crop.r / 100, ft = _crop.t / 100, fb = _crop.b / 100;
+  // 用户插入页：裁切参数按**书页内容包围盒**算，套同一位移会把白纸页
+  // 左上的正文裁出可见区（2026-08-25 真机：文字被左缘裁半）；完全豁免
+  // 又会比裁窄的书页宽出一截（同日真机二连）。正解 = **同宽同高、零位移**：
+  // wrap 收成与书页一致的裁后尺寸，覆盖层 HTML（inset:0）随窄宽自动换行
+  // 重排，不裁字；被盖住的底图页边无所谓。
+  const _pn = wrap && wrap.dataset ? parseInt(wrap.dataset.pageNum, 10) : 0;
+  if (_pn > 0 && typeof window._upIsRealPage === 'function' && window._upIsRealPage(_pn)) {
+    wrap.classList.add('crop-on');
+    wrap.style.width = Math.max(1, Math.floor(cw * (1 - fl - fr))) + 'px';
+    wrap.style.height = Math.max(1, Math.floor(ch * (1 - ft - fb))) + 'px';
+    wrap.style.setProperty('--crop-l', '0px');
+    wrap.style.setProperty('--crop-t', '0px');
+    wrap.style.setProperty('--full-w', cw + 'px');
+    wrap.style.setProperty('--full-h', ch + 'px');
+    return;
+  }
   wrap.classList.add('crop-on');
   wrap.style.width = Math.max(1, Math.floor(cw * (1 - fl - fr))) + 'px';
   wrap.style.height = Math.max(1, Math.floor(ch * (1 - ft - fb))) + 'px';
@@ -2400,6 +2416,17 @@ async function _rescaleContinuousInPlace(options) {
     } else if (estW) {
       w.style.width = estW + 'px'; w.style.height = estH + 'px';
     }
+  }
+  // 乐观插入页(虚拟 .pdf-upage,无 data-page-num)不在 wraps 里:它的宽度
+  // 是创建时一次性"跟前一张真页同宽"拷来的,缩放/侧栏开合后没人再执行
+  // 这条规则 → 停留在旧宽度上,整列里只有它不缩放(2026-08-25 真机)。
+  // 用循环外的统一 fit 宽 estW 重设(创建时"跟前一张同宽"的本质就是它);
+  // ⚠ 不能拷邻居 style.width——已渲染页过渡期视觉尺寸靠补偿 zoom 撑,
+  // style.width 还是旧值。
+  if (estW) {
+    container.querySelectorAll('.pdf-upage').forEach((up) => {
+      up.style.width = estW + 'px';
+    });
   }
   return true;
 }
@@ -4555,14 +4582,16 @@ function _charRangeToVisualRects(chars, sIdx, eIdx, coordinateSpace) {
 function _charsRangeToText(chars, sIdx, eIdx) {
   if (sIdx < 0 || eIdx >= chars.length || sIdx > eIdx) return '';
   const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
-  let text = '', lastChar = null;
+  let text = '', lastChar = null, _lastReal = null, _pendSp = false;
   const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
     if (!_inBlk(c)) continue;   // 别块(另一栏/题号)不计入
     if (lastChar) {
       // 两边都是 CJK(日/中,无词间空格)→ 跨行/间隙都直接拼,不插换行或空格(否则 公表する 跨行被拆成「公 表する」无法识别)
-      const cjkPair = _cjk(c.c) && _cjk(lastChar.c);
+      // cjkPair 按上一个**实字符**判(空白盒 c=' ' 永远判不进 CJK,
+      // 行尾带 sp 盒的跨行 CJK 词会被误插换行 —— バンセ[sp]|オ 实锤)。
+      const cjkPair = _cjk(c.c) && _cjk(((_lastReal || lastChar).c));
       const dy = Math.abs(c.top - lastChar.top);
       if (dy > c.height * 0.5) { if (!cjkPair) text += '\n'; }
       else {
@@ -4571,7 +4600,18 @@ function _charsRangeToText(chars, sIdx, eIdx) {
         if (!cjkPair && gap > ref * ((/[A-Za-z]/.test(c.c) && /[A-Za-z]/.test(lastChar.c)) ? 1.3 : 0.6) && !lastChar.sp && !c.sp) text += ' ';   // 0.6 防 justified 词内字距拉伸误拆(如 between→be tween)
       }
     }
-    text += c.sp ? ' ' : c.c;
+    if (c.sp) { _pendSp = true; }
+    else {
+      // sp 空白盒延迟决策(2026-09-01 实锤 バンセ|オ →「パンセ オ」):
+      // 空白盒两侧都是 CJK 时不产出空格 —— CJK 没有词间空格,这个空格
+      // 只会把跨行词拆断、送错词典;拉丁词间的 sp 照旧输出。
+      if (_pendSp) {
+        if (!(_cjk(c.c) && _lastReal && _cjk(_lastReal.c))) text += ' ';
+        _pendSp = false;
+      }
+      text += c.c;
+      _lastReal = c;
+    }
     lastChar = c;
   }
   return text.replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').trim();
@@ -4644,6 +4684,29 @@ function _expandToWordEnd(chars, idx) {
   return idx;
 }
 
+// 把选区重设为词锚卡 bind 的 _oi 区间（2026-09-01 用户图3:已绑词组
+// 点击其中一部分时应整个词组被选中）。_oi 与数组下标可能不同序:先映射
+// 下标闭区间,并要求区间内所有实字符的 _oi 都落在 [from,to]（防重排页把
+// 无关字符圈进来）,不满足就放弃扩选（只开卡,不动选区）。
+function _selBindRange(pw, from, to) {
+  const chars = pw && pw.__charBoxes;
+  if (!chars || !chars.length || !(from >= 0) || !(to >= from)) return false;
+  let lo = -1, hi = -1;
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i]; if (!c) continue;
+    const oi = (c._oi != null ? c._oi : i) | 0;
+    if (oi >= from && oi <= to) { if (lo < 0) lo = i; hi = i; }
+  }
+  if (lo < 0) return false;
+  for (let i = lo; i <= hi; i++) {
+    const c = chars[i]; if (!c || c.sp) continue;
+    const oi = (c._oi != null ? c._oi : i) | 0;
+    if (oi < from || oi > to) return false;
+  }
+  _selByCharRange(pw, lo, hi);
+  return true;
+}
+
 function _selByCharRange(pw, sIdx, eIdx) {
   if (!pw || !pw.__charBoxes) return;
   if (sIdx > eIdx) { const t = sIdx; sIdx = eIdx; eIdx = t; }
@@ -4682,14 +4745,16 @@ function _selByCharRange(pw, sIdx, eIdx) {
   // 拼出选中文本：跨行加 \n；同行按物理 X gap 智能补空格（应对 PDF 数轴等
   // TJ 间隔但无空格 char 的情况，如 '0 1 2 3 4' 在 PyMuPDF rawdict 里没空格 char）
   let text = '';
-  let lastChar = null;
+  let lastChar = null, _lastReal = null, _pendSp = false;
   const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
     if (!_inBlk(c)) continue;   // 跨块过滤：别块(题号/另一栏)字符不计入选中文本
     if (lastChar) {
       // 两边都是 CJK(日/中,无词间空格)→ 跨行/间隙都直接拼,不插换行或空格(公表する 跨行不再被拆「公 表する」)
-      const cjkPair = _cjk(c.c) && _cjk(lastChar.c);
+      // cjkPair 按上一个**实字符**判(空白盒 c=' ' 永远判不进 CJK,
+      // 行尾带 sp 盒的跨行 CJK 词会被误插换行 —— バンセ[sp]|オ 实锤)。
+      const cjkPair = _cjk(c.c) && _cjk(((_lastReal || lastChar).c));
       const dy = Math.abs(c.top - lastChar.top);
       if (dy > c.height * 0.5) {
         if (!cjkPair) text += '\n';
@@ -4701,7 +4766,18 @@ function _selByCharRange(pw, sIdx, eIdx) {
       }
     }
     // 真实空格 char 直接保留；其它 char 写入
-    text += c.sp ? ' ' : c.c;
+    if (c.sp) { _pendSp = true; }
+    else {
+      // sp 空白盒延迟决策(2026-09-01 实锤 バンセ|オ →「パンセ オ」):
+      // 空白盒两侧都是 CJK 时不产出空格 —— CJK 没有词间空格,这个空格
+      // 只会把跨行词拆断、送错词典;拉丁词间的 sp 照旧输出。
+      if (_pendSp) {
+        if (!(_cjk(c.c) && _lastReal && _cjk(_lastReal.c))) text += ' ';
+        _pendSp = false;
+      }
+      text += c.c;
+      _lastReal = c;
+    }
     lastChar = c;
   }
   // 压缩多余空格 / trim
@@ -5161,18 +5237,21 @@ function _bindCharLayer(cl, pw) {
           // 母语(不需要翻译的语言)单击选词 = 毫无意义 → 单击中文汉字词(纯汉字无假名、本书非日语)不弹任何东西、清掉选中。
           // 拖选/双击行/三击段仍照常弹(走别的分支)。
           const isNativeHan = hasKanji(_t) && !hasKana(_t) && !(declared && BOOK_LANGS.includes('ja'));
-          // ── 词上有锚卡 → 点字也展开卡（用户 2026-08-31：点开已是
-          //   整合内容，没必要再按命中像素分「字=旧词典框/标记=卡」两种
-          //   结果）。几何相交判定：字符盒中心落进任一 .pgmark 矩形即命中,
-          //   存量标记零改动适用。命中就把点击交给标记自己的展开逻辑。
+          // ── 词上有锚卡 → 点字直接展开卡（用户 2026-08-31：点开已是
+          //   整合内容，没必要再按命中像素分「字=旧词典框/标记=卡」两种结果）。
+          //   ①区间判定：选中词的 _oi 区间与本页词锚卡 bind 区间相交就开卡。
+          //     标记的 bindkey 是**便签 id**（_applyWordBind 传 uid:ctl.note.id）;
+          //     曾查 cid/sourceUid → 永远查不到 → 掉几何兜底,而几何兜底字段名
+          //     还写错(x0,布局系实为 left/top) → 双腿全瘸,边缘点击漏进翻译卡
+          //     (2026-09-01 用户图3/图6 实锤)。命中后把选区扩到 bind 区间 ——
+          //     点击词组的一部分=选中整个词组（用户图3 点名）。
+          //   ②几何兜底（老数据/uid 对不上）：字符盒中心落进任一 .pgmark
+          //     矩形（±6px 容差,治边缘像素漏网）即命中。
           const _bindMk = (() => {
             try {
               if (!_t || _t.length > 30 || !_charSel || !_charSel.pw) return null;
               const _bl = _charSel.pw.querySelector('.pgbind-layer');
               if (!_bl) return null;
-              // ①区间判定（用户 2026-09-01：边缘像素还会漏到翻译卡）——
-              // 选中词的 _oi 区间与本页词锚卡的 bind 区间有交集就开卡，
-              // 不看命中像素；几何检测降为兜底（老数据/uid 对不上时）。
               try {
                 const _sn = (window.RC && RC.stickynote &&
                   typeof RC.stickynote.notes === 'function')
@@ -5197,12 +5276,16 @@ function _bindCharLayer(cl, pw) {
                     const _t2 = parseInt(_bd.to, 10);
                     if (!(_f2 >= 0 && _t2 >= _f2)) continue;
                     if (_hi >= _f2 && _lo <= _t2) {
-                      const _uid = String(
-                        _n2.html.cid || _n2.html.sourceUid || ''
-                      ).replace(/[^\w-]/g, '');
-                      const _mk2 = _uid && _bl.querySelector(
-                        '.pgmark[data-bindkey="u' + _uid + '"]');
-                      if (_mk2) return _mk2;
+                      const _cands = [_n2.id, _n2.html.cid, _n2.html.sourceUid];
+                      for (const _cd of _cands) {
+                        const _uid = String(_cd || '').replace(/[^\w-]/g, '');
+                        const _mk2 = _uid && _bl.querySelector(
+                          '.pgmark[data-bindkey="u' + _uid + '"]');
+                        if (_mk2) {
+                          try { _selBindRange(_charSel.pw, _f2, _t2); } catch (_) {}
+                          return _mk2;
+                        }
+                      }
                     }
                   }
                 }
@@ -5213,12 +5296,12 @@ function _bindCharLayer(cl, pw) {
               const _a = Math.min(_charSel.startIdx, _charSel.endIdx);
               const _b = Math.max(_charSel.startIdx, _charSel.endIdx);
               for (let _i = _a; _i <= _b && _i < _bx.length; _i++) {
-                const _c = _bx[_i]; if (!_c) continue;
-                const _cx = (_c.x0 + _c.x1) / 2, _cy = (_c.y0 + _c.y1) / 2;
+                const _c = _bx[_i]; if (!_c || !(_c.width > 0)) continue;
+                const _cx = _c.left + _c.width / 2, _cy = _c.top + _c.height / 2;
                 for (let _m = 0; _m < _marks.length; _m++) {
                   const _mk = _marks[_m];
-                  const _L = parseFloat(_mk.style.left), _T = parseFloat(_mk.style.top);
-                  const _W = parseFloat(_mk.style.width), _H = parseFloat(_mk.style.height);
+                  const _L = parseFloat(_mk.style.left) - 6, _T = parseFloat(_mk.style.top) - 6;
+                  const _W = parseFloat(_mk.style.width) + 12, _H = parseFloat(_mk.style.height) + 12;
                   if (_cx >= _L && _cx <= _L + _W && _cy >= _T && _cy <= _T + _H) return _mk;
                 }
               }
@@ -12971,9 +13054,37 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       seg.sort((a, b) => (a._oi | 0) - (b._oi | 0));
       let txt = '';
       for (const c3 of seg) txt += c3.c;
+      // 跨行词按行分段（2026-09-01 用户图4:锁定预览一个 union 大框把两行
+      // 之间整片无关正文都圈进去）。判据同 34-bindcard._rangeRects:
+      // baseline 差 < 0.6 行高 = 同行。anchorFxShow 有 rects 就画多段。
+      const rowsGeo = seg.slice().sort((a, b) => {
+        const d = (a.top + a.height) - (b.top + b.height);
+        return Math.abs(d) > (Math.max(a.height, b.height) || 1) * 0.6
+          ? d : a.left - b.left;
+      });
+      const rows = [];
+      let curRow = null;
+      for (const c4 of rowsGeo) {
+        const base4 = c4.top + c4.height;
+        if (curRow && Math.abs(base4 - curRow.base) <
+            Math.max(c4.height, 8) * 0.6) {
+          curRow.x0 = Math.min(curRow.x0, c4.left);
+          curRow.y0 = Math.min(curRow.y0, c4.top);
+          curRow.x1 = Math.max(curRow.x1, c4.left + c4.width);
+          curRow.y1 = Math.max(curRow.y1, base4);
+        } else {
+          curRow = { base: base4, x0: c4.left, y0: c4.top,
+                     x1: c4.left + c4.width, y1: base4 };
+          rows.push(curRow);
+        }
+      }
       return {
         el: pw, left: L * Klay, top: T * Klay,
         width: (R2 - L) * Klay, height: (B - T) * Klay,
+        rects: rows.map(r => ({
+          left: r.x0 * Klay, top: r.y0 * Klay,
+          width: (r.x1 - r.x0) * Klay, height: (r.y1 - r.y0) * Klay
+        })),
         dist: Math.sqrt(bd) * dispK,
         from: from, to: to, text: txt,
         page: parseInt(pw.dataset.pageNum, 10) || 0
@@ -13460,8 +13571,31 @@ window.__upReconcileDelete = function (newMeta) {
     // 它从不读 UA/Origin，而认证形态只能二分（扩展 Bearer / App 与桌面都是
     // session cookie），三分只能由客户端自报。
     const client = (window.RC && RC.clientRole) ? RC.clientRole() : '';
-    const body = JSON.stringify({ file: FILE_REL, client: client, dwell: entries.map(([k, s]) => (
-      k.charAt(0) === 'u' ? { upage: k.slice(2), secs: s } : { page: +k.slice(2), secs: s })) });
+    // 活动账本 §3.4「地点」：App 的 Swift 侧把最近定位推在这个全局变量里
+    //（开关关着/没授权/非 App 环境就没有）。必须走全局而不是异步取 ——
+    // pagehide 的 beacon flush 是同步的，等不了任何 Promise。
+    // 只带新鲜的（≤30min）：一条 dwell 配一个两小时前的位置是错误数据。
+    const payload = { file: FILE_REL, client: client, dwell: entries.map(([k, s]) => (
+      k.charAt(0) === 'u' ? { upage: k.slice(2), secs: s } : { page: +k.slice(2), secs: s })) };
+    const loc = window.__BW_DEVICE_LOCATION__;
+    if (loc && typeof loc === 'object' &&
+        Number.isFinite(loc.lat) && Number.isFinite(loc.lon) &&
+        Number.isFinite(loc.at) && (Date.now() / 1000 - loc.at) < 1800) {
+      payload.loc = { lat: loc.lat, lon: loc.lon,
+                      acc: Number.isFinite(loc.acc) ? loc.acc : null,
+                      at: Math.floor(loc.at) };
+      if (typeof loc.name === 'string' && loc.name) {
+        payload.loc.name = loc.name.slice(0, 80);
+      }
+    }
+    const body = JSON.stringify(payload);
+    // 活动记录旁路(2026-08-25 方向:记录的家在 Windows):同一份 flush 批
+    // 经 runtime 进复制命令流。App 内才有 runtime;失败静默 —— 旁路不拖主路。
+    try {
+      if (window.BWReaderRuntime && window.BWReaderRuntime.reportActivity) {
+        window.BWReaderRuntime.reportActivity(payload);
+      }
+    } catch (e) {}
     try {
       if (useBeacon && navigator.sendBeacon) {
         // The native App owns this same-origin route through a synchronous
@@ -14635,51 +14769,6 @@ window._lbClick = _lbClick;
     return true;
   }
 
-  function _resolvePageBind(bind) {
-    if (!bind || bind.kind !== 'page-chars') return { ok: false, why: 'not-page-chars' };
-    var page = parseInt(bind.page, 10);
-    if (!(page > 0)) return { ok: false, why: 'bad-page' };
-    var pageCount = 0;
-    try { pageCount = (typeof pdfDoc !== 'undefined' && pdfDoc) ? (parseInt(pdfDoc.numPages, 10) || 0) : 0; } catch (e) {}
-    if (pageCount > 0 && page > pageCount) return { ok: false, why: 'bad-page', page: page };
-    var pw = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
-    if (!pw || pw.dataset.loaded !== '1') return { ok: false, why: 'page-not-rendered', page: page };
-    var boxes = pw.__charBoxes;
-    if (!boxes || !boxes.length) return { ok: false, why: 'no-char-layer', page: page };
-    // ⚠ from/to 可选：**不能**用 `parseInt(...) || 0` 兜底 —— 那会把"没给"
-    //   变成 0，_resolveRange 就无从分辨"钉在开头"和"没说"。
-    var _bFrom = parseInt(bind.from, 10);
-    var _bTo = parseInt(bind.to, 10);
-    var range = _resolveRange(boxes, {
-      from: Number.isFinite(_bFrom) ? _bFrom : undefined,
-      to: Number.isFinite(_bTo) ? _bTo : undefined,
-      block: parseInt(bind.block, 10) || 0,
-      text: bind.text || ''
-    });
-    // 分词扩展（用户 2026-09-01：「真正按照分词支持跨行」）——
-    // AI 给的 text 常在行尾截断（它读到的页面文本按行分块，跨行词只有
-    // 前半，实锤 コチュジャ|ン）。解析结果命中生词分词标记（fugashi
-    // 整词、rects 天然跨行）时扩展到整词；没有标记的词保持原匹配。
-    if (range) range = _expandRangeToVocabMark(pw, boxes, range);
-    if (!range) {
-      return {
-        ok: false, why: 'range-unresolved', page: page,
-        detail: {
-          chars: boxes.length,
-          from: parseInt(bind.from, 10) || 0,
-          to: parseInt(bind.to, 10) || 0,
-          wanted: String(bind.text || '').slice(0, 40),
-          gotAtIndex: _textAt(boxes, parseInt(bind.from, 10) || 0,
-                              parseInt(bind.to, 10) || 0).slice(0, 40)
-        }
-      };
-    }
-    var rects = _rangeRects(range);
-    if (!rects) return { ok: false, why: 'no-rect', page: page };
-    return { ok: true, page: page, pw: pw, boxes: boxes, range: range,
-             rects: rects, last: rects[rects.length - 1] };
-  }
-
   function _expandRangeToVocabMark(pw, boxes, range) {
     try {
       var marks = pw && pw.__vocabMarks;
@@ -14703,7 +14792,7 @@ window._lbClick = _lbClick;
         }
       }
       if (!mark) return range;
-      var lo = range.lo, hi = range.hi, hit = [];
+      var lo = range.lo, hi = range.hi;
       for (var i = 0; i < boxes.length; i++) {
         var b = boxes[i];
         if (!b || b._x0 === undefined) continue;
@@ -14730,6 +14819,51 @@ window._lbClick = _lbClick;
     } catch (e) { return range; }
   }
 
+  function _resolvePageBind(bind) {
+    if (!bind || bind.kind !== 'page-chars') return { ok: false, why: 'not-page-chars' };
+    var page = parseInt(bind.page, 10);
+    if (!(page > 0)) return { ok: false, why: 'bad-page' };
+    var pageCount = 0;
+    try { pageCount = (typeof pdfDoc !== 'undefined' && pdfDoc) ? (parseInt(pdfDoc.numPages, 10) || 0) : 0; } catch (e) {}
+    if (pageCount > 0 && page > pageCount) return { ok: false, why: 'bad-page', page: page };
+    var pw = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
+    if (!pw || pw.dataset.loaded !== '1') return { ok: false, why: 'page-not-rendered', page: page };
+    var boxes = pw.__charBoxes;
+    if (!boxes || !boxes.length) return { ok: false, why: 'no-char-layer', page: page };
+    // ⚠ from/to 可选：**不能**用 `parseInt(...) || 0` 兜底 —— 那会把"没给"
+    //   变成 0，_resolveRange 就无从分辨"钉在开头"和"没说"。
+    var _bFrom = parseInt(bind.from, 10);
+    var _bTo = parseInt(bind.to, 10);
+    var range = _resolveRange(boxes, {
+      from: Number.isFinite(_bFrom) ? _bFrom : undefined,
+      to: Number.isFinite(_bTo) ? _bTo : undefined,
+      block: parseInt(bind.block, 10) || 0,
+      text: bind.text || ''
+    });
+    if (!range) {
+      return {
+        ok: false, why: 'range-unresolved', page: page,
+        detail: {
+          chars: boxes.length,
+          from: parseInt(bind.from, 10) || 0,
+          to: parseInt(bind.to, 10) || 0,
+          wanted: String(bind.text || '').slice(0, 40),
+          gotAtIndex: _textAt(boxes, parseInt(bind.from, 10) || 0,
+                              parseInt(bind.to, 10) || 0).slice(0, 40)
+        }
+      };
+    }
+    // 分词扩展（用户 2026-09-01：「真正按照分词支持跨行」）——
+    // AI 给的 text 常在行尾截断（它读到的页面文本按行分块，跨行词只有
+    // 前半，实锤 コチュジャ|ン）。解析结果命中生词分词标记（fugashi
+    // 整词、rects 天然跨行）时扩展到整词；没有标记的词保持原匹配。
+    if (range) range = _expandRangeToVocabMark(pw, boxes, range);
+    var rects = _rangeRects(range);
+    if (!rects) return { ok: false, why: 'no-rect', page: page };
+    return { ok: true, page: page, pw: pw, boxes: boxes, range: range,
+             rects: rects, last: rects[rects.length - 1] };
+  }
+
   function _bindScreenPoint(g) {
     var ge = g.pw.__charLayer || g.pw;
     var gr = ge.getBoundingClientRect();
@@ -14741,9 +14875,6 @@ window._lbClick = _lbClick;
     };
   }
 
-  /// AI page-chars 的唯一持久化入口。返回 Promise；只有便签仓完成 create 且
-  /// 本地投影已 upsert 后才 resolve ok:true。rc-voicecall 不得先调 __pageBindCard
-  /// 画临时 DOM 再宣称 bound。
   /// 只解析不建卡（2026-09-01 自动认领锚定用）：浮层卡的标题在页面
   /// 字符层能解析出区间时，把 bind 补进**现有**卡 —— persistBoundCard
   /// 是 create 流，不适用于已存在的卡。
@@ -14759,6 +14890,9 @@ window._lbClick = _lbClick;
     }
   };
 
+  /// AI page-chars 的唯一持久化入口。返回 Promise；只有便签仓完成 create 且
+  /// 本地投影已 upsert 后才 resolve ok:true。rc-voicecall 不得先调 __pageBindCard
+  /// 画临时 DOM 再宣称 bound。
   window.__pageBindPersist = function (bind, payload) {
     var g = null;
     try { g = _resolvePageBind(bind); } catch (e) {

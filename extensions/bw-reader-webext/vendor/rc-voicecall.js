@@ -2643,7 +2643,8 @@ if (window.__bwPwaProviderOnly) return;
       // 按需补留底(2026-09-01):源站限流期建的卡保留了原始外链,
       // 设备一直直连一直挨 429。外链失败时把原链投给桥现场抓一份,
       // 抓成换本地资产路由 —— 存量卡零迁移救活,以后永远走本地。
-      if (_hasNativeRuntime() && !image.hasAttribute('data-ensure-tried')) {
+      var _ensN = parseInt(image.getAttribute('data-ensure-tried') || '0', 10) || 0;
+      if (_hasNativeRuntime() && _ensN < 3) {
         var extSrc = '';
         var mProxy = /^\/pdf\/api\/img-proxy\?url=(https%3A%2F%2F[^&]+)$/.exec(src0);
         if (mProxy) {
@@ -2652,7 +2653,7 @@ if (window.__bwPwaProviderOnly) return;
           extSrc = src0;
         }
         if (extSrc && extSrc.indexOf('bwicarus-2.taile44d0c.ts.net') < 0) {
-          image.setAttribute('data-ensure-tried', '1');
+          image.setAttribute('data-ensure-tried', String(_ensN + 1));
           // @interaction cardasset.ensure.request
           fetch('/pdf/api/card-asset-ensure?url=' + encodeURIComponent(extSrc))
             .then(function (r) { return r.ok ? r.json() : null; })
@@ -2660,6 +2661,18 @@ if (window.__bwPwaProviderOnly) return;
               if (d && d.ok && d.assetId && image.isConnected) {
                 image.setAttribute(
                   'src', '/pdf/api/card-asset?id=' + d.assetId);
+              } else if (image.isConnected && _ensN + 1 < 3) {
+                // 桥可能正被源站冷却（2026-09-01 实锤:批量建卡撞进
+                // wikimedia 限流,一次性 ensure 撞上冷却窗就永远破图）。
+                // 35s 后重设 src 重进 error→ensure 链,计次护栏防打转。
+                setTimeout(function () {
+                  if (!image.isConnected) return;
+                  var s1 = String(image.getAttribute('src') || '');
+                  try {
+                    image.removeAttribute('src');
+                    image.setAttribute('src', s1);
+                  } catch (e5) {}
+                }, 35000);
               }
             })
             .catch(function () {});

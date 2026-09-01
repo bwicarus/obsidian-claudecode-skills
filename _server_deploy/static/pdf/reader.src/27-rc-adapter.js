@@ -173,9 +173,37 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       seg.sort((a, b) => (a._oi | 0) - (b._oi | 0));
       let txt = '';
       for (const c3 of seg) txt += c3.c;
+      // 跨行词按行分段（2026-09-01 用户图4:锁定预览一个 union 大框把两行
+      // 之间整片无关正文都圈进去）。判据同 34-bindcard._rangeRects:
+      // baseline 差 < 0.6 行高 = 同行。anchorFxShow 有 rects 就画多段。
+      const rowsGeo = seg.slice().sort((a, b) => {
+        const d = (a.top + a.height) - (b.top + b.height);
+        return Math.abs(d) > (Math.max(a.height, b.height) || 1) * 0.6
+          ? d : a.left - b.left;
+      });
+      const rows = [];
+      let curRow = null;
+      for (const c4 of rowsGeo) {
+        const base4 = c4.top + c4.height;
+        if (curRow && Math.abs(base4 - curRow.base) <
+            Math.max(c4.height, 8) * 0.6) {
+          curRow.x0 = Math.min(curRow.x0, c4.left);
+          curRow.y0 = Math.min(curRow.y0, c4.top);
+          curRow.x1 = Math.max(curRow.x1, c4.left + c4.width);
+          curRow.y1 = Math.max(curRow.y1, base4);
+        } else {
+          curRow = { base: base4, x0: c4.left, y0: c4.top,
+                     x1: c4.left + c4.width, y1: base4 };
+          rows.push(curRow);
+        }
+      }
       return {
         el: pw, left: L * Klay, top: T * Klay,
         width: (R2 - L) * Klay, height: (B - T) * Klay,
+        rects: rows.map(r => ({
+          left: r.x0 * Klay, top: r.y0 * Klay,
+          width: (r.x1 - r.x0) * Klay, height: (r.y1 - r.y0) * Klay
+        })),
         dist: Math.sqrt(bd) * dispK,
         from: from, to: to, text: txt,
         page: parseInt(pw.dataset.pageNum, 10) || 0

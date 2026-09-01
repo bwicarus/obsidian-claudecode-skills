@@ -23,11 +23,10 @@
   var _mode = false;
   // 复习范围（用户 2026-09-01）：'current'=只看与当前内容相关的卡
   // （暂以出处/related 区分，节点关系版后续接）；'all'=全部到期卡。
-  var _scopeMode = (function () {
-    try {
-      return localStorage.getItem('rv-scope') === 'all' ? 'all' : 'current';
-    } catch (e) { return 'current'; }
-  })();
+  // 只存内存：复习组件的纪律是**不用页面 localStorage**（隐私审计
+  // uses-private-extension-storage 盯着）。会话内记住切换,重进复习回到
+  // 默认「当前」—— 与「载入当前内容相关的卡」的入口心智一致。
+  var _scopeMode = 'current';
   var _mounted = false;
   var _observer = null;
   var _decorateTimer = 0;
@@ -1494,10 +1493,16 @@
       }
       var scopedCards = Array.isArray(data.cards) ? data.cards : [];
       var relatedCount = Number(data.related_total || 0);
-      if (_scopeMode === 'current') {
+      if (_scopeMode === 'current' && hasContext && data.related_total != null) {
         // 「当前」只收 related 之内的卡：服务端 degraded/无匹配时
         // related_total=0 却塞满无关到期卡 —— 那正是「载入相关却出现
         // 无关卡片」的来源。宁可空着提示，不喂无关。
+        // ⚠ 两个不截的边界：① 字段**缺席**（旧协议/本地仓库路径）
+        // ≠ 相关为 0 —— 那套协议里没有相关性概念；② **无 context 的
+        // GET due 队列**本来就是「全部到期」语义，它响应里的 related_total:0
+        // 说的是"没做相关计算"不是"没有相关卡"（契约测试
+        // zero-local-cards 与 legacy-HTML 两例实锤：截了它们，
+        // 旧外部队列整个消失）。
         scopedCards = scopedCards.slice(0, relatedCount);
       }
       var snapshot = _consumeRejectedSnapshot(
@@ -1916,7 +1921,6 @@
     );
     scopeToggle.addEventListener('click', function () {
       _scopeMode = _scopeMode === 'all' ? 'current' : 'all';
-      try { localStorage.setItem('rv-scope', _scopeMode); } catch (e) {}
       _contextCacheKey = '';
       _commitStagedRating('scope');
       loadQueue(true);

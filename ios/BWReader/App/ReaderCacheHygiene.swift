@@ -110,13 +110,14 @@ enum ReaderCacheHygiene {
             for: .libraryDirectory, in: .userDomainMask
         ).first?.appendingPathComponent("WebKit", isDirectory: true)
         if let webkitData {
-            // 递归三层（2026-09-01 实锤：只拆一层看到「Default 10.77GB」
-            // 等于没说 —— Default 是 per-origin 容器,真凶在
-            // Default/<origin>/<类型> 里)。>64MB 才报;条目带「└」前缀,
-            // totalBytes 会跳过 —— 它们是上面 WebKit 行的**内部构成**,
-            // 计入总和就是双重计数(21.84GB 假读数实锤)。
+            // 递归六层（2026-09-01 二连实锤：三层停在
+            // Default/<origin盐目录> 16.79GB —— 还是没说清是 IndexedDB
+            // 还是 CacheStorage,而这决定能不能清、怎么清。WebKit 的实际
+            // 布局是 Default/<盐>/<盐>/<数据类型>/...,六层足以见到类型名)。
+            // >64MB 才报;条目带「└」前缀,totalBytes 会跳过 —— 它们是上面
+            // WebKit 行的**内部构成**,计入总和就是双重计数(21.84GB 实锤)。
             func drill(_ dir: URL, depth: Int, label: String) {
-                guard depth <= 3,
+                guard depth <= 6,
                       let subs = try? FileManager.default.contentsOfDirectory(
                           at: dir, includingPropertiesForKeys: nil)
                 else { return }

@@ -601,6 +601,56 @@
     return true;
   }
 
+  function _expandRangeToVocabMark(pw, boxes, range) {
+    try {
+      var marks = pw && pw.__vocabMarks;
+      if (!marks || !marks.length || !range || !range.boxes ||
+          !range.boxes.length) return range;
+      var probe = [range.boxes[0],
+                   range.boxes[range.boxes.length - 1]];
+      var mark = null;
+      for (var p0 = 0; p0 < probe.length && !mark; p0++) {
+        var c = probe[p0];
+        if (!c || c._x0 === undefined) continue;
+        var cx = (c._x0 + c._x1) / 2, cy = (c._y0 + c._y1) / 2;
+        for (var m = 0; m < marks.length && !mark; m++) {
+          for (var r0 = 0; r0 < (marks[m].rects || []).length; r0++) {
+            var r = marks[m].rects[r0];
+            if (cx >= r[0] && cx <= r[2] && cy >= r[1] && cy <= r[3]) {
+              mark = marks[m];
+              break;
+            }
+          }
+        }
+      }
+      if (!mark) return range;
+      var lo = range.lo, hi = range.hi;
+      for (var i = 0; i < boxes.length; i++) {
+        var b = boxes[i];
+        if (!b || b._x0 === undefined) continue;
+        var bx = (b._x0 + b._x1) / 2, by = (b._y0 + b._y1) / 2;
+        for (var r1 = 0; r1 < (mark.rects || []).length; r1++) {
+          var rr = mark.rects[r1];
+          if (bx >= rr[0] && bx <= rr[2] && by >= rr[1] && by <= rr[3]) {
+            var oi = (b._oi != null ? b._oi : i) | 0;
+            if (oi < lo) lo = oi;
+            if (oi > hi) hi = oi;
+            break;
+          }
+        }
+      }
+      if (lo === range.lo && hi === range.hi) return range;
+      var expanded = [];
+      var ord = _byOi(boxes);
+      for (var k = 0; k < ord.length; k++) {
+        var oi2 = ord[k]._oi | 0;
+        if (oi2 >= lo && oi2 <= hi) expanded.push(ord[k]);
+      }
+      return { lo: lo, hi: hi, boxes: expanded,
+               how: (range.how || 'text') + '+vocab' };
+    } catch (e) { return range; }
+  }
+
   function _resolvePageBind(bind) {
     if (!bind || bind.kind !== 'page-chars') return { ok: false, why: 'not-page-chars' };
     var page = parseInt(bind.page, 10);
@@ -635,6 +685,11 @@
         }
       };
     }
+    // 分词扩展（用户 2026-09-01：「真正按照分词支持跨行」）——
+    // AI 给的 text 常在行尾截断（它读到的页面文本按行分块，跨行词只有
+    // 前半，实锤 コチュジャ|ン）。解析结果命中生词分词标记（fugashi
+    // 整词、rects 天然跨行）时扩展到整词；没有标记的词保持原匹配。
+    if (range) range = _expandRangeToVocabMark(pw, boxes, range);
     var rects = _rangeRects(range);
     if (!rects) return { ok: false, why: 'no-rect', page: page };
     return { ok: true, page: page, pw: pw, boxes: boxes, range: range,
@@ -651,6 +706,21 @@
       y: gr.top + (g.last.y0 + g.last.y1) / 2 * screenK
     };
   }
+
+  /// 只解析不建卡（2026-09-01 自动认领锚定用）：浮层卡的标题在页面
+  /// 字符层能解析出区间时，把 bind 补进**现有**卡 —— persistBoundCard
+  /// 是 create 流，不适用于已存在的卡。
+  window.__pageBindResolveOnly = function (bind) {
+    try {
+      var g = _resolvePageBind(bind);
+      if (!g || g.ok !== true || !g.range) {
+        return { ok: false, why: (g && g.why) || 'unresolved' };
+      }
+      return { ok: true, page: g.page, from: g.range.lo, to: g.range.hi };
+    } catch (e) {
+      return { ok: false, why: 'exception' };
+    }
+  };
 
   /// AI page-chars 的唯一持久化入口。返回 Promise；只有便签仓完成 create 且
   /// 本地投影已 upsert 后才 resolve ok:true。rc-voicecall 不得先调 __pageBindCard
@@ -675,7 +745,20 @@
       icon: payload.icon || '', category: _bindCategory(payload), tone: _bindColor(payload)
     };
     var placement = deferred ? { deferredPdfPage: g.page } : _bindScreenPoint(g);
-    return Promise.resolve(RC.stickynote.persistBoundCard(bind, normalized, placement))
+    // ⚠ block+text 形式的 bind 在 _resolvePageBind 里已经解析出了字符区间，
+    //   但传下去的还是原始 bind —— persistBoundCard 只认数字 from/to，于是
+    //   "解析明明成功了却被拒 bad-bind"。把算出的区间写回再传（拷贝，不改
+    //   调用方对象）；identitySeed/去重 key 也因此拿到干净的数字区间。
+    var bindOut = bind;
+    if (g.ok && g.range) {
+      bindOut = {};
+      for (var bk in bind) {
+        if (Object.prototype.hasOwnProperty.call(bind, bk)) bindOut[bk] = bind[bk];
+      }
+      bindOut.from = g.range.lo;
+      bindOut.to = g.range.hi;
+    }
+    return Promise.resolve(RC.stickynote.persistBoundCard(bindOut, normalized, placement))
       .then(function (result) {
         if (!result || result.ok !== true) return result || { ok: false, why: 'persistence-failed' };
         return { ok: true, page: g.page,

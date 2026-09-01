@@ -248,9 +248,16 @@ function _charBlocksConnected(a, b) {
   const horizontal = a.axis !== 'vertical' && b.axis !== 'vertical'
     && xOverlap >= 0.3
     && yGap <= Math.max(a.charHeight, b.charHeight) * 1.8;
+  // 左右相邻的 1.8 字宽容差是给**纵排行间**的（纵排书的"行"就是左右
+  // 排列）。横排/未知块的左右连接只有"同一行被 OCR 拆成两块"一种合法
+  // 场景 —— 间隙≈字间距。表格相邻单元格的格线+边距恰好落在 0.6~1.8
+  // 字宽之间,1.8 一刀切会让选区逐格传染整行(2026-09-01 实锤:
+  // スペイン料理→ルを使用→サングリ 三格连选)。
+  const bothVertical = a.axis === 'vertical' && b.axis === 'vertical';
   const vertical = a.axis !== 'horizontal' && b.axis !== 'horizontal'
     && yOverlap >= 0.3
-    && xGap <= Math.max(a.charWidth, b.charWidth) * 1.8;
+    && xGap <= Math.max(a.charWidth, b.charWidth)
+       * (bothVertical ? 1.8 : 0.6);
   return horizontal || vertical;
 }
 
@@ -436,14 +443,16 @@ function _charRangeToVisualRects(chars, sIdx, eIdx, coordinateSpace) {
 function _charsRangeToText(chars, sIdx, eIdx) {
   if (sIdx < 0 || eIdx >= chars.length || sIdx > eIdx) return '';
   const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
-  let text = '', lastChar = null;
+  let text = '', lastChar = null, _lastReal = null, _pendSp = false;
   const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
     if (!_inBlk(c)) continue;   // 别块(另一栏/题号)不计入
     if (lastChar) {
       // 两边都是 CJK(日/中,无词间空格)→ 跨行/间隙都直接拼,不插换行或空格(否则 公表する 跨行被拆成「公 表する」无法识别)
-      const cjkPair = _cjk(c.c) && _cjk(lastChar.c);
+      // cjkPair 按上一个**实字符**判(空白盒 c=' ' 永远判不进 CJK,
+      // 行尾带 sp 盒的跨行 CJK 词会被误插换行 —— バンセ[sp]|オ 实锤)。
+      const cjkPair = _cjk(c.c) && _cjk(((_lastReal || lastChar).c));
       const dy = Math.abs(c.top - lastChar.top);
       if (dy > c.height * 0.5) { if (!cjkPair) text += '\n'; }
       else {
@@ -452,7 +461,18 @@ function _charsRangeToText(chars, sIdx, eIdx) {
         if (!cjkPair && gap > ref * ((/[A-Za-z]/.test(c.c) && /[A-Za-z]/.test(lastChar.c)) ? 1.3 : 0.6) && !lastChar.sp && !c.sp) text += ' ';   // 0.6 防 justified 词内字距拉伸误拆(如 between→be tween)
       }
     }
-    text += c.sp ? ' ' : c.c;
+    if (c.sp) { _pendSp = true; }
+    else {
+      // sp 空白盒延迟决策(2026-09-01 实锤 バンセ|オ →「パンセ オ」):
+      // 空白盒两侧都是 CJK 时不产出空格 —— CJK 没有词间空格,这个空格
+      // 只会把跨行词拆断、送错词典;拉丁词间的 sp 照旧输出。
+      if (_pendSp) {
+        if (!(_cjk(c.c) && _lastReal && _cjk(_lastReal.c))) text += ' ';
+        _pendSp = false;
+      }
+      text += c.c;
+      _lastReal = c;
+    }
     lastChar = c;
   }
   return text.replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').trim();
@@ -525,28 +545,77 @@ function _expandToWordEnd(chars, idx) {
   return idx;
 }
 
+// 把选区重设为词锚卡 bind 的 _oi 区间（2026-09-01 用户图3:已绑词组
+// 点击其中一部分时应整个词组被选中）。_oi 与数组下标可能不同序:先映射
+// 下标闭区间,并要求区间内所有实字符的 _oi 都落在 [from,to]（防重排页把
+// 无关字符圈进来）,不满足就放弃扩选（只开卡,不动选区）。
+function _selBindRange(pw, from, to) {
+  const chars = pw && pw.__charBoxes;
+  if (!chars || !chars.length || !(from >= 0) || !(to >= from)) return false;
+  let lo = -1, hi = -1;
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i]; if (!c) continue;
+    const oi = (c._oi != null ? c._oi : i) | 0;
+    if (oi >= from && oi <= to) { if (lo < 0) lo = i; hi = i; }
+  }
+  if (lo < 0) return false;
+  for (let i = lo; i <= hi; i++) {
+    const c = chars[i]; if (!c || c.sp) continue;
+    const oi = (c._oi != null ? c._oi : i) | 0;
+    if (oi < from || oi > to) return false;
+  }
+  _selByCharRange(pw, lo, hi);
+  return true;
+}
+
 function _selByCharRange(pw, sIdx, eIdx) {
   if (!pw || !pw.__charBoxes) return;
   if (sIdx > eIdx) { const t = sIdx; sIdx = eIdx; eIdx = t; }
   const chars = pw.__charBoxes;
   if (sIdx < 0 || eIdx >= chars.length) return;
   // 拖选两端自动对齐词边界（英文 \w 词；CJK 字符不动 - isWord 不匹配自动跳过）
+  const _tapIdx = (sIdx === eIdx) ? sIdx : -1;   // 单击特征,拖选不进下面的 mark 覆盖
   sIdx = _expandToWordStart(chars, sIdx);
   eIdx = _expandToWordEnd(chars, eIdx);
+  // 单击落在生词下划线内 → 选中范围与下划线一致（用户 2026-08-31 实锤:
+  // 跨行词下划线画得对,点击却按行断开,下半行还可能独立成词被判已掌握）。
+  // 下划线 mark 是分词后的**整词**(rects 跨行分段),从 rects 反推字符集,
+  // 一次选全。拖选(_tapIdx<0)是手动范围,不覆盖。
+  if (_tapIdx >= 0) {
+    const _vm = _findVocabMarkAt(pw, _tapIdx);
+    if (_vm && Array.isArray(_vm.rects) && _vm.rects.length) {
+      let _lo = -1, _hi = -1;
+      for (let _i = 0; _i < chars.length; _i++) {
+        const _c = chars[_i];
+        if (!_c || _c._x0 === undefined) continue;
+        const _cx = (_c._x0 + _c._x1) / 2, _cy = (_c._y0 + _c._y1) / 2;
+        for (const _r of _vm.rects) {
+          if (_cx >= _r[0] && _cx <= _r[2] && _cy >= _r[1] && _cy <= _r[3]) {
+            if (_lo < 0) _lo = _i;
+            _hi = _i;
+            break;
+          }
+        }
+      }
+      if (_lo >= 0 && _hi >= _lo) { sIdx = _lo; eIdx = _hi; }
+    }
+  }
   // 同块严格限在该 bk；跨块只接受两端之间的几何连通路径。
   // bk 缺失才回退 w//1e6，无任何块信息时保持旧行为。
   const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
   // 拼出选中文本：跨行加 \n；同行按物理 X gap 智能补空格（应对 PDF 数轴等
   // TJ 间隔但无空格 char 的情况，如 '0 1 2 3 4' 在 PyMuPDF rawdict 里没空格 char）
   let text = '';
-  let lastChar = null;
+  let lastChar = null, _lastReal = null, _pendSp = false;
   const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
     if (!_inBlk(c)) continue;   // 跨块过滤：别块(题号/另一栏)字符不计入选中文本
     if (lastChar) {
       // 两边都是 CJK(日/中,无词间空格)→ 跨行/间隙都直接拼,不插换行或空格(公表する 跨行不再被拆「公 表する」)
-      const cjkPair = _cjk(c.c) && _cjk(lastChar.c);
+      // cjkPair 按上一个**实字符**判(空白盒 c=' ' 永远判不进 CJK,
+      // 行尾带 sp 盒的跨行 CJK 词会被误插换行 —— バンセ[sp]|オ 实锤)。
+      const cjkPair = _cjk(c.c) && _cjk(((_lastReal || lastChar).c));
       const dy = Math.abs(c.top - lastChar.top);
       if (dy > c.height * 0.5) {
         if (!cjkPair) text += '\n';
@@ -558,7 +627,18 @@ function _selByCharRange(pw, sIdx, eIdx) {
       }
     }
     // 真实空格 char 直接保留；其它 char 写入
-    text += c.sp ? ' ' : c.c;
+    if (c.sp) { _pendSp = true; }
+    else {
+      // sp 空白盒延迟决策(2026-09-01 实锤 バンセ|オ →「パンセ オ」):
+      // 空白盒两侧都是 CJK 时不产出空格 —— CJK 没有词间空格,这个空格
+      // 只会把跨行词拆断、送错词典;拉丁词间的 sp 照旧输出。
+      if (_pendSp) {
+        if (!(_cjk(c.c) && _lastReal && _cjk(_lastReal.c))) text += ' ';
+        _pendSp = false;
+      }
+      text += c.c;
+      _lastReal = c;
+    }
     lastChar = c;
   }
   // 压缩多余空格 / trim
@@ -1018,7 +1098,81 @@ function _bindCharLayer(cl, pw) {
           // 母语(不需要翻译的语言)单击选词 = 毫无意义 → 单击中文汉字词(纯汉字无假名、本书非日语)不弹任何东西、清掉选中。
           // 拖选/双击行/三击段仍照常弹(走别的分支)。
           const isNativeHan = hasKanji(_t) && !hasKana(_t) && !(declared && BOOK_LANGS.includes('ja'));
-          if (_t && _t.length <= 30 && (isJa || engOk)) {
+          // ── 词上有锚卡 → 点字直接展开卡（用户 2026-08-31：点开已是
+          //   整合内容，没必要再按命中像素分「字=旧词典框/标记=卡」两种结果）。
+          //   ①区间判定：选中词的 _oi 区间与本页词锚卡 bind 区间相交就开卡。
+          //     标记的 bindkey 是**便签 id**（_applyWordBind 传 uid:ctl.note.id）;
+          //     曾查 cid/sourceUid → 永远查不到 → 掉几何兜底,而几何兜底字段名
+          //     还写错(x0,布局系实为 left/top) → 双腿全瘸,边缘点击漏进翻译卡
+          //     (2026-09-01 用户图3/图6 实锤)。命中后把选区扩到 bind 区间 ——
+          //     点击词组的一部分=选中整个词组（用户图3 点名）。
+          //   ②几何兜底（老数据/uid 对不上）：字符盒中心落进任一 .pgmark
+          //     矩形（±6px 容差,治边缘像素漏网）即命中。
+          const _bindMk = (() => {
+            try {
+              if (!_t || _t.length > 30 || !_charSel || !_charSel.pw) return null;
+              const _bl = _charSel.pw.querySelector('.pgbind-layer');
+              if (!_bl) return null;
+              try {
+                const _sn = (window.RC && RC.stickynote &&
+                  typeof RC.stickynote.notes === 'function')
+                    ? RC.stickynote.notes() : [];
+                if (_sn && _sn.length) {
+                  const _pg = +(_charSel.pw.dataset.pageNum || 0);
+                  const _bx0 = _charSel.pw.__charBoxes || [];
+                  const _ia = Math.min(_charSel.startIdx, _charSel.endIdx);
+                  const _ib = Math.max(_charSel.startIdx, _charSel.endIdx);
+                  let _lo = Infinity, _hi = -1;
+                  for (let _i2 = _ia; _i2 <= _ib && _i2 < _bx0.length; _i2++) {
+                    const _c2 = _bx0[_i2]; if (!_c2) continue;
+                    const _oi2 = (_c2._oi != null ? _c2._oi : _i2) | 0;
+                    if (_oi2 < _lo) _lo = _oi2;
+                    if (_oi2 > _hi) _hi = _oi2;
+                  }
+                  for (const _n2 of _sn) {
+                    const _bd = _n2 && _n2.html && _n2.html.bind;
+                    if (!_bd || _bd.kind !== 'page-chars') continue;
+                    if ((parseInt(_bd.page, 10) || 0) !== _pg) continue;
+                    const _f2 = parseInt(_bd.from, 10);
+                    const _t2 = parseInt(_bd.to, 10);
+                    if (!(_f2 >= 0 && _t2 >= _f2)) continue;
+                    if (_hi >= _f2 && _lo <= _t2) {
+                      const _cands = [_n2.id, _n2.html.cid, _n2.html.sourceUid];
+                      for (const _cd of _cands) {
+                        const _uid = String(_cd || '').replace(/[^\w-]/g, '');
+                        const _mk2 = _uid && _bl.querySelector(
+                          '.pgmark[data-bindkey="u' + _uid + '"]');
+                        if (_mk2) {
+                          try { _selBindRange(_charSel.pw, _f2, _t2); } catch (_) {}
+                          return _mk2;
+                        }
+                      }
+                    }
+                  }
+                }
+              } catch (_) {}
+              const _marks = _bl.querySelectorAll('.pgmark');
+              if (!_marks.length) return null;
+              const _bx = _charSel.pw.__charBoxes || [];
+              const _a = Math.min(_charSel.startIdx, _charSel.endIdx);
+              const _b = Math.max(_charSel.startIdx, _charSel.endIdx);
+              for (let _i = _a; _i <= _b && _i < _bx.length; _i++) {
+                const _c = _bx[_i]; if (!_c || !(_c.width > 0)) continue;
+                const _cx = _c.left + _c.width / 2, _cy = _c.top + _c.height / 2;
+                for (let _m = 0; _m < _marks.length; _m++) {
+                  const _mk = _marks[_m];
+                  const _L = parseFloat(_mk.style.left) - 6, _T = parseFloat(_mk.style.top) - 6;
+                  const _W = parseFloat(_mk.style.width) + 12, _H = parseFloat(_mk.style.height) + 12;
+                  if (_cx >= _L && _cx <= _L + _W && _cy >= _T && _cy <= _T + _H) return _mk;
+                }
+              }
+              return null;
+            } catch (_) { return null; }
+          })();
+          if (_bindMk) {
+            toolbar.classList.remove('open');
+            try { _bindMk.click(); } catch (_) {}
+          } else if (_t && _t.length <= 30 && (isJa || engOk)) {
             // 同步关掉刚被 _selByCharRange 打开的工具栏:同一事件 tick 内移除 → 浏览器根本不画它。
             // 此前靠 30ms 后的 showWordPopover 去关 → 工具栏闪一帧再消失(慢词时=「弹框闪烁后消失」)。
             toolbar.classList.remove('open');

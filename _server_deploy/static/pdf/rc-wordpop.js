@@ -1055,6 +1055,14 @@
                     'src', '/pdf/api/card-asset?id=' + m2[1]);
                 });
             } catch (e2) {}
+            // 词典小框语境下剥掉卡内塞的词典区（用户 2026-09-01 图7：
+            // 小框本身就是完整词典,再嵌一份卡内词典区=同屏两份重复）。
+            // 只影响 wordpop 嵌入视图;卡片自己打开时词典区照常显示。
+            try {
+              Array.prototype.forEach.call(
+                body.querySelectorAll('.rc-note-dict,.rc-note-dict-note'),
+                function (dn) { dn.remove(); });
+            } catch (e3) {}
             item.appendChild(body);
             wrap.appendChild(item);
           });

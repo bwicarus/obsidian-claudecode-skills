@@ -3540,6 +3540,15 @@
     try { return fn(); } finally { el.style.visibility = pv || ''; }
   }
   var _afx = null;
+  var _afxExtra = [];   // 跨行词的第 2+ 段(与 _afx 同 class,按需增建/复用)
+  function _afxSegApply(el, host, seg) {
+    el.classList.add('rc-afx-word'); el.classList.remove('rc-afx-line');
+    if (el.parentElement !== host) host.appendChild(el);
+    el.style.left = (seg.left - 3) + 'px'; el.style.right = 'auto';
+    el.style.top = (seg.top - 2) + 'px';
+    el.style.width = (seg.width + 6) + 'px'; el.style.height = (seg.height + 4) + 'px';
+    el.style.display = 'block';
+  }
   function anchorFxShow(cx, cy, ignoreEl) {
     // #51 粒度=单词(用户设计):近文字(词中心 ≤48px)→**单词精确框**(锚定=绑到这个词,注入=词所在句后方);
     //   超范围/空白/clamp → 横线(内容插入位置=排到上方内容/段落之后)。旧 20px 光带退役。
@@ -3553,25 +3562,43 @@
       });
     } catch (e) {}
     if (wr && wr.el && (wr.dist == null || wr.dist <= 48)) {
-      _afx.classList.add('rc-afx-word'); _afx.classList.remove('rc-afx-line');
-      if (_afx.parentElement !== wr.el) wr.el.appendChild(_afx);
-      _afx.style.left = (wr.left - 3) + 'px'; _afx.style.right = 'auto';
-      _afx.style.top = (wr.top - 2) + 'px';
-      _afx.style.width = (wr.width + 6) + 'px'; _afx.style.height = (wr.height + 4) + 'px';
-      _afx.style.display = 'block';
+      // 跨行词分段（2026-09-01 用户图4）：adapter 给了 rects 就逐段画，
+      // union 大框只当没有 rects 时的兜底（EPUB adapter 尚未给 rects）。
+      var segs = (Array.isArray(wr.rects) && wr.rects.length)
+        ? wr.rects
+        : [{ left: wr.left, top: wr.top, width: wr.width, height: wr.height }];
+      _afxSegApply(_afx, wr.el, segs[0]);
+      for (var si = 1; si < segs.length; si++) {
+        if (!_afxExtra[si - 1]) {
+          _afxExtra[si - 1] = document.createElement('div');
+          _afxExtra[si - 1].className = 'rc-anchor-fx';
+        }
+        _afxSegApply(_afxExtra[si - 1], wr.el, segs[si]);
+      }
+      for (var sj = segs.length - 1; sj < _afxExtra.length; sj++) {
+        if (_afxExtra[sj]) _afxExtra[sj].style.display = 'none';
+      }
       return;
     }
     var a = _aa;
     if (!a) { anchorFxHide(); return; }
     var m = null; try { m = O.mount(a); } catch (e) {}
     if (!m || !m.el || typeof m.top !== 'number') { anchorFxHide(); return; }
+    for (var li = 0; li < _afxExtra.length; li++) {
+      if (_afxExtra[li]) _afxExtra[li].style.display = 'none';
+    }
     _afx.classList.add('rc-afx-line'); _afx.classList.remove('rc-afx-word');
     if (_afx.parentElement !== m.el) m.el.appendChild(_afx);
     _afx.style.left = '8px'; _afx.style.right = '8px'; _afx.style.width = 'auto'; _afx.style.height = '0';
     _afx.style.top = Math.max(0, m.top - 1) + 'px';
     _afx.style.display = 'block';
   }
-  function anchorFxHide() { if (_afx) _afx.style.display = 'none'; }
+  function anchorFxHide() {
+    if (_afx) _afx.style.display = 'none';
+    for (var i = 0; i < _afxExtra.length; i++) {
+      if (_afxExtra[i]) _afxExtra[i].style.display = 'none';
+    }
+  }
 
   function teardownStorage(clearOptions) {
     var priorOptions = O;

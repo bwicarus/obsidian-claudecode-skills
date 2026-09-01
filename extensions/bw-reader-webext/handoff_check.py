@@ -713,6 +713,30 @@ def audit_vendor(audit: Audit) -> None:
         audit.ok("vendor 与共享源码逐字一致" + suffix)
 
 
+def audit_reader_concat(audit: Audit) -> None:
+    """reader.js 必须逐字等于 reader.src/*.js 的顺序拼接。
+
+    2026-09-01 实锤：上一轮把六块修复直接改进拼合产物、没回写源，
+    漂移 257 行躺了一整天而默认档全绿 —— 这条一致性当时只在
+    --production 档（比 Pi 部署副本时）才查。产物是 build 脚本的输出，
+    谁 build 谁覆盖；改产物不回写源 = 下一次 build 静默蒸发。
+    放进默认档，开工前一跑就现形。
+    """
+    pdf_dir = ROOT / "_server_deploy" / "static" / "pdf"
+    parts = sorted((pdf_dir / "reader.src").glob("*.js"))
+    combined = b"".join(part.read_bytes() for part in parts)
+    if not combined:
+        audit.error("reader.src 为空 —— 拼合源目录丢失?")
+        return
+    if combined != (pdf_dir / "reader.js").read_bytes():
+        audit.error(
+            "reader.js 与 reader.src/*.js 拼合结果漂移(有人直接改了产物?)"
+            " —— 把改动回写 reader.src 后跑 scripts/build_pdf_reader_js.sh 重建"
+        )
+    else:
+        audit.ok(f"reader.js == cat(reader.src/*.js) 拼合一致 ({len(parts)} 源文件)")
+
+
 def audit_syntax(audit: Audit) -> None:
     node = shutil.which("node")
     if not node:
@@ -936,8 +960,17 @@ def audit_worktree(audit: Audit) -> None:
 def audit_live_runtime_parity(audit: Audit) -> bool:
     """Do not mistake a local-new-extension/live-old-PWA mix for a code failure."""
 
+    items = production_manifest_items()
+    # 部署面整个不在场（Windows 开发机：target 是 Pi 的绝对路径）≠ 混测
+    # 风险 —— 没有"旧 PWA"可混。2026-09-01 实锤：166 项「部署缺失」把
+    # 浏览器测试整步拦死，而 PWA 已 410、Pi 已退纯备份（产品边界
+    # 2026-08-18/30）。这个门禁只在部署面真实存在时把关；部分存在才是
+    # 真漂移，仍走下面的逐项比对。
+    if items and not any(target.is_file() for _, _, target in items):
+        audit.ok("部署面不在本机（无旧 PWA 可混测），浏览器门禁直接放行")
+        return True
     drift: list[str] = []
-    for entry, source, target in production_manifest_items():
+    for entry, source, target in items:
         if not source.is_file():
             drift.append(f"源码缺失 {source.relative_to(ROOT)}")
         elif not target.is_file():
@@ -962,7 +995,9 @@ def run_browser_tests(audit: Audit) -> None:
     if not audit_live_runtime_parity(audit):
         return
     prefix: list[str] = []
-    if not os.environ.get("DISPLAY"):
+    # Windows 桌面会话自带显示，DISPLAY/xvfb 是 X11 世界观 —— 不豁免的话
+    # 这一步在主力开发机上永远 error（2026-09-01 实锤）。
+    if sys.platform != "win32" and not os.environ.get("DISPLAY"):
         xvfb = shutil.which("xvfb-run")
         if not xvfb:
             audit.error("无 DISPLAY 且找不到 xvfb-run，无法运行 headed Chromium 回归")
@@ -1092,6 +1127,7 @@ def main() -> int:
     audit_runtime_wiring(audit)
     audit_docs(audit, version)
     audit_vendor(audit)
+    audit_reader_concat(audit)
     audit_syntax(audit)
     run_runtime_contract_tests(audit)
     run_reader_network_audit(audit)

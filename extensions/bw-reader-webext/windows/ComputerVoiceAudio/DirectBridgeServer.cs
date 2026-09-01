@@ -749,6 +749,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         try
         {
             await app.StartAsync(serviceToken).ConfigureAwait(false);
+            // 卡图欠账补抓（2026-09-01）：撞限流失败的留底在源站解禁后
+            // 自动补齐,不再依赖"用户恰好重新点开那张卡"。
+            ReaderCardAssetStore.StartRetrySweep(serviceToken);
             shutdownRequestLifetime =
                 CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken);

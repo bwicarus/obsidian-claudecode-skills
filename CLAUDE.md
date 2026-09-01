@@ -89,6 +89,14 @@ git rev-parse --abbrev-ref HEAD && git worktree list
   `scripts\deploy_from_windows.ps1 -PreflightOnly`,脚本自带摘要校验/原子安装/失败回滚/健康检查,
   **不要手工重做**);**清单外**(insights/fitness/qa_server/`control.html` 等)才手工 `cp` + restart。
   各处旧文档里的 `scp root@bwicarus.space` 与手工回滚清单**已废弃**。
+- 🧍 **单主体单会话工作制（2026-09-01 用户拍板，收窄下面 2026-08-16 那条）**：
+  从此工程操作**只由 Claude 进行，且同一时间只保持一个对话在动仓库**（Codex 仍是
+  运行时——语音助手/CLI——但不再作为开发主体触碰代码）。动机=多主体并发的事故谱系：
+  Codex 批量建卡把桥撞进 wikimedia 限流（2026-09-01 波及 26 张卡图）、别的会话留下
+  打包夹具红躺了 5 天、拼合产物被另一只手直改导致源/产物漂移 257 行。实际影响：
+  ① 不并行多开会话动同一仓库；② BWAB 协作邮箱「开工/完工必查」降级为按需；
+  ③ 同一对话连续工作时开工前 `handoff_check.py` 默认档可省（**隔了对话接手仍要跑**——
+  上一个对话也可能留下未完成态，且默认档已含 reader.js 拼合一致性检查）。
 - 🤝 **工程所有权（2026-08-16 用户拍板）：全部工程由 Claude 负责**。此前的分工文档
   （如 `references/codex-claude-bridge-role-swap-20260805.md` 的 Claude=Windows 桥 /
   Codex=iOS 划分）**已过时,不要拿它们当现行边界**;`extensions/`、`ios/`、`_server_deploy/`、

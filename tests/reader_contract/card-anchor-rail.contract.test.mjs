@@ -139,7 +139,9 @@ test("词锚展开态只有明确的垃圾桶删除，失败不先收卡，成�
 test("AI 直绑只有持久化 Promise 成功后才可报告 bound", () => {
   assert.match(BIND, /window\.__pageBindPersist = function \(bind, payload\)/);
   assert.match(BIND, /var placement = deferred \? \{ deferredPdfPage: g\.page \} : _bindScreenPoint\(g\)/);
-  assert.match(BIND, /RC\.stickynote\.persistBoundCard\(bind, normalized, placement\)/);
+  assert.match(BIND, /RC\.stickynote\.persistBoundCard\(bindOut, normalized, placement\)/);
+  assert.match(BIND, /bindOut\.from = g\.range\.lo/,
+    "block+text 解析出的区间必须写回再传 —— persistBoundCard 只认数字 from/to");
   assert.match(BIND, /persisted: true/);
   assert.match(BIND, /why: 'persistence-required'/,
     "旧调用方直画临时 DOM 时必须 fail closed");

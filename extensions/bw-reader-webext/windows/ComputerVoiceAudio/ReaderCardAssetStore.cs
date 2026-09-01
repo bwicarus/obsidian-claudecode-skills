@@ -157,6 +157,18 @@ internal static class ReaderCardAssetStore
         await FetchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            // 排队期间别人可能刚把这个 host 撞进冷却（2026-09-01 实锤：
+            // 一批并发 ensure 首条 429 记冷却，已在闸内排队的不复查，
+            // 出队后逐条真发逐条再吃 429 —— 7 条连环，封禁窗口越撞越长）。
+            lock (ThrottleGate)
+            {
+                if (HostCooldown.TryGetValue(host, out DateTime queuedCool)
+                    && queuedCool > DateTime.UtcNow)
+                {
+                    RecordFailure(id, url, "host-cooldown");
+                    return null;
+                }
+            }
             TimeSpan wait = TimeSpan.Zero;
             lock (ThrottleGate)
             {
@@ -206,8 +218,11 @@ internal static class ReaderCardAssetStore
                 {
                     lock (ThrottleGate)
                     {
+                        // 30 分钟（原 10：2026-09-01 实测 wikimedia 在首波
+                        // 429 后 20+ 分钟仍拒同指纹客户端 —— 10 分钟一到
+                        // 就去撞只会把封禁续期）。
                         HostCooldown[host] =
-                            DateTime.UtcNow + TimeSpan.FromMinutes(10);
+                            DateTime.UtcNow + TimeSpan.FromMinutes(30);
                     }
                 }
                 RecordFailure(id, url, "http-" + (int)response.StatusCode);
@@ -378,6 +393,97 @@ internal static class ReaderCardAssetStore
         catch (Exception)
         {
             // 注册表只是元数据留底，坏了不该拦住图片本身的链路。
+        }
+    }
+
+    // ── 欠账自动补抓（2026-09-01）。批量建卡撞限流后，失败留痕躺在
+    //   registry 里；而 App 端 ensure 是"用户点开那张卡"才触发 —— 封禁
+    //   解除后没有任何主体去补，26 张图就永远欠着。这里每 10 分钟扫一轮：
+    //   每轮先抓 1 条探路，成功才继续（至多 6 条，条间 3s，FetchGate 内
+    //   另有 1.5s 同站间隔）；任何一条失败立即收轮 —— 429 已由
+    //   FetchOnceAsync 记 30 分钟冷却，下轮撞上冷却直接快速失败退出。
+    private static System.Threading.Timer? RetrySweepTimer;
+    private static int SweepBusy;
+
+    internal static void StartRetrySweep(CancellationToken token)
+    {
+        RetrySweepTimer ??= new System.Threading.Timer(
+            _ => _ = RetrySweepAsync(token),
+            null,
+            TimeSpan.FromMinutes(3),
+            TimeSpan.FromMinutes(10));
+    }
+
+    private static async Task RetrySweepAsync(CancellationToken token)
+    {
+        if (Interlocked.Exchange(ref SweepBusy, 1) == 1)
+        {
+            return;
+        }
+        try
+        {
+            List<string> debts = new();
+            lock (RegistryGate)
+            {
+                string path = Path.Combine(StoreDirectory, "registry.json");
+                if (!File.Exists(path))
+                {
+                    return;
+                }
+                try
+                {
+                    using JsonDocument document = JsonDocument.Parse(
+                        File.ReadAllText(path));
+                    foreach (JsonProperty one in
+                        document.RootElement.EnumerateObject())
+                    {
+                        if (one.Value.ValueKind != JsonValueKind.Object
+                            || one.Value.TryGetProperty("bytes", out _)
+                            || !one.Value.TryGetProperty("lastError", out _)
+                            || !one.Value.TryGetProperty(
+                                "url", out JsonElement urlField))
+                        {
+                            continue;
+                        }
+                        string? url = urlField.GetString();
+                        if (!string.IsNullOrEmpty(url)
+                            && FindStoredFile(AssetID(url)) is null)
+                        {
+                            debts.Add(url);
+                        }
+                    }
+                }
+                catch (JsonException)
+                {
+                }
+            }
+            int fetched = 0;
+            foreach (string url in debts)
+            {
+                if (token.IsCancellationRequested || fetched >= 6)
+                {
+                    break;
+                }
+                if (await EnsureAsync(url, token).ConfigureAwait(false)
+                    is null)
+                {
+                    break;   // 探路失败 = 源站还在拒，收轮别骚扰
+                }
+                fetched++;
+                await Task.Delay(TimeSpan.FromSeconds(3), token)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception)
+        {
+            // 补抓是后台便民，任何失败都不该影响服务主体。
+        }
+        finally
+        {
+            Interlocked.Exchange(ref SweepBusy, 0);
         }
     }
 }

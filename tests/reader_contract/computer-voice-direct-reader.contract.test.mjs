@@ -4256,7 +4256,10 @@ test("高置信漫画布局生成四列 Markdown 且 CARD 仍按原字符下标�
   );
   const payload = harness.scenario.nativePageContextPublishes[0];
   assert.equal(payload.textSource, "app-local-structured-layout");
-  assert.match(payload.text, /【当前屏幕可见原文】\n左文/);
+  // 快照去重（2026-09-01 用户实锤）：结构化投影在场时不再重复可见原文
+  // —— 同一页写两遍浪费 token，且可见原文是交错烂序的劣质版本。
+  // 内容不许丢：左文必须出现在结构化表格里（下面的四列断言盯着）。
+  assert.doesNotMatch(payload.text, /【当前屏幕可见原文】/);
   assert.match(payload.text, /按 \[NN\] 编号顺序阅读/);
   assert.match(payload.text, /\| 左 \| 中左 \| 中右 \| 右 \|/);
   assert.match(
