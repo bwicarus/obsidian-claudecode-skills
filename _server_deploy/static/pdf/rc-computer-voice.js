@@ -10176,6 +10176,22 @@
         return;
       }
       var table = block.table;
+      // 稀疏假表挡板（2026-09-01 实锤 45 页）：对话气泡间的分隔线被
+      // 格线检测当成表格框 → 整页划成大网格，对话散落进格子、大量
+      // 空单元格。真表格（46 页对照）填充率接近全满。容量 ≥8 且
+      // 填充率 <40% 的"表"按普通文本流输出 —— 混合页的对话回到
+      // Markdown 正文，真表格不受影响。
+      var tableCapacity = table.rows * table.columns;
+      if (tableCapacity >= 8 &&
+          block.regions.length / tableCapacity < 0.4) {
+        block.regions.slice().sort(function (left, right) {
+          return left.order - right.order;
+        }).forEach(function (region) {
+          appendLocalLayoutRegion(builder, pageRecord, region);
+          builder.append("\n");
+        });
+        return;
+      }
       var cells = [];
       for (var row = 0; row < table.rows; row += 1) {
         cells[row] = [];
