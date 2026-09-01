@@ -109,32 +109,39 @@ enum ReaderCacheHygiene {
         let webkitData = FileManager.default.urls(
             for: .libraryDirectory, in: .userDomainMask
         ).first?.appendingPathComponent("WebKit", isDirectory: true)
-        if let webkitData,
-           let subs = try? FileManager.default.contentsOfDirectory(
-               at: webkitData, includingPropertiesForKeys: nil) {
-            for sub in subs {
-                var isDir: ObjCBool = false
-                guard FileManager.default.fileExists(
-                    atPath: sub.path, isDirectory: &isDir),
-                    isDir.boolValue else { continue }
-                if let inner = try? FileManager.default.contentsOfDirectory(
-                    at: sub, includingPropertiesForKeys: nil) {
-                    for one in inner {
-                        let bytes = measure(one)
-                        if bytes > 64 * 1024 * 1024 {
-                            entries.append(Entry(
-                                path: "WebKit/…/" + one.lastPathComponent,
-                                bytes: bytes))
-                        }
-                    }
+        if let webkitData {
+            // 递归三层（2026-09-01 实锤：只拆一层看到「Default 10.77GB」
+            // 等于没说 —— Default 是 per-origin 容器,真凶在
+            // Default/<origin>/<类型> 里)。>64MB 才报;条目带「└」前缀,
+            // totalBytes 会跳过 —— 它们是上面 WebKit 行的**内部构成**,
+            // 计入总和就是双重计数(21.84GB 假读数实锤)。
+            func drill(_ dir: URL, depth: Int, label: String) {
+                guard depth <= 3,
+                      let subs = try? FileManager.default.contentsOfDirectory(
+                          at: dir, includingPropertiesForKeys: nil)
+                else { return }
+                for sub in subs {
+                    var isDir: ObjCBool = false
+                    guard FileManager.default.fileExists(
+                        atPath: sub.path, isDirectory: &isDir),
+                        isDir.boolValue else { continue }
+                    let bytes = measure(sub)
+                    guard bytes > 64 * 1024 * 1024 else { continue }
+                    let name = label + "/" + sub.lastPathComponent
+                    entries.append(Entry(path: "└ WebKit" + name,
+                                         bytes: bytes))
+                    drill(sub, depth: depth + 1, label: name)
                 }
             }
+            drill(webkitData, depth: 1, label: "")
         }
         return entries.sorted { $0.bytes > $1.bytes }
     }
 
     static func totalBytes(_ entries: [Entry]) -> Int64 {
-        entries.reduce(0) { $0 + max($1.bytes, 0) }
+        entries.reduce(0) {
+            $1.path.hasPrefix("└") ? $0 : $0 + max($1.bytes, 0)
+        }
     }
 
     /// 清派生数据。返回清了几条记录。

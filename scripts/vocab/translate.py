@@ -68,7 +68,11 @@ def _gcp_key() -> str:
         return k.strip()
     try:
         from pathlib import Path
-        return Path("/home/bwicarus/.config/gcp-vision-key").read_text("utf-8").strip()
+        # 跨平台（2026-09-01 翻译迁 Windows）：原来硬编码 /home/bwicarus,
+        # Windows 上文件明明在 ~/.config 却读不到 —— 服务迁过来第一步就
+        # 断在这。Path.home() 在 Linux 上等价原路径。
+        return (Path.home() / ".config" / "gcp-vision-key").read_text(
+            "utf-8").strip()
     except Exception:
         return ""
 
