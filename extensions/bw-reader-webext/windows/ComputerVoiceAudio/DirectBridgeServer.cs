@@ -651,6 +651,14 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-library/list",
             new[] { "POST", "OPTIONS" },
             context => HandleLibraryListAsync(context, serviceToken));
+        // 跨设备同步枢纽（用户 2026-09-01：「利用 Windows 对不同前端内容
+        // 进行同步」）：设备合书时把本书 user-state 整包推来，开书时来拉
+        // 全局最新的一份 —— 图片资产早已在桥留底，包一到别的设备图自动
+        // 补货。第一期 last-writer-wins，冲突向量合并留下一期。
+        app.MapMethods(
+            "/reader-library/user-state",
+            new[] { "GET", "POST", "OPTIONS" },
+            context => HandleLibraryUserStateAsync(context, serviceToken));
         // 语音助手的主动提示板。它盯着 BoardPath 一个地方就够。
         // ⚠ 板子**不存数据** —— 只是把 runtime 目录里已有的
         // notifications-*.json 和位置挑一挑、渲成一份很小的文本。
@@ -1529,6 +1537,105 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             return false;
         }
         return true;
+    }
+
+    private async Task HandleLibraryUserStateAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "library-user-state")) return;
+        if (HttpMethods.IsGet(context.Request.Method))
+        {
+            string sha = (context.Request.Query["contentSha256"]
+                .FirstOrDefault() ?? "").Trim().ToLowerInvariant();
+            if (!ReaderUserStateStore.IsValidContentSha(sha))
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                await context.Response.WriteAsJsonAsync(
+                    new
+                    {
+                        ok = false,
+                        code = "BW_USER_STATE_SHA",
+                        message = "contentSha256 无效",
+                    },
+                    serviceCancellationToken).ConfigureAwait(false);
+                return;
+            }
+            System.Text.Json.Nodes.JsonObject? latest = ReaderUserStateStore.Latest(sha);
+            if (latest is null)
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                await context.Response.WriteAsJsonAsync(
+                    new
+                    {
+                        ok = false,
+                        code = "BW_USER_STATE_NONE",
+                        message = "这本书还没有任何设备推过状态包",
+                    },
+                    serviceCancellationToken).ConfigureAwait(false);
+                return;
+            }
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            context.Response.ContentType = "application/json; charset=utf-8";
+            await context.Response.WriteAsync(
+                latest.ToJsonString(),
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        System.Text.Json.Nodes.JsonObject? body = null;
+        try
+        {
+            using var reader = new StreamReader(context.Request.Body);
+            string raw = await reader.ReadToEndAsync(
+                serviceCancellationToken).ConfigureAwait(false);
+            if (raw.Length <= ReaderUserStateStore.MaximumPackageBytes)
+            {
+                body = System.Text.Json.Nodes.JsonNode.Parse(raw)
+                    as System.Text.Json.Nodes.JsonObject;
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+        string deviceId = (body?["deviceId"]?.GetValue<string>() ?? "").Trim();
+        string contentSha =
+            (body?["contentSha256"]?.GetValue<string>() ?? "")
+            .Trim().ToLowerInvariant();
+        long atMs = 0;
+        try { atMs = body?["at"]?.GetValue<long>() ?? 0; }
+        catch (Exception error) when (
+            error is InvalidOperationException or FormatException)
+        {
+        }
+        if (body is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(
+                new
+                {
+                    ok = false,
+                    code = "BW_USER_STATE_BODY",
+                    message = "需要 JSON 对象（≤48MiB）",
+                },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        (bool ok, string code, string message) = ReaderUserStateStore.Save(
+            contentSha, deviceId, atMs, body);
+        AppendOutputPickupLog(
+            "library-user-state	" + contentSha[..Math.Min(12, contentSha.Length)]
+            + "	" + code);
+        context.Response.StatusCode = ok
+            ? StatusCodes.Status200OK
+            : StatusCodes.Status400BadRequest;
+        await context.Response.WriteAsJsonAsync(
+            new { ok, code, message },
+            serviceCancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleLibraryUploadAsync(

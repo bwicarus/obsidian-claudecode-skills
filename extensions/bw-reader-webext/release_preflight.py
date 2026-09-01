@@ -142,6 +142,7 @@ WINDOWS_SOURCE_FILES = (
     "ComputerVoiceAudio/ReaderAttentionBoardSelfTest.cs",
     "ComputerVoiceAudio/ReaderCardAssetStore.cs",
     "ComputerVoiceAudio/ReaderLibraryStore.cs",
+    "ComputerVoiceAudio/ReaderUserStateStore.cs",
     "ComputerVoiceAudio/ReaderCapabilities/camera.md",
     "ComputerVoiceAudio/ReaderCapabilities/cards.md",
     "ComputerVoiceAudio/ReaderCapabilities/capability-matrix.md",

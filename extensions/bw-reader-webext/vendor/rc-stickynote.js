@@ -1277,9 +1277,10 @@ if (window.__bwPwaProviderOnly) return;
       var line = document.createElement('div');
       line.className = 'rc-note-dict-note';
       line.style.cssText =
-        'margin-top:4px;font-size:10px;opacity:.45;color:#cfe6ff';
+        'margin:2px 0;font-size:10px;opacity:.55;color:#cfe6ff';
       line.textContent = '📖 ' + reason;
-      box.appendChild(line);
+      // 插卡顶部:尾部会被展开卡的固定高度裁掉,只露半行(实锤截图)。
+      box.insertBefore(line, box.firstChild || null);
       setTimeout(function () { try { line.remove(); } catch (e) {} }, 8000);
     } catch (e) {}
   }
@@ -1369,14 +1370,10 @@ if (window.__bwPwaProviderOnly) return;
       var ready = (cached && cached.d)
         ? Promise.resolve(cached.d)
         // @interaction dictionary.quick.read
-        : fetch(
-            (function () {
-              try {
-                var bp = String(window.__BW_NATIVE_LOCAL_BASE_PATH__ || '');
-                if (/^\/r\/[a-f0-9]{64}$/.test(bp)) return bp;
-              } catch (e9) {}
-              return '';
-            })() + '/pdf/api/dict-quick?word=' + encodeURIComponent(text)
+        // 裸路径是**正道**（2026-09-01 二次实锤）：页面 fetch 被 runtime
+        // 接管,按 manifest 分派 → owner=pi → 网关转发。带 /r/ 前缀反而
+        // 绕过拦截直打 43129,而它的分派表没有 pdf/api/* → 404。
+        : fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(text)
             + '&prewarm=1' + extra,
             (function () {
               try {
