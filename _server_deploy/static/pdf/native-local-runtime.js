@@ -393,7 +393,11 @@
   var OUTGOING_FOCUS_KINDS = new Set([
     'text', 'image', 'card', 'drawing', 'region'
   ]);
-  var OUTGOING_JOURNAL_KEEP = 2000;
+  // 200（原 2000,2026-09-02 止血）：journal 每次事件都**整本重写**进
+  // device IndexedDB,2000 条=MB 级 value 高频重写,WebKit IDB 不回收
+  // 旧版本页 → 库半天涨 0.6GB(实测 15.88→16.47GB,单库 16GB+)。
+  // journal 只是发往 Windows 的事件缓冲,200 条对断线重放绰绰有余。
+  var OUTGOING_JOURNAL_KEEP = 200;
   var OUTGOING_JOURNAL_LIMIT = 500;
   var OUTGOING_JOURNAL_MAX_WAIT_S = 25;
   var OUTGOING_ACTIVE_FRESH_S = 180;

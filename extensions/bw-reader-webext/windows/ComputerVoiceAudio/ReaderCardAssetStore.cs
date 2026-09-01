@@ -405,6 +405,25 @@ internal static class ReaderCardAssetStore
     private static System.Threading.Timer? RetrySweepTimer;
     private static int SweepBusy;
 
+    // ── sweep 状态落盘（2026-09-02 静默失败教训第 N 次）：0.1.261 首夜
+    //   sweep 零活动、零留痕 —— "没被调度"和"每轮都空手而归"在外面看
+    //   一模一样。每轮无论结果都写一行；文件不存在 = StartRetrySweep
+    //   根本没执行到。
+    private static void SweepLog(string message)
+    {
+        try
+        {
+            Directory.CreateDirectory(StoreDirectory);
+            File.AppendAllText(
+                Path.Combine(StoreDirectory, "sweep.log"),
+                DateTimeOffset.Now.ToString("MM-dd HH:mm:ss")
+                + "\t" + message + Environment.NewLine);
+        }
+        catch (Exception)
+        {
+        }
+    }
+
     internal static void StartRetrySweep(CancellationToken token)
     {
         RetrySweepTimer ??= new System.Threading.Timer(
@@ -412,6 +431,7 @@ internal static class ReaderCardAssetStore
             null,
             TimeSpan.FromMinutes(3),
             TimeSpan.FromMinutes(10));
+        SweepLog("armed pid=" + Environment.ProcessId);
     }
 
     private static async Task RetrySweepAsync(CancellationToken token)
@@ -458,6 +478,7 @@ internal static class ReaderCardAssetStore
                 }
             }
             int fetched = 0;
+            bool stalled = false;
             foreach (string url in debts)
             {
                 if (token.IsCancellationRequested || fetched >= 6)
@@ -467,19 +488,26 @@ internal static class ReaderCardAssetStore
                 if (await EnsureAsync(url, token).ConfigureAwait(false)
                     is null)
                 {
+                    stalled = true;
                     break;   // 探路失败 = 源站还在拒，收轮别骚扰
                 }
                 fetched++;
                 await Task.Delay(TimeSpan.FromSeconds(3), token)
                     .ConfigureAwait(false);
             }
+            SweepLog(
+                "round debts=" + debts.Count
+                + " fetched=" + fetched
+                + (stalled ? " stalled" : ""));
         }
         catch (OperationCanceledException)
         {
+            SweepLog("round cancelled");
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            // 补抓是后台便民，任何失败都不该影响服务主体。
+            // 补抓是后台便民，任何失败都不该影响服务主体 —— 但必须留痕。
+            SweepLog("round crashed " + exception.GetType().Name);
         }
         finally
         {

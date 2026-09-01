@@ -2285,10 +2285,25 @@
       if (norm(b.text) === want) return null;   // bind 文本与词一致=没病
       if (ctl._bindHealAt && Date.now() - ctl._bindHealAt < 30000) return null;
       ctl._bindHealAt = Date.now();
-      var r = window.__pageBindResolveOnly({
-        kind: 'page-chars', page: parseInt(b.page, 10) || 0, text: label
-      });
-      if (!r || r.ok !== true || norm(r.text) !== want) return null;
+      var r = null;
+      try {
+        r = window.__pageBindResolveOnly({
+          kind: 'page-chars', page: parseInt(b.page, 10) || 0, text: label
+        });
+      } catch (e0) { r = null; }
+      // 失败必须留痕：App 上没有控制台,把原因挂在 ctl 上,卡打开时
+      // 渲 8s 诊断行 —— 用户一张截图就是完整故障报告。
+      if (!r || r.ok !== true) {
+        ctl._bindHealWhy = '锚自愈失败:解析不到「' + label + '」(' +
+          ((r && r.why) || 'null') + ')';
+        return null;
+      }
+      if (norm(r.text) !== want) {
+        ctl._bindHealWhy = '锚自愈失败:解析到「' +
+          String(r.text || '').slice(0, 16) + '」≠「' + label + '」';
+        return null;
+      }
+      ctl._bindHealWhy = '';
       var slot = wordBindSlot(ctl.note);
       if (!slot || !ctl.note[slot]) return null;
       var healed = {};
@@ -2306,6 +2321,24 @@
       } catch (e) {}
       return healed;
     } catch (e) { return null; }
+  }
+
+  // 自愈失败的 8s 诊断行（打开卡时渲在正文顶部,自动消失）。
+  function _healWhyNote(ctl) {
+    try {
+      if (!ctl || !ctl.body || !ctl._bindHealWhy) return;
+      if (ctl.body.querySelector('.rc-heal-note')) return;
+      var line = document.createElement('div');
+      line.className = 'rc-heal-note';
+      line.style.cssText =
+        'margin:2px 6px;font-size:10px;opacity:.6;color:#ffd7a8;' +
+        'pointer-events:none';
+      line.textContent = ctl._bindHealWhy;
+      ctl.body.insertBefore(line, ctl.body.firstChild);
+      setTimeout(function () {
+        try { line.remove(); } catch (e) {}
+      }, 8000);
+    } catch (e) {}
   }
 
   function _applyWordBind(ctl) {
@@ -2362,6 +2395,7 @@
           setWordDeleteUi(ctl, true);
           wordPortalIn(ctl);   // body-fixed：逃出 #main/page-wrap 的 zoom 与 overflow 裁剪
           _placeWordCard(ctl, meta && meta.source);
+          if (ctl._bindHealWhy) _healWhyNote(ctl);
           return true;
         }
       });

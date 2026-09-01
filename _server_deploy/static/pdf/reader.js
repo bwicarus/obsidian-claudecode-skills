@@ -14887,10 +14887,17 @@ window._lbClick = _lbClick;
       if (!g || g.ok !== true || !g.range) {
         return { ok: false, why: (g && g.why) || 'unresolved' };
       }
+      // 实际解析到的文字：调用方(自愈)拿它与词逐字比对,不一致就拒绝
+      // 写回。⚠ 必须用**命中段自身**(range.boxes)拼,不能 _textAt 按
+      // _oi 区间从全页重取 —— 表格/混排页 _oi 穿插会把区间内的无关
+      // 字符掺进来,校验永远不等 → 自愈静默误拒(2026-09-02 实锤)。
+      var hitText = '';
+      for (var h2 = 0; h2 < g.range.boxes.length; h2++) {
+        var hb = g.range.boxes[h2];
+        if (hb && !hb.sp && hb.c) hitText += hb.c;
+      }
       return { ok: true, page: g.page, from: g.range.lo, to: g.range.hi,
-               // 实际解析到的文字：调用方(自愈)拿它与词逐字比对 ——
-               // 不一致就拒绝写回,防止把一种坏换成另一种坏。
-               text: _textAt(g.boxes, g.range.lo, g.range.hi) };
+               text: hitText };
     } catch (e) {
       return { ok: false, why: 'exception' };
     }
