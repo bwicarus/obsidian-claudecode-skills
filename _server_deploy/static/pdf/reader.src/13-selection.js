@@ -704,15 +704,99 @@ function _clampToolbarIntoView(mainEl, selTopY) {
 }
 
 // 按 char 扩展到词边界（英文 \w / CJK 逐字）。空格视作非词字符
+// ── 登记词组的单击兜底（2026-09-02 用户实锤：跨行词组点击上下行分开）──
+//   服务端表面靠 _merge_favorite_phrases 合并 w;App 本地 chars 管道没有
+//   这一步,登记词组对单击毫无效果。这里不动分词管道:单击时按 **_oi
+//   原序**建全页字符流(重排数组序会被表格别列插断,同一坑别再踩),
+//   tap 字符落在任一登记词组匹配段内 → 整段选中(取最长匹配)。
+//   竖直跳变 >2.2 行高拒并 —— 服务端同款守卫,防 reading-order 相邻但
+//   视觉分离的字误并。选区闭区间交给 _selByCharRange 既有跨块过滤。
+function _phraseExpandFromChar(chars, idx) {
+  try {
+    const favs = (typeof _phraseFavSet !== 'undefined' && _phraseFavSet) ? _phraseFavSet : null;
+    const marks = (typeof _phraseMarkSet !== 'undefined' && _phraseMarkSet) ? _phraseMarkSet : null;
+    if ((!favs || !favs.size) && (!marks || !marks.size)) return null;
+    const ord = [];
+    for (let i = 0; i < chars.length; i++) {
+      const cc = chars[i];
+      if (cc && !cc.sp && cc.c) ord.push(i);
+    }
+    ord.sort((a, b) =>
+      ((chars[a]._oi != null ? chars[a]._oi : a) | 0) -
+      ((chars[b]._oi != null ? chars[b]._oi : b) | 0));
+    let compact = '';
+    let tapPos = -1;
+    for (let k = 0; k < ord.length; k++) {
+      if (ord[k] === idx) tapPos = k;
+      compact += chars[ord[k]].c;
+    }
+    if (tapPos < 0) return null;
+    const lower = compact.toLowerCase();
+    let best = null;
+    const probe = (ph) => {
+      const p = String(ph || '').replace(/\s+/g, '').toLowerCase();
+      if (p.length < 2 || (best && p.length <= best.len)) return;
+      let at = lower.indexOf(p);
+      while (at >= 0) {
+        if (tapPos >= at && tapPos < at + p.length) {
+          best = { at: at, len: p.length };
+          return;
+        }
+        at = lower.indexOf(p, at + 1);
+      }
+    };
+    if (favs) favs.forEach(probe);
+    if (marks) marks.forEach(probe);
+    if (!best) return null;
+    let prev = null, lo = Infinity, hi = -1;
+    for (let k = best.at; k < best.at + best.len; k++) {
+      const ci = ord[k], cc = chars[ci];
+      const y0 = cc._y0 != null ? cc._y0 : cc.top;
+      if (prev) {
+        const ph0 = prev._y0 != null ? prev._y0 : prev.top;
+        const ph1 = prev._y1 != null ? prev._y1 : (prev.top + prev.height);
+        const h = Math.max(1, ph1 - ph0);
+        if (Math.abs(y0 - ph0) > h * 2.2) return null;
+      }
+      prev = cc;
+      if (ci < lo) lo = ci;
+      if (ci > hi) hi = ci;
+    }
+    return { start: lo, end: hi };
+  } catch (e) { return null; }
+}
+
 function _wordExpandFromChar(chars, idx) {
   if (idx < 0 || idx >= chars.length) return null;
   const isWord = (c) => /[A-Za-z0-9_]/.test(c);
   const isCJK  = (c) => /[　-〿぀-ゟ゠-ヿ㐀-䶿一-鿿＀-￯]/.test(c);
   const c = chars[idx].c;
+  // 登记词组最优先：用户显式圈定的整体,凌驾分词结果。
+  const _ph = _phraseExpandFromChar(chars, idx);
+  if (_ph) return _ph;
   // 优先用词边界(英语 PyMuPDF + 日语 fugashi)：同一个 w 扩成整词；
   // 之前 CJK 在这里 hardcoded 返回 single,阻止了 fugashi 分词生效。
   if (chars[idx].w !== -1) {
     const wid = chars[idx].w;
+    // 同 w 按**全页收集**(2026-09-02):chars 按 baseline 重排后,表格页
+    // 跨行词的两半之间插着其它列同 baseline 的字符,原来的相邻遍历在
+    // 断口停下 → 整词永远选不全。收集出 [min,max] 闭区间,夹进来的
+    // 别列字符由 _selByCharRange 的跨块过滤(_charRangeBlockFilter)滤除。
+    // 词内含 /|／ 分隔符或异常大集合(w 污染)回退旧的相邻遍历语义。
+    let cnt = 0, hasSep = false, mn = -1, mx = -1;
+    for (let i = 0; i < chars.length; i++) {
+      if (!chars[i] || chars[i].w !== wid) continue;
+      cnt++;
+      if ('/|／'.includes(chars[i].c)) hasSep = true;
+      if (mn < 0) mn = i;
+      mx = i;
+    }
+    if (!hasSep && cnt >= 1 && cnt <= 48 && mn >= 0) {
+      let s0 = mn, e0 = mx;
+      while (s0 < e0 && !isWord(chars[s0].c) && !isCJK(chars[s0].c)) s0++;
+      while (e0 > s0 && !isWord(chars[e0].c) && !isCJK(chars[e0].c)) e0--;
+      return {start: s0, end: e0};
+    }
     let s = idx, e = idx;
     while (s > 0 && chars[s - 1].w === wid && !'/|／'.includes(chars[s - 1].c)) s--;
     while (e < chars.length - 1 && chars[e + 1].w === wid && !'/|／'.includes(chars[e + 1].c)) e++;
