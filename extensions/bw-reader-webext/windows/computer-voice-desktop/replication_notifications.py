@@ -842,17 +842,12 @@ def ensure_codex_voice_health(
             (status.get("voice") or {}).get("codexVoiceActive"))
     except (OSError, ValueError):
         voice_active = False
-    if voice_active:
-        for item in list(store.open_items()):
-            if item.get("kind") == "codex-voice-stuck":
-                store.resolve(item["id"], by="auto", note="语音已恢复")
-        return
     try:
         lines = (
             runtime_dir / "computer-voice-direct.failures.jsonl"
         ).read_text("utf-8-sig").splitlines()
     except OSError:
-        return
+        lines = []
     now_ms = _now_ms()
     recent = []
     for line in lines[-40:]:
@@ -875,19 +870,21 @@ def ensure_codex_voice_health(
         # 只看最近 15 分钟 —— 历史失败不该在恢复后还阴魂不散。
         if now_ms - t_ms < 15 * 60_000:
             recent.append(t_ms)
-    if len(recent) < 4:
-        return
-    store.create(
-        kind="codex-voice-stuck",
-        title="Codex 语音连续 %d 次没能启动，App 可能卡在错误界面" % len(recent),
-        body=("需要看一眼电脑上的 ChatGPT/Codex 窗口：若是「意外停止」"
-              "错误页，用 文件→Quit 彻底退出再打开（错误页上的「重启」"
-              "按钮只重载页面，救不了热键）。"),
-        source="codex-voice-keepalive",
-        audience="user",
-        dedupe_key="codex-voice-stuck:%d" % (min(recent) // 60000),
-        end="expires:%d" % (now_ms + 12 * 3600 * 1000),
-    )
+    # ── 解除条件（2026-09-01 修）：voice_active 是「正在通话中」，语音
+    # 健康但空闲时恒 False —— 拿它当解除判据等于永不解除。哨兵监控的
+    # 电平就是失败流本身：**最近 15 分钟没有失败** = 问题不存在 → 全解。
+    # 1-3 条失败是滞回带（正常冷启动预算内），既不建也不解。
+    # ── 用户 2026-09-01 拍板：「我希望这种东西不要进入通知」──
+    # 系统健康类告警不再打扰用户。这个函数从此**只清不建**：把历史遗留
+    # 的 codex-voice-stuck 全部入库（一次性清扫 + 防止旧版建的残留）。
+    # 卡死场景的兜底改由 ReaderPC 看门狗自愈（autoStartOnBoot 已开）；
+    # 失败流仍完整记录在 failures.jsonl 供诊断，只是不再变成通知。
+    del recent, now_ms, voice_active
+    for item in list(store.open_items()):
+        if item.get("kind") == "codex-voice-stuck":
+            store.resolve(
+                item["id"], by="auto",
+                note="健康告警不再进通知（用户 2026-09-01 拍板）")
 
 
 #: 到期卡积到多少张才值得让 AI 开口（用户 2026-08-30 定的 32）。

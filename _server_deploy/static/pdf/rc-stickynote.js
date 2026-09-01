@@ -1378,8 +1378,27 @@
                 ? '<span>' + esc(reading || phon) + '</span>' : ''))
             + '<button type="button" class="rnd-speak" '
             + 'title="\u53D1\u97F3">\uD83D\uDD0A</button>'
-            + '</div>'
-            + (zh ? '<div class="rnd-def">' + esc(zh) + '</div>' : '');
+            + '</div>';
+          // 变形行（用户 2026-09-01：卡内词典要跟词典框同级）——
+          // 当前形 ≠ 原形时显示「当前形 X 原形 Y ＋语法标签」。
+          try {
+            var inf = d.inflect || {};
+            var surf = String(inf.surface || '').trim();
+            var base0 = String(inf.base || '').trim();
+            if (surf && base0 && surf !== base0) {
+              var marks0 = Array.isArray(inf.marks)
+                ? inf.marks.filter(Boolean) : [];
+              h2 += '<div style="font-size:11px;opacity:.75;margin:2px 0">'
+                + '当前形 <b>' + esc(surf) + '</b>'
+                + '　原形 <b>' + esc(base0) + '</b>'
+                + (marks0.length
+                    ? '　<span style="opacity:.8">'
+                      + marks0.map(esc).join('・') + '</span>'
+                    : '')
+                + '</div>';
+            }
+          } catch (e8) {}
+          h2 += (zh ? '<div class="rnd-def">' + esc(zh) + '</div>' : '');
           var examples = Array.isArray(d.examples) ? d.examples : [];
           examples.slice(0, 2).forEach(function (ex) {
             if (!ex) return;
