@@ -26,13 +26,7 @@ EXT = pathlib.Path(
         pathlib.Path(__file__).resolve().parent,
     )
 ).resolve()
-CHROME = pathlib.Path(
-    os.environ.get(
-        "BW_CHROME_EXECUTABLE",
-        pathlib.Path.home()
-        / ".cache/ms-playwright/chromium-1223/chrome-linux/chrome",
-    )
-).resolve()
+from browser_exe import CHROME
 
 
 class QuietHandler(SimpleHTTPRequestHandler):

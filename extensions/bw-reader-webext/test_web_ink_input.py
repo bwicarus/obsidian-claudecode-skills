@@ -16,27 +16,7 @@ from playwright.sync_api import sync_playwright
 
 
 EXT = pathlib.Path(__file__).resolve().parent
-PLAYWRIGHT_CHROME = (
-    pathlib.Path.home()
-    / ".cache/ms-playwright/chromium-1223/chrome-linux/chrome"
-)
-WINDOWS_PLAYWRIGHT = pathlib.Path(
-    os.environ.get("LOCALAPPDATA", "")
-) / "ms-playwright"
-WINDOWS_CHROMIUMS = sorted(
-    WINDOWS_PLAYWRIGHT.glob("chromium-*/chrome-win64/chrome.exe"),
-    reverse=True,
-)
-WINDOWS_CHROME = pathlib.Path(
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-)
-CHROME = (
-    WINDOWS_CHROMIUMS[0]
-    if WINDOWS_CHROMIUMS
-    else WINDOWS_CHROME
-    if WINDOWS_CHROME.exists()
-    else PLAYWRIGHT_CHROME
-)
+from browser_exe import CHROME
 URL = "http://ink-input.test/"
 
 HTML = """<!doctype html>

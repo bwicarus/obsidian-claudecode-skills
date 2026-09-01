@@ -23,10 +23,7 @@ from playwright.sync_api import sync_playwright
 EXT = Path(
     os.environ.get("BW_EXTENSION_ROOT", Path(__file__).resolve().parent)
 ).resolve()
-DEFAULT_CHROME = (
-    Path.home() / ".cache/ms-playwright/chromium-1223/chrome-linux/chrome"
-)
-CHROME = Path(os.environ.get("BW_PLAYWRIGHT_CHROME", DEFAULT_CHROME))
+from browser_exe import CHROME
 NAMESPACE = "acct-v1-" + "b" * 64
 
 PAGE = """<!doctype html>

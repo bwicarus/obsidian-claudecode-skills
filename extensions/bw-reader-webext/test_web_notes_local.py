@@ -34,10 +34,7 @@ EXT = Path(
         str(Path(__file__).resolve().parent),
     )
 ).resolve()
-DEFAULT_CHROME = (
-    Path.home() / ".cache/ms-playwright/chromium-1223/chrome-linux/chrome"
-)
-CHROME = Path(os.environ.get("BW_PLAYWRIGHT_CHROME", str(DEFAULT_CHROME)))
+from browser_exe import CHROME
 ALPHA_URL = "http://web-notes-contract.test/alpha?view=1"
 BETA_URL = "http://web-notes-contract.test/beta?view=2"
 NAMESPACE = "acct-v1-" + "b" * 64

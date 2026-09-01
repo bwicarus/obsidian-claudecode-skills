@@ -25,7 +25,7 @@ from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[2]
 IMMERSIVE = ROOT / "_server_deploy" / "static" / "pdf" / "web-immersive.js"
-CHROME = Path.home() / ".cache/ms-playwright/chromium-1223/chrome-linux/chrome"
+from browser_exe import CHROME
 URL = "http://web-vocab-scheduler.test/"
 SENTENCE_COUNT = 120
 

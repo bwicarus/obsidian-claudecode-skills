@@ -13,7 +13,7 @@ from playwright.sync_api import sync_playwright
 
 
 EXT = pathlib.Path(__file__).resolve().parent
-CHROME = pathlib.Path.home() / ".cache/ms-playwright/chromium-1223/chrome-linux/chrome"
+from browser_exe import CHROME
 URL = "http://ink-assistant.test/article"
 
 HTML = """<!doctype html>

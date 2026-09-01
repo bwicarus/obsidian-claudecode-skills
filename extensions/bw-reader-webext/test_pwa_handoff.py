@@ -15,7 +15,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_pla
 BASE = "https://bwicarus.taile44d0c.ts.net"
 BOOK = "%E8%B5%84%E6%BA%90%2Fbooks%2F%E5%BF%9C%E7%94%A8%E6%83%85%E5%A0%B1%E6%8A%80%E8%A1%93%E8%80%85.pdf"
 EXT = pathlib.Path(__file__).resolve().parent
-CHROME = pathlib.Path.home() / ".cache/ms-playwright/chromium-1223/chrome-linux/chrome"
+from browser_exe import CHROME
 
 
 def session_cookie() -> str:

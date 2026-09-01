@@ -38,10 +38,7 @@ from playwright.sync_api import BrowserContext, Page, sync_playwright
 EXT = Path(
     os.environ.get("BW_EXTENSION_ROOT", str(Path(__file__).resolve().parent))
 ).resolve()
-DEFAULT_CHROME = (
-    Path.home() / ".cache/ms-playwright/chromium-1223/chrome-linux/chrome"
-)
-CHROME = Path(os.environ.get("BW_PLAYWRIGHT_CHROME", str(DEFAULT_CHROME)))
+from browser_exe import CHROME
 PAGE_URL = "http://web-bind-contract.test/article"
 
 # 刻意混合三种正文写法：语义标签、纯 div（x.com/Gmail 那类）、以及导航噪声。

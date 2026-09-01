@@ -148,8 +148,14 @@ python3 extensions/bw-reader-webext/handoff_check.py
 完成改动后运行：
 
 ```bash
-python3 extensions/bw-reader-webext/handoff_check.py --full
+python3 extensions/bw-reader-webext/handoff_check.py
 ```
+
+（⚡ 2026-09-01 用户拍板「快速开发优先」：完工也只跑**默认档** —— 它已含
+node 契约全量 + 拼合/vendor 一致 + 语法 + 网络审计，几分钟内出结果。
+`--full` 追加的 11 个 Chromium 浏览器测试**仅在用户点名时跑**；跑它的环境
+已在 2026-09-01 修通 —— Pi 部署面门禁放行、Windows 免 DISPLAY、
+`browser_exe.py` 跨平台找 chromium —— 随时可用，别再让它默认拦交付。）
 
 ## Vault 位置
 > 见上「环境定向」表;下面按 Windows 主力机写,Linux 换对应根。
