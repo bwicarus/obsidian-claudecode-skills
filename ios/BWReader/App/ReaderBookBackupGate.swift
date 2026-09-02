@@ -47,7 +47,13 @@ final class ReaderBookBackupGate: ObservableObject {
     @Published private(set) var serverBooks: [ReaderServerLibrary.Book] = []
     /// 正在上传的书的字节进度（0…1），界面据此显示百分比。
     @Published private(set) var uploadProgress: [String: Double] = [:]
+    /// 每本书最近一次上传失败的原因（成功或重新开始时清掉）。界面把它画在书那一行，
+    /// 而不是弹窗 —— 弹窗一关就没了，用户回头看不到这本为什么没传上。
+    @Published private(set) var uploadFailures: [String: String] = [:]
     @Published private(set) var lastError: String?
+    /// 单飞：同一本书正在传时再来一次 ensureBacked，只是等那一次，不再并发开第二路。
+    /// 09-02 桥日志里同一秒三路 WRITE_FAILED，其中一个来源就是连点几次「打开」。
+    private var inflight: [String: Task<Bool, Never>] = [:]
     /// 服务器还没有书库端点(旧版)。**这时规矩不生效** ——
     /// 强制一条根本不可能被满足的规则,等于把所有书锁死。
     @Published private(set) var capabilityMissing = false
@@ -120,8 +126,22 @@ final class ReaderBookBackupGate: ObservableObject {
         progress: (@MainActor (Double) -> Void)? = nil
     ) async -> Bool {
         if case .backed = status(of: book) { return true }
+        if let running = inflight[book.id] { return await running.value }
+        let task = Task<Bool, Never> { @MainActor in
+            await self.uploadOnce(book, fileURL: fileURL, progress: progress)
+        }
+        inflight[book.id] = task
+        defer { inflight.removeValue(forKey: book.id) }
+        return await task.value
+    }
+
+    private func uploadOnce(
+        _ book: ReaderLocalBookRecord, fileURL: URL,
+        progress: (@MainActor (Double) -> Void)?
+    ) async -> Bool {
         uploading.insert(book.id)
         uploadProgress[book.id] = 0
+        uploadFailures.removeValue(forKey: book.id)
         defer {
             uploading.remove(book.id)
             uploadProgress.removeValue(forKey: book.id)
@@ -142,10 +162,12 @@ final class ReaderBookBackupGate: ObservableObject {
             }
             lastError = "上传报告成功，但\(ReaderServer.displayName)上没找到这本"
                 + "——没有放行，因为不变量没有真的成立"
+            uploadFailures[book.id] = lastError
             return false
         } catch {
             lastError = (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
+            uploadFailures[book.id] = lastError
             return false
         }
     }

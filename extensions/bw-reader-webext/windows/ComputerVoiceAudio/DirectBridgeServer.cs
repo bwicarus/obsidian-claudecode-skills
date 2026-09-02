@@ -1898,7 +1898,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 .SaveAsync(streamedName, context.Request.Body, serviceCancellationToken)
                 .ConfigureAwait(false);
             AppendOutputPickupLog(
-                "library-upload\t" + streamedName + "\t" + streamedOutcome.Code + "\tstream");
+                "library-upload\t" + streamedName + "\t" + streamedOutcome.Code + "\tstream"
+                + (streamedOutcome.Ok ? "" : "\t" + streamedOutcome.Message));
             await ReaderLibraryStore
                 .WriteOutcomeAsync(context, streamedOutcome, serviceCancellationToken)
                 .ConfigureAwait(false);
@@ -1960,7 +1961,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             .SaveAsync(name, source, serviceCancellationToken)
             .ConfigureAwait(false);
         AppendOutputPickupLog(
-            "library-upload	" + name + "	" + outcome.Code);
+            "library-upload	" + name + "	" + outcome.Code
+            + (outcome.Ok ? "" : "\t" + outcome.Message));
         await ReaderLibraryStore
             .WriteOutcomeAsync(context, outcome, serviceCancellationToken)
             .ConfigureAwait(false);

@@ -309,6 +309,19 @@ struct ReaderLocalLibraryView: View {
                     Text("\(book.format.title) · \(byteCount(book.byteCount)) · \(syncState.title)")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                    if backupGate.uploading.contains(book.id) {
+                        let fraction = backupGate.uploadProgress[book.id] ?? 0
+                        ProgressView(value: fraction)
+                            .progressViewStyle(.linear)
+                        Text("正在传到\(ReaderServer.displayName) "
+                             + "\(Int((fraction * 100).rounded()))% · 传完自动打开")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else if let failure = backupGate.uploadFailures[book.id] {
+                        Text("上传没成功：\(failure)（再点「打开」重试）")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    }
                     if book.format == .pdf {
                         preprocessingToggleButton(
                             bookID: "local:\(book.id)",
@@ -347,10 +360,11 @@ struct ReaderLocalLibraryView: View {
                     .buttonStyle(.bordered)
                     .disabled(remote.activeBookID != nil)
                 }
-                Button("打开") {
+                Button(backupGate.uploading.contains(book.id) ? "上传中…" : "打开") {
                     Task { await openLocal(book) }
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(backupGate.uploading.contains(book.id))
             }
 
             if expandedPreprocessingBookIDs.contains("local:\(book.id)") {
@@ -1418,9 +1432,11 @@ struct ReaderLocalLibraryView: View {
         await openLocal(localBook, allowAutomaticPreprocessing: false)
     }
 
-    // 备份闸的提示。⚠ 必须显示出来:这条规矩最常见的失败是"服务器没开",
-    // 而那跟"书坏了"该做的事完全不同。
+    // 备份闸的提示 —— 只留给两种**真阻塞**(文件读不到 / 服务器没问到)。
+    // 上传进度和上传失败不走这里:弹窗文案呈现时定格、改字不刷新、再赋值就再弹,
+    // 09-02 用户看到的"关一次弹一次、百分比不动"就是它;那两样画在书那一行。
     @State private var backupNotice: String?
+    @ObservedObject private var backupGate = ReaderBookBackupGate.shared
 
     private func openLocal(
         _ book: ReaderLocalBookRecord,
@@ -1462,13 +1478,9 @@ struct ReaderLocalLibraryView: View {
                 backupNotice = "读不到这本书的文件，没法上传"
                 return false
             }
-            backupNotice = "正在上传到\(ReaderServer.displayName)… 0%"
-            let ok = await gate.ensureBacked(book, fileURL: access.url) { fraction in
-                backupNotice = "正在上传到\(ReaderServer.displayName)… "
-                    + "\(Int((fraction * 100).rounded()))%"
-            }
-            backupNotice = ok ? nil : (gate.lastError ?? "上传没成功")
-            return ok
+            // 进度与失败都由闸发布、画在书那一行(见 localBookRow);这里只等结果。
+            // 传成功 → 返回 true → 调用方接着开书,用户看到的是"进度条走完书就开了"。
+            return await gate.ensureBacked(book, fileURL: access.url)
         case .ruleNotReady:
             // 服务器还没这个能力 —— **放行**。强制一条它那边还没落地的规则,
             // 结果是所有书都打不开而用户什么也做不了。
