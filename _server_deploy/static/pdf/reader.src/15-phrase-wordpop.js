@@ -363,6 +363,7 @@ function _applyPhraseMergesLocal(pw) {
   ordIdx.sort((a, b) =>
     ((chars[a]._oi != null ? chars[a]._oi : a) | 0) -
     ((chars[b]._oi != null ? chars[b]._oi : b) | 0));
+  const phraseHits = [];
   let str = ''; const pos = [];
   for (const i of ordIdx) {
     const cc = chars[i].c != null ? String(chars[i].c) : '';
@@ -396,8 +397,54 @@ function _applyPhraseMergesLocal(pw) {
       for (const k of hit) if (chars[k].w != null && chars[k].w >= 0) { wUse = chars[k].w; break; }
       if (wUse < 0) continue;   // 无既有词 id 可借(w 编码含块 id)→ 保守跳过
       for (const k of hit) { const cb = chars[k]; if (cb._w0 === undefined) cb._w0 = cb.w; cb.w = wUse; }
+      phraseHits.push({ text: t, idx: hit });
     }
   }
+  _syncPhraseUnderlines(pw, chars, phraseHits);
+}
+
+// 收藏词组的生词下划线（2026-09-02）：App 本地 vocab_marks 只含 enrichment
+// 的生词表,登记词组不在其中 → "只收藏没掌握却没下划线"。用合并阶段精确
+// 命中的字符集合成 mark(rects 按行分段,与 chars 的 _x0.._y1 同为页面 pt 系),
+// 挂进 pw.__vocabMarks。已掌握的词组不画(与服务端 favm 跳线语义一致)。
+// 合成 mark 带 phraseLocal,每次先剔旧再加 → 幂等。
+function _syncPhraseUnderlines(pw, chars, phraseHits) {
+  try {
+    const before = Array.isArray(pw.__vocabMarks) ? pw.__vocabMarks : [];
+    const kept = before.filter(m => !(m && m.phraseLocal));
+    const added = [];
+    for (const hitInfo of (phraseHits || [])) {
+      const t = hitInfo.text;
+      if (typeof _phraseMarkSet !== 'undefined' && _phraseMarkSet &&
+          _phraseMarkSet.has(typeof _phraseNorm === 'function' ? _phraseNorm(t) : t)) continue;
+      const exists = kept.some(m => {
+        const w = String((m && (m.word || m.lemma)) || '').replace(/[\s\u3000]+/g, '');
+        return w && w === t;
+      });
+      if (exists) continue;
+      // 按行分段:基线差 < 0.6 行高 = 同一行(同 34-bindcard._rangeRects 判据)
+      const boxes = hitInfo.idx.map(i => chars[i]).filter(c => c && c._x0 != null && c._y1 != null);
+      if (!boxes.length) continue;
+      boxes.sort((a, b) => (Math.abs(a._y1 - b._y1) > Math.max(a._y1 - a._y0, b._y1 - b._y0, 1) * 0.6)
+        ? a._y1 - b._y1 : a._x0 - b._x0);
+      const rects = [];
+      let cur = null;
+      for (const c of boxes) {
+        const h = Math.max(1, c._y1 - c._y0);
+        if (cur && Math.abs(c._y1 - cur[3]) < h * 0.6) {
+          cur[0] = Math.min(cur[0], c._x0); cur[1] = Math.min(cur[1], c._y0);
+          cur[2] = Math.max(cur[2], c._x1); cur[3] = Math.max(cur[3], c._y1);
+        } else {
+          cur = [c._x0, c._y0, c._x1, c._y1];
+          rects.push(cur);
+        }
+      }
+      added.push({ word: t, lemma: t, surface: t, label_slug: 'phrase', rects, phraseLocal: true });
+    }
+    if (!added.length && kept.length === before.length) return;
+    pw.__vocabMarks = kept.concat(added);
+    try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {}
+  } catch (_) {}
 }
 function _applyPhraseMergesAll() { document.querySelectorAll('.page-wrap[data-page-num]').forEach((pw) => { try { _applyPhraseMergesLocal(pw); } catch (_) {} }); }
 try { window.__applyPhraseMergesLocal = _applyPhraseMergesLocal; } catch (_) {}

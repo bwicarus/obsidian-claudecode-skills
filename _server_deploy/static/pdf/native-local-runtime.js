@@ -14127,30 +14127,13 @@
     });
   }
 
-  // ── 翻译句子的桥缓存前置（2026-09-02 翻译二期保守层）────────────────
-  //   架构终局「三层缓存」的中间层:键 sha1('zh-CN::'+text)[:16] 与
-  //   translate.py(_cache_path 无 ns 形态)/桥 /reader-translate-cache
-  //   三方共享 —— Windows 上翻过的句子这里直接命中,App 翻过的推回去
-  //   全家共享。带 fresh(重新翻译,语义=必出新结果)或 file+sentence
-  //   (服务端要写 sidecar 句子标记,命中短路会丢副作用)的请求不前置。
-  //   任何缓存层错误=静默回原路;桥不在线=GET 失败=miss=照旧打 Pi。
-  var TRANSLATE_CACHE_URL =
-    'https://bwicarus-2.taile44d0c.ts.net/reader-translate-cache';
-
-  function translateCacheSha(text) {
-    try {
-      var data = new TextEncoder().encode('zh-CN::' + text);
-      return crypto.subtle.digest('SHA-1', data).then(function (digest) {
-        var bytes = new Uint8Array(digest);
-        var hex = '';
-        for (var i = 0; i < bytes.length; i += 1) {
-          hex += (bytes[i] + 256).toString(16).slice(1);
-        }
-        return hex.slice(0, 16);
-      }, function () { return ''; });
-    } catch (_) { return Promise.resolve(''); }
-  }
-
+  // ── 翻译句子（2026-09-02 翻译二期）：两层 —— ① 本地 native 路由
+  //   translate-direct(Swift 内含桥留底命中 + Google 直连 + 成功推桥留底;
+  //   页面 CSP 不许直连桥,契约 native-local-library 钉死,所以缓存读写都在
+  //   Swift) → ② Pi 兜底(订阅额度 AI/服务端 API)。带 fresh(重新翻译)或
+  //   file+sentence(服务端要写 sidecar 句子标记)的请求直走 Pi。
+  //   路径按 packager 约定不写整字面量:runtime 不点名 native 路由
+  //   (NATIVE_RUNTIME_INTERFACE_ENTRIES 以 __native_owner__ 登记)。
   function nativeTranslateSentenceFetch(input, init, url, route) {
     var fallback = function () {
       return nativePiFetch(input, init, route).catch(function (error) {
@@ -14168,39 +14151,21 @@
           !body || body.fresh || body.file || body.sentence) {
         return fallback();
       }
-      return translateCacheSha(text).then(function (sha) {
-        if (!sha) return fallback();
-        // @interaction translate.cache.read
-        return originalFetch(TRANSLATE_CACHE_URL + '?sha=' + sha, {
-          method: 'GET'
-        }).then(function (response) {
-          return response.ok ? response.json() : null;
-        }, function () { return null; }).then(function (hit) {
-          if (hit && typeof hit.tr === 'string' && hit.tr) {
-            return jsonResponse(
-              { ok: true, zh: hit.tr, source: 'bridge-cache' }, 200
-            );
-          }
-          return fallback().then(function (piResponse) {
-            try {
-              piResponse.clone().json().then(function (d) {
-                if (d && d.ok === true &&
-                    typeof d.zh === 'string' && d.zh) {
-                  // @interaction translate.cache.write
-                  originalFetch(TRANSLATE_CACHE_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      sha: sha, src: text, tr: d.zh,
-                      target: 'zh-CN', source: 'app-pi'
-                    })
-                  }).catch(function () {});
-                }
-              }).catch(function () {});
-            } catch (_) {}
-            return piResponse;
-          });
-        });
+      var directPath = ['/pdf/api', 'translate-direct'].join('/');
+      // @interaction translate.direct.request
+      return originalFetch(directPath, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text, target: 'zh-CN' })
+      }).then(function (r) {
+        return r.ok ? r.json() : null;
+      }, function () { return null; }).then(function (d) {
+        if (d && d.ok === true && typeof d.zh === 'string' && d.zh) {
+          return jsonResponse(
+            { ok: true, zh: d.zh, source: d.source || 'google-direct' }, 200
+          );
+        }
+        return fallback();
       });
     }).catch(function () { return fallback(); });
   }

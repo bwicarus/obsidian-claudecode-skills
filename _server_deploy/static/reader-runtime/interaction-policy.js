@@ -594,23 +594,14 @@
         }
       }
     ),
-    networkRead(
-      'translate.cache.read',
-      ['/reader-translate-cache'],
-      {
-        transport: { extensionBridge: false, serviceWorker: 'none' },
-        reason: '翻译三层缓存中间层:同键查桥留底,命中秒回省一次 Pi AI/'
-          + 'API 调用;桥不在线=miss 照旧打 Pi(App 内 runtime 专用)。'
-      }
-    ),
     networkMutation(
-      'translate.cache.write',
-      '/reader-translate-cache',
+      'translate.direct.request',
+      '/pdf/api/translate-direct',
       ['POST'],
       {
         transport: { extensionBridge: false, serviceWorker: 'none' },
-        reason: 'Pi 翻译成功后异步推桥留底(first-write-wins),全设备下次'
-          + '命中;失败静默,不拖翻译主路。'
+        reason: '翻译三层缓存第二层:桥缓存 miss 后 App 经 Swift 持桥下发的 key '
+          + '直连 Google v2(用户 2026-09-02 拍板 A);失败回退 Pi。'
       }
     ),
     networkRead(

@@ -372,6 +372,11 @@ NATIVE_RUNTIME_INTERFACE_ENTRIES = {
     "/pdf/api/sync-batch": (
         "pi", ("POST",), ("epub", "pdf"), "localFetch"
     ),
+    "/pdf/api/translate-direct": (
+        # 翻译直连(2026-09-02 A 方案):Swift 持桥下发的 Google key 直连 v2,
+        # runtime 在桥缓存 miss 后调它,失败再退 Pi。
+        "native", ("POST",), ("epub", "pdf"), "__native_owner__"
+    ),
     "/pdf/api/translate-sentence": (
         # 翻译二期保守层(2026-09-02):桥缓存前置的有界混合处理器 ——
         # 命中回缓存,miss 照旧打 Pi 并异步推桥留底。owner 仍是 pi。

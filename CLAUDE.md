@@ -648,7 +648,7 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
   高频 AI 调用变成按 token 付费，这是 CLI 套壳存在的经济学理由）
   **+浏览器抓取+重计算常驻**（spacy/批量 OCR）**+桥接语音+全量留底**；
   **Pi=纯备份**。翻译已按此落地（桥 /reader-translate-cache 与
-  translate.py 同键共享；App 直连 Google=下一班）。
+  translate.py 同键共享；App 直连 Google 已于 2026-09-02 落地 —— 三层顺序=桥留底→App 直连（Swift 持 Keychain 里桥下发的 key，端点 `/reader-translate-key`，用户拍板 A：key 只在 Windows 一处、不进构建）→Pi 兜底）。
 
 ## 授权（2026-08-18 用户明确）
 - ⚠ **TestFlight 上传上限 = 滚动 24 小时内 20 次**（altool 90382）。

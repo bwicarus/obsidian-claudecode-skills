@@ -4689,33 +4689,11 @@ function _expandToWordEnd(chars, idx) {
   return idx;
 }
 
-// 把选区重设为词锚卡 bind 的 _oi 区间（2026-09-01 用户图3:已绑词组
-// 点击其中一部分时应整个词组被选中）。_oi 与数组下标可能不同序:先映射
-// 下标闭区间,并要求区间内所有实字符的 _oi 都落在 [from,to]（防重排页把
-// 无关字符圈进来）,不满足就放弃扩选（只开卡,不动选区）。
-function _selBindRange(pw, from, to) {
-  const chars = pw && pw.__charBoxes;
-  if (!chars || !chars.length || !(from >= 0) || !(to >= from)) return false;
-  let lo = -1, hi = -1;
-  for (let i = 0; i < chars.length; i++) {
-    const c = chars[i]; if (!c) continue;
-    const oi = (c._oi != null ? c._oi : i) | 0;
-    if (oi >= from && oi <= to) { if (lo < 0) lo = i; hi = i; }
-  }
-  if (lo < 0) return false;
-  for (let i = lo; i <= hi; i++) {
-    const c = chars[i]; if (!c || c.sp) continue;
-    const oi = (c._oi != null ? c._oi : i) | 0;
-    if (oi < from || oi > to) return false;
-  }
-  _selByCharRange(pw, lo, hi);
-  return true;
-}
-
-function _selByCharRange(pw, sIdx, eIdx) {
-  // 程序性整词选中的精确集合（一次性消费,任何早退都不能让它漏到下一次）
-  const _keep = _pendingSelKeep;
-  _pendingSelKeep = null;
+function _selByCharRange(pw, sIdx, eIdx, keepSet) {
+  // 程序性整词选中的精确字符集:由 _wordExpandFromChar 随 bounds 显式传入,
+  // 不经全局变量 —— 全局一次性变量在调用方早退时泄漏到下一次选中,表现为
+  // "选中区域和实际的词完全不相干"(2026-09-02 实锤)。
+  const _keep = keepSet instanceof Set ? keepSet : null;
   if (!pw || !pw.__charBoxes) return;
   if (sIdx > eIdx) { const t = sIdx; sIdx = eIdx; eIdx = t; }
   const chars = pw.__charBoxes;
@@ -4859,12 +4837,6 @@ function _clampToolbarIntoView(mainEl, selTopY) {
 //   tap 字符落在任一登记词组匹配段内 → 整段选中(取最长匹配)。
 //   竖直跳变 >2.2 行高拒并 —— 服务端同款守卫,防 reading-order 相邻但
 //   视觉分离的字误并。选区闭区间交给 _selByCharRange 既有跨块过滤。
-// 程序性整词选中的**精确字符集**:词组兜底/同 w 收集算出的命中集合,
-// 经此变量交给紧随其后的 _selByCharRange 做逐字符过滤 —— [min,max]
-// 裸区间在"OCR 行贯通表格列"的页面会夹带别列字符(2026-09-02 实锤:
-// 选词组得到 トートマ+味がある。+ン 10 字)。一次性消费,用后即清。
-let _pendingSelKeep = null;
-
 function _phraseExpandFromChar(chars, idx) {
   try {
     const favs = (typeof _phraseFavSet !== 'undefined' && _phraseFavSet) ? _phraseFavSet : null;
@@ -4918,8 +4890,7 @@ function _phraseExpandFromChar(chars, idx) {
     }
     const keep = new Set();
     for (let k = best.at; k < best.at + best.len; k++) keep.add(ord[k]);
-    _pendingSelKeep = keep;
-    return { start: lo, end: hi };
+    return { start: lo, end: hi, keep: keep };
   } catch (e) { return null; }
 }
 
@@ -4935,30 +4906,10 @@ function _wordExpandFromChar(chars, idx) {
   // 之前 CJK 在这里 hardcoded 返回 single,阻止了 fugashi 分词生效。
   if (chars[idx].w !== -1) {
     const wid = chars[idx].w;
-    // 同 w 按**全页收集**(2026-09-02):chars 按 baseline 重排后,表格页
-    // 跨行词的两半之间插着其它列同 baseline 的字符,原来的相邻遍历在
-    // 断口停下 → 整词永远选不全。收集出 [min,max] 闭区间,夹进来的
-    // 别列字符由 _selByCharRange 的跨块过滤(_charRangeBlockFilter)滤除。
-    // 词内含 /|／ 分隔符或异常大集合(w 污染)回退旧的相邻遍历语义。
-    let cnt = 0, hasSep = false, mn = -1, mx = -1;
-    for (let i = 0; i < chars.length; i++) {
-      if (!chars[i] || chars[i].w !== wid) continue;
-      cnt++;
-      if ('/|／'.includes(chars[i].c)) hasSep = true;
-      if (mn < 0) mn = i;
-      mx = i;
-    }
-    if (!hasSep && cnt >= 1 && cnt <= 48 && mn >= 0) {
-      let s0 = mn, e0 = mx;
-      while (s0 < e0 && !isWord(chars[s0].c) && !isCJK(chars[s0].c)) s0++;
-      while (e0 > s0 && !isWord(chars[e0].c) && !isCJK(chars[e0].c)) e0--;
-      const keepW = new Set();
-      for (let i = s0; i <= e0; i++) {
-        if (chars[i] && chars[i].w === wid) keepW.add(i);
-      }
-      _pendingSelKeep = keepW;
-      return {start: s0, end: e0};
-    }
+    // 同 w 只沿相邻遍历(2026-09-02 回滚"全页收集":App 本地 chars 的 w 是
+    // Vision 词块粒度,同 w 不看标点/相邻会把 カレー、トートマ 整串圈进,
+    // 选区与所点的词完全不相干)。跨行整词的需求由登记词组(上面的精确
+    // 匹配)与生词下划线 rects(_selByCharRange 里的 tap-vocab 扩展)承担。
     let s = idx, e = idx;
     while (s > 0 && chars[s - 1].w === wid && !'/|／'.includes(chars[s - 1].c)) s--;
     while (e < chars.length - 1 && chars[e + 1].w === wid && !'/|／'.includes(chars[e + 1].c)) e++;
@@ -5322,7 +5273,7 @@ function _bindCharLayer(cl, pw) {
       else if (_clickCount === 2) bounds = _lineExpandFromChar(pw.__charBoxes, startIdx);
       else bounds = _paragraphExpandFromChar(pw.__charBoxes, startIdx);
       if (bounds) {
-        _selByCharRange(pw, bounds.start, bounds.end);
+        _selByCharRange(pw, bounds.start, bounds.end, bounds.keep);
         // 单击单词 → 弹单词小框查词
         if (_clickCount === 1) {
           const _t = (lastSelText || '').trim();
@@ -5344,76 +5295,27 @@ function _bindCharLayer(cl, pw) {
           // 母语(不需要翻译的语言)单击选词 = 毫无意义 → 单击中文汉字词(纯汉字无假名、本书非日语)不弹任何东西、清掉选中。
           // 拖选/双击行/三击段仍照常弹(走别的分支)。
           const isNativeHan = hasKanji(_t) && !hasKana(_t) && !(declared && BOOK_LANGS.includes('ja'));
-          // ── 词上有锚卡 → 点字直接展开卡（用户 2026-08-31：点开已是
-          //   整合内容，没必要再按命中像素分「字=旧词典框/标记=卡」两种结果）。
-          //   ①区间判定：选中词的 _oi 区间与本页词锚卡 bind 区间相交就开卡。
-          //     标记的 bindkey 是**便签 id**（_applyWordBind 传 uid:ctl.note.id）;
-          //     曾查 cid/sourceUid → 永远查不到 → 掉几何兜底,而几何兜底字段名
-          //     还写错(x0,布局系实为 left/top) → 双腿全瘸,边缘点击漏进翻译卡
-          //     (2026-09-01 用户图3/图6 实锤)。命中后把选区扩到 bind 区间 ——
-          //     点击词组的一部分=选中整个词组（用户图3 点名）。
-          //   ②几何兜底（老数据/uid 对不上）：字符盒中心落进任一 .pgmark
-          //     矩形（±6px 容差,治边缘像素漏网）即命中。
+          // ── 点击规则只有一条（用户 2026-09-02 拍板减法重构）：**被点的那个
+          //   字符盒**落在某个锚定标记框（.pgmark）内 → 开那张卡；框外 → 正常
+          //   选词查词。纯几何、零容差、不看选区区间相交、不找"最近"的卡。
+          //   此前的区间相交判定 + ±6px 兜底会把任何邻近锚卡的点击劫持成开卡
+          //   （实锤：点 トートマ 开了下一行 プリッキーヌ 的卡）。"边缘漏进字典卡"
+          //   的老问题是标记框没描全（bind 断尾）的数据病，靠数据修，不靠放宽命中。
           const _bindMk = (() => {
             try {
-              if (!_t || _t.length > 30 || !_charSel || !_charSel.pw) return null;
+              if (!_charSel || !_charSel.pw) return null;
               const _bl = _charSel.pw.querySelector('.pgbind-layer');
               if (!_bl) return null;
-              try {
-                const _sn = (window.RC && RC.stickynote &&
-                  typeof RC.stickynote.notes === 'function')
-                    ? RC.stickynote.notes() : [];
-                if (_sn && _sn.length) {
-                  const _pg = +(_charSel.pw.dataset.pageNum || 0);
-                  const _bx0 = _charSel.pw.__charBoxes || [];
-                  const _ia = Math.min(_charSel.startIdx, _charSel.endIdx);
-                  const _ib = Math.max(_charSel.startIdx, _charSel.endIdx);
-                  let _lo = Infinity, _hi = -1;
-                  for (let _i2 = _ia; _i2 <= _ib && _i2 < _bx0.length; _i2++) {
-                    const _c2 = _bx0[_i2]; if (!_c2) continue;
-                    const _oi2 = (_c2._oi != null ? _c2._oi : _i2) | 0;
-                    if (_oi2 < _lo) _lo = _oi2;
-                    if (_oi2 > _hi) _hi = _oi2;
-                  }
-                  for (const _n2 of _sn) {
-                    const _bd = _n2 && _n2.html && _n2.html.bind;
-                    if (!_bd || _bd.kind !== 'page-chars') continue;
-                    if ((parseInt(_bd.page, 10) || 0) !== _pg) continue;
-                    const _f2 = parseInt(_bd.from, 10);
-                    const _t2 = parseInt(_bd.to, 10);
-                    if (!(_f2 >= 0 && _t2 >= _f2)) continue;
-                    if (_hi >= _f2 && _lo <= _t2) {
-                      // noteId 第一优先:noteIdOf = noteId || id,标记挂载键
-                      // 跟着它走 —— 只查 id 会在 noteId 卡上永远 miss。
-                      const _cands = [_n2.noteId, _n2.id,
-                                      _n2.html.cid, _n2.html.sourceUid];
-                      for (const _cd of _cands) {
-                        const _uid = String(_cd || '').replace(/[^\w-]/g, '');
-                        const _mk2 = _uid && _bl.querySelector(
-                          '.pgmark[data-bindkey="u' + _uid + '"]');
-                        if (_mk2) {
-                          try { _selBindRange(_charSel.pw, _f2, _t2); } catch (_) {}
-                          return _mk2;
-                        }
-                      }
-                    }
-                  }
-                }
-              } catch (_) {}
-              const _marks = _bl.querySelectorAll('.pgmark');
-              if (!_marks.length) return null;
               const _bx = _charSel.pw.__charBoxes || [];
-              const _a = Math.min(_charSel.startIdx, _charSel.endIdx);
-              const _b = Math.max(_charSel.startIdx, _charSel.endIdx);
-              for (let _i = _a; _i <= _b && _i < _bx.length; _i++) {
-                const _c = _bx[_i]; if (!_c || !(_c.width > 0)) continue;
-                const _cx = _c.left + _c.width / 2, _cy = _c.top + _c.height / 2;
-                for (let _m = 0; _m < _marks.length; _m++) {
-                  const _mk = _marks[_m];
-                  const _L = parseFloat(_mk.style.left) - 6, _T = parseFloat(_mk.style.top) - 6;
-                  const _W = parseFloat(_mk.style.width) + 12, _H = parseFloat(_mk.style.height) + 12;
-                  if (_cx >= _L && _cx <= _L + _W && _cy >= _T && _cy <= _T + _H) return _mk;
-                }
+              const _c = _bx[startIdx];
+              if (!_c || !(_c.width > 0)) return null;
+              const _cx = _c.left + _c.width / 2, _cy = _c.top + _c.height / 2;
+              const _marks = _bl.querySelectorAll('.pgmark');
+              for (let _m = 0; _m < _marks.length; _m++) {
+                const _mk = _marks[_m];
+                const _L = parseFloat(_mk.style.left), _T = parseFloat(_mk.style.top);
+                const _W = parseFloat(_mk.style.width), _H = parseFloat(_mk.style.height);
+                if (_cx >= _L && _cx <= _L + _W && _cy >= _T && _cy <= _T + _H) return _mk;
               }
               return null;
             } catch (_) { return null; }
@@ -5431,6 +5333,13 @@ function _bindCharLayer(cl, pw) {
               const _vm = (_charSel && _charSel.pw && _charSel.pw.__vocabMarks) || [];
               const _tl = _t.toLowerCase();
               _isKnown = _vm.some(m => (m.word && String(m.word).toLowerCase() === _tl) || (m.lemma && String(m.lemma).toLowerCase() === _tl));
+              // 登记过的词组(收藏/已掌握)也是已知词:有缓存,直接弹,不呼吸等待
+              // (用户 2026-09-02:"已收藏了选中后还是闪烁查询")。
+              if (!_isKnown) {
+                const _pk = _t.replace(/[\s\u3000]+/g, '');
+                _isKnown = (typeof _phraseFavSet !== 'undefined' && _phraseFavSet && _phraseFavSet.has(_pk)) ||
+                  (typeof _phraseMarkSet !== 'undefined' && _phraseMarkSet && _phraseMarkSet.has(_pk));
+              }
             } catch (_) {}
             if (window.__uiShared && window.PdfAdapter) {
               PdfAdapter.lookupWord({ word: _t, context: _ctx, page: _selPageNum(), file: FILE_REL, langs: BOOK_LANGS, anchorRect: _charSel, noBreathe: _isKnown, fallback: (w, c) => showWordPopover(w, c) });
@@ -6209,6 +6118,7 @@ function _applyPhraseMergesLocal(pw) {
   ordIdx.sort((a, b) =>
     ((chars[a]._oi != null ? chars[a]._oi : a) | 0) -
     ((chars[b]._oi != null ? chars[b]._oi : b) | 0));
+  const phraseHits = [];
   let str = ''; const pos = [];
   for (const i of ordIdx) {
     const cc = chars[i].c != null ? String(chars[i].c) : '';
@@ -6242,8 +6152,54 @@ function _applyPhraseMergesLocal(pw) {
       for (const k of hit) if (chars[k].w != null && chars[k].w >= 0) { wUse = chars[k].w; break; }
       if (wUse < 0) continue;   // 无既有词 id 可借(w 编码含块 id)→ 保守跳过
       for (const k of hit) { const cb = chars[k]; if (cb._w0 === undefined) cb._w0 = cb.w; cb.w = wUse; }
+      phraseHits.push({ text: t, idx: hit });
     }
   }
+  _syncPhraseUnderlines(pw, chars, phraseHits);
+}
+
+// 收藏词组的生词下划线（2026-09-02）：App 本地 vocab_marks 只含 enrichment
+// 的生词表,登记词组不在其中 → "只收藏没掌握却没下划线"。用合并阶段精确
+// 命中的字符集合成 mark(rects 按行分段,与 chars 的 _x0.._y1 同为页面 pt 系),
+// 挂进 pw.__vocabMarks。已掌握的词组不画(与服务端 favm 跳线语义一致)。
+// 合成 mark 带 phraseLocal,每次先剔旧再加 → 幂等。
+function _syncPhraseUnderlines(pw, chars, phraseHits) {
+  try {
+    const before = Array.isArray(pw.__vocabMarks) ? pw.__vocabMarks : [];
+    const kept = before.filter(m => !(m && m.phraseLocal));
+    const added = [];
+    for (const hitInfo of (phraseHits || [])) {
+      const t = hitInfo.text;
+      if (typeof _phraseMarkSet !== 'undefined' && _phraseMarkSet &&
+          _phraseMarkSet.has(typeof _phraseNorm === 'function' ? _phraseNorm(t) : t)) continue;
+      const exists = kept.some(m => {
+        const w = String((m && (m.word || m.lemma)) || '').replace(/[\s\u3000]+/g, '');
+        return w && w === t;
+      });
+      if (exists) continue;
+      // 按行分段:基线差 < 0.6 行高 = 同一行(同 34-bindcard._rangeRects 判据)
+      const boxes = hitInfo.idx.map(i => chars[i]).filter(c => c && c._x0 != null && c._y1 != null);
+      if (!boxes.length) continue;
+      boxes.sort((a, b) => (Math.abs(a._y1 - b._y1) > Math.max(a._y1 - a._y0, b._y1 - b._y0, 1) * 0.6)
+        ? a._y1 - b._y1 : a._x0 - b._x0);
+      const rects = [];
+      let cur = null;
+      for (const c of boxes) {
+        const h = Math.max(1, c._y1 - c._y0);
+        if (cur && Math.abs(c._y1 - cur[3]) < h * 0.6) {
+          cur[0] = Math.min(cur[0], c._x0); cur[1] = Math.min(cur[1], c._y0);
+          cur[2] = Math.max(cur[2], c._x1); cur[3] = Math.max(cur[3], c._y1);
+        } else {
+          cur = [c._x0, c._y0, c._x1, c._y1];
+          rects.push(cur);
+        }
+      }
+      added.push({ word: t, lemma: t, surface: t, label_slug: 'phrase', rects, phraseLocal: true });
+    }
+    if (!added.length && kept.length === before.length) return;
+    pw.__vocabMarks = kept.concat(added);
+    try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {}
+  } catch (_) {}
 }
 function _applyPhraseMergesAll() { document.querySelectorAll('.page-wrap[data-page-num]').forEach((pw) => { try { _applyPhraseMergesLocal(pw); } catch (_) {} }); }
 try { window.__applyPhraseMergesLocal = _applyPhraseMergesLocal; } catch (_) {}

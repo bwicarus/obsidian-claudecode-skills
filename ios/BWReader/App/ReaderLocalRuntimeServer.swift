@@ -292,6 +292,22 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             )
         }
 
+        if decodedPath == "/pdf/api/translate-direct" {
+            guard request.method == .POST else {
+                return response(
+                    status: .methodNotAllowed,
+                    text: "method not allowed",
+                    headers: [HTTPHeader("Allow"): "POST"]
+                )
+            }
+            guard trustedResourceSurface(
+                referer: request.headers[HTTPHeader("Referer")]
+            ) != nil else {
+                return response(status: .forbidden, text: "invalid referer")
+            }
+            return await serveNativeTranslateDirect(request)
+        }
+
         if decodedPath == "/pdf/api/card-asset-ensure" {
             guard request.method == .GET else {
                 return response(
@@ -563,6 +579,64 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 headers: [
                     HTTPHeader("X-BW-Reader-Error"): "ensure-bridge-unreachable"
                 ]
+            )
+        }
+    }
+
+    // 翻译直连（用户 2026-09-02 拍板 A 方案）：runtime 查桥缓存 miss 后到这里,
+    // Swift 持 Keychain 里的 Google key 直连 v2;失败回 5xx 让 runtime 退到 Pi。
+    private func serveNativeTranslateDirect(
+        _ request: HTTPRequest
+    ) async -> HTTPResponse {
+        guard let data = try? await request.bodyData,
+              (2...16_384).contains(data.count),
+              let object = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              let text = (object["text"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty,
+              text.count <= 2_000 else {
+            return jsonResponse(
+                request,
+                status: .badRequest,
+                object: ["ok": false, "code": "BW_TRANSLATE_BODY"]
+            )
+        }
+        let requestedTarget = (object["target"] as? String) ?? ""
+        let target = requestedTarget.isEmpty ? "zh-CN" : requestedTarget
+        // 三层缓存的前两层都在这里（页面 CSP 不许直连桥,契约
+        // native-local-library 钉死）：桥留底命中直接回;miss 直连 Google,
+        // 成功异步推桥留底供全设备共享。失败回 5xx 让 runtime 退到 Pi。
+        let cacheSha = ReaderTranslateDirectService.cacheSha(text: text, target: target)
+        if let cached = await ReaderTranslateDirectService.shared.cachedTranslation(
+            sha: cacheSha) {
+            return jsonResponse(
+                request,
+                status: .ok,
+                object: ["ok": true, "zh": cached, "source": "bridge-cache"]
+            )
+        }
+        do {
+            let translated = try await ReaderTranslateDirectService.shared.translate(
+                text, target: target)
+            await ReaderTranslateDirectService.shared.storeTranslation(
+                sha: cacheSha, source: text, translated: translated, target: target)
+            return jsonResponse(
+                request,
+                status: .ok,
+                object: ["ok": true, "zh": translated, "source": "google-direct"]
+            )
+        } catch ReaderTranslateDirectError.keyUnavailable {
+            return jsonResponse(
+                request,
+                status: .init(503, phrase: "Service Unavailable"),
+                object: ["ok": false, "code": "BW_TRANSLATE_KEY_UNAVAILABLE"]
+            )
+        } catch {
+            return jsonResponse(
+                request,
+                status: .badGateway,
+                object: ["ok": false, "code": "BW_TRANSLATE_UPSTREAM"]
             )
         }
     }

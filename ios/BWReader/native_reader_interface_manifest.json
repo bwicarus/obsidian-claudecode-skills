@@ -2961,6 +2961,21 @@
       "description": "Read or update translation configuration."
     },
     {
+      "path": "/pdf/api/translate-direct",
+      "match": "exact",
+      "owner": "native",
+      "methods": [
+        "POST"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": null,
+      "description": "Translate one sentence directly through Google Translate v2 with the bridge-issued key held in Keychain."
+    },
+    {
       "path": "/pdf/api/translate-sentence",
       "match": "exact",
       "owner": "pi",

@@ -2243,13 +2243,19 @@ if (window.__bwPwaProviderOnly) return;
     } catch (e) {}
     if (old && nb && nb.page === old.page && nb.from === old.from && nb.to === old.to) return false;
     try { if (old && window.__pageBindRemove) window.__pageBindRemove(old, ctl.note.id); } catch (e) {}
-    // 手动重绑标记（2026-09-02 实锤）：拖到新词后 bind.text=新词而卡片
-    // label 还是旧词,自愈把这种"不一致"当坏数据滚回原词 —— 用户显式
-    // 动作必须凌驾数据医生。manual 随 bind 持久化,自愈永久免疫。
-    if (nb) nb.manual = true;
     ctl.note[slot].bind = nb;
     ctl._bindMarked = false;
     if (!nb) ctl.root.style.display = '';   // 退回普通便签，别把卡藏没了
+    if (!nb) {
+      // 拖到空白=解绑成自由卡（2026-09-02 实锤"拖到空白后消失"）：词锚展开态
+      // （_bindOpen/word-open 类名/词锚 portal）若留着，dropNote 随后按 _bindOpen
+      // 走 wordPortalIn —— 标记已不存在，卡被定位到不存在的锚点上。整套词锚态
+      // 在这里一次清干净，后续按普通便签重挂。
+      ctl._bindOpen = false;
+      ctl._bindKey = '';
+      ctl.root.classList.remove('rc-note-word-open');
+      try { setWordDeleteUi(ctl, false); } catch (e) {}
+    }
     return slot;
   }
 
@@ -2275,85 +2281,14 @@ if (window.__bwPwaProviderOnly) return;
     } catch (e) {}
   }
 
-  // ── bind 质量自愈（2026-09-02,桥留底 document-notes 实锤两类坏数据）:
-  //   「パンセオ」卡 bind.text="パンセ"(跨行断尾少一字,点 オ 不开卡)、
-  //   另一副本 bind.text="よ" from=to=341(建卡时区间整个指错,点词永远
-  //   不开卡而是漏进字典)。词卡的 label 就是词本身 —— 用它在字符层重新
-  //   解析,解析出的文本与 label 逐字一致才写回;不一致宁可不动。
-  //   每卡 30s 内只试一次(页面未渲染时失败,下次挂载再试)。
-  function _healWordBind(ctl, presentation, b) {
-    try {
-      if (!window.__pageBindResolveOnly) return null;
-      if (!b || b.kind !== 'page-chars') return null;
-      var label = String(presentation.label || '').trim();
-      var norm = function (s) { return String(s || '').replace(/\s+/g, ''); };
-      var want = norm(label);
-      if (!want || want.length < 2 || want.length > 32) return null;
-      if (b.manual) return null;   // 手动重绑（拖放换锚）：用户显式动作,自愈永不碰
-      if (norm(b.text) === want) return null;   // bind 文本与词一致=没病
-      if (ctl._bindHealAt && Date.now() - ctl._bindHealAt < 30000) return null;
-      ctl._bindHealAt = Date.now();
-      var r = null;
-      try {
-        r = window.__pageBindResolveOnly({
-          kind: 'page-chars', page: parseInt(b.page, 10) || 0, text: label
-        });
-      } catch (e0) { r = null; }
-      // 失败必须留痕：App 上没有控制台,把原因挂在 ctl 上,卡打开时
-      // 渲 8s 诊断行 —— 用户一张截图就是完整故障报告。
-      if (!r || r.ok !== true) {
-        ctl._bindHealWhy = '锚自愈失败:解析不到「' + label + '」(' +
-          ((r && r.why) || 'null') + ')';
-        return null;
-      }
-      if (norm(r.text) !== want) {
-        ctl._bindHealWhy = '锚自愈失败:解析到「' +
-          String(r.text || '').slice(0, 16) + '」≠「' + label + '」';
-        return null;
-      }
-      ctl._bindHealWhy = '';
-      var slot = wordBindSlot(ctl.note);
-      if (!slot || !ctl.note[slot]) return null;
-      var healed = {};
-      for (var k in b) {
-        if (Object.prototype.hasOwnProperty.call(b, k)) healed[k] = b[k];
-      }
-      healed.from = r.from; healed.to = r.to; healed.text = label;
-      ctl.note[slot].bind = healed;
-      var pf = {}; pf[slot] = ctl.note[slot];
-      patchNote(ctl.note, pf);
-      try {
-        console.info('[bind] 自愈', label,
-          b.from + '-' + b.to + '(' + String(b.text || '') + ')',
-          '→', r.from + '-' + r.to);
-      } catch (e) {}
-      return healed;
-    } catch (e) { return null; }
-  }
-
-  // 自愈失败的 8s 诊断行（打开卡时渲在正文顶部,自动消失）。
-  function _healWhyNote(ctl) {
-    try {
-      if (!ctl || !ctl.body || !ctl._bindHealWhy) return;
-      if (ctl.body.querySelector('.rc-heal-note')) return;
-      var line = document.createElement('div');
-      line.className = 'rc-heal-note';
-      line.style.cssText =
-        'margin:2px 6px;font-size:10px;opacity:.6;color:#ffd7a8;' +
-        'pointer-events:none';
-      line.textContent = ctl._bindHealWhy;
-      ctl.body.insertBefore(line, ctl.body.firstChild);
-      setTimeout(function () {
-        try { line.remove(); } catch (e) {}
-      }, 8000);
-    } catch (e) {}
-  }
-
+  // （2026-09-02 减法重构：此前这里有一套"bind 自愈"—— bind 文本与卡片
+  //   词不一致就重解析写回。它两次吃掉用户意图：把拖到新词的手动重绑滚回
+  //   原词、把拖到空白的解绑捡回去藏成词锚卡。数据医生分不清"坏数据"和
+  //   "用户刚改的"，所以整套删除：绑定只由用户拖放与建卡决定，不静默改。）
   function _applyWordBind(ctl) {
     var presentation = wordCardPresentation(ctl.note);
     var b = presentation.bind;
     if (!b || !window.__pageBindCard) return;
-    b = _healWordBind(ctl, presentation, b) || b;
     // ⚠ 先藏起来再试。挂载点是 04-render.js 的 dataset.loaded='1'，那时
     //   `wrap.__charBoxes` 还没挂上（08-charlayer 的 fetch 是异步的），
     //   所以第一次必然拿到 no-char-layer。不先藏的话，每次翻页/缩放都会先
@@ -2403,7 +2338,6 @@ if (window.__bwPwaProviderOnly) return;
           setWordDeleteUi(ctl, true);
           wordPortalIn(ctl);   // body-fixed：逃出 #main/page-wrap 的 zoom 与 overflow 裁剪
           _placeWordCard(ctl, meta && meta.source);
-          if (ctl._bindHealWhy) _healWhyNote(ctl);
           return true;
         }
       });

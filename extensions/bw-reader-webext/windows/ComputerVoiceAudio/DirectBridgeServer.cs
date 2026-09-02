@@ -673,6 +673,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-translate-cache",
             new[] { "GET", "POST", "OPTIONS" },
             context => HandleTranslateCacheAsync(context, serviceToken));
+        // 翻译密钥下发（用户 2026-09-02 拍板 A 方案）：App 直连 Google 翻译的
+        // key 由这里发,Tailscale 内网 + 身份头;key 只在 Windows 一处
+        // (~/.config/gcp-vision-key,与 translate.py 同源),不进构建不进 git。
+        app.MapMethods(
+            "/reader-translate-key",
+            new[] { "GET", "OPTIONS" },
+            context => HandleTranslateKeyAsync(context, serviceToken));
         // 语音助手的主动提示板。它盯着 BoardPath 一个地方就够。
         // ⚠ 板子**不存数据** —— 只是把 runtime 目录里已有的
         // notifications-*.json 和位置挑一挑、渲成一份很小的文本。
@@ -1706,6 +1713,50 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 code = assetId is null
                     ? "BW_CARD_ASSET_ENSURE_FAILED" : "BW_CARD_ASSET_ENSURED",
             },
+            serviceCancellationToken).ConfigureAwait(false);
+    }
+
+    private static readonly string TranslateKeyPath =
+        System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".config", "gcp-vision-key");
+
+    private async Task HandleTranslateKeyAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "translate-key")) return;
+        if (!HttpMethods.IsGet(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        string key = "";
+        try
+        {
+            if (File.Exists(TranslateKeyPath))
+            {
+                key = (await File.ReadAllTextAsync(
+                    TranslateKeyPath, serviceCancellationToken)
+                    .ConfigureAwait(false)).Trim();
+            }
+        }
+        catch (IOException)
+        {
+        }
+        if (key.Length == 0)
+        {
+            AppendOutputPickupLog("translate-key\tmissing");
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, code = "BW_TRANSLATE_KEY_MISSING" },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        AppendOutputPickupLog("translate-key\tissued");
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        await context.Response.WriteAsJsonAsync(
+            new { ok = true, key, provider = "google-translate-v2" },
             serviceCancellationToken).ConfigureAwait(false);
     }
 
