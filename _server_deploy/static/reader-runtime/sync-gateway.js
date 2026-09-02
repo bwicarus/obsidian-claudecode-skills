@@ -72,6 +72,18 @@
     if (error && error.name === 'SyncGatewayError') return error;
     var status = Number(error && error.status || 0);
     var retryable = !status || status === 408 || status === 429 || status >= 500;
+    // 传输层/App 同步桥已给出自己的错误码(BW_NATIVE_SYNC_RESPONSE 之类)时原样保留,别一律折成
+    // BW_SYNC_RETRYABLE —— 2026-09-03 切服务器后四个请求全 200 却只看到"可重试",真因被盖住。
+    var ownCode = error && typeof error.code === 'string' && /^BW_[A-Z0-9_]{1,78}$/.test(error.code)
+      ? error.code : '';
+    if (ownCode && ownCode !== 'BW_SYNC_HTTP' && ownCode !== 'BW_SYNC_HTTP_JSON') {
+      return new SyncError(
+        String(error.message || ownCode),
+        ownCode,
+        typeof error.retryable === 'boolean' ? error.retryable : retryable,
+        { status: status || null }
+      );
+    }
     return new SyncError(
       String(error && error.message || error || '同步失败'),
       retryable ? 'BW_SYNC_RETRYABLE' : 'BW_SYNC_REJECTED',

@@ -64,6 +64,8 @@ struct ReaderPiDataSyncReport: Equatable, Sendable {
     let conflictCount: Int
     let errorCode: String
     let retryable: Bool
+    /// 真实原因(2026-09-03):只显示错误码时,"可重试失败"盖住了桥/传输层的具体消息。
+    var errorMessage: String = ""
 
     var summary: String {
         switch state {
@@ -86,9 +88,10 @@ struct ReaderPiDataSyncReport: Equatable, Sendable {
         case .unknown:
             return "无法确认设置、词汇与卡片仓库的同步结果"
         case .error:
-            return errorCode.isEmpty
+            let detail = [errorCode, errorMessage].filter { !$0.isEmpty }.joined(separator: "：")
+            return detail.isEmpty
                 ? "设置、词汇与卡片仓库同步失败"
-                : "设置、词汇与卡片仓库同步失败（\(errorCode)）"
+                : "设置、词汇与卡片仓库同步失败（\(detail)）"
         }
     }
 }
@@ -129,6 +132,7 @@ private struct ReaderPiDataSyncWireResult: Decodable {
     let conflictCount: Int
     let errorCode: String
     let retryable: Bool
+    let errorMessage: String?
 }
 
 private enum ReaderPiSyncError: LocalizedError {
@@ -474,7 +478,8 @@ private extension ReaderWebViewModel {
             pendingLocal: decoded.pendingLocal,
             conflictCount: decoded.conflictCount,
             errorCode: decoded.errorCode,
-            retryable: decoded.retryable
+            retryable: decoded.retryable,
+            errorMessage: String((decoded.errorMessage ?? "").prefix(200))
         )
     }
 }
