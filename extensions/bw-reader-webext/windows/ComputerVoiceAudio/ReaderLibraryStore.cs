@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
@@ -69,21 +70,123 @@ internal static class ReaderLibraryStore
     internal readonly record struct Entry(
         string Name, long Bytes, string Sha256, DateTimeOffset ModifiedUtc);
 
+    /// 内容指纹缓存（2026-09-02）：书库从 2 本到 28 本、1.6GB 之后，每次 list 都
+    /// 全量算 SHA256 要 20 多秒 —— 而 App 问清单只等 20 秒，等于书库越全越打不开。
+    /// 键=文件名，值=(字节数, 修改时间, sha)；字节数或修改时间变了才重算。
+    /// 落盘在书库目录里的隐藏文件，进程重启不必重算；损坏就当没有，全部重算。
+    private sealed record HashCacheEntry(long Bytes, long ModifiedTicks, string Sha256);
+    private static readonly object HashCacheGate = new();
+    private static Dictionary<string, HashCacheEntry>? _hashCache;
+    private static string HashCachePath => Path.Combine(RootDirectory, ".hash-cache.json");
+
+    private static Dictionary<string, HashCacheEntry> LoadHashCache()
+    {
+        try
+        {
+            if (File.Exists(HashCachePath))
+            {
+                var loaded = JsonSerializer.Deserialize<Dictionary<string, HashCacheEntry>>(
+                    File.ReadAllText(HashCachePath));
+                if (loaded != null) return loaded;
+            }
+        }
+        catch { /* 缓存坏了就重算，不影响正确性 */ }
+        return new Dictionary<string, HashCacheEntry>(StringComparer.Ordinal);
+    }
+
+    private static void SaveHashCache(Dictionary<string, HashCacheEntry> cache)
+    {
+        try
+        {
+            Directory.CreateDirectory(RootDirectory);
+            string temporary = HashCachePath + ".part";
+            File.WriteAllText(temporary, JsonSerializer.Serialize(cache));
+            File.Move(temporary, HashCachePath, overwrite: true);
+        }
+        catch { /* 写不进缓存只是下次慢，不是错误 */ }
+    }
+
+    /// 启动时后台把缓存补全，让第一次 list 就快。
+    internal static void WarmHashCache()
+    {
+        _ = Task.Run(() => { try { List(); } catch { } });
+    }
+
     internal static IReadOnlyList<Entry> List()
     {
         var root = new DirectoryInfo(RootDirectory);
         if (!root.Exists) return Array.Empty<Entry>();
         var entries = new List<Entry>();
-        foreach (FileInfo file in root.EnumerateFiles())
+        lock (HashCacheGate)
         {
-            if (!AllowedExtensions.Contains(file.Extension)) continue;
-            entries.Add(new Entry(
-                file.Name, file.Length, ShortHash(file.FullName),
-                new DateTimeOffset(file.LastWriteTimeUtc, TimeSpan.Zero)));
+            _hashCache ??= LoadHashCache();
+            bool dirty = false;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (FileInfo file in root.EnumerateFiles())
+            {
+                if (!AllowedExtensions.Contains(file.Extension)) continue;
+                long ticks = file.LastWriteTimeUtc.Ticks;
+                seen.Add(file.Name);
+                string sha;
+                if (_hashCache.TryGetValue(file.Name, out HashCacheEntry? cached)
+                    && cached.Bytes == file.Length && cached.ModifiedTicks == ticks
+                    && !string.IsNullOrEmpty(cached.Sha256))
+                {
+                    sha = cached.Sha256;
+                }
+                else
+                {
+                    sha = ShortHash(file.FullName);
+                    _hashCache[file.Name] = new HashCacheEntry(file.Length, ticks, sha);
+                    dirty = true;
+                }
+                entries.Add(new Entry(
+                    file.Name, file.Length, sha,
+                    new DateTimeOffset(file.LastWriteTimeUtc, TimeSpan.Zero)));
+            }
+            foreach (string stale in _hashCache.Keys.Where(k => !seen.Contains(k)).ToList())
+            {
+                _hashCache.Remove(stale);
+                dirty = true;
+            }
+            if (dirty) SaveHashCache(_hashCache);
         }
         entries.Sort((left, right) =>
             string.CompareOrdinal(left.Name, right.Name));
         return entries;
+    }
+
+    /// 从服务器取回一本书（2026-09-02 用户：「把 Pi 上的书都转移到 Windows 且把 Pi
+    /// 从这个线路中移除」—— 设备此后只从这里下书）。只认书库根目录里的纯文件名。
+    internal static async Task<string> WriteDownloadAsync(
+        HttpContext context, string? name, CancellationToken token)
+    {
+        name = (name ?? string.Empty).Trim();
+        if (!IsSafeName(name))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, code = "BW_LIBRARY_NAME_INVALID", message = "书名不接受" },
+                token).ConfigureAwait(false);
+            return "BW_LIBRARY_NAME_INVALID";
+        }
+        string path = Path.Combine(RootDirectory, name);
+        var info = new FileInfo(path);
+        if (!info.Exists)
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, code = "BW_LIBRARY_NOT_FOUND", message = "服务器上没有这本" },
+                token).ConfigureAwait(false);
+            return "BW_LIBRARY_NOT_FOUND";
+        }
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.ContentType = "application/octet-stream";
+        context.Response.ContentLength = info.Length;
+        context.Response.Headers["X-BW-Book-Bytes"] = info.Length.ToString();
+        context.Response.Headers["Cache-Control"] = "no-store";
+        await context.Response.SendFileAsync(path, token).ConfigureAwait(false);
+        return "BW_LIBRARY_SENT";
     }
 
     /// 内容指纹。用来回答「这本我已经有了吗」。

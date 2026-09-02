@@ -11,7 +11,7 @@ private enum ReaderLibrarySource: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .local: return "本机"
-        case .pi: return "Pi 书库"
+        case .pi: return "服务器书库"
         case .all: return "全部"
         }
     }
@@ -101,14 +101,17 @@ struct ReaderLocalLibraryView: View {
 
                 localFolderSection
 
+                // 远端来源=Windows 服务器书库(2026-09-02 用户:Pi 退出这条线路)。
+                // Pi 书库那套 remoteBooksSection/remoteBookRow 不再挂进页面;Pi OCR
+                // (预处理)仍经 remote 取 Pi 侧书记录,那是另一条线。
                 switch selectedSource {
                 case .local:
                     localBooksSection(library.books)
                 case .pi:
-                    remoteBooksSection(remote.books)
+                    serverBooksSection(serverOnlyBooks)
                 case .all:
                     localBooksSection(library.books)
-                    remoteBooksSection(remoteOnlyBooks)
+                    serverBooksSection(serverOnlyBooks)
                 }
 
                 statusSections
@@ -269,6 +272,118 @@ struct ReaderLocalLibraryView: View {
         }
     }
 
+    /// 服务器(Windows)书库里本机没有的书。判据与备份闸同一口径:sha 相同,或同名同字节数。
+    private var serverOnlyBooks: [ReaderServerLibrary.Book] {
+        let locals = library.books
+        let books = backupGate.serverBooks.filter { sb in
+            !locals.contains { lb in
+                (lb.contentSha256 == sb.sha256)
+                    || (Int(lb.byteCount) == sb.bytes
+                        && (lb.relativePath as NSString).lastPathComponent == sb.name)
+            }
+        }
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return books }
+        return books.filter { $0.name.localizedCaseInsensitiveContains(query) }
+    }
+
+    @State private var serverDownloading: [String: Double] = [:]
+    @State private var serverDownloadFailures: [String: String] = [:]
+
+    private func serverStateTitle(_ book: ReaderLocalBookRecord) -> String {
+        switch backupGate.status(of: book) {
+        case .backed: return "本机 + \(ReaderServer.displayName)"
+        case .notBacked: return "仅本机（打开时自动传）"
+        case .unknown: return "\(ReaderServer.displayName)状态未知"
+        case .ruleNotReady: return "\(ReaderServer.displayName)无书库"
+        }
+    }
+
+    @ViewBuilder
+    private func serverBooksSection(_ books: [ReaderServerLibrary.Book]) -> some View {
+        if backupGate.serverHashes == nil, let why = backupGate.lastError, selectedSource == .pi {
+            placeholder(title: "问不到\(ReaderServer.displayName)书库", detail: why)
+        } else if backupGate.serverHashes == nil, selectedSource == .pi {
+            placeholder(title: "还没问过\(ReaderServer.displayName)书库", detail: "下拉刷新一次。")
+        } else if books.isEmpty, selectedSource == .pi {
+            placeholder(
+                title: searchText.isEmpty ? "\(ReaderServer.displayName)上没有本机缺的书" : "没有匹配的服务器书籍",
+                detail: "本机每一本打开时都会自动传上去；这里只列服务器有、本机没有的。"
+            )
+        } else if !books.isEmpty {
+            Section(selectedSource == .all ? "仅在\(ReaderServer.displayName)" : "\(ReaderServer.displayName)书库") {
+                ForEach(books) { book in
+                    serverBookRow(book)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func serverBookRow(_ book: ReaderServerLibrary.Book) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                bookIcon(kind: (book.name as NSString).pathExtension.lowercased())
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(book.name)
+                        .font(.body.weight(.medium))
+                        .lineLimit(2)
+                    Text("\((book.name as NSString).pathExtension.uppercased()) · \(byteCount(Int64(book.bytes))) · 仅在\(ReaderServer.displayName)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    if let fraction = serverDownloading[book.id] {
+                        ProgressView(value: fraction)
+                            .progressViewStyle(.linear)
+                        Text("正在从\(ReaderServer.displayName)下载 \(Int((fraction * 100).rounded()))% · 下完自动打开")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else if let failure = serverDownloadFailures[book.id] {
+                        Text("下载没成功：\(failure)（再点一次重试）")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    }
+                }
+                Spacer(minLength: 4)
+            }
+            HStack {
+                Spacer()
+                Button("下载并打开") {
+                    Task { await downloadFromServerAndOpen(book) }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!library.isConfigured || serverDownloading[book.id] != nil)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func downloadFromServerAndOpen(_ book: ReaderServerLibrary.Book) async {
+        serverDownloadFailures.removeValue(forKey: book.id)
+        serverDownloading[book.id] = 0
+        defer { serverDownloading.removeValue(forKey: book.id) }
+        do {
+            let folderAccess = try library.makeFolderAccess()
+            defer { withExtendedLifetime(folderAccess) {} }
+            let bookID = book.id
+            let savedName = try await ReaderServerLibrary.download(
+                book, destinationDirectory: folderAccess.url
+            ) { fraction in
+                self.serverDownloading[bookID] = fraction
+            }
+            await library.rescan()
+            guard let record = library.books.first(where: {
+                ($0.relativePath as NSString).lastPathComponent == savedName
+            }) else {
+                serverDownloadFailures[book.id] = "文件已下到本机文件夹，但重新扫描后没找到它（\(savedName)）"
+                return
+            }
+            await openLocal(record, allowAutomaticPreprocessing: false)
+        } catch {
+            serverDownloadFailures[book.id] = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+        }
+    }
+
     @ViewBuilder
     private func remoteBooksSection(_ sourceBooks: [ReaderRemoteBook]) -> some View {
         let books = filteredRemote(sourceBooks)
@@ -293,8 +408,7 @@ struct ReaderLocalLibraryView: View {
 
     @ViewBuilder
     private func localBookRow(_ book: ReaderLocalBookRecord) -> some View {
-        let remoteBook = remote.remoteBook(for: book)
-        let syncState = remote.syncState(for: book)
+        let remoteBook = remote.remoteBook(for: book)   // 仅供 Pi OCR 预处理面板
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 10) {
                 bookIcon(kind: book.format.rawValue)
@@ -306,7 +420,7 @@ struct ReaderLocalLibraryView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
-                    Text("\(book.format.title) · \(byteCount(book.byteCount)) · \(syncState.title)")
+                    Text("\(book.format.title) · \(byteCount(book.byteCount)) · \(serverStateTitle(book))")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                     if backupGate.uploading.contains(book.id) {
@@ -351,28 +465,7 @@ struct ReaderLocalLibraryView: View {
 
             HStack {
                 Spacer()
-                if let remoteBook {
-                    if syncState == .localNewer || syncState == .conflict {
-                        Button("上传此版本") {
-                            Task { await upload(book) }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(remote.activeBookID != nil)
-                    }
-                    if syncState == .piNewer || syncState == .conflict {
-                        Button("下载 Pi 新版") {
-                            Task { await download(remoteBook) }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(remote.activeBookID != nil)
-                    }
-                } else {
-                    Button("上传到 Pi") {
-                        Task { await upload(book) }
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(remote.activeBookID != nil)
-                }
+                // 传服务器不再是一个按钮:「打开」自动完成(备份闸),状态写在上一行。
                 Button("打开") {
                     Task { await openLocal(book) }
                 }
@@ -1388,6 +1481,9 @@ struct ReaderLocalLibraryView: View {
 
     @MainActor
     private func refreshRemote() async {
+        // 书库远端=Windows 服务器(2026-09-02 Pi 退出这条线路)。Pi 仍刷一次,但只为
+        // 预处理(OCR)面板提供 Pi 侧书记录,书库页本身不再展示 Pi 书。
+        await backupGate.refresh()
         let cookies = await reader.remoteLibraryCookies()
         await remote.refresh(cookies: cookies, localLibrary: library)
         ReaderLibraryRefreshClock.lastAutomaticRemoteRefreshAt = Date()
@@ -1502,23 +1598,8 @@ struct ReaderLocalLibraryView: View {
     /// 那等于规矩不存在。所以这里如实把两者分开,并把原因显示出来。
     private func passesBackupGate(_ book: ReaderLocalBookRecord) async -> Bool {
         let gate = ReaderBookBackupGate.shared
-        // 「本机 + Pi」的书(2026-09-02 用户:"本机和服务器里都有为何还要上传"):
-        // Pi 书库里已有同一份内容,不变量"任何能用的书两边都有"已经成立 —— 放行。
-        // 但 Windows 才是现行服务器,Pi 只是备份/历史表面:这里顺手在后台把它传到
-        // Windows(单飞、不阻塞开书),让两个"服务器"逐步收敛,而不是每次都逼用户等
-        // 600MB 传完。
-        if remote.syncState(for: book) == .synced {
-            if gate.serverHashes == nil { await gate.refresh() }
-            if case .notBacked = gate.status(of: book),
-               let access = try? library.makeOpenAccess(for: book) {
-                let url = access.url
-                Task { @MainActor in
-                    _ = access   // 持住 security-scoped 访问直到传完
-                    await gate.ensureBacked(book, fileURL: url)
-                }
-            }
-            return true
-        }
+        // (同日早些时候的「Pi 已同步则放行」已撤:用户拍板 Pi 退出书库线路,Pi 上的书
+        //  已全部搬到 Windows,对照 Windows 哈希表即可,不再看 Pi。)
         if gate.serverHashes == nil { await gate.refresh() }
         switch gate.status(of: book) {
         case .backed:

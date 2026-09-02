@@ -91,6 +91,85 @@ enum ReaderServerLibrary {
         return payload.books
     }
 
+    /// 从服务器取回一本书（2026-09-02：Pi 退出书库线路，设备只从这里下书）。
+    /// 流式写到 `destinationDirectory/<name>`；同名但字节数不同 → 加「 (服务器)」后缀，
+    /// 绝不覆盖本机已有文件。返回最终文件名。
+    static func download(
+        _ book: Book,
+        destinationDirectory: URL,
+        progress: (@MainActor (Double) -> Void)? = nil
+    ) async throws -> String {
+        guard var components = URLComponents(string: ReaderServer.origin + "/reader-library/download") else {
+            throw Failure.malformed
+        }
+        components.queryItems = [URLQueryItem(name: "name", value: book.name)]
+        guard let url = components.url else { throw Failure.malformed }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(ReaderServer.origin, forHTTPHeaderField: "Origin")
+        request.timeoutInterval = 3600
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (bytes, response) = try await URLSession.shared.bytes(for: request)
+        } catch {
+            throw Failure.serverUnreachable(error.localizedDescription)
+        }
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 404 || http.statusCode == 405 {
+                // 404 可能是「端点没有」也可能是「这本没有」——桥用 JSON code 区分，
+                // 但两种对用户的下一步都是"服务器上没有这本可下"。
+                throw Failure.rejected(code: "HTTP_\(http.statusCode)", message: "服务器上没有这本，或它还没有下载能力")
+            }
+            if http.statusCode != 200 {
+                throw Failure.rejected(code: "HTTP_\(http.statusCode)", message: "服务器拒绝了这次下载")
+            }
+        }
+        var finalName = book.name
+        var target = destinationDirectory.appendingPathComponent(finalName)
+        if FileManager.default.fileExists(atPath: target.path) {
+            let existing = (try? FileManager.default.attributesOfItem(atPath: target.path)[.size] as? Int) ?? -1
+            if existing == book.bytes { return finalName }   // 已经有同一本，直接用
+            let stem = (book.name as NSString).deletingPathExtension
+            let ext = (book.name as NSString).pathExtension
+            finalName = stem + " (服务器)" + (ext.isEmpty ? "" : "." + ext)
+            target = destinationDirectory.appendingPathComponent(finalName)
+        }
+        let temporary = destinationDirectory.appendingPathComponent(finalName + ".part-download")
+        FileManager.default.createFile(atPath: temporary.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: temporary)
+        var written = 0
+        var buffer = Data()
+        buffer.reserveCapacity(1 << 20)
+        let total = max(book.bytes, 1)
+        do {
+            for try await byte in bytes {
+                buffer.append(byte)
+                if buffer.count >= (1 << 20) {
+                    try handle.write(contentsOf: buffer)
+                    written += buffer.count
+                    buffer.removeAll(keepingCapacity: true)
+                    let fraction = min(1, Double(written) / Double(total))
+                    if let progress { await progress(fraction) }
+                }
+            }
+            if !buffer.isEmpty { try handle.write(contentsOf: buffer); written += buffer.count }
+            try handle.close()
+        } catch {
+            try? handle.close()
+            try? FileManager.default.removeItem(at: temporary)
+            throw Failure.serverUnreachable(error.localizedDescription)
+        }
+        if written != book.bytes {
+            try? FileManager.default.removeItem(at: temporary)
+            throw Failure.rejected(code: "BW_LIBRARY_SHORT_READ",
+                                   message: "下载到 \(written) 字节，服务器说应有 \(book.bytes) 字节")
+        }
+        try FileManager.default.moveItem(at: temporary, to: target)
+        if let progress { await progress(1) }
+        return finalName
+    }
+
     /// 传一本书上去（流式 + 字节进度）。
     ///
     /// - Returns: 服务器上的书名。⚠ **重传同一本不是失败** —— 换设备、

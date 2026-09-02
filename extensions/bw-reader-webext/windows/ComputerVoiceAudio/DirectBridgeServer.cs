@@ -651,6 +651,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-library/list",
             new[] { "POST", "OPTIONS" },
             context => HandleLibraryListAsync(context, serviceToken));
+        // 取书（2026-09-02）：Pi 退出书库线路，设备从这里下书。GET ?name=<纯文件名>。
+        app.MapMethods(
+            "/reader-library/download",
+            new[] { "GET", "OPTIONS" },
+            context => HandleLibraryDownloadAsync(context, serviceToken));
         // 跨设备同步枢纽（用户 2026-09-01：「利用 Windows 对不同前端内容
         // 进行同步」）：设备合书时把本书 user-state 整包推来，开书时来拉
         // 全局最新的一份 —— 图片资产早已在桥留底，包一到别的设备图自动
@@ -759,6 +764,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             // 卡图欠账补抓（2026-09-01）：撞限流失败的留底在源站解禁后
             // 自动补齐,不再依赖"用户恰好重新点开那张卡"。
             ReaderCardAssetStore.StartRetrySweep(serviceToken);
+        ReaderLibraryStore.WarmHashCache();   // 书库指纹缓存预热(2026-09-02):首次 list 不再全量算哈希
             shutdownRequestLifetime =
                 CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken);
@@ -1966,6 +1972,23 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         await ReaderLibraryStore
             .WriteOutcomeAsync(context, outcome, serviceCancellationToken)
             .ConfigureAwait(false);
+    }
+
+    private async Task HandleLibraryDownloadAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "library-download")) return;
+        if (!HttpMethods.IsGet(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        string? name = context.Request.Query["name"].FirstOrDefault();
+        string code = await ReaderLibraryStore
+            .WriteDownloadAsync(context, name, serviceCancellationToken)
+            .ConfigureAwait(false);
+        AppendOutputPickupLog("library-download\t" + (name ?? string.Empty) + "\t" + code);
     }
 
     private async Task HandleLibraryListAsync(
