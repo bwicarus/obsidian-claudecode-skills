@@ -10909,9 +10909,23 @@ def _card_bootstrap_item(aid, entry):
             entry[key],
             filter_meta=True,
         )
+    cards = _card_bootstrap_clone_json(entry["data"])
+    # 旧登记表里每张卡同时带 front/back/cloze 四个键(不用的那个是 ''/None),而 App 卡仓
+    # (card-repository.js normalizeCard)是严格形状:basic 不得携带 cloze/text、cloze 不得携带
+    # front/back —— 2026-09-02 整批同步被拒 BW_CARD_REPOSITORY_CARD_SHAPE。导出时剔掉与
+    # type 无关的**空**键;非空的保留(那是真冲突,该由 App 如实报错,不在这里猜)。
+    if isinstance(cards, list):
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            kind = str(card.get("type") or "").strip().lower()
+            drop = ("cloze", "text") if kind == "basic" else (("front", "back") if kind == "cloze" else ())
+            for key in drop:
+                if key in card and (card[key] is None or (isinstance(card[key], str) and not card[key].strip())):
+                    del card[key]
     return {
         "id": aid,
-        "cards": _card_bootstrap_clone_json(entry["data"]),
+        "cards": cards,
         "states": _card_bootstrap_clone_json(entry.get("states", {})),
         "source_ref": source_ref,
         "req": requirement,
