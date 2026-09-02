@@ -37,3 +37,9 @@
   被改成 `/C:/Users/…/git/2.54.0/reader-library/download`，serve 表里多出一条永远命不中的映射
   （09-02 实锤）。给这类命令加 `MSYS_NO_PATHCONV=1`，但同一条命令里就别再用 `/dev/null`
   （它同样不再被转换，curl 会写失败、exit 23）。改完 `tailscale serve status` 看一眼路径原文。
+- **装桥会把 ReaderPC 一起带走，而且它留下的是「用户主动退出」标记**（09-02 晚实锤，桥停了
+  25 分钟没人复活）：桥安装器 `stop_direct_service` 杀掉 Direct 进程，ReaderPC 作为属主随之走
+  `request_exit` 退出并写 `readerpc-user-exit.json`，看门狗此后每 5 分钟看到标记就"不复活"。
+  恢复：删标记 → `wscript.exe //B start-readerpc.vbs logon`（该脚本见到已有进程就退出，要换版本得直接
+  起新版 exe，它会接管旧实例）。根治待做：安装器装完应自己拉起 ReaderPC，或 ReaderPC 把"属下服务被外部
+  停掉"与"用户点了退出"分开对待。

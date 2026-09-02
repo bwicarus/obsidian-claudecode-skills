@@ -922,7 +922,8 @@ class QualityPipeline:
             )
             # vision 分支以前直接跳到下面标 tokenized=True,却从没真跑过分词 ——
             # 服务器那趟看见这个标记就 continue,于是 PC 出的 vision 页永远没分词。
-            chars = core._tokenize_chars(chars)
+            # 2026-09-02:分词以块为边界,必须把版面(表格格子)一起交给分词器。
+            chars = core._tokenize_chars(chars, layout)
         else:
             vision_chars = None
             try:
@@ -944,7 +945,7 @@ class QualityPipeline:
                 vision_chars=vision_chars,
                 include_layout=True,
             )
-            chars = core._tokenize_chars(chars)
+            chars = core._tokenize_chars(chars, layout)   # 以块为边界(2026-09-02)
         sidecar = {
             "schema": PAGE_SCHEMA,
             "bookId": claim.book_id,
@@ -960,6 +961,7 @@ class QualityPipeline:
             "furigana": [],
             "textCharCount": len("".join(text.split())),
             "tokenized": True,
+            "tokenizeSchema": int(getattr(core, "_TOKENIZE_SCHEMA", 1)),
             "generatedAtEpochMs": _now_ms(),
         }
         if effective_dpi is not None:
