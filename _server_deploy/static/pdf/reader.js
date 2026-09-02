@@ -13284,26 +13284,41 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       if (bestRow) { best = bestRow; bd = brd * brd; }
       if (!best) return null;
       let L = best.left, T = best.top, R2 = best.left + best.width, B = best.top + best.height;
-      // 词区间的**下标**：手动把卡钉到词上时要的正是它。
-      // 这里本来只吐屏幕矩形 —— 矩形能画反馈，但存不成锚（换一份文字层坐标
-      // 就全变）。下标 + 文本才是能持久的锚，跟 page-chars 那套同一口径。
-      let from = best._oi, to = best._oi;
-      if (best.w !== -1) for (const cb of cbs) {
-        if (cb.w !== best.w || cb.sp) continue;
+      // 词=**精确字符集**(2026-09-02):与选中/点击/下划线同一套 —— 登记词组优先
+      // (_phraseExpandFromChar,按格分流的源序匹配),否则同 w 且**同区域**的字符。
+      // 之前是取同 w 的 _oi 最小/最大再把闭区间内所有字符当词:OCR 表格页源序按行
+      // 流过各列,区间里夹着左列(トートマ|味がある。|ン 实锤),锚框把左列也圈进去。
+      const bestIdx = cbs.indexOf(best);
+      let seg = [];
+      let ph = null;
+      try { ph = (typeof _phraseExpandFromChar === 'function') ? _phraseExpandFromChar(cbs, bestIdx) : null; } catch (_) { ph = null; }
+      if (ph && ph.keep && ph.keep.size) {
+        ph.keep.forEach((i) => { const c0 = cbs[i]; if (c0 && !c0.sp && c0.c) seg.push(c0); });
+      } else {
+        const keyOf = (typeof _charRegionKeyOf === 'function') ? _charRegionKeyOf(cbs) : (() => null);
+        const bestKey = keyOf(bestIdx);
+        if (best.w !== -1) {
+          for (let i = 0; i < cbs.length; i++) {
+            const cb = cbs[i];
+            if (cb.w !== best.w || cb.sp || !cb.c) continue;
+            if (keyOf(i) !== bestKey) continue;
+            seg.push(cb);
+          }
+        }
+        if (!seg.length) seg.push(best);
+      }
+      let from = Infinity, to = -Infinity;
+      for (const cb of seg) {
         L = Math.min(L, cb.left); T = Math.min(T, cb.top);
         R2 = Math.max(R2, cb.left + cb.width); B = Math.max(B, cb.top + cb.height);
-        if (cb._oi < from) from = cb._oi;
-        if (cb._oi > to) to = cb._oi;
+        const oi = cb._oi | 0;
+        if (oi < from) from = oi;
+        if (oi > to) to = oi;
       }
-      // ⚠ 按 **_oi（原始下标）** 取文本，不能顺着 cbs 拼：cbs 在 _mapCharBoxes
+      // ⚠ 文本按 **_oi（原始下标）** 顺序拼，不能顺着 cbs 拼：cbs 在 _mapCharBoxes
       //   里被按 baseline 重排过，顺着拼会串行。
-      const seg = [];
-      for (let i = 0; i < cbs.length; i++) {
-        const c2 = cbs[i];
-        if (!c2 || c2.sp || !c2.c) continue;
-        if (c2._oi >= from && c2._oi <= to) seg.push(c2);
-      }
       seg.sort((a, b) => (a._oi | 0) - (b._oi | 0));
+      const ois = seg.map((c5) => c5._oi | 0);
       let txt = '';
       for (const c3 of seg) txt += c3.c;
       // 跨行词按行分段（2026-09-01 用户图4:锁定预览一个 union 大框把两行
@@ -13338,7 +13353,7 @@ if (window.PdfAdapter && PdfAdapter.bind) {
           width: (r.x1 - r.x0) * Klay, height: (r.y1 - r.y0) * Klay
         })),
         dist: Math.sqrt(bd) * dispK,
-        from: from, to: to, text: txt,
+        from: from, to: to, text: txt, ois: ois,
         page: parseInt(pw.dataset.pageNum, 10) || 0
       };
     },
@@ -14496,6 +14511,26 @@ window._lbClick = _lbClick;
       ? (want.block | 0) : 0;
     var ord = _byOi(boxes);
 
+    // ⓪ 精确字符集(2026-09-02):bind.ois 有就按集合取框 —— 区间 [from,to] 在 OCR
+    //   表格页会夹进别列字符(トートマ|味がある。|ン)。文本对得上才算 exact。
+    if (Array.isArray(want.ois) && want.ois.length) {
+      var oiSet = Object.create(null);
+      for (var q0 = 0; q0 < want.ois.length; q0++) oiSet[want.ois[q0] | 0] = true;
+      var gotSet = '', hitSet = [], loSet = Infinity, hiSet = -Infinity;
+      for (var k0 = 0; k0 < ord.length; k0++) {
+        var oi0 = ord[k0]._oi | 0;
+        if (!oiSet[oi0]) continue;
+        hitSet.push(ord[k0]);
+        if (!ord[k0].sp && ord[k0].c) gotSet += ord[k0].c;
+        if (oi0 < loSet) loSet = oi0;
+        if (oi0 > hiSet) hiSet = oi0;
+      }
+      if (hitSet.length && (!text || _stripWs(gotSet) === text)) {
+        return { lo: loSet, hi: hiSet, boxes: hitSet, how: 'exact-set',
+                 ois: hitSet.map(function (b0) { return b0._oi | 0; }) };
+      }
+    }
+
     // ① 序号是 _oi 语义：先按 _oi 取出这一段，比对文字
     if (hasRange) {
       var got = '', hit = [];
@@ -14561,6 +14596,39 @@ window._lbClick = _lbClick;
       if (inBlock) { inBlock.how = 'by-block'; return inBlock; }
     }
     var anywhere = search(0);
+    if (!anywhere && typeof _charRegionKeyOf === 'function') {
+      // 全页源序流找不到(跨行词组两半之间夹着别列字符)→ 按区域(表格=格)分流再找,
+      // 与选中/点击/下划线的区域划分同一口径。
+      try {
+        var keyOf = _charRegionKeyOf(boxes);
+        var streams = Object.create(null);
+        for (var s0 = 0; s0 < boxes.length; s0++) {
+          var kk = keyOf(s0); if (kk == null) continue;
+          (streams[kk] || (streams[kk] = [])).push(boxes[s0]);
+        }
+        var bestR = null, bestRD = Infinity;
+        Object.keys(streams).forEach(function (kk2) {
+          var ordR = _byOi(streams[kk2]), joinedR = '', indexR = [];
+          for (var r0 = 0; r0 < ordR.length; r0++) {
+            if (!ordR[r0].c || ordR[r0].sp) continue;
+            joinedR += ordR[r0].c; indexR.push(r0);
+          }
+          var atR = joinedR.indexOf(text);
+          while (atR >= 0) {
+            var distR = hasRange ? Math.abs((ordR[indexR[atR]]._oi | 0) - from) : 0;
+            if (distR < bestRD) {
+              bestRD = distR;
+              var aR = indexR[atR], bR = indexR[Math.min(atR + text.length - 1, indexR.length - 1)];
+              var pick = ordR.slice(aR, bR + 1);
+              bestR = { lo: ordR[aR]._oi | 0, hi: ordR[bR]._oi | 0, boxes: pick,
+                        ois: pick.map(function (b1) { return b1._oi | 0; }), how: 'by-text-region' };
+            }
+            atR = joinedR.indexOf(text, atR + 1);
+          }
+        });
+        if (bestR) return bestR;
+      } catch (e) {}
+    }
     if (!anywhere) return null;
     // ⚠ 如实说出走的哪条。带了块号却退回全页 = 块对不上了，必须看得见。
     anywhere.how = wantBlock ? 'by-text-block-missed' : 'by-text';
@@ -15061,13 +15129,28 @@ window._lbClick = _lbClick;
         }
       }
       if (lo === range.lo && hi === range.hi) return range;
-      var expanded = [];
+      // 扩展也按**集合**:原命中 ∪ 落在该词下划线 rects 内的字符,不再按 [lo,hi] 区间
+      // 回填(区间会把别列字符带回来)。
+      var expanded = [], seen = Object.create(null);
       var ord = _byOi(boxes);
       for (var k = 0; k < ord.length; k++) {
-        var oi2 = ord[k]._oi | 0;
-        if (oi2 >= lo && oi2 <= hi) expanded.push(ord[k]);
+        var b2 = ord[k];
+        if (!b2 || b2._x0 === undefined) continue;
+        var oi2 = b2._oi | 0;
+        var inOrig = false;
+        for (var q1 = 0; q1 < range.boxes.length && !inOrig; q1++) inOrig = (range.boxes[q1] === b2);
+        var inMark = false;
+        if (!inOrig) {
+          var bx2 = (b2._x0 + b2._x1) / 2, by2 = (b2._y0 + b2._y1) / 2;
+          for (var r2 = 0; r2 < (mark.rects || []).length && !inMark; r2++) {
+            var rr2 = mark.rects[r2];
+            inMark = bx2 >= rr2[0] && bx2 <= rr2[2] && by2 >= rr2[1] && by2 <= rr2[3];
+          }
+        }
+        if ((inOrig || inMark) && !seen[oi2]) { seen[oi2] = true; expanded.push(b2); }
       }
       return { lo: lo, hi: hi, boxes: expanded,
+               ois: expanded.map(function (b3) { return b3._oi | 0; }),
                how: (range.how || 'text') + '+vocab' };
     } catch (e) { return range; }
   }
@@ -15090,6 +15173,7 @@ window._lbClick = _lbClick;
     var range = _resolveRange(boxes, {
       from: Number.isFinite(_bFrom) ? _bFrom : undefined,
       to: Number.isFinite(_bTo) ? _bTo : undefined,
+      ois: Array.isArray(bind.ois) ? bind.ois : undefined,
       block: parseInt(bind.block, 10) || 0,
       text: bind.text || ''
     });
@@ -15188,6 +15272,8 @@ window._lbClick = _lbClick;
       }
       bindOut.from = g.range.lo;
       bindOut.to = g.range.hi;
+      // 解析出的精确字符集一并写回:下次解析直接按集合取,不再依赖区间/文本。
+      if (Array.isArray(g.range.ois) && g.range.ois.length) bindOut.ois = g.range.ois.slice(0, 512);
     }
     return Promise.resolve(RC.stickynote.persistBoundCard(bindOut, normalized, placement))
       .then(function (result) {

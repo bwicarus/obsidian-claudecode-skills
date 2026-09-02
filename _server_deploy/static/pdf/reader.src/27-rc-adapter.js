@@ -151,26 +151,41 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       if (bestRow) { best = bestRow; bd = brd * brd; }
       if (!best) return null;
       let L = best.left, T = best.top, R2 = best.left + best.width, B = best.top + best.height;
-      // 词区间的**下标**：手动把卡钉到词上时要的正是它。
-      // 这里本来只吐屏幕矩形 —— 矩形能画反馈，但存不成锚（换一份文字层坐标
-      // 就全变）。下标 + 文本才是能持久的锚，跟 page-chars 那套同一口径。
-      let from = best._oi, to = best._oi;
-      if (best.w !== -1) for (const cb of cbs) {
-        if (cb.w !== best.w || cb.sp) continue;
+      // 词=**精确字符集**(2026-09-02):与选中/点击/下划线同一套 —— 登记词组优先
+      // (_phraseExpandFromChar,按格分流的源序匹配),否则同 w 且**同区域**的字符。
+      // 之前是取同 w 的 _oi 最小/最大再把闭区间内所有字符当词:OCR 表格页源序按行
+      // 流过各列,区间里夹着左列(トートマ|味がある。|ン 实锤),锚框把左列也圈进去。
+      const bestIdx = cbs.indexOf(best);
+      let seg = [];
+      let ph = null;
+      try { ph = (typeof _phraseExpandFromChar === 'function') ? _phraseExpandFromChar(cbs, bestIdx) : null; } catch (_) { ph = null; }
+      if (ph && ph.keep && ph.keep.size) {
+        ph.keep.forEach((i) => { const c0 = cbs[i]; if (c0 && !c0.sp && c0.c) seg.push(c0); });
+      } else {
+        const keyOf = (typeof _charRegionKeyOf === 'function') ? _charRegionKeyOf(cbs) : (() => null);
+        const bestKey = keyOf(bestIdx);
+        if (best.w !== -1) {
+          for (let i = 0; i < cbs.length; i++) {
+            const cb = cbs[i];
+            if (cb.w !== best.w || cb.sp || !cb.c) continue;
+            if (keyOf(i) !== bestKey) continue;
+            seg.push(cb);
+          }
+        }
+        if (!seg.length) seg.push(best);
+      }
+      let from = Infinity, to = -Infinity;
+      for (const cb of seg) {
         L = Math.min(L, cb.left); T = Math.min(T, cb.top);
         R2 = Math.max(R2, cb.left + cb.width); B = Math.max(B, cb.top + cb.height);
-        if (cb._oi < from) from = cb._oi;
-        if (cb._oi > to) to = cb._oi;
+        const oi = cb._oi | 0;
+        if (oi < from) from = oi;
+        if (oi > to) to = oi;
       }
-      // ⚠ 按 **_oi（原始下标）** 取文本，不能顺着 cbs 拼：cbs 在 _mapCharBoxes
+      // ⚠ 文本按 **_oi（原始下标）** 顺序拼，不能顺着 cbs 拼：cbs 在 _mapCharBoxes
       //   里被按 baseline 重排过，顺着拼会串行。
-      const seg = [];
-      for (let i = 0; i < cbs.length; i++) {
-        const c2 = cbs[i];
-        if (!c2 || c2.sp || !c2.c) continue;
-        if (c2._oi >= from && c2._oi <= to) seg.push(c2);
-      }
       seg.sort((a, b) => (a._oi | 0) - (b._oi | 0));
+      const ois = seg.map((c5) => c5._oi | 0);
       let txt = '';
       for (const c3 of seg) txt += c3.c;
       // 跨行词按行分段（2026-09-01 用户图4:锁定预览一个 union 大框把两行
@@ -205,7 +220,7 @@ if (window.PdfAdapter && PdfAdapter.bind) {
           width: (r.x1 - r.x0) * Klay, height: (r.y1 - r.y0) * Klay
         })),
         dist: Math.sqrt(bd) * dispK,
-        from: from, to: to, text: txt,
+        from: from, to: to, text: txt, ois: ois,
         page: parseInt(pw.dataset.pageNum, 10) || 0
       };
     },

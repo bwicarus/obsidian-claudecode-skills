@@ -3237,10 +3237,17 @@ if (window.__bwPwaProviderOnly) return;
     var page = Number(word.page), from = Number(word.from), to = Number(word.to);
     if (!Number.isInteger(page) || !Number.isInteger(from) || !Number.isInteger(to) ||
         page < 1 || from < 0 || to < from) return null;
-    return {
+    var bind = {
       kind: 'page-chars', page: page, from: from, to: to,
       text: String(word.text).slice(0, 200)
     };
+    // 精确字符集(2026-09-02):区间 [from,to] 在 OCR 表格页会夹进别列字符,解析时
+    // 优先按这份集合取框;没有(旧卡/AI 直绑)才退回区间+文本。
+    if (Array.isArray(word.ois) && word.ois.length && word.ois.length <= 512) {
+      bind.ois = word.ois.filter(function (v) { return Number.isInteger(v) && v >= 0; });
+      if (!bind.ois.length) delete bind.ois;
+    }
+    return bind;
   }
   function createCardAt(clientX, clientY, cards, gid) {
     if (!O || !O.anchorFromPoint || !cards || !cards.length) return false;

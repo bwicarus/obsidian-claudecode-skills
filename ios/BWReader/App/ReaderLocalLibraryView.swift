@@ -1502,6 +1502,23 @@ struct ReaderLocalLibraryView: View {
     /// 那等于规矩不存在。所以这里如实把两者分开,并把原因显示出来。
     private func passesBackupGate(_ book: ReaderLocalBookRecord) async -> Bool {
         let gate = ReaderBookBackupGate.shared
+        // 「本机 + Pi」的书(2026-09-02 用户:"本机和服务器里都有为何还要上传"):
+        // Pi 书库里已有同一份内容,不变量"任何能用的书两边都有"已经成立 —— 放行。
+        // 但 Windows 才是现行服务器,Pi 只是备份/历史表面:这里顺手在后台把它传到
+        // Windows(单飞、不阻塞开书),让两个"服务器"逐步收敛,而不是每次都逼用户等
+        // 600MB 传完。
+        if remote.syncState(for: book) == .synced {
+            if gate.serverHashes == nil { await gate.refresh() }
+            if case .notBacked = gate.status(of: book),
+               let access = try? library.makeOpenAccess(for: book) {
+                let url = access.url
+                Task { @MainActor in
+                    _ = access   // 持住 security-scoped 访问直到传完
+                    await gate.ensureBacked(book, fileURL: url)
+                }
+            }
+            return true
+        }
         if gate.serverHashes == nil { await gate.refresh() }
         switch gate.status(of: book) {
         case .backed:
