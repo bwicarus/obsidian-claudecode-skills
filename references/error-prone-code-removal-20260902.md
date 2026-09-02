@@ -33,3 +33,7 @@
   一次性的真阻塞。
 - **同一资源的长操作要单飞**：闸/按钮再次触发时等已有的那次，不要再开一路。桥日志里
   同一秒三路 `BW_LIBRARY_WRITE_FAILED`，来源之一就是连点「打开」并发上传同一本书。
+- **Git Bash 会把以 `/` 开头的参数改写成 Windows 路径**：`tailscale serve --set-path /reader-library/download …`
+  被改成 `/C:/Users/…/git/2.54.0/reader-library/download`，serve 表里多出一条永远命不中的映射
+  （09-02 实锤）。给这类命令加 `MSYS_NO_PATHCONV=1`，但同一条命令里就别再用 `/dev/null`
+  （它同样不再被转换，curl 会写失败、exit 23）。改完 `tailscale serve status` 看一眼路径原文。
