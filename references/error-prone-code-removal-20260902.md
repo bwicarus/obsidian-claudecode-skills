@@ -50,3 +50,21 @@
 - **按命令行关键字杀进程前先想"我自己的 shell 命令行里有没有这个词"**（09-02 第二次实锤）：重启 Flask 时按
   `app.py` 匹配，把正在等 CI 的后台 bash（其提交信息里含 "python app.py"）一起杀了。匹配要落到**进程名 +
   精确脚本路径**（如 `local_supervisor.pyw`），不要用会出现在自己命令行/提交信息里的泛词。
+
+## 2026-09-03 追加两条
+
+### 只在罕见路径上才会跑到的校验层，等于没测过
+换服务器主机 → App 同步检查点归零 → 服务器合法地要求 resetRequired → App 走
+`pushLocalSnapshot`。这条路径 Pi 时代**一次都没触发过**，所以 Swift 桥白名单把
+`cursor` 当必填的错误潜伏了整个开发期，直到迁 Windows 才以 `BW_NATIVE_SYNC_PAYLOAD`
+整批拒收的形态露头。两个教训：
+- 白名单/校验层要对着**所有生产者**写（这里 `snapshotChange` 合成的变更天生没有 cursor，
+  relay 的 `_normalize_change` 也从不读它），而不是对着最常见的那一种载荷形状写。
+- 拒收必须带出"哪条、哪个键"（`payloadRejectReason`）。这次前四轮全靠猜，
+  是因为桥只回了一个码，`ReaderPiSyncCoordinator` 的 JS 片段又把 message 丢了。
+
+### 又一次把自己杀了（第三次）
+`Get-CimInstance Win32_Process | ? CommandLine -match 'handoff_check|reader_contract'` 想清残留
+node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 bash 一起杀（exit 255）。
+本文件上面已写过两次同型事故。**硬规则**：杀进程只按 `Name -eq 'node.exe'` 之类的
+精确进程名 + 命令行里的**精确脚本路径**两条同时成立，且先 `Where-Object ProcessId -ne $PID`。
