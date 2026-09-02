@@ -688,7 +688,10 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
                 let collection = (change["collection"] as? String) ?? "?"
                 let keys = change.keys.sorted().joined(separator: ",")
                 var detail = "change#\(index) collection=\(collection) keys=\(keys)"
-                if !isSafeInteger(change["cursor"], minimum: 1) { detail += " cursor<1" }
+                if !requiredChangeKeys.isSubset(of: change.keys) || !Set(change.keys).isSubset(of: allowedChangeKeys) {
+                    detail += " 键集合不合规"
+                }
+                if change["cursor"] != nil, !isSafeInteger(change["cursor"], minimum: 1) { detail += " cursor<1" }
                 if let mutationID = change["mutationId"] as? String, !safeName(mutationID) { detail += " mutationId 非法" }
                 if let operation = change["operation"] as? String, !["put", "remove"].contains(operation) { detail += " operation=\(operation)" }
                 if !allowedCollections.contains(collection) { detail += " collection 不在白名单" }
@@ -717,11 +720,16 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
         "user-settings", "vocabulary-state",
     ]
 
+    /// 变更键集合。`cursor` 可选：完整对账（服务器 resetRequired 后）推送的 snapshot-overlay 变更
+    /// 由 sync-coordinator.snapshotChange 合成，天生不带 cursor（relay 的 _normalize_change 也不读它）。
+    /// 2026-09-03 换服务器主机后首次走到这条路径，这里曾把 cursor 当必填而整批拒收（BW_NATIVE_SYNC_PAYLOAD）。
+    private static let requiredChangeKeys: Set<String> = ["mutationId", "operation", "collection", "record"]
+    private static let allowedChangeKeys: Set<String> = requiredChangeKeys.union(["cursor"])
+
     private static func isAllowedChange(_ change: [String: Any]) -> Bool {
-        guard Set(change.keys) == Set([
-            "cursor", "mutationId", "operation", "collection", "record",
-        ]),
-        isSafeInteger(change["cursor"], minimum: 1),
+        let keys = Set(change.keys)
+        guard requiredChangeKeys.isSubset(of: keys), keys.isSubset(of: allowedChangeKeys),
+        change["cursor"] == nil || isSafeInteger(change["cursor"], minimum: 1),
         let mutationID = change["mutationId"] as? String,
         safeName(mutationID),
         let operation = change["operation"] as? String,
@@ -772,7 +780,8 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
               let deleted = parent["deleted"] as? Bool else { return false }
         let expected = deleted ? Set(["deleted"]) : Set(["deleted", "value"])
         return Set(parent.keys) == expected
-            && isBoundedJSONObject(parent, maximumBytes: 256 * 1_024)
+            // 与 data-store.js / reader_sync_relay.py 的 MAX_CAUSAL_PARENT_BYTES(512KB)对齐；此前 256KB 偏严
+            && isBoundedJSONObject(parent, maximumBytes: 512 * 1_024)
     }
 
     private static func isSafeInteger(

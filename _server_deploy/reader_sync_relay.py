@@ -2233,7 +2233,7 @@ def exchange():
         try:
             # 体积/结果日志(2026-09-03):切到 Windows 后 App 报 BW_SYNC_RETRYABLE 而四个请求全 200,
             # 服务端看不见响应体积就无法判断是否撞上 App 侧 4MB 响应上限。
-            current_app.logger.info(
+            current_app.logger.warning(
                 "[sync-exchange] dir=%s dev=%s cursor=%s in=%d out=%d acked=%d conflicts=%d resp_bytes=%d",
                 direction, device_id[:12], cursor, len(raw_changes), len(payload.get("changes") or []),
                 len(payload.get("ackedMutationIds") or []), len(payload.get("conflicts") or []),

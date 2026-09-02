@@ -420,7 +420,7 @@ private extension ReaderWebViewModel {
                 conflictCount: 0,
                 errorCode,
                 // 真实原因(2026-09-03):syncNow 抛出时此前只带码,桥的"哪条 change 哪个字段"全丢
-                errorMessage: String(error && error.message || "").replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200),
+                errorMessage: String(error && error.message || "").replace(/[\\u0000-\\u001f\\u007f]/g, " ").slice(0, 200),
                 retryable: error && error.retryable === true
               });
             }
