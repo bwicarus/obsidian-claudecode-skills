@@ -69,6 +69,7 @@
           pw: _charSel.pw,
           sIdx: _charSel.startIdx,
           eIdx: _charSel.endIdx,
+          keep: _charSel.keep,
           color,
           kind: String(payload.kind || 'note'),
           sentence: String(payload.sentence || ''),

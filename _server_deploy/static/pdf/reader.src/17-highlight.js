@@ -164,11 +164,11 @@ function _pdfHlToAsst(h) {
 //
 // 2026-08-16 用户实测报告:「第一张图的蓝色选中范围和高亮这一段后实际黄色
 // 高亮的范围不同,右侧的对话也被高亮了」。
-function _charsRangeToRects(chars, sIdx, eIdx) {
-  return _charRangeToVisualRects(chars, sIdx, eIdx, 'point');
+function _charsRangeToRects(chars, sIdx, eIdx, keepSet) {
+  return _charRangeToVisualRects(chars, sIdx, eIdx, 'point', keepSet);
 }
 
-async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', body='', note='', id='', silent=false}) {
+async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', body='', note='', id='', silent=false, keep=null}) {
   if (!pw || !pw.__charBoxes) {
     if (silent) throw new Error('BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE');
     alert('请先在 PDF 上选中再标记'); return null;
@@ -178,13 +178,13 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
     if (silent) throw new Error('BW_READER_HIGHLIGHT_TEXT_RANGE_INVALID');
     return null;
   }
-  const rects = _charsRangeToRects(chars, sIdx, eIdx);
+  const rects = _charsRangeToRects(chars, sIdx, eIdx, keep);   // keep=选区精确字符集
   if (!rects.length) {
     if (silent) throw new Error('BW_READER_HIGHLIGHT_TEXT_RECTS_EMPTY');
     return null;
   }
   const pageNum = parseInt(pw.dataset.pageNum || '0');
-  const text = _charsRangeToText(chars, Math.min(sIdx,eIdx), Math.max(sIdx,eIdx));
+  const text = _charsRangeToText(chars, Math.min(sIdx,eIdx), Math.max(sIdx,eIdx), keep);
   const payload = {
     file: FILE_REL, page: pageNum, rects, color, text,
     kind, sentence, body, note,
@@ -722,7 +722,7 @@ async function onPickColor(col) {
   renderHlPicker();
   if (!_charSel) { _toast('已选定颜色（先选中文字）'); return; }
   await saveHighlight({
-    pw: _charSel.pw, sIdx: _charSel.startIdx, eIdx: _charSel.endIdx,
+    pw: _charSel.pw, sIdx: _charSel.startIdx, eIdx: _charSel.endIdx, keep: _charSel.keep,
     color: col, kind: 'note',
   });
   _charSel.pw.querySelector('.sel-overlay')?.replaceChildren();
@@ -746,7 +746,7 @@ async function markFromResult() {
   const cs = _resultContext.charSel;
   const useColor = _activeHlColor || _lastHlColor || (getHlColors()[0] || '#fff59d');
   const h = await saveHighlight({
-    pw: cs.pw, sIdx: cs.startIdx, eIdx: cs.endIdx,
+    pw: cs.pw, sIdx: cs.startIdx, eIdx: cs.endIdx, keep: cs.keep,
     color: useColor,
     kind: _resultContext.kind || 'note',
     sentence: _resultContext.sentence || '',

@@ -320,7 +320,11 @@ function _charRangeBlockFilter(chars, sIdx, eIdx) {
   //   外置辅助会 ReferenceError（2026-09-02 selection-highlight-line-split 实锤）。
   const base = _base(chars, sIdx, eIdx);
   const region = _region(chars, sIdx, eIdx);
-  return region ? (c) => base(c) && region(c) : base;
+  const filter = region ? (c) => base(c) && region(c) : base;
+  // 诊断出口(2026-09-02,iPad 无控制台):走了哪条路要看得见 —— cell=同格约束
+  // 生效;cross=有版面但两端不同格,只剩块过滤;none=这页没拿到版面。
+  filter.regionMode = (chars && chars.__layout) ? (region ? 'cell' : 'cross') : 'none';
+  return filter;
 
   function _base(chars, sIdx, eIdx) {
   if (chars[sIdx] && chars[eIdx]
@@ -356,11 +360,18 @@ function _charRangeBlockFilter(chars, sIdx, eIdx) {
   if (!byOi) {
     byOi = new Map();
     layout.regions.forEach((region, ri) => {
+      // 约束单位是**格**不是 region：表格单元格内每一视觉行是一个独立 region
+      // (快照按 cells[row][column].push(region) 组织),跨行词的两半分属两个
+      // region,按 region 判"同区"永远不成立 —— 595 实锤区域约束零生效。
+      // table-cell 按 tableId:row:column 归并;非表格 region 各自为一区。
+      const key = (region && region.kind === 'table-cell')
+        ? 't' + region.tableId + ':' + region.row + ':' + region.column
+        : 'r' + ri;
       const ranges = region && Array.isArray(region.ranges) ? region.ranges : [];
       ranges.forEach((range) => {
         if (!Array.isArray(range) || range.length < 2) return;
         const a = range[0] | 0, b = range[1] | 0;
-        for (let oi = Math.min(a, b); oi <= Math.max(a, b); oi++) byOi.set(oi, ri);
+        for (let oi = Math.min(a, b); oi <= Math.max(a, b); oi++) byOi.set(oi, key);
       });
     });
     chars.__regionByOi = byOi;
@@ -482,9 +493,13 @@ function _charRangeToVisualRects(chars, sIdx, eIdx, coordinateSpace, keepSet) {
 }
 
 // chars[s..e] 拼成文本（含 X gap 智能空格 + 跨行换行；跟 _selByCharRange 同逻辑）
-function _charsRangeToText(chars, sIdx, eIdx) {
+function _charsRangeToText(chars, sIdx, eIdx, keepSet) {
   if (sIdx < 0 || eIdx >= chars.length || sIdx > eIdx) return '';
-  const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
+  const _inBlkRaw = _charRangeBlockFilter(chars, sIdx, eIdx);
+  // keepSet=选区的精确字符集(_charSel.keep):有它就按集合取,不再重扫区间。
+  const _inBlk = (keepSet instanceof Set)
+    ? (c) => _inBlkRaw(c) && (!!c.sp || keepSet.has(chars.indexOf(c)))
+    : _inBlkRaw;
   let text = '', lastChar = null, _lastReal = null, _pendSp = false;
   const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
   for (let i = sIdx; i <= eIdx; i++) {
@@ -630,11 +645,13 @@ function _selByCharRange(pw, sIdx, eIdx, keepSet) {
   // TJ 间隔但无空格 char 的情况，如 '0 1 2 3 4' 在 PyMuPDF rawdict 里没空格 char）
   let text = '';
   let lastChar = null, _lastReal = null, _pendSp = false;
+  const _selectedIdx = [];   // 选区精确字符集(2026-09-02 清单第 3 项)
   const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
     if (_keep && !_keep.has(i) && !c.sp) continue;   // 程序性选中=精确集,别列夹带剔除
     if (!_inBlk(c)) continue;   // 跨块过滤：别块(题号/另一栏)字符不计入选中文本
+    if (!c.sp) _selectedIdx.push(i);   // 真正入选的字符 → _charSel.keep(唯一的选区事实)
     if (lastChar) {
       // 两边都是 CJK(日/中,无词间空格)→ 跨行/间隙都直接拼,不插换行或空格(公表する 跨行不再被拆「公 表する」)
       // cjkPair 按上一个**实字符**判(空白盒 c=' ' 永远判不进 CJK,
@@ -680,13 +697,16 @@ function _selByCharRange(pw, sIdx, eIdx, keepSet) {
       window.__lastSelSentence = (_sent && _norm(_sent) !== _norm(lastSelText)) ? _sent : '';
     }
   } catch (_) {}
-  _charSel = {pw, startIdx: sIdx, endIdx: eIdx, dragging: _charSel?.dragging || false};
+  // keep=这次选区真正入选的字符集合 —— 所有消费者(高亮 rects/文本/OCR bbox/
+  // AI 快照/扩展宿主)按它取,不再各自按 [起,止] 重扫区间。
+  _charSel = {pw, startIdx: sIdx, endIdx: eIdx, dragging: _charSel?.dragging || false,
+              keep: new Set(_selectedIdx)};
   try { window.__lastSelMeta = { page: (typeof _selPageNum === 'function' ? _selPageNum() : (typeof currentPage !== 'undefined' ? currentPage : 0)), t: Date.now() }; } catch (_) {}   // char 层选中也记 meta(页+时间);否则 __voiceContext 新鲜度校验(meta.page===curP && <10min)失败 → 助手拿到空选中
   // 高亮：横排按行、竖排按列合并；与保存后的高亮共用同一几何函数。
   const ov = pw.querySelector('.sel-overlay');
   if (ov) {
     ov.innerHTML = '';
-    for (const rect of _charRangeToVisualRects(chars, sIdx, eIdx, 'css', _keep)) {
+    for (const rect of _charRangeToVisualRects(chars, sIdx, eIdx, 'css', _charSel.keep)) {
       const div = document.createElement('div');
       div.className = 'hl';
       div.style.left = rect[0] + 'px';
@@ -704,6 +724,20 @@ function _selByCharRange(pw, sIdx, eIdx, keepSet) {
   toolbar.style.left = Math.max(8, pwRect.left - mainRect.left + mainEl.scrollLeft + chars[sIdx].left) + 'px';
   toolbar.style.top  = (pwRect.top - mainRect.top + mainEl.scrollTop + endChar.top + endChar.height + 6) + 'px';
   toolbar.classList.add('open');
+  // 选区诊断标记(2026-09-02):区域约束走了哪条路,截图即可读。
+  try {
+    let diag = toolbar.querySelector('.sel-diag');
+    if (!diag) {
+      diag = document.createElement('span');
+      diag.className = 'sel-diag';
+      diag.style.cssText = 'display:block;font-size:10px;opacity:.55;padding:0 8px 2px';
+      toolbar.appendChild(diag);
+    }
+    const mode = _inBlk && _inBlk.regionMode;
+    diag.textContent = mode === 'cell' ? '区域：同格约束 ✓'
+      : mode === 'cross' ? '区域：跨格（只按块过滤）'
+      : '区域：本页无版面数据';
+  } catch (_) {}
   // 防溢出屏：选区靠右/靠下时工具栏(max-width 480)会跑出可见区被裁 → 夹回 #main 可见区
   _clampToolbarIntoView(mainEl, pwRect.top - mainRect.top + mainEl.scrollTop + chars[sIdx].top);
 }

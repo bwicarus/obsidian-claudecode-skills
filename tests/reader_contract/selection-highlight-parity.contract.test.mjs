@@ -53,7 +53,9 @@ test("每条从索引区间还原字符的路径都调共享块过滤，并且�
 
 test("保存高亮委托给实时选区的同一横排/竖排几何投影", () => {
   const body = fnBody("_charsRangeToRects");
-  assert.match(body, /return _charRangeToVisualRects\(chars, sIdx, eIdx, 'point'\)/);
+  // 2026-09-02 选区改字符集合(_charSel.keep)后,保存高亮把同一份集合透传给同一个
+  // 投影函数 —— 仍是"同一投影",而且比只传区间更贴近实时选区。
+  assert.match(body, /return _charRangeToVisualRects\(chars, sIdx, eIdx, 'point'(, keepSet)?\)/);
 });
 
 test("没有人再自己抄一份块过滤（块号 min/max 不是区间）", () => {

@@ -4483,7 +4483,11 @@ function _charRangeBlockFilter(chars, sIdx, eIdx) {
   //   外置辅助会 ReferenceError（2026-09-02 selection-highlight-line-split 实锤）。
   const base = _base(chars, sIdx, eIdx);
   const region = _region(chars, sIdx, eIdx);
-  return region ? (c) => base(c) && region(c) : base;
+  const filter = region ? (c) => base(c) && region(c) : base;
+  // 诊断出口(2026-09-02,iPad 无控制台):走了哪条路要看得见 —— cell=同格约束
+  // 生效;cross=有版面但两端不同格,只剩块过滤;none=这页没拿到版面。
+  filter.regionMode = (chars && chars.__layout) ? (region ? 'cell' : 'cross') : 'none';
+  return filter;
 
   function _base(chars, sIdx, eIdx) {
   if (chars[sIdx] && chars[eIdx]
@@ -4519,11 +4523,18 @@ function _charRangeBlockFilter(chars, sIdx, eIdx) {
   if (!byOi) {
     byOi = new Map();
     layout.regions.forEach((region, ri) => {
+      // 约束单位是**格**不是 region：表格单元格内每一视觉行是一个独立 region
+      // (快照按 cells[row][column].push(region) 组织),跨行词的两半分属两个
+      // region,按 region 判"同区"永远不成立 —— 595 实锤区域约束零生效。
+      // table-cell 按 tableId:row:column 归并;非表格 region 各自为一区。
+      const key = (region && region.kind === 'table-cell')
+        ? 't' + region.tableId + ':' + region.row + ':' + region.column
+        : 'r' + ri;
       const ranges = region && Array.isArray(region.ranges) ? region.ranges : [];
       ranges.forEach((range) => {
         if (!Array.isArray(range) || range.length < 2) return;
         const a = range[0] | 0, b = range[1] | 0;
-        for (let oi = Math.min(a, b); oi <= Math.max(a, b); oi++) byOi.set(oi, ri);
+        for (let oi = Math.min(a, b); oi <= Math.max(a, b); oi++) byOi.set(oi, key);
       });
     });
     chars.__regionByOi = byOi;
@@ -4645,9 +4656,13 @@ function _charRangeToVisualRects(chars, sIdx, eIdx, coordinateSpace, keepSet) {
 }
 
 // chars[s..e] 拼成文本（含 X gap 智能空格 + 跨行换行；跟 _selByCharRange 同逻辑）
-function _charsRangeToText(chars, sIdx, eIdx) {
+function _charsRangeToText(chars, sIdx, eIdx, keepSet) {
   if (sIdx < 0 || eIdx >= chars.length || sIdx > eIdx) return '';
-  const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
+  const _inBlkRaw = _charRangeBlockFilter(chars, sIdx, eIdx);
+  // keepSet=选区的精确字符集(_charSel.keep):有它就按集合取,不再重扫区间。
+  const _inBlk = (keepSet instanceof Set)
+    ? (c) => _inBlkRaw(c) && (!!c.sp || keepSet.has(chars.indexOf(c)))
+    : _inBlkRaw;
   let text = '', lastChar = null, _lastReal = null, _pendSp = false;
   const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
   for (let i = sIdx; i <= eIdx; i++) {
@@ -4793,11 +4808,13 @@ function _selByCharRange(pw, sIdx, eIdx, keepSet) {
   // TJ 间隔但无空格 char 的情况，如 '0 1 2 3 4' 在 PyMuPDF rawdict 里没空格 char）
   let text = '';
   let lastChar = null, _lastReal = null, _pendSp = false;
+  const _selectedIdx = [];   // 选区精确字符集(2026-09-02 清单第 3 项)
   const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
     if (_keep && !_keep.has(i) && !c.sp) continue;   // 程序性选中=精确集,别列夹带剔除
     if (!_inBlk(c)) continue;   // 跨块过滤：别块(题号/另一栏)字符不计入选中文本
+    if (!c.sp) _selectedIdx.push(i);   // 真正入选的字符 → _charSel.keep(唯一的选区事实)
     if (lastChar) {
       // 两边都是 CJK(日/中,无词间空格)→ 跨行/间隙都直接拼,不插换行或空格(公表する 跨行不再被拆「公 表する」)
       // cjkPair 按上一个**实字符**判(空白盒 c=' ' 永远判不进 CJK,
@@ -4843,13 +4860,16 @@ function _selByCharRange(pw, sIdx, eIdx, keepSet) {
       window.__lastSelSentence = (_sent && _norm(_sent) !== _norm(lastSelText)) ? _sent : '';
     }
   } catch (_) {}
-  _charSel = {pw, startIdx: sIdx, endIdx: eIdx, dragging: _charSel?.dragging || false};
+  // keep=这次选区真正入选的字符集合 —— 所有消费者(高亮 rects/文本/OCR bbox/
+  // AI 快照/扩展宿主)按它取,不再各自按 [起,止] 重扫区间。
+  _charSel = {pw, startIdx: sIdx, endIdx: eIdx, dragging: _charSel?.dragging || false,
+              keep: new Set(_selectedIdx)};
   try { window.__lastSelMeta = { page: (typeof _selPageNum === 'function' ? _selPageNum() : (typeof currentPage !== 'undefined' ? currentPage : 0)), t: Date.now() }; } catch (_) {}   // char 层选中也记 meta(页+时间);否则 __voiceContext 新鲜度校验(meta.page===curP && <10min)失败 → 助手拿到空选中
   // 高亮：横排按行、竖排按列合并；与保存后的高亮共用同一几何函数。
   const ov = pw.querySelector('.sel-overlay');
   if (ov) {
     ov.innerHTML = '';
-    for (const rect of _charRangeToVisualRects(chars, sIdx, eIdx, 'css', _keep)) {
+    for (const rect of _charRangeToVisualRects(chars, sIdx, eIdx, 'css', _charSel.keep)) {
       const div = document.createElement('div');
       div.className = 'hl';
       div.style.left = rect[0] + 'px';
@@ -4867,6 +4887,20 @@ function _selByCharRange(pw, sIdx, eIdx, keepSet) {
   toolbar.style.left = Math.max(8, pwRect.left - mainRect.left + mainEl.scrollLeft + chars[sIdx].left) + 'px';
   toolbar.style.top  = (pwRect.top - mainRect.top + mainEl.scrollTop + endChar.top + endChar.height + 6) + 'px';
   toolbar.classList.add('open');
+  // 选区诊断标记(2026-09-02):区域约束走了哪条路,截图即可读。
+  try {
+    let diag = toolbar.querySelector('.sel-diag');
+    if (!diag) {
+      diag = document.createElement('span');
+      diag.className = 'sel-diag';
+      diag.style.cssText = 'display:block;font-size:10px;opacity:.55;padding:0 8px 2px';
+      toolbar.appendChild(diag);
+    }
+    const mode = _inBlk && _inBlk.regionMode;
+    diag.textContent = mode === 'cell' ? '区域：同格约束 ✓'
+      : mode === 'cross' ? '区域：跨格（只按块过滤）'
+      : '区域：本页无版面数据';
+  } catch (_) {}
   // 防溢出屏：选区靠右/靠下时工具栏(max-width 480)会跑出可见区被裁 → 夹回 #main 可见区
   _clampToolbarIntoView(mainEl, pwRect.top - mainRect.top + mainEl.scrollTop + chars[sIdx].top);
 }
@@ -5874,8 +5908,9 @@ window.onPhrase = () => {
 let _phraseHlTimer = null;
 let _phraseHls = [];          // 多个词组高亮并存 [{id,page,text,rects:[[x0,y0,x1,y1]pt...],solid}](原单例 _activePhraseHl → 数组)
 let _phraseHlSeq = 0;
-function _charRangeToPtRects(chars, s, e) {
+function _charRangeToPtRects(chars, s, e, keepSet) {
   if (s > e) { const t = s; s = e; e = t; }
+  const _inKeep = (keepSet instanceof Set) ? (i) => keepSet.has(i) : () => true;   // 选区精确字符集
   // 块过滤:跟选中预览(_selByCharRange)/句子构造(_buildSentenceFromSel)严格一致——排序后选区首尾之间
   // 会交错进别气泡/别栏的字,不过滤就把别行的字也框进来(表现:选第2行却高亮第1、3行)。只取起止块区间内的字。
   const _blk = (c) => (c.bk != null && c.bk >= 0) ? c.bk : ((c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
@@ -5886,6 +5921,7 @@ function _charRangeToPtRects(chars, s, e) {
   for (let i = s; i <= e && i < chars.length; i++) {
     const c = chars[i];
     if (c.sp || c._x0 == null) continue;
+    if (!_inKeep(i)) continue;
     if (!inBlk(c)) continue;   // 别块字符不框,跟预览一致
     const lh = (c._y1 - c._y0) || 1;
     if (cur && Math.abs(c._y0 - cur[1]) <= lh * 0.6) {
@@ -5969,7 +6005,7 @@ function _showPhraseHighlight(pw) {
   if (!pw || !_charSel || !pw.__charBoxes) return null;
   const text = (lastSelText || '').trim();
   if (!text) return null;
-  const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx);
+  const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx, _charSel.keep);
   if (!rects.length) return null;
   const hl = {id: ++_phraseHlSeq, page: parseInt(pw.dataset.pageNum || '0', 10) || currentPage, text, rects, solid: false};
   _phraseHls.push(hl);   // 追加,不清旧的 → 多个词组高亮并存
@@ -6011,7 +6047,7 @@ function _showExplainHighlight(pw, text) {
   if (!pw || !_charSel || !pw.__charBoxes) return null;
   const t = (text || lastSelText || '').trim();
   if (!t) return null;
-  const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx);
+  const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx, _charSel.keep);
   if (!rects.length) return null;
   if (_activeExplainHl) _activeExplainHl.canceled = true;   // 旧 job 作废(结果丢弃,不再填面板)
   document.querySelectorAll('.explain-hl-layer').forEach(l => l.remove());
@@ -6616,7 +6652,7 @@ window.showWordPopover = async (word, ctx) => {
   const _cseq = ++_wordPopCancelSeq;   // 本次点词占位;同时取消上一个还没回来的词的自动弹出
   toolbar.classList.remove('open');
   const pw = _charSel && _charSel.pw;
-  const cap = _charSel ? {pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx} : null;
+  const cap = _charSel ? {pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx, keep: _charSel.keep} : null;
   // 已有现成数据(本会话查过)→ **直接秒显小框**,不发请求/不建高亮;后台再打一次刷新暴露计数+缓存
   const cached = _dictCache.get(word);
   if (cached) {
@@ -7326,11 +7362,11 @@ function _pdfHlToAsst(h) {
 //
 // 2026-08-16 用户实测报告:「第一张图的蓝色选中范围和高亮这一段后实际黄色
 // 高亮的范围不同,右侧的对话也被高亮了」。
-function _charsRangeToRects(chars, sIdx, eIdx) {
-  return _charRangeToVisualRects(chars, sIdx, eIdx, 'point');
+function _charsRangeToRects(chars, sIdx, eIdx, keepSet) {
+  return _charRangeToVisualRects(chars, sIdx, eIdx, 'point', keepSet);
 }
 
-async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', body='', note='', id='', silent=false}) {
+async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', body='', note='', id='', silent=false, keep=null}) {
   if (!pw || !pw.__charBoxes) {
     if (silent) throw new Error('BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE');
     alert('请先在 PDF 上选中再标记'); return null;
@@ -7340,13 +7376,13 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
     if (silent) throw new Error('BW_READER_HIGHLIGHT_TEXT_RANGE_INVALID');
     return null;
   }
-  const rects = _charsRangeToRects(chars, sIdx, eIdx);
+  const rects = _charsRangeToRects(chars, sIdx, eIdx, keep);   // keep=选区精确字符集
   if (!rects.length) {
     if (silent) throw new Error('BW_READER_HIGHLIGHT_TEXT_RECTS_EMPTY');
     return null;
   }
   const pageNum = parseInt(pw.dataset.pageNum || '0');
-  const text = _charsRangeToText(chars, Math.min(sIdx,eIdx), Math.max(sIdx,eIdx));
+  const text = _charsRangeToText(chars, Math.min(sIdx,eIdx), Math.max(sIdx,eIdx), keep);
   const payload = {
     file: FILE_REL, page: pageNum, rects, color, text,
     kind, sentence, body, note,
@@ -7884,7 +7920,7 @@ async function onPickColor(col) {
   renderHlPicker();
   if (!_charSel) { _toast('已选定颜色（先选中文字）'); return; }
   await saveHighlight({
-    pw: _charSel.pw, sIdx: _charSel.startIdx, eIdx: _charSel.endIdx,
+    pw: _charSel.pw, sIdx: _charSel.startIdx, eIdx: _charSel.endIdx, keep: _charSel.keep,
     color: col, kind: 'note',
   });
   _charSel.pw.querySelector('.sel-overlay')?.replaceChildren();
@@ -7908,7 +7944,7 @@ async function markFromResult() {
   const cs = _resultContext.charSel;
   const useColor = _activeHlColor || _lastHlColor || (getHlColors()[0] || '#fff59d');
   const h = await saveHighlight({
-    pw: cs.pw, sIdx: cs.startIdx, eIdx: cs.endIdx,
+    pw: cs.pw, sIdx: cs.startIdx, eIdx: cs.endIdx, keep: cs.keep,
     color: useColor,
     kind: _resultContext.kind || 'note',
     sentence: _resultContext.sentence || '',
@@ -10360,6 +10396,7 @@ window.onOcrSel = async () => {
   for (let i = _charSel.startIdx; i <= _charSel.endIdx; i++) {
     const c = chars[i];
     if (!c || c.sp || c._x0 == null) continue;
+    if (_charSel.keep && !_charSel.keep.has(i)) continue;   // 选区精确字符集
     x0 = Math.min(x0, c._x0); y0 = Math.min(y0, c._y0);
     x1 = Math.max(x1, c._x1); y1 = Math.max(y1, c._y1); n++;
   }
@@ -10461,7 +10498,7 @@ window.onTranslate = async () => {
   if (window.__uiShared && adapter && typeof adapter.translate === 'function') {   // 共享模式按当前宿主分流；PDF 行为不变
     toolbar.classList.remove('open');
     _resultContext = adapter.kind === 'pdf' && _charSel
-      ? { charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx}, text: selectedText, sentence: selectedText, kind: 'translate' }
+      ? { charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx, keep: _charSel.keep}, text: selectedText, sentence: selectedText, kind: 'translate' }
       : null;
     adapter.translate({
       text: selectedText,
@@ -10560,7 +10597,7 @@ window.onExplain = () => {
     }
   }
   _resultContext = _charSel ? {
-    charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
+    charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx, keep: _charSel.keep},
     text: selectedText, sentence: explainText, kind: 'explain',
   } : null;
   if (window.__uiShared && adapter && typeof adapter.explain === 'function') {   // 共享模式按当前宿主分流；PDF 行为不变
@@ -10624,7 +10661,7 @@ window.onChat = () => {
     }
   }
   _resultContext = _charSel ? {
-    charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
+    charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx, keep: _charSel.keep},
     text: selectedText, sentence: context || selectedText, kind: 'chat',
   } : null;
   if (window.__uiShared && adapter && typeof adapter.chat === 'function') {   // 共享模式按当前宿主分流；PDF 行为不变
@@ -13984,6 +14021,7 @@ window._lbClick = _lbClick;
           pw: _charSel.pw,
           sIdx: _charSel.startIdx,
           eIdx: _charSel.endIdx,
+          keep: _charSel.keep,
           color,
           kind: String(payload.kind || 'note'),
           sentence: String(payload.sentence || ''),

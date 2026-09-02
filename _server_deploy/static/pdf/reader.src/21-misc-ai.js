@@ -422,6 +422,7 @@ window.onOcrSel = async () => {
   for (let i = _charSel.startIdx; i <= _charSel.endIdx; i++) {
     const c = chars[i];
     if (!c || c.sp || c._x0 == null) continue;
+    if (_charSel.keep && !_charSel.keep.has(i)) continue;   // 选区精确字符集
     x0 = Math.min(x0, c._x0); y0 = Math.min(y0, c._y0);
     x1 = Math.max(x1, c._x1); y1 = Math.max(y1, c._y1); n++;
   }
@@ -523,7 +524,7 @@ window.onTranslate = async () => {
   if (window.__uiShared && adapter && typeof adapter.translate === 'function') {   // 共享模式按当前宿主分流；PDF 行为不变
     toolbar.classList.remove('open');
     _resultContext = adapter.kind === 'pdf' && _charSel
-      ? { charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx}, text: selectedText, sentence: selectedText, kind: 'translate' }
+      ? { charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx, keep: _charSel.keep}, text: selectedText, sentence: selectedText, kind: 'translate' }
       : null;
     adapter.translate({
       text: selectedText,
@@ -622,7 +623,7 @@ window.onExplain = () => {
     }
   }
   _resultContext = _charSel ? {
-    charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
+    charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx, keep: _charSel.keep},
     text: selectedText, sentence: explainText, kind: 'explain',
   } : null;
   if (window.__uiShared && adapter && typeof adapter.explain === 'function') {   // 共享模式按当前宿主分流；PDF 行为不变
@@ -686,7 +687,7 @@ window.onChat = () => {
     }
   }
   _resultContext = _charSel ? {
-    charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
+    charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx, keep: _charSel.keep},
     text: selectedText, sentence: context || selectedText, kind: 'chat',
   } : null;
   if (window.__uiShared && adapter && typeof adapter.chat === 'function') {   // 共享模式按当前宿主分流；PDF 行为不变

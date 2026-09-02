@@ -58,8 +58,9 @@ window.onPhrase = () => {
 let _phraseHlTimer = null;
 let _phraseHls = [];          // 多个词组高亮并存 [{id,page,text,rects:[[x0,y0,x1,y1]pt...],solid}](原单例 _activePhraseHl → 数组)
 let _phraseHlSeq = 0;
-function _charRangeToPtRects(chars, s, e) {
+function _charRangeToPtRects(chars, s, e, keepSet) {
   if (s > e) { const t = s; s = e; e = t; }
+  const _inKeep = (keepSet instanceof Set) ? (i) => keepSet.has(i) : () => true;   // 选区精确字符集
   // 块过滤:跟选中预览(_selByCharRange)/句子构造(_buildSentenceFromSel)严格一致——排序后选区首尾之间
   // 会交错进别气泡/别栏的字,不过滤就把别行的字也框进来(表现:选第2行却高亮第1、3行)。只取起止块区间内的字。
   const _blk = (c) => (c.bk != null && c.bk >= 0) ? c.bk : ((c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
@@ -70,6 +71,7 @@ function _charRangeToPtRects(chars, s, e) {
   for (let i = s; i <= e && i < chars.length; i++) {
     const c = chars[i];
     if (c.sp || c._x0 == null) continue;
+    if (!_inKeep(i)) continue;
     if (!inBlk(c)) continue;   // 别块字符不框,跟预览一致
     const lh = (c._y1 - c._y0) || 1;
     if (cur && Math.abs(c._y0 - cur[1]) <= lh * 0.6) {
@@ -153,7 +155,7 @@ function _showPhraseHighlight(pw) {
   if (!pw || !_charSel || !pw.__charBoxes) return null;
   const text = (lastSelText || '').trim();
   if (!text) return null;
-  const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx);
+  const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx, _charSel.keep);
   if (!rects.length) return null;
   const hl = {id: ++_phraseHlSeq, page: parseInt(pw.dataset.pageNum || '0', 10) || currentPage, text, rects, solid: false};
   _phraseHls.push(hl);   // 追加,不清旧的 → 多个词组高亮并存
@@ -195,7 +197,7 @@ function _showExplainHighlight(pw, text) {
   if (!pw || !_charSel || !pw.__charBoxes) return null;
   const t = (text || lastSelText || '').trim();
   if (!t) return null;
-  const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx);
+  const rects = _charRangeToPtRects(pw.__charBoxes, _charSel.startIdx, _charSel.endIdx, _charSel.keep);
   if (!rects.length) return null;
   if (_activeExplainHl) _activeExplainHl.canceled = true;   // 旧 job 作废(结果丢弃,不再填面板)
   document.querySelectorAll('.explain-hl-layer').forEach(l => l.remove());
@@ -800,7 +802,7 @@ window.showWordPopover = async (word, ctx) => {
   const _cseq = ++_wordPopCancelSeq;   // 本次点词占位;同时取消上一个还没回来的词的自动弹出
   toolbar.classList.remove('open');
   const pw = _charSel && _charSel.pw;
-  const cap = _charSel ? {pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx} : null;
+  const cap = _charSel ? {pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx, keep: _charSel.keep} : null;
   // 已有现成数据(本会话查过)→ **直接秒显小框**,不发请求/不建高亮;后台再打一次刷新暴露计数+缓存
   const cached = _dictCache.get(word);
   if (cached) {
