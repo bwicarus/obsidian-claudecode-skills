@@ -4582,8 +4582,11 @@ function _charRangeToVisualRects(chars, sIdx, eIdx, coordinateSpace, keepSet) {
   // 做法:sp 先进 pending,等同一行后面再来一个实字符才一起入组;行首(前面还没有
   // 实字符)的直接丢,行尾(后面没有实字符)的留在 pending 里自然作废。
   // 596 实锤:左列「用。」行尾的 sp 通过了区域过滤(sp 无归属一律放行),独自成框。
-  const pendingSp = new Map();   // continuityKey → entries[]
-  const seenReal = new Set();    // 该行已出现过入选实字符
+  // 600 实锤:左列行尾的空白盒与右列同一视觉行的 ン 共用块号,"同键前后有实字"仍放行。
+  // 改为纯几何:空白盒只有**夹在前后两个入选实字符之间**(同一视觉行、主轴上落在两者
+  // 之间)才画;不看 lineKey/blockId。
+  let pendingSp = [];            // 上一个入选实字符之后、尚未定夺的空白盒
+  let lastReal = null;           // 上一个入选实字符的 entry
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
     if (!_inBlk(c)) continue;
@@ -4615,14 +4618,25 @@ function _charRangeToVisualRects(chars, sIdx, eIdx, coordinateSpace, keepSet) {
     const entry = {x0: rect.x0, y0: rect.y0, x1: rect.x1, y1: rect.y1,
       axis, lineKey, first: i};
     if (c.sp) {
-      if (seenReal.has(continuityKey)) {
-        (pendingSp.get(continuityKey) || pendingSp.set(continuityKey, []).get(continuityKey)).push(entry);
-      }
+      if (lastReal) pendingSp.push(entry);
     } else {
-      const held = pendingSp.get(continuityKey);
-      if (held) { entries.push(...held); pendingSp.delete(continuityKey); }
+      if (lastReal && pendingSp.length) {
+        const vertical = entry.axis === 'vertical';
+        for (const spE of pendingSp) {
+          const sameRow = vertical
+            ? overlap(lastReal.x0, lastReal.x1, spE.x0, spE.x1) >= 0.35 && overlap(entry.x0, entry.x1, spE.x0, spE.x1) >= 0.35
+            : overlap(lastReal.y0, lastReal.y1, spE.y0, spE.y1) >= 0.35 && overlap(entry.y0, entry.y1, spE.y0, spE.y1) >= 0.35;
+          if (!sameRow) continue;
+          const eps = vertical ? Math.max(1, (entry.x1 - entry.x0) * 0.5) : Math.max(1, (entry.y1 - entry.y0) * 0.5);
+          const between = vertical
+            ? (spE.y0 >= lastReal.y1 - eps && spE.y1 <= entry.y0 + eps)
+            : (spE.x0 >= lastReal.x1 - eps && spE.x1 <= entry.x0 + eps);
+          if (between) entries.push(spE);
+        }
+      }
+      pendingSp = [];
       entries.push(entry);
-      seenReal.add(continuityKey);
+      lastReal = entry;
     }
     lastRectByBlock.set(continuityKey, rect);
   }
