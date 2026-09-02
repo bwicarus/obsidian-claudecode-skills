@@ -4529,7 +4529,7 @@ function _charRangeBlockFilter(chars, sIdx, eIdx) {
       // table-cell 按 tableId:row:column 归并;非表格 region 各自为一区。
       const key = (region && region.kind === 'table-cell')
         ? 't' + region.tableId + ':' + region.row + ':' + region.column
-        : 'r' + ri;
+        : 'page';   // 非表格 region 是一行一个,不能各自为区,同属一区
       const ranges = region && Array.isArray(region.ranges) ? region.ranges : [];
       ranges.forEach((range) => {
         if (!Array.isArray(range) || range.length < 2) return;
@@ -4982,7 +4982,7 @@ function _charRegionKeyOf(chars) {
     byOi = new Map();
     layout.regions.forEach((region, ri) => {
       const key = (region && region.kind === 'table-cell')
-        ? 't' + region.tableId + ':' + region.row + ':' + region.column : 'r' + ri;
+        ? 't' + region.tableId + ':' + region.row + ':' + region.column : 'page';   // 非表格 region 是一行一个,不能各自为区,同属一区
       (region && region.ranges || []).forEach((range) => {
         const a = Math.min(range[0], range[1]) | 0, b = Math.max(range[0], range[1]) | 0;
         for (let oi = a; oi <= b; oi++) byOi.set(oi, key);
@@ -5071,12 +5071,33 @@ function _wordExpandFromChar(chars, idx) {
     // Vision 词块粒度,同 w 不看标点/相邻会把 カレー、トートマ 整串圈进,
     // 选区与所点的词完全不相干)。跨行整词的需求由登记词组(上面的精确
     // 匹配)与生词下划线 rects(_selByCharRange 里的 tap-vocab 扩展)承担。
+    // 分词现在以块为单位(预处理 2026-09-02):一个词可以跨行,同 w 的字在**源序流**里
+    // 是连着的,但在按基线重排的数组里不相邻(中间夹着别列的字)。所以沿源序流扩:
+    // 取非空白字符按 _oi 排好,从所点位置向两侧走,w 相同就并入,w 一变就停。
+    // 仍是连续扩展 —— 不是"全页收集同 w"(592 那次圈错就是全页收集)。
+    const ord = [];
+    for (let i = 0; i < chars.length; i++) { const cc = chars[i]; if (cc && !cc.sp && cc.c) ord.push(i); }
+    ord.sort((a, b) => ((chars[a]._oi != null ? chars[a]._oi : a) | 0) - ((chars[b]._oi != null ? chars[b]._oi : b) | 0));
+    const pos = ord.indexOf(idx);
+    const keepW = new Set();
     let s = idx, e = idx;
-    while (s > 0 && chars[s - 1].w === wid && !'/|／'.includes(chars[s - 1].c)) s--;
-    while (e < chars.length - 1 && chars[e + 1].w === wid && !'/|／'.includes(chars[e + 1].c)) e++;
+    if (pos >= 0) {
+      let a = pos, b = pos;
+      while (a > 0 && chars[ord[a - 1]].w === wid && !'/|／'.includes(chars[ord[a - 1]].c)) a--;
+      while (b < ord.length - 1 && chars[ord[b + 1]].w === wid && !'/|／'.includes(chars[ord[b + 1]].c)) b++;
+      for (let k = a; k <= b; k++) { keepW.add(ord[k]); if (ord[k] < s) s = ord[k]; if (ord[k] > e) e = ord[k]; }
+    } else {
+      while (s > 0 && chars[s - 1].w === wid && !'/|／'.includes(chars[s - 1].c)) s--;
+      while (e < chars.length - 1 && chars[e + 1].w === wid && !'/|／'.includes(chars[e + 1].c)) e++;
+      for (let k = s; k <= e; k++) if (!chars[k].sp) keepW.add(k);
+    }
     while (s < e && !isWord(chars[s].c) && !isCJK(chars[s].c)) s++;   // 去词首标点
     while (e > s && !isWord(chars[e].c) && !isCJK(chars[e].c)) e--;   // 去词尾标点(如 often. 的句号)
-    return {start: s, end: e};
+    // 返回精确字符集(跨行词的两半在数组里不相邻,[s,e] 区间会夹进别列的字):
+    // 只保留区间内、且不是首尾被去掉的标点的那些。
+    const keepOut = new Set();
+    keepW.forEach((i) => { const cc = chars[i]; if (i >= s && i <= e && cc && (isWord(cc.c) || isCJK(cc.c) || (i !== s && i !== e))) keepOut.add(i); });
+    return keepOut.size ? {start: s, end: e, keep: keepOut} : {start: s, end: e};
   }
   // 没词 id 时:CJK 字符无分词信息 → 只选 1 字(避免整页扩),英文按 isWord 扩
   if (isCJK(c)) return {start: idx, end: idx};

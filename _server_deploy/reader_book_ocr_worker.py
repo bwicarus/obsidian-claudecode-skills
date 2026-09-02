@@ -2598,13 +2598,117 @@ _CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 _KANA_RE = re.compile(r"[\u3040-\u30ff]")
 
 
-def _tokenize_chars(chars: list[dict]) -> list[dict]:
-    """Assign real tokenizer boundaries; never invent words on mismatch."""
-    by_line: dict[tuple[int, int], list[dict]] = {}
-    for char in chars:
-        by_line.setdefault((int(char.get("bk", -1)), int(char.get("line", 0))), []).append(char)
+_TOKENIZE_SCHEMA = 2   # 2 = 以块为边界分词(2026-09-02);1/缺失 = 旧的按行分词
+
+
+def _tokenize_groups(chars: list[dict], layout: dict | None) -> list[list[int]]:
+    """分词的单位是**块**,不是行(用户 2026-09-02:"预处理时需要以块为边界,并在考虑到
+    块内换行的前提下进行分词")。
+
+    块的来源两层:① 版面里的表格单元格(layout.regions kind=table-cell,同一格的所有行
+    归一组 —— 跨行词 コチュジャ|ン 从此在分词器眼里是连着的);② 其余字符按 (bk,line)
+    的行,再按几何聚成段落:相邻两行竖直间距 ≤ 0.9 行高且横向重叠 ≥ 50% 视为同段。
+    竖排字符(vertical)不做段落聚合,仍按 (bk,line) 一行一组。
+    返回每组的字符下标列表,组内已按阅读顺序(行的 y、行内原序)排好。"""
+    n = len(chars)
+    assigned = [False] * n
+    groups: list[list[int]] = []
+
+    def _line_key(char: dict) -> tuple[int, int]:
+        return (int(char.get("bk", -1)), int(char.get("line", -1)))
+
+    def _order_lines(indices: list[int]) -> list[int]:
+        lines: dict[tuple[int, int], list[int]] = {}
+        for index in indices:
+            lines.setdefault(_line_key(chars[index]), []).append(index)
+
+        def _line_pos(items: list[int]) -> tuple[float, float]:
+            ys = [float(chars[i].get("y0", 0.0)) for i in items]
+            xs = [float(chars[i].get("x0", 0.0)) for i in items]
+            return (min(ys) if ys else 0.0, min(xs) if xs else 0.0)
+
+        ordered: list[int] = []
+        for items in sorted(lines.values(), key=_line_pos):
+            ordered.extend(sorted(items))
+        return ordered
+
+    regions = layout.get("regions") if isinstance(layout, dict) else None
+    cells: dict[tuple[int, int, int], list[int]] = {}
+    if isinstance(regions, list):
+        for region in regions:
+            if not isinstance(region, dict) or region.get("kind") != "table-cell":
+                continue
+            try:
+                key = (int(region.get("tableId")), int(region.get("row")), int(region.get("column")))
+            except (TypeError, ValueError):
+                continue
+            for rng in region.get("ranges") or []:
+                try:
+                    a, b = int(rng[0]), int(rng[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                for index in range(max(0, min(a, b)), min(n - 1, max(a, b)) + 1):
+                    if not assigned[index]:
+                        assigned[index] = True
+                        cells.setdefault(key, []).append(index)
+    for key in sorted(cells):
+        groups.append(_order_lines(cells[key]))
+
+    by_line: dict[tuple[int, int], list[int]] = {}
+    for index, char in enumerate(chars):
+        if assigned[index]:
+            continue
+        by_line.setdefault(_line_key(char), []).append(index)
+    line_items = []
+    for indices in by_line.values():
+        boxes = [chars[i] for i in indices if chars[i].get("x0") is not None]
+        if not boxes:
+            line_items.append({"indices": indices, "x0": 0.0, "x1": 0.0, "y0": 0.0, "y1": 0.0, "vertical": False})
+            continue
+        vertical = any(bool(chars[i].get("vertical")) for i in indices)
+        line_items.append({
+            "indices": indices,
+            "x0": min(float(b.get("x0", 0.0)) for b in boxes),
+            "x1": max(float(b.get("x1", 0.0)) for b in boxes),
+            "y0": min(float(b.get("y0", 0.0)) for b in boxes),
+            "y1": max(float(b.get("y1", 0.0)) for b in boxes),
+            "vertical": vertical,
+        })
+    line_items.sort(key=lambda item: (item["y0"], item["x0"]))
+    paragraphs: list[dict] = []
+    for item in line_items:
+        if item["vertical"]:
+            groups.append(sorted(item["indices"]))
+            continue
+        line_h = max(1.0, item["y1"] - item["y0"])
+        merged = False
+        for para in paragraphs:
+            gap = item["y0"] - para["y1"]
+            overlap = min(item["x1"], para["x1"]) - max(item["x0"], para["x0"])
+            width = max(1.0, min(item["x1"] - item["x0"], para["x1"] - para["x0"]))
+            if -0.3 * line_h <= gap <= 0.9 * line_h and overlap / width >= 0.5:
+                para["indices"].extend(item["indices"])
+                para["x0"] = min(para["x0"], item["x0"])
+                para["x1"] = max(para["x1"], item["x1"])
+                para["y1"] = max(para["y1"], item["y1"])
+                merged = True
+                break
+        if not merged:
+            paragraphs.append({"indices": list(item["indices"]), "x0": item["x0"], "x1": item["x1"],
+                               "y0": item["y0"], "y1": item["y1"]})
+    for para in paragraphs:
+        groups.append(_order_lines(para["indices"]))
+    return groups
+
+
+def _tokenize_chars(chars: list[dict], layout: dict | None = None) -> list[dict]:
+    """Assign real tokenizer boundaries; never invent words on mismatch.
+
+    以块为单位喂分词器(见 _tokenize_groups):同一块内所有行的文字连成一串,行尾不再是
+    词边界;字符上的 line 字段保留,下游据此处理换行。"""
     tagger = None
-    for group_no, group in enumerate(by_line.values()):
+    for group_no, indices in enumerate(_tokenize_groups(chars, layout)):
+        group = [chars[i] for i in indices]
         text_chars = [char for char in group if not char.get("sp") and char.get("c")]
         text = "".join(char["c"] for char in text_chars)
         if not text:
@@ -2664,9 +2768,12 @@ def _tokenize_directory(
 ) -> int:
     page_paths = sorted((job_dir / "pages").glob("p*.json"))
     total = len(page_paths)
+    def _is_tokenized(value: dict) -> bool:
+        return bool(value.get("tokenized")) and int(value.get("tokenizeSchema") or 1) >= _TOKENIZE_SCHEMA
+
     completed = sum(
         1 for page_path in page_paths
-        if bool((_load(page_path, {}) or {}).get("tokenized"))
+        if _is_tokenized(_load(page_path, {}) or {})
     )
     if job_path is not None:
         _update_job(
@@ -2683,7 +2790,7 @@ def _tokenize_directory(
             if desired != "running":
                 return _stop_state(job_path, desired) if job_path is not None else 21
         value = _load(page_path, {}) or {}
-        if value.get("tokenized"):
+        if _is_tokenized(value):
             continue
         if job_path is not None:
             _update_job(
@@ -2704,9 +2811,12 @@ def _tokenize_directory(
         ) or _KANA_RE.search(
             "".join(str(char.get("c") or "") for char in chars if not char.get("sp"))
         )
-        if needs_tokenizing:
-            value["chars"] = _tokenize_chars(chars)
+        # 旧版(按行)分好的词也要按块重分:凡 schema 落后就重跑,不看 w 是否已有。
+        stale_schema = bool(value.get("tokenized")) and int(value.get("tokenizeSchema") or 1) < _TOKENIZE_SCHEMA
+        if needs_tokenizing or stale_schema:
+            value["chars"] = _tokenize_chars(chars, value.get("layout"))
         value["tokenized"] = True
+        value["tokenizeSchema"] = _TOKENIZE_SCHEMA
         if job_path is not None:
             _assert_worker_identity(job_path)
         _atomic_json(page_path, value)
