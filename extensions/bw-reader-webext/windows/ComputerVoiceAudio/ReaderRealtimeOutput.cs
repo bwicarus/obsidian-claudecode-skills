@@ -394,6 +394,7 @@ internal static class ReaderRealtimeOutputProtocol
             or "_nativeReaderEditNote"
             or "_nativeReaderMakeNote"
             or "_nativeReaderMarkVocabulary"
+            or "_nativeReaderWordCardsConsolidate"
             or "_bwWebHighlightByText"
             or "_bwWebNoteCreate"
             or "__upStartTask"))
@@ -731,6 +732,46 @@ internal static class ReaderRealtimeOutputProtocol
             _ = Text(web, "suffix", 200, allowEmpty: true);
             _ = Text(web, "color", 32, allowEmpty: true);
             _ = Text(web, "note", 2_000, allowEmpty: true);
+            return;
+        }
+        if (fn is "_nativeReaderWordCardsConsolidate")
+        {
+            // 词卡整理（2026-09-02 补漏：名单里一直没有它，MCP reader_word_cards
+            // 的整理投递被本闸拒了两天）。形状与 MCP 组包/JS 派发同源：
+            // args=[{lemma, content?|undo?}]，lemma≤64，content 1..65536，
+            // content 与 undo 互斥且至少其一。
+            if (args.GetArrayLength() != 1
+                || args[0].ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 词卡整理需要一个对象");
+            }
+            JsonElement consolidate = args[0];
+            DirectJsonValidation.RequireNoDuplicateKeys(consolidate);
+            ExactWithOptional(
+                consolidate, new[] { "lemma" }, new[] { "content", "undo" });
+            string consolidateLemma = Text(consolidate, "lemma", 64);
+            if (string.IsNullOrWhiteSpace(consolidateLemma))
+            {
+                throw Invalid("Reader 词卡整理缺少 lemma");
+            }
+            bool hasContent = consolidate.TryGetProperty(
+                "content", out JsonElement consolidateContent);
+            bool hasUndo = consolidate.TryGetProperty(
+                "undo", out JsonElement consolidateUndo);
+            if (hasContent == hasUndo)
+            {
+                throw Invalid("Reader 词卡整理 content 与 undo 必须且只能有一个");
+            }
+            if (hasContent
+                && (consolidateContent.ValueKind != JsonValueKind.String
+                    || consolidateContent.GetString() is not { Length: > 0 and <= 65536 }))
+            {
+                throw Invalid("Reader 词卡整理 content 非法");
+            }
+            if (hasUndo && consolidateUndo.ValueKind != JsonValueKind.True)
+            {
+                throw Invalid("Reader 词卡整理 undo 必须为 true");
+            }
             return;
         }
         if (fn is "_nativeReaderMarkVocabulary")

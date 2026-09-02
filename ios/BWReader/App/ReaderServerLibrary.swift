@@ -89,12 +89,66 @@ enum ReaderServerLibrary {
         return payload.books
     }
 
-    /// 传一本书上去。
+    /// 传一本书上去（流式 + 字节进度）。
     ///
     /// - Returns: 服务器上的书名。⚠ **重传同一本不是失败** —— 换设备、
     ///   重装之后重传是正常操作，服务端按内容去重并如实说「已经有了」。
+    /// - 2026-09-02：改为 `URLSession.upload(fromFile:)` 流式上传，整本书不再
+    ///   进内存；`progress` 收到 0…1 的已发送比例。老桥（只认 multipart）回
+    ///   400 BW_LIBRARY_FORM_REQUIRED 时退回 multipart 老路。
     @discardableResult
-    static func upload(fileURL: URL) async throws -> String {
+    static func upload(
+        fileURL: URL,
+        progress: (@MainActor (Double) -> Void)? = nil
+    ) async throws -> String {
+        guard let url = ReaderServer.url("/reader-library/upload") else {
+            throw Failure.malformed
+        }
+        let name = fileURL.lastPathComponent
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.setValue(ReaderServer.origin, forHTTPHeaderField: "Origin")
+        request.setValue(
+            name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? name,
+            forHTTPHeaderField: "X-BW-Book-Name")
+        // 大书 + Tailscale：给足时间，但要有上限 —— 无限等在界面上跟死掉一样。
+        request.timeoutInterval = 3600
+        let delegate = ReaderUploadProgressDelegate(progress)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.upload(
+                for: request, fromFile: fileURL, delegate: delegate)
+        } catch {
+            throw Failure.serverUnreachable(error.localizedDescription)
+        }
+        if let http = response as? HTTPURLResponse,
+           http.statusCode == 404 || http.statusCode == 405 {
+            throw Failure.capabilityMissing
+        }
+        if let http = response as? HTTPURLResponse, http.statusCode == 400,
+           let payload = try? JSONDecoder().decode(UploadResponse.self, from: data),
+           payload.code == "BW_LIBRARY_FORM_REQUIRED" {
+            // 旧桥只认 multipart —— 退回老路（整文件进内存、无进度）。
+            return try await uploadMultipart(fileURL: fileURL)
+        }
+        guard let payload = try? JSONDecoder().decode(UploadResponse.self, from: data) else {
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                throw Failure.rejected(
+                    code: "HTTP_\(http.statusCode)", message: "服务器拒绝了这次上传")
+            }
+            throw Failure.malformed
+        }
+        guard payload.ok else {
+            throw Failure.rejected(code: payload.code, message: payload.message)
+        }
+        return payload.name ?? name
+    }
+
+    /// multipart 老路（整文件进内存，无进度）—— 只给还没升级的桥用。
+    @discardableResult
+    static func uploadMultipart(fileURL: URL) async throws -> String {
         guard let url = ReaderServer.url("/reader-library/upload") else {
             throw Failure.malformed
         }
@@ -153,5 +207,27 @@ enum ReaderServerLibrary {
         } catch {
             throw Failure.serverUnreachable(error.localizedDescription)
         }
+    }
+}
+
+/// 上传字节进度：URLSession 的 didSendBodyData 回调（后台队列）→ 跳回主线程
+/// 交给 0…1 比例的回调。回调是 @MainActor 的，界面与闸直接改状态不用再跳。
+final class ReaderUploadProgressDelegate: NSObject, URLSessionTaskDelegate {
+    private let progress: (@MainActor (Double) -> Void)?
+
+    init(_ progress: (@MainActor (Double) -> Void)?) {
+        self.progress = progress
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        guard let progress, totalBytesExpectedToSend > 0 else { return }
+        let fraction = min(1, Double(totalBytesSent) / Double(totalBytesExpectedToSend))
+        Task { @MainActor in progress(fraction) }
     }
 }

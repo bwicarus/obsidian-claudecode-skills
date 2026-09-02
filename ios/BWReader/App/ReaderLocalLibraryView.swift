@@ -1462,8 +1462,11 @@ struct ReaderLocalLibraryView: View {
                 backupNotice = "读不到这本书的文件，没法上传"
                 return false
             }
-            backupNotice = "正在上传到\(ReaderServer.displayName)…"
-            let ok = await gate.ensureBacked(book, fileURL: access.url)
+            backupNotice = "正在上传到\(ReaderServer.displayName)… 0%"
+            let ok = await gate.ensureBacked(book, fileURL: access.url) { fraction in
+                backupNotice = "正在上传到\(ReaderServer.displayName)… "
+                    + "\(Int((fraction * 100).rounded()))%"
+            }
             backupNotice = ok ? nil : (gate.lastError ?? "上传没成功")
             return ok
         case .ruleNotReady:

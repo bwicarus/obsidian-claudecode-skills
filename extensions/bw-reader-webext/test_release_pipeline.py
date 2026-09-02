@@ -792,6 +792,9 @@ class ReleasePipelineTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             text=True,
             check=False,
+            # 无超时的子进程会让整条默认档悬挂(2026-09-02 一天两次卡在本文件,
+            # 人肉等了近一小时)。这里预期立即以 2 退出,120s 是宽裕上限。
+            timeout=120,
         )
         self.assertEqual(result.returncode, 2)
         self.assertIn("--artifact", result.stderr)

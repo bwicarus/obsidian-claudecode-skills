@@ -42,6 +42,11 @@ final class ReaderBookBackupGate: ObservableObject {
     /// 没问过就放，会在服务器空着的时候放过所有书。所以用 Optional 强制
     /// 调用方面对这个区别。
     @Published private(set) var serverHashes: Set<String>?
+    /// 服务器书表原样保留：sha 对不上时按「同名 + 同字节数」二级匹配 ——
+    /// 用户 2026-09-02："两边有同本书时可以立刻可用"。
+    @Published private(set) var serverBooks: [ReaderServerLibrary.Book] = []
+    /// 正在上传的书的字节进度（0…1），界面据此显示百分比。
+    @Published private(set) var uploadProgress: [String: Double] = [:]
     @Published private(set) var lastError: String?
     /// 服务器还没有书库端点(旧版)。**这时规矩不生效** ——
     /// 强制一条根本不可能被满足的规则,等于把所有书锁死。
@@ -52,6 +57,7 @@ final class ReaderBookBackupGate: ObservableObject {
         do {
             let books = try await ReaderServerLibrary.list()
             serverHashes = Set(books.map(\.sha256))
+            serverBooks = books
             lastError = nil
             capabilityMissing = false
         } catch ReaderServerLibrary.Failure.capabilityMissing {
@@ -88,11 +94,20 @@ final class ReaderBookBackupGate: ObservableObject {
         guard let hashes = serverHashes else {
             return .unknown(lastError ?? "还没问过\(ReaderServer.displayName)")
         }
+        // 二级匹配（2026-09-02）：同名 + 同字节数视为同一本 —— 服务器上那份
+        // 可能是字节略有差异的另一份导出（sha 对不上），但对用户就是同一本书，
+        // 不该逼他重传 200MB。sha 精确命中仍是首选。
+        let fileName = (book.relativePath as NSString).lastPathComponent
+        let sameNameAndSize = serverBooks.contains {
+            $0.bytes == Int(book.byteCount) && $0.name == fileName
+        }
         guard let sha = book.contentSha256, !sha.isEmpty else {
+            if sameNameAndSize { return .backed }
             // 本地还没算出哈希 —— 同样是"不知道"，不是"没备份"。
             return .unknown("这本书的内容指纹还没算出来")
         }
-        return hashes.contains(sha) ? .backed : .notBacked
+        if hashes.contains(sha) { return .backed }
+        return sameNameAndSize ? .backed : .notBacked
     }
 
     /// 确保这本书在服务器上；不在就传上去。
@@ -101,13 +116,23 @@ final class ReaderBookBackupGate: ObservableObject {
     /// - 失败时 `lastError` 里是**能指导下一步**的原因，调用方要显示它。
     @discardableResult
     func ensureBacked(
-        _ book: ReaderLocalBookRecord, fileURL: URL
+        _ book: ReaderLocalBookRecord, fileURL: URL,
+        progress: (@MainActor (Double) -> Void)? = nil
     ) async -> Bool {
         if case .backed = status(of: book) { return true }
         uploading.insert(book.id)
-        defer { uploading.remove(book.id) }
+        uploadProgress[book.id] = 0
+        defer {
+            uploading.remove(book.id)
+            uploadProgress.removeValue(forKey: book.id)
+        }
         do {
-            try await ReaderServerLibrary.upload(fileURL: fileURL)
+            let bookID = book.id
+            try await ReaderServerLibrary.upload(fileURL: fileURL) { fraction in
+                // 回调已在主线程（delegate 跳过来的），闸自身也是 @MainActor。
+                self.uploadProgress[bookID] = fraction
+                progress?(fraction)
+            }
             // 传完重新问一次,而不是乐观地把哈希塞进本地集合 ——
             // 「我以为传上去了」正是这条不变量最容易被悄悄破坏的方式。
             await refresh()

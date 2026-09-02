@@ -1869,6 +1869,41 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
             return;
         }
+        // 单路由放宽请求体上限（2026-09-02 实锤：全局 2MiB 让任何一本书都传不
+        // 上，App 端 205MB 整文件推到 600s 超时，界面一直"正在上传"）。书是
+        // 这条路唯一的大件，4GiB 是宽裕上限；其它路由仍守全局 2MiB。
+        var sizeFeature = context.Features
+            .Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+        if (sizeFeature is not null && !sizeFeature.IsReadOnly)
+        {
+            sizeFeature.MaxRequestBodySize = 4L * 1024 * 1024 * 1024;
+        }
+        // 流式正文（新 App）：application/octet-stream + X-BW-Book-Name(percent-
+        // encoded)。整本书边收边写临时文件，不进内存；App 端因此能报字节进度。
+        string rawContentType = (context.Request.ContentType ?? "").ToLowerInvariant();
+        string rawName = context.Request.Headers["X-BW-Book-Name"].FirstOrDefault() ?? "";
+        if (rawContentType.StartsWith("application/octet-stream", StringComparison.Ordinal)
+            && rawName.Length > 0)
+        {
+            string streamedName;
+            try
+            {
+                streamedName = Uri.UnescapeDataString(rawName).Trim();
+            }
+            catch (UriFormatException)
+            {
+                streamedName = "";
+            }
+            ReaderLibraryStore.SaveOutcome streamedOutcome = await ReaderLibraryStore
+                .SaveAsync(streamedName, context.Request.Body, serviceCancellationToken)
+                .ConfigureAwait(false);
+            AppendOutputPickupLog(
+                "library-upload\t" + streamedName + "\t" + streamedOutcome.Code + "\tstream");
+            await ReaderLibraryStore
+                .WriteOutcomeAsync(context, streamedOutcome, serviceCancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
         // ⚠ 用框架自带的 multipart 解析,不手搓 —— 手搓 multipart 是 bug 的
         // 温床,而这条链路一旦出错的表现是「书打不开而且不知道为什么」。
         if (!context.Request.HasFormContentType)

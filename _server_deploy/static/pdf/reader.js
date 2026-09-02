@@ -2969,6 +2969,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   wrap.__charBoxes = charBoxes;
   wrap.__charsBaseW = wrap.classList.contains('crop-on') ? (parseFloat(wrap.style.getPropertyValue('--full-w')) || wrap.clientWidth || 0) : (wrap.clientWidth || 0);   // #51:建层整页布局宽基准(去边=整页 --full-w,charBox 是整页坐标;非去边=clientWidth);重渲后按 char-layer 实时 BCR/baseW 换算
   try { window.__applyPhraseMergesLocal && window.__applyPhraseMergesLocal(wrap); } catch (_) {}   // 本地词组合并(收藏集驱动,教义:本地算)
+  _attachPageLayout(wrap);   // 区域划分同源(选中/点击/下划线/锁定一套)
   // 字符层刚就绪 → 把"等着钉到这一页正文上"的卡接回去。时机必须是这里而不是
   //   页面渲染完：卡是按**字符序号**定位的，charBoxes 没挂上之前定不出位置。
   try { window.__pageBindRetry && window.__pageBindRetry(num); } catch (_) {}
@@ -3020,6 +3021,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
             wrap.__pageWPt = d2.page_w; wrap.__pageHPt = d2.page_h;
             wrap.__furigana = d2.furigana || [];
             try { window.__applyPhraseMergesLocal && window.__applyPhraseMergesLocal(wrap); } catch (_) {}
+            _attachPageLayout(wrap);
             // 真 cv 可能替换掉首次用缓存猜值建立的整套字符几何。词锚必须
             // 对这份最终权威几何再挂一次，否则刷新后会一直等到下一次重渲。
             try { window.__pageBindRetry && window.__pageBindRetry(num); } catch (_) {}
@@ -3103,6 +3105,28 @@ function _vocabMarkKeys(mark) {
     if (key && !out.includes(key)) out.push(key);
   });
   return out;
+}
+
+// 区域划分同源（2026-09-02 用户拍板：选中/点击/下划线/锁定用同一套区域与分词）：
+// 字符层就位后向 runtime 的 pageTextProvider 要同页 layout（vision regions：表格
+// 单元格/段落/气泡，ranges 为源序字符区间 —— 语音快照与下划线用的就是这份），
+// 挂在 chars 数组上供 _charRangeBlockFilter 做区域约束。拿不到=无约束，行为同旧。
+function _attachPageLayout(wrap) {
+  try {
+    const chars = wrap && wrap.__charBoxes;
+    const page = parseInt(wrap && wrap.dataset && wrap.dataset.pageNum, 10) || 0;
+    const provider = window.BWReaderRuntime && window.BWReaderRuntime.pageTextProvider;
+    if (!chars || !page || !provider ||
+        provider.contract !== 'reader-page-text-provider/1' ||
+        typeof provider.pageChars !== 'function') return;
+    Promise.resolve(provider.pageChars(page)).then((result) => {
+      if (!result || wrap.__charBoxes !== chars) return;   // 期间字符层换代 → 丢弃
+      const layout = result.layout;
+      if (!layout || !Array.isArray(layout.regions) || !layout.regions.length) return;
+      chars.__layout = layout;
+      chars.__regionByOi = null;   // 惰性重建
+    }).catch(() => {});
+  } catch (_) {}
 }
 
 function renderVocabUnderlines(pw, marks) {
@@ -4452,7 +4476,16 @@ function _charSpanBlocks(blocks, startId, endId) {
   return allowed;
 }
 
+// 选中文本 / 选中高亮框 / 保存高亮 三条路共用的唯一过滤器：块连通过滤 +
+// 区域约束（2026-09-02 用户拍板"同一套区域划分"）。
 function _charRangeBlockFilter(chars, sIdx, eIdx) {
+  // ⚠ 两个辅助必须是**内部函数**：契约测试按函数名逐个抽取源码进 VM 运行，
+  //   外置辅助会 ReferenceError（2026-09-02 selection-highlight-line-split 实锤）。
+  const base = _base(chars, sIdx, eIdx);
+  const region = _region(chars, sIdx, eIdx);
+  return region ? (c) => base(c) && region(c) : base;
+
+  function _base(chars, sIdx, eIdx) {
   if (chars[sIdx] && chars[eIdx]
       && chars[sIdx]._selectionBlockFilter === false
       && chars[eIdx]._selectionBlockFilter === false) return () => true;
@@ -4473,6 +4506,34 @@ function _charRangeBlockFilter(chars, sIdx, eIdx) {
   // 只有孤立的才剔除。这样同段多行照常全选,旁边的气泡仍然进不来。
   const allowed = _charSpanBlocks(blocks, sb, eb);
   return (c) => allowed.has(_charBlockId(c)) || (_charBlockId(c) < 0 && !!c.sp);
+  }
+
+  // 区域约束：两端同属一个 layout region（同一表格单元格/段落/气泡）时，选区只收
+  // 该 region 的字符。OCR 行块贯通表格列，块过滤挡不住同视觉行的左列（2026-09-02
+  // 实锤：トートマ..ン 拖选卷进「味がある。」）。两端不同 region（跨格/跨段拖选）
+  // 不加约束沿旧行为；页面没有 layout 也同旧。region 成员按 _oi（源序）判定。
+  function _region(chars, sIdx, eIdx) {
+  const layout = chars && chars.__layout;
+  if (!layout || !Array.isArray(layout.regions) || !layout.regions.length) return null;
+  let byOi = chars.__regionByOi;
+  if (!byOi) {
+    byOi = new Map();
+    layout.regions.forEach((region, ri) => {
+      const ranges = region && Array.isArray(region.ranges) ? region.ranges : [];
+      ranges.forEach((range) => {
+        if (!Array.isArray(range) || range.length < 2) return;
+        const a = range[0] | 0, b = range[1] | 0;
+        for (let oi = Math.min(a, b); oi <= Math.max(a, b); oi++) byOi.set(oi, ri);
+      });
+    });
+    chars.__regionByOi = byOi;
+  }
+  const oiOf = (c, i) => ((c && c._oi != null) ? c._oi : i) | 0;
+  const rs = byOi.get(oiOf(chars[sIdx], sIdx));
+  const re = byOi.get(oiOf(chars[eIdx], eIdx));
+  if (rs == null || re == null || rs !== re) return null;
+  return (c) => !!c.sp || byOi.get(oiOf(c, chars.indexOf(c))) === rs;
+  }
 }
 
 // 把字符区间投影成视觉矩形。实时蓝选区与保存后的持久高亮共用这一份：

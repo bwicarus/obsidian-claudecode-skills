@@ -313,7 +313,16 @@ function _charSpanBlocks(blocks, startId, endId) {
   return allowed;
 }
 
+// 选中文本 / 选中高亮框 / 保存高亮 三条路共用的唯一过滤器：块连通过滤 +
+// 区域约束（2026-09-02 用户拍板"同一套区域划分"）。
 function _charRangeBlockFilter(chars, sIdx, eIdx) {
+  // ⚠ 两个辅助必须是**内部函数**：契约测试按函数名逐个抽取源码进 VM 运行，
+  //   外置辅助会 ReferenceError（2026-09-02 selection-highlight-line-split 实锤）。
+  const base = _base(chars, sIdx, eIdx);
+  const region = _region(chars, sIdx, eIdx);
+  return region ? (c) => base(c) && region(c) : base;
+
+  function _base(chars, sIdx, eIdx) {
   if (chars[sIdx] && chars[eIdx]
       && chars[sIdx]._selectionBlockFilter === false
       && chars[eIdx]._selectionBlockFilter === false) return () => true;
@@ -334,6 +343,34 @@ function _charRangeBlockFilter(chars, sIdx, eIdx) {
   // 只有孤立的才剔除。这样同段多行照常全选,旁边的气泡仍然进不来。
   const allowed = _charSpanBlocks(blocks, sb, eb);
   return (c) => allowed.has(_charBlockId(c)) || (_charBlockId(c) < 0 && !!c.sp);
+  }
+
+  // 区域约束：两端同属一个 layout region（同一表格单元格/段落/气泡）时，选区只收
+  // 该 region 的字符。OCR 行块贯通表格列，块过滤挡不住同视觉行的左列（2026-09-02
+  // 实锤：トートマ..ン 拖选卷进「味がある。」）。两端不同 region（跨格/跨段拖选）
+  // 不加约束沿旧行为；页面没有 layout 也同旧。region 成员按 _oi（源序）判定。
+  function _region(chars, sIdx, eIdx) {
+  const layout = chars && chars.__layout;
+  if (!layout || !Array.isArray(layout.regions) || !layout.regions.length) return null;
+  let byOi = chars.__regionByOi;
+  if (!byOi) {
+    byOi = new Map();
+    layout.regions.forEach((region, ri) => {
+      const ranges = region && Array.isArray(region.ranges) ? region.ranges : [];
+      ranges.forEach((range) => {
+        if (!Array.isArray(range) || range.length < 2) return;
+        const a = range[0] | 0, b = range[1] | 0;
+        for (let oi = Math.min(a, b); oi <= Math.max(a, b); oi++) byOi.set(oi, ri);
+      });
+    });
+    chars.__regionByOi = byOi;
+  }
+  const oiOf = (c, i) => ((c && c._oi != null) ? c._oi : i) | 0;
+  const rs = byOi.get(oiOf(chars[sIdx], sIdx));
+  const re = byOi.get(oiOf(chars[eIdx], eIdx));
+  if (rs == null || re == null || rs !== re) return null;
+  return (c) => !!c.sp || byOi.get(oiOf(c, chars.indexOf(c))) === rs;
+  }
 }
 
 // 把字符区间投影成视觉矩形。实时蓝选区与保存后的持久高亮共用这一份：
