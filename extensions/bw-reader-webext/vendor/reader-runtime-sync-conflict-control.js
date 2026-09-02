@@ -255,6 +255,7 @@
     if (runtimeError && typeof runtimeError === 'object') {
       return {
         code: safeErrorCode(runtimeError.code),
+        message: safeErrorMessage(runtimeError.message),
         retryable: runtimeError.retryable !== false
       };
     }
@@ -263,10 +264,15 @@
     if (server && typeof server === 'object' && server.ok === false) {
       return {
         code: safeErrorCode(server.code),
+        message: safeErrorMessage(server.error),
         retryable: server.retryable !== false
       };
     }
     return null;
+  }
+  // 错误消息只做展示:去控制字符、截 200,不参与任何判定
+  function safeErrorMessage(value) {
+    return String(value == null ? '' : value).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 200);
   }
   function stateOf(runtimeStatus, conflictCount, failure) {
     if (
@@ -375,6 +381,15 @@
       });
     }
 
+    // 本次 runNow 的 server 车道失败文本优先(rawResult 是刚跑完的),其次 runtime 状态里的;
+    // 两者都只在错误码是 App 自己桥写的 BW_NATIVE_SYNC_* 时放行。
+    function nativeBridgeReason(server, failure) {
+      if (server && server.ok === false && /^BW_NATIVE_SYNC/.test(safeErrorCode(server.code))) {
+        return safeErrorMessage(server.error);
+      }
+      if (failure && /^BW_NATIVE_SYNC/.test(failure.code)) return failure.message || '';
+      return '';
+    }
     function manualResult(requestId, runtimeStatus, rawResult) {
       runtimeStatus = runtimeStatus || {};
       rawResult = rawResult && typeof rawResult === 'object'
@@ -407,6 +422,9 @@
         pendingLocal: server.pendingLocal === true,
         conflictCount: summary.total,
         errorCode: skippedCode || (failure ? failure.code : ''),
+        // 只放行 App 自己的同步桥写的原因(BW_NATIVE_SYNC_*:哪条 change 哪个字段不合规)。
+        // 服务器/传输层的上游文本仍按契约不外泄(见「不泄漏上游文本」契约);状态视图也不带消息。
+        errorMessage: skippedCode ? '' : nativeBridgeReason(server, failure),
         retryable: failure ? failure.retryable : false
       };
     }

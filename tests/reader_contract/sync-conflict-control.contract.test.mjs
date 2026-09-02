@@ -275,6 +275,7 @@ test("syncNow 严格校验请求并复用同一 requestId 的 receipt", async ()
     "conflictCount",
     "contract",
     "errorCode",
+    "errorMessage",
     "owner",
     "pendingLocal",
     "requestId",

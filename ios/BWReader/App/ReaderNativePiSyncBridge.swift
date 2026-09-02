@@ -659,7 +659,9 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
                 "contract", "deviceId", "snapshotId", "offset", "limit",
               ]),
               let snapshotID = payload["snapshotId"] as? String,
-              safeName(snapshotID),
+              // 空 snapshotId = 请服务器新建快照(relay 2279 行:空则生成 snap-…)。首次完整对账
+              // 必然是空的;此前这里要求非空 → 完整对账在桥这一步就被拒,从未到过服务器(2026-09-03)。
+              snapshotID.isEmpty || safeName(snapshotID),
               isSafeInteger(payload["offset"], minimum: 0),
               isSafeInteger(payload["limit"], minimum: 1, maximum: 100)
         else { return false }
@@ -712,7 +714,11 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
             }
             return "未定位到具体字段"
         }
-        return "snapshot 载荷不合规：keys=" + payload.keys.sorted().joined(separator: ",")
+        var detail = "snapshot 载荷不合规：keys=" + payload.keys.sorted().joined(separator: ",")
+        if let snapshotID = payload["snapshotId"] as? String, !snapshotID.isEmpty, !safeName(snapshotID) { detail += " snapshotId 非法" }
+        if !isSafeInteger(payload["offset"], minimum: 0) { detail += " offset<0" }
+        if !isSafeInteger(payload["limit"], minimum: 1, maximum: 100) { detail += " limit 不在 1…100" }
+        return detail
     }
 
     private static let allowedCollections: Set<String> = [
