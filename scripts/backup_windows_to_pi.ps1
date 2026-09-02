@@ -15,7 +15,9 @@ $items = @(
 )
 # 排除可重建的大缓存（与盘点文档第二节 C 类一致）
 $exclude = @("pdf-page-img", "pdf-page-backups", "backup-pdfs", "book-preprocess", "model3d",
-             "google-vision-ocr", "web-rescache", "epub-extract", "pdf-compressed", "logs", "pc-ocr-cache", "models")
+             "google-vision-ocr", "web-rescache", "epub-extract", "pdf-compressed", "logs", "pc-ocr-cache", "models",
+             # BWReader 本地目录里可重建/可重装的大块(首跑实测 8.5G,其中 venv 5.5G、历次 ReaderPC 发布 3.3G)
+             "reader-pc-ocr-venv", "ReaderPC-Server", "garbage-assistant")
 ssh pi "mkdir -p ~/backups/windows-server" | Out-Null
 foreach ($item in $items) {
   if (-not (Test-Path $item.Src)) { Write-Host "[skip] $($item.Src) 不存在"; continue }
