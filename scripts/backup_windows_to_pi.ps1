@@ -1,4 +1,4 @@
-# Windows → Pi 手动备份（用户 2026-09-02 拍板："pi 的本地备份应该是手动从 Windows 上进行的"）。
+﻿# Windows → Pi 手动备份（用户 2026-09-02 拍板："pi 的本地备份应该是手动从 Windows 上进行的"）。
 # Windows 是唯一服务器；Pi 只收这份快照，不再被任何客户端直接写。
 # 用法：powershell -ExecutionPolicy Bypass -File scripts\backup_windows_to_pi.ps1 [-Root C:\tmp\reader-card-anchor-release]
 # 需要：ssh 别名 `pi`（~/.ssh/config），Pi 上存在 ~/backups/windows-server/。
