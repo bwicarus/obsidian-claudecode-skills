@@ -321,6 +321,19 @@ struct ReaderLocalLibraryView: View {
                         Text("上传没成功：\(failure)（再点「打开」重试）")
                             .font(.caption2)
                             .foregroundStyle(.red)
+                    } else if openBusy.contains(book.id) {
+                        // 「打开」按下后到真正开书之间的每一步都要有状态：问服务器清单
+                        // 可能要几秒(Tailscale),这段静默曾被读成"点了没反应"。
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.mini)
+                            Text(openStage[book.id] ?? "正在打开…")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if let failure = openFailures[book.id] {
+                        Text("没能打开：\(failure)")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
                     }
                     if book.format == .pdf {
                         preprocessingToggleButton(
@@ -360,11 +373,11 @@ struct ReaderLocalLibraryView: View {
                     .buttonStyle(.bordered)
                     .disabled(remote.activeBookID != nil)
                 }
-                Button(backupGate.uploading.contains(book.id) ? "上传中…" : "打开") {
+                Button("打开") {
                     Task { await openLocal(book) }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(backupGate.uploading.contains(book.id))
+                .disabled(backupGate.uploading.contains(book.id) || openBusy.contains(book.id))
             }
 
             if expandedPreprocessingBookIDs.contains("local:\(book.id)") {
@@ -1437,6 +1450,11 @@ struct ReaderLocalLibraryView: View {
     // 09-02 用户看到的"关一次弹一次、百分比不动"就是它;那两样画在书那一行。
     @State private var backupNotice: String?
     @ObservedObject private var backupGate = ReaderBookBackupGate.shared
+    /// 「打开」按下后的阶段与结果，画在书那一行。任何一条提前返回都必须在这里留字，
+    /// 不许静默（silent-failure 规则）。
+    @State private var openBusy: Set<String> = []
+    @State private var openStage: [String: String] = [:]
+    @State private var openFailures: [String: String] = [:]
 
     private func openLocal(
         _ book: ReaderLocalBookRecord,
@@ -1451,12 +1469,29 @@ struct ReaderLocalLibraryView: View {
         // 代价是服务器没开时新书打不开 —— 用户知道这个代价而仍然选了它,
         // 理由是另一条路(能读但标"未备份")会留下一个需要人注意的标记,
         // 而那种标记迟早被忽略,然后在重装时才发现。
-        if !(await passesBackupGate(book)) { return }
+        openBusy.insert(book.id)
+        openFailures.removeValue(forKey: book.id)
+        openStage[book.id] = "正在核对\(ReaderServer.displayName)书库…"
+        defer {
+            openBusy.remove(book.id)
+            openStage.removeValue(forKey: book.id)
+        }
+        if !(await passesBackupGate(book)) {
+            // 闸没放行：上传失败已由闸写在行内(uploadFailures)，其余两种真阻塞走弹窗；
+            // 这里再兜一层，保证不存在"什么都没显示"的返回路径。
+            if backupGate.uploadFailures[book.id] == nil, backupNotice == nil {
+                openFailures[book.id] = backupGate.lastError ?? "备份闸没放行，原因未知"
+            }
+            return
+        }
+        openStage[book.id] = "正在打开…"
         if await reader.openLocalBook(book, library: library) {
             if allowAutomaticPreprocessing {
                 scheduleAutomaticNativeOCR(for: book)
             }
             dismiss()
+        } else {
+            openFailures[book.id] = "本机 Reader 拒绝了这次打开，详情见书库底部的提示"
         }
     }
 

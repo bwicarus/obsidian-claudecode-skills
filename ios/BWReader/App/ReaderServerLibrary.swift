@@ -80,8 +80,10 @@ enum ReaderServerLibrary {
         guard let url = ReaderServer.url("/reader-library/list") else {
             throw Failure.malformed
         }
+        // 只是问一张清单：20s 还没回就是"连不上"，别让「打开」在这里静静等 10 分钟
+        // （09-02 用户："点击后没有任何反应"——闸在问清单时界面没有任何状态）。
         let data = try await post(url, body: Data("{}".utf8),
-                                  contentType: "application/json")
+                                  contentType: "application/json", timeout: 20)
         guard let payload = try? JSONDecoder().decode(
             ListResponse.self, from: data), payload.ok else {
             throw Failure.malformed
@@ -177,7 +179,8 @@ enum ReaderServerLibrary {
     }
 
     private static func post(
-        _ url: URL, body: Data, contentType: String
+        _ url: URL, body: Data, contentType: String,
+        timeout: TimeInterval = 600
     ) async throws -> Data {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -185,7 +188,7 @@ enum ReaderServerLibrary {
         // ⚠ 桥的第一道闸就是 Origin，少了它是 403 而不是"没鉴权"。
         request.setValue(ReaderServer.origin, forHTTPHeaderField: "Origin")
         // 书可能很大，给足时间但要有上限 —— 无限等在界面上跟死掉一样。
-        request.timeoutInterval = 600
+        request.timeoutInterval = timeout
         request.httpBody = body
         do {
             let (data, response) = try await URLSession.shared.data(for: request)

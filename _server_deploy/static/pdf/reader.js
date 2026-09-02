@@ -4578,6 +4578,12 @@ function _charRangeToVisualRects(chars, sIdx, eIdx, coordinateSpace, keepSet) {
     Math.max(0, Math.max(a0, b0) - Math.min(a1, b1));
   const entries = [];
   const lastRectByBlock = new Map();
+  // 空白盒(sp)只用来填同一行两个入选实字符之间的缝:它没有墨迹,自己不该成框。
+  // 做法:sp 先进 pending,等同一行后面再来一个实字符才一起入组;行首(前面还没有
+  // 实字符)的直接丢,行尾(后面没有实字符)的留在 pending 里自然作废。
+  // 596 实锤:左列「用。」行尾的 sp 通过了区域过滤(sp 无归属一律放行),独自成框。
+  const pendingSp = new Map();   // continuityKey → entries[]
+  const seenReal = new Set();    // 该行已出现过入选实字符
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
     if (!_inBlk(c)) continue;
@@ -4606,8 +4612,18 @@ function _charRangeToVisualRects(chars, sIdx, eIdx, coordinateSpace, keepSet) {
       }
     }
     if (!rect) continue;
-    entries.push({x0: rect.x0, y0: rect.y0, x1: rect.x1, y1: rect.y1,
-      axis, lineKey, first: i});
+    const entry = {x0: rect.x0, y0: rect.y0, x1: rect.x1, y1: rect.y1,
+      axis, lineKey, first: i};
+    if (c.sp) {
+      if (seenReal.has(continuityKey)) {
+        (pendingSp.get(continuityKey) || pendingSp.set(continuityKey, []).get(continuityKey)).push(entry);
+      }
+    } else {
+      const held = pendingSp.get(continuityKey);
+      if (held) { entries.push(...held); pendingSp.delete(continuityKey); }
+      entries.push(entry);
+      seenReal.add(continuityKey);
+    }
     lastRectByBlock.set(continuityKey, rect);
   }
 
@@ -4668,12 +4684,16 @@ function _charsRangeToText(chars, sIdx, eIdx, keepSet) {
   for (let i = sIdx; i <= eIdx; i++) {
     const c = chars[i];
     if (!_inBlk(c)) continue;   // 别块(另一栏/题号)不计入
-    if (lastChar) {
+    // 空白盒(c.sp)不参与换行/间距判定 —— 它只把「有过一个空白」记到 _pendSp,
+    // 由下一个实字符决定要不要产出空格。否则行首的 sp 盒自己先跟上一行比 dy、
+    // 又永远判不进 CJK,于是抢先写入换行(コチュジャ|[sp]ン → 「コチュジャ ン」, 09-02 实锤;注释里不能出现反斜杠 n 转义,契约 VM 会把它当真换行)。
+    if (lastChar && !c.sp) {
       // 两边都是 CJK(日/中,无词间空格)→ 跨行/间隙都直接拼,不插换行或空格(否则 公表する 跨行被拆成「公 表する」无法识别)
       // cjkPair 按上一个**实字符**判(空白盒 c=' ' 永远判不进 CJK,
       // 行尾带 sp 盒的跨行 CJK 词会被误插换行 —— バンセ[sp]|オ 实锤)。
-      const cjkPair = _cjk(c.c) && _cjk(((_lastReal || lastChar).c));
-      const dy = Math.abs(c.top - lastChar.top);
+      const _prev = _lastReal || lastChar;   // 换行判定也按上一个实字符,不按空白盒
+      const cjkPair = _cjk(c.c) && _cjk(_prev.c);
+      const dy = Math.abs(c.top - _prev.top);
       if (dy > c.height * 0.5) { if (!cjkPair) text += '\n'; }
       else {
         const gap = c.left - (lastChar.left + lastChar.width);
@@ -4815,12 +4835,16 @@ function _selByCharRange(pw, sIdx, eIdx, keepSet) {
     if (_keep && !_keep.has(i) && !c.sp) continue;   // 程序性选中=精确集,别列夹带剔除
     if (!_inBlk(c)) continue;   // 跨块过滤：别块(题号/另一栏)字符不计入选中文本
     if (!c.sp) _selectedIdx.push(i);   // 真正入选的字符 → _charSel.keep(唯一的选区事实)
-    if (lastChar) {
+    // 空白盒(c.sp)不参与换行/间距判定 —— 它只把「有过一个空白」记到 _pendSp,
+    // 由下一个实字符决定要不要产出空格。否则行首的 sp 盒自己先跟上一行比 dy、
+    // 又永远判不进 CJK,于是抢先写入换行(コチュジャ|[sp]ン → 「コチュジャ ン」, 09-02 实锤;注释里不能出现反斜杠 n 转义,契约 VM 会把它当真换行)。
+    if (lastChar && !c.sp) {
       // 两边都是 CJK(日/中,无词间空格)→ 跨行/间隙都直接拼,不插换行或空格(公表する 跨行不再被拆「公 表する」)
       // cjkPair 按上一个**实字符**判(空白盒 c=' ' 永远判不进 CJK,
       // 行尾带 sp 盒的跨行 CJK 词会被误插换行 —— バンセ[sp]|オ 实锤)。
-      const cjkPair = _cjk(c.c) && _cjk(((_lastReal || lastChar).c));
-      const dy = Math.abs(c.top - lastChar.top);
+      const _prev = _lastReal || lastChar;   // 换行判定也按上一个实字符,不按空白盒
+      const cjkPair = _cjk(c.c) && _cjk(_prev.c);
+      const dy = Math.abs(c.top - _prev.top);
       if (dy > c.height * 0.5) {
         if (!cjkPair) text += '\n';
       } else {
@@ -4932,15 +4956,43 @@ function _clampToolbarIntoView(mainEl, selTopY) {
 //   tap 字符落在任一登记词组匹配段内 → 整段选中(取最长匹配)。
 //   竖直跳变 >2.2 行高拒并 —— 服务端同款守卫,防 reading-order 相邻但
 //   视觉分离的字误并。选区闭区间交给 _selByCharRange 既有跨块过滤。
+// 字符 → 区域键(表格按「格」tableId:row:column 归并,非表格 region 各自为一区;
+// 无版面数据 → null)。与 _charRangeBlockFilter._region 同一口径、同一缓存
+// chars.__regionByOi —— 选中/点击/下划线/锚定用同一套区域划分(用户 09-02 拍板)。
+// (_region 内嵌了一份同样的建表逻辑,因为契约按函数名把它抽进 VM,引用不到这里。)
+function _charRegionKeyOf(chars) {
+  const layout = chars && chars.__layout;
+  if (!layout || !Array.isArray(layout.regions) || !layout.regions.length) return () => null;
+  let byOi = chars.__regionByOi;
+  if (!byOi) {
+    byOi = new Map();
+    layout.regions.forEach((region, ri) => {
+      const key = (region && region.kind === 'table-cell')
+        ? 't' + region.tableId + ':' + region.row + ':' + region.column : 'r' + ri;
+      (region && region.ranges || []).forEach((range) => {
+        const a = Math.min(range[0], range[1]) | 0, b = Math.max(range[0], range[1]) | 0;
+        for (let oi = a; oi <= b; oi++) byOi.set(oi, key);
+      });
+    });
+    chars.__regionByOi = byOi;
+  }
+  return (i) => { const c = chars[i]; const k = byOi.get(((c && c._oi != null) ? c._oi : i) | 0); return k == null ? null : k; };
+}
+
 function _phraseExpandFromChar(chars, idx) {
   try {
     const favs = (typeof _phraseFavSet !== 'undefined' && _phraseFavSet) ? _phraseFavSet : null;
     const marks = (typeof _phraseMarkSet !== 'undefined' && _phraseMarkSet) ? _phraseMarkSet : null;
     if ((!favs || !favs.size) && (!marks || !marks.size)) return null;
+    // 源序流只取**所点字符所在区域**(表格=同一格):OCR 表格页的源序按行流过
+    // 各列,跨行词组两半之间夹着左列字符,全页流永远 indexOf 不到(コチュジャ|
+    // 用。|ン 实锤 09-02);选中已按格约束,点击也必须按同一套划分。
+    const keyOf = _charRegionKeyOf(chars);
+    const tapKey = keyOf(idx);
     const ord = [];
     for (let i = 0; i < chars.length; i++) {
       const cc = chars[i];
-      if (cc && !cc.sp && cc.c) ord.push(i);
+      if (cc && !cc.sp && cc.c && keyOf(i) === tapKey) ord.push(i);
     }
     ord.sort((a, b) =>
       ((chars[a]._oi != null ? chars[a]._oi : a) | 0) -
@@ -6216,11 +6268,20 @@ function _applyPhraseMergesLocal(pw) {
     ((chars[a]._oi != null ? chars[a]._oi : a) | 0) -
     ((chars[b]._oi != null ? chars[b]._oi : b) | 0));
   const phraseHits = [];
-  let str = ''; const pos = [];
+  // 按区域(表格=格)分流再匹配:与 _phraseExpandFromChar / 选中区域约束同一口径。
+  // 全页单流在 OCR 表格页会被左列字符打断(コチュジャ|用。|ン),跨行词组既不合并
+  // 也不画下划线。
+  const keyOf = (typeof _charRegionKeyOf === 'function') ? _charRegionKeyOf(chars) : (() => null);
+  const streams = new Map();
   for (const i of ordIdx) {
+    const k = keyOf(i);
+    let st = streams.get(k);
+    if (!st) { st = { str: '', pos: [] }; streams.set(k, st); }
     const cc = chars[i].c != null ? String(chars[i].c) : '';
-    for (let j = 0; j < cc.length; j++) { str += cc[j]; pos.push(i); }
+    for (let j = 0; j < cc.length; j++) { st.str += cc[j]; st.pos.push(i); }
   }
+  for (const st of streams.values()) {
+  const str = st.str, pos = st.pos;
   for (const t0 of favs) {
     const t = String(t0 || '').replace(/[\s\u3000]/g, '');   // #55:去空白与页面无空白 str 对齐(跨行/夹空格词组本地也合并)
     if (!t) continue;
@@ -6251,6 +6312,7 @@ function _applyPhraseMergesLocal(pw) {
       for (const k of hit) { const cb = chars[k]; if (cb._w0 === undefined) cb._w0 = cb.w; cb.w = wUse; }
       phraseHits.push({ text: t, idx: hit });
     }
+  }
   }
   _syncPhraseUnderlines(pw, chars, phraseHits);
 }

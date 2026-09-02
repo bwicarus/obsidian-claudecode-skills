@@ -366,11 +366,20 @@ function _applyPhraseMergesLocal(pw) {
     ((chars[a]._oi != null ? chars[a]._oi : a) | 0) -
     ((chars[b]._oi != null ? chars[b]._oi : b) | 0));
   const phraseHits = [];
-  let str = ''; const pos = [];
+  // 按区域(表格=格)分流再匹配:与 _phraseExpandFromChar / 选中区域约束同一口径。
+  // 全页单流在 OCR 表格页会被左列字符打断(コチュジャ|用。|ン),跨行词组既不合并
+  // 也不画下划线。
+  const keyOf = (typeof _charRegionKeyOf === 'function') ? _charRegionKeyOf(chars) : (() => null);
+  const streams = new Map();
   for (const i of ordIdx) {
+    const k = keyOf(i);
+    let st = streams.get(k);
+    if (!st) { st = { str: '', pos: [] }; streams.set(k, st); }
     const cc = chars[i].c != null ? String(chars[i].c) : '';
-    for (let j = 0; j < cc.length; j++) { str += cc[j]; pos.push(i); }
+    for (let j = 0; j < cc.length; j++) { st.str += cc[j]; st.pos.push(i); }
   }
+  for (const st of streams.values()) {
+  const str = st.str, pos = st.pos;
   for (const t0 of favs) {
     const t = String(t0 || '').replace(/[\s\u3000]/g, '');   // #55:去空白与页面无空白 str 对齐(跨行/夹空格词组本地也合并)
     if (!t) continue;
@@ -401,6 +410,7 @@ function _applyPhraseMergesLocal(pw) {
       for (const k of hit) { const cb = chars[k]; if (cb._w0 === undefined) cb._w0 = cb.w; cb.w = wUse; }
       phraseHits.push({ text: t, idx: hit });
     }
+  }
   }
   _syncPhraseUnderlines(pw, chars, phraseHits);
 }
