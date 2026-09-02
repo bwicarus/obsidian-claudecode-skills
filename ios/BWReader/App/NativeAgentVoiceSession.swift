@@ -17,9 +17,9 @@ struct NativeAgentVoiceContext: Sendable, Equatable {
 struct NativeAgentVoiceConfiguration: Sendable, Equatable {
     static let production = NativeAgentVoiceConfiguration(
         endpoint: URL(
-            string: "wss://bwicarus.taile44d0c.ts.net/voice-rt"
+            string: "wss://bwicarus-2.taile44d0c.ts.net/voice-rt"
         )!,
-        origin: "https://bwicarus.taile44d0c.ts.net"
+        origin: "https://bwicarus-2.taile44d0c.ts.net"
     )
 
     let endpoint: URL

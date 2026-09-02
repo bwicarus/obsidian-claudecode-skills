@@ -20,7 +20,7 @@ import WebKit
 enum ReaderWatchTokenProvisioning {
     /// 与 `ReaderWatchVoiceTurn.piOrigin` 同源。刻意各写一份而不互相引用：
     /// 那个类型是 WebView 的消息处理器，为了一个常量把生命周期绑上去不划算。
-    static let piOrigin = "https://bwicarus.taile44d0c.ts.net"
+    static let piOrigin = "https://bwicarus-2.taile44d0c.ts.net"
 
     enum Failure: LocalizedError {
         case notSignedIn

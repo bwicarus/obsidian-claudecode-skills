@@ -270,7 +270,7 @@ final class ReaderPiOCRClient {
     private static let attachmentContract = "reader-book-attachments/1"
     private static let maxAttachmentBytes: Int64 = 32 * 1_024 * 1_024
     private static let maxBundleBytes: Int64 = 512 * 1_024 * 1_024
-    private let baseURL = URL(string: "https://bwicarus.taile44d0c.ts.net/")!
+    private let baseURL = URL(string: "https://bwicarus-2.taile44d0c.ts.net/")!
     private let redirectDelegate: ReaderPiOCRRedirectDelegate
     private let session: URLSession
 

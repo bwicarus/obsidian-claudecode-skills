@@ -1123,7 +1123,9 @@ test("Swift sync bridge keeps namespace and capabilities private and exposes log
   assert.doesNotMatch(NATIVE_SYNC_BRIDGE, /print\(|NSLog\(|os_log/);
   assert.match(PI_LOGIN, /ReaderNativePiSyncBridge\.loginURL/);
   assert.match(PI_LOGIN, /websiteDataStore = dataStore/);
-  assert.match(PI_LOGIN, /bwicarus\.taile44d0c\.ts\.net/);
+  // 2026-09-02 Pi 整体退出:登录面固定指向 Windows 上的 Flask(bwicarus-2)。
+  assert.match(PI_LOGIN, /bwicarus-2\.taile44d0c\.ts\.net/);
+  assert.doesNotMatch(PI_LOGIN, /"https:\/\/bwicarus\.taile44d0c\.ts\.net/);
   // loginFlowPaths 语义修正后只含登录流程本身；dashboard 是登录后的
   // 落点（跳到列表之外即视为登录成功），不再在列表里。
   assert.match(PI_LOGIN, /"\/login", "\/logout", "\/register",/);

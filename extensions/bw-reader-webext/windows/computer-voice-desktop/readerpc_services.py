@@ -20,7 +20,7 @@ CODEX_VOICE_REGISTRY_PATH = (
     r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager"
     r"\ConsentStore\microphone\OpenAI.CodexBeta_2p2nqsd0c76g0"
 )
-DEFAULT_PI_ORIGIN = "https://bwicarus.taile44d0c.ts.net"
+DEFAULT_PI_ORIGIN = "https://bwicarus-2.taile44d0c.ts.net"   # 2026-09-02 Pi 整体退出:协调/发布在 Windows 的 Flask
 STATUS_LIMIT_BYTES = 128 * 1024
 
 PHASE_LABELS = {

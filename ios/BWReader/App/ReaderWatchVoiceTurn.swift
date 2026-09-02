@@ -50,7 +50,7 @@ enum ReaderWatchVoiceTurn {
     /// Pi 的基址。与 ReaderNativePiGateway.piHost 同源，改一处要改两处 ——
     /// 但故意不去引用它：那个类是 WebView 的消息处理器，为了一个常量把
     /// 生命周期绑上去不划算。
-    static let piOrigin = "https://bwicarus.taile44d0c.ts.net"
+    static let piOrigin = "https://bwicarus-2.taile44d0c.ts.net"
 
     struct Outcome {
         let transcript: String

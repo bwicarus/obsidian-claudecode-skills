@@ -89,3 +89,21 @@ ssh pi 'find ~/webapp/data/reader-sidecars/by-user/1 -type f -printf "%TY-%Tm-%T
   `%LOCALAPPDATA%\BWReader\pc-ocr-cache` 只是页图渲染缓存，不含字符层。迁移第 7 项因此不是"停 Pi OCR"
   那么简单，要把协调/发布搬到桥。
 - 桥装完 ReaderPC 不复活的根因与恢复步骤见 `error-prone-code-removal-20260902.md` 末条。
+
+## 六、整体搬迁（2026-09-02 深夜，用户："继续搬，全搬过去"）
+
+做法不是逐条重写 99 条路由，而是**把 Pi 上那套 Flask 服务原样跑在 Windows**：
+
+- 代码：`C:	mpeader-card-anchor-release`（与 Pi 同分支 `codex/card-anchor-release-20260820`），
+  `_server_deploy/run_local.ps1` → 托盘守护 `local_supervisor.pyw` → `python app.py` 监听 `127.0.0.1:5000`；
+  `.env.local` 在工作树根（本机新 SECRET_KEY，未搬 Pi 密钥；账号库 app.db 随 webapp/data 复制，密码照旧）。
+  开机自启：HKCU Run `BwicarusLocal` → pythonw + local_supervisor.pyw（守护自己读 .env.local）。
+- 数据：`~/webapp/data` → `webapp-data/`（30M）；`~/claude/state` 里用户数据与派生层（词汇/停留/词典缓存/
+  助手/复习/语法/收藏/OCR 发布 315M/KG/FTS 索引…）→ `state/`。页图缓存等 10G 未搬（可重建）。
+- 暴露：`tailscale serve` 把 `/pdf /api /login /logout /static /voice-rt /auth /profile /skilltree /insights
+  /private /dashboard /control /register /history /admin` 前缀映射到 `127.0.0.1:5000`，与桥的 `/reader-*` 共存于
+  `https://bwicarus-2.taile44d0c.ts.net`。Flask 自带 ProxyFix，认 X-Forwarded-Proto。
+- 客户端：App 10 处 Pi 主机常量 → `bwicarus-2`（网关/登录面/同步桥/远端书库/Pi OCR/手表/语音）；
+  ReaderPC `DEFAULT_PI_ORIGIN` → Windows（0.1.116）。App 换主机后需重新登录一次（同账号）。
+- 仍待办：Pi 上的 `mcp-server`(8766)/`watch_*` 桥、spacy 语法常驻进程（Windows 未装 spacy-venv）、
+  Windows→Pi 的手动备份脚本、验证 App 登录与预处理链路后停 Pi 的 webapp/book-ocr 服务。

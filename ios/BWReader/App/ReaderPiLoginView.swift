@@ -79,7 +79,7 @@ private struct ReaderPiLoginWebView: UIViewRepresentable {
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
-        private static let allowedHost = "bwicarus.taile44d0c.ts.net"
+        private static let allowedHost = "bwicarus-2.taile44d0c.ts.net"
         /// 属于登录流程本身的路径。跳到**这之外**就意味着已经通过了登录。
         private static let loginFlowPaths: Set<String> = [
             "/login", "/logout", "/register",

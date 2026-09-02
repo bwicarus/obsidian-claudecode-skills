@@ -9,7 +9,7 @@ enum DirectVoiceProtocol {
     static let endpoint = URL(
         string: "wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1"
     )!
-    static let origin = "https://bwicarus.taile44d0c.ts.net"
+    static let origin = "https://bwicarus-2.taile44d0c.ts.net"
 
     static let maximumMessageBytes = 256 * 1024
     static let maximumPendingRequests = 16

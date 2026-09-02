@@ -23,7 +23,7 @@ private final class ReaderNativeNoRedirectDelegate: NSObject,
 final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply {
     static let messageName = "bwNativePiSync"
     static let loginURL = URL(
-        string: "https://bwicarus.taile44d0c.ts.net/login"
+        string: "https://bwicarus-2.taile44d0c.ts.net/login"
     )!
 
     private static let requestContract = "reader-native-pi-sync-request/1"
@@ -36,7 +36,7 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
     private static let maximumRequestBytes = 2 * 1_024 * 1_024
     private static let maximumResponseBytes = 4 * 1_024 * 1_024
     private static let piOrigin = URL(
-        string: "https://bwicarus.taile44d0c.ts.net"
+        string: "https://bwicarus-2.taile44d0c.ts.net"
     )!
     private static let familyDefaultsKey = "BWReaderNativeSyncDeviceFamilyV1"
 

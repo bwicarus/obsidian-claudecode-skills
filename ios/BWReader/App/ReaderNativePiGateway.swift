@@ -23,7 +23,7 @@ struct ReaderNativeRemoteBookBinding: Equatable, Sendable {
 @MainActor
 final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
     static let messageName = "bwNativePiGateway"
-    static let piHost = "bwicarus.taile44d0c.ts.net"
+    static let piHost = "bwicarus-2.taile44d0c.ts.net"
 
     private static let requestContract = "reader-native-pi-request/2"
     private static let responseContract = "reader-native-pi-response/2"

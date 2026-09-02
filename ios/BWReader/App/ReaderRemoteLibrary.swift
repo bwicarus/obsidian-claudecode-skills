@@ -83,7 +83,7 @@ final class ReaderRemoteLibraryClient {
     static let shared = ReaderRemoteLibraryClient()
 
     private let baseURL = URL(
-        string: "https://bwicarus.taile44d0c.ts.net/"
+        string: "https://bwicarus-2.taile44d0c.ts.net/"
     )!
     private let redirectDelegate: ReaderRemoteLibraryRedirectDelegate
     private let session: URLSession
@@ -819,8 +819,8 @@ final class ReaderRemoteLibraryCoordinator: ObservableObject {
         var components = URLComponents(
             url: URL(
                 string: book.kind.lowercased() == "epub"
-                    ? "https://bwicarus.taile44d0c.ts.net/pdf/epub/view"
-                    : "https://bwicarus.taile44d0c.ts.net/pdf/view"
+                    ? "https://bwicarus-2.taile44d0c.ts.net/pdf/epub/view"
+                    : "https://bwicarus-2.taile44d0c.ts.net/pdf/view"
             )!,
             resolvingAgainstBaseURL: false
         )
