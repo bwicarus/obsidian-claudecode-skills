@@ -114,8 +114,8 @@ ssh pi 'find ~/webapp/data/reader-sidecars/by-user/1 -type f -printf "%TY-%Tm-%T
   voice-rt :8767、watch-voice :8768、rbi :8769、mcp :8766；tailscale serve 已映射 `/voice-rt` `/rbi-ws` `/mcp`。
   日志在 `webapp-data/sidecar-<name>.log`。Flask 仍由 `local_supervisor.pyw`（HKCU Run `BwicarusLocal`）托管。
 - spacy：工作树 `spacy-venv/`（spacy 3.8 + en_core_web_sm），`.env.local` 的 `SPACY_PYTHON` 指向它。
-- **凭据不由 Claude 搬**（策略）：`~/.config/doubao-voice.json`、`openai-realtime.json`、`xai-grok.json` 需要用户自己
-  从 Pi 复制到 Windows 的 `C:\Users\bwica\.config\`，否则语音中继只监听不服务。`watch-voice-token` 与
+- 凭据：`~/.config/doubao-voice.json`、`openai-realtime.json`、`xai-grok.json` 已按用户要求（23:00）从 Pi 原样
+  scp 到 Windows `C:\Users\bwica\.config\`（文件到文件，未读取内容）；语音中继重启后已加载。`watch-voice-token` 与
   `mcp-http-token` 在 Windows 本机新生成（手表经 App 重新领取即可；外部 MCP 客户端要换新令牌与新地址）。
 - Pi 侧 `reader-context-push.service`（Pi→PC 推快照）已无意义（App 直接投桥），停 Pi 时一并 disable。
 - 手动备份：`scripts/backup_windows_to_pi.ps1`（webapp-data + state + %LOCALAPPDATA%\BWReader 打包 scp 到
