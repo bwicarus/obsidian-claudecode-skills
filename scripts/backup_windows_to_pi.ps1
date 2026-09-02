@@ -6,7 +6,7 @@ param(
   [string]$Root = "C:\tmp\reader-card-anchor-release",
   [string]$PiTarget = "pi:~/backups/windows-server"
 )
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $items = @(
   @{ Src = Join-Path $Root "webapp-data"; Name = "webapp-data" },
@@ -20,12 +20,17 @@ ssh pi "mkdir -p ~/backups/windows-server" | Out-Null
 foreach ($item in $items) {
   if (-not (Test-Path $item.Src)) { Write-Host "[skip] $($item.Src) 不存在"; continue }
   $tar = Join-Path $env:TEMP "bw-backup-$($item.Name)-$stamp.tgz"
-  $exArgs = $exclude | ForEach-Object { "--exclude=$_" }
+  $exArgs = @($exclude | ForEach-Object { "--exclude=$_" })
   Write-Host "[pack] $($item.Name) → $tar"
-  & tar -czf $tar @exArgs -C (Split-Path $item.Src) (Split-Path $item.Src -Leaf)
-  Write-Host "[send] $tar → $PiTarget/"
+  $tarExe = Join-Path (Join-Path $env:SystemRoot 'System32') 'tar.exe'   # 系统 bsdtar,别被 PATH 里的 Git tar 抢走
+  $parent = Split-Path $item.Src
+  $leaf = Split-Path $item.Src -Leaf
+  & $tarExe -czf $tar @exArgs -C $parent $leaf 2>&1 | ForEach-Object { Write-Host "  tar: $_" }
+  if (-not (Test-Path $tar)) { Write-Host "[fail] $($item.Name) 打包失败(exit=$LASTEXITCODE),跳过"; continue }
+  Write-Host "[send] $tar ($([math]::Round((Get-Item $tar).Length/1MB,1)) MB) → $PiTarget/"
   & scp -q $tar "$PiTarget/"
-  Remove-Item $tar -Force
+  if ($LASTEXITCODE -ne 0) { Write-Host "[fail] scp exit=$LASTEXITCODE" }
+  Remove-Item $tar -Force -ErrorAction SilentlyContinue
 }
 # Pi 侧只保留最近 7 份
 ssh pi "cd ~/backups/windows-server && ls -1t | tail -n +22 | xargs -r rm -f; ls -lh | tail -n 6"
