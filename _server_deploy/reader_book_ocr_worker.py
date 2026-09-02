@@ -2701,6 +2701,60 @@ def _tokenize_groups(chars: list[dict], layout: dict | None) -> list[list[int]]:
     return groups
 
 
+_PHRASES_CACHE: list[str] | None = None
+
+
+def _favorite_phrases() -> list[str]:
+    """收藏词组(Windows 镜像文件)。读一次缓存;读不到就是空列表,不影响分词。"""
+    global _PHRASES_CACHE
+    if _PHRASES_CACHE is not None:
+        return _PHRASES_CACHE
+    candidates = []
+    configured = os.environ.get("BW_READER_PHRASES_FILE")
+    if configured:
+        candidates.append(Path(configured))
+    local_app = os.environ.get("LOCALAPPDATA")
+    if local_app:
+        candidates.append(Path(local_app) / "BWReader" / "phrases.json")
+    phrases: list[str] = []
+    for path in candidates:
+        try:
+            if not path.is_file():
+                continue
+            value = json.loads(path.read_text(encoding="utf-8"))
+            items = value.get("phrases") if isinstance(value, dict) else value
+            for item in items or []:
+                text = re.sub(r"[\s\u3000]+", "", str(item or ""))
+                if 2 <= len(text) <= 64 and text not in phrases:
+                    phrases.append(text)
+            break
+        except Exception:
+            continue
+    phrases.sort(key=len, reverse=True)
+    _PHRASES_CACHE = phrases
+    return phrases
+
+
+def _merge_phrase_words(text: str, text_chars: list[dict], group_no: int, next_word_no: int) -> int:
+    """把块文字串里出现的收藏词组合并成一个 w(用户登记的整体凌驾分词结果)。"""
+    phrases = _favorite_phrases()
+    if not phrases or not text:
+        return next_word_no
+    taken = [False] * len(text_chars)
+    for phrase in phrases:
+        start = text.find(phrase)
+        while start >= 0:
+            end = start + len(phrase)
+            if not any(taken[start:end]):
+                wid = group_no * 1_000_000 + next_word_no
+                next_word_no += 1
+                for k in range(start, end):
+                    text_chars[k]["w"] = wid
+                    taken[k] = True
+            start = text.find(phrase, start + 1)
+    return next_word_no
+
+
 def _tokenize_chars(chars: list[dict], layout: dict | None = None) -> list[dict]:
     """Assign real tokenizer boundaries; never invent words on mismatch.
 
@@ -2731,6 +2785,8 @@ def _tokenize_chars(chars: list[dict], layout: dict | None = None) -> list[dict]
                 cursor += len(surface)
             if cursor != len(text_chars):
                 raise RuntimeError("Japanese tokenization left unassigned OCR characters")
+            # 收藏词组合并(2026-09-02):词组 id 从 500000 起,不与 fugashi 的 word_no 撞
+            _merge_phrase_words(text, text_chars, group_no, 500_000)
             continue
         word_no = 0
         index = 0

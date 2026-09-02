@@ -13140,6 +13140,12 @@
       if (url.pathname === '/pdf/api/translate-sentence') {
         return nativeTranslateSentenceFetch(input, init, url, route);
       }
+      if (url.pathname === '/pdf/api/dict-quick' && method === 'GET') {
+        return nativeDictQuickFetch(input, init, url, route);
+      }
+      if (url.pathname === '/pdf/api/phrases') {
+        return nativePhrasesFetch(input, init, url, route, method);
+      }
       if (nativeInterfaceSurface === 'pdf' && url.pathname === '/api/assistant/chat') {
         return nativePDFChatFetch(input, init, url, route);
       }
@@ -14134,6 +14140,165 @@
   //   file+sentence(服务端要写 sidecar 句子标记)的请求直走 Pi。
   //   路径按 packager 约定不写整字面量:runtime 不点名 native 路由
   //   (NATIVE_RUNTIME_INTERFACE_ENTRIES 以 __native_owner__ 登记)。
+  // 词典本地登记(2026-09-02):查过一次的词条落设备库,再查秒回;miss 才打 Pi。
+  // 键=词 + 本书语言声明(同一词按不同语言声明可能给不同词条)。ok:true 才登记;
+  // 失败/查无不登记(留给下次重试)。上限 3000 条,满了按最旧淘汰。
+  var DICT_CACHE_KIND = 'dict-cache';
+  var DICT_CACHE_LIMIT = 3000;
+  var dictCacheWriteChain = Promise.resolve();
+  function dictCacheKey(url) {
+    var word = String(url.searchParams.get('word') || '').trim();
+    if (!word) return '';
+    var langs = String(url.searchParams.get('langs') || '').trim().toLowerCase();
+    return word.replace(/[\s\u3000]+/g, '').toLowerCase() + '|' + langs;
+  }
+  function dictCacheRead(key) {
+    return bootPromise.then(function () {
+      return storedStateRecord(
+        stores.device, DICT_CACHE_KIND, 'deviceId', deviceId, null
+      );
+    }).then(function (record) {
+      var entries = record && record.payload && record.payload.entries;
+      var hit = entries && Object.prototype.hasOwnProperty.call(entries, key) ? entries[key] : null;
+      return hit && hit.d && hit.d.ok === true ? hit.d : null;
+    }).catch(function () { return null; });
+  }
+  function dictCacheWrite(key, d) {
+    dictCacheWriteChain = dictCacheWriteChain.then(function () {
+      return storedStateRecord(
+        stores.device, DICT_CACHE_KIND, 'deviceId', deviceId, {}
+      ).then(function (record) {
+        var payload = record && record.payload && typeof record.payload === 'object'
+          ? record.payload : {};
+        var entries = payload.entries && typeof payload.entries === 'object' ? payload.entries : {};
+        entries[key] = { d: d, at: Date.now() };
+        var keys = Object.keys(entries);
+        if (keys.length > DICT_CACHE_LIMIT) {
+          keys.sort(function (a, b) { return (entries[a].at || 0) - (entries[b].at || 0); });
+          keys.slice(0, keys.length - DICT_CACHE_LIMIT).forEach(function (k) { delete entries[k]; });
+        }
+        return stores.device.batch([
+          deviceStateMutation(DICT_CACHE_KIND, { entries: entries }, randomHex(12), record.rev)
+        ]);
+      });
+    }).catch(function () {});
+    return dictCacheWriteChain;
+  }
+  // 桥镜像(2026-09-02):页面 CSP 不许直连桥,经 Swift 原生路由 /pdf/api/bridge-mirror 转发。
+  // 回 {ok, status, body};任何失败都解析成 null,调用方按"桥不在"处理。
+  function bridgeMirror(path, method, body, query) {
+    var mirrorPath = ['/pdf/api', 'bridge-mirror'].join('/');
+    // @interaction bridge.mirror.request
+    return originalFetch(mirrorPath, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: path, method: method || 'POST', body: body || {}, query: query || {} })
+    }).then(function (r) { return r.ok ? r.json() : null; }, function () { return null; })
+      .then(function (d) { return d && typeof d === 'object' ? d : null; });
+  }
+
+  function nativeDictQuickFetch(input, init, url, route) {
+    var key = dictCacheKey(url);
+    var remote = function () {
+      return nativePiFetch(input, init, route).then(function (response) {
+        if (!key || !response || !response.ok) return response;
+        var copy;
+        try { copy = response.clone(); } catch (_) { return response; }
+        copy.json().then(function (d) {
+          if (d && d.ok === true) {
+            dictCacheWrite(key, d);
+            bridgeMirror('/reader-dict-cache', 'POST', { key: key, d: d }).catch(function () {});
+          }
+        }).catch(function () {});
+        return response;
+      });
+    };
+    if (!key) return remote();
+    return dictCacheRead(key).then(function (hit) {
+      if (hit) {
+        return jsonResponse(Object.assign({}, hit, { cached: true, cache_source: 'device' }), 200);
+      }
+      // 本地 miss → 先问 Windows 留底(别的设备查过的词条),命中即登记本地;再 miss 才打 Pi。
+      return bridgeMirror('/reader-dict-cache', 'GET', null, { key: key }).then(function (m) {
+        var d = m && m.ok && m.body && m.body.d && m.body.d.ok === true ? m.body.d : null;
+        if (d) {
+          dictCacheWrite(key, d);
+          return jsonResponse(Object.assign({}, d, { cached: true, cache_source: 'bridge' }), 200);
+        }
+        return remote();
+      }, function () { return remote(); });
+    }, function () { return remote(); });
+  }
+
+  // 收藏词组本地为权威(2026-09-02,Pi 退出用户数据线路):设备库 phrase-favorites。
+  // 首次为空时从 Pi 取一次做种(历史 191 条不丢),之后本地即真相;改动后整表镜像到 Windows,
+  // 并照旧转 Pi 一份作备份(失败不影响本地)。
+  var PHRASES_KIND = 'phrase-favorites';
+  var phrasesWriteChain = Promise.resolve();
+  function normalizePhrase(v) { return String(v == null ? '' : v).replace(/[\s\u3000]+/g, ''); }
+  function phrasesRead() {
+    return bootPromise.then(function () {
+      return storedStateRecord(stores.device, PHRASES_KIND, 'deviceId', deviceId, null);
+    }).then(function (record) {
+      var payload = record && record.payload && typeof record.payload === 'object' ? record.payload : null;
+      return { seeded: !!(payload && payload.seeded), phrases: payload && Array.isArray(payload.phrases) ? payload.phrases.slice() : [], rev: record ? record.rev : null };
+    });
+  }
+  function phrasesWrite(phrases, seeded) {
+    phrasesWriteChain = phrasesWriteChain.then(function () {
+      return storedStateRecord(stores.device, PHRASES_KIND, 'deviceId', deviceId, {}).then(function (record) {
+        return stores.device.batch([
+          deviceStateMutation(PHRASES_KIND, { phrases: phrases, seeded: !!seeded }, randomHex(12), record.rev)
+        ]);
+      });
+    }).catch(function () {});
+    return phrasesWriteChain;
+  }
+  function phrasesMirrorToBridge(phrases) {
+    bridgeMirror('/reader-phrases', 'POST', { phrases: phrases }).catch(function () {});
+  }
+  function nativePhrasesFetch(input, init, url, route, method) {
+    if (method === 'GET') {
+      return phrasesRead().then(function (state) {
+        if (state.seeded || state.phrases.length) {
+          return jsonResponse({ ok: true, phrases: state.phrases, source: 'device' }, 200);
+        }
+        // 未播种:从 Pi 取一次历史(取不到就用桥的镜像;都没有就空表并标记已播种)
+        return nativePiFetch(input, init, route).then(function (r) { return r && r.ok ? r.json() : null; }, function () { return null; })
+          .then(function (d) {
+            if (d && d.ok && Array.isArray(d.phrases)) return d.phrases;
+            return bridgeMirror('/reader-phrases', 'GET').then(function (m) {
+              return m && m.ok && m.body && Array.isArray(m.body.phrases) ? m.body.phrases : [];
+            });
+          }).then(function (seed) {
+            var phrases = [];
+            (seed || []).forEach(function (p) { var t = normalizePhrase(p); if (t && phrases.indexOf(t) < 0) phrases.push(t); });
+            phrasesWrite(phrases, true);
+            if (phrases.length) phrasesMirrorToBridge(phrases);
+            return jsonResponse({ ok: true, phrases: phrases, source: 'seeded' }, 200);
+          });
+      }).catch(function () { return jsonResponse({ ok: true, phrases: [], source: 'device-error' }, 200); });
+    }
+    if (method !== 'POST' && method !== 'DELETE') return nativePiFetch(input, init, route);
+    var body = null;
+    try { body = JSON.parse((init && init.body) || '{}'); } catch (_) { body = null; }
+    var text = normalizePhrase(body && body.text);
+    if (!text || text.length > 64) {
+      return Promise.resolve(jsonResponse({ ok: false, error: '词组无效' }, 400));
+    }
+    return phrasesRead().then(function (state) {
+      var phrases = state.phrases.map(normalizePhrase).filter(Boolean);
+      var idx = phrases.indexOf(text);
+      if (method === 'POST' && idx < 0) phrases.push(text);
+      if (method === 'DELETE' && idx >= 0) phrases.splice(idx, 1);
+      return phrasesWrite(phrases, true).then(function () {
+        // 只镜像到 Windows;Pi 的备份由 Windows 手动同步(用户 2026-09-02),App 不再写 Pi。
+        phrasesMirrorToBridge(phrases);
+        return jsonResponse({ ok: true, phrases: phrases, source: 'device' }, 200);
+      });
+    });
+  }
+
   function nativeTranslateSentenceFetch(input, init, url, route) {
     var fallback = function () {
       return nativePiFetch(input, init, route).catch(function (error) {

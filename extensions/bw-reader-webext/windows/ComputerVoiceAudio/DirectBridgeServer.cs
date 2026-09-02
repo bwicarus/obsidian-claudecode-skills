@@ -678,6 +678,16 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-translate-cache",
             new[] { "GET", "POST", "OPTIONS" },
             context => HandleTranslateCacheAsync(context, serviceToken));
+        // 用户数据镜像(2026-09-02,Pi 退出用户数据线路):收藏词组整表 + 词典登记。
+        // App 经 Swift /pdf/api/bridge-mirror 转发到这里;PC 预处理 worker 读 phrases.json。
+        app.MapMethods(
+            "/reader-phrases",
+            new[] { "GET", "POST", "OPTIONS" },
+            context => HandleReaderPhrasesAsync(context, serviceToken));
+        app.MapMethods(
+            "/reader-dict-cache",
+            new[] { "GET", "POST", "OPTIONS" },
+            context => HandleReaderDictCacheAsync(context, serviceToken));
         // 翻译密钥下发（用户 2026-09-02 拍板 A 方案）：App 直连 Google 翻译的
         // key 由这里发,Tailscale 内网 + 身份头;key 只在 Windows 一处
         // (~/.config/gcp-vision-key,与 translate.py 同源),不进构建不进 git。
@@ -1575,6 +1585,174 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private static bool IsValidTranslateSha(string value) =>
         value.Length == 16 && value.All(
             static ch => ch is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static string ReaderUserDataDirectory =>
+        System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "BWReader");
+
+    private static string ReaderPhrasesPath =>
+        System.IO.Path.Combine(ReaderUserDataDirectory, "phrases.json");
+
+    private static string ReaderDictCacheDirectory =>
+        System.IO.Path.Combine(ReaderUserDataDirectory, "dict-cache");
+
+    private static readonly object ReaderPhrasesGate = new();
+
+    private static async Task<System.Text.Json.Nodes.JsonObject?> ReadSmallJsonBodyAsync(
+        HttpContext context, int maxBytes, CancellationToken token)
+    {
+        try
+        {
+            using var reader = new StreamReader(context.Request.Body);
+            string raw = await reader.ReadToEndAsync(token).ConfigureAwait(false);
+            if (raw.Length > maxBytes) return null;
+            return System.Text.Json.Nodes.JsonNode.Parse(raw)
+                as System.Text.Json.Nodes.JsonObject;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// 收藏词组整表(2026-09-02)。GET 回全表;POST 整表覆盖。小表(几百条),不做合并。
+    private async Task HandleReaderPhrasesAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "reader-phrases")) return;
+        if (HttpMethods.IsGet(context.Request.Method))
+        {
+            string text = "{\"ok\":true,\"phrases\":[]}";
+            if (File.Exists(ReaderPhrasesPath))
+            {
+                text = await File.ReadAllTextAsync(
+                    ReaderPhrasesPath, serviceCancellationToken).ConfigureAwait(false);
+            }
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            context.Response.ContentType = "application/json; charset=utf-8";
+            await context.Response.WriteAsync(text, serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        var body = await ReadSmallJsonBodyAsync(context, 256 * 1024, serviceCancellationToken)
+            .ConfigureAwait(false);
+        var phrasesNode = body?["phrases"] as System.Text.Json.Nodes.JsonArray;
+        if (phrasesNode is null || phrasesNode.Count > 5000)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, code = "BW_PHRASES_BODY" },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        var phrases = new List<string>();
+        foreach (var node in phrasesNode)
+        {
+            string? item = node?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(item) || item.Length > 64) continue;
+            if (!phrases.Contains(item)) phrases.Add(item);
+        }
+        string json = System.Text.Json.JsonSerializer.Serialize(
+            new { ok = true, phrases, updatedAtEpochMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() },
+            new System.Text.Json.JsonSerializerOptions
+            {
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            });
+        lock (ReaderPhrasesGate)
+        {
+            Directory.CreateDirectory(ReaderUserDataDirectory);
+            string temporary = ReaderPhrasesPath + ".part";
+            File.WriteAllText(temporary, json);
+            File.Move(temporary, ReaderPhrasesPath, overwrite: true);
+        }
+        AppendOutputPickupLog("reader-phrases\tsaved\t" + phrases.Count);
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        await context.Response.WriteAsJsonAsync(
+            new { ok = true, count = phrases.Count },
+            serviceCancellationToken).ConfigureAwait(false);
+    }
+
+    private static string ReaderDictCacheFile(string key)
+    {
+        using var sha = System.Security.Cryptography.SHA1.Create();
+        string hex = Convert.ToHexString(
+            sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(key))).ToLowerInvariant();
+        return System.IO.Path.Combine(ReaderDictCacheDirectory, "dq-" + hex[..16] + ".json");
+    }
+
+    /// 词典登记(2026-09-02):设备查过的词条在这里留底,别的设备 miss 时先来这里拿。
+    private async Task HandleReaderDictCacheAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "reader-dict-cache")) return;
+        if (HttpMethods.IsGet(context.Request.Method))
+        {
+            string key = (context.Request.Query["key"].FirstOrDefault() ?? "").Trim();
+            if (key.Length is 0 or > 200)
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                await context.Response.WriteAsJsonAsync(
+                    new { ok = false, code = "BW_DICT_KEY" },
+                    serviceCancellationToken).ConfigureAwait(false);
+                return;
+            }
+            string path = ReaderDictCacheFile(key);
+            if (!File.Exists(path))
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                await context.Response.WriteAsJsonAsync(
+                    new { ok = false, code = "BW_DICT_MISS" },
+                    serviceCancellationToken).ConfigureAwait(false);
+                return;
+            }
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            context.Response.ContentType = "application/json; charset=utf-8";
+            await context.Response.WriteAsync(
+                await File.ReadAllTextAsync(path, serviceCancellationToken).ConfigureAwait(false),
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        var body = await ReadSmallJsonBodyAsync(context, 256 * 1024, serviceCancellationToken)
+            .ConfigureAwait(false);
+        string key2 = (body?["key"]?.GetValue<string>() ?? "").Trim();
+        var entry = body?["d"] as System.Text.Json.Nodes.JsonObject;
+        if (key2.Length is 0 or > 200 || entry is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, code = "BW_DICT_BODY" },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        Directory.CreateDirectory(ReaderDictCacheDirectory);
+        string outPath = ReaderDictCacheFile(key2);
+        var record = new System.Text.Json.Nodes.JsonObject
+        {
+            ["ok"] = true,
+            ["key"] = key2,
+            ["d"] = entry.DeepClone(),
+            ["savedAtEpochMs"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        };
+        string temporary2 = outPath + ".part";
+        await File.WriteAllTextAsync(
+            temporary2, record.ToJsonString(), serviceCancellationToken).ConfigureAwait(false);
+        File.Move(temporary2, outPath, overwrite: true);
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        await context.Response.WriteAsJsonAsync(
+            new { ok = true }, serviceCancellationToken).ConfigureAwait(false);
+    }
 
     private async Task HandleTranslateCacheAsync(
         HttpContext context,

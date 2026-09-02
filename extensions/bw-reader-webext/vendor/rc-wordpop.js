@@ -989,7 +989,14 @@ if (window.__bwPwaProviderOnly) return;
       // 本地来源（实据修正 2026-08-31）：本书钉着的卡里 label=查询词的
       // 直接算这个词的卡 —— 用户的存量卡是浮层卡（bind:null），不在
       // lemma 索引里；卡名即词名，label 匹配让它们零门槛进组合段。
+      // 卡片跟随锁定(用户 2026-09-02):只嵌**锁定到这个词**的本地卡。已解绑的浮层卡、
+      // 锁到别的词的卡不进组合段;它们若也在跨书索引里,同样按本地状态剔掉。
       var localCards = [];
+      var excludeCids = {};
+      var _nw = function (v) { return String(v || '').replace(/[\s\u3000]+/g, '').toLowerCase(); };
+      var wordKeys = {};
+      wordKeys[_nw(key)] = true;
+      wordKeys[_nw(word)] = true;
       try {
         var _sn = window.RC && RC.stickynote &&
           typeof RC.stickynote.notes === 'function'
@@ -998,14 +1005,19 @@ if (window.__bwPwaProviderOnly) return;
           var hh = n && n.html;
           if (!hh || !hh.content) return;
           var lb = String(hh.label || '').trim();
-          if (!lb) return;
-          var norm = lb.toLowerCase();
-          if (norm !== key &&
-              norm !== String(word || '').trim().toLowerCase()) return;
-          localCards.push({
-            cid: String(hh.cid || ''), label: lb,
-            content: String(hh.content || ''), at: 0
-          });
+          var bind = hh.bind && typeof hh.bind === 'object' ? hh.bind : null;
+          var boundWord = bind && bind.kind === 'page-chars' ? _nw(bind.text) : '';
+          var cidStr = String(hh.cid || '');
+          var nameMatches = !!(lb && wordKeys[_nw(lb)]);
+          if (boundWord && wordKeys[boundWord]) {
+            localCards.push({
+              cid: cidStr, label: lb || String(bind.text || ''),
+              content: String(hh.content || ''), at: 0
+            });
+          } else if (nameMatches && cidStr) {
+            // 同名但没锁在这个词上(解绑/锁别处)→ 本地知识覆盖索引,不嵌
+            excludeCids[cidStr] = true;
+          }
         });
       } catch (e0) {}
       // @interaction wordcard.index.sync
@@ -1021,6 +1033,7 @@ if (window.__bwPwaProviderOnly) return;
           localCards.concat(indexed).forEach(function (c) {
             var ck = String(c && c.cid || '');
             if (!c || !c.content || (ck && seen[ck])) return;
+            if (ck && excludeCids[ck]) return;   // 本地已解绑/锁别处的同一张,不嵌
             if (ck) seen[ck] = true;
             merged.push(c);
           });

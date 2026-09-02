@@ -595,6 +595,16 @@
       }
     ),
     networkMutation(
+      'bridge.mirror.request',
+      '/pdf/api/bridge-mirror',
+      ['POST'],
+      {
+        transport: { extensionBridge: false, serviceWorker: 'none' },
+        reason: '用户数据镜像到 Windows(收藏词组/词典登记,2026-09-02 Pi 退出用户数据线路):'
+          + '页面 CSP 不许直连桥,经 Swift 原生路由转发,白名单限定桥端路径。'
+      }
+    ),
+    networkMutation(
       'translate.direct.request',
       '/pdf/api/translate-direct',
       ['POST'],

@@ -63,6 +63,7 @@
   var ACTIVE_READING_POLL_MS = 250;
   var ACTIVE_READING_HEARTBEAT_MS = 60000;
   var LOCAL_PAGE_CONTEXT_POLL_MS = 1500;
+  var LOCAL_PAGE_CONTEXT_RESEND_MS = 60 * 1000;   // 同一份正文的重发间隔(桥失忆自愈)
   var LOCAL_PAGE_TEXT_WAIT_MS = 1200;
   // 256 KiB is the direct bridge's immutable frame ceiling.  Keep enough
   // envelope headroom while allowing normal long cards to remain complete.
@@ -10577,17 +10578,29 @@
         if (!latest || latest.file !== current.file ||
             !sameActiveScalar(latest.page, current.page)) return null;
         var signature = JSON.stringify(payload);
-        if (signature === pump.lastPageContextSignature) return null;
+        // 签名去重带过期(2026-09-02):桥重启后稳定页丢失,而正文没变就永远不重发,
+        // 快照板一直"无文字层"直到翻页。同一份正文超过 60s 允许重发,桥失忆最多空一分钟。
+        // ⚠ sentAt 未知(旧泵对象/别处只写了签名)时按"刚发过"处理,不重发 —— 否则每个
+        //   轮询 tick 都重发同一份(契约"迟到卡片读取不能覆盖"实锤 2 次发布)。
+        if (signature === pump.lastPageContextSignature) {
+          var sentAt = pump.lastPageContextSentAt;
+          if (!sentAt || Date.now() - sentAt < LOCAL_PAGE_CONTEXT_RESEND_MS) return null;
+        }
         return Promise.resolve(runtime.publishPageContext(payload)).then(function () {
           pump.lastPageContextSignature = signature;
+          pump.lastPageContextSentAt = Date.now();
+          pump.lastGoodPageContext = payload;
           pump.lastPageContextError = "";
         });
       }).catch(function (error) {
         var message = String(error && error.message || error || "本机正文上报失败");
-        if (message !== pump.lastPageContextError) {
+        var firstTime = message !== pump.lastPageContextError;
+        if (firstTime) {
           pump.lastPageContextError = message;
           try { if (window.dlog) window.dlog("本机快照正文失败: " + message); } catch (_) {}
         }
+        // 失败不发布(契约:a failed authoritative read keeps the last complete context ——
+        // 桥保留上一份完整上下文比一份带原因的空正文更有用);原因进 dlog。
       }).finally(function () {
         pump.pageContextInFlight = false;
         if (generation !== pump.pageContextGeneration &&
@@ -10753,7 +10766,10 @@
       pageContextGeneration: 0,
       lastPageContextCheckAt: 0,
       lastPageContextSignature: null,
+      lastPageContextSentAt: 0,
+      lastGoodPageContext: null,
       lastPageContextError: "",
+      lastPageContextErrorSentAt: 0,
       highlightSourceInFlight: false,
       highlightSourceTargetKey: "",
       nextHighlightSourceCheckAt: 0,

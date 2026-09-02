@@ -771,6 +771,21 @@
       "description": "Read native-local book identity metadata."
     },
     {
+      "path": "/pdf/api/bridge-mirror",
+      "match": "exact",
+      "owner": "native",
+      "methods": [
+        "POST"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": null,
+      "description": "Mirror user data (favorite phrases, dictionary entries) to the Windows bridge through the App; the page CSP forbids reaching the bridge directly."
+    },
+    {
       "path": "/pdf/api/build-toc",
       "match": "exact",
       "owner": "pi",

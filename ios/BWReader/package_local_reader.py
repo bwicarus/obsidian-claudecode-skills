@@ -377,6 +377,18 @@ NATIVE_RUNTIME_INTERFACE_ENTRIES = {
         # runtime 在桥缓存 miss 后调它,失败再退 Pi。
         "native", ("POST",), ("epub", "pdf"), "__native_owner__"
     ),
+    "/pdf/api/bridge-mirror": (
+        # 桥镜像(2026-09-02):runtime 把词组/词典登记镜像到 Windows 的唯一通道(页面 CSP 不许直连桥)。
+        "native", ("POST",), ("epub", "pdf"), "__native_owner__"
+    ),
+    "/pdf/api/phrases": (
+        # 收藏词组本地为权威(2026-09-02):设备库即真相,Pi 只做首次播种与备份;owner 仍标 pi。
+        "pi", ("GET", "POST", "DELETE"), ("epub", "pdf"), "localFetch"
+    ),
+    "/pdf/api/dict-quick": (
+        # 词典本地登记(2026-09-02):设备库 dict-cache 命中即回,miss 才打 Pi;owner 仍是 pi。
+        "pi", ("GET",), ("epub", "pdf"), "localFetch"
+    ),
     "/pdf/api/translate-sentence": (
         # 翻译二期保守层(2026-09-02):桥缓存前置的有界混合处理器 ——
         # 命中回缓存,miss 照旧打 Pi 并异步推桥留底。owner 仍是 pi。

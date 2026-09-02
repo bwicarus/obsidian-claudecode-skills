@@ -292,6 +292,22 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             )
         }
 
+        if decodedPath == "/pdf/api/bridge-mirror" {
+            guard request.method == .POST else {
+                return response(
+                    status: .methodNotAllowed,
+                    text: "method not allowed",
+                    headers: [HTTPHeader("Allow"): "POST"]
+                )
+            }
+            guard trustedResourceSurface(
+                referer: request.headers[HTTPHeader("Referer")]
+            ) != nil else {
+                return response(status: .forbidden, text: "invalid referer")
+            }
+            return await serveNativeBridgeMirror(request)
+        }
+
         if decodedPath == "/pdf/api/translate-direct" {
             guard request.method == .POST else {
                 return response(
@@ -585,6 +601,80 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
 
     // 翻译直连（用户 2026-09-02 拍板 A 方案）：runtime 查桥缓存 miss 后到这里,
     // Swift 持 Keychain 里的 Google key 直连 v2;失败回 5xx 让 runtime 退到 Pi。
+    /// 桥镜像(2026-09-02):runtime 把用户数据(收藏词组、词典登记…)镜像到 Windows 的唯一通道。
+    /// 页面 CSP 不许直连桥,所以经这里转发。白名单限定桥端路径与方法;体 ≤64KB;6s 超时。
+    /// 回 {ok, status, body}:body 是桥的 JSON(解不出就是原文字符串)。
+    private static let bridgeMirrorAllowed: [String: Set<String>] = [
+        "/reader-phrases": ["GET", "POST"],
+        "/reader-dict-cache": ["GET", "POST"],
+    ]
+
+    private func serveNativeBridgeMirror(
+        _ request: HTTPRequest
+    ) async -> HTTPResponse {
+        guard let data = try? await request.bodyData,
+              (2...65_536).contains(data.count),
+              let object = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              let path = object["path"] as? String,
+              let allowedMethods = Self.bridgeMirrorAllowed[path] else {
+            return jsonResponse(
+                request,
+                status: .badRequest,
+                object: ["ok": false, "code": "BW_BRIDGE_MIRROR_PATH"]
+            )
+        }
+        let method = ((object["method"] as? String) ?? "POST").uppercased()
+        guard allowedMethods.contains(method) else {
+            return jsonResponse(
+                request,
+                status: .badRequest,
+                object: ["ok": false, "code": "BW_BRIDGE_MIRROR_METHOD"]
+            )
+        }
+        var components = URLComponents(string: ReaderServer.origin + path)
+        if let query = object["query"] as? [String: Any], !query.isEmpty {
+            components?.queryItems = query.compactMap { key, value in
+                guard let text = value as? String else { return nil }
+                return URLQueryItem(name: key, value: text)
+            }
+        }
+        guard let url = components?.url else {
+            return jsonResponse(
+                request,
+                status: .badRequest,
+                object: ["ok": false, "code": "BW_BRIDGE_MIRROR_URL"]
+            )
+        }
+        var upstream = URLRequest(url: url)
+        upstream.httpMethod = method
+        upstream.timeoutInterval = 6
+        upstream.setValue(ReaderServer.origin, forHTTPHeaderField: "Origin")
+        if method == "POST" {
+            upstream.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            let body = object["body"] ?? [String: Any]()
+            upstream.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        }
+        do {
+            let (replyData, reply) = try await URLSession.shared.data(for: upstream)
+            let status = (reply as? HTTPURLResponse)?.statusCode ?? 0
+            let parsed = (try? JSONSerialization.jsonObject(with: replyData))
+                ?? (String(data: replyData, encoding: .utf8) ?? "")
+            return jsonResponse(
+                request,
+                status: .ok,
+                object: ["ok": (200...299).contains(status), "status": status, "body": parsed]
+            )
+        } catch {
+            return jsonResponse(
+                request,
+                status: .badGateway,
+                object: ["ok": false, "code": "BW_BRIDGE_MIRROR_UNREACHABLE",
+                         "error": error.localizedDescription]
+            )
+        }
+    }
+
     private func serveNativeTranslateDirect(
         _ request: HTTPRequest
     ) async -> HTTPResponse {

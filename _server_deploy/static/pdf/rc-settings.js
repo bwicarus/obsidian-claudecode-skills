@@ -313,21 +313,19 @@
       bl.value = px;
       if (bv) bv.textContent = px;
     }
-    var br = $('rcset-bindrail-show');
-    if (br) {
-      lsSet(BINDRAIL_HIDE_KEY, br.checked ? '0' : '1');
-      try {
-        document.documentElement.classList.toggle(
-          'bw-hide-bindrail', !br.checked);
-      } catch (e) {}
-    }
     var dt = $('rcset-ink-double-tap');
     if (dt) {
       var action = lsGet(INK_DOUBLE_TAP_KEY) || 'eraser';
       dt.value = /^(eraser|selection|none)$/.test(action) ? action : 'eraser';
     }
+    // 填充只读不写(2026-09-02 实锤:这里曾先把复选框默认态写进存储再读回,
+    // 用户存的「隐藏」每次打开面板就被覆盖)。写入在 _saveNotePane。
     var br = $('rcset-bindrail-show');
-    if (br) br.checked = (lsGet(BINDRAIL_HIDE_KEY) !== '1');
+    if (br) {
+      var hidden = (lsGet(BINDRAIL_HIDE_KEY) === '1');
+      br.checked = !hidden;
+      try { document.documentElement.classList.toggle('bw-hide-bindrail', hidden); } catch (e) {}
+    }
   }
   function _saveNotePane() {
     var op = $('rcset-note-op'), ac = $('rcset-note-autoc');
@@ -352,6 +350,11 @@
     if (dt) {
       var action = /^(eraser|selection|none)$/.test(dt.value) ? dt.value : 'eraser';
       lsSet(INK_DOUBLE_TAP_KEY, action);
+    }
+    var br = $('rcset-bindrail-show');
+    if (br) {
+      lsSet(BINDRAIL_HIDE_KEY, br.checked ? '0' : '1');
+      try { document.documentElement.classList.toggle('bw-hide-bindrail', !br.checked); } catch (e) {}
     }
     // 即时应用到所有已挂载便签(rc-stickynote 未加载的页面(如 HTML 阅读器)只落盘,下次进书生效)
     try { if (window.RC && RC.stickynote && RC.stickynote.refreshStyle) RC.stickynote.refreshStyle(); } catch (_) {}
