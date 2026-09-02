@@ -914,3 +914,12 @@ enum NativeBookOCRError: LocalizedError {
         }
     }
 }
+
+/// 收藏词组表（2026-09-02）：文字层存储服务每一页时按它把词组合并成一个词。
+/// 全局一份（不按书），由 runtime 经 `phrases-set` 推来；Pi 已退出这条线路。
+struct NativeBookOCRPhraseList: Codable, Equatable, Sendable {
+    static let schema = "reader-native-phrase-list/1"
+    let schema: String
+    let phrases: [String]
+    let updatedAt: Date
+}

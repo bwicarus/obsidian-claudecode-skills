@@ -3765,6 +3765,8 @@
     search: new Set(['matches', 'total', 'pages', 'incomplete']),
     'ocr-selection': new Set(['page', 'text', 'cv', 'persisted', 'textAuthority']),
     'reocr-page': new Set(['page', 'chars', 'cv', 'textAuthority']),
+    // 收藏词组表整表推给 Swift 文字层存储(2026-09-02):服务页时合并分词,持久且与层无关。
+    'phrases-set': new Set(['count']),
     'clear-reocr-page': new Set(['page', 'cleared', 'cv', 'textAuthority']),
     'book-identity': new Set(['contentSha256']),
     'device-location-status': new Set(['enabled', 'authorized', 'hasFix']),
@@ -14257,10 +14259,26 @@
   function phrasesMirrorToBridge(phrases) {
     bridgeMirror('/reader-phrases', 'POST', { phrases: phrases }).catch(function () {});
   }
+  // 词组表推给 Swift 文字层(2026-09-02):存储服务每一页时按它合并分词 —— 分词层直接改,
+  // 不再靠每次开页在内存里重算。推完让全部页缓存失效,已渲染页重新取字符层(w 已变)。
+  var phrasesPushedSignature = null;
+  function nativePhrasesPush(phrases, force) {
+    var signature = JSON.stringify(phrases || []);
+    if (!force && signature === phrasesPushedSignature) return Promise.resolve(false);
+    if (!nativePageTextHandler()) return Promise.resolve(false);
+    return nativePageTextRequest('phrases-set', { phrases: phrases || [] }).then(function (raw) {
+      phrasesPushedSignature = signature;
+      if (raw && raw.ok === true) {
+        try { invalidateAllNativePageText('ready', null, null); } catch (_) {}
+      }
+      return !!(raw && raw.ok === true);
+    }).catch(function () { return false; });
+  }
   function nativePhrasesFetch(input, init, url, route, method) {
     if (method === 'GET') {
       return phrasesRead().then(function (state) {
         if (state.seeded || state.phrases.length) {
+          nativePhrasesPush(state.phrases, false);   // 每次开书同步一次到 Swift 文字层(签名相同不重推)
           return jsonResponse({ ok: true, phrases: state.phrases, source: 'device' }, 200);
         }
         // 未播种:从 Pi 取一次历史(取不到就用桥的镜像;都没有就空表并标记已播种)
@@ -14275,6 +14293,7 @@
             (seed || []).forEach(function (p) { var t = normalizePhrase(p); if (t && phrases.indexOf(t) < 0) phrases.push(t); });
             phrasesWrite(phrases, true);
             if (phrases.length) phrasesMirrorToBridge(phrases);
+            nativePhrasesPush(phrases, true);
             return jsonResponse({ ok: true, phrases: phrases, source: 'seeded' }, 200);
           });
       }).catch(function () { return jsonResponse({ ok: true, phrases: [], source: 'device-error' }, 200); });
@@ -14294,7 +14313,10 @@
       return phrasesWrite(phrases, true).then(function () {
         // 只镜像到 Windows;Pi 的备份由 Windows 手动同步(用户 2026-09-02),App 不再写 Pi。
         phrasesMirrorToBridge(phrases);
-        return jsonResponse({ ok: true, phrases: phrases, source: 'device' }, 200);
+        // 分词层直接改:推给 Swift 后全部页缓存失效,已渲染页按新 w 重取(下划线/单击/锚定同步)。
+        return nativePhrasesPush(phrases, true).then(function () {
+          return jsonResponse({ ok: true, phrases: phrases, source: 'device' }, 200);
+        });
       });
     });
   }

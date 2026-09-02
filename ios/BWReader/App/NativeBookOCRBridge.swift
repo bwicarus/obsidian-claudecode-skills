@@ -173,6 +173,19 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                         request: request,
                         status: status
                     )
+                case .phrasesSet:
+                    let count = try await manager.setPhrases(request.phrases ?? [])
+                    payload = [
+                        "contract": Self.responseContract,
+                        "action": request.action.rawValue,
+                        "requestId": request.requestID,
+                        "ok": true,
+                        "state": "ready",
+                        "source": NSNull(),
+                        "revision": "phrases/1:count=\(count)",
+                        "error": NSNull(),
+                        "count": count,
+                    ]
                 case .bookIdentity:
                     payload = Self.bookIdentityReply(
                         request: request,
@@ -416,6 +429,8 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         case recognizeSelection = "ocr-selection"
         case reOCRPage = "reocr-page"
         case clearReOCRPage = "clear-reocr-page"
+        // 收藏词组表（2026-09-02）：整表推给文字层存储，服务页时合并分词。
+        case phrasesSet = "phrases-set"
     }
 
     private struct Request {
@@ -429,6 +444,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         // 有默认值 → 既有 5 处构造点不必逐一补 nil。
         var projection: [String: Any]? = nil
         var card: [String: Any]? = nil
+        var phrases: [String]? = nil
 
         static func parse(
             _ body: Any,
@@ -466,6 +482,29 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                     query: nil,
                     limit: nil,
                     bbox: nil
+                )
+            case .phrasesSet:
+                guard Set(value.keys) == common.union(["phrases"]),
+                      let raw = value["phrases"] as? [Any],
+                      raw.count <= 5000 else {
+                    throw BridgeError.invalidRequest
+                }
+                var list: [String] = []
+                for item in raw {
+                    guard let text = item as? String, !text.isEmpty, text.count <= 64 else {
+                        throw BridgeError.invalidRequest
+                    }
+                    list.append(text)
+                }
+                return Request(
+                    action: action,
+                    requestID: requestID,
+                    localBookID: localBookID,
+                    page: nil,
+                    query: nil,
+                    limit: nil,
+                    bbox: nil,
+                    phrases: list
                 )
             case .status, .bookIdentity, .locationStatus, .locationEnable, .locationDisable:
                 guard Set(value.keys) == common else {
@@ -1007,6 +1046,8 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
             payload["textAuthority"] = NativeBookOCRTextAuthority.supplemental.rawValue
         case .bookIdentity:
             payload["contentSha256"] = NSNull()
+        case .phrasesSet:
+            payload["count"] = 0
         case .locationStatus, .locationEnable, .locationDisable:
             payload["enabled"] = false
             payload["authorized"] = false

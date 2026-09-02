@@ -519,7 +519,9 @@ actor NativeBookOCRSidecarStore {
             }
             return nil
         }
-        let effective = Self.applyingSelectionCorrections(corrections, to: selected)
+        let corrected = Self.applyingSelectionCorrections(corrections, to: selected)
+        // 第四层：收藏词组合并（2026-09-02）。改的是 w，不动字符与版面，所以 layout 保留。
+        let effective = Self.applyingPhraseMerges(phrases(), to: corrected)
         if manual == nil, corrections.isEmpty,
            [.legacy, .appleVision, .pi, .pc].contains(selectedLayer) {
             // Existing Reader runtimes already treat local-override as the
@@ -597,6 +599,40 @@ actor NativeBookOCRSidecarStore {
                 withIntermediateDirectories: true
             )
             try encoder().encode(value).write(to: url, options: .atomic)
+        } catch {
+            throw NativeBookOCRError.storage(error.localizedDescription)
+        }
+    }
+
+    // ── 收藏词组表（全局一份）────────────────────────────────────────────
+    private func phraseListURL() -> URL {
+        rootURL.appendingPathComponent("phrases.json", isDirectory: false)
+    }
+
+    func phrases() -> [String] {
+        let url = phraseListURL()
+        guard fileManager.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url),
+              let value = try? decoder().decode(NativeBookOCRPhraseList.self, from: data),
+              value.schema == NativeBookOCRPhraseList.schema else {
+            return []
+        }
+        return value.phrases
+    }
+
+    func writePhrases(_ phrases: [String]) throws {
+        var cleaned: [String] = []
+        for phrase in phrases {
+            let text = phrase.replacingOccurrences(
+                of: "[\\s\u{3000}]+", with: "", options: .regularExpression)
+            guard (2...64).contains(text.count), !cleaned.contains(text) else { continue }
+            cleaned.append(text)
+        }
+        let value = NativeBookOCRPhraseList(
+            schema: NativeBookOCRPhraseList.schema, phrases: cleaned, updatedAt: Date())
+        do {
+            try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+            try encoder().encode(value).write(to: phraseListURL(), options: .atomic)
         } catch {
             throw NativeBookOCRError.storage(error.localizedDescription)
         }
@@ -736,6 +772,166 @@ actor NativeBookOCRSidecarStore {
         } catch {
             throw NativeBookOCRError.storage(error.localizedDescription)
         }
+    }
+
+    /// 组内按行排：行=(bk,line)，行按 (y0,x0)，行内保持原序。
+    private static func orderedByLine(
+        _ indices: [Int], _ chars: [NativeBookOCRCharacter]
+    ) -> [Int] {
+        var lines: [String: [Int]] = [:]
+        var order: [String] = []
+        for index in indices {
+            let key = "\(chars[index].bk):\(chars[index].line ?? -1)"
+            if lines[key] == nil { order.append(key); lines[key] = [] }
+            lines[key]!.append(index)
+        }
+        let sortedLines = order.sorted { left, right in
+            let l = lines[left]!, r = lines[right]!
+            let ly = l.map { chars[$0].y0 }.min() ?? 0, ry = r.map { chars[$0].y0 }.min() ?? 0
+            if ly != ry { return ly < ry }
+            return (l.map { chars[$0].x0 }.min() ?? 0) < (r.map { chars[$0].x0 }.min() ?? 0)
+        }
+        return sortedLines.flatMap { lines[$0]!.sorted() }
+    }
+
+    private static func stableHash(_ text: String) -> String {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x100000001b3
+        }
+        return String(hash, radix: 16)
+    }
+
+    /// 收藏词组合并（2026-09-02）：分词的单位是块 —— 表格单元格（版面 table-cell，同格所有行
+    /// 归一组）或几何聚成的段落（相邻行竖直间距 ≤0.9 行高且横向重叠 ≥50%）；竖排按行。
+    /// 组内所有实字符按阅读顺序连成一串，在串里找每个词组（长的优先），命中的字符改成同一个
+    /// 新 w（从现有最大 w + 1_000_000 起，不与任何层的编号相撞）。与 PC 预处理端
+    /// `_tokenize_groups` / `_merge_phrase_words` 同一口径。
+    static func applyingPhraseMerges(
+        _ phrases: [String],
+        to initial: NativeBookOCRPageCharacters
+    ) -> NativeBookOCRPageCharacters {
+        let normalized = phrases.map {
+            $0.replacingOccurrences(of: "[\\s\u{3000}]+", with: "", options: .regularExpression)
+        }.filter { (2...64).contains($0.count) }
+        guard !normalized.isEmpty, !initial.chars.isEmpty else { return initial }
+        var chars = initial.chars
+        var assigned = [Bool](repeating: false, count: chars.count)
+        var groups: [[Int]] = []
+        if let regions = initial.layout?.regions {
+            var cells: [String: [Int]] = [:]
+            var order: [String] = []
+            for region in regions where region.kind == .tableCell {
+                let key = "\(region.tableId ?? -1):\(region.row ?? -1):\(region.column ?? -1)"
+                for range in region.ranges where range.count >= 2 {
+                    let a = max(0, min(range[0], range[1]))
+                    let b = min(chars.count - 1, max(range[0], range[1]))
+                    if a > b { continue }
+                    for index in a...b where !assigned[index] {
+                        assigned[index] = true
+                        if cells[key] == nil { order.append(key); cells[key] = [] }
+                        cells[key]!.append(index)
+                    }
+                }
+            }
+            for key in order { groups.append(orderedByLine(cells[key]!, chars)) }
+        }
+        struct LineBox { var idx: [Int]; var x0: Double; var x1: Double; var y0: Double; var y1: Double; var vertical: Bool }
+        var lines: [String: [Int]] = [:]
+        var lineOrder: [String] = []
+        for index in chars.indices where !assigned[index] {
+            let key = "\(chars[index].bk):\(chars[index].line ?? -1)"
+            if lines[key] == nil { lineOrder.append(key); lines[key] = [] }
+            lines[key]!.append(index)
+        }
+        var boxes: [LineBox] = lineOrder.map { key in
+            let idx = lines[key]!
+            return LineBox(
+                idx: idx,
+                x0: idx.map { chars[$0].x0 }.min() ?? 0, x1: idx.map { chars[$0].x1 }.max() ?? 0,
+                y0: idx.map { chars[$0].y0 }.min() ?? 0, y1: idx.map { chars[$0].y1 }.max() ?? 0,
+                vertical: idx.contains { chars[$0].vertical == true })
+        }
+        boxes.sort { ($0.y0, $0.x0) < ($1.y0, $1.x0) }
+        var paragraphs: [LineBox] = []
+        for box in boxes {
+            if box.vertical { groups.append(box.idx.sorted()); continue }
+            let lineHeight = max(1, box.y1 - box.y0)
+            var merged = false
+            for p in paragraphs.indices {
+                let gap = box.y0 - paragraphs[p].y1
+                let overlap = min(box.x1, paragraphs[p].x1) - max(box.x0, paragraphs[p].x0)
+                let width = max(1, min(box.x1 - box.x0, paragraphs[p].x1 - paragraphs[p].x0))
+                if gap >= -0.3 * lineHeight, gap <= 0.9 * lineHeight, overlap / width >= 0.5 {
+                    paragraphs[p].idx += box.idx
+                    paragraphs[p].x0 = min(paragraphs[p].x0, box.x0)
+                    paragraphs[p].x1 = max(paragraphs[p].x1, box.x1)
+                    paragraphs[p].y1 = max(paragraphs[p].y1, box.y1)
+                    merged = true
+                    break
+                }
+            }
+            if !merged { paragraphs.append(box) }
+        }
+        for paragraph in paragraphs { groups.append(orderedByLine(paragraph.idx, chars)) }
+
+        var nextW = (chars.map { $0.w }.max() ?? 0) + 1_000_000
+        var mergedCount = 0
+        let byLength = normalized.sorted { $0.count > $1.count }
+        for group in groups {
+            let real = group.filter { chars[$0].sp == 0 && !chars[$0].c.isEmpty }
+            if real.count < 2 { continue }
+            let texts = real.map { chars[$0].c }
+            let compact = texts.joined()
+            var offsets: [Int] = []
+            var running = 0
+            for text in texts { offsets.append(running); running += text.count }
+            var taken = [Bool](repeating: false, count: real.count)
+            for phrase in byLength {
+                var searchStart = compact.startIndex
+                while searchStart < compact.endIndex,
+                      let found = compact.range(of: phrase, range: searchStart..<compact.endIndex) {
+                    let startOffset = compact.distance(from: compact.startIndex, to: found.lowerBound)
+                    let endOffset = compact.distance(from: compact.startIndex, to: found.upperBound)
+                    var covered: [Int] = []
+                    for (k, offset) in offsets.enumerated() {
+                        let length = texts[k].count
+                        if offset < endOffset && offset + length > startOffset { covered.append(k) }
+                    }
+                    if !covered.isEmpty, !covered.contains(where: { taken[$0] }) {
+                        for k in covered { chars[real[k]].w = nextW; taken[k] = true }
+                        nextW += 1
+                        mergedCount += 1
+                    }
+                    searchStart = compact.index(after: found.lowerBound)
+                }
+            }
+        }
+        guard mergedCount > 0 else { return initial }
+        let signature = stableHash(normalized.joined(separator: "\u{1F}"))
+        return NativeBookOCRPageCharacters(
+            schema: initial.schema,
+            contentSHA256: initial.contentSHA256,
+            page: initial.page,
+            pageWidth: initial.pageWidth,
+            pageHeight: initial.pageHeight,
+            rotation: initial.rotation,
+            geometryDigest: initial.geometryDigest,
+            engineRevision: initial.engineRevision + "+phrases:\(mergedCount):" + signature,
+            status: initial.status,
+            source: initial.source,
+            chars: chars,
+            layout: initial.layout,
+            furigana: initial.furigana,
+            wordSegmentation: initial.wordSegmentation,
+            characterGeometry: initial.characterGeometry,
+            formulaCoverage: initial.formulaCoverage,
+            formulaRegions: initial.formulaRegions,
+            createdAt: initial.createdAt,
+            error: initial.error,
+            textAuthority: initial.textAuthority
+        )
     }
 
     private static func applyingSelectionCorrections(

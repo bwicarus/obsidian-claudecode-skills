@@ -713,6 +713,13 @@ final class NativeBookOCRManager: ObservableObject {
 
     /// Explicit user action: force Apple Vision for one page and keep the
     /// result in a separate manual layer above embedded/imported text.
+    /// 收藏词组表（2026-09-02）：runtime 每次词组变动都整表推来；存储服务页时按它合并分词。
+    func setPhrases(_ phrases: [String]) async throws -> Int {
+        await waitUntilReady()
+        try await store.writePhrases(phrases)
+        return phrases.count
+    }
+
     func reOCRPage(
         book: ReaderLocalBookAccess,
         contentSHA256: String,

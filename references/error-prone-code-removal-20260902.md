@@ -43,3 +43,7 @@
   恢复：删标记 → `wscript.exe //B start-readerpc.vbs logon`（该脚本见到已有进程就退出，要换版本得直接
   起新版 exe，它会接管旧实例）。根治待做：安装器装完应自己拉起 ReaderPC，或 ReaderPC 把"属下服务被外部
   停掉"与"用户点了退出"分开对待。
+- **换 ReaderPC 版本要么让新版接管、要么全杀再拉，不能各做一半**（09-02 晚）：直接起新版 exe 会走
+  「启动接管」，它要求旧实例**正常退出**；我在接管进行中强杀了旧实例，新版判定"旧 ReaderPC 未完成
+  正常退出；拒绝强制接管"而不接管服务，桥随旧实例一起死。正确顺序：`taskkill` 掉**全部** ReaderPC
+  实例 → 删退出标记 → `wscript.exe //B start-readerpc.vbs logon`（无实例时它会启动 current.json 指向的版本）。
