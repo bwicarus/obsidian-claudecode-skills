@@ -310,9 +310,19 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
         guard payload["contract"] as? String == "sync-gateway/2",
               payload["deviceId"] as? String == current.deviceID,
               Self.isAllowedPayload(payload, action: input.action) else {
+            // 说清是哪一条不合(2026-09-03):切服务器后整批同步被这里拒了,只有一个码,
+            // 查了两小时才知道该看哪。原因只进错误消息,不改变拒绝语义。
+            let reason: String
+            if payload["contract"] as? String != "sync-gateway/2" {
+                reason = "contract 不是 sync-gateway/2"
+            } else if payload["deviceId"] as? String != current.deviceID {
+                reason = "deviceId 与 owner 租约不一致"
+            } else {
+                reason = Self.payloadRejectReason(payload, action: input.action)
+            }
             throw BridgeError(
                 "BW_NATIVE_SYNC_PAYLOAD",
-                "同步载荷不符合 sync-gateway/2",
+                "同步载荷不符合 sync-gateway/2：" + reason,
                 false
             )
         }
@@ -654,6 +664,52 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
               isSafeInteger(payload["limit"], minimum: 1, maximum: 100)
         else { return false }
         return true
+    }
+
+    /// 只在 isAllowedPayload 已判假时调用：逐条复查，返回第一条不合规的描述（含 change 序号/字段名）。
+    private static func payloadRejectReason(
+        _ payload: [String: Any],
+        action: String
+    ) -> String {
+        if action == "exchange" {
+            let expected = Set(["contract", "direction", "deviceId", "cursor", "limit", "changes"])
+            if Set(payload.keys) != expected {
+                return "exchange 顶层键=" + payload.keys.sorted().joined(separator: ",")
+            }
+            guard let direction = payload["direction"] as? String, ["push", "pull"].contains(direction) else {
+                return "direction 非 push/pull"
+            }
+            if !isSafeInteger(payload["cursor"], minimum: 0) { return "cursor 不是 ≥0 的安全整数" }
+            if !isSafeInteger(payload["limit"], minimum: 1, maximum: 100) { return "limit 不在 1…100" }
+            guard let changes = payload["changes"] as? [[String: Any]] else { return "changes 不是对象数组" }
+            if changes.count > 100 { return "changes 多于 100 条(\(changes.count))" }
+            if direction == "pull", !changes.isEmpty { return "pull 携带了 changes" }
+            for (index, change) in changes.enumerated() where !isAllowedChange(change) {
+                let collection = (change["collection"] as? String) ?? "?"
+                let keys = change.keys.sorted().joined(separator: ",")
+                var detail = "change#\(index) collection=\(collection) keys=\(keys)"
+                if !isSafeInteger(change["cursor"], minimum: 1) { detail += " cursor<1" }
+                if let mutationID = change["mutationId"] as? String, !safeName(mutationID) { detail += " mutationId 非法" }
+                if let operation = change["operation"] as? String, !["put", "remove"].contains(operation) { detail += " operation=\(operation)" }
+                if !allowedCollections.contains(collection) { detail += " collection 不在白名单" }
+                if let record = change["record"] as? [String: Any] {
+                    let recordKeys = record.keys.sorted().joined(separator: ",")
+                    detail += " recordKeys=\(recordKeys)"
+                    if let recordID = record["id"] as? String, !safeName(recordID) { detail += " record.id 非法" }
+                    if let updatedBy = record["updatedBy"] as? String, !isSafeUpdatedBy(updatedBy) { detail += " updatedBy 非法" }
+                    if let value = record["value"] as? [String: Any] {
+                        if value["id"] as? String != record["id"] as? String { detail += " value.id≠record.id" }
+                        if !isBoundedJSONObject(value, maximumBytes: 512 * 1_024) { detail += " value>512KB" }
+                    } else { detail += " value 缺失" }
+                    if let causal = record["causal"] as? [String: Any] {
+                        if !isAllowedCausalProof(causal) { detail += " causal 不合规" }
+                    } else { detail += " causal 缺失" }
+                } else { detail += " record 缺失" }
+                return detail
+            }
+            return "未定位到具体字段"
+        }
+        return "snapshot 载荷不合规：keys=" + payload.keys.sorted().joined(separator: ",")
     }
 
     private static let allowedCollections: Set<String> = [
