@@ -47,3 +47,6 @@
   「启动接管」，它要求旧实例**正常退出**；我在接管进行中强杀了旧实例，新版判定"旧 ReaderPC 未完成
   正常退出；拒绝强制接管"而不接管服务，桥随旧实例一起死。正确顺序：`taskkill` 掉**全部** ReaderPC
   实例 → 删退出标记 → `wscript.exe //B start-readerpc.vbs logon`（无实例时它会启动 current.json 指向的版本）。
+- **按命令行关键字杀进程前先想"我自己的 shell 命令行里有没有这个词"**（09-02 第二次实锤）：重启 Flask 时按
+  `app.py` 匹配，把正在等 CI 的后台 bash（其提交信息里含 "python app.py"）一起杀了。匹配要落到**进程名 +
+  精确脚本路径**（如 `local_supervisor.pyw`），不要用会出现在自己命令行/提交信息里的泛词。
