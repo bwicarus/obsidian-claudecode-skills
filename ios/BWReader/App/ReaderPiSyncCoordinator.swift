@@ -88,10 +88,13 @@ struct ReaderPiDataSyncReport: Equatable, Sendable {
         case .unknown:
             return "无法确认设置、词汇与卡片仓库的同步结果"
         case .error:
-            let detail = [errorCode, errorMessage].filter { !$0.isEmpty }.joined(separator: "：")
-            return detail.isEmpty
-                ? "设置、词汇与卡片仓库同步失败"
-                : "设置、词汇与卡片仓库同步失败（\(detail)）"
+            let messageSuffix = errorMessage.isEmpty ? "" : "：" + errorMessage
+            if errorCode.isEmpty {
+                return errorMessage.isEmpty
+                    ? "设置、词汇与卡片仓库同步失败"
+                    : "设置、词汇与卡片仓库同步失败（\(errorMessage)）"
+            }
+            return "设置、词汇与卡片仓库同步失败（\(errorCode)\(messageSuffix)）"
         }
     }
 }
