@@ -1720,6 +1720,10 @@ class ReaderBookOcrService:
             #   上来的**每一页**都被 400 拒,整本预处理 0/53 失败。这个白名单是
             #   拒绝式的(`set(page) - allowed` 非空即拒),给页加字段必须同时改这里。
             "visionEffectiveDpi", "visionDpiShortfall",
+            # 分词方案版本(2026-09-03 栏段切分=3)。⚠ 2026-09-04 又踩一次 08-19 的坑:worker 加了这个字段,
+            #   这里没放行,PC 预处理整本 0/80,App 里"直接无法使用"。tests/test_reader_book_ocr.py 的
+            #   test_pc_worker_sidecar_keys_are_all_allowed 就是为这个写的 —— 改 worker 必须跑它。
+            "tokenizeSchema",
         }
         if not isinstance(page, dict) or set(page) - allowed:
             raise ReaderBookOcrError(
@@ -1771,6 +1775,15 @@ class ReaderBookOcrService:
         if "tokenized" in page and not isinstance(page["tokenized"], bool):
             raise ReaderBookOcrError(
                 "invalid-worker-page", "invalid PC OCR tokenization state", status=400
+            )
+        if "tokenizeSchema" in page and (
+            isinstance(page["tokenizeSchema"], bool)
+            or not isinstance(page["tokenizeSchema"], int)
+            or page["tokenizeSchema"] < 1
+            or page["tokenizeSchema"] > 99
+        ):
+            raise ReaderBookOcrError(
+                "invalid-worker-page", "invalid PC OCR tokenization schema", status=400
             )
         char_fields = {
             "c", "x0", "y0", "x1", "y1", "w", "bk", "b", "sp", "line", "conf",

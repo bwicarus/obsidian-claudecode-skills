@@ -1072,7 +1072,7 @@ class ReaderBookOcrPageSchemaContractTest(unittest.TestCase):
             "schema", "bookId", "contentSha256", "engine", "pageNumber",
             "page_w", "page_h", "imageWidth", "imageHeight", "chars",
             "furigana", "textCharCount", "generatedAtEpochMs", "tokenized",
-            "visionEffectiveDpi", "visionDpiShortfall", "layout",
+            "visionEffectiveDpi", "visionDpiShortfall", "layout", "tokenizeSchema",
         ):
             self.assertIn(field, allowed, f"服务端白名单少了 {field}，PC 传页会被 400 拒")
 

@@ -861,11 +861,13 @@
       return (hit && hit.ok === true) ? hit : null;
     } catch (_) { return null; }
   }
+  var _persistLastSkip = '';
   function _persistPut(word, result) {
+    _persistLastSkip = '';
     try {
-      if (!result || result.ok !== true) return;
-      if (result.jp && !_jpMeaningText(result)) return;
-      if (result.meaning_source === 'synthetic' || /^暂无词典释义/.test(String(result.definition || ''))) return;
+      if (!result || result.ok !== true) { _persistLastSkip = 'ok=false'; return false; }
+      if (result.jp && !_jpMeaningText(result)) { _persistLastSkip = '无中文义'; return false; }
+      if (result.meaning_source === 'synthetic' || /^暂无词典释义/.test(String(result.definition || ''))) { _persistLastSkip = '合成兜底词条'; return false; }
       var store = _persistLoad();
       var copy = {};
       Object.keys(result).forEach(function (k) {
@@ -877,19 +879,21 @@
       store.map[word] = copy;
       while (store.order.length > _DICT_CACHE_MAX) { var old = store.order.shift(); delete store.map[old]; }
       localStorage.setItem(_PERSIST_KEY, JSON.stringify({ order: store.order, map: store.map }));
-    } catch (_) {}
+      return true;
+    } catch (e) { _persistLastSkip = 'localStorage 写失败 ' + String(e && e.name || e); return false; }
   }
   function _cacheDictResult(word, result) {
-    if (!result || !result.ok) return;
+    if (!result || !result.ok) { _dictDiag('不缓存「' + word + '」:结果 ok=false'); return; }
     // 中文义仍缺失时不缓存：用户再次点原词会重新进入原有呼吸查询，而
     // 不会被一条残缺的会话缓存永久短路。例句缺中文有自己的 exact-JA
     // 原位回填链，不应再次触发整词查询。
-    if (result.jp && !_jpMeaningText(result)) return;
+    if (result.jp && !_jpMeaningText(result)) { _dictDiag('不缓存「' + word + '」:无中文义(source=' + (result.meaning_source || result.source || '?') + ')'); return; }
     try {
       _dictCache.set(word, result);
       if (_dictCache.size > _DICT_CACHE_MAX) _dictCache.delete(_dictCache.keys().next().value);
     } catch (_) {}
-    _persistPut(word, result);
+    var persisted = _persistPut(word, result);
+    _dictDiag('缓存「' + word + '」← ' + (result.meaning_source || result.source || '?') + (persisted ? ' (已落盘)' : ' (未落盘:' + _persistLastSkip + ')'));
   }
   // 供卡内词典(rc-stickynote)等复用**同一条**查词链:内存缓存 → 设备持久缓存 → 本地词典 → 服务器 → Codex 兜底。
   // 此前卡内词典只打服务器 dict-quick,查词框能出释义的外来语在卡里却是空的(2026-09-04 パンセオ 实锤)。
@@ -1326,6 +1330,7 @@
     // owner 占新 id(照原生:没有 hl 会匹配它 → 别的并发慢词回来不会覆盖本框)。
     var cached = _dictCache.get(word) || _persistGet(word);
     if (cached) {
+      _dictDiag('缓存命中「' + word + '」(' + (_dictCache.get(word) ? '内存' : '持久') + ')');
       _wordPopOwnerId = ++_wordHlSeq;
       _popPosHook = _ctx.positionPop;
       _renderWordPop(word, _ctx.ctx, cached, _ctx.rect);
