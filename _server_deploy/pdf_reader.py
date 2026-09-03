@@ -20105,6 +20105,10 @@ def pdf_api_translate_sentence():
     try:
         from translate import translate as _tr  # type: ignore
         zh = _tr(text, backend=backend, model=model, effort=effort, no_cache=no_cache)
+        if not zh and backend == "ai":
+            # AI CLI 拿不到结果(未登录/限流/路径不对)时别让调用方拿空:词典例句这类场景 Google 链足够。
+            # 2026-09-04 App 日志实锤:CLI 登录过期 + 配置路径是 Pi 的,例句中译"无结果"持续了好几天没人知道。
+            zh = _tr(text, backend="no_ai", model=model, effort=effort, no_cache=no_cache)
         if zh:
             # 前端带 file + sentence 几何时 → 存 sidecar(持久句子标记 + 译文浮层)
             sent = data.get("sentence")
