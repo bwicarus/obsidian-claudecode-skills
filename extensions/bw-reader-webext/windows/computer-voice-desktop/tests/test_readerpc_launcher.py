@@ -48,6 +48,22 @@ from readerpc_services import (  # noqa: E402
 )
 
 
+_BOOT_LOG_PATCH = None
+
+
+def setUpModule() -> None:
+    # 单测绝不能往真实 %LOCALAPPDATA%/BWReader/readerpc-server.log 写:
+    # 2026-09-03 实锤,测试夹具里的 Mock 异常("unsupported operand ... 'Mock' and 'str'")
+    # 与假 PID 的"启动接管"行混进了线上日志,排障时会把人带偏。
+    global _BOOT_LOG_PATCH
+    _BOOT_LOG_PATCH = patch.object(readerpc_launcher, "_boot_log", lambda message: None)
+    _BOOT_LOG_PATCH.start()
+
+
+def tearDownModule() -> None:
+    if _BOOT_LOG_PATCH is not None:
+        _BOOT_LOG_PATCH.stop()
+
 class ReaderPCLauncherTests(unittest.TestCase):
     class MutableProcessRunner:
         def __init__(self, executables: dict[int, Path]) -> None:
