@@ -23,6 +23,10 @@ Set-Location 'C:\obsidian'
 "[$(Get-Date -Format 'o')] launcher starting node $cli sync --continuous" | Out-File -FilePath $out -Append -Encoding UTF8
 
 # Run synchronously — this script blocks until node exits, so the scheduled task can detect failure and restart.
+# ⚠ 2026-09-03 实锤:上面 $ErrorActionPreference='Stop' 时,Windows PowerShell 5.1 会把原生程序写到 stderr 的
+#   任何一行(重定向到文件时)当成终止错误 —— 脚本在这里被掐断,下面那行"node exited"从来没写过,
+#   node 随宿主一起被计划任务收掉,看护每 5 分钟重拉一次 → "持续同步"实际退化成"每 5 分钟同步一次"。
+$ErrorActionPreference = 'Continue'
 & $nodeCmd.Source $cli sync --continuous *>> $out
 $rc = $LASTEXITCODE
 "[$(Get-Date -Format 'o')] node exited rc=$rc" | Out-File -FilePath $out -Append -Encoding UTF8

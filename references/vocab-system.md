@@ -621,3 +621,15 @@ build_exposure ~40s（增量更新已扫过的 PDF），compute_mastery ~秒级�
 - `08-charlayer._applyPageVocabOverlay`：本地标记与服务端增强做**并集**（此前有增强就跳过本地）。
   `window.refreshLocalVocabMarks(page)` 供查词后立即刷新当前页。
 - 契约：`tests/reader_contract/local-vocab-marks.contract.test.mjs`。
+
+### §19.1 「下划线出现又消失」的根因（2026-09-03 晚，App 客户端日志第一次派上用场）
+
+现象：查词的一瞬间页面上多处出现下划线，随后全部消失（用户 2026-09-03）。链路：
+查词 → `refreshLocalVocabMarks(page)`（08-charlayer）按本地状态立刻画出刚查的词 →
+`refreshVocabUnderlinesForAllPages()`（12-vocab-sentences）在 1.8s / 3.5s / 1.5s **三轮**拿服务端
+`/pdf/api/page-vocab-marks` 整页重画（这条路由在 App 内**直打服务器**，不走本地分支），
+而它此前是 `pw.__vocabMarks = d.vocab_marks` **覆盖** —— 服务端不知道 App 本地的 `lookup` 状态，
+刚出现的本地下划线被冲掉；三轮就是三次"出现→消失"。修法：与 `pw.__localVocabMarks` 用
+`_mergeVocabMarks`（几何去重、本地优先）合并；浏览器表面 `__localVocabMarks` 为空，行为不变。
+契约 `local-vocab-marks.contract.test.mjs` 锁住不许再覆盖。
+教训：同一份状态有两个刷新入口时，**每个入口都要按同一条合并规则写**，只改一处等于没改。

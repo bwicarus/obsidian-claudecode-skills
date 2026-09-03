@@ -674,9 +674,25 @@
         });
       });
     }
-    Promise.resolve().then(ensureRestored).catch(function (error) {
-      log('恢复 AnkiMobile pending 失败：' + String(error && error.message || error));
-    });
+    // 开页第一拍卡仓可能还没接上本地存储(2026-09-03 App 日志:「本地卡仓存储缺少 get」比「连接本地状态」早 60ms),
+    // 失败一次就放弃会让 pending 回执一直等到下次前台切换;这里对"仓未就绪"类错误短退避重试几次。
+    var restoreAttempt = 0;
+    function restoreAtStartup() {
+      return ensureRestored().catch(function (error) {
+        var code = String(error && error.code || '');
+        var unavailable = code === 'BW_CARD_REPOSITORY_UNAVAILABLE' ||
+          code === 'BW_ANKIMOBILE_REPOSITORY_UNAVAILABLE';
+        if (unavailable && restoreAttempt < 6) {
+          restoreAttempt += 1;
+          return new Promise(function (resolve) {
+            setTimeout(resolve, 400 * restoreAttempt);
+          }).then(restoreAtStartup);
+        }
+        log('恢复 AnkiMobile pending 失败：' + String(error && error.message || error) +
+          (restoreAttempt ? '（已重试 ' + restoreAttempt + ' 次）' : ''));
+      });
+    }
+    Promise.resolve().then(restoreAtStartup);
 
     return Object.freeze({
       contract: CONTRACT,

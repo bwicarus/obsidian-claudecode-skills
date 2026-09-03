@@ -1216,7 +1216,13 @@ if (window.__bwPwaProviderOnly) return;
     var visible = false;
     try { visible = box.offsetParent !== null; } catch (e0) {}
     if (visible) { run(); return; }
-    if (box.__dictVisWatch) return;
+    // 已挂着上一次的观察者 → 拆掉重挂:锁定词可能已经换了,旧闭包 run() 用的是同一个 h 引用没问题,
+    // 但 2026-09-03 之前这里直接 return,而观察者若因 box 被重建/一直不可见从没触发,后续每次调用都被吞掉。
+    if (box.__dictVisWatch) {
+      try { box.__dictVisWatch.disconnect(); } catch (e00) {}
+      box.__dictVisWatch = null;
+    }
+    try { window.dlog && window.dlog('卡内词典:卡当前不可见,等展开再查(锁定词=' + (bindWordTextOf(h.bind) || '(无)') + ')'); } catch (eL1) {}
     if (typeof IntersectionObserver !== 'function') { run(); return; }
     try {
       var obs = new IntersectionObserver(function (entries) {
@@ -1245,7 +1251,10 @@ if (window.__bwPwaProviderOnly) return;
     try {
       // 词典行 v1 只在 App 内出（runtime 在场才发请求,契约沙箱不发）。
       if (!(window.BWReaderRuntime &&
-        window.BWReaderRuntime.nativeLocalRuntime)) return;
+        window.BWReaderRuntime.nativeLocalRuntime)) {
+        try { window.dlog && window.dlog('卡内词典:跳过(本机 runtime 不在场)'); } catch (eL00) {}
+        return;
+      }
       // 用户设计（2026-09-03）：字典内容留在字典里、卡片内容留在卡片里,卡内词典段只是
       // **当前锁定词**的实时投影 —— 改锁到「試験」就显示試験,解绑就没有;不再按卡名兜底,
       // 也不再把词典文字固化进 content(旧卡里已固化的那段显示时摘掉,存储不动)。
@@ -1269,7 +1278,13 @@ if (window.__bwPwaProviderOnly) return;
       try {
         var hhB = ctl && ctl.note && ctl.note.html;
         var bakedFor = hhB ? (String(hhB.content || '').match(/vc-dict-sec"[^>]*data-dict-word="([^"]*)"/) || [])[1] : '';
-        if (bakedFor === text) return;
+        if (bakedFor === text) {
+          try { window.dlog && window.dlog('卡内词典:「' + text + '」已固化,不重查'); } catch (eL2) {}
+          return;
+        }
+        if (bakedFor) {
+          try { window.dlog && window.dlog('卡内词典:固化的是「' + bakedFor + '」,改为「' + text + '」重查'); } catch (eL3) {}
+        }
       } catch (eB) {}
       if (text.length > 32 || text.indexOf(String.fromCharCode(10)) >= 0) {
         dictLineNote(box, '词典：标题不是词（过长/多行）'); return;
@@ -1447,8 +1462,12 @@ if (window.__bwPwaProviderOnly) return;
           patchNote(ctl.note, { html: hh });
           try { window.dlog && window.dlog('卡内词典:「' + text + '」已写入卡片内容,长度 ' + h2.length); } catch (eL) {}
         })
-        .catch(function () {});
-    } catch (e) {}
+        .catch(function (eF) {
+          try { window.dlog && window.dlog('卡内词典:「' + text + '」查询/写入失败: ' + String(eF && eF.message || eF), '#ff6b6b'); } catch (eL4) {}
+        });
+    } catch (e) {
+      try { window.dlog && window.dlog('卡内词典:异常 ' + String(e && e.message || e), '#ff6b6b'); } catch (eL5) {}
+    }
   }
 
   function bindHtmlCardSelection(el, htmlOrGetter, cid, hostKind) {
@@ -2183,7 +2202,14 @@ if (window.__bwPwaProviderOnly) return;
         return wordBindFromPoint(cx, cy);
       });
     } catch (e) {}
-    if (old && nb && nb.page === old.page && nb.from === old.from && nb.to === old.to) return false;
+    if (old && nb && nb.page === old.page && nb.from === old.from && nb.to === old.to) {
+      try { window.dlog && window.dlog('改绑:落回同一个词「' + (bindWordTextOf(old) || '?') + '」,不动'); } catch (eL0) {}
+      return false;
+    }
+    try {
+      window.dlog && window.dlog('改绑:「' + (bindWordTextOf(old) || '(无)') + '」→「' + (bindWordTextOf(nb) || '(无:解绑成自由卡)') + '」 slot=' + slot
+        + ' html=' + !!(ctl.note && ctl.note.html));
+    } catch (eL1) {}
     try { if (old && window.__pageBindRemove) window.__pageBindRemove(old, ctl.note.id); } catch (e) {}
     ctl.note[slot].bind = nb;
     ctl._bindMarked = false;
@@ -2648,7 +2674,10 @@ if (window.__bwPwaProviderOnly) return;
     patchNote(ctl.note, _pf);
     // 改锁/解绑 → 卡内词典段立刻跟随当前锁定词(用户 2026-09-03:锁到「試験」却显示旧词)
     if (_rb && ctl.html && ctl.note.html) {
-      try { appendDictWhenVisible(ctl, ctl.html, ctl.note.html); } catch (eD) {}
+      try { appendDictWhenVisible(ctl, ctl.html, ctl.note.html); }
+      catch (eD) { try { window.dlog && window.dlog('改绑:卡内词典刷新异常 ' + String(eD && eD.message || eD), '#ff6b6b'); } catch (eL) {} }
+    } else if (_rb) {
+      try { window.dlog && window.dlog('改绑:不是 HTML 卡(html 盒=' + !!ctl.html + ' note.html=' + !!ctl.note.html + '),无卡内词典可刷'); } catch (eL2) {}
     }
     if (wasPortaled) {   // 先解除 portal,ensureMounted 才会真正换容器重挂(否则 portaled 守卫早退)
       if (wasWordPortal) { unobserveWordPortal(ctl); clearWordViewportLimits(ctl); }

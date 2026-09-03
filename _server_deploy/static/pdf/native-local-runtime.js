@@ -1619,7 +1619,14 @@
       // 入队失败绝不能影响已经完成的本地写 —— 但必须出声，
       // 静默丢队列就是静默分叉。
       if (typeof root.dlog === 'function') {
-        root.dlog('复制命令入队失败:' + String(error && error.code || error), '#ff6b6b');
+        // 带上原因:只打 code 的话 BW_DATA_BACKEND 分不清是 IndexedDB 配额满/事务提前完成/库损坏(2026-09-03 App 日志实锤)
+        var detail = '';
+        try {
+          detail = String(error && error.message || '') +
+            (error && error.details ? ' ' + JSON.stringify(error.details).slice(0, 300) : '');
+        } catch (_) {}
+        root.dlog('复制命令入队失败:' + String(error && error.code || error) + (detail ? ' — ' + detail : '') +
+          ' [' + method + ' ' + url + ']', '#ff6b6b');
       }
       return false;
     });
@@ -14890,7 +14897,8 @@
     clientLogInFlight = true;
     var body = JSON.stringify({
       device: deviceId, book: localFileRef(), surface: String(nativeInterfaceSurface || ''),
-      build: String((root.BWReaderRuntime && root.BWReaderRuntime.appBuild) || ''),
+      // Swift 在 atDocumentStart 注入 __BW_NATIVE_COMPUTER_VOICE_APP_VERSION__(ReaderWebView.swift);appBuild 保留给别的宿主
+      build: String((root.BWReaderRuntime && root.BWReaderRuntime.appBuild) || root.__BW_NATIVE_COMPUTER_VOICE_APP_VERSION__ || ''),
       lines: batch
     });
     // 裸路径是正道(2026-09-03 实锤:带 localBasePath 前缀的路径不以 /pdf/api/ 开头,localFetch 不认领,

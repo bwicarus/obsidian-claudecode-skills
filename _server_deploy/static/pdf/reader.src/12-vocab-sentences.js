@@ -53,8 +53,16 @@ async function refreshVocabUnderlinesForAllPages() {
           try {
             const r = await fetch('/pdf/api/page-vocab-marks?file=' + encodeURIComponent(FILE_REL) + '&page=' + pn);
             const d = await r.json();
-            if (!d.ok) continue;
-            pw.__vocabMarks = d.vocab_marks || [];
+            if (!d.ok) { window.dlog?.('vocab refresh p.' + pn + ' 服务端拒绝: ' + (d.error || '?'), '#ffb454'); continue; }
+            // ⚠ 与本地标记**合并**而不是覆盖(2026-09-03 App 日志实锤「下划线出现又消失」):
+            //   查词 → refreshLocalVocabMarks 先按本地状态画出刚查的词 → 这里 1.8s/3.5s/1.5s 三轮
+            //   拿服务端结果整页重画,服务端不知道 App 本地的 lookup 状态,于是刚出现的下划线被冲掉。
+            //   浏览器表面 __localVocabMarks 为空,合并结果与原来完全一样。
+            const remote = d.vocab_marks || [];
+            pw.__vocabMarks = _mergeVocabMarks(pw.__localVocabMarks, remote);
+            if (pw.__localVocabMarks && pw.__localVocabMarks.length) {
+              window.dlog?.('vocab refresh p.' + pn + ': 本地 ' + pw.__localVocabMarks.length + ' + 服务端 ' + remote.length + ' → ' + pw.__vocabMarks.length);
+            }
             pw.__vocabSentences = d.vocab_sentences || [];
             pw.__masteredFuri = new Set(d.mastered_furi || []);   // 刚标掌握 → 更新已掌握词集
             renderVocabUnderlines(pw, pw.__vocabMarks);

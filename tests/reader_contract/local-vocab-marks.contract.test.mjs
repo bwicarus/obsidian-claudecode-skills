@@ -81,3 +81,11 @@ test("快照：漫画网格只给真漫画页，整页宽行的页按阅读顺�
   // 同一视觉行的块用空格接上（一行被网格拆成两格的病根）
   assert.match(flow, /builder\.append\(sameLine \? " " : "\\n"\)/);
 });
+
+// 2026-09-03 App 客户端日志实锤「查词后下划线出现又消失」:查词后 1.8s/3.5s/1.5s 三轮全页刷新
+// 拿服务端 page-vocab-marks 整页**覆盖**,服务端不知道 App 本地 lookup 状态,刚画出的下划线被冲掉。
+test("查词后全页刷新与本地标记合并,不覆盖", () => {
+  const SENT = readFileSync(new URL("../../_server_deploy/static/pdf/reader.src/12-vocab-sentences.js", import.meta.url), "utf8");
+  assert.match(SENT, /pw\.__vocabMarks = _mergeVocabMarks\(pw\.__localVocabMarks, remote\);/);
+  assert.doesNotMatch(SENT, /pw\.__vocabMarks = d\.vocab_marks \|\| \[\];/);
+});
