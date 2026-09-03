@@ -118,3 +118,41 @@ test("bindWordTextOf 有定义且取词锚 text", () => {
   // 用到它的三处都在同一个 IIFE 作用域里
   assert.ok(NOTE.indexOf("function bindWordTextOf(bind)") < NOTE.indexOf("var text = bindWordTextOf(bind);"));
 });
+
+// 2026-09-04 第三次踩坑(bindWordTextOf → _dictLineCache):卡内词典链路里被调用的名字必须在 rc-stickynote.js 里有定义。
+// 全部包在 try/catch 里,ReferenceError 只会让功能静默死亡;这条契约在本地就把"用到却没定义"抓出来。
+test("卡内词典链路用到的每个标识符都有定义", () => {
+  const NOTE = readFileSync(new URL("../../_server_deploy/static/pdf/rc-stickynote.js", import.meta.url), "utf8");
+  const bodyOfNote = (name) => {
+    const start = NOTE.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `缺 function ${name}`);
+    const next = NOTE.slice(start + 1).search(/\n {2}function /);
+    return next < 0 ? NOTE.slice(start) : NOTE.slice(start, start + 1 + next);
+  };
+  const GLOBALS = new Set([
+    "window", "document", "String", "Array", "Promise", "Date", "Math", "JSON", "Number", "Object", "Boolean",
+    "fetch", "setTimeout", "clearTimeout", "console", "encodeURIComponent", "decodeURIComponent",
+    "IntersectionObserver", "AbortController", "parseInt", "parseFloat", "isFinite", "Error", "RegExp", "Set", "Map", "RC",
+    "if", "for", "while", "return", "function", "typeof", "catch", "try", "new", "var", "else", "switch",
+  ]);
+  const defined = new Set();
+  for (const m of NOTE.matchAll(/(?:^|\n)\s*(?:function\s+([A-Za-z_$][\w$]*)\s*\(|var\s+([A-Za-z_$][\w$]*)\s*[=;,])/g)) {
+    defined.add(m[1] || m[2]);
+  }
+  const missing = new Set();
+  for (const fn of ["appendWordDictLine", "appendDictWhenVisible", "_rebindWord", "dictLineNote", "bindWordTextOf"]) {
+    const body = bodyOfNote(fn)
+      .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
+      .replace(/\/\/[^\n]*/g, "");
+    // 只看"名字(" 与 "名字[" 两种用法,且前面不是 . (方法调用不算)
+    for (const m of body.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?=\(|\[)/g)) {
+      const id = m[1];
+      if (GLOBALS.has(id) || defined.has(id)) continue;
+      // 函数自己的形参/局部变量:出现在 body 内的 var/参数声明里就算有定义
+      const local = new RegExp(`(?:var\\s+|\\(|,\\s*)${id.replace(/\$/g, "\\$")}\\b`).test(body);
+      if (local) continue;
+      missing.add(`${fn}: ${id}`);
+    }
+  }
+  assert.deepEqual([...missing], [], "这些名字被调用却没有定义(会在运行时 ReferenceError 并被 catch 吞掉)");
+});

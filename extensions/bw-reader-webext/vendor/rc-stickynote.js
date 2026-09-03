@@ -1213,6 +1213,27 @@ if (window.__bwPwaProviderOnly) return;
   //   新 → patchNote 覆写本地内容（sig 变化自然触发重渲）。
   // (2026-09-03 重做:索引不再存内容副本,「整理」直接写回便签本体,无需开卷对账。)
 
+  // ⚠ 第三次踩同一个坑(2026-09-04,619 日志「Can't find variable: _dictLineCache」):这两个定义在 2026-09-03
+  // 重做词→卡索引时随 reconcileConsolidatedWordCard 一起被删,而使用处全在;每次调用第一行 ReferenceError
+  // 被 try/catch 吞掉,卡内词典整体静默死亡。现在 word-card-bindings 契约扫这一段用到的每个标识符必须有定义。
+  var _dictLineCache = {};   // 词 → {d}(成功,永久) / {failAt}(失败,20s 冷却)
+
+  // ── 词典区诊断出口(每个早退都要出声)──────────
+  function dictLineNote(box, reason) {
+    try {
+      if (!box || !box.isConnected) return;
+      if (box.querySelector('.rc-note-dict-note')) return;
+      var line = document.createElement('div');
+      line.className = 'rc-note-dict-note';
+      line.style.cssText =
+        'margin:2px 0;font-size:10px;opacity:.55;color:#cfe6ff';
+      line.textContent = '📖 ' + reason;
+      // 插卡顶部:尾部会被展开卡的固定高度裁掉,只露半行(实锤截图)。
+      box.insertBefore(line, box.firstChild || null);
+      setTimeout(function () { try { line.remove(); } catch (e) {} }, 8000);
+    } catch (e) {}
+  }
+
   // ── 词典区按真实可见性调度：看得见才拉；看不见挂一次性观察者，
   //   展开瞬间自动补 —— 性能与功能语义都保住。
   function appendDictWhenVisible(ctl, box, h) {
