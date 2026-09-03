@@ -1506,9 +1506,10 @@ struct ReaderLocalLibraryView: View {
                 )
             }
             if let localBook { await refreshTextLayers(localBook) }
-            let active = remoteBook.flatMap { piOCR.job(for: $0) }.map { job in
-                job.isActive || job.canResume || piOCR.activeBookID == $0.bookId
-            } ?? false
+            var active = false
+            if let remoteBook, let job = piOCR.job(for: remoteBook) {
+                active = job.isActive || job.canResume || piOCR.activeBookID == remoteBook.bookId
+            }
             let busy = active || ocrActionBookID != nil || piOCR.activeBookID != nil
             do {
                 try await Task.sleep(for: .seconds(busy ? 3 : 20))
