@@ -499,10 +499,15 @@ class ReleasePipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             fixture = Path(raw) / "extensions" / "bw-reader-webext"
             fixture.parent.mkdir(parents=True)
+            # 只复制 audit_manifest 需要的源码;windows/candidates 与 readerpc-candidates 里是几 GB 的
+            # 发布 zip(2026-09-04 实锤:整目录 copytree 让这一个用例跑十几分钟,handoff 看起来像挂了)。
             shutil.copytree(
                 HERE,
                 fixture,
-                ignore=shutil.ignore_patterns("__pycache__"),
+                ignore=shutil.ignore_patterns(
+                    "__pycache__", "candidates", "readerpc-candidates", "*.zip",
+                    "node_modules", "dist", "build",
+                ),
             )
             extra = fixture / "src" / "review-extra.js"
             extra.write_text("", encoding="utf-8")

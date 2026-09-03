@@ -322,7 +322,32 @@
       return databasePromise;
     }
 
+    // WebKit 在网页进程挂起/恢复(切后台、长时间空闲)后,第一笔事务常以 UnknownError
+    // 「Attempt to get a record from database without an in-progress transaction」失败
+    // (2026-09-03/04 App 日志两次实锤,都紧跟一段空闲,都落在复制命令入队 → 本地写成功、
+    // 出箱丢失 = 静默分叉)。事务失败即整体回滚,重开连接再试一次是安全的;只认这一类错误,
+    // 其他错误原样抛出,不做通用重试。
+    function isStaleConnectionError(error) {
+      var name = String((error && error.name) || (error && error.details && error.details.name) || '');
+      var text = String((error && error.message) || '') + ' ' +
+        String((error && error.details && error.details.cause) || '');
+      return /without an in-progress transaction/i.test(text) ||
+        (name === 'UnknownError' && /transaction/i.test(text));
+    }
+
     function transact(storeNames, mode, worker, transactionOptions) {
+      return transactOnce(storeNames, mode, worker, transactionOptions).catch(function (error) {
+        if (!isStaleConnectionError(error) || closed) throw error;
+        try { if (database) database.close(); } catch (_) {}
+        database = null;
+        databasePromise = null;
+        return new Promise(function (resolve) { root.setTimeout(resolve, 120); }).then(function () {
+          return transactOnce(storeNames, mode, worker, transactionOptions);
+        });
+      });
+    }
+
+    function transactOnce(storeNames, mode, worker, transactionOptions) {
       transactionOptions = transactionOptions || {};
       return openDatabase().then(function (db) {
         return new Promise(function (resolve, reject) {

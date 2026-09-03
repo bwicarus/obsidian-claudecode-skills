@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -20,25 +21,38 @@ import urllib.error
 import urllib.request
 
 
-def _resolve_exec(command: str) -> str:
-    """配置的可执行路径不存在时,在增强 PATH 里按 basename 找回。
+def _resolve_exec(command: str, env_var: str = "") -> str:
+    """配置的可执行路径不存在时,依次用环境变量、增强 PATH 找回。
 
-    解决两类问题:
+    解决三类问题:
     1. CLI 自更新搬家(如 claude 从 /usr/bin/claude 迁到 ~/.local/bin/claude),
        硬编码的绝对路径失效。
     2. systemd 服务的受限 PATH(/usr/local/bin:/usr/bin:/bin,不含 ~/.local/bin),
        导致 bare name `claude` 或默认 shutil.which 都找不到。
-    增强 PATH 并入 ~/.local/bin + 常见安装位,确保服务里也能解析。
-    Windows 不动(客户端 GUI 用完整路径或 .cmd)。
+    3. **配置来自另一台机器**(2026-09-04 实锤:Pi 迁 Windows 后 server-config.json 里
+       `ai.claude_cli.command` 仍是 /home/bwicarus/.local/bin/claude → WinError 2,被上层
+       折成"翻译无结果",App 里所有走 AI CLI 的词典例句中译全部静默失败)。此时以
+       `.env.local` 的 APP_CLAUDE / APP_CODEX(本机路径)为准,再退到 PATH 按名找。
     """
-    if os.name == "nt" or not command:
-        return command
-    if os.sep in command and os.path.exists(command):
-        return command   # 已是存在的绝对/相对路径,直接用
-    name = os.path.basename(command)
+    raw = (command or "").strip()
+    if raw and (os.sep in raw or "/" in raw) and os.path.exists(raw):
+        return raw   # 已是存在的绝对/相对路径,直接用
+    env_value = (os.environ.get(env_var, "") if env_var else "").strip()
+    if env_value and os.path.exists(env_value):
+        return env_value
+    if not raw:
+        return raw
+    name = os.path.basename(raw.replace("\\", "/"))
+    if os.name == "nt":
+        stem = re.sub(r"\.(exe|cmd|bat)$", "", name, flags=re.I)
+        for candidate in (name, stem + ".exe", stem + ".cmd", stem + ".bat", stem):
+            found = shutil.which(candidate)
+            if found:
+                return found
+        return raw
     extra = [os.path.expanduser("~/.local/bin"), "/usr/local/bin", "/usr/bin", "/bin"]
     search = os.pathsep.join([os.environ.get("PATH", "")] + extra)
-    return shutil.which(name, path=search) or command
+    return shutil.which(name, path=search) or raw
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -239,10 +253,11 @@ class CliBackend(BackendAdapter):
 
     name = "cli"
     default_command = "echo"
+    env_var = ""   # 本机路径环境变量(.env.local):配置路径来自别的机器时以它为准
 
     def _command(self) -> str:
         raw = (self.settings.get("command") or self.default_command).strip()
-        return _resolve_exec(raw)
+        return _resolve_exec(raw, self.env_var)
 
     def ping(self) -> tuple[bool, str]:
         cmd = self._command()
@@ -272,9 +287,18 @@ class CliBackend(BackendAdapter):
         return False, f"{cmd} 返回 {r.returncode}: {head}"
 
 
+# claude CLI 把认证失败当普通文本输出(exit 0)的几种写法;命中即视为调用失败,不得当回答。
+_CLI_AUTH_FAILURE = re.compile(
+    r"^(?:Failed to authenticate|Not logged in|Please run /login|Invalid API key|"
+    r"OAuth (?:session|token) expired|Authentication (?:failed|error))",
+    re.I,
+)
+
+
 class ClaudeCli(CliBackend):
     name = "claude_cli"
     default_command = "claude"
+    env_var = "APP_CLAUDE"
 
     def _model_effort_flags(self) -> list[str]:
         """从 settings 取 model / effort（思考深度），拼成 claude CLI flags。"""
@@ -303,9 +327,15 @@ class ClaudeCli(CliBackend):
                                 encoding="utf-8", errors="replace",
                                 timeout=int(self.settings.get("timeout", 180)))
                 out = (r.stdout or "").strip()
+                if out and _CLI_AUTH_FAILURE.search(out[:400]):
+                    # 2026-09-04 实锤:登录过期时 claude.exe **exit 0** 且把
+                    # 「Failed to authenticate: OAuth session expired and could not be refreshed」
+                    # 打到 stdout —— 不识别就会被当译文/词条永久缓存。
+                    claude_err = "claude_cli 未登录/登录过期: " + out[:160]
+                    out = ""
                 if out:
                     return out
-                claude_err = (r.stderr or "").strip()[:300] or f"claude_cli 空(exit {r.returncode})"
+                claude_err = claude_err or (r.stderr or "").strip()[:300] or f"claude_cli 空(exit {r.returncode})"
             except Exception as e:
                 claude_err = str(e)[:300]
             # ── claude 失败/限流/空 → Gemini 兜底(省额度 + 防单边挂)──
@@ -396,6 +426,7 @@ class ClaudeCli(CliBackend):
 class CodexCli(CliBackend):
     name = "codex_cli"
     default_command = "codex"
+    env_var = "APP_CODEX"
 
     def _model_runtime_flags(self) -> list[str]:
         """Build only live-catalog-verified model/depth/priority flags."""

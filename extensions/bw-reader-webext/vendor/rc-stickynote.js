@@ -492,6 +492,12 @@ if (window.__bwPwaProviderOnly) return;
     var slot = wordBindSlot(note);
     return slot ? note[slot].bind : null;
   }
+  // 词锚(page-chars bind)对应的词面。⚠ 2026-09-04 618 日志实锤:这个名字被 appendWordDictLine/改绑日志
+  // 引用却从未定义,ReferenceError 被外层 catch(e){} 吞掉 —— 卡内词典从上一版起一次都没跑过,
+  // 「改绑后内容没变」的直接原因。日志出口补上后第一晚就抓到。
+  function bindWordTextOf(bind) {
+    return String((bind && bind.text) || '').trim();
+  }
   function noteIndex(noteId) {
     for (var i = 0; i < notes.length; i++) if (noteIdOf(notes[i]) === noteId) return i;
     return -1;

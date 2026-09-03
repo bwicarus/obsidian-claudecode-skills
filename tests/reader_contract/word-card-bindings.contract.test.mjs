@@ -109,3 +109,12 @@ test("绑定变化事件带契约与键集合，电脑端快照仍由既有便�
   // 绑定是便签的一次写入，announceLocalNotesChanged 照旧触发 page.context 重发
   assert.match(bodyOf(RUNTIME, "mutateDocumentStateNow"), /announceLocalNotesChanged\('mutation'\)/);
 });
+
+// 2026-09-04 618 App 日志实锤:appendWordDictLine 一进门 ReferenceError(bindWordTextOf 未定义)被空 catch 吞掉,
+// 卡内词典从上一版起一次都没跑过。名字被引用就必须有定义,而且取的是词锚的 text。
+test("bindWordTextOf 有定义且取词锚 text", () => {
+  const NOTE = readFileSync(new URL("../../_server_deploy/static/pdf/rc-stickynote.js", import.meta.url), "utf8");
+  assert.match(NOTE, /function bindWordTextOf\(bind\) \{\n\s*return String\(\(bind && bind\.text\) \|\| ''\)\.trim\(\);/);
+  // 用到它的三处都在同一个 IIFE 作用域里
+  assert.ok(NOTE.indexOf("function bindWordTextOf(bind)") < NOTE.indexOf("var text = bindWordTextOf(bind);"));
+});

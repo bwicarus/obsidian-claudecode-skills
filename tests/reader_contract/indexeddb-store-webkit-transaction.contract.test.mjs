@@ -174,3 +174,14 @@ test("WebKit 严格事务在 Promise 续步之间保持活跃", async () => {
   store.close();
   await new Promise((resolve) => setImmediate(resolve));
 });
+
+// 2026-09-03/04 App 日志两次实锤:网页进程挂起/恢复后第一笔 readwrite 事务报 UnknownError
+// 「Attempt to get a record from database without an in-progress transaction」,复制命令入队失败 = 静默分叉。
+// 事务失败即整体回滚,重开连接重试一次是安全的;只认这一类错误。
+test("过期连接错误重开连接重试一次,其他错误不重试", () => {
+  const SRC = readFileSync(new URL("../../_server_deploy/static/reader-runtime/indexeddb-store.js", import.meta.url), "utf8");
+  assert.match(SRC, /function isStaleConnectionError\(error\)/);
+  assert.match(SRC, /without an in-progress transaction/);
+  assert.match(SRC, /return transactOnce\(storeNames, mode, worker, transactionOptions\)\.catch\(function \(error\) \{\n\s*if \(!isStaleConnectionError\(error\) \|\| closed\) throw error;/);
+  assert.match(SRC, /databasePromise = null;\n\s*return new Promise\(function \(resolve\) \{ root\.setTimeout\(resolve, 120\); \}\)/);
+});

@@ -78,3 +78,12 @@ node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 b
   ReaderPC 保活见标记就等待），装完删标记；或者安装器直接经 ReaderPC 的服务托管来做换代。
   今天 0.1.270 已装上（`serviceRestartDeferredToReaderPC=true`，ReaderPC 随后重拉了新 exe），
   但下次换桥别指望重试。
+- **从 Pi 搬过来的 `state/server-config.json` 里还有四条 Pi 路径**（09-04 实锤，App 日志「服务器例句中译失败…no result」）：
+  `ai.claude_cli.command=/home/bwicarus/.local/bin/claude`、`ai.codex_cli.command=/usr/bin/codex`、
+  `qa_vault_path`、`qa_index_dir`、`qa_anki_records_dir`。Windows 上 `WinError 2` 被 translate.py 的 try/except
+  折成"无结果"，App 里所有走 AI CLI 的例句中译从迁移那天起全部静默失败。已改数据（备份
+  `state/server-config.json.bak-20260904`），代码侧 `ai_backends._resolve_exec` 现在按「配置路径存在 → `.env.local`
+  的 APP_CLAUDE/APP_CODEX → PATH 按名找」解析，配置来自别的机器也能跑。
+- **claude.exe 登录过期时 exit 0，并把 `Failed to authenticate: OAuth session expired…` 打到 stdout**（同日）：
+  调用方当成正常回答 → 会被当译文/词条**永久缓存**。`ClaudeCli.chat` 现在识别这类文本为失败并落 Gemini 兜底；
+  真正的修复要在 PC 上重新 `claude login`（AI 不能替用户做登录）。
