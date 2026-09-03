@@ -9,7 +9,10 @@ Pi 上除 webapp(Flask) 之外还有几个 systemd 独立服务，App/手表/iPa
 Flask 本身由 local_supervisor.pyw 托管；这里只管这三个。每个子进程崩了 5s 后拉起，
 日志落 webapp-data/sidecar-<name>.log。环境从工作树根的 .env.local 读（与 Flask 同一份）。
 
-用法：pythonw scripts/windows_sidecar_services.py   （开机自启：HKCU Run "BwicarusSidecars"）
+用法：pythonw scripts/windows_sidecar_services.py
+开机自启：HKCU Run "BwicarusSidecars" + 计划任务 "BwicarusServer"（登录触发 + 每 5 分钟重拉,
+2026-09-03 实锤:04:04 重启后 Run 项没有执行,服务器一直 502 到 10:16 才被手工拉起;
+计划任务是第二保险,本脚本与 local_supervisor.pyw 都有单实例锁,重拉不会起第二份）
 """
 from __future__ import annotations
 
@@ -46,7 +49,29 @@ def load_env() -> dict[str, str]:
     return env
 
 
+_MUTEX_NAME = "Local\bwicarus-sidecar-services"   # 单实例:计划任务每 5 分钟重拉一次,已在跑就直接退出
+_mutex_handle = None
+
+
+def single_instance() -> bool:
+    global _mutex_handle
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = wintypes.HANDLE
+        k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        _mutex_handle = k32.CreateMutexW(None, True, _MUTEX_NAME)
+        return ctypes.get_last_error() != 183   # ERROR_ALREADY_EXISTS
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def main() -> None:
+    if not single_instance():
+        return
     env = load_env()
     data_dir = Path(env["WEBAPP_DATA"])
     data_dir.mkdir(parents=True, exist_ok=True)

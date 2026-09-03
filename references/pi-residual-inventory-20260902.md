@@ -120,3 +120,23 @@ ssh pi 'find ~/webapp/data/reader-sidecars/by-user/1 -type f -printf "%TY-%Tm-%T
 - Pi 侧 `reader-context-push.service`（Pi→PC 推快照）已无意义（App 直接投桥），停 Pi 时一并 disable。
 - 手动备份：`scripts/backup_windows_to_pi.ps1`（webapp-data + state + %LOCALAPPDATA%\BWReader 打包 scp 到
   Pi `~/backups/windows-server/`，保留 7 份）。
+
+## 七、Windows 服务器的看护（2026-09-03 追加）
+
+04:04 机器重启（用户侧发起）后，HKCU Run 里的 `BwicarusLocal` / `BwicarusSidecars`
+**没有执行**（Shell-Core 日志里当次只跑了 BWAB-Visual / start-readerpc 等四项），服务器从
+04:04 一直 502 到 10:16 才被手工拉起——App 端表现为「Pi 书库请求失败 (HTTP 502)」和
+`BW_CARD_BOOTSTRAP_HTTP`。原因未定位（注册表项当时在、也没被「启动应用」开关禁用）。
+
+现行看护（Run 项照旧保留，再加第二保险）：
+
+- 计划任务 **`BwicarusServer`**（用户级，登录触发 + 每 5 分钟重拉，`StartWhenAvailable`）：
+  两个动作 = `pythonw _server_deploy/local_supervisor.pyw`、`pythonw scripts/windows_sidecar_services.py`。
+- 两个脚本都有单实例锁（`Local\bwicarus-local-supervisor` / `Local\bwicarus-sidecar-services`），
+  重拉时已在跑就立即退出，不会起第二份、不会撞端口。
+- 一眼看状态：
+
+  ```powershell
+  Get-ScheduledTaskInfo BwicarusServer | Select LastRunTime,LastTaskResult,NextRunTime
+  curl.exe -s -o NUL -w "%{http_code}" http://127.0.0.1:5000/login   # 应 200
+  ```
