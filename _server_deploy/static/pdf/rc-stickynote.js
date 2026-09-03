@@ -495,6 +495,21 @@
   function bindWordTextOf(bind) {
     return String((bind && bind.text) || '').trim();
   }
+  // 锚词所在句(≤240 字):从该页字符层向前/向后找句末标点或换行。字符层未就绪 → ''。
+  function _bindSentenceContext(bind) {
+    if (!bind || !(bind.page > 0)) return '';
+    var wrap = document.querySelector('[data-page-num="' + Number(bind.page) + '"]');
+    var boxes = wrap && wrap.__charBoxes;
+    if (!boxes || !boxes.length) return '';
+    var from = Math.max(0, Number(bind.from) || 0), to = Math.min(boxes.length - 1, Number(bind.to) || from);
+    var isEnd = function (ch) { return /[。！？!?\n\r]/.test(ch); };
+    var lo = from, hi = to;
+    while (lo > 0 && from - lo < 120 && !isEnd(String(boxes[lo - 1].c || ''))) lo -= 1;
+    while (hi < boxes.length - 1 && hi - to < 120 && !isEnd(String(boxes[hi].c || ''))) hi += 1;
+    var out = '';
+    for (var i = lo; i <= hi; i += 1) out += boxes[i].sp ? ' ' : String(boxes[i].c || '');
+    return out.replace(/\s+/g, ' ').trim().slice(0, 240);
+  }
   function noteIndex(noteId) {
     for (var i = 0; i < notes.length; i++) if (noteIdOf(notes[i]) === noteId) return i;
     return -1;
@@ -1310,8 +1325,26 @@
         var hhB = ctl && ctl.note && ctl.note.html;
         var bakedFor = hhB ? (String(hhB.content || '').match(/vc-dict-sec"[^>]*data-dict-word="([^"]*)"/) || [])[1] : '';
         if (bakedFor === text) {
-          try { window.dlog && window.dlog('卡内词典:「' + text + '」已固化,不重查'); } catch (eL2) {}
-          return;
+          // 固化的是同一个词 → 还要看它是不是过期了(2026-09-04 实锤:先写进去的是 Codex 的「未能确定」,
+          // 之后查词框查到真释义,卡却因"同词已固化"永远不更新)。固化段文字 vs 最新查词结果的中文义不一致
+          // (或固化的本身就是不确定类文本)→ 摘掉重写;一致 → 不动。
+          var bakedSec = '';
+          try {
+            var at0 = String(hhB.content || '').indexOf('<div class="rc-note-dict vc-dict-sec"');
+            bakedSec = at0 >= 0 ? String(hhB.content).slice(at0).replace(/<[^>]+>/g, ' ') : '';
+          } catch (eB2) {}
+          var stale = /未能确定|无法确定|不确定|无法判断/.test(bakedSec);
+          try {
+            var peek = window.RC && RC.wordpop && RC.wordpop.peekCache && RC.wordpop.peekCache(text);
+            var latest = peek && RC.wordpop.meaningText ? String(RC.wordpop.meaningText(peek) || '') : '';
+            if (latest && bakedSec.indexOf(latest.split('；')[0].slice(0, 24)) < 0) stale = true;
+          } catch (eB3) {}
+          if (!stale) {
+            try { window.dlog && window.dlog('卡内词典:「' + text + '」已固化且与最新查词一致,不重查'); } catch (eL2) {}
+            return;
+          }
+          try { window.dlog && window.dlog('卡内词典:「' + text + '」固化段过期,按最新查词重写'); } catch (eL2b) {}
+          try { delete _dictLineCache[text]; } catch (eB4) {}
         }
         if (bakedFor) {
           try { window.dlog && window.dlog('卡内词典:固化的是「' + bakedFor + '」,改为「' + text + '」重查'); } catch (eL3) {}
@@ -1373,11 +1406,15 @@
       // 2026-09-04 实锤 パンセオ:查词框靠 Codex 兜底有释义,卡里只打服务器词典却是空的。
       var viaWordpop = !(cached && cached.d) && window.RC && RC.wordpop &&
         typeof RC.wordpop.lookupData === 'function';
+      // 句境:锚词所在句(字符层按句号/换行切)。Codex 兜底没有句境会答「未能确定」(2026-09-04 实锤)
+      var bindCtx = '';
+      try { bindCtx = _bindSentenceContext(bind); } catch (eC) {}
       var ready = (cached && cached.d)
         ? Promise.resolve(cached.d)
         : viaWordpop
-        ? Promise.resolve(RC.wordpop.lookupData(text, '')).then(function (d) {
-            var okd = d && d.ok === true && !/^暂无词典释义/.test(String(d.definition || ''));
+        ? Promise.resolve(RC.wordpop.lookupData(text, bindCtx)).then(function (d) {
+            var okd = d && d.ok === true && !/^暂无词典释义/.test(String(d.definition || '')) &&
+              !/^(?:未能确定|无法确定|不确定|无法判断)/.test(String(d.translation || d.zh || '').trim());
             _dictLineCache[text] = okd ? { d: d } : { failAt: Date.now() };
             if (!okd) { try { window.dlog && window.dlog('卡内词典:「' + text + '」三级查词链均无中文义'); } catch (eL9) {} }
             return okd ? d : { ok: false };

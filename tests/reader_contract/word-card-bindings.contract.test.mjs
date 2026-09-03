@@ -162,11 +162,14 @@ test("卡内词典链路用到的每个标识符都有定义", () => {
 test("卡内词典与查词框共用 RC.wordpop.lookupData,查词结果落设备持久缓存", () => {
   const POP = readFileSync(new URL("../../_server_deploy/static/pdf/rc-wordpop.js", import.meta.url), "utf8");
   const NOTE = readFileSync(new URL("../../_server_deploy/static/pdf/rc-stickynote.js", import.meta.url), "utf8");
-  assert.match(POP, /lookupData: lookupData \};/);
+  assert.match(POP, /lookupData: lookupData, peekCache: peekCache, meaningText: _jpMeaningText \};/);
   assert.match(POP, /var _PERSIST_KEY = 'rc-wordpop-dict-cache-v1';/);
   assert.match(POP, /var cached = _dictCache\.get\(word\) \|\| _persistGet\(word\);/);
   // 合成兜底词条(暂无词典释义…)不得落盘,否则永久短路真查询
   assert.match(POP, /if \(result\.meaning_source === 'synthetic' \|\| \/\^暂无词典释义\/\.test\(String\(result\.definition \|\| ''\)\)\) return;/);
   assert.match(NOTE, /typeof RC\.wordpop\.lookupData === 'function';/);
-  assert.match(NOTE, /Promise\.resolve\(RC\.wordpop\.lookupData\(text, ''\)\)/);
+  assert.match(NOTE, /Promise\.resolve\(RC\.wordpop\.lookupData\(text, bindCtx\)\)/);
+  // 固化段与最新查词结果不一致或本身是不确定类文本 → 重写(2026-09-04 「未能确定」实锤)
+  assert.match(NOTE, /固化段过期,按最新查词重写/);
+  assert.match(POP, /function _isUncertainMeaning\(text\)/);
 });

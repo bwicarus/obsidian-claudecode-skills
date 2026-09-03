@@ -717,6 +717,10 @@
         reading: (base && base.reading) || '', english: ''
       })).then(function (cli) {
         if (!cli || !cli.text) return null;
+        if (_isUncertainMeaning(cli.text)) {
+          _dictDiag('Codex 兜底「' + word + '」回答不确定,不作释义');
+          return null;
+        }
         return Object.assign({}, base || {}, {
           ok: true, jp: true, word: word, lemma: (base && base.lemma) || word,
           zh: cli.text, translation: cli.text, meaning_source: 'pc-codex-cli',
@@ -742,9 +746,15 @@
   // v3 离线词典已经把中文义项和例句拆成结构化字段。小框若继续只读
   // translation，会把下载到本机的富数据再次压扁成一条“基本翻译”。这里直接
   // 消费 zh_senses，并在旧数据没有该字段时才回退旧字符串合同。
+  // AI 兜底的"我不知道"不是释义(2026-09-04 实锤:「未能确定」被当成中文义写进卡片并缓存)
+  var _UNCERTAIN_MEANING = /^(?:未能确定|无法确定|不确定|不能确定|暂无法确定|未知|不明|无法判断|无法识别)/;
+  function _isUncertainMeaning(text) {
+    return _UNCERTAIN_MEANING.test(String(text || '').trim());
+  }
   function _cleanJapaneseChineseMeaning(value) {
     var text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
     if (!text) return '';
+    if (_isUncertainMeaning(text)) return '';
     if (/(?:\balt-of\b|\balternative\s+(?:form|spelling|kanji)\b|\bredirected\s+from\b|\bromanization\b|\bnon-lemma\b|\b(?:stem|continuative|imperfective|attributive)\b)/i.test(text)) return '';
     text = text.replace(/^onoma\s*/i, '').trim();
     return /[㐀-鿿]/.test(text) ? text : '';
@@ -883,6 +893,12 @@
   }
   // 供卡内词典(rc-stickynote)等复用**同一条**查词链:内存缓存 → 设备持久缓存 → 本地词典 → 服务器 → Codex 兜底。
   // 此前卡内词典只打服务器 dict-quick,查词框能出释义的外来语在卡里却是空的(2026-09-04 パンセオ 实锤)。
+  // 同步窥视缓存(内存 → 设备持久):卡内词典用它判断"固化的那段是不是已经过期"
+  function peekCache(word) {
+    word = String(word || '').trim();
+    if (!word) return null;
+    return _dictCache.get(word) || _persistGet(word) || null;
+  }
   function lookupData(word, ctx) {
     word = String(word || '').trim();
     if (!word) return Promise.resolve(null);
@@ -1892,5 +1908,5 @@
     else dictStream(word, opts.ctx || '');
   }
 
-  RC.wordpop = { show: show, openFull: openFull, clearHls: _removeAllWordHls, prewarm: prewarm, clearCache: clearDictCache, injectCss: injectCss, jpInflectHtml: _jpInflectHtml, jpExamples: _jpExamples, lookupData: lookupData };   // injectCss 供 rc-phrasepop 复用同一套小框样式(用户 2026-09-03:所有查词框统一成单词框的版式)   // clearHls:清查词高亮;prewarm(words):翻页后台预热释义;clearCache:切书/失效释放
+  RC.wordpop = { show: show, openFull: openFull, clearHls: _removeAllWordHls, prewarm: prewarm, clearCache: clearDictCache, injectCss: injectCss, jpInflectHtml: _jpInflectHtml, jpExamples: _jpExamples, lookupData: lookupData, peekCache: peekCache, meaningText: _jpMeaningText };   // injectCss 供 rc-phrasepop 复用同一套小框样式(用户 2026-09-03:所有查词框统一成单词框的版式)   // clearHls:清查词高亮;prewarm(words):翻页后台预热释义;clearCache:切书/失效释放
 })();
