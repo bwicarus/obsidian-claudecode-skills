@@ -87,3 +87,7 @@ node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 b
 - **claude.exe 登录过期时 exit 0，并把 `Failed to authenticate: OAuth session expired…` 打到 stdout**（同日）：
   调用方当成正常回答 → 会被当译文/词条**永久缓存**。`ClaudeCli.chat` 现在识别这类文本为失败并落 Gemini 兜底；
   真正的修复要在 PC 上重新 `claude login`（AI 不能替用户做登录）。
+- **`translate_model` 是 Claude 命名，切别的 AI 后端时不能原样塞过去**（09-04）：`ai_backend` 切到 `codex_cli`
+  后 `_ai_translate` 把 `haiku` 传给 Codex → 「Codex 型号不可用」。现在非 claude 后端沿用 `server-config.ai.<backend>`
+  自己的 model/effort（当前 codex_cli = gpt-5.5 / low）。09-04 起服务器 AI 后端 = codex_cli（用户拍板，CLI 的 Claude
+  登录已过期未修）；改回去只需把 `state/server-config.json` 的 `ai_backend` 设回 `claude_cli`。

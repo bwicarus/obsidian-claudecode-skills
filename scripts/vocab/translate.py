@@ -176,8 +176,15 @@ def _ai_translate(text: str, target: str = "zh-CN", model: str = "sonnet", effor
             cfg_all = json.loads(CFG_PATH.read_text("utf-8")) if CFG_PATH.exists() else {}
         backend_name = cfg_all.get("ai_backend", "claude_cli")
         settings = dict((cfg_all.get("ai") or {}).get(backend_name, {}))
-        if model:  settings["model"] = model
-        if effort: settings["effort"] = effort
+        # translate_model/effort 是按 Claude 命名的(haiku/sonnet/opus + low…max);后端不是 claude 时
+        # 不能原样塞过去(2026-09-04 实锤:切 codex_cli 后「Codex 型号不可用:haiku」→ 例句中译全空),
+        # 改用该后端自己在 server-config.ai.<backend> 里配的 model/effort。
+        claude_named = model.strip().lower() in ("haiku", "sonnet", "opus", "") or model.startswith("claude")
+        if backend_name == "claude_cli" or not claude_named:
+            if model:  settings["model"] = model
+            if effort: settings["effort"] = effort
+        elif backend_name == "codex_cli":
+            settings.setdefault("effort", effort or "low")
         ad = make_backend(backend_name, settings)
         target_zh = "中文" if target.startswith("zh") else target
         if _detect_src(text) == "ja":
