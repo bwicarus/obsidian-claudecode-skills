@@ -20084,6 +20084,69 @@ def pdf_api_sentence_dismiss():
     return jsonify({"ok": True})
 
 
+_ROUTE_TRANSLATE_NS = "route-translate"
+
+
+def _translate_via_reader_route(text: str, *, no_cache: bool = False, target: str = "zh-CN") -> str:
+    """按 App「翻译 / 例句」路由(_ai_call action=translate)翻一句,结果进 translate.py 的持久缓存。
+    只输出译文;拒绝/说明类文本视为失败返回 ""(交给调用方退 Google 链)。"""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    try:
+        from translate import _cache_get as _tc_get, _cache_put as _tc_put, _detect_src as _tc_src  # type: ignore
+    except Exception:
+        _tc_get = _tc_put = _tc_src = None
+    if not no_cache and _tc_get is not None:
+        try:
+            hit = _tc_get(text, target, ns=_ROUTE_TRANSLATE_NS)
+            if hit:
+                return hit
+        except Exception:
+            pass
+    is_ja = False
+    try:
+        is_ja = _tc_src is not None and _tc_src(text) == "ja"
+    except Exception:
+        is_ja = False
+    target_zh = "中文" if target.startswith("zh") else target
+    if is_ja:
+        system = ("你是专业日汉翻译助手。用户给的是日语句子或短语,可能与中文共用汉字但含义按日语理解。"
+                  "只输出简洁的中文译文,不要解释、注音或说明。")
+        prompt = "把下面这句日语翻译成" + target_zh + "(按日语意思翻,别因为看起来像中文就说无法翻译):\n\n" + text
+    else:
+        system = "你是专业翻译助手。只输出译文,不要解释或注释。"
+        prompt = "把下面这句翻译成" + target_zh + ":\n\n" + text
+    try:
+        # 直接带 system 走 reader_ask:经 _ai_call 会被 _READER_SYS 抢了系统位,5.3 Spark 对着"阅读辅助"说明回一段客套而不翻译(2026-09-04 实测)
+        out = (_assistant().reader_ask(prompt, action="translate", uid=_reader_uid(), system=system) or "").strip()
+    except Exception as ex:
+        try:
+            print(f"[translate-route] 失败: {ex}", flush=True)
+        except Exception:
+            pass
+        return ""
+    if not out:
+        return ""
+    if out[:1] in ("\"", "\u201c", "'", "「") and out[-1:] in ("\"", "\u201d", "'", "」"):
+        out = out[1:-1].strip()
+    for prefix in ("译文:", "译文：", "翻译:", "翻译：", "Translation:"):
+        if out.startswith(prefix):
+            out = out[len(prefix):].strip()
+            break
+    # 拒绝/说明/认证失败类文本不是译文:多行、过长、或含明显说明词,一律不要
+    if "\n" in out or len(out) > max(80, len(text) * 4) or out == text:
+        return ""
+    if any(k in out for k in ("无法翻译", "已经是中文", "Failed to authenticate", "not logged in", "我是一")):
+        return ""
+    if _tc_put is not None:
+        try:
+            _tc_put(text, target, out, "route:translate", ns=_ROUTE_TRANSLATE_NS)
+        except Exception:
+            pass
+    return out
+
+
 @bp.route("/api/translate-sentence", methods=["POST"])
 def pdf_api_translate_sentence():
     """body: {text, backend?, model?, effort?, file?, sentence?} → {ok, zh}
@@ -20104,11 +20167,16 @@ def pdf_api_translate_sentence():
         sys.path.insert(0, str(vp))
     try:
         from translate import translate as _tr  # type: ignore
-        zh = _tr(text, backend=backend, model=model, effort=effort, no_cache=no_cache)
-        if not zh and backend == "ai":
-            # AI CLI 拿不到结果(未登录/限流/路径不对)时别让调用方拿空:词典例句这类场景 Google 链足够。
-            # 2026-09-04 App 日志实锤:CLI 登录过期 + 配置路径是 Pi 的,例句中译"无结果"持续了好几天没人知道。
-            zh = _tr(text, backend="no_ai", model=model, effort=effort, no_cache=no_cache)
+        if backend == "ai":
+            # AI 翻译走 App 设置面板里的「翻译 / 例句」路由(assistant._AI_ROUTES["translate"],按用户可配
+            # 后端/型号/深度;用户 2026-09-04:App 里默认全是 Codex),**不再**经 translate.py 的全局 ai_backend
+            # 老路 —— 那条路只看 server-config.ai_backend + translate_model,跟 App 里的选择完全脱节,
+            # 一度指向 Pi 路径的 claude_cli 而例句中译静默失败好几天。AI 拿不到结果 → Google 链兜底。
+            zh = _translate_via_reader_route(text, no_cache=no_cache)
+            if not zh:
+                zh = _tr(text, backend="no_ai", model=model, effort=effort, no_cache=no_cache)
+        else:
+            zh = _tr(text, backend=backend, model=model, effort=effort, no_cache=no_cache)
         if zh:
             # 前端带 file + sentence 几何时 → 存 sidecar(持久句子标记 + 译文浮层)
             sent = data.get("sentence")

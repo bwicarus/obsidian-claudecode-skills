@@ -497,8 +497,10 @@ except Exception:
 # 失败/空/限额 → 自动回退 Claude(主助手永不因 Gemini 断而挂)。夜间批处理仍 Claude(按用户要求,不烧 Gemini)。
 # 两把 Gemini key:免费优先(额度耗尽/限流自动切付费),各自独立冷却。文件各存一把(不进 git/代码)。
 _GEMINI_KEY_FILES = [
-    ("free", Path("/home/bwicarus/.config/gemini-api-key-free")),   # 免费档:优先用,省钱
-    ("paid", Path("/home/bwicarus/.config/gemini-api-key")),        # 付费档:免费耗尽/限流时兜底
+    # 按当前用户 home 找(2026-09-04:此前写死 /home/bwicarus,Windows 服务器上 Gemini 永远没 key → 所有默认走
+    # Gemini 的路由静默返空)。Pi 上仍是原路径;Windows = C:\Users\<用户>\.config\gemini-api-key(-free)。
+    ("free", Path.home() / ".config" / "gemini-api-key-free"),   # 免费档:优先用,省钱
+    ("paid", Path.home() / ".config" / "gemini-api-key"),        # 付费档:免费耗尽/限流时兜底
 ]
 _GEMINI_MODEL = "gemini-3.5-flash"   # 最新稳定 Flash(2.x 已过时;型号清单见 ListModels)
 
@@ -1556,9 +1558,9 @@ unified_exec = false
 personality = false
 [apps._default]
 enabled = false
-[projects."%s"]
+[projects.'%s']
 trust_level = "untrusted"
-""" % _CODEX_RC_CWD
+""" % _CODEX_RC_CWD   # 单引号=TOML 字面串:Windows 路径的反斜杠不被当转义(2026-09-04 实锤 "C:\Users\…" 让 app-server 起不来)
 
 
 def _valid_codex_auth_bytes(path):
@@ -1608,7 +1610,12 @@ def _codex_rc_bootstrap():
         else:
             result["error"] = "没有可用的 Codex 认证快照"
         cfg = _CODEX_RC_HOME / "config.toml"
-        if not cfg.exists():
+        # 模板变了就重写(2026-09-04:此前只在不存在时写,修了 TOML 键的引号后老文件永远留着坏的那份)
+        try:
+            stale = cfg.read_text("utf-8") != _CODEX_RC_CONFIG
+        except Exception:
+            stale = True
+        if stale:
             cfg.write_text(_CODEX_RC_CONFIG, "utf-8")
     except Exception as ex:
         result["error"] = "Codex 阅读器环境初始化失败：" + type(ex).__name__
@@ -1938,7 +1945,11 @@ def _codex_exec_text(prompt, model="gpt-5.5", effort="medium", timeout=180, imag
     of = _tf.NamedTemporaryFile(prefix="codex-out-", suffix=".txt", delete=False)
     of.close()
     try:
-        cmd = [cx, "exec", "--skip-git-repo-check",
+        # Windows 上 which("codex") 给的是 codex.cmd:必须经 cmd.exe 调起,而且 prompt **不能**当参数传 ——
+        # cmd.exe 在第一个换行处截断,空行之后的正文全丢(2026-09-04 实锤:例句中译回「请先把句子发我」)。
+        # 统一改成 stdin 传 prompt(`-`),两个平台同一条路。
+        base = ["cmd.exe", "/d", "/c", cx] if str(cx).lower().endswith((".cmd", ".bat")) else [cx]
+        cmd = base + ["exec", "--skip-git-repo-check",
                "-m", (model if str(model).startswith("gpt-") else "gpt-5.5-codex"),
                "-c", 'model_reasoning_effort="%s"' % (effort if effort in _CODEX_DEPTHS else "high"),
                "-c", 'sandbox_mode="read-only"',
@@ -1949,8 +1960,9 @@ def _codex_exec_text(prompt, model="gpt-5.5", effort="medium", timeout=180, imag
             cmd += ["-c", 'service_tier="priority"']
         for ip in (image_paths or [])[:3]:
             cmd += ["-i", ip]
-        cmd.append(prompt)
-        subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd="/tmp")
+        cmd.append("-")   # 从 stdin 读 prompt
+        subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=timeout, cwd=_tf.gettempdir())
         txt = Path(of.name).read_text("utf-8").strip()
         return txt or None
     except Exception:

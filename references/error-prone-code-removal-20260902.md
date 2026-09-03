@@ -91,3 +91,11 @@ node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 b
   后 `_ai_translate` 把 `haiku` 传给 Codex → 「Codex 型号不可用」。现在非 claude 后端沿用 `server-config.ai.<backend>`
   自己的 model/effort（当前 codex_cli = gpt-5.5 / low）。09-04 起服务器 AI 后端 = codex_cli（用户拍板，CLI 的 Claude
   登录已过期未修）；改回去只需把 `state/server-config.json` 的 `ai_backend` 设回 `claude_cli`。
+- **Codex 三处 Windows 化**（09-04，例句中译回「请先把句子发我」实锤）：① `_codex_exec_text` 把 prompt 当命令行参数传给
+  `codex.cmd`，cmd.exe 在第一个换行处截断，空行之后正文全丢 → 改 stdin（`-`）+ `cmd.exe /d /c`；② `~/.reader-codex/home/config.toml`
+  的 `[projects."C:\Users\…"]` 双引号键含反斜杠 = TOML 非法转义，app-server 一直起不来、每次回落慢的 exec → 改单引号字面串，
+  且模板变了就重写；③ Gemini key 路径写死 `/home/bwicarus/.config` → 改 `Path.home()`，**Windows 上要把两把 key 文件放到
+  `C:\Users\bwica\.config\gemini-api-key(-free)`**，否则默认走 Gemini 的路由（翻译/解释/词典的出厂默认）在 Windows 上静默返空。
+- **例句中译改走 App 的「翻译 / 例句」路由**（同日）：`/pdf/api/translate-sentence` `backend=ai` 现在按 `assistant._AI_ROUTES["translate"]`
+  + 用户在 App 设置面板里的覆盖（当前 Codex 5.3 Spark / low）翻，缓存 ns `route-translate`；不再经 translate.py 的全局 `ai_backend`。
+  两条老教训：`_ai_call` 会把 `_READER_SYS` 抢占系统位，翻译这类要自带 system 的调用直接走 `reader_ask(system=…)`。
