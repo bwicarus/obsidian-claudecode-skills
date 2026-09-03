@@ -606,3 +606,18 @@ build_exposure ~40s（增量更新已扫过的 PDF），compute_mastery ~秒级�
 - 详细引擎对比/质量评审/Google 放行/CLI 冷启动结论见 [`google-cloud-apis.md`](google-cloud-apis.md)。
 
 发音：日语走浏览器原生 `speechSynthesis` ja-JP（iPad 自带 Kyoko，离线，念假名读音），不走有道英语库。详见 [`pdf-reader.md`](pdf-reader.md)。
+
+## §19 生词下划线本地权威（2026-09-03）
+
+用户实锤：「这个词只是查询过但是没有标记掌握，应该有下划线但是现在看不到」。病根：下划线只来自
+服务端 vocab 索引（`_build_jp_vocab_marks` 读 `_vocab_idx()`），而日语查词**本地 JMdict 命中根本
+不出网**，服务端永远不知道这个词被查过。现在：
+
+- `vocabulary-state` 新增 `lookup` 属性（`setLookedUp` / `isLookedUp`）：词框与词组框查到即记
+  （合成兜底词条不算）；本地/缓存命中时另补一条 `/pdf/api/lookup-event` 给服务端，其查词日志与
+  生词笔记链路照旧。
+- App 内 `page-overlay` 本地分支 `localVocabMarks(chars)`：按本地字符层的分词（`w` 分组）逐词查本地
+  状态，已掌握不画，收藏词组=`seen`，查过=`new`；rect 与字符层同坐标系。
+- `08-charlayer._applyPageVocabOverlay`：本地标记与服务端增强做**并集**（此前有增强就跳过本地）。
+  `window.refreshLocalVocabMarks(page)` 供查词后立即刷新当前页。
+- 契约：`tests/reader_contract/local-vocab-marks.contract.test.mjs`。

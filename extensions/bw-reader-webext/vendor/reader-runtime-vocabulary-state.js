@@ -21,7 +21,8 @@
   var MAX_ALIAS_BYTES = 4096;
   var VALID_KIND = { word: true, phrase: true };
   var VALID_LANGUAGE = { en: true, ja: true, und: true };
-  var VALID_PROPERTY = { mastered: true, favorite: true };
+  // lookup(2026-09-03):查过一次即记,生词下划线的本地依据(此前只靠服务端查词日志,本地词典命中根本不出网)
+  var VALID_PROPERTY = { mastered: true, favorite: true, lookup: true };
   var records = new Map();
   var pending = new Map();
   var listeners = [];
@@ -576,6 +577,10 @@
     setPhraseFavorite: function (input, value, options) {
       input = Object.assign({}, input || {}, { kind: 'phrase' });
       return setProperty(input, 'favorite', value, options);
+    },
+    isLookedUp: function (input) { return enabled(input, 'lookup'); },
+    setLookedUp: function (input, value, options) {
+      return setProperty(input, 'lookup', value !== false, options);
     },
     importRecord: function (value, options) {
       return acceptRecord(value, options && options.source, options && options.onlyMissing);

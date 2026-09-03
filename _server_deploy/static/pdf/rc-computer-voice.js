@@ -10128,7 +10128,45 @@
     return { segments: segments, overflow: overflow };
   }
 
+  // 「整页宽行」判定(2026-09-03 用户实锤 52 页):对话行 + 表格的混合页被视觉层标成 manga,
+  // 4 列网格把一行文字拆进两格、留下大片空格。真漫画页的分镜块窄而分散;这里若多数
+  // 正文块的宽度 ≥ 页宽一半,就不是分镜,按阅读顺序输出正文行(同一视觉行的块用空格接上)。
+  function mangaLayoutIsProse(layout) {
+    var regions = (layout.regions || []).filter(function (region) {
+      return region.kind !== "vision-supplement" && Array.isArray(region.bounds);
+    });
+    if (regions.length < 2) return false;
+    var pageWidth = 0;
+    regions.forEach(function (region) { pageWidth = Math.max(pageWidth, region.bounds[2]); });
+    if (!pageWidth) return false;
+    var wide = regions.filter(function (region) {
+      return (region.bounds[2] - region.bounds[0]) >= pageWidth * 0.5;
+    }).length;
+    return wide / regions.length >= 0.4;
+  }
+  function appendLocalProseLayout(builder, pageRecord, layout) {
+    var regions = (layout.regions || []).slice().sort(function (left, right) {
+      return left.order - right.order;
+    });
+    var previous = null;
+    regions.forEach(function (region) {
+      if (previous) {
+        var sameLine = Array.isArray(previous.bounds) && Array.isArray(region.bounds) &&
+          Math.min(previous.bounds[3], region.bounds[3]) -
+            Math.max(previous.bounds[1], region.bounds[1]) > 0 &&
+          region.bounds[0] >= previous.bounds[0];
+        builder.append(sameLine ? " " : "\n");
+      }
+      appendLocalLayoutRegion(builder, pageRecord, region);
+      previous = region;
+    });
+    builder.append("\n");
+  }
   function appendLocalMangaLayout(builder, pageRecord, layout) {
+    if (mangaLayoutIsProse(layout)) {
+      appendLocalProseLayout(builder, pageRecord, layout);
+      return;
+    }
     var cells = [];
     for (var row = 0; row < layout.gridRows; row += 1) {
       cells[row] = [[], [], [], []];

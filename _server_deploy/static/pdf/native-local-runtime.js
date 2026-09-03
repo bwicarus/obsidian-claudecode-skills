@@ -8173,13 +8173,70 @@
           formula_regions: result.formulaRegions || [],
           native_formula_state: String(result.state || 'unknown'),
           native_formula_source: String(result.source || 'none'),
-          vocab_marks: [],
+          // 本地权威(2026-09-03):按本地字符层 + 本地 vocabulary-state 算;服务端增强只做并集
+          vocab_marks: localVocabMarks(result && result.chars),
           vocab_sentences: [],
           mastered_furi: [],
           offset: { dx: 0, dy: 0, scale: 1 }
         };
       });
     }, code);
+  }
+
+  // ── 生词下划线的本地依据(用户 2026-09-03:「查询过但没标记掌握,应该有下划线」)────
+  // 此前下划线只来自服务端 vocab 索引,而日语查词本地 JMdict 命中根本不出网,查过的词服务端
+  // 不知道。现在:查词即记 vocabulary-state 'lookup';这里按本地字符层的分词(w 分组)逐词查
+  // 本地状态 —— 已掌握不画;查过/收藏过的画,mastery 颜色只分 new(查过)与 seen(收藏词组)。
+  function localVocabMarks(chars) {
+    var state = root.BWReaderRuntime && root.BWReaderRuntime.vocabularyState;
+    if (!state || state.CONTRACT !== 'vocabulary-state/1' ||
+        typeof state.lookup !== 'function' || !Array.isArray(chars) || !chars.length) return [];
+    var marks = [];
+    var i = 0, n = chars.length;
+    while (i < n) {
+      var c = chars[i];
+      var wid = c && c.w;
+      if (!c || c.sp || wid == null || wid < 0) { i += 1; continue; }
+      var j = i, toks = [];
+      while (j < n && chars[j] && chars[j].w === wid) {
+        if (!chars[j].sp) toks.push(chars[j]);
+        j += 1;
+      }
+      i = j;
+      var surf = toks.map(function (t) { return String(t.c || ''); }).join('');
+      var key = surf.replace(/[\s\u3000]+/g, '');
+      if (!key || key.length > 64) continue;
+      var ja = /[\u3040-\u30ff\u3400-\u9fff]/.test(key);
+      var spec = { kind: 'word', language: ja ? 'ja' : 'en', lemma: key, word: key };
+      var phraseSpec = { kind: 'phrase', language: ja ? 'ja' : 'en', lemma: key, word: key };
+      var slug = '';
+      try {
+        if (state.isMastered(spec) || state.isMastered(phraseSpec)) continue;
+        if (state.isPhraseFavorite(phraseSpec)) slug = 'seen';
+        else if (state.isLookedUp(spec) || state.isLookedUp(phraseSpec)) slug = 'new';
+      } catch (_) { continue; }
+      if (!slug) continue;
+      var rects = [], cur = null;
+      toks.forEach(function (t) {
+        var x0 = Number(t.x0), y0 = Number(t.y0), x1 = Number(t.x1), y1 = Number(t.y1);
+        if (![x0, y0, x1, y1].every(Number.isFinite)) return;
+        var lh = y1 - y0;
+        if (cur && Math.abs(y0 - cur[1]) <= lh * 0.5) {
+          cur[2] = Math.max(cur[2], x1); cur[1] = Math.min(cur[1], y0); cur[3] = Math.max(cur[3], y1);
+        } else {
+          if (cur) rects.push(cur.map(function (v) { return Math.round(v * 100) / 100; }));
+          cur = [x0, y0, x1, y1];
+        }
+      });
+      if (cur) rects.push(cur.map(function (v) { return Math.round(v * 100) / 100; }));
+      if (!rects.length) continue;
+      marks.push({
+        word: surf, lemma: key, mastery: slug === 'seen' ? 0.4 : 0.1,
+        label_slug: slug, rects: rects, jp: ja, local: true
+      });
+      if (marks.length >= 800) break;
+    }
+    return marks;
   }
 
   function handleLocalState(input, init, url, method, mutationGatePassed) {

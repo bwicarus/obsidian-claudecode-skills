@@ -772,6 +772,40 @@ if (window.__bwPwaProviderOnly) return;
     return result;
   }
 
+  // 查过即记(2026-09-03):① 本地 vocabulary-state 'lookup'(生词下划线的本地依据,离线也成立)
+  // ② 结果不是服务端刚给的(本地 JMdict / 设备缓存)时补一条 lookup-event 给服务端(它的查词
+  //    日志/生词笔记链路照旧),幂等按 id 去重 ③ 当前页立即刷新下划线。合成兜底词条不算查到。
+  function _noteLookedUp(word, d) {
+    try {
+      if (!d || d.ok !== true || !word) return;
+      if (String(d.definition || '').indexOf('暂无词典释义') === 0) return;
+      var lemma = String(d.lemma || word);
+      var state = _vocabularyState();
+      if (state && typeof state.setLookedUp === 'function') {
+        try {
+          if (!state.isLookedUp(_wordStateSpec(lemma, { jp: !!d.jp, word: word, forms: d.forms }))) {
+            state.setLookedUp(_wordStateSpec(lemma, { jp: !!d.jp, word: word, forms: d.forms }), true,
+              { source: 'rc-wordpop' });
+          }
+        } catch (_) {}
+      }
+      var servedLocally = d.source === 'local-jmdict' || d.cached === true ||
+        d.meaning_source === 'pc-codex-cli';
+      if (servedLocally && navigator.onLine !== false) {
+        var eid = 'lk_' + Array.from(crypto.getRandomValues(new Uint8Array(8)))
+          .map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+        // @interaction learning.lookup.report
+        fetch('/pdf/api/lookup-event', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: eid, word: d.word || word, lemma: lemma, jp: !!d.jp,
+            file: (_ctx.file || ''), page: (_ctx.page || 0), context: (_ctx.ctx || '').slice(0, 1500) })
+        }).catch(function () {});
+      }
+      if (typeof window.refreshLocalVocabMarks === 'function') {
+        setTimeout(function () { window.refreshLocalVocabMarks(_ctx.page || 0); }, 50);
+      }
+    } catch (_) {}
+  }
   function _cacheDictResult(word, result) {
     if (!result || !result.ok) return;
     // 中文义仍缺失时不缓存：用户再次点原词会重新进入原有呼吸查询，而
@@ -891,6 +925,7 @@ if (window.__bwPwaProviderOnly) return;
     }
     _cacheDictResult(word, d);
     _wordPopState.lemma = d.lemma || word;
+    _noteLookedUp(word, d);
     _wordPopState.forms = Array.isArray(d.forms) ? d.forms.slice() : [];
     _wordPopState.jp = !!d.jp;                                      // 掌握按钮按语言分流(jp/en 不同 store)
     _wordPopState.reading = (d.jp && d.reading) ? d.reading : '';   // 日语:发音念假名读音(保证读对)

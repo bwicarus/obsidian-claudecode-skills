@@ -2878,10 +2878,36 @@ function _rememberNativePageOverlay(detail) {
   return value;
 }
 
+// 本地标记(App 内 page-overlay 本地分支按本地状态算)与服务端增强(savedAt 有值)做**并集**:
+// 增强到达时不能把本地刚查过的词冲掉(2026-09-03 用户实锤:查过的词没下划线)。
+function _mergeVocabMarks(local, remote) {
+  // 一侧为空就原样返回另一侧（保持引用，既有契约按引用比较增强数组）
+  if (!local || !local.length) return remote || [];
+  if (!remote || !remote.length) return local;
+  const out = [];
+  const seen = new Set();
+  const keyOf = (m) => {
+    const r = (m && m.rects && m.rects[0]) || [];
+    return String(m && (m.lemma || m.word) || '').toLowerCase() + '|' + (r[0] | 0) + '|' + (r[1] | 0);
+  };
+  (local || []).concat(remote || []).forEach((m) => {
+    if (!m) return;
+    const k = keyOf(m);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(m);
+  });
+  return out;
+}
 function _applyPageVocabOverlay(wrap, overlay) {
   if (overlay && overlay.localRevision && wrap.__pageTextRevision &&
       overlay.localRevision !== wrap.__pageTextRevision) return false;
-  wrap.__vocabMarks = (overlay && overlay.vocab_marks) || [];
+  const isEnrichment = !!(overlay && overlay.savedAt);
+  if (!isEnrichment) wrap.__localVocabMarks = (overlay && overlay.vocab_marks) || [];
+  wrap.__vocabMarks = isEnrichment
+    ? _mergeVocabMarks(wrap.__localVocabMarks, overlay.vocab_marks)
+    : _mergeVocabMarks(overlay && overlay.vocab_marks,
+        (wrap.__vocabMarks || []).filter((m) => !(m && m.local)));
   wrap.__vocabSentences = (overlay && overlay.vocab_sentences) || [];
   wrap.__masteredFuri = new Set((overlay && overlay.mastered_furi) || []);
   try { renderVocabUnderlines(wrap, wrap.__vocabMarks); }
@@ -3035,7 +3061,9 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
     const currentEnrichment = enrichment &&
       enrichment.localRevision === String(wrap.__pageTextRevision || '')
       ? enrichment : null;
-    _applyPageVocabOverlay(wrap, currentEnrichment || ov);
+    // 先套本地标记,再叠服务端增强(并集);此前有增强就跳过本地 → 本地刚查过的词永远没下划线
+    _applyPageVocabOverlay(wrap, ov);
+    if (currentEnrichment) _applyPageVocabOverlay(wrap, currentEnrichment);
   });
 }
 
@@ -3183,6 +3211,26 @@ function renderVocabUnderlines(pw, marks) {
   //   切书=整页重载自动清缓存;600 上限自然淘汰旧页的词。
   try { if (window.RC && RC.wordpop && RC.wordpop.prewarm) RC.wordpop.prewarm(marks.map(m => m.word).filter(Boolean)); } catch (_) {}
 }
+// 查词后立即刷新这一页的本地下划线(rc-wordpop / rc-phrasepop 调用)。
+window.refreshLocalVocabMarks = function (page) {
+  try {
+    page = Number(page) || 0;
+    if (!page || !window.__BW_NATIVE_LOCAL_READER__) return;
+    const wrap = document.querySelector('[data-page-num="' + page + '"]');
+    if (!wrap || !wrap.isConnected) return;
+    // @interaction document.page-overlay.read
+    fetch('/pdf/api/page-overlay?file=' + encodeURIComponent(FILE_REL || '') + '&page=' + page, { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d || d.ok !== true || !wrap.isConnected) return;
+        wrap.__localVocabMarks = d.vocab_marks || [];
+        wrap.__vocabMarks = _mergeVocabMarks(wrap.__localVocabMarks,
+          (wrap.__vocabMarks || []).filter((m) => !(m && m.local)));
+        renderVocabUnderlines(wrap, wrap.__vocabMarks);
+      })
+      .catch(() => {});
+  } catch (_) {}
+};
 function _vocabUnderlineEnabled() {
   // localStorage 默认开
   const v = localStorage.getItem('pdf-vocab-underline');

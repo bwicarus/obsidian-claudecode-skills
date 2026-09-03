@@ -186,3 +186,11 @@ no-op，不能停止或恢复新连接的路由；只有原连接仍是 owner �
 | `extensions/bw-reader-webext/package_safari.py` | host 权限（含 Windows 桥这台具名主机） |
 | `windows/ComputerVoiceAudio/DirectBridgeServer.cs` | POST 端点、CORS 预检、请求日志 |
 | `windows/ComputerVoiceAudio/DirectBridgeAdapters.cs` | 故障留痕 |
+
+## 补：漫画网格只给真漫画页（2026-09-03）
+
+52 页实锤：对话行 + 表格的混合页被视觉层标成 `manga`，`appendLocalMangaLayout` 的 4 列网格把一行
+文字拆进两格、留下大片空单元格。现在 `mangaLayoutIsProse`：忽略 `vision-supplement` 后，若 ≥40% 的
+正文块宽度 ≥ 页宽一半，就不是分镜 → `appendLocalProseLayout` 按阅读顺序输出正文，同一视觉行的块用
+空格接上。真漫画页（分镜块窄而分散）不受影响。⚠ 该页的真表格视觉层没检测成 `tables`（mode 取了
+manga），所以表格部分仍是逐行正文——表格检测与 manga 判定并存是预处理侧的后续项。
