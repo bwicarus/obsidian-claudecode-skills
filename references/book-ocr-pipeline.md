@@ -322,3 +322,19 @@ OCR 流水线原来只能改 systemd unit 硬编码 PDF 路径跑。2026-06 曾�
 单测 `test_table_row_splits_into_column_blocks_before_tokenizing`。⚠ 预处理代码跑在 ReaderPC
 里（`package_readerpc_server.py --build/--install`），改完必须发新版；已有结果 schema 落后会在
 下次预处理时重新分词，App 侧要对该书再跑一次「PC 预处理」。
+
+## App 预处理面板行为（2026-09-04 收口）
+
+用户拍板：「省略那一系列导入的按钮；PC 预处理完成后自动在当前使用列表里出现，且提供删除」。
+
+- 面板展开期间轮询（`pollPreprocessingPanel`）：服务器任务活动中每 3 秒、空闲每 20 秒刷服务器状态与本机文字层状态；
+  收起即停。此前 `.task(id:)` 只在身份变化时跑一次，状态要关掉重开才更新。
+- 不再有「重新导入结果」「导入到本机」「采用现有服务器结果」：轮询里自动做 —— 服务器有旧结果且当前无任务 → 自动采用
+  （每书一次）；任务出结果且本机没导入该 `pageCharsRevision` → 自动导入（每版本一次）。导入即成为当前文字层
+  （`adoptImportedLayerIfUnchosen(force: true)`），不再区分"以前挑没挑过"。
+- 「当前使用」由下拉改成列表：一行一层，点行切换，导入进来的层（Vision/服务器/PC）可删；PDF 自带层与兼容旧结果不可删。
+- 服务器历史里「设为当前」改名「使用这份」：切换后自动导入。
+- 原生侧错误进服务器客户端日志：`ReaderPiOCRClient.postClientLog` → `/pdf/api/client-log`，前缀 `[native]`；
+  协调器 `recordError` 与面板 17 处 `reportPanelError` 都走它。此前「预处理附件导入失败」只在面板里一句话，日志零痕迹。
+- ⚠ 服务器页字段白名单（`reader_book_ocr._normalize_pc_page`）是拒绝式的：worker 页加字段必须同步放行，并跑
+  `tests/test_reader_book_ocr.py`（08-19、09-04 两次整本 0/N 都是它）。
