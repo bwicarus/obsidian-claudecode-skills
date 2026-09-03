@@ -29,7 +29,7 @@ git rev-parse --abbrev-ref HEAD && git worktree list
 
 | 环境 | 判定 | 项目根 | Vault | webapp | 服务管理 |
 |---|---|---|---|---|---|
-| **Windows PC**（主力开发机） | `sys.platform==win32` / 有 `C:\` | `C:\claude` | `C:\obsidian` | `run_local.ps1`→Flask `127.0.0.1:5000`(本地实例,托盘守护 `local_supervisor.pyw`) | Windows 计划任务 + 托盘 |
+| **Windows PC**（主力开发机，**App 的服务器**） | `sys.platform==win32` / 有 `C:\` | `C:\claude`（服务器实际跑的是工作树 `C:	mpeader-card-anchor-release`） | `C:\obsidian` | Flask `127.0.0.1:5000` + 四个 sidecar(8766-8769)，**2026-09-03 起全部由 ReaderPC 托盘（`ReaderPC-Server.exe`）托管**：崩溃重拉/代码变更自动重启/Obsidian Sync 任务看护，状态见 `%LOCALAPPDATA%\BWReadereaderpc-server.status.json` 的 `services`；旧 `local_supervisor.pyw`/`windows_sidecar_services.py`/计划任务 `BwicarusServer` 已停用（见 `references/windows-server-consolidation-plan.md`） | ReaderPC 托盘（唯一常驻守护） |
 | **Pi**（hostname `bwicarus`,Tailscale-only,**当前主力服务器**） | Linux + 存在 `/home/bwicarus/claude` | `/home/bwicarus/claude` | `/home/bwicarus/obsidian` | **gunicorn `127.0.0.1:5000`** ← nginx HTTPS(`webapp.service`) | **systemd**(`systemctl`) |
 | **VPS**（公网 `bwicarus.space`,⏸ **2026-06-10 起暂停**:只跑 webapp,自动化已 disable） | Linux + 存在 `/root/claude`(⚠ hostname 也是 `bwicarus`,跟 Pi 撞名,**别用 hostname 判定**) | `/root/claude` | `/root/obsidian` | 同 Pi,webapp 代码在 `/root/webapp` | **systemd** |
 

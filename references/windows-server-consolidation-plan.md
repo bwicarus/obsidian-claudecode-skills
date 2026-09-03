@@ -74,3 +74,14 @@ ReaderPC-Server.exe
   （webapp 监视 `_server_deploy/*.py`，只对本控制器拉起的实例生效）、`ensure_scheduled_task_running()` 看护
   「Obsidian Headless Sync」计划任务（开机第一轮 + 每 5 分钟）、连续快失败熔断（20s 内退出 ×4 → `halted`，
   `reset()` 解除）。托管开关打开后这三件事都由 ReaderPC 做；旧守护此后不再有独占的功能。
+- **2026-09-03 22:48 切换完成（步骤 6 后半）**：ReaderPC 0.1.120 以 `manageServerServices=true` 启动 → 停掉
+  计划任务 `BwicarusServer`（`Disable-ScheduledTask`，未删）→ 删 HKCU Run 两项 → 按精确 PID 停旧守护
+  （sidecar 守护连 4 个子进程一起 `/T`，Flask 守护死后 Job Object 带走 app.py）→ 30s 内五个服务
+  `owned=true`、Flask `/login` 200。**现在 Windows 上只剩 ReaderPC 一个常驻守护**。
+  回滚（若需要）：重新写回 Run 项
+  `BwicarusLocal = "<Python313>\pythonw.exe" "C:\tmp\reader-card-anchor-release\_server_deploy\local_supervisor.pyw"`、
+  `BwicarusSidecars = "<Python313>\pythonw.exe" "C:\tmp\reader-card-anchor-release\scripts\windows_sidecar_services.py"`，
+  `Enable-ScheduledTask BwicarusServer`，并在 ReaderPC 里关掉托管开关。
+- 待做（步骤 4 收尾，观察一天后）：删 `local_supervisor.pyw` / `windows_sidecar_services.py` /
+  `windows_server_watchdog.ps1` 与计划任务本体；`run_local.ps1` 改为提示"由 ReaderPC 托管"。
+  步骤 5（原子发布 app.py）仍留第二阶段：现在托管的是**工作树** `C:\tmp\reader-card-anchor-release`。
