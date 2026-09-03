@@ -130,8 +130,12 @@ ssh pi 'find ~/webapp/data/reader-sidecars/by-user/1 -type f -printf "%TY-%Tm-%T
 
 现行看护（Run 项照旧保留，再加第二保险）：
 
-- 计划任务 **`BwicarusServer`**（用户级，登录触发 + 每 5 分钟重拉，`StartWhenAvailable`）：
-  两个动作 = `pythonw _server_deploy/local_supervisor.pyw`、`pythonw scripts/windows_sidecar_services.py`。
+- 计划任务 **`BwicarusServer`**（用户级，登录触发 + 每 5 分钟，`StartWhenAvailable`）：唯一动作 =
+  `pwsh -File scripts/windows_server_watchdog.ps1`（短脚本：查 5000 端口、两个守护进程、守护心跳文件
+  `webapp-data/local_supervisor.heartbeat`；缺谁拉谁；心跳停 3 分钟或端口连续两轮不通就杀掉重拉；然后退出）。
+  ⚠ 2026-09-03 19:3x 实锤两条：① 任务动作不能是常驻进程 —— 动作不退出，任务实例就一直"运行中"，
+  `MultipleInstances=IgnoreNew` 让之后每次触发都被忽略（LastTaskResult 0x800710E0），看护形同虚设；
+  ② 守护自己会卡死（日志停在 17:07，Flask 死了没人拉），单靠"进程在不在"看不出来，所以加心跳。
 - 两个脚本都有单实例锁（`Local\bwicarus-local-supervisor` / `Local\bwicarus-sidecar-services`），
   重拉时已在跑就立即退出，不会起第二份、不会撞端口。
 - 一眼看状态：

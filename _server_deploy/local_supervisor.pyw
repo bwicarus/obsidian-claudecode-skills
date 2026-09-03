@@ -436,6 +436,12 @@ class Supervisor:
             time.sleep(2.0)
             if self.stop_event.is_set():
                 break
+            # 心跳(2026-09-03 实锤:守护自己卡死,日志停在 17:07,端口没人管):每轮写一次时间戳,
+            # 外部看护(scripts/windows_server_watchdog.ps1)见它超过 3 分钟没动就杀掉重拉。
+            try:
+                (DATA_DIR / "local_supervisor.heartbeat").write_text(str(int(time.time())), encoding="utf-8")
+            except Exception:
+                pass
             # 周期看护 Obsidian sync 任务(没被禁/在跑),~5min 一次,防静默死亡
             self._sync_tick += 1
             if self.keep_sync and self._sync_tick % _SYNC_CHECK_TICKS == 0:
