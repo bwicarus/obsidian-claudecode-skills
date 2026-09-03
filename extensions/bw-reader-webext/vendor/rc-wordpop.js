@@ -818,11 +818,11 @@ if (window.__bwPwaProviderOnly) return;
           if (item.cacheEpoch === _jpExampleZhCacheEpoch) _jpExampleZhCache.set(item.ja, zh);
           return zh;
         }
-        _dictDiag('Pi 例句中译失败「' + item.ja.slice(0, 32) + '」' +
+        _dictDiag('服务器例句中译失败「' + item.ja.slice(0, 32) + '」' +
           (reply && reply.error ? '：' + String(reply.error).slice(0, 80) : ''));
         return '';
       }).catch(function (error) {
-        _dictDiag('Pi 例句中译异常「' + item.ja.slice(0, 32) + '」：' +
+        _dictDiag('服务器例句中译异常「' + item.ja.slice(0, 32) + '」：' +
           String(error && error.message || error || '').slice(0, 80));
         return '';
       }).then(function (zh) {
@@ -850,7 +850,7 @@ if (window.__bwPwaProviderOnly) return;
       resolve: resolveTask
     };
     if (_jpExampleZhPending.length >= _JP_EXAMPLE_ZH_PENDING_MAX) {
-      _dictDiag('Pi 例句中译队列已满，跳过「' + ja.slice(0, 32) + '」');
+      _dictDiag('服务器例句中译队列已满，跳过「' + ja.slice(0, 32) + '」');
       resolveTask('');
       return task;
     }
@@ -979,115 +979,108 @@ if (window.__bwPwaProviderOnly) return;
   // ── 词锚卡 × 字典（用户 2026-08-31）：这个词若有绑定卡，小框顶部
   //   渲组合卡段 —— 点到同词看到的是"卡 + 字典"，不是裸字典。
   //   路由只在 App 本地 runtime 存在；扩展/桌面 404 → 静默跳过。
+  // 词→卡 反向索引是权威(用户 2026-09-03 重做):由便签仓库在同一次写入里维护的标记,
+  // 内容显示时现读,没有副本;解绑/改锁/移动/删除即时反映(下方监听 bw:native-word-bindings-changed)。
+  var _wordCardsSeq = 0;
+  function _nwKey(v) { return String(v || '').replace(/[\s\u3000]+/g, '').toLowerCase(); }
+  // 索引路由不可用的宿主(扩展/契约沙箱):退回只看本书便签
+  function _localBoundCards(wordKeys) {
+    var out = [];
+    try {
+      var _sn = window.RC && RC.stickynote && typeof RC.stickynote.notes === 'function'
+        ? RC.stickynote.notes() : [];
+      (Array.isArray(_sn) ? _sn : []).forEach(function (n) {
+        var hh = n && n.html;
+        if (!hh || !hh.content) return;
+        var bind = hh.bind && typeof hh.bind === 'object' ? hh.bind : null;
+        var boundWord = bind && bind.kind === 'page-chars' ? _nwKey(bind.text) : '';
+        if (!boundWord || !wordKeys[boundWord]) return;
+        out.push({ cid: String(hh.cid || ''), label: String(hh.label || bind.text || ''),
+          content: String(hh.content || ''), at: 0 });
+      });
+    } catch (e0) {}
+    return out;
+  }
   function _attachWordCards(pop, word, lemma, rect) {
     try {
-      // 索引路由只在 App 本地 runtime 存在；别的宿主（含契约沙箱）不发。
-      if (!(window.BWReaderRuntime &&
-        window.BWReaderRuntime.nativeLocalRuntime)) return;
       var key = String(lemma || word || '').trim().toLowerCase();
       if (!key) return;
-      // 本地来源（实据修正 2026-08-31）：本书钉着的卡里 label=查询词的
-      // 直接算这个词的卡 —— 用户的存量卡是浮层卡（bind:null），不在
-      // lemma 索引里；卡名即词名，label 匹配让它们零门槛进组合段。
-      // 卡片跟随锁定(用户 2026-09-02):只嵌**锁定到这个词**的本地卡。已解绑的浮层卡、
-      // 锁到别的词的卡不进组合段;它们若也在跨书索引里,同样按本地状态剔掉。
-      var localCards = [];
-      var excludeCids = {};
-      var _nw = function (v) { return String(v || '').replace(/[\s\u3000]+/g, '').toLowerCase(); };
       var wordKeys = {};
-      wordKeys[_nw(key)] = true;
-      wordKeys[_nw(word)] = true;
-      try {
-        var _sn = window.RC && RC.stickynote &&
-          typeof RC.stickynote.notes === 'function'
-            ? RC.stickynote.notes() : [];
-        (Array.isArray(_sn) ? _sn : []).forEach(function (n) {
-          var hh = n && n.html;
-          if (!hh || !hh.content) return;
-          var lb = String(hh.label || '').trim();
-          var bind = hh.bind && typeof hh.bind === 'object' ? hh.bind : null;
-          var boundWord = bind && bind.kind === 'page-chars' ? _nw(bind.text) : '';
-          var cidStr = String(hh.cid || '');
-          var nameMatches = !!(lb && wordKeys[_nw(lb)]);
-          if (boundWord && wordKeys[boundWord]) {
-            localCards.push({
-              cid: cidStr, label: lb || String(bind.text || ''),
-              content: String(hh.content || ''), at: 0
-            });
-          } else if (nameMatches && cidStr) {
-            // 同名但没锁在这个词上(解绑/锁别处)→ 本地知识覆盖索引,不嵌
-            excludeCids[cidStr] = true;
-          }
-        });
-      } catch (e0) {}
+      wordKeys[_nwKey(key)] = true;
+      wordKeys[_nwKey(word)] = true;
+      if (_wordPopState) _wordPopState.cardsRect = rect || null;
+      var seq = ++_wordCardsSeq;
+      var native = !!(window.BWReaderRuntime && window.BWReaderRuntime.nativeLocalRuntime);
       // @interaction wordcard.index.sync
-      fetch('/pdf/api/word-card-index?lemma=' + encodeURIComponent(key))
-        .then(function (r) { return r.ok ? r.json() : null; },
-              function () { return null; })   // 索引失败不牵连本地卡
-        .then(function (d) {
-          var indexed = (d && d.ok === true && Array.isArray(d.cards))
-            ? d.cards : [];
-          // 合并：本地在前（就是眼前这本书的卡），索引补跨书的；按 cid 去重。
-          var seen = {};
-          var merged = [];
-          localCards.concat(indexed).forEach(function (c) {
-            var ck = String(c && c.cid || '');
-            if (!c || !c.content || (ck && seen[ck])) return;
-            if (ck && excludeCids[ck]) return;   // 本地已解绑/锁别处的同一张,不嵌
-            if (ck) seen[ck] = true;
-            merged.push(c);
-          });
-          if (!merged.length) return;
-          d = { ok: true, cards: merged };
-          // 竞态守卫：回来时框已切到别的词 → 丢弃。
-          if (!_wordPopState || _wordPopState.word !== word) return;
-          if (pop.querySelector('.wp-cards')) return;
-          var wrap = document.createElement('div');
-          wrap.className = 'wp-cards';
-          wrap.style.cssText = 'margin:0 0 6px;padding:6px 8px;'
-            + 'border:1px solid rgba(140,120,255,.4);border-radius:8px;'
-            + 'background:rgba(140,120,255,.10);max-height:180px;'
-            + 'overflow:auto';
-          // 多卡按加入时间顺序全部显示（用户 2026-08-31），空间靠
-          // 外层 max-height 滚动，不截断。存储序即时间正序。
-          d.cards.forEach(function (c) {
-            var item = document.createElement('div');
-            item.className = 'wp-card-item';
-            var head = document.createElement('div');
-            head.style.cssText =
-              'font-weight:600;font-size:12px;opacity:.9;margin:2px 0';
-            head.textContent = '🔖 ' + String(c.label || '卡片');
-            item.appendChild(head);
-            var body = document.createElement('div');
-            // content 是本机 _infoHtml 的产物（生成时已净化），同源复渲。
-            body.innerHTML = String(c.content || '');
-            // 索引副本里固化的桥直连地址 → 本地资产路由（App 内）。
-            try {
-              Array.prototype.forEach.call(
-                body.querySelectorAll('img'), function (img2) {
-                  var m2 = /^(?:https:\/\/bwicarus-2\.taile44d0c\.ts\.net\/reader-card-asset\/|\/pdf\/api\/img-proxy\?url=https%3A%2F%2Fbwicarus-2\.taile44d0c\.ts\.net%2Freader-card-asset%2F)([0-9a-f]{16})$/.exec(
-                    String(img2.getAttribute('src') || ''));
-                  if (m2) img2.setAttribute(
-                    'src', '/pdf/api/card-asset?id=' + m2[1]);
-                });
-            } catch (e2) {}
-            // 词典小框语境下剥掉卡内塞的词典区（用户 2026-09-01 图7：
-            // 小框本身就是完整词典,再嵌一份卡内词典区=同屏两份重复）。
-            // 只影响 wordpop 嵌入视图;卡片自己打开时词典区照常显示。
-            try {
-              Array.prototype.forEach.call(
-                body.querySelectorAll('.rc-note-dict,.rc-note-dict-note'),
-                function (dn) { dn.remove(); });
-            } catch (e3) {}
-            item.appendChild(body);
-            wrap.appendChild(item);
-          });
-          pop.insertBefore(wrap, pop.firstChild);
-          _positionPop(pop, rect);   // 高度变了重新定位
-        })
-        .catch(function () {});
+      var query = native
+        ? fetch('/pdf/api/word-card-index?lemma=' + encodeURIComponent(_nwKey(key)) +
+            '&word=' + encodeURIComponent(_nwKey(word)))
+          .then(function (r) { return r.ok ? r.json() : null; }, function () { return null; })
+        : Promise.resolve(null);
+      query.then(function (d) {
+        if (seq !== _wordCardsSeq) return;   // 期间又查了一次 → 只认最新
+        var cards = (d && d.ok === true && Array.isArray(d.cards)) ? d.cards : null;
+        if (cards === null) cards = _localBoundCards(wordKeys);
+        // 竞态守卫：回来时框已切到别的词 → 丢弃。
+        if (!_wordPopState || _wordPopState.word !== word) return;
+        var old = pop.querySelector('.wp-cards');
+        if (old) old.remove();
+        if (!cards.length) { _positionPop(pop, rect); return; }
+        var wrap = document.createElement('div');
+        wrap.className = 'wp-cards';
+        wrap.style.cssText = 'margin:0 0 6px;padding:6px 8px;'
+          + 'border:1px solid rgba(140,120,255,.4);border-radius:8px;'
+          + 'background:rgba(140,120,255,.10);max-height:180px;'
+          + 'overflow:auto';
+        // 多卡按加入时间顺序全部显示（用户 2026-08-31），空间靠外层 max-height 滚动，不截断。
+        cards.forEach(function (c) {
+          if (!c || !c.content) return;
+          var item = document.createElement('div');
+          item.className = 'wp-card-item';
+          var head = document.createElement('div');
+          head.style.cssText = 'font-weight:600;font-size:12px;opacity:.9;margin:2px 0';
+          head.textContent = '🔖 ' + String(c.label || '卡片');
+          item.appendChild(head);
+          var body = document.createElement('div');
+          // content 是本机 _infoHtml 的产物（生成时已净化），同源复渲。
+          body.innerHTML = String(c.content || '');
+          // 桥直连地址 → 本地资产路由（App 内）。
+          try {
+            Array.prototype.forEach.call(body.querySelectorAll('img'), function (img2) {
+              var m2 = /^(?:https:\/\/bwicarus-2\.taile44d0c\.ts\.net\/reader-card-asset\/|\/pdf\/api\/img-proxy\?url=https%3A%2F%2Fbwicarus-2\.taile44d0c\.ts\.net%2Freader-card-asset%2F)([A-Za-z0-9_-]+)/.exec(String(img2.getAttribute('src') || ''));
+              if (m2) img2.setAttribute('src', '/pdf/api/card-asset?id=' + m2[1]);
+            });
+          } catch (e2) {}
+          // 词典小框语境下剥掉卡内塞的词典区（用户 2026-09-01 图7：小框本身就是完整词典）。
+          try {
+            Array.prototype.forEach.call(body.querySelectorAll('.rc-note-dict,.rc-note-dict-note'),
+              function (dn) { dn.remove(); });
+          } catch (e3) {}
+          item.appendChild(body);
+          wrap.appendChild(item);
+        });
+        if (!wrap.childNodes.length) { _positionPop(pop, rect); return; }
+        pop.insertBefore(wrap, pop.firstChild);
+        _positionPop(pop, rect);   // 高度变了重新定位
+      }).catch(function () {});
     } catch (e) {}
   }
+  // 绑定变化即时体现:解绑成自由卡、移动、改锁别的词,正开着的小框马上重取卡片段
+  try {
+    document.addEventListener('bw:native-word-bindings-changed', function (ev) {
+      try {
+        var pop = document.getElementById('word-pop');
+        if (!pop || pop.style.display === 'none' || !_wordPopState || !_wordPopState.word) return;
+        var d = ev && ev.detail;
+        var keys = d && Array.isArray(d.keys) ? d.keys : [];
+        var mine = {};
+        mine[_nwKey(_wordPopState.lemma)] = true;
+        mine[_nwKey(_wordPopState.word)] = true;
+        if (keys.length && !keys.some(function (k) { return mine[k]; })) return;
+        _attachWordCards(pop, _wordPopState.word, _wordPopState.lemma, _wordPopState.cardsRect || null);
+      } catch (_) {}
+    });
+  } catch (_) {}
 
   // ─────────────────────────── 小框动作按钮 ───────────────────────────
   // 展开完整词条:日语走 dictStreamJP(离线富内容 + 按需 AI),英语走 dictStream(三源 SSE)。
@@ -1610,7 +1603,7 @@ if (window.__bwPwaProviderOnly) return;
       });
       html += '</div>';
     }
-    html += '<button id="jp-ai-btn" class="jp-ai-btn">Pi 深度解释（可选：句境 / 用法 / 语感 / 近义辨析）</button>' +
+    html += '<button id="jp-ai-btn" class="jp-ai-btn">AI 深度解释（可选：句境 / 用法 / 语感 / 近义辨析）</button>' +
             '<div id="jp-ai-out" class="jp-ai-out"></div>';
     contentEl.innerHTML = html;
     contentEl.scrollTop = 0;
@@ -1670,7 +1663,7 @@ if (window.__bwPwaProviderOnly) return;
   window._jpAiDeep = jpAiDeep;   // 仅兼容导出;本模块的 AI 按钮经 addEventListener 直接绑局部 jpAiDeep
 
   async function jpAiDeepPi(word, btn, out, myReq) {
-    if (btn) { btn.disabled = true; btn.textContent = 'Pi 旧版精释中…'; }
+    if (btn) { btn.disabled = true; btn.textContent = 'AI 深度解释中…'; }
     var ctx = (_wordPopState && _wordPopState.ctx) || '';
     try {
       var render = function (text) {
@@ -1786,7 +1779,7 @@ if (window.__bwPwaProviderOnly) return;
     else dictStream(word, opts.ctx || '');
   }
 
-  RC.wordpop = { show: show, openFull: openFull, clearHls: _removeAllWordHls, prewarm: prewarm, clearCache: clearDictCache };   // clearHls:清查词高亮;prewarm(words):翻页后台预热释义;clearCache:切书/失效释放
+  RC.wordpop = { show: show, openFull: openFull, clearHls: _removeAllWordHls, prewarm: prewarm, clearCache: clearDictCache, injectCss: injectCss, jpInflectHtml: _jpInflectHtml, jpExamples: _jpExamples };   // injectCss 供 rc-phrasepop 复用同一套小框样式(用户 2026-09-03:所有查词框统一成单词框的版式)   // clearHls:清查词高亮;prewarm(words):翻页后台预热释义;clearCache:切书/失效释放
 })();
 
 })(window.__bwReaderDoc || document, window.__bwReaderFetch || window.fetch.bind(window));

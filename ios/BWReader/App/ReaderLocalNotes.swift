@@ -124,7 +124,7 @@ final class ReaderLocalNotesManager: ObservableObject {
         defaults.set(enabled, forKey: DefaultsKey.enabled)
         notice = enabled
             ? "本机 Obsidian 笔记已开启"
-            : "已切回原有 Pi 笔记线路"
+            : "已切回原有服务器笔记线路"
         publishSharedState()
     }
 
@@ -192,7 +192,7 @@ final class ReaderLocalNotesManager: ObservableObject {
         isConfigured = false
         folderName = ""
         vaultGeneration = ""
-        notice = "已移除本机文件夹授权，继续使用 Pi 笔记线路"
+        notice = "已移除本机文件夹授权，继续使用服务器笔记线路"
         errorMessage = nil
         publishSharedState()
     }

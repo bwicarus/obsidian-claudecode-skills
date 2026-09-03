@@ -280,7 +280,7 @@ test("an already imported revision still invalidates the visible text layer", ()
 
 test("each PDF exposes independent Apple, Pi, and PC preprocessing lifecycles", () => {
   assert.match(VIEW, /Label\("本机预处理"/);
-  assert.match(VIEW, /Label\("Pi \/ PC 预处理"/);
+  assert.match(VIEW, /Label\("服务器 \/ PC 预处理"/);
   assert.match(VIEW, /executor: "pi"/);
   assert.match(VIEW, /executor: "pc"/);
   for (const action of ["startLocal", "pause", "resume", "cancel", "retry"]) {
@@ -294,7 +294,7 @@ test("each PDF exposes independent Apple, Pi, and PC preprocessing lifecycles", 
     assert.match(VIEW, new RegExp(`job\\.${stage}`));
   }
   assert.match(VIEW, /EPUB 使用其可重排文字层/);
-  assert.match(VIEW, /EPUB 当前不支持 Pi 的 PDF 页图预处理/);
+  assert.match(VIEW, /EPUB 当前不支持服务器的 PDF 页图预处理/);
 });
 
 test("PC preprocessing is an explicit Pi-coordinated executor with live availability", () => {
@@ -309,7 +309,7 @@ test("PC preprocessing is an explicit Pi-coordinated executor with live availabi
     PI.slice(PI.indexOf("var body = ["), PI.indexOf('if executor == "pc"')),
     /"executor"/,
   );
-  assert.match(VIEW, /Menu\(executor == "pc" \? "PC 预处理" : "Pi 预处理"\)/);
+  assert.match(VIEW, /Menu\(executor == "pc" \? "PC 预处理" : "服务器预处理"\)/);
   assert.match(VIEW, /Label\("此电脑 GPU", systemImage: "desktopcomputer"\)/);
   assert.match(VIEW, /executor == "pc" && !pcExecutorAcceptingJobs/);
   assert.match(VIEW, /async let executorRefresh: Void = piOCR\.refreshExecutors\(cookies: cookies\)/);
@@ -357,7 +357,7 @@ test("Pi request failures stay visible and actions are never silently preference
   assert.doesNotMatch(refresh, /status == 404|jobs\.removeValue/);
   assert.match(refresh, /recordError\([\s\S]*explicit: false/);
   assert.match(PI, /throw ReaderPiOCRError\.invalidResponse/);
-  assert.match(PI, /Pi 预处理接口未部署，或服务器返回了网页而不是协议数据/);
+  assert.match(PI, /服务器预处理接口未部署，或服务器返回了网页而不是协议数据/);
   assert.match(PI, /http\.statusCode == 404 && responseContract != Self\.contract/);
   for (const code of ["legacy-adoption-busy", "legacy-result-incomplete", "book-ocr-busy"]) {
     assert.match(PI, new RegExp(code));
@@ -442,8 +442,8 @@ test("idle Pi status previews legacy results without adopting or starting them",
 });
 
 test("legacy Pi results require an explicit adopt and then use normal job and attachment import", () => {
-  assert.match(VIEW, /Text\("已有 Pi 结果，可采用"\)/);
-  assert.match(VIEW, /Button\("采用现有 Pi 结果"\)/);
+  assert.match(VIEW, /Text\("已有服务器结果，可采用"\)/);
+  assert.match(VIEW, /Button\("采用现有服务器结果"\)/);
   assert.match(VIEW, /piOCR\.adoption\(for: remoteBook\)/);
   assert.match(VIEW, /let job = piOCR\.job\(for: remoteBook\),\s*job\.state != "idle"/);
   const explicitAdopt = VIEW.slice(
@@ -511,7 +511,7 @@ test("automatic preprocessing is Apple-only, preference-gated, and operational",
   );
   assert.doesNotMatch(auto, /piOCR|startPiOCR|remote\.upload/);
   assert.match(SETTINGS, /PDF 下载到本机或首次打开时会启动这台设备的 Apple 预处理/);
-  assert.match(SETTINGS, /不会上传书籍，也不会自动调用 Pi/);
+  assert.match(SETTINGS, /不会上传书籍，也不会自动调用服务器/);
 });
 
 test("local-only Pi preprocessing uploads first and never happens automatically", () => {
@@ -655,5 +655,5 @@ test("历次结果区块在两个书库入口都要有，且空态说得出原�
     2,
     "本机书与 Pi 书两个 preprocessingPanel 重载都要调用",
   );
-  assert.match(VIEW, /这本书还没有上传到 Pi，服务器上没有预处理结果。/);
+  assert.match(VIEW, /这本书还没有上传到服务器，服务器上没有预处理结果。/);
 });

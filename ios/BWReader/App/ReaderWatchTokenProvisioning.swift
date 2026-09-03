@@ -31,9 +31,9 @@ enum ReaderWatchTokenProvisioning {
             switch self {
             case .notSignedIn:
                 // 手表上没有登录界面，所以这条必须说清该去哪儿修。
-                return "手机还没登录 Pi，先在 App 里登录一次"
+                return "手机还没登录服务器，先在 App 里登录一次"
             case .serverSaid(let why): return why
-            case .malformed: return "Pi 返回的内容不是预期格式"
+            case .malformed: return "服务器返回的内容不是预期格式"
             }
         }
     }
@@ -62,7 +62,7 @@ enum ReaderWatchTokenProvisioning {
             // 所以把服务端那句中文原样透出来，别折成一个笼统的失败。
             let said = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
                 .flatMap { $0?["error"] as? String }
-            throw Failure.serverSaid(said ?? "Pi 返回 HTTP \(http.statusCode)")
+            throw Failure.serverSaid(said ?? "服务器返回 HTTP \(http.statusCode)")
         }
         guard let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               payload["ok"] as? Bool == true,

@@ -309,7 +309,7 @@ test("Pi sync button is explicit, serialized, and reports partial support honest
   assert.match(TOOLS_VIEW, /\.disabled\(piSync\.isRunning\)/);
   assert.match(TOOLS_VIEW, /ProgressView\(\)/);
   assert.match(TOOLS_VIEW, /LabeledContent\("结果", value: report\.state\.title\)/);
-  assert.match(TOOLS_VIEW, /仅保存在本机、尚未同步到 Pi/);
+  assert.match(TOOLS_VIEW, /仅保存在本机、尚未同步到服务器/);
   assert.match(TOOLS_VIEW, /本机书籍会直接离线打开/);
   assert.doesNotMatch(TOOLS_VIEW, /纯本地书会先上传到 Pi，再复用完整 Reader 打开/);
   assert.match(COORDINATOR, /guard !phase\.isRunning else \{ return \}/);
@@ -1129,7 +1129,7 @@ test("Swift sync bridge keeps namespace and capabilities private and exposes log
   // loginFlowPaths 语义修正后只含登录流程本身；dashboard 是登录后的
   // 落点（跳到列表之外即视为登录成功），不再在列表里。
   assert.match(PI_LOGIN, /"\/login", "\/logout", "\/register",/);
-  assert.match(TOOLS_VIEW, /登录或重新登录 Pi/);
+  assert.match(TOOLS_VIEW, /登录或重新登录服务器/);
 });
 
 test("Pi sync summaries interpolate runtime counts instead of showing variable names", () => {

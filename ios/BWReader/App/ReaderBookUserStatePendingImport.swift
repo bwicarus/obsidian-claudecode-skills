@@ -50,9 +50,9 @@ enum ReaderBookUserStatePendingImportError: LocalizedError {
         case .authenticationUnavailable:
             return "当前未登录原下载账户，书籍附属数据已保留且未导入"
         case .accountScopeUnavailable:
-            return "无法确认当前 Pi 账户范围，书籍附属数据已保留且未导入"
+            return "无法确认当前服务器账户范围，书籍附属数据已保留且未导入"
         case .accountScopeChanged:
-            return "当前 Pi 账户与下载书籍数据时不同，已保留待导入数据且未覆盖本机内容"
+            return "当前服务器账户与下载书籍数据时不同，已保留待导入数据且未覆盖本机内容"
         }
     }
 }

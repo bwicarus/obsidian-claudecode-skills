@@ -236,7 +236,9 @@
               else if (h.phraseRefresh) h.phraseRefresh();
             } catch (e) {}
           },
-          onExplain: function () { if (h && h.onExplain) { try { h.onExplain(); } catch (e) {} } }
+          onExplain: function () { if (h && h.onExplain) { try { h.onExplain(); } catch (e) {} } },
+          // 词组框与单词框统一版式(2026-09-03):语法按钮走同一入口
+          onGrammar: function () { if (window.onGrammarAnalyze) window.onGrammarAnalyze(); }
         };
       };
       // ── 点击已有常亮高亮重弹:anchorRect(高亮屏幕矩形)+ 已存结果秒开(无则 fetch 兜底) ──

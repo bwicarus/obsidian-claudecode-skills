@@ -12,7 +12,7 @@ struct ReaderPiLoginView: View {
         NavigationStack {
             ReaderPiLoginWebView(dataStore: dataStore) { signedIn = true }
                 .ignoresSafeArea(edges: .bottom)
-                .navigationTitle("登录 Pi")
+                .navigationTitle("登录服务器")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
@@ -27,8 +27,8 @@ struct ReaderPiLoginView: View {
                             Image(systemName: "checkmark.circle.fill")
                                 .font(.system(size: 44))
                                 .foregroundStyle(Color.green)
-                            Text("已登录 Pi").font(.headline)
-                            Text("点右上角「完成」，再执行「与 Pi 同步」")
+                            Text("已登录服务器").font(.headline)
+                            Text("点右上角「完成」，再执行「与服务器同步」")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
@@ -40,7 +40,7 @@ struct ReaderPiLoginView: View {
                     }
                 }
                 .safeAreaInset(edge: .bottom) {
-                    Text("登录完成后点“完成”，再重新执行“与 Pi 同步”。登录凭据只保存在 App 的网站数据存储中，不会交给书页。")
+                    Text("登录完成后点“完成”，再重新执行“与服务器同步”。登录凭据只保存在 App 的网站数据存储中，不会交给书页。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 16)

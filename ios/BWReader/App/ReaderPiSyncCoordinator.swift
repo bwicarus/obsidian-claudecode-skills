@@ -46,8 +46,8 @@ struct ReaderPiBookSyncReport: Equatable, Sendable {
             "已上传或关联 \(uploaded) 本",
             "无需上传 \(unchanged) 本",
         ]
-        if remoteOnly > 0 { parts.append("仅 Pi \(remoteOnly) 本未下载") }
-        if blockedCount > 0 { parts.append("冲突或 Pi 较新 \(blockedCount) 本未覆盖") }
+        if remoteOnly > 0 { parts.append("仅服务器 \(remoteOnly) 本未下载") }
+        if blockedCount > 0 { parts.append("冲突或服务器较新 \(blockedCount) 本未覆盖") }
         if pending > 0 { parts.append("待下次同步 \(pending) 本") }
         if failed > 0 { parts.append("本地读取失败 \(failed) 本") }
         if unknown > 0 { parts.append("结果未知 \(unknown) 本") }
@@ -77,10 +77,10 @@ struct ReaderPiDataSyncReport: Equatable, Sendable {
                 : "设置、词汇与卡片仓库仅部分同步"
         case .blocked:
             if errorCode == "BW_NATIVE_SYNC_BOOTSTRAP_UNAVAILABLE" {
-                return "设置、词汇与卡片仓库尚未接通 Pi；本机数据未受影响"
+                return "设置、词汇与卡片仓库尚未接通服务器；本机数据未受影响"
             }
             if errorCode == "BW_SYNC_REGISTRY_MISMATCH" {
-                return "Pi 尚未完成卡片仓库同步升级；本机数据未受影响"
+                return "服务器尚未完成卡片仓库同步升级；本机数据未受影响"
             }
             return conflictCount > 0
                 ? "设置、词汇或卡片仓库存在 \(conflictCount) 个冲突，未覆盖"
@@ -113,7 +113,7 @@ struct ReaderPiSyncReport: Identifiable, Equatable, Sendable {
         "笔迹",
         "便签",
         "卡片位置",
-        "对话记录（联网时从 Pi 在线恢复，不在离线同步包）",
+        "对话记录（联网时从服务器在线恢复，不在离线同步包）",
     ]
 
     let id: String
@@ -188,7 +188,7 @@ final class ReaderPiSyncCoordinator: ObservableObject {
             switch self {
             case .idle: return ""
             case .scanning: return "正在扫描本机书库…"
-            case .readingPiCatalog: return "正在核对 Pi 书库…"
+            case .readingPiCatalog: return "正在核对服务器书库…"
             case .uploading(let current, let total, let title):
                 return "正在上传 \(current)/\(total)：\(title)"
             case .syncingData: return "正在同步设置、词汇与卡片仓库…"
@@ -338,14 +338,14 @@ final class ReaderPiSyncCoordinator: ObservableObject {
                     summary.unknown += 1
                     uploadOutcomeUnknown = true
                     errorMessage = remoteLibrary.errorMessage
-                        ?? "无法确认 Pi 是否已收到该书；下次同步会先重新核对"
+                        ?? "无法确认服务器是否已收到该书；下次同步会先重新核对"
                     continue
                 }
                 guard uploaded.contentSha256.caseInsensitiveCompare(digest)
                         == .orderedSame else {
                     summary.unknown += 1
                     uploadOutcomeUnknown = true
-                    errorMessage = "Pi 返回的书籍摘要与本机不一致，已停止后续上传"
+                    errorMessage = "服务器返回的书籍摘要与本机不一致，已停止后续上传"
                     continue
                 }
                 summary.uploaded += 1

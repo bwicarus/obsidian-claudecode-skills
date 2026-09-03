@@ -183,7 +183,7 @@ struct ReaderNativeInterfaceManifest: Decodable {
             }
             if let remoteBook = route.remoteBook {
                 guard route.owner == .pi else {
-                    throw ManifestError("非 Pi 路由不得声明远端书策略：\(route.path)")
+                    throw ManifestError("非服务器路由不得声明远端书策略：\(route.path)")
                 }
                 try Self.validate(
                     remoteBook,

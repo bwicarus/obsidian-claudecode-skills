@@ -41,13 +41,13 @@ enum ReaderRemoteLibraryError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidResponse:
-            return "Pi 书库返回了无法识别的数据"
+            return "服务器书库返回了无法识别的数据"
         case .server(let status, let message):
-            return "Pi 书库请求失败（HTTP \(status)）：\(message)"
+            return "服务器书库请求失败（HTTP \(status)）：\(message)"
         case .rejected(let message):
             return message
         case .invalidDownloadURL:
-            return "Pi 书库返回了不安全的下载地址"
+            return "服务器书库返回了不安全的下载地址"
         case .invalidBookName:
             return "书籍文件名无效"
         case .localFileChanged:
@@ -122,7 +122,7 @@ final class ReaderRemoteLibraryClient {
             from: data
         )
         guard payload.ok else {
-            throw ReaderRemoteLibraryError.rejected("Pi 书库拒绝读取目录")
+            throw ReaderRemoteLibraryError.rejected("服务器书库拒绝读取目录")
         }
         return payload.books
     }
@@ -163,7 +163,7 @@ final class ReaderRemoteLibraryClient {
             from: data
         )
         guard payload.ok else {
-            throw ReaderRemoteLibraryError.rejected("Pi 书库拒绝上传")
+            throw ReaderRemoteLibraryError.rejected("服务器书库拒绝上传")
         }
         return payload
     }
@@ -316,7 +316,7 @@ final class ReaderRemoteLibraryClient {
                 options: .regularExpression
               ) != nil else {
             throw ReaderRemoteLibraryError.rejected(
-                "Pi 返回的书籍附属数据账户证明无效"
+                "服务器返回的书籍附属数据账户证明无效"
             )
         }
         let package = try ReaderBookUserStatePackageCodec.decode(data)
@@ -523,10 +523,10 @@ enum ReaderLibrarySyncState: String, Sendable {
     var title: String {
         switch self {
         case .localOnly: return "仅本机"
-        case .piOnly: return "仅 Pi"
-        case .synced: return "本机 + Pi"
+        case .piOnly: return "仅服务器"
+        case .synced: return "本机 + 服务器"
         case .localNewer: return "本机有更新"
-        case .piNewer: return "Pi 有更新"
+        case .piNewer: return "服务器有更新"
         case .conflict: return "两端均有更新"
         }
     }
@@ -627,8 +627,8 @@ final class ReaderRemoteLibraryCoordinator: ObservableObject {
             remoteToLocalID = remoteToLocalID.filter { $0.value != localBook.id }
             remoteToLocalID[result.book.bookId] = localBook.id
             notice = result.deduplicated
-                ? "Pi 已有相同内容，已关联并准备打开"
-                : "已上传到 Pi 书库"
+                ? "服务器已有相同内容，已关联并准备打开"
+                : "已上传到服务器书库"
             return result.book
         } catch {
             errorMessage = "上传失败：\(error.localizedDescription)"
@@ -704,7 +704,7 @@ final class ReaderRemoteLibraryCoordinator: ObservableObject {
                 book: remoteBook,
                 cookies: cookies
             ) else {
-                let message = "Pi 上这本书暂无用户附属数据；原书和识别附件不受影响"
+                let message = "服务器上这本书暂无用户附属数据；原书和识别附件不受影响"
                 try? await pendingUserStateStore.markFetchFailure(
                     localBookId: localBook.id,
                     message: message
@@ -722,14 +722,14 @@ final class ReaderRemoteLibraryCoordinator: ObservableObject {
                 remoteBookId: remoteBook.bookId,
                 contentSha256: remoteBook.contentSha256
             )
-            notice = "书籍已下载，Pi 用户数据将在本机阅读页就绪后安全合并"
+            notice = "书籍已下载，服务器用户数据将在本机阅读页就绪后安全合并"
         } catch {
             let message = error.localizedDescription
             try? await pendingUserStateStore.markFetchFailure(
                 localBookId: localBook.id,
                 message: message
             )
-            errorMessage = "书籍已下载，但 Pi 用户数据获取失败：\(message)；打开本书可重试"
+            errorMessage = "书籍已下载，但服务器用户数据获取失败：\(message)；打开本书可重试"
             ReaderBookUserStatePendingImportStore.publishFailure(
                 localBookId: localBook.id,
                 message: errorMessage ?? message

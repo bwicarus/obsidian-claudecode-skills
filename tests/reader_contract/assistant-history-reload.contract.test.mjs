@@ -426,7 +426,7 @@ test("normal, review and EPUB reloads retain their existing authoritative scopes
 });
 
 test("manual Pi sync refresh is online-only and conversation collections remain pending", () => {
-  assert.match(NATIVE_SYNC, /对话记录（联网时从 Pi 在线恢复，不在离线同步包）/);
+  assert.match(NATIVE_SYNC, /对话记录（联网时从服务器在线恢复，不在离线同步包）/);
   const refresh = section(NATIVE_SYNC, "        // 对话仍由 Pi", "        return ReaderPiDataSyncReport(");
   assert.match(refresh, /RC\.assistant\.onNativePiSyncFinished/);
   assert.doesNotMatch(refresh, /decoded\.state == \.complete|decoded\.state == \.partial/);

@@ -64,7 +64,7 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
         super.init()
         piProxyBroker.installResourceRequestPreparer { [weak self] request in
             guard let self else {
-                throw GatewayError("BW_PI_GATEWAY_UNAVAILABLE：Pi 网关不可用")
+                throw GatewayError("BW_PI_GATEWAY_UNAVAILABLE：服务器网关不可用")
             }
             return try await self.prepareAuthorizedResource(request)
         }
@@ -121,11 +121,11 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
               message.webView === webView,
               isTrustedLocalURL(webView.url),
               isTrustedLocalURL(message.frameInfo.request.url) else {
-            replyHandler(nil, "BW_PI_GATEWAY_SOURCE：Pi 网关来源无效")
+            replyHandler(nil, "BW_PI_GATEWAY_SOURCE：服务器网关来源无效")
             return
         }
         guard let request = Self.parse(message.body) else {
-            replyHandler(nil, "BW_PI_GATEWAY_REQUEST：Pi 网关请求无效")
+            replyHandler(nil, "BW_PI_GATEWAY_REQUEST：服务器网关请求无效")
             return
         }
         guard let surface = nativeSurface(
@@ -146,7 +146,7 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
             method: request.method,
             surface: surface
         ) else {
-            replyHandler(nil, "BW_PI_GATEWAY_ROUTE：接口未由 Pi 网关认领")
+            replyHandler(nil, "BW_PI_GATEWAY_ROUTE：接口未由服务器网关认领")
             return
         }
 
@@ -164,7 +164,7 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
 
         Task { @MainActor [weak self] in
             guard let self else {
-                replyHandler(nil, "BW_PI_GATEWAY_UNAVAILABLE：Pi 网关不可用")
+                replyHandler(nil, "BW_PI_GATEWAY_UNAVAILABLE：服务器网关不可用")
                 return
             }
             do {
@@ -237,7 +237,7 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
               target.host == Self.piOrigin.host,
               target.port == Self.piOrigin.port,
               target.path.hasPrefix("/") else {
-            throw GatewayError("BW_PI_GATEWAY_ROUTE：Pi API 地址无效")
+            throw GatewayError("BW_PI_GATEWAY_ROUTE：服务器 API 地址无效")
         }
         var request = URLRequest(url: target)
         request.httpMethod = input.method
@@ -283,7 +283,7 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
                 surface: resource.surface
               ) else {
             throw GatewayError(
-                "BW_PI_GATEWAY_ROUTE：资源接口未由 Pi 网关认领"
+                "BW_PI_GATEWAY_ROUTE：资源接口未由服务器网关认领"
             )
         }
         let authorizedTarget = try Self.forceAssetProxyMode(canonical)
@@ -379,7 +379,7 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
 
         var components = URLComponents(string: input.path)
         guard components != nil else {
-            throw GatewayError("BW_PI_GATEWAY_ROUTE：Pi API 地址无效")
+            throw GatewayError("BW_PI_GATEWAY_ROUTE：服务器 API 地址无效")
         }
         var jsonRoot: Any?
         var parsedJSON = false
@@ -539,7 +539,7 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
                 || matchedBinding != nil
                 || continuationWasAuthorized else {
             let detail = bindings.isEmpty
-                ? "这本本机书尚未关联 Pi 的同摘要书体；请先在书库同步书体到 Pi，再选择 Pi 预处理"
+                ? "这本本机书尚未关联服务器的同摘要书体；请先在书库同步书体到服务器，再选择服务器预处理"
                 : "请求未提供可验证的书籍身份或续传凭据"
             throw GatewayError("BW_PI_GATEWAY_REMOTE_BOOK：\(detail)")
         }
@@ -551,7 +551,7 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
             guard let canonical = Self.canonicalRequestPath(candidate),
                   canonical.path == input.routePath else {
                 throw GatewayError(
-                    "BW_PI_GATEWAY_ROUTE：Pi API 地址改写后无效"
+                    "BW_PI_GATEWAY_ROUTE：服务器 API 地址改写后无效"
                 )
             }
             rewrittenPath = canonical.requestTarget
@@ -562,7 +562,7 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
             let encoded = try JSONSerialization.data(withJSONObject: jsonRoot)
             guard encoded.count <= Self.maximumRequestBytes else {
                 throw GatewayError(
-                    "BW_PI_GATEWAY_LIMIT：Pi 请求改写后超过限制"
+                    "BW_PI_GATEWAY_LIMIT：服务器请求改写后超过限制"
                 )
             }
             rewrittenBody = encoded

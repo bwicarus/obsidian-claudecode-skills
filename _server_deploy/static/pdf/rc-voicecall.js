@@ -4022,51 +4022,7 @@
     _bindPending = rest;
   };
 
-  // 词卡关联登记：dict-quick 查得到（= 元素本身有字典内容，正是用户
-  // 定的条件）才登记；prewarm=1 使验证查询不污染查询日志/暴露计数。
-  // 索引键 = 响应 lemma（英语变形归并；日语当前回原文，精确匹配）。
-  function _registerWordCard(bind, card, payload) {
-    try {
-      var text = String((bind && bind.text) || '').trim();
-      if (!text || text.length > 32 || /[\n\r]/.test(text)) return;
-      if (text.split(/\s+/).length > 3) return;   // 只认词/短词组
-      var file = '';
-      try {
-        file = String((window.RC && RC.core && RC.core.file
-          && RC.core.file()) || '');
-      } catch (e0) {}
-      // @interaction dictionary.quick.read
-      fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(text)
-        + '&file=' + encodeURIComponent(file) + '&prewarm=1')
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-          if (!d || d.ok !== true) return null;   // 字典没有 → 不建关联
-          var lemma = String(d.lemma || text).toLowerCase();
-          // @interaction wordcard.index.sync
-          return fetch('/pdf/api/word-card-index', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lemma: lemma, card: {
-              cid: String(card.cid || ''),
-              doc: file,
-              page: parseInt(bind && bind.page, 10) || 0,
-              label: String(card.title || (payload && payload.label) || '卡片'),
-              content: String((payload && payload.raw) || '')
-            } })
-          });
-        })
-        .then(function (r) {
-          if (r && !r.ok) {
-            console.warn('[word-card] 登记失败 http-' + r.status);
-          }
-        })
-        .catch(function (e) {
-          console.warn('[word-card] 登记失败', e && e.message);
-        });
-    } catch (e) {
-      console.warn('[word-card] 登记异常', e && e.message);
-    }
-  }
+  // (2026-09-03 重做:词卡关联不再由这里登记副本 —— 便签仓库在写入时自行派生「词→卡」索引,内容显示时现读。)
 
   function _renderInfoResult(rendered, outcome, reason) {
     return {
@@ -4153,8 +4109,7 @@
             };
           }
         } else _pr = { ok: false, why: 'persistence-unavailable' };
-        // 词卡登记(fire-and-forget,详见 _registerWordCard);下一行单行形状被契约锁定。
-        if (_pr && _pr.ok === true) _registerWordCard(_b, card, _pp);
+        // 词卡关联由便签写入自行派生(2026-09-03 重做),这里不再登记;下一行单行形状被契约锁定。
         if (_pr && _pr.ok === true) return _renderInfoResult(true, 'bound');
         // durable replay 的第一次失败已经生成过回退卡并登记补绑。后续只重试
         // 权威 placement：再次走下面的 turnCard / 浮层分支会让同一 correlation

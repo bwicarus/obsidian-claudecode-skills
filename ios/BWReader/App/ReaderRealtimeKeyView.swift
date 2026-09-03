@@ -48,7 +48,7 @@ struct ReaderRealtimeKeyView: View {
                         ).isEmpty
                     )
                 } footer: {
-                    Text("Key 只在这个 App 中输入并写入 Apple Keychain；Safari 扩展只由签名的原生进程共享读取。App 保存、启动通话、注入选区与发送笔迹/视口合成图都不连接 Pi；Key 也不会进入 Reader 网页、扩展 JavaScript、代码、构建产物或日志。")
+                    Text("Key 只在这个 App 中输入并写入 Apple Keychain；Safari 扩展只由签名的原生进程共享读取。App 保存、启动通话、注入选区与发送笔迹/视口合成图都不连接服务器；Key 也不会进入 Reader 网页、扩展 JavaScript、代码、构建产物或日志。")
                 }
 
                 if let notice = credentials.notice {

@@ -284,6 +284,8 @@ if (window.__bwPwaProviderOnly) return;
   var _cssInjected = false;
   function injectCss() {
     if (_cssInjected) return; _cssInjected = true;
+    // 用户 2026-09-03:所有查词框统一成单词框的版式 → 有 rc-wordpop 就直接用它那套 CSS
+    try { if (window.RC && RC.wordpop && typeof RC.wordpop.injectCss === 'function') RC.wordpop.injectCss(); } catch (_) {}
     if (document.getElementById('rc-wordpop-css') || document.getElementById('rc-phrasepop-css')) { _cssInjected = true; if (document.getElementById('rc-phrasepop-css')) return; }
     var css = document.createElement('style'); css.id = 'rc-phrasepop-css';
     css.textContent = [
@@ -420,6 +422,9 @@ if (window.__bwPwaProviderOnly) return;
     _sendCompatibility('mastered', t, next);
   };
   // 💡 解释:藏框 → 底座 onExplain(走 RC.result 解释模态)。
+  window._epPhraseGrammar = function () {
+    try { if (_ctx && typeof _ctx.onGrammar === 'function') _ctx.onGrammar(_state && _state.text); } catch (_) {}
+  };
   window._epPhraseExplain = function () {
     var p = document.getElementById('word-pop'); if (p) p.style.display = 'none';
     if (_ctx.onExplain) { try { _ctx.onExplain(_state && _state.text); } catch (_) {} }
@@ -506,6 +511,9 @@ if (window.__bwPwaProviderOnly) return;
           zh: zhLocal,
           reading: localResult.reading || '',
           accent: localResult.accent != null ? localResult.accent : null,
+          examples: Array.isArray(localResult.examples) ? localResult.examples : [],
+          inflect: localResult.inflect || null,
+          lemma: localResult.lemma || '',
           source: 'local-jmdict'
         };
       }
@@ -528,6 +536,9 @@ if (window.__bwPwaProviderOnly) return;
               zh: cli.text,
               reading: (localResult && localResult.reading) || '',
               accent: (localResult && localResult.accent != null) ? localResult.accent : null,
+              examples: (localResult && Array.isArray(localResult.examples)) ? localResult.examples : [],
+              inflect: (localResult && localResult.inflect) || null,
+              lemma: (localResult && localResult.lemma) || '',
               source: 'pc-codex-cli',
               cached: !!cli.cached
             };
@@ -605,6 +616,8 @@ if (window.__bwPwaProviderOnly) return;
       var zh = result.zh || '', reading = result.reading || '', accent = result.accent;
       try { if (opts.onResult) opts.onResult({
         text: text, zh: zh, reading: reading, accent: accent,
+        examples: Array.isArray(result.examples) ? result.examples : [],
+        inflect: result.inflect || null, lemma: result.lemma || '',
         source: result.source || '', error: result.error || '', errorCode: result.errorCode || ''
       }); } catch (_) {}   // 用局部 opts(闭包)不读共享 _ctx:并发查询/点击不会互相覆盖回调
       try { if (opts.onSolid) opts.onSolid(); } catch (_) {}   // 出结果 → 底座停呼吸转常亮保持
@@ -613,23 +626,44 @@ if (window.__bwPwaProviderOnly) return;
       var phon = (isJa && reading && accent != null) ? _renderPitch(reading, accent)
         : (reading ? '<span class="wp-phon">' + esc(reading) + '</span>' : '');
       var fav = _propertyValue(text, isJa, 'favorite', _favSet.has(key));
+      // 版式与单词框一致(用户 2026-09-03 拍板:所有查词框统一成单词框那种):
+      //   词头+读音/声调+发音 → 释义区(点开=AI 完整讲解,末行「点这里展开完整字典」) → 收藏/掌握 两个按钮。
+      //   不再显示来源小字,也不再有单独的「改用旧版精释」按钮 —— 展开完整字典就是它。
+      var wp = window.RC && RC.wordpop;
+      var inflectHtml = '';
+      try {
+        if (result.inflect && wp && typeof wp.jpInflectHtml === 'function') {
+          inflectHtml = wp.jpInflectHtml(result.inflect, text, result.lemma || '');
+        }
+      } catch (_) {}
+      var exRows = [];
+      try {
+        exRows = (wp && typeof wp.jpExamples === 'function')
+          ? wp.jpExamples({ examples: result.examples || [] }) : (result.examples || []);
+      } catch (_) { exRows = []; }
+      var exHtml = '';
+      if (exRows && exRows.length) {
+        exHtml = '<div class="wp-ex">' + exRows.slice(0, 2).map(function (e) {
+          return '<div class="wp-ex-ja">' + esc(String(e && e.ja || '')) + '</div>' +
+                 '<div class="wp-ex-zh">' + esc(String(e && e.zh || '')) + '</div>';
+        }).join('') + '</div>';
+      }
+      var grammarBtn = (_ctx && typeof _ctx.onGrammar === 'function')
+        ? '<button onclick="_epPhraseGrammar()" title="语法分析">📊 语法</button>' : '';
       pop.innerHTML =
         '<div class="wp-head"><span class="wp-word">' + esc(text) + '</span>' + phon +
         (reading ? '<button class="wp-speak" onclick="_epPhraseSpeak()" title="发音">🔊</button>' : '') + '</div>' +
-        '<div class="wp-def">' + (zh ? esc(zh) :
-          '<span style="color:#c66">' + esc(result.error || 'App 本地日语词典未命中') + '</span>') + '</div>' +
-        (result.source === 'pc-codex-cli'
-          ? '<div style="margin:-4px 12px 8px;color:#6f7e96;font-size:10.5px">电脑 ReaderPC · Codex CLI 句境释义' + (result.cached ? ' · 本地缓存' : '') + '</div>'
-          : result.source === 'local-jmdict'
-            ? '<div style="margin:-4px 12px 8px;color:#6f7e96;font-size:10.5px">App 本地中文词典</div>'
-          : result.source === 'ai-translate'
-            ? '<div style="margin:-4px 12px 8px;color:#6f7e96;font-size:10.5px">AI 释义（词典未收录）</div>' : '') +
+        inflectHtml +
+        '<div class="wp-def" onclick="_epPhraseExplain()" title="点开看 AI 完整讲解">' + (zh ? esc(zh) :
+          '<span style="color:#c66">' + esc(result.error || 'App 本地日语词典未命中') + '</span>') +
+        exHtml +
+        '<div class="wp-more">点这里展开完整字典 ▾</div></div>' +
         '<div class="wp-actions">' +
         '<button id="ep-phrase-fav-btn" class="' + (fav ? 'wp-anki' : '') + '" onclick="_epPhraseFav(this)">' +
         (fav ? '★ 已收藏' : '☆ 收藏为词组') + '</button>' +
-        '<button id="ep-phrase-master-btn" class="' + (_state.mastered ? 'wp-anki' : '') + '" onclick="_epPhraseMaster(this)" title="' + (_state.mastered ? '点击取消掌握（恢复词组下划线）' : '标记掌握 100（该词组不再标生词下划线）') + '">' +
+        '<button id="ep-phrase-master-btn" class="' + (_state.mastered ? 'wp-anki' : '') + '" onclick="_epPhraseMaster(this)" title="' + (_state.mastered ? '点击取消掌握' : '掌握度设为100%') + '">' +
         (_state.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
-        '<button onclick="_epPhraseExplain()" title="仅在你主动选择后使用 Pi 旧版服务">改用 Pi 旧版精释</button>' +
+        grammarBtn +
         '</div>';
       _position(pop, opts.rect);   // 内容定型后再夹一次进视口
     };
@@ -639,6 +673,8 @@ if (window.__bwPwaProviderOnly) return;
         render({
           zh: r.zh || '', reading: r.reading || '',
           accent: r.accent != null ? r.accent : null,
+          examples: Array.isArray(r.examples) ? r.examples : [],
+          inflect: r.inflect || null, lemma: r.lemma || '',
           source: r.source || ''
         });
         return;

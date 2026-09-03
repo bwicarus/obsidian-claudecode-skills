@@ -139,7 +139,7 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
                     requestID: input.requestID,
                     action: input.action,
                     code: "BW_NATIVE_SYNC_NETWORK",
-                    message: "无法连接 Pi 同步服务",
+                    message: "无法连接服务器同步服务",
                     retryable: true
                 ), nil)
             }
@@ -246,7 +246,7 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
               ) != nil else {
             throw BridgeError(
                 "BW_NATIVE_SYNC_BOOTSTRAP_RESPONSE",
-                "Pi 返回了无效的同步身份",
+                "服务器返回了无效的同步身份",
                 false
             )
         }
@@ -343,7 +343,7 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
               result["nativeBootstrapToken"] == nil else {
             throw BridgeError(
                 "BW_NATIVE_SYNC_RESPONSE",
-                "Pi 返回了无效的同步结果",
+                "服务器返回了无效的同步结果",
                 false
             )
         }
@@ -426,7 +426,7 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
               expiresAt.doubleValue > Date().timeIntervalSince1970 else {
             throw BridgeError(
                 "BW_NATIVE_SYNC_OWNER_RESPONSE",
-                "Pi 返回了无效的 owner lease",
+                "服务器返回了无效的 owner lease",
                 false
             )
         }
@@ -471,7 +471,7 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
         guard let http = response as? HTTPURLResponse,
               responseData.count <= Self.maximumResponseBytes else {
             throw BridgeError(
-                "BW_NATIVE_SYNC_RESPONSE", "Pi 同步响应无效或过大", false
+                "BW_NATIVE_SYNC_RESPONSE", "服务器同步响应无效或过大", false
             )
         }
         let decoded = try? JSONSerialization.jsonObject(with: responseData)
@@ -488,15 +488,15 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
             throw BridgeError(
                 code,
                 code == "BW_PI_AUTH_REQUIRED"
-                    ? "Pi 登录状态无效，请先在 App 中登录"
-                    : "Pi 同步服务拒绝请求",
+                    ? "服务器登录状态无效，请先在 App 中登录"
+                    : "服务器同步服务拒绝请求",
                 http.statusCode == 408 || http.statusCode == 429
                     || http.statusCode >= 500
             )
         }
         guard let value else {
             throw BridgeError(
-                "BW_NATIVE_SYNC_RESPONSE", "Pi 同步响应不是 JSON", false
+                "BW_NATIVE_SYNC_RESPONSE", "服务器同步响应不是 JSON", false
             )
         }
         return value

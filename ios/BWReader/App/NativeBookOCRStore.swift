@@ -1308,7 +1308,7 @@ actor NativeBookOCRSidecarStore {
         }
         guard executor != "pi"
             || ["pi-default-v1", "pi-default-v2", "pi-default-v3", "pi-default-v4", "pi-default-v5"].contains(processingProfile) else {
-            throw NativeBookOCRError.invalidAttachment("Pi 预处理配置无效")
+            throw NativeBookOCRError.invalidAttachment("服务器预处理配置无效")
         }
         let targetLayer: NativeBookOCRLayerID = executor == "pc" ? .pc : .pi
         let targetSource: NativeBookOCRSource = executor == "pc" ? .pc : .pi
@@ -1885,7 +1885,7 @@ actor NativeBookOCRSidecarStore {
             state: latex?.isEmpty == false ? .ready : .failed,
             latex: latex?.isEmpty == false ? latex : nil,
             multiline: value.multiline,
-            error: latex?.isEmpty == false ? nil : "Pi 未能识别该公式"
+            error: latex?.isEmpty == false ? nil : "服务器未能识别该公式"
         )
     }
 

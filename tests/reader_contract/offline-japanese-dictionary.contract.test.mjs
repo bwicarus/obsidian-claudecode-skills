@@ -238,7 +238,7 @@ test("lookup code ships everywhere but dictionary bytes ship nowhere", () => {
   assert.equal((htmlReader.match(/"pdf\/rc-offline-dictionary\.js"/g) || []).length, 1);
 });
 
-test("词典留在设备上：可与同包 Safari 扩展共享，但不进 iCloud / Pi / 设置同步", () => {
+test("词典留在设备上：可与同包 Safari 扩展共享，但不进 iCloud / 服务器 / 设置同步", () => {
   const core = read("ios/BWReader/Shared/ReaderOfflineDictionaryCore.swift");
   const installer = read("ios/BWReader/App/ReaderOfflineDictionary.swift");
   const localServer = read("ios/BWReader/App/ReaderLocalRuntimeServer.swift");
@@ -275,7 +275,7 @@ test("词典留在设备上：可与同包 Safari 扩展共享，但不进 iClou
   // 实现变了而话没变 = 对用户撒谎；话变了而实现没变 = 白白削弱承诺。
   assert.match(settings, /下载离线日语词典/);
   for (const source of [settings, webSettings]) {
-    assert.match(source, /不进入书籍附件、Pi 或设置同步/);
+    assert.match(source, /不进入书籍附件、服务器或设置同步/);
     assert.match(source, /Safari 扩展共享/);
     // 旧话不能残留 —— 它现在是错的
     assert.doesNotMatch(source, /不进入书籍附件、Pi、Safari 扩展或设置同步/);
@@ -318,5 +318,5 @@ test("Japanese UI queries the App dictionary first and restores the old explicit
   assert.match(nativeRuntime, /dictionaryFallbackCache/);
   assert.match(protocol, /HandleDictionaryLookupAsync/);
   assert.match(wordpop, /暂无词典释义（可能是人名\/专有名词），已请 AI 讲解/);
-  assert.match(phrasepop, /改用 Pi 旧版精释/);
+  assert.match(phrasepop, /点这里展开完整字典/);   // 2026-09-03 词组框与单词框统一版式:展开完整字典 = 原「改用旧版精释」
 });

@@ -79,7 +79,7 @@ test("both-changed state is retained locally and not imported", () => {
   assert.match(PYTHON,
     /"conflict", "keep", "local and Pi both changed since baseline"/);
   assert.match(SWIFT,
-    /classification = \.conflict[\s\S]*action = \.keep[\s\S]*本机与 Pi 都在基线后发生变化/);
+    /classification = \.conflict[\s\S]*action = \.keep[\s\S]*本机与服务器都在基线后发生变化/);
   assert.match(SWIFT,
     /decision\.action == \.import \? decision\.name : nil/);
   assert.match(SWIFT,

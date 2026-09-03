@@ -231,10 +231,10 @@ struct ReaderLocalLibraryView: View {
                     value: library.folderName.isEmpty ? "已授权文件夹" : library.folderName
                 )
                 LabeledContent("本机", value: "\(library.books.count) 本")
-                LabeledContent("Pi", value: "\(remote.books.count) 本")
+                LabeledContent("我的服务器", value: "\(remote.books.count) 本")
             }
 
-            Text("下载只写入你选择的文件夹，不覆盖同名文件；上传按内容去重，也不会删除本机或 Pi 上的书。")
+            Text("下载只写入你选择的文件夹，不覆盖同名文件；上传按内容去重，也不会删除本机或服务器上的书。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -243,7 +243,7 @@ struct ReaderLocalLibraryView: View {
             Section {
                 HStack {
                     ProgressView()
-                    Text(library.isScanning ? "正在扫描本机书籍…" : "正在读取 Pi 书库…")
+                    Text(library.isScanning ? "正在扫描本机书籍…" : "正在读取服务器书库…")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -261,7 +261,7 @@ struct ReaderLocalLibraryView: View {
         } else if books.isEmpty, selectedSource != .all {
             placeholder(
                 title: searchText.isEmpty ? "本机还没有 PDF 或 EPUB" : "没有匹配的本机书籍",
-                detail: "把书放入当前文件夹后点刷新，或从 Pi 书库下载。"
+                detail: "把书放入当前文件夹后点刷新，或从服务器书库下载。"
             )
         } else if !books.isEmpty {
             Section(selectedSource == .all ? "本机与已同步" : "本机书籍") {
@@ -392,13 +392,13 @@ struct ReaderLocalLibraryView: View {
            !remote.isRefreshing,
            selectedSource == .pi {
             placeholder(
-                title: "Pi 书库为空",
+                title: "服务器书库为空",
                 detail: "上传一本本机书后，它会出现在这里。"
             )
         } else if books.isEmpty, !searchText.isEmpty, selectedSource == .pi {
-            placeholder(title: "没有匹配的 Pi 书籍", detail: "尝试更换搜索词。")
+            placeholder(title: "没有匹配的服务器书籍", detail: "尝试更换搜索词。")
         } else if !books.isEmpty {
-            Section(selectedSource == .all ? "仅在 Pi" : "Pi 书库") {
+            Section(selectedSource == .all ? "仅在服务器" : "服务器书库") {
                 ForEach(books) { book in
                     remoteBookRow(book)
                 }
@@ -637,7 +637,7 @@ struct ReaderLocalLibraryView: View {
                 Label("文字、分词与公式", systemImage: "text.viewfinder")
             }
         } else {
-            Text("EPUB 当前不支持 Pi 的 PDF 页图预处理；下载后仍按 EPUB 原文字层阅读。")
+            Text("EPUB 当前不支持服务器的 PDF 页图预处理；下载后仍按 EPUB 原文字层阅读。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -834,7 +834,7 @@ struct ReaderLocalLibraryView: View {
             }
             if remoteBook == nil {
                 // 整段藏起来等于用户看不出这个功能存在 —— 说清为什么是空的。
-                Text("这本书还没有上传到 Pi，服务器上没有预处理结果。")
+                Text("这本书还没有上传到服务器，服务器上没有预处理结果。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -1059,7 +1059,7 @@ struct ReaderLocalLibraryView: View {
         localBook: ReaderLocalBookRecord?
     ) -> some View {
         HStack {
-            Label("Pi / PC 预处理", systemImage: "server.rack")
+            Label("服务器 / PC 预处理", systemImage: "server.rack")
                 .font(.caption.weight(.semibold))
             Spacer()
             if let remoteBook,
@@ -1079,7 +1079,7 @@ struct ReaderLocalLibraryView: View {
             } else if let remoteBook,
                       let adoption = piOCR.adoption(for: remoteBook),
                       adoption.available {
-                Text("已有 Pi 结果，可采用")
+                Text("已有服务器结果，可采用")
                     .font(.caption2)
                     .foregroundStyle(.tint)
             } else {
@@ -1158,7 +1158,7 @@ struct ReaderLocalLibraryView: View {
                   let adoption = piOCR.adoption(for: remoteBook),
                   adoption.available {
             VStack(alignment: .leading, spacing: 4) {
-                Text("已找到覆盖 \(adoption.totalPages) 页的旧 Pi 文字与分词结果。")
+                Text("已找到覆盖 \(adoption.totalPages) 页的旧服务器文字与分词结果。")
                 if adoption.formula.state == "succeeded" {
                     Text("公式结果：已识别 \(adoption.formula.count) 处")
                 } else {
@@ -1168,7 +1168,7 @@ struct ReaderLocalLibraryView: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
             HStack {
-                Button("采用现有 Pi 结果") {
+                Button("采用现有服务器结果") {
                     Task {
                         await adoptExistingPiResult(
                             book: remoteBook,
@@ -1282,7 +1282,7 @@ struct ReaderLocalLibraryView: View {
         localBook: ReaderLocalBookRecord?,
         executor: String
     ) -> some View {
-        Menu(executor == "pc" ? "PC 预处理" : "Pi 预处理") {
+        Menu(executor == "pc" ? "PC 预处理" : "服务器预处理") {
             Button("通用 PDF（Vision）") {
                 Task {
                     await startPiOCR(
@@ -1652,7 +1652,7 @@ struct ReaderLocalLibraryView: View {
                     cookies: cookies
                 )
             } catch {
-                ocrErrorMessage = "书籍已下载，但 Pi 预处理附件未导入：\(error.localizedDescription)"
+                ocrErrorMessage = "书籍已下载，但服务器预处理附件未导入：\(error.localizedDescription)"
             }
         }
         let userStateTask = Task { @MainActor in
@@ -1793,7 +1793,7 @@ struct ReaderLocalLibraryView: View {
         }
         guard let target else {
             ocrErrorMessage = remote.errorMessage
-                ?? "无法把这本书准备到 Pi 书库，请稍后重试"
+                ?? "无法把这本书准备到服务器书库，请稍后重试"
             return
         }
         if let localDigest,
@@ -2025,7 +2025,7 @@ struct ReaderLocalLibraryView: View {
     }
 
     private func executorTitle(_ executor: String?) -> String {
-        executor == "pc" ? "PC" : "Pi"
+        executor == "pc" ? "PC" : "我的服务器"
     }
 
     private func nativeStateTitle(_ state: NativeBookOCRJobState) -> String {

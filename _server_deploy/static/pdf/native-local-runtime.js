@@ -37,6 +37,9 @@
     'application/vnd.bw-reader.card-replacement+json;version=1';
   var LOCAL_NOTES_CHANGED_CONTRACT = 'reader-local-notes-changed/1';
   var LOCAL_NOTES_CHANGED_EVENT = 'bw:native-document-notes-changed';
+  // 词→卡绑定变化(用户 2026-09-03 重做):由便签写入派生,内容永远现读、没有副本
+  var WORD_BINDINGS_CHANGED_CONTRACT = 'reader-word-bindings-changed/1';
+  var WORD_BINDINGS_CHANGED_EVENT = 'bw:native-word-bindings-changed';
   var NATIVE_INTERFACE_CONTRACT = 'reader-native-interface-manifest/2';
   var NATIVE_INTERFACE_OWNERS = new Set(['local', 'pi', 'native']);
   var NATIVE_INTERFACE_MATCHES = new Set(['exact', 'segment']);
@@ -811,7 +814,7 @@
     function attempt() {
       attempts += 1;
       var relatedKinds = kind === 'document-notes-legacy'
-        ? ['document-notes-legacy', 'card-placements', 'entity-references']
+        ? ['document-notes-legacy', 'card-placements', 'entity-references', 'word-bindings']
         : [kind];
       return Promise.all(relatedKinds.map(function (relatedKind) {
         // 前置读与随后的 batch 用同一个上界：这条链上任何一环无界，整条就仍会挂死。
@@ -833,10 +836,13 @@
           var notes = Array.isArray(outcome.payload) ? clone(outcome.payload) : [];
           var placements = deriveCardPlacements(notes);
           var references = deriveEntityReferences(placements);
+          var bindingsBefore = deriveWordBindings(records[0].payload);
+          var bindings = deriveWordBindings(notes);
           mutations = [
             stateRecordMutation(kind, notes, suffix + '-notes', records[0].rev),
             stateRecordMutation('card-placements', placements, suffix + '-cards', records[1].rev),
-            stateRecordMutation('entity-references', references, suffix + '-entities', records[2].rev)
+            stateRecordMutation('entity-references', references, suffix + '-entities', records[2].rev),
+            stateRecordMutation('word-bindings', bindings, suffix + '-words', records[3].rev)
           ];
         } else {
           mutations = [stateRecordMutation(
@@ -845,9 +851,10 @@
         }
         return stores.document.batch(mutations, batchOptions).then(function () {
           if (kind === 'document-notes-legacy') {
-            // 只在 notes + 两个派生索引的事务确实提交后发信号。删除失败或 CAS
+            // 只在 notes + 三个派生索引的事务确实提交后发信号。删除失败或 CAS
             // 仍未知时不发，旧 page.context 因而继续保留，不能提前把 CARD 擦掉。
             announceLocalNotesChanged('mutation');
+            announceWordBindingsChanged(bindingsBefore, bindings, 'mutation');
           }
           return clone(outcome.value);
         });
@@ -1952,18 +1959,192 @@
     });
   }
 
+  // ── 词 → 卡片 反向索引(用户 2026-09-03 拍板的重做)────────────────────
+  // 卡片内容只在便签仓库里;锁定只是便签 html.bind 上的一个字段。这里从便签派生
+  // 「词键 → [cid…]」标记,与 notes/placements/references **同一批事务**写入,所以
+  // 永远不会有过期副本;显示时内容一律从便签现读(liveWordCards)。
+  function wordBindingKey(text) {
+    return String(text == null ? '' : text).replace(/[\s\u3000]+/g, '').toLowerCase();
+  }
+  function deriveWordBindings(notes) {
+    var out = [];
+    (Array.isArray(notes) ? notes : []).forEach(function (note, index) {
+      var h = note && note.html;
+      if (!h || typeof h !== 'object') return;
+      var bind = h.bind && typeof h.bind === 'object' ? h.bind : null;
+      if (!bind || bind.kind !== 'page-chars') return;
+      var key = wordBindingKey(bind.text);
+      var cid = String(h.cid || '');
+      if (!key || key.length > 64 || !cid) return;
+      out.push({
+        cid: cid, noteId: String(note.id || ''), key: key,
+        text: String(bind.text || '').slice(0, 64),
+        page: parseInt(bind.page, 10) || 0,
+        label: String(h.label || '').slice(0, 120),
+        at: Number(note.created) || 0, order: index
+      });
+    });
+    return out;
+  }
+  function dispatchWordBindingsChanged(keys, changes, source) {
+    if (!keys.length && !changes.length) return;
+    try {
+      root.dispatchEvent(new CustomEvent(WORD_BINDINGS_CHANGED_EVENT, {
+        detail: {
+          contract: WORD_BINDINGS_CHANGED_CONTRACT, file: localFileRef(),
+          keys: keys.slice(), changes: changes.slice(), source: String(source || 'write')
+        }
+      }));
+    } catch (_) {}
+  }
+  function announceWordBindingsChanged(before, after, source) {
+    var bmap = {}, amap = {};
+    (before || []).forEach(function (b) { bmap[b.cid] = b.key; });
+    (after || []).forEach(function (b) { amap[b.cid] = b.key; });
+    var changes = [], keys = {}, seen = {};
+    Object.keys(bmap).concat(Object.keys(amap)).forEach(function (cid) {
+      if (seen[cid] || bmap[cid] === amap[cid]) return;
+      seen[cid] = true;
+      changes.push({ cid: cid, before: bmap[cid] || '', after: amap[cid] || '' });
+      if (bmap[cid]) keys[bmap[cid]] = true;
+      if (amap[cid]) keys[amap[cid]] = true;
+    });
+    dispatchWordBindingsChanged(Object.keys(keys), changes, source);
+  }
+  // 跨书写回便签本体(词卡整理用):四条派生记录同批,与 mutateDocumentStateNow 同形
+  function writeNotesAndIndexesFor(docId, notes, ifRev, source) {
+    var placements = deriveCardPlacements(notes);
+    var references = deriveEntityReferences(placements);
+    var bindings = deriveWordBindings(notes);
+    var suffix = randomHex(12);
+    function rec(kind, payload, tag, rev) {
+      return {
+        operation: 'put', collection: 'native-' + kind,
+        value: { id: docId + ':' + kind, documentId: docId, payload: clone(payload), updatedAt: Date.now() },
+        options: { mutationId: 'native-' + kind + '-' + suffix + tag, ifRev: rev == null ? undefined : rev }
+      };
+    }
+    return stores.document.batch([
+      rec('document-notes-legacy', notes, '-notes', ifRev),
+      rec('card-placements', placements, '-cards'),
+      rec('entity-references', references, '-entities'),
+      rec('word-bindings', bindings, '-words')
+    ]).then(function () {
+      if (docId === bookId) announceLocalNotesChanged(source || 'replace');
+    });
+  }
+  function listAllWordBindings() {
+    return stores.document.list('native-word-bindings', { limit: 1000, orderBy: 'id' }).then(function (records) {
+      var out = [];
+      (Array.isArray(records) ? records : []).forEach(function (record) {
+        var value = record && record.value;
+        var docId = value ? String(value.documentId || '') : '';
+        if (!docId) return;
+        (Array.isArray(value.payload) ? value.payload : []).forEach(function (b) {
+          if (b && b.cid && b.key) out.push(Object.assign({ docId: docId }, b));
+        });
+      });
+      return out;
+    });
+  }
+  // 一次性迁移:老数据没有 word-bindings 记录 → 扫全部便签记录补齐;之后每次便签写入自行维护
+  function ensureWordBindingsRebuilt() {
+    return readDeviceState('word-bindings-rebuilt', null).then(function (flag) {
+      if (flag && flag.v === 1) return null;
+      return stores.document.list('native-document-notes-legacy', { limit: 1000, orderBy: 'id' }).then(function (records) {
+        var mutations = [];
+        (Array.isArray(records) ? records : []).forEach(function (record) {
+          var value = record && record.value;
+          var docId = value ? String(value.documentId || '') : '';
+          if (!docId) return;
+          mutations.push({
+            operation: 'put', collection: 'native-word-bindings',
+            value: { id: docId + ':word-bindings', documentId: docId, payload: deriveWordBindings(value.payload), updatedAt: Date.now() },
+            options: { mutationId: 'native-word-bindings-rebuild-' + randomHex(12) }
+          });
+        });
+        return mutations.length ? stores.document.batch(mutations) : null;
+      }).then(function () {
+        return mutateDeviceState('word-bindings-rebuilt', null, function () {
+          return localStateMutationResult({ v: 1, at: Date.now() }, null);
+        });
+      });
+    });
+  }
+  // refs 分书读便签,内容现取;便签没了/键不再匹配就当它不存在(索引自愈)
+  function liveWordCards(refs) {
+    var byDoc = {};
+    refs.forEach(function (r) { (byDoc[r.docId] = byDoc[r.docId] || []).push(r); });
+    return Promise.all(Object.keys(byDoc).map(function (docId) {
+      return stores.document.get('native-document-notes-legacy', docId + ':document-notes-legacy').then(function (record) {
+        var notes = record && record.value && Array.isArray(record.value.payload) ? record.value.payload : [];
+        var byCid = {};
+        notes.forEach(function (n) { var h = n && n.html; if (h && h.cid) byCid[String(h.cid)] = h; });
+        return byDoc[docId].map(function (r) {
+          var h = byCid[r.cid];
+          if (!h) return null;
+          var bind = h.bind && typeof h.bind === 'object' ? h.bind : null;
+          if (!bind || bind.kind !== 'page-chars' || wordBindingKey(bind.text) !== r.key) return null;
+          var content = String(h.content || '');
+          if (!content) return null;
+          return {
+            cid: r.cid, doc: 'localbook:' + docId, page: r.page || 0,
+            label: String(h.label || r.label || ''), content: content,
+            at: r.at || 0, order: r.order || 0
+          };
+        }).filter(Boolean);
+      }, function () { return []; });
+    })).then(function (groups) {
+      var out = [].concat.apply([], groups);
+      out.sort(function (a, b) { return (a.at - b.at) || (a.order - b.order); });
+      return out;
+    });
+  }
+  // 分书把内容写回便签本体([{cid, docId, content}]),返回改动张数
+  function applyWordCardContents(items) {
+    var byDoc = {};
+    items.forEach(function (it) { (byDoc[it.docId] = byDoc[it.docId] || []).push(it); });
+    var total = 0;
+    return Object.keys(byDoc).reduce(function (chain, docId) {
+      return chain.then(function () {
+        return stores.document.get('native-document-notes-legacy', docId + ':document-notes-legacy').then(function (record) {
+          var notes = record && record.value && Array.isArray(record.value.payload) ? clone(record.value.payload) : [];
+          var want = {};
+          byDoc[docId].forEach(function (it) { want[it.cid] = it.content; });
+          var changed = 0;
+          notes.forEach(function (n) {
+            var h = n && n.html;
+            if (!h || !h.cid || !Object.prototype.hasOwnProperty.call(want, String(h.cid))) return;
+            if (String(h.content || '') === want[h.cid]) return;
+            h.content = want[h.cid]; n.updated = nowSeconds(); changed += 1;
+          });
+          if (!changed) return null;
+          total += changed;
+          return writeNotesAndIndexesFor(docId, notes, record ? record.rev : undefined, 'consolidate');
+        });
+      });
+    }, Promise.resolve()).then(function () { return total; });
+  }
+
   function writeNotesAndIndexes(payload) {
     var notes = Array.isArray(payload) ? clone(payload) : [];
     var placements = deriveCardPlacements(notes);
     var references = deriveEntityReferences(placements);
+    var bindings = deriveWordBindings(notes);
     var suffix = randomHex(12);
-    return stores.document.batch([
-      stateRecordMutation('document-notes-legacy', notes, suffix + '-notes'),
-      stateRecordMutation('card-placements', placements, suffix + '-cards'),
-      stateRecordMutation('entity-references', references, suffix + '-entities')
-    ]).then(function () {
-      announceLocalNotesChanged('replace');
-      return clone(notes);
+    return stores.document.get('native-word-bindings', stateId('word-bindings')).then(function (prior) {
+      return prior && prior.value && Array.isArray(prior.value.payload) ? prior.value.payload : [];
+    }, function () { return []; }).then(function (before) {
+      return stores.document.batch([
+        stateRecordMutation('document-notes-legacy', notes, suffix + '-notes'),
+        stateRecordMutation('card-placements', placements, suffix + '-cards'),
+        stateRecordMutation('entity-references', references, suffix + '-entities'),
+        stateRecordMutation('word-bindings', bindings, suffix + '-words')
+      ]).then(function () {
+        announceLocalNotesChanged('replace');
+        announceWordBindingsChanged(before, bindings, 'replace');
+        return clone(notes);
+      });
     });
   }
 
@@ -2923,7 +3104,7 @@
       state: 'unconfirmed',
       confirmed: false,
       code: failure.code || fallbackCode,
-      error: String(failure.message || 'Pi 兼容链路未确认').slice(0, 400)
+      error: String(failure.message || '服务器兼容链路未确认').slice(0, 400)
     };
   }
 
@@ -3008,7 +3189,7 @@
     if (!payload || payload.ok !== true || typeof payload.enabled !== 'boolean' ||
         !LOCAL_CONTEXT_SYNC_MODES.has(payload.deliveryMode)) {
       throw new RuntimeError(
-        'Pi 上下文同步配置无效', 'BW_NATIVE_CONTEXT_SYNC_PI_RESPONSE'
+        '服务器上下文同步配置无效', 'BW_NATIVE_CONTEXT_SYNC_PI_RESPONSE'
       );
     }
     return {
@@ -5035,7 +5216,7 @@
         );
         if (translationRoute.owner !== 'pi') {
           throw outgoingRequestError(
-            '页面翻译服务未由 Pi 提供', code + '_ROUTE', 503
+            '页面翻译服务未由服务器提供', code + '_ROUTE', 503
           );
         }
         return nativePiJSON(translationURL, {
@@ -5044,7 +5225,7 @@
           if (!translated || !Array.isArray(translated.translations) ||
               translated.translations.length !== sentences.length) {
             throw outgoingRequestError(
-              'Pi 页面翻译响应无效', code + '_RESPONSE', 502
+              '服务器页面翻译响应无效', code + '_RESPONSE', 502
             );
           }
           translated.translations.forEach(function (value, index) {
@@ -5057,7 +5238,7 @@
         }).catch(function (error) {
           if (error && error.httpStatus) throw error;
           throw outgoingRequestError(
-            String(error && error.message || error || 'Pi 页面翻译不可用'),
+            String(error && error.message || error || '服务器页面翻译不可用'),
             code + '_REMOTE', 503
           );
         });
@@ -6440,56 +6621,34 @@
     return value;
   }
 
-  // ── 词卡关联索引（用户 2026-08-31：词锚卡 × 字典）────────────────
-  // 按 lemma 键 —— 数据主体归字典域，不按书/页组织。卡内容存**显示副本**
-  // （词锚卡由 AI 建、基本不再编辑；跨书取各自便签仓太重）；字典内容
-  // 不进索引 —— 显示时实时拉，词条升级组合卡自动新。
+  // ── 词卡关联索引（用户 2026-08-31 词锚卡 × 字典;2026-09-03 重做）────────
+  // 现在只是 word-bindings 派生记录的查询门面:按词键(lemma / word 任一命中)
+  // 或 cid 找到标记,内容从各书便签**现读**。POST 仅为兼容旧调用方保留,不再存副本。
   function localWordCardIndex(input, init, url, method) {
     var code = 'BW_LOCAL_WORD_CARD_INDEX';
     if (method === 'GET') {
       return localJSONRoute(function () {
-        strictQuery(url, ['lemma', 'cid'], [], code);
-        var lemma = String(url.searchParams.get('lemma') || '')
-          .trim().toLowerCase();
+        strictQuery(url, ['lemma', 'cid', 'word'], [], code);
+        var lemma = wordBindingKey(url.searchParams.get('lemma'));
+        var word = wordBindingKey(url.searchParams.get('word'));
         var cid = String(url.searchParams.get('cid') || '').trim();
-        if ((lemma ? 1 : 0) + (cid ? 1 : 0) !== 1) {
-          throw outgoingRequestError('lemma 与 cid 二选一', code, 400);
-        }
-        if (lemma.length > 64 || cid.length > 64) {
+        if (cid && (lemma || word)) throw outgoingRequestError('lemma 与 cid 二选一', code, 400);
+        if (!cid && !lemma && !word) throw outgoingRequestError('lemma 与 cid 二选一', code, 400);
+        if (lemma.length > 64 || word.length > 64 || cid.length > 64) {
           throw outgoingRequestError('查询键无效', code, 400);
         }
-        return readDeviceState('word-card-index', {}).then(function (map) {
-          if (!map || typeof map !== 'object' || Array.isArray(map)) {
-            map = {};
-          }
-          if (lemma) {
-            var entry = map[lemma];
+        return ensureWordBindingsRebuilt().then(listAllWordBindings).then(function (all) {
+          var refs = cid
+            ? all.filter(function (r) { return r.cid === cid; })
+            : all.filter(function (r) { return r.key === lemma || (word && r.key === word); });
+          return liveWordCards(refs).then(function (cards) {
             return {
-              ok: true, lemma: lemma,
-              consolidatedAt:
-                (entry && entry.consolidatedAt) || 0,
-              cards: (entry && Array.isArray(entry.cards))
-                ? entry.cards : []
+              ok: true,
+              lemma: cid ? (refs[0] ? refs[0].key : '') : (lemma || word),
+              consolidatedAt: 0,
+              cards: cards
             };
-          }
-          // 按 cid 反查（开卷对账用）：遍历上限 2000 词，开卡一次可接受。
-          var found = null, foundLemma = '';
-          Object.keys(map).some(function (key) {
-            var cards = (map[key] && map[key].cards) || [];
-            for (var i = 0; i < cards.length; i++) {
-              if (cards[i] && cards[i].cid === cid) {
-                found = cards[i]; foundLemma = key;
-                return true;
-              }
-            }
-            return false;
           });
-          return {
-            ok: true, lemma: foundLemma,
-            consolidatedAt:
-              (foundLemma && map[foundLemma].consolidatedAt) || 0,
-            cards: found ? [found] : []
-          };
         });
       }, code);
     }
@@ -6497,58 +6656,9 @@
       strictQuery(url, [], [], code);
       return requestObject(
         input, init, ['lemma', 'card'], ['lemma', 'card'], code, 256 * 1024
-      ).then(function (body) {
-        var lemma = String(body.lemma || '').trim().toLowerCase();
-        if (!lemma || lemma.length > 64) {
-          throw outgoingRequestError('lemma 无效', code, 400);
-        }
-        var card = body.card;
-        if (!card || typeof card !== 'object' || Array.isArray(card)) {
-          throw outgoingRequestError('card 无效', code, 400);
-        }
-        var cid = String(card.cid || '').slice(0, 64);
-        var doc = String(card.doc || '').slice(0, 200);
-        var label = String(card.label || '').slice(0, 120);
-        var content = String(card.content || '');
-        var page = parseInt(card.page, 10);
-        if (!Number.isFinite(page) || page < 0) page = 0;
-        if (!cid || !content || content.length > 64 * 1024) {
-          throw outgoingRequestError('card 字段无效', code, 400);
-        }
-        var at = Date.now();
-        return mutateDeviceState('word-card-index', {}, function (map) {
-          if (!map || typeof map !== 'object' || Array.isArray(map)) map = {};
-          var entry = map[lemma];
-          var cards = (entry && Array.isArray(entry.cards)) ? entry.cards : [];
-          cards = cards.filter(function (one) {
-            return one && one.cid !== cid;
-          });
-          // 按加入时间正序（用户 2026-08-31：多卡按时间顺序显示），
-          // 超限裁最旧的。
-          cards.push(
-            { cid: cid, doc: doc, page: page, label: label,
-              content: content, at: at });
-          if (cards.length > 8) cards = cards.slice(-8);
-          map[lemma] = {
-            cards: cards,
-            consolidatedAt: (entry && entry.consolidatedAt) || 0,
-            prev: (entry && entry.prev) || null
-          };
-          var keys = Object.keys(map);
-          if (keys.length > 2000) {
-            // 按最新卡时间裁最旧的词 —— 上限防膨胀，不是业务语义。
-            keys.sort(function (a, b) {
-              var av = ((map[a].cards && map[a].cards[0]) || {}).at || 0;
-              var bv = ((map[b].cards && map[b].cards[0]) || {}).at || 0;
-              return av - bv;
-            });
-            keys.slice(0, keys.length - 2000).forEach(function (k) {
-              delete map[k];
-            });
-          }
-          return localStateMutationResult(
-            map, { ok: true, lemma: lemma, count: cards.length });
-        });
+      ).then(function () {
+        // 索引由便签写入自行维护;这里不再接受内容副本(旧扩展/vendor 调用方兼容)
+        return { ok: true, deprecated: true };
       });
     }, code);
   }
@@ -7877,7 +7987,7 @@
         mode: plan.operation,
         warnings: warnings.concat([
           '本机 OCR、分词与公式页已随 PDF 页号迁移；新插入页或改写页可按需重新预处理',
-          'Pi 页锚数据保留在旧内容摘要下；上传/同步新 PDF 前，联网页锚接口会拒绝旧绑定'
+          '服务器页锚数据保留在旧内容摘要下；上传/同步新 PDF 前，联网页锚接口会拒绝旧绑定'
         ]),
         mtime: committed.mtime
       };
@@ -9378,7 +9488,7 @@
   function binaryRequestPayload(buffer, contentType) {
     var bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
     if (bytes.byteLength > PI_GATEWAY_MAX_BODY_BYTES) {
-      throw new RuntimeError('Pi 请求过大', 'BW_PI_GATEWAY_LIMIT');
+      throw new RuntimeError('服务器请求过大', 'BW_PI_GATEWAY_LIMIT');
     }
     return {
       body: bytesToBase64(bytes), bodyEncoding: 'base64',
@@ -9388,7 +9498,7 @@
   function utf8RequestPayload(text, contentType) {
     text = String(text || '');
     if (new TextEncoder().encode(text).byteLength > PI_GATEWAY_MAX_BODY_BYTES) {
-      throw new RuntimeError('Pi 请求过大', 'BW_PI_GATEWAY_LIMIT');
+      throw new RuntimeError('服务器请求过大', 'BW_PI_GATEWAY_LIMIT');
     }
     return { body: text, bodyEncoding: 'utf8', contentType: String(contentType || '') };
   }
@@ -9399,7 +9509,7 @@
       var cloned;
       try { cloned = input.clone(); }
       catch (error) {
-        return Promise.reject(new RuntimeError('Pi 请求体已被读取', 'BW_PI_GATEWAY_BODY'));
+        return Promise.reject(new RuntimeError('服务器请求体已被读取', 'BW_PI_GATEWAY_BODY'));
       }
       contentType = contentType || String(cloned.headers.get('Content-Type') || '');
       return cloned.arrayBuffer().then(function (buffer) {
@@ -9432,18 +9542,18 @@
       try {
         generated = new Request(url.href, { method: method, headers: init && init.headers, body: body });
       } catch (error) {
-        return Promise.reject(new RuntimeError('Pi 表单请求体无效', 'BW_PI_GATEWAY_BODY'));
+        return Promise.reject(new RuntimeError('服务器表单请求体无效', 'BW_PI_GATEWAY_BODY'));
       }
       contentType = contentType || String(generated.headers.get('Content-Type') || '');
       return generated.arrayBuffer().then(function (buffer) {
         return binaryRequestPayload(buffer, contentType);
       });
     }
-    return Promise.reject(new RuntimeError('Pi 请求体不受支持', 'BW_PI_GATEWAY_BODY'));
+    return Promise.reject(new RuntimeError('服务器请求体不受支持', 'BW_PI_GATEWAY_BODY'));
   }
   function piProxyStreamURL(value) {
     if (typeof value !== 'string' || value.length > 512) {
-      throw new RuntimeError('Pi 流地址无效', 'BW_PI_GATEWAY_RESPONSE');
+      throw new RuntimeError('服务器流地址无效', 'BW_PI_GATEWAY_RESPONSE');
     }
     var shellMatch = String(root.location.pathname || '').match(
       /^(\/r\/[0-9a-f]{64})\/shells\/(?:pdf|epub)\.html$/
@@ -9451,12 +9561,12 @@
     var parsed;
     try { parsed = new URL(value); }
     catch (error) {
-      throw new RuntimeError('Pi 流地址无效', 'BW_PI_GATEWAY_RESPONSE');
+      throw new RuntimeError('服务器流地址无效', 'BW_PI_GATEWAY_RESPONSE');
     }
     if (!shellMatch || parsed.origin !== root.location.origin || parsed.username || parsed.password ||
         parsed.search || parsed.hash ||
         !new RegExp('^' + shellMatch[1] + '\\/pi-proxy\\/[0-9a-f]{32}$').test(parsed.pathname)) {
-      throw new RuntimeError('Pi 流地址越界', 'BW_PI_GATEWAY_RESPONSE');
+      throw new RuntimeError('服务器流地址越界', 'BW_PI_GATEWAY_RESPONSE');
     }
     return parsed.href;
   }
@@ -9471,12 +9581,12 @@
     var route;
     try {
       if (!url || url.origin !== root.location.origin) {
-        throw new RuntimeError('Pi API 来源无效', 'BW_PI_GATEWAY_ROUTE');
+        throw new RuntimeError('服务器 API 来源无效', 'BW_PI_GATEWAY_ROUTE');
       }
       route = declaredRoute || declaredNativeInterface(url.pathname, method);
       if (route.owner !== 'pi') {
         throw new RuntimeError(
-          '接口不由 Pi 网关认领：' + url.pathname,
+          '接口不由服务器网关认领：' + url.pathname,
           'BW_PI_GATEWAY_ROUTE'
         );
       }
@@ -9485,7 +9595,7 @@
     }
     var handler = root.webkit && root.webkit.messageHandlers && root.webkit.messageHandlers.bwNativePiGateway;
     if (!handler || typeof handler.postMessage !== 'function') {
-      return Promise.reject(new RuntimeError('Pi 网关不可用', 'BW_PI_GATEWAY_UNAVAILABLE'));
+      return Promise.reject(new RuntimeError('服务器网关不可用', 'BW_PI_GATEWAY_UNAVAILABLE'));
     }
     return requestBodyPayload(input, init, url, method).then(function (payload) {
       return handler.postMessage({
@@ -9501,7 +9611,7 @@
     }).then(function (result) {
       if (!result || result.contract !== 'reader-native-pi-response/2' ||
           Object.keys(result).sort().join(',') !== 'contract,streamURL') {
-        throw new RuntimeError('Pi 网关响应无效', 'BW_PI_GATEWAY_RESPONSE');
+        throw new RuntimeError('服务器网关响应无效', 'BW_PI_GATEWAY_RESPONSE');
       }
       return originalFetch(piProxyStreamURL(result.streamURL), {
         method: 'GET', credentials: 'omit', cache: 'no-store',
@@ -9511,7 +9621,7 @@
   }
 
   function nativePiFailure(error) {
-    var message = String(error && error.message || error || 'Pi 网关请求失败');
+    var message = String(error && error.message || error || '服务器网关请求失败');
     var embeddedCode = message.match(/\b(BW_PI_GATEWAY_[A-Z0-9_]+)\b/);
     var code = error && typeof error.code === 'string' && error.code
       ? error.code
@@ -12472,7 +12582,7 @@
         resolve({
           action: nextAction, metadata: null, metadataSynced: false,
           metadataStatus: 'metadata_pending',
-          metadataError: 'Pi 元数据在 ' + NATIVE_EPUB_METADATA_TIMEOUT_MS +
+          metadataError: '服务器元数据在 ' + NATIVE_EPUB_METADATA_TIMEOUT_MS +
             'ms 内未回应；本地写入已完成'
         });
       }, NATIVE_EPUB_METADATA_TIMEOUT_MS);
@@ -12492,7 +12602,7 @@
           action: nextAction, metadata: null, metadataSynced: false,
           metadataStatus: 'metadata_error',
           metadataError: String(
-            metadataError && metadataError.message || metadataError || 'Pi 元数据未同步'
+            metadataError && metadataError.message || metadataError || '服务器元数据未同步'
           ).slice(0, 500)
         });
       });
@@ -12615,7 +12725,7 @@
             metadata_pending: true,
             actions: clone(body.actions || []),
             warning: String(
-              metadataError && metadataError.message || metadataError || 'Pi 元数据未同步'
+              metadataError && metadataError.message || metadataError || '服务器元数据未同步'
             ).slice(0, 500)
           });
         });
@@ -12899,7 +13009,7 @@
       return Promise.resolve({
         status: 501,
         code: 'BW_NATIVE_SYNC_BATCH_OWNER',
-        error: '同步子请求不属于本地或 Pi'
+        error: '同步子请求不属于本地或服务器'
       });
     }
     var headers = {
@@ -14430,12 +14540,11 @@
   }
 
   /// 词卡整理（用户 2026-08-31）：把一个词名下所有绑定卡统一为同一内容。
-  /// 索引是词典入口的显示源 —— 这里改完，词典处立即统一；各原书里的卡
-  /// 实体由开卷对账跟上（与 pending-bind「等页归位」同一哲学）。
-  /// 撤销：整理前把每张卡旧内容存 prev（单层），undo:true 恢复。
+  /// 2026-09-03 重做:直接写回各书里的便签本体(同批派生索引),不再经索引副本中转;
+  /// 撤销:整理前把每张卡旧内容存 word-card-consolidations(单层),undo:true 恢复。
   function nativeReaderWordCardsConsolidate(input) {
     input = (input && typeof input === 'object') ? input : {};
-    var lemma = String(input.lemma || '').trim().toLowerCase();
+    var lemma = wordBindingKey(input.lemma);
     var content = typeof input.content === 'string' ? input.content : null;
     var undo = input.undo === true;
     if (!lemma || lemma.length > 64 || (content === null && !undo) ||
@@ -14445,56 +14554,43 @@
         '词卡整理参数无效', 'BW_NATIVE_WORD_CARDS_ARGS'
       ));
     }
-    return bootPromise.then(function () {
-      return mutateDeviceState('word-card-index', {}, function (map) {
-        if (!map || typeof map !== 'object' || Array.isArray(map)) map = {};
-        var entry = map[lemma];
-        var cards = (entry && Array.isArray(entry.cards)) ? entry.cards : [];
-        if (undo) {
-          var prev = entry && entry.prev;
+    return bootPromise.then(ensureWordBindingsRebuilt).then(listAllWordBindings).then(function (all) {
+      var refs = all.filter(function (r) { return r.key === lemma; });
+      if (undo) {
+        return readDeviceState('word-card-consolidations', {}).then(function (map) {
+          var prev = map && typeof map === 'object' ? map[lemma] : null;
           if (!prev || !Array.isArray(prev.cards)) {
             throw new RuntimeError(
               '这个词没有可撤销的整理记录', 'BW_NATIVE_WORD_CARDS_NO_UNDO'
             );
           }
-          var restoredCount = 0;
-          var byCid = {};
-          prev.cards.forEach(function (one) {
-            if (one && one.cid) byCid[one.cid] = one.content;
-          });
-          cards.forEach(function (one) {
-            if (one && Object.prototype.hasOwnProperty.call(byCid, one.cid)) {
-              one.content = byCid[one.cid];
-              restoredCount++;
-            }
-          });
-          map[lemma] = { cards: cards, consolidatedAt: prev.at || 0,
-            prev: null };
-          return localStateMutationResult(map, {
-            ok: true, lemma: lemma, restored: restoredCount
-          });
-        }
-        if (!cards.length) {
-          throw new RuntimeError(
-            '这个词没有绑定卡片', 'BW_NATIVE_WORD_CARDS_EMPTY'
-          );
-        }
-        var prevCards = cards.map(function (one) {
-          return { cid: one.cid, content: one.content };
+          return applyWordCardContents(prev.cards).then(function (restored) {
+            return mutateDeviceState('word-card-consolidations', {}, function (m) {
+              m = m && typeof m === 'object' && !Array.isArray(m) ? m : {};
+              delete m[lemma];
+              return localStateMutationResult(m, { ok: true, lemma: lemma, restored: restored });
+            });
+          }).then(function (value) { dispatchWordBindingsChanged([lemma], [], 'content'); return value; });
         });
-        var now = Date.now();
-        cards.forEach(function (one) { one.content = content; });
-        map[lemma] = {
-          cards: cards,
-          consolidatedAt: now,
-          prev: {
-            at: (entry && entry.consolidatedAt) || 0,
-            cards: prevCards
-          }
-        };
-        return localStateMutationResult(map, {
-          ok: true, lemma: lemma, updated: cards.length
+      }
+      if (!refs.length) {
+        throw new RuntimeError(
+          '这个词没有绑定卡片', 'BW_NATIVE_WORD_CARDS_EMPTY'
+        );
+      }
+      return liveWordCards(refs).then(function (cards) {
+        var prevCards = cards.map(function (c) {
+          return { cid: c.cid, docId: c.doc.slice('localbook:'.length), content: c.content };
         });
+        return applyWordCardContents(cards.map(function (c) {
+          return { cid: c.cid, docId: c.doc.slice('localbook:'.length), content: content };
+        })).then(function (updated) {
+          return mutateDeviceState('word-card-consolidations', {}, function (m) {
+            m = m && typeof m === 'object' && !Array.isArray(m) ? m : {};
+            m[lemma] = { at: Date.now(), cards: prevCards };
+            return localStateMutationResult(m, { ok: true, lemma: lemma, updated: updated });
+          });
+        }).then(function (value) { dispatchWordBindingsChanged([lemma], [], 'content'); return value; });
       });
     });
   }
@@ -14625,9 +14721,9 @@
     syncControl: function () { return syncControl; },
     syncNow: function (request) {
       if (!request || request.contract !== SYNC_REQUEST_CONTRACT || !/^[A-Za-z0-9._:-]{1,160}$/.test(String(request.requestId || ''))) {
-        return Promise.reject(new RuntimeError('Pi 同步请求无效', 'BW_NATIVE_SYNC_REQUEST'));
+        return Promise.reject(new RuntimeError('服务器同步请求无效', 'BW_NATIVE_SYNC_REQUEST'));
       }
-      if (!syncControl) return Promise.reject(new RuntimeError('Pi 同步尚未准备好', 'BW_NATIVE_SYNC_BOOTSTRAP_UNAVAILABLE'));
+      if (!syncControl) return Promise.reject(new RuntimeError('服务器同步尚未准备好', 'BW_NATIVE_SYNC_BOOTSTRAP_UNAVAILABLE'));
       return syncControl.syncNow(request);
     }
   };

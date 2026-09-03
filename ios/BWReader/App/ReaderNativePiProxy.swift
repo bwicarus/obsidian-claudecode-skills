@@ -452,19 +452,19 @@ enum ReaderNativePiProxyError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidUpstream:
-            return "BW_PI_PROXY_ROUTE：Pi 流式请求地址无效"
+            return "BW_PI_PROXY_ROUTE：服务器流式请求地址无效"
         case .staleScope:
             return "BW_PI_PROXY_SCOPE：阅读书籍已经切换，请重试"
         case .invalidTicket:
-            return "BW_PI_PROXY_TICKET：Pi 流式票据无效"
+            return "BW_PI_PROXY_TICKET：服务器流式票据无效"
         case .expiredTicket:
-            return "BW_PI_PROXY_TICKET：Pi 流式票据已使用或过期"
+            return "BW_PI_PROXY_TICKET：服务器流式票据已使用或过期"
         case .missingHTTPResponse:
-            return "BW_PI_PROXY_RESPONSE：Pi 没有返回 HTTP 响应"
+            return "BW_PI_PROXY_RESPONSE：服务器没有返回 HTTP 响应"
         case .cancelled:
-            return "BW_PI_PROXY_CANCELLED：Pi 流式请求已取消"
+            return "BW_PI_PROXY_CANCELLED：服务器流式请求已取消"
         case .unavailable:
-            return "BW_PI_PROXY_UNAVAILABLE：Pi 流式网关尚未准备好"
+            return "BW_PI_PROXY_UNAVAILABLE：服务器流式网关尚未准备好"
         }
     }
 }

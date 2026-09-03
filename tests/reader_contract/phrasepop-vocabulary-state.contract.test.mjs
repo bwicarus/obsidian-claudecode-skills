@@ -569,5 +569,5 @@ test("AI 也没给出结果时才如实说未命中，并保留手动 Pi 精释�
   assert.equal(results[0].zh, "");
   assert.equal(results[0].errorCode, "BW_OFFLINE_DICTIONARY_NO_MATCH");
   assert.match(harness.pop.innerHTML, /App 本地日语词典未命中/);
-  assert.match(harness.pop.innerHTML, /改用 Pi 旧版精释/);
+  assert.match(harness.pop.innerHTML, /点这里展开完整字典/);
 });

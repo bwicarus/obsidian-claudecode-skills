@@ -68,7 +68,7 @@ enum ReaderWatchVoiceTurn {
             switch self {
             case .notSignedIn:
                 // 手表上没有登录界面，所以这条必须说清该去哪儿修。
-                return "手机还没登录 Pi，先在 App 里登录一次"
+                return "手机还没登录服务器，先在 App 里登录一次"
             case .emptyAudio: return "没录到声音"
             case .transcribeFailed(let why): return "转写失败：" + why
             case .heardNothing: return "没听清，再说一次"

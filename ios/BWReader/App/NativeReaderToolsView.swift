@@ -309,11 +309,11 @@ struct NativeReaderToolsView: View {
             )
             .disabled(!textRecognition.isEnabled)
 
-            Text("开启后，PDF 下载到本机或首次打开时会启动这台设备的 Apple 预处理；不会上传书籍，也不会自动调用 Pi。")
+            Text("开启后，PDF 下载到本机或首次打开时会启动这台设备的 Apple 预处理；不会上传书籍，也不会自动调用服务器。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            Text("本机处理失败或效果不理想时，可在书库中为该书手动选择“Pi 预处理”。")
+            Text("本机处理失败或效果不理想时，可在书库中为该书手动选择“服务器预处理”。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -344,7 +344,7 @@ struct NativeReaderToolsView: View {
                 }
             }
 
-            Text("词典不随 App 安装包提供。只有你在这里主动下载后，数据才会进入本 App 与它自己的 Safari 扩展共享的容器（同一个 App 组，供扩展离线查词）；它已排除 iCloud 备份，不进入书籍附件、Pi 或设置同步。")
+            Text("词典不随 App 安装包提供。只有你在这里主动下载后，数据才会进入本 App 与它自己的 Safari 扩展共享的容器（同一个 App 组，供扩展离线查词）；它已排除 iCloud 备份，不进入书籍附件、服务器或设置同步。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -363,7 +363,7 @@ struct NativeReaderToolsView: View {
                 Label("本机书库", systemImage: "books.vertical")
             }
 
-            Text("本机书籍会直接离线打开；Pi 只用于显式同步与备份，不是打开本机书籍的前置条件，也不会自动覆盖或删除任何书籍。")
+            Text("本机书籍会直接离线打开；服务器只用于显式同步与备份，不是打开本机书籍的前置条件，也不会自动覆盖或删除任何书籍。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -436,7 +436,7 @@ struct NativeReaderToolsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("Key 只在这个 App 中输入并写入 Apple Keychain；Safari 扩展只由签名的原生进程共享读取。App 保存、启动通话、注入选区与发送笔迹/视口合成图都不连接 Pi；Key 也不会进入 Reader 网页、扩展 JavaScript、代码、构建产物或日志。")
+            Text("Key 只在这个 App 中输入并写入 Apple Keychain；Safari 扩展只由签名的原生进程共享读取。App 保存、启动通话、注入选区与发送笔迹/视口合成图都不连接服务器；Key 也不会进入 Reader 网页、扩展 JavaScript、代码、构建产物或日志。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -482,7 +482,7 @@ struct NativeReaderToolsView: View {
             Button {
                 presentsPiLogin = true
             } label: {
-                Label("登录或重新登录 Pi", systemImage: "person.crop.circle.badge.checkmark")
+                Label("登录或重新登录服务器", systemImage: "person.crop.circle.badge.checkmark")
             }
             .disabled(piSync.isRunning)
 
@@ -490,7 +490,7 @@ struct NativeReaderToolsView: View {
                 Task { await piSync.syncToPi(using: reader) }
             } label: {
                 Label(
-                    piSync.isRunning ? "正在与 Pi 同步" : "与 Pi 同步",
+                    piSync.isRunning ? "正在与服务器同步" : "与服务器同步",
                     systemImage: "arrow.triangle.2.circlepath.icloud"
                 )
             }
@@ -517,7 +517,7 @@ struct NativeReaderToolsView: View {
 
                 if !report.books.remoteNewer.isEmpty {
                     Text(
-                        "Pi 较新，未覆盖：" +
+                        "服务器较新，未覆盖：" +
                             report.books.remoteNewer.prefix(5).joined(separator: "、")
                     )
                     .font(.caption)
@@ -532,7 +532,7 @@ struct NativeReaderToolsView: View {
                     .foregroundStyle(.orange)
                 }
                 if !report.unsupported.isEmpty {
-                    Text("仅保存在本机、尚未同步到 Pi：\(report.unsupported.joined(separator: "、"))")
+                    Text("仅保存在本机、尚未同步到服务器：\(report.unsupported.joined(separator: "、"))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -553,7 +553,7 @@ struct NativeReaderToolsView: View {
                     .lineLimit(4)
             }
 
-            Text("本机先保存，再显式同步到 Pi。Pi 较新、两端冲突或结果未知时不会自动覆盖；再次同步会先重新核对目录与摘要。")
+            Text("本机先保存，再显式同步到服务器。服务器较新、两端冲突或结果未知时不会自动覆盖；再次同步会先重新核对目录与摘要。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -891,7 +891,7 @@ struct NativeReaderToolsView: View {
                 }
             }
 
-            Text("App 与 Safari 扩展只使用本机笔记线路，不会回落 Pi。开启后两端共享创建、查看和读取能力；扩展创建的内容会先安全排队，再由 App 自动写入所选 Vault。请选择 Vault 根目录，以便 Obsidian 链接能够正确打开。")
+            Text("App 与 Safari 扩展只使用本机笔记线路，不会回落服务器。开启后两端共享创建、查看和读取能力；扩展创建的内容会先安全排队，再由 App 自动写入所选 Vault。请选择 Vault 根目录，以便 Obsidian 链接能够正确打开。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

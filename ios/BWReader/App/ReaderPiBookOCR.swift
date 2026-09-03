@@ -146,7 +146,7 @@ struct ReaderPiOCRRelease: Equatable, Identifiable, Sendable {
 
     static func engineTitle(engine: String, executor: String) -> String {
         if engine == "legacy" { return "兼容旧结果" }
-        return executor == "pc" ? "PC 高质量预处理" : "Pi 预处理"
+        return executor == "pc" ? "PC 高质量预处理" : "服务器预处理"
     }
 }
 
@@ -232,21 +232,21 @@ enum ReaderPiOCRError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidResponse:
-            return "Pi 预处理返回了无法识别的数据"
+            return "服务器预处理返回了无法识别的数据"
         case .invalidURL:
-            return "Pi 预处理返回了不安全的地址"
+            return "服务器预处理返回了不安全的地址"
         case .invalidManifest:
-            return "Pi 书籍附件清单无效"
+            return "服务器书籍附件清单无效"
         case .server(let status, let message):
-            return "Pi 预处理请求失败（HTTP \(status)）：\(message)"
+            return "服务器预处理请求失败（HTTP \(status)）：\(message)"
         case .attachmentTooLarge:
-            return "Pi 书籍附件超过 App 的安全大小限制"
+            return "服务器书籍附件超过 App 的安全大小限制"
         case .attachmentSizeMismatch:
-            return "Pi 书籍附件大小校验失败"
+            return "服务器书籍附件大小校验失败"
         case .attachmentChecksumMismatch:
-            return "Pi 书籍附件摘要校验失败"
+            return "服务器书籍附件摘要校验失败"
         case .localContentMismatch:
-            return "本机书籍内容与 Pi 预处理版本不一致，请先上传或下载同一版本"
+            return "本机书籍内容与服务器预处理版本不一致，请先上传或下载同一版本"
         }
     }
 }
@@ -807,16 +807,16 @@ final class ReaderPiOCRClient {
                 || contentType.contains("text/html")
                 || message.trimmingCharacters(in: .whitespacesAndNewlines)
                     .hasPrefix("<") {
-                message = "Pi 预处理接口未部署，或服务器返回了网页而不是协议数据"
+                message = "服务器预处理接口未部署，或服务器返回了网页而不是协议数据"
             } else if responseContract == Self.contract,
                       let code = responseObject?["code"] as? String {
                 switch code {
                 case "legacy-adoption-busy":
-                    message = "现有 Pi 结果检查正在进行，请稍后重试"
+                    message = "现有服务器结果检查正在进行，请稍后重试"
                 case "legacy-result-incomplete":
-                    message = "现有 Pi 预处理结果不完整，暂时不能采用"
+                    message = "现有服务器预处理结果不完整，暂时不能采用"
                 case "book-ocr-busy":
-                    message = "这本书正在 Pi 预处理中，请完成或取消后再采用"
+                    message = "这本书正在服务器预处理中，请完成或取消后再采用"
                 default:
                     message = responseObject?["error"] as? String ?? message
                 }
@@ -1170,7 +1170,7 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 if let previewingBookID {
                     if previewingBookID == book.bookId { return }
                     recordError(
-                        "正在检查另一册书的现有 Pi 结果，请稍后重试",
+                        "正在检查另一册书的现有服务器结果，请稍后重试",
                         for: book,
                         explicit: false
                     )
@@ -1247,7 +1247,7 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 importsAttachments: false
             )
             notice = result.already
-                ? "现有 Pi 预处理结果已经采用"
+                ? "现有服务器预处理结果已经采用"
                 : result.job.message
             if let localBinding = localBindings[book.bookId] {
                 let imported = await importAvailableAttachmentsImpl(
@@ -1416,7 +1416,7 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 }
                 notice = attachmentManifest.executor == "pc"
                     ? "PC 高质量预处理结果已是最新"
-                    : "Pi 预处理结果已是最新"
+                    : "服务器预处理结果已是最新"
                 return true
             }
             let bundle = try await client.downloadAttachments(
@@ -1462,7 +1462,7 @@ final class ReaderPiOCRCoordinator: ObservableObject {
             }
             notice = bundle.manifest.executor == "pc"
                 ? "已导入 PC 高质量预处理结果，可在文字层中选择"
-                : "已导入 Pi 预处理结果，可在文字层中选择"
+                : "已导入服务器预处理结果，可在文字层中选择"
             return true
         } catch {
             guard !isCancellation(error) else { return false }
@@ -1472,7 +1472,7 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 discardPendingImport(ownershipClaim)
             }
             recordError(
-                "Pi 预处理附件导入失败：\(error.localizedDescription)",
+                "服务器预处理附件导入失败：\(error.localizedDescription)",
                 for: book,
                 explicit: reportsExplicitFailure
             )
@@ -1616,7 +1616,7 @@ final class ReaderPiOCRCoordinator: ObservableObject {
     private func acquireExplicitCommand(for book: ReaderRemoteBook) -> Bool {
         guard activeBookID == nil else {
             recordError(
-                "另一项 Pi 预处理请求正在进行，请稍后再试",
+                "另一项服务器预处理请求正在进行，请稍后再试",
                 for: book,
                 explicit: true
             )

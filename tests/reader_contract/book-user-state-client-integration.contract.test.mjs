@@ -100,7 +100,7 @@ test("A to B account switch is rejected before any renderer mutation", () => {
   assert.match(verify, /accountScopeChanged/);
   assert.match(
     PENDING,
-    /当前 Pi 账户与下载书籍数据时不同，已保留待导入数据且未覆盖本机内容/
+    /当前服务器账户与下载书籍数据时不同，已保留待导入数据且未覆盖本机内容/
   );
 
   const flow = WEB.slice(

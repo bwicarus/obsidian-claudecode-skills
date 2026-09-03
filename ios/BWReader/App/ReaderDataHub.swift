@@ -92,7 +92,7 @@ enum ReaderDataHub {
             // 一张写错的状态表比没有更糟：它会让人按错误的前提去清设备。
             Category(
                 name: "聊天记录", localCount: nil, replicated: true,
-                caveat: "存在 Pi 上，登录后就在，重装不丢"),
+                caveat: "存在服务器上，登录后就在，重装不丢"),
             Category(
                 name: "阅读位置", localCount: nil, replicated: true,
                 caveat: nil),

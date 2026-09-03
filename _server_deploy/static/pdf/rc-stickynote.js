@@ -1202,98 +1202,13 @@
   //   索引；各原书里的卡实体在**下次渲染到**时跟上 —— 与 pending-bind
   //   「等页归位」同一哲学。cid 反查索引，索引内容更新且更新时间比本卡
   //   新 → patchNote 覆写本地内容（sig 变化自然触发重渲）。
-  function reconcileConsolidatedWordCard(ctl, h) {
-    try {
-      // 索引路由只在 App 本地 runtime 存在；别的宿主（含契约沙箱）不发。
-      if (!(window.BWReaderRuntime &&
-        window.BWReaderRuntime.nativeLocalRuntime)) return;
-      if (!h || !h.bind || !h.cid) return;
-      var note = ctl && ctl.note;
-      if (!note) return;
-      if (h._wcReconciledAt &&
-          Date.now() - h._wcReconciledAt < 60 * 1000) return;
-      // @interaction wordcard.index.sync
-      fetch('/pdf/api/word-card-index?cid=' + encodeURIComponent(h.cid))
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (d) {
-          if (!d || d.ok !== true || !d.cards || !d.cards.length) return;
-          var idx = d.cards[0];
-          var at = d.consolidatedAt || 0;
-          if (!at || !idx || typeof idx.content !== 'string') return;
-          var current = String(h.content || '');
-          if (!idx.content || idx.content === current) return;
-          if (h._wcAppliedAt && h._wcAppliedAt >= at) return;
-          h.content = idx.content;
-          h._wcAppliedAt = at;
-          h._wcReconciledAt = Date.now();
-          note.html = h;
-          patchNote(note, { html: h });
-        })
-        .catch(function () {});
-      h._wcReconciledAt = Date.now();
-    } catch (e) {}
-  }
-
-  // ── 词锚卡 × 字典（用户 2026-08-31）：锁定的元素本身有字典词条时，
-  //   打开卡片就把释义带上 —— 显示层组合，字典内容实时拉不复制，
-  //   词条以后升级（AI 深解重生成）这里自动是新的。查不到就安静缺席。
-  // bind 里的词文本：text 字段优先；旧卡（2026-08-31 之前建的）没传
-  // text，只带 from/to —— 从页面字符层把词取回来（卡钉在那页，展开时
-  // 页面多半已渲染；取不到就安静缺席，下次展开再试）。
-  // ⚠ from/to 是 _oi 阅读序坐标，跟数组下标不是一回事。
-  function bindWordTextOf(bind) {
-    var text = String((bind && bind.text) || '').trim();
-    if (text) return text;
-    var page = parseInt(bind && bind.page, 10);
-    var from = parseInt(bind && bind.from, 10);
-    var to = parseInt(bind && bind.to, 10);
-    if (!(page > 0) || !(from >= 0) || !(to >= from) || to - from > 48) {
-      return '';
-    }
-    try {
-      var pw = document.querySelector(
-        '.page-wrap[data-page-num="' + page + '"]');
-      var boxes = pw && pw.__charBoxes;
-      if (!boxes || !boxes.length) return '';
-      var out = '';
-      for (var i = 0; i < boxes.length; i++) {
-        var b = boxes[i];
-        if (!b) continue;
-        var oi = (b._oi != null ? b._oi : i) | 0;
-        if (oi < from || oi > to) continue;
-        if (!b.sp && b.c) out += b.c;
-      }
-      return out.trim();
-    } catch (e) { return ''; }
-  }
-
-  // 581 真凶（2026-09-01）：这个声明曾因补丁脚本中断而从未写入 ——
-  // 使用处全在、声明缺席，每次调用第一行 ReferenceError 被 try/catch
-  // 吞掉，词典区整体静默死亡。声明与使用必须同一笔提交。
-  var _dictLineCache = {};   // 词 → {d}(成功,永久) / {failAt}(失败,20s 冷却)
-
-  // ── 词典区诊断出口（七轮盲猜的教训 —— 每个早退都要出声）──────────
-  function dictLineNote(box, reason) {
-    try {
-      if (!box || !box.isConnected) return;
-      if (box.querySelector('.rc-note-dict-note')) return;
-      var line = document.createElement('div');
-      line.className = 'rc-note-dict-note';
-      line.style.cssText =
-        'margin:2px 0;font-size:10px;opacity:.55;color:#cfe6ff';
-      line.textContent = '📖 ' + reason;
-      // 插卡顶部:尾部会被展开卡的固定高度裁掉,只露半行(实锤截图)。
-      box.insertBefore(line, box.firstChild || null);
-      setTimeout(function () { try { line.remove(); } catch (e) {} }, 8000);
-    } catch (e) {}
-  }
+  // (2026-09-03 重做:索引不再存内容副本,「整理」直接写回便签本体,无需开卷对账。)
 
   // ── 词典区按真实可见性调度：看得见才拉；看不见挂一次性观察者，
   //   展开瞬间自动补 —— 性能与功能语义都保住。
   function appendDictWhenVisible(ctl, box, h) {
     var run = function () {
       appendWordDictLine(ctl, box, h.bind, h.label);
-      reconcileConsolidatedWordCard(ctl, h);
     };
     var visible = false;
     try { visible = box.offsetParent !== null; } catch (e0) {}

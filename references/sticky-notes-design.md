@@ -230,3 +230,35 @@ AI **读**页面时看不见卡片编号（`buildLocalPageContext` 吐的是纯�
 [`card-anchor-footnote-design.md`](card-anchor-footnote-design.md) §7.3。
 
 ⚠ EPUB 没有 `__pageBindCard`，词锚在 EPUB 上静默回落到老浮层便签。
+
+## 词 → 卡片 反向索引（2026-09-03 重做，用户拍板）
+
+用户原话：「字典的内容还是保存在原本的字典内，卡片的内容还是保存在卡片内，只是锁定后
+进行一次标记……解绑等动作发生时需要将其解除……卡片被解绑为自由卡、移动到其他地方、
+绑定新元素，都要立刻体现」。
+
+**病根**：旧索引（device state `word-card-index`）存的是卡片内容的**副本**，由语音建卡时
+写入（`rc-voicecall._registerWordCard`），之后解绑/改锁/移动都不碰它，所以单词框里
+嵌的卡永远是建卡那一刻的样子。
+
+**现行设计**（`native-local-runtime.js`）：
+
+- **只有一份真相**：卡片内容只在便签 `html.content`，锁定只是 `html.bind`（`page-chars`）。
+- **标记与便签同批写入**：`deriveWordBindings(notes)` 派生每书一条 `word-bindings`
+  记录（`{cid, key, text, page, label, at, order}`，**无内容**），与 notes / card-placements /
+  entity-references 在 `mutateDocumentStateNow` / `writeNotesAndIndexes` 的**同一批事务**里落盘，
+  因此不可能有过期副本。键 = 去空白小写的绑定文本。
+- **内容现读**：`/pdf/api/word-card-index?lemma=&word=`（或 `?cid=`）→ `listAllWordBindings`
+  扫全部 `native-word-bindings` 记录 → `liveWordCards` 分书读便签取当前内容；便签没了或
+  绑定键不再匹配就当它不存在（索引自愈）。POST 只为兼容旧调用方保留，返回 `deprecated`。
+- **事件**：事务提交后广播 `bw:native-word-bindings-changed`（契约
+  `reader-word-bindings-changed/1`，detail 含 `keys` / `changes[{cid,before,after}]`）。
+  `rc-wordpop` 订阅它，正开着的小框按键集合命中就重取卡片段。电脑端上下文快照不需要新
+  接线：绑定本来就是一次便签写入，既有 `bw:native-document-notes-changed` 已让它重发。
+- **一次性迁移**：`ensureWordBindingsRebuilt` 首次查询时扫全部便签记录补齐标记，
+  device state `word-bindings-rebuilt` 记一次。
+- **词卡整理**（`wordCardsConsolidate`）：直接把内容写回各书便签本体
+  （`applyWordCardContents` → `writeNotesAndIndexesFor`），撤销用 `word-card-consolidations`
+  单层 prev；`rc-stickynote.reconcileConsolidatedWordCard`（开卷对账）随之删除。
+
+契约：`tests/reader_contract/word-card-bindings.contract.test.mjs`。

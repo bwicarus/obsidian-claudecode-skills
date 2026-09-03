@@ -122,7 +122,7 @@ test("PDFKit serves the legacy TOC shape locally without a Pi book dependency", 
 test("disabled native notes return an explicit conflict instead of falling through to loopback 404", () => {
   assert.match(WEB_VIEW, /guard manager\.isEnabled else \{[\s\S]*"status": 409/);
   assert.match(WEB_VIEW, /BW_NATIVE_NOTES_DISABLED/);
-  assert.match(WEB_VIEW, /未向 Pi 或回环地址假提交/);
+  assert.match(WEB_VIEW, /未向服务器或回环地址假提交/);
 });
 
 test("legacy cross-book navigation stays inside the native local-library lifecycle", () => {

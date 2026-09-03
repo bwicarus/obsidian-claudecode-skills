@@ -152,7 +152,7 @@ enum ReaderBookUserStatePackageError: LocalizedError {
         case .invalidPackage(let message):
             return "书籍附属数据包无效：\(message)"
         case .invalidAccountScope:
-            return "无法确认当前 Pi 账户，未导入书籍附属数据"
+            return "无法确认当前服务器账户，未导入书籍附属数据"
         case .contentVersionMismatch:
             return "书籍附属数据与当前书籍版本不一致"
         case .invalidLocalSnapshot:
@@ -575,11 +575,11 @@ enum ReaderBookUserStatePlanner {
                     && domain.digest != based.digest)) {
                 classification = .conflict
                 action = .keep
-                reason = "Pi 版本倒退或在同一版本下改变，拒绝覆盖"
+                reason = "服务器版本倒退或在同一版本下改变，拒绝覆盖"
             } else if local?.digest == domain.digest {
                 classification = .unchanged
                 action = .keep
-                reason = "本机与 Pi 摘要相同"
+                reason = "本机与服务器摘要相同"
             } else if localIsNewOrEmpty, local == nil || local?.empty == true {
                 if domain.empty {
                     classification = .unchanged
@@ -594,7 +594,7 @@ enum ReaderBookUserStatePlanner {
                 if domain.empty {
                     classification = .localNewer
                     action = .keep
-                    reason = "Pi 为空且尚无同步基线"
+                    reason = "服务器为空且尚无同步基线"
                 } else if local == nil || local?.empty == true {
                     classification = .piNewer
                     action = .import
@@ -619,11 +619,11 @@ enum ReaderBookUserStatePlanner {
                 case (false, true):
                     classification = .piNewer
                     action = .import
-                    reason = "只有 Pi 在基线后发生变化"
+                    reason = "只有服务器在基线后发生变化"
                 case (true, true):
                     classification = .conflict
                     action = .keep
-                    reason = "本机与 Pi 都在基线后发生变化"
+                    reason = "本机与服务器都在基线后发生变化"
                 }
             }
 

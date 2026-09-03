@@ -391,7 +391,7 @@
     }
     if (!storage.enabled) {
       return 'BWReader App 本机笔记线路已关闭' +
-        (folder ? '（' + folder + '）' : '') + '；扩展不会回落 Pi，仍可查看已索引的 ' + count + ' 条历史笔记。';
+        (folder ? '（' + folder + '）' : '') + '；扩展不会回落服务器，仍可查看已索引的 ' + count + ' 条历史笔记。';
     }
     if (!count) {
       return '已连接' + (folder ? '“' + folder + '”' : '本机 Vault') + '，目前没有 App 本机 Markdown 笔记。';
@@ -1177,7 +1177,7 @@
         '<div data-sec="native-app-notes" style="display:none">' +
           '<hr class="ep-set-hr">' +
           '<label style="' + LBL + '">📚 App / 扩展共享 Markdown 笔记</label>' +
-          '<div class="ep-set-note" style="margin:-2px 0 8px">开启本机线路后，网页扩展与 App 都能创建、查看和读取笔记；扩展创建的内容先进入共享队列，再由 App 自动写入 Obsidian。关闭时保留原有 Pi 线路。</div>' +
+          '<div class="ep-set-note" style="margin:-2px 0 8px">开启本机线路后，网页扩展与 App 都能创建、查看和读取笔记；扩展创建的内容先进入共享队列，再由 App 自动写入 Obsidian。关闭时保留原有服务器线路。</div>' +
           '<div id="rcset-native-notes-status" role="status" aria-live="polite" style="font-size:11px;color:#aebbd0;line-height:1.55;white-space:pre-wrap;margin-bottom:8px">尚未读取</div>' +
           '<button id="rcset-native-notes-refresh" type="button" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:12px;cursor:pointer">查看 / 刷新</button>' +
           '<div id="rcset-native-notes-list" style="margin-top:8px"></div>' +
@@ -1232,7 +1232,7 @@
           '<button type="button" id="rcset-nat-dict-dl" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">下载离线日语词典</button>' +
           '<button type="button" id="rcset-nat-dict-rm" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">删除</button>' +
         '</div>' +
-        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">词典只存在这台 iPad 上，由本 App 与它自己的 Safari 扩展共享（同一个 App 组，供扩展离线查词）；不进入书籍附件、Pi 或设置同步。数据来自 JMdict / EDICT 项目（CC BY-SA）。</div>' +
+        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">词典只存在这台 iPad 上，由本 App 与它自己的 Safari 扩展共享（同一个 App 组，供扩展离线查词）；不进入书籍附件、服务器或设置同步。数据来自 JMdict / EDICT 项目（CC BY-SA）。</div>' +
         HR +
         '<label style="' + LBL + '">📁 本机 Obsidian Vault</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;cursor:pointer;margin-bottom:6px">' +
@@ -1259,7 +1259,7 @@
           '<button type="button" id="rcset-nat-key-clr" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">清除本机 Key</button>' +
           '<button type="button" id="rcset-nat-pi-login" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">登录或重新登录 Pi</button>' +
         '</div>' +
-        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">Key 由 App 保存在 Apple Keychain，输入框是 App 的原生控件 —— 密钥不经过这个网页。App 保存、启动通话与转写都直连 OpenAI，都不连接 Pi。</div>' +
+        '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">Key 由 App 保存在 Apple Keychain，输入框是 App 的原生控件 —— 密钥不经过这个网页。App 保存、启动通话与转写都直连 OpenAI，都不连接服务器。</div>' +
         HR +
         '<button type="button" id="rcset-nat-open" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">打开 App 原生设置（其它诊断项）</button>' +
       '</div>';

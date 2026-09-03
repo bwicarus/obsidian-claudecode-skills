@@ -25,7 +25,7 @@ enum NativeBookOCRLayerID: String, Codable, CaseIterable, Hashable, Identifiable
         case .embedded: return "PDF 原文字层"
         case .legacy: return "现有兼容结果"
         case .appleVision: return "本机 Vision"
-        case .pi: return "Pi 预处理"
+        case .pi: return "服务器预处理"
         case .pc: return "PC 高质量预处理"
         }
     }
@@ -906,11 +906,11 @@ enum NativeBookOCRError: LocalizedError {
         case .noRecognizedText:
             return "本页没有识别到可用文字"
         case .lowConfidence:
-            return "本页文字识别质量不足，可手动选择 Pi 预处理"
+            return "本页文字识别质量不足，可手动选择服务器预处理"
         case .storage(let detail):
             return "保存本机文字预处理结果失败：\(detail)"
         case .invalidAttachment(let detail):
-            return "导入 Pi 预处理附件失败：\(detail)"
+            return "导入服务器预处理附件失败：\(detail)"
         }
     }
 }

@@ -257,7 +257,7 @@ test("the App owns both the project key and the Realtime session without Pi", ()
   assert.match(CORE, /"do_task"/);
   assert.match(TOOLS, /SecureField\("输入现有 OpenAI Key/);
   assert.match(TOOLS, /保存 App Key/);
-  assert.match(TOOLS, /App 保存、启动通话、注入选区与发送笔迹\/视口合成图都不连接 Pi/);
+  assert.match(TOOLS, /App 保存、启动通话、注入选区与发送笔迹\/视口合成图都不连接服务器/);
   assert.match(TOOLS, /已存入 Apple Keychain（尚未验证）/);
   assert.match(TOOLS, /Keychain 与 OpenAI 均已验证/);
   assert.match(TOOLS, /清除这台 iPad 中的 Key/);

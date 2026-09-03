@@ -420,7 +420,7 @@ test("formula recognition is a real Pi interface and its Swift consumer is packa
   );
   assert.match(toolsView, /reader\.supportsNativeFormulaRecognition\(/);
   assert.match(toolsView, /refreshNativeFormulaRecognitionStatus\(/);
-  assert.match(gateway, /请先在书库同步书体到 Pi，再选择 Pi 预处理/);
+  assert.match(gateway, /请先在书库同步书体到服务器，再选择服务器预处理/);
   assert.doesNotMatch(swift, /native.*latex.*=/i);
   assert.match(PACKAGE, /NATIVE_INTERFACE_SWIFT_CONSUMERS = \(/);
   assert.match(PACKAGE, /NATIVE_FORMULA_RECOGNITION_SOURCE/);

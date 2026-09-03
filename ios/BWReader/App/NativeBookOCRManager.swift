@@ -1006,7 +1006,7 @@ final class NativeBookOCRManager: ObservableObject {
                 previousStatus,
                 state: .paused,
                 currentPage: nil,
-                message: "本机预处理已暂停，正在导入 Pi 附件"
+                message: "本机预处理已暂停，正在导入服务器附件"
             ))
         }
         let result = try await store.importDerivedAttachments(
@@ -1242,7 +1242,7 @@ final class NativeBookOCRManager: ObservableObject {
                     currentPage: nil,
                     pages: Array(cached.values),
                     message: value.status == .failed
-                        ? "第 \(pageNumber) 页本机处理失败；不会自动改用 Pi"
+                        ? "第 \(pageNumber) 页本机处理失败；不会自动改用服务器"
                         : "已保存第 \(pageNumber)/\(totalPages) 页"
                 )
                 publish(status: after, page: pageNumber)
@@ -1264,7 +1264,7 @@ final class NativeBookOCRManager: ObservableObject {
                 currentPage: nil,
                 pages: pages,
                 message: failed
-                    ? "本机预处理已结束，部分页面失败；旧版可用文字与公式均已保留，可重试或手动选择 Pi 预处理"
+                    ? "本机预处理已结束，部分页面失败；旧版可用文字与公式均已保留，可重试或手动选择服务器预处理"
                     : "本机预处理完成"
             ))
             layerStates[bookID] = try await store.layerState(

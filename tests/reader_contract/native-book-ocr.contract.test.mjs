@@ -318,8 +318,8 @@ test("formula semantics stay honest and cannot turn Vision glyphs into fake LaTe
 });
 
 test("Apple failures are persisted and never start Pi automatically", () => {
-  assert.match(MANAGER, /不会自动改用 Pi/);
-  assert.match(MANAGER, /手动选择 Pi 预处理/);
+  assert.match(MANAGER, /不会自动改用服务器/);
+  assert.match(MANAGER, /手动选择服务器预处理/);
   assert.match(PROCESSOR, /status: \.failed/);
   assert.match(PROCESSOR, /error: message/);
   assert.doesNotMatch(PROCESSOR, /ReaderPi|startPi|PiGateway/);

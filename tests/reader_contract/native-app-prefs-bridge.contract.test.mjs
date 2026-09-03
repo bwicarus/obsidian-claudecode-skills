@@ -116,8 +116,8 @@ test("三项真的在设置 tab 里，而不是只有一个跳转按钮", () => 
     assert.ok(SETTINGS.includes(id), `设置 tab 缺控件：${id}`);
   }
   // 隐私声明跟着内容一起搬过来 —— 它是对用户的承诺，不能在搬家时掉队
-  assert.match(SETTINGS, /不进入书籍附件、Pi 或设置同步/);
-  assert.match(SETTINGS, /都不连接 Pi/);
+  assert.match(SETTINGS, /不进入书籍附件、服务器或设置同步/);
+  assert.match(SETTINGS, /都不连接服务器/);
   // 每次打开面板都要重读状态（原生那侧会自己变，网页没有推送通道）
   assert.match(SETTINGS, /_fillNativePane\(\);\s+\/\/ 本机 tab/);
   // 下载进度的轮询必须在关面板时停掉

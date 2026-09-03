@@ -1129,7 +1129,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
               let localLibrary = currentLocalLibrary,
               let remoteLibraryCoordinator else {
             showBookUserStateMessage(
-                "无法打开目标书籍：本机书库或 Pi 书库尚未连接",
+                "无法打开目标书籍：本机书库或服务器书库尚未连接",
                 isError: true
             )
             return true
@@ -1168,7 +1168,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                   ["pdf", "epub"].contains(remoteBook.kind.lowercased()) else {
                 self.showBookUserStateMessage(
                     remoteLibraryCoordinator.errorMessage
-                        ?? "Pi 书库中没有找到目标 PDF/EPUB",
+                        ?? "服务器书库中没有找到目标 PDF/EPUB",
                     isError: true
                 )
                 return
@@ -1371,7 +1371,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 // staged and the next matching book load will retry it.
             } catch {
                 self.showBookUserStateMessage(
-                    "Pi 用户数据未导入：\(error.localizedDescription)；重新打开本书可重试",
+                    "服务器用户数据未导入：\(error.localizedDescription)；重新打开本书可重试",
                     isError: true
                 )
             }
@@ -1416,7 +1416,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                     try await pendingBookUserStateStore
                         .removeFetchIntent(fetch)
                     showBookUserStateMessage(
-                        "Pi 上这本书暂无用户附属数据；本机内容未改变",
+                        "服务器上这本书暂无用户附属数据；本机内容未改变",
                         isError: false
                     )
                     return
@@ -2233,7 +2233,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             $0.classification == .localNewer
         }.count
         var parts: [String] = []
-        parts.append(imported > 0 ? "已合并 \(imported) 类 Pi 用户数据" : "Pi 用户数据已核对")
+        parts.append(imported > 0 ? "已合并 \(imported) 类服务器用户数据" : "服务器用户数据已核对")
         if localNewer > 0 {
             parts.append("保留本机较新数据 \(localNewer) 类")
         }
@@ -4065,7 +4065,7 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                 "response": [
                     "ok": false,
                     "code": "BW_NATIVE_NOTES_DISABLED",
-                    "error": "本机笔记未启用，未向 Pi 或回环地址假提交",
+                    "error": "本机笔记未启用，未向服务器或回环地址假提交",
                 ],
             ], nil)
             return

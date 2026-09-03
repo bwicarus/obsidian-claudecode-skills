@@ -4468,7 +4468,7 @@ test("native PDF insert, edit and delete keep the legacy job API and migrate eve
     mode: "insert",
     warnings: [
       "本机 OCR、分词与公式页已随 PDF 页号迁移；新插入页或改写页可按需重新预处理",
-      "Pi 页锚数据保留在旧内容摘要下；上传/同步新 PDF 前，联网页锚接口会拒绝旧绑定",
+      "服务器页锚数据保留在旧内容摘要下；上传/同步新 PDF 前，联网页锚接口会拒绝旧绑定",
     ],
     mtime: 1_800_000_000,
     page: 2,
