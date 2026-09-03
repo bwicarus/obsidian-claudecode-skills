@@ -393,6 +393,7 @@ def write_readerpc_status(
     voice: Mapping[str, Any],
     context: ReaderContextStatus,
     pc_ocr: "PcOcrStatus",
+    services: Sequence["ManagedServiceStatus"] | None = None,
 ) -> None:
     """Publish one credential-free local status entry for App/extension tools."""
 
@@ -420,8 +421,233 @@ def write_readerpc_status(
                 "error": pc_ocr.error,
                 "sourceReady": pc_ocr.source_ready,
             },
+            # 三守护合一(2026-09-03):Flask 与 sidecar 的可达/托管状态;影子模式下 owned 全 False
+            "services": [item.to_public() for item in (services or [])],
         },
     )
+
+
+
+
+# ── 通用受管进程(三守护合一第一步,2026-09-03)──────────────────────────────
+# 目标形态见 references/windows-server-consolidation-plan.md:Flask(5000)与四个 sidecar
+# 由 ReaderPC 用同一套控制器托管,不再各起守护。本步为影子模式:控制器只观测(端口探针)与
+# 显示;偏好 manageServerServices=True 时才真正拉起/保活。health 探针只用 TCP 连通,
+# 既不依赖 HTTP 状态码也不需要凭据。
+
+MANAGED_SERVICE_STATUS_CONTRACT = "readerpc-managed-service/1"
+DEFAULT_SERVER_PROJECT_ROOTS = (
+    Path(r"C:\tmp\reader-card-anchor-release"),
+    Path(r"C:\claude"),
+)
+
+
+def discover_server_project_root() -> Path | None:
+    """服务器代码(app.py 与 .env.local)所在的**工作树**,不是打进包的 readerpc-runtime。
+    第一阶段按方案先托管工作树里的 app.py(今天实际就是这么跑的),原子发布留第二阶段。"""
+    configured = str(os.environ.get("BW_READER_SERVER_PROJECT_ROOT") or "").strip()
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.extend(DEFAULT_SERVER_PROJECT_ROOTS)
+    for candidate in candidates:
+        if (candidate / "_server_deploy" / "app.py").is_file() and (candidate / ".env.local").is_file():
+            return candidate.resolve()
+    return None
+
+
+def load_server_env(project_root: Path) -> dict[str, str]:
+    """与 scripts/windows_sidecar_services.load_env 同规则:.env.local 的键只在环境里缺席时补上。"""
+    env = dict(os.environ)
+    env_file = project_root / ".env.local"
+    try:
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                key, value = line.split("=", 1)
+                env.setdefault(key.strip(), value.strip())
+    except OSError:
+        pass
+    env.setdefault("CLAUDE_PROJECT", str(project_root))
+    env.setdefault("WEBAPP_DATA", str(project_root / "webapp-data"))
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return env
+
+
+@dataclass(frozen=True)
+class ManagedServiceSpec:
+    name: str
+    label: str
+    command: tuple[str, ...]
+    cwd: Path
+    port: int
+    log_file: Path
+    env: Mapping[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class ManagedServiceStatus:
+    name: str
+    label: str
+    port: int
+    reachable: bool          # 端口可连(不管是谁起的)
+    owned: bool              # 由本控制器拉起且进程仍在
+    pid: int | None
+    restarts: int
+    error: str | None
+
+    def to_public(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "label": self.label,
+            "port": self.port,
+            "reachable": self.reachable,
+            "owned": self.owned,
+            "restarts": self.restarts,
+            "error": self.error,
+        }
+
+
+def _tcp_reachable(port: int, timeout: float = 0.6) -> bool:
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+class ManagedProcessController:
+    def __init__(
+        self,
+        spec: ManagedServiceSpec,
+        *,
+        popen: Callable[..., Any] = subprocess.Popen,
+        reachable: Callable[[int], bool] = _tcp_reachable,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.spec = spec
+        self._popen = popen
+        self._reachable = reachable
+        self._clock = clock
+        self._sleep = sleep
+        self._process: Any = None
+        self._restarts = 0
+        self._error: str | None = None
+        self._last_start = 0.0
+
+    def status(self) -> ManagedServiceStatus:
+        owned = self._process is not None and self._process.poll() is None
+        pid = int(getattr(self._process, "pid", 0) or 0) if owned else None
+        return ManagedServiceStatus(
+            name=self.spec.name,
+            label=self.spec.label,
+            port=self.spec.port,
+            reachable=bool(self._reachable(self.spec.port)),
+            owned=owned,
+            pid=pid,
+            restarts=self._restarts,
+            error=self._error,
+        )
+
+    def start(self, *, timeout_seconds: float = 20.0) -> ManagedServiceStatus:
+        before = self.status()
+        if before.owned:
+            return before
+        if before.reachable:
+            # 别人(旧守护)已经占着端口:不抢,只报告 —— 影子模式下这就是常态
+            self._error = None
+            return before
+        self.spec.log_file.parent.mkdir(parents=True, exist_ok=True)
+        creation_flags = 0
+        if os.name == "nt":
+            creation_flags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+        handle = self.spec.log_file.open("a", encoding="utf-8")
+        try:
+            handle.write(f"\n===== {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ReaderPC 启动 {self.spec.name} =====\n")
+            handle.flush()
+            self._process = self._popen(
+                list(self.spec.command),
+                cwd=str(self.spec.cwd),
+                env=dict(self.spec.env) if self.spec.env is not None else None,
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                creationflags=creation_flags,
+                close_fds=True,
+            )
+        finally:
+            handle.close()
+        self._last_start = self._clock()
+        self._restarts += 1
+        deadline = self._clock() + max(1.0, timeout_seconds)
+        while self._clock() < deadline:
+            if self._process.poll() is not None:
+                self._error = f"{self.spec.label} 启动后立即退出(code={self._process.returncode}),看 {self.spec.log_file.name}"
+                raise ReaderPCServiceError(self._error)
+            if self._reachable(self.spec.port):
+                self._error = None
+                return self.status()
+            self._sleep(0.2)
+        self._error = f"{self.spec.label} 已拉起但 {timeout_seconds:.0f}s 内端口 {self.spec.port} 未就绪"
+        raise ReaderPCServiceError(self._error)
+
+    def stop(self, *, timeout_seconds: float = 8.0) -> ManagedServiceStatus:
+        process = self._process
+        if process is None or process.poll() is not None:
+            self._process = None
+            return self.status()
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=timeout_seconds,
+                )
+            else:
+                process.terminate()
+            try:
+                process.wait(timeout=timeout_seconds)
+            except Exception:
+                process.kill()
+        finally:
+            self._process = None
+        return self.status()
+
+    def ensure(self, *, backoff_seconds: float = 15.0) -> ManagedServiceStatus:
+        """保活:不可达且未由本控制器持有 → 拉起(带退避);由本控制器持有但进程死了 → 记错并重拉。"""
+        current = self.status()
+        if current.reachable:
+            return current
+        if self._clock() - self._last_start < backoff_seconds:
+            return current
+        if self._process is not None and self._process.poll() is not None:
+            self._error = f"{self.spec.label} 退出(code={self._process.returncode}),重拉"
+            self._process = None
+        return self.start()
+
+
+def default_server_services(project_root: Path | None = None) -> list[ManagedServiceSpec]:
+    """Flask(5000)+ 四个 sidecar 的规格。project_root 为 None 时返回空表(影子模式也显示不出来,
+    UI 会提示"未找到服务器工作树")。"""
+    root = project_root or discover_server_project_root()
+    if root is None or not (root / "_server_deploy" / "app.py").is_file() or not (root / ".env.local").is_file():
+        return []
+    env = load_server_env(root)
+    python = env.get("APP_PYTHON") or sys.executable
+    deploy = root / "_server_deploy"
+    logs = root / "webapp-data"
+    return [
+        ManagedServiceSpec("webapp", "Flask 服务器(5000)", (python, "app.py"), deploy, 5000, logs / "local_flask.log", env),
+        ManagedServiceSpec("voice-rt", "实时语音中继(8767)", (python, str(deploy / "voice_realtime_relay.py")), deploy, 8767, logs / "sidecar-voice-rt.log", env),
+        ManagedServiceSpec("watch-voice", "手表语音中继(8768)", (python, str(deploy / "watch_voice_relay.py")), deploy, 8768, logs / "sidecar-watch-voice.log", env),
+        ManagedServiceSpec("rbi", "远程浏览器(8769)", (python, str(deploy / "rbi_server.py")), deploy, 8769, logs / "sidecar-rbi.log", env),
+        ManagedServiceSpec("mcp", "MCP 门面(8766)", (python, str(deploy / "mcp_server.py"), "--http", "8766"), deploy, 8766, logs / "sidecar-mcp.log", env),
+    ]
 
 
 @dataclass(frozen=True)

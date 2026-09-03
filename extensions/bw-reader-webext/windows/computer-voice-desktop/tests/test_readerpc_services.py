@@ -12,8 +12,12 @@ sys.path.insert(0, str(SOURCE_ROOT))
 
 from readerpc_services import (  # noqa: E402
     PC_OCR_STATUS_CONTRACT,
+    ManagedProcessController,
+    ManagedServiceSpec,
     PcOcrPaths,
     PcOcrServiceController,
+    ReaderPCServiceError,
+    default_server_services,
     read_codex_voice_activity,
     read_reader_context_status,
     write_readerpc_status,
@@ -194,6 +198,101 @@ class ReaderPCServicesTests(unittest.TestCase):
 
         self.assertTrue(status.running)
         self.assertIn("--recycle-after-job", captured)
+
+
+class ManagedProcessControllerTests(unittest.TestCase):
+    """三守护合一第一步:通用受管进程控制器(影子模式下只观测,托管时拉起/保活)。"""
+
+    def _spec(self, root: Path) -> "ManagedServiceSpec":
+        return ManagedServiceSpec(
+            name="webapp", label="Flask", command=("python", "app.py"),
+            cwd=root, port=5000, log_file=root / "logs" / "flask.log", env={"A": "1"},
+        )
+
+    def test_status_reports_external_process_as_reachable_but_not_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = ManagedProcessController(
+                self._spec(Path(tmp)), popen=lambda *a, **k: self.fail("不该拉起"),
+                reachable=lambda port: True,
+            )
+            status = controller.status()
+            self.assertTrue(status.reachable)
+            self.assertFalse(status.owned)
+            # 端口被别人(旧守护)占着:start 不抢,只报告
+            self.assertFalse(controller.start().owned)
+
+    def test_start_waits_for_port_and_stop_kills_owned_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            reachable = {"value": False}
+            captured: dict[str, object] = {}
+
+            class Process:
+                pid = 4321
+                returncode = None
+                def poll(self):
+                    return self.returncode
+                def wait(self, timeout=None):
+                    self.returncode = 0
+                def terminate(self):
+                    self.returncode = 0
+                def kill(self):
+                    self.returncode = -9
+
+            def popen(command, **kwargs):
+                captured["command"] = list(command)
+                captured["cwd"] = kwargs.get("cwd")
+                captured["env"] = kwargs.get("env")
+                reachable["value"] = True
+                return Process()
+
+            clock = {"t": 0.0}
+            controller = ManagedProcessController(
+                self._spec(Path(tmp)), popen=popen,
+                reachable=lambda port: reachable["value"],
+                clock=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
+            )
+            status = controller.start()
+            self.assertTrue(status.owned)
+            self.assertEqual(status.pid, 4321)
+            self.assertEqual(captured["command"], ["python", "app.py"])
+            self.assertEqual(captured["env"], {"A": "1"})
+            self.assertTrue((Path(tmp) / "logs" / "flask.log").exists())
+            # 进程死了 → ensure 在退避后重拉,restarts 递增
+            controller._process.returncode = 1
+            reachable["value"] = False
+            clock["t"] += 30
+            self.assertTrue(controller.ensure().owned)
+            self.assertEqual(controller.status().restarts, 2)
+
+    def test_start_failure_when_process_exits_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            class Dead:
+                pid = 1
+                returncode = 3
+                def poll(self):
+                    return 3
+            controller = ManagedProcessController(
+                self._spec(Path(tmp)), popen=lambda *a, **k: Dead(), reachable=lambda port: False,
+            )
+            with self.assertRaises(ReaderPCServiceError):
+                controller.start()
+            self.assertIn("立即退出", controller.status().error or "")
+
+    def test_default_specs_require_a_server_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(default_server_services(root), [])
+            (root / "_server_deploy").mkdir()
+            (root / "_server_deploy" / "app.py").write_text("", "utf-8")
+            (root / ".env.local").write_text("APP_PYTHON=C:/py/python.exe\n", "utf-8")
+            specs = default_server_services(root)
+            self.assertEqual([s.name for s in specs], ["webapp", "voice-rt", "watch-voice", "rbi", "mcp"])
+            self.assertEqual(specs[0].command[0], "C:/py/python.exe")
+            self.assertEqual(specs[0].port, 5000)
+            # 状态文件带 services 子树,且不含进程路径/凭据
+            status = ManagedProcessController(specs[0], reachable=lambda port: False).status()
+            self.assertEqual(status.to_public()["reachable"], False)
+            self.assertNotIn("command", status.to_public())
 
 
 if __name__ == "__main__":

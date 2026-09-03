@@ -41,8 +41,10 @@ from control_plane import (
 )
 from readerpc_services import (
     CodexVoiceActivityStatus,
+    ManagedProcessController,
     PRODUCT_NAME,
     PcOcrServiceController,
+    default_server_services,
     ReaderPCPaths,
     ReaderPCServiceError,
     format_pc_progress,
@@ -196,6 +198,8 @@ def load_preferences(path: Path) -> dict[str, object]:
         "snapshotViewerHidden": False,
         "hideVoiceOrb": False,
         "autoStartOnBoot": False,
+        # 三守护合一(2026-09-03):默认 False = 影子模式,只观测 Flask/sidecar 的端口不接管
+        "manageServerServices": False,
     }
     try:
         value = json.loads(path.read_text("utf-8"))
@@ -222,6 +226,7 @@ def load_preferences(path: Path) -> dict[str, object]:
         "snapshotViewerHidden": hidden is True,
         "hideVoiceOrb": value.get("hideVoiceOrb") is True,
         "autoStartOnBoot": value.get("autoStartOnBoot") is True,
+        "manageServerServices": value.get("manageServerServices") is True,
     }
 
 
@@ -234,6 +239,7 @@ def save_preferences(
     snapshot_viewer_hidden: bool = False,
     hide_voice_orb: bool = False,
     auto_start_on_boot: bool = False,
+    manage_server_services: bool = False,
 ) -> None:
     if service_mode not in SERVICE_MODES:
         raise ReaderPCServiceError(f"未知服务模式 {service_mode}")
@@ -247,6 +253,7 @@ def save_preferences(
             "snapshotViewerHidden": bool(snapshot_viewer_hidden),
             "hideVoiceOrb": bool(hide_voice_orb),
             "autoStartOnBoot": bool(auto_start_on_boot),
+            "manageServerServices": bool(manage_server_services),
         },
     )
 
@@ -994,6 +1001,7 @@ class ReaderPCWindow:
             snapshot_viewer_hidden=self._snapshot_hidden_enabled(),
             hide_voice_orb=self._hide_orb_enabled(),
             auto_start_on_boot=self._auto_start_enabled(),
+            manage_server_services=bool(self.manage_server_services.get()),
         )
 
     def _restart_voice_with_intent(self, busy: str, done: str) -> None:
@@ -1108,6 +1116,18 @@ class ReaderPCWindow:
         self.voice_enabled = tk.BooleanVar(
             value=bool(preferences["voiceEnabled"])
         )
+        # 三守护合一第一步(2026-09-03,references/windows-server-consolidation-plan.md):
+        # Flask(5000)与四个 sidecar 的受管控制器。影子模式只观测端口;托管开关打开才拉起/保活。
+        self.manage_server_services = tk.BooleanVar(
+            value=bool(preferences.get("manageServerServices", False))
+        )
+        try:
+            self.server_services: list[ManagedProcessController] = [
+                ManagedProcessController(spec) for spec in default_server_services()
+            ]
+        except Exception:
+            self.server_services = []
+        self.last_server_ensure = 0.0
         self.snapshot_hidden = tk.BooleanVar(
             value=bool(preferences["snapshotViewerHidden"])
         )
@@ -1192,6 +1212,20 @@ class ReaderPCWindow:
             "文字、分词与公式 · quality-first-v6",
             self.toggle_pc,
         )
+        self.server_status, self.server_detail, _ = self._service_row(
+            outer,
+            "服务器服务",
+            "Flask 5000 与语音/手表/远程浏览器/MCP 四个 sidecar · 目前由旧守护托管,这里先观测",
+            None,
+        )
+        server_row = ttk.Frame(outer)
+        server_row.pack(fill="x", pady=(0, 2))
+        ttk.Checkbutton(
+            server_row,
+            text="由 ReaderPC 托管服务器服务(实验:打开前先停掉旧守护与计划任务)",
+            variable=self.manage_server_services,
+            command=self.on_manage_server_changed,
+        ).pack(side="left")
 
         options = ttk.Frame(outer)
         options.pack(fill="x", pady=(8, 2))
@@ -1273,6 +1307,7 @@ class ReaderPCWindow:
         root.after(100, self._drain_events)
         root.after(250, self.refresh)
         root.after(600, self._ensure_pc_online)
+        root.after(900, self._ensure_server_services_online)
         root.after(800, self._ensure_voice_online)
 
     def _service_row(
@@ -1407,6 +1442,7 @@ class ReaderPCWindow:
                 _boot_log(f"[warn] 写退出标记失败(看门狗可能复活): {exc}")
             try:
                 with self.service_lock:
+                    self._stop_owned_server_services()
                     stop_readerpc_services(
                         self.bridge_paths,
                         self.process_runner,
@@ -1789,6 +1825,58 @@ class ReaderPCWindow:
             pass
         self.root.after(5_000, self._ensure_pc_online)
 
+    def on_manage_server_changed(self) -> None:
+        self._save_current_preferences()
+        self.last_server_ensure = 0.0
+        self._ensure_server_services_online()
+
+    def _ensure_server_services_online(self) -> None:
+        """每 5s:刷新「服务器服务」一行;托管开关打开时对不可达的服务 ensure()(带退避)。
+        影子模式下永不拉起 —— 端口由旧守护占着就显示"外部",这正是切换前要看到的常态。"""
+        if self.closed or self.closing:
+            return
+        try:
+            if not self.server_services:
+                self.server_status.configure(text="未找到服务器工作树", foreground="#b26a00")
+            else:
+                manage = bool(self.manage_server_services.get())
+                if manage and not self.busy and time.monotonic() - self.last_server_ensure >= 5.0:
+                    self.last_server_ensure = time.monotonic()
+                    for controller in self.server_services:
+                        try:
+                            controller.ensure()
+                        except Exception:
+                            pass
+                statuses = [controller.status() for controller in self.server_services]
+                reachable = sum(1 for item in statuses if item.reachable)
+                owned = sum(1 for item in statuses if item.owned)
+                missing = [item.label for item in statuses if not item.reachable]
+                errors = [item.error for item in statuses if item.error]
+                if reachable == len(statuses):
+                    self.server_status.configure(
+                        text=f"{reachable}/{len(statuses)} 可达 · 托管 {owned}" + ("" if manage else " · 影子观测"),
+                        foreground="#167347",
+                    )
+                else:
+                    self.server_status.configure(
+                        text=f"{reachable}/{len(statuses)} 可达 · 缺 " + "、".join(missing),
+                        foreground="#b26a00",
+                    )
+                if errors:
+                    self.server_detail.configure(text="；".join(errors)[:200])
+        except Exception:
+            pass
+        self.root.after(5_000, self._ensure_server_services_online)
+
+    def _stop_owned_server_services(self) -> None:
+        """退出即全停只针对**本控制器拉起**的进程;旧守护拉起的不动(它们有自己的看护)。"""
+        for controller in getattr(self, "server_services", []):
+            try:
+                if controller.status().owned:
+                    controller.stop()
+            except Exception:
+                pass
+
     def _reconcile_service_mode_intent(self) -> None:
         """App 经桥请求换模式(C# 只写意图文件);ReaderPC 是唯一的服务生命周期
         所有者,在这里收敛:文件模式 ≠ 当前模式 → 同步 UI/偏好并按新模式重启。
@@ -2026,6 +2114,7 @@ class ReaderPCWindow:
             if now - self.last_status_publish >= STATUS_PUBLISH_INTERVAL_SECONDS:
                 write_readerpc_status(
                     self.readerpc_paths.status_file,
+                    services=[c.status() for c in getattr(self, "server_services", [])],
                     voice={
                         "online": voice.service_online,
                         "configured": voice.configuration_enabled,

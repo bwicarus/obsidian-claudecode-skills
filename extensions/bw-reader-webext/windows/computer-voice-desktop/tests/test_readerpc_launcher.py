@@ -125,7 +125,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             path = Path(raw) / "missing.json"
             self.assertEqual(
                 load_preferences(path),
-                {"keepPcPreprocessingOnline": True, "serviceMode": "full", "voiceEnabled": True, "snapshotViewerHidden": False, "hideVoiceOrb": False, "autoStartOnBoot": False},
+                {"keepPcPreprocessingOnline": True, "serviceMode": "full", "voiceEnabled": True, "snapshotViewerHidden": False, "hideVoiceOrb": False, "autoStartOnBoot": False, "manageServerServices": False},
             )
 
     def test_preferences_round_trip_explicit_opt_out(self) -> None:
@@ -134,7 +134,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             save_preferences(path, keep_pc_online=False)
             self.assertEqual(
                 load_preferences(path),
-                {"keepPcPreprocessingOnline": False, "serviceMode": "full", "voiceEnabled": True, "snapshotViewerHidden": False, "hideVoiceOrb": False, "autoStartOnBoot": False},
+                {"keepPcPreprocessingOnline": False, "serviceMode": "full", "voiceEnabled": True, "snapshotViewerHidden": False, "hideVoiceOrb": False, "autoStartOnBoot": False, "manageServerServices": False},
             )
 
     def test_invalid_preferences_fail_to_safe_default(self) -> None:
