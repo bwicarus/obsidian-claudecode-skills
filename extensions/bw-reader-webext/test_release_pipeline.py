@@ -34,6 +34,13 @@ handoff = importlib.util.module_from_spec(_HANDOFF_SPEC)
 _HANDOFF_SPEC.loader.exec_module(handoff)
 
 
+# 复制扩展目录做夹具时排除发布候选 zip:windows/candidates 已堆到 70+GB,整份 copytree 要十几分钟甚至把
+# 临时盘写满(2026-09-04 实锤,handoff 因此"像挂了"、两个用例直接报错)。
+_FIXTURE_IGNORE = shutil.ignore_patterns(
+    "__pycache__", "candidates", "readerpc-candidates", "*.zip", "node_modules", "dist", "build",
+)
+
+
 class ReleasePipelineTests(unittest.TestCase):
     def test_production_reader_comparison_uses_generated_reader_parts(self) -> None:
         class ReaderStampEntry:
@@ -313,7 +320,7 @@ class ReleasePipelineTests(unittest.TestCase):
             shutil.copytree(
                 HERE,
                 fixture,
-                ignore=shutil.ignore_patterns("__pycache__"),
+                ignore=_FIXTURE_IGNORE,   # 排除 windows/candidates 等几十 GB 发布 zip(2026-09-04)
             )
             secret = Path(raw) / "secret.txt"
             secret.write_text("release-secret", encoding="utf-8")
@@ -334,7 +341,7 @@ class ReleasePipelineTests(unittest.TestCase):
             shutil.copytree(
                 HERE,
                 fixture,
-                ignore=shutil.ignore_patterns("__pycache__"),
+                ignore=_FIXTURE_IGNORE,   # 排除 windows/candidates 等几十 GB 发布 zip(2026-09-04)
             )
             cache = fixture / "windows" / "__pycache__"
             cache.mkdir()
@@ -374,7 +381,7 @@ class ReleasePipelineTests(unittest.TestCase):
             shutil.copytree(
                 HERE,
                 fixture,
-                ignore=shutil.ignore_patterns("__pycache__"),
+                ignore=_FIXTURE_IGNORE,   # 排除 windows/candidates 等几十 GB 发布 zip(2026-09-04)
             )
             (fixture / "vendor" / "review-extra.js").write_text(
                 "",
@@ -504,10 +511,7 @@ class ReleasePipelineTests(unittest.TestCase):
             shutil.copytree(
                 HERE,
                 fixture,
-                ignore=shutil.ignore_patterns(
-                    "__pycache__", "candidates", "readerpc-candidates", "*.zip",
-                    "node_modules", "dist", "build",
-                ),
+                ignore=_FIXTURE_IGNORE,
             )
             extra = fixture / "src" / "review-extra.js"
             extra.write_text("", encoding="utf-8")
