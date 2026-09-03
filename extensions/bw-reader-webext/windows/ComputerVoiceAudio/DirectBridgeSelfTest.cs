@@ -13576,7 +13576,7 @@ internal static class DirectBridgeSelfTest
                 "f] l l l / A",
                 StringComparison.Ordinal)
             && terminal.Contains(
-                "https://bwicarus.taile44d0c.ts.net/pdf/api/page-image",
+                "https://bwicarus-2.taile44d0c.ts.net/pdf/api/page-image",
                 StringComparison.Ordinal)
             && terminal.Contains(
                 "【语音层最近对话】",

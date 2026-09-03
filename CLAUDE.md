@@ -574,6 +574,14 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe -
   `bwicarus.taile44d0c.ts.net` 等）—— 那是**迁移未完成的痕迹，不是方向**。
   别据此把新功能建到 Pi 上：2026-08-30 图片资产一事，我就因为看到
   Pi 上有现成资产系统而差点把新链路接回 Pi，被用户拦下。
+  ✅ **2026-09-03 落地**：Pi 上阅读线服务已 `disable --now`（webapp / voice-rt /
+  watch-voice / reader-context-push / rbi-server / mcp-server / book-ocr 及
+  book-ocr-watchdog、yolo-figures、figures-describe 三个 timer）；vault/Anki 线
+  （xvfb-99 / anki-headless / obsidian-sync / qa-server / daily / quick-sync /
+  anki-sync-refresh / backup / push-big-files）**原样保留**。Windows 侧服务器由
+  `local_supervisor.pyw` + `scripts/windows_sidecar_services.py` 承担，计划任务
+  `BwicarusServer` 每 5 分钟看护（详见 `references/pi-residual-inventory-20260902.md` 七、八）。
+  App 数据同步已于 2026-09-03 10:40 在 Windows 上跑通完整对账。
 - ⚠ **Pi 是什么、不是什么（2026-08-19 用户重新定义，之前那句概括把人带偏过多次）**：
   Pi 的存在主要是两件事 —— ① 把 **CLI 调用抽象成一种 AI 的 API**（Claude/Codex 包成
   HTTP 服务）；② 做**设备间的同步中继**。它**不是**阅读器的数据权威，也不是业务逻辑

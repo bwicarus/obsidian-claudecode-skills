@@ -10,8 +10,9 @@ namespace BwReader.ComputerVoiceAudio;
 
 internal static class DirectSnapshotMarkdown
 {
+    // 2026-09-03 Pi 退出阅读线:页图链接的基址改指 Windows 上的 Flask(同一套 /pdf/api/page-image)
     internal const string ReaderOrigin =
-        "https://bwicarus.taile44d0c.ts.net";
+        "https://bwicarus-2.taile44d0c.ts.net";
 
     private static readonly UTF8Encoding Utf8WithoutBom = new(
         encoderShouldEmitUTF8Identifier: false);
@@ -3372,13 +3373,13 @@ internal sealed class DirectSnapshotViewer : IDisposable
                     try {
                       url = new URL(
                         image,
-                        "https://bwicarus.taile44d0c.ts.net");
+                        "https://bwicarus-2.taile44d0c.ts.net");
                     } catch {
                       throw new Error("页图 URL 无效");
                     }
                     if (url.protocol !== "https:"
                         || url.origin
-                          !== "https://bwicarus.taile44d0c.ts.net") {
+                          !== "https://bwicarus-2.taile44d0c.ts.net") {
                       throw new Error("页图 URL 来源无效");
                     }
                     imageLink.href = url.href;

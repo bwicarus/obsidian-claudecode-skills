@@ -140,3 +140,21 @@ ssh pi 'find ~/webapp/data/reader-sidecars/by-user/1 -type f -printf "%TY-%Tm-%T
   Get-ScheduledTaskInfo BwicarusServer | Select LastRunTime,LastTaskResult,NextRunTime
   curl.exe -s -o NUL -w "%{http_code}" http://127.0.0.1:5000/login   # 应 200
   ```
+
+## 八、Pi 阅读线正式停机（2026-09-03 10:5x）
+
+同步在 Windows 上跑通完整对账后执行：
+
+```bash
+sudo systemctl disable --now webapp voice-rt watch-voice reader-context-push rbi-server mcp-server   book-ocr book-ocr-watchdog.timer yolo-figures.timer figures-describe.timer
+```
+
+停机前证据：nginx access.log 自 00:26 轮转后为空、webapp journal 8 小时仅 1 行——没有客户端再打 Pi。
+保留：nginx / tailscaled / xvfb-99 / anki-headless / obsidian-sync / qa-server / bwicarus-daily /
+anki-sync-refresh / bwicarus-quick-sync / bwicarus-backup / push-big-files（vault/Anki 线不动）。
+要回滚：`sudo systemctl enable --now <unit>`，数据仍在 Pi 上原位（未删除）。
+
+代码里剩下的 `bwicarus.taile44d0c.ts.net` 都是 **Origin 白名单字符串**（桥的 CORS、
+watch_card_bridge 发请求时带的 Origin 头、bridge_core 默认 allowed_origins），不是请求目标，
+留着无害。唯一会真正指向 Pi 的是快照展示页里页图链接的基址 `DirectSnapshotMarkdown.ReaderOrigin`，
+已改指 Windows（随下一个桥版本生效）。
