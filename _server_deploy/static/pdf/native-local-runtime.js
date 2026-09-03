@@ -14858,7 +14858,9 @@
   var clientLogTimer = null;
   var clientLogInFlight = false;
   var clientLogFailures = 0;
+  var clientLogGaveUpAt = 0;
   var CLIENT_LOG_FLUSH_MS = 4000;
+  var CLIENT_LOG_COOLDOWN_MS = 5 * 60 * 1000;   // 放弃后 5 分钟再试:服务器宕机一阵不能让本页永远失声
   var CLIENT_LOG_MAX_FAILURES = 6;   // 连续失败 6 次(约 4+8+16+32+60+60s)就停,清空缓冲,不吊着事件循环
   // 定时器不得把宿主(契约沙箱里的 node)吊住:有 unref 就 unref。2026-09-03 实锤:失败后无限重排
   // 让 native-local-runtime / highlight-local-write 两份契约永不退出,门禁挂了 25 分钟。
@@ -14869,7 +14871,11 @@
   }
   function clientLogPush(level, msg) {
     try {
-      if (typeof root.fetch !== 'function' || clientLogFailures >= CLIENT_LOG_MAX_FAILURES) return;
+      if (typeof root.fetch !== 'function') return;
+      if (clientLogFailures >= CLIENT_LOG_MAX_FAILURES) {
+        if (Date.now() - clientLogGaveUpAt < CLIENT_LOG_COOLDOWN_MS) return;
+        clientLogFailures = 0;   // 冷却期满,重新开始
+      }
       var text = String(msg == null ? '' : msg).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 2000);
       if (!text) return;
       clientLogBuffer.push({ t: new Date().toISOString(), level: String(level || 'log').slice(0, 12), msg: text });
@@ -14897,6 +14903,7 @@
     }).catch(function () {
       // 失败:放回去等下一批(最多再攒到 400),指数退避;连续失败到上限就放弃并清空,不制造重试风暴
       clientLogFailures += 1;
+      if (clientLogFailures >= CLIENT_LOG_MAX_FAILURES) clientLogGaveUpAt = Date.now();
       clientLogBuffer = clientLogFailures >= CLIENT_LOG_MAX_FAILURES ? [] : batch.concat(clientLogBuffer).slice(-400);
     }).then(function () {
       clientLogInFlight = false;

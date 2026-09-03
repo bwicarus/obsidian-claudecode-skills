@@ -2884,17 +2884,28 @@ function _mergeVocabMarks(local, remote) {
   // 一侧为空就原样返回另一侧（保持引用，既有契约按引用比较增强数组）
   if (!local || !local.length) return remote || [];
   if (!remote || !remote.length) return local;
-  const out = [];
-  const seen = new Set();
-  const keyOf = (m) => {
-    const r = (m && m.rects && m.rects[0]) || [];
-    return String(m && (m.lemma || m.word) || '').toLowerCase() + '|' + (r[0] | 0) + '|' + (r[1] | 0);
+  // 去重按**几何**(2026-09-03 用户实锤「覚え」双下划线):本地标记与服务端增强对同一个词
+  // 词元/原形不同(覚え vs 覚える)、坐标又各来自一套 OCR 差几像素,按键去重去不掉。
+  // 同一行(竖直重叠 ≥ 半个字高)且横向重叠 ≥ 一半就是同一处,本地优先。
+  const sameSpot = (a, b) => {
+    const ra = (a && a.rects) || [], rb = (b && b.rects) || [];
+    if (!ra.length || !rb.length) return false;
+    for (const p of ra) {
+      for (const q of rb) {
+        const vy = Math.min(p[3], q[3]) - Math.max(p[1], q[1]);
+        const hMin = Math.max(1, Math.min(p[3] - p[1], q[3] - q[1]));
+        if (vy < hMin * 0.5) continue;
+        const ox = Math.min(p[2], q[2]) - Math.max(p[0], q[0]);
+        const wMin = Math.max(1, Math.min(p[2] - p[0], q[2] - q[0]));
+        if (ox / wMin >= 0.5) return true;
+      }
+    }
+    return false;
   };
-  (local || []).concat(remote || []).forEach((m) => {
+  const out = local.filter(Boolean);
+  remote.forEach((m) => {
     if (!m) return;
-    const k = keyOf(m);
-    if (seen.has(k)) return;
-    seen.add(k);
+    if (out.some((l) => sameSpot(l, m))) return;
     out.push(m);
   });
   return out;

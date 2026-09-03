@@ -52,7 +52,10 @@ test("上报器：包住 dlog、接住未捕获异常、批量而有上限", () 
   assert.match(flush, /clientLogFailures >= CLIENT_LOG_MAX_FAILURES \? \[\] : batch\.concat\(clientLogBuffer\)\.slice\(-400\)/);
   assert.match(flush, /clientLogArm\(Math\.min\(60000, CLIENT_LOG_FLUSH_MS \* Math\.pow\(2, clientLogFailures\)\)\)/);
   assert.match(bodyOf(RUNTIME, "clientLogArm"), /typeof clientLogTimer\.unref === 'function'\) clientLogTimer\.unref\(\)/);
-  assert.match(push, /if \(typeof root\.fetch !== 'function' \|\| clientLogFailures >= CLIENT_LOG_MAX_FAILURES\) return;/);
+  assert.match(push, /if \(typeof root\.fetch !== 'function'\) return;/);
+  // 放弃后 5 分钟冷却再恢复:服务器宕机一阵不能让本页永远失声(2026-09-03 实锤 16:1x-19:39 宕机后一条都收不到)
+  assert.match(push, /if \(Date\.now\(\) - clientLogGaveUpAt < CLIENT_LOG_COOLDOWN_MS\) return;/);
+  assert.match(RUNTIME, /var CLIENT_LOG_COOLDOWN_MS = 5 \* 60 \* 1000;/);
   assert.match(RUNTIME, /installClientLogReporter\(\);\n\n\s*runtimeRoot\.nativeLocalRuntime = api;/);
 });
 
