@@ -14900,8 +14900,21 @@
     }).then(function (r) {
       if (!r || !r.ok) throw new Error('http-' + (r && r.status));
       clientLogFailures = 0;
-    }).catch(function () {
-      // 失败:放回去等下一批(最多再攒到 400),指数退避;连续失败到上限就放弃并清空,不制造重试风暴
+    }).catch(function (error) {
+      // 失败:放回去等下一批(最多再攒到 400),指数退避;连续失败到上限就放弃并清空,不制造重试风暴。
+      // 第一次失败在调试浮窗出声(只写浮窗、不进缓冲,否则自我循环):没有它,"日志为什么没到服务器"本身就不可诊断。
+      if (clientLogFailures === 0) {
+        try {
+          var el = root.document && (root.document.getElementById('debug-log') || root.document.getElementById('ep-debug-log'));
+          if (el) {
+            var line = root.document.createElement('div');
+            line.style.color = '#e0a040';
+            line.textContent = '[' + new Date().toLocaleTimeString() + '] 日志上报失败: ' +
+              String(error && error.message || error).slice(0, 160);
+            el.appendChild(line);
+          }
+        } catch (_) {}
+      }
       clientLogFailures += 1;
       if (clientLogFailures >= CLIENT_LOG_MAX_FAILURES) clientLogGaveUpAt = Date.now();
       clientLogBuffer = clientLogFailures >= CLIENT_LOG_MAX_FAILURES ? [] : batch.concat(clientLogBuffer).slice(-400);

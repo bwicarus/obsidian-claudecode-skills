@@ -1234,6 +1234,13 @@ if (window.__bwPwaProviderOnly) return;
     } catch (e2) { run(); }
   }
 
+  // 摘掉 content 里固化的词典段(整段 <div class="rc-note-dict vc-dict-sec"...>…</div>,它是 content 末尾追加的)
+  function _stripBakedDict(content) {
+    var s = String(content || '');
+    var at = s.indexOf('<div class="rc-note-dict vc-dict-sec"');
+    if (at < 0) return s;
+    return s.slice(0, at);
+  }
   function appendWordDictLine(ctl, box, bind, label) {
     try {
       // 词典行 v1 只在 App 内出（runtime 在场才发请求,契约沙箱不发）。
@@ -1242,15 +1249,28 @@ if (window.__bwPwaProviderOnly) return;
       // 用户设计（2026-09-03）：字典内容留在字典里、卡片内容留在卡片里,卡内词典段只是
       // **当前锁定词**的实时投影 —— 改锁到「試験」就显示試験,解绑就没有;不再按卡名兜底,
       // 也不再把词典文字固化进 content(旧卡里已固化的那段显示时摘掉,存储不动)。
-      try {
-        Array.prototype.forEach.call(box.querySelectorAll('.vc-dict-sec'), function (n) { n.remove(); });
-      } catch (eC) {}
       var text = bindWordTextOf(bind);
       try { window.dlog && window.dlog('卡内词典:锁定词=' + (text || '(无绑定)') + ' label=' + String(label || '')); } catch (eL0) {}
       if (!text) {
-        try { Array.prototype.forEach.call(box.querySelectorAll('.rc-note-dict,.rc-note-dict-wait'), function (n) { n.remove(); }); } catch (eU) {}
+        // 解绑:固化在 content 里的词典段一并摘掉(存回去),显示层同步
+        try {
+          var hhU = ctl && ctl.note && ctl.note.html;
+          if (hhU && /vc-dict-sec/.test(String(hhU.content || ''))) {
+            hhU.content = _stripBakedDict(hhU.content);
+            ctl.note.html = hhU;
+            patchNote(ctl.note, { html: hhU });
+          }
+          Array.prototype.forEach.call(box.querySelectorAll('.rc-note-dict,.rc-note-dict-wait'), function (n) { n.remove(); });
+        } catch (eU) {}
         return;
       }
+      // 已固化且就是当前锁定词 → 什么都不做(2026-09-01 方案:词典文字写进 content 走卡片自己的渲染流,
+      // 实测独立 DOM 会被卡片的固定高度/滚动裁掉 —— 613/614 的实时投影正是这样"看不见")
+      try {
+        var hhB = ctl && ctl.note && ctl.note.html;
+        var bakedFor = hhB ? (String(hhB.content || '').match(/vc-dict-sec"[^>]*data-dict-word="([^"]*)"/) || [])[1] : '';
+        if (bakedFor === text) return;
+      } catch (eB) {}
       if (text.length > 32 || text.indexOf(String.fromCharCode(10)) >= 0) {
         dictLineNote(box, '词典：标题不是词（过长/多行）'); return;
       }
@@ -1416,18 +1436,16 @@ if (window.__bwPwaProviderOnly) return;
             h2 += '<div class="rnd-ex"><div class="rnd-ex-zh">'
               + esc(defText.slice(0, 400)) + '</div></div>';
           }
-          // 实时投影(2026-09-03):挂进卡片正文容器(.vc-card-bd 随卡片自己的滚动流,不会被
-          // 固定高度裁掉),不写进 content —— 锁定变了这段就换,卡片内容始终是卡片自己的。
-          if (!box.isConnected) return;
-          var host = box.querySelector('.vc-card-bd') || box.querySelector('.vc-card') || box;
-          var stale = box.querySelector('.rc-note-dict');
-          if (stale) stale.remove();
-          var sec = document.createElement('div');
-          sec.className = 'rc-note-dict';
-          sec.setAttribute('data-dict-word', text);
-          sec.innerHTML = h2;
-          host.appendChild(sec);
-          try { window.dlog && window.dlog('卡内词典:「' + text + '」已挂到 ' + (host.className || 'box').split(' ')[0] + ',长度 ' + h2.length); } catch (eL) {}
+          // 词典文字写进卡片 content(2026-09-01 方案,实测唯一稳定可见的路径),但按**当前锁定词**
+          // 重写:改锁到别的词时先摘掉旧段再写新段(2026-09-03 用户实锤锁到「試験」仍显示原词);
+          // 段上带 data-dict-word 供下次判断是否已是当前词。词典框嵌卡时会剥掉这段,不会重复。
+          var hh = ctl && ctl.note && ctl.note.html;
+          if (!hh) return;
+          hh.content = _stripBakedDict(String(hh.content || ''))
+            + '<div class="rc-note-dict vc-dict-sec" data-dict-word="' + esc(text) + '">' + h2 + '</div>';
+          ctl.note.html = hh;
+          patchNote(ctl.note, { html: hh });
+          try { window.dlog && window.dlog('卡内词典:「' + text + '」已写入卡片内容,长度 ' + h2.length); } catch (eL) {}
         })
         .catch(function () {});
     } catch (e) {}
