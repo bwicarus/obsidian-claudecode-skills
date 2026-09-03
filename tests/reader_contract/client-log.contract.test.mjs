@@ -30,7 +30,9 @@ test("路由四处同步：服务端实现、manifest、interaction-policy、运
   assert.match(POLICY, /'diagnostics\.client-log\.report',\n\s*'\/pdf\/api\/client-log',\n\s*\['POST'\]/);
   // 诊断不能反过来制造积压：离线丢弃、不进 outbox
   assert.match(POLICY, /'diagnostics\.client-log\.report'[\s\S]{0,300}offline: 'drop'/);
-  assert.match(RUNTIME, /root\.fetch\(localBasePath\(\) \+ '\/pdf\/api\/client-log'/);
+  // 必须是裸路径:带 localBasePath 前缀的路径不以 /pdf/api/ 开头,localFetch 不认领 → 环回 404 → 静默失败(2026-09-03 实锤)
+  assert.match(RUNTIME, /root\.fetch\('\/pdf\/api\/client-log', \{/);
+  assert.doesNotMatch(RUNTIME, /root\.fetch\(localBasePath\(\) \+ '\/pdf\/api\/client-log'/);
   void routes;
 });
 
@@ -43,7 +45,8 @@ test("上报器：包住 dlog、接住未捕获异常、批量而有上限", () 
   assert.match(read("_server_deploy/static/pdf/rc-settings.js"), /window\.__bwClientLog\(lvl, msg\)/);
   assert.match(install, /root\.addEventListener\('error'/);
   assert.match(install, /root\.addEventListener\('unhandledrejection'/);
-  assert.match(install, /root\.addEventListener\('pagehide'/);
+  // pagehide 不抢发:那一刻只允许 active-reading 的同步上报(native-local-runtime 契约按请求数计)
+  assert.doesNotMatch(install, /root\.addEventListener\('pagehide'/);
   const push = bodyOf(RUNTIME, "clientLogPush");
   assert.match(push, /if \(clientLogBuffer\.length > 400\) clientLogBuffer\.splice\(0, clientLogBuffer\.length - 400\);/);
   const flush = bodyOf(RUNTIME, "clientLogFlush");

@@ -14893,8 +14893,10 @@
       build: String((root.BWReaderRuntime && root.BWReaderRuntime.appBuild) || ''),
       lines: batch
     });
+    // 裸路径是正道(2026-09-03 实锤:带 localBasePath 前缀的路径不以 /pdf/api/ 开头,localFetch 不认领,
+    // 直接打到环回服务 404 → 上报静默失败 6 次后放弃,服务器一条都没收到)。
     // @interaction diagnostics.client-log.report
-    return root.fetch(localBasePath() + '/pdf/api/client-log', {
+    return root.fetch('/pdf/api/client-log', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body,
       keepalive: keepalive === true
     }).then(function (r) {
@@ -14948,8 +14950,9 @@
           clientLogPush('error', 'unhandled: ' + String((r && (r.stack || r.message)) || r).slice(0, 1500));
         } catch (_) {}
       });
-      root.addEventListener('pagehide', function () { try { clientLogFlush(true); } catch (_) {} });
-      clientLogPush('log', 'client-log 上报器就绪 device=' + deviceId + ' book=' + localFileRef());
+      // 不在 pagehide 抢发:那一刻只允许 active-reading 的同步上报(契约「最后可见页不过期」按请求数计),
+      // 最多丢最后 4 秒的行;首行"就绪"也不发,免得每次开页都占一条请求。
+      clientLogGaveUpAt = 0;
     } catch (_) {}
   }
   installClientLogReporter();
