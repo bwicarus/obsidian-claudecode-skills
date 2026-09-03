@@ -4660,7 +4660,7 @@ class ReaderBookOcrService:
                 "recognizedPages": details["recognizedPages"],
                 "percent": 100,
                 "etaSeconds": 0,
-                "message": "已采用现有 Pi 预处理结果",
+                "message": "已采用现有服务器预处理结果",
                 "canPause": False,
                 "canResume": False,
                 "canCancel": False,

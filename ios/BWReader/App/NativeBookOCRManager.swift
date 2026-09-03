@@ -1032,12 +1032,13 @@ final class NativeBookOCRManager: ObservableObject {
         let state: NativeBookOCRJobState = pages.contains(where: {
             $0.status == .failed
         }) ? .failed : .completed
-        // 还没人挑过文字层时，把刚导入的这一份采纳为当前使用 —— 否则书会继续
-        // 用 PDF 自带的那层，而它的框高到相邻两行重叠，预处理等于白做。
+        // 刚导入的这一份直接成为当前使用(用户 2026-09-04:「导入后再选择毫无意义」)。
+        // 导入是用户主动触发的动作,不是后台偷改;选择器仍可手动切回。
         let adoption = try await store.adoptImportedLayerIfUnchosen(
             bookID: bookID,
             contentSHA256: result.contentSHA256,
-            layer: result.layer
+            layer: result.layer,
+            force: true
         )
         let status = Self.makeStatus(
             bookID: bookID,

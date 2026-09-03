@@ -453,7 +453,7 @@ struct ReaderLocalLibraryView: View {
                         preprocessingToggleButton(
                             bookID: "local:\(book.id)",
                             summary: "本机 \(nativeStateTitle(nativeStatus(for: book).state)) · "
-                                + "Pi \(piSummary(remoteBook))"
+                                + "服务器 \(piSummary(remoteBook))"
                         )
                     }
                 }
@@ -482,9 +482,10 @@ struct ReaderLocalLibraryView: View {
                             "local:\(book.id)"
                         )
                     )) {
-                        guard let remoteBook else { return }
-                        await refreshPiStatus(
-                            remoteBook,
+                        // 面板开着就持续刷新(用户 2026-09-04:此前要关掉重开才更新):
+                        // 任务活动中每 3s,空闲每 20s;顺带刷本机文字层状态,选择器不再显示过期的选中项。
+                        await pollPreprocessingPanel(
+                            remoteBook: remoteBook,
                             localBook: book,
                             previewsLegacyResults: expandedPreprocessingBookIDs.contains(
                                 "local:\(book.id)"
@@ -520,7 +521,7 @@ struct ReaderLocalLibraryView: View {
                     if book.kind.lowercased() == "pdf" {
                         preprocessingToggleButton(
                             bookID: "remote:\(book.bookId)",
-                            summary: "Pi \(piSummary(book))"
+                            summary: "服务器 \(piSummary(book))"
                         )
                     }
                 }
@@ -557,8 +558,8 @@ struct ReaderLocalLibraryView: View {
                             "remote:\(book.bookId)"
                         )
                     )) {
-                        await refreshPiStatus(
-                            book,
+                        await pollPreprocessingPanel(
+                            remoteBook: book,
                             localBook: localBook,
                             previewsLegacyResults: expandedPreprocessingBookIDs.contains(
                                 "remote:\(book.bookId)"
@@ -755,7 +756,7 @@ struct ReaderLocalLibraryView: View {
                 ProgressView().controlSize(.mini)
             }
         }
-        Text("导入或预处理不会自动覆盖当前选择；切换后正在阅读的页面会立即重载文字层。")
+        Text("导入或预处理完成的结果会自动成为当前文字层；这里可以手动切回，切换后正在阅读的页面立即重载。")
             .font(.caption2)
             .foregroundStyle(.secondary)
     }
@@ -1487,6 +1488,34 @@ struct ReaderLocalLibraryView: View {
         let cookies = await reader.remoteLibraryCookies()
         await remote.refresh(cookies: cookies, localLibrary: library)
         ReaderLibraryRefreshClock.lastAutomaticRemoteRefreshAt = Date()
+    }
+
+    /// 预处理面板展开期间的轮询。`.task(id:)` 随面板出现而起、收起而取消;
+    /// 服务器任务活动中(排队/运行/暂停请求…)每 3 秒,空闲每 20 秒;每轮顺带刷本机文字层状态。
+    private func pollPreprocessingPanel(
+        remoteBook: ReaderRemoteBook?,
+        localBook: ReaderLocalBookRecord?,
+        previewsLegacyResults: Bool
+    ) async {
+        while !Task.isCancelled {
+            if let remoteBook {
+                await refreshPiStatus(
+                    remoteBook,
+                    localBook: localBook,
+                    previewsLegacyResults: previewsLegacyResults
+                )
+            }
+            if let localBook { await refreshTextLayers(localBook) }
+            let active = remoteBook.flatMap { piOCR.job(for: $0) }.map { job in
+                job.isActive || job.canResume || piOCR.activeBookID == $0.bookId
+            } ?? false
+            let busy = active || ocrActionBookID != nil || piOCR.activeBookID != nil
+            do {
+                try await Task.sleep(for: .seconds(busy ? 3 : 20))
+            } catch {
+                return
+            }
+        }
     }
 
     private func refreshPiStatus(

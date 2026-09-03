@@ -99,3 +99,8 @@ node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 b
 - **例句中译改走 App 的「翻译 / 例句」路由**（同日）：`/pdf/api/translate-sentence` `backend=ai` 现在按 `assistant._AI_ROUTES["translate"]`
   + 用户在 App 设置面板里的覆盖（当前 Codex 5.3 Spark / low）翻，缓存 ns `route-translate`；不再经 translate.py 的全局 `ai_backend`。
   两条老教训：`_ai_call` 会把 `_READER_SYS` 抢占系统位，翻译这类要自带 system 的调用直接走 `reader_ask(system=…)`。
+- **PC 预处理整本 0/80「直接无法使用」= 服务器页字段白名单没放行 worker 新字段**（09-04，与 08-19 同坑）：
+  9 月 3 日给 worker 页加了 `tokenizeSchema`，`reader_book_ocr._normalize_pc_page` 的拒绝式白名单没同步，
+  worker 传第 1 页就 400 `invalid-worker-page`，退避重试永不前进。`tests/test_reader_book_ocr.py` 里
+  `test_pc_worker_sidecar_keys_are_all_allowed` 就是为它写的 —— **改 worker sidecar 字段必须跑这个测试**；
+  白名单副本有两份（服务端 + 该测试的字段清单），`contract_sites.py` 口径。

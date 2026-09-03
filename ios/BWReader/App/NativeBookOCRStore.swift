@@ -410,21 +410,27 @@ actor NativeBookOCRSidecarStore {
     /// 「导入不覆盖当前选择」本身是对的（用户挑过的东西不该被后台改掉），错在
     /// 把"从来没挑过"也算成了一次选择。所以只在这两种情况下自动采纳：
     /// 当前是内嵌层或兼容旧结果，**且**这个选择不是用户自己点出来的。
+    ///
+    /// `force`(2026-09-04 用户:「导入后再选择毫无意义」):导入/预处理是用户主动做的,
+    /// 结果就该成为当前文字层,不再区分"以前挑没挑过";选择器留着手动切回。
     func adoptImportedLayerIfUnchosen(
         bookID: String,
         contentSHA256: String,
-        layer: NativeBookOCRLayerID
+        layer: NativeBookOCRLayerID,
+        force: Bool = false
     ) throws -> (state: NativeBookOCRLayerState, adopted: Bool) {
         let current = try layerState(contentSHA256: contentSHA256)
         guard current.available.contains(where: { $0.layer == layer }) else {
             return (current, false)
         }
         if current.selected == layer { return (current, false) }
-        guard [.embedded, .legacy].contains(current.selected) else {
-            return (current, false)
+        if !force {
+            guard [.embedded, .legacy].contains(current.selected) else {
+                return (current, false)
+            }
+            let stored = try loadLayerSelection(contentSHA256: contentSHA256)
+            if stored?.chosenByUser == true { return (current, false) }
         }
-        let stored = try loadLayerSelection(contentSHA256: contentSHA256)
-        if stored?.chosenByUser == true { return (current, false) }
         let state = try selectLayer(
             bookID: bookID,
             contentSHA256: contentSHA256,
