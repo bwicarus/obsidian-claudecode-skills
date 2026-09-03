@@ -482,6 +482,9 @@ class ManagedServiceSpec:
     port: int
     log_file: Path
     env: Mapping[str, str] | None = None
+    # 相对 cwd 的 glob;任一文件 mtime 变了 → restart_if_code_changed() 重启(只对本控制器拉起的实例)。
+    # 搬自 local_supervisor.pyw 的「代码变更自动重启」(治「改端点要手动重启」)。
+    watch_globs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -494,6 +497,7 @@ class ManagedServiceStatus:
     pid: int | None
     restarts: int
     error: str | None
+    halted: bool = False     # 连续快失败熔断:暂停自动重拉,等人看日志后 reset()
 
     def to_public(self) -> dict[str, Any]:
         return {
@@ -504,6 +508,7 @@ class ManagedServiceStatus:
             "owned": self.owned,
             "restarts": self.restarts,
             "error": self.error,
+            "halted": self.halted,
         }
 
 
@@ -514,6 +519,10 @@ def _tcp_reachable(port: int, timeout: float = 0.6) -> bool:
             return True
     except OSError:
         return False
+
+
+MANAGED_FAST_FAIL_SECONDS = 20.0   # 起来不到这么久就退出 = 快失败
+MANAGED_FAST_FAIL_LIMIT = 4        # 连续这么多次 → 熔断
 
 
 class ManagedProcessController:
@@ -535,6 +544,9 @@ class ManagedProcessController:
         self._restarts = 0
         self._error: str | None = None
         self._last_start = 0.0
+        self._watched: dict[str, float] = {}
+        self._fast_fails = 0
+        self._halted = False
 
     def status(self) -> ManagedServiceStatus:
         owned = self._process is not None and self._process.poll() is None
@@ -548,7 +560,54 @@ class ManagedProcessController:
             pid=pid,
             restarts=self._restarts,
             error=self._error,
+            halted=self._halted,
         )
+
+    # —— 代码变更自动重启(搬自 local_supervisor.pyw)——
+    def _watched_files(self):
+        for pattern in self.spec.watch_globs:
+            try:
+                yield from self.spec.cwd.glob(pattern)
+            except Exception:
+                continue
+
+    def _snapshot_watched(self) -> None:
+        snapshot: dict[str, float] = {}
+        for path in self._watched_files():
+            try:
+                snapshot[str(path)] = path.stat().st_mtime
+            except OSError:
+                continue
+        self._watched = snapshot
+
+    def code_changed(self) -> str | None:
+        """返回第一个 mtime 与上次快照不同(或新增)的文件名;没变返回 None。"""
+        for path in self._watched_files():
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if self._watched.get(str(path)) != mtime:
+                return path.name
+        return None
+
+    def restart_if_code_changed(self, *, debounce_seconds: float = 1.5) -> str | None:
+        """只对**本控制器拉起**的实例生效:别人的进程改了代码不归我们重启。"""
+        if not self.spec.watch_globs or not self.status().owned:
+            return None
+        changed = self.code_changed()
+        if not changed:
+            return None
+        self._sleep(debounce_seconds)   # 连写多文件只重启一次
+        self.stop()
+        self.start()
+        return changed
+
+    def reset(self) -> None:
+        """人看过日志后解除熔断。"""
+        self._halted = False
+        self._fast_fails = 0
+        self._error = None
 
     def start(self, *, timeout_seconds: float = 20.0) -> ManagedServiceStatus:
         before = self.status()
@@ -583,6 +642,7 @@ class ManagedProcessController:
             handle.close()
         self._last_start = self._clock()
         self._restarts += 1
+        self._snapshot_watched()
         deadline = self._clock() + max(1.0, timeout_seconds)
         while self._clock() < deadline:
             if self._process.poll() is not None:
@@ -621,14 +681,29 @@ class ManagedProcessController:
     def ensure(self, *, backoff_seconds: float = 15.0) -> ManagedServiceStatus:
         """保活:不可达且未由本控制器持有 → 拉起(带退避);由本控制器持有但进程死了 → 记错并重拉。"""
         current = self.status()
-        if current.reachable:
-            return current
-        if self._clock() - self._last_start < backoff_seconds:
+        if current.reachable or self._halted:
             return current
         if self._process is not None and self._process.poll() is not None:
-            self._error = f"{self.spec.label} 退出(code={self._process.returncode}),重拉"
+            # 连续快失败熔断(搬自 local_supervisor.pyw):坏代码/端口被占时别每 15s 拉一次
+            uptime = self._clock() - self._last_start
+            exit_code = self._process.returncode
+            self._fast_fails = self._fast_fails + 1 if uptime < MANAGED_FAST_FAIL_SECONDS else 0
             self._process = None
-        return self.start()
+            if self._fast_fails >= MANAGED_FAST_FAIL_LIMIT:
+                self._halted = True
+                self._error = (
+                    f"{self.spec.label} 连续 {self._fast_fails} 次启动后立即退出,已熔断;"
+                    f"看 {self.spec.log_file.name} 修好后点「重启」"
+                )
+                return self.status()
+            self._error = f"{self.spec.label} 退出(code={exit_code}),重拉"
+        if self._clock() - self._last_start < backoff_seconds:
+            return current
+        try:
+            return self.start()
+        except ReaderPCServiceError:
+            # start() 已把 _error 写好;熔断计数在下一轮 ensure 里按"进程已退出"累加
+            return self.status()
 
 
 def default_server_services(project_root: Path | None = None) -> list[ManagedServiceSpec]:
@@ -642,12 +717,50 @@ def default_server_services(project_root: Path | None = None) -> list[ManagedSer
     deploy = root / "_server_deploy"
     logs = root / "webapp-data"
     return [
-        ManagedServiceSpec("webapp", "Flask 服务器(5000)", (python, "app.py"), deploy, 5000, logs / "local_flask.log", env),
+        ManagedServiceSpec("webapp", "Flask 服务器(5000)", (python, "app.py"), deploy, 5000, logs / "local_flask.log", env, watch_globs=("*.py",)),
         ManagedServiceSpec("voice-rt", "实时语音中继(8767)", (python, str(deploy / "voice_realtime_relay.py")), deploy, 8767, logs / "sidecar-voice-rt.log", env),
         ManagedServiceSpec("watch-voice", "手表语音中继(8768)", (python, str(deploy / "watch_voice_relay.py")), deploy, 8768, logs / "sidecar-watch-voice.log", env),
         ManagedServiceSpec("rbi", "远程浏览器(8769)", (python, str(deploy / "rbi_server.py")), deploy, 8769, logs / "sidecar-rbi.log", env),
         ManagedServiceSpec("mcp", "MCP 门面(8766)", (python, str(deploy / "mcp_server.py"), "--http", "8766"), deploy, 8766, logs / "sidecar-mcp.log", env),
     ]
+
+
+OBSIDIAN_SYNC_TASK_NAME = "Obsidian Headless Sync"
+
+
+def ensure_scheduled_task_running(
+    task_name: str = OBSIDIAN_SYNC_TASK_NAME,
+    *,
+    runner: Callable[..., Any] = subprocess.run,
+) -> str:
+    """看护一个 Windows 计划任务:被禁→启用,没跑→启动。搬自 local_supervisor.pyw 的
+    ensure_obsidian_sync(2026-05-15 迁服务器时该任务被禁,PC vault 停更 3 周没人发现)。
+    用 Get-ScheduledTask 的 State 枚举(语言中立)。返回做了什么:absent / running / started / enabled+started / error:…"""
+    if os.name != "nt":
+        return "absent"
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        probe = runner(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-ScheduledTask -TaskName '{task_name}' -ErrorAction SilentlyContinue).State"],
+            capture_output=True, text=True, creationflags=flags, timeout=20,
+        )
+        state = str(getattr(probe, "stdout", "") or "").strip()
+        if not state:
+            return "absent"
+        if state == "Running":
+            return "running"
+        command = ""
+        action = "started"
+        if state == "Disabled":
+            command += f"Enable-ScheduledTask -TaskName '{task_name}' | Out-Null; "
+            action = "enabled+started"
+        command += f"Start-ScheduledTask -TaskName '{task_name}'"
+        runner(["powershell", "-NoProfile", "-Command", command],
+               capture_output=True, text=True, creationflags=flags, timeout=20)
+        return action
+    except Exception as exc:
+        return f"error:{exc}"
 
 
 @dataclass(frozen=True)

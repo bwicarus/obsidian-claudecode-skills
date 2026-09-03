@@ -42,9 +42,11 @@ from control_plane import (
 from readerpc_services import (
     CodexVoiceActivityStatus,
     ManagedProcessController,
+    OBSIDIAN_SYNC_TASK_NAME,
     PRODUCT_NAME,
     PcOcrServiceController,
     default_server_services,
+    ensure_scheduled_task_running,
     ReaderPCPaths,
     ReaderPCServiceError,
     format_pc_progress,
@@ -62,7 +64,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.119"
+APP_VERSION = "0.1.120"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status
@@ -1128,6 +1130,7 @@ class ReaderPCWindow:
         except Exception:
             self.server_services = []
         self.last_server_ensure = 0.0
+        self.server_tick = 0
         self.snapshot_hidden = tk.BooleanVar(
             value=bool(preferences["snapshotViewerHidden"])
         )
@@ -1840,13 +1843,27 @@ class ReaderPCWindow:
                 self.server_status.configure(text="未找到服务器工作树", foreground="#b26a00")
             else:
                 manage = bool(self.manage_server_services.get())
+                self.server_tick += 1
                 if manage and not self.busy and time.monotonic() - self.last_server_ensure >= 5.0:
                     self.last_server_ensure = time.monotonic()
                     for controller in self.server_services:
                         try:
                             controller.ensure()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            _boot_log(f"[warn] 服务器服务 {controller.spec.name} 保活失败: {str(exc)[:160]}")
+                        try:
+                            changed = controller.restart_if_code_changed()
+                            if changed:
+                                _boot_log(f"服务器服务 {controller.spec.name} 因代码变更 {changed} 已重启")
+                        except Exception as exc:
+                            _boot_log(f"[warn] 服务器服务 {controller.spec.name} 代码变更重启失败: {str(exc)[:160]}")
+                    # Obsidian Headless Sync 计划任务看护:开机第一轮 + 之后约每 5 分钟(60 轮 × 5s)
+                    if self.server_tick == 1 or self.server_tick % 60 == 0:
+                        def _watch_sync() -> None:
+                            outcome = ensure_scheduled_task_running(OBSIDIAN_SYNC_TASK_NAME)
+                            if outcome not in ("running", "absent"):
+                                _boot_log(f"Obsidian sync 计划任务看护: {outcome}")
+                        threading.Thread(target=_watch_sync, daemon=True).start()
                 statuses = [controller.status() for controller in self.server_services]
                 reachable = sum(1 for item in statuses if item.reachable)
                 owned = sum(1 for item in statuses if item.owned)
@@ -1864,6 +1881,10 @@ class ReaderPCWindow:
                     )
                 if errors:
                     self.server_detail.configure(text="；".join(errors)[:200])
+                elif manage:
+                    self.server_detail.configure(
+                        text="Flask 5000 与语音/手表/远程浏览器/MCP 四个 sidecar · 由 ReaderPC 托管:崩溃重拉、代码变更自动重启、Obsidian Sync 任务看护"
+                    )
         except Exception:
             pass
         self.root.after(5_000, self._ensure_server_services_online)

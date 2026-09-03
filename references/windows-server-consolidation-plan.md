@@ -70,3 +70,7 @@ ReaderPC-Server.exe
 - 下一步：观察一天影子行无误报 → 停计划任务 `BwicarusServer` 与两个旧守护 → 打开托管开关 →
   观察一天 → 删旧守护脚本、计划任务与 HKCU Run 项（步骤 4）。步骤 2 的两项副作用（代码变更重启、
   Obsidian Sync 计划任务看护）尚未搬，切换前必须补上。
+- **2026-09-03 步骤 2 + 3 完成（ReaderPC 0.1.120）**：`ManagedServiceSpec.watch_globs` + `restart_if_code_changed()`
+  （webapp 监视 `_server_deploy/*.py`，只对本控制器拉起的实例生效）、`ensure_scheduled_task_running()` 看护
+  「Obsidian Headless Sync」计划任务（开机第一轮 + 每 5 分钟）、连续快失败熔断（20s 内退出 ×4 → `halted`，
+  `reset()` 解除）。托管开关打开后这三件事都由 ReaderPC 做；旧守护此后不再有独占的功能。

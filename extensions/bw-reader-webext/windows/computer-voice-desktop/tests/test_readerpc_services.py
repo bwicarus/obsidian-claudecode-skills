@@ -5,11 +5,14 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
+import readerpc_services  # noqa: E402
 from readerpc_services import (  # noqa: E402
     PC_OCR_STATUS_CONTRACT,
     ManagedProcessController,
@@ -297,3 +300,130 @@ class ManagedProcessControllerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManagedProcessControllerSideEffectTests(unittest.TestCase):
+    """步骤 2:旧 Flask 守护的两项副作用 + 熔断,搬进受管控制器后要有人盯着。"""
+
+    def _controller(self, tmp, *, watch=("*.py",), reachable_flags=None):
+        from readerpc_services import ManagedProcessController, ManagedServiceSpec
+
+        deploy = Path(tmp) / "_server_deploy"
+        deploy.mkdir()
+        (deploy / "app.py").write_text("print('x')\n", encoding="utf-8")
+        spec = ManagedServiceSpec(
+            "webapp", "Flask", ("python", "app.py"), deploy, 5000,
+            Path(tmp) / "logs" / "flask.log", None, watch_globs=watch,
+        )
+        started: list[object] = []
+
+        class Process:
+            def __init__(self):
+                self.pid = 4242
+                self._alive = True
+                self.returncode = None
+
+            def poll(self):
+                return None if self._alive else self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def kill(self):
+                self._alive = False
+                self.returncode = -9
+
+        def popen(*args, **kwargs):
+            proc = Process()
+            started.append(proc)
+            return proc
+
+        state = {"reachable": False}
+        clock = {"now": 100.0}
+
+        def killer(cmd, **kwargs):
+            # taskkill /F /T /PID:模拟进程被杀
+            for proc in started:
+                proc._alive = False
+                proc.returncode = 1
+            return SimpleNamespace(returncode=0)
+
+        controller = ManagedProcessController(
+            spec,
+            popen=popen,
+            reachable=lambda port: state["reachable"] or bool(started and started[-1]._alive),
+            clock=lambda: clock["now"],
+            sleep=lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+        )
+        return controller, started, state, clock, killer, deploy
+
+    def test_code_change_restarts_only_owned_instance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller, started, state, clock, killer, deploy = self._controller(tmp)
+            # 影子模式:端口被别人占着 → 就算代码变了也不动
+            state["reachable"] = True
+            (deploy / "app.py").write_text("print('y')\n", encoding="utf-8")
+            self.assertIsNone(controller.restart_if_code_changed())
+            self.assertEqual(started, [])
+            state["reachable"] = False
+            controller.start()
+            self.assertEqual(len(started), 1)
+            self.assertIsNone(controller.code_changed(), "刚启动时快照应与磁盘一致")
+            (deploy / "app.py").write_text("print('z')\n", encoding="utf-8")
+            import os as _os
+            _os.utime(deploy / "app.py", (2_000_000_000, 2_000_000_000))
+            with patch("readerpc_services.subprocess.run", killer):
+                self.assertEqual(controller.restart_if_code_changed(), "app.py")
+            self.assertEqual(len(started), 2, "变更后应停旧起新")
+            self.assertIsNone(controller.code_changed(), "重启后快照刷新")
+
+    def test_fast_fail_halts_after_limit_and_reset_clears(self):
+        from readerpc_services import MANAGED_FAST_FAIL_LIMIT
+
+        with tempfile.TemporaryDirectory() as tmp:
+            controller, started, state, clock, killer, deploy = self._controller(tmp, watch=())
+            controller.start()
+            for _ in range(MANAGED_FAST_FAIL_LIMIT):
+                started[-1]._alive = False
+                started[-1].returncode = 3
+                clock["now"] += 1.0        # 起来 1 秒就死 = 快失败
+                controller.ensure(backoff_seconds=0.0)
+            status = controller.status()
+            self.assertTrue(status.halted, status)
+            self.assertIn("熔断", status.error or "")
+            self.assertTrue(status.to_public()["halted"])
+            before = len(started)
+            clock["now"] += 100.0
+            controller.ensure(backoff_seconds=0.0)
+            self.assertEqual(len(started), before, "熔断后不再自动拉起")
+            controller.reset()
+            controller.ensure(backoff_seconds=0.0)
+            self.assertEqual(len(started), before + 1, "reset 后恢复拉起")
+
+    def test_scheduled_task_watch_enables_and_starts(self):
+        calls: list[list[str]] = []
+
+        def runner(cmd, **kwargs):
+            calls.append(cmd)
+            if "Get-ScheduledTask" in cmd[-1]:
+                return SimpleNamespace(stdout="Disabled\n", returncode=0)
+            return SimpleNamespace(stdout="", returncode=0)
+
+        outcome = readerpc_services.ensure_scheduled_task_running("Obsidian Headless Sync", runner=runner)
+        if sys.platform != "win32":
+            self.assertEqual(outcome, "absent")
+            return
+        self.assertEqual(outcome, "enabled+started")
+        self.assertIn("Enable-ScheduledTask -TaskName 'Obsidian Headless Sync'", calls[1][-1])
+        self.assertIn("Start-ScheduledTask -TaskName 'Obsidian Headless Sync'", calls[1][-1])
+
+        def running(cmd, **kwargs):
+            return SimpleNamespace(stdout="Running\n", returncode=0)
+
+        self.assertEqual(readerpc_services.ensure_scheduled_task_running("X", runner=running), "running")
+
+        def absent(cmd, **kwargs):
+            return SimpleNamespace(stdout="", returncode=0)
+
+        self.assertEqual(readerpc_services.ensure_scheduled_task_running("X", runner=absent), "absent")
+        self.assertEqual(readerpc_services.OBSIDIAN_SYNC_TASK_NAME, "Obsidian Headless Sync")
