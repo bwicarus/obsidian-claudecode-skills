@@ -4855,11 +4855,16 @@ test("历史未锚定卡进入当前页上下文但不冒充正文或右侧标�
     text: "不能冒充自由卡",
     bind: { kind: "page-chars", page: 7, from: 90, to: 91, text: "不存在" },
   }));
-  await assert.rejects(
-    harness.api.pageCards(7),
-    /已锚定卡片几何暂不可解析/,
-    "bound geometry failure must fail the exact projection, never become unbound",
+  // 2026-09-03 用户实锤:一张 OCR 重跑后失配的旧卡曾让整页永远"无文字层"。
+  // 现在失配的已锚卡从本次投影跳过(既不编号、也不冒充自由卡),正文照常上报。
+  const degraded = await harness.api.pageCards(7);
+  // 跨 vm realm 的数组与本 realm 的字面量原型不同,strict deepEqual 会因原型不等而失败 → 比字符串
+  assert.equal(
+    degraded.cards.map((card) => card.id).join(","),
+    "c_7777777777777777,c_8888888888888888",
+    "unresolved bound card is skipped: neither numbered nor published as unbound",
   );
+  assert.equal(degraded.cards.some((card) => card.id === "c_9999999999999999"), false);
   await disableSnapshot(harness);
 });
 

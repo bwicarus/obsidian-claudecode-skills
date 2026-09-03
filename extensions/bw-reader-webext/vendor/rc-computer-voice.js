@@ -67,6 +67,7 @@ if (window.__bwPwaProviderOnly) return;
   var ACTIVE_READING_HEARTBEAT_MS = 60000;
   var LOCAL_PAGE_CONTEXT_POLL_MS = 1500;
   var LOCAL_PAGE_CONTEXT_RESEND_MS = 60 * 1000;   // 同一份正文的重发间隔(桥失忆自愈)
+  var LOCAL_PAGE_CONTEXT_BUILD_TIMEOUT_MS = 20 * 1000;   // 正文构建上限:超过即放栅栏、记 dlog
   var LOCAL_PAGE_TEXT_WAIT_MS = 1200;
   // 256 KiB is the direct bridge's immutable frame ceiling.  Keep enough
   // envelope headroom while allowing normal long cards to remain complete.
@@ -8310,6 +8311,24 @@ if (window.__bwPwaProviderOnly) return;
     if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)) return null;
     to = Math.max(from, to);
     var text = stripLocalCardWhitespace(want && want.text);
+    // 绑定自带字符索引集合(2026-09-02 词锚改为字符集合语义)时优先按它解析:
+    // 跨行/跨格的词 from..to 区间会夹进别的字符,按区间对文本必失配。
+    if (Array.isArray(want && want.ois) && want.ois.length) {
+      var oisBoxes = [];
+      var oisText = "";
+      var lo = Infinity, hi = -1;
+      want.ois.slice().sort(function (a, b) { return a - b; }).forEach(function (oi) {
+        var item = chars[oi];
+        if (!item) return;
+        oisBoxes.push(item);
+        if (!item.sp && item.c) oisText += String(item.c);
+        lo = Math.min(lo, oi); hi = Math.max(hi, oi);
+      });
+      if (oisBoxes.length && hi >= 0 &&
+          (!text || stripLocalCardWhitespace(oisText) === text)) {
+        return { lo: lo, hi: hi, boxes: oisBoxes };
+      }
+    }
     var hit = [];
     var got = "";
     for (var index = 0; index < chars.length; index += 1) {
@@ -8457,14 +8476,16 @@ if (window.__bwPwaProviderOnly) return;
       };
     });
     var unboundCards = [];
+    var unresolvedCards = [];
     cards.forEach(function (card) {
       if (numberedIndexes[card.sourceIndex]) return;
-      // A persisted bind that cannot be resolved is not a free card. Returning
-      // it as unbound would both violate the validator (unbound => bind:null)
-      // and silently change its product meaning. Exact projection is atomic:
-      // one unresolved bound card makes this snapshot unavailable.
+      // A persisted bind that cannot be resolved is not a free card, so it must
+      // not be published as unbound (validator: unbound => bind:null). 2026-09-03
+      // 用户实锤:此前这里整页抛错 —— 一张 OCR 重跑后失配的旧卡让第 46 页永远
+      // "无文字层"。现在这张卡从本次投影**跳过**并出声(dlog),正文照常上报。
       if (card.unbound !== true || card.bind !== null) {
-        throw new Error("已锚定卡片几何暂不可解析");
+        unresolvedCards.push({ id: card.id, label: card.label });
+        return;
       }
       var fallback = {
         number: null,
@@ -8481,6 +8502,14 @@ if (window.__bwPwaProviderOnly) return;
       publicCards.push(fallback);
       unboundCards.push({ card: card, number: null });
     });
+    if (unresolvedCards.length) {
+      try {
+        if (window.dlog) window.dlog("快照:第 " + page + " 页 " + unresolvedCards.length +
+          " 张已锚卡几何未解析,已跳过:" + unresolvedCards.map(function (c) {
+            return c.label || c.id;
+          }).join("、"), "#e0a040");
+      } catch (_) {}
+    }
     return {
       value: {
         contract: LOCAL_PAGE_CARD_PROJECTION_CONTRACT,
@@ -8489,7 +8518,8 @@ if (window.__bwPwaProviderOnly) return;
         cards: publicCards
       },
       projected: projected,
-      unboundCards: unboundCards
+      unboundCards: unboundCards,
+      unresolvedCards: unresolvedCards
     };
   }
 
@@ -10610,9 +10640,21 @@ if (window.__bwPwaProviderOnly) return;
     pump.lastPageContextCheckAt = now;
     pump.pageContextInFlight = true;
     var generation = pump.pageContextGeneration;
-    Promise.resolve(typeof runtime.ready === "function" ? runtime.ready() : null)
-      .then(function () { return buildLocalPageContext(current, runtime); })
+    // 构建加超时(2026-09-03):正文构建若永不落定,in-flight 栅栏永远不放,此后每次翻页都
+    // 没有正文上报,快照板一直 pending。超时按失败处理(不发布、进 dlog),但栅栏必须释放。
+    var buildTimer = null;
+    var buildWithTimeout = new Promise(function (resolve, reject) {
+      buildTimer = setTimeout(function () {
+        buildTimer = null;
+        reject(new Error("本机正文构建超时(" + LOCAL_PAGE_CONTEXT_BUILD_TIMEOUT_MS + "ms)"));
+      }, LOCAL_PAGE_CONTEXT_BUILD_TIMEOUT_MS);
+      Promise.resolve(typeof runtime.ready === "function" ? runtime.ready() : null)
+        .then(function () { return buildLocalPageContext(current, runtime); })
+        .then(resolve, reject);
+    });
+    buildWithTimeout
       .then(function (payload) {
+        if (buildTimer) { clearTimeout(buildTimer); buildTimer = null; }
         if (!activeReadingPumpAlive(state, pump) ||
             generation !== pump.pageContextGeneration) return null;
         var latest = localActiveReadingSnapshot();
@@ -10634,6 +10676,7 @@ if (window.__bwPwaProviderOnly) return;
           pump.lastPageContextError = "";
         });
       }).catch(function (error) {
+        if (buildTimer) { clearTimeout(buildTimer); buildTimer = null; }
         var message = String(error && error.message || error || "本机正文上报失败");
         var firstTime = message !== pump.lastPageContextError;
         if (firstTime) {

@@ -58,6 +58,11 @@ git rev-parse --abbrev-ref HEAD && git worktree list
   ② 面向 AI 的说明**写反比没写更糟** —— 没写它可能去翻 schema，
   写反了它直接放弃。
 
+- 🩺 **App 端报错自动落盘（2026-09-03 用户建议）**：阅读器里 `window.dlog` 的每一行与未捕获异常
+  由本机运行时批量 POST `/pdf/api/client-log`，落在 Windows 服务器
+  `state/reader-client-log/<user>.jsonl`（20MB 轮转一份）。**用户说「出问题了」先 tail 这个文件**，
+  不要再让用户截屏调试浮窗。规则：**新功能落地必须带诊断出口**——每个提前退出都要 `dlog` 出声
+  （见 `references/silent-failure-lessons.md`），否则等于不可诊断。
 - 🧭 **改完文档跑一次漂移检查**（没有 CI 会替你跑）：
 
   ```bash

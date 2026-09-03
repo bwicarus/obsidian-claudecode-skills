@@ -917,6 +917,21 @@
       "description": "Resolve character offsets for a verified Pi PDF copy."
     },
     {
+      "path": "/pdf/api/client-log",
+      "match": "exact",
+      "owner": "pi",
+      "methods": [
+        "POST"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": null,
+      "description": "Append App diagnostic log lines (dlog + uncaught errors) to the server-side file Claude reads."
+    },
+    {
       "path": "/pdf/api/context-sync",
       "match": "exact",
       "owner": "pi",

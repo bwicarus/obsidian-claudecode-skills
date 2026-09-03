@@ -408,6 +408,19 @@
         transport: { outbox: true, extensionBridge: true, serviceWorker: 'none' }
       }
     ),
+    // App 端诊断行落盘(用户 2026-09-03 建议):离线就丢,不排队 —— 诊断不能反过来制造积压
+    backgroundMutation(
+      'diagnostics.client-log.report',
+      '/pdf/api/client-log',
+      ['POST'],
+      {
+        kind: 'telemetry',
+        offline: 'drop',
+        sync: 'none',
+        transport: { outbox: false, extensionBridge: false, serviceWorker: 'none' },
+        reason: '诊断行是易失增量;发不出去就丢,不进 outbox,不能反过来制造积压。'
+      }
+    ),
     localMutation(
       'anki.cards.enqueue',
       '/pdf/api/anki-add-cards',

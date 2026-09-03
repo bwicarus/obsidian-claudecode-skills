@@ -16218,6 +16218,9 @@ def pdf_api_sync_batch():
 
 
 _LOOKUP_EVT_SEEN = CLAUDE_DIR / "state" / "lookup-events-seen.json"
+# App 端诊断日志落盘目录(用户 2026-09-03 建议:出问题 Claude 直接看文件)
+_CLIENT_LOG_DIR = CLAUDE_DIR / "state" / "reader-client-log"
+_CLIENT_LOG_MAX_BYTES = 20 * 1024 * 1024
 # 复习事件日志（append-only JSONL）与去重表。只写不读 —— 消费方将来单独做。
 _REVIEW_EVT_LOG = CLAUDE_DIR / "state" / "reader-review-events.jsonl"
 _REVIEW_EVT_SEEN = CLAUDE_DIR / "state" / "reader-review-events.seen.json"
@@ -16305,6 +16308,63 @@ def pdf_api_review_event():
         except Exception:
             pass
     return jsonify({"ok": True})
+
+
+@bp.route("/api/client-log", methods=["POST"])
+def pdf_api_client_log():
+    """App 端诊断行落盘(用户 2026-09-03 建议):阅读器的 dlog 行与未捕获异常由本机运行时批量
+    POST 到这里,按用户写 JSONL —— Claude 排障时直接 tail 文件,不必再让用户截屏调试浮窗。
+    只追加、单文件 20MB 轮转一份;每批 ≤200 行、每行 ≤2000 字、整包 ≤256KB,超出丢弃不报错。"""
+    raw = request.get_data(cache=False, as_text=False) or b""
+    if len(raw) > 256 * 1024:
+        return jsonify({"ok": False, "error": "too large"}), 413
+    try:
+        body = json.loads(raw.decode("utf-8")) if raw else {}
+    except Exception:
+        return jsonify({"ok": False, "error": "bad json"}), 400
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "bad body"}), 400
+    lines = body.get("lines")
+    if not isinstance(lines, list) or not lines:
+        return jsonify({"ok": True, "written": 0})
+    user = re.sub(r"[^A-Za-z0-9_.-]", "_", str(session.get("username") or "anon"))[:64] or "anon"
+    received = int(time.time())
+    head = {
+        "device": str(body.get("device") or "")[:96],
+        "book": str(body.get("book") or "")[:200],
+        "surface": str(body.get("surface") or "")[:16],
+        "build": str(body.get("build") or "")[:64],
+    }
+    out_lines = []
+    for item in lines[:200]:
+        if not isinstance(item, dict):
+            continue
+        rec = dict(head)
+        rec["received"] = received
+        rec["t"] = str(item.get("t") or "")[:40]
+        rec["level"] = str(item.get("level") or "log")[:12]
+        rec["msg"] = str(item.get("msg") or "")[:2000]
+        if not rec["msg"]:
+            continue
+        out_lines.append(json.dumps(rec, ensure_ascii=False))
+    if not out_lines:
+        return jsonify({"ok": True, "written": 0})
+    try:
+        _CLIENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        path = _CLIENT_LOG_DIR / f"{user}.jsonl"
+        try:
+            if path.exists() and path.stat().st_size > _CLIENT_LOG_MAX_BYTES:
+                rotated = _CLIENT_LOG_DIR / f"{user}.1.jsonl"
+                if rotated.exists():
+                    rotated.unlink()
+                path.rename(rotated)
+        except Exception:
+            pass
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(out_lines) + "\n")
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)[:120]}), 500
+    return jsonify({"ok": True, "written": len(out_lines)})
 
 
 @bp.route("/api/lookup-event", methods=["POST"])

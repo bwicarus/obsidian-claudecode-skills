@@ -14784,6 +14784,93 @@
       return syncControl.syncNow(request);
     }
   };
+  // ── App 端诊断自动落盘(用户 2026-09-03 建议)──────────────────────────
+  // 把 window.dlog 的每一行与未捕获异常攒起来,每 4s 一批 POST /pdf/api/client-log(owner=pi,
+  // 经网关带认证到 Windows 服务器,落 state/reader-client-log/<user>.jsonl)。Claude 排障直接看
+  // 文件,不必再让用户截屏调试浮窗。失败不重试到积压:缓冲上限 400 行,超出丢最旧。
+  var clientLogBuffer = [];
+  var clientLogTimer = null;
+  var clientLogInFlight = false;
+  var CLIENT_LOG_FLUSH_MS = 4000;
+  function clientLogPush(level, msg) {
+    try {
+      var text = String(msg == null ? '' : msg).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 2000);
+      if (!text) return;
+      clientLogBuffer.push({ t: new Date().toISOString(), level: String(level || 'log').slice(0, 12), msg: text });
+      if (clientLogBuffer.length > 400) clientLogBuffer.splice(0, clientLogBuffer.length - 400);
+      if (!clientLogTimer) clientLogTimer = setTimeout(clientLogFlush, CLIENT_LOG_FLUSH_MS);
+    } catch (_) {}
+  }
+  function clientLogFlush(keepalive) {
+    clientLogTimer = null;
+    if (clientLogInFlight || !clientLogBuffer.length) return;
+    var batch = clientLogBuffer.splice(0, 200);
+    clientLogInFlight = true;
+    var body = JSON.stringify({
+      device: deviceId, book: localFileRef(), surface: String(nativeInterfaceSurface || ''),
+      build: String((root.BWReaderRuntime && root.BWReaderRuntime.appBuild) || ''),
+      lines: batch
+    });
+    // @interaction diagnostics.client-log.report
+    return root.fetch(localBasePath() + '/pdf/api/client-log', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body,
+      keepalive: keepalive === true
+    }).then(function (r) {
+      if (!r || !r.ok) throw new Error('http-' + (r && r.status));
+    }).catch(function () {
+      // 失败:放回去等下一批(最多再攒到 400),服务器不在时不制造重试风暴
+      clientLogBuffer = batch.concat(clientLogBuffer).slice(-400);
+    }).then(function () {
+      clientLogInFlight = false;
+      if (clientLogBuffer.length && !clientLogTimer) clientLogTimer = setTimeout(clientLogFlush, CLIENT_LOG_FLUSH_MS);
+    });
+  }
+  function installClientLogReporter() {
+    try {
+      var wrapped = new WeakSet();
+      var wrap = function (fn) {
+        if (typeof fn !== 'function' || wrapped.has(fn)) return fn;
+        var out = function (msg, color) {
+          try { clientLogPush(color === '#ff6b6b' || color === '#c00' ? 'error' : 'log', msg); } catch (_) {}
+          return fn.apply(this, arguments);
+        };
+        wrapped.add(out);
+        return out;
+      };
+      var current = root.dlog;
+      var trapped = false;
+      // PDF 页在内联脚本里用 function 声明再 window.dlog = dlog:声明式全局不可重定义,
+      // defineProperty 会抛 → 退回直接赋值包一层(之后再被覆盖就包不住,但异常监听照常装)。
+      try {
+        Object.defineProperty(root, 'dlog', {
+          configurable: true, enumerable: true,
+          get: function () { return current; },
+          set: function (fn) { current = wrap(fn); }
+        });
+        trapped = true;
+      } catch (_) {}
+      if (typeof current === 'function') {
+        current = wrap(current);
+        if (!trapped) root.dlog = current;
+      }
+      root.addEventListener('error', function (ev) {
+        try {
+          var e = ev && ev.error;
+          clientLogPush('error', 'uncaught: ' + String((e && e.stack) || (ev && ev.message) || ev).slice(0, 1500));
+        } catch (_) {}
+      });
+      root.addEventListener('unhandledrejection', function (ev) {
+        try {
+          var r = ev && ev.reason;
+          clientLogPush('error', 'unhandled: ' + String((r && (r.stack || r.message)) || r).slice(0, 1500));
+        } catch (_) {}
+      });
+      root.addEventListener('pagehide', function () { try { clientLogFlush(true); } catch (_) {} });
+      root.__bwClientLog = clientLogPush;
+    } catch (_) {}
+  }
+  installClientLogReporter();
+
   runtimeRoot.nativeLocalRuntime = api;
   root._nativeReaderUndoLast = function (operationID) {
     return api.undoLast(operationID);

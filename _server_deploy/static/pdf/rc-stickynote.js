@@ -1236,27 +1236,33 @@
       // 词典行 v1 只在 App 内出（runtime 在场才发请求,契约沙箱不发）。
       if (!(window.BWReaderRuntime &&
         window.BWReaderRuntime.nativeLocalRuntime)) return;
-      // 已固化进 content 的卡不再查（用户方案：词典文字是卡的一部分）。
+      // 用户设计（2026-09-03）：字典内容留在字典里、卡片内容留在卡片里,卡内词典段只是
+      // **当前锁定词**的实时投影 —— 改锁到「試験」就显示試験,解绑就没有;不再按卡名兜底,
+      // 也不再把词典文字固化进 content(旧卡里已固化的那段显示时摘掉,存储不动)。
       try {
-        var hh0 = ctl && ctl.note && ctl.note.html;
-        if (hh0 && String(hh0.content || '').indexOf('vc-dict-sec') >= 0) {
-          return;
-        }
+        Array.prototype.forEach.call(box.querySelectorAll('.vc-dict-sec'), function (n) { n.remove(); });
       } catch (eC) {}
-      // ⚠ 实据修正（2026-08-31 深夜）：用户的卡是浮层卡（bind:null,
-      //   unbound）—— 只靠 bind 取词，这批卡的词典行**永远缺席**。
-      //   卡名（label）就是词名（キムチ/ローストビーフ…），bind 取不到
-      //   时用 label —— unbound 卡零门槛受益。
-      var text = bindWordTextOf(bind) || String(label || '').trim();
-      if (!text) { dictLineNote(box, '词典：取不到词（bind/label 皆空）'); return; }
+      var text = bindWordTextOf(bind);
+      if (!text) {
+        try { Array.prototype.forEach.call(box.querySelectorAll('.rc-note-dict,.rc-note-dict-wait'), function (n) { n.remove(); }); } catch (eU) {}
+        return;
+      }
       if (text.length > 32 || text.indexOf(String.fromCharCode(10)) >= 0) {
         dictLineNote(box, '词典：标题不是词（过长/多行）'); return;
       }
       if (text.split(/\s+/).length > 3) {
         dictLineNote(box, '词典：标题不是词（词数>3）'); return;
       }
-      if (box.querySelector('.rc-note-dict')) return;
-      if (box.querySelector('.rc-note-dict-wait')) return;   // 已在查
+      var existing = box.querySelector('.rc-note-dict');
+      if (existing) {
+        if (existing.getAttribute('data-dict-word') === text) return;   // 已是当前锁定词
+        existing.remove();   // 锁到别的词了 → 旧词的词典段摘掉,下面重查
+      }
+      var waiting = box.querySelector('.rc-note-dict-wait');
+      if (waiting) {
+        if (waiting.getAttribute('data-dict-word') === text) return;   // 已在查同一个词
+        waiting.remove();
+      }
       var cached = _dictLineCache[text];
       if (cached && cached.failAt &&
           Date.now() - cached.failAt < 20 * 1000) {
@@ -1269,6 +1275,7 @@
       if (!(cached && cached.d)) {
         waitLine = document.createElement('div');
         waitLine.className = 'rc-note-dict-wait';
+        waitLine.setAttribute('data-dict-word', text);
         waitLine.style.cssText =
           'margin-top:4px;font-size:11px;opacity:.5;color:#cfe6ff';
         waitLine.textContent = '📖 词典查询中…';
@@ -1405,17 +1412,17 @@
             h2 += '<div class="rnd-ex"><div class="rnd-ex-zh">'
               + esc(defText.slice(0, 400)) + '</div></div>';
           }
-          // 用户 2026-09-01 方案：词典文字**写进卡片 content** ——
-          // 独立 DOM 会被卡片的固定高度/滚动体系裁掉（诊断行跑到框外
-          // 实锤）；content 走卡片自己的渲染流，天然可见，patchNote
-          // 持久化后下次开卡零查询、跨设备随包同步。
-          var hh = ctl && ctl.note && ctl.note.html;
-          if (!hh) return;
-          if (String(hh.content || '').indexOf('vc-dict-sec') >= 0) return;
-          hh.content = String(hh.content || '')
-            + '<div class="rc-note-dict vc-dict-sec">' + h2 + '</div>';
-          ctl.note.html = hh;
-          patchNote(ctl.note, { html: hh });
+          // 实时投影(2026-09-03):挂进卡片正文容器(.vc-card-bd 随卡片自己的滚动流,不会被
+          // 固定高度裁掉),不写进 content —— 锁定变了这段就换,卡片内容始终是卡片自己的。
+          if (!box.isConnected) return;
+          var host = box.querySelector('.vc-card-bd') || box.querySelector('.vc-card') || box;
+          var stale = box.querySelector('.rc-note-dict');
+          if (stale) stale.remove();
+          var sec = document.createElement('div');
+          sec.className = 'rc-note-dict';
+          sec.setAttribute('data-dict-word', text);
+          sec.innerHTML = h2;
+          host.appendChild(sec);
         })
         .catch(function () {});
     } catch (e) {}
@@ -2616,6 +2623,10 @@
     var _pf = { anchor: anchor };
     if (_rb) _pf[_rb] = ctl.note[_rb];
     patchNote(ctl.note, _pf);
+    // 改锁/解绑 → 卡内词典段立刻跟随当前锁定词(用户 2026-09-03:锁到「試験」却显示旧词)
+    if (_rb && ctl.html && ctl.note.html) {
+      try { appendDictWhenVisible(ctl, ctl.html, ctl.note.html); } catch (eD) {}
+    }
     if (wasPortaled) {   // 先解除 portal,ensureMounted 才会真正换容器重挂(否则 portaled 守卫早退)
       if (wasWordPortal) { unobserveWordPortal(ctl); clearWordViewportLimits(ctl); }
       ctl.portaled = false; ctl._wordFixedPortal = false;
