@@ -36,9 +36,11 @@ test("路由四处同步：服务端实现、manifest、interaction-policy、运
 
 test("上报器：包住 dlog、接住未捕获异常、批量而有上限", () => {
   const install = bodyOf(RUNTIME, "installClientLogReporter");
-  assert.match(install, /Object\.defineProperty\(root, 'dlog'/);
-  // 声明式全局(PDF 页 function dlog)不可重定义时退回赋值包一层
-  assert.match(install, /if \(!trapped\) root\.dlog = current;/);
+  // 阅读器内部调的是局部 dlog,包 window.dlog 包不到 → dlog 本体主动交给 __bwClientLog,早期行先攒 __bwEarlyDlog
+  assert.match(install, /root\.__bwClientLog = clientLogPush;/);
+  assert.match(install, /var early = root\.__bwEarlyDlog;/);
+  assert.match(read("_server_deploy/templates/pdf_reader.html"), /window\.__bwClientLog\(lvl, msg\)/);
+  assert.match(read("_server_deploy/static/pdf/rc-settings.js"), /window\.__bwClientLog\(lvl, msg\)/);
   assert.match(install, /root\.addEventListener\('error'/);
   assert.match(install, /root\.addEventListener\('unhandledrejection'/);
   assert.match(install, /root\.addEventListener\('pagehide'/);
@@ -46,8 +48,11 @@ test("上报器：包住 dlog、接住未捕获异常、批量而有上限", () 
   assert.match(push, /if \(clientLogBuffer\.length > 400\) clientLogBuffer\.splice\(0, clientLogBuffer\.length - 400\);/);
   const flush = bodyOf(RUNTIME, "clientLogFlush");
   assert.match(flush, /var batch = clientLogBuffer\.splice\(0, 200\);/);
-  // 失败放回去、不制造重试风暴
-  assert.match(flush, /clientLogBuffer = batch\.concat\(clientLogBuffer\)\.slice\(-400\);/);
+  // 失败放回去、指数退避、连续失败到上限就放弃;定时器 unref,不把契约沙箱的 node 吊住(2026-09-03 实锤门禁挂 25 分钟)
+  assert.match(flush, /clientLogFailures >= CLIENT_LOG_MAX_FAILURES \? \[\] : batch\.concat\(clientLogBuffer\)\.slice\(-400\)/);
+  assert.match(flush, /clientLogArm\(Math\.min\(60000, CLIENT_LOG_FLUSH_MS \* Math\.pow\(2, clientLogFailures\)\)\)/);
+  assert.match(bodyOf(RUNTIME, "clientLogArm"), /typeof clientLogTimer\.unref === 'function'\) clientLogTimer\.unref\(\)/);
+  assert.match(push, /if \(typeof root\.fetch !== 'function' \|\| clientLogFailures >= CLIENT_LOG_MAX_FAILURES\) return;/);
   assert.match(RUNTIME, /installClientLogReporter\(\);\n\n\s*runtimeRoot\.nativeLocalRuntime = api;/);
 });
 

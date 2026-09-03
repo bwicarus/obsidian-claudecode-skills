@@ -622,6 +622,11 @@
   // 提供 window.dlog(若底座未定义):往可见浮窗追加一行,供 EPUB 各模块复用(对照 PDF window.dlog)
   if (typeof window.dlog !== 'function') {
     window.dlog = function (msg, color) {
+      try {   // App 端报错自动落盘(2026-09-03)
+        var lvl = (color === '#ff6b6b' || color === '#c00') ? 'error' : 'log';
+        if (typeof window.__bwClientLog === 'function') window.__bwClientLog(lvl, msg);
+        else { (window.__bwEarlyDlog = window.__bwEarlyDlog || []).push([lvl, String(msg)]); if (window.__bwEarlyDlog.length > 200) window.__bwEarlyDlog.shift(); }
+      } catch (_) {}
       try {
         var el = document.getElementById('ep-debug-log');
         if (!el) { _applyDebugVisibility(); el = document.getElementById('ep-debug-log'); }

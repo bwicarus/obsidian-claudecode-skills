@@ -849,6 +849,31 @@ class ReaderBookOcrJapaneseTokenizationTest(unittest.TestCase):
             [char["w"] for char in after],
         )
 
+    def test_table_row_splits_into_column_blocks_before_tokenizing(self) -> None:
+        """2026-09-03 实锤第 46 页:视觉层没认出表格时,manga OCR 的一"行"横跨整张表格行
+        (特徴格 + 主な料理格)且 line 字段为 None。整行聚成一块后 コチュジャ|ン 之间夹着别格的字,
+        收藏词组合并与分词都断掉。现在先按视觉行再按大横向间隔切栏段:同一格的两行归一块。"""
+
+        def cell(text: str, x: float, y: float, bk: int = 15) -> list[dict]:
+            out = []
+            for k, ch in enumerate(text):
+                out.append({"c": ch, "x0": x + k * 30.0, "x1": x + k * 30.0 + 28.0,
+                            "y0": y, "y1": y + 36.0, "w": -1, "bk": bk, "b": 0})
+            return out
+
+        # 中栏(x 540-)与右栏(x 900-)间隔 36px ≈ 一个行高;正常字间距 2px
+        chars = (cell("中国と同じく", 540.0, 1525.0) + cell("キムチ、コチュジャ", 900.0, 1525.0)
+                 + cell("とうがらしを多用", 540.0, 1569.0) + cell("ン、クッパなど", 900.0, 1569.0))
+        groups = self.worker._tokenize_groups(chars, None)
+        texts = ["".join(chars[i]["c"] for i in g) for g in groups]
+        right = [t for t in texts if "コチュジャ" in t]
+        self.assertEqual(len(right), 1, texts)
+        self.assertIn("コチュジャン", right[0])
+        self.assertNotIn("とうがらし", right[0])
+        middle = [t for t in texts if "とうがらし" in t]
+        self.assertEqual(len(middle), 1, texts)
+        self.assertIn("中国と同じくとうがらしを多用", middle[0])
+
 
 
 class ReaderBookOcrForcedRerunTest(unittest.TestCase):

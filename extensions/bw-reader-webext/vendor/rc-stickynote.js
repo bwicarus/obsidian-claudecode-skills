@@ -1246,6 +1246,7 @@ if (window.__bwPwaProviderOnly) return;
         Array.prototype.forEach.call(box.querySelectorAll('.vc-dict-sec'), function (n) { n.remove(); });
       } catch (eC) {}
       var text = bindWordTextOf(bind);
+      try { window.dlog && window.dlog('卡内词典:锁定词=' + (text || '(无绑定)') + ' label=' + String(label || '')); } catch (eL0) {}
       if (!text) {
         try { Array.prototype.forEach.call(box.querySelectorAll('.rc-note-dict,.rc-note-dict-wait'), function (n) { n.remove(); }); } catch (eU) {}
         return;
@@ -1426,6 +1427,7 @@ if (window.__bwPwaProviderOnly) return;
           sec.setAttribute('data-dict-word', text);
           sec.innerHTML = h2;
           host.appendChild(sec);
+          try { window.dlog && window.dlog('卡内词典:「' + text + '」已挂到 ' + (host.className || 'box').split(' ')[0] + ',长度 ' + h2.length); } catch (eL) {}
         })
         .catch(function () {});
     } catch (e) {}

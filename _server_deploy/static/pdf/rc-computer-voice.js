@@ -8360,11 +8360,48 @@
       }
       at = joined.indexOf(text, at + 1);
     }
-    if (best < 0) return null;
-    var lo = sourceIndexes[best];
-    var hi = sourceIndexes[Math.min(best + text.length - 1,
-      sourceIndexes.length - 1)];
-    return { lo: lo, hi: hi, boxes: chars.slice(lo, hi + 1) };
+    if (best >= 0) {
+      var lo = sourceIndexes[best];
+      var hi = sourceIndexes[Math.min(best + text.length - 1,
+        sourceIndexes.length - 1)];
+      return { lo: lo, hi: hi, boxes: chars.slice(lo, hi + 1) };
+    }
+    // 第三策略(2026-09-03 实锤 コチュジャン):词跨行/跨格时,源序里两段之间夹着别的格子的字,
+    // 连续搜索必失配,而阅读器本身是按字符集合锚定的。这里允许有间隔的子序列匹配,再用几何
+    // 校验(所有匹配字落在 3 个行高内、横向不超页宽六成)排除"东拼西凑"的假命中。
+    var units = Array.from(text);
+    if (units.length < 2 || units.length > 64) return null;
+    var startFrom = Number.isSafeInteger(from) ? from : 0;
+    var pageW = 0;
+    for (var pw = 0; pw < chars.length; pw += 1) {
+      if (chars[pw] && Number.isFinite(Number(chars[pw].x1))) pageW = Math.max(pageW, Number(chars[pw].x1));
+    }
+    var bestSeq = null, bestSeqDistance = Infinity;
+    for (var s0 = 0; s0 < chars.length; s0 += 1) {
+      var c0 = chars[s0];
+      if (!c0 || c0.sp || String(c0.c || "").charAt(0) !== units[0]) continue;
+      var picked = [c0], pickedIdx = [s0], ui = 1, gap = 0;
+      for (var s1 = s0 + 1; s1 < chars.length && ui < units.length && gap <= 80; s1 += 1) {
+        var c1 = chars[s1];
+        if (!c1 || c1.sp || !c1.c) continue;
+        if (String(c1.c).charAt(0) === units[ui]) { picked.push(c1); pickedIdx.push(s1); ui += 1; gap = 0; }
+        else gap += 1;
+      }
+      if (ui !== units.length) continue;
+      var xs0 = Infinity, xs1 = -Infinity, ys0 = Infinity, ys1 = -Infinity, lh = 0;
+      picked.forEach(function (b) {
+        xs0 = Math.min(xs0, Number(b.x0)); xs1 = Math.max(xs1, Number(b.x1));
+        ys0 = Math.min(ys0, Number(b.y0)); ys1 = Math.max(ys1, Number(b.y1));
+        lh = Math.max(lh, Number(b.y1) - Number(b.y0));
+      });
+      if (!(lh > 0) || (ys1 - ys0) > lh * 3 || (pageW && (xs1 - xs0) > pageW * 0.6)) continue;
+      var d0 = Math.abs(s0 - startFrom);
+      if (d0 < bestSeqDistance) {
+        bestSeqDistance = d0;
+        bestSeq = { lo: pickedIdx[0], hi: pickedIdx[pickedIdx.length - 1], boxes: picked };
+      }
+    }
+    return bestSeq;
   }
 
   function localCardGeometry(range) {

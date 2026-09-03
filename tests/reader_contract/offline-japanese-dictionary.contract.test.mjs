@@ -295,7 +295,9 @@ test("Japanese UI queries the App dictionary first and restores the old explicit
   assert.doesNotMatch(wordpop, /改用 Pi 深度解释（可选）|手动使用 Pi 深度解释/);
   assert.match(wordpop, /_lookupJapaneseLocalFirst/);
   assert.match(phrasepop, /_lookupPhraseLocalFirst/);
-  assert.doesNotMatch(wordpop, /lookupJapaneseFallback\s*\(/);
+  // 2026-09-03 用户拍板:单词两级词典都没中文时也像词组一样保持呼吸、请 ReaderPC 句境释义,不再立刻显示"暂无词典释义"
+  assert.match(wordpop, /_lookupJapaneseByReaderPC\(word, ctx, merged \|\| result\)/);
+  assert.match(wordpop, /cv\.lookupJapaneseFallback\(\{/);
   // 词组:本地词典缺中文时改向已连接的 ReaderPC 要句境释义(2026-08-18 用户拍板:
   // 「字典里没有的就直接闪烁等待就好了啊」)。英文 gloss 一律不得进视觉层 ——
   // 它此前被当成中文显示,还挂着「App 本地中文词典」的落款。

@@ -694,13 +694,36 @@
       if (!_japaneseLookupNeedsRemote(result)) return result;
       return _lookupJapaneseRemote(word, ctx).then(function (remoteResult) {
         var merged = _mergeJapaneseRemoteLookup(result, remoteResult);
-        // 两级词典都没有中文义时，回到旧版“无词条”分支：小框仍可点
-        // 整个释义区展开，完整框随后自动进入深度解释。
-        return _jpMeaningText(merged) ? merged : Object.assign({}, merged || result, { ok: false, jp: true });
+        if (_jpMeaningText(merged)) return merged;
+        // 两级词典都没有中文义(用户 2026-09-03 实锤 だろう):不立刻显示"暂无词典释义",
+        // 而是像词组那样保持呼吸,请这台电脑上的 ReaderPC 用句境算一条中文释义;电脑不在线才退回无词条分支。
+        return _lookupJapaneseByReaderPC(word, ctx, merged || result).then(function (cli) {
+          return cli || Object.assign({}, merged || result, { ok: false, jp: true });
+        });
       }).catch(function () {
-        return Object.assign({}, result, { ok: false, jp: true });
+        return _lookupJapaneseByReaderPC(word, ctx, result).then(function (cli) {
+          return cli || Object.assign({}, result, { ok: false, jp: true });
+        });
       });
     });
+  }
+  function _lookupJapaneseByReaderPC(word, ctx, base) {
+    try {
+      var cv = window.RC && RC.computerVoice;
+      if (!(cv && typeof cv.isLinked === 'function' && cv.isLinked() &&
+            typeof cv.lookupJapaneseFallback === 'function')) return Promise.resolve(null);
+      return Promise.resolve(cv.lookupJapaneseFallback({
+        mode: 'meaning', term: word, context: ctx || '',
+        reading: (base && base.reading) || '', english: ''
+      })).then(function (cli) {
+        if (!cli || !cli.text) return null;
+        return Object.assign({}, base || {}, {
+          ok: true, jp: true, word: word, lemma: (base && base.lemma) || word,
+          zh: cli.text, translation: cli.text, meaning_source: 'pc-codex-cli',
+          cli_cached: !!cli.cached, source: (base && base.source) || 'pc-codex-cli'
+        });
+      }).catch(function () { return null; });
+    } catch (_) { return Promise.resolve(null); }
   }
 
   function _lookupFetch(word) {
@@ -775,7 +798,7 @@
   function _noteLookedUp(word, d) {
     try {
       if (!d || d.ok !== true || !word) return;
-      if (String(d.definition || '').indexOf('暂无词典释义') === 0) return;
+      // 点过就算查过(用户 2026-09-03):词典没有的词也要有下划线 —— 它恰恰是你不认识的
       var lemma = String(d.lemma || word);
       var state = _vocabularyState();
       if (state && typeof state.setLookedUp === 'function') {

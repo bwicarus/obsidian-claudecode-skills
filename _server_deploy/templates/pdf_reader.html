@@ -424,6 +424,13 @@ try {
 <script>
   // ES module 之前的诊断：监听所有错误（包括 import 失败），写到 #debug-log + 页面
   function dlog(msg, color) {
+    // App 端报错自动落盘(2026-09-03):每一行也交给本机运行时批量送到服务器文件;
+    // 运行时还没起来时先攒着(上限 200),起来后一次性接走。
+    try {
+      var lvl = (color === '#ff6b6b' || color === '#c00') ? 'error' : 'log';
+      if (typeof window.__bwClientLog === 'function') window.__bwClientLog(lvl, msg);
+      else { (window.__bwEarlyDlog = window.__bwEarlyDlog || []).push([lvl, String(msg)]); if (window.__bwEarlyDlog.length > 200) window.__bwEarlyDlog.shift(); }
+    } catch (_) {}
     const el = document.getElementById('debug-log');
     if (!el) { console.log(msg); return; }
     const line = document.createElement('div');

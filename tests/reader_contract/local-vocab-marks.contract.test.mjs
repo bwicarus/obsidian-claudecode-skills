@@ -29,7 +29,8 @@ test("vocabulary-state 多了 lookup 属性，词框与词组框查到即记", (
   // 词框：渲染成功后记；合成兜底词条（"暂无词典释义"）不算查到
   assert.match(WORDPOP, /_cacheDictResult\(word, d\);\n\s*_wordPopState\.lemma = d\.lemma \|\| word;\n\s*_noteLookedUp\(word, d\);/);
   const note = bodyOf(WORDPOP, "_noteLookedUp");
-  assert.match(note, /indexOf\('暂无词典释义'\) === 0\) return;/);
+  // 点过就算查过(2026-09-03):词典没有的词也记 —— 它恰恰是你不认识的
+  assert.doesNotMatch(note, /indexOf\('暂无词典释义'\) === 0\) return;/);
   assert.match(note, /state\.setLookedUp\(/);
   // 本地/缓存命中时补报服务端 lookup-event（它的查词日志、生词笔记链路照旧）
   assert.match(note, /var servedLocally = d\.source === 'local-jmdict' \|\| d\.cached === true/);

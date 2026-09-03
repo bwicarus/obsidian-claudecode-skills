@@ -8236,6 +8236,72 @@
       });
       if (marks.length >= 800) break;
     }
+    // 第二遍(2026-09-03 实锤 だろう):点词得到的词往往跨多个分词(だろ+う),逐词元查不到。
+    // 拿本地状态里查过/收藏过的键在整页文本里搜,命中的按字符范围画;与第一遍按起点去重。
+    try {
+      var keys = typeof state.snapshot === 'function' ? state.snapshot() : [];
+      var wanted = [];
+      var seenKey = {};
+      (Array.isArray(keys) ? keys : []).forEach(function (r) {
+        if (!r || r.enabled !== true) return;
+        if (r.property !== 'lookup' && r.property !== 'favorite') return;
+        var k = String(r.key || '').replace(/[\s\u3000]+/g, '');
+        if (k.length < 2 || k.length > 64 || seenKey[k]) return;
+        seenKey[k] = true;
+        wanted.push({ key: k, slug: r.property === 'favorite' ? 'seen' : 'new', language: r.language });
+      });
+      if (wanted.length && wanted.length <= 4000) {
+        var joined = '', srcIdx = [];
+        chars.forEach(function (c, idx) {
+          if (!c || c.sp || !c.c) return;
+          var t = String(c.c).replace(/[\s\u3000]+/g, '').toLowerCase();
+          for (var u = 0; u < t.length; u += 1) { joined += t.charAt(u); srcIdx.push(idx); }
+        });
+        var takenStart = {};
+        marks.forEach(function (m) { if (m.rects && m.rects[0]) takenStart[m.rects[0][0] + ',' + m.rects[0][1]] = true; });
+        var rectsOf = function (lo, hi) {
+          var out = [], cur = null;
+          for (var q = lo; q <= hi; q += 1) {
+            var t = chars[q];
+            if (!t || t.sp) continue;
+            var x0 = Number(t.x0), y0 = Number(t.y0), x1 = Number(t.x1), y1 = Number(t.y1);
+            if (![x0, y0, x1, y1].every(Number.isFinite)) continue;
+            var lh = y1 - y0;
+            if (cur && Math.abs(y0 - cur[1]) <= lh * 0.5) {
+              cur[2] = Math.max(cur[2], x1); cur[1] = Math.min(cur[1], y0); cur[3] = Math.max(cur[3], y1);
+            } else {
+              if (cur) out.push(cur.map(function (v) { return Math.round(v * 100) / 100; }));
+              cur = [x0, y0, x1, y1];
+            }
+          }
+          if (cur) out.push(cur.map(function (v) { return Math.round(v * 100) / 100; }));
+          return out;
+        };
+        wanted.forEach(function (w) {
+          var at = joined.indexOf(w.key);
+          var guard = 0;
+          while (at >= 0 && guard < 200 && marks.length < 800) {
+            guard += 1;
+            var lo = srcIdx[at], hi = srcIdx[Math.min(at + w.key.length - 1, srcIdx.length - 1)];
+            var spec2 = { kind: 'word', language: w.language === 'en' ? 'en' : 'ja', lemma: w.key, word: w.key };
+            var mastered = false;
+            try {
+              mastered = state.isMastered(spec2) || state.isMastered(Object.assign({}, spec2, { kind: 'phrase' }));
+            } catch (_) {}
+            if (!mastered) {
+              var rects2 = rectsOf(lo, hi);
+              var startKey = rects2.length ? rects2[0][0] + ',' + rects2[0][1] : '';
+              if (rects2.length && !takenStart[startKey]) {
+                takenStart[startKey] = true;
+                marks.push({ word: w.key, lemma: w.key, mastery: w.slug === 'seen' ? 0.4 : 0.1,
+                  label_slug: w.slug, rects: rects2, jp: w.language !== 'en', local: true });
+              }
+            }
+            at = joined.indexOf(w.key, at + 1);
+          }
+        });
+      }
+    } catch (_) {}
     return marks;
   }
 
@@ -14791,14 +14857,24 @@
   var clientLogBuffer = [];
   var clientLogTimer = null;
   var clientLogInFlight = false;
+  var clientLogFailures = 0;
   var CLIENT_LOG_FLUSH_MS = 4000;
+  var CLIENT_LOG_MAX_FAILURES = 6;   // 连续失败 6 次(约 4+8+16+32+60+60s)就停,清空缓冲,不吊着事件循环
+  // 定时器不得把宿主(契约沙箱里的 node)吊住:有 unref 就 unref。2026-09-03 实锤:失败后无限重排
+  // 让 native-local-runtime / highlight-local-write 两份契约永不退出,门禁挂了 25 分钟。
+  function clientLogArm(delay) {
+    if (clientLogTimer) return;
+    clientLogTimer = setTimeout(clientLogFlush, delay);
+    try { if (clientLogTimer && typeof clientLogTimer.unref === 'function') clientLogTimer.unref(); } catch (_) {}
+  }
   function clientLogPush(level, msg) {
     try {
+      if (typeof root.fetch !== 'function' || clientLogFailures >= CLIENT_LOG_MAX_FAILURES) return;
       var text = String(msg == null ? '' : msg).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 2000);
       if (!text) return;
       clientLogBuffer.push({ t: new Date().toISOString(), level: String(level || 'log').slice(0, 12), msg: text });
       if (clientLogBuffer.length > 400) clientLogBuffer.splice(0, clientLogBuffer.length - 400);
-      if (!clientLogTimer) clientLogTimer = setTimeout(clientLogFlush, CLIENT_LOG_FLUSH_MS);
+      clientLogArm(CLIENT_LOG_FLUSH_MS);
     } catch (_) {}
   }
   function clientLogFlush(keepalive) {
@@ -14817,41 +14893,28 @@
       keepalive: keepalive === true
     }).then(function (r) {
       if (!r || !r.ok) throw new Error('http-' + (r && r.status));
+      clientLogFailures = 0;
     }).catch(function () {
-      // 失败:放回去等下一批(最多再攒到 400),服务器不在时不制造重试风暴
-      clientLogBuffer = batch.concat(clientLogBuffer).slice(-400);
+      // 失败:放回去等下一批(最多再攒到 400),指数退避;连续失败到上限就放弃并清空,不制造重试风暴
+      clientLogFailures += 1;
+      clientLogBuffer = clientLogFailures >= CLIENT_LOG_MAX_FAILURES ? [] : batch.concat(clientLogBuffer).slice(-400);
     }).then(function () {
       clientLogInFlight = false;
-      if (clientLogBuffer.length && !clientLogTimer) clientLogTimer = setTimeout(clientLogFlush, CLIENT_LOG_FLUSH_MS);
+      if (clientLogBuffer.length) {
+        clientLogArm(Math.min(60000, CLIENT_LOG_FLUSH_MS * Math.pow(2, clientLogFailures)));
+      }
     });
   }
   function installClientLogReporter() {
     try {
-      var wrapped = new WeakSet();
-      var wrap = function (fn) {
-        if (typeof fn !== 'function' || wrapped.has(fn)) return fn;
-        var out = function (msg, color) {
-          try { clientLogPush(color === '#ff6b6b' || color === '#c00' ? 'error' : 'log', msg); } catch (_) {}
-          return fn.apply(this, arguments);
-        };
-        wrapped.add(out);
-        return out;
-      };
-      var current = root.dlog;
-      var trapped = false;
-      // PDF 页在内联脚本里用 function 声明再 window.dlog = dlog:声明式全局不可重定义,
-      // defineProperty 会抛 → 退回直接赋值包一层(之后再被覆盖就包不住,但异常监听照常装)。
-      try {
-        Object.defineProperty(root, 'dlog', {
-          configurable: true, enumerable: true,
-          get: function () { return current; },
-          set: function (fn) { current = wrap(fn); }
+      // 阅读器内部调的是局部函数 dlog(不是 window.dlog),所以不在这里包 window.dlog;
+      // 改为 dlog 本体主动把每行交给 __bwClientLog,这里只接早期缓冲 + 未捕获异常。
+      root.__bwClientLog = clientLogPush;
+      var early = root.__bwEarlyDlog;
+      if (Array.isArray(early)) {
+        early.splice(0, early.length).forEach(function (pair) {
+          if (Array.isArray(pair)) clientLogPush(pair[0], pair[1]);
         });
-        trapped = true;
-      } catch (_) {}
-      if (typeof current === 'function') {
-        current = wrap(current);
-        if (!trapped) root.dlog = current;
       }
       root.addEventListener('error', function (ev) {
         try {
@@ -14866,7 +14929,7 @@
         } catch (_) {}
       });
       root.addEventListener('pagehide', function () { try { clientLogFlush(true); } catch (_) {} });
-      root.__bwClientLog = clientLogPush;
+      clientLogPush('log', 'client-log 上报器就绪 device=' + deviceId + ' book=' + localFileRef());
     } catch (_) {}
   }
   installClientLogReporter();

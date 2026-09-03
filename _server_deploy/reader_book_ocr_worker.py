@@ -2598,7 +2598,7 @@ _CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 _KANA_RE = re.compile(r"[\u3040-\u30ff]")
 
 
-_TOKENIZE_SCHEMA = 2   # 2 = 以块为边界分词(2026-09-02);1/缺失 = 旧的按行分词
+_TOKENIZE_SCHEMA = 3   # 3 = 行先按大横向间隔切成栏段再聚块(2026-09-03);2 = 以块为边界;1/缺失 = 旧的按行分词
 
 
 def _tokenize_groups(chars: list[dict], layout: dict | None) -> list[list[int]]:
@@ -2659,8 +2659,93 @@ def _tokenize_groups(chars: list[dict], layout: dict | None) -> list[list[int]]:
         if assigned[index]:
             continue
         by_line.setdefault(_line_key(char), []).append(index)
-    line_items = []
+
+    def _split_columns(indices: list[int]) -> list[list[int]]:
+        """一条 OCR "行"先按视觉行(y 聚类)再按**大横向间隔**切成栏段(2026-09-03 实锤第 46 页):
+        视觉层没认出表格时,manga OCR 的一"行"横跨整张表格行(特徴格 + 主な料理格),甚至含两个
+        视觉行;整段聚成一块后 コチュジャ|ン 之间夹着别格的字,收藏词组合并与分词都断掉。
+        同一视觉行内相邻实字符间距超过 max(0.6 行高, 3×中位字间距+4) 视为栏边界;竖排不切。
+        sp 空白盒跟随同一视觉行里其左侧最近的段。"""
+        real = [i for i in indices if not chars[i].get("sp") and chars[i].get("x0") is not None]
+        if len(real) < 2 or any(bool(chars[i].get("vertical")) for i in indices):
+            return [indices]
+
+        def _y0(i: int) -> float:
+            return float(chars[i].get("y0", 0.0))
+
+        def _y1(i: int) -> float:
+            return float(chars[i].get("y1", 0.0))
+
+        def _x0(i: int) -> float:
+            return float(chars[i].get("x0", 0.0))
+
+        def _x1(i: int) -> float:
+            return float(chars[i].get("x1", 0.0))
+
+        rows: list[dict] = []
+        for i in sorted(real, key=lambda k: (_y0(k), _x0(k))):
+            h = max(1.0, _y1(i) - _y0(i))
+            placed = False
+            for row in rows:
+                overlap = min(row["y1"], _y1(i)) - max(row["y0"], _y0(i))
+                if overlap >= 0.5 * min(h, max(1.0, row["y1"] - row["y0"])):
+                    row["items"].append(i)
+                    row["y0"] = min(row["y0"], _y0(i))
+                    row["y1"] = max(row["y1"], _y1(i))
+                    placed = True
+                    break
+            if not placed:
+                rows.append({"items": [i], "y0": _y0(i), "y1": _y1(i)})
+        # 竖排(没打 vertical 标的封面大标题「調理師試験」):每个视觉行只有一个字且逐行下叠 → 不是栏,
+        # 原样一组;否则一个词会被拆成一字一组。
+        if len(rows) >= 2 and sum(1 for row in rows if len(row["items"]) == 1) / len(rows) > 0.6:
+            return [indices]
+        segments: list[list[int]] = []
+        for row in rows:
+            items = sorted(row["items"], key=_x0)
+            row_h = max(1.0, row["y1"] - row["y0"])
+            # 阈值按这一行自己的字间距定:正常字间距(实测 5-8px)的 3 倍再加 4px,且不低于 0.6 行高。
+            # 表格栏之间的间隔实测 35-36px(第 46 页),英文词间空格 10-14px 不会被切。
+            gaps = sorted(max(0.0, _x0(cur) - _x1(prev)) for prev, cur in zip(items, items[1:]))
+            median_gap = gaps[len(gaps) // 2] if gaps else 0.0
+            threshold = max(0.6 * row_h, 3.0 * median_gap + 4.0)
+            current = [items[0]]
+            for prev, cur in zip(items, items[1:]):
+                if _x0(cur) - _x1(prev) > threshold:
+                    segments.append(current)
+                    current = [cur]
+                else:
+                    current.append(cur)
+            segments.append(current)
+        if len(segments) == 1:
+            return [indices]
+        for i in indices:
+            if i in real:
+                continue
+            x0 = chars[i].get("x0")
+            y0 = chars[i].get("y0")
+            if x0 is None or y0 is None:
+                segments[0].append(i)
+                continue
+            best = None
+            best_score = None
+            for seg in segments:
+                sy0 = min(_y0(k) for k in seg)
+                sy1 = max(_y1(k) for k in seg)
+                vertical_penalty = 0.0 if sy0 - 2 <= float(y0) <= sy1 + 2 else abs(float(y0) - sy0) + 1000.0
+                left = min(_x0(k) for k in seg)
+                horizontal = (float(x0) - left) if float(x0) >= left else (left - float(x0)) + 500.0
+                score = vertical_penalty + horizontal
+                if best_score is None or score < best_score:
+                    best, best_score = seg, score
+            (best or segments[0]).append(i)
+        return [sorted(seg) for seg in segments]
+
+    split_lines: list[list[int]] = []
     for indices in by_line.values():
+        split_lines.extend(_split_columns(indices))
+    line_items = []
+    for indices in split_lines:
         boxes = [chars[i] for i in indices if chars[i].get("x0") is not None]
         if not boxes:
             line_items.append({"indices": indices, "x0": 0.0, "x1": 0.0, "y0": 0.0, "y1": 0.0, "vertical": False})

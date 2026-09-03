@@ -845,13 +845,69 @@ actor NativeBookOCRSidecarStore {
             if lines[key] == nil { lineOrder.append(key); lines[key] = [] }
             lines[key]!.append(index)
         }
-        var boxes: [LineBox] = lineOrder.map { key in
-            let idx = lines[key]!
-            return LineBox(
-                idx: idx,
-                x0: idx.map { chars[$0].x0 }.min() ?? 0, x1: idx.map { chars[$0].x1 }.max() ?? 0,
-                y0: idx.map { chars[$0].y0 }.min() ?? 0, y1: idx.map { chars[$0].y1 }.max() ?? 0,
-                vertical: idx.contains { chars[$0].vertical == true })
+        // 栏段切分(2026-09-03,与 reader_book_ocr_worker._split_columns 同规则):视觉层没认出表格时
+        // manga OCR 的一"行"横跨整张表格行且 line 为空;先按视觉行聚类,再按大横向间隔切栏段,
+        // 否则 コチュジャ|ン 之间夹着别格的字,收藏词组永远合不上 —— 这样登记词组就能动态生效,不必重跑预处理。
+        func splitColumns(_ idx: [Int]) -> [[Int]] {
+            let real = idx.filter { chars[$0].sp == 0 && !chars[$0].c.isEmpty }
+            if real.count < 2 || idx.contains(where: { chars[$0].vertical == true }) { return [idx] }
+            struct Row { var items: [Int]; var y0: Double; var y1: Double }
+            var rows: [Row] = []
+            for i in real.sorted(by: { (chars[$0].y0, chars[$0].x0) < (chars[$1].y0, chars[$1].x0) }) {
+                let h = max(1, chars[i].y1 - chars[i].y0)
+                var placed = false
+                for r in rows.indices {
+                    let overlap = min(rows[r].y1, chars[i].y1) - max(rows[r].y0, chars[i].y0)
+                    if overlap >= 0.5 * min(h, max(1, rows[r].y1 - rows[r].y0)) {
+                        rows[r].items.append(i)
+                        rows[r].y0 = min(rows[r].y0, chars[i].y0)
+                        rows[r].y1 = max(rows[r].y1, chars[i].y1)
+                        placed = true
+                        break
+                    }
+                }
+                if !placed { rows.append(Row(items: [i], y0: chars[i].y0, y1: chars[i].y1)) }
+            }
+            // 竖排(逐字下叠、每行一个字)不切
+            if rows.count >= 2, Double(rows.filter { $0.items.count == 1 }.count) / Double(rows.count) > 0.6 { return [idx] }
+            var segments: [[Int]] = []
+            for row in rows {
+                let items = row.items.sorted { chars[$0].x0 < chars[$1].x0 }
+                let rowH = max(1, row.y1 - row.y0)
+                var gaps: [Double] = []
+                for k in 1..<items.count { gaps.append(max(0, chars[items[k]].x0 - chars[items[k - 1]].x1)) }
+                let medianGap = gaps.isEmpty ? 0 : gaps.sorted()[gaps.count / 2]
+                let threshold = max(0.6 * rowH, 3 * medianGap + 4)
+                var current = [items[0]]
+                for k in 1..<items.count {
+                    if chars[items[k]].x0 - chars[items[k - 1]].x1 > threshold { segments.append(current); current = [items[k]] }
+                    else { current.append(items[k]) }
+                }
+                segments.append(current)
+            }
+            if segments.count == 1 { return [idx] }
+            for i in idx where !real.contains(i) {
+                var best = 0
+                var bestScore = Double.greatestFiniteMagnitude
+                for (s, seg) in segments.enumerated() {
+                    let sy0 = seg.map { chars[$0].y0 }.min() ?? 0, sy1 = seg.map { chars[$0].y1 }.max() ?? 0
+                    let left = seg.map { chars[$0].x0 }.min() ?? 0
+                    let vertical = (sy0 - 2 <= chars[i].y0 && chars[i].y0 <= sy1 + 2) ? 0 : abs(chars[i].y0 - sy0) + 1000
+                    let horizontal = chars[i].x0 >= left ? chars[i].x0 - left : (left - chars[i].x0) + 500
+                    if vertical + horizontal < bestScore { bestScore = vertical + horizontal; best = s }
+                }
+                segments[best].append(i)
+            }
+            return segments.map { $0.sorted() }
+        }
+        var boxes: [LineBox] = lineOrder.flatMap { key -> [LineBox] in
+            splitColumns(lines[key]!).map { idx in
+                LineBox(
+                    idx: idx,
+                    x0: idx.map { chars[$0].x0 }.min() ?? 0, x1: idx.map { chars[$0].x1 }.max() ?? 0,
+                    y0: idx.map { chars[$0].y0 }.min() ?? 0, y1: idx.map { chars[$0].y1 }.max() ?? 0,
+                    vertical: idx.contains { chars[$0].vertical == true })
+            }
         }
         boxes.sort { ($0.y0, $0.x0) < ($1.y0, $1.x0) }
         var paragraphs: [LineBox] = []
