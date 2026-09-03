@@ -58,3 +58,15 @@ ReaderPC-Server.exe
 - `_server_deploy/app.py` 的启动参数与 `.env.local` 不变，App 与 tailscale serve 映射不动。
 - ReaderPC 退出即全停（2026-08-17 用户定案）继续成立：退出 ReaderPC = 服务器全停，符合「一个开关」。
 - 契约：`test_desktop_launcher.py` / `test_bridge_core.py` 需要为新控制器补用例（沿 PcOcr 的夹具）。
+
+## 进度
+
+- **2026-09-03 步骤 1 + 步骤 6 前半（影子模式）已上线**：ReaderPC `0.1.119` 原子安装并完成启动接管。
+  `readerpc_services.py` 新增 `ManagedProcessController`（TCP 探针 / 退避拉起 / 进程身份校验 /
+  只停自己拉起的），`default_server_services()` 从工作树发现 `app.py` + `.env.local`，给出
+  webapp 5000 与 voice-rt 8767 / watch-voice 8768 / rbi 8769 / mcp 8766。启动器多一行「服务器服务」
+  与偏好 `manageServerServices`（默认 False：只观测端口，端口由旧守护占着就算可达，不拉起）；
+  状态文件 `readerpc-server.status.json` 带 `services` 子树。
+- 下一步：观察一天影子行无误报 → 停计划任务 `BwicarusServer` 与两个旧守护 → 打开托管开关 →
+  观察一天 → 删旧守护脚本、计划任务与 HKCU Run 项（步骤 4）。步骤 2 的两项副作用（代码变更重启、
+  Obsidian Sync 计划任务看护）尚未搬，切换前必须补上。
