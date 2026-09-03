@@ -1981,11 +1981,15 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 .texraw { font-family: ui-monospace, Consolas, monospace;
                   font-size: .86em; padding: 0 .25em; border-radius: .2em;
                   background: rgba(200,120,80,.16); }
-                .cardblk { margin: .35rem 0; padding: .3rem .45rem;
-                  border-left: 3px solid rgba(150,130,240,.75);
-                  background: rgba(150,130,240,.09); border-radius: .2rem; }
-                .cardblk .hd { font-size: .78rem; opacity: .78;
-                  margin-bottom: .15rem; }
+                .cardblk { margin: .45rem 0; padding: 0;
+                  border: 1px solid rgba(150,130,240,.55);
+                  border-left: 3px solid rgba(150,130,240,.9);
+                  background: rgba(150,130,240,.09); border-radius: .3rem; overflow: hidden; }
+                .cardblk .hd { font-size: .78rem; opacity: .9; padding: .2rem .45rem;
+                  background: rgba(150,130,240,.18);
+                  border-bottom: 1px solid rgba(150,130,240,.35); }
+                .cardblk .hd .anc { opacity: .75; margin-left: .4rem; }
+                .cardblk .bd { padding: .3rem .45rem; }
                 .foldnote { margin: .35rem 0; padding: .25rem .45rem;
                   font-size: .8rem; opacity: .62; font-style: italic;
                   border: 1px dashed rgba(128,128,128,.4); border-radius: .2rem; }
@@ -3059,9 +3063,21 @@ internal sealed class DirectSnapshotViewer : IDisposable
                       box.className = 'cardblk';
                       const hd = document.createElement('div');
                       hd.className = 'hd';
-                      hd.textContent = '🎴 ' + (seg.card.head || '卡片');
+                      // 标题行按属性拼:「🎴 卡片 #n · label · 锚「词」」;原始属性串(id/revision)不再当标题
+                      // (2026-09-04 用户:边界不明显、看不出卡开始在哪)。
+                      const attrs = {};
+                      for (const m of String(seg.card.head || '').matchAll(/([a-z_]+)="([^"]*)"/g)) attrs[m[1]] = m[2];
+                      const num = attrs.n ? '#' + attrs.n : (attrs.unbound === 'true' ? '未锚定' : '');
+                      hd.textContent = '🎴 卡片' + (num ? ' ' + num : '') + (attrs.label ? ' · ' + attrs.label : '');
+                      if (attrs.anchor) {
+                        const anc = document.createElement('span');
+                        anc.className = 'anc';
+                        anc.textContent = '锚「' + attrs.anchor + '」';
+                        hd.appendChild(anc);
+                      }
                       box.appendChild(hd);
                       const bd = document.createElement('div');
+                      bd.className = 'bd';
                       paintText(bd, unescapeLeaf(seg.card.body).trim());
                       box.appendChild(bd);
                       target.appendChild(box);

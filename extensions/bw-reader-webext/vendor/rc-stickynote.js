@@ -1249,7 +1249,14 @@ if (window.__bwPwaProviderOnly) return;
       try { box.__dictVisWatch.disconnect(); } catch (e00) {}
       box.__dictVisWatch = null;
     }
-    try { window.dlog && window.dlog('卡内词典:卡当前不可见,等展开再查(锁定词=' + (bindWordTextOf(h.bind) || '(无)') + ')'); } catch (eL1) {}
+    // 每张卡每个锁定词只说一次:一页几十张折叠卡每次重排都来一遍,620 日志里 8 分钟刷了 500 行(2026-09-04)
+    try {
+      var visKey = bindWordTextOf(h.bind) || '(无)';
+      if (box.__dictVisLogged !== visKey) {
+        box.__dictVisLogged = visKey;
+        window.dlog && window.dlog('卡内词典:卡当前不可见,等展开再查(锁定词=' + visKey + ')');
+      }
+    } catch (eL1) {}
     if (typeof IntersectionObserver !== 'function') { run(); return; }
     try {
       var obs = new IntersectionObserver(function (entries) {
@@ -1365,8 +1372,19 @@ if (window.__bwPwaProviderOnly) return;
           && RC.core.file()) || '';
         if (bf) extra += '&file=' + encodeURIComponent(bf);
       } catch (e4) {}
+      // 与查词框**同一条**查词链(本地词典 → 服务器 → Codex 兜底 + 设备持久缓存):
+      // 2026-09-04 实锤 パンセオ:查词框靠 Codex 兜底有释义,卡里只打服务器词典却是空的。
+      var viaWordpop = !(cached && cached.d) && window.RC && RC.wordpop &&
+        typeof RC.wordpop.lookupData === 'function';
       var ready = (cached && cached.d)
         ? Promise.resolve(cached.d)
+        : viaWordpop
+        ? Promise.resolve(RC.wordpop.lookupData(text, '')).then(function (d) {
+            var okd = d && d.ok === true && !/^暂无词典释义/.test(String(d.definition || ''));
+            _dictLineCache[text] = okd ? { d: d } : { failAt: Date.now() };
+            if (!okd) { try { window.dlog && window.dlog('卡内词典:「' + text + '」三级查词链均无中文义'); } catch (eL9) {} }
+            return okd ? d : { ok: false };
+          })
         // @interaction dictionary.quick.read
         // 裸路径是**正道**（2026-09-01 二次实锤）：页面 fetch 被 runtime
         // 接管,按 manifest 分派 → owner=pi → 网关转发。带 /r/ 前缀反而

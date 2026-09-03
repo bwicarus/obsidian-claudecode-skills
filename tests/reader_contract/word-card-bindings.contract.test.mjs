@@ -156,3 +156,17 @@ test("卡内词典链路用到的每个标识符都有定义", () => {
   }
   assert.deepEqual([...missing], [], "这些名字被调用却没有定义(会在运行时 ReferenceError 并被 catch 吞掉)");
 });
+
+// 2026-09-04 用户实锤 パンセオ:查词框靠 Codex 兜底有释义,卡内词典只打服务器词典却是空的;
+// 有下划线(=查过)的词再点仍闪烁重查(结果只在内存缓存)。两条都要走同一条链并落设备缓存。
+test("卡内词典与查词框共用 RC.wordpop.lookupData,查词结果落设备持久缓存", () => {
+  const POP = readFileSync(new URL("../../_server_deploy/static/pdf/rc-wordpop.js", import.meta.url), "utf8");
+  const NOTE = readFileSync(new URL("../../_server_deploy/static/pdf/rc-stickynote.js", import.meta.url), "utf8");
+  assert.match(POP, /lookupData: lookupData \};/);
+  assert.match(POP, /var _PERSIST_KEY = 'rc-wordpop-dict-cache-v1';/);
+  assert.match(POP, /var cached = _dictCache\.get\(word\) \|\| _persistGet\(word\);/);
+  // 合成兜底词条(暂无词典释义…)不得落盘,否则永久短路真查询
+  assert.match(POP, /if \(result\.meaning_source === 'synthetic' \|\| \/\^暂无词典释义\/\.test\(String\(result\.definition \|\| ''\)\)\) return;/);
+  assert.match(NOTE, /typeof RC\.wordpop\.lookupData === 'function';/);
+  assert.match(NOTE, /Promise\.resolve\(RC\.wordpop\.lookupData\(text, ''\)\)/);
+});

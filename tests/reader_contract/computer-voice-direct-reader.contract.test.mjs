@@ -4625,12 +4625,12 @@ test("权威卡片按页面几何编号且成功删除只触发一次重排后�
   assert.match(initial, /戊⟦CARD_START n="2" id="c_3333333333333333"/);
   assert.match(
     initial,
-    /CARD_START n="1" id="c_2222222222222222" revision="1" type="card" label="第二张"⟧第二张内容⟦CARD_END⟧/,
+    /CARD_START n="1" id="c_2222222222222222" revision="1" type="card" label="第二张" anchor="[^"]+"⟧第二张内容⟦CARD_END⟧/,
     "a marker carries only the semantic body plus stable id/revision",
   );
   assert.match(
     initial,
-    /CARD_START n="2" id="c_3333333333333333" revision="1" type="anki" label="第三张"⟧第三张内容⟦CARD_END⟧/,
+    /CARD_START n="2" id="c_3333333333333333" revision="1" type="anki" label="第三张" anchor="[^"]+"⟧第三张内容⟦CARD_END⟧/,
     "learning-card markers are readable without exposing replacement JSON",
   );
   assert.doesNotMatch(
@@ -4913,7 +4913,7 @@ test("异常超大渲染源也只向快照提供语义正文", async () => {
     "the semantic card body fits the page snapshot");
   assert.match(
     payload.text,
-    /id="c_extreme000000001" revision="1" type="card" label="异常大卡"⟧旧可读摘要不应冒充实际内容⟦CARD_END⟧/,
+    /id="c_extreme000000001" revision="1" type="card" label="异常大卡" anchor="[^"]+"⟧旧可读摘要不应冒充实际内容⟦CARD_END⟧/,
   );
   assert.doesNotMatch(payload.text, /replacement JSON|【头部片段】|【尾部片段】|Z{20}|content_length/);
   await disableSnapshot(harness);
@@ -4999,7 +4999,7 @@ test("本地 page.context 截断不会留下半个 CARD marker", async () => {
   assert.match(payload.text, /c_aaaaaaaaaaaaaaaa/);
   assert.match(
     payload.text,
-    /id="c_aaaaaaaaaaaaaaaa" revision="1" type="card" label="完整卡"⟧X{2400}⟦CARD_END⟧/,
+    /id="c_aaaaaaaaaaaaaaaa" revision="1" type="card" label="完整卡" anchor="[^"]+"⟧X{2400}⟦CARD_END⟧/,
     "a normal long semantic body remains complete when the whole page hits its transport fence",
   );
   assert.doesNotMatch(payload.text, /c_bbbbbbbbbbbbbbbb/);

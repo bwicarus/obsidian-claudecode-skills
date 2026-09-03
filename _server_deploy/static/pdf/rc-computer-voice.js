@@ -10067,7 +10067,10 @@
       '" revision="' + String(item.revision) +
       '" type="' + localContextMarkerAttribute(card.kind, 32) +
       '" label="' + localContextMarkerAttribute(card.label, 120) +
-      (unbound ? '" unbound="true' : '') +
+      // anchor=被锚定的词(2026-09-04 用户:「没有开始的标记」)。卡插在锚词**之后**,只靠位置看不出钉在哪个词上;
+      // 带上词面,人读快照与模型改绑/删卡都有据可指。未锚定卡没有 anchor。
+      (unbound ? '" unbound="true'
+        : '" anchor="' + localContextMarkerAttribute(card.bind && card.bind.text, 120)) +
       '"⟧' + escapeLocalContextText(semanticBody) + '⟦CARD_END⟧';
   }
 

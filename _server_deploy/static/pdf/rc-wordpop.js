@@ -826,6 +826,49 @@
       }
     } catch (_) {}
   }
+  // ── 设备持久缓存(2026-09-04 用户实锤:有下划线=查过的词再点还闪烁重查)──
+  //   _dictCache 只在内存,重开书就空;两级词典都无中文的外来语每次都得绕到电脑上的 Codex 兜底。
+  //   这里把「拿到中文义」的结果落到 localStorage(按词,600 上限 LRU),下次点开秒显;
+  //   合成兜底词条(definition 是"暂无词典释义…")不落盘,免得永久短路真查询。
+  var _PERSIST_KEY = 'rc-wordpop-dict-cache-v1';
+  var _persistLoaded = null;
+  function _persistLoad() {
+    if (_persistLoaded) return _persistLoaded;
+    _persistLoaded = { order: [], map: Object.create(null) };
+    try {
+      var raw = JSON.parse(localStorage.getItem(_PERSIST_KEY) || 'null');
+      if (raw && Array.isArray(raw.order) && raw.map && typeof raw.map === 'object') {
+        _persistLoaded.order = raw.order.filter(function (k) { return typeof k === 'string' && raw.map[k]; });
+        _persistLoaded.order.forEach(function (k) { _persistLoaded.map[k] = raw.map[k]; });
+      }
+    } catch (_) {}
+    return _persistLoaded;
+  }
+  function _persistGet(word) {
+    try {
+      var store = _persistLoad();
+      var hit = store.map[word];
+      return (hit && hit.ok === true) ? hit : null;
+    } catch (_) { return null; }
+  }
+  function _persistPut(word, result) {
+    try {
+      if (!result || result.ok !== true) return;
+      if (result.jp && !_jpMeaningText(result)) return;
+      if (result.meaning_source === 'synthetic' || /^暂无词典释义/.test(String(result.definition || ''))) return;
+      var store = _persistLoad();
+      var copy = {};
+      Object.keys(result).forEach(function (k) {
+        if (k === 'mastered' || k === 'cached' || k === 'cli_cached') return;   // 掌握态另有权威,不随词条缓存
+        copy[k] = result[k];
+      });
+      copy.persistedAt = Date.now();
+      if (!store.map[word]) store.order.push(word);
+      store.map[word] = copy;
+      while (store.order.length > _DICT_CACHE_MAX) { var old = store.order.shift(); delete store.map[old]; }
+      localStorage.setItem(_PERSIST_KEY, JSON.stringify({ order: store.order, map: store.map }));
+    } catch (_) {}
+  }
   function _cacheDictResult(word, result) {
     if (!result || !result.ok) return;
     // 中文义仍缺失时不缓存：用户再次点原词会重新进入原有呼吸查询，而
@@ -836,6 +879,21 @@
       _dictCache.set(word, result);
       if (_dictCache.size > _DICT_CACHE_MAX) _dictCache.delete(_dictCache.keys().next().value);
     } catch (_) {}
+    _persistPut(word, result);
+  }
+  // 供卡内词典(rc-stickynote)等复用**同一条**查词链:内存缓存 → 设备持久缓存 → 本地词典 → 服务器 → Codex 兜底。
+  // 此前卡内词典只打服务器 dict-quick,查词框能出释义的外来语在卡里却是空的(2026-09-04 パンセオ 实锤)。
+  function lookupData(word, ctx) {
+    word = String(word || '').trim();
+    if (!word) return Promise.resolve(null);
+    var hit = _dictCache.get(word) || _persistGet(word);
+    if (hit) return Promise.resolve(hit);
+    var savedCtx = _ctx.ctx;
+    try { if (ctx) _ctx.ctx = ctx; } catch (_) {}
+    return Promise.resolve().then(function () { return _lookupFetch(word); }).then(function (d) {
+      _cacheDictResult(word, d);
+      return d;
+    }).finally(function () { try { _ctx.ctx = savedCtx; } catch (_) {} });
   }
 
   function _pruneJapaneseExampleZhPending() {
@@ -1250,7 +1308,7 @@
     var pop = _ensurePop();
     // 已有现成数据(本会话查过)→ 直接秒显小框,不发请求;后台再打一次刷新暴露计数 + 缓存。
     // owner 占新 id(照原生:没有 hl 会匹配它 → 别的并发慢词回来不会覆盖本框)。
-    var cached = _dictCache.get(word);
+    var cached = _dictCache.get(word) || _persistGet(word);
     if (cached) {
       _wordPopOwnerId = ++_wordHlSeq;
       _popPosHook = _ctx.positionPop;
@@ -1834,5 +1892,5 @@
     else dictStream(word, opts.ctx || '');
   }
 
-  RC.wordpop = { show: show, openFull: openFull, clearHls: _removeAllWordHls, prewarm: prewarm, clearCache: clearDictCache, injectCss: injectCss, jpInflectHtml: _jpInflectHtml, jpExamples: _jpExamples };   // injectCss 供 rc-phrasepop 复用同一套小框样式(用户 2026-09-03:所有查词框统一成单词框的版式)   // clearHls:清查词高亮;prewarm(words):翻页后台预热释义;clearCache:切书/失效释放
+  RC.wordpop = { show: show, openFull: openFull, clearHls: _removeAllWordHls, prewarm: prewarm, clearCache: clearDictCache, injectCss: injectCss, jpInflectHtml: _jpInflectHtml, jpExamples: _jpExamples, lookupData: lookupData };   // injectCss 供 rc-phrasepop 复用同一套小框样式(用户 2026-09-03:所有查词框统一成单词框的版式)   // clearHls:清查词高亮;prewarm(words):翻页后台预热释义;clearCache:切书/失效释放
 })();

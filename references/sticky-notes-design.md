@@ -262,3 +262,18 @@ AI **读**页面时看不见卡片编号（`buildLocalPageContext` 吐的是纯�
   单层 prev；`rc-stickynote.reconcileConsolidatedWordCard`（开卷对账）随之删除。
 
 契约：`tests/reader_contract/word-card-bindings.contract.test.mjs`。
+
+### 卡内词典的查词链与快照锚词（2026-09-04）
+
+- **卡内词典与查词框走同一条查词链**：`RC.wordpop.lookupData(word, ctx)` = 内存缓存 → 设备持久缓存
+  （`localStorage` `rc-wordpop-dict-cache-v1`，600 上限 LRU）→ 本地 JMdict → 服务器 dict-quick → ReaderPC Codex 兜底。
+  此前卡内词典只打服务器 dict-quick（prewarm），外来语（パンセオ）查词框有释义、卡里却是空的。
+  写入方式不变：仍是写进卡片 content 末尾的 `<div class="rc-note-dict vc-dict-sec" data-dict-word="…">`，
+  不是另起一张卡；改锁到别的词先摘旧段再写新段。
+- **查过的词再点不再闪烁重查**：查到中文义的结果落设备持久缓存；合成兜底词条（「暂无词典释义…」）不落盘，
+  免得永久短路真查询；`mastered` 不随词条缓存（掌握态另有权威）。
+- **快照卡片标记带锚词**：`⟦CARD_START n=".." … label=".." anchor="被锚定的词"⟧正文⟦CARD_END⟧`（未锚定卡无 anchor）。
+  卡插在锚词之后，此前只靠位置看不出钉在哪个词上。PC 快照查看器改为带四边框的卡块，标题
+  「🎴 卡片 #n · label · 锚「词」」。消费方（C# 两处解析器、MCP、typist）都把属性当整串保存，加属性向后兼容。
+- **三次踩坑的契约**：`word-card-bindings.contract.test.mjs` 扫卡内词典链路里每个被调用的名字都有定义
+  （`bindWordTextOf` → `_dictLineCache` 两次都是"使用处在、定义被删、ReferenceError 被空 catch 吞掉"）。
