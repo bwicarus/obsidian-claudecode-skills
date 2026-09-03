@@ -1124,9 +1124,14 @@ def _push_locked(
                 "reason": change["_causal_reason"],
             }
             status = "conflict"
-        elif not semantic_advance and not _causal_parent_matches(
-            current_record,
-            change["_causal_parent"],
+        elif (
+            not semantic_advance
+            and not _causal_parent_matches(current_record, change["_causal_parent"])
+            # 服务器根本没有这条记录(从未有过/墓碑已被清理)而客户端带着一个父记录:
+            # 服务器这边没有任何东西会被覆盖,按新建接收。2026-09-03 实锤:Pi 中继副本
+            # 缺一条设备已认为同步过的词组收藏,完整对账在这里卡成"1 个冲突,未覆盖",
+            # 而 App 侧没有解决冲突的入口,只会永远停在这条上。
+            and not (current_record is None and change["_causal_parent"] is not None)
         ):
             outcome = {
                 "mutationId": mutation_id,
@@ -1148,6 +1153,11 @@ def _push_locked(
             }
             status = "conflict"
         else:
+            if current_record is None and change["_causal_parent"] is not None:
+                current_app.logger.warning(
+                    "[sync-orphan-parent] 服务器无此记录而客户端带父记录,按新建接收 collection=%s id=%s rev=%s",
+                    change["collection"], change["_record_id"], change["_revision"],
+                )
             effective_revision = max(
                 change["_revision"],
                 (int(head["rev"]) + 1) if head else 1,
@@ -2239,6 +2249,13 @@ def exchange():
                 len(payload.get("ackedMutationIds") or []), len(payload.get("conflicts") or []),
                 len(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
             )
+            # 冲突明细(2026-09-03):App 端只显示"存在 1 个冲突",不说是哪条;服务端把前 3 条写全
+            for _c in (payload.get("conflicts") or [])[:3]:
+                current_app.logger.warning(
+                    "[sync-conflict] collection=%s id=%s reason=%s incomingRev=%s currentRev=%s mutation=%s",
+                    _c.get("collection"), _c.get("id"), _c.get("reason"),
+                    _c.get("incomingRev"), _c.get("currentRev"), str(_c.get("mutationId") or "")[:40],
+                )
         except Exception:
             pass
         return _json_response(payload)
