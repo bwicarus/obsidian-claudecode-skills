@@ -155,6 +155,21 @@ def _current_process_identity() -> dict[str, int]:
     }
 
 
+def _replace_with_retry(source: Path, target: Path, attempts: int = 6) -> None:
+    """Windows 上 os.replace 会撞上 WinError 5/32(杀软/索引器短暂占用目标文件)。
+    2026-09-02/04 实锤:worker 因此每隔几页就 PermissionError 退避 10s。短退避重试,最后一次才抛。"""
+    delay = 0.2
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay = min(2.0, delay * 2)
+
+
 def _atomic_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + f".tmp-{os.getpid()}")
@@ -163,7 +178,7 @@ def _atomic_json(path: Path, value: dict) -> None:
         os.chmod(temporary, 0o600)
     except OSError:
         pass
-    os.replace(temporary, path)
+    _replace_with_retry(temporary, path)
 
 
 def _load_json(path: Path) -> dict | None:
@@ -698,7 +713,7 @@ class ContentCache:
             if claim.source_size > 0 and offset != claim.source_size:
                 partial.replace(partial.with_suffix(f".size-mismatch-{_now_ms()}"))
                 raise WorkerError("cached PDF size did not match the claimed source")
-            os.replace(partial, final)
+            _replace_with_retry(partial, final)
             return final
         response = api.source_response(claim, offset)
         with response:
@@ -732,7 +747,7 @@ class ContentCache:
         if claim.source_size > 0 and partial.stat().st_size != claim.source_size:
             partial.replace(partial.with_suffix(f".size-mismatch-{_now_ms()}"))
             raise WorkerError("downloaded PDF size did not match the claimed source")
-        os.replace(partial, final)
+        _replace_with_retry(partial, final)
         return final
 
 
@@ -1669,6 +1684,14 @@ def main(argv=None) -> int:
                 return 130
             except Exception as exc:
                 print("PC OCR worker error: " + safe_error(exc), file=sys.stderr, flush=True)
+                # 本地 err 日志留完整 traceback(含路径):这是本机文件,不上传;
+                # 只打脱敏一行的话「PermissionError: <path>」永远查不出是哪个文件(2026-09-04)。
+                try:
+                    import traceback as _tb
+                    _tb.print_exc(file=sys.stderr)
+                    sys.stderr.flush()
+                except Exception:
+                    pass
                 # ⚠ 2026-08-17 修:失败以前被记成 worked=True → recycle 模式直接
                 # return 0 → 监督者 30s 后重启 → 持续性错误(Pi 证书过期/502)变成
                 # "每 30 秒冷启动一个进程"的重启风暴,而下面写好的退避永远走不到。

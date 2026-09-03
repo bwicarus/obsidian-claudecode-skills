@@ -173,7 +173,7 @@ struct ReaderLocalLibraryView: View {
             }
             .onChange(of: nativeOCR.lastUpdate) { _, update in
                 guard update?.status.state == .failed else { return }
-                ocrErrorMessage = update?.status.message ?? "本机预处理失败"
+                reportPanelError(update?.status.message ?? "本机预处理失败")
             }
             .alert(
                 "预处理失败",
@@ -733,30 +733,46 @@ struct ReaderLocalLibraryView: View {
             Label("当前使用", systemImage: "text.page")
                 .font(.caption.weight(.semibold))
             Spacer()
-            if let state = nativeOCR.layerState(
-                for: book.id,
-                expectedContentSHA256: book.contentSha256
-            ) {
-                Picker(
-                    "当前使用的文字层",
-                    selection: Binding(
-                        get: { state.selected },
-                        set: { layer in
-                            Task { await selectTextLayer(layer, for: book) }
+        }
+        // 列表而不是下拉(用户 2026-09-04):预处理/导入完成的结果自动出现在这里并被选中;
+        // 点一行切换;导入进来的层可删(PDF 自带层与兼容旧结果没有可删的目录)。
+        if let state = nativeOCR.layerState(
+            for: book.id,
+            expectedContentSHA256: book.contentSha256
+        ) {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(state.available) { metadata in
+                    let selected = metadata.layer == state.selected
+                    HStack(spacing: 8) {
+                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                        Text(textLayerOptionTitle(metadata))
+                            .font(.caption)
+                            .foregroundStyle(selected ? Color.primary : Color.secondary)
+                        Spacer()
+                        if [.appleVision, .pi, .pc].contains(metadata.layer) {
+                            Button {
+                                Task { await deleteTextLayer(metadata.layer, for: book) }
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.red)
                         }
-                    )
-                ) {
-                    ForEach(state.available) { metadata in
-                        Text(textLayerOptionTitle(metadata)).tag(metadata.layer)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard !selected else { return }
+                        Task { await selectTextLayer(metadata.layer, for: book) }
                     }
                 }
-                .labelsHidden()
-                .disabled(ocrActionBookID != nil)
-            } else {
-                ProgressView().controlSize(.mini)
             }
+            .disabled(ocrActionBookID != nil)
+        } else {
+            ProgressView().controlSize(.mini)
         }
-        Text("导入或预处理完成的结果会自动成为当前文字层；这里可以手动切回，切换后正在阅读的页面立即重载。")
+        Text("预处理或导入完成的结果会自动出现在这里并成为当前文字层；切换后正在阅读的页面立即重载。")
             .font(.caption2)
             .foregroundStyle(.secondary)
     }
@@ -776,6 +792,15 @@ struct ReaderLocalLibraryView: View {
         return title + " · \(metadata.pageCount) 页"
     }
 
+    /// 面板里的错误既显示也进服务器客户端日志(用户 2026-09-04:「预处理附件导入失败」只在面板里一句话,查不到)。
+    private func reportPanelError(_ message: String) {
+        ocrErrorMessage = message
+        Task {
+            let cookies = await reader.remoteLibraryCookies()
+            ReaderPiOCRClient.shared.postClientLog("预处理面板: " + message, cookies: cookies)
+        }
+    }
+
     private func refreshTextLayers(_ book: ReaderLocalBookRecord) async {
         do {
             let digest = try await library.ensureContentSHA256(for: book)
@@ -784,7 +809,26 @@ struct ReaderLocalLibraryView: View {
                 expectedContentSHA256: digest
             )
         } catch {
-            ocrErrorMessage = "文字层状态读取失败：\(error.localizedDescription)"
+            reportPanelError("文字层状态读取失败：\(error.localizedDescription)")
+        }
+    }
+
+    private func deleteTextLayer(
+        _ layer: NativeBookOCRLayerID,
+        for book: ReaderLocalBookRecord
+    ) async {
+        guard ocrActionBookID == nil else { return }
+        ocrActionBookID = book.id
+        defer { if ocrActionBookID == book.id { ocrActionBookID = nil } }
+        do {
+            let digest = try await library.ensureContentSHA256(for: book)
+            _ = try await nativeOCR.deleteTextLayer(
+                bookID: book.id,
+                expectedContentSHA256: digest,
+                layer: layer
+            )
+        } catch {
+            reportPanelError("删除文字层失败：\(error.localizedDescription)")
         }
     }
 
@@ -803,7 +847,7 @@ struct ReaderLocalLibraryView: View {
                 layer: layer
             )
         } catch {
-            ocrErrorMessage = "文字层切换失败：\(error.localizedDescription)"
+            reportPanelError("文字层切换失败：\(error.localizedDescription)")
         }
     }
 
@@ -876,24 +920,10 @@ struct ReaderLocalLibraryView: View {
                         Spacer()
                         Menu {
                             if !release.isActive {
-                                Button("设为当前") {
+                                // 切到这一份后自动导入到本机并成为当前文字层(2026-09-04 去掉了单独的导入按钮)
+                                Button("使用这份") {
                                     Task {
                                         await activateRelease(
-                                            release,
-                                            book: remoteBook,
-                                            localBook: localBook
-                                        )
-                                    }
-                                }
-                            }
-                            // 「设为当前」只对非生效项出现，于是**已经生效**的那一份
-                            // 反而没有任何入口能拉到本机 —— 用户 2026-08-19 就卡在这：
-                            // 服务器上是 08-19 那份、本机「当前使用」里还是 08-12 的，
-                            // 而菜单里什么都点不了。导入必须是独立的一项，永远可用。
-                            if localBook != nil {
-                                Button("导入到本机") {
-                                    Task {
-                                        await importRelease(
                                             release,
                                             book: remoteBook,
                                             localBook: localBook
@@ -965,7 +995,7 @@ struct ReaderLocalLibraryView: View {
             )
             releasesByBook[book.bookId] = listing
         } catch {
-            ocrErrorMessage = "切换预处理结果失败：\(error.localizedDescription)"
+            reportPanelError("切换预处理结果失败：\(error.localizedDescription)")
             return
         }
         // 服务器换了当前生效的那一份，本机还留着上一次导入的旧层 ——
@@ -998,7 +1028,7 @@ struct ReaderLocalLibraryView: View {
                 )
                 releasesByBook[book.bookId] = listing
             } catch {
-                ocrErrorMessage = "切换预处理结果失败：\(error.localizedDescription)"
+                reportPanelError("切换预处理结果失败：\(error.localizedDescription)")
                 return
             }
         }
@@ -1022,7 +1052,7 @@ struct ReaderLocalLibraryView: View {
             )
             releasesByBook[book.bookId] = listing
         } catch {
-            ocrErrorMessage = "删除预处理结果失败：\(error.localizedDescription)"
+            reportPanelError("删除预处理结果失败：\(error.localizedDescription)")
             return
         }
         // 服务器上删掉了，本机导入的那份副本还在，而且「当前使用」里仍然列着它 ——
@@ -1049,7 +1079,7 @@ struct ReaderLocalLibraryView: View {
             } catch {
                 // 服务器那边已经删了，本机没删掉要说出来 —— 否则用户会看到
                 // 「当前使用」里还有一项，却不知道为什么。
-                ocrErrorMessage = "服务器上已删除，但本机这一份没能删掉：\(error.localizedDescription)"
+                reportPanelError("服务器上已删除，但本机这一份没能删掉：\(error.localizedDescription)")
             }
         }
     }
@@ -1136,16 +1166,7 @@ struct ReaderLocalLibraryView: View {
                         Task { await controlPi("retry", book: remoteBook, localBook: localBook) }
                     }
                 }
-                if job.resultAvailable, let localBook {
-                    Button("重新导入结果") {
-                        Task {
-                            await importPiAttachments(
-                                book: remoteBook,
-                                localBook: localBook
-                            )
-                        }
-                    }
-                }
+                // 「重新导入结果」已删(2026-09-04):结果一出来轮询就自动导入并成为当前文字层。
                 if !job.isActive && !job.canResume && !job.canRetry {
                     preprocessingStartMenus(
                         remoteBook: remoteBook,
@@ -1168,15 +1189,14 @@ struct ReaderLocalLibraryView: View {
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
+            // 采用不再是一个按钮(2026-09-04):面板轮询发现本机没有这份结果就自动采用并导入。
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text(localBook == nil ? "这本书还没有本机副本，采用后无处导入" : "正在自动采用并导入到本机…")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
             HStack {
-                Button("采用现有服务器结果") {
-                    Task {
-                        await adoptExistingPiResult(
-                            book: remoteBook,
-                            localBook: localBook
-                        )
-                    }
-                }
                 preprocessingStartMenus(
                     remoteBook: remoteBook,
                     localBook: localBook
@@ -1506,6 +1526,7 @@ struct ReaderLocalLibraryView: View {
                 )
             }
             if let localBook { await refreshTextLayers(localBook) }
+            await autoAdoptOrImportIfNeeded(remoteBook: remoteBook, localBook: localBook)
             var active = false
             if let remoteBook, let job = piOCR.job(for: remoteBook) {
                 active = job.isActive || job.canResume || piOCR.activeBookID == remoteBook.bookId
@@ -1516,6 +1537,40 @@ struct ReaderLocalLibraryView: View {
             } catch {
                 return
             }
+        }
+    }
+
+    /// 面板不再有「采用」「导入」按钮(2026-09-04):这里按状态自动做,每本书每个版本只做一次。
+    /// - 服务器有旧结果、当前没有任务 → 自动采用(采用会顺带导入并成为当前文字层);
+    /// - 任务已出结果、本机没导入这个版本 → 自动导入。
+    private func autoAdoptOrImportIfNeeded(
+        remoteBook: ReaderRemoteBook?,
+        localBook: ReaderLocalBookRecord?
+    ) async {
+        guard let remoteBook, let localBook,
+              ocrActionBookID == nil, piOCR.activeBookID == nil,
+              piOCR.previewingBookID == nil else { return }
+        let job = piOCR.job(for: remoteBook)
+        if let job, job.resultAvailable, !job.isActive, let revision = job.pageCharsRevision,
+           let digest = localBook.contentSha256 {
+            let key = "\(remoteBook.bookId):\(revision)"
+            if !autoImportedKeys.contains(key) {
+                let imported = (try? await nativeOCR.hasImportedRevision(
+                    expectedContentSHA256: digest,
+                    revision: revision
+                )) ?? true
+                if !imported {
+                    autoImportedKeys.insert(key)
+                    await importPiAttachments(book: remoteBook, localBook: localBook)
+                    return
+                }
+            }
+        }
+        if (job == nil || job?.state == "idle"),
+           let adoption = piOCR.adoption(for: remoteBook), adoption.available,
+           !autoAdoptedBookIDs.contains(remoteBook.bookId) {
+            autoAdoptedBookIDs.insert(remoteBook.bookId)
+            await adoptExistingPiResult(book: remoteBook, localBook: localBook)
         }
     }
 
@@ -1579,6 +1634,9 @@ struct ReaderLocalLibraryView: View {
     /// 「打开」按下后的阶段与结果，画在书那一行。任何一条提前返回都必须在这里留字，
     /// 不许静默（silent-failure 规则）。
     @State private var openBusy: Set<String> = []
+    /// 面板自动采用/自动导入的去重(每本书一次采用;每个结果版本一次导入)
+    @State private var autoAdoptedBookIDs: Set<String> = []
+    @State private var autoImportedKeys: Set<String> = []
     @State private var openStage: [String: String] = [:]
     @State private var openFailures: [String: String] = [:]
 
@@ -1682,7 +1740,7 @@ struct ReaderLocalLibraryView: View {
                     cookies: cookies
                 )
             } catch {
-                ocrErrorMessage = "书籍已下载，但服务器预处理附件未导入：\(error.localizedDescription)"
+                reportPanelError("书籍已下载，但服务器预处理附件未导入：\(error.localizedDescription)")
             }
         }
         let userStateTask = Task { @MainActor in
@@ -1717,7 +1775,7 @@ struct ReaderLocalLibraryView: View {
             ).state == .idle else { return }
             await startNativeOCR(book, reportFailure: true)
         } catch {
-            ocrErrorMessage = error.localizedDescription
+            reportPanelError(error.localizedDescription)
         }
     }
 
@@ -1771,7 +1829,7 @@ struct ReaderLocalLibraryView: View {
             let access = try library.makeOpenAccess(for: current)
             try await operation(access, digest)
         } catch {
-            ocrErrorMessage = error.localizedDescription
+            reportPanelError(error.localizedDescription)
         }
     }
 
@@ -1783,7 +1841,7 @@ struct ReaderLocalLibraryView: View {
         force: Bool = false
     ) async {
         guard recognitionPreferences.isEnabled else {
-            ocrErrorMessage = "请先在设置中启用书籍文字识别"
+            reportPanelError("请先在设置中启用书籍文字识别")
             return
         }
         guard ocrActionBookID == nil else { return }
@@ -1817,19 +1875,19 @@ struct ReaderLocalLibraryView: View {
                     )
                 }
             } catch {
-                ocrErrorMessage = error.localizedDescription
+                reportPanelError(error.localizedDescription)
                 return
             }
         }
         guard let target else {
-            ocrErrorMessage = remote.errorMessage
+            reportPanelError(remote.errorMessage)
                 ?? "无法把这本书准备到服务器书库，请稍后重试"
             return
         }
         if let localDigest,
            target.contentSha256.caseInsensitiveCompare(localDigest)
             != .orderedSame {
-            ocrErrorMessage = ReaderPiOCRError.localContentMismatch
+            reportPanelError(ReaderPiOCRError.localContentMismatch)
                 .localizedDescription
             return
         }
@@ -1844,7 +1902,7 @@ struct ReaderLocalLibraryView: View {
         )
         if piOCR.errorBookID == target.bookId,
            let errorMessage = piOCR.errorMessage {
-            ocrErrorMessage = errorMessage
+            reportPanelError(errorMessage)
         }
     }
 
@@ -1914,7 +1972,7 @@ struct ReaderLocalLibraryView: View {
                 presentPiErrorIfNeeded(for: book)
             }
         } catch {
-            ocrErrorMessage = error.localizedDescription
+            reportPanelError(error.localizedDescription)
         }
     }
 
@@ -1922,7 +1980,7 @@ struct ReaderLocalLibraryView: View {
         guard piOCR.errorBookID == book.bookId,
               let message = piOCR.errorMessage,
               !message.isEmpty else { return }
-        ocrErrorMessage = message
+        reportPanelError(message)
     }
 
     private func matchingLocalIdentity(

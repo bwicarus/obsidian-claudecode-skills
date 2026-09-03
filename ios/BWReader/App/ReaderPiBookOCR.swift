@@ -322,6 +322,34 @@ final class ReaderPiOCRClient {
         )
     }
 
+    /// 把 App 原生侧的预处理/导入错误送进服务器的客户端日志(/pdf/api/client-log,与网页侧 dlog 同一个文件)。
+    /// 只发不等、失败静默:诊断通道绝不能反过来打断被诊断的功能(2026-09-04 用户「预处理附件导入失败」时日志里零痕迹)。
+    func postClientLog(_ message: String, level: String = "error", cookies: [HTTPCookie]) {
+        Task.detached(priority: .utility) { [session] in
+            do {
+                var request = URLRequest(url: try self.canonicalURL(path: "pdf/api/client-log"))
+                request.httpMethod = "POST"
+                request.timeoutInterval = 8
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                self.apply(cookies: cookies, to: &request)
+                let payload: [String: Any] = [
+                    "device": "ios-native",
+                    "surface": "native",
+                    "build": nativeAppBuildVersion,
+                    "lines": [[
+                        "t": ISO8601DateFormatter().string(from: Date()),
+                        "level": level,
+                        "msg": "[native] " + message.prefix(1800),
+                    ]],
+                ]
+                request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+                _ = try await session.data(for: request)
+            } catch {
+                // 静默:见上
+            }
+        }
+    }
+
     func executors(
         cookies: [HTTPCookie]
     ) async throws -> [ReaderOCRExecutorStatus] {
@@ -1013,6 +1041,8 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         case replaceConfirmed(engine: String?, executor: String?)
     }
     private var localBindings: [String: LocalBinding] = [:]
+    /// 最近一次请求携带的 cookie:recordError 往服务器客户端日志出声时用(协调器拿不到 WebView)。
+    private var lastKnownCookies: [HTTPCookie] = []
     private var pendingImports: [String: PendingImport]
 
     init(defaults: UserDefaults = .standard) {
@@ -1346,6 +1376,7 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         if reportsExplicitFailure {
             clearError(for: book.bookId)
         }
+        lastKnownCookies = cookies
         do {
             if let ownershipClaim,
                !isCurrentPendingImport(ownershipClaim) {
@@ -1595,6 +1626,7 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         importsAttachments: Bool = true
     ) {
         jobs[book.bookId] = job
+        lastKnownCookies = cookies
         clearPassiveError(for: book.bookId)
         let ownershipClaim = validatedPendingImport(for: job, book: book)
         if importsAttachments,
@@ -1753,6 +1785,11 @@ final class ReaderPiOCRCoordinator: ObservableObject {
             errorBookID = bookID
             errorMessage = message
         }
+        // 出声到服务器客户端日志:用最近一次请求带过来的那组 cookie(协调器本身拿不到 WebView)
+        client.postClientLog(
+            "预处理[\(explicit ? "显式" : "被动")] \(book.name): \(message)",
+            cookies: lastKnownCookies
+        )
     }
 
     private func clearPassiveError(for bookID: String) {
