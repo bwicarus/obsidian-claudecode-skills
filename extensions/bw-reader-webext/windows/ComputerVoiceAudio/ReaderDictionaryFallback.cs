@@ -56,7 +56,8 @@ internal sealed class CodexCliReaderDictionaryFallback
 {
     internal const string Source = "pc-codex-cli";
     internal const string Language = "zh-CN";
-    internal const string PromptVersion = "reader-jp-zh/1";
+    // /2(2026-09-03):外来语先还原原词、释义必须与句境一致、不确定就说不确定 —— ナンプラー 被答成「数独」的教训
+    internal const string PromptVersion = "reader-jp-zh/2";
     private const int MaximumOutputBytes = 24 * 1024;
     private static readonly TimeSpan ProcessTimeout = TimeSpan.FromSeconds(60);
     private static readonly UTF8Encoding StrictUtf8 = new(
@@ -309,6 +310,9 @@ internal sealed class CodexCliReaderDictionaryFallback
     {
         string task = request.Mode == "meaning"
             ? "给出与句境匹配的简体中文核心义。多义时最多三项，总长不超过180个汉字；不要寒暄，不要只返回日文或英文。"
+              + "片假名外来语先按发音还原成原语言的词（英语、泰语、法语等），再据此释义，并在末尾用括号注明原词；"
+              + "释义必须与 context 一致（例如句子在谈食物，就不能给出与食物无关的义项）；"
+              + "若无法确定，text 只写「未能确定」，不要猜。"
             : "用简体中文 Markdown 简洁讲解核心义、句境用法、语感和必要的近义辨析，总长不超过1200字；不要寒暄。";
         string data = JsonSerializer.Serialize(new
         {
