@@ -68,3 +68,13 @@
 node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 bash 一起杀（exit 255）。
 本文件上面已写过两次同型事故。**硬规则**：杀进程只按 `Name -eq 'node.exe'` 之类的
 精确进程名 + 命令行里的**精确脚本路径**两条同时成立，且先 `Where-Object ProcessId -ne $PID`。
+- **Git Bash 里 `taskkill /PID` 也会被路径改写**（09-03 实锤）：`/PID` 被改成 `C:/Users/…/git/2.54.0/PID`，
+  taskkill 报"无效参数"，而且是 GBK 乱码看不出原因。用 `MSYS_NO_PATHCONV=1 taskkill /PID <pid>` 或写成
+  `taskkill //PID <pid>`；同一条 09-02 的 tailscale 教训，换了个命令又踩一次。
+- **装桥与 ReaderPC 保活赛跑**（09-03 实锤）：桥安装器先停 Direct 再原子替换 exe，而 ReaderPC 的保活
+  在"属下服务不在"后立刻重拉 Direct —— 第一次安装就撞上：替换时 exe 已被新拉起的 Direct 占用，
+  `WinError 5 拒绝访问`，安装器自动回滚；第二次原样重跑碰巧赢了赛跑就成功了。这不是可靠流程。
+  根治（待做）：安装器停 Direct 前先给 ReaderPC 一个"维护中，暂勿重拉"的信号（写维护标记文件，
+  ReaderPC 保活见标记就等待），装完删标记；或者安装器直接经 ReaderPC 的服务托管来做换代。
+  今天 0.1.270 已装上（`serviceRestartDeferredToReaderPC=true`，ReaderPC 随后重拉了新 exe），
+  但下次换桥别指望重试。
