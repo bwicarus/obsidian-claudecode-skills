@@ -1783,6 +1783,58 @@ test("voice page text reads embedded PDF content locally without opening Pi", as
   assert.equal(result.gatewayMessages.length, 0);
 });
 
+test("块号编号器只有一个,两个出口都从它取号", () => {
+  // 静态约定,配合下面那条行为契约:防止哪天又出现第二个自己数块的地方
+  // (这个 bug 的原始形态就是"两处各自推导，各自都自洽")。
+  const RUNTIME = readFileSync(
+    new URL("../../_server_deploy/static/pdf/native-local-runtime.js", import.meta.url), "utf8");
+  assert.match(RUNTIME, /function blockNumberer\(layout\) \{/);
+  assert.match(RUNTIME, /function pageTextSegments\(chars, layout\) \{/);
+  assert.match(RUNTIME, /function blockLines\(chars, limit, layout\) \{/);
+  assert.equal((RUNTIME.match(/blockNumberer\(layout\)/g) || []).length, 3,
+    "定义 1 处 + pageTextSegments / blockLines 各取一次");
+  // 有版面就按 region.order + 1,没有才退回 bk 连号
+  assert.match(RUNTIME, /var no = region\.order \+ 1;/);
+  assert.match(RUNTIME, /source: 'bk'/);
+});
+
+test("块号只有一个来源:有版面就用版面区域号,与语音快照的 [NN] 同源", async () => {
+  // 2026-09-04 根治。此前 reader_page_text 按 bk 连号印 [NN]，而语音快照(结构化投影)
+  // 按 region.order + 1 印 —— 助手读到的号与解析端算的号不是一回事，撞上就把卡片钉到
+  // 页内另一处一样的字上。这个夹具**故意让两套编号相反**：区域号把第二个字排成 [01]，
+  // 而 bk 连号会把第一个字排成 [01]。所以它能真正区分改没改对。
+  const chars = Array.from("左右", (character, index) => ({
+    c: character, x0: 10 + index * 30, y0: 20,
+    x1: 20 + index * 30, y1: 40, w: index, bk: index, sp: false,
+  }));
+  const layout = nativeLayoutFixture({
+    regions: [
+      nativeLayoutRegion({ id: 7, order: 0, bounds: [40, 20, 50, 40], ranges: [[1, 1]], gridColumn: 3 }),
+      nativeLayoutRegion({ id: 8, order: 1, bounds: [10, 20, 10, 40], ranges: [[0, 0]], gridColumn: 0 }),
+    ],
+  });
+  const result = await harness({
+    interfaceManifest: withNativeLocalContentRoutesSupported(),
+    pageTextReply(message) {
+      return { ...nativePageReply(message), source: "pi", chars, layout };
+    },
+  });
+  const response = await result.context.fetch(
+    "/api/assistant/voice-page-text?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE) + "&page=9",
+  );
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.blocks, true);
+  // 正文行按版面区域号编：右(order 0)=01、左(order 1)=02
+  assert.equal(payload.text, "[02] 左\n[01] 右");
+  // segments 的 block 必须与正文里的 [NN] 是同一套 —— 两处不一致正是这个 bug 的形态
+  assert.deepEqual(
+    payload.segments.map((segment) => [segment.from, segment.text, segment.block]),
+    [[0, "左", 2], [1, "右", 1]],
+  );
+});
+
 test("book crop is App-owned, validated, and durable across runtime reload", async () => {
   const dataStoresState = {
     global: { values: new Map(), revision: 0 },

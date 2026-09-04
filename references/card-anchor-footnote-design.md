@@ -390,25 +390,36 @@ char-layer 是个**空的透明 div**，字都在页图里（`13-selection.js:67
 ---
 
 ## 核实记录
-### 块号寻址：两套编号（2026-09-04）
+### 块号寻址：一页只有一套编号（2026-09-04）
 
 `bind.block` 的语义是「**页面正文里印出来的那个 `[NN]`**」，不是"第几段"。
-而 `[NN]` 的来源随这一页有没有视觉版面而不同，两套都是活的：
 
-| 页面 | 助手读到的 `[NN]` | 出处 |
-|---|---|---|
-| 有 vision 高置信版面（manga / table） | `region.order + 1` | `rc-computer-voice.js` 的 `appendLocalRegionLabel` |
-| 没有版面 | `bk` 连号（从 1 起） | `native-local-runtime.js` 的 `blockLines` / `segments[].block` |
+**编号只有一个来源** —— `native-local-runtime.js::blockNumberer(layout)`：
 
-所以 `34-bindcard.js::_resolveRange` **两套都试**：先按版面区域号
-（`_regionOiFilter` 用 `boxes.__layout.regions[].ranges` 展成 `_oi` 集合），
-再按 `bk` 连号，都不中才退回全页并在回执里标 `by-text-block-missed`
-（同时 `dlog` 出声，说明两套各有几块）。区域号命中时把精确字符集写回 `bind.ois`，
-下次开书直接走 `exact-set`，不再受同页重复文字影响。
+| 这一页 | 块号 |
+|---|---|
+| 有版面区域（vision regions） | `region.order + 1` |
+| 没有版面 | `bk` 连号（从 1 起） |
 
-⚠ 历史坑：`[NN]` 曾只在分镜网格那一条路印，散文页/表格页一个都不印，
-而能力说明写着「正文每一行形如 `[NN] …`」—— 助手只能自己数行号，
-数出来的号跟两套都不是同一套。现在四条版面路径统一印。
+三个出口全从它取号，所以说的是同一件事：
+- 语音快照的结构化投影（`rc-computer-voice.js::appendLocalRegionLabel`，按 `region.order + 1`）
+- `reader_page_text` 的正文折行（`blockLines`）
+- `reader_page_text` 的 `segments[].block`（`pageTextSegments`）
+
+解析端 `34-bindcard.js::_resolveRange` 先按版面区域号解（`_regionOiFilter` 把
+`boxes.__layout.regions[].ranges` 展成 `_oi` 集合），再按 `bk` 连号兜（没有版面的页
+以及旧快照）。区域号命中时把精确字符集写回 `bind.ois`，下次开书直接走 `exact-set`。
+块号对不上、又没给 `from/to`、而那句话页内不止一处时**不钉** —— 那种情况下退回全页
+等于抛硬币（距离恒为 0，第一处必胜），钉错比钉不上更难发现。
+
+⚠ 病史（别再走回去）：`[NN]` 曾只在分镜网格那一条路印，散文页/表格页一个都不印，
+而能力说明写着「正文每一行形如 `[NN] …`」—— 助手只能自己数行号；而两处各自推导编号
+（投影按区域、`blockLines` 按 bk），两边各自都自洽，撞车时卡片钉到页内第一处。
+先做的止血是"解析端两套都试"，随后才把编号收敛成一个来源。
+**只要两处各自推导同一个地址，就还会有下一次撞车。**
+
+例外：快照里的真数据表，单元格内不印 `[NN]`（会把 `| 国家 | 特征 |` 毁掉）；
+要钉表格里的内容就调 `reader_page_text`，它按块折行，每一格在那里都有自己的号。
 
 
 

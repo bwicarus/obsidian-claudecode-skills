@@ -132,6 +132,13 @@ node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 b
   修法：解析端两套都试（区域号优先，命中就把 `ois` 写回 bind，下次直接 exact-set）；
   四条版面路径统一走 `appendLocalRegionLabel` 印 `[NN]`；说明改成「抄页面上印的那个号，
   没有 `[NN]` 就别给 block」。契约钉在 `tests/reader_contract/page-chars-bind.contract.test.mjs`。
+  **随后做了根治**（同日）：上面那套只是止血 —— 只要两处各自推导同一个地址，就还会有
+  下一次撞车。现在编号只有一个来源 `native-local-runtime::blockNumberer(layout)`
+  （有版面用 `region.order + 1`，没有才退回 bk 连号），语音快照投影、`blockLines`、
+  `segments[].block` 三个出口全从它取号。行为契约用一个**故意让两套编号相反**的夹具钉住
+  （区域号把第二个字排成 `[01]`，bk 连号会把第一个字排成 `[01]`），改错立刻红。
+  **判据**：一个面向 AI 的地址，只能有一处推导它、一处解析它。两处各自算出来的
+  "同一个号"是这个仓库反复出现的最难查的错型。
 - **stale-while-revalidate 的第一跳被客户端存成了终局**（09-04 实锤，ヘルスプロモーション「明明是从英文来的但没标英文」）：
   服务端 `lookup_jp` 命中旧版本词条时先秒回（内部标 `stale_pv`）再后台按新 prompt 重生成 ——
   这套本来是对的。错在**那一跳被三层客户端缓存当正式结果收下**（会话内存 / localStorage

@@ -141,7 +141,8 @@ test("[NN] 由同一个 label 函数印，四条版面路径一条都不落", ()
   // 说明也要跟着改：助手照着说明数行号正是另一半病根
   assert.match(CARDS, /不要自己数行号/);
   assert.match(CARDS, /正文里没有 `\[NN\]` 就\*\*别给 `block`\*\*/);
-  assert.match(CARDS, /真数据表的单元格/, "说明要讲清哪两种页面天生没有 \[NN\]");
+  assert.match(CARDS, /一页\*\*只有一套\*\*块编号/, "根治后说明必须讲成一套编号");
+  assert.match(CARDS, /数据表/, "数据表单元格不印号、改调 reader_page_text 要讲清");
   assert.match(CARDS, /阅读器\*\*不会\*\*替你猜/, "不唯一时不钉,说明里要讲");
   assert.match(MCPSERVER, /never "\s*\n?\s*\+ "count lines yourself/);
 });

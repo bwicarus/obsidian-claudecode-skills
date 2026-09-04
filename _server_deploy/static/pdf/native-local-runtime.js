@@ -4856,27 +4856,67 @@
   //   生成端算出来，在给助手的边界上丢掉。
   //   bk 本身可能不连续（跳号、分栏后重编），所以转成从 1 起的连号再印，
   //   否则助手看到的 [NN] 跟内部 bk 对不上。
-  function pageTextSegments(chars) {
+  // 块号的**唯一来源**（2026-09-04 根治）。
+  //
+  // ⚠ 此前同一页可能有两套编号：结构化投影（语音快照）按版面区域 `order + 1` 印
+  //   `[NN]`，而这里按 `bk` 连号。助手读到的号与解析端算出的号不是一回事，撞上时
+  //   卡片会钉到页内另一处一样的字上，而两边各自都自洽 —— 最难查的那类错
+  //   （见 references/error-prone-code-removal-20260902.md）。
+  //   现在：**有版面就一律用版面区域号**（与投影同源），没有版面才退回 bk 连号。
+  //   一页只有一套编号，`[NN]`、`segments[].block`、解析端说的是同一件事。
+  //
+  // 返回 `of(index, bk)`：index 是字符在 chars 数组里的下标 —— 区域的 `ranges`
+  // 索引的正是这同一个数组（也就是 charBoxes 的 `_oi`）。
+  function blockNumberer(layout) {
+    var regions = (layout && Array.isArray(layout.regions)) ? layout.regions : null;
+    if (regions && regions.length) {
+      var byIndex = Object.create(null);
+      regions.forEach(function (region) {
+        if (!region || !Number.isSafeInteger(region.order)) return;
+        var no = region.order + 1;
+        var ranges = Array.isArray(region.ranges) ? region.ranges : [];
+        ranges.forEach(function (rg) {
+          if (!Array.isArray(rg) || rg.length < 2) return;
+          var a = Math.min(rg[0] | 0, rg[1] | 0), b = Math.max(rg[0] | 0, rg[1] | 0);
+          // 区域重叠时先到先得：同一个字符不能有两个块地址。
+          for (var i = a; i <= b; i += 1) if (byIndex[i] === undefined) byIndex[i] = no;
+        });
+      });
+      return {
+        source: 'region',
+        of: function (index) {
+          var value = byIndex[index | 0];
+          return value === undefined ? 0 : value;
+        }
+      };
+    }
+    var seq = 0, seen = Object.create(null);
+    return {
+      source: 'bk',
+      of: function (index, bk) {
+        if (bk === undefined || bk === null) return 0;
+        var key = String(bk);
+        if (!seen[key]) { seq += 1; seen[key] = seq; }
+        return seen[key];
+      }
+    };
+  }
+
+  function pageTextSegments(chars, layout) {
     var segments = [];
     var currentWord = null;
     var start = 0;
     var buffer = [];
     var last = 0;
-    var blockNo = Object.create(null);   // bk → 从 1 起的连号
-    var blockSeq = 0;
-    var curBk = null;
-    function numberFor(bk) {
-      var key = String(bk);
-      if (!blockNo[key]) { blockSeq += 1; blockNo[key] = blockSeq; }
-      return blockNo[key];
-    }
+    var numberer = blockNumberer(layout);
+    var curBlock = 0;
     function flush(end) {
       if (!buffer.length) return;
       var text = buffer.join('').trim();
       if (text) {
         segments.push({
           from: start, to: end, text: text.slice(0, 120),
-          block: curBk === null ? 0 : numberFor(curBk)
+          block: curBlock
         });
       }
     }
@@ -4887,12 +4927,13 @@
       if (!value.trim()) continue;
       var word = Number.isInteger(Number(item.w)) ? Number(item.w) : -1;
       var bk = item.bk === undefined || item.bk === null ? null : item.bk;
+      var block = numberer.of(index, bk);
       // 换块也要断段：一个词组不可能跨两个版面块。
       if (currentWord === null || word !== currentWord || word === -1 ||
-          String(bk) !== String(curBk)) {
+          block !== curBlock) {
         flush(last);
         currentWord = word;
-        curBk = bk;
+        curBlock = block;
         start = index;
         buffer = [];
       }
@@ -4918,20 +4959,21 @@
   //
   // ⚠ 行首的 [NN] 是**块地址**,不是字符下标。要下标只能用 segments。
   //   两套编号长得一样,这是 ANCHOR_MAP 那个陷阱的同一形态。
-  function blockLines(chars, limit) {
+  function blockLines(chars, limit, layout) {
     var lines = [];
-    var cur = null, seq = 0;
-    var no = Object.create(null);
+    var cur = null;
+    // 编号与 segments[].block、与语音快照里的 [NN] 同源(blockNumberer)。
+    var numberer = blockNumberer(layout);
     for (var i = 0; i < (chars || []).length; i += 1) {
       var item = chars[i];
       if (!item) continue;
       var value = String(item.c == null ? '' : item.c);
       if (!value) continue;
-      var bk = item.bk === undefined || item.bk === null ? '' : String(item.bk);
-      if (!cur || cur.bk !== bk) {
+      var bk = item.bk === undefined || item.bk === null ? null : item.bk;
+      var n = numberer.of(i, bk);
+      if (!cur || cur.n !== n) {
         if (cur) lines.push(cur);
-        if (!no[bk]) { seq += 1; no[bk] = seq; }
-        cur = { bk: bk, n: no[bk], buf: '' };
+        cur = { n: n, buf: '' };
       }
       cur.buf += value;
     }
@@ -4941,7 +4983,8 @@
       var body = lines[j].buf.replace(/\s+/g, ' ').trim();
       if (!body) continue;
       var n2 = lines[j].n;
-      out.push('[' + (n2 < 10 ? '0' : '') + n2 + '] ' + body);
+      // 认不出块的字符(区域没覆盖 / 没有 bk)编号为 0 —— 不印假编号,只出正文。
+      out.push(n2 > 0 ? '[' + (n2 < 10 ? '0' : '') + n2 + '] ' + body : body);
     }
     var text = out.join('\n');
     return limit && text.length > limit ? text.slice(0, limit) : text;
@@ -5019,7 +5062,9 @@
         });
       }
       return pageTextForPage(page).then(function (result) {
-        var all = pageTextSegments(result && result.chars);
+        var all = pageTextSegments(
+          result && result.chars, result && result.layout
+        );
         // 助手据此自己挑段落绑卡片，不必要求用户先选中。
         //
         // contains 给了就只回覆盖那句话的几条。旧的内联 ANCHOR_MAP 正是
@@ -5034,7 +5079,7 @@
         return {
           ok: true,
           text: hasBlocks
-            ? blockLines(result && result.chars, 1500)
+            ? blockLines(result && result.chars, 1500, result && result.layout)
             : searchableText(result).slice(0, 1500),
           blocks: hasBlocks,
           segments: narrowed ? narrowed.segments : all,
