@@ -7680,6 +7680,32 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
     _x0s = [c["x0"] for c in chars if not c.get("sp") and c["x1"] > c["x0"]]
     right_edge = max(_x1s) if _x1s else 0
     text_width = max(1.0, right_edge - (min(_x0s) if _x0s else 0))
+    # ⚠ 但「顶没顶到右边界」必须按**这一块自己的**边界量,不能拿整页的
+    #   (2026-09-05 用户实锤:漫画气泡里「これらの問題を…総合的に」始终接不上下一行)。
+    #   那一页整页 right_edge=2205,而气泡每行只到 941–1060 —— 每一行都比页右缘短
+    #   56~80%,远超 30% 阈值,于是**每一行都被判成独立短行而断句**。
+    #   分栏、气泡、侧栏、表格……只要正文不占满页宽,这条启发式就必然误伤。
+    #   块(bk)才是它想表达的那个"一栏文字"的单位:段末短行仍然照断(它比本块最宽行短),
+    #   而正常换行不再被冤枉。
+    _edge_by_bk: dict = {}
+    _left_by_bk: dict = {}
+    for c in chars:
+        if c.get("sp") or c["x1"] <= c["x0"]:
+            continue
+        bk = c.get("bk")
+        if bk is None:
+            continue
+        if bk not in _edge_by_bk or c["x1"] > _edge_by_bk[bk]:
+            _edge_by_bk[bk] = c["x1"]
+        if bk not in _left_by_bk or c["x0"] < _left_by_bk[bk]:
+            _left_by_bk[bk] = c["x0"]
+
+    def _line_is_short(prev_char: dict) -> bool:
+        """上一行明显没顶到**本块**右边界 → 它是独立短行(标题/段末/居中行)。"""
+        bk = prev_char.get("bk")
+        edge = _edge_by_bk.get(bk, right_edge)
+        width = max(1.0, edge - _left_by_bk.get(bk, right_edge - text_width))
+        return (edge - prev_char.get("x1", 0)) > width * 0.30
 
     sentences: list[dict] = []
     cur_chars: list[dict] = []
@@ -7855,9 +7881,10 @@ def _build_unmastered_sentences(chars: list[dict], threshold: int = 3, min_words
                 if _is_list_head(i):
                     # 新行是列表项(10.1 / 10. / a) …) → 独立成句,不并进上一项(否则整列表框成一大块)
                     _flush_word(); _flush_sentence()
-                elif (right_edge - prev_ns.get("x1", 0)) > text_width * 0.30:
-                    # 上一行明显没顶到右边界(>30% 短) = 独立短行(标题/版权/ISBN/居中行/段末) → 断句,
-                    # 不并入下一行(否则标题块那几行被并成一个跨行大框)。正文顶格换行的行≈到右边界,不受影响。
+                elif _line_is_short(prev_ns):
+                    # 上一行明显没顶到**本块**右边界(>30% 短) = 独立短行(标题/版权/ISBN/居中行/段末)
+                    # → 断句,不并入下一行(否则标题块那几行被并成一个跨行大框)。
+                    # 正文顶格换行的行≈到本块右边界,不受影响;分栏/气泡也不再被整页宽度冤枉。
                     _flush_word(); _flush_sentence()
                 elif cur_word_letters and cur_word_letters[-1] == "-":
                     cur_word_letters.pop()   # 行尾连字符 → 拼回
