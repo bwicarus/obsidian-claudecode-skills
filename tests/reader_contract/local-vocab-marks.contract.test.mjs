@@ -40,7 +40,6 @@ test("vocabulary-state 多了 lookup 属性，词框查到即记（词组只认�
   // 词组框同样记（kind: phrase）
   // 2026-09-04 用户:「词组的下划线应该是收藏后出现而不是查询后」→ 词组框查完**不再**记 lookup
   assert.doesNotMatch(PHRASEPOP, /setLookedUp\(lspec/);
-  assert.match(PHRASEPOP, /vs\.setLookedUp\(lspec, true, \{ source: 'rc-phrasepop' \}\)/);
 });
 
 test("本地 page-overlay 按本地字符层 + 本地状态算下划线，已掌握不画", () => {
