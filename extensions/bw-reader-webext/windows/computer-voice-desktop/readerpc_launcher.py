@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -68,7 +69,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.125"
+APP_VERSION = "0.1.128"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status
@@ -367,6 +368,73 @@ def set_codex_voice_keep_active(
 # C# 侧是**纯轮询**读 keepalive 文件（DirectBridgeProtocol.cs:519 PeriodicTimer，
 # 默认 5 秒；全仓没有任何 FileSystemWatcher）。这个数字决定了下面那个窗口要多宽。
 _KEEPALIVE_POLL_SECONDS = 5.0
+
+
+def board_store_path() -> Path:
+    """展示板存储。跟 C# 侧 ReaderDisplayBoard 写的是同一个文件。"""
+    return ReaderPCPaths.discover().local_root / "reader-display-boards.json"
+
+
+def _board_render_python() -> Path | None:
+    """找一个**带 playwright** 的 Python 来跑渲染。
+
+    ⚠ 不能用 sys.executable：ReaderPC 是 PyInstaller onefile，
+      那个"可执行文件"是它自己，不是解释器。
+    """
+    candidates = []
+    override = os.environ.get("BW_BOARD_RENDER_PYTHON")
+    if override:
+        candidates.append(Path(override))
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        candidates.append(
+            Path(local) / "Programs" / "Python" / "Python313" / "python.exe")
+    for name in ("python.exe", "python3.exe", "python"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(Path(found))
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def run_board_card_render(timeout_seconds: float = 90.0) -> str:
+    """起一个子进程把展示板的卡片渲成 PNG，返回一行给日志的摘要（无事则空串）。
+
+    渲染脚本装在稳定路径 %LOCALAPPDATA%/BWReader/board_card_render.py
+    （跟 camera_snap.py 那批同样由安装器铺开）。
+    """
+    script = ReaderPCPaths.discover().local_root / "board_card_render.py"
+    if not script.is_file():
+        return "渲染脚本缺失：" + str(script)
+    interpreter = _board_render_python()
+    if interpreter is None:
+        return "找不到可用的 Python 解释器（渲染需要 playwright）"
+    try:
+        completed = subprocess.run(
+            [str(interpreter), str(script)],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        return "渲染超时（>%ds）" % int(timeout_seconds)
+    except OSError as exc:
+        return "渲染进程起不来：" + str(exc)[:160]
+    output = (completed.stdout or "").strip().splitlines()
+    summary = output[-1] if output else ""
+    if completed.returncode != 0:
+        return ("渲染退出码 %d：" % completed.returncode) + (
+            (completed.stderr or summary or "").strip()[:200])
+    # 没渲也没错就不刷屏。
+    if summary and ('"rendered": 0' not in summary or '"errors": []' not in summary):
+        return summary[:300]
+    return ""
 
 
 def rearm_codex_voice_keep_active(
@@ -1105,6 +1173,9 @@ class ReaderPCWindow:
         self.voice_start_in_progress = False
         self.voice_stop_in_progress = False
         self.voice_snapshot_offline_marked = False
+        # 展示板卡片渲染:上次看到的存储指纹 + 是否正在渲(同一时间只跑一轮)。
+        self._board_render_seen: tuple[int, int] | None = None
+        self._board_render_busy = False
         # 上一次播报过的维护原因:同一条只说一次,但换了原因要再说。
         self.voice_maintenance_notice: str | None = None
         self.last_status_publish = 0.0
@@ -1317,6 +1388,7 @@ class ReaderPCWindow:
         root.after(250, self.refresh)
         root.after(600, self._ensure_pc_online)
         root.after(900, self._ensure_server_services_online)
+        root.after(1500, self._ensure_board_cards)
         root.after(800, self._ensure_voice_online)
 
     def _service_row(
@@ -1958,6 +2030,54 @@ class ReaderPCWindow:
             "正在应用 App 请求的 ReaderPC 连接/语音设置…",
             "ReaderPC 连接与语音设置已按 App 请求更新。",
         )
+
+    def _ensure_board_cards(self) -> None:
+        """把展示板里新的/改过的卡片渲成 PNG（源头与渲染都在这台机器上）。
+
+        用户 2026-09-05 定的架构：设备端是纯显示器，只按 sha 取一张渲好的图。
+        小组件进程里放不了 WebView，HTML 在那边**不可能**渲染 —— 所以这一步
+        必须发生在服务器侧，而这台机器就是服务器。
+
+        ⚠ 渲染要起无头 Chromium（秒级），**绝不能**在 Tk 主循环里做：
+          界面会整个卡住，而表现是"点什么都没反应"。丢到工作线程，
+          且同一时间只跑一轮。
+        ⚠ 只在板子存储真的变过时才跑：否则每 20 秒白起一次浏览器。
+        """
+        if self.closed or self.closing:
+            return
+        try:
+            if not self._board_render_busy:
+                signature = None
+                try:
+                    stat = board_store_path().stat()
+                    signature = (stat.st_mtime_ns, stat.st_size)
+                except OSError:
+                    signature = None
+                if signature is not None and signature != self._board_render_seen:
+                    self._board_render_seen = signature
+                    self._board_render_busy = True
+
+                    def worker() -> None:
+                        try:
+                            report = run_board_card_render()
+                            if report:
+                                _boot_log("展示板卡片渲染: " + report)
+                        except Exception as exc:   # noqa: BLE001
+                            _boot_log(
+                                "展示板卡片渲染失败: "
+                                + type(exc).__name__ + ": " + str(exc)[:160])
+                        finally:
+                            self._board_render_busy = False
+
+                    threading.Thread(
+                        target=worker,
+                        name="readerpc-board-cards",
+                        daemon=True,
+                    ).start()
+        except Exception as exc:   # noqa: BLE001
+            _boot_log("展示板卡片轮询异常: " + type(exc).__name__)
+        finally:
+            self.root.after(20_000, self._ensure_board_cards)
 
     def _ensure_voice_online(self) -> None:
         if self.closed or self.closing:

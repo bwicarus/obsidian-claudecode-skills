@@ -74,5 +74,31 @@ class VerifyRunningGenerationTests(unittest.TestCase):
         )
 
 
+class RuntimeSourceListsAgreeTest(unittest.TestCase):
+    """两份清单必须对齐 —— 打进包里 ≠ 铺到运行位置。
+
+    2026-08-29 voip_push.py 只加了第一份：包里有、运行位置没有，而调用方是
+    `except ImportError: return 0`，于是 deliver=call **静默地永远不响**。
+    2026-09-05 board_card_render.py 又踩一次（表现是"渲染脚本缺失"，
+    这次因为有出声的诊断，一条日志就看见了）。
+    所以这条契约直接比对两份清单本身。
+    """
+
+    def test_every_flat_runtime_source_is_also_installed_to_the_stable_path(self):
+        source = Path(module.__file__).read_text("utf-8")
+        block = source[source.index("for stable_name in ("):]
+        stable = block[:block.index(")")]
+        missing = []
+        for key in module.RUNTIME_SOURCES:
+            prefix, _, name = key.partition("/")
+            if prefix != "readerpc-runtime" or "/" in name:
+                continue   # scripts/ 子目录那几个复制口径不同，单列在下面
+            if '"' + name + '"' not in stable:
+                missing.append(name)
+        self.assertEqual(
+            missing, [],
+            "这些运行时源码打进了包却没铺到 %LOCALAPPDATA%/BWReader：" + repr(missing))
+
+
 if __name__ == "__main__":
     unittest.main()

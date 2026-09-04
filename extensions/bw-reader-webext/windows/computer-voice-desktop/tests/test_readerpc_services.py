@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -61,9 +62,12 @@ class ReaderPCExitRequestTests(unittest.TestCase):
         )
 
     def test_live_request_is_honoured_then_cleared(self):
-        write_readerpc_exit_request(self.paths, "新一代 ReaderPC 正在接管")
+        # 退出请求是**别的进程**写给我的;自己写的那条永远不认(见下面那条契约)。
+        write_readerpc_exit_request(
+            self.paths, "新一代 ReaderPC 正在接管", pid=os.getpid() + 1)
         self.assertEqual(
-            read_readerpc_exit_request(self.paths),
+            read_readerpc_exit_request(
+                self.paths, pid_alive=lambda pid: True),
             "新一代 ReaderPC 正在接管",
         )
         payload = json.loads(self.paths.exit_request_file.read_text("utf-8"))
@@ -72,16 +76,33 @@ class ReaderPCExitRequestTests(unittest.TestCase):
         self.assertIsNone(read_readerpc_exit_request(self.paths))
         clear_readerpc_exit_request(self.paths)   # 再删一次不许抛
 
+    def test_a_request_written_by_this_process_is_never_consumed(self):
+        # 2026-09-05 实锤：接管方在自己进程里写这条请求去请旧实例退场；
+        # 旧实例先走（WM_CLOSE 比刷新循环快）时请求留在原地，
+        # 新实例下一次刷新读到的是**自己写的**那条 → 刚接管完就自杀，
+        # 整台机器的 ReaderPC/桥/Flask 一起没了。按 pid 认自己，直接不认。
+        write_readerpc_exit_request(self.paths, "接管")
+        self.assertIsNone(read_readerpc_exit_request(self.paths))
+        # 别人写的仍然照认
+        write_readerpc_exit_request(self.paths, "接管", pid=os.getpid() + 1)
+        self.assertEqual(
+            read_readerpc_exit_request(self.paths, pid_alive=lambda pid: True),
+            "接管")
+
     def test_expired_request_is_ignored(self):
         # 赖在原地的请求会让**新**实例一启动就自杀，表现是"双击没反应"。
         write_readerpc_exit_request(
-            self.paths, "接管", ttl_seconds=10.0, clock=lambda: 500.0
+            self.paths, "接管", ttl_seconds=10.0, clock=lambda: 500.0,
+            pid=os.getpid() + 1,
         )
         self.assertEqual(
-            read_readerpc_exit_request(self.paths, clock=lambda: 509.0), "接管"
+            read_readerpc_exit_request(
+                self.paths, clock=lambda: 509.0, pid_alive=lambda pid: True),
+            "接管",
         )
         self.assertIsNone(
-            read_readerpc_exit_request(self.paths, clock=lambda: 511.0)
+            read_readerpc_exit_request(
+                self.paths, clock=lambda: 511.0, pid_alive=lambda pid: True)
         )
 
     def test_request_from_a_dead_process_is_ignored(self):

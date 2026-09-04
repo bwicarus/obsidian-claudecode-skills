@@ -46,6 +46,9 @@ namespace BwReader.ComputerVoiceAudio;
 internal static class ReaderDisplayBoard
 {
     internal const string BoardPath = "/reader-board/v1";
+    /// 渲好的卡片图。**内容寻址**：sha 就是卡片 html 的指纹，
+    /// 所以同一个 URL 的内容永不变 → 设备端可以长缓存，改了内容自然换 URL。
+    internal const string CardImagePath = "/reader-board/card.png";
     internal const string StoreContract = "reader-display-boards/1";
     private const string StoreFileName = "reader-display-boards.json";
 
@@ -54,6 +57,12 @@ internal static class ReaderDisplayBoard
     private const int MaxSections = 12;
     private const int MaxLines = 24;
     private const int MaxLineChars = 200;
+    // 卡片(2026-09-05 用户改版):一张卡 = 一个方块 = 一条信息。
+    // 12 张已经超过最大号小组件能放下的量;再多只是把 payload 撑大。
+    private const int MaxCards = 12;
+    private const int MaxCardHtmlChars = 4000;
+    private const int MaxCardIdChars = 64;
+    private const int MaxCardAltChars = 200;
     private const int MaxTitleChars = 60;
     private const int MaxSlugChars = 64;
     private const int MaxNoteChars = 200;
@@ -191,6 +200,21 @@ internal static class ReaderDisplayBoard
                 double hours = ReadNumber(rule?["hours"]) ?? 0;
                 if (hours <= 0) continue;
                 long cutoff = nowMs - (long)(hours * 3600_000);
+                // 卡片模型:按卡过期(一张卡多久没更新就撤那一张)。
+                if (board["cards"] is JsonArray cardList)
+                {
+                    for (int index = cardList.Count - 1; index >= 0; index--)
+                    {
+                        long cardAt = (cardList[index] as JsonObject)
+                            ?["updatedAtMs"]?.GetValue<long>() ?? 0;
+                        if (cardAt > 0 && cardAt < cutoff)
+                        {
+                            cardList.RemoveAt(index);
+                            changed = true;
+                        }
+                    }
+                    if (changed) board["updatedAtMs"] = nowMs;
+                }
                 if (board["sections"] is not JsonArray sections) continue;
                 for (int index = sections.Count - 1; index >= 0; index--)
                 {
@@ -215,6 +239,12 @@ internal static class ReaderDisplayBoard
                     && sections.Count > 0)
                 {
                     sections.Clear();
+                    changed = true;
+                }
+                if (board["cards"] is JsonArray dailyCards
+                    && dailyCards.Count > 0)
+                {
+                    dailyCards.Clear();
                     changed = true;
                 }
                 board["clearedAtMs"] = nowMs;
@@ -296,6 +326,125 @@ internal static class ReaderDisplayBoard
         if (value.TryGetValue(out double asDouble)) return asDouble;
         if (value.TryGetValue(out long asLong)) return asLong;
         return null;
+    }
+
+    /// AI 写的 HTML 入库前先洗一遍。
+    ///
+    /// ⚠ 渲染端(无头 Chromium)已经关了 JS 和网络,但**不能只靠那一层**:
+    ///   同一段 HTML 还会进 App 的 WebView 显示。任何一处把它当可信输入,
+    ///   这条链就有一处能执行别人写的字。
+    ///   这里只做"结构性"删除(整段扔掉),不做属性级美化 —— 半清洗最危险:
+    ///   看起来干净了,实际留了一条路。
+    private static readonly string[] ForbiddenTags =
+    {
+        "script", "iframe", "object", "embed", "link", "meta", "base",
+        "form", "input", "button", "textarea", "svg", "math", "video",
+        "audio", "source", "track", "canvas", "portal",
+    };
+
+    private static string SanitizeHtml(string html)
+    {
+        string value = html.Replace("\r", string.Empty);
+        foreach (string tag in ForbiddenTags)
+        {
+            value = System.Text.RegularExpressions.Regex.Replace(
+                value,
+                "<" + tag + "\\b[\\s\\S]*?</" + tag + "\\s*>",
+                string.Empty,
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            value = System.Text.RegularExpressions.Regex.Replace(
+                value,
+                "<\\s*/?" + tag + "\\b[^>]*>",
+                string.Empty,
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        }
+        // on* 事件属性(onclick=…, onerror=…):带引号和不带引号两种写法都去掉。
+        value = System.Text.RegularExpressions.Regex.Replace(
+            value,
+            "\\son[a-zA-Z]+\\s*=\\s*(\"[^\"]*\"|'[^']*'|[^\\s>]+)",
+            " ",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        // 外链与危险协议:板子是离线渲染的,任何 http(s)/javascript/data 资源都不该出现。
+        value = System.Text.RegularExpressions.Regex.Replace(
+            value,
+            "\\s(src|href|xlink:href|background|poster)\\s*=\\s*(\"[^\"]*\"|'[^']*'|[^\\s>]+)",
+            " ",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        value = System.Text.RegularExpressions.Regex.Replace(
+            value, "javascript:", "blocked:",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        value = System.Text.RegularExpressions.Regex.Replace(
+            value, "@import", "blocked-import",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return value.Trim();
+    }
+
+    private static string NewCardId()
+    {
+        Span<byte> raw = stackalloc byte[6];
+        RandomNumberGenerator.Fill(raw);
+        return "c_" + Convert.ToHexString(raw).ToLowerInvariant();
+    }
+
+    /// 卡片内容的指纹：渲染端据此判断"这张卡变了没有"，没变就不重渲。
+    private static string CardSha(string html)
+    {
+        byte[] digest = SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(html));
+        return Convert.ToHexString(digest, 0, 8).ToLowerInvariant();
+    }
+
+    private static JsonObject BuildCard(JsonObject item, long nowMs)
+    {
+        string html = SanitizeHtml(
+            RequireText(item, "html", MaxCardHtmlChars, required: true));
+        if (html.Length == 0)
+        {
+            throw new DirectProtocolException(
+                "BW_BOARD_FIELD_INVALID",
+                "html 洗掉之后是空的（是不是整段都被禁用标签包着？）",
+                retryable: false);
+        }
+        string id = RequireText(item, "id", MaxCardIdChars, required: false);
+        return new JsonObject
+        {
+            ["id"] = id.Length > 0 ? id : NewCardId(),
+            ["html"] = html,
+            ["alt"] = RequireText(item, "alt", MaxCardAltChars, required: false),
+            ["sha"] = CardSha(html),
+            ["updatedAtMs"] = nowMs,
+        };
+    }
+
+    /// 旧的「分区+行」读进来转成卡片，那块示例板不会因为改版变空。
+    private static JsonArray CardsOf(JsonObject board, long nowMs)
+    {
+        if (board["cards"] is JsonArray cards) return cards;
+        JsonArray converted = new();
+        foreach (JsonObject section in
+            (board["sections"] as JsonArray ?? new JsonArray())
+                .OfType<JsonObject>())
+        {
+            string title = section["title"]?.GetValue<string>() ?? "";
+            string body = string.Join("<br>",
+                (section["lines"] as JsonArray ?? new JsonArray())
+                    .Select(line => line?.GetValue<string>() ?? string.Empty)
+                    .Where(line => line.Length > 0));
+            converted.Add(new JsonObject
+            {
+                ["id"] = NewCardId(),
+                ["html"] =
+                    "<div style=\"font:600 15px system-ui;margin-bottom:6px\">"
+                    + title + "</div><div style=\"font:13px system-ui;"
+                    + "line-height:1.5;opacity:.85\">" + body + "</div>",
+                ["alt"] = title,
+                ["sha"] = CardSha(title + body),
+                ["updatedAtMs"] =
+                    section["updatedAtMs"]?.GetValue<long>() ?? nowMs,
+            });
+        }
+        board["cards"] = converted;
+        return converted;
     }
 
     private static string NewCode()
@@ -473,6 +622,15 @@ internal static class ReaderDisplayBoard
                 case "section":
                     result = OpSection(boards, body, nowMs, ref dirty);
                     break;
+                case "card":
+                    result = OpCard(boards, body, nowMs, ref dirty);
+                    break;
+                case "cards":
+                    result = OpCards(boards, body, nowMs, ref dirty);
+                    break;
+                case "cardDelete":
+                    result = OpCardDelete(boards, body, nowMs, ref dirty);
+                    break;
                 case "clear":
                     result = OpClear(boards, body, nowMs, ref dirty);
                     break;
@@ -499,7 +657,8 @@ internal static class ReaderDisplayBoard
                     throw new DirectProtocolException(
                         "BW_BOARD_UNKNOWN_OP",
                         "不认识的 op：" + op
-                        + "（register/update/section/clear/delete/enable/get/list）",
+                        + "（register/card/cards/cardDelete/clear/delete"
+                        + "/enable/get/list；update/section 是旧的分区式写法）",
                         retryable: false);
             }
             if (dirty) SaveStore(root);
@@ -638,13 +797,148 @@ internal static class ReaderDisplayBoard
         };
     }
 
+    /// 放一张卡（有 id 就替换那一张，没有就新增）。
+    ///
+    /// 反复刷同一张卡是常态用法：拿同一个 id 再 `card` 一次即可 ——
+    /// 这跟旧的「同名分区整区替换」是同一个语义，只是换成了 id。
+    private static JsonObject OpCard(
+        JsonArray boards, JsonObject body, long nowMs, ref bool dirty)
+    {
+        JsonObject board = RequireByCode(
+            boards, RequireText(body, "code", 40, required: true));
+        JsonArray cards = CardsOf(board, nowMs);
+        JsonObject card = BuildCard(body, nowMs);
+        string id = card["id"]!.GetValue<string>();
+        int at = -1;
+        for (int index = 0; index < cards.Count; index++)
+        {
+            if ((cards[index] as JsonObject)?["id"]?.GetValue<string>() == id)
+            {
+                at = index;
+                break;
+            }
+        }
+        if (at >= 0)
+        {
+            cards[at] = card;
+        }
+        else
+        {
+            if (cards.Count >= MaxCards)
+            {
+                throw new DirectProtocolException(
+                    "BW_BOARD_FIELD_INVALID",
+                    "这块板子已有 " + MaxCards + " 张卡；改现有的（同 id 再发一次）"
+                    + "或先 cardDelete / clear",
+                    retryable: false);
+            }
+            cards.Add(card);
+        }
+        board["updatedAtMs"] = nowMs;
+        dirty = true;
+        return new JsonObject
+        {
+            ["ok"] = true,
+            ["code"] = board["code"]?.GetValue<string>(),
+            ["id"] = id,
+            ["sha"] = card["sha"]?.GetValue<string>(),
+            ["replaced"] = at >= 0,
+        };
+    }
+
+    /// 整块换掉所有卡片。
+    private static JsonObject OpCards(
+        JsonArray boards, JsonObject body, long nowMs, ref bool dirty)
+    {
+        JsonObject board = RequireByCode(
+            boards, RequireText(body, "code", 40, required: true));
+        if (body["cards"] is not JsonArray incoming)
+        {
+            throw new DirectProtocolException(
+                "BW_BOARD_FIELD_MISSING", "缺少 cards（卡片数组）",
+                retryable: false);
+        }
+        if (incoming.Count > MaxCards)
+        {
+            throw new DirectProtocolException(
+                "BW_BOARD_FIELD_INVALID",
+                "最多 " + MaxCards + " 张卡（收到 " + incoming.Count + "）",
+                retryable: false);
+        }
+        JsonArray cards = new();
+        foreach (JsonNode? node in incoming)
+        {
+            if (node is not JsonObject item)
+            {
+                throw new DirectProtocolException(
+                    "BW_BOARD_FIELD_INVALID", "卡片必须是对象",
+                    retryable: false);
+            }
+            cards.Add(BuildCard(item, nowMs));
+        }
+        board["cards"] = cards;
+        board.Remove("sections");   // 旧模型不再共存：两份内容会各画各的
+        board["updatedAtMs"] = nowMs;
+        dirty = true;
+        return new JsonObject
+        {
+            ["ok"] = true,
+            ["code"] = board["code"]?.GetValue<string>(),
+            ["cards"] = cards.Count,
+        };
+    }
+
+    /// 删掉一张卡。小组件上每张卡固定的那个删除键走的就是这条。
+    private static JsonObject OpCardDelete(
+        JsonArray boards, JsonObject body, long nowMs, ref bool dirty)
+    {
+        JsonObject board = RequireByCode(
+            boards, RequireText(body, "code", 40, required: true));
+        string id = RequireText(body, "id", MaxCardIdChars, required: true);
+        JsonArray cards = CardsOf(board, nowMs);
+        for (int index = 0; index < cards.Count; index++)
+        {
+            if ((cards[index] as JsonObject)?["id"]?.GetValue<string>() == id)
+            {
+                cards.RemoveAt(index);
+                board["updatedAtMs"] = nowMs;
+                dirty = true;
+                return new JsonObject
+                {
+                    ["ok"] = true,
+                    ["code"] = board["code"]?.GetValue<string>(),
+                    ["deleted"] = id,
+                    ["cards"] = cards.Count,
+                };
+            }
+        }
+        throw new DirectProtocolException(
+            "BW_BOARD_UNKNOWN_CARD",
+            "这块板子上没有这张卡：" + id, retryable: false);
+    }
+
     private static JsonObject OpClear(
         JsonArray boards, JsonObject body, long nowMs, ref bool dirty)
     {
         JsonObject board = RequireByCode(
             boards, RequireText(body, "code", 40, required: true));
         string only = RequireText(body, "section", MaxTitleChars, required: false);
-        JsonArray sections = (JsonArray)board["sections"]!;
+        // 卡片模型:clear 就是把卡都清掉(不接受按标题清 —— 卡片按 id 删,用 cardDelete)。
+        if (only.Length == 0 && board["cards"] is JsonArray cardList)
+        {
+            int cleared = cardList.Count;
+            cardList.Clear();
+            board["clearedAtMs"] = nowMs;
+            board["updatedAtMs"] = nowMs;
+            dirty = true;
+            return new JsonObject
+            {
+                ["ok"] = true,
+                ["code"] = board["code"]?.GetValue<string>(),
+                ["removed"] = cleared,
+            };
+        }
+        JsonArray sections = (board["sections"] as JsonArray) ?? new JsonArray();
         int removed = 0;
         for (int index = sections.Count - 1; index >= 0; index--)
         {
@@ -748,22 +1042,21 @@ internal static class ReaderDisplayBoard
                 .OrderByDescending(
                     board => board["updatedAtMs"]?.GetValue<long>() ?? 0))
             {
-                JsonArray sections = new();
-                foreach (JsonObject section in
-                    (board["sections"] as JsonArray ?? new JsonArray())
-                        .OfType<JsonObject>().Take(WidgetSections))
+                // 卡片:只出 id/alt/sha —— **不出 html**。
+                // 小组件渲染不了 HTML(WidgetKit 只有 SwiftUI),它拿的是
+                // Windows 渲好的 PNG;html 塞进来只会把每 15 分钟一次的
+                // payload 撑大好几倍,而没有任何一个消费者用得上。
+                JsonArray cards = new();
+                foreach (JsonObject card in CardsOf(board, nowMs)
+                    .OfType<JsonObject>().Take(MaxCards))
                 {
-                    JsonArray lines = new();
-                    foreach (JsonNode? line in
-                        (section["lines"] as JsonArray ?? new JsonArray())
-                            .Take(WidgetLines))
+                    cards.Add(new JsonObject
                     {
-                        lines.Add(line?.GetValue<string>() ?? string.Empty);
-                    }
-                    sections.Add(new JsonObject
-                    {
-                        ["title"] = section["title"]?.GetValue<string>(),
-                        ["lines"] = lines,
+                        ["id"] = card["id"]?.GetValue<string>(),
+                        ["alt"] = card["alt"]?.GetValue<string>(),
+                        ["sha"] = card["sha"]?.GetValue<string>(),
+                        ["updatedAtMs"] =
+                            card["updatedAtMs"]?.GetValue<long>() ?? 0,
                     });
                 }
                 projected.Add(new JsonObject
@@ -773,7 +1066,7 @@ internal static class ReaderDisplayBoard
                     ["title"] = board["title"]?.GetValue<string>(),
                     ["updatedAtMs"] =
                         board["updatedAtMs"]?.GetValue<long>() ?? 0,
-                    ["sections"] = sections,
+                    ["cards"] = cards,
                 });
             }
             return projected;
@@ -781,6 +1074,47 @@ internal static class ReaderDisplayBoard
     }
 
     // ── HTTP ────────────────────────────────────────────────────────────
+
+    /// 端出一张渲好的卡片图。渲染发生在 ReaderPC 那边（Playwright 无头 Chromium），
+    /// 这里只负责把文件发出去 —— 桥不跑浏览器。
+    ///
+    /// 图还没渲出来时回 404 **而不是**占位图：占位图会被设备端长缓存下来，
+    /// 于是"渲染慢了一拍"变成"这张卡永远是灰的"。
+    internal static async Task WriteCardImageAsync(
+        HttpContext context,
+        CancellationToken cancellationToken)
+    {
+        string sha = context.Request.Query["sha"].ToString();
+        if (sha.Length != 16 || !sha.All(
+                ch => ch is >= '0' and <= '9' or >= 'a' and <= 'f'))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return;
+        }
+        Configure();
+        string path;
+        lock (Gate)
+        {
+            path = Path.Combine(_storeDirectory, "board-cards", sha + ".png");
+        }
+        byte[] payload;
+        try
+        {
+            payload = await File.ReadAllBytesAsync(path, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+        context.Response.ContentType = "image/png";
+        // 内容寻址 → 永不失效。
+        context.Response.Headers["Cache-Control"] =
+            "public, max-age=31536000, immutable";
+        await context.Response.Body
+            .WriteAsync(payload, cancellationToken).ConfigureAwait(false);
+    }
 
     internal static async Task WriteResponseAsync(
         HttpContext context,

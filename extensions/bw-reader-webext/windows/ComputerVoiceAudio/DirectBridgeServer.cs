@@ -723,6 +723,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             ReaderDisplayBoard.BoardPath,
             new[] { "POST", "OPTIONS" },
             context => HandleDisplayBoardAsync(context, serviceToken));
+        // 渲好的卡片图（内容寻址，长缓存）。小组件与 App 都从这里取。
+        app.MapMethods(
+            ReaderDisplayBoard.CardImagePath,
+            new[] { "GET" },
+            context => HandleDisplayBoardImageAsync(context, serviceToken));
         app.MapMethods(
             ReaderAttentionBoard.AckPath,
             new[] { "GET", "POST", "OPTIONS" },
@@ -2243,6 +2248,21 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         }
         await ReaderDisplayBoard
             .WriteResponseAsync(context, serviceCancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task HandleDisplayBoardImageAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "board-image")) return;
+        if (!HttpMethods.IsGet(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        await ReaderDisplayBoard
+            .WriteCardImageAsync(context, serviceCancellationToken)
             .ConfigureAwait(false);
     }
 

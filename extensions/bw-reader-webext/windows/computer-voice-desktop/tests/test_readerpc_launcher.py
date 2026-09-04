@@ -1539,9 +1539,15 @@ class ReaderPCLauncherTests(unittest.TestCase):
             seen: list[str | None] = []
 
             def close_gui(pid: int) -> bool:
-                seen.append(
-                    readerpc_services.read_readerpc_exit_request(readerpc_paths)
-                )
+                # ⚠ 直接读文件,不走 read_readerpc_exit_request ——
+                #   那个函数**故意不认自己写的**(接管方与本测试是同一个进程),
+                #   而这条契约要验的是"文件在 close 之前就已经写下了"。
+                try:
+                    payload = json.loads(
+                        readerpc_paths.exit_request_file.read_text("utf-8"))
+                    seen.append(payload.get("reason"))
+                except OSError:
+                    seen.append(None)
                 runner.executables.pop(gui_pid, None)
                 return True
 

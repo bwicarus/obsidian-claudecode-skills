@@ -59,6 +59,8 @@ DIRECT_SERVE_SIBLING_PATHS = (
     # 展示板写入面(2026-09-05)。⚠ 这份清单是 C# 路由表的**第二份副本**:
     # 只加路由不放行,表现是端点 404 而桥看起来完全正常。
     "/reader-board/v1",
+    # 渲好的卡片图(内容寻址)。设备端只当显示器,渲染在 Windows 上做完。
+    "/reader-board/card.png",
 )
 DIRECT_WSS_URL = (
     "wss://bwicarus-2.taile44d0c.ts.net"

@@ -67,6 +67,13 @@ RUNTIME_SOURCES = {
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "judgment_basis.py"
     ),
+    # 展示板卡片渲染(2026-09-05)。⚠ 必须作为**运行时源码**铺到稳定路径:
+    # 它要 playwright + Chromium,两样都在 PyInstaller 的打包边界之外,
+    # 硬 import 的表现会是"装上新版本 ReaderPC 直接起不来"。
+    "readerpc-runtime/board_card_render.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "board_card_render.py"
+    ),
     "readerpc-runtime/transit_search.py": (
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "transit_search.py"
@@ -476,6 +483,7 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             "replication_activity.py", "replication_notifications.py",
             "replication_places.py", "transit_search.py",
             "camera_capture.py", "voip_push.py", "judgment_basis.py",
+            "board_card_render.py",
         ):
             (root.parent / stable_name).write_bytes(
                 (release / "readerpc-runtime" / stable_name).read_bytes()

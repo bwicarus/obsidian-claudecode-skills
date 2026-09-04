@@ -248,6 +248,15 @@ def read_readerpc_exit_request(
         return None
     if pid_alive is not None and not pid_alive(int(value["pid"])):
         return None
+    # ⚠ **绝不消费自己写的那一条**（2026-09-05 实锤：0.1.127 接管成功之后
+    #   自己退出，整台机器的 ReaderPC/桥/Flask 一起没了）。
+    #   接管方在自己进程里写这条请求去请旧实例退场；如果旧实例已经先走
+    #   （WM_CLOSE 比刷新循环快），这条请求就留在原地，下一次刷新时
+    #   **新实例读到的是自己写的**，于是刚接管完就自杀 ——
+    #   表现是"装完新版本，什么都没了"。
+    #   清残留那一步是第一道防线，这里是第二道：**按 pid 认自己**。
+    if int(value["pid"]) == os.getpid():
+        return None
     return value["reason"][:200]
 
 
