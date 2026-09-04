@@ -46,7 +46,20 @@ MAX_RECENT_ITEMS = 20
 MAX_ARCHIVE_ITEMS = 10_000
 MAX_TEXT_CHARS = 4_000
 MAX_CODEX_TEXT_CHARS = 8_000
-MAX_CODEX_RESPONSE_BYTES = 32 * 1024 * 1024
+# 2026-09-04 实测:一条用了 21 天的语音线程 thread/read 回 35.3 MB(1017 turns),
+# 直接撞破当时的 32 MB 上限 → "Codex app-server response invalid" → 结构化回填每次都失败
+# → `_structured_baseline` 保持 None → should_read 恒真 → 每 15s 重读一遍磁盘上 157 MiB
+# 的 rollout。聊天记录一直同步不到 App 就是这么来的。
+# ⚠ 抬上限是**推迟**不是治愈:响应字节按约 1.7 MB/天长(九成是投影根本不要的 mcpToolCall
+#   载荷), 128 MB 大约再撑一个多月, 之后 MAX_CODEX_TURNS 也会撞上。
+#   治本要么轮换语音线程(新线程 = 新 rollout), 要么等 app-server 提供分页读
+#   (当前 ThreadReadParams 只有 threadId/includeTurns, 没有 limit/cursor)。
+MAX_CODEX_RESPONSE_BYTES = 128 * 1024 * 1024
+# 响应大到这个量级就不该按 0.75s 的节奏反复整读(见 _structured_read_cooldown_seconds)。
+STRUCTURED_READ_LARGE_BYTES = 8 * 1024 * 1024
+STRUCTURED_READ_HUGE_BYTES = 24 * 1024 * 1024
+STRUCTURED_READ_LARGE_COOLDOWN_SECONDS = 5.0
+STRUCTURED_READ_HUGE_COOLDOWN_SECONDS = 15.0
 MAX_CODEX_TURNS = 5_000
 MAX_CODEX_ITEMS_PER_TURN = 2_000
 MAX_PROJECTED_TOOLS = 64
@@ -92,6 +105,8 @@ class CodexAppServerHistoryClient:
         self._stdout: queue.Queue[str | None] = queue.Queue()
         self._next_id = 0
         self._initialized = False
+        # 上一次成功响应的字节数。调用方据此决定重读节奏 —— 线程越大越不该频繁整读。
+        self.last_response_bytes = 0
 
     @staticmethod
     def find_executable() -> Path | None:
@@ -273,16 +288,27 @@ class CodexAppServerHistoryClient:
                 self.close()
                 raise CodexAppServerError("Codex app-server closed")
             raw = line.encode("utf-8")
-            if not raw.strip() or len(raw) > MAX_CODEX_RESPONSE_BYTES:
+            # ⚠ 三种情况必须分开说。合成一句 "response invalid" 让 2026-09-04 那次
+            #   排查完全无从下手:日志上看不出是空行、超长、还是 JSON 坏了,
+            #   而真相(35.3 MB > 32 MB 上限)只要报出字节数就一眼可见。
+            if not raw.strip():
                 self.close()
-                raise CodexAppServerError("Codex app-server response invalid")
+                raise CodexAppServerError("Codex app-server response blank")
+            if len(raw) > MAX_CODEX_RESPONSE_BYTES:
+                self.close()
+                raise CodexAppServerError(
+                    "Codex app-server response too large: %d bytes > %d cap"
+                    % (len(raw), MAX_CODEX_RESPONSE_BYTES)
+                )
             try:
                 response = _decode_json(raw, "app-server-response")
             except SyncDataError as exc:
                 self.close()
                 raise CodexAppServerError(
-                    "Codex app-server response invalid"
+                    "Codex app-server response undecodable at %d bytes"
+                    % len(raw)
                 ) from exc
+            self.last_response_bytes = len(raw)
             if not isinstance(response, dict) or "id" not in response:
                 continue
             if response.get("id") != request_id:
@@ -1592,6 +1618,8 @@ class CaptureBoundHistorySynchronizer:
         self._lease_source_instance_id: str | None = None
         self._failure_backoff_polls = 0
         self._structured_baseline: set[str] | None = None
+        # 上一次结构化整读的时刻(monotonic)。大线程按 _structured_read_cooldown_seconds 限速。
+        self._structured_read_at = 0.0
         self._structured_signature: tuple[int, int] | None = None
         self._structured_followup_polls = 0
         self.last_result: dict[str, Any] | None = None
@@ -1746,6 +1774,22 @@ class CaptureBoundHistorySynchronizer:
             self._capture_generation = None
         return result
 
+    def _structured_read_cooldown_seconds(self) -> float:
+        """大线程的整读冷却。
+
+        thread/read 没有分页,一次就是整条线程(2026-09-04 实测 35.3 MB / 2.2s,
+        而 app-server 那一侧要重读磁盘上 157 MiB 的 rollout)。按 0.75s 的轮询
+        节奏反复整读是纯浪费,也是用户感到"一直在读盘"的一部分。
+        小线程不受影响 —— 它们本来就便宜,历史仍近实时到达。
+        """
+        client = self.structured_history_client
+        size = getattr(client, "last_response_bytes", 0) if client else 0
+        if size >= STRUCTURED_READ_HUGE_BYTES:
+            return STRUCTURED_READ_HUGE_COOLDOWN_SECONDS
+        if size >= STRUCTURED_READ_LARGE_BYTES:
+            return STRUCTURED_READ_LARGE_COOLDOWN_SECONDS
+        return 0.0
+
     def _continuity_signature(self) -> tuple[int, int] | None:
         try:
             stat = self.continuity_path.stat()
@@ -1819,8 +1863,29 @@ class CaptureBoundHistorySynchronizer:
             self._structured_followup_polls -= 1
         if not should_read:
             return self.last_result
+        # 大线程限速。force_history_read(收尾/显式要求)不受限,否则会丢尾巴。
+        cooldown = self._structured_read_cooldown_seconds()
+        if cooldown > 0.0 and not force_history_read:
+            waited = time.monotonic() - self._structured_read_at
+            if waited < cooldown:
+                # 出声,别让"这一轮什么都没做"看起来像没在跑。
+                self._diag(
+                    "structured read 冷却中 thread=%s 已等 %.1fs/%.1fs"
+                    " (上次响应 %.1f MB)" % (
+                        self._lease_thread_id,
+                        waited,
+                        cooldown,
+                        getattr(
+                            self.structured_history_client,
+                            "last_response_bytes",
+                            0,
+                        ) / 1048576.0,
+                    )
+                )
+                return self.last_result
 
         try:
+            self._structured_read_at = time.monotonic()
             projection = _project_codex_thread(
                 self.structured_history_client.read_thread(
                     self._lease_thread_id
@@ -1833,6 +1898,11 @@ class CaptureBoundHistorySynchronizer:
                 "structured history unavailable: "
                 + type(exc).__name__
             )
+            # ⚠ 只记类名会把唯一有用的那句话丢掉(2026-09-04:"response too large:
+            #   36991863 bytes > 33554432 cap" 才是答案, "CodexAppServerError" 什么都不是)。
+            self._diag(
+                "structured publish read FAILED thread=%s: %s: %s" % (
+                    self._lease_thread_id, type(exc).__name__, str(exc)[:160]))
             self._failure_backoff_polls = PUBLISH_FAILURE_BACKOFF_POLLS
             return self.last_result
 

@@ -120,3 +120,35 @@ node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 b
   **排障入口**：桥的安全日志 `~/bw-computer-voice-bridge/runtime/computer-voice-direct.service.err.log`
   里有 `{"event":"origin-denied",...}` 行；用 `curl -H "Origin: …" -H "Upgrade: websocket" …` 打
   Tailscale URL 可直接判 101/403（直连 127.0.0.1 会因缺 `Tailscale-User-Login` 恒 403，别拿它当判据）。
+- **同一个「块号」有两套编号，而两边各自都自洽**（09-04 实锤，用户转述 Codex：「绑定出错不是他的问题是程序的问题」）：
+  卡片 `bind.block` 的解析端按 `bk` 连号数块，而助手在结构化投影（vision 高置信 manga/table）里读到的
+  `[NN]` 是 `region.order + 1`。同一本书里两套按页共存：没有版面信息的页面走
+  `blockLines`/`segments[].block`（= bk 连号），有版面的页面走区域号。撞上的表现极隐蔽 ——
+  助手说「第 11 块」，那页 bk 连号只有 8 块 → `search(11)` 空 → 退回全页按文本找 →
+  没给 from 时距离恒为 0 → **页内第一处胜出**，卡片钉到另一处一样的字上。
+  更糟的另一半：`[NN]` 当时**只有分镜网格那一条路在印**，散文页与表格页一个都不印，
+  而 `ReaderCapabilities/cards.md` 写着「正文每一行形如 `[NN] …`」—— 助手只能自己数行号。
+  **面向 AI 的说明写反/漏写比没写更糟**（CLAUDE.md 那条的又一例）：它不会追问，它会照着编。
+  修法：解析端两套都试（区域号优先，命中就把 `ois` 写回 bind，下次直接 exact-set）；
+  四条版面路径统一走 `appendLocalRegionLabel` 印 `[NN]`；说明改成「抄页面上印的那个号，
+  没有 `[NN]` 就别给 block」。契约钉在 `tests/reader_contract/page-chars-bind.contract.test.mjs`。
+- **stale-while-revalidate 的第一跳被客户端存成了终局**（09-04 实锤，ヘルスプロモーション「明明是从英文来的但没标英文」）：
+  服务端 `lookup_jp` 命中旧版本词条时先秒回（内部标 `stale_pv`）再后台按新 prompt 重生成 ——
+  这套本来是对的。错在**那一跳被三层客户端缓存当正式结果收下**（会话内存 / localStorage
+  `rc-wordpop-dict-cache` / 设备库 `dict-cache` + 桥留底 `/reader-dict-cache`），
+  于是升级好的词条**永远没人去取**，表现成「服务端明明改好了、App 上永远是旧的」。
+  桥留底还会把毒化条目传染给别的设备。修法：响应里显式带 `stale`（逐字段重建的响应不加就传不出去），
+  客户端见 `stale` 一律不缓存（下次点击再问一次，服务端仍是缓存秒回，用户感觉不到），
+  已毒化的条目靠缓存键 v2→v3 一次清掉。**通用形状**：任何「先给旧的、后台升级」的机制，
+  下游每一层缓存都必须能分辨这一跳是不是终局 —— 不然升级链在第一层就断了。
+- **「response invalid」把三种情况折成一句，聊天记录停了同步却查不出原因**（09-04 实锤）：
+  语音线程 `thread/read` 回 35.3 MB，撞破 `MAX_CODEX_RESPONSE_BYTES=32 MB`，而报错只说
+  "Codex app-server response invalid"（空行 / 超长 / JSON 坏了共用这一句）。失败后
+  `_structured_baseline` 保持 None → `should_read` 恒真 → 每 15s（失败退避）重来一次，
+  app-server 每次都要整读磁盘上 **157 MiB** 的 rollout —— 既是「聊天记录一直没同步到 app」的
+  直接原因，也是用户抱怨的持续读盘的一部分。测得的构成：`mcpToolCall` 占 90.7% 字节，
+  而投影只取用户消息 + final_answer + 工具摘要，也就是九成流量本来就要丢掉。
+  修法：上限提到 128 MB、报错带上真实字节数与是哪一种、大线程加读取冷却（≥24 MB 至少隔 15s）。
+  ⚠ **这只是推迟**：响应约 1.7 MB/天在长，`thread/read` 没有分页参数（`ThreadReadParams`
+  只有 threadId/includeTurns），`MAX_CODEX_TURNS=5000` 是下一道墙。治本要轮换语音线程。
+  规则复述：**折成布尔（或折成一句话）之前先把原始值报出来**（silent-failure-lessons 第 2 条）。

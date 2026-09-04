@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import tempfile
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1581,6 +1582,98 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
         self.assertEqual(page_card_edit["label"], "修改卡片")
         self.assertEqual(unknown["tool"], "other_server.private_action")
         self.assertEqual(unknown["label"], "工具：other_server.private_action")
+
+
+class CodexAppServerResponseBoundsTest(unittest.TestCase):
+    """2026-09-04 实锤:用了 21 天的语音线程 thread/read 回 35.3 MB,撞破当时的
+    32 MB 上限 → 结构化回填每次都失败 → 聊天记录一直同步不到 App。
+    而三种失败共用一句 "response invalid",日志里看不出到底是哪一种 ——
+    这条契约钉的就是"报错必须说得出原始值"。"""
+
+    class _StubProcess:
+        def __init__(self):
+            self.stdin = self
+
+        def poll(self):
+            return None
+
+        def write(self, _text):
+            return None
+
+        def flush(self):
+            return None
+
+        def close(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            return None
+
+        def kill(self):
+            return None
+
+    def _client(self, line):
+        client = SYNC.CodexAppServerHistoryClient()
+        client._process = self._StubProcess()
+        client._stdout.put(line)
+        return client
+
+    def test_oversized_response_reports_the_actual_size(self):
+        line = json.dumps({"id": 1, "result": {"pad": "y" * 200}}) + "\n"
+        with patch.object(SYNC, "MAX_CODEX_RESPONSE_BYTES", 64):
+            client = self._client(line)
+            with self.assertRaises(SYNC.CodexAppServerError) as caught:
+                client._request("thread/read", {})
+        message = str(caught.exception)
+        self.assertIn("too large", message)
+        self.assertIn(str(len(line.encode("utf-8"))), message)
+        self.assertIn("64", message)
+
+    def test_blank_and_undecodable_are_not_the_same_error(self):
+        client = self._client("\n")
+        with self.assertRaises(SYNC.CodexAppServerError) as blank:
+            client._request("thread/read", {})
+        self.assertIn("blank", str(blank.exception))
+        client = self._client("{not json\n")
+        with self.assertRaises(SYNC.CodexAppServerError) as broken:
+            client._request("thread/read", {})
+        self.assertIn("undecodable", str(broken.exception))
+
+    def test_success_records_response_size_for_the_read_cooldown(self):
+        line = json.dumps({"id": 1, "result": {"thread": {}}}) + "\n"
+        client = self._client(line)
+        self.assertEqual(client._request("thread/read", {}), {"thread": {}})
+        self.assertEqual(client.last_response_bytes, len(line.encode("utf-8")))
+
+    def test_read_cooldown_scales_with_thread_size(self):
+        # 小线程照旧(历史近实时到达);大线程不再按 0.75s 的节奏反复整读 ——
+        # app-server 那一侧每次都要重读磁盘上 157 MiB 的 rollout。
+        cooldown = SYNC.CaptureBoundHistorySynchronizer._structured_read_cooldown_seconds
+
+        class _Holder:
+            def __init__(self, size):
+                self.structured_history_client = types.SimpleNamespace(
+                    last_response_bytes=size
+                )
+
+        self.assertEqual(cooldown(_Holder(1024)), 0.0)
+        self.assertEqual(
+            cooldown(_Holder(SYNC.STRUCTURED_READ_LARGE_BYTES)),
+            SYNC.STRUCTURED_READ_LARGE_COOLDOWN_SECONDS,
+        )
+        self.assertEqual(
+            cooldown(_Holder(SYNC.STRUCTURED_READ_HUGE_BYTES)),
+            SYNC.STRUCTURED_READ_HUGE_COOLDOWN_SECONDS,
+        )
+        # 实测的那条线程(35.3 MB)必须落在最长冷却档,且不再超过传输上限
+        self.assertEqual(
+            cooldown(_Holder(36_991_863)),
+            SYNC.STRUCTURED_READ_HUGE_COOLDOWN_SECONDS,
+        )
+        self.assertGreater(SYNC.MAX_CODEX_RESPONSE_BYTES, 36_991_863)
 
 
 if __name__ == "__main__":
