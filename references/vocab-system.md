@@ -668,3 +668,12 @@ build_exposure ~40s（增量更新已扫过的 PDF），compute_mastery ~秒级�
 却被打上绿色的「活用→原形」标。判据改为：去掉分隔符（`・` U+30FB / `･` U+FF65 / `·` / 空白）后两者相同
 **且**服务端没给真语法标签 → 整行不出。长音 `ー` 不算分隔符（去掉会把不同的词判成同一个）。
 真活用的外来语（`サボった → サボる`，源自 sabotage）不受影响，仍照常显示。
+
+**服务端标 stale 的那一跳，客户端一层都不许缓存**（2026-09-04 用户：「还有这个明明是从英文来的但没标英文」，
+ヘルスプロモーション）：上面第 2 条把片假名旧条目改成"stale → 后台升级"之后，**升级好的条目仍然到不了 App** ——
+`lookup_jp` 先秒回的那一跳被三层客户端缓存当正式结果存下了：会话内存 `_dictCache`、
+localStorage `rc-wordpop-dict-cache`、设备库 `dict-cache`（且经 `/reader-dict-cache` 传染给别的设备）。
+修法三处：① `/pdf/api/dict-quick` 响应显式带 `"stale": bool(jp["stale_pv"])`（逐字段重建，不加传不出去）；
+② `_cacheDictResult` 与 `nativeDictQuickFetch` 见 `stale` 一律不写缓存（下次点击再问一次，
+服务端那边仍是缓存秒回，用户感觉不到多这一跳）；③ 缓存键 v2→v3，把已被毒化的条目一次清掉。
+契约：`tests/reader_contract/word-card-bindings.contract.test.mjs`「stale-while-revalidate 的第一跳一层都不许缓存」。

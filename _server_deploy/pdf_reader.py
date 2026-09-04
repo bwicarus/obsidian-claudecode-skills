@@ -9292,6 +9292,11 @@ def pdf_api_dict_quick():
             "source_lang": jp.get("source_lang", ""),
             "source_kind": jp.get("source_kind", ""),
             "from_cache": jp.get("from_cache", False),
+            # stale-while-revalidate 的第一跳(2026-09-04)。⚠ 必须如实上报:
+            # 客户端有三层缓存,把这一跳当终局存下来,后台升级好的条目就**永远没人取**
+            # —— ヘルスプロモーション 服务端已经能给出英文源词, App 上却一直不显示,
+            # 就是这么来的。有 stale 客户端才知道"这条别存,下次再问"。
+            "stale": bool(jp.get("stale_pv")),
         })
     ec = ds.lookup_ecdict(word)
     if not ec:

@@ -14394,9 +14394,11 @@
     var word = String(url.searchParams.get('word') || '').trim();
     if (!word) return '';
     var langs = String(url.searchParams.get('langs') || '').trim().toLowerCase();
-    // |v2(2026-09-04):词条新增 source_word/source_lang/source_kind。键无版本的话,已缓存的词
+    // |vN(2026-09-04):词条新增 source_word/source_lang/source_kind。键无版本的话,已缓存的词
     // 永远命中旧条目、新字段永不出现 —— 桥留底 /reader-dict-cache 用同一个键,一起自然失效。
-    return word.replace(/[\s\u3000]+/g, '').toLowerCase() + '|' + langs + '|v2';
+    // v3:v2 期间把 stale-while-revalidate 的第一跳登记成了终局(下面已加 stale 闸),
+    // 已经毒化的条目只能靠换键清掉。
+    return word.replace(/[\s\u3000]+/g, '').toLowerCase() + '|' + langs + '|v3';
   }
   function dictCacheRead(key) {
     return bootPromise.then(function () {
@@ -14451,7 +14453,10 @@
         var copy;
         try { copy = response.clone(); } catch (_) { return response; }
         copy.json().then(function (d) {
-          if (d && d.ok === true) {
+          // d.stale = 服务端给的是 stale-while-revalidate 的旧条目,后台正在按新 prompt 重生成。
+          // 登记它就等于把升级后的条目永久挡在门外(ヘルスプロモーション 的英文源词丢在这里),
+          // 而且会连桥留底一起毒化 —— 别的设备也跟着看到旧条目。不登记,下次查再问。
+          if (d && d.ok === true && d.stale !== true) {
             dictCacheWrite(key, d);
             bridgeMirror('/reader-dict-cache', 'POST', { key: key, d: d }).catch(function () {});
           }

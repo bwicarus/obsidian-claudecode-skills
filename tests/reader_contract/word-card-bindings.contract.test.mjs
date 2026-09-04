@@ -174,3 +174,24 @@ test("卡内词典与查词框共用 RC.wordpop.lookupData,查词结果落设备
   assert.match(NOTE, /固化段过期,按最新查词重写/);
   assert.match(POP, /function _isUncertainMeaning\(text\)/);
 });
+
+// 2026-09-04 用户实锤 ヘルスプロモーション:「明明是从英文来的但没标英文」。
+// 服务端 stale-while-revalidate 先秒回旧条目再后台升级,而客户端三层缓存把**第一跳**
+// 当终局存下 → 升级后的条目永远没人取。三层都要挡,且服务端必须如实上报 stale。
+test("stale-while-revalidate 的第一跳一层都不许缓存", () => {
+  const READER = read("_server_deploy/pdf_reader.py");
+  // ① 服务端如实上报(响应是逐字段重建,不加就传不出去)
+  assert.match(READER, /"stale": bool\(jp\.get\("stale_pv"\)\)/);
+  // ② 会话内存 + localStorage 两层由 _cacheDictResult 一处把门
+  assert.match(
+    WORDPOP,
+    /if \(result\.stale === true\) \{ _dictDiag\('不缓存「' \+ word \+ '」:服务端标了 stale/,
+    "查词框缓存要认 stale",
+  );
+  // ③ 设备库 + 桥留底(桥被毒化会传染到别的设备)
+  const fetchBody = bodyOf(RUNTIME, "nativeDictQuickFetch");
+  assert.match(fetchBody, /if \(d && d\.ok === true && d\.stale !== true\) \{/);
+  // 已被毒化的条目靠换键清掉:两处键版本必须一起往前走
+  assert.match(WORDPOP, /rc-wordpop-dict-cache-v3/);
+  assert.match(RUNTIME, /'\|' \+ langs \+ '\|v3'/);
+});
