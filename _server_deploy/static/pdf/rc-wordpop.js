@@ -429,12 +429,22 @@
     return html;
   }
   // 日语变形分析 → HTML 行(原形 + 中文语法标签)。word-pop 和完整字典共用。
+  // 片假名写法归一用的分隔符:全角中点「・」(U+30FB)、半角「･」(U+FF65)、各种空格。
+  // 长音「ー」不算 —— 它是词的一部分, 去掉会把不同的词判成同一个。
+  var _KANA_SEPARATORS = /[\u30FB\uFF65\u00B7\s\u3000]+/g;
   function _jpInflectHtml(inf, word, lemma) {
     inf = inf || {};
     var surface = String(inf.surface || word || '').trim();
     var base = String(inf.base || lemma || '').trim();
     var differs = !!(surface && base && surface !== base);
     var marks = Array.isArray(inf.marks) ? inf.marks.filter(Boolean) : [];
+    // 只差分隔符 = 写法归一, 不是活用(2026-09-04 用户:プライマリー・ヘルス・ケア 那行「当前形/原形」很多余)。
+    // 此时既不该打「活用→原形」的标, 整行也没有信息量 —— 外来语的信息在下面那条源词行里。
+    // ⚠ 只在服务端**没给真语法标签**时才收:サボった→サボる(源自 sabotage)是真活用, 标签在, 照常显示。
+    if (differs && !marks.length &&
+        surface.replace(_KANA_SEPARATORS, '') === base.replace(_KANA_SEPARATORS, '')) {
+      differs = false;
+    }
     if (differs && !marks.length) marks = ['活用→原形'];
     var current = differs ? '当前形 <b>' + esc(surface) + '</b>' : '';
     var original = differs ? '原形 <b>' + esc(base) + '</b>' : '';
