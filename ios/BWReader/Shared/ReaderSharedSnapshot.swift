@@ -226,10 +226,31 @@ struct ReaderWidgetSystemData: Codable, Equatable, Sendable {
         var dueAtMs: Int64?
     }
 
+    /// 展示板（2026-09-05 用户要求）：电脑上的 AI 或固定程序申请一块分了区的
+    /// 板子往里放内容，这里是它在设备侧的投影。
+    ///
+    /// ⚠ 和 body/dueAtMs 同一条纪律：**新字段一律可选**。非可选会让老缓存
+    ///   整份解码失败 —— "升级把旧数据全废掉"是最容易忽略的一种回归。
+    struct Board: Codable, Equatable, Sendable {
+        struct Section: Codable, Equatable, Sendable {
+            var title: String
+            var lines: [String]
+        }
+
+        var code: String
+        var title: String
+        var updatedAtMs: Int64
+        var sections: [Section]
+    }
+
     var review: Review?
     var notifications: [NotificationItem]
     var lastSyncAtMs: Int64
     var updatedAtMs: Int64
+    var boards: [Board]?
+    /// 板子读不到时桥给的错误码。**不折成空数组** —— 空板子会被当成权威，
+    /// 于是"桥那边出问题了"看起来像"AI 什么都没写"。
+    var boardsError: String?
 }
 
 struct ReaderNativeFeatureStore: Sendable {

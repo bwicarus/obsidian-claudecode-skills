@@ -209,6 +209,9 @@ struct NativeReaderToolsView: View {
                 piSyncDetailSection
                 localNotesSection
                 quickNotesSection
+                // 展示板的手动操作面（2026-09-05）：看有哪些板子、停用、清空、删除。
+                // 开关只由用户决定 —— AI 不许调 enable（能力说明里明写）。
+                ReaderDisplayBoardSection()
                 NativePencilSettingsSection()
                 touchInputSection
                 buildIdentitySection

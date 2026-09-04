@@ -201,7 +201,19 @@ private struct SystemDataProvider: TimelineProvider {
                 ],
                 lastSyncAtMs: Int64(
                     Date().timeIntervalSince1970 * 1000) - 300_000,
-                updatedAtMs: Int64(Date().timeIntervalSince1970 * 1000)))
+                updatedAtMs: Int64(Date().timeIntervalSince1970 * 1000),
+                boards: [
+                    .init(code: "bd_preview", title: "发布看板",
+                          updatedAtMs: Int64(
+                              Date().timeIntervalSince1970 * 1000) - 600_000,
+                          sections: [
+                            .init(title: "当前状态",
+                                  lines: ["尚未发布", "官网版本号仍是 4.2"]),
+                            .init(title: "已确认的信号",
+                                  lines: ["论坛出现 4.3 beta 讨论"]),
+                          ]),
+                ],
+                boardsError: nil))
     }
 
     func getSnapshot(
@@ -353,12 +365,37 @@ private struct SystemDataProvider: TimelineProvider {
                 newCards: fresh,
                 atMs: (raw["atMs"] as? NSNumber)?.int64Value ?? 0)
         }
+        // 展示板（2026-09-05）。桥已经按"最近更新在前"排好序，这里不再排 ——
+        // 两处各自排序就会在"同一时刻更新"的板子上给出不同的第一块。
+        let boards = (root["boards"] as? [[String: Any]] ?? []).compactMap {
+            one -> ReaderWidgetSystemData.Board? in
+            guard let code = one["code"] as? String,
+                  let title = one["title"] as? String else { return nil }
+            let sections = (one["sections"] as? [[String: Any]] ?? [])
+                .compactMap { raw -> ReaderWidgetSystemData.Board.Section? in
+                    guard let sectionTitle = raw["title"] as? String
+                    else { return nil }
+                    return ReaderWidgetSystemData.Board.Section(
+                        title: sectionTitle,
+                        lines: (raw["lines"] as? [String] ?? []))
+                }
+            return ReaderWidgetSystemData.Board(
+                code: code,
+                title: title,
+                updatedAtMs:
+                    (one["updatedAtMs"] as? NSNumber)?.int64Value ?? 0,
+                sections: sections)
+        }
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         return ReaderWidgetSystemData(
             review: review,
             notifications: items,
             lastSyncAtMs: now,
-            updatedAtMs: now)
+            updatedAtMs: now,
+            boards: boards,
+            // ⚠ 桥说读不到就照实带上，**不要**在这里折成空数组：
+            //   空板子会被下游当权威，于是"桥那边出问题"看起来像"AI 没写"。
+            boardsError: root["boardsError"] as? String)
     }
 }
 
@@ -477,6 +514,125 @@ private struct SyncWidgetView: View {
     }
 }
 
+/// 展示板（2026-09-05 用户要求）：一块**分了区**的板子，
+/// 内容由电脑上的 AI / 固定程序放进来。
+///
+/// 三条纪律：
+/// - **板子不解释内容**。它不排版、不加工、不补时间戳 —— 写板子的人写什么就显示什么。
+/// - **数据时刻要露出来**。小组件是快照，不假装实时；旧了必须让人看得出来，
+///   否则会拿"拉取成功"冒充"内容新鲜"。
+/// - **读不到 ≠ 空**。桥报了 boardsError 就说"暂时取不到"，绝不显示一块空板子。
+private struct BoardWidgetView: View {
+    @Environment(\.widgetFamily) private var family
+    let entry: SystemDataEntry
+
+    private var boards: [ReaderWidgetSystemData.Board] {
+        entry.data?.boards ?? []
+    }
+
+    /// 桥已按最近更新排序，第一块就是最该看的那块。
+    private var board: ReaderWidgetSystemData.Board? { boards.first }
+
+    private var sectionLimit: Int {
+        switch family {
+        case .systemSmall: return 1
+        case .systemMedium: return 2
+        default: return 4
+        }
+    }
+
+    private var lineLimit: Int {
+        switch family {
+        case .systemSmall: return 2
+        case .systemMedium: return 3
+        default: return 4
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if let board {
+                HStack(spacing: 4) {
+                    Image(systemName: "rectangle.split.3x1")
+                        .font(.caption2)
+                    Text(board.title)
+                        .font(.caption).bold()
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Text(dataAge(board.updatedAtMs))
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+                .foregroundStyle(.secondary)
+                if board.sections.isEmpty {
+                    Text("这块板子暂时是空的")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ForEach(
+                        Array(board.sections.prefix(sectionLimit).enumerated()),
+                        id: \.offset
+                    ) { _, section in
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(section.title)
+                                .font(.caption2).bold()
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                            ForEach(
+                                Array(section.lines.prefix(lineLimit)
+                                    .enumerated()),
+                                id: \.offset
+                            ) { _, line in
+                                Text(line)
+                                    .font(.caption2)
+                                    .lineLimit(family == .systemSmall ? 1 : 2)
+                            }
+                        }
+                    }
+                }
+                Spacer(minLength: 0)
+                if boards.count > 1, family != .systemSmall {
+                    Text("另有 \(boards.count - 1) 块板子")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+            } else if let failure = entry.data?.boardsError {
+                Label("展示板", systemImage: "rectangle.split.3x1")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("暂时取不到")
+                    .font(.caption).foregroundStyle(.secondary)
+                // 错误码照实显示：这块板子没有控制台，不写出来就等于静默。
+                Text(failure)
+                    .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                Spacer(minLength: 0)
+            } else {
+                Label("展示板", systemImage: "rectangle.split.3x1")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("还没有板子")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("在任务里说明要用展示板，AI 会申请一块")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .containerBackground(for: .widget) {
+            Color(uiColor: .systemBackground)
+        }
+        .widgetURL(URL(string: "bwreader://reader-feature?action=openReader"))
+    }
+}
+
+struct BWReaderBoardWidget: Widget {
+    let kind = "BWReaderBoardWidget"
+
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: kind, provider: SystemDataProvider()) {
+            BoardWidgetView(entry: $0)
+        }
+        .configurationDisplayName("展示板")
+        .description("电脑上的任务往这块分区板子里放状态（每日新闻、发布盯梢、长任务进展）。")
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+    }
+}
+
 struct BWReaderReviewWidget: Widget {
     let kind = "BWReaderReviewWidget"
 
@@ -523,5 +679,6 @@ struct BWReaderWidgetBundle: WidgetBundle {
         BWReaderReviewWidget()
         BWReaderNotificationsWidget()
         BWReaderSyncWidget()
+        BWReaderBoardWidget()
     }
 }
