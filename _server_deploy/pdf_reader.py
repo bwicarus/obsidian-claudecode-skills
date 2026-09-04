@@ -9153,7 +9153,7 @@ def pdf_api_phrases():
         import re as _re_ph
         # #55:归一化去空白(跨行选中带 \n/空格)→存干净词组,与前端本地匹配一致
         text = _re_ph.sub(r"[\s　]+", "", (data.get("text") or ""))
-        if not text or len(text) > 60:
+        if not text or len(text) > 120:   # 2026-09-04 与前端词组判定(中日 ≤60 字/拉丁 ≤120 字)对齐
             return jsonify({"ok": False, "error": "invalid text"}), 400
         lst = _phrases_load(identity)
         if request.method == "POST":
@@ -9184,7 +9184,7 @@ def pdf_api_phrase_mark():
             })
         data = request.get_json(silent=True) or {}
         text = (data.get("text") or "").strip()
-        if not text or len(text) > 60:
+        if not text or len(text) > 120:   # 2026-09-04 与前端词组判定(中日 ≤60 字/拉丁 ≤120 字)对齐
             return jsonify({"ok": False, "error": "invalid text"}), 400
         mark = str(data.get("mark") or "").strip().lower()
         on = mark in ("mastered", "known", "1", "true", "yes")

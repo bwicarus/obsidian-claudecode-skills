@@ -5977,16 +5977,18 @@ function _updateToolbarMode(text) {
   if (pb) { pb.style.display = phrase ? '' : 'none'; pb.classList.toggle('breathe', phrase); }
 }
 
-// 短词组判定：中日 2-8 字(无句末标点) / 拉丁 2-5 词且不太长(无句末标点)
+// 词组判定(2026-09-04 放宽,用户:「同区域稍长内容无法保存为词组就导致无法把卡片绑定到上面」):
+//   中日 2-60 字(服务器 phrase-favorite 上限)、拉丁 2-12 词且 ≤120 字;只拒绝**以句末标点结尾**的整句
+//   (那是句子,走翻译/解释)。此前中日限 8 字,24 字的菜名/术语并列既存不了词组也绑不了卡。
 function _isShortPhrase(text) {
   const t = (text || '').trim();
   if (!t) return false;
-  if (/[。！？、，.!?]$/.test(t)) return false;
+  if (/[。！？.!?]$/.test(t)) return false;
   if (/[぀-ヿ㐀-鿿]/.test(t)) {
-    return t.length >= 2 && t.length <= 8 && !/[。！？、，.!?]/.test(t);
+    return t.length >= 2 && t.length <= 60 && !/[。！？]/.test(t);
   }
   const words = t.split(/\s+/).filter(Boolean);
-  return words.length >= 2 && words.length <= 5 && t.length <= 40;
+  return words.length >= 2 && words.length <= 12 && t.length <= 120;
 }
 let _phraseBreatheTimer = null;
 function _setSelPhraseBreathe(on) {
