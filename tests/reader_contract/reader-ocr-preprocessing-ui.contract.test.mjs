@@ -441,11 +441,27 @@ test("idle Pi status previews legacy results without adopting or starting them",
   assert.doesNotMatch(statusSections, /piOCR\.errorMessage/);
 });
 
-test("legacy Pi results require an explicit adopt and then use normal job and attachment import", () => {
-  assert.match(VIEW, /Text\("已有服务器结果，可采用"\)/);
-  assert.match(VIEW, /Button\("采用现有服务器结果"\)/);
+test("legacy server results are adopted automatically by the panel poll, then use normal job and attachment import", () => {
+  // 2026-09-04 用户:「省略那一系列导入的按钮」—— 采用不再是按钮,面板轮询发现本机没有这份结果就自动采用并导入。
+  assert.doesNotMatch(VIEW, /Button\("采用现有服务器结果"\)/);
+  assert.doesNotMatch(VIEW, /Button\("重新导入结果"\)/);
+  assert.doesNotMatch(VIEW, /Button\("导入到本机"\)/);
   assert.match(VIEW, /piOCR\.adoption\(for: remoteBook\)/);
   assert.match(VIEW, /let job = piOCR\.job\(for: remoteBook\),\s*job\.state != "idle"/);
+  const autoPath = VIEW.slice(
+    VIEW.indexOf("private func autoAdoptOrImportIfNeeded("),
+    VIEW.indexOf("private func refreshPiStatus(", VIEW.indexOf("private func autoAdoptOrImportIfNeeded(")),
+  );
+  assert.match(autoPath, /autoAdoptedBookIDs\.insert\(remoteBook\.bookId\)/);
+  assert.match(autoPath, /await adoptExistingPiResult\(book: remoteBook, localBook: localBook\)/);
+  // 导入成功才记去重键,失败下一轮重试(626 实锤:一次失败就永远不导)
+  assert.match(autoPath, /if await importPiAttachments\(book: remoteBook, localBook: localBook\) \{\s*autoImportedKeys\.insert\(key\)/);
+  // 轮询每轮调用它
+  const poll = VIEW.slice(
+    VIEW.indexOf("private func pollPreprocessingPanel("),
+    VIEW.indexOf("private func autoAdoptOrImportIfNeeded("),
+  );
+  assert.match(poll, /await autoAdoptOrImportIfNeeded\(remoteBook: remoteBook, localBook: localBook\)/);
   const explicitAdopt = VIEW.slice(
     VIEW.indexOf("private func adoptExistingPiResult("),
     VIEW.indexOf("private func importPiAttachments(", VIEW.indexOf("private func adoptExistingPiResult(")),
@@ -646,14 +662,25 @@ test("一层坏掉不得连累整本书的文字层", () => {
   assert.match(STORE, /selected = available\.contains\(where: \{ \$0\.layer == \.legacy \}\)/);
 });
 
-test("历次结果区块在两个书库入口都要有，且空态说得出原因", () => {
-  // 上一版只挂在本机书那个重载上，Pi 书库那栏整块缺失；而且整段包在
-  // `if let remoteBook` 里 —— 书没上传到 Pi 时连标题都不出现，
-  // 用户看不出这个功能存在（用户实测："我没有看到删除的选项"）。
+test("「服务器上的结果」段不再渲染;删本机层顺带删服务器同版本结果", () => {
+  // 2026-09-04 用户:「当前使用已经有删除按钮那么服务器上结果感觉多此一举」。
+  // 面板两个重载都不再调用 releaseHistory;删除走 deleteTextLayer(revision:remoteBook:) 把服务器上同
+  // revision 的那份也删掉,免得服务器攒下用户以为已删的东西。
   assert.equal(
-    (VIEW.match(/releaseHistory\(remoteBook:/g) || []).length,
-    2,
-    "本机书与 Pi 书两个 preprocessingPanel 重载都要调用",
+    (VIEW.match(/releaseHistory\(remoteBook: remoteBook, localBook: localBook\)/g) || []).length,
+    0,
+    "面板里不该再渲染服务器历次结果段",
   );
-  assert.match(VIEW, /这本书还没有上传到服务器，服务器上没有预处理结果。/);
+  const del = VIEW.slice(
+    VIEW.indexOf("private func deleteTextLayer("),
+    VIEW.indexOf("private func selectTextLayer(", VIEW.indexOf("private func deleteTextLayer(")),
+  );
+  assert.match(del, /nativeOCR\.deleteTextLayer\(/);
+  assert.match(del, /piOCR\.releases\(book: remoteBook, cookies: cookies\)/);
+  assert.match(del, /listing\.releases\.first\(where: \{ \$0\.revision == revision \}\)/);
+  assert.match(del, /piOCR\.deleteRelease\(/);
+  assert.match(del, /allowDeactivate: release\.isActive/);
+  // 「当前使用」是列表:每层一行,可点选,导入层带删除
+  assert.match(VIEW, /\[\.appleVision, \.pi, \.pc\]\.contains\(metadata\.layer\)/);
+  assert.match(VIEW, /Image\(systemName: "trash"\)/);
 });
