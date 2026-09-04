@@ -22,7 +22,7 @@ const bodyOf = (source, name) => {
 // 病根：下划线只来自服务端 vocab 索引，而日语查词本地 JMdict 命中根本不出网，
 // 查过的词服务端永远不知道。现在生词下划线以本地为准。
 
-test("vocabulary-state 多了 lookup 属性，词框与词组框查到即记", () => {
+test("vocabulary-state 多了 lookup 属性，词框查到即记（词组只认收藏）", () => {
   assert.match(VSTATE, /var VALID_PROPERTY = \{ mastered: true, favorite: true, lookup: true \}/);
   assert.match(VSTATE, /setLookedUp: function \(input, value, options\)/);
   assert.match(VSTATE, /isLookedUp: function \(input\) \{ return enabled\(input, 'lookup'\); \}/);
@@ -38,7 +38,8 @@ test("vocabulary-state 多了 lookup 属性，词框与词组框查到即记", (
   // 当前页立即刷新
   assert.match(note, /window\.refreshLocalVocabMarks\(_ctx\.page \|\| 0\)/);
   // 词组框同样记（kind: phrase）
-  assert.match(PHRASEPOP, /var lspec = \{ kind: 'phrase', language: isJa \? 'ja' : 'en', lemma: text, word: text \};/);
+  // 2026-09-04 用户:「词组的下划线应该是收藏后出现而不是查询后」→ 词组框查完**不再**记 lookup
+  assert.doesNotMatch(PHRASEPOP, /setLookedUp\(lspec/);
   assert.match(PHRASEPOP, /vs\.setLookedUp\(lspec, true, \{ source: 'rc-phrasepop' \}\)/);
 });
 
@@ -52,7 +53,7 @@ test("本地 page-overlay 按本地字符层 + 本地状态算下划线，已掌
   assert.match(marks, /while \(j < n && chars\[j\] && chars\[j\]\.w === wid\)/);
   assert.match(marks, /if \(state\.isMastered\(spec\) \|\| state\.isMastered\(phraseSpec\)\) continue;/);
   assert.match(marks, /if \(state\.isPhraseFavorite\(phraseSpec\)\) slug = 'seen';/);
-  assert.match(marks, /else if \(state\.isLookedUp\(spec\) \|\| state\.isLookedUp\(phraseSpec\)\) slug = 'new';/);
+  assert.match(marks, /else if \(state\.isLookedUp\(spec\)\) slug = 'new';/);   // 词组 lookup 不算(2026-09-04)
   assert.match(marks, /label_slug: slug, rects: rects, jp: ja, local: true/);
 });
 
