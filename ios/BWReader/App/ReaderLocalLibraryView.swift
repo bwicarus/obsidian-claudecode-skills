@@ -594,11 +594,10 @@ struct ReaderLocalLibraryView: View {
                     nativeControls(book: localBook, status: status)
 
                     Divider()
-                    textLayerPicker(book: localBook)
+                    textLayerPicker(book: localBook, remoteBook: remoteBook)
 
-                    Divider()
-                    releaseHistory(remoteBook: remoteBook, localBook: localBook)
-
+                    // 「服务器上的结果」段已去掉(用户 2026-09-04:当前使用里能删,这里多此一举);
+                    // 删本机层时顺带删服务器上同版本那份。
                     Divider()
                     piControls(
                         remoteBook: remoteBook,
@@ -625,11 +624,6 @@ struct ReaderLocalLibraryView: View {
     ) -> some View {
         if remoteBook.kind.lowercased() == "pdf" {
             GroupBox {
-                // 从「Pi 书库」那一栏展开时同样要能看到历次结果并删除 ——
-                // 上一版只挂在本机书那个重载上，这边整块缺失。
-                releaseHistory(remoteBook: remoteBook, localBook: localBook)
-
-                Divider()
                 piControls(
                     remoteBook: remoteBook,
                     localBook: localBook
@@ -728,7 +722,10 @@ struct ReaderLocalLibraryView: View {
     }
 
     @ViewBuilder
-    private func textLayerPicker(book: ReaderLocalBookRecord) -> some View {
+    private func textLayerPicker(
+        book: ReaderLocalBookRecord,
+        remoteBook: ReaderRemoteBook?
+    ) -> some View {
         HStack(spacing: 8) {
             Label("当前使用", systemImage: "text.page")
                 .font(.caption.weight(.semibold))
@@ -752,7 +749,15 @@ struct ReaderLocalLibraryView: View {
                         Spacer()
                         if [.appleVision, .pi, .pc].contains(metadata.layer) {
                             Button {
-                                Task { await deleteTextLayer(metadata.layer, for: book) }
+                                let revision: String? = metadata.revision
+                                Task {
+                                    await deleteTextLayer(
+                                        metadata.layer,
+                                        revision: revision,
+                                        for: book,
+                                        remoteBook: remoteBook
+                                    )
+                                }
                             } label: {
                                 Image(systemName: "trash")
                                     .font(.caption)
@@ -813,9 +818,13 @@ struct ReaderLocalLibraryView: View {
         }
     }
 
+    /// 删本机文字层;服务器上同版本(revision)的那份结果一并删掉 —— 「服务器上的结果」段已不再单独露出,
+    /// 否则服务器会攒下用户以为已经删掉的东西。找不到对应版本就只删本机。
     private func deleteTextLayer(
         _ layer: NativeBookOCRLayerID,
-        for book: ReaderLocalBookRecord
+        revision: String?,
+        for book: ReaderLocalBookRecord,
+        remoteBook: ReaderRemoteBook?
     ) async {
         guard ocrActionBookID == nil else { return }
         ocrActionBookID = book.id
@@ -829,6 +838,23 @@ struct ReaderLocalLibraryView: View {
             )
         } catch {
             reportPanelError("删除文字层失败：\(error.localizedDescription)")
+            return
+        }
+        guard let remoteBook, let revision, !revision.isEmpty else { return }
+        let cookies = await reader.remoteLibraryCookies()
+        do {
+            let listing = try await piOCR.releases(book: remoteBook, cookies: cookies)
+            guard let release = listing.releases.first(where: { $0.revision == revision }) else { return }
+            _ = try await piOCR.deleteRelease(
+                book: remoteBook,
+                runId: release.runId,
+                allowDeactivate: release.isActive,
+                cookies: cookies
+            )
+            // 服务器那份删了 → 别让轮询把同一版本再自动采用/导入回来
+            autoImportedKeys.insert("\(remoteBook.bookId):\(revision)")
+        } catch {
+            reportPanelError("本机已删，服务器上同版本结果删除失败：\(error.localizedDescription)")
         }
     }
 
@@ -1528,10 +1554,18 @@ struct ReaderLocalLibraryView: View {
             if let localBook { await refreshTextLayers(localBook) }
             await autoAdoptOrImportIfNeeded(remoteBook: remoteBook, localBook: localBook)
             var active = false
+            var signature = ""
             if let remoteBook, let job = piOCR.job(for: remoteBook) {
                 active = job.isActive || job.canResume || piOCR.activeBookID == remoteBook.bookId
+                signature = "\(job.state):\(job.resultAvailable):\(job.pageCharsRevision ?? "")"
             }
-            let busy = active || ocrActionBookID != nil || piOCR.activeBookID != nil
+            if let remoteBook, panelJobSignature[remoteBook.bookId] != signature {
+                // 任务刚变状态(完成/失败/出结果):接下来 60s 保持 3s 节奏,让导入与文字层列表马上跟上
+                panelJobSignature[remoteBook.bookId] = signature
+                panelSettleUntil = Date().addingTimeInterval(60)
+            }
+            let settling = Date() < panelSettleUntil
+            let busy = active || settling || ocrActionBookID != nil || piOCR.activeBookID != nil
             do {
                 try await Task.sleep(for: .seconds(busy ? 3 : 20))
             } catch {
@@ -1551,17 +1585,25 @@ struct ReaderLocalLibraryView: View {
               ocrActionBookID == nil, piOCR.activeBookID == nil,
               piOCR.previewingBookID == nil else { return }
         let job = piOCR.job(for: remoteBook)
-        if let job, job.resultAvailable, !job.isActive, let revision = job.pageCharsRevision,
-           let digest = localBook.contentSha256 {
-            let key = "\(remoteBook.bookId):\(revision)"
+        if let job, job.resultAvailable, !job.isActive, let digest = localBook.contentSha256 {
+            let revision = job.pageCharsRevision
+            let key = "\(remoteBook.bookId):\(revision ?? ("job:" + (job.jobId ?? "?")))"
             if !autoImportedKeys.contains(key) {
-                let imported = (try? await nativeOCR.hasImportedRevision(
-                    expectedContentSHA256: digest,
-                    revision: revision
-                )) ?? true
-                if !imported {
+                var alreadyLocal = false
+                if let revision {
+                    alreadyLocal = (try? await nativeOCR.hasImportedRevision(
+                        expectedContentSHA256: digest,
+                        revision: revision
+                    )) ?? false
+                }
+                if alreadyLocal {
                     autoImportedKeys.insert(key)
-                    await importPiAttachments(book: remoteBook, localBook: localBook)
+                } else {
+                    // 成功才记键:失败(网络抖动/附件校验)下一轮还会再试;不再像 626 那样一次失败就永远不导
+                    if await importPiAttachments(book: remoteBook, localBook: localBook) {
+                        autoImportedKeys.insert(key)
+                        await refreshTextLayers(localBook)
+                    }
                     return
                 }
             }
@@ -1637,6 +1679,9 @@ struct ReaderLocalLibraryView: View {
     /// 面板自动采用/自动导入的去重(每本书一次采用;每个结果版本一次导入)
     @State private var autoAdoptedBookIDs: Set<String> = []
     @State private var autoImportedKeys: Set<String> = []
+    /// 面板轮询:上次看到的任务签名(状态/结果/版本)与"刚变过、保持快节奏到几点"
+    @State private var panelJobSignature: [String: String] = [:]
+    @State private var panelSettleUntil: Date = .distantPast
     @State private var openStage: [String: String] = [:]
     @State private var openFailures: [String: String] = [:]
 
@@ -1950,10 +1995,11 @@ struct ReaderLocalLibraryView: View {
         presentPiErrorIfNeeded(for: book)
     }
 
+    @discardableResult
     private func importPiAttachments(
         book: ReaderRemoteBook,
         localBook: ReaderLocalBookRecord
-    ) async {
+    ) async -> Bool {
         do {
             let digest = try await library.ensureContentSHA256(for: localBook)
             guard digest.caseInsensitiveCompare(book.contentSha256)
@@ -1973,8 +2019,10 @@ struct ReaderLocalLibraryView: View {
             if !imported {
                 presentPiErrorIfNeeded(for: book)
             }
+            return imported
         } catch {
             reportPanelError(error.localizedDescription)
+            return false
         }
     }
 
