@@ -16,7 +16,8 @@ from unittest.mock import Mock, patch
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
-import readerpc_launcher  # noqa: E402
+import readerpc_launcher
+import readerpc_services  # noqa: E402
 from readerpc_launcher import (  # noqa: E402
     ReaderPCWindow,
     ShortcutBrokerError,
@@ -131,6 +132,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
         window.voice_start_in_progress = False
         window.voice_stop_in_progress = False
         window.voice_snapshot_offline_marked = False
+        window.voice_maintenance_notice = None
         window._shortcut_broker = Mock()
         window.history_stop_event = threading.Event()
         window.history_thread = None
@@ -1061,6 +1063,48 @@ class ReaderPCLauncherTests(unittest.TestCase):
         disabled.assert_not_called()
         self.assertEqual(window.root.after.call_count, 2)
 
+    def test_maintenance_hold_keeps_the_keepalive_off_the_installer(self) -> None:
+        # 装桥要先停 Direct 再原子替换 exe；保活一重拉，替换就撞 WinError 5，
+        # 整个安装事务回滚（2026-09-03 / 09-04 各一次）。见标记就等着。
+        window = self.window_without_tk()
+        window.last_voice_start_attempt = 0.0
+        window._voice_status = Mock(return_value=SimpleNamespace(
+            service_online=False,
+            configuration_enabled=True,
+        ))
+        window._start_voice_task = Mock()
+        with (
+            patch(
+                "readerpc_launcher.read_direct_maintenance_hold",
+                return_value="安装 Direct 0.1.275",
+            ),
+            patch(
+                "readerpc_launcher.write_recovering_reader_context_snapshot"
+            ) as recovering,
+            patch("readerpc_launcher._boot_log") as boot_log,
+            patch("readerpc_launcher.time.monotonic", return_value=31.0),
+        ):
+            window._ensure_voice_online()
+            window._ensure_voice_online()
+        window._start_voice_task.assert_not_called()
+        recovering.assert_not_called()
+        self.assertEqual(boot_log.call_count, 1, "同一条原因只播报一次")
+        self.assertEqual(window.voice_maintenance_notice, "安装 Direct 0.1.275")
+        # 标记一撤，保活立刻恢复（否则语音要等到下次事件才回来）
+        with (
+            patch(
+                "readerpc_launcher.read_direct_maintenance_hold",
+                return_value=None,
+            ),
+            patch("readerpc_launcher.write_recovering_reader_context_snapshot"),
+            patch("readerpc_launcher._boot_log") as resumed,
+            patch("readerpc_launcher.time.monotonic", return_value=62.0),
+        ):
+            window._ensure_voice_online()
+        window._start_voice_task.assert_called_once_with()
+        self.assertIsNone(window.voice_maintenance_notice)
+        self.assertEqual(resumed.call_count, 1, "恢复也要出声")
+
     def test_server_recovers_listener_even_if_derived_config_is_off(self) -> None:
         window = self.window_without_tk()
         window.voice_snapshot_offline_marked = True
@@ -1473,6 +1517,49 @@ class ReaderPCLauncherTests(unittest.TestCase):
         self.assertEqual(closed, [gui_pid])
         stop.assert_called_once()
         self.assertEqual(runner.terminations, [])
+
+    def test_takeover_asks_out_of_band_before_it_asks_the_window(self) -> None:
+        # taskkill /PID 发的是 WM_CLOSE，而收进托盘的 ReaderPC 没有顶层窗口
+        # （实测 MainWindowHandle = 0）—— 只有窗口这一条路就必然超时（2026-09-05
+        # 两次换代失败）。所以文件请求必须**先于** close 尝试写下。
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            paths = readerpc_launcher.BridgePaths.for_root(root)
+            data_root = root / "BWReader"
+            data_root.mkdir()
+            readerpc_paths = readerpc_launcher.ReaderPCPaths(
+                local_root=data_root,
+                status_file=data_root / "status.json",
+                preferences_file=data_root / "config.json",
+            )
+            gui_pid = 5101
+            reader_exe = root / "ReaderPC-Server.exe"
+            runner = self.MutableProcessRunner({gui_pid: reader_exe})
+            rows = [(gui_pid, 1, "ReaderPC-Server.exe", str(reader_exe))]
+            seen: list[str | None] = []
+
+            def close_gui(pid: int) -> bool:
+                seen.append(
+                    readerpc_services.read_readerpc_exit_request(readerpc_paths)
+                )
+                runner.executables.pop(gui_pid, None)
+                return True
+
+            with patch.object(
+                readerpc_launcher.ReaderPCPaths,
+                "discover",
+                staticmethod(lambda: readerpc_paths),
+            ):
+                stale = terminate_stale_instances(
+                    paths,
+                    runner,
+                    process_rows=rows,
+                    close_process=close_gui,
+                )
+        self.assertEqual(stale, [gui_pid])
+        self.assertEqual(seen, ["新一代 ReaderPC 正在接管"])
+        # 接管完成后必须清掉，否则本代第一次刷新就自己退出（"双击没反应"）
+        self.assertFalse(readerpc_paths.exit_request_file.exists())
 
     def test_takeover_waits_if_record_disappears_while_direct_is_live(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

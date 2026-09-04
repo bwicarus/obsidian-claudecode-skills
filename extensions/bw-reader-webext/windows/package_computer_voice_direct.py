@@ -147,6 +147,13 @@ class InstallServiceController(Protocol):
 
     def stop(self, install_root: Path) -> None: ...
 
+    # 维护标记:停 Direct 之前声明"正在维护",装完(含回滚)撤销。
+    # 没有它就会和 ReaderPC 每 5 秒一次的保活赛跑 —— 替换时 exe 被新拉起的
+    # Direct 占住,WinError 5,整个安装事务回滚(2026-09-03/09-04 各一次)。
+    def hold(self, install_root: Path, reason: str) -> bool: ...
+
+    def release(self, install_root: Path) -> None: ...
+
 
 class InstallMcpController(Protocol):
     def quiesce(self, install_root: Path) -> int: ...
@@ -308,6 +315,26 @@ class BridgeCoreInstallServiceController:
             self._runner,
         ):
             _fail("Direct 服务在安装前未确认停止")
+
+    def hold(self, install_root: Path, reason: str) -> bool:
+        try:
+            self._module.write_direct_maintenance_hold(
+                self._paths(install_root),
+                reason,
+            )
+        except Exception:
+            # 写不下标记就照旧装(退回赛跑),但**不要**因此拒绝安装:
+            # 旧行为(没有标记)本来就是能装成的,只是不可靠。
+            return False
+        return True
+
+    def release(self, install_root: Path) -> None:
+        try:
+            self._module.clear_direct_maintenance_hold(
+                self._paths(install_root)
+            )
+        except Exception:
+            pass
 
 def _same_windows_path(left: Path | str, right: Path | str) -> bool:
     def normalized(value: Path | str) -> str:
@@ -2134,6 +2161,12 @@ def _install_verified_payload(
     _write_payload_tree(backup, current_manifest, current_payload)
     _verified_install_directory(backup, label="新建安装备份")
 
+    # ⚠ 顺序要紧:标记必须写在**停 Direct 之前**。ReaderPC 的保活每 5 秒看一次
+    #   "属下服务在不在",不在就立刻重拉;先停后写就是把赛跑窗口留着。
+    maintenance_held = service_controller.hold(
+        install_root,
+        f"安装 Direct {manifest['version']}",
+    )
     was_running = service_controller.is_running(install_root)
     stopped = False
     payload_mutation_started = False
@@ -2175,6 +2208,9 @@ def _install_verified_payload(
             # ReaderPC monitor will create one fresh owned generation.
             "serviceRestored": False,
             "serviceRestartDeferredToReaderPC": was_running,
+            # 如实报出这次有没有拿到维护标记:拿不到就是退回了赛跑,
+            # 下次失败时这一行是第一个要看的东西。
+            "maintenanceHold": maintenance_held,
             "mcpProcessesStopped": mcp_processes_stopped,
             "codexConfigMigration": {
                 "changed": codex_migration.changed,
@@ -2220,6 +2256,10 @@ def _install_verified_payload(
         if recovery_errors:
             detail += "; " + "; ".join(recovery_errors)
         raise PackageError(detail) from install_error
+    finally:
+        # 成功、失败、回滚 —— 三条出口都要撤标记。留着只会让语音干等到它过期。
+        if maintenance_held:
+            service_controller.release(install_root)
 
 
 def install_archive(

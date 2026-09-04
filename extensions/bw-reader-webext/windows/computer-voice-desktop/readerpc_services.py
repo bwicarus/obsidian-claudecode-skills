@@ -150,6 +150,10 @@ class ReaderPCPaths:
     status_file: Path
     preferences_file: Path
 
+    @property
+    def exit_request_file(self) -> Path:
+        return self.local_root / EXIT_REQUEST_FILE
+
     @classmethod
     def discover(cls) -> "ReaderPCPaths":
         local_root = _default_local_root()
@@ -158,6 +162,93 @@ class ReaderPCPaths:
             status_file=local_root / "readerpc-server.status.json",
             preferences_file=local_root / "readerpc-server.config.json",
         )
+
+
+# 带外退出请求(2026-09-05)。换代接管原本只有 `taskkill /PID`(WM_CLOSE)一条路,
+# 而 ReaderPC 收进托盘后**没有顶层窗口**(实测 MainWindowHandle = 0),WM_CLOSE 无处可去,
+# taskkill 却照样返回 0 —— 于是等 60s 超时、拒绝接管,新旧两代同时在跑。
+# 这条通道让请求方写文件,运行中的实例在自己的刷新循环里看到就走正常退出路径。
+EXIT_REQUEST_CONTRACT = "readerpc-exit-request/1"
+EXIT_REQUEST_FILE = "readerpc-exit-request.json"
+# ⚠ 必须过期:一个赖在原地的请求会让**新**实例一启动就自杀,表现是"双击没反应"。
+EXIT_REQUEST_MAX_SECONDS = 30.0
+
+
+def write_readerpc_exit_request(
+    paths: "ReaderPCPaths",
+    reason: str,
+    *,
+    ttl_seconds: float = EXIT_REQUEST_MAX_SECONDS,
+    pid: int | None = None,
+    clock: Callable[[], float] = time.time,
+) -> None:
+    """请正在运行的 ReaderPC 走正常退出路径。"""
+
+    if not reason or len(reason) > 200:
+        raise ReaderPCServiceError("退出请求必须带一句 200 字以内的原因。")
+    if not 0 < ttl_seconds <= EXIT_REQUEST_MAX_SECONDS:
+        raise ReaderPCServiceError("退出请求有效期无效。")
+    path = paths.exit_request_file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    temporary.write_text(
+        json.dumps(
+            {
+                "contract": EXIT_REQUEST_CONTRACT,
+                "reason": reason,
+                "pid": int(os.getpid() if pid is None else pid),
+                "expiresAtEpoch": float(clock() + ttl_seconds),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+def clear_readerpc_exit_request(paths: "ReaderPCPaths") -> None:
+    try:
+        paths.exit_request_file.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def read_readerpc_exit_request(
+    paths: "ReaderPCPaths",
+    *,
+    pid_alive: Callable[[int], bool] | None = None,
+    clock: Callable[[], float] = time.time,
+) -> str | None:
+    """有活跃退出请求就回原因，否则回 None。
+
+    过期、契约不对、请求方进程已不在 —— 都当作没有请求。
+    ⚠ 这个函数**绝不能抛异常**：它跑在刷新循环里，抛出会把状态刷新一起搭上。
+    """
+
+    try:
+        value = json.loads(paths.exit_request_file.read_text("utf-8"))
+    except Exception:
+        return None
+    if (
+        not isinstance(value, dict)
+        or value.get("contract") != EXIT_REQUEST_CONTRACT
+        or not isinstance(value.get("reason"), str)
+        or not value["reason"]
+        or not isinstance(value.get("pid"), int)
+        or isinstance(value.get("pid"), bool)
+        or value["pid"] <= 0
+        or not isinstance(value.get("expiresAtEpoch"), (int, float))
+        or isinstance(value.get("expiresAtEpoch"), bool)
+        or float(value["expiresAtEpoch"]) <= clock()
+    ):
+        return None
+    if pid_alive is not None and not pid_alive(int(value["pid"])):
+        return None
+    return value["reason"][:200]
 
 
 @dataclass(frozen=True)

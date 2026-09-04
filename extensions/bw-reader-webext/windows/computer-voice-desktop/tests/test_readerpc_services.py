@@ -14,13 +14,19 @@ sys.path.insert(0, str(SOURCE_ROOT))
 
 import readerpc_services  # noqa: E402
 from readerpc_services import (  # noqa: E402
+    EXIT_REQUEST_CONTRACT,
+    EXIT_REQUEST_MAX_SECONDS,
     PC_OCR_STATUS_CONTRACT,
     ManagedProcessController,
     ManagedServiceSpec,
     PcOcrPaths,
     PcOcrServiceController,
+    ReaderPCPaths,
     ReaderPCServiceError,
+    clear_readerpc_exit_request,
     default_server_services,
+    read_readerpc_exit_request,
+    write_readerpc_exit_request,
     read_codex_voice_activity,
     read_reader_context_status,
     write_readerpc_status,
@@ -33,6 +39,84 @@ class FakeProbe:
 
     def start_file_time_utc(self, pid: int) -> int | None:
         return self.values.get(pid)
+
+
+class ReaderPCExitRequestTests(unittest.TestCase):
+    """带外退出请求（2026-09-05）。
+
+    换代接管原本只有 `taskkill /PID`（WM_CLOSE）一条路，而 ReaderPC 收进托盘后
+    **没有顶层窗口**（实测 MainWindowHandle = 0），WM_CLOSE 无处可去、taskkill 却
+    返回 0 —— 等 60s 超时、拒绝接管，新旧两代同时在跑。这个类钉的是这条补充通道
+    **不能反过来把新实例弄死**。
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        root = Path(self.temporary.name)
+        self.paths = ReaderPCPaths(
+            local_root=root,
+            status_file=root / "status.json",
+            preferences_file=root / "config.json",
+        )
+
+    def test_live_request_is_honoured_then_cleared(self):
+        write_readerpc_exit_request(self.paths, "新一代 ReaderPC 正在接管")
+        self.assertEqual(
+            read_readerpc_exit_request(self.paths),
+            "新一代 ReaderPC 正在接管",
+        )
+        payload = json.loads(self.paths.exit_request_file.read_text("utf-8"))
+        self.assertEqual(payload["contract"], EXIT_REQUEST_CONTRACT)
+        clear_readerpc_exit_request(self.paths)
+        self.assertIsNone(read_readerpc_exit_request(self.paths))
+        clear_readerpc_exit_request(self.paths)   # 再删一次不许抛
+
+    def test_expired_request_is_ignored(self):
+        # 赖在原地的请求会让**新**实例一启动就自杀，表现是"双击没反应"。
+        write_readerpc_exit_request(
+            self.paths, "接管", ttl_seconds=10.0, clock=lambda: 500.0
+        )
+        self.assertEqual(
+            read_readerpc_exit_request(self.paths, clock=lambda: 509.0), "接管"
+        )
+        self.assertIsNone(
+            read_readerpc_exit_request(self.paths, clock=lambda: 511.0)
+        )
+
+    def test_request_from_a_dead_process_is_ignored(self):
+        write_readerpc_exit_request(self.paths, "接管", pid=4242)
+        self.assertIsNone(
+            read_readerpc_exit_request(self.paths, pid_alive=lambda pid: False)
+        )
+        self.assertEqual(
+            read_readerpc_exit_request(self.paths, pid_alive=lambda pid: True),
+            "接管",
+        )
+
+    def test_foreign_or_broken_payload_never_asks_for_exit(self):
+        for payload in (
+            "{",
+            json.dumps({"contract": "other/1", "reason": "x", "pid": 1,
+                        "expiresAtEpoch": 9e18}),
+            json.dumps({"contract": EXIT_REQUEST_CONTRACT, "reason": "",
+                        "pid": 1, "expiresAtEpoch": 9e18}),
+            json.dumps({"contract": EXIT_REQUEST_CONTRACT, "reason": "x",
+                        "pid": 0, "expiresAtEpoch": 9e18}),
+            json.dumps({"contract": EXIT_REQUEST_CONTRACT, "reason": "x",
+                        "pid": 1}),
+        ):
+            self.paths.exit_request_file.write_text(payload, encoding="utf-8")
+            self.assertIsNone(read_readerpc_exit_request(self.paths), payload)
+
+    def test_missing_file_and_bounded_ttl(self):
+        self.assertIsNone(read_readerpc_exit_request(self.paths))
+        with self.assertRaises(ReaderPCServiceError):
+            write_readerpc_exit_request(
+                self.paths, "太久", ttl_seconds=EXIT_REQUEST_MAX_SECONDS + 1
+            )
+        with self.assertRaises(ReaderPCServiceError):
+            write_readerpc_exit_request(self.paths, "")
 
 
 class ReaderPCServicesTests(unittest.TestCase):

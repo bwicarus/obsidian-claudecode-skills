@@ -154,3 +154,9 @@ class MiscCallIdTests(unittest.TestCase):
         import voip_push
         self.assertEqual(
             replication_apply._MISC_CALL_ID, voip_push.MISC_CALL_ID)
+
+
+# ⚠ 少了这一段，直接 `python test_voip_calls.py` 会静默什么都不跑（退出码 0）——
+#   看起来像"全绿"，其实一条都没加载（2026-09-05 顺手发现）。
+if __name__ == "__main__":
+    unittest.main()

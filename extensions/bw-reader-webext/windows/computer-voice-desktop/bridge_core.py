@@ -37,6 +37,14 @@ DIRECT_SHUTDOWN_ACCEPT_TIMEOUT_SECONDS = 2.0
 DIRECT_SHUTDOWN_POLL_SECONDS = 0.1
 DIRECT_SHUTDOWN_PROCESS_EXIT_TIMEOUT_SECONDS = 2.0
 SELF_TEST_CONTRACT = "reader-computer-voice-desktop-self-test/1"
+# 维护标记(2026-09-04):装桥期间让 ReaderPC 的保活别重拉 Direct。
+# 装桥要先停 Direct 再原子替换 exe,而保活每 5 秒发现"属下服务不在"就立刻重拉 ——
+# 替换时 exe 已被新进程占用,WinError 5,安装事务回滚(09-03/09-04 各撞一次)。
+DIRECT_MAINTENANCE_CONTRACT = "readerpc-direct-maintenance/1"
+DIRECT_MAINTENANCE_FILE = "readerpc-direct-maintenance.json"
+# ⚠ 必须有上限:安装器被杀而标记留在原地 = 语音永久起不来,
+#   而且现场看起来是"服务都开着、就是没声音"(最难查的那一类)。
+DIRECT_MAINTENANCE_MAX_SECONDS = 300.0
 
 FIXED_LISTEN_HOST = "127.0.0.1"
 FIXED_LISTEN_PORT = 43128
@@ -430,6 +438,12 @@ class BridgePaths:
     service_record: Path
 
     @property
+    def maintenance_hold(self) -> Path:
+        # 放在 runtime/ 下:安装的原子替换只动清单里的文件,runtime/ 不在清单里,
+        # 所以标记跨过整个替换过程仍在原地。
+        return self.runtime_status.parent / DIRECT_MAINTENANCE_FILE
+
+    @property
     def shutdown_request(self) -> Path:
         return self.runtime_status.parent / DIRECT_SHUTDOWN_FILE
 
@@ -593,6 +607,87 @@ def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def write_direct_maintenance_hold(
+    paths: BridgePaths,
+    reason: str,
+    *,
+    ttl_seconds: float = DIRECT_MAINTENANCE_MAX_SECONDS,
+    pid: int | None = None,
+    clock: Callable[[], float] = time.time,
+) -> None:
+    """声明"Direct 正在维护,保活暂勿重拉"。"""
+
+    if not reason or len(reason) > 200:
+        raise BridgeError("维护标记必须带一句 200 字以内的原因。")
+    if not 0 < ttl_seconds <= DIRECT_MAINTENANCE_MAX_SECONDS:
+        raise BridgeError("维护标记有效期无效。")
+    _atomic_write_json(
+        paths.maintenance_hold,
+        {
+            "contract": DIRECT_MAINTENANCE_CONTRACT,
+            "reason": reason,
+            "pid": int(os.getpid() if pid is None else pid),
+            "expiresAtEpoch": float(clock() + ttl_seconds),
+        },
+    )
+
+
+def clear_direct_maintenance_hold(paths: BridgePaths) -> None:
+    try:
+        paths.maintenance_hold.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        # 删不掉也不能抛:调用方在 finally 里用它,抛出会盖掉真正的安装错误。
+        # 标记本身会过期,最坏情况是语音晚几分钟恢复。
+        pass
+
+
+def read_direct_maintenance_hold(
+    paths: BridgePaths,
+    *,
+    runner: "WindowsProcessRunner | None" = None,
+    clock: Callable[[], float] = time.time,
+) -> str | None:
+    """有活跃维护标记就回原因文字，否则回 None。
+
+    过期、契约不对、或写标记的进程已经不在 —— 都当作没有标记。
+    **宁可早一点恢复语音，也不要因为一个赖在原地的文件让语音永久起不来。**
+    """
+
+    # ⚠ 这个函数绝不能把异常抛进保活循环 —— 抛了就把语音的自愈能力一起搭上了。
+    #   读不到、读到垃圾、路径根本不是文件：一律当作"没有标记"，保活照常。
+    try:
+        value = json.loads(paths.maintenance_hold.read_text("utf-8"))
+    except Exception:
+        return None
+    if (
+        not isinstance(value, dict)
+        or value.get("contract") != DIRECT_MAINTENANCE_CONTRACT
+        or not isinstance(value.get("reason"), str)
+        or not value["reason"]
+        or not isinstance(value.get("pid"), int)
+        or isinstance(value.get("pid"), bool)
+        or value["pid"] <= 0
+        or not isinstance(value.get("expiresAtEpoch"), (int, float))
+        or isinstance(value.get("expiresAtEpoch"), bool)
+    ):
+        return None
+    if float(value["expiresAtEpoch"]) <= clock():
+        return None
+    if os.name == "nt":
+        probe = runner or WindowsProcessRunner()
+        try:
+            # 任何存活进程都算 —— 这里只问"写标记的那个进程还在吗",
+            # 不问它是什么(安装器是 python.exe,不是被管的 exe)。
+            alive = probe.executable_for_pid(int(value["pid"])) is not None
+        except Exception:
+            alive = True   # 探不到就按"还在"处理:此刻宁可等,别去抢安装器的文件
+        if not alive:
+            return None
+    return value["reason"][:200]
 
 
 def _is_valid_origin(value: object) -> bool:

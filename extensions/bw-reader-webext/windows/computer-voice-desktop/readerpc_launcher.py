@@ -26,6 +26,7 @@ from bridge_core import (
     clear_direct_service_record_if_pid,
     inspect_direct_shutdown_identity,
     load_direct_config,
+    read_direct_maintenance_hold,
     read_direct_shutdown_receipt_state,
     read_direct_status,
     set_direct_config_enabled,
@@ -42,6 +43,9 @@ from control_plane import (
 from readerpc_services import (
     CodexVoiceActivityStatus,
     ManagedProcessController,
+    clear_readerpc_exit_request,
+    read_readerpc_exit_request,
+    write_readerpc_exit_request,
     OBSIDIAN_SYNC_TASK_NAME,
     PRODUCT_NAME,
     PcOcrServiceController,
@@ -64,7 +68,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.123"
+APP_VERSION = "0.1.125"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status
@@ -1101,6 +1105,8 @@ class ReaderPCWindow:
         self.voice_start_in_progress = False
         self.voice_stop_in_progress = False
         self.voice_snapshot_offline_marked = False
+        # 上一次播报过的维护原因:同一条只说一次,但换了原因要再说。
+        self.voice_maintenance_notice: str | None = None
         self.last_status_publish = 0.0
         self.history_stop_event = threading.Event()
         self.history_synchronizer = CaptureBoundHistorySynchronizer(
@@ -1969,6 +1975,23 @@ class ReaderPCWindow:
                     self.voice_snapshot_offline_marked = False
                     self.voice_fail_streak = 0
                 else:
+                    # 装桥/换代期间**不要抢 exe**:保活一重拉,安装器的原子替换就
+                    # 撞上 WinError 5 而整事务回滚(09-03/09-04 各一次)。标记会过期、
+                    # 写标记的进程没了也作废,所以不会把语音永久按住。
+                    hold = read_direct_maintenance_hold(self.bridge_paths)
+                    if hold:
+                        # 出声:"保活什么都没做"跟"一切正常"在界面上长得一样。
+                        if self.voice_maintenance_notice != hold:
+                            self.voice_maintenance_notice = hold
+                            _boot_log("Direct 维护标记在,保活暂不重拉:" + hold)
+                        self.footer.configure(
+                            text=f"电脑语音维护中（{hold}），保活暂不重拉。",
+                            foreground="#b26a00",
+                        )
+                        return
+                    if self.voice_maintenance_notice is not None:
+                        self.voice_maintenance_notice = None
+                        _boot_log("Direct 维护标记已撤,保活恢复")
                     if not self.voice_snapshot_offline_marked:
                         write_recovering_reader_context_snapshot(
                             self.bridge_paths
@@ -2130,6 +2153,20 @@ class ReaderPCWindow:
                 )
             self.pc_detail.configure(text=details)
             self.pc_button.configure(text="停止" if pc.running else "启动")
+
+            # 带外退出请求：没有顶层窗口时这是唯一能被叫停的通道。
+            # 先删文件再退出 —— 否则下一代会把同一条请求再消费一次。
+            exit_reason = read_readerpc_exit_request(
+                self.readerpc_paths,
+                pid_alive=lambda pid: (
+                    self.process_runner.executable_for_pid(pid) is not None
+                ),
+            )
+            if exit_reason:
+                clear_readerpc_exit_request(self.readerpc_paths)
+                _boot_log("收到带外退出请求，按正常路径退出：" + exit_reason)
+                self.request_exit()
+                return
 
             now = time.monotonic()
             if now - self.last_status_publish >= STATUS_PUBLISH_INTERVAL_SECONDS:
@@ -2379,6 +2416,20 @@ def terminate_stale_instances(
         except Exception:
             return False
 
+    # ⚠ 带外退出请求必须先写。`taskkill /PID` 发的是 WM_CLOSE，而 ReaderPC 收进
+    #   托盘后**没有顶层窗口**（实测 MainWindowHandle = 0），WM_CLOSE 无处可去，
+    #   taskkill 却照样返回 0 —— 于是等 60s 超时、拒绝接管，新旧两代同时在跑。
+    #   2026-09-05 两次换代失败都是这个（"刚启动接管成功、隔一小时就失败"不是随机的：
+    #   窗口那时还在）。文件这条路不依赖窗口。
+    if close_targets:
+        try:
+            write_readerpc_exit_request(
+                ReaderPCPaths.discover(),
+                "新一代 ReaderPC 正在接管",
+            )
+        except Exception:
+            # 写不下就只剩 WM_CLOSE 一条路（退回旧行为），不因此拒绝启动。
+            pass
     for pid in close_targets:
         if original_gui_live(pid) and not request_close(pid):
             if original_gui_live(pid):
@@ -2393,6 +2444,13 @@ def terminate_stale_instances(
                 "旧 ReaderPC 未完成正常退出；拒绝强制接管。"
             )
         sleeper(0.2)
+
+    # 旧代已退场：清掉任何没被消费的退出请求。留着会让**本代**在第一次刷新时
+    # 就自己退出（表现是"双击没反应"）。过期时限只是第二道保险。
+    try:
+        clear_readerpc_exit_request(ReaderPCPaths.discover())
+    except Exception:
+        pass
 
     # The service record may disappear while the old GUI is completing its
     # own stop path.  Always inspect the captured original PID itself; never

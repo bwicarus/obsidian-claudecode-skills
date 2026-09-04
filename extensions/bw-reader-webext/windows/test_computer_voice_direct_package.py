@@ -173,6 +173,7 @@ class FakeInstallService:
     def __init__(self, *, running: bool = True) -> None:
         self.running = running
         self.events: list[str] = []
+        self.holds: list[str] = []
 
     def is_running(self, install_root: Path) -> bool:
         self.events.append("is-running")
@@ -183,6 +184,15 @@ class FakeInstallService:
         if not self.running:
             raise AssertionError("service was not running")
         self.running = False
+
+    def hold(self, install_root: Path, reason: str) -> bool:
+        # events 的顺序就是契约:hold 必须先于 stop。
+        self.events.append("hold")
+        self.holds.append(reason)
+        return True
+
+    def release(self, install_root: Path) -> None:
+        self.events.append("release")
 
 class FakeMcpController:
     def __init__(self, *, stopped: int = 0) -> None:
@@ -574,8 +584,12 @@ class DirectPackageTests(unittest.TestCase):
             self.assertEqual(mcp.events, ["quiesce"])
             self.assertEqual(
                 service.events,
-                ["is-running", "stop"],
+                # hold 必须先于 stop，release 收尾 —— 装桥与 ReaderPC 保活的赛跑
+                # 就是靠这个顺序消掉的（2026-09-03/09-04 各撞一次）。
+                ["hold", "is-running", "stop", "release"],
             )
+            self.assertTrue(receipt["maintenanceHold"])
+            self.assertEqual(service.holds, ["安装 Direct 0.4.1"])
             self.assertFalse(service.running)
             installed, _ = package._verified_install_directory(
                 install_root, label="test installed"
@@ -625,8 +639,9 @@ class DirectPackageTests(unittest.TestCase):
             self.assertEqual(
                 service.events,
                 [
-                    "is-running", "stop",
-                    "is-running", "stop",
+                    # 两次独立事务，各自 hold…release 成对
+                    "hold", "is-running", "stop", "release",
+                    "hold", "is-running", "stop", "release",
                 ],
             )
             self.assertFalse(service.running)
@@ -675,7 +690,7 @@ class DirectPackageTests(unittest.TestCase):
             self.assertEqual(mcp.events, ["quiesce", "quiesce"])
             self.assertEqual(
                 service.events,
-                ["is-running", "stop", "is-running"],
+                ["hold", "is-running", "stop", "is-running", "release"],
             )
             self.assertEqual(
                 (install_root / "runtime" / "state.json").read_text(),
@@ -745,7 +760,7 @@ class DirectPackageTests(unittest.TestCase):
             self.assertEqual(backend.terminated, [])
             self.assertEqual(
                 service.events,
-                ["is-running", "stop", "is-running"],
+                ["hold", "is-running", "stop", "is-running", "release"],
             )
             self.assertFalse(service.running)
             restored_manifest, restored_payload = package._verified_install_directory(

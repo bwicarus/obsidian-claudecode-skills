@@ -42,6 +42,9 @@ from bridge_core import (  # noqa: E402
     build_self_test_report,
     build_start_command,
     build_tailscale_command_plan,
+    clear_direct_maintenance_hold,
+    DIRECT_MAINTENANCE_CONTRACT,
+    DIRECT_MAINTENANCE_MAX_SECONDS,
     disable_and_stop_direct_service,
     disable_config,
     enumerate_active_capture_endpoints,
@@ -49,6 +52,7 @@ from bridge_core import (  # noqa: E402
     legacy_microphone_config_requires_migration,
     load_direct_config,
     migrate_native_app_origin,
+    read_direct_maintenance_hold,
     read_direct_status,
     restore_direct_config,
     run_idle_bootstrap,
@@ -58,6 +62,7 @@ from bridge_core import (  # noqa: E402
     start_direct_service,
     stop_direct_service,
     validate_direct_config,
+    write_direct_maintenance_hold,
 )
 
 
@@ -109,6 +114,97 @@ class FakeReadOnlyRunner:
     def run_read_only(self, command, *, timeout_seconds):
         self.calls.append(tuple(command))
         return subprocess.CompletedProcess(command, 0, "{}", "")
+
+
+class DirectMaintenanceHoldTests(unittest.TestCase):
+    """装桥期间让 ReaderPC 的保活别重拉 Direct（2026-09-04 根治那场赛跑）。
+
+    赛跑的形态：安装器先停 Direct 再原子替换 exe，而保活每 5 秒发现"属下服务不在"
+    就立刻重拉 —— 替换时 exe 已被新进程占住，`WinError 5`，整个安装事务回滚。
+    标记消掉了窗口；这个类钉的是**它不能反过来把语音永久按住**。
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.paths = BridgePaths.for_root(Path(self.temporary.name))
+        self.paths.runtime_status.parent.mkdir(parents=True, exist_ok=True)
+
+    def test_live_hold_is_honoured_and_says_why(self):
+        write_direct_maintenance_hold(self.paths, "安装 Direct 9.9.9")
+        self.assertEqual(
+            read_direct_maintenance_hold(self.paths),
+            "安装 Direct 9.9.9",
+        )
+        payload = json.loads(self.paths.maintenance_hold.read_text("utf-8"))
+        self.assertEqual(payload["contract"], DIRECT_MAINTENANCE_CONTRACT)
+        self.assertEqual(payload["pid"], os.getpid())
+        clear_direct_maintenance_hold(self.paths)
+        self.assertIsNone(read_direct_maintenance_hold(self.paths))
+
+    def test_clearing_a_missing_hold_is_not_an_error(self):
+        # 安装器在 finally 里撤标记；这里抛异常会盖掉真正的安装错误。
+        clear_direct_maintenance_hold(self.paths)
+        clear_direct_maintenance_hold(self.paths)
+
+    def test_expired_hold_stops_holding(self):
+        # 安装器被杀而标记留在原地 = 语音永久起不来，而现场看起来是
+        # "服务都开着、就是没声音"。所以过期必须自动作废。
+        write_direct_maintenance_hold(
+            self.paths, "安装中", ttl_seconds=30.0, clock=lambda: 1000.0
+        )
+        self.assertEqual(
+            read_direct_maintenance_hold(self.paths, clock=lambda: 1029.0),
+            "安装中",
+        )
+        self.assertIsNone(
+            read_direct_maintenance_hold(self.paths, clock=lambda: 1031.0)
+        )
+
+    def test_hold_from_a_dead_process_stops_holding(self):
+        write_direct_maintenance_hold(self.paths, "安装中", pid=4242)
+
+        class DeadRunner:
+            def executable_for_pid(self, pid):
+                return None
+
+        with patch.object(os, "name", "nt"):
+            self.assertIsNone(
+                read_direct_maintenance_hold(self.paths, runner=DeadRunner())
+            )
+
+        class LiveRunner:
+            def executable_for_pid(self, pid):
+                return Path("C:/Windows/py.exe")
+
+        with patch.object(os, "name", "nt"):
+            self.assertEqual(
+                read_direct_maintenance_hold(self.paths, runner=LiveRunner()),
+                "安装中",
+            )
+
+    def test_unreadable_or_foreign_payload_never_holds(self):
+        for payload in (
+            "not json",
+            json.dumps({"contract": "other/1", "reason": "x", "pid": 1,
+                        "expiresAtEpoch": 9e18}),
+            json.dumps({"contract": DIRECT_MAINTENANCE_CONTRACT, "reason": "",
+                        "pid": 1, "expiresAtEpoch": 9e18}),
+            json.dumps({"contract": DIRECT_MAINTENANCE_CONTRACT, "reason": "x",
+                        "pid": True, "expiresAtEpoch": 9e18}),
+            json.dumps({"contract": DIRECT_MAINTENANCE_CONTRACT, "reason": "x",
+                        "pid": 1}),
+        ):
+            self.paths.maintenance_hold.write_text(payload, encoding="utf-8")
+            self.assertIsNone(read_direct_maintenance_hold(self.paths), payload)
+
+    def test_ttl_is_bounded(self):
+        with self.assertRaises(BridgeError):
+            write_direct_maintenance_hold(
+                self.paths, "太久", ttl_seconds=DIRECT_MAINTENANCE_MAX_SECONDS + 1
+            )
+        with self.assertRaises(BridgeError):
+            write_direct_maintenance_hold(self.paths, "", ttl_seconds=10.0)
 
 
 class DirectDesktopCoreTests(unittest.TestCase):

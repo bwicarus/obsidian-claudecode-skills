@@ -74,10 +74,37 @@ node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 b
 - **装桥与 ReaderPC 保活赛跑**（09-03 实锤）：桥安装器先停 Direct 再原子替换 exe，而 ReaderPC 的保活
   在"属下服务不在"后立刻重拉 Direct —— 第一次安装就撞上：替换时 exe 已被新拉起的 Direct 占用，
   `WinError 5 拒绝访问`，安装器自动回滚；第二次原样重跑碰巧赢了赛跑就成功了。这不是可靠流程。
-  根治（待做）：安装器停 Direct 前先给 ReaderPC 一个"维护中，暂勿重拉"的信号（写维护标记文件，
-  ReaderPC 保活见标记就等待），装完删标记；或者安装器直接经 ReaderPC 的服务托管来做换代。
-  今天 0.1.270 已装上（`serviceRestartDeferredToReaderPC=true`，ReaderPC 随后重拉了新 exe），
-  但下次换桥别指望重试。
+  **已根治（2026-09-05）**：维护标记 —— 安装器在**停 Direct 之前**写
+  `runtime/readerpc-direct-maintenance.json`（`bridge_core.write_direct_maintenance_hold`，
+  唯一一份约定，安装器经 importlib 加载同一个 bridge_core），ReaderPC 保活见标记就等着不重拉，
+  事务三条出口（成功/失败/回滚）都在 `finally` 里撤标记。
+  三条安全性质缺一都会变成"语音永久起不来、而现场看起来服务全开"：① 标记 300s 过期；
+  ② 带写入方 PID，进程没了立即作废；③ ReaderPC 认标记时出声（footer + boot log，同一条只说一次，
+  撤销也说）。`read_direct_maintenance_hold` 内部一律 `except Exception: return None` ——
+  这个函数**绝不能把异常抛进保活循环**，抛了就把语音的自愈能力一起搭上了。
+  回执里多一行 `maintenanceHold`：false 就是退回了赛跑，下次安装失败先看它。
+  契约：`tests/test_bridge_core.py::DirectMaintenanceHoldTests`（过期/死 PID/垃圾载荷/TTL 上限）
+  + `test_readerpc_launcher.py::…keeps_the_keepalive_off_the_installer`
+  + `test_computer_voice_direct_package.py` 的事件序列（`hold` 必须先于 `stop`，`release` 收尾）。
+  ⚠ 装桥前**先把 ReaderPC 升到会认标记的版本**（0.1.124+），否则标记没人看。
+  实测验收（0.1.277 装在活着的 ReaderPC 上）：`serviceRestartDeferredToReaderPC=true`、
+  `maintenanceHold=true`、日志 `01:34:42 Direct 维护标记在,保活暂不重拉` →
+  `01:35:17 Direct 维护标记已撤,保活恢复`，Direct 随即重起。不再需要"先退 ReaderPC"那套。
+- **ReaderPC 换代接管在窗口隐藏后必然失败**（2026-09-05 实锤，同一天两次"旧 ReaderPC
+  未完成正常退出；拒绝强制接管"）：接管靠 `taskkill /PID`，那是**发 WM_CLOSE**，
+  而 ReaderPC 收进托盘后没有顶层窗口（`MainWindowHandle = 0`），WM_CLOSE 无处可去，
+  taskkill 仍返回 0（它只管"请求已送出"）→ 等 60s 超时 → 拒绝接管 → 新旧两代同时在跑
+  （这次就出现过两代都活着、心跳停摆、Direct 掉线，只能精确 kill 收场）。
+  "刚启动接管成功、隔一小时就失败"不是随机的：窗口那时还在。
+  修法：补一条**带外**通道 —— 接管方先写 `readerpc-exit-request.json`
+  （`readerpc_services.write_readerpc_exit_request`），运行中的实例在自己的刷新循环里
+  读到就走正常退出路径 `request_exit()`，两条通道并用。安全性质同维护标记：30s 过期、
+  带请求方 PID、认到时出声，**先删文件再退出**（否则下一代会再消费一次），
+  接管完成后清残留（留着会让本代一启动就自杀，表现是"双击没反应"）。
+  ⚠ 判据：**任何"请对方自己停下"的通道都不能只依赖窗口消息** —— 托盘程序的窗口是
+  会消失的，而 `taskkill` 的返回码只说"送出了"，不说"有人收到"。
+  契约：`test_readerpc_services.py::ReaderPCExitRequestTests` +
+  `test_readerpc_launcher.py::…asks_out_of_band_before_it_asks_the_window`。
 - **从 Pi 搬过来的 `state/server-config.json` 里还有四条 Pi 路径**（09-04 实锤，App 日志「服务器例句中译失败…no result」）：
   `ai.claude_cli.command=/home/bwicarus/.local/bin/claude`、`ai.codex_cli.command=/usr/bin/codex`、
   `qa_vault_path`、`qa_index_dir`、`qa_anki_records_dir`。Windows 上 `WinError 2` 被 translate.py 的 try/except
