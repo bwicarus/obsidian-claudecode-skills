@@ -110,3 +110,13 @@ node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 b
 - **用正则批量改写 Swift 赋值语句会拆断多行表达式**（同日）：`ocrErrorMessage = X` → `reportPanelError(X)` 把
   `remote.errorMessage\n ?? "…"` 与 `ReaderPiOCRError.x\n .localizedDescription` 两处拆成了语法错误。批量改写后
   至少扫一遍"下一行以 `??`/`.`/`+` 开头"的调用点，或者干脆逐处手改。
+- **主机名迁移只改了一半，语音静默断了好几天**（09-04 实锤）：提交 `6f528708`「Pi 整体退出」把 App 侧
+  `DirectVoiceProtocol.swift` 的语音 Origin 改成了 `bwicarus-2`，但 **没动桥的来源白名单**
+  `DirectBridgeServer.cs::SingleUserReaderOrigin`（仍是 Pi 主机名）。结果：语音 WebSocket 每次握手都
+  `origin-denied`，App 每 1-2 秒重试一次全被拒；而 `/reader-*` 那些 HTTP 路由**不校验 Origin**，
+  所以「所有服务都开着、状态都正常」，`readerConnected:false` 是唯一线索，极难看出。
+  同一个主机名在仓库里有多份副本，当时 `DirectSnapshotPresentation.ReaderOrigin` 改了、这份漏了 ——
+  又一次 CLAUDE.md「改白名单前先数清楚有几份副本」。
+  **排障入口**：桥的安全日志 `~/bw-computer-voice-bridge/runtime/computer-voice-direct.service.err.log`
+  里有 `{"event":"origin-denied",...}` 行；用 `curl -H "Origin: …" -H "Upgrade: websocket" …` 打
+  Tailscale URL 可直接判 101/403（直连 127.0.0.1 会因缺 `Tailscale-User-Login` 恒 403，别拿它当判据）。

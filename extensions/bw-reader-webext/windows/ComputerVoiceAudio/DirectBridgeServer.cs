@@ -26,7 +26,17 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         HostShutdownTimeout + OwnedCleanupTimeout;
     internal static readonly TimeSpan DisconnectCleanupWatchdogDelay =
         TimeSpan.FromSeconds(30);
+    // ⚠ 2026-09-04:这里曾是 Pi 的主机名, 而提交 6f528708「Pi 整体退出」只把 **App 侧**
+    //   (DirectVoiceProtocol.swift) 的 Origin 改成了 bwicarus-2, 没动这份白名单 —— 于是自那以后
+    //   语音 WebSocket 每次握手都 origin-denied(桥安全日志里 App 每 1-2 秒重试一次全被拒),
+    //   而 HTTP 那些 /reader-* 路由不校验 Origin 所以看起来"服务都正常", 极难看出。
+    //   同一个主机名在本仓库有多份副本(DirectSnapshotPresentation.ReaderOrigin 当时改了、这里漏了),
+    //   正是 CLAUDE.md「改白名单前先数清楚有几份副本」那条教训。
     private const string SingleUserReaderOrigin =
+        "https://bwicarus-2.taile44d0c.ts.net";
+    // 迁移前的 Pi 主机。Pi 已退出阅读线, 但扩展/旧页面若仍带这个 Origin 就继续认 ——
+    // 两者都还要过 TailscaleLoginMatches, 保留它不放宽实际边界。
+    private const string LegacyPiReaderOrigin =
         "https://bwicarus.taile44d0c.ts.net";
     private const string SingleUserChromeExtensionOrigin =
         "chrome-extension://jddhhakcblmihidgdobfkcejjinpigak";
@@ -3888,6 +3898,10 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         return string.Equals(
                 origin,
                 SingleUserReaderOrigin,
+                StringComparison.Ordinal)
+            || string.Equals(
+                origin,
+                LegacyPiReaderOrigin,
                 StringComparison.Ordinal)
             || string.Equals(
                 origin,
