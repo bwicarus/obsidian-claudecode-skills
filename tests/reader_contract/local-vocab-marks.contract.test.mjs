@@ -89,3 +89,13 @@ test("查词后全页刷新与本地标记合并,不覆盖", () => {
   assert.match(SENT, /pw\.__vocabMarks = _mergeVocabMarks\(pw\.__localVocabMarks, remote\);/);
   assert.doesNotMatch(SENT, /pw\.__vocabMarks = d\.vocab_marks \|\| \[\];/);
 });
+
+// 2026-09-04 用户:「词组的下划线应该是收藏后出现而不是查询后」。单词 lookup 即画;词组只认收藏。
+test("词组下划线只认收藏,不认查过", () => {
+  const RT = readFileSync(new URL("../../_server_deploy/static/pdf/native-local-runtime.js", import.meta.url), "utf8");
+  const PP = readFileSync(new URL("../../_server_deploy/static/pdf/rc-phrasepop.js", import.meta.url), "utf8");
+  assert.match(RT, /else if \(state\.isLookedUp\(spec\)\) slug = 'new';/);
+  assert.doesNotMatch(RT, /state\.isLookedUp\(phraseSpec\)/);
+  assert.match(RT, /if \(r\.property === 'lookup' && r\.kind === 'phrase'\) return;/);
+  assert.doesNotMatch(PP, /setLookedUp\(lspec/);
+});

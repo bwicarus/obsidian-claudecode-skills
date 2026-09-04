@@ -8193,7 +8193,8 @@
   // ── 生词下划线的本地依据(用户 2026-09-03:「查询过但没标记掌握,应该有下划线」)────
   // 此前下划线只来自服务端 vocab 索引,而日语查词本地 JMdict 命中根本不出网,查过的词服务端
   // 不知道。现在:查词即记 vocabulary-state 'lookup';这里按本地字符层的分词(w 分组)逐词查
-  // 本地状态 —— 已掌握不画;查过/收藏过的画,mastery 颜色只分 new(查过)与 seen(收藏词组)。
+  // 本地状态 —— 已掌握不画;单词**查过**即画(new),词组**只有收藏**才画(seen)。
+  // 2026-09-04 用户:「词组的下划线应该是收藏后出现而不是查询后」—— 词组的 lookup 记录不再作为下划线依据。
   function localVocabMarks(chars) {
     var state = root.BWReaderRuntime && root.BWReaderRuntime.vocabularyState;
     if (!state || state.CONTRACT !== 'vocabulary-state/1' ||
@@ -8220,7 +8221,7 @@
       try {
         if (state.isMastered(spec) || state.isMastered(phraseSpec)) continue;
         if (state.isPhraseFavorite(phraseSpec)) slug = 'seen';
-        else if (state.isLookedUp(spec) || state.isLookedUp(phraseSpec)) slug = 'new';
+        else if (state.isLookedUp(spec)) slug = 'new';   // 词组的 lookup 不算(只认收藏)
       } catch (_) { continue; }
       if (!slug) continue;
       var rects = [], cur = null;
@@ -8252,6 +8253,7 @@
       (Array.isArray(keys) ? keys : []).forEach(function (r) {
         if (!r || r.enabled !== true) return;
         if (r.property !== 'lookup' && r.property !== 'favorite') return;
+        if (r.property === 'lookup' && r.kind === 'phrase') return;   // 词组只认收藏,不认查过(2026-09-04)
         var k = String(r.key || '').replace(/[\s\u3000]+/g, '');
         if (k.length < 2 || k.length > 64 || seenKey[k]) return;
         seenKey[k] = true;

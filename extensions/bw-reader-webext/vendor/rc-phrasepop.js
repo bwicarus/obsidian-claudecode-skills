@@ -621,18 +621,8 @@ if (window.__bwPwaProviderOnly) return;
         source: result.source || '', error: result.error || '', errorCode: result.errorCode || ''
       }); } catch (_) {}   // 用局部 opts(闭包)不读共享 _ctx:并发查询/点击不会互相覆盖回调
       try { if (opts.onSolid) opts.onSolid(); } catch (_) {}   // 出结果 → 底座停呼吸转常亮保持
-      // 查过即记(2026-09-03):词组也是生词下划线的本地依据;noDisplay(后台查询)同样算查过
-      try {
-        if (zh && window.BWReaderRuntime && window.BWReaderRuntime.vocabularyState &&
-            typeof window.BWReaderRuntime.vocabularyState.setLookedUp === 'function') {
-          var vs = window.BWReaderRuntime.vocabularyState;
-          var lspec = { kind: 'phrase', language: isJa ? 'ja' : 'en', lemma: text, word: text };
-          if (!vs.isLookedUp(lspec)) vs.setLookedUp(lspec, true, { source: 'rc-phrasepop' });
-          if (typeof window.refreshLocalVocabMarks === 'function') {
-            setTimeout(function () { window.refreshLocalVocabMarks((opts && opts.page) || 0); }, 50);
-          }
-        }
-      } catch (_) {}
+      // 词组**不**因查询记 lookup(2026-09-04 用户:「词组的下划线应该是收藏后出现而不是查询后」);
+      // 收藏(setPhraseFavorite)才是词组下划线的唯一依据,见 _setFavorite → refreshLocalVocabMarks。
       if (noDisplay || !pop) return;   // 查询模式:只回调,不渲染/不弹框
       _state.reading = reading;
       var phon = (isJa && reading && accent != null) ? _renderPitch(reading, accent)

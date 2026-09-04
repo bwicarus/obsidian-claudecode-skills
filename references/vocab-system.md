@@ -633,3 +633,9 @@ build_exposure ~40s（增量更新已扫过的 PDF），compute_mastery ~秒级�
 `_mergeVocabMarks`（几何去重、本地优先）合并；浏览器表面 `__localVocabMarks` 为空，行为不变。
 契约 `local-vocab-marks.contract.test.mjs` 锁住不许再覆盖。
 教训：同一份状态有两个刷新入口时，**每个入口都要按同一条合并规则写**，只改一处等于没改。
+
+### §19.2 词组下划线只认收藏（2026-09-04 用户拍板）
+
+单词：点过（`lookup`）即下划线（9 月 3 日规则不变，「点过=不认识」）。
+词组：**只有收藏**（`setPhraseFavorite`，slug `seen`）才下划线；词组框查完不再记 `lookup`，
+`localVocabMarks` 两遍扫描都忽略 `kind:'phrase'` 的 lookup 记录。契约 `local-vocab-marks.contract.test.mjs` 锁住。
