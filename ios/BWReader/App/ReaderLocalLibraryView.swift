@@ -1880,15 +1880,17 @@ struct ReaderLocalLibraryView: View {
             }
         }
         guard let target else {
-            reportPanelError(remote.errorMessage)
-                ?? "无法把这本书准备到服务器书库，请稍后重试"
+            reportPanelError(
+                remote.errorMessage ?? "无法把这本书准备到服务器书库，请稍后重试"
+            )
             return
         }
         if let localDigest,
            target.contentSha256.caseInsensitiveCompare(localDigest)
             != .orderedSame {
-            reportPanelError(ReaderPiOCRError.localContentMismatch)
-                .localizedDescription
+            reportPanelError(
+                ReaderPiOCRError.localContentMismatch.localizedDescription
+            )
             return
         }
         await piOCR.start(
