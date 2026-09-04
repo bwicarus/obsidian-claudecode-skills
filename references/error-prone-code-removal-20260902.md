@@ -104,3 +104,9 @@ node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 b
   worker 传第 1 页就 400 `invalid-worker-page`，退避重试永不前进。`tests/test_reader_book_ocr.py` 里
   `test_pc_worker_sidecar_keys_are_all_allowed` 就是为它写的 —— **改 worker sidecar 字段必须跑这个测试**；
   白名单副本有两份（服务端 + 该测试的字段清单），`contract_sites.py` 口径。
+- **判 CI 成败只看 `IOS_BUILD_NUMBER` 是错的**（09-04 实锤，向用户误报「625 已上传」）：那一行来自「Clean up signing material」，
+  是 `if: always()` 的收尾步骤，编译失败也会打印。判定必须用 `gh run view <id> --json conclusion` 或 `gh run watch --exit-status`
+  的退出码（别把它接进 `| tail`，管道会吞掉退出码），再 grep `UPLOAD SUCCEEDED`。
+- **用正则批量改写 Swift 赋值语句会拆断多行表达式**（同日）：`ocrErrorMessage = X` → `reportPanelError(X)` 把
+  `remote.errorMessage\n ?? "…"` 与 `ReaderPiOCRError.x\n .localizedDescription` 两处拆成了语法错误。批量改写后
+  至少扫一遍"下一行以 `??`/`.`/`+` 开头"的调用点，或者干脆逐处手改。
