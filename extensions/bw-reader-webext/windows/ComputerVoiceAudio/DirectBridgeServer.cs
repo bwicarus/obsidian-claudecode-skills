@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -714,6 +715,14 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             ReaderAttentionBoard.BoardPath,
             new[] { "GET", "OPTIONS" },
             context => HandleAttentionBoardAsync(context, serviceToken));
+        // 展示板（2026-09-05 用户要求）：AI 或固定程序注册一块分区板子并往里放
+        // 内容，iOS 小组件显示。**写入与读取分开**：这里只管写入与查询，
+        // 小组件读的是 /widget/system-data 里的 boards 段 —— 它每 15 分钟只拉
+        // 一次，多开一个端点等于多一次网络往返和多一处会忘记放行的路径。
+        app.MapMethods(
+            ReaderDisplayBoard.BoardPath,
+            new[] { "POST", "OPTIONS" },
+            context => HandleDisplayBoardAsync(context, serviceToken));
         app.MapMethods(
             ReaderAttentionBoard.AckPath,
             new[] { "GET", "POST", "OPTIONS" },
@@ -1459,12 +1468,37 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 + exception.Message.Replace('\n', ' ').Replace('\t', ' '));
             throw;
         }
+        // 展示板挂进同一份 payload（2026-09-05）。
+        // ⚠ 板子读不到**不能**让整份数据变 503：通知/复习那几块跟它无关，
+        //   一起 503 会让小组件把已排的到点通知全撤掉（那条最贵的教训）。
+        //   也不能塞一个空数组冒充"没有板子" —— 空板子会被当权威。
+        //   所以：出错就只报 boardsError，别的照发。
+        JsonNode? payload = JsonSerializer.SerializeToNode(view);
+        if (payload is JsonObject merged)
+        {
+            try
+            {
+                merged["boards"] = ReaderDisplayBoard.ProjectForWidget();
+            }
+            catch (DirectProtocolException exception)
+            {
+                AppendOutputPickupLog("widget-boards\t" + exception.Code);
+                merged["boardsError"] = exception.Code;
+            }
+            catch (Exception exception)
+            {
+                AppendOutputPickupLog(
+                    "widget-boards-crash\t" + exception.GetType().Name);
+                merged["boardsError"] = "BW_BOARD_UNAVAILABLE";
+            }
+        }
         context.Response.ContentType = "application/json; charset=utf-8";
         context.Response.Headers["Cache-Control"] = "no-store";
         try
         {
-            await context.Response.WriteAsJsonAsync(
-                view, serviceCancellationToken).ConfigureAwait(false);
+            await context.Response.WriteAsync(
+                (payload ?? new JsonObject()).ToJsonString(),
+                serviceCancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -2191,6 +2225,24 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         }
         await ReaderLibraryStore
             .WriteListAsync(context, serviceCancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// 展示板的写入与查询。身份闸同书库：只认 tailscale serve 注入的登录头 ——
+    /// 本机的固定程序也走同一个 HTTPS 主机名（自己的 tailnet 名字），
+    /// 这样"设备"和"本机程序"是同一条路、同一套鉴权，不必再开一个本地口。
+    private async Task HandleDisplayBoardAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "board")) return;
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        await ReaderDisplayBoard
+            .WriteResponseAsync(context, serviceCancellationToken)
             .ConfigureAwait(false);
     }
 

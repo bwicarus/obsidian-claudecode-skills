@@ -56,6 +56,9 @@ DIRECT_SERVE_SIBLING_PATHS = (
     "/reader-output/receipt",
     "/widget/system-data",
     "/map/tile",
+    # 展示板写入面(2026-09-05)。⚠ 这份清单是 C# 路由表的**第二份副本**:
+    # 只加路由不放行,表现是端点 404 而桥看起来完全正常。
+    "/reader-board/v1",
 )
 DIRECT_WSS_URL = (
     "wss://bwicarus-2.taile44d0c.ts.net"

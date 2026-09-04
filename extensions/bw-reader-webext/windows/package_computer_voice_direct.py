@@ -2108,7 +2108,30 @@ def _replace_install_payload(
         )
         try:
             temporary.write_bytes(content)
-            replace_file(temporary, target)
+            try:
+                replace_file(temporary, target)
+            except PermissionError:
+                # ⚠ 目标被某个**正在运行的进程**锁住了。这不是权限问题,
+                #   是 Windows 不许覆盖运行中的镜像文件。
+                #   在这里最常见的锁主是 Codex 自己 spawn 的 MCP 宿主
+                #   (required=true,掉了立刻重起,维护标记管不到它)。
+                #   Windows 允许**改名**运行中的 exe —— 把它挪开让位即可:
+                #   已在跑的进程继续用改名后的那一份,新起的拿新版本。
+                #   改名也失败才算真失败(那才是权限/占用之外的问题)。
+                displaced = target.with_name(
+                    f"{target.name}.superseded-{transaction_id[:12]}"
+                )
+                target.rename(displaced)
+                try:
+                    replace_file(temporary, target)
+                except Exception:
+                    # 让位之后还是放不进去 —— 把旧文件挪回来,别留个空位:
+                    # 空位比旧版本坏得多(下次 spawn 直接找不到程序)。
+                    try:
+                        displaced.rename(target)
+                    except OSError:
+                        pass
+                    raise
         finally:
             try:
                 temporary.unlink()

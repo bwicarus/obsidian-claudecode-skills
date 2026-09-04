@@ -105,6 +105,29 @@ node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 b
   会消失的，而 `taskkill` 的返回码只说"送出了"，不说"有人收到"。
   契约：`test_readerpc_services.py::ReaderPCExitRequestTests` +
   `test_readerpc_launcher.py::…asks_out_of_band_before_it_asks_the_window`。
+- **装桥还有第三个 racer：Codex 自己 spawn 的 MCP 宿主**（2026-09-05）。维护标记管住了
+  ReaderPC 的保活，但 `[mcp_servers.reader_snapshot]` 的宿主是 **Codex** 起的
+  （`required = true`，断了立刻重连重起），而 Windows 上运行中的进程锁住自己的镜像文件 ——
+  替换窗口里任何一次 spawn 都让 `os.replace` 变成 `WinError 5`，连回滚都跟着失败
+  （无害：exe 压根没换掉，状态仍一致，但整次安装白跑）。
+  修法用一个 Windows 事实：**运行中的 exe 不能被覆盖，但可以被改名**。换不动就先把旧文件
+  改名让位（`.superseded-<txn>`）再放新文件；已在跑的进程继续用改名后那份，新 spawn 拿新版本。
+  安装目录里那一堆 `.running-*`/`.superseded-*` 说明这手法本来就是这套装置的旧习惯，
+  只是 `_replace_install_payload` 一直没用它。让位后仍放不进去就把旧文件挪回来 ——
+  **留个空位比留旧版本坏得多**（下次 spawn 直接找不到程序）。
+  副产品：`Transport closed` 的来源也是这个 —— 装桥必然掐断 Codex 那条 stdio 连接，
+  重试即可（无法避免：stdio 子进程活不过自己镜像文件的替换）。
+- **自己 new 的 `JsonSerializerOptions` 在这个 exe 里会抛，表现是空 500**（2026-09-05，
+  展示板首次真机调用）：`root.ToJsonString(new JsonSerializerOptions { WriteIndented = true })`
+  抛 `JsonSerializerOptions instance must specify a TypeInfoResolver setting` ——
+  这个宿主的序列化配置里反射默认是关的，而**不传 options 反而没事**（用的是自带 resolver 的
+  `JsonSerializerOptions.Default`）。要缩进就用 `Utf8JsonWriter` + `JsonNode.WriteTo`，
+  它不需要 resolver。
+  ⚠ 真正贵的不是这个 API 细节，是**没有兜底 catch 时 ASP.NET 把它变成一个空 500**：
+  使用方（程序/AI）看到的只有"失败"，现场零线索。加了一段 `catch (Exception)` →
+  回 `{"ok":false,"error":"BW_BOARD_CRASH","detail":"<类型>: <消息>"}` 之后，
+  一次调用就看见了真因。**每个对外端点都要有这段兜底**，这跟
+  `HandleWidgetSystemDataAsync` 里那句"兜底留痕"是同一条规矩。
 - **从 Pi 搬过来的 `state/server-config.json` 里还有四条 Pi 路径**（09-04 实锤，App 日志「服务器例句中译失败…no result」）：
   `ai.claude_cli.command=/home/bwicarus/.local/bin/claude`、`ai.codex_cli.command=/usr/bin/codex`、
   `qa_vault_path`、`qa_index_dir`、`qa_anki_records_dir`。Windows 上 `WinError 2` 被 translate.py 的 try/except
