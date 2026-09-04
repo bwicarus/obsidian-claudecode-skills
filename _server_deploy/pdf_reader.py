@@ -7334,6 +7334,9 @@ def _vocab_idx() -> dict:
         return {}
 
 
+_CJK_ONE_RE = re.compile(r"^[\u3400-\u9fff]$")
+
+
 def _build_jp_vocab_marks(chars: list[dict]) -> list[dict]:
     """按 fugashi 分词的 w 把 chars 分组成 JP token → 解析原形 → 查 **vocab_index（英日统一库）** →
     未掌握(label_slug!=mastered)的按 mastery 上色画下划线。rects 用 PDF pt 坐标，前端复用 renderVocabUnderlines。"""
@@ -7361,6 +7364,25 @@ def _build_jp_vocab_marks(chars: list[dict]) -> list[dict]:
             i = j   # 已掌握收藏词组 → 不画下划线
             continue
         surf = "".join(t.get("c", "") for t in toks)
+        # ⚠ 单个汉字的 token 先试着**并进后一个 token**再查（2026-09-05 用户实锤）：
+        #   分词把「栄養」切成 栄|養，而「養」恰好是很久以前单查过一次的独立词条，
+        #   于是已掌握的「栄養」里那个「養」被单独画了一条下划线。
+        #   这条链完全信任分词边界，所以一个汉字落在更长的、用户已认识的词里也照画。
+        #   不去追分词：合起来能在生词库里查到，就用长的那条（它的 slug 与合并框）。
+        if len(surf) == 1 and _CJK_ONE_RE.match(surf) and j < n:
+            k = j
+            more = []
+            next_wid = chars[k].get("w") if k < n else None
+            while k < n and chars[k].get("w") == next_wid and next_wid is not None \
+                    and next_wid >= 0:
+                if not chars[k].get("sp"):
+                    more.append(chars[k])
+                k += 1
+            merged = surf + "".join(t.get("c", "") for t in more)
+            if more and idx.get(merged.lower()):
+                toks = toks + more
+                surf = merged
+                j = k
         # 先按表层查（forms 映射已含活用形）；查不到再解析原形(辞書形)查
         info = idx.get(surf.lower())
         if not info:

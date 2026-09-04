@@ -578,9 +578,19 @@ function _expandSentenceFromRange(chars, sIdx, eIdx) {
   //   - 标题/邻段在不同视觉行+不同块 → 断(不把标题并进句子)
   const isSentEnd = (c) => /[.!?。！？]/.test(c);
   const _bk = (a, b) => a && b && a.bk != null && b.bk != null && a.bk >= 0 && b.bk >= 0 && a.bk !== b.bk;
+  const _sameBk = (a, b) => a && b && a.bk != null && b.bk != null && a.bk >= 0 && b.bk >= 0 && a.bk === b.bk;
   const _lineChanged = (a, b) => Math.abs(a.top - b.top) > Math.max(a.height, b.height) * 0.5;
   const _paraGap = (a, b) => Math.abs(a.top - b.top) > Math.max(a.height, b.height) * 1.5;
-  const _stop = (a, b) => (_bk(a, b) && _lineChanged(a, b)) || _paraGap(a, b);
+  // ⚠ 同一个块内的换行**永远不是段落边界**（2026-09-05 用户实锤：漫画气泡里
+  //   「これらの問題を…総合的に / そして平等に解決していこうってわけだ」被断在行尾）。
+  //   `bk` 在这条链上就是段落/气泡：mokuro 的块=气泡，Vision 替换的字符继承气泡的 bk。
+  //   而 `_paraGap`（行距 > 1.5 倍字高）在气泡里天天成立 —— OCR 的字符盒紧贴字形，
+  //   漫画行距本来就宽，于是每一行都被当成新段落。
+  //   只留一个非常宽松的兜底（> 3 倍字高）：那已经不像换行，而像块内真有空行。
+  const _hugeGap = (a, b) => Math.abs(a.top - b.top) > Math.max(a.height, b.height) * 3;
+  const _stop = (a, b) => _sameBk(a, b)
+    ? _hugeGap(a, b)
+    : ((_bk(a, b) && _lineChanged(a, b)) || _paraGap(a, b));
   let s = sIdx;
   while (s > 0) {
     if (isSentEnd(chars[s - 1].c)) break;

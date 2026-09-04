@@ -8257,6 +8257,40 @@
       }
       i = j;
       var surf = toks.map(function (t) { return String(t.c || ''); }).join('');
+      // ⚠ 单个汉字的 token 先试着并进后一个 token（2026-09-05 用户实锤 栄|養）：
+      //   分词把「栄養」切开，而「養」是很久以前单查过一次的独立词条，于是
+      //   已掌握的「栄養」里那个「養」被单独画了下划线。服务端 _build_jp_vocab_marks
+      //   有同一条规则 —— 两边都画下划线，只改一处等于没改。
+      if (surf.length === 1 && /^[\u3400-\u9fff]$/.test(surf) && j < n) {
+        var nextWid = chars[j] && chars[j].w;
+        if (nextWid != null && nextWid >= 0) {
+          var k2 = j, more = [];
+          while (k2 < n && chars[k2] && chars[k2].w === nextWid) {
+            if (!chars[k2].sp) more.push(chars[k2]);
+            k2 += 1;
+          }
+          var mergedKey = (surf + more.map(function (t) {
+            return String(t.c || '');
+          }).join('')).replace(/[\s\u3000]+/g, '');
+          var mergedSpec = {
+            kind: 'word',
+            language: /[\u3040-\u30ff\u3400-\u9fff]/.test(mergedKey) ? 'ja' : 'en',
+            lemma: mergedKey, word: mergedKey
+          };
+          var mergedKnown = false;
+          try {
+            mergedKnown = state.isMastered(mergedSpec)
+              || state.isLookedUp(mergedSpec)
+              || state.isPhraseFavorite(
+                Object.assign({}, mergedSpec, { kind: 'phrase' }));
+          } catch (_) { mergedKnown = false; }
+          if (more.length && mergedKnown) {
+            toks = toks.concat(more);
+            surf = toks.map(function (t) { return String(t.c || ''); }).join('');
+            i = k2;
+          }
+        }
+      }
       var key = surf.replace(/[\s\u3000]+/g, '');
       if (!key || key.length > 64) continue;
       var ja = /[\u3040-\u30ff\u3400-\u9fff]/.test(key);
