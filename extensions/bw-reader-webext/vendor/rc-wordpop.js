@@ -883,7 +883,9 @@ if (window.__bwPwaProviderOnly) return;
   //   _dictCache 只在内存,重开书就空;两级词典都无中文的外来语每次都得绕到电脑上的 Codex 兜底。
   //   这里把「拿到中文义」的结果落到 localStorage(按词,600 上限 LRU),下次点开秒显;
   //   合成兜底词条(definition 是"暂无词典释义…")不落盘,免得永久短路真查询。
-  var _PERSIST_KEY = 'rc-wordpop-dict-cache-v2';   // v2(2026-09-04):词条多了 source_* 三字段,旧缓存必须整体作废
+  // v3(2026-09-04):v2 期间把 stale-while-revalidate 的第一跳存成了终局,已缓存的外来语
+  // 永远缺 source_*。加了 stale 闸只挡住新的,已经毒化的那些得靠换键清掉。
+  var _PERSIST_KEY = 'rc-wordpop-dict-cache-v3';
   var _persistLoaded = null;
   function _persistLoad() {
     if (_persistLoaded) return _persistLoaded;
@@ -927,6 +929,11 @@ if (window.__bwPwaProviderOnly) return;
   }
   function _cacheDictResult(word, result) {
     if (!result || !result.ok) { _dictDiag('不缓存「' + word + '」:结果 ok=false'); return; }
+    // stale-while-revalidate 的第一跳不缓存(2026-09-04)。服务端返回的是**旧版本**词条,
+    // 同时已在后台按新 prompt 重生成;存下它等于把升级后的条目永久挡在门外
+    // (ヘルスプロモーション 的英文源词就是这么丢的)。下次点击再问一次 ——
+    // 服务端那边仍是缓存秒回,用户感觉不到多这一跳。
+    if (result.stale === true) { _dictDiag('不缓存「' + word + '」:服务端标了 stale(后台正在升级)'); return; }
     // 中文义仍缺失时不缓存：用户再次点原词会重新进入原有呼吸查询，而
     // 不会被一条残缺的会话缓存永久短路。例句缺中文有自己的 exact-JA
     // 原位回填链，不应再次触发整词查询。
