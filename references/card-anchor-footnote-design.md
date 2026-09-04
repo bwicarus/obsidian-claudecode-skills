@@ -390,6 +390,27 @@ char-layer 是个**空的透明 div**，字都在页图里（`13-selection.js:67
 ---
 
 ## 核实记录
+### 块号寻址：两套编号（2026-09-04）
+
+`bind.block` 的语义是「**页面正文里印出来的那个 `[NN]`**」，不是"第几段"。
+而 `[NN]` 的来源随这一页有没有视觉版面而不同，两套都是活的：
+
+| 页面 | 助手读到的 `[NN]` | 出处 |
+|---|---|---|
+| 有 vision 高置信版面（manga / table） | `region.order + 1` | `rc-computer-voice.js` 的 `appendLocalRegionLabel` |
+| 没有版面 | `bk` 连号（从 1 起） | `native-local-runtime.js` 的 `blockLines` / `segments[].block` |
+
+所以 `34-bindcard.js::_resolveRange` **两套都试**：先按版面区域号
+（`_regionOiFilter` 用 `boxes.__layout.regions[].ranges` 展成 `_oi` 集合），
+再按 `bk` 连号，都不中才退回全页并在回执里标 `by-text-block-missed`
+（同时 `dlog` 出声，说明两套各有几块）。区域号命中时把精确字符集写回 `bind.ois`，
+下次开书直接走 `exact-set`，不再受同页重复文字影响。
+
+⚠ 历史坑：`[NN]` 曾只在分镜网格那一条路印，散文页/表格页一个都不印，
+而能力说明写着「正文每一行形如 `[NN] …`」—— 助手只能自己数行号，
+数出来的号跟两套都不是同一套。现在四条版面路径统一印。
+
+
 
 本稿全部前提由两轮并行核实产出，每条附代码出处：
 

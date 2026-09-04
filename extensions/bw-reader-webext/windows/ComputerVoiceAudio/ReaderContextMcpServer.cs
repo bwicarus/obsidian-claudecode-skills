@@ -2532,8 +2532,15 @@ internal sealed class ReaderContextMcpServer
                                         ["minimum"] = 1,
                                         ["description"] =
                                             "Optional. The [NN] block number "
-                                            + "you are reading in the page "
-                                            + "Markdown. Scopes the `text` "
+                                            + "**as printed in the page "
+                                            + "Markdown** - copy it, never "
+                                            + "count lines yourself: an "
+                                            + "invented number matches no "
+                                            + "block, so the lookup silently "
+                                            + "falls back to the whole page "
+                                            + "and pins the first occurrence. "
+                                            + "Omit it when the page shows no "
+                                            + "[NN]. Scopes the `text` "
                                             + "lookup to that block, which is "
                                             + "what makes a repeated phrase "
                                             + "unambiguous. Requires `text`.",

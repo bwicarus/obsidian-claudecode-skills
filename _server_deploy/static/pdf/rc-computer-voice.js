@@ -10214,6 +10214,19 @@
     }).length;
     return wide / regions.length >= 0.4;
   }
+  // `[NN]` 是助手唯一说得出口的块地址：卡片 bind.block 认的就是它
+  // （ReaderCapabilities/cards.md、MCP schema 都这么写）。
+  // ⚠ 2026-09-04：此前**只有分镜网格**那一条路印它，散文页与表格页一个都不印 ——
+  //   而能力说明白纸黑字写着「正文每一行形如 [NN] 这一块的文字」。于是助手只能
+  //   自己数行号，数出来的号跟任何一套编号都对不上，解析端当然定位不到
+  //   （实锤：说第 11 块，而那页 bk 连号只有 8 块 → 退回全页 → 钉到页内第一处
+  //   同样的字上）。CLAUDE.md 那条「面向 AI 的说明写反比没写更糟」的同一形态：
+  //   助手不会去追问，它会照着编。
+  // 例外:真数据表的单元格不印(见下面 appendLocalTableLayout 里的说明)。
+  function appendLocalRegionLabel(builder, region) {
+    if (!region || !Number.isSafeInteger(region.order)) return;
+    builder.append("[" + String(region.order + 1).padStart(2, "0") + "] ");
+  }
   function appendLocalProseLayout(builder, pageRecord, layout) {
     var regions = (layout.regions || []).slice().sort(function (left, right) {
       return left.order - right.order;
@@ -10227,6 +10240,7 @@
           region.bounds[0] >= previous.bounds[0];
         builder.append(sameLine ? " " : "\n");
       }
+      appendLocalRegionLabel(builder, region);
       appendLocalLayoutRegion(builder, pageRecord, region);
       previous = region;
     });
@@ -10256,7 +10270,7 @@
         builder.append(" ");
         regions.forEach(function (region, index) {
           if (index) builder.append("<br>");
-          builder.append("[" + String(region.order + 1).padStart(2, "0") + "] ");
+          appendLocalRegionLabel(builder, region);
           appendLocalLayoutRegion(builder, pageRecord, region);
         });
         builder.append(" |");
@@ -10298,6 +10312,7 @@
     blocks.forEach(function (block, blockIndex) {
       if (blockIndex) builder.append("\n");
       if (block.region) {
+        appendLocalRegionLabel(builder, block.region);
         appendLocalLayoutRegion(builder, pageRecord, block.region);
         builder.append("\n");
         return;
@@ -10314,6 +10329,7 @@
         block.regions.slice().sort(function (left, right) {
           return left.order - right.order;
         }).forEach(function (region) {
+          appendLocalRegionLabel(builder, region);
           appendLocalLayoutRegion(builder, pageRecord, region);
           builder.append("\n");
         });
@@ -10342,6 +10358,10 @@
             if (index && !sharesVisualLine(regions[index - 1], region)) {
               builder.append("<br>");
             }
+            // ⚠ 真数据表的单元格**不印 [NN]** —— 印了就成了 `| [01] 国家 | [02] 特征 |`,
+            //   Markdown 数据表当场毁掉(助手与用户都要读它)。分镜网格那条路的"格子"
+            //   是气泡不是数据,所以那边照印。表格里的内容要钉卡就只给 text:
+            //   页内重复时由 _resolveRange 的区域流兜底,再不行就如实钉不上。
             appendLocalLayoutRegion(builder, pageRecord, region);
           });
           builder.append(" |");

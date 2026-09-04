@@ -60,6 +60,41 @@
     return v;
   }
 
+  /// 块号有**两套来源**，助手看到哪一套取决于这一页有没有视觉版面：
+  ///   • 有版面（vision 高置信 manga/table 的结构化投影）→ 正文里印的 `[NN]`
+  ///     就是 `region.order + 1`（rc-computer-voice 的 appendLocal*Layout）
+  ///   • 没版面（reader_page_text 的 blockLines / segments[].block）→ 是 `bk` 连号
+  /// 两套在同一本书里**按页共存**，所以解析端必须都认。
+  ///
+  /// ⚠ 2026-09-04 实锤（用户："codex 说绑定出错不是他的问题是程序的问题"）：
+  ///   助手说「第 11 块」，而这一页 `bk` 连号只有 8 块 → `search(11)` 空 →
+  ///   退回全页按文本找 → 没给 from 时距离恒为 0 → **页内第一处胜出**。
+  ///   表现是"卡片钉到了另一处一样的字上"，而两边各自都自洽（助手数得对、
+  ///   解析端也数得对）—— 最难查的那类错。
+  ///
+  /// region.ranges 是**索引区间**，索引的正是 chars 数组，也就是 `_oi`
+  /// （08-charlayer 的 `chars.map((ch, _oi) => …)`；13-selection 的
+  /// `__regionByOi` 也是照这条等式建的）。
+  function _regionOiFilter(boxes, blockNumber) {
+    var layout = boxes && boxes.__layout;
+    var regions = (layout && Array.isArray(layout.regions)) ? layout.regions : null;
+    if (!regions || !regions.length || !(blockNumber >= 1)) return null;
+    var set = null;
+    for (var i = 0; i < regions.length; i++) {
+      var region = regions[i];
+      if (!region || !Number.isSafeInteger(region.order)) continue;
+      if ((region.order | 0) + 1 !== blockNumber) continue;
+      var ranges = Array.isArray(region.ranges) ? region.ranges : [];
+      for (var r = 0; r < ranges.length; r++) {
+        var rg = ranges[r];
+        if (!Array.isArray(rg) || rg.length < 2) continue;
+        var a = Math.min(rg[0] | 0, rg[1] | 0), b = Math.max(rg[0] | 0, rg[1] | 0);
+        for (var oi = a; oi <= b; oi++) (set || (set = Object.create(null)))[oi] = true;
+      }
+    }
+    return set;
+  }
+
   /// 把 bind 解成一段字符框。四条路，返回的 `how` 就是定位质量：
   ///   exact / by-block / by-text / by-text-block-missed
   ///
@@ -126,17 +161,21 @@
       return blockNo[key];
     }
 
-    function search(onlyBlock) {
+    /// `oiFilter` 给了就按**版面区域**限定（[NN] = region.order + 1 那一套），
+    /// 否则按 `bk` 连号限定。两者互斥：同一个块号在两套里指的不是一块。
+    function search(onlyBlock, oiFilter) {
       var joined = '', index = [];   // joined 每个字符 → ord 里的位置
       for (var i = 0; i < ord.length; i++) {
         var c = ord[i] && ord[i].c;
         if (!c || ord[i].sp) continue;
-        if (onlyBlock && numberOf(ord[i].bk) !== onlyBlock) continue;
+        if (oiFilter) { if (!oiFilter[ord[i]._oi | 0]) continue; }
+        else if (onlyBlock && numberOf(ord[i].bk) !== onlyBlock) continue;
         joined += c;
         index.push(i);
       }
-      var best = -1, bestDist = Infinity, at = joined.indexOf(text);
+      var best = -1, bestDist = Infinity, hits = 0, at = joined.indexOf(text);
       while (at >= 0) {
+        hits += 1;
         // 没给序号时不做距离偏好 —— 否则等于假装知道它在哪。
         var dist = hasRange ? Math.abs((ord[index[at]]._oi | 0) - from) : 0;
         if (dist < bestDist) { bestDist = dist; best = at; }
@@ -147,7 +186,8 @@
       var b = index[Math.min(best + text.length - 1, index.length - 1)];
       return {
         lo: ord[a]._oi | 0, hi: ord[b]._oi | 0,
-        boxes: ord.slice(a, b + 1)
+        boxes: ord.slice(a, b + 1),
+        count: hits   // 命中几处 —— 调用方据此判断"这一处是不是猜的"
       };
     }
 
@@ -156,10 +196,49 @@
       for (var n = 0; n < ord.length; n++) {
         if (ord[n] && ord[n].c && !ord[n].sp) numberOf(ord[n].bk);
       }
+      // (1) 先按版面区域号试 —— 有视觉版面的页面，助手在正文里读到的 [NN]
+      //     就是 region.order + 1，跟 bk 连号不是同一套。
+      var regionFilter = _regionOiFilter(boxes, wantBlock);
+      if (regionFilter) {
+        var inRegion = search(0, regionFilter);
+        if (inRegion) {
+          inRegion.how = 'by-block';
+          // 命中就把精确字符集一并带上：写回 bind.ois 后，下次开书直接走
+          // exact-set，不必再按文本搜一遍（也就不会再被同页重复文字带偏）。
+          inRegion.ois = inRegion.boxes.map(function (b4) { return b4._oi | 0; });
+          return inRegion;
+        }
+      }
+      // (2) 再按 bk 连号试 —— 没版面的页面（blockLines / segments[].block）是这一套。
       var inBlock = search(wantBlock);
       if (inBlock) { inBlock.how = 'by-block'; return inBlock; }
+      // 两套都没命中 → 下面会退回全页。这一步必须出声：静默降级正是这个 bug
+      // 藏了这么久的原因（`how` 里的 by-text-block-missed 只有助手看得见，
+      // 用户那边什么都看不到）。
+      try {
+        if (typeof dlog === 'function') {
+          var _rn = (boxes.__layout && (boxes.__layout.regions || []).length) || 0;
+          dlog('[bind] 第 ' + wantBlock + ' 块两套编号都没命中（版面区域 ' + _rn +
+               ' 个 / bk 连号 ' + blockSeq + ' 块）→ 退回全页按文本找', '#ff6b6b');
+        }
+      } catch (e0) {}
     }
     var anywhere = search(0);
+    // 块号给了却两套都对不上,而这句话在页内**不止一处** —— 此时"退回全页"等于抛硬币:
+    // 没给 from 时距离恒为 0,永远是第一处胜出。用户看到的正是这个(卡片钉到了另一处
+    // 一样的字上)。宁可如实钉不上(卡片退回浮层 + 回执报错,助手可以改用 segments 的
+    // from/to 重来),也不要静默钉错 —— 钉错比不钉更难发现。
+    // ⚠ 只在**完全没有位置信息**时才这么严:带了 from/to 的话，距离偏好是真信息
+    //   （序号可能只是轻微过期），那条路照走，别把能救的也判死。
+    if (anywhere && wantBlock && !hasRange && (anywhere.count | 0) > 1) {
+      try {
+        if (typeof dlog === 'function') {
+          dlog('[bind] 第 ' + wantBlock + ' 块对不上,而「' + text.slice(0, 12) +
+               '」页内有 ' + anywhere.count + ' 处 → 不钉,交回助手重定位', '#ff6b6b');
+        }
+      } catch (e1) {}
+      return null;
+    }
     if (!anywhere && typeof _charRegionKeyOf === 'function') {
       // 全页源序流找不到(跨行词组两半之间夹着别列字符)→ 按区域(表格=格)分流再找,
       // 与选中/点击/下划线的区域划分同一口径。

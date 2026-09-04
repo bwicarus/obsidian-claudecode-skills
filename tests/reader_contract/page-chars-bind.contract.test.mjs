@@ -13,6 +13,11 @@ const ENVELOPE = read("reader-specs/specs/result-envelope.md");
 const AGENTS = read("reader-specs/AGENTS.md");
 const READER = read("_server_deploy/static/pdf/reader.js");
 const CSS = read("_server_deploy/static/pdf/pdf-styles.css");
+const VOICE = read("_server_deploy/static/pdf/rc-computer-voice.js");
+const CARDS = read(
+  "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderCapabilities/cards.md");
+const MCPSERVER = read(
+  "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderContextMcpServer.cs");
 
 // C15 第二版（用户 2026-08-19：「记得把 c15 做完而不是只停在第一阶段」）。
 // 第一版只能把卡钉到自建页的格子块；书页正文的字符锚是缺的那一半。
@@ -64,6 +69,81 @@ test("定位靠直接验证文本，不靠 revision 号推断", () => {
   );
   assert.match(BINDCARD, /function _stripWs/);
   assert.doesNotMatch(BINDCARD, /dataset\.charsRev/);
+});
+
+test("块号两套编号解析端都认，且页面每一种版面都印得出 [NN]", () => {
+  // 2026-09-04 实锤（用户："codex 说绑定出错不是他的问题是程序的问题"）：
+  // 助手说「第 11 块」，而那一页 bk 连号只有 8 块 → search(11) 空 → 退回全页
+  // 按文本找 → 没给 from 时距离恒为 0 → 钉到页内第一处同样的字上。
+  // 病根是两件事，缺一个都还会复发：
+  //   ① 助手看见的 [NN] 是 region.order + 1（结构化投影），解析端却只认 bk 连号；
+  //   ② [NN] 当时只在分镜网格那一条路印，散文页/表格页一个都不印，而能力说明
+  //      写着「正文每一行形如 [NN] …」—— 于是助手只能自己数行号。
+  const body = BINDCARD.slice(
+    BINDCARD.indexOf("function _regionOiFilter("),
+    BINDCARD.indexOf("function _rangeRects("),
+  );
+  assert.ok(BINDCARD.indexOf("function _regionOiFilter(") >= 0, "缺少版面区域号解析");
+  // region.ranges 索引的就是 _oi（chars 数组下标），跟 13-selection 的 __regionByOi 同一条等式
+  assert.match(body, /\(region\.order \| 0\) \+ 1 !== blockNumber/,
+    "区域号必须按 order + 1 比 —— 那才是正文里印出来的那个号");
+  assert.match(CHARLAYER, /chars\.__layout = layout/, "版面必须挂在字符层上，解析端才拿得到");
+  // 两套都试，且区域号先（有版面的页面助手读到的就是它）
+  assert.match(body, /var regionFilter = _regionOiFilter\(boxes, wantBlock\);/);
+  assert.ok(
+    body.indexOf("search(0, regionFilter)") > 0 &&
+      body.indexOf("search(0, regionFilter)") < body.indexOf("var inBlock = search(wantBlock)"),
+    "区域号要先试：bk 连号在有版面的页面上是另一套编号",
+  );
+  // 两套都没命中 → 必须出声，不能只在回执里留一个助手才看得见的 how
+  assert.match(body, /两套编号都没命中/);
+  assert.match(body, /dlog\(/);
+});
+
+test("块号对不上而页内文本不唯一时宁可不钉，也不钉到第一处", () => {
+  // 退回全页那条路在没给 from 时距离恒为 0 —— 第一处必胜。所以"块号对不上"加上
+  // "页内多处相同文字"等于抛硬币，而钉错比钉不上更难被发现（用户就是这么撞上的）。
+  const body = BINDCARD.slice(
+    BINDCARD.indexOf("function _regionOiFilter("),
+    BINDCARD.indexOf("function _rangeRects("),
+  );
+  assert.match(body, /count: hits/, "search 要如实报命中几处");
+  assert.match(
+    body,
+    /if \(anywhere && wantBlock && !hasRange && \(anywhere\.count \| 0\) > 1\) \{/,
+    "块号对不上 + 没给序号 + 不唯一 → 不钉（带了 from/to 时距离偏好是真信息，照走）",
+  );
+  // 唯一命中时块号对不上仍然照钉，只是回执标 by-text-block-missed
+  assert.match(body, /how = wantBlock \? 'by-text-block-missed' : 'by-text'/);
+});
+
+test("[NN] 由同一个 label 函数印，四条版面路径一条都不落", () => {
+  // 只补一条路是这个 bug 的原始形态。所以钉「都走同一个函数」而不是钉四处字面量。
+  assert.match(VOICE, /function appendLocalRegionLabel\(builder, region\) \{/);
+  assert.match(VOICE, /String\(region\.order \+ 1\)\.padStart\(2, "0"\)/);
+  assert.equal(
+    (VOICE.match(/appendLocalRegionLabel\(builder, (?:region|block\.region)\)/g) || []).length,
+    5,
+    "定义 1 处 + 四条版面路径各 1 处：散文 / 分镜网格 / 表格页非表格块 / 假表回退成文本流",
+  );
+  // 真数据表的单元格**不印** —— 印了就成了 `| [01] 国家 | [02] 特征 |`，把数据表毁掉
+  const tableBody = VOICE.slice(
+    VOICE.indexOf("function appendLocalTableLayout("),
+    VOICE.indexOf("function localStructuredPageProjection("),
+  );
+  const cellLoop = tableBody.slice(tableBody.indexOf("cells.forEach(function (row, rowIndex)"));
+  assert.doesNotMatch(cellLoop, /appendLocalRegionLabel/, "真表格单元格不该印块号");
+  // 除 label 函数自己之外，不该再有第二处手拼 [NN]
+  assert.equal(
+    (VOICE.match(/padStart\(2, "0"\)/g) || []).length, 1,
+    "块号只能有一个印法",
+  );
+  // 说明也要跟着改：助手照着说明数行号正是另一半病根
+  assert.match(CARDS, /不要自己数行号/);
+  assert.match(CARDS, /正文里没有 `\[NN\]` 就\*\*别给 `block`\*\*/);
+  assert.match(CARDS, /真数据表的单元格/, "说明要讲清哪两种页面天生没有 \[NN\]");
+  assert.match(CARDS, /阅读器\*\*不会\*\*替你猜/, "不唯一时不钉,说明里要讲");
+  assert.match(MCPSERVER, /never "\s*\n?\s*\+ "count lines yourself/);
 });
 
 test("同一个词重复出现时，用原序号挑最近的一处", () => {
