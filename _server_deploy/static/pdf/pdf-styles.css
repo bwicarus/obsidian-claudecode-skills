@@ -564,6 +564,9 @@ body.ink-mode #main{cursor:crosshair}   /* 桌面手写模式：鼠标十字（�
 #result-content .jp-inflect{padding:6px 0 0}
 .jp-inflect b{color:#dff1ff;font-weight:600}
 .jp-inflect .jp-inflect-mark{display:inline-block;background:#16352a;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:4px;padding:0 6px;font-size:11px;margin-left:2px}
+/* 外来语源词(2026-09-04):橙色区别于绿色的语法标签;和製英語另加一档 */
+.jp-inflect.jp-source b{color:#ffe0b2;letter-spacing:.2px}
+.jp-inflect .jp-inflect-mark.jp-wasei{background:#3a2a12;border-color:#8a5a1e;color:#ffcf8f}
 #word-pop .wp-def:hover{background:#162045}
 #word-pop .wp-more{color:#60a5fa;font-size:11px;margin-top:7px}
 #word-pop .wp-actions{display:flex;gap:8px;padding:9px 14px;border-top:1px solid #1f2740;background:#0d1322}

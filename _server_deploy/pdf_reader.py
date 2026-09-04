@@ -9286,6 +9286,11 @@ def pdf_api_dict_quick():
             "definition": ex_txt,
             "examples": ex,                    # [{ja, zh, en}] 结构化,前端可富渲染
             "examples_src": jp.get("examples_src", ""),
+            # 外来语源词(2026-09-04)。⚠ 这里是**逐字段重建**不是透传:AI 那边加了字段,
+            # 这里不加就永远传不到前端(与 tokenizeSchema 被 400 拒同一形态,见 CLAUDE.md 教训①)。
+            "source_word": jp.get("source_word", ""),
+            "source_lang": jp.get("source_lang", ""),
+            "source_kind": jp.get("source_kind", ""),
             "from_cache": jp.get("from_cache", False),
         })
     ec = ds.lookup_ecdict(word)

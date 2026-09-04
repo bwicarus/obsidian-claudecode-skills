@@ -639,3 +639,26 @@ build_exposure ~40s（增量更新已扫过的 PDF），compute_mastery ~秒级�
 单词：点过（`lookup`）即下划线（9 月 3 日规则不变，「点过=不认识」）。
 词组：**只有收藏**（`setPhraseFavorite`，slug `seen`）才下划线；词组框查完不再记 `lookup`，
 `localVocabMarks` 两遍扫描都忽略 `kind:'phrase'` 的 lookup 记录。契约 `local-vocab-marks.contract.test.mjs` 锁住。
+
+### §19.3 外来语源词（2026-09-04 用户要求）
+
+用户：「这种来自英文的词原型可以显示英文么」。片假名外来语的「原形」只显示假名规范形，看不出源词。
+
+**数据来源 = 服务端 AI**（用户那条 `プライマリー・ヘルス・ケア` 的客户端日志显示本地 JMdict 全空、
+`← pi-dict-quick`）。离线 JMdict 保留了英文释义但**丢弃了 lsource**，重建并重发 ~93MB 分片成本太高，本轮不做。
+
+新增三字段：`source_word`（源语言原拼写）/ `source_lang`（en/de/pt…）/ `source_kind`（`loan` 或 `wasei` 和製英語）。
+不确定一律留空串，整行不显示（宁缺勿编；提示词里明确禁止按假名发音倒推 —— ナンプラー 是泰语 nam pla 不是 number）。
+实测：プライマリー・ヘルス・ケア→`primary health care`/en/loan；アルバイト→`Arbeit`/**de**；
+サラリーマン→`salary man`/en/**wasei**；故郷→全空。
+
+**四道关卡，缺一则静默不生效**（这类字段在本仓库的固定形态）：
+1. `scripts/vocab/dict_sources.py` 提示词加字段 + `_JP_PROMPT_VER` 5→6；
+2. 同文件缓存闸门原为 `pv == VER or not has_kanji` —— `or not has_kanji` 让**片假名词永远命中旧缓存**，
+   而外来语恰恰全是无汉字词，不改则版本号刷不动它。现改为「无汉字词只在**已带 source_word 键**时才算新鲜」；
+3. `_server_deploy/pdf_reader.py` 的响应是**逐字段重建**不是透传，必须显式加三个字段；
+4. 前端 `rc-wordpop.js`：`_mergeJapaneseRemoteLookup` 只搬 zh/examples，要补搬三字段；渲染用**独立的**
+   `_jpSourceHtml`（不能挂在 `_jpInflectHtml` 里 —— 外来语没有活用，那个函数会整行返回空）。
+
+**两处缓存键换版**（否则 App 端永远命中旧词条）：`rc-wordpop._PERSIST_KEY` → `-v2`；
+`native-local-runtime.dictCacheKey` 尾部加 `|v2`（桥留底 `/reader-dict-cache` 同键，自动失效，桥不用改）。

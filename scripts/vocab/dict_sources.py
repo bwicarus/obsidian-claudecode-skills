@@ -697,7 +697,7 @@ def is_japanese(word: str) -> bool:
 
 # JP 词典 prompt 版本。**改 prompt 就 +1** → 含汉字的旧缓存(可能带中文同形词语感,如
 # 下流 误标"低级/粗俗")在下次查词时自动重生成;纯假名词无伪朋友风险,旧缓存仍直接命中(不浪费 AI)。
-_JP_PROMPT_VER = 5
+_JP_PROMPT_VER = 6
 
 
 def _jp_langs_label(langs) -> tuple[str, bool]:
@@ -736,7 +736,15 @@ def lookup_jp(word: str, context: str = "", model: str = "haiku", langs=None) ->
     cached = _cache_load("jp", word, ttl_days=3650)   # 词义不变,缓存 10 年
     if cached:
         has_kanji = bool(_KANJI_RE.search(word))
-        if cached.get("pv") == _JP_PROMPT_VER or not has_kanji:
+        # ⚠ 2026-09-04:此前是 `or not has_kanji` —— 无汉字词无伪朋友风险,当初为省额度让它们
+        #   **永远**命中旧缓存,不看 pv。但源词(source_word)恰恰只对**外来语**有意义,而外来语
+        #   全是无汉字的片假名词 → 那条捷径会让新字段永远出不来(改了看起来对、上线静默不生效)。
+        #   现在:无汉字词只要**已带 source_word 键**(哪怕是空串,表示 AI 判过"无源词")就仍算新鲜;
+        #   没这个键说明是加字段之前的旧条目 → 走下面的 stale-while-revalidate 后台升级。
+        fresh = cached.get("pv") == _JP_PROMPT_VER or (
+            not has_kanji and "source_word" in cached
+        )
+        if fresh:
             return _attach_examples({**cached, "from_cache": True})
         # 旧 prompt 版的含汉字词(存量 ~4300 条/78%):**先秒回旧条目**(服务器有就不让用户等
         # ——此前这里直接丢弃重生成,点一下=同步干等 ~7s AI),后台按新 prompt 重生成升级缓存
@@ -799,9 +807,18 @@ def _jp_ai_fetch(word: str, context: str = "", model: str = "haiku", langs=None)
         "老婆(ろうば)=老太婆,不是「妻子」。\n"
         "原则:**只给日语辞典里确实存在的义项**;拿不准某贬义日语到底有没有时,宁可不加,**绝不为了和中文对称而臆造**。\n"
         "按重要性排序(核心义在前);首义别用与中文同形、易误解的词打头(如 経理 用「会计·财务管理」而非「经理」)。\n"
+        "【外来语源词】若这个词是外来语(片假名词居多),再给出它的**源语言原拼写**:\n"
+        "  source_word=源语言里的原词(如 プライマリー・ヘルス・ケア→\"primary health care\"、"
+        "パン→\"pão\"、アルバイト→\"Arbeit\"),source_lang=语言代码(en/de/pt/fr/nl/it/ru…),\n"
+        "  source_kind=\"loan\"(真外来语) 或 \"wasei\"(和製英語,如 サラリーマン/ナイター —— 由英语要素造的日本自创词,"
+        "英语里没有这个说法);此时 source_word 填可读构件(如 \"salary man\")。\n"
+        "  ⚠ **绝不按假名发音倒推**:ナンプラー 是泰语鱼露(nam pla),不是 number;拿不准就把三个字段全留空串。\n"
+        "  和语词/汉语词(食べる・勉強・故郷 等)本来就没有源词,三个字段一律留空串,别硬凑。\n"
         "严格只输出 JSON,不要解释:\n"
         '{"reading":"假名读音(振り仮名)","romaji":"罗马字","pos":"词性(名詞/動詞/形容詞/副詞 等)",'
-        '"zh":"简洁中文释义,多义用;分隔","examples":[{"ja":"日语例句","zh":"中文翻译"}]}\n'
+        '"zh":"简洁中文释义,多义用;分隔","source_word":"源语言原词,没有就空串",'
+        '"source_lang":"语言代码,没有就空串","source_kind":"loan/wasei,没有就空串",'
+        '"examples":[{"ja":"日语例句","zh":"中文翻译"}]}\n'
         "examples 给 1-2 句即可。若该词无意义或非日语,zh 填\"(无)\"。"
     )
     try:
@@ -820,6 +837,13 @@ def _jp_ai_fetch(word: str, context: str = "", model: str = "haiku", langs=None)
         return None
     data["word"] = word
     data["source"] = "jp_ai"
+    # 三个源词字段一律落成字符串(缺键 → 空串)。**键必须存在**:上面的缓存闸门靠
+    # "有没有 source_word 键"区分"AI 判过无源词"与"加字段之前的旧条目"。
+    for _k in ("source_word", "source_lang", "source_kind"):
+        _v = data.get(_k)
+        data[_k] = str(_v).strip() if isinstance(_v, (str, int, float)) else ""
+    if data["source_kind"] not in ("loan", "wasei"):
+        data["source_kind"] = "" if not data["source_word"] else "loan"
     data["pv"] = _JP_PROMPT_VER
     _cache_save("jp", word, data)
     return data

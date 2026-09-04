@@ -163,7 +163,8 @@ test("卡内词典与查词框共用 RC.wordpop.lookupData,查词结果落设备
   const POP = readFileSync(new URL("../../_server_deploy/static/pdf/rc-wordpop.js", import.meta.url), "utf8");
   const NOTE = readFileSync(new URL("../../_server_deploy/static/pdf/rc-stickynote.js", import.meta.url), "utf8");
   assert.match(POP, /lookupData: lookupData, peekCache: peekCache, meaningText: _jpMeaningText \};/);
-  assert.match(POP, /var _PERSIST_KEY = 'rc-wordpop-dict-cache-v1';/);
+  // 键带版本:词条字段变化时必须换版,否则 App 端永远命中旧缓存(2026-09-04 加 source_* 三字段时的实锤)
+  assert.match(POP, /var _PERSIST_KEY = 'rc-wordpop-dict-cache-v\d+';/);
   assert.match(POP, /var cached = _dictCache\.get\(word\) \|\| _persistGet\(word\);/);
   // 合成兜底词条(暂无词典释义…)不得落盘,否则永久短路真查询
   assert.match(POP, /if \(result\.meaning_source === 'synthetic' \|\| \/\^暂无词典释义\/\.test\(String\(result\.definition \|\| ''\)\)\) \{ _persistLastSkip = '合成兜底词条'; return false; \}/);

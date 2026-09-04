@@ -14394,7 +14394,9 @@
     var word = String(url.searchParams.get('word') || '').trim();
     if (!word) return '';
     var langs = String(url.searchParams.get('langs') || '').trim().toLowerCase();
-    return word.replace(/[\s\u3000]+/g, '').toLowerCase() + '|' + langs;
+    // |v2(2026-09-04):词条新增 source_word/source_lang/source_kind。键无版本的话,已缓存的词
+    // 永远命中旧条目、新字段永不出现 —— 桥留底 /reader-dict-cache 用同一个键,一起自然失效。
+    return word.replace(/[\s\u3000]+/g, '').toLowerCase() + '|' + langs + '|v2';
   }
   function dictCacheRead(key) {
     return bootPromise.then(function () {

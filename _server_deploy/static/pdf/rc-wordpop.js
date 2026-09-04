@@ -134,6 +134,8 @@
       '#result-content .jp-inflect{padding:6px 0 0}',
       '.jp-inflect b{color:#dff1ff;font-weight:600}',
       '.jp-inflect .jp-inflect-mark{display:inline-block;background:#16352a;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:4px;padding:0 6px;font-size:11px;margin-left:2px}',
+      '.jp-inflect.jp-source b{color:#ffe0b2;letter-spacing:.2px}',
+      '.jp-inflect .jp-inflect-mark.jp-wasei{background:#3a2a12;border-color:#8a5a1e;color:#ffcf8f}',
       '#word-pop .wp-def:hover{background:#162045}',
       '#word-pop .wp-more{color:#60a5fa;font-size:11px;margin-top:7px}',
       // flex-wrap 为 EPUB 多一两个按钮(🎴Anki/🖌标记)留行,避免横向溢出;其余照搬
@@ -440,6 +442,28 @@
     if (!current && !original && !m) return '';
     return '<div class="jp-inflect">🔀 ' + [current, original, m].filter(Boolean).join('　') + '</div>';
   }
+  // 外来语源词 → HTML 行(用户 2026-09-04:「这种来自英文的词原型可以显示英文么」)。
+  // **独立于变形行**:プライマリー・ヘルス・ケア 这类词没有活用,_jpInflectHtml 会整行返回空,
+  // 挂在它里面就永远不显示。语言代码映射成中文标签;和製英語单独标注(英语里并没有这个说法)。
+  var _SOURCE_LANG_LABEL = {
+    en: '英語', de: '德語', pt: '葡萄牙語', fr: '法語', nl: '荷蘭語', it: '意大利語',
+    ru: '俄語', es: '西班牙語', la: '拉丁語', zh: '中文', ko: '韓語', th: '泰語', ar: '阿拉伯語'
+  };
+  function _jpSourceHtml(d) {
+    if (!d || !d.jp) return '';
+    var word = String(d.source_word || '').trim();
+    var kind = String(d.source_kind || '').trim();
+    if (!word && kind !== 'wasei') return '';
+    var lang = String(d.source_lang || '').trim().toLowerCase();
+    var label = kind === 'wasei'
+      ? '和製英語'
+      : (_SOURCE_LANG_LABEL[lang] || (lang ? lang.toUpperCase() : ''));
+    var mark = label
+      ? '<span class="jp-inflect-mark' + (kind === 'wasei' ? ' jp-wasei' : '') + '">' + esc(label) + '</span>'
+      : '';
+    var body = word ? '源词 <b>' + esc(word) + '</b>' : '源词 <b>—</b>';
+    return '<div class="jp-inflect jp-source">🌐 ' + [body, mark].filter(Boolean).join('　') + '</div>';
+  }
   // 英语原型 + 变形 → HTML 行(跟日语变形行同款样式)。
   function _enFormsHtml(lemma, forms, clicked) {
     lemma = (lemma || '').toLowerCase();
@@ -640,6 +664,12 @@
       return Object.assign({ source: 'pi-dict-quick', meaning_source: 'pi-dict-quick' }, remoteResult);
     }
     var merged = Object.assign({}, localResult);
+    // 源词只有服务端 AI 给得出(离线 JMdict 没有这个字段) → 本地词条命中时也要把它搬过来,
+    // 否则"本地有释义 + 服务端有源词"的词永远看不到源词(2026-09-04)。
+    ['source_word', 'source_lang', 'source_kind'].forEach(function (key) {
+      var value = String(remoteResult[key] == null ? '' : remoteResult[key]).trim();
+      if (value && !String(merged[key] || '').trim()) merged[key] = value;
+    });
     var remoteMeaning = _jpMeaningText(remoteResult);
     if (!_jpMeaningText(merged) && remoteMeaning) {
       merged.zh = remoteMeaning;
@@ -840,7 +870,7 @@
   //   _dictCache 只在内存,重开书就空;两级词典都无中文的外来语每次都得绕到电脑上的 Codex 兜底。
   //   这里把「拿到中文义」的结果落到 localStorage(按词,600 上限 LRU),下次点开秒显;
   //   合成兜底词条(definition 是"暂无词典释义…")不落盘,免得永久短路真查询。
-  var _PERSIST_KEY = 'rc-wordpop-dict-cache-v1';
+  var _PERSIST_KEY = 'rc-wordpop-dict-cache-v2';   // v2(2026-09-04):词条多了 source_* 三字段,旧缓存必须整体作废
   var _persistLoaded = null;
   function _persistLoad() {
     if (_persistLoaded) return _persistLoaded;
@@ -1062,7 +1092,8 @@
     // 用户给出的旧界面基准明确划掉了这一块：日语小框与完整字典页
     // 都不恢复词性标签；英语仍保留原有标签。
     var posTag = (!d.jp && d.pos ? '<span class="wp-pos-tag">' + esc(d.pos) + '</span>' : '');
-    var inflectHtml = d.jp ? _jpInflectHtml(d.inflect, word, d.lemma) : _enFormsHtml(d.lemma || word, d.forms, word);
+    var inflectHtml = (d.jp ? _jpInflectHtml(d.inflect, word, d.lemma) : _enFormsHtml(d.lemma || word, d.forms, word))
+      + _jpSourceHtml(d);
     var phonHtml = (d.jp && d.reading && d.accent != null)
       ? _renderPitch(d.reading, d.accent)
       : (d.jp && d.reading
@@ -1718,6 +1749,7 @@
         (d.local_zh ? ' · 中文 Wiktionary 释义' : ' · 暂无本地中文释义') + '</div>';
     }
     html += _jpInflectHtml(d.inflect, word, d.lemma);   // 当前形 + 原形 + 语法标签
+    html += _jpSourceHtml(d);                          // 外来语源词(如 primary health care)
     _jpKanjiData = d.kanji || [];
     if (_jpKanjiData.length) {
       // chip 不用裸 onclick(共享模式下 window._jpKanjiTap 被后加载的 reader.js 夺走、数据为空 → no-op);改 data-ki + 下方 addEventListener 绑本模块 jpKanjiTap
