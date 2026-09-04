@@ -60,7 +60,16 @@ STRUCTURED_READ_LARGE_BYTES = 8 * 1024 * 1024
 STRUCTURED_READ_HUGE_BYTES = 24 * 1024 * 1024
 STRUCTURED_READ_LARGE_COOLDOWN_SECONDS = 5.0
 STRUCTURED_READ_HUGE_COOLDOWN_SECONDS = 15.0
-MAX_CODEX_TURNS = 5_000
+# 侧栏历史是**有界列表**（用户 2026-09-05：「设置上限就好，比如最多到目前为止 100 条
+# 之类的，还有就是 app 有清空按钮不是么，按下后之前的聊天记录就不需要了」）。
+# 所以投影只看线程末尾这么多轮：更早的轮次既不补发，也不参与"哪些已发过"的比对。
+MAX_CODEX_PROJECTED_TURNS = 100
+# 只是防畸形载荷的天花板，**不再**是"轮次太多就整条拒收"那道墙（那样约 80 天后
+# 又会以同一形态停摆：一条恒定增长的线程总会越过任何固定轮次上限）。
+MAX_CODEX_TURNS = 200_000
+# 结构化源读失败后的退避。期间走连续性文件那条路继续发 —— 但别每 0.75s 重读一次
+# 整条线程：app-server 每次都要整读磁盘上的 rollout（实测 157 MiB / 2.2s）。
+STRUCTURED_READ_FAILURE_COOLDOWN_SECONDS = 60.0
 MAX_CODEX_ITEMS_PER_TURN = 2_000
 MAX_PROJECTED_TOOLS = 64
 MAX_STRUCTURED_RECOVERY_REQUESTS = 32
@@ -606,10 +615,18 @@ def _project_codex_thread(
     turns = thread.get("turns")
     if not isinstance(turns, list) or len(turns) > MAX_CODEX_TURNS:
         raise SyncDataError("app-server: turns invalid")
+    # 只投影线程**末尾** MAX_CODEX_PROJECTED_TURNS 轮。
+    #
+    # ⚠ `turn_index` 必须是**绝对**下标：没有 id 的轮次拿 `turn-<index>` 当身份，
+    #   切片后从 0 重新数会让同一轮的 requestId 随线程增长而变 → 同一轮被重复发。
+    index_offset = max(0, len(turns) - MAX_CODEX_PROJECTED_TURNS)
+    if index_offset:
+        turns = turns[index_offset:]
 
     seen_request_ids: list[str] = []
     segments: list[dict[str, Any]] = []
-    for turn_index, turn in enumerate(turns):
+    for offset_index, turn in enumerate(turns):
+        turn_index = index_offset + offset_index
         if not isinstance(turn, dict):
             continue
         items = turn.get("items")
@@ -1620,6 +1637,8 @@ class CaptureBoundHistorySynchronizer:
         self._structured_baseline: set[str] | None = None
         # 上一次结构化整读的时刻(monotonic)。大线程按 _structured_read_cooldown_seconds 限速。
         self._structured_read_at = 0.0
+        # 上一次结构化整读**失败**的时刻。失败期间走连续性文件继续发,不反复重读整条线程。
+        self._structured_failed_at = 0.0
         self._structured_signature: tuple[int, int] | None = None
         self._structured_followup_polls = 0
         self.last_result: dict[str, Any] | None = None
@@ -1754,9 +1773,10 @@ class CaptureBoundHistorySynchronizer:
                     "structured recovery FAILED thread=%s: %s: %s" % (
                         thread_id, type(exc).__name__,
                         str(exc)[:160]))
-                self._failure_backoff_polls = (
-                    PUBLISH_FAILURE_BACKOFF_POLLS
-                )
+                # 记下失败时刻:随后的每一轮先走连续性文件发,60s 后才再试整读。
+                # 原来这里只置退避,而 baseline 仍是 None → should_read 恒真 →
+                # 每 15s 重读一遍整条线程,聊天记录却一条都发不出去。
+                self._structured_failed_at = time.monotonic()
         return self.last_result
 
     def _arm_current_generation(
@@ -1845,6 +1865,16 @@ class CaptureBoundHistorySynchronizer:
             return self.last_result
         if self.last_result.get("stale") is not False:
             return self.last_result
+        # 结构化源刚失败过 → 这一轮别再整读，直接走连续性文件把话发出去。
+        if self._structured_failed_at:
+            waited = time.monotonic() - self._structured_failed_at
+            if waited < STRUCTURED_READ_FAILURE_COOLDOWN_SECONDS:
+                return self._continuity_publish(
+                    identity,
+                    "structured history cooling down %.0fs/%.0fs" % (
+                        waited, STRUCTURED_READ_FAILURE_COOLDOWN_SECONDS
+                    ),
+                )
 
         signature = self._continuity_signature()
         changed = signature != self._structured_signature
@@ -1892,19 +1922,19 @@ class CaptureBoundHistorySynchronizer:
                 ),
                 self._lease_thread_id,
             )
+            self._structured_failed_at = 0.0
         except Exception as exc:
-            self.last_result["stale"] = True
-            self.last_result["error"] = (
-                "structured history unavailable: "
-                + type(exc).__name__
-            )
             # ⚠ 只记类名会把唯一有用的那句话丢掉(2026-09-04:"response too large:
             #   36991863 bytes > 33554432 cap" 才是答案, "CodexAppServerError" 什么都不是)。
             self._diag(
                 "structured publish read FAILED thread=%s: %s: %s" % (
                     self._lease_thread_id, type(exc).__name__, str(exc)[:160]))
-            self._failure_backoff_polls = PUBLISH_FAILURE_BACKOFF_POLLS
-            return self.last_result
+            self._structured_failed_at = time.monotonic()
+            # 读不到结构化源 ≠ 聊天记录必须停。退回连续性文件继续发。
+            return self._continuity_publish(
+                identity,
+                "structured history unavailable: " + type(exc).__name__,
+            )
 
         seen_ids = projection["seenRequestIds"]
         segments = projection["segments"]
@@ -2078,8 +2108,20 @@ class CaptureBoundHistorySynchronizer:
             )
             self._failure_backoff_polls = 0
             return self.last_result
-        file = identity.get("file") if identity else None
-        page = identity.get("page") if identity else None
+        return self._continuity_publish(identity)
+
+    def _continuity_publish(
+        self,
+        identity: dict[str, Any] | None,
+        degraded: str | None = None,
+    ) -> dict[str, Any]:
+        """从连续性文件（有界，10 条滚动窗口）发布这一轮。
+
+        两处共用：没有结构化源时的常规路径，以及结构化源读不到时的降级路径。
+        降级时 `degraded` 说明原因 —— 聊天记录仍在发，只是"窗口滚掉的轮次还能
+        补回来"这一项能力此刻没有。**不要因为读不到整条线程就把历史整个停掉**：
+        2026-09-04 那次就是这么停了好几天（35.3 MB 撞破传输上限）。
+        """
         self.last_result = sync_once(
             global_state_path=self.global_state_path,
             continuity_path=self.continuity_path,
@@ -2087,8 +2129,8 @@ class CaptureBoundHistorySynchronizer:
             archive_path=self.archive_path,
             publish=True,
             publisher=self.publisher,
-            file=file,
-            page=page,
+            file=identity.get("file") if identity else None,
+            page=identity.get("page") if identity else None,
             source_instance_id=(
                 identity.get("source_instance_id") if identity else None
             ),
@@ -2099,10 +2141,17 @@ class CaptureBoundHistorySynchronizer:
             minimum_assistant_index=self._minimum_assistant_index,
             allow_last_good=False,
         )
+        if degraded:
+            self.last_result["degraded"] = degraded
+            prior = self.last_result.get("error")
+            self.last_result["error"] = (
+                f"{prior}; {degraded}" if prior else degraded
+            )
         if (
             self.last_result.get("error")
             and self.last_result.get("pending", 0) > 0
             and self.last_result.get("published", 0) == 0
+            and not degraded
         ):
             self._failure_backoff_polls = (
                 PUBLISH_FAILURE_BACKOFF_POLLS

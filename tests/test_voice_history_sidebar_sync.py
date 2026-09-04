@@ -1584,6 +1584,191 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
         self.assertEqual(unknown["label"], "工具：other_server.private_action")
 
 
+class StructuredHistoryWindowTest(unittest.TestCase):
+    """用户 2026-09-05:「设置上限就好，比如最多到目前为止 100 条之类的，还有就是
+    app 有清空按钮不是么，按下后之前的聊天记录就不需要了」。
+
+    侧栏历史是有界列表，所以投影只看线程末尾这么多轮 —— 更早的轮次既不补发，
+    也不参与"哪些已发过"的比对。这同时拆掉了 MAX_CODEX_TURNS 那道墙：一条恒定
+    增长的线程总会越过任何固定轮次上限，那只是把同一次停摆推迟几十天。
+    """
+
+    @staticmethod
+    def _turn(index, with_id=True):
+        turn = {
+            "items": [
+                {
+                    "type": "userMessage",
+                    "id": "u%d" % index,
+                    "content": [{"type": "text", "text": "问题 %d" % index}],
+                },
+                {
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": "回答 %d" % index,
+                },
+            ],
+        }
+        if with_id:
+            turn["id"] = "t%d" % index
+        return turn
+
+    def _project(self, count, with_id=True):
+        return SYNC._project_codex_thread(
+            {
+                "thread": {
+                    "id": THREAD,
+                    "turns": [self._turn(i, with_id) for i in range(count)],
+                }
+            },
+            THREAD,
+        )
+
+    def test_only_the_last_window_is_projected(self):
+        self.assertEqual(SYNC.MAX_CODEX_PROJECTED_TURNS, 100)
+        projected = self._project(150)
+        self.assertEqual(len(projected["segments"]), 100)
+        self.assertEqual(len(projected["seenRequestIds"]), 100)
+        self.assertEqual(projected["segments"][0]["user"], "问题 50")
+        self.assertEqual(projected["segments"][-1]["user"], "问题 149")
+
+    def test_turn_without_id_keeps_its_identity_as_the_thread_grows(self):
+        # 切片后从 0 重新数，会让没有 id 的轮次靠 `turn-<index>` 兜底的身份漂移，
+        # 同一轮于是被当成新的重复发一次。绝对下标是这条契约的全部内容。
+        first = self._project(150, with_id=False)
+        grown = self._project(160, with_id=False)
+        shared = set(first["seenRequestIds"]) & set(grown["seenRequestIds"])
+        self.assertEqual(len(shared), 90, "重叠的 90 轮必须逐条同身份")
+
+    def test_a_very_long_thread_is_no_longer_rejected(self):
+        projected = self._project(SYNC.MAX_CODEX_PROJECTED_TURNS * 3)
+        self.assertEqual(
+            len(projected["segments"]), SYNC.MAX_CODEX_PROJECTED_TURNS
+        )
+        self.assertGreater(SYNC.MAX_CODEX_TURNS, 5_000)
+
+
+class StructuredReadDegradationTest(unittest.TestCase):
+    """结构化源读不到 ≠ 聊天记录必须停（2026-09-04 就是这么停了好几天）。
+
+    读不到时退回连续性文件（有界，10 条滚动窗口）继续发，只损失"窗口滚掉的轮次
+    还能补回来"这一项，并如实标 degraded。再配失败退避，免得每 0.75s 重读一遍
+    整条线程（app-server 每次都要整读磁盘上 157 MiB 的 rollout）。
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.global_state = self.root / "global.json"
+        self.continuity = self.root / "continuity.json"
+        self.state = self.root / "state.json"
+        self.archive = self.root / "archive.json"
+        self.write(
+            self.global_state,
+            {
+                "electron-persisted-atom-state": {
+                    SYNC.RECENT_THREAD_KEY: {
+                        "conversationId": THREAD,
+                        "hostId": "local",
+                    },
+                },
+            },
+        )
+
+    @staticmethod
+    def write(path, value):
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    def recent(self, items):
+        self.write(
+            self.continuity,
+            {"version": 1, "threads": {THREAD: {"items": items}}},
+        )
+
+    class FailingHistoryClient:
+        def __init__(self):
+            self.calls = 0
+
+        def read_thread(self, thread_id):
+            self.calls += 1
+            raise SYNC.CodexAppServerError(
+                "Codex app-server response too large: 36991863 bytes"
+                " > 33554432 cap"
+            )
+
+        def close(self):
+            pass
+
+    def _snapshot(self):
+        path = self.root / "reader-context-snapshot.json"
+        self.write(
+            path,
+            {
+                "schema": "reader-context-snapshot/1",
+                "revision": 7,
+                "updatedAtUtc": datetime.now(timezone.utc).isoformat(),
+                "contextStatus": "ready",
+                "activeReading": {
+                    "fresh": True,
+                    "sourceInstanceId": "app-reader-degraded",
+                },
+                "currentPage": {
+                    "stable": True,
+                    "sourceInstanceId": "app-reader-degraded",
+                    "file": "Books/degraded.pdf",
+                    "page": 3,
+                },
+            },
+        )
+        return path
+
+    def test_history_keeps_flowing_when_the_thread_is_too_large_to_read(self):
+        self.recent([msg("user", "u1"), msg("assistant", "a1")])
+        calls = []
+        client = self.FailingHistoryClient()
+        syncer = SYNC.CaptureBoundHistorySynchronizer(
+            root=self.root,
+            publisher=lambda *args, **kwargs: (
+                calls.append((args, kwargs)) or {"ok": True}
+            ),
+            global_state_path=self.global_state,
+            continuity_path=self.continuity,
+            state_path=self.state,
+            archive_path=self.archive,
+            snapshot_path=self._snapshot(),
+            structured_history_client=client,
+        )
+        armed = syncer.observe(
+            service_online=True, capture_active=True, snapshot_mode=True
+        )
+        self.assertIsNotNone(armed)
+        self.assertIn("structured history unavailable", armed.get("error", ""))
+        self.assertEqual(client.calls, 1)
+
+        # 新一轮对话落进连续性文件 —— 结构化源仍读不到，但话必须发出去。
+        self.recent(
+            [
+                msg("user", "u1"),
+                msg("assistant", "a1"),
+                msg("user", "u2"),
+                msg("assistant", "a2"),
+            ]
+        )
+        degraded = syncer.observe(
+            service_online=True, capture_active=True, snapshot_mode=True
+        )
+        self.assertEqual(degraded["published"], 1, "降级后仍要把新一轮发出去")
+        self.assertIn("cooling down", degraded["degraded"])
+        self.assertEqual(
+            [call[0][0] for call in calls].count("assistant_turn"), 1
+        )
+        self.assertEqual(calls[-1][0][1]["text"], "a2")
+        self.assertEqual(calls[-1][0][1]["user_utterance"], "u2")
+        # 失败退避期间不再重读整条线程
+        self.assertEqual(client.calls, 1)
+
+
 class CodexAppServerResponseBoundsTest(unittest.TestCase):
     """2026-09-04 实锤:用了 21 天的语音线程 thread/read 回 35.3 MB,撞破当时的
     32 MB 上限 → 结构化回填每次都失败 → 聊天记录一直同步不到 App。
