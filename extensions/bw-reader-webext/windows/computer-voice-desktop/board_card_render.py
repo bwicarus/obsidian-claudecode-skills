@@ -114,16 +114,23 @@ def legacy_png_path(sha: str, root: Path | None = None) -> Path:
     return cache_dir(root) / (sha + ".png")
 
 
-def _document(html: str) -> str:
+def _document(html: str, shape: str = "square") -> str:
     """把 AI 写的片段放进一个固定的壳子里。
 
     壳子做四件事：给一个确定的画布尺寸、给一套默认字体/配色、把内容居中、
     把内容等比放大到填满（见 _FIT_SCRIPT）。**不改写用户的样式** ——
     卡片长什么样是 AI 决定的，这是用户要的那条。
+
+    2026-09-05 第二版起壳子把形状告诉画面：`body.shape-square` / `body.shape-wide`
+    和 `:root` 上的 `--card-w` / `--card-h`（逻辑像素），让同一段 HTML 能在 1:1 与
+    2:1 里各排一套；`@media (min-width: 600px)` 也能区分宽卡。
+    AI 想全出血就自己写 `body{padding:0}`，壳子的默认样式不阻止它。
     """
+    width, height = SHAPES[shape]
     return (
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         "<style>"
+        ":root{--card-w:" + str(width) + "px;--card-h:" + str(height) + "px}"
         "html,body{margin:0;padding:0;width:100%;height:100%}"
         "body{box-sizing:border-box;padding:14px;"
         "font-family:'Yu Gothic UI','Hiragino Sans','Microsoft YaHei',"
@@ -131,9 +138,10 @@ def _document(html: str) -> str:
         "color:#e6edf3;background:#161b22;"
         "display:flex;flex-direction:column;justify-content:center;"
         "overflow:hidden;word-break:break-word}"
-        "#bw{zoom:1}"
+        "#bw{zoom:1;width:100%}"
         "*{max-width:100%}"
-        "</style></head><body><div id=\"bw\">" + html + "</div></body></html>"
+        "</style></head><body class=\"shape-" + shape + "\"><div id=\"bw\">"
+        + html + "</div></body></html>"
     )
 
 
@@ -261,7 +269,7 @@ def render_cards(
                         width, height = SHAPES[shape]
                         try:
                             page.set_viewport_size({"width": width, "height": height})
-                            page.set_content(_document(html))
+                            page.set_content(_document(html, shape))
                             page.evaluate(_FIT_SCRIPT, MAX_ZOOM)
                             shot = page.screenshot(type="png")
                         except Exception as exc:   # noqa: BLE001

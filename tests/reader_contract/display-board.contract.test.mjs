@@ -82,9 +82,19 @@ test("AI 写的 HTML 入库先洗：整段扔掉危险标签、去事件、去�
   const sanitize = BOARD.slice(
     BOARD.indexOf("private static readonly string[] ForbiddenTags"),
     BOARD.indexOf("private static string NewCardId("));
-  for (const tag of ["script", "iframe", "object", "embed", "form", "svg", "link", "meta"]) {
+  for (const tag of ["script", "iframe", "object", "embed", "form", "foreignobject", "link", "meta"]) {
     assert.match(sanitize, new RegExp(`"${tag}"`), `禁用标签缺 ${tag}`);
   }
+  // 2026-09-05 起放行内联 svg / math（用户：「更丰富的 html 画面」）：HTML 只在断网禁脚本的
+  // 无头 Chromium 里渲成 PNG，设备端从不解析它；外链属性仍在下面被去掉。
+  for (const tag of ["svg", "math"]) {
+    assert.doesNotMatch(sanitize, new RegExp(`"${tag}"`), `${tag} 应当放行`);
+  }
+  assert.match(BOARD, /MaxCardHtmlChars = 8000;/, "画面带 <style> 与 SVG 路径，4000 不够");
+  assert.match(GUIDE, /画面要丰富，不要套模板/, "指南要明说别套模板");
+  assert.match(GUIDE, /body\.shape-wide/, "指南要教两种形状怎么各排一套");
+  assert.match(RENDER, /class=\\"shape-" \+ shape/, "壳子把形状告诉画面");
+  assert.match(RENDER, /--card-w:/, "壳子给出画布尺寸变量");
   assert.match(sanitize, /son\[a-zA-Z\]\+/, "on* 事件属性要去掉");
   assert.match(sanitize, /\(src\|href\|xlink:href\|background\|poster\)/, "外链属性要去掉");
   assert.match(sanitize, /"javascript:", "blocked:"/);

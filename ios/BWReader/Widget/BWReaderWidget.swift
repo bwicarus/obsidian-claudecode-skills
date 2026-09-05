@@ -799,60 +799,84 @@ private struct BoardWidgetView: View {
         .widgetURL(URL(string: "bwreader://reader-feature?action=openReader"))
     }
 
-    /// 方格本体。每格一张卡：渲好的图铺满方块；取不到图就显示 alt 文字。
-    /// 右上角固定一个删除键（Button(intent:)），谁写的卡都能被用户一键撤掉。
+    /// 方格本体。格子尺寸按**可用面积**算：先按行高、再按列宽取小，整块绝不被裁
+    /// （2026-09-05 用户实拍：特大号两行宽卡按宽度撑满后高度超了，下面一行被切掉；
+    /// 组件实际比 2:1 更宽，还有标题行，按比例硬排必然溢出）。
+    /// 每格一张卡：渲好的图铺满；取不到图就显示 alt 文字。右上角固定一个删除键。
+    /// 多板同屏时板名放在卡**下面**一行小字 —— 画面放大填满之后，盖在上面会压住内容。
     private func cardGrid() -> some View {
         let layout = self.layout
-        let columns = Array(
-            repeating: GridItem(.flexible(), spacing: 6), count: layout.columns)
         let labelBoards = shownBoardCodes.count > 1
         let ratio = layout.aspectRatio
-        return LazyVGrid(columns: columns, spacing: 6) {
-            ForEach(slots) { slot in
-                let card = slot.card
-                ZStack(alignment: .topTrailing) {
-                    Group {
-                        if let image = entry.cardImages[card.sha] {
-                            Image(uiImage: image)
-                                .resizable()
-                                .aspectRatio(ratio, contentMode: .fill)
-                        } else {
-                            // 没图：alt 文字兜底（图还没渲出来 / 下载失败）。
-                            // 不留空方块 —— 空方块会被当成"这张卡是空的"。
-                            ZStack {
-                                Color(uiColor: .secondarySystemBackground)
-                                Text(card.alt.isEmpty ? "渲染中…" : card.alt)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .multilineTextAlignment(.center)
-                                    .padding(6)
+        let spacing: CGFloat = 6
+        let captionHeight: CGFloat = labelBoards ? 14 : 0
+        return GeometryReader { geo in
+            let cols = CGFloat(layout.columns)
+            let rows = CGFloat(layout.rows)
+            let maxW = (geo.size.width - spacing * (cols - 1)) / cols
+            let maxH = (geo.size.height - spacing * (rows - 1)) / rows - captionHeight
+            let cellW = max(1, min(maxW, maxH * ratio))
+            let cellH = cellW / ratio
+            VStack(spacing: spacing) {
+                ForEach(0..<layout.rows, id: \.self) { row in
+                    HStack(spacing: spacing) {
+                        ForEach(0..<layout.columns, id: \.self) { col in
+                            let index = row * layout.columns + col
+                            if index < slots.count {
+                                cardCell(slots[index], width: cellW, height: cellH,
+                                         labelBoards: labelBoards)
+                            } else {
+                                Color.clear.frame(width: cellW, height: cellH + captionHeight)
                             }
                         }
                     }
-                    .aspectRatio(ratio, contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay(alignment: .bottomLeading) {
-                        // 多板同屏时才标板名：只有一块时标题已经说了。
-                        if labelBoards {
-                            Text(slot.board.title)
-                                .font(.system(size: 9, weight: .semibold))
-                                .lineLimit(1)
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 6).padding(.vertical, 3)
-                                .background(Color.black.opacity(0.55), in: Capsule())
-                                .padding(5)
+                }
+            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+        }
+    }
+
+    private func cardCell(_ slot: Slot, width: CGFloat, height: CGFloat,
+                          labelBoards: Bool) -> some View {
+        let card = slot.card
+        return VStack(alignment: .leading, spacing: 2) {
+            ZStack(alignment: .topTrailing) {
+                Group {
+                    if let image = entry.cardImages[card.sha] {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        // 没图：alt 文字兜底（图还没渲出来 / 下载失败）。
+                        // 不留空方块 —— 空方块会被当成"这张卡是空的"。
+                        ZStack {
+                            Color(uiColor: .secondarySystemBackground)
+                            Text(card.alt.isEmpty ? "渲染中…" : card.alt)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(6)
                         }
                     }
-                    Button(intent: DeleteBoardCardIntent(code: slot.board.code, cardId: card.id)) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.white)
-                            .padding(5)
-                            .background(Color.black.opacity(0.55), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(4)
                 }
+                .frame(width: width, height: height)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                Button(intent: DeleteBoardCardIntent(code: slot.board.code, cardId: card.id)) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(5)
+                        .background(Color.black.opacity(0.55), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .padding(4)
+            }
+            if labelBoards {
+                Text(slot.board.title)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(width: width, alignment: .leading)
             }
         }
     }

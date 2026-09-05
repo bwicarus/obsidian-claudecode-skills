@@ -60,7 +60,9 @@ internal static class ReaderDisplayBoard
     // 卡片(2026-09-05 用户改版):一张卡 = 一个方块 = 一条信息。
     // 12 张已经超过最大号小组件能放下的量;再多只是把 payload 撑大。
     private const int MaxCards = 12;
-    private const int MaxCardHtmlChars = 4000;
+    // 8000（原 4000）：带 <style> 块和内联 SVG 路径的画面轻松过 4000，而 12 张卡 × 8000 字
+    // 仍只是百 KB 级的存储。
+    private const int MaxCardHtmlChars = 8000;
     private const int MaxCardIdChars = 64;
     private const int MaxCardAltChars = 200;
     private const int MaxTitleChars = 60;
@@ -335,10 +337,13 @@ internal static class ReaderDisplayBoard
     ///   这条链就有一处能执行别人写的字。
     ///   这里只做"结构性"删除(整段扔掉),不做属性级美化 —— 半清洗最危险:
     ///   看起来干净了,实际留了一条路。
+    // svg / math 2026-09-05 起放行（用户：「更丰富的 html 画面」）：卡片只在
+    // Windows 上由断网、禁脚本的无头 Chromium 渲成 PNG，设备端从不解析这段 HTML，
+    // 内联 SVG 在这个环境里没有脚本面；外链 href/src 仍在下面被去掉。
     private static readonly string[] ForbiddenTags =
     {
         "script", "iframe", "object", "embed", "link", "meta", "base",
-        "form", "input", "button", "textarea", "svg", "math", "video",
+        "form", "input", "button", "textarea", "foreignobject", "video",
         "audio", "source", "track", "canvas", "portal",
     };
 
