@@ -37,7 +37,10 @@ from typing import Any, Callable, Iterator
 VERSION = 1
 RECENT_THREAD_KEY = "realtime-voice-most-recent-thread"
 
-MAX_GLOBAL_STATE_BYTES = 1024 * 1024
+# 16 MiB（原 1 MiB）。2026-09-06 Codex 正式版把 .codex-global-state.json 写到了 1.5 MB，
+# 超限被当成"读不到"，同步器退回上一次绑定的 Beta 旧线程，聊天记录就此停更 —— 而日志里
+# 一个字都没有。这个文件是整份 JSON，只能整读；上限只防畸形文件，不该卡在正常增长上。
+MAX_GLOBAL_STATE_BYTES = 16 * 1024 * 1024
 MAX_CONTINUITY_BYTES = 4 * 1024 * 1024
 MAX_STATE_BYTES = 1024 * 1024
 MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
@@ -838,9 +841,12 @@ def _normalize_item(value: Any, label: str) -> dict[str, str]:
 def _parse_binding(root: Any) -> tuple[str, dict[str, str] | None]:
     """Return ``bound``, ``unbound``, or raise for a malformed binding.
 
-    Top-level Electron state is intentionally extensible.  Only the selected
-    atom has an exact schema.  ``version`` is tolerated because current Codex
-    builds may include it, but selection never depends on it.
+    Top-level Electron state is intentionally extensible, and so is the
+    selected atom: it is Codex's own record, and every app update may add a
+    field (2026-09-06 the stable app added ``isEverydayWorkMode`` and the old
+    exact-schema check silently pinned the sidebar to a stale Beta thread).
+    Only the two fields selection depends on are required and type-checked;
+    unknown fields are ignored.
     """
     if not isinstance(root, dict):
         raise SyncDataError("global-state: root must be an object")
@@ -854,12 +860,12 @@ def _parse_binding(root: Any) -> tuple[str, dict[str, str] | None]:
         return "unbound", None
     if not isinstance(recent, dict):
         raise SyncDataError("global-state: recent thread must be an object")
-    _exact_fields(
-        recent,
-        {"conversationId", "hostId"},
-        {"version"},
-        "global-state.recent-thread",
-    )
+    missing = {"conversationId", "hostId"} - set(recent)
+    if missing:
+        raise SyncDataError(
+            "global-state.recent-thread: schema mismatch"
+            f" missing={sorted(missing)}"
+        )
     if "version" in recent and (
         isinstance(recent["version"], bool)
         or not isinstance(recent["version"], int)
@@ -1642,6 +1648,8 @@ class CaptureBoundHistorySynchronizer:
         self._structured_signature: tuple[int, int] | None = None
         self._structured_followup_polls = 0
         self.last_result: dict[str, Any] | None = None
+        # 上一次已写进日志的 last_result["error"]。同一条错误只出声一次,变了再出声。
+        self._last_reported_error: str | None = None
         self._diag_path = root / "runtime" / "voice-history-sync.log"
         self._service_was_online = True
 
@@ -2161,6 +2169,43 @@ class CaptureBoundHistorySynchronizer:
         return self.last_result
 
     def observe(
+        self,
+        *,
+        service_online: bool,
+        capture_active: bool,
+        snapshot_mode: bool,
+        capture_generation: int | None = None,
+    ) -> dict[str, Any] | None:
+        result = self._observe(
+            service_online=service_online,
+            capture_active=capture_active,
+            snapshot_mode=snapshot_mode,
+            capture_generation=capture_generation,
+        )
+        self._report_result_error()
+        return result
+
+    def _report_result_error(self) -> None:
+        """last_result["error"] 变了就写日志。
+
+        2026-09-06 教训:global-state 超 1 MiB 上限、随后又撞上 Codex 新字段,
+        同步器都只把原因塞进 last_result["error"] 然后退回上一次绑定的旧线程 ——
+        聊天记录停更了一整天,而日志里一个字都没有。"""
+        error = None
+        if isinstance(self.last_result, dict):
+            raw = self.last_result.get("error")
+            error = str(raw)[:300] if raw else None
+        if error == self._last_reported_error:
+            return
+        self._last_reported_error = error
+        if error:
+            self._diag(
+                "sync error thread=%s: %s" % (self._lease_thread_id, error)
+            )
+        else:
+            self._diag("sync error cleared thread=%s" % self._lease_thread_id)
+
+    def _observe(
         self,
         *,
         service_online: bool,

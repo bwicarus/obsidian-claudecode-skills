@@ -27,6 +27,7 @@ PHASE_LABELS = {
     "preparing": "准备中",
     "downloading": "下载书籍",
     "text-ocr": "文字识别",
+    "text-layer": "读文字层",
     "tokenizing": "分词",
     "formula-detect": "公式定位",
     "formula-latex": "公式识别",

@@ -3900,7 +3900,7 @@ def _record_worker_failure(
                 else _progress()
             )
             failed_pages = int(current.get("failedPages") or 0)
-            if phase == "text-ocr":
+            if phase in ("text-ocr", "text-layer"):
                 text_progress = _progress(
                     text_progress.get("total"),
                     text_progress.get("completed"),
@@ -4019,10 +4019,13 @@ def run(args) -> int:
                     )
                 )
             )
+            # native 只读字符层,不识别:阶段与文案都别说「文字识别」(2026-09-06)。
+            text_phase = "text-layer" if args.engine == "native" else "text-ocr"
+            text_label = "读文字层" if args.engine == "native" else "文字识别"
             _update_job(
                 job_path,
                 state="running",
-                phase="text-ocr",
+                phase=text_phase,
                 totalPages=total,
                 textProgress=_progress(total, existing),
                 wordProgress=_progress(total, tokenized),
@@ -4053,7 +4056,7 @@ def run(args) -> int:
                     job_path,
                     pid=os.getpid(),
                     state="running",
-                    phase="text-ocr",
+                    phase=text_phase,
                     textState="running",
                     totalPages=total,
                     processedPages=existing,
@@ -4067,7 +4070,7 @@ def run(args) -> int:
                     ),
                     formulaProgress=_progress(total, 0),
                     percent=round(existing * 75 / max(1, total), 1),
-                    message=f"文字识别 {existing}/{total}；暂停会保留完成页",
+                    message=f"{text_label} {existing}/{total}；暂停会保留完成页",
                     canPause=True,
                     canResume=False,
                     canCancel=True,

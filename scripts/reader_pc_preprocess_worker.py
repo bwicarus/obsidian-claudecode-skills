@@ -83,6 +83,7 @@ ALLOWED_PHASES = frozenset(
         "preparing",
         "downloading",
         "text-ocr",
+        "text-layer",
         "tokenizing",
         "formula-detect",
         "formula-latex",
@@ -1379,14 +1380,16 @@ class WorkerRunner:
                 raise WorkerError("Pi page count does not match the immutable PDF")
             total = actual_total
             completed = set(claim.completed_pages)
+            # native 引擎不识别,只读字符层:阶段名要说实话,否则 ReaderPC 界面显示「文字识别」。
+            page_phase = "text-layer" if claim.engine == "native" else "text-ocr"
             for page_number in range(1, total + 1):
                 if page_number in completed:
                     continue
                 progress = _progress(total, text=text_done, words=word_done)
-                monitor.update("text-ocr", page_number, progress)
+                monitor.update(page_phase, page_number, progress)
                 self.cache.status(
                     state="running",
-                    phase="text-ocr",
+                    phase=page_phase,
                     currentPage=page_number,
                     progress=progress,
                 )

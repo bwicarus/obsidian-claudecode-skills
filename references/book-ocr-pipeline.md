@@ -359,3 +359,19 @@ OCR 流水线原来只能改 systemd unit 硬编码 PDF 路径跑。2026-06 曾�
   `NativeBookOCRPageLayoutTextSource` 枚举、`ReaderLocalLibraryView` 两处按钮。
 - **到达面**：Flask（ReaderPC 看代码变化自动重启）+ ReaderPC 包（`scripts/reader_pc_preprocess_worker.py`
   在 RUNTIME_SOURCES 里，要出新包）+ App（TestFlight 新构建）。三条互不相干，做一个不等于做完。
+- **阶段名 `text-layer`（读文字层）**：native 逐页阶段不再报 `text-ocr`。首版没改阶段名，ReaderPC
+  界面写着「文字识别」，用户以为选错了引擎。五处副本（服务端 `PC_PHASES`、PC worker
+  `ALLOWED_PHASES` + 逐页分支、ReaderPC `PHASE_LABELS`、服务器自跑 worker 的逐页与失败分支）由
+  `ocr-engine-table` 契约测试钉住。App 只显示服务器给的 `message`，不认阶段名，不用改。
+- **「服务器预处理」与「PC 预处理」的区别**（用户 2026-09-06 问）：两个按钮打的是同一台 Windows
+  服务器，只差 `executor`。`pi` = 服务器进程自己 spawn `reader_book_ocr_worker.py`（profile
+  `pi-default-v5`，不带 DocLayout-YOLO / UniMerNet 公式模型，manga 走 `MANGA_OCR_PYTHON`）；`pc` =
+  任务排队等 ReaderPC 托管的 `reader_pc_preprocess_worker.py` 认领（profile `quality-first-v6`，
+  独立 `reader-pc-ocr-venv`，带公式定位/识别，结果在 App 里标「PC 高质量」）。Pi 出局后两者跑在同一台
+  机器上，差别只剩流水线与 profile；native 引擎两边做的事一样（读字符层 + 分词）。
+- **旧结果采纳（legacy）从来到不了 App**（2026-09-05 用户点「采用现有结果」→「服务器预处理附件导入
+  失败：The data couldn't be read because it is missing」）：`_normalize_legacy_page` 写的页没有
+  `imageWidth` / `imageHeight` / `generatedAtEpochMs`，而 App `PiPageCharacters` 三项必填，且
+  `convertPiPage` 只认 vision/manga/native。两边一起修：服务端补齐三项（像素尺寸按页尺寸取整，比例 1）
+  + `tokenized`；App 对 `legacy` 引擎放开这三项、接受 legacy 页（几何标 estimated）。⚠ 这条报错**看着像
+  新引擎的锅**，其实是采纳旧结果那一步；native 发布的 212 页逐字段核对全部通过 App 的 decoder。

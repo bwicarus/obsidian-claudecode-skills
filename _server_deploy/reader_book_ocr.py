@@ -96,8 +96,12 @@ PC_LEASE_SECONDS_DEFAULT = 45
 PC_ONLINE_SECONDS_DEFAULT = 30
 PC_WORKER_ID_RE = re.compile(r"pc_[A-Za-z0-9_-]{1,64}")
 PC_LEASE_ID_RE = re.compile(r"ocrlease_[0-9a-f]{32}")
+# text-layer(2026-09-06):native 引擎逐页读 PDF 字符层时的阶段。它和 text-ocr 在进度上
+# 同构(逐页、可暂停保留完成页),只是没有"识别"这回事 —— 用户看到「文字识别」会以为
+# 选错了引擎。五处副本:这里、PC worker ALLOWED_PHASES、ReaderPC PHASE_LABELS、
+# reader_book_ocr_worker 的逐页分支与失败分支(tests/reader_contract/ocr-engine-table 钉住)。
 PC_PHASES = frozenset((
-    "preparing", "downloading", "text-ocr", "tokenizing",
+    "preparing", "downloading", "text-ocr", "text-layer", "tokenizing",
     "formula-detect", "formula-latex", "uploading", "finalizing",
 ))
 PC_IDENTITY_FIELDS = frozenset((
@@ -1079,11 +1083,23 @@ class ReaderBookOcrService:
             "pageNumber": page_number,
             "page_w": page_w,
             "page_h": page_h,
+            # App 的 PiPageCharacters 把 imageWidth/imageHeight/generatedAtEpochMs 当必填:
+            # 旧页层一直没带,采纳出来的发布 App 一律「The data couldn't be read because
+            # it is missing」(2026-09-05 首次被用户撞见)。旧字符框本来就在 PDF 点坐标里,
+            # 像素尺寸按页尺寸取整,比例即 1。
+            "imageWidth": max(1, int(round(page_w))),
+            "imageHeight": max(1, int(round(page_h))),
             "chars": chars,
             "furigana": furigana,
             "textCharCount": len("".join(
                 str(item.get("c") or "") for item in chars if not item.get("sp")
             )),
+            "tokenized": all(
+                item.get("sp")
+                or (isinstance(item.get("w"), int) and item.get("w") >= 0)
+                for item in chars
+            ),
+            "generatedAtEpochMs": _now_ms(),
             "legacySource": source,
         }
         try:

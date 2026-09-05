@@ -97,6 +97,43 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
             "threads"
         ][THREAD]
 
+    def test_binding_tolerates_unknown_codex_fields(self):
+        # 2026-09-06:Codex 正式版给最近线程记录加了 isEverydayWorkMode,
+        # 旧的"精确 schema"检查把它当成读不到 → 退回上一次绑定的旧线程。
+        self.write(
+            self.global_state,
+            {
+                "electron-persisted-atom-state": {
+                    SYNC.RECENT_THREAD_KEY: {
+                        "conversationId": THREAD,
+                        "hostId": "local",
+                        "version": 3,
+                        "isEverydayWorkMode": False,
+                        "someFutureField": {"nested": True},
+                    },
+                },
+            },
+        )
+        self.recent([msg("user", "u"), msg("assistant", "a")])
+        result = self.sync()
+        self.assertEqual(result["threadId"], THREAD)
+        self.assertIsNone(result.get("error"))
+        self.assertFalse(result["stale"])
+
+    def test_binding_still_requires_selection_fields(self):
+        self.write(
+            self.global_state,
+            {
+                "electron-persisted-atom-state": {
+                    SYNC.RECENT_THREAD_KEY: {"hostId": "local"},
+                },
+            },
+        )
+        self.recent([msg("user", "u"), msg("assistant", "a")])
+        result = self.sync()
+        self.assertTrue(result["stale"])
+        self.assertIn("missing=['conversationId']", result["error"])
+
     def test_exact_local_uuid_binding_never_guesses_another_thread(self):
         self.bind(host="remote")
         self.recent([msg("user", "x")])

@@ -1623,14 +1623,17 @@ actor NativeBookOCRSidecarStore {
         let pageNumber: Int
         let pageWidth: Double
         let pageHeight: Double
-        let imageWidth: Int
-        let imageHeight: Int
+        // legacy（服务器采纳的旧结果）从来没带这三个字段:2026-09-05 用户点「采用现有
+        // 结果」→「The data couldn't be read because it is missing」。只对 legacy 放开,
+        // 其它引擎仍在 convertPiPage 里按必填校验。
+        let imageWidth: Int?
+        let imageHeight: Int?
         let chars: [NativeBookOCRCharacter]
         let layout: NativeBookOCRPageLayout?
         let furigana: [NativeBookOCRFurigana]
         let tokenized: Bool?
         let textCharCount: Int?
-        let generatedAtEpochMs: Int64
+        let generatedAtEpochMs: Int64?
 
         enum CodingKeys: String, CodingKey {
             case schema, bookId, contentSha256, engine, pageNumber
@@ -1664,14 +1667,20 @@ actor NativeBookOCRSidecarStore {
         executor: String,
         processingProfile: String
     ) throws -> NativeBookOCRPageCharacters {
+        // legacy 页的字符框本来就在 PDF 点坐标里:像素尺寸按页尺寸取整,比例即 1。
+        let isLegacy = value.engine == "legacy"
         guard value.schema == PiPageCharacters.schema,
               value.bookId == expectedBookID,
               value.contentSha256 == expectedContentSHA256,
               value.pageNumber >= 1,
               value.pageWidth.isFinite, value.pageHeight.isFinite,
               value.pageWidth > 0, value.pageHeight > 0,
-              value.imageWidth > 0, value.imageHeight > 0,
-              ["vision", "manga", "native"].contains(value.engine) else {
+              let imageWidth = value.imageWidth
+                ?? (isLegacy ? Int(value.pageWidth.rounded()) : nil),
+              let imageHeight = value.imageHeight
+                ?? (isLegacy ? Int(value.pageHeight.rounded()) : nil),
+              imageWidth > 0, imageHeight > 0,
+              ["vision", "manga", "native", "legacy"].contains(value.engine) else {
             throw NativeBookOCRError.invalidAttachment("文字页附件身份或几何无效")
         }
         // ⚠ textCharCount 与 chars.count **不是**同一个量，不能相等比。
@@ -1711,8 +1720,8 @@ actor NativeBookOCRSidecarStore {
             pageWidth: value.pageWidth,
             pageHeight: value.pageHeight,
             rotation: 0,
-            renderPixelWidth: value.imageWidth,
-            renderPixelHeight: value.imageHeight
+            renderPixelWidth: imageWidth,
+            renderPixelHeight: imageHeight
         )
         let layout = try validatePiPageLayout(
             value.layout,
@@ -1774,7 +1783,10 @@ actor NativeBookOCRSidecarStore {
             formulaCoverage: .unknown,
             formulaRegions: [],
             createdAt: Date(
-                timeIntervalSince1970: Double(value.generatedAtEpochMs) / 1_000
+                timeIntervalSince1970: Double(
+                    value.generatedAtEpochMs
+                        ?? Int64(Date().timeIntervalSince1970 * 1_000)
+                ) / 1_000
             ),
             error: nil
         )
