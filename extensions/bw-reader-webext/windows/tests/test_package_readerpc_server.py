@@ -49,14 +49,83 @@ class VerifyRunningGenerationTests(unittest.TestCase):
                 timeout_seconds=0.05,
             )
 
-    def test_fails_loudly_when_no_process_survives(self) -> None:
-        with self.assertRaises(module.PackageError):
+    def test_fails_loudly_when_no_process_survives_even_after_relaunch(self) -> None:
+        relaunches = {"n": 0}
+
+        def relauncher() -> None:
+            relaunches["n"] += 1
+
+        with self.assertRaises(module.PackageError) as caught:
             module.verify_running_generation(
                 self.release,
                 probe=lambda: [],
                 sleeper=lambda seconds: None,
                 timeout_seconds=0.05,
+                relauncher=relauncher,
             )
+        self.assertEqual(relaunches["n"], 1, "兜底只拉一次，不无限重试")
+        self.assertIn("兜底拉起也没起来", str(caught.exception))
+
+    def test_relaunches_once_when_the_new_instance_exited_after_refusing_takeover(self) -> None:
+        """2026-09-06 一天撞两次：新实例拒绝接管自退、旧实例已按退出请求退出 →
+        一个 ReaderPC 都不在，整栈下线。兜底 = 用稳定启动器再拉一次，拉起来了也要出声。"""
+        exe = str(self.release / "ReaderPC-Server.exe")
+        state = {"relaunched": False}
+
+        def probe() -> list[str]:
+            return [exe, exe] if state["relaunched"] else []
+
+        def relauncher() -> None:
+            state["relaunched"] = True
+
+        import io
+        from contextlib import redirect_stdout
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            module.verify_running_generation(
+                self.release,
+                probe=probe,
+                sleeper=lambda seconds: None,
+                timeout_seconds=0.05,
+                relauncher=relauncher,
+            )
+        self.assertTrue(state["relaunched"])
+        self.assertIn("WARN", out.getvalue(), "兜底成功也必须出声，接管失败的根因不能被吞掉")
+
+    def test_does_not_relaunch_when_the_new_generation_is_already_running(self) -> None:
+        exe = str(self.release / "ReaderPC-Server.exe")
+        relaunches = {"n": 0}
+
+        def relauncher() -> None:
+            relaunches["n"] += 1
+
+        module.verify_running_generation(
+            self.release,
+            probe=lambda: [exe],
+            sleeper=lambda seconds: None,
+            timeout_seconds=1.0,
+            relauncher=relauncher,
+        )
+        self.assertEqual(relaunches["n"], 0)
+
+    def test_old_generation_surviving_is_not_relaunched_over(self) -> None:
+        """旧代际还在跑时不兜底：再拉一个只会又撞一次接管；照旧报错让人看日志。"""
+        old = str(self.release.parent / "0.1.62" / "ReaderPC-Server.exe")
+        relaunches = {"n": 0}
+
+        def relauncher() -> None:
+            relaunches["n"] += 1
+
+        with self.assertRaises(module.PackageError):
+            module.verify_running_generation(
+                self.release,
+                probe=lambda: [old],
+                sleeper=lambda seconds: None,
+                timeout_seconds=0.05,
+                relauncher=relauncher,
+            )
+        self.assertEqual(relaunches["n"], 0)
 
     def test_waits_for_a_slow_handover_before_passing(self) -> None:
         exe = str(self.release / "ReaderPC-Server.exe")

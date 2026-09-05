@@ -555,36 +555,70 @@ def _running_readerpc_exe_paths() -> list[str]:
     return [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
 
 
+def _relaunch_via_stable_launcher() -> None:
+    """用安装好的稳定启动器（HKCU Run 用的同一个 vbs）再拉一次当前 release。"""
+    launcher = _default_install_root() / "start-readerpc.vbs"
+    if not launcher.is_file():
+        _fail(f"稳定启动器不存在，无法兜底拉起：{launcher}")
+    subprocess.Popen(
+        ["wscript.exe", "//B", str(launcher), "logon"],
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
 def verify_running_generation(
     release: Path,
     *,
     probe: Any = None,
     sleeper: Any = None,
     timeout_seconds: float = 90.0,
+    relauncher: Any = None,
 ) -> None:
     """--launch 后的接管验证：所有 ReaderPC 进程都必须来自新 release。
 
     三种失败形态，全部出声：
     - 旧代际仍在（新实例拒绝接管后自退）→ 指向 readerpc-server.log；
-    - 没有任何进程（新实例起了又崩）；
+    - 没有任何进程（新实例起了又崩）→ **先兜底再报**（见下）；
     - 超时仍混着新旧。
+
+    兜底（2026-09-06 一天撞两次）：新实例"拒绝接管"后自退，而旧实例已按带外退出请求
+    正常退出 → 一个 ReaderPC 都不在，Flask / 桥 / 三个 sidecar 全部下线，直到有人手动拉。
+    这里用稳定启动器再拉一次新 release：拉起来了也照实打 WARN 说"接管失败、已兜底"，
+    根因仍要看日志 —— 兜底是不让整栈躺着，不是修好接管。
     """
     import time as _time
 
     probe = probe or _running_readerpc_exe_paths
     sleeper = sleeper or _time.sleep
+    relaunch = relauncher if relauncher is not None else _relaunch_via_stable_launcher
     release_text = str(release.resolve()).lower()
-    deadline = _time.monotonic() + timeout_seconds
-    last: list[str] = []
-    while _time.monotonic() < deadline:
-        last = probe()
-        if last and all(release_text in path.lower() for path in last):
-            return
-        sleeper(3.0)
     log_hint = str(_default_install_root().parent / "readerpc-server.log")
+
+    def wait_for_new_generation(seconds: float) -> list[str]:
+        deadline = _time.monotonic() + seconds
+        observed: list[str] = []
+        while True:
+            observed = probe()
+            if observed and all(release_text in path.lower() for path in observed):
+                return observed
+            if _time.monotonic() >= deadline:
+                return observed
+            sleeper(3.0)
+
+    last = wait_for_new_generation(timeout_seconds)
+    if last and all(release_text in path.lower() for path in last):
+        return
     if not last:
+        relaunch()
+        last = wait_for_new_generation(min(timeout_seconds, 45.0))
+        if last and all(release_text in path.lower() for path in last):
+            print(
+                "WARN: 新实例接管失败后自退（整栈曾短暂下线），已用稳定启动器兜底拉起新 release；"
+                f"根因看 {log_hint} 里的'启动接管'记录。"
+            )
+            return
         _fail(
-            "安装后没有任何 ReaderPC 进程在跑（新实例可能起了又退）；"
+            "安装后没有任何 ReaderPC 进程在跑（新实例可能起了又退），稳定启动器兜底拉起也没起来；"
             f"看 {log_hint}"
         )
     _fail(
