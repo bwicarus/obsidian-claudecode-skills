@@ -182,8 +182,14 @@ test("小组件：方格 + 大号 + 每张卡一个删除键 + 图按 sha 取", 
   assert.match(WIDGET, /BWReaderBoardWidget\(\)/, "要进 WidgetBundle 才会出现");
   assert.match(WIDGET, /\.systemExtraLarge/, "用户点名的「更大的版本」");
   assert.match(WIDGET, /struct DeleteBoardCardIntent: AppIntent/);
-  assert.match(WIDGET, /Button\(intent: DeleteBoardCardIntent\(code: code, cardId: card\.id\)\)/,
-    "每张卡固定一个删除键");
+  assert.match(WIDGET, /Button\(intent: DeleteBoardCardIntent\(code: slot\.board\.code, cardId: card\.id\)\)/,
+    "每张卡固定一个删除键，且带的是这张卡自己所属板子的编码");
+  // 2026-09-05 用户实拍：五块板子只显示了第一块，其余折成「另有 4 块板子」。
+  // 格子必须跨板子铺；取图也要按同一顺序跨板子，否则第二块起的卡只剩 alt 文字。
+  assert.match(WIDGET, /boards\.flatMap \{ board in \(board\.cards \?\? \[\]\)\.map/, "格子跨板子铺");
+  assert.match(WIDGET, /\(data\?\.boards \?\? \[\]\)\.flatMap \{ \$0\.cards \?\? \[\] \}/, "取图跨板子");
+  assert.doesNotMatch(WIDGET, /另有 \\\(boards\.count - 1\) 块板子/, "不再把其余板子折成一行字");
+  assert.match(WIDGET, /还有 \\\(hidden\) 张卡放不下/, "放不下的按卡报数");
   assert.match(WIDGET, /"op": "cardDelete"/);
   assert.match(WIDGET, /reloadTimelines\(ofKind: "BWReaderBoardWidget"\)/, "删完立刻刷");
   assert.match(WIDGET, /default: return \(4, 2\)/, "大号放 8 张");
@@ -200,7 +206,9 @@ test("小组件：方格 + 大号 + 每张卡一个删除键 + 图按 sha 取", 
   const view = WIDGET.slice(
     WIDGET.indexOf("private struct BoardWidgetView: View"),
     WIDGET.indexOf("struct BWReaderBoardWidget: Widget"));
-  assert.match(view, /dataAge\(board\.updatedAtMs\)/);
+  // 多板同屏：数据时刻取所有板子里最新的那一次，不是第一块的。
+  assert.match(view, /dataAge\(newestUpdatedAtMs\)/);
+  assert.match(view, /boards\.map\(\\\.updatedAtMs\)\.max\(\)/);
   assert.match(view, /Text\(failure\)/);
   // 新字段一律可选，否则老缓存整份解码失败
   assert.match(MODEL, /var boards: \[Board\]\?/);

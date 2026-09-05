@@ -256,8 +256,11 @@ private struct SystemDataProvider: TimelineProvider {
             }
             // 展示板卡片图：Windows 渲好、按 sha 内容寻址。有缓存直接用，
             // 没有才下载；下载失败那张卡显示 alt 文字，其它卡不受影响。
+            // 跨板子铺格（2026-09-05 用户实拍：五块板子只显示了第一块），
+            // 所以图也要按同一顺序跨板子取；最大格数 8，多取的图只白占内存。
+            let orderedCards = (data?.boards ?? []).flatMap { $0.cards ?? [] }
             let images = await WidgetCardImageCache.images(
-                for: data?.boards?.first?.cards ?? [])
+                for: Array(orderedCards.prefix(BoardWidgetView.maxSlots)))
             completion(Timeline(
                 entries: [SystemDataEntry(
                     date: now, data: data, cardImages: images)],
@@ -651,8 +654,18 @@ private struct BoardWidgetView: View {
         entry.data?.boards ?? []
     }
 
-    /// 桥已按最近更新排序，第一块就是最该看的那块。
-    private var board: ReaderWidgetSystemData.Board? { boards.first }
+    /// 一格一张卡，**跨板子**按顺序铺（2026-09-05 用户实拍：AI 建了五块板子，
+    /// 特大号 8 格只显示了第一块的 1 张卡，其余四块折成一行「另有 4 块板子」）。
+    /// 桥已按最近更新给板子排序、板内按写入顺序，所以格子先给最新的板子。
+    /// 每格记着自己属于哪块板子：删除键要带板子编码，多板同屏时角标写板名。
+    struct Slot: Identifiable {
+        let board: ReaderWidgetSystemData.Board
+        let card: ReaderWidgetSystemData.Board.Card
+        var id: String { board.code + "/" + card.id }
+    }
+
+    /// 最大的一档能放几张 —— timeline 取图也按这个数截，别多下载。
+    static let maxSlots = 8
 
     /// 方格：列数 × 行数。大号（iPad）能放 8 张。
     private var grid: (columns: Int, rows: Int) {
@@ -664,34 +677,56 @@ private struct BoardWidgetView: View {
         }
     }
 
-    private var cards: [ReaderWidgetSystemData.Board.Card] {
-        Array((board?.cards ?? []).prefix(grid.columns * grid.rows))
+    private var allSlots: [Slot] {
+        boards.flatMap { board in (board.cards ?? []).map { Slot(board: board, card: $0) } }
+    }
+
+    private var slots: [Slot] {
+        Array(allSlots.prefix(grid.columns * grid.rows))
+    }
+
+    /// 格子里出现了几块不同的板子。只有一块时标题就写它的名字；
+    /// 多于一块时标题写总数，每张卡角上标它属于哪块。
+    private var shownBoardCodes: Set<String> { Set(slots.map(\.board.code)) }
+
+    private var headerTitle: String {
+        if shownBoardCodes.count <= 1, let only = slots.first?.board ?? boards.first {
+            return only.title
+        }
+        return "展示板 · \(boards.count) 块"
+    }
+
+    /// 数据时刻取所有板子里最新的那一次 —— 板子是快照，旧了必须让人看得出来。
+    private var newestUpdatedAtMs: Int64 {
+        boards.map(\.updatedAtMs).max() ?? 0
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let board {
+            if !boards.isEmpty {
                 HStack(spacing: 4) {
                     Image(systemName: "square.grid.2x2")
                         .font(.caption2)
-                    Text(board.title)
+                    Text(headerTitle)
                         .font(.caption).bold()
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    Text(dataAge(board.updatedAtMs))
+                    Text(dataAge(newestUpdatedAtMs))
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
                 .foregroundStyle(.secondary)
-                if cards.isEmpty {
+                if slots.isEmpty {
                     Spacer(minLength: 0)
-                    Text("这块板子暂时是空的")
+                    Text(boards.count == 1 ? "这块板子暂时是空的" : "板子暂时都是空的")
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                 } else {
-                    cardGrid(code: board.code)
+                    cardGrid()
                 }
-                if boards.count > 1, family != .systemSmall {
-                    Text("另有 \(boards.count - 1) 块板子")
+                // 放不下的按**卡**报数，不按板子 —— 用户要知道的是漏看了几张。
+                let hidden = allSlots.count - slots.count
+                if hidden > 0, family != .systemSmall {
+                    Text("还有 \(hidden) 张卡放不下")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
             } else if let failure = entry.data?.boardsError {
@@ -722,11 +757,13 @@ private struct BoardWidgetView: View {
 
     /// 方格本体。每格一张卡：渲好的图铺满方块；取不到图就显示 alt 文字。
     /// 右上角固定一个删除键（Button(intent:)），谁写的卡都能被用户一键撤掉。
-    private func cardGrid(code: String) -> some View {
+    private func cardGrid() -> some View {
         let columns = Array(
             repeating: GridItem(.flexible(), spacing: 6), count: grid.columns)
+        let labelBoards = shownBoardCodes.count > 1
         return LazyVGrid(columns: columns, spacing: 6) {
-            ForEach(cards, id: \.id) { card in
+            ForEach(slots) { slot in
+                let card = slot.card
                 ZStack(alignment: .topTrailing) {
                     Group {
                         if let image = entry.cardImages[card.sha] {
@@ -748,7 +785,19 @@ private struct BoardWidgetView: View {
                     }
                     .aspectRatio(1, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    Button(intent: DeleteBoardCardIntent(code: code, cardId: card.id)) {
+                    .overlay(alignment: .bottomLeading) {
+                        // 多板同屏时才标板名：只有一块时标题已经说了。
+                        if labelBoards {
+                            Text(slot.board.title)
+                                .font(.system(size: 9, weight: .semibold))
+                                .lineLimit(1)
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 6).padding(.vertical, 3)
+                                .background(Color.black.opacity(0.55), in: Capsule())
+                                .padding(5)
+                        }
+                    }
+                    Button(intent: DeleteBoardCardIntent(code: slot.board.code, cardId: card.id)) {
                         Image(systemName: "xmark")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(.white)
