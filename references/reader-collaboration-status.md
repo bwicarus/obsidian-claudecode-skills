@@ -4403,3 +4403,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **Pi/扩展**：Reader `0.2.137` / KG `kg-0.2.137-cf1f4b87dfc5965a9917` 与公开 WebExt `0.2.137` 已上线，扩展 SHA `04aece0e…1d25`；回退点 `20260823T061735Z-451974` / `webext-channel-20260823T063458Z-y2n1sl9a`。
 - **Windows**：Direct `0.1.178` 已由 ReaderPC 重新拉起且 `/healthz` 正常；原子安装回退点 `install-0.1.178-20260823T063651Z-e84d6933`，未改 ReaderPC 版本与数据 schema。
 - **iOS**：Actions `32623428740` 上传 TestFlight `1.1.82 (435)`，`32623835696` 确认 `COMPLETE / VALID / IN_BETA_TESTING`，错误与警告均为 0。
+
+### 2026-09-05 现有远程插件接入 Windows ReaderPC 工具壳
+- **实现**：远程 MCP 新增 `reader_pc_tools` 与 `reader_pc_call_tool`；前者动态读取 Windows 本地 Reader MCP 的说明与 schema，后者仅转调 19 个白名单 Reader 工具并原样保留内容块、错误和写入回执。
+- **边界**：Windows 是唯一实时数据源；远端设备只连接既有 `bwicarus-library` 插件，不需要本地 Reader 文件，也不能借代理执行任意命令。
+- **修复**：首次只在 tailnet 自测，未覆盖真实插件链路；用户截图证明公网调用仍报内部错误，最终定位为 VPS nginx 还指向已退出的 Pi `100.101.15.57:8766`。现已把 MCP/OAuth 七条公网路由改到 Windows Tailscale Serve，并迁移旧 OAuth 状态。
+- **验证**：代理单测 `3/3`、部署清单测试 `15/15`、Python 编译和 diff 检查通过；`https://bwicarus.space/mcp` 已由 `502` 恢复为标准 OAuth `401`，public base、PRM 均为 `bwicarus.space`；静态 token 与迁移的旧 OAuth token 均能列出 22 个工具，公网代理能读取 `reader-context-snapshot/1`。
+- **运行/回退**：ReaderPC 主服务已重启并重新拉起 MCP PID `29328`；Windows 凭据备份在 `C:\Users\bwica\.config\mcp-auth-backup-20260905T184654`，VPS nginx 备份在 `/root/nginx-backups/default.bak-20260905T174901-reader-mcp-windows`。未改 Reader 数据。

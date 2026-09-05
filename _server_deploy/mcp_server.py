@@ -21,7 +21,10 @@ import sys
 from pathlib import Path
 
 import httpx
+from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, ToolAnnotations
 
 BASE = os.environ.get("MCP_WEBAPP_BASE", "http://127.0.0.1:5000")
 
@@ -38,6 +41,132 @@ def _token() -> str:
 
 _client = httpx.Client(base_url=BASE, timeout=60.0,
                        headers={"Authorization": f"Bearer {_token()}"})
+
+
+# Windows ReaderPC exposes the live Reader bridge as a local stdio MCP server.
+# The public plugin stays a thin facade: it discovers that server's schemas and
+# forwards calls without duplicating card, anchor, image, or snapshot logic.
+_READER_PC_TOOL_NAMES = frozenset({
+    "reader_context_snapshot",
+    "reader_visual_image",
+    "reader_camera_snap",
+    "reader_capability_guide",
+    "reader_browser_control",
+    "reader_highlight_range",
+    "reader_anki_draft",
+    "reader_card",
+    "reader_command",
+    "reader_paper_start",
+    "reader_page_cards",
+    "reader_page_card_read",
+    "reader_page_card_edit",
+    "reader_page_card_delete",
+    "reader_learning_cards",
+    "reader_learning_card_read",
+    "reader_learning_card_edit",
+    "reader_learning_card_delete",
+    "reader_review_current_card",
+})
+
+
+def _reader_pc_server_parameters() -> StdioServerParameters:
+    command = os.environ.get("READER_CONTEXT_MCP_COMMAND", "").strip()
+    if not command and os.name == "nt":
+        command = str(
+            Path(os.environ.get("USERPROFILE") or Path.home())
+            / "bw-computer-voice-bridge"
+            / "native-host"
+            / "bw-computer-voice-audio.exe"
+        )
+    state = os.environ.get("READER_CONTEXT_MCP_STATE", "").strip()
+    if not state and os.name == "nt":
+        state = str(
+            Path(os.environ.get("USERPROFILE") or Path.home())
+            / "bw-computer-voice-bridge"
+            / "runtime"
+            / "reader-context-snapshot.json"
+        )
+    if not command or not Path(command).is_file():
+        raise FileNotFoundError(
+            "Windows Reader MCP executable is unavailable; set "
+            "READER_CONTEXT_MCP_COMMAND on the ReaderPC host"
+        )
+    if not state:
+        raise FileNotFoundError(
+            "Windows Reader snapshot path is unavailable; set "
+            "READER_CONTEXT_MCP_STATE on the ReaderPC host"
+        )
+    return StdioServerParameters(
+        command=command,
+        args=["--reader-context-mcp", "--state", state],
+    )
+
+
+def _reader_pc_error(ex: Exception) -> CallToolResult:
+    return CallToolResult(
+        isError=True,
+        content=[{
+            "type": "text",
+            "text": f"READER_PC_UNAVAILABLE: {type(ex).__name__}: {ex}",
+        }],
+    )
+
+
+async def _reader_pc_list_tools() -> dict:
+    try:
+        params = _reader_pc_server_parameters()
+        async with stdio_client(params) as (reader, writer):
+            async with ClientSession(reader, writer) as session:
+                await session.initialize()
+                result = await session.list_tools()
+    except Exception as ex:
+        return {
+            "ok": False,
+            "error": "READER_PC_UNAVAILABLE",
+            "detail": f"{type(ex).__name__}: {ex}",
+        }
+    tools = []
+    for tool in result.tools:
+        if tool.name not in _READER_PC_TOOL_NAMES:
+            continue
+        tools.append({
+            "name": tool.name,
+            "description": tool.description or "",
+            "inputSchema": tool.inputSchema,
+            "annotations": (
+                tool.annotations.model_dump(exclude_none=True)
+                if tool.annotations is not None else None
+            ),
+        })
+    tools.sort(key=lambda item: item["name"])
+    return {
+        "ok": True,
+        "source": "windows-readerpc",
+        "count": len(tools),
+        "tools": tools,
+    }
+
+
+async def _reader_pc_call(name: str, args: dict | None) -> CallToolResult:
+    if name not in _READER_PC_TOOL_NAMES:
+        return CallToolResult(
+            isError=True,
+            content=[{
+                "type": "text",
+                "text": (
+                    f"READER_PC_TOOL_NOT_ALLOWED: {name}. "
+                    "Call reader_pc_tools first and use one returned name."
+                ),
+            }],
+        )
+    try:
+        params = _reader_pc_server_parameters()
+        async with stdio_client(params) as (reader, writer):
+            async with ClientSession(reader, writer) as session:
+                await session.initialize()
+                return await session.call_tool(name, args or {})
+    except Exception as ex:
+        return _reader_pc_error(ex)
 
 try:   # HTTP 模式经 nginx/Funnel 反代,Host 头是 ts.net → 关 SDK 的 DNS-rebinding Host 校验(否则 421;安全由 Bearer 门禁负责)
     from mcp.server.transport_security import TransportSecuritySettings
@@ -313,6 +442,38 @@ def assistant_call_tool(name: str, args: dict | None = None,
     if selection:
         ctx["selection"] = selection
     return _post("/api/assistant/tool", {"name": name, "args": args or {}, "ctx": ctx})
+
+
+# ───────────────────────── Windows ReaderPC 实时工具代理 ─────────────────────────
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+))
+async def reader_pc_tools() -> dict:
+    """列出这台 Windows ReaderPC 当前可供远程插件调用的 Reader 工具及完整参数说明。
+
+    需要读取当前页、看页面/选区图、创建或改绑图片卡、管理页面卡片、操作学习卡
+    或复习当前卡片时，先调用本工具发现准确名称与 inputSchema，再用
+    reader_pc_call_tool 调用。目录直接来自 Windows 上正在使用的 Reader MCP，插件不复制业务逻辑。
+    """
+    return await _reader_pc_list_tools()
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=True,
+    idempotentHint=False,
+    openWorldHint=False,
+))
+async def reader_pc_call_tool(name: str, args: dict | None = None) -> CallToolResult:
+    """按 reader_pc_tools 返回的名称和参数，调用这台 Windows 上的实时 Reader 工具。
+
+    返回内容、图片、错误状态和写入回执均由原始 Reader MCP 原样透传；不要根据旧记忆猜参数，
+    也不要在结果不确定时自动重复写操作。该入口只允许已登记的 Reader 工具，不能执行任意命令。
+    """
+    return await _reader_pc_call(name, args)
 
 
 @mcp.tool()
