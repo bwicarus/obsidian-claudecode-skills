@@ -65,6 +65,23 @@ test("模型看到的 payload 明说依据：basis=pinned 按钉住时刻算新�
   assert.match(MCP, /pinned\["live"\] = DescribeLiveDelta\(pinned, live\);/, "钉住之后变了什么要报");
   assert.match(MCP, /"Read basis first\. basis=pinned means the payload is "/, "工具描述要教模型看 basis");
   assert.match(MCP, /private JsonObject BuildLivePayload\(bool forModel\)/);
+  // 2026-09-06 回归：取图（reader_visual_image）读了钉住版，用户说完才画的圈不在里面，
+  // 模型回「没有可用合成图」。能不能取图、取哪个笔迹版本，永远看实时版。
+  assert.match(MCP, /pinned\["visualAccess"\] = live\["visualAccess"\]\?\.DeepClone\(\);/, "visualAccess 以实时版为准");
+  const visual = MCP.slice(
+    MCP.indexOf("private async Task HandleVisualToolCallAsync("),
+    MCP.indexOf("VisualRequestStillCurrent(after, request)"));
+  assert.match(visual, /JsonObject before = BuildLivePayload\(forModel: false\);/, "取图前读实时版");
+  assert.match(visual, /JsonObject after = BuildLivePayload\(forModel: false\);/, "取图后校验也读实时版");
+  assert.doesNotMatch(visual, /BuildToolPayload\(/, "取图不许读钉住版");
+  // 同一类：控制浏览器要等快照**前进**来确认滚动到位，钉住版永远不前进。
+  const browser = MCP.slice(
+    MCP.indexOf("private async Task HandleBrowserControlToolCallAsync("),
+    MCP.indexOf("BrowserControlRequestStillCurrent(after, request)"));
+  assert.doesNotMatch(browser, /BuildToolPayload\(/, "控制浏览器不许读钉住版");
+  assert.match(browser, /after = BuildLivePayload\(forModel: false\);/);
+  // 其余工具（高亮 / 建卡 / 查页 / 练习纸）照旧读钉住版：模型是对着钉住那版挑的目标，
+  // 写回也该落在那一页 —— 只有"等 Reader 前进"和"取此刻的图"这两类必须看实时。
 });
 
 test("自检覆盖：判定器、协调器钉住、文件落盘", () => {

@@ -5953,7 +5953,9 @@ internal sealed class ReaderContextMcpServer
         }
 
         await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
-        JsonObject before = BuildToolPayload();
+        // 控制浏览器看的是**现在**的页面，且下面要等快照前进来确认滚动到位 ——
+        // 钉住版永远不前进，读它会让每次滚动都等满五秒再报"没到位"。
+        JsonObject before = BuildLivePayload(forModel: false);
         ReaderBrowserControlRequest? request =
             BuildBrowserControlRequest(
                 before,
@@ -5987,7 +5989,7 @@ internal sealed class ReaderContextMcpServer
             return;
         }
 
-        JsonObject after = BuildToolPayload();
+        JsonObject after = BuildLivePayload(forModel: false);
         bool snapshotAdvanced = false;
         bool requiresSnapshotAdvance =
             BrowserControlResponseRequiresSnapshotAdvance(
@@ -6002,7 +6004,7 @@ internal sealed class ReaderContextMcpServer
         {
             await TryLoadLatestAsync(cancellationToken)
                 .ConfigureAwait(false);
-            after = BuildToolPayload();
+            after = BuildLivePayload(forModel: false);
             if (!BrowserControlRequestStillCurrent(after, request))
             {
                 await WriteBrowserControlToolErrorAsync(
@@ -6322,7 +6324,9 @@ internal sealed class ReaderContextMcpServer
         }
 
         await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
-        JsonObject before = BuildToolPayload();
+        // 取图看的是**现在**的 Reader，不是钉住那一刻：用户说完话才画的圈就在实时版里。
+        // 2026-09-06 实锤：钉住版上线后取笔迹回「没有可用合成图」，正是这里读了钉住的快照。
+        JsonObject before = BuildLivePayload(forModel: false);
         ReaderVisualDeliveryRequest? request = BuildVisualRequest(
             before,
             scope,
@@ -6355,7 +6359,7 @@ internal sealed class ReaderContextMcpServer
         }
 
         await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
-        JsonObject after = BuildToolPayload();
+        JsonObject after = BuildLivePayload(forModel: false);
         if (!VisualRequestStillCurrent(after, request))
         {
             await WriteVisualToolErrorAsync(
@@ -7088,9 +7092,9 @@ internal sealed class ReaderContextMcpServer
         }
         ApplyFreshness(pinned, at);
         pinned["mcp"] = live["mcp"]?.DeepClone();
-        pinned["visualAccess"] = BuildVisualAccess(
-            pinned,
-            _fetchVisualAsync is not null);
+        // 能不能取图是**现在**的事：来源在不在线、笔迹版本是哪个，都以实时版为准。
+        // 按钉住那一刻算会把"说完才画的圈"判成没有笔迹（2026-09-06 实锤）。
+        pinned["visualAccess"] = live["visualAccess"]?.DeepClone();
         if (forModel)
         {
             TrimDrawingForModel(pinned);

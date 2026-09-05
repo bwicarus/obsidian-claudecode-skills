@@ -802,7 +802,9 @@
       '.vc-imgdrop-t{font-size:11px;color:#9aa4b8;margin-top:3px}' +
       '.vc-ig-cell.vc-picked{box-shadow:0 0 0 2px rgba(123,108,255,.9)}' +
       '.vc-ig-img{width:100%;display:block;border-radius:10px 10px 0 0;cursor:pointer}' +
-      '.vc-ig-t{font-size:10.5px;color:#9fb0cf;padding:3px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+      // 图卡说明整段显示（2026-09-06 用户实拍：AI 给人物照配的一段简介被截成一行省略号）。
+      // 说明是内容不是标签：能换行就换行，长了让卡片长高，不裁。
+      '.vc-ig-t{font-size:11.5px;line-height:1.45;color:#b7c4dc;padding:4px 7px 6px;white-space:normal;overflow:visible;text-overflow:clip;word-break:break-word}' +
       '.vc-vg-wrap{position:relative}' +
       '.vc-vg-empty{display:flex;align-items:center;justify-content:center;min-height:84px;color:#7d8db0;font-size:11px;background:#10182b}' +
       '.vc-vg-play{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:34px;height:34px;border-radius:50%;border:none;' +
