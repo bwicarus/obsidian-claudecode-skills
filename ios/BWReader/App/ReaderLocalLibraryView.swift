@@ -1350,6 +1350,17 @@ struct ReaderLocalLibraryView: View {
                     )
                 }
             }
+            // 用户 2026-09-06：「本身就有文字层的书籍专用的，只需要做分词等处理」。
+            Button("文字层 PDF（不 OCR，只分词）") {
+                Task {
+                    await startPiOCR(
+                        remoteBook: remoteBook,
+                        localBook: localBook,
+                        engine: "native",
+                        executor: executor
+                    )
+                }
+            }
             // 用户 2026-08-18：「而不是覆盖或者拒绝进行多次预处理」。
             // 上面两项仍然复用已发布的结果（省时省钱的正确默认）；只有从这里
             // 进去才会真的再跑一次，跑出来的是**新的一份**，旧的不动。
@@ -1371,6 +1382,17 @@ struct ReaderLocalLibraryView: View {
                             remoteBook: remoteBook,
                             localBook: localBook,
                             engine: "manga",
+                            executor: executor,
+                            force: true
+                        )
+                    }
+                }
+                Button("文字层 PDF（不 OCR，只分词）") {
+                    Task {
+                        await startPiOCR(
+                            remoteBook: remoteBook,
+                            localBook: localBook,
+                            engine: "native",
                             executor: executor,
                             force: true
                         )

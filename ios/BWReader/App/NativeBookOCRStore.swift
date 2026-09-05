@@ -1671,7 +1671,7 @@ actor NativeBookOCRSidecarStore {
               value.pageWidth.isFinite, value.pageHeight.isFinite,
               value.pageWidth > 0, value.pageHeight > 0,
               value.imageWidth > 0, value.imageHeight > 0,
-              ["vision", "manga"].contains(value.engine) else {
+              ["vision", "manga", "native"].contains(value.engine) else {
             throw NativeBookOCRError.invalidAttachment("文字页附件身份或几何无效")
         }
         // ⚠ textCharCount 与 chars.count **不是**同一个量，不能相等比。
@@ -1766,7 +1766,9 @@ actor NativeBookOCRSidecarStore {
             // The v5/v6 Manga profile keeps the original Vision character
             // sequence and geometry; Manga only supplies layout metadata.
             // Older Manga payloads without that contract remain estimated.
+            // native（有文字层的书，2026-09-06）：字符框直接来自 PDF 字符层，本来就是精确的。
             characterGeometry: value.engine == "vision"
+                || value.engine == "native"
                 || (value.engine == "manga" && layout?.textSource == .vision)
                 ? .exact : .estimated,
             formulaCoverage: .unknown,
@@ -1966,7 +1968,7 @@ actor NativeBookOCRSidecarStore {
                 options: .regularExpression
               ) != nil,
               manifest.executor.map({ ["pi", "pc"].contains($0) }) ?? true,
-              manifest.engine.map({ ["vision", "manga", "legacy"].contains($0) })
+              manifest.engine.map({ ["vision", "manga", "native", "legacy"].contains($0) })
                 ?? true,
               manifest.processingProfile.map({ !$0.isEmpty && $0.count <= 80 })
                 ?? true,

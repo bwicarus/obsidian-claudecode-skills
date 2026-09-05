@@ -1081,6 +1081,61 @@ def _table_cell_layout_runs(chars: list[dict], indices: list[int]) -> list[list[
     return [sorted(run) for run in runs]
 
 
+_NATIVE_LIGATURES = {
+    "ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
+}
+
+
+def _native_page(page) -> tuple[list[dict], str, int, int]:
+    """有文字层的书：直接读 PDF 自带的字符层，不做 OCR。
+
+    用户 2026-09-06："预处理应该多一个本身就有文字层的书籍专用的，也就是说只需要做分词等
+    处理就行了。"字符结构与 Vision 页一致（c/x0/y0/x1/y1/sp/w/b/bk），坐标就是 PDF 点，
+    所以 App 侧 characterGeometry 可以当 exact。bk = rawdict 块号（段落），分词以块为单位
+    交给 _tokenize_chars（fugashi / 西文切词）；振假名留给 App 自己算。
+    没有文字层的页（扫描件混进来）返回空 chars，调用方按页记 unavailable，不伪造。
+    """
+    raw = page.get_text("rawdict")
+    chars: list[dict] = []
+    for block_index, block in enumerate(raw.get("blocks") or []):
+        if block.get("type", 0) != 0:
+            continue
+        for line in block.get("lines") or []:
+            for span in line.get("spans") or []:
+                font = str(span.get("font") or "").lower()
+                bold = bool(int(span.get("flags", 0) or 0) & 16) or "bold" in font
+                for item in span.get("chars") or []:
+                    bbox = item.get("bbox")
+                    text = item.get("c") or ""
+                    if (
+                        not text
+                        or not isinstance(bbox, (list, tuple))
+                        or len(bbox) != 4
+                    ):
+                        continue
+                    text = _NATIVE_LIGATURES.get(text, text)
+                    x0, y0, x1, y1 = (float(value) for value in bbox)
+                    chars.append({
+                        "c": text,
+                        "x0": round(min(x0, x1), 3),
+                        "y0": round(min(y0, y1), 3),
+                        "x1": round(max(x0, x1), 3),
+                        "y1": round(max(y0, y1), 3),
+                        "sp": 1 if text.isspace() else 0,
+                        # w 由 _tokenize_chars 覆盖；空白字符不分词，保留 -1（App 侧 w 是必填 Int）。
+                        "w": -1,
+                        "b": 1 if bold else 0,
+                        "bk": block_index,
+                    })
+    text_out = "".join(char["c"] for char in chars)
+    return (
+        chars,
+        text_out,
+        max(1, int(round(float(page.rect.width)))),
+        max(1, int(round(float(page.rect.height)))),
+    )
+
+
 def _vision_page_layout(
     chars: list[dict],
     *,
@@ -4029,6 +4084,17 @@ def run(args) -> int:
                         page_w=float(page.rect.width),
                         page_h=float(page.rect.height),
                     )
+                elif args.engine == "native":
+                    # 有文字层的书：不 OCR，读字符层 + 分词（用户 2026-09-06）。
+                    chars, text, image_w, image_h = _native_page(page)
+                    layout = _vision_page_layout(
+                        chars,
+                        page_w=float(page.rect.width),
+                        page_h=float(page.rect.height),
+                    )
+                    if chars:
+                        layout["textSource"] = "native"
+                    chars = _tokenize_chars(chars, layout)
                 else:
                     vision_chars = None
                     try:
@@ -4070,6 +4136,9 @@ def run(args) -> int:
                     "textCharCount": len("".join(text.split())),
                     "generatedAtEpochMs": int(time.time() * 1000),
                 }
+                if args.engine == "native":
+                    # 字符层自带词边界（_tokenize_chars 已跑），不需要再走 manga 那趟分词。
+                    sidecar["tokenized"] = True
                 if effective_dpi is not None:
                     # 贴合度问题永远先看这一项 —— 有效 DPI 掉下去,框就会开始糊。
                     sidecar["visionEffectiveDpi"] = round(effective_dpi, 1)
@@ -4220,7 +4289,7 @@ def parse_args(argv=None):
     parser.add_argument("--project")
     parser.add_argument("--book-id")
     parser.add_argument("--content-sha256")
-    parser.add_argument("--engine", choices=("vision", "manga"))
+    parser.add_argument("--engine", choices=("vision", "manga", "native"))
     parser.add_argument("--job-id")
     parser.add_argument("--worker-generation")
     parser.add_argument("--max-pages", type=int, default=5000)

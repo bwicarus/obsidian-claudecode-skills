@@ -294,6 +294,8 @@ private func rejectUnknownOCRFields<Key: CodingKey & CaseIterable>(
 
 enum NativeBookOCRPageLayoutTextSource: String, Codable, Equatable, Sendable {
     case vision
+    /// 有文字层的书直接读 PDF 字符层（2026-09-06 的 native 引擎），布局算法与 vision 同一套。
+    case native
     case unavailable
 }
 

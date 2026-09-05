@@ -329,7 +329,11 @@ class ShortcutBrokerRequestProcessor:
 # These identifiers are local constants.  Reader input is never accepted as an
 # application path, command, or AUMID.
 LOCAL_PACKAGED_APP_IDS = {
-    "codex-desktop": "OpenAI.CodexBeta_2p2nqsd0c76g0!App",
+    # 2026-09-06 起默认 Codex 正式版（用户拍板）；Beta 只保留给回滚。
+    # ⚠ 与 C# DirectBridgeContract.CodexAppUserModelId、readerpc_services.CODEX_VOICE_REGISTRY_PATH
+    #   是同一身份的三份副本，改要同改。
+    "codex-desktop": "OpenAI.Codex_2p2nqsd0c76g0!App",
+    "codex-desktop-beta": "OpenAI.CodexBeta_2p2nqsd0c76g0!App",
     "chatgpt-classic": (
         "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT"
     ),

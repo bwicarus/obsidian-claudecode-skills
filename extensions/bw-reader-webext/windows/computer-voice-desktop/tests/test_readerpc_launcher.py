@@ -574,7 +574,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
         bridge_paths.service_record.exists.return_value = True
         process_runner = Mock()
         with (
-            patch("readerpc_launcher.set_codex_voice_keep_active"),
+            patch("readerpc_launcher.set_codex_voice_keep_active") as intent,
             patch("readerpc_launcher.set_readerpc_service_mode"),
             patch("readerpc_launcher.set_direct_config_enabled") as configure,
             patch(
@@ -595,6 +595,8 @@ class ReaderPCLauncherTests(unittest.TestCase):
                 disable_configuration=False,
             )
         configure.assert_not_called()
+        # 2026-09-06：换代/重启不撤销 keepalive —— 撤销 = C# 按 F24 把活着的通话关掉。
+        intent.assert_not_called()
         self.assertEqual(recovering.call_count, 2)
         disabled.assert_not_called()
 

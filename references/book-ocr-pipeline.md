@@ -342,3 +342,20 @@ OCR 流水线原来只能改 systemd unit 硬编码 PDF 路径跑。2026-06 曾�
   `revision` 的那份结果（找不到就只删本机）。轮询在任务状态/结果版本变化后 60 秒内保持 3 秒节奏，导入成功才记
   去重键（失败下轮重试），`pageCharsRevision` 未出时按 jobId 去重也导入 —— 626 里"完成后没有立刻更新"就是 20 秒
   空闲节奏 + 一次失败即放弃造成的。
+
+## native 引擎：有文字层的书不 OCR、只分词（2026-09-06）
+
+用户："预处理应该多一个本身就有文字层的书籍专用的，也就是说只需要做分词等处理就行了。"
+
+- **做什么**：`reader_book_ocr_worker._native_page(page)` 直接读 PyMuPDF `rawdict` 的字符层
+  （c / x0 y0 x1 y1 / sp / b / bk，bk = 段落块号，坐标就是 PDF 点），版面走与 Vision 同一套
+  `_vision_page_layout`（`textSource` 标 `native`），分词走 `_tokenize_chars`（fugashi / 西文切词，
+  以块为边界）。不渲染页图、不调 Vision、不需要 CUDA。振假名留给 App 自己算（`furigana: []`）。
+- **不做什么**：没有文字层的页返回空 chars，版面标 `unavailable`，不伪造；扫描书请照旧用 Vision / Manga。
+- **引擎表的副本**（见 `tests/reader_contract/ocr-engine-table.contract.test.mjs`，缺一处的表现是
+  "服务器接受了、App 拒收"或"按钮有、服务器 400"）：服务端 `ENGINES`；Pi worker CLI `--engine`
+  choices；PC worker 的 `Claim.parse` / `supported_engines` / `--engines` 默认值；App 的
+  `ReaderPiBookOCR` 五处白名单、`NativeBookOCRStore` 两处白名单与 `characterGeometry`、
+  `NativeBookOCRPageLayoutTextSource` 枚举、`ReaderLocalLibraryView` 两处按钮。
+- **到达面**：Flask（ReaderPC 看代码变化自动重启）+ ReaderPC 包（`scripts/reader_pc_preprocess_worker.py`
+  在 RUNTIME_SOURCES 里，要出新包）+ App（TestFlight 新构建）。三条互不相干，做一个不等于做完。

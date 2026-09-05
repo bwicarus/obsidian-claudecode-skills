@@ -35,7 +35,11 @@ from reader_sidecar_store import atomic_write_json, exclusive_lock, read_json
 CONTRACT = "reader-library-ocr/1"
 WORKER_CONTRACT = "reader-library-ocr-worker/1"
 ADOPTION_CONTRACT = "reader-library-ocr-adoption/1"
-ENGINES = frozenset(("vision", "manga"))
+# native（2026-09-06 用户）：本身就有文字层的书专用 —— 不做 OCR，直接读 PDF 字符层，
+# 只做分词等处理。⚠ 这张引擎表有多份副本（worker CLI choices、PC worker 的 supported_engines
+# 与 Claim.parse、App 里 ReaderPiBookOCR/NativeBookOCRStore 的白名单与按钮），
+# 见 tests/reader_contract/ocr-engine-table.contract.test.mjs。
+ENGINES = frozenset(("vision", "manga", "native"))
 EXECUTORS = frozenset(("pi", "pc"))
 PROCESSING_PROFILES = {
     "pi": "pi-default-v5",
@@ -286,7 +290,7 @@ def _normalize_page_layout(
         fail()
     if (
         layout.get("schema") != PAGE_LAYOUT_SCHEMA
-        or layout.get("textSource") not in {"vision", "unavailable"}
+        or layout.get("textSource") not in {"vision", "native", "unavailable"}
         or layout.get("layoutSource") not in {"manga", "ruled-table", "vision"}
         or layout.get("mode") not in {"manga", "table", "vision", "fallback"}
         or layout.get("readingDirection") not in {"ltr", "rtl"}

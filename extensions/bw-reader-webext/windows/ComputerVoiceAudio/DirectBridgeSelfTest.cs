@@ -244,7 +244,7 @@ internal static class DirectBridgeSelfTest
             && directHelloPayload.GetProperty("limits")
                 .GetProperty("uplinkTrack").GetInt32() == 3
             && directHelloPayload.GetProperty("limits")
-                .GetProperty("uplinkQueueLimitMs").GetInt32() == 200
+                .GetProperty("uplinkQueueLimitMs").GetInt32() == 200   // 线上契约，App/扩展严格核对；桥内队列容量另算
             && directSession.IsAuthenticated
             && directSession.Phase == DirectProtocolPhase.AwaitingStart
             && appLauncher.EnsureRunningCount == 0

@@ -18,7 +18,7 @@ READERPC_STATUS_CONTRACT = "readerpc-server-status/1"
 READER_CONTEXT_SNAPSHOT_CONTRACT = "reader-context-snapshot/1"
 CODEX_VOICE_REGISTRY_PATH = (
     r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager"
-    r"\ConsentStore\microphone\OpenAI.CodexBeta_2p2nqsd0c76g0"
+    r"\ConsentStore\microphone\OpenAI.Codex_2p2nqsd0c76g0"   # 2026-09-06 起正式版（原 CodexBeta）
 )
 DEFAULT_PI_ORIGIN = "https://bwicarus-2.taile44d0c.ts.net"   # 2026-09-02 Pi 整体退出:协调/发布在 Windows 的 Flask
 STATUS_LIMIT_BYTES = 128 * 1024

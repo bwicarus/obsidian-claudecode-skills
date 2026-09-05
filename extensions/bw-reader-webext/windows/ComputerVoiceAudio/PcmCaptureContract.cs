@@ -218,11 +218,21 @@ internal sealed class BoundedPcmPacketQueue : IBoundedPcmSink
     private readonly Queue<PcmPacket> _packets = new();
     private readonly int _maximumPackets;
     private readonly int _maximumBytes;
+    private readonly bool _dropOldestWhenFull;
     private int _queuedBytes;
+    private long _droppedPackets;
     private bool _completed;
     private Exception? _completionError;
 
-    internal BoundedPcmPacketQueue(int maximumPackets, int maximumBytes)
+    /// dropOldestWhenFull（2026-09-06 审计 C04）：AI 声音的下行队列满了不再 fail-closed。
+    /// 原策略是"满了 = 整条媒体拆掉"，而它满的时刻恰恰是 AI 正在出声、App 那边收得慢
+    /// （网络抖一下）—— 一次 320 ms 的下行卡顿就把用户的上行也一起拆了。AI 的声音
+    /// 少几个包只是听到一小格空白；用户的麦克风没了才是事故。麦克风上行队列另有
+    /// 自己的策略（BoundedUplinkPcmQueue），不走这里。
+    internal BoundedPcmPacketQueue(
+        int maximumPackets,
+        int maximumBytes,
+        bool dropOldestWhenFull = false)
     {
         if (maximumPackets <= 0)
         {
@@ -236,6 +246,18 @@ internal sealed class BoundedPcmPacketQueue : IBoundedPcmSink
 
         _maximumPackets = maximumPackets;
         _maximumBytes = maximumBytes;
+        _dropOldestWhenFull = dropOldestWhenFull;
+    }
+
+    internal long DroppedPackets
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _droppedPackets;
+            }
+        }
     }
 
     internal int Count
@@ -287,8 +309,32 @@ internal sealed class BoundedPcmPacketQueue : IBoundedPcmSink
         int packetBytes = packet.Data.Length;
         lock (_gate)
         {
-            if (_completed
-                || _packets.Count >= _maximumPackets
+            if (_completed)
+            {
+                return false;
+            }
+            if (_dropOldestWhenFull)
+            {
+                // 单个包本身就超过整个上限的，谁也救不了；照旧拒收。
+                if (packetBytes > _maximumBytes)
+                {
+                    return false;
+                }
+                while (
+                    _packets.Count != 0
+                    && (
+                        _packets.Count >= _maximumPackets
+                        || packetBytes > _maximumBytes - _queuedBytes
+                    )
+                )
+                {
+                    PcmPacket stale = _packets.Dequeue();
+                    _queuedBytes -= stale.Data.Length;
+                    _droppedPackets += 1;
+                }
+            }
+            else if (
+                _packets.Count >= _maximumPackets
                 || packetBytes > _maximumBytes - _queuedBytes)
             {
                 return false;

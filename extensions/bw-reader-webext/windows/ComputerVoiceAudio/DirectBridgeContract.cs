@@ -27,13 +27,21 @@ internal static class DirectBridgeContract
     internal const int PcmFrameBytes =
         PcmFrameHeaderBytes + PcmPayloadBytes;
     internal const int PcmQueueLimitMilliseconds = 400;
-    internal const int UplinkPcmQueueLimitMilliseconds =
-        BoundedUplinkPcmQueue.MaximumBufferedMilliseconds;
+    // ⚠ 这是**线上契约**，不是桥内部队列的容量：hello 回执里的 limits.uplinkQueueLimitMs
+    //   被 App（DirectVoiceSocket.requireInt == 200）和扩展（rc-computer-voice.js !== 200）
+    //   严格核对，改了就是所有已装客户端握手失败。桥内部的抖动队列（BoundedUplinkPcmQueue，
+    //   2026-09-06 起 400 ms、先丢静音）是另一件事，两者 2026-09-06 起解耦。
+    internal const int UplinkPcmQueueLimitMilliseconds = 200;
     internal const int AuthenticationTimeoutMilliseconds = 10_000;
     internal const int StartTimeoutMilliseconds = 30_000;
     internal const int ClientHeartbeatIntervalMilliseconds = 5_000;
     internal const int ClientHeartbeatTimeoutMilliseconds = 15_000;
+    // 2026-09-06 起默认 Codex 正式版；Beta 只保留给 codex-desktop-beta 回滚用。
+    // ⚠ 同一身份在 Python 侧 bridge_core.LOCAL_PACKAGED_APP_IDS 与
+    //   readerpc_services.CODEX_VOICE_REGISTRY_PATH 各有一份，改要三处同改。
     internal const string CodexAppUserModelId =
+        "OpenAI.Codex_2p2nqsd0c76g0!App";
+    internal const string CodexBetaAppUserModelId =
         "OpenAI.CodexBeta_2p2nqsd0c76g0!App";
     internal const string ChatGptClassicAppUserModelId =
         "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT";

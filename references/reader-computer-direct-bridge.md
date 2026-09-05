@@ -103,7 +103,7 @@ loopback 目标。关闭桌面控制窗不等于关闭 bootstrap；bootstrap 空
   `waiting-app-ready`。捕获 worker 未运行时启动 worker；配置的 Codex/ChatGPT Desktop 未运行时，
   只允许用登记的 packaged app identity 激活它，不从网页接受可执行文件路径或任意命令。
 - 当前直连服务接受两个固定档（`DirectAppTargets.IsSupported`）：`appKind=codex-desktop` 激活
-  `OpenAI.CodexBeta_2p2nqsd0c76g0!App`；Reader 不提交 AUMID、可执行路径或命令。
+  `OpenAI.Codex_2p2nqsd0c76g0!App`（2026-09-06 起默认正式版；Beta 包保留为 `codex-desktop-beta` 目标只供回滚）；Reader 不提交 AUMID、可执行路径或命令。
   `appKind=chatgpt-classic` 激活 `OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT`，它已经进入服务合同，
   不再只是桌面控制器里的保留常量。启动后必须重新归并进程树并等待唯一根目标就绪，超时、多根或
   身份不符均失败。

@@ -679,6 +679,39 @@ internal static class ContractSelfTest
             "oversized-packet-released-and-rejected",
             checks);
 
+        // 下行（AI 声音）队列满了丢最旧、不 fail-closed（2026-09-06 审计 C04）：
+        // 它满的时刻正是 AI 出声而 App 收得慢，拆媒体会把用户的上行一起拆掉。
+        BoundedPcmPacketQueue dropping = new(2, 1024, dropOldestWhenFull: true);
+        static PcmPacket Packet(byte fill) => new(
+            Enumerable.Repeat(fill, 8).ToArray(),
+            FrameCount: 2,
+            Silent: false,
+            Discontinuous: false,
+            TimestampError: false,
+            DevicePosition: 0,
+            QpcPosition: 0);
+        bool wroteFirst = dropping.TryWrite(Packet(1));
+        bool wroteSecond = dropping.TryWrite(Packet(2));
+        bool wroteThird = dropping.TryWrite(Packet(3));
+        bool readFirst = dropping.TryRead(out PcmPacket survivor);
+        Require(
+            wroteFirst
+            && wroteSecond
+            && wroteThird
+            && dropping.DroppedPackets == 1
+            && readFirst
+            && survivor.Data.Span[0] == 2
+            && dropping.Count == 1,
+            "downlink-packet-queue-drops-oldest-instead-of-failing-closed",
+            checks);
+        BoundedPcmPacketQueue strict = new(1, 1024);
+        bool strictFirst = strict.TryWrite(Packet(1));
+        bool strictSecond = strict.TryWrite(Packet(2));
+        Require(
+            strictFirst && !strictSecond && strict.DroppedPackets == 0,
+            "packet-queue-default-still-fails-closed",
+            checks);
+
         FakePacketSource emptySource = new([
             new NativeCapturePacket(
                 Data: 0,
@@ -1476,14 +1509,47 @@ internal static class ContractSelfTest
                 == "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE";
         }
         Require(
-            BoundedUplinkPcmQueue.MaximumBufferedMilliseconds == 200
-            && BoundedUplinkPcmQueue.MaximumFrames == 10
+            BoundedUplinkPcmQueue.MaximumBufferedMilliseconds == 400
+            && BoundedUplinkPcmQueue.MaximumFrames == 20
             && queue.DroppedFrames == 1
             && retainedBytes == Pcm48kMonoFramer.BytesPerChunk
             && oldestRetained.All(value => value == 1)
             && stoppedRejected
             && queue.BufferedFrames == 0,
             "virtual-mic-uplink-queue-drops-oldest-and-stays-bounded",
+            checks);
+
+        // 先丢静音（2026-09-06 审计 C06）：队列满时丢最旧的**静音**帧，人声帧留下 ——
+        // 网络抖一下之后用户那句"等一下"的前半截才不会被吃掉。
+        BoundedUplinkPcmQueue silenceFirst = new();
+        byte[] voicedFrame = Enumerable.Repeat(
+            (byte)0x40,   // 样本 0x4040 = 16448，远高于静音门限
+            Pcm48kMonoFramer.BytesPerChunk).ToArray();
+        byte[] silentFrame = new byte[Pcm48kMonoFramer.BytesPerChunk];
+        for (int index = 0; index < 5; index++)
+        {
+            silenceFirst.Push(voicedFrame);
+        }
+        for (int index = 0; index < 5; index++)
+        {
+            silenceFirst.Push(silentFrame);
+        }
+        for (int index = 0;
+            index < BoundedUplinkPcmQueue.MaximumFrames - 10;
+            index++)
+        {
+            silenceFirst.Push(voicedFrame);
+        }
+        silenceFirst.Push(voicedFrame);   // 满了：该丢第 6 帧（最旧的静音），不是第 1 帧
+        byte[] headAfterDrop = new byte[Pcm48kMonoFramer.BytesPerChunk];
+        int headBytes = silenceFirst.Read(headAfterDrop);
+        Require(
+            headBytes == Pcm48kMonoFramer.BytesPerChunk
+            && headAfterDrop.All(value => value == 0x40)
+            && silenceFirst.DroppedFrames == 1
+            && silenceFirst.BufferedFrames
+                == BoundedUplinkPcmQueue.MaximumFrames - 1,
+            "virtual-mic-uplink-queue-drops-silence-before-speech",
             checks);
 
         FakeVirtualRenderRuntimeFactory factory = new();

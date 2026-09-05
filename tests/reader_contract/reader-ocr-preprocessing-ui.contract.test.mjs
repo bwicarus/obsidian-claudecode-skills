@@ -542,7 +542,8 @@ test("local-only Pi preprocessing uploads first and never happens automatically"
   );
   assert.match(start, /localContentSHA256: localDigest/);
   assert.match(start, /engine: engine/);
-  assert.match(PI, /guard \["vision", "manga"\]\.contains\(engine\)/);
+  // 2026-09-06 加 native（有文字层的书不 OCR、只分词）；引擎表副本清单见 ocr-engine-table 契约。
+  assert.match(PI, /guard \["vision", "manga", "native"\]\.contains\(engine\)/);
   assert.match(PI, /let engine: String\?/);
 });
 

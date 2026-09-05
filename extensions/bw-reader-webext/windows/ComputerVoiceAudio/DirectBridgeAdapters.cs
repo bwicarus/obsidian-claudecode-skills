@@ -164,6 +164,11 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
     // 这里，说完就钉一次；Codex 语音模式自己的端点判定桥看不到，也不需要看到。
     private readonly UplinkSpeechEndDetector _speechEnd = new();
     private Task? _lastPinTask;
+    // 最近一次是谁、为什么让媒体停下（2026-09-06）：Completion 为 null 的"意外停止"
+    // 其实都是某处正常调了 StopAsync，没有这条就只剩一个码可查。
+    private volatile string? _lastMediaStopReason;
+
+    internal string? LastMediaStopReason => _lastMediaStopReason;
     // 双工诊断（2026-09-05 用户："AI 在说话时听不到我"）：AI 出声期间上行还有没有人声帧。
     // 有 → 声音到了桥、是 Codex 那头没理；没有 → 是设备端（回声消除的双讲抑制）把它压掉了。
     // 只计数，不下结论 —— 结论要人看着数字下。
@@ -483,6 +488,9 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                     // START may recover it without inventing a second
                     // liveness clock. CleanupPending is intentionally not a
                     // health signal: live media owns cleanup resources too.
+                    _lastMediaStopReason =
+                        (takeover ? "takeover-by-new-start:" : "stale-owner-replaced:")
+                        + connectionId;
                     await _mediaAdapter.StopAsync(CancellationToken.None)
                         .ConfigureAwait(false);
                     Task<DirectProtocolException?> completion =
@@ -722,6 +730,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                 return;
             }
             RequireActiveOwner(connectionId, sessionId);
+            _lastMediaStopReason = "stop-request:" + connectionId;
             // Once ownership is confirmed, teardown belongs to the bridge.
             // A peer abort may cancel its request token, but must not cancel
             // capture/typist cleanup or erase the only active-session lease
@@ -833,6 +842,8 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             ["speaking"] = _speechEnd.Speaking,
             ["speechEndPins"] = SpeechEndPinCount,
             ["lastPinFailure"] = LastPinFailure,
+            // 虚拟麦克风渲染会话有没有退出 Windows 通讯闪避（"opted-out" 或失败原因）。
+            ["virtualMicDucking"] = AudioSessionDucking.LastVirtualMicrophoneOptOut,
         };
     }
 
@@ -993,6 +1004,10 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         await _stateGate.WaitAsync().ConfigureAwait(false);
         try
         {
+            if (_activeConnectionId == connectionId)
+            {
+                _lastMediaStopReason = "connection-closed:" + connectionId;
+            }
             if (
                 _activeConnectionId != connectionId
                 || _activeSessionId is null
@@ -1039,6 +1054,11 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         await _stateGate.WaitAsync().ConfigureAwait(false);
         try
         {
+            if (_activeConnectionId == connectionId)
+            {
+                _lastMediaStopReason =
+                    "fault:" + stage + ":" + failure.GetType().Name;
+            }
             if (
                 _activeConnectionId != connectionId
                 || _activeSessionId is null
@@ -1198,6 +1218,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             {
                 try
                 {
+                    _lastMediaStopReason = "coordinator-dispose";
                     await _mediaAdapter.StopAsync(CancellationToken.None)
                         .ConfigureAwait(false);
                     Task<DirectProtocolException?> completion =

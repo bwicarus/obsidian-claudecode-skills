@@ -69,7 +69,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.130"
+APP_VERSION = "0.1.132"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status
@@ -701,11 +701,15 @@ def stop_readerpc_voice(
         if disable_configuration
         else write_recovering_reader_context_snapshot
     )
-    try:
-        set_codex_voice_keep_active(bridge_paths, False)
-    except Exception as exc:
-        failures.append(f"撤销 ReaderPC 运行意图：{exc}")
+    # keepalive 只在**真的要关掉语音**时撤销（2026-09-06 审计 C03/KA-05）。
+    # 它对 C# 是一个盲切换的 F24：服务重启 / 换模式（disable_configuration=False）
+    # 也撤一下，就是先把用户正在进行的通话按掉，再由下一代重新按开 —— 那一下
+    # 若落在 Codex 出声期间，用户看到的就是"它说话时听不到我"。
     if disable_configuration:
+        try:
+            set_codex_voice_keep_active(bridge_paths, False)
+        except Exception as exc:
+            failures.append(f"撤销 ReaderPC 运行意图：{exc}")
         try:
             set_direct_config_enabled(bridge_paths, False)
         except Exception as exc:
@@ -736,7 +740,8 @@ def stop_readerpc_voice(
 
 # ── Codex 语音球隐藏(2026-08-17 用户需求) ────────────────────────────────────
 # 语音球是 Codex 的独立置顶 Electron 窗(class Chrome_WidgetWin_1,标题 "Codex",
-# TOPMOST,属主 ChatGPT (Beta).exe),每次语音会话重建 → 周期按签名扫描隐藏。
+# TOPMOST,属主正式版 ChatGPT.exe / Beta 的 ChatGPT (Beta).exe),每次语音会话重建 →
+# 周期按签名扫描隐藏。签名不看映像名,换正式版不受影响。
 # 只动显示层:麦克风/播报/F24 保活全不受影响。主应用窗不置顶,签名天然排除。
 def find_voice_orb_windows() -> list[int]:
     if os.name != "nt":
@@ -780,7 +785,8 @@ def find_voice_orb_windows() -> list[int]:
                 exe = buf.value.rsplit("\\", 1)[-1].lower()
             finally:
                 kernel32.CloseHandle(handle)
-            if exe not in ("chatgpt (beta).exe", "codex.exe"):
+            # 正式版主进程是 chatgpt.exe（2026-09-06 换正式版时补）；Beta 是 chatgpt (beta).exe。
+            if exe not in ("chatgpt.exe", "chatgpt (beta).exe", "codex.exe"):
                 return True
             result.append(int(hwnd))
         except Exception:

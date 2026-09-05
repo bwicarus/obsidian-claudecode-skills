@@ -297,7 +297,7 @@ final class ReaderPiOCRClient {
         force: Bool = false,
         cookies: [HTTPCookie]
     ) async throws -> ReaderPiOCRJob {
-        guard ["vision", "manga"].contains(engine),
+        guard ["vision", "manga", "native"].contains(engine),
               ["pi", "pc"].contains(executor) else {
             throw ReaderPiOCRError.invalidResponse
         }
@@ -384,7 +384,7 @@ final class ReaderPiOCRClient {
         for status in payload.executors {
             guard ["pi", "pc"].contains(status.executor),
                   names.insert(status.executor).inserted,
-                  Set(status.engines).isSubset(of: Set(["vision", "manga"])),
+                  Set(status.engines).isSubset(of: Set(["vision", "manga", "native"])),
                   (status.workerCount ?? 0) >= 0 else {
                 throw ReaderPiOCRError.invalidResponse
             }
@@ -864,7 +864,7 @@ final class ReaderPiOCRClient {
                 == .orderedSame,
               manifest.category == "derived",
               manifest.mergePolicy == "immutable",
-              manifest.engine.map({ ["vision", "manga", "legacy"].contains($0) }) ?? true,
+              manifest.engine.map({ ["vision", "manga", "native", "legacy"].contains($0) }) ?? true,
               manifest.executor.map({ ["pi", "pc"].contains($0) }) ?? true,
               manifest.processingProfile.map({ !$0.isEmpty && $0.count <= 80 }) ?? true,
               (manifest.executor != "pc"
@@ -2100,7 +2100,7 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 && pending.remoteBook.contentSha256.caseInsensitiveCompare(
                     pending.contentSHA256
                 ) == .orderedSame
-                && ["vision", "manga", "legacy"].contains(pending.engine)
+                && ["vision", "manga", "native", "legacy"].contains(pending.engine)
                 && ["pi", "pc"].contains(pending.executor)
                 && isJobID(pending.jobID)
                 && UUID(uuidString: pending.generation) != nil
@@ -2181,7 +2181,7 @@ final class ReaderPiOCRCoordinator: ObservableObject {
               let jobID = job.jobId,
               Self.isJobID(jobID),
               let engine = job.engine,
-              ["vision", "manga", "legacy"].contains(engine),
+              ["vision", "manga", "native", "legacy"].contains(engine),
               (expectedEngine.map({ $0 == engine }) ?? true) else {
             throw ReaderPiOCRError.invalidResponse
         }

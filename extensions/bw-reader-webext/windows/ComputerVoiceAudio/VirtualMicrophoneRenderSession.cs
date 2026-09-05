@@ -40,9 +40,14 @@ internal sealed record VirtualMicrophoneRenderRequest
 internal sealed class BoundedUplinkPcmQueue
 {
     internal const int FrameDurationMilliseconds = 20;
-    internal const int MaximumBufferedMilliseconds = 200;
+    // 400 ms（原 200）。队列只在上游停顿后的突发里才会满；满了怎么丢决定"打断的
+    // 开头"活不活（2026-09-06 审计 C06）：盲丢最旧帧，网络抖 300 ms 之后用户那句
+    // "等一下"的前半截就没了，Codex 的自动暂停靠的正是这前半截。
+    internal const int MaximumBufferedMilliseconds = 400;
     internal const int MaximumFrames =
         MaximumBufferedMilliseconds / FrameDurationMilliseconds;
+    /// 判"这一帧是静音"的 s16 RMS 门限：低于它的帧先让路。
+    internal const double SilentFrameRms = 200;
 
     private readonly object _gate = new();
     private readonly Queue<byte[]> _frames = new();
@@ -94,13 +99,49 @@ internal sealed class BoundedUplinkPcmQueue
                 // jitter queue. Keep latency bounded by dropping stale audio;
                 // unlike the downlink START gate, this cannot create a later
                 // protocol sequence gap.
-                byte[] stale = _frames.Dequeue();
-                Array.Clear(stale);
-                _headOffset = 0;
-                _droppedFrames += 1;
+                //
+                // 先丢**静音**帧，没有静音才丢最旧的人声帧：延迟照样收敛（停顿
+                // 里的静音被吃掉），而用户刚开口的那几帧留下来。
+                DropOneFramePreferringSilence();
             }
             _frames.Enqueue(pcmS16Le.ToArray());
         }
+    }
+
+    /// 调用方持有 _gate。丢掉队列里最旧的一帧静音；一帧静音都没有就丢最旧的那帧。
+    /// 队头正在被 Read 消费时（_headOffset > 0）不动它，从第二帧起找。
+    private void DropOneFramePreferringSilence()
+    {
+        byte[][] frames = _frames.ToArray();
+        int start = _headOffset > 0 ? 1 : 0;
+        int victim = -1;
+        for (int index = start; index < frames.Length; index++)
+        {
+            if (UplinkSpeechEndDetector.Rms(frames[index]) < SilentFrameRms)
+            {
+                victim = index;
+                break;
+            }
+        }
+        if (victim < 0)
+        {
+            victim = start < frames.Length ? start : 0;
+        }
+        _frames.Clear();
+        for (int index = 0; index < frames.Length; index++)
+        {
+            if (index == victim)
+            {
+                Array.Clear(frames[index]);
+                continue;
+            }
+            _frames.Enqueue(frames[index]);
+        }
+        if (victim == 0)
+        {
+            _headOffset = 0;
+        }
+        _droppedFrames += 1;
     }
 
     internal int Read(Span<byte> destination)
@@ -436,6 +477,11 @@ internal sealed class NativeVirtualMicrophoneRenderRuntime :
             _renderClient = _renderClientObject as IAudioRenderClient
                 ?? throw new InvalidOperationException(
                     "BW_COMPUTER_VOICE_DIRECT_RENDER_SERVICE_INVALID");
+            // 这一路渲染的是用户的声音（Codex 的输入），Windows 通讯闪避默认会在
+            // "通讯活动"期间把它当"其它声音"压低 80% —— 见 AudioSessionDucking。
+            // 退出失败不抛：上行照走，只是没有豁免；结果进双工诊断。
+            AudioSessionDucking.LastVirtualMicrophoneOptOut =
+                AudioSessionDucking.TryOptOut(_audioClient);
         }
         catch
         {

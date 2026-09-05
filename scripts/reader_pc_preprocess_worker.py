@@ -297,7 +297,7 @@ class Claim:
         if not SHA256_RE.fullmatch(digest):
             raise WorkerError("Pi returned an invalid content digest")
         engine = str(job.get("engine") or "")
-        if engine not in ("vision", "manga"):
+        if engine not in ("vision", "manga", "native"):
             raise WorkerError("Pi returned an unsupported OCR engine")
         if job.get("executor") != "pc":
             raise WorkerError("Pi returned a job for a different executor")
@@ -769,7 +769,8 @@ class QualityPipeline:
 
     @staticmethod
     def supported_engines(configured: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(engine for engine in configured if engine in ("vision", "manga"))
+        # native（2026-09-06）：有文字层的书直接读字符层，不需要 CUDA 模型。
+        return tuple(engine for engine in configured if engine in ("vision", "manga", "native"))
 
     @staticmethod
     def cuda_status() -> dict:
@@ -938,6 +939,18 @@ class QualityPipeline:
             # vision 分支以前直接跳到下面标 tokenized=True,却从没真跑过分词 ——
             # 服务器那趟看见这个标记就 continue,于是 PC 出的 vision 页永远没分词。
             # 2026-09-02:分词以块为边界,必须把版面(表格格子)一起交给分词器。
+            chars = core._tokenize_chars(chars, layout)
+        elif claim.engine == "native":
+            # 有文字层的书：不 OCR，直接读 PDF 字符层，只做分词（用户 2026-09-06）。
+            # 实现与 Pi worker 共用 core._native_page，这里不再抄一遍。
+            chars, text, image_w, image_h = core._native_page(page)
+            layout = core._vision_page_layout(
+                chars,
+                page_w=float(page.rect.width),
+                page_h=float(page.rect.height),
+            )
+            if chars:
+                layout["textSource"] = "native"
             chars = core._tokenize_chars(chars, layout)
         else:
             vision_chars = None
@@ -1608,7 +1621,7 @@ def parse_args(argv=None):
     parser.add_argument("--worker-id", default=os.environ.get("BW_READER_PC_OCR_WORKER_ID"))
     parser.add_argument("--project-root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--cache-root", default=os.environ.get("BW_READER_PC_OCR_CACHE"))
-    parser.add_argument("--engines", default=os.environ.get("BW_READER_PC_OCR_ENGINES", "vision,manga"))
+    parser.add_argument("--engines", default=os.environ.get("BW_READER_PC_OCR_ENGINES", "vision,manga,native"))
     parser.add_argument("--idle-poll-seconds", type=float, default=20.0)
     parser.add_argument("--once", action="store_true")
     parser.add_argument(

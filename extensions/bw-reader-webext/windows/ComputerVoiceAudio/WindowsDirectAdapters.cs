@@ -1362,9 +1362,11 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 cancellationToken).ConfigureAwait(false);
             initialVoiceBaseline =
                 VoiceActivity.CaptureStartBaseline();
+            // 下行（AI 声音）满了丢最旧的包，不拆媒体（2026-09-06 审计 C04）。
             BoundedPcmPacketQueue outputQueue = new(
                 32,
-                2 * 1024 * 1024);
+                2 * 1024 * 1024,
+                dropOldestWhenFull: true);
             DirectOutputCaptureSession outputSession =
                 DirectOutputCaptureSession.Prepare(
                     request,

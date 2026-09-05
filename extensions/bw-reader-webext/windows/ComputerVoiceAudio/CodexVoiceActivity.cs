@@ -108,7 +108,7 @@ internal sealed class WindowsRegistryCodexVoiceActivitySource
     internal const string RegistryPath =
         @"Software\Microsoft\Windows\CurrentVersion\"
         + @"CapabilityAccessManager\ConsentStore\microphone\"
-        + "OpenAI.CodexBeta_2p2nqsd0c76g0";
+        + "OpenAI.Codex_2p2nqsd0c76g0";
 
     private const string StartValueName = "LastUsedTimeStart";
     private const string StopValueName = "LastUsedTimeStop";

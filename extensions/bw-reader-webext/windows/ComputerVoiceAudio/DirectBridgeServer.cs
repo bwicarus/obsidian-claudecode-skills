@@ -3358,6 +3358,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             dictionaryFallback: _dictionaryFallback,
             localAnkiWriter: _localAnkiWriter);
         Task<DirectClientMessage?>? prefetchedReceiveTask = null;
+        string? lastWrittenStatusState = null;
 
         while (
             !cancellationToken.IsCancellationRequested
@@ -3420,11 +3421,17 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
             if (winner == mediaCompletion)
             {
+                // Completion 为 null = 有人正常调了 StopAsync，而不是媒体自己坏了。
+                // 2026-09-05 20:37 那次就是这样：failures.jsonl 只有这个码、没有原因，
+                // 查了一小时。把协调器记下的"最近一次为什么停"带上。
                 DirectProtocolException failure =
                     await mediaCompletion!.ConfigureAwait(false)
                     ?? new DirectProtocolException(
                         "BW_COMPUTER_VOICE_DIRECT_MEDIA_STOPPED_UNEXPECTEDLY",
-                        "媒体捕获意外停止");
+                        "媒体捕获意外停止"
+                        + (_coordinator.LastMediaStopReason is string stopReason
+                            ? "（最近一次停止：" + stopReason + "）"
+                            : "（没有记录到任何停止原因）"));
                 await HandleConnectionFailureAsync(
                     connection,
                     connectionId,
@@ -3777,25 +3784,35 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 break;
             }
 
-            if (_coordinator.CaptureActive)
+            // 状态文件只在状态**真变了**时写（2026-09-06 审计 C05）：这一段跑在
+            // 接收循环里，每条文本消息后都同步落一次盘，会把后面排着的上行 PCM 帧
+            // 挡住；心跳 5 s 一条、上下文消息更密，落盘慢一点就是几帧人声没了。
+            // 写失败也不许把整条通话拆掉：状态文件是给人看的，不是通话的一部分。
+            string nextStatusState = _coordinator.CaptureActive
+                ? "active"
+                : _coordinator.CleanupPending
+                    ? "faulted"
+                    : "reader-connected";
+            if (nextStatusState != lastWrittenStatusState)
             {
-                _ = await WriteConnectionRuntimeStatusAsync(
-                    connection,
-                    "active",
-                    readerConnected: true,
-                    captureActive: true,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            else
-            {
-                _ = await WriteConnectionRuntimeStatusAsync(
-                    connection,
-                    _coordinator.CleanupPending
-                        ? "faulted"
-                        : "reader-connected",
-                    readerConnected: true,
-                    captureActive: false,
-                    cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    _ = await WriteConnectionRuntimeStatusAsync(
+                        connection,
+                        nextStatusState,
+                        readerConnected: true,
+                        captureActive: nextStatusState == "active",
+                        cancellationToken).ConfigureAwait(false);
+                    lastWrittenStatusState = nextStatusState;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception)
+                {
+                    // 下一条消息再试；这里吞掉的是状态文件的 IO 错，不是通话的错。
+                }
             }
         }
     }

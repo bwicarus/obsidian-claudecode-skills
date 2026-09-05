@@ -266,3 +266,13 @@ curl -s https://bwicarus-2.taile44d0c.ts.net/reader-context/snapshot
 没理（它自己的语音模式在出声时不听，桥管不着）；若几乎不涨 → 声音在到桥之前就没了，最可能是 iPad 的
 系统语音处理（`.voiceChat` + `setVoiceProcessingEnabled(true)`）在外放时做的双讲抑制 —— 远端在讲，
 近端被压。这一条戴耳机就能验：耳机没有声学回声，抑制基本消失。
+
+### 9b. App 原生语音（relay agent 模式）下的钉住（2026-09-06）
+
+用户问："现在可以使用 App 原生的语音对话了，不需要桥接也不需要电脑上进行语音，那快照固定怎么办？"
+答：那条路**天然就是钉住的**，不需要桥上的 pinned 文件。链路是 App → `wss://…/voice-rt?mode=agent`
+（Windows 上的 relay 只做 ASR/TTS）→ relay 把 utterance 终稿推回 App → 阅读器前端 `rc-voicecall.js`
+的 `sendToAssistant` → `rc-assistant.js` 的 `send`，而 `send` 在**那一刻**从页面现取上下文
+（`sentCtx`：页码、选区、选区周边句…）随请求发出。也就是说上下文在"说完"到达前端的瞬间被取走，
+之后翻页、改选区都不影响这一轮 —— 与桥接语音里的 `basis=pinned` 同一语义，只是钉的动作发生在前端。
+两条路各自钉自己的，互不依赖；桥的 pinned 文件只服务 Codex 桌面语音那条。
