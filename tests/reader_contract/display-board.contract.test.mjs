@@ -98,7 +98,7 @@ test("渲染在 Windows：断网断脚本、按内容 sha 命名、原子落盘�
   assert.match(RENDER, /offline=True/);
   assert.match(RENDER, /context\.route\("\*\*\/\*", lambda route: route\.abort\(\)\)/,
     "路由级拦截是断网的第二道保险");
-  assert.match(RENDER, /os\.replace\(temporary, card_png_path\(sha, root\)\)/,
+  assert.match(RENDER, /os\.replace\(temporary, card_png_path\(sha, shape, root\)\)/,
     "半张 PNG 会被消费端当成'渲好了'，必须原子改名");
   // sha 两边同一个算法：sha256 前 8 字节。不一致的表现是"永远有待渲染的卡"
   assert.match(RENDER, /hashlib\.sha256\(html\.encode\("utf-8"\)\)\.digest\(\)[\s\S]{0,40}\[:8\]\.hex\(\)/);
@@ -192,7 +192,21 @@ test("小组件：方格 + 大号 + 每张卡一个删除键 + 图按 sha 取", 
   assert.match(WIDGET, /还有 \\\(hidden\) 张卡放不下/, "放不下的按卡报数");
   assert.match(WIDGET, /"op": "cardDelete"/);
   assert.match(WIDGET, /reloadTimelines\(ofKind: "BWReaderBoardWidget"\)/, "删完立刻刷");
-  assert.match(WIDGET, /default: return \(4, 2\)/, "大号放 8 张");
+  assert.match(WIDGET, /default: return Layout\(columns: 4, rows: 2, shape: \.square\)/, "大号放 8 张");
+  // 2026-09-05 第二版（用户实拍「版面利用率和可读性很差」）：每张卡两种形状，
+  // 版面按张数挑形状。形状名在三处：渲染器 / 桥的 shape 参数 / 小组件枚举 —— 缺一处
+  // 的表现是"某一档永远 404 显示 alt 文字"，而每一处各自都自洽。
+  assert.match(RENDER, /"square": \(320, 320\),\s*\n\s*"wide": \(640, 320\),/, "渲染器两种形状");
+  assert.match(RENDER, /_FIT_SCRIPT/, "放大填满");
+  assert.match(RENDER, /if \(!fits\(1\)\)/, "只放大不缩小");
+  assert.match(BOARD, /Query\["shape"\]/, "桥按形状端图");
+  assert.match(BOARD, /shape != "square" && shape != "wide"/, "桥只认这两种");
+  assert.match(WIDGET, /enum CardShape: String \{\s*\n\s*case square/, "小组件形状枚举");
+  assert.match(WIDGET, /static func layout\(family: WidgetFamily, count: Int\) -> Layout/, "版面按张数挑");
+  assert.match(WIDGET, /case 3\.\.\.4: return Layout\(columns: 2, rows: 2, shape: \.wide\)/, "特大号 3–4 张用宽卡吃满");
+  assert.match(WIDGET, /"&shape=" \+ shape\.rawValue/, "取图带形状");
+  assert.match(MANAGER, /&shape=square/, "App 缩略条取方卡");
+  assert.match(GUIDE, /两种形状/, "指南说明两种形状与放大");
   // 图在 provider 里取好随 entry 交出去（视图里不能异步加载）
   assert.match(WIDGET, /var cardImages: \[String: UIImage\] = \[:\]/);
   assert.match(WIDGET, /WidgetCardImageCache\.images\(/);

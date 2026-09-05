@@ -1091,11 +1091,22 @@ internal static class ReaderDisplayBoard
             context.Response.StatusCode = StatusCodes.Status400BadRequest;
             return;
         }
+        // 形状（2026-09-05 第二版）：每张卡渲方、宽两种，小组件按张数挑一种。
+        // 不带参数 = 方（第一版客户端只认方卡）。名字与 board_card_render.SHAPES、
+        // iOS BoardWidgetView.CardShape 三处一致。
+        string shape = context.Request.Query["shape"].ToString();
+        if (shape.Length == 0) shape = "square";
+        if (shape != "square" && shape != "wide")
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return;
+        }
         Configure();
         string path;
         lock (Gate)
         {
-            path = Path.Combine(_storeDirectory, "board-cards", sha + ".png");
+            path = Path.Combine(
+                _storeDirectory, "board-cards", sha + "." + shape + ".png");
         }
         byte[] payload;
         try

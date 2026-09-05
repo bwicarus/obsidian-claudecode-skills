@@ -257,10 +257,13 @@ private struct SystemDataProvider: TimelineProvider {
             // 展示板卡片图：Windows 渲好、按 sha 内容寻址。有缓存直接用，
             // 没有才下载；下载失败那张卡显示 alt 文字，其它卡不受影响。
             // 跨板子铺格（2026-09-05 用户实拍：五块板子只显示了第一块），
-            // 所以图也要按同一顺序跨板子取；最大格数 8，多取的图只白占内存。
+            // 所以图也要按同一顺序跨板子取；形状与张数按这一档的版面定，
+            // 多取的图只白占内存。
             let orderedCards = (data?.boards ?? []).flatMap { $0.cards ?? [] }
+            let layout = BoardWidgetView.layout(
+                family: context.family, count: orderedCards.count)
             let images = await WidgetCardImageCache.images(
-                for: Array(orderedCards.prefix(BoardWidgetView.maxSlots)))
+                for: Array(orderedCards.prefix(layout.capacity)), shape: layout.shape)
             completion(Timeline(
                 entries: [SystemDataEntry(
                     date: now, data: data, cardImages: images)],
@@ -551,7 +554,8 @@ private enum WidgetCardImageCache {
     }
 
     static func images(
-        for cards: [ReaderWidgetSystemData.Board.Card]
+        for cards: [ReaderWidgetSystemData.Board.Card],
+        shape: BoardWidgetView.CardShape
     ) async -> [String: UIImage] {
         guard let directory, !cards.isEmpty else { return [:] }
         try? FileManager.default.createDirectory(
@@ -562,7 +566,7 @@ private enum WidgetCardImageCache {
         await withTaskGroup(of: (String, Data?).self) { group in
             for card in wanted {
                 group.addTask {
-                    (card.sha, await fetch(sha: card.sha, directory: directory))
+                    (card.sha, await fetch(sha: card.sha, shape: shape, directory: directory))
                 }
             }
             for await (sha, data) in group {
@@ -573,15 +577,19 @@ private enum WidgetCardImageCache {
         return out
     }
 
-    private static func fetch(sha: String, directory: URL) async -> Data? {
-        let file = directory.appendingPathComponent(sha + ".png")
+    /// 图按「sha.形状」存取：同一张卡 Windows 渲了方、宽两种，版面按张数挑一种
+    /// （见 BoardWidgetView.layout）。
+    private static func fetch(
+        sha: String, shape: BoardWidgetView.CardShape, directory: URL
+    ) async -> Data? {
+        let file = directory.appendingPathComponent(sha + "." + shape.rawValue + ".png")
         if let data = try? Data(contentsOf: file), UIImage(data: data) != nil {
             return data
         }
         guard sha.count == 16, sha.allSatisfy(\.isHexDigit),
               let url = URL(string:
                 "https://bwicarus-2.taile44d0c.ts.net/reader-board/card.png?sha="
-                + sha)
+                + sha + "&shape=" + shape.rawValue)
         else { return nil }
         var request = URLRequest(url: url)
         request.timeoutInterval = 8
@@ -598,7 +606,10 @@ private enum WidgetCardImageCache {
         guard let items = try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: nil) else { return }
         for item in items where item.pathExtension == "png" {
-            if !keeping.contains(item.deletingPathExtension().lastPathComponent) {
+            // 文件名是 <sha>.<shape>.png；按 sha 判活、两种形状一起留 ——
+            // 不同档的组件各要一种形状，互删对方的图只会反复重下。
+            let sha = item.lastPathComponent.split(separator: ".").first.map(String.init) ?? ""
+            if !keeping.contains(sha) {
                 try? FileManager.default.removeItem(at: item)
             }
         }
@@ -664,16 +675,45 @@ private struct BoardWidgetView: View {
         var id: String { board.code + "/" + card.id }
     }
 
-    /// 最大的一档能放几张 —— timeline 取图也按这个数截，别多下载。
-    static let maxSlots = 8
+    /// 卡片形状。Windows 每张卡渲两种，这里只挑不裁；名字与桥的 `shape` 参数、
+    /// `board_card_render.SHAPES` 三处一致。
+    enum CardShape: String {
+        case square   // 1:1，320×320 逻辑像素
+        case wide     // 2:1，640×320
+    }
 
-    /// 方格：列数 × 行数。大号（iPad）能放 8 张。
-    private var grid: (columns: Int, rows: Int) {
+    struct Layout {
+        let columns: Int
+        let rows: Int
+        let shape: CardShape
+        var capacity: Int { columns * rows }
+        var aspectRatio: CGFloat { shape == .wide ? 2 : 1 }
+    }
+
+    /// 版面按「几张卡 × 哪一档」定（2026-09-05 用户实拍：特大号 4 张卡只占上半，
+    /// 下半整行空着，字还小）。方卡在 2:1 的组件里放 4 张，无论怎么排都只能占
+    /// 一半 —— 所以卡少时改用宽卡把面积吃满，卡多时才用方卡。
+    static func layout(family: WidgetFamily, count: Int) -> Layout {
         switch family {
-        case .systemSmall: return (1, 1)
-        case .systemMedium: return (2, 1)
-        case .systemLarge: return (2, 2)
-        default: return (4, 2)   // systemExtraLarge
+        case .systemSmall:
+            return Layout(columns: 1, rows: 1, shape: .square)
+        case .systemMedium:   // 2:1
+            return count <= 1
+                ? Layout(columns: 1, rows: 1, shape: .wide)
+                : Layout(columns: 2, rows: 1, shape: .square)
+        case .systemLarge:    // 1:1
+            switch count {
+            case ...1: return Layout(columns: 1, rows: 1, shape: .square)
+            case 2: return Layout(columns: 1, rows: 2, shape: .wide)
+            default: return Layout(columns: 2, rows: 2, shape: .square)
+            }
+        default:              // systemExtraLarge，2:1
+            switch count {
+            case ...1: return Layout(columns: 1, rows: 1, shape: .wide)
+            case 2: return Layout(columns: 2, rows: 1, shape: .square)
+            case 3...4: return Layout(columns: 2, rows: 2, shape: .wide)
+            default: return Layout(columns: 4, rows: 2, shape: .square)   // 8 张
+            }
         }
     }
 
@@ -681,8 +721,12 @@ private struct BoardWidgetView: View {
         boards.flatMap { board in (board.cards ?? []).map { Slot(board: board, card: $0) } }
     }
 
+    private var layout: Layout {
+        Self.layout(family: family, count: allSlots.count)
+    }
+
     private var slots: [Slot] {
-        Array(allSlots.prefix(grid.columns * grid.rows))
+        Array(allSlots.prefix(layout.capacity))
     }
 
     /// 格子里出现了几块不同的板子。只有一块时标题就写它的名字；
@@ -758,9 +802,11 @@ private struct BoardWidgetView: View {
     /// 方格本体。每格一张卡：渲好的图铺满方块；取不到图就显示 alt 文字。
     /// 右上角固定一个删除键（Button(intent:)），谁写的卡都能被用户一键撤掉。
     private func cardGrid() -> some View {
+        let layout = self.layout
         let columns = Array(
-            repeating: GridItem(.flexible(), spacing: 6), count: grid.columns)
+            repeating: GridItem(.flexible(), spacing: 6), count: layout.columns)
         let labelBoards = shownBoardCodes.count > 1
+        let ratio = layout.aspectRatio
         return LazyVGrid(columns: columns, spacing: 6) {
             ForEach(slots) { slot in
                 let card = slot.card
@@ -769,7 +815,7 @@ private struct BoardWidgetView: View {
                         if let image = entry.cardImages[card.sha] {
                             Image(uiImage: image)
                                 .resizable()
-                                .aspectRatio(1, contentMode: .fill)
+                                .aspectRatio(ratio, contentMode: .fill)
                         } else {
                             // 没图：alt 文字兜底（图还没渲出来 / 下载失败）。
                             // 不留空方块 —— 空方块会被当成"这张卡是空的"。
@@ -783,7 +829,7 @@ private struct BoardWidgetView: View {
                             }
                         }
                     }
-                    .aspectRatio(1, contentMode: .fit)
+                    .aspectRatio(ratio, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .overlay(alignment: .bottomLeading) {
                         // 多板同屏时才标板名：只有一块时标题已经说了。

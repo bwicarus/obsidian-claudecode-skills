@@ -20,8 +20,9 @@ final class ReaderDisplayBoardManager: ObservableObject {
         var updatedAtMs: Int64
 
         var imageURL: URL? {
+            // App 里的缩略条一律取方卡；宽卡是小组件少卡时用的。
             URL(string: "https://\(ReaderNativePiGateway.piHost)"
-                + "/reader-board/card.png?sha=\(sha)")
+                + "/reader-board/card.png?sha=\(sha)&shape=square")
         }
     }
 
