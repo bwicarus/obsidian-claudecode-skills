@@ -255,3 +255,19 @@ node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 b
   "接管失败、已兜底"；旧代际还在跑的那一支**不**兜底（再拉只会又撞一次）。
 - 判据：**拒绝接管是对的，但拒绝之后不能让栈空着** —— 新实例自退前应至少保证有一个实例在跑，
   或者由调用方兜底。接管等待为何不够长（旧实例退出路径在停 owned 服务）是下一个要查的根因。
+
+## 2026-09-06 补：一次性 `ob sync` 撞常驻同步 —— 「Another sync instance is already running」是健康态
+
+- 现象：Codex 用 `obsidian-project-notes` 技能存 KJ 设计讨论，脚本在每次 list/read 前、每次写后各跑一次
+  `ob sync --path C:\obsidian`，全部被 `Another sync instance is already running for this vault.` 挡住；
+  技能文档又要求"第二次同步成功才算成功"，于是本地明明写成了也只能报失败，还差点让用户去关 iPad。
+- 事实：这台机上 `Obsidian Headless Sync` 计划任务常驻跑 `cli.js sync --continuous`（本次核对：任务 Running、
+  node 进程在），本地写入几秒内自动上传，远端改动同样自动到。那条报文只说明锁在常驻实例手里，
+  不是文档冲突，也不是遗留锁。
+- 处理：脚本（`~/.codex/skills/obsidian-project-notes/scripts/obsidian_notes.ps1`，不在仓库内）改成三档：
+  检测到常驻同步 → `resident`（只读写本地，报 `SYNC=resident`）；没有常驻同步 → `oneshot`（读前写后同步，
+  报 `SYNC=completed`，若 ob 仍报另一实例则 `SYNC=resident-busy`）；`-SkipSync` → `local`（`SYNC=skipped`）。
+  写后读回校验；"本地写成"和"已同步"永远是两句话；`read`/`list` 在 stderr 打 `FRESHNESS:` 说明读到的是什么。
+  新增 `-Command status`。技能说明同步改写，默认提示词不再说"并同步"。
+- 判据：**谁拥有同步就只让谁同步**。任何脚本在常驻同步的机器上都不该再起一次性同步；
+  报告要把"落盘"和"送达"分开说，跳过同步时不能输出"已同步"。
