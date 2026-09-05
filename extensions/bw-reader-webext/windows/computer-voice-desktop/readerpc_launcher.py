@@ -69,7 +69,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.134"
+APP_VERSION = "0.1.135"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status
@@ -739,10 +739,18 @@ def stop_readerpc_voice(
 
 
 # ── Codex 语音球隐藏(2026-08-17 用户需求) ────────────────────────────────────
-# 语音球是 Codex 的独立置顶 Electron 窗(class Chrome_WidgetWin_1,标题 "Codex",
-# TOPMOST,属主正式版 ChatGPT.exe / Beta 的 ChatGPT (Beta).exe),每次语音会话重建 →
-# 周期按签名扫描隐藏。签名不看映像名,换正式版不受影响。
-# 只动显示层:麦克风/播报/F24 保活全不受影响。主应用窗不置顶,签名天然排除。
+# 语音球是 Codex 的独立置顶 Electron 窗(class Chrome_WidgetWin_1,TOPMOST,属主
+# 正式版 ChatGPT.exe / Beta 的 ChatGPT (Beta).exe / codex.exe),每次语音会话重建 →
+# 周期按签名扫描隐藏。只动显示层:麦克风/播报/F24 保活全不受影响。
+# 主应用窗不置顶,签名天然排除。
+# ⚠ 标题随客户端换:Beta 时期是 "Codex";2026-09-06 换正式版后实测(EnumWindows)
+#   语音球是两个 TOPMOST + TOOLWINDOW 的 Chrome_WidgetWin_1,标题都是 "ChatGPT"
+#   (772×800 与 720×84),而主窗也叫 "ChatGPT" 但不置顶。只认 "Codex" 就一个都
+#   对不上 —— 用户报「隐藏语音球失灵」正是这个。两种标题都收。
+ORB_WINDOW_TITLES = ("Codex", "ChatGPT")
+ORB_OWNER_EXES = ("chatgpt.exe", "chatgpt (beta).exe", "codex.exe")
+
+
 def find_voice_orb_windows() -> list[int]:
     if os.name != "nt":
         return []
@@ -768,7 +776,7 @@ def find_voice_orb_windows() -> list[int]:
                 return True
             title = ctypes.create_unicode_buffer(64)
             user32.GetWindowTextW(hwnd, title, 64)
-            if title.value != "Codex":
+            if title.value not in ORB_WINDOW_TITLES:
                 return True
             pid = wintypes.DWORD(0)
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
@@ -785,8 +793,7 @@ def find_voice_orb_windows() -> list[int]:
                 exe = buf.value.rsplit("\\", 1)[-1].lower()
             finally:
                 kernel32.CloseHandle(handle)
-            # 正式版主进程是 chatgpt.exe（2026-09-06 换正式版时补）；Beta 是 chatgpt (beta).exe。
-            if exe not in ("chatgpt.exe", "chatgpt (beta).exe", "codex.exe"):
+            if exe not in ORB_OWNER_EXES:
                 return True
             result.append(int(hwnd))
         except Exception:

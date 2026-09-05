@@ -2116,5 +2116,31 @@ class AutostartScriptCheckTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), before, "自测绝不能改已安装的脚本")
 
 
+class VoiceOrbSignatureTest(unittest.TestCase):
+    """语音球窗口签名（2026-09-06 用户：换正式版 Codex 后「隐藏语音球失灵」）。
+
+    EnumWindows 实测：正式版的语音球是两个 TOPMOST + TOOLWINDOW 的 Chrome_WidgetWin_1，
+    标题是 "ChatGPT" 而不是 Beta 时期的 "Codex"。只认一个标题就一个都对不上。
+    """
+
+    def test_signature_accepts_both_client_titles(self) -> None:
+        import readerpc_launcher
+
+        self.assertIn("Codex", readerpc_launcher.ORB_WINDOW_TITLES)
+        self.assertIn("ChatGPT", readerpc_launcher.ORB_WINDOW_TITLES)
+        for exe in ("chatgpt.exe", "chatgpt (beta).exe", "codex.exe"):
+            self.assertIn(exe, readerpc_launcher.ORB_OWNER_EXES)
+
+    def test_finder_uses_the_shared_signature_tables(self) -> None:
+        import inspect
+
+        import readerpc_launcher
+
+        source = inspect.getsource(readerpc_launcher.find_voice_orb_windows)
+        self.assertIn("ORB_WINDOW_TITLES", source)
+        self.assertIn("ORB_OWNER_EXES", source)
+        self.assertNotIn('!= "Codex"', source)
+
+
 if __name__ == "__main__":
     unittest.main()
