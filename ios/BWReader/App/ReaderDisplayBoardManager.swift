@@ -5,12 +5,26 @@ import WidgetKit
 /// 展示板的**手动操作**面（2026-09-05 用户要求的「以及提供手动操作的可能」）。
 ///
 /// 板子的内容由电脑上的 AI / 固定程序写，这里是用户这一侧：看有哪些板子、
-/// 谁建的为什么建、**停用**（`enabled` 是用户的开关，AI 不许动）、删掉不要的。
+/// 谁建的为什么建、**停用**（`enabled` 是用户的开关，AI 不许动）、删掉不要的；
+/// v2（同日改版）起每块板子里是一张张卡片 —— 这里同样能看每张卡、**逐张删**。
 ///
 /// 走的是跟小组件同一个桥端点（`/reader-board/v1`，Tailscale 身份闸），
-/// 不经阅读器 runtime —— 这是 App 自己的界面，不该借道网页层。
+/// 卡片图同样按 sha 从 `/reader-board/card.png` 取 —— 设备端只当显示器，
+/// 源头与渲染都在 Windows。
 @MainActor
 final class ReaderDisplayBoardManager: ObservableObject {
+    struct Card: Identifiable, Equatable {
+        var id: String
+        var alt: String
+        var sha: String
+        var updatedAtMs: Int64
+
+        var imageURL: URL? {
+            URL(string: "https://\(ReaderNativePiGateway.piHost)"
+                + "/reader-board/card.png?sha=\(sha)")
+        }
+    }
+
     struct Board: Identifiable, Equatable {
         var code: String
         var slug: String
@@ -18,8 +32,8 @@ final class ReaderDisplayBoardManager: ObservableObject {
         var note: String
         var enabled: Bool
         var updatedAtMs: Int64
-        var sectionCount: Int
         var autoClear: String
+        var cards: [Card]
 
         var id: String { code }
     }
@@ -34,32 +48,59 @@ final class ReaderDisplayBoardManager: ObservableObject {
     )!
 
     func refresh() async {
-        await send(["op": "list"]) { [weak self] payload in
-            let raw = payload["boards"] as? [[String: Any]] ?? []
-            self?.boards = raw.compactMap(Self.decode)
+        // list 只给板子概要；每块板子的卡片要再 get 一次（最多 24 块，都很小）。
+        guard let listed = await send(["op": "list"]) else { return }
+        let summaries = (listed["boards"] as? [[String: Any]] ?? [])
+        var out: [Board] = []
+        for raw in summaries {
+            guard var board = Self.decodeBoard(raw) else { continue }
+            if let detail = await send(["op": "get", "code": board.code]),
+               let full = detail["board"] as? [String: Any] {
+                board.cards = (full["cards"] as? [[String: Any]] ?? [])
+                    .compactMap(Self.decodeCard)
+            }
+            out.append(board)
         }
+        boards = out
     }
 
     func setEnabled(_ board: Board, to wanted: Bool) async {
-        await send(["op": "enable", "code": board.code, "enabled": wanted])
+        _ = await send(["op": "enable", "code": board.code, "enabled": wanted])
         await refresh()
         // 停用/启用直接改变小组件该显示什么 —— 立刻刷，别等下一个 15 分钟。
         WidgetCenter.shared.reloadAllTimelines()
     }
 
     func delete(_ board: Board) async {
-        await send(["op": "delete", "code": board.code])
+        _ = await send(["op": "delete", "code": board.code])
         await refresh()
         WidgetCenter.shared.reloadAllTimelines()
     }
 
     func clear(_ board: Board) async {
-        await send(["op": "clear", "code": board.code])
+        _ = await send(["op": "clear", "code": board.code])
         await refresh()
         WidgetCenter.shared.reloadAllTimelines()
     }
 
-    private static func decode(_ raw: [String: Any]) -> Board? {
+    /// 每张卡固定的删除键（用户：「固定每张卡片有一个删除按键」）。
+    func deleteCard(_ card: Card, in board: Board) async {
+        _ = await send(["op": "cardDelete", "code": board.code, "id": card.id])
+        await refresh()
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    private static func decodeCard(_ raw: [String: Any]) -> Card? {
+        guard let id = raw["id"] as? String, let sha = raw["sha"] as? String
+        else { return nil }
+        return Card(
+            id: id,
+            alt: raw["alt"] as? String ?? "",
+            sha: sha,
+            updatedAtMs: (raw["updatedAtMs"] as? NSNumber)?.int64Value ?? 0)
+    }
+
+    private static func decodeBoard(_ raw: [String: Any]) -> Board? {
         guard let code = raw["code"] as? String,
               let title = raw["title"] as? String else { return nil }
         let rule = raw["autoClear"] as? [String: Any] ?? [:]
@@ -68,7 +109,7 @@ final class ReaderDisplayBoardManager: ObservableObject {
         switch kind {
         case "afterHours":
             let hours = (rule["hours"] as? NSNumber)?.doubleValue ?? 0
-            describedRule = "分区 \(Int(hours)) 小时不更新就撤掉"
+            describedRule = "卡片 \(Int(hours)) 小时不更新就撤掉"
         case "dailyAtLocal":
             describedRule = "每天 \(rule["hhmm"] as? String ?? "") 清空"
         default:
@@ -81,14 +122,12 @@ final class ReaderDisplayBoardManager: ObservableObject {
             note: raw["note"] as? String ?? "",
             enabled: (raw["enabled"] as? NSNumber)?.boolValue ?? true,
             updatedAtMs: (raw["updatedAtMs"] as? NSNumber)?.int64Value ?? 0,
-            sectionCount: (raw["sectionCount"] as? NSNumber)?.intValue ?? 0,
-            autoClear: describedRule)
+            autoClear: describedRule,
+            cards: [])
     }
 
-    private func send(
-        _ body: [String: Any],
-        onSuccess: (([String: Any]) -> Void)? = nil
-    ) async {
+    /// 成功回 payload；失败回 nil 并把原因放进 `failure`。
+    private func send(_ body: [String: Any]) async -> [String: Any]? {
         busy = true
         defer { busy = false }
         var request = URLRequest(url: Self.endpoint)
@@ -107,12 +146,13 @@ final class ReaderDisplayBoardManager: ObservableObject {
                 failure = (payload["detail"] as? String)
                     ?? (payload["error"] as? String)
                     ?? "HTTP \(status)"
-                return
+                return nil
             }
             failure = nil
-            onSuccess?(payload)
+            return payload
         } catch {
             failure = "连不上电脑（\(error.localizedDescription)）"
+            return nil
         }
     }
 }
@@ -133,7 +173,7 @@ struct ReaderDisplayBoardSection: View {
                 .foregroundStyle(.secondary)
             }
             ForEach(manager.boards) { board in
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text(board.title).font(.body)
                         Spacer(minLength: 8)
@@ -148,10 +188,13 @@ struct ReaderDisplayBoardSection: View {
                         Text(board.note)
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    Text("\(board.sectionCount) 个分区 · \(board.autoClear)")
+                    Text("\(board.cards.count) 张卡 · \(board.autoClear)")
                         .font(.caption2).foregroundStyle(.tertiary)
+                    if !board.cards.isEmpty {
+                        cardStrip(board)
+                    }
                     HStack(spacing: 14) {
-                        Button("清空内容") {
+                        Button("清空卡片") {
                             Task { await manager.clear(board) }
                         }
                         .font(.caption)
@@ -174,12 +217,54 @@ struct ReaderDisplayBoardSection: View {
         } header: {
             Text("展示板")
         } footer: {
-            Text("小组件上那块分区板子。内容由电脑上的任务写入；开关只由你决定，AI 不会自己开。")
+            Text("小组件上那块方格板。卡片由电脑上的任务写入并在电脑上渲染；开关只由你决定，AI 不会自己开；每张卡都能单独删。")
         }
         .task {
             guard !loaded else { return }
             loaded = true
             await manager.refresh()
+        }
+    }
+
+    /// 横向一排卡片缩略图，每张右上角一个删除键 —— 跟小组件上那个是同一个动作。
+    private func cardStrip(_ board: ReaderDisplayBoardManager.Board) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(board.cards) { card in
+                    ZStack(alignment: .topTrailing) {
+                        AsyncImage(url: card.imageURL) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image.resizable().aspectRatio(1, contentMode: .fill)
+                            default:
+                                ZStack {
+                                    Color(uiColor: .secondarySystemBackground)
+                                    Text(card.alt.isEmpty ? "渲染中…" : card.alt)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .multilineTextAlignment(.center)
+                                        .padding(4)
+                                }
+                            }
+                        }
+                        .frame(width: 96, height: 96)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        Button {
+                            Task { await manager.deleteCard(card, in: board) }
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(5)
+                                .background(Color.black.opacity(0.55), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(4)
+                        .accessibilityLabel("删除卡片 \(card.alt)")
+                    }
+                }
+            }
+            .padding(.vertical, 2)
         }
     }
 }

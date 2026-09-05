@@ -1,5 +1,7 @@
+import AppIntents
 import Foundation
 import SwiftUI
+import UIKit
 import UserNotifications
 import WidgetKit
 
@@ -154,6 +156,9 @@ struct BWReaderRecentWidget: Widget {
 private struct SystemDataEntry: TimelineEntry {
     let date: Date
     let data: ReaderWidgetSystemData?
+    /// 展示板卡片图，按 sha 索引。WidgetKit 的视图里不能异步加载图片 ——
+    /// 图必须在 timeline provider 里取好、随 entry 一起交出去。
+    var cardImages: [String: UIImage] = [:]
 }
 
 /// Widget 自己的缓存（2026-08-26 调研实锤：Widget target 在 project.yml
@@ -206,11 +211,12 @@ private struct SystemDataProvider: TimelineProvider {
                     .init(code: "bd_preview", title: "发布看板",
                           updatedAtMs: Int64(
                               Date().timeIntervalSince1970 * 1000) - 600_000,
-                          sections: [
-                            .init(title: "当前状态",
-                                  lines: ["尚未发布", "官网版本号仍是 4.2"]),
-                            .init(title: "已确认的信号",
-                                  lines: ["论坛出现 4.3 beta 讨论"]),
+                          sections: [],
+                          cards: [
+                            .init(id: "p1", alt: "当前状态：尚未发布",
+                                  sha: "placeholder-1", updatedAtMs: 0),
+                            .init(id: "p2", alt: "已确认的信号",
+                                  sha: "placeholder-2", updatedAtMs: 0),
                           ]),
                 ],
                 boardsError: nil))
@@ -248,8 +254,13 @@ private struct SystemDataProvider: TimelineProvider {
             } else {
                 data = WidgetLocalCache.read() ?? store.readWidgetSystemData()
             }
+            // 展示板卡片图：Windows 渲好、按 sha 内容寻址。有缓存直接用，
+            // 没有才下载；下载失败那张卡显示 alt 文字，其它卡不受影响。
+            let images = await WidgetCardImageCache.images(
+                for: data?.boards?.first?.cards ?? [])
             completion(Timeline(
-                entries: [SystemDataEntry(date: now, data: data)],
+                entries: [SystemDataEntry(
+                    date: now, data: data, cardImages: images)],
                 policy: .after(now.addingTimeInterval(15 * 60))))
         }
     }
@@ -379,12 +390,24 @@ private struct SystemDataProvider: TimelineProvider {
                         title: sectionTitle,
                         lines: (raw["lines"] as? [String] ?? []))
                 }
+            let cards = (one["cards"] as? [[String: Any]] ?? [])
+                .compactMap { raw -> ReaderWidgetSystemData.Board.Card? in
+                    guard let id = raw["id"] as? String,
+                          let sha = raw["sha"] as? String else { return nil }
+                    return ReaderWidgetSystemData.Board.Card(
+                        id: id,
+                        alt: raw["alt"] as? String ?? "",
+                        sha: sha,
+                        updatedAtMs:
+                            (raw["updatedAtMs"] as? NSNumber)?.int64Value ?? 0)
+                }
             return ReaderWidgetSystemData.Board(
                 code: code,
                 title: title,
                 updatedAtMs:
                     (one["updatedAtMs"] as? NSNumber)?.int64Value ?? 0,
-                sections: sections)
+                sections: sections,
+                cards: cards)
         }
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         return ReaderWidgetSystemData(
@@ -514,8 +537,106 @@ private struct SyncWidgetView: View {
     }
 }
 
-/// 展示板（2026-09-05 用户要求）：一块**分了区**的板子，
-/// 内容由电脑上的 AI / 固定程序放进来。
+/// 展示板卡片图的本地缓存。**内容寻址**：文件名就是 sha，同名内容永不变，
+/// 所以命中即用、永不过期；只按"还在板子上的 sha"清孤儿。
+private enum WidgetCardImageCache {
+    private static let maxCards = 12
+    private static var directory: URL? {
+        FileManager.default
+            .urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("bw-board-cards", isDirectory: true)
+    }
+
+    static func images(
+        for cards: [ReaderWidgetSystemData.Board.Card]
+    ) async -> [String: UIImage] {
+        guard let directory, !cards.isEmpty else { return [:] }
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        let wanted = Array(cards.prefix(maxCards))
+        var out: [String: UIImage] = [:]
+        // 任务组里只传 Data（Sendable）；UIImage 在收口处再建 —— 免得撞严格并发检查。
+        await withTaskGroup(of: (String, Data?).self) { group in
+            for card in wanted {
+                group.addTask {
+                    (card.sha, await fetch(sha: card.sha, directory: directory))
+                }
+            }
+            for await (sha, data) in group {
+                if let data, let image = UIImage(data: data) { out[sha] = image }
+            }
+        }
+        prune(keeping: Set(wanted.map(\.sha)), directory: directory)
+        return out
+    }
+
+    private static func fetch(sha: String, directory: URL) async -> Data? {
+        let file = directory.appendingPathComponent(sha + ".png")
+        if let data = try? Data(contentsOf: file), UIImage(data: data) != nil {
+            return data
+        }
+        guard sha.count == 16, sha.allSatisfy(\.isHexDigit),
+              let url = URL(string:
+                "https://bwicarus-2.taile44d0c.ts.net/reader-board/card.png?sha="
+                + sha)
+        else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              UIImage(data: data) != nil
+        else { return nil }
+        // 只在真解出图之后才落盘：半张/错误页缓存下来就是"这张卡永远是灰的"。
+        try? data.write(to: file, options: [.atomic])
+        return data
+    }
+
+    private static func prune(keeping: Set<String>, directory: URL) {
+        guard let items = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil) else { return }
+        for item in items where item.pathExtension == "png" {
+            if !keeping.contains(item.deletingPathExtension().lastPathComponent) {
+                try? FileManager.default.removeItem(at: item)
+            }
+        }
+    }
+}
+
+/// 每张卡固定的删除键（用户 2026-09-05：「固定每张卡片有一个删除按键」）。
+/// iOS 17 小组件的 Button(intent:) —— 直接打桥的 cardDelete，再刷 timeline。
+struct DeleteBoardCardIntent: AppIntent {
+    static var title: LocalizedStringResource = "删除展示板卡片"
+    static var isDiscoverable: Bool = false
+
+    @Parameter(title: "板子编码") var code: String
+    @Parameter(title: "卡片 ID") var cardId: String
+
+    init() {}
+    init(code: String, cardId: String) {
+        self.code = code
+        self.cardId = cardId
+    }
+
+    func perform() async throws -> some IntentResult {
+        guard let url = URL(
+            string: "https://bwicarus-2.taile44d0c.ts.net/reader-board/v1")
+        else { return .result() }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 10
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "op": "cardDelete", "code": code, "id": cardId,
+        ])
+        _ = try? await URLSession.shared.data(for: request)
+        // 不管成没成都刷一次：成了立刻消失；没成下一次拉取会把真相带回来。
+        WidgetCenter.shared.reloadTimelines(ofKind: "BWReaderBoardWidget")
+        return .result()
+    }
+}
+
+/// 展示板（2026-09-05 用户改版）：一块**方格板**，每张卡一个方块，
+/// 内容由电脑上的 AI 写成 HTML/CSS、在 Windows 渲成图，这里只显示。
 ///
 /// 三条纪律：
 /// - **板子不解释内容**。它不排版、不加工、不补时间戳 —— 写板子的人写什么就显示什么。
@@ -533,27 +654,25 @@ private struct BoardWidgetView: View {
     /// 桥已按最近更新排序，第一块就是最该看的那块。
     private var board: ReaderWidgetSystemData.Board? { boards.first }
 
-    private var sectionLimit: Int {
+    /// 方格：列数 × 行数。大号（iPad）能放 8 张。
+    private var grid: (columns: Int, rows: Int) {
         switch family {
-        case .systemSmall: return 1
-        case .systemMedium: return 2
-        default: return 4
+        case .systemSmall: return (1, 1)
+        case .systemMedium: return (2, 1)
+        case .systemLarge: return (2, 2)
+        default: return (4, 2)   // systemExtraLarge
         }
     }
 
-    private var lineLimit: Int {
-        switch family {
-        case .systemSmall: return 2
-        case .systemMedium: return 3
-        default: return 4
-        }
+    private var cards: [ReaderWidgetSystemData.Board.Card] {
+        Array((board?.cards ?? []).prefix(grid.columns * grid.rows))
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 6) {
             if let board {
                 HStack(spacing: 4) {
-                    Image(systemName: "rectangle.split.3x1")
+                    Image(systemName: "square.grid.2x2")
                         .font(.caption2)
                     Text(board.title)
                         .font(.caption).bold()
@@ -563,38 +682,20 @@ private struct BoardWidgetView: View {
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
                 .foregroundStyle(.secondary)
-                if board.sections.isEmpty {
+                if cards.isEmpty {
+                    Spacer(minLength: 0)
                     Text("这块板子暂时是空的")
                         .font(.caption).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
                 } else {
-                    ForEach(
-                        Array(board.sections.prefix(sectionLimit).enumerated()),
-                        id: \.offset
-                    ) { _, section in
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(section.title)
-                                .font(.caption2).bold()
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                            ForEach(
-                                Array(section.lines.prefix(lineLimit)
-                                    .enumerated()),
-                                id: \.offset
-                            ) { _, line in
-                                Text(line)
-                                    .font(.caption2)
-                                    .lineLimit(family == .systemSmall ? 1 : 2)
-                            }
-                        }
-                    }
+                    cardGrid(code: board.code)
                 }
-                Spacer(minLength: 0)
                 if boards.count > 1, family != .systemSmall {
                     Text("另有 \(boards.count - 1) 块板子")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
             } else if let failure = entry.data?.boardsError {
-                Label("展示板", systemImage: "rectangle.split.3x1")
+                Label("展示板", systemImage: "square.grid.2x2")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("暂时取不到")
                     .font(.caption).foregroundStyle(.secondary)
@@ -603,7 +704,7 @@ private struct BoardWidgetView: View {
                     .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
                 Spacer(minLength: 0)
             } else {
-                Label("展示板", systemImage: "rectangle.split.3x1")
+                Label("展示板", systemImage: "square.grid.2x2")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("还没有板子")
                     .font(.caption).foregroundStyle(.secondary)
@@ -612,11 +713,53 @@ private struct BoardWidgetView: View {
                 Spacer(minLength: 0)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(for: .widget) {
             Color(uiColor: .systemBackground)
         }
         .widgetURL(URL(string: "bwreader://reader-feature?action=openReader"))
+    }
+
+    /// 方格本体。每格一张卡：渲好的图铺满方块；取不到图就显示 alt 文字。
+    /// 右上角固定一个删除键（Button(intent:)），谁写的卡都能被用户一键撤掉。
+    private func cardGrid(code: String) -> some View {
+        let columns = Array(
+            repeating: GridItem(.flexible(), spacing: 6), count: grid.columns)
+        return LazyVGrid(columns: columns, spacing: 6) {
+            ForEach(cards, id: \.id) { card in
+                ZStack(alignment: .topTrailing) {
+                    Group {
+                        if let image = entry.cardImages[card.sha] {
+                            Image(uiImage: image)
+                                .resizable()
+                                .aspectRatio(1, contentMode: .fill)
+                        } else {
+                            // 没图：alt 文字兜底（图还没渲出来 / 下载失败）。
+                            // 不留空方块 —— 空方块会被当成"这张卡是空的"。
+                            ZStack {
+                                Color(uiColor: .secondarySystemBackground)
+                                Text(card.alt.isEmpty ? "渲染中…" : card.alt)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(6)
+                            }
+                        }
+                    }
+                    .aspectRatio(1, contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    Button(intent: DeleteBoardCardIntent(code: code, cardId: card.id)) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(5)
+                            .background(Color.black.opacity(0.55), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(4)
+                }
+            }
+        }
     }
 }
 
@@ -628,8 +771,9 @@ struct BWReaderBoardWidget: Widget {
             BoardWidgetView(entry: $0)
         }
         .configurationDisplayName("展示板")
-        .description("电脑上的任务往这块分区板子里放状态（每日新闻、发布盯梢、长任务进展）。")
-        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        .description("电脑上的任务往这块方格板里放卡片（每日新闻、发布盯梢、长任务进展）；每张卡都能一键删。")
+        // 大号（iPad 专有）是用户点名要的：「首先应该支持更大的版本」。
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge])
     }
 }
 

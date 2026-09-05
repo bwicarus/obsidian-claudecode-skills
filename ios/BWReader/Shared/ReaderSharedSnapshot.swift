@@ -237,10 +237,21 @@ struct ReaderWidgetSystemData: Codable, Equatable, Sendable {
             var lines: [String]
         }
 
+        /// 一张卡 = 一个方块 = 一条信息（2026-09-05 用户改版）。
+        /// 只带 id/alt/sha：图在 Windows 渲好，按 sha 取；HTML 不下发到设备。
+        struct Card: Codable, Equatable, Sendable {
+            var id: String
+            var alt: String
+            var sha: String
+            var updatedAtMs: Int64
+        }
+
         var code: String
         var title: String
         var updatedAtMs: Int64
         var sections: [Section]
+        /// 可选：老缓存没有这个字段，非可选会让整份缓存解码失败。
+        var cards: [Card]?
     }
 
     var review: Review?
