@@ -69,11 +69,23 @@ internal interface IDirectSnapshotContextAdapter
         string requestId,
         string sessionId,
         CancellationToken cancellationToken);
+
+    /// 把此刻的快照另存成「钉住的一版」（2026-09-05）。谁来钉、什么时候钉由调用方定：
+    /// 桥在上行 PCM 上判「说完」、App 在打字发送时打 HTTP 口、将来的音频通道各自照做。
+    /// 这里只负责"另存一份"，不改主快照。
+    Task<DirectSnapshotForwardResult> PinAsync(
+        string reason,
+        CancellationToken cancellationToken);
 }
 
 internal sealed class UnwiredDirectSnapshotContextAdapter :
     IDirectSnapshotContextAdapter
 {
+    public Task<DirectSnapshotForwardResult> PinAsync(
+        string reason,
+        CancellationToken cancellationToken) =>
+        Task.FromException<DirectSnapshotForwardResult>(Unavailable());
+
     public Task<DirectSnapshotForwardResult> ForwardJournalAsync(
         string requestId,
         string sessionId,
@@ -118,6 +130,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
         "reader-context-snapshot.json";
     internal const string MarkdownFileName =
         "reader-context-live.md";
+    /// 钉住的快照（2026-09-05）。与主快照同目录；MCP 读它的路径也从这里算，别抄第二份名字。
+    internal const string PinnedFileName =
+        "reader-context-pinned.json";
 
     internal const int MaximumSnapshotBytes = 512 * 1024;
     private const int RecentEventLimit = 256;
@@ -540,6 +555,62 @@ internal sealed class FileDirectSnapshotContextAdapter :
             return new DirectSnapshotForwardResult(
                 "accepted",
                 _revision);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    internal static string PinnedPathFor(string statePath) =>
+        System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(statePath)
+                ?? throw new ArgumentException(
+                    "snapshot state path has no directory",
+                    nameof(statePath)),
+            PinnedFileName);
+
+    /// 把此刻的快照钉成一份独立副本。
+    ///
+    /// 快照本体是持续覆盖的状态；命令是一个时刻。模型哪一刻去读、读到的就是那一刻 ——
+    /// 用户说完话之后翻页、改选区，模型看到的就不再是他说话时看的那页
+    /// （2026-09-05 用户："不知道 AI 进行到了哪一步，就无法判断它是否读取了目标内容"）。
+    /// 钉住 = 把"命令发出那一刻的状态"另存一份，MCP 默认拿它。
+    /// 不修改主快照、不动 revision；`pinned` 记下时刻、原因和当时的 revision。
+    public async Task<DirectSnapshotForwardResult> PinAsync(
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            JsonObject snapshot = BuildSnapshot();
+            snapshot["pinned"] = new JsonObject
+            {
+                ["at"] = _utcNow().ToString("O"),
+                ["reason"] = reason,
+                ["revision"] = _revision,
+            };
+            byte[] payload = JsonSerializer.SerializeToUtf8Bytes(
+                snapshot,
+                DirectBridgeContract.JsonOptions);
+            if (payload.Length is < 1 or > MaximumSnapshotBytes)
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_SNAPSHOT_TOO_LARGE",
+                    "Windows 本地 Reader 快照超过大小上限");
+            }
+            string path = PinnedPathFor(_statePath);
+            Directory.CreateDirectory(
+                System.IO.Path.GetDirectoryName(path)!);
+            string temporaryPath = path + ".tmp";
+            await File.WriteAllTextAsync(
+                temporaryPath,
+                Utf8WithoutBom.GetString(payload),
+                Utf8WithoutBom,
+                cancellationToken).ConfigureAwait(false);
+            File.Move(temporaryPath, path, overwrite: true);
+            return new DirectSnapshotForwardResult("pinned", _revision);
         }
         finally
         {

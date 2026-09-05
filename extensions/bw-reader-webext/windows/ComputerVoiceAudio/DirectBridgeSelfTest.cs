@@ -686,6 +686,13 @@ internal static class DirectBridgeSelfTest
         await CheckHeartbeatDeadlineAsync(
             configPath,
             checks).ConfigureAwait(false);
+        CheckSpeechEndDetector(checks);
+        await CheckSpeechEndPinAsync(
+            configPath,
+            checks).ConfigureAwait(false);
+        await CheckSnapshotPinFileAsync(
+            root,
+            checks).ConfigureAwait(false);
         await CheckTypistLeaseLifecycleAsync(checks)
             .ConfigureAwait(false);
         await CheckAtomicShortcutAndBestEffortCleanupAsync(checks)
@@ -14517,6 +14524,211 @@ internal static class DirectBridgeSelfTest
                 },
             },
         };
+
+    // ── 钉住的快照（2026-09-05 用户定：不断固定我停止说话时刻的快照）───────
+
+    private static byte[] SyntheticPcm(double amplitude, int frameIndex)
+    {
+        byte[] pcm = new byte[DirectBridgeContract.PcmPayloadBytes];
+        int samples = pcm.Length / sizeof(short);
+        for (int sample = 0; sample < samples; sample++)
+        {
+            double seconds = (frameIndex * samples + sample) / 48_000.0;
+            short value = (short)Math.Round(
+                amplitude * Math.Sin(2 * Math.PI * 440 * seconds));
+            BinaryPrimitives.WriteInt16LittleEndian(
+                pcm.AsSpan(sample * sizeof(short), sizeof(short)),
+                value);
+        }
+        return pcm;
+    }
+
+    private static void CheckSpeechEndDetector(ICollection<string> checks)
+    {
+        UplinkSpeechEndDetector detector = new();
+        int events = 0;
+        int frame = 0;
+        void Feed(double amplitude, int count)
+        {
+            for (int index = 0; index < count; index++)
+            {
+                if (detector.Observe(SyntheticPcm(amplitude, frame++)))
+                {
+                    events++;
+                }
+            }
+        }
+        Feed(0, 20);          // 安静：噪底落到地板
+        Feed(6000, 30);       // 说 600 ms
+        Feed(0, 40);          // 停 800 ms → 说完
+        Require(
+            events == 1 && !detector.Speaking,
+            "speech-end-detector-fires-once-after-utterance",
+            checks);
+        Feed(6000, 4);        // 碰一下麦克风：4 帧
+        Feed(0, 40);
+        Require(
+            events == 1,
+            "speech-end-detector-ignores-short-blip",
+            checks);
+        Feed(6000, 8);        // 开口了但只有 160 ms → 不算话
+        Feed(0, 40);
+        Require(
+            events == 1,
+            "speech-end-detector-ignores-sub-minimum-utterance",
+            checks);
+        Feed(6000, 30);       // 句中 200 ms 换气不切开
+        Feed(0, 10);
+        Feed(6000, 30);
+        Feed(0, 40);
+        Require(
+            events == 2,
+            "speech-end-detector-keeps-breath-pause-inside-utterance",
+            checks);
+    }
+
+    private static async Task CheckSpeechEndPinAsync(
+        string configPath,
+        ICollection<string> checks)
+    {
+        FakeDirectAppLauncher launcher = new();
+        FakeDirectMediaAdapter media = new();
+        RecordingSnapshotContextAdapter snapshots = new();
+        await using DirectBridgeCoordinator coordinator = new(
+            new DirectBridgeConfigStore(configPath),
+            launcher,
+            media,
+            () => 1_000,
+            snapshotContextAdapter: snapshots);
+        const string connectionId = "connection-speech-end-pin";
+        string sessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Repeat((byte)7, 16).ToArray());
+        _ = await coordinator.StartAsync(
+            connectionId,
+            sessionId,
+            (_, _) => Task.CompletedTask,
+            (_, _) => Task.CompletedTask,
+            CancellationToken.None).ConfigureAwait(false);
+        uint sequence = 0;
+        async Task FeedAsync(double amplitude, int count)
+        {
+            for (int index = 0; index < count; index++)
+            {
+                uint current = sequence++;
+                await coordinator.PushUplinkFrameAsync(
+                    connectionId,
+                    sessionId,
+                    new DirectPcmFrame(
+                        DirectPcmTrack.BrowserMicrophone,
+                        current,
+                        (ulong)current * 20_000UL,
+                        SyntheticPcm(amplitude, (int)current)),
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+        await FeedAsync(0, 20).ConfigureAwait(false);
+        await FeedAsync(6000, 30).ConfigureAwait(false);
+        await FeedAsync(0, 40).ConfigureAwait(false);
+        await coordinator.LastPinCompletion.ConfigureAwait(false);
+        Require(
+            coordinator.SpeechEndPinCount == 1
+            && coordinator.LastPinFailure is null
+            && snapshots.PinReasons.SequenceEqual(new[] { "speech-end" }),
+            "speech-end-pins-snapshot-once-per-utterance",
+            checks);
+        await FeedAsync(6000, 30).ConfigureAwait(false);
+        await FeedAsync(0, 40).ConfigureAwait(false);
+        await coordinator.LastPinCompletion.ConfigureAwait(false);
+        Require(
+            coordinator.SpeechEndPinCount == 2
+            && snapshots.PinReasons.Count == 2,
+            "speech-end-pins-again-for-next-utterance",
+            checks);
+        JsonObject duplex = coordinator.DuplexDiagnostics();
+        Require(
+            duplex["uplinkFrames"]?.GetValue<long>() == 160
+            && duplex["uplinkVoicedFrames"]?.GetValue<long>() == 60
+            && duplex["speechEndPins"]?.GetValue<int>() == 2
+            && duplex["uplinkFramesDuringOutput"]?.GetValue<long>() == 0,
+            "duplex-diagnostics-count-uplink-and-voiced-frames",
+            checks);
+    }
+
+    private static async Task CheckSnapshotPinFileAsync(
+        string root,
+        ICollection<string> checks)
+    {
+        string directory = System.IO.Path.Combine(root, "pin-file");
+        Directory.CreateDirectory(directory);
+        string statePath = System.IO.Path.Combine(
+            directory,
+            FileDirectSnapshotContextAdapter.SnapshotFileName);
+        DateTimeOffset now = new(2026, 9, 5, 6, 0, 0, TimeSpan.Zero);
+        FileDirectSnapshotContextAdapter adapter = new(statePath, () => now);
+        DirectSnapshotForwardResult result = await adapter
+            .PinAsync("text-send", CancellationToken.None)
+            .ConfigureAwait(false);
+        string pinnedPath =
+            FileDirectSnapshotContextAdapter.PinnedPathFor(statePath);
+        JsonObject? pinned = JsonNode.Parse(
+            await File.ReadAllTextAsync(pinnedPath).ConfigureAwait(false))
+            as JsonObject;
+        Require(
+            result.Outcome == "pinned"
+            && pinned?["schema"]?.GetValue<string>()
+                == FileDirectSnapshotContextAdapter.SnapshotContract
+            && pinned["pinned"]?["reason"]?.GetValue<string>() == "text-send"
+            && pinned["pinned"]?["at"]?.GetValue<string>() == now.ToString("O")
+            && !File.Exists(statePath),
+            "snapshot-pin-writes-separate-file-without-touching-live",
+            checks);
+        Require(
+            ReaderContextMcpServer.PinnedAt(pinned) == now,
+            "snapshot-pin-timestamp-roundtrips",
+            checks);
+    }
+
+    private sealed class RecordingSnapshotContextAdapter :
+        IDirectSnapshotContextAdapter
+    {
+        internal List<string> PinReasons { get; } = new();
+
+        public Task<DirectSnapshotForwardResult> ForwardJournalAsync(
+            string requestId,
+            string sessionId,
+            DirectContextEvent contextEvent,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new DirectSnapshotForwardResult("accepted", 1));
+
+        public Task<DirectSnapshotForwardResult> ForwardActiveReadingAsync(
+            string requestId,
+            string sessionId,
+            DirectActiveReading activeReading,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new DirectSnapshotForwardResult("accepted", 1));
+
+        public Task<DirectSnapshotForwardResult> ForwardViewportAsync(
+            string requestId,
+            string sessionId,
+            DirectViewportContext viewport,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new DirectSnapshotForwardResult("accepted", 1));
+
+        public Task<DirectSnapshotForwardResult> ClearAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new DirectSnapshotForwardResult("cleared", 1));
+
+        public Task<DirectSnapshotForwardResult> PinAsync(
+            string reason,
+            CancellationToken cancellationToken)
+        {
+            PinReasons.Add(reason);
+            return Task.FromResult(
+                new DirectSnapshotForwardResult("pinned", PinReasons.Count));
+        }
+    }
 
     private static void Require(
         bool condition,

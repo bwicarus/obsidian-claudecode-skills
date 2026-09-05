@@ -91,7 +91,11 @@ test("AI 写的 HTML 入库先洗：整段扔掉危险标签、去事件、去�
     assert.doesNotMatch(sanitize, new RegExp(`"${tag}"`), `${tag} 应当放行`);
   }
   assert.match(BOARD, /MaxCardHtmlChars = 8000;/, "画面带 <style> 与 SVG 路径，4000 不够");
-  assert.match(GUIDE, /画面要丰富，不要套模板/, "指南要明说别套模板");
+  // 用户 09-05 二次修正：画面由 AI 自己设计，指南只给限制和统一风格，不给版式模板。
+  assert.match(GUIDE, /画面由你设计；这里只给限制和统一风格/, "指南只给限制和风格");
+  assert.match(GUIDE, /不给版式模板/, "指南要明说不给模板");
+  assert.match(GUIDE, /统一风格/, "统一风格要求要在");
+  assert.doesNotMatch(GUIDE, /\| 信息是什么样 \| 画成什么 \|/, "不许再放「画成什么」对照表");
   assert.match(GUIDE, /body\.shape-wide/, "指南要教两种形状怎么各排一套");
   assert.match(RENDER, /class=\\"shape-" \+ shape/, "壳子把形状告诉画面");
   assert.match(RENDER, /--card-w:/, "壳子给出画布尺寸变量");

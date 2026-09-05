@@ -231,10 +231,11 @@ test("AI 能自己定位到正文的一段 —— 不必要求用户先选中", 
 
   // ② App 侧**本地**实现 —— 这条路由在 manifest 里是 owner:'local'，
   //    runtime 用 nativeVoicePageText 自己算，**不打 Pi**。
-  assert.match(runtime, /function pageTextSegments\(chars\)/);
+  // 2026-09-05 起带 layout：块编号单一来源（blockNumberer）从 layout 取，见 native-local-runtime 契约。
+  assert.match(runtime, /function pageTextSegments\(chars, layout\)/);
   // 2026-08-23：加了 contains 收窄后不再是一行直出，但**不变量不变** ——
   // segments 仍由本地 chars 现算、不打 Pi，且没传 contains 时行为与从前一致。
-  assert.match(runtime, /pageTextSegments\(result && result\.chars\)/,
+  assert.match(runtime, /pageTextSegments\(\s*\n?\s*result && result\.chars, result && result\.layout\s*\n?\s*\)/,
     'segments 必须由本地 chars 现算，不打 Pi');
   assert.match(runtime, /segments: narrowed \? narrowed\.segments : all/,
     '没传 contains 时必须回落到整页 segments，行为不变');

@@ -647,9 +647,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-output/receipt",
             new[] { "POST", "OPTIONS" },
             context => HandleOutputReceiptAsync(context, serviceToken));
+        // GET（2026-09-05）= 双工诊断只读口；POST 才是快照与钉住。方法表不放行 GET 的
+        // 表现是 404，而处理函数里的 GET 分支看起来完全正常 —— 0.1.288 就这么丢过一次。
         app.MapMethods(
             "/reader-context/snapshot",
-            new[] { "POST", "OPTIONS" },
+            new[] { "GET", "POST", "OPTIONS" },
             context => HandleSnapshotPostAsync(context, serviceToken));
         // 书库：设备把书传到这台服务器,也从这里取回。
         // ⚠ 它服务的是用户 2026-08-28 拍板的那条规矩 ——「本地的书必须先上传
@@ -2711,6 +2713,26 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             context.Response.StatusCode = StatusCodes.Status204NoContent;
             return;
         }
+        if (HttpMethods.IsGet(context.Request.Method))
+        {
+            // 双工诊断（2026-09-05 用户："AI 在说话时听不到我"）：GET 直接端出协调器的
+            // 计数 —— AI 出声期间上行还有没有人声帧。有 → 声音到了桥、是 Codex 那头
+            // 没理；没有 → 是设备端把它压掉了。同一个来源闸，只有 tailnet 内看得到。
+            if (!originOk)
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
+            context.Response.ContentType = "application/json; charset=utf-8";
+            await context.Response.WriteAsync(
+                new JsonObject
+                {
+                    ["ok"] = true,
+                    ["duplex"] = _coordinator.DuplexDiagnostics(),
+                }.ToJsonString(),
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
         // Every attempt is recorded, accepted or not.
         //
         // "Nothing arrived" and "something arrived and was refused" look
@@ -2760,6 +2782,47 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             HashSet<string> fields = root.EnumerateObject()
                 .Select(property => property.Name)
                 .ToHashSet(StringComparer.Ordinal);
+            // 钉住当前快照（2026-09-05）：任何通道在"用户命令发出"的那一刻打一下这个口，
+            // 模型这一轮看到的就是这一刻的 Reader。语音说完由桥自己在上行 PCM 上判；
+            // App 里打字发送、将来别的音频通道，都调这同一个口 —— 触发方式随通道变，
+            // 原语不变。body 只有 {"pin":{"reason":"…"}} 一个字段，不与快照字段混发。
+            if (fields.SetEquals(new[] { "pin" }))
+            {
+                string reason = "unspecified";
+                if (
+                    root.TryGetProperty("pin", out JsonElement pinValue)
+                    && pinValue.ValueKind == JsonValueKind.Object
+                    && pinValue.TryGetProperty(
+                        "reason", out JsonElement reasonValue)
+                    && reasonValue.ValueKind == JsonValueKind.String
+                )
+                {
+                    string candidate = reasonValue.GetString() ?? string.Empty;
+                    if (
+                        candidate.Length is > 0 and <= 40
+                        && candidate.All(ch =>
+                            char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_')
+                    )
+                    {
+                        reason = candidate;
+                    }
+                }
+                DirectSnapshotForwardResult pinned = await adapter
+                    .PinAsync(reason, serviceCancellationToken)
+                    .ConfigureAwait(false);
+                context.Response.StatusCode = StatusCodes.Status200OK;
+                context.Response.ContentType = "application/json; charset=utf-8";
+                await context.Response.WriteAsync(
+                    JsonSerializer.Serialize(new
+                    {
+                        ok = true,
+                        outcome = pinned.Outcome,
+                        revision = pinned.Revision,
+                        reason,
+                    }),
+                    serviceCancellationToken).ConfigureAwait(false);
+                return;
+            }
             if (
                 fields.Count == 0
                 || fields.Any(field => field is not (

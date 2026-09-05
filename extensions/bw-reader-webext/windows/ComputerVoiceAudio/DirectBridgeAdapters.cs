@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+
 namespace BwReader.ComputerVoiceAudio;
 
 internal sealed record DirectAppTarget(
@@ -157,6 +159,20 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
     private readonly SemaphoreSlim _disposeGate = new(1, 1);
     private readonly object _heartbeatGate = new();
     private readonly object _runtimeErrorGate = new();
+    // 「一句话说完」→ 钉住快照（2026-09-05 用户定：不断固定我停止说话时刻的快照）。
+    // 判定放在上行 PCM 这一层：无论音频从哪个通道进来，只要它把设备麦克风的帧推到
+    // 这里，说完就钉一次；Codex 语音模式自己的端点判定桥看不到，也不需要看到。
+    private readonly UplinkSpeechEndDetector _speechEnd = new();
+    private Task? _lastPinTask;
+    // 双工诊断（2026-09-05 用户："AI 在说话时听不到我"）：AI 出声期间上行还有没有人声帧。
+    // 有 → 声音到了桥、是 Codex 那头没理；没有 → 是设备端（回声消除的双讲抑制）把它压掉了。
+    // 只计数，不下结论 —— 结论要人看着数字下。
+    private long _lastAppOutputAtMs = long.MinValue;
+    private long _uplinkFrames;
+    private long _uplinkVoicedFrames;
+    private long _uplinkFramesDuringOutput;
+    private long _uplinkVoicedFramesDuringOutput;
+    private const long OutputRecentWindowMs = 300;
     private string? _activeConnectionId;
     private string? _activeSessionId;
     private string? _activeAppKind;
@@ -585,7 +601,15 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                             config.VirtualSpeakerCaptureEndpointId,
                         FixedVirtualAudioBus:
                             config.FixedVirtualAudioBusEnabled),
-                    sendFrameAsync,
+                    (frame, token) =>
+                    {
+                        // 记下 AI 最近一次出声的时刻：双工诊断按它判"出声期间"。
+                        if (frame.Track == DirectPcmTrack.AppOutput)
+                        {
+                            _lastAppOutputAtMs = _monotonicMilliseconds();
+                        }
+                        return sendFrameAsync(frame, token);
+                    },
                     cancellationToken).ConfigureAwait(false);
             if (!started.HostReady
                 || !started.CaptureActive
@@ -757,10 +781,74 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             await _mediaAdapter.PushUplinkFrameAsync(
                 frame,
                 cancellationToken).ConfigureAwait(false);
+            bool utteranceEnded = _speechEnd.Observe(frame.PcmS16Le.Span);
+            _uplinkFrames++;
+            if (_speechEnd.LastVoiced) _uplinkVoicedFrames++;
+            // ⚠ 没出过声时 _lastAppOutputAtMs 是 long.MinValue，直接相减会溢出成负数，
+            //   于是每一帧都算"出声期间" —— 自检第一次就抓到了这条。
+            if (
+                _lastAppOutputAtMs != long.MinValue
+                && _monotonicMilliseconds() - _lastAppOutputAtMs <= OutputRecentWindowMs
+            )
+            {
+                _uplinkFramesDuringOutput++;
+                if (_speechEnd.LastVoiced) _uplinkVoicedFramesDuringOutput++;
+            }
+            if (utteranceEnded)
+            {
+                // 不在 _stateGate 里等落盘：音频 20 ms 一帧，钉住是一次文件 IO。
+                _lastPinTask = PinAfterSpeechEndAsync();
+            }
         }
         finally
         {
             _stateGate.Release();
+        }
+    }
+
+    /// 说完话钉住了几次 / 最近一次为什么没钉成（快照存储没接线时每句话都会失败，
+    /// 只记最后一次原因，不刷日志）。自检与诊断用。
+    internal int SpeechEndPinCount { get; private set; }
+
+    internal string? LastPinFailure { get; private set; }
+
+    /// 等最近一次钉住落盘。自检用；正常运行没人等它。
+    internal Task LastPinCompletion => _lastPinTask ?? Task.CompletedTask;
+
+    /// 双工诊断快照：给 GET /reader-context/snapshot 端出去，人看着数字判打断失灵在哪一段。
+    internal JsonObject DuplexDiagnostics()
+    {
+        long now = _monotonicMilliseconds();
+        return new JsonObject
+        {
+            ["uplinkFrames"] = _uplinkFrames,
+            ["uplinkVoicedFrames"] = _uplinkVoicedFrames,
+            ["uplinkFramesDuringOutput"] = _uplinkFramesDuringOutput,
+            ["uplinkVoicedFramesDuringOutput"] = _uplinkVoicedFramesDuringOutput,
+            ["lastAppOutputAgeMs"] = _lastAppOutputAtMs == long.MinValue
+                ? null
+                : now - _lastAppOutputAtMs,
+            ["noiseFloor"] = Math.Round(_speechEnd.NoiseFloor, 1),
+            ["lastUplinkRms"] = Math.Round(_speechEnd.LastRms, 1),
+            ["speaking"] = _speechEnd.Speaking,
+            ["speechEndPins"] = SpeechEndPinCount,
+            ["lastPinFailure"] = LastPinFailure,
+        };
+    }
+
+    private async Task PinAfterSpeechEndAsync()
+    {
+        try
+        {
+            await _snapshotContextAdapter.PinAsync(
+                "speech-end",
+                CancellationToken.None).ConfigureAwait(false);
+            SpeechEndPinCount++;
+            LastPinFailure = null;
+        }
+        catch (Exception exception)
+        {
+            LastPinFailure = exception.Message;
         }
     }
 

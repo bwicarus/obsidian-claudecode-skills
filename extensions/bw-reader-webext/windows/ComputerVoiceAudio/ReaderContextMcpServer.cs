@@ -47,9 +47,17 @@ internal sealed class ReaderContextMcpServer
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
+    // 1.8.0 是打包器校验的 stdio MCP 合同号（package_computer_voice_direct.py）；
+    // 2026-09-05 的 pinned/basis 字段是纯增量，不改合同号。
     internal const string ServerVersion = "1.8.0";
     internal static readonly TimeSpan FreshnessWindow =
         TimeSpan.FromMinutes(3);
+
+    /// 钉住的快照最多认多久（2026-09-05）：超过就当那句话早已处理完，退回实时版并注明。
+    internal static readonly TimeSpan PinnedWindow = TimeSpan.FromMinutes(5);
+
+    private JsonObject? _pinnedSnapshot;
+    private (long Length, DateTime WriteUtc)? _pinnedStamp;
 
     private const int MaximumMessageCharacters = 1024 * 1024;
     private const long MaximumSafeInteger = 9_007_199_254_740_991L;
@@ -531,6 +539,18 @@ internal sealed class ReaderContextMcpServer
                     + "highlight, drawing, or circle. It reads the newest "
                     + "Windows-local Reader page and selection snapshot and "
                     + "is read-only. "
+                    // 钉住语义（2026-09-05 用户定）：说完话 / 打字发出那一刻的快照另存一份，
+                    // 模型看到的默认是它 —— 用户在 AI 干活时继续翻页、改选区不影响这一轮。
+                    + "Read basis first. basis=pinned means the payload is "
+                    + "the Reader exactly as it was the moment the user "
+                    + "finished speaking or sent the message (pinned.at, "
+                    + "pinned.ageSec, pinned.reason): resolve this/here/the "
+                    + "selection against THAT, even if the user has since "
+                    + "turned the page; live.changed lists what moved "
+                    + "afterwards, and only an explicit 'now' from the user "
+                    + "should make you prefer the live state. basis=live "
+                    + "means no recent pin exists and this is the state as "
+                    + "of this call. "
                     + "Check contextStatus before using currentPage; "
                     + "never reuse text when it is pending or stale. Read "
                     + "visualAccess to discover whether the exact App "
@@ -7034,7 +7054,99 @@ internal sealed class ReaderContextMcpServer
     // 校验请求是否仍然有效也要读。收敛过的投影喂给它们会让取图直接失效，
     // 而且是静默失效（字段缺失读成 null，判断自然不成立）。
     // 默认完整意味着将来新增调用点不会踩这个坑；要收敛必须自己说出来。
+    /// 模型看到的快照 = 有新鲜的钉就用钉住的那一版，否则用刚读到的实时版。
+    ///
+    /// 用户 2026-09-05 定的语义：「不断固定我停止说话时刻的快照，AI 查看时看到的就是
+    /// 最后一次被固定的快照」；打字发出的命令同理，由发送方在发出那一刻钉。
+    /// 钉住的版本按**钉住时刻**算新鲜度 —— 它记录的是用户说话时看到的东西，拿现在去算
+    /// 会把两分钟前的页标成 stale，模型就不敢用了。`live` 只报钉住之后变了什么。
+    /// 超过 PinnedWindow 的钉视为过期：那句话早已处理完，退回实时版并注明。
     private JsonObject BuildToolPayload(bool forModel = false)
+    {
+        JsonObject live = BuildLivePayload(forModel);
+        DateTimeOffset now = _utcNow();
+        JsonObject? pinned = _pinnedSnapshot?.DeepClone() as JsonObject;
+        DateTimeOffset? pinnedAt = PinnedAt(pinned);
+        if (pinned is null || pinnedAt is not DateTimeOffset at)
+        {
+            live["pinned"] = null;
+            live["basis"] = "live";
+            return live;
+        }
+        long ageSeconds = (long)Math.Max(0, (now - at).TotalSeconds);
+        if (now - at > PinnedWindow)
+        {
+            live["pinned"] = new JsonObject
+            {
+                ["at"] = at.ToString("O"),
+                ["ageSec"] = ageSeconds,
+                ["expired"] = true,
+                ["reason"] = pinned["pinned"]?["reason"]?.DeepClone(),
+            };
+            live["basis"] = "live";
+            return live;
+        }
+        ApplyFreshness(pinned, at);
+        pinned["mcp"] = live["mcp"]?.DeepClone();
+        pinned["visualAccess"] = BuildVisualAccess(
+            pinned,
+            _fetchVisualAsync is not null);
+        if (forModel)
+        {
+            TrimDrawingForModel(pinned);
+        }
+        JsonObject meta = pinned["pinned"] as JsonObject ?? new JsonObject();
+        meta["ageSec"] = ageSeconds;
+        meta["expired"] = false;
+        pinned["pinned"] = meta;
+        pinned["basis"] = "pinned";
+        pinned["live"] = DescribeLiveDelta(pinned, live);
+        return pinned;
+    }
+
+    internal static DateTimeOffset? PinnedAt(JsonObject? pinned)
+    {
+        string? at = (pinned?["pinned"] as JsonObject)?["at"]
+            ?.GetValue<string>();
+        return at is not null
+            && DateTimeOffset.TryParse(
+                at,
+                null,
+                System.Globalization.DateTimeStyles.RoundtripKind,
+                out DateTimeOffset parsed)
+            ? parsed
+            : null;
+    }
+
+    /// 钉住之后 Reader 变了什么 —— 只报"变了没有、变成什么"，不重复整份实时快照。
+    internal static JsonObject DescribeLiveDelta(
+        JsonObject pinned,
+        JsonObject live)
+    {
+        static string PageOf(JsonObject snapshot) =>
+            (snapshot["currentPage"] as JsonObject)?["page"]?.ToJsonString()
+            ?? "null";
+        static string SelectionOf(JsonObject snapshot) =>
+            (snapshot["selection"] as JsonObject)?["text"]?.ToJsonString()
+            ?? "null";
+        JsonArray changed = new();
+        if (PageOf(pinned) != PageOf(live))
+        {
+            changed.Add("page " + PageOf(pinned) + " -> " + PageOf(live));
+        }
+        if (SelectionOf(pinned) != SelectionOf(live))
+        {
+            changed.Add("selection changed");
+        }
+        return new JsonObject
+        {
+            ["revision"] = live["revision"]?.DeepClone(),
+            ["updatedAtUtc"] = live["updatedAtUtc"]?.DeepClone(),
+            ["changed"] = changed,
+        };
+    }
+
+    private JsonObject BuildLivePayload(bool forModel)
     {
         JsonObject? snapshot = _latestSnapshot?.DeepClone()
             as JsonObject;
@@ -7331,9 +7443,71 @@ internal sealed class ReaderContextMcpServer
         return null;
     }
 
+    /// 钉住的快照（2026-09-05）：桥在用户说完话 / 打字发出的那一刻另存的一份，
+    /// 文件与主快照同目录。跟读主快照一样只看本机文件；没有就是没有，不猜。
+    /// 按 (长度, 写入时刻) 判有没有变，没变不重新解析。
+    private async Task TryLoadPinnedAsync(CancellationToken cancellationToken)
+    {
+        string path = FileDirectSnapshotContextAdapter.PinnedPathFor(_statePath);
+        try
+        {
+            FileInfo info = new(path);
+            if (
+                !info.Exists
+                || info.Length is <= 0 or > MaximumSnapshotBytes
+            )
+            {
+                _pinnedSnapshot = null;
+                _pinnedStamp = null;
+                return;
+            }
+            (long Length, DateTime WriteUtc) stamp =
+                (info.Length, info.LastWriteTimeUtc);
+            if (_pinnedStamp == stamp)
+            {
+                return;
+            }
+            await using FileStream stream = new(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete,
+                bufferSize: 4096,
+                options: FileOptions.Asynchronous);
+            using StreamReader reader = new(
+                stream,
+                Utf8WithoutBom,
+                detectEncodingFromByteOrderMarks: false,
+                bufferSize: 4096,
+                leaveOpen: false);
+            string raw = await reader.ReadToEndAsync(
+                cancellationToken).ConfigureAwait(false);
+            JsonObject? parsed = JsonNode.Parse(raw) as JsonObject;
+            if (
+                parsed?["schema"]?.GetValue<string>()
+                    != FileDirectSnapshotContextAdapter.SnapshotContract
+                || parsed["pinned"] is not JsonObject
+            )
+            {
+                return;
+            }
+            _pinnedSnapshot = parsed;
+            _pinnedStamp = stamp;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // 半写的文件下一轮就好；这一轮沿用上一次读到的。
+        }
+    }
+
     private async Task TryLoadLatestAsync(
         CancellationToken cancellationToken)
     {
+        await TryLoadPinnedAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             // 通知投影每次读取都刷新:快照 rev 不变时 _latestSnapshot 被

@@ -65,7 +65,7 @@ POST https://bwicarus-2.taile44d0c.ts.net/reader-board/v1
 - `alt` 是这张卡的一句话文字版：图还没渲出来、或设备取不到图时显示它；
   也是用户在 App 里辨认"这张是什么"的依据。**每张卡都写**。
 - `html` 见下面的「卡片怎么写」。⚠ 上面例子里「标题 + 徽章 + 两行字」只是示意接口形状，
-  **不要把它当版式模板** —— 画面按「画面要丰富，不要套模板」那节设计。
+  **不要把它当版式模板** —— 画面按「画面由你设计」那节的限制与风格自己设计。
 
 ### 整块换掉所有卡
 
@@ -109,64 +109,39 @@ POST https://bwicarus-2.taile44d0c.ts.net/reader-board/v1
 壳子还会把整段内容**等比放大到刚好填满**（最多 3 倍，只放大不缩小）。
 壳子只做这几件事，**不改写你的样式** —— 卡片长什么样是你决定的。
 
-### 画面要丰富，不要套模板
+### 画面由你设计；这里只给限制和统一风格
 
-用户 2026-09-05 原话：「我想要的是更丰富的 html 画面而不是固定格式的卡片」。
-一张卡是一块**小海报**，不是"标题 + 徽章 + 两行字"。同一块板子上四张卡长得一模一样，
-用户一眼就看出是模板。按信息的形状挑画面：
+用户 2026-09-05 原话：「html 的内容不应该是我们决定，而是使用的 AI 自己根据需要设计的；
+我们应该提供的是需要满足的限制和统一的风格要求」。所以这里**不给版式模板**。
+同一块板子上四张卡长得一模一样，用户一眼就看出是套的 —— 每张卡按它承载的信息自己
+设计画面：一个数字、一条流程、一张小表、一组色块、一段 SVG，都可以，决定权在你。
 
-| 信息是什么样 | 画成什么 |
-|---|---|
-| 一个关键数字（到期张数、剩余天数、价格） | 占半张卡的大数字 + 一行小标签 + 一条纯 CSS 进度条 |
-| 几步流程 / 时间点（发车→到达、发布前后） | 横向时间线：flex 排几个圆点，中间 `border-top` 连线，当前节点换色 |
-| 周期性的日子（垃圾回收、复习日） | 一周七个小方块，今天高亮、有事的日子标色 |
-| 几项并列状态 | 2×2 或 3×2 色块网格，每格一个词 + 一个 emoji |
-| 两三列对照 | 迷你 `<table>`，斑马纹，表头加粗 |
-| 比例 / 进度 / 趋势 | 内联 `<svg>` 画环形进度或简单折线（只用内联路径，不能引用外部资源） |
+**统一风格**（让不同任务写的卡放在同一块板上像一家的）：
 
-三条硬规则：
+- 底色深、字色浅。壳子默认底 `#161b22`、字 `#e6edf3`；自己铺背景时用同一族深色
+  （`#0d1117` / `#161b22` / `#21262d`）或它们的渐变。
+- 强调色从这一组里挑，一张卡最多两种：蓝 `#58a6ff`、绿 `#7ee787`、黄 `#f0b429`、
+  红 `#f85149`、紫 `#bc8cff`。色块上的字用白或近黑（`#0d1117`），不用灰。
+- 字体不指定（壳子默认 system-ui 一族）；层级靠字重和字号拉开，不靠换字体。
+- 圆角 8–12px，元素间距 6–12px。边缘留白由壳子给（14px）；要全出血自己写
+  `<style>body{padding:0}</style>`。
+- 一张卡只说一件事。不放时间戳，板子自带数据时刻。
 
-- **用满整张画布**。要全出血的色块背景就写 `<style>body{padding:0}</style>`；
-  尺寸可以用 `:root` 上的 `--card-w` / `--card-h`（逻辑像素）来算。
-- **两种形状各渲一次**，同一段 HTML 要在 1:1 和 2:1 里都成立。要区分时用
-  `@media (min-width: 600px)`（宽卡）或 `body.shape-wide` / `body.shape-square`。
-- **对比度**：深色底上浅色字；色块上的字要么白要么近黑，不要灰。
+**硬限制**：
 
-一个大数字卡（方卡里数字在上、进度条在下；宽卡里数字在左、进度条在右）：
-
-```html
-<style>
-  body{padding:0}
-  .k{box-sizing:border-box;min-height:var(--card-h);display:flex;flex-direction:column;
-     justify-content:center;padding:22px;background:linear-gradient(135deg,#1f6feb,#0d419d)}
-  .n{font:800 96px/1 system-ui;color:#fff}
-  .l{font:600 16px system-ui;color:#cae8ff;margin-top:8px}
-  .bar{margin-top:16px;height:10px;border-radius:5px;background:#ffffff33}
-  .bar i{display:block;height:100%;width:62%;border-radius:5px;background:#7ee787}
-  body.shape-wide .k{flex-direction:row;align-items:center;gap:28px}
-  body.shape-wide .n{font-size:128px}
-  body.shape-wide .bar{margin-top:0;flex:1}
-</style>
-<div class="k">
-  <div><div class="n">31</div><div class="l">张卡到期 · 已复习 62%</div></div>
-  <div class="bar"><i></i></div>
-</div>
-```
-
-其余规则：
-
-- **放得下就行**：最多 12 张卡（最大号小组件放 8 张），每张 `html` 最多 8000 字。
-  超了直接被拒（`detail` 会说超了多少），不会悄悄截断。
+- **两种形状各渲一次**：方 320×320、宽 640×320（逻辑像素，2x 输出）。同一段 HTML 要在
+  两种比例里都成立；要分开排时用 `body.shape-square` / `body.shape-wide`，或
+  `@media (min-width: 600px)`；`:root` 上有 `--card-w` / `--card-h` 可拿来算尺寸。
+- **内容会被等比放大到刚好填满**（最多 3 倍，只放大不缩小）。所以字号是相对比例；
+  写多了不会缩小，超出的部分直接裁掉 —— 写不下就拆成两张卡。
+- 每张 `html` 最多 8000 字，一块板最多 12 张卡（最大号小组件放 8 张）。超了直接被拒，
+  `detail` 会说超了多少，不会悄悄截断。
 - **只用页内样式**（`style="…"` 或 `<style>`）。**外链一律无效**：`src`、`href`、
-  `@import`、`javascript:` 入库时就被去掉，渲染环境断网 —— 别指望图片、字体、
-  外部 CSS 能加载。要图标就用 emoji、纯 CSS 或内联 SVG。
-- **这些标签整段扔掉**：`script`、`iframe`、`object`、`embed`、`link`、`meta`、`base`、
-  `form`、`input`、`button`、`textarea`、`foreignObject`、`video`、`audio`、`canvas`。
+  `@import`、`javascript:` 入库时就被去掉，渲染环境断网。图标用 emoji、纯 CSS 或内联 `<svg>`。
+- **整段扔掉的标签**：`script`、`iframe`、`object`、`embed`、`link`、`meta`、`base`、
+  `form`、`input`、`button`、`textarea`、`foreignObject`、`video`、`audio`、`canvas`；
   `on*` 事件属性一并去掉。内容被整段扔掉的卡会被拒（`html 洗掉之后是空的`）。
-  内联 `<svg>` 和 `<math>` 可以用。
-- **字号只决定相对比例**：内容会被放大到填满，所以 14px 正文 / 20px 标题这种
-  写法照旧可用，要紧的是各部分之间的比例。**写多了不会缩小**，超出的部分直接
-  被裁掉 —— 写不下就拆成两张卡。
+  内联 `<svg>`、`<math>` 可以用。
 - **不要放时间戳**。板子自带"数据时刻"，你再写一遍只会占地方，
   两个时间不一致时用户会以为板子坏了。
 - 内容变了 `sha` 才变，设备端按 `sha` 取图并长缓存 —— 所以**没变的卡不要重发**
@@ -178,9 +153,9 @@ POST https://bwicarus-2.taile44d0c.ts.net/reader-board/v1
 {"op":"register","slug":"deploy-watch","title":"发布看板",
  "note":"用户要求盯 X 产品发布","autoClear":{"kind":"afterHours","hours":12}}
 {"op":"card","code":"bd_…","id":"status","alt":"尚未发布，官网仍是 4.2",
- "html":"<style>body{padding:0}.w{box-sizing:border-box;min-height:var(--card-h);display:flex;flex-direction:column;justify-content:center;padding:22px;background:#0d1117}.t{font:800 28px system-ui;color:#f0b429}.tl{display:flex;align-items:center;margin-top:20px}.tl b{width:20px;height:20px;border-radius:50%;background:#30363d;border:3px solid #8b949e}.tl b.on{background:#f0b429;border-color:#f0b429}.tl i{flex:1;border-top:3px dashed #484f58}.lb{display:flex;justify-content:space-between;font:600 13px system-ui;color:#c9d1d9;margin-top:8px}</style><div class=\"w\"><div class=\"t\">4.3 尚未发布</div><div class=\"tl\"><b class=\"on\"></b><i></i><b class=\"on\"></b><i></i><b></b></div><div class=\"lb\"><span>beta 讨论</span><span>changelog 未更</span><span>正式发布</span></div></div>"}
+ "html":"<style>/* 你的页内 CSS */</style>…你按统一风格设计的画面…"}
 {"op":"card","code":"bd_…","id":"signals","alt":"两条已确认的信号",
- "html":"<div style=\"font:600 16px system-ui;margin-bottom:6px\">已确认的信号</div><ul style=\"margin:0;padding-left:18px;font:13px system-ui;line-height:1.6\"><li>开发者论坛出现 4.3 beta 讨论</li><li>官方 changelog 未更新</li></ul>"}
+ "html":"…另一张卡，画面另作设计，不要跟上一张同一个版式…"}
 ```
 
 发布真的发生时：更新 `status` 那张卡，**并按原有通知能力通知用户** ——

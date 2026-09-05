@@ -212,3 +212,57 @@ Obsidian/Anki 自动化不是 Reader 运行时的一部分；相关工作再读�
 版本号、模型名、MCP 工具数量和历史“待修/已完成”段最容易陈旧：
 `card-review-integration.md`/`anki-card-format.md` 主要提供用户意图与格式，当前行为以最新
 共享状态、`rc-*` 实现和合同测试为准；Codex 模型/Fast tier 必须以运行时 `model/list` 为准。
+
+## 9. 钉住的快照（2026-09-05）
+
+**问题**：快照是持续覆盖的状态，命令是一个时刻。模型哪一刻去读，读到的就是那一刻 —— 用户说完话
+之后翻页、改选区，模型看到的就不再是他说话时看的那页；用户也无法判断"它读到目标了没"，于是
+AI 干活时不敢碰 App。
+
+**用户定的形状**："不断固定我停止说话时刻的快照，AI 查看时看到的就是最后一次被固定的快照"；
+打字发出的命令同理，在发出那一刻固定。要求方案对音频通道的变化不敏感。
+
+**实现**（桥 0.1.287 起）：
+
+- **一个原语**：`IDirectSnapshotContextAdapter.PinAsync(reason)` 把此刻的快照另存为
+  `reader-context-pinned.json`（与主快照同目录，文件名只在 `FileDirectSnapshotContextAdapter.PinnedFileName`
+  一处定义，MCP 用 `PinnedPathFor` 算路径）。不改主快照、不动 revision；副本带
+  `pinned:{at, reason, revision}`。
+- **触发一：说完话**。`DirectBridgeCoordinator.PushUplinkFrameAsync` 把设备麦克风的每一帧喂给
+  `UplinkSpeechEndDetector`（纯能量法：自适应噪底，连续 120 ms 有声算开口，连续 700 ms 无声算说完，
+  短于 300 ms 不算话），判定为说完就 `PinAsync("speech-end")`。判定放在上行帧这一层，音频从哪个
+  通道进来都一样 —— 通道换了，只要还把帧推到协调器，这条就照常工作；Codex 语音模式自己的端点判定
+  桥看不到，也不需要看到。
+- **触发二：HTTP 口**。`POST /reader-context/snapshot` 带 `{"pin":{"reason":"text-send"}}`
+  （只此一个字段，不与快照字段混发）。App 里打字发送、将来任何新通道，都调这一个口。
+  reason 限 40 字以内的 `[A-Za-z0-9_-]`。
+- **读取**：MCP `reader_context_snapshot` 的 payload 顶层多了 `basis`：
+  `pinned` = 主体就是钉住那一版，新鲜度按**钉住时刻**算（否则两分钟前的页会被标 stale，模型不敢用），
+  `pinned.ageSec` 说命令距今多久，`live.changed` 列钉住之后变了什么（页、选区）；
+  `live` = 没有 5 分钟内的钉（`PinnedWindow`），主体是刚读到的实时版，`pinned` 为 null 或带 `expired:true`。
+  工具描述里明说：this/here/选区按钉住的那版解，用户明说"现在"才看实时。
+
+**边界**（如实写）：
+
+- 在 Codex 桌面端直接打字的命令，桥看不到发出时刻，没有钉 → `basis=live`，模型第一次来读的那一刻
+  就是它拿到的状态。人在电脑前打字时一般不在碰 iPad，实测偏差以秒计。
+- 说完才画圈这种顺序颠倒的情况，`live.changed` 会报"selection changed"，指南要求指代词优先用它。
+- 用户侧的"已交给 AI"回显还没做：HTTP 口的响应带了 `revision`，App 显示一行是下一步。
+
+自检：`DirectBridgeSelfTest` 的 `speech-end-detector-*` / `speech-end-pins-*` / `snapshot-pin-*`；
+契约：`tests/reader_contract/snapshot-pin.contract.test.mjs`。
+
+### 9a. 双工诊断（2026-09-05，用户："AI 在说话时很难打断它，好像它说话时听不到我"）
+
+先给数字再下结论。桥在上行帧上顺手数四个数：`uplinkFrames` / `uplinkVoicedFrames`（总帧数与有声帧数）、
+`uplinkFramesDuringOutput` / `uplinkVoicedFramesDuringOutput`（AI 最近 300 ms 内出过声时的帧数与有声帧数），
+外加噪底、最近一帧 RMS、钉住次数。看法：
+
+```
+curl -s https://bwicarus-2.taile44d0c.ts.net/reader-context/snapshot
+```
+
+判读：AI 出声期间你说了话，`uplinkVoicedFramesDuringOutput` 若跟着涨 → 你的声音到了桥，是 Codex 那头
+没理（它自己的语音模式在出声时不听，桥管不着）；若几乎不涨 → 声音在到桥之前就没了，最可能是 iPad 的
+系统语音处理（`.voiceChat` + `setVoiceProcessingEnabled(true)`）在外放时做的双讲抑制 —— 远端在讲，
+近端被压。这一条戴耳机就能验：耳机没有声学回声，抑制基本消失。
