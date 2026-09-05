@@ -172,6 +172,7 @@ node 契约全量 + 拼合/vendor 一致 + 语法 + 网络审计，几分钟内�
 - Windows 计划任务「Obsidian Headless Sync」开机/登录自启,启动器在 `bin/start_obsidian_sync.ps1`,日志写到 `state/logs/obsidian_sync.log`
 - 远端 vault:Obsidian Sync(Plus 订阅),Asia 区。**单文件上限 200MB**(Standard 仅 5MB);>200MB 的文件 Sync 永不同步,走旁路 `scripts/push_big_files_to_pc.py`(Pi→PC scp,见「脚本」段)
 - iPad 端写完几秒内 Windows 端就能看到,没有等待窗口期
+- ⚠ **别再从脚本里起一次性 `ob sync`**（2026-09-06 实锤）:常驻的 `sync --continuous` 在跑时,一次性同步一律被 `Another sync instance is already running for this vault.` 挡住 —— 那是健康态不是冲突。要落笔记就写本地文件,由常驻同步上传;报告时把「已落盘」和「已送达」分开说。Codex 的 `obsidian-project-notes` 技能(`~/.codex/skills/`,不在仓库内)已按此改成 resident / oneshot / local 三档,详见 error-prone 文档 09-06 那条
 - 注:PC 的「Obsidian Headless Sync」计划任务 2026-05-15 迁服务器时连同每日任务一起被禁,导致 PC vault 停更 3 周(非尺寸问题),2026-06-08 已重新 Enable+Start;托盘守护 `local_supervisor.pyw` 的 `ensure_obsidian_sync()` 现会看护该任务(被禁→Enable、没跑→Start)
 
 ## 学习方向
