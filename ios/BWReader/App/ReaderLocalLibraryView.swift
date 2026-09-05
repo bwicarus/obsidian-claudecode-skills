@@ -1116,7 +1116,7 @@ struct ReaderLocalLibraryView: View {
         localBook: ReaderLocalBookRecord?
     ) -> some View {
         HStack {
-            Label("服务器 / PC 预处理", systemImage: "server.rack")
+            Label("PC 预处理", systemImage: "server.rack")
                 .font(.caption.weight(.semibold))
             Spacer()
             if let remoteBook,
@@ -1310,18 +1310,15 @@ struct ReaderLocalLibraryView: View {
         remoteBook: ReaderRemoteBook?,
         localBook: ReaderLocalBookRecord?
     ) -> some View {
-        HStack {
-            piStartMenu(
-                remoteBook: remoteBook,
-                localBook: localBook,
-                executor: "pi"
-            )
-            piStartMenu(
-                remoteBook: remoteBook,
-                localBook: localBook,
-                executor: "pc"
-            )
-        }
+        // 「服务器预处理」按钮已删（2026-09-06 用户拍板：「如果实际上相同的话只保留一个」）。
+        // Pi 出局后两个执行器跑在同一台 Windows 上，差别只剩流水线：PC 执行器带公式模型、
+        // 在 ReaderPC 界面有进度；服务器自跑那条没有任何独有能力。服务端仍认 executor=pi
+        // （旧结果采纳走它），只是 App 不再提供入口。
+        piStartMenu(
+            remoteBook: remoteBook,
+            localBook: localBook,
+            executor: "pc"
+        )
     }
 
     private func piStartMenu(
@@ -1329,7 +1326,7 @@ struct ReaderLocalLibraryView: View {
         localBook: ReaderLocalBookRecord?,
         executor: String
     ) -> some View {
-        Menu(executor == "pc" ? "PC 预处理" : "服务器预处理") {
+        Menu("PC 预处理") {
             Button("通用 PDF（Vision）") {
                 Task {
                     await startPiOCR(

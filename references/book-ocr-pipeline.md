@@ -363,12 +363,14 @@ OCR 流水线原来只能改 systemd unit 硬编码 PDF 路径跑。2026-06 曾�
   界面写着「文字识别」，用户以为选错了引擎。五处副本（服务端 `PC_PHASES`、PC worker
   `ALLOWED_PHASES` + 逐页分支、ReaderPC `PHASE_LABELS`、服务器自跑 worker 的逐页与失败分支）由
   `ocr-engine-table` 契约测试钉住。App 只显示服务器给的 `message`，不认阶段名，不用改。
-- **「服务器预处理」与「PC 预处理」的区别**（用户 2026-09-06 问）：两个按钮打的是同一台 Windows
-  服务器，只差 `executor`。`pi` = 服务器进程自己 spawn `reader_book_ocr_worker.py`（profile
-  `pi-default-v5`，不带 DocLayout-YOLO / UniMerNet 公式模型，manga 走 `MANGA_OCR_PYTHON`）；`pc` =
-  任务排队等 ReaderPC 托管的 `reader_pc_preprocess_worker.py` 认领（profile `quality-first-v6`，
-  独立 `reader-pc-ocr-venv`，带公式定位/识别，结果在 App 里标「PC 高质量」）。Pi 出局后两者跑在同一台
-  机器上，差别只剩流水线与 profile；native 引擎两边做的事一样（读字符层 + 分词）。
+- **「服务器预处理」按钮已删，只留「PC 预处理」**（用户 2026-09-06 拍板：「如果实际上相同的话只保留一个」）。
+  两者本来打的就是同一台 Windows 服务器，只差 `executor`：`pi` = 服务器进程自己 spawn
+  `reader_book_ocr_worker.py`（profile `pi-default-v5`，不带 DocLayout-YOLO / UniMerNet 公式模型，manga
+  走 `MANGA_OCR_PYTHON`）；`pc` = 任务排队等 ReaderPC 托管的 `reader_pc_preprocess_worker.py` 认领
+  （profile `quality-first-v6`，独立 `reader-pc-ocr-venv`，带公式定位/识别，结果在 App 里标「PC 高质量」）。
+  Pi 出局后差别只剩流水线，`pi` 没有任何独有能力，所以 App 只保留 `pc` 入口
+  （`ReaderLocalLibraryView.preprocessingStartMenus`，契约测试钉住 `executor: "pi"` 不再出现在该视图）。
+  ⚠ 服务端**仍认** `executor=pi`：旧结果采纳（`adoptExisting`）走的就是它，别顺手删。
 - **旧结果采纳（legacy）从来到不了 App**（2026-09-05 用户点「采用现有结果」→「服务器预处理附件导入
   失败：The data couldn't be read because it is missing」）：`_normalize_legacy_page` 写的页没有
   `imageWidth` / `imageHeight` / `generatedAtEpochMs`，而 App `PiPageCharacters` 三项必填，且

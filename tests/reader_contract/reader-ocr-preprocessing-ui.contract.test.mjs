@@ -280,8 +280,9 @@ test("an already imported revision still invalidates the visible text layer", ()
 
 test("each PDF exposes independent Apple, Pi, and PC preprocessing lifecycles", () => {
   assert.match(VIEW, /Label\("本机预处理"/);
-  assert.match(VIEW, /Label\("服务器 \/ PC 预处理"/);
-  assert.match(VIEW, /executor: "pi"/);
+  assert.match(VIEW, /Label\("PC 预处理", systemImage: "server\.rack"\)/);
+  // 「服务器预处理」按钮已删（2026-09-06 用户拍板）：App 只提供 PC 执行器入口。
+  assert.doesNotMatch(VIEW, /executor: "pi"/, "App 不再提供服务器自跑执行器的入口");
   assert.match(VIEW, /executor: "pc"/);
   for (const action of ["startLocal", "pause", "resume", "cancel", "retry"]) {
     assert.match(VIEW, new RegExp(`nativeOCR\\.${action}\\(`));
@@ -309,7 +310,13 @@ test("PC preprocessing is an explicit Pi-coordinated executor with live availabi
     PI.slice(PI.indexOf("var body = ["), PI.indexOf('if executor == "pc"')),
     /"executor"/,
   );
-  assert.match(VIEW, /Menu\(executor == "pc" \? "PC 预处理" : "服务器预处理"\)/);
+  assert.match(VIEW, /Menu\("PC 预处理"\) \{/);
+  assert.doesNotMatch(VIEW, /Menu\([^\n]*"服务器预处理"/, "只保留 PC 一个按钮");
+  assert.match(
+    VIEW,
+    /preprocessingStartMenus\([\s\S]{0,900}?piStartMenu\(\s*remoteBook: remoteBook,\s*localBook: localBook,\s*executor: "pc"\s*\)\s*\}/,
+    "开始菜单只剩 PC 一份",
+  );
   assert.match(VIEW, /Label\("此电脑 GPU", systemImage: "desktopcomputer"\)/);
   assert.match(VIEW, /executor == "pc" && !pcExecutorAcceptingJobs/);
   assert.match(VIEW, /async let executorRefresh: Void = piOCR\.refreshExecutors\(cookies: cookies\)/);
