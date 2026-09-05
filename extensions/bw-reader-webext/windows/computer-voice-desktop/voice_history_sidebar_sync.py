@@ -80,6 +80,9 @@ MAX_STRUCTURED_PUBLISH_PER_POLL = 8
 MAX_PUBLISHED = MAX_ARCHIVE_ITEMS // 2
 MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
 SNAPSHOT_ANCHOR_MAX_AGE = timedelta(minutes=3)
+# 通话中 Reader 源换成了**另一本书**时,先扣住这么久等原来那本回来;过了就跟着用户走。
+# 同一本书换了连接(App 切后台再回来、换网络)不等,直接改绑。见 _lease_source_matches。
+ROUTE_REBIND_GRACE_SECONDS = 60.0
 HISTORY_POLL_SECONDS = 0.75
 FINAL_TAIL_POLLS = 3
 OFFLINE_EXIT_POLLS = 40
@@ -1639,6 +1642,10 @@ class CaptureBoundHistorySynchronizer:
         self._capture_generation: int | None = None
         self._minimum_assistant_index: int | None = None
         self._lease_source_instance_id: str | None = None
+        # 租约绑定的那本书(identity["file"]);同一本书换连接就改绑,不扣。
+        self._lease_source_file: str | None = None
+        # 当前在线的 Reader 源与租约不符是从什么时候开始的(monotonic);None=相符。
+        self._route_mismatch_since: float | None = None
         self._failure_backoff_polls = 0
         self._structured_baseline: set[str] | None = None
         # 上一次结构化整读的时刻(monotonic)。大线程按 _structured_read_cooldown_seconds 限速。
@@ -1681,6 +1688,8 @@ class CaptureBoundHistorySynchronizer:
         self._lease_thread_id = None
         self._minimum_assistant_index = None
         self._lease_source_instance_id = None
+        self._lease_source_file = None
+        self._route_mismatch_since = None
         self._failure_backoff_polls = 0
         self._structured_baseline = None
         self._structured_signature = None
@@ -1724,9 +1733,7 @@ class CaptureBoundHistorySynchronizer:
         self._minimum_assistant_index = items + 1
         identity = snapshot_output_identity(self.snapshot_path)
         if identity is not None:
-            self._lease_source_instance_id = identity[
-                "source_instance_id"
-            ]
+            self._bind_lease_source(identity)
         if self.structured_history_client is not None:
             self._structured_signature = self._continuity_signature()
             try:
@@ -1825,13 +1832,59 @@ class CaptureBoundHistorySynchronizer:
             return None
         return stat.st_mtime_ns, stat.st_size
 
+    def _bind_lease_source(self, identity: dict[str, Any]) -> None:
+        self._lease_source_instance_id = identity["source_instance_id"]
+        file = identity.get("file")
+        self._lease_source_file = file if isinstance(file, str) else None
+        self._route_mismatch_since = None
+
+    def _lease_source_matches(self, identity: dict[str, Any] | None) -> bool:
+        """租约绑定的 Reader 源是不是当前在线的那个;不是就看能不能改绑。
+
+        原设计(2026-08-12)把整段通话钉在激活那一刻的 sourceInstanceId 上,换了源
+        就扣住不发,等它回来 —— 防的是把这段对话发给另一个 Reader。可 App 每次
+        重连(切后台再回来、换网络)都换一个 sourceInstanceId,旧的永远不会回来:
+        2026-09-06 实测整段通话的记录都被扣到结束,侧栏里一条都没有,而日志在
+        本轮之前一个字都不写。历史是**按书**归档的,不是按连接归档的:同一本书换了
+        连接直接改绑;换了书先扣 ROUTE_REBIND_GRACE_SECONDS 等原来那本回来,过了
+        就跟着用户走 —— 发到用户正在看的那本书,总好过整段丢失(租约一重臂,
+        激活线之前的轮次就再也不发了)。
+        """
+        if identity is None:
+            return self._lease_source_instance_id is None
+        if self._lease_source_instance_id is None:
+            self._bind_lease_source(identity)
+            return True
+        source = identity.get("source_instance_id")
+        if source == self._lease_source_instance_id:
+            self._route_mismatch_since = None
+            return True
+        file = identity.get("file")
+        same_file = (
+            isinstance(file, str)
+            and self._lease_source_file is not None
+            and file == self._lease_source_file
+        )
+        now = time.monotonic()
+        if self._route_mismatch_since is None:
+            self._route_mismatch_since = now
+        waited = now - self._route_mismatch_since
+        if same_file or waited >= ROUTE_REBIND_GRACE_SECONDS:
+            self._diag(
+                "Reader source %s -> %s (%s) - rebinding capture lease" % (
+                    self._lease_source_instance_id,
+                    source,
+                    "same book, reconnected"
+                    if same_file
+                    else "another book for %.0fs" % waited,
+                )
+            )
+            self._bind_lease_source(identity)
+            return True
+        return False
+
     def _structured_route_identity(self) -> dict[str, Any] | None:
-        identity = snapshot_output_identity(self.snapshot_path)
-        if identity is not None and self._lease_source_instance_id is None:
-            self._lease_source_instance_id = identity[
-                "source_instance_id"
-            ]
-        return identity
+        return snapshot_output_identity(self.snapshot_path)
 
     def _structured_sync(
         self,
@@ -1841,12 +1894,7 @@ class CaptureBoundHistorySynchronizer:
         assert self._lease_thread_id is not None
         assert self._minimum_assistant_index is not None
         identity = self._structured_route_identity()
-        source_matches_lease = (
-            identity is None and self._lease_source_instance_id is None
-            or identity is not None
-            and identity.get("source_instance_id")
-                == self._lease_source_instance_id
-        )
+        source_matches_lease = self._lease_source_matches(identity)
         self.last_result = sync_once(
             global_state_path=self.global_state_path,
             continuity_path=self.continuity_path,
@@ -2081,16 +2129,7 @@ class CaptureBoundHistorySynchronizer:
                 force_history_read=force_history_read
             )
         identity = snapshot_output_identity(self.snapshot_path)
-        if identity is not None and self._lease_source_instance_id is None:
-            self._lease_source_instance_id = identity[
-                "source_instance_id"
-            ]
-        source_matches_lease = (
-            identity is None and self._lease_source_instance_id is None
-            or identity is not None
-            and identity.get("source_instance_id")
-                == self._lease_source_instance_id
-        )
+        source_matches_lease = self._lease_source_matches(identity)
         if not source_matches_lease:
             self.last_result = sync_once(
                 global_state_path=self.global_state_path,

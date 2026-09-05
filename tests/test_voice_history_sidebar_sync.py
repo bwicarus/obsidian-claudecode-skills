@@ -512,11 +512,8 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
         self.assertEqual(rebound["threadId"], OTHER)
         self.assertEqual(syncer._capture_generation, 202)
 
-    def test_capture_lease_never_sends_pending_turn_to_another_reader_source(self):
-        self.recent([msg("user", "old-u"), msg("assistant", "old-a")])
-        snapshot = self.root / "reader-context-snapshot.json"
-
-        def write_snapshot(source, revision, page):
+    def _route_snapshot_writer(self, snapshot):
+        def write_snapshot(source, revision, page, file="Books/book.pdf"):
             self.write(
                 snapshot,
                 {
@@ -530,7 +527,7 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
                     },
                     "contextStatus": "ready",
                     "currentPage": {
-                        "file": "Books/book.pdf",
+                        "file": file,
                         "page": page,
                         "stable": True,
                         "sourceInstanceId": source,
@@ -538,8 +535,9 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
                 },
             )
 
-        write_snapshot("app-reader-a", 30, 4)
-        calls = []
+        return write_snapshot
+
+    def _armed_route_syncer(self, snapshot, calls):
         syncer = SYNC.CaptureBoundHistorySynchronizer(
             root=self.root,
             publisher=lambda *args, **kwargs: (
@@ -564,8 +562,18 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
                 msg("assistant", "new-a"),
             ]
         )
+        return syncer
 
-        write_snapshot("extension-reader-b", 31, 0)
+    def test_capture_lease_never_sends_pending_turn_to_another_book(self):
+        # 另一本书上的 Reader 源(不管哪个表面)先扣住,等原来那本回来再发。
+        self.recent([msg("user", "old-u"), msg("assistant", "old-a")])
+        snapshot = self.root / "reader-context-snapshot.json"
+        write_snapshot = self._route_snapshot_writer(snapshot)
+        write_snapshot("app-reader-a", 30, 4)
+        calls = []
+        syncer = self._armed_route_syncer(snapshot, calls)
+
+        write_snapshot("extension-reader-b", 31, 0, file="Books/other.pdf")
         withheld = syncer.observe(
             service_online=True,
             capture_active=True,
@@ -587,6 +595,59 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
         self.assertEqual(calls[0][1]["source_instance_id"], "app-reader-a")
         self.assertEqual(calls[0][1]["snapshot_revision"], 32)
         self.assertEqual(calls[0][1]["page"], 5)
+
+    def test_capture_lease_follows_same_book_reader_reconnect(self):
+        # 2026-09-06:App 切后台再回来会换 sourceInstanceId,旧的永远不回来。
+        # 同一本书换了连接必须直接改绑,否则整段通话的记录都扣到结束。
+        self.recent([msg("user", "old-u"), msg("assistant", "old-a")])
+        snapshot = self.root / "reader-context-snapshot.json"
+        write_snapshot = self._route_snapshot_writer(snapshot)
+        write_snapshot("source-first", 30, 4)
+        calls = []
+        syncer = self._armed_route_syncer(snapshot, calls)
+
+        write_snapshot("source-reconnected", 31, 6)
+        delivered = syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.assertEqual(delivered["published"], 1)
+        self.assertIsNone(delivered.get("error"))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["source_instance_id"], "source-reconnected")
+        self.assertEqual(calls[0][1]["page"], 6)
+        self.assertEqual(syncer._lease_source_instance_id, "source-reconnected")
+
+    def test_capture_lease_follows_user_to_another_book_after_grace(self):
+        # 换了书先扣 ROUTE_REBIND_GRACE_SECONDS;过了还没回来就跟着用户走,不丢。
+        self.recent([msg("user", "old-u"), msg("assistant", "old-a")])
+        snapshot = self.root / "reader-context-snapshot.json"
+        write_snapshot = self._route_snapshot_writer(snapshot)
+        write_snapshot("app-reader-a", 30, 4)
+        calls = []
+        syncer = self._armed_route_syncer(snapshot, calls)
+
+        write_snapshot("app-reader-c", 31, 2, file="Books/other.pdf")
+        withheld = syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.assertEqual(calls, [])
+        self.assertIn("source changed", withheld["error"])
+        self.assertIsNotNone(syncer._route_mismatch_since)
+
+        syncer._route_mismatch_since -= SYNC.ROUTE_REBIND_GRACE_SECONDS + 1
+        delivered = syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.assertEqual(delivered["published"], 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["page"], 2)
+        self.assertEqual(syncer._lease_source_file, "Books/other.pdf")
 
     def test_activation_watermark_handles_non_alternating_existing_roles(self):
         baseline = [
