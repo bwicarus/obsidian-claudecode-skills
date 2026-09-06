@@ -9,3 +9,4 @@ MarkupSafe==2.1.5
 requests==2.32.3
 PyMuPDF==1.27.2.3
 gunicorn==26.0.0
+zhconv==1.4.3    # KJ 公共目录检索的简繁变体（scripts/kj/wikidata.py，可选：缺了只按原字形查）

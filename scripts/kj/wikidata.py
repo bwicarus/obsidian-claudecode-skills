@@ -203,17 +203,41 @@ def _squeeze(s: str) -> str:
     return _SQUEEZE_RE.sub("", s or "").lower()
 
 
-def _search_score(ledger: Ledger, e: dict, q_lower: str) -> tuple:
+try:  # 简繁转换：可选依赖，没装就只按原字形查
+    import zhconv as _zhconv
+except Exception:  # pragma: no cover
+    _zhconv = None
+
+
+def _query_variants(q: str) -> list[str]:
+    """查询词的简/繁变体（含港台用词）。2026-09-07 探针实锤：目录里一大半条目只有一种字形的 zh 标签
+    （導數 / 極限 / 編譯器 / 現在進行式 都没有 zh-hans 标签），用户输简体必须也能撞到繁体标签。"""
+    out = [q]
+    if _zhconv is not None and any("一" <= ch <= "鿿" for ch in q):
+        for loc in ("zh-cn", "zh-tw", "zh-hk"):
+            try:
+                v = _zhconv.convert(q, loc)
+            except Exception:
+                continue
+            if v and v not in out:
+                out.append(v)
+    return out
+
+
+def _search_score(ledger: Ledger, e: dict, q_lower) -> tuple:
     labels = [x for x in (e.get("label_en"), e.get("label_zh"), e.get("label_ja")) if x]
     aliases = [a for vals in (e.get("aliases") or {}).values() for a in vals]
     names = [x.lower() for x in labels + aliases]
-    q_sq = _squeeze(q_lower)
-    if any(n == q_lower for n in names) or any(_squeeze(n) == q_sq for n in names):
+    qs = [q_lower] if isinstance(q_lower, str) else list(q_lower)
+    q_sqs = {_squeeze(x) for x in qs}
+    if any(n in qs for n in names) or any(_squeeze(n) in q_sqs for n in names):
         tier = 0
-    elif any(n.startswith(q_lower) for n in names):
+    elif any(n.startswith(x) for n in names for x in qs):
         tier = 1
+    elif any(len(n) >= 2 and x.startswith(n) for n in names for x in qs):
+        tier = 2   # 标签是查询词的前缀："拉格朗日乘数" 之于 "拉格朗日乘数法"
     else:
-        tier = 2
+        tier = 3
     classes = {t for p, t, _ in claims_of(ledger, e["qid"]) if p == "P31"}
     penalty = 3 if classes & SEARCH_DEMOTED_CLASSES else 0
     # 同分时按 Q 号**数值**排：老条目（小号）多是核心概念，新号多是论文/游戏/村镇。字符串比较会让 Q109753558 排在 Q45003 前面（"熵"实锤）。
@@ -236,43 +260,54 @@ def search_public(ledger: Ledger, q: str, limit: int = 8) -> list[dict]:
         for r in rows:
             if r[0] not in qids:
                 qids.append(r[0])
-    # ① 精确标签（三语，走索引）② 前缀（范围查询，走索引；两字词如"宪法""牛顿"靶这条）
-    add(db.execute("SELECT qid FROM public_entities WHERE label_zh=? OR label_en=? OR label_ja=? LIMIT 20", (q, q, q)))
-    hi = q + "￿"
-    for col in ("label_zh", "label_en", "label_ja"):
-        add(db.execute(f"SELECT qid FROM public_entities WHERE {col} >= ? AND {col} < ? LIMIT 30", (q, hi)))
-    # ③ 全文（trigram 要 ≥3 字）
-    if len(q) >= 3:
+    variants = _query_variants(q)   # 简体/繁体/港台 各查一遍，目录里的 zh 标签字形不定
+
+    def fts(phrase: str, n: int) -> None:
         try:
             add(db.execute("SELECT qid FROM public_fts WHERE public_fts MATCH ? ORDER BY rank LIMIT ?",
-                           ('"' + q.replace('"', '""') + '"', _SEARCH_CANDIDATES)))
+                           ('"' + phrase.replace('"', '""') + '"', n)))
         except Exception:
             pass
+
+    # ① 精确标签（三语，走索引）② 前缀（范围查询，走索引；两字词如"宪法""牛顿"靶这条）
+    for v in variants:
+        add(db.execute("SELECT qid FROM public_entities WHERE label_zh=? OR label_en=? OR label_ja=? LIMIT 20", (v, v, v)))
+    n_exact = len(qids)
+    for v in variants:
+        hi = v + "￿"
+        for col in ("label_zh", "label_en", "label_ja"):
+            add(db.execute(f"SELECT qid FROM public_entities WHERE {col} >= ? AND {col} < ? LIMIT 30", (v, hi)))
+    # ③ 全文（trigram 要 ≥3 字）
+    if len(q) >= 3:
+        for v in variants:
+            fts(v, _SEARCH_CANDIDATES)
     # ④ 什么都没有才全表 LIKE（慢路径，只在短词且无命中时）
     if not qids and len(q) <= 2:
         like = f"%{q}%"
         add(db.execute(
             "SELECT qid FROM public_entities WHERE label_zh LIKE ? OR label_en LIKE ? OR label_ja LIKE ? LIMIT ?",
             (like, like, like, _SEARCH_CANDIDATES)))
-    # ⑤ 仍没有：去掉连接符/空格后再试一次（"凯莱-哈密顿定理" vs "凯莱–哈密顿定理"），再逐字缩短前缀（"牛顿第二定律"→"牛顿第二"）
+    # ⑤ 什么都没有：去掉连接符/空格后再试一次（"凯莱-哈密顿定理" vs "凯莱–哈密顿定理"）
     if not qids:
         squeezed = _squeeze(q)
         if squeezed != q and len(squeezed) >= 2:
             return search_public(ledger, squeezed, limit)
+    # ⑥ 没有精确同名（前缀/全文只捞到以这串字开头或含这串字的论文）：逐字缩短前缀召回本体条目——
+    #    "牛顿第二定律"→"牛顿第二"撞 "牛顿第二运动定律"，"拉格朗日乘数法"→"拉格朗日乘数"，"现在进行时"→"現在進行式"。
+    #    2026-09-07 探针：这一步原来只在候选全空时才走，结果论文一多正确条目反而进不了候选。
+    if n_exact == 0:
         for n in range(len(q) - 1, 1, -1):
-            prefix = q[:n]
-            hi2 = prefix + "￿"
-            for col in ("label_zh", "label_en", "label_ja"):
-                add(db.execute(f"SELECT qid FROM public_entities WHERE {col} >= ? AND {col} < ? LIMIT 30", (prefix, hi2)))
-            if len(prefix) >= 3:   # 别名（含简繁变体）只在全文里，前缀范围查询看不到
-                try:
-                    add(db.execute("SELECT qid FROM public_fts WHERE public_fts MATCH ? ORDER BY rank LIMIT 30",
-                                   ('"' + prefix.replace('"', '""') + '"',)))
-                except Exception:
-                    pass
-            if qids:
+            before = len(qids)
+            for v in variants:
+                prefix = v[:n]
+                hi2 = prefix + "￿"
+                for col in ("label_zh", "label_en", "label_ja"):
+                    add(db.execute(f"SELECT qid FROM public_entities WHERE {col} >= ? AND {col} < ? LIMIT 30", (prefix, hi2)))
+                if len(prefix) >= 3:   # 别名只在全文里，前缀范围查询看不到
+                    fts(prefix, 30)
+            if len(qids) > before:
                 break
-    q_lower = q.lower()
+    q_lower = [v.lower() for v in variants]
     scored = []
     for qid in qids[:_SEARCH_CANDIDATES * 2]:
         e = entity(ledger, qid)

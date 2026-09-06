@@ -91,6 +91,18 @@ class WikidataTests(unittest.TestCase):
         self.assertEqual([h["qid"] for h in WD.search_public(self.L, "牛顿第二运动定律", limit=2)][0], "Q2397319")   # 简体别名命中繁体条目
         self.assertEqual([h["qid"] for h in WD.search_public(self.L, "牛顿第二定律", limit=2)][0], "Q2397319")      # 缩短前缀兜底
         self.assertEqual(WD.entity(self.L, "Q2397319")["aliases"]["zh"], ["牛顿第二运动定律"])
+        # 标签是查询词的前缀（"拉格朗日乘数" ⊂ "拉格朗日乘数法"）要赢过标题里含这串字的论文——论文有精确前缀也不行
+        WD.upsert_entity(self.L, "Q598870", {"zh": "拉格朗日乘数", "en": "Lagrange multiplier"}, {}, {}, [], source="t")
+        WD.upsert_entity(self.L, "Q99408725", {"zh": "拉格朗日乘数法计算大坝可靠度"}, {}, {}, [("P31", "Q13442814", "normal")], source="t")
+        self.assertEqual([h["qid"] for h in WD.search_public(self.L, "拉格朗日乘数法", limit=2)][0], "Q598870")
+        if WD._zhconv is not None:
+            # 目录里只有繁体 zh 标签、没有 zh-hans 的条目（导数/极限/编译器都是），简体查询靠查询侧简繁变体命中
+            WD.upsert_entity(self.L, "Q29175", {"zh": "導數", "en": "derivative"}, {}, {}, [], source="t")
+            WD.upsert_entity(self.L, "Q67189384", {"zh": "导数分光光度法"}, {}, {}, [("P31", "Q13442814", "normal")], source="t")
+            self.assertEqual([h["qid"] for h in WD.search_public(self.L, "导数", limit=2)][0], "Q29175")
+            WD.upsert_entity(self.L, "Q7240943", {"zh": "現在進行式", "en": "present continuous"}, {}, {}, [], source="t")
+            WD.upsert_entity(self.L, "Q121417949", {"zh": "现在进行时─青年设计师访谈"}, {}, {}, [("P31", "Q13442814", "normal")], source="t")
+            self.assertEqual([h["qid"] for h in WD.search_public(self.L, "现在进行时", limit=2)][0], "Q7240943")   # 时/式 不同字：缩短前缀 + 繁体变体
 
     def test_parse_entity_json_and_fetch_via_fake_http(self):
         doc = {"entities": {"Q1": {"labels": {"en": {"language": "en", "value": "one"}, "zh-hans": {"language": "zh-hans", "value": "一"}},
