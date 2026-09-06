@@ -67,24 +67,40 @@ def J(o) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = [a for a in (argv if argv is not None else sys.argv[1:])]
     do_sparql = "--no-sparql" not in args
+    online = "--offline" not in args
+    public_db = None
+    for a in args:
+        if a.startswith("--public-db="):
+            public_db = a.split("=", 1)[1]
     concept = next((a for a in args if not a.startswith("--")), "向量空间")
     tmp = Path(tempfile.mkdtemp(prefix="kjtok"))
+    # --public-db=<kj-public.db>：把真实的公共目录挂到临时账本上（只读用），量的就是离线本地检索
     svc = KJService(tmp / "kj.db", render=False, actor="measure")
+    if public_db:
+        svc.close()
+        from kj.store import Ledger as _Ledger  # type: ignore
+        svc = KJService.__new__(KJService)
+        svc.ledger = _Ledger(tmp / "kj.db", public_path=public_db)
+        svc.writer = None
+        svc.actor = "measure"
     rows: list[tuple[str, int, int, float | None]] = []
     try:
         t = time.time()
-        res = svc.search(concept, online=True, limit=8)
+        res = svc.search(concept, online=online, limit=8)
         s = J(res)
-        rows.append((f"A1 search {concept} --online（本地空库→上网）", len(s), tok(s), round(time.time() - t, 2)))
+        rows.append((f"A1 search {concept} {'--online（本地空库→上网）' if online else '--offline（本地公共目录）'}", len(s), tok(s), round(time.time() - t, 2)))
         pub = res.get("public") or []
         if not pub:
             print("公共目录与在线搜索都没有候选，无法继续路径 A/B")
             return 1
-        qid = pub[0]["qid"]
+        exact = [p for p in pub if p.get("label") == concept]
+        qid = (exact or pub)[0]["qid"]
         chain: list[tuple[str, str]] = []
         cur = qid
         for _ in range(6):
-            e = WD.fetch_entity(svc.ledger, cur, fetcher=lambda url, to: http(url, to))
+            e = WD.entity(svc.ledger, cur) if not online else None
+            if e is None:
+                e = WD.fetch_entity(svc.ledger, cur, fetcher=lambda url, to: http(url, to))
             if e is None:
                 break
             chain.append((cur, e["label"]))

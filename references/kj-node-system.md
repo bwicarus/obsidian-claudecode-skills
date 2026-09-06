@@ -114,6 +114,12 @@ relation / relation_retract / relation_change / card / card_make / quiz / quiz_r
 - **2026-09-07 全量实测**（`wikidata-20260831`，103 GB bz2，20 进程 2 小时 50 分）：展开 1.84 TB（压缩比 17.9）；
   实体 121,505,373、实体值关系 881,654,057、单流 3,662,362 块；全量最简行 54.6 GB；有中/日文标签的子集 12,328,574 个实体（10.1%），
   最简行 5.05 GB、gzip 983 MB —— 这份子集就是导入本地公共目录的对象。度分布：45% 实体 ≤3 条关系、88% ≤10、99.4% ≤50。
+- **子集已导入** `state/kj/kj-public.db`：12,328,574 实体、63,765,531 条关系（去掉 deprecated 与重复），导入 29 分钟，
+  加三语标签索引后 13.9 GB。检索 `search_public`：① 精确标签（索引）② 前缀范围查询（索引）③ FTS trigram（≥3 字）④ 兜底 LIKE；
+  候选再按 精确 > 前缀 > 包含 排序，`SEARCH_DEMOTED_CLASSES`（论文/文章/学位论文等 P31）压后 —— 有中文标签的实体里大半是论文标题，
+  不压会把"向量空间"本体挤出前几名。实测延迟 3~30 ms（"Newton" 32 ms）。
+- **离线 Token 复测**（o200k）：`search 向量空间` 8 个候选带 2 层分类路径 692 token → 精简为简述 100 字 + 1 层路径后 502；
+  `node` 详情（含公共邻居）696，必需字段 189。默认路径一轮约 1200 token（在线版约 900，多出来的是本地目录给出的公共邻居与路径）。
 - 属性映射（`wikidata.PROP_MAP`）：P279 subclass_of、P31 instance_of、P361/P527 part_of、P1542/P828 causes、P737 influenced_by、
   P2283 uses、P1269 facet_of、P1889 different_from、P2579/P2578 studied_by/studies、P1855 example、P3095 practiced_by。**没有 prereq**。
 - 两端都绑了编号的公共关系 → 本地关系 `origin=wikidata`；换绑/解绑撤回旧的、生成新的；分类路径 `path_up` 只作定位线索。

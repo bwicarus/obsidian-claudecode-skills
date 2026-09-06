@@ -158,31 +158,82 @@ def path_up(ledger: Ledger, qid: str, depth: int = 3) -> list[dict]:
     return out
 
 
+# 检索时压后排的类别（P31）：论文/文章/学位论文/章节 —— 有中文标签的 1233 万实体里大半是论文标题，
+# 会把"向量空间"这种概念本体挤出前几名（2026-09-07 实测）。不是删除，只是排序时加罚分。
+SEARCH_DEMOTED_CLASSES = frozenset({
+    "Q13442814",  # scholarly article
+    "Q191067",    # article
+    "Q7318358",   # review article
+    "Q23927052",  # conference paper
+    "Q1266946",   # thesis
+    "Q187685",    # doctoral thesis
+    "Q1980247",   # chapter
+    "Q18918145",  # academic journal article
+    "Q58632367",  # preprint
+    "Q10885494",  # scientific journal article?
+})
+_SEARCH_CANDIDATES = 80
+
+
+def _search_score(ledger: Ledger, e: dict, q_lower: str) -> tuple:
+    labels = [x for x in (e.get("label_en"), e.get("label_zh"), e.get("label_ja")) if x]
+    aliases = [a for vals in (e.get("aliases") or {}).values() for a in vals]
+    names = [x.lower() for x in labels + aliases]
+    if any(n == q_lower for n in names):
+        tier = 0
+    elif any(n.startswith(q_lower) for n in names):
+        tier = 1
+    else:
+        tier = 2
+    classes = {t for p, t, _ in claims_of(ledger, e["qid"]) if p == "P31"}
+    penalty = 3 if classes & SEARCH_DEMOTED_CLASSES else 0
+    return (tier + penalty, len(e.get("label") or ""), e["qid"])
+
+
 def search_public(ledger: Ledger, q: str, limit: int = 8) -> list[dict]:
+    """公共目录检索：FTS(trigram) 取候选 → 精确标签/别名优先、前缀次之、论文类压后 → 取前 limit。"""
     q = (q or "").strip()
     if not q:
         return []
-    rows = []
+    db = ledger.db
+    qids: list[str] = []
+
+    def add(rows) -> None:
+        for r in rows:
+            if r[0] not in qids:
+                qids.append(r[0])
+    # ① 精确标签（三语，走索引）② 前缀（范围查询，走索引；两字词如"宪法""牛顿"靶这条）
+    add(db.execute("SELECT qid FROM public_entities WHERE label_zh=? OR label_en=? OR label_ja=? LIMIT 20", (q, q, q)))
+    hi = q + "￿"
+    for col in ("label_zh", "label_en", "label_ja"):
+        add(db.execute(f"SELECT qid FROM public_entities WHERE {col} >= ? AND {col} < ? LIMIT 30", (q, hi)))
+    # ③ 全文（trigram 要 ≥3 字）
     if len(q) >= 3:
         try:
-            rows = ledger.db.execute(
-                "SELECT qid FROM public_fts WHERE public_fts MATCH ? ORDER BY rank LIMIT ?",
-                ('"' + q.replace('"', '""') + '"', limit)).fetchall()
+            add(db.execute("SELECT qid FROM public_fts WHERE public_fts MATCH ? ORDER BY rank LIMIT ?",
+                           ('"' + q.replace('"', '""') + '"', _SEARCH_CANDIDATES)))
         except Exception:
-            rows = []
-    if not rows:
+            pass
+    # ④ 什么都没有才全表 LIKE（慢路径，只在短词且无命中时）
+    if not qids:
         like = f"%{q}%"
-        rows = ledger.db.execute(
-            "SELECT qid FROM public_entities WHERE label_en LIKE ? OR label_zh LIKE ? OR label_ja LIKE ? OR aliases_json LIKE ? LIMIT ?",
-            (like, like, like, like, limit)).fetchall()
+        add(db.execute(
+            "SELECT qid FROM public_entities WHERE label_zh LIKE ? OR label_en LIKE ? OR label_ja LIKE ? LIMIT ?",
+            (like, like, like, _SEARCH_CANDIDATES)))
+    q_lower = q.lower()
+    scored = []
+    for qid in qids[:_SEARCH_CANDIDATES * 2]:
+        e = entity(ledger, qid)
+        if e:
+            scored.append((_search_score(ledger, e, q_lower), e))
+    scored.sort(key=lambda x: x[0])
     out = []
-    for r in rows:
-        e = entity(ledger, r[0])
-        if not e:
-            continue
+    for _, e in scored[:limit]:
         local = ledger.find_by_qid(e["qid"])
-        out.append({"qid": e["qid"], "label": e["label"], "description": e["description"],
-                    "local_node": local["id"] if local else None, "path": path_up(ledger, e["qid"], 2)})
+        # 给 AI 的候选只留定位所需：简述截 100 字、分类路径 1 层（完整的等 kj_node 再看）—— 2026-09-07 离线实测
+        # 8 个候选带 2 层路径要 690 token，精简后约减半。
+        out.append({"qid": e["qid"], "label": e["label"], "description": (e["description"] or "")[:100],
+                    "local_node": local["id"] if local else None, "path": path_up(ledger, e["qid"], 1)})
     return out
 
 

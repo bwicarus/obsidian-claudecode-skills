@@ -148,6 +148,9 @@ CREATE TABLE IF NOT EXISTS pub.public_claims(
     PRIMARY KEY(qid, prop, target)
 );
 CREATE INDEX IF NOT EXISTS pub.idx_public_claims_target ON public_claims(target, prop);
+CREATE INDEX IF NOT EXISTS pub.idx_pub_label_zh ON public_entities(label_zh);
+CREATE INDEX IF NOT EXISTS pub.idx_pub_label_en ON public_entities(label_en);
+CREATE INDEX IF NOT EXISTS pub.idx_pub_label_ja ON public_entities(label_ja);
 CREATE VIRTUAL TABLE IF NOT EXISTS pub.public_fts USING fts5(
     qid UNINDEXED, labels, tokenize='trigram'
 );
