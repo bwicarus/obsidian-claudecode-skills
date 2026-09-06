@@ -133,20 +133,25 @@ CREATE TABLE IF NOT EXISTS search_text(
 CREATE VIRTUAL TABLE IF NOT EXISTS node_fts USING fts5(
     node_id UNINDEXED, name, aliases, body, tokenize='trigram'
 );
+"""
 
-CREATE TABLE IF NOT EXISTS public_entities(
+# 公共目录单独一个文件（kj-public.db，ATTACH 为 pub）：几百万条 Wikidata 行不该把私人账本撑大、拖慢备份。
+# 未加限定的表名 SQLite 先查 main 再查 pub，所以查询代码不用写 pub. 前缀。
+_PUBLIC_SCHEMA = """
+CREATE TABLE IF NOT EXISTS pub.public_entities(
     qid TEXT PRIMARY KEY, label_en TEXT, label_zh TEXT, label_ja TEXT,
     desc_en TEXT, desc_zh TEXT, desc_ja TEXT, aliases_json TEXT,
-    fetched_at INTEGER, source TEXT
+    search_text TEXT, fetched_at INTEGER, source TEXT
 );
-CREATE TABLE IF NOT EXISTS public_claims(
+CREATE TABLE IF NOT EXISTS pub.public_claims(
     qid TEXT NOT NULL, prop TEXT NOT NULL, target TEXT NOT NULL, rank TEXT DEFAULT 'normal',
     PRIMARY KEY(qid, prop, target)
 );
-CREATE INDEX IF NOT EXISTS idx_public_claims_target ON public_claims(target, prop);
-CREATE VIRTUAL TABLE IF NOT EXISTS public_fts USING fts5(
+CREATE INDEX IF NOT EXISTS pub.idx_public_claims_target ON public_claims(target, prop);
+CREATE VIRTUAL TABLE IF NOT EXISTS pub.public_fts USING fts5(
     qid UNINDEXED, labels, tokenize='trigram'
 );
+CREATE TABLE IF NOT EXISTS pub.meta(k TEXT PRIMARY KEY, v TEXT);
 """
 
 _PROJECTION_TABLES = (
@@ -158,20 +163,24 @@ _PROJECTION_TABLES = (
 class Ledger:
     """一个 SQLite 文件 = 一套账本。线程安全靠一把进程内锁 + WAL。"""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, public_path: str | Path | None = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.public_path = Path(public_path) if public_path else self.path.with_name(self.path.stem + "-public" + self.path.suffix)
         self._lock = threading.RLock()
         self.db = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
+        self.db.execute("ATTACH DATABASE ? AS pub", (str(self.public_path),))
+        self.db.execute("PRAGMA pub.journal_mode=WAL")
         self._ensure_schema()
 
     # ── schema ────────────────────────────────────────────────────────────
     def _ensure_schema(self) -> None:
         with self._lock:
             self.db.executescript(_SCHEMA)
+            self.db.executescript(_PUBLIC_SCHEMA)
             cur = self.db.execute("SELECT v FROM meta WHERE k='contract'")
             row = cur.fetchone()
             if row is None:

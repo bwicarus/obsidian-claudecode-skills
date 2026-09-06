@@ -103,6 +103,10 @@ class AnkiTests(unittest.TestCase):
         self.assertEqual([c[0] for c in self.calls], ["createDeck", "addNote", "findCards", "changeDeck"])
         self.assertEqual(self.calls[1][1]["note"]["deckName"], "KJ")
         self.assertIn("kj::kj_" + self.a.split(":")[1], self.calls[1][1]["note"]["tags"])
+        back = self.calls[1][1]["note"]["fields"]["Back"]
+        self.assertTrue(back.startswith("A<hr>"), back)
+        self.assertIn('href="obsidian://open?vault=', back)        # 复习卡 UI 的来源栏据此显示"打开节点"
+        self.assertIn("&amp;file=KJ/", back)
         self.assertEqual(self.svc.make_card(node_ids=[], front="Q", back="A", request=self.fake_request)["code"], "missing_node")
         self.assertEqual(self.svc.node(self.a)["cards"][0]["anki_note_id"], 1001)
 

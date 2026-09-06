@@ -1,14 +1,19 @@
 """节点 Markdown 页：程序生成、可重建的人可读视图。**不是数据来源**（账本在 SQLite）。
 
-布局（文档 §4 用户修正）：标题 = 名称；正文 = 定义原文 / 关系链接 / 记录摘要 / 卡片 / 来源；
-frontmatter 只放参与计算的值与状态。关系用固定栏目里的 [[内部链接]] 表达，程序可解析。
+布局（文档 §4 用户修正 + 2026-09-06 晚反馈）：
+- frontmatter：参与计算的值与状态，外加 Obsidian 原生 ``aliases`` / ``tags``、公共编号、前置/后续/相关的 [[链接]]、来源清单，
+  让属性面板一眼看到掌握度、关系、来源、Wikidata 来源。
+- 正文：定义原文（多行保留、引用原文、出处）、关系栏目（[[链接]]）、记录（**多行排版保留**，不再压成一行）、卡片。
 
-文件名 = ``<安全名称>·<短id>.md``：改名会重命名文件（旧文件删除、链接全部由程序重新生成）。
+文件名 = ``<安全名称>·<短id>.md``：改名会重命名文件（旧文件删除、链接由程序重新生成）。
+每页都有 ``obsidian://open`` 深链，供 AI 推送 / 卡片来源栏打开。
 """
 from __future__ import annotations
 
 import datetime as _dt
+import os
 import re
+import urllib.parse
 from pathlib import Path
 
 from . import ids
@@ -16,13 +21,13 @@ from .store import Ledger
 from . import wikidata as WD
 
 INDEX_NAME = "节点索引.md"
+NODES_DIR_NAME = "节点"
 _FM_MARK = "kj_id:"
+_RECORD_TEXT_LIMIT = 4000
 
 
 def _ts(t: int | None) -> str:
-    if not t:
-        return ""
-    return _dt.datetime.fromtimestamp(int(t)).strftime("%Y-%m-%d %H:%M")
+    return _dt.datetime.fromtimestamp(int(t)).strftime("%Y-%m-%d %H:%M") if t else ""
 
 
 def _day(t: int | None) -> str:
@@ -33,6 +38,17 @@ def filename_for(node_id: str, name: str) -> str:
     return f"{ids.safe_filename(name)}·{ids.short(node_id)}.md"
 
 
+def vault_relative_dir() -> str:
+    """节点页在 vault 里的相对目录（默认 KJ/节点）。"""
+    return os.environ.get("KJ_VAULT_SUBDIR", "KJ") + "/" + NODES_DIR_NAME
+
+
+def obsidian_url(node_id: str, name: str) -> str:
+    vault = os.environ.get("OBSIDIAN_VAULT_NAME", "Obsidian Vault")
+    file_rel = vault_relative_dir() + "/" + filename_for(node_id, name)[:-3]
+    return "obsidian://open?vault=" + urllib.parse.quote(vault, safe="") + "&file=" + urllib.parse.quote(file_rel, safe="/")
+
+
 def link_for(ledger: Ledger, node_id: str) -> str:
     n = ledger.node(node_id)
     if n is None:
@@ -40,14 +56,32 @@ def link_for(ledger: Ledger, node_id: str) -> str:
     return f"[[{filename_for(n['id'], n['name'])[:-3]}|{n['name']}]]"
 
 
-def _source_line(src: dict | None) -> str:
+def _wikilink_plain(ledger: Ledger, node_id: str) -> str:
+    n = ledger.node(node_id)
+    return f"[[{filename_for(n['id'], n['name'])[:-3]}]]" if n else node_id
+
+
+def _y(s) -> str:
+    """YAML 双引号标量。"""
+    s = "" if s is None else str(s)
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ") + '"'
+
+
+def _ylist(items) -> str:
+    items = [x for x in items if x]
+    return "[" + ", ".join(_y(x) for x in items) + "]" if items else "[]"
+
+
+def source_label(src: dict | None) -> str:
+    """来源一行字：pdf：书名 · 第N页 · 节；web：url。"""
     if not src:
         return ""
     parts = []
-    kind = src.get("kind", "")
     if src.get("book") or src.get("title"):
         parts.append(str(src.get("book") or src.get("title")))
-    if src.get("page") is not None:
+    if src.get("printed_page") is not None:
+        parts.append(f"第 {src['printed_page']} 页")
+    elif src.get("page") is not None:
         parts.append(f"p.{src['page']}")
     if src.get("section"):
         parts.append(str(src["section"]))
@@ -57,61 +91,117 @@ def _source_line(src: dict | None) -> str:
         parts.append(str(src["ref"]))
     if src.get("qid"):
         parts.append(f"Wikidata {src['qid']}")
-    head = f"{kind}" if kind and kind not in ("other", "manual") else ""
+    kind = src.get("kind", "")
+    head = kind if kind and kind not in ("other", "manual") else ""
     body = " · ".join(parts)
-    return f"（{head}{'：' if head and body else ''}{body}）" if (head or body) else ""
+    return f"{head}：{body}" if head and body else (head or body)
 
 
-def render_node(ledger: Ledger, node_id: str, *, records_limit: int = 20) -> str:
+def _source_block(src: dict | None, indent: str = "  ") -> list[str]:
+    """来源的多行展示：出处行 + 原文引用（blockquote）。"""
+    if not src:
+        return []
+    out = []
+    label = source_label(src)
+    if label:
+        out.append(f"{indent}来源：{label}")
+    if src.get("file"):
+        out.append(f"{indent}文件：`{src['file']}`" + (f"（页序 {src['page']}）" if src.get("page") is not None else ""))
+    quote = str(src.get("quote") or "").strip()
+    if quote:
+        for ln in quote.splitlines():
+            out.append(f"{indent}> {ln}")
+    return out
+
+
+def _multiline_item(text: str, first_prefix: str, indent: str = "  ", limit: int = _RECORD_TEXT_LIMIT) -> list[str]:
+    """把多行正文放进一个列表项：首行跟着 ``- ``，后续行缩进两格（Markdown 列表续行），排版保留。"""
+    text = (text or "").strip()
+    if len(text) > limit:
+        text = text[:limit] + "…（超长，完整内容在账本）"
+    lines = text.splitlines() or [""]
+    out = [first_prefix + lines[0]]
+    for ln in lines[1:]:
+        out.append(indent + ln if ln.strip() else "")
+    return out
+
+
+def render_node(ledger: Ledger, node_id: str, *, records_limit: int = 30) -> str:
     n = ledger.node(node_id)
     if n is None:
         raise KeyError(node_id)
     m = ledger.mastery_row(node_id) or {}
     detail = m.get("detail") or {}
-    fm = [
-        "---",
-        f"kj_id: {n['id']}",
-        f"kind: {n['kind']}",
-        f"qid: {n['qid'] or ''}",
-        f"mastery: {'' if m.get('value') is None else m['value']}",
-        f"mastery_level: {m.get('level', 0)}",
-        f"progress: {m.get('progress', 'unseen')}",
-        f"availability: {m.get('availability', 'open')}",
-        f"readiness: {m.get('readiness', 'no_prereq_info')}",
-        f"state: {m.get('state', 'unlockable')}",
-        f"evidence_count: {m.get('evidence_count', 0)}",
-        f"cards: {len(ledger.cards_of(node_id))}",
-        f"records: {ledger.db.execute('SELECT COUNT(*) FROM records WHERE node_id=? AND merged_into IS NULL', (node_id,)).fetchone()[0]}",
-        f"updated: {_ts(m.get('updated_at') or n['updated_at'])}",
-        "---",
-    ]
-    out = list(fm)
-    out.append(f"# {n['name']}")
-    aliases = ledger.aliases(node_id)
-    if aliases:
-        out.append("别名：" + " / ".join(a["alias"] for a in aliases))
-    if n["summary"]:
-        out.append("")
-        out.append(n["summary"])
-    if n["qid"]:
-        e = WD.entity(ledger, n["qid"])
-        label = f"{e['label']} — {e['description']}" if e else "（公共目录未载入）"
-        out.append(f"公共编号：[{n['qid']}](https://www.wikidata.org/wiki/{n['qid']}) {label}")
-
-    out += ["", "## 定义"]
-    defs = ledger.definitions(node_id)
-    if defs:
-        for d in defs:
-            ctx = f" `{d['context_key']}`" if d["context_key"] else ""
-            out.append(f"- {d['text']}{_source_line(d['source'])}{ctx}")
-    else:
-        out.append("- （尚无定义）")
-
-    out += ["", "## 关系"]
     rels = ledger.relations(node_id)
     pre = [r for r in rels if r["type"] == "prereq" and r["to_id"] == node_id]
     suc = [r for r in rels if r["type"] == "prereq" and r["from_id"] == node_id]
     oth = [r for r in rels if r["type"] != "prereq"]
+    defs = ledger.definitions(node_id)
+    recs = ledger.records(node_id, limit=records_limit)
+    rec_total = int(ledger.db.execute("SELECT COUNT(*) FROM records WHERE node_id=? AND merged_into IS NULL", (node_id,)).fetchone()[0])
+    cards = ledger.cards_of(node_id)
+    aliases = [a["alias"] for a in ledger.aliases(node_id)]
+    weak = detail.get("prereqs", {}).get("weak", [])
+    unknown = detail.get("prereqs", {}).get("unknown", [])
+    sources = []
+    for d in defs:
+        lab = source_label(d["source"])
+        if lab and lab not in sources:
+            sources.append(lab)
+    for r in recs:
+        lab = source_label(r["source"])
+        if lab and lab not in sources:
+            sources.append(lab)
+    public = WD.entity(ledger, n["qid"]) if n["qid"] else None
+
+    fm = ["---",
+          f"kj_id: {n['id']}",
+          f"aliases: {_ylist(aliases)}",
+          f"tags: {_ylist(['kj', 'kj/' + n['kind']])}",
+          f"kind: {n['kind']}",
+          f"wikidata: {n['qid'] or ''}",
+          f"wikidata_url: {('https://www.wikidata.org/wiki/' + n['qid']) if n['qid'] else ''}",
+          f"wikidata_label: {_y(public['label']) if public else _y('')}",
+          f"mastery: {'null' if m.get('value') is None else m['value']}",
+          f"mastery_level: {m.get('level', 0)}",
+          f"progress: {m.get('progress', 'unseen')}",
+          f"availability: {m.get('availability', 'open')}",
+          f"readiness: {m.get('readiness', 'no_prereq_info')}",
+          f"state: {m.get('state', 'unlockable')}",
+          f"evidence_count: {m.get('evidence_count', 0)}",
+          f"prereqs: {_ylist(_wikilink_plain(ledger, r['from_id']) for r in pre)}",
+          f"successors: {_ylist(_wikilink_plain(ledger, r['to_id']) for r in suc)}",
+          f"related: {_ylist(_wikilink_plain(ledger, r['to_id'] if r['from_id'] == node_id else r['from_id']) for r in oth)}",
+          f"weak_prereqs: {_ylist(_wikilink_plain(ledger, w) for w in weak)}",
+          f"unknown_prereqs: {_ylist(_wikilink_plain(ledger, u) for u in unknown)}",
+          f"sources: {_ylist(sources[:20])}",
+          f"definitions: {len(defs)}",
+          f"records: {rec_total}",
+          f"cards: {len(cards)}",
+          f"obsidian_url: {_y(obsidian_url(n['id'], n['name']))}",
+          f"updated: {_ts(m.get('updated_at') or n['updated_at'])}",
+          "---"]
+    out = list(fm)
+    out.append(f"# {n['name']}")
+    if aliases:
+        out.append("别名：" + " / ".join(aliases))
+    if n["summary"]:
+        out += ["", n["summary"]]
+    if n["qid"]:
+        label = f"{public['label']} — {public['description']}" if public else "（公共目录未载入）"
+        out.append(f"公共编号：[{n['qid']}](https://www.wikidata.org/wiki/{n['qid']}) {label}")
+
+    out += ["", "## 定义"]
+    if defs:
+        for d in defs:
+            out += _multiline_item(d["text"], "- ")
+            out += _source_block(d["source"])
+            if d["context_key"]:
+                out.append(f"  语境：`{d['context_key']}`")
+    else:
+        out.append("- （尚无定义）")
+
+    out += ["", "## 关系"]
     out.append("### 前置")
     out += [f"- {link_for(ledger, r['from_id'])} — {r['evidence']}" for r in pre] or ["- （无）"]
     out.append("### 后续")
@@ -126,8 +216,6 @@ def render_node(ledger: Ledger, node_id: str, *, records_limit: int = 20) -> str
     else:
         out.append("- （无）")
 
-    weak = detail.get("prereqs", {}).get("weak", [])
-    unknown = detail.get("prereqs", {}).get("unknown", [])
     out += ["", "## 掌握与准备度"]
     val = "无证据" if m.get("value") is None else f"{m['value']:.2f}（{m.get('level', 0)}/5）"
     out.append(f"- 掌握度：{val}，进度 {m.get('progress', 'unseen')}，准备度 {m.get('readiness', 'no_prereq_info')}")
@@ -139,21 +227,17 @@ def render_node(ledger: Ledger, node_id: str, *, records_limit: int = 20) -> str
     if sig:
         out.append("- 最近证据：" + "；".join(_signal_text(s) for s in sig[-5:]))
 
-    out += ["", "## 记录（程序生成的摘要，账本在数据库）"]
-    recs = ledger.records(node_id, limit=records_limit)
+    out += ["", f"## 记录（{rec_total} 条；程序生成的摘要，账本在数据库）"]
     if recs:
         for r in recs:
             when = _day(r["occurred_at"]) if r["occurred_at"] else f"登记 {_day(r['registered_at'])}"
             times = f" ×{r['occurrences']}" if (r["occurrences"] or 1) > 1 else ""
-            text = r["text"].replace("\n", " ").strip()
-            if len(text) > 300:
-                text = text[:300] + "…"
-            out.append(f"- {when} [{r['kind']}]{times} {text}{_source_line(r['source'])}")
+            out += _multiline_item(r["text"], f"- **{when}** [{r['kind']}]{times} ")
+            out += _source_block(r["source"])
     else:
         out.append("- （尚无记录）")
 
     out += ["", "## 卡片"]
-    cards = ledger.cards_of(node_id)
     if cards:
         for c in cards:
             front = (c["front"] or "").replace("\n", " ")[:120]
@@ -181,7 +265,7 @@ class VaultWriter:
 
     def __init__(self, root: str | Path):
         self.root = Path(root)
-        self.nodes_dir = self.root / "节点"
+        self.nodes_dir = self.root / NODES_DIR_NAME
 
     def _existing(self, node_id: str) -> list[Path]:
         if not self.nodes_dir.exists():
@@ -237,7 +321,6 @@ class VaultWriter:
             p = self.write_node(ledger, nid)
             if p:
                 live.add(p)
-        # 清理孤儿：带 kj_id 头但对应节点已不活跃
         for p in self.nodes_dir.glob("*.md"):
             if p in live:
                 continue

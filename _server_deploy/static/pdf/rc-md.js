@@ -28,6 +28,10 @@
           ],
           ALLOW_DATA_ATTR: false,
           ALLOW_UNKNOWN_PROTOCOLS: false,
+          // 显式放行的协议：http(s)/mailto/tel 之外只加 obsidian（打开 vault 里的笔记/KJ 节点页）
+          // 与 bwreader（App 自己的 scheme）。DOMPurify 默认表没有它们 → AI 回答里的
+          // obsidian:// 链接 href 被剥掉，看得见点不动（2026-09-06 用户反馈"推送 markdown 链接不可用"）。
+          ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|obsidian|bwreader):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
           CUSTOM_ELEMENT_HANDLING: {
             tagNameCheck: null,
             attributeNameCheck: null,

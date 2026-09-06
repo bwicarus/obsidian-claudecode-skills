@@ -88,9 +88,17 @@ relation / relation_retract / relation_change / card / card_make / quiz / quiz_r
 ## 5. Markdown 页（`$OBSIDIAN_VAULT/KJ/`）
 
 - 文件名 `<安全名称>·<短id>.md`；改名 → 旧文件删、新文件建，**所有邻居页链接由程序重写**；合并 → 被并节点页删除。
-- frontmatter：`kj_id / kind / qid / mastery / mastery_level / progress / availability / readiness / state / evidence_count / cards / records / updated`。
-- 正文：`# 名称`、别名、摘要、公共编号 → `## 定义`（原文+出处+语境键）→ `## 关系`（前置/后续/其它，`[[链接]]`）→
-  `## 掌握与准备度` → `## 记录`（归并摘要）→ `## 卡片`。
+- frontmatter（2026-09-06 晚按用户反馈加厚）：`kj_id`、Obsidian 原生 `aliases` / `tags`（`kj`、`kj/<kind>`）、`kind`、
+  `wikidata` / `wikidata_url` / `wikidata_label`、`mastery`（无证据写 `null`）/ `mastery_level` / `progress` / `availability` /
+  `readiness` / `state` / `evidence_count`、`prereqs` / `successors` / `related` / `weak_prereqs` / `unknown_prereqs`（都是 `[[链接]]`）、
+  `sources`（出处清单）、`definitions` / `records` / `cards` 计数、`obsidian_url`（本页深链）、`updated`。
+- 正文：`# 名称`、别名、摘要、公共编号 → `## 定义`（原文多行保留 + 来源行 + 原文引用 blockquote + 语境键）→
+  `## 关系`（前置/后续/其它，`[[链接]]`）→ `## 掌握与准备度` → `## 记录`（**多行排版保留**：首行跟 `- **日期** [kind]`，续行缩进两格；
+  来源行、文件与页序、原文引用）→ `## 卡片`。
+- 深链 `obsidian://open?vault=<OBSIDIAN_VAULT_NAME>&file=KJ/节点/<文件名>`：`kj_node` / `kj_search` 的返回里都带 `obsidian_url`；
+  `card-make` 把绑定节点的深链写进卡片背面来源栏（复习卡 UI 的"来源"按钮与 Anki 桌面版都能点开）。
+  ⚠ vault 名取 `OBSIDIAN_VAULT_NAME`（默认 `Obsidian Vault`），iPad 上 Obsidian 的 vault 名必须一致，否则打不开。
+  侧栏 Markdown 的消毒器 `rc-md.js` 2026-09-06 起显式放行 `obsidian:` / `bwreader:`（此前 DOMPurify 默认表剥掉 href，链接看得见点不动）。
 - `节点索引.md` 按 kind 列全部节点。手改无效：下次渲染会被覆盖；改动请走登记工具。
 
 ## 6. Wikidata 公共目录

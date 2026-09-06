@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from .store import Ledger, loads
 from . import wikidata as WD
+from .markdown import obsidian_url
 
 _DEF_PREVIEW = 160
 
@@ -18,7 +19,8 @@ def node_brief(ledger: Ledger, node_id: str) -> dict | None:
     m = ledger.mastery_row(node_id) or {}
     return {"id": n["id"], "name": n["name"], "kind": n["kind"], "qid": n["qid"], "status": n["status"],
             "mastery": m.get("value"), "level": m.get("level", 0), "progress": m.get("progress", "unseen"),
-            "readiness": m.get("readiness", "no_prereq_info"), "state": m.get("state", "unlockable")}
+            "readiness": m.get("readiness", "no_prereq_info"), "state": m.get("state", "unlockable"),
+            "obsidian_url": obsidian_url(n["id"], n["name"])}
 
 
 def search(ledger: Ledger, q: str, *, limit: int = 8, include_public: bool = True) -> dict:
@@ -146,6 +148,7 @@ def node_detail(ledger: Ledger, node_id: str, *, records_limit: int = 8) -> dict
     return {
         "id": nid, "name": row["name"], "kind": row["kind"], "qid": row["qid"], "summary": row["summary"],
         "aliases": ledger.aliases(nid), "status": row["status"],
+        "obsidian_url": obsidian_url(nid, row["name"]),
         "path": classification_path(ledger, nid),
         "definitions": [{"id": d["id"], "text": d["text"], "context_key": d["context_key"], "source": d["source"]} for d in ledger.definitions(nid)],
         "prereqs": prereqs, "successors": successors, "relations": others,

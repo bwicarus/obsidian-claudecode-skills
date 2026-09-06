@@ -18,6 +18,22 @@ DEFAULT_DECK = "KJ"
 DEFAULT_MODEL = "Basic"
 
 
+def node_provenance_html(ledger: Ledger, node_ids: list[str]) -> str:
+    """卡片背面末尾的来源栏：每个绑定节点一条 obsidian://open 深链。
+    复习卡 UI 与 Anki 桌面版都从这里拿"打开节点"的链接（服务端 _anki_visible_source_urls 只认这种 obsidian://open?file= 形状）。"""
+    import html as _html
+    from .markdown import obsidian_url
+    links = []
+    for nid in node_ids:
+        n = ledger.node(nid)
+        if n is None:
+            continue
+        links.append('<a href="%s" rel="noopener noreferrer">%s</a>' % (_html.escape(obsidian_url(n["id"], n["name"]), quote=True), _html.escape(n["name"])))
+    if not links:
+        return ""
+    return '<hr><div class="bw-reader-anki-source">节点：' + " · ".join(links) + "</div>"
+
+
 def _anki():
     """延迟导入 scripts/anki_status.py（只在真要碰 Anki 时才把 scripts 目录放进 sys.path）。"""
     try:
@@ -41,7 +57,8 @@ def make_card(ledger: Ledger, *, node_ids: list[str], front: str, back: str, dec
     url = anki_url or AS.DEFAULT_ANKI_URL
     req = request or AS.anki_request
     tags = list(dict.fromkeys(["kj", *(tags or [])] + [f"kj::{n.replace(':', '_')}" for n in node_ids]))
-    note = {"deckName": deck, "modelName": model, "fields": {"Front": front, "Back": back}, "tags": tags,
+    back_html = back + node_provenance_html(ledger, node_ids)
+    note = {"deckName": deck, "modelName": model, "fields": {"Front": front, "Back": back_html}, "tags": tags,
             "options": {"allowDuplicate": False, "duplicateScope": "deck"}}
     try:
         req(url, "createDeck", {"deck": deck}, timeout=15)

@@ -72,25 +72,41 @@ def _aliases(d: dict) -> dict[str, list[str]]:
     return out
 
 
+def _entity_tuple(qid: str, labels: dict, descriptions: dict, aliases: dict, now: int, source: str) -> tuple:
+    al = _aliases(aliases)
+    l_en, l_zh, l_ja = _pick(labels, "en"), _pick(labels, "zh"), _pick(labels, "ja")
+    text = " / ".join(x for x in [l_en, l_zh, l_ja] + sum(al.values(), []) if x)
+    return (qid, l_en, l_zh, l_ja, _pick(descriptions, "en"), _pick(descriptions, "zh"), _pick(descriptions, "ja"),
+            dumps(al), text, now, source)
+
+
+_ENTITY_SQL = ("INSERT OR REPLACE INTO public_entities(qid, label_en, label_zh, label_ja, desc_en, desc_zh, desc_ja, aliases_json,"
+               " search_text, fetched_at, source) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+
+
 def upsert_entity(ledger: Ledger, qid: str, labels: dict, descriptions: dict, aliases: dict,
                   claims: Iterable[tuple[str, str, str]], *, source: str) -> None:
     now = int(time.time())
-    al = _aliases(aliases)
+    row = _entity_tuple(qid, labels, descriptions, aliases, now, source)
     with ledger._lock:
         db = ledger.db
-        db.execute(
-            "INSERT OR REPLACE INTO public_entities(qid, label_en, label_zh, label_ja, desc_en, desc_zh, desc_ja, aliases_json, fetched_at, source)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (qid, _pick(labels, "en"), _pick(labels, "zh"), _pick(labels, "ja"),
-             _pick(descriptions, "en"), _pick(descriptions, "zh"), _pick(descriptions, "ja"), dumps(al), now, source))
+        db.execute(_ENTITY_SQL, row)
         db.execute("DELETE FROM public_claims WHERE qid=?", (qid,))
         for prop, target, rank in claims:
             if rank == "deprecated":
                 continue
             db.execute("INSERT OR IGNORE INTO public_claims(qid, prop, target, rank) VALUES(?,?,?,?)", (qid, prop, target, rank or "normal"))
-        text = " / ".join(x for x in [_pick(labels, "en"), _pick(labels, "zh"), _pick(labels, "ja")] + sum(al.values(), []) if x)
         db.execute("DELETE FROM public_fts WHERE qid=?", (qid,))
-        db.execute("INSERT INTO public_fts(qid, labels) VALUES(?,?)", (qid, text))
+        db.execute("INSERT INTO public_fts(qid, labels) VALUES(?,?)", (qid, row[8]))
+
+
+def rebuild_public_fts(ledger: Ledger) -> int:
+    """批量导入后整体重建公共目录的全文索引（逐行维护太慢）。"""
+    with ledger._lock:
+        db = ledger.db
+        db.execute("DELETE FROM public_fts")
+        db.execute("INSERT INTO public_fts(qid, labels) SELECT qid, COALESCE(search_text, '') FROM public_entities")
+        return int(db.execute("SELECT COUNT(*) FROM public_fts").fetchone()[0])
 
 
 def entity(ledger: Ledger, qid: str) -> dict | None:
@@ -202,33 +218,64 @@ def import_minimal_index(ledger: Ledger, path: str | Path, *, only_qids: set[str
     """流式导入 minimal-index.jsonl(.gz)。不设过滤会很大 —— 调用方负责给 only_qids / require_lang。"""
     p = Path(path)
     opener = gzip.open if p.suffix == ".gz" else open
-    seen = kept = 0
-    with opener(p, "rt", encoding="utf-8") as fh:  # type: ignore[arg-type]
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            seen += 1
-            qid = row.get("id") or ""
-            if not qid.startswith("Q"):
-                continue
-            if only_qids is not None and qid not in only_qids:
-                continue
-            labels = row.get("labels") or {}
-            if require_lang and not _pick(labels, require_lang):
-                continue
-            if keep_if is not None and not keep_if(row):
-                continue
-            claims = [(r[0], r[1], r[2] if len(r) > 2 else "normal") for r in row.get("relations") or [] if len(r) >= 2]
-            upsert_entity(ledger, qid, labels, row.get("descriptions") or {}, row.get("aliases") or {}, claims, source="dump")
-            kept += 1
-            if limit and kept >= limit:
-                break
-    return {"seen": seen, "kept": kept}
+    seen = kept = claims_n = 0
+    now = int(time.time())
+    ent_batch: list[tuple] = []
+    claim_batch: list[tuple] = []
+    qid_batch: list[tuple] = []
+    t0 = time.time()
+
+    def flush() -> None:
+        nonlocal ent_batch, claim_batch, qid_batch
+        if not ent_batch:
+            return
+        db = ledger.db
+        db.execute("BEGIN")
+        db.executemany("DELETE FROM public_claims WHERE qid=?", qid_batch)
+        db.executemany(_ENTITY_SQL, ent_batch)
+        db.executemany("INSERT OR IGNORE INTO public_claims(qid, prop, target, rank) VALUES(?,?,?,?)", claim_batch)
+        db.execute("COMMIT")
+        ent_batch, claim_batch, qid_batch = [], [], []
+
+    with ledger._lock:
+        ledger.db.execute("PRAGMA pub.synchronous=OFF")
+        try:
+            with opener(p, "rt", encoding="utf-8") as fh:  # type: ignore[arg-type]
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    seen += 1
+                    qid = row.get("id") or ""
+                    if not qid.startswith("Q"):
+                        continue
+                    if only_qids is not None and qid not in only_qids:
+                        continue
+                    labels = row.get("labels") or {}
+                    if require_lang and not _pick(labels, require_lang):
+                        continue
+                    if keep_if is not None and not keep_if(row):
+                        continue
+                    ent_batch.append(_entity_tuple(qid, labels, row.get("descriptions") or {}, row.get("aliases") or {}, now, "dump"))
+                    qid_batch.append((qid,))
+                    for r in row.get("relations") or []:
+                        if len(r) >= 2 and (len(r) < 3 or r[2] != "deprecated"):
+                            claim_batch.append((qid, r[0], r[1], r[2] if len(r) > 2 else "normal"))
+                            claims_n += 1
+                    kept += 1
+                    if len(ent_batch) >= 5000:
+                        flush()
+                    if limit and kept >= limit:
+                        break
+            flush()
+            fts = rebuild_public_fts(ledger)
+        finally:
+            ledger.db.execute("PRAGMA pub.synchronous=NORMAL")
+    return {"seen": seen, "kept": kept, "claims": claims_n, "fts_rows": fts, "seconds": round(time.time() - t0, 1)}
 
 
 def _http_json(url: str, timeout: float) -> dict:

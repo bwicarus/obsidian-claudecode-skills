@@ -37,9 +37,21 @@ class MarkdownQueryTests(unittest.TestCase):
         self.assertTrue(text.startswith("---\nkj_id: " + self.a))
         self.assertIn("# 向量空间", text)
         self.assertIn("别名：vector space", text)
-        self.assertIn("- 满足八条公理的集合（pdf：LADR · p.12）", text)
+        self.assertIn("- 满足八条公理的集合\n  来源：pdf：LADR · p.12\n", text)
         self.assertIn(f"[[向量加法·{self.b.split(':')[1]}|向量加法]] — 定义用到加法", text)
         self.assertIn("readiness: unknown_basics", text)
+        # frontmatter 里直接能看到别名/关系/来源/Wikidata/深链（2026-09-06 用户反馈）
+        self.assertIn('aliases: ["vector space"]', text)
+        self.assertIn(f'prereqs: ["[[向量加法·{self.b.split(":")[1]}]]"]', text)
+        self.assertIn('sources: ["pdf：LADR · p.12"]', text)
+        self.assertIn("mastery: null", text)
+        self.assertIn("obsidian_url: \"obsidian://open?vault=", text)
+        self.assertEqual(self.svc.node(self.a)["obsidian_url"], MD.obsidian_url(self.a, "向量空间"))
+        # 多行记录排版保留：续行缩进两格，引用原文成 blockquote
+        self.svc.add_record(self.a, text="第一行\n1. 甲\n2. 乙", kind="reading",
+                            source={"kind": "pdf", "book": "LADR", "page": 3, "quote": "原文 A\n原文 B"})
+        text = self.page(self.a).read_text("utf-8")
+        self.assertIn("[reading] 第一行\n  1. 甲\n  2. 乙\n  来源：pdf：LADR · p.3\n  > 原文 A\n  > 原文 B", text)
         self.assertEqual(MD.node_id_from_file(self.page(self.a)), self.a)
         self.assertIn("[[向量空间·", (self.vault / MD.INDEX_NAME).read_text("utf-8"))
 
