@@ -75,7 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--front", default=""); s.add_argument("--back", default=""); s.add_argument("--deck", default="")
     s = sp.add_parser("card-make"); s.add_argument("--nodes", required=True); s.add_argument("--front", required=True); s.add_argument("--back", required=True)
     s.add_argument("--deck", default=AK.DEFAULT_DECK); s.add_argument("--tag", action="append", default=[])
-    sp.add_parser("anki-sync")
+    sp.add_parser("anki-sync", help="吸收桥的卡↔节点绑定账本 + 拉 Anki 复习快照进掌握度")
+    s = sp.add_parser("inbox", help="只吸收桥的卡↔节点绑定账本（确认入库后的卡自动绑节点、补深链）"); s.add_argument("--path")
     s = sp.add_parser("quiz"); s.add_argument("--json", required=True, help='{"items":[{"item_id","question","answer","node_ids":[...]}], "target_node", "title"}')
     s = sp.add_parser("quiz-result"); s.add_argument("quiz_id"); s.add_argument("--json", required=True, help='[{"item_id","result"}]')
     s = sp.add_parser("self-assess"); s.add_argument("node_id"); s.add_argument("value", type=float); s.add_argument("--reason", default="")
@@ -131,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
             r = svc.make_card(node_ids=[x.strip() for x in a.nodes.split(",") if x.strip()], front=a.front, back=a.back, deck=a.deck, tags=a.tag)
         elif c == "anki-sync":
             r = svc.anki_sync()
+        elif c == "inbox":
+            r = svc.ingest_bindings(a.path)
         elif c == "quiz":
             p = _json_arg(a.json) or {}
             r = svc.register_quiz(items=p.get("items") or [], target_node=p.get("target_node"), title=p.get("title", ""), source=p.get("source"))

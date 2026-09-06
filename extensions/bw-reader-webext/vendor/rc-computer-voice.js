@@ -863,6 +863,31 @@ if (window.__bwPwaProviderOnly) return;
     };
   }
 
+  // KJ 知识节点编号（scripts/kj/ids.py）。制卡必须绑定 1~8 个 —— 2026-09-06 用户拍板，fail-closed。
+  // ⚠ 白名单副本之一：Windows C# ReaderRealtimeOutput.KjNodeIdRules / 这里 / rc-flashcard 导出前检查。
+  var KJ_NODE_ID_RE = /^kj:[0-9A-HJKMNP-TV-Z]{10}$/;
+  function normalizeKjNodeIds(value, label) {
+    if (!Array.isArray(value) || value.length < 1 || value.length > 8) {
+      throw directError(
+        label + "必须绑定 1~8 个知识节点（nodeIds）",
+        "BW_READER_ANKI_NODE_REQUIRED",
+        false
+      );
+    }
+    var out = [];
+    value.forEach(function (id) {
+      if (typeof id !== "string" || !KJ_NODE_ID_RE.test(id) || out.indexOf(id) >= 0) {
+        throw directError(
+          label + "知识节点编号无效或重复",
+          "BW_READER_ANKI_NODE_INVALID",
+          false
+        );
+      }
+      out.push(id);
+    });
+    return out;
+  }
+
   function normalizeReaderAnkiDraftCards(cards) {
     if (!Array.isArray(cards) || cards.length < 1 || cards.length > 12) {
       throw directError(
@@ -1340,8 +1365,8 @@ if (window.__bwPwaProviderOnly) return;
       exactObject(
         p,
         exactDraftSource
-          ? ["draftId", "file", "target", "sourceText", "cards"]
-          : ["draftId", "cards"],
+          ? ["draftId", "file", "target", "sourceText", "cards", "nodeIds"]
+          : ["draftId", "cards", "nodeIds"],
         [],
         "Reader Anki 草稿输出"
       );
@@ -1356,6 +1381,7 @@ if (window.__bwPwaProviderOnly) return;
       payload = {
         draftId: draftId,
         cards: normalizeReaderAnkiDraftCards(p.cards),
+        nodeIds: normalizeKjNodeIds(p.nodeIds, "Reader Anki 草稿"),
       };
       if (exactDraftSource) {
         var draftFile = safeText(p.file, "Reader Anki file", 4096, false);
@@ -5593,7 +5619,7 @@ if (window.__bwPwaProviderOnly) return;
   function normalizeLocalAnkiAddRequest(value) {
     exactObject(
       value,
-      ["draftId", "sourceInstanceId", "cardIndex", "aid", "card"],
+      ["draftId", "sourceInstanceId", "cardIndex", "aid", "card", "nodeIds"],
       [],
       "本机 Anki 入库请求"
     );
@@ -5619,6 +5645,7 @@ if (window.__bwPwaProviderOnly) return;
       cardIndex: value.cardIndex,
       aid: aid,
       card: normalizedCard.canonical,
+      nodeIds: normalizeKjNodeIds(value.nodeIds, "本机 Anki 入库"),
       projection: normalizedCard.projection,
     };
     var bytes = new TextEncoder().encode(JSON.stringify(normalized)).byteLength;

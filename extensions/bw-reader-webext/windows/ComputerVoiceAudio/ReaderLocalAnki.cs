@@ -1638,6 +1638,72 @@ internal sealed class FixedLoopbackAnkiConnectClient :
             "AnkiConnect 响应无效");
 }
 
+/// 已确认入库的卡 → KJ 知识节点 绑定账本（追加式 JSONL，runtime/kj-card-bindings.jsonl）。
+/// 桥只负责记下"哪张 Anki 卡绑了哪些节点"；Python 侧 `kj anki-sync` 读它写进 KJ 账本并补节点链接。
+/// 写失败绝不影响 addNote 结果（addNote 已成功，绑定信息可从 Anki tag kj::<id> 重建）。
+internal sealed class ReaderKjBindingLog
+{
+    internal const string FileName = "kj-card-bindings.jsonl";
+    private readonly string _path;
+    private readonly object _gate = new();
+
+    internal ReaderKjBindingLog(string path)
+    {
+        _path = path;
+    }
+
+    internal void Append(
+        string aid,
+        string draftId,
+        int cardIndex,
+        string sourceInstanceId,
+        IReadOnlyList<string> nodeIds,
+        ReaderLocalAnkiAddResult result,
+        JsonObject projectionCard)
+    {
+        try
+        {
+            JsonObject line = new()
+            {
+                ["contract"] = "kj-card-binding/1",
+                ["ts"] = DateTimeOffset.UtcNow.ToString("o"),
+                ["aid"] = aid,
+                ["draftId"] = draftId,
+                ["cardIndex"] = cardIndex,
+                ["sourceInstanceId"] = sourceInstanceId,
+                ["nodeIds"] = new JsonArray(
+                    nodeIds.Select(value => (JsonNode?)value).ToArray()),
+                ["noteIds"] = new JsonArray(
+                    result.NoteIds.Select(value => (JsonNode?)value).ToArray()),
+                ["cardIds"] = new JsonArray(
+                    result.CardIds.Select(value => (JsonNode?)value).ToArray()),
+                ["type"] = projectionCard["type"]?.GetValue<string>() ?? "",
+                ["front"] = Clip(projectionCard["front"]),
+                ["back"] = Clip(projectionCard["back"]),
+                ["cloze"] = Clip(projectionCard["cloze"]),
+            };
+            string text = line.ToJsonString(DirectBridgeContract.JsonOptions)
+                .Replace("\r", " ").Replace("\n", " ") + "\n";
+            lock (_gate)
+            {
+                Directory.CreateDirectory(
+                    Path.GetDirectoryName(_path) ?? ".");
+                File.AppendAllText(_path, text, new UTF8Encoding(false));
+            }
+        }
+        catch (Exception)
+        {
+            // best-effort：Anki 已写成功；绑定还能从 tag kj::<id> 重建。
+        }
+    }
+
+    private static string Clip(JsonNode? node)
+    {
+        string value = node?.GetValue<string>() ?? "";
+        return value.Length <= 400 ? value : value[..400];
+    }
+}
+
 internal interface IReaderLocalAnkiWriter
 {
     Task<ReaderLocalAnkiWriteOutcome> AddAsync(
@@ -1647,6 +1713,7 @@ internal interface IReaderLocalAnkiWriter
         string aid,
         JsonObject canonicalCard,
         JsonObject projectionCard,
+        IReadOnlyList<string> nodeIds,
         CancellationToken cancellationToken);
 
     Task<JsonObject> OperateAsync(
@@ -1688,15 +1755,21 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
     private readonly object _backgroundSyncLock = new();
     private Task<ReaderLocalAnkiSyncOutcome>? _backgroundSync;
 
+    private readonly ReaderKjBindingLog? _bindingLog;
+
     internal ReaderLocalAnkiWriter(
         ReaderLocalAnkiRegistry registry,
         IReaderAnkiConnectClient? client = null,
-        IReaderPublicImageFetcher? imageFetcher = null)
+        IReaderPublicImageFetcher? imageFetcher = null,
+        string? kjBindingLogPath = null)
     {
         _registry = registry;
         _client = client ?? new FixedLoopbackAnkiConnectClient();
         _imageFetcher = imageFetcher
             ?? new BoundedReaderPublicImageFetcher();
+        _bindingLog = string.IsNullOrWhiteSpace(kjBindingLogPath)
+            ? null
+            : new ReaderKjBindingLog(kjBindingLogPath);
     }
 
     public async Task<ReaderLocalAnkiWriteOutcome> AddAsync(
@@ -1706,9 +1779,17 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
         string aid,
         JsonObject canonicalCard,
         JsonObject projectionCard,
+        IReadOnlyList<string> nodeIds,
         CancellationToken cancellationToken)
     {
         ReaderLocalAnkiRegistry.RequireAid(aid);
+        if (nodeIds.Count is < 1 or > ReaderRealtimeOutputProtocol.KjNodeIdRules.Maximum
+            || nodeIds.Any(id => !ReaderRealtimeOutputProtocol.KjNodeIdRules.IsValid(id)))
+        {
+            throw new ReaderLocalAnkiException(
+                "BW_READER_ANKI_NODE_REQUIRED",
+                "Reader 制卡必须绑定 1~8 个知识节点（nodeIds）");
+        }
         ReaderLocalAnkiRegisteredCard registered =
             await _registry.ResolveCardAsync(
                 sourceInstanceId,
@@ -1808,6 +1889,7 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
                     registered,
                     aidTag,
                     fingerprintTag,
+                    nodeIds,
                     cancellationToken).ConfigureAwait(false);
             }
             catch (ReaderAnkiConnectException exception)
@@ -1883,6 +1965,15 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
                     fingerprint,
                     result,
                     cancellationToken).ConfigureAwait(false);
+                // 卡已入库：把"这张卡绑了哪些 KJ 节点"记进绑定账本（best-effort）。
+                _bindingLog?.Append(
+                    aid,
+                    draftId,
+                    cardIndex,
+                    sourceInstanceId,
+                    nodeIds,
+                    result,
+                    registered.ProjectionCard);
                 return AddOutcomeWithBackgroundSync(
                     result,
                     Dedup: false);
@@ -2929,6 +3020,7 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
         ReaderLocalAnkiRegisteredCard registered,
         string aidTag,
         string fingerprintTag,
+        IReadOnlyList<string> nodeIds,
         CancellationToken cancellationToken)
     {
         string[] models = RequireStrings(await _client.CallAsync(
@@ -2956,10 +3048,15 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
         JsonObject noteFields = await LocalizeRemoteImagesAsync(
             BuildFields(registered, type, fields),
             cancellationToken).ConfigureAwait(false);
+        // KJ 节点绑定也进 Anki tag（kj::kj_XXXXXXXXXX，冒号换下划线避开 Anki 的层级分隔符），
+        // 这样即使绑定账本丢了也能从卡本身重建关联。
+        string[] tags = new[] { "pdf-snippets", "card-lab", aidTag, fingerprintTag, "kj" }
+            .Concat(nodeIds.Select(id => "kj::" + id.Replace(':', '_')))
+            .ToArray();
         return new ReaderLocalAnkiPreparedNote(
             model,
             noteFields,
-            ["pdf-snippets", "card-lab", aidTag, fingerprintTag]);
+            tags);
     }
 
     private async Task<long> AddClaimedAsync(

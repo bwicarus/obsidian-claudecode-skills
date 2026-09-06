@@ -2995,6 +2995,10 @@ def _t_make_anki(args, ctx):
     )
     if not text:
         return {"error": "缺要做卡的内容(给 text 或先选中)"}
+    # 2026-09-06 用户拍板：制卡必须绑定 KJ 知识节点，缺了直接拒绝（fail-closed），不再返回成功。
+    node_ids = _kj_require_node_ids(args.get("node_ids") or args.get("nodeIds"))
+    if isinstance(node_ids, dict):
+        return node_ids
     # Phase2 软 gate(据 page_type):内容取自整页兜底且本页判为『无关页』(目录/版权/空白)→ 软性确认,不硬拒。
     #   仅在**没给 text、也没选中**(最弱意图)时提示;page_type 可能判错,给了 text/选中就照做不拦(避免误伤)。
     if not (args.get("text") or "").strip() and not (ctx.get("selection") or "").strip():
@@ -3060,6 +3064,7 @@ def _t_make_anki(args, ctx):
         "deferred": True,
         "speak": f"做好了{n}张卡片草稿，你在卡片上确认后保存到 Reader 卡库",
         "note": f"生成了{n}张卡片草稿，等你确认后保存到 Reader 本地卡库",
+        "node_ids": node_ids,   # 随卡进本地卡仓 source.kjNodes，确认入库时带给桥
     }
     if src:
         result["source_ref"] = src
@@ -6261,6 +6266,29 @@ def _kj_call(ctx, fn):
         return {"ok": False, "error": "KJ 出错:%s" % str(e)[:200]}
 
 
+def _kj_require_node_ids(value):
+    """制卡必须绑定 1~8 个 KJ 节点（2026-09-06 用户拍板，fail-closed）。返回节点 id 列表，或 {"error","code"} 字典。
+    规则：已绑定的节点直接沿用；没绑定但库里有 → kj_search 找到再传；都没有 → kj_register type=node 建了再传。"""
+    ids = value if isinstance(value, list) else ([value] if isinstance(value, str) and value.strip() else [])
+    ids = list(dict.fromkeys(str(x).strip() for x in ids if str(x or "").strip()))
+    if not ids or len(ids) > 8:
+        return {"error": "制卡必须先绑定 1~8 个知识节点：先 kj_search 找到节点（没有就 kj_register type=node 新建），再把 node_ids 传进来",
+                "code": "kj_node_required"}
+    try:
+        svc = _kj_service()
+        resolved = []
+        missing = []
+        for n in ids:
+            row = svc.ledger.resolve(n)
+            (resolved.append(row["id"]) if row is not None else missing.append(n))
+    except Exception as e:
+        return {"error": "知识节点系统不可用:%s" % str(e)[:120], "code": "kj_unavailable"}
+    if missing:
+        return {"error": "这些知识节点不存在：%s（先 kj_search / kj_register）" % "、".join(missing),
+                "code": "kj_node_not_found", "missing": missing}
+    return list(dict.fromkeys(resolved))
+
+
 def _t_kj_search(args, ctx):
     """找节点：本地优先（名称/别名/定义），再附公共目录候选。args {q, limit?, online?}。"""
     q = str(args.get("q") or args.get("query") or "").strip()
@@ -6404,7 +6432,9 @@ TOOLS = {
     "translate": ("翻译文字成中文(或 target 语言)。不传 text 则译选中/本页。args {text?, target?}", _t_translate),
     "goto_page": ("翻到指定页(前端跳转)。args {page};page 可以是数字,也可以是 last(最后一页)/first/+1/-1。结果里带『全书总页数』", _t_goto_page),
     "make_anki": ("把内容做成 Anki 卡片草稿供用户预览确认(**同步等做完才返回**,报告生成了几张;未确认不入库)。"
-                 "args {text?, requirement?, image_url?}。**requirement=把用户对卡片的具体要求原样转述**"
+                 "**node_ids 必填**:卡必须绑 1~8 个 KJ 知识节点(kj:XXXXXXXXXX)——已绑的节点直接沿用;"
+                 "没绑但库里有就 kj_search 找到;都没有才 kj_register type=node 新建。缺 node_ids 会被拒绝。"
+                 "args {node_ids, text?, requirement?, image_url?}。**requirement=把用户对卡片的具体要求原样转述**"
                  "(几张/难度/角度/语言,如'只做一张''简单点''考细节'——用户说什么就原样填,别自作主张)。"
                  "不传 text 用选中/本页;image_url 若刚 search_image 过、这张图也进卡片就把同一个 image_url 传进来", _t_make_anki),
     "make_note": ("把内容整理成 Obsidian 笔记(后台)。args {text?}(不传用选中/本页)", _t_make_note),
@@ -6852,10 +6882,12 @@ _TOOL_SCHEMA_OVERRIDES = {
         "page": dict(_PAGE_VALUE_SCHEMA, description="印刷页码；不给则当前页"),
     }),
     "make_anki": _tool_object_schema({
+        "node_ids": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "pattern": "^kj:[0-9A-HJKMNP-TV-Z]{10}$"},
+                     "description": "这张卡所属的 KJ 知识节点编号（先 kj_search，没有再 kj_register type=node）"},
         "text": {"type": "string", "description": "制卡内容；不给则用当前选中或当前页"},
         "requirement": {"type": "string", "description": "数量、难度、角度等具体要求"},
         "image_url": {"type": "string", "description": "可选配图 URL"},
-    }),
+    }, required=("node_ids",)),
     "make_note": _tool_object_schema({
         "text": {"type": "string", "description": "要整理进笔记的内容；不给则用当前选中"},
     }),

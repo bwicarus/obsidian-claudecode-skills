@@ -120,8 +120,31 @@ relation / relation_retract / relation_change / card / card_make / quiz / quiz_r
 ## 7. Anki
 
 - `card-make` 走 AnkiConnect `addNote` + `changeDeck` 归位（addNote 的 deckName 不生效，见 CLAUDE.md），tag `kj` + `kj::<节点id>`，绑定写账本。
-- `anki-sync`：所有活跃绑卡 → `notesInfo → cardsInfo → fsrs_memory_map → card_mastery` → `anki.snapshot`（按卡+日幂等）→ 重算。
-  **目前手动/按需跑**；定时挂载（Windows 计划任务）是下一步。
+- `anki-sync`：先吸收桥的绑定账本（下节），再对所有活跃绑卡 → `notesInfo → cardsInfo → fsrs_memory_map → card_mastery` → `anki.snapshot`（按卡+日幂等）→ 重算。
+  Anki 不在线时绑定仍被吸收，只是报 `anki_unavailable`。`inbox` 子命令只做吸收。
+
+### 7.1 阅读器制卡必须绑节点（2026-09-06 深夜，用户拍板"从根本上修"，fail-closed）
+
+**症状**：Codex 用 `reader_anki_draft` 出草稿 → 用户在 App 确认 → 桥 `anki-add-cards-local` 写进桌面 Anki，整条链路没有任何一处要求节点，
+"制卡自动关联节点"的约定只活在提示词里，一忘就漏。
+
+**根本修法**：草稿载荷与入库请求都新增必填 `nodeIds`（1~8 个 `kj:XXXXXXXXXX`），每一层 fail-closed，缺了直接拒绝、不返回成功：
+
+| 层 | 文件 | 规则 |
+|---|---|---|
+| 桥 MCP 工具 `reader_anki_draft` | `ReaderContextMcpServer.cs` schema/normalizer | `nodeIds` 必填；精确来源形态 `file/target/sourceText/cards/nodeIds`，通用形态 `cards/nodeIds` |
+| 桥输出校验 | `ReaderRealtimeOutput.cs` `KjNodeIdRules` + `ValidateKjNodeIds` | 数组 1~8、格式 `^kj:[0-9A-HJKMNP-TV-Z]{10}$`、不重复 |
+| App 入站闸 | `rc-computer-voice.js` `normalizeKjNodeIds` | 同上（白名单副本） |
+| 本地卡仓 | `card-repository.js` `source.kjNodes` | 逗号分隔文本随卡持久化 |
+| 确认入库（App→桥） | `rc-flashcard.js exportToComputerAnki` / `normalizeLocalAnkiAddRequest` / `DirectBridgeProtocol.HandleLocalAnkiAddAsync` | 请求必带 `nodeIds`；没有 → `BW_READER_ANKI_NODE_REQUIRED` |
+| 写 Anki | `ReaderLocalAnki.cs` | tag `kj` + `kj::kj_XXXXXXXXXX`；成功后追加 `runtime/kj-card-bindings.jsonl`（`kj-card-binding/1`） |
+| 侧栏助手 `make_anki` | `assistant.py _t_make_anki` | `node_ids` 必填并校验存在（`_kj_require_node_ids`）；结果带 `node_ids` → 卡仓 `kjNodes` |
+| 服务端草稿登记 `/pdf/api/anki-draft` | `pdf_reader.py` | 可选 `nodeIds`，给了就校验存在并存进实体 |
+| KJ 吸收 | `anki_sync.ingest_bridge_bindings` | 读绑定账本（游标存 meta）→ `card.bind`（card_key=`anki:<note>` 幂等）→ 给卡背面追加节点深链；节点不存在落 `state/kj/unresolved-bindings.jsonl` |
+
+**AI 的固定流程**（写进工具描述与 Skill）：已有节点直接沿用；没绑定但库里有 → `kj_search` 找到；都没有 → `kj_register type=node` 建；然后把 id 传进 `reader_anki_draft` / `make_anki`。
+**已知缝**：桥只校验编号格式，不校验存在（桥没有 KJ 账本的访问权）；编号不存在的绑定在吸收时落 unresolved 文件。
+**滚动升级窗口**：新桥（带 nodeIds）× 旧 App 会在 App 入站闸被拒；新 App × 旧桥出的草稿没有 nodeIds、确认时被 App 挡下。两端要一起升。
 
 ## 8. 维护
 

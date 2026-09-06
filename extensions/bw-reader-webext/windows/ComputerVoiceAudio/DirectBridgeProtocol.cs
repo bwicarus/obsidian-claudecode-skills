@@ -2573,6 +2573,7 @@ internal sealed class DirectBridgeProtocolSession
                 "cardIndex",
                 "aid",
                 "card",
+                "nodeIds",
                 "projection");
         }
         else
@@ -2581,6 +2582,7 @@ internal sealed class DirectBridgeProtocolSession
             // extension sent canonical Markdown only as `card`; use that same
             // Markdown-shaped value as the fallback projection until WebExt
             // starts sending the separately rendered `projection` field.
+            // nodeIds（KJ 知识节点）2026-09-06 起必填：制卡必须带节点。
             RequireExactKeys(
                 message,
                 "contract",
@@ -2591,7 +2593,8 @@ internal sealed class DirectBridgeProtocolSession
                 "draftId",
                 "cardIndex",
                 "aid",
-                "card");
+                "card",
+                "nodeIds");
         }
         if (Encoding.UTF8.GetByteCount(message.GetRawText()) > 192 * 1024)
         {
@@ -2621,6 +2624,7 @@ internal sealed class DirectBridgeProtocolSession
             "sourceInstanceId");
         string draftId = RequireString(message, "draftId", 64);
         string aid = RequireString(message, "aid", 64);
+        string[] nodeIds = RequireKjNodeIds(message);
         if (!message.TryGetProperty("cardIndex", out JsonElement indexValue)
             || indexValue.ValueKind != JsonValueKind.Number
             || !indexValue.TryGetInt32(out int cardIndex)
@@ -2651,6 +2655,7 @@ internal sealed class DirectBridgeProtocolSession
                     aid,
                     card,
                     projection,
+                    nodeIds,
                     cancellationToken).ConfigureAwait(false);
             return outcome.Result.ToPayload(outcome.Dedup);
         }
@@ -2839,6 +2844,39 @@ internal sealed class DirectBridgeProtocolSession
                 $"Reader 本地 Anki {name} 无效");
         }
         return id;
+    }
+
+    /// 制卡必须绑定 1~8 个 KJ 知识节点（2026-09-06 用户拍板）。缺失/无效直接拒绝，绝不静默放行。
+    private static string[] RequireKjNodeIds(JsonElement message)
+    {
+        if (
+            !message.TryGetProperty("nodeIds", out JsonElement value)
+            || value.ValueKind != JsonValueKind.Array
+            || value.GetArrayLength() is < 1
+                or > ReaderRealtimeOutputProtocol.KjNodeIdRules.Maximum)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ANKI_NODE_REQUIRED",
+                "Reader 制卡必须绑定 1~8 个知识节点（nodeIds）");
+        }
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        List<string> ids = new();
+        foreach (JsonElement item in value.EnumerateArray())
+        {
+            string? id = item.ValueKind == JsonValueKind.String
+                ? item.GetString()
+                : null;
+            if (
+                !ReaderRealtimeOutputProtocol.KjNodeIdRules.IsValid(id)
+                || !seen.Add(id!))
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_ANKI_NODE_INVALID",
+                    "Reader 知识节点编号无效或重复");
+            }
+            ids.Add(id!);
+        }
+        return ids.ToArray();
     }
 
     private static long[] RequirePositiveIds(

@@ -220,12 +220,16 @@ def extract_parallel(dump: Path, out_dir: Path, *, workers: int = 12, keep_langs
              "started": time.strftime("%Y-%m-%d %H:%M:%S")}
     degree_hist: collections.Counter = collections.Counter()
 
+    t_extract = [t0]   # 扫描结束、真正开始提取的时刻（速率/ETA 只按提取阶段算，别把扫描时间摊进去）
+
     def flush_status(final: bool = False) -> None:
         el = time.time() - t0
+        el_x = max(time.time() - t_extract[0], 1e-6)
         stats["elapsed_s"] = round(el)
         read = stats["compressed_read"]
-        stats["compressed_mb_s"] = round(read / 1e6 / el, 2) if el else 0
-        stats["eta_s"] = round((total_c - read) / (read / el)) if read and el and not final else 0
+        stats["compressed_mb_s"] = round(read / 1e6 / el_x, 2) if read else 0
+        stats["plain_mb_s"] = round(stats.get("plain_bytes", 0) / 1e6 / el_x, 1)
+        stats["eta_s"] = round((total_c - read) / (read / el_x)) if read and not final else 0
         stats["degree_histogram"] = {str(k): v for k, v in sorted(degree_hist.items())[:60]}
         stats["phase"] = "complete" if final else stats["phase"]
         tmp = status_path.with_suffix(".tmp")
@@ -234,6 +238,7 @@ def extract_parallel(dump: Path, out_dir: Path, *, workers: int = 12, keep_langs
 
     flush_status()
     blocks, eos = BP.scan_blocks(dump, limit_bytes=scan_limit_bytes)
+    t_extract[0] = time.time()
     ends = BP.block_ends(blocks, eos, total_c * 8)
     if scan_limit_bytes:   # 只扫了前缀：最后一个块的结束位未知，丢掉它
         blocks, ends = blocks[:-1], ends[:-1]

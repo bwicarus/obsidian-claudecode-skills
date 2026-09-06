@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -80,16 +82,106 @@ def make_card(ledger: Ledger, *, node_ids: list[str], front: str, back: str, dec
             "node_ids": ev.payload["node_ids"], "event": ev.id}
 
 
+DEFAULT_BINDINGS_PATH = Path(os.environ.get("BW_BRIDGE_RUNTIME") or (Path.home() / "bw-computer-voice-bridge" / "runtime")) / "kj-card-bindings.jsonl"
+_BINDINGS_OFFSET_KEY = "bridge_bindings_offset"
+_PROVENANCE_MARK = 'class="bw-reader-anki-source"'
+
+
+def ingest_bridge_bindings(ledger: Ledger, path: str | Path | None = None, *, anki_url: str | None = None,
+                           request: Callable[..., Any] | None = None, add_provenance: bool = True) -> dict:
+    """读 Windows 桥写的绑定账本（追加式 JSONL：确认入库的卡 ↔ nodeIds），把卡绑到节点（幂等：card_key=anki:<note>），
+    再给 Anki 卡背面补上节点深链。游标存 meta 表，只处理新增行；节点不存在的行落到 state/kj/unresolved-bindings.jsonl 等人工处理。"""
+    p = Path(path or DEFAULT_BINDINGS_PATH)
+    out = {"path": str(p), "lines": 0, "bound": 0, "skipped": 0, "unresolved": 0, "nodes": [], "notes": []}
+    if not p.exists():
+        return out
+    row = ledger.db.execute("SELECT v FROM meta WHERE k=?", (_BINDINGS_OFFSET_KEY,)).fetchone()
+    offset = int(row["v"]) if row else 0
+    data = p.read_bytes()
+    if offset > len(data):
+        offset = 0  # 账本被重建/截断：从头重放（bind_card 幂等）
+    touched: set[str] = set()
+    new_notes: list[tuple[int, list[str]]] = []
+    unresolved_path = ledger.path.parent / "unresolved-bindings.jsonl"
+    for raw in data[offset:].split(b"\n"):
+        raw = raw.strip()
+        if not raw:
+            continue
+        out["lines"] += 1
+        try:
+            rec = json.loads(raw.decode("utf-8"))
+        except Exception:
+            out["skipped"] += 1
+            continue
+        node_ids = [str(n) for n in (rec.get("nodeIds") or []) if n]
+        note_ids = [int(x) for x in (rec.get("noteIds") or []) if str(x).isdigit()]
+        known = [n for n in node_ids if ledger.resolve(n) is not None]
+        if not node_ids or not note_ids:
+            out["skipped"] += 1
+            continue
+        if not known:
+            out["unresolved"] += 1
+            with unresolved_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            continue
+        for nid in note_ids:
+            ev = bind_card(ledger, node_ids=known, anki_note_id=nid, anki_card_ids=[int(c) for c in (rec.get("cardIds") or []) if str(c).isdigit()],
+                           front=str(rec.get("front") or rec.get("cloze") or "")[:400], back=str(rec.get("back") or "")[:400],
+                           deck="QA", card_key=f"anki:{nid}", actor="bridge")
+            out["bound"] += 1
+            touched.update(ev.node_ids)
+            new_notes.append((nid, list(ev.payload["node_ids"])))
+    with ledger._lock:
+        ledger.db.execute("INSERT OR REPLACE INTO meta(k, v) VALUES(?, ?)", (_BINDINGS_OFFSET_KEY, str(len(data))))
+    out["nodes"] = sorted(touched)
+    out["notes"] = [n for n, _ in new_notes]
+    if add_provenance and new_notes:
+        out["provenance_updated"] = _append_node_provenance(ledger, new_notes, anki_url=anki_url, request=request)
+    return out
+
+
+def _append_node_provenance(ledger: Ledger, notes: list[tuple[int, list[str]]], *, anki_url: str | None = None,
+                            request: Callable[..., Any] | None = None) -> int:
+    """给刚绑定的 Anki 卡背面（最后一个字段）追加"节点：<a obsidian://…>"来源栏；已有就不重复。失败不抛。"""
+    try:
+        AS = _anki()
+        url = anki_url or AS.DEFAULT_ANKI_URL
+        req = request or AS.anki_request
+        infos = req(url, "notesInfo", {"notes": [n for n, _ in notes]}) or []
+    except Exception:
+        return 0
+    by_id = {int(i.get("noteId") or 0): i for i in infos if isinstance(i, dict)}
+    updated = 0
+    for note_id, node_ids in notes:
+        info = by_id.get(note_id)
+        if not info:
+            continue
+        fields = info.get("fields") or {}
+        if not fields:
+            continue
+        name = max(fields, key=lambda k: (fields[k] or {}).get("order", 0))
+        value = str((fields[name] or {}).get("value") or "")
+        if _PROVENANCE_MARK in value and "obsidian://open" in value:
+            continue
+        try:
+            req(url, "updateNoteFields", {"note": {"id": note_id, "fields": {name: value + node_provenance_html(ledger, node_ids)}}}, timeout=15)
+            updated += 1
+        except Exception:
+            continue
+    return updated
+
+
 def sync_snapshots(ledger: Ledger, *, anki_url: str | None = None, request: Callable[..., Any] | None = None,
-                   fsrs: Callable[..., dict] | None = None, now: float | None = None) -> dict:
-    """所有活跃绑卡：notesInfo → cardsInfo → card_mastery → anki.snapshot（按卡+日幂等）。返回统计与受影响节点。"""
+                   fsrs: Callable[..., dict] | None = None, now: float | None = None, bindings_path: str | Path | None = None) -> dict:
+    """先吸收桥的绑定账本，再对所有活跃绑卡：notesInfo → cardsInfo → card_mastery → anki.snapshot（按卡+日幂等）。返回统计与受影响节点。"""
     AS = _anki()
     url = anki_url or AS.DEFAULT_ANKI_URL
     req = request or AS.anki_request
     fsrs_fn = fsrs or AS.fsrs_memory_map
+    ingest = ingest_bridge_bindings(ledger, bindings_path, anki_url=url, request=req)
     cards = ledger.db.execute("SELECT card_key, anki_note_id, anki_card_ids_json FROM cards WHERE status='active' AND anki_note_id IS NOT NULL").fetchall()
     if not cards:
-        return {"cards": 0, "snapshots": 0, "nodes": []}
+        return {"cards": 0, "snapshots": 0, "nodes": ingest["nodes"], "ingest": ingest}
     key_by_note = {int(c["anki_note_id"]): c["card_key"] for c in cards}
     note_ids = list(key_by_note)
     infos = req(url, "notesInfo", {"notes": note_ids}) or []
@@ -99,7 +191,7 @@ def sync_snapshots(ledger: Ledger, *, anki_url: str | None = None, request: Call
         for cid in info.get("cards") or []:
             card_note[int(cid)] = nid
     if not card_note:
-        return {"cards": len(cards), "snapshots": 0, "nodes": [], "note": "Anki 里找不到这些笔记"}
+        return {"cards": len(cards), "snapshots": 0, "nodes": ingest["nodes"], "ingest": ingest, "note": "Anki 里找不到这些笔记"}
     cards_info = req(url, "cardsInfo", {"cards": list(card_note)}) or []
     try:
         fsrs_mem = fsrs_fn(url, list(card_note))
@@ -122,7 +214,8 @@ def sync_snapshots(ledger: Ledger, *, anki_url: str | None = None, request: Call
         if not ev.duplicate:
             n += 1
             touched.update(node_ids)
-    return {"cards": len(cards), "snapshots": n, "nodes": sorted(touched)}
+    touched.update(ingest["nodes"])
+    return {"cards": len(cards), "snapshots": n, "nodes": sorted(touched), "ingest": ingest}
 
 
 def card_ids_of(ledger: Ledger, card_key: str) -> list[int]:

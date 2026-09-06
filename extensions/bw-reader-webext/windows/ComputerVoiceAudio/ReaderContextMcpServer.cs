@@ -1412,15 +1412,22 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = AnkiDraftToolName,
                 ["description"] =
-                    "Deliver editable Anki card drafts. For a normal card that "
-                    + "does not quote the open book, pass cards only; the Reader "
+                    "Deliver editable Anki card drafts. nodeIds is REQUIRED: "
+                    + "every card must be bound to 1-8 KJ knowledge nodes "
+                    + "(kj:XXXXXXXXXX). Reuse the node the card already belongs "
+                    + "to; otherwise find it with kj_search; only when none "
+                    + "exists create one with kj_register type=node. A draft "
+                    + "without nodeIds is rejected, never silently accepted. "
+                    + "For a normal card that "
+                    + "does not quote the open book, pass cards and nodeIds only; the Reader "
                     + "will not invent current-page provenance. When the card "
                     + "does quote the book, also pass file, target and verbatim "
                     + "sourceText after reader_context_snapshot; all three are "
                     + "required together and the Reader requires exactly one "
                     + "match before showing its confirmation UI. This tool never writes "
                     + "Anki: success means only draft_delivered. The user "
-                    + "must click the existing Add to Anki button.",
+                    + "must click the existing Add to Anki button; the confirmed "
+                    + "card keeps the node binding (tags kj::<id> + KJ ledger).",
                 ["inputSchema"] = BuildExactSourceArgumentsSchema(true),
                 ["annotations"] = new JsonObject
                 {
@@ -2635,11 +2642,12 @@ internal sealed class ReaderContextMcpServer
             },
         };
         JsonArray required = includeCards
-            ? new JsonArray("cards")
+            ? new JsonArray("cards", "nodeIds")
             : new JsonArray("file", "target");
         if (includeCards)
         {
             properties["sourceText"] = SourceTextSchema();
+            properties["nodeIds"] = KjNodeIdsSchema();
             properties["cards"] = new JsonObject
             {
                 ["type"] = "array",
@@ -2874,6 +2882,23 @@ internal sealed class ReaderContextMcpServer
         ["type"] = "string",
         ["minLength"] = 1,
         ["maxLength"] = 2_000,
+    };
+
+    /// 制卡必须绑定的 KJ 知识节点编号（2026-09-06 用户拍板，fail-closed）。
+    private static JsonObject KjNodeIdsSchema() => new()
+    {
+        ["type"] = "array",
+        ["minItems"] = 1,
+        ["maxItems"] = ReaderRealtimeOutputProtocol.KjNodeIdRules.Maximum,
+        ["uniqueItems"] = true,
+        ["description"] =
+            "KJ knowledge node ids (kj:XXXXXXXXXX) this card belongs to. "
+            + "Reuse an already bound node; else kj_search; else kj_register type=node.",
+        ["items"] = new JsonObject
+        {
+            ["type"] = "string",
+            ["pattern"] = "^kj:[0-9A-HJKMNP-TV-Z]{10}$",
+        },
     };
 
     private static JsonObject CardFaceSchema(bool allowEmpty = false) => new()
@@ -4807,10 +4832,10 @@ internal sealed class ReaderContextMcpServer
                     ["file", "target", "text", "color", "note"],
                     StringComparer.Ordinal)
                 : new HashSet<string>(
-                    ["file", "target", "sourceText", "cards"],
+                    ["file", "target", "sourceText", "cards", "nodeIds"],
                     StringComparer.Ordinal);
             bool genericAnki = kind == "anki-draft"
-                && actual.SetEquals(new[] { "cards" });
+                && actual.SetEquals(new[] { "cards", "nodeIds" });
             if (!actual.SetEquals(exactExpected) && !genericAnki)
             {
                 return false;

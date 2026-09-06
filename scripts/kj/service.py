@@ -202,9 +202,23 @@ class KJService:
             return self._finish(list(res["node_ids"]), res)
         return self._run(go)
 
-    def anki_sync(self, *, anki_url: str | None = None, request=None, fsrs=None) -> dict:
+    def anki_sync(self, *, anki_url: str | None = None, request=None, fsrs=None, bindings_path=None) -> dict:
+        """先吸收桥的绑定账本（不依赖 Anki 在线），再拉复习快照；Anki 不在线时前者仍生效、后者报 anki_unavailable。"""
         def go():
-            res = AK.sync_snapshots(self.ledger, anki_url=anki_url, request=request, fsrs=fsrs)
+            ingest = AK.ingest_bridge_bindings(self.ledger, bindings_path, anki_url=anki_url, request=request)
+            if ingest.get("nodes"):
+                self._finish(list(ingest["nodes"]))
+            try:
+                res = AK.sync_snapshots(self.ledger, anki_url=anki_url, request=request, fsrs=fsrs, bindings_path=bindings_path)
+            except Exception as e:  # AnkiConnect 不在线等：绑定已吸收，只是没拉到复习数据
+                return {"ok": False, "code": "anki_unavailable", "error": str(e)[:200], "ingest": ingest}
+            return self._finish(list(res.get("nodes") or []), res) if res.get("nodes") else dict(res, ok=True)
+        return self._run(go)
+
+    def ingest_bindings(self, path=None, *, anki_url: str | None = None, request=None, add_provenance: bool = True) -> dict:
+        """只吸收桥的卡↔节点绑定账本（不拉复习快照）。"""
+        def go():
+            res = AK.ingest_bridge_bindings(self.ledger, path, anki_url=anki_url, request=request, add_provenance=add_provenance)
             return self._finish(list(res.get("nodes") or []), res) if res.get("nodes") else dict(res, ok=True)
         return self._run(go)
 

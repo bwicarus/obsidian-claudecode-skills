@@ -67,13 +67,17 @@ test('ordinary card drafts carry no invented current-page provenance', () => {
 });
 
 test('Windows draft protocol accepts cards-only but keeps exact source all-or-none', () => {
-  assert.match(MCP, /required = includeCards[\s\S]*new JsonArray\("cards"\)/);
+  // 2026-09-06 用户拍板：制卡必须绑 KJ 知识节点 —— cards-only 形态也要带 nodeIds，缺了 fail-closed。
+  assert.match(MCP, /required = includeCards[\s\S]*new JsonArray\("cards", "nodeIds"\)/);
   assert.match(MCP, /schema\["dependentRequired"\][\s\S]*\["file"\][\s\S]*"target", "sourceText"/);
-  assert.match(MCP, /bool genericAnki = kind == "anki-draft"[\s\S]*actual\.SetEquals\(new\[\] \{ "cards" \}\)/);
+  assert.match(MCP, /bool genericAnki = kind == "anki-draft"[\s\S]*actual\.SetEquals\(new\[\] \{ "cards", "nodeIds" \}\)/);
+  assert.match(MCP, /properties\["nodeIds"\] = KjNodeIdsSchema\(\)/);
 
   assert.match(OUTPUT, /bool exactSource = hasFile && hasTarget && hasSourceText/);
   assert.match(OUTPUT, /if \(\(hasFile \|\| hasTarget \|\| hasSourceText\) && !exactSource\)/);
-  assert.match(OUTPUT, /else[\s\S]*Exact\(root, "draftId", "cards"\)/);
+  assert.match(OUTPUT, /else[\s\S]*Exact\(root, "draftId", "cards", "nodeIds"\)/);
+  assert.match(OUTPUT, /ValidateKjNodeIds\(root\.GetProperty\("nodeIds"\)\)/);
+  assert.match(OUTPUT, /\^kj:\[0-9A-HJKMNP-TV-Z\]\{10\}\$/);
 
   assert.match(LOCAL_ANKI, /bool exactSource = hasFile && hasTarget && hasSourceText/);
   assert.match(LOCAL_ANKI, /: new JsonObject\(\)/);

@@ -110,6 +110,41 @@ class AnkiTests(unittest.TestCase):
         self.assertEqual(self.svc.make_card(node_ids=[], front="Q", back="A", request=self.fake_request)["code"], "missing_node")
         self.assertEqual(self.svc.node(self.a)["cards"][0]["anki_note_id"], 1001)
 
+    def test_ingest_bridge_bindings_binds_notes_and_appends_provenance(self):
+        """桥确认入库后写的 JSONL → 卡绑到节点、背面补 obsidian 深链；重复吸收不重复绑；节点不存在落 unresolved。"""
+        b = self.svc.create_node(name="B")["node_id"]
+        path = self.tmp / "kj-card-bindings.jsonl"
+        lines = [
+            {"contract": "kj-card-binding/1", "aid": "fc_" + "a" * 32, "draftId": "draft-" + "b" * 32, "cardIndex": 0,
+             "nodeIds": [self.a, b], "noteIds": [7001], "cardIds": [8001], "type": "basic", "front": "Q1", "back": "A1"},
+            {"contract": "kj-card-binding/1", "aid": "fc_" + "c" * 32, "draftId": "draft-" + "d" * 32, "cardIndex": 0,
+             "nodeIds": ["kj:ZZZZZZZZZZ"], "noteIds": [7002], "cardIds": [8002], "type": "basic", "front": "Q2", "back": "A2"},
+        ]
+        path.write_text("".join(json.dumps(l, ensure_ascii=False) + "\n" for l in lines), "utf-8")
+        updates: list = []
+
+        def fake(url, action, params=None, timeout=15):
+            if action == "notesInfo":
+                return [{"noteId": 7001, "fields": {"Front": {"value": "Q1", "order": 0}, "Back": {"value": "A1", "order": 1}}}]
+            if action == "updateNoteFields":
+                updates.append(params); return None
+            raise AssertionError(action)
+        res = self.svc.ingest_bindings(str(path), request=fake)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual((res["lines"], res["bound"], res["unresolved"]), (2, 1, 1))
+        self.assertEqual(sorted(res["nodes"]), sorted([self.a, b]))
+        self.assertEqual(res["provenance_updated"], 1)
+        self.assertIn('obsidian://open?vault=', updates[0]["note"]["fields"]["Back"])
+        self.assertEqual(sorted(self.svc.ledger.cards_of(self.a)[0]["node_ids"]), sorted([self.a, b]))
+        self.assertTrue((self.tmp / "unresolved-bindings.jsonl").exists())
+        again = self.svc.ingest_bindings(str(path), request=fake)
+        self.assertEqual(again["lines"], 0)                     # 游标前进，不重复处理
+        with path.open("a", encoding="utf-8") as fh:               # 追加一行 → 只处理新行
+            fh.write(json.dumps({"nodeIds": [self.a], "noteIds": [7001], "cardIds": [8001], "front": "Q1", "back": "A1"}) + "\n")
+        third = self.svc.ingest_bindings(str(path), request=fake, add_provenance=False)
+        self.assertEqual((third["lines"], third["bound"]), (1, 1))
+        self.assertEqual(self.svc.ledger.count("cards"), 1)       # 同一 note 仍是一张卡
+
     def test_sync_snapshots_feeds_mastery_and_dedupes(self):
         self.svc.make_card(node_ids=[self.a], front="Q", back="A", request=self.fake_request)
         res = self.svc.anki_sync(request=self.fake_request, fsrs=lambda url, ids: {})

@@ -1151,6 +1151,14 @@ if (window.__bwPwaProviderOnly) return;
       RC.toast && RC.toast('电脑 Anki 导出当前不可用');
       return;
     }
+    // 2026-09-06 用户拍板：卡必须绑 KJ 知识节点才能入库。节点编号随卡进了本地仓（source.kjNodes），
+    // 这里只是最后一道闸；真正的校验在桥（缺 nodeIds 直接拒）。
+    var kjNodes = String((repositorySource(st) || {}).kjNodes || '')
+      .split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    if (!kjNodes.length) {
+      RC.toast && RC.toast('这张卡还没关联知识节点，不能入库：让 AI 先用 kj_search/kj_register 绑定节点再重发草稿');
+      return;
+    }
     var aid = c._pcExportAid;
     if (!/^fc_[a-f0-9]{32}$/.test(String(aid || ''))) {
       aid = 'fc_' + Array.from(crypto.getRandomValues(new Uint8Array(16))).map(function (b) {
@@ -1169,7 +1177,8 @@ if (window.__bwPwaProviderOnly) return;
         sourceInstanceId: draft.sourceInstanceId,
         cardIndex: i,
         aid: aid,
-        card: repositoryCard(c)
+        card: repositoryCard(c),
+        nodeIds: kjNodes
       });
     }).then(function (data) {
       var noteIds = data.note_ids || [], cardIds = data.card_ids || [];

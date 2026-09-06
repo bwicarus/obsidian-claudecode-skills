@@ -11431,10 +11431,34 @@ def _anki_draft_cards(value) -> list | None:
 def pdf_api_anki_draft():
     """Register a source-bound card draft; never write to Anki here."""
     body = request.get_json(silent=True)
-    if not isinstance(body, dict) or set(body) != {
-        "draftId", "file", "target", "sourceText", "cards"
-    }:
+    _draft_keys = {"draftId", "file", "target", "sourceText", "cards"}
+    if not isinstance(body, dict) or set(body) not in (_draft_keys, _draft_keys | {"nodeIds"}):
         return jsonify({"ok": False, "error": "bad draft payload"}), 400
+    # nodeIds（KJ 知识节点，2026-09-06）：给了就必须全部存在；App 主路径在桥侧强制，这里是服务端登记的对应位。
+    node_ids = []
+    if "nodeIds" in body:
+        raw_nodes = body.get("nodeIds")
+        if not isinstance(raw_nodes, list) or not (1 <= len(raw_nodes) <= 8) or not all(
+            isinstance(n, str) and re.fullmatch(r"kj:[0-9A-HJKMNP-TV-Z]{10}", n) for n in raw_nodes
+        ):
+            return jsonify({"ok": False, "error": "bad nodeIds", "code": "kj_node_invalid"}), 400
+        try:
+            import sys as _sys
+            _sp = str(CLAUDE_DIR / "scripts")
+            if _sp not in _sys.path:
+                _sys.path.insert(0, _sp)
+            from kj.service import KJService as _KJS
+            _kj = _KJS(render=False, actor="anki-draft")
+            try:
+                missing = [n for n in raw_nodes if _kj.ledger.resolve(n) is None]
+            finally:
+                _kj.close()
+        except Exception:
+            current_app.logger.exception("KJ node lookup failed for anki draft")
+            return jsonify({"ok": False, "error": "knowledge node system unavailable", "code": "kj_unavailable"}), 503
+        if missing:
+            return jsonify({"ok": False, "error": "unknown nodeIds: %s" % ",".join(missing), "code": "kj_node_not_found"}), 404
+        node_ids = list(dict.fromkeys(raw_nodes))
     rel = str(body.get("file") or "").strip()
     abs_path = _safe_vault_path(rel)
     target = body.get("target")
@@ -11503,7 +11527,7 @@ def pdf_api_anki_draft():
     try:
         gid = _entity_reg_cards(
             cards,
-            {"source_ref": source_ref},
+            {"source_ref": source_ref, "node_ids": node_ids},
             entity_id=entity_id,
         )
     except ValueError as error:
@@ -11514,6 +11538,7 @@ def pdf_api_anki_draft():
         "status": "draft_registered",
         "gid": gid,
         "source_ref": source_ref,
+        "node_ids": node_ids,
         "anki_written": False,
     })
 

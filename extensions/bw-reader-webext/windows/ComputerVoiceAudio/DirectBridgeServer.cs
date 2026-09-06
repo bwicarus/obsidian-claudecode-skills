@@ -431,7 +431,10 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 runtimeDirectory,
                 ReaderLocalAnkiRegistry.RegistryFileName));
         _localAnkiWriter = new ReaderLocalAnkiWriter(
-            _localAnkiRegistry);
+            _localAnkiRegistry,
+            kjBindingLogPath: Path.Combine(
+                runtimeDirectory,
+                ReaderKjBindingLog.FileName));
         _coordinator = new DirectBridgeCoordinator(
             configStore,
             appLauncher,

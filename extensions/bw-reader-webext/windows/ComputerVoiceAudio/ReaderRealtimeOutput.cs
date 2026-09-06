@@ -275,6 +275,7 @@ internal static class ReaderRealtimeOutputProtocol
                     throw Invalid(
                         "Reader Anki 引用来源必须同时提供 file/target/sourceText");
                 }
+                // 2026-09-06 用户拍板：制卡必须绑定 KJ 知识节点（nodeIds），缺了直接拒绝。
                 if (exactSource)
                 {
                     Exact(
@@ -283,11 +284,12 @@ internal static class ReaderRealtimeOutputProtocol
                         "file",
                         "target",
                         "sourceText",
-                        "cards");
+                        "cards",
+                        "nodeIds");
                 }
                 else
                 {
-                    Exact(root, "draftId", "cards");
+                    Exact(root, "draftId", "cards", "nodeIds");
                 }
                 ValidateAnkiDraftId(root, "draftId");
                 if (exactSource)
@@ -297,6 +299,7 @@ internal static class ReaderRealtimeOutputProtocol
                     Text(root, "sourceText", 2_000);
                 }
                 ValidateAnkiDraftCards(root.GetProperty("cards"));
+                ValidateKjNodeIds(root.GetProperty("nodeIds"));
                 break;
             case "client-action":
                 Exact(root, "fn", "args");
@@ -1344,6 +1347,44 @@ internal static class ReaderRealtimeOutputProtocol
         )
         {
             throw Invalid($"Reader 输出 {name} 无效");
+        }
+    }
+
+    /// KJ 知识节点编号：kj: + 10 位 Crockford base32（scripts/kj/ids.py 铸造）。
+    /// 制卡必须绑定 1~8 个；这里是白名单的 C# 副本，App 侧在 rc-computer-voice.js normalizeKjNodeIds。
+    internal static class KjNodeIdRules
+    {
+        internal const int Maximum = 8;
+        private static readonly System.Text.RegularExpressions.Regex Pattern = new(
+            "^kj:[0-9A-HJKMNP-TV-Z]{10}$",
+            System.Text.RegularExpressions.RegexOptions.Compiled
+                | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+        internal static bool IsValid(string? value) =>
+            value is not null && Pattern.IsMatch(value);
+    }
+
+    private static void ValidateKjNodeIds(JsonElement nodeIds)
+    {
+        if (
+            nodeIds.ValueKind != JsonValueKind.Array
+            || nodeIds.GetArrayLength() is < 1 or > KjNodeIdRules.Maximum
+        )
+        {
+            throw Invalid("Reader 制卡必须绑定 1~8 个知识节点（nodeIds）");
+        }
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        foreach (JsonElement item in nodeIds.EnumerateArray())
+        {
+            if (
+                item.ValueKind != JsonValueKind.String
+                || item.GetString() is not string id
+                || !KjNodeIdRules.IsValid(id)
+                || !seen.Add(id)
+            )
+            {
+                throw Invalid("Reader 知识节点编号无效或重复");
+            }
         }
     }
 

@@ -2330,6 +2330,7 @@ test("snapshot-mcp 将精确高亮和 Anki 草稿送进 Reader 接收器并逐�
         front: "问题",
         back: "答案",
       }],
+      nodeIds: ["kj:01J9ZK3A7Q"],
     },
   }, {
     ...base,
@@ -2341,6 +2342,7 @@ test("snapshot-mcp 将精确高亮和 Anki 草稿送进 Reader 接收器并逐�
         type: "cloze",
         cloze: "普通卡不需要绑定当前页：{{c1::本地卡库}}先保存。",
       }],
+      nodeIds: ["kj:01J9ZK3A7Q", "kj:01J9ZK3A7R"],
     },
   }, {
     ...base,

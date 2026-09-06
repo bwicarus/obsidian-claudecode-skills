@@ -1983,6 +1983,7 @@ internal static class DirectBridgeSelfTest
                     ["back"] = "原答案",
                 },
             },
+            ["nodeIds"] = new JsonArray("kj:01J9ZK3A7Q"),
         };
         ReaderRealtimeOutputRequest draft =
             ReaderRealtimeOutputProtocol.Create(
@@ -2084,6 +2085,7 @@ internal static class DirectBridgeSelfTest
                 front = "Q",
                 back = "A",
             },
+            nodeIds = new[] { "kj:01J9ZK3A7Q" },
         };
         JsonElement beforeOpen = await SendAsync(
             session,
@@ -2122,6 +2124,7 @@ internal static class DirectBridgeSelfTest
                     front = "Q",
                     back = "A",
                 },
+                nodeIds = new[] { "kj:01J9ZK3A7Q" },
                 projection = new
                 {
                     type = "basic",
@@ -2149,6 +2152,7 @@ internal static class DirectBridgeSelfTest
                     front = "Q",
                     back = "A",
                 },
+                nodeIds = new[] { "kj:01J9ZK3A7Q" },
                 projection = new
                 {
                     type = "cloze",
@@ -2167,6 +2171,7 @@ internal static class DirectBridgeSelfTest
             draftId = "draft-" + new string('a', 32),
             cardIndex = 0,
             aid = "fc_" + new string('b', 32),
+            nodeIds = new[] { "kj:01J9ZK3A7Q", "kj:01J9ZK3A7R" },
             card = new
             {
                 type = "basic",
@@ -2205,6 +2210,7 @@ internal static class DirectBridgeSelfTest
                 draftId = "draft-" + new string('a', 32),
                 cardIndex = 0,
                 aid = "fc_" + new string('c', 32),
+                nodeIds = new[] { "kj:01J9ZK3A7Q" },
                 card = new
                 {
                     type = "basic",
@@ -2633,6 +2639,7 @@ internal static class DirectBridgeSelfTest
                     draftId = "draft-" + new string('a', 32),
                     cardIndex = 0,
                     aid = "fc_" + new string('8', 32),
+                    nodeIds = new[] { "kj:01J9ZK3A7Q" },
                     card = new
                     {
                         type = "basic",
@@ -2672,6 +2679,7 @@ internal static class DirectBridgeSelfTest
                     ["front"] = "预检失败可重试",
                     ["back"] = "A",
                 },
+                new[] { "kj:01J9ZK3A7Q" },
                 CancellationToken.None).ConfigureAwait(false);
             throw new InvalidOperationException(
                 "pre-add failure unexpectedly succeeded");
@@ -2711,6 +2719,7 @@ internal static class DirectBridgeSelfTest
                     ["front"] = "不可逆阶段失败",
                     ["back"] = "A",
                 },
+                new[] { "kj:01J9ZK3A7Q" },
                 CancellationToken.None).ConfigureAwait(false);
             throw new InvalidOperationException(
                 "addNote outcome unexpectedly succeeded");
@@ -10166,12 +10175,78 @@ internal static class DirectBridgeSelfTest
                             ["back"] = "答案",
                         },
                     },
+                    ["nodeIds"] = new JsonArray("kj:01J9ZK3A7Q"),
                 });
         }
         catch (ReaderRealtimeOutputException)
         {
             invalidDraftIdRejected = true;
         }
+        // 2026-09-06 用户拍板：制卡必须绑节点。没有 nodeIds / 节点编号不合法 → 拒绝，不能静默放行。
+        bool missingNodeIdsRejected = false;
+        try
+        {
+            _ = ReaderRealtimeOutputProtocol.ValidatePayload(
+                "anki-draft",
+                new JsonObject
+                {
+                    ["draftId"] = "draft-" + new string('e', 32),
+                    ["cards"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["type"] = "basic",
+                            ["front"] = "问题",
+                            ["back"] = "答案",
+                        },
+                    },
+                });
+        }
+        catch (ReaderRealtimeOutputException)
+        {
+            missingNodeIdsRejected = true;
+        }
+        bool badNodeIdRejected = false;
+        try
+        {
+            _ = ReaderRealtimeOutputProtocol.ValidatePayload(
+                "anki-draft",
+                new JsonObject
+                {
+                    ["draftId"] = "draft-" + new string('e', 32),
+                    ["cards"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["type"] = "basic",
+                            ["front"] = "问题",
+                            ["back"] = "答案",
+                        },
+                    },
+                    ["nodeIds"] = new JsonArray("kg:LADR#1.1"),
+                });
+        }
+        catch (ReaderRealtimeOutputException)
+        {
+            badNodeIdRejected = true;
+        }
+        JsonNode validNodeDraft = ReaderRealtimeOutputProtocol.ValidatePayload(
+            "anki-draft",
+            new JsonObject
+            {
+                ["draftId"] = "draft-" + new string('e', 32),
+                ["cards"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "basic",
+                        ["front"] = "问题",
+                        ["back"] = "答案",
+                    },
+                },
+                ["nodeIds"] = new JsonArray("kj:01J9ZK3A7Q", "kj:01J9ZK3A7R"),
+            });
+        bool nodeIdsKept = validNodeDraft["nodeIds"]?.AsArray().Count == 2;
         bool controlledPayloadFilesRejected = true;
         foreach (char control in new[] { '\u001f', '\u0085' })
         {
@@ -10590,6 +10665,9 @@ internal static class DirectBridgeSelfTest
             generalCard.Kind == "card"
             && unsafeCardRejected
             && invalidDraftIdRejected
+            && missingNodeIdsRejected
+            && badNodeIdRejected
+            && nodeIdsKept
             && controlledPayloadFilesRejected
             && validUndoPayload["fn"]?.GetValue<string>()
                 == "_nativeReaderUndoLast"
@@ -10900,6 +10978,7 @@ internal static class DirectBridgeSelfTest
                                 back = "Answer",
                             },
                         },
+                        nodeIds = new[] { "kj:01J9ZK3A7Q" },
                     },
                 },
             }),

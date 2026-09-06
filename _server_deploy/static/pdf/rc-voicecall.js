@@ -1064,6 +1064,10 @@
       tool: String(tool || 'make_anki').slice(0, 160),
       legacy: { piEntityRegistered: !!payload.id }
     };
+    // make_anki 工具结果带 node_ids（KJ 知识节点，服务端已校验存在）→ 随卡进本地仓。
+    if (Array.isArray(payload.node_ids) && payload.node_ids.length) {
+      source.kjNodes = payload.node_ids.map(String).join(',').slice(0, 256);
+    }
     // 普通制卡的 text 是用户/助手生成内容，不是当前页引用。
     // 只有上游显式给出 source_ref 或精确高亮合同时，才把书页来源
     // 写入卡仓；绝不用“用户此刻刚好打开的页”伪造 provenance。
@@ -1738,6 +1742,10 @@
       draftId: draftId,
       sourceInstanceId: String(delivery && delivery.sourceInstanceId || '')
     };
+    // KJ 知识节点绑定随卡进本地仓（逗号分隔文本），确认入库时再带给桥；没有它导出会被拒。
+    if (Array.isArray(payload.nodeIds) && payload.nodeIds.length) {
+      source.kjNodes = payload.nodeIds.join(',').slice(0, 256);
+    }
     if (exact) {
       source.documentId = file;
       source.quote = String(payload.sourceText || '');

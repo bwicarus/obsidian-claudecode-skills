@@ -27,7 +27,9 @@ python scripts/kj/cli.py register --json '{"type":"record","node_id":"kj:…","k
 2. 登记内容：定义用 `definition`（必带 source；同语境已有定义会先返回旧文，比较后带 `--decision keep|supersede`）；
    学习过程用 `record`（每次单独追加，不查重；不知道发生时间就不填 `--at`）。
 3. 顺手登记依赖：`relation FROM TO prereq --evidence "原文…"`；成环会被拒绝并返回路径，按提示处理。
-4. 制卡：`card-make --nodes kj:… --front … --back …`（没有节点先建；工具会拒绝无节点的卡）。
+4. 制卡：阅读器路径 `reader_anki_draft` / 侧栏 `make_anki` 都**必带 nodeIds / node_ids**（已有节点沿用 → 没有就 search → 库里没有才建）；
+   缺节点的草稿在桥和 App 两侧都会被拒绝。不经阅读器建卡用 `card-make --nodes kj:… --front … --back …`。
+   确认入库后运行 `anki-sync`（或 `inbox`）把桥记下的卡↔节点绑定吸进账本并给卡背面补节点深链。
 
 **学习排查（用户反复出错 / 主动求助）**
 1. `node` 读目标：看 `readiness`、`weak_prereqs`、`unknown_prereqs`、`next_hint`。
