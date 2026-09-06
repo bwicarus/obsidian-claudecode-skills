@@ -129,6 +129,16 @@ relation / relation_retract / relation_change / card / card_make / quiz / quiz_r
   `--online` 取一次即缓存）。剩余漏的全是命名差异（安培环路定理=安培定律、定语从句=關係子句、五段动词=五段活用），
   对策是 AI 换英/日文原名再搜 —— 已写进 `kj_search` 工具说明与两份技能文件。子集噪声：310 万论文、158 万人物、120 万分类页、
   15.8 万消歧义页，靠 P31 压后处理。
+- **它能当"挂点"，当不了"网"（2026-09-07 量过）**：探针 50 个概念在公共目录里彼此直接相连的只有 3 对；2 跳内（共享一个公共邻居）数学 15 个
+  连成 4 块、物理 12 个 5 块、计算机 12 个 10 块、语法术语几乎全孤立。P279 往上一两层有用（排序算法/物理定律/语态），再往上进哲学本体
+  （客體/實體/類）不汇到课程根；真正的领域挂钩是 facet_of / studied_by / part_of（线性代数、静电学、操作系统）。结论：Wikidata 提供的是
+  **身份**（跨书跨语言判定同一概念、消歧）+ 粗定位；概念之间的网与前置只能从书来。属性映射扩充、共同挂点建议等不再投入。
+- **编号的价值兑现在别名回填**：绑编号（建节点带 qid / `bind_qid`）时把实体的三语标签与别名写成节点别名，`origin='wikidata'`
+  （`node_aliases.origin` 列，2026-09-07 迁移加；事件 `node.aliases_sync`），本名/过长/重复的跳过、最多 16 个；用户自填别名 origin 为空、
+  `node.update` 只替换这部分；换绑/解绑时 wikidata 别名整体收回再回填新的；`rebuild` 可重放。这样第二本书用 eigenvalue / 固有値 来搜，本地节点搜得到。
+- **给 AI 核对用的内容**：`search` 公共候选默认 5 个（`public_limit` 可加），每个带 `label_en` / `description`(100 字) / `description_en`(80 字，
+  与 description 相同时不带) / `aliases`(≤4，样本) / `path`(1 层) / `local_node`；`node` 详情的 `public` 块也带 `label_en` / `description_en` / `aliases`(≤6)。
+  用法是绑编号前对照书里的定义与所属领域，拿不准先不绑（编号随时可补），绑错 `bind_qid` 换绑。
 - **离线 Token 复测**（o200k）：`search 向量空间` 8 个候选带 2 层分类路径 692 token → 精简为简述 100 字 + 1 层路径后 502；
   `node` 详情（含公共邻居）696，必需字段 189。默认路径一轮约 1200 token（在线版约 900，多出来的是本地目录给出的公共邻居与路径）。
 - 属性映射（`wikidata.PROP_MAP`）：P279 subclass_of、P31 instance_of、P361/P527 part_of、P1542/P828 causes、P737 influenced_by、

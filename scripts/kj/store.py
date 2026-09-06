@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS nodes(
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_qid ON nodes(qid);
 CREATE TABLE IF NOT EXISTS node_aliases(
-    node_id TEXT NOT NULL, alias TEXT NOT NULL, lang TEXT DEFAULT '',
+    node_id TEXT NOT NULL, alias TEXT NOT NULL, lang TEXT DEFAULT '', origin TEXT DEFAULT '',
     PRIMARY KEY(node_id, alias)
 );
 CREATE TABLE IF NOT EXISTS definitions(
@@ -187,6 +187,9 @@ class Ledger:
             self.db.executescript(_SCHEMA)
             self.db.executescript(_PUBLIC_SCHEMA)
             self._migrate_public_tables_out_of_main()
+            if "origin" not in [r[1] for r in self.db.execute("PRAGMA table_info(node_aliases)")]:
+                # 2026-09-07：别名带来源。公共编号回填的三语名称/别名 origin='wikidata'，换绑/解绑时整体收回，用户自填的不动
+                self.db.execute("ALTER TABLE node_aliases ADD COLUMN origin TEXT DEFAULT ''")
             cur = self.db.execute("SELECT v FROM meta WHERE k='contract'")
             row = cur.fetchone()
             if row is None:
@@ -354,8 +357,19 @@ class Ledger:
             self._refresh_search(p["into"])
         elif k == "node.bind_qid":
             db.execute("UPDATE nodes SET qid=?, updated_at=? WHERE id=?", (p["qid"], now, p["id"]))
+            db.execute("DELETE FROM node_aliases WHERE node_id=? AND origin='wikidata'", (p["id"],))   # 旧编号回填的别名随之收回
+            self._refresh_search(p["id"])
         elif k == "node.unbind_qid":
             db.execute("UPDATE nodes SET qid=NULL, updated_at=? WHERE id=?", (now, p["id"]))
+            db.execute("DELETE FROM node_aliases WHERE node_id=? AND origin='wikidata'", (p["id"],))
+            self._refresh_search(p["id"])
+        elif k == "node.aliases_sync":
+            origin = p.get("origin") or "wikidata"
+            db.execute("DELETE FROM node_aliases WHERE node_id=? AND origin=?", (p["id"], origin))
+            for a in p.get("aliases") or []:   # OR IGNORE：用户自己登记过的同名别名优先保留
+                db.execute("INSERT OR IGNORE INTO node_aliases(node_id, alias, lang, origin) VALUES(?,?,?,?)",
+                           (p["id"], a["alias"], a.get("lang") or "", origin))
+            self._refresh_search(p["id"])
         elif k == "definition.add":
             db.execute(
                 "INSERT OR REPLACE INTO definitions(id, node_id, text, context_key, source_json, created_at, superseded_by)"
@@ -422,14 +436,15 @@ class Ledger:
             raise ValueError(f"未知事件类型：{k}")
 
     def _set_aliases(self, node_id: str, aliases: list) -> None:
-        self.db.execute("DELETE FROM node_aliases WHERE node_id=?", (node_id,))
+        """用户登记的别名整体替换；公共编号回填的（origin='wikidata'）不在此列，由 node.aliases_sync / bind / unbind 管。"""
+        self.db.execute("DELETE FROM node_aliases WHERE node_id=? AND origin=''", (node_id,))
         for a in aliases:
             if isinstance(a, dict):
                 alias, lang = str(a.get("alias") or "").strip(), str(a.get("lang") or "")
             else:
                 alias, lang = str(a).strip(), ""
             if alias:
-                self.db.execute("INSERT OR IGNORE INTO node_aliases(node_id, alias, lang) VALUES(?,?,?)", (node_id, alias, lang))
+                self.db.execute("INSERT OR REPLACE INTO node_aliases(node_id, alias, lang, origin) VALUES(?,?,?,'')", (node_id, alias, lang))
 
     def _refresh_search(self, node_id: str) -> None:
         n = self.db.execute("SELECT name, summary, status FROM nodes WHERE id=?", (node_id,)).fetchone()
@@ -464,8 +479,8 @@ class Ledger:
         return None
 
     def aliases(self, node_id: str) -> list[dict]:
-        return [{"alias": r["alias"], "lang": r["lang"]} for r in
-                self.db.execute("SELECT alias, lang FROM node_aliases WHERE node_id=? ORDER BY alias", (node_id,))]
+        return [{"alias": r["alias"], "lang": r["lang"], "origin": r["origin"] or ""} for r in
+                self.db.execute("SELECT alias, lang, origin FROM node_aliases WHERE node_id=? ORDER BY alias", (node_id,))]
 
     def definitions(self, node_id: str, *, include_superseded: bool = False) -> list[dict]:
         sql = "SELECT * FROM definitions WHERE node_id=?" + ("" if include_superseded else " AND superseded_by IS NULL") + " ORDER BY created_at"

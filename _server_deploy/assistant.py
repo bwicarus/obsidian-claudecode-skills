@@ -6355,6 +6355,8 @@ _KJ_TOOLS = {
                   "再附 Wikidata 公共候选（标 local_node 有无）。登记任何东西之前先用它定位；找不到再新建。"
                   "中文名搜不到或只出论文时，换英文/日文原名再搜一次（公共目录三语标签都索引；教学用语常与 Wikidata 命名不同："
                   "安培环路定理=Ampère's circuital law、定语从句=relative clause、五段动词=五段活用、过去完成时=past perfect）。"
+                  "公共候选默认 5 个，每个带 label_en / description / description_en / aliases / path：绑编号前拿它们对照书里的定义与所属领域，"
+                  "确认是同一概念再绑；拿不准就先不绑（编号随时可补），绑错用 kj_register bind_qid 换绑。绑定后实体的三语名称与别名会自动回填成节点别名。"
                   "args {q, limit?, online?:本地和公共目录都没有时再上网查}。", _t_kj_search),
     "kj_node": ("读一个知识节点：分类位置、前置/后续、定义原文出处、记录摘要、卡片、掌握度、准备度、weak/unknown 前置、"
                 "next_hint（建议动作代码）。学习排查第 1 步就是它。args {node_id}。", _t_kj_node),

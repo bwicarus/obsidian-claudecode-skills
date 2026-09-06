@@ -186,6 +186,33 @@ def unbind_qid(ledger: Ledger, node_id: str, *, actor: str = "") -> Event:
     return ledger.append("node.unbind_qid", {"id": node_id, "prev": prev}, node_ids=[node_id], actor=actor)
 
 
+def sync_public_aliases(ledger: Ledger, node_id: str, qid: str, *, actor: str = "", limit: int = 16) -> Event | None:
+    """把公共实体的三语名称与别名回填成节点别名（origin=wikidata）—— 第二本书用英文名/日文名来搜，本地才搜得到。
+    跳过节点本名、过长（>60）、重复（不分大小写）的；最多 limit 个，标签优先、别名按 zh/en/ja 补。
+    目录里没有这个实体（未 fetch）→ 不发事件，返回 None。"""
+    e = WD.entity(ledger, qid)
+    if e is None:
+        return None
+    node = ledger.node(node_id)
+    seen = {((node["name"] if node else "") or "").strip().lower()}
+    picked: list[dict] = []
+
+    def take(text: Any, lang: str) -> None:
+        t = str(text or "").strip()
+        if not t or len(t) > 60 or t.lower() in seen or len(picked) >= limit:
+            return
+        seen.add(t.lower())
+        picked.append({"alias": t, "lang": lang})
+
+    for lang in ("zh", "en", "ja"):
+        take(e.get(f"label_{lang}"), lang)
+    for lang in ("zh", "en", "ja"):
+        for a in (e.get("aliases") or {}).get(lang) or []:
+            take(a, lang)
+    return ledger.append("node.aliases_sync", {"id": node_id, "qid": qid, "origin": "wikidata", "aliases": picked},
+                         node_ids=[node_id], actor=actor or "wikidata")
+
+
 def generate_auto_relations(ledger: Ledger, node_id: str, qid: str, *, actor: str = "") -> list[Event]:
     """两端都已绑定编号的公共关系 → 本地关系（幂等：同 from/to/type/derived 只生成一次）。"""
     out: list[Event] = []

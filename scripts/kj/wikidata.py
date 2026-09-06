@@ -127,6 +127,19 @@ def entity(ledger: Ledger, qid: str) -> dict | None:
     return d
 
 
+def alias_sample(e: dict, n: int = 4) -> list[str]:
+    """给 AI 核对用的别名样本：先中文再英文再日文，去掉与标签重复的，最多 n 个。"""
+    out: list[str] = []
+    skip = {(e.get("label") or "").lower(), (e.get("label_en") or "").lower()}
+    for lang in ("zh", "en", "ja"):
+        for a in (e.get("aliases") or {}).get(lang) or []:
+            if a and a.lower() not in skip and a not in out:
+                out.append(a)
+                if len(out) >= n:
+                    return out
+    return out
+
+
 def label_of(ledger: Ledger, qid: str) -> str:
     e = entity(ledger, qid)
     return e["label"] if e else qid
@@ -319,8 +332,14 @@ def search_public(ledger: Ledger, q: str, limit: int = 8) -> list[dict]:
         local = ledger.find_by_qid(e["qid"])
         # 给 AI 的候选只留定位所需：简述截 100 字、分类路径 1 层（完整的等 kj_node 再看）—— 2026-09-07 离线实测
         # 8 个候选带 2 层路径要 690 token，精简后约减半。
-        out.append({"qid": e["qid"], "label": e["label"], "description": (e["description"] or "")[:100],
-                    "local_node": local["id"] if local else None, "path": path_up(ledger, e["qid"], 1)})
+        # 核对字段（2026-09-07 用户要求）：英文标签、英文简述、别名样本 —— AI 绑编号前拿它们对照书里的定义；空的不带，省 token
+        cand = {"qid": e["qid"], "label": e["label"],
+                "label_en": e["label_en"] if e["label_en"] and e["label_en"] != e["label"] else None,
+                "description": (e["description"] or "")[:100],
+                "description_en": (e["desc_en"] or "")[:80] if e["desc_en"] and e["desc_en"] != e["description"] else None,
+                "aliases": alias_sample(e, 4) or None,
+                "local_node": local["id"] if local else None, "path": path_up(ledger, e["qid"], 1)}
+        out.append({k: v for k, v in cand.items() if v is not None or k == "local_node"})
     return out
 
 

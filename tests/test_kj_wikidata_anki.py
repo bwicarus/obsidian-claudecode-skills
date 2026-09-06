@@ -104,6 +104,35 @@ class WikidataTests(unittest.TestCase):
             WD.upsert_entity(self.L, "Q121417949", {"zh": "现在进行时─青年设计师访谈"}, {}, {}, [("P31", "Q13442814", "normal")], source="t")
             self.assertEqual([h["qid"] for h in WD.search_public(self.L, "现在进行时", limit=2)][0], "Q7240943")   # 时/式 不同字：缩短前缀 + 繁体变体
 
+    def test_bind_qid_backfills_trilingual_aliases_and_retracts_on_rebind(self):
+        """绑编号 → 实体三语名称/别名回填成 origin=wikidata 的别名（本名不重复进）；用户改别名不冲掉它们；换绑收回旧的、进新的；解绑清空；重放一致。"""
+        from kj import register as R
+        WD.upsert_entity(self.L, "Q3553768", {"zh": "特征值", "en": "eigenvalue", "ja": "固有値"}, {"en": "scale factor of an eigenvector"},
+                         {"zh": ["本征值"], "en": ["characteristic value"]}, [("P31", "Q1936384", "normal")], source="t")
+        WD.upsert_entity(self.L, "Q178546", {"zh": "行列式", "en": "determinant"}, {"zh": "方阵的标量", "en": "scalar of a square matrix"}, {}, [], source="t")
+        nid = self.svc.create_node(name="特征值", aliases=["eigen"], qid="Q3553768")["node_id"]
+        al = {a["alias"]: a for a in self.L.aliases(nid)}
+        self.assertEqual(set(al), {"eigen", "eigenvalue", "固有値", "本征值", "characteristic value"})
+        self.assertEqual((al["eigenvalue"]["origin"], al["eigenvalue"]["lang"], al["eigen"]["origin"]), ("wikidata", "en", ""))
+        self.assertEqual(self.svc.search("eigenvalue")["local"][0]["id"], nid)      # 第二本书用英文名能搜到本地节点
+        self.svc.update_node(nid, aliases=["ev"])                                    # 用户整体改别名，回填的不动
+        names = {a["alias"] for a in self.L.aliases(nid)}
+        self.assertIn("固有値", names); self.assertNotIn("eigen", names); self.assertIn("ev", names)
+        r = self.svc.bind_qid(nid, "Q178546", fetch_public=False)                    # 换绑：旧回填收回、新回填进来
+        self.assertEqual(r["aliases_synced"], 2)
+        names = {a["alias"] for a in self.L.aliases(nid)}
+        self.assertEqual(names, {"ev", "行列式", "determinant"})
+        self.L.rebuild()
+        self.assertEqual({a["alias"] for a in self.L.aliases(nid)}, names)           # 投影可从事件重放
+        R.unbind_qid(self.L, nid)
+        self.assertEqual({a["alias"] for a in self.L.aliases(nid)}, {"ev"})
+        # 搜索候选带核对字段：英文标签/英文简述/别名样本；空字段不带
+        h = WD.search_public(self.L, "特征值", limit=1)[0]
+        self.assertEqual((h["label_en"], h["aliases"]), ("eigenvalue", ["本征值", "characteristic value"]))
+        self.assertEqual(h["description"], "scale factor of an eigenvector"); self.assertNotIn("description_en", h)   # 没中文简述时 description 就是英文，不重复带
+        h2 = WD.search_public(self.L, "行列式", limit=1)[0]
+        self.assertEqual((h2["description"], h2["description_en"]), ("方阵的标量", "scalar of a square matrix"))
+
     def test_parse_entity_json_and_fetch_via_fake_http(self):
         doc = {"entities": {"Q1": {"labels": {"en": {"language": "en", "value": "one"}, "zh-hans": {"language": "zh-hans", "value": "一"}},
                                    "descriptions": {}, "aliases": {"ja": [{"language": "ja", "value": "いち"}]},

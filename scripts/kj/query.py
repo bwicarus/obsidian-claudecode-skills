@@ -23,7 +23,7 @@ def node_brief(ledger: Ledger, node_id: str) -> dict | None:
             "obsidian_url": obsidian_url(n["id"], n["name"])}
 
 
-def search(ledger: Ledger, q: str, *, limit: int = 8, include_public: bool = True) -> dict:
+def search(ledger: Ledger, q: str, *, limit: int = 8, include_public: bool = True, public_limit: int | None = None) -> dict:
     """本地节点优先（名称/别名/定义 FTS，短词退 LIKE），再附公共目录候选（标 local_node 有无）。"""
     q = (q or "").strip()
     if not q:
@@ -54,7 +54,8 @@ def search(ledger: Ledger, q: str, *, limit: int = 8, include_public: bool = Tru
         b["definition_preview"] = defs[0]["text"][:_DEF_PREVIEW] if defs else ""
         b["path"] = classification_path(ledger, nid, depth=2)
         local.append(b)
-    public = WD.search_public(ledger, q, limit=limit) if include_public else []
+    # 公共候选默认最多 5 个（排序修好后 4~5 个够定位；每个约 60 token），要更多显式给 public_limit
+    public = WD.search_public(ledger, q, limit=public_limit or min(limit, 5)) if include_public else []
     local_qids = {b["qid"] for b in local if b["qid"]}
     public = [p for p in public if p["qid"] not in local_qids]
     return {"query": q, "local": local, "public": public}
@@ -139,7 +140,8 @@ def node_detail(ledger: Ledger, node_id: str, *, records_limit: int = 8) -> dict
     if row["qid"]:
         e = WD.entity(ledger, row["qid"])
         if e:
-            public = {"qid": e["qid"], "label": e["label"], "description": e["description"],
+            public = {"qid": e["qid"], "label": e["label"], "label_en": e["label_en"], "description": e["description"],
+                      "description_en": e["desc_en"], "aliases": WD.alias_sample(e, 6),
                       "neighbors": public_neighbors(ledger, row["qid"])}
         else:
             public = {"qid": row["qid"], "label": None, "description": None, "neighbors": [], "note": "公共目录里还没有这个编号（可 fetch）"}

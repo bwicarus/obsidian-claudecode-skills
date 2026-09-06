@@ -94,6 +94,8 @@ class KJService:
                         WD.fetch_entity(self.ledger, qid)
                     except Exception as e:  # 在线失败不阻塞登记
                         extra["public_fetch_error"] = str(e)[:120]
+                synced = R.sync_public_aliases(self.ledger, nid, qid, actor=self.actor)
+                extra["aliases_synced"] = len(synced.payload["aliases"]) if synced else 0
                 added = R.generate_auto_relations(self.ledger, nid, qid, actor=self.actor)
                 extra["auto_relations"] = len(added)
             return self._finish([nid], extra)
@@ -122,6 +124,7 @@ class KJService:
                     pass
             ev, retracted, added = R.bind_qid(self.ledger, node_id, qid, actor=self.actor)
             nid = ev.payload["id"]
+            synced = R.sync_public_aliases(self.ledger, nid, qid, actor=self.actor)
             touched = {nid}
             for e in added:
                 touched.update(e.node_ids)
@@ -130,6 +133,7 @@ class KJService:
             e = WD.entity(self.ledger, qid)
             return self._finish(sorted(touched), {"node_id": nid, "qid": qid, "prev": ev.payload.get("prev"),
                                                   "retracted_auto_relations": len(retracted), "auto_relations": len(added),
+                                                  "aliases_synced": len(synced.payload["aliases"]) if synced else 0,
                                                   "public": {"label": e["label"], "description": e["description"]} if e else None})
         return self._run(go)
 
@@ -287,8 +291,9 @@ class KJService:
         return self._run(go)
 
     # ── 查询 ──────────────────────────────────────────────────────────────
-    def search(self, q: str, *, limit: int = 8, online: bool = False, include_public: bool = True) -> dict:
-        res = Q.search(self.ledger, q, limit=limit, include_public=include_public)
+    def search(self, q: str, *, limit: int = 8, online: bool = False, include_public: bool = True,
+               public_limit: int | None = None) -> dict:
+        res = Q.search(self.ledger, q, limit=limit, include_public=include_public, public_limit=public_limit)
         res["ok"] = True
         if online and not res["local"]:
             try:
