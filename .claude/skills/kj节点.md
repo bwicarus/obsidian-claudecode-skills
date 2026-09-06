@@ -27,6 +27,8 @@ python scripts/kj/cli.py register --json '{"type":"record","node_id":"kj:…","k
 **入库（读书 / 制卡 / 记笔记 触发）**
 1. `search` 定位：有本地节点 → 用它；只有公共候选 → `node-create --qid Q… --fetch`；都没有 → 按原文与语境新建（`node-create`）。
 2. 登记内容：定义用 `definition`（必带 source；同语境已有定义会先返回旧文，比较后带 `--decision keep|supersede`）；
+   带 `--uses A,B` 申报**看懂它必须先会**的节点（编号或名称），程序以定义原句为依据登 prereq、查环、查冗余（传递可得的直连边报 `redundant` 不加）；
+   返回的 `also_mentioned` 是定义里出现但没申报的节点名，逐条确认是漏了还是无关。前置只来自书里的句子，不从 Wikidata、阅读顺序、词频推；
    学习过程用 `record`（每次单独追加，不查重；不知道发生时间就不填 `--at`）。
 3. 顺手登记依赖：`relation FROM TO prereq --evidence "原文…"`；成环会被拒绝并返回路径，按提示处理。
 4. 制卡：阅读器路径 `reader_anki_draft` / 侧栏 `make_anki` 都**必带 nodeIds / node_ids**（已有节点沿用 → 没有就 search → 库里没有才建）；

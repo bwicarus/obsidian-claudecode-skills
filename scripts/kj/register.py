@@ -12,7 +12,7 @@ import time
 from typing import Any
 
 from . import ids
-from .compute import RESULT_KINDS, prereq_cycle_path
+from .compute import RESULT_KINDS, prereq_cycle_path, prereq_path
 from .store import Event, Ledger
 from . import wikidata as WD
 
@@ -255,6 +255,90 @@ def add_definition(ledger: Ledger, node_id: str, *, text: str, source: Any, cont
     return ledger.append("definition.add", payload, node_ids=[node_id], actor=actor, source=src)
 
 
+def resolve_node_ref(ledger: Ledger, ref: str) -> tuple[str | None, list[dict]]:
+    """把编号或名称/别名解析成活跃节点 id。返回 (id 或 None, 候选)；候选多于一个时 id 为 None。"""
+    s = (ref or "").strip()
+    if not s:
+        return None, []
+    if ids.is_node_id(s):
+        row = ledger.resolve(s)
+        return (row["id"], []) if row is not None else (None, [])
+    rows = ledger.db.execute(
+        "SELECT DISTINCT n.id, n.name FROM nodes n LEFT JOIN node_aliases a ON a.node_id=n.id"
+        " WHERE n.status='active' AND (lower(n.name)=lower(?) OR lower(a.alias)=lower(?))", (s, s)).fetchall()
+    if len(rows) == 1:
+        return rows[0]["id"], []
+    return None, [{"id": r["id"], "name": r["name"]} for r in rows]
+
+
+_LATIN_TERM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .'\-]*$")
+
+
+def mentioned_nodes(ledger: Ledger, text: str, *, exclude: set[str] | frozenset[str] = frozenset(), limit: int = 10) -> list[dict]:
+    """字串匹配：文本里出现了哪些已有节点的名称/别名。纯机械，只当防漏清单，不是判断。
+    拉丁字母词整词匹配、不分大小写；中日文按子串；单字名不匹配（"群"会在"群组"里误命中）。"""
+    tl = (text or "").lower()
+    if not tl.strip():
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    rows = ledger.db.execute(
+        "SELECT n.id AS id, n.name AS name, n.name AS term FROM nodes n WHERE n.status='active'"
+        " UNION ALL SELECT n.id, n.name, a.alias FROM node_aliases a JOIN nodes n ON n.id=a.node_id WHERE n.status='active'").fetchall()
+    for r in rows:
+        nid, term = r["id"], (r["term"] or "").strip()
+        if nid in exclude or nid in seen or len(term) < 2:
+            continue
+        if _LATIN_TERM_RE.match(term):
+            hit = re.search(r"(?<![A-Za-z0-9])" + re.escape(term.lower()) + r"(?![A-Za-z0-9])", tl) is not None
+        else:
+            hit = term.lower() in tl
+        if hit:
+            seen.add(nid)
+            out.append({"node_id": nid, "name": r["name"], "matched": term})
+            if len(out) >= limit:
+                break
+    return out
+
+
+def attach_definition_uses(ledger: Ledger, node_id: str, *, definition_text: str, source: Any, uses: Any, actor: str = "") -> dict:
+    """定义申报的依赖 → 关系（依据 = 定义原句）。uses 每项是编号或名称/别名，或 {node, type: prereq|uses}（默认 prereq）。
+    程序只做：解析、查环、查冗余、记账；"提到"是否等于"要先会"由申报方判断。
+    另把定义里出现、但没申报的节点名列成 also_mentioned 防漏。"""
+    node_id = _node(ledger, node_id)
+    evidence = (definition_text or "").strip()[:300]
+    rep: dict[str, list] = {"prereqs_added": [], "relations_added": [], "existing": [], "redundant": [], "rejected": [],
+                            "unresolved_uses": [], "ambiguous_uses": []}
+    declared: set[str] = {node_id}
+    for item in uses or []:
+        if isinstance(item, dict):
+            ref = str(item.get("node") or item.get("id") or item.get("name") or "")
+            rtype = str(item.get("type") or "prereq").strip().lower()
+        else:
+            ref, rtype = str(item), "prereq"
+        rid, cands = resolve_node_ref(ledger, ref)
+        if rid is None:
+            if cands:
+                rep["ambiguous_uses"].append({"ref": ref, "candidates": cands})
+            else:
+                rep["unresolved_uses"].append(ref)
+            continue
+        if rid == node_id:
+            continue
+        declared.add(rid)
+        try:
+            ev = add_relation(ledger, from_id=rid, to_id=node_id, type=rtype, evidence=evidence, source=source, actor=actor, origin="definition")
+            entry = {"relation_id": ev.payload["id"], "from": rid, "to": node_id, "type": rtype}
+            (rep["prereqs_added"] if rtype == "prereq" else rep["relations_added"]).append(entry)
+        except RegisterError as e:
+            info = {"ref": ref, "from": rid, "type": rtype, "code": e.code}
+            info.update({k: v for k, v in e.extra.items() if k in ("path", "path_names", "edges", "relation_id")})
+            bucket = {"relation_exists": "existing", "prereq_redundant": "redundant"}.get(e.code, "rejected")
+            rep[bucket].append(info)
+    rep["also_mentioned"] = mentioned_nodes(ledger, evidence, exclude=declared)
+    return rep
+
+
 def _context_from_source(src: dict | None) -> str:
     if not src:
         return ""
@@ -305,9 +389,37 @@ def merge_records(ledger: Ledger, node_id: str, *, record_ids: list[str], text: 
 
 
 # ── 关系 ────────────────────────────────────────────────────────────────────
+def _names(ledger: Ledger, path: list[str]) -> list[str]:
+    out = []
+    for nid in path:
+        n = ledger.node(nid)
+        out.append(n["name"] if n else nid)
+    return out
+
+
+def _edges_with_sources(ledger: Ledger, path: list[str]) -> list[dict]:
+    """路径上每条前置边：编号、依据、哪本书哪页。不同书教学顺序打架成环时，一眼看出该撤哪条。"""
+    out = []
+    for x, y in zip(path, path[1:]):
+        row = ledger.db.execute("SELECT id, evidence, source_json FROM relations WHERE from_id=? AND to_id=? AND type='prereq' AND status='active'",
+                                (x, y)).fetchone()
+        if row is None:
+            continue
+        try:
+            src = json.loads(row["source_json"]) if row["source_json"] else {}
+        except Exception:
+            src = {}
+        if not isinstance(src, dict):
+            src = {}
+        out.append({"relation_id": row["id"], "from": x, "to": y, "evidence": (row["evidence"] or "")[:120],
+                    "source": {k: src[k] for k in ("kind", "book", "page", "quote") if k in src}})
+    return out
+
+
 def add_relation(ledger: Ledger, *, from_id: str, to_id: str, type: str, evidence: str = "", source: Any = None,
-                 actor: str = "", origin: str = "manual") -> Event:
-    """from →(type)→ to。prereq 语义：from 是 to 的前置。成环 → prereq_cycle（返回路径）。"""
+                 actor: str = "", origin: str = "manual", allow_redundant: bool = False) -> Event:
+    """from →(type)→ to。prereq 语义：from 是 to 的前置。成环 → prereq_cycle（返回环路与各边来源）；
+    沿已有前置链已可达 → prereq_redundant（直连边多余，确有必要传 allow_redundant）。"""
     a, b = _node(ledger, from_id, "from"), _node(ledger, to_id, "to")
     if a == b:
         raise RegisterError("self_relation", "关系两端不能是同一节点")
@@ -319,10 +431,16 @@ def add_relation(ledger: Ledger, *, from_id: str, to_id: str, type: str, evidenc
             raise RegisterError("missing_evidence", "教学前置必须带原文依据 evidence（哪句话说明学 to 要先会 from）")
         path = prereq_cycle_path(ledger, a, b)
         if path:
-            raise RegisterError("prereq_cycle", "加入后前置关系成环，已拒绝", path=path)
+            raise RegisterError("prereq_cycle", "加入后前置关系成环，已拒绝", path=path, path_names=_names(ledger, path),
+                                edges=_edges_with_sources(ledger, path))
     dup = ledger.db.execute("SELECT id FROM relations WHERE from_id=? AND to_id=? AND type=? AND status='active'", (a, b, rtype)).fetchone()
     if dup:
         raise RegisterError("relation_exists", "同方向同类型关系已存在（要换依据请先撤回旧的）", relation_id=dup["id"])
+    if rtype == "prereq" and not allow_redundant:
+        rp = prereq_path(ledger, a, b)
+        if rp:
+            raise RegisterError("prereq_redundant", "沿已有前置链已能从 from 到 to，这条直连边多余，未加；确有必要就 allow_redundant=true",
+                                path=rp, path_names=_names(ledger, rp), edges=_edges_with_sources(ledger, rp))
     src = normalize_source(source)
     rid = ids.mint("rel")
     return ledger.append("relation.add", {"id": rid, "from": a, "to": b, "type": rtype, "evidence": (evidence or "").strip(),

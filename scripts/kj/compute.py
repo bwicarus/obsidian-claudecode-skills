@@ -231,3 +231,27 @@ def prereq_cycle_path(ledger: Ledger, from_id: str, to_id: str, *, exclude_relat
                 return path + [to_id]
             dq.append(nxt)
     return None
+
+
+def prereq_path(ledger: Ledger, from_id: str, to_id: str) -> list[str] | None:
+    """沿已有前置链能否从 from 走到 to（至少经过一个中间节点）。有则返回路径 [from, …, to]。
+    用途：判断新加的直连边 from→to 是否多余 —— 冗余边越多，节点被"前置薄弱"锁住越没道理。"""
+    if from_id == to_id:
+        return None
+    parent: dict[str, str | None] = {from_id: None}
+    dq = deque([from_id])
+    while dq:
+        cur = dq.popleft()
+        for r in ledger.db.execute("SELECT to_id FROM relations WHERE from_id=? AND type='prereq' AND status='active'", (cur,)):
+            nxt = r[0]
+            if nxt in parent:
+                continue
+            parent[nxt] = cur
+            if nxt == to_id:
+                path = [nxt]
+                while parent[path[-1]] is not None:
+                    path.append(parent[path[-1]])  # type: ignore[arg-type]
+                path.reverse()
+                return path if len(path) > 2 else None
+            dq.append(nxt)
+    return None

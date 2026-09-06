@@ -59,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--source"); s.add_argument("--fetch", action="store_true", help="绑了 qid 时在线补公共目录")
     s = sp.add_parser("definition"); s.add_argument("node_id"); s.add_argument("--text", required=True); s.add_argument("--source", required=True)
     s.add_argument("--context", default=""); s.add_argument("--decision", default=""); s.add_argument("--supersedes", default="")
+    s.add_argument("--uses", default="", help="看懂这条定义必须先会的节点：编号或名称，逗号分隔；程序以定义原句为依据登 prereq")
     s = sp.add_parser("record"); s.add_argument("node_id"); s.add_argument("--text", required=True); s.add_argument("--kind", default="note")
     s.add_argument("--source"); s.add_argument("--at", help="发生时间 ISO/epoch；不知道就别填")
     s = sp.add_parser("merge-records"); s.add_argument("node_id"); s.add_argument("--ids", required=True, help="逗号分隔")
@@ -108,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         elif c == "node-create":
             r = svc.create_node(name=a.name, kind=a.kind, aliases=a.alias, qid=a.qid, summary=a.summary, source=_json_arg(a.source), fetch_public=a.fetch)
         elif c == "definition":
-            r = svc.add_definition(a.node_id, text=a.text, source=_json_arg(a.source), context_key=a.context, decision=a.decision, supersedes=a.supersedes)
+            r = svc.add_definition(a.node_id, text=a.text, source=_json_arg(a.source), context_key=a.context, decision=a.decision, supersedes=a.supersedes,
+                                   uses=[x.strip() for x in (a.uses or "").split(",") if x.strip()])
         elif c == "record":
             r = svc.add_record(a.node_id, text=a.text, kind=a.kind, source=_json_arg(a.source), occurred_at=a.at)
         elif c == "merge-records":

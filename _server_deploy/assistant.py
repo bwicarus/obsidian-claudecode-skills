@@ -6362,7 +6362,9 @@ _KJ_TOOLS = {
                 "next_hint（建议动作代码）。学习排查第 1 步就是它。args {node_id}。", _t_kj_node),
     "kj_browse": ("按分类一层层浏览节点（渐进式披露，不要一次读全部）。不给 parent=根；给 parent=下级。args {parent?}。", _t_kj_browse),
     "kj_register": ("★统一登记（程序编号/校验/保存，你只负责理解与匹配）。args 必带 type："
-                    "node{name,kind,aliases,qid?,summary?} / definition{node_id,text,source,context_key?,decision?,supersedes?}"
+                    "node{name,kind,aliases,qid?,summary?} / definition{node_id,text,source,context_key?,decision?,supersedes?,"
+                    "uses?:[看懂这条定义必须先会的节点（编号或名称），程序以定义原句为依据登 prereq，查环、查冗余；只是出现不构成门槛的写 {node,type:'uses'}；"
+                    "返回 also_mentioned=定义里出现但没申报的节点名，逐条确认是漏了还是无关]}"
                     "（已有同语境定义会先返回旧文让你比较）/ record{node_id,kind,text,source,occurred_at?}（每次单独追加，不查重）/ "
                     "merge_records{node_id,record_ids,text,occurrences}（你完整读过记录后顺手归并）/ "
                     "card{node_ids,anki_note_id,front,back} 或 card_make{node_ids,front,back}（制卡必须有节点）/ "

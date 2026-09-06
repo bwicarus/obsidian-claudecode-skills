@@ -99,6 +99,35 @@ class LedgerTests(KJCase):
         self.assertEqual(self.svc.ledger.prereqs_of(a), [])
         self.assertEqual(len(self.svc.ledger.relations(a, status="retracted")), 2)
 
+    def test_definition_uses_become_prereqs_with_cycle_and_redundancy_checks(self):
+        """定义申报 uses → 以定义原句为依据登 prereq；名称/别名可解析；传递可得的直连边报 redundant 不加；
+        成环拒绝并带各边书页来源；未申报但出现的名字列 also_mentioned；relation 直登同样查冗余，可 allow_redundant。"""
+        V = self.svc.create_node(name="向量空间", aliases=["vector space"])["node_id"]
+        L = self.svc.create_node(name="线性映射", aliases=["linear map", "线性变换"])["node_id"]
+        E = self.svc.create_node(name="特征值")["node_id"]
+        S = self.svc.create_node(name="标量")["node_id"]
+        r = self.svc.add_definition(L, text="从 V 到 W 的线性映射是满足加性与齐性的函数 T: V→W", source={"kind": "pdf", "book": "LADR", "page": 52},
+                                    uses=["vector space"])
+        self.assertTrue(r["ok"], r)
+        self.assertEqual([(x["from"], x["to"]) for x in r["prereqs_added"]], [(V, L)])
+        rel = self.svc.ledger.relations(L)[0]
+        self.assertEqual((rel["type"], rel["origin"], rel["from_id"], rel["source"]["page"]), ("prereq", "definition", V, 52))
+        self.assertIn("线性映射是满足", rel["evidence"])
+        r = self.svc.add_definition(E, text="设 T∈L(V)，标量 λ 称为 T 的特征值，若存在 v≠0 使 Tv=λv", source={"kind": "pdf", "book": "LADR", "page": 134},
+                                    uses=["线性变换", "向量空间", "不存在的概念"])
+        self.assertEqual([x["from"] for x in r["prereqs_added"]], [L])
+        self.assertEqual((r["redundant"][0]["from"], r["redundant"][0]["path"]), (V, [V, L, E]))   # V→L→E 已通，V→E 直连多余
+        self.assertEqual(r["unresolved_uses"], ["不存在的概念"])
+        self.assertEqual([m["node_id"] for m in r["also_mentioned"]], [S])                          # 定义里出现"标量"但没申报
+        r = self.svc.add_definition(V, text="域 F 上的向量空间是带加法与标量乘法的集合", source={"kind": "pdf", "book": "另一本", "page": 3},
+                                    uses=[E, {"node": "标量", "type": "uses"}])
+        rej = r["rejected"][0]
+        self.assertEqual((rej["code"], rej["path"][0] == rej["path"][-1]), ("prereq_cycle", True))
+        self.assertEqual({e["source"]["book"] for e in rej["edges"]}, {"LADR"})                    # 环上每条边带书页来源
+        self.assertEqual([(x["from"], x["type"]) for x in r["relations_added"]], [(S, "uses")])     # 非门槛依赖登 uses，不进 readiness
+        self.assertEqual(self.svc.add_relation(from_id=V, to_id=E, type="prereq", evidence="x")["code"], "prereq_redundant")
+        self.assertTrue(self.svc.add_relation(from_id=V, to_id=E, type="prereq", evidence="x", allow_redundant=True)["ok"])
+
     def test_rebuild_replays_to_identical_state(self):
         a, b = self.node("A"), self.node("B")
         self.svc.add_relation(from_id=b, to_id=a, type="prereq", evidence="e")

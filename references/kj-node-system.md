@@ -178,6 +178,26 @@ relation / relation_retract / relation_change / card / card_make / quiz / quiz_r
 **已知缝**：桥只校验编号格式，不校验存在（桥没有 KJ 账本的访问权）；编号不存在的绑定在吸收时落 unresolved 文件。
 **滚动升级窗口**：新桥（带 nodeIds）× 旧 App 会在 App 入站闸被拒；新 App × 旧桥出的草稿没有 nodeIds、确认时被 App 挡下。两端要一起升。
 
+### 7.2 前置关系怎么产生（2026-09-07 定稿）
+
+Wikidata 没有教学前置（§6 量过：能当挂点当不了网），前置只有一个来源：**书里"定义/陈述 B 时用到了 A"的那句话**。分工：
+语义判断归 AI（定义原文就在它眼前的那一刻），要依据、查环、查冗余、记账归程序。
+
+- `definition` 接受 `uses`（编号或名称/别名，或 `{node, type: prereq|uses}`，默认 prereq）：程序解析到节点（`resolve_node_ref`，名称多义返回
+  `ambiguous_uses`，找不到返回 `unresolved_uses`，**不自动建节点**），以定义原句（截 300 字）为 evidence、定义的书页为 source、`origin=definition`
+  登 prereq；只是出现不构成门槛的登 `uses`，不进 readiness。
+- **传递冗余**：`prereq_path`（`compute.py`）沿已有前置链能从 A 走到 B 时，直连 A→B 报 `prereq_redundant` 不加（`definition` 里进 `redundant` 桶，
+  `relation` 直登返回该 code；确有必要 `allow_redundant=true`）。冗余边越多，节点被"前置薄弱"锁住越没道理。
+- **成环**：`prereq_cycle` 除环路外带 `path_names` 与 `edges`（每条边的 relation_id / 依据 / 书页来源）——两本书教学顺序打架时一眼看出该撤哪条。
+- **防漏清单**：`also_mentioned` = 定义原文里出现、但没申报的已有节点名/别名（`mentioned_nodes`：拉丁词整词、中日文子串、单字不匹配）。
+  纯字串匹配，只当清单，不当判断。
+- 不产生前置的：Wikidata 关系、阅读顺序、词频、卡片绑定、答题结果。
+
+**下一步（未做）：按书全量通读。** 用户 2026-09-07 拍板：不做定义块模式匹配/排版/索引比对那套（不通用、复杂、会漏），改为 AI 通读整本书，
+一次产出：节点+定义（定理/引理也建节点）、前置（uses）、公共编号绑定、记号与叫法作别名、书内位置与习题清单（记录，供出题当真题库）、
+书里点明的坑（记录）、**每页与每章的内容标注**（页：干什么/出现哪些节点/关键记号；章：摘要/概念顺序/依赖前面哪些概念；存书侧边车并喂目录系统）。
+不批量建卡。成本：一章 15~30 页输入 1~2.5 万 token，一本 300 页教材约 25~30 万，一次性，走凌晨闲时额度；按章断点续跑、重跑不重复。
+
 ## 8. 维护
 
 - `rebuild`：清空投影 → 重放事件 → 重算全部 → 重渲染全部页。任何时候都能从 events 表还原。

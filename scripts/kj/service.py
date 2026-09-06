@@ -144,12 +144,19 @@ class KJService:
         return self._run(go)
 
     # ── 定义 / 记录 ───────────────────────────────────────────────────────
-    def add_definition(self, node_id: str, *, text: str, source: Any, context_key: str = "", decision: str = "", supersedes: str = "") -> dict:
+    def add_definition(self, node_id: str, *, text: str, source: Any, context_key: str = "", decision: str = "", supersedes: str = "",
+                       uses: Any = None) -> dict:
         def go():
             ev = R.add_definition(self.ledger, node_id, text=text, source=source, context_key=context_key, decision=decision,
                                   supersedes=supersedes, actor=self.actor)
-            return self._finish([ev.payload["node_id"]], {"definition_id": ev.payload["id"], "node_id": ev.payload["node_id"],
-                                                          "context_key": ev.payload["context_key"]})
+            nid = ev.payload["node_id"]
+            extra: dict[str, Any] = {"definition_id": ev.payload["id"], "node_id": nid, "context_key": ev.payload["context_key"]}
+            # 申报的依赖以定义原句为依据登前置；没申报也扫一遍定义里出现的节点名（also_mentioned）防漏
+            rep = R.attach_definition_uses(self.ledger, nid, definition_text=ev.payload["text"], source=ev.payload.get("source"),
+                                           uses=uses or [], actor=self.actor)
+            extra.update(rep)
+            touched = {nid} | {e["from"] for e in rep["prereqs_added"] + rep["relations_added"]}
+            return self._finish(sorted(touched), extra)
         return self._run(go)
 
     def add_record(self, node_id: str, *, text: str, kind: str = "note", source: Any = None, occurred_at: Any = None,
@@ -166,9 +173,11 @@ class KJService:
         return self._run(go)
 
     # ── 关系 ──────────────────────────────────────────────────────────────
-    def add_relation(self, *, from_id: str, to_id: str, type: str, evidence: str = "", source: Any = None) -> dict:
+    def add_relation(self, *, from_id: str, to_id: str, type: str, evidence: str = "", source: Any = None,
+                     allow_redundant: bool = False) -> dict:
         def go():
-            ev = R.add_relation(self.ledger, from_id=from_id, to_id=to_id, type=type, evidence=evidence, source=source, actor=self.actor)
+            ev = R.add_relation(self.ledger, from_id=from_id, to_id=to_id, type=type, evidence=evidence, source=source, actor=self.actor,
+                                allow_redundant=allow_redundant)
             return self._finish([ev.payload["from"], ev.payload["to"]], {"relation_id": ev.payload["id"], "from": ev.payload["from"],
                                                                        "to": ev.payload["to"], "type": ev.payload["type"]})
         return self._run(go)
@@ -380,7 +389,7 @@ class KJService:
                 return self.unbind_qid(p.get("node_id", ""))
             if t == "definition":
                 return self.add_definition(p.get("node_id", ""), text=p.get("text", ""), source=p.get("source"), context_key=p.get("context_key", ""),
-                                           decision=p.get("decision", ""), supersedes=p.get("supersedes", ""))
+                                           decision=p.get("decision", ""), supersedes=p.get("supersedes", ""), uses=p.get("uses"))
             if t == "record":
                 return self.add_record(p.get("node_id", ""), text=p.get("text", ""), kind=p.get("kind", "note"), source=p.get("source"),
                                        occurred_at=p.get("occurred_at"), dedupe_key=p.get("dedupe_key"))
@@ -389,7 +398,8 @@ class KJService:
                                           occurrences=p.get("occurrences"), earliest=p.get("earliest"))
             if t == "relation":
                 return self.add_relation(from_id=p.get("from", p.get("from_id", "")), to_id=p.get("to", p.get("to_id", "")),
-                                         type=p.get("relation_type", p.get("rtype", "")), evidence=p.get("evidence", ""), source=p.get("source"))
+                                         type=p.get("relation_type", p.get("rtype", "")), evidence=p.get("evidence", ""), source=p.get("source"),
+                                         allow_redundant=bool(p.get("allow_redundant")))
             if t == "relation_retract":
                 return self.retract_relation(p.get("relation_id", ""), reason=p.get("reason", ""))
             if t == "relation_change":
