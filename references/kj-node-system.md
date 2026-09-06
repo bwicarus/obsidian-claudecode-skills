@@ -100,6 +100,9 @@ relation / relation_retract / relation_change / card / card_make / quiz / quiz_r
 - 属性映射（`wikidata.PROP_MAP`）：P279 subclass_of、P31 instance_of、P361/P527 part_of、P1542/P828 causes、P737 influenced_by、
   P2283 uses、P1269 facet_of、P1889 different_from、P2579/P2578 studied_by/studies、P1855 example、P3095 practiced_by。**没有 prereq**。
 - 两端都绑了编号的公共关系 → 本地关系 `origin=wikidata`；换绑/解绑撤回旧的、生成新的；分类路径 `path_up` 只作定位线索。
+- **Token 实测**（2026-09-06，`scripts/kj/measure_tokens.py`，tiktoken o200k_base，在线取数）：默认路径"直搜 + 读节点"约 900 token
+  （node 只取必需字段约 560）；最差情况从"结构"逐层下钻到"向量空间"5 层、每层 20 候选合计 1610 token，累计上下文约 4375。
+  高分支层（代数结构 93 个直接子类、向量空间 32 个）必然截断，分页策略仍未定案。SPARQL 端点要求带联系方式的 User-Agent。
 
 ## 7. Anki
 
