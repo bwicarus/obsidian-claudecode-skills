@@ -70,6 +70,23 @@ class ExtractTests(unittest.TestCase):
         with gzip.open(out, "rt", encoding="utf-8") as fh:
             kept_rows = [json.loads(l) for l in fh if l.strip()]
         self.assertTrue(all(r["labels"].get("zh") for r in kept_rows))
+        # 并行按块模式：同一份截断文件，结果应与顺序模式一致（最后半块解不开 → failed_blocks ≥ 1，不抛）
+        par = X.extract_parallel(dump, self.tmp / "out-par", workers=2, keep_langs=("zh",), group_blocks=3, tag="par")
+        # 顺序模式会把截断的最后一块里已解出的半截也吐出来，并行模式整块丢弃 → 并行 ≤ 顺序，且是其前缀（顺序完全一致）
+        self.assertGreater(par["items"], 100)
+        self.assertLessEqual(par["items"], stats["items"])
+        self.assertGreaterEqual(par["failed_blocks"], 1)
+        self.assertGreater(par["blocks"], 3)
+        with gzip.open(par["out"], "rt", encoding="utf-8") as fh:
+            par_ids = [json.loads(l)["id"] for l in fh if l.strip()]
+        seq_ids = [r["id"] for r in kept_rows]
+        self.assertEqual(par_ids, seq_ids[:len(par_ids)])
+        self.assertGreater(len(par_ids), 50)
+        # 完整文件：并行 == 全量 3000 条，一个块都不该失败
+        full = self.tmp / "full.json.bz2"
+        full.write_bytes(data)
+        st_full = X.extract_parallel(full, self.tmp / "out-full", workers=2, keep_langs=("zh",), group_blocks=5)
+        self.assertEqual((st_full["items"], st_full["failed_blocks"], st_full["streams"]), (3000, 0, 1))
         svc = KJService(self.tmp / "kj.db", render=False)
         try:
             res = svc.wikidata_import(str(out))

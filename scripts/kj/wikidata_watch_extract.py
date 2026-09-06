@@ -38,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--keep", default="zh,ja")
     ap.add_argument("--wait-hours", type=float, default=24)
     ap.add_argument("--poll-seconds", type=int, default=30)
+    ap.add_argument("--sequential", action="store_true", help="单线程顺序解压（默认按 bz2 块并行）")
+    ap.add_argument("--group-blocks", type=int, default=64)
     a = ap.parse_args(argv)
     dump = Path(a.dump)
     out = Path(a.out) if a.out else Path(os.environ.get("CLAUDE_PROJECT") or Path(__file__).resolve().parents[2]) / "state" / "wikidata"
@@ -71,7 +73,11 @@ def main(argv: list[str] | None = None) -> int:
     logline(f"file ready size={last_size}; extracting → {out}")
     _status(st, phase="extracting", dump=str(dump), size=last_size, started=time.strftime("%Y-%m-%d %H:%M:%S"))
     try:
-        stats = X.extract(dump, out, workers=a.workers, keep_langs=tuple(x for x in a.keep.split(",") if x))
+        keep = tuple(x for x in a.keep.split(",") if x)
+        if a.sequential:
+            stats = X.extract(dump, out, workers=a.workers, keep_langs=keep)
+        else:
+            stats = X.extract_parallel(dump, out, workers=a.workers, keep_langs=keep, group_blocks=a.group_blocks)
     except Exception:
         _status(st, phase="error", dump=str(dump), error=traceback.format_exc()[-2000:])
         logline("error:\n" + traceback.format_exc())
