@@ -101,6 +101,8 @@ WEBAPP_SOURCE_FILES = (
     "kg_runtime.py",
     "control.py",
     "skilltree.py",
+    # KJ 知识节点 HTTP 适配层(app.py 顶层 import 它;业务在 scripts/kj,Windows 本机运行)
+    "kj_nodes.py",
     # 复习卡改进的 app-server 多轮 runner + 签名草稿存储。领域 prompt/
     # 校验本体从下方唯一的 _client/core 源映射为同名生产模块。
     "card_improvement_runtime.py",

@@ -196,7 +196,8 @@ node 契约全量 + 拼合/vendor 一致 + 语法 + 网络审计，几分钟内�
 | `/claude-quota` | 查 Claude Code 实时额度（5h/7d/Sonnet 使用率 + extra credits），零 token 消耗 |
 | `/google-apis` | 自包含参考：只用 HTTP（`requests`）+ 一把 key 直接调 Google AI/Cloud API（OCR/STT/Gemini/翻译/YouTube）；含两把 key（`AIzaSy*` GCP vs `AQ.Ab*` Gemini）别混用等踩坑 |
 | 截图问答 | （非斜杠命令，session 入口指南）QA Browser 系统怎么工作 / 如何改，指向 `references/qa-browser-features.md` |
-| 技能树 | （非斜杠命令，session 入口指南）技能树 / 知识图谱（KG）怎么工作 / 如何改，指向 `references/skill-tree-system.md` |
+| 技能树 | （非斜杠命令，session 入口指南）技能树 / 知识图谱（KG）怎么工作 / 如何改，指向 `references/skill-tree-system.md`。⚠ 旧书图 2026-09-06 起**封存**（只读不重算），新知识点一律走下面的 KJ |
+| KJ节点 | （非斜杠命令，session 入口指南）**KJ 知识节点系统**：检索 / 登记定义·记录·关系·卡片 / 出题判分 / 自评，程序统一算掌握度与准备度。入口 `.claude/skills/kj节点.md`，规格 `references/kj-node-system.md`，代码 `scripts/kj/` + `_server_deploy/kj_nodes.py`，账本 `state/kj/kj.db`，Markdown `C:\obsidian\KJ\` |
 
 ## 关键文件
 
@@ -206,6 +207,7 @@ node 契约全量 + 拼合/vendor 一致 + 语法 + 网络审计，几分钟内�
 - `index/{科目}/{分支}.md` — 分支索引（条目超 30 条时自动拆分）
 
 **参考规范**（各 skill 按需加载）
+- `references/kj-node-system.md` — **KJ 知识节点系统**（2026-09-06 首期）：事件账本 + 可重建投影、掌握度折叠（近因加权/先验/自评一次性/更正重算）、准备度（weak/unknown 前置分开）、关系随时登记与改变（prereq 必带原文依据、成环拒绝）、Wikidata 公共目录与自动关系、Anki 绑卡与快照、Markdown 页布局、CLI/HTTP/助手工具三套接口、未做清单。设计讨论原件在 Obsidian `AI助手专用/已有项目/KJ知识点系统设计讨论.md`
 - `references/index-format.md` / `vault-structure.md` / `obsidian-syntax.md`
 - `references/anki-selection-rules.md` / `anki-card-format.md`
 - `references/pdf-annotation-format.md`

@@ -193,6 +193,9 @@ class WebTranslateSafetyBoundaryTest(unittest.TestCase):
         import html_reader
 
         saved = sys.modules.pop("web_translate_protocol", None)
+        # 只看**本次调用**新增了什么：别的测试模块（如 tests/test_kj_*）会合法地把 scripts 放进 sys.path，
+        # 全局断言会随执行顺序翻车（2026-09-06 全量跑一次就撞上）。
+        path_before = list(sys.path)
         try:
             # 本测试模块把 CLAUDE_PROJECT 指到临时目录；兜底找的是真实仓库里的源文件。
             with patch.object(html_reader, "_CLAUDE_DIR", ROOT):
@@ -208,7 +211,8 @@ class WebTranslateSafetyBoundaryTest(unittest.TestCase):
             sys.modules.pop("web_translate_protocol", None)
             if saved is not None:
                 sys.modules["web_translate_protocol"] = saved
-        self.assertNotIn("scripts", [Path(p).name for p in sys.path], "兜底不许把 scripts 目录塞进 sys.path")
+        added = [p for p in sys.path if p not in path_before]
+        self.assertNotIn("scripts", [Path(p).name for p in added], "兜底不许把 scripts 目录塞进 sys.path")
 
     def test_codex_profile_is_explicitly_downgraded_before_generation(self) -> None:
         with patch.object(assistant, "_resolve", return_value={

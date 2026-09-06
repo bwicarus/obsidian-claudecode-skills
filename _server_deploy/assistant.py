@@ -6235,6 +6235,119 @@ def _t_userpage_delete(args, ctx):
     }
 
 
+# ── KJ 知识节点（2026-09-06，业务在 scripts/kj；这里只是工具壳）──────────────
+_KJ_SVC = None
+
+
+def _kj_service():
+    """懒加载 KJService（账本 $CLAUDE_PROJECT/state/kj/kj.db，Markdown 到 $OBSIDIAN_VAULT/KJ）。"""
+    global _KJ_SVC
+    if _KJ_SVC is None:
+        import sys as _sys
+        sp = str(CLAUDE_DIR / "scripts")
+        if sp not in _sys.path:
+            _sys.path.insert(0, sp)
+        from kj.service import KJService
+        _KJ_SVC = KJService(actor="assistant")
+    return _KJ_SVC
+
+
+def _kj_call(ctx, fn):
+    svc = _kj_service()
+    svc.actor = "assistant:%s" % str((ctx or {}).get("_uid") or "")
+    try:
+        return fn(svc)
+    except Exception as e:  # 不让节点系统的异常掀翻助手回合
+        return {"ok": False, "error": "KJ 出错:%s" % str(e)[:200]}
+
+
+def _t_kj_search(args, ctx):
+    """找节点：本地优先（名称/别名/定义），再附公共目录候选。args {q, limit?, online?}。"""
+    q = str(args.get("q") or args.get("query") or "").strip()
+    if not q:
+        return {"error": "q 不能为空"}
+    return _kj_call(ctx, lambda s: s.search(q, limit=int(args.get("limit") or 8), online=bool(args.get("online"))))
+
+
+def _t_kj_node(args, ctx):
+    """读一个节点的全部交流所需：位置/前置/定义/记录摘要/卡/掌握/准备度/next_hint。args {node_id}。"""
+    nid = str(args.get("node_id") or args.get("id") or "").strip()
+    if not nid:
+        return {"error": "node_id 不能为空"}
+    return _kj_call(ctx, lambda s: s.node(nid, records_limit=int(args.get("records") or 8)))
+
+
+def _t_kj_browse(args, ctx):
+    """一层一层看分类：不给 parent = 根（按 kind 分组），给 parent = 它的下级。args {parent?}。"""
+    return _kj_call(ctx, lambda s: s.browse(str(args.get("parent") or "") or None))
+
+
+def _t_kj_register(args, ctx):
+    """统一登记：args 里带 type ∈ node/definition/record/merge_records/card/card_make/bind_qid/node_update/merge_node…（同 /kj/api/register）。"""
+    if not args.get("type"):
+        return {"error": "缺 type", "types": ["node", "definition", "record", "merge_records", "card", "card_make", "bind_qid", "node_update", "merge_node"]}
+    return _kj_call(ctx, lambda s: s.register(dict(args)))
+
+
+def _t_kj_relation(args, ctx):
+    """关系登记/撤回/改动：args {op:add|retract|change, from, to, relation_type, evidence, relation_id?, reverse?}。"""
+    op = str(args.get("op") or "add").lower()
+
+    def go(s):
+        if op == "retract":
+            return s.retract_relation(str(args.get("relation_id") or ""), reason=str(args.get("reason") or ""))
+        if op == "change":
+            return s.change_relation(str(args.get("relation_id") or ""), type=args.get("relation_type"), reverse=bool(args.get("reverse")),
+                                     evidence=str(args.get("evidence") or ""), source=args.get("source"), reason=str(args.get("reason") or ""))
+        return s.add_relation(from_id=str(args.get("from") or args.get("from_id") or ""), to_id=str(args.get("to") or args.get("to_id") or ""),
+                              type=str(args.get("relation_type") or args.get("rtype") or ""), evidence=str(args.get("evidence") or ""),
+                              source=args.get("source"))
+    return _kj_call(ctx, go)
+
+
+def _t_kj_quiz(args, ctx):
+    """出题登记：每题先绑节点。args {items:[{item_id?, question, answer?, node_ids:[...]}], target_node?, title?}。"""
+    return _kj_call(ctx, lambda s: s.register_quiz(items=list(args.get("items") or []), target_node=args.get("target_node"),
+                                                   title=str(args.get("title") or ""), source=args.get("source")))
+
+
+def _t_kj_quiz_result(args, ctx):
+    """逐题回传判分：args {quiz_id, results:[{item_id, result:correct|wrong|partial|unanswered|undetermined, note?}]}。返回结论+下一步。"""
+    return _kj_call(ctx, lambda s: s.submit_results(quiz_id=str(args.get("quiz_id") or ""), results=list(args.get("results") or []),
+                                                    occurred_at=args.get("occurred_at")))
+
+
+def _t_kj_self_assess(args, ctx):
+    """用户自评（只在用户明确说『这个我确定会了/不会』时调）：args {node_id, value:0~1, reason?}。"""
+    return _kj_call(ctx, lambda s: s.self_assess(str(args.get("node_id") or ""), value=args.get("value"), reason=str(args.get("reason") or "")))
+
+
+_KJ_TOOLS = {
+    "kj_search": ("★知识节点检索：找『这个概念/人物/方法在节点网里叫什么、有没有』。本地优先（名称/别名/定义），"
+                  "再附 Wikidata 公共候选（标 local_node 有无）。登记任何东西之前先用它定位；找不到再新建。"
+                  "args {q, limit?, online?:本地和公共目录都没有时再上网查}。", _t_kj_search),
+    "kj_node": ("读一个知识节点：分类位置、前置/后续、定义原文出处、记录摘要、卡片、掌握度、准备度、weak/unknown 前置、"
+                "next_hint（建议动作代码）。学习排查第 1 步就是它。args {node_id}。", _t_kj_node),
+    "kj_browse": ("按分类一层层浏览节点（渐进式披露，不要一次读全部）。不给 parent=根；给 parent=下级。args {parent?}。", _t_kj_browse),
+    "kj_register": ("★统一登记（程序编号/校验/保存，你只负责理解与匹配）。args 必带 type："
+                    "node{name,kind,aliases,qid?,summary?} / definition{node_id,text,source,context_key?,decision?,supersedes?}"
+                    "（已有同语境定义会先返回旧文让你比较）/ record{node_id,kind,text,source,occurred_at?}（每次单独追加，不查重）/ "
+                    "merge_records{node_id,record_ids,text,occurrences}（你完整读过记录后顺手归并）/ "
+                    "card{node_ids,anki_note_id,front,back} 或 card_make{node_ids,front,back}（制卡必须有节点）/ "
+                    "bind_qid{node_id,qid} / node_update / merge_node{node_id,into}。", _t_kj_register),
+    "kj_relation": ("关系随时登记与改变：add{from,to,relation_type,evidence}（prereq=from 是 to 的前置，**必须带原文依据**，成环会拒绝并返回路径）/ "
+                    "retract{relation_id,reason} / change{relation_id,relation_type?,reverse?,evidence?}。"
+                    "读书或扫书时顺手整理已有节点关系就用它。args {op, ...}。", _t_kj_relation),
+    "kj_quiz": ("出题登记：出题时就把每道题绑到检验的节点（不在批改后猜）。args {items:[{item_id?,question,answer?,node_ids}], target_node?, title?}。"
+                "返回 quiz_id，用户作答后用 kj_quiz_result 逐题回传。", _t_kj_quiz),
+    "kj_quiz_result": ("逐题回传判分（correct/wrong/partial/unanswered/undetermined，同题再传=更正）。程序自动更新掌握度与准备度，"
+                       "返回 conclusion（prereq_weak/prereqs_ok_target_stuck/all_passed/mixed）+ next + per_node，照着接下去交流。"
+                       "args {quiz_id, results:[{item_id,result,note?}]}。", _t_kj_quiz_result),
+    "kj_self_assess": ("用户自评『我确定会了/不会』：把掌握度在此刻设为该值**一次**，之后证据照常推动（不是常驻覆盖）。"
+                       "只在用户明确表态时调。args {node_id, value:0~1, reason?}。", _t_kj_self_assess),
+}
+
+
 TOOLS = {
     "read_page": ("读当前页(或指定页)正文。args {page?}", _t_read_page),
     "userpage_list": ("列出这本书里用户自建的插入页(标题/位置标签/正文预览)。"
@@ -6418,6 +6531,7 @@ TOOLS = {
                         "调完这个工具你的任务就结束了 —— **循环和等待由系统负责,你不要再管**,"
                         "也不要自己去念词、不要问用户写完没有。", _t_start_dictation),
 }
+TOOLS.update(_KJ_TOOLS)   # KJ 知识节点 8 个工具（命名空间 kj，见 _TOOL_NAMES_BY_NAMESPACE）
 
 # ToolRegistry production surfaces.  These names describe the trusted caller,
 # never a value supplied by an untrusted request body.
@@ -6441,6 +6555,7 @@ _TOOL_NAMESPACE_DESCRIPTIONS = {
     "recipes": "召回创造物、检查报告和已保存的复合工具。",
     "review": "诊断、提议并在确认后更新知识掌握度。",
     "runtime": "实时语音引擎在本地处理的稳定控制工具。",
+    "kj": "KJ 知识节点：检索、登记定义/记录/关系/卡片、出题判分、自评；程序统一算掌握度与准备度。",
 }
 
 _TOOL_NAMES_BY_NAMESPACE = {
@@ -6484,6 +6599,10 @@ _TOOL_NAMES_BY_NAMESPACE = {
     },
     "review": {
         "make_diagnostic", "mastery_proposal", "apply_mastery", "remove_mastery",
+    },
+    "kj": {
+        "kj_search", "kj_node", "kj_browse", "kj_register", "kj_relation",
+        "kj_quiz", "kj_quiz_result", "kj_self_assess",
     },
 }
 
@@ -6565,6 +6684,54 @@ _PAGE_VALUE_SCHEMA = {
 }
 
 _TOOL_SCHEMA_OVERRIDES = {
+    # KJ 知识节点（scripts/kj）
+    "kj_search": _tool_object_schema({
+        "q": {"type": "string", "description": "概念/人物/方法名或关键词"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 30},
+        "online": {"type": "boolean", "description": "本地与公共目录都没有时再上网查 Wikidata"},
+    }, required=("q",)),
+    "kj_node": _tool_object_schema({
+        "node_id": {"type": "string", "description": "kj:XXXXXXXXXX"},
+        "records": {"type": "integer", "minimum": 0, "maximum": 50},
+    }, required=("node_id",)),
+    "kj_browse": _tool_object_schema({"parent": {"type": "string", "description": "不给=根"}}),
+    "kj_register": _tool_object_schema({
+        "type": {"type": "string", "enum": ["node", "definition", "record", "merge_records", "card", "card_make", "bind_qid",
+                                            "unbind_qid", "node_update", "merge_node"]},
+        "node_id": {"type": "string"}, "node_ids": {"type": "array", "items": {"type": "string"}},
+        "name": {"type": "string"}, "kind": {"type": "string"}, "aliases": {"type": "array", "items": {"type": "string"}},
+        "qid": {"type": "string"}, "summary": {"type": "string"}, "text": {"type": "string"},
+        "source": {"type": "object", "description": "{kind:pdf|epub|web|conversation|…, book, page, quote, url}"},
+        "context_key": {"type": "string"}, "decision": {"type": "string", "enum": ["", "keep", "supersede", "add"]},
+        "supersedes": {"type": "string"}, "occurred_at": {"type": "string"}, "record_ids": {"type": "array", "items": {"type": "string"}},
+        "occurrences": {"type": "integer"}, "front": {"type": "string"}, "back": {"type": "string"},
+        "anki_note_id": {"type": "integer"}, "into": {"type": "string"},
+    }, required=("type",)),
+    "kj_relation": _tool_object_schema({
+        "op": {"type": "string", "enum": ["add", "retract", "change"]},
+        "from": {"type": "string"}, "to": {"type": "string"},
+        "relation_type": {"type": "string", "description": "prereq/part_of/subclass_of/instance_of/related/causes/solves/explains/uses/example/contrast/custom"},
+        "evidence": {"type": "string", "description": "原文依据；prereq 必填"},
+        "relation_id": {"type": "string"}, "reverse": {"type": "boolean"}, "reason": {"type": "string"},
+        "source": {"type": "object"},
+    }),
+    "kj_quiz": _tool_object_schema({
+        "items": {"type": "array", "items": {"type": "object", "properties": {
+            "item_id": {"type": "string"}, "question": {"type": "string"}, "answer": {"type": "string"},
+            "kind": {"type": "string"}, "node_ids": {"type": "array", "items": {"type": "string"}}},
+            "required": ["question", "node_ids"]}},
+        "target_node": {"type": "string"}, "title": {"type": "string"},
+    }, required=("items",)),
+    "kj_quiz_result": _tool_object_schema({
+        "quiz_id": {"type": "string"},
+        "results": {"type": "array", "items": {"type": "object", "properties": {
+            "item_id": {"type": "string"},
+            "result": {"type": "string", "enum": ["correct", "wrong", "partial", "unanswered", "undetermined"]},
+            "note": {"type": "string"}}, "required": ["item_id", "result"]}},
+    }, required=("quiz_id", "results")),
+    "kj_self_assess": _tool_object_schema({
+        "node_id": {"type": "string"}, "value": {"type": "number", "minimum": 0, "maximum": 1}, "reason": {"type": "string"},
+    }, required=("node_id", "value")),
     # These were formerly duplicated in voice_realtime_relay.py.  Keeping the
     # useful schemas here makes text, MCP, direct Realtime and relayed voice
     # consume the same contract.
