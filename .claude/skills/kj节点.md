@@ -14,6 +14,7 @@
 
 ```bash
 python scripts/kj/cli.py search "向量空间"            # 本地优先；--online 本地与公共目录都没有时再上网
+#   中文搜不到/只出论文 → 换英文或日文原名再搜（三语标签都索引；安培环路定理=Ampère's circuital law、五段动词=五段活用、定语从句=relative clause）
 python scripts/kj/cli.py node kj:XXXXXXXXXX          # 位置/前置/定义/记录摘要/卡/掌握/准备度/next_hint
 python scripts/kj/cli.py register --json '{"type":"record","node_id":"kj:…","kind":"reading","text":"…","source":{"kind":"pdf","book":"LADR","page":12}}'
 ```
