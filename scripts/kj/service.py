@@ -10,6 +10,7 @@ from typing import Any
 
 from . import anki_sync as AK
 from . import compute
+from . import pages as PG
 from . import query as Q
 from . import register as R
 from . import wikidata as WD
@@ -300,6 +301,26 @@ class KJService:
         return self._run(go)
 
     # ── 查询 ──────────────────────────────────────────────────────────────
+    # ── 页级分析（pages.py）───────────────────────────────────────────────
+    def page_status(self, book: Any, page: Any) -> dict:
+        return self._run(lambda: {"ok": True, **PG.status(self.ledger, book, page)})
+
+    def page_brief(self, book: Any, page: Any) -> dict:
+        return self._run(lambda: {"ok": True, **PG.brief(self.ledger, book, page)})
+
+    def page_block(self, book: Any, page: Any) -> dict:
+        """附在整页快照后的块（未分析=指示+YOLO 框；已分析=brief+提示）。所有给整页内容的表面都走这一个。"""
+        return self._run(lambda: {"ok": True, **PG.snapshot_block(self.ledger, book, page)})
+
+    def page_submit(self, payload: dict) -> dict:
+        def go():
+            rep, touched = PG.submit(self.ledger, payload, actor=self.actor)
+            return self._finish(sorted(touched), rep)
+        return self._run(go)
+
+    def book_pages(self, book: Any, total: Any = None) -> dict:
+        return self._run(lambda: {"ok": True, **PG.book_pages(self.ledger, book, int(total) if total else None)})
+
     def search(self, q: str, *, limit: int = 8, online: bool = False, include_public: bool = True,
                public_limit: int | None = None) -> dict:
         res = Q.search(self.ledger, q, limit=limit, include_public=include_public, public_limit=public_limit)
@@ -390,6 +411,8 @@ class KJService:
             if t == "definition":
                 return self.add_definition(p.get("node_id", ""), text=p.get("text", ""), source=p.get("source"), context_key=p.get("context_key", ""),
                                            decision=p.get("decision", ""), supersedes=p.get("supersedes", ""), uses=p.get("uses"))
+            if t == "page":
+                return self.page_submit(p)
             if t == "record":
                 return self.add_record(p.get("node_id", ""), text=p.get("text", ""), kind=p.get("kind", "note"), source=p.get("source"),
                                        occurred_at=p.get("occurred_at"), dedupe_key=p.get("dedupe_key"))
@@ -420,5 +443,5 @@ class KJService:
         except RegisterError as e:
             return e.to_dict()
         return {"ok": False, "code": "bad_type", "error": f"未知登记类型：{t}",
-                "types": ["node", "node_update", "merge_node", "bind_qid", "unbind_qid", "definition", "record", "merge_records",
+                "types": ["page", "node", "node_update", "merge_node", "bind_qid", "unbind_qid", "definition", "record", "merge_records",
                           "relation", "relation_retract", "relation_change", "card", "card_make", "quiz", "quiz_result", "self_assess"]}

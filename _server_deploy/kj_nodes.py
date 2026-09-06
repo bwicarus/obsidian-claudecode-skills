@@ -143,5 +143,45 @@ def kj_wikidata_fetch():
     return _reply(_svc().wikidata_fetch(str(b.get("qid") or ""), refresh=bool(b.get("refresh"))))
 
 
+def _book_param() -> str:
+    """book=16 位 sha 或绝对路径；file=书库相对路径（阅读器/MCP 用的那个）→ 拼成绝对路径，键口径与 pdf_reader._book_sha 一致。"""
+    b = (request.args.get("book") or (request.get_json(silent=True) or {}).get("book") or "").strip()
+    if b:
+        return b
+    f = (request.args.get("file") or (request.get_json(silent=True) or {}).get("file") or "").strip()
+    if not f or ".." in f:
+        return ""
+    root = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
+    return str((root / f).resolve())
+
+
+@bp.route("/page/status")
+def kj_page_status():
+    return _reply(_svc().page_status(_book_param(), request.args.get("page", 0)))
+
+
+@bp.route("/page/brief")
+def kj_page_brief():
+    return _reply(_svc().page_brief(_book_param(), request.args.get("page", 0)))
+
+
+@bp.route("/page/block")
+def kj_page_block():
+    return _reply(_svc().page_block(_book_param(), request.args.get("page", 0)))
+
+
+@bp.route("/page/submit", methods=["POST"])
+def kj_page_submit():
+    body = dict(_body())
+    if not body.get("book"):
+        body["book"] = _book_param()
+    return _reply(_svc().page_submit(body))
+
+
+@bp.route("/book/pages")
+def kj_book_pages():
+    return _reply(_svc().book_pages(_book_param(), request.args.get("total")))
+
+
 def register_kj_nodes(app) -> None:
     app.register_blueprint(bp)

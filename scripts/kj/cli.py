@@ -60,6 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sp.add_parser("definition"); s.add_argument("node_id"); s.add_argument("--text", required=True); s.add_argument("--source", required=True)
     s.add_argument("--context", default=""); s.add_argument("--decision", default=""); s.add_argument("--supersedes", default="")
     s.add_argument("--uses", default="", help="看懂这条定义必须先会的节点：编号或名称，逗号分隔；程序以定义原句为依据登 prereq")
+    s = sp.add_parser("page-status"); s.add_argument("book", help="书的 sha(16 hex) 或绝对路径"); s.add_argument("page", type=int)
+    s = sp.add_parser("page-brief"); s.add_argument("book"); s.add_argument("page", type=int)
+    s = sp.add_parser("page-block"); s.add_argument("book"); s.add_argument("page", type=int)
+    s = sp.add_parser("page-submit"); s.add_argument("--json", required=True, help="一页分析的 JSON（结构见 kj/pages.py），或 @文件")
+    s = sp.add_parser("book-pages"); s.add_argument("book"); s.add_argument("--total", type=int, help="给了就列未分析页（整本手动批处理用）")
     s = sp.add_parser("record"); s.add_argument("node_id"); s.add_argument("--text", required=True); s.add_argument("--kind", default="note")
     s.add_argument("--source"); s.add_argument("--at", help="发生时间 ISO/epoch；不知道就别填")
     s = sp.add_parser("merge-records"); s.add_argument("node_id"); s.add_argument("--ids", required=True, help="逗号分隔")
@@ -111,6 +116,16 @@ def main(argv: list[str] | None = None) -> int:
         elif c == "definition":
             r = svc.add_definition(a.node_id, text=a.text, source=_json_arg(a.source), context_key=a.context, decision=a.decision, supersedes=a.supersedes,
                                    uses=[x.strip() for x in (a.uses or "").split(",") if x.strip()])
+        elif c == "page-status":
+            r = svc.page_status(a.book, a.page)
+        elif c == "page-brief":
+            r = svc.page_brief(a.book, a.page)
+        elif c == "page-block":
+            r = svc.page_block(a.book, a.page)
+        elif c == "page-submit":
+            r = svc.page_submit(_json_arg(a.json))
+        elif c == "book-pages":
+            r = svc.book_pages(a.book, a.total)
         elif c == "record":
             r = svc.add_record(a.node_id, text=a.text, kind=a.kind, source=_json_arg(a.source), occurred_at=a.at)
         elif c == "merge-records":

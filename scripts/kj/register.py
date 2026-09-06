@@ -16,7 +16,7 @@ from .compute import RESULT_KINDS, prereq_cycle_path, prereq_path
 from .store import Event, Ledger
 from . import wikidata as WD
 
-NODE_KINDS = ("concept", "person", "method", "object", "event", "problem", "analysis", "other")
+NODE_KINDS = ("concept", "theorem", "person", "method", "object", "event", "problem", "analysis", "other")
 RECORD_KINDS = ("reading", "note", "handwriting", "conversation", "observation", "analysis", "anki", "other")
 RELATION_TYPES = ("prereq", "part_of", "subclass_of", "instance_of", "related", "causes", "solves", "explains",
                   "uses", "example", "contrast", "influenced_by", "facet_of", "different_from", "studied_by",

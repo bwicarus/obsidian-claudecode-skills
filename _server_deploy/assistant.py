@@ -2671,6 +2671,14 @@ def _t_read_page(args, ctx):
               "页码提醒": "报页码一律用本结果的 pages 字段(系统页,用户界面同款);正文开头/角落出现的数字可能是**原书自印的页码**(与系统页不一致),别抄它报页。"}
     # 自建页(用户手写作答页):再附一张**前端渲染图**(所见即所得,含手写)喂回大脑 —— 前端在场
     #   截了 view_image 才有(_vision 喂模型 + _fed_images 给流程展示);无头/不在视口时纯文字兜底(题目+标准答案已在 text 里)。
+    # KJ 页级分析块（2026-09-07 用户拍板：页是最小单位）——未分析页附指示与 YOLO 框，已分析页附标注/节点掌握度/公式/图描述。
+    # 只对显式读到的第一页做（下一页预览不算"全量读到"）。出错不掀翻回合，但要出声。
+    try:
+        _kb = _kj_page_block(ctx, file_rel, pages[0]) if pages else None
+        if _kb:
+            result["kj_page"] = _kb
+    except Exception as _e:
+        result["kj_page"] = {"error": "KJ 页块出错:%s" % str(_e)[:160]}
     if up_hit and isinstance(ctx.get("view_image"), dict) and ctx["view_image"].get("b64"):
         _vi = ctx["view_image"]
         _fed = [{"media_type": _vi.get("media_type") or "image/jpeg", "b64": _vi["b64"]}]
@@ -6350,6 +6358,54 @@ def _t_kj_self_assess(args, ctx):
     return _kj_call(ctx, lambda s: s.self_assess(str(args.get("node_id") or ""), value=args.get("value"), reason=str(args.get("reason") or "")))
 
 
+def _kj_book_abs(file_rel, page):
+    """阅读器的 file_rel → 书的绝对路径 + 成员页（合并书映射到真成员）；网页/HTML/MD 单文档没有页概念 → None。"""
+    rel = str(file_rel or "").strip()
+    if not rel or rel.startswith("web:") or rel.lower().endswith((".html", ".htm", ".md", ".markdown")) or ".." in rel:
+        return None, None
+    try:
+        rel, page = _vb_src(rel, page)
+    except Exception:
+        pass
+    return str((VAULT_ROOT / rel).resolve()), page
+
+
+def _kj_page_block(ctx, file_rel, page):
+    ab, pg = _kj_book_abs(file_rel, page)
+    if not ab or not pg:
+        return None
+    r = _kj_call(ctx, lambda s: s.page_block(ab, pg))
+    if not isinstance(r, dict):
+        return None
+    r.pop("ok", None)
+    return r
+
+
+def _t_kj_page_submit(args, ctx):
+    """交一页分析。book/page 不传就用当前书、当前页。"""
+    payload = dict(args or {})
+    pg = payload.get("page") or (ctx or {}).get("page")
+    if not payload.get("book"):
+        ab, pg2 = _kj_book_abs((ctx or {}).get("file_rel", ""), pg)
+        if not ab:
+            return {"error": "当前不是有页的书（网页/HTML/MD 不做页分析），或没有 file_rel；请显式给 book"}
+        payload["book"], pg = ab, pg2
+    payload["page"] = pg
+    if not payload.get("book_title"):
+        payload["book_title"] = str((ctx or {}).get("book_title") or (ctx or {}).get("title") or "")
+    return _kj_call(ctx, lambda s: s.page_submit(payload))
+
+
+def _t_kj_page_brief(args, ctx):
+    pg = (args or {}).get("page") or (ctx or {}).get("page")
+    book = (args or {}).get("book")
+    if not book:
+        book, pg = _kj_book_abs((ctx or {}).get("file_rel", ""), pg)
+        if not book:
+            return {"error": "当前不是有页的书，请显式给 book"}
+    return _kj_call(ctx, lambda s: s.page_brief(book, pg))
+
+
 _KJ_TOOLS = {
     "kj_search": ("★知识节点检索：找『这个概念/人物/方法在节点网里叫什么、有没有』。本地优先（名称/别名/定义），"
                   "再附 Wikidata 公共候选（标 local_node 有无）。登记任何东西之前先用它定位；找不到再新建。"
@@ -6358,6 +6414,13 @@ _KJ_TOOLS = {
                   "公共候选默认 5 个，每个带 label_en / description / description_en / aliases / path：绑编号前拿它们对照书里的定义与所属领域，"
                   "确认是同一概念再绑；拿不准就先不绑（编号随时可补），绑错用 kj_register bind_qid 换绑。绑定后实体的三语名称与别名会自动回填成节点别名。"
                   "args {q, limit?, online?:本地和公共目录都没有时再上网查}。", _t_kj_search),
+    "kj_page_submit": ("★交一页的分析（read_page 返回 kj_page.status=unanalyzed 时：先回答用户，答完在同一轮里调它）。"
+                       "args {book?,page?(不传=当前书当前页), summary, kind[], notation[{symbol,meaning,concept}], "
+                       "concepts[{name,node_id?,qid?,kind?(concept|theorem|…),aliases?,role:defined|stated|used|exercised,"
+                       "definition?{text 原句,uses[看懂它必须先会的概念]},summary?}], formulas[{idx,latex}](按 kj_page.boxes 的 idx，需看页图), "
+                       "figures[{idx,desc}], exercises[{label,concepts[]}], pitfalls[{text,concept}]}。"
+                       "程序建节点/绑编号/登定义与前置/写回公式图描述/打标记，返回报告。重交覆盖。", _t_kj_page_submit),
+    "kj_page_brief": ("看某页的分析结果：页标注、出现的节点及掌握度、公式 LaTeX、图描述。args {page?, book?}。", _t_kj_page_brief),
     "kj_node": ("读一个知识节点：分类位置、前置/后续、定义原文出处、记录摘要、卡片、掌握度、准备度、weak/unknown 前置、"
                 "next_hint（建议动作代码）。学习排查第 1 步就是它。args {node_id}。", _t_kj_node),
     "kj_browse": ("按分类一层层浏览节点（渐进式披露，不要一次读全部）。不给 parent=根；给 parent=下级。args {parent?}。", _t_kj_browse),

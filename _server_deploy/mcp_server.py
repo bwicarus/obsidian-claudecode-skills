@@ -228,7 +228,34 @@ def list_books() -> dict:
 @mcp.tool()
 def read_page(file: str, page: int) -> dict:
     """读某书某页的纯文本(1-based 页码)。返回 {ok, page, total, text}。"""
-    return _get("/pdf/api/page-text", file=file, page=page)
+    d = _get("/pdf/api/page-text", file=file, page=page)
+    # KJ 页级分析块：未分析页附指示（先答后交 kj_page_submit）与 YOLO 框；已分析页附标注/节点掌握度/公式/图描述
+    try:
+        kb = _get("/kj/api/page/block", file=file, page=page)
+        if isinstance(kb, dict) and kb.get("ok"):
+            kb.pop("ok", None)
+            d["kj_page"] = kb
+        elif isinstance(kb, dict):
+            d["kj_page"] = {"error": kb.get("error") or kb.get("code") or "unavailable"}
+    except Exception as e:  # 页块失败不影响读页，但要出声
+        d["kj_page"] = {"error": str(e)[:160]}
+    return d
+
+
+@mcp.tool()
+def kj_page_submit(file: str, page: int, analysis: dict) -> dict:
+    """交一页的 KJ 分析（read_page 返回 kj_page.status=unanalyzed 时，先回答用户再调）。
+    analysis = {summary, kind[], notation[{symbol,meaning,concept}], concepts[{name,qid?,kind?,aliases?,role,definition?{text,uses[]}}],
+    formulas[{idx,latex}], figures[{idx,desc}], exercises[{label,concepts[]}], pitfalls[{text,concept}]}。程序落账并打标记。"""
+    body = dict(analysis or {})
+    body.update({"file": file, "page": page})
+    return _post("/kj/api/page/submit", body)
+
+
+@mcp.tool()
+def kj_page_brief(file: str, page: int) -> dict:
+    """看某页的 KJ 分析结果（页标注、出现的节点及掌握度、公式 LaTeX、图描述）。"""
+    return _get("/kj/api/page/brief", file=file, page=page)
 
 
 @mcp.tool()

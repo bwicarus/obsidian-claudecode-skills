@@ -78,6 +78,16 @@ CREATE TABLE IF NOT EXISTS node_aliases(
     node_id TEXT NOT NULL, alias TEXT NOT NULL, lang TEXT DEFAULT '', origin TEXT DEFAULT '',
     PRIMARY KEY(node_id, alias)
 );
+CREATE TABLE IF NOT EXISTS page_analyses(
+    book TEXT NOT NULL, page INTEGER NOT NULL, version INTEGER NOT NULL DEFAULT 1,
+    analyzed_at INTEGER NOT NULL, actor TEXT DEFAULT '', summary TEXT DEFAULT '', payload_json TEXT,
+    PRIMARY KEY(book, page)
+);
+CREATE TABLE IF NOT EXISTS page_nodes(
+    book TEXT NOT NULL, page INTEGER NOT NULL, node_id TEXT NOT NULL, role TEXT DEFAULT '',
+    PRIMARY KEY(book, page, node_id, role)
+);
+CREATE INDEX IF NOT EXISTS idx_page_nodes_node ON page_nodes(node_id);
 CREATE TABLE IF NOT EXISTS definitions(
     id TEXT PRIMARY KEY, node_id TEXT NOT NULL, text TEXT NOT NULL,
     context_key TEXT DEFAULT '', source_json TEXT, created_at INTEGER NOT NULL,
@@ -160,6 +170,7 @@ CREATE TABLE IF NOT EXISTS pub.meta(k TEXT PRIMARY KEY, v TEXT);
 _PROJECTION_TABLES = (
     "nodes", "node_aliases", "definitions", "records", "relations", "cards", "card_nodes",
     "card_snapshots", "quizzes", "quiz_items", "mastery", "search_text", "node_fts",
+    "page_analyses", "page_nodes",
 )
 
 
@@ -370,6 +381,16 @@ class Ledger:
                 db.execute("INSERT OR IGNORE INTO node_aliases(node_id, alias, lang, origin) VALUES(?,?,?,?)",
                            (p["id"], a["alias"], a.get("lang") or "", origin))
             self._refresh_search(p["id"])
+        elif k == "page.analyze":
+            # 页级分析（pages.py）：一页一行，重交覆盖；页→节点按角色平铺
+            db.execute("INSERT OR REPLACE INTO page_analyses(book, page, version, analyzed_at, actor, summary, payload_json)"
+                       " VALUES(?,?,?,?,?,?,?)",
+                       (p["book"], int(p["page"]), int(p.get("version") or 1), now, ev.actor or p.get("actor") or "",
+                        p.get("summary") or "", dumps(p)))
+            db.execute("DELETE FROM page_nodes WHERE book=? AND page=?", (p["book"], int(p["page"])))
+            for n in p.get("nodes") or []:
+                db.execute("INSERT OR IGNORE INTO page_nodes(book, page, node_id, role) VALUES(?,?,?,?)",
+                           (p["book"], int(p["page"]), n["node_id"], n.get("role") or ""))
         elif k == "definition.add":
             db.execute(
                 "INSERT OR REPLACE INTO definitions(id, node_id, text, context_key, source_json, created_at, superseded_by)"

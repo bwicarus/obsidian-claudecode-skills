@@ -198,6 +198,33 @@ Wikidata 没有教学前置（§6 量过：能当挂点当不了网），前置�
 书里点明的坑（记录）、**每页与每章的内容标注**（页：干什么/出现哪些节点/关键记号；章：摘要/概念顺序/依赖前面哪些概念；存书侧边车并喂目录系统）。
 不批量建卡。成本：一章 15~30 页输入 1~2.5 万 token，一本 300 页教材约 25~30 万，一次性，走凌晨闲时额度；按章断点续跑、重跑不重复。
 
+### 7.3 页级分析：页是最小单位（2026-09-07 用户拍板，`scripts/kj/pages.py`）
+
+整本书只是页的连续。AI **第一次拿到某页全量内容**时（侧栏 `read_page`、MCP `read_page`，桥的 `reader_context_snapshot` 待接），
+返回里附 `kj_page` 块：
+- 未分析：`status=unanalyzed` + `instruction`（**先回答用户，答完在同一轮里** `kj_page_submit`）+ `boxes`（YOLO 给的公式框/图框，页内 idx 从 0 起，
+  来自 `state/pdf-figures/<sha>.json`；没有边车就 `sidecar=false`）。
+- 已分析：`status=analyzed` + 页标注 + 出现的节点（掌握度/准备度/角色）+ 公式 LaTeX + 图描述 + 提示"直接用，不必重读整页"。
+- 判断与注入只在 `pages.snapshot_block` 一处；各表面只负责调它（防 2026-08-19 那种"每层一份"的漂移）。
+
+`kj_page_submit` 的 payload：`summary`、`kind[]`、`notation[{symbol,meaning,concept}]`、
+`concepts[{name,node_id?,qid?,kind?,aliases?,role:defined|stated|used|exercised,definition?{text,uses[]},summary?}]`、
+`formulas[{idx,latex}]`、`figures[{idx,desc}]`、`exercises[{label,concepts[]}]`、`pitfalls[{text,concept}]`。程序一次落账（`pages.submit`）：
+1. 概念 → 节点：按 node_id / qid / 名称与别名解析，多义进 `ambiguous`（不猜），解析不到才新建（`kind` 可为 `theorem`：定理引理也是节点）；
+   带 qid 就绑并回填三语别名、接公共关系，编号被占记 `qid_problems`。
+2. `definition.text` → 定义（出处 = 书 sha + 页 + 原句），`uses` 走 §7.2（同页新建的概念按名互相引用；查环、查冗余；`also_mentioned`）。
+3. `notation` → 节点别名 `origin=page:<sha>:<页>`（重交整体覆盖，不碰用户别名与 Wikidata 别名）。
+4. `pitfalls` → 记录 kind=observation，`dedupe_key=page:<sha>:<页>:pitfall:<hash>`，重交不重复。
+5. `formulas/figures` → 边车 `formulas[i].latex`（`latex_engine=page-analysis`）/ `figures_geom[i].desc`，写前 `.bak`、原子替换；
+   阅读器照旧据此注入字符层、显图注。idx 对不上进 `unmatched`。
+6. 事件 `page.analyze` → 投影 `page_analyses(book,page)` / `page_nodes(book,page,node_id,role)`，`rebuild` 可重放；`node_pages` 给"书内位置"。
+不做的：不批量建卡；不推前置。**整本批处理暂时手动**：`cli.py book-pages <书> --total N` 列未分析页，逐页走同一条提交路径；
+等每页 token 消耗量清楚（估：页图 1.3~1.6k + 文字 0.5~0.8k + 输出 0.6~1k）再谈自动。
+书的键 = `pdf_reader._book_sha` 口径 sha1(绝对路径)[:16]；HTTP 侧 `file=` 相对路径由 `kj_nodes._book_param` 拼成绝对路径。
+接口：CLI `page-status / page-brief / page-block / page-submit --json / book-pages`；HTTP `GET /kj/api/page/{status,brief,block}`、
+`POST /kj/api/page/submit`、`GET /kj/api/book/pages`；助手工具 `kj_page_submit / kj_page_brief`；MCP 同名工具。
+待接：桥 `reader_context_snapshot`（C#，需调 Flask 页块）、YOLO 环境搬 Windows（原在 Pi，两条 timer 已随 Pi 停）。
+
 ## 8. 维护
 
 - `rebuild`：清空投影 → 重放事件 → 重算全部 → 重渲染全部页。任何时候都能从 events 表还原。
