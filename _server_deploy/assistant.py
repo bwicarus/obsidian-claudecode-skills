@@ -6363,6 +6363,8 @@ def _kj_book_abs(file_rel, page):
     rel = str(file_rel or "").strip()
     if not rel or rel.startswith("web:") or rel.lower().endswith((".html", ".htm", ".md", ".markdown")) or ".." in rel:
         return None, None
+    if rel.startswith("localbook:"):
+        return rel, page   # App 本机书：编号本身就是键，与桥 activeReading.file 同一口径
     try:
         rel, page = _vb_src(rel, page)
     except Exception:

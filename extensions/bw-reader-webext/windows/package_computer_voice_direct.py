@@ -1886,6 +1886,7 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
         "reader_page_text",
         "reader_search",
         "reader_highlights",
+        "kj_page_submit",   # KJ 页级分析提交（随 Reader 查询能力一起暴露，列表最后）
     )
     if (
         not isinstance(tools, list)

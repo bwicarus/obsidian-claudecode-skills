@@ -223,7 +223,7 @@ Wikidata 没有教学前置（§6 量过：能当挂点当不了网），前置�
 书的键 = `pdf_reader._book_sha` 口径 sha1(绝对路径)[:16]；HTTP 侧 `file=` 相对路径由 `kj_nodes._book_param` 拼成绝对路径。
 接口：CLI `page-status / page-brief / page-block / page-submit --json / book-pages`；HTTP `GET /kj/api/page/{status,brief,block}`、
 `POST /kj/api/page/submit`、`GET /kj/api/book/pages`；助手工具 `kj_page`（`op=submit|brief`，命名空间每组最多 9 个工具，故并成一个）；MCP `kj_page_submit / kj_page_brief`。提示里的提交工具名由表面传入（`snapshot_block(submit_tool=)` / HTTP `?tool=`）。
-待接：桥 `reader_context_snapshot`（C#，需调 Flask 页块）、YOLO 环境搬 Windows（原在 Pi，两条 timer 已随 Pi 停）。
+桥（C#，`KjPageClient.cs`，0.1.296 起）：`reader_context_snapshot` 的 payload 与 `reader_page_text` 的结果都附 `kjPage`（GET 本机 Flask `/kj/api/page/block?file=&page=&tool=kj_page_submit`，令牌与 mcp_server.py 同一把 `~/.config/mcp-webapp-token`；拿不到时块里写 error 不静默）；工具 `kj_page_submit{page, analysis, file?}` POST `/kj/api/page/submit`，随 Reader 查询能力一起暴露（最小配置仍是 3 个工具，自检卡这一点；打包脚本 `expected_tools` 锁 34 个）。书键：`activeReading.file`——App 本机书是 `localbook:…` 编号，Flask `_book_param` 与侧栏 `_kj_book_abs` 都原样当键，三面同一口径。待接：YOLO 环境搬 Windows（原在 Pi，两条 timer 已随 Pi 停）。
 
 ## 8. 维护
 

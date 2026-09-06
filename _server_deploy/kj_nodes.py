@@ -151,6 +151,8 @@ def _book_param() -> str:
     f = (request.args.get("file") or (request.get_json(silent=True) or {}).get("file") or "").strip()
     if not f or ".." in f:
         return ""
+    if f.startswith(("localbook:", "web:")):
+        return f   # App 本机书 / 网页：不是 Windows 上的路径，编号本身就是键（桥与侧栏同一口径，pages.book_key 取其 sha）
     root = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
     return str((root / f).resolve())
 

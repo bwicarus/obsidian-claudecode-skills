@@ -44,6 +44,7 @@ internal sealed class ReaderContextMcpServer
     internal const string MarkVocabToolName = "reader_mark_vocab";
     internal const string WebHighlightToolName = "reader_web_highlight";
     internal const string WebNoteToolName = "reader_web_note";
+    internal const string KjPageSubmitToolName = KjPageClient.SubmitToolLabel;
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
@@ -1965,6 +1966,63 @@ internal sealed class ReaderContextMcpServer
                 },
             });
         }
+        // 页分析提交需要 Reader 能给整页文字（reader_page_text），所以随查询能力一起暴露；
+        // 最小配置（无 Reader 回调）仍只有 快照/能力指南/摄像头 三个（自检卡这一点）。
+        if (_queryReaderAsync is not null)
+        {
+        tools.Add(new JsonObject
+        {
+            ["name"] = KjPageSubmitToolName,
+            ["description"] =
+                "Submit the KJ page analysis for one page of the open book. "
+                + "Call it only when a page read (reader_context_snapshot or "
+                + "reader_page_text) came back with kjPage.status = "
+                + "'unanalyzed' - and only AFTER you have answered the user; "
+                + "do it in the same turn. `analysis` = {summary, kind[], "
+                + "notation[{symbol,meaning,concept}], concepts[{name,qid?,"
+                + "kind?(concept|theorem|...),aliases?,role:defined|stated|used|"
+                + "exercised,definition?{text,uses[]}}], formulas[{idx,latex}] "
+                + "(idx from kjPage.boxes; needs the page image), figures[{idx,"
+                + "desc}], exercises[{label,concepts[]}], pitfalls[{text,"
+                + "concept}]}. The Windows side creates nodes, binds public ids, "
+                + "records definitions and prerequisites, writes formula LaTeX "
+                + "and figure descriptions back, and marks the page analyzed. "
+                + "Resubmitting overwrites. Returns the ledger report.",
+            ["inputSchema"] = new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["page"] = new JsonObject
+                    {
+                        ["type"] = "integer",
+                        ["minimum"] = 1,
+                        ["description"] = "The page (PDF) or section index (EPUB) the analysis is for.",
+                    },
+                    ["file"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["description"] = "Optional. Defaults to the open book in the current snapshot.",
+                    },
+                    ["analysis"] = new JsonObject
+                    {
+                        ["type"] = "object",
+                        ["description"] = "The structured page analysis (see tool description).",
+                        ["additionalProperties"] = true,
+                    },
+                },
+                ["required"] = new JsonArray { "page", "analysis" },
+                ["additionalProperties"] = false,
+            },
+            ["annotations"] = new JsonObject
+            {
+                ["readOnlyHint"] = false,
+                ["destructiveHint"] = false,
+                ["idempotentHint"] = true,
+                ["openWorldHint"] = false,
+            },
+        });
+        }
         return new JsonObject
         {
             ["tools"] = tools,
@@ -3675,6 +3733,14 @@ internal sealed class ReaderContextMcpServer
                 cancellationToken).ConfigureAwait(false);
             return;
         }
+        if (toolName == KjPageSubmitToolName && _queryReaderAsync is not null)
+        {
+            await HandleKjPageSubmitToolCallAsync(
+                id,
+                arguments,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
         if (
             toolName != ToolName
             || !HasNoArguments(arguments)
@@ -3697,6 +3763,9 @@ internal sealed class ReaderContextMcpServer
             payload,
             parameters,
             cancellationToken).ConfigureAwait(false);
+        // KJ 页级分析块：未分析页给指示与 YOLO 框，已分析页给标注/节点掌握度/公式/图描述（Windows Flask 判断）
+        await KjPageClient.AttachToSnapshotAsync(payload, cancellationToken)
+            .ConfigureAwait(false);
         await WriteResultAsync(
             id,
             new JsonObject
@@ -4271,6 +4340,13 @@ internal sealed class ReaderContextMcpServer
             ["truncated"] = response.Truncated,
             ["result"] = JsonNode.Parse(response.Result.GetRawText()),
         };
+        if (query == "page-text" && LongValue(parameters["page"]) is long kjPageNo && kjPageNo >= 1)
+        {
+            // 整页文字到手的那一刻就是"第一次全量读到这一页"：附 KJ 页块（未分析→先答后交；已分析→直接用）
+            result["kjPage"] = await KjPageClient
+                .BlockAsync(request.File, kjPageNo, cancellationToken)
+                .ConfigureAwait(false);
+        }
         await WriteResultAsync(
             id,
             new JsonObject
@@ -6874,6 +6950,76 @@ internal sealed class ReaderContextMcpServer
                     },
                 },
                 ["isError"] = true,
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    // kj_page_submit：把模型交的页分析原样 POST 给 Windows Flask（/kj/api/page/submit），
+    // 书取快照里正在读的那本（可显式 file 覆盖），页号必给。返回账本报告（含错误码）。
+    private async Task HandleKjPageSubmitToolCallAsync(
+        JsonNode id,
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        if (arguments.ValueKind != JsonValueKind.Object
+            || !arguments.TryGetProperty("page", out JsonElement pageValue)
+            || pageValue.ValueKind != JsonValueKind.Number
+            || !pageValue.TryGetInt64(out long page)
+            || page < 1
+            || !arguments.TryGetProperty("analysis", out JsonElement analysis)
+            || analysis.ValueKind != JsonValueKind.Object)
+        {
+            await WriteErrorAsync(
+                id,
+                -32602,
+                "Invalid kj_page_submit arguments: need page (>= 1) and analysis (object)",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
+        JsonObject snapshot = BuildToolPayload();
+        string? file = null;
+        string? title = null;
+        if (snapshot["activeReading"] is JsonObject active)
+        {
+            file = StringValue(active["file"]);
+            title = StringValue(active["title"]);
+        }
+        if (arguments.TryGetProperty("file", out JsonElement fileValue)
+            && fileValue.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(fileValue.GetString()))
+        {
+            file = fileValue.GetString();
+        }
+        if (string.IsNullOrWhiteSpace(file))
+        {
+            await WriteReaderOutputToolErrorAsync(
+                id,
+                "BW_KJ_PAGE_SOURCE_NOT_READY",
+                "当前快照里没有打开的书，也没有显式 file；先读取 Reader 上下文，或传 file。",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        JsonObject body = JsonNode.Parse(analysis.GetRawText()) as JsonObject ?? new JsonObject();
+        body["file"] = file;
+        body["page"] = page;
+        if (body["book_title"] is null && !string.IsNullOrWhiteSpace(title))
+        {
+            body["book_title"] = title;
+        }
+        JsonObject result = await KjPageClient.SubmitAsync(body, cancellationToken).ConfigureAwait(false);
+        await WriteResultAsync(
+            id,
+            new JsonObject
+            {
+                ["content"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = result.ToJsonString(DirectBridgeContract.JsonOptions),
+                    },
+                },
             },
             cancellationToken).ConfigureAwait(false);
     }
