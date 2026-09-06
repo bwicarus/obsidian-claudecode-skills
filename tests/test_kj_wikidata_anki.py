@@ -49,6 +49,34 @@ class WikidataTests(unittest.TestCase):
         hits = WD.search_public(self.L, "linear")
         self.assertEqual({h["qid"] for h in hits}, {"Q125977", "Q207643"})
 
+    def test_legacy_public_tables_in_main_db_are_migrated_to_pub(self):
+        """拆库前公共目录建在主账本里；重开时要搬进 kj-public.db 并删掉主库副本，否则遮住 pub 表、导入写错地方。"""
+        import sqlite3
+        self.svc.close()
+        raw = sqlite3.connect(str(self.tmp / "kj.db"))
+        raw.executescript("""
+            CREATE TABLE public_entities(qid TEXT PRIMARY KEY, label_en TEXT, label_zh TEXT, label_ja TEXT,
+                desc_en TEXT, desc_zh TEXT, desc_ja TEXT, aliases_json TEXT, fetched_at INTEGER, source TEXT);
+            CREATE TABLE public_claims(qid TEXT, prop TEXT, target TEXT, rank TEXT, PRIMARY KEY(qid, prop, target));
+            CREATE VIRTUAL TABLE public_fts USING fts5(qid UNINDEXED, labels, tokenize='trigram');
+            INSERT INTO public_entities VALUES('Q42','Douglas Adams','道格拉斯·亚当斯','','writer','','','{}',1,'old');
+            INSERT INTO public_claims VALUES('Q42','P31','Q5','normal');
+        """)
+        raw.commit(); raw.close()
+        self.svc = KJService(self.tmp / "kj.db", render=False, actor="test")
+        L = self.svc.ledger
+        self.assertIsNone(L.db.execute("SELECT 1 FROM main.sqlite_master WHERE name='public_entities'").fetchone())
+        e = WD.entity(L, "Q42")
+        self.assertEqual((e["label"], e["source"]), ("道格拉斯·亚当斯", "old"))
+        self.assertEqual(WD.claims_of(L, "Q42"), [("P31", "Q5", "normal")])
+        self.assertEqual([h["qid"] for h in WD.search_public(L, "Douglas")], ["Q42"])
+        # 之后的导入落到 pub（带 search_text 列），不再撞旧表
+        p = self.tmp / "mini.jsonl"
+        p.write_text(json.dumps({"id": "Q7", "labels": {"en": "seven", "zh": "七"}, "descriptions": {}, "aliases": {}, "relations": []}) + "\n", "utf-8")
+        res = self.svc.wikidata_import(str(p))
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(L.count("public_entities"), 2)
+
     def test_parse_entity_json_and_fetch_via_fake_http(self):
         doc = {"entities": {"Q1": {"labels": {"en": {"language": "en", "value": "one"}, "zh-hans": {"language": "zh-hans", "value": "一"}},
                                    "descriptions": {}, "aliases": {"ja": [{"language": "ja", "value": "いち"}]},

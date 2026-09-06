@@ -109,7 +109,11 @@ relation / relation_retract / relation_change / card / card_make / quiz / quiz_r
   每块拼成独立小流多进程解，输出与顺序解压逐字节一致；单流 bz2 在 Python 里只有约 3 MB/s，20 核并行后瓶颈变成磁盘与 JSON 解析）。
   一趟同时产出全量规模统计（实体/关系/度分布/最简行字节）与 zh/ja 子集 `minimal-index.zhja.jsonl.gz`。
   `wikidata_watch_extract.py` 等文件就位自动开跑，脱离会话运行；进度在 `state/wikidata/extract-status.json`。
-  公共目录独立成 `state/kj/kj-public.db`（ATTACH 为 `pub`），几百万条不撑私人账本。
+  公共目录独立成 `state/kj/kj-public.db`（ATTACH 为 `pub`），几百万条不撑私人账本；打开账本时会把拆库前遗留在主库的 `public_*` 表迁走
+  （否则遮住 pub 同名表，导入写错地方 —— 2026-09-07 第一次全量导入实锤）。
+- **2026-09-07 全量实测**（`wikidata-20260831`，103 GB bz2，20 进程 2 小时 50 分）：展开 1.84 TB（压缩比 17.9）；
+  实体 121,505,373、实体值关系 881,654,057、单流 3,662,362 块；全量最简行 54.6 GB；有中/日文标签的子集 12,328,574 个实体（10.1%），
+  最简行 5.05 GB、gzip 983 MB —— 这份子集就是导入本地公共目录的对象。度分布：45% 实体 ≤3 条关系、88% ≤10、99.4% ≤50。
 - 属性映射（`wikidata.PROP_MAP`）：P279 subclass_of、P31 instance_of、P361/P527 part_of、P1542/P828 causes、P737 influenced_by、
   P2283 uses、P1269 facet_of、P1889 different_from、P2579/P2578 studied_by/studies、P1855 example、P3095 practiced_by。**没有 prereq**。
 - 两端都绑了编号的公共关系 → 本地关系 `origin=wikidata`；换绑/解绑撤回旧的、生成新的；分类路径 `path_up` 只作定位线索。

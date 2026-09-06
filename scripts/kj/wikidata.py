@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -269,11 +270,16 @@ def import_minimal_index(ledger: Ledger, path: str | Path, *, only_qids: set[str
                     kept += 1
                     if len(ent_batch) >= 5000:
                         flush()
+                        if kept % 200_000 == 0:
+                            print(f"[wikidata-import] kept={kept:,} claims={claims_n:,} seen={seen:,} {time.time() - t0:.0f}s", file=sys.stderr, flush=True)
                     if limit and kept >= limit:
                         break
             flush()
+            print(f"[wikidata-import] rows done kept={kept:,} claims={claims_n:,}; rebuilding FTS…", file=sys.stderr, flush=True)
             fts = rebuild_public_fts(ledger)
         finally:
+            if ledger.db.in_transaction:   # flush 半途抛错时把事务收掉，否则下面的 PRAGMA 会再抛一个把真错误盖住
+                ledger.db.execute("ROLLBACK")
             ledger.db.execute("PRAGMA pub.synchronous=NORMAL")
     return {"seen": seen, "kept": kept, "claims": claims_n, "fts_rows": fts, "seconds": round(time.time() - t0, 1)}
 

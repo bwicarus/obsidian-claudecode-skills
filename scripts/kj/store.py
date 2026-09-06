@@ -181,6 +181,7 @@ class Ledger:
         with self._lock:
             self.db.executescript(_SCHEMA)
             self.db.executescript(_PUBLIC_SCHEMA)
+            self._migrate_public_tables_out_of_main()
             cur = self.db.execute("SELECT v FROM meta WHERE k='contract'")
             row = cur.fetchone()
             if row is None:
@@ -188,6 +189,39 @@ class Ledger:
                 self.db.execute("INSERT INTO meta(k, v) VALUES('schema', ?)", (str(DB_SCHEMA_VERSION),))
             elif row[0] != CONTRACT:
                 raise RuntimeError(f"账本合同不符：{row[0]} ≠ {CONTRACT}（{self.path}）")
+
+    def _migrate_public_tables_out_of_main(self) -> None:
+        """2026-09-06 晚拆库前，公共目录曾建在主账本里。若主库还留着 public_* 表，它会遮住 pub 里的同名表
+        （未限定的表名先查 main），导入就写进旧表、旧表又没有 search_text 列 —— 实测第一次全量导入就是这么炸的。
+        这里把旧行搬进 pub、删掉主库副本；幂等，没有旧表时什么都不做。"""
+        db = self.db
+        has_old = db.execute(
+            "SELECT 1 FROM main.sqlite_master WHERE type IN ('table','view') AND name='public_entities'").fetchone()
+        if not has_old:
+            return
+        cols = [r[1] for r in db.execute("PRAGMA main.table_info(public_entities)")]
+        search_expr = "search_text" if "search_text" in cols else \
+            "TRIM(COALESCE(label_en,'') || ' / ' || COALESCE(label_zh,'') || ' / ' || COALESCE(label_ja,''), ' /')"
+        db.execute("BEGIN")
+        try:
+            db.execute(
+                "INSERT OR IGNORE INTO pub.public_entities(qid, label_en, label_zh, label_ja, desc_en, desc_zh, desc_ja,"
+                " aliases_json, search_text, fetched_at, source)"
+                f" SELECT qid, label_en, label_zh, label_ja, desc_en, desc_zh, desc_ja, aliases_json, {search_expr}, fetched_at, source"
+                " FROM main.public_entities")
+            if db.execute("SELECT 1 FROM main.sqlite_master WHERE name='public_claims'").fetchone():
+                db.execute("INSERT OR IGNORE INTO pub.public_claims(qid, prop, target, rank)"
+                           " SELECT qid, prop, target, rank FROM main.public_claims")
+                db.execute("DROP TABLE main.public_claims")
+            if db.execute("SELECT 1 FROM main.sqlite_master WHERE name='public_fts'").fetchone():
+                db.execute("DROP TABLE main.public_fts")
+            db.execute("DROP TABLE main.public_entities")
+            db.execute("DELETE FROM pub.public_fts")
+            db.execute("INSERT INTO pub.public_fts(qid, labels) SELECT qid, COALESCE(search_text, '') FROM pub.public_entities")
+            db.execute("COMMIT")
+        except Exception:
+            db.execute("ROLLBACK")
+            raise
 
     def close(self) -> None:
         with self._lock:
