@@ -24,7 +24,7 @@ python scripts/kj/cli.py register --json '{"type":"record","node_id":"kj:…","k
 
 ## 页级分析（read_page 返回 kj_page 时）
 
-- `kj_page.status=unanalyzed`：**先回答用户**，答完在同一轮里 `kj_page_submit` 交本页分析：summary / kind / notation / concepts（被定义、被陈述的带
+- `kj_page.status=unanalyzed`：**先回答用户**，答完在同一轮里提交本页分析（侧栏工具 `kj_page` op=submit；MCP `kj_page_submit`）：summary / kind / notation / concepts（被定义、被陈述的带
   definition{text 原句, uses 必须先会的概念}；定理引理 kind=theorem；能确定就带 qid）/ formulas（按 boxes 的 idx 填 LaTeX，**需看页图**，没看图不填）/
   figures / exercises / pitfalls。程序建节点、绑编号、登定义与前置、写回公式图描述、打标记；交错了重交覆盖。
 - `kj_page.status=analyzed`：直接用块里的节点掌握度、公式、图描述，不必重读整页。

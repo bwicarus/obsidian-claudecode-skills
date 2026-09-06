@@ -6374,11 +6374,27 @@ def _kj_page_block(ctx, file_rel, page):
     ab, pg = _kj_book_abs(file_rel, page)
     if not ab or not pg:
         return None
-    r = _kj_call(ctx, lambda s: s.page_block(ab, pg))
+    r = _kj_call(ctx, lambda s: s.page_block(ab, pg, submit_tool="kj_page（op=submit）"))
     if not isinstance(r, dict):
         return None
     r.pop("ok", None)
     return r
+
+
+_KJ_PAGE_FIELDS = ("summary", "kind", "notation", "concepts", "formulas", "figures", "exercises", "pitfalls")
+
+
+def _t_kj_page(args, ctx):
+    """一个工具两个动作（命名空间每组最多 9 个工具）：op=submit 交本页分析；op=brief 看本页分析。没给 op：带分析字段就当 submit。"""
+    a = dict(args or {})
+    op = str(a.pop("op", "") or "").strip().lower()
+    if not op:
+        op = "submit" if any(a.get(k) for k in _KJ_PAGE_FIELDS) else "brief"
+    if op == "brief":
+        return _t_kj_page_brief(a, ctx)
+    if op == "submit":
+        return _t_kj_page_submit(a, ctx)
+    return {"error": "op 只能是 submit 或 brief"}
 
 
 def _t_kj_page_submit(args, ctx):
@@ -6414,13 +6430,12 @@ _KJ_TOOLS = {
                   "公共候选默认 5 个，每个带 label_en / description / description_en / aliases / path：绑编号前拿它们对照书里的定义与所属领域，"
                   "确认是同一概念再绑；拿不准就先不绑（编号随时可补），绑错用 kj_register bind_qid 换绑。绑定后实体的三语名称与别名会自动回填成节点别名。"
                   "args {q, limit?, online?:本地和公共目录都没有时再上网查}。", _t_kj_search),
-    "kj_page_submit": ("★交一页的分析（read_page 返回 kj_page.status=unanalyzed 时：先回答用户，答完在同一轮里调它）。"
-                       "args {book?,page?(不传=当前书当前页), summary, kind[], notation[{symbol,meaning,concept}], "
-                       "concepts[{name,node_id?,qid?,kind?(concept|theorem|…),aliases?,role:defined|stated|used|exercised,"
-                       "definition?{text 原句,uses[看懂它必须先会的概念]},summary?}], formulas[{idx,latex}](按 kj_page.boxes 的 idx，需看页图), "
-                       "figures[{idx,desc}], exercises[{label,concepts[]}], pitfalls[{text,concept}]}。"
-                       "程序建节点/绑编号/登定义与前置/写回公式图描述/打标记，返回报告。重交覆盖。", _t_kj_page_submit),
-    "kj_page_brief": ("看某页的分析结果：页标注、出现的节点及掌握度、公式 LaTeX、图描述。args {page?, book?}。", _t_kj_page_brief),
+    "kj_page": ("★页级分析。op=submit：交一页的分析（read_page 返回 kj_page.status=unanalyzed 时：先回答用户，答完在同一轮里调它）——"
+                "args {op:'submit', book?,page?(不传=当前书当前页), summary, kind[], notation[{symbol,meaning,concept}], "
+                "concepts[{name,node_id?,qid?,kind?(concept|theorem|…),aliases?,role:defined|stated|used|exercised,"
+                "definition?{text 原句,uses[看懂它必须先会的概念]},summary?}], formulas[{idx,latex}](按 kj_page.boxes 的 idx，需看页图), "
+                "figures[{idx,desc}], exercises[{label,concepts[]}], pitfalls[{text,concept}]}；程序建节点/绑编号/登定义与前置/写回公式图描述/打标记，重交覆盖。"
+                "op=brief：看某页的分析结果（页标注、出现的节点及掌握度、公式 LaTeX、图描述），args {op:'brief', page?, book?}。", _t_kj_page),
     "kj_node": ("读一个知识节点：分类位置、前置/后续、定义原文出处、记录摘要、卡片、掌握度、准备度、weak/unknown 前置、"
                 "next_hint（建议动作代码）。学习排查第 1 步就是它。args {node_id}。", _t_kj_node),
     "kj_browse": ("按分类一层层浏览节点（渐进式披露，不要一次读全部）。不给 parent=根；给 parent=下级。args {parent?}。", _t_kj_browse),
@@ -6701,7 +6716,7 @@ _TOOL_NAMES_BY_NAMESPACE = {
     },
     "kj": {
         "kj_search", "kj_node", "kj_browse", "kj_register", "kj_relation",
-        "kj_quiz", "kj_quiz_result", "kj_self_assess",
+        "kj_quiz", "kj_quiz_result", "kj_self_assess", "kj_page",
     },
 }
 

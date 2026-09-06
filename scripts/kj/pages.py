@@ -32,8 +32,9 @@ ANALYSIS_VERSION = 1
 _HEX16 = re.compile(r"^[0-9a-f]{16}$")
 CONCEPT_ROLES = ("defined", "stated", "used", "exercised")
 
+DEFAULT_SUBMIT_TOOL = "kj_page_submit"
 UNANALYZED_HINT = (
-    "这一页还没做过分析。先回答用户的问题；答完后在同一轮里用 kj_page_submit 交一份本页分析："
+    "这一页还没做过分析。先回答用户的问题；答完后在同一轮里用 {tool} 交一份本页分析："
     "summary（这页在干什么）、kind（definition/theorem/proof/example/exercise/prose 多选）、"
     "notation（记号→含义→所属概念）、concepts（这页定义/陈述/用到/练到的概念；被定义或被陈述的带 definition{text: 原句, uses: 看懂它必须先会的概念}；"
     "定理、引理也是概念，kind=theorem；能确定公共编号就带 qid）、formulas（按 boxes 里的 idx 填 LaTeX，需看页图，没看图就不填）、"
@@ -42,7 +43,7 @@ UNANALYZED_HINT = (
 )
 ANALYZED_HINT = (
     "这一页已分析过：下面是页标注、出现的节点及其掌握度与准备度、公式 LaTeX、图描述，直接用，不必重读整页；"
-    "发现有误可用 kj_page_submit 重交覆盖。"
+    "发现有误可用 {tool} 重交覆盖。"
 )
 
 
@@ -441,16 +442,18 @@ def brief(ledger: Ledger, book: Any, page: Any) -> dict:
     return st
 
 
-def snapshot_block(ledger: Ledger, book: Any, page: Any) -> dict:
-    """附在整页快照后面的块：未分析 → 指示 + YOLO 框；已分析 → brief + 提示。所有给出整页内容的表面都调这一个函数。"""
+def snapshot_block(ledger: Ledger, book: Any, page: Any, *, submit_tool: str | None = None) -> dict:
+    """附在整页快照后面的块：未分析 → 指示 + YOLO 框；已分析 → brief + 提示。所有给出整页内容的表面都调这一个函数；
+    submit_tool = 该表面上提交工具的叫法（侧栏 kj_page(op=submit)，MCP kj_page_submit）。"""
+    tool = submit_tool or DEFAULT_SUBMIT_TOOL
     st = status(ledger, book, page)
     if st["analyzed"]:
         b = brief(ledger, book, page)
         b["status"] = "analyzed"
-        b["instruction"] = ANALYZED_HINT
+        b["instruction"] = ANALYZED_HINT.replace("{tool}", tool)   # 提示文本里有 {text,…} 花括号，不能 format
         return b
     boxes = page_boxes(ledger, st["book"], st["page"])
-    return {"status": "unanalyzed", "book": st["book"], "page": st["page"], "instruction": UNANALYZED_HINT,
+    return {"status": "unanalyzed", "book": st["book"], "page": st["page"], "instruction": UNANALYZED_HINT.replace("{tool}", tool),
             "boxes": {"formulas": [{"idx": f["idx"], "bbox": f["bbox"]} for f in boxes["formulas"]],
                       "figures": [{"idx": f["idx"], "bbox": f["bbox"], "caption": f["caption"]} for f in boxes["figures"]],
                       "sidecar": boxes["sidecar"]}}

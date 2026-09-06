@@ -167,7 +167,7 @@ def kj_page_brief():
 
 @bp.route("/page/block")
 def kj_page_block():
-    return _reply(_svc().page_block(_book_param(), request.args.get("page", 0)))
+    return _reply(_svc().page_block(_book_param(), request.args.get("page", 0), submit_tool=request.args.get("tool") or None))
 
 
 @bp.route("/page/submit", methods=["POST"])

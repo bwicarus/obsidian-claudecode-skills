@@ -308,9 +308,9 @@ class KJService:
     def page_brief(self, book: Any, page: Any) -> dict:
         return self._run(lambda: {"ok": True, **PG.brief(self.ledger, book, page)})
 
-    def page_block(self, book: Any, page: Any) -> dict:
+    def page_block(self, book: Any, page: Any, *, submit_tool: str | None = None) -> dict:
         """附在整页快照后的块（未分析=指示+YOLO 框；已分析=brief+提示）。所有给整页内容的表面都走这一个。"""
-        return self._run(lambda: {"ok": True, **PG.snapshot_block(self.ledger, book, page)})
+        return self._run(lambda: {"ok": True, **PG.snapshot_block(self.ledger, book, page, submit_tool=submit_tool)})
 
     def page_submit(self, payload: dict) -> dict:
         def go():

@@ -222,7 +222,7 @@ Wikidata 没有教学前置（§6 量过：能当挂点当不了网），前置�
 等每页 token 消耗量清楚（估：页图 1.3~1.6k + 文字 0.5~0.8k + 输出 0.6~1k）再谈自动。
 书的键 = `pdf_reader._book_sha` 口径 sha1(绝对路径)[:16]；HTTP 侧 `file=` 相对路径由 `kj_nodes._book_param` 拼成绝对路径。
 接口：CLI `page-status / page-brief / page-block / page-submit --json / book-pages`；HTTP `GET /kj/api/page/{status,brief,block}`、
-`POST /kj/api/page/submit`、`GET /kj/api/book/pages`；助手工具 `kj_page_submit / kj_page_brief`；MCP 同名工具。
+`POST /kj/api/page/submit`、`GET /kj/api/book/pages`；助手工具 `kj_page`（`op=submit|brief`，命名空间每组最多 9 个工具，故并成一个）；MCP `kj_page_submit / kj_page_brief`。提示里的提交工具名由表面传入（`snapshot_block(submit_tool=)` / HTTP `?tool=`）。
 待接：桥 `reader_context_snapshot`（C#，需调 Flask 页块）、YOLO 环境搬 Windows（原在 Pi，两条 timer 已随 Pi 停）。
 
 ## 8. 维护
