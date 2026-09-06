@@ -36,6 +36,8 @@ targets:
           - BWReader.entitlements
       - path: Shared/ReaderNativeBridgeContract.swift
       - path: Shared/ReaderRealtimeCredentialCore.swift
+      # 服务器设备令牌的共享 Keychain 存取（2026-09-06）：App 写、扩展读。两个 target 都要列。
+      - path: Shared/ReaderAccountTokenCore.swift
       - path: Shared/ReaderSharedSnapshot.swift
       - path: Shared/ReaderLocalNoteBridge.swift
       # 离线词典的核心类型（ReaderOfflineDictionaryInfo / Error / Store）。
@@ -100,6 +102,7 @@ targets:
       - path: Extension/SafariWebExtensionHandler.swift
       - path: Shared/ReaderNativeBridgeContract.swift
       - path: Shared/ReaderRealtimeCredentialCore.swift
+      - path: Shared/ReaderAccountTokenCore.swift
       - path: Shared/ReaderSharedSnapshot.swift
       - path: Shared/ReaderLocalNoteBridge.swift
       # 离线词典的只读核心：扩展查词走本地词典而不是打 Pi（C 组 #19）。

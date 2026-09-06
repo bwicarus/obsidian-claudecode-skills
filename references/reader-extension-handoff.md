@@ -761,3 +761,22 @@ generation。既有内容寻址书籍别名的不可变 release 身份限制未�
 同一本书的离屏页可直接锚定。Direct 只对稳定 page-chars/learning-card mutation 持久排队，
 以确定性身份和权威列表水合实现幂等恢复；手动自由卡绑定只对网络/5xx 使用同一 ID 重试一次，
 4xx 与未知写入结果继续 fail closed。ReaderPC 协议与数据 schema 未变。
+
+## 2026-09-06 补：扩展账户 = App 登录后铸的设备令牌；服务器 = Windows 桥
+
+- **症状**：iPad 上扩展弹窗一直报「设备令牌无效，服务器没有返回账户证明」。原因两层：
+  ① 09-02 把 App 的 10 处 Pi 主机常量都切到 `bwicarus-2` 时，扩展这边（`background.js` 的 ORIGIN、
+  `manifest.json` 的 host_permissions、`src/facade.js` 的相对路径重写、`package_safari.py` /
+  `handoff_check.py` / `release_preflight.py` 的校验常量）一处都没动，token-owner 打到已停机的 Pi，
+  拿回的是登录页 HTML；② 就算服务器对了，弹窗仍要用户去 /profile/ 复制令牌粘贴，而"先打开一次已登录
+  的书籍 PWA"那条前置早已随 PWA 退役。
+- **现在**：App 登录服务器（`ReaderPiLoginView` 跳出登录流程那一刻）或启动时（幂等），
+  `ReaderAccountTokenProvisioner` 用 App 网站数据存储里的会话 cookie 调服务端现成的 `POST /api/tokens`
+  铸一枚设备令牌，存进与 Realtime 凭证同一个签名 Keychain 访问组（`ReaderAccountTokenStore`）。
+  扩展 background 经 native messaging 的 `account.token` 取来，走跟手工粘贴**完全相同**的路径：
+  `/api/reader/token-owner` 换账户证明 → `rememberVerifiedAccount(namespace, "", "app-token")`
+  → 账户凭据存储。弹窗打开发现没令牌就自动去要；没有账户上下文时 background 也先问 App。
+  手工粘贴收进折叠区当备用。
+- **纪律**：服务器主机常量在扩展里有六处副本（上面列的），改一处不等于改完 ——
+  `extension-app-autologin.contract.test.mjs` 断言 background / manifest / facade / web-adapter 里
+  不再出现 Pi 主机。令牌从不回网页：native handler 只回给 background，background 只写账户凭据存储。

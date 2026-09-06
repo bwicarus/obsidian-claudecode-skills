@@ -12,7 +12,7 @@ from playwright.sync_api import sync_playwright
 
 EXT = pathlib.Path(__file__).resolve().parent
 from browser_exe import CHROME
-URL = "https://bwicarus.taile44d0c.ts.net/pdf/view?file=contract.pdf"
+URL = "https://bwicarus-2.taile44d0c.ts.net/pdf/view?file=contract.pdf"
 EXPECTED_VERSION = json.loads(
     (EXT / "manifest.json").read_text(encoding="utf-8")
 )["version"]
@@ -153,7 +153,7 @@ def main() -> None:
             )
             try:
                 context.route(
-                    "https://bwicarus.taile44d0c.ts.net/pdf/view**",
+                    "https://bwicarus-2.taile44d0c.ts.net/pdf/view**",
                     lambda route: route.fulfill(
                         status=200,
                         content_type="text/html; charset=utf-8",

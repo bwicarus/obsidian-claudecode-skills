@@ -10,20 +10,20 @@
     "offscreen"
   ],
   "host_permissions": [
-    "https://bwicarus.taile44d0c.ts.net/*",
+    "https://bwicarus-2.taile44d0c.ts.net/*",
     "https://api.openai.com/*"
   ],
   "content_scripts": [
     {
       "matches": [
-        "https://bwicarus.taile44d0c.ts.net/pdf/view",
-        "https://bwicarus.taile44d0c.ts.net/pdf/view?*",
-        "https://bwicarus.taile44d0c.ts.net/pdf/epub/view",
-        "https://bwicarus.taile44d0c.ts.net/pdf/epub/view?*",
-        "https://bwicarus.taile44d0c.ts.net/pdf/html/view",
-        "https://bwicarus.taile44d0c.ts.net/pdf/html/view?*",
-        "https://bwicarus.taile44d0c.ts.net/pdf/fav/open",
-        "https://bwicarus.taile44d0c.ts.net/pdf/fav/open?*"
+        "https://bwicarus-2.taile44d0c.ts.net/pdf/view",
+        "https://bwicarus-2.taile44d0c.ts.net/pdf/view?*",
+        "https://bwicarus-2.taile44d0c.ts.net/pdf/epub/view",
+        "https://bwicarus-2.taile44d0c.ts.net/pdf/epub/view?*",
+        "https://bwicarus-2.taile44d0c.ts.net/pdf/html/view",
+        "https://bwicarus-2.taile44d0c.ts.net/pdf/html/view?*",
+        "https://bwicarus-2.taile44d0c.ts.net/pdf/fav/open",
+        "https://bwicarus-2.taile44d0c.ts.net/pdf/fav/open?*"
       ],
       "js": [
         "src/pwa-marker.js"

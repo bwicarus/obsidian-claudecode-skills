@@ -93,7 +93,7 @@ const MANIFEST = JSON.parse(readFileSync(
   new URL("../../extensions/bw-reader-webext/manifest.json", import.meta.url),
   "utf8",
 ));
-const ORIGIN = "https://bwicarus.taile44d0c.ts.net";
+const ORIGIN = "https://bwicarus-2.taile44d0c.ts.net";
 const NAMESPACE = `acct-v1-${"b".repeat(64)}`;
 const OTHER_NAMESPACE = `acct-v1-${"c".repeat(64)}`;
 const TICKET_EXPIRES_AT = Math.floor(Date.now() / 1000) + 3600;
@@ -6517,7 +6517,7 @@ test("bw-ws 严格限制 voice-rt 路由，并保持文本与二进制帧逐字�
   const socket = h.state.webSockets[0];
   assert.equal(
     socket.url,
-    "wss://bwicarus.taile44d0c.ts.net/voice-rt?mode=tts",
+    `${ORIGIN.replace("https://", "wss://")}/voice-rt?mode=tts`,
   );
   assert.equal(socket.binaryType, "arraybuffer");
 
@@ -6526,7 +6526,7 @@ test("bw-ws 严格限制 voice-rt 路由，并保持文本与二进制帧逐字�
     port.messages.find((message) => message.type === "open"),
     {
       type: "open",
-      url: "wss://bwicarus.taile44d0c.ts.net/voice-rt?mode=tts",
+      url: `${ORIGIN.replace("https://", "wss://")}/voice-rt?mode=tts`,
     },
   );
 

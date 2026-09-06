@@ -13,7 +13,9 @@
   "use strict";
   if (window.__bwPwaProviderOnly) return;
   if (window.__bwReaderDoc) return;   // 幂等
-  const ORIGIN = "https://bwicarus.taile44d0c.ts.net";
+  // 2026-09-06：服务器是 Windows 桥（bwicarus-2）。Pi 的 webapp 已停，留着旧地址等于所有
+  // /pdf/api/* 相对路径都打到一台不在的机器上。
+  const ORIGIN = "https://bwicarus-2.taile44d0c.ts.net";
   const OPENAI_REALTIME_CALL_URL = "https://api.openai.com/v1/realtime/calls";
 
   const localStoreCall = (type, key, value) => new Promise((resolve, reject) => {

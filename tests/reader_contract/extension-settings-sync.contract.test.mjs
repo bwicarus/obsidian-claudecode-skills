@@ -7,7 +7,7 @@ const SOURCE = readFileSync(
   new URL("../../extensions/bw-reader-webext/src/settings-sync.js", import.meta.url),
   "utf8",
 );
-const ORIGIN = "https://bwicarus.taile44d0c.ts.net";
+const ORIGIN = "https://bwicarus-2.taile44d0c.ts.net";
 const CONTRACT = "preference-store/1";
 const KEY = "bwReaderExtensionPreferencesV2";
 const tick = () => new Promise((resolve) => setImmediate(resolve));

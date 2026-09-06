@@ -271,3 +271,12 @@ node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 b
   新增 `-Command status`。技能说明同步改写，默认提示词不再说"并同步"。
 - 判据：**谁拥有同步就只让谁同步**。任何脚本在常驻同步的机器上都不该再起一次性同步；
   报告要把"落盘"和"送达"分开说，跳过同步时不能输出"已同步"。
+
+## 2026-09-06 补：搬服务器时，扩展的主机常量没跟着 App 一起搬
+
+- 现象：iPad 扩展弹窗报「设备令牌无效，服务器没有返回账户证明」。09-02 把 App 的 Pi 主机常量全切到
+  Windows 桥，扩展这边六处副本（background ORIGIN、manifest host_permissions、facade 相对路径重写、
+  package_safari / handoff_check / release_preflight 的校验常量）一处没动，token-owner 打到已停机的 Pi。
+- 判据：**同一个"服务器在哪"的事实在仓库里有几份，搬迁就要数几份**。App、扩展、打包器、门禁各有一份，
+  而且扩展那几份彼此还互相校验（manifest 对 package_safari），少改一处会在打包时才炸。
+  这次顺手把"让用户去开已退役的 PWA 确认账户"也换成了 App 登录后自动取令牌。

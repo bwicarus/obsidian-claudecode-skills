@@ -22,7 +22,9 @@ if (typeof importScripts === "function") {
   );
 }
 
-const ORIGIN = "https://bwicarus.taile44d0c.ts.net";
+// 2026-09-06：账户与 API 的服务器是 Windows 桥（bwicarus-2）。Pi 的 webapp 已停 ——
+// 留着旧地址时 token-owner 拿回的是登录页 HTML，弹窗就一直报"服务器没有返回账户证明"。
+const ORIGIN = "https://bwicarus-2.taile44d0c.ts.net";
 const interactionPolicy = globalThis.BWReaderRuntime?.interactionPolicy;
 if (
   !interactionPolicy ||
@@ -164,7 +166,9 @@ const NATIVE_APP_ACTIONS = new Set([
   "realtime.status",
   "realtime.mint",
   "realtime.image",
-  "realtime.hangup"
+  "realtime.hangup",
+  // App 登录后替扩展铸的服务器设备令牌（2026-09-06）：扩展自动登录靠它。
+  "account.token"
 ]);
 const NATIVE_APP_KINDS = new Set([
   "codex-desktop",
@@ -217,12 +221,18 @@ const LOCAL_STORAGE_KEYS = new Set([
 const PAGE_CARD_PRESENTATION_STORAGE_KEY = "pageCardPresentationV1";
 const MAX_LOCAL_STORAGE_VALUE_BYTES = 4 * 1024 * 1024;
 const ACCOUNT_MESSAGES = new Set([
+  "BW_ACCOUNT_FROM_APP",
   "BW_ACCOUNT_STATUS",
   "BW_ACCOUNT_TOKEN_SAVE",
   "BW_ACCOUNT_TOKEN_TEST",
   "BW_SYNC_STATUS"
 ]);
 const PUBLIC_ACCOUNT_ERROR_CODES = new Set([
+  // App 自动登录这条路上的失败都要让用户看见原文：哪一步没走通决定他该去做什么。
+  "BW_ACCOUNT_APP_NOT_LOGGED_IN",
+  "BW_ACCOUNT_APP_ORIGIN_MISMATCH",
+  "BW_NATIVE_APP_UNAVAILABLE",
+  "BW_NATIVE_APP_NOT_SUPPORTED",
   "BW_ACCOUNT_ACTIVE_TAB",
   "BW_ACCOUNT_CONTEXT_UNAVAILABLE",
   "BW_ACCOUNT_CONTEXT_STALE",
@@ -772,7 +782,7 @@ const accountStorage = accountStorageFactory.create({
 });
 const PROVIDER_PROTOCOL = "bw-reader-services/1";
 const TRUSTED_PWA_ORIGINS = new Set([
-  "https://bwicarus.taile44d0c.ts.net"
+  "https://bwicarus-2.taile44d0c.ts.net"
 ]);
 const TRUSTED_PWA_PATHS = new Set([
   "/pdf/view",
@@ -960,7 +970,7 @@ function serializePersistentAccount(operation) {
   persistentAccountTransition = current.catch(() => {});
   return current;
 }
-async function rememberVerifiedAccount(namespace, deviceFamilyId = "") {
+async function rememberVerifiedAccount(namespace, deviceFamilyId = "", via = "provider") {
   namespace = safeNamespace(namespace);
   deviceFamilyId = checkedDeviceFamilyId(deviceFamilyId, true);
   return serializePersistentAccount(async () => {
@@ -989,7 +999,10 @@ async function rememberVerifiedAccount(namespace, deviceFamilyId = "") {
           namespace,
           deviceFamilyId: persistentDeviceFamilyId,
           verifiedAt: Date.now(),
-          source: "provider-ticket"
+          source: "provider-ticket",
+          // 证明是怎么来的：provider（书籍 PWA 页）还是 app-token（App 登录后铸的令牌）。
+          // source 保持 provider-ticket 是账户上下文运行时认的身份，不动。
+          via
         }
       });
     } catch (error) {
@@ -1025,7 +1038,7 @@ async function ensurePersistentAccount() {
       record.source !== "provider-ticket"
     ) {
       throw Object.assign(new Error(
-        "请先打开一次已登录的 BW 书籍 PWA，让扩展确认当前账户"
+        "扩展还没有确认当前账户：先在 BWReader App 里登录服务器，扩展会自动取得登录"
       ), {
         code: "BW_ACCOUNT_CONTEXT_UNAVAILABLE"
       });
@@ -4390,19 +4403,29 @@ if (chrome.alarms && chrome.alarms.onAlarm) {
     void startActiveProviderSync("periodic-alarm", { runNow: true });
   });
 }
+// 启动时静默向 App 要一次登录：没账户或没令牌才会真的去问，有就直接返回。
+// 失败不打扰（App 没登录、非 Safari 环境没有原生桥）—— 弹窗打开时会再试并把原因摆出来。
+function adoptAppAccountTokenSilently(reason) {
+  adoptAppAccountTokenIfNeeded(reason).catch((error) => {
+    console.warn("[bw] app account token not adopted:", error?.code || error);
+  });
+}
 if (chrome.runtime.onInstalled) {
   chrome.runtime.onInstalled.addListener(() => {
     ensureProviderSyncAlarm();
+    adoptAppAccountTokenSilently("extension-installed");
     void startActiveProviderSync("extension-installed", { runNow: true });
   });
 }
 if (chrome.runtime.onStartup) {
   chrome.runtime.onStartup.addListener(() => {
     ensureProviderSyncAlarm();
+    adoptAppAccountTokenSilently("browser-startup");
     void startActiveProviderSync("browser-startup", { runNow: true });
   });
 }
 ensureProviderSyncAlarm();
+adoptAppAccountTokenSilently("worker-start");
 void startActiveProviderSync("worker-start", { runNow: true });
 
 // ── 账户分区缓存：旧 dictCache/webTrCacheV1 只留在隔离区，不读取、不迁移、不删除。──
@@ -7213,21 +7236,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;   // 异步 sendResponse
 });
 
-async function verifyTokenOwner(captured, token) {
+// 拿令牌去服务器换"账户证明"（storage_namespace）。手工粘贴与 App 自动登录共用一条路。
+async function fetchTokenOwnerNamespace(token, fence = () => {}) {
   token = String(token || "").trim();
   if (!token || token.length > 8192) {
     throw Object.assign(new Error("请输入有效的设备令牌"), {
       code: "BW_ACCOUNT_TOKEN_INVALID"
     });
   }
-  fenceCapturedAccount(captured);
+  fence();
   const response = await fetch(ORIGIN + "/api/reader/token-owner", {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
     credentials: "omit",
     cache: "no-store"
   });
-  fenceCapturedAccount(captured);
+  fence();
   const contentType = response.headers.get("Content-Type") || "";
   if (response.redirected || !contentType.includes("application/json")) {
     throw Object.assign(new Error("设备令牌无效，服务器没有返回账户证明"), {
@@ -7238,12 +7262,12 @@ async function verifyTokenOwner(captured, token) {
   try {
     data = await response.json();
   } catch (_) {
-    fenceCapturedAccount(captured);
+    fence();
     throw Object.assign(new Error("设备令牌验证失败"), {
       code: "BW_ACCOUNT_TOKEN_INVALID"
     });
   }
-  fenceCapturedAccount(captured);
+  fence();
   if (!response.ok || data?.ok !== true) {
     // 服务器错误文本不向 popup 透传：即使上游错误地回显 Authorization，
     // 扩展也不能把用户刚粘贴的 token 明文带回页面或弹窗。
@@ -7251,12 +7275,80 @@ async function verifyTokenOwner(captured, token) {
       code: "BW_ACCOUNT_TOKEN_INVALID"
     });
   }
-  if (String(data.storage_namespace || "") !== captured.lease.namespace) {
+  return String(data.storage_namespace || "");
+}
+
+async function verifyTokenOwner(captured, token) {
+  const namespace = await fetchTokenOwnerNamespace(
+    token,
+    () => fenceCapturedAccount(captured)
+  );
+  if (namespace !== captured.lease.namespace) {
     throw Object.assign(new Error("设备令牌不属于当前阅读器账户，已拒绝保存"), {
       code: "BW_ACCOUNT_TOKEN_OWNER_MISMATCH"
     });
   }
   return true;
+}
+
+// ── App 登录 → 扩展自动登录（2026-09-06 用户："就不能设计为 App 登录后扩展自动登录么"）──
+// App 登录服务器后替扩展铸一枚设备令牌存进共享 Keychain（ReaderAccountTokenProvisioner）；
+// 这里经 native messaging 取来，走跟手工粘贴**完全相同**的路径：token-owner 换账户证明 →
+// 建立/确认账户上下文 → 存进账户凭据存储。令牌只留在 background，不回网页、不进弹窗。
+function nativeAccountTokenRequestId() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return "acct-" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function adoptAppAccountToken(reason) {
+  const response = await sendSafariNativeMessage({
+    contract: NATIVE_APP_CONTRACT,
+    action: "account.token",
+    requestId: nativeAccountTokenRequestId()
+  });
+  if (!response || typeof response !== "object" || response.ok !== true) {
+    const code = String(response?.code || "");
+    if (code === "BW_ACCOUNT_APP_NOT_LOGGED_IN") {
+      throw Object.assign(new Error(
+        "BWReader App 尚未登录服务器；先在 App 里登录一次，扩展会自动取得登录"
+      ), { code });
+    }
+    throw Object.assign(new Error("无法从 BWReader App 取得登录"), {
+      code: "BW_NATIVE_APP_UNAVAILABLE"
+    });
+  }
+  const token = String(response.token || "").trim();
+  if (String(response.origin || "") !== ORIGIN) {
+    throw Object.assign(new Error("App 登录的服务器与扩展配置的不是同一台"), {
+      code: "BW_ACCOUNT_APP_ORIGIN_MISMATCH"
+    });
+  }
+  const namespace = await fetchTokenOwnerNamespace(token);
+  await rememberVerifiedAccount(namespace, "", "app-token");
+  const captured = await capturePersistentAccount();
+  await accountStorage.saveVerifiedToken(
+    captured.entry.accountContext,
+    captured.lease,
+    token
+  );
+  fenceCapturedAccount(captured);
+  void startActiveProviderSync(reason, { captured, runNow: true });
+  void promoteDirectHost(reason);
+  return captured;
+}
+// 没有账户或没有令牌时才去问 App；有就什么都不做。启动时静默跑一次。
+async function adoptAppAccountTokenIfNeeded(reason) {
+  try {
+    const captured = await capturePersistentAccount();
+    const credential = await accountStorage.credentialStatus(
+      captured.entry.accountContext,
+      captured.lease
+    );
+    if (credential?.configured) return null;
+  } catch (error) {
+    if (error?.code !== "BW_ACCOUNT_CONTEXT_UNAVAILABLE") throw error;
+  }
+  return adoptAppAccountToken(reason);
 }
 
 async function accountCredentialStatus(captured) {
@@ -7280,6 +7372,15 @@ async function accountCredentialStatus(captured) {
 }
 
 async function handleAccountMessage(message, sender) {
+  if (message.type === "BW_ACCOUNT_FROM_APP") {
+    if (!isPopupSender(sender)) {
+      throw Object.assign(new Error("账户凭据只能由扩展弹窗管理"), {
+        code: "BW_ACCOUNT_POPUP_REQUIRED"
+      });
+    }
+    const captured = await adoptAppAccountToken("app-token-popup");
+    return accountCredentialStatus(captured);
+  }
   if (
     [
       "BW_ACCOUNT_STATUS",
@@ -7289,7 +7390,14 @@ async function handleAccountMessage(message, sender) {
     ]
       .includes(message.type)
   ) {
-    const captured = await captureProviderForPopup(sender, message.target || {});
+    let captured;
+    try {
+      captured = await captureProviderForPopup(sender, message.target || {});
+    } catch (error) {
+      // 还没有账户上下文（新装 / 旧 PWA 证明已失效）：先问 App 要登录，再继续。
+      if (error?.code !== "BW_ACCOUNT_CONTEXT_UNAVAILABLE") throw error;
+      captured = await adoptAppAccountToken("app-token-auto");
+    }
     if (message.type === "BW_SYNC_STATUS") {
       return (await providerSyncControlFor(captured)).status();
     }

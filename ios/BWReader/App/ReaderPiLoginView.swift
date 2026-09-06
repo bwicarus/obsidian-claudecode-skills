@@ -10,7 +10,17 @@ struct ReaderPiLoginView: View {
 
     var body: some View {
         NavigationStack {
-            ReaderPiLoginWebView(dataStore: dataStore) { signedIn = true }
+            ReaderPiLoginWebView(dataStore: dataStore) {
+                signedIn = true
+                // 登录成功的同一刻替 Safari 扩展铸设备令牌（2026-09-06 用户：
+                // App 登录后扩展应自动登录）。失败只记日志，不打断这里的"已登录"提示。
+                Task {
+                    await ReaderAccountTokenProvisioner.shared.ensureToken(
+                        dataStore: dataStore,
+                        reason: "login"
+                    )
+                }
+            }
                 .ignoresSafeArea(edges: .bottom)
                 .navigationTitle("登录服务器")
                 .navigationBarTitleDisplayMode(.inline)

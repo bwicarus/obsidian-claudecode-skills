@@ -69,7 +69,8 @@ BACKGROUND_SCRIPTS = (
     "background.js",
 )
 BACKGROUND_IMPORTS = BACKGROUND_SCRIPTS[:-1]
-ACTIVE_ORIGIN = "https://bwicarus.taile44d0c.ts.net/"
+# 2026-09-06：服务器是 Windows 桥（bwicarus-2）；Pi 的 webapp 已停。
+ACTIVE_ORIGIN = "https://bwicarus-2.taile44d0c.ts.net/"
 # The Windows bridge. Narrow on purpose: one named host, nothing wildcarded.
 #
 # The extension already talks to this machine -- the computer-voice link has run

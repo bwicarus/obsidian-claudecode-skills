@@ -19,17 +19,26 @@
     #sync-conflicts { margin: 7px 0 0; padding-left: 18px; color: #555; font-size: 12px; }
     [hidden] { display: none !important; }
     .hint { margin-top: 12px; font-size: 12px; color: #888; line-height: 1.5; }
+    .manual { margin-top: 10px; }
+    .manual summary { font-size: 12px; color: #666; cursor: pointer; }
+    .manual label { margin-top: 8px; }
   </style>
   <script src="popup.js" defer></script>
 </head>
 <body>
   <h3>BW网页伴读</h3>
-  <label for="token">设备令牌（Bearer token）</label>
-  <input id="token" type="password" autocomplete="off" placeholder="从 /profile/ 创建">
   <div class="row">
-    <button id="save">保存</button>
+    <button id="from-app">从 App 取得登录</button>
     <button id="test">测试连接</button>
   </div>
+  <details class="manual">
+    <summary>手工粘贴设备令牌（备用）</summary>
+    <label for="token">设备令牌（Bearer token）</label>
+    <input id="token" type="password" autocomplete="off" placeholder="通常不用填：App 登录后自动取得">
+    <div class="row">
+      <button id="save">保存</button>
+    </div>
+  </details>
   <p id="status"></p>
   <!-- No button: the page you are reading reports itself. Nothing to start, and
        nothing to keep open. -->
@@ -42,8 +51,8 @@
     <p id="sync-status">正在读取同步状态……</p>
     <ul id="sync-conflicts" hidden></ul>
   </section>
-  <p class="hint">首次使用请打开一次已登录的 BW 书籍 PWA，让扩展确认账户；
-    此后可以在任意网页管理和使用令牌。令牌只保存在扩展后台，
+  <p class="hint">在 BWReader App 里登录一次服务器，扩展会自动取得登录，不需要再复制令牌；
+    换了账号就再点一次「从 App 取得登录」。令牌只保存在扩展后台，
     不会返回网页或显示在弹窗中。</p>
 </body>
 </html>

@@ -171,7 +171,7 @@
         goToInBook: function (file, page) {
           try {
             window.open(
-              'https://bwicarus.taile44d0c.ts.net/pdf/view?file=' +
+              'https://bwicarus-2.taile44d0c.ts.net/pdf/view?file=' +
                 encodeURIComponent(String(file || '')) +
                 '&page=' + Math.max(1, parseInt(page, 10) || 1),
               '_blank'

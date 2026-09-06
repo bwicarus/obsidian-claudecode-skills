@@ -81,7 +81,8 @@ REQUIRED_RUNTIME_TESTS = {
     "text-hit-testing.contract.test.mjs",
     "web-sandbox.contract.test.mjs",
 }
-ACTIVE_PWA_ORIGIN = "https://bwicarus.taile44d0c.ts.net"
+# 2026-09-06：服务器是 Windows 桥（bwicarus-2）；Pi 的 webapp 已停。
+ACTIVE_PWA_ORIGIN = "https://bwicarus-2.taile44d0c.ts.net"
 TRUSTED_PWA_MATCHES = {
     f"{ACTIVE_PWA_ORIGIN}/pdf/view",
     f"{ACTIVE_PWA_ORIGIN}/pdf/view?*",

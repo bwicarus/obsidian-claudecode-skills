@@ -29,7 +29,8 @@ DEPLOY_ROOT = Path("/var/www/html/static/pdf")
 CHANNEL_FILENAME = "bw-reader-webext-test-channel.json"
 DEFAULT_DEPLOYED_CHANNEL = DEPLOY_ROOT / CHANNEL_FILENAME
 
-OFFICIAL_ORIGIN = "https://bwicarus.taile44d0c.ts.net"
+# 2026-09-06：服务器是 Windows 桥（bwicarus-2）；Pi 的 webapp 已停。
+OFFICIAL_ORIGIN = "https://bwicarus-2.taile44d0c.ts.net"
 OFFICIAL_STATIC_PATH = "/static/pdf"
 OFFICIAL_STATIC_URL = OFFICIAL_ORIGIN + OFFICIAL_STATIC_PATH
 CHANNEL_SCHEMA = 1

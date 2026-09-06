@@ -143,6 +143,49 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 ))
             }
 
+        case "account.token":
+            // App 登录后替扩展铸的设备令牌（2026-09-06）。只回给扩展 background，
+            // 它走跟手工粘贴相同的 token-owner 校验与保存路径；网页拿不到。
+            guard exactKeys(
+                message,
+                required: ["contract", "action", "requestId"]
+            ) else {
+                complete(context, response: schemaFailure(
+                    action: action,
+                    requestID: requestID
+                ))
+                return
+            }
+            do {
+                guard let stored = try ReaderAccountTokenStore.shared.loadIfPresent() else {
+                    complete(context, response: failure(
+                        action: action,
+                        requestID: requestID,
+                        code: "BW_ACCOUNT_APP_NOT_LOGGED_IN",
+                        message: "BWReader App 尚未登录服务器；先在 App 里登录一次，扩展会自动取得令牌",
+                        retryable: true
+                    ))
+                    return
+                }
+                var response = baseResponse(
+                    action: action,
+                    requestID: requestID
+                )
+                response["origin"] = stored.origin
+                response["token"] = stored.token
+                response["label"] = stored.label
+                response["mintedAt"] = Int64(stored.mintedAt.timeIntervalSince1970 * 1_000)
+                complete(context, response: response)
+            } catch {
+                complete(context, response: failure(
+                    action: action,
+                    requestID: requestID,
+                    code: "BW_ACCOUNT_APP_KEYCHAIN",
+                    message: error.localizedDescription,
+                    retryable: true
+                ))
+            }
+
         case "realtime.status":
             guard exactKeys(
                 message,

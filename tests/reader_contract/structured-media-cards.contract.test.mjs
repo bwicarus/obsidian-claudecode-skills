@@ -220,7 +220,8 @@ test("sticky image cards normalize durable asset URLs before render and persiste
 test("ordinary-page extension images cross its fetch bridge instead of the host site", () => {
   assert.match(
     EXTENSION_FACADE,
-    /const ORIGIN = "https:\/\/bwicarus\.taile44d0c\.ts\.net"/,
+    // 2026-09-06 起服务器是 Windows 桥（bwicarus-2）；Pi 的 webapp 已停。
+    /const ORIGIN = "https:\/\/bwicarus-2\.taile44d0c\.ts\.net"/,
   );
   assert.match(
     EXTENSION_FACADE,

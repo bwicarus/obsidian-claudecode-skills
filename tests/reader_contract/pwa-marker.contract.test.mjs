@@ -7,7 +7,7 @@ const SOURCE = readFileSync(
   new URL("../../extensions/bw-reader-webext/src/pwa-marker.js", import.meta.url),
   "utf8",
 );
-const ORIGIN = "https://bwicarus.taile44d0c.ts.net";
+const ORIGIN = "https://bwicarus-2.taile44d0c.ts.net";
 
 function harness({
   path = "/pdf/view",

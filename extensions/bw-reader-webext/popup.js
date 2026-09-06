@@ -2,6 +2,7 @@ const tokenInput = document.querySelector("#token");
 const status = document.querySelector("#status");
 const saveButton = document.querySelector("#save");
 const testButton = document.querySelector("#test");
+const fromAppButton = document.querySelector("#from-app");
 const syncStatus = document.querySelector("#sync-status");
 const syncConflicts = document.querySelector("#sync-conflicts");
 
@@ -44,8 +45,29 @@ function renderStatus(data, prefix = "") {
   status.textContent = parts.join("\n");
   tokenInput.placeholder = credential.configured
     ? "已保存；如需更换，请粘贴新令牌"
-    : "从 /profile/ 创建并粘贴";
+    : "通常不用填：App 登录后自动取得";
   renderSyncStatus(data?.sync);
+}
+
+// App 登录 → 扩展自动登录（2026-09-06）。background 经原生桥向 App 要它铸好的设备令牌，
+// 再走跟手工粘贴相同的校验与保存。auto=true 是弹窗打开时发现没令牌的静默尝试。
+async function adoptFromApp(auto) {
+  if (fromAppButton) fromAppButton.disabled = true;
+  status.textContent = auto
+    ? "尚未保存令牌，正在从 BWReader App 取得登录……"
+    : "正在向 BWReader App 要登录……";
+  try {
+    const data = await accountMessage("BW_ACCOUNT_FROM_APP");
+    renderStatus(data, "✓ 已从 App 取得登录");
+    return true;
+  } catch (error) {
+    status.textContent = "✗ " + (error?.message || String(error)) +
+      (auto ? "\n（也可以在下方手工粘贴设备令牌）" : "");
+    renderSyncStatus(null);
+    return false;
+  } finally {
+    if (fromAppButton) fromAppButton.disabled = false;
+  }
 }
 
 function renderSyncStatus(value) {
@@ -107,12 +129,21 @@ function renderSyncStatus(value) {
 
 async function loadStatus() {
   status.textContent = "正在读取扩展当前账户……";
+  let data;
   try {
-    renderStatus(await accountMessage("BW_ACCOUNT_STATUS"));
+    // 没有账户上下文时 background 已经会先问 App；这里失败就是真失败，原文摆出来。
+    data = await accountMessage("BW_ACCOUNT_STATUS");
   } catch (error) {
     status.textContent = "✗ " + (error?.message || String(error));
     renderSyncStatus(null);
+    return;
   }
+  renderStatus(data);
+  if (!data?.credential?.configured) await adoptFromApp(true);
+}
+
+if (fromAppButton) {
+  fromAppButton.addEventListener("click", () => { void adoptFromApp(false); });
 }
 
 saveButton.addEventListener("click", async () => {

@@ -248,6 +248,13 @@ private struct ReaderRootView: View {
         .task {
             await restoreInitialLocalBook()
         }
+        .task {
+            // 早就登录过的老用户：启动时补铸一枚给 Safari 扩展的设备令牌（幂等，有就不动）。
+            await ReaderAccountTokenProvisioner.shared.ensureToken(
+                dataStore: reader.webView.configuration.websiteDataStore,
+                reason: "launch"
+            )
+        }
         .onOpenURL { url in
             if reader.handleAnkiMobileCallback(url) {
                 return
