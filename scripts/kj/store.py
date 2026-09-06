@@ -171,7 +171,9 @@ class Ledger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.public_path = Path(public_path) if public_path else self.path.with_name(self.path.stem + "-public" + self.path.suffix)
         self._lock = threading.RLock()
-        self.db = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)
+        # timeout=30：Flask、计划任务、导入脚本可能同时开这套库；碰到写锁等 30 秒而不是立刻 "database is locked"
+        # （2026-09-07 凌晨计划任务撞上 13.9 GB 公共目录建索引就是这么失败的）。
+        self.db = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None, timeout=30.0)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
