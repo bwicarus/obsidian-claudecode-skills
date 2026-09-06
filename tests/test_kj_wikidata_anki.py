@@ -77,6 +77,21 @@ class WikidataTests(unittest.TestCase):
         self.assertTrue(res["ok"], res)
         self.assertEqual(L.count("public_entities"), 2)
 
+    def test_search_ranking_prefers_concepts_over_papers_pages_and_new_ids(self):
+        """同名候选：精确标签优先；论文/消歧义页/单字条目压后；同分按 Q 号数值（老条目多为核心概念）。繁体标签当别名可被简体命中。"""
+        WD.upsert_entity(self.L, "Q109753558", {"zh": "熵"}, {"zh": "CJK 中日韓文字"}, {}, [("P31", "Q53764738", "normal")], source="t")
+        WD.upsert_entity(self.L, "Q45003", {"zh": "熵", "en": "entropy"}, {"zh": "热力学概念"}, {}, [("P31", "Q1936384", "normal")], source="t")
+        WD.upsert_entity(self.L, "Q67189383", {"zh": "熵分光光度法研究"}, {}, {}, [("P31", "Q13442814", "normal")], source="t")
+        WD.upsert_entity(self.L, "Q1", {"zh": "熵值"}, {}, {}, [("P31", "Q4167410", "normal")], source="t")
+        WD.upsert_entity(self.L, "Q2397319", {"zh": "牛頓第二運動定律", "zh-hans": "牛顿第二运动定律", "en": "Newton's second law"}, {}, {}, [], source="t")
+        hits = [h["qid"] for h in WD.search_public(self.L, "熵", limit=4)]
+        self.assertEqual(hits[0], "Q45003")
+        self.assertLess(hits.index("Q45003"), hits.index("Q109753558"))
+        self.assertLess(hits.index("Q109753558"), hits.index("Q67189383"))
+        self.assertEqual([h["qid"] for h in WD.search_public(self.L, "牛顿第二运动定律", limit=2)][0], "Q2397319")   # 简体别名命中繁体条目
+        self.assertEqual([h["qid"] for h in WD.search_public(self.L, "牛顿第二定律", limit=2)][0], "Q2397319")      # 缩短前缀兜底
+        self.assertEqual(WD.entity(self.L, "Q2397319")["aliases"]["zh"], ["牛顿第二运动定律"])
+
     def test_parse_entity_json_and_fetch_via_fake_http(self):
         doc = {"entities": {"Q1": {"labels": {"en": {"language": "en", "value": "one"}, "zh-hans": {"language": "zh-hans", "value": "一"}},
                                    "descriptions": {}, "aliases": {"ja": [{"language": "ja", "value": "いち"}]},

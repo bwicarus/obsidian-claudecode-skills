@@ -76,6 +76,12 @@ def _aliases(d: dict) -> dict[str, list[str]]:
 def _entity_tuple(qid: str, labels: dict, descriptions: dict, aliases: dict, now: int, source: str) -> tuple:
     al = _aliases(aliases)
     l_en, l_zh, l_ja = _pick(labels, "en"), _pick(labels, "zh"), _pick(labels, "ja")
+    # 其它中文变体标签（简/繁/港台）都当别名收进来：用户输简体"凯莱-哈密顿定理"要能撞到繁体标签的条目
+    for k in _ZH_FALLBACK:
+        v = labels.get(k)
+        v = v if isinstance(v, str) else (v.get("value") if isinstance(v, dict) else None)
+        if v and v != l_zh and v not in al.setdefault("zh", []):
+            al["zh"].append(v)
     text = " / ".join(x for x in [l_en, l_zh, l_ja] + sum(al.values(), []) if x)
     return (qid, l_en, l_zh, l_ja, _pick(descriptions, "en"), _pick(descriptions, "zh"), _pick(descriptions, "ja"),
             dumps(al), text, now, source)
@@ -171,15 +177,38 @@ SEARCH_DEMOTED_CLASSES = frozenset({
     "Q18918145",  # academic journal article
     "Q58632367",  # preprint
     "Q10885494",  # scientific journal article?
+    # 维基媒体自己的页面类型：分类页/消歧义页/列表/模板/项目页 —— 子集里有 120 万分类页、16 万消歧义页（2026-09-07 实测）
+    "Q4167836",   # Wikimedia category
+    "Q4167410",   # Wikimedia disambiguation page
+    "Q13406463",  # Wikimedia list article
+    "Q11266439",  # Wikimedia template
+    "Q14204246",  # Wikimedia project page
+    "Q17442446",  # Wikimedia internal item
+    "Q15184295",  # Wikimedia module
+    "Q17633526",  # Wikinews article
+    # 单个汉字/假名条目：查"熵"会先撞到"CJK 中日韩文字"而不是物理概念
+    "Q3595028",   # kanji
+    "Q53764738",  # CJK unified ideograph
+    "Q1374204",   # Chinese character? (variant)
+    "Q54932297",  # CJK character
 })
 _SEARCH_CANDIDATES = 80
+
+
+_SQUEEZE_RE = __import__("re").compile(r"[\s\-‐‑‒–—―－·・‧,，.。()（）\[\]【】「」『』:：;；'\"“”‘’]+")
+
+
+def _squeeze(s: str) -> str:
+    """去掉连接符/空格/标点，只留字母数字与汉字假名，用来做不计标点的匹配。"""
+    return _SQUEEZE_RE.sub("", s or "").lower()
 
 
 def _search_score(ledger: Ledger, e: dict, q_lower: str) -> tuple:
     labels = [x for x in (e.get("label_en"), e.get("label_zh"), e.get("label_ja")) if x]
     aliases = [a for vals in (e.get("aliases") or {}).values() for a in vals]
     names = [x.lower() for x in labels + aliases]
-    if any(n == q_lower for n in names):
+    q_sq = _squeeze(q_lower)
+    if any(n == q_lower for n in names) or any(_squeeze(n) == q_sq for n in names):
         tier = 0
     elif any(n.startswith(q_lower) for n in names):
         tier = 1
@@ -187,7 +216,12 @@ def _search_score(ledger: Ledger, e: dict, q_lower: str) -> tuple:
         tier = 2
     classes = {t for p, t, _ in claims_of(ledger, e["qid"]) if p == "P31"}
     penalty = 3 if classes & SEARCH_DEMOTED_CLASSES else 0
-    return (tier + penalty, len(e.get("label") or ""), e["qid"])
+    # 同分时按 Q 号**数值**排：老条目（小号）多是核心概念，新号多是论文/游戏/村镇。字符串比较会让 Q109753558 排在 Q45003 前面（"熵"实锤）。
+    try:
+        qnum = int(e["qid"][1:])
+    except ValueError:
+        qnum = 10**12
+    return (tier + penalty, len(e.get("label") or ""), qnum)
 
 
 def search_public(ledger: Ledger, q: str, limit: int = 8) -> list[dict]:
@@ -215,11 +249,29 @@ def search_public(ledger: Ledger, q: str, limit: int = 8) -> list[dict]:
         except Exception:
             pass
     # ④ 什么都没有才全表 LIKE（慢路径，只在短词且无命中时）
-    if not qids:
+    if not qids and len(q) <= 2:
         like = f"%{q}%"
         add(db.execute(
             "SELECT qid FROM public_entities WHERE label_zh LIKE ? OR label_en LIKE ? OR label_ja LIKE ? LIMIT ?",
             (like, like, like, _SEARCH_CANDIDATES)))
+    # ⑤ 仍没有：去掉连接符/空格后再试一次（"凯莱-哈密顿定理" vs "凯莱–哈密顿定理"），再逐字缩短前缀（"牛顿第二定律"→"牛顿第二"）
+    if not qids:
+        squeezed = _squeeze(q)
+        if squeezed != q and len(squeezed) >= 2:
+            return search_public(ledger, squeezed, limit)
+        for n in range(len(q) - 1, 1, -1):
+            prefix = q[:n]
+            hi2 = prefix + "￿"
+            for col in ("label_zh", "label_en", "label_ja"):
+                add(db.execute(f"SELECT qid FROM public_entities WHERE {col} >= ? AND {col} < ? LIMIT 30", (prefix, hi2)))
+            if len(prefix) >= 3:   # 别名（含简繁变体）只在全文里，前缀范围查询看不到
+                try:
+                    add(db.execute("SELECT qid FROM public_fts WHERE public_fts MATCH ? ORDER BY rank LIMIT 30",
+                                   ('"' + prefix.replace('"', '""') + '"',)))
+                except Exception:
+                    pass
+            if qids:
+                break
     q_lower = q.lower()
     scored = []
     for qid in qids[:_SEARCH_CANDIDATES * 2]:
