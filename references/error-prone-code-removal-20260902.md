@@ -280,3 +280,16 @@ node，结果 pwsh 自己的命令行也含这些字串 → 连自己和几个 b
 - 判据：**同一个"服务器在哪"的事实在仓库里有几份，搬迁就要数几份**。App、扩展、打包器、门禁各有一份，
   而且扩展那几份彼此还互相校验（manifest 对 package_safari），少改一处会在打包时才炸。
   这次顺手把"让用户去开已退役的 PWA 确认账户"也换成了 App 登录后自动取令牌。
+
+## 2026-09-06 补：Windows 直接跑源码树，部署清单里"改名落地"的模块就不存在
+
+- 现象：iPad 上扩展的沉浸式翻译全部 500，正文是 `No module named 'web_translate_protocol'`。
+  该模块在生产里是部署清单把 `scripts/vocab/translate.py` 改名落地后的名字；Windows 桥成为服务器后
+  Flask 直接跑源码树，没有经过那一步，于是按部署名 import 必失败。这条自 09-02 搬迁起就是坏的，
+  日志里只有 500 没有 traceback（handler 把异常折进了 JSON），所以没人看见。
+- 处理：`html_reader.py` 只在 `ModuleNotFoundError.name == "web_translate_protocol"` 时按清单记的源路径
+  **按文件**加载（不进 sys.path、不在仓库放同名文件 —— 清单测试禁止后者）；源路径常量与清单那条
+  `source_rel` 由 `test_reader_deploy_manifest.py` 钉住相等。实测 Windows 上 Google 后端一句译出 200。
+- 判据：**清单里凡是 `target_rel` 与源文件名不同的条目，在"跑源码树"的机器上都是一颗雷**。
+  这次查了另一颗 `card_improvement_service`，它的运行时自己处理了路径，没炸；以后加改名条目要同时想
+  "源码树上怎么找到它"。

@@ -89,6 +89,19 @@ class ReaderDeployManifestTests(unittest.TestCase):
             (manifest.ROOT / "_server_deploy" / "web_translate_protocol.py")
             .exists()
         )
+        # 2026-09-06：Windows 直接跑源码树时 html_reader 按路径兜底加载这个源文件；
+        # 它写的源路径必须与清单同一份，否则清单一改兜底就静默指向旧文件。
+        import re
+        html_reader_source = (
+            manifest.ROOT / "_server_deploy" / "html_reader.py"
+        ).read_text("utf-8")
+        declared = re.search(
+            r'^WEB_TRANSLATE_PROTOCOL_SOURCE_REL = "([^"]+)"$',
+            html_reader_source,
+            re.M,
+        )
+        self.assertIsNotNone(declared)
+        self.assertEqual(declared.group(1), translate.source_rel)
         service_matches = [
             entry
             for entry in self.entries

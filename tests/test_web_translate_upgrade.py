@@ -184,6 +184,31 @@ class WebTranslateSafetyBoundaryTest(unittest.TestCase):
         self.assertIn('import_module("web_translate_protocol")', route_source)
         self.assertNotIn("from translate import", route_source)
         self.assertNotIn('/ "scripts" / "vocab"', route_source)
+        # 2026-09-06：部署名不存在时只允许走这一个兜底，且只接"部署名本身不存在"。
+        self.assertIn("_protocol = _load_undeployed_protocol_module()", route_source)
+        self.assertIn('if missing.name != "web_translate_protocol":', route_source)
+
+    def test_undeployed_fallback_loads_manifest_source_by_path(self) -> None:
+        """Windows 桥直接跑源码树、没经过部署清单改名落地时，翻译不能 500（2026-09-06 实锤）。"""
+        import html_reader
+
+        saved = sys.modules.pop("web_translate_protocol", None)
+        try:
+            # 本测试模块把 CLAUDE_PROJECT 指到临时目录；兜底找的是真实仓库里的源文件。
+            with patch.object(html_reader, "_CLAUDE_DIR", ROOT):
+                module = html_reader._load_undeployed_protocol_module()
+            for name in ("ai_translate_batch", "gtranslate_batch", "translate", "_cache_get", "_cache_put"):
+                self.assertTrue(callable(getattr(module, name)), name)
+            self.assertIs(sys.modules["web_translate_protocol"], module)
+            self.assertEqual(
+                Path(module.__file__).resolve(),
+                (ROOT / html_reader.WEB_TRANSLATE_PROTOCOL_SOURCE_REL).resolve(),
+            )
+        finally:
+            sys.modules.pop("web_translate_protocol", None)
+            if saved is not None:
+                sys.modules["web_translate_protocol"] = saved
+        self.assertNotIn("scripts", [Path(p).name for p in sys.path], "兜底不许把 scripts 目录塞进 sys.path")
 
     def test_codex_profile_is_explicitly_downgraded_before_generation(self) -> None:
         with patch.object(assistant, "_resolve", return_value={

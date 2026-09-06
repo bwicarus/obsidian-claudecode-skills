@@ -21,9 +21,11 @@ register_html_reader 注入(safe_vault_path/obsidian_root/claude_dir),避免循�
 """
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 import secrets
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -70,6 +72,43 @@ from web_cache_store import (
 _safe_vault_path = None   # callable: vault 相对路径 → 安全绝对 Path 或 None
 _OBSIDIAN_ROOT = None     # Path: vault 根
 _CLAUDE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
+# 网页沉浸式翻译的后端模块，生产里叫 web_translate_protocol —— 那是部署清单
+# （scripts/reader_deploy_manifest.py）把下面这个源文件**改名落地**后的名字。
+# ⚠ 这里的源路径必须与清单里那条 target_rel="web_translate_protocol.py" 的 source_rel 一致，
+#   tests/test_reader_deploy_manifest.py 钉住两处相等。
+WEB_TRANSLATE_PROTOCOL_SOURCE_REL = "scripts/vocab/translate.py"
+
+
+def _load_undeployed_protocol_module():
+    """部署名 web_translate_protocol 不存在时，按清单记的源文件**按路径**加载它。
+
+    2026-09-06 实锤：Windows 桥成为服务器后 Flask 直接跑源码树，没有经过部署清单那一步
+    改名落地，于是 import_module("web_translate_protocol") 报 ModuleNotFoundError，
+    iPad 上扩展的沉浸式翻译全部 500。按路径加载不把 scripts/vocab 塞进 sys.path，
+    也不在仓库里放同名文件（清单测试禁止）；Pi 那种真部署过的机器走不到这里。
+    """
+    source = _CLAUDE_DIR / Path(WEB_TRANSLATE_PROTOCOL_SOURCE_REL)
+    if not source.is_file():
+        raise ModuleNotFoundError(
+            "web_translate_protocol 未部署，且清单源文件也不存在: " + str(source),
+            name="web_translate_protocol",
+        )
+    spec = importlib.util.spec_from_file_location("web_translate_protocol", source)
+    if spec is None or spec.loader is None:
+        raise ModuleNotFoundError(
+            "web_translate_protocol 源文件无法加载: " + str(source),
+            name="web_translate_protocol",
+        )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["web_translate_protocol"] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop("web_translate_protocol", None)
+        raise
+    return module
+
+
 _HTML_HL_DIR = None       # Path: state/html-highlights/(高亮 sidecar 目录)
 _HTML_HL_USER_DIR = None  # Path: state/html-highlights-by-user/<uid>/
 _HTML_HL_ACCOUNT_PATH = None  # callable(*parts): 经验证账户的统一 sidecar 路径
@@ -2186,11 +2225,17 @@ def register_html_reader(
         try:
             # 生产只认部署到 webapp 的模块名；不得再把开发仓库 scripts/vocab
             # 动态塞进 sys.path。测试可通过 register 的显式 module 注入唯一源码。
-            _protocol = (
-                web_translate_protocol_module
-                if web_translate_protocol_module is not None
-                else importlib.import_module("web_translate_protocol")
-            )
+            try:
+                _protocol = (
+                    web_translate_protocol_module
+                    if web_translate_protocol_module is not None
+                    else importlib.import_module("web_translate_protocol")
+                )
+            except ModuleNotFoundError as missing:
+                # 只接"部署名本身不存在"这一种；模块内部的导入错误照旧抛出去变 500 文本。
+                if missing.name != "web_translate_protocol":
+                    raise
+                _protocol = _load_undeployed_protocol_module()
             _ab = _protocol.ai_translate_batch
             _gb = _protocol.gtranslate_batch
             _tr = _protocol.translate
