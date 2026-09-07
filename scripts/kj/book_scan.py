@@ -72,7 +72,7 @@ class Status:
         self.data = dict(base)
         self.data.setdefault("contract", CONTRACT)
         self.data.setdefault("pages", {})
-        self.data.setdefault("tokens", {"input": 0, "cached": 0, "output": 0, "turns": 0})
+        self.data.setdefault("tokens", {"input": 0, "cached": 0, "cache_write": 0, "output": 0, "turns": 0})
         self.data.setdefault("errors", [])
         self.data["pid"] = os.getpid()
 
@@ -88,8 +88,11 @@ class Status:
         if not usage:
             return
         t = self.data["tokens"]
+        # Claude 的口径：input=未缓存输入，cached=缓存读取，cache_write=本轮新写进缓存的输入（首轮 4 万多都在这里）。
+        # 三项都记，不然总账看起来"输入 4"，把最贵的一项藏了（2026-09-07 实测）。
         t["input"] += int(usage.get("input") or 0)
         t["cached"] += int(usage.get("cached") or 0)
+        t["cache_write"] = t.get("cache_write", 0) + int(usage.get("cache_write") or 0)
         t["output"] += int(usage.get("output") or 0)
         t["turns"] += 1
 
@@ -234,6 +237,7 @@ class CodexSession:
             elif t == "turn.completed":
                 u = ev.get("usage") or {}
                 usage = {"input": u.get("input_tokens", 0), "cached": u.get("cached_input_tokens", 0),
+                         "cache_write": u.get("cache_write_input_tokens", 0),
                          "output": u.get("output_tokens", 0), "reasoning": u.get("reasoning_output_tokens", 0)}
         if r.returncode != 0 and not out_text:
             raise SessionError(f"codex rc={r.returncode}: {(r.stderr or '')[:300]}")
