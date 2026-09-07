@@ -1988,7 +1988,7 @@ class ReaderBookOcrService:
             formula = payload.get("formula")
             if (
                 not isinstance(formula, dict)
-                or set(formula) - {"schema", "bookId", "contentSha256", "formulas"}
+                or set(formula) - {"schema", "bookId", "contentSha256", "formulas", "figures"}
                 or formula.get("schema") != "reader-formula-regions/1"
                 or formula.get("bookId") != job.get("bookId")
                 or formula.get("contentSha256") != job.get("contentSha256")
@@ -2112,6 +2112,40 @@ class ReaderBookOcrService:
                 "executorLastSeenAtEpochMs": worker["lastSeenAtEpochMs"],
             }
             atomic_write_json(formula_path, {"formulas": normalized}, indent=None, mode=0o600)
+            # 图/表框（同一趟 DocLayout-YOLO 顺手留下的）：与公式同样严校验，落 pc-figures.json；旧 worker 不带 figures 也接受
+            figures_in = formula.get("figures")
+            figures_out: list[dict] = []
+            if figures_in is not None:
+                if not isinstance(figures_in, list) or len(figures_in) > 200_000:
+                    raise ReaderBookOcrError("invalid-worker-formula", "invalid PC OCR figure list", status=400)
+                for item in figures_in:
+                    if not isinstance(item, dict) or set(item) - {"page", "bbox", "conf", "cls"}:
+                        raise ReaderBookOcrError("invalid-worker-formula", "invalid PC OCR figure record", status=400)
+                    try:
+                        figure_page = int(item.get("page"))
+                        fbox = [float(number) for number in item.get("bbox")]
+                    except (TypeError, ValueError) as exc:
+                        raise ReaderBookOcrError("invalid-worker-formula", "invalid PC OCR figure geometry", status=400) from exc
+                    cls = str(item.get("cls") or "figure")
+                    if cls not in ("figure", "table"):
+                        raise ReaderBookOcrError("invalid-worker-formula", "invalid PC OCR figure class", status=400)
+                    fconf = item.get("conf")
+                    if fconf is not None:
+                        try:
+                            fconf = float(fconf)
+                        except (TypeError, ValueError) as exc:
+                            raise ReaderBookOcrError("invalid-worker-formula", "invalid PC OCR figure confidence", status=400) from exc
+                        if not math.isfinite(fconf) or fconf < 0 or fconf > 1:
+                            raise ReaderBookOcrError("invalid-worker-formula", "invalid PC OCR figure confidence", status=400)
+                    if (
+                        figure_page < 1 or figure_page > total_pages
+                        or len(fbox) != 4
+                        or not all(math.isfinite(number) and 0 <= number <= 1 for number in fbox)
+                        or fbox[0] >= fbox[2] or fbox[1] >= fbox[3]
+                    ):
+                        raise ReaderBookOcrError("invalid-worker-formula", "invalid PC OCR figure geometry", status=400)
+                    figures_out.append({"page": figure_page, "bbox": fbox, "conf": fconf, "cls": cls})
+            atomic_write_json(job_dir / "pc-figures.json", {"figures": figures_out}, indent=None, mode=0o600)
             formula_unavailable = formula_state == "unavailable"
             job = {
                 **job,
@@ -2439,6 +2473,8 @@ class ReaderBookOcrService:
                 terminal_job=final_job,
                 finalizer_token=finalizer_token,
             )
+            # 发布成功后镜像到 pdf-figures 边车：Flask 阅读器公式层与 KJ 页级分析的框都从那里读。不进发布 index，失败只记日志。
+            self._mirror_pc_layout_to_pdf_figures(resolved.path, formula_path, job_dir / "pc-figures.json")
         except Exception as exc:
             # The release index is the atomic commit record.  Read only that
             # small ledger outside jobs.lock: a terminal-job replace can fail
@@ -5020,6 +5056,85 @@ class ReaderBookOcrService:
                 )
             normalized.append({**item, "page": page, "bbox": bbox})
         return normalized
+
+    def _mirror_pc_layout_to_pdf_figures(self, source_path: Path, formula_path: Path, figures_path: Path) -> None:
+        """把 PC 预处理的公式框（含 LaTeX）与图/表框镜像进 ``state/pdf-figures/<sha1(绝对路径)[:16]>.json``
+        （键口径 = pdf_reader._book_sha）。Flask 阅读器的公式层 ``_apply_formula_chars`` 与 KJ 页级分析的 ``boxes``
+        都读这份边车；以前它只有 Pi 上 yolo_figures.py 会写，Pi 退出后新书就没有图框（2026-09-07）。
+        已有图注 desc 按同页 IoU≥0.7 保留；不进发布 index；失败只记日志，绝不掀翻发布。"""
+        try:
+            import hashlib
+            import json as _json
+            import logging
+            fig_dir = self.project_root / "state" / "pdf-figures"
+            fig_dir.mkdir(parents=True, exist_ok=True)
+            key = hashlib.sha1(str(Path(source_path).resolve()).encode("utf-8")).hexdigest()[:16]
+            path = fig_dir / f"{key}.json"
+            data = None
+            if path.is_file():
+                try:
+                    data = _json.loads(path.read_text("utf-8"))
+                except Exception:
+                    data = None
+            if not isinstance(data, dict):
+                data = {"pdf": str(source_path), "figures": [], "_none_pages": [], "formulas": [], "figures_geom": []}
+            data.setdefault("figures", [])
+            data.setdefault("_none_pages", [])
+
+            def _load(p: Path, key_name: str) -> list[dict]:
+                if not Path(p).is_file():
+                    return []
+                try:
+                    payload = _json.loads(Path(p).read_text("utf-8"))
+                except Exception:
+                    return []
+                items = payload.get(key_name) if isinstance(payload, dict) else None
+                return [item for item in (items or []) if isinstance(item, dict)]
+
+            data["formulas"] = [
+                {"page": int(f["page"]), "bbox": list(f["bbox"]), "conf": f.get("conf"), "latex": f.get("latex"),
+                 "latex_engine": f.get("latexEngine") or f.get("latex_engine") or ("pc-preprocess" if f.get("latex") else None)}
+                for f in _load(formula_path, "formulas")
+            ]
+
+            def _iou(a, b) -> float:
+                try:
+                    ax0, ay0, ax1, ay1 = [float(v) for v in a]
+                    bx0, by0, bx1, by1 = [float(v) for v in b]
+                except Exception:
+                    return 0.0
+                iw = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+                ih = max(0.0, min(ay1, by1) - max(ay0, by0))
+                inter = iw * ih
+                union = (ax1 - ax0) * (ay1 - ay0) + (bx1 - bx0) * (by1 - by0) - inter
+                return inter / union if union > 0 else 0.0
+
+            old = [g for g in (data.get("figures_geom") or []) if isinstance(g, dict)]
+            geom: list[dict] = []
+            for g in _load(figures_path, "figures"):
+                entry = {"page": int(g["page"]), "bbox": list(g["bbox"]), "fbox": list(g["bbox"]), "fsrc": "yolo",
+                         "fconf": g.get("conf"), "fcls": g.get("cls") or "figure", "caption": "", "desc": ""}
+                for o in old:
+                    try:
+                        same_page = int(o.get("page", 0)) == entry["page"]
+                    except Exception:
+                        same_page = False
+                    if same_page and _iou(o.get("fbox") or o.get("bbox") or [], entry["bbox"]) >= 0.7:
+                        entry["desc"] = o.get("desc") or ""
+                        entry["caption"] = o.get("caption") or ""
+                        if o.get("desc_engine"):
+                            entry["desc_engine"] = o["desc_engine"]
+                        break
+                geom.append(entry)
+            data["figures_geom"] = geom
+            data["geom"] = "pc-doclayout"
+            data["geom_at"] = _now_ms()
+            atomic_write_json(path, data, indent=None, mode=0o600)
+        except Exception as exc:  # 镜像是派生物，绝不能让发布失败；但要出声
+            try:
+                logging.getLogger(__name__).warning("pdf-figures 镜像失败 %s: %s", source_path, exc)
+            except Exception:
+                pass
 
     def read_page_bundle(
         self, book_id: str, content_sha256: str, page: int

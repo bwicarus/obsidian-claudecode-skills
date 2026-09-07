@@ -1100,6 +1100,7 @@ class QualityPipeline:
             )
         torch = self._require_cuda()
         formulas: list[dict] = []
+        figures: list[dict] = []   # 同一趟 YOLO 顺手留下的图/表框（以前白白丢掉；2026-09-07 用户拍板并进预处理）
         for page_number in range(1, total_pages + 1):
             checkpoint(
                 "formula-detect",
@@ -1123,7 +1124,11 @@ class QualityPipeline:
                     result.boxes.conf.tolist(),
                 ):
                     label = names.get(int(class_no), str(int(class_no))) if isinstance(names, dict) else str(int(class_no))
-                    if label != "isolate_formula" and int(class_no) != 8:
+                    # DocLayout-DocStructBench 类：3=figure 5=table 8=isolate_formula。KJ 页级分析与阅读器图注要图/表框。
+                    is_formula = label == "isolate_formula" or int(class_no) == 8
+                    is_table = label == "table" or int(class_no) == 5
+                    is_figure = is_table or label == "figure" or int(class_no) == 3
+                    if not (is_formula or is_figure):
                         continue
                     normalized = [
                         max(0.0, min(1.0, float(bbox[0]) / pix.width)),
@@ -1132,14 +1137,24 @@ class QualityPipeline:
                         max(0.0, min(1.0, float(bbox[3]) / pix.height)),
                     ]
                     if normalized[0] < normalized[2] and normalized[1] < normalized[3]:
-                        formulas.append(
-                            {
-                                "page": page_number,
-                                "bbox": [round(value, 6) for value in normalized],
-                                "conf": round(float(confidence), 6),
-                                "latex": None,
-                            }
-                        )
+                        if is_formula:
+                            formulas.append(
+                                {
+                                    "page": page_number,
+                                    "bbox": [round(value, 6) for value in normalized],
+                                    "conf": round(float(confidence), 6),
+                                    "latex": None,
+                                }
+                            )
+                        else:
+                            figures.append(
+                                {
+                                    "page": page_number,
+                                    "bbox": [round(value, 6) for value in normalized],
+                                    "conf": round(float(confidence), 6),
+                                    "cls": "table" if is_table else "figure",
+                                }
+                            )
             finally:
                 del pix
         recognized = 0
@@ -1154,6 +1169,7 @@ class QualityPipeline:
                         "bookId": claim.book_id,
                         "contentSha256": claim.content_sha256,
                         "formulas": formulas,
+                        "figures": figures,
                     },
                     "unavailable",
                     "formula-model-unavailable",
@@ -1205,6 +1221,7 @@ class QualityPipeline:
             "bookId": claim.book_id,
             "contentSha256": claim.content_sha256,
             "formulas": formulas,
+            "figures": figures,
         }
         del torch
         return payload, state, reason, len(formulas), recognized
