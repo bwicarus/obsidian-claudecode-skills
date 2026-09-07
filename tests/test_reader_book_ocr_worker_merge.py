@@ -29,7 +29,7 @@ class MergeShortUnitsTests(unittest.TestCase):
 
     def test_verb_chains_join_but_final_forms_stay(self):
         tokens = [tok("に", "助詞", "格助詞"), tok("おけ", "動詞", "一般", "命令形"), tok("る", "助動詞", "*", "連体形-一般"), tok("人口", "名詞", "普通名詞")]
-        self.assertEqual(worker._merge_short_units(tokens), ["に", "おける", "人口"])
+        self.assertEqual(worker._merge_short_units(tokens, frozenset()), ["に", "おける", "人口"])   # 只测词性规则;有词典表时 における 整体成词(见下)
         tokens = [tok("含ま", "動詞", "一般", "未然形-一般"), tok("れる", "助動詞", "*", "連体形-一般"), tok("病気", "名詞", "普通名詞")]
         self.assertEqual(worker._merge_short_units(tokens), ["含まれる", "病気"])
         tokens = [tok("出し", "動詞", "非自立可能", "連用形-一般"), tok("て", "助詞", "接続助詞"), tok("いる", "動詞", "非自立可能", "終止形-一般")]
@@ -48,7 +48,38 @@ class MergeShortUnitsTests(unittest.TestCase):
         self.assertEqual(worker._merge_short_units(tokens), ["脳", "血管", "疾患"])
 
     def test_schema_bumped(self):
-        self.assertGreaterEqual(worker._TOKENIZE_SCHEMA, 4)
+        self.assertGreaterEqual(worker._TOKENIZE_SCHEMA, 5)
+
+    def test_dictionary_expressions_join_function_word_runs(self):
+        exprs = frozenset({"なんだか", "もしかしたら", "かもしれない", "には", "ことに", "上に", "として"})
+        # なん(代名詞)+だ+か → なんだか;もし+か+し+たら → もしかしたら(4 词元,最长优先)
+        tokens = [tok("なん", "代名詞"), tok("だ", "助動詞", "*", "終止形-一般"), tok("か", "助詞", "副助詞"), tok("頭", "名詞", "普通名詞")]
+        self.assertEqual(worker._merge_short_units(tokens, exprs), ["なんだか", "頭"])
+        tokens = [tok("もし", "副詞"), tok("か", "助詞", "副助詞"), tok("し", "動詞", "非自立可能", "連用形-一般"), tok("たら", "助動詞", "*", "仮定形-一般"), tok("病気", "名詞", "普通名詞"), tok("かしら", "助詞", "終助詞")]
+        self.assertEqual(worker._merge_short_units(tokens, exprs), ["もしかしたら", "病気", "かしら"])
+        tokens = [tok("病気", "名詞", "普通名詞"), tok("か", "助詞", "副助詞"), tok("も", "助詞", "係助詞"), tok("しれ", "動詞", "一般", "未然形-一般"), tok("ない", "助動詞", "*", "終止形-一般"), tok("から", "助詞", "接続助詞")]
+        self.assertEqual(worker._merge_short_units(tokens, exprs), ["病気", "かもしれない", "から"])
+        tokens = [tok("彼", "代名詞"), tok("に", "助詞", "格助詞"), tok("は", "助詞", "係助詞")]
+        self.assertEqual(worker._merge_short_units(tokens, exprs), ["彼", "には"])
+        tokens = [tok("に", "助詞", "格助詞"), tok("おけ", "動詞", "一般", "命令形"), tok("る", "助動詞", "*", "連体形-一般"), tok("人口", "名詞", "普通名詞")]
+        self.assertEqual(worker._merge_short_units(tokens, frozenset(exprs | {"における"})), ["における", "人口"], "JMdict 整条 に於ける 优先于词性规则")
+        # 守卫:跨度里有普通名词就不并 —— こと|に 不能变 殊に,机の 上|に 不能变 上に
+        tokens = [tok("その", "連体詞"), tok("こと", "名詞", "普通名詞"), tok("に", "助詞", "格助詞")]
+        self.assertEqual(worker._merge_short_units(tokens, exprs), ["その", "こと", "に"])
+        tokens = [tok("机", "名詞", "普通名詞"), tok("の", "助詞", "格助詞"), tok("上", "名詞", "普通名詞", "*"), tok("に", "助詞", "格助詞")]
+        self.assertEqual(worker._merge_short_units(tokens, exprs), ["机", "の", "上", "に"])
+        # 表达段之后词性规则照常:と+し+て → として(在表里),行っ+て 仍按规则 ③
+        tokens = [tok("と", "助詞", "格助詞"), tok("し", "動詞", "非自立可能", "連用形-一般"), tok("て", "助詞", "接続助詞"), tok("行っ", "動詞", "一般", "連用形-促音便"), tok("て", "助詞", "接続助詞")]
+        self.assertEqual(worker._merge_short_units(tokens, exprs), ["として", "行って"])
+        # 空表 = 关掉词典段,只剩词性规则
+        tokens = [tok("なん", "代名詞"), tok("だ", "助動詞", "*", "終止形-一般"), tok("か", "助詞", "副助詞")]
+        self.assertEqual(worker._merge_short_units(tokens, frozenset()), ["なん", "だ", "か"])
+
+    def test_expression_file_ships_with_the_worker(self):
+        exprs = worker._load_expressions()
+        self.assertTrue(exprs, "_server_deploy/data/jp_expressions.txt 缺失或为空")
+        for probe in ("なんだか", "もしかしたら", "かもしれない", "には", "として"):
+            self.assertIn(probe, exprs)
 
 
 if __name__ == "__main__":

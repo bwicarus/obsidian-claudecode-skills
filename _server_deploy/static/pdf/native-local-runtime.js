@@ -8240,6 +8240,23 @@
   // 不知道。现在:查词即记 vocabulary-state 'lookup';这里按本地字符层的分词(w 分组)逐词查
   // 本地状态 —— 已掌握不画;单词**查过**即画(new),词组**只有收藏**才画(seen)。
   // 2026-09-04 用户:「词组的下划线应该是收藏后出现而不是查询后」—— 词组的 lookup 记录不再作为下划线依据。
+  // [lo, hi] 两端之外紧邻的实字符是否与端点同一个 w(即命中落在更大的词元内部)
+  function _insideLargerToken(chars, lo, hi) {
+    function neighbor(from, step) {
+      for (var k = from + step; k >= 0 && k < chars.length; k += step) {
+        var c = chars[k];
+        if (!c || c.sp) continue;
+        return c;
+      }
+      return null;
+    }
+    var a = chars[lo], b = chars[hi];
+    if (!a || !b) return false;
+    var wa = a.w, wb = b.w;
+    if (wa == null || wa < 0 || wb == null || wb < 0) return false;
+    var before = neighbor(lo, -1), after = neighbor(hi, 1);
+    return !!((before && before.w === wa) || (after && after.w === wb));
+  }
   function localVocabMarks(chars) {
     var state = root.BWReaderRuntime && root.BWReaderRuntime.vocabularyState;
     if (!state || state.CONTRACT !== 'vocabulary-state/1' ||
@@ -8298,6 +8315,9 @@
       var key = surf.replace(/[\s\u3000]+/g, '');
       if (!key || key.length > 64) continue;
       var ja = /[\u3040-\u30ff\u3400-\u9fff]/.test(key);
+      // 单个假名(か/は/の 这类助词)不画:查过一次 か 就满页 か 都带下划线,词被"从中间打断"(用户 2026-09-07);
+      // 与服务端 _jp_vocab_is_trackable 同规则 —— 含汉字 或 ≥2 字才算生词
+      if (ja && key.length < 2 && !/[\u3400-\u9fff]/.test(key)) continue;
       var spec = { kind: 'word', language: ja ? 'ja' : 'en', lemma: key, word: key };
       var phraseSpec = { kind: 'phrase', language: ja ? 'ja' : 'en', lemma: key, word: key };
       var slug = '';
@@ -8381,6 +8401,9 @@
             guard += 1;
             var lo = srcIdx[at], hi = srcIdx[Math.min(at + w.key.length - 1, srcIdx.length - 1)];
             if (w.slug === 'mastered') { masteredRanges.push([lo, hi]); at = joined.indexOf(w.key, at + 1); continue; }
+            // 命中要对齐词元边界:两端都不能还在同一个 w 里往外延(「栄養素」里搜到「養」、「感染症」里搜到「症」都跳过)。
+            // 页面上的词比查过的键长,说明这一处不是那个词(用户 2026-09-07 晚:点 栄養 只选中带线的 養)。
+            if (_insideLargerToken(chars, lo, hi)) { at = joined.indexOf(w.key, at + 1); continue; }
             var spec2 = { kind: 'word', language: w.language === 'en' ? 'en' : 'ja', lemma: w.key, word: w.key };
             var mastered = false;
             try {

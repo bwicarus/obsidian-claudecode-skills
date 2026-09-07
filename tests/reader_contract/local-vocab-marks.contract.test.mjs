@@ -126,3 +126,22 @@ test("已掌握的词/词组范围压掉里面的短标记", () => {
   assert.match(marks, /seenKey\[k \+ '\|' \+ slugFor\]/, "同一键既是查过又是已掌握时，掌握范围不能被去重吞掉");
   assert.match(marks, /if \(masteredRanges\[q\]\[0\] <= m\._lo && m\._hi <= masteredRanges\[q\]\[1\]\) return false;/);
 });
+
+// 用户 2026-09-07 晚：「很多词都被从中间打断了」—— 查过一次助词 か，满页每个 か 词元都带下划线，
+// なんだか / もしかしたら / かもしれない 看起来像被切开。单个假名不是生词（服务端 _jp_vocab_is_trackable 同规则）。
+test("单个假名词元不画下划线", () => {
+  const marks = bodyOf(RUNTIME, "localVocabMarks");
+  assert.match(marks, /if \(ja && key\.length < 2 && !\/\[\\u3400-\\u9fff\]\/\.test\(key\)\) continue;/);
+});
+
+// 用户 2026-09-07 晚：「这里明显是营养但是为何点击后只有一个字被选中」—— 「栄養素」里以前单查过的「養」被第二遍全文搜画了线，
+// 单击又按"下划线凌驾分词"只选中 養。两处：全文搜命中要对齐词元边界；单击时严格落在词元内部的更短下划线不再凌驾。
+test("下划线命中要对齐词元边界；词元内部的更短下划线不凌驾单击", () => {
+  const marks = bodyOf(RUNTIME, "localVocabMarks");
+  assert.match(marks, /if \(_insideLargerToken\(chars, lo, hi\)\) \{ at = joined\.indexOf\(w\.key, at \+ 1\); continue; \}/);
+  const inside = bodyOf(RUNTIME, "_insideLargerToken");
+  assert.match(inside, /\(before && before\.w === wa\) \|\| \(after && after\.w === wb\)/);
+  const SEL = read("_server_deploy/static/pdf/reader.src/13-selection.js");
+  assert.match(SEL, /var _inside = _lo >= 0 && _hi >= _lo && _lo >= sIdx && _hi <= eIdx && \(_hi - _lo\) < \(eIdx - sIdx\)/);
+  assert.match(SEL, /if \(_lo >= 0 && _hi >= _lo && !_inside\) \{ sIdx = _lo; eIdx = _hi;/);
+});

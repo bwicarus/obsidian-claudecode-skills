@@ -2653,7 +2653,7 @@ _CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 _KANA_RE = re.compile(r"[\u3040-\u30ff]")
 
 
-_TOKENIZE_SCHEMA = 4   # 4 = unidic 短単位并成词典可查的长単位(2026-09-07);3 = 行先按大横向间隔切成栏段再聚块(2026-09-03);2 = 以块为边界;1/缺失 = 旧的按行分词
+_TOKENIZE_SCHEMA = 5   # 5 = 再加 JMdict 多词表达最长匹配(なんだか/もしかしたら/かもしれない,2026-09-07 晚);4 = unidic 短単位并成词典可查的长単位(2026-09-07);3 = 行先按大横向间隔切成栏段再聚块(2026-09-03);2 = 以块为边界;1/缺失 = 旧的按行分词
 
 
 # ── 短単位 → 长単位(2026-09-07 用户实锤:心|疾患、感染|症、廃棄|物|処理、おけ|る、含ま|れる)──
@@ -2666,6 +2666,39 @@ _TOKENIZE_SCHEMA = 4   # 4 = unidic 短単位并成词典可查的长単位(2026
 # 名詞+名詞 不并(脳血管疾患 保持 脳|血管|疾患):那需要词典而不是词性,交给用户收藏词组。
 _VERB_LIKE_POS1 = ("動詞", "形容詞")
 _NON_FINAL_CFORM_PREFIXES = ("連用形", "未然形", "仮定形", "命令形", "已然形", "語幹")
+# ④ 词典驱动的多词表达(2026-09-07 晚,用户:「很多词都被从中间打断了」):なんだか(なん|だ|か)、もしかしたら(もし|か|し|たら)、
+#    かもしれない(か|も|しれ|ない)、には(に|は)这类 JMdict 整条按词性拼不出来 → 对相邻词元做最长匹配(最多 _EXPR_MAX_TOKENS 个),
+#    拼起来在 _server_deploy/data/jp_expressions.txt(scripts/vocab/build_jp_expressions.py 从 JMdict 功能词类生成)里就并成一词。
+#    守卫:跨度里不能有名词(代名词除外:なん)、记号、数词 —— 否则 こと|に 会被并成 殊に、机の 上|に 并成 上に。
+_EXPR_MAX_TOKENS = 6
+_EXPR_FILE = Path(__file__).resolve().parent / "data" / "jp_expressions.txt"
+_EXPR_CACHE: dict = {"path": None, "terms": None}
+
+
+def _load_expressions(path: Path | None = None) -> frozenset:
+    target = Path(path) if path is not None else _EXPR_FILE
+    if _EXPR_CACHE["terms"] is not None and _EXPR_CACHE["path"] == target:
+        return _EXPR_CACHE["terms"]
+    terms: set[str] = set()
+    try:
+        with open(target, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    terms.add(line)
+    except OSError:
+        terms = set()   # 没有表就只按词性并(旧行为),不报错:表是增强,不是前提
+    _EXPR_CACHE["path"] = target
+    _EXPR_CACHE["terms"] = frozenset(terms)
+    return _EXPR_CACHE["terms"]
+
+
+def _expr_span_ok(units: list[dict], i: int, j: int) -> bool:
+    """[i, j) 这段词元能不能作为一个表达合并:全不是名词(代名词可以)、记号、数词。"""
+    for u in units[i:j]:
+        if u["pos1"] in ("名詞", "補助記号", "記号", "空白") or u["pos2"] == "数詞":
+            return False
+    return True
 
 
 def _tok_attr(token, *names: str) -> str:
@@ -2680,8 +2713,9 @@ def _tok_attr(token, *names: str) -> str:
     return ""
 
 
-def _merge_short_units(tokens) -> list[str]:
-    """把 fugashi token 序列并成长単位表面串列表(顺序拼接后与原文完全一致)。"""
+def _merge_short_units(tokens, expressions=None) -> list[str]:
+    """把 fugashi token 序列并成长単位表面串列表(顺序拼接后与原文完全一致)。
+    expressions=None 用 data/jp_expressions.txt;传 frozenset/set 供测试注入;传空集合 = 关掉词典段。"""
     units: list[dict] = []
     for token in tokens:
         surface = str(getattr(token, "surface", "") or "")
@@ -2693,6 +2727,25 @@ def _merge_short_units(tokens) -> list[str]:
             "pos2": _tok_attr(token, "pos2"),
             "cform": _tok_attr(token, "cForm"),
         })
+    # ④ 先做词典最长匹配(在词性规则之前:词性规则会把 し+たら 先并掉,之后再匹配 もしかしたら 反而要跨已合并的单元)
+    exprs = _load_expressions() if expressions is None else expressions
+    if exprs:
+        merged: list[dict] = []
+        i = 0
+        while i < len(units):
+            best_j = -1
+            upper = min(len(units), i + _EXPR_MAX_TOKENS)
+            for j in range(upper, i + 1, -1):   # 最长优先,至少 2 个词元
+                if "".join(u["s"] for u in units[i:j]) in exprs and _expr_span_ok(units, i, j):
+                    best_j = j
+                    break
+            if best_j > 0:
+                merged.append({"s": "".join(u["s"] for u in units[i:best_j]), "pos1": "表現", "pos2": "", "cform": ""})
+                i = best_j
+            else:
+                merged.append(units[i])
+                i += 1
+        units = merged
     out: list[dict] = []
     i = 0
     while i < len(units):

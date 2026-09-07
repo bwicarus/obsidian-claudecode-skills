@@ -99,6 +99,10 @@ RUNTIME_SOURCES = {
     "readerpc-runtime/_server_deploy/reader_book_ocr_worker.py": (
         PROJECT_ROOT / "_server_deploy" / "reader_book_ocr_worker.py"
     ),
+    # 分词用的 JMdict 多词表达表(2026-09-07):worker 按 __file__ 相对路径读 data/jp_expressions.txt,不带就退回只按词性并
+    "readerpc-runtime/_server_deploy/data/jp_expressions.txt": (
+        PROJECT_ROOT / "_server_deploy" / "data" / "jp_expressions.txt"
+    ),
 }
 PAYLOAD_PATHS = (EXE_REL, *RUNTIME_SOURCES.keys())
 

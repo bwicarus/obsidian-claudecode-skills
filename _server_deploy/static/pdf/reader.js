@@ -4947,7 +4947,11 @@ function _selByCharRange(pw, sIdx, eIdx, keepSet, tapIdx) {
           }
         }
       }
-      if (_lo >= 0 && _hi >= _lo) { sIdx = _lo; eIdx = _hi; _keep = _cov.size ? _cov : null; }
+      // 下划线严格落在所点词元**内部**(更短)时不凌驾词元:「栄養素」里以前单查过的「養」画了线,点 栄養 只选中 養
+      // (用户 2026-09-07 晚)。下划线凌驾分词的初衷是分词边界错位(感染症 vs 染症の),那种情形下划线不会整个落在词元里。
+      var _inside = _lo >= 0 && _hi >= _lo && _lo >= sIdx && _hi <= eIdx && (_hi - _lo) < (eIdx - sIdx) &&
+        (!_keep || Array.from(_cov).every(function (ci) { return _keep.has(ci); }));
+      if (_lo >= 0 && _hi >= _lo && !_inside) { sIdx = _lo; eIdx = _hi; _keep = _cov.size ? _cov : null; }
     }
   }
   // 同块严格限在该 bk；跨块只接受两端之间的几何连通路径。

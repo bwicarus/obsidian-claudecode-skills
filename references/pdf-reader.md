@@ -1397,3 +1397,11 @@ E2E 模式:scratchpad 铸 cookie + set_offline,验"入队→重放→服务端�
 助動詞 / て・で(+非自立动词) 链（含まれる、出している、見た、飲みたい、おける；終止形不并，思う+う 不会变 思うう）。名詞+名詞 不并
 （脳血管疾患 保持三段，交给收藏词组）。`_TOKENIZE_SCHEMA` 3→4：`_tokenize_directory` 对 schema 落后的页重分词，已发布的书要**重跑一次
 预处理**（OCR 页有本机缓存，快）才会拿到新分词。单测 `tests/test_reader_book_ocr_worker_merge.py`。
+
+**④ 词典驱动的多词表达（同日晚，tokenizeSchema 5）**：用户「很多词都被从中间打断了」—— なんだか / もしかしたら / かしら / かもしれない
+是 JMdict 整条（exp/adv/prt），unidic 短単位切成 なん|だ|か、もし|か|し|たら、か|も|しれ|ない，按词性拼不出来。
+`scripts/vocab/build_jp_expressions.py` 从本地 JMdict 分片（`ios/BWReader/DictionaryData/shards`，不入库）只取功能词类
+（exp/adv/adv-to/conj/prt/aux/aux-v/aux-adj/int/pn）的 forms+readings，长度 2..12，生成 `_server_deploy/data/jp_expressions.txt`
+（17350 条，约 290 KB，入库并随 ReaderPC 运行时打包）。`_merge_short_units` 先对相邻词元做最长匹配（≤6 个），拼起来在表里就并成一词，
+再跑词性规则。守卫：跨度里不能有名词（代名词除外）、记号、数词 —— 否则 こと|に 会被并成 殊に、机の 上|に 并成 上に、ため|に 也不并。
+没有表时静默退回只按词性并。同时 App 下划线第一遍跳过单个假名词元（查过一次 か 满页 か 都带线，看起来像词被切开）。
