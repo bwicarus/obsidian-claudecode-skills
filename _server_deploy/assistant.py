@@ -8100,8 +8100,8 @@ _slot("dictation_grade", "main", "判分指令(纸上「让 AI 检查」按钮�
 _AP_PATH = CLAUDE_DIR / "state" / "assistant-action-prefs.json"
 _ap_lock = threading.Lock()
 _BACKENDS = ("claude", "gemini", "codex")
-_CLAUDE_VARIANTS = ("haiku", "sonnet", "opus")
-_CODEX_VARIANTS = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.5",
+_CLAUDE_VARIANTS = ("haiku", "sonnet", "opus", "fable")   # fable=Claude 5.1(opus 之上),CLI 2.1.263 起可用(2026-09-07)
+_CODEX_VARIANTS = ("gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.5",
                    "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark")
 # 最近一次开发期实测只作为无法探测时的展示顺序，不作为 Fast
 # 能力真值。Spark 是 CLI 的兼容型号：普通调用可尝试；只有 model/list
@@ -8491,7 +8491,9 @@ _AP_LABELS = {   # 设置面板给每个阅读器 action 显示的中文名
     "grammar": "语法分析(长句结构 / 语法点)", "pick_video": "找视频(拟搜索词 + 相关性筛选)",
     "web_search": "联网搜索(天气/新闻/事实 结构卡)", "route_text": "路由详答(语音转文字长回答引擎)",
 }
-_VARIANT_SHORT = {"gpt-5.5-codex": "5.5-codex", "gpt-5.5": "5.5",
+_VARIANT_SHORT = {"gpt-6-astra": "6-astra", "gpt-5.6-luna": "5.6-luna", "gpt-5.6-terra": "5.6-terra",
+                  "gpt-5.6-sol": "5.6-sol", "gpt-5.4-mini": "5.4-mini",
+                  "gpt-5.5-codex": "5.5-codex", "gpt-5.5": "5.5",
                   "gpt-5.3-codex-spark": "5.3 Spark",
                   "gemini-flash-latest": "flash-latest", "gemini-pro-latest": "pro-latest",
                   "gemini-3.5-flash": "3.5-flash", "gemini-3.1-flash-lite": "3.1-lite",

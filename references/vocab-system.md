@@ -708,3 +708,17 @@ Codex 永远带模型（`settings.model` 否则 `CODEX_DEFAULT_MODEL`=gpt-5.5，
 按 `dict_sources._jp_entry_fresh`（与 `lookup_jp` **同一条规则**）找旧版词条，先片假名缺 `source_word` 的（用户看得见）
 再其余 pv 落后的，每晚 200 条（Haiku low ≈ 2–4 s/条），AI 连败 3 次即停。2026-09-07 存量：旧版 6091 条，其中片假名
 缺源词 668。契约：同文件「stale 的第二跳自动化」；单测 `tests/test_ai_client_health.py`。
+
+### §19.5 本地词典多条命中要排序；异体写法/读音命中不是活用（2026-09-07 用户两张截图）
+
+幼児 弹出的是 幼子【おさなご】那条并标「活用→原形」（用户：「这不是名词么」）；思|う 切错后 う 命中 兎 的罕见读音也标「活用→原形」
+（「对应也太牵强」）。病根一个：`rc-offline-dictionary.js` `lookupJapanese` 对同一表层命中的多条 `exact` 直接拿第一条（构建器只按
+common 排，幼児 恰好两条都 common），`asLegacy` 又把"表层 ≠ 词头"一律当活用。现在 `rankExactEntries` 按「这条条目跟表层是什么关系」排：
+词头就是它 > 它是主读音 > 它是异体写法 > 它只是罕见读音，同级再看 common 与构建器顺序；`asLegacy` 没经过还原规则而表层 ≠ 词头时，
+按 `entryMatchKind` 标 `inflect.variant`：`form` → 「同词异写」、`reading` → 「按读音命中」（词头以表层开头的 取り寄せ←取り寄せる 仍算活用）。
+词框 `_jpInflectHtml` 见 `variant` 换措辞「写法/读音 … 词头 …」，不再写「当前形/原形」。契约 `offline-japanese-dictionary.contract.test.mjs`
+「同表层多条命中」。
+
+**已掌握范围压掉里面的短标记**（同日，用户：「更大范围的词组已经收藏并掌握了，但是其中的部分词反而又有下划线」）：已掌握的词/词组本来
+就不画，于是它的范围对里面的短标记没有压制力。`localVocabMarks` 现在把已掌握范围登记下来（第一遍按 w、第二遍把 `mastered` 记录的键+别名
+也全文搜），被完全包住的标记一律不画。契约 `local-vocab-marks.contract.test.mjs`「已掌握的词/词组范围压掉里面的短标记」。

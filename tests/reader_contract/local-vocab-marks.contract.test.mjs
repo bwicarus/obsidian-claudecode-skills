@@ -50,7 +50,7 @@ test("本地 page-overlay 按本地字符层 + 本地状态算下划线，已掌
   assert.match(marks, /typeof state\.lookup !== 'function' \|\| !Array\.isArray\(chars\) \|\| !chars\.length\) return \[\];/);
   // 按分词 w 分组、跳过 sp
   assert.match(marks, /while \(j < n && chars\[j\] && chars\[j\]\.w === wid\)/);
-  assert.match(marks, /if \(state\.isMastered\(spec\) \|\| state\.isMastered\(phraseSpec\)\) continue;/);
+  assert.match(marks, /if \(state\.isMastered\(spec\) \|\| state\.isMastered\(phraseSpec\)\) \{ masteredRanges\.push\(\[lo0, i - 1\]\); continue; \}/);   // 已掌握不画,但范围要记(2026-09-07)
   assert.match(marks, /if \(state\.isPhraseFavorite\(phraseSpec\)\) slug = 'seen';/);
   assert.match(marks, /else if \(state\.isLookedUp\(spec\)\) slug = 'new';/);   // 词组 lookup 不算(2026-09-04)
   assert.match(marks, /label_slug: slug, rects: rects, jp: ja, local: true/);
@@ -112,4 +112,17 @@ test("表层进别名：原形已记也要补登表层，第二遍全文搜键 +
   assert.match(marks, /\[r\.key\]\.concat\(Array\.isArray\(r\.aliases\) \? r\.aliases : \[\]\)\.forEach/);
   const setProp = bodyOf(VSTATE, "setProperty");
   assert.match(setProp, /previous\.aliases\.forEach\(function \(alias\)/);
+});
+
+// 用户 2026-09-07 实锤：「更大范围的词组已经收藏并掌握了，但是其中的部分词反而又有下划线」。已掌握的词/词组本来
+// 就不画，于是它的范围对里面的短标记没有任何压制力。现在把已掌握范围登记下来（第一遍按 w、第二遍按键+别名全文搜），
+// 被完全包住的标记一律不画：部分词不能比整体"更不熟"。
+test("已掌握的词/词组范围压掉里面的短标记", () => {
+  const marks = bodyOf(RUNTIME, "localVocabMarks");
+  assert.match(marks, /var masteredRanges = \[\];/);
+  assert.match(marks, /if \(state\.isMastered\(spec\) \|\| state\.isMastered\(phraseSpec\)\) \{ masteredRanges\.push\(\[lo0, i - 1\]\); continue; \}/);
+  assert.match(marks, /r\.property !== 'lookup' && r\.property !== 'favorite' && r\.property !== 'mastered'/);
+  assert.match(marks, /if \(w\.slug === 'mastered'\) \{ masteredRanges\.push\(\[lo, hi\]\);/);
+  assert.match(marks, /seenKey\[k \+ '\|' \+ slugFor\]/, "同一键既是查过又是已掌握时，掌握范围不能被去重吞掉");
+  assert.match(marks, /if \(masteredRanges\[q\]\[0\] <= m\._lo && m\._hi <= masteredRanges\[q\]\[1\]\) return false;/);
 });

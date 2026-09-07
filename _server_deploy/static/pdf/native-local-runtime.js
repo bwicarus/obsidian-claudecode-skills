@@ -8245,6 +8245,9 @@
     if (!state || state.CONTRACT !== 'vocabulary-state/1' ||
         typeof state.lookup !== 'function' || !Array.isArray(chars) || !chars.length) return [];
     var marks = [];
+    // 已掌握的字符范围(词/收藏词组):落在里面的更短标记一律不画 —— 掌握了更大的词组 = 它里面的词在这一处也算掌握
+    // (用户 2026-09-07:「更大范围的词组已经收藏并掌握了,但是其中的部分词反而又有下划线」)。
+    var masteredRanges = [];
     var i = 0, n = chars.length;
     while (i < n) {
       var c = chars[i];
@@ -8299,7 +8302,7 @@
       var phraseSpec = { kind: 'phrase', language: ja ? 'ja' : 'en', lemma: key, word: key };
       var slug = '';
       try {
-        if (state.isMastered(spec) || state.isMastered(phraseSpec)) continue;
+        if (state.isMastered(spec) || state.isMastered(phraseSpec)) { masteredRanges.push([lo0, i - 1]); continue; }
         if (state.isPhraseFavorite(phraseSpec)) slug = 'seen';
         else if (state.isLookedUp(spec)) slug = 'new';   // 词组的 lookup 不算(只认收藏)
       } catch (_) { continue; }
@@ -8332,14 +8335,15 @@
       var seenKey = {};
       (Array.isArray(keys) ? keys : []).forEach(function (r) {
         if (!r || r.enabled !== true) return;
-        if (r.property !== 'lookup' && r.property !== 'favorite') return;
+        // mastered 也搜:不画,只登记"已掌握范围",用来压掉里面的短标记
+        if (r.property !== 'lookup' && r.property !== 'favorite' && r.property !== 'mastered') return;
         if (r.property === 'lookup' && r.kind === 'phrase') return;   // 词组只认收藏,不认查过(2026-09-04)
         // 键是原形,别名是查过的各个表层(おける ↔ 於ける):页面上出现的是表层,键和别名都要搜(2026-09-07)
-        var slugFor = r.property === 'favorite' ? 'seen' : 'new';
+        var slugFor = r.property === 'mastered' ? 'mastered' : (r.property === 'favorite' ? 'seen' : 'new');
         [r.key].concat(Array.isArray(r.aliases) ? r.aliases : []).forEach(function (raw) {
           var k = String(raw || '').replace(/[\s\u3000]+/g, '');
-          if (k.length < 2 || k.length > 64 || seenKey[k]) return;
-          seenKey[k] = true;
+          if (k.length < 2 || k.length > 64 || seenKey[k + '|' + slugFor]) return;
+          seenKey[k + '|' + slugFor] = true;
           wanted.push({ key: k, slug: slugFor, language: r.language });
         });
       });
@@ -8376,6 +8380,7 @@
           while (at >= 0 && guard < 200 && marks.length < 800) {
             guard += 1;
             var lo = srcIdx[at], hi = srcIdx[Math.min(at + w.key.length - 1, srcIdx.length - 1)];
+            if (w.slug === 'mastered') { masteredRanges.push([lo, hi]); at = joined.indexOf(w.key, at + 1); continue; }
             var spec2 = { kind: 'word', language: w.language === 'en' ? 'en' : 'ja', lemma: w.key, word: w.key };
             var mastered = false;
             try {
@@ -8414,6 +8419,16 @@
         return true;
       });
     } catch (_) {}
+    // 掌握范围压制:被某个已掌握的词/词组范围完全包住的标记不画(部分词不能比整体"更不熟")
+    if (masteredRanges.length) {
+      marks = marks.filter(function (m) {
+        if (!Number.isInteger(m._lo) || !Number.isInteger(m._hi)) return true;
+        for (var q = 0; q < masteredRanges.length; q += 1) {
+          if (masteredRanges[q][0] <= m._lo && m._hi <= masteredRanges[q][1]) return false;
+        }
+        return true;
+      });
+    }
     marks.forEach(function (m) { delete m._lo; delete m._hi; });
     return marks;
   }

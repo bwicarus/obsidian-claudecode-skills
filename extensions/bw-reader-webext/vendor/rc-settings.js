@@ -917,8 +917,13 @@ if (window.__bwPwaProviderOnly) return;
             '<option value="haiku">haiku（最快最便宜，句子翻译够用）</option>' +
             '<option value="sonnet">sonnet（平衡）</option>' +
             '<option value="opus">opus（最强）</option>' +
-            '<option value="gpt-5">gpt-5</option>' +
+            '<option value="fable">fable（Claude 5.1，比 opus 更强）</option>' +
+            '<option value="gpt-6-astra">gpt-6-astra（OpenAI 最新）</option>' +
+            '<option value="gpt-5.6-sol">gpt-5.6-sol</option>' +
+            '<option value="gpt-5.6-terra">gpt-5.6-terra</option>' +
+            '<option value="gpt-5.6-luna">gpt-5.6-luna</option>' +
             '<option value="gpt-5.5">gpt-5.5</option>' +
+            '<option value="gpt-5.4-mini">gpt-5.4-mini（快、省）</option>' +
           '</select>' +
           '<label style="display:block;font-size:12px;color:#8a9bb4;margin:4px 0">思考深度</label>' +
           '<select id="set-sent-effort" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">' +

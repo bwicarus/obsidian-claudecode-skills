@@ -104,6 +104,32 @@ if (window.__bwPwaProviderOnly) return;
     return indexes.map(function (index) { return shard.entries[index]; }).filter(Boolean);
   }
 
+  // 同一表层命中多条时怎么选(2026-09-07 用户实锤:幼児 拿到了 幼子【おさなご】那条,还被标成「活用→原形」;
+  // 思|う 切错一位后 う 命中 兎 的罕见读音)。构建器只按 common 排,幼児 恰好是两条都 common。
+  // 这里按"这条词典条目跟表层是什么关系"排:词头就是它 > 它是主读音 > 它是异体写法 > 它只是罕见读音;同级再看 common、构建器顺序。
+  function entryMatchKind(entry, term) {
+    if (!entry) return 'none';
+    if (normalize(entry.lemma) === term) return 'lemma';
+    var readings = Array.isArray(entry.readings) ? entry.readings.map(normalize) : [];
+    var forms = Array.isArray(entry.forms) ? entry.forms.map(normalize) : [];
+    if (readings.length && readings[0] === term) return 'reading';
+    if (forms.indexOf(term) >= 0) return 'form';
+    if (readings.indexOf(term) >= 0) return 'rare-reading';
+    return 'other';
+  }
+  var MATCH_RANK = { lemma: 4, reading: 3, form: 2, 'rare-reading': 1, other: 0, none: -1 };
+  function rankExactEntries(found, term) {
+    return (found || []).map(function (entry, index) { return { entry: entry, index: index }; })
+      .sort(function (a, b) {
+        var d = MATCH_RANK[entryMatchKind(b.entry, term)] - MATCH_RANK[entryMatchKind(a.entry, term)];
+        if (d) return d;
+        d = (b.entry.common === true ? 1 : 0) - (a.entry.common === true ? 1 : 0);
+        if (d) return d;
+        return a.index - b.index;
+      })
+      .map(function (item) { return item.entry; });
+  }
+
   function loadKanji() {
     if (!kanjiPromise) {
       kanjiPromise = loadJson('kanji.json').catch(function (error) {
@@ -332,12 +358,14 @@ if (window.__bwPwaProviderOnly) return;
     if (!found.length) {
       return { ok: false, source: 'local-jmdict', query: query, code: 'BW_OFFLINE_DICTIONARY_NO_MATCH' };
     }
+    found = rankExactEntries(found, matched);
     var entry = found[0];
     return {
       ok: true,
       source: 'local-jmdict',
       query: query,
       matchedTerm: matched,
+      matchKind: entryMatchKind(entry, matched),
       inflectionMark: mark,
       entry: entry,
       candidates: found,
@@ -379,10 +407,16 @@ if (window.__bwPwaProviderOnly) return;
     var reading = readings[0] || '';
     var surface = normalize(original);
     var inflectionMarks = result.inflectionMark ? [result.inflectionMark] : [];
+    var variant = '';
     if (lemma && surface && lemma !== surface && !inflectionMarks.length) {
-      // exact 索引也包含表层词形；直接命中不代表“没有活用”。旧逻辑只看
-      // inflectionMark，导致最常见的 exact-form 命中反而丢掉原形/当前形。
-      inflectionMarks.push('活用→原形');
+      // 表层 ≠ 词头但没经过任何还原规则 = 命中的是这条的**异体写法或读音**(幼な子→幼子、う→鵜),不是活用。
+      // 以前一律标「活用→原形」(2026-09-07 用户:「这不是名词么」「对应也太牵强」)。
+      var kind = entryMatchKind(entry, surface);
+      // 词头以表层开头(取り寄せ ← 取り寄せる)= 构建器把连用形/词干也登进了 forms,那是活用不是异体
+      if (kind === 'form' && normalize(lemma).indexOf(surface) === 0 && normalize(lemma) !== surface) kind = 'stem';
+      if (kind === 'form') { variant = 'form'; inflectionMarks.push('同词异写'); }
+      else if (kind === 'reading' || kind === 'rare-reading') { variant = 'reading'; inflectionMarks.push('按读音命中'); }
+      else inflectionMarks.push('活用→原形');   // exact 索引里的其他表层:保留旧行为
     }
     return {
       ok: true,
@@ -406,7 +440,7 @@ if (window.__bwPwaProviderOnly) return;
       source_urls: Array.isArray(entry.sourceUrls) ? entry.sourceUrls : [],
       kanji: await wordKanji(lemma),
       inflect: (lemma && surface && (lemma !== surface || inflectionMarks.length))
-        ? { base: lemma, surface: surface, marks: inflectionMarks }
+        ? { base: lemma, surface: surface, marks: inflectionMarks, variant: variant }
         : null,
       local_candidates: result.candidates || [],
       source: 'local-jmdict',

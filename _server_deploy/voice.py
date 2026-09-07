@@ -1418,7 +1418,7 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
                "--mcp-config", _agent_mcp_cfg(),
                "--allowedTools", "mcp__bwapp",
                "--disallowedTools", _AGENT_DENY,
-               "--model", (model if model in ("haiku", "sonnet", "opus")
+               "--model", (model if model in ("haiku", "sonnet", "opus", "fable")
                            else os.environ.get("AGENT_TASK_MODEL", "opus")),
                "--setting-sources", "", "--output-format", "stream-json", "--verbose"]
         # claude 的 fast mode 是**默认开着**的(实测 DISABLE=1 会从 7.7s 慢到 9.1s),不用显式配。

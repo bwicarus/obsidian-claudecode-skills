@@ -340,3 +340,61 @@ test("复合助动词剥离：て形＋いる／しまう／おく／ある／�
   const mark = dictionary._candidateForms("出している")[1].mark;
   assert.match(mark, /ている/, "标签要说明这是 ている 形：" + mark);
 });
+
+// 用户 2026-09-07 两张截图：幼児 弹出的是 幼子【おさなご】那条并标「活用→原形」（「这不是名词么」）；
+// 思|う 切错一位后 う 命中 兎 的罕见读音也标「活用→原形」（「对应也太牵强」）。病根一个：同一表层命中多条时
+// 不排序、拿构建器顺序第一条；表层 ≠ 词头就一律当活用。
+test("同表层多条命中：词头就是它 > 主读音 > 异体写法 > 罕见读音；异体/读音命中不算活用", async () => {
+  const resources = {
+    "manifest.json": {
+      contract: "bw-jmdict-manifest/3",
+      normalization: "NFC",
+      shardAlgorithm: "utf8-prefix-2-kana-3/1",
+      source: { release: "fixture" },
+      posLabels: { n: "noun" },
+      shards: { e5b9: { path: "shards/e5b9.json" }, e38186: { path: "shards/e38186.json" } },
+    },
+    "kanji.json": {},
+    "shards/e5b9.json": {
+      contract: "bw-jmdict-shard/3",
+      key: "e5b9",
+      entries: [
+        { id: "20", lemma: "幼子", forms: ["幼子", "幼な子", "幼児"], readings: ["おさなご"], pos: ["n"],
+          glosses: ["infant"], zhGlosses: ["幼儿"], common: true },
+        { id: "21", lemma: "幼児", forms: ["幼児"], readings: ["ようじ"], pos: ["n"],
+          glosses: ["infant", "baby"], zhGlosses: ["幼儿；小孩"], common: true },
+      ],
+      // 构建器只按 common 排，两条都 common → 幼子 那条(id 小)排前面，正是线上拿错的原因
+      exact: { "幼児": [0, 1], "幼子": [0], "幼な子": [0], "おさなご": [0], "ようじ": [1] },
+    },
+    "shards/e38186.json": {
+      contract: "bw-jmdict-shard/3",
+      key: "e38186",
+      entries: [
+        { id: "30", lemma: "兎", forms: ["兎", "兔"], readings: ["うさぎ", "う"], pos: ["n"],
+          glosses: ["rabbit"], zhGlosses: ["兔"], common: true },
+        { id: "31", lemma: "鵜", forms: ["鵜"], readings: ["う"], pos: ["n"],
+          glosses: ["cormorant"], zhGlosses: ["鹈"], common: false },
+      ],
+      exact: { "う": [0, 1], "うさぎ": [0], "兎": [0], "鵜": [1] },
+    },
+  };
+  const { dictionary } = harness(resources);
+  const yoji = await dictionary.lookupJapaneseLegacy("幼児");
+  assert.equal(yoji.lemma, "幼児", "词头就是 幼児 的那条要赢过把 幼児 当异体的 幼子");
+  assert.equal(yoji.reading, "ようじ");
+  assert.equal(yoji.inflect, null, "词头 = 表层，没有任何「当前形/原形」行");
+  const osanago = await dictionary.lookupJapaneseLegacy("幼な子");
+  assert.equal(osanago.lemma, "幼子");
+  assert.equal(osanago.inflect.variant, "form");
+  assert.deepEqual(JSON.parse(JSON.stringify(osanago.inflect.marks)), ["同词异写"], "异体写法不是活用");
+  const u = await dictionary.lookupJapaneseLegacy("う");
+  assert.equal(u.lemma, "鵜", "う 是 鵜 的主读音、只是 兎 的罕见读音：主读音赢，哪怕 兎 更常用");
+  assert.equal(u.inflect.variant, "reading");
+  assert.deepEqual(JSON.parse(JSON.stringify(u.inflect.marks)), ["按读音命中"]);
+  assert.ok(!u.inflect.marks.includes("活用→原形"));
+  // 词框那边按 variant 换措辞，不再写「当前形/原形」
+  const WORDPOP = read("_server_deploy/static/pdf/rc-wordpop.js");
+  assert.match(WORDPOP, /if \(differs && inf\.variant\) \{/);
+  assert.match(WORDPOP, /inf\.variant === 'reading' \? '读音 <b>' : '写法 <b>'/);
+});

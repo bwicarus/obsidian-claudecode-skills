@@ -441,6 +441,13 @@ if (window.__bwPwaProviderOnly) return;
     var base = String(inf.base || lemma || '').trim();
     var differs = !!(surface && base && surface !== base);
     var marks = Array.isArray(inf.marks) ? inf.marks.filter(Boolean) : [];
+    // 异体写法 / 按读音命中(本地词典 inflect.variant,2026-09-07 幼な子→幼子、う→鵜):不是活用,
+    // 别用「当前形/原形」的措辞 —— 那会让名词看起来像被"还原"了。
+    if (differs && inf.variant) {
+      var lhs = (inf.variant === 'reading' ? '读音 <b>' : '写法 <b>') + esc(surface) + '</b>';
+      var vm = marks.length ? '<span class="jp-inflect-mark">' + marks.map(esc).join('・') + '</span>' : '';
+      return '<div class="jp-inflect">🔀 ' + [lhs, '词头 <b>' + esc(base) + '</b>', vm].filter(Boolean).join('　') + '</div>';
+    }
     // 只差分隔符 = 写法归一, 不是活用(2026-09-04 用户:プライマリー・ヘルス・ケア 那行「当前形/原形」很多余)。
     // 此时既不该打「活用→原形」的标, 整行也没有信息量 —— 外来语的信息在下面那条源词行里。
     // ⚠ 只在服务端**没给真语法标签**时才收:サボった→サボる(源自 sabotage)是真活用, 标签在, 照常显示。

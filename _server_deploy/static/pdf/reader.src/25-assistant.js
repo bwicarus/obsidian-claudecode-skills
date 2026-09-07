@@ -287,7 +287,10 @@
     { model: 'opus',   effort: 'medium', label: 'opus·中' },
     { model: 'opus',   effort: 'high',   label: 'opus·深' },
     { model: 'opus',   effort: 'xhigh',  label: 'opus·更深' },
-    { model: 'opus',   effort: 'max',    label: 'opus·max' }
+    { model: 'opus',   effort: 'max',    label: 'opus·max' },
+    // 2026-09-07 CLI 更新后 fable(Claude 5.1,opus 之上)可用:放在谱的最深端,「更好」从 opus·max 往上爬到它
+    { model: 'fable',  effort: 'high',   label: 'fable·深' },
+    { model: 'fable',  effort: 'max',    label: 'fable·max' }
   ];
   function _specIdx(m, e) { for (var i = 0; i < _SPEC.length; i++) if (_SPEC[i].model === m && _SPEC[i].effort === e) return i; return -1; }
   function _tierLabel(m, e) { var i = _specIdx(m, e); return i >= 0 ? _SPEC[i].label : (m + '·' + e); }

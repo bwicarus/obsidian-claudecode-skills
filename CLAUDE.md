@@ -501,6 +501,8 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
   `state/ai-health.json` 并冷却 10 分钟，auto-claude 期内先走 Codex、到点再探、成功即清；`~/.config/claude-code-oauth-token`
   存在时以 `CLAUDE_CODE_OAUTH_TOKEN` 注入（`claude setup-token` 一次生成长期令牌）。`ai_client.ai_health()` 一眼看状态。
   夜间「JP Dict Refresh」计划任务（03:30，`bin/jp_dict_refresh.cmd`）刷日语词典旧版词条。详见 `references/vocab-system.md` §14。
+  模型可选项有 **6 份副本**要一起改（2026-09-07 加 fable / gpt-6-astra / gpt-5.6-* 时数过）：`rc-settings.js` 句子翻译下拉、
+  `templates/pdf_reader.html` 两个下拉、`rc-assistant.js` 与 `reader.src/25-assistant.js` 的 `_SPEC` 谱、`assistant.py` `_CLAUDE_VARIANTS`/`_CODEX_VARIANTS`/`_VARIANT_SHORT`、`voice.py` 的 `--model` 白名单。
   ⚠ `config.CLAUDE_CLI` 默认已改为按实际安装位找（`~/.local/bin/claude.exe` → PATH → 旧 WinGet 位）：以前硬编码的 WinGet 位早已不存在，
   独立脚本里 Claude 调用一律 FileNotFoundError 被吞成 None（Flask 只因 `.env.local` 的 APP_CLAUDE 才对）。
 
