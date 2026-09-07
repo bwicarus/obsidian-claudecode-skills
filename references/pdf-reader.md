@@ -1386,3 +1386,14 @@ E2E 模式:scratchpad 铸 cookie + set_offline,验"入队→重放→服务端�
 修法：再补两级证据 —— `_tapMarkIsJa(pw, idx)`（所点字符落在 jp 生词下划线内 = 以前就按日语查过）、
 `_pageHasKana(pw)`（整页字符层有假名；纯中文书整页一个假名都没有；按 `__charBoxes` 数组身份缓存，换层重扫）。
 声明了语言的书不受影响。彻底解决仍是在设置面板声明本书语言。契约 `tap-language-detection.contract.test.mjs`。
+
+### 日语分词：unidic 短単位并成词典可查的长単位（2026-09-07，tokenizeSchema 4）
+
+用户连报 染症の / 棄物処 / 思|う / 心疾患 点不出整词。到 Windows 预处理产物里对字符层实证（`state/reader-book-ocr/book_ff8248…`），
+分词本身没有错位：fugashi + unidic-lite 给的是**短単位** —— 心|疾患（心=接頭辞）、感染|症、廃棄|物|処理、におけ|る（unidic-lite 把
+おける 析成 於く 命令形 + 助動詞 り）、含ま|れる；「棄物処」那类看起来"错一位"的选区，是 OCR 多认/少认一个字后**字框**顺移造成的
+（思うけど 被 OCR 成 思ううけど，两个 う 各有一框）。`reader_book_ocr_worker._merge_short_units` 在分词后按词性并回去：
+① 接頭辞+名詞（心疾患、お茶）② 名詞(非数詞)+接尾辞 名詞的/形状詞的（感染症、廃棄物、科学的；3年/2位 不并）③ 動詞/形容詞非终止形 +
+助動詞 / て・で(+非自立动词) 链（含まれる、出している、見た、飲みたい、おける；終止形不并，思う+う 不会变 思うう）。名詞+名詞 不并
+（脳血管疾患 保持三段，交给收藏词组）。`_TOKENIZE_SCHEMA` 3→4：`_tokenize_directory` 对 schema 落后的页重分词，已发布的书要**重跑一次
+预处理**（OCR 页有本机缓存，快）才会拿到新分词。单测 `tests/test_reader_book_ocr_worker_merge.py`。

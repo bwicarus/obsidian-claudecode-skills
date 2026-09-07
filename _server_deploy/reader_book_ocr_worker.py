@@ -2653,7 +2653,85 @@ _CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 _KANA_RE = re.compile(r"[\u3040-\u30ff]")
 
 
-_TOKENIZE_SCHEMA = 3   # 3 = 行先按大横向间隔切成栏段再聚块(2026-09-03);2 = 以块为边界;1/缺失 = 旧的按行分词
+_TOKENIZE_SCHEMA = 4   # 4 = unidic 短単位并成词典可查的长単位(2026-09-07);3 = 行先按大横向间隔切成栏段再聚块(2026-09-03);2 = 以块为边界;1/缺失 = 旧的按行分词
+
+
+# ── 短単位 → 长単位(2026-09-07 用户实锤:心|疾患、感染|症、廃棄|物|処理、おけ|る、含ま|れる)──
+# fugashi + unidic-lite 给的是 unidic 短単位:接头/接尾辞单独成词、动词与助动词分开。阅读器点词要的是**词典里查得到的词**,
+# 于是 心疾患 点出来是「心」、感染症 是「症」、における 是「おけ」→ 兎/於く 之类的牵强命中。这里按词性把它们并回去:
+#   ① 接頭辞 + 名詞 → 一词(心+疾患、お+茶)
+#   ② 名詞(非数詞)+ 接尾辞(名詞的/形状詞的)→ 一词(感染+症、廃棄+物、科学+的);数詞不并(3+年、2+位 单点计数词更有用)
+#   ③ 動詞/形容詞 的**非终止/连体形**(連用形/未然形/仮定形/命令形…)+ 助動詞 / 接続助詞 て・で,再跟 助動詞 或 非自立动词(いる/おく/しまう…)
+#      → 一词(含ま+れる、出し+て+いる、見+た、飲み+たい、おけ+る);终止形不并(思う + う 不能变成 思うう)
+# 名詞+名詞 不并(脳血管疾患 保持 脳|血管|疾患):那需要词典而不是词性,交给用户收藏词组。
+_VERB_LIKE_POS1 = ("動詞", "形容詞")
+_NON_FINAL_CFORM_PREFIXES = ("連用形", "未然形", "仮定形", "命令形", "已然形", "語幹")
+
+
+def _tok_attr(token, *names: str) -> str:
+    """fugashi UnidicFeatures 或测试用的 SimpleNamespace 都能读。"""
+    feature = getattr(token, "feature", None)
+    for name in names:
+        value = getattr(feature, name, None) if feature is not None else None
+        if value is None:
+            value = getattr(token, name, None)
+        if value not in (None, "", "*"):
+            return str(value)
+    return ""
+
+
+def _merge_short_units(tokens) -> list[str]:
+    """把 fugashi token 序列并成长単位表面串列表(顺序拼接后与原文完全一致)。"""
+    units: list[dict] = []
+    for token in tokens:
+        surface = str(getattr(token, "surface", "") or "")
+        if not surface:
+            continue
+        units.append({
+            "s": surface,
+            "pos1": _tok_attr(token, "pos1"),
+            "pos2": _tok_attr(token, "pos2"),
+            "cform": _tok_attr(token, "cForm"),
+        })
+    out: list[dict] = []
+    i = 0
+    while i < len(units):
+        cur = dict(units[i])
+        j = i + 1
+        # ① 接頭辞 + 名詞
+        if cur["pos1"] == "接頭辞" and j < len(units) and units[j]["pos1"] == "名詞":
+            cur = {"s": cur["s"] + units[j]["s"], "pos1": "名詞", "pos2": units[j]["pos2"], "cform": ""}
+            j += 1
+        # ② 名詞(非数詞)+ 接尾辞(名詞的/形状詞的),可连并
+        while (cur["pos1"] == "名詞" and cur["pos2"] != "数詞" and j < len(units)
+               and units[j]["pos1"] == "接尾辞" and units[j]["pos2"] in ("名詞的", "形状詞的")):
+            cur = {"s": cur["s"] + units[j]["s"], "pos1": "名詞", "pos2": cur["pos2"], "cform": ""}
+            j += 1
+        # ③ 动词/形容词非终止形 + 助動詞 / て・で(+ 非自立动词)链
+        if cur["pos1"] in _VERB_LIKE_POS1 and cur["cform"].startswith(_NON_FINAL_CFORM_PREFIXES):
+            while j < len(units):
+                nxt = units[j]
+                if nxt["pos1"] == "助動詞":
+                    cur = {"s": cur["s"] + nxt["s"], "pos1": cur["pos1"], "pos2": cur["pos2"], "cform": nxt["cform"]}
+                    j += 1
+                    # 助动词自己若还是连用/未然形(含ま+れ+た),继续链
+                    if not nxt["cform"].startswith(_NON_FINAL_CFORM_PREFIXES):
+                        break
+                    continue
+                if nxt["pos1"] == "助詞" and nxt["pos2"] == "接続助詞" and nxt["s"] in ("て", "で"):
+                    cur = {"s": cur["s"] + nxt["s"], "pos1": cur["pos1"], "pos2": cur["pos2"], "cform": "連用形"}
+                    j += 1
+                    if j < len(units) and units[j]["pos1"] == "動詞" and units[j]["pos2"] == "非自立可能":
+                        cur = {"s": cur["s"] + units[j]["s"], "pos1": "動詞", "pos2": "非自立可能", "cform": units[j]["cform"]}
+                        j += 1
+                        if not units[j - 1]["cform"].startswith(_NON_FINAL_CFORM_PREFIXES):
+                            break
+                        continue
+                    break
+                break
+        out.append(cur)
+        i = j
+    return [u["s"] for u in out]
 
 
 def _tokenize_groups(chars: list[dict], layout: dict | None) -> list[list[int]]:
@@ -2915,8 +2993,7 @@ def _tokenize_chars(chars: list[dict], layout: dict | None = None) -> list[dict]
                 except Exception as exc:
                     raise RuntimeError("fugashi is required to tokenize Japanese manga OCR") from exc
             cursor = 0
-            for word_no, token in enumerate(tagger(text)):
-                surface = str(token.surface or "")
+            for word_no, surface in enumerate(_merge_short_units(tagger(text))):
                 if not surface or text[cursor:cursor + len(surface)] != surface:
                     raise RuntimeError("Japanese tokenization did not align with OCR characters")
                 word_id = group_no * 1_000_000 + word_no
