@@ -283,13 +283,26 @@
     var spec = normalizedSpec(input, property);
     var id = idFor(spec, property);
     var previous = records.get(id) || null;
+    // 同一原形再次登记(换了表层/活用形)时别名做**并集**而不是替换(2026-09-07 用户实锤 おける/於ける:
+    // 记录键是原形,下划线按页面上的表层查;新表层进不了别名就永远画不上)。并集超上限才退回只留本次的。
+    var aliases = spec.aliases;
+    if (previous && Array.isArray(previous.aliases) && previous.aliases.length) {
+      var merged = spec.aliases.slice();
+      previous.aliases.forEach(function (alias) {
+        if (alias !== spec.key && merged.indexOf(alias) < 0) merged.push(alias);
+      });
+      merged.sort();
+      var mergedBytes = 0;
+      merged.forEach(function (alias) { mergedBytes += utf8Bytes(alias).length; });
+      if (merged.length <= MAX_ALIASES && mergedBytes <= MAX_ALIAS_BYTES) aliases = merged;
+    }
     var record = normalizeRecord({
       id: id,
       property: property,
       kind: spec.kind,
       language: spec.language,
       key: spec.key,
-      aliases: spec.aliases,
+      aliases: aliases,
       enabled: value === true
     });
     records.set(id, record);

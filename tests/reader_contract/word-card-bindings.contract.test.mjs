@@ -195,3 +195,22 @@ test("stale-while-revalidate 的第一跳一层都不许缓存", () => {
   assert.match(WORDPOP, /rc-wordpop-dict-cache-v3/);
   assert.match(RUNTIME, /'\|' \+ langs \+ '\|v3'/);
 });
+
+// 2026-09-07 用户:「我要的是自动的解决方案」。第一跳不缓存只解决了"不毒化",升级好的条目仍要用户
+// 再点两次才看得到(第二次进缓存、第三次才显示)。现在 stale 到手就定时自动重问,拿到新条目原地重绘。
+test("stale 的第二跳自动化:定时重问、合并结果带 stale、只在同词小框还开着时重绘", () => {
+  const fetchFn = bodyOf(WORDPOP, "_lookupFetch");
+  assert.match(fetchFn, /if \(d && d\.stale === true\) _scheduleStaleRefresh\(word, 0\);/);
+  const sched = bodyOf(WORDPOP, "_scheduleStaleRefresh");
+  assert.match(sched, /_lookupFetchRaw\(word\)/, "重问要走原始查询,不能再触发一层调度");
+  assert.match(sched, /if \(d\.stale === true\) \{ _scheduleStaleRefresh\(word, attempt \+ 1\); return; \}/);
+  assert.match(sched, /_cacheDictResult\(word, d\);/);
+  assert.match(sched, /_wordPopState && _wordPopState\.word === word/, "小框已换词/已关只更新缓存不动界面");
+  assert.match(sched, /if \(_staleRefreshTimers\[word\]\) return;/, "同词在途去重");
+  assert.match(WORDPOP, /var _STALE_REFRESH_DELAYS = \[12000, 30000\];/);
+  // "本地命中 + 远端 stale"是最常见的路:合并结果必须带 stale,否则既被缓存又不会触发自动刷新
+  const merge = bodyOf(WORDPOP, "_mergeJapaneseRemoteLookup");
+  assert.match(merge, /if \(remoteResult\.stale === true\) merged\.stale = true;/);
+  // 重绘要能回到原位:渲染时把 rect 记进状态
+  assert.match(WORDPOP, /_wordPopState = \{ word: word, ctx: ctx \|\| '', lemma: word, rect: rect \|\| null \}/);
+});

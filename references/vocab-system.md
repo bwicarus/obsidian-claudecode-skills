@@ -640,6 +640,17 @@ build_exposure ~40s（增量更新已扫过的 PDF），compute_mastery ~秒级�
 词组：**只有收藏**（`setPhraseFavorite`，slug `seen`）才下划线；词组框查完不再记 `lookup`，
 `localVocabMarks` 两遍扫描都忽略 `kind:'phrase'` 的 lookup 记录。契约 `local-vocab-marks.contract.test.mjs` 锁住。
 
+### §19.4 表层要进别名（2026-09-07 用户实锤 おける）
+
+用户：「这个词未掌握但是没有下划线」（おける，词框显示 原形 於ける）。记录键是原形 `於ける`，而下划线
+`localVocabMarks` 按页面上的**表层** `おける` 查，只能靠记录的别名命中。两处让表层进不了别名：
+① `rc-wordpop._noteLookedUp` 见原形已 `isLookedUp` 就跳过登记 —— 之前查过 於ける 的任何一个形，后来的表层再也进不了记录；
+② `vocabulary-state.setProperty` 再登记同一键时别名**替换**而不是并集。另外第二遍全文搜只搜 `r.key` 不搜别名。
+修法三处：`_lookupCoversSurface` 只在记录键/别名已含这个表层时才跳过登记；`setProperty` 别名并集（超 32 条 / 4 KB 才退回只留本次）；
+`localVocabMarks` 第二遍 `wanted` 键 + 别名都搜。契约 `vocabulary-state.contract.test.mjs`「同一原形换表层再登记」
++ `local-vocab-marks.contract.test.mjs`「表层进别名」。到 App 需新 TestFlight 构建（三个文件都在 ReaderBundle）。
+⚠ 已存在的旧记录不会自动补别名：再点一次那个词即补上（补登是幂等的）。
+
 ### §19.3 外来语源词（2026-09-04 用户要求）
 
 用户：「这种来自英文的词原型可以显示英文么」。片假名外来语的「原形」只显示假名规范形，看不出源词。
@@ -677,3 +688,23 @@ localStorage `rc-wordpop-dict-cache`、设备库 `dict-cache`（且经 `/reader-
 ② `_cacheDictResult` 与 `nativeDictQuickFetch` 见 `stale` 一律不写缓存（下次点击再问一次，
 服务端那边仍是缓存秒回，用户感觉不到多这一跳）；③ 缓存键 v2→v3，把已被毒化的条目一次清掉。
 契约：`tests/reader_contract/word-card-bindings.contract.test.mjs`「stale-while-revalidate 的第一跳一层都不许缓存」。
+
+**第二跳也不许靠用户手点（2026-09-07 用户：「我要的是自动的解决方案」）**：上一条只解决了"不毒化"，升级好的条目仍要
+用户再点两次才看得到（第二次进缓存、第三次才显示；ピラミッド 的英文源词就是这样一直"没出现"）。三处一起自动化：
+① **客户端** `rc-wordpop.js` `_lookupFetch` 拿到 `stale === true` 就 `_scheduleStaleRefresh(word)`：12 s 后用
+`_lookupFetchRaw` 再问一次（不再套一层调度），拿到新条目 → `_cacheDictResult` 进缓存 + 小框还开着**同一个词**就
+`_renderWordPop(..., _wordPopState.rect)` 原地重绘；仍 stale（Codex 兜底慢）再等 30 s 最后一次；同词在途去重。
+`_mergeJapaneseRemoteLookup` 现在把远端的 `stale` 带进合并结果 —— "本地 JMdict 命中 + 远端 stale"是最常见的路，
+以前合并结果不带 stale，既被缓存又无从触发刷新。② **AI 后端自愈** `scripts/ai_client.py`：Claude CLI 登录失效
+（OAuth 刷新失败）以前每次查词先干等 Claude 报错再改道 Codex，而 Codex 不给 `-m` 走 CLI 默认 gpt-6-astra、
+旧版 CLI 直接 400「requires a newer version of Codex」→ 两边全败、`_jp_ai_fetch` 返回 None、词典静默退化。现在
+Codex 永远带模型（`settings.model` 否则 `CODEX_DEFAULT_MODEL`=gpt-5.5，撞「requires a newer version」自动换默认模型
+重试）；Claude 登录失效写 `state/ai-health.json` 并冷却 10 分钟（`claude_in_cooldown()`，auto-claude 期内先走 Codex，
+到点再探一次，成功即清标记）；`~/.config/claude-code-oauth-token` 存在时以 `CLAUDE_CODE_OAUTH_TOKEN` 注入 CLI
+子进程（用户跑一次 `claude setup-token` 生成长期令牌，不再依赖交互式会话的刷新令牌）。`ai_health()` 一眼看状态，
+含凭证有效期字段（只读 `~/.claude/.credentials.json` 的 `refreshTokenExpiresAt`，绝不读令牌本身）。
+③ **夜间刷新** `scripts/vocab/refresh_stale_jp_cache.py`（Windows 计划任务「JP Dict Refresh」03:30，
+`bin/jp_dict_refresh.cmd`，日志 `state/logs/jp-dict-refresh.log`，状态 `state/dict-cache-refresh.json`）：
+按 `dict_sources._jp_entry_fresh`（与 `lookup_jp` **同一条规则**）找旧版词条，先片假名缺 `source_word` 的（用户看得见）
+再其余 pv 落后的，每晚 200 条（Haiku low ≈ 2–4 s/条），AI 连败 3 次即停。2026-09-07 存量：旧版 6091 条，其中片假名
+缺源词 668。契约：同文件「stale 的第二跳自动化」；单测 `tests/test_ai_client_health.py`。

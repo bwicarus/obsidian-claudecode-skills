@@ -99,3 +99,17 @@ test("词组下划线只认收藏,不认查过", () => {
   assert.match(RT, /if \(r\.property === 'lookup' && r\.kind === 'phrase'\) return;/);
   assert.doesNotMatch(PP, /setLookedUp\(lspec/);
 });
+
+// 用户 2026-09-07 实锤 おける：已查过未掌握却没有下划线。记录键是原形 於ける，下划线按页面表层 おける 查；
+// 原形早有记录时词框跳过登记，表层永远进不了别名；第二遍全文搜也只搜键不搜别名。三处一起改。
+test("表层进别名：原形已记也要补登表层，第二遍全文搜键 + 别名，别名并集", () => {
+  const note = bodyOf(WORDPOP, "_noteLookedUp");
+  assert.match(note, /if \(!_lookupCoversSurface\(state, spec, word\)\)/);
+  const covers = bodyOf(WORDPOP, "_lookupCoversSurface");
+  assert.match(covers, /state\.lookup\(spec, 'lookup'\)/);
+  assert.match(covers, /have\.aliases\.indexOf\(surface\) >= 0/);
+  const marks = bodyOf(RUNTIME, "localVocabMarks");
+  assert.match(marks, /\[r\.key\]\.concat\(Array\.isArray\(r\.aliases\) \? r\.aliases : \[\]\)\.forEach/);
+  const setProp = bodyOf(VSTATE, "setProperty");
+  assert.match(setProp, /previous\.aliases\.forEach\(function \(alias\)/);
+});

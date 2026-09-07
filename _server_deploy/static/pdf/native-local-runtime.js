@@ -8334,10 +8334,14 @@
         if (!r || r.enabled !== true) return;
         if (r.property !== 'lookup' && r.property !== 'favorite') return;
         if (r.property === 'lookup' && r.kind === 'phrase') return;   // 词组只认收藏,不认查过(2026-09-04)
-        var k = String(r.key || '').replace(/[\s\u3000]+/g, '');
-        if (k.length < 2 || k.length > 64 || seenKey[k]) return;
-        seenKey[k] = true;
-        wanted.push({ key: k, slug: r.property === 'favorite' ? 'seen' : 'new', language: r.language });
+        // 键是原形,别名是查过的各个表层(おける ↔ 於ける):页面上出现的是表层,键和别名都要搜(2026-09-07)
+        var slugFor = r.property === 'favorite' ? 'seen' : 'new';
+        [r.key].concat(Array.isArray(r.aliases) ? r.aliases : []).forEach(function (raw) {
+          var k = String(raw || '').replace(/[\s\u3000]+/g, '');
+          if (k.length < 2 || k.length > 64 || seenKey[k]) return;
+          seenKey[k] = true;
+          wanted.push({ key: k, slug: slugFor, language: r.language });
+        });
       });
       if (wanted.length && wanted.length <= 4000) {
         var joined = '', srcIdx = [];

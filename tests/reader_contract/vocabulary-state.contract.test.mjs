@@ -402,3 +402,21 @@ test("记录拒绝无界别名，避免扩展消息与 IndexedDB 被超大载荷
     /别名数量或总长度超出上限/,
   );
 });
+
+// 用户 2026-09-07 实锤 おける：已查过未掌握却没有下划线。记录键是原形 於ける，页面上的表层 おける 只能靠
+// 别名命中；再次登记同一原形时别名若被替换（或干脆跳过登记），后来查过的表层就永远画不上。
+test("同一原形换表层再登记：别名并集而不是替换（おける ↔ 於ける）", () => {
+  const state = moduleInstance();
+  state.setLookedUp({ kind: "word", language: "ja", lemma: "於ける", word: "おいて" }, true);
+  state.setLookedUp({ kind: "word", language: "ja", lemma: "於ける", word: "おける" }, true);
+  const record = state.lookup({ kind: "word", language: "ja", lemma: "於ける" }, "lookup");
+  assert.deepEqual(record.aliases, ["おいて", "おける"]);
+  assert.equal(state.isLookedUp({ kind: "word", language: "ja", lemma: "おける", word: "おける" }), true);
+  assert.equal(state.isLookedUp({ kind: "word", language: "ja", lemma: "おいて", word: "おいて" }), true);
+  // 取消登记后按 enabled 判，别名仍保留（重新登记时不用再攒）
+  state.setLookedUp({ kind: "word", language: "ja", lemma: "於ける", word: "おける" }, false);
+  assert.equal(state.isLookedUp({ kind: "word", language: "ja", lemma: "おいて", word: "おいて" }), false);
+  const disabled = state.lookup({ kind: "word", language: "ja", lemma: "於ける" }, "lookup");
+  assert.equal(disabled.enabled, false, "禁用记录不算查过");
+  assert.deepEqual(disabled.aliases, ["おいて", "おける"], "取消登记也不丢别名");
+});

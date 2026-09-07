@@ -674,6 +674,9 @@
       return Object.assign({ source: 'pi-dict-quick', meaning_source: 'pi-dict-quick' }, remoteResult);
     }
     var merged = Object.assign({}, localResult);
+    // 服务端标 stale(旧条目先回、后台升级中)要跟着合并结果走:否则"本地命中 + 远端 stale"这条最常见的路
+    // 会把缺源词的合并结果当终局缓存,自动刷新也无从触发(2026-09-07)。
+    if (remoteResult.stale === true) merged.stale = true;
     // 源词只有服务端 AI 给得出(离线 JMdict 没有这个字段) → 本地词条命中时也要把它搬过来,
     // 否则"本地有释义 + 服务端有源词"的词永远看不到源词(2026-09-04)。
     ['source_word', 'source_lang', 'source_kind'].forEach(function (key) {
@@ -770,7 +773,37 @@
     } catch (_) { return Promise.resolve(null); }
   }
 
+  // stale-while-revalidate 的第二跳自动化(2026-09-07 用户:「我要的是自动的解决方案」):服务端标 stale =
+  // 旧条目先回、后台正在按新 prompt 重生成。以前要用户再点两次才看到新字段(第二次进缓存、第三次才显示)。
+  // 现在:12 s 后自动再问一次;拿到新条目 → 进缓存,小框还开着同一个词就原地重绘;仍 stale(Codex 兜底慢)
+  // 再等 30 s 最后一次。同词在途去重;小框已换词/已关则只更新缓存不动界面。
+  var _staleRefreshTimers = Object.create(null);
+  var _STALE_REFRESH_DELAYS = [12000, 30000];
+  function _scheduleStaleRefresh(word, attempt) {
+    attempt = attempt | 0;
+    if (attempt >= _STALE_REFRESH_DELAYS.length) { _dictDiag('「' + word + '」后台升级等待超时,放弃自动刷新'); return; }
+    if (_staleRefreshTimers[word]) return;
+    _staleRefreshTimers[word] = setTimeout(function () {
+      delete _staleRefreshTimers[word];
+      _lookupFetchRaw(word).then(function (d) {
+        if (!d || !d.ok) return;
+        if (d.stale === true) { _scheduleStaleRefresh(word, attempt + 1); return; }
+        _cacheDictResult(word, d);
+        var pop = document.getElementById('word-pop');
+        if (pop && pop.style.display !== 'none' && _wordPopState && _wordPopState.word === word) {
+          _dictDiag('「' + word + '」后台升级完成,原地重绘');
+          _renderWordPop(word, _wordPopState.ctx, d, _wordPopState.rect || null);
+        }
+      }).catch(function () {});
+    }, _STALE_REFRESH_DELAYS[attempt]);
+  }
   function _lookupFetch(word) {
+    return _lookupFetchRaw(word).then(function (d) {
+      if (d && d.stale === true) _scheduleStaleRefresh(word, 0);
+      return d;
+    });
+  }
+  function _lookupFetchRaw(word) {
     if (_isJaWord(word)) {
       return _lookupJapaneseLocalFirst(word, _ctx.ctx || '');
     }
@@ -845,6 +878,19 @@
   // 查过即记(2026-09-03):① 本地 vocabulary-state 'lookup'(生词下划线的本地依据,离线也成立)
   // ② 结果不是服务端刚给的(本地 JMdict / 设备缓存)时补一条 lookup-event 给服务端(它的查词
   //    日志/生词笔记链路照旧),幂等按 id 去重 ③ 当前页立即刷新下划线。合成兜底词条不算查到。
+  // 查过的记录是否已覆盖这个表层:记录键(原形)或别名里有它才算。拿不到 lookup/normalizeKey 就按"未覆盖"补登(幂等)。
+  function _lookupCoversSurface(state, spec, word) {
+    var have = null;
+    try { have = typeof state.lookup === 'function' ? state.lookup(spec, 'lookup') : null; } catch (_) { have = null; }
+    if (!have || have.enabled !== true) return false;
+    var surface = '';
+    try {
+      surface = typeof state.normalizeKey === 'function'
+        ? state.normalizeKey(word) : String(word || '').trim().toLowerCase();
+    } catch (_) { return false; }
+    if (!surface) return true;
+    return have.key === surface || (Array.isArray(have.aliases) && have.aliases.indexOf(surface) >= 0);
+  }
   function _noteLookedUp(word, d) {
     try {
       if (!d || d.ok !== true || !word) return;
@@ -853,9 +899,11 @@
       var state = _vocabularyState();
       if (state && typeof state.setLookedUp === 'function') {
         try {
-          if (!state.isLookedUp(_wordStateSpec(lemma, { jp: !!d.jp, word: word, forms: d.forms }))) {
-            state.setLookedUp(_wordStateSpec(lemma, { jp: !!d.jp, word: word, forms: d.forms }), true,
-              { source: 'rc-wordpop' });
+          var spec = _wordStateSpec(lemma, { jp: !!d.jp, word: word, forms: d.forms });
+          // 原形已登记 ≠ 这个表层已登记(2026-09-07 用户实锤 おける:原形 於ける 早有记录,表层 おける 不在别名里,
+          // 下划线按页面表层查永远查不到)。表层没进记录就再登记一次 —— vocabulary-state 会把别名并进旧记录。
+          if (!_lookupCoversSurface(state, spec, word)) {
+            state.setLookedUp(spec, true, { source: 'rc-wordpop' });
           }
         } catch (_) {}
       }
@@ -1058,7 +1106,7 @@
   // 渲染单词小框(已拿到 dict-quick 结果 d)。rect=查词时捕获的选区矩形,用于定位。
   function _renderWordPop(word, ctx, d, rect) {
     var pop = _ensurePop();
-    _wordPopState = { word: word, ctx: ctx || '', lemma: word };
+    _wordPopState = { word: word, ctx: ctx || '', lemma: word, rect: rect || null };   // rect 留给 stale 自动刷新原地重绘
     if (!d || !d.ok) {
       if (_isJaWord(word)) {
         // 词典无此词(常见=复合词/专有名词,2026-07-21 用户实锤「豆腐汁」):不再自动糊 AI 大框——
