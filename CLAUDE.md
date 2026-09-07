@@ -29,7 +29,8 @@ git rev-parse --abbrev-ref HEAD && git worktree list
 
 | 环境 | 判定 | 项目根 | Vault | webapp | 服务管理 |
 |---|---|---|---|---|---|
-| **Windows PC**（主力开发机，**App 的服务器**） | `sys.platform==win32` / 有 `C:\` | `C:\claude`（服务器实际跑的是工作树 `C:\tmp\reader-card-anchor-release`） | `C:\obsidian` | Flask `127.0.0.1:5000` + 四个 sidecar(8766-8769)，**2026-09-03 起全部由 ReaderPC 托盘（`ReaderPC-Server.exe`）托管**：崩溃重拉/代码变更自动重启/Obsidian Sync 任务看护，状态见 `%LOCALAPPDATA%\BWReadereaderpc-server.status.json` 的 `services`；旧 `local_supervisor.pyw`/`windows_sidecar_services.py`/计划任务 `BwicarusServer` 已停用（见 `references/windows-server-consolidation-plan.md`） | ReaderPC 托盘（唯一常驻守护） |
+| **Windows PC**（主力开发机，**App 的服务器**） | `sys.platform==win32` / 有 `C:\` | `C:\claude`（服务器实际跑的是工作树 `C:\tmp\reader-card-anchor-release`） | `C:\obsidian` | Flask `127.0.0.1:5000` + 四个 sidecar(8766-8769)，**2026-09-03 起全部由 ReaderPC 托盘（`ReaderPC-Server.exe`）托管**：崩溃重拉/代码变更自动重启/Obsidian Sync 任务看护，状态见 `%LOCALAPPDATA%\BWReader
+eaderpc-server.status.json` 的 `services`；旧 `local_supervisor.pyw`/`windows_sidecar_services.py`/计划任务 `BwicarusServer` 已停用（见 `references/windows-server-consolidation-plan.md`） | ReaderPC 托盘（唯一常驻守护） |
 | **Pi**（hostname `bwicarus`,Tailscale-only,**当前主力服务器**） | Linux + 存在 `/home/bwicarus/claude` | `/home/bwicarus/claude` | `/home/bwicarus/obsidian` | **gunicorn `127.0.0.1:5000`** ← nginx HTTPS(`webapp.service`) | **systemd**(`systemctl`) |
 | **VPS**（公网 `bwicarus.space`,⏸ **2026-06-10 起暂停**:只跑 webapp,自动化已 disable） | Linux + 存在 `/root/claude`(⚠ hostname 也是 `bwicarus`,跟 Pi 撞名,**别用 hostname 判定**) | `/root/claude` | `/root/obsidian` | 同 Pi,webapp 代码在 `/root/webapp` | **systemd** |
 
@@ -495,6 +496,13 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 - 切换由 `service_switch.py switch <claude|gpt>` 完成，亦可在任务监视托盘菜单点选
   - `claude` → `{"backend": "auto-claude"}`，限流时降级到 Codex
   - `gpt` → `{"backend": "codex", "model": "gpt-5.5"}`，限流时降级到 Claude
+- **后端自愈（2026-09-07，用户拍板「要自动的解决方案」）**：Codex 永远带模型（`settings.model` 否则
+  `CODEX_DEFAULT_MODEL`=gpt-5.5；空模型走 CLI 默认 gpt-6-astra 曾让旧 CLI 直接 400）；Claude CLI 登录失效写
+  `state/ai-health.json` 并冷却 10 分钟，auto-claude 期内先走 Codex、到点再探、成功即清；`~/.config/claude-code-oauth-token`
+  存在时以 `CLAUDE_CODE_OAUTH_TOKEN` 注入（`claude setup-token` 一次生成长期令牌）。`ai_client.ai_health()` 一眼看状态。
+  夜间「JP Dict Refresh」计划任务（03:30，`bin/jp_dict_refresh.cmd`）刷日语词典旧版词条。详见 `references/vocab-system.md` §14。
+  ⚠ `config.CLAUDE_CLI` 默认已改为按实际安装位找（`~/.local/bin/claude.exe` → PATH → 旧 WinGet 位）：以前硬编码的 WinGet 位早已不存在，
+  独立脚本里 Claude 调用一律 FileNotFoundError 被吞成 None（Flask 只因 `.env.local` 的 APP_CLAUDE 才对）。
 
 重新编译方法：
 ```

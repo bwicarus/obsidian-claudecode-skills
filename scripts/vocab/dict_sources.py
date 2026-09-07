@@ -735,15 +735,12 @@ def lookup_jp(word: str, context: str = "", model: str = "haiku", langs=None) ->
 
     cached = _cache_load("jp", word, ttl_days=3650)   # 词义不变,缓存 10 年
     if cached:
-        has_kanji = bool(_KANJI_RE.search(word))
         # ⚠ 2026-09-04:此前是 `or not has_kanji` —— 无汉字词无伪朋友风险,当初为省额度让它们
         #   **永远**命中旧缓存,不看 pv。但源词(source_word)恰恰只对**外来语**有意义,而外来语
         #   全是无汉字的片假名词 → 那条捷径会让新字段永远出不来(改了看起来对、上线静默不生效)。
         #   现在:无汉字词只要**已带 source_word 键**(哪怕是空串,表示 AI 判过"无源词")就仍算新鲜;
         #   没这个键说明是加字段之前的旧条目 → 走下面的 stale-while-revalidate 后台升级。
-        fresh = cached.get("pv") == _JP_PROMPT_VER or (
-            not has_kanji and "source_word" in cached
-        )
+        fresh = _jp_entry_fresh(word, cached)
         if fresh:
             return _attach_examples({**cached, "from_cache": True})
         # 旧 prompt 版的含汉字词(存量 ~4300 条/78%):**先秒回旧条目**(服务器有就不让用户等
@@ -758,6 +755,15 @@ def lookup_jp(word: str, context: str = "", model: str = "haiku", langs=None) ->
 
 
 _JP_REGEN_INFLIGHT: set = set()
+
+
+def _jp_entry_fresh(word: str, cached: dict) -> bool:
+    """词条是否按当前 prompt 版本算新鲜。lookup_jp 与夜间刷新脚本(refresh_stale_jp_cache.py)共用**同一条规则**,
+    免得两处各写一份然后漂移:pv 对得上 → 新鲜;无汉字词只要已带 source_word 键(哪怕空串)也算新鲜。"""
+    if not isinstance(cached, dict):
+        return False
+    has_kanji = bool(_KANJI_RE.search(word))
+    return cached.get("pv") == _JP_PROMPT_VER or (not has_kanji and "source_word" in cached)
 
 
 def _jp_regen_bg(word: str, context: str, model: str, langs) -> None:

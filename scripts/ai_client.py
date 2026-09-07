@@ -32,6 +32,14 @@ def _resolve_cli(configured: str, name: str) -> str:
     兜底,避免 webapp/daily 整条 AI 链路因 CLI 搬家而崩。
     """
     if WINDOWS:
+        # 配置了带目录的路径但它不存在(CLI 自更新搬家 / 旧 WinGet 位)→ 按 PATH 找同名可执行;找不到才原样返回
+        try:
+            if configured and ("\\" in configured or "/" in configured) and not os.path.exists(configured):
+                found = shutil.which(name) or shutil.which(os.path.basename(configured))
+                if found:
+                    return found
+        except Exception:
+            pass
         return configured
     try:
         # 配置的是存在的真路径 → 直接用
@@ -150,6 +158,172 @@ def _log_ai_call(backend: str, label: str, prompt: str, response: str, duration:
         pass  # 日志失败不能影响主流程
 
 
+# ── 后端健康 & 自动改道(2026-09-07 用户拍板「要自动的解决方案」) ──────────────────────
+# 事故链:Claude CLI 登录失效(OAuth 刷新失败)→ 每次查词先干等 Claude 报错再改道 Codex;而 Codex 不给 -m
+# 走 CLI 默认 gpt-6-astra,本机旧 CLI 直接 400「requires a newer version of Codex」→ 两边全败,词典静默退化,
+# 外来语的英文源词一直出不来。三件事都不再要人手动介入:
+#   ① Codex 永远带模型(settings.model 否则 CODEX_DEFAULT_MODEL);撞到「requires a newer version」自动换默认模型重试一次;
+#   ② Claude 登录失效 → 写 state/ai-health.json 并冷却 CLAUDE_AUTH_COOLDOWN_SEC:冷却期 auto-claude 先走 Codex,
+#      到点再探一次 Claude,成功即清标记(用户重新登录后无需任何操作);
+#   ③ ~/.config/claude-code-oauth-token 存在时以 CLAUDE_CODE_OAUTH_TOKEN 注入子进程(`claude setup-token` 生成一次,
+#      长期有效,不再依赖交互式会话的刷新令牌)。
+CODEX_DEFAULT_MODEL = (os.environ.get("BW_CODEX_DEFAULT_MODEL") or "gpt-5.5").strip() or "gpt-5.5"
+CLAUDE_AUTH_COOLDOWN_SEC = int(os.environ.get("BW_CLAUDE_AUTH_COOLDOWN_SEC") or 600)
+_HEALTH_FILE = Path(PROJECT) / "state" / "ai-health.json"
+_HEALTH_LOCK = threading.Lock()
+_CLAUDE_TOKEN_FILE = Path(os.environ.get("BW_CLAUDE_TOKEN_FILE") or os.path.expanduser("~/.config/claude-code-oauth-token"))
+_CLAUDE_CREDENTIALS = Path(os.path.expanduser("~/.claude/.credentials.json"))
+_CLAUDE_FLAGGED: list = [None]   # None=还没读过健康文件;True/False=本进程内存镜像,成功调用不必每次读盘
+
+# CLI 自己的失败行(小写比对)。不对整段答案做子串匹配:正常讲解里可以出现「401 Unauthorized」这种话。
+_AUTH_ERROR_LINE = re.compile(
+    r"(?:error\s*:\s*)?(?:"
+    r"failed to authenticate:\s*oauth session expired and could not be refreshed\.?|"
+    r"oauth session expired(?: and could not be refreshed)?\.?|"
+    r"authentication failed:\s*(?:invalid authentication credentials|oauth session expired)\.?|"
+    r"authentication_error:\s*(?:invalid authentication credentials|oauth session expired)\.?|"
+    r"invalid authentication credentials\.?|"
+    r"could not refresh (?:the )?oauth session\.?|"
+    r"please run /login\.?|"
+    r"please log in to continue\.?|"
+    r"login required:\s*(?:please )?(?:run /login|log in to continue)\.?"
+    r")"
+)
+_AUTH_401_LINE = re.compile(r"(?:error\s*:\s*)?401 unauthorized(?:[.!:]\s*.*)?")
+# stderr 只有 CLI 自己会写,可以放宽成子串
+_AUTH_STDERR_RE = re.compile(
+    r"oauth session expired|could not refresh (?:the )?oauth|invalid authentication credentials|"
+    r"please run /login|please log in|login required|not logged in|401 unauthorized|authentication[_ ]error",
+    re.I,
+)
+_CODEX_NEWER_RE = re.compile(r"requires a newer version of codex", re.I)
+
+
+def _is_claude_auth_failure(stdout: str, stderr: str = "") -> bool:
+    for line in (stdout or "").lower().splitlines():
+        line = line.strip()
+        if _AUTH_ERROR_LINE.fullmatch(line) or _AUTH_401_LINE.fullmatch(line):
+            return True
+    return bool(_AUTH_STDERR_RE.search((stderr or "")[:4000]))
+
+
+def _health_read() -> dict:
+    try:
+        d = json.loads(_HEALTH_FILE.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _health_write(patch: dict) -> None:
+    with _HEALTH_LOCK:
+        d = _health_read()
+        d.update(patch)
+        d["updated_at"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+        try:
+            _HEALTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _HEALTH_FILE.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(_HEALTH_FILE)
+        except Exception:
+            pass
+
+
+def _mark_claude_auth_failed(detail: str) -> None:
+    now = time.time()
+    _health_write({
+        "claude_auth_failed_at": now,
+        "claude_auth_error": _truncate(detail, 300),
+        "claude_cooldown_until": now + CLAUDE_AUTH_COOLDOWN_SEC,
+    })
+    _CLAUDE_FLAGGED[0] = True
+    _log_ai_call("claude", f"AUTH-FAIL → 冷却 {CLAUDE_AUTH_COOLDOWN_SEC}s,auto 路由先走 Codex", "", detail, 0.0)
+
+
+def _mark_claude_ok() -> None:
+    if _CLAUDE_FLAGGED[0] is None:
+        h = _health_read()
+        _CLAUDE_FLAGGED[0] = bool(h.get("claude_cooldown_until") or h.get("claude_auth_failed_at"))
+    if not _CLAUDE_FLAGGED[0]:
+        return
+    _health_write({
+        "claude_auth_failed_at": None, "claude_auth_error": None,
+        "claude_cooldown_until": None, "claude_recovered_at": time.time(),
+    })
+    _CLAUDE_FLAGGED[0] = False
+    _log_ai_call("claude", "AUTH-OK → 解除冷却", "", "", 0.0)
+
+
+def claude_in_cooldown() -> bool:
+    """跨进程(Flask / 夜间脚本 / 桥)共用同一份健康文件,所以每次读盘;一个几百字节的 JSON,远小于起一个 CLI 进程。"""
+    try:
+        return float(_health_read().get("claude_cooldown_until") or 0) > time.time()
+    except (TypeError, ValueError):
+        return False
+
+
+def claude_credentials_status() -> dict:
+    """只读 ~/.claude/.credentials.json 的**有效期字段**(绝不返回令牌本身)。refresh token 过期 = 下次调用必失败。"""
+    out: dict = {"present": False}
+    try:
+        d = (json.loads(_CLAUDE_CREDENTIALS.read_text(encoding="utf-8")) or {}).get("claudeAiOauth") or {}
+    except Exception:
+        return out
+    if not isinstance(d, dict) or not d.get("accessToken"):
+        return out
+    out["present"] = True
+    for key, name in (("expiresAt", "access_expires_at"), ("refreshTokenExpiresAt", "refresh_expires_at")):
+        v = d.get(key)
+        if isinstance(v, (int, float)) and v > 0:
+            out[name] = v / 1000.0
+    rexp = out.get("refresh_expires_at")
+    out["refresh_expired"] = bool(rexp and rexp < time.time())
+    out["subscription"] = str(d.get("subscriptionType") or "")
+    return out
+
+
+def ai_health() -> dict:
+    """一眼状态(给脚本/面板):冷却中?上次登录失效错误?长期令牌文件在不在?凭证有效期。"""
+    h = _health_read()
+    return {
+        "claude_in_cooldown": claude_in_cooldown(),
+        "claude_cooldown_until": h.get("claude_cooldown_until"),
+        "claude_auth_error": h.get("claude_auth_error"),
+        "claude_auth_failed_at": h.get("claude_auth_failed_at"),
+        "claude_recovered_at": h.get("claude_recovered_at"),
+        "claude_token_file": _CLAUDE_TOKEN_FILE.is_file(),
+        "claude_credentials": claude_credentials_status(),
+        "codex_default_model": CODEX_DEFAULT_MODEL,
+    }
+
+
+def _claude_env() -> dict | None:
+    """长期令牌文件存在 → 子进程环境注入 CLAUDE_CODE_OAUTH_TOKEN(环境里已有的优先,不覆盖)。没有就返回 None 走默认环境。"""
+    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return None
+    try:
+        tok = _CLAUDE_TOKEN_FILE.read_text(encoding="utf-8").strip() if _CLAUDE_TOKEN_FILE.is_file() else ""
+    except Exception:
+        tok = ""
+    if not tok:
+        return None
+    env = dict(os.environ)
+    env["CLAUDE_CODE_OAUTH_TOKEN"] = tok
+    return env
+
+
+def codex_model(model: str = "") -> str:
+    """Codex 一律带 -m:传入 → settings.model → CODEX_DEFAULT_MODEL。空模型走 CLI 默认曾直接 400(gpt-6-astra)。"""
+    m = (model or "").strip()
+    if m:
+        return m
+    try:
+        m = (load_settings().get("model") or "").strip()
+    except Exception:
+        m = ""
+    return m or CODEX_DEFAULT_MODEL
+
+
 _claude_lock = threading.Lock()
 
 
@@ -180,18 +354,29 @@ def claude_raw(prompt: str, first: bool = False,
             cmd.append("--continue")
         cmd += ["-p", prompt]
         t0 = time.time()
+        env = _claude_env()
         try:
             r = _run_hidden(cmd, cwd=CLI_CWD, capture_output=True,
                             text=True, encoding="utf-8", errors="replace",
-                            timeout=900)   # 15 分钟,够 Opus max effort
+                            timeout=900,   # 15 分钟,够 Opus max effort
+                            **({"env": env} if env else {}))
         except subprocess.TimeoutExpired as e:
             tag = f"raw TIMEOUT model={model} effort={effort}"
             _log_ai_call("claude", tag, prompt, f"TIMEOUT after {e.timeout}s", time.time() - t0)
             return ""
+        except OSError as e:
+            # CLI 路径不存在/不可执行:当后端不可用(auto 路由改道 Codex),别让 FileNotFoundError 穿到调用方被 except 吞掉
+            _log_ai_call("claude", f"raw FAIL CLI 不可执行 {CLAUDE}", prompt, f"{type(e).__name__}: {e}", time.time() - t0)
+            return ""
         out = (r.stdout or "").strip()
+        stderr = (r.stderr or "").strip()
+        # 登录失效 → 记健康文件 + 进冷却(auto 路由据此先走 Codex);正常答复 → 解除冷却
+        if _is_claude_auth_failure(out, stderr):
+            _mark_claude_auth_failed(out or stderr)
+        elif r.returncode == 0 and out and not is_backend_unavailable(out):
+            _mark_claude_ok()
         # CLI 失败时(returncode != 0)记录 stderr 帮调试
         if r.returncode != 0 and not out:
-            stderr = (r.stderr or "").strip()
             tag = f"raw FAIL rc={r.returncode} model={model} effort={effort}"
             _log_ai_call("claude", tag, prompt,
                          f"STDERR: {stderr[:500]}", time.time() - t0)
@@ -204,7 +389,17 @@ def claude_raw(prompt: str, first: bool = False,
 
 
 def codex_raw(prompt: str, image_path: str = None, model: str = "") -> str:
-    """调用 Codex CLI；可附带图片，model 为空时使用 Codex 默认模型。"""
+    """调用 Codex CLI;可附带图片。model 为空 → settings.model → CODEX_DEFAULT_MODEL(不再让 CLI 自选:
+    本机 CLI 默认 gpt-6-astra 而旧版 CLI 跑不了它,直接 400)。撞「requires a newer version of Codex」换默认模型重试一次。"""
+    model = codex_model(model)
+    result = _codex_exec(prompt, image_path, model)
+    if model != CODEX_DEFAULT_MODEL and _CODEX_NEWER_RE.search(result or ""):
+        _log_ai_call("codex", f"model {model} 需更新 CLI → 换 {CODEX_DEFAULT_MODEL} 重试", prompt, result, 0.0)
+        result = _codex_exec(prompt, image_path, CODEX_DEFAULT_MODEL)
+    return result
+
+
+def _codex_exec(prompt: str, image_path: str, model: str) -> str:
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     base = ["cmd.exe", "/d", "/c", CODEX] if CODEX.lower().endswith((".cmd", ".bat")) else [CODEX]
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", dir=TEMP_DIR, delete=False) as f:
@@ -220,8 +415,12 @@ def codex_raw(prompt: str, image_path: str = None, model: str = "") -> str:
     cmd.append("-")
     t0 = time.time()
     try:
-        r = _run_hidden(cmd, input=prompt, cwd=PROJECT, capture_output=True,
-                        text=True, encoding="utf-8", errors="replace")
+        try:
+            r = _run_hidden(cmd, input=prompt, cwd=PROJECT, capture_output=True,
+                            text=True, encoding="utf-8", errors="replace")
+        except OSError as e:
+            _log_ai_call("codex", f"raw FAIL CLI 不可执行 {CODEX}", prompt, f"{type(e).__name__}: {e}", time.time() - t0)
+            return ""
         out_file = Path(out_path)
         text = out_file.read_text(encoding="utf-8").strip() if out_file.exists() else ""
         result = text or r.stdout.strip() or (r.stderr or "").strip()
@@ -260,24 +459,12 @@ def is_backend_unavailable(response: str) -> bool:
     # CLI failures appear as their own line (sometimes prefixed with ``Error:``).
     # Do not substring-match the whole answer: a valid explanation can naturally
     # discuss phrases such as "401 Unauthorized" or "authentication failed".
-    error_line = re.compile(
-        r"(?:error\s*:\s*)?(?:"
-        r"failed to authenticate:\s*oauth session expired and could not be refreshed\.?|"
-        r"oauth session expired(?: and could not be refreshed)?\.?|"
-        r"authentication failed:\s*(?:invalid authentication credentials|oauth session expired)\.?|"
-        r"authentication_error:\s*(?:invalid authentication credentials|oauth session expired)\.?|"
-        r"invalid authentication credentials\.?|"
-        r"could not refresh (?:the )?oauth session\.?|"
-        r"please run /login\.?|"
-        r"please log in to continue\.?|"
-        r"login required:\s*(?:please )?(?:run /login|log in to continue)\.?"
-        r")"
-    )
     for line in low.splitlines():
         line = line.strip()
-        if error_line.fullmatch(line):
+        if _AUTH_ERROR_LINE.fullmatch(line) or _AUTH_401_LINE.fullmatch(line):
             return True
-        if re.fullmatch(r"(?:error\s*:\s*)?401 unauthorized(?:[.!:]\s*.*)?", line):
+        # Codex CLI 太旧跑不了所选模型(gpt-6-astra 400):这是基础设施错,要改道而不是当答案
+        if len(line) <= 400 and _CODEX_NEWER_RE.search(line):
             return True
     return False
 
@@ -291,7 +478,14 @@ def route(backend: str, try_claude, try_codex) -> str:
             r2 = try_claude()
             return r2 if r2 and not is_backend_unavailable(r2) else r
         return r
-    # auto-claude（默认）
+    # auto-claude(默认)。Claude 登录失效冷却期内先走 Codex —— 免得每次都先干等 Claude 报错;
+    # Codex 也不行才回头探 Claude(探成功即解除冷却)。
+    if claude_in_cooldown():
+        r = try_codex()
+        if r and not is_backend_unavailable(r):
+            return r
+        r2 = try_claude()
+        return r2 if r2 and not is_backend_unavailable(r2) else r
     r = try_claude()
     if is_backend_unavailable(r):
         r2 = try_codex()

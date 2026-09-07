@@ -46,11 +46,19 @@ AI_CALLS_LOG       = LOGS_DIR / "ai_calls.log"
 PYTHON  = os.environ.get("APP_PYTHON",  r"C:\Users\bwica\AppData\Local\Programs\Python\Python313\python.exe")
 PYTHONW = os.environ.get("APP_PYTHONW", r"C:\Users\bwica\AppData\Local\Programs\Python\Python313\pythonw.exe")
 
-CLAUDE_CLI = os.environ.get(
-    "APP_CLAUDE",
-    r"C:\Users\bwica\AppData\Local\Microsoft\WinGet\Packages"
-    r"\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe\claude.exe",
-)
+def _default_claude_cli() -> str:
+    """APP_CLAUDE 未设时按本机实际安装位找:~/.local/bin/claude.exe(CLI 自更新后迁到这里)→ PATH → 旧 WinGet 位。
+    2026-09-07 实锤:以前硬编码 WinGet 旧位,Flask 只因 .env.local 里的 APP_CLAUDE 才对,独立脚本(夜间词典刷新/kj cli)
+    一律 FileNotFoundError 且被上层 except 吞成 None —— 静默失败(references/silent-failure-lessons.md)。"""
+    import shutil
+    for cand in (os.path.expanduser(r"~\.local\bin\claude.exe"), shutil.which("claude") or ""):
+        if cand and os.path.exists(cand):
+            return cand
+    return (r"C:\Users\bwica\AppData\Local\Microsoft\WinGet\Packages"
+            r"\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe\claude.exe")
+
+
+CLAUDE_CLI = os.environ.get("APP_CLAUDE") or _default_claude_cli()
 CODEX_CLI = os.environ.get("APP_CODEX", r"C:\Users\bwica\AppData\Roaming\npm\codex.cmd")
 
 ANKI_EXE_CANDIDATES = (
