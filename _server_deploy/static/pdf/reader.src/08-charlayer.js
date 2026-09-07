@@ -458,12 +458,19 @@ function _findVocabMarkAt(pw, charIdx) {
   if (!c || c._x0 === undefined) return null;
   const cx = (c._x0 + c._x1) / 2;
   const cy = (c._y0 + c._y1) / 2;
+  // 同一字可能同时落在几条下划线里（衛生 / 衛生活動 / 公衆衛生）：取**最长的词**。
+  // 用户 2026-09-07 拍板：明确标记了更长的词组后，同一处再出现以最长者为分词依据。
+  let best = null, bestLen = -1;
   for (const m of pw.__vocabMarks) {
     for (const r of (m.rects || [])) {
-      if (cx >= r[0] && cx <= r[2] && cy >= r[1] && cy <= r[3]) return m;
+      if (cx >= r[0] && cx <= r[2] && cy >= r[1] && cy <= r[3]) {
+        const len = String(m.word || m.lemma || '').replace(/\s+/g, '').length;
+        if (len > bestLen) { best = m; bestLen = len; }
+        break;
+      }
     }
   }
-  return null;
+  return best;
 }
 function _clickTranslateEnabled() {
   const v = localStorage.getItem('pdf-click-translate-unmastered');

@@ -1167,6 +1167,12 @@ struct ReaderLocalLibraryView: View {
             }
         }
 
+        // 整本节点析出（KJ，2026-09-07 用户拍板放在预处理旁）：服务端逐页读图+文字交页分析，
+        // 建节点/定义/前置、写回公式与图描述。暂时手动触发，跑完可在这里看每页 token。
+        if let remoteBook {
+            kjScanRow(remoteBook: remoteBook)
+        }
+
         if let remoteBook,
            let job = piOCR.job(for: remoteBook),
            job.state != "idle" {
@@ -1571,12 +1577,19 @@ struct ReaderLocalLibraryView: View {
                 )
             }
             if let localBook { await refreshTextLayers(localBook) }
+            if let remoteBook {
+                let cookies = await reader.remoteLibraryCookies()
+                await piOCR.refreshKjScan(book: remoteBook, cookies: cookies)
+            }
             await autoAdoptOrImportIfNeeded(remoteBook: remoteBook, localBook: localBook)
             var active = false
             var signature = ""
             if let remoteBook, let job = piOCR.job(for: remoteBook) {
                 active = job.isActive || job.canResume || piOCR.activeBookID == remoteBook.bookId
                 signature = "\(job.state):\(job.resultAvailable):\(job.pageCharsRevision ?? "")"
+            }
+            if let remoteBook, piOCR.kjScan(for: remoteBook)?.isActive == true {
+                active = true   // 整本节点析出跑着：保持 3s 轮询，页数与 token 实时跟上
             }
             if let remoteBook, panelJobSignature[remoteBook.bookId] != signature {
                 // 任务刚变状态(完成/失败/出结果):接下来 60s 保持 3s 节奏,让导入与文字层列表马上跟上
@@ -1970,6 +1983,81 @@ struct ReaderLocalLibraryView: View {
            let errorMessage = piOCR.errorMessage {
             reportPanelError(errorMessage)
         }
+    }
+
+    @ViewBuilder
+    private func kjScanRow(remoteBook: ReaderRemoteBook) -> some View {
+        let scan = piOCR.kjScan(for: remoteBook)
+        let unavailable = piOCR.kjScanIsUnavailable(for: remoteBook)
+        HStack {
+            Label("整本节点析出", systemImage: "point.3.connected.trianglepath.dotted")
+                .font(.caption2)
+            Spacer()
+            Text(kjScanTitle(scan, unavailable: unavailable))
+                .font(.caption2)
+                .foregroundStyle(scan?.isActive == true ? Color.tint : Color.secondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.trailing)
+            if let scan, scan.isActive {
+                Button("取消", role: .destructive) {
+                    Task { await cancelKjScan(book: remoteBook) }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .disabled(scan.state == "cancelling")
+            } else {
+                Button(scan?.state == "done" ? "再析出" : "开始") {
+                    Task { await startKjScan(book: remoteBook, force: scan?.state == "done") }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .disabled(unavailable || ocrActionBookID != nil)
+            }
+        }
+    }
+
+    private func kjScanTitle(_ scan: ReaderKjScanStatus?, unavailable: Bool) -> String {
+        if unavailable { return "服务器不可用" }
+        guard let scan else { return "未开始" }
+        let progress: String = {
+            if let done = scan.done, let todo = scan.todo, todo > 0 {
+                return "\(done)/\(todo) 页"
+            }
+            if let done = scan.done { return "\(done) 页" }
+            return ""
+        }()
+        let tokens: String = {
+            guard let t = scan.tokens, let input = t.input, let output = t.output, input + output > 0 else { return "" }
+            let cached = t.cached ?? 0
+            return "token 入 \(input) 缓存 \(cached) 出 \(output)"
+        }()
+        switch scan.state {
+        case "starting": return "正在启动"
+        case "running":
+            var parts = ["进行中"]
+            if let page = scan.currentPage { parts.append("第 \(page) 页") }
+            if !progress.isEmpty { parts.append(progress) }
+            return parts.joined(separator: " · ")
+        case "cancelling": return "正在取消"
+        case "cancelled": return "已取消 · " + progress
+        case "done": return ["已完成", progress, tokens].filter { !$0.isEmpty }.joined(separator: " · ")
+        case "error": return "出错：" + (scan.message ?? "看服务器日志")
+        case "stale": return "上次没跑完（进程已不在）"
+        case "idle": return "未开始"
+        default: return scan.message ?? scan.state
+        }
+    }
+
+    private func startKjScan(book: ReaderRemoteBook, force: Bool) async {
+        let cookies = await reader.remoteLibraryCookies()
+        await piOCR.startKjScan(book: book, force: force, cookies: cookies)
+        presentPiErrorIfNeeded(for: book)
+    }
+
+    private func cancelKjScan(book: ReaderRemoteBook) async {
+        let cookies = await reader.remoteLibraryCookies()
+        await piOCR.cancelKjScan(book: book, cookies: cookies)
+        presentPiErrorIfNeeded(for: book)
     }
 
     private func controlPi(

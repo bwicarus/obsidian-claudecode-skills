@@ -173,6 +173,7 @@ WINDOWS_SOURCE_FILES = (
     "ComputerVoiceAudio/ReaderLocalAnki.cs",
     "ComputerVoiceAudio/ReaderMapTiles.cs",
     "ComputerVoiceAudio/ReaderQuery.cs",
+    "ComputerVoiceAudio/KjPageClient.cs",
     "ComputerVoiceAudio/ReaderQueryRpc.cs",
     "ComputerVoiceAudio/ReaderRealtimeOutput.cs",
     "ComputerVoiceAudio/ReaderRealtimeOutputOutbox.cs",

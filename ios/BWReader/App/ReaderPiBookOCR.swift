@@ -55,6 +55,41 @@ struct ReaderPiOCRJob: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
+/// KJ 整本节点析出的状态（服务端 state/kj/scans/<sha>.json 的投影）。除 state 外都可空：
+/// 刚启动只有 state/message；老服务器没有这条路由时协调器把整项置 nil，面板显示"不可用"。
+struct ReaderKjScanStatus: Decodable, Hashable, Sendable {
+    static let contract = "kj-book-scan/1"
+    let state: String
+    let message: String?
+    let totalPages: Int?
+    let todo: Int?
+    let done: Int?
+    let currentPage: Int?
+    let backend: String?
+    let tokens: Tokens?
+
+    struct Tokens: Decodable, Hashable, Sendable {
+        let input: Int?
+        let cached: Int?
+        let output: Int?
+        let turns: Int?
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case state, message, todo, done, backend, tokens
+        case totalPages = "total_pages"
+        case currentPage = "current_page"
+    }
+
+    var isActive: Bool { ["starting", "running", "cancelling"].contains(state) }
+}
+
+private struct ReaderKjScanWireResponse: Decodable {
+    let ok: Bool
+    let contract: String
+    let scan: ReaderKjScanStatus
+}
+
 private struct ReaderPiOCRWireResponse: Decodable {
     let ok: Bool
     let contract: String
@@ -757,6 +792,92 @@ final class ReaderPiOCRClient {
         )
     }
 
+    // ── KJ 整本节点析出（2026-09-07）：书库页预处理旁的按钮；服务端 detached 跑 scripts/kj/book_scan.py ──
+    func kjScanStatus(
+        book: ReaderRemoteBook,
+        cookies: [HTTPCookie]
+    ) async throws -> ReaderKjScanStatus {
+        guard var components = URLComponents(
+            url: try canonicalURL(path: "pdf/api/library/kj-scan/status"),
+            resolvingAgainstBaseURL: false
+        ) else {
+            throw ReaderPiOCRError.invalidURL
+        }
+        components.queryItems = [
+            URLQueryItem(name: "bookId", value: book.bookId),
+            URLQueryItem(name: "contentSha256", value: book.contentSha256),
+        ]
+        guard let url = components.url else { throw ReaderPiOCRError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        apply(cookies: cookies, to: &request)
+        return try await kjScanResponse(
+            for: request,
+            expectedPath: "/pdf/api/library/kj-scan/status"
+        )
+    }
+
+    func kjScanStart(
+        book: ReaderRemoteBook,
+        force: Bool,
+        cookies: [HTTPCookie]
+    ) async throws -> ReaderKjScanStatus {
+        try await kjScanCommand(
+            "start",
+            book: book,
+            flags: force ? ["force": true] : [:],
+            cookies: cookies
+        )
+    }
+
+    func kjScanCancel(
+        book: ReaderRemoteBook,
+        cookies: [HTTPCookie]
+    ) async throws -> ReaderKjScanStatus {
+        try await kjScanCommand("cancel", book: book, flags: [:], cookies: cookies)
+    }
+
+    private func kjScanCommand(
+        _ action: String,
+        book: ReaderRemoteBook,
+        flags: [String: Bool],
+        cookies: [HTTPCookie]
+    ) async throws -> ReaderKjScanStatus {
+        let path = "pdf/api/library/kj-scan/\(action)"
+        var request = URLRequest(url: try canonicalURL(path: path))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var payload: [String: Any] = [
+            "bookId": book.bookId,
+            "contentSha256": book.contentSha256,
+        ]
+        for (key, value) in flags { payload[key] = value }
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        apply(cookies: cookies, to: &request)
+        return try await kjScanResponse(for: request, expectedPath: "/\(path)")
+    }
+
+    private func kjScanResponse(
+        for request: URLRequest,
+        expectedPath: String
+    ) async throws -> ReaderKjScanStatus {
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data, expectedPathPrefix: expectedPath)
+        let payload: ReaderKjScanWireResponse
+        do {
+            payload = try JSONDecoder().decode(ReaderKjScanWireResponse.self, from: data)
+        } catch {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        guard payload.ok, payload.contract == ReaderKjScanStatus.contract else {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        return payload.scan
+    }
+
     private func command(
         path: String,
         body: [String: String],
@@ -993,6 +1114,9 @@ final class ReaderPiOCRCoordinator: ObservableObject {
     @Published private var bookErrors: [String: BookError] = [:]
     @Published private(set) var errorMessage: String?
     @Published private(set) var errorBookID: String?
+    /// KJ 整本节点析出：按书的服务端状态；nil = 还没查到或服务器没这条路由。
+    @Published private(set) var kjScans: [String: ReaderKjScanStatus] = [:]
+    @Published private(set) var kjScanUnavailable: Set<String> = []
 
     private let client = ReaderPiOCRClient.shared
     private let defaults: UserDefaults
@@ -1096,6 +1220,46 @@ final class ReaderPiOCRCoordinator: ObservableObject {
             allowDeactivate: allowDeactivate,
             cookies: cookies
         )
+    }
+
+    // ── KJ 整本节点析出 ────────────────────────────────────────────────────
+    func kjScan(for book: ReaderRemoteBook) -> ReaderKjScanStatus? {
+        kjScans[book.bookId]
+    }
+
+    func kjScanIsUnavailable(for book: ReaderRemoteBook) -> Bool {
+        kjScanUnavailable.contains(book.bookId)
+    }
+
+    func refreshKjScan(book: ReaderRemoteBook, cookies: [HTTPCookie]) async {
+        do {
+            let status = try await client.kjScanStatus(book: book, cookies: cookies)
+            guard !Task.isCancelled else { return }
+            kjScans[book.bookId] = status
+            kjScanUnavailable.remove(book.bookId)
+        } catch {
+            // 老服务器没有这条路由 / 网络不通：不弹错，只把这一项标成不可用，面板照常显示别的
+            guard !Task.isCancelled else { return }
+            kjScanUnavailable.insert(book.bookId)
+        }
+    }
+
+    func startKjScan(book: ReaderRemoteBook, force: Bool = false, cookies: [HTTPCookie]) async {
+        do {
+            let status = try await client.kjScanStart(book: book, force: force, cookies: cookies)
+            kjScans[book.bookId] = status
+            kjScanUnavailable.remove(book.bookId)
+        } catch {
+            recordError("整本节点析出没能启动：\(error.localizedDescription)", for: book, explicit: true)
+        }
+    }
+
+    func cancelKjScan(book: ReaderRemoteBook, cookies: [HTTPCookie]) async {
+        do {
+            kjScans[book.bookId] = try await client.kjScanCancel(book: book, cookies: cookies)
+        } catch {
+            recordError("取消整本节点析出失败：\(error.localizedDescription)", for: book, explicit: true)
+        }
     }
 
     func job(for book: ReaderRemoteBook) -> ReaderPiOCRJob? {

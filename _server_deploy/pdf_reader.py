@@ -4470,6 +4470,144 @@ def pdf_api_library_ocr_retry():
     return _reader_library_ocr_control("retry")
 
 
+# ── KJ 整本节点析出（2026-09-07 用户拍板：书库页预处理旁的按钮；暂时手动触发） ──────────────────
+# 跑的是 scripts/kj/book_scan.py（滚动会话逐页读图+文字 → page-submit 落账），detached 低优先级子进程；
+# 状态文件 state/kj/scans/<sha 前 16>.json 由书库页轮询。路由挂在 /pdf/api/library 下是因为 tailscale serve
+# 只把 /pdf /api 等前缀转给 Flask，/kj 没有转（桥调本机 Flask 不经 tailscale，不受此限）。
+_KJ_SCAN_CONTRACT = "kj-book-scan/1"
+_KJ_SCAN_DIR = CLAUDE_DIR / "state" / "kj" / "scans"
+
+
+def _kj_scan_status_path(content_sha256: str):
+    return _KJ_SCAN_DIR / f"{str(content_sha256)[:16]}.json"
+
+
+def _kj_scan_read(path):
+    try:
+        st = json.loads(path.read_text("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(st, dict):
+        return None
+    if st.get("state") in ("starting", "running") and not _pid_alive(st.get("pid")):
+        st["state"] = "stale"     # 进程没了却没写完结状态：如实报，不装作还在跑
+        st["message"] = (st.get("message") or "") + "（进程已不在）"
+    return st
+
+
+def _kj_scan_reply(st, **extra):
+    body = {"ok": True, "contract": _KJ_SCAN_CONTRACT, "scan": st or {"state": "idle"}}
+    body.update(extra)
+    return jsonify(body)
+
+
+@bp.route("/api/library/kj-scan/status")
+def pdf_api_library_kj_scan_status():
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    if set(request.args) - {"bookId", "contentSha256"}:
+        return _reader_library_ocr_error(ReaderBookOcrError("invalid-request", "unknown kj-scan fields", status=400))
+    book_id = str(request.args.get("bookId") or "")
+    sha = str(request.args.get("contentSha256") or "")
+    try:
+        _reader_book_ocr().resolve(book_id, sha)
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+    return _kj_scan_reply(_kj_scan_read(_kj_scan_status_path(sha)))
+
+
+@bp.route("/api/library/kj-scan/start", methods=["POST"])
+def pdf_api_library_kj_scan_start():
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict) or set(body) - {"bookId", "contentSha256", "force", "pages", "backend", "model"}:
+        return _reader_library_ocr_error(ReaderBookOcrError("invalid-request", "unknown kj-scan fields", status=400))
+    book_id = str(body.get("bookId") or "")
+    sha = str(body.get("contentSha256") or "")
+    try:
+        resolved = _reader_book_ocr().resolve(book_id, sha)
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+    import subprocess
+    _KJ_SCAN_DIR.mkdir(parents=True, exist_ok=True)
+    sp = _kj_scan_status_path(sha)
+    st = _kj_scan_read(sp)
+    if st and st.get("state") in ("starting", "running"):
+        return _kj_scan_reply(st, already_running=True)
+    try:
+        cancel_flag = Path(str(sp) + ".cancel")
+        if cancel_flag.exists():
+            cancel_flag.unlink()
+    except Exception:
+        pass
+    py = os.environ.get("APP_PYTHON") or sys.executable
+    title = str((resolved.entry or {}).get("name") or Path(resolved.path).stem)
+    rel = ""
+    try:
+        rel = Path(resolved.path).resolve().relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+    except Exception:
+        rel = ""
+    cmd = [py, str(CLAUDE_DIR / "scripts" / "kj" / "book_scan.py"), "--book", str(resolved.path),
+           "--book-id", book_id, "--sha", sha, "--title", title, "--status", str(sp)]
+    if rel:
+        cmd += ["--rel", rel]
+    if body.get("force"):
+        cmd.append("--force")
+    if body.get("pages"):
+        cmd += ["--pages", str(body["pages"])[:200]]
+    if body.get("backend") in ("claude", "codex"):
+        cmd += ["--backend", str(body["backend"])]
+    if body.get("model"):
+        cmd += ["--model", str(body["model"])[:80]]
+    env = dict(os.environ)
+    env.setdefault("CLAUDE_PROJECT", str(CLAUDE_DIR))
+    popen_kw = dict(cwd=str(CLAUDE_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    if sys.platform == "win32":
+        popen_kw["creationflags"] = 0x00004000 | 0x08000000  # BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW
+    else:
+        popen_kw["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(cmd, **popen_kw)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"启动失败：{ex}"}), 500
+    st = {"contract": _KJ_SCAN_CONTRACT, "state": "starting", "pid": proc.pid, "book_id": book_id, "sha": sha,
+          "title": title, "started_at": int(time.time()), "updated_at": int(time.time()), "message": "正在启动"}
+    try:
+        sp.write_text(json.dumps(st, ensure_ascii=False), "utf-8")
+    except Exception:
+        pass
+    return _kj_scan_reply(st, started=True)
+
+
+@bp.route("/api/library/kj-scan/cancel", methods=["POST"])
+def pdf_api_library_kj_scan_cancel():
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    body = request.get_json(silent=True) or {}
+    book_id = str(body.get("bookId") or "")
+    sha = str(body.get("contentSha256") or "")
+    try:
+        _reader_book_ocr().resolve(book_id, sha)
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+    sp = _kj_scan_status_path(sha)
+    st = _kj_scan_read(sp)
+    if not st or st.get("state") not in ("starting", "running"):
+        return _kj_scan_reply(st, cancelled=False)
+    try:
+        Path(str(sp) + ".cancel").write_text(str(int(time.time())), "utf-8")
+        st["state"] = "cancelling"
+        st["message"] = "已请求取消，当前页交完就停"
+        sp.write_text(json.dumps(st, ensure_ascii=False), "utf-8")
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"写取消标记失败：{ex}"}), 500
+    return _kj_scan_reply(st, cancelled=True)
+
+
 @bp.route("/api/library/ocr/page-chars/<book_id>/<int:page>")
 def pdf_api_library_ocr_page_chars(book_id, page):
     """Return one canonical OCR sidecar, enriched by the existing formula layer."""

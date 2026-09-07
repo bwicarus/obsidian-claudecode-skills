@@ -3085,12 +3085,19 @@ function _findVocabMarkAt(pw, charIdx) {
   if (!c || c._x0 === undefined) return null;
   const cx = (c._x0 + c._x1) / 2;
   const cy = (c._y0 + c._y1) / 2;
+  // 同一字可能同时落在几条下划线里（衛生 / 衛生活動 / 公衆衛生）：取**最长的词**。
+  // 用户 2026-09-07 拍板：明确标记了更长的词组后，同一处再出现以最长者为分词依据。
+  let best = null, bestLen = -1;
   for (const m of pw.__vocabMarks) {
     for (const r of (m.rects || [])) {
-      if (cx >= r[0] && cx <= r[2] && cy >= r[1] && cy <= r[3]) return m;
+      if (cx >= r[0] && cx <= r[2] && cy >= r[1] && cy <= r[3]) {
+        const len = String(m.word || m.lemma || '').replace(/\s+/g, '').length;
+        if (len > bestLen) { best = m; bestLen = len; }
+        break;
+      }
     }
   }
-  return null;
+  return best;
 }
 function _clickTranslateEnabled() {
   const v = localStorage.getItem('pdf-click-translate-unmastered');
@@ -4876,17 +4883,20 @@ function _expandToWordEnd(chars, idx) {
   return idx;
 }
 
-function _selByCharRange(pw, sIdx, eIdx, keepSet) {
+function _selByCharRange(pw, sIdx, eIdx, keepSet, tapIdx) {
   // 程序性整词选中的精确字符集:由 _wordExpandFromChar 随 bounds 显式传入,
   // 不经全局变量 —— 全局一次性变量在调用方早退时泄漏到下一次选中,表现为
   // "选中区域和实际的词完全不相干"(2026-09-02 实锤)。
-  const _keep = keepSet instanceof Set ? keepSet : null;
+  let _keep = keepSet instanceof Set ? keepSet : null;
   if (!pw || !pw.__charBoxes) return;
   if (sIdx > eIdx) { const t = sIdx; sIdx = eIdx; eIdx = t; }
   const chars = pw.__charBoxes;
   if (sIdx < 0 || eIdx >= chars.length) return;
   // 拖选两端自动对齐词边界（英文 \w 词；CJK 字符不动 - isWord 不匹配自动跳过）
-  const _tapIdx = (sIdx === eIdx) ? sIdx : -1;   // 单击特征,拖选不进下面的 mark 覆盖
+  // 单击特征:调用方显式传 tapIdx(单击整词扩展后 sIdx≠eIdx 也算单击);没传则退回旧判据(单字)。拖选不进下面的 mark 覆盖。
+  // 2026-09-07 实锤:分词给的 w 跨度错位(感|染症の、廃|棄物処)时,点在已画下划线的「感染症」中间,以前因 sIdx≠eIdx 不吸附,
+  // 结果按错位分词选出「染症の」再去查——已有分词(下划线)必须凌驾即时分词。
+  const _tapIdx = (typeof tapIdx === 'number' && tapIdx >= 0) ? tapIdx : ((sIdx === eIdx) ? sIdx : -1);
   sIdx = _expandToWordStart(chars, sIdx);
   eIdx = _expandToWordEnd(chars, eIdx);
   // 单击落在生词下划线内 → 选中范围与下划线一致（用户 2026-08-31 实锤:
@@ -4894,9 +4904,15 @@ function _selByCharRange(pw, sIdx, eIdx, keepSet) {
   // 下划线 mark 是分词后的**整词**(rects 跨行分段),从 rects 反推字符集,
   // 一次选全。拖选(_tapIdx<0)是手动范围,不覆盖。
   if (_tapIdx >= 0) {
-    const _vm = _findVocabMarkAt(pw, _tapIdx);
-    if (_vm && Array.isArray(_vm.rects) && _vm.rects.length) {
+    // 优先级（用户 2026-09-07 拍板）：登记词组（最长）> 生词下划线（最长）> 即时分词。
+    // 衛生 与 衛生活動 都收藏时点 衛 → 选 衛生活動；以前先撞到"衛生"的下划线就停了。
+    const _ph = _phraseExpandFromChar(chars, _tapIdx);
+    const _vm = (_ph && _ph.keep && _ph.keep.size) ? null : _findVocabMarkAt(pw, _tapIdx);
+    if (_ph && _ph.keep && _ph.keep.size) {
+      sIdx = _ph.start; eIdx = _ph.end; _keep = _ph.keep;
+    } else if (_vm && Array.isArray(_vm.rects) && _vm.rects.length) {
       let _lo = -1, _hi = -1;
+      const _cov = new Set();   // 下划线 rects 覆盖到的精确字符集:凌驾分词给的 keep
       for (let _i = 0; _i < chars.length; _i++) {
         const _c = chars[_i];
         if (!_c || _c._x0 === undefined) continue;
@@ -4905,11 +4921,12 @@ function _selByCharRange(pw, sIdx, eIdx, keepSet) {
           if (_cx >= _r[0] && _cx <= _r[2] && _cy >= _r[1] && _cy <= _r[3]) {
             if (_lo < 0) _lo = _i;
             _hi = _i;
+            _cov.add(_i);
             break;
           }
         }
       }
-      if (_lo >= 0 && _hi >= _lo) { sIdx = _lo; eIdx = _hi; }
+      if (_lo >= 0 && _hi >= _lo) { sIdx = _lo; eIdx = _hi; _keep = _cov.size ? _cov : null; }
     }
   }
   // 同块严格限在该 bk；跨块只接受两端之间的几何连通路径。
@@ -5532,7 +5549,7 @@ function _bindCharLayer(cl, pw) {
       else if (_clickCount === 2) bounds = _lineExpandFromChar(pw.__charBoxes, startIdx);
       else bounds = _paragraphExpandFromChar(pw.__charBoxes, startIdx);
       if (bounds) {
-        _selByCharRange(pw, bounds.start, bounds.end, bounds.keep);
+        _selByCharRange(pw, bounds.start, bounds.end, bounds.keep, _clickCount === 1 ? startIdx : -1);
         // 单击单词 → 弹单词小框查词
         if (_clickCount === 1) {
           const _t = (lastSelText || '').trim();
