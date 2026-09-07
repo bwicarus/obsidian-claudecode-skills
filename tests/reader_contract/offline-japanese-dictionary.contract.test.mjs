@@ -322,3 +322,21 @@ test("Japanese UI queries the App dictionary first and restores the old explicit
   assert.match(wordpop, /暂无词典释义（可能是人名\/专有名词），已请 AI 讲解/);
   assert.match(phrasepop, /点这里展开完整字典/);   // 2026-09-03 词组框与单词框统一版式:展开完整字典 = 原「改用旧版精释」
 });
+
+test("复合助动词剥离：て形＋いる／しまう／おく／ある／くる 与 たい 都能还原到原形（用户 2026-09-07 「出している」查不到原形）", () => {
+  const { dictionary } = harness({}, true);
+  const first = (term) => dictionary._candidateForms(term).slice(1).map((x) => x.term);
+  assert.equal(first("出している")[0], "出す", "出している → 出す 应是第一个候选：" + first("出している").join(","));
+  assert.ok(first("出しています").includes("出す"));
+  assert.equal(first("読んでいた")[0], "読む");
+  assert.equal(first("食べておく")[0], "食べる");
+  assert.equal(first("書いてある")[0], "書く");
+  assert.equal(first("来ている")[0], "来る");
+  assert.equal(first("行っている")[0], "行く");
+  assert.ok(first("確認している").includes("確認する"), "サ变仍要能到 確認する");
+  assert.equal(first("泳いでいる")[0], "泳ぐ");
+  assert.ok(first("見たい").includes("見る"), "一字词干的 たい 也要还原：" + first("見たい").join(","));
+  assert.ok(first("出したい").includes("出す"));
+  const mark = dictionary._candidateForms("出している")[1].mark;
+  assert.match(mark, /ている/, "标签要说明这是 ている 形：" + mark);
+});

@@ -212,6 +212,35 @@
     return chars.map(function (c) { return source[c]; }).filter(Boolean);
   }
 
+  // 复合助动词剥离（用户 2026-09-07 实锤「出している」查不到原形）：
+  // 原来的规则只认单步活用（出した→出す、ない、ます），て形后面再接 いる/しまう/おく/ある/みる/いく/くる/
+  // くれる… 就整体不认，于是退回 AI 翻译、弹窗没有「原形」那栏。这里先把尾部助动词剥掉得到 て形，
+  // 再按五段/一段规则还原原形。每一步的标签拼进 mark，弹窗里显示成「进行(ている)・て形→原形」。
+  var AUX_TE = [
+    [/(て|で)(?:いる|います|いた|いました|いない|いません|いなかった|いて|る|た|ます|ない|なかった)$/, '进行・状态(ている)'],
+    [/(て|で)(?:しまう|しまった|しまいます|しまいました|ちゃう|ちゃった|じゃう|じゃった)$/, '完了・遗憾(てしまう)'],
+    [/(て|で)(?:おく|おいた|おきます|おきました|とく|といた)$/, '预先(ておく)'],
+    [/(て|で)(?:ある|あった|あります|ありました)$/, '结果状态(てある)'],
+    [/(て|で)(?:みる|みた|みます|みました|みたい)$/, '尝试(てみる)'],
+    [/(て|で)(?:いく|いった|いきます|いきました|くる|きた|きます|きました)$/, '方向・变化(ていく／てくる)'],
+    [/(て|で)(?:ください|くれる|くれた|くれます|もらう|もらった|もらいます|あげる|あげた|あげます|やる|やった)$/, '授受(てくれる／てもらう／てあげる)'],
+    [/(て|で)(?:ほしい|ほしかった)$/, '希望(てほしい)']
+  ];
+  // て/で形 → 原形（五段按音便分组；一段去て加る；来て/行って/して 单列）
+  function baseFromTe(stem) {
+    var out = [];
+    if (/して$/.test(stem)) { out.push(stem.replace(/して$/, 'す')); out.push(stem.replace(/して$/, 'する')); }
+    if (/来て$|きて$/.test(stem)) out.push(stem.replace(/(来|き)て$/, '$1る').replace(/きる$/, 'くる'));
+    if (/行って$/.test(stem)) out.push(stem.replace(/行って$/, '行く'));
+    if (/いて$/.test(stem)) out.push(stem.replace(/いて$/, 'く'));
+    if (/いで$/.test(stem)) out.push(stem.replace(/いで$/, 'ぐ'));
+    if (/って$/.test(stem)) ['う', 'つ', 'る'].forEach(function (end) { out.push(stem.replace(/って$/, end)); });
+    if (/んで$/.test(stem)) ['む', 'ぶ', 'ぬ'].forEach(function (end) { out.push(stem.replace(/んで$/, end)); });
+    if (/て$/.test(stem)) out.push(stem.slice(0, -1) + 'る');
+    if (/で$/.test(stem)) out.push(stem.slice(0, -1) + 'る');   // 一段的で极少，兜底
+    return out;
+  }
+
   function candidateForms(term) {
     var value = normalize(term);
     var result = [value];
@@ -221,6 +250,24 @@
       if (!candidate || seen.has(candidate)) return;
       seen.add(candidate);
       result.push({ term: candidate, mark: mark || '词形还原' });
+    }
+    // ① 先剥复合助动词：出している → 出して(进行) → 出す；読んでいた → 読んで → 読む；食べておく → 食べて → 食べる
+    for (var a = 0; a < AUX_TE.length; a++) {
+      var m = value.match(AUX_TE[a][0]);
+      if (!m) continue;
+      var teStem = value.slice(0, m.index) + m[1];   // 保留 て/で 本身
+      if (teStem.length < 2) continue;
+      baseFromTe(teStem).forEach(function (base) { add(base, AUX_TE[a][1] + '・て形→原形'); });
+      break;   // 只剥最外一层；再深的（ていてしまう…）先不追
+    }
+    // ② 願望「たい」：出したい／出したかった → 出し → 出す（连用形按 ます 规则还原）
+    var taiMatch = value.match(/(たい|たかった|たくない|たくて)$/);
+    if (taiMatch && value.length > taiMatch[1].length) {   // 見たい → 見 + たい → 見る，词干一个字也算
+      var taiStem = value.slice(0, -taiMatch[1].length);
+      var ren = { 'い':'う', 'き':'く', 'ぎ':'ぐ', 'し':'す', 'ち':'つ', 'に':'ぬ', 'び':'ぶ', 'み':'む', 'り':'る' };
+      var lastKana = taiStem.slice(-1);
+      if (ren[lastKana]) add(taiStem.slice(0, -1) + ren[lastKana], '愿望(たい)→原形');
+      add(taiStem + 'る', '愿望(たい)→原形');
     }
     if (/せ$/.test(value)) add(value + 'る', '连用形→原形');
     if (/して(?:いる|いた|いて)?$/.test(value)) add(value.replace(/して(?:いる|いた|いて)?$/, 'する'), 'サ变→原形');
