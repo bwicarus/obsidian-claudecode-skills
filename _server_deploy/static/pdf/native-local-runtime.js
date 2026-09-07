@@ -8250,6 +8250,7 @@
       var c = chars[i];
       var wid = c && c.w;
       if (!c || c.sp || wid == null || wid < 0) { i += 1; continue; }
+      var lo0 = i;   // 这条标记的字符起点（嵌套抑制用）
       var j = i, toks = [];
       while (j < n && chars[j] && chars[j].w === wid) {
         if (!chars[j].sp) toks.push(chars[j]);
@@ -8319,7 +8320,7 @@
       if (!rects.length) continue;
       marks.push({
         word: surf, lemma: key, mastery: slug === 'seen' ? 0.4 : 0.1,
-        label_slug: slug, rects: rects, jp: ja, local: true
+        label_slug: slug, rects: rects, jp: ja, local: true, _lo: lo0, _hi: i - 1
       });
       if (marks.length >= 800) break;
     }
@@ -8382,7 +8383,7 @@
               if (rects2.length && !takenStart[startKey]) {
                 takenStart[startKey] = true;
                 marks.push({ word: w.key, lemma: w.key, mastery: w.slug === 'seen' ? 0.4 : 0.1,
-                  label_slug: w.slug, rects: rects2, jp: w.language !== 'en', local: true });
+                  label_slug: w.slug, rects: rects2, jp: w.language !== 'en', local: true, _lo: lo, _hi: hi });
               }
             }
             at = joined.indexOf(w.key, at + 1);
@@ -8390,6 +8391,26 @@
         });
       }
     } catch (_) {}
+    // 嵌套抑制（用户 2026-09-07 拍板：明确收藏了更长的词组后，同一处只按最长的画）：一条标记的字符范围被另一条
+    // 完全包住就不画；范围相同时收藏(seen)优先。以前第二遍按子串找"查过的词"，起点不同就照画，于是已合并成一个 w 的
+    // 「衛生活動」里又叠了一条「衛生」/「活動」。分词层本身没错（Swift 已按词组表合并 w），错的是画下划线这一步。
+    try {
+      var ranged = marks.filter(function (m) { return Number.isInteger(m._lo) && Number.isInteger(m._hi); });
+      marks = marks.filter(function (m) {
+        if (!Number.isInteger(m._lo) || !Number.isInteger(m._hi)) return true;
+        for (var z = 0; z < ranged.length; z += 1) {
+          var o = ranged[z];
+          if (o === m || !(o._lo <= m._lo && m._hi <= o._hi)) continue;
+          if ((o._hi - o._lo) > (m._hi - m._lo)) return false;                       // 被更长的包住
+          if (o._lo === m._lo && o._hi === m._hi) {                                   // 同一范围两条
+            if (o.label_slug === 'seen' && m.label_slug !== 'seen') return false;   // 收藏优先
+            if (o.label_slug === m.label_slug && ranged.indexOf(o) < ranged.indexOf(m)) return false;
+          }
+        }
+        return true;
+      });
+    } catch (_) {}
+    marks.forEach(function (m) { delete m._lo; delete m._hi; });
     return marks;
   }
 
