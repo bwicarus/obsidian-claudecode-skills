@@ -1995,7 +1995,7 @@ struct ReaderLocalLibraryView: View {
             Spacer()
             Text(kjScanTitle(scan, unavailable: unavailable))
                 .font(.caption2)
-                .foregroundStyle(scan?.isActive == true ? Color.tint : Color.secondary)
+                .foregroundStyle(scan?.isActive == true ? Color.accentColor : Color.secondary)
                 .lineLimit(2)
                 .multilineTextAlignment(.trailing)
             if let scan, scan.isActive {
