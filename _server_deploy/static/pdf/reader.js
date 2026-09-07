@@ -4287,6 +4287,27 @@ function _selectionEndpointFilter(charBoxes, anchorIdx) {
   return (c) => allowed.has(_charBlockId(c));
 }
 
+// 未声明语言的书里判"这个纯汉字词是不是日语"的两级证据(2026-09-07 用户实锤「2位 心疾患」单击没反应):
+// ① 所点字符落在 jp 生词下划线内 —— 以前就按日语查过;② 整页字符层有假名 —— 纯中文书整页一个假名都没有。
+function _tapMarkIsJa(pw, idx) {
+  try { const m = _findVocabMarkAt(pw, idx); return !!(m && m.jp); } catch (_) { return false; }
+}
+function _pageHasKana(pw) {
+  try {
+    const chars = pw && pw.__charBoxes;
+    if (!Array.isArray(chars)) return false;
+    if (pw.__kanaScan && pw.__kanaScan.chars === chars) return pw.__kanaScan.has;   // 字符层数组换了才重扫
+    const re = /[぀-ゟ゠-ヿ]/;
+    let has = false;
+    for (let i = 0; i < chars.length; i++) {
+      const c = chars[i];
+      if (c && !c.sp && re.test(c.c || '')) { has = true; break; }
+    }
+    pw.__kanaScan = { chars: chars, has: has };
+    return has;
+  } catch (_) { return false; }
+}
+
 function _findCharAt(charBoxes, x, y, anchorIdx) {
   // 拖选终点只能落在起点所在的几何连通文字片区。旧实现的同行/Manhattan
   // 兜底没有距离上限：正文行尾空白处松手时，会把远处漫画气泡当作 endpoint；
@@ -5564,7 +5585,10 @@ function _bindCharLayer(cl, pw) {
           if (declared) {
             isJa = BOOK_LANGS.includes('ja') && (hasKana(_t) || hasKanji(_t));
           } else {
-            isJa = hasKana(_t) || (hasKanji(_t) && hasKana(_ctx));
+            // 未声明语言时纯汉字词只看所在句有没有假名 → 标题/列表/表格里的孤立词(「2位 心疾患」整句就这一行)
+            // 没假名就被当成母语中文词、连选中一起清掉:表现为"单击没反应、拖选正常"(用户 2026-09-07 实锤)。
+            // 补两级证据:所点处已有日语生词下划线 = 以前就按日语查过;再不行看整页有没有假名(纯中文书整页一个假名都没有)。
+            isJa = hasKana(_t) || (hasKanji(_t) && (hasKana(_ctx) || _tapMarkIsJa(pw, startIdx) || _pageHasKana(pw)));
           }
           // 英文:沿用「点击翻译」开关;若声明了语言且没勾英语则不弹
           const engOk = isEng && _clickTranslateEnabled() && (!declared || BOOK_LANGS.includes('en'));
