@@ -17,6 +17,7 @@ import json
 import re
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -66,6 +67,25 @@ def build_queue(limit: int) -> tuple[list, int, int]:
     return queue, len(first), len(rest)
 
 
+def run_batch(words: list, model: str = "haiku") -> dict:
+    """子进程入口:一问多词;没回来的词逐个单查兜底。返回 {word: source_word 或 None(失败)}。
+    每个进程各有一把 ai_client._claude_lock,所以多进程才能真并行(线程池会被那把锁串成一条)。"""
+    got = {}
+    try:
+        batch = ds.jp_ai_fetch_batch(words, model, None)
+    except Exception:
+        batch = {}
+    for w in words:
+        e = batch.get(w)
+        if not e:
+            try:
+                e = ds._jp_ai_fetch(w, "", model, None)
+            except Exception:
+                e = None
+        got[w] = (e.get("source_word", "") if e else None)
+    return got
+
+
 def write_status(payload: dict) -> None:
     try:
         STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -82,6 +102,9 @@ def main(argv=None) -> int:
     ap.add_argument("--max-fail", type=int, default=3, help="AI 连败多少次就停(默认 3)")
     ap.add_argument("--sleep", type=float, default=0.5, help="每条之间歇多久秒(默认 0.5)")
     ap.add_argument("--dry-run", action="store_true", help="只列队列不调 AI")
+    ap.add_argument("--batch", type=int, default=8, help="一问几词(默认 8;1=逐词老路径)")
+    ap.add_argument("--workers", type=int, default=1, help="并行进程数(默认 1;即时全量刷新可开 4-6)")
+    ap.add_argument("--model", default="haiku", help="Claude 模型(默认 haiku;auto 路由失败时自动改道 Codex)")
     args = ap.parse_args(argv)
 
     health = ai_client.ai_health()
@@ -103,6 +126,57 @@ def main(argv=None) -> int:
     ok = fail = consecutive = 0
     stopped_reason = ""
     t_start = time.time()
+    if args.batch > 1 or args.workers > 1:
+        batch = max(1, args.batch)
+        chunks = [[w for w, _, _ in queue[i:i + batch]] for i in range(0, len(queue), batch)]
+        print(f"批量模式: {len(chunks)} 批 × {batch} 词, {max(1, args.workers)} 进程并行")
+        done_batches = 0
+        try:
+            with ProcessPoolExecutor(max_workers=max(1, args.workers)) as pool:
+                pending = set()
+                next_i = 0
+                while next_i < len(chunks) or pending:
+                    while next_i < len(chunks) and len(pending) < max(1, args.workers) and not stopped_reason:
+                        pending.add(pool.submit(run_batch, chunks[next_i], args.model))
+                        next_i += 1
+                    if not pending:
+                        break
+                    finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for fut in finished:
+                        done_batches += 1
+                        try:
+                            got = fut.result()
+                        except Exception as exc:
+                            got = {}
+                            print(f"  ! 批次异常: {type(exc).__name__}: {exc}")
+                        n_ok = sum(1 for v in got.values() if v is not None)
+                        n_fail = len(got) - n_ok if got else 0
+                        ok += n_ok
+                        fail += n_fail
+                        shown = ", ".join(f"{w}→{v or '-'}" for w, v in list(got.items())[:8] if v is not None)
+                        missed = [w for w, v in got.items() if v is None]
+                        print(f"  [{done_batches}/{len(chunks)}] ✓{n_ok} ✗{n_fail} {shown}"
+                              + (f" | 失败: {' '.join(missed)}" if missed else "") + f" ({time.time() - t_start:.0f}s)")
+                        consecutive = 0 if n_ok else consecutive + 1
+                        if consecutive >= args.max_fail and not stopped_reason:
+                            stopped_reason = f"AI 后端连续 {consecutive} 批全败"
+                            print(f"{stopped_reason},不再提交新批次(等在途批次结束);看 state/ai-health.json 与 state/logs/ai_calls.log")
+                    if stopped_reason and not pending:
+                        break
+        except KeyboardInterrupt:
+            stopped_reason = "手动中断"
+            print("手动中断")
+        remaining = max(0, total - ok)
+        summary = {
+            "last_run": _now(), "duration_s": round(time.time() - t_start, 1), "queued": len(queue),
+            "ok": ok, "failed": fail, "remaining_stale": remaining, "batch": batch, "workers": max(1, args.workers),
+            "katakana_missing_source_word_before": n_first, "stopped_reason": stopped_reason,
+            "ai_health": {k: v for k, v in health.items() if k != "claude_credentials"},
+        }
+        write_status(summary)
+        print(f"[{_now()}] 完成: 成功 {ok} / 失败 {fail} / 剩余旧版 {remaining} / 用时 {summary['duration_s']}s"
+              + (f" / 停止原因: {stopped_reason}" if stopped_reason else ""))
+        return 0 if (ok or not queue) else 1
     try:
         for word, entry, _ in queue:
             t0 = time.time()

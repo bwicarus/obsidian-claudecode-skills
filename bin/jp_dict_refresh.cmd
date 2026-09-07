@@ -8,4 +8,4 @@ set "OBSIDIAN_VAULT_NAME=Obsidian Vault"
 set "PY=C:\Users\bwica\AppData\Local\Programs\Python\Python313\python.exe"
 if not exist "%CLAUDE_PROJECT%\state\logs" mkdir "%CLAUDE_PROJECT%\state\logs"
 echo [%date% %time%] jp-dict-refresh>> "%CLAUDE_PROJECT%\state\logs\jp-dict-refresh.log"
-"%PY%" -X utf8 "%CLAUDE_PROJECT%\scripts\vocab\refresh_stale_jp_cache.py" --limit 200 >> "%CLAUDE_PROJECT%\state\logs\jp-dict-refresh.log" 2>&1
+"%PY%" -X utf8 "%CLAUDE_PROJECT%\scripts\vocab\refresh_stale_jp_cache.py" --limit 200 --batch 8 >> "%CLAUDE_PROJECT%\state\logs\jp-dict-refresh.log" 2>&1

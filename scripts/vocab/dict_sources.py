@@ -782,6 +782,35 @@ def _jp_regen_bg(word: str, context: str, model: str, langs) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+# 日语词条提示词的规则段与输出 schema:单词查询(_jp_ai_fetch)与批量刷新(jp_ai_fetch_batch)**共用同一份**,
+# 免得两处各写一份然后漂移(2026-09-07 用户要即时刷新存量旧条目:一次一词 ~25 s 太慢 → 一问多词)。
+_JP_RULES_TEXT = (
+    "⚠ 务必小心中日同形异义(伪朋友),两种错都要避免:\n"
+    "(A) **别把中文同形词才有的义项/贬义混进来**(最常见的错):下流(かりゅう) 日语里**只有**"
+    "「下游 / 社会下层」两义,**没有**中文的「猥琐·色情·粗鄙·下品」义(日语那个义用 下品/下劣,不是 下流);"
+    "勉強=学习 /(买卖)便宜,不是「勉强」;手紙=书信,不是「手纸」;汽車=火车,不是「汽车」;"
+    "検討=研究·探讨,不是「检讨」;質問=提问,不是「质问」。\n"
+    "(B) 反过来,**该词在日语辞典里确实带的语感也别淡化**:愛人(あいじん)=情夫·情妇(婚外·不伦对象,"
+    "带秘密·负面语感),不是中文中性的「爱人/恋人」(日语正面恋人用 恋人);適当 既有「恰当」也有「敷衍·随便」;"
+    "老婆(ろうば)=老太婆,不是「妻子」。\n"
+    "原则:**只给日语辞典里确实存在的义项**;拿不准某贬义日语到底有没有时,宁可不加,**绝不为了和中文对称而臆造**。\n"
+    "按重要性排序(核心义在前);首义别用与中文同形、易误解的词打头(如 経理 用「会计·财务管理」而非「经理」)。\n"
+    "【外来语源词】若这个词是外来语(片假名词居多),再给出它的**源语言原拼写**:\n"
+    "  source_word=源语言里的原词(如 プライマリー・ヘルス・ケア→\"primary health care\"、"
+    "パン→\"pão\"、アルバイト→\"Arbeit\"),source_lang=语言代码(en/de/pt/fr/nl/it/ru…),\n"
+    "  source_kind=\"loan\"(真外来语) 或 \"wasei\"(和製英語,如 サラリーマン/ナイター —— 由英语要素造的日本自创词,"
+    "英语里没有这个说法);此时 source_word 填可读构件(如 \"salary man\")。\n"
+    "  ⚠ **绝不按假名发音倒推**:ナンプラー 是泰语鱼露(nam pla),不是 number;拿不准就把三个字段全留空串。\n"
+    "  和语词/汉语词(食べる・勉強・故郷 等)本来就没有源词,三个字段一律留空串,别硬凑。\n"
+)
+_JP_ENTRY_SCHEMA = (   # 末尾自带一个换行
+    '{"reading":"假名读音(振り仮名)","romaji":"罗马字","pos":"词性(名詞/動詞/形容詞/副詞 等)",'
+    '"zh":"简洁中文释义,多义用;分隔","source_word":"源语言原词,没有就空串",'
+    '"source_lang":"语言代码,没有就空串","source_kind":"loan/wasei,没有就空串",'
+    '"examples":[{"ja":"日语例句","zh":"中文翻译"}]}\n'
+)
+
+
 def _jp_ai_fetch(word: str, context: str = "", model: str = "haiku", langs=None) -> dict | None:
     """调 AI 生成 JP 词条 + 写缓存(lookup_jp 同步路径与后台升级线程共用)。返回原始 data。"""
     try:
@@ -803,28 +832,8 @@ def _jp_ai_fetch(word: str, context: str = "", model: str = "haiku", langs=None)
     prompt = (
         f"你是权威的【日语→中文】词典(广辞苑/大辞林 水准)。给日语词「{word}」{ctx}的词典条目。\n"
         f"{book_note}请给出它**在日语里的实际含义**。\n"
-        "⚠ 务必小心中日同形异义(伪朋友),两种错都要避免:\n"
-        "(A) **别把中文同形词才有的义项/贬义混进来**(最常见的错):下流(かりゅう) 日语里**只有**"
-        "「下游 / 社会下层」两义,**没有**中文的「猥琐·色情·粗鄙·下品」义(日语那个义用 下品/下劣,不是 下流);"
-        "勉強=学习 /(买卖)便宜,不是「勉强」;手紙=书信,不是「手纸」;汽車=火车,不是「汽车」;"
-        "検討=研究·探讨,不是「检讨」;質問=提问,不是「质问」。\n"
-        "(B) 反过来,**该词在日语辞典里确实带的语感也别淡化**:愛人(あいじん)=情夫·情妇(婚外·不伦对象,"
-        "带秘密·负面语感),不是中文中性的「爱人/恋人」(日语正面恋人用 恋人);適当 既有「恰当」也有「敷衍·随便」;"
-        "老婆(ろうば)=老太婆,不是「妻子」。\n"
-        "原则:**只给日语辞典里确实存在的义项**;拿不准某贬义日语到底有没有时,宁可不加,**绝不为了和中文对称而臆造**。\n"
-        "按重要性排序(核心义在前);首义别用与中文同形、易误解的词打头(如 経理 用「会计·财务管理」而非「经理」)。\n"
-        "【外来语源词】若这个词是外来语(片假名词居多),再给出它的**源语言原拼写**:\n"
-        "  source_word=源语言里的原词(如 プライマリー・ヘルス・ケア→\"primary health care\"、"
-        "パン→\"pão\"、アルバイト→\"Arbeit\"),source_lang=语言代码(en/de/pt/fr/nl/it/ru…),\n"
-        "  source_kind=\"loan\"(真外来语) 或 \"wasei\"(和製英語,如 サラリーマン/ナイター —— 由英语要素造的日本自创词,"
-        "英语里没有这个说法);此时 source_word 填可读构件(如 \"salary man\")。\n"
-        "  ⚠ **绝不按假名发音倒推**:ナンプラー 是泰语鱼露(nam pla),不是 number;拿不准就把三个字段全留空串。\n"
-        "  和语词/汉语词(食べる・勉強・故郷 等)本来就没有源词,三个字段一律留空串,别硬凑。\n"
-        "严格只输出 JSON,不要解释:\n"
-        '{"reading":"假名读音(振り仮名)","romaji":"罗马字","pos":"词性(名詞/動詞/形容詞/副詞 等)",'
-        '"zh":"简洁中文释义,多义用;分隔","source_word":"源语言原词,没有就空串",'
-        '"source_lang":"语言代码,没有就空串","source_kind":"loan/wasei,没有就空串",'
-        '"examples":[{"ja":"日语例句","zh":"中文翻译"}]}\n'
+        + _JP_RULES_TEXT +
+        "严格只输出 JSON,不要解释:\n" + _JP_ENTRY_SCHEMA +
         "examples 给 1-2 句即可。若该词无意义或非日语,zh 填\"(无)\"。"
     )
     try:
@@ -841,18 +850,78 @@ def _jp_ai_fetch(word: str, context: str = "", model: str = "haiku", langs=None)
         data = json.loads(m.group(0))
     except json.JSONDecodeError:
         return None
+    data = _jp_normalize_entry(word, data)
+    _cache_save("jp", word, data)
+    return data
+
+
+def _jp_normalize_entry(word: str, data: dict) -> dict:
+    """AI 原始 JSON → 落缓存的词条:补 word/source/pv,三个源词字段一律落成字符串(缺键 → 空串)。
+    **键必须存在**:lookup_jp 的新鲜度闸门靠"有没有 source_word 键"区分"AI 判过无源词"与"加字段之前的旧条目"。"""
+    data = dict(data)
     data["word"] = word
     data["source"] = "jp_ai"
-    # 三个源词字段一律落成字符串(缺键 → 空串)。**键必须存在**:上面的缓存闸门靠
-    # "有没有 source_word 键"区分"AI 判过无源词"与"加字段之前的旧条目"。
     for _k in ("source_word", "source_lang", "source_kind"):
         _v = data.get(_k)
         data[_k] = str(_v).strip() if isinstance(_v, (str, int, float)) else ""
     if data["source_kind"] not in ("loan", "wasei"):
         data["source_kind"] = "" if not data["source_word"] else "loan"
     data["pv"] = _JP_PROMPT_VER
-    _cache_save("jp", word, data)
     return data
+
+
+def jp_ai_fetch_batch(words: list, model: str = "haiku", langs=None) -> dict:
+    """一问多词:同一套规则(_JP_RULES_TEXT/_JP_ENTRY_SCHEMA),要求输出 {原词: 条目} 的 JSON 对象;逐词归一 + 写缓存。
+    返回 {word: entry};没回来的词不在返回里(调用方可退回 _jp_ai_fetch 单查)。没有句境(存量刷新本来就没有)。
+    每次 CLI 调用有 ~15 s 固定成本(进程启动),一次 8 词把每词成本压到 ~3 s。"""
+    words = [str(w or "").strip() for w in (words or [])]
+    words = [w for w in dict.fromkeys(words) if w]
+    if not words:
+        return {}
+    try:
+        _p = str(PROJECT_ROOT / "scripts")
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+        from ai_client import ask
+    except Exception:
+        return {}
+    lang_label, pure_ja = _jp_langs_label(langs)
+    book_note = (f"这些词来自**纯日语书**(声明语言:{lang_label}),其中所有汉字词都是**日语**。"
+                 if pure_ja else
+                 f"本书声明语言:{lang_label};这些词一律按**日语**处理。")
+    prompt = (
+        f"你是权威的【日语→中文】词典(广辞苑/大辞林 水准)。给下列 {len(words)} 个日语词**各自**的词典条目。\n"
+        f"{book_note}请给出它们**在日语里的实际含义**。\n"
+        + _JP_RULES_TEXT +
+        "严格只输出**一个 JSON 对象**,不要解释:键=原词(必须与词表里的字符串完全一致,一个都不能少),值=该词条目,条目格式:\n"
+        + _JP_ENTRY_SCHEMA +
+        "每个条目 examples 给 1-2 句即可。若某词无意义或非日语,其 zh 填\"(无)\"。\n"
+        "词表(JSON 数组):" + json.dumps(words, ensure_ascii=False)
+    )
+    try:
+        resp = ask(prompt, claude_model=model, claude_effort="low")
+    except Exception:
+        return {}
+    if not resp:
+        return {}
+    m = re.search(r"\{.*\}", resp, re.DOTALL)
+    if not m:
+        return {}
+    try:
+        parsed = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: dict = {}
+    for w in words:
+        entry = parsed.get(w)
+        if not isinstance(entry, dict) or not str(entry.get("zh") or "").strip():
+            continue
+        entry = _jp_normalize_entry(w, entry)
+        _cache_save("jp", w, entry)
+        out[w] = entry
+    return out
 
 
 def compose_entry(word: str, *, online: bool = True, translate_examples: bool = True) -> dict:
