@@ -12,6 +12,7 @@ from . import anki_sync as AK
 from . import compute
 from . import pages as PG
 from . import query as Q
+from . import webscope as WS
 from . import register as R
 from . import wikidata as WD
 from .markdown import VaultWriter
@@ -320,6 +321,11 @@ class KJService:
 
     def book_pages(self, book: Any, total: Any = None) -> dict:
         return self._run(lambda: {"ok": True, **PG.book_pages(self.ledger, book, int(total) if total else None)})
+
+    def web_scope(self, action: str = "list", *, pattern: str | None = None, note: str = "", rule_id: str | None = None,
+                  url: str | None = None) -> dict:
+        """网页分析范围规则表：哪些网页当书页做页级分析。list / add / remove / enable / disable / test。"""
+        return self._run(lambda: WS.handle(self.ledger, action, pattern=pattern, note=note, rule_id=rule_id, url=url, actor=self.actor))
 
     def search(self, q: str, *, limit: int = 8, online: bool = False, include_public: bool = True,
                public_limit: int | None = None) -> dict:

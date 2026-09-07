@@ -65,6 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sp.add_parser("page-block"); s.add_argument("book"); s.add_argument("page", type=int)
     s = sp.add_parser("page-submit"); s.add_argument("--json", required=True, help="一页分析的 JSON（结构见 kj/pages.py），或 @文件")
     s = sp.add_parser("book-pages"); s.add_argument("book"); s.add_argument("--total", type=int, help="给了就列未分析页（整本手动批处理用）")
+    s = sp.add_parser("web-scope", help="网页分析范围：哪些网页当书页做页级分析"); s.add_argument("action", choices=["list", "add", "remove", "enable", "disable", "test"])
+    s.add_argument("--pattern", help="通配 *.wikipedia.org/wiki/* 或 re:正则"); s.add_argument("--note", default=""); s.add_argument("--id"); s.add_argument("--url")
     s = sp.add_parser("record"); s.add_argument("node_id"); s.add_argument("--text", required=True); s.add_argument("--kind", default="note")
     s.add_argument("--source"); s.add_argument("--at", help="发生时间 ISO/epoch；不知道就别填")
     s = sp.add_parser("merge-records"); s.add_argument("node_id"); s.add_argument("--ids", required=True, help="逗号分隔")
@@ -126,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
             r = svc.page_submit(_json_arg(a.json))
         elif c == "book-pages":
             r = svc.book_pages(a.book, a.total)
+        elif c == "web-scope":
+            r = svc.web_scope(a.action, pattern=a.pattern, note=a.note, rule_id=a.id, url=a.url)
         elif c == "record":
             r = svc.add_record(a.node_id, text=a.text, kind=a.kind, source=_json_arg(a.source), occurred_at=a.at)
         elif c == "merge-records":

@@ -122,6 +122,31 @@ class PageAnalysisTests(unittest.TestCase):
         self.assertEqual(self.svc.page_block(KEY, 8)["boxes"]["sidecar"], False)
         self.assertEqual(self.svc.page_status("Z", 0).get("code"), "bad_page")
 
+    def test_web_scope_gates_web_pages(self):
+        """网页只有命中规则表才附块；默认维基/arXiv 在范围；AI/CLI 可加删；网页提交出处记 URL、页恒 1。"""
+        blk = self.svc.page_block("web:https://zh.wikipedia.org/wiki/特征值和特征向量", 1)
+        self.assertEqual(blk["status"], "unanalyzed")
+        blk = self.svc.page_block("web:https://www.zhihu.com/question/123", 1)
+        self.assertEqual(blk["status"], "out_of_scope"); self.assertIn("scope", blk["hint"])
+        r = self.svc.web_scope("add", pattern="https://www.zhihu.com/question/*", note="知乎问答")
+        self.assertTrue(r["ok"], r); self.assertEqual(r["rule"]["pattern"], "zhihu.com/question/*")   # 去协议、去 www、小写
+        self.assertEqual(self.svc.page_block("web:https://www.zhihu.com/question/123", 1)["status"], "unanalyzed")
+        self.assertTrue(self.svc.web_scope("test", url="https://zhihu.com/question/9")["in_scope"])
+        self.assertFalse(self.svc.web_scope("test", url="https://zhihu.com/people/x")["in_scope"])
+        r = self.svc.web_scope("add", pattern="re:^https://docs\\.python\\.org/3/", note="Python 文档")
+        self.assertTrue(self.svc.web_scope("test", url="https://docs.python.org/3/library/re.html")["in_scope"])
+        self.assertEqual(self.svc.web_scope("add", pattern="re:(")["code"], "bad_pattern")
+        sub = self.svc.page_submit({"book": "web:https://zh.wikipedia.org/wiki/特征值和特征向量", "book_title": "特征值和特征向量 - 维基百科",
+                                    "summary": "词条", "concepts": [{"name": "特征值", "role": "defined", "definition": {"text": "……的标量", "uses": []}}]})
+        self.assertTrue(sub["ok"], sub); self.assertEqual(sub["page"], 1)
+        d = self.svc.ledger.definitions(sub["nodes_created"][0]["node_id"])[0]
+        self.assertEqual((d["source"]["kind"], d["source"]["url"]), ("web", "https://zh.wikipedia.org/wiki/特征值和特征向量"))
+        self.assertTrue(self.svc.web_scope("remove", rule_id="zhihu-com-question")["ok"])
+        self.assertEqual(self.svc.page_block("web:https://www.zhihu.com/question/123", 1)["status"], "out_of_scope")
+        self.assertTrue(self.svc.web_scope("disable", rule_id="wikipedia")["ok"])
+        self.assertEqual(self.svc.page_block("web:https://en.wikipedia.org/wiki/Eigenvalue", 1)["status"], "out_of_scope")
+        self.assertEqual(self.svc.web_scope("remove", rule_id="nope")["code"], "rule_not_found")
+
     def test_book_key_matches_pdf_reader_sha(self):
         import hashlib
         p = self.tmp / "book.pdf"

@@ -29,6 +29,7 @@ python scripts/kj/cli.py register --json '{"type":"record","node_id":"kj:…","k
   figures / exercises / pitfalls。程序建节点、绑编号、登定义与前置、写回公式图描述、打标记；交错了重交覆盖。
 - `kj_page.status=analyzed`：直接用块里的节点掌握度、公式、图描述，不必重读整页。
 - 整本批处理暂时手动：`book-pages <书> --total N` 列未分析页，逐页读、逐页交。
+- 网页只有命中『网页分析范围』规则表才附块（默认维基词条、arXiv 摘要页）。用户说这类网页以后也要分析 → `kj_page op=scope action=add pattern=*.site.org/path/*`（MCP：`kj_web_scope`）；不要加整站或搜索页。
 
 ## 固定流程
 

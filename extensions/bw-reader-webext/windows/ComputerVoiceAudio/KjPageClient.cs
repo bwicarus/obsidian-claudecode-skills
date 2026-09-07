@@ -122,23 +122,41 @@ internal static class KjPageClient
             return;
         }
         string? kind = Str(active["kind"]);
-        if (kind is not ("pdf" or "epub"))
+        if (kind is not ("pdf" or "epub" or "web"))
         {
             return;
         }
         string? file = Str(active["file"]);
-        long? page = Long(active["page"])
-            ?? Long((payload["currentPage"] as JsonObject)?["page"]);
+        // 网页=单文档，页恒 1；在不在"网页分析范围"由 Flask 按规则表判，out_of_scope 就不附块
+        long? page = kind == "web"
+            ? 1
+            : Long(active["page"]) ?? Long((payload["currentPage"] as JsonObject)?["page"]);
         if (string.IsNullOrWhiteSpace(file) || page is not long pageNo || pageNo < 1)
         {
             return;
         }
-        JsonObject block = await BlockAsync(file, pageNo, cancellationToken).ConfigureAwait(false);
+        JsonObject block = await BlockAsync(BookKeyFor(kind, file), pageNo, cancellationToken).ConfigureAwait(false);
+        if (Str(block["status"]) == "out_of_scope")
+        {
+            return;
+        }
         if (Str(block["status"]) == "unanalyzed")
         {
             block["note"] = "快照里的文字未必是整页；要按整页提交分析，先 reader_page_text(page) 取全文再交。";
         }
         payload["kjPage"] = block;
+    }
+
+    // 书键口径与 Flask/侧栏一致：网页（kind=web，或 file 本身是 http(s) URL）→ "web:" + URL；书 → 原样。
+    internal static string BookKeyFor(string? kind, string file)
+    {
+        if (file.StartsWith("web:", StringComparison.Ordinal))
+        {
+            return file;
+        }
+        bool isUrl = file.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            || file.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+        return kind == "web" || isUrl ? "web:" + file : file;
     }
 
     internal static string? Str(JsonNode? node) =>

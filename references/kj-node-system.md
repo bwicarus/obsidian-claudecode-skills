@@ -223,7 +223,10 @@ Wikidata 没有教学前置（§6 量过：能当挂点当不了网），前置�
 书的键 = `pdf_reader._book_sha` 口径 sha1(绝对路径)[:16]；HTTP 侧 `file=` 相对路径由 `kj_nodes._book_param` 拼成绝对路径。
 接口：CLI `page-status / page-brief / page-block / page-submit --json / book-pages`；HTTP `GET /kj/api/page/{status,brief,block}`、
 `POST /kj/api/page/submit`、`GET /kj/api/book/pages`；助手工具 `kj_page`（`op=submit|brief`，命名空间每组最多 9 个工具，故并成一个）；MCP `kj_page_submit / kj_page_brief`。提示里的提交工具名由表面传入（`snapshot_block(submit_tool=)` / HTTP `?tool=`）。
-桥（C#，`KjPageClient.cs`，0.1.296 起）：`reader_context_snapshot` 的 payload 与 `reader_page_text` 的结果都附 `kjPage`（GET 本机 Flask `/kj/api/page/block?file=&page=&tool=kj_page_submit`，令牌与 mcp_server.py 同一把 `~/.config/mcp-webapp-token`；拿不到时块里写 error 不静默）；工具 `kj_page_submit{page, analysis, file?}` POST `/kj/api/page/submit`，随 Reader 查询能力一起暴露（最小配置仍是 3 个工具，自检卡这一点；打包脚本 `expected_tools` 锁 34 个）。书键：`activeReading.file`——App 本机书是 `localbook:…` 编号，Flask `_book_param` 与侧栏 `_kj_book_abs` 都原样当键，三面同一口径。待接：YOLO 环境搬 Windows（原在 Pi，两条 timer 已随 Pi 停）。
+桥（C#，`KjPageClient.cs`，0.1.296 起）：`reader_context_snapshot` 的 payload 与 `reader_page_text` 的结果都附 `kjPage`（GET 本机 Flask `/kj/api/page/block?file=&page=&tool=kj_page_submit`，令牌与 mcp_server.py 同一把 `~/.config/mcp-webapp-token`；拿不到时块里写 error 不静默）；工具 `kj_page_submit{page, analysis, file?}` POST `/kj/api/page/submit`，随 Reader 查询能力一起暴露（最小配置仍是 3 个工具，自检卡这一点；打包脚本 `expected_tools` 锁 34 个）。书键：`activeReading.file`——App 本机书是 `localbook:…` 编号，Flask `_book_param` 与侧栏 `_kj_book_abs` 都原样当键，三面同一口径。
+**网页分析范围**（`scripts/kj/webscope.py`，2026-09-07 用户拍板：扩展阅读的网页也能做页级分析，但**不是所有网页**）：规则表 `state/kj/web-scope.json`（默认：各语言维基百科词条、维基移动版、arXiv 摘要页），通配 `*.site.org/path/*`（去协议、去 www、小写）或 `re:` 正则；`snapshot_block` 对 `web:<url>` 先查表，没命中返回 `status=out_of_scope`，三面都**不附块**。命中的网页页恒为 1，提交出处 `{kind: web, url}`。改表：CLI `web-scope list|add|remove|enable|disable|test`、HTTP `GET/POST /kj/api/web-scope`、侧栏 `kj_page op=scope`、MCP `kj_web_scope`；设置面板里的编辑界面要随 App 构建，先靠这些接口。桥 0.1.297：kind=web 的 activeReading 键为 `web:`+URL、页 1，out_of_scope 不附。
+**整本批跑（运行器未建）设计定稿**：滚动会话——一章一个会话、逐页追加、前缀吃提示缓存；窗口到头开新会话，开场塞账本生成的接力包（本书已登记节点/别名/记号清单 + 上章标注 + 末页原文 + 待确认名字）；图只在当页那一轮给；与读书时共用 `page-submit`。
+待接：YOLO 环境搬 Windows（原在 Pi，两条 timer 已随 Pi 停）。
 
 ## 8. 维护
 

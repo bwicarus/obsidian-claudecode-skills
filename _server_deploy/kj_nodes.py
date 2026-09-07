@@ -185,5 +185,15 @@ def kj_book_pages():
     return _reply(_svc().book_pages(_book_param(), request.args.get("total")))
 
 
+@bp.route("/web-scope", methods=["GET", "POST"])
+def kj_web_scope():
+    """网页分析范围规则表。GET=list；POST {action: add|remove|enable|disable|test, pattern?, note?, rule_id?, url?}。"""
+    if request.method == "GET":
+        return _reply(_svc().web_scope("list"))
+    b = _body()
+    return _reply(_svc().web_scope(str(b.get("action") or "list"), pattern=b.get("pattern"), note=str(b.get("note") or ""),
+                                   rule_id=b.get("rule_id") or b.get("id"), url=b.get("url")))
+
+
 def register_kj_nodes(app) -> None:
     app.register_blueprint(bp)

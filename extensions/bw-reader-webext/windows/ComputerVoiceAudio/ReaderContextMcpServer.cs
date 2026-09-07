@@ -4343,9 +4343,13 @@ internal sealed class ReaderContextMcpServer
         if (query == "page-text" && LongValue(parameters["page"]) is long kjPageNo && kjPageNo >= 1)
         {
             // 整页文字到手的那一刻就是"第一次全量读到这一页"：附 KJ 页块（未分析→先答后交；已分析→直接用）
-            result["kjPage"] = await KjPageClient
-                .BlockAsync(request.File, kjPageNo, cancellationToken)
+            JsonObject kjBlock = await KjPageClient
+                .BlockAsync(KjPageClient.BookKeyFor(null, request.File), kjPageNo, cancellationToken)
                 .ConfigureAwait(false);
+            if (KjPageClient.Str(kjBlock["status"]) != "out_of_scope")
+            {
+                result["kjPage"] = kjBlock;
+            }
         }
         await WriteResultAsync(
             id,
@@ -6980,10 +6984,12 @@ internal sealed class ReaderContextMcpServer
         JsonObject snapshot = BuildToolPayload();
         string? file = null;
         string? title = null;
+        string? activeKind = null;
         if (snapshot["activeReading"] is JsonObject active)
         {
             file = StringValue(active["file"]);
             title = StringValue(active["title"]);
+            activeKind = StringValue(active["kind"]);
         }
         if (arguments.TryGetProperty("file", out JsonElement fileValue)
             && fileValue.ValueKind == JsonValueKind.String
@@ -7001,7 +7007,7 @@ internal sealed class ReaderContextMcpServer
             return;
         }
         JsonObject body = JsonNode.Parse(analysis.GetRawText()) as JsonObject ?? new JsonObject();
-        body["file"] = file;
+        body["file"] = KjPageClient.BookKeyFor(activeKind, file!);
         body["page"] = page;
         if (body["book_title"] is null && !string.IsNullOrWhiteSpace(title))
         {

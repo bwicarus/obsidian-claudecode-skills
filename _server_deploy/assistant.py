@@ -6361,8 +6361,10 @@ def _t_kj_self_assess(args, ctx):
 def _kj_book_abs(file_rel, page):
     """阅读器的 file_rel → 书的绝对路径 + 成员页（合并书映射到真成员）；网页/HTML/MD 单文档没有页概念 → None。"""
     rel = str(file_rel or "").strip()
-    if not rel or rel.startswith("web:") or rel.lower().endswith((".html", ".htm", ".md", ".markdown")) or ".." in rel:
+    if not rel or rel.lower().endswith((".html", ".htm", ".md", ".markdown")) or ".." in rel:
         return None, None
+    if rel.startswith("web:"):
+        return rel, 1   # 网页=单文档，页恒 1；在不在分析范围由 pages.snapshot_block 按规则表判（out_of_scope 就不附块）
     if rel.startswith("localbook:"):
         return rel, page   # App 本机书：编号本身就是键，与桥 activeReading.file 同一口径
     try:
@@ -6379,6 +6381,8 @@ def _kj_page_block(ctx, file_rel, page):
     r = _kj_call(ctx, lambda s: s.page_block(ab, pg, submit_tool="kj_page（op=submit）"))
     if not isinstance(r, dict):
         return None
+    if r.get("status") == "out_of_scope":
+        return None   # 不在网页分析范围：不附块（规则表用 kj_page op=scope 改）
     r.pop("ok", None)
     return r
 
@@ -6396,7 +6400,10 @@ def _t_kj_page(args, ctx):
         return _t_kj_page_brief(a, ctx)
     if op == "submit":
         return _t_kj_page_submit(a, ctx)
-    return {"error": "op 只能是 submit 或 brief"}
+    if op == "scope":
+        return _kj_call(ctx, lambda s: s.web_scope(str(a.get("action") or "list"), pattern=a.get("pattern"), note=str(a.get("note") or ""),
+                                                   rule_id=a.get("rule_id") or a.get("id"), url=a.get("url")))
+    return {"error": "op 只能是 submit / brief / scope"}
 
 
 def _t_kj_page_submit(args, ctx):
@@ -6437,7 +6444,10 @@ _KJ_TOOLS = {
                 "concepts[{name,node_id?,qid?,kind?(concept|theorem|…),aliases?,role:defined|stated|used|exercised,"
                 "definition?{text 原句,uses[看懂它必须先会的概念]},summary?}], formulas[{idx,latex}](按 kj_page.boxes 的 idx，需看页图), "
                 "figures[{idx,desc}], exercises[{label,concepts[]}], pitfalls[{text,concept}]}；程序建节点/绑编号/登定义与前置/写回公式图描述/打标记，重交覆盖。"
-                "op=brief：看某页的分析结果（页标注、出现的节点及掌握度、公式 LaTeX、图描述），args {op:'brief', page?, book?}。", _t_kj_page),
+                "op=brief：看某页的分析结果（页标注、出现的节点及掌握度、公式 LaTeX、图描述），args {op:'brief', page?, book?}。"
+                "op=scope：网页分析范围规则表——只有命中的网页才当书页做页级分析（默认维基百科词条、arXiv 摘要页）；"
+                "args {op:'scope', action:list|add|remove|enable|disable|test, pattern?(通配 *.site.org/path/* 或 re:正则), note?, rule_id?, url?}。"
+                "用户说『这类网页以后也要分析』时 add；不要把整站或搜索页加进去。", _t_kj_page),
     "kj_node": ("读一个知识节点：分类位置、前置/后续、定义原文出处、记录摘要、卡片、掌握度、准备度、weak/unknown 前置、"
                 "next_hint（建议动作代码）。学习排查第 1 步就是它。args {node_id}。", _t_kj_node),
     "kj_browse": ("按分类一层层浏览节点（渐进式披露，不要一次读全部）。不给 parent=根；给 parent=下级。args {parent?}。", _t_kj_browse),

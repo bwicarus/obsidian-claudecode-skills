@@ -259,6 +259,15 @@ def kj_page_brief(file: str, page: int) -> dict:
 
 
 @mcp.tool()
+def kj_web_scope(action: str = "list", pattern: str = "", note: str = "", rule_id: str = "", url: str = "") -> dict:
+    """网页分析范围规则表：只有命中的网页才当书页做 KJ 页级分析（默认维基百科词条、arXiv 摘要页）。
+    action=list|add|remove|enable|disable|test；pattern 通配 *.site.org/path/* 或 re:正则；test 用 url 看在不在范围。"""
+    if action == "list":
+        return _get("/kj/api/web-scope")
+    return _post("/kj/api/web-scope", {"action": action, "pattern": pattern or None, "note": note, "rule_id": rule_id or None, "url": url or None})
+
+
+@mcp.tool()
 def search_in_book(file: str, query: str, limit: int = 50) -> dict:
     """在**指定书**里全文搜索,返回命中页码+片段。"""
     return _get("/pdf/api/search", file=file, q=query, limit=limit)

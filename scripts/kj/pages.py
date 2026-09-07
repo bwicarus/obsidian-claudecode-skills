@@ -25,12 +25,21 @@ from typing import Any
 from . import ids
 from . import query as Q
 from . import register as R
+from . import webscope as WS
 from .register import RegisterError
 from .store import Ledger, dumps, loads
 
 ANALYSIS_VERSION = 1
 _HEX16 = re.compile(r"^[0-9a-f]{16}$")
 CONCEPT_ROLES = ("defined", "stated", "used", "exercised")
+
+
+def is_web(book: Any) -> bool:
+    return str(book or "").strip().startswith("web:")
+
+
+def web_url(book: Any) -> str:
+    return str(book or "").strip()[4:]
 
 DEFAULT_SUBMIT_TOOL = "kj_page_submit"
 UNANALYZED_HINT = (
@@ -230,9 +239,12 @@ def submit(ledger: Ledger, payload: dict, *, actor: str = "") -> tuple[dict, set
     if not isinstance(payload, dict):
         raise RegisterError("bad_payload", "payload 必须是对象")
     key = book_key(payload.get("book"))
-    page = _page_no(payload.get("page"))
+    page = _page_no(payload.get("page") or (1 if is_web(payload.get("book")) else None))
     title = str(payload.get("book_title") or payload.get("title") or "").strip()
-    src: dict[str, Any] = {"kind": "pdf", "sha": key, "page": page}
+    if is_web(payload.get("book")):   # 网页=单文档，页恒为 1，出处记 URL
+        src: dict[str, Any] = {"kind": "web", "url": web_url(payload.get("book")), "sha": key, "page": page}
+    else:
+        src = {"kind": "pdf", "sha": key, "page": page}
     if title:
         src["book"] = title
     rep: dict[str, Any] = {"book": key, "page": page, "version": ANALYSIS_VERSION,
@@ -446,6 +458,10 @@ def snapshot_block(ledger: Ledger, book: Any, page: Any, *, submit_tool: str | N
     """附在整页快照后面的块：未分析 → 指示 + YOLO 框；已分析 → brief + 提示。所有给出整页内容的表面都调这一个函数；
     submit_tool = 该表面上提交工具的叫法（侧栏 kj_page(op=submit)，MCP kj_page_submit）。"""
     tool = submit_tool or DEFAULT_SUBMIT_TOOL
+    if is_web(book) and WS.matches(ledger, web_url(book)) is None:
+        # 不在网页分析范围内：不出提示、不做分析。表面拿到 out_of_scope 就别附块（省 token）。
+        return {"status": "out_of_scope", "book": book_key(book), "url": web_url(book),
+                "hint": "这个网页不在页级分析范围内；值得当资料的话用 " + tool.replace("_submit", "").replace("(op=submit)", "") + " 的 scope 动作加规则（如 *.wikipedia.org/wiki/*）。"}
     st = status(ledger, book, page)
     if st["analyzed"]:
         b = brief(ledger, book, page)
