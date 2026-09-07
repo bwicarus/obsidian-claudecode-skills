@@ -924,6 +924,26 @@ class QualityPipeline:
             chars.append(char)
         return chars, str(raw.get("text") or ""), image_w, image_h, effective_dpi
 
+    def retokenize_if_stale(self, page: dict) -> bool:
+        """缓存页的分词 schema 落后于 core._TOKENIZE_SCHEMA 时原地只重做分词,不重做 OCR。返回是否改动。
+        2026-09-07 实锤:分词规则升级(schema 3→4)后 force 重跑预处理,页缓存命中 → 发布出来还是旧分词、revision 一样,
+        App 什么都看不到。缓存校验只看 profile/visionRender,没看分词版本。"""
+        core = self._worker_core()
+        current = int(getattr(core, "_TOKENIZE_SCHEMA", 1))
+        if not isinstance(page, dict) or not page.get("tokenized"):
+            return False
+        try:
+            have = int(page.get("tokenizeSchema") or 1)
+        except (TypeError, ValueError):
+            have = 1
+        chars = page.get("chars")
+        if have >= current or not isinstance(chars, list):
+            return False
+        page["chars"] = core._tokenize_chars(chars, page.get("layout"))
+        page["tokenized"] = True
+        page["tokenizeSchema"] = current
+        return True
+
     def page(self, claim: Claim, page_number: int) -> dict:
         if self.document is None:
             raise WorkerError("quality pipeline is not open")
@@ -1415,6 +1435,9 @@ class WorkerRunner:
                 page = self.cache.cached_page(claim, page_number)
                 if page is None:
                     page = pipeline.page(claim, page_number)
+                    self.cache.save_page(claim, page_number, page)
+                elif pipeline.retokenize_if_stale(page):
+                    # 缓存页分词版本落后:只重分词(不重 OCR)并回写缓存,否则重跑预处理发布的还是旧分词(2026-09-07)
                     self.cache.save_page(claim, page_number, page)
                 # Manga tokenization occurs inside page() before this first PUT.
                 text_done += 1

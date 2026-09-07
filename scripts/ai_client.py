@@ -435,9 +435,12 @@ def _codex_exec(prompt: str, image_path: str, model: str) -> str:
 
 def is_rate_limited(response: str) -> bool:
     low = (response or "").lower()
+    # 2026-09-07 实锤:Claude CLI 额度用尽时整段回复就是「You've hit your session limit · resets 8:50pm」,
+    # 以前的关键词表没有它 → 被当成正常答案交给调用方解析 JSON → 失败也不改道 Codex,词典刷新连败 3 批停机。
     return any(kw in low for kw in [
         "rate limit", "too many requests", "429", "overloaded",
         "capacity exceeded", "quota", "usage limit",
+        "session limit", "hit your", "limit reached", "limit · resets", "limit - resets",
     ])
 
 

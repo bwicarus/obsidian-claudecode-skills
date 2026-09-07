@@ -134,6 +134,18 @@ class AIClientHealthTests(unittest.TestCase):
             f"config.CLAUDE_CLI 指向不存在的路径: {config.CLAUDE_CLI}",
         )
 
+    def test_session_limit_message_reroutes_to_codex(self):
+        # 2026-09-07 实锤:额度用尽的整段回复以前不算不可用,被当成答案
+        msg = "You've hit your session limit · resets 8:50pm (Asia/Tokyo)"
+        self.assertTrue(ai_client.is_rate_limited(msg))
+        self.assertTrue(ai_client.is_backend_unavailable(msg))
+        calls = []
+        result = ai_client.route("auto-claude", lambda: calls.append("claude") or msg,
+                                 lambda: calls.append("codex") or '{"zh":"金字塔"}')
+        self.assertEqual(result, '{"zh":"金字塔"}')
+        self.assertEqual(calls, ["claude", "codex"])
+        self.assertFalse(ai_client.is_rate_limited("这个词的意思是「限制」。"))
+
 
 if __name__ == "__main__":
     unittest.main()
