@@ -938,6 +938,10 @@ REVIEW_NEW_MIN_AGE_HOURS = 3
 #: 缺字段就用下面的默认值；文件坏了也只回落到默认，绝不让复习提醒整条停摆。
 REVIEW_SCHEDULE_FILE = "review-schedule.json"
 
+#: 完成回写用的固定字样。**判重也靠它** —— 认标题里有没有这四个字，
+#: 比另存一个"写过没有"的标记简单，也不会跟通知本体的状态机打架。
+COMPLETED_MARK = "阶段复习完成"
+
 
 def review_schedule(root: Path) -> dict:
     """读作息配置，缺项回落默认。数值都做范围钳制 —— 手改出来的 25 点不该让判断永远为假。"""
@@ -1280,8 +1284,29 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
                 "可评分的新卡只剩 %d 张，另有 %d 张卡在导出上（见 review-blocked）"
                 % (gradable_new, blocked_new))
         for item in list(store.open_items()):
-            if item.get("kind") == "review-new":
-                store.resolve(item["id"], by="auto", note=note)
+            if item.get("kind") != "review-new":
+                continue
+            # 完成回写（2026-09-09 用户：「完成后就直接更新慢板内容为
+            # xx:xx 阶段复习完成」）——**改最初那一条**，不另开一条：
+            # 提醒和完成是同一件事的两端，分成两条会让板上留下一条
+            # 永远得不到结果的催促。
+            if blocked_new == 0 and COMPLETED_MARK not in (item.get("title") or ""):
+                remaining = ("；还剩 %d 张新卡" % gradable_new
+                             if gradable_new else "")
+                store.update(
+                    item["id"],
+                    title="%s %s" % (time.strftime("%H:%M"), COMPLETED_MARK),
+                    body="这一轮的新卡已经过了一遍%s。" % remaining,
+                    # 让它自己过期而不是当场入库：板上要**看得见**这句完成，
+                    # 立刻 resolve 等于他做完了却什么反馈都没有。
+                    expires_at_ms=_now_ms() + 4 * 3600 * 1000,
+                )
+                continue
+            if COMPLETED_MARK in (item.get("title") or ""):
+                # 已经写过完成的，等它自己过期 —— 每轮重写会让时间戳
+                # 每 15 分钟往前跳一次，看着像刚做完。
+                continue
+            store.resolve(item["id"], by="auto", note=note)
     return {
         "due": due, "new": new,
         "newGradable": gradable_new, "newBlocked": blocked_new,

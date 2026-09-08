@@ -20,6 +20,7 @@ class FakeStore:
     def __init__(self, open_items=()):
         self.created = []
         self.resolved = []
+        self.updated = []
         self._open = list(open_items)
 
     def create(self, **kw):
@@ -30,6 +31,13 @@ class FakeStore:
 
     def resolve(self, item_id, by="auto", note=""):
         self.resolved.append((item_id, note))
+
+    def update(self, item_id, **kw):
+        self.updated.append((item_id, kw))
+        for one in self._open:
+            if one.get("id") == item_id:
+                one.update({k: v for k, v in kw.items() if k in ("title", "body")})
+        return {}
 
 
 WAKE_MS = 1_788_900_000_000   # 测试里"下一个起床点"的固定值
@@ -126,11 +134,19 @@ class ReviewNewTimingTests(unittest.TestCase):
             run(store, new=25, **kwargs)
             self.assertEqual(store.resolved, [], "只是没到点,不该消掉 %r" % kwargs)
 
-    def test_only_a_real_drop_resolves_it(self):
-        store = FakeStore([{"id": "n1", "kind": "review-new"}])
+    def test_only_a_real_drop_closes_it(self):
+        """真回落才收尾。
+
+        ⚠ 2026-09-09 契约变了：回落不再**直接入库**，而是把最初那条改写成
+        「xx:xx 阶段复习完成」再让它自己过期（用户要提醒与完成联动）。
+        立刻入库等于他做完了却什么反馈都没有。
+        """
+        store = FakeStore([{"id": "n1", "kind": "review-new",
+                            "title": "还没开始学的新卡已有 25 张"}])
         run(store, new=rn.REVIEW_NEW_SPEAK_THRESHOLD - 1)
-        self.assertEqual([r[0] for r in store.resolved], ["n1"])
-        self.assertIn("开始学了", store.resolved[0][1])
+        self.assertEqual([one[0] for one in store.updated], ["n1"])
+        self.assertIn(rn.COMPLETED_MARK, store.updated[0][1]["title"])
+        self.assertEqual(store.resolved, [], "要看得见完成，不是当场消失")
 
     def test_thresholds_stay_humane(self):
         self.assertLessEqual(rn.REVIEW_NEW_BATCH, 20, "一次别超过 20 张")
@@ -255,3 +271,49 @@ class ReviewCountsTests(unittest.TestCase):
         counts = rn.review_counts(Path(tempfile.mkdtemp(prefix="empty-")))
         self.assertEqual(counts, {"due": 0, "new": 0,
                                   "newGradable": 0, "newBlocked": 0})
+
+
+class CompletionWriteBackTests(unittest.TestCase):
+    """完成回写到**最初那一条**（2026-09-09 用户：「完成后就直接更新慢板内容为
+    xx:xx 阶段复习完成」）。
+
+    为什么改原条目而不是另开一条：提醒和完成是同一件事的两端。分成两条会在
+    板上留下一条永远得不到结果的催促，而那正是他要联动起来的东西。
+    """
+
+    def test_completion_updates_the_original_item(self):
+        store = FakeStore(open_items=[{"id": "n1", "kind": "review-new",
+                                       "title": "还没开始学的新卡已有 10 张"}])
+        run(store, new=0, blocked=0)
+        self.assertEqual(len(store.updated), 1)
+        item_id, fields = store.updated[0]
+        self.assertEqual(item_id, "n1")
+        self.assertIn(rn.COMPLETED_MARK, fields["title"])
+        # 时间要在标题里 —— 用户点名要 xx:xx
+        self.assertRegex(fields["title"], r"^\d{2}:\d{2} ")
+        # 让它自己过期而不是当场入库：板上要看得见这句完成
+        self.assertGreater(fields["expires_at_ms"], 0)
+        self.assertEqual(store.resolved, [])
+
+    def test_partial_completion_says_what_is_left(self):
+        store = FakeStore(open_items=[{"id": "n1", "kind": "review-new",
+                                       "title": "还没开始学的新卡已有 10 张"}])
+        run(store, new=3, blocked=0)
+        _id, fields = store.updated[0]
+        self.assertIn("3", fields["body"])
+
+    def test_completion_is_written_once_not_every_round(self):
+        # 每轮重写会让时间戳每 15 分钟往前跳一次，看着像刚做完。
+        store = FakeStore(open_items=[{"id": "n1", "kind": "review-new",
+                                       "title": "02:30 " + rn.COMPLETED_MARK}])
+        run(store, new=0, blocked=0)
+        self.assertEqual(store.updated, [])
+        self.assertEqual(store.resolved, [], "写过完成的要等它自己过期")
+
+    def test_blocked_is_not_completion(self):
+        # 可评分的降到 0 也可能是卡全被导出堵住了 —— 那不是"做完了"。
+        store = FakeStore(open_items=[{"id": "n1", "kind": "review-new",
+                                       "title": "还没开始学的新卡已有 10 张"}])
+        run(store, new=10, blocked=10)
+        self.assertEqual(store.updated, [])
+        self.assertEqual([one[0] for one in store.resolved], ["n1"])
