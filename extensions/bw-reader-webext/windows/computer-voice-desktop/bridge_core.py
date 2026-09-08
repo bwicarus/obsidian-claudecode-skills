@@ -61,6 +61,10 @@ DIRECT_SERVE_SIBLING_PATHS = (
     "/reader-board/v1",
     # 渲好的卡片图(内容寻址)。设备端只当显示器,渲染在 Windows 上做完。
     "/reader-board/card.png",
+    # 睡眠信号(2026-09-08):App 读健康库拿到起床/入睡时刻后写进来,
+    # 复习提醒据此定"起床点"。这份清单同时就是 tailscale serve 的白名单
+    # (control_plane.ALLOWED_SERVE_PATHS 复用它),漏了这里新地址一律 404。
+    "/reader-sleep/v1",
 )
 DIRECT_WSS_URL = (
     "wss://bwicarus-2.taile44d0c.ts.net"

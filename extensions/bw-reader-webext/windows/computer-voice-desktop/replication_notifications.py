@@ -972,6 +972,33 @@ def last_user_activity_ms(root: Path) -> int | None:
         return None
 
 
+def sleep_signal_woke_today_ms(root: Path) -> int | None:
+    r"""App 写进来的真实醒来时刻（%LOCALAPPDATA%\BWReader\sleep-signal.json）。
+
+    由桥的 /reader-sleep/v1 落盘（ReaderSleepSignal.cs）。不是今天的、或读不出来就返回 None，
+    调用方回落到「命令账本里那段睡眠缺口」的推断 —— 两级是**更准的替换更粗的**，不是二选一。
+    """
+    try:
+        import json as _json
+        record = _json.loads(
+            (root / "sleep-signal.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    try:
+        woke = int(record.get("wokeAtMs") or 0)
+    except (TypeError, ValueError):
+        return None
+    if woke <= 0:
+        return None
+    day_start_ms = int(time.mktime(
+        time.localtime()[:3] + (0, 0, 0, 0, 0, -1)) * 1000)
+    if woke < day_start_ms or woke > _now_ms() + 60_000:
+        return None
+    return woke
+
+
 def wake_time_today_ms(
     root: Path, quiet_hours: float = QUIET_MEANS_ASLEEP_HOURS
 ) -> int | None:
@@ -987,6 +1014,12 @@ def wake_time_today_ms(
     等健康数据接上，这个函数换成读真实睡眠分段即可，调用方不用改。
     ⚠ 只认 actor='user'：后台对账自己也写命令，拿它当"人醒了"会让起床时刻恒为 0 点。
     """
+    # 健康数据优先(2026-09-08):App 从健康库读到的真实醒来时刻比设备活动准 ——
+    # 设备活动只能看出"他开始碰这套系统了",健康数据知道他其实七点就醒、只是先用了别的软件。
+    # 只认**今天**的信号:昨天的起床点用在今天会让窗口起点永远停在过去。
+    signal = sleep_signal_woke_today_ms(root)
+    if signal is not None:
+        return signal
     path = root / "replication-command-ledger.sqlite3"
     if not path.is_file():
         return None

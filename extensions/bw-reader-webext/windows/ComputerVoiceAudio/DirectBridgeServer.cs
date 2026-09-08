@@ -733,6 +733,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             ReaderDisplayBoard.CardImagePath,
             new[] { "GET" },
             context => HandleDisplayBoardImageAsync(context, serviceToken));
+        // 睡眠信号（2026-09-08）：App 从健康库读到起床/入睡时刻后 POST 过来。
+        // 只收不判 —— 什么时候算起床、要不要因此提醒都在 Python 侧，
+        // 桥这边多一层判断只会变成第二个真值源。
+        app.MapMethods(
+            ReaderSleepSignal.RoutePath,
+            new[] { "POST", "OPTIONS" },
+            context => HandleSleepSignalAsync(context, serviceToken));
         app.MapMethods(
             ReaderAttentionBoard.AckPath,
             new[] { "GET", "POST", "OPTIONS" },
@@ -2252,6 +2259,21 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             return;
         }
         await ReaderDisplayBoard
+            .WriteResponseAsync(context, serviceCancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task HandleSleepSignalAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "sleep")) return;
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        await ReaderSleepSignal
             .WriteResponseAsync(context, serviceCancellationToken)
             .ConfigureAwait(false);
     }
