@@ -47,6 +47,15 @@ MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
 MAX_THREADS = 128
 MAX_RECENT_ITEMS = 20
 MAX_ARCHIVE_ITEMS = 10_000
+# 到顶就裁,别抛错(2026-09-08 用户实锤:归档正好写满 10000 条,此后每次同步都在
+# durable-write 抛 "archive: total item limit reached" 整体放弃发布 —— 侧栏聊天记录
+# 就此静止,而失败只写进这个没人看的诊断日志)。上限本是防文件无限增长的防御性设计,
+# 却没有配套裁剪,于是"到顶"=永久失效而不是"丢最老的"。
+# 裁到 PRUNE_TARGET 留出余量:裁一次要重写 ~1.3 MB,留 100 条会过几天就再触发一次。
+ARCHIVE_PRUNE_TARGET = 9_000
+# 每条对话至少保留的尾部条数:_merge_recent 的去重只比对尾部,裁头部不会让旧对话被重发,
+# 但尾部留太少就认不出重叠,同一段会被当成新内容再发一遍。
+MIN_THREAD_TAIL_ITEMS = 200
 MAX_TEXT_CHARS = 4_000
 MAX_CODEX_TEXT_CHARS = 8_000
 # 2026-09-04 实测:一条用了 21 天的语音线程 thread/read 回 35.3 MB(1017 turns),
@@ -1124,6 +1133,53 @@ def _overlap(
     return 0
 
 
+def _drop_thread_head(thread: dict[str, Any], drop: int) -> int:
+    """从一条对话的**头部**丢 drop 条,并把 gaps 索引跟着左移。返回真正丢掉的条数。
+
+    gaps 记的是 items 里的断点下标;不跟着移就会指向别的条目,侧栏的"这里有断档"
+    标记会错位到无关的地方。移到 0 以下的断点直接丢(那段历史已经不在了)。
+    """
+    items = thread["items"]
+    drop = max(0, min(drop, len(items)))
+    if drop <= 0:
+        return 0
+    del items[:drop]
+    gaps = thread.get("gaps")
+    if isinstance(gaps, list):
+        thread["gaps"] = [g - drop for g in gaps if g - drop > 0]
+    return drop
+
+
+def _prune_archive(archive: dict[str, Any]) -> int:
+    """总条数超上限时裁掉最老的条目,返回裁掉多少条(未超限返回 0)。
+
+    没有时间戳可以跨对话排序,所以每轮裁**当前最大的那条对话**的头部:它通常就是
+    积累最久的那条,而正在进行的对话很短、完全不会被动到。每条至少留
+    MIN_THREAD_TAIL_ITEMS 条尾部供去重比对。
+    """
+    threads = archive.get("threads")
+    if not isinstance(threads, dict) or not threads:
+        return 0
+    total = sum(len(t["items"]) for t in threads.values())
+    if total <= MAX_ARCHIVE_ITEMS:
+        return 0
+    removed = 0
+    while total > ARCHIVE_PRUNE_TARGET:
+        thread_id = max(threads, key=lambda key: len(threads[key]["items"]))
+        thread = threads[thread_id]
+        can_drop = len(thread["items"]) - MIN_THREAD_TAIL_ITEMS
+        if can_drop <= 0:
+            break   # 最大的一条都到保底了 → 其余更短,再裁只会伤去重
+        dropped = _drop_thread_head(
+            thread, min(total - ARCHIVE_PRUNE_TARGET, can_drop)
+        )
+        if dropped <= 0:
+            break
+        removed += dropped
+        total -= dropped
+    return removed
+
+
 def _merge_recent(
     thread: dict[str, Any], recent: list[dict[str, str]]
 ) -> bool:
@@ -1138,7 +1194,8 @@ def _merge_recent(
         thread["gaps"].append(len(archived))
     archived.extend(recent[overlap:])
     if len(archived) > MAX_ARCHIVE_ITEMS:
-        raise SyncDataError("archive: item limit reached")
+        # 单条对话自己就超上限:同样裁头部,不抛错
+        _drop_thread_head(thread, len(archived) - ARCHIVE_PRUNE_TARGET)
     return overlap == 0
 
 
@@ -1346,10 +1403,7 @@ def sync_once(
     )
     try:
         new_gap = _merge_recent(thread, recent)
-        if sum(
-            len(entry["items"]) for entry in archive["threads"].values()
-        ) > MAX_ARCHIVE_ITEMS:
-            raise SyncDataError("archive: total item limit reached")
+        _prune_archive(archive)
         _atomic_write_json(archive_path, archive, MAX_ARCHIVE_BYTES)
         _atomic_write_json(state_path, state, MAX_STATE_BYTES)
     except (OSError, SyncDataError) as exc:
