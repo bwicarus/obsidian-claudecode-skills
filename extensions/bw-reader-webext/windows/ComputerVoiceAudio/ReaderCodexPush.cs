@@ -31,7 +31,8 @@ namespace BwReader.ComputerVoiceAudio;
 /// - **地址和任务绑定必须动态。** 管道地址、Codex 安装路径、目标任务 id
 ///   一律不写死：那两个环境变量只有 Codex 亲自启动的进程才有，独立启动的
 ///   ReaderPC 拿不到（2026-09-09 实测）。所以由 AI 自己注册，见
-///   `ReaderCodexEndpoint`；注册带 TTL，过期即失效，免得往死掉的任务里推。
+///   `ReaderCodexEndpoint`。绑定死没死**由连续推送失败判定**，不由时钟 ——
+///   时钟答不出目标活着与否，还会在长会话中途把活绑定杀掉。
 /// - **不做重试。** 一次推送失败就算了：下一轮板面若仍与对面不同，
 ///   `WriteIfChangedAsync` 会再写一次并再推一次。自己攒重试队列会把
 ///   "同一件事说两遍"变成常态。
@@ -48,6 +49,15 @@ internal static class ReaderCodexPush
     private static bool _enabled;
     private static string _lastNote = "尚未推送";
     private static long _sentCount;
+    private static int _consecutiveFailures;
+
+    /// 连续失败多少次就判这个绑定死了。
+    ///
+    /// ⚠ 判"目标还活着吗"用的是**这个**，不是时钟（2026-09-09 用户当场问了
+    /// 那个 6 小时 TTL 的设计）：推失败了就是死了，这是实测；时钟只是猜。
+    /// 不取 1 是因为要容一次抖动 —— Codex 重启那几秒里推送本来就会失败，
+    /// 一次就判死会让它刚回来就被拒之门外。
+    internal const int ConsecutiveFailureLimit = 5;
 
     /// 开关。**默认关**：消费端还在轮询时同时推送就是双发。
     internal static bool Enabled
@@ -94,7 +104,10 @@ internal static class ReaderCodexPush
         ReaderCodexEndpoint.Binding? binding = ReaderCodexEndpoint.Current();
         if (binding is null)
         {
-            Note("没有可用的 Codex 绑定（未注册或已过期），这一轮不推");
+            string why = ReaderCodexEndpoint.InvalidReason();
+            Note(why.Length > 0
+                ? "绑定已被判失效，等重新登记：" + why
+                : "没有可用的 Codex 绑定（未注册或已过兜底期限），这一轮不推");
             return;
         }
         string which = slowChanged && fastChanged
@@ -109,7 +122,11 @@ internal static class ReaderCodexPush
         {
             await SendAsync(binding, prompt, cancellationToken)
                 .ConfigureAwait(false);
-            lock (Gate) { _sentCount++; }
+            lock (Gate)
+            {
+                _sentCount++;
+                _consecutiveFailures = 0;   // 成功一次就把计数清零
+            }
             Note("已推送（" + which + "）");
         }
         catch (OperationCanceledException)
@@ -119,7 +136,21 @@ internal static class ReaderCodexPush
         catch (Exception exception)
         {
             // 失败**要留下原因**，但不重试：下一轮板面若仍不同会再写再推。
-            Note("推送失败：" + exception.Message);
+            int failures;
+            lock (Gate) { failures = ++_consecutiveFailures; }
+            if (failures >= ConsecutiveFailureLimit)
+            {
+                // 连着这么多次都不成，那不是抖动，是目标没了。判绑定失效并
+                // **把原因写进绑定文件** —— 这条链没有界面，原因丢了就等于
+                // 没发生过，下次问"为什么不推了"会完全没有答案。
+                ReaderCodexEndpoint.Invalidate(
+                    "连续 " + failures + " 次推送失败：" + exception.Message);
+                lock (Gate) { _consecutiveFailures = 0; }
+                Note("连续 " + failures + " 次失败，已判绑定失效，等重新登记："
+                     + exception.Message);
+                return;
+            }
+            Note("推送失败（连续第 " + failures + " 次）：" + exception.Message);
         }
     }
 

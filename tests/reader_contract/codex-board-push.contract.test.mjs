@@ -99,15 +99,38 @@ test("默认关，且注册不会顺手打开", () => {
   assert.match(ENDPOINT, /if \(wantEnabled is bool decided\)/);
 });
 
-test("绑定带 TTL，过期即失效", () => {
-  // 陈旧绑定会一直往死掉的任务里推，而接口照样可能返回成功 —— 完全无声。
-  assert.match(ENDPOINT, /internal static readonly TimeSpan Lifetime/);
+test("失效由连续推送失败判定，时钟只是远期兜底", () => {
+  // 2026-09-09 用户当场问了那个 6 小时 TTL：时钟答不出目标死没死，
+  // 而推送本身答得出。更糟的是 6 小时会在长会话**中途**把活绑定杀掉，
+  // 制造出它本要防的静默停摆。两种错的代价还不对称。
+  assert.match(PUSH, /ConsecutiveFailureLimit/);
+  assert.match(PUSH, /ReaderCodexEndpoint\.Invalidate\(/);
+  // 成功要清零，否则零星失败攒着攒着也会判死
+  assert.match(PUSH, /_consecutiveFailures = 0;\s*\/\/ 成功一次就把计数清零/);
   const current = ENDPOINT.slice(
     ENDPOINT.indexOf("internal static Binding? Current()"),
     ENDPOINT.indexOf("internal static async Task WriteResponseAsync"),
   );
+  // 实测判定优先于时钟
+  assert.ok(
+    current.indexOf('invalidReason') < current.indexOf("Lifetime"),
+    "失效判定要排在时钟之前",
+  );
   assert.match(current, /now - at > \(long\)Lifetime\.TotalMilliseconds/);
-  assert.match(current, /return null/);
+  // 兜底要足够远，不能又变成一个会杀活绑定的钟
+  assert.match(ENDPOINT, /Lifetime = TimeSpan\.FromHours\((\d+)\)/);
+  const hours = Number(/Lifetime = TimeSpan\.FromHours\((\d+)\)/.exec(ENDPOINT)[1]);
+  assert.ok(hours >= 48, `兜底期限 ${hours} 小时太短，会在长会话中途杀掉活绑定`);
+});
+
+test("失效要留下原因，重新登记要清掉它", () => {
+  // 删文件的话，再问"为什么不推了"就没有答案 —— 这条链没有界面。
+  assert.match(ENDPOINT, /internal static void Invalidate\(string reason\)/);
+  assert.match(ENDPOINT, /\["invalidReason"\] = reason/);
+  // 重新登记 = "我又活了"
+  assert.match(ENDPOINT, /\["invalidReason"\] = null/);
+  // 并且要把上一次死过的事回给 AI，否则它不知道中间断过
+  assert.match(ENDPOINT, /previousInvalidReason/);
 });
 
 test("地址和任务 id 一律不写死", () => {

@@ -17,8 +17,11 @@ namespace BwReader.ComputerVoiceAudio;
 ///
 /// ## 纪律
 ///
-/// - **带 TTL，过期即失效。** 一个陈旧绑定会让板面事件一直推进一个已经
-///   死掉的任务，而那种失败完全无声：接口照样可能返回成功。
+/// - **失效由实测判定，不由时钟。** 一个陈旧绑定会让板面事件一直推进一个
+///   已经死掉的任务。判它死没死的**不是时间**，是推送本身连续失败
+///   （见 `Invalidate` 和 `ReaderCodexPush` 的失败计数）；`Lifetime` 只是
+///   防"注册完再没人管过"的远期兜底。2026-09-09 从 6 小时的硬 TTL 改过来，
+///   因为那种设计会在一段长会话中途把活绑定杀掉，制造出它本要防的静默停摆。
 /// - **地址不做任何猜测。** 不枚举命名管道、不去读 Codex 的安装目录 ——
 ///   交接里明说安装路径带版本号会变。拿不到就不推，并说出原因。
 /// - **注册只是"能推"，不等于"该推"。** 推不推由 `ReaderCodexPush.Enabled`
@@ -28,9 +31,18 @@ internal static class ReaderCodexEndpoint
     internal const string RoutePath = "/reader-codex-endpoint/v1";
     private const string StoreFileName = "codex-push-binding.json";
     private const int MaxBodyBytes = 4 * 1024;
-    /// 绑定活多久。比一次语音会话长一些，但短到不会跨到下一次 ——
-    /// 用户中途换任务时，旧绑定最迟这么久之后自己失效。
-    internal static readonly TimeSpan Lifetime = TimeSpan.FromHours(6);
+    /// 绑定的**远期兜底**期限。
+    ///
+    /// ⚠ 2026-09-09 从 6 小时放宽到 72 小时，因为用时钟判"目标还活着吗"
+    /// 是错的方向（用户当场问了这个设计）：
+    ///   · 时钟答不出目标死没死，而**推送本身答得出** —— 推失败了就是死了；
+    ///   · 6 小时会在一段长会话**中途**过期，推送悄悄停掉，
+    ///     那正是这个机制本来要防的失败，只不过改由我们的定时器制造；
+    ///   · 两种错的代价不对称：过期太早=静默停摆（很糟），
+    ///     过期太晚=往死目标推一次并失败（会记在 lastNote 里，便宜）。
+    /// 所以真正判失效的是**连续推送失败**（见 `Invalidate`），
+    /// 这个时钟只是防"注册完就再没人管过"的兜底。
+    internal static readonly TimeSpan Lifetime = TimeSpan.FromHours(72);
 
     internal sealed record Binding(string PipeName, string ThreadId);
 
@@ -75,7 +87,54 @@ internal static class ReaderCodexEndpoint
         return text.Contains('\\') ? string.Empty : text;
     }
 
-    /// 当前可用的绑定。没注册过、读不出来、或已过期都返回 null。
+    /// 把绑定标成失效，并**记下原因**。由推送侧在连续失败到上限时调。
+    ///
+    /// 不直接删文件：删掉之后再问"为什么不推了"就没有答案了，
+    /// 而这条链没有界面，原因丢了就等于没发生过。重新登记会清掉这个标记。
+    internal static void Invalidate(string reason)
+    {
+        try
+        {
+            string path = StorePath;
+            if (!File.Exists(path)) return;
+            if (JsonNode.Parse(File.ReadAllText(path)) is not JsonObject value)
+            {
+                return;
+            }
+            value["invalidAtMs"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            value["invalidReason"] = reason.Length > 200
+                ? reason[..200] : reason;
+            string temporary = path + ".tmp-" + Environment.ProcessId;
+            File.WriteAllText(temporary, value.ToJsonString(
+                new JsonSerializerOptions { WriteIndented = true }));
+            File.Move(temporary, path, overwrite: true);
+        }
+        catch (Exception)
+        {
+            // 记不下就算了：这一步是为了留线索，不该反过来把推送弄坏。
+        }
+    }
+
+    /// 绑定为什么失效了。没失效返回空串 —— 给状态查询用。
+    internal static string InvalidReason()
+    {
+        try
+        {
+            string path = StorePath;
+            if (!File.Exists(path)) return string.Empty;
+            if (JsonNode.Parse(File.ReadAllText(path)) is not JsonObject value)
+            {
+                return string.Empty;
+            }
+            return (string?)value["invalidReason"] ?? string.Empty;
+        }
+        catch (Exception)
+        {
+            return string.Empty;
+        }
+    }
+
+    /// 当前可用的绑定。没注册过、读不出来、被判失效、或超过兜底期限都返回 null。
     internal static Binding? Current()
     {
         try
@@ -84,6 +143,11 @@ internal static class ReaderCodexEndpoint
             if (!File.Exists(path)) return null;
             JsonNode? parsed = JsonNode.Parse(File.ReadAllText(path));
             if (parsed is not JsonObject value) return null;
+            // 连续推失败判定的失效**优先于**时钟：它是实测的，时钟是猜的。
+            if (!string.IsNullOrEmpty((string?)value["invalidReason"]))
+            {
+                return null;
+            }
             long at = (long?)value["registeredAtMs"] ?? 0;
             if (at <= 0) return null;
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -155,6 +219,9 @@ internal static class ReaderCodexEndpoint
             ? parsedEnabled
             : null;
 
+        // 先记下上一次是不是被判死过，登记完在响应里回给 AI ——
+        // 否则它永远不知道中间断过一段，也就想不到去问为什么。
+        string previousInvalid = InvalidReason();
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         JsonObject record = new()
         {
@@ -162,6 +229,10 @@ internal static class ReaderCodexEndpoint
             ["pipeName"] = pipeName,
             ["threadId"] = threadId,
             ["registeredAtMs"] = now,
+            // 重新登记 = "我又活了"：把上一次的失效判定清掉。
+            // 不清的话，一次网络抖动判死之后就再也起不来了。
+            ["invalidAtMs"] = null,
+            ["invalidReason"] = null,
             ["expiresAtMs"] = now + (long)Lifetime.TotalMilliseconds,
         };
         try
@@ -191,6 +262,8 @@ internal static class ReaderCodexEndpoint
             ["expiresAtMs"] = now + (long)Lifetime.TotalMilliseconds,
             ["pushEnabled"] = ReaderCodexPush.Enabled,
             ["lastNote"] = ReaderCodexPush.LastNote,
+            ["previousInvalidReason"] = previousInvalid.Length == 0
+                ? null : previousInvalid,
         }, cancellationToken).ConfigureAwait(false);
     }
 
