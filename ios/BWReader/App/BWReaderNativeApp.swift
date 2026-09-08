@@ -342,6 +342,10 @@ private struct ReaderRootView: View {
             consumePendingNativeFeatureRequest()
             await refreshNativeFeatureSnapshot()
             reader.probeReaderSnapshotLink()
+            // 睡眠信号(2026-09-08):从健康库读"今早几点醒的"报给 Windows,
+            // 复习提醒据此决定起床后才出声。同一个醒来时刻只报一次;
+            // 没授权/没数据/电脑不可达都安静降级 —— Windows 那边会回落到设备活动推断。
+            await ReaderSleepReporter.shared.refresh()
             var secondsUntilSnapshotRefresh = 12
             while !Task.isCancelled {
                 do {

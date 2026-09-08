@@ -2,6 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- 读健康库里的睡眠分段(2026-09-08):复习提醒的"起床点"用真实醒来时刻,
+         比"他开始碰这套系统了"准。只读不写;不声明 healthkit.background-delivery,
+         等基础链路稳了再加,那时不用再动开发者后台。 -->
+    <key>com.apple.developer.healthkit</key>
+    <true/>
     <key>com.apple.security.application-groups</key>
     <array>
         <string>group.space.bwicarus.bwreader2</string>

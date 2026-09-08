@@ -45,6 +45,8 @@
     <string>用于把到点必须知道的提醒（如赶车、出门时间）排成系统闹钟，确保在静音或专注模式下也能叫住你。只为你自己创建的提醒排闹钟。</string>
     <key>NSRemindersFullAccessUsageDescription</key>
     <string>用于把 AI 待办同步到「BW 待办」提醒列表，并读回你勾选完成的状态。只操作该专用列表，不读取你自己的提醒。</string>
+    <key>NSHealthShareUsageDescription</key>
+    <string>读取睡眠记录，用来判断你今天几点醒的，好在起床后而不是半夜提醒你复习卡片。只读取，不写入，不上传到互联网。</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>用于在阅读时与 Windows 电脑上的语音助手持续通话，包括应用进入后台或锁屏期间。</string>
     <key>NSAppTransportSecurity</key>
