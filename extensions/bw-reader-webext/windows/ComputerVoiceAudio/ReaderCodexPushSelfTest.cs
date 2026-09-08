@@ -57,7 +57,7 @@ internal static class ReaderCodexPushSelfTest
         ReaderCodexPush.SetEnabled(true);
         long before = ReaderCodexPush.SentCount;
         ReaderCodexPush
-            .NotifyBoardChangedAsync(false, false, CancellationToken.None)
+            .NotifyBoardChangedAsync(false, false, "慢板", "快板", CancellationToken.None)
             .GetAwaiter().GetResult();
         if (ReaderCodexPush.SentCount != before)
         {
@@ -66,7 +66,7 @@ internal static class ReaderCodexPushSelfTest
         // 关着、板面变了 → 也不许发（这一条守的是迁移开关本身）。
         ReaderCodexPush.SetEnabled(false);
         ReaderCodexPush
-            .NotifyBoardChangedAsync(true, true, CancellationToken.None)
+            .NotifyBoardChangedAsync(true, true, "慢板", "快板", CancellationToken.None)
             .GetAwaiter().GetResult();
         if (ReaderCodexPush.SentCount != before)
         {

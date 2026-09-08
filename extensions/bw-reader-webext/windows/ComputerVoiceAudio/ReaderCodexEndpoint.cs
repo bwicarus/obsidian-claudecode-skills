@@ -47,6 +47,13 @@ internal static class ReaderCodexEndpoint
     internal sealed record Binding(string PipeName, string ThreadId);
 
     private static readonly object Gate = new();
+    /// 登记这一串动作（读旧状态 → 写新绑定 → 决定要不要发接通提醒）必须
+    /// 整体互斥。Codex 的 SessionStart 和 UserPromptSubmit 两个钩子会几乎
+    /// 同时登记同一个目标（2026-09-09 实测），不锁的话两边各自读到"还没登记过"
+    /// 于是各发一次接通提醒。
+    /// ⚠ 与 `Gate` 分开：那把锁只护 `_storeDirectory`，在它里面做文件读写
+    /// 会把两件无关的事绑在一起。
+    private static readonly object RegistrationGate = new();
     private static string _storeDirectory = string.Empty;
 
     internal static void Configure()
@@ -112,6 +119,21 @@ internal static class ReaderCodexEndpoint
         catch (Exception)
         {
             // 记不下就算了：这一步是为了留线索，不该反过来把推送弄坏。
+        }
+    }
+
+    /// 读出整条绑定记录（不做新鲜度/失效判断）。读不出来返回 null。
+    private static JsonObject? ReadRecord()
+    {
+        try
+        {
+            string path = StorePath;
+            if (!File.Exists(path)) return null;
+            return JsonNode.Parse(File.ReadAllText(path)) as JsonObject;
+        }
+        catch (Exception)
+        {
+            return null;
         }
     }
 
@@ -235,43 +257,96 @@ internal static class ReaderCodexEndpoint
             ["invalidReason"] = null,
             ["expiresAtMs"] = now + (long)Lifetime.TotalMilliseconds,
         };
-        try
+        // ── 读旧状态 → 写新绑定 → 决定要不要发接通提醒。**整段互斥。**
+        //
+        // Codex 的 SessionStart 与 UserPromptSubmit 两个钩子会几乎同时登记
+        // 同一个目标（2026-09-09 Codex 反馈），不锁的话两边各自读到
+        // "还没登记过"，于是各发一次接通提醒。
+        string? writeError = null;
+        bool shouldAnnounce = false;
+        Binding announceTarget = new(pipeName, threadId);
+        bool pushEnabledAfter;
+        lock (RegistrationGate)
         {
-            Configure();
-            Directory.CreateDirectory(_storeDirectory);
-            string path = StorePath;
-            string temporary = path + ".tmp-" + Environment.ProcessId;
-            File.WriteAllText(temporary, record.ToJsonString(
-                new JsonSerializerOptions { WriteIndented = true }));
-            File.Move(temporary, path, overwrite: true);
+            JsonObject? previous = ReadRecord();
+            previousInvalid = (string?)previous?["invalidReason"] ?? string.Empty;
+            string previousPipe = NormalizePipeName(
+                (string?)previous?["pipeName"] ?? string.Empty);
+            string previousThread =
+                ((string?)previous?["threadId"] ?? string.Empty).Trim();
+            bool wasEnabled = ReaderCodexPush.Enabled;
+            // 「同一个有效绑定」= 对话和管道都没变。只有这种情况才是纯续期。
+            bool sameTarget = previous is not null
+                && string.Equals(previousPipe, pipeName, StringComparison.Ordinal)
+                && string.Equals(previousThread, threadId, StringComparison.Ordinal);
+
+            try
+            {
+                Configure();
+                Directory.CreateDirectory(_storeDirectory);
+                string path = StorePath;
+                string temporary = path + ".tmp-" + Environment.ProcessId;
+                File.WriteAllText(temporary, record.ToJsonString(
+                    new JsonSerializerOptions { WriteIndented = true }));
+                File.Move(temporary, path, overwrite: true);
+            }
+            catch (Exception exception)
+            {
+                writeError = exception.Message;
+            }
+
+            if (writeError is null)
+            {
+                if (wantEnabled is bool decided)
+                {
+                    ReaderCodexPush.SetEnabled(decided);
+                }
+                pushEnabledAfter = ReaderCodexPush.Enabled;
+                // 换了目标、或从失效里恢复：失败计数从头算，别把上一个
+                // 死绑定攒下的次数记在新目标头上。
+                if (!sameTarget || previousInvalid.Length > 0)
+                {
+                    ReaderCodexPush.ResetFailures();
+                }
+                // 只有**真的（重新）接上**才发全量提醒。四种情形：
+                //   第一次登记 / 换了对话或管道 / 从关变开 / 从失效里恢复。
+                // 单纯续期不发 —— 用户每说一句话就续一次，那会变成每句话
+                // 都收到一条"把两块板完整读一遍"（2026-09-09 实测重复）。
+                shouldAnnounce = pushEnabledAfter
+                    && (previous is null
+                        || !sameTarget
+                        || !wasEnabled
+                        || previousInvalid.Length > 0);
+            }
+            else
+            {
+                pushEnabledAfter = ReaderCodexPush.Enabled;
+            }
         }
-        catch (Exception exception)
+        if (writeError is not null)
         {
-            await Fail(context, "写入失败：" + exception.Message)
-                .ConfigureAwait(false);
+            await Fail(context, "写入失败：" + writeError).ConfigureAwait(false);
             return;
         }
-        if (wantEnabled is bool decided)
+        // ⚠ 把**这次登记定下的目标**传进去，不让它异步时再去读全局绑定 ——
+        //   中间可能已经被另一段对话覆盖，那样提醒就发到别人那里去了
+        //   （2026-09-09 Codex 明确点出这一条）。
+        // ⚠ 不 await，且用 `CancellationToken.None`：拿这个请求的 token 的话，
+        //   响应一返回推送就被取消，表现是"登记成功但全量提醒从来没到"。
+        if (shouldAnnounce)
         {
-            ReaderCodexPush.SetEnabled(decided);
-        }
-        // 接上就推一次全量（2026-09-09 用户：推送只在变化时触发，
-        // 登记之前就摆在板上的待办永远送不出去）。
-        //
-        // ⚠ 不 await：登记这个请求不该等一次跨进程推送。而且它要用
-        //   `CancellationToken.None` —— 拿这个请求的 token 的话，
-        //   响应一返回推送就被取消，表现是"登记成功但全量提醒从来没到"，
-        //   而没有一处会报错。KJ 那边刚踩过同一个形态。
-        if (ReaderCodexPush.Enabled)
-        {
-            _ = ReaderCodexPush.NotifyConnectedAsync(CancellationToken.None);
+            _ = ReaderCodexPush.NotifyConnectedAsync(
+                announceTarget, CancellationToken.None);
         }
         await Ok(context, new JsonObject
         {
             ["ok"] = true,
             ["threadId"] = threadId,
             ["expiresAtMs"] = now + (long)Lifetime.TotalMilliseconds,
-            ["pushEnabled"] = ReaderCodexPush.Enabled,
+            ["pushEnabled"] = pushEnabledAfter,
+            // 续期还是接上，回给调用方 —— 否则验收时分不清"没发"和"发丢了"。
+            ["announcedConnect"] = shouldAnnounce,
+            ["renewedOnly"] = pushEnabledAfter && !shouldAnnounce,
             ["lastNote"] = ReaderCodexPush.LastNote,
             ["previousInvalidReason"] = previousInvalid.Length == 0
                 ? null : previousInvalid,

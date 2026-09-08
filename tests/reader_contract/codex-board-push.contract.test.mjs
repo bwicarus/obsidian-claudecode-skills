@@ -60,17 +60,45 @@ test("登记表变了不推送", () => {
   );
 });
 
-test("推送只送提醒，不送板面正文", () => {
-  // 书页标题和内容是资料不是指令。塞进一条送给模型的提示里，
-  // 等于把资料升级成有执行权的命令。
-  for (const forbidden of ["slowToWrite", "RenderSlow", "RenderFast",
-    "SlowFileName", "FastFileName"]) {
-    assert.ok(
-      !PUSH.includes(forbidden),
-      `推送模块不该碰 ${forbidden}（那是板面正文一侧的东西）`,
-    );
-  }
-  assert.ok(PUSH.includes("板面文件是权威"), "提示语要说清板面才是权威");
+test("推送直接带上变了那块板的全文", () => {
+  // 用户 2026-09-09：「直接把快慢板内容发过去就好，只是快板有变化就发快板的
+  // 全部内容，慢板同理」。原来只发一句"有更新，去读文件"，对面每次还要
+  // 再读一趟 —— 而板面本来就短，那一趟纯属多余。
+  assert.match(
+    PUSH,
+    /NotifyBoardChangedAsync\(\s*bool slowChanged,\s*bool fastChanged,\s*string slowText,\s*string fastText,/);
+  assert.ok(PUSH.includes("【快板】") && PUSH.includes("Trim(fastText)"),
+    "快板变了要带快板全文");
+  assert.ok(PUSH.includes("【慢板】") && PUSH.includes("Trim(slowText)"),
+    "慢板变了要带慢板全文");
+  // 只带**变了的那块**：没变的那块对面手上已经有了
+  const region = PUSH.slice(
+    PUSH.indexOf("var body = new StringBuilder()"),
+    PUSH.indexOf("string prompt = body.ToString()"));
+  assert.match(region, /if \(fastChanged\)/);
+  assert.match(region, /if \(slowChanged\)/);
+  // 病态长度要收口，不能让对面吞下整块
+  assert.match(PUSH, /板面过长已截断/);
+});
+
+test("推送是支线，绝不能拖住或弄坏渲染", () => {
+  // 2026-09-09 实测：await 推送之后，板子只渲了启动那一次，之后新建通知、
+  // 翻书、画图全都不再更新，而每个文件都好端端躺着 —— 因为渲染循环的异常
+  // 没有任何人观察（那个 task 只在关服时被 await 一次）。
+  const flush = BOARD.slice(
+    BOARD.indexOf("internal static async Task FlushFilesAsync"),
+    BOARD.indexOf("private static bool DecideSlowFlush"));
+  assert.match(flush, /_ = ReaderCodexPush\.NotifyBoardChangedAsync\(/);
+  assert.ok(
+    !/await ReaderCodexPush/.test(flush),
+    "不许 await 推送：一次推送最长能占住 28 秒，而这个循环每秒渲一次");
+  assert.match(flush, /CancellationToken\.None/);
+  // 循环本身也要吞掉异常并留下原因
+  const server = read(CS + "DirectBridgeServer.cs");
+  assert.match(server, /private static async Task FlushOnceAsync/);
+  assert.match(server, /ReaderAttentionBoard\.NoteFlushFailure\(exception\)/);
+  assert.match(server, /catch \(OperationCanceledException\)\s*\{\s*throw;/);
+  assert.match(BOARD, /internal static string LastFlushFailure/);
 });
 
 test("推送绝不碰业务 ack", () => {
@@ -146,12 +174,77 @@ test("接上时推一次全量，否则登记前就摆在板上的东西永远�
   //   取消，表现是"登记成功但全量提醒从来没到"，没有一处会报错。
   assert.match(
     ENDPOINT,
-    /NotifyConnectedAsync\(CancellationToken\.None\)/);
+    /NotifyConnectedAsync\(\s*announceTarget, CancellationToken\.None\)/);
   // 这一条失败不该判绑定失效 —— 刚登记完就判死太急
   const body = PUSH.slice(
     PUSH.indexOf("internal static async Task NotifyConnectedAsync"),
     PUSH.indexOf("/// 板面变了"));
   assert.ok(!/Invalidate\(/.test(body), "接上提醒失败不判绑定失效");
+});
+
+test("续期不再重复发接通提醒", () => {
+  // Codex 2026-09-09 报的重复：钩子每次用户发言都续登记，而接通提醒原来挂在
+  // "每次登记"上，于是每说一句话就收到一条"把两块板完整读一遍"。
+  // ⚠ 终点用 lastIndexOf：注销分支里先出现过一次 `await Ok(context`，
+  // 用 indexOf 会把切片切成空串，于是断言全部"通过"而什么都没检查。
+  const region = ENDPOINT.slice(
+    ENDPOINT.indexOf("lock (RegistrationGate)"),
+    ENDPOINT.lastIndexOf("await Ok(context"));
+  assert.ok(region.length > 500, "切片没取到登记那一段");
+  // 只有真接上才发，四种情形写在条件里
+  assert.match(region, /shouldAnnounce = pushEnabledAfter/);
+  assert.match(region, /previous is null/);
+  assert.match(region, /!sameTarget/);
+  assert.match(region, /!wasEnabled/);
+  assert.match(region, /previousInvalid\.Length > 0/);
+  // 「同一个有效绑定」= 对话和管道都没变
+  assert.match(region, /string\.Equals\(previousPipe, pipeName/);
+  assert.match(region, /string\.Equals\(previousThread, threadId/);
+});
+
+test("读旧状态到写新绑定整段互斥", () => {
+  // 两个钩子几乎同时登记同一目标时，不锁的话两边各自读到"还没登记过"，
+  // 于是各发一次。
+  assert.match(ENDPOINT, /private static readonly object RegistrationGate/);
+  const region = ENDPOINT.slice(
+    ENDPOINT.indexOf("lock (RegistrationGate)"),
+    ENDPOINT.indexOf("if (writeError is not null)"));
+  // 读旧、写新、定开关、下决定必须都在锁里
+  for (const needle of ["ReadRecord()", "File.Move(temporary, path",
+    "ReaderCodexPush.SetEnabled(decided)", "shouldAnnounce ="]) {
+    assert.ok(region.includes(needle), `${needle} 必须在 RegistrationGate 里`);
+  }
+  // ⚠ 锁里不许 await
+  assert.ok(!/await /.test(region), "锁里不能有 await");
+});
+
+test("接通提醒绑定到这次登记定下的目标", () => {
+  // 异步发送时全局绑定可能已被另一段对话覆盖，那样提醒会发到别人那里。
+  assert.match(PUSH, /NotifyConnectedAsync\(\s*ReaderCodexEndpoint\.Binding binding,/);
+  const body = PUSH.slice(
+    PUSH.indexOf("internal static async Task NotifyConnectedAsync"),
+    PUSH.indexOf("/// 板面变了"));
+  assert.ok(
+    !/ReaderCodexEndpoint\.Current\(\)/.test(body),
+    "不许在这里重读全局绑定");
+  assert.match(
+    ENDPOINT,
+    /NotifyConnectedAsync\(\s*announceTarget, CancellationToken\.None\)/);
+});
+
+test("换目标或从失效恢复时失败计数清零", () => {
+  // 不清的话上一个死绑定攒下的次数会记在新目标头上，新目标可能一上来就被判死。
+  assert.match(PUSH, /internal static void ResetFailures\(\)/);
+  const region = ENDPOINT.slice(
+    ENDPOINT.indexOf("lock (RegistrationGate)"),
+    ENDPOINT.indexOf("if (writeError is not null)"));
+  assert.match(region, /ReaderCodexPush\.ResetFailures\(\)/);
+});
+
+test("响应说清这次是接上还是续期", () => {
+  // 否则验收时分不清"没发"和"发丢了"。
+  assert.match(ENDPOINT, /\["announcedConnect"\] = shouldAnnounce/);
+  assert.match(ENDPOINT, /\["renewedOnly"\]/);
 });
 
 test("地址和任务 id 一律不写死", () => {

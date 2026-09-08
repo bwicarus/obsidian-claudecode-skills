@@ -2437,20 +2437,45 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         using PeriodicTimer timer = new(AttentionBoardFlushInterval);
         try
         {
-            await ReaderAttentionBoard
-                .FlushFilesAsync(cancellationToken)
-                .ConfigureAwait(false);
+            await FlushOnceAsync(cancellationToken).ConfigureAwait(false);
             while (await timer.WaitForNextTickAsync(cancellationToken)
                 .ConfigureAwait(false))
             {
-                await ReaderAttentionBoard
-                    .FlushFilesAsync(cancellationToken)
-                    .ConfigureAwait(false);
+                await FlushOnceAsync(cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
         {
             // 正常收摊。
+        }
+    }
+
+    /// 渲一轮并落盘。**任何异常都不许逃出去。**
+    ///
+    /// ⚠ 2026-09-09 加的，因为这个循环的异常**没有任何人观察**：
+    /// `attentionBoardTask` 只在关服时被 await 一次。于是渲染里抛一次异常，
+    /// 循环就永久停摆，而板子文件停在最后一次成功渲染的内容上 ——
+    /// 那看起来跟"状态确实没变"一模一样，没有一处会报错。
+    /// 实测就是这样：加了主动推送之后板子只渲了启动那一次，之后新建通知、
+    /// 翻书、画图全都不再更新，而每个文件都好端端地躺在那儿。
+    ///
+    /// 所以这里吞掉异常并**留下原因**，下一秒照常再试一次。一次渲染失败
+    /// 是可以接受的；渲染从此不再进行不行。
+    private static async Task FlushOnceAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ReaderAttentionBoard
+                .FlushFilesAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;   // 收摊要传出去，让外层的循环正常结束
+        }
+        catch (Exception exception)
+        {
+            ReaderAttentionBoard.NoteFlushFailure(exception);
         }
     }
 
@@ -3051,21 +3076,32 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 //   而交接里列的快板语义明写着"焦点变化意味着旧快照不能当
                 //   当前页"，说的就是书页。
                 //
-                // ⚠ 身份取**书**（File）而不是书+页：按页的话，正常阅读
-                //   每停留满 45 秒就是一次焦点转移，开了主动推送之后等于
-                //   每分钟叫醒对面一次，而"他翻到第 9 页了"这件事对面
-                //   从快照里本来就读得到。开新书才是真的换了注意力。
+                // ⚠ 身份取**书+页**（2026-09-09 用户点名要换页也算：
+                //   「app 书换页，绘图等没有变化」）。我先做成按书，
+                //   理由是"按页会每分钟叫醒一次"—— 但那是我替他做的取舍，
+                //   而他要的正是"焦点变化意味着旧快照不能当当前页"。
+                //   噪音由 45 秒停留门槛挡：翻着找页的那些页一个都不确认。
                 //
                 // ⚠ 只在没有 viewport 时报：两支同时报会让网页焦点和书本
                 //   焦点互相顶掉，板上表现为反复横跳。网页那支优先，
                 //   因为它带的是浏览器里正在看的东西。
                 if (viewport is null)
                 {
-                    ReaderAttentionBoard.NoteLocation(
-                        activeReading.File,
+                    string page = activeReading.Page.ValueKind
+                        == JsonValueKind.Number
+                        ? activeReading.Page.ToString()
+                        : string.Empty;
+                    string title =
                         string.IsNullOrWhiteSpace(activeReading.Title)
                             ? activeReading.File
-                            : activeReading.Title,
+                            : activeReading.Title;
+                    ReaderAttentionBoard.NoteLocation(
+                        page.Length == 0
+                            ? activeReading.File
+                            : activeReading.File + "#" + page,
+                        page.Length == 0
+                            ? title
+                            : title + " 第 " + page + " 页",
                         DateTimeOffset.UtcNow,
                         source: activeReading.SourceInstanceId,
                         interacted: !string.IsNullOrWhiteSpace(

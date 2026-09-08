@@ -846,11 +846,42 @@ internal static class ReaderAttentionBoard
         // ⚠ 只在真的写了盘时推 —— 空转一轮不推。这条就是"无变化静默"。
         if (slowChanged || fastChanged)
         {
-            await ReaderCodexPush
-                .NotifyBoardChangedAsync(
-                    slowChanged, fastChanged, token)
-                .ConfigureAwait(false);
+            // ⚠ **不 await，也不用这一轮的 token。**
+            //
+            // 之前是 await 的，于是一次推送最长可以占住 28 秒（连接 4 秒 +
+            // 两次请求各 12 秒），而这个循环每秒要渲一次；更糟的是推送里
+            // 任何一个没被接住的异常都会顺着 await 冒到循环里，把渲染
+            // 永久停掉（2026-09-09 实测：加了推送之后板子只渲了启动那一次）。
+            //
+            // 渲染是主线，推送是支线。支线绝不能拖住或弄坏主线。
+            _ = ReaderCodexPush.NotifyBoardChangedAsync(
+                slowChanged, fastChanged, slowToWrite, fast,
+                CancellationToken.None);
         }
+    }
+
+    private static string _lastFlushFailure = string.Empty;
+
+    /// 记下一次渲染失败。**只留原因，不改板面** —— 板上留着最后一次
+    /// 成功的内容，比留一句错误更有用（对面照着旧内容做事，总好过
+    /// 照着一句"渲染失败"什么都做不了）。
+    ///
+    /// ⚠ 这一条存在的理由：渲染循环的异常没有任何人观察，
+    /// 板子停更跟"状态确实没变"长得一模一样。有了它，
+    /// `--flush-status` 至少答得出"停在哪一步"。
+    internal static void NoteFlushFailure(Exception exception)
+    {
+        lock (Gate)
+        {
+            _lastFlushFailure = DateTimeOffset.Now.ToString("HH:mm:ss")
+                + " " + exception.GetType().Name + "：" + exception.Message;
+        }
+    }
+
+    /// 最近一次渲染失败的原因。没失败过返回空串。
+    internal static string LastFlushFailure
+    {
+        get { lock (Gate) { return _lastFlushFailure; } }
     }
 
     /// 慢板这一轮要不要落盘。调用方须持有 Gate。

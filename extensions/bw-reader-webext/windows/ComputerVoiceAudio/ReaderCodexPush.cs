@@ -70,6 +70,13 @@ internal static class ReaderCodexPush
         lock (Gate) { _enabled = value; }
     }
 
+    /// 换了推送目标、或从失效里恢复时清零。不清的话上一个死绑定攒下的
+    /// 失败次数会记在新目标头上，新目标可能一上来就被判死。
+    internal static void ResetFailures()
+    {
+        lock (Gate) { _consecutiveFailures = 0; }
+    }
+
     /// 最近一次尝试的结果。这条链没有界面，出问题只能靠它。
     internal static string LastNote
     {
@@ -102,16 +109,14 @@ internal static class ReaderCodexPush
     /// ⚠ 与变化推送共用同一条运输和同一套失败判定；只有措辞不同：
     ///   这一条明说"这是接上时的一次，板上现有内容请整个读一遍"，
     ///   否则对面会以为只有增量。
+    /// ⚠ 目标由**调用方**传进来，不在这里读全局绑定：这一条是异步发的，
+    /// 中间全局绑定可能已被另一段对话覆盖，那样提醒就发到别人那里去了
+    /// （2026-09-09 Codex 明确点出这一条）。
     internal static async Task NotifyConnectedAsync(
+        ReaderCodexEndpoint.Binding binding,
         CancellationToken cancellationToken)
     {
         if (!Enabled) return;
-        ReaderCodexEndpoint.Binding? binding = ReaderCodexEndpoint.Current();
-        if (binding is null)
-        {
-            Note("刚登记就取不到绑定，接上提醒没发出去");
-            return;
-        }
         string prompt =
             "提示板已接上主动推送。"
             + "这是接上时的一次全量提醒：**把快板和慢板都完整读一遍**，"
@@ -146,6 +151,8 @@ internal static class ReaderCodexPush
     internal static async Task NotifyBoardChangedAsync(
         bool slowChanged,
         bool fastChanged,
+        string slowText,
+        string fastText,
         CancellationToken cancellationToken)
     {
         if (!Enabled) return;
@@ -159,14 +166,30 @@ internal static class ReaderCodexPush
                 : "没有可用的 Codex 绑定（未注册或已过兜底期限），这一轮不推");
             return;
         }
+        // 直接把**变了那块板的全文**带过去（2026-09-09 用户：
+        // 「直接把快慢板内容发过去就好，只是快板有变化就发快板的全部内容，
+        //   慢板同理」）。
+        //
+        // 原来只发一句"有更新，去读文件"，于是对面每次还要再读一趟 ——
+        // 而板面本来就短，那一趟纯属多余。文件留着当权威和回退面，
+        // 但不必每次都回头读。
+        //
+        // ⚠ 只带**变了的那块**：没变的那块对面手上已经有了，
+        // 再发一遍是同一件事说两遍。
         string which = slowChanged && fastChanged
             ? "快板和慢板"
             : (fastChanged ? "快板" : "慢板");
-        string prompt =
-            "提示板事件：" + which + "有新内容。"
-            + "按 reader-attention-watch 契约读板并处理；"
-            + "板面文件是权威，这条只是提醒。"
-            + "业务 ack/resolve 仍按原契约，本条不代表任何通知已交付用户。";
+        var body = new StringBuilder();
+        body.Append("提示板更新（").Append(which).Append("）。\n");
+        if (fastChanged)
+        {
+            body.Append("\n【快板】\n").Append(Trim(fastText));
+        }
+        if (slowChanged)
+        {
+            body.Append("\n【慢板】\n").Append(Trim(slowText));
+        }
+        string prompt = body.ToString();
         try
         {
             await SendAsync(binding, prompt, cancellationToken)
@@ -201,6 +224,17 @@ internal static class ReaderCodexPush
             }
             Note("推送失败（连续第 " + failures + " 次）：" + exception.Message);
         }
+    }
+
+    /// 板面正文进消息前的收口。板子本来就短，这里只防病态输入 ——
+    /// 一块板长到几十 KB 说明渲染出了别的问题，那时截断比让对面吞下整块好。
+    private static string Trim(string text)
+    {
+        string value = (text ?? string.Empty).TrimEnd();
+        const int limit = 8000;
+        return value.Length <= limit
+            ? value
+            : value[..limit] + "\n…（板面过长已截断，完整内容见板面文件）";
     }
 
     private static async Task SendAsync(
