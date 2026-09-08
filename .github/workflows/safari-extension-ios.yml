@@ -607,6 +607,25 @@ jobs:
             esac
           fi
 
+          # ⚠ 用途说明必须与 entitlement 配对（2026-09-08 第三次栽在
+          # "只有上传才报"的错上）。苹果按 **entitlement** 而不是按代码
+          # 要求用途说明：`com.apple.developer.healthkit` 本身允许写，
+          # 所以即使我们只读也必须有 NSHealthUpdateUsageDescription。
+          # run 34229274644 就是这么挂的（90683），而编译、归档、altool
+          # 的本地校验全部通过 —— 睡眠功能因此从未上过设备。
+          # 前两次同类：PlugIns/ 放手表 app、WKBackgroundModes[audio]。
+          ENTITLEMENTS_SRC="$GITHUB_WORKSPACE/$PROJECT_DIR/App/BWReader.entitlements"
+          check_purpose() {
+            /usr/libexec/PlistBuddy -c "Print :$1"               "$APP_PATH/Info.plist" >/dev/null 2>&1 && return 0
+            echo "::error::Info.plist 缺 $1"
+            echo "::error::entitlement $2 要求它 —— 传上去会报 90683，而归档和本地校验都不会拦"
+            return 1
+          }
+          if /usr/libexec/PlistBuddy -c "Print :com.apple.developer.healthkit"                "$ENTITLEMENTS_SRC" >/dev/null 2>&1; then
+            check_purpose NSHealthShareUsageDescription com.apple.developer.healthkit
+            check_purpose NSHealthUpdateUsageDescription com.apple.developer.healthkit
+          fi
+
           READER_BUNDLE="$APP_PATH/ReaderBundle"
           test -d "$READER_BUNDLE" || { echo "embedded ReaderBundle is missing"; exit 1; }
           python "$GITHUB_WORKSPACE/$PROJECT_DIR/package_local_reader.py" \
