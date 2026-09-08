@@ -3857,9 +3857,11 @@ internal sealed class ReaderContextMcpServer
             payload,
             parameters,
             cancellationToken).ConfigureAwait(false);
-        // KJ 页级分析块：未分析页给指示与 YOLO 框，已分析页给标注/节点掌握度/公式/图描述（Windows Flask 判断）
-        await KjPageClient.AttachToSnapshotAsync(payload, cancellationToken)
-            .ConfigureAwait(false);
+        // KJ 页级分析块：未分析页给指示与 YOLO 框，已分析页给标注/节点掌握度/公式/图描述。
+        // ⚠ 这一句**不等网络**：只读缓存，缺了就附一句"后台在取"并把那一跳丢到后台。
+        //   原来这里 await 一个到 Flask 的 HTTP，而 Flask 由 ReaderPC 托管 ——
+        //   ReaderPC 一关，每次带书页的快照就白等 2 秒（拒连在 Windows 上的代价）。
+        KjPageClient.AttachToSnapshot(payload);
         await WriteResultAsync(
             id,
             new JsonObject

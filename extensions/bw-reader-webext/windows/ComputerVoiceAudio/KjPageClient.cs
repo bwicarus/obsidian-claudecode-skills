@@ -24,6 +24,118 @@ internal static class KjPageClient
         Timeout = TimeSpan.FromSeconds(8),
     };
 
+    // ── 快照路径上不许有网络等待（2026-09-09 用户：「不要因为获取 kj 信息导致
+    //    查看快照变慢」）
+    //
+    // 原来 reader_context_snapshot 直接 await 这边的 HTTP。实测的代价不是
+    // "KJ 算得慢"，而是**等一个没在跑的服务**：Flask 由 ReaderPC 托管，
+    // ReaderPC 一关它就没了，而 Windows 上连一个拒连的端口要约 2 秒
+    // （2026-09-09 连测三次都是 2050 ms 上下）。于是每一次带书页的快照都白等 2 秒。
+    //
+    // 所以快照改成**只读缓存**：有就附上，没有就附一句"后台在取"，
+    // 网络那一跳挪到后台。熔断另加一层，免得服务不在时后台每次都去撞 2 秒。
+    private sealed record Cached(JsonObject Block, DateTimeOffset At);
+
+    private static readonly object CacheLock = new();
+    private static readonly Dictionary<string, Cached> Blocks = new(StringComparer.Ordinal);
+    private static readonly HashSet<string> InFlight = new(StringComparer.Ordinal);
+    private static DateTimeOffset _coolUntil = DateTimeOffset.MinValue;
+    private static string _coolReason = string.Empty;
+
+    /// 缓存多久算新鲜。页分析不常变；真正要紧的"未分析→已分析"那一跳由
+    /// `SubmitAsync` 成功后直接失效，不靠等 TTL。
+    internal static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(90);
+    /// 取不到时冷却多久再试。没有这层的话，服务不在时每次快照都会在后台
+    /// 撞一次 2 秒的拒连 —— 快照本身不慢了，但机器被白白占着。
+    internal static readonly TimeSpan FailureCooldown = TimeSpan.FromSeconds(60);
+
+    private static string CacheKey(string book, long page) =>
+        book + "#" + page.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// 只给测试用。
+    internal static void ResetCacheForTests()
+    {
+        lock (CacheLock)
+        {
+            Blocks.Clear();
+            InFlight.Clear();
+            _coolUntil = DateTimeOffset.MinValue;
+            _coolReason = string.Empty;
+        }
+    }
+
+    private static JsonObject? TryCached(string book, long page)
+    {
+        lock (CacheLock)
+        {
+            if (!Blocks.TryGetValue(CacheKey(book, page), out Cached? hit))
+            {
+                return null;
+            }
+            if (DateTimeOffset.UtcNow - hit.At > CacheTtl)
+            {
+                return null;
+            }
+            // 复制一份：调用方会往块里塞 note，别让它改到缓存。
+            return JsonNode.Parse(hit.Block.ToJsonString()) as JsonObject;
+        }
+    }
+
+    private static void Remember(string book, long page, JsonObject block)
+    {
+        lock (CacheLock)
+        {
+            Blocks[CacheKey(book, page)] =
+                new Cached(block, DateTimeOffset.UtcNow);
+            // 缓存不设上限会随翻页无限长。一本书几百页 × 几本 = 几千条小对象,
+            // 不算多,但没有理由让它无界。
+            if (Blocks.Count > 400)
+            {
+                string[] oldest = Blocks
+                    .OrderBy(one => one.Value.At)
+                    .Take(100)
+                    .Select(one => one.Key)
+                    .ToArray();
+                foreach (string key in oldest) Blocks.Remove(key);
+            }
+        }
+    }
+
+    private static void Forget(string book, long page)
+    {
+        lock (CacheLock)
+        {
+            Blocks.Remove(CacheKey(book, page));
+        }
+    }
+
+    private static bool Cooling(out string reason)
+    {
+        lock (CacheLock)
+        {
+            reason = _coolReason;
+            return DateTimeOffset.UtcNow < _coolUntil;
+        }
+    }
+
+    private static void StartCooling(string reason)
+    {
+        lock (CacheLock)
+        {
+            _coolUntil = DateTimeOffset.UtcNow + FailureCooldown;
+            _coolReason = reason;
+        }
+    }
+
+    private static void StopCooling()
+    {
+        lock (CacheLock)
+        {
+            _coolUntil = DateTimeOffset.MinValue;
+            _coolReason = string.Empty;
+        }
+    }
+
     private static readonly object TokenLock = new();
     private static bool _tokenLoaded;
     private static string? _token;
@@ -86,7 +198,27 @@ internal static class KjPageClient
         }
     }
 
+    /// 取一页的块。**缓存优先**；服务不在（熔断中）就立刻返回失败而不是再撞一次
+    /// 拒连。reader_page_text 走这条：那一刻模型正要交分析，值得等真实的耗时，
+    /// 但不值得等一个已知不在的服务。
     internal static async Task<JsonObject> BlockAsync(
+        string file,
+        long page,
+        CancellationToken cancellationToken)
+    {
+        JsonObject? cached = TryCached(file, page);
+        if (cached is not null)
+        {
+            return cached;
+        }
+        if (Cooling(out string why))
+        {
+            return Failure("BW_KJ_COOLING", "KJ 页块暂时取不到：" + why);
+        }
+        return await FetchAsync(file, page, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<JsonObject> FetchAsync(
         string file,
         long page,
         CancellationToken cancellationToken)
@@ -96,7 +228,19 @@ internal static class KjPageClient
             + "&page=" + page.ToString(System.Globalization.CultureInfo.InvariantCulture)
             + "&tool=" + Uri.EscapeDataString(SubmitToolLabel);
         using HttpRequestMessage request = new(HttpMethod.Get, url);
-        return await SendAsync(request, cancellationToken).ConfigureAwait(false);
+        JsonObject block = await SendAsync(request, cancellationToken)
+            .ConfigureAwait(false);
+        // 失败的块不缓存：缓存住一次失败等于把一次抖动变成 90 秒的空白。
+        // 改成开熔断 —— 冷却期内立刻失败，冷却过了再试一次真请求。
+        if (block["error"] is not null || block["ok"] is JsonValue okValue
+            && okValue.TryGetValue(out bool ok) && !ok)
+        {
+            StartCooling(Str(block["error"]) ?? "取 KJ 页块失败");
+            return block;
+        }
+        StopCooling();
+        Remember(file, page, block);
+        return block;
     }
 
     internal static async Task<JsonObject> SubmitAsync(
@@ -105,14 +249,27 @@ internal static class KjPageClient
     {
         using HttpRequestMessage request = new(HttpMethod.Post, BaseUrl + "/kj/api/page/submit");
         request.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
-        return await SendAsync(request, cancellationToken).ConfigureAwait(false);
+        JsonObject reply = await SendAsync(request, cancellationToken)
+            .ConfigureAwait(false);
+        // ⚠ 交上去之后这一页从"未分析"变成"已分析" —— 缓存里那份旧块必须当场
+        //   作废，不能等 TTL。否则模型刚交完分析，下一次快照还告诉它"这页
+        //   没分析过，去交一份"，它就会重复交。
+        string? book = Str(body["book"]);
+        long? page = Long(body["page"]);
+        if (!string.IsNullOrWhiteSpace(book) && page is long pageNo)
+        {
+            Forget(book, pageNo);
+        }
+        return reply;
     }
 
     // 快照有就绪的 PDF/EPUB 来源且有页号 → 附 kjPage。快照里的文字未必是整页，
     // 所以未分析页额外提醒：要按整页提交，先 reader_page_text 取全文。
-    internal static async Task AttachToSnapshotAsync(
-        JsonObject payload,
-        CancellationToken cancellationToken)
+    //
+    // ⚠ **同步、无 await、无网络**（2026-09-09 用户：「不要因为获取 kj 信息导致
+    //   查看快照变慢」）。刻意不写成 async Task：签名里没有 Task，调用点就
+    //   没有 await 可写，以后想"顺手等一下"得先改签名 —— 那一步足够让人停下来想。
+    internal static void AttachToSnapshot(JsonObject payload)
     {
         if (payload["contextStatus"] is not JsonValue statusValue
             || !statusValue.TryGetValue<string>(out string? status)
@@ -135,7 +292,38 @@ internal static class KjPageClient
         {
             return;
         }
-        JsonObject block = await BlockAsync(BookKeyFor(kind, file), pageNo, cancellationToken).ConfigureAwait(false);
+        // ⚠ 快照这条路径**只读缓存，不等网络**（2026-09-09 用户定的硬要求）。
+        //   没有缓存就说一句"后台在取"，并把那一跳丢到后台。
+        string bookKey = BookKeyFor(kind, file);
+        JsonObject? block = TryCached(bookKey, pageNo);
+        if (block is null)
+        {
+            RefreshInBackground(bookKey, pageNo);
+            if (Cooling(out string why))
+            {
+                // 服务不在时也要**出声**：静默缺块会让模型以为这页没有 KJ 数据，
+                // 而那跟"取不到"是两件事。
+                payload["kjPage"] = new JsonObject
+                {
+                    ["status"] = "unavailable",
+                    ["book"] = bookKey,
+                    ["page"] = pageNo,
+                    ["error"] = why,
+                };
+            }
+            else
+            {
+                payload["kjPage"] = new JsonObject
+                {
+                    ["status"] = "pending",
+                    ["book"] = bookKey,
+                    ["page"] = pageNo,
+                    // 措辞刻意不邀请轮询：让它继续做手上的事，别为等这块反复查快照。
+                    ["note"] = "本页 KJ 块正在后台取，下一次快照就会带上；不必为此重复查快照。",
+                };
+            }
+            return;
+        }
         if (Str(block["status"]) == "out_of_scope")
         {
             return;
@@ -145,6 +333,38 @@ internal static class KjPageClient
             block["note"] = "快照里的文字未必是整页；要按整页提交分析，先 reader_page_text(page) 取全文再交。";
         }
         payload["kjPage"] = block;
+    }
+
+    /// 后台补一次，绝不让调用方等。
+    ///
+    /// ⚠ 用 `CancellationToken.None` 而不是请求的 token：快照那一刻就返回了，
+    ///   拿请求的 token 会让后台取数当场被取消 —— 于是缓存永远填不上，
+    ///   而表现只是"快照里那块永远是 pending"，没有一处会报错。
+    private static void RefreshInBackground(string book, long page)
+    {
+        if (Cooling(out _)) return;
+        string key = CacheKey(book, page);
+        lock (CacheLock)
+        {
+            // 同一页别并发取好几次：翻页快的时候会叠出一堆同样的请求。
+            if (!InFlight.Add(key)) return;
+        }
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await FetchAsync(book, page, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                StartCooling(exception.Message);
+            }
+            finally
+            {
+                lock (CacheLock) { InFlight.Remove(key); }
+            }
+        });
     }
 
     // 书键口径与 Flask/侧栏一致：网页（kind=web，或 file 本身是 http(s) URL）→ "web:" + URL；书 → 原样。

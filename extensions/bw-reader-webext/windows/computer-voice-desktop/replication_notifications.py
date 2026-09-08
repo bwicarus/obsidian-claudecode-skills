@@ -980,8 +980,76 @@ def review_schedule(root: Path) -> dict:
 QUIET_MEANS_ASLEEP_HOURS = 5
 
 
+def pc_input_idle_ms() -> int | None:
+    """这台电脑距上次键鼠输入多少毫秒。拿不到返回 None。
+
+    2026-09-09 加的，因为它是"他在不在这台机器前"最直接的答案，而原来那套
+    完全看不见它：账本只记**阅读器**的改动，用户跟 AI 打字、语音说话、
+    开别的软件，一条都不会写进去。实测撞出来的形态 ——
+    账本说"9 小时没动静"，同一刻 Windows 说"1.6 分钟前刚有输入"。
+
+    ⚠ 它能证明**醒着**，不能证明**睡着**：锁屏、去别的设备、离开电脑，
+    空闲都会涨。所以只当"最近一次活动"的一个来源，取最晚的那个。
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        class _LastInputInfo(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+        info = _LastInputInfo()
+        info.cbSize = ctypes.sizeof(info)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        tick = ctypes.windll.kernel32.GetTickCount64()
+        return max(0, int(tick) - int(info.dwTime))
+    except Exception:
+        return None
+
+
+def _presence_report_ms(root: Path) -> int | None:
+    """App 上次报在场状态的时刻。它在前台时才报，所以是"人刚用过手机"的证据。"""
+    try:
+        value = json.loads(
+            (root / "presence-signal.json").read_text("utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    at = value.get("atMs") if isinstance(value, dict) else None
+    return int(at) if isinstance(at, (int, float)) and at > 0 else None
+
+
 def last_user_activity_ms(root: Path) -> int | None:
-    """最近一次**用户发起**的设备命令时刻。读不到返回 None（当作醒着，见下）。
+    """最近一次用户活动时刻，**取几个来源里最晚的那个**。读不到返回 None。
+
+    2026-09-09 改：原来只看复制账本的 actor='user'，也就是只看"他动过阅读器"。
+    于是一个整晚在用电脑、只是没碰阅读器的人会被判成睡了 9 小时 ——
+    实测就是这样撞出来的。
+
+    三个来源，各自能证明的东西不同：
+      · 复制账本   他改过阅读器里的东西（高亮/卡片/笔记）
+      · 键鼠输入   他就在这台电脑前（最直接，也最容易被忽略）
+      · App 在场   他刚把 App 拿到前台，也就是刚用过手机
+
+    ⚠ 取**最晚**而不是取账本：任何一个来源有动静都足以证明醒着，
+      而"都没动静"才是弱证据。方向不对称，所以不能用平均或者只信一个。
+    """
+    candidates: list[int] = []
+    idle = pc_input_idle_ms()
+    if idle is not None:
+        candidates.append(_now_ms() - idle)
+    presence = _presence_report_ms(root)
+    if presence is not None:
+        candidates.append(presence)
+    ledger = _ledger_user_activity_ms(root)
+    if ledger is not None:
+        candidates.append(ledger)
+    return max(candidates) if candidates else None
+
+
+def _ledger_user_activity_ms(root: Path) -> int | None:
+    """复制账本里最近一次**用户发起**的设备命令时刻。
 
     只认 actor='user'：后台对账自己也会写命令，拿它当"人在动"会让静默判断永远为假。
     账本以只读方式打开——这是别人正在写的库，绝不能因为读它而挡住写入。
