@@ -32,11 +32,15 @@ class FakeStore:
         self.resolved.append((item_id, note))
 
 
-def run(store, *, new, due=0, age=99.0, hour=14):
-    """跑一次生产者,把数量/静置/钟点都钉死。"""
-    with mock.patch.object(rn, "count_due_cards", return_value=(due, new)), \
-            mock.patch.object(rn, "oldest_new_card_age_hours", return_value=age), \
-            mock.patch.object(rn, "time", wraps=time) as fake_time:
+WAKE_MS = 1_788_900_000_000   # 测试里"下一个起床点"的固定值
+
+
+def run(store, *, new, due=0, age=99.0, hour=14, schedule=None):
+    """跑一次生产者,把数量/静置/钟点/作息都钉死(作息读取本身另有用例)。"""
+    plan = {"wakeHour": 8, "sleepHour": 24, "newThreshold": rn.REVIEW_NEW_SPEAK_THRESHOLD,
+            "newMinAgeHours": rn.REVIEW_NEW_MIN_AGE_HOURS, "newBatch": rn.REVIEW_NEW_BATCH}
+    plan.update(schedule or {})
+    with mock.patch.object(rn, "count_due_cards", return_value=(due, new)),             mock.patch.object(rn, "oldest_new_card_age_hours", return_value=age),             mock.patch.object(rn, "review_schedule", return_value=plan),             mock.patch.object(rn, "next_window_start_ms", return_value=WAKE_MS),             mock.patch.object(rn, "time", wraps=time) as fake_time:
         fake_time.localtime.return_value = time.struct_time(
             (2026, 9, 8, hour, 0, 0, 0, 251, 0))
         fake_time.strftime.side_effect = time.strftime
@@ -62,13 +66,45 @@ class ReviewNewTimingTests(unittest.TestCase):
         run(store, new=25, age=rn.REVIEW_NEW_MIN_AGE_HOURS - 0.5)
         self.assertEqual([c for c in store.created if c["kind"] == "review-new"], [])
 
-    def test_outside_the_window_stays_quiet(self):
-        for hour in (rn.REVIEW_NEW_WINDOW_HOURS[0] - 1, rn.REVIEW_NEW_WINDOW_HOURS[1]):
+    def test_outside_the_window_still_records_but_sleeps_until_morning(self):
+        """过了点的卡不能被忽视:照样建通知,只是推迟到下一个起床点才浮现。"""
+        for hour in (3, 7):   # 深夜与清晨,都在 8-24 之外
             store = FakeStore()
             run(store, new=25, hour=hour)
-            self.assertEqual(
-                [c for c in store.created if c["kind"] == "review-new"], [],
-                "%d 点不该催" % hour)
+            made = [c for c in store.created if c["kind"] == "review-new"]
+            self.assertEqual(len(made), 1, "%d 点也要留痕" % hour)
+            self.assertEqual(made[0]["activate_at_ms"], WAKE_MS,
+                             "%d 点建的通知要蛰伏到起床点" % hour)
+
+    def test_inside_the_window_shows_immediately(self):
+        store = FakeStore()
+        run(store, new=25, hour=14)
+        made = [c for c in store.created if c["kind"] == "review-new"]
+        self.assertIsNone(made[0]["activate_at_ms"], "窗口内就该立刻可见")
+
+    def test_schedule_file_overrides_the_defaults(self):
+        """作息随时会变:改配置文件即可,不用改代码。"""
+        store = FakeStore()
+        run(store, new=25, hour=7, schedule={"wakeHour": 6, "sleepHour": 22})
+        made = [c for c in store.created if c["kind"] == "review-new"]
+        self.assertIsNone(made[0]["activate_at_ms"], "6 点起床的话 7 点已在窗口内")
+
+    def test_schedule_reader_clamps_and_falls_back(self):
+        import json, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(rn.review_schedule(root)["wakeHour"],
+                             rn.REVIEW_NEW_WINDOW_HOURS[0], "没有配置文件就用默认")
+            (root / rn.REVIEW_SCHEDULE_FILE).write_text(
+                json.dumps({"wakeHour": 30, "sleepHour": 2, "newBatch": 999}), encoding="utf-8")
+            plan = rn.review_schedule(root)
+            self.assertEqual((plan["wakeHour"], plan["sleepHour"]), rn.REVIEW_NEW_WINDOW_HOURS,
+                             "起点晚于终点(跨夜)先不支持,回落默认而不是永远不提醒")
+            self.assertLessEqual(plan["newBatch"], 50, "数值要钳制")
+            (root / rn.REVIEW_SCHEDULE_FILE).write_text("{ 坏掉的 json", encoding="utf-8")
+            self.assertEqual(rn.review_schedule(root)["wakeHour"], rn.REVIEW_NEW_WINDOW_HOURS[0],
+                             "文件坏了也只回落默认,不能让复习提醒整条停摆")
+
 
     def test_timing_not_yet_reached_must_not_resolve_an_open_reminder(self):
         """时机未到 ≠ 已经不需要。把它当成回落消掉,通知会在窗口边缘反复生灭。"""

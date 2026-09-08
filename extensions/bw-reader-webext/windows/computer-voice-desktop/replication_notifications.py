@@ -901,6 +901,56 @@ REVIEW_NEW_SPEAK_THRESHOLD = 10
 #: 新卡至少"静置"多久才值得提醒（用户 2026-09-08：「不能是学完立刻就进行」）。
 #: 刚做完卡内容还在脑子里，立刻复习问不出真实记忆，间隔效应也白费。
 REVIEW_NEW_MIN_AGE_HOURS = 3
+#: 作息可调（用户 2026-09-08：「我最近准备调整作息时间所以作息时间随时可能会改变」）。
+#: 改 `<root>/review-schedule.json` 即可，不用改代码、不用重装：
+#:   {"wakeHour": 8, "sleepHour": 24, "newThreshold": 10, "newMinAgeHours": 3, "newBatch": 10}
+#: 缺字段就用下面的默认值；文件坏了也只回落到默认，绝不让复习提醒整条停摆。
+REVIEW_SCHEDULE_FILE = "review-schedule.json"
+
+
+def review_schedule(root: Path) -> dict:
+    """读作息配置，缺项回落默认。数值都做范围钳制 —— 手改出来的 25 点不该让判断永远为假。"""
+    value = {}
+    try:
+        import json as _json
+        raw = _json.loads((root / REVIEW_SCHEDULE_FILE).read_text(encoding="utf-8-sig"))
+        if isinstance(raw, dict):
+            value = raw
+    except (OSError, ValueError):
+        value = {}
+
+    def _int(key: str, default: int, low: int, high: int) -> int:
+        try:
+            number = int(value.get(key, default))
+        except (TypeError, ValueError):
+            return default
+        return max(low, min(high, number))
+
+    wake = _int("wakeHour", REVIEW_NEW_WINDOW_HOURS[0], 0, 23)
+    sleep = _int("sleepHour", REVIEW_NEW_WINDOW_HOURS[1], 1, 24)
+    if sleep <= wake:            # 手滑写成 22→6 这种跨夜区间:先不支持,回落默认而不是永远不提醒
+        wake, sleep = REVIEW_NEW_WINDOW_HOURS
+    return {
+        "wakeHour": wake,
+        "sleepHour": sleep,
+        "newThreshold": _int("newThreshold", REVIEW_NEW_SPEAK_THRESHOLD, 1, 500),
+        "newMinAgeHours": _int("newMinAgeHours", REVIEW_NEW_MIN_AGE_HOURS, 0, 72),
+        "newBatch": _int("newBatch", REVIEW_NEW_BATCH, 1, 50),
+    }
+
+
+def next_window_start_ms(wake_hour: int, now: float | None = None) -> int:
+    """下一个窗口起点（本地时钟）的毫秒时间戳。今天还没到就今天，过了就明天。"""
+    stamp = time.time() if now is None else now
+    local = time.localtime(stamp)
+    target = time.struct_time(
+        (local.tm_year, local.tm_mon, local.tm_mday, wake_hour, 0, 0, 0, 0, -1))
+    epoch = time.mktime(target)
+    if epoch <= stamp:
+        epoch += 24 * 3600
+    return int(epoch * 1000)
+
+
 #: 提醒的时间窗（本地时钟，含头不含尾）= **起床到睡前**（用户 2026-09-08 定）。
 #: 起点定在起床：新卡里可能压着前几天的东西，早上就该能看到，而不是等到下午。
 #: 终点定在睡前：睡前是当天最后的补课机会，过了就该让人睡。
@@ -1002,16 +1052,23 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
     #   ③ 当前在 REVIEW_NEW_WINDOW_HOURS 窗口内
     # ⚠ 只有 ① 不满足才算"目标达成"去消通知;②③ 不满足是**时机未到**,保持现状等下一轮 ——
     #   把"还没到点"当成"已经不需要"消掉,会让通知在窗口边缘反复生灭。
+    schedule = review_schedule(root)
     age_hours = oldest_new_card_age_hours(root)
     hour_now = time.localtime().tm_hour
-    in_window = REVIEW_NEW_WINDOW_HOURS[0] <= hour_now < REVIEW_NEW_WINDOW_HOURS[1]
-    settled = age_hours is not None and age_hours >= REVIEW_NEW_MIN_AGE_HOURS
-    if new >= REVIEW_NEW_SPEAK_THRESHOLD:
-        if settled and in_window:
-            batch = min(new, REVIEW_NEW_BATCH)
+    in_window = schedule["wakeHour"] <= hour_now < schedule["sleepHour"]
+    settled = age_hours is not None and age_hours >= schedule["newMinAgeHours"]
+    if new >= schedule["newThreshold"]:
+        if settled:
+            batch = min(new, schedule["newBatch"])
             body = "先做 %d 张就好，大约 %d 分钟。" % (batch, max(5, batch))
             if due:
                 body += "另有 %d 张到期待复习。" % due
+            # 窗口外**照样建**,只是把生效时刻推到下一个起床点(用户 2026-09-08:
+            #   「超过时间后的卡片也不能就被忽视…要能够挤压状态,等到 ai 进行快慢板查看时一起显示」)。
+            #   存储早就支持蛰伏(visible_items 会滤掉未到 activateAt 的),不必另造机制:
+            #   夜里攒下的这条,第二天一到起床点自己浮现,AI 打开快慢板就看见。
+            #   ⚠ 这里绝不能改成"窗口外就不建" —— 那正是过了点的卡被忽视的原因。
+            activate_at = None if in_window else next_window_start_ms(schedule["wakeHour"])
             store.create(
                 kind="review-new",
                 title="还没开始学的新卡已有 %d 张" % new,
@@ -1019,7 +1076,8 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
                 source="review-scheduler",
                 audience="user",
                 dedupe_key="review-new:" + day,
-                end="expires:%d" % (_now_ms() + 24 * 3600 * 1000),
+                activate_at_ms=activate_at,
+                end="expires:%d" % (_now_ms() + 36 * 3600 * 1000),
             )
     else:
         for item in list(store.open_items()):
@@ -1030,6 +1088,7 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
     return {
         "due": due, "new": new,
         "newAgeHours": age_hours, "newInWindow": in_window, "newSettled": settled,
+        "schedule": schedule,
     }
 
 
