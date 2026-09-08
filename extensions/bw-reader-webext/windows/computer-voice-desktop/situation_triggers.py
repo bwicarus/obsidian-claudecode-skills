@@ -165,9 +165,24 @@ def validate_then(then: Any) -> dict[str, Any]:
     import replication_notifications as rn
     if not isinstance(then, dict):
         raise TriggerError("then 必须是对象")
+    # 动作（2026-09-08 用户：「触发某个或者复合条件后停下或者开始某些功能」）。
+    # 能写成固定代码的就别绕经 AI —— 那是这一整套设计的出发点。
+    action = str(then.get("action") or "").strip()
+    action_params = then.get("actionParams") or {}
+    if action:
+        if not isinstance(action_params, dict):
+            raise TriggerError("then.actionParams 必须是对象")
+        import situation_actions
+        try:
+            # ⚠ **注册时就校验**，不等触发那一刻：动作名写错却存下来，
+            # 表现是"规则响了、功能没动"，而没有一处会喊。
+            situation_actions.validate(action, action_params)
+        except situation_actions.ActionError as error:
+            raise TriggerError(str(error)) from None
     title = str(then.get("title") or "").strip()
-    if not title:
-        raise TriggerError("then.title 是必需的（通知没有标题就没法显示）")
+    if not title and not action:
+        # 有动作时标题可省：机器自己做完的事不一定值得占用户一条通知。
+        raise TriggerError("then 至少要有 title 或 action 之一")
     deliver = str(then.get("deliver") or "auto")
     if deliver not in rn._DELIVER_MODES:  # noqa: SLF001
         raise TriggerError(
@@ -193,6 +208,8 @@ def validate_then(then: Any) -> dict[str, Any]:
         "deliver": deliver,
         "audience": audience,
         "endHours": hours,
+        "action": action,
+        "actionParams": dict(action_params) if action else {},
     }
 
 
@@ -300,6 +317,32 @@ def _fire(root: Path, trigger: dict[str, Any], now: int) -> str | None:
     action = then.get("aiAction") or ""
     if action:
         body = (body + "\n" if body else "") + "AI 该做的：" + action
+    # 机器侧动作**先做**：它是确定性的，不该等通知建得成不成。
+    # 做完把结果附在正文里，人和 AI 都看得见到底动了什么。
+    machine = then.get("action") or ""
+    fallback_title = ""
+    if machine:
+        import situation_actions
+        try:
+            situation_actions.run(
+                machine, then.get("actionParams") or {}, root)
+            trigger["lastActionAtUtcMs"] = now
+            trigger.pop("lastActionError", None)
+            body = (body + "\n" if body else "") + "已自动执行：" + machine
+        except Exception as error:  # noqa: BLE001
+            # 动作失败要**出声**并且照样把通知发出去 —— 否则表现是
+            # "规则响了、功能没动、也没人知道"。
+            trigger["lastActionError"] = str(error)[:200]
+            body = ((body + "\n" if body else "")
+                    + "⚠ 自动执行 " + machine + " 失败：" + str(error)[:120])
+        if not str(then.get("title") or "").strip():
+            # 没标题说明这条规则只想做事、不想打扰人。
+            if "lastActionError" not in trigger:
+                return "silent"          # 做成了就安静收工
+            # 但**失败一定要留下通知**：静默失败的动作等于没有这个动作。
+            # ⚠ 这里必须自己补一个标题 —— NotificationStore 会拒掉空标题，
+            # 于是"失败也要说"会变成"什么都没说"（测试 2026-09-08 当场抓到）。
+            fallback_title = "自动执行「%s」失败" % machine
     store = rn.NotificationStore(root)
     # dedupe_key 按复发档取：daily 同一天只留一条，避免边沿抖动堆出重复。
     dedupe = "trigger:%s" % trigger["id"]
@@ -311,7 +354,7 @@ def _fire(root: Path, trigger: dict[str, Any], now: int) -> str | None:
     try:
         item = store.create(
             kind="situation-trigger",
-            title=then["title"],
+            title=then.get("title") or fallback_title,
             body=body[:MAX_TEXT],
             source="trigger:" + trigger["name"],
             audience=then.get("audience") or "user",
@@ -371,14 +414,18 @@ def evaluate(
                 # 今天已经响过。lastMatch 已更新，明天同一个上升沿还能响。
                 keep.append(trigger)
                 continue
-            notification_id = _fire(root, trigger, now)
-            if not notification_id:
+            outcome = _fire(root, trigger, now)
+            # 三种结果要分清：通知 id = 建成了；"silent" = 动作做完了、
+            # 这条规则本来就不想打扰人；空 = 真失败。
+            # 把 "silent" 混进失败会让纯动作规则每轮重跑一次动作。
+            notification_id = outcome if outcome and outcome != "silent" else ""
+            if not outcome:
                 # 建通知失败**不能吃掉这个上升沿**：把 lastMatch 退回假，
                 # 下一轮条件还成立就再试一次。原因已记在 lastError 里，
                 # --list 看得见 —— 宁可每轮重试并一直喊，也不要"响过一次
                 # 但其实什么都没发生"（这种失败最贵：它看起来像成功）。
                 trigger["lastMatch"] = False
-            if notification_id:
+            if outcome:
                 trigger["lastFiredAtUtcMs"] = now
                 trigger["lastFiredDay"] = _day_key(now)
                 trigger["fireCount"] = int(trigger.get("fireCount") or 0) + 1
@@ -386,6 +433,7 @@ def evaluate(
                 fired.append({
                     "id": trigger["id"], "name": trigger["name"],
                     "notificationId": notification_id,
+                    "action": trigger["then"].get("action") or "",
                 })
                 if recur == "once":
                     continue  # 响过就删：一次性的规则留着只会让人猜它还灵不灵
@@ -462,6 +510,17 @@ def render_explain(value: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _action_params(args: Any) -> dict[str, Any]:
+    """把 --do-* 收成动作参数。只放**给了的**那些 —— 补一个 None 进去会让
+    situation_actions 那边把"没给"和"给了空"混在一起。"""
+    params: dict[str, Any] = {}
+    if getattr(args, "do_target", None) is not None:
+        params["target"] = args.do_target
+    if getattr(args, "do_minutes", None) is not None:
+        params["minutes"] = args.do_minutes
+    return params
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="情境自动触发规则")
     parser.add_argument("--root", type=Path, default=None)
@@ -480,6 +539,12 @@ def main() -> int:
     parser.add_argument("--body", default="")
     parser.add_argument("--ai-action", default="", dest="ai_action",
                         help="触发后 AI 该做什么（折进通知正文）")
+    parser.add_argument("--do", default="", dest="machine_action",
+                        help="触发后机器直接做的事（见 situation_actions.py --list）")
+    parser.add_argument("--do-target", default=None,
+                        help="--do 的目标，如计划任务名")
+    parser.add_argument("--do-minutes", type=float, default=None,
+                        help="--do 的时长，如 background.hold 按住多久")
     parser.add_argument("--deliver", default="auto")
     parser.add_argument("--audience", default="user")
     parser.add_argument("--recur", default="daily",
@@ -512,7 +577,9 @@ def main() -> int:
                 root, name=args.name or "", when=when,
                 then={"title": args.title or "", "body": args.body,
                       "aiAction": args.ai_action, "deliver": args.deliver,
-                      "audience": args.audience},
+                      "audience": args.audience,
+                      "action": args.machine_action,
+                      "actionParams": _action_params(args)},
                 recur=args.recur, expires_hours=args.expires_hours,
                 created_by="ai", runtime=args.runtime)
         except TriggerError as error:

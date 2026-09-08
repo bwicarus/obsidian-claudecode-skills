@@ -232,8 +232,11 @@ def _sig_reading_title(root: Path, runtime: Path, now_ms: int) -> dict[str, Any]
     context = status.get("readerContext") or {}
     title = str(context.get("title") or "").strip()
     # 判据是**标题非空**而不是 available：reader 断开后 available 还是 true。
-    if not title:
-        return unknown("当前没有在读的东西")
+    #
+    # ⚠ 空标题报的是 known("")，**不是** unknown：ReaderPC 在跑而没有在读的东西，
+    # 这是一件"已知的事"，不是"不知道"。第一版把它写成 unknown，等于把自己
+    # 定的纪律用反了 —— 而后果是实的：`{"reading_title": {"not": ""}}`
+    # （在读点什么）这类条件永远不成立，因为不可用的信号一律判不成立。
     return known(title, _age_minutes(context.get("updatedAtEpochMs"), now_ms))
 
 
@@ -327,7 +330,8 @@ SIGNALS: dict[str, dict[str, Any]] = {
     },
     "reading_title": {
         "summary": "正在读的东西的标题",
-        "values": "字符串；什么都没在读时 known=false",
+        "values": '字符串；什么都没在读时是空串（"在读点什么"写 {"not":""}）；'
+                  "ReaderPC 没在跑时 known=false",
         "read": _sig_reading_title,
     },
     "review_due": {
@@ -422,6 +426,69 @@ def vocab_text() -> str:
     return "\n".join(lines)
 
 
+#: 紧凑行里每个信号怎么写成一小段。值 = (标签, 折成短语的函数)。
+#:
+#: 用户 2026-09-08：「这些信息要尽可能的紧凑和简洁防止造成混乱」。
+#: 逐行列 15 个信号对 AI 是噪音 —— 它每次判断都要从一屏字里挑出有用的两三条。
+#: 所以**默认就是一行**，逐行版留给 `--full`。
+#:
+#: ⚠ 紧凑不等于省掉"不知道"：读不到的信号写成 `名字?`，而不是不写。
+#: 不写会让 AI 以为那一项是否定的 —— 那正是这个模块从头到尾在防的事。
+_COMPACT: dict[str, Any] = {
+    "place": lambda v: {"home": "在家", "work": "在工作"}.get(v, "在外(%s)" % v),
+    "awake": lambda v: "醒着" if v else "像在睡",
+    "local_hour": lambda v: "%d点" % v,
+    "in_review_window": lambda v: "窗内" if v else "窗外",
+    "headphones": lambda v: "戴耳机" if v else "没耳机",
+    "voice_linked": lambda v: "语音通" if v else "语音断",
+    "review_new": lambda v: "新卡%d" % v,
+    "review_due": lambda v: "到期%d" % v,
+    "reading_title": lambda v: ("在读《%s》" % v[:14]) if v else "未在读",
+    "idle_minutes": lambda v: "闲%d分" % round(v),
+    "readerpc_running": lambda v: "PC在" if v else "PC停",
+}
+#: 紧凑行里省略不写的（信息量低于占位成本）。**只省已知为真且无歧义的**。
+_COMPACT_SKIP_WHEN = {"readerpc_running": True, "voice_linked": True}
+
+
+def render_compact(payload: dict[str, Any]) -> str:
+    """一行说完现在什么状况。给板子和 AI 的默认形态。
+
+    读不到的信号收尾成 `名字?` 的形式一起列出 —— 缺项必须看得见，
+    但不必每个占一行。
+    """
+    parts: list[str] = []
+    unknown_names: list[str] = []
+    for name, fold in _COMPACT.items():
+        signal = payload["signals"].get(name)
+        if signal is None:
+            continue
+        if not signal.get("known"):
+            unknown_names.append(name)
+            continue
+        value = signal.get("value")
+        if _COMPACT_SKIP_WHEN.get(name) == value:
+            continue
+        try:
+            parts.append(fold(value))
+        except Exception:  # noqa: BLE001
+            parts.append("%s=%s" % (name, value))
+    running = payload["signals"].get("readerpc_running") or {}
+    if running.get("known") and running.get("value") is False:
+        # PC 停着时语音链和在读什么**必然**不可用，再列一遍 ?xxx 是纯噪音 ——
+        # "PC停"已经把原因说全了。紧凑的意思正是别重复同一件事。
+        unknown_names = [one for one in unknown_names
+                         if one not in ("voice_linked", "reading_title")]
+    if unknown_names:
+        parts.append("?" + "/".join(unknown_names))
+    place = payload["signals"].get("place") or {}
+    age = place.get("ageMinutes")
+    if place.get("known") and isinstance(age, (int, float)) and age >= 60:
+        # 位置旧到这个程度必须标出来：拿两小时前的位置当现状是最容易犯的错。
+        parts.append("位置已%d分钟未更新" % round(age))
+    return " ".join(parts) if parts else "什么都不知道"
+
+
 def render(payload: dict[str, Any]) -> str:
     """一行一个信号，「不知道」直说。"""
     lines = ["情境信号（%s）：" % time.strftime(
@@ -441,6 +508,8 @@ def main() -> int:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--vocab", action="store_true", help="只列信号名和值域")
     parser.add_argument("--signal", action="append", help="只读指定信号（可重复）")
+    parser.add_argument("--full", action="store_true",
+                        help="逐行列出（含年龄和「为什么不知道」）；默认是紧凑一行")
     parser.add_argument("--root", type=Path, default=None)
     parser.add_argument("--runtime", type=Path, default=None)
     args = parser.parse_args()
@@ -456,8 +525,12 @@ def main() -> int:
             print(vocab_text())
         return 0
     payload = read_all(args.root, args.runtime, args.signal)
-    print(json.dumps(payload, ensure_ascii=False, indent=2)
-          if args.json else render(payload))
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        # 默认紧凑（用户 2026-09-08：信息要尽可能紧凑简洁防止混乱）；
+        # 要逐条看年龄和"为什么不知道"时才用 --full。
+        print(render(payload) if args.full else render_compact(payload))
     return 0
 
 

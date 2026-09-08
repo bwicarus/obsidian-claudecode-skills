@@ -26,6 +26,11 @@ from pathlib import Path
 DEFAULT_MAX_STALE_SECONDS = 300
 STATUS_NAME = "readerpc-server.status.json"
 EXIT_MARKER_NAME = "readerpc-user-exit.json"
+#: 「静一会儿」标记。**这个文件名是与 situation_actions.py 的协议**
+#: （那边的 BACKGROUND_HOLD_FILE_NAME 写它，这边读它；两个常量必须一字不差，
+#: test_situation_actions.py 里有断言盯着）。两棵 git 树互相 import 不了，
+#: 所以只能靠文件名对接 —— 但不能靠人记住。
+BACKGROUND_HOLD_NAME = "background-hold.json"
 
 
 def readerpc_root() -> Path:
@@ -75,6 +80,28 @@ def user_exited(root: Path | None = None) -> bool:
     return True
 
 
+def background_hold_until(root: Path | None = None) -> float | None:
+    """后台任务被按住到什么时候（epoch 秒）。没按住或已过期返回 None。
+
+    由 `situation_actions.py` 的 `background.hold` 动作写入 ——
+    也就是「触发某个条件后停下某些功能」里的"停下"落到实处的地方
+    （用户 2026-09-08）。典型用法：人正在用电脑时按住一小时，
+    别让后台的 AI 批量作业抢资源把机器拖卡。
+
+    ⚠ 过期即失效，不需要谁来清理：一个没有上限的"静音"会变成永久停摆，
+    而且没人记得去解除它。
+    """
+    path = (root or readerpc_root()) / BACKGROUND_HOLD_NAME
+    try:
+        until = json.loads(path.read_text(encoding="utf-8")).get("untilMs")
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(until, (int, float)) or until <= 0:
+        return None
+    seconds = until / 1000.0
+    return seconds if seconds > time.time() else None
+
+
 def readerpc_active(
     root: Path | None = None,
     max_stale_seconds: float = DEFAULT_MAX_STALE_SECONDS,
@@ -83,6 +110,12 @@ def readerpc_active(
     root = root or readerpc_root()
     if user_exited(root):
         return False, "用户已主动退出 ReaderPC（本次开机内）"
+    held = background_hold_until(root)
+    if held is not None:
+        # ⚠ 排在心跳判断**之前**：按住是显式意图，而心跳只是推断。
+        # 顺序反了会出现"ReaderPC 在跑所以放行"盖掉"刚刚要求静一会儿"。
+        return False, "后台任务被按住到 %s" % time.strftime(
+            "%H:%M", time.localtime(held))
     age = status_age_seconds(root)
     if age is None:
         return True, "没有心跳文件，按在跑处理（宁可多跑一次也不静默停摆）"
