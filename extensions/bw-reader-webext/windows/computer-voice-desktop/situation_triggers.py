@@ -559,13 +559,23 @@ def main() -> int:
         return 0
 
     if args.vocab:
+        # ⚠ 一处看全：信号（写在 --when）+ 动作（写在 --do）+ 复发档。
+        # 分成两个命令去查，AI 就会只查一个然后猜另一个 ——
+        # 而它猜出来的东西没有任何人测过，那正是这套设计要消灭的。
+        import situation_actions
         return out({"signals": {name: {"summary": spec["summary"],
                                        "values": spec["values"]}
                                 for name, spec
                                 in situation_signals.SIGNALS.items()},
+                    "actions": {name: {"summary": spec["summary"],
+                                       "params": spec["params"]}
+                                for name, spec
+                                in situation_actions.ACTIONS.items()},
+                    "taskWhitelist": list(situation_actions.TASK_WHITELIST),
                     "recur": list(RECUR_MODES)},
                    situation_signals.vocab_text()
-                   + "\n复发档：" + " / ".join(RECUR_MODES))
+                   + "\n复发档：" + " / ".join(RECUR_MODES)
+                   + chr(10) + chr(10) + situation_actions.vocab_text())
     if args.add:
         try:
             when = json.loads(args.when or "")
