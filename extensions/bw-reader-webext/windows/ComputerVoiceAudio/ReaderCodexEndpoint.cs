@@ -255,6 +255,17 @@ internal static class ReaderCodexEndpoint
         {
             ReaderCodexPush.SetEnabled(decided);
         }
+        // 接上就推一次全量（2026-09-09 用户：推送只在变化时触发，
+        // 登记之前就摆在板上的待办永远送不出去）。
+        //
+        // ⚠ 不 await：登记这个请求不该等一次跨进程推送。而且它要用
+        //   `CancellationToken.None` —— 拿这个请求的 token 的话，
+        //   响应一返回推送就被取消，表现是"登记成功但全量提醒从来没到"，
+        //   而没有一处会报错。KJ 那边刚踩过同一个形态。
+        if (ReaderCodexPush.Enabled)
+        {
+            _ = ReaderCodexPush.NotifyConnectedAsync(CancellationToken.None);
+        }
         await Ok(context, new JsonObject
         {
             ["ok"] = true,

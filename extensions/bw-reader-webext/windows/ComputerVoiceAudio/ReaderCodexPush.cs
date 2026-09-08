@@ -89,6 +89,55 @@ internal static class ReaderCodexPush
         }
     }
 
+    /// 刚接上时推一次**全量提醒**（2026-09-09 用户点出来的缺口）。
+    ///
+    /// > 现在既然已经变成了主动推送，ai 也就不会轮询快慢板内容，那现在板子上
+    /// > 留着的比如现在通知之类的信息说白了也就没有机会送到 ai 那里，
+    /// > 应该是每次连上时先把快慢板内容主动传输一次
+    ///
+    /// 说的对：推送只在**变化时**触发，而"接上之前就已经摆在板上的东西"
+    /// 不构成变化。不补这一下，一条在他登记之前就建好的待办会一直躺着，
+    /// 而两边都不会觉得有问题 —— 板上明明写着，推送也从没出错。
+    ///
+    /// ⚠ 与变化推送共用同一条运输和同一套失败判定；只有措辞不同：
+    ///   这一条明说"这是接上时的一次，板上现有内容请整个读一遍"，
+    ///   否则对面会以为只有增量。
+    internal static async Task NotifyConnectedAsync(
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled) return;
+        ReaderCodexEndpoint.Binding? binding = ReaderCodexEndpoint.Current();
+        if (binding is null)
+        {
+            Note("刚登记就取不到绑定，接上提醒没发出去");
+            return;
+        }
+        string prompt =
+            "提示板已接上主动推送。"
+            + "这是接上时的一次全量提醒：**把快板和慢板都完整读一遍**，"
+            + "板上可能有你登记之前就已经存在的待办。"
+            + "之后只有内容变化时才会再推。"
+            + "板面文件是权威；业务 ack/resolve 仍按原契约，"
+            + "本条不代表任何通知已交付用户。";
+        try
+        {
+            await SendAsync(binding, prompt, cancellationToken)
+                .ConfigureAwait(false);
+            lock (Gate)
+            {
+                _sentCount++;
+                _consecutiveFailures = 0;
+            }
+            Note("已推送（接上时的全量提醒）");
+        }
+        catch (Exception exception)
+        {
+            // 这一条失败**不判绑定失效**：刚登记完就判死太急，而且下一次
+            // 真实变化会再试一次。只把原因留下。
+            Note("接上提醒没发出去：" + exception.Message);
+        }
+    }
+
     /// 板面变了。哪块变了决定措辞，但**内容不在这条消息里** ——
     /// 对面照样去读板面文件，那才是权威。
     ///

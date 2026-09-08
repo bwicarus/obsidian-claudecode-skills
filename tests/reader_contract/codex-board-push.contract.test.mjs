@@ -133,6 +133,27 @@ test("失效要留下原因，重新登记要清掉它", () => {
   assert.match(ENDPOINT, /previousInvalidReason/);
 });
 
+test("接上时推一次全量，否则登记前就摆在板上的东西永远送不出去", () => {
+  // 用户 2026-09-09 点出来的缺口：推送只在**变化时**触发，而"接上之前
+  // 就已经存在的待办"不构成变化。不补这一下，那条待办会一直躺着，
+  // 而两边都不会觉得有问题 —— 板上明明写着，推送也从没出错。
+  assert.match(PUSH, /internal static async Task NotifyConnectedAsync/);
+  // 措辞必须说清是全量，否则对面会以为只有增量
+  assert.match(PUSH, /把快板和慢板都完整读一遍/);
+  // 登记之后触发，且**不等**它
+  assert.match(ENDPOINT, /_ = ReaderCodexPush\.NotifyConnectedAsync\(/);
+  // ⚠ 必须 CancellationToken.None：拿请求的 token 的话响应一返回推送就被
+  //   取消，表现是"登记成功但全量提醒从来没到"，没有一处会报错。
+  assert.match(
+    ENDPOINT,
+    /NotifyConnectedAsync\(CancellationToken\.None\)/);
+  // 这一条失败不该判绑定失效 —— 刚登记完就判死太急
+  const body = PUSH.slice(
+    PUSH.indexOf("internal static async Task NotifyConnectedAsync"),
+    PUSH.indexOf("/// 板面变了"));
+  assert.ok(!/Invalidate\(/.test(body), "接上提醒失败不判绑定失效");
+});
+
 test("地址和任务 id 一律不写死", () => {
   // 交接明说：安装路径带版本号会变，管道地址是动态的。
   for (const source of [PUSH, ENDPOINT]) {

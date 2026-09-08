@@ -3042,6 +3042,35 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     serviceCancellationToken).ConfigureAwait(false);
                 appliedRevision = result.Revision;
                 applied += 1;
+                // 阅读器自己的焦点（2026-09-09 用户："我打开了新的书并且进行了
+                // 选中等操作，结果快板那里的内容没有任何变化"）。
+                //
+                // ⚠ 这一支以前**根本没接**：NoteLocation 只在下面 viewport
+                //   那一支被调用，而 viewport 是浏览器网页快照的载荷。
+                //   于是在 App 里开书翻页，快板永远是「无」——
+                //   而交接里列的快板语义明写着"焦点变化意味着旧快照不能当
+                //   当前页"，说的就是书页。
+                //
+                // ⚠ 身份取**书**（File）而不是书+页：按页的话，正常阅读
+                //   每停留满 45 秒就是一次焦点转移，开了主动推送之后等于
+                //   每分钟叫醒对面一次，而"他翻到第 9 页了"这件事对面
+                //   从快照里本来就读得到。开新书才是真的换了注意力。
+                //
+                // ⚠ 只在没有 viewport 时报：两支同时报会让网页焦点和书本
+                //   焦点互相顶掉，板上表现为反复横跳。网页那支优先，
+                //   因为它带的是浏览器里正在看的东西。
+                if (viewport is null)
+                {
+                    ReaderAttentionBoard.NoteLocation(
+                        activeReading.File,
+                        string.IsNullOrWhiteSpace(activeReading.Title)
+                            ? activeReading.File
+                            : activeReading.Title,
+                        DateTimeOffset.UtcNow,
+                        source: activeReading.SourceInstanceId,
+                        interacted: !string.IsNullOrWhiteSpace(
+                            activeReading.Selection));
+                }
             }
             if (viewport is not null)
             {
