@@ -892,6 +892,12 @@ def ensure_codex_voice_health(
 #: 不经过这里），AI 看到不用动。
 REVIEW_DUE_SPEAK_THRESHOLD = 32
 
+#: 新卡积到多少张才值得开口（2026-09-08 用户点破：「新卡不被计数，岂不是没有启动第一次复习的契机」）。
+#: 死循环是真的：新卡的 `_next` 为空 → 永远不算到期 → due 那条永远不触发 → 没人提醒 → 卡一直是新卡。
+#: 新卡与到期卡性质不同，阈值也不该共用：到期是欠债（越积越多、催得越急），新卡是"还没开始"，
+#: 一次学习的合理量就值得提一句，故取 10 而不是 32。
+REVIEW_NEW_SPEAK_THRESHOLD = 10
+
 
 def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
     """复习到期生产者（每轮对账调用）。
@@ -931,6 +937,25 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
                 store.resolve(
                     item["id"], by="auto",
                     note="已回落到 %d 张（他在复习）" % due)
+    # 新卡自己的启动契机(2026-09-08):与到期那条**分开**的通知种类,措辞是"待学习"不是"待复习"。
+    # 分开而不是并进 due 的原因:两者回落条件不同 —— 新卡学过一次就有了 _next,从 new 转入 due,
+    # 若共用一条通知,那次转移会被当成"回落"而误消。
+    if new >= REVIEW_NEW_SPEAK_THRESHOLD:
+        store.create(
+            kind="review-new",
+            title="还没开始学的新卡已有 %d 张" % new,
+            body=("另有 %d 张到期待复习。" % due) if due else "",
+            source="review-scheduler",
+            audience="user",
+            dedupe_key="review-new:" + day,
+            end="expires:%d" % (_now_ms() + 24 * 3600 * 1000),
+        )
+    else:
+        for item in list(store.open_items()):
+            if item.get("kind") == "review-new":
+                store.resolve(
+                    item["id"], by="auto",
+                    note="新卡已降到 %d 张（他开始学了）" % new)
     return {"due": due, "new": new}
 
 
