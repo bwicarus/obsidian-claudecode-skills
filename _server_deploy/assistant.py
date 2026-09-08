@@ -6288,6 +6288,8 @@ def _kj_call(ctx, fn):
 # 于是:词汇/语法卡走轨道,直接跳过节点查询;学科概念卡照旧绑节点。按语言分开,且词汇与语法分开。
 # ⚠ 这份枚举有 3 份副本要同步:本文件、static/pdf/rc-computer-voice.js(App 入站闸)、
 #   windows/ComputerVoiceAudio/ReaderRealtimeOutput.cs(桥白名单)。改之前先 grep KJ_CARD_TRACKS。
+# ⚠ 归属规则本身有 **8 处**门禁(2026-09-08 第一次数成 7 处,漏了导出前那道):本文件校验 + 工具说明 + schema、
+#   rc-computer-voice.js 入站闸、rc-flashcard.js **导出前闸**、DirectBridgeProtocol、ReaderLocalAnki、ReaderRealtimeOutput。
 KJ_CARD_TRACKS = ("jp-word", "jp-grammar", "en-word", "en-grammar")
 
 

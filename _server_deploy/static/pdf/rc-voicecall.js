@@ -1068,6 +1068,8 @@
     if (Array.isArray(payload.node_ids) && payload.node_ids.length) {
       source.kjNodes = payload.node_ids.map(String).join(',').slice(0, 256);
     }
+    // 归属二选一(2026-09-08):单词/语法卡带的是学习轨道,同样随卡进本地仓,导出时替代 nodeIds。
+    if (payload.track) source.kjTrack = String(payload.track).slice(0, 32);
     // 普通制卡的 text 是用户/助手生成内容，不是当前页引用。
     // 只有上游显式给出 source_ref 或精确高亮合同时，才把书页来源
     // 写入卡仓；绝不用“用户此刻刚好打开的页”伪造 provenance。
@@ -1746,6 +1748,7 @@
     if (Array.isArray(payload.nodeIds) && payload.nodeIds.length) {
       source.kjNodes = payload.nodeIds.join(',').slice(0, 256);
     }
+    if (payload.track) source.kjTrack = String(payload.track).slice(0, 32);
     if (exact) {
       source.documentId = file;
       source.quote = String(payload.sourceText || '');

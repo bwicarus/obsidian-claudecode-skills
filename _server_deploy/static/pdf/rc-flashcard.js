@@ -1148,12 +1148,16 @@
       RC.toast && RC.toast('电脑 Anki 导出当前不可用');
       return;
     }
-    // 2026-09-06 用户拍板：卡必须绑 KJ 知识节点才能入库。节点编号随卡进了本地仓（source.kjNodes），
-    // 这里只是最后一道闸；真正的校验在桥（缺 nodeIds 直接拒）。
-    var kjNodes = String((repositorySource(st) || {}).kjNodes || '')
+    // 2026-09-06 用户拍板：卡必须有归属才能入库；2026-09-08 起归属**二选一** ——
+    // 单词/语法卡带学习轨道(source.kjTrack)，学科概念卡带知识节点(source.kjNodes)。
+    // 这里只是最后一道闸；真正的校验在桥。⚠ 这处是同一条规则的第八份副本(前七处见 KJ_CARD_TRACKS 注释)。
+    var kjSource = repositorySource(st) || {};
+    var kjNodes = String(kjSource.kjNodes || '')
       .split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-    if (!kjNodes.length) {
-      RC.toast && RC.toast('这张卡还没关联知识节点，不能入库：让 AI 先用 kj_search/kj_register 绑定节点再重发草稿');
+    var kjTrack = String(kjSource.kjTrack || '').trim();
+    if (kjTrack) kjNodes = [];   // 轨道承担归属时不带节点,桥那边也要求为空
+    if (!kjTrack && !kjNodes.length) {
+      RC.toast && RC.toast('这张卡还没有归属，不能入库：单词/语法卡让 AI 传 track，概念卡先 kj_search/kj_register 绑定节点');
       return;
     }
     var aid = c._pcExportAid;
@@ -1175,7 +1179,8 @@
         cardIndex: i,
         aid: aid,
         card: repositoryCard(c),
-        nodeIds: kjNodes
+        nodeIds: kjNodes,
+        track: kjTrack
       });
     }).then(function (data) {
       var noteIds = data.note_ids || [], cardIds = data.card_ids || [];
