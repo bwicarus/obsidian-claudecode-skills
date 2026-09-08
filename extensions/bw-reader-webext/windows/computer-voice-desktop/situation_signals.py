@@ -271,6 +271,65 @@ ANKI_CONNECT_HOST = "127.0.0.1"
 ANKI_CONNECT_PORT = 8765
 
 
+#: 阅读器上下文快照。复习模式的状态就投影在它的 activeReading.review 里 ——
+#: 这条链早就存在（RC.review.snapshotState → 桥 DirectContextSnapshot 校验 → 落盘），
+#: 2026-09-09 只是把它读成信号。
+CONTEXT_SNAPSHOT_FILE_NAME = "reader-context-snapshot.json"
+#: 快照多久算过期。阅读器每几十秒推一次，两分钟没动就别拿它当现状。
+CONTEXT_FRESH_MINUTES = 2.0
+
+
+def _review_state(runtime: Path, now_ms: int) -> tuple[dict[str, Any] | None, str]:
+    """(复习投影, 说不出来时的原因)。
+
+    三种「不知道」要分开：没有快照文件 / 阅读器没连（contextStatus=disabled）/
+    快照太旧。混成一个会让「他没在复习」和「我看不见」变成同一句话，
+    而触发器拿后者当前者就会在他正复习时判定没在复习。
+    """
+    value = _load(runtime / CONTEXT_SNAPSHOT_FILE_NAME)
+    if value is None:
+        return None, "还没有阅读器上下文快照"
+    if value.get("contextStatus") in ("disabled", "pending"):
+        return None, "阅读器没连上（快照 %s）" % value.get("contextStatus")
+    active = value.get("activeReading")
+    if not isinstance(active, dict):
+        # 快照在、阅读器也连着，但没有在读的东西 —— 那就**确实**没在复习。
+        return {}, ""
+    return (active.get("review") if isinstance(active.get("review"), dict)
+            else {}), ""
+
+
+def _sig_reviewing(root: Path, runtime: Path, now_ms: int) -> dict[str, Any]:
+    """他现在是不是在复习卡片（2026-09-09 用户要的"复习开始"信号）。
+
+    用法是**边沿**：注册一条 `--when '{"reviewing": true}'` 的触发规则，
+    他一进复习模式就会收到信号 —— 用户原话「在后方等待我主动点击那个复习
+    模式后返回开始复习……对他来说这其实就只是一次工具调用」。
+
+    ⚠ 「字段缺席 = 未进入复习模式」是快照链本来的语义（旧构建不发这个字段
+    也是同一意思），所以这里把缺席读成 False 而不是 unknown。
+    真正的 unknown 只有一种：快照本身不可用（见 `_review_state`）。
+    """
+    review, why = _review_state(runtime, now_ms)
+    if review is None:
+        return unknown(why)
+    return known(bool(review))
+
+
+def _sig_review_remaining(root: Path, runtime: Path, now_ms: int) -> dict[str, Any]:
+    """这一轮复习还剩几张。没在复习时是 0（不是不知道）。"""
+    review, why = _review_state(runtime, now_ms)
+    if review is None:
+        return unknown(why)
+    if not review:
+        return known(0)
+    total = review.get("dueTotal")
+    index = review.get("index")
+    if not isinstance(total, int) or not isinstance(index, int):
+        return unknown("复习投影里没有 dueTotal/index")
+    return known(max(0, total - index))
+
+
 def _sig_anki_reachable(root: Path, runtime: Path, now_ms: int) -> dict[str, Any]:
     """Anki 开着吗（2026-09-09）。
 
@@ -379,6 +438,16 @@ SIGNALS: dict[str, dict[str, Any]] = {
         "values": "true / false",
         "read": _sig_readerpc_running,
     },
+    "reviewing": {
+        "summary": "他现在在不在复习卡片",
+        "values": "true / false；阅读器没连时 known=false",
+        "read": _sig_reviewing,
+    },
+    "review_remaining": {
+        "summary": "这一轮复习还剩几张",
+        "values": "整数；没在复习时是 0",
+        "read": _sig_review_remaining,
+    },
     "anki_reachable": {
         "summary": "Anki 开着吗（第一次评分完全依赖它）",
         "values": "true / false",
@@ -482,11 +551,15 @@ _COMPACT: dict[str, Any] = {
     "idle_minutes": lambda v: "闲%d分" % round(v),
     "readerpc_running": lambda v: "PC在" if v else "PC停",
     "anki_reachable": lambda v: "Anki在" if v else "Anki没开",
+    "reviewing": lambda v: "正在复习" if v else "",
+    "review_remaining": lambda v: "还剩%d张" % v if v else "",
 }
 #: 紧凑行里省略不写的（信息量低于占位成本）。**只省已知为真且无歧义的**。
 #: Anki 开着是常态，不占位；**没开才说** —— 那正是新卡评不了分的原因。
+#: 没在复习是常态，不占位；**正在复习才说**。剩几张同理。
 _COMPACT_SKIP_WHEN = {"readerpc_running": True, "voice_linked": True,
-                      "anki_reachable": True}
+                      "anki_reachable": True,
+                      "reviewing": False, "review_remaining": 0}
 
 
 def render_compact(payload: dict[str, Any]) -> str:
@@ -517,6 +590,11 @@ def render_compact(payload: dict[str, Any]) -> str:
         # "PC停"已经把原因说全了。紧凑的意思正是别重复同一件事。
         unknown_names = [one for one in unknown_names
                          if one not in ("voice_linked", "reading_title")]
+    if ("reviewing" in unknown_names
+            and "review_remaining" in unknown_names):
+        # 同一个原因（阅读器没连）导致的两个未知，说一次就够 ——
+        # 紧凑的意思正是别重复同一件事。
+        unknown_names.remove("review_remaining")
     if unknown_names:
         parts.append("?" + "/".join(unknown_names))
     place = payload["signals"].get("place") or {}

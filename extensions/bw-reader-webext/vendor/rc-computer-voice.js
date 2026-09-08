@@ -1454,6 +1454,32 @@ if (window.__bwPwaProviderOnly) return;
           );
         }
         payload = { fn: actionFn, args: [undoId] };
+      } else if (actionFn === "_nativeReaderReviewAnswer") {
+        // 语音复习代评分（2026-09-09）。只两个字段，且都要卡死：
+        // ease 决定写进 FSRS 的东西，cardId 是"评的是不是那一张"的互锁。
+        if (p.args.length !== 1 || !plainObject(p.args[0])) {
+          throw directError(
+            "Reader 复习评分需要一个对象",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        var rating = p.args[0];
+        var ratingKeys = Object.keys(rating);
+        var ratingEase = Number(rating.ease);
+        var ratingCardId = safeText(rating.cardId, "Reader 复习卡片编号", 120, false);
+        if (ratingKeys.length !== 2 ||
+            ratingKeys.indexOf("ease") < 0 || ratingKeys.indexOf("cardId") < 0 ||
+            !Number.isSafeInteger(ratingEase) || ratingEase < 1 || ratingEase > 4 ||
+            !/^[A-Za-z0-9_-]{1,120}$/.test(ratingCardId)) {
+          throw directError(
+            "Reader 复习评分参数无效",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        // **重建**而不是透传：多一个字段就该被丢掉，而不是跟着过桥。
+        payload = { fn: actionFn, args: [{ ease: ratingEase, cardId: ratingCardId }] };
       } else if (actionFn === "_nativeReaderPageCardMutate") {
         if (p.args.length !== 1 || !plainObject(p.args[0])) {
           throw directError(

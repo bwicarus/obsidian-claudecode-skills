@@ -395,6 +395,7 @@ internal static class ReaderRealtimeOutputProtocol
         string fn = Text(root, "fn", 64);
         if (fn is not (
             "_nativeReaderUndoLast"
+            or "_nativeReaderReviewAnswer"
             or "_nativeReaderPageCardMutate"
             or "_nativeReaderLearningCardMutate"
             or "_nativeReaderCreateNote"
@@ -412,6 +413,45 @@ internal static class ReaderRealtimeOutputProtocol
         if (args.ValueKind != JsonValueKind.Array)
         {
             throw Invalid("Reader 客户端动作参数必须是数组");
+        }
+        if (fn is "_nativeReaderReviewAnswer")
+        {
+            // 语音复习代评分（2026-09-09）。只两个字段：掌握度 + 要评的那张卡。
+            // ⚠ cardId 是**互锁**不是装饰：AI 念完那张、等用户答完再评分，
+            //   中间卡可能已经翻过去；不核对就会把评价打在下一张上。
+            if (args.GetArrayLength() != 1
+                || args[0].ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 复习评分需要一个对象");
+            }
+            JsonElement rating = args[0];
+            DirectJsonValidation.RequireNoDuplicateKeys(rating);
+            // 精确键集：多一个字段就整条拒。这条通道是跨进程的，
+            // "放行未知字段"等于把没人校验过的东西送进阅读器。
+            HashSet<string> ratingKeys = rating.EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal);
+            if (ratingKeys.Count != 2
+                || !ratingKeys.Contains("ease")
+                || !ratingKeys.Contains("cardId"))
+            {
+                throw Invalid("Reader 复习评分只接受 ease 和 cardId");
+            }
+            if (!rating.TryGetProperty("ease", out JsonElement easeValue)
+                || easeValue.ValueKind != JsonValueKind.Number
+                || !easeValue.TryGetInt32(out int ease)
+                || ease < 1 || ease > 4)
+            {
+                throw Invalid("Reader 复习评分的 ease 必须是 1~4");
+            }
+            string cardId = Text(rating, "cardId", 120);
+            if (cardId.Length == 0
+                || !cardId.All(one => char.IsAsciiLetterOrDigit(one)
+                    || one == '_' || one == '-'))
+            {
+                throw Invalid("Reader 复习评分的 cardId 无效");
+            }
+            return;
         }
         if (fn is "__upStartTask")
         {

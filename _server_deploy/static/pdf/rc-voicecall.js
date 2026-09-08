@@ -1952,6 +1952,21 @@
           }
           _caTarget = window._nativeReaderUndoLast;
           _caCall = function (target) { return target.call(window, _caId); };
+        } else if (_caFn === '_nativeReaderReviewAnswer') {
+          var _caRate = _caArgs.length === 1 && _caArgs[0] &&
+            typeof _caArgs[0] === 'object' && !Array.isArray(_caArgs[0])
+            ? _caArgs[0] : null;
+          var _caEase = _caRate ? Number(_caRate.ease) : 0;
+          var _caCardId = _caRate ? String(_caRate.cardId || '') : '';
+          if (!_caRate || Object.keys(_caRate).length !== 2 ||
+              !Number.isSafeInteger(_caEase) || _caEase < 1 || _caEase > 4 ||
+              !/^[A-Za-z0-9_-]{1,120}$/.test(_caCardId)) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window._nativeReaderReviewAnswer;
+          _caCall = function (target) {
+            return target.call(window, { ease: _caEase, cardId: _caCardId });
+          };
         } else if (_caFn === '_nativeReaderWordCardsConsolidate') {
           var _caWc = _caArgs.length === 1 && _caArgs[0] &&
             typeof _caArgs[0] === 'object' && !Array.isArray(_caArgs[0])

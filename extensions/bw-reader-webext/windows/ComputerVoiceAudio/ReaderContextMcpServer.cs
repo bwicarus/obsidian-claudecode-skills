@@ -42,6 +42,7 @@ internal sealed class ReaderContextMcpServer
     internal const string MakeNoteToolName = "reader_make_note";
     internal const string LookupToolName = "reader_lookup_word";
     internal const string MarkVocabToolName = "reader_mark_vocab";
+    internal const string ReviewAnswerToolName = "reader_review_answer";
     internal const string WebHighlightToolName = "reader_web_highlight";
     internal const string WebNoteToolName = "reader_web_note";
     internal const string KjPageSubmitToolName = KjPageClient.SubmitToolLabel;
@@ -1705,6 +1706,54 @@ internal sealed class ReaderContextMcpServer
             });
             tools.Add(new JsonObject
             {
+                ["name"] = ReviewAnswerToolName,
+                ["description"] =
+                    "Grade the card currently shown in Reader review mode, on "
+                    + "the user's behalf during a spoken review. Read the "
+                    + "front aloud, let them answer, then send the ease you "
+                    + "judged: 1 again, 2 hard, 3 good, 4 easy. cardId must be "
+                    + "the id you got from reader_review_current_card for that "
+                    + "same card - it is an interlock, not a formality: while "
+                    + "you waited for their answer the card may have moved on, "
+                    + "and grading the next one silently would be worse than "
+                    + "failing. Fails when review mode is closed or the card "
+                    + "changed; re-read the current card and start over. "
+                    + "This writes to the schedule, so never grade a card the "
+                    + "user did not actually answer.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["ease"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["minimum"] = 1,
+                            ["maximum"] = 4,
+                            ["description"] =
+                                "1 again, 2 hard, 3 good, 4 easy.",
+                        },
+                        ["cardId"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 120,
+                            ["description"] =
+                                "The id of the card you just read aloud.",
+                        },
+                    },
+                    ["required"] = new JsonArray { "ease", "cardId" },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
                 ["name"] = NotesToolName,
                 ["description"] =
                     "Read the sticky notes in the book that is open, from the "
@@ -3212,6 +3261,51 @@ internal sealed class ReaderContextMcpServer
                 id,
                 "client-action",
                 vocabPayload,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == ReviewAnswerToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            int reviewEase = arguments.ValueKind == JsonValueKind.Object
+                && arguments.TryGetProperty("ease", out JsonElement easeArg)
+                && easeArg.ValueKind == JsonValueKind.Number
+                && easeArg.TryGetInt32(out int parsedEase)
+                ? parsedEase
+                : 0;
+            string reviewCardId = arguments.ValueKind == JsonValueKind.Object
+                && arguments.TryGetProperty("cardId", out JsonElement cardArg)
+                && cardArg.ValueKind == JsonValueKind.String
+                ? (cardArg.GetString() ?? string.Empty).Trim()
+                : string.Empty;
+            if (reviewEase < 1 || reviewEase > 4
+                || reviewCardId.Length == 0 || reviewCardId.Length > 120)
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid Reader review rating",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            JsonObject reviewPayload = new()
+            {
+                ["fn"] = "_nativeReaderReviewAnswer",
+                ["args"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["ease"] = reviewEase,
+                        ["cardId"] = reviewCardId,
+                    },
+                },
+            };
+            await SendReaderOutputAsync(
+                id,
+                "client-action",
+                reviewPayload,
                 cancellationToken).ConfigureAwait(false);
             return;
         }

@@ -14921,6 +14921,53 @@
     });
   }
 
+  // 语音复习代评分（2026-09-09 用户：「根据我回答的结果 ai 来判断掌握程度后录入」）。
+  //
+  // ⚠ 走 RC.review.answer 而**不是**自己去改卡状态或直接打 review-answer：
+  //   那条路已经被按按钮这个动作跑熟了（幂等 aid、结果未知的处理、_next 回写、
+  //   队列前进都在里面）。绕过它等于把同一套调度逻辑再实现一遍，
+  //   而两份实现迟早不一致。
+  //
+  // ⚠ 必须带 cardId：AI 念的是**那一张**，等它听完用户回答再评分，中间卡可能已经
+  //   翻过去了。不核对就会把评价打在下一张上，而且没有任何一处会喊。
+  function nativeReaderReviewAnswer(input) {
+    var arg = input && typeof input === 'object' && !Array.isArray(input)
+      ? input : null;
+    var ease = arg ? Number(arg.ease) : 0;
+    var expected = arg ? String(arg.cardId || '') : '';
+    if (!arg || !Number.isSafeInteger(ease) || ease < 1 || ease > 4 ||
+        !/^[A-Za-z0-9_-]{1,120}$/.test(expected)) {
+      return Promise.reject(new Error('BW_REVIEW_ANSWER_INVALID'));
+    }
+    var review = window.RC && window.RC.review;
+    if (!review || typeof review.answer !== 'function' ||
+        typeof review.currentCard !== 'function') {
+      return Promise.reject(new Error('BW_REVIEW_ANSWER_UNAVAILABLE'));
+    }
+    if (review.mode && review.mode() !== 'review') {
+      return Promise.reject(new Error('BW_REVIEW_ANSWER_NOT_IN_REVIEW'));
+    }
+    var current = review.currentCard();
+    if (!current) {
+      return Promise.reject(new Error('BW_REVIEW_ANSWER_NO_CARD'));
+    }
+    var actual = String(current.id || current.card_id || '');
+    if (actual !== expected) {
+      // 说清是哪一张对不上：只说"失败"会让 AI 无从判断该重念还是该重试。
+      return Promise.reject(new Error(
+        'BW_REVIEW_ANSWER_CARD_CHANGED:' + actual));
+    }
+    // answer() 要求答案已揭示（跟人手动复习一样：先看背面再评分）。
+    if (typeof review.show === 'function') review.show();
+    review.answer(ease);
+    return Promise.resolve({
+      contract: 'reader-review-answer/1',
+      ok: true,
+      cardId: expected,
+      ease: ease
+    });
+  }
+
   var api = {
     contract: CONTRACT,
     owner: 'native-app',
@@ -14929,6 +14976,7 @@
     localBookId: bookId,
     ready: function () { return bootPromise; },
     undoLast: nativeReaderUndoLast,
+    reviewAnswer: nativeReaderReviewAnswer,
     wordCardsConsolidate: nativeReaderWordCardsConsolidate,
     pageCardMutate: nativeReaderPageCardMutate,
     pageCardAction: nativeReaderPageCardAction,
@@ -15136,6 +15184,9 @@
   runtimeRoot.nativeLocalRuntime = api;
   root._nativeReaderUndoLast = function (operationID) {
     return api.undoLast(operationID);
+  };
+  root._nativeReaderReviewAnswer = function (input) {
+    return api.reviewAnswer(input);
   };
   root._nativeReaderWordCardsConsolidate = function (input) {
     return api.wordCardsConsolidate(input);

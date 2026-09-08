@@ -1880,6 +1880,7 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
         "reader_learning_cards",
         "reader_learning_card_read",
         "reader_review_current_card",
+        "reader_review_answer",
         "reader_notes",
         "reader_toc",
         "reader_lookup_word",
