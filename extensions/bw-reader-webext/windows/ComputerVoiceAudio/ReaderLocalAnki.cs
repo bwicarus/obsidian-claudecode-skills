@@ -1716,6 +1716,7 @@ internal interface IReaderLocalAnkiWriter
         JsonObject canonicalCard,
         JsonObject projectionCard,
         IReadOnlyList<string> nodeIds,
+        string track,
         CancellationToken cancellationToken);
 
     Task<JsonObject> OperateAsync(

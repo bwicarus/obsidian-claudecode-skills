@@ -2560,22 +2560,16 @@ internal sealed class DirectBridgeProtocolSession
         bool hasProjection = message.TryGetProperty(
             "projection",
             out JsonElement projectionValue);
+        // track 可选(滚动升级:桥先装、App 后出构建)。加进精确字段集就成了**必需**,
+        // 旧版 App 不发就被拒 —— 2026-09-08 自检当场抓到过一次。
+        bool hasTrack = message.TryGetProperty("track", out _);
         if (hasProjection)
         {
             RequireExactKeys(
                 message,
-                "contract",
-                "type",
-                "requestId",
-                "sessionId",
-                "sourceInstanceId",
-                "draftId",
-                "cardIndex",
-                "aid",
-                "card",
-                "nodeIds",
-                "projection",
-                "track");
+                hasTrack
+                    ? new[] { "contract", "type", "requestId", "sessionId", "sourceInstanceId", "draftId", "cardIndex", "aid", "card", "nodeIds", "projection", "track" }
+                    : new[] { "contract", "type", "requestId", "sessionId", "sourceInstanceId", "draftId", "cardIndex", "aid", "card", "nodeIds", "projection" });
         }
         else
         {
@@ -2587,17 +2581,9 @@ internal sealed class DirectBridgeProtocolSession
             // 2026-09-08 起归属二选一，track 承担单词/语法卡的归属。
             RequireExactKeys(
                 message,
-                "contract",
-                "type",
-                "requestId",
-                "sessionId",
-                "sourceInstanceId",
-                "draftId",
-                "cardIndex",
-                "aid",
-                "card",
-                "nodeIds",
-                "track");
+                hasTrack
+                    ? new[] { "contract", "type", "requestId", "sessionId", "sourceInstanceId", "draftId", "cardIndex", "aid", "card", "nodeIds", "track" }
+                    : new[] { "contract", "type", "requestId", "sessionId", "sourceInstanceId", "draftId", "cardIndex", "aid", "card", "nodeIds" });
         }
         if (Encoding.UTF8.GetByteCount(message.GetRawText()) > 192 * 1024)
         {

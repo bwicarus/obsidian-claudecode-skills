@@ -2680,6 +2680,7 @@ internal static class DirectBridgeSelfTest
                     ["back"] = "A",
                 },
                 new[] { "kj:01J9ZK3A7Q" },
+                string.Empty,
                 CancellationToken.None).ConfigureAwait(false);
             throw new InvalidOperationException(
                 "pre-add failure unexpectedly succeeded");
@@ -2720,6 +2721,7 @@ internal static class DirectBridgeSelfTest
                     ["back"] = "A",
                 },
                 new[] { "kj:01J9ZK3A7Q" },
+                string.Empty,
                 CancellationToken.None).ConfigureAwait(false);
             throw new InvalidOperationException(
                 "addNote outcome unexpectedly succeeded");
