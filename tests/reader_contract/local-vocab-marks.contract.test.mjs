@@ -44,7 +44,9 @@ test("vocabulary-state 多了 lookup 属性，词框查到即记（词组只认�
 
 test("本地 page-overlay 按本地字符层 + 本地状态算下划线，已掌握不画", () => {
   const overlay = bodyOf(RUNTIME, "localPageOverlay");
-  assert.match(overlay, /vocab_marks: localVocabMarks\(result && result\.chars\)/);
+  // 2026-09-08 起经 safeLocalVocabMarks:算下划线抛异常不该让整页 overlay 一起没(但要出声)
+  assert.match(overlay, /vocab_marks: safeLocalVocabMarks\(result && result\.chars\)/);
+  assert.match(bodyOf(RUNTIME, 'safeLocalVocabMarks'), /return localVocabMarks\(chars\);/);
   const marks = bodyOf(RUNTIME, "localVocabMarks");
   // 没有 vocabulary-state 时必须仍是 []（首开不出网、不制造假标记）
   assert.match(marks, /typeof state\.lookup !== 'function' \|\| !Array\.isArray\(chars\) \|\| !chars\.length\) return \[\];/);
@@ -144,4 +146,22 @@ test("下划线命中要对齐词元边界；词元内部的更短下划线不�
   const SEL = read("_server_deploy/static/pdf/reader.src/13-selection.js");
   assert.match(SEL, /var _inside = _lo >= 0 && _hi >= _lo && _lo >= sIdx && _hi <= eIdx && \(_hi - _lo\) < \(eIdx - sIdx\)/);
   assert.match(SEL, /if \(_lo >= 0 && _hi >= _lo && !_inside\) \{ sIdx = _lo; eIdx = _hi;/);
+});
+
+// 用户 2026-09-08：「连续翻页后 app 的下划线等全部消失」「一段时间后会再次出现，但总感觉加载方式好像有点问题」。
+// 会自己恢复 = 不是算错也不是崩，是**结果被丢弃**：overlay 是慢的一环，连续翻页时页面被回收，
+// `!wrap.isConnected` 一成立就早退，已在途/已返回的 overlay 直接作废，回到该页又从零请求。
+test("overlay 结果先落缓存再判页面在不在；回到同页不再出网", () => {
+  const load = bodyOf(CHARLAYER, "loadCharsAndBindLayer");
+  // 命中缓存 → 不发 fetch，Promise 立即兑现
+  assert.match(load, /const ovCached = _ovCache\.get\(_ovCacheKey\(num\)\);/);
+  assert.match(load, /ovCached\s*\?\s*Promise\.resolve\(ovCached\)/);
+  // 未命中 → 取回后**先**落缓存，再交给下游那些带 isConnected 判断的分支
+  assert.match(load, /\.then\(v => _ovCacheSet\(num, v\)\)/);
+  const setter = bodyOf(CHARLAYER, "_ovCacheSet");
+  assert.match(setter, /value\.ok !== true\) return value;/, "失败不缓存，下次照常重试");
+  assert.match(setter, /_OV_CACHE_MAX/, "要有上限，别把整本书的 overlay 攒在内存里");
+  // 掌握/收藏后的新结果必须覆盖同一条缓存，否则页面重建会拿回旧下划线
+  assert.match(CHARLAYER, /_ovCacheSet\(page, d\);\s*\/\/ 掌握\/收藏后的新结果覆盖缓存/);
+  assert.ok(read("_server_deploy/static/pdf/reader.js").includes("_ovCacheSet"), "reader.js 需重新拼合");
 });

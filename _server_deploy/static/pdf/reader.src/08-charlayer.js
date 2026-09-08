@@ -313,6 +313,24 @@ function _applyPageVocabOverlay(wrap, overlay) {
   });
 })();
 
+// 页级 overlay 缓存(2026-09-08 用户:「连续翻页后 app 的下划线等全部消失…一段时间后会再次出现」)。
+// 病根不是算错也不是崩,是**结果被丢弃**:overlay 是这条链上慢的一环(服务端跑分词/生词),
+// 而连续翻页时页面被连续模式回收,`!wrap.isConnected` 一成立就早退 —— 已经在途、甚至已经返回的
+// overlay 直接作废,等这页重新进视口时又从零请求一遍,于是"先空一阵再出现"。
+// 现在结果先落缓存再判断页面在不在:回到同一页时 Promise 立即兑现,下划线随渲染一起出来。
+// 掌握/收藏后由 refreshLocalVocabMarks 覆盖同一条缓存,不会拿旧的。
+const _OV_CACHE_MAX = 40;
+const _ovCache = new Map();
+function _ovCacheKey(page) { return (FILE_REL || '') + '|' + page; }
+function _ovCacheSet(page, value) {
+  if (!value || value.ok !== true) return value;   // 失败不缓存,下次照常重试
+  const key = _ovCacheKey(page);
+  if (_ovCache.has(key)) _ovCache.delete(key);
+  _ovCache.set(key, value);
+  while (_ovCache.size > _OV_CACHE_MAX) _ovCache.delete(_ovCache.keys().next().value);
+  return value;
+}
+
 async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   _retry = _retry || 0;
   if (!wrap.isConnected) return;   // 页已被连续模式释放 → 放弃
@@ -323,7 +341,13 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   let cvGuess; try { cvGuess = localStorage.getItem(cvKey) || ('v' + CHARS_VER); } catch (_) { cvGuess = 'v' + CHARS_VER; }
   const charsUrl = (cv) => `/pdf/api/page-chars?file=${encodeURIComponent(FILE_REL)}&page=${num}&v=${CHARS_VER}&cv=${encodeURIComponent(cv)}`;
   // overlay(生词/句子/真 cv)**并行**拉,不阻塞选词层;chars 用上次 cv 猜测 → 命中 SW 缓存秒回 → 选词立即可用
-  const ovP = fetch(`/pdf/api/page-overlay?file=${encodeURIComponent(FILE_REL)}&page=${num}`).then(r => r.json()).catch(() => null);
+  const ovCached = _ovCache.get(_ovCacheKey(num));
+  const ovP = ovCached
+    ? Promise.resolve(ovCached)   // 命中:不出网,下划线随这一帧就位
+    : fetch(`/pdf/api/page-overlay?file=${encodeURIComponent(FILE_REL)}&page=${num}`)
+        .then(r => r.json())
+        .then(v => _ovCacheSet(num, v))   // 先落缓存再判页面在不在:翻得再快也不白取
+        .catch(() => null);
   let d = null;
   try { d = await (await fetch(charsUrl(cvGuess))).json(); } catch (e) { d = null; }
   if (!wrap.isConnected || wrap.__pageTextLoadSeq !== loadSeq) return;
@@ -614,6 +638,7 @@ window.refreshLocalVocabMarks = function (page) {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!d || d.ok !== true || !wrap.isConnected) return;
+        _ovCacheSet(page, d);   // 掌握/收藏后的新结果覆盖缓存,页面重建时不会拿回旧的
         wrap.__localVocabMarks = d.vocab_marks || [];
         wrap.__vocabMarks = _mergeVocabMarks(wrap.__localVocabMarks,
           (wrap.__vocabMarks || []).filter((m) => !(m && m.local)));
