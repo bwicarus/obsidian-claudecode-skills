@@ -264,6 +264,36 @@ def _sig_review_new(root: Path, runtime: Path, now_ms: int) -> dict[str, Any]:
     return unknown("还没有复制过来的卡片数据") if counts is None else known(counts[1])
 
 
+#: AnkiConnect 的地址。只做 TCP 连通性探测，不发请求 ——
+#: 信号要快（read_all 会把 15 个信号全读一遍），而"端口开着"已经足以
+#: 区分「Anki 在跑」和「Anki 没开」这两种情况。
+ANKI_CONNECT_HOST = "127.0.0.1"
+ANKI_CONNECT_PORT = 8765
+
+
+def _sig_anki_reachable(root: Path, runtime: Path, now_ms: int) -> dict[str, Any]:
+    """Anki 开着吗（2026-09-09）。
+
+    为什么这是个情境信号而不是内部细节：**第一次评分完全依赖它**。
+    Reader 自己不排期 —— `/pdf/api/review-answer` 必须有真实 Anki 卡号、
+    走 AnkiConnect 的 answerCards。Anki 没开时，新卡导不出去、评不了分，
+    而这台机器上 10 张卡就这么挂了 18 天没人发现。
+
+    ⚠ 探的是**端口通不通**，不是 AnkiConnect 答不答得对。端口开着而插件
+    坏掉的情形这里报"通" —— 那是另一种故障，不该由一个要跑得快的信号
+    去承担；真正的失败会在导出回执里显形。
+    """
+    import socket
+    try:
+        with socket.create_connection(
+                (ANKI_CONNECT_HOST, ANKI_CONNECT_PORT), timeout=0.4):
+            return known(True)
+    except OSError:
+        # 连不上就是没开。这里**不报 unknown**：拒连是一个确定的事实，
+        # 跟"读不到文件"不一样。
+        return known(False)
+
+
 def _sig_readerpc_running(root: Path, runtime: Path, now_ms: int) -> dict[str, Any]:
     status, age = _status(root, now_ms)
     return known(status is not None, age)
@@ -348,6 +378,11 @@ SIGNALS: dict[str, dict[str, Any]] = {
         "summary": "PC 服务器软件在不在跑",
         "values": "true / false",
         "read": _sig_readerpc_running,
+    },
+    "anki_reachable": {
+        "summary": "Anki 开着吗（第一次评分完全依赖它）",
+        "values": "true / false",
+        "read": _sig_anki_reachable,
     },
 }
 
@@ -446,9 +481,12 @@ _COMPACT: dict[str, Any] = {
     "reading_title": lambda v: ("在读《%s》" % v[:14]) if v else "未在读",
     "idle_minutes": lambda v: "闲%d分" % round(v),
     "readerpc_running": lambda v: "PC在" if v else "PC停",
+    "anki_reachable": lambda v: "Anki在" if v else "Anki没开",
 }
 #: 紧凑行里省略不写的（信息量低于占位成本）。**只省已知为真且无歧义的**。
-_COMPACT_SKIP_WHEN = {"readerpc_running": True, "voice_linked": True}
+#: Anki 开着是常态，不占位；**没开才说** —— 那正是新卡评不了分的原因。
+_COMPACT_SKIP_WHEN = {"readerpc_running": True, "voice_linked": True,
+                      "anki_reachable": True}
 
 
 def render_compact(payload: dict[str, Any]) -> str:

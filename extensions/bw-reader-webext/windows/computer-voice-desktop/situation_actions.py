@@ -56,6 +56,11 @@ BACKGROUND_HOLD_FILE_NAME = "background-hold.json"
 #: 一次最多按住多久。没有上限的"静音"会变成永久停摆，而且没人记得去解除。
 BACKGROUND_HOLD_MAX_MINUTES = 480
 
+#: 起 Anki 之后最多等 AnkiConnect 监听多久（秒）。Anki 冷启动要开卡库，
+#: 十几秒是常态。测试会把它调小 —— 循环按真实时钟走，写死 60 会让
+#: 一条超时用例白等一分钟。
+ANKI_START_TIMEOUT_SECONDS = 60.0
+
 #: 允许被触发开关的计划任务。**只放批量/AI 类的重活**。
 #:
 #: ⚠ 看门狗（BW ReaderPC Watchdog）和引导任务（BW Computer Voice Setup）
@@ -182,6 +187,53 @@ def _do_task_enable(
     return {"task": target, "state": "enabled"}
 
 
+def _anki_port_open(timeout: float = 0.4) -> bool:
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", 8765), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _do_anki_start(root: Path, **_ignored: Any) -> dict[str, Any]:
+    """把 Anki 拉起来（2026-09-09）。
+
+    为什么这是个动作：**第一次评分完全依赖 Anki 在跑** —— Reader 自己不排期，
+    评分要走 AnkiConnect 的 answerCards。2026-09-09 实测这台机器上 Anki 没开，
+    于是 34 张草稿 0 回执、10 张新卡挂了 18 天评不了分，而没有一处会喊。
+
+    凭什么生效：起进程后轮询 8765 端口，**端口真的开了才算成功**，
+    否则抛错。不做"启动了就当成了"那种交待。
+
+    ⚠ 已经在跑就直接返回，不重启 —— 重启会打断用户正在做的复习。
+    项目里那套 force_restart 是给凌晨批处理用的，不该由情境触发替他决定。
+    """
+    if _anki_port_open():
+        return {"alreadyRunning": True}
+    exe = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / (
+        "Programs/Anki/anki.exe")
+    if not exe.is_file():
+        raise ActionError("找不到 Anki：%s" % exe)
+    try:
+        subprocess.Popen(
+            [str(exe)],
+            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
+            close_fds=True)
+    except OSError as error:
+        raise ActionError("起不动 Anki：%s" % error) from None
+    started = time.time()
+    deadline = started + ANKI_START_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        if _anki_port_open(timeout=0.6):
+            return {"alreadyRunning": False,
+                    "waitedSeconds": round(time.time() - started, 1)}
+        time.sleep(0.5)
+    raise ActionError(
+        "Anki 起来了但 AnkiConnect %.0f 秒内没监听 8765"
+        % ANKI_START_TIMEOUT_SECONDS)
+
+
 #: **封闭动作表**。键 = `--do` 能写的名字。
 #:
 #: 每条都要填 `why`：它凭什么生效。这一栏不是注释，是准入条件 ——
@@ -198,6 +250,12 @@ ACTIONS: dict[str, dict[str, Any]] = {
         "params": "无",
         "why": "同上，删掉标记文件即恢复",
         "run": _do_background_resume,
+    },
+    "anki.start": {
+        "summary": "把 Anki 拉起来（新卡的第一次评分依赖它）",
+        "params": "无；已经在跑就直接返回，不重启",
+        "why": "起进程后轮询 8765，端口真的开了才算成功",
+        "run": _do_anki_start,
     },
     "task.disable": {
         "summary": "关掉一个批量/AI 计划任务",

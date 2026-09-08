@@ -234,3 +234,63 @@ class TriggerActionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AnkiActionTests(unittest.TestCase):
+    """把 Anki 拉起来（2026-09-09）。
+
+    为什么这值得一个动作：第一次评分**完全依赖** Anki 在跑 —— Reader 自己
+    不排期。实测这台机器上 Anki 没开，于是 34 张草稿 0 回执、10 张新卡挂了
+    18 天评不了分，而没有一处会喊。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_already_running_does_not_restart(self):
+        # 重启会打断用户正在做的复习。项目里那套 force_restart 是给凌晨
+        # 批处理用的，不该由情境触发替他决定。
+        original = actions._anki_port_open
+        launched = []
+        actions._anki_port_open = lambda timeout=0.4: True
+        popen = actions.subprocess.Popen
+        actions.subprocess.Popen = lambda *a, **k: launched.append(a)
+        try:
+            result = actions.run("anki.start", {}, self.root)
+        finally:
+            actions._anki_port_open = original
+            actions.subprocess.Popen = popen
+        self.assertTrue(result["result"]["alreadyRunning"])
+        self.assertEqual(launched, [], "已经在跑就不该再起一个")
+
+    def test_port_never_opens_is_an_error_not_a_shrug(self):
+        # "启动了就当成了"是最贵的那种交待：调用方以为好了，其实没有。
+        original = actions._anki_port_open
+        actions._anki_port_open = lambda timeout=0.4: False
+        popen = actions.subprocess.Popen
+        actions.subprocess.Popen = lambda *a, **k: None
+        sleep = actions.time.sleep
+        actions.time.sleep = lambda _s: None
+        budget = actions.ANKI_START_TIMEOUT_SECONDS
+        actions.ANKI_START_TIMEOUT_SECONDS = 0.2
+        exe = Path(__file__)          # 随便一个存在的文件，绕开"找不到 Anki"
+        which = actions.Path
+        try:
+            actions.Path = lambda *a, **k: exe if a and "anki" in str(a[0]).lower() else which(*a, **k)
+            with self.assertRaises(actions.ActionError):
+                actions.run("anki.start", {}, self.root)
+        finally:
+            actions._anki_port_open = original
+            actions.subprocess.Popen = popen
+            actions.time.sleep = sleep
+            actions.ANKI_START_TIMEOUT_SECONDS = budget
+            actions.Path = which
+
+    def test_action_is_in_the_closed_table(self):
+        checked = actions.validate("anki.start")
+        self.assertEqual(checked["action"], "anki.start")
+        self.assertIn("8765", actions.ACTIONS["anki.start"]["why"])
