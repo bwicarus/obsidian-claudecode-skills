@@ -956,8 +956,9 @@ def last_user_activity_ms(root: Path) -> int | None:
         return None
     try:
         import sqlite3
+        from contextlib import closing
         uri = "file:" + str(path).replace("\\", "/") + "?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=2.0) as conn:
+        with closing(sqlite3.connect(uri, uri=True, timeout=2.0)) as conn:
             row = conn.execute(
                 "SELECT MAX(received_at_utc_ms) FROM commands WHERE actor='user'"
             ).fetchone()
@@ -969,6 +970,56 @@ def last_user_activity_ms(root: Path) -> int | None:
         return int(row[0])
     except (TypeError, ValueError):
         return None
+
+
+def wake_time_today_ms(
+    root: Path, quiet_hours: float = QUIET_MEANS_ASLEEP_HOURS
+) -> int | None:
+    """今天的"起床时刻" = **一段长静默之后的第一次用户操作**（2026-09-08）。
+
+    不能简单取"今天第一条"：跨零点还在用设备的夜里，那条会落在 00:10，
+    而那显然不是起床（第一版就这么错过，实测数据当场戳穿）。所以要找的是
+    **睡眠留下的那个缺口**：某次操作之前有 ≥ quiet_hours 的空白。
+    通宵没睡的日子找不到这样的缺口，返回 None —— 调用方回落到配置钟点，
+    这正是想要的：那天本来就没有"起床"这回事。
+
+    比健康数据省：不需要 HealthKit 能力、不需要重签描述文件、不用动手表 App。
+    等健康数据接上，这个函数换成读真实睡眠分段即可，调用方不用改。
+    ⚠ 只认 actor='user'：后台对账自己也写命令，拿它当"人醒了"会让起床时刻恒为 0 点。
+    """
+    path = root / "replication-command-ledger.sqlite3"
+    if not path.is_file():
+        return None
+    day_start_ms = int(time.mktime(
+        time.localtime()[:3] + (0, 0, 0, 0, 0, -1)) * 1000)
+    # 多往前看一天:今天第一条之前的那段空白可能起自昨晚
+    since_ms = day_start_ms - 24 * 3600 * 1000
+    try:
+        import sqlite3
+        from contextlib import closing
+        uri = "file:" + str(path).replace("\\", "/") + "?mode=ro"
+        # closing 而不是 `with sqlite3.connect(...)`:后者是**事务**上下文,不关连接。
+        # 每轮对账调一次就泄漏一个句柄,Windows 上还会一直握着这个文件。
+        with closing(sqlite3.connect(uri, uri=True, timeout=2.0)) as conn:
+            rows = conn.execute(
+                "SELECT received_at_utc_ms FROM commands "
+                "WHERE actor='user' AND received_at_utc_ms >= ? "
+                "ORDER BY received_at_utc_ms",
+                (since_ms,),
+            ).fetchall()
+    except Exception:
+        return None
+    gap_ms = quiet_hours * 3_600_000
+    previous: int | None = None
+    for row in rows:
+        try:
+            stamp = int(row[0])
+        except (TypeError, ValueError):
+            continue
+        if stamp >= day_start_ms and (previous is None or stamp - previous >= gap_ms):
+            return stamp
+        previous = stamp
+    return None
 
 
 def looks_awake(root: Path, quiet_hours: float = QUIET_MEANS_ASLEEP_HOURS) -> tuple[bool, str]:
@@ -1099,7 +1150,11 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
     schedule = review_schedule(root)
     age_hours = oldest_new_card_age_hours(root)
     hour_now = time.localtime().tm_hour
-    in_window = schedule["wakeHour"] <= hour_now < schedule["sleepHour"]
+    # 窗口起点 = 配置钟点与**真实起床**取晚的那个(2026-09-08):
+    #   6 点就醒也不在 8 点前打扰(不早于配置);睡到 11 点也不会在 8 点被当成已起床(不早于实际)。
+    woke_at = wake_time_today_ms(root)
+    after_waking = woke_at is None or _now_ms() >= woke_at
+    in_window = (schedule["wakeHour"] <= hour_now < schedule["sleepHour"]) and after_waking
     settled = age_hours is not None and age_hours >= schedule["newMinAgeHours"]
     if new >= schedule["newThreshold"]:
         if settled:
@@ -1136,7 +1191,7 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
     return {
         "due": due, "new": new,
         "newAgeHours": age_hours, "newInWindow": in_window, "newSettled": settled,
-        "schedule": schedule, "awake": looks_awake(root)[0],
+        "schedule": schedule, "awake": looks_awake(root)[0], "wokeAtMs": woke_at,
     }
 
 
