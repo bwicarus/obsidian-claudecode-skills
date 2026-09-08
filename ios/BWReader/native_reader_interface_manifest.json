@@ -2097,6 +2097,27 @@
       "description": "Read one asynchronous Pi job status."
     },
     {
+      "path": "/pdf/api/jp-reading",
+      "match": "exact",
+      "owner": "pi",
+      "methods": [
+        "GET"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": {
+        "mode": "none",
+        "scope": "none",
+        "requiredMethods": [],
+        "identities": [],
+        "continuation": null
+      },
+      "description": "Reading and pitch accent only (unidic, offline, no AI, no vocabulary write)."
+    },
+    {
       "path": "/pdf/api/jp-vocab-mark",
       "match": "exact",
       "owner": "pi",

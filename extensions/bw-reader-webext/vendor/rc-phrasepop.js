@@ -493,6 +493,23 @@ if (window.__bwPwaProviderOnly) return;
     return '';
   }
 
+  // 词组的读音/音调过去只有本地 JMdict **整条命中**时才有,而「海の底」「耳の鼓膜」这类短语词典里没有整条,
+  // 于是注音和音调一起空着(用户 2026-09-08:「为何卡片不提供注音和音调等」)。unidic 按分词能拼出整串读音,
+  // 走 /pdf/api/jp-reading(离线、毫秒级、不碰 AI、不写生词库)补上。拿不到就保持原样,绝不因此拖慢或报错。
+  // ⚠ 长短语的音调核只是近似:unidic 按词给,不处理连读变调。
+  async function _fillPhraseReading(result, text, isJa) {
+    if (!isJa || !result || result.reading) return result;
+    try {
+      var response = await fetch('/pdf/api/jp-reading?word=' + encodeURIComponent(text));
+      if (!response.ok) return result;
+      var data = await response.json();
+      if (!data || data.ok !== true || !data.reading) return result;
+      result.reading = data.reading;
+      if (result.accent == null && data.accent != null) result.accent = data.accent;
+    } catch (_) {}
+    return result;
+  }
+
   async function _lookupPhraseLocalFirst(text, context, isJa) {
     var localResult = null;
     if (isJa) {
@@ -683,7 +700,8 @@ if (window.__bwPwaProviderOnly) return;
       }
     }
     (async function () {
-      render(await _lookupPhraseLocalFirst(text, context, isJa));
+      render(await _fillPhraseReading(
+        await _lookupPhraseLocalFirst(text, context, isJa), text, isJa));
     })();
   }
 

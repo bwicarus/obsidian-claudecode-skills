@@ -714,6 +714,20 @@ def _project_codex_thread(
     }
 
 
+def _publish_assistant_text(value: str) -> str:
+    """发布进侧栏的助手正文:剥掉纯传输用的 [COMPLETE] 前缀(2026-09-08 用户截图实锤它露到了正文里)。
+
+    _history_match_text 早就会剥它,但那只用于**对齐匹配**(它的 docstring 明说"发布的始终是原始字符串"),
+    于是标记一路进了侧栏。发布是给人看的,传输标记不该出现;对齐那条路照旧用原始串,两者互不影响。
+    """
+    text = str(value or "")
+    stripped = text.lstrip()
+    if stripped.casefold().startswith("[complete]"):
+        stripped = stripped[len("[COMPLETE]"):]
+        return stripped.strip()
+    return text
+
+
 def _history_match_text(value: str, *, user: bool) -> str:
     """Normalize only enough text to align old Voice and Codex records.
 
@@ -1433,7 +1447,7 @@ def sync_once(
         else:
             for pair in pending:
                 payload = {
-                    "text": pair["assistant"],
+                    "text": _publish_assistant_text(pair["assistant"]),
                     "user_utterance": pair["user"],
                 }
                 try:
@@ -2100,7 +2114,7 @@ class CaptureBoundHistorySynchronizer:
                     response = self.publisher(
                         "assistant_turn",
                         {
-                            "text": segment["assistant"],
+                            "text": _publish_assistant_text(segment["assistant"]),
                             "user_utterance": segment["user"],
                         },
                         request_id=request_id,

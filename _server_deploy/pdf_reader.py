@@ -9733,6 +9733,34 @@ def pdf_api_dict_jp():
     })
 
 
+@bp.route("/api/jp-reading")
+def pdf_api_jp_reading():
+    """只算读音+音调,不查词义、不碰 AI(2026-09-08 用户:「为何卡片不提供注音和音调等」)。
+
+    词组框的读音过去只有本地 JMdict **整条命中**时才有,而「海の底」「耳の鼓膜」这类短语词典里没有整条,
+    于是注音和音调一起空着。unidic(fugashi)本来就能按分词拼出整串读音并给出音调核,离线、毫秒级、零额度,
+    只是没有一条不触发词义查询的路由暴露它 —— dict-jp 那条会顺带调 AI 生成词条,给词组用太贵。
+    ⚠ 音调对复合短语只是**近似**:unidic 按词给,不处理连读变调,所以长短语的音调核可能偏。
+    """
+    word = (request.args.get("word") or "").strip()
+    if not word or len(word) > 64:
+        return jsonify({"ok": False, "error": "word 无效"}), 400
+    try:
+        import dict_sources as _ds   # type: ignore
+        ra = _ds._jp_reading_accent(word) or {}
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)[:120]}), 500
+    if not ra.get("reading"):
+        return jsonify({"ok": False, "word": word})
+    return jsonify({
+        "ok": True, "word": word,
+        "reading": ra.get("reading", ""),
+        "reading_kata": ra.get("reading_kata", ""),
+        "accent": ra.get("accent"),
+        "mora": ra.get("mora"),
+    })
+
+
 @bp.route("/api/jp-vocab-mark", methods=["POST"])
 def pdf_api_jp_vocab_mark():
     """日语词掌握标记 → 跟英语**完全同一条路径** compute_mastery.apply_user_mark
