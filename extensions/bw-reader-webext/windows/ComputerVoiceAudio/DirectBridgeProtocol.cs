@@ -2574,7 +2574,8 @@ internal sealed class DirectBridgeProtocolSession
                 "aid",
                 "card",
                 "nodeIds",
-                "projection");
+                "projection",
+                "track");
         }
         else
         {
@@ -2582,7 +2583,8 @@ internal sealed class DirectBridgeProtocolSession
             // extension sent canonical Markdown only as `card`; use that same
             // Markdown-shaped value as the fallback projection until WebExt
             // starts sending the separately rendered `projection` field.
-            // nodeIds（KJ 知识节点）2026-09-06 起必填：制卡必须带节点。
+            // nodeIds（KJ 知识节点）2026-09-06 起必填：制卡必须带归属。
+            // 2026-09-08 起归属二选一，track 承担单词/语法卡的归属。
             RequireExactKeys(
                 message,
                 "contract",
@@ -2594,7 +2596,8 @@ internal sealed class DirectBridgeProtocolSession
                 "cardIndex",
                 "aid",
                 "card",
-                "nodeIds");
+                "nodeIds",
+                "track");
         }
         if (Encoding.UTF8.GetByteCount(message.GetRawText()) > 192 * 1024)
         {
@@ -2624,7 +2627,8 @@ internal sealed class DirectBridgeProtocolSession
             "sourceInstanceId");
         string draftId = RequireString(message, "draftId", 64);
         string aid = RequireString(message, "aid", 64);
-        string[] nodeIds = RequireKjNodeIds(message);
+        string track = RequireKjCardTrack(message);
+        string[] nodeIds = RequireKjNodeIds(message, track);
         if (!message.TryGetProperty("cardIndex", out JsonElement indexValue)
             || indexValue.ValueKind != JsonValueKind.Number
             || !indexValue.TryGetInt32(out int cardIndex)
@@ -2656,6 +2660,7 @@ internal sealed class DirectBridgeProtocolSession
                     card,
                     projection,
                     nodeIds,
+                    track,
                     cancellationToken).ConfigureAwait(false);
             return outcome.Result.ToPayload(outcome.Dedup);
         }
@@ -2846,9 +2851,45 @@ internal sealed class DirectBridgeProtocolSession
         return id;
     }
 
-    /// 制卡必须绑定 1~8 个 KJ 知识节点（2026-09-06 用户拍板）。缺失/无效直接拒绝，绝不静默放行。
-    private static string[] RequireKjNodeIds(JsonElement message)
+    /// 学习轨道（单词/语法卡的归属，2026-09-08）。缺失=空串，表示这张卡走概念节点那条路。
+    private static string RequireKjCardTrack(JsonElement message)
     {
+        if (!message.TryGetProperty("track", out JsonElement value))
+        {
+            return "";
+        }
+        string track = value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? ""
+            : "";
+        if (track.Length == 0)
+        {
+            return "";
+        }
+        if (!ReaderRealtimeOutputProtocol.KjCardTracks.IsValid(track))
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ANKI_NODE_REQUIRED",
+                "Reader 制卡 track 不在白名单内");
+        }
+        return track;
+    }
+
+    /// 制卡必须有归属（2026-09-06 用户拍板）。缺失/无效直接拒绝，绝不静默放行。
+    /// 2026-09-08：track 已承担归属时 nodeIds 必须为空；否则仍要 1~8 个合法节点。
+    private static string[] RequireKjNodeIds(JsonElement message, string track)
+    {
+        if (track.Length > 0)
+        {
+            if (message.TryGetProperty("nodeIds", out JsonElement bound)
+                && (bound.ValueKind != JsonValueKind.Array
+                    || bound.GetArrayLength() != 0))
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_ANKI_NODE_REQUIRED",
+                    "Reader 制卡按 track 归属时不应再带 nodeIds");
+            }
+            return Array.Empty<string>();
+        }
         if (
             !message.TryGetProperty("nodeIds", out JsonElement value)
             || value.ValueKind != JsonValueKind.Array
@@ -2857,7 +2898,7 @@ internal sealed class DirectBridgeProtocolSession
         {
             throw new DirectProtocolException(
                 "BW_READER_ANKI_NODE_REQUIRED",
-                "Reader 制卡必须绑定 1~8 个知识节点（nodeIds）");
+                "Reader 制卡必须给出归属：单词/语法卡传 track，概念卡绑 1~8 个知识节点（nodeIds）");
         }
         HashSet<string> seen = new(StringComparer.Ordinal);
         List<string> ids = new();

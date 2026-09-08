@@ -1658,6 +1658,7 @@ internal sealed class ReaderKjBindingLog
         int cardIndex,
         string sourceInstanceId,
         IReadOnlyList<string> nodeIds,
+        string track,
         ReaderLocalAnkiAddResult result,
         JsonObject projectionCard)
     {
@@ -1673,6 +1674,7 @@ internal sealed class ReaderKjBindingLog
                 ["sourceInstanceId"] = sourceInstanceId,
                 ["nodeIds"] = new JsonArray(
                     nodeIds.Select(value => (JsonNode?)value).ToArray()),
+                ["track"] = track,
                 ["noteIds"] = new JsonArray(
                     result.NoteIds.Select(value => (JsonNode?)value).ToArray()),
                 ["cardIds"] = new JsonArray(
@@ -1780,15 +1782,20 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
         JsonObject canonicalCard,
         JsonObject projectionCard,
         IReadOnlyList<string> nodeIds,
+        string track,
         CancellationToken cancellationToken)
     {
         ReaderLocalAnkiRegistry.RequireAid(aid);
-        if (nodeIds.Count is < 1 or > ReaderRealtimeOutputProtocol.KjNodeIdRules.Maximum
-            || nodeIds.Any(id => !ReaderRealtimeOutputProtocol.KjNodeIdRules.IsValid(id)))
+        // 归属二选一(2026-09-08):合法 track → 不带节点;否则仍要 1~8 个合法节点。
+        bool tracked = ReaderRealtimeOutputProtocol.KjCardTracks.IsValid(track);
+        if (tracked
+            ? nodeIds.Count != 0
+            : nodeIds.Count is < 1 or > ReaderRealtimeOutputProtocol.KjNodeIdRules.Maximum
+                || nodeIds.Any(id => !ReaderRealtimeOutputProtocol.KjNodeIdRules.IsValid(id)))
         {
             throw new ReaderLocalAnkiException(
                 "BW_READER_ANKI_NODE_REQUIRED",
-                "Reader 制卡必须绑定 1~8 个知识节点（nodeIds）");
+                "Reader 制卡必须给出归属：单词/语法卡传 track，概念卡绑 1~8 个知识节点（nodeIds）");
         }
         ReaderLocalAnkiRegisteredCard registered =
             await _registry.ResolveCardAsync(
@@ -1890,6 +1897,7 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
                     aidTag,
                     fingerprintTag,
                     nodeIds,
+                    track,
                     cancellationToken).ConfigureAwait(false);
             }
             catch (ReaderAnkiConnectException exception)
@@ -1972,6 +1980,7 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
                     cardIndex,
                     sourceInstanceId,
                     nodeIds,
+                    track,
                     result,
                     registered.ProjectionCard);
                 return AddOutcomeWithBackgroundSync(
@@ -3021,6 +3030,7 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
         string aidTag,
         string fingerprintTag,
         IReadOnlyList<string> nodeIds,
+        string track,
         CancellationToken cancellationToken)
     {
         string[] models = RequireStrings(await _client.CallAsync(
@@ -3050,8 +3060,12 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
             cancellationToken).ConfigureAwait(false);
         // KJ 节点绑定也进 Anki tag（kj::kj_XXXXXXXXXX，冒号换下划线避开 Anki 的层级分隔符），
         // 这样即使绑定账本丢了也能从卡本身重建关联。
+        // 学习轨道进 tag(track::jp-word 等):单词/语法卡不绑概念节点,轨道就是它在 Anki 里的归属痕迹。
         string[] tags = new[] { "pdf-snippets", "card-lab", aidTag, fingerprintTag, "kj" }
             .Concat(nodeIds.Select(id => "kj::" + id.Replace(':', '_')))
+            .Concat(ReaderRealtimeOutputProtocol.KjCardTracks.IsValid(track)
+                ? new[] { "track::" + track }
+                : Array.Empty<string>())
             .ToArray();
         return new ReaderLocalAnkiPreparedNote(
             model,

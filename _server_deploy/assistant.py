@@ -3003,10 +3003,16 @@ def _t_make_anki(args, ctx):
     )
     if not text:
         return {"error": "缺要做卡的内容(给 text 或先选中)"}
-    # 2026-09-06 用户拍板：制卡必须绑定 KJ 知识节点，缺了直接拒绝（fail-closed），不再返回成功。
-    node_ids = _kj_require_node_ids(args.get("node_ids") or args.get("nodeIds"))
-    if isinstance(node_ids, dict):
-        return node_ids
+    # 归属二选一(2026-09-08):轨道 or 概念节点。词汇/语法走轨道,直接跳过节点查询那两轮往返。
+    track = _kj_card_track(args.get("track") or args.get("kind"))
+    if track:
+        node_ids = []
+    else:
+        node_ids = _kj_require_node_ids(args.get("node_ids") or args.get("nodeIds"))
+        if isinstance(node_ids, dict):
+            # 既没给轨道也没给节点:把轨道这条路一并告诉模型,别让它继续硬造概念节点
+            node_ids["error"] += "；若这是单词/语法卡，改传 track（%s）即可，不必绑节点" % "/".join(KJ_CARD_TRACKS)
+            return node_ids
     # Phase2 软 gate(据 page_type):内容取自整页兜底且本页判为『无关页』(目录/版权/空白)→ 软性确认,不硬拒。
     #   仅在**没给 text、也没选中**(最弱意图)时提示;page_type 可能判错,给了 text/选中就照做不拦(避免误伤)。
     if not (args.get("text") or "").strip() and not (ctx.get("selection") or "").strip():
@@ -3073,6 +3079,7 @@ def _t_make_anki(args, ctx):
         "speak": f"做好了{n}张卡片草稿，你在卡片上确认后保存到 Reader 卡库",
         "note": f"生成了{n}张卡片草稿，等你确认后保存到 Reader 本地卡库",
         "node_ids": node_ids,   # 随卡进本地卡仓 source.kjNodes，确认入库时带给桥
+        "track": track,         # 学习轨道(词汇/语法);与 node_ids 二选一,同样随卡带给桥
     }
     if src:
         result["source_ref"] = src
@@ -6274,9 +6281,26 @@ def _kj_call(ctx, fn):
         return {"ok": False, "error": "KJ 出错:%s" % str(e)[:200]}
 
 
+# 卡片的**学习轨道**(2026-09-08 用户拍板)。09-06 那条"制卡必须绑 1~8 个知识节点"的初衷是**不许有无归属的卡**,
+# 这条保留;但归属不必都是"概念节点"。用户实锤:とうもろこし / 詰めが甘い 这类日语词被硬造成 concept 节点后
+# 在知识网络里全是孤岛(27 条前置边没有一条连到它们),而且制卡前要先 kj_search 再 kj_register,
+# 两轮额外的 AI 往返全挡在卡片显示前面 —— 判断质量还最差(那时卡片内容根本不存在)。
+# 于是:词汇/语法卡走轨道,直接跳过节点查询;学科概念卡照旧绑节点。按语言分开,且词汇与语法分开。
+# ⚠ 这份枚举有 3 份副本要同步:本文件、static/pdf/rc-computer-voice.js(App 入站闸)、
+#   windows/ComputerVoiceAudio/ReaderRealtimeOutput.cs(桥白名单)。改之前先 grep KJ_CARD_TRACKS。
+KJ_CARD_TRACKS = ("jp-word", "jp-grammar", "en-word", "en-grammar")
+
+
+def _kj_card_track(value):
+    """取学习轨道;不是合法轨道就返回 ""(表示这张卡走概念节点那条路)。"""
+    track = str(value or "").strip().lower().replace("_", "-")
+    return track if track in KJ_CARD_TRACKS else ""
+
+
 def _kj_require_node_ids(value):
     """制卡必须绑定 1~8 个 KJ 节点（2026-09-06 用户拍板，fail-closed）。返回节点 id 列表，或 {"error","code"} 字典。
-    规则：已绑定的节点直接沿用；没绑定但库里有 → kj_search 找到再传；都没有 → kj_register type=node 建了再传。"""
+    规则：已绑定的节点直接沿用；没绑定但库里有 → kj_search 找到再传；都没有 → kj_register type=node 建了再传。
+    ⚠ 走轨道的卡(track)不经过这里 —— 归属由轨道承担,见 KJ_CARD_TRACKS。"""
     ids = value if isinstance(value, list) else ([value] if isinstance(value, str) and value.strip() else [])
     ids = list(dict.fromkeys(str(x).strip() for x in ids if str(x or "").strip()))
     if not ids or len(ids) > 8:
@@ -6528,9 +6552,12 @@ TOOLS = {
     "translate": ("翻译文字成中文(或 target 语言)。不传 text 则译选中/本页。args {text?, target?}", _t_translate),
     "goto_page": ("翻到指定页(前端跳转)。args {page};page 可以是数字,也可以是 last(最后一页)/first/+1/-1。结果里带『全书总页数』", _t_goto_page),
     "make_anki": ("把内容做成 Anki 卡片草稿供用户预览确认(**同步等做完才返回**,报告生成了几张;未确认不入库)。"
-                 "**node_ids 必填**:卡必须绑 1~8 个 KJ 知识节点(kj:XXXXXXXXXX)——已绑的节点直接沿用;"
-                 "没绑但库里有就 kj_search 找到;都没有才 kj_register type=node 新建。缺 node_ids 会被拒绝。"
-                 "args {node_ids, text?, requirement?, image_url?}。**requirement=把用户对卡片的具体要求原样转述**"
+                 "**每张卡必须有归属,二选一**:①**单词/语法卡传 track**(jp-word 日语单词 / jp-grammar 日语语法 / "
+                 "en-word 英语单词 / en-grammar 英语语法)——传了 track 就**别再查节点**,直接制卡,快;"
+                 "②**学科概念卡传 node_ids**(1~8 个 kj:XXXXXXXXXX):已绑的直接沿用,没绑但库里有就 kj_search 找到,"
+                 "都没有才 kj_register type=node 新建。两个都不给会被拒绝。"
+                 "⚠ 日语/英语的词汇与语法一律走 track —— 给它们建概念节点只会在知识网络里留下孤岛。"
+                 "args {track|node_ids, text?, requirement?, image_url?}。**requirement=把用户对卡片的具体要求原样转述**"
                  "(几张/难度/角度/语言,如'只做一张''简单点''考细节'——用户说什么就原样填,别自作主张)。"
                  "不传 text 用选中/本页;image_url 若刚 search_image 过、这张图也进卡片就把同一个 image_url 传进来", _t_make_anki),
     "make_note": ("把内容整理成 Obsidian 笔记(后台)。args {text?}(不传用选中/本页)", _t_make_note),
@@ -6977,13 +7004,17 @@ _TOOL_SCHEMA_OVERRIDES = {
         "note": {"type": "string", "description": "可选高亮备注"},
         "page": dict(_PAGE_VALUE_SCHEMA, description="印刷页码；不给则当前页"),
     }),
+    # 归属二选一(track 或 node_ids)。JSON Schema 这层不写 anyOf(工具 schema 是扁平白名单),
+    # 由 _t_make_anki 在运行时 fail-closed 拒绝"两个都不给";required 留空才让 track-only 的调用过得来。
     "make_anki": _tool_object_schema({
+        "track": {"type": "string", "enum": list(KJ_CARD_TRACKS),
+                  "description": "单词/语法卡的学习轨道；给了它就**不要**再查知识节点（这类卡不进概念网络）"},
         "node_ids": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "pattern": "^kj:[0-9A-HJKMNP-TV-Z]{10}$"},
-                     "description": "这张卡所属的 KJ 知识节点编号（先 kj_search，没有再 kj_register type=node）"},
+                     "description": "学科概念卡所属的 KJ 知识节点编号（先 kj_search，没有再 kj_register type=node）；单词/语法卡改用 track"},
         "text": {"type": "string", "description": "制卡内容；不给则用当前选中或当前页"},
         "requirement": {"type": "string", "description": "数量、难度、角度等具体要求"},
         "image_url": {"type": "string", "description": "可选配图 URL"},
-    }, required=("node_ids",)),
+    }),
     "make_note": _tool_object_schema({
         "text": {"type": "string", "description": "要整理进笔记的内容；不给则用当前选中"},
     }),

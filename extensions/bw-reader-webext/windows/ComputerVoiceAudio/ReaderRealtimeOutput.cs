@@ -275,21 +275,25 @@ internal static class ReaderRealtimeOutputProtocol
                     throw Invalid(
                         "Reader Anki 引用来源必须同时提供 file/target/sourceText");
                 }
-                // 2026-09-06 用户拍板：制卡必须绑定 KJ 知识节点（nodeIds），缺了直接拒绝。
+                // 2026-09-06 用户拍板：制卡必须有归属，缺了直接拒绝。
+                // 2026-09-08 起归属二选一：单词/语法卡带 track，概念卡带 1~8 个 nodeIds。
+                // track 是**可选**字段（滚动升级：桥先装、App 后出构建），故按有无分两套字段集。
+                bool hasTrack = root.TryGetProperty("track", out _);
                 if (exactSource)
                 {
                     Exact(
                         root,
-                        "draftId",
-                        "file",
-                        "target",
-                        "sourceText",
-                        "cards",
-                        "nodeIds");
+                        hasTrack
+                            ? new[] { "draftId", "file", "target", "sourceText", "cards", "nodeIds", "track" }
+                            : new[] { "draftId", "file", "target", "sourceText", "cards", "nodeIds" });
                 }
                 else
                 {
-                    Exact(root, "draftId", "cards", "nodeIds");
+                    Exact(
+                        root,
+                        hasTrack
+                            ? new[] { "draftId", "cards", "nodeIds", "track" }
+                            : new[] { "draftId", "cards", "nodeIds" });
                 }
                 ValidateAnkiDraftId(root, "draftId");
                 if (exactSource)
@@ -299,7 +303,7 @@ internal static class ReaderRealtimeOutputProtocol
                     Text(root, "sourceText", 2_000);
                 }
                 ValidateAnkiDraftCards(root.GetProperty("cards"));
-                ValidateKjNodeIds(root.GetProperty("nodeIds"));
+                ValidateKjCardAttribution(root);
                 break;
             case "client-action":
                 Exact(root, "fn", "args");
@@ -1350,8 +1354,23 @@ internal static class ReaderRealtimeOutputProtocol
         }
     }
 
+    /// 卡片的**学习轨道**：单词/语法卡以它为归属，不进概念节点网络（2026-09-08 用户拍板）。
+    /// 给日语单词硬造概念节点只会在知识网络里留孤岛，且制卡前多两轮 AI 往返。
+    /// ⚠ 白名单副本：本类 / assistant.py KJ_CARD_TRACKS / rc-computer-voice.js KJ_CARD_TRACKS。
+    internal static class KjCardTracks
+    {
+        private static readonly HashSet<string> Allowed = new(StringComparer.Ordinal)
+        {
+            "jp-word", "jp-grammar", "en-word", "en-grammar",
+        };
+
+        internal static bool IsValid(string? value) =>
+            value is not null && Allowed.Contains(value);
+    }
+
     /// KJ 知识节点编号：kj: + 10 位 Crockford base32（scripts/kj/ids.py 铸造）。
-    /// 制卡必须绑定 1~8 个；这里是白名单的 C# 副本，App 侧在 rc-computer-voice.js normalizeKjNodeIds。
+    /// 概念卡必须绑 1~8 个（单词/语法卡改由 KjCardTracks 承担归属）；
+    /// 这里是白名单的 C# 副本，App 侧在 rc-computer-voice.js normalizeKjNodeIds。
     internal static class KjNodeIdRules
     {
         internal const int Maximum = 8;
@@ -1364,6 +1383,30 @@ internal static class ReaderRealtimeOutputProtocol
             value is not null && Pattern.IsMatch(value);
     }
 
+    /// 归属二选一：合法 track → nodeIds 必须为空；否则 nodeIds 必须是 1~8 个合法节点。
+    private static void ValidateKjCardAttribution(JsonElement root)
+    {
+        string track = root.TryGetProperty("track", out JsonElement trackValue)
+            && trackValue.ValueKind == JsonValueKind.String
+                ? trackValue.GetString() ?? ""
+                : "";
+        JsonElement nodeIds = root.GetProperty("nodeIds");
+        if (track.Length > 0)
+        {
+            if (!KjCardTracks.IsValid(track))
+            {
+                throw Invalid("Reader 制卡 track 不在白名单内");
+            }
+            if (nodeIds.ValueKind != JsonValueKind.Array
+                || nodeIds.GetArrayLength() != 0)
+            {
+                throw Invalid("Reader 制卡按 track 归属时不应再带 nodeIds");
+            }
+            return;
+        }
+        ValidateKjNodeIds(nodeIds);
+    }
+
     private static void ValidateKjNodeIds(JsonElement nodeIds)
     {
         if (
@@ -1371,7 +1414,8 @@ internal static class ReaderRealtimeOutputProtocol
             || nodeIds.GetArrayLength() is < 1 or > KjNodeIdRules.Maximum
         )
         {
-            throw Invalid("Reader 制卡必须绑定 1~8 个知识节点（nodeIds）");
+            throw Invalid(
+                "Reader 制卡必须给出归属：单词/语法卡传 track，概念卡绑 1~8 个知识节点（nodeIds）");
         }
         HashSet<string> seen = new(StringComparer.Ordinal);
         foreach (JsonElement item in nodeIds.EnumerateArray())

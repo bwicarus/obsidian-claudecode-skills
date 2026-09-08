@@ -863,13 +863,33 @@ if (window.__bwPwaProviderOnly) return;
     };
   }
 
-  // KJ 知识节点编号（scripts/kj/ids.py）。制卡必须绑定 1~8 个 —— 2026-09-06 用户拍板，fail-closed。
-  // ⚠ 白名单副本之一：Windows C# ReaderRealtimeOutput.KjNodeIdRules / 这里 / rc-flashcard 导出前检查。
+  // KJ 知识节点编号（scripts/kj/ids.py）。每张卡必须有归属 —— 2026-09-06 用户拍板，fail-closed。
+  // 2026-09-08 起归属**二选一**：单词/语法卡给 track，学科概念卡给 1~8 个 nodeIds。
+  // 给日语单词硬造概念节点只会在知识网络里留孤岛（用户实锤 とうもろこし/詰めが甘い），且制卡前多两轮 AI 往返。
+  // ⚠ 白名单副本：本文件 / assistant.py KJ_CARD_TRACKS / C# ReaderRealtimeOutput.KjNodeIdRules+KjCardTracks。
   var KJ_NODE_ID_RE = /^kj:[0-9A-HJKMNP-TV-Z]{10}$/;
-  function normalizeKjNodeIds(value, label) {
+  var KJ_CARD_TRACKS = ["jp-word", "jp-grammar", "en-word", "en-grammar"];
+  function normalizeKjCardTrack(value) {
+    var track = typeof value === "string"
+      ? value.trim().toLowerCase().replace(/_/g, "-") : "";
+    return KJ_CARD_TRACKS.indexOf(track) >= 0 ? track : "";
+  }
+  function normalizeKjNodeIds(value, label, track) {
+    // 走轨道的卡不带节点：空数组是合法的，别再要求 1~8 个
+    if (track) {
+      if (value !== undefined && value !== null
+          && !(Array.isArray(value) && value.length === 0)) {
+        throw directError(
+          label + "已按 track 归属，不应再带 nodeIds",
+          "BW_READER_ANKI_NODE_INVALID",
+          false
+        );
+      }
+      return [];
+    }
     if (!Array.isArray(value) || value.length < 1 || value.length > 8) {
       throw directError(
-        label + "必须绑定 1~8 个知识节点（nodeIds）",
+        label + "必须给出归属：单词/语法卡传 track，概念卡绑 1~8 个知识节点（nodeIds）",
         "BW_READER_ANKI_NODE_REQUIRED",
         false
       );
@@ -1381,7 +1401,10 @@ if (window.__bwPwaProviderOnly) return;
       payload = {
         draftId: draftId,
         cards: normalizeReaderAnkiDraftCards(p.cards),
-        nodeIds: normalizeKjNodeIds(p.nodeIds, "Reader Anki 草稿"),
+        track: normalizeKjCardTrack(p.track),
+        nodeIds: normalizeKjNodeIds(
+          p.nodeIds, "Reader Anki 草稿", normalizeKjCardTrack(p.track)
+        ),
       };
       if (exactDraftSource) {
         var draftFile = safeText(p.file, "Reader Anki file", 4096, false);
@@ -5645,7 +5668,10 @@ if (window.__bwPwaProviderOnly) return;
       cardIndex: value.cardIndex,
       aid: aid,
       card: normalizedCard.canonical,
-      nodeIds: normalizeKjNodeIds(value.nodeIds, "本机 Anki 入库"),
+      track: normalizeKjCardTrack(value.track),
+      nodeIds: normalizeKjNodeIds(
+        value.nodeIds, "本机 Anki 入库", normalizeKjCardTrack(value.track)
+      ),
       projection: normalizedCard.projection,
     };
     var bytes = new TextEncoder().encode(JSON.stringify(normalized)).byteLength;

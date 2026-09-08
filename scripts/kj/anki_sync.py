@@ -116,6 +116,13 @@ def ingest_bridge_bindings(ledger: Ledger, path: str | Path | None = None, *, an
         node_ids = [str(n) for n in (rec.get("nodeIds") or []) if n]
         note_ids = [int(x) for x in (rec.get("noteIds") or []) if str(x).isdigit()]
         known = [n for n in node_ids if ledger.resolve(n) is not None]
+        # 走学习轨道的卡(单词/语法,2026-09-08)本就不绑概念节点:单独计数,别混进 skipped 让人以为丢了
+        track = str(rec.get("track") or "").strip()
+        if track and not node_ids:
+            out["tracked"] = out.get("tracked", 0) + 1
+            out.setdefault("tracks", {})
+            out["tracks"][track] = out["tracks"].get(track, 0) + 1
+            continue
         if not node_ids or not note_ids:
             out["skipped"] += 1
             continue
