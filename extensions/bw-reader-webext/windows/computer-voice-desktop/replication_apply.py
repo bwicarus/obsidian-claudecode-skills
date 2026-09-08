@@ -856,6 +856,12 @@ def run_once(
                     digests_path.parent
                     / replication_places.CURRENT_PLACE_FILE_NAME,
                 )
+                # 语音区（2026-09-08）：几个坐标 + 一个半径，让 App 在**本机**
+                # 即时判断在不在家。出门那一刻要立刻静音，问一趟 Windows
+                # 来不及；而 current-place 最旧可以是几小时前的，拿它判
+                # "我现在是不是出门了"正好会答错。写在 BWReader 根，
+                # 桥的 /reader-presence/v1 从那儿读出来随响应下发。
+                replication_places.export_voice_zones(local_root)
                 # 情境触发（2026-09-08 用户拍板「提供判断接口 + 自动触发
                 # 工具，让 codex 自己绑定，不然它每次都发明一个新工具」）：
                 # 求值 AI 注册的规则，上升沿的建通知。

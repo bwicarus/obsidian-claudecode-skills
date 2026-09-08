@@ -380,6 +380,62 @@ def export_current_place(root: Path, export_path: Path) -> dict | None:
     return value
 
 
+VOICE_ZONES_FILE_NAME = "voice-zones.json"
+
+
+def export_voice_zones(root: Path, export_path: Path | None = None) -> dict:
+    """把已命名的地点导成「语音区」，供 App 在**本机即时**判断在不在家。
+
+    ## 为什么 App 不能问 Windows
+
+    用户 2026-09-08：「如果我在外面没有带耳机的情况下如果 app 的语音是开启的
+    其实我希望 app 可以自动静音」。这个判断必须在设备本地即时完成 —— 出门那
+    一刻要立刻生效，绕一趟 Windows 再回来早就出声了；而 current-place.json 最旧
+    可以是几小时前的，拿它判"我现在是不是出门了"正好会答错。
+
+    所以 App 要的不是结论，是**判据**：几个坐标 + 一个半径，它自己拿当下的
+    定位比一比。这份文件就是那个判据。
+
+    ## 为什么由 Python 导而不是 C# 直接读别名表
+
+    别名→状态的映射（家/自宅→home，公司/职场→work）只应该存在一处。
+    让 C# 或 Swift 各自去认那几个中文名字，等于把同一张表抄成三份 ——
+    改了别名却只改一处的表现是"设置里明明写着家，App 就是不认"。
+    这里把 `place_state` 的结论一起导出，下游只认 home/work/elsewhere。
+    """
+    zones: list[dict[str, Any]] = []
+    for alias in load_aliases(root):
+        name = str(alias.get("name") or "").strip()
+        try:
+            lat = float(alias["lat"])
+            lon = float(alias["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not name:
+            continue
+        zones.append({
+            "name": name,
+            "state": place_state(name),
+            "lat": lat,
+            "lon": lon,
+        })
+    value = {
+        "contract": "reader-voice-zones/1",
+        # 与 resolve_alias 用的是**同一个**半径常量：两处各写一个数字，
+        # 就会出现"Windows 认为到家了、App 认为还没到"这种谁也说不清的分歧。
+        "hitRadiusM": ALIAS_HIT_RADIUS_M,
+        "zones": zones,
+        "atUtcMs": int(time.time() * 1000),
+    }
+    path = export_path or (root / VOICE_ZONES_FILE_NAME)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False) + "\n", encoding="utf-8")
+    temporary.replace(path)
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=None)

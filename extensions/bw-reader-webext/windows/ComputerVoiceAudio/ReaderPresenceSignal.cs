@@ -122,12 +122,43 @@ internal static class ReaderPresenceSignal
             return;
         }
 
+        JsonObject reply = new()
+        {
+            ["ok"] = true,
+            ["audioRoute"] = route,
+        };
+        // 顺路把「语音区」带回去：App 靠它在**本机**判断在不在家。
+        // 为什么搭这趟车而不另开一个端点：App 需要这份判据的时机，正好
+        // 就是它在报在场状态的时候；另开端点等于多一条要各自保活的链。
+        JsonNode? zones = ReadVoiceZones();
+        if (zones is not null) reply["voiceZones"] = zones;
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = "application/json; charset=utf-8";
         await context.Response.WriteAsync(
-            new JsonObject { ["ok"] = true, ["audioRoute"] = route }
-                .ToJsonString(),
-            cancellationToken).ConfigureAwait(false);
+            reply.ToJsonString(), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// 读 Python 导出的语音区。读不到就**不带这个字段** ——
+    /// 空数组会被 App 理解成"一个已命名的地点都没有"，于是它认为自己
+    /// 永远在外面，一出声就静音。缺字段才是"这次没拿到，用你缓存的那份"。
+    private static JsonNode? ReadVoiceZones()
+    {
+        try
+        {
+            Configure();
+            string path;
+            lock (Gate)
+            {
+                path = Path.Combine(_storeDirectory, "voice-zones.json");
+            }
+            if (!File.Exists(path)) return null;
+            JsonNode? parsed = JsonNode.Parse(File.ReadAllText(path));
+            return parsed as JsonObject;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     private static async Task<JsonObject?> ReadBodyAsync(

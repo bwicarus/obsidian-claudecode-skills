@@ -346,6 +346,11 @@ private struct ReaderRootView: View {
             // 复习提醒据此决定起床后才出声。同一个醒来时刻只报一次;
             // 没授权/没数据/电脑不可达都安静降级 —— Windows 那边会回落到设备活动推断。
             await ReaderSleepReporter.shared.refresh()
+            // 在场信号(2026-09-08):耳机/前台报给 Windows,顺路把「语音区」
+            // 判据取回来缓存。⚠ 自动静音**不等**这次往返 —— 它已经在
+            // ReaderPresenceGuard 里本机判完了;这趟只是给 AI 判断和
+            // situation_triggers 的规则留一份副本,失败安静降级。
+            await ReaderPresenceGuard.shared.report(foreground: true)
             var secondsUntilSnapshotRefresh = 12
             while !Task.isCancelled {
                 do {

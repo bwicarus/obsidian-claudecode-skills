@@ -88,6 +88,9 @@ final class NativeAudioEngine {
             queue: nil
         ) { [weak self] _ in
             self?.reportRecoveryNeeded("系统音频路由已变化")
+            // 耳机拔出的那一刻要立刻静（2026-09-08）。这是整个自动静音
+            // 功能里唯一时间敏感的地方 —— 晚一秒声音就已经出去了。
+            self?.applyPresenceMute()
         }
         mediaServicesResetObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.mediaServicesWereResetNotification,
@@ -263,6 +266,9 @@ final class NativeAudioEngine {
         do {
             try engine.start()
             player.play()
+            // 开播时也判一次：只在路由变化时判会漏掉"出门之后才开始说话"
+            // 这一种 —— 那时路由早就是扬声器了，不会再有变化事件。
+            applyPresenceMute()
             stateLock.lock()
             running = true
             stateLock.unlock()
@@ -290,6 +296,30 @@ final class NativeAudioEngine {
 
     var isInputMuted: Bool {
         AVAudioApplication.shared.isInputMuted
+    }
+
+    /// 输出静音（2026-09-08 用户：在外面没戴耳机时自动静音）。
+    ///
+    /// 改播放节点的音量而**不是**停播：会话照常、字幕照出、AI 还听得见他，
+    /// 只是不出声。用户要的是"静音"，不是"挂断"。
+    func setOutputMuted(_ muted: Bool) {
+        controlQueue.async { [player] in
+            player.volume = muted ? 0 : 1
+        }
+    }
+
+    /// 问一次在场判断并应用。判断本身在 ReaderPresenceGuard 里（本机即时，
+    /// 不出网），这里只负责把结论落到音量上。
+    ///
+    /// ⚠ 用**拉**而不是让 guard 推：同时存在两个 NativeAudioEngine
+    /// （语音会话和语音桥各一个），推的一方要记住有几个订阅者，
+    /// 而漏掉一个的表现是"有时静音有时不静"，极难查。
+    private func applyPresenceMute() {
+        Task { @MainActor [weak self] in
+            let guardian = ReaderPresenceGuard.shared
+            guardian.reevaluate(reason: "音频引擎询问")
+            self?.setOutputMuted(guardian.shouldMuteVoiceOutput)
+        }
     }
 
     func setInputMuted(_ muted: Bool) throws {
