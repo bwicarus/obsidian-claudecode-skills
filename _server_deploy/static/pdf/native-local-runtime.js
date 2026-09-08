@@ -8226,7 +8226,7 @@
           native_formula_state: String(result.state || 'unknown'),
           native_formula_source: String(result.source || 'none'),
           // 本地权威(2026-09-03):按本地字符层 + 本地 vocabulary-state 算;服务端增强只做并集
-          vocab_marks: localVocabMarks(result && result.chars),
+          vocab_marks: safeLocalVocabMarks(result && result.chars),
           vocab_sentences: [],
           mastered_furi: [],
           offset: { dx: 0, dy: 0, scale: 1 }
@@ -8257,6 +8257,21 @@
     var before = neighbor(lo, -1), after = neighbor(hi, 1);
     return !!((before && before.w === wa) || (after && after.w === wb));
   }
+  // 算下划线抛异常时,整页 overlay 的返回对象都构造不出来 → 这一页公式/下划线/句子全没
+  // (用户 2026-09-08:「连续翻页后 app 的下划线等全部消失」)。这里兜住,但**出声**:
+  // 静默返回空正是"全没了却查不出为什么"的成因(references/silent-failure-lessons.md 规则一)。
+  function safeLocalVocabMarks(chars) {
+    try {
+      return localVocabMarks(chars);
+    } catch (error) {
+      try {
+        (root.dlog || function () {})('localVocabMarks 失败,本页下划线为空: '
+          + String((error && (error.stack || error.message)) || error).slice(0, 400));
+      } catch (_) {}
+      return [];
+    }
+  }
+
   function localVocabMarks(chars) {
     var state = root.BWReaderRuntime && root.BWReaderRuntime.vocabularyState;
     if (!state || state.CONTRACT !== 'vocabulary-state/1' ||
@@ -8443,15 +8458,17 @@
       });
     } catch (_) {}
     // 掌握范围压制:被某个已掌握的词/词组范围完全包住的标记不画(部分词不能比整体"更不熟")
-    if (masteredRanges.length) {
-      marks = marks.filter(function (m) {
-        if (!Number.isInteger(m._lo) || !Number.isInteger(m._hi)) return true;
-        for (var q = 0; q < masteredRanges.length; q += 1) {
-          if (masteredRanges[q][0] <= m._lo && m._hi <= masteredRanges[q][1]) return false;
-        }
-        return true;
-      });
-    }
+    try {
+      if (masteredRanges.length) {
+        marks = marks.filter(function (m) {
+          if (!Number.isInteger(m._lo) || !Number.isInteger(m._hi)) return true;
+          for (var q = 0; q < masteredRanges.length; q += 1) {
+            if (masteredRanges[q][0] <= m._lo && m._hi <= masteredRanges[q][1]) return false;
+          }
+          return true;
+        });
+      }
+    } catch (_) {}
     marks.forEach(function (m) { delete m._lo; delete m._hi; });
     return marks;
   }
