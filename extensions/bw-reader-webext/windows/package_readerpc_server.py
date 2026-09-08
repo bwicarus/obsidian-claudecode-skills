@@ -76,6 +76,11 @@ RUNTIME_SOURCES = {
     ),
     # 触发能做的事（2026-09-08）。situation_triggers 在 then.action 非空时
     # 硬 import 它 —— 漏了这个的表现是"规则注册得了、触发时报 ImportError"。
+    # 语音复习要念的那一组卡（2026-09-09）。AI 直接跑稳定路径上的这份。
+    "readerpc-runtime/review_deck.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "review_deck.py"
+    ),
     "readerpc-runtime/situation_actions.py": (
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "situation_actions.py"
@@ -506,7 +511,7 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             "camera_capture.py", "voip_push.py", "judgment_basis.py",
             "board_card_render.py",
             "situation_signals.py", "situation_triggers.py",
-            "situation_actions.py",
+            "situation_actions.py", "review_deck.py",
         ):
             (root.parent / stable_name).write_bytes(
                 (release / "readerpc-runtime" / stable_name).read_bytes()
