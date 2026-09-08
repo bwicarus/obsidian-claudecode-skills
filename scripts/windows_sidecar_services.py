@@ -3,7 +3,7 @@
 
 Pi 上除 webapp(Flask) 之外还有几个 systemd 独立服务，App/手表/iPad 直连它们：
   voice-rt      voice_realtime_relay.py   127.0.0.1:8767   豆包实时语音中继(App wss /voice-rt)
-  watch-voice   watch_voice_relay.py      127.0.0.1:8768   Apple Watch ↔ Windows 桥的语音中继
+  (watch-voice  已于 2026-09-09 暂停：用户停研发与 PC 服务，恢复见 SERVICES 里那行注释)
   rbi           rbi_server.py             127.0.0.1:8769   远程浏览器(iPad 看 PC 上的真 Chrome)
   mcp           mcp_server.py --http 8766 127.0.0.1:8766   MCP 门面(tailscale serve /mcp)
 Flask 本身由 local_supervisor.pyw 托管；这里只管这三个。每个子进程崩了 5s 后拉起，
@@ -29,7 +29,11 @@ PYTHON = sys.executable.replace("pythonw.exe", "python.exe")
 
 SERVICES = {
     "voice-rt": [PYTHON, str(DEPLOY / "voice_realtime_relay.py")],
-    "watch-voice": [PYTHON, str(DEPLOY / "watch_voice_relay.py")],
+    # ⏸ 手表语音中继：用户 2026-09-09 拍板**暂停研发与 PC 服务**。
+    #    代码原样留着（_server_deploy/watch_voice_relay.py、
+    #    ios/BWReader/Watch/WatchVoice*.swift），只是不再由这里拉起 ——
+    #    恢复就是把下面这行的注释去掉。
+    # "watch-voice": [PYTHON, str(DEPLOY / "watch_voice_relay.py")],
     "rbi": [PYTHON, str(DEPLOY / "rbi_server.py")],
     # MCP 门面(外部 agent 控制整个 App;认 ~/.config/mcp-webapp-token → webapp api_tokens)
     "mcp": [PYTHON, str(DEPLOY / "mcp_server.py"), "--http", "8766"],

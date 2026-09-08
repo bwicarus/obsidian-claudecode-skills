@@ -808,7 +808,7 @@ class ManagedProcessController:
 
 
 def default_server_services(project_root: Path | None = None) -> list[ManagedServiceSpec]:
-    """Flask(5000)+ 四个 sidecar 的规格。project_root 为 None 时返回空表(影子模式也显示不出来,
+    """Flask(5000)+ 三个 sidecar 的规格（手表语音中继 2026-09-09 起暂停）。project_root 为 None 时返回空表(影子模式也显示不出来,
     UI 会提示"未找到服务器工作树")。"""
     root = project_root or discover_server_project_root()
     if root is None or not (root / "_server_deploy" / "app.py").is_file() or not (root / ".env.local").is_file():
@@ -820,7 +820,11 @@ def default_server_services(project_root: Path | None = None) -> list[ManagedSer
     return [
         ManagedServiceSpec("webapp", "Flask 服务器(5000)", (python, "app.py"), deploy, 5000, logs / "local_flask.log", env, watch_globs=("*.py",)),
         ManagedServiceSpec("voice-rt", "实时语音中继(8767)", (python, str(deploy / "voice_realtime_relay.py")), deploy, 8767, logs / "sidecar-voice-rt.log", env),
-        ManagedServiceSpec("watch-voice", "手表语音中继(8768)", (python, str(deploy / "watch_voice_relay.py")), deploy, 8768, logs / "sidecar-watch-voice.log", env),
+    # ⏸ 手表语音中继：用户 2026-09-09 拍板**暂停研发与 PC 服务**。
+    #    代码原样留着（_server_deploy/watch_voice_relay.py、
+    #    ios/BWReader/Watch/WatchVoice*.swift），只是不再由这里拉起 ——
+    #    恢复就是把下面这行的注释去掉。
+        # ManagedServiceSpec("watch-voice", "手表语音中继(8768)", (python, str(deploy / "watch_voice_relay.py")), deploy, 8768, logs / "sidecar-watch-voice.log", env),
         ManagedServiceSpec("rbi", "远程浏览器(8769)", (python, str(deploy / "rbi_server.py")), deploy, 8769, logs / "sidecar-rbi.log", env),
         ManagedServiceSpec("mcp", "MCP 门面(8766)", (python, str(deploy / "mcp_server.py"), "--http", "8766"), deploy, 8766, logs / "sidecar-mcp.log", env),
     ]

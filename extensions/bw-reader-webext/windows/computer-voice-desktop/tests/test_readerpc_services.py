@@ -394,7 +394,12 @@ class ManagedProcessControllerTests(unittest.TestCase):
             (root / "_server_deploy" / "app.py").write_text("", "utf-8")
             (root / ".env.local").write_text("APP_PYTHON=C:/py/python.exe\n", "utf-8")
             specs = default_server_services(root)
-            self.assertEqual([s.name for s in specs], ["webapp", "voice-rt", "watch-voice", "rbi", "mcp"])
+            names = [s.name for s in specs]
+            self.assertEqual(names, ["webapp", "voice-rt", "rbi", "mcp"])
+            # ⏸ 手表语音中继 2026-09-09 起暂停（用户停研发与 PC 服务）。
+            # 这条**显式**钉住"故意不在"：否则以后有人看到清单少一个，
+            # 会当成漏了而顺手加回去。要恢复就连这条断言一起改。
+            self.assertNotIn("watch-voice", names)
             self.assertEqual(specs[0].command[0], "C:/py/python.exe")
             self.assertEqual(specs[0].port, 5000)
             # 状态文件带 services 子树,且不含进程路径/凭据
