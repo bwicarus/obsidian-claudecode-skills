@@ -25,7 +25,83 @@ final class ReaderSleepReporter {
     private static let endpoint = URL(
         string: "https://\(ReaderNativePiGateway.piHost)/reader-sleep/v1")
 
+    /// 观察查询挂过没有。挂两次会收到两份唤醒，也就会重复上报。
+    private var observing = false
+
     private init() {}
+
+    /// 启动时挂上后台投递（2026-09-09 用户点名要）。
+    ///
+    /// ⚠ **必须在 App 启动时调，不能挂在视图的 `.task` 里。** 系统因为新的
+    /// 睡眠样本把 App 唤到**后台**时 SwiftUI 视图层根本不出现，`.task` 永远
+    /// 不跑 —— 表现是"权限给了、后台投递也开了，就是一条都没上报"，
+    /// 而没有一处会报错。VoIP 那条链 2026-08-29 正是这么栽的，同一个形态。
+    ///
+    /// 声明成 `nonisolated static` 是为了能在 AppDelegate 里直接调（那里不在
+    /// MainActor 上），真正的工作在内部切回主线程做，与 `ReaderWatchLink` 同款。
+    nonisolated static func activateFromLaunch() {
+        Task { @MainActor in await shared.startBackgroundDelivery() }
+    }
+
+    /// 让系统在新的睡眠样本落库时叫醒我们。
+    ///
+    /// 为什么需要它：原来只在 `scenePhase == .active` 时读一次，也就是
+    /// **用户打开 App 才报**。于是 Windows 那边的"今天几点起的"长期落空，
+    /// 只能回落到设备活动推断，而那个推断只看阅读器操作，盲区很大
+    /// （2026-09-09 实测：`sleep-signal.json` 根本没被写过）。
+    func startBackgroundDelivery() async {
+        guard !observing else { return }
+        guard HKHealthStore.isHealthDataAvailable() else {
+            lastNote = "这台设备没有健康数据"
+            return
+        }
+        guard let sleepType = HKCategoryType.categoryType(
+            forIdentifier: .sleepAnalysis) else {
+            lastNote = "取不到睡眠数据类型"
+            return
+        }
+        do {
+            try await store.requestAuthorization(toShare: [], read: [sleepType])
+        } catch {
+            lastNote = "请求健康授权失败：\(error.localizedDescription)"
+            return
+        }
+        observing = true
+
+        let query = HKObserverQuery(
+            sampleType: sleepType, predicate: nil
+        ) { [weak self] _, completionHandler, error in
+            // ⚠⚠ `completionHandler()` **无论如何都要调**，而且要在系统给的
+            // 那段时间内调完。不调的话 iOS 会先节流、然后干脆不再唤醒 ——
+            // 表现是"一开始还报，过几天就不报了"，最难查的那一类。
+            // 所以它写在 defer 里，任何一条提前返回都盖得住。
+            Task { @MainActor in
+                defer { completionHandler() }
+                if let error {
+                    self?.lastNote = "后台唤醒带着错误：\(error.localizedDescription)"
+                    return
+                }
+                await self?.refresh()
+            }
+        }
+        store.execute(query)
+
+        // 观察查询只在 App 活着时管用；**把它变成"能把 App 叫醒"的是这一步**。
+        // 两个都要，少一个的表现都是"前台好使、后台没动静"。
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            store.enableBackgroundDelivery(
+                for: sleepType, frequency: .hourly
+            ) { [weak self] ok, error in
+                Task { @MainActor in
+                    self?.lastNote = ok
+                        ? "后台投递已挂上，等系统在新睡眠样本落库时叫醒"
+                        : "后台投递没挂上：" + (error?.localizedDescription
+                            ?? "系统没说原因")
+                    continuation.resume()
+                }
+            }
+        }
+    }
 
     /// App 进前台时调一次。同一个醒来时刻只报一次，重复调用是廉价的。
     func refresh() async {

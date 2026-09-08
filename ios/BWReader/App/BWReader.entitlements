@@ -7,6 +7,13 @@
          等基础链路稳了再加,那时不用再动开发者后台。 -->
     <key>com.apple.developer.healthkit</key>
     <true/>
+    <!-- 后台投递（2026-09-09 用户点名要）：让系统在新的睡眠样本落库时把 App
+         叫醒，不必等用户打开它。上面那条注释当时写"等基础链路稳了再加，
+         那时不用再动开发者后台" —— 链路 2026-09-08 已端到端验过，现在补上。
+         ⚠ 它不需要 UIBackgroundModes：HealthKit 用的是自己那套唤醒，
+         不是后台模式。加了反而会被审核问"你要后台干什么"。 -->
+    <key>com.apple.developer.healthkit.background-delivery</key>
+    <true/>
     <key>com.apple.security.application-groups</key>
     <array>
         <string>group.space.bwicarus.bwreader2</string>

@@ -48,6 +48,11 @@ final class BWReaderAppDelegate: NSObject, UIApplicationDelegate {
         // `nonisolated static` 正是为了能在这里（不在 MainActor 上）直接调。
         // 真正的激活在它内部切回主线程做。
         ReaderWatchLink.activateFromLaunch()
+        // 睡眠信号的后台投递（2026-09-09）。⚠ 同样**必须在启动时注册**：
+        // 系统因为新的睡眠样本把 App 唤到后台时视图层不出现，挂在 .task 里
+        // 永远不跑 —— 表现是"权限给了、投递也开了，就是一条都没上报"。
+        // 这跟下面 VoIP 那条踩过的是同一个坑。
+        ReaderSleepReporter.activateFromLaunch()
         // VoIP 来电（通知阶梯最响的一级）。**必须在启动时注册**：
         // ⚠ 晚注册 = token 迟迟拿不到，而没有 token 就永远打不进来 ——
         // 且这个失败完全静默：发送方推了、APNs 收下了、设备上什么也没发生。

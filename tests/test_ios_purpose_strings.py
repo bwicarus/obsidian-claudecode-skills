@@ -25,6 +25,13 @@ REQUIRED_PURPOSE_STRINGS = {
         "NSHealthShareUsageDescription",
         "NSHealthUpdateUsageDescription",
     ),
+    # 后台投递本身不额外要用途说明，但它同样属于"碰健康数据"。
+    # 单独列一条是为了防一种改动：有人把 healthkit 那条去掉却留着这条，
+    # 于是上面的检查不再触发，而苹果照样会要那两句话。
+    "com.apple.developer.healthkit.background-delivery": (
+        "NSHealthShareUsageDescription",
+        "NSHealthUpdateUsageDescription",
+    ),
 }
 
 
