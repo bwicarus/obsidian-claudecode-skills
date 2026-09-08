@@ -500,7 +500,13 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
   `CODEX_DEFAULT_MODEL`=gpt-5.5；空模型走 CLI 默认 gpt-6-astra 曾让旧 CLI 直接 400）；Claude CLI 登录失效写
   `state/ai-health.json` 并冷却 10 分钟，auto-claude 期内先走 Codex、到点再探、成功即清；`~/.config/claude-code-oauth-token`
   存在时以 `CLAUDE_CODE_OAUTH_TOKEN` 注入（`claude setup-token` 一次生成长期令牌）。`ai_client.ai_health()` 一眼看状态。
-  夜间「JP Dict Refresh」计划任务（03:30，`bin/jp_dict_refresh.cmd`）刷日语词典旧版词条。详见 `references/vocab-system.md` §14。
+  夜间「JP Dict Refresh」计划任务（03:30，`bin/jp_dict_refresh.cmd`）刷日语词典旧版词条，**2026-09-08 用户拍板停用**
+  （凌晨跑了 31 分钟、起 26 次 Claude CLI，撞上他在用电脑；旧条目本来就会在他读到时自动升级，提前批量刷不值这个代价）。
+  任务定义保留着，`Enable-ScheduledTask -TaskName 'JP Dict Refresh'` 可随时恢复。详见 `references/vocab-system.md` §14。
+- 🪟 **计划任务一律经 `bin/run_hidden.vbs` 启动**（2026-09-08）：Task Scheduler 以交互身份直接跑 `.cmd` 会在桌面**闪一个
+  控制台窗口**，哪怕任务只花 0.2 秒（用户实锤：每 15 分钟闪一次）。动作写成
+  `wscript.exe //B //Nologo "…inun_hidden.vbs" "…in\你的.cmd"`，VBS 用 `Shell.Run(line, 0, True)` 隐藏窗口并等待，
+  退出码原样传回（`LastTaskResult` 仍然可信、`MultipleInstances=IgnoreNew` 仍然有效）。新建计划任务照此办理。
   模型可选项有 **6 份副本**要一起改（2026-09-07 加 fable / gpt-6-astra / gpt-5.6-* 时数过）：`rc-settings.js` 句子翻译下拉、
   `templates/pdf_reader.html` 两个下拉、`rc-assistant.js` 与 `reader.src/25-assistant.js` 的 `_SPEC` 谱、`assistant.py` `_CLAUDE_VARIANTS`/`_CODEX_VARIANTS`/`_VARIANT_SHORT`、`voice.py` 的 `--model` 白名单。
   ⚠ `config.CLAUDE_CLI` 默认已改为按实际安装位找（`~/.local/bin/claude.exe` → PATH → 旧 WinGet 位）：以前硬编码的 WinGet 位早已不存在，

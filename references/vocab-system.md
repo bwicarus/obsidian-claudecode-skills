@@ -703,7 +703,7 @@ Codex 永远带模型（`settings.model` 否则 `CODEX_DEFAULT_MODEL`=gpt-5.5，
 到点再探一次，成功即清标记）；`~/.config/claude-code-oauth-token` 存在时以 `CLAUDE_CODE_OAUTH_TOKEN` 注入 CLI
 子进程（用户跑一次 `claude setup-token` 生成长期令牌，不再依赖交互式会话的刷新令牌）。`ai_health()` 一眼看状态，
 含凭证有效期字段（只读 `~/.claude/.credentials.json` 的 `refreshTokenExpiresAt`，绝不读令牌本身）。
-③ **夜间刷新** `scripts/vocab/refresh_stale_jp_cache.py`（Windows 计划任务「JP Dict Refresh」03:30，
+③ **夜间刷新（⏸ 2026-09-08 已停用，见本节末）** `scripts/vocab/refresh_stale_jp_cache.py`（Windows 计划任务「JP Dict Refresh」03:30，
 `bin/jp_dict_refresh.cmd`，日志 `state/logs/jp-dict-refresh.log`，状态 `state/dict-cache-refresh.json`）：
 按 `dict_sources._jp_entry_fresh`（与 `lookup_jp` **同一条规则**）找旧版词条，先片假名缺 `source_word` 的（用户看得见）
 再其余 pv 落后的，每晚 200 条（Haiku low ≈ 2–4 s/条），AI 连败 3 次即停。2026-09-07 存量：旧版 6091 条，其中片假名
@@ -722,3 +722,20 @@ common 排，幼児 恰好两条都 common），`asLegacy` 又把"表层 ≠ 词
 **已掌握范围压掉里面的短标记**（同日，用户：「更大范围的词组已经收藏并掌握了，但是其中的部分词反而又有下划线」）：已掌握的词/词组本来
 就不画，于是它的范围对里面的短标记没有压制力。`localVocabMarks` 现在把已掌握范围登记下来（第一遍按 w、第二遍把 `mastered` 记录的键+别名
 也全文搜），被完全包住的标记一律不画。契约 `local-vocab-marks.contract.test.mjs`「已掌握的词/词组范围压掉里面的短标记」。
+
+### §19.6 夜间批量刷新停用；计划任务一律无窗口（2026-09-08 用户拍板）
+
+用户：「首先都做成无窗口，其次暂停单词的这个夜间批量更新，保留阅读时自动更新的渠道就好了」。起因是他反复看到终端窗口一闪
+而过、电脑瞬间卡顿。查下来是两件事：① **KJ Anki Sync 每 15 分钟**跑一次 `.cmd`，任务本身只花 0.2 秒，但 Task Scheduler
+以交互身份跑 `.cmd` 必然在桌面开一个控制台窗口；② **JP Dict Refresh** 2026-09-08 03:30 那次跑了 31 分钟、起了 26 次
+Claude CLI（每次一个几百 MB 的进程），正好撞上他在用电脑。
+
+- **无窗口**：两个任务的动作都改成 `wscript.exe //B //Nologo "binun_hidden.vbs" "bin\<任务>.cmd"`。
+  `run_hidden.vbs` 用 `Shell.Run(line, 0, True)`：0=隐藏窗口，True=等子进程结束并把退出码传回，所以 `LastTaskResult`
+  仍然可信、`MultipleInstances=IgnoreNew` 仍然能防重入。ReaderPC 看门狗早就是这个机制，所以它从来不闪。
+- **停用夜间批量**：`Disable-ScheduledTask -TaskName "JP Dict Refresh"`，任务定义保留，`Enable-ScheduledTask` 可随时恢复。
+  停掉不丢任何东西 —— 旧条目在用户**读到它时**由 `lookup_jp` 的 stale-while-revalidate 自动升级（第一跳秒回旧条目并标
+  `stale`，后台按新提示词重生成，客户端 12 s 后自动重问并原地重绘）。停用当天实测「本体」：旧条目「主体；本体；正品」
+  （"正品"是中文同形词渗进来的错义），30 s 后重生成为「本体；实体；本质；主体」。
+- 当时存量：缓存 6122 条，其中按当前 `_JP_PROMPT_VER=6` 算旧版 4429 条（片假名缺 `source_word` 的已在 09-07 夜里清零，
+  剩下的全是含汉字词的语感修正）。
