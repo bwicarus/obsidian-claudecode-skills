@@ -168,6 +168,8 @@ WINDOWS_SOURCE_FILES = (
     "ComputerVoiceAudio/ReaderContextReadLedger.cs",
     "ComputerVoiceAudio/ReaderDictionaryFallback.cs",
     "ComputerVoiceAudio/ReaderDisplayBoard.cs",
+    "ComputerVoiceAudio/ReaderCodexEndpoint.cs",
+    "ComputerVoiceAudio/ReaderCodexPush.cs",
     "ComputerVoiceAudio/ReaderPresenceSignal.cs",
     "ComputerVoiceAudio/ReaderSleepSignal.cs",
     "ComputerVoiceAudio/ReaderDocumentCorpus.cs",

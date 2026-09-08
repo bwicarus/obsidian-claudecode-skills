@@ -747,6 +747,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             ReaderPresenceSignal.RoutePath,
             new[] { "POST", "OPTIONS" },
             context => HandlePresenceSignalAsync(context, serviceToken));
+        // Codex 主动推送的绑定登记（2026-09-09 交接）：管道地址和目标任务 id
+        // 只有 Codex 亲自启动的进程才有，独立启动的 ReaderPC 拿不到 ——
+        // 所以只能由 AI 自己报上来。带 TTL，过期即失效。
+        app.MapMethods(
+            ReaderCodexEndpoint.RoutePath,
+            new[] { "POST", "OPTIONS" },
+            context => HandleCodexEndpointAsync(context, serviceToken));
         app.MapMethods(
             ReaderAttentionBoard.AckPath,
             new[] { "GET", "POST", "OPTIONS" },
@@ -2281,6 +2288,21 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             return;
         }
         await ReaderSleepSignal
+            .WriteResponseAsync(context, serviceCancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task HandleCodexEndpointAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "codex-endpoint")) return;
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        await ReaderCodexEndpoint
             .WriteResponseAsync(context, serviceCancellationToken)
             .ConfigureAwait(false);
     }

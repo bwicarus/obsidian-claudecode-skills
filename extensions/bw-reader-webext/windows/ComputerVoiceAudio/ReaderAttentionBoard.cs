@@ -827,15 +827,30 @@ internal static class ReaderAttentionBoard
         {
             return;
         }
-        await WriteIfChangedAsync(
+        bool slowChanged = await WriteIfChangedAsync(
             Path.Combine(directory, SlowFileName), slowToWrite,
             token).ConfigureAwait(false);
-        await WriteIfChangedAsync(
+        bool fastChanged = await WriteIfChangedAsync(
             Path.Combine(directory, FastFileName), fast,
             token).ConfigureAwait(false);
+        // 登记表变了**不推送**：它是清单不是情报，推它等于白唤醒一次。
         await WriteIfChangedAsync(
             Path.Combine(directory, RegistryFileName), registry,
             token).ConfigureAwait(false);
+        // 主动推送（2026-09-09 交接：把"它来拉"改成"我们来推"）。
+        //
+        // ⚠ 挂在**落盘之后**：板面文件仍是权威与回退面，推送只是让对面
+        // 早知道。顺序反了会出现"推送说变了、文件还是旧的"，
+        // 而对面拿到通知后第一件事就是去读文件。
+        //
+        // ⚠ 只在真的写了盘时推 —— 空转一轮不推。这条就是"无变化静默"。
+        if (slowChanged || fastChanged)
+        {
+            await ReaderCodexPush
+                .NotifyBoardChangedAsync(
+                    slowChanged, fastChanged, token)
+                .ConfigureAwait(false);
+        }
     }
 
     /// 慢板这一轮要不要落盘。调用方须持有 Gate。
@@ -908,7 +923,16 @@ internal static class ReaderAttentionBoard
         }
     }
 
-    private static async Task WriteIfChangedAsync(
+    /// 返回**这一次是不是真的写了盘**。
+    ///
+    /// 2026-09-09 为主动推送加的返回值：推送要挂在"板面确实变了"这个判断上，
+    /// 而那个判断这里已经算过了。让调用方自己再比一次内容，就是把同一个
+    /// 政策写成两份 —— 慢板"攒 4 次"的规则一旦两边不一致，
+    /// 表现是推送和板子各说各话，而两边都不会报错。
+    ///
+    /// ⚠ 写失败返回 false：那一轮对面看到的还是旧内容，推送出去就是在
+    /// 说一件没发生的事。下一轮会重试（记号已清），届时再推。
+    private static async Task<bool> WriteIfChangedAsync(
         string path, string body, CancellationToken token)
     {
         lock (Gate)
@@ -917,7 +941,7 @@ internal static class ReaderAttentionBoard
                 && string.Equals(had, body, StringComparison.Ordinal)
                 && File.Exists(path))
             {
-                return;
+                return false;
             }
             LastWritten[path] = body;
         }
@@ -927,6 +951,7 @@ internal static class ReaderAttentionBoard
             await File.WriteAllTextAsync(
                 temporary, body, token).ConfigureAwait(false);
             File.Move(temporary, path, overwrite: true);
+            return true;
         }
         catch (Exception)
         {
@@ -937,6 +962,7 @@ internal static class ReaderAttentionBoard
             {
                 LastWritten.Remove(path);
             }
+            return false;
         }
     }
 
