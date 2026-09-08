@@ -243,6 +243,7 @@ node 契约全量 + 拼合/vendor 一致 + 语法 + 网络审计，几分钟内�
 - `references/evidence-quality-lessons.md` — **证据质量三条规则 + 落地检查表**（2026-08-17，游戏探针首场 3/8 误判的沉淀）。⚠ **建任何「大量采集→事后让 AI 提炼」的通道前先读**：病根不是 AI 判不准也不是阈值没调好，而是**存下来的东西根本没法判**——采集不可重来,分析层能重写一百遍,当时没存对的救不回来。三条：① 一个信号只有一种解释时才能单独采（但也别过度承诺:实测判不出就如实记歧义,别让确定性层假装能判）② 单帧不是证据、序列才是（时间覆盖要宽于事件:远景认种类/近景认过程/事后认结果）③ 模糊帧等于没有帧（每个时刻留候选,按清晰度挑）。附:性能瓶颈要实测再砍（PIL LANCZOS 47.8ms → numpy 步长降采样 7.7ms 且分辨率更高）
 - `references/video-understanding-2026.md` — **视频理解 2026 调研结论 + 我们的架构判据**（2026-08-17 一晚五份独立调研,含直接读 llama.cpp/transformers/vLLM 源码）。⚠ **想"换个更好的视频模型"之前先读这里**——大概率不用换。一句话:**没有任何生产级 VLM 的 video encoder 有真时序**,所谓"视频输入"在 Qwen3-VL/Gemini/llama.cpp 全家都是"抽帧+文本时间戳"(Qwen3-VL 官方主动废除时序位置编码;llama.cpp 的 `--video` 就是 `--image` 的别名);而工业界通用形态是**廉价确定性信号扫全部 → 昂贵模型只看候选**(Verkada 只送裁剪不送整帧、SoccerNet 冠军全是 YOLO+跟踪+几何、内容审核 1fps 采样、游戏 highlight 全靠遥测且唯一做像素 CV 的公司破产了)。含:最高性价比改进(**把光流画进帧里,同模型 0%→51.54%**)+ 我们踩的两个坑(游戏镜头在动要做全局补偿、光流需相邻帧故加自适应连拍)+ 明确不值得做的五项(TAL 已停滞/streaming VLM/生成模型 encoder/场景检测)+ 待做清单(音频 P0、IG-VLM 帧网格、Set-of-Mark)
 - `references/vendor-docs-local.md` — **本地厂商参考库**(`/home/bwicarus/refs/`,git 之外):OpenAI cookbook(含 Realtime 提示词指南/上下文压缩/out-of-band)、**官方 realtime-agents 参考应用**、xAI cookbook。⚠ **要查官方资料先 grep 这里,别急着上网**(2026-07-14 教训:没查官方资料导致成本算反、开关没找到)
+- `references/situation-signals-triggers.md` — **情境信号词汇表 + 自动触发原语**（2026-09-08 用户拍板：判断接口和触发工具由我们提供，codex 只负责绑定，否则它每次都发明一个新工具）。封闭的 15 个信号（place/awake/headphones/review_new…，「不知道」与「否」分开）+ 一个触发注册 CLI（上升沿检测，所以「到家」「起床后」不需要专用谓词）+ 耳机自动静音的分工（判断在 App 本机即时，判据由 Windows 下发，在场状态回传只是副本）。含要数的副本清单：两份打包清单、桥路由四处、两条互不相干的流水线
 - `references/grammar-analysis-system.md` — 英语语法分析系统：grammar KG（`scripts/kg/build_grammar_nodes.py` 三层抽取 + `grammar-nodes.json`）+ spacy 词性/依存（独立 spacy-venv，`spacy_parse.py --server` 常驻模式免每次加载模型，pdf_reader 经 `_spacy_worker_request` 锁串行+超时自愈调用）+ pdf_reader 的 grammar-* 路由（跟踪语法点分析；spaCy 结果存 sentence-only 缓存键、grammar-stream 有回放缓存）
 
 **脚本**
@@ -505,7 +506,8 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
   任务定义保留着，`Enable-ScheduledTask -TaskName 'JP Dict Refresh'` 可随时恢复。详见 `references/vocab-system.md` §14。
 - 🪟 **计划任务一律经 `bin/run_hidden.vbs` 启动**（2026-09-08）：Task Scheduler 以交互身份直接跑 `.cmd` 会在桌面**闪一个
   控制台窗口**，哪怕任务只花 0.2 秒（用户实锤：每 15 分钟闪一次）。动作写成
-  `wscript.exe //B //Nologo "…inun_hidden.vbs" "…in\你的.cmd"`，VBS 用 `Shell.Run(line, 0, True)` 隐藏窗口并等待，
+  `wscript.exe //B //Nologo "…in
+un_hidden.vbs" "…in\你的.cmd"`，VBS 用 `Shell.Run(line, 0, True)` 隐藏窗口并等待，
   退出码原样传回（`LastTaskResult` 仍然可信、`MultipleInstances=IgnoreNew` 仍然有效）。新建计划任务照此办理。
   模型可选项有 **6 份副本**要一起改（2026-09-07 加 fable / gpt-6-astra / gpt-5.6-* 时数过）：`rc-settings.js` 句子翻译下拉、
   `templates/pdf_reader.html` 两个下拉、`rc-assistant.js` 与 `reader.src/25-assistant.js` 的 `_SPEC` 谱、`assistant.py` `_CLAUDE_VARIANTS`/`_CODEX_VARIANTS`/`_VARIANT_SHORT`、`voice.py` 的 `--model` 白名单。
