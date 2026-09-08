@@ -740,6 +740,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             ReaderSleepSignal.RoutePath,
             new[] { "POST", "OPTIONS" },
             context => HandleSleepSignalAsync(context, serviceToken));
+        // 在场信号（2026-09-08）：耳机/前台。同样只收不判 ——
+        // 「在外面没耳机就静音」这个判断在 App 本地做（要即时），
+        // 这里收的副本给 AI 判断和 situation_triggers 的规则用。
+        app.MapMethods(
+            ReaderPresenceSignal.RoutePath,
+            new[] { "POST", "OPTIONS" },
+            context => HandlePresenceSignalAsync(context, serviceToken));
         app.MapMethods(
             ReaderAttentionBoard.AckPath,
             new[] { "GET", "POST", "OPTIONS" },
@@ -2274,6 +2281,21 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             return;
         }
         await ReaderSleepSignal
+            .WriteResponseAsync(context, serviceCancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task HandlePresenceSignalAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "presence")) return;
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        await ReaderPresenceSignal
             .WriteResponseAsync(context, serviceCancellationToken)
             .ConfigureAwait(false);
     }

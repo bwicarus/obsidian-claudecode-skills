@@ -65,6 +65,7 @@ DIRECT_SERVE_SIBLING_PATHS = (
     # 复习提醒据此定"起床点"。这份清单同时就是 tailscale serve 的白名单
     # (control_plane.ALLOWED_SERVE_PATHS 复用它),漏了这里新地址一律 404。
     "/reader-sleep/v1",
+    "/reader-presence/v1",
 )
 DIRECT_WSS_URL = (
     "wss://bwicarus-2.taile44d0c.ts.net"

@@ -850,6 +850,32 @@ def run_once(
                 review_due = replication_notifications.ensure_review_due(
                     notify_store, local_root
                 )
+                import replication_places
+                replication_places.export_current_place(
+                    local_root,
+                    digests_path.parent
+                    / replication_places.CURRENT_PLACE_FILE_NAME,
+                )
+                # 情境触发（2026-09-08 用户拍板「提供判断接口 + 自动触发
+                # 工具，让 codex 自己绑定，不然它每次都发明一个新工具」）：
+                # 求值 AI 注册的规则，上升沿的建通知。
+                #
+                # ⚠ 位置在这条链里的位置是**被两头夹住**的，别随手挪：
+                #   ① 必须在 export_current_place **之后** —— 条件里的 place
+                #      读的就是那个文件，顺序反了会拿上一轮的旧位置判这一轮；
+                #   ② 必须在两个 export_* **之前** —— 触发建出来的通知要赶上
+                #      本轮投影，否则侧栏/板子要等下一轮（15 分钟）才看见它。
+                try:
+                    import situation_triggers
+                    triggered = situation_triggers.evaluate(local_root)
+                    if triggered.get("fired"):
+                        status["situationTriggersFired"] = [
+                            one["name"] for one in triggered["fired"]
+                        ]
+                except Exception as trigger_error:  # noqa: BLE001
+                    # 规则引擎炸了不拦通知维护 —— 但**要留下原因**，
+                    # 否则表现是"注册的规则从来不响"而没人说得出为什么。
+                    status["situationTriggersError"] = str(trigger_error)[:500]
                 notify_store.export_open(
                     digests_path.parent
                     / replication_notifications.EXPORT_FILE_NAME
@@ -857,12 +883,6 @@ def run_once(
                 notify_store.export_user_open(
                     digests_path.parent
                     / replication_notifications.USER_EXPORT_FILE_NAME
-                )
-                import replication_places
-                replication_places.export_current_place(
-                    local_root,
-                    digests_path.parent
-                    / replication_places.CURRENT_PLACE_FILE_NAME,
                 )
                 # 路由层（2026-08-30）：对每条 pending 判「现在能不能说、
                 # 怎么说」，结论写 notification-routing.json，板子照着渲。
