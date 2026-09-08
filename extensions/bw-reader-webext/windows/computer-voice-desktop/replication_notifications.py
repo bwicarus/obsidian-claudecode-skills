@@ -898,6 +898,57 @@ REVIEW_DUE_SPEAK_THRESHOLD = 32
 #: 一次学习的合理量就值得提一句，故取 10 而不是 32。
 REVIEW_NEW_SPEAK_THRESHOLD = 10
 
+#: 新卡至少"静置"多久才值得提醒（用户 2026-09-08：「不能是学完立刻就进行」）。
+#: 刚做完卡内容还在脑子里，立刻复习问不出真实记忆，间隔效应也白费。
+REVIEW_NEW_MIN_AGE_HOURS = 3
+#: 提醒的时间窗（本地时钟，含头不含尾）。「也不能太晚」：晚上给一堆待学只会挤掉睡觉，
+#: 而白天太早人还没进状态。窗口外**不催也不消**，等进窗口再说。
+REVIEW_NEW_WINDOW_HOURS = (10, 21)
+#: 一次建议做多少张（用户：「数量也不能太多太占用时间」）。按每张 30–60 秒算，10 张约 5–10 分钟。
+REVIEW_NEW_BATCH = 10
+
+
+def oldest_new_card_age_hours(root: Path) -> float | None:
+    """最早那张新卡已经放了多久（小时）。没有新卡返回 None。
+
+    时间取便签的 `created`（同一张便签里的卡是一起做的，粒度够用）；
+    秒/毫秒都容忍 —— 副本里现存的是秒，但这个字段历史上两种都出现过，
+    判错一次就会让"静置 3 小时"变成"静置 3 毫秒"，那正是这条规则要防的事。
+    """
+    import json as _json
+    data_dir = root / "replication-data"
+    if not data_dir.is_dir():
+        return None
+    now_ms = _now_ms()
+    oldest_ms: int | None = None
+    for book_dir in data_dir.iterdir():
+        path = book_dir / "document-notes.json"
+        try:
+            value = _json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        for item in (value.get("items") or {}).values():
+            if not isinstance(item, dict):
+                continue
+            card = item.get("card")
+            if not isinstance(card, dict):
+                continue
+            has_new = any(
+                isinstance(one, dict) and not one.get("_removed") and not one.get("_next")
+                for one in (card.get("cards") or [])
+            )
+            if not has_new:
+                continue
+            created = item.get("created")
+            if not isinstance(created, (int, float)) or created <= 0:
+                continue
+            created_ms = int(created if created > 1_000_000_000_000 else created * 1000)
+            if oldest_ms is None or created_ms < oldest_ms:
+                oldest_ms = created_ms
+    if oldest_ms is None:
+        return None
+    return max(0.0, (now_ms - oldest_ms) / 3_600_000.0)
+
 
 def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
     """复习到期生产者（每轮对账调用）。
@@ -940,23 +991,41 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
     # 新卡自己的启动契机(2026-09-08):与到期那条**分开**的通知种类,措辞是"待学习"不是"待复习"。
     # 分开而不是并进 due 的原因:两者回落条件不同 —— 新卡学过一次就有了 _next,从 new 转入 due,
     # 若共用一条通知,那次转移会被当成"回落"而误消。
+    #
+    # 三个条件同时满足才开口(用户 2026-09-08 定的时机要求):
+    #   ① 数量够(≥ REVIEW_NEW_SPEAK_THRESHOLD) ② 最早那张已静置 ≥ REVIEW_NEW_MIN_AGE_HOURS
+    #   ③ 当前在 REVIEW_NEW_WINDOW_HOURS 窗口内
+    # ⚠ 只有 ① 不满足才算"目标达成"去消通知;②③ 不满足是**时机未到**,保持现状等下一轮 ——
+    #   把"还没到点"当成"已经不需要"消掉,会让通知在窗口边缘反复生灭。
+    age_hours = oldest_new_card_age_hours(root)
+    hour_now = time.localtime().tm_hour
+    in_window = REVIEW_NEW_WINDOW_HOURS[0] <= hour_now < REVIEW_NEW_WINDOW_HOURS[1]
+    settled = age_hours is not None and age_hours >= REVIEW_NEW_MIN_AGE_HOURS
     if new >= REVIEW_NEW_SPEAK_THRESHOLD:
-        store.create(
-            kind="review-new",
-            title="还没开始学的新卡已有 %d 张" % new,
-            body=("另有 %d 张到期待复习。" % due) if due else "",
-            source="review-scheduler",
-            audience="user",
-            dedupe_key="review-new:" + day,
-            end="expires:%d" % (_now_ms() + 24 * 3600 * 1000),
-        )
+        if settled and in_window:
+            batch = min(new, REVIEW_NEW_BATCH)
+            body = "先做 %d 张就好，大约 %d 分钟。" % (batch, max(5, batch))
+            if due:
+                body += "另有 %d 张到期待复习。" % due
+            store.create(
+                kind="review-new",
+                title="还没开始学的新卡已有 %d 张" % new,
+                body=body,
+                source="review-scheduler",
+                audience="user",
+                dedupe_key="review-new:" + day,
+                end="expires:%d" % (_now_ms() + 24 * 3600 * 1000),
+            )
     else:
         for item in list(store.open_items()):
             if item.get("kind") == "review-new":
                 store.resolve(
                     item["id"], by="auto",
                     note="新卡已降到 %d 张（他开始学了）" % new)
-    return {"due": due, "new": new}
+    return {
+        "due": due, "new": new,
+        "newAgeHours": age_hours, "newInWindow": in_window, "newSettled": settled,
+    }
 
 
 def render_list(items: list[dict[str, Any]]) -> str:
