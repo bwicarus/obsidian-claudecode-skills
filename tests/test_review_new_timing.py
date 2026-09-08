@@ -88,7 +88,10 @@ class ReviewNewTimingTests(unittest.TestCase):
         self.assertLessEqual(rn.REVIEW_NEW_BATCH, 20, "一次别超过 20 张")
         self.assertGreaterEqual(rn.REVIEW_NEW_MIN_AGE_HOURS, 1)
         start, end = rn.REVIEW_NEW_WINDOW_HOURS
-        self.assertTrue(8 <= start < end <= 22, "窗口要落在清醒且不挤睡眠的时段")
+        # 窗口 = 起床到睡前(用户 2026-09-08)。终点允许到 24(午夜):睡前是当天最后的补课机会。
+        # 这两个数字是占位,真正的边界将由睡眠状态判定接管。
+        self.assertTrue(6 <= start <= 10, "起点该在起床前后")
+        self.assertTrue(start < end <= 24, "终点最晚到午夜")
 
 
 if __name__ == "__main__":
