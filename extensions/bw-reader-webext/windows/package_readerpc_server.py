@@ -81,6 +81,12 @@ RUNTIME_SOURCES = {
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "review_deck.py"
     ),
+    # 提示板推送的登记命令（2026-09-09）。⚠ 必须由 Codex 启动才有意义：
+    # 它读的是自己进程继承来的 CODEX_APP_TOOLS_PIPE_PATH / CODEX_THREAD_ID。
+    "readerpc-runtime/codex_push_register.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "codex_push_register.py"
+    ),
     "readerpc-runtime/situation_actions.py": (
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "situation_actions.py"
@@ -512,6 +518,7 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             "board_card_render.py",
             "situation_signals.py", "situation_triggers.py",
             "situation_actions.py", "review_deck.py",
+            "codex_push_register.py",
         ):
             (root.parent / stable_name).write_bytes(
                 (release / "readerpc-runtime" / stable_name).read_bytes()

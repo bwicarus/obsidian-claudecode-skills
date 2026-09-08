@@ -198,6 +198,7 @@ WINDOWS_SOURCE_FILES = (
     "computer-voice-desktop/bridge_core.py",
     "computer-voice-desktop/camera_capture.py",
     "computer-voice-desktop/computer-voice-direct.config.example.json",
+    "computer-voice-desktop/codex_push_register.py",
     "computer-voice-desktop/control_plane.py",
     "computer-voice-desktop/desktop_launcher.py",
     "computer-voice-desktop/judgment_basis.py",
