@@ -2108,14 +2108,8 @@
         "pdf"
       ],
       "status": "supported",
-      "remoteBook": {
-        "mode": "none",
-        "scope": "none",
-        "requiredMethods": [],
-        "identities": [],
-        "continuation": null
-      },
-      "description": "Reading and pitch accent only (unidic, offline, no AI, no vocabulary write)."
+      "description": "Reading and pitch accent only (unidic, offline, no AI, no vocabulary write).",
+      "remoteBook": null
     },
     {
       "path": "/pdf/api/jp-vocab-mark",
