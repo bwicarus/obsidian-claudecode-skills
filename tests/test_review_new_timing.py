@@ -35,12 +35,17 @@ class FakeStore:
 WAKE_MS = 1_788_900_000_000   # 测试里"下一个起床点"的固定值
 
 
-def run(store, *, new, due=0, age=99.0, hour=14, schedule=None):
-    """跑一次生产者,把数量/静置/钟点/作息都钉死(作息读取本身另有用例)。"""
+def run(store, *, new, due=0, age=99.0, hour=14, schedule=None, awake=True):
+    """跑一次生产者,把数量/静置/钟点/作息/醒着都钉死(各自的读取另有用例)。"""
     plan = {"wakeHour": 8, "sleepHour": 24, "newThreshold": rn.REVIEW_NEW_SPEAK_THRESHOLD,
             "newMinAgeHours": rn.REVIEW_NEW_MIN_AGE_HOURS, "newBatch": rn.REVIEW_NEW_BATCH}
     plan.update(schedule or {})
-    with mock.patch.object(rn, "count_due_cards", return_value=(due, new)),             mock.patch.object(rn, "oldest_new_card_age_hours", return_value=age),             mock.patch.object(rn, "review_schedule", return_value=plan),             mock.patch.object(rn, "next_window_start_ms", return_value=WAKE_MS),             mock.patch.object(rn, "time", wraps=time) as fake_time:
+    with mock.patch.object(rn, "count_due_cards", return_value=(due, new)), \
+            mock.patch.object(rn, "oldest_new_card_age_hours", return_value=age), \
+            mock.patch.object(rn, "review_schedule", return_value=plan), \
+            mock.patch.object(rn, "looks_awake", return_value=(awake, "test")), \
+            mock.patch.object(rn, "next_window_start_ms", return_value=WAKE_MS), \
+            mock.patch.object(rn, "time", wraps=time) as fake_time:
         fake_time.localtime.return_value = time.struct_time(
             (2026, 9, 8, hour, 0, 0, 0, 251, 0))
         fake_time.strftime.side_effect = time.strftime
@@ -132,3 +137,19 @@ class ReviewNewTimingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_asleep_defers_even_inside_the_window(self):
+        """钟点只是粗筛:窗口内但几小时没动静(像在睡),也该蛰伏到起床点而不是当场出声。"""
+        store = FakeStore()
+        run(store, new=25, hour=14, awake=False)
+        made = [c for c in store.created if c["kind"] == "review-new"]
+        self.assertEqual(len(made), 1, "仍要留痕")
+        self.assertEqual(made[0]["activate_at_ms"], WAKE_MS)
+
+    def test_awake_signal_falls_back_to_awake_when_unreadable(self):
+        """读不到活动就当醒着:守卫是为了别在睡觉时出声,不是制造"提醒神秘消失"。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            awake, reason = rn.looks_awake(Path(tmp))
+        self.assertTrue(awake)
+        self.assertIn("按醒着处理", reason)

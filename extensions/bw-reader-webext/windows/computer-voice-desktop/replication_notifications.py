@@ -939,6 +939,50 @@ def review_schedule(root: Path) -> dict:
     }
 
 
+#: 多久没有任何设备动静就当"可能在睡"（用户 2026-09-08 想用手表判睡眠；这是零权限的先行版）。
+#: 真正的睡眠分段要读健康数据，那需要先在开发者后台给 App 开 HealthKit 能力、重签描述文件——
+#: 只有用户能做。在那之前用**设备活动**顶着：他在用任何一台设备就是醒着，这个信号又快又准。
+QUIET_MEANS_ASLEEP_HOURS = 5
+
+
+def last_user_activity_ms(root: Path) -> int | None:
+    """最近一次**用户发起**的设备命令时刻。读不到返回 None（当作醒着，见下）。
+
+    只认 actor='user'：后台对账自己也会写命令，拿它当"人在动"会让静默判断永远为假。
+    账本以只读方式打开——这是别人正在写的库，绝不能因为读它而挡住写入。
+    """
+    path = root / "replication-command-ledger.sqlite3"
+    if not path.is_file():
+        return None
+    try:
+        import sqlite3
+        uri = "file:" + str(path).replace("\\", "/") + "?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=2.0) as conn:
+            row = conn.execute(
+                "SELECT MAX(received_at_utc_ms) FROM commands WHERE actor='user'"
+            ).fetchone()
+    except Exception:
+        return None
+    if not row or not row[0]:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def looks_awake(root: Path, quiet_hours: float = QUIET_MEANS_ASLEEP_HOURS) -> tuple[bool, str]:
+    """(此刻像不像醒着, 原因)。判不出来一律当**醒着** —— 守卫是为了别在睡觉时出声，
+    不是为了制造"提醒神秘消失"；读不到活动就退回纯钟点判断。"""
+    last = last_user_activity_ms(root)
+    if last is None:
+        return True, "读不到设备活动，按醒着处理"
+    idle_hours = max(0.0, (_now_ms() - last) / 3_600_000.0)
+    if idle_hours >= quiet_hours:
+        return False, "已 %.1f 小时没有任何设备动静" % idle_hours
+    return True, "%.1f 小时前还在用设备" % idle_hours
+
+
 def next_window_start_ms(wake_hour: int, now: float | None = None) -> int:
     """下一个窗口起点（本地时钟）的毫秒时间戳。今天还没到就今天，过了就明天。"""
     stamp = time.time() if now is None else now
@@ -1068,7 +1112,11 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
             #   存储早就支持蛰伏(visible_items 会滤掉未到 activateAt 的),不必另造机制:
             #   夜里攒下的这条,第二天一到起床点自己浮现,AI 打开快慢板就看见。
             #   ⚠ 这里绝不能改成"窗口外就不建" —— 那正是过了点的卡被忽视的原因。
-            activate_at = None if in_window else next_window_start_ms(schedule["wakeHour"])
+                    # 醒着才出声(2026-09-08):钟点只是粗筛,人是不是真起来了要看设备动静。
+            #   夜里没睡的人不该被 8 点整点吵醒式地提醒;睡到中午的人也不该在 8 点被当成已起床。
+            awake, awake_reason = looks_awake(root)
+            activate_at = (None if (in_window and awake)
+                           else next_window_start_ms(schedule["wakeHour"]))
             store.create(
                 kind="review-new",
                 title="还没开始学的新卡已有 %d 张" % new,
@@ -1088,7 +1136,7 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
     return {
         "due": due, "new": new,
         "newAgeHours": age_hours, "newInWindow": in_window, "newSettled": settled,
-        "schedule": schedule,
+        "schedule": schedule, "awake": looks_awake(root)[0],
     }
 
 
