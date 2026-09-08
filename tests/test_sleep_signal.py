@@ -31,7 +31,11 @@ class SleepSignalTests(unittest.TestCase):
             json.dumps(fields), encoding="utf-8")
 
     def test_todays_signal_wins_over_activity_inference(self):
-        woke = day_start_ms() + 7 * 3_600_000
+        # ⚠ 不能写死"今天 7 点"：凌晨跑这个测试时 7 点还在未来，
+        # 而未来时间戳会被 sleep_signal_woke_today_ms 正当地拒掉 ——
+        # 于是这条从 00:00 到 07:00 每天必红（2026-09-09 02:27 撞到）。
+        # 取"刚才"，并夹到今天之内。
+        woke = max(day_start_ms(), int(time.time() * 1000) - 60_000)
         self.write(wokeAtMs=woke, source="healthkit")
         # 目录里没有命令账本,只有信号 → 拿到的就是信号本身
         self.assertEqual(rn.wake_time_today_ms(self.root), woke)

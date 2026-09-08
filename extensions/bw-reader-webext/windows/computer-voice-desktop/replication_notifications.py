@@ -690,12 +690,29 @@ def count_due_cards(root: Path) -> tuple[int, int]:
     due = 卡片 `_next` 非空且已到时；new = `_next` 为空且未移除的学习卡。
     副本由两节点复制保持新鲜，App 评分后 PATCH 会把 `_next` 推过来。
     """
+    counts = review_counts(root)
+    return counts["due"], counts["new"]
+
+
+def review_counts(root: Path) -> dict[str, int]:
+    """一次遍历给出全部四个数：due / new / newGradable / newBlocked。
+
+    ⚠ 为什么收成一个函数：2026-09-09 我先写了第二个数卡的函数，
+    两个各走一遍同一份数据 —— 而"两处各数一遍"迟早会互相矛盾，
+    到时候没人说得清哪个对。这里保证 `newGradable + newBlocked == new`
+    是**构造出来的**，不是靠两边碰巧一致。
+
+    newBlocked = 没进外部 Anki 因而**真的评不了分**的新卡。
+    Reader 没有本地排期：`rate()` 的 `_next` 全来自 `/pdf/api/review-answer`
+    的响应，而那条路由必须有真实 Anki 卡号（没有就 404）。
+    """
     import json as _json
     data_dir = root / "replication-data"
     due = 0
     new = 0
+    blocked = 0
     if not data_dir.is_dir():
-        return 0, 0
+        return {"due": 0, "new": 0, "newGradable": 0, "newBlocked": 0}
     now_ms = _now_ms()
     for book_dir in data_dir.iterdir():
         path = book_dir / "document-notes.json"
@@ -718,7 +735,21 @@ def count_due_cards(root: Path) -> tuple[int, int]:
                         due += 1
                 elif one.get("_st") in ("learn", None):
                     new += 1
-    return due, new
+                    reason = one.get("_ratingUnavailableReason")
+                    if (one.get("_ratingUnavailable")
+                            and reason in _NOT_IN_ANKI_REASONS):
+                        blocked += 1
+    return {"due": due, "new": new,
+            "newGradable": new - blocked, "newBlocked": blocked}
+
+
+#: 评分不可用的原因里，哪些表示「这张卡根本不在外部 Anki 里」。
+#:
+#: 2026-09-09 实查出来的事：Reader **没有本地排期能力** —— `rate()` 拿到的
+#: `_next` 完全来自 `/pdf/api/review-answer` 的响应，而那条路由必须有真实
+#: Anki 卡号、走 AnkiConnect 的 answerCards（没有卡号直接 404）。
+#: 所以一张没进 Anki 的卡是**真的评不了分**，不是界面小气。
+_NOT_IN_ANKI_REASONS = ("not-exported", "export-unknown")
 
 
 #: 路由层的输出（写在 BWReader 根，桥的板子读它渲祈使句）。
@@ -1153,7 +1184,8 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
     唯一途径），目标已达成，别再让 AI 拿着过时的数字去说。回落 + 按日
     dedupe 一起兜住阈值附近的抖动：同一天重新越线不会再建。
     """
-    due, new = count_due_cards(root)
+    counts = review_counts(root)
+    due, new = counts["due"], counts["new"]
     day = time.strftime("%Y%m%d")
     if due >= REVIEW_DUE_SPEAK_THRESHOLD:
         store.create(
@@ -1181,6 +1213,11 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
     # ⚠ 只有 ① 不满足才算"目标达成"去消通知;②③ 不满足是**时机未到**,保持现状等下一轮 ——
     #   把"还没到点"当成"已经不需要"消掉,会让通知在窗口边缘反复生灭。
     schedule = review_schedule(root)
+    # 新卡里分开数：评得了分的才配得上"去学吧"的催促（2026-09-09）。
+    # Reader 没有本地排期，评分必须有真实 Anki 卡号 —— 没进 Anki 的卡
+    # 是真的按不下去，拿总数去催等于让人打开一个没有按钮的空框。
+    gradable_new = counts["newGradable"]
+    blocked_new = counts["newBlocked"]
     age_hours = oldest_new_card_age_hours(root)
     hour_now = time.localtime().tm_hour
     # 窗口起点 = 配置钟点与**真实起床**取晚的那个(2026-09-08):
@@ -1189,9 +1226,28 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
     after_waking = woke_at is None or _now_ms() >= woke_at
     in_window = (schedule["wakeHour"] <= hour_now < schedule["sleepHour"]) and after_waking
     settled = age_hours is not None and age_hours >= schedule["newMinAgeHours"]
-    if new >= schedule["newThreshold"]:
+    # 卡在导出上的单独出一条**故障**通知：它要的不是"去学"，是"去修"。
+    # 与 review-new 分开而不是改措辞，因为消除条件不同 ——
+    # review-new 靠"他学了"回落，这条靠"导出通了"回落。
+    if blocked_new > 0:
+        store.create(
+            kind="review-blocked",
+            title="%d 张新卡评不了分：还没进 Anki" % blocked_new,
+            body=("Reader 自己不排期，第一次评分必须有真实 Anki 卡号。"
+                  "先确认这台电脑上 Anki 开着（AnkiConnect 8765），"
+                  "再重新打开这些卡片让导出重试。"),
+            source="review-scheduler",
+            audience="user",
+            dedupe_key="review-blocked:" + day,
+            end="expires:%d" % (_now_ms() + 36 * 3600 * 1000),
+        )
+    else:
+        for item in list(store.open_items()):
+            if item.get("kind") == "review-blocked":
+                store.resolve(item["id"], by="auto", note="卡片已能评分")
+    if gradable_new >= schedule["newThreshold"]:
         if settled:
-            batch = min(new, schedule["newBatch"])
+            batch = min(gradable_new, schedule["newBatch"])
             body = "先做 %d 张就好，大约 %d 分钟。" % (batch, max(5, batch))
             if due:
                 body += "另有 %d 张到期待复习。" % due
@@ -1207,7 +1263,7 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
                            else next_window_start_ms(schedule["wakeHour"]))
             store.create(
                 kind="review-new",
-                title="还没开始学的新卡已有 %d 张" % new,
+                title="还没开始学的新卡已有 %d 张" % gradable_new,
                 body=body,
                 source="review-scheduler",
                 audience="user",
@@ -1216,13 +1272,19 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
                 end="expires:%d" % (_now_ms() + 36 * 3600 * 1000),
             )
     else:
+        # ⚠ 消除的**理由要说对**：可评分的降到阈值以下有两种可能 ——
+        # 他真的学了，或者卡全被导出堵住了。写死"他开始学了"会在故障时
+        # 留下一句反过来的记录，而那条记录正是以后查这件事的唯一线索。
+        note = ("可评分的新卡已降到 %d 张（他开始学了）" % gradable_new
+                if blocked_new == 0 else
+                "可评分的新卡只剩 %d 张，另有 %d 张卡在导出上（见 review-blocked）"
+                % (gradable_new, blocked_new))
         for item in list(store.open_items()):
             if item.get("kind") == "review-new":
-                store.resolve(
-                    item["id"], by="auto",
-                    note="新卡已降到 %d 张（他开始学了）" % new)
+                store.resolve(item["id"], by="auto", note=note)
     return {
         "due": due, "new": new,
+        "newGradable": gradable_new, "newBlocked": blocked_new,
         "newAgeHours": age_hours, "newInWindow": in_window, "newSettled": settled,
         "schedule": schedule, "awake": looks_awake(root)[0], "wokeAtMs": woke_at,
     }

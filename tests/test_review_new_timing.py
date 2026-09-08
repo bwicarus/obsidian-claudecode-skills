@@ -35,12 +35,19 @@ class FakeStore:
 WAKE_MS = 1_788_900_000_000   # 测试里"下一个起床点"的固定值
 
 
-def run(store, *, new, due=0, age=99.0, hour=14, schedule=None, awake=True):
-    """跑一次生产者,把数量/静置/钟点/作息/醒着都钉死(各自的读取另有用例)。"""
+def run(store, *, new, due=0, age=99.0, hour=14, schedule=None, awake=True,
+        blocked=0):
+    """跑一次生产者,把数量/静置/钟点/作息/醒着都钉死(各自的读取另有用例)。
+
+    ⚠ 只 mock **一个** review_counts：四个数（到期/新卡/可评/卡住）由同一次
+    遍历产出，分开 mock 会造出真实世界里不可能出现的组合（可评+卡住 != 新卡），
+    于是测试通过而线上失败。"""
     plan = {"wakeHour": 8, "sleepHour": 24, "newThreshold": rn.REVIEW_NEW_SPEAK_THRESHOLD,
             "newMinAgeHours": rn.REVIEW_NEW_MIN_AGE_HOURS, "newBatch": rn.REVIEW_NEW_BATCH}
     plan.update(schedule or {})
-    with mock.patch.object(rn, "count_due_cards", return_value=(due, new)), \
+    counts = {"due": due, "new": new,
+              "newGradable": new - blocked, "newBlocked": blocked}
+    with mock.patch.object(rn, "review_counts", return_value=counts), \
             mock.patch.object(rn, "oldest_new_card_age_hours", return_value=age), \
             mock.patch.object(rn, "review_schedule", return_value=plan), \
             mock.patch.object(rn, "looks_awake", return_value=(awake, "test")), \
@@ -153,3 +160,98 @@ if __name__ == "__main__":
             awake, reason = rn.looks_awake(Path(tmp))
         self.assertTrue(awake)
         self.assertIn("按醒着处理", reason)
+
+
+class BlockedNewCardTests(unittest.TestCase):
+    """评不了分的新卡不能被当成"去学吧"（2026-09-09 实测撞出来的）。
+
+    那天的实况：10 张新卡挂了 18 天，全是 `_pcExportStatus=failed` —— 这台
+    电脑上 Anki 根本没在跑，AnkiConnect 8765 拒连。而 Reader **没有本地排期**，
+    第一次评分必须有真实 Anki 卡号，所以那 10 张一张都按不下去。
+
+    提醒当时说的是「还没开始学的新卡已有 10 张，先做 10 张就好，大约 10 分钟」。
+    催人去做一件按不下去的事比不催更糟：他打开卡，看见一个没有按钮也没有说明
+    的空框，然后不知道该怎么办。
+    """
+
+    def test_all_blocked_does_not_ask_him_to_study(self):
+        store = FakeStore()
+        run(store, new=10, blocked=10)
+        self.assertEqual([c for c in store.created if c["kind"] == "review-new"], [])
+
+    def test_all_blocked_raises_a_fault_instead(self):
+        store = FakeStore()
+        run(store, new=10, blocked=10)
+        made = [c for c in store.created if c["kind"] == "review-blocked"]
+        self.assertEqual(len(made), 1)
+        self.assertIn("10", made[0]["title"])
+        # 故障通知要说清**怎么修**，不能只报"不行"。
+        self.assertIn("Anki", made[0]["body"])
+        self.assertEqual(made[0]["audience"], "user")
+
+    def test_partly_blocked_counts_only_the_gradable_ones(self):
+        store = FakeStore()
+        run(store, new=14, blocked=4)
+        made = [c for c in store.created if c["kind"] == "review-new"]
+        self.assertEqual(len(made), 1)
+        # 标题里的数字必须是**能做的**那些，否则他打开会少 4 张。
+        self.assertIn("10", made[0]["title"])
+        self.assertEqual(
+            len([c for c in store.created if c["kind"] == "review-blocked"]), 1)
+
+    def test_below_threshold_after_excluding_blocked(self):
+        store = FakeStore()
+        run(store, new=12, blocked=4)
+        self.assertEqual([c for c in store.created if c["kind"] == "review-new"], [])
+
+    def test_fault_clears_itself_once_export_works(self):
+        store = FakeStore(open_items=[{"id": "b1", "kind": "review-blocked"}])
+        run(store, new=10, blocked=0)
+        self.assertIn("b1", [one[0] for one in store.resolved])
+
+    def test_resolution_note_does_not_claim_he_studied_when_blocked(self):
+        # 消除理由是以后查这件事的唯一线索 —— 写死"他开始学了"会在故障时
+        # 留下一句反过来的记录。
+        store = FakeStore(open_items=[{"id": "n1", "kind": "review-new"}])
+        run(store, new=10, blocked=10)
+        notes = [one[1] for one in store.resolved if one[0] == "n1"]
+        self.assertEqual(len(notes), 1)
+        self.assertNotIn("他开始学了", notes[0])
+        self.assertIn("导出", notes[0])
+
+
+class ReviewCountsTests(unittest.TestCase):
+    """四个数由同一次遍历产出，构造上就不可能自相矛盾。"""
+
+    def test_gradable_plus_blocked_always_equals_new(self):
+        import json
+        import tempfile
+        root = Path(tempfile.mkdtemp(prefix="counts-"))
+        book = root / "replication-data" / "b1"
+        book.mkdir(parents=True)
+        cards = [
+            {"_st": "learn"},                                    # 可评
+            {"_st": "learn", "_ratingUnavailable": True,
+             "_ratingUnavailableReason": "not-exported"},        # 卡住
+            {"_st": "learn", "_ratingUnavailable": True,
+             "_ratingUnavailableReason": "external"},            # 在 Anki 里，能评
+            {"_next": 1, "_st": "review"},                       # 到期
+            {"_st": "learn", "_removed": True},                  # 不算
+        ]
+        (book / "document-notes.json").write_text(json.dumps(
+            {"items": {"i1": {"card": {"cards": cards}}}}), encoding="utf-8")
+        counts = rn.review_counts(root)
+        self.assertEqual(counts["new"], 3)
+        self.assertEqual(counts["newBlocked"], 1)
+        self.assertEqual(counts["newGradable"], 2)
+        self.assertEqual(counts["newGradable"] + counts["newBlocked"],
+                         counts["new"])
+        self.assertEqual(counts["due"], 1)
+        # 旧签名不能变形：还有别的调用方在用它
+        self.assertEqual(rn.count_due_cards(root), (1, 3))
+
+    def test_missing_data_directory_is_all_zero(self):
+        import tempfile
+        counts = rn.review_counts(Path(tempfile.mkdtemp(prefix="empty-")))
+        self.assertEqual(counts, {"due": 0, "new": 0,
+                                  "newGradable": 0, "newBlocked": 0})
