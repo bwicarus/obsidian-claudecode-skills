@@ -215,10 +215,23 @@ def _do_anki_start(root: Path, **_ignored: Any) -> dict[str, Any]:
         "Programs/Anki/anki.exe")
     if not exe.is_file():
         raise ActionError("找不到 Anki：%s" % exe)
+    # 起来就别抢屏（2026-09-09 用户：「你好像把我的电脑上的 anki 打开了…
+    # 就不能使用无界面版本么」）。Anki **没有**无界面模式 —— AnkiConnect 是
+    # 插件，跑在 GUI 进程里；Pi 上那套"headless"其实是 Xvfb 虚拟屏，
+    # 而 Windows 没有等价物。所以能做的是最小化且不激活地起。
+    # ⚠ wShowWindow 是给进程的**建议**，Qt 应用未必照办。照办不了时它仍会
+    # 露一下脸 —— 那时该做的是起来之后再用 ShowWindow 压下去，而不是假装
+    # 这里已经解决了。
+    startupinfo = None
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 7   # SW_SHOWMINNOACTIVE：最小化且不夺焦点
     try:
         subprocess.Popen(
             [str(exe)],
             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
+            startupinfo=startupinfo,
             close_fds=True)
     except OSError as error:
         raise ActionError("起不动 Anki：%s" % error) from None

@@ -23,6 +23,7 @@ from pathlib import Path
 import sys
 import tempfile
 import time
+import os
 import unittest
 
 DESKTOP = Path(__file__).resolve().parent.parent
@@ -266,6 +267,46 @@ class AnkiActionTests(unittest.TestCase):
             actions.subprocess.Popen = popen
         self.assertTrue(result["result"]["alreadyRunning"])
         self.assertEqual(launched, [], "已经在跑就不该再起一个")
+
+    def test_start_is_minimized_and_does_not_steal_focus(self):
+        """起 Anki 不该抢屏（2026-09-09 用户提出）。
+
+        Anki 没有无界面模式 —— AnkiConnect 是插件、跑在 GUI 进程里；
+        Pi 上那套 headless 是 Xvfb 虚拟屏，Windows 没有等价物。
+        所以这里能做的就是最小化且不激活地起，别把用户从正在做的事上踢开。
+        """
+        if os.name != "nt":
+            self.skipTest("wShowWindow 只有 Windows 有")
+        original = actions._anki_port_open
+        seen = {}
+        calls = [0]
+
+        def port(timeout=0.4):
+            calls[0] += 1
+            return calls[0] > 1        # 第一次没开(于是会去起)，之后开了
+
+        def fake_popen(*args, **kwargs):
+            seen.update(kwargs)
+            return None
+
+        popen = actions.subprocess.Popen
+        exe = Path(__file__)
+        which = actions.Path
+        try:
+            actions._anki_port_open = port
+            actions.subprocess.Popen = fake_popen
+            actions.Path = lambda *a, **k: (
+                exe if a and "anki" in str(a[0]).lower() else which(*a, **k))
+            result = actions.run("anki.start", {}, self.root)
+        finally:
+            actions._anki_port_open = original
+            actions.subprocess.Popen = popen
+            actions.Path = which
+        self.assertFalse(result["result"]["alreadyRunning"])
+        info = seen.get("startupinfo")
+        self.assertIsNotNone(info, "Windows 上必须带 STARTUPINFO")
+        self.assertTrue(info.dwFlags & actions.subprocess.STARTF_USESHOWWINDOW)
+        self.assertEqual(info.wShowWindow, 7, "SW_SHOWMINNOACTIVE：最小化且不夺焦点")
 
     def test_port_never_opens_is_an_error_not_a_shrug(self):
         # "启动了就当成了"是最贵的那种交待：调用方以为好了，其实没有。
