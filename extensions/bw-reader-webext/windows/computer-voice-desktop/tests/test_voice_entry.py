@@ -61,6 +61,38 @@ class KeepAliveTests(unittest.TestCase):
         self.assertIsNone(KEEPALIVE.read_keep_active(self.runtime))
 
 
+class StartModeTests(unittest.TestCase):
+    """启动方式（2026-09-09 用户：「应该把现在的启动方式作为一个可选项放在里面」）。
+
+    用户实测「启用语音功能怎么还是旧的快捷键启动方式」—— 出处是
+    enable_readerpc_voice 里无条件把保活意图置开。这里钉住那条分叉。
+    """
+
+    def test_keep_alive_is_the_default(self):
+        """多一个新选项不该悄悄改掉别人已经习惯的行为。"""
+        self.assertEqual(KEEPALIVE.DEFAULT_START_MODE,
+                         KEEPALIVE.START_MODE_KEEP_ALIVE)
+
+    def test_one_shot_does_not_arm_keep_alive(self):
+        """这就是「打开功能就自动起一通」与「等我触发」的分界。"""
+        self.assertFalse(
+            KEEPALIVE.should_keep_alive(True, KEEPALIVE.START_MODE_ONE_SHOT))
+        self.assertTrue(
+            KEEPALIVE.should_keep_alive(True, KEEPALIVE.START_MODE_KEEP_ALIVE))
+
+    def test_voice_off_never_arms_keep_alive(self):
+        for mode in KEEPALIVE.START_MODES:
+            self.assertFalse(KEEPALIVE.should_keep_alive(False, mode))
+
+    def test_unknown_mode_falls_back_instead_of_breaking(self):
+        """封闭词汇表不做就近取整，但坏偏好也不该把语音整个卡死。"""
+        self.assertEqual(KEEPALIVE.normalize_start_mode("nonsense"),
+                         KEEPALIVE.DEFAULT_START_MODE)
+        self.assertEqual(KEEPALIVE.normalize_start_mode(None),
+                         KEEPALIVE.DEFAULT_START_MODE)
+        self.assertTrue(KEEPALIVE.should_keep_alive(True, "nonsense"))
+
+
 class StartStepTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

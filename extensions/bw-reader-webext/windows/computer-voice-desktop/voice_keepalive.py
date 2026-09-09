@@ -28,6 +28,35 @@ FILE_NAME = "codex-voice-keepalive.json"
 #: C# 侧的轮询周期。写完意图之后要等多久才可能看到动作，由它决定。
 POLL_SECONDS = 5.0
 
+#: 启动方式（2026-09-09 用户：「应该把现在的启动方式作为一个可选项放在里面」）。
+#:
+#: keep-alive —— **原有行为**：打开语音功能就把意图置开，收敛循环随即按快捷键
+#:   起一通，且此后语音一结束就再拉起来（那正是"保活"的意思）。
+#: one-shot   —— 语音链照常装载，但**不**自动开：意图保持关，由 App 按钮或
+#:   主动通知触发的一次性尝试来开。语音结束后不会自己重开。
+#:
+#: ⚠ 默认仍是 keep-alive：不因为多了个新选项就悄悄改掉别人已经习惯的行为。
+START_MODE_KEEP_ALIVE = "keep-alive"
+START_MODE_ONE_SHOT = "one-shot"
+START_MODES = (START_MODE_KEEP_ALIVE, START_MODE_ONE_SHOT)
+DEFAULT_START_MODE = START_MODE_KEEP_ALIVE
+
+
+def normalize_start_mode(value: object) -> str:
+    """认不出来的一律回默认 —— 封闭词汇表不做"就近取整"，但也不该让一个
+    坏掉的偏好把语音整个卡死。"""
+    return value if value in START_MODES else DEFAULT_START_MODE
+
+
+def should_keep_alive(voice_enabled: bool, start_mode: object) -> bool:
+    """打开语音功能时要不要顺手把意图置开。
+
+    这就是用户看到的那句「怎么还是旧的快捷键启动方式」的出处：
+    enable_readerpc_voice 里原本无条件 `set(..., voice_enabled)`。
+    """
+    return bool(voice_enabled) and (
+        normalize_start_mode(start_mode) == START_MODE_KEEP_ALIVE)
+
 
 def keepalive_path(runtime: Path | None = None) -> Path:
     """意图文件的位置。runtime = 桥的 runtime 目录。"""

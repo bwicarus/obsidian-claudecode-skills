@@ -214,6 +214,8 @@ def load_preferences(path: Path) -> dict[str, object]:
         # 语音智能关闭(2026-09-09)。字段表在 voice_autoclose.PREFERENCE_DEFAULTS,
         # 这里不再抄一份 —— 抄两份迟早只改一边。
         **voice_autoclose.PREFERENCE_DEFAULTS,
+        # 启动方式(2026-09-09):keep-alive=原有行为,one-shot=不自动开。
+        "voiceStartMode": voice_keepalive.DEFAULT_START_MODE,
     }
     try:
         value = json.loads(path.read_text("utf-8"))
@@ -242,6 +244,8 @@ def load_preferences(path: Path) -> dict[str, object]:
         "autoStartOnBoot": value.get("autoStartOnBoot") is True,
         "manageServerServices": value.get("manageServerServices") is True,
         **voice_autoclose.normalize_preferences(value),
+        "voiceStartMode": voice_keepalive.normalize_start_mode(
+            value.get("voiceStartMode")),
     }
 
 
@@ -256,6 +260,7 @@ def save_preferences(
     auto_start_on_boot: bool = False,
     manage_server_services: bool = False,
     voice_auto_close: dict[str, Any] | None = None,
+    voice_start_mode: str | None = None,
 ) -> None:
     if service_mode not in SERVICE_MODES:
         raise ReaderPCServiceError(f"未知服务模式 {service_mode}")
@@ -271,6 +276,8 @@ def save_preferences(
             "autoStartOnBoot": bool(auto_start_on_boot),
             "manageServerServices": bool(manage_server_services),
             **voice_autoclose.normalize_preferences(voice_auto_close),
+            "voiceStartMode": voice_keepalive.normalize_start_mode(
+                voice_start_mode),
         },
     )
 
@@ -624,6 +631,7 @@ def enable_readerpc_voice(
     bridge_only: bool = False,
     voice_enabled: bool = True,
     snapshot_viewer_hidden: bool = False,
+    start_mode: str = voice_keepalive.DEFAULT_START_MODE,
 ) -> int:
     """Start the Direct generation owned by this ReaderPC process."""
 
@@ -657,7 +665,14 @@ def enable_readerpc_voice(
         )
         # 语音是 Direct 上的独立可选层。关闭时快照/MCP/卡片/视觉
         # 继续启动,但 C# 不装载保活与 F24 链。
-        set_codex_voice_keep_active(bridge_paths, voice_enabled)
+        #
+        # ⚠ 打开语音功能**不一定**要顺手把保活置开:one-shot 方式下语音链照常
+        # 装载,但不自动起通话 —— 由 App 按钮或主动通知触发一次性尝试。
+        # 用户 2026-09-09 实测「启用语音功能怎么还是旧的快捷键启动方式」,
+        # 出处就是这一行原来的无条件置开。
+        set_codex_voice_keep_active(
+            bridge_paths,
+            voice_keepalive.should_keep_alive(voice_enabled, start_mode))
         set_direct_config_enabled(
             bridge_paths,
             True,
@@ -1070,6 +1085,7 @@ class ReaderPCWindow:
             "bridge_only": self._bridge_only_enabled(),
             "voice_enabled": self._voice_enabled(),
             "snapshot_viewer_hidden": self._snapshot_hidden_enabled(),
+            "start_mode": self._voice_start_mode(),
         }
 
     def _current_service_mode(self) -> str:
@@ -1088,6 +1104,28 @@ class ReaderPCWindow:
             auto_start_on_boot=self._auto_start_enabled(),
             manage_server_services=bool(self.manage_server_services.get()),
             voice_auto_close=self._voice_auto_close_preferences(),
+            voice_start_mode=self._voice_start_mode(),
+        )
+
+    def _voice_start_mode(self) -> str:
+        """界面上的启动方式。读炸了回默认，别让一个开关把语音整个卡死。"""
+        var = getattr(self, "voice_one_shot_start", None)
+        try:
+            one_shot = bool(var.get()) if var is not None else False
+        except Exception:
+            one_shot = False
+        return (
+            voice_keepalive.START_MODE_ONE_SHOT
+            if one_shot
+            else voice_keepalive.START_MODE_KEEP_ALIVE
+        )
+
+    def on_voice_start_mode_changed(self) -> None:
+        """改启动方式要重启直连服务：保活意图是启动时读的。"""
+        self._save_current_preferences()
+        self._restart_voice_with_intent(
+            "正在切换语音启动方式…",
+            "语音启动方式已切换。",
         )
 
     def _voice_auto_close_preferences(self) -> dict[str, Any]:
@@ -1226,6 +1264,10 @@ class ReaderPCWindow:
         )
         self.voice_enabled = tk.BooleanVar(
             value=bool(preferences["voiceEnabled"])
+        )
+        self.voice_one_shot_start = tk.BooleanVar(
+            value=(preferences.get("voiceStartMode")
+                   == voice_keepalive.START_MODE_ONE_SHOT)
         )
         # 三守护合一第一步(2026-09-03,references/windows-server-consolidation-plan.md):
         # Flask(5000)与四个 sidecar 的受管控制器。影子模式只观测端口;托管开关打开才拉起/保活。
@@ -1413,6 +1455,16 @@ class ReaderPCWindow:
                 variable=self.voice_auto_close_vars[key],
                 command=self.on_voice_auto_close_changed,
             ).pack(side="left")
+
+        start_mode_row = ttk.Frame(outer)
+        start_mode_row.pack(fill="x", pady=(0, 2), padx=(24, 0))
+        ttk.Checkbutton(
+            start_mode_row,
+            text="一次性启动：打开语音功能后不自动起通话，"
+                 "由 App 按钮或通知触发（关 = 原有的保活方式）",
+            variable=self.voice_one_shot_start,
+            command=self.on_voice_start_mode_changed,
+        ).pack(side="left")
 
         orb_row = ttk.Frame(outer)
         orb_row.pack(fill="x", pady=(2, 2))

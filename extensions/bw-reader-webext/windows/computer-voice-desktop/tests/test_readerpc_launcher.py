@@ -19,6 +19,7 @@ sys.path.insert(0, str(SOURCE_ROOT))
 import readerpc_launcher
 import readerpc_services  # noqa: E402
 import voice_autoclose
+import voice_keepalive
 from readerpc_launcher import (  # noqa: E402
     ReaderPCWindow,
     ShortcutBrokerError,
@@ -157,6 +158,8 @@ class ReaderPCLauncherTests(unittest.TestCase):
             "manageServerServices": False,
         }
         expected.update(voice_autoclose.PREFERENCE_DEFAULTS)
+        # 启动方式默认仍是 keep-alive：多一个选项不该悄悄改掉原有行为。
+        expected["voiceStartMode"] = voice_keepalive.DEFAULT_START_MODE
         expected.update(overrides)
         return expected
 
@@ -940,6 +943,8 @@ class ReaderPCLauncherTests(unittest.TestCase):
             bridge_only=False,
             voice_enabled=True,
             snapshot_viewer_hidden=False,
+            # 启动方式随意图一起下去：默认仍是原有的保活方式。
+            start_mode=voice_keepalive.DEFAULT_START_MODE,
         )
         self.assertFalse(window.voice_snapshot_offline_marked)
 
@@ -957,6 +962,8 @@ class ReaderPCLauncherTests(unittest.TestCase):
             bridge_only=False,
             voice_enabled=True,
             snapshot_viewer_hidden=False,
+            # 启动方式随意图一起下去：默认仍是原有的保活方式。
+            start_mode=voice_keepalive.DEFAULT_START_MODE,
         )
 
     def test_voice_switch_restarts_only_optional_layer_intent(self) -> None:
@@ -1004,6 +1011,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
             bridge_only=False,
             voice_enabled=False,
             snapshot_viewer_hidden=False,
+            start_mode=voice_keepalive.DEFAULT_START_MODE,
         )
 
     def test_switch_cleanup_failure_preserves_helpers_and_stops_new_generation(self) -> None:
