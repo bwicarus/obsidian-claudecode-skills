@@ -349,23 +349,56 @@ internal static class ReaderCodexEndpoint
                 }, cancellationToken).ConfigureAwait(false);
                 return;
             }
+            bool stopped;
             try
             {
+                WindowsRegistryCodexVoiceActivitySource source = new();
+                CodexVoiceActivityController controller = new(
+                    source, new SystemCodexVoiceActivityClock());
                 CodexAppTarget target = WindowsCodexAppProbe.RequireReady();
                 new WindowsCodexVoiceShortcutSender()
                     .Send(target, DirectVoiceCommand.Stop);
+                // 按完要**看着它关掉**，而不是按完就说按过了。
+                //
+                // ⚠ 2026-09-09 实测撞到:一次落在起通话后几秒的挂断被 Codex 的
+                // 初始化吞掉了,台账纹丝不动,而这里当时只回 pressed:true ——
+                // "按了"和"关了"在回答里长得一模一样,于是调用方以为完事了。
+                // 这个 op 是**绕过冷却**直接按的(兜底就该能在冷却里按),代价正是
+                // 有几率落在那扇窗里,所以确认不能省。
+                CodexVoiceActivitySnapshot after = await controller
+                    .ConfirmStoppedAsync(
+                        ledger,
+                        CodexVoiceActivityController.StopTransitionTimeout,
+                        CodexVoiceActivityController.MonitorInterval,
+                        cancellationToken).ConfigureAwait(false);
+                stopped = !after.Active;
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception exception)
             {
-                await Fail(context, "F24 兜底失败：" + exception.Message)
-                    .ConfigureAwait(false);
+                // 确认超时 ≠ 没按。按过了但没看到它关掉,如实说 ——
+                // 这正是调用方决定"再按一次"的依据。
+                await Ok(context, new JsonObject
+                {
+                    ["ok"] = false,
+                    ["pressed"] = true,
+                    ["confirmed"] = false,
+                    ["note"] = "已按 F24，但没能确认它关掉：" + exception.Message,
+                }, cancellationToken).ConfigureAwait(false);
                 return;
             }
             await Ok(context, new JsonObject
             {
-                ["ok"] = true,
+                ["ok"] = stopped,
                 ["pressed"] = true,
-                ["note"] = "已按 F24；关没关成仍要看台账",
+                ["confirmed"] = stopped,
+                ["note"] = stopped
+                    ? "已按 F24，台账已转为未通话"
+                    : "已按 F24，但台账仍显示在通话",
             }, cancellationToken).ConfigureAwait(false);
             return;
         }

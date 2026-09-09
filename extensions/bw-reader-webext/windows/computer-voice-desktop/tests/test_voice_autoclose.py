@@ -251,6 +251,55 @@ class CloseSequenceTests(unittest.TestCase):
             True, [p.get("hangUpVoiceFallback") for p in self.posts]
         )
 
+    def test_unconfirmed_shortcut_is_pressed_once_more(self):
+        """按了但桥没确认它关掉 → 再按一次。
+
+        2026-09-09 实测撞到：一次落在起通话后几秒的挂断被 Codex 的初始化吞掉了，
+        台账纹丝不动，而端点当时只回 pressed:true —— "按了"和"关了"在回答里长得
+        一模一样。我当时是手动再按一次才关掉的，这里把那一步固定下来。
+
+        再按是安全的：端点每次都先重查台账，已经挂断了就不按（F24 是切换，
+        按在"已挂断"上会反向开一通）。
+        """
+        replies = [
+            {"ok": False, "pressed": True, "confirmed": False},
+            {"ok": True, "pressed": True, "confirmed": True},
+        ]
+
+        def post(endpoint, body):
+            self.posts.append(body)
+            if body.get("hangUpVoiceFallback"):
+                return 200, replies.pop(0) if replies else {}
+            return 200, {"ok": True, "hangUpRequested": True}
+
+        VAC.close_voice(
+            endpoint="http://x", thread_id="t", reason="r",
+            ledger_reader=self._ledger(closes_after=10_000),
+            poster=post, sleeper=self._sleep, clock=self._clock,
+            grace_seconds=10.0,
+        )
+        kinds = [("fallback" if p.get("hangUpVoiceFallback") else "push")
+                 for p in self.posts]
+        self.assertEqual(kinds, ["push", "push", "fallback", "fallback"])
+
+    def test_confirmed_shortcut_is_not_pressed_twice(self):
+        """确认关掉了就别再按 —— 那一下会反向开一通。"""
+
+        def post(endpoint, body):
+            self.posts.append(body)
+            if body.get("hangUpVoiceFallback"):
+                return 200, {"ok": True, "pressed": True, "confirmed": True}
+            return 200, {"ok": True, "hangUpRequested": True}
+
+        VAC.close_voice(
+            endpoint="http://x", thread_id="t", reason="r",
+            ledger_reader=self._ledger(closes_after=10_000),
+            poster=post, sleeper=self._sleep, clock=self._clock,
+            grace_seconds=10.0,
+        )
+        fallbacks = [p for p in self.posts if p.get("hangUpVoiceFallback")]
+        self.assertEqual(len(fallbacks), 1)
+
     def test_bridge_skipping_the_shortcut_is_not_success(self):
         """桥自己复核台账后跳过 F24 时，绝不能报成已关闭。"""
         result = VAC.close_voice(

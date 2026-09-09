@@ -439,11 +439,23 @@ def close_voice(
 
     # 兜底。⚠ 桥那边**会自己再读一次台账**才按 —— F24 是切换，按在"已挂断"
     # 上会反向开一通。这里不替它判断，也不因为自己刚读过就跳过它的复核。
-    code, reply = post(endpoint, {"hangUpVoiceFallback": True})
-    pressed = code == 200 and reply.get("pressed") is True
-    steps.append({"step": "shortcut", "http": code, "pressed": pressed,
-                  "note": reply.get("skipped") or reply.get("note")
-                  or reply.get("detail") or ""})
+    #
+    # ⚠ 按了不等于关了（2026-09-09 实测撞到）：一次落在起通话后几秒的挂断被
+    # Codex 的初始化吞掉，台账纹丝不动。桥现在按完会自己确认，没确认就**再按
+    # 一次** —— 再按是安全的，因为它每次都先重查台账，已经挂断了就不按。
+    pressed = False
+    for round_index in (1, 2):
+        code, reply = post(endpoint, {"hangUpVoiceFallback": True})
+        pressed = code == 200 and reply.get("pressed") is True
+        confirmed = reply.get("confirmed")
+        steps.append({"step": "shortcut", "round": round_index,
+                      "http": code, "pressed": pressed,
+                      "confirmed": confirmed,
+                      "note": reply.get("skipped") or reply.get("note")
+                      or reply.get("detail") or ""})
+        # skipped(没按)也算走完：台账说已经不在通话，或者读不到不该赌。
+        if not pressed or confirmed is not False:
+            break
     if not pressed:
         return {"contract": CONTRACT, "closed": False, "by": None,
                 "reason": reason, "steps": steps}
