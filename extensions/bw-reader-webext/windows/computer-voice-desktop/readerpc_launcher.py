@@ -73,7 +73,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.161"
+APP_VERSION = "0.1.162"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status
@@ -354,6 +354,16 @@ def persist_preferences(
     path: Path,
     preferences: dict[str, Any],
 ) -> None:
+    """把一份完整偏好写回去。
+
+    ⚠ **这里必须搬全部键**（2026-09-09 发现它只搬了 6 个）。它的唯一调用点是启动时
+    「App 的服务意图与存档不一致」那一支 —— App 每改一次 serviceMode/voiceEnabled/
+    snapshotViewer，下次启动就会走到这里；而 save_preferences 给没传的参数备着默认值，
+    于是漏搬的键**静默回默认**：manageServerServices 从 true 掉回 false（三守护退回
+    影子模式）、五个语音自动关闭偏好全部复位、启动方式退回保活。表现是"我明明设过"。
+    这正是本仓库反复吃亏的形态：放行了字段但没搬字段，校验全过就是不生效。
+    下面 test_persist_preferences_carries_every_key 用 load 的键集做全量比对钉住它。
+    """
     save_preferences(
         path,
         keep_pc_online=bool(preferences["keepPcPreprocessingOnline"]),
@@ -364,6 +374,9 @@ def persist_preferences(
         ),
         hide_voice_orb=bool(preferences["hideVoiceOrb"]),
         auto_start_on_boot=bool(preferences["autoStartOnBoot"]),
+        manage_server_services=bool(preferences["manageServerServices"]),
+        voice_auto_close=preferences,
+        voice_start_mode=preferences.get("voiceStartMode"),
     )
 
 

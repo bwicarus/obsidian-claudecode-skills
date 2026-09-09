@@ -25,6 +25,7 @@ from readerpc_launcher import (  # noqa: E402
     ShortcutBrokerError,
     enable_readerpc_voice,
     load_preferences,
+    persist_preferences,
     merge_preferences_with_service_intent,
     main,
     read_codex_voice_keep_active,
@@ -206,6 +207,38 @@ class ReaderPCLauncherTests(unittest.TestCase):
             self.assertFalse(prefs["voiceAutoCloseOnSleep"])
             # 没传的那些回默认，不会因为漏传就变成关
             self.assertTrue(prefs["voiceAutoCloseOnIdle"])
+
+    def test_persist_preferences_carries_every_key(self) -> None:
+        """persist_preferences 必须搬**全部**键，一个都不能漏。
+
+        2026-09-09 发现它只搬了 6 个。它的调用点是启动时「App 的服务意图与存档
+        不一致」那一支 —— App 每改一次 voiceEnabled/serviceMode 就会走到，而
+        save_preferences 给没传的参数备着默认值，于是漏搬的键**静默回默认**：
+        manageServerServices 从 true 掉回 false、五个自动关闭偏好复位、启动方式
+        退回保活。表现是"我明明设过"，而且没有任何报错。
+
+        这里刻意**不列键名** —— 列了就成了第四份字段表，下次加字段照样漏。
+        改成拿 load 的键集做全量比对：新加的键自动纳入，漏搬就红。
+        """
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "readerpc.json"
+            defaults = load_preferences(path)
+            # 每个键都取一个**不等于默认**的值：搬漏了就会掉回默认，比对即失败。
+            flipped = {}
+            for key, value in defaults.items():
+                if isinstance(value, bool):
+                    flipped[key] = not value
+                elif isinstance(value, int):
+                    flipped[key] = value + 7
+                elif key == "serviceMode":
+                    flipped[key] = "bridge-only"
+                elif key == "voiceStartMode":
+                    flipped[key] = voice_keepalive.START_MODE_ONE_SHOT
+                else:  # pragma: no cover - 新类型的键要在这里补一支
+                    self.fail(f"偏好 {key} 是没见过的类型 {type(value)!r}")
+            self.assertNotEqual(flipped, defaults)
+            persist_preferences(path, flipped)
+            self.assertEqual(load_preferences(path), flipped)
 
     def test_invalid_preferences_fail_to_safe_default(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
