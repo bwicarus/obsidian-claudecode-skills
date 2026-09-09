@@ -177,6 +177,12 @@ internal static class ReaderCodexPush
         string detail) =>
         NoteAttempt("bridge-voice-entry", requestId, ok, detail);
 
+    /// 记一条**不经钩子的送达**结果（codex app-server 那条兜底路径）。
+    /// 落进同一本账 —— 排查的人要在一个地方看到"这次开语音发生了什么"。
+    internal static void NoteThreadNotify(
+        string requestId, bool ok, string detail) =>
+        NoteAttempt("thread-notify", requestId, ok, detail);
+
     /// 记一条尝试：内存里留最后一句给现有调用方，账本里留全量给排查的人。
     private static void NoteAttempt(
         string purpose,

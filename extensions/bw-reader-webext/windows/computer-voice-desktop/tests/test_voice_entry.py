@@ -123,12 +123,14 @@ class StartStepTests(unittest.TestCase):
         return urlopen
 
     def _fake_urlopen_sequence(self, replies):
-        """按顺序回答 —— 冷却那条要看"第二次才是真按"。"""
+        """按顺序回答。元素可以是 payload，也可以是 (payload, httpStatus)
+        —— 502 那一类只能靠状态码认出来。"""
         pending = list(replies)
 
         class Response:
-            def __init__(self, payload):
+            def __init__(self, payload, status):
                 self._payload = json.dumps(payload).encode("utf-8")
+                self.status = status
 
             def read(self):
                 return self._payload
@@ -141,7 +143,10 @@ class StartStepTests(unittest.TestCase):
 
         def urlopen(request, timeout=None):
             self.sent.append(json.loads(request.data.decode("utf-8")))
-            return Response(pending.pop(0) if pending else {})
+            item = pending.pop(0) if pending else {}
+            if isinstance(item, tuple):
+                return Response(item[0], item[1])
+            return Response(item, 200)
         return urlopen
 
     def _run(self, reply, clock=None, replies=None, sleeper=None):
@@ -271,6 +276,46 @@ class StartStepTests(unittest.TestCase):
                                sleeper=lambda _s: None)
             self.assertEqual(result["reason"], reason)
 
+    def test_bridge_being_down_does_not_burn_the_attempt(self):
+        """桥暂时不在，不该把「两次机会」用掉。
+
+        2026-09-10 实测：一次入口通知恰好落在桥的维护窗口里（装 Direct 用了
+        40 秒），两次尝试都拿到 502 空回应，Codex 于是按说明放弃并上报失败 ——
+        而语音其实完全开得起来。「两次不成就放弃」说的是**试了没接通**，
+        不是**根本没试成**。
+        """
+        naps: list[float] = []
+        result = self._run(
+            None,
+            replies=[
+                ({}, 502),                           # 桥在重装
+                ({}, 502),                           # 还在维护窗口里
+                {"ok": True, "confirmed": True, "reason": "started"},
+            ],
+            sleeper=naps.append,
+        )
+        self.assertEqual(result["reason"], "started")
+        self.assertEqual(len(self.sent), 3)
+        self.assertEqual(len(naps), 2)
+
+    def test_transport_blip_is_told_apart_from_a_real_failure(self):
+        """只有"请求没到达执行方"才算抖动；试了没确认不能靠重试蒙混。"""
+        self.assertTrue(STEP._transport_blip({"reason": "unreachable"}))
+        self.assertTrue(STEP._transport_blip({"httpStatus": 502}))
+        self.assertTrue(STEP._transport_blip({"httpStatus": 503}))
+        self.assertFalse(STEP._transport_blip(
+            {"reason": "not-confirmed", "httpStatus": 200}))
+        self.assertFalse(STEP._transport_blip(
+            {"reason": "cooldown", "httpStatus": 200}))
+
+    def test_transport_retry_gives_up_eventually(self):
+        """桥一直不在也要停 —— 无限重试跟"还在试"一样会把人吊着。"""
+        naps: list[float] = []
+        result = self._run(None, replies=[({}, 502)] * 10,
+                           sleeper=naps.append)
+        self.assertEqual(result["reason"], "unexpected-reply")
+        self.assertEqual(len(self.sent), STEP.TRANSPORT_RETRIES + 1)
+
     def test_initial_timeout_is_generous(self):
         """用户要的是"一开始时间搞长一点",等短了会把要成的那次判成失败,
         然后去按第二下 —— 而那一下可能正好把刚起来的通话关掉。"""
@@ -285,7 +330,8 @@ class StartStepTests(unittest.TestCase):
         STEP.urllib.request.urlopen = boom
         try:
             result = STEP.start_once(endpoint="http://x",
-                                     runtime=self.runtime)
+                                     runtime=self.runtime,
+                                     sleeper=lambda _s: None)
         finally:
             STEP.urllib.request.urlopen = original
         self.assertEqual(result["reason"], "unreachable")
@@ -476,6 +522,45 @@ class WiredUpTests(unittest.TestCase):
         hook = hook.split("private async Task<object> HandleStopAsync")[0]
         self.assertIn("_lastVoiceEntrySessionId", hook)
         self.assertIn("sameSession", hook)
+
+    def test_thread_notify_is_the_fallback_when_push_cannot_be_sent(self):
+        """推送送不出去时要有另一条路（2026-09-10 用户拍板）。
+
+        钩子只在 SessionStart/UserPromptSubmit 时登记，而"想开语音"常常正发生在
+        没跟 Codex 说过话的时候 —— 那时没有绑定，推送无处可发。这条兜底走
+        codex app-server 的 thread/list + turn/start，不需要绑定。
+        """
+        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
+            encoding="utf-8")
+        hook = source.split("private void RequestVoiceEntryIfNobodyElseWill")[1]
+        hook = hook.split("private static string PythonExecutable")[0]
+        self.assertIn("NotifyThreadDirectly(requestId)", hook)
+        # ⚠ 只在推送真的送不出去之后才走 —— 它要起一个 app-server 并跑一个
+        # turn，是要花订阅额度的；推送能送到时更便宜也更快。
+        self.assertIn("if (sent) return;", hook)
+
+    def test_thread_source_comes_from_the_session_record(self):
+        """排除表要对着**会话来源**判，不是对着 thread/list 回的客户端名。
+
+        2026-09-10 实测：thread/list 的 threadSource 25 条全是 'vscode'
+        （那是客户端），拿它做排除表永远不匹配 —— 而空转的排除跟没有排除
+        在行为上一样，只是看起来像有。真实分布里 automation 有 13 条，
+        不排掉就会挑中它。
+        """
+        notify = (Path(__file__).resolve().parents[1]
+                  / "codex_thread_notify.py").read_text(encoding="utf-8")
+        self.assertIn("def thread_source_of", notify)
+        pick = notify.split("def newest_thread")[1].split("def approve")[0]
+        self.assertIn("thread_source_of", pick)
+        self.assertNotIn('row.get("threadSource")', pick)
+
+    def test_thread_notify_approval_is_not_a_blank_cheque(self):
+        """审批写成"什么都同意"就等于把一条通知变成任意命令执行入口。"""
+        notify = (Path(__file__).resolve().parents[1]
+                  / "codex_thread_notify.py").read_text(encoding="utf-8")
+        approve = notify.split("def approve")[1].split("def send")[0]
+        self.assertIn("ALLOWED_SCRIPTS", approve)
+        self.assertIn('"denied"', approve)
 
     def test_dead_pipe_invalidates_the_binding_immediately(self):
         """管道不存在 = 那个会话没了，立刻判失效。

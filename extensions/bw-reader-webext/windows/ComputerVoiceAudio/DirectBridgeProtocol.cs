@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -3376,7 +3377,17 @@ internal sealed class DirectBridgeProtocolSession
                 {
                     // RequestVoiceEntryAsync 自己已经记过原因。
                 }
-                if (sent || DateTime.UtcNow >= deadline) return;
+                if (sent) return;
+                if (DateTime.UtcNow >= deadline)
+                {
+                    // 推送这条路走不通（多半是没有活绑定：钩子只在
+                    // SessionStart/UserPromptSubmit 时登记，而"想开语音"常常
+                    // 正发生在没跟 Codex 说过话的时候）。改走不经钩子的那条：
+                    // codex app-server 的 thread/list + turn/start。
+                    // 它顺带让对面把通道登记好，所以下次推送就有地方可送。
+                    NotifyThreadDirectly(requestId);
+                    return;
+                }
                 try
                 {
                     await Task.Delay(
@@ -3389,6 +3400,68 @@ internal sealed class DirectBridgeProtocolSession
                 }
             }
         });
+    }
+
+    /// 与 NativeMessagingHost 用同一个解释器路径。
+    private static string PythonExecutable() => Path.Combine(
+        Environment.GetFolderPath(
+            Environment.SpecialFolder.LocalApplicationData),
+        "Programs", "Python", "Python313", "python.exe");
+
+    /// <summary>不经钩子，直接把通知送进 Codex 的对话。</summary>
+    /// <remarks>
+    /// ⚠ **只在推送确实送不出去时才走**：这一路要起一个 `codex app-server`
+    /// 并跑一个 turn，**要花订阅额度**。推送能送到时它更便宜也更快。
+    ///
+    /// 失败只记不抛：这是兜底路径，它自己失败不该再影响什么 —— 但也不静默，
+    /// 结果落在同一本推送账本里（purpose=thread-notify），排查的人只看一处。
+    /// </remarks>
+    private static void NotifyThreadDirectly(string requestId)
+    {
+        string script = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "BWReader",
+            "codex_thread_notify.py");
+        if (!File.Exists(script))
+        {
+            ReaderCodexPush.NoteThreadNotify(
+                requestId, false, "送达脚本不在：" + script);
+            return;
+        }
+        try
+        {
+            ProcessStartInfo start = new()
+            {
+                FileName = PythonExecutable(),
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            start.ArgumentList.Add(script);
+            start.ArgumentList.Add("--request-id");
+            start.ArgumentList.Add(requestId);
+            using Process? process = Process.Start(start);
+            if (process is null)
+            {
+                ReaderCodexPush.NoteThreadNotify(
+                    requestId, false, "起不了送达脚本");
+                return;
+            }
+            string output = process.StandardOutput.ReadToEnd();
+            string error = process.StandardError.ReadToEnd();
+            process.WaitForExit(240_000);
+            ReaderCodexPush.NoteThreadNotify(
+                requestId,
+                process.HasExited && process.ExitCode == 0,
+                (output + " " + error).Trim());
+        }
+        catch (Exception exception)
+        {
+            ReaderCodexPush.NoteThreadNotify(
+                requestId, false, "送达失败：" + exception.Message);
+        }
     }
 
     private async Task<object> HandleStopAsync(

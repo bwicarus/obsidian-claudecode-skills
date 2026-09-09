@@ -97,6 +97,23 @@ def record_attempt(entry: dict[str, object],
 #: 这个只是"桥给的数离谱时"的上界，不是我们自己猜的冷却长度。
 MAX_COOLDOWN_WAIT_SECONDS = 30.0
 
+#: 桥不在时在这一层重试几次、每次隔多久。
+#: 覆盖一次 Direct 重装的空窗（实测约 40 秒）还留有余量。
+TRANSPORT_RETRIES = 4
+TRANSPORT_RETRY_SECONDS = 15.0
+
+
+def _transport_blip(result: dict[str, object]) -> bool:
+    """这次失败是"桥不在"，而不是"试了没接通"。
+
+    502/503/504 来自 tailscale serve 转不到后端；unreachable 是连都没连上。
+    两者都说明**请求没有到达执行方**，跟语音开不开得起来无关。
+    """
+    if result.get("reason") == "unreachable":
+        return True
+    status = result.get("httpStatus")
+    return isinstance(status, int) and status in (502, 503, 504)
+
 
 #: 桥会给出的 reason（封闭词汇表）。不在表里的一律当"没说清"。
 BRIDGE_REASONS = frozenset({
@@ -186,7 +203,19 @@ def start_once(
             "detail": str(result.get("detail") or "")[:200] or None,
         }, runtime)
 
-    result = _post_once(url, timeout)
+    # 桥暂时不在（重装/重启）时**不算用掉一次机会**。
+    #
+    # ⚠ 2026-09-10 实测：一次入口通知恰好落在桥的维护窗口里（安装 Direct 用了
+    # 40 秒），两次尝试都拿到 502 空回应，于是 Codex 按说明放弃并上报失败 ——
+    # 而语音其实完全开得起来。「两次不成就放弃」那条规则说的是**试了没接通**，
+    # 不是**根本没试成**；把传输抖动算进去，等于让一次例行升级吃掉整个预算。
+    # 所以这一层自己消化：短暂等待后重问，仍不通才交回上层。
+    for attempt in range(TRANSPORT_RETRIES + 1):
+        result = _post_once(url, timeout)
+        if not _transport_blip(result) or attempt == TRANSPORT_RETRIES:
+            break
+        sample(result, round(now() - started, 2), 0.0)   # 每次都留样本
+        rest(TRANSPORT_RETRY_SECONDS)
     waited = 0.0
     if result.get("reason") == "cooldown":
         # 冷却那一次也留样本 —— 否则记录里看不出我们等过，

@@ -114,6 +114,13 @@ RUNTIME_SOURCES = {
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "voice_start_failed.py"
     ),
+    # 不经钩子的送达路径(2026-09-10)。钩子只在 SessionStart/UserPromptSubmit
+    # 时登记,而"想开语音"常常正发生在没跟 Codex 说过话的时候 —— 那时没有绑定。
+    # 这条走 codex app-server 的 thread/list + turn/start,不需要绑定。
+    "readerpc-runtime/codex_thread_notify.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "codex_thread_notify.py"
+    ),
     "readerpc-runtime/situation_actions.py": (
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "situation_actions.py"
@@ -549,6 +556,7 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             # 语音入口这条链:脚本之间互相 import,缺一个就整条跑不起来。
             "voice_autoclose.py", "voice_keepalive.py", "voice_ladder.py",
             "voice_start_step.py", "voice_start_failed.py",
+            "codex_thread_notify.py",
         ):
             (root.parent / stable_name).write_bytes(
                 (release / "readerpc-runtime" / stable_name).read_bytes()
