@@ -365,3 +365,46 @@ test("旧的 1 秒渲染没有被顺手删掉", () => {
   assert.match(server, /AttentionBoardFlushInterval =\s*\n?\s*TimeSpan\.FromSeconds\(1\)/);
   assert.ok(server.includes("MonitorAttentionBoardAsync"));
 });
+
+// ── 挂断请求走同一条通道（2026-09-09）──────────────────────────────────
+test("挂断请求复用推送通道，不另造一份协议", () => {
+  assert.match(PUSH, /RequestVoiceHangUpAsync\(/);
+  // 只能有一处实现帧协议：找 tools/call 的地方应当只有 SendAsync。
+  assert.equal((PUSH.match(/"tools\/call"/g) || []).length, 1);
+  // 目标线程可另指：挂断要发给**正在通话**的线程，不是板推送那条。
+  assert.match(PUSH, /threadIdOverride/);
+  assert.match(PUSH, /threadIdOverride: inCallThreadId/);
+});
+
+test("挂断文案如实说明它是用户预设规则触发的", () => {
+  // 那个工具的自述是「Only call this tool if the user explicitly asks…」，
+  // 所以文案必须说清这是用户事先定的规则，不能编成"用户刚说要挂"。
+  const start = PUSH.indexOf("RequestVoiceHangUpAsync(");
+  const body = PUSH.slice(start, PUSH.indexOf("\n    private static async Task SendAsync", start));
+  assert.match(body, /用户预先设定的自动关闭规则触发了/);
+  assert.match(body, /用户本人事先在设置里定下的/);
+  assert.match(body, /end_realtime_voice_call/);
+  assert.match(body, /不要只回复文字/);
+  // 请求编号要带上，重复出现说明上一次没生效。
+  assert.match(body, /请求编号/);
+});
+
+test("挂断失败不连累板推送的绑定", () => {
+  const start = PUSH.indexOf("RequestVoiceHangUpAsync(");
+  const body = PUSH.slice(start, PUSH.indexOf("\n    private static async Task SendAsync", start));
+  // 不判绑定失效、不累加连续失败计数：挂不掉往往只是对面正忙。
+  assert.doesNotMatch(body, /Invalidate\(/);
+  assert.doesNotMatch(body, /_consecutiveFailures/);
+  // 也不看板推送开关：板子推不推与"到点该挂断"是两件事。
+  assert.doesNotMatch(body, /if \(!Enabled\)/);
+});
+
+test("端点只回「送出去了没有」，不谎称已挂断", () => {
+  const start = ENDPOINT.indexOf('body["hangUpVoice"]');
+  assert.ok(start >= 0, "端点要有 hangUpVoice 分支");
+  const body = ENDPOINT.slice(start, start + 1800);
+  assert.match(body, /hangUpRequested/);
+  assert.match(body, /关没关成要看麦克风台账/);
+  // 缺目标线程直接拒，不拿板推送那条线程顶替。
+  assert.match(body, /hangUpVoice 需要 threadId/);
+});

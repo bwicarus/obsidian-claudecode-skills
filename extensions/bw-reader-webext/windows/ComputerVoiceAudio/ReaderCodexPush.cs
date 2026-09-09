@@ -244,11 +244,85 @@ internal static class ReaderCodexPush
             : value[..limit] + "\n…（板面过长已截断，完整内容见板面文件）";
     }
 
+    /// <summary>
+    /// 请**正在通话的那条线程**挂断（2026-09-09）。
+    ///
+    /// 为什么走这条而不是 F24：F24 是**切换**，要先知道当前状态才敢按，
+    /// 而状态只能从麦克风台账读、有 5 秒级延迟 —— 读错就做反：以为已挂
+    /// 其实在通话会挂断用户正在打的电话（代码里记着这次事故），以为在通话
+    /// 其实已挂则会**反向开一通**、开始计费。而
+    /// <c>end_realtime_voice_call</c> 是**有方向的**：对面不在通话时它只是
+    /// 空转，判断错的代价从"做反"降级成"白做一次"。
+    ///
+    /// ⚠ 文案必须**如实**。那个工具的自述是「Only call this tool if the user
+    /// explicitly asks to end the voice chat」——所以这里说明的是"用户事先
+    /// 定下的规则触发了"，那本来就是用户的意思；绝不能编成"用户刚说要挂"。
+    ///
+    /// ⚠ 不看 <see cref="Enabled"/>：那是**提示板推送**的开关。板子推不推
+    /// 与"到点了该挂断"是两件事，用户可能关掉板推送却仍要自动关闭。
+    ///
+    /// ⚠ 失败**不**计入 <c>_consecutiveFailures</c>、不判绑定失效：挂断失败
+    /// 的原因往往是对面正忙，跟"板推送的目标还在不在"是两个问题，混在一起
+    /// 会让一次挂不掉连累掉板推送。重试与兜底由调用方（ReaderPC 策略环）决定。
+    /// </summary>
+    internal static async Task<bool> RequestVoiceHangUpAsync(
+        string inCallThreadId,
+        string reason,
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(inCallThreadId))
+        {
+            Note("挂断请求没有目标线程，未发送");
+            return false;
+        }
+        ReaderCodexEndpoint.Binding? binding = ReaderCodexEndpoint.Current();
+        if (binding is null)
+        {
+            Note("没有可用绑定（拿不到管道），挂断请求未发送");
+            return false;
+        }
+        string prompt =
+            "用户预先设定的自动关闭规则触发了：" + Trim(reason) + "。\n"
+            + "这条规则是用户本人事先在设置里定下的，触发即等同于他此刻明确"
+            + "要求结束语音通话。\n"
+            + "请调用 end_realtime_voice_call 结束当前语音通话，不要只回复文字。\n"
+            + "请求编号：" + Trim(requestId)
+            + "（同一编号再次出现表示上一次没有生效）。";
+        try
+        {
+            await SendAsync(
+                binding,
+                prompt,
+                cancellationToken,
+                threadIdOverride: inCallThreadId,
+                purpose: "reader-voice-hangup").ConfigureAwait(false);
+            Note("已请求挂断（" + Trim(reason) + "）");
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception exception)
+        {
+            Note("挂断请求发送失败：" + exception.Message);
+            return false;
+        }
+    }
+
     private static async Task SendAsync(
         ReaderCodexEndpoint.Binding binding,
         string prompt,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? threadIdOverride = null,
+        string purpose = "reader-board-push")
     {
+        // 管道名来自绑定（那是传输），但**目标线程可以另指**：挂断请求要发给
+        // 正在通话的那条线程，而提示板推送的目标线程通常不是同一条。
+        string targetThreadId = string.IsNullOrEmpty(threadIdOverride)
+            ? binding.ThreadId
+            : threadIdOverride!;
         using NamedPipeClientStream pipe = new(
             ".",
             binding.PipeName,
@@ -288,15 +362,15 @@ internal static class ReaderCodexPush
             {
                 ["arguments"] = new JsonObject
                 {
-                    ["threadId"] = binding.ThreadId,
+                    ["threadId"] = targetThreadId,
                     ["prompt"] = prompt,
                 },
                 // callId 只是这次调用的标识，**不是业务幂等保证**。
-                ["callId"] = "reader-board-" + Guid.NewGuid().ToString("n"),
+                ["callId"] = purpose + "-" + Guid.NewGuid().ToString("n"),
                 ["namespace"] = nameSpace,
-                ["threadId"] = binding.ThreadId,
+                ["threadId"] = targetThreadId,
                 ["tool"] = ToolName,
-                ["turnId"] = "reader-board-push",
+                ["turnId"] = purpose,
             },
             cancellationToken).ConfigureAwait(false);
         if (result["success"] is not JsonValue success

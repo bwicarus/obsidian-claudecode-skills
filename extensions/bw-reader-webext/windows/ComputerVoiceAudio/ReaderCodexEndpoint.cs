@@ -221,6 +221,83 @@ internal static class ReaderCodexEndpoint
             return;
         }
 
+        // 请正在通话的线程挂断（2026-09-09）。走的是**已有的推送通道**，
+        // 所以协议只有一份实现；策略、校验与兜底都在 ReaderPC 那边。
+        //
+        // ⚠ 这里只回"送出去了没有"，**不回"关掉了没有"** —— 后者要看麦克风
+        // 台账，而那是调用方的事。把传输成功说成挂断成功正是这一带最容易
+        // 出的那种交待。
+        if (body["hangUpVoice"] is JsonValue hangUp
+            && hangUp.TryGetValue(out bool wantsHangUp) && wantsHangUp)
+        {
+            string inCall = Text(body["threadId"], 100);
+            if (inCall.Length == 0)
+            {
+                await Fail(context, "hangUpVoice 需要 threadId（正在通话的那条线程）")
+                    .ConfigureAwait(false);
+                return;
+            }
+            bool sent = await ReaderCodexPush.RequestVoiceHangUpAsync(
+                inCall,
+                Text(body["reason"], 200),
+                Text(body["requestId"], 80),
+                cancellationToken).ConfigureAwait(false);
+            await Ok(context, new JsonObject
+            {
+                ["ok"] = true,
+                ["hangUpRequested"] = sent,
+                ["threadId"] = inCall,
+                ["note"] = sent
+                    ? "已把挂断请求送到该线程；关没关成要看麦克风台账"
+                    : "没送出去（看 pushNote）",
+                ["pushNote"] = ReaderCodexPush.LastNote,
+            }, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // 兜底：推送两次都没让通话结束时才按 F24（2026-09-09 用户选的策略）。
+        //
+        // ⚠ F24 是**切换**：按在"其实已经挂断了"的状态上会**反向开一通**并
+        // 开始计费。所以这里**自己再读一次台账**，不信调用方的判断 ——
+        // 危险动作的守卫必须长在动作自己身上，否则总有一天会有第二个调用方
+        // 绕过它。台账说不在通话就直接跳过，这不是失败。
+        if (body["hangUpVoiceFallback"] is JsonValue fallback
+            && fallback.TryGetValue(out bool wantsFallback) && wantsFallback)
+        {
+            CodexVoiceActivitySnapshot ledger =
+                new WindowsRegistryCodexVoiceActivitySource().Read();
+            if (!ledger.Active)
+            {
+                await Ok(context, new JsonObject
+                {
+                    ["ok"] = true,
+                    ["pressed"] = false,
+                    ["skipped"] = "台账显示已经不在通话，按 F24 反而会开一通",
+                    ["ledgerStatus"] = ledger.Status.ToString(),
+                }, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            try
+            {
+                CodexAppTarget target = WindowsCodexAppProbe.RequireReady();
+                new WindowsCodexVoiceShortcutSender()
+                    .Send(target, DirectVoiceCommand.Stop);
+            }
+            catch (Exception exception)
+            {
+                await Fail(context, "F24 兜底失败：" + exception.Message)
+                    .ConfigureAwait(false);
+                return;
+            }
+            await Ok(context, new JsonObject
+            {
+                ["ok"] = true,
+                ["pressed"] = true,
+                ["note"] = "已按 F24；关没关成仍要看台账",
+            }, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         string pipeName = NormalizePipeName(Text(body["pipePath"], 200));
         string threadId = Text(body["threadId"], 100);
         if (pipeName.Length == 0)

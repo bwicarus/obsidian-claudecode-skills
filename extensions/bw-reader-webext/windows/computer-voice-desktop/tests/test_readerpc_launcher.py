@@ -18,6 +18,7 @@ sys.path.insert(0, str(SOURCE_ROOT))
 
 import readerpc_launcher
 import readerpc_services  # noqa: E402
+import voice_autoclose
 from readerpc_launcher import (  # noqa: E402
     ReaderPCWindow,
     ShortcutBrokerError,
@@ -138,12 +139,33 @@ class ReaderPCLauncherTests(unittest.TestCase):
         window.history_thread = None
         return window
 
+    @staticmethod
+    def _expected_preferences(**overrides):
+        """期望值。语音智能关闭那一组**从字段表拼**，不在这里再抄一份。
+
+        2026-09-09 加这一组时，如果照旧手抄，仓库里就会有第三份同样的字段表
+        （另两份在 voice_autoclose.PREFERENCE_DEFAULTS 与 readerpc_launcher）。
+        这个仓库反复吃亏的正是这个形态。
+        """
+        expected = {
+            "keepPcPreprocessingOnline": True,
+            "serviceMode": "full",
+            "voiceEnabled": True,
+            "snapshotViewerHidden": False,
+            "hideVoiceOrb": False,
+            "autoStartOnBoot": False,
+            "manageServerServices": False,
+        }
+        expected.update(voice_autoclose.PREFERENCE_DEFAULTS)
+        expected.update(overrides)
+        return expected
+
     def test_preferences_default_to_keep_pc_online(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "missing.json"
             self.assertEqual(
                 load_preferences(path),
-                {"keepPcPreprocessingOnline": True, "serviceMode": "full", "voiceEnabled": True, "snapshotViewerHidden": False, "hideVoiceOrb": False, "autoStartOnBoot": False, "manageServerServices": False},
+                self._expected_preferences(),
             )
 
     def test_preferences_round_trip_explicit_opt_out(self) -> None:
@@ -152,8 +174,35 @@ class ReaderPCLauncherTests(unittest.TestCase):
             save_preferences(path, keep_pc_online=False)
             self.assertEqual(
                 load_preferences(path),
-                {"keepPcPreprocessingOnline": False, "serviceMode": "full", "voiceEnabled": True, "snapshotViewerHidden": False, "hideVoiceOrb": False, "autoStartOnBoot": False, "manageServerServices": False},
+                self._expected_preferences(keepPcPreprocessingOnline=False),
             )
+
+    def test_voice_auto_close_defaults_to_off(self) -> None:
+        """默认是**持续开启**：没人打开过的功能不该自己开始挂断用户的通话。"""
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "missing.json"
+            prefs = load_preferences(path)
+            self.assertFalse(prefs["voiceAutoClose"])
+            self.assertEqual(prefs["voiceAutoCloseIdleMinutes"], 20)
+
+    def test_voice_auto_close_round_trips_through_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "readerpc.json"
+            save_preferences(
+                path,
+                keep_pc_online=True,
+                voice_auto_close={
+                    "voiceAutoClose": True,
+                    "voiceAutoCloseIdleMinutes": 35,
+                    "voiceAutoCloseOnSleep": False,
+                },
+            )
+            prefs = load_preferences(path)
+            self.assertTrue(prefs["voiceAutoClose"])
+            self.assertEqual(prefs["voiceAutoCloseIdleMinutes"], 35)
+            self.assertFalse(prefs["voiceAutoCloseOnSleep"])
+            # 没传的那些回默认，不会因为漏传就变成关
+            self.assertTrue(prefs["voiceAutoCloseOnIdle"])
 
     def test_invalid_preferences_fail_to_safe_default(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

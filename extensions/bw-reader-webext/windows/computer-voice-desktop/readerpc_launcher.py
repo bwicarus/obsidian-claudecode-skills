@@ -35,6 +35,8 @@ from bridge_core import (
     stop_direct_service,
 )
 import replication_apply
+import situation_signals
+import voice_autoclose
 from control_plane import (
     ControlPaths,
     SubprocessExactCommandRunner,
@@ -207,6 +209,9 @@ def load_preferences(path: Path) -> dict[str, object]:
         "autoStartOnBoot": False,
         # 三守护合一(2026-09-03):默认 False = 影子模式,只观测 Flask/sidecar 的端口不接管
         "manageServerServices": False,
+        # 语音智能关闭(2026-09-09)。字段表在 voice_autoclose.PREFERENCE_DEFAULTS,
+        # 这里不再抄一份 —— 抄两份迟早只改一边。
+        **voice_autoclose.PREFERENCE_DEFAULTS,
     }
     try:
         value = json.loads(path.read_text("utf-8"))
@@ -234,6 +239,7 @@ def load_preferences(path: Path) -> dict[str, object]:
         "hideVoiceOrb": value.get("hideVoiceOrb") is True,
         "autoStartOnBoot": value.get("autoStartOnBoot") is True,
         "manageServerServices": value.get("manageServerServices") is True,
+        **voice_autoclose.normalize_preferences(value),
     }
 
 
@@ -247,6 +253,7 @@ def save_preferences(
     hide_voice_orb: bool = False,
     auto_start_on_boot: bool = False,
     manage_server_services: bool = False,
+    voice_auto_close: dict[str, Any] | None = None,
 ) -> None:
     if service_mode not in SERVICE_MODES:
         raise ReaderPCServiceError(f"未知服务模式 {service_mode}")
@@ -261,6 +268,7 @@ def save_preferences(
             "hideVoiceOrb": bool(hide_voice_orb),
             "autoStartOnBoot": bool(auto_start_on_boot),
             "manageServerServices": bool(manage_server_services),
+            **voice_autoclose.normalize_preferences(voice_auto_close),
         },
     )
 
@@ -1089,7 +1097,23 @@ class ReaderPCWindow:
             hide_voice_orb=self._hide_orb_enabled(),
             auto_start_on_boot=self._auto_start_enabled(),
             manage_server_services=bool(self.manage_server_services.get()),
+            voice_auto_close=self._voice_auto_close_preferences(),
         )
+
+    def _voice_auto_close_preferences(self) -> dict[str, Any]:
+        """把界面上的这一组读成偏好 dict。读炸了回默认，别让设置页拖垮保存。"""
+        out: dict[str, Any] = {}
+        for key in voice_autoclose.PREFERENCE_DEFAULTS:
+            var = self.voice_auto_close_vars.get(key)
+            try:
+                out[key] = var.get() if var is not None else None
+            except Exception:
+                out[key] = None
+        return voice_autoclose.normalize_preferences(out)
+
+    def on_voice_auto_close_changed(self) -> None:
+        """勾选即存盘。策略环每轮重新读偏好，所以不必重启任何东西。"""
+        self._save_current_preferences()
 
     def _restart_voice_with_intent(self, busy: str, done: str) -> None:
         """模式类开关共用:停旧代际 → 按当前意图重启(C# 只在启动时读意图文件)。"""
@@ -1189,6 +1213,11 @@ class ReaderPCWindow:
         # 展示板卡片渲染:上次看到的存储指纹 + 是否正在渲(同一时间只跑一轮)。
         self._board_render_seen: tuple[int, int] | None = None
         self._board_render_busy = False
+        # 语音智能关闭：这一通通话的记忆 + "正在关"的互斥。
+        # 关一次要走完 推送→等 120s→重试→等→兜底，最长几分钟，期间绝不能
+        # 再起第二次 —— 那会变成对同一通反复发挂断请求。
+        self._auto_close_state = voice_autoclose.AutoCloseState()
+        self._auto_close_busy = False
         # 上一次播报过的维护原因:同一条只说一次,但换了原因要再说。
         self.voice_maintenance_notice: str | None = None
         self.last_status_publish = 0.0
@@ -1230,6 +1259,17 @@ class ReaderPCWindow:
         self.auto_start = tk.BooleanVar(
             value=bool(preferences["autoStartOnBoot"])
         )
+        # 语音智能关闭(2026-09-09)。总开关关着 = 持续开启模式;打开 = 智能开启,
+        # 由下面四条用户自己勾的条件决定何时挂断。变量名与偏好键一一对应,
+        # 表在 voice_autoclose.PREFERENCE_DEFAULTS。
+        self.voice_auto_close_vars: dict[str, tk.Variable] = {
+            key: (
+                tk.IntVar(value=int(preferences.get(key, default)))
+                if isinstance(default, int) and not isinstance(default, bool)
+                else tk.BooleanVar(value=bool(preferences.get(key, default)))
+            )
+            for key, default in voice_autoclose.PREFERENCE_DEFAULTS.items()
+        }
         self._applied_service_mode = str(preferences["serviceMode"])
         self._applied_voice_enabled = bool(preferences["voiceEnabled"])
         self._applied_snapshot_hidden = bool(
@@ -1349,6 +1389,41 @@ class ReaderPCWindow:
             variable=self.voice_enabled,
             command=self.on_voice_enabled_changed,
         ).pack(side="left")
+        # ── 语音智能关闭（2026-09-09 用户拍板）────────────────────────
+        # 两种模式：这一项关着 = 持续开启；打开 = 智能开启，由下面四条
+        # **用户自己勾**的条件决定何时挂断。只关不开 —— 启动仍无解。
+        auto_close_row = ttk.Frame(outer)
+        auto_close_row.pack(fill="x", pady=(6, 2))
+        ttk.Checkbutton(
+            auto_close_row,
+            text="智能开启：满足下列条件时自动结束语音通话（关 = 持续开启）",
+            variable=self.voice_auto_close_vars["voiceAutoClose"],
+            command=self.on_voice_auto_close_changed,
+        ).pack(side="left")
+        idle_row = ttk.Frame(outer)
+        idle_row.pack(fill="x", pady=(0, 2), padx=(24, 0))
+        ttk.Label(idle_row, text="闲置超过").pack(side="left")
+        ttk.Spinbox(
+            idle_row,
+            from_=1,
+            to=480,
+            width=5,
+            textvariable=self.voice_auto_close_vars[
+                "voiceAutoCloseIdleMinutes"],
+            command=self.on_voice_auto_close_changed,
+        ).pack(side="left", padx=(4, 4))
+        ttk.Label(idle_row, text="分钟（「长时间没在读」也用这个数）").pack(
+            side="left")
+        for key, spec in voice_autoclose.CONDITIONS.items():
+            condition_row = ttk.Frame(outer)
+            condition_row.pack(fill="x", pady=(0, 1), padx=(24, 0))
+            ttk.Checkbutton(
+                condition_row,
+                text=spec["label"],
+                variable=self.voice_auto_close_vars[key],
+                command=self.on_voice_auto_close_changed,
+            ).pack(side="left")
+
         orb_row = ttk.Frame(outer)
         orb_row.pack(fill="x", pady=(2, 2))
         ttk.Checkbutton(
@@ -1402,6 +1477,7 @@ class ReaderPCWindow:
         root.after(600, self._ensure_pc_online)
         root.after(900, self._ensure_server_services_online)
         root.after(1500, self._ensure_board_cards)
+        root.after(9_000, self._voice_auto_close_tick)
         root.after(800, self._ensure_voice_online)
 
     def _service_row(
@@ -2091,6 +2167,87 @@ class ReaderPCWindow:
             _boot_log("展示板卡片轮询异常: " + type(exc).__name__)
         finally:
             self.root.after(20_000, self._ensure_board_cards)
+
+    def _voice_auto_close_tick(self) -> None:
+        """语音智能关闭的策略环（2026-09-09 用户拍板）。
+
+        只做三件事：看台账在不在通话、按用户勾的条件判要不要关、要关就交给
+        后台线程走完那套慢流程。判断本身不碰网络，放界面线程里没问题；
+        真正的关闭必须离开界面线程 —— 它会阻塞好几分钟（推送→等 120s→
+        重试→等→兜底）。
+        """
+        if self.closed or self.closing:
+            return
+        try:
+            prefs = load_preferences(self.readerpc_paths.preferences_file)
+            if not prefs.get("voiceAutoClose"):
+                # 持续开启模式。顺手清掉这一通的记忆，免得开关来回拨之后
+                # 拿着上一通的起点地点去判断。
+                self._auto_close_state = voice_autoclose.AutoCloseState()
+                return
+            ledger = voice_autoclose.read_ledger()
+            in_call = bool(ledger.get("known") and ledger.get("active"))
+            names = sorted({
+                name
+                for key, spec in voice_autoclose.CONDITIONS.items()
+                if prefs.get(key)
+                for name in spec["signals"]
+            })
+            signals = (
+                situation_signals.read_all(
+                    self.readerpc_paths.local_root,
+                    self.bridge_paths.runtime_status.parent,
+                    names,
+                )["signals"]
+                if in_call and names
+                else {}
+            )
+            now_ms = int(time.time() * 1000)
+            self._auto_close_state.observe(signals, now_ms, in_call)
+            if not in_call or self._auto_close_busy:
+                return
+            reason = voice_autoclose.evaluate(
+                self._auto_close_state, signals, prefs, now_ms
+            )
+            if not reason:
+                return
+            thread_id = voice_autoclose.in_call_thread_id(
+                self.readerpc_paths.local_root
+            )
+            if not thread_id:
+                # 出声：没有通话线程 id 就发不出挂断请求，而"这一轮什么都没做"
+                # 跟"一切正常"在界面上长得一样。
+                _boot_log("语音智能关闭：拿不到通话线程 id，这一轮不动手")
+                return
+            self._auto_close_busy = True
+
+            def worker(reason=reason, thread_id=thread_id) -> None:
+                try:
+                    result = voice_autoclose.close_voice(
+                        endpoint=voice_autoclose.ENDPOINT,
+                        thread_id=thread_id,
+                        reason=reason,
+                    )
+                    _boot_log(
+                        "语音智能关闭：%s → %s（%s）" % (
+                            reason,
+                            "已关闭" if result.get("closed") else "没关掉",
+                            result.get("by") or result.get("note") or "-",
+                        )
+                    )
+                except Exception as exc:   # noqa: BLE001
+                    _boot_log("语音智能关闭异常: " + type(exc).__name__
+                              + ": " + str(exc)[:160])
+                finally:
+                    self._auto_close_busy = False
+
+            threading.Thread(
+                target=worker, name="readerpc-voice-autoclose", daemon=True
+            ).start()
+        except Exception as exc:   # noqa: BLE001
+            _boot_log("语音智能关闭轮询异常: " + type(exc).__name__)
+        finally:
+            self.root.after(30_000, self._voice_auto_close_tick)
 
     def _ensure_voice_online(self) -> None:
         if self.closed or self.closing:
