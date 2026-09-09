@@ -3326,6 +3326,36 @@ internal sealed class DirectBridgeProtocolSession
                 activeReading,
                 requireActiveOwner: activeSession,
                 cancellationToken).ConfigureAwait(false);
+        // 提示板的焦点（2026-09-09）。
+        //
+        // ⚠⚠ `ForwardActiveReadingAsync` 有**两个**调用点，而我上一版只补了
+        //   另一个（DirectBridgeServer 里那条 HTTP POST）。那条是**浏览器扩展**
+        //   走的；**App 走的是这条直连通道**。于是表现正好是用户报的：
+        //   "扩展里打开新网页板子更新了，但 app 书换页、绘图没变化"。
+        //   改这类东西之前先数清有几个调用点 —— 这是 CLAUDE.md 里那条
+        //   "先数清楚它有几份副本"的又一次实证。
+        //
+        // 身份取书+页；「在新页上划选」立刻确认，不必等满 45 秒
+        // （SelectionState 三种取值里只有 active 表示他真的划了）。
+        // 与 HTTP 那条保持逐字一致，两边分叉的表现会是"某些设备上焦点不动"。
+        string focusPage = activeReading.Page.ValueKind == JsonValueKind.Number
+            ? activeReading.Page.ToString()
+            : string.Empty;
+        string focusTitle = string.IsNullOrWhiteSpace(activeReading.Title)
+            ? activeReading.File
+            : activeReading.Title;
+        ReaderAttentionBoard.NoteLocation(
+            focusPage.Length == 0
+                ? activeReading.File
+                : activeReading.File + "#" + focusPage,
+            focusPage.Length == 0
+                ? focusTitle
+                : focusTitle + " 第 " + focusPage + " 页",
+            DateTimeOffset.UtcNow,
+            source: activeReading.SourceInstanceId,
+            interacted: string.Equals(
+                activeReading.SelectionState, "active",
+                StringComparison.Ordinal));
         return new
         {
             sessionId,

@@ -265,6 +265,26 @@ test("响应说清这次是接上还是续期", () => {
   assert.match(ENDPOINT, /\["renewedOnly"\]/);
 });
 
+test("两条通道都要报焦点：扩展走 HTTP，App 走直连", () => {
+  // ⚠⚠ 这是本轮最贵的一课。`ForwardActiveReadingAsync` 有**两个**调用点：
+  //   DirectBridgeServer 的 HTTP POST（浏览器扩展走）和 DirectBridgeProtocol
+  //   的直连通道（**App 走**）。我第一版只补了前者，于是表现正好是用户报的
+  //   "扩展里打开新网页板子更新了，但 app 书换页没变化"。
+  //   CLAUDE.md 那条"先数清楚它有几份副本"，这是又一次实证。
+  const server = read(CS + "DirectBridgeServer.cs");
+  const protocol = read(CS + "DirectBridgeProtocol.cs");
+  for (const [label, source] of [["HTTP POST", server], ["直连通道", protocol]]) {
+    assert.ok(
+      source.includes("ReaderAttentionBoard.NoteLocation("),
+      `${label} 这一支没有上报焦点`);
+  }
+  // 两边的判定必须逐字一致，分叉的表现是"某些设备上焦点不动"
+  for (const source of [server, protocol]) {
+    assert.ok(source.includes('activeReading.SelectionState, "active"'));
+    assert.ok(source.includes('activeReading.File + "#" + '));
+  }
+});
+
 test("新页上划选即确认焦点，不必等满 45 秒", () => {
   // 用户 2026-09-09：「不是除了 45s 还有新页面操作后直接刷新的机制么」——
   // 有，我接得太窄：原来判 Selection 非空，改成判 SelectionState。
