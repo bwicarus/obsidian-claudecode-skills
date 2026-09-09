@@ -1384,7 +1384,12 @@
         exactDraftSource
           ? ["draftId", "file", "target", "sourceText", "cards", "nodeIds"]
           : ["draftId", "cards", "nodeIds"],
-        [],
+        // track 是可选的(滚动升级:桥先装、App 后出构建),所以它属于 optional
+        // 而不是 required —— 但**必须在放行表里**。2026-09-08 加归属二选一时
+        // 只加了下面的读取、没加这一行,于是任何带 track 的制卡都被这道闸
+        // 以「含未知字段 track」拒掉:读了却没放行,和放行了却没搬字段一样,
+        // 表现都是"明明改齐了却不生效"。
+        ["track"],
         "Reader Anki 草稿输出"
       );
       var draftId = safeText(p.draftId, "Reader Anki draftId", 160, false);
@@ -5663,15 +5668,34 @@
   }
 
   function normalizeLocalAnkiAddRequest(value) {
+    // 身份二选一(2026-09-09)：
+    //   草稿路 = draftId + sourceInstanceId。sourceInstanceId 是「产生这批
+    //           草稿的那个页面模块实例」，**页面一重载就换新**，于是导出失败
+    //           之后再也补不上（重开书时便签恢复了，那个实例却已经不在）。
+    //   实体路 = entityId + cards。身份来自卡库实体 card_*，跨会话稳定，
+    //           "当时没发出去、过几天再补"这件事才成立。
+    var isEntity = plainObject(value) &&
+      Object.prototype.hasOwnProperty.call(value, "entityId");
     exactObject(
       value,
-      ["draftId", "sourceInstanceId", "cardIndex", "aid", "card", "nodeIds"],
-      [],
+      isEntity
+        ? ["entityId", "cards", "cardIndex", "aid", "card", "nodeIds"]
+        : ["draftId", "sourceInstanceId", "cardIndex", "aid", "card", "nodeIds"],
+      // track 读了就必须放行,否则 rc-flashcard 每次导出都撞 SCHEMA。
+      // 出处三件套(file/target/sourceText)只有实体路才带,且要么齐要么全无。
+      isEntity ? ["track", "file", "target", "sourceText"] : ["track"],
       "本机 Anki 入库请求"
     );
-    var draftId = safeText(value.draftId, "Anki draftId", 64, false);
     var aid = safeText(value.aid, "Anki aid", 64, false);
-    if (!/^draft-[a-f0-9]{32}$/.test(draftId) ||
+    var draftId = isEntity
+      ? ""
+      : safeText(value.draftId, "Anki draftId", 64, false);
+    var entityId = isEntity
+      ? safeText(value.entityId, "Anki entityId", 80, false)
+      : "";
+    if ((isEntity
+          ? !/^card_[a-f0-9]{4,64}$/.test(entityId)
+          : !/^draft-[a-f0-9]{32}$/.test(draftId)) ||
         !/^fc_[a-f0-9]{32}$/.test(aid) ||
         !Number.isSafeInteger(value.cardIndex) || value.cardIndex < 0 ||
         value.cardIndex > 19) {
@@ -5683,11 +5707,6 @@
     }
     var normalizedCard = normalizeLocalAnkiCard(value.card);
     var normalized = {
-      draftId: draftId,
-      sourceInstanceId: safeId(
-        value.sourceInstanceId,
-        "Anki sourceInstanceId"
-      ),
       cardIndex: value.cardIndex,
       aid: aid,
       card: normalizedCard.canonical,
@@ -5697,6 +5716,44 @@
       ),
       projection: normalizedCard.projection,
     };
+    if (isEntity) {
+      normalized.entityId = entityId;
+      // 整批卡面：桥按 draftId 存一整批，还要用 cardIndex 在这批里定位。
+      if (!Array.isArray(value.cards) || value.cards.length < 1 ||
+          value.cards.length > 20 || value.cardIndex >= value.cards.length) {
+        throw directError(
+          "本机 Anki 实体导出必须带上整批卡面",
+          "BW_READER_LOCAL_ANKI_SCHEMA",
+          false
+        );
+      }
+      normalized.cards = value.cards.map(function (one) {
+        return normalizeLocalAnkiCard(one).canonical;
+      });
+      var hasFile = Object.prototype.hasOwnProperty.call(value, "file");
+      var hasTarget = Object.prototype.hasOwnProperty.call(value, "target");
+      var hasQuote = Object.prototype.hasOwnProperty.call(value, "sourceText");
+      if (hasFile || hasTarget || hasQuote) {
+        if (!hasFile || !hasTarget || !hasQuote) {
+          throw directError(
+            "本机 Anki 引用来源必须同时提供 file/target/sourceText",
+            "BW_READER_LOCAL_ANKI_SCHEMA",
+            false
+          );
+        }
+        normalized.file = safeText(value.file, "Anki file", 4096, false);
+        normalized.target = normalizeReaderOutputTarget(value.target);
+        normalized.sourceText = safeText(
+          value.sourceText, "Anki sourceText", 8000, false
+        );
+      }
+    } else {
+      normalized.draftId = draftId;
+      normalized.sourceInstanceId = safeId(
+        value.sourceInstanceId,
+        "Anki sourceInstanceId"
+      );
+    }
     var bytes = new TextEncoder().encode(JSON.stringify(normalized)).byteLength;
     if (bytes > 192 * 1024) {
       throw directError(

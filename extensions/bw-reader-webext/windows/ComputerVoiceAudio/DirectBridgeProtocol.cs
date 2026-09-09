@@ -2563,13 +2563,32 @@ internal sealed class DirectBridgeProtocolSession
         // track 可选(滚动升级:桥先装、App 后出构建)。加进精确字段集就成了**必需**,
         // 旧版 App 不发就被拒 —— 2026-09-08 自检当场抓到过一次。
         bool hasTrack = message.TryGetProperty("track", out _);
-        if (hasProjection)
+        // 两种身份二选一(2026-09-09):
+        //   草稿路 = sourceInstanceId + draftId —— AI 刚交付草稿时用，
+        //            身份绑在那个页面模块实例上，**页面一重载就失效**。
+        //   实体路 = entityId + cards —— 身份来自卡库实体(card_*)，跨会话
+        //            稳定，所以"当时没发出去、过几天再补"这件事才成立。
+        //   实测四张 2026-08-13 的卡就死在只有草稿路这一点上。
+        bool hasEntity = message.TryGetProperty("entityId", out _);
+        // 出处三件套要么齐、要么全无(与草稿登记同一条规则)。
+        bool hasFile = message.TryGetProperty("file", out _);
+        bool hasTarget = message.TryGetProperty("target", out _);
+        bool hasSourceText = message.TryGetProperty("sourceText", out _);
+        List<string> expected =
+        [
+            "contract", "type", "requestId", "sessionId",
+            "cardIndex", "aid", "card", "nodeIds",
+        ];
+        if (hasEntity)
         {
-            RequireExactKeys(
-                message,
-                hasTrack
-                    ? new[] { "contract", "type", "requestId", "sessionId", "sourceInstanceId", "draftId", "cardIndex", "aid", "card", "nodeIds", "projection", "track" }
-                    : new[] { "contract", "type", "requestId", "sessionId", "sourceInstanceId", "draftId", "cardIndex", "aid", "card", "nodeIds", "projection" });
+            expected.Add("entityId");
+            expected.Add("cards");
+            if (hasFile || hasTarget || hasSourceText)
+            {
+                expected.Add("file");
+                expected.Add("target");
+                expected.Add("sourceText");
+            }
         }
         else
         {
@@ -2579,12 +2598,18 @@ internal sealed class DirectBridgeProtocolSession
             // starts sending the separately rendered `projection` field.
             // nodeIds（KJ 知识节点）2026-09-06 起必填：制卡必须带归属。
             // 2026-09-08 起归属二选一，track 承担单词/语法卡的归属。
-            RequireExactKeys(
-                message,
-                hasTrack
-                    ? new[] { "contract", "type", "requestId", "sessionId", "sourceInstanceId", "draftId", "cardIndex", "aid", "card", "nodeIds", "track" }
-                    : new[] { "contract", "type", "requestId", "sessionId", "sourceInstanceId", "draftId", "cardIndex", "aid", "card", "nodeIds" });
+            expected.Add("sourceInstanceId");
+            expected.Add("draftId");
         }
+        if (hasProjection)
+        {
+            expected.Add("projection");
+        }
+        if (hasTrack)
+        {
+            expected.Add("track");
+        }
+        RequireExactKeys(message, expected.ToArray());
         if (Encoding.UTF8.GetByteCount(message.GetRawText()) > 192 * 1024)
         {
             throw new DirectProtocolException(
@@ -2608,10 +2633,15 @@ internal sealed class DirectBridgeProtocolSession
                 "ReaderPC 本地 Anki 写入尚未接线",
                 retryable: true);
         }
-        string sourceInstanceId = RequireSafeId(
-            message,
-            "sourceInstanceId");
-        string draftId = RequireString(message, "draftId", 64);
+        string sourceInstanceId = hasEntity
+            ? ""
+            : RequireSafeId(message, "sourceInstanceId");
+        string draftId = hasEntity
+            ? ""
+            : RequireString(message, "draftId", 64);
+        string entityId = hasEntity
+            ? RequireString(message, "entityId", 80)
+            : "";
         string aid = RequireString(message, "aid", 64);
         string track = RequireKjCardTrack(message);
         string[] nodeIds = RequireKjNodeIds(message, track);
@@ -2637,8 +2667,28 @@ internal sealed class DirectBridgeProtocolSession
                 (hasProjection ? projectionValue : cardValue).GetRawText())
                 as JsonObject
                 ?? throw new JsonException("projection is empty");
-            ReaderLocalAnkiWriteOutcome outcome =
-                await _localAnkiWriter.AddAsync(
+            ReaderLocalAnkiWriteOutcome outcome = hasEntity
+                ? await _localAnkiWriter.AddFromEntityAsync(
+                    entityId,
+                    cardIndex,
+                    aid,
+                    card,
+                    projection,
+                    hasFile ? RequireString(message, "file", 4096) : "",
+                    hasTarget
+                        ? JsonNode.Parse(
+                            message.GetProperty("target").GetRawText())
+                            as JsonObject
+                            ?? throw new JsonException("target is empty")
+                        : new JsonObject(),
+                    hasSourceText
+                        ? RequireString(message, "sourceText", 8000)
+                        : "",
+                    RequireEntityCards(message),
+                    nodeIds,
+                    track,
+                    cancellationToken).ConfigureAwait(false)
+                : await _localAnkiWriter.AddAsync(
                     sourceInstanceId,
                     draftId,
                     cardIndex,
@@ -3701,6 +3751,33 @@ internal sealed class DirectBridgeProtocolSession
                 "BW_COMPUTER_VOICE_DIRECT_MESSAGE_INVALID",
                 "直连消息必须是对象");
         }
+    }
+
+    /// <summary>
+    /// 实体路必须带上整批卡面：登记表按 draftId 存一整批，
+    /// <c>ResolveCardAsync</c> 还要用 cardIndex 在这批里定位。
+    /// </summary>
+    private static JsonArray RequireEntityCards(JsonElement message)
+    {
+        if (!message.TryGetProperty("cards", out JsonElement value)
+            || value.ValueKind != JsonValueKind.Array)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ANKI_REQUEST_INVALID",
+                "Reader 本地 Anki 实体导出必须带上整批卡面");
+        }
+        JsonArray cards = JsonNode.Parse(value.GetRawText()) as JsonArray
+            ?? throw new DirectProtocolException(
+                "BW_READER_ANKI_REQUEST_INVALID",
+                "Reader 本地 Anki 实体卡面无效");
+        if (cards.Count is < 1 or > 20
+            || cards.Any(node => node is not JsonObject))
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ANKI_REQUEST_INVALID",
+                "Reader 本地 Anki 实体卡面无效");
+        }
+        return cards;
     }
 
     private static void RequireExactKeys(

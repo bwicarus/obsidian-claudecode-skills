@@ -455,7 +455,8 @@ internal sealed class ReaderLocalAnkiRegistry
         {
             throw Invalid("Reader 本地 Anki 草稿无效");
         }
-        JsonObject draft = NormalizeDraft(request, payload);
+        JsonObject draft = NormalizeDraft(
+            payload, request.SourceInstanceId);
         string draftId = draft["draftId"]!.GetValue<string>();
         return WithLockAsync(root =>
         {
@@ -476,6 +477,94 @@ internal sealed class ReaderLocalAnkiRegistry
                 }
                 return false;
             }
+            drafts[draftId] = draft;
+            TrimOldest(drafts, MaximumDrafts, "registeredAtUtc");
+            return true;
+        }, cancellationToken);
+    }
+
+    /// <summary>
+    /// 卡库实体这条路占住 sourceInstanceId 位置的固定值。
+    ///
+    /// ⚠ 为什么需要另一条路（2026-09-09 查实）：草稿那条路的
+    /// sourceInstanceId 是「产生这批草稿的那个页面模块实例」，**页面一重载
+    /// 就换新**。于是导出失败之后永远补不上 —— 重开书时便签恢复出来了，
+    /// 可当初那个实例早就不在，`ResolveCardAsync` 抛
+    /// DRAFT_SOURCE_MISMATCH；更早一步，Reader 侧连 `localDraft` 都没有，
+    /// 按钮根本不显示。实测四张 2026-08-13 的卡就卡在这里，登记表里
+    /// 一条回执都没有。
+    ///
+    /// 实体这条路的身份来自卡库实体（card_*），跨会话稳定，所以这里用一个
+    /// 固定值占位；防串实例的责任由实体 id 自己承担，"同一 aid 不许写入
+    /// 不同内容"那道闸照旧有效。
+    /// </summary>
+    internal const string EntitySourceInstanceId =
+        "source-reader-card-entity";
+
+    /// <summary>
+    /// 由卡库实体 id 推出一个格式合法且**确定**的 draftId。
+    ///
+    /// 确定性是关键：同一个实体每次都推出同一个 draftId，于是
+    /// <see cref="Fingerprint"/>（它把 draftId 算进去）对同一张卡也稳定，
+    /// aid → 指纹的对应关系不会因为"又试了一次"而改变。
+    /// </summary>
+    internal static string EntityDraftId(string entityId)
+    {
+        RequireEntityId(entityId);
+        return "draft-" + Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes("reader-card-entity:" + entityId)))
+            .ToLowerInvariant()[..32];
+    }
+
+    internal static void RequireEntityId(string value)
+    {
+        if (value.Length is < 9 or > 69
+            || !value.StartsWith("card_", StringComparison.Ordinal)
+            || value[5..].Any(character =>
+                character is not (>= '0' and <= '9'
+                    or >= 'a' and <= 'f')))
+        {
+            throw Invalid("Reader 本地 Anki 卡库实体 id 无效");
+        }
+    }
+
+    /// <summary>
+    /// 用卡库实体的内容登记（或刷新）一份实体派生草稿。
+    ///
+    /// ⚠ 与 <see cref="RegisterDraftAsync"/> 的关键差别：这里**覆盖**而不是
+    /// 撞 DRAFT_REUSED。草稿 id 是 AI 一次性发出来的，"一个 id 一份内容"
+    /// 是对的；而实体 id 天生长过内容 —— 用户改了卡面，实体还是同一个。
+    /// 真正防写错的是 aid → 指纹那道闸，它没有被放松。
+    /// </summary>
+    internal Task RegisterEntityDraftAsync(
+        string entityId,
+        string file,
+        JsonObject target,
+        string sourceText,
+        JsonArray cards,
+        CancellationToken cancellationToken)
+    {
+        string draftId = EntityDraftId(entityId);
+        JsonObject payload = new()
+        {
+            ["draftId"] = draftId,
+            ["cards"] = cards.DeepClone(),
+        };
+        // ⚠ 出处三件套「要么齐、要么一个都不放」——NormalizeDraft 是按
+        // **键在不在**判断的，放一个空串进去它就当你声明了精确出处，
+        // 然后因为空串不合法整条拒。2026-09-09 自检当场抓到：带出处的
+        // 那张过了，不带出处的那张报「来源无效」，而"没有出处"恰恰是
+        // 那几张卡的常态。
+        if (file.Length > 0 && sourceText.Length > 0 && target.Count > 0)
+        {
+            payload["file"] = file;
+            payload["target"] = target.DeepClone();
+            payload["sourceText"] = sourceText;
+        }
+        JsonObject draft = NormalizeDraft(payload, EntitySourceInstanceId);
+        return WithLockAsync(root =>
+        {
+            JsonObject drafts = RequireObject(root, "drafts");
             drafts[draftId] = draft;
             TrimOldest(drafts, MaximumDrafts, "registeredAtUtc");
             return true;
@@ -886,13 +975,13 @@ internal sealed class ReaderLocalAnkiRegistry
     }
 
     private JsonObject NormalizeDraft(
-        ReaderRealtimeOutputRequest request,
-        JsonObject payload)
+        JsonObject payload,
+        string sourceInstanceId)
     {
         string draftId = payload["draftId"]?.GetValue<string>()
             ?? throw Invalid("Reader 本地 Anki draftId 无效");
         RequireDraftId(draftId);
-        RequireSafeSource(request.SourceInstanceId);
+        RequireSafeSource(sourceInstanceId);
         bool hasFile = payload.ContainsKey("file");
         bool hasTarget = payload.ContainsKey("target");
         bool hasSourceText = payload.ContainsKey("sourceText");
@@ -943,7 +1032,7 @@ internal sealed class ReaderLocalAnkiRegistry
         return new JsonObject
         {
             ["draftId"] = draftId,
-            ["sourceInstanceId"] = request.SourceInstanceId,
+            ["sourceInstanceId"] = sourceInstanceId,
             ["file"] = file,
             ["target"] = target.DeepClone(),
             ["sourceText"] = sourceText,
@@ -1719,6 +1808,23 @@ internal interface IReaderLocalAnkiWriter
         string track,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// 从卡库实体导出：身份来自 card_* 实体而不是那个活不过页面重载的草稿。
+    /// </summary>
+    Task<ReaderLocalAnkiWriteOutcome> AddFromEntityAsync(
+        string entityId,
+        int cardIndex,
+        string aid,
+        JsonObject canonicalCard,
+        JsonObject projectionCard,
+        string file,
+        JsonObject target,
+        string sourceText,
+        JsonArray cards,
+        IReadOnlyList<string> nodeIds,
+        string track,
+        CancellationToken cancellationToken);
+
     Task<JsonObject> OperateAsync(
         ReaderLocalAnkiOperationRequest request,
         CancellationToken cancellationToken);
@@ -1773,6 +1879,45 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
         _bindingLog = string.IsNullOrWhiteSpace(kjBindingLogPath)
             ? null
             : new ReaderKjBindingLog(kjBindingLogPath);
+    }
+
+    /// <summary>
+    /// 从卡库实体导出。整条写入链（aid 回执、AID_REUSED、指纹、去重、
+    /// changeDeck）一律复用 <see cref="AddAsync"/> —— 这里只负责把实体
+    /// 的内容与出处**登记成一份实体派生草稿**，把身份从"某个页面实例"
+    /// 换成"某个卡库实体"。
+    /// </summary>
+    public async Task<ReaderLocalAnkiWriteOutcome> AddFromEntityAsync(
+        string entityId,
+        int cardIndex,
+        string aid,
+        JsonObject canonicalCard,
+        JsonObject projectionCard,
+        string file,
+        JsonObject target,
+        string sourceText,
+        JsonArray cards,
+        IReadOnlyList<string> nodeIds,
+        string track,
+        CancellationToken cancellationToken)
+    {
+        await _registry.RegisterEntityDraftAsync(
+            entityId,
+            file,
+            target,
+            sourceText,
+            cards,
+            cancellationToken).ConfigureAwait(false);
+        return await AddAsync(
+            ReaderLocalAnkiRegistry.EntitySourceInstanceId,
+            ReaderLocalAnkiRegistry.EntityDraftId(entityId),
+            cardIndex,
+            aid,
+            canonicalCard,
+            projectionCard,
+            nodeIds,
+            track,
+            cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<ReaderLocalAnkiWriteOutcome> AddAsync(

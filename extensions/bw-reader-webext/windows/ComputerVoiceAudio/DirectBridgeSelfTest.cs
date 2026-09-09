@@ -1703,7 +1703,15 @@ internal static class DirectBridgeSelfTest
                 "kind", "sourceId", "documentId", "bookId", "url", "title",
                 "quote", "context", "tool", "draftId", "sourceInstanceId",
                 "requirement", "location", "anchor", "selection", "legacy",
+                // 归属可修补（2026-09-09）：归属 2026-09-06 才成为硬要求，
+                // 之前的卡一条都没有，而没归属就进不了 Anki、永远评不了分。
+                // 这两个字段不在这张 schema 里时，唯一出路是删掉重做。
+                "kjTrack", "kjNodes",
             })
+            && sourceSchema["properties"]?["kjTrack"]?["enum"]?.AsArray()
+                .Select(value => value?.GetValue<string>())
+                .SequenceEqual(
+                    ReaderRealtimeOutputProtocol.KjCardTracks.All) == true
             && sourceOnlyAccepted
             && sourceOnlyId == "card_aabbccdd"
             && sourceOnlyIndex == 1
@@ -2223,6 +2231,122 @@ internal static class DirectBridgeSelfTest
                     front = "Q",
                     back = "A",
                 },
+            },
+            events,
+            frames).ConfigureAwait(false);
+        // ── 实体路：没有任何草稿登记也要能入库 ────────────────────────
+        // 上面那条 mismatch 证明的正是问题所在：草稿的 sourceInstanceId 一旦
+        // 不对就拒。而页面重载后**没有一个对的 sourceInstanceId 存在** ——
+        // 于是"当时没发出去"等于"永远发不出去"。实体路把身份换成 card_*，
+        // 这里刻意不做任何 RegisterDraftAsync 就直接发。
+        string entityId = "card_" + new string('d', 12);
+        object entityRequest = new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = "anki-add-cards-local",
+            requestId = "request-local-anki-entity",
+            sessionId,
+            entityId,
+            cardIndex = 1,
+            aid = "fc_" + new string('3', 32),
+            nodeIds = Array.Empty<string>(),
+            track = "jp-word",
+            file = "library/local-book.pdf",
+            target = new { kind = "pdf", page = 7 },
+            sourceText = "原始页面文字",
+            cards = new object[]
+            {
+                new { type = "basic", front = "第一张", back = "第一张的答案" },
+                new { type = "basic", front = "第二张", back = "第二张的答案" },
+            },
+            card = new { type = "basic", front = "第二张", back = "第二张的答案" },
+            projection = new
+            {
+                type = "basic",
+                front = "第二张",
+                back = "<p>第二张的答案</p>",
+            },
+        };
+        JsonElement entityFirst = RequireSuccess(
+            await SendAsync(session, entityRequest, events, frames)
+                .ConfigureAwait(false),
+            "anki-add-cards-local");
+        JsonElement entityReplay = RequireSuccess(
+            await SendAsync(session, entityRequest, events, frames)
+                .ConfigureAwait(false),
+            "anki-add-cards-local");
+        string? entityAddedFront = anki.LastAddedFront;
+        // 同一个实体、同一个序号，改了卡面之后再发**必须**被 aid 那道闸拦住
+        // （aid 说"这张卡"，内容变了就是另一张卡）。实体路放松的只是草稿
+        // 那条身份，不是这条安全性。
+        JsonElement entityAidReuse = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-add-cards-local",
+                requestId = "request-local-anki-entity-aid-reuse",
+                sessionId,
+                entityId,
+                cardIndex = 1,
+                aid = "fc_" + new string('3', 32),
+                nodeIds = Array.Empty<string>(),
+                track = "jp-word",
+                cards = new object[]
+                {
+                    new { type = "basic", front = "第一张", back = "第一张的答案" },
+                    new { type = "basic", front = "改过的第二张", back = "改过的答案" },
+                },
+                card = new
+                {
+                    type = "basic",
+                    front = "改过的第二张",
+                    back = "改过的答案",
+                },
+            },
+            events,
+            frames).ConfigureAwait(false);
+        // 出处三件套要么齐、要么全无 —— 只给一半直接拒。
+        JsonElement entityHalfSource = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-add-cards-local",
+                requestId = "request-local-anki-entity-half-source",
+                sessionId,
+                entityId = "card_" + new string('c', 12),
+                cardIndex = 0,
+                aid = "fc_" + new string('4', 32),
+                nodeIds = Array.Empty<string>(),
+                track = "jp-word",
+                file = "library/local-book.pdf",
+                cards = new object[]
+                {
+                    new { type = "basic", front = "只给了 file", back = "答案" },
+                },
+                card = new { type = "basic", front = "只给了 file", back = "答案" },
+            },
+            events,
+            frames).ConfigureAwait(false);
+        // 归属仍然必填：实体路不是绕过归属的后门。
+        JsonElement entityNoAttribution = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-add-cards-local",
+                requestId = "request-local-anki-entity-no-attribution",
+                sessionId,
+                entityId = "card_" + new string('b', 12),
+                cardIndex = 0,
+                aid = "fc_" + new string('5', 32),
+                nodeIds = Array.Empty<string>(),
+                cards = new object[]
+                {
+                    new { type = "basic", front = "没有归属", back = "答案" },
+                },
+                card = new { type = "basic", front = "没有归属", back = "答案" },
             },
             events,
             frames).ConfigureAwait(false);
@@ -2756,6 +2880,12 @@ internal static class DirectBridgeSelfTest
             first = first.GetRawText(),
             replay = replay.GetRawText(),
             mismatch = mismatch.GetRawText(),
+            entityAddedFront,
+            entityFirst = entityFirst.GetRawText(),
+            entityReplay = entityReplay.GetRawText(),
+            entityAidReuse = entityAidReuse.GetRawText(),
+            entityHalfSource = entityHalfSource.GetRawText(),
+            entityNoAttribution = entityNoAttribution.GetRawText(),
             projectionTypeMismatch = projectionTypeMismatch.GetRawText(),
             aggregateImageUpdate = aggregateImageUpdate.GetRawText(),
             legacyAdd = legacyAdd.GetRawText(),
@@ -2795,7 +2925,9 @@ internal static class DirectBridgeSelfTest
             && !first.GetProperty("dedup").GetBoolean()
             && first.GetProperty("note_ids")[0].GetInt64() == 101
             && replay.GetProperty("dedup").GetBoolean()
-            && anki.AddNoteCount == 2
+            // 三次真实 addNote：草稿路一次、实体路一次、旧版无 projection 一次。
+            // 重放那两次必须**不**再 addNote（dedup），所以这个数字是有意义的。
+            && anki.AddNoteCount == 3
             && primaryAddedFront == "用户编辑后的问题"
             && primaryAddedBack is string addedBack
             && addedBack.Split(addedMediaFile).Length == 3
@@ -2807,6 +2939,19 @@ internal static class DirectBridgeSelfTest
             && !mismatch.GetProperty("ok").GetBoolean()
             && mismatch.GetProperty("error").GetProperty("code")
                 .GetString() == "BW_READER_ANKI_DRAFT_SOURCE_MISMATCH"
+            // 实体路：没登记过草稿也能入库，且重放去重、aid 复用照旧被拦。
+            && entityFirst.GetProperty("ok").GetBoolean()
+            && entityFirst.GetProperty("added").GetInt32() == 1
+            && !entityFirst.GetProperty("dedup").GetBoolean()
+            && entityReplay.GetProperty("dedup").GetBoolean()
+            && entityAddedFront == "第二张"
+            && !entityAidReuse.GetProperty("ok").GetBoolean()
+            && entityAidReuse.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_AID_REUSED"
+            && !entityHalfSource.GetProperty("ok").GetBoolean()
+            && !entityNoAttribution.GetProperty("ok").GetBoolean()
+            && entityNoAttribution.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_NODE_REQUIRED"
             && readNote.GetProperty("ok").GetBoolean()
             && readNote.GetProperty("anki_local_status").GetString()
                 == "read"

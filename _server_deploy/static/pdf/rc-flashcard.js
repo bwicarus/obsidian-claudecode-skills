@@ -102,6 +102,35 @@
       legacy: { piEntityRegistered: !(st && st.opts && st.opts.entityRegistered === false) }
     };
   }
+  //: 桥只收 {type,front,back} / {type,cloze} —— C# 侧是 RequireExact，多一个
+  //: 字段整条拒。repositoryCard() 会带上 deck/tags/reason(仓库要那些)，
+  //: 所以送桥之前必须再剥一层。⚠ 直接把 repositoryCard 的结果送过去，
+  //: 表现是"有 deck 的卡永远导不出去"，而错误码停在 SCHEMA 上看不出是哪个字段。
+  function bridgeCard(card) {
+    var one = repositoryCard(card);
+    return one.type === 'cloze'
+      ? { type: 'cloze', cloze: one.cloze }
+      : { type: 'basic', front: one.front, back: one.back };
+  }
+  function bridgeCards(cards) {
+    return (cards || []).map(bridgeCard);
+  }
+  //: 出处 → 桥的 target（{kind:'pdf',page} / {kind:'epub',section}）。
+  //: 拿不到就返回 null，让实体导出走"无出处"那条路 —— 出处只影响卡片脚注，
+  //: 不该因为它缺失就让整张卡发不出去。
+  function bridgeTarget(source) {
+    var at = (source && (source.location || source.anchor)) || null;
+    if (!at || typeof at !== 'object') return null;
+    var page = Number(at.page);
+    if (Number.isSafeInteger(page) && page >= 1) {
+      return { kind: 'pdf', page: page };
+    }
+    var section = Number(at.section);
+    if (Number.isSafeInteger(section) && section >= 0) {
+      return { kind: 'epub', section: section };
+    }
+    return null;
+  }
   function repositoryMutation(prefix, gid, index) {
     var bytes = new Uint8Array(12);
     if (!window.crypto || typeof window.crypto.getRandomValues !== 'function') {
@@ -130,6 +159,14 @@
   function applyRepositoryRecord(container, record) {
     var st = container && container.__fc;
     if (!st || !record || record.deleted || !record.states) return false;
+    // 采纳仓库里存着的 source。恢复出来的卡片组（重开书时从便签里长出来的
+    // 那些）挂载时**没人给它 repositorySource** —— rc-snippets 只传
+    // cards/gid/mode。于是 repositorySource() 退回一个合成的默认值，
+    // 里面既没有归属（kjTrack/kjNodes）也没有出处（documentId/quote）,
+    // 导出前那道归属闸必然拒。权威的 source 一直在仓库记录里，读过来即可。
+    if (record.source && typeof record.source === 'object' && st.opts) {
+      st.opts.repositorySource = record.source;
+    }
     var changed = false;
     Object.keys(record.states).forEach(function (key) {
       var index = Number(key), saved = record.states[key], card = st.cards[index];
@@ -329,14 +366,21 @@
     }
     var exportControls = '';
     if (c._ratingUnavailableReason === 'not-exported') {
-      var canDesktop = !!(st && st.opts && st.opts.localDraft &&
-        RC.computerVoice && typeof RC.computerVoice.addLocalAnkiCard === 'function');
+      // 草稿刚交付时用 localDraft，此后用卡库实体 id —— 两者任一在就能发。
+      var canDesktop = !!((
+        (st && st.opts && st.opts.localDraft) || entityIdOf(st && st.gid)
+      ) && RC.computerVoice &&
+        typeof RC.computerVoice.addLocalAnkiCard === 'function');
       var mobileApi = window.BWReaderRuntime && window.BWReaderRuntime.ankiMobileExport;
       var canMobile = !!(mobileApi && typeof mobileApi.available === 'function' &&
         mobileApi.available());
-      if (canDesktop || canMobile) {
+      // 只有**确实卡住**的卡才给按钮：保存时会自动推一次，正常路径不该
+      // 多占一个按钮位；但自动那次失败之后，用户必须有一个自己动手的出口 ——
+      // 从前没有，卡就只能一直躺着（且界面上什么都不说）。
+      var stuck = canDesktop && c._pcExportStatus === 'failed';
+      if (stuck || canMobile) {
         exportControls = '<div class="fc-btns">' +
-          // 电脑 Anki 已在保存时自动推送，不再占一个按钮位；
+          (stuck ? '<button class="fc-export" data-fc="export-desktop">重发到电脑 Anki</button>' : '') +
           // iPad Anki 必须用户主动（要切 App），保留这一个。
           (canMobile ? '<button class="fc-export" data-fc="export-mobile">同步到 iPad Anki</button>' : '') +
           '</div>';
@@ -458,6 +502,7 @@
         if (act === 'del') { removeDraft(container, i); }
         else if (act === 'add') { addToAnki(container, i); }
         else if (act === 'export-pc') { exportToComputerAnki(container, i); }
+        else if (act === 'export-desktop') { exportToComputerAnki(container, i); }
         else if (act === 'export-mobile') { exportToMobileAnki(container, i); }
         else if (act === 'reveal') {
           cc._showBack = true;
@@ -1128,37 +1173,67 @@
     });
   }
 
-  function _recordExternalReceipt(st, i, target, receipt, prefix) {
+  function _recordReceiptForGid(gid, i, target, receipt, prefix) {
     var repo = repositoryApi();
     if (!repo) return Promise.reject(new Error('BW_CARD_REPOSITORY_UNAVAILABLE'));
     return repo.recordAnkiReceipt(
-      st.gid,
+      gid,
       i,
       target,
       receipt,
-      { mutationId: repositoryMutation(prefix, st.gid, i) }
+      { mutationId: repositoryMutation(prefix, gid, i) }
     );
   }
-  function exportToComputerAnki(container, i) {
-    var st = container && container.__fc, c = st && st.cards[i];
-    var draft = st && st.opts && st.opts.localDraft;
-    if (!c || !draft || c._pcExportStatus === 'pending' ||
-        c._pcExportStatus === 'unknown' || !(RC.computerVoice &&
-        typeof RC.computerVoice.addLocalAnkiCard === 'function')) {
-      RC.toast && RC.toast('电脑 Anki 导出当前不可用');
-      return;
+  function _recordExternalReceipt(st, i, target, receipt, prefix) {
+    return _recordReceiptForGid(st.gid, i, target, receipt, prefix);
+  }
+  //: 卡库实体身份：card_ + 4~64 位十六进制（与桥、MCP schema 同一条规则）。
+  function entityIdOf(gid) {
+    return /^card_[a-f0-9]{4,64}$/.test(String(gid || '')) ? String(gid) : '';
+  }
+  //: 组装实体路的请求。出处齐了就带上（决定卡片脚注的「来源：」），
+  //: 缺了照样发 —— 出处不该成为发不出去的理由。
+  function entityAnkiRequest(entityId, cards, index, aid, source, kjNodes, kjTrack) {
+    var request = {
+      entityId: entityId,
+      cards: bridgeCards(cards),
+      cardIndex: index,
+      aid: aid,
+      card: bridgeCard(cards[index]),
+      nodeIds: kjNodes,
+      track: kjTrack
+    };
+    var file = String((source && source.documentId) || '');
+    var quote = String((source && source.quote) || '');
+    var target = bridgeTarget(source);
+    if (file && quote && target) {
+      request.file = file;
+      request.target = target;
+      request.sourceText = quote;
     }
+    return request;
+  }
+  //: 导出的内核。容器可以为空 —— 自动补送要能处理**没挂在页面上**的卡片，
+  //: 而"必须有容器"正是从前那条补送路走不通的原因之一。
+  //: ⚠ 两个入口共用这一份实现，别再复制一遍：状态字符串、可重试码表、
+  //: 回执三态如果各写一遍，迟早只改一边。
+  function runComputerExport(ctx) {
+    var c = ctx.card;
+    var kjNodes = String((ctx.source && ctx.source.kjNodes) || '')
+      .split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    var kjTrack = String((ctx.source && ctx.source.kjTrack) || '').trim();
+    if (kjTrack) kjNodes = [];   // 轨道承担归属时不带节点,桥那边也要求为空
     // 2026-09-06 用户拍板：卡必须有归属才能入库；2026-09-08 起归属**二选一** ——
     // 单词/语法卡带学习轨道(source.kjTrack)，学科概念卡带知识节点(source.kjNodes)。
-    // 这里只是最后一道闸；真正的校验在桥。⚠ 这处是同一条规则的第八份副本(前七处见 KJ_CARD_TRACKS 注释)。
-    var kjSource = repositorySource(st) || {};
-    var kjNodes = String(kjSource.kjNodes || '')
-      .split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-    var kjTrack = String(kjSource.kjTrack || '').trim();
-    if (kjTrack) kjNodes = [];   // 轨道承担归属时不带节点,桥那边也要求为空
+    // 这里只是最后一道闸；真正的校验在桥。⚠ 这处是同一条规则的第八份副本。
     if (!kjTrack && !kjNodes.length) {
-      RC.toast && RC.toast('这张卡还没有归属，不能入库：单词/语法卡让 AI 传 track，概念卡先 kj_search/kj_register 绑定节点');
-      return;
+      // 只能 return：归属得由人或 AI 补，不能就地编一个。
+      // 但**不要在静默补送时弹 toast** —— 那条 toast 挂在没人看的容器上，
+      // 用户只看到卡片一直发不出去、不知道缺的是归属。
+      if (!ctx.silent) {
+        RC.toast && RC.toast('这张卡还没有归属，不能入库：单词/语法卡让 AI 传 track，概念卡先 kj_search/kj_register 绑定节点');
+      }
+      return Promise.resolve(false);
     }
     var aid = c._pcExportAid;
     if (!/^fc_[a-f0-9]{32}$/.test(String(aid || ''))) {
@@ -1168,52 +1243,119 @@
     }
     c._pcExportAid = aid;
     c._pcExportStatus = 'pending';
-    updateSlide(container, i);
+    ctx.paint();
     var pending = {
       status: 'pending', mutationId: aid, updatedAt: Date.now()
     };
-    _recordExternalReceipt(st, i, 'readerpc', pending, 'pc-pending').then(function () {
-      return RC.computerVoice.addLocalAnkiCard({
-        draftId: draft.draftId,
-        sourceInstanceId: draft.sourceInstanceId,
-        cardIndex: i,
-        aid: aid,
-        card: repositoryCard(c),
-        nodeIds: kjNodes,
-        track: kjTrack
-      });
+    return _recordReceiptForGid(
+      ctx.gid, ctx.index, 'readerpc', pending, 'pc-pending'
+    ).then(function () {
+      return RC.computerVoice.addLocalAnkiCard(ctx.draft
+        ? {
+            draftId: ctx.draft.draftId,
+            sourceInstanceId: ctx.draft.sourceInstanceId,
+            cardIndex: ctx.index,
+            aid: aid,
+            card: bridgeCard(c),
+            nodeIds: kjNodes,
+            track: kjTrack
+          }
+        : entityAnkiRequest(
+            ctx.gid, ctx.cards, ctx.index, aid, ctx.source, kjNodes, kjTrack
+          ));
     }).then(function (data) {
       var noteIds = data.note_ids || [], cardIds = data.card_ids || [];
       c._pcExportStatus = 'succeeded';
       c._ratingUnavailable = true;
       c._ratingUnavailableReason = 'external';
-      updateSlide(container, i);
-      broadcast(st.gid, i, container);
-      return _recordExternalReceipt(st, i, 'readerpc', {
+      ctx.paint();
+      return _recordReceiptForGid(ctx.gid, ctx.index, 'readerpc', {
         status: 'succeeded', mutationId: aid,
         noteIds: noteIds, cardIds: cardIds,
         exportedAt: Date.now(), updatedAt: Date.now()
-      }, 'pc-success').then(function () { return _stateSync(st, i); });
+      }, 'pc-success').then(ctx.sync);
     }).then(function () {
-      RC.toast && RC.toast('✓ 已发送到电脑 Anki');
+      if (!ctx.silent) RC.toast && RC.toast('✓ 已发送到电脑 Anki');
+      return true;
     }).catch(function (error) {
       var code = String(error && error.code || '');
       var safeToRetry = /^(?:BW_READER_LOCAL_ANKI_(?:SCHEMA|CHANNEL_UNAVAILABLE|CONTEXT_INVALID)|BW_READER_ANKI_(?:LOCAL_UNAVAILABLE|CONTEXT_ONLY_REQUIRED|REQUEST_INVALID|DRAFT_NOT_REGISTERED|DRAFT_SOURCE_MISMATCH|DRAFT_CARD_INDEX_INVALID|AID_REUSED|AID_AMBIGUOUS|CONNECT_UNREACHABLE|CONNECT_RESPONSE_INVALID|CONNECT_ERROR))$/.test(code);
       c._pcExportStatus = safeToRetry ? 'failed' : 'unknown';
       c._ratingUnavailable = true;
       c._ratingUnavailableReason = safeToRetry ? 'not-exported' : 'export-unknown';
-      updateSlide(container, i);
-      broadcast(st.gid, i, container);
-      _recordExternalReceipt(st, i, 'readerpc', {
+      ctx.paint();
+      _recordReceiptForGid(ctx.gid, ctx.index, 'readerpc', {
         status: safeToRetry ? 'failed' : 'unknown',
         mutationId: aid,
         updatedAt: Date.now(),
         error: String(error && (error.code || error.message) || error || '?').slice(0, 1000)
       }, safeToRetry ? 'pc-failed' : 'pc-unknown').catch(function () {});
-      _stateSync(st, i);
-      RC.toast && RC.toast(safeToRetry
-        ? '电脑 Anki 导出失败，可稍后重试'
-        : '电脑 Anki 接收结果未知，已阻止重复发送');
+      ctx.sync();
+      if (!ctx.silent) {
+        RC.toast && RC.toast(safeToRetry
+          ? '电脑 Anki 导出失败，可稍后重试'
+          : '电脑 Anki 接收结果未知，已阻止重复发送');
+      }
+      return false;
+    });
+  }
+  function exportToComputerAnki(container, i, silent) {
+    var st = container && container.__fc, c = st && st.cards[i];
+    var draft = st && st.opts && st.opts.localDraft;
+    // 身份二选一(2026-09-09)：草稿刚交付时用 localDraft；此后（页面重载、
+    // 重开书）它已经不在了，用卡库实体 id。⚠ 从前只有前者，于是
+    // "当时没发出去" 等于 "永远发不出去" —— 按钮不显示、自动补送第一行就退出、
+    // 就算硬调也会撞 DRAFT_SOURCE_MISMATCH。四张 2026-08-13 的卡卡了 27 天。
+    var entityId = entityIdOf(st && st.gid);
+    if (!c || (!draft && !entityId) || c._pcExportStatus === 'pending' ||
+        c._pcExportStatus === 'unknown' || !(RC.computerVoice &&
+        typeof RC.computerVoice.addLocalAnkiCard === 'function')) {
+      if (!silent) RC.toast && RC.toast('电脑 Anki 导出当前不可用');
+      return Promise.resolve(false);
+    }
+    return runComputerExport({
+      gid: st.gid,
+      cards: st.cards,
+      index: i,
+      card: c,
+      draft: draft || null,
+      source: repositorySource(st) || {},
+      silent: !!silent,
+      paint: function () {
+        updateSlide(container, i);
+        broadcast(st.gid, i, container);
+      },
+      sync: function () { return _stateSync(st, i); }
+    });
+  }
+  //: 没挂在页面上的那张卡怎么补送。
+  //: ⚠ 这条路**只写外部回执，不写 exactState**：手上只有从仓库读回来的
+  //: 一个残缺卡对象，写整份 exactState 会把 _st/_next 这些抹掉。
+  //: 回执才是权威 —— applyRepositoryRecord 下次挂载时会从 projections
+  //: 反推 _pcExportStatus，两边不会打架。
+  function exportRecordCard(record, index) {
+    var semantic = record && record.cards && record.cards[index];
+    var state = record && record.states && record.states[String(index)];
+    if (!semantic || !state || !entityIdOf(record.id)) {
+      return Promise.resolve(false);
+    }
+    var receipt = (state.projections && state.projections.anki
+      && state.projections.anki.readerpc) || {};
+    var card = Object.assign({}, semantic, {
+      _pcExportAid: receipt.mutationId || null,
+      _pcExportStatus: receipt.status || null
+    });
+    return runComputerExport({
+      gid: record.id,
+      cards: record.cards,
+      index: index,
+      card: card,
+      draft: null,
+      source: (record.source && typeof record.source === 'object')
+        ? record.source : {},
+      silent: true,
+      paint: function () {},
+      sync: function () { return Promise.resolve(false); }
     });
   }
   // ── 断了就自动补送 ───────────────────────────────────────────────────
@@ -1238,21 +1380,46 @@
     // 让出一拍：链路刚回来时对面往往还在收敛，挤在同一刻发只会再失败一次。
     setTimeout(function () {
       _retryScheduled = false;
-      Object.keys(_groups).forEach(function (gid) {
-        var group = _groups[gid];
-        if (!group) return;
-        group.conts.slice().forEach(function (container) {
-          var st = container && container.__fc;
-          if (!st || !st.cards) return;
-          st.cards.forEach(function (card, index) {
+      // ⚠ 遍历的是**卡库**，不是挂载中的容器（2026-09-09 改）。
+      //   从前走 _groups：只看得到此刻挂在页面上的便签，于是"当时那本书
+      //   已经关了"的卡永远轮不到 —— 而那正是最需要补送的一批。
+      //   实测四张 2026-08-13 的卡就这样躺了 27 天，桥上一条回执都没有。
+      var repo = repositoryApi();
+      if (!repo || typeof repo.snapshot !== 'function') return;
+      Promise.resolve(repo.snapshot()).then(function (records) {
+        if (!Array.isArray(records)) return;
+        records.forEach(function (record) {
+          if (!record || record.deleted || !record.states ||
+              !Array.isArray(record.cards)) return;
+          Object.keys(record.states).forEach(function (key) {
+            var index = Number(key);
+            var state = record.states[key];
+            if (!Number.isInteger(index) || !state ||
+                state.removed === true || state.phase !== 'confirmed') return;
+            var receipt = (state.projections && state.projections.anki &&
+              state.projections.anki.readerpc) || {};
             // 只补"可安全重试"那一类；'unknown' 是电脑侧可能已经写进去了，
             // 再发一次等于制造重复卡 —— 那种要人来决定。
-            if (card && card._pcExportStatus === 'failed') {
-              try { exportToComputerAnki(container, index); } catch (_) {}
+            if (receipt.status !== 'failed') return;
+            var mounted = null;
+            var group = _groups[record.id];
+            if (group) {
+              group.conts.some(function (container) {
+                if (container && container.__fc &&
+                    container.__fc.cards && container.__fc.cards[index]) {
+                  mounted = container;
+                  return true;
+                }
+                return false;
+              });
             }
+            try {
+              if (mounted) exportToComputerAnki(mounted, index, true);
+              else exportRecordCard(record, index);
+            } catch (_) {}
           });
         });
-      });
+      }).catch(function () {});
     }, 1200);
     return reason;
   }

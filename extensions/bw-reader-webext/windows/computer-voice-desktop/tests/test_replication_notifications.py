@@ -15,6 +15,7 @@ from replication_notifications import (  # noqa: E402
     NotificationError,
     NotificationStore,
     _now_ms,
+    review_counts,
 )
 
 
@@ -777,6 +778,98 @@ class RouterTests(unittest.TestCase):
         }), encoding="utf-8")
         self._place("work", "工作地点")
         self.assertEqual(self._route_of()["action"], "hold")
+
+
+class ReviewCountTests(unittest.TestCase):
+    """数的是卡，不是卡的出现次数。
+
+    2026-09-09 实数出来的事：一本书里同一个卡组挂在三张便签上，于是
+    3 张卡被报成 9 张，加上另一本的 1 张，板子告诉用户"10 张新卡"。
+    用户按这个数去找卡永远找不齐 —— 虚报比少报更糟。
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.data = self.root / "replication-data"
+        self.data.mkdir()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _write_book(self, name: str, items: dict) -> None:
+        book = self.data / name
+        book.mkdir(exist_ok=True)
+        (book / "document-notes.json").write_text(
+            json.dumps({"contract": "document-notes/1", "items": items}),
+            encoding="utf-8")
+
+    @staticmethod
+    def _blocked_card(front: str) -> dict:
+        return {
+            "type": "basic", "front": front, "back": "背面",
+            "_st": "learn", "_next": None,
+            "_ratingUnavailable": True,
+            "_ratingUnavailableReason": "not-exported",
+        }
+
+    def test_one_card_group_on_three_notes_counts_once(self) -> None:
+        group = {
+            "gid": "card_49355a00cb45",
+            "cid": "card_49355a00cb45",
+            "cards": [self._blocked_card("イスラム教"),
+                      self._blocked_card("ヒンズー教"),
+                      self._blocked_card("ユダヤ教")],
+        }
+        self._write_book("repbook-jp", {
+            "n426bc5f5cbd": {"card": group},
+            "n13d98d31bbe": {"card": group},
+            "n888cbe4ec30": {"card": group},
+        })
+        self._write_book("repbook-en", {
+            "c_8c96358a": {"card": {
+                "gid": "card_f9298e759b20",
+                "cid": "card_f9298e759b20",
+                "cards": [self._blocked_card("Primary Health Care")],
+            }},
+        })
+        counts = review_counts(self.root)
+        self.assertEqual(counts["new"], 4, "同一卡组挂三张便签仍然只有 3 张卡")
+        self.assertEqual(counts["newBlocked"], 4)
+        self.assertEqual(counts["newGradable"], 0)
+
+    def test_different_groups_are_not_merged(self) -> None:
+        # 去重不能反过来把不同的卡吞掉。
+        self._write_book("repbook-a", {
+            "n1": {"card": {"gid": "card_aaa", "cid": "card_aaa",
+                            "cards": [self._blocked_card("甲")]}},
+            "n2": {"card": {"gid": "card_bbb", "cid": "card_bbb",
+                            "cards": [self._blocked_card("乙")]}},
+        })
+        self.assertEqual(review_counts(self.root)["new"], 2)
+
+    def test_group_without_identity_falls_back_to_note(self) -> None:
+        # 老数据可能既没 gid 也没 cid：那时宁可多数，不可把两张合成一张。
+        self._write_book("repbook-old", {
+            "n1": {"card": {"cards": [self._blocked_card("甲")]}},
+            "n2": {"card": {"cards": [self._blocked_card("乙")]}},
+        })
+        self.assertEqual(review_counts(self.root)["new"], 2)
+
+    def test_totals_stay_constructed(self) -> None:
+        # newGradable + newBlocked == new 必须是构造出来的，不是碰巧。
+        self._write_book("repbook-mixed", {
+            "n1": {"card": {"gid": "card_x", "cid": "card_x", "cards": [
+                self._blocked_card("挡住的"),
+                {"type": "basic", "front": "能评的", "back": "背面",
+                 "_st": "learn", "_next": None},
+            ]}},
+        })
+        counts = review_counts(self.root)
+        self.assertEqual(counts["new"], 2)
+        self.assertEqual(counts["newBlocked"], 1)
+        self.assertEqual(
+            counts["newGradable"] + counts["newBlocked"], counts["new"])
 
 
 class VoiceHealthTests(unittest.TestCase):

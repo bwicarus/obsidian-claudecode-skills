@@ -144,13 +144,15 @@ test("persisted draft deletion keeps stable cardIndex and hides only the removed
 });
 
 test("optional ReaderPC export records pending before the side effect and blocks unknown replay", () => {
-  const start = SOURCE.indexOf("function exportToComputerAnki(container, i)");
+  // 2026-09-09：导出内核抽成了 runComputerExport（容器可为空，自动补送要能
+  // 处理没挂在页面上的卡），所以这里从内核开始切，而不是从 UI 入口。
+  const start = SOURCE.indexOf("function runComputerExport(ctx)");
   const end = SOURCE.indexOf("function exportToMobileAnki", start);
   const send = SOURCE.slice(start, end);
-  const pending = send.indexOf("_recordExternalReceipt(st, i, 'readerpc', pending");
-  const request = send.indexOf("RC.computerVoice.addLocalAnkiCard({", pending);
+  const pending = send.indexOf("_recordReceiptForGid(\n      ctx.gid, ctx.index, 'readerpc', pending");
+  const request = send.indexOf("RC.computerVoice.addLocalAnkiCard(", pending);
 
-  assert.ok(pending >= 0);
+  assert.ok(pending >= 0, "pending 回执必须在副作用之前写");
   assert.ok(request > pending);
   assert.match(send, /c\._pcExportAid\s*=\s*aid/);
   assert.match(send, /c\._pcExportStatus === 'unknown'/);

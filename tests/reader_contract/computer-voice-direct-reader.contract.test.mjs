@@ -2331,6 +2331,9 @@ test("snapshot-mcp 将精确高亮和 Anki 草稿送进 Reader 接收器并逐�
         back: "答案",
       }],
       nodeIds: ["kj:01J9ZK3A7Q"],
+      // 2026-09-08 起归属二选一：没给 track 时入站闸也会补一个空串，
+      // 因为轨道是**可选**字段（滚动升级：桥先装、App 后出构建）。
+      track: "",
     },
   }, {
     ...base,
@@ -2343,6 +2346,7 @@ test("snapshot-mcp 将精确高亮和 Anki 草稿送进 Reader 接收器并逐�
         cloze: "普通卡不需要绑定当前页：{{c1::本地卡库}}先保存。",
       }],
       nodeIds: ["kj:01J9ZK3A7Q", "kj:01J9ZK3A7R"],
+      track: "",
     },
   }, {
     ...base,

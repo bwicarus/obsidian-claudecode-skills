@@ -705,6 +705,11 @@ def review_counts(root: Path) -> dict[str, int]:
     newBlocked = 没进外部 Anki 因而**真的评不了分**的新卡。
     Reader 没有本地排期：`rate()` 的 `_next` 全来自 `/pdf/api/review-answer`
     的响应，而那条路由必须有真实 Anki 卡号（没有就 404）。
+
+    ⚠ 数的是**卡**，不是卡的出现次数（2026-09-09 修）。一个卡组（gid）可以
+    同时挂在好几张便签上 —— 实测一本书里同一个 `card_49355a00cb45` 挂了三张，
+    于是 3 张卡被数成 9 张，板子上告诉用户"10 张新卡"而真实只有 4 张。
+    虚报比少报更糟：用户按那个数去找卡，永远找不齐。
     """
     import json as _json
     data_dir = root / "replication-data"
@@ -714,19 +719,33 @@ def review_counts(root: Path) -> dict[str, int]:
     if not data_dir.is_dir():
         return {"due": 0, "new": 0, "newGradable": 0, "newBlocked": 0}
     now_ms = _now_ms()
+    seen: set[tuple[str, int]] = set()
     for book_dir in data_dir.iterdir():
         path = book_dir / "document-notes.json"
         try:
             value = _json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
-        for item in (value.get("items") or {}).values():
+        for note_id, item in (value.get("items") or {}).items():
             card = item.get("card") if isinstance(item, dict) else None
             if not isinstance(card, dict):
                 continue
-            for one in card.get("cards") or []:
+            # 卡组身份优先用 gid/cid；两者都没有的老数据退回"书+便签"，
+            # 那样至少不会把不同的卡合并掉（宁可多数，不可少数）。
+            group = ""
+            for field in ("gid", "cid"):
+                candidate = card.get(field)
+                if isinstance(candidate, str) and candidate:
+                    group = candidate
+                    break
+            if not group:
+                group = book_dir.name + "::" + str(note_id)
+            for index, one in enumerate(card.get("cards") or []):
                 if not isinstance(one, dict) or one.get("_removed"):
                     continue
+                if (group, index) in seen:
+                    continue
+                seen.add((group, index))
                 next_at = one.get("_next")
                 if isinstance(next_at, (int, float)) and next_at > 0:
                     # _next 语义按秒或毫秒都可能;>1e12 视为毫秒。

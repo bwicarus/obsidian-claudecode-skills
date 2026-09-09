@@ -2278,6 +2278,32 @@ internal sealed class ReaderContextMcpServer
             ["anchor"] = new JsonObject { ["type"] = "object" },
             ["selection"] = new JsonObject { ["type"] = "object" },
             ["legacy"] = new JsonObject { ["type"] = "object" },
+            // 归属（2026-09-09 起可经这条路修补）。二选一：单词/语法卡给
+            // kjTrack，学科概念卡给 kjNodes。⚠ 为什么必须能改：归属是 2026-09-06
+            // 才成为硬要求的，之前做的卡一条都没有，而没有归属就进不了 Anki、
+            // 因而**永远评不了分**。此前这张 schema 不认这两个字段，于是唯一的
+            // 出路是删掉重做 —— 连同已有的复习历史一起。
+            ["kjTrack"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["enum"] = new JsonArray(
+                    ReaderRealtimeOutputProtocol.KjCardTracks.All
+                        .Select(value => (JsonNode?)value).ToArray()),
+                ["description"] =
+                    "Learning track that owns a vocabulary or grammar card. "
+                    + "Mutually exclusive with kjNodes.",
+            },
+            ["kjNodes"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["maxLength"] = 256,
+                ["pattern"] =
+                    "^kj:[0-9A-HJKMNP-TV-Z]{10}"
+                    + "(?:,kj:[0-9A-HJKMNP-TV-Z]{10}){0,7}$",
+                ["description"] =
+                    "Comma separated KJ concept node ids that own a subject "
+                    + "card. Mutually exclusive with kjTrack.",
+            },
         };
         JsonArray stableSource = new();
         foreach (string field in new[]

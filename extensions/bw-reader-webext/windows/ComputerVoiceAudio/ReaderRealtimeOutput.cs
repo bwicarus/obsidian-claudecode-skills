@@ -1406,6 +1406,11 @@ internal static class ReaderRealtimeOutputProtocol
 
         internal static bool IsValid(string? value) =>
             value is not null && Allowed.Contains(value);
+
+        /// 供 schema 枚举用 —— 让 AI 看见的取值表与校验用的**同一份**，
+        /// 免得再多一处要手工同步的副本。
+        internal static IReadOnlyList<string> All { get; } =
+            Allowed.Order(StringComparer.Ordinal).ToArray();
     }
 
     /// KJ 知识节点编号：kj: + 10 位 Crockford base32（scripts/kj/ids.py 铸造）。

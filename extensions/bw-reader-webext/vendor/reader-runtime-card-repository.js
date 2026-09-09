@@ -35,13 +35,19 @@
     kind: true, sourceId: true, documentId: true, bookId: true, url: true,
     title: true, quote: true, context: true, tool: true, draftId: true,
     sourceInstanceId: true, requirement: true, location: true, anchor: true,
-    selection: true, legacy: true, kjNodes: true
+    selection: true, legacy: true, kjNodes: true, kjTrack: true
   };
   // kjNodes：这张卡绑定的 KJ 知识节点编号，逗号分隔（kj:XXXXXXXXXX,…）。2026-09-06 起制卡必须带。
+  // kjTrack：学习轨道（jp-word / jp-grammar / en-word / en-grammar），2026-09-08 起与
+  //   kjNodes 二选一承担归属。⚠ 2026-09-09 补：加轨道那次漏了这一行，而
+  //   allowedFields 遇到未声明字段是**抛错**不是忽略 —— 于是每一张带轨道的卡
+  //   在 saveConfirmedCard 那一步就 BW_CARD_REPOSITORY_INPUT，用户看到的是
+  //   "本地卡库保存失败"，跟归属八竿子打不着。
   var SOURCE_LIMITS = {
     kind: 80, sourceId: 4096, documentId: 4096, bookId: 4096,
     url: 8192, title: 1024, quote: 32768, context: 65536, tool: 160,
-    draftId: 512, sourceInstanceId: 512, requirement: 32768, kjNodes: 256
+    draftId: 512, sourceInstanceId: 512, requirement: 32768, kjNodes: 256,
+    kjTrack: 32
   };
   var REVIEW_FIELDS = {
     status: true, dueAt: true, lastReviewedAt: true, intervalDays: true,

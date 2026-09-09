@@ -75,8 +75,16 @@ test('Windows draft protocol accepts cards-only but keeps exact source all-or-no
 
   assert.match(OUTPUT, /bool exactSource = hasFile && hasTarget && hasSourceText/);
   assert.match(OUTPUT, /if \(\(hasFile \|\| hasTarget \|\| hasSourceText\) && !exactSource\)/);
-  assert.match(OUTPUT, /else[\s\S]*Exact\(root, "draftId", "cards", "nodeIds"\)/);
-  assert.match(OUTPUT, /ValidateKjNodeIds\(root\.GetProperty\("nodeIds"\)\)/);
+  // 2026-09-08 起 track 是可选字段（滚动升级：桥先装、App 后出构建），
+  // 所以字段集按有无 track 分两套 —— cards-only 那一支两套都必须带 nodeIds。
+  assert.match(
+    OUTPUT,
+    /else[\s\S]*hasTrack[\s\S]*"draftId", "cards", "nodeIds", "track"[\s\S]*"draftId", "cards", "nodeIds"/,
+  );
+  // 归属校验 2026-09-08 收进 ValidateKjCardAttribution（二选一：track 或 nodeIds），
+  // 节点那一支仍走 ValidateKjNodeIds。
+  assert.match(OUTPUT, /ValidateKjCardAttribution\(root\)/);
+  assert.match(OUTPUT, /ValidateKjNodeIds\(nodeIds\)/);
   assert.match(OUTPUT, /\^kj:\[0-9A-HJKMNP-TV-Z\]\{10\}\$/);
 
   assert.match(LOCAL_ANKI, /bool exactSource = hasFile && hasTarget && hasSourceText/);

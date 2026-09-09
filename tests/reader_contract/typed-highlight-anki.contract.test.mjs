@@ -228,17 +228,19 @@ test("draft confirmation is local-first and ReaderPC is an optional projection",
   assert.match(FLASH, /✓ 已保存到 Reader 本地卡库/);
   assert.doesNotMatch(add, /addLocalAnkiCard|anki-add-cards/);
 
+  // 2026-09-09：导出内核抽成 runComputerExport，草稿路与实体路共用一份实现。
   const optionalExport = FLASH.slice(
-    FLASH.indexOf("function exportToComputerAnki"),
+    FLASH.indexOf("function runComputerExport(ctx)"),
     FLASH.indexOf("function exportToMobileAnki"),
   );
-  const durablePending = optionalExport.indexOf("_recordExternalReceipt(st, i, 'readerpc', pending");
-  const externalWrite = optionalExport.indexOf("RC.computerVoice.addLocalAnkiCard({");
+  const durablePending = optionalExport.indexOf("_recordReceiptForGid(\n      ctx.gid, ctx.index, 'readerpc', pending");
+  const externalWrite = optionalExport.indexOf("RC.computerVoice.addLocalAnkiCard(");
   assert.ok(durablePending >= 0 && externalWrite > durablePending);
-  assert.match(optionalExport, /draftId:\s*draft\.draftId/);
-  assert.match(optionalExport, /sourceInstanceId:\s*draft\.sourceInstanceId/);
-  assert.match(optionalExport, /cardIndex:\s*i/);
-  assert.match(optionalExport, /repositoryCard\(c\)/);
+  assert.match(optionalExport, /draftId:\s*ctx\.draft\.draftId/);
+  assert.match(optionalExport, /sourceInstanceId:\s*ctx\.draft\.sourceInstanceId/);
+  assert.match(optionalExport, /cardIndex:\s*ctx\.index/);
+  // 送桥的卡面必须剥成 type/front/back（C# 侧 RequireExact），不是仓库形态。
+  assert.match(optionalExport, /bridgeCard\(c\)/);
   assert.match(optionalExport, /c\._pcExportStatus === 'unknown'/);
   assert.match(optionalExport, /电脑 Anki 接收结果未知，已阻止重复发送/);
 
