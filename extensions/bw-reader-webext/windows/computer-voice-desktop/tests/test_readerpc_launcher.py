@@ -2108,6 +2108,35 @@ class RearmCodexVoiceTests(unittest.TestCase):
             self.assertFalse(flipped)
             self.assertEqual(seen, [True])
 
+    def _rearm_window(self, one_shot: bool):
+        window = ReaderPCLauncherTests.window_without_tk()
+        window.voice_one_shot_start = SimpleNamespace(get=lambda: one_shot)
+        window._voice_enabled = lambda: True
+        window._voice_rearm_count = 0
+        window._voice_rearm_at = 0.0
+        window.last_voice_start_attempt = 0.0
+        return window
+
+    def test_one_shot_start_mode_never_rearms(self):
+        """一次性方式下不解封 —— 解封的做法就是把保活翻成 true。
+
+        不加这道门，用户选了一次性，45 秒后照样被起一通，而日志里只写着
+        "自动解封"，看不出跟启动方式有关：跟他报的那个 bug 是同一个观感。
+        而且这里本来就无事可解 —— 一次性方式下意图是**故意**关着的。
+        """
+        flips: list[object] = []
+        with patch("readerpc_launcher.rearm_codex_voice_keep_active",
+                   lambda *a, **k: flips.append(a) or True):
+            self._rearm_window(one_shot=True)._maybe_rearm_codex_voice()
+            self.assertEqual(flips, [])
+
+            window = self._rearm_window(one_shot=False)
+            window._maybe_rearm_codex_voice()
+            # 保活方式下照旧解封（起的是后台线程，等它跑完再断言）
+            for thread in threading.enumerate():
+                if thread is not threading.current_thread():
+                    thread.join(timeout=2.0)
+        self.assertEqual(len(flips), 1)
 
 
 class VoiceFailureDescriptionTests(unittest.TestCase):

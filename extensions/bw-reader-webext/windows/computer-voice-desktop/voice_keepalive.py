@@ -36,6 +36,13 @@ POLL_SECONDS = 5.0
 #:   主动通知触发的一次性尝试来开。语音结束后不会自己重开。
 #:
 #: ⚠ 默认仍是 keep-alive：不因为多了个新选项就悄悄改掉别人已经习惯的行为。
+#:
+#: ⚠⚠ one-shot 能成立，靠的是 C# 那条**挂断**分支被 `intentChanged ||
+#: initialReconcile` 门控着（DirectBridgeProtocol.ReconcileKeepActiveAsync）：
+#: 意图稳定在 false 时，每 5 秒的收敛什么都不做，所以一次性按开的通话**不会**
+#: 在几秒后被收敛掉。要是哪天把那条分支改成每 tick 都执行，one-shot 就会变成
+#: "开三秒就被挂"，而这边一行代码都没动 —— 所以那条门是 one-shot 的前置条件，
+#: 不是可有可无的优化。
 START_MODE_KEEP_ALIVE = "keep-alive"
 START_MODE_ONE_SHOT = "one-shot"
 START_MODES = (START_MODE_KEEP_ALIVE, START_MODE_ONE_SHOT)

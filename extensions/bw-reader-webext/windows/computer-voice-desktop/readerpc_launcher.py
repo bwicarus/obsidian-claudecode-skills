@@ -73,7 +73,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.162"
+APP_VERSION = "0.1.163"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status
@@ -1800,6 +1800,16 @@ class ReaderPCWindow:
             or self.closing
             or self.voice_start_in_progress
         ):
+            return
+        # ⚠ 一次性启动方式下**不解封**。解封的做法是把保活意图翻成 true,而 C#
+        # 看到"意图要开着但台账说没开"就会按快捷键 —— 那正是一次性方式要避免的
+        # 事。不加这一条,用户选了一次性,45 秒后照样被起一通,而且日志里只写着
+        # "自动解封",看不出跟启动方式有关。
+        #
+        # 而且这里本来就无事可解:解封的前提是"意图是开的但语音一直不活",
+        # 一次性方式下意图是**故意**关着的,没有代际封锁需要撬。
+        if (self._voice_start_mode()
+                != voice_keepalive.START_MODE_KEEP_ALIVE):
             return
         if getattr(self, "_voice_rearm_count", 0) >= self._VOICE_REARM_MAX:
             return
