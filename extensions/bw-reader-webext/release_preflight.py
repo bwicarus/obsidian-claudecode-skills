@@ -170,6 +170,7 @@ WINDOWS_SOURCE_FILES = (
     "ComputerVoiceAudio/ReaderDisplayBoard.cs",
     "ComputerVoiceAudio/ReaderCodexEndpoint.cs",
     "ComputerVoiceAudio/ReaderCodexPush.cs",
+    "ComputerVoiceAudio/ReaderCodexPushSelfTest.cs",
     "ComputerVoiceAudio/ReaderPresenceSignal.cs",
     "ComputerVoiceAudio/ReaderSleepSignal.cs",
     "ComputerVoiceAudio/ReaderDocumentCorpus.cs",

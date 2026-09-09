@@ -665,6 +665,16 @@
         reason: '读取日语词典与永久缓存；不可用时由调用方显示失败或退回通用词典。'
       }
     ),
+    networkRead(
+      'phrase.reading.read',
+      ['/pdf/api/jp-reading'],
+      {
+        transport: { extensionBridge: true, serviceWorker: 'none' },
+        reason: 'unidic 按分词拼出词组读音与音调（JMdict 对「海の底」这类短语没有整条）。'
+          + '⚠ 它是**增益**：owner=pi、要经网关出网，所以调用方必须先出释义再补注音，'
+          + '不能 await 在 render 前面 —— 端点慢一点小框就一直空着。'
+      }
+    ),
     cachedRead(
       'document.page-figures.read',
       ['/pdf/api/page-figures'],

@@ -500,6 +500,7 @@ if (window.__bwPwaProviderOnly) return;
   async function _fillPhraseReading(result, text, isJa) {
     if (!isJa || !result || result.reading) return result;
     try {
+      // @interaction phrase.reading.read
       var response = await fetch('/pdf/api/jp-reading?word=' + encodeURIComponent(text));
       if (!response.ok) return result;
       var data = await response.json();
@@ -700,8 +701,16 @@ if (window.__bwPwaProviderOnly) return;
       }
     }
     (async function () {
-      render(await _fillPhraseReading(
-        await _lookupPhraseLocalFirst(text, context, isJa), text, isJa));
+      var result = await _lookupPhraseLocalFirst(text, context, isJa);
+      // 先出结果，再补注音。⚠ 注音**不能**挂在 render 前面：_fillPhraseReading
+      // 自己的注释就写着「绝不因此拖慢」，可 await 在这里就是拖慢 ——
+      // /pdf/api/jp-reading 慢一点或不回（这条路上没有超时），小框就一直空着，
+      // 而释义其实早就拿到了。补到了再重渲一次，注音随后出现。
+      render(result);
+      var before = result && result.reading ? String(result.reading) : '';
+      var enriched = await _fillPhraseReading(result, text, isJa);
+      var after = enriched && enriched.reading ? String(enriched.reading) : '';
+      if (after && after !== before) render(enriched);
     })();
   }
 
