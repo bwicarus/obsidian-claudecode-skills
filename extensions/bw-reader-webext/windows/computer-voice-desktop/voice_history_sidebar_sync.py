@@ -97,6 +97,19 @@ FINAL_TAIL_POLLS = 3
 OFFLINE_EXIT_POLLS = 40
 PUBLISH_FAILURE_BACKOFF_POLLS = 20
 STRUCTURED_HISTORY_FOLLOWUP_POLLS = 2
+# ⚠ 上面那个跟读窗口(2 拍 ≈ 1.5s)**接不住语音这条路**（2026-09-09 用户报"侧栏比
+#   实际对话晚一轮，而不是晚一段时间"，据此实测）：委派 → final_answer 的耗时
+#   在这条线程的 209 次里是 中位 11.1s / P75 20.9s / P90 36.3s / 最大 265s，
+#   **0 次**落在 1.5s 内。于是权威历史永远等不到本轮的最终回答，只能靠**下一次**
+#   连续性文件变化被顺带捎上 —— 这正是"晚一轮"的由来，且与加载快慢无关。
+#   治法不是把窗口拉长（那会让 30 MB 的整读每轮跑好几遍），而是换触发信号：
+#   rollout 文件尾部真的追加了 final_answer 才去整读。stat + 读增量几 KB，
+#   代价可忽略，而且每完成一轮只触发一次。
+ROLLOUT_FINAL_ANSWER_MARKER = '"final_answer"'
+#: 一次只扫新追加的这么多字节；超过就当"有变化"直接整读（宁可多读一次）。
+MAX_ROLLOUT_TAIL_SCAN_BYTES = 4 * 1024 * 1024
+#: rollout 还没落盘时，隔这么久再找一次，别每 0.75s 走一遍 sessions 目录。
+ROLLOUT_LOOKUP_INTERVAL_SECONDS = 5.0
 CODEX_APP_SERVER_TIMEOUT_SECONDS = 6.0
 ERROR_ALREADY_EXISTS = 183
 READER_SYNC_MARKERS = ("[[READER_SYNC]]", "[[/READER_SYNC]]")
@@ -1722,6 +1735,10 @@ class CaptureBoundHistorySynchronizer:
         self._structured_failed_at = 0.0
         self._structured_signature: tuple[int, int] | None = None
         self._structured_followup_polls = 0
+        # 权威历史的真实触发源：租约线程的 rollout 文件，以及已扫到的偏移量。
+        self._rollout_path: Path | None = None
+        self._rollout_offset = 0
+        self._rollout_lookup_at = 0.0
         self.last_result: dict[str, Any] | None = None
         # 上一次已写进日志的 last_result["error"]。同一条错误只出声一次,变了再出声。
         self._last_reported_error: str | None = None
@@ -1762,6 +1779,9 @@ class CaptureBoundHistorySynchronizer:
         self._structured_baseline = None
         self._structured_signature = None
         self._structured_followup_polls = 0
+        self._rollout_path = None
+        self._rollout_offset = 0
+        self._rollout_lookup_at = 0.0
 
     def cancel(self) -> None:
         """Drop the in-memory capture lease without publishing a final turn."""
@@ -1893,6 +1913,69 @@ class CaptureBoundHistorySynchronizer:
             return STRUCTURED_READ_LARGE_COOLDOWN_SECONDS
         return 0.0
 
+    def _locate_rollout(self, thread_id: str) -> Path | None:
+        """找到这条线程的 rollout 文件（sessions/<年>/<月>/<日>/rollout-…-<id>.jsonl）。
+
+        找不到不是错：新线程的 rollout 要等第一条落盘才出现。所以隔
+        ROLLOUT_LOOKUP_INTERVAL_SECONDS 再找一次，别每一拍都走一遍目录。
+        """
+        sessions = self.global_state_path.parent / "sessions"
+        try:
+            for candidate in sessions.rglob("rollout-*-" + thread_id + ".jsonl"):
+                return candidate
+        except OSError:
+            return None
+        return None
+
+    def _rollout_final_answer_appended(self) -> bool:
+        """rollout 尾部新追加的内容里有没有 final_answer 落盘。
+
+        这是权威历史的**正确**触发信号。连续性文件（语音侧）变化时那一轮的推理
+        往往才刚开始跑（实测中位 11 秒才出最终回答），所以拿它当信号必然晚一轮。
+        这里只 stat + 读增量，代价可忽略。
+        """
+        thread_id = self._lease_thread_id
+        if thread_id is None:
+            return False
+        if self._rollout_path is None:
+            now = time.monotonic()
+            if now - self._rollout_lookup_at < ROLLOUT_LOOKUP_INTERVAL_SECONDS:
+                return False
+            self._rollout_lookup_at = now
+            self._rollout_path = self._locate_rollout(thread_id)
+            if self._rollout_path is None:
+                return False
+            # 第一次找到就从当前末尾开始看，不回头扫已有内容（基线由整读建立）。
+            try:
+                self._rollout_offset = self._rollout_path.stat().st_size
+            except OSError:
+                self._rollout_path = None
+            return False
+        try:
+            size = self._rollout_path.stat().st_size
+        except OSError:
+            # 文件被移走/归档了：重新找，并把这一拍当有变化，让整读去核实。
+            self._rollout_path = None
+            self._rollout_offset = 0
+            return True
+        if size < self._rollout_offset:
+            # 压缩会重写文件，偏移量失效。当有变化处理，宁可多读一次。
+            self._rollout_offset = size
+            return True
+        if size == self._rollout_offset:
+            return False
+        start = self._rollout_offset
+        self._rollout_offset = size
+        if size - start > MAX_ROLLOUT_TAIL_SCAN_BYTES:
+            return True
+        try:
+            with self._rollout_path.open("rb") as handle:
+                handle.seek(start)
+                chunk = handle.read(size - start)
+        except OSError:
+            return True
+        return ROLLOUT_FINAL_ANSWER_MARKER in chunk.decode("utf-8", "replace")
+
     def _continuity_signature(self) -> tuple[int, int] | None:
         try:
             stat = self.continuity_path.stat()
@@ -2001,7 +2084,11 @@ class CaptureBoundHistorySynchronizer:
                 )
 
         signature = self._continuity_signature()
-        changed = signature != self._structured_signature
+        # 两个信号取或：连续性文件（语音侧刚说完）与 rollout 追加了 final_answer
+        # （推理侧刚答完）。只有后者能接住本轮的最终回答 —— 前者变化时那一轮
+        # 通常还在跑，实测 0/209 次能在跟读窗口内等到答案。
+        final_answer_landed = self._rollout_final_answer_appended()
+        changed = signature != self._structured_signature or final_answer_landed
         if changed:
             self._structured_signature = signature
             self._structured_followup_polls = (

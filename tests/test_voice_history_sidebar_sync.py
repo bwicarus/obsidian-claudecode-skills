@@ -272,6 +272,71 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
         self.assertIn("exceeds", result["error"])
         self.assertEqual(self.archive.read_bytes(), before)
 
+    def test_authoritative_read_is_triggered_by_final_answer_landing(self):
+        """权威历史的触发信号必须是 rollout 追加了 final_answer，不是连续性文件变化。
+
+        2026-09-09 用户报"侧栏比实际对话晚一轮，而不是晚一段时间"。据此实测:
+        委派 → final_answer 的耗时在真实线程的 209 次里是 中位 11.1s / P90 36.3s /
+        最大 265s，**0 次**落在跟读窗口(2 拍 ≈ 1.5s)内。所以拿连续性文件当信号
+        必然晚一轮 —— 本轮的最终回答只能靠**下一次**语音变化被顺带捎上。
+        这条测试钉住:只有真的落了 final_answer 才触发整读，别的追加不触发
+        （否则 30 MB 的整读会被每条 reasoning/工具输出各拉一遍）。
+        """
+        syncer = SYNC.CaptureBoundHistorySynchronizer(
+            root=self.root,
+            publisher=lambda *a, **k: {"ok": True},
+            global_state_path=self.global_state,
+            continuity_path=self.continuity,
+            state_path=self.state,
+            archive_path=self.archive,
+            snapshot_path=self.root / "reader-context-snapshot.json",
+        )
+        syncer._lease_thread_id = THREAD
+        day = self.global_state.parent / "sessions" / "2026" / "09" / "09"
+        day.mkdir(parents=True)
+        rollout = day / ("rollout-2026-09-09T10-00-00-" + THREAD + ".jsonl")
+        rollout.write_text('{"type":"session_meta"}\n', encoding="utf-8")
+
+        # 第一次只认位置，不回头扫已有内容（基线由整读建立）。
+        self.assertFalse(syncer._rollout_final_answer_appended())
+        self.assertEqual(syncer._rollout_path, rollout)
+
+        def append(line: str) -> None:
+            with rollout.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+
+        # 推理中间产物不该触发整读。
+        append('{"payload":{"type":"reasoning"}}')
+        self.assertFalse(syncer._rollout_final_answer_appended())
+        append('{"payload":{"type":"AgentMessage","phase":"commentary"}}')
+        self.assertFalse(syncer._rollout_final_answer_appended())
+        # 没有新增字节也不触发。
+        self.assertFalse(syncer._rollout_final_answer_appended())
+
+        # 最终回答落盘 → 触发。
+        append('{"payload":{"type":"AgentMessage","phase":"final_answer"}}')
+        self.assertTrue(syncer._rollout_final_answer_appended())
+        self.assertFalse(syncer._rollout_final_answer_appended())
+
+        # 压缩会重写文件让偏移量失效：当有变化处理，宁可多读一次。
+        rollout.write_text('{"type":"session_meta"}\n', encoding="utf-8")
+        self.assertTrue(syncer._rollout_final_answer_appended())
+
+        # 被归档/移走：重新找，并让整读去核实。
+        rollout.unlink()
+        self.assertTrue(syncer._rollout_final_answer_appended())
+        self.assertIsNone(syncer._rollout_path)
+
+    def test_structured_read_decision_consults_the_rollout_signal(self):
+        """防回归:触发判据里必须真的用上这个信号，不能只留个方法没人调。"""
+        source = (RUNTIME_ROOT / "voice_history_sidebar_sync.py").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("def _structured_sync(")
+        body = source[start:source.index("\n    def ", start + 10)]
+        self.assertIn("_rollout_final_answer_appended()", body)
+        self.assertIn("or final_answer_landed", body)
+
     def test_capture_bound_sync_publishes_only_active_and_late_tail_turns(self):
         self.recent([msg("user", "old-u"), msg("assistant", "old-a")])
         snapshot = self.root / "reader-context-snapshot.json"
@@ -1255,7 +1320,14 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
             [call[0][0] for call in calls].count("tool_status"),
             1,
         )
-        self.assertEqual(calls[0][0][1]["text"], "[COMPLETE] crash-final")
+        # 传输标记不进侧栏（d80e94e2 起 _publish_assistant_text 会剥掉它；
+        # 用户 2026-09-08 截图实锤 [COMPLETE] 露到了正文里）。对齐匹配那条路
+        # 照旧用原始串，两者互不影响。
+        self.assertEqual(calls[0][0][1]["text"], "crash-final")
+        self.assertNotIn(
+            "[COMPLETE]",
+            "".join(call[0][1]["text"] for call in calls if call[0][0] == "assistant_turn"),
+        )
         self.assertEqual(calls[0][0][1]["user_utterance"], "crash-u")
         self.assertEqual(calls[-1][0][1]["text"], "later-final-8")
         self.assertNotIn(
