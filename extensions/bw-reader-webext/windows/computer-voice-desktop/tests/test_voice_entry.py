@@ -310,6 +310,39 @@ class LadderTests(unittest.TestCase):
         self.assertFalse(session["satisfied"])
         self.assertEqual(status["blockedAt"], "session")
 
+    def test_label_never_claims_an_action_it_cannot_know_about(self):
+        """这个文件是每 30 秒无条件写一次的**静态读数**。
+
+        它不知道此刻有没有人在开语音，所以不能说「正在打开语音」——
+        2026-09-09 没人在开的时候读到那句，一句话里三个互相矛盾的说法。
+        "正在打开"的框由知道自己在连接的界面那侧去加。
+        """
+        for status in (self._ladder(heartbeat=False),
+                       self._ladder(voice_enabled=False),
+                       self._ladder(codex=False),
+                       self._ladder(known=False)):
+            self.assertNotIn("正在打开", status["label"])
+
+    def test_blocked_step_is_named_by_what_it_waits_for(self):
+        """状态名和待办名是两回事，混用会写出自相矛盾的话。
+
+        第 4 级的 label 是「语音已连接」；拿它当"正在等的步骤名"就拼出
+        「语音已连接 —— 当前没有进行中的通话」。
+        """
+        status = self._ladder(active=False)
+        self.assertEqual(status["blockedAt"], "session")
+        self.assertIn("通话接通", status["label"])
+        self.assertNotIn("语音已连接", status["label"])
+        self.assertIn("当前没有进行中的通话", status["label"])
+        self.assertIn("4/4", status["label"])
+
+    def test_every_rung_names_both_states(self):
+        """每级都要有两个名字 —— 少一个，下次又会被拿去顶替。"""
+        for rung in self._ladder()["rungs"]:
+            self.assertTrue(rung["label"])
+            self.assertTrue(rung["step"])
+            self.assertEqual(rung["step"], LADDER.STEP_NAMES[rung["key"]])
+
     def test_publish_is_atomic_and_readable(self):
         status = self._ladder(active=True)
         path = LADDER.publish(status, self.root)

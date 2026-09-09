@@ -9601,7 +9601,11 @@ if (window.__bwPwaProviderOnly) return;
     if (!ladder || typeof ladder !== 'object') return;
     var label = String(ladder.label || '').trim();
     if (!label) return;
-    setSt(label);
+    // 「正在打开」这个框由这里加,不由梯子文件加(2026-09-09)。
+    // 那份文件是 ReaderPC 每 30 秒无条件写一次的**静态读数**,它不知道此刻
+    // 有没有人在开语音;而这里知道 —— 我们正握着 _computerVoiceStarting,
+    // 按钮就在黄闪。谁知道就由谁说。
+    setSt(_computerVoiceStarting ? ('正在打开语音 · ' + label) : label);
     ['asst-computer', 'vc-top-computer'].forEach(function (id) {
       var el = document.getElementById(id);
       if (el) el.title = label;

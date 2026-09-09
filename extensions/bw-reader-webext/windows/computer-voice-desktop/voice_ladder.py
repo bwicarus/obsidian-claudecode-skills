@@ -37,9 +37,23 @@ STATUS_FILE_NAME = "voice-ladder-status.json"
 SERVER_HEARTBEAT_STALE_SECONDS = 180.0
 
 
+#: 每级两个名字:`label` 是**满足时**的状态名,`step` 是**正在等**的那件事。
+#:
+#: ⚠ 混用一个会写出自相矛盾的话(2026-09-09 自己被绕了一下):第 4 级的 label 是
+#: 「语音已连接」,拿它当"正在等的步骤名"就拼出「语音已连接 —— 当前没有进行中
+#: 的通话」。状态名和待办名是两回事,不能省成一个。
+STEP_NAMES = {
+    "server": "电脑上的服务在跑",
+    "chain": "语音链装载",
+    "codex": "Codex 就绪",
+    "session": "通话接通",
+}
+
+
 def _rung(key: str, label: str, known: bool, satisfied: bool,
           why: str = "") -> dict[str, Any]:
-    return {"key": key, "label": label, "known": known,
+    return {"key": key, "label": label, "step": STEP_NAMES.get(key, label),
+            "known": known,
             "satisfied": bool(known and satisfied), "why": why}
 
 
@@ -127,13 +141,19 @@ def ladder(
         "reached": reached,
         "total": len(rungs),
         "blockedAt": blocked["key"] if blocked else None,
-        # 给界面直接显示的一句话。全通时说"已连接"，否则说卡在第几级、为什么。
+        # 给界面直接显示的一句话。全通时说"已连接"，否则说差哪一步、为什么。
+        #
+        # ⚠ 不说「正在打开语音」（2026-09-09 改）。这个文件是 ReaderPC 每 30 秒
+        # 无条件写一次的**静态读数**，它根本不知道此刻有没有人在开语音 ——
+        # 而我自己就被那句话绕了一下：没人在开的时候读到「正在打开语音（4/4）：
+        # 语音已连接 —— 当前没有进行中的通话」，一句话里三个互相矛盾的说法。
+        # 界面那侧知道自己在连接（按钮正黄闪），"正在打开"的框由它来加。
         "label": (
             "语音已连接"
             if blocked is None
-            else "正在打开语音（%d/%d）：%s%s" % (
-                reached + 1, len(rungs), blocked["label"],
-                "" if not blocked["why"] else " —— " + blocked["why"],
+            else "差第 %d/%d 步「%s」%s" % (
+                reached + 1, len(rungs), blocked["step"],
+                "" if not blocked["why"] else "：" + blocked["why"],
             )
         ),
         # ⚠ 第 1 级够不到：桥是 ReaderPC 的子进程，它不在就没有接收方。
