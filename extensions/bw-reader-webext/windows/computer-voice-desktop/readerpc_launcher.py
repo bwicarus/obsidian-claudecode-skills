@@ -73,7 +73,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.163"
+APP_VERSION = "0.1.164"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status
@@ -1434,6 +1434,21 @@ class ReaderPCWindow:
             variable=self.voice_enabled,
             command=self.on_voice_enabled_changed,
         ).pack(side="left")
+        # ── 启动方式（2026-09-09 用户：「应该把现在的启动方式作为一个可选项
+        # 放在里面」）。⚠ 必须紧贴上面那一格,并且用缩进 + 「└」把从属关系
+        # 说清:它讲的是**「启用语音功能」打开时要不要顺手起一通**,跟下面那组
+        # "何时挂断"是两件独立的事。第一版放在自动关闭那四条条件后面(同样缩进),
+        # 读起来就成了"第五条关闭条件" —— 而它跟智能开启开不开毫无关系。
+        # 缩进指向谁,就是说明的一部分。
+        start_mode_row = ttk.Frame(outer)
+        start_mode_row.pack(fill="x", pady=(2, 2), padx=(24, 0))
+        ttk.Checkbutton(
+            start_mode_row,
+            text="└ 一次性启动：打开后不自动起通话，由 App 按钮或通知触发"
+                 "（关 = 原有的保活方式）",
+            variable=self.voice_one_shot_start,
+            command=self.on_voice_start_mode_changed,
+        ).pack(side="left")
         # ── 语音智能关闭（2026-09-09 用户拍板）────────────────────────
         # 两种模式：这一项关着 = 持续开启；打开 = 智能开启，由下面四条
         # **用户自己勾**的条件决定何时挂断。只关不开 —— 启动仍无解。
@@ -1468,16 +1483,6 @@ class ReaderPCWindow:
                 variable=self.voice_auto_close_vars[key],
                 command=self.on_voice_auto_close_changed,
             ).pack(side="left")
-
-        start_mode_row = ttk.Frame(outer)
-        start_mode_row.pack(fill="x", pady=(0, 2), padx=(24, 0))
-        ttk.Checkbutton(
-            start_mode_row,
-            text="一次性启动：打开语音功能后不自动起通话，"
-                 "由 App 按钮或通知触发（关 = 原有的保活方式）",
-            variable=self.voice_one_shot_start,
-            command=self.on_voice_start_mode_changed,
-        ).pack(side="left")
 
         orb_row = ttk.Frame(outer)
         orb_row.pack(fill="x", pady=(2, 2))
