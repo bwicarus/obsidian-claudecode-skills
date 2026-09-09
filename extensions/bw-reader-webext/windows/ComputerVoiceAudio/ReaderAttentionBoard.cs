@@ -137,6 +137,12 @@ internal static class ReaderAttentionBoard
 
     private static string? _runtimeDirectory;
 
+    /// <summary>
+    /// 桥的 runtime 目录。别处要读 ReaderPC 发布到这里的东西（比如语音梯子
+    /// 状态）时用它 —— 各处自己拼一遍路径，迟早有一处拼错而且没人发现。
+    /// </summary>
+    internal static string? RuntimeDirectory => _runtimeDirectory;
+
     /// 待办的**真值库**（`%LOCALAPPDATA%\BWReader\notifications.json`）。
     ///
     /// ⚠ 2026-08-29 改：原来读的是 runtime 目录里的导出副本

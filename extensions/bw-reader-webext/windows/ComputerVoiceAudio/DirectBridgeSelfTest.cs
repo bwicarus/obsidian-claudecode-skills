@@ -7403,6 +7403,11 @@ internal static class DirectBridgeSelfTest
             "source",
             "shortcutSent",
             "keepActive",
+            // ladder = 语音入口梯子（2026-09-09）。**总是**带这个键，
+            // 读不到时值是 null —— 界面据此说"卡在第几级"。
+            // 这张表被钉住是有道理的：JS 那边是全等入站闸，多一个键的后果
+            // 不是"少显示一点"，是整条 STATUS 被拒、语音状态全废。
+            "ladder",
         });
     }
 

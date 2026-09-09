@@ -10,6 +10,11 @@ import { fileURLToPath } from "node:url";
 // 管道名）在 ReaderCodexPushSelfTest 里；打包成单文件后 .cs 不在包内，
 // 所以"源码里不许出现什么"只能在这一层断言。
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+//: 入站闸的两份副本。放行表漏一处的表现是「整条 STATUS 被拒」。
+const COPIES_CV = [
+  "_server_deploy/static/pdf/rc-computer-voice.js",
+  "extensions/bw-reader-webext/vendor/rc-computer-voice.js",
+];
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), "utf8");
 const CS = "extensions/bw-reader-webext/windows/ComputerVoiceAudio/";
 const PUSH = read(CS + "ReaderCodexPush.cs");
@@ -439,4 +444,50 @@ test("台账读不到 ≠ 已经挂断", () => {
   const body = ENDPOINT.slice(start, start + 2200);
   assert.match(body, /ledgerKnown/);
   assert.match(body, /台账读不到，不知道在不在通话/);
+});
+
+// ── 语音入口梯子（2026-09-09）────────────────────────────────────────
+test("桥总是捎带梯子，读不到就是 null 而不是编一个就绪", () => {
+  const proto = read(CS + "DirectBridgeProtocol.cs");
+  assert.match(proto, /ladder = ReadVoiceLadder\(\)/);
+  const start = proto.indexOf("private static object? ReadVoiceLadder()");
+  assert.ok(start >= 0);
+  const body = proto.slice(start, proto.indexOf("\n    private", start + 10));
+  // 任何读失败都 null；不知道要如实说
+  assert.match(body, /return null;/);
+  assert.match(body, /voice-ladder-status\.json/);
+  // 只捎带界面要用的那几项，不整份透传
+  for (const field of ["reached", "total", "label", "blockedAt", "reachable"]) {
+    assert.ok(body.includes(field), `缺字段 ${field}`);
+  }
+});
+
+test("入站闸放行 ladder —— 漏掉会让整条 STATUS 被拒", () => {
+  for (const copy of COPIES_CV) {
+    const source = read(copy);
+    const start = source.indexOf("function normalizeCodexVoicePayload(");
+    assert.ok(start >= 0, copy);
+    const body = source.slice(start, source.indexOf("\n  function ", start + 10));
+    assert.match(body, /"keepActive", "ladder"/);
+  }
+});
+
+test("第 1 级够不到时不许继续闪", () => {
+  // 闪代表"在推进"，而那一级推进不了；一直闪跟"已经不会成了"长得一样。
+  const voice = read("_server_deploy/static/pdf/rc-voicecall.js");
+  const start = voice.indexOf("function _applyLadder(ladder)");
+  assert.ok(start >= 0);
+  const body = voice.slice(start, voice.indexOf("\n  function ", start + 10));
+  assert.match(body, /ladder\.reachable === false/);
+  assert.match(body, /computerBtnConnecting\(false\)/);
+});
+
+test("梯子轮询只在连接期间开着", () => {
+  const voice = read("_server_deploy/static/pdf/rc-voicecall.js");
+  const start = voice.indexOf("function _startLadderProgress(");
+  assert.ok(start >= 0);
+  const body = voice.slice(start, voice.indexOf("\n  function ", start + 10));
+  // availability() 会发一次 STATUS，不该常年开着
+  assert.match(body, /_computerVoiceStarting/);
+  assert.match(body, /_stopLadderProgress\(\)/);
 });

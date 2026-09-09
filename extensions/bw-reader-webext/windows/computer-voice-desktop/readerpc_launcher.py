@@ -38,6 +38,7 @@ import replication_apply
 import situation_signals
 import voice_autoclose
 import voice_keepalive
+import voice_ladder
 from control_plane import (
     ControlPaths,
     SubprocessExactCommandRunner,
@@ -2157,6 +2158,33 @@ class ReaderPCWindow:
         finally:
             self.root.after(20_000, self._ensure_board_cards)
 
+    def _running_image_names(self) -> list[str]:
+        """当前进程映像名。梯子第 3 级要看 Codex 在不在。"""
+        result = subprocess.run(
+            ["tasklist", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return [
+            line.split('","')[0].lstrip('"')
+            for line in (result.stdout or "").splitlines()
+            if line
+        ]
+
+    def _publish_voice_ladder(self, preferences: dict[str, Any]) -> None:
+        """算一次梯子并写给界面看。失败**出声**但不打断这一轮。"""
+        try:
+            runtime = self.bridge_paths.runtime_status.parent
+            status = voice_ladder.ladder(
+                local_root=self.readerpc_paths.local_root,
+                runtime=runtime,
+                preferences=preferences,
+                process_lister=self._running_image_names,
+            )
+            voice_ladder.publish(status, runtime)
+        except Exception as exc:   # noqa: BLE001
+            _boot_log("语音梯子状态发布失败: " + type(exc).__name__)
+
     def _voice_auto_close_tick(self) -> None:
         """语音智能关闭的策略环（2026-09-09 用户拍板）。
 
@@ -2169,6 +2197,9 @@ class ReaderPCWindow:
             return
         try:
             prefs = load_preferences(self.readerpc_paths.preferences_file)
+            # 梯子状态每轮都发布 —— 它跟自动关闭开没开无关：界面要在**任何**
+            # 时候都能说出"现在到第几级、卡在哪"，包括智能关闭整个关着的时候。
+            self._publish_voice_ladder(prefs)
             if not prefs.get("voiceAutoClose"):
                 # 持续开启模式。顺手清掉这一通的记忆，免得开关来回拨之后
                 # 拿着上一通的起点地点去判断。

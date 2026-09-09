@@ -9583,6 +9583,56 @@ if (window.__bwPwaProviderOnly) return;
     }
     if (state.title) setSt(String(state.title));
   }
+  // ── 打开语音时显示"卡在第几级"（2026-09-09 用户要求）──────────────────
+  // 按钮本来就有琥珀色快脉冲（.connecting），缺的是**说清在哪一步**：
+  // 一直闪而不说话，跟"已经不会成了"在界面上长得一模一样。
+  //
+  // 梯子由 ReaderPC 每 30 秒算一次、桥随 STATUS 捎回来（codexVoice.ladder）。
+  // 这里只在**连接期间**轮询，连上或放弃就停 —— availability() 会发一次
+  // STATUS，不该常年开着。
+  var _ladderTimer = null;
+  var LADDER_POLL_MS = 3000;
+
+  function _stopLadderProgress() {
+    if (_ladderTimer) { clearInterval(_ladderTimer); _ladderTimer = null; }
+  }
+
+  function _applyLadder(ladder) {
+    if (!ladder || typeof ladder !== 'object') return;
+    var label = String(ladder.label || '').trim();
+    if (!label) return;
+    setSt(label);
+    ['asst-computer', 'vc-top-computer'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.title = label;
+    });
+    // 第 1 级够不到（桥是 ReaderPC 的子进程，它不在就没有接收方）。
+    // 这种情况**别继续闪** —— 闪代表"在推进"，而这里推进不了。
+    if (ladder.reachable === false) {
+      _stopLadderProgress();
+      computerBtnConnecting(false);
+    }
+  }
+
+  function _startLadderProgress(generation) {
+    _stopLadderProgress();
+    var tick = function () {
+      if (generation !== _gen || !_computerVoiceStarting) {
+        _stopLadderProgress();
+        return;
+      }
+      try {
+        Promise.resolve(RC.computerVoice.availability()).then(function (info) {
+          if (generation !== _gen || !_computerVoiceStarting) return;
+          var status = info && info.status;
+          _applyLadder(status && status.codexVoice && status.codexVoice.ladder);
+        }).catch(function () {});
+      } catch (e) {}
+    };
+    _ladderTimer = setInterval(tick, LADDER_POLL_MS);
+    tick();
+  }
+
   function _bindNativeComputerVoiceEvents() {
     if (_nativeComputerVoiceEventsBound) return;
     _nativeComputerVoiceEventsBound = true;
@@ -9753,10 +9803,12 @@ if (window.__bwPwaProviderOnly) return;
       var state = status && status.state || '';
       setSt(status && status.message || ('电脑客户端:' + state));
       if (state === 'connected') {
+        _stopLadderProgress();
         computerBtnConnecting(false);
         computerBtnOn(true);
         taPlaceholder('电脑客户端通话中…');
       } else if (state === 'failed' || state === 'stopped') {
+        _stopLadderProgress();
         _computerVoiceStarting = false;
         computerBtnConnecting(false);
         computerBtnOn(false);
@@ -9765,6 +9817,7 @@ if (window.__bwPwaProviderOnly) return;
     });
     setSt('正在确认电脑客户端…');
     computerBtnConnecting(true);
+    _startLadderProgress(generation);
     RC.computerVoice.startFromUserGesture(opts || {}).then(function () {
       _computerVoiceStarting = false;
       _connecting = false;
@@ -9773,6 +9826,7 @@ if (window.__bwPwaProviderOnly) return;
         RC.computerVoice.stop('stale-reader-start').catch(function () {});
       }
     }).catch(function (error) {
+      _stopLadderProgress();
       _computerVoiceStarting = false;
       _connecting = false;
       _setComputerVoiceDialPending(false);

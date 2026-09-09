@@ -2173,9 +2173,25 @@ if (window.__bwPwaProviderOnly) return;
     exactObject(
       value,
       ["status", "active", "source", "shortcutSent"],
-      ["keepActive"],
+      // ladder = 语音入口梯子（2026-09-09）。桥**总是**带这个字段（读不到时
+      // 是 null），所以它必须在放行表里 —— exactObject 是全等校验，漏掉
+      // 一个字段的后果不是"少显示一点"，是**整条 STATUS 被拒**、语音状态全废。
+      ["keepActive", "ladder"],
       label || "Codex 语音响应"
     );
+    // 只校验形状，不校验内容：内容由 ReaderPC 那边负责，这里多加一层
+    // 严格校验只会让"多了一个新字段"变成"状态消息整条失效"。
+    if (
+      Object.prototype.hasOwnProperty.call(value, "ladder") &&
+      value.ladder !== null &&
+      !plainObject(value.ladder)
+    ) {
+      throw directError(
+        "Codex 语音梯子字段无效",
+        "BW_COMPUTER_VOICE_DIRECT_SCHEMA",
+        false
+      );
+    }
     var status = safeText(
       value.status,
       (label || "Codex 语音响应") + " status",

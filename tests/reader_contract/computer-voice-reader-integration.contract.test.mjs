@@ -397,7 +397,7 @@ test("电脑客户端设置只读 Codex 语音状态且不再拥有服务器生�
   );
   assert.match(
     runtime,
-    /function normalizeCodexVoicePayload[\s\S]*\["keepActive"\][\s\S]*typeof value\.keepActive !== "boolean"/,
+    /function normalizeCodexVoicePayload[\s\S]*\["keepActive", "ladder"\][\s\S]*typeof value\.keepActive !== "boolean"/,
   );
   assert.doesNotMatch(runtime, /"codex-voice-set"/);
   assert.doesNotMatch(runtime, /"codex-voice-keepalive-set"/);

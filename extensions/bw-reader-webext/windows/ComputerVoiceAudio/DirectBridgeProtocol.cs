@@ -3047,7 +3047,64 @@ internal sealed class DirectBridgeProtocolSession
             source = state.Source,
             shortcutSent,
             keepActive = _codexVoiceControl.KeepActive,
+            // 语音入口梯子（2026-09-09）。ReaderPC 每 30 秒算一次写在这里，
+            // 桥只是**捎带**给界面 —— 界面据此显示"卡在第几级"，而不是
+            // 一直转圈。读不到就是 null：不知道要如实说，不能编一个"就绪"。
+            ladder = ReadVoiceLadder(),
         };
+
+    /// <summary>
+    /// 读 ReaderPC 发布的语音梯子状态。任何读失败都返回 null（不知道）。
+    /// </summary>
+    private static object? ReadVoiceLadder()
+    {
+        string? runtime = ReaderAttentionBoard.RuntimeDirectory;
+        if (string.IsNullOrEmpty(runtime))
+        {
+            return null;
+        }
+        try
+        {
+            string path = Path.Combine(runtime, "voice-ladder-status.json");
+            FileInfo info = new(path);
+            if (!info.Exists || info.Length is <= 0 or > 64 * 1024)
+            {
+                return null;
+            }
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllText(path));
+            JsonElement root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+            // 只捎带界面要用的那几项：整份原样透传会让这条状态消息随
+            // ReaderPC 那边改字段而悄悄变形。
+            return new
+            {
+                reached = root.TryGetProperty("reached", out JsonElement r)
+                    && r.TryGetInt32(out int reached) ? reached : 0,
+                total = root.TryGetProperty("total", out JsonElement to)
+                    && to.TryGetInt32(out int total) ? total : 0,
+                label = root.TryGetProperty("label", out JsonElement la)
+                    && la.ValueKind == JsonValueKind.String
+                    ? la.GetString() ?? "" : "",
+                blockedAt =
+                    root.TryGetProperty("blockedAt", out JsonElement bl)
+                    && bl.ValueKind == JsonValueKind.String
+                    ? bl.GetString() : null,
+                reachable =
+                    root.TryGetProperty("reachable", out JsonElement re)
+                    && re.ValueKind is JsonValueKind.True
+                        or JsonValueKind.False
+                    ? re.GetBoolean() : true,
+            };
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
 
     private async Task<DirectStartActionResult> HandleStartAsync(
         JsonElement message,
