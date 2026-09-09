@@ -33,6 +33,9 @@ internal sealed class ReaderCapabilityCatalog
         new("navigation", "导航输出", "滚动、定位、跳页与跳章节"),
         new("highlight", "高亮输出", "保存当前稳定选区"),
         new("tool-status", "工具状态输出", "发送现有 Realtime 工具状态"),
+        new("voice-entry", "语音入口",
+            "收到「语音入口」通知时怎么开语音：跑入口脚本，最多两次，"
+            + "两次不成就跑报错脚本放弃"),
         new("status-report", "状态回报",
             "收到外部推来的「状态查询」时怎么答：只回答、不改变任何状态；"
             + "没有足够新鲜的证据就答 unknown"),

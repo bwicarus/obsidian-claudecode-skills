@@ -255,6 +255,85 @@ internal static class ReaderCodexEndpoint
             return;
         }
 
+        // 语音入口的一次尝试（2026-09-09 用户拍板）：**按一次并等确认**。
+        //
+        // ⚠ 刻意做成一次性，而不是写"保活意图"：保活是持续语义，会跟自动关闭
+        // 互相打架（关掉之后收敛循环几秒内又拉起来）。入口要的是"试一次，
+        // 成了就成了，不成让调用方决定再试还是放弃"。
+        //
+        // ⚠ 守卫长在这里：已经在通话就不按（F24 是切换，按下去会**挂断**）；
+        // 台账读不到也不按（那是不知道，不是没在通话）。
+        if (body["startVoiceOnce"] is JsonValue startOnce
+            && startOnce.TryGetValue(out bool wantsStart) && wantsStart)
+        {
+            WindowsRegistryCodexVoiceActivitySource source = new(
+                DirectAppTargets.CodexDesktop);
+            CodexVoiceActivitySnapshot before = source.Read();
+            if (before.Status != CodexVoiceActivityReadStatus.Available)
+            {
+                await Ok(context, new JsonObject
+                {
+                    ["ok"] = false,
+                    ["pressed"] = false,
+                    ["confirmed"] = false,
+                    ["reason"] = "unknown",
+                    ["detail"] = "读不到麦克风台账，不知道现在在不在通话；没有动作",
+                }, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            if (before.Active)
+            {
+                await Ok(context, new JsonObject
+                {
+                    ["ok"] = true,
+                    ["pressed"] = false,
+                    ["confirmed"] = true,
+                    ["reason"] = "already-active",
+                    ["detail"] = "已经在通话中，无需动作",
+                }, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            try
+            {
+                CodexVoiceActivityController controller = new(
+                    source, new SystemCodexVoiceActivityClock());
+                CodexAppTarget target = WindowsCodexAppProbe.RequireReady();
+                CodexVoiceStartBaseline baseline = new(before);
+                new WindowsCodexVoiceShortcutSender()
+                    .Send(target, DirectVoiceCommand.Start);
+                CodexVoiceShortcutReceipt receipt =
+                    controller.RecordShortcutSent(baseline, target);
+                CodexVoiceStartConfirmation confirmation =
+                    await controller.ConfirmStartedAsync(
+                        baseline,
+                        receipt,
+                        CodexVoiceActivityController.StartObservationTimeout,
+                        CodexVoiceActivityController.MonitorInterval,
+                        cancellationToken).ConfigureAwait(false);
+                await Ok(context, new JsonObject
+                {
+                    ["ok"] = true,
+                    ["pressed"] = true,
+                    ["confirmed"] = confirmation.OwnsVoice,
+                    ["reason"] = "started",
+                }, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                // 按了但没确认 ≠ 没按。如实报，让调用方决定再试还是放弃 ——
+                // 这里替它决定就等于把"可能已经开着"藏起来。
+                await Ok(context, new JsonObject
+                {
+                    ["ok"] = false,
+                    ["pressed"] = true,
+                    ["confirmed"] = false,
+                    ["reason"] = "not-confirmed",
+                    ["detail"] = exception.Message,
+                }, cancellationToken).ConfigureAwait(false);
+            }
+            return;
+        }
+
         // 状态查询（2026-09-09）。只要回答，不改变任何状态。
         //
         // ⚠ 同样只回"发出去了没有"。回执是否写成要去看回执账本 ——

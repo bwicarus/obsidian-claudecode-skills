@@ -37,6 +37,7 @@ from bridge_core import (
 import replication_apply
 import situation_signals
 import voice_autoclose
+import voice_keepalive
 from control_plane import (
     ControlPaths,
     SubprocessExactCommandRunner,
@@ -362,15 +363,14 @@ def set_codex_voice_keep_active(
     bridge_paths: BridgePaths,
     enabled: bool,
 ) -> None:
-    """Publish the ephemeral ReaderPC service intent consumed by Direct."""
+    """Publish the ephemeral ReaderPC service intent consumed by Direct.
 
-    _atomic_json(
-        bridge_paths.runtime_status.parent / "codex-voice-keepalive.json",
-        {
-            "contract": CODEX_VOICE_KEEPALIVE_CONTRACT,
-            "enabled": bool(enabled),
-        },
-    )
+    ⚠ 格式只在 voice_keepalive 里写一份：这份意图现在有两个写入方（界面/策略环，
+    以及 Codex 按状态回报去跑的启动脚本），两处各写一遍迟早只改一边。
+    """
+
+    voice_keepalive.write_keep_active(
+        enabled, bridge_paths.runtime_status.parent)
 
 
 # C# 侧是**纯轮询**读 keepalive 文件（DirectBridgeProtocol.cs:519 PeriodicTimer，
@@ -612,19 +612,8 @@ def describe_voice_failure(last_error: dict | None) -> str:
 def read_codex_voice_keep_active(
     bridge_paths: BridgePaths,
 ) -> bool | None:
-    path = bridge_paths.runtime_status.parent / "codex-voice-keepalive.json"
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return None
-    if (
-        not isinstance(value, dict)
-        or set(value) != {"contract", "enabled"}
-        or value.get("contract") != CODEX_VOICE_KEEPALIVE_CONTRACT
-        or not isinstance(value.get("enabled"), bool)
-    ):
-        return None
-    return value["enabled"]
+    return voice_keepalive.read_keep_active(
+        bridge_paths.runtime_status.parent)
 
 
 def enable_readerpc_voice(
@@ -2223,6 +2212,16 @@ class ReaderPCWindow:
 
             def worker(reason=reason, thread_id=thread_id) -> None:
                 try:
+                    # ⚠ 先撤掉保活意图，再去挂断。
+                    # 保活是**持续**语义：C# 每 5 秒收敛一次，看到"意图要开着
+                    # 但台账说没开"就会把它按回来。不先撤意图，自动关闭挂掉的
+                    # 通话会在几秒后被收敛循环重新拉起 —— 两个循环互相打架，
+                    # 而表现是"关了又开、来回抖"，最难查的那种。
+                    try:
+                        set_codex_voice_keep_active(self.bridge_paths, False)
+                    except Exception as exc:   # noqa: BLE001
+                        _boot_log("语音智能关闭：撤保活意图失败 "
+                                  + type(exc).__name__)
                     result = voice_autoclose.close_voice(
                         endpoint=voice_autoclose.ENDPOINT,
                         thread_id=thread_id,

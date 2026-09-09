@@ -94,6 +94,26 @@ RUNTIME_SOURCES = {
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "voice_status_receipt.py"
     ),
+    "readerpc-runtime/voice_autoclose.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "voice_autoclose.py"
+    ),
+    "readerpc-runtime/voice_keepalive.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "voice_keepalive.py"
+    ),
+    "readerpc-runtime/voice_ladder.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "voice_ladder.py"
+    ),
+    "readerpc-runtime/voice_start_step.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "voice_start_step.py"
+    ),
+    "readerpc-runtime/voice_start_failed.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "voice_start_failed.py"
+    ),
     "readerpc-runtime/situation_actions.py": (
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "situation_actions.py"
@@ -526,6 +546,9 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             "situation_signals.py", "situation_triggers.py",
             "situation_actions.py", "review_deck.py",
             "codex_push_register.py", "voice_status_receipt.py",
+            # 语音入口这条链:脚本之间互相 import,缺一个就整条跑不起来。
+            "voice_autoclose.py", "voice_keepalive.py", "voice_ladder.py",
+            "voice_start_step.py", "voice_start_failed.py",
         ):
             (root.parent / stable_name).write_bytes(
                 (release / "readerpc-runtime" / stable_name).read_bytes()
