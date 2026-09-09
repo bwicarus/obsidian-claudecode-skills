@@ -391,6 +391,7 @@ internal static class ReaderCodexPush
     ///
     /// ⚠ 这条推送**不保证**语音会开起来，只保证请求发出去了。开没开成要看台账
     /// （梯子第 4 级）；对面放弃时会自己跑 voice_start_failed.py 留痕。
+    /// </summary>
     internal static async Task<bool> RequestVoiceEntryAsync(
         string requestId,
         CancellationToken cancellationToken)
