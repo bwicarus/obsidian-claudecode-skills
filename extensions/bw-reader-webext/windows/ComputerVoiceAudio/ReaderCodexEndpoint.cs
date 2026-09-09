@@ -352,6 +352,8 @@ internal static class ReaderCodexEndpoint
             // 那个循环的异常没有任何人观察，板子停更跟"状态确实没变"
             // 长得一模一样（2026-09-09 就是这么查了半天）。
             // 没失败过时不出这个字段，免得每次登记都多一行噪音。
+            // 焦点判定的现场：没收到 / 还在等停留 / 已确认，三者处置完全不同。
+            ["boardFocus"] = ReaderAttentionBoard.FocusDiagnosis(),
             ["boardFlushFailure"] =
                 ReaderAttentionBoard.LastFlushFailure.Length == 0
                     ? null

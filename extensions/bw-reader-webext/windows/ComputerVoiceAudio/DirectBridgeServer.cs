@@ -3104,8 +3104,16 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                             : title + " 第 " + page + " 页",
                         DateTimeOffset.UtcNow,
                         source: activeReading.SourceInstanceId,
-                        interacted: !string.IsNullOrWhiteSpace(
-                            activeReading.Selection));
+                        // 「在新的焦点上操作了」用 SelectionState 判，
+                        // 不用 Selection 非空：状态是权威的那一个，
+                        // 三种取值 active/cleared/unknown 里只有 active
+                        // 表示他真的划了。
+                        // ⚠ 不把 HighlightSource 算进来：那是**这一页已有的**
+                        //   高亮，不是这一刻的动作。算进来的话，翻到任何
+                        //   画过线的页都会立刻确认，45 秒门槛就形同虚设。
+                        interacted: string.Equals(
+                            activeReading.SelectionState, "active",
+                            StringComparison.Ordinal));
                 }
             }
             if (viewport is not null)

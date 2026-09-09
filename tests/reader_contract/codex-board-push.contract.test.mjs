@@ -265,6 +265,42 @@ test("响应说清这次是接上还是续期", () => {
   assert.match(ENDPOINT, /\["renewedOnly"\]/);
 });
 
+test("新页上划选即确认焦点，不必等满 45 秒", () => {
+  // 用户 2026-09-09：「不是除了 45s 还有新页面操作后直接刷新的机制么」——
+  // 有，我接得太窄：原来判 Selection 非空，改成判 SelectionState。
+  // 状态是权威的那一个，三种取值里只有 active 表示他真的划了。
+  const server = read(CS + "DirectBridgeServer.cs");
+  const region = server.slice(
+    server.indexOf("阅读器自己的焦点"),
+    server.indexOf("if (viewport is not null)"));
+  assert.match(region, /interacted: string\.Equals\(/);
+  assert.ok(region.includes('activeReading.SelectionState, "active"'));
+  // ⚠ 不许把 HighlightSource 算进来：那是这一页**已有的**高亮不是这一刻的
+  //   动作，算进来的话翻到任何画过线的页都会立刻确认，45 秒门槛形同虚设。
+  // 只看 interacted: 那个表达式本身 —— 用整段去查会把上面那句注释也算进去。
+  const interacted = region.slice(
+    region.indexOf("interacted: string.Equals("),
+    region.indexOf("StringComparison.Ordinal));"));
+  assert.ok(interacted.length > 0, "没定位到 interacted 表达式");
+  assert.ok(
+    !/HighlightSource/.test(interacted),
+    "已有的高亮不是操作，不能拿它确认焦点");
+  assert.ok(interacted.includes("SelectionState"));
+});
+
+test("焦点判定的现场看得见", () => {
+  // 一次判定有三种可能：没收到 / 收到但还在等停留 / 已确认。
+  // 三者处置完全不同，而 2026-09-09 查这件事时**一种都看不到**，
+  // 只能靠建测试通知去试。
+  assert.match(BOARD, /internal static string FocusDiagnosis\(\)/);
+  const body = BOARD.slice(
+    BOARD.indexOf("internal static string FocusDiagnosis()"),
+    BOARD.indexOf("/// 最近一次渲染失败的原因"));
+  assert.ok(body.includes("还没收到任何焦点上报"), "要能说出「没收到」");
+  assert.ok(body.includes("已等 "), "要能说出候选等了多久");
+  assert.match(ENDPOINT, /\["boardFocus"\] = ReaderAttentionBoard\.FocusDiagnosis\(\)/);
+});
+
 test("地址和任务 id 一律不写死", () => {
   // 交接明说：安装路径带版本号会变，管道地址是动态的。
   for (const source of [PUSH, ENDPOINT]) {

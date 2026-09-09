@@ -898,6 +898,38 @@ internal static class ReaderAttentionBoard
         }
     }
 
+    /// 焦点判定的现场（诊断用）。
+    ///
+    /// ⚠ 这一条存在的理由：2026-09-09 用户连着报"开书/翻页/绘图快板都不变"，
+    /// 而我**没有任何办法看到**输入有没有进来、板子判成了什么 ——
+    /// 只能靠建测试通知去试。一次判定有三种可能（没收到 / 收到但还在等停留 /
+    /// 已确认），三者的处置完全不同，混在一起就只能猜。
+    internal static string FocusDiagnosis()
+    {
+        lock (Gate)
+        {
+            if (_currentKey is null && _pendingKey is null)
+            {
+                return "还没收到任何焦点上报";
+            }
+            var text = new StringBuilder();
+            text.Append(_currentLabel is null
+                ? "当前焦点：无"
+                : "当前焦点：" + _currentLabel);
+            if (_pendingKey is not null)
+            {
+                double waited =
+                    (DateTimeOffset.UtcNow - _pendingSince).TotalSeconds;
+                text.Append("；候选「").Append(_pendingLabel)
+                    .Append("」已等 ").Append((int)waited)
+                    .Append(" 秒（满 ")
+                    .Append((int)DwellThreshold.TotalSeconds)
+                    .Append(" 秒或在新页上划选即确认）");
+            }
+            return text.ToString();
+        }
+    }
+
     /// 最近一次渲染失败的原因。没失败过返回空串。
     internal static string LastFlushFailure
     {
