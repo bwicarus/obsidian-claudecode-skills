@@ -933,10 +933,31 @@ internal interface IAudioEndpointVolumeForBridge
 
 internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
 {
+    /// <summary>Codex 的音频服务子进程出现前最多等多久。</summary>
+    /// <remarks>
+    /// ⚠ **按冷启动取值，不是按热路径**（2026-09-10 用户实测：「codex 没有启动时
+    /// app 点击语音后，codex 初始化结束前按钮就灭掉了」）。
+    ///
+    /// 原来是 3 秒。Codex 已经在跑时音频服务早就在，3 秒绰绰有余 —— 但这条路径
+    /// 恰恰是**我们刚把 Codex 拉起来**（同一次 START 里 EnsureRunningAsync 干的）:
+    /// 窗口先出来（上一步 AppReadyTimeout 为此等了 20 秒），音频服务子进程还要更久。
+    /// 于是冷启动必然在这里超时，抛 AUDIO_SERVICE_NOT_READY —— 那个错**标着
+    /// retryable: true 却没有任何人重试**，一路上抛成 START 失败，按钮直接灭掉。
+    ///
+    /// 所以它至少要和等窗口那一步同量级：音频服务是在窗口之后才出现的东西，
+    /// 给它比窗口更短的预算没有道理。等久了只是慢，等短了是必然失败。
+    /// </remarks>
     private static readonly TimeSpan AudioPolicyProcessReadyTimeout =
-        TimeSpan.FromSeconds(3);
+        TimeSpan.FromSeconds(20);
+
+    /// <summary>麦克风台账变成可读之前最多等多久。</summary>
+    /// <remarks>
+    /// 同样是冷启动才需要等的东西（台账键在 Codex 首次用麦后才存在）。12 秒是
+    /// 热路径下的富余值;这里跟上面一并放宽,理由相同 —— 判定依据始终是信号本身,
+    /// 这个数只是"等多久算认输"的上界。
+    /// </remarks>
     private static readonly TimeSpan VoiceReadyTimeout =
-        TimeSpan.FromSeconds(12);
+        TimeSpan.FromSeconds(20);
 
     private readonly WindowsDirectTypistLeaseController _typist;
     private readonly IDirectOutputRouteObserverFactory

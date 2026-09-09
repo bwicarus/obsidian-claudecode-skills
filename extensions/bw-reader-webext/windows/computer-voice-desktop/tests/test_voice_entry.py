@@ -16,6 +16,8 @@ import unittest
 from pathlib import Path
 
 RUNTIME = Path(__file__).resolve().parents[1]
+#: 仓库根。数层数很容易错一格,而错了的表现是测试**静默跳过** —— 所以只算一次。
+REPO_ROOT = Path(__file__).resolve().parents[5]
 
 
 def _load(name: str):
@@ -426,13 +428,84 @@ class WiredUpTests(unittest.TestCase):
         """
         source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
             encoding="utf-8")
-        self.assertIn("RequestVoiceEntryIfNobodyElseWill(appKind)", source)
+        # 钉调用**位置**,不钉参数列表 —— 参数会变,"挂在 START 上"不该变。
+        start = source.split("private async Task<DirectStartActionResult> "
+                             "HandleStartAsync")[1]
+        start = start.split("private async Task<object> HandleStopAsync")[0]
+        self.assertIn("RequestVoiceEntryIfNobodyElseWill(", start)
         hook = source.split("private void RequestVoiceEntryIfNobodyElseWill")[1]
         hook = hook.split("private async Task<object> HandleStopAsync")[0]
         # 三条判据缺一条都会做错事,见那段的 remarks。
         self.assertIn("_codexVoiceControl.KeepActive", hook)
         self.assertIn("Active == true", hook)
         self.assertIn("DirectAppTargets.CodexDesktop", hook)
+
+    def test_cold_launch_waits_are_sized_for_a_cold_launch(self):
+        """刚被我们拉起来的 Codex，音频服务不可能 3 秒就绪。
+
+        用户 2026-09-10:「codex 没有启动时 app 点击语音后,codex 初始化结束前
+        按钮就灭掉了」。窗口那一步等 20 秒(AppReadyTimeout),而音频服务子进程是
+        在窗口**之后**才出现的东西 —— 给它更短的预算没有道理,冷启动必然超时,
+        抛 AUDIO_SERVICE_NOT_READY(标着 retryable 却没人重试),按钮直接灭。
+        """
+        source = (self.BRIDGE / "WindowsDirectAdapters.cs").read_text(
+            encoding="utf-8")
+        audio = re.search(
+            r"AudioPolicyProcessReadyTimeout =\s*TimeSpan\.FromSeconds\((\d+)\)",
+            source)
+        voice = re.search(
+            r"VoiceReadyTimeout =\s*TimeSpan\.FromSeconds\((\d+)\)", source)
+        self.assertTrue(audio and voice, "两个超时常量的写法变了,正则该修")
+        ready = re.search(
+            r"AppReadyTimeout = TimeSpan\.FromSeconds\((\d+)\)",
+            (self.BRIDGE / "DirectBridgeAdapters.cs").read_text(
+                encoding="utf-8"))
+        self.assertTrue(ready)
+        self.assertGreaterEqual(int(audio.group(1)), int(ready.group(1)))
+        self.assertGreaterEqual(int(voice.group(1)), 20)
+
+    def test_voice_entry_cooldown_is_keyed_by_session_not_the_clock(self):
+        """用户再按一次是**新意图**,不是重复的幂等 START。
+
+        原来是一个全局时间戳,于是第一次失败后隔十几秒再按被当成重复挡掉 ——
+        用户看到的正是「再次点击…并没有发送内容到 codex」。
+        """
+        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
+            encoding="utf-8")
+        hook = source.split("private void RequestVoiceEntryIfNobodyElseWill")[1]
+        hook = hook.split("private async Task<object> HandleStopAsync")[0]
+        self.assertIn("_lastVoiceEntrySessionId", hook)
+        self.assertIn("sameSession", hook)
+
+    def test_voice_entry_push_retries_because_codex_was_just_launched(self):
+        """只发一次正好落在最差的时刻。
+
+        Codex 往前几秒才刚被同一次 START 拉起来,它的推送绑定要等自己的会话钩子
+        跑完才登记 —— 在那之前管道对面没人。所以要在有界窗口里重试,并且**语音
+        一起来就收手**(再催一遍会让对面多按一次 F24,而那是挂断)。
+        """
+        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
+            encoding="utf-8")
+        self.assertIn("VoiceEntryRetryWindow", source)
+        hook = source.split("private void RequestVoiceEntryIfNobodyElseWill")[1]
+        hook = hook.split("private async Task<object> HandleStopAsync")[0]
+        self.assertIn("ReadState().Active == true", hook)
+        self.assertIn("if (sent ||", hook)
+
+    def test_green_light_does_not_treat_unasked_as_permission(self):
+        """"还没问过"不是"可以放行"(2026-09-10 我犯的那个)。
+
+        首次上漆时还没轮询过,闸门若看 null 放行,按钮立刻变绿、闸门形同不存在。
+        两个方向都要避开:把"读不到"当"没起来"会永远黄闪,把"没问过"当"放行"
+        会白亮一次。
+        """
+        reader = REPO_ROOT / "_server_deploy" / "static" / "pdf" / "rc-voicecall.js"
+        self.assertTrue(reader.is_file(), "找不到 rc-voicecall.js：%s" % reader)
+        source = reader.read_text(encoding="utf-8")
+        gate = source.split("function _greenLightAllowed()")[1].split("}")[0]
+        self.assertIn("=== true", gate)
+        self.assertIn("'unknown'", gate)
+        self.assertNotIn("!== false", gate)
 
     def test_give_up_flag_reaches_the_surface_that_shows_the_blinking(self):
         """放弃的痕迹要能到显示按钮的那一层。
@@ -444,11 +517,12 @@ class WiredUpTests(unittest.TestCase):
         source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
             encoding="utf-8")
         self.assertIn("startGaveUp", source)
-        reader = (Path(__file__).resolve().parents[4]
-                  / "_server_deploy" / "static" / "pdf" / "rc-voicecall.js")
-        if reader.is_file():
-            self.assertIn("ladder.startGaveUp", reader.read_text(
-                encoding="utf-8"))
+        # ⚠ parents[5] 才是仓库根(tests/…/computer-voice-desktop/windows/
+        # bw-reader-webext/extensions/<root>)。之前写成 [4],于是 is_file() 恒假、
+        # 这条断言从来没跑过 —— 一个空转的测试比没有测试更糟,它在报告里是绿的。
+        reader = REPO_ROOT / "_server_deploy" / "static" / "pdf" / "rc-voicecall.js"
+        self.assertTrue(reader.is_file(), "找不到 rc-voicecall.js：%s" % reader)
+        self.assertIn("ladder.startGaveUp", reader.read_text(encoding="utf-8"))
 
 
 class GiveUpTests(unittest.TestCase):

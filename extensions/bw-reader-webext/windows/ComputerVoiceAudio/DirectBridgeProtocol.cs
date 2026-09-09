@@ -3230,7 +3230,7 @@ internal sealed class DirectBridgeProtocolSession
             _phase = DirectProtocolPhase.Active;
             _activeVoiceSessionId = sessionId;
             _activeVoiceAppKind = appKind;
-            RequestVoiceEntryIfNobodyElseWill(appKind);
+            RequestVoiceEntryIfNobodyElseWill(appKind, sessionId);
             return new DirectStartActionResult(
                 payload,
                 pcmGate.ReleaseAsync);
@@ -3245,9 +3245,26 @@ internal sealed class DirectBridgeProtocolSession
 
     /// 同一条入口请求的最小间隔。活动连接上的 START 允许幂等重复，
     /// 不设这个门就会对同一次"开语音"反复催对面。
+    ///
+    /// ⚠ **按会话计，不是按时钟计**（2026-09-10 用户实测：「我再次点击后…
+    /// 并没有发送内容到 codex 让他启动语音」）。原来是一个全局时间戳，于是用户
+    /// 第一次按失败、隔十几秒再按时被这个门当成"重复的幂等 START"挡掉 ——
+    /// 而那是一次**新的用户意图**，恰恰最该发。幂等重复的特征是 sessionId 相同；
+    /// 换了 sessionId 就是新按了一次。
     private static readonly TimeSpan VoiceEntryRequestCooldown =
         TimeSpan.FromSeconds(45);
+    private static readonly object VoiceEntryGate = new();
     private static long _lastVoiceEntryRequestTicksUtc;
+    private static string _lastVoiceEntrySessionId = string.Empty;
+
+    /// 请求发出后还要盯多久。**Codex 往前几秒才刚被我们拉起来**
+    /// （同一次 START 里 EnsureRunningAsync 干的），它的推送绑定要等自己的会话
+    /// 钩子跑完才登记 —— 在那之前管道对面没人。只发一次正好落在最差的时刻：
+    /// 请求失败，而失败原因只写进 lastNote，用户看到的是"什么都没发生"。
+    private static readonly TimeSpan VoiceEntryRetryWindow =
+        TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan VoiceEntryRetryInterval =
+        TimeSpan.FromSeconds(10);
 
     /// <summary>
     /// 音频通道刚通，但语音会话没起来 —— 且**没有别人会去起它**时，请对面开一次。
@@ -3268,7 +3285,9 @@ internal sealed class DirectBridgeProtocolSession
     /// 整段是 fire-and-forget：推送慢或管道不通绝不能拖住/弄失败一次已经成功的
     /// START。发没发成写在 ReaderCodexPush 的 lastNote 里。
     /// </remarks>
-    private void RequestVoiceEntryIfNobodyElseWill(string appKind)
+    private void RequestVoiceEntryIfNobodyElseWill(
+        string appKind,
+        string sessionId)
     {
         if (!string.Equals(
                 appKind,
@@ -3293,31 +3312,69 @@ internal sealed class DirectBridgeProtocolSession
             // 读不到就当"不知道" —— 继续发。见 remarks。
         }
         long now = DateTime.UtcNow.Ticks;
-        long previous = Interlocked.Read(ref _lastVoiceEntryRequestTicksUtc);
-        if (
-            previous != 0
-            && now - previous < VoiceEntryRequestCooldown.Ticks
-        )
+        lock (VoiceEntryGate)
         {
-            return;
+            bool sameSession = string.Equals(
+                _lastVoiceEntrySessionId,
+                sessionId,
+                StringComparison.Ordinal);
+            long previous = _lastVoiceEntryRequestTicksUtc;
+            // 只挡"同一次开语音里重复的幂等 START"。换了 sessionId 说明用户
+            // 又按了一次 —— 那是新意图，必须放过去。
+            if (
+                sameSession
+                && previous != 0
+                && now - previous < VoiceEntryRequestCooldown.Ticks
+            )
+            {
+                return;
+            }
+            _lastVoiceEntryRequestTicksUtc = now;
+            _lastVoiceEntrySessionId = sessionId;
         }
-        Interlocked.Exchange(ref _lastVoiceEntryRequestTicksUtc, now);
         string requestId = "voice-entry-"
             + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
                 .ToString(System.Globalization.CultureInfo.InvariantCulture);
+        IDirectCodexVoiceControl control = _codexVoiceControl;
         _ = Task.Run(async () =>
         {
             using CancellationTokenSource lifetime = new(
-                TimeSpan.FromSeconds(20));
-            try
+                VoiceEntryRetryWindow + VoiceEntryRetryInterval);
+            DateTime deadline = DateTime.UtcNow + VoiceEntryRetryWindow;
+            while (true)
             {
-                await ReaderCodexPush.RequestVoiceEntryAsync(
-                    requestId,
-                    lifetime.Token).ConfigureAwait(false);
-            }
-            catch (Exception)
-            {
-                // RequestVoiceEntryAsync 自己已经记过原因；这里只保证不炸线程。
+                try
+                {
+                    // 中途语音自己起来了(或别人起了)就收手 —— 再催一遍会让对面
+                    // 多按一次 F24,而那是**挂断**。
+                    if (control.ReadState().Active == true) return;
+                }
+                catch (Exception)
+                {
+                    // 读不到就当不知道,继续按原计划催。
+                }
+                bool sent = false;
+                try
+                {
+                    sent = await ReaderCodexPush.RequestVoiceEntryAsync(
+                        requestId,
+                        lifetime.Token).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // RequestVoiceEntryAsync 自己已经记过原因。
+                }
+                if (sent || DateTime.UtcNow >= deadline) return;
+                try
+                {
+                    await Task.Delay(
+                        VoiceEntryRetryInterval,
+                        lifetime.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
             }
         });
     }

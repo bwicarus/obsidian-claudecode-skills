@@ -9512,7 +9512,7 @@
     vt.sent = 0; vt.tail = ''; vt.pref = ''; pendingUtter = null; activeUtter = '';
     capClear();   // 挂断:字幕/等待指示一并收掉
     callBtnOn(false); callBtnSpeaking(false);
-    _audioRouteConnected = false; _codexSessionLive = null;
+    _audioRouteConnected = false; _codexSessionLive = null;   // 回到"还没问过"
     computerBtnOn(false); computerBtnSpeaking(false);
     taPlaceholder(null);
     if (box) { box.classList.remove('on'); if (closeBox) { box.remove(); box = null; } }
@@ -9565,22 +9565,33 @@
   // 判据用 codexVoice.active（桥直接读麦克风台账，没有过期问题），
   // 而**不是**梯子的 label —— 梯子是 30 秒一份的静态读数。
   // 三态必须分开：true=真在通话；false=确实没在；null/读不到=不知道。
-  var _codexSessionLive = null;   // null = 还不知道
+  // 三态之外还要分清**"还没问过"和"问过了读不到"** —— 这两个混成一个 null,
+  // 就是我 2026-09-10 犯的错:首次上漆时还没轮询过,闸门看 null 放行,按钮立刻变绿,
+  // 3 秒后轮询回来才知道其实没起来 —— 而绿已经亮过了。用户原话:「我再次点击后
+  // 直接变绿但是并没有发送内容到 codex 让他启动语音」。
+  //   null  = 还没问过        → **不放行**(我们正在开,马上就有答案)
+  //   true  = 确证在通话      → 放行
+  //   false = 确证没在通话    → 拦住
+  //   'unknown' = 问过了但读不到 → 放行(无从否证,而音频通道确实通了)
+  var _codexSessionLive = null;
   var _audioRouteConnected = false;
 
+  // 问过之后一律返回三种确定说法之一,绝不再返回 null ——
+  // null 专门留给"还没问过"。
   function _sessionEvidence(status) {
     var voice = status && status.codexVoice;
-    if (!voice || typeof voice !== 'object') return null;
-    if (voice.status && voice.status !== 'available') return null;
+    if (!voice || typeof voice !== 'object') return 'unknown';
+    if (voice.status && voice.status !== 'available') return 'unknown';
     return voice.active === true ? true
-      : (voice.active === false ? false : null);
+      : (voice.active === false ? false : 'unknown');
   }
 
-  // ⚠ "不知道"不能当成"没起来"：那会让按钮在台账读不到时永远黄闪，
-  // 而音频通道其实真的通了 —— 把一个未知折成否定，就是今天修过好几次的形态。
-  // 所以只有**确证没起来**才拦住绿灯。
+  // ⚠ 两个方向的错都要避开：
+  //   · 把"读不到"当成"没起来" → 按钮在台账读不到时永远黄闪,而音频通道真的通了;
+  //   · 把"还没问过"当成"可以放行" → 首次上漆就变绿,闸门形同不存在(我犯的那个)。
+  // 所以只有**确证在通话**或**问过了确实读不到**才放行。
   function _greenLightAllowed() {
-    return _codexSessionLive !== false;
+    return _codexSessionLive === true || _codexSessionLive === 'unknown';
   }
 
   function _paintComputerVoiceConnected() {
@@ -9699,7 +9710,14 @@
           if (_audioRouteConnected && _greenLightAllowed()) {
             _paintComputerVoiceConnected();
           }
-        }).catch(function () {});
+        }).catch(function () {
+          // 问了但没拿到答案,同样算"问过了读不到" —— 留在 null 会让按钮
+          // 永远黄闪,那是把一次失败的询问伪装成"还在推进"。
+          if (_codexSessionLive === null) {
+            _codexSessionLive = 'unknown';
+            if (_audioRouteConnected) _paintComputerVoiceConnected();
+          }
+        });
       } catch (e) {}
     };
     _ladderTimer = setInterval(tick, LADDER_POLL_MS);
