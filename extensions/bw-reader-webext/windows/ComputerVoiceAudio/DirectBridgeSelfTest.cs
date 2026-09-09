@@ -693,6 +693,8 @@ internal static class DirectBridgeSelfTest
         await CheckSnapshotPinFileAsync(
             root,
             checks).ConfigureAwait(false);
+        await CheckStartVoiceOnceGoesThroughVoiceControlAsync(checks)
+            .ConfigureAwait(false);
         await CheckTypistLeaseLifecycleAsync(checks)
             .ConfigureAwait(false);
         await CheckAtomicShortcutAndBestEffortCleanupAsync(checks)
@@ -14884,6 +14886,155 @@ internal static class DirectBridgeSelfTest
             && duplex["uplinkFramesDuringOutput"]?.GetValue<long>() == 0,
             "duplex-diagnostics-count-uplink-and-voiced-frames",
             checks);
+    }
+
+    /// 一次性启动必须走**语音控制器**那条链（2026-09-09 用户当场指出：
+    /// 「即使是一次性启动也需要能拉起 codex 啊」）。
+    ///
+    /// 第一版端点自己拼了一条按键链——探针 → 发 F24 → 确认——把
+    /// SetActiveWithinGateAsync 抄了一遍，抄的时候漏掉了它最前面的
+    /// `_prepareStartAsync`：拉起 Codex、等它出现、按已运行时长沉降。
+    /// 于是一次性方式下 Codex 没在跑时，两次尝试必然全废，而且失败理由是
+    /// APP_TREE_AMBIGUOUS 这种看不出根因的话。
+    ///
+    /// 这条钉的是**委托本身**：端点问的是控制器，不是自己按。控制器上以后
+    /// 再加守卫，这边就不会又落下一次。
+    private static async Task
+        CheckStartVoiceOnceGoesThroughVoiceControlAsync(
+        ICollection<string> checks)
+    {
+        RecordingCodexVoiceControl control = new(
+            active: true,
+            shortcutSent: true);
+        ReaderCodexEndpoint.ConfigureVoiceControl(control);
+        JsonObject started = await InvokeStartVoiceOnceAsync()
+            .ConfigureAwait(false);
+        Require(
+            control.SetActiveCalls.SequenceEqual(new[] { true })
+            && started["reason"]?.GetValue<string>() == "started"
+            && started["confirmed"]?.GetValue<bool>() == true
+            && started["pressed"]?.GetValue<bool>() == true,
+            "start-voice-once-delegates-to-voice-control",
+            checks);
+
+        // 本来就在通话：没按，但确认为开。报成失败会让调用方去按第二下，
+        // 而那一下是**挂断**。
+        ReaderCodexEndpoint.ConfigureVoiceControl(
+            new RecordingCodexVoiceControl(active: true, shortcutSent: false));
+        JsonObject already = await InvokeStartVoiceOnceAsync()
+            .ConfigureAwait(false);
+        Require(
+            already["reason"]?.GetValue<string>() == "already-active"
+            && already["confirmed"]?.GetValue<bool>() == true
+            && already["pressed"]?.GetValue<bool>() == false,
+            "start-voice-once-reports-already-active-without-pressing",
+            checks);
+
+        // 冷却期挡下：没按也没开。这**不是**失败，是"这次我们选择不按"。
+        ReaderCodexEndpoint.ConfigureVoiceControl(
+            new RecordingCodexVoiceControl(active: false, shortcutSent: false));
+        JsonObject cooling = await InvokeStartVoiceOnceAsync()
+            .ConfigureAwait(false);
+        Require(
+            cooling["reason"]?.GetValue<string>() == "cooldown"
+            && cooling["pressed"]?.GetValue<bool>() == false,
+            "start-voice-once-distinguishes-cooldown-from-failure",
+            checks);
+
+        // 台账读不到 = 不知道，不是没在通话。分开报，调用方才知道该不该再试。
+        ReaderCodexEndpoint.ConfigureVoiceControl(
+            new RecordingCodexVoiceControl(
+                active: false,
+                shortcutSent: false,
+                failure: new DirectProtocolException(
+                    CodexVoiceActivityController.ActivityUnavailableCode,
+                    "台账读不到")));
+        JsonObject unknown = await InvokeStartVoiceOnceAsync()
+            .ConfigureAwait(false);
+        Require(
+            unknown["reason"]?.GetValue<string>() == "unknown"
+            && unknown["pressed"]?.GetValue<bool>() == false,
+            "start-voice-once-reports-unknown-ledger-as-unknown",
+            checks);
+
+        // 语音层根本没装（voiceEnabled=false 时接的是 Disabled 控制器）。
+        ReaderCodexEndpoint.ConfigureVoiceControl(
+            new DirectDisabledCodexVoiceControl());
+        JsonObject off = await InvokeStartVoiceOnceAsync()
+            .ConfigureAwait(false);
+        Require(
+            off["confirmed"]?.GetValue<bool>() == false
+            && off["pressed"]?.GetValue<bool>() == false,
+            "start-voice-once-does-not-pretend-to-press-when-voice-is-off",
+            checks);
+
+        static async Task<JsonObject> InvokeStartVoiceOnceAsync()
+        {
+            DefaultHttpContext context = new();
+            context.Request.Method = "POST";
+            context.Request.Headers["Tailscale-User-Login"] =
+                "bwicarus@gmail.com";
+            byte[] payload = System.Text.Encoding.UTF8.GetBytes(
+                "{\"startVoiceOnce\":true}");
+            context.Request.Body = new MemoryStream(payload);
+            context.Request.ContentLength = payload.Length;
+            using MemoryStream sink = new();
+            context.Response.Body = sink;
+            await ReaderCodexEndpoint
+                .WriteResponseAsync(context, CancellationToken.None)
+                .ConfigureAwait(false);
+            return JsonNode.Parse(
+                System.Text.Encoding.UTF8.GetString(sink.ToArray()))
+                as JsonObject
+                ?? throw new InvalidOperationException(
+                    "startVoiceOnce 没有回一个 JSON 对象");
+        }
+    }
+
+    private sealed class RecordingCodexVoiceControl : IDirectCodexVoiceControl
+    {
+        private readonly bool _active;
+        private readonly bool _shortcutSent;
+        private readonly Exception? _failure;
+
+        internal RecordingCodexVoiceControl(
+            bool active,
+            bool shortcutSent,
+            Exception? failure = null)
+        {
+            _active = active;
+            _shortcutSent = shortcutSent;
+            _failure = failure;
+        }
+
+        internal List<bool> SetActiveCalls { get; } = new();
+
+        public bool KeepActive => false;
+
+        public DirectCodexVoiceState ReadState() => new(
+            "available",
+            _active,
+            "self-test");
+
+        public Task<DirectCodexVoiceSetResult> SetActiveAsync(
+            bool active,
+            CancellationToken cancellationToken)
+        {
+            SetActiveCalls.Add(active);
+            if (_failure is not null)
+            {
+                return Task.FromException<DirectCodexVoiceSetResult>(_failure);
+            }
+            return Task.FromResult(new DirectCodexVoiceSetResult(
+                ReadState(),
+                _shortcutSent));
+        }
+
+        public Task<DirectCodexVoiceSetResult> SetKeepActiveAsync(
+            bool enabled,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException(
+                "一次性启动绝不能去动保活意图");
     }
 
     private static async Task CheckSnapshotPinFileAsync(

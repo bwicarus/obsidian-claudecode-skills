@@ -487,6 +487,12 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                         "codex-voice-keepalive"),
                 automaticRecoverySucceeded:
                     _coordinator.ClearRecoveryFailure);
+        // 一次性启动端点用的是**同一个**控制器：拉起 Codex、等就绪、沉降、
+        // 冷却与"已在通话不按"全在它上面。不接这一行，端点就只能自己再拼一条
+        // 按键链——而那条链正是漏掉"拉起 Codex"的地方（2026-09-09）。
+        // ⚠ 语音关着时接的是 DirectDisabledCodexVoiceControl：它会明确抛
+        // VOICE_DISABLED，端点据此回 voice-off，而不是假装按过。
+        ReaderCodexEndpoint.ConfigureVoiceControl(_codexVoiceControl);
         _documentCorpus = new ReaderDocumentCorpusStore(
             Path.Combine(
                 runtimeDirectory,

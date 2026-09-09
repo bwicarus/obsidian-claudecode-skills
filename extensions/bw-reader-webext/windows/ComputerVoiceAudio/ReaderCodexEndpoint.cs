@@ -55,6 +55,14 @@ internal static class ReaderCodexEndpoint
     /// 会把两件无关的事绑在一起。
     private static readonly object RegistrationGate = new();
     private static string _storeDirectory = string.Empty;
+    /// 语音控制器。一次性启动要用**它**，而不是自己再拼一条按键链 ——
+    /// 拉起 Codex、等就绪、沉降、冷却、已在通话的守卫全长在它上面。
+    /// 由 DirectBridgeServer 在构造时注入；没注入就等于这台机器没有语音层。
+    private static IDirectCodexVoiceControl? _voiceControl;
+
+    internal static void ConfigureVoiceControl(
+        IDirectCodexVoiceControl control) =>
+        Volatile.Write(ref _voiceControl, control);
 
     internal static void Configure()
     {
@@ -266,71 +274,8 @@ internal static class ReaderCodexEndpoint
         if (body["startVoiceOnce"] is JsonValue startOnce
             && startOnce.TryGetValue(out bool wantsStart) && wantsStart)
         {
-            WindowsRegistryCodexVoiceActivitySource source = new(
-                DirectAppTargets.CodexDesktop);
-            CodexVoiceActivitySnapshot before = source.Read();
-            if (before.Status != CodexVoiceActivityReadStatus.Available)
-            {
-                await Ok(context, new JsonObject
-                {
-                    ["ok"] = false,
-                    ["pressed"] = false,
-                    ["confirmed"] = false,
-                    ["reason"] = "unknown",
-                    ["detail"] = "读不到麦克风台账，不知道现在在不在通话；没有动作",
-                }, cancellationToken).ConfigureAwait(false);
-                return;
-            }
-            if (before.Active)
-            {
-                await Ok(context, new JsonObject
-                {
-                    ["ok"] = true,
-                    ["pressed"] = false,
-                    ["confirmed"] = true,
-                    ["reason"] = "already-active",
-                    ["detail"] = "已经在通话中，无需动作",
-                }, cancellationToken).ConfigureAwait(false);
-                return;
-            }
-            try
-            {
-                CodexVoiceActivityController controller = new(
-                    source, new SystemCodexVoiceActivityClock());
-                CodexAppTarget target = WindowsCodexAppProbe.RequireReady();
-                CodexVoiceStartBaseline baseline = new(before);
-                new WindowsCodexVoiceShortcutSender()
-                    .Send(target, DirectVoiceCommand.Start);
-                CodexVoiceShortcutReceipt receipt =
-                    controller.RecordShortcutSent(baseline, target);
-                CodexVoiceStartConfirmation confirmation =
-                    await controller.ConfirmStartedAsync(
-                        baseline,
-                        receipt,
-                        CodexVoiceActivityController.StartObservationTimeout,
-                        CodexVoiceActivityController.MonitorInterval,
-                        cancellationToken).ConfigureAwait(false);
-                await Ok(context, new JsonObject
-                {
-                    ["ok"] = true,
-                    ["pressed"] = true,
-                    ["confirmed"] = confirmation.OwnsVoice,
-                    ["reason"] = "started",
-                }, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception exception)
-            {
-                // 按了但没确认 ≠ 没按。如实报，让调用方决定再试还是放弃 ——
-                // 这里替它决定就等于把"可能已经开着"藏起来。
-                await Ok(context, new JsonObject
-                {
-                    ["ok"] = false,
-                    ["pressed"] = true,
-                    ["confirmed"] = false,
-                    ["reason"] = "not-confirmed",
-                    ["detail"] = exception.Message,
-                }, cancellationToken).ConfigureAwait(false);
-            }
+            await StartVoiceOnceAsync(context, cancellationToken)
+                .ConfigureAwait(false);
             return;
         }
 
@@ -595,6 +540,111 @@ internal static class ReaderCodexEndpoint
         }
         string trimmed = (text ?? string.Empty).Trim();
         return trimmed[..Math.Min(trimmed.Length, limit)];
+    }
+
+    /// 一次性启动：请语音控制器把语音**开起来**，然后如实回报。
+    ///
+    /// ⚠ 这里刻意**不自己拼按键链**（2026-09-09 用户当场指出：「即使是一次性
+    /// 启动也需要能拉起 codex 啊」）。第一版就是自己拼的 —— 探针 → 发 F24 →
+    /// 确认 —— 把 SetActiveWithinGateAsync 抄了一遍，抄的时候漏掉了它最前面的
+    /// `_prepareStartAsync`：**拉起 Codex、等它出现、按已运行时长沉降**。
+    /// 于是一次性方式下 Codex 没在跑时，`RequireReady()` 直接抛
+    /// APP_TREE_AMBIGUOUS，两次尝试全废，而"拉起 Codex"这件事只长在保活那条路上。
+    ///
+    /// 委托过来之后，一次性和保活走的是**同一条**链，各种守卫也就自动都在：
+    /// 已在通话不按（F24 是切换，按下去会挂断）、台账读不到就失败关闭、
+    /// 冷却期内不按。以后往那条链上加守卫，这边不会再落下。
+    ///
+    /// 回报的 reason 是封闭词汇表，跟 voice_start_step.py / voice-entry.md 对齐：
+    /// already-active / started / cooldown / not-confirmed / unknown / voice-off。
+    private static async Task StartVoiceOnceAsync(
+        HttpContext context,
+        CancellationToken cancellationToken)
+    {
+        IDirectCodexVoiceControl? control = Volatile.Read(ref _voiceControl);
+        if (control is null)
+        {
+            await Ok(context, new JsonObject
+            {
+                ["ok"] = false,
+                ["pressed"] = false,
+                ["confirmed"] = false,
+                ["reason"] = "voice-off",
+                ["detail"] = "这个 Direct 进程没有语音层，开不了",
+            }, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        try
+        {
+            DirectCodexVoiceSetResult result = await control
+                .SetActiveAsync(active: true, cancellationToken)
+                .ConfigureAwait(false);
+            bool active = result.State.Active == true;
+            // 没按且已开 = 本来就在通话；没按且没开 = 冷却期挡下了
+            // （见 SetActiveWithinGateAsync：到这一步只剩这一种可能）。
+            // 把"我们选择不按"报成失败会让调用方去按第二下 —— 而那一下
+            // 可能正好落在刚起来的通话上，把它关掉。
+            string reason = active
+                ? (result.ShortcutSent ? "started" : "already-active")
+                : (result.ShortcutSent ? "not-confirmed" : "cooldown");
+            JsonObject answer = new()
+            {
+                ["ok"] = active,
+                ["pressed"] = result.ShortcutSent,
+                ["confirmed"] = active,
+                ["reason"] = reason,
+            };
+            if (reason == "cooldown")
+            {
+                // 等多久才值得再问一次 —— **由这里给**，不让调用方猜。
+                //
+                // ⚠ 这一条是委托带来的新情况：老的手拼链根本不看冷却，直接按
+                // （那正是"按掉刚开起来的通话"的隐患）。现在守卫生效了，于是
+                // 第一次尝试失败后立刻跑的第二次会落在冷却里变成空操作 ——
+                // 冷却 13 秒，而第一次尝试在确认窗口耗尽（10 秒）后就返回了。
+                // 不给这个数，"重试一次"就是一次假重试。
+                answer["cooldownSeconds"] =
+                    DirectCodexVoiceControl.ShortcutCooldown.TotalSeconds;
+            }
+            await Ok(context, answer, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (DirectProtocolException exception)
+        {
+            // 台账读不到是"不知道"，不是"没在通话"——分开报，调用方才知道
+            // 这次该再试还是根本没有可试的东西。
+            bool unknown =
+                exception.Code
+                    == CodexVoiceActivityController.ActivityUnavailableCode
+                || exception.Code
+                    == CodexVoiceActivityController.ActivityReadFailedCode;
+            await Ok(context, new JsonObject
+            {
+                ["ok"] = false,
+                ["pressed"] = false,
+                ["confirmed"] = false,
+                ["reason"] = unknown ? "unknown" : "not-confirmed",
+                ["detail"] = exception.Message,
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            // 按了但没确认 ≠ 没按。如实报，让调用方决定再试还是放弃 ——
+            // 这里替它决定就等于把"可能已经开着"藏起来。
+            await Ok(context, new JsonObject
+            {
+                ["ok"] = false,
+                ["pressed"] = true,
+                ["confirmed"] = false,
+                ["reason"] = "not-confirmed",
+                ["detail"] = exception.Message,
+            }, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private static async Task Ok(

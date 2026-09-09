@@ -119,14 +119,103 @@ class StartStepTests(unittest.TestCase):
             return Response(reply)
         return urlopen
 
-    def _run(self, reply, clock=None):
+    def _fake_urlopen_sequence(self, replies):
+        """按顺序回答 —— 冷却那条要看"第二次才是真按"。"""
+        pending = list(replies)
+
+        class Response:
+            def __init__(self, payload):
+                self._payload = json.dumps(payload).encode("utf-8")
+
+            def read(self):
+                return self._payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        def urlopen(request, timeout=None):
+            self.sent.append(json.loads(request.data.decode("utf-8")))
+            return Response(pending.pop(0) if pending else {})
+        return urlopen
+
+    def _run(self, reply, clock=None, replies=None, sleeper=None):
         original = STEP.urllib.request.urlopen
-        STEP.urllib.request.urlopen = self._fake_urlopen(reply)
+        STEP.urllib.request.urlopen = (
+            self._fake_urlopen_sequence(replies) if replies is not None
+            else self._fake_urlopen(reply))
         try:
             return STEP.start_once(endpoint="http://x", runtime=self.runtime,
-                                   clock=clock)
+                                   clock=clock, sleeper=sleeper)
         finally:
             STEP.urllib.request.urlopen = original
+
+    def test_cooldown_is_waited_out_not_spent_as_an_attempt(self):
+        """冷却期挡下时要**等过去再问**，不能当一次尝试用掉。
+
+        桥的守卫是"上一次按键的确认还没走完之前不许再按"（10s 确认 + 3s 沉降
+        = 13s），而第一次尝试正是在确认窗口耗尽时返回的。调用方紧接着跑的第二次
+        必然落在冷却里 —— 不等就问，等于把"重试一次"变成一次假重试：什么都没按，
+        重试预算却花掉了。
+
+        ⚠ 这是"改成走同一条链"带来的**新**情况：老的手拼链根本不看冷却，直接按，
+        那正是"按掉刚开起来的通话"的隐患。守卫生效了，等待就得跟上。
+        """
+        naps: list[float] = []
+        result = self._run(
+            None,
+            replies=[
+                {"ok": False, "confirmed": False, "reason": "cooldown",
+                 "cooldownSeconds": 13.0},
+                {"ok": True, "pressed": True, "confirmed": True,
+                 "reason": "started"},
+            ],
+            sleeper=naps.append,
+        )
+        self.assertEqual(naps, [13.0])
+        self.assertEqual(len(self.sent), 2)
+        self.assertEqual(result["reason"], "started")
+        self.assertEqual(result["cooldownWaitSeconds"], 13.0)
+
+    def test_cooldown_wait_is_bounded_even_if_the_bridge_says_something_odd(self):
+        """桥给的数不合理时用自己的上界 —— 但仍然要等，不是不等。"""
+        for given in (None, 0, -5, "十三秒", True, 9999):
+            naps: list[float] = []
+            self.sent.clear()
+            self._run(
+                None,
+                replies=[
+                    dict({"reason": "cooldown"},
+                         **({"cooldownSeconds": given}
+                            if given is not None else {})),
+                    {"ok": True, "confirmed": True, "reason": "started"},
+                ],
+                sleeper=naps.append,
+            )
+            self.assertEqual(len(naps), 1, given)
+            self.assertLessEqual(naps[0], STEP.MAX_COOLDOWN_WAIT_SECONDS)
+            self.assertGreater(naps[0], 0, given)
+
+    def test_cooldown_leaves_both_samples(self):
+        """等待要能从记录里看出来，否则调超时的时候会把等待算进"按一次要多久"。"""
+        self._run(
+            None,
+            replies=[
+                {"reason": "cooldown", "cooldownSeconds": 13.0},
+                {"ok": True, "confirmed": True, "reason": "started"},
+            ],
+            sleeper=lambda _s: None,
+        )
+        lines = STEP.attempts_path(self.runtime).read_text(
+            encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        first, second = (json.loads(line) for line in lines)
+        self.assertEqual(first["reason"], "cooldown")
+        self.assertEqual(first["cooldownWaitSeconds"], 0.0)
+        self.assertEqual(second["reason"], "started")
+        self.assertEqual(second["cooldownWaitSeconds"], 13.0)
 
     def test_it_asks_the_bridge_for_one_shot_not_keep_active(self):
         """一次性,不是保活 —— 保活是持续语义,会跟自动关闭互相打架。"""
