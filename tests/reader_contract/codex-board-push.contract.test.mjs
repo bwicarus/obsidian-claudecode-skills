@@ -491,3 +491,23 @@ test("梯子轮询只在连接期间开着", () => {
   assert.match(body, /_computerVoiceStarting/);
   assert.match(body, /_stopLadderProgress\(\)/);
 });
+
+test("过期的梯子不许冒充现状", () => {
+  // 2026-09-09 实测抓到：ReaderPC 在通话中写下「语音已连接」，随后通话结束、
+  // 服务停止、ReaderPC 退出，而那份文件原样留着 —— 界面照着显示"已连接"，
+  // 而实际上语音是关的。宁可什么都不显示，也不能显示一份会撒谎的状态。
+  const proto = read(CS + "DirectBridgeProtocol.cs");
+  const start = proto.indexOf("private static object? ReadVoiceLadder()");
+  const body = proto.slice(start, proto.indexOf("\n    private", start + 10));
+  assert.match(body, /atUtcMs/);
+  assert.match(body, /VoiceLadderMaxAgeMs/);
+  // 上限要明显大于发布周期(30s)，否则正常刷新的间隙也会被当成过期
+  const cap = proto.match(/VoiceLadderMaxAgeMs = ([\d_]+);/);
+  assert.ok(cap, "要有上限常量");
+  assert.ok(Number(cap[1].replace(/_/g, "")) >= 60000);
+  // Python 侧必须真的盖时间戳，否则上面这条判据永远判不了
+  const ladder = read(
+    "extensions/bw-reader-webext/windows/computer-voice-desktop/voice_ladder.py",
+  );
+  assert.match(ladder, /"atUtcMs": int\(now \* 1000\)/);
+});

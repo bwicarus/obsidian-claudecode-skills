@@ -3053,8 +3053,12 @@ internal sealed class DirectBridgeProtocolSession
             ladder = ReadVoiceLadder(),
         };
 
+    /// ReaderPC 每 30 秒发布一次梯子；超过 3 个周期就当没有。
+    /// 宁可界面什么都不显示，也不能显示一份**过期到会撒谎**的状态。
+    private const long VoiceLadderMaxAgeMs = 90_000;
+
     /// <summary>
-    /// 读 ReaderPC 发布的语音梯子状态。任何读失败都返回 null（不知道）。
+    /// 读 ReaderPC 发布的语音梯子状态。任何读失败**或过期**都返回 null（不知道）。
     /// </summary>
     private static object? ReadVoiceLadder()
     {
@@ -3075,6 +3079,18 @@ internal sealed class DirectBridgeProtocolSession
                 File.ReadAllText(path));
             JsonElement root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+            // ⚠ **过期的梯子会撒谎**（2026-09-09 实测抓到）：ReaderPC 在通话中
+            // 写下「语音已连接」，随后通话结束、服务停止、ReaderPC 退出，而
+            // 那份文件原样留着 —— 界面照着显示"已连接"，而实际上语音是关的。
+            // ReaderPC 每 30 秒发布一次，所以超过 3 个周期就当没有：
+            // 不知道要如实说 null，不能拿旧快照冒充现状。
+            if (!root.TryGetProperty("atUtcMs", out JsonElement at)
+                || !at.TryGetInt64(out long publishedAt)
+                || DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - publishedAt
+                    > VoiceLadderMaxAgeMs)
             {
                 return null;
             }
