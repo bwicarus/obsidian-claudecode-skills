@@ -176,23 +176,69 @@ class AnkiTests(unittest.TestCase):
 
     def fake_request(self, url, action, params=None, timeout=15):
         self.calls.append((action, params))
-        return {"createDeck": 1, "addNote": 1001, "findCards": [5001], "changeDeck": None,
+        return {"modelNames": ["Basic", "Cloze"],
+                "modelFieldNames": ["Front", "Back"],
+                "createDeck": 1, "addNote": 1001, "findCards": [5001], "changeDeck": None,
                 "notesInfo": [{"noteId": 1001, "cards": [5001]}],
                 "cardsInfo": [{"cardId": 5001, "type": 2, "queue": 2, "interval": 30, "mod": 1_700_000_000, "reps": 5, "lapses": 0, "factor": 2500}]}[action]
+
+    def localized_request(self, url, action, params=None, timeout=15):
+        """中文本地化的 collection：没有 "Basic"，「基础的」的字段是「正面」/「背面」。
+
+        2026-09-09 实测就是这台机器的样子（32 个模板、无 Basic）。写死
+        Basic/Front/Back 的旧代码在这里必然报「找不到名叫 Basic 的卡片模板」。
+        """
+        self.calls.append((action, params))
+        if action == "modelNames":
+            return ["基础的", "基础的（和相反的卡片）", "填空题", "问答题"]
+        if action == "modelFieldNames":
+            assert params["modelName"] == "基础的", params
+            return ["正面", "背面"]
+        return {"createDeck": 1, "addNote": 2002, "findCards": [6002], "changeDeck": None}[action]
+
+    def modelless_request(self, url, action, params=None, timeout=15):
+        """一个基础卡模板都认不出来：报错必须**把有哪些模板说出来**。"""
+        self.calls.append((action, params))
+        if action == "modelNames":
+            return ["Saladict Word", "图片遮盖"]
+        raise AssertionError("挑不到模板时不该继续调 " + action)
 
     def test_make_card_binds_node_and_changes_deck(self):
         r = self.svc.make_card(node_ids=[self.a], front="Q", back="A", request=self.fake_request)
         self.assertTrue(r["ok"], r)
         self.assertEqual((r["anki_note_id"], r["anki_card_ids"], r["card_key"]), (1001, [5001], "anki:1001"))
-        self.assertEqual([c[0] for c in self.calls], ["createDeck", "addNote", "findCards", "changeDeck"])
-        self.assertEqual(self.calls[1][1]["note"]["deckName"], "KJ")
-        self.assertIn("kj::kj_" + self.a.split(":")[1], self.calls[1][1]["note"]["tags"])
-        back = self.calls[1][1]["note"]["fields"]["Back"]
+        # 模板名与字段名都先问 Anki 要，再建卡。
+        self.assertEqual([c[0] for c in self.calls],
+                         ["modelNames", "modelFieldNames", "createDeck", "addNote",
+                          "findCards", "changeDeck"])
+        self.assertEqual(self.calls[3][1]["note"]["deckName"], "KJ")
+        self.assertIn("kj::kj_" + self.a.split(":")[1], self.calls[3][1]["note"]["tags"])
+        back = self.calls[3][1]["note"]["fields"]["Back"]
         self.assertTrue(back.startswith("A<hr>"), back)
         self.assertIn('href="obsidian://open?vault=', back)        # 复习卡 UI 的来源栏据此显示"打开节点"
         self.assertIn("&amp;file=KJ/", back)
         self.assertEqual(self.svc.make_card(node_ids=[], front="Q", back="A", request=self.fake_request)["code"], "missing_node")
         self.assertEqual(self.svc.node(self.a)["cards"][0]["anki_note_id"], 1001)
+
+    def test_make_card_uses_localized_model_and_field_names(self):
+        """中文 collection 上也要能建卡 —— 这条正是用户报的「找不到名叫Basic的卡片模板」。"""
+        r = self.svc.make_card(node_ids=[self.a], front="正面内容", back="背面内容",
+                               request=self.localized_request)
+        self.assertTrue(r["ok"], r)
+        note = next(p["note"] for a, p in self.calls if a == "addNote")
+        self.assertEqual(note["modelName"], "基础的")
+        self.assertEqual(sorted(note["fields"]), sorted(["正面", "背面"]))
+        self.assertEqual(note["fields"]["正面"], "正面内容")
+        self.assertTrue(note["fields"]["背面"].startswith("背面内容<hr>"))
+
+    def test_make_card_lists_available_models_when_none_match(self):
+        """挑不到模板时的报错要能指路，不能只说「缺少兼容的 Basic 模型」。"""
+        r = self.svc.make_card(node_ids=[self.a], front="Q", back="A",
+                               request=self.modelless_request)
+        self.assertEqual(r["code"], "anki_model_missing", r)
+        # RegisterError.to_dict 把文案放在 error 里（不是 message）。
+        self.assertIn("Saladict Word", r["error"])
+        self.assertIn("图片遮盖", r["error"])
 
     def test_ingest_bridge_bindings_binds_notes_and_appends_provenance(self):
         """桥确认入库后写的 JSONL → 卡绑到节点、背面补 obsidian 深链；重复吸收不重复绑；节点不存在落 unresolved。"""

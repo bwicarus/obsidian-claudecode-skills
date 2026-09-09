@@ -18,6 +18,42 @@ _SCRIPTS = Path(__file__).resolve().parent.parent
 
 DEFAULT_DECK = "KJ"
 DEFAULT_MODEL = "Basic"
+#: 基础卡模板的候选名，按优先级。⚠ 不能只写 "Basic"：本地化安装里根本没有这个名字。
+#: 2026-09-09 实测这台机器的 collection 有 32 个模板、没有 "Basic"，
+#: 「基础的」的字段是「正面」/「背面」——于是 card-make 必然报
+#: 「找不到名叫 Basic 的卡片模板」。仓库里另外两处早就按候选名挑了
+#: （pdf_reader 的 _pickm、ReaderLocalAnki 的 PickModel），这条路漏了。
+BASIC_MODEL_CANDIDATES = ("Basic", "基础的", "基本")
+
+
+def resolve_basic_model(req: Callable[..., Any], url: str) -> str:
+    """按候选名挑一个真实存在的基础卡模板。挑不到时**把有哪些模板说出来**。
+
+    只说"缺少兼容的 Basic 模型"会让人（和 AI）去找一个不存在的东西；
+    列出实际模板名，下一步该做什么立刻清楚。
+    """
+    names = req(url, "modelNames", {}, timeout=15) or []
+    for candidate in BASIC_MODEL_CANDIDATES:
+        if candidate in names:
+            return candidate
+    raise RegisterError(
+        "anki_model_missing",
+        "Anki 里没有可用的基础卡模板（找过 %s）；现有模板：%s"
+        % ("/".join(BASIC_MODEL_CANDIDATES), "、".join(map(str, names[:20])) or "（一个都没读到）"))
+
+
+def resolve_two_fields(req: Callable[..., Any], url: str, model: str) -> tuple[str, str]:
+    """取模板的前两个字段名当正/背面。
+
+    ⚠ 按**位置**取而不是写死 Front/Back：本地化模板叫「正面」/「背面」，
+    写死英文名的表现是校验全过、addNote 却造出一张空卡。
+    """
+    fields = req(url, "modelFieldNames", {"modelName": model}, timeout=15) or []
+    if len(fields) < 2:
+        raise RegisterError(
+            "anki_model_fields",
+            "Anki 模板 %s 的可写字段不足两个：%s" % (model, fields))
+    return str(fields[0]), str(fields[1])
 
 
 def node_provenance_html(ledger: Ledger, node_ids: list[str]) -> str:
@@ -48,7 +84,7 @@ def _anki():
 
 
 def make_card(ledger: Ledger, *, node_ids: list[str], front: str, back: str, deck: str = DEFAULT_DECK,
-              model: str = DEFAULT_MODEL, tags: list[str] | None = None, anki_url: str | None = None,
+              model: str | None = None, tags: list[str] | None = None, anki_url: str | None = None,
               request: Callable[..., Any] | None = None, actor: str = "") -> dict:
     """AnkiConnect addNote（+ changeDeck 归位，见 CLAUDE.md 的 addNote deckName 不生效坑）→ 绑定节点。"""
     if not (front or "").strip() or not (back or "").strip():
@@ -60,7 +96,11 @@ def make_card(ledger: Ledger, *, node_ids: list[str], front: str, back: str, dec
     req = request or AS.anki_request
     tags = list(dict.fromkeys(["kj", *(tags or [])] + [f"kj::{n.replace(':', '_')}" for n in node_ids]))
     back_html = back + node_provenance_html(ledger, node_ids)
-    note = {"deckName": deck, "modelName": model, "fields": {"Front": front, "Back": back_html}, "tags": tags,
+    # 模板名与字段名都**问 Anki 要**，不写死（见 BASIC_MODEL_CANDIDATES 上面那段）。
+    model = model or resolve_basic_model(req, url)
+    front_field, back_field = resolve_two_fields(req, url, model)
+    note = {"deckName": deck, "modelName": model,
+            "fields": {front_field: front, back_field: back_html}, "tags": tags,
             "options": {"allowDuplicate": False, "duplicateScope": "deck"}}
     try:
         req(url, "createDeck", {"deck": deck}, timeout=15)
