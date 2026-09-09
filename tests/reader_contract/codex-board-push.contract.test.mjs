@@ -107,10 +107,9 @@ test("推送绝不碰业务 ack", () => {
   for (const forbidden of ["Acknowledge", "acknowledge", "Resolve(", '"ack"']) {
     assert.ok(!PUSH.includes(forbidden), `推送模块不该出现 ${forbidden}`);
   }
-  assert.ok(
-    PUSH.includes("不代表任何通知已交付用户"),
-    "提示语要写明接口收下 != 已交付",
-  );
+  // ⚠ 这条纪律现在**写在 AGENTS.md 里**，不再每条推送重复一遍：
+  // 推送带上板面全文之后，每次再附一句"本条不代表已交付"就是纯噪音，
+  // 而用户要的是紧凑。代码这一侧只保证**不去碰** ack，上面那几条就是。
 });
 
 test("默认关，且注册不会顺手打开", () => {
@@ -166,8 +165,23 @@ test("接上时推一次全量，否则登记前就摆在板上的东西永远�
   // 就已经存在的待办"不构成变化。不补这一下，那条待办会一直躺着，
   // 而两边都不会觉得有问题 —— 板上明明写着，推送也从没出错。
   assert.match(PUSH, /internal static async Task NotifyConnectedAsync/);
-  // 措辞必须说清是全量，否则对面会以为只有增量
-  assert.match(PUSH, /把快板和慢板都完整读一遍/);
+  // 接上这一条同样**直接带正文**（2026-09-09 用户：「不是说了直接推送快慢板
+  // 内容么怎么现在还是这种提醒」）。两条走同一条运输，一条给内容一条给指路
+  // 说不通。
+  assert.ok(
+    PUSH.includes("ReaderAttentionBoard.CurrentBoards()"),
+    "接上时要取板面正文");
+  assert.ok(
+    PUSH.includes("Trim(fastNow)") && PUSH.includes("Trim(slowNow)"),
+    "接上时两块板都要带上（对面手上什么都还没有）");
+  assert.ok(
+    !PUSH.includes("把快板和慢板都完整读一遍"),
+    "不许再发那句叫人去读的提醒");
+  // 取的是**落盘内容**：现渲会给出一份还没落盘的版本，跟板面文件对不上
+  const boards = BOARD.slice(
+    BOARD.indexOf("internal static (string Slow, string Fast) CurrentBoards()"),
+    BOARD.indexOf("/// 慢板这一轮要不要落盘"));
+  assert.match(boards, /_lastSlowText, _lastFastText/);
   // 登记之后触发，且**不等**它
   assert.match(ENDPOINT, /_ = ReaderCodexPush\.NotifyConnectedAsync\(/);
   // ⚠ 必须 CancellationToken.None：拿请求的 token 的话响应一返回推送就被

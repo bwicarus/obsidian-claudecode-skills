@@ -827,6 +827,11 @@ internal static class ReaderAttentionBoard
         {
             return;
         }
+        lock (Gate)
+        {
+            _lastSlowText = slowToWrite;
+            _lastFastText = fast;
+        }
         bool slowChanged = await WriteIfChangedAsync(
             Path.Combine(directory, SlowFileName), slowToWrite,
             token).ConfigureAwait(false);
@@ -861,6 +866,21 @@ internal static class ReaderAttentionBoard
     }
 
     private static string _lastFlushFailure = string.Empty;
+    private static string _lastSlowText = string.Empty;
+    private static string _lastFastText = string.Empty;
+
+    /// 两块板**最后一次落盘**的正文。给接上时的那一条推送用。
+    ///
+    /// ⚠ 取的是落盘内容而不是现渲一遍：慢板有"纯上下文攒 4 次"的攒批，
+    /// 现渲会给出一份还没落盘的版本，于是推送里的内容和板面文件对不上，
+    /// 而对面拿哪一份都说得通 —— 那种不一致最难查。
+    internal static (string Slow, string Fast) CurrentBoards()
+    {
+        lock (Gate)
+        {
+            return (_lastSlowText, _lastFastText);
+        }
+    }
 
     /// 记下一次渲染失败。**只留原因，不改板面** —— 板上留着最后一次
     /// 成功的内容，比留一句错误更有用（对面照着旧内容做事，总好过

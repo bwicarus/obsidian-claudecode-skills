@@ -117,13 +117,20 @@ internal static class ReaderCodexPush
         CancellationToken cancellationToken)
     {
         if (!Enabled) return;
-        string prompt =
-            "提示板已接上主动推送。"
-            + "这是接上时的一次全量提醒：**把快板和慢板都完整读一遍**，"
-            + "板上可能有你登记之前就已经存在的待办。"
-            + "之后只有内容变化时才会再推。"
-            + "板面文件是权威；业务 ack/resolve 仍按原契约，"
-            + "本条不代表任何通知已交付用户。";
+        // 接上这一条同样**直接带正文**（用户 2026-09-09：「不是说了直接推送
+        // 快慢板内容么怎么现在还是这种提醒」）。变化推送已经改了，这一条
+        // 当时漏了 —— 两条走同一条运输却一条给内容一条给指路，说不通。
+        //
+        // 与变化推送的区别只有一个：这一条给**两块都给**，因为对面手上
+        // 什么都还没有；之后才是只给变了的那块。
+        (string slowNow, string fastNow) = ReaderAttentionBoard.CurrentBoards();
+        var connect = new StringBuilder();
+        connect.Append("提示板已接上主动推送，下面是当前两块板的全部内容")
+               .Append("（其中可能有你登记之前就已经存在的待办）。")
+               .Append("之后只有内容变化时才会再推，且只推变了的那块。\n");
+        connect.Append("\n【快板】\n").Append(Trim(fastNow));
+        connect.Append("\n【慢板】\n").Append(Trim(slowNow));
+        string prompt = connect.ToString();
         try
         {
             await SendAsync(binding, prompt, cancellationToken)
