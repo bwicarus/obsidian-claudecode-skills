@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -349,6 +350,73 @@ class LadderTests(unittest.TestCase):
         self.assertEqual(
             json.loads(path.read_text(encoding="utf-8"))["label"],
             "语音已连接")
+
+
+class WiredUpTests(unittest.TestCase):
+    """建好了但没人触发 —— 这一类错今天真的发生了（2026-09-10）。
+
+    用户报「直接就变绿显示联通但是实际上 codex 语音没起来」。查下去:入口脚本、
+    失败上报、梯子、端点、能力说明全建好了,`RequestVoiceEntryAsync` 那条推送
+    **一个发送方都没有**。链上任何一环缺了都表现成"什么都没发生",而"什么都
+    没发生"不会红任何一条测试。
+
+    所以这里不钉某个名字,钉的是**形态**:凡是"请对面做一件事"的推送,都必须
+    有生产代码在调它。以后新加一条同样跑不掉。
+    """
+
+    BRIDGE = (Path(__file__).resolve().parents[2] / "ComputerVoiceAudio")
+
+    def test_every_push_request_has_a_caller(self):
+        push = self.BRIDGE / "ReaderCodexPush.cs"
+        source = push.read_text(encoding="utf-8")
+        names = set(re.findall(
+            r"internal static async Task<bool> (Request\w+Async)\(", source))
+        self.assertTrue(names, "一条 Request*Async 都没找到,正则该修了")
+        callers = {name: [] for name in names}
+        for path in self.BRIDGE.rglob("*.cs"):
+            if path.name in (push.name, "DirectBridgeSelfTest.cs",
+                             "ReaderCodexPushSelfTest.cs"):
+                continue
+            body = path.read_text(encoding="utf-8")
+            for name in names:
+                if name in body:
+                    callers[name].append(path.name)
+        orphans = sorted(n for n, where in callers.items() if not where)
+        self.assertEqual(
+            orphans, [],
+            "这些推送没有任何生产代码在调用 —— 功能等于不存在: %s" % orphans)
+
+    def test_voice_entry_push_is_sent_from_the_start_path(self):
+        """入口推送必须挂在"音频通道刚通"那一步上。
+
+        那是唯一知道"用户此刻要开语音"的时刻;挪到别处(比如定时器)就会变成
+        没人要求也去催对面。
+        """
+        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
+            encoding="utf-8")
+        self.assertIn("RequestVoiceEntryIfNobodyElseWill(appKind)", source)
+        hook = source.split("private void RequestVoiceEntryIfNobodyElseWill")[1]
+        hook = hook.split("private async Task<object> HandleStopAsync")[0]
+        # 三条判据缺一条都会做错事,见那段的 remarks。
+        self.assertIn("_codexVoiceControl.KeepActive", hook)
+        self.assertIn("Active == true", hook)
+        self.assertIn("DirectAppTargets.CodexDesktop", hook)
+
+    def test_give_up_flag_reaches_the_surface_that_shows_the_blinking(self):
+        """放弃的痕迹要能到显示按钮的那一层。
+
+        voice_start_failed.py 会把 startGaveUp 写进梯子状态,但桥只透传挑出来的
+        几个字段 —— 漏掉它,那个脚本存在的全部理由(留下痕迹)就落空了:按钮一直闪,
+        人一直等一件不会再成的事。
+        """
+        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
+            encoding="utf-8")
+        self.assertIn("startGaveUp", source)
+        reader = (Path(__file__).resolve().parents[4]
+                  / "_server_deploy" / "static" / "pdf" / "rc-voicecall.js")
+        if reader.is_file():
+            self.assertIn("ladder.startGaveUp", reader.read_text(
+                encoding="utf-8"))
 
 
 class GiveUpTests(unittest.TestCase):

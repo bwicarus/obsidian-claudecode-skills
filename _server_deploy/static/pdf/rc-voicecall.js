@@ -9512,6 +9512,7 @@
     vt.sent = 0; vt.tail = ''; vt.pref = ''; pendingUtter = null; activeUtter = '';
     capClear();   // 挂断:字幕/等待指示一并收掉
     callBtnOn(false); callBtnSpeaking(false);
+    _audioRouteConnected = false; _codexSessionLive = null;
     computerBtnOn(false); computerBtnSpeaking(false);
     taPlaceholder(null);
     if (box) { box.classList.remove('on'); if (closeBox) { box.remove(); box = null; } }
@@ -9555,6 +9556,48 @@
       return false;
     }
   }
+  // ── 绿灯只在**语音会话真的起来了**之后亮（2026-09-10 用户实测）────────
+  // 用户原话：「直接就变绿显示联通但是实际上 codex 语音没起来」。他说得对：
+  // 桥的 state==='connected' 与原生的 phase==='active' 都只代表**音频通道通了**
+  // （PCM 隧道 + 浏览器在放声），跟 Codex 那侧有没有一通语音会话毫无关系。
+  // 一次性启动方式下这两件事本来就分开：通道先通，通话由通知触发后才起。
+  //
+  // 判据用 codexVoice.active（桥直接读麦克风台账，没有过期问题），
+  // 而**不是**梯子的 label —— 梯子是 30 秒一份的静态读数。
+  // 三态必须分开：true=真在通话；false=确实没在；null/读不到=不知道。
+  var _codexSessionLive = null;   // null = 还不知道
+  var _audioRouteConnected = false;
+
+  function _sessionEvidence(status) {
+    var voice = status && status.codexVoice;
+    if (!voice || typeof voice !== 'object') return null;
+    if (voice.status && voice.status !== 'available') return null;
+    return voice.active === true ? true
+      : (voice.active === false ? false : null);
+  }
+
+  // ⚠ "不知道"不能当成"没起来"：那会让按钮在台账读不到时永远黄闪，
+  // 而音频通道其实真的通了 —— 把一个未知折成否定，就是今天修过好几次的形态。
+  // 所以只有**确证没起来**才拦住绿灯。
+  function _greenLightAllowed() {
+    return _codexSessionLive !== false;
+  }
+
+  function _paintComputerVoiceConnected() {
+    if (!_audioRouteConnected) return;
+    if (_greenLightAllowed()) {
+      _stopLadderProgress();
+      computerBtnConnecting(false);
+      computerBtnOn(true);
+      taPlaceholder('电脑客户端通话中…');
+      return;
+    }
+    // 通道通了但通话没起来：继续黄闪并说清差哪一步（梯子那侧会写文案）。
+    computerBtnOn(false);
+    computerBtnConnecting(true);
+    taPlaceholder('音频通道已通，等语音接通…');
+  }
+
   function _applyNativeComputerVoiceState(value) {
     // Safari extension pages own their direct bridge state locally.  Ignore
     // stale containing-App events so they cannot repaint a live direct call
@@ -9566,14 +9609,18 @@
       _configureNativeComputerVoiceButton(document.getElementById(id));
     });
     if (state.active === true) {
-      computerBtnConnecting(false);
-      computerBtnOn(true);
-      taPlaceholder('电脑客户端通话中…');
+      // 原生的 active = 音频通道 START 成功（socket.start 返回 + 麦克风管道起来），
+      // **不是**"Codex 语音会话已建立"。绿灯由 _paintComputerVoiceConnected 决定。
+      _audioRouteConnected = true;
+      _paintComputerVoiceConnected();
+      if (!_greenLightAllowed()) _startLadderProgress(_gen);
     } else if (state.busy === true) {
       computerBtnOn(false);
       computerBtnConnecting(true);
       taPlaceholder('正在交给 BWReader App…');
     } else {
+      _audioRouteConnected = false;
+      _stopLadderProgress();
       computerBtnConnecting(false);
       computerBtnOn(false);
       taPlaceholder(null);
@@ -9602,7 +9649,11 @@
     // 那份文件是 ReaderPC 每 30 秒无条件写一次的**静态读数**,它不知道此刻
     // 有没有人在开语音;而这里知道 —— 我们正握着 _computerVoiceStarting,
     // 按钮就在黄闪。谁知道就由谁说。
-    setSt(_computerVoiceStarting ? ('正在打开语音 · ' + label) : label);
+    // 等 Codex 接通期间也算"正在打开" —— 那一段确实有事在进行中
+    // （通道已通、入口通知已发出），只是通话还没起来。
+    var opening = _computerVoiceStarting ||
+      (_audioRouteConnected && !_greenLightAllowed());
+    setSt(opening ? ('正在打开语音 · ' + label) : label);
     ['asst-computer', 'vc-top-computer'].forEach(function (id) {
       var el = document.getElementById(id);
       if (el) el.title = label;
@@ -9612,21 +9663,42 @@
     if (ladder.reachable === false) {
       _stopLadderProgress();
       computerBtnConnecting(false);
+      return;
+    }
+    // 对面已经放弃了（跑过 voice_start_failed.py）。同样别再闪 ——
+    // 不报错的放弃跟"还在试"长得一模一样，人会一直等着一件不会再成的事。
+    if (ladder.startGaveUp === true) {
+      _stopLadderProgress();
+      computerBtnConnecting(false);
+      setSt('打不开语音 · ' + label);
+      taPlaceholder(null);
+      try {
+        if (window.RC && RC.toast) RC.toast('语音没能打开：' + label);
+      } catch (e) {}
     }
   }
 
   function _startLadderProgress(generation) {
     _stopLadderProgress();
     var tick = function () {
-      if (generation !== _gen || !_computerVoiceStarting) {
+      // ⚠ 不能只在 _computerVoiceStarting 期间轮询（2026-09-10 改）：
+      // 音频通道通了之后 startFromUserGesture 就 resolve 了，那个标记随之落下 ——
+      // 而"等 Codex 接通"恰恰发生在**那之后**。停在这里等于按钮黄闪着再没人更新。
+      if (generation !== _gen ||
+          !(_computerVoiceStarting || _audioRouteConnected)) {
         _stopLadderProgress();
         return;
       }
       try {
         Promise.resolve(RC.computerVoice.availability()).then(function (info) {
-          if (generation !== _gen || !_computerVoiceStarting) return;
+          if (generation !== _gen) return;
           var status = info && info.status;
+          _codexSessionLive = _sessionEvidence(status);
           _applyLadder(status && status.codexVoice && status.codexVoice.ladder);
+          // 通话起来了（或已无从否证）就把绿灯点上并收摊。
+          if (_audioRouteConnected && _greenLightAllowed()) {
+            _paintComputerVoiceConnected();
+          }
         }).catch(function () {});
       } catch (e) {}
     };
@@ -9804,13 +9876,15 @@
       var state = status && status.state || '';
       setSt(status && status.message || ('电脑客户端:' + state));
       if (state === 'connected') {
-        _stopLadderProgress();
-        computerBtnConnecting(false);
-        computerBtnOn(true);
-        taPlaceholder('电脑客户端通话中…');
+        // 桥说的 connected = PCM 隧道通了、浏览器在放声（"电脑客户端通话中"），
+        // 跟 Codex 那侧有没有一通语音会话是两件事。绿灯由闸门决定。
+        _audioRouteConnected = true;
+        _paintComputerVoiceConnected();
+        if (!_greenLightAllowed()) _startLadderProgress(generation);
       } else if (state === 'failed' || state === 'stopped') {
         _stopLadderProgress();
         _computerVoiceStarting = false;
+        _audioRouteConnected = false;
         computerBtnConnecting(false);
         computerBtnOn(false);
         taPlaceholder(null);

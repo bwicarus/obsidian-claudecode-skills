@@ -3114,6 +3114,13 @@ internal sealed class DirectBridgeProtocolSession
                     && re.ValueKind is JsonValueKind.True
                         or JsonValueKind.False
                     ? re.GetBoolean() : true,
+                // 对面**放弃**了(跑过 voice_start_failed.py)。必须捎给界面:
+                // 不报错的放弃跟"还在试"在界面上长得一模一样 —— 按钮一直闪、
+                // 人一直等,而其实早就不会成了。那个脚本存在的全部理由就是留下
+                // 这个痕迹,而痕迹到不了显示它的那一层,等于没留(2026-09-10)。
+                startGaveUp =
+                    root.TryGetProperty("startGaveUp", out JsonElement gu)
+                    && gu.ValueKind == JsonValueKind.Object,
             };
         }
         catch (Exception)
@@ -3223,6 +3230,7 @@ internal sealed class DirectBridgeProtocolSession
             _phase = DirectProtocolPhase.Active;
             _activeVoiceSessionId = sessionId;
             _activeVoiceAppKind = appKind;
+            RequestVoiceEntryIfNobodyElseWill(appKind);
             return new DirectStartActionResult(
                 payload,
                 pcmGate.ReleaseAsync);
@@ -3233,6 +3241,85 @@ internal sealed class DirectBridgeProtocolSession
             pcmGate.Abort();
             throw;
         }
+    }
+
+    /// 同一条入口请求的最小间隔。活动连接上的 START 允许幂等重复，
+    /// 不设这个门就会对同一次"开语音"反复催对面。
+    private static readonly TimeSpan VoiceEntryRequestCooldown =
+        TimeSpan.FromSeconds(45);
+    private static long _lastVoiceEntryRequestTicksUtc;
+
+    /// <summary>
+    /// 音频通道刚通，但语音会话没起来 —— 且**没有别人会去起它**时，请对面开一次。
+    /// </summary>
+    /// <remarks>
+    /// 用户 2026-09-10 实测：「直接就变绿显示联通但是实际上 codex 语音没起来」。
+    /// 根因不在显示层：一次性启动方式下保活收敛是**故意**关着的，而那条
+    /// 「语音入口」推送**一个发送方都没有** —— 脚本、失败上报、梯子、端点、
+    /// 能力说明全建好了，就是没人触发。链上任何一环缺了都表现成"什么都没发生"。
+    ///
+    /// 判据三条，缺一条都会做错事：
+    ///   · 台账已 active → 已经在通话，催它只会多按一次 F24（那是**挂断**）；
+    ///   · keepActive 为真 → 保活收敛正在负责起它，再推一遍就是两个人同时按；
+    ///   · 只对 Codex 桌面端 → 别的 appKind 没有这条入口链。
+    /// 台账读不到时**照发**：脚本那侧的守卫才是权威（它会先把 Codex 拉起来，
+    /// 仍读不到就失败关闭），在这里替它判断等于把"不知道"折成"不必开"。
+    ///
+    /// 整段是 fire-and-forget：推送慢或管道不通绝不能拖住/弄失败一次已经成功的
+    /// START。发没发成写在 ReaderCodexPush 的 lastNote 里。
+    /// </remarks>
+    private void RequestVoiceEntryIfNobodyElseWill(string appKind)
+    {
+        if (!string.Equals(
+                appKind,
+                DirectAppTargets.CodexDesktop,
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+        if (_codexVoiceControl.KeepActive)
+        {
+            return;
+        }
+        try
+        {
+            if (_codexVoiceControl.ReadState().Active == true)
+            {
+                return;
+            }
+        }
+        catch (Exception)
+        {
+            // 读不到就当"不知道" —— 继续发。见 remarks。
+        }
+        long now = DateTime.UtcNow.Ticks;
+        long previous = Interlocked.Read(ref _lastVoiceEntryRequestTicksUtc);
+        if (
+            previous != 0
+            && now - previous < VoiceEntryRequestCooldown.Ticks
+        )
+        {
+            return;
+        }
+        Interlocked.Exchange(ref _lastVoiceEntryRequestTicksUtc, now);
+        string requestId = "voice-entry-"
+            + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                .ToString(System.Globalization.CultureInfo.InvariantCulture);
+        _ = Task.Run(async () =>
+        {
+            using CancellationTokenSource lifetime = new(
+                TimeSpan.FromSeconds(20));
+            try
+            {
+                await ReaderCodexPush.RequestVoiceEntryAsync(
+                    requestId,
+                    lifetime.Token).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // RequestVoiceEntryAsync 自己已经记过原因；这里只保证不炸线程。
+            }
+        });
     }
 
     private async Task<object> HandleStopAsync(

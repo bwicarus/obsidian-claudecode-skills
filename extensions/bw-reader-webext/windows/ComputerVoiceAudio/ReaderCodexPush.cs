@@ -376,6 +376,60 @@ internal static class ReaderCodexPush
         }
     }
 
+    /// <summary>
+    /// 请对面**开一次语音**（2026-09-09 用户拍板的启动方式）。
+    ///
+    /// 用户原话：「发送主动通知让 codex 通过脚本自己启动」、「他就只需要根据状态
+    /// 回报信息使用脚本，而脚本实际上是点击一次 f24 罢了」。所以这里只说"跑那个
+    /// 脚本"，不解释脚本在做什么 —— 具体步数、重试上限、放弃后怎么报错都写在
+    /// 能力说明 voice-entry.md 里，它已经登记在册。
+    ///
+    /// ⚠ **目标线程与挂断相反。** 挂断要发给正在通话的那条线程；入口是要把通话
+    /// **开起来**，此刻并没有通话线程，只能发给绑定的常规线程。把 inCallThreadId
+    /// 那套照搬过来会得到一个空目标然后静默不发 —— 而那正是这条链一直没人触发的
+    /// 那种沉默。
+    ///
+    /// ⚠ 这条推送**不保证**语音会开起来，只保证请求发出去了。开没开成要看台账
+    /// （梯子第 4 级）；对面放弃时会自己跑 voice_start_failed.py 留痕。
+    internal static async Task<bool> RequestVoiceEntryAsync(
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        ReaderCodexEndpoint.Binding? binding = ReaderCodexEndpoint.Current();
+        if (binding is null)
+        {
+            Note("没有可用绑定（拿不到管道），语音入口请求未发送");
+            return false;
+        }
+        string prompt =
+            "语音入口（requestId: " + Trim(requestId) + "）。\n"
+            + "用户刚在 App 上要求开始语音通话。\n"
+            + "请按能力说明 voice-entry.md 里的步骤操作：先跑一次入口脚本，"
+            + "看它打印的 confirmed；没进就再跑一次，两次都不成就跑报错脚本"
+            + "并停下。\n"
+            + "不要跑第三次，也不要自己另想办法开语音。\n"
+            + "同一编号再次出现表示上一次没有生效。";
+        try
+        {
+            await SendAsync(
+                binding,
+                prompt,
+                cancellationToken,
+                purpose: "reader-voice-entry").ConfigureAwait(false);
+            Note("已请求开语音（" + Trim(requestId) + "）");
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception exception)
+        {
+            Note("语音入口请求发送失败：" + exception.Message);
+            return false;
+        }
+    }
+
     private static async Task SendAsync(
         ReaderCodexEndpoint.Binding binding,
         string prompt,
