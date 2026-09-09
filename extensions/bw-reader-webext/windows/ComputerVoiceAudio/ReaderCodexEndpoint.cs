@@ -348,6 +348,14 @@ internal static class ReaderCodexEndpoint
             ["announcedConnect"] = shouldAnnounce,
             ["renewedOnly"] = pushEnabledAfter && !shouldAnnounce,
             ["lastNote"] = ReaderCodexPush.LastNote,
+            // 渲染循环最近一次失败的原因。**这是它唯一的出口** ——
+            // 那个循环的异常没有任何人观察，板子停更跟"状态确实没变"
+            // 长得一模一样（2026-09-09 就是这么查了半天）。
+            // 没失败过时不出这个字段，免得每次登记都多一行噪音。
+            ["boardFlushFailure"] =
+                ReaderAttentionBoard.LastFlushFailure.Length == 0
+                    ? null
+                    : ReaderAttentionBoard.LastFlushFailure,
             ["previousInvalidReason"] = previousInvalid.Length == 0
                 ? null : previousInvalid,
         }, cancellationToken).ConfigureAwait(false);

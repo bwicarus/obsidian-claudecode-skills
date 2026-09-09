@@ -99,6 +99,10 @@ test("推送是支线，绝不能拖住或弄坏渲染", () => {
   assert.match(server, /ReaderAttentionBoard\.NoteFlushFailure\(exception\)/);
   assert.match(server, /catch \(OperationCanceledException\)\s*\{\s*throw;/);
   assert.match(BOARD, /internal static string LastFlushFailure/);
+  // ⚠ 光记下来不够：得有地方读得到。那个循环的异常没有任何人观察，
+  // 板子停更跟"状态确实没变"长得一模一样。登记响应就是它的出口。
+  assert.match(ENDPOINT, /\["boardFlushFailure"\]/);
+  assert.match(ENDPOINT, /ReaderAttentionBoard\.LastFlushFailure/);
 });
 
 test("推送绝不碰业务 ack", () => {
