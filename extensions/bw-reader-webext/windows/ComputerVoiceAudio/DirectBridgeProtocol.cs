@@ -3051,6 +3051,18 @@ internal sealed class DirectBridgeProtocolSession
             // 桥只是**捎带**给界面 —— 界面据此显示"卡在第几级"，而不是
             // 一直转圈。读不到就是 null：不知道要如实说，不能编一个"就绪"。
             ladder = ReadVoiceLadder(),
+            // 「通知送得到 Codex 吗」（2026-09-10 用户点出来的盲区：「主动推送
+            // 没有办法确认是否推送成功，一开始的绑定对话也无法判断是否成功」）。
+            // 这三项让界面说得出"卡住是因为对面收不到"，而不是一直干闪。
+            // ⚠ bound 只说明**登记过**，不说明还通 —— 通不通看
+            // lastSuccessAtUtcMs 与 consecutiveFailures。
+            push = new
+            {
+                bound = ReaderCodexEndpoint.Current() is not null,
+                lastSuccessAtUtcMs = ReaderCodexPush.LastSuccessAtUtcMs,
+                consecutiveFailures = ReaderCodexPush.ConsecutiveFailures,
+                lastNote = ReaderCodexPush.LastNote,
+            },
         };
 
     /// ReaderPC 每 30 秒发布一次梯子；超过 3 个周期就当没有。

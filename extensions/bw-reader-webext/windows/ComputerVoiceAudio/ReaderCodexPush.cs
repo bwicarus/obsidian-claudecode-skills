@@ -88,12 +88,112 @@ internal static class ReaderCodexPush
         get { lock (Gate) { return _sentCount; } }
     }
 
+    /// 推送尝试的账本文件名。
+    ///
+    /// ⚠ **进程外必须看得到**（2026-09-10 用户点出来的：「主动推送没有办法确认
+    /// 是否推送成功，一开始的绑定对话也无法判断是否成功」）。他说得对：`Note`
+    /// 以前只把**最后一句**留在内存里，进程外一个字都读不到,于是"推送发没发到"
+    /// 这件事只能靠猜 —— 而这条链本来就没有界面,猜错的代价是整条链看起来
+    /// "什么都没发生"。
+    internal const string AttemptsFileName = "codex-push-attempts.jsonl";
+    private const int MaxAttemptsKept = 300;
+
+    private static string AttemptsPath =>
+        Path.Combine(
+            ReaderAttentionBoard.RuntimeDirectory ?? string.Empty,
+            AttemptsFileName);
+
+    /// 一条尝试的账。**失败也记,而且记原因** —— 只记成功的账本回答不了
+    /// "为什么没到"。
+    private static void RecordAttempt(
+        string purpose,
+        string requestId,
+        bool ok,
+        string detail)
+    {
+        string? runtime = ReaderAttentionBoard.RuntimeDirectory;
+        if (string.IsNullOrEmpty(runtime)) return;
+        try
+        {
+            JsonObject entry = new()
+            {
+                ["at"] = DateTimeOffset.UtcNow.ToString("O"),
+                ["purpose"] = purpose,
+                ["requestId"] = requestId,
+                ["ok"] = ok,
+                ["detail"] = detail.Length > 300 ? detail[..300] : detail,
+                // 绑定是否还在、连续失败几次 —— 判"目标死没死"用的就是它。
+                ["bound"] = ReaderCodexEndpoint.Current() is not null,
+                ["consecutiveFailures"] = ConsecutiveFailures,
+            };
+            Directory.CreateDirectory(runtime);
+            string path = AttemptsPath;
+            File.AppendAllText(
+                path,
+                entry.ToJsonString() + Environment.NewLine);
+            string[] lines = File.ReadAllLines(path);
+            if (lines.Length > MaxAttemptsKept)
+            {
+                File.WriteAllLines(
+                    path,
+                    lines[^MaxAttemptsKept..]);
+            }
+        }
+        catch (Exception)
+        {
+            // 记账失败不能影响推送本身。但也不静默扩散：lastNote 仍在。
+        }
+    }
+
+    internal static int ConsecutiveFailures
+    {
+        get { lock (Gate) { return _consecutiveFailures; } }
+    }
+
+    /// 最近一次**成功**送达的时刻（UTC 毫秒），从没成功过是 0。
+    /// 「绑定还活着吗」看这个 —— 登记时间只说明登记过，不说明还通。
+    internal static long LastSuccessAtUtcMs
+    {
+        get { lock (Gate) { return _lastSuccessAtUtcMs; } }
+    }
+
+    private static long _lastSuccessAtUtcMs;
+
     private static void Note(string text)
     {
         lock (Gate)
         {
             _lastNote = DateTimeOffset.Now.ToString("HH:mm:ss") + " " + text;
         }
+    }
+
+    /// 记一条**桥端起语音**的结果。
+    ///
+    /// 不经过推送通道（那条路 2026-09-10 已确认不能用来起通话），但要落进同一本
+    /// 账 —— 排查的人要在一个地方看到"这次开语音发生了什么",不该分两处找。
+    internal static void NoteVoiceEntryOutcome(
+        string requestId,
+        bool ok,
+        string detail) =>
+        NoteAttempt("bridge-voice-entry", requestId, ok, detail);
+
+    /// 记一条尝试：内存里留最后一句给现有调用方，账本里留全量给排查的人。
+    private static void NoteAttempt(
+        string purpose,
+        string requestId,
+        bool ok,
+        string text)
+    {
+        Note(text);
+        if (ok)
+        {
+            lock (Gate)
+            {
+                _lastSuccessAtUtcMs =
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            }
+        }
+        RecordAttempt(purpose, requestId, ok, text);
     }
 
     /// 刚接上时推一次**全量提醒**（2026-09-09 用户点出来的缺口）。
@@ -273,13 +373,15 @@ internal static class ReaderCodexPush
     {
         if (string.IsNullOrWhiteSpace(inCallThreadId))
         {
-            Note("挂断请求没有目标线程，未发送");
+            NoteAttempt("reader-voice-hangup", requestId, false,
+                "挂断请求没有目标线程，未发送");
             return false;
         }
         ReaderCodexEndpoint.Binding? binding = ReaderCodexEndpoint.Current();
         if (binding is null)
         {
-            Note("没有可用绑定（拿不到管道），挂断请求未发送");
+            NoteAttempt("reader-voice-hangup", requestId, false,
+                "没有可用绑定（拿不到管道），挂断请求未发送");
             return false;
         }
         string prompt =
@@ -297,7 +399,8 @@ internal static class ReaderCodexPush
                 cancellationToken,
                 threadIdOverride: inCallThreadId,
                 purpose: "reader-voice-hangup").ConfigureAwait(false);
-            Note("已请求挂断（" + Trim(reason) + "）");
+            NoteAttempt("reader-voice-hangup", requestId, true,
+                "已请求挂断（" + Trim(reason) + "）");
             return true;
         }
         catch (OperationCanceledException)
@@ -306,7 +409,8 @@ internal static class ReaderCodexPush
         }
         catch (Exception exception)
         {
-            Note("挂断请求发送失败：" + exception.Message);
+            NoteAttempt("reader-voice-hangup", requestId, false,
+                "挂断请求发送失败：" + exception.Message);
             return false;
         }
     }
@@ -328,13 +432,15 @@ internal static class ReaderCodexPush
     {
         if (string.IsNullOrWhiteSpace(inCallThreadId))
         {
-            Note("状态查询没有目标线程，未发送");
+            NoteAttempt("reader-voice-status", requestId, false,
+                "状态查询没有目标线程，未发送");
             return false;
         }
         ReaderCodexEndpoint.Binding? binding = ReaderCodexEndpoint.Current();
         if (binding is null)
         {
-            Note("没有可用绑定（拿不到管道），状态查询未发送");
+            NoteAttempt("reader-voice-status", requestId, false,
+                "没有可用绑定（拿不到管道），状态查询未发送");
             return false;
         }
         string script = Path.Combine(
@@ -362,7 +468,8 @@ internal static class ReaderCodexPush
                 cancellationToken,
                 threadIdOverride: inCallThreadId,
                 purpose: "reader-voice-status").ConfigureAwait(false);
-            Note("已发出状态查询（" + Trim(requestId) + "）");
+            NoteAttempt("reader-voice-status", requestId, true,
+                "已发出状态查询（" + Trim(requestId) + "）");
             return true;
         }
         catch (OperationCanceledException)
@@ -371,7 +478,8 @@ internal static class ReaderCodexPush
         }
         catch (Exception exception)
         {
-            Note("状态查询发送失败：" + exception.Message);
+            NoteAttempt("reader-voice-status", requestId, false,
+                "状态查询发送失败：" + exception.Message);
             return false;
         }
     }
@@ -451,7 +559,27 @@ internal static class ReaderCodexPush
         using CancellationTokenSource connect = CancellationTokenSource
             .CreateLinkedTokenSource(cancellationToken);
         connect.CancelAfter(ConnectTimeoutMs);
-        await pipe.ConnectAsync(connect.Token).ConfigureAwait(false);
+        try
+        {
+            await pipe.ConnectAsync(connect.Token).ConfigureAwait(false);
+        }
+        catch (FileNotFoundException exception)
+        {
+            // ⚠ **管道不存在 = 那个会话没了，立刻判失效**（2026-09-10）。
+            //
+            // 这跟"推不动"必须分开处置。连续失败 5 次那条容忍规则是给抖动留的
+            // （Codex 重启那几秒里推送本来就会失败，一次就判死会让它刚回来
+            // 就被拒之门外）；而 FileNotFound 不是抖动，是确证：管道随会话生死，
+            // 不在了就是不在了，再等多少次也不会回来。
+            //
+            // 不这么做的代价实测过：绑定文件写着 invalidAtMs: null、到期还有两天，
+            // 于是 Current() 一直把一条死绑定交出去，每次推送都往虚空里发 ——
+            // 而 push.bound 也就跟着一直说谎。
+            ReaderCodexEndpoint.Invalidate(
+                "推送管道已不存在（登记它的会话已结束）");
+            throw new IOException(
+                "推送管道已不存在：" + binding.PipeName, exception);
+        }
 
         // 先问一次工具表，用它**返回的 namespace**。猜 namespace 会在对面
         // 改分组时静默失效，而失效的表现只是"消息没到"。

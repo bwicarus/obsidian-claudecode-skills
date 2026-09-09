@@ -7410,6 +7410,8 @@ internal static class DirectBridgeSelfTest
             // 这张表被钉住是有道理的：JS 那边是全等入站闸，多一个键的后果
             // 不是"少显示一点"，是整条 STATUS 被拒、语音状态全废。
             "ladder",
+            // push = 通知送得到 Codex 吗（2026-09-10）。同上：总是带这个键。
+            "push",
         });
     }
 

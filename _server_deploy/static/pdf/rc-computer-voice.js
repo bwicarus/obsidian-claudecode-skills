@@ -2173,7 +2173,7 @@
       // ladder = 语音入口梯子（2026-09-09）。桥**总是**带这个字段（读不到时
       // 是 null），所以它必须在放行表里 —— exactObject 是全等校验，漏掉
       // 一个字段的后果不是"少显示一点"，是**整条 STATUS 被拒**、语音状态全废。
-      ["keepActive", "ladder"],
+      ["keepActive", "ladder", "push"],
       label || "Codex 语音响应"
     );
     // 只校验形状，不校验内容：内容由 ReaderPC 那边负责，这里多加一层

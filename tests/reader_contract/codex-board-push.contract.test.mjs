@@ -468,7 +468,7 @@ test("入站闸放行 ladder —— 漏掉会让整条 STATUS 被拒", () => {
     const start = source.indexOf("function normalizeCodexVoicePayload(");
     assert.ok(start >= 0, copy);
     const body = source.slice(start, source.indexOf("\n  function ", start + 10));
-    assert.match(body, /"keepActive", "ladder"/);
+    assert.match(body, /"keepActive", "ladder", "push"/);
   }
 });
 

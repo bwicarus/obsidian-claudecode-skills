@@ -477,20 +477,36 @@ class WiredUpTests(unittest.TestCase):
         self.assertIn("_lastVoiceEntrySessionId", hook)
         self.assertIn("sameSession", hook)
 
-    def test_voice_entry_push_retries_because_codex_was_just_launched(self):
-        """只发一次正好落在最差的时刻。
+    def test_dead_pipe_invalidates_the_binding_immediately(self):
+        """管道不存在 = 那个会话没了，立刻判失效。
 
-        Codex 往前几秒才刚被同一次 START 拉起来,它的推送绑定要等自己的会话钩子
-        跑完才登记 —— 在那之前管道对面没人。所以要在有界窗口里重试,并且**语音
-        一起来就收手**(再催一遍会让对面多按一次 F24,而那是挂断)。
+        2026-09-10 实测：绑定文件写着 invalidAtMs: null、到期还有两天，而管道
+        早已 FileNotFoundError —— 于是 Current() 一直交出一条死绑定，每次推送都
+        往虚空里发，push.bound 也跟着一直说谎。
+
+        ⚠ 这跟"推不动"必须分开：连续失败 5 次那条容忍规则是给抖动留的
+        （Codex 重启那几秒推送本来就会失败），而 FileNotFound 不是抖动，是确证。
+        """
+        push = (self.BRIDGE / "ReaderCodexPush.cs").read_text(encoding="utf-8")
+        self.assertIn("catch (FileNotFoundException", push)
+        connect = push.split("await pipe.ConnectAsync")[1].split(
+            "// 先问一次工具表")[0]
+        self.assertIn("ReaderCodexEndpoint.Invalidate", connect)
+        # 容忍规则本身不能被顺手改掉 —— 它防的是另一件事。
+        self.assertIn("ConsecutiveFailureLimit = 5", push)
+
+    def test_push_reachability_is_reported_not_just_registration(self):
+        """「登记过」不等于「送得到」。
+
+        界面要能说出"Codex 那边没有可接收的会话"，而不是一直干闪 ——
+        所以状态里除了 bound 还要带最近一次成功与连续失败次数。
         """
         source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
             encoding="utf-8")
-        self.assertIn("VoiceEntryRetryWindow", source)
-        hook = source.split("private void RequestVoiceEntryIfNobodyElseWill")[1]
-        hook = hook.split("private async Task<object> HandleStopAsync")[0]
-        self.assertIn("ReadState().Active == true", hook)
-        self.assertIn("if (sent ||", hook)
+        block = source.split("push = new")[1].split("};")[0]
+        for field in ("bound", "lastSuccessAtUtcMs",
+                      "consecutiveFailures", "lastNote"):
+            self.assertIn(field, block)
 
     def test_green_light_does_not_treat_unasked_as_permission(self):
         """"还没问过"不是"可以放行"(2026-09-10 我犯的那个)。
