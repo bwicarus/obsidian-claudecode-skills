@@ -43,8 +43,18 @@ from pathlib import Path
 
 import voice_autoclose
 
-#: 一次尝试的等待上限。桥那边观察窗 10 秒、沉降 3 秒，这里**刻意放宽**，
-#: 等真实分布出来再收。见模块头。
+#: 一次尝试的等待上限。
+#:
+#: **第一批真实样本（2026-09-10，用户实测两次成功）**：3.67 / 3.69 / 5.79 秒。
+#: 跟 CodexVoiceActivity 里实测的"台账 active → 渲染侧出声 = 2.25 秒"一致。
+#:
+#: ⚠ **但据此收到 10 秒是错的** —— 那三次 Codex 都**已经在跑**。真正撑起这个
+#: 数字的是冷启动那条路：WaitForUniqueReadyAsync 20 秒 + 沉降 5 秒 + 观察窗
+#: 10 秒 ≈ 35 秒，而它**一个样本都还没有**。拿热样本去收超时，正是模块头警告的
+#: 那件事：等短了会把本来会成功的那次判成失败，然后去按第二下 —— 而那一下可能
+#: 正好把刚起来的通话关掉。
+#:
+#: 所以维持 60 秒，等出现一条冷启动样本（形态是 10~35 秒那一档）再谈收。
 ATTEMPT_TIMEOUT_SECONDS = 60.0
 
 ATTEMPTS_FILE_NAME = "voice-start-attempts.jsonl"
@@ -88,24 +98,57 @@ def record_attempt(entry: dict[str, object],
 MAX_COOLDOWN_WAIT_SECONDS = 30.0
 
 
+#: 桥会给出的 reason（封闭词汇表）。不在表里的一律当"没说清"。
+BRIDGE_REASONS = frozenset({
+    "already-active", "started", "cooldown", "not-confirmed",
+    "unknown", "voice-off",
+})
+
+
 def _post_once(url: str, timeout: float) -> dict[str, object]:
-    """问桥一次。任何失败都折成带 reason 的回答，不抛。"""
+    """问桥一次。任何失败都折成**带 reason 且说得出原因**的回答，不抛。
+
+    ⚠ 回答里没有 reason 时不能就这么记下去（2026-09-10 被自己咬到）：
+    两条样本记成 pressed/confirmed/reason 全 null，于是事后完全无从判断
+    那次到底发生了什么 —— 而"记了一条说不出原因的失败"跟没记一样。
+    所以这里给不认识的回答补上 reason 和一段原文,状态码也一并留下。
+    """
     data = json.dumps({"startVoiceOnce": True}).encode("utf-8")
     request = urllib.request.Request(
         url, data=data, method="POST",
         headers={"Content-Type": "application/json"})
+    status: object = None
+    body = b""
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read() or b"{}")
+            status = getattr(response, "status", None)
+            body = response.read() or b""
+            result = json.loads(body or b"{}")
     except urllib.error.HTTPError as error:
+        status = error.code
         try:
-            return json.loads(error.read() or b"{}")
+            body = error.read() or b""
+        except OSError:
+            body = b""
+        try:
+            result = json.loads(body or b"{}")
         except ValueError:
-            return {"ok": False, "reason": "http",
-                    "detail": "回应不是 JSON"}
+            result = {"ok": False, "reason": "http",
+                      "detail": "回应不是 JSON"}
     except OSError as error:
-        return {"ok": False, "reason": "unreachable",
+        return {"ok": False, "reason": "unreachable", "httpStatus": None,
                 "detail": "连不上桥：%s" % str(error)[:160]}
+    if not isinstance(result, dict):
+        result = {"ok": False}
+    result["httpStatus"] = status
+    if result.get("reason") not in BRIDGE_REASONS:
+        # 桥的 400 只带 detail(没有 reason);空体则连 detail 都没有。
+        # 两种都要说得出话来,而不是留三个 null。
+        result.setdefault("detail", "回应里没有可辨认的 reason：%s"
+                          % (body[:200].decode("utf-8", "replace") or "空回应"))
+        result["reason"] = "unexpected-reply"
+        result["ok"] = False
+    return result
 
 
 def start_once(
@@ -138,6 +181,9 @@ def start_once(
             "pressed": result.get("pressed"),
             "confirmed": result.get("confirmed"),
             "reason": result.get("reason"),
+            # 说不出原因的样本等于没样本 —— 状态码与原文一并留下。
+            "httpStatus": result.get("httpStatus"),
+            "detail": str(result.get("detail") or "")[:200] or None,
         }, runtime)
 
     result = _post_once(url, timeout)

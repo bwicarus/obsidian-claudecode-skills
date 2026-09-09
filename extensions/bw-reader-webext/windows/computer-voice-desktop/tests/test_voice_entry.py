@@ -237,6 +237,38 @@ class StartStepTests(unittest.TestCase):
         self.assertEqual(entry["confirmed"], False)
         self.assertEqual(entry["reason"], "not-confirmed")
 
+    def test_unrecognised_reply_still_says_something(self):
+        """回答里没有可辨认的 reason 时，样本仍要说得出发生了什么。
+
+        2026-09-10 真实样本里有两条 pressed/confirmed/reason 全 null ——
+        记了一条说不出原因的失败，跟没记一样。桥的 400 只带 detail、空体则
+        连 detail 都没有，两种都得落成话。
+        """
+        for reply in ({"ok": False, "detail": "pipePath 是必需的"}, {}):
+            self.sent.clear()
+            result = self._run(reply)
+            self.assertEqual(result["reason"], "unexpected-reply")
+            self.assertTrue(result["detail"])
+            self.assertIs(result["ok"], False)
+
+    def test_sample_records_status_and_detail(self):
+        self._run({"ok": False, "detail": "说不清"})
+        entry = json.loads(STEP.attempts_path(self.runtime).read_text(
+            encoding="utf-8").strip().splitlines()[-1])
+        self.assertEqual(entry["reason"], "unexpected-reply")
+        self.assertTrue(entry["detail"])
+        self.assertIn("httpStatus", entry)
+
+    def test_known_reasons_pass_through_untouched(self):
+        """封闭词汇表里的一律原样 —— 别把桥说清楚的话也改写掉。"""
+        for reason in sorted(STEP.BRIDGE_REASONS):
+            self.sent.clear()
+            # cooldown 会真的等一轮 —— 这里把睡眠换掉,不然测试白等 30 秒。
+            result = self._run({"ok": True, "confirmed": True,
+                                "reason": reason},
+                               sleeper=lambda _s: None)
+            self.assertEqual(result["reason"], reason)
+
     def test_initial_timeout_is_generous(self):
         """用户要的是"一开始时间搞长一点",等短了会把要成的那次判成失败,
         然后去按第二下 —— 而那一下可能正好把刚起来的通话关掉。"""
