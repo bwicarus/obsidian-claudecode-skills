@@ -33,6 +33,9 @@ internal sealed class ReaderCapabilityCatalog
         new("navigation", "导航输出", "滚动、定位、跳页与跳章节"),
         new("highlight", "高亮输出", "保存当前稳定选区"),
         new("tool-status", "工具状态输出", "发送现有 Realtime 工具状态"),
+        new("status-report", "状态回报",
+            "收到外部推来的「状态查询」时怎么答：只回答、不改变任何状态；"
+            + "没有足够新鲜的证据就答 unknown"),
         new("command-format", "统一命令格式", "命令外壳、回执、去重和失败规则"),
         new("task-routing", "Codex 原生任务路由", "按延迟和副作用选择直接工具或原生子代理"),
         new("research-task", "多步研究任务", "替代旧 CLI worker prompt 的原生研究合同"),

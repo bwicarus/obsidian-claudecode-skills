@@ -311,6 +311,71 @@ internal static class ReaderCodexPush
         }
     }
 
+    /// <summary>
+    /// 向正在通话的线程发一次**状态查询**（2026-09-09）。
+    ///
+    /// 只要回答，不改变任何状态：不开语音、不发快捷键、不重试。
+    ///
+    /// ⚠ 回答方式是**跑一个脚本**而不是让它手写 JSON —— 契约（字段、取值、
+    /// 时间语义）由程序保证，不该指望每次都写对。尤其 observedAt：
+    /// 不知道证据产生时刻就留空，拿回写时间冒充会让上层据以判断的新鲜度是假的。
+    /// </summary>
+    internal static async Task<bool> RequestStatusReportAsync(
+        string inCallThreadId,
+        string requestId,
+        int validSeconds,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(inCallThreadId))
+        {
+            Note("状态查询没有目标线程，未发送");
+            return false;
+        }
+        ReaderCodexEndpoint.Binding? binding = ReaderCodexEndpoint.Current();
+        if (binding is null)
+        {
+            Note("没有可用绑定（拿不到管道），状态查询未发送");
+            return false;
+        }
+        string script = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "BWReader",
+            "voice_status_receipt.py");
+        string prompt =
+            "状态查询（requestId: " + Trim(requestId)
+            + "，有效期 " + validSeconds + " 秒）。\n"
+            + "只根据当前可见证据回答；不要开启语音、不要发送快捷键、不要重试。\n"
+            + "回答方式：运行下面这行命令，把你的判断作为参数传进去。\n"
+            + "python \"" + script + "\""
+            + " --request-id " + Trim(requestId)
+            + " --task-status ready"
+            + " --voice-status <active|ended|unknown>"
+            + " --evidence \"<你据以判断的依据>\"\n"
+            + "没有足够新鲜的证据就填 unknown；没收到语音消息不能推断成 ended。\n"
+            + "知道证据产生时刻再加 --observed-at <ISO8601>；不知道就别加。";
+        try
+        {
+            await SendAsync(
+                binding,
+                prompt,
+                cancellationToken,
+                threadIdOverride: inCallThreadId,
+                purpose: "reader-voice-status").ConfigureAwait(false);
+            Note("已发出状态查询（" + Trim(requestId) + "）");
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception exception)
+        {
+            Note("状态查询发送失败：" + exception.Message);
+            return false;
+        }
+    }
+
     private static async Task SendAsync(
         ReaderCodexEndpoint.Binding binding,
         string prompt,

@@ -11444,10 +11444,11 @@ internal static class DirectBridgeSelfTest
                     .Contains(
                         "Do not infer a card from final assistant text",
                         StringComparison.Ordinal)
-                // 15 = 能力主题数（2026-08-27 加了 camera）。这个数被钉住
-                // 是有道理的：主题列表就是**发现层**,助手扫不到关键词就
-                // 直接答"没有这个能力",漏登记等于功能不存在。
-                && resources.GetArrayLength() == 15
+                // 16 = 能力主题数（2026-08-27 加 camera；2026-09-09 加
+                // status-report）。这个数被钉住是有道理的：主题列表就是
+                // **发现层**,助手扫不到关键词就直接答"没有这个能力",
+                // 漏登记等于功能不存在 —— 加 status-report 时这条当场拦住了我。
+                && resources.GetArrayLength() == 16
                 && resources[0].GetProperty("uri").GetString()
                     == ReaderCapabilityCatalog.IndexUri
                 && contents.GetArrayLength() == 1

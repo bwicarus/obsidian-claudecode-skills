@@ -408,3 +408,35 @@ test("端点只回「送出去了没有」，不谎称已挂断", () => {
   // 缺目标线程直接拒，不拿板推送那条线程顶替。
   assert.match(body, /hangUpVoice 需要 threadId/);
 });
+
+// ── 状态查询与回执（2026-09-09）────────────────────────────────────────
+test("状态查询只要回答，且明确不许改变状态", () => {
+  const start = PUSH.indexOf("RequestStatusReportAsync(");
+  assert.ok(start >= 0, "要有状态查询");
+  const body = PUSH.slice(start, PUSH.indexOf("\n    private static async Task SendAsync", start));
+  assert.match(body, /不要开启语音、不要发送快捷键、不要重试/);
+  // 回答方式是跑脚本，不是让它手写 JSON —— 契约由程序保证。
+  assert.match(body, /voice_status_receipt\.py/);
+  assert.match(body, /--request-id/);
+  assert.match(body, /--voice-status/);
+  // Codex 自己点名的两条纪律要写进文案
+  assert.match(body, /没收到语音消息不能推断成 ended/);
+  assert.match(body, /不知道就别加/);
+});
+
+test("端点不把「送出去」说成「已回答」", () => {
+  const start = ENDPOINT.indexOf('body["statusQuery"]');
+  assert.ok(start >= 0);
+  const body = ENDPOINT.slice(start, start + 1800);
+  assert.match(body, /statusRequested/);
+  assert.match(body, /回执写没写要看回执账本/);
+});
+
+test("台账读不到 ≠ 已经挂断", () => {
+  // 两者都不该按 F24，但原因必须分开说：把不知道折成结论，
+  // 排查的人就会去错的方向。
+  const start = ENDPOINT.indexOf('body["hangUpVoiceFallback"]');
+  const body = ENDPOINT.slice(start, start + 2200);
+  assert.match(body, /ledgerKnown/);
+  assert.match(body, /台账读不到，不知道在不在通话/);
+});

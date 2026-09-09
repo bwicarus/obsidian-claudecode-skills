@@ -255,6 +255,46 @@ internal static class ReaderCodexEndpoint
             return;
         }
 
+        // 状态查询（2026-09-09）。只要回答，不改变任何状态。
+        //
+        // ⚠ 同样只回"发出去了没有"。回执是否写成要去看回执账本 ——
+        // Codex 自己在交接里点了这条：「推送接口接受消息不等于状态回执已写入」。
+        if (body["statusQuery"] is JsonValue query
+            && query.TryGetValue(out bool wantsStatus) && wantsStatus)
+        {
+            string statusThread = Text(body["threadId"], 100);
+            string requestId = Text(body["requestId"], 120);
+            if (statusThread.Length == 0 || requestId.Length == 0)
+            {
+                await Fail(context, "statusQuery 需要 threadId 与 requestId")
+                    .ConfigureAwait(false);
+                return;
+            }
+            int validSeconds = 120;
+            if (body["validSeconds"] is JsonValue seconds
+                && seconds.TryGetValue(out int parsedSeconds)
+                && parsedSeconds is > 0 and <= 3600)
+            {
+                validSeconds = parsedSeconds;
+            }
+            bool asked = await ReaderCodexPush.RequestStatusReportAsync(
+                statusThread,
+                requestId,
+                validSeconds,
+                cancellationToken).ConfigureAwait(false);
+            await Ok(context, new JsonObject
+            {
+                ["ok"] = true,
+                ["statusRequested"] = asked,
+                ["requestId"] = requestId,
+                ["note"] = asked
+                    ? "查询已送到该线程；回执写没写要看回执账本"
+                    : "没送出去（看 pushNote）",
+                ["pushNote"] = ReaderCodexPush.LastNote,
+            }, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         // 兜底：推送两次都没让通话结束时才按 F24（2026-09-09 用户选的策略）。
         //
         // ⚠ F24 是**切换**：按在"其实已经挂断了"的状态上会**反向开一通**并
@@ -268,11 +308,19 @@ internal static class ReaderCodexEndpoint
                 new WindowsRegistryCodexVoiceActivitySource().Read();
             if (!ledger.Active)
             {
+                // ⚠ 台账**读不到**时 Active 也是 false —— 但那是"不知道"，
+                // 不是"已经挂了"。两者都不该按 F24，可原因必须分开说：
+                // 把不知道折成结论，排查的人就会去错的方向。
+                bool readable =
+                    ledger.Status == CodexVoiceActivityReadStatus.Available;
                 await Ok(context, new JsonObject
                 {
                     ["ok"] = true,
                     ["pressed"] = false,
-                    ["skipped"] = "台账显示已经不在通话，按 F24 反而会开一通",
+                    ["skipped"] = readable
+                        ? "台账显示已经不在通话，按 F24 反而会开一通"
+                        : "台账读不到，不知道在不在通话；这种时候按 F24 是赌",
+                    ["ledgerKnown"] = readable,
                     ["ledgerStatus"] = ledger.Status.ToString(),
                 }, cancellationToken).ConfigureAwait(false);
                 return;

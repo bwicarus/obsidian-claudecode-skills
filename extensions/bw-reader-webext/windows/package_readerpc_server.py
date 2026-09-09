@@ -87,6 +87,13 @@ RUNTIME_SOURCES = {
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "codex_push_register.py"
     ),
+    # 状态回执的落地脚本(2026-09-09)。⚠ 必须铺到**稳定路径**:能力文档
+    # status-report.md 里写死了 %LOCALAPPDATA%\BWReaderoice_status_receipt.py,
+    # 文件不在那儿的表现是"助手照着文档跑命令,命令不存在,于是没有回执"。
+    "readerpc-runtime/voice_status_receipt.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "voice_status_receipt.py"
+    ),
     "readerpc-runtime/situation_actions.py": (
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "situation_actions.py"
@@ -518,7 +525,7 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             "board_card_render.py",
             "situation_signals.py", "situation_triggers.py",
             "situation_actions.py", "review_deck.py",
-            "codex_push_register.py",
+            "codex_push_register.py", "voice_status_receipt.py",
         ):
             (root.parent / stable_name).write_bytes(
                 (release / "readerpc-runtime" / stable_name).read_bytes()

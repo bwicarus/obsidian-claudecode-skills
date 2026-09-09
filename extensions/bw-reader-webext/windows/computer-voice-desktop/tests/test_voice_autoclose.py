@@ -22,6 +22,12 @@ assert SPEC and SPEC.loader
 VAC = importlib.util.module_from_spec(SPEC)
 sys.modules["voice_autoclose_test_subject"] = VAC
 SPEC.loader.exec_module(VAC)
+RECEIPT_SPEC = importlib.util.spec_from_file_location(
+    "voice_status_receipt_test_subject", RUNTIME / "voice_status_receipt.py"
+)
+assert RECEIPT_SPEC and RECEIPT_SPEC.loader
+RECEIPT = importlib.util.module_from_spec(RECEIPT_SPEC)
+RECEIPT_SPEC.loader.exec_module(RECEIPT)
 
 
 def known(value):
@@ -265,6 +271,127 @@ class CloseSequenceTests(unittest.TestCase):
         )
         ids = [p["requestId"] for p in self.posts if "requestId" in p]
         self.assertEqual(len(ids), len(set(ids)), "同一编号重复会看不出是第几次")
+
+
+class BlindLedgerTests(unittest.TestCase):
+    """台账全程读不出来时怎么办。
+
+    这是最危险的一格：不知道在不在通话，而 F24 是切换 —— 按错方向会**反向
+    开一通并开始计费**。2026-09-09 Codex 给出了状态回执通道，于是这一格
+    从"瞎着赌"变成"先问一次"。
+    """
+
+    def setUp(self):
+        self.posts = []
+        self.clock_value = [0.0]
+
+    def _sleep(self, seconds):
+        self.clock_value[0] += seconds
+
+    def _clock(self):
+        return self.clock_value[0]
+
+    def _poster(self):
+        def post(endpoint, body):
+            self.posts.append(body)
+            if body.get("hangUpVoiceFallback"):
+                return 200, {"ok": True, "pressed": True}
+            return 200, {"ok": True, "hangUpRequested": True}
+        return post
+
+    @staticmethod
+    def _blind_ledger():
+        return lambda: {"known": False, "active": None,
+                        "start": 0, "stop": 0, "why": "读不到台账"}
+
+    def _run(self, answer):
+        return VAC.close_voice(
+            endpoint="http://x", thread_id="t", reason="r",
+            ledger_reader=self._blind_ledger(), poster=self._poster(),
+            sleeper=self._sleep, clock=self._clock, grace_seconds=10.0,
+            status_query=lambda **_kwargs: answer,
+        )
+
+    def test_receipt_says_ended_closes_without_pressing_f24(self):
+        result = self._run({"voiceStatus": "ended",
+                            "observedAt": "2026-09-09T11:00:00Z"})
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["by"], "receipt")
+        self.assertNotIn(
+            True, [p.get("hangUpVoiceFallback") for p in self.posts]
+        )
+        ask = [s for s in result["steps"] if s["step"] == "ask"][0]
+        # 证据的产生时刻要一路带着 —— 它是判断新鲜度的唯一依据
+        self.assertEqual(ask["observedAt"], "2026-09-09T11:00:00Z")
+
+    def test_receipt_says_active_allows_the_fallback(self):
+        result = self._run({"voiceStatus": "active", "observedAt": None})
+        self.assertIn(
+            True, [p.get("hangUpVoiceFallback") for p in self.posts]
+        )
+        self.assertFalse(result["closed"])   # 台账仍读不到，无从确认
+
+    def test_no_answer_means_no_f24(self):
+        """对面没答上来时**不许**按 F24：不知道时按下去可能反向开一通。"""
+        result = self._run(None)
+        self.assertNotIn(
+            True, [p.get("hangUpVoiceFallback") for p in self.posts]
+        )
+        self.assertFalse(result["closed"])
+        self.assertIn("不按 F24 赌", result["note"])
+
+    def test_unknown_answer_is_not_treated_as_ended(self):
+        result = self._run({"voiceStatus": "unknown"})
+        self.assertFalse(result["closed"])
+        self.assertNotIn(
+            True, [p.get("hangUpVoiceFallback") for p in self.posts]
+        )
+
+
+class ReceiptTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.runtime = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_observed_at_is_null_when_unknown(self):
+        """不知道证据产生时刻就留空 —— 拿回写时间冒充会让新鲜度是假的。"""
+        receipt = RECEIPT.build_receipt(
+            request_id="r1", task_status="ready", voice_status="active",
+            evidence="系统语音模式标记为已激活")
+        self.assertIsNone(receipt["observedAt"])
+        self.assertTrue(receipt["respondedAt"].endswith("Z"))
+
+    def test_closed_vocabularies_reject_instead_of_rounding(self):
+        with self.assertRaises(ValueError):
+            RECEIPT.build_receipt(request_id="r", task_status="ready",
+                                  voice_status="probably")
+        with self.assertRaises(ValueError):
+            RECEIPT.build_receipt(request_id="r", task_status="maybe",
+                                  voice_status="active")
+        with self.assertRaises(ValueError):
+            RECEIPT.build_receipt(request_id="", task_status="ready",
+                                  voice_status="active")
+
+    def test_round_trip_through_the_ledger(self):
+        written = RECEIPT.build_receipt(
+            request_id="r2", task_status="ready", voice_status="ended",
+            evidence="end_realtime_voice_call 返回 ended=true",
+            observed_at="2026-09-09T11:22:33Z")
+        RECEIPT.append_receipt(written, self.runtime)
+        got = RECEIPT.read_receipt("r2", self.runtime)
+        self.assertEqual(got["voiceStatus"], "ended")
+        self.assertEqual(got["observedAt"], "2026-09-09T11:22:33Z")
+        self.assertIsNone(RECEIPT.read_receipt("nope", self.runtime))
+
+    def test_latest_answer_wins(self):
+        for status in ("active", "ended"):
+            RECEIPT.append_receipt(
+                RECEIPT.build_receipt(request_id="r3", task_status="ready",
+                                      voice_status=status),
+                self.runtime)
+        self.assertEqual(
+            RECEIPT.read_receipt("r3", self.runtime)["voiceStatus"], "ended")
 
 
 class ThreadLookupTests(unittest.TestCase):

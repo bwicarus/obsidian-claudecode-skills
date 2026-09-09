@@ -42,7 +42,14 @@ CONTRACT = "reader-voice-autoclose/1"
 #: 改了一处的表现是"注册好好的，挂断永远发不出去"。
 #: ⚠ 只能走 tailnet 那条：回环 127.0.0.1:43128 会被 origin 闸以 403 拒掉
 #: （2026-09-09 实测）。
-from codex_push_register import DEFAULT_ENDPOINT as ENDPOINT  # noqa: E402
+# 有意再导出：readerpc_launcher 用 voice_autoclose.ENDPOINT，
+# 而地址只在 codex_push_register 里写一份。写成显式赋值而不是
+# `import ... as`，是为了让它是一次**真正的使用** —— pyflakes 不认
+# noqa，而"为了消警告去删一行有用的代码"是更坏的结局。
+import codex_push_register  # noqa: E402
+
+ENDPOINT = codex_push_register.DEFAULT_ENDPOINT
+import voice_status_receipt  # noqa: E402
 
 #: 麦克风使用台账。与 C# 的 WindowsRegistryCodexVoiceActivitySource.RegistryPath
 #: **必须是同一个键**：两边读同一份事实，判据也照抄（见 _ledger_active）。
@@ -310,6 +317,45 @@ def in_call_thread_id(root: Path) -> str:
     return thread_id if isinstance(thread_id, str) else ""
 
 
+def query_status(
+    *,
+    endpoint: str,
+    thread_id: str,
+    runtime: Path | None = None,
+    poster: Callable[[str, dict[str, Any]], tuple[int, dict[str, Any]]] | None = None,
+    sleeper: Callable[[float], None] | None = None,
+    clock: Callable[[], float] | None = None,
+    timeout_seconds: float = 90.0,
+) -> dict[str, Any] | None:
+    """问对面一次"你现在什么状态"，等它把回执写出来。
+
+    ⚠ **有开销**：每问一次对面都要跑一轮。Codex 在交接里专门点了「不适合高频
+    轮询」。所以这条只在**决策点**用一次 —— 绝不放进 5 秒的等待循环里。
+
+    ⚠ 送出去 ≠ 已回答：`statusRequested` 只说明消息被接收。判断以**回执账本**
+    为准（同样是 Codex 点的那条：「推送接口接受消息不等于状态回执已写入」）。
+    """
+    post = poster or _post
+    sleep = sleeper or time.sleep
+    now = clock or time.monotonic
+    request_id = "vsq-" + uuid.uuid4().hex[:16]
+    code, reply = post(endpoint, {
+        "statusQuery": True,
+        "threadId": thread_id,
+        "requestId": request_id,
+        "validSeconds": int(timeout_seconds),
+    })
+    if code != 200 or reply.get("statusRequested") is not True:
+        return None
+    deadline = now() + timeout_seconds
+    while now() < deadline:
+        sleep(POLL_SECONDS)
+        receipt = voice_status_receipt.read_receipt(request_id, runtime)
+        if receipt is not None:
+            return receipt
+    return None
+
+
 def close_voice(
     *,
     endpoint: str,
@@ -321,6 +367,8 @@ def close_voice(
     clock: Callable[[], float] | None = None,
     grace_seconds: float = GRACE_SECONDS,
     allow_shortcut_fallback: bool = True,
+    runtime: Path | None = None,
+    status_query: Callable[..., dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     """把这一通关掉。返回一份**说得清发生了什么**的回执。
 
@@ -336,6 +384,9 @@ def close_voice(
 
     steps: list[dict[str, Any]] = []
     request_id = "vac-" + uuid.uuid4().hex[:16]
+    # 等待期间台账**有没有一次读得出来**。全程读不出 = 我们是瞎的，
+    # 那时按 F24 是赌，而赌错的方向是"反向开一通并开始计费"。
+    ledger_seen_known = False
 
     for attempt in range(1, MAX_PUSH_ATTEMPTS + 1):
         code, reply = post(endpoint, {
@@ -353,6 +404,7 @@ def close_voice(
         while now() < deadline:
             sleep(POLL_SECONDS)
             ledger = read()
+            ledger_seen_known = ledger_seen_known or bool(ledger["known"])
             if ledger["known"] and ledger["active"] is False:
                 steps.append({"step": "verify", "closed": True})
                 return {"contract": CONTRACT, "closed": True,
@@ -365,6 +417,25 @@ def close_voice(
         return {"contract": CONTRACT, "closed": False, "by": None,
                 "reason": reason, "steps": steps,
                 "note": "推送没关掉，且兜底被关闭"}
+
+    # 台账全程读不出来 → 我们是瞎的。这时**问对面一次**（2026-09-09 Codex
+    # 交接给出的状态回执通道），别直接去赌 F24。
+    # ⚠ 只问这一次：每问一轮对面都要跑，Codex 点名"不适合高频轮询"。
+    if not ledger_seen_known:
+        ask = status_query or query_status
+        receipt = ask(endpoint=endpoint, thread_id=thread_id, runtime=runtime)
+        voice_status = (receipt or {}).get("voiceStatus")
+        steps.append({"step": "ask", "answered": receipt is not None,
+                      "voiceStatus": voice_status,
+                      "observedAt": (receipt or {}).get("observedAt")})
+        if voice_status == "ended":
+            return {"contract": CONTRACT, "closed": True, "by": "receipt",
+                    "reason": reason, "steps": steps}
+        if voice_status != "active":
+            # 还是不知道。不按 F24 —— 不知道时按下去可能反向开一通。
+            return {"contract": CONTRACT, "closed": False, "by": None,
+                    "reason": reason, "steps": steps,
+                    "note": "台账读不到，对面也没说清在不在通话；不按 F24 赌"}
 
     # 兜底。⚠ 桥那边**会自己再读一次台账**才按 —— F24 是切换，按在"已挂断"
     # 上会反向开一通。这里不替它判断，也不因为自己刚读过就跳过它的复核。
