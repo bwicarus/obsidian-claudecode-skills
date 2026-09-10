@@ -3687,8 +3687,6 @@ internal sealed class DirectBridgeProtocolSession
             using CancellationTokenSource lifetime = new(
                 VoiceEntryRetryWindow + VoiceEntryRetryInterval);
             DateTime deadline = DateTime.UtcNow + VoiceEntryRetryWindow;
-            // 自愈周期 30 秒，给它一轮多一点。
-            DateTime healWindow = DateTime.UtcNow + TimeSpan.FromSeconds(40);
             // 送出去几次、上一次是什么时候 —— 用来决定这一轮该不该再送。
             int sentCount = 0;
             DateTime lastSentAt = DateTime.MinValue;
@@ -3760,21 +3758,18 @@ internal sealed class DirectBridgeProtocolSession
                 // ⚠ 这里**没有** `if (sent) return;`（2026-09-10 删掉的）。
                 // 送达只说明消息进了管道；判"起来了没有"的始终是循环顶部那次
                 // 台账读取。收工的唯一理由是语音真的起来了。
-                // 绑定已判死就别再等了 —— 重试救不回一条不存在的管道，
-                // 而每一轮都要干等满一个连接超时。用户看到的是按钮白闪 90 秒，
-                // 然后才轮到兜底（2026-09-10 实测：八次×14 秒）。
+                // ⚠ 这里原来有一个 40 秒的早退：没有绑定就提前放弃、直接兜底。
+                // 那在旧前提下是对的 —— 当时每一轮只是**干等**，等满 90 秒
+                // 纯属让按钮白闪。
                 //
-                // ⚠ 但**给自愈留一点时间**：ReaderPC 每 30 秒会去重新发现管道
-                // 并登记。实测撞到过一次 48 秒之差 —— 按钮按下时通道刚好还没
-                // 重连上，于是走了兜底 F24，而 48 秒后通道就自己好了。
-                // 所以头一轮不立刻放弃，等一个自愈周期再看。
-                if (ReaderCodexEndpoint.Current() is null
-                    && DateTime.UtcNow >= healWindow)
-                {
-                    WriteVoiceEntryStreak(ReadVoiceEntryStreak() + 1);
-                    StartVoiceFromBridge(control, requestId);
-                    return;
-                }
+                // **前提没了**（2026-09-10）：现在每一轮都会主动跑一次
+                // TryEnsureChannelAsync，Codex 没起来时它立刻返回、起来了就当场
+                // 把通道建出来。等待本身成了有产出的事，早退反而是提前认输。
+                //
+                // 实测代价：22:47:51 按下 → 40 秒早退 → 因为 F24 兜底关着，
+                // 两条路都不通、什么都没做（用户看到"按钮直接灭掉"）；
+                // 而通道 22:49:06 就自己好了 —— **只差 35 秒**。
+                // 现在让它跑满窗口（90 秒），到点再谈兜底。
                 if (DateTime.UtcNow >= deadline)
                 {
                     // 推送这条路走不通时，**桥自己把语音开起来**。
@@ -3791,6 +3786,14 @@ internal sealed class DirectBridgeProtocolSession
                     // ⚠ 记一次失败：连够 VoiceEntryRestartAfterFailures 次，
                     // 下一次入口会先重启一次 Codex。
                     WriteVoiceEntryStreak(ReadVoiceEntryStreak() + 1);
+                    if (ReaderCodexEndpoint.Current() is null)
+                    {
+                        // 通道整整一个窗口都没建起来 —— 这条得让 App 说出来，
+                        // 否则按钮只是灭掉（见 NoteBridgeGaveUp）。
+                        NoteBridgeGaveUp(
+                            requestId,
+                            "通道没能建立（Codex 可能还没加载完）");
+                    }
                     StartVoiceFromBridge(control, requestId);
                     return;
                 }
@@ -3957,6 +3960,60 @@ internal sealed class DirectBridgeProtocolSession
     private static readonly TimeSpan AppRestartTimeout =
         TimeSpan.FromSeconds(45);
 
+    /// <summary>桥自己放弃时，也要让 App 知道**为什么**。</summary>
+    /// <remarks>
+    /// ⚠ 2026-09-10 实测的缺口：`startGaveUp` 只有 Codex 跑
+    /// `voice_start_failed.py` 时才会写 —— 而那要求推送**送到过**。
+    /// 第一次按下时通道压根没建起来，Codex 什么都没跑，于是 App 一个字都
+    /// 收不到，按钮直接灭掉。用户原话：「第一次直接灭掉」。
+    ///
+    /// 账本里其实写着原因（"推送没送到，且 F24 兜底在设置里是关的"），
+    /// 但账本在电脑上，人在手机前 —— **诊断留在了看不见的那一侧**。
+    ///
+    /// ⚠ 复用同一个生产者而不是另开一条路：那个脚本已经会把 startGaveUp
+    /// 按正确形状写进梯子状态，App 也已经会渲染它。另写一份的下场是两边
+    /// 迟早不一致，而且要动 exactObject 那几份入站白名单。
+    /// </remarks>
+    private static void NoteBridgeGaveUp(string requestId, string detail)
+    {
+        string script = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "BWReader",
+            "voice_start_failed.py");
+        if (!File.Exists(script))
+        {
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                requestId, false,
+                "放弃了，但找不到 voice_start_failed.py，App 那边不会有提示");
+            return;
+        }
+        try
+        {
+            ProcessStartInfo info = new()
+            {
+                FileName = PythonExecutable(),
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            info.ArgumentList.Add(script);
+            info.ArgumentList.Add("--attempts");
+            info.ArgumentList.Add("0");
+            info.ArgumentList.Add("--detail");
+            info.ArgumentList.Add(detail);
+            using Process? child = Process.Start(info);
+            child?.WaitForExit(10_000);
+        }
+        catch (Exception exception)
+        {
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                requestId, false,
+                "放弃了，但写不进梯子状态：" + exception.GetType().Name);
+        }
+    }
+
     /// <summary>跑一次 codex_channel --ensure，把通道建起来。</summary>
     /// <remarks>
     /// ⚠ 走脚本而不是在 C# 里重写一遍：枚举命名管道、逐条 tools/list 自证、
@@ -4057,6 +4114,10 @@ internal sealed class DirectBridgeProtocolSession
             ReaderCodexPush.NoteBridgeStart(
                 requestId, false,
                 "推送没送到，且 F24 兜底在设置里是关的 —— 没有按任何键");
+            // 两条路都不通 = 这一次不会再有结果了。必须说出来：
+            // 「什么都没做」和「还在试」在按钮上长得一模一样。
+            NoteBridgeGaveUp(
+                requestId, "推送没送到，且 F24 兜底已关闭");
             return;
         }
         _ = Task.Run(async () =>
