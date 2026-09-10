@@ -629,7 +629,9 @@ class WiredUpTests(unittest.TestCase):
         bare = [
             line.strip()
             for line in code.splitlines()
-            if re.search(r"(?<!Attempt)(?<!void )Note\(", line)
+            # ⚠ 前面必须不是标识符字符，否则 BoardTargetNote( 这种
+            # 以 Note 结尾的函数名会被当成裸 Note()（2026-09-11 误报过）。
+            if re.search(r"(?<![A-Za-z_])(?<!void )Note\(", line)
             and "NoteAttempt(" not in line
         ]
         # 只该剩 NoteAttempt 内部那一次转调。

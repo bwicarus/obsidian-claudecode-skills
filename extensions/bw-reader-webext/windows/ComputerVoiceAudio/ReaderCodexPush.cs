@@ -324,8 +324,13 @@ internal static class ReaderCodexPush
             // 板面推送因此不会把同样的内容再送一遍（用户点名的"复数通知"，
             // 最常见的就是这一对）。
             ReaderAttentionBoard.NoteFastBoardDelivered(fastNow);
+            // ⚠ 记下**发给了哪条线程**：绑定那条与通话那条不是一回事
+            // （Codex 每起一次语音就新建一条 voice_chat），不记就没法
+            // 回答"板子到底进了谁的对话" —— 而那正是 2026-09-11 用户
+            // 问的问题，当时我答不上来。
             NoteAttempt(
-                "board-push", "connect", true, "已推送（接上时的全量提醒）");
+                "board-push", "connect", true,
+                "已推送（接上时的全量提醒）→ " + BoardTargetNote(boardTarget, binding));
         }
         catch (Exception exception)
         {
@@ -424,7 +429,9 @@ internal static class ReaderCodexPush
             if (fastChanged) ReaderAttentionBoard
                 .NoteFastBoardDelivered(fastText);
             NoteAttempt(
-                "board-push", which, true, "已推送（" + which + "）");
+                "board-push", which, true,
+                "已推送（" + which + "）→ "
+                + BoardTargetNote(boardTarget, binding));
         }
         catch (OperationCanceledException)
         {
@@ -494,6 +501,18 @@ internal static class ReaderCodexPush
 
     /// 板面正文进消息前的收口。板子本来就短，这里只防病态输入 ——
     /// 一块板长到几十 KB 说明渲染出了别的问题，那时截断比让对面吞下整块好。
+    /// 这一条板子发去了哪条线程，以及那是不是通话那条。
+    private static string BoardTargetNote(
+        string boardTarget,
+        ReaderCodexEndpoint.Binding binding)
+    {
+        string target = boardTarget.Length > 0
+            ? boardTarget : binding.ThreadId;
+        string head = target.Length > 13 ? target[..13] : target;
+        return head + (boardTarget.Length > 0
+            ? "（通话中的那条）" : "（绑定那条，此刻没有通话）");
+    }
+
     private static string Trim(string text)
     {
         string value = (text ?? string.Empty).TrimEnd();
