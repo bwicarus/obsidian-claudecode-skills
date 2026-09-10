@@ -133,13 +133,30 @@ internal sealed class WindowsDirectAppLauncher : IDirectAppLauncher
             cancellationToken.ThrowIfCancellationRequested();
             CodexAppProbeState state =
                 WindowsCodexAppProbe.Probe(profile.AppKind);
-            if (state.RootCount > 1)
+            // ⚠ **这是个轮询循环，却在瞬时歧义上当场认输**（2026-09-11 修）。
+            //
+            // Codex 是打包应用，冷启动那几秒里会短暂出现多于一棵根进程树。
+            // 原来一看到就抛 APP_AMBIGUOUS —— 于是"等它就绪"这个循环把自己
+            // 唯一的用处扔掉了：第一按必失败、按钮灭掉，第二按才成。
+            // 用户 2026-09-11 连报两次「按钮闪了一下打开 codex 就灭」。
+            //
+            // 现在只在**熬到 deadline 仍然多棵**时才判 ambiguous —— 那才是
+            // 真的有两个实例；此前一律当作"还在起"，继续等。
+            //
+            // ⚠ 我上一版只改了 EnsureRunningAsync 那一处，而抛这个码的地方
+            // 一共有三处（这里、EnsureRunningAsync、RestartAsync）。
+            // 又一次"只改了一份副本"。
+            if (
+                state.RootCount > 1
+                && Stopwatch.GetTimestamp() >= deadline
+            )
             {
                 throw new DirectProtocolException(
                     "BW_COMPUTER_VOICE_DIRECT_APP_AMBIGUOUS",
-                    "检测到多个 Codex 进程树");
+                    "检测到多个 Codex 进程树（等满就绪超时仍未收敛）");
             }
-            if (state.ReadyTarget is CodexAppTarget target)
+            if (state.RootCount <= 1
+                && state.ReadyTarget is CodexAppTarget target)
             {
                 return new DirectAppTarget(
                     target.RootProcessId,
@@ -247,11 +264,15 @@ internal sealed class WindowsDirectAppLauncher : IDirectAppLauncher
         {
             cancellationToken.ThrowIfCancellationRequested();
             CodexAppProbeState state = WindowsCodexAppProbe.Probe(appKind);
-            if (state.RootCount > 1)
+            // 同上：重启后那几秒本来就会多棵并存，熬到 deadline 才算数。
+            if (
+                state.RootCount > 1
+                && Stopwatch.GetTimestamp() >= deadline
+            )
             {
                 throw new DirectProtocolException(
                     "BW_COMPUTER_VOICE_DIRECT_APP_AMBIGUOUS",
-                    "Codex 重启后出现多个进程树",
+                    "Codex 重启后一直是多个进程树",
                     retryable: true);
             }
             if (state.ReadyTarget is CodexAppTarget ready)

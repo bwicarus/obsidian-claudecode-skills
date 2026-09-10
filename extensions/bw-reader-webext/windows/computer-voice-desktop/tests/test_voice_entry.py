@@ -1156,6 +1156,25 @@ class TransientAmbiguityTests(unittest.TestCase):
             encoding="utf-8")
         self.assertIn("BW_COMPUTER_VOICE_DIRECT_APP_AMBIGUOUS", source)
 
+    def test_every_thrower_tolerates_the_transient(self):
+        """⚠ **抛这个码的地方一共三处**，只改一处等于没改。
+
+        2026-09-11 实测：我先改了 EnsureRunningAsync，用户再按还是灭 ——
+        因为真正拦住的是 WaitForUniqueReadyAsync，而它**本身就是个轮询循环**，
+        却在瞬时歧义上当场抛错，把自己唯一的用处扔掉了。
+        第三处在 RestartAsync 里，同样的形状。
+        """
+        source = (self.BRIDGE / "WindowsDirectAdapters.cs").read_text(
+            encoding="utf-8")
+        self.assertEqual(
+            source.count("BW_COMPUTER_VOICE_DIRECT_APP_AMBIGUOUS"), 3,
+            "抛这个码的地方数量变了 —— 先数清楚再改")
+        # 两个轮询循环里的那两处必须带 deadline 条件，否则又是当场认输
+        for marker in ("Stopwatch.GetTimestamp() >= deadline",):
+            self.assertGreaterEqual(
+                source.count(marker), 2,
+                "轮询循环里还有没等 deadline 就抛 ambiguous 的")
+
 
 class PacingOnlyDelaysTheBoardTests(unittest.TestCase):
     """出站间隔只该拦板面推送，不该拦有人在等结果的那几条。

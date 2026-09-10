@@ -477,6 +477,30 @@ def navigate(thread_id: str, pipe: tuple[str, str] | None = None
     return _tool_call(name, namespace, envelope,
                       "navigate_to_codex_page", {"threadId": thread_id})
 
+
+def bind_to(thread_id: str) -> dict[str, Any]:
+    """把通道锁到**指定**的这条对话。
+
+    ⚠ 用户 2026-09-11 定的顺序：
+
+        「先通知某个对话让他打开语音，然后锁定打开语音的对话，然后通知建立通道」
+
+    比"事先猜一条绑上去"稳：语音起来之前谁也不知道它会落在哪条对话上
+    （Codex 每次可能新开），而起来之后**它是谁是确定的**。
+    所以绑定不再是一次猜测，而是一次观测。
+
+    与 ensure_channel 的分工：那条用于"还没有通话时也要有个落脚点"
+    （提示板、待办这些）；这条用于"通话已经起来了，把通道钉到它身上"。
+    """
+    wanted = (thread_id or "").strip()
+    if not wanted:
+        raise ChannelError("没给要锁定的对话 id")
+    name, _namespace = usable_pipe()
+    result = register(name, wanted)
+    write_last_used(wanted)
+    return {"pipeName": name, "threadId": wanted,
+            "why": "锁定到正在通话的那条", "register": result}
+
 # ── 命令行入口（2026-09-10）─────────────────────────────────────────
 #
 # ⚠ 这个模块原来**只有库、没有入口**，于是唯一会调它的是 ReaderPC 那个 30 秒
@@ -502,9 +526,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--navigate", metavar="THREAD_ID",
         help="让 Codex 主窗口打开这条对话（按 F24 之前用，见 navigate）")
+    parser.add_argument(
+        "--bind", metavar="THREAD_ID",
+        help="把通道锁到这条对话（语音起来之后用，见 bind_to）")
     args = parser.parse_args(argv)
     try:
-        if args.navigate:
+        if args.bind:
+            result = bind_to(args.bind)
+        elif args.navigate:
             result = navigate(args.navigate)
         else:
             result = survey() if args.survey else ensure_channel()

@@ -909,6 +909,10 @@ internal sealed class DirectCodexVoiceControl :
         }
     }
 
+    /// 导航之后、按键之前的沉降。见调用处的说明：这是估的，不是量的。
+    internal static readonly TimeSpan NavigateSettleDelay =
+        TimeSpan.FromMilliseconds(1500);
+
     /// <summary>把 Codex 主窗口导航到最近那条语音对话。</summary>
     /// <remarks>
     /// 走 codex_channel.py --navigate（工具 navigate_to_codex_page），
@@ -1012,6 +1016,19 @@ internal sealed class DirectCodexVoiceControl :
         // ⚠ 尽力而为：导航不成也照样按键 —— 顶多回到原来的行为，
         // 而把它做成硬前置会让"打不开语音"多一个失败源。
         await NavigateToLatestVoiceChatAsync(cancellationToken)
+            .ConfigureAwait(false);
+        // ⚠ 导航是**异步生效**的：工具回 {"navigated":true} 只说明请求被受理，
+        // 界面切过去还要一会儿。紧接着按 F24，App 很可能还停在原来的位置 ——
+        // 那就又是"新开一条"。用户 2026-09-11：「这次不知道为何又打开了一个
+        // 新的对话」，而账本显示导航确实成功了。
+        //
+        // ⚠ 1.5 秒是**估的**，不是量出来的。判据应该是"界面真的切过去了"，
+        // 可现有工具只回受理不回完成。先用它换回可用，等实测数据再收
+        // —— 这条注释就是给下一个人的凭据。
+        // ⚠ 不走 delayAsync：那个委托是**冷启动沉降**的注入点，自检逐次断言它
+        // 收到的时长等于 RestartReadySettleDelay。把另一件事塞进同一个通道，
+        // 那条断言就会因为一个无关的等待而红 —— 刚才就红了一次。
+        await Task.Delay(NavigateSettleDelay, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -3807,6 +3824,15 @@ internal sealed class DirectBridgeProtocolSession
                     {
                         // 起来了 = 这一串失败到此为止。
                         WriteVoiceEntryStreak(0);
+                        // ⚠ **把通道锁到刚起来的那条对话**（用户 2026-09-11
+                        // 定的顺序：「先通知某个对话让他打开语音，然后锁定打开
+                        // 语音的对话，然后通知建立通道」）。
+                        //
+                        // 事先猜一条绑上去是不可能猜准的 —— Codex 每次可能新开
+                        // 一条，而语音起来**之后**它是谁是确定的。绑定于是从
+                        // 一次猜测变成一次观测。
+                        await LockChannelToLiveCallAsync(lifetime.Token)
+                            .ConfigureAwait(false);
                         return;
                     }
                 }
@@ -4135,6 +4161,72 @@ internal sealed class DirectBridgeProtocolSession
             ReaderCodexPush.NoteVoiceEntryOutcome(
                 requestId, false,
                 "放弃了，但写不进梯子状态：" + exception.GetType().Name);
+        }
+    }
+
+    /// <summary>把通道锁到正在通话的那条对话。</summary>
+    /// <remarks>
+    /// 只在**确证在通话**时做（InCallThreadIdIfActive）：散场之后的 lastGood
+    /// 不该被钉成绑定，那会让没有通话时的板面推送去骚扰一条已经结束的对话。
+    ///
+    /// 与绑定相同就不动手 —— 重复登记会把接上提醒再发一遍，那正是用户点过名的
+    /// "复数通知"。
+    /// </remarks>
+    private static async Task LockChannelToLiveCallAsync(
+        CancellationToken cancellationToken)
+    {
+        string thread =
+            DirectCodexVoiceControl.InCallThreadIdIfActive();
+        if (thread.Length == 0) return;
+        if (ReaderCodexEndpoint.Current() is { } bound
+            && string.Equals(bound.ThreadId, thread, StringComparison.Ordinal))
+        {
+            return;                       // 已经锁着它了
+        }
+        string script = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "BWReader",
+            "codex_channel.py");
+        if (!File.Exists(script)) return;
+        try
+        {
+            ProcessStartInfo info = new()
+            {
+                FileName = DirectBridgeProtocolSession.PythonExecutable(),
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            info.ArgumentList.Add(script);
+            info.ArgumentList.Add("--bind");
+            info.ArgumentList.Add(thread);
+            using Process? child = Process.Start(info);
+            if (child is null) return;
+            using CancellationTokenSource budget =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+            budget.CancelAfter(TimeSpan.FromSeconds(20));
+            string output = await child.StandardOutput
+                .ReadToEndAsync(budget.Token).ConfigureAwait(false);
+            await child.WaitForExitAsync(budget.Token).ConfigureAwait(false);
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                "lock:" + (thread.Length > 13 ? thread[..13] : thread),
+                child.ExitCode == 0,
+                (child.ExitCode == 0
+                    ? "通话起来了，通道已锁到它："
+                    : "锁定通道失败：")
+                + (output.Length > 120 ? output[..120] : output).Trim());
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                "lock", false, "锁定脚本跑不起来：" + exception.GetType().Name);
         }
     }
 
