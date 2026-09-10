@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import struct
+import subprocess
 import urllib.error
 import urllib.request
 import uuid
@@ -81,6 +82,20 @@ def candidate_pipes() -> list[str]:
         return []
 
 
+def codex_running() -> bool:
+    """Codex 桌面端在不在跑。只用来把错误话说准，不作为任何判据。"""
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-Process ChatGPT -ErrorAction SilentlyContinue"
+             " | Measure-Object).Count"],
+            capture_output=True, text=True, timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (completed.stdout or "").strip() not in ("", "0")
+
+
 def usable_pipe() -> tuple[str, str]:
     """挑一条**自证可用**的管道，返回 (管道名, 工具 namespace)。
 
@@ -108,8 +123,17 @@ def usable_pipe() -> tuple[str, str]:
             tried.append("%s（拿不到 namespace）" % name[-12:])
             continue
         return name, str(namespace)
+    if not tried:
+        # ⚠ **说清楚是哪一种"没有"**：一条候选都没有，多半是 Codex 没在跑，
+        # 而"没有可用的通知管道"这句话会让人去查管道、查权限、查我们的代码 ——
+        # 全是错的方向。分辨它只要看一眼进程。
+        raise ChannelError(
+            "Codex 没在跑（一条候选管道都没有），先打开它"
+            if not codex_running() else
+            "Codex 在跑，但没有任何 codex-browser-use 管道 —— "
+            "可能它还在启动，稍等再试")
     raise ChannelError(
-        "没有可用的通知管道；试过：%s" % ("；".join(tried) or "（一条都没有）"))
+        "有 %d 条候选管道但都不能用：%s" % (len(tried), "；".join(tried)))
 
 
 def _tool_call(pipe_name: str, namespace: str, thread_id: str,

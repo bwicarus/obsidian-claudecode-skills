@@ -732,6 +732,49 @@ class WiredUpTests(unittest.TestCase):
         self.assertIn("ladder.startGaveUp", reader.read_text(encoding="utf-8"))
 
 
+class ShortcutFallbackTests(unittest.TestCase):
+    """F24 兜底开关（2026-09-10 用户：「把 f24 兜底作为一个可选开关」）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.runtime = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_default_is_on_so_nothing_silently_changes(self):
+        """多一个开关不该悄悄改掉现在能用的行为。"""
+        self.assertTrue(KEEPALIVE.read_shortcut_fallback(self.runtime))
+        self.assertTrue(KEEPALIVE.DEFAULT_FALLBACK)
+
+    def test_round_trip_and_bad_file_falls_back_to_on(self):
+        """一个坏掉的偏好不该让语音开不了。"""
+        KEEPALIVE.write_shortcut_fallback(False, self.runtime)
+        self.assertFalse(KEEPALIVE.read_shortcut_fallback(self.runtime))
+        KEEPALIVE.fallback_path(self.runtime).write_text(
+            '{"contract":"wrong","enabled":false}', encoding="utf-8")
+        self.assertTrue(KEEPALIVE.read_shortcut_fallback(self.runtime))
+
+    def test_bridge_reads_the_same_file_and_defaults_to_on(self):
+        source = (Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
+                  / "DirectBridgeProtocol.cs").read_text(encoding="utf-8")
+        gate = source.split("private static bool ShortcutFallbackEnabled")[1]
+        gate = gate.split("private static void StartVoiceFromBridge")[0]
+        self.assertIn("voice-shortcut-fallback.json", gate)
+        self.assertIn("reader-voice-shortcut-fallback/1", gate)
+        # 读不到一律当开 —— 每条出路都 return true。
+        self.assertNotIn("return false", gate)
+
+    def test_declining_to_press_still_leaves_a_trace(self):
+        """"通道不通"与"通道不通且我们选择不兜底"在外面看长得一样。
+
+        后者是用户自己设的，不该被当成故障去查 —— 所以不按也要记一笔。
+        """
+        source = (Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
+                  / "DirectBridgeProtocol.cs").read_text(encoding="utf-8")
+        body = source.split("private static void StartVoiceFromBridge")[1][:900]
+        self.assertIn("ShortcutFallbackEnabled()", body)
+        self.assertIn("NoteBridgeStart", body.split("if (!Shortcut")[1][:400])
+
+
 class ChannelChoiceTests(unittest.TestCase):
     """通道连哪条对话：一份设置，两个入口。"""
 
@@ -798,6 +841,45 @@ class ChannelChoiceTests(unittest.TestCase):
         picked = CHANNEL.choose(rows, CHANNEL.MODE_LAST_USED,
                                 runtime=self.runtime)
         self.assertIn("上次连的", picked["why"])
+
+    def test_channel_heals_itself_without_anyone_typing(self):
+        """绑定失效就自己重建 —— 不该等用户在 App 里打字。
+
+        管道名每次 Codex 重启就变，而"通道断了"没有任何提示：表现只是挂断、
+        状态回报、提示板悄悄不工作。所以策略环每轮看一眼，坏了就修。
+        """
+        launcher = (Path(__file__).resolve().parents[1]
+                    / "readerpc_launcher.py").read_text(encoding="utf-8")
+        self.assertIn("_heal_channel_if_needed", launcher)
+        heal = launcher.split("def _heal_channel_if_needed")[1]
+        heal = heal.split("def _voice_auto_close_tick")[0]
+        self.assertIn("codex_channel.ensure_channel", heal)
+        self.assertIn("invalidAtMs", heal)      # 判据只看绑定本身
+        self.assertIn("_CHANNEL_HEAL_RETRY_SECONDS", heal)  # 修不好要退避
+
+    def test_healing_runs_even_when_auto_close_is_off(self):
+        """挂断/状态回报/提示板都要用这条通道 —— 跟自动关闭开没开无关。"""
+        launcher = (Path(__file__).resolve().parents[1]
+                    / "readerpc_launcher.py").read_text(encoding="utf-8")
+        tick = launcher.split("def _voice_auto_close_tick")[1][:2000]
+        heal_at = tick.index("_heal_channel_if_needed")
+        gate_at = tick.index('prefs.get("voiceAutoClose")')
+        self.assertLess(heal_at, gate_at, "自愈被关在了自动关闭的开关后面")
+
+    def test_no_pipes_says_which_kind_of_nothing(self):
+        """"一条都没有"要说清是哪一种 —— 多半是 Codex 没在跑。
+
+        2026-09-10 实测撞到：设置页显示「没有可用的通知管道；试过：（一条都
+        没有）」，让人去查管道、查权限、查我们的代码，全是错的方向。
+        分辨它只要看一眼进程。
+        """
+        source = (Path(__file__).resolve().parents[1]
+                  / "codex_channel.py").read_text(encoding="utf-8")
+        picker = source.split("def usable_pipe")[1].split("def _tool_call")[0]
+        self.assertIn("codex_running()", picker)
+        self.assertIn("没在跑", picker)
+        # 有候选但都不能用是**另一种**情况，要逐条说原因。
+        self.assertIn("都不能用", picker)
 
     def test_pipe_must_prove_itself(self):
         """并存的管道里只有一条是活的 —— 按名字或顺序猜都会挑错。"""

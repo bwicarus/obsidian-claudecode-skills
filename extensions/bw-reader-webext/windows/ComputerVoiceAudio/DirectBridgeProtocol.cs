@@ -3354,6 +3354,8 @@ internal sealed class DirectBridgeProtocolSession
             using CancellationTokenSource lifetime = new(
                 VoiceEntryRetryWindow + VoiceEntryRetryInterval);
             DateTime deadline = DateTime.UtcNow + VoiceEntryRetryWindow;
+            // 自愈周期 30 秒，给它一轮多一点。
+            DateTime healWindow = DateTime.UtcNow + TimeSpan.FromSeconds(40);
             while (true)
             {
                 try
@@ -3381,7 +3383,13 @@ internal sealed class DirectBridgeProtocolSession
                 // 绑定已判死就别再等了 —— 重试救不回一条不存在的管道，
                 // 而每一轮都要干等满一个连接超时。用户看到的是按钮白闪 90 秒，
                 // 然后才轮到兜底（2026-09-10 实测：八次×14 秒）。
-                if (ReaderCodexEndpoint.Current() is null)
+                //
+                // ⚠ 但**给自愈留一点时间**：ReaderPC 每 30 秒会去重新发现管道
+                // 并登记。实测撞到过一次 48 秒之差 —— 按钮按下时通道刚好还没
+                // 重连上，于是走了兜底 F24，而 48 秒后通道就自己好了。
+                // 所以头一轮不立刻放弃，等一个自愈周期再看。
+                if (ReaderCodexEndpoint.Current() is null
+                    && DateTime.UtcNow >= healWindow)
                 {
                     StartVoiceFromBridge(control, requestId);
                     return;
@@ -3430,10 +3438,48 @@ internal sealed class DirectBridgeProtocolSession
     /// 在外面再按一次的含义是不确定的（可能补上一次失败，也可能把刚起来的
     /// 通话按掉）。成没成如实记进账本，由 App 决定要不要让用户再点。
     /// </remarks>
+    /// F24 兜底开关（2026-09-10 用户：「把 f24 兜底作为一个可选开关」）。
+    /// 读不到一律当**开** —— 一个坏掉/缺失的偏好不该让语音开不了。
+    private static bool ShortcutFallbackEnabled()
+    {
+        string? runtime = ReaderAttentionBoard.RuntimeDirectory;
+        if (string.IsNullOrEmpty(runtime)) return true;
+        try
+        {
+            string path = Path.Combine(
+                runtime, "voice-shortcut-fallback.json");
+            if (!File.Exists(path)) return true;
+            if (JsonNode.Parse(File.ReadAllText(path)) is not JsonObject value)
+            {
+                return true;
+            }
+            if ((string?)value["contract"]
+                != "reader-voice-shortcut-fallback/1")
+            {
+                return true;
+            }
+            return value["enabled"] is not JsonValue flag
+                || !flag.TryGetValue(out bool enabled) || enabled;
+        }
+        catch (Exception)
+        {
+            return true;
+        }
+    }
+
     private static void StartVoiceFromBridge(
         IDirectCodexVoiceControl control,
         string requestId)
     {
+        if (!ShortcutFallbackEnabled())
+        {
+            // ⚠ 不按也要留痕：不然"通道不通"与"通道不通且我们选择不兜底"
+            // 在外面看长得一样，而后者是用户自己设的，不该被当成故障查。
+            ReaderCodexPush.NoteBridgeStart(
+                requestId, false,
+                "推送没送到，且 F24 兜底在设置里是关的 —— 没有按任何键");
+            return;
+        }
         _ = Task.Run(async () =>
         {
             using CancellationTokenSource lifetime = new(VoiceEntryBudget);

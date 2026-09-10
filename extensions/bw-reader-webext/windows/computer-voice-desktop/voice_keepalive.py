@@ -65,6 +65,65 @@ def should_keep_alive(voice_enabled: bool, start_mode: object) -> bool:
         normalize_start_mode(start_mode) == START_MODE_KEEP_ALIVE)
 
 
+#: F24 兜底开关（2026-09-10 用户：「把 f24 兜底作为一个可选开关」）。
+#:
+#: 推送送不出去时，桥要不要自己按一次快捷键把语音开起来。
+#:   开（默认）= 现有行为：通道断着也能开语音，代价是"到底走了哪条路"要看账本
+#:   关         = 只走通知通道；通道不通就如实报失败，不按任何键
+#:
+#: ⚠ 默认保持**开** —— 多一个开关不该悄悄改掉现在能用的行为。
+#: ⚠ 跟"启用语音功能"是两件事：那个决定语音链装不装载，这个只决定
+#:   推送失败之后要不要退而求其次。
+FALLBACK_FILE = "voice-shortcut-fallback.json"
+FALLBACK_CONTRACT = "reader-voice-shortcut-fallback/1"
+DEFAULT_FALLBACK = True
+
+
+def fallback_path(runtime: Path | None = None) -> Path:
+    if runtime is not None:
+        return runtime / FALLBACK_FILE
+    root = os.environ.get("BW_BRIDGE_RUNTIME")
+    base = (Path(root) if root
+            else Path.home() / "bw-computer-voice-bridge" / "runtime")
+    return base / FALLBACK_FILE
+
+
+def read_shortcut_fallback(runtime: Path | None = None) -> bool:
+    """兜底开着吗。读不到一律回默认（开）—— 一个坏掉的偏好不该让语音开不了。"""
+    try:
+        value = json.loads(
+            fallback_path(runtime).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return DEFAULT_FALLBACK
+    if (not isinstance(value, dict)
+            or value.get("contract") != FALLBACK_CONTRACT
+            or not isinstance(value.get("enabled"), bool)):
+        return DEFAULT_FALLBACK
+    return value["enabled"]
+
+
+def write_shortcut_fallback(enabled: bool,
+                            runtime: Path | None = None) -> Path:
+    """原子写。跟保活意图同一套写法 —— 半个文件等于让读的人拿到默认值。"""
+    path = fallback_path(runtime)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"contract": FALLBACK_CONTRACT,
+                          "enabled": bool(enabled)}, ensure_ascii=False)
+    handle, temporary = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as writer:
+            writer.write(payload)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    return path
+
+
 def keepalive_path(runtime: Path | None = None) -> Path:
     """意图文件的位置。runtime = 桥的 runtime 目录。"""
     if runtime is not None:

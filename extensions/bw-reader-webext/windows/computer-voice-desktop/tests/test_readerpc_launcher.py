@@ -208,6 +208,25 @@ class ReaderPCLauncherTests(unittest.TestCase):
             # 没传的那些回默认，不会因为漏传就变成关
             self.assertTrue(prefs["voiceAutoCloseOnIdle"])
 
+    def test_worker_events_are_tuples_not_callables(self) -> None:
+        """事件队列要的是**二元组**，塞回调会当场炸。
+
+        2026-09-10：通知通道那两个后台任务往队列里塞了 lambda，
+        `kind, value = self.events.get_nowait()` 解包失败 —— 表现是
+        "刷新列表永远没结果"，而且不报错，因为异常在泵里被吞了。
+        """
+        import re
+        source = (Path(__file__).resolve().parents[1]
+                  / "readerpc_launcher.py").read_text(encoding="utf-8")
+        bad = re.findall(r"events\.put\(\s*lambda", source)
+        self.assertEqual(bad, [], "事件队列里还有 %d 处塞回调" % len(bad))
+        # 每一种 put 进去的 kind 都要在泵里有对应分支，否则同样是静默丢弃。
+        kinds = set(re.findall(r'events\.put\(\(\s*"([a-z-]+)"', source))
+        pump = source.split("def _drain_events")[1].split("\n    def ")[0]
+        for kind in sorted(kinds):
+            self.assertIn('"%s"' % kind, pump,
+                          "事件 %s 没有人处理" % kind)
+
     def test_persist_preferences_carries_every_key(self) -> None:
         """persist_preferences 必须搬**全部**键，一个都不能漏。
 

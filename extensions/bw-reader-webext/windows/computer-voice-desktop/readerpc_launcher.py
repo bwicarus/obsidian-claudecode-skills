@@ -74,7 +74,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.169"
+APP_VERSION = "0.1.172"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status
@@ -1132,6 +1132,19 @@ class ReaderPCWindow:
         ("指定对话", codex_channel.MODE_TITLE),
     )
 
+    def on_shortcut_fallback_changed(self) -> None:
+        """写共享文件。桥每次要兜底前都读它，所以不用重启服务。"""
+        try:
+            voice_keepalive.write_shortcut_fallback(
+                bool(self.shortcut_fallback.get()))
+        except OSError as error:
+            self.channel_note.set("写设置失败：" + str(error)[:60])
+            return
+        self.channel_note.set(
+            "F24 兜底已开：推送送不到时桥会自己按一次"
+            if self.shortcut_fallback.get()
+            else "F24 兜底已关：推送送不到就如实报失败，不按任何键")
+
     def _channel_mode_from_label(self, label: str) -> str:
         for text, mode in self.CHANNEL_MODE_LABELS:
             if text == label:
@@ -1175,7 +1188,7 @@ class ReaderPCWindow:
                     result.get("why") or result["mode"])
             except Exception as error:          # noqa: BLE001
                 note = "建立失败：" + str(error)[:80]
-            self.events.put(lambda: self.channel_note.set(note))
+            self.events.put(("channel-note", note))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1193,12 +1206,7 @@ class ReaderPCWindow:
             except Exception as error:          # noqa: BLE001
                 titles, note = [], "查不到：" + str(error)[:80]
 
-            def apply() -> None:
-                if titles:
-                    self.channel_title_box.configure(values=titles)
-                self.channel_note.set(note)
-
-            self.events.put(apply)
+            self.events.put(("channel-choices", (titles, note)))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1363,6 +1371,10 @@ class ReaderPCWindow:
         # 「通知通道连哪条对话」。⚠ 真相在**桥 runtime 的共享文件**里，不在
         # ReaderPC 偏好里 —— App 也要读写同一份（用户 2026-09-10：「app和服务器
         # 设置页的设置需要是相同的才行」）。存两份迟早只改一边。
+        # F24 兜底开关。⚠ 跟通道选择一样存在**桥 runtime 的共享文件**里，
+        # 不进 ReaderPC 偏好 —— App 上要有同一个开关。
+        self.shortcut_fallback = tk.BooleanVar(
+            value=voice_keepalive.read_shortcut_fallback())
         _channel = codex_channel.read_choice()
         self.channel_mode = tk.StringVar(value=_channel["mode"])
         self.channel_title = tk.StringVar(value=_channel["title"])
@@ -1485,7 +1497,22 @@ class ReaderPCWindow:
             "Flask 5000 与语音/手表/远程浏览器/MCP 四个 sidecar · 目前由旧守护托管,这里先观测",
             None,
         )
-        server_row = ttk.Frame(outer)
+        # ── 选项分页（2026-09-10 用户：「设置页现在内容太多了」）──────────
+        #
+        # ⚠ 上面那四行状态**不进 tab**：它们是仪表盘，任何时候都该一眼看到。
+        # 进 tab 的只是"设置"——那些看一次、改一次、之后不再关心的东西。
+        tabs = ttk.Notebook(outer)
+        tabs.pack(fill="both", expand=True, pady=(6, 0))
+        tab_voice = ttk.Frame(tabs, padding=(2, 8))
+        tab_channel = ttk.Frame(tabs, padding=(2, 8))
+        tab_service = ttk.Frame(tabs, padding=(2, 8))
+        tab_display = ttk.Frame(tabs, padding=(2, 8))
+        tabs.add(tab_voice, text="语音")
+        tabs.add(tab_channel, text="通知通道")
+        tabs.add(tab_service, text="服务")
+        tabs.add(tab_display, text="显示与启动")
+
+        server_row = ttk.Frame(tab_service)
         server_row.pack(fill="x", pady=(0, 2))
         ttk.Checkbutton(
             server_row,
@@ -1494,7 +1521,7 @@ class ReaderPCWindow:
             command=self.on_manage_server_changed,
         ).pack(side="left")
 
-        options = ttk.Frame(outer)
+        options = ttk.Frame(tab_service)
         options.pack(fill="x", pady=(8, 2))
         ttk.Checkbutton(
             options,
@@ -1507,7 +1534,7 @@ class ReaderPCWindow:
             text="打开音频与连接配置",
             command=self.open_legacy_voice_settings,
         ).pack(side="right")
-        mode_row = ttk.Frame(outer)
+        mode_row = ttk.Frame(tab_service)
         mode_row.pack(fill="x", pady=(2, 2))
         ttk.Checkbutton(
             mode_row,
@@ -1515,7 +1542,7 @@ class ReaderPCWindow:
             variable=self.bridge_only,
             command=self.on_bridge_only_changed,
         ).pack(side="left")
-        voice_mode_row = ttk.Frame(outer)
+        voice_mode_row = ttk.Frame(tab_voice)
         voice_mode_row.pack(fill="x", pady=(2, 2))
         ttk.Checkbutton(
             voice_mode_row,
@@ -1529,7 +1556,7 @@ class ReaderPCWindow:
         # "何时挂断"是两件独立的事。第一版放在自动关闭那四条条件后面(同样缩进),
         # 读起来就成了"第五条关闭条件" —— 而它跟智能开启开不开毫无关系。
         # 缩进指向谁,就是说明的一部分。
-        start_mode_row = ttk.Frame(outer)
+        start_mode_row = ttk.Frame(tab_voice)
         start_mode_row.pack(fill="x", pady=(2, 2), padx=(24, 0))
         ttk.Checkbutton(
             start_mode_row,
@@ -1538,10 +1565,20 @@ class ReaderPCWindow:
             variable=self.voice_one_shot_start,
             command=self.on_voice_start_mode_changed,
         ).pack(side="left")
+        fallback_row = ttk.Frame(tab_voice)
+        fallback_row.pack(fill="x", pady=(2, 2), padx=(24, 0))
+        ttk.Checkbutton(
+            fallback_row,
+            text="└ F24 兜底：通知送不到时，由电脑自己按一次把语音开起来"
+                 "（关 = 只走通知，送不到就报失败）",
+            variable=self.shortcut_fallback,
+            command=self.on_shortcut_fallback_changed,
+        ).pack(side="left")
+
         # ── 通知通道（2026-09-10）──────────────────────────────────
         # 桥往 Codex 推消息（挂断请求、状态查询、提示板）走的那条通道连哪段对话。
         # ⚠ 这一组存的是**桥 runtime 的共享文件**，App 上是同一份设置。
-        channel_row = ttk.Frame(outer)
+        channel_row = ttk.Frame(tab_channel)
         channel_row.pack(fill="x", pady=(6, 1))
         ttk.Label(channel_row, text="通知通道连到").pack(side="left")
         self.channel_mode_label = tk.StringVar(
@@ -1566,7 +1603,7 @@ class ReaderPCWindow:
             channel_row, text="刷新列表",
             command=self.refresh_channel_choices).pack(side="left")
 
-        channel_note_row = ttk.Frame(outer)
+        channel_note_row = ttk.Frame(tab_channel)
         channel_note_row.pack(fill="x", pady=(0, 2), padx=(24, 0))
         ttk.Label(
             channel_note_row, textvariable=self.channel_note,
@@ -1575,7 +1612,7 @@ class ReaderPCWindow:
         # ── 语音智能关闭（2026-09-09 用户拍板）────────────────────────
         # 两种模式：这一项关着 = 持续开启；打开 = 智能开启，由下面四条
         # **用户自己勾**的条件决定何时挂断。只关不开 —— 启动仍无解。
-        auto_close_row = ttk.Frame(outer)
+        auto_close_row = ttk.Frame(tab_voice)
         auto_close_row.pack(fill="x", pady=(6, 2))
         ttk.Checkbutton(
             auto_close_row,
@@ -1583,7 +1620,7 @@ class ReaderPCWindow:
             variable=self.voice_auto_close_vars["voiceAutoClose"],
             command=self.on_voice_auto_close_changed,
         ).pack(side="left")
-        idle_row = ttk.Frame(outer)
+        idle_row = ttk.Frame(tab_voice)
         idle_row.pack(fill="x", pady=(0, 2), padx=(24, 0))
         ttk.Label(idle_row, text="闲置超过").pack(side="left")
         ttk.Spinbox(
@@ -1598,7 +1635,7 @@ class ReaderPCWindow:
         ttk.Label(idle_row, text="分钟（「长时间没在读」也用这个数）").pack(
             side="left")
         for key, spec in voice_autoclose.CONDITIONS.items():
-            condition_row = ttk.Frame(outer)
+            condition_row = ttk.Frame(tab_voice)
             condition_row.pack(fill="x", pady=(0, 1), padx=(24, 0))
             ttk.Checkbutton(
                 condition_row,
@@ -1607,7 +1644,7 @@ class ReaderPCWindow:
                 command=self.on_voice_auto_close_changed,
             ).pack(side="left")
 
-        orb_row = ttk.Frame(outer)
+        orb_row = ttk.Frame(tab_display)
         orb_row.pack(fill="x", pady=(2, 2))
         ttk.Checkbutton(
             orb_row,
@@ -1615,7 +1652,7 @@ class ReaderPCWindow:
             variable=self.hide_voice_orb,
             command=self.on_hide_orb_changed,
         ).pack(side="left")
-        viewer_row = ttk.Frame(outer)
+        viewer_row = ttk.Frame(tab_display)
         viewer_row.pack(fill="x", pady=(2, 2))
         ttk.Checkbutton(
             viewer_row,
@@ -1623,7 +1660,7 @@ class ReaderPCWindow:
             variable=self.snapshot_hidden,
             command=self.on_snapshot_hidden_changed,
         ).pack(side="left")
-        boot_row = ttk.Frame(outer)
+        boot_row = ttk.Frame(tab_display)
         boot_row.pack(fill="x", pady=(2, 2))
         ttk.Checkbutton(
             boot_row,
@@ -1869,6 +1906,18 @@ class ReaderPCWindow:
                     messagebox.showerror(PRODUCT_NAME, detail)
                     continue
                 if self.closing and kind in {"task-error", "task-success"}:
+                    continue
+                # 通知通道那一组（2026-09-10）。
+                # ⚠ 这个队列要的是**二元组**，不是回调 —— 第一版往里塞了
+                # lambda，解包当场炸，表现是"刷新列表永远没结果"。
+                if kind == "channel-note":
+                    self.channel_note.set(str(value))
+                    continue
+                if kind == "channel-choices":
+                    titles, note = value
+                    if titles:
+                        self.channel_title_box.configure(values=titles)
+                    self.channel_note.set(note)
                     continue
                 if kind == "intent-rollback":
                     self.bridge_only.set(
@@ -2388,6 +2437,58 @@ class ReaderPCWindow:
         except Exception as exc:   # noqa: BLE001
             _boot_log("语音梯子状态发布失败: " + type(exc).__name__)
 
+    #: 通道修不好时的重试间隔。Codex 关着时修不好是正常的，
+    #: 每 30 秒去枚举一次管道纯属白费。
+    _CHANNEL_HEAL_RETRY_SECONDS = 120.0
+
+    def _heal_channel_if_needed(self) -> None:
+        """绑定失效/缺失就重新发现登记。
+
+        ⚠ **管道名每次 Codex 重启就变**（实测 600d7d50 → 三条全新的），所以
+        绑定不能指望一直有效。原来只能靠用户在 App 里打一句话来重建 ——
+        而"通道断了"这件事没有任何提示，表现只是挂断/状态回报悄悄不工作。
+
+        判据只看绑定本身：`invalidAtMs` 有值（推送连不上时置的）或文件不在。
+        通道好着的时候一次管道 I/O 都不做。
+        """
+        if getattr(self, "_channel_heal_busy", False):
+            return
+        now = time.monotonic()
+        last = getattr(self, "_channel_heal_at", 0.0)
+        if last and now - last < self._CHANNEL_HEAL_RETRY_SECONDS:
+            return
+        try:
+            binding = json.loads(
+                (self.readerpc_paths.local_root
+                 / "codex-push-binding.json").read_text("utf-8"))
+            healthy = binding.get("invalidAtMs") is None
+        except (OSError, ValueError, TypeError):
+            healthy = False
+        if healthy:
+            return
+        # ⚠ 桥自己停着的时候修不了 —— 登记要 POST 给它（2026-09-10 实测：
+        # 装新版那 40 秒里自愈每轮都失败，日志里只留下"连不上桥"）。
+        # 先看一眼，省下无谓的枚举与一条误导性的失败记录。
+        status = self._voice_status()
+        if status.service_online is not True:
+            return
+        self._channel_heal_at = now
+        self._channel_heal_busy = True
+
+        def run() -> None:
+            try:
+                result = codex_channel.ensure_channel()
+                _boot_log("通知通道已重建：%s（%s）" % (
+                    result.get("title") or result.get("threadId", "")[:8],
+                    result.get("why") or result.get("mode")))
+            except Exception as exc:   # noqa: BLE001
+                # 修不好通常是 Codex 没在跑 —— 说一句就够，别刷屏。
+                _boot_log("通知通道重建失败：" + str(exc)[:120])
+            finally:
+                self._channel_heal_busy = False
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _voice_auto_close_tick(self) -> None:
         """语音智能关闭的策略环（2026-09-09 用户拍板）。
 
@@ -2403,6 +2504,10 @@ class ReaderPCWindow:
             # 梯子状态每轮都发布 —— 它跟自动关闭开没开无关：界面要在**任何**
             # 时候都能说出"现在到第几级、卡在哪"，包括智能关闭整个关着的时候。
             self._publish_voice_ladder(prefs)
+            # 通道自愈：绑定失效了就自己重新发现登记（2026-09-10）。
+            # ⚠ 跟自动关闭开没开**无关** —— 挂断请求、状态回报、提示板都要用
+            # 这条通道，它断着的时候那些能力全是哑的，而哑掉没有任何提示。
+            self._heal_channel_if_needed()
             if not prefs.get("voiceAutoClose"):
                 # 持续开启模式。顺手清掉这一通的记忆，免得开关来回拨之后
                 # 拿着上一通的起点地点去判断。
