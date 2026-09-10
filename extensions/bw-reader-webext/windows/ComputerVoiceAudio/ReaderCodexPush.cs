@@ -812,8 +812,21 @@ internal static class ReaderCodexPush
         await OutboundGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            // ⚠ **时间敏感的那几条不排队等间隔**（2026-09-11 实测）。
+            //
+            // 间隔是为了防"通道恢复时几条挤成一堆"，那说的是**板面**推送。
+            // 可它一视同仁之后就卡在了起语音的关键路径上：01:52 那次实测
+            //   01:52:16 通道重建 → 01:52:22 接上时的全量板（+6s）
+            //   → 01:52:28 才轮到起语音（又 +6s）
+            // 30 秒总时长里 **12 秒是这个间隔**，而用户的原话是"好像在那里
+            // 等待了很多秒"。
+            //
+            // 起语音、挂断、状态查询都是**有人在等结果**的动作；板面推送不是。
+            // 所以只有板面排队。
+            bool paced = purpose.StartsWith("reader-board", StringComparison.Ordinal)
+                || purpose == "reader-board-push";
             TimeSpan since = DateTime.UtcNow - _lastOutboundAtUtc;
-            if (since < OutboundMinimumGap)
+            if (paced && since < OutboundMinimumGap)
             {
                 await Task.Delay(
                     OutboundMinimumGap - since,

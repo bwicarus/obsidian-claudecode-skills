@@ -952,7 +952,10 @@ class VoiceEntryStormTests(unittest.TestCase):
         source = (self.BRIDGE / "ReaderCodexPush.cs").read_text(
             encoding="utf-8")
         self.assertIn("OutboundMinimumGap", source)
-        gate = source.split("private static async Task SendAsync")[1][:900]
+        # ⚠ 取到方法结束，别截固定字数 —— 注释一长就把要找的东西挤出窗口，
+        # 于是测试红了但代码是对的。这个写法今天已经骗过我三次。
+        gate = source.split("private static async Task SendAsync")[1]
+        gate = gate[:gate.index("private static async Task SendWithinGateAsync")]
         self.assertIn("OutboundGate.WaitAsync", gate)
         self.assertIn("OutboundMinimumGap", gate)
 
@@ -1122,6 +1125,59 @@ class OpenTheThreadBeforePressingTests(unittest.TestCase):
                                 " PrepareInitialStartAsync")]
         self.assertIn("catch (Exception exception)", body)
         self.assertNotIn("throw", body)
+
+
+class TransientAmbiguityTests(unittest.TestCase):
+    """「暂时看着有两棵进程树」不是结论，是瞬时状态。
+
+    ⚠ 用户 2026-09-11：「codex 没有启动时按下 app 内按钮会启动 codex 然后
+    按钮直接灭掉，重按后虽然会正常流程打开语音」。失败账本里每一次"第二按
+    才成"之前都躺着一条 APP_AMBIGUOUS stage=start
+    （00:17:25 / 00:18:12 / 00:59:40 / 01:30:14 / 01:52:00）。
+    Codex 是打包应用，启动/退出过程中会短暂出现多于一棵根进程树。
+    """
+
+    BRIDGE = Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
+
+    def test_it_waits_for_the_tree_to_settle(self):
+        source = (self.BRIDGE / "WindowsDirectAdapters.cs").read_text(
+            encoding="utf-8")
+        body = source.split("public async Task<bool> EnsureRunningAsync")[1]
+        body = body[:body.index("public async Task<DirectAppTarget>")]
+        self.assertIn("AmbiguousSettleAttempts", body, "没有稳定期就直接判死")
+        # 稳定期必须**排在**抛 APP_AMBIGUOUS 之前
+        settle = body.index("AmbiguousSettleAttempts")
+        raise_at = body.index("APP_AMBIGUOUS")
+        self.assertLess(settle, raise_at, "先抛错再等，等于没等")
+
+    def test_a_real_second_instance_is_still_refused(self):
+        """拒绝本身是对的 —— 一直是两棵才判 ambiguous。"""
+        source = (self.BRIDGE / "WindowsDirectAdapters.cs").read_text(
+            encoding="utf-8")
+        self.assertIn("BW_COMPUTER_VOICE_DIRECT_APP_AMBIGUOUS", source)
+
+
+class PacingOnlyDelaysTheBoardTests(unittest.TestCase):
+    """出站间隔只该拦板面推送，不该拦有人在等结果的那几条。
+
+    ⚠ 2026-09-11 实测：01:52 那次从按下到语音起来 30 秒，其中 **12 秒**是这个
+    间隔（接上时的全量板 +6s，然后起语音又 +6s）。用户原话「好像在那里等待了
+    很多秒」。间隔本来是防"通道恢复时几条挤成一堆"，那说的是板面。
+    """
+
+    BRIDGE = Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
+
+    def test_only_board_pushes_are_paced(self):
+        source = (self.BRIDGE / "ReaderCodexPush.cs").read_text(
+            encoding="utf-8")
+        gate = source.split("await OutboundGate.WaitAsync")[1][:1600]
+        self.assertIn("paced", gate, "间隔仍然一视同仁")
+        self.assertIn("reader-board", gate)
+        # 起语音 / 挂断 / 状态查询这三个 purpose 不该出现在放行条件里
+        for purpose in ("reader-voice-entry", "reader-voice-hangup",
+                        "reader-voice-status"):
+            self.assertNotIn(purpose, gate,
+                             purpose + " 被排进了间隔队列")
 
 
 class ChannelChoiceTests(unittest.TestCase):

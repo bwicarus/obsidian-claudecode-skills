@@ -10,7 +10,29 @@ internal sealed class WindowsDirectAppLauncher : IDirectAppLauncher
 {
     public bool IsWired => true;
 
-    public Task<bool> EnsureRunningAsync(
+    /// <summary>
+    /// "看着有两棵进程树"要给它一点时间稳下来（2026-09-11 实测）。
+    /// </summary>
+    /// <remarks>
+    /// 用户报：「codex 没有启动时按下 app 内按钮会启动 codex 然后按钮直接
+    /// 灭掉，重按后虽然会正常流程打开语音」。账本里每一次"第二按才成"之前
+    /// 都躺着一条 `APP_AMBIGUOUS stage=start`：
+    ///
+    ///   00:17:25 / 00:18:12 / 00:59:40 / 01:30:14 / 01:52:00
+    ///
+    /// Codex 是打包应用，启动和退出过程中会**短暂**出现多于一棵根进程树。
+    /// 第一按正好撞在那个窗口里，于是当场抛错、START 失败、按钮灭掉；
+    /// 等用户再按一次，进程树已经收敛成一棵，就成了。
+    ///
+    /// ⚠ 拒绝本身是对的（不能在已经有一棵时再启一个），错的是**把瞬时状态
+    /// 当成结论**。给它 6 秒（12 × 500ms）稳定期：稳成一棵就照常走，
+    /// 一直是两棵才判 ambiguous —— 那才是真的有两个实例。
+    /// </remarks>
+    private static readonly TimeSpan AmbiguousSettleInterval =
+        TimeSpan.FromMilliseconds(500);
+    private const int AmbiguousSettleAttempts = 12;
+
+    public async Task<bool> EnsureRunningAsync(
         string appKind,
         string appUserModelId,
         CancellationToken cancellationToken)
@@ -26,15 +48,31 @@ internal sealed class WindowsDirectAppLauncher : IDirectAppLauncher
         }
         CodexAppProbeState current =
             WindowsCodexAppProbe.Probe(profile.AppKind);
+        for (
+            int attempt = 0;
+            current.ReadyTarget is null
+                && current.RootCount > 1
+                && attempt < AmbiguousSettleAttempts;
+            attempt++)
+        {
+            await Task.Delay(AmbiguousSettleInterval, cancellationToken)
+                .ConfigureAwait(false);
+            current = WindowsCodexAppProbe.Probe(profile.AppKind);
+        }
         if (current.ReadyTarget is not null || current.RootCount == 1)
         {
-            return Task.FromResult(false);
+            return false;
         }
         if (current.RootCount > 1)
         {
             throw new DirectProtocolException(
                 "BW_COMPUTER_VOICE_DIRECT_APP_AMBIGUOUS",
-                "检测到多个 Codex 进程树，拒绝自动启动");
+                "检测到多个 Codex 进程树（等了 "
+                + (AmbiguousSettleAttempts
+                    * AmbiguousSettleInterval.TotalSeconds)
+                    .ToString("0", System.Globalization.CultureInfo
+                        .InvariantCulture)
+                + " 秒仍未收敛），拒绝自动启动");
         }
 
         IApplicationActivationManager manager =
@@ -72,7 +110,7 @@ internal sealed class WindowsDirectAppLauncher : IDirectAppLauncher
             }
         }
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(true);
+        return true;
     }
 
     public async Task<DirectAppTarget> WaitForUniqueReadyAsync(
