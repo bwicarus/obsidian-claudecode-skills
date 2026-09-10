@@ -513,6 +513,67 @@ test("第 1 级够不到时不许继续闪", () => {
   assert.match(body, /computerBtnConnecting\(false\)/);
 });
 
+test("绿灯：梯子说得准时就别去问台账", () => {
+  // 用户 2026-09-10/11 连着两次实录：「codex 冷启动后按钮就变成了绿色但是
+  // 语音没通」「一样，先绿然后才连上」。
+  //
+  // 病根是**同一份 payload 里两个来源矛盾，而我们用了弱的那个**：
+  //   · 麦克风台账 —— Codex 刚拉起来时条目还不存在 → 'unknown' → 放行绿灯；
+  //   · 梯子 session 级 —— known:true / satisfied:false，明确说"没有通话"。
+  //
+  // 下面这份 rungs 是 2026-09-11 00:20 从桥上 voice-ladder-status.json
+  // 原样取的，不是编的。
+  const voice = read("_server_deploy/static/pdf/rc-voicecall.js");
+  const from = voice.indexOf("function _sessionRungEvidence");
+  const to = voice.indexOf("function _greenLightAllowed");
+  assert.ok(from >= 0 && to > from, "找不到判据函数");
+  const body = voice.slice(from, to);
+  // ⚠ ESM 里的 eval 是严格模式，函数声明**不会**泄漏到外面 —— 所以取
+  // 最后一个表达式的值把函数拿出来（它闭包着同一次 eval 里的 _sessionRungEvidence）。
+  // eslint-disable-next-line no-eval
+  const evidence = eval(body + String.fromCharCode(10) + "_sessionEvidence");
+
+  const cold = {
+    codexVoice: {
+      status: "unavailable",
+      ladder: { rungs: [
+        { key: "server", known: true, satisfied: true },
+        { key: "chain", known: true, satisfied: true },
+        { key: "codex", known: true, satisfied: true },
+        { key: "session", known: true, satisfied: false,
+          why: "当前没有进行中的通话" },
+      ] },
+    },
+  };
+  assert.equal(
+    evidence(cold), false,
+    "梯子明说没有通话，却没被当成确定的否定 —— 绿灯会提前亮");
+
+  const live = JSON.parse(JSON.stringify(cold));
+  live.codexVoice.ladder.rungs[3].satisfied = true;
+  assert.equal(evidence(live), true);
+
+  // 梯子自己也不知道时才回退到台账 —— 那时 'unknown' 才是诚实的。
+  assert.equal(evidence({ codexVoice: { status: "unavailable" } }),
+    "unknown");
+  const vague = JSON.parse(JSON.stringify(cold));
+  vague.codexVoice.ladder.rungs[3].known = false;
+  assert.equal(evidence(vague), "unknown");
+});
+
+test("绿灯只有一条上漆路径，且它自己带闸", () => {
+  // 我 2026-09-10 给 _greenLightAllowed 加宽限时**先数过**这一条：
+  // 只要有第二处直接 computerBtnOn(true)，闸就形同不存在。
+  const voice = read("_server_deploy/static/pdf/rc-voicecall.js");
+  const greens = voice.split("computerBtnOn(true)").length - 1;
+  assert.equal(greens, 1, "变绿的地方多于一处 —— 闸拦不住");
+  const paint = voice.slice(
+    voice.indexOf("function _paintComputerVoiceConnected"),
+    voice.indexOf("function _applyNativeComputerVoiceState"),
+  );
+  assert.match(paint, /_greenLightAllowed\(\)/);
+});
+
 test("梯子轮询只在连接期间开着", () => {
   const voice = read("_server_deploy/static/pdf/rc-voicecall.js");
   const start = voice.indexOf("function _startLadderProgress(");

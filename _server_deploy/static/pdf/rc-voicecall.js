@@ -9578,9 +9578,34 @@
 
   // 问过之后一律返回三种确定说法之一,绝不再返回 null ——
   // null 专门留给"还没问过"。
+  // 「通话到底起没起来」有两个来源，强弱不同 —— 用错了就会把明确的否定
+  // 读成"不知道"，而"不知道"是会放行绿灯的（2026-09-11 修）。
+  //
+  //   · **梯子的 session 级**：桥算好的结论，known=true 时是**确定**的
+  //     （实测 why 写着"当前没有进行中的通话"）；
+  //   · **麦克风台账**：原始信号，Codex 冷启动时条目还不存在 → 'unknown'。
+  //
+  // 同一份 payload 里两者会矛盾：台账说"读不到"、梯子说"确定没有"。
+  // 先前只读台账，于是冷启动必然走 'unknown' → 放行 → 用户看到
+  // 「先绿然后才连上」。梯子既然已经在同一次请求里拿回来了，就该先问它。
+  function _sessionRungEvidence(voice) {
+    var rungs = voice && voice.ladder && voice.ladder.rungs;
+    if (!rungs || typeof rungs.length !== 'number') return null;
+    for (var i = 0; i < rungs.length; i += 1) {
+      var rung = rungs[i];
+      if (!rung || rung.key !== 'session') continue;
+      if (rung.known !== true) return null;       // 它也不知道 → 交给台账
+      return rung.satisfied === true;
+    }
+    return null;
+  }
+
   function _sessionEvidence(status) {
     var voice = status && status.codexVoice;
     if (!voice || typeof voice !== 'object') return 'unknown';
+    // ⚠ 梯子优先：它是**结论**，台账是原始信号。
+    var fromLadder = _sessionRungEvidence(voice);
+    if (fromLadder !== null) return fromLadder;
     if (voice.status && voice.status !== 'available') return 'unknown';
     return voice.active === true ? true
       : (voice.active === false ? false : 'unknown');
