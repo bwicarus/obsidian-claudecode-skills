@@ -34,6 +34,7 @@ VAC = _load("voice_autoclose")
 KEEPALIVE = _load("voice_keepalive")
 LADDER = _load("voice_ladder")
 STEP = _load("voice_start_step")
+CHANNEL = _load("codex_channel")
 FAILED = _load("voice_start_failed")
 
 
@@ -556,9 +557,11 @@ class WiredUpTests(unittest.TestCase):
         """
         notify = (Path(__file__).resolve().parents[1]
                   / "codex_thread_notify.py").read_text(encoding="utf-8")
-        self.assertIn("def thread_source_of", notify)
-        pick = notify.split("def newest_thread")[1].split("def approve")[0]
-        self.assertIn("thread_source_of", pick)
+        # 挑对话现在按磁盘上的会话记录来（thread/list 既不按时间排、也漏当天的），
+        # 来源从记录里读 —— 不能用 thread/list 回的 threadSource（那是客户端）。
+        pick = notify.split("def recent_threads")[1].split("ACTIVE_WRITER")[0]
+        self.assertIn("thread_source", pick)
+        self.assertIn("ALLOWED_SOURCES", pick)
         self.assertNotIn('row.get("threadSource")', pick)
 
     def test_turn_start_accepted_is_not_reported_as_done(self):
@@ -727,6 +730,82 @@ class WiredUpTests(unittest.TestCase):
         reader = REPO_ROOT / "_server_deploy" / "static" / "pdf" / "rc-voicecall.js"
         self.assertTrue(reader.is_file(), "找不到 rc-voicecall.js：%s" % reader)
         self.assertIn("ladder.startGaveUp", reader.read_text(encoding="utf-8"))
+
+
+class ChannelChoiceTests(unittest.TestCase):
+    """通道连哪条对话：一份设置，两个入口。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.runtime = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_choice_is_one_file_shared_by_both_surfaces(self):
+        """⚠ 存两份迟早只改一边，而"我明明设过"没有任何提示。
+
+        用户 2026-09-10 定：「app和服务器设置页的设置需要是相同的才行」。
+        所以真相只能有一处 —— 桥 runtime 里的那个文件。
+        """
+        self.assertEqual(CHANNEL.read_choice(self.runtime),
+                         {"mode": CHANNEL.DEFAULT_MODE, "title": ""})
+        CHANNEL.write_choice(CHANNEL.MODE_TITLE, "实时语音聊天", self.runtime)
+        self.assertEqual(CHANNEL.read_choice(self.runtime),
+                         {"mode": "title", "title": "实时语音聊天"})
+        # 设置页写的与 App 写的是同一个函数、同一个文件，不存在第二份。
+        self.assertTrue((self.runtime / CHANNEL.CHOICE_FILE).is_file())
+
+    def test_bad_choice_falls_back_instead_of_breaking_the_channel(self):
+        """一个坏掉的偏好不该让通道整个建不起来。"""
+        (self.runtime / CHANNEL.CHOICE_FILE).write_text(
+            '{"contract":"wrong","mode":"title"}', encoding="utf-8")
+        self.assertEqual(CHANNEL.read_choice(self.runtime)["mode"],
+                         CHANNEL.DEFAULT_MODE)
+        self.assertEqual(CHANNEL.normalize_mode("胡说"), CHANNEL.DEFAULT_MODE)
+
+    def test_updated_at_mixes_seconds_and_milliseconds(self):
+        """同一个字段里两种单位 —— 不归一会把旧对话判成"最近活跃"。
+
+        实测：置顶那几条是毫秒（1786779621000），其余是秒（1789021032）。
+        这种错不报异常，只是悄悄连错对话。
+        """
+        rows = [
+            {"id": "old", "title": "旧的", "status": "",
+             "updatedAt": CHANNEL._seconds(1786779621000)},
+            {"id": "new", "title": "新的", "status": "",
+             "updatedAt": CHANNEL._seconds(1789021032)},
+        ]
+        self.assertEqual(
+            CHANNEL.choose(rows, CHANNEL.MODE_RECENT)["id"], "new")
+
+    def test_named_conversation_missing_reports_instead_of_switching(self):
+        """找不到指定的那条就**报错**，不悄悄换一条。
+
+        推给了另一段对话这种错没有任何提示 —— 宁可停下说清楚。
+        """
+        rows = [{"id": "a", "title": "甲", "status": "", "updatedAt": 2},
+                {"id": "b", "title": "乙", "status": "", "updatedAt": 1}]
+        with self.assertRaises(CHANNEL.ChannelError) as caught:
+            CHANNEL.choose(rows, CHANNEL.MODE_TITLE, "丙")
+        self.assertIn("甲", str(caught.exception))   # 要列出现有的
+
+    def test_last_used_says_why_it_fell_back(self):
+        """退回也要说明原因，别让人以为"上次那条"还在用。"""
+        rows = [{"id": "a", "title": "甲", "status": "", "updatedAt": 2}]
+        picked = CHANNEL.choose(rows, CHANNEL.MODE_LAST_USED,
+                                runtime=self.runtime)
+        self.assertIn("已不在", picked["why"])
+        CHANNEL.write_last_used("a", "甲", self.runtime)
+        picked = CHANNEL.choose(rows, CHANNEL.MODE_LAST_USED,
+                                runtime=self.runtime)
+        self.assertIn("上次连的", picked["why"])
+
+    def test_pipe_must_prove_itself(self):
+        """并存的管道里只有一条是活的 —— 按名字或顺序猜都会挑错。"""
+        source = (Path(__file__).resolve().parents[1]
+                  / "codex_channel.py").read_text(encoding="utf-8")
+        picker = source.split("def usable_pipe")[1].split("def _tool_call")[0]
+        self.assertIn("tools/list", picker)
+        self.assertIn("REQUIRED_TOOL", picker)
 
 
 class GiveUpTests(unittest.TestCase):

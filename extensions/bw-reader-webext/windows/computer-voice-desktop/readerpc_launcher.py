@@ -37,6 +37,7 @@ from bridge_core import (
 import replication_apply
 import situation_signals
 import voice_autoclose
+import codex_channel
 import voice_keepalive
 import voice_ladder
 from control_plane import (
@@ -73,7 +74,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.168"
+APP_VERSION = "0.1.169"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status
@@ -1120,6 +1121,87 @@ class ReaderPCWindow:
             voice_start_mode=self._voice_start_mode(),
         )
 
+    # ── 通知通道连哪条对话（2026-09-10）────────────────────────────
+    #
+    # ⚠ 这一组读写的是**桥 runtime 的共享文件**，不是 ReaderPC 偏好：
+    # App 上要有同样的选择，两处必须是同一份（用户拍板）。所以这里不走
+    # save_preferences，改完直接落到 codex_channel.write_choice。
+    CHANNEL_MODE_LABELS = (
+        ("自动：最近活跃的对话", codex_channel.MODE_RECENT),
+        ("自动：上次连过的对话", codex_channel.MODE_LAST_USED),
+        ("指定对话", codex_channel.MODE_TITLE),
+    )
+
+    def _channel_mode_from_label(self, label: str) -> str:
+        for text, mode in self.CHANNEL_MODE_LABELS:
+            if text == label:
+                return mode
+        return codex_channel.DEFAULT_MODE
+
+    def _channel_label_from_mode(self, mode: str) -> str:
+        wanted = codex_channel.normalize_mode(mode)
+        for text, value in self.CHANNEL_MODE_LABELS:
+            if value == wanted:
+                return text
+        return self.CHANNEL_MODE_LABELS[0][0]
+
+    def on_channel_changed(self) -> None:
+        """选择变了就写共享文件，并立刻按新选择重建通道。
+
+        ⚠ 只写不建的话，界面显示的和实际连的会不一致 —— 而"设了没生效"
+        没有任何提示。所以改完当场重建，并把结果显示出来。
+        """
+        mode = self._channel_mode_from_label(self.channel_mode_label.get())
+        title = self.channel_title.get().strip()
+        if mode == codex_channel.MODE_TITLE and not title:
+            self.channel_note.set("选了「指定对话」但还没选名字")
+            return
+        try:
+            codex_channel.write_choice(mode, title)
+        except OSError as error:
+            self.channel_note.set("写设置失败：" + str(error)[:60])
+            return
+        self.channel_note.set("正在按新选择建立通道…")
+        self._rebuild_channel_async()
+
+    def _rebuild_channel_async(self) -> None:
+        """建通道要走命名管道 I/O，**不能在界面线程里做**。"""
+
+        def run() -> None:
+            try:
+                result = codex_channel.ensure_channel()
+                note = "已连「%s」（%s）" % (
+                    result["title"] or result["threadId"][:8],
+                    result.get("why") or result["mode"])
+            except Exception as error:          # noqa: BLE001
+                note = "建立失败：" + str(error)[:80]
+            self.events.put(lambda: self.channel_note.set(note))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def refresh_channel_choices(self) -> None:
+        """重新列一次可选对话。对面开了新对话之后要手动刷一下才看得到。"""
+        self.channel_note.set("正在查可用的对话…")
+
+        def run() -> None:
+            try:
+                survey = codex_channel.survey()
+                titles = [row["title"] for row in survey["choices"]
+                          if row["title"]]
+                note = "找到 %d 条对话（管道 …%s）" % (
+                    len(survey["choices"]), survey["pipeName"][-8:])
+            except Exception as error:          # noqa: BLE001
+                titles, note = [], "查不到：" + str(error)[:80]
+
+            def apply() -> None:
+                if titles:
+                    self.channel_title_box.configure(values=titles)
+                self.channel_note.set(note)
+
+            self.events.put(apply)
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _voice_start_mode(self) -> str:
         """界面上的启动方式。读炸了回默认，别让一个开关把语音整个卡死。"""
         var = getattr(self, "voice_one_shot_start", None)
@@ -1278,6 +1360,13 @@ class ReaderPCWindow:
         self.voice_enabled = tk.BooleanVar(
             value=bool(preferences["voiceEnabled"])
         )
+        # 「通知通道连哪条对话」。⚠ 真相在**桥 runtime 的共享文件**里，不在
+        # ReaderPC 偏好里 —— App 也要读写同一份（用户 2026-09-10：「app和服务器
+        # 设置页的设置需要是相同的才行」）。存两份迟早只改一边。
+        _channel = codex_channel.read_choice()
+        self.channel_mode = tk.StringVar(value=_channel["mode"])
+        self.channel_title = tk.StringVar(value=_channel["title"])
+        self.channel_note = tk.StringVar(value="")
         self.voice_one_shot_start = tk.BooleanVar(
             value=(preferences.get("voiceStartMode")
                    == voice_keepalive.START_MODE_ONE_SHOT)
@@ -1449,6 +1538,40 @@ class ReaderPCWindow:
             variable=self.voice_one_shot_start,
             command=self.on_voice_start_mode_changed,
         ).pack(side="left")
+        # ── 通知通道（2026-09-10）──────────────────────────────────
+        # 桥往 Codex 推消息（挂断请求、状态查询、提示板）走的那条通道连哪段对话。
+        # ⚠ 这一组存的是**桥 runtime 的共享文件**，App 上是同一份设置。
+        channel_row = ttk.Frame(outer)
+        channel_row.pack(fill="x", pady=(6, 1))
+        ttk.Label(channel_row, text="通知通道连到").pack(side="left")
+        self.channel_mode_label = tk.StringVar(
+            value=self._channel_label_from_mode(self.channel_mode.get()))
+        mode_box = ttk.Combobox(
+            channel_row, textvariable=self.channel_mode_label, width=20,
+            state="readonly",
+            values=[text for text, _ in self.CHANNEL_MODE_LABELS])
+        mode_box.pack(side="left", padx=(6, 6))
+        mode_box.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self.on_channel_changed())
+        self.channel_title_box = ttk.Combobox(
+            channel_row, textvariable=self.channel_title, width=24,
+            values=[self.channel_title.get()] if self.channel_title.get()
+            else [])
+        self.channel_title_box.pack(side="left", padx=(0, 6))
+        self.channel_title_box.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self.on_channel_changed())
+        ttk.Button(
+            channel_row, text="刷新列表",
+            command=self.refresh_channel_choices).pack(side="left")
+
+        channel_note_row = ttk.Frame(outer)
+        channel_note_row.pack(fill="x", pady=(0, 2), padx=(24, 0))
+        ttk.Label(
+            channel_note_row, textvariable=self.channel_note,
+            foreground="#7a7a7a").pack(side="left")
+
         # ── 语音智能关闭（2026-09-09 用户拍板）────────────────────────
         # 两种模式：这一项关着 = 持续开启；打开 = 智能开启，由下面四条
         # **用户自己勾**的条件决定何时挂断。只关不开 —— 启动仍无解。

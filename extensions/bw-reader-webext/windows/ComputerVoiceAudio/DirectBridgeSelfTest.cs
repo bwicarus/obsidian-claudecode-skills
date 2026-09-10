@@ -6937,12 +6937,41 @@ internal static class DirectBridgeSelfTest
             contextMedia,
             renderEndpointProbe: _ => null,
             contextAdapter: new FakeDirectContextAdapter());
+        // ⚠ 这一场景要**自己的**语音控制器（2026-09-10）。
+        //
+        // 原来跟上面那个媒体活动场景共用同一个 control 和同一份可变快照，于是
+        // 上面 START 触发的入口尝试会把状态翻成 active，这里的 codex-voice-set
+        // 就变成"已经开着、不必按" —— 断言 shortcutSent 落空。跨场景共用可变
+        // 夹具，早晚会被另一个场景的副作用咬到；各自拥有就没有这回事。
+        CodexVoiceActivitySnapshot contextCurrent =
+            CodexVoiceActivitySnapshot.Available(0, 0);
+        await using DirectCodexVoiceControl contextControl = new(
+            () => contextCurrent,
+            (active, before, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                contextCurrent = active
+                    ? CodexVoiceActivitySnapshot.Available(
+                        Math.Max(
+                            before.LastUsedTimeStart,
+                            before.LastUsedTimeStop) + 1,
+                        before.LastUsedTimeStop)
+                    : CodexVoiceActivitySnapshot.Available(
+                        before.LastUsedTimeStart,
+                        Math.Max(
+                            before.LastUsedTimeStart,
+                            before.LastUsedTimeStop) + 1);
+                return Task.FromResult(contextCurrent);
+            },
+            keepActivePath: keepActivePath,
+            keepActivePollInterval: TimeSpan.FromSeconds(1),
+            shortcutCooldown: TimeSpan.Zero);
         DirectBridgeProtocolSession contextSession = new(
             "connection-codex-voice-context-only",
             origin,
             snapshotStore,
             contextCoordinator,
-            codexVoiceControl: control);
+            codexVoiceControl: contextControl);
         List<object> contextEvents = [];
         List<byte[]> contextFrames = [];
         _ = RequireSuccess(

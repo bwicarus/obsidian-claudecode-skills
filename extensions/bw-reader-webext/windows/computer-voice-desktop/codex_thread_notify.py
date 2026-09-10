@@ -258,27 +258,57 @@ class AppServer:
                 "detail": "没等到 turn/completed（%.0f 秒）" % timeout}
 
 
-def newest_thread(server: AppServer, limit: int = 20) -> dict:
-    """挑一个能代表用户的最近对话。
+#: 能代表用户、可以被送指令的会话来源。
+#:
+#: ⚠ 用**白名单**而不是黑名单：`thread_source` 还可能出现没见过的取值，
+#: 而"没见过"不该默认可用 —— 定时任务与子任务被误选中的代价是把指令塞进
+#: 别人的工作流。
+ALLOWED_SOURCES = frozenset({"voice_chat", "user", "realtime_voice"})
 
-    ⚠ 用 `thread/list` 而不是 `thread/loaded/list`：后者只列**本进程**加载的，
-    桌面端开着的那些不在其中（实测返回空）。
+
+def recent_threads(home: Path | None = None,
+                   limit: int = 12) -> list[tuple[str, str, float]]:
+    """从**磁盘上的会话记录**列出最近的可送达对话，最新在前。
+
+    返回 [(线程 id, 来源, 最后写入时间), …]。
+
+    ⚠ **不用 `thread/list`**（2026-09-10 实测）：它既不按时间排序，也不把最近的
+    给全 —— 拿到 40 条里最新的是前一天，当天的一条都不在里面（有 nextCursor，
+    只是一页）。按它的顺序取"第一条"当最新是个错的假设。磁盘记录才是事实：
+    文件名带线程 id，首行 session_meta 带 thread_source，最后写入时间就是
+    最近活动时间。
+
+    ⚠ 要**一串**而不是一条：最新那条常常正被 Codex App 占着写，
+    `thread/resume` 会报 "already has an active writer"。那不是失败，
+    只是说这条不能由我们来写 —— 往下找一条就好。
     """
-    result = server.request("thread/list", {"limit": limit})
-    rows = result.get("data") if isinstance(result, dict) else result
-    if not isinstance(rows, list) or not rows:
-        raise NotifyError("Codex 一条对话都没有，没有可送达的目标")
-    for row in rows:
-        if not isinstance(row, dict):
+    base = (home or Path(
+        os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))) / "sessions"
+    rows: list[tuple[float, str, str]] = []
+    for path in base.rglob("rollout-*.jsonl"):
+        try:
+            when = path.stat().st_mtime
+            with path.open(encoding="utf-8-sig") as source:
+                entry = json.loads(source.readline(1024 * 1024))
+        except (OSError, ValueError):
             continue
-        if row.get("ephemeral"):
+        if entry.get("type") != "session_meta":
             continue
-        if thread_source_of(str(row.get("id") or "")) in EXCLUDED_SOURCES:
+        meta = entry.get("payload") or {}
+        if meta.get("thread_source") not in ALLOWED_SOURCES:
             continue
-        if row.get("id"):
-            return row
-    raise NotifyError(
-        "最近 %d 条对话里没有可用目标（都是子任务/定时任务或临时会话）" % len(rows))
+        thread_id = meta.get("id") or meta.get("session_id")
+        if thread_id:
+            rows.append((when, str(thread_id), str(meta.get("thread_source"))))
+    rows.sort(reverse=True)
+    if not rows:
+        raise NotifyError("找不到可送达的对话（没有 %s 这几类会话记录）"
+                          % "/".join(sorted(ALLOWED_SOURCES)))
+    return [(tid, src, when) for when, tid, src in rows[:limit]]
+
+
+#: `thread/resume` 说"这条正被别人写"时的原话片段。
+ACTIVE_WRITER = "active writer"
 
 
 #: 审批方法 → 该用哪套取值。**两套不通用**（2026-09-10 从官方 schema 取的）：
@@ -327,15 +357,24 @@ def send(text: str, *, thread_id: str | None = None,
             "clientInfo": {"name": "bw-reader-voice-entry", "version": "1"},
         })
         server.notify("initialized")
-        target = thread_id
-        preview = ""
-        if target is None:
-            row = newest_thread(server)
-            target, preview = row["id"], str(row.get("preview") or "")[:40]
-        server.request("thread/resume", {"threadId": target})
-        seen = server.run_turn(target, text, timeout=turn_timeout)
-        return {"ok": seen["completed"], "threadId": target,
-                "preview": preview, **seen}
+        candidates = ([(thread_id, "", 0.0)] if thread_id
+                      else recent_threads())
+        skipped: list[str] = []
+        for target, source, _when in candidates:
+            try:
+                server.request("thread/resume", {"threadId": target})
+            except NotifyError as error:
+                # 被 App 占着写 → 换下一条；别的错才是真失败。
+                if ACTIVE_WRITER in str(error):
+                    skipped.append("%s（%s，App 正开着）" % (target[:13], source))
+                    continue
+                raise
+            seen = server.run_turn(target, text, timeout=turn_timeout)
+            return {"ok": seen["completed"], "threadId": target,
+                    "source": source, "skipped": skipped, **seen}
+        raise NotifyError(
+            "最近 %d 条对话都连不上（都被 App 占着写）：%s"
+            % (len(candidates), "; ".join(skipped)))
 
 
 #: 指定操作那条通知的正文。

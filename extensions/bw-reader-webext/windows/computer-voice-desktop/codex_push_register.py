@@ -82,11 +82,27 @@ def main() -> int:
     pipe = (os.environ.get(PIPE_ENV) or "").strip()
     thread = (os.environ.get(THREAD_ENV) or "").strip()
     if not pipe or not thread:
-        # 这不是"出错了"，是"你不是被 Codex 启动的"。说清楚，别让人以为链路坏了。
-        print("拿不到 %s / %s。" % (PIPE_ENV, THREAD_ENV))
-        print("这两个变量只有 Codex 亲自启动的进程才有 —— 这条命令要由 Codex 来跑，")
-        print("它读的是自己进程的环境。别人跑它登记不了，也不该登记：")
-        print("任务 id 决定推给哪一段对话，只有它自己知道当前是哪一段。")
+        # ⚠ **分别报，别捆在一起说**（2026-09-10 Codex 排查时点出来的）。
+        #
+        # 原来的写法是：任一缺失就把两个名字一起打出来，再断言"这两个变量只有
+        # Codex 亲自启动的进程才有"。于是实际只缺一个的时候，读的人（包括我们
+        # 自己和 Codex）都以为两个都没有，把排查方向带偏了整整一轮 ——
+        # 实测：终端接续对话时 CODEX_THREAD_ID **是有的**，缺的只有管道路径。
+        #
+        # 这正是 references/silent-failure-lessons.md 里那条"折成布尔前先报
+        # 原始值"的反面教材，而且是我们自己写的。
+        missing = [name for name, value in
+                   ((PIPE_ENV, pipe), (THREAD_ENV, thread)) if not value]
+        print("缺少：%s" % "、".join(missing))
+        print("已有：%s" % ("、".join(
+            "%s=%s" % (name, value if name == THREAD_ENV else "(有)")
+            for name, value in ((PIPE_ENV, pipe), (THREAD_ENV, thread))
+            if value) or "（两个都没有）"))
+        if PIPE_ENV in missing:
+            print()
+            print("%s 只存在于**桌面应用自己的会话进程**里。" % PIPE_ENV)
+            print("从终端接续同一段对话不会带上它 —— 线程身份是存在磁盘上的，")
+            print("进程环境不是。要登记，得在桌面应用的对话里跑这条命令。")
         return 2
 
     body: dict = {"pipePath": pipe, "threadId": thread}

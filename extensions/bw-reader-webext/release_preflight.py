@@ -248,6 +248,7 @@ WINDOWS_SOURCE_FILES = (
     "computer-voice-desktop/voice_start_failed.py",
     "computer-voice-desktop/voice_start_step.py",
     "computer-voice-desktop/codex_thread_notify.py",
+    "computer-voice-desktop/codex_channel.py",
     "computer-voice-desktop/voice_history_sidebar_sync.py",
     "computer-voice-desktop/voip_push.py",
     "package_computer_voice_direct.py",
