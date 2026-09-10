@@ -1207,6 +1207,38 @@ class PacingOnlyDelaysTheBoardTests(unittest.TestCase):
         self.assertIn("reader-board", body)
 
 
+class AuthoritativeSourceTests(unittest.TestCase):
+    """「最近那条语音线程」要问 App 自己，别问二手的。
+
+    ⚠ 2026-09-11 用户点破：「目前的所有问题都来自于你对每个环节实际能做到的
+    事情的误判」。这条是其中之一 —— 我一直读侧栏同步的 lastGood，而它比通话
+    滞后约一分钟（02:48:47 锁定时它还指着上一通，02:49:56 才对）。
+    App 自己在 .codex-global-state.json 里记着，且不滞后。
+    """
+
+    BRIDGE = Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
+
+    def test_it_asks_the_app_first(self):
+        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
+            encoding="utf-8")
+        self.assertIn("realtime-voice-most-recent-thread", source)
+        body = source.split("internal static string InCallThreadId()")[1]
+        body = body[:body.index("internal static string InCallThreadSource")]
+        # 权威来源必须排在退回侧栏之前
+        first = body.index("AppMostRecentVoiceThread()")
+        fallback = body.index("InCallThreadSource()")
+        self.assertLess(first, fallback, "还是先读那个滞后的来源")
+
+    def test_the_capability_table_exists(self):
+        """⚠ 这张表是给下一个人的 —— 动手改这条链之前先看它。"""
+        doc = (Path(__file__).resolve().parents[5]
+               / "references" / "codex-notification-channel.md")
+        text = doc.read_text(encoding="utf-8")
+        self.assertIn("每个环节实际能做到什么", text)
+        self.assertIn("权威来源清单", text)
+        self.assertIn("realtime-voice-most-recent-thread", text)
+
+
 class ChannelChoiceTests(unittest.TestCase):
     """通道连哪条对话：一份设置，两个入口。"""
 

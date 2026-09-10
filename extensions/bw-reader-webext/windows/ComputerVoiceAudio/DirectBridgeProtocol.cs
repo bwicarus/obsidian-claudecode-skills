@@ -805,8 +805,57 @@ internal sealed class DirectCodexVoiceControl :
     /// Python 侧 <c>voice_autoclose.in_call_thread_id</c> 是同一份知识的第二个
     /// 实现，且原本指错了目录（2026-09-10 一起修）——改一处必须改两处。
     /// </remarks>
+    /// <summary>App **自己**记的"最近那条语音线程"。</summary>
+    /// <remarks>
+    /// ⚠ 这是权威来源，2026-09-11 才找到：
+    /// `~/.codex/.codex-global-state.json` 的
+    /// `electron-persisted-atom-state["realtime-voice-most-recent-thread"]`
+    /// = {conversationId, hostId, isEverydayWorkMode, version}。
+    ///
+    /// 在此之前我一直读侧栏同步的 lastGood —— 那是**二手的、会滞后的**
+    /// （实测晚约一分钟：02:48:47 锁定时它还指着上一通）。
+    /// 用户当晚归纳得很准：「目前的所有问题都来自于你对每个环节实际能做到的
+    /// 事情的误判」，这一条就是其中之一。
+    ///
+    /// 读不到就退回 lastGood —— 少一个来源不该让整条链哑掉。
+    /// </remarks>
+    internal static string AppMostRecentVoiceThread()
+    {
+        try
+        {
+            string path = Path.Combine(
+                Environment.GetFolderPath(
+                    Environment.SpecialFolder.UserProfile),
+                ".codex",
+                ".codex-global-state.json");
+            if (!File.Exists(path)) return string.Empty;
+            if (JsonNode.Parse(File.ReadAllText(path)) is not JsonObject root)
+            {
+                return string.Empty;
+            }
+            if (root["electron-persisted-atom-state"] is not JsonObject atoms)
+            {
+                return string.Empty;
+            }
+            if (atoms["realtime-voice-most-recent-thread"]
+                is not JsonObject entry)
+            {
+                return string.Empty;
+            }
+            string? id = (string?)entry["conversationId"];
+            return string.IsNullOrWhiteSpace(id) ? string.Empty : id;
+        }
+        catch (Exception)
+        {
+            return string.Empty;
+        }
+    }
+
     internal static string InCallThreadId()
     {
+        // 先问 App 自己（权威且不滞后），拿不到才退回侧栏同步。
+        string authoritative = AppMostRecentVoiceThread();
+        if (authoritative.Length > 0) return authoritative;
         try
         {
             string path = InCallThreadSource();
