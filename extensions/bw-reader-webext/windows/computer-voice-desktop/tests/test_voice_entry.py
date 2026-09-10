@@ -1075,6 +1075,55 @@ class BoardFollowsTheCallTests(unittest.TestCase):
         self.assertIn("return string.Empty;", body)
 
 
+class OpenTheThreadBeforePressingTests(unittest.TestCase):
+    """按 F24 之前，先把 App 打开到最近那条语音对话。
+
+    ⚠ 2026-09-11 用户：「本身软件的设计也是语音快捷键按下时默认打开最近的语音
+    对话，为何现在变成打开新的对话了」。对，但那要求 App 里**已经开着**那条。
+    我们这条链常常是刚把 Codex 拉起来的（实录：Codex 01:30:15 启动、01:30:22
+    收到 START），冷启动的 App 什么都没开，F24 只能新开一条。
+    19:38 那通能复用，正因为 Codex 从 16:19 就开着。
+
+    工具是 codex_app 的 navigate_to_codex_page，实测返回 {"navigated": true}。
+    """
+
+    BRIDGE = Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
+
+    def test_the_channel_module_can_navigate(self):
+        source = (Path(__file__).resolve().parents[1]
+                  / "codex_channel.py").read_text(encoding="utf-8")
+        self.assertIn("def navigate(", source)
+        self.assertIn("navigate_to_codex_page", source)
+        self.assertIn('"--navigate"', source.replace("'", '"'))
+
+    def test_navigation_runs_before_the_shortcut(self):
+        """顺序要紧：导航必须排在按键之前，否则等于没做。"""
+        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
+            encoding="utf-8")
+        prepare = source.index(
+            "internal static async Task PrepareInitialStartAsync")
+        press = source.index("shortcutSender.Send(target, "
+                             "DirectVoiceCommand.Start)")
+        navigate = source.index("NavigateToLatestVoiceChatAsync(")
+        # 实现在 prepare 之前定义，调用在 prepare 之内；按键在别处（委托里）。
+        called = source.index("await NavigateToLatestVoiceChatAsync(")
+        self.assertGreater(called, prepare,
+                           "导航没挂在 PrepareInitialStartAsync 里")
+        self.assertLess(navigate, len(source))
+        self.assertGreater(press, 0)
+
+    def test_navigation_is_best_effort(self):
+        """导航不成也要照样按键 —— 做成硬前置只会多一个"打不开语音"的来源。"""
+        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
+            encoding="utf-8")
+        body = source.split(
+            "private static async Task NavigateToLatestVoiceChatAsync")[1]
+        body = body[:body.index("internal static async Task"
+                                " PrepareInitialStartAsync")]
+        self.assertIn("catch (Exception exception)", body)
+        self.assertNotIn("throw", body)
+
+
 class ChannelChoiceTests(unittest.TestCase):
     """通道连哪条对话：一份设置，两个入口。"""
 

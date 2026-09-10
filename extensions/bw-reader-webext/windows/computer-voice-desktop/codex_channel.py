@@ -455,6 +455,28 @@ def _newest_thread_on_disk() -> str | None:
     return best[1] if best else None
 
 
+
+def navigate(thread_id: str, pipe: tuple[str, str] | None = None
+             ) -> dict[str, Any]:
+    """让 Codex 的主窗口打开某条对话。
+
+    ⚠ **这是"按 F24 之前"缺的那一步**（2026-09-11 用户点出来的）：
+
+        「本身软件的设计也是语音快捷键按下时默认打开最近的语音对话」
+
+    对，但那要求 App 里**已经开着**那条对话。冷启动拉起来的 Codex 什么都没开，
+    于是 F24 只能新开一条。实录：Codex 01:30:15 启动、01:30:22 收到 START ——
+    它根本没在跑，是我们拉起来的；而 19:38 那通能复用，是因为 Codex 从 16:19
+    就开着、那条对话还在窗口里。
+
+    工具自述："Navigate the most recently focused main app window to a thread
+    or chat." 实测返回 {"navigated": true}。
+    """
+    name, namespace = pipe or usable_pipe()
+    envelope = _envelope_thread_id()
+    return _tool_call(name, namespace, envelope,
+                      "navigate_to_codex_page", {"threadId": thread_id})
+
 # ── 命令行入口（2026-09-10）─────────────────────────────────────────
 #
 # ⚠ 这个模块原来**只有库、没有入口**，于是唯一会调它的是 ReaderPC 那个 30 秒
@@ -477,9 +499,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--survey", action="store_true",
         help="只看能连上哪条管道、有哪些对话，不登记")
+    parser.add_argument(
+        "--navigate", metavar="THREAD_ID",
+        help="让 Codex 主窗口打开这条对话（按 F24 之前用，见 navigate）")
     args = parser.parse_args(argv)
     try:
-        result = survey() if args.survey else ensure_channel()
+        if args.navigate:
+            result = navigate(args.navigate)
+        else:
+            result = survey() if args.survey else ensure_channel()
     except Exception as error:          # noqa: BLE001
         # ⚠ 失败也要输出 JSON：调用方（桥）要能分辨"没就绪"和"脚本坏了"，
         # 而一句自由文本的 traceback 两者长得一样。

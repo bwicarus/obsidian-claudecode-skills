@@ -909,6 +909,63 @@ internal sealed class DirectCodexVoiceControl :
         }
     }
 
+    /// <summary>把 Codex 主窗口导航到最近那条语音对话。</summary>
+    /// <remarks>
+    /// 走 codex_channel.py --navigate（工具 navigate_to_codex_page），
+    /// 不在 C# 里另拼一条管道调用 —— 枚举/自证/信封那一套已经在那个模块里。
+    /// 实测该工具返回 {"navigated": true}。
+    /// </remarks>
+    private static async Task NavigateToLatestVoiceChatAsync(
+        CancellationToken cancellationToken)
+    {
+        string thread = InCallThreadId();
+        if (thread.Length == 0) return;      // 从来没有过语音对话，没得导航
+        string script = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "BWReader",
+            "codex_channel.py");
+        if (!File.Exists(script)) return;
+        try
+        {
+            ProcessStartInfo info = new()
+            {
+                FileName = DirectBridgeProtocolSession.PythonExecutable(),
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            info.ArgumentList.Add(script);
+            info.ArgumentList.Add("--navigate");
+            info.ArgumentList.Add(thread);
+            using Process? child = Process.Start(info);
+            if (child is null) return;
+            using CancellationTokenSource budget =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+            budget.CancelAfter(TimeSpan.FromSeconds(15));
+            string output = await child.StandardOutput
+                .ReadToEndAsync(budget.Token).ConfigureAwait(false);
+            await child.WaitForExitAsync(budget.Token).ConfigureAwait(false);
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                "navigate:" + (thread.Length > 13 ? thread[..13] : thread),
+                child.ExitCode == 0,
+                (child.ExitCode == 0 ? "按键前已把 App 打开到：" : "导航失败：")
+                + (output.Length > 120 ? output[..120] : output).Trim());
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                "navigate", false,
+                "导航脚本跑不起来：" + exception.GetType().Name);
+        }
+    }
+
     internal static async Task PrepareInitialStartAsync(
         IDirectAppLauncher launcher,
         Func<TimeSpan, CancellationToken, Task> delayAsync,
@@ -944,6 +1001,18 @@ internal sealed class DirectCodexVoiceControl :
         {
             await delayAsync(settle, cancellationToken).ConfigureAwait(false);
         }
+        // ⚠ **按 F24 之前先把 App 打开到最近那条语音对话**
+        // （2026-09-11 用户：「软件的设计也是语音快捷键按下时默认打开最近的
+        // 语音对话」）。对，但那要求 App 里**已经开着**那条 —— 而我们这条链
+        // 常常是刚把 Codex 拉起来的：实录 01:30:15 启动、01:30:22 收到 START。
+        // 冷启动的 Codex 什么都没开，F24 只能新开一条，于是"每次都是新对话"。
+        //
+        // 19:38 那通能复用，正因为 Codex 从 16:19 就开着、那条还在窗口里。
+        //
+        // ⚠ 尽力而为：导航不成也照样按键 —— 顶多回到原来的行为，
+        // 而把它做成硬前置会让"打不开语音"多一个失败源。
+        await NavigateToLatestVoiceChatAsync(cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>目标 App 已经运行了多久；读不出启动时间就按"已经很久"处理。</summary>
@@ -4138,7 +4207,7 @@ internal sealed class DirectBridgeProtocolSession
         TimeSpan.FromSeconds(20);
 
     /// 与 NativeMessagingHost 用同一个解释器路径。
-    private static string PythonExecutable() => Path.Combine(
+    internal static string PythonExecutable() => Path.Combine(
         Environment.GetFolderPath(
             Environment.SpecialFolder.LocalApplicationData),
         "Programs", "Python", "Python313", "python.exe");
