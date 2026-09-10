@@ -281,16 +281,19 @@ app 中开启语音后服务器如果没有连接语音则需要积极的去开�
 ### 2. 语音对话一结束就被搬到 `archived_sessions/`
 
 `~/.codex/sessions/` 里**只留正在进行的那条**；结束的搬去
-`~/.codex/archived_sessions/`。所以只扫 `sessions/` 的话，一晚上十几通语音里
-只看得见一条。（我第一版就是这么写的，实测才发现。）
+`~/.codex/archived_sessions/`。
+
+⚠ 我一度把归档目录也扫了进来，好让当晚那十几条露面 —— **方向是反的**
+（用户当场点破：「被归档了当然就不要了啊」）。它们能露面恰恰因为已经结束，
+而结束的语音对话绑不了，列出来只是给选择器塞一堆死条目。
 
 ### 现在的做法
 
-`disk_conversations()` 扫**两个目录**的 `rollout-*.jsonl` 首行 session_meta，
-`merged_conversations()` 把它与 `list_threads` 按 id 合并：
-app 那边有标题（磁盘上语音会话没有），磁盘这边有语音会话（app 列表里没有），
-**只用一边都会缺一半**。语音对话在磁盘列表里优先排（否则会被自动化产生的
-会话挤出 limit —— 实测 40 条里只剩 1 条语音）。
+`disk_conversations()` 只扫 `sessions/`，且**只取 `thread_source == voice_chat`**
+（别的，比如 CLI 会话，在 app 列表里该有的都有，从磁盘再捞一遍纯属噪音）。
+`merged_conversations()` 把它与 `list_threads` 按 id 合并 ——
+app 那边是**已保存的线程**，磁盘这边是**此刻活着的语音会话**，
+合起来正好是"可以选来绑"的全集。实测：49 条，磁盘只补进 2 条。
 
 ⚠ 由此推出的设计约束：**绑到语音对话只在它活着的时候有意义**。
 所以入口走 `InCallThreadId()`（lastGood）、锁定走 `bind_to(threadId)` ——

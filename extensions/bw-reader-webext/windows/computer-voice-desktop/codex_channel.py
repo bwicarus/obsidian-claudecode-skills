@@ -387,18 +387,19 @@ def disk_conversations(limit: int = 40) -> list[dict[str, Any]]:
     这里只读首行，不读正文。
     """
     home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
-    # ⚠ **两个目录都要扫**（2026-09-11 实测）：语音对话一结束就被搬到
-    # archived_sessions/，`sessions/` 里只留着**正在进行**的那条。
-    # 只扫 sessions/ 的话，当晚打过的十几通语音里只剩一条能看见 ——
-    # 而那正是用户报的「刷新对话列表根本无法正确列出现有的对话」。
+    # ⚠ **只扫 sessions/，不扫 archived_sessions/**（用户 2026-09-11：
+    # 「被归档了当然就不要了啊」）。
+    #
+    # 语音对话一结束就被搬去 archived_sessions/ —— 归档就是"用完了"。
+    # 我第一版为了让当晚那十几条露面把归档目录也扫了进来，方向是反的：
+    # 它们能露面**恰恰因为已经结束**，而结束的语音对话绑不了也没意义。
+    #
+    # 所以这里给出的就是：**现在还活着的那条**（sessions/ 里通常只有它），
+    # 与 list_threads 的已保存线程合并，正好是"可以选来绑"的全集。
     rows: list[tuple[float, dict[str, Any]]] = []
-    paths: list[Path] = []
-    for folder in ("sessions", "archived_sessions"):
-        try:
-            paths.extend((home / folder).rglob("rollout-*.jsonl"))
-        except OSError:
-            continue
-    if not paths:
+    try:
+        paths = list((home / "sessions").rglob("rollout-*.jsonl"))
+    except OSError:
         return []
     for path in paths:
         try:
@@ -412,7 +413,10 @@ def disk_conversations(limit: int = 40) -> list[dict[str, Any]]:
         meta = entry.get("payload") or {}
         thread_id = meta.get("id") or meta.get("session_id")
         source_kind = meta.get("thread_source") or ""
-        if not thread_id or source_kind in EXCLUDED_DISK_SOURCES:
+        # ⚠ 磁盘这边**只取语音会话**。它存在的唯一理由就是补上 list_threads
+        # 看不见的那一类；别的（我自己跑 CLI 产生的 computer-voice-desktop
+        # 之类）在 app 列表里该有的都有，从磁盘再捞一遍只是给选择器塞噪音。
+        if not thread_id or source_kind != "voice_chat":
             continue
         rows.append((when, {
             "id": str(thread_id),
@@ -422,13 +426,8 @@ def disk_conversations(limit: int = 40) -> list[dict[str, Any]]:
             "updatedAt": when,
             "from": "disk",
         }))
-    # ⚠ **语音对话优先**，同类再按新旧。
-    #
-    # 纯按时间排的话，我自己跑脚本产生的那些会话（computer-voice-desktop）
-    # 会把当晚的语音对话挤出 limit —— 实测 40 条里只剩下 1 条语音。
-    # 而这个列表的用途就是"挑一条对话来绑"，语音那些才是要挑的。
-    rows.sort(key=lambda item: (item[1]["status"] == "voice_chat", item[0]),
-              reverse=True)
+    # 只剩语音会话了，按新旧排即可。
+    rows.sort(key=lambda item: item[0], reverse=True)
     return [row for _when, row in rows[:limit]]
 
 
