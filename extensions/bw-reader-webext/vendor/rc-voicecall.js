@@ -9591,9 +9591,18 @@ if (window.__bwPwaProviderOnly) return;
   // 同一份 payload 里两者会矛盾：台账说"读不到"、梯子说"确定没有"。
   // 先前只读台账，于是冷启动必然走 'unknown' → 放行 → 用户看到
   // 「先绿然后才连上」。梯子既然已经在同一次请求里拿回来了，就该先问它。
+  // 梯子文件是 **ReaderPC 每 30 秒无条件写一次的静态读数**（_applyLadder
+  // 那段注释里写着）。所以它只在**新鲜**时可信 —— 用一份 30 秒前的读数当
+  // 现状，两个方向都会错：语音刚接通时按钮多黄闪半分钟，刚挂断时又绿着。
+  //
+  // 取 12 秒：梯子每 30 秒写一次，超过这个数说明我们拿到的多半是上一轮的。
+  var LADDER_FRESH_MS = 12000;
   function _sessionRungEvidence(voice) {
-    var rungs = voice && voice.ladder && voice.ladder.rungs;
+    var ladder = voice && voice.ladder;
+    var rungs = ladder && ladder.rungs;
     if (!rungs || typeof rungs.length !== 'number') return null;
+    var at = Number(ladder.atUtcMs);
+    if (!isFinite(at) || (Date.now() - at) > LADDER_FRESH_MS) return null;
     for (var i = 0; i < rungs.length; i += 1) {
       var rung = rungs[i];
       if (!rung || rung.key !== 'session') continue;
@@ -9603,15 +9612,28 @@ if (window.__bwPwaProviderOnly) return;
     return null;
   }
 
+  // 「通话到底起没起来」有两个来源，**按新鲜度排序**（2026-09-11）：
+  //
+  //   · 桥的 codexVoice.active —— STATUS 请求那一刻**现读**麦克风台账。
+  //     status === 'available' 时它是确定的，而且是最新的。
+  //   · 梯子的 session 级 —— ReaderPC 算好的同一个结论，但落在一个每 30 秒
+  //     才写一次的文件里。只在新鲜时用，用来救"桥自己读不到"的那种情况。
+  //
+  // ⚠ 用户 2026-09-11 指出「服务器不是可以稳定判断语音是否连接上了么」——
+  // 对，而且那行「Codex 语音工作中」跟这里读的**是同一个台账**
+  // （voice_ladder._session_rung → voice_autoclose.read_ledger）。
+  // 区别只在新鲜度，所以这里按新鲜度取，而不是按"谁看起来更权威"。
   function _sessionEvidence(status) {
     var voice = status && status.codexVoice;
     if (!voice || typeof voice !== 'object') return 'unknown';
-    // ⚠ 梯子优先：它是**结论**，台账是原始信号。
+    if (voice.status === 'available') {
+      if (voice.active === true) return true;
+      if (voice.active === false) return false;
+    }
+    // 桥自己读不到时，才轮到（新鲜的）梯子替它回答。
     var fromLadder = _sessionRungEvidence(voice);
     if (fromLadder !== null) return fromLadder;
-    if (voice.status && voice.status !== 'available') return 'unknown';
-    return voice.active === true ? true
-      : (voice.active === false ? false : 'unknown');
+    return 'unknown';
   }
 
   // ⚠ 三个方向的错都要避开：

@@ -524,7 +524,7 @@ test("绿灯：梯子说得准时就别去问台账", () => {
   // 下面这份 rungs 是 2026-09-11 00:20 从桥上 voice-ladder-status.json
   // 原样取的，不是编的。
   const voice = read("_server_deploy/static/pdf/rc-voicecall.js");
-  const from = voice.indexOf("function _sessionRungEvidence");
+  const from = voice.indexOf("var LADDER_FRESH_MS");
   const to = voice.indexOf("function _greenLightAllowed");
   assert.ok(from >= 0 && to > from, "找不到判据函数");
   const body = voice.slice(from, to);
@@ -536,7 +536,7 @@ test("绿灯：梯子说得准时就别去问台账", () => {
   const cold = {
     codexVoice: {
       status: "unavailable",
-      ladder: { rungs: [
+      ladder: { atUtcMs: Date.now(), rungs: [
         { key: "server", known: true, satisfied: true },
         { key: "chain", known: true, satisfied: true },
         { key: "codex", known: true, satisfied: true },
@@ -559,6 +559,19 @@ test("绿灯：梯子说得准时就别去问台账", () => {
   const vague = JSON.parse(JSON.stringify(cold));
   vague.codexVoice.ladder.rungs[3].known = false;
   assert.equal(evidence(vague), "unknown");
+
+  // ⚠ 梯子是 ReaderPC **每 30 秒无条件写一次**的静态读数，只在新鲜时可信。
+  // 拿一份过期读数当现状，两个方向都会错：刚接通时按钮多黄闪半分钟，
+  // 刚挂断时又绿着。2026-09-11 我把它设成第一优先级时正好埋了前一个坑。
+  const stale = JSON.parse(JSON.stringify(cold));
+  stale.codexVoice.ladder.atUtcMs = Date.now() - 40000;
+  assert.equal(evidence(stale), "unknown", "过期的梯子不许冒充现状");
+
+  // 桥是**请求那一刻现读**的，比梯子新 —— 有它就该用它。
+  const fresher = JSON.parse(JSON.stringify(cold));
+  fresher.codexVoice.status = "available";
+  fresher.codexVoice.active = true;          // 梯子仍说 satisfied:false
+  assert.equal(evidence(fresher), true, "现读的结论没有压过陈旧的梯子");
 });
 
 test("绿灯只有一条上漆路径，且它自己带闸", () => {
