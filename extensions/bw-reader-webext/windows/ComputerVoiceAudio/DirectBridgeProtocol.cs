@@ -3541,6 +3541,32 @@ internal sealed class DirectBridgeProtocolSession
         TimeSpan.FromSeconds(10);
 
     /// <summary>
+    /// 送达之后再等多久才认为"这一次没生效"（2026-09-10 用户：「在 app 中开启
+    /// 语音后服务器如果没有连接语音则需要**积极的**去开启语音」）。
+    /// </summary>
+    /// <remarks>
+    /// 原来是 `if (sent) return;` —— **送出去就收工**。可是"接口收下了"从来
+    /// 不等于"任务处理了"，这条纪律本文件顶部就写着，偏偏在这里没守住：
+    /// 推送成功但对面没跑成脚本时，整条链就此静默，用户看到的是按钮闪一下
+    /// 然后什么都没有。
+    ///
+    /// 30 秒的来历：实测一次成功的链路是 19:38:04 送出 → 19:38:09 台账翻转，
+    /// 约 5 秒；对面跑一轮约 11 秒。30 秒 ≈ 3 倍余量，超过它基本可以断定
+    /// 这一次没落地。
+    /// </remarks>
+    private static readonly TimeSpan VoiceEntrySentGrace =
+        TimeSpan.FromSeconds(30);
+
+    /// <summary>同一次开语音里最多送几遍。</summary>
+    /// <remarks>
+    /// ⚠ 不是越多越好：**每一次送达都让对面跑一整轮**（实测 11 秒 + 额度）。
+    /// 而重发是安全的 —— 指令正文里写着「同一编号再次出现表示上一次没有生效」，
+    /// 脚本自己也带守卫（已在通话中不动作、冷却期内不动作）。
+    /// 取 2 = 一次 + 一次补发；再不行就交给桥端兜底，那条不烧对面的额度。
+    /// </remarks>
+    private const int VoiceEntrySendBudget = 2;
+
+    /// <summary>
     /// 音频通道刚通，但语音会话没起来 —— 且**没有别人会去起它**时，请对面开一次。
     /// </summary>
     /// <remarks>
@@ -3617,30 +3643,57 @@ internal sealed class DirectBridgeProtocolSession
             DateTime deadline = DateTime.UtcNow + VoiceEntryRetryWindow;
             // 自愈周期 30 秒，给它一轮多一点。
             DateTime healWindow = DateTime.UtcNow + TimeSpan.FromSeconds(40);
+            // 送出去几次、上一次是什么时候 —— 用来决定这一轮该不该再送。
+            int sentCount = 0;
+            DateTime lastSentAt = DateTime.MinValue;
+            // 连着几次整条链都没起来，先重启一次 Codex 再谈（见
+            // RestartCodexIfWedgedAsync；它自己判在不在通话、自己清零）。
+            await RestartCodexIfWedgedAsync(requestId, lifetime.Token)
+                .ConfigureAwait(false);
             while (true)
             {
                 try
                 {
                     // 中途语音自己起来了(或别人起了)就收手 —— 再催一遍会让对面
                     // 多按一次 F24,而那是**挂断**。
-                    if (control.ReadState().Active == true) return;
+                    if (control.ReadState().Active == true)
+                    {
+                        // 起来了 = 这一串失败到此为止。
+                        WriteVoiceEntryStreak(0);
+                        return;
+                    }
                 }
                 catch (Exception)
                 {
                     // 读不到就当不知道,继续按原计划催。
                 }
-                bool sent = false;
-                try
+                // 这一轮该不该送：
+                //   · 一次都没送成 → 一直试（送不出去不烧对面的额度）
+                //   · 送成过 → 等满宽限期，且还有补发预算才再送一次
+                bool maySend =
+                    sentCount == 0
+                    || (sentCount < VoiceEntrySendBudget
+                        && DateTime.UtcNow - lastSentAt >= VoiceEntrySentGrace);
+                if (maySend)
                 {
-                    sent = await ReaderCodexPush.RequestVoiceEntryAsync(
-                        requestId,
-                        lifetime.Token).ConfigureAwait(false);
+                    try
+                    {
+                        if (await ReaderCodexPush.RequestVoiceEntryAsync(
+                                requestId,
+                                lifetime.Token).ConfigureAwait(false))
+                        {
+                            sentCount++;
+                            lastSentAt = DateTime.UtcNow;
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        // RequestVoiceEntryAsync 自己已经记过原因。
+                    }
                 }
-                catch (Exception)
-                {
-                    // RequestVoiceEntryAsync 自己已经记过原因。
-                }
-                if (sent) return;
+                // ⚠ 这里**没有** `if (sent) return;`（2026-09-10 删掉的）。
+                // 送达只说明消息进了管道；判"起来了没有"的始终是循环顶部那次
+                // 台账读取。收工的唯一理由是语音真的起来了。
                 // 绑定已判死就别再等了 —— 重试救不回一条不存在的管道，
                 // 而每一轮都要干等满一个连接超时。用户看到的是按钮白闪 90 秒，
                 // 然后才轮到兜底（2026-09-10 实测：八次×14 秒）。
@@ -3652,6 +3705,7 @@ internal sealed class DirectBridgeProtocolSession
                 if (ReaderCodexEndpoint.Current() is null
                     && DateTime.UtcNow >= healWindow)
                 {
+                    WriteVoiceEntryStreak(ReadVoiceEntryStreak() + 1);
                     StartVoiceFromBridge(control, requestId);
                     return;
                 }
@@ -3667,6 +3721,10 @@ internal sealed class DirectBridgeProtocolSession
                     //
                     // ⚠ 守卫全在 SetActiveAsync 里：已在通话不按（再按是挂断）、
                     // 台账读不到失败关闭、冷却期内不按。
+                    //
+                    // ⚠ 记一次失败：连够 VoiceEntryRestartAfterFailures 次，
+                    // 下一次入口会先重启一次 Codex。
+                    WriteVoiceEntryStreak(ReadVoiceEntryStreak() + 1);
                     StartVoiceFromBridge(control, requestId);
                     return;
                 }
@@ -3683,6 +3741,148 @@ internal sealed class DirectBridgeProtocolSession
             }
         });
     }
+
+    /// <summary>连着几次整条入口都没把语音开起来，就重启一次 Codex。</summary>
+    /// <remarks>
+    /// 用户 2026-09-10：「多次重试失败时可能需要一次 codex 重启」。
+    ///
+    /// ⚠ **这条路 2026-08-17 被用户实测否掉过一次**，当时它接在
+    /// `recoverStartFailureAsync` 上 —— 那个钩子在 SetActiveAsync **每一次**
+    /// 起语音失败时都会触发，于是"恢复=重启 App"在 20 分钟里反复杀掉用户
+    /// 正在用的会话，而且重启窗口里新旧两代并存又制造 APP_AMBIGUOUS。
+    /// 所以那个钩子至今仍然接的是 null，别把它接回去。
+    ///
+    /// 现在的形状不同，差别就是当初出事的那一点：
+    ///   · 判据是**整条入口链**失败（推送 ×2 + 桥端兜底都没起来），不是单次按键；
+    ///   · 要连着 <see cref="VoiceEntryRestartAfterFailures"/> 次；
+    ///   · 重启前先读台账，**在通话中一律不重启**（那才是"杀掉他正在用的会话"）；
+    ///   · 重启后立刻清零，所以最多重启一次，不会变成重启风暴。
+    /// </remarks>
+    private const int VoiceEntryRestartAfterFailures = 3;
+
+    private const string VoiceEntryStreakFileName =
+        "voice-entry-failure-streak.json";
+
+    private static string? VoiceEntryStreakPath()
+    {
+        string? runtime = ReaderAttentionBoard.RuntimeDirectory;
+        return string.IsNullOrEmpty(runtime)
+            ? null
+            : Path.Combine(runtime, VoiceEntryStreakFileName);
+    }
+
+    /// 连败次数。读不到当 0 —— 一个坏掉的计数器不该触发重启。
+    private static int ReadVoiceEntryStreak()
+    {
+        try
+        {
+            string? path = VoiceEntryStreakPath();
+            if (path is null || !File.Exists(path)) return 0;
+            if (JsonNode.Parse(File.ReadAllText(path)) is not JsonObject value)
+            {
+                return 0;
+            }
+            return value["failures"] is JsonValue count
+                && count.TryGetValue(out int failures)
+                && failures is >= 0 and <= 1000
+                ? failures
+                : 0;
+        }
+        catch (Exception)
+        {
+            return 0;
+        }
+    }
+
+    private static void WriteVoiceEntryStreak(int failures)
+    {
+        try
+        {
+            string? path = VoiceEntryStreakPath();
+            if (path is null) return;
+            string temporary = path + ".tmp-" + Environment.ProcessId;
+            File.WriteAllText(
+                temporary,
+                new JsonObject
+                {
+                    ["contract"] = "reader-voice-entry-streak/1",
+                    ["failures"] = failures,
+                    ["atUtcMs"] =
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                }.ToJsonString());
+            File.Move(temporary, path, overwrite: true);
+        }
+        catch (Exception)
+        {
+            // 记不下来只是少一次重启，不该反过来弄坏起语音。
+        }
+    }
+
+    /// <summary>连败够了就重启一次 Codex。返回是否真的重启了。</summary>
+    private static async Task<bool> RestartCodexIfWedgedAsync(
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        int streak = ReadVoiceEntryStreak();
+        if (streak < VoiceEntryRestartAfterFailures) return false;
+        // ⚠ 在通话中绝不重启 —— 那正是 2026-08-17 出事的形态。
+        try
+        {
+            if (new WindowsRegistryCodexVoiceActivitySource(
+                    DirectAppTargets.CodexDesktop).Read().Active)
+            {
+                ReaderCodexPush.NoteVoiceEntryOutcome(
+                    requestId, false,
+                    "连败 " + streak + " 次，但台账显示在通话中 —— 不重启 Codex");
+                return false;
+            }
+        }
+        catch (Exception)
+        {
+            // 读不到就是"不知道在不在通话"，而不知道时不该动用户的 App。
+            return false;
+        }
+        try
+        {
+            // 与 PrepareInitialStartAsync 同一套取法：profile 给名字，
+            // WaitForUniqueReadyAsync 给"现在这一代是谁"。
+            // ⚠ 不用探针那个 CodexAppTarget —— 启动器要的是 DirectAppTarget，
+            // 两个是不同的记录，混用编译期就会拦下来（刚才就拦了一次）。
+            DirectAppTargetProfile profile = DirectAppTargets.Require(
+                DirectAppTargets.CodexDesktop);
+            WindowsDirectAppLauncher launcher = new();
+            DirectAppTarget current = await launcher
+                .WaitForUniqueReadyAsync(
+                    profile.AppKind,
+                    profile.AppUserModelId,
+                    TimeSpan.FromSeconds(10),
+                    cancellationToken).ConfigureAwait(false);
+            await launcher.RestartAsync(
+                profile.AppKind,
+                profile.AppUserModelId,
+                current,
+                AppRestartTimeout,
+                cancellationToken).ConfigureAwait(false);
+            // 立刻清零：这一次已经用掉了，不许连着重启。
+            WriteVoiceEntryStreak(0);
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                requestId, true,
+                "连败 " + streak + " 次，已重启 Codex 一次再试");
+            return true;
+        }
+        catch (Exception exception)
+        {
+            WriteVoiceEntryStreak(0);
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                requestId, false,
+                "连败 " + streak + " 次，重启 Codex 失败："
+                + exception.GetType().Name);
+            return false;
+        }
+    }
+
+    private static readonly TimeSpan AppRestartTimeout =
+        TimeSpan.FromSeconds(45);
 
     /// 与 NativeMessagingHost 用同一个解释器路径。
     private static string PythonExecutable() => Path.Combine(

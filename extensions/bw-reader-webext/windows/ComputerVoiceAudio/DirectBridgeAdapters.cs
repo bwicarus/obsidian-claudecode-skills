@@ -815,11 +815,76 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             {
                 // 不在 _stateGate 里等落盘：音频 20 ms 一帧，钉住是一次文件 IO。
                 _lastPinTask = PinAfterSpeechEndAsync();
+                // 说完一句话 = 一次**确凿的在场证据**（2026-09-10）。
+                //
+                // 起因：闲置判据的三个来源（键鼠 / App 转前台 / 复制账本）
+                // 没有一个看得见"他正在通话里说话" —— pc_input_idle_ms 的注释
+                // 里其实写着「用户跟 AI 打字、语音说话、开别的软件，一条都不会
+                // 写进去」，那是当初加键鼠源的理由，但没人接着问"键鼠盖得住
+                // 说话吗"。盖不住。于是一通 20 分钟以上、免提、不碰键鼠的
+                // 对话会被自动关闭**打断**，而这个模块自己的文件头写着
+                // 「关闭会打断人说话；不确定就不关」。
+                //
+                // ⚠ 挂在**句末**而不是每一帧：20ms 一帧写文件是灾难，
+                // 而"说完一句"本来就是我们已经在检测的事件。
+                NoteUplinkPresence();
             }
         }
         finally
         {
             _stateGate.Release();
+        }
+    }
+
+    /// 上行在场证据的落点。<see cref="NoteUplinkPresence"/> 写，
+    /// Python 侧的闲置判据读。
+    internal const string UplinkPresenceFileName =
+        "voice-uplink-activity.json";
+
+    /// 两次落盘之间的最小间隔。说话是连续事件，句句都写没有意义 ——
+    /// 闲置判据的粒度是**分钟**，5 秒已经远超所需。
+    private static readonly TimeSpan UplinkPresenceWriteInterval =
+        TimeSpan.FromSeconds(5);
+
+    private static long _lastUplinkPresenceWriteTicks;
+
+    /// <summary>记下"刚刚有人在通话里说完一句话"。</summary>
+    /// <remarks>
+    /// ⚠ **尽力而为**：写不成绝不能影响音频路径。写不成的后果只是闲置判据
+    /// 少一个来源，而它本来就是取几个来源里最晚的那个。
+    /// </remarks>
+    private static void NoteUplinkPresence()
+    {
+        try
+        {
+            long now = DateTime.UtcNow.Ticks;
+            long last = Interlocked.Read(ref _lastUplinkPresenceWriteTicks);
+            if (
+                last != 0
+                && new TimeSpan(now - last) < UplinkPresenceWriteInterval
+            )
+            {
+                return;
+            }
+            Interlocked.Exchange(ref _lastUplinkPresenceWriteTicks, now);
+            string? runtime = ReaderAttentionBoard.RuntimeDirectory;
+            if (string.IsNullOrEmpty(runtime)) return;
+            string path = System.IO.Path.Combine(
+                runtime, UplinkPresenceFileName);
+            string temporary = path + ".tmp-" + Environment.ProcessId;
+            System.IO.File.WriteAllText(
+                temporary,
+                new JsonObject
+                {
+                    ["contract"] = "reader-voice-uplink-activity/1",
+                    ["lastVoicedAtUtcMs"] =
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                }.ToJsonString());
+            System.IO.File.Move(temporary, path, overwrite: true);
+        }
+        catch (Exception)
+        {
+            // 见上：诊断绝不能弄坏被诊断的东西。
         }
     }
 

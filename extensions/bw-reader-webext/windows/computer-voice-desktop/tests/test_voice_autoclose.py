@@ -151,6 +151,113 @@ class DecisionTests(unittest.TestCase):
         )
 
 
+class IdleIsScopedToTheCallTests(unittest.TestCase):
+    """闲置判据必须是**通话内**的，而不是一口全局时钟。
+
+    ⚠ 现役 30 条测试一条都没覆盖这件事 —— 它们从不调 observe()，于是
+    call_started_ms 一直是 None，通话内的分支根本没被走过。改完之后它们
+    仍然全绿，正说明这里必须另立一组。
+    """
+
+    def setUp(self):
+        self.state = VAC.AutoCloseState()
+        self.now = 1_800_000_000_000
+
+    def test_a_call_started_while_already_idle_is_not_closed_at_once(self):
+        """离开键盘 25 分钟后起一通，不该在第一次 tick 就被挂掉。
+
+        这是最贵的那种错：人刚开口，电话就没了。全局时钟答的是"这台机器
+        多久没动静"，跟这通电话什么时候开始的无关。
+        """
+        settings = prefs(voiceAutoCloseIdleMinutes=20)
+        signals = {"idle_minutes": known(25)}
+        # 通话刚开始（第一次 observe 立起点），同一轮就 evaluate。
+        self.state.observe(signals, self.now, in_call=True)
+        self.assertIsNone(
+            VAC.evaluate(self.state, signals, settings, self.now))
+
+    def test_it_still_closes_once_the_call_itself_has_been_idle_long_enough(
+            self):
+        """从通话开始算满阈值，才轮到它动手。"""
+        settings = prefs(voiceAutoCloseIdleMinutes=20)
+        signals = {"idle_minutes": known(25)}
+        self.state.observe(signals, self.now, in_call=True)
+        later = self.now + 20 * 60000
+        reason = VAC.evaluate(self.state, signals, settings, later)
+        self.assertIn("闲置 20 分钟", reason or "")
+
+    def test_the_clock_restarts_with_each_call(self):
+        """挂掉再打，起点要跟着重来 —— 否则上一通的闲置会算在新一通头上。"""
+        settings = prefs(voiceAutoCloseIdleMinutes=20)
+        signals = {"idle_minutes": known(99)}
+        self.state.observe(signals, self.now, in_call=True)
+        self.state.observe(signals, self.now + 5 * 60000, in_call=False)
+        restarted = self.now + 10 * 60000
+        self.state.observe(signals, restarted, in_call=True)
+        self.assertIsNone(
+            VAC.evaluate(self.state, signals, settings, restarted))
+
+
+class SpeakingCountsAsActivityTests(unittest.TestCase):
+    """说话必须算"人在"。
+
+    ⚠ 2026-09-10 之前三个来源（键鼠 / App 转前台 / 复制账本）没有一个看得见
+    通话里的说话 —— pc_input_idle_ms 的注释里其实写着「用户跟 AI 打字、语音
+    说话、开别的软件，一条都不会写进去」，那是当初加键鼠源的理由，但没人
+    接着问"键鼠盖得住说话吗"。于是免提长谈会被自动关闭打断。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.runtime = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _write(self, at_ms, contract="reader-voice-uplink-activity/1"):
+        (self.runtime / "voice-uplink-activity.json").write_text(
+            json.dumps({"contract": contract, "lastVoicedAtUtcMs": at_ms}),
+            encoding="utf-8")
+
+    def test_a_finished_utterance_is_evidence_of_presence(self):
+        import replication_notifications as rn
+        self._write(1_800_000_000_000)
+        self.assertEqual(
+            rn.uplink_voice_ms(self.runtime), 1_800_000_000_000)
+
+    def test_a_wrong_contract_is_ignored_not_guessed(self):
+        """契约不对就当没有 —— 猜一个时刻会让闲置判据据以做出错误决定。"""
+        import replication_notifications as rn
+        self._write(1_800_000_000_000, contract="something-else/1")
+        self.assertIsNone(rn.uplink_voice_ms(self.runtime))
+
+    def test_missing_file_and_missing_runtime_are_both_quiet(self):
+        import replication_notifications as rn
+        self.assertIsNone(rn.uplink_voice_ms(self.runtime))
+        self.assertIsNone(rn.uplink_voice_ms(None))
+
+    def test_it_is_taken_into_the_latest_of_all_sources(self):
+        """取**最晚**：任一来源有动静就足以证明人在。"""
+        import replication_notifications as rn
+        root = self.runtime / "readerpc"
+        root.mkdir()
+        spoke_at = rn._now_ms() - 1000
+        self._write(spoke_at)
+        got = rn.last_user_activity_ms(root, self.runtime)
+        self.assertIsNotNone(got)
+        self.assertGreaterEqual(got, spoke_at)
+
+    def test_the_signal_layer_actually_passes_the_bridge_runtime(self):
+        """⚠ 不传 runtime 等于这个来源不存在，而它是通话中唯一看得见的证据。
+
+        这条钉的是**接线**：桥把文件写在自己的 runtime 目录，而信号层拿到
+        的 root 是 ReaderPC 的本地根 —— 今天已经因为同类错误吃过一次亏
+        （in_call_thread_id 一直读错目录，智能关闭从来没真正动过手）。
+        """
+        source = (Path(__file__).resolve().parents[1]
+                  / "situation_signals.py").read_text(encoding="utf-8")
+        body = source.split("def _sig_idle_minutes")[1].split("def ")[0]
+        self.assertIn("last_user_activity_ms(root, runtime)", body)
+
+
 class LedgerTests(unittest.TestCase):
     def test_active_rule_matches_the_csharp_copy(self):
         """这是同一条判据的第二份副本，两边必须逐字同义。"""

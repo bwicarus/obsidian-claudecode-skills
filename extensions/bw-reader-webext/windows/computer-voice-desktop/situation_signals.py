@@ -123,7 +123,9 @@ def _sig_awake(root: Path, runtime: Path, now_ms: int) -> dict[str, Any]:
 
 def _sig_idle_minutes(root: Path, runtime: Path, now_ms: int) -> dict[str, Any]:
     import replication_notifications as rn
-    last = rn.last_user_activity_ms(root)
+    # ⚠ 必须把 runtime 传进去：通话人声那个来源写在**桥的** runtime 目录，
+    # 不传等于那个来源不存在（而它恰恰是通话中唯一看得见的证据）。
+    last = rn.last_user_activity_ms(root, runtime)
     if last is None:
         return unknown("账本里没有用户操作记录")
     return known(round(max(0.0, (now_ms - last) / 60000.0), 1))

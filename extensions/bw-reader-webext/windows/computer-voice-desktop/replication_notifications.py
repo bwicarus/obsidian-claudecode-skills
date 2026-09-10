@@ -1039,7 +1039,36 @@ def _presence_report_ms(root: Path) -> int | None:
     return int(at) if isinstance(at, (int, float)) and at > 0 else None
 
 
-def last_user_activity_ms(root: Path) -> int | None:
+def uplink_voice_ms(runtime: Path | None) -> int | None:
+    """通话里最近一次**说完一句话**的时刻。桥在句末写，见
+    `DirectBridgeCoordinator.NoteUplinkPresence`。
+
+    ⚠ 这是第四个来源，2026-09-10 加的。前三个没有一个看得见"他正在通话里
+    说话"—— pc_input_idle_ms 的注释里其实写着「用户跟 AI 打字、**语音说话**、
+    开别的软件，一条都不会写进去」，那是当初加键鼠源的理由，但没人接着问
+    "键鼠盖得住说话吗"。盖不住：说话不产生键鼠输入，App 的在场只在转入前台
+    时报一次（不是周期的），复制账本只记阅读器改动。
+    于是一通 20 分钟以上、免提、不碰键鼠的对话会被自动关闭**打断**。
+    """
+    if runtime is None:
+        return None
+    try:
+        value = json.loads(
+            (runtime / "voice-uplink-activity.json").read_text("utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    if value.get("contract") != "reader-voice-uplink-activity/1":
+        return None
+    at = value.get("lastVoicedAtUtcMs")
+    return int(at) if isinstance(at, (int, float)) and at > 0 else None
+
+
+def last_user_activity_ms(
+    root: Path,
+    runtime: Path | None = None,
+) -> int | None:
     """最近一次用户活动时刻，**取几个来源里最晚的那个**。读不到返回 None。
 
     2026-09-09 改：原来只看复制账本的 actor='user'，也就是只看"他动过阅读器"。
@@ -1050,6 +1079,7 @@ def last_user_activity_ms(root: Path) -> int | None:
       · 复制账本   他改过阅读器里的东西（高亮/卡片/笔记）
       · 键鼠输入   他就在这台电脑前（最直接，也最容易被忽略）
       · App 在场   他刚把 App 拿到前台，也就是刚用过手机
+      · 通话人声   他刚在通话里说完一句话（2026-09-10 加；见 uplink_voice_ms）
 
     ⚠ 取**最晚**而不是取账本：任何一个来源有动静都足以证明醒着，
       而"都没动静"才是弱证据。方向不对称，所以不能用平均或者只信一个。
@@ -1064,6 +1094,9 @@ def last_user_activity_ms(root: Path) -> int | None:
     ledger = _ledger_user_activity_ms(root)
     if ledger is not None:
         candidates.append(ledger)
+    voiced = uplink_voice_ms(runtime)
+    if voiced is not None:
+        candidates.append(voiced)
     return max(candidates) if candidates else None
 
 

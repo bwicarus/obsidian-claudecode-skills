@@ -156,10 +156,30 @@ def _known(signals: dict[str, Any], name: str) -> Any:
 
 
 def _cond_idle(state: "AutoCloseState", signals, prefs, now_ms) -> str | None:
+    """闲置超过阈值。
+
+    ⚠ **起算点不能早于这一通的开始**（2026-09-10 修）。
+    idle_minutes 是一口**全局**时钟：它答的是"这台机器多久没动静了"，
+    跟这通电话什么时候开始的无关。于是"离开键盘 25 分钟之后起一通"会在
+    第一次 tick（≤30 秒）就被挂掉 —— 人刚开口就没了。
+
+    对比同一张表里的地点条件：它专门记了 place_at_start，问的是"**变化**
+    了吗"。同样的纪律当初只落在地点上，闲置这条漏了。
+
+    起算点取 max(通话开始, 最后一次活动)：
+      · 通话中一直说话  → 活动时刻在涨（通话人声那个来源，2026-09-10 加）
+      · 通话中完全没动  → 从通话开始算满阈值才关，而不是一进来就关
+    """
     limit = int(prefs.get("voiceAutoCloseIdleMinutes")
                 or DEFAULT_IDLE_MINUTES)
     idle = _known(signals, "idle_minutes")
-    if idle is None or idle < limit:
+    if idle is None:
+        return None
+    if state.call_started_ms is not None:
+        since_call = (now_ms - state.call_started_ms) / 60000.0
+        # 通话内的闲置不可能超过通话本身的长度。
+        idle = min(idle, since_call)
+    if idle < limit:
         return None
     return "闲置 %d 分钟（阈值 %d）" % (int(idle), limit)
 
@@ -245,6 +265,8 @@ class AutoCloseState:
         self.place_at_start: str | None = None
         self.not_reading_since_ms: int | None = None
         self.call_seen = False
+        #: 这一通是什么时候开始的。闲置判据要从它起算，见 _cond_idle。
+        self.call_started_ms: int | None = None
 
     def observe(self, signals: dict[str, Any], now_ms: int,
                 in_call: bool) -> None:
@@ -253,6 +275,7 @@ class AutoCloseState:
             return
         if not self.call_seen:
             self.call_seen = True
+            self.call_started_ms = now_ms
             self.place_at_start = _known(signals, "place")
         title = _known(signals, "reading_title")
         if title:
