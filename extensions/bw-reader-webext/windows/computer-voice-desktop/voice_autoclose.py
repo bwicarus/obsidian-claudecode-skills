@@ -24,6 +24,7 @@ Codex 有内置工具 ``end_realtime_voice_call``，而我们已有一条推送�
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -300,14 +301,29 @@ def _post(endpoint: str, body: dict[str, Any], timeout: float = 15.0
         return 0, {"detail": "连不上桥：%s" % str(error)[:160]}
 
 
-def in_call_thread_id(root: Path) -> str:
+def codex_home() -> Path:
+    """侧栏同步状态所在的目录。"""
+    return Path(os.environ.get("USERPROFILE") or Path.home()) / ".codex"
+
+
+def in_call_thread_id(root: Path | None = None) -> str:
     """正在通话的那条线程。
 
     ⚠ 不能用推送绑定里的 threadId：那是**提示板**推送的目标，通常不是通话
     那条（2026-09-09 实测绑定是 01a0847a 而通话是 01a08560）。侧栏同步一直
     在跟通话线程，读它的 lastGood 即可。
+
+    ⚠ **文件在 `~/.codex/`**（2026-09-10 修）。原来调用方传的是 ReaderPC 的
+    local_root（`%LOCALAPPDATA%/BWReader`），那儿根本没有这个文件 —— 于是
+    这里永远返回空串，智能关闭永远走"拿不到通话线程 id"那条分支。当时的
+    测试用 `tempfile` 目录自己造文件、再把同一个目录传进来，两边都对但**跟
+    真实位置无关**，所以一直是绿的。默认值现在直接指向真实位置，参数只留给
+    测试覆盖。
+
+    ⚠ 同一份知识在 C# 侧还有一个实现
+    （`DirectCodexVoiceControl.InCallThreadId`）——改一处必须改两处。
     """
-    path = root / "voice-history-sidebar-sync-state.json"
+    path = (root or codex_home()) / "voice-history-sidebar-sync-state.json"
     try:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):

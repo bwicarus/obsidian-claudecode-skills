@@ -6458,16 +6458,23 @@ internal static class DirectBridgeSelfTest
             "direct-codex-voice-invalid-live-intent-retains-last-valid",
             checks);
 
+        // 意图 true -> false：**只撤意图，不碰通话**（2026-09-10 解绑）。
+        //
+        // 这条以前叫 -stops-once，断言 liveIntentTransitions == 2 —— 也就是
+        // 「意图文件变成 false 就把通话按停」。那正是 17:01 那次事故的授权
+        // 来源：一次性启动方式下这个文件**常态为 false**，桥每换一代就写一次，
+        // 于是每一代都掐掉用户正在打的电话。挂断的合法触发只有智能关闭。
         await WriteKeepActiveIntentAsync(liveIntentPath, enabled: false)
             .ConfigureAwait(false);
-        _ = await liveIntentStopped.Task.WaitAsync(
-            TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+        await Task.Delay(TimeSpan.FromMilliseconds(2500))
+            .ConfigureAwait(false);
         Require(
             !liveIntentControl.KeepActive
-            && !liveIntentState.Active
-            && liveIntentTransitions == 2
+            && liveIntentState.Active
+            && liveIntentTransitions == 1
+            && !liveIntentStopped.Task.IsCompleted
             && liveIntentChanges.SequenceEqual(new[] { true, false }),
-            "direct-codex-voice-live-true-to-false-stops-once",
+            "direct-codex-voice-live-true-to-false-keeps-the-call",
             checks);
 
         string failedKeepActivePath = System.IO.Path.Combine(
@@ -7209,15 +7216,23 @@ internal static class DirectBridgeSelfTest
         using JsonDocument disposedIntent = JsonDocument.Parse(
             await File.ReadAllTextAsync(disposeKeepActivePath)
                 .ConfigureAwait(false));
+        // 退出只**撤意图**，不碰通话（2026-09-10 解绑）。
+        //
+        // 这条断言以前是反过来的：`disposeTransitions == [false]` +
+        // `!disposeState.Active`，即"退出时必须把通话按停"。那正是 2026-09-10
+        // 那类事故的授权来源 —— 桥每天换好几代，每一代退出都掐掉用户正在打的
+        // 电话。现在要求：意图落成 false，**一次转换都不许发**，通话原样留着。
         Require(
             !disposeControl.KeepActive
-            && !disposeState.Active
-            && disposeTransitions.SequenceEqual(new[] { false })
+            && disposeState.Active
+            && disposeTransitions.Count == 0
             && disposedIntent.RootElement
                 .GetProperty("enabled").GetBoolean() == false,
-            "direct-dispose-revokes-keepalive-and-stops-active-voice-once",
+            "direct-dispose-revokes-keepalive-without-touching-the-call",
             checks);
 
+        // 退出路径上**没有任何**通话转换 —— 连"转换会抛"都不该被触发到。
+        // 用一个只会抛的转换委托来证明：它一次都不会被调用。
         string failedDisposePath = System.IO.Path.Combine(
             installationRoot,
             "runtime",
@@ -7251,12 +7266,11 @@ internal static class DirectBridgeSelfTest
             await File.ReadAllTextAsync(failedDisposePath)
                 .ConfigureAwait(false));
         Require(
-            failedDisposeCode
-                == "BW_COMPUTER_VOICE_DIRECT_FAKE_DISPOSE_STOP_FAILED"
+            failedDisposeCode is null
             && !failedDisposeControl.KeepActive
             && !failedDisposeIntent.RootElement
                 .GetProperty("enabled").GetBoolean(),
-            "direct-dispose-stop-failure-is-visible-after-intent-revocation",
+            "direct-dispose-never-invokes-a-voice-transition",
             checks);
     }
 
@@ -7979,7 +7993,13 @@ internal static class DirectBridgeSelfTest
                     "hresult",
                     "atUtc",
                     "exceptionType",
+                    "safeDetail",
                 })
+            // safeDetail 走的是异常之外的路：FromException **永远**不填它，
+            // 所以从异常来的这条必须是 null。这一句就是"消息没有任何路径能
+            // 流进 safeDetail"的落脚点。
+            && statusError.GetProperty("safeDetail").ValueKind
+                == JsonValueKind.Null
             // 这条 !Contains 是整个净化保证的落脚点：异常 message 里会出现
             // 设备/端点标识（本例的 message 就叫 secret-endpoint-…），
             // 所以状态文件只带**类型名**这种编译期常量，绝不带 message。
@@ -7987,6 +8007,24 @@ internal static class DirectBridgeSelfTest
                 "secret-endpoint",
                 StringComparison.Ordinal),
             "direct-status-endpoint-failure-is-sanitized-and-not-ready",
+            checks);
+
+        // SanitizeDetail 是 safeDetail 的唯一入口，所以它得自己证明自己：
+        // 放行真实形态的停止原因，挡掉一切带空格/中文/引号的东西（异常
+        // message 全长那样）。写死这几个样本是为了让"白名单"不能被悄悄放宽。
+        Require(
+            DirectRuntimeError.SanitizeDetail("connection-closed:conn-7a1f")
+                == "connection-closed:conn-7a1f"
+            && DirectRuntimeError.SanitizeDetail(
+                "fault:media-fault:DirectProtocolException")
+                == "fault:media-fault:DirectProtocolException"
+            && DirectRuntimeError.SanitizeDetail(
+                "secret-endpoint id must never be serialized") is null
+            && DirectRuntimeError.SanitizeDetail("媒体捕获意外停止") is null
+            && DirectRuntimeError.SanitizeDetail(new string('a', 201)) is null
+            && DirectRuntimeError.SanitizeDetail(null) is null
+            && DirectRuntimeError.SanitizeDetail("  ") is null,
+            "direct-runtime-error-safe-detail-allows-only-constant-shaped-text",
             checks);
 
         string sessionId = "session-" + DirectBase64Url.Encode(

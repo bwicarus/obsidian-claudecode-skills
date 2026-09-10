@@ -328,6 +328,19 @@ internal static class ReaderCodexEndpoint
         if (body["hangUpVoiceFallback"] is JsonValue fallback
             && fallback.TryGetValue(out bool wantsFallback) && wantsFallback)
         {
+            // ⚠ 开关也管挂断这一侧（2026-09-10 修）。这个 op 原来完全绕过
+            // voice-shortcut-fallback：用户把「F24 兜底」关掉之后，起语音确实
+            // 不按了，挂断仍然在按 —— 开关只兑现了一半，而两侧都叫兜底。
+            if (!DirectCodexVoiceControl.ShortcutFallbackEnabled())
+            {
+                await Ok(context, new JsonObject
+                {
+                    ["ok"] = true,
+                    ["pressed"] = false,
+                    ["skipped"] = "F24 兜底在设置里是关的，没有按任何键",
+                }, cancellationToken).ConfigureAwait(false);
+                return;
+            }
             CodexVoiceActivitySnapshot ledger =
                 new WindowsRegistryCodexVoiceActivitySource().Read();
             if (!ledger.Active)

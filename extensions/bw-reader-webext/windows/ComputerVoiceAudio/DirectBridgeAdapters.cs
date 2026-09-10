@@ -274,11 +274,15 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
 
     internal DirectRuntimeError RecordFailure(
         Exception exception,
-        string fallbackStage)
+        string fallbackStage,
+        string? safeDetail = null)
     {
         DirectRuntimeError failure = DirectRuntimeError.FromException(
             exception,
-            fallbackStage);
+            fallbackStage) with
+        {
+            SafeDetail = DirectRuntimeError.SanitizeDetail(safeDetail),
+        };
         lock (_runtimeErrorGate)
         {
             _lastError = failure;
@@ -319,6 +323,10 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                 stage = failure.Stage,
                 hresult = failure.Hresult,
                 exceptionType = failure.ExceptionType,
+                // 只收过了白名单的那种线索（见 DirectRuntimeError.SafeDetail）。
+                // 漏掉它的代价实测过两次：账本里只剩一个
+                // MEDIA_STOPPED_UNEXPECTEDLY，说不出媒体为什么停。
+                safeDetail = failure.SafeDetail,
             });
             System.IO.File.AppendAllText(
                 path,
@@ -1054,6 +1062,12 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         await _stateGate.WaitAsync().ConfigureAwait(false);
         try
         {
+            // ⚠ 先把**上一条**原因取走再覆盖（2026-09-10）。
+            // 下面那行会把它改成 `fault:<stage>:<TypeName>` —— 而真正想知道的
+            // 恰恰是被覆盖掉的那条（`connection-closed:<id>` /
+            // `takeover-by-new-start:<id>` …）。它原本只出现在异常 message 里，
+            // 而 message 按设计进不了账本，所以等于没有留下。
+            string? priorStopReason = _lastMediaStopReason;
             if (_activeConnectionId == connectionId)
             {
                 _lastMediaStopReason =
@@ -1070,7 +1084,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             // connection owns media.  Otherwise a retired transport could
             // wake on the old Completion task after a replacement START and
             // overwrite the new owner's clean runtime state.
-            _ = RecordFailure(failure, stage);
+            _ = RecordFailure(failure, stage, priorStopReason);
             try
             {
                 await _mediaAdapter.StopAsync(CancellationToken.None)

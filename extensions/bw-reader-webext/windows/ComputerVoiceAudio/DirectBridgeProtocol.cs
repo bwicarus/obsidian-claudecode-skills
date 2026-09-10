@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -557,8 +558,15 @@ internal sealed class DirectCodexVoiceControl :
             source.Read,
             async (active, before, cancellationToken) =>
             {
+                if (!active)
+                {
+                    return await HangUpAsync(
+                        controller,
+                        shortcutSender,
+                        before,
+                        cancellationToken).ConfigureAwait(false);
+                }
                 CodexAppTarget target = RequireCodexTarget();
-                if (active)
                 {
                     CodexVoiceStartBaseline baseline = new(before);
                     shortcutSender.Send(target, DirectVoiceCommand.Start);
@@ -617,13 +625,6 @@ internal sealed class DirectCodexVoiceControl :
                         cancellationToken).ConfigureAwait(false);
                     return confirmation.Snapshot;
                 }
-
-                shortcutSender.Send(target, DirectVoiceCommand.Stop);
-                return await controller.ConfirmStoppedAsync(
-                    before,
-                    CodexVoiceActivityController.StopTransitionTimeout,
-                    CodexVoiceActivityController.MonitorInterval,
-                    cancellationToken).ConfigureAwait(false);
             },
             keepActivePath: keepActivePath,
             prepareStartAsync: (_, cancellationToken) =>
@@ -641,6 +642,237 @@ internal sealed class DirectCodexVoiceControl :
             automaticRecoveryFailed: automaticRecoveryFailed,
             automaticRecoverySucceeded: automaticRecoverySucceeded,
             shortcutCooldown: shortcutCooldown);
+    }
+
+    /// <summary>
+    /// 挂断当前通话。**先走通知通道，F24 只是兜底**（2026-09-10 用户拍板：
+    /// 「挂断走通知更稳定不要再用 f24」）。
+    /// </summary>
+    /// <remarks>
+    /// 理由与 <see cref="ReaderCodexPush.RequestVoiceHangUpAsync"/> 那段注释
+    /// 同源：F24 是**切换**，按它之前必须先知道当前状态，而状态只能从有秒级
+    /// 延迟的麦克风台账读 —— 读错就做反（以为已挂其实在通话＝挂掉用户的电话；
+    /// 以为在通话其实已挂＝**反向开一通并开始计费**）。
+    /// <c>end_realtime_voice_call</c> 是**有方向**的：对面不在通话时它只空转，
+    /// 判断错的代价从"做反"降级成"白做一次"。
+    ///
+    /// ⚠ 那段道理 2026-09-09 就写下来了，但**只有 ReaderPC 的策略环照做**；
+    /// 收敛环（本方法的调用方）一直在直接按键。2026-09-10 17:01 就是这么
+    /// 挂掉一通正在进行的通话的。同一条道理有两个实现、只改了一个 ——
+    /// 这正是 CLAUDE.md 里"先数清楚有几份副本"那条。现在按用途收到一处：
+    /// **收敛环与策略环共用这条挂断路径**，F24 留在
+    /// <c>hangUpVoiceFallback</c> 那个显式兜底 op 里。
+    ///
+    /// ⚠ 兜底按键受 <see cref="ShortcutFallbackEnabled"/> 管（用户
+    /// 2026-09-10：「把 f24 兜底作为一个可选开关」）。关着时不按，**如实报
+    /// 失败而不是假装挂掉了** —— 上层据此决定要不要提示用户手动挂。
+    /// </remarks>
+    private static async Task<CodexVoiceActivitySnapshot> HangUpAsync(
+        CodexVoiceActivityController controller,
+        WindowsCodexVoiceShortcutSender shortcutSender,
+        CodexVoiceActivitySnapshot before,
+        CancellationToken cancellationToken)
+    {
+        string requestId = "hangup-"
+            + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                .ToString(CultureInfo.InvariantCulture);
+        string threadId = InCallThreadId();
+        bool requested = false;
+        if (threadId.Length > 0)
+        {
+            requested = await ReaderCodexPush.RequestVoiceHangUpAsync(
+                threadId,
+                "桥端收敛：语音保活意图已撤销，这一通该结束了",
+                requestId,
+                cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            // 出声：拿不到通话线程与"送出去了但对面没动"是两件不同的事，
+            // 折成一个"没挂掉"会让排查的人查错方向。
+            ReaderCodexPush.NoteHangUpDecision(
+                requestId, false,
+                "拿不到正在通话的线程 id（"
+                + InCallThreadSource()
+                + "），挂断请求未发送");
+        }
+
+        if (requested)
+        {
+            // 通道这条路要等的是：推送送达 → 对面跑完一轮 → 通话真的拆掉。
+            // 比按键那条长，所以用它自己的上界（见 StopViaChannelTimeout）。
+            return await ConfirmHangUpAsync(
+                controller,
+                before,
+                CodexVoiceActivityController.StopViaChannelTimeout,
+                requestId,
+                "通道",
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!ShortcutFallbackEnabled())
+        {
+            ReaderCodexPush.NoteHangUpDecision(
+                requestId, false,
+                "挂断请求没送出去，且 F24 兜底在设置里是关的 —— 没有按任何键");
+            throw new DirectProtocolException(
+                CodexVoiceActivityController.StopNotConfirmedCode,
+                "挂断请求没能经通知通道送出，而 F24 兜底已关闭；本次没有挂断",
+                retryable: true);
+        }
+
+        CodexAppTarget target = RequireCodexTarget();
+        shortcutSender.Send(target, DirectVoiceCommand.Stop);
+        ReaderCodexPush.NoteHangUpDecision(
+            requestId, true,
+            "通道没送出去，已按 F24 兜底");
+        return await ConfirmHangUpAsync(
+            controller,
+            before,
+            CodexVoiceActivityController.StopTransitionTimeout,
+            requestId,
+            "F24",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 等台账转为未通话，并把**实际耗时**记下来。
+    /// </summary>
+    /// <remarks>
+    /// 记耗时是为了以后调 <c>StopTransitionTimeout</c> /
+    /// <c>StopViaChannelTimeout</c> 时**有数据可依**。2026-09-10 只有一个
+    /// 样本（按下到台账释放 ≈ 22 秒，而当时的上界是 5 秒），拿一个样本拍
+    /// 常数正是这两个数字最初就拍错的原因。
+    /// </remarks>
+    private static async Task<CodexVoiceActivitySnapshot> ConfirmHangUpAsync(
+        CodexVoiceActivityController controller,
+        CodexVoiceActivitySnapshot before,
+        TimeSpan timeout,
+        string requestId,
+        string via,
+        CancellationToken cancellationToken)
+    {
+        long startedAt = Stopwatch.GetTimestamp();
+        try
+        {
+            CodexVoiceActivitySnapshot after = await controller
+                .ConfirmStoppedAsync(
+                    before,
+                    timeout,
+                    CodexVoiceActivityController.MonitorInterval,
+                    cancellationToken).ConfigureAwait(false);
+            ReaderCodexPush.NoteHangUpDecision(
+                requestId, true,
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "已挂断（经{0}），台账 {1:0.0} 秒后转为未通话（上界 {2:0} 秒）",
+                    via,
+                    Stopwatch.GetElapsedTime(startedAt).TotalSeconds,
+                    timeout.TotalSeconds));
+            return after;
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            // ⚠ "没确认到"不等于"没挂掉"：2026-09-10 那次按键其实生效了，只是
+            // 台账 22 秒后才翻，而上界是 5 秒。所以这里要把**等了多久**写进去，
+            // 否则下一个人只看到一条"未确认"，仍然不知道该把上界调到多少。
+            ReaderCodexPush.NoteHangUpDecision(
+                requestId, false,
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "已请求挂断（经{0}），但 {1:0.0} 秒内没等到台账转为未通话"
+                    + "（上界 {2:0} 秒）：{3}",
+                    via,
+                    Stopwatch.GetElapsedTime(startedAt).TotalSeconds,
+                    timeout.TotalSeconds,
+                    exception.Message));
+            throw;
+        }
+    }
+
+    /// <summary>正在通话的那条线程。</summary>
+    /// <remarks>
+    /// ⚠ **不能用推送绑定里的 threadId**：那是提示板推送的目标，通常不是通话
+    /// 那条（2026-09-09 实测绑定 01a0847a 而通话 01a08560）。侧栏同步一直跟着
+    /// 通话线程走，读它的 lastGood 即可。
+    ///
+    /// ⚠ 文件在 <c>~/.codex/</c>，不在桥 runtime 也不在 ReaderPC 的 local_root。
+    /// Python 侧 <c>voice_autoclose.in_call_thread_id</c> 是同一份知识的第二个
+    /// 实现，且原本指错了目录（2026-09-10 一起修）——改一处必须改两处。
+    /// </remarks>
+    internal static string InCallThreadId()
+    {
+        try
+        {
+            string path = InCallThreadSource();
+            if (!File.Exists(path))
+            {
+                return string.Empty;
+            }
+            if (JsonNode.Parse(File.ReadAllText(path)) is not JsonObject root)
+            {
+                return string.Empty;
+            }
+            if (root["lastGood"] is not JsonObject lastGood)
+            {
+                return string.Empty;
+            }
+            string? threadId = (string?)lastGood["threadId"];
+            return string.IsNullOrWhiteSpace(threadId)
+                ? string.Empty
+                : threadId;
+        }
+        catch (Exception)
+        {
+            return string.Empty;
+        }
+    }
+
+    internal static string InCallThreadSource() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".codex",
+        "voice-history-sidebar-sync-state.json");
+
+    /// <summary>
+    /// F24 兜底开关（2026-09-10 用户：「把 f24 兜底作为一个可选开关」）。
+    /// 读不到一律当**开** —— 一个坏掉/缺失的偏好不该让语音开不了。
+    /// </summary>
+    /// <remarks>
+    /// ⚠ 只此一份：起语音（<c>StartVoiceFromBridge</c>）、收敛挂断
+    /// （<see cref="HangUpAsync"/>）、显式兜底 op（<c>hangUpVoiceFallback</c>）
+    /// 三处都调这里。原来这个判断长在 DirectBridgeProtocolSession 里、只管起
+    /// 语音那一处，于是"关掉开关之后挂断仍然按 F24"。
+    /// </remarks>
+    internal static bool ShortcutFallbackEnabled()
+    {
+        string? runtime = ReaderAttentionBoard.RuntimeDirectory;
+        if (string.IsNullOrEmpty(runtime)) return true;
+        try
+        {
+            string path = Path.Combine(
+                runtime, "voice-shortcut-fallback.json");
+            if (!File.Exists(path)) return true;
+            if (JsonNode.Parse(File.ReadAllText(path)) is not JsonObject value)
+            {
+                return true;
+            }
+            if ((string?)value["contract"]
+                != "reader-voice-shortcut-fallback/1")
+            {
+                return true;
+            }
+            return value["enabled"] is not JsonValue flag
+                || !flag.TryGetValue(out bool enabled) || enabled;
+        }
+        catch (Exception)
+        {
+            return true;
+        }
     }
 
     internal static async Task PrepareInitialStartAsync(
@@ -712,17 +944,13 @@ internal sealed class DirectCodexVoiceControl :
         using PeriodicTimer timer = new(_keepActivePollInterval);
         try
         {
-            await ReconcileKeepActiveAsync(
-                initialReconcile: true,
-                cancellationToken)
-                .ConfigureAwait(false);
+            ReconcileKeepActive(initialReconcile: true, cancellationToken);
             while (await timer.WaitForNextTickAsync(cancellationToken)
                 .ConfigureAwait(false))
             {
-                await ReconcileKeepActiveAsync(
+                ReconcileKeepActive(
                     initialReconcile: false,
-                    cancellationToken)
-                    .ConfigureAwait(false);
+                    cancellationToken);
             }
         }
         catch (OperationCanceledException)
@@ -731,16 +959,52 @@ internal sealed class DirectCodexVoiceControl :
         }
     }
 
-    private async Task ReconcileKeepActiveAsync(
+    /// <summary>
+    /// 把磁盘上的保活意图收敛到内存。
+    /// </summary>
+    /// <remarks>
+    /// 2026-09-10 起是**纯同步**的：意图为假时这里不再挂断通话（见下），
+    /// 于是没有任何需要 await 的动作。名字去掉 Async 是为了让"这一步不会
+    /// 跑很久、也不会碰外部世界"在调用处一眼看得到。
+    /// </remarks>
+    private void ReconcileKeepActive(
         bool initialReconcile,
-        CancellationToken cancellationToken)
+        CancellationToken serviceToken)
     {
         bool intentChanged = RefreshKeepActiveFromDisk(
             out bool enabled,
             out _,
-            out CancellationToken intentToken);
+            out _);
         if (!enabled)
         {
+            // ## 收敛环**永不挂断**（2026-09-10 用户拍板重构）
+            //
+            // 用户原话：「把语音线路的连接和 ai 语音的在线解除绑定关系……即使
+            // app 上的语音暂时断开，电脑上也不做出任何反应，除非是满足了智能
+            // 开启设置的那些选项才使用自动关闭的功能」。
+            //
+            // 也就是说**挂断只有一个合法触发源：智能关闭**。音频线路怎么样、
+            // 桥换了几代、App 断没断，都与"那通电话该不该继续"无关。
+            //
+            // 原来是 `intentChanged || initialReconcile` → 挂断。那是"保活=语音
+            // 总开关"年代的写法：意图为假就等于语音该关着。**一次性启动方式
+            // 落地后这个前提没了** —— 一次性方式下保活意图全程为假
+            // （should_keep_alive 返回 False），它的含义是"别自动再开"，
+            // 不是"把正在打的电话挂掉"。于是每一次桥换代都杀掉一通。
+            //
+            // 实录 2026-09-10：
+            //   17:01:07.18  旧桥 media-fault，进程没了
+            //   17:01:07.92  ReaderPC 保活拉起新一代（意图=假，一次性方式）
+            //   17:01:08.18  新一代 service-start → 初次收敛 → 挂断
+            //   17:01:30     通话真的结束（用户还在打）
+            //
+            // ⚠ 这个布尔**分不出**三件事：用户关掉了语音功能、一次性方式的常
+            // 态、自动关闭刚撤的意图。分不出就不该动手 —— 真要挂断的那两条路
+            // 都有各自的显式入口（ReaderPC 的 close_voice / hangUpVoiceFallback
+            // op），信息在那儿是齐的。
+            //
+            // 代价：语音功能关着时，遗留的一通不会被自动收摊。那一通用户自己
+            // 能挂，而挂错的那一通他挂不回来。
             if (intentChanged || initialReconcile)
             {
                 try
@@ -748,24 +1012,25 @@ internal sealed class DirectCodexVoiceControl :
                     DirectCodexVoiceState state = ReadState();
                     if (state.Status == "available" && state.Active == true)
                     {
-                        _ = await SetActiveSerializedAsync(
-                            active: false,
-                            intentToken).ConfigureAwait(false);
+                        // 出声：**"我们选择不挂断"与"这一轮什么都没发生"在外面
+                        // 长得一样**，而前者是新规则、后者是故障。
+                        ReaderCodexPush.NoteHangUpDecision(
+                            initialReconcile
+                                ? "keepalive-initial-reconcile"
+                                : "keepalive-intent-cleared",
+                            true,
+                            "台账显示在通话中，但保活意图为假不等于要挂断"
+                            + "（音频线路与通话已解绑）；不动手");
                     }
                 }
-                catch (OperationCanceledException) when (
-                    intentToken.IsCancellationRequested
-                    || cancellationToken.IsCancellationRequested)
+                catch (Exception)
                 {
-                }
-                catch (Exception exception)
-                {
-                    NotifyAutomaticRecoveryFailed(exception);
+                    // 记不下来绝不能影响收敛本身。
                 }
             }
             return;
         }
-        StartAutomaticRecoveryIfNeeded(cancellationToken);
+        StartAutomaticRecoveryIfNeeded(serviceToken);
     }
 
     private void StartAutomaticRecoveryIfNeeded(
@@ -1171,35 +1436,31 @@ internal sealed class DirectCodexVoiceControl :
             failures.Add(exception);
         }
 
+        // ## 退出**不再挂断通话**（2026-09-10 用户拍板重构）
+        //
+        // 原来这里 SetKeepActiveAsync(false)，而那条路在通话中会按停并要求确认，
+        // 确认不到就记一条 DISPOSE_STOP_UNCONFIRMED/TIMEOUT。
+        //
+        // 问题是**桥退出与"那通电话该不该继续"无关**。桥每天要换好几代（装新版、
+        // ReaderPC 接管、保活重拉），每一代退出都把用户正在打的电话按掉，下一代
+        // 起来又不知道该不该开回去。用户：「即使 app 上的语音暂时断开，电脑上
+        // 也不做出任何反应」—— 桥自己收摊更是如此。
+        //
+        // 现在只做**放弃意图**这一件事：把意图落成 false，让下一代不会误以为
+        // 要自动开；通话留给它自己的生命周期（用户挂、或智能关闭挂）。
         try
         {
-            using CancellationTokenSource stopLifetime = new(
-                DisposeStopTimeout);
-            DirectCodexVoiceSetResult stopped =
-                await SetKeepActiveAsync(
-                    enabled: false,
-                    stopLifetime.Token).WaitAsync(
-                        DisposeStopTimeout).ConfigureAwait(false);
-            if (
-                stopped.State.Status != "available"
-                || stopped.State.Active != false
-            )
+            SaveKeepActive(_keepActivePath, false);
+            _ = ApplyKeepActiveIntent(false, out _, out _);
+            DirectCodexVoiceState state = ReadState();
+            if (state.Status == "available" && state.Active == true)
             {
-                throw new DirectProtocolException(
-                    "BW_COMPUTER_VOICE_DIRECT_DISPOSE_STOP_UNCONFIRMED",
-                    "Direct 退出前未能确认 Codex 语音已停止");
+                // 出声：这一代桥退出时通话还在，是**有意**留着的。
+                ReaderCodexPush.NoteHangUpDecision(
+                    "dispose-leaves-call-running",
+                    true,
+                    "桥退出，通话仍在进行 —— 按解绑规则不挂断");
             }
-        }
-        catch (Exception exception) when (
-            exception is OperationCanceledException
-            or TimeoutException)
-        {
-            failures ??= [];
-            failures.Add(new DirectProtocolException(
-                "BW_COMPUTER_VOICE_DIRECT_DISPOSE_STOP_TIMEOUT",
-                "Direct 退出前等待 Codex 语音停止超时",
-                retryable: false,
-                innerException: exception));
         }
         catch (Exception exception)
         {
@@ -3438,34 +3699,11 @@ internal sealed class DirectBridgeProtocolSession
     /// 在外面再按一次的含义是不确定的（可能补上一次失败，也可能把刚起来的
     /// 通话按掉）。成没成如实记进账本，由 App 决定要不要让用户再点。
     /// </remarks>
-    /// F24 兜底开关（2026-09-10 用户：「把 f24 兜底作为一个可选开关」）。
-    /// 读不到一律当**开** —— 一个坏掉/缺失的偏好不该让语音开不了。
-    private static bool ShortcutFallbackEnabled()
-    {
-        string? runtime = ReaderAttentionBoard.RuntimeDirectory;
-        if (string.IsNullOrEmpty(runtime)) return true;
-        try
-        {
-            string path = Path.Combine(
-                runtime, "voice-shortcut-fallback.json");
-            if (!File.Exists(path)) return true;
-            if (JsonNode.Parse(File.ReadAllText(path)) is not JsonObject value)
-            {
-                return true;
-            }
-            if ((string?)value["contract"]
-                != "reader-voice-shortcut-fallback/1")
-            {
-                return true;
-            }
-            return value["enabled"] is not JsonValue flag
-                || !flag.TryGetValue(out bool enabled) || enabled;
-        }
-        catch (Exception)
-        {
-            return true;
-        }
-    }
+    /// F24 兜底开关。实现只在 <see cref="DirectCodexVoiceControl"/> 一处
+    /// （2026-09-10 收拢）：原来这份私有副本只管起语音，于是"把开关关掉之后
+    /// 挂断仍然按 F24"。
+    private static bool ShortcutFallbackEnabled() =>
+        DirectCodexVoiceControl.ShortcutFallbackEnabled();
 
     private static void StartVoiceFromBridge(
         IDirectCodexVoiceControl control,

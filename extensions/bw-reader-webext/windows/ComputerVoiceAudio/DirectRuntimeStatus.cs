@@ -21,8 +21,48 @@ internal sealed record DirectRuntimeError(
     //
     // 类型名则是编译期常量，永远不含用户数据，同时又足以把"哪一类失败"说清楚。
     // 拿得到确定性又安全的那部分，拿不到的就老实不拿。
-    string? ExceptionType = null)
+    string? ExceptionType = null,
+    // 一段**受控**的补充说明（2026-09-10）。
+    //
+    // 上面那条规矩不变：异常 message 永远不进来。这个字段专收"代码自己拼出来
+    // 的、由常量与 id 组成"的线索 —— 例如媒体停止原因
+    // `fault:<stage>:<TypeName>` / `takeover-by-new-start:<connectionId>`，
+    // 与 Stage、ExceptionType 是同一类东西，只是拼在一起。
+    //
+    // 为什么需要它：DirectBridgeServer 报 MEDIA_STOPPED_UNEXPECTEDLY 时特意把
+    // LastMediaStopReason 拼进了异常消息（那儿的注释写着"2026-09-05 查了一小
+    // 时"），可账本与状态文件都不收消息 —— 于是那条线索**一次也没落过盘**，
+    // 2026-09-10 又照原样查不出来一次。修在消息里等于没修。
+    //
+    // ⚠ 只能由调用方显式传入，且必须过 SanitizeDetail；FromException 永远不
+    // 填它 —— 异常消息因此没有任何路径能流到这里来。
+    string? SafeDetail = null)
 {
+    /// <summary>
+    /// 字符白名单 + 长度上限。不合规就整段丢弃，**不做替换** ——
+    /// 半个被改写过的字符串比没有更难判读，而且会让人以为自己看到了全部。
+    /// </summary>
+    internal static string? SanitizeDetail(string? detail)
+    {
+        if (string.IsNullOrWhiteSpace(detail) || detail.Length > 200)
+        {
+            return null;
+        }
+        foreach (char character in detail)
+        {
+            bool allowed =
+                character is >= 'a' and <= 'z'
+                || character is >= 'A' and <= 'Z'
+                || character is >= '0' and <= '9'
+                || character is '-' or '_' or '.' or ':';
+            if (!allowed)
+            {
+                return null;
+            }
+        }
+        return detail;
+    }
+
     internal static DirectRuntimeError FromException(
         Exception exception,
         string fallbackStage,

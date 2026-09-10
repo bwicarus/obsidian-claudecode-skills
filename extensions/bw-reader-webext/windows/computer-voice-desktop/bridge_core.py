@@ -1420,17 +1420,33 @@ def _validated_runtime_error(value: object) -> dict[str, Any] | None:
     # 而且 JSON 选项可能把 null 整个省掉）——所以按"必需键 + 可选 message"校验，
     # 不能再写死 exact-set，否则新桥的记录会被整条判无效、last_error 变成 None，
     # 界面反而比以前更瞎。
+    # ⚠ safeDetail 是 2026-09-10 新增的可选键（媒体停止原因这类"代码自己拼的"
+    # 线索）。它必须列进下面这个上界集合 —— 上界是 `<=`，多出一个没登记的键会
+    # 让**整条**记录判无效、last_error 变成 None，界面反而比以前更瞎。
+    # 这就是 CLAUDE.md 里"改白名单前先数清楚有几份副本"那条：C# 那边加一个
+    # 字段，这里不跟就是静默失效。
     if (
         not isinstance(value, dict)
         or not {"failureId", "code", "stage", "hresult", "atUtc"} <= set(value)
         or not set(value) <= {
-            "failureId", "code", "stage", "hresult", "atUtc", "exceptionType"
+            "failureId", "code", "stage", "hresult", "atUtc", "exceptionType",
+            "safeDetail",
         }
         or (
             value.get("exceptionType") is not None
             and (
                 not isinstance(value.get("exceptionType"), str)
                 or len(value["exceptionType"]) > 300
+            )
+        )
+        or (
+            value.get("safeDetail") is not None
+            and (
+                not isinstance(value.get("safeDetail"), str)
+                # 与 C# 的 DirectRuntimeError.SanitizeDetail 同一套白名单：
+                # 这一侧也自己验一遍，不指望对面一定守规矩。
+                or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}",
+                                    value["safeDetail"])
             )
         )
         or not isinstance(value.get("failureId"), str)

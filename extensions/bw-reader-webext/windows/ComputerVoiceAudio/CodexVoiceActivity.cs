@@ -298,8 +298,35 @@ internal sealed class CodexVoiceActivityController
         TimeSpan.FromSeconds(10);
     internal static readonly TimeSpan StartUsableSettleDelay =
         TimeSpan.FromSeconds(3);
+    /// <summary>按下"关"之后等台账转为未通话的上界。</summary>
+    /// <remarks>
+    /// 原为 5 秒 —— 那是照着"开"的方向对称拍的，而"开"有实测（台账翻转 2.25
+    /// 秒）、"关"从来没量过。2026-09-10 实测：按下约 17:01:08，台账
+    /// <c>LastUsedTimeStop</c> 到 17:01:30 才动 = **约 22 秒**。于是每一次挂断
+    /// 都在 5 秒时报 VOICE_STOP_NOT_CONFIRMED，而它其实已经挂掉了 ——
+    /// 一条稳定产出的假失败。
+    ///
+    /// ⚠ 只有**一个**样本，所以这里取 30 秒（≈1.4 倍余量）而不是精确贴合；
+    /// 真正的调参依据由 <c>ConfirmHangUpAsync</c> 记进推送账本的实际耗时提供。
+    /// 判"关没关"始终看信号本身，这个数只是"等多久算认输"的上界 ——
+    /// 放宽不会造成误判，只会晚一点认输。
+    ///
+    /// ⚠ 假失败不是无害的：这个码标着 retryable，重试意味着**再按一次 F24**，
+    /// 而那是把已经挂掉的通话反向打开。挂断改走通知通道之后按键不再是主路，
+    /// 但上界仍然要对。
+    /// </remarks>
     internal static readonly TimeSpan StopTransitionTimeout =
-        TimeSpan.FromSeconds(5);
+        TimeSpan.FromSeconds(30);
+
+    /// <summary>经通知通道请求挂断后，等台账转为未通话的上界。</summary>
+    /// <remarks>
+    /// 比按键那条长一段：推送要送达、对面要跑完一轮、然后才拆通话。
+    /// 参考量：2026-09-10 起语音方向"推送送出→台账翻转"约 5 秒
+    /// （16:56:02 → 16:56:07），拆通话本身约 22 秒 ⇒ 约 30 秒，取 60 秒余量。
+    /// 同样只是认输上界，真值由账本里的实测耗时来收。
+    /// </remarks>
+    internal static readonly TimeSpan StopViaChannelTimeout =
+        TimeSpan.FromSeconds(60);
     internal static readonly TimeSpan MonitorInterval =
         TimeSpan.FromMilliseconds(250);
 

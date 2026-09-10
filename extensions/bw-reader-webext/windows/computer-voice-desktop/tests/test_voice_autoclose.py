@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 RUNTIME = Path(__file__).resolve().parents[1]
@@ -459,6 +461,24 @@ class ThreadLookupTests(unittest.TestCase):
     def test_missing_state_is_empty_not_a_crash(self):
         with tempfile.TemporaryDirectory() as name:
             self.assertEqual(VAC.in_call_thread_id(Path(name)), "")
+
+    def test_default_location_is_the_codex_home_not_readerpc_local_root(self):
+        """默认位置必须是真实位置。
+
+        ⚠ 上面两条测试都自己造目录再把同一个目录传进来 —— 两边都对，但
+        **跟真实位置无关**：调用方一直传的是 ReaderPC 的 local_root，那儿
+        没有这个文件，于是智能关闭永远拿不到线程 id，而测试一直是绿的
+        （2026-09-10 发现）。所以这里钉住"不传参时读哪儿"。
+        """
+        with tempfile.TemporaryDirectory() as name:
+            with mock.patch.dict(os.environ, {"USERPROFILE": name}):
+                home = VAC.codex_home()
+                self.assertEqual(home, Path(name) / ".codex")
+                home.mkdir(parents=True, exist_ok=True)
+                (home / "voice-history-sidebar-sync-state.json").write_text(
+                    json.dumps({"lastGood": {"threadId": "real-thread"}}),
+                    encoding="utf-8")
+                self.assertEqual(VAC.in_call_thread_id(), "real-thread")
 
 
 if __name__ == "__main__":

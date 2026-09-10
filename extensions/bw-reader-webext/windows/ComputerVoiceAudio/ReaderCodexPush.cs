@@ -189,6 +189,18 @@ internal static class ReaderCodexPush
         string requestId, bool ok, string detail) =>
         NoteAttempt("thread-notify", requestId, ok, detail);
 
+    /// <summary>
+    /// 记一条**关于挂断的决定**（2026-09-10）。
+    /// </summary>
+    /// <remarks>
+    /// 包括"决定不挂"。挂断这条链上一半的动作是**选择不动手**（意图为假但不是
+    /// 这一代开的、台账读不到、F24 兜底关着），而这些在外面全都长成"什么都没
+    /// 发生"。跟起语音落进同一本账：排查的人只该有一个地方要看。
+    /// </remarks>
+    internal static void NoteHangUpDecision(
+        string requestId, bool ok, string detail) =>
+        NoteAttempt("voice-hangup-decision", requestId, ok, detail);
+
     /// 记一条尝试：内存里留最后一句给现有调用方，账本里留全量给排查的人。
     private static void NoteAttempt(
         string purpose,

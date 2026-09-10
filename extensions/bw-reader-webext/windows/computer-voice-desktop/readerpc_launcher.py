@@ -74,7 +74,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.172"
+APP_VERSION = "0.1.174"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status
@@ -2539,9 +2539,9 @@ class ReaderPCWindow:
             )
             if not reason:
                 return
-            thread_id = voice_autoclose.in_call_thread_id(
-                self.readerpc_paths.local_root
-            )
+            # ⚠ 不传 local_root（2026-09-10 修）：侧栏同步状态在 ~/.codex，
+            # 传 ReaderPC 的本地根等于永远读不到，智能关闭从来没真正动过手。
+            thread_id = voice_autoclose.in_call_thread_id()
             if not thread_id:
                 # 出声：没有通话线程 id 就发不出挂断请求，而"这一轮什么都没做"
                 # 跟"一切正常"在界面上长得一样。

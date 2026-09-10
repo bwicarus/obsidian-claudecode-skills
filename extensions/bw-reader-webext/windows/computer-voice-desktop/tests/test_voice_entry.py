@@ -756,12 +756,56 @@ class ShortcutFallbackTests(unittest.TestCase):
     def test_bridge_reads_the_same_file_and_defaults_to_on(self):
         source = (Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
                   / "DirectBridgeProtocol.cs").read_text(encoding="utf-8")
-        gate = source.split("private static bool ShortcutFallbackEnabled")[1]
-        gate = gate.split("private static void StartVoiceFromBridge")[0]
+        gate = source.split(
+            "internal static bool ShortcutFallbackEnabled")[1]
+        gate = gate.split("internal static async Task")[0]
         self.assertIn("voice-shortcut-fallback.json", gate)
         self.assertIn("reader-voice-shortcut-fallback/1", gate)
         # 读不到一律当开 —— 每条出路都 return true。
         self.assertNotIn("return false", gate)
+
+    def test_the_switch_has_exactly_one_implementation(self):
+        """⚠ 开关只兑现一半比没有开关更糟。
+
+        2026-09-10 实测：这个判断原本是 DirectBridgeProtocolSession 的私有
+        副本、只管**起**语音，于是用户把开关关掉之后挂断仍然在按 F24。
+        所以钉住"读文件的实现只有一处，其余都是转调"。
+        """
+        source = (Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
+                  / "DirectBridgeProtocol.cs").read_text(encoding="utf-8")
+        self.assertEqual(
+            source.count("voice-shortcut-fallback.json"), 1,
+            "读这个偏好文件的地方多于一处 —— 先合并再改")
+        endpoint = (Path(__file__).resolve().parents[2]
+                    / "ComputerVoiceAudio" / "ReaderCodexEndpoint.cs"
+                    ).read_text(encoding="utf-8")
+        # 显式兜底 op 也必须过同一个闸（它才是真正会按 F24 的那条路）。
+        fallback_op = endpoint.split('body["hangUpVoiceFallback"]')[1][:1200]
+        self.assertIn(
+            "DirectCodexVoiceControl.ShortcutFallbackEnabled()", fallback_op)
+
+    def test_hangup_prefers_the_channel_over_the_shortcut(self):
+        """用户 2026-09-10：「挂断走通知更稳定不要再用 f24」。
+
+        收敛环原来直接 shortcutSender.Send(..., Stop)，绕过了 2026-09-09 就
+        写好的推送挂断。钉住：挂断先请推送，按键只在推送没送出去时才轮到，
+        且还要过兜底开关。
+        """
+        source = (Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
+                  / "DirectBridgeProtocol.cs").read_text(encoding="utf-8")
+        body = source.split(
+            "private static async Task<CodexVoiceActivitySnapshot>"
+            " HangUpAsync")[1]
+        body = body.split("private static async Task"
+                          "<CodexVoiceActivitySnapshot> ConfirmHangUpAsync")[0]
+        request = body.index("RequestVoiceHangUpAsync")
+        press = body.index("DirectVoiceCommand.Stop")
+        self.assertLess(request, press, "推送必须排在按键前面")
+        self.assertLess(
+            body.index("ShortcutFallbackEnabled()"), press,
+            "按键之前必须先过兜底开关")
+        # 收敛环里不该再有第二处直接按停。
+        self.assertEqual(source.count("DirectVoiceCommand.Stop"), 1)
 
     def test_declining_to_press_still_leaves_a_trace(self):
         """"通道不通"与"通道不通且我们选择不兜底"在外面看长得一样。
