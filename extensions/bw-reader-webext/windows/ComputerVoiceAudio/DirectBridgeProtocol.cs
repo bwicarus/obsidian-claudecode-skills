@@ -3607,6 +3607,24 @@ internal sealed class DirectBridgeProtocolSession
         string appKind,
         string sessionId)
     {
+        // ## 每一次 START 都留一条（2026-09-10）
+        //
+        // 起因：对面被「指定操作」刷屏，205 个不同的 requestId 横跨三个多小时，
+        // 其中 120 个间隔小于 200 毫秒（成对出现 = 两条连接同时 START）。
+        // 想知道"是谁在反复 START"时才发现 —— **桥从来没记录过 START**：
+        // 安全日志只记 reader-connect（那一段里只有两次），账本只记推送。
+        // 于是能看到结果、看不到起因。
+        //
+        // 这是同一天里第三次撞上"查不出来是因为压根没记"（媒体为什么停、
+        // 推送发没发、现在这条）。所以先记录，别再猜。
+        //
+        // ⚠ 记的是**每一次调用**，包括被闸挡掉的 —— 被挡掉的次数正是
+        // "上游有多吵"的度量，而那恰恰是要回答的问题。
+        ReaderCodexPush.NoteVoiceEntryOutcome(
+            "start:" + _connectionId,
+            true,
+            "收到 START（session " + (sessionId.Length > 12
+                ? sessionId[..12] : sessionId) + "），准备判断要不要请求入口");
         if (!string.Equals(
                 appKind,
                 DirectAppTargets.CodexDesktop,

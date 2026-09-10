@@ -96,7 +96,13 @@ internal static class ReaderCodexPush
     /// 这件事只能靠猜 —— 而这条链本来就没有界面,猜错的代价是整条链看起来
     /// "什么都没发生"。
     internal const string AttemptsFileName = "codex-push-attempts.jsonl";
-    private const int MaxAttemptsKept = 300;
+    /// 账本保留条数。
+    ///
+    /// ⚠ 2026-09-10 从 300 提到 1200：这本账现在也记 START（见
+    /// RequestVoiceEntryIfNobodyElseWill 顶部那段）。一次刷屏能在半小时里
+    /// 写进几百条，300 的话**刷屏本身会把它的前因后果一起挤掉** ——
+    /// 而那正是要查的东西。1200 行 ≈ 240 KB，代价可以忽略。
+    private const int MaxAttemptsKept = 1200;
 
     private static string AttemptsPath =>
         Path.Combine(
