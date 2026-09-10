@@ -369,10 +369,100 @@ def register(pipe_name: str, thread_id: str,
         raise ChannelError("连不上桥：%s" % str(error)[:160])
 
 
+
+def disk_conversations(limit: int = 40) -> list[dict[str, Any]]:
+    """从**磁盘会话记录**列对话。
+
+    ⚠ 存在的理由（2026-09-11 实测）：`list_threads` **看不见实时语音会话**。
+    它的自述是"List threads and chats across the app"，参数只有 limit ——
+    没有任何开关能带上语音对话。实测那一刻它返回 37 条，而当晚建的
+    01a08c53 / 01a08c51 / 01a08c47 / 01a08c3c … **一条都不在里面**：
+    语音对话没有标题、不进侧栏列表。
+
+    于是 ensure_channel 那三种模式（recent / last-used / title）全都在一个
+    看不见语音对话的列表里挑 —— 永远挑不到用户正在通话的那条。
+    用户报的「刷新对话列表根本无法正确列出现有的对话」就是这件事。
+
+    磁盘上是全的：每条会话的首行 session_meta 带 id / thread_source / cwd。
+    这里只读首行，不读正文。
+    """
+    home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    # ⚠ **两个目录都要扫**（2026-09-11 实测）：语音对话一结束就被搬到
+    # archived_sessions/，`sessions/` 里只留着**正在进行**的那条。
+    # 只扫 sessions/ 的话，当晚打过的十几通语音里只剩一条能看见 ——
+    # 而那正是用户报的「刷新对话列表根本无法正确列出现有的对话」。
+    rows: list[tuple[float, dict[str, Any]]] = []
+    paths: list[Path] = []
+    for folder in ("sessions", "archived_sessions"):
+        try:
+            paths.extend((home / folder).rglob("rollout-*.jsonl"))
+        except OSError:
+            continue
+    if not paths:
+        return []
+    for path in paths:
+        try:
+            when = path.stat().st_mtime
+            with path.open(encoding="utf-8-sig") as source:
+                entry = json.loads(source.readline(1024 * 1024))
+        except (OSError, ValueError):
+            continue
+        if entry.get("type") != "session_meta":
+            continue
+        meta = entry.get("payload") or {}
+        thread_id = meta.get("id") or meta.get("session_id")
+        source_kind = meta.get("thread_source") or ""
+        if not thread_id or source_kind in EXCLUDED_DISK_SOURCES:
+            continue
+        rows.append((when, {
+            "id": str(thread_id),
+            # 语音会话没有标题 —— 用工作目录当可读名，总比空白强。
+            "title": str(meta.get("cwd") or "").rsplit("\\", 1)[-1],
+            "status": source_kind,
+            "updatedAt": when,
+            "from": "disk",
+        }))
+    # ⚠ **语音对话优先**，同类再按新旧。
+    #
+    # 纯按时间排的话，我自己跑脚本产生的那些会话（computer-voice-desktop）
+    # 会把当晚的语音对话挤出 limit —— 实测 40 条里只剩下 1 条语音。
+    # 而这个列表的用途就是"挑一条对话来绑"，语音那些才是要挑的。
+    rows.sort(key=lambda item: (item[1]["status"] == "voice_chat", item[0]),
+              reverse=True)
+    return [row for _when, row in rows[:limit]]
+
+
+#: 磁盘列表要挡掉的来源。与 ALLOWED_SOURCES 同源的道理：automation 与
+#: subagent 会抢绑定，也不该代表用户。
+EXCLUDED_DISK_SOURCES = frozenset({"automation", "subagent"})
+
+
+def merged_conversations(pipe_name: str, namespace: str,
+                         limit: int = 40) -> list[dict[str, Any]]:
+    """app 列表 + 磁盘记录，按 id 去重，磁盘的排在能补足的位置。
+
+    ⚠ 两边**都要**：app 列表有标题（磁盘上语音会话没有），磁盘有语音会话
+    （app 列表里没有）。只用一边都会缺一半。
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    try:
+        for row in list_conversations(pipe_name, namespace,
+                                      _envelope_thread_id(), limit=limit):
+            merged[row["id"]] = row
+    except Exception:                       # noqa: BLE001
+        pass                                # 对面列不出来时至少还有磁盘
+    for row in disk_conversations(limit=limit):
+        merged.setdefault(row["id"], row)
+    return sorted(merged.values(),
+                  key=lambda r: _seconds(r.get("updatedAt")) or 0.0,
+                  reverse=True)
+
 def survey(runtime: Path | None = None) -> dict[str, Any]:
     """只看不动：现在有哪条管道可用、有哪些对话可选。给设置页用。"""
     pipe_name, namespace = usable_pipe()
-    rows = list_conversations(pipe_name, namespace, _envelope_thread_id())
+    # ⚠ 合并磁盘记录：app 的 list_threads 看不见实时语音会话（见
+    # disk_conversations 的说明），只用它的话列表里永远没有正在通话的那条。
+    rows = merged_conversations(pipe_name, namespace)
     last = read_last_used(runtime)
     return {"pipeName": pipe_name, "choices": rows,
             "lastUsed": last["threadId"] if last else None}
