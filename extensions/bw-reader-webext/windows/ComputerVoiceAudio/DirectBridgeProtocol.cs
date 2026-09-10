@@ -3895,6 +3895,18 @@ internal sealed class DirectBridgeProtocolSession
                     }
                     else if (hadBinding)
                     {
+                        // ⚠ **"对面没有收下这条消息" = 目标线程死了，不是通道坏了**
+                        // （2026-09-11 实测）：02:34–02:36 连着 12 次失败，每次后面
+                        // 都跟一条"通道已建立" —— 管道好好的，是目标 01a08c53 已经
+                        // 归档。而我只会重建通道、从不换目标，于是原地空转两分钟。
+                        //
+                        // 换成绑定那条（它是从活着的列表里挑出来的）。真连不上
+                        // 管道的情况下面那次 ensure 照样处理。
+                        if (ReaderCodexPush.LastNote.Contains(
+                                "对面没有收下", StringComparison.Ordinal))
+                        {
+                            ReaderCodexPush.ClearVoiceEntryTargetOverride();
+                        }
                         // ⚠ **发送失败本身就是"这条绑定不通"的实测证据**，
                         // 比等下一轮再问时钟强 —— 那正是本文件顶部那条教条
                         // （判目标还活着用推送本身，不用时钟）。
@@ -4167,6 +4179,38 @@ internal sealed class DirectBridgeProtocolSession
                 requestId, false,
                 "放弃了，但写不进梯子状态：" + exception.GetType().Name);
         }
+    }
+
+    /// <summary>发现绑定指错了对话，就把它纠正过来（后台做，不挡调用方）。</summary>
+    /// <remarks>
+    /// ⚠ 由**板面推送**触发：它每次都重算"现在在跟谁通话"，所以是唯一持续
+    /// 拿得到真相的地方。锁定那一步一次性地在语音刚起来时做，正好撞上侧栏
+    /// 同步还没跟上的那一刻（实测差了约 70 秒）。
+    ///
+    /// ⚠ 去重靠"和上次纠正的目标相同就不做"：不然每一次板面推送都要起一个
+    /// 进程，而板面每秒渲一次。
+    /// </remarks>
+    private static string _lastRelockTarget = string.Empty;
+
+    internal static void RequestChannelRelock(string thread)
+    {
+        if (string.IsNullOrEmpty(thread)) return;
+        lock (VoiceEntryGate)
+        {
+            if (string.Equals(_lastRelockTarget, thread,
+                              StringComparison.Ordinal))
+            {
+                return;
+            }
+            _lastRelockTarget = thread;
+        }
+        _ = Task.Run(async () =>
+        {
+            using CancellationTokenSource lifetime =
+                new(TimeSpan.FromSeconds(30));
+            await LockChannelToLiveCallAsync(lifetime.Token)
+                .ConfigureAwait(false);
+        });
     }
 
     /// <summary>把通道锁到正在通话的那条对话。</summary>

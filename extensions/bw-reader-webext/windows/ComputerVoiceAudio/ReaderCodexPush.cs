@@ -232,6 +232,13 @@ internal static class ReaderCodexPush
         NoteAttempt("voice-hangup-decision", requestId, ok, detail);
 
     /// 记一条尝试：内存里留最后一句给现有调用方，账本里留全量给排查的人。
+    /// 下一次入口推送跳过「最近那条语音对话」这个目标。
+    /// 由入口循环在「对面没有收下这条消息」之后设。
+    private static bool _skipEntryTargetOverride;
+
+    internal static void ClearVoiceEntryTargetOverride() =>
+        _skipEntryTargetOverride = true;
+
     private static void NoteAttempt(
         string purpose,
         string requestId,
@@ -328,6 +335,21 @@ internal static class ReaderCodexPush
         // 管道来自绑定（那是传输），目标线程按现状选：在通话就跟着通话，
         // 不在通话（或读不到）就仍用绑定里那条 —— 设置页指定的那条。
         string boardTarget = DirectCodexVoiceControl.InCallThreadIdIfActive();
+        // ⚠ **顺手把绑定纠正过来**（2026-09-11 实测）。
+        //
+        // 锁定那一步用的是侧栏同步的 lastGood，而它**跟得比通话慢**：
+        //   02:48:47 通话起来了，通道已锁到它 → 01a08c64（上一通那条）
+        //   02:49:56 已推送（快板）          → 01a08c6f（真正在通话的那条）
+        // 一次性地在语音刚起来时锁一把，正好锁在它还没跟上的那一刻。
+        //
+        // 板面推送每次都会重算"现在在跟谁通话"，所以让它顺带发现并纠正 ——
+        // 判据是观测到的事实（两者不同），不是又一个猜出来的等待时长。
+        if (boardTarget.Length > 0
+            && !string.Equals(boardTarget, binding.ThreadId,
+                              StringComparison.Ordinal))
+        {
+            DirectBridgeProtocolSession.RequestChannelRelock(boardTarget);
+        }
         try
         {
             await SendAsync(
@@ -434,6 +456,21 @@ internal static class ReaderCodexPush
         // 管道来自绑定（那是传输），目标线程按现状选：在通话就跟着通话，
         // 不在通话（或读不到）就仍用绑定里那条 —— 设置页指定的那条。
         string boardTarget = DirectCodexVoiceControl.InCallThreadIdIfActive();
+        // ⚠ **顺手把绑定纠正过来**（2026-09-11 实测）。
+        //
+        // 锁定那一步用的是侧栏同步的 lastGood，而它**跟得比通话慢**：
+        //   02:48:47 通话起来了，通道已锁到它 → 01a08c64（上一通那条）
+        //   02:49:56 已推送（快板）          → 01a08c6f（真正在通话的那条）
+        // 一次性地在语音刚起来时锁一把，正好锁在它还没跟上的那一刻。
+        //
+        // 板面推送每次都会重算"现在在跟谁通话"，所以让它顺带发现并纠正 ——
+        // 判据是观测到的事实（两者不同），不是又一个猜出来的等待时长。
+        if (boardTarget.Length > 0
+            && !string.Equals(boardTarget, binding.ThreadId,
+                              StringComparison.Ordinal))
+        {
+            DirectBridgeProtocolSession.RequestChannelRelock(boardTarget);
+        }
         try
         {
             await SendAsync(
@@ -774,7 +811,11 @@ internal static class ReaderCodexPush
             // ⚠ 这里用不加通话守卫的 InCallThreadId()（lastGood）——要的就是
             // "最后一条好的"，散场之后仍然是它。这跟提示板那边**故意相反**：
             // 板子要发给活着的通话，入口要发给将要被续上的那条。
-            string entryTarget = DirectCodexVoiceControl.InCallThreadId();
+            // 上一轮若是「对面没有收下」（目标线程已死），这一轮别再发给它。
+            string entryTarget = _skipEntryTargetOverride
+                ? string.Empty
+                : DirectCodexVoiceControl.InCallThreadId();
+            _skipEntryTargetOverride = false;
             await SendAsync(
                 binding,
                 prompt,

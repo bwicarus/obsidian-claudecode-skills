@@ -996,9 +996,13 @@ class ChannelRebuildTests(unittest.TestCase):
         body = self._entry_task()
         self.assertIn("hadBinding", body)
         # 失败分支里必须再建一次
-        # ⚠ 窗口要够宽：那段注释本身就有三百多字，取 400 会只截到注释。
-        tail = body[body.index("else if (hadBinding)"):][:1200]
+        # ⚠ 窗口取到分支结束，别截固定字数 —— 2026-09-11 又加了一段注释，
+        # 1200 字又不够了。同一个写法今天骗过我第四次。
+        tail = body[body.index("else if (hadBinding)"):]
         self.assertIn("TryEnsureChannelAsync", tail)
+        # "对面没有收下" = 目标线程死了，不是通道坏了；那种情况要换目标。
+        self.assertIn("ClearVoiceEntryTargetOverride", tail,
+                      "目标被拒时只会重建通道，不会换目标 —— 会原地空转")
 
     def test_it_does_not_rebuild_twice_in_one_round(self):
         """绑定为 null 时循环顶部已经建过了，失败分支不该再来一次。"""
