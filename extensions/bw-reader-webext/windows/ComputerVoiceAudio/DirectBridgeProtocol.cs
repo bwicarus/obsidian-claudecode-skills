@@ -833,6 +833,40 @@ internal sealed class DirectCodexVoiceControl :
         }
     }
 
+    /// <summary>
+    /// 正在通话的线程 —— **只在真的在通话时**才给（2026-09-11）。
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <see cref="InCallThreadId"/> 读的是侧栏同步的 `lastGood`，那是
+    /// "最后一条好的"，通话结束之后仍然留着。拿它当"现在在跟谁说话"，
+    /// 会在通话结束后把提示板一直推给一条已经散场的对话。
+    ///
+    /// 所以这里再问一次台账：确证在通话才给线程；说不在、或读不到，
+    /// 都退回绑定里那条（也就是用户在设置页指定的那条）。
+    /// **读不到时不改变行为** —— 不知道不是动手的理由。
+    /// </remarks>
+    internal static string InCallThreadIdIfActive()
+    {
+        try
+        {
+            CodexVoiceActivitySnapshot snapshot =
+                new WindowsRegistryCodexVoiceActivitySource(
+                    DirectAppTargets.CodexDesktop).Read();
+            if (
+                snapshot.Status != CodexVoiceActivityReadStatus.Available
+                || !snapshot.Active
+            )
+            {
+                return string.Empty;
+            }
+        }
+        catch (Exception)
+        {
+            return string.Empty;
+        }
+        return InCallThreadId();
+    }
+
     internal static string InCallThreadSource() => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".codex",

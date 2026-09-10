@@ -1002,6 +1002,52 @@ class ChannelRebuildTests(unittest.TestCase):
                       "失败就重建必须以「本来有绑定」为条件")
 
 
+class BoardFollowsTheCallTests(unittest.TestCase):
+    """提示板要发给**正在通话的那条对话**。
+
+    ⚠ 用户 2026-09-11：「建立通道后再让 ai 运行快捷键开启语音，可能会造成
+    开启语音的对话和建立通道的对话不是同一对话」。我们这条链让它更容易发生：
+    冷启动时先建通道（语音会话还不存在，只能绑到旧对话），语音一起来 Codex
+    新开一条 voice_chat。于是板子推给 A、人在跟 B 说话，而两边都不报错。
+
+    挂断与状态查询早就用 threadIdOverride 处理这件事了，只有提示板漏了 ——
+    同一条道理的两份实现只改了一份。
+    """
+
+    BRIDGE = Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
+
+    def test_every_outbound_targets_the_call_when_there_is_one(self):
+        push = (self.BRIDGE / "ReaderCodexPush.cs").read_text(
+            encoding="utf-8")
+        # 四条外发正文都要能指定目标线程；一条都不许再用绑定里那条硬发。
+        self.assertEqual(
+            push.count("await SendAsync(binding, prompt, cancellationToken)"),
+            0, "还有外发没带 threadIdOverride —— 它会发给绑定那条")
+        # 五条外发正文里，**四条**要能跟着通话走：接上时的全量板、板面更新、
+        # 挂断、状态查询。第五条「指定操作」是例外且必须是例外 —— 它是在
+        # 语音**还没起来**时发的（那时根本没有通话线程），而且它要发给会去跑
+        # 脚本的那条，也就是绑定那条。
+        self.assertEqual(
+            push.count("threadIdOverride:"), 4,
+            "带目标线程的外发不是四条了 —— 先数清楚再改（第五条是语音入口，"
+            "它必须发给绑定那条）")
+
+    def test_it_only_follows_while_a_call_is_really_live(self):
+        """lastGood 是"最后一条好的"，通话结束后还留着。
+
+        拿它当"现在在跟谁说话"，会在散场之后把板子一直推给一条死掉的对话。
+        """
+        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
+            encoding="utf-8")
+        body = source.split("internal static string InCallThreadIdIfActive")[1]
+        body = body[:body.index("internal static string InCallThreadSource")]
+        # 必须先问台账、且只认"确证在通话"
+        self.assertIn("CodexVoiceActivityReadStatus.Available", body)
+        self.assertIn("snapshot.Active", body)
+        # 读不到 → 空串（退回绑定），而不是硬着头皮跟
+        self.assertIn("return string.Empty;", body)
+
+
 class ChannelChoiceTests(unittest.TestCase):
     """通道连哪条对话：一份设置，两个入口。"""
 

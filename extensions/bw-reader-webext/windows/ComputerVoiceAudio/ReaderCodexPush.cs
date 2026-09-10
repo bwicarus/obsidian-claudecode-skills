@@ -286,9 +286,29 @@ internal static class ReaderCodexPush
         connect.Append("\n【快板】\n").Append(Trim(fastNow));
         connect.Append("\n【慢板】\n").Append(Trim(slowNow));
         string prompt = connect.ToString();
+        // ⚠ **提示板要发给正在通话的那条对话**（2026-09-11 用户点出来的）：
+        //
+        //   「建立通道后再让 ai 运行快捷键开启语音，可能会造成开启语音的
+        //     对话和建立通道的对话不是同一对话」
+        //
+        // 说得对，而且我们这条链让它更容易发生：冷启动时先建通道（那会儿
+        // 语音会话还不存在，只能绑到某条旧对话），语音一起来 Codex 新开一条
+        // voice_chat 会话。于是板子推给了 A，人在跟 B 说话 —— 板上的焦点、
+        // 待办、挂断提示，通话里那位一条都看不到，而两边都不报错。
+        // references/codex-notification-channel.md 里已记过一次实测：
+        // 绑定 01a0847a、通话 01a08560。
+        //
+        // ⚠ 挂断与状态查询**早就在用**这个机制（threadIdOverride），
+        // 只有提示板漏了 —— 同一条道理的两份实现只改了一份，又一次。
+        //
+        // 管道来自绑定（那是传输），目标线程按现状选：在通话就跟着通话，
+        // 不在通话（或读不到）就仍用绑定里那条 —— 设置页指定的那条。
+        string boardTarget = DirectCodexVoiceControl.InCallThreadIdIfActive();
         try
         {
-            await SendAsync(binding, prompt, cancellationToken)
+            await SendAsync(
+                binding, prompt, cancellationToken,
+                threadIdOverride: boardTarget.Length > 0 ? boardTarget : null)
                 .ConfigureAwait(false);
             lock (Gate)
             {
@@ -367,9 +387,29 @@ internal static class ReaderCodexPush
             body.Append("\n【慢板】\n").Append(Trim(slowText));
         }
         string prompt = body.ToString();
+        // ⚠ **提示板要发给正在通话的那条对话**（2026-09-11 用户点出来的）：
+        //
+        //   「建立通道后再让 ai 运行快捷键开启语音，可能会造成开启语音的
+        //     对话和建立通道的对话不是同一对话」
+        //
+        // 说得对，而且我们这条链让它更容易发生：冷启动时先建通道（那会儿
+        // 语音会话还不存在，只能绑到某条旧对话），语音一起来 Codex 新开一条
+        // voice_chat 会话。于是板子推给了 A，人在跟 B 说话 —— 板上的焦点、
+        // 待办、挂断提示，通话里那位一条都看不到，而两边都不报错。
+        // references/codex-notification-channel.md 里已记过一次实测：
+        // 绑定 01a0847a、通话 01a08560。
+        //
+        // ⚠ 挂断与状态查询**早就在用**这个机制（threadIdOverride），
+        // 只有提示板漏了 —— 同一条道理的两份实现只改了一份，又一次。
+        //
+        // 管道来自绑定（那是传输），目标线程按现状选：在通话就跟着通话，
+        // 不在通话（或读不到）就仍用绑定里那条 —— 设置页指定的那条。
+        string boardTarget = DirectCodexVoiceControl.InCallThreadIdIfActive();
         try
         {
-            await SendAsync(binding, prompt, cancellationToken)
+            await SendAsync(
+                binding, prompt, cancellationToken,
+                threadIdOverride: boardTarget.Length > 0 ? boardTarget : null)
                 .ConfigureAwait(false);
             lock (Gate)
             {
