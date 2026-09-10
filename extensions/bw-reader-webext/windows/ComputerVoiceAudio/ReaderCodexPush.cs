@@ -177,6 +177,12 @@ internal static class ReaderCodexPush
         string detail) =>
         NoteAttempt("bridge-voice-entry", requestId, ok, detail);
 
+    /// 记一条**桥端起语音**的结果。落进同一本账 —— 排查的人要在一个地方
+    /// 看到这次开语音发生了什么。
+    internal static void NoteBridgeStart(
+        string requestId, bool ok, string detail) =>
+        NoteAttempt("bridge-start", requestId, ok, detail);
+
     /// 记一条**不经钩子的送达**结果（codex app-server 那条兜底路径）。
     /// 落进同一本账 —— 排查的人要在一个地方看到"这次开语音发生了什么"。
     internal static void NoteThreadNotify(
@@ -516,13 +522,29 @@ internal static class ReaderCodexPush
             Note("没有可用绑定（拿不到管道），语音入口请求未发送");
             return false;
         }
+        string step = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "BWReader",
+            "voice_start_step.py");
+        string failed = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "BWReader",
+            "voice_start_failed.py");
+        // 指定操作：只说要跑什么、怎么判、跑几次。
+        //
+        // ⚠ **不叙述用途**（用户 2026-09-09 与 09-10 两次点明）：这是一条运维
+        // 指令，不是一段说明文。脚本自己带守卫（已在通话中不动作、台账读不到
+        // 不动作、冷却期内不动作），所以对面不需要先判断什么，照着跑就行。
         string prompt =
-            "语音入口（requestId: " + Trim(requestId) + "）。\n"
-            + "用户刚在 App 上要求开始语音通话。\n"
-            + "请按能力说明 voice-entry.md 里的步骤操作：先跑一次入口脚本，"
-            + "看它打印的 confirmed；没进就再跑一次，两次都不成就跑报错脚本"
-            + "并停下。\n"
-            + "不要跑第三次，也不要自己另想办法开语音。\n"
+            "指定操作（requestId: " + Trim(requestId) + "）。\n"
+            + "请运行下面这一行，并回报它打印的 confirmed 值：\n"
+            + "    python \"" + step + "\"\n"
+            + "confirmed 为 false 时再运行同一行一次；仍为 false 则运行：\n"
+            + "    python \"" + failed
+            + "\" --attempts 2 --detail <最后一次的 reason>\n"
+            + "不要运行第三次。\n"
             + "同一编号再次出现表示上一次没有生效。";
         try
         {

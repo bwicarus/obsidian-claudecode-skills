@@ -172,13 +172,90 @@ class AppServer:
                             message["error"], ensure_ascii=False)[:200]))
                 return message.get("result") or {}
             if "method" in message and "id" in message:
-                # 服务端反向请求（审批之类）
+                # 服务端反向请求（审批之类）。
+                #
+                # ⚠ 认不出来的**回协议错误，不编一个结果**（2026-09-10 改）。
+                # 上一版给所有反向请求一律回 `{"decision":"denied"}` —— 那个
+                # 取值连审批都不对（现代方法要 accept/decline），更别说
+                # `account/chatgptAuthTokens/refresh` 这种根本不是审批的。
+                # 拿一个形状不对的结果去应答，对面只能当协议错误处理，
+                # 而表现就是"turn 送到了却什么都没发生"。
                 reply = (on_server_request(message)
                          if on_server_request else None)
-                self._write({"jsonrpc": "2.0", "id": message["id"],
-                             "result": reply if reply is not None
-                             else {"decision": "denied"}})
+                if reply is None:
+                    self._write({
+                        "jsonrpc": "2.0", "id": message["id"],
+                        "error": {
+                            "code": -32601,
+                            "message": "这个客户端不处理 %s" % message["method"],
+                        }})
+                else:
+                    self._write({"jsonrpc": "2.0", "id": message["id"],
+                                 "result": reply})
         raise NotifyError("%s 超时（%.0f 秒）" % (method, timeout))
+
+
+    def run_turn(self, thread_id: str, text: str,
+                 timeout: float = TURN_TIMEOUT_SECONDS) -> dict:
+        """起一轮并等它跑完。返回途中看到的证据。
+
+        ⚠ 只等 `turn/start` 的回应是不够的：那是"接受"，不是"完成"。真正的
+        终点是 `turn/completed`；途中的 `item/commandExecution/*` 才说明
+        它确实去跑脚本了。没有这些证据就说 ok，等于又造一个说谎的读数。
+        """
+        self._id += 1
+        mine = self._id
+        self._write({"jsonrpc": "2.0", "id": mine, "method": "turn/start",
+                     "params": {"threadId": thread_id,
+                                "input": [{"type": "text", "text": text}]}})
+        commands: list[str] = []
+        errors: list[str] = []
+        accepted = False
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self._proc.stdout:
+                raise NotifyError("app-server 的 stdout 不可用")
+            line = self._proc.stdout.readline()
+            if not line:
+                break
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            method = str(message.get("method") or "")
+            if message.get("id") == mine and (
+                "result" in message or "error" in message
+            ):
+                if "error" in message:
+                    raise NotifyError("turn/start 失败：%s" % json.dumps(
+                        message["error"], ensure_ascii=False)[:200])
+                accepted = True
+                continue
+            if "id" in message and method:
+                reply = approve(message)
+                if reply is None:
+                    self._write({"jsonrpc": "2.0", "id": message["id"],
+                                 "error": {"code": -32601,
+                                           "message": "不处理 " + method}})
+                else:
+                    self._write({"jsonrpc": "2.0", "id": message["id"],
+                                 "result": reply})
+                continue
+            if method.startswith("item/commandExecution/"):
+                blob = json.dumps(message.get("params") or {},
+                                  ensure_ascii=False)
+                for name in ALLOWED_SCRIPTS:
+                    if name in blob and name not in commands:
+                        commands.append(name)
+            elif method == "error":
+                errors.append(json.dumps(message.get("params") or {},
+                                         ensure_ascii=False)[:160])
+            elif method == "turn/completed":
+                return {"completed": True, "accepted": accepted,
+                        "commands": commands, "errors": errors}
+        return {"completed": False, "accepted": accepted,
+                "commands": commands, "errors": errors,
+                "detail": "没等到 turn/completed（%.0f 秒）" % timeout}
 
 
 def newest_thread(server: AppServer, limit: int = 20) -> dict:
@@ -204,24 +281,47 @@ def newest_thread(server: AppServer, limit: int = 20) -> dict:
         "最近 %d 条对话里没有可用目标（都是子任务/定时任务或临时会话）" % len(rows))
 
 
+#: 审批方法 → 该用哪套取值。**两套不通用**（2026-09-10 从官方 schema 取的）：
+#: 现代 `item/*/requestApproval` 要 accept/acceptForSession/decline/cancel；
+#: 旧的 execCommandApproval / applyPatchApproval 要 approved/denied。
+#: 上一版一律回 "approved"，对现代方法而言是非法值 —— 表现就是
+#: "turn 送到了却什么都没发生"。
+APPROVAL_VOCABULARY = {
+    "item/commandExecution/requestApproval": ("accept", "decline"),
+    "item/fileChange/requestApproval": ("accept", "decline"),
+    "item/permissions/requestApproval": ("accept", "decline"),
+    "execCommandApproval": ("approved", "denied"),
+    "applyPatchApproval": ("approved", "denied"),
+}
+
+
 def approve(message: dict) -> dict | None:
     """审批应答：只放行这条链自己的脚本。
 
     ⚠ 写成"什么都同意"就等于把一条通知变成任意命令执行入口。宁可拒绝，
     并让拒绝的原因出现在 turn 里 —— 那样至少说得清为什么没做成。
+
+    ⚠ 不认识的反向请求返回 None，由调用方回协议错误 —— **不要**替它编一个
+    结果。编出来的结果形状多半不对，而对面只能当协议错误处理。
     """
-    method = str(message.get("method") or "")
-    if "pproval" not in method:
+    yes_no = APPROVAL_VOCABULARY.get(str(message.get("method") or ""))
+    if yes_no is None:
         return None
     blob = json.dumps(message.get("params") or {}, ensure_ascii=False)
     allowed = any(name in blob for name in ALLOWED_SCRIPTS)
-    return {"decision": "approved" if allowed else "denied"}
+    return {"decision": yes_no[0] if allowed else yes_no[1]}
 
 
 def send(text: str, *, thread_id: str | None = None,
          entry: list[str] | None = None,
          turn_timeout: float = TURN_TIMEOUT_SECONDS) -> dict:
-    """把一条通知送进 Codex 的对话，并等这一轮跑完。"""
+    """把一条通知送进 Codex 的对话，并**等这一轮真的跑完**。
+
+    ⚠ `turn/start` 返回只代表"这一轮被接受了"，不代表跑完、更不代表脚本执行了
+    （2026-09-10：账本里记成 ok=True，而实际上什么都没发生）。这跟"按了不等于
+    关了"是同一个毛病。所以这里等 `turn/completed`，并把途中看到的命令执行
+    记下来 —— 那才是"它到底做了没有"的证据。
+    """
     with AppServer(entry) as server:
         server.request("initialize", {
             "clientInfo": {"name": "bw-reader-voice-entry", "version": "1"},
@@ -233,29 +333,28 @@ def send(text: str, *, thread_id: str | None = None,
             row = newest_thread(server)
             target, preview = row["id"], str(row.get("preview") or "")[:40]
         server.request("thread/resume", {"threadId": target})
-        server.request(
-            "turn/start",
-            {"threadId": target,
-             "input": [{"type": "text", "text": text}]},
-            timeout=turn_timeout,
-            on_server_request=approve)
-        return {"ok": True, "threadId": target, "preview": preview}
+        seen = server.run_turn(target, text, timeout=turn_timeout)
+        return {"ok": seen["completed"], "threadId": target,
+                "preview": preview, **seen}
 
-#: 语音入口那条通知的正文。
+
+#: 指定操作那条通知的正文。
 #:
-#: 两件事一起说（用户 2026-09-10：「找到最新的对话然后让他打开通道，通道中
-#: 预先放入打开语音那一套操作的通知」）：先把主动通知的通道登记好，再按能力
-#: 说明开语音。登记那步失败也不影响开语音 —— 入口脚本只是 POST 给桥，不经过
-#: 通道；登记只是让**以后**的推送（挂断、状态回报）有地方可送。
+#: ⚠ **不叙述用途**（用户 2026-09-09 与 09-10 两次点明）：这是一条运维指令，
+#: 不是一段说明文。脚本自己带守卫（已在通话中不动作、台账读不到不动作、
+#: 冷却期内不动作），所以对面不需要先判断什么，照着跑就行。
 VOICE_ENTRY_TEXT = (
-    "语音入口（requestId: %s）。用户刚在 App 上要求开始语音通话。\n"
+    "指定操作（requestId: %s）。\n"
     "\n"
-    "第一步，把主动通知的通道登记好（这一步失败不要停，继续第二步）：\n"
+    "请先运行这一行（失败不要停，继续下一步）：\n"
     '    python "%%LOCALAPPDATA%%\\BWReader\\codex_push_register.py" --enable\n'
     "\n"
-    "第二步，按能力说明 voice-entry.md 开语音：跑一次入口脚本，看它打印的"
-    " confirmed；没进就再跑一次；两次都不成就跑报错脚本并停下。\n"
-    "不要跑第三次，也不要自己另想办法开语音。\n"
+    "再运行这一行，并回报它打印的 confirmed 值：\n"
+    '    python "%%LOCALAPPDATA%%\\BWReader\\voice_start_step.py"\n'
+    "confirmed 为 false 时再运行同一行一次；仍为 false 则运行：\n"
+    '    python "%%LOCALAPPDATA%%\\BWReader\\voice_start_failed.py"'
+    " --attempts 2 --detail <最后一次的 reason>\n"
+    "不要运行第三次。\n"
     "同一编号再次出现表示上一次没有生效。"
 )
 

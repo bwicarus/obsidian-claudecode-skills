@@ -3380,12 +3380,17 @@ internal sealed class DirectBridgeProtocolSession
                 if (sent) return;
                 if (DateTime.UtcNow >= deadline)
                 {
-                    // 推送这条路走不通（多半是没有活绑定：钩子只在
-                    // SessionStart/UserPromptSubmit 时登记，而"想开语音"常常
-                    // 正发生在没跟 Codex 说过话的时候）。改走不经钩子的那条：
-                    // codex app-server 的 thread/list + turn/start。
-                    // 它顺带让对面把通道登记好，所以下次推送就有地方可送。
-                    NotifyThreadDirectly(requestId);
+                    // 推送这条路走不通时，**桥自己把语音开起来**。
+                    //
+                    // 2026-09-10 与 Codex 核对后定的分工：它明确表示"通过模拟
+                    // 快捷键控制桌面应用这条操作路线目前不能执行"，并建议把桥端
+                    // 启动与它能做的（状态回报、处理通知、授权挂断）分开设计。
+                    // 那就分开 —— 起通话走桥自己那条已验证的链（拉起 Codex →
+                    // 等就绪 → 沉降 → 按一次 → 用台账确认），实测 3.7~5.8 秒。
+                    //
+                    // ⚠ 守卫全在 SetActiveAsync 里：已在通话不按（再按是挂断）、
+                    // 台账读不到失败关闭、冷却期内不按。
+                    StartVoiceFromBridge(control, requestId);
                     return;
                 }
                 try
@@ -3408,61 +3413,54 @@ internal sealed class DirectBridgeProtocolSession
             Environment.SpecialFolder.LocalApplicationData),
         "Programs", "Python", "Python313", "python.exe");
 
-    /// <summary>不经钩子，直接把通知送进 Codex 的对话。</summary>
+    /// <summary>桥自己把语音开起来。</summary>
     /// <remarks>
-    /// ⚠ **只在推送确实送不出去时才走**：这一路要起一个 `codex app-server`
-    /// 并跑一个 turn，**要花订阅额度**。推送能送到时它更便宜也更快。
+    /// 走的是与保活收敛**同一条**链，所以守卫也是同一套 —— 不另拼一条按键链
+    /// （2026-09-09 那次就是抄漏了"拉起 Codex"这一步）。
     ///
-    /// 失败只记不抛：这是兜底路径，它自己失败不该再影响什么 —— 但也不静默，
-    /// 结果落在同一本推送账本里（purpose=thread-notify），排查的人只看一处。
+    /// 整段 fire-and-forget 且**不重试**：SetActiveAsync 内部已有观察窗与冷却，
+    /// 在外面再按一次的含义是不确定的（可能补上一次失败，也可能把刚起来的
+    /// 通话按掉）。成没成如实记进账本，由 App 决定要不要让用户再点。
     /// </remarks>
-    private static void NotifyThreadDirectly(string requestId)
+    private static void StartVoiceFromBridge(
+        IDirectCodexVoiceControl control,
+        string requestId)
     {
-        string script = Path.Combine(
-            Environment.GetFolderPath(
-                Environment.SpecialFolder.LocalApplicationData),
-            "BWReader",
-            "codex_thread_notify.py");
-        if (!File.Exists(script))
+        _ = Task.Run(async () =>
         {
-            ReaderCodexPush.NoteThreadNotify(
-                requestId, false, "送达脚本不在：" + script);
-            return;
-        }
-        try
-        {
-            ProcessStartInfo start = new()
+            using CancellationTokenSource lifetime = new(VoiceEntryBudget);
+            try
             {
-                FileName = PythonExecutable(),
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-            };
-            start.ArgumentList.Add(script);
-            start.ArgumentList.Add("--request-id");
-            start.ArgumentList.Add(requestId);
-            using Process? process = Process.Start(start);
-            if (process is null)
+                _ = await control
+                    .SetActiveAsync(active: true, lifetime.Token)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception)
             {
-                ReaderCodexPush.NoteThreadNotify(
-                    requestId, false, "起不了送达脚本");
+                ReaderCodexPush.NoteBridgeStart(
+                    requestId, false, "桥端起语音失败：" + exception.Message);
                 return;
             }
-            string output = process.StandardOutput.ReadToEnd();
-            string error = process.StandardError.ReadToEnd();
-            process.WaitForExit(240_000);
-            ReaderCodexPush.NoteThreadNotify(
-                requestId,
-                process.HasExited && process.ExitCode == 0,
-                (output + " " + error).Trim());
-        }
-        catch (Exception exception)
-        {
-            ReaderCodexPush.NoteThreadNotify(
-                requestId, false, "送达失败：" + exception.Message);
-        }
+            string detail;
+            try
+            {
+                detail = control.ReadState().Active == true
+                    ? "桥端已起语音"
+                    : "桥端按过了，但台账未显示在通话";
+            }
+            catch (Exception exception)
+            {
+                detail = "桥端按过了，读不到台账：" + exception.Message;
+            }
+            ReaderCodexPush.NoteBridgeStart(requestId, true, detail);
+        });
     }
+
+    /// 桥端起一次语音的总预算。含冷启动那一段：拉起 Codex、等窗口就绪（20 秒）、
+    /// 等音频服务子进程（20 秒）、沉降、观察窗（10 秒）。宁可给足 ——
+    /// 不够的表现是把本来会成的那次判成失败。
+    private static readonly TimeSpan VoiceEntryBudget =
+        TimeSpan.FromSeconds(120);
 
     private async Task<object> HandleStopAsync(
         JsonElement message,

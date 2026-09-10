@@ -523,21 +523,28 @@ class WiredUpTests(unittest.TestCase):
         self.assertIn("_lastVoiceEntrySessionId", hook)
         self.assertIn("sameSession", hook)
 
-    def test_thread_notify_is_the_fallback_when_push_cannot_be_sent(self):
-        """推送送不出去时要有另一条路（2026-09-10 用户拍板）。
+    def test_bridge_starts_voice_when_push_cannot_be_sent(self):
+        """推送送不出去时，**桥自己把语音开起来**（2026-09-10 定的分工）。
 
-        钩子只在 SessionStart/UserPromptSubmit 时登记，而"想开语音"常常正发生在
-        没跟 Codex 说过话的时候 —— 那时没有绑定，推送无处可发。这条兜底走
-        codex app-server 的 thread/list + turn/start，不需要绑定。
+        Codex 明确表示"通过模拟快捷键控制桌面应用这条操作路线目前不能执行"，
+        并建议把桥端启动与它能做的（状态回报、处理通知、授权挂断）分开设计。
+        那就分开：起通话走桥自己那条已验证的链，推送继续负责挂断与状态回报。
+
+        ⚠ 走的必须是 SetActiveAsync（与保活收敛同一条链），不是另拼一条按键链
+        —— 2026-09-09 那次就是抄漏了"拉起 Codex"这一步。
         """
         source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
             encoding="utf-8")
         hook = source.split("private void RequestVoiceEntryIfNobodyElseWill")[1]
-        hook = hook.split("private static string PythonExecutable")[0]
-        self.assertIn("NotifyThreadDirectly(requestId)", hook)
-        # ⚠ 只在推送真的送不出去之后才走 —— 它要起一个 app-server 并跑一个
-        # turn，是要花订阅额度的；推送能送到时更便宜也更快。
+        hook = hook.split("private static void StartVoiceFromBridge")[0]
+        self.assertIn("StartVoiceFromBridge(control, requestId)", hook)
+        # ⚠ 只在推送真的送不出去之后 —— 推送能送到时它更便宜也更快。
         self.assertIn("if (sent) return;", hook)
+        body = source.split("private static void StartVoiceFromBridge")[1]
+        body = body.split("private async Task<object> HandleStopAsync")[0]
+        self.assertIn("SetActiveAsync(active: true", body)
+        self.assertIn("NoteBridgeStart", body)
+        self.assertNotIn("while (true)", body)   # 不重试，见 remarks
 
     def test_thread_source_comes_from_the_session_record(self):
         """排除表要对着**会话来源**判，不是对着 thread/list 回的客户端名。
@@ -554,13 +561,45 @@ class WiredUpTests(unittest.TestCase):
         self.assertIn("thread_source_of", pick)
         self.assertNotIn('row.get("threadSource")', pick)
 
+    def test_turn_start_accepted_is_not_reported_as_done(self):
+        """`turn/start` 返回只是"接受"，不是"跑完"。
+
+        2026-09-10：账本记成 ok=True，而实际上 Codex 什么都没做 —— 又一个
+        "按了不等于关了"。真正的终点是 turn/completed；途中的
+        item/commandExecution/* 才说明它确实去跑脚本了。
+        """
+        notify = (Path(__file__).resolve().parents[1]
+                  / "codex_thread_notify.py").read_text(encoding="utf-8")
+        self.assertIn("turn/completed", notify)
+        self.assertIn("item/commandExecution/", notify)
+        send = notify.split("def send(text")[1]
+        self.assertIn('seen["completed"]', send)
+
+    def test_approval_vocabulary_comes_from_the_schema(self):
+        """两套取值不通用，猜一个就等于没应答。
+
+        现代 item/*/requestApproval 要 accept/decline；旧的
+        execCommandApproval / applyPatchApproval 要 approved/denied。
+        上一版一律回 "approved"，对现代方法是非法值 —— 表现就是
+        "turn 送到了却什么都没发生"。
+        """
+        notify = (Path(__file__).resolve().parents[1]
+                  / "codex_thread_notify.py").read_text(encoding="utf-8")
+        self.assertIn("item/commandExecution/requestApproval", notify)
+        self.assertIn('"accept"', notify)
+        self.assertIn('"approved"', notify)
+        # 认不出来的要回协议错误，不能编一个结果。
+        self.assertIn("-32601", notify)
+
     def test_thread_notify_approval_is_not_a_blank_cheque(self):
         """审批写成"什么都同意"就等于把一条通知变成任意命令执行入口。"""
         notify = (Path(__file__).resolve().parents[1]
                   / "codex_thread_notify.py").read_text(encoding="utf-8")
         approve = notify.split("def approve")[1].split("def send")[0]
         self.assertIn("ALLOWED_SCRIPTS", approve)
-        self.assertIn('"denied"', approve)
+        # 放行与拒绝取自同一张表的两端 —— 不在放行表里的走 [1]（拒绝那一侧）。
+        self.assertIn("yes_no[1]", approve)
+        self.assertIn("decline", notify)
 
     def test_dead_pipe_invalidates_the_binding_immediately(self):
         """管道不存在 = 那个会话没了，立刻判失效。
