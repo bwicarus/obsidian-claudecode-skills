@@ -9589,12 +9589,27 @@ if (window.__bwPwaProviderOnly) return;
       : (voice.active === false ? false : 'unknown');
   }
 
-  // ⚠ 两个方向的错都要避开：
+  // ⚠ 三个方向的错都要避开：
   //   · 把"读不到"当成"没起来" → 按钮在台账读不到时永远黄闪,而音频通道真的通了;
-  //   · 把"还没问过"当成"可以放行" → 首次上漆就变绿,闸门形同不存在(我犯的那个)。
-  // 所以只有**确证在通话**或**问过了确实读不到**才放行。
+  //   · 把"还没问过"当成"可以放行" → 首次上漆就变绿,闸门形同不存在(我犯的那个);
+  //   · 把**冷启动头几秒的"读不到"**当成"我们瞎了" → 也变绿,而语音其实没通
+  //     (用户 2026-09-10 实录:「codex 冷启动后按钮就变成了绿色但是语音没通」)。
+  //
+  // 第三条是前两条打架的产物。Codex 刚被拉起来时,它的麦克风台账条目还不存在,
+  // 于是 status !== 'available' → 'unknown' → 那个为了防"永远黄闪"而开的宽松
+  // 出口被触发 —— **而那恰恰是最不该放行的时刻**:冷启动早期的"读不到"不是
+  // 我们瞎了,是它真的还没起来。
+  //
+  // 所以给"读不到"加一个宽限期:头 UNKNOWN_GRACE_MS 内不放行(继续黄闪 + 走梯子),
+  // 之后才当成"问过了确实读不到"。桥自己起语音的预算是 13~20 秒,取 30 秒
+  // 让它跑完整轮再谈。
+  var UNKNOWN_GRACE_MS = 30000;
+  var _ladderStartedAt = 0;
   function _greenLightAllowed() {
-    return _codexSessionLive === true || _codexSessionLive === 'unknown';
+    if (_codexSessionLive === true) return true;
+    if (_codexSessionLive !== 'unknown') return false;
+    if (!_ladderStartedAt) return true;   // 没在起语音流程里,别改旧行为
+    return (Date.now() - _ladderStartedAt) >= UNKNOWN_GRACE_MS;
   }
 
   function _paintComputerVoiceConnected() {
@@ -9652,6 +9667,9 @@ if (window.__bwPwaProviderOnly) return;
   var LADDER_POLL_MS = 3000;
 
   function _stopLadderProgress() {
+    // 收摊即清:下一次按下要重新计时,否则上一通的宽限会算在新一通头上
+    // —— 那正好让"第二次按"绕过整个闸门。
+    _ladderStartedAt = 0;
     if (_ladderTimer) { clearInterval(_ladderTimer); _ladderTimer = null; }
   }
 
@@ -9694,6 +9712,8 @@ if (window.__bwPwaProviderOnly) return;
 
   function _startLadderProgress(generation) {
     _stopLadderProgress();
+    // 宽限期从**这一轮开始起语音**算起,不是从页面加载算起。
+    if (!_ladderStartedAt) _ladderStartedAt = Date.now();
     var tick = function () {
       // ⚠ 不能只在 _computerVoiceStarting 期间轮询（2026-09-10 改）：
       // 音频通道通了之后 startFromUserGesture 就 resolve 了，那个标记随之落下 ——

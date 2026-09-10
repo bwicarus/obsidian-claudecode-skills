@@ -23,6 +23,7 @@ mtime 会被无关写入干扰、App 正开着的那条还连不上）。
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import struct
@@ -452,3 +453,46 @@ def _newest_thread_on_disk() -> str | None:
         if thread_id:
             best = (when, str(thread_id))
     return best[1] if best else None
+
+
+# ── 命令行入口（2026-09-10）─────────────────────────────────────────
+#
+# ⚠ 这个模块原来**只有库、没有入口**，于是唯一会调它的是 ReaderPC 那个 30 秒
+# 的自愈 tick。桥自己没法主动建通道，只能干等钩子 —— 而冷启动时钩子还没跑过，
+# 通道自然是空的。用户 2026-09-10 点出的顺序问题正是这一条：
+#
+#   「顺序必须是冷启动后尝试刷新列表，等刷新成功时就证明 codex 加载成功，
+#     然后选择记录中的那个对话然后建立通道」
+#
+# ensure_channel() 本来就是这四步（枚举管道 → tools/list 自证 → list_threads
+# → 按记录选 → 登记），而且**任何一步不成就整体失败**。所以"重试到成功"
+# 天然等价于"等 Codex 真的加载完"：能列出对话这件事本身就是就绪信号，
+# 比窗口句柄出现可靠得多（句柄出现得比 app-tools 管道早得多）。
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="建立/查看 Codex 主动通知通道")
+    parser.add_argument(
+        "--ensure", action="store_true",
+        help="按当前设置建立通道；成功打印 JSON 并返回 0")
+    parser.add_argument(
+        "--survey", action="store_true",
+        help="只看能连上哪条管道、有哪些对话，不登记")
+    args = parser.parse_args(argv)
+    try:
+        result = survey() if args.survey else ensure_channel()
+    except Exception as error:          # noqa: BLE001
+        # ⚠ 失败也要输出 JSON：调用方（桥）要能分辨"没就绪"和"脚本坏了"，
+        # 而一句自由文本的 traceback 两者长得一样。
+        print(json.dumps({
+            "ok": False,
+            "error": type(error).__name__,
+            "detail": str(error)[:300],
+        }, ensure_ascii=False))
+        return 1
+    print(json.dumps({"ok": True, "result": result}, ensure_ascii=False,
+                     default=str))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

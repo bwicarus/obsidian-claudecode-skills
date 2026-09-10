@@ -31,7 +31,38 @@ test("推送挂在真的写了盘之后，而不是渲染之后", () => {
   const slowWrite = flush.indexOf("bool slowChanged = await WriteIfChangedAsync");
   const push = flush.indexOf("ReaderCodexPush");
   assert.ok(slowWrite > 0 && push > slowWrite, "推送必须排在落盘之后");
-  assert.match(flush, /if \(slowChanged \|\| fastChanged\)/);
+  // 2026-09-10：快板多了一层安静窗口，条件从 fastChanged 变成 pushFast。
+  // 守的东西没变 —— **只在真的有新东西时才推** —— 只是"有没有新东西"现在
+  // 由 ShouldPushFast 回答（内容与上一次真送到的不同，且过了窗口或是紧急）。
+  // ⚠ 慢板仍然直接用 slowChanged：待办是祈使句，不进窗口。
+  assert.match(flush, /if \(slowChanged \|\| pushFast\)/);
+  assert.match(flush, /pushFast = ShouldPushFast\(/);
+  // 传给推送的是 pushFast 而不是 fastChanged —— 传错的话窗口压下的那一轮
+  // 会被当成"快板变了"照样送出去，等于窗口不存在。
+  assert.match(flush, /NotifyBoardChangedAsync\(\s*slowChanged, pushFast,/);
+});
+
+test("快板安静窗口压得住上下文，压不住挂断", () => {
+  // 「他主动挂断了电话」的语义是"看到就停止向通话说话"，压它 90 秒
+  // 等于让 AI 对着已经挂断的电话继续说一分半。
+  const decide = BOARD.slice(
+    BOARD.indexOf("internal static bool ShouldPushFast"),
+    BOARD.indexOf("internal static readonly TimeSpan FastQuietWindow"),
+  );
+  assert.ok(decide.length > 0, "找不到 ShouldPushFast");
+  // 内容与"上一次真送到的"相同就不推（无变化静默的延伸）
+  assert.match(decide, /string\.Equals\(fast, lastDelivered/);
+  // 紧急标记必须排在窗口判断**之前**（|| 的左边）
+  const urgent = decide.indexOf("HangUpMarker");
+  const window = decide.indexOf("FastQuietWindow");
+  assert.ok(urgent > 0 && window > urgent, "挂断必须先于窗口被判定");
+});
+
+test("送达才算数：判去重用真送到的，不用我们试过的", () => {
+  // 通道断着时每一轮都会失败；那时记成"已推"，通道恢复后这份内容
+  // 再也不会被送出去 —— 通知丢失里最难查的那种。
+  assert.match(BOARD, /internal static void NoteFastBoardDelivered/);
+  assert.match(PUSH, /ReaderAttentionBoard\s*\.NoteFastBoardDelivered/);
 });
 
 test("写盘函数报告是否真写了，失败时报 false", () => {

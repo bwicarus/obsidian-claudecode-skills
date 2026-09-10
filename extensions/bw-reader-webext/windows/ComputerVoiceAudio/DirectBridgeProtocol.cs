@@ -3713,6 +3713,26 @@ internal sealed class DirectBridgeProtocolSession
                 {
                     // 读不到就当不知道,继续按原计划催。
                 }
+                // ⚠ **没有绑定时先自己去建通道**（2026-09-10 用户点出的顺序）：
+                //
+                //   「顺序必须是冷启动后尝试刷新列表，等刷新成功时就证明 codex
+                //     加载成功，然后选择记录中的那个对话然后建立通道」
+                //
+                // 原来这里只会干等 —— 等 ReaderPC 那个 30 秒的自愈 tick，或者
+                // 等 Codex 自己的会话钩子登记。可**冷启动时两者都还没发生**：
+                // 钩子要等会话建起来，而会话要等语音起来，正是那个闭环。
+                // 于是按钮按下、Codex 被拉起来了，通道却始终是空的。
+                //
+                // ensure_channel 那四步（枚举管道 → tools/list 自证 →
+                // list_threads → 按记录选 → 登记）任何一步不成就整体失败，
+                // 所以"重试到成功"天然等价于"等 Codex 真的加载完"。
+                // ⚠ 它比窗口句柄可靠：句柄出现得比 app-tools 管道早得多，
+                // 而我们要的是后者。
+                if (ReaderCodexEndpoint.Current() is null)
+                {
+                    await TryEnsureChannelAsync(requestId, lifetime.Token)
+                        .ConfigureAwait(false);
+                }
                 // 这一轮该不该送：
                 //   · 一次都没送成 → 一直试（送不出去不烧对面的额度）
                 //   · 送成过 → 等满宽限期，且还有补发预算才再送一次
@@ -3936,6 +3956,74 @@ internal sealed class DirectBridgeProtocolSession
 
     private static readonly TimeSpan AppRestartTimeout =
         TimeSpan.FromSeconds(45);
+
+    /// <summary>跑一次 codex_channel --ensure，把通道建起来。</summary>
+    /// <remarks>
+    /// ⚠ 走脚本而不是在 C# 里重写一遍：枚举命名管道、逐条 tools/list 自证、
+    /// list_threads、按名字/活跃度挑对话、登记 —— 这一整套已经在
+    /// `codex_channel.py` 里，而且那份还带着六个实测踩坑的处理
+    /// （管道名每次重启都变、同时存在的管道只有一条是活的、信封要真实 threadId、
+    /// updatedAt 混着秒和毫秒…）。抄第二份的下场是两边迟早不一致。
+    ///
+    /// ⚠ 失败是**常态**而不是异常：Codex 还没加载完时它必然失败，那正是我们
+    /// 据以判断"还没就绪"的信号。所以失败只记账不抛。
+    /// </remarks>
+    private static async Task<bool> TryEnsureChannelAsync(
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        string script = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "BWReader",
+            "codex_channel.py");
+        if (!File.Exists(script)) return false;
+        try
+        {
+            ProcessStartInfo info = new()
+            {
+                FileName = PythonExecutable(),
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            info.ArgumentList.Add(script);
+            info.ArgumentList.Add("--ensure");
+            using Process? child = Process.Start(info);
+            if (child is null) return false;
+            using CancellationTokenSource budget =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+            budget.CancelAfter(EnsureChannelTimeout);
+            string output = await child.StandardOutput
+                .ReadToEndAsync(budget.Token).ConfigureAwait(false);
+            await child.WaitForExitAsync(budget.Token).ConfigureAwait(false);
+            bool ok = child.ExitCode == 0;
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                requestId, ok,
+                (ok ? "通道已建立：" : "通道还建不起来（多半是 Codex 还没加载完）：")
+                + (output.Length > 160 ? output[..160] : output).Trim());
+            return ok;
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (Exception exception)
+        {
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                requestId, false,
+                "建通道脚本跑不起来：" + exception.GetType().Name);
+            return false;
+        }
+    }
+
+    /// 一次建通道的上界。它要连管道、问 tools/list、列对话 —— 正常一两秒，
+    /// 卡住多半是管道那头没人。
+    private static readonly TimeSpan EnsureChannelTimeout =
+        TimeSpan.FromSeconds(20);
 
     /// 与 NativeMessagingHost 用同一个解释器路径。
     private static string PythonExecutable() => Path.Combine(
