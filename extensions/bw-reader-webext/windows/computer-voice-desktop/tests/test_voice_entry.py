@@ -601,6 +601,46 @@ class WiredUpTests(unittest.TestCase):
         self.assertIn("yes_no[1]", approve)
         self.assertIn("decline", notify)
 
+    def test_every_request_records_to_the_ledger_not_just_memory(self):
+        """请求的每一条出路都要**落盘**，不能只写内存里那句 lastNote。
+
+        2026-09-10 撞到：我从 HEAD 还原一个被误删的方法时，带回来的是**账本
+        之前**的旧版本 —— 它用的还是只写内存的 Note()。于是那一轮推送一条记录
+        都没留，账本看起来像"一次都没试过"，而实际上试了十次。
+
+        还原代码比新写代码更容易漏这种东西：新写会照着周围抄，还原是把时间
+        倒回去。所以这里按方法体扫，不按记忆。
+        """
+        push = (self.BRIDGE / "ReaderCodexPush.cs").read_text(encoding="utf-8")
+        for name in re.findall(
+                r"internal static async Task<bool> (Request\w+Async)\(", push):
+            body = push.split("Task<bool> " + name + "(")[1]
+            body = body.split("internal static")[0].split(
+                "private static async Task SendAsync")[0]
+            bare = re.findall(r"(?<!Attempt)Note\(", body)
+            self.assertEqual(
+                bare, [],
+                "%s 里还有只写内存的 Note()：%d 处" % (name, len(bare)))
+            self.assertIn("NoteAttempt(", body, name + " 完全没记账")
+
+    def test_cancelled_request_still_leaves_a_trace(self):
+        """取消也要留痕 —— 静默返回让账本看起来像"一次都没试过"。"""
+        # ⚠ 只管**一次请求**里的取消。板面推送循环的收摊分支不在此列：
+        # 那里取消等于"在停服"，不是一次失败的尝试，也没有 requestId。
+        push = (self.BRIDGE / "ReaderCodexPush.cs").read_text(encoding="utf-8")
+        names = re.findall(
+            r"internal static async Task<bool> (Request\w+Async)\(", push)
+        self.assertTrue(names, "一条 Request*Async 都没找到，正则该修了")
+        for name in names:
+            body = push.split("Task<bool> " + name + "(")[1]
+            body = body.split("internal static")[0].split(
+                "private static async Task SendAsync")[0]
+            for index, block in enumerate(
+                    body.split("catch (OperationCanceledException)")[1:]):
+                self.assertIn(
+                    "NoteAttempt(", block[:400],
+                    "%s 第 %d 个取消分支是静默的" % (name, index + 1))
+
     def test_dead_pipe_invalidates_the_binding_immediately(self):
         """管道不存在 = 那个会话没了，立刻判失效。
 

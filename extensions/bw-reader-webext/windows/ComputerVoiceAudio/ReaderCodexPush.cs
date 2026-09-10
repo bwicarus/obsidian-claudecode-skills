@@ -417,6 +417,9 @@ internal static class ReaderCodexPush
         }
         catch (OperationCanceledException)
         {
+            // 取消也要留痕：静默返回让账本看起来像"一次都没试过"。
+            NoteAttempt("reader-voice-hangup", requestId, false,
+                "请求被取消（多半是预算耗尽或服务在停）");
             return false;
         }
         catch (Exception exception)
@@ -486,6 +489,9 @@ internal static class ReaderCodexPush
         }
         catch (OperationCanceledException)
         {
+            // 取消也要留痕：静默返回让账本看起来像"一次都没试过"。
+            NoteAttempt("reader-voice-status", requestId, false,
+                "请求被取消（多半是预算耗尽或服务在停）");
             return false;
         }
         catch (Exception exception)
@@ -519,7 +525,8 @@ internal static class ReaderCodexPush
         ReaderCodexEndpoint.Binding? binding = ReaderCodexEndpoint.Current();
         if (binding is null)
         {
-            Note("没有可用绑定（拿不到管道），语音入口请求未发送");
+            NoteAttempt("reader-voice-entry", requestId, false,
+                "没有可用绑定（拿不到管道），语音入口请求未发送");
             return false;
         }
         string step = Path.Combine(
@@ -553,16 +560,22 @@ internal static class ReaderCodexPush
                 prompt,
                 cancellationToken,
                 purpose: "reader-voice-entry").ConfigureAwait(false);
-            Note("已请求开语音（" + Trim(requestId) + "）");
+            NoteAttempt("reader-voice-entry", requestId, true,
+                "已请求开语音（" + Trim(requestId) + "）");
             return true;
         }
         catch (OperationCanceledException)
         {
+            // 取消也要留痕：静默返回让账本看起来像"一次都没试过"，
+            // 而那正是 2026-09-10 那一晚查不动的原因之一。
+            NoteAttempt("reader-voice-entry", requestId, false,
+                "语音入口请求被取消（多半是预算耗尽）");
             return false;
         }
         catch (Exception exception)
         {
-            Note("语音入口请求发送失败：" + exception.Message);
+            NoteAttempt("reader-voice-entry", requestId, false,
+                "语音入口请求发送失败：" + exception.Message);
             return false;
         }
     }
