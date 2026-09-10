@@ -855,7 +855,40 @@ internal static class ReaderAttentionBoard
         // 而对面拿到通知后第一件事就是去读文件。
         //
         // ⚠ 只在真的写了盘时推 —— 空转一轮不推。这条就是"无变化静默"。
-        if (slowChanged || fastChanged)
+        //
+        // ## 快板的安静窗口（2026-09-10 用户：「可以有一个一定时间窗口内不
+        // 连续发送相同通知的限制」）
+        //
+        // 起因：连翻两页 → 25 页一次、27 页一次，两条推送、对面跑两轮
+        // （实录里每轮 11 秒）。焦点转移是**上下文**，早一分钟晚一分钟对它
+        // 要做的事没有区别，而每一次唤醒都是实打实的额度。
+        //
+        // ⚠ **不能一刀切地压**：快板里「他主动挂断了电话」是时间敏感的
+        // （它的说明就是"看到就停止向通话说话"）—— 压它 90 秒等于让 AI 对着
+        // 已经挂断的电话继续说一分半。所以紧急标记直通，其余才进窗口。
+        //
+        // ⚠ 压下的那一次**必须补发**，而且补发的是**最新**内容而不是当时
+        // 那份：板面是整块内容不是增量，后一份天然覆盖前一份。判据用
+        // "现在的内容 ≠ 上一次真推出去的内容"，于是"翻走又翻回来"这种
+        // 来回变化在窗口结束时自动归于无事可推 —— 那正是无变化静默的延伸。
+        //
+        // ⚠ 慢板**不进窗口**：待办是祈使句，压它就是压该开口的事。
+        // 慢板已经有自己的攒批（DecideSlowFlush 的纯上下文攒 N 次）。
+        bool pushFast;
+        // 上面那个 now 的作用域早结束了（它在渲染那把锁里）。这里重新取一次：
+        // 这是个**节流判据**不是时间戳，差几毫秒毫无影响。
+        DateTimeOffset pushNow = DateTimeOffset.UtcNow;
+        lock (Gate)
+        {
+            pushFast = ShouldPushFast(
+                fast, _lastPushedFastText, pushNow, _lastFastPushAt);
+            if (pushFast)
+            {
+                _lastFastPushAt = pushNow;
+                _lastPushedFastText = fast;
+            }
+        }
+        if (slowChanged || pushFast)
         {
             // ⚠ **不 await，也不用这一轮的 token。**
             //
@@ -866,10 +899,54 @@ internal static class ReaderAttentionBoard
             //
             // 渲染是主线，推送是支线。支线绝不能拖住或弄坏主线。
             _ = ReaderCodexPush.NotifyBoardChangedAsync(
-                slowChanged, fastChanged, slowToWrite, fast,
+                slowChanged, pushFast, slowToWrite, fast,
                 CancellationToken.None);
         }
     }
+
+    /// <summary>这一轮该不该推快板。**纯函数，自检直接喂它**。</summary>
+    /// <remarks>
+    /// 三条，缺一不可：
+    ///   ① 内容与**上一次真推出去**的不同 —— 否则窗口结束时会白唤醒一次，
+    ///      「翻走又翻回来」正是这种情况；
+    ///   ② 紧急标记直通 —— 「他主动挂断了电话」压不得（见 HangUpMarker）；
+    ///   ③ 否则等窗口。
+    /// </remarks>
+    internal static bool ShouldPushFast(
+        string fast,
+        string lastPushed,
+        DateTimeOffset now,
+        DateTimeOffset lastPushAt)
+    {
+        if (string.Equals(fast, lastPushed, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        return fast.Contains(HangUpMarker, StringComparison.Ordinal)
+            || now - lastPushAt >= FastQuietWindow;
+    }
+
+    /// <summary>快板两次推送之间的最小间隔。</summary>
+    /// <remarks>
+    /// 90 秒的来历：焦点确认本身就要停留满 45 秒（DwellThreshold），所以
+    /// 正常翻阅根本到不了这里；会连推的是"翻页 + 在新页上划一下"那条
+    /// 即刻确认的旁路。取 2 倍 dwell ≈ 同一分半钟内最多打扰一次。
+    ///
+    /// ⚠ 它只是**间隔**不是丢弃：窗口结束时会补上最新内容。所以放大它
+    /// 的代价是上下文晚到，不是丢失。
+    /// </remarks>
+    internal static readonly TimeSpan FastQuietWindow =
+        TimeSpan.FromSeconds(90);
+
+    /// 快板里**不受窗口约束**的那一条。见上面的说明：它的语义是
+    /// "看到就停止向通话说话"，晚 90 秒等于让 AI 对着空气说完一分半。
+    internal const string HangUpMarker = "他主动挂断了电话";
+
+    private static DateTimeOffset _lastFastPushAt = DateTimeOffset.MinValue;
+
+    /// 上一次**真的推出去**的快板正文。判"该不该补推"用它，而不是用
+    /// "有没有压过一次" —— 后者答不出"压下之后又变回原样"该怎么办。
+    private static string _lastPushedFastText = string.Empty;
 
     private static string _lastFlushFailure = string.Empty;
     private static string _lastSlowText = string.Empty;

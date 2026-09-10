@@ -26,6 +26,7 @@ internal static class ReaderCodexPushSelfTest
         {
             CheckDisabledByDefault(checks);
             CheckNoChangeIsSilent(checks);
+        CheckFastQuietWindow(checks);
             CheckPipeNameNormalisation(checks);
         }
         finally
@@ -49,6 +50,55 @@ internal static class ReaderCodexPushSelfTest
         }
         ReaderCodexPush.SetEnabled(false);
         checks.Add("codex-push: 开关可关可开，且迁移期默认关");
+    }
+
+    /// 快板的安静窗口（2026-09-10 用户：「一定时间窗口内不连续发送相同通知」）。
+    ///
+    /// ⚠ 这里最要紧的一条是**紧急标记不许被压**：快板里「他主动挂断了电话」
+    /// 的语义是"看到就停止向通话说话"，压它 90 秒等于让 AI 对着已经挂断的
+    /// 电话继续说一分半。一个只测"会不会限流"的测试会把这条漏掉。
+    private static void CheckFastQuietWindow(ICollection<string> checks)
+    {
+        DateTimeOffset t0 = new(2026, 9, 10, 12, 0, 0, TimeSpan.Zero);
+        TimeSpan window = ReaderAttentionBoard.FastQuietWindow;
+
+        // ① 第一次：没推过任何东西，立刻推。
+        if (!ReaderAttentionBoard.ShouldPushFast(
+                "焦点 A", string.Empty, t0, DateTimeOffset.MinValue))
+        {
+            throw new InvalidOperationException("第一次就被压住了");
+        }
+
+        // ② 窗口内的第二次不同内容：压住。
+        if (ReaderAttentionBoard.ShouldPushFast(
+                "焦点 B", "焦点 A", t0 + TimeSpan.FromSeconds(5), t0))
+        {
+            throw new InvalidOperationException("窗口内没有限流");
+        }
+
+        // ③ 窗口结束：补推**当时最新**的那份。
+        if (!ReaderAttentionBoard.ShouldPushFast(
+                "焦点 C", "焦点 A", t0 + window, t0))
+        {
+            throw new InvalidOperationException("窗口结束后没有补推");
+        }
+
+        // ④ 压下之后又变回原样：窗口结束时无事可推（无变化静默的延伸）。
+        if (ReaderAttentionBoard.ShouldPushFast(
+                "焦点 A", "焦点 A", t0 + window, t0))
+        {
+            throw new InvalidOperationException("内容没变却在窗口结束时推了");
+        }
+
+        // ⑤ **紧急标记直通**：窗口内也必须立刻推。
+        string urgent = "焦点 B\n" + ReaderAttentionBoard.HangUpMarker + "。";
+        if (!ReaderAttentionBoard.ShouldPushFast(
+                urgent, "焦点 A", t0 + TimeSpan.FromSeconds(1), t0))
+        {
+            throw new InvalidOperationException("挂断这条被安静窗口压住了");
+        }
+
+        checks.Add("codex-push: 快板安静窗口会补推，且挂断不受它约束");
     }
 
     private static void CheckNoChangeIsSilent(ICollection<string> checks)

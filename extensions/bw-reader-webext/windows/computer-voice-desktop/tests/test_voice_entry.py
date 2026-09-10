@@ -36,6 +36,7 @@ LADDER = _load("voice_ladder")
 STEP = _load("voice_start_step")
 CHANNEL = _load("codex_channel")
 FAILED = _load("voice_start_failed")
+NOTIFY = _load("codex_thread_notify")
 
 
 def ledger(known=True, active=False):
@@ -612,19 +613,29 @@ class WiredUpTests(unittest.TestCase):
         都没留，账本看起来像"一次都没试过"，而实际上试了十次。
 
         还原代码比新写代码更容易漏这种东西：新写会照着周围抄，还原是把时间
-        倒回去。所以这里按方法体扫，不按记忆。
+        倒回去。
+
+        ⚠ **范围原来是按方法签名圈的**（只扫 Request*Async），而板面推送
+        不是那个形状 —— 于是它一直只写内存，账本里连「推过一次」都没有。
+        2026-09-10 用户问「你刚才为何连发两次」时我才发现自己答不上来：
+        证据从来没被写下来过，而这条测试是绿的，因为那两条不在它视野里。
+        **一条按形状圈范围的测试，会把范围外的东西证明成合格的。**
+        现在扫整个文件。
         """
         push = (self.BRIDGE / "ReaderCodexPush.cs").read_text(encoding="utf-8")
-        for name in re.findall(
-                r"internal static async Task<bool> (Request\w+Async)\(", push):
-            body = push.split("Task<bool> " + name + "(")[1]
-            body = body.split("internal static")[0].split(
-                "private static async Task SendAsync")[0]
-            bare = re.findall(r"(?<!Attempt)Note\(", body)
-            self.assertEqual(
-                bare, [],
-                "%s 里还有只写内存的 Note()：%d 处" % (name, len(bare)))
-            self.assertIn("NoteAttempt(", body, name + " 完全没记账")
+        code = "\n".join(
+            line for line in push.splitlines()
+            if not line.lstrip().startswith("//"))
+        bare = [
+            line.strip()
+            for line in code.splitlines()
+            if re.search(r"(?<!Attempt)(?<!void )Note\(", line)
+            and "NoteAttempt(" not in line
+        ]
+        # 只该剩 NoteAttempt 内部那一次转调。
+        self.assertEqual(
+            bare, ["Note(text);"],
+            "还有只写内存的 Note()：%s" % bare)
 
     def test_connect_timeout_is_what_proves_the_pipe_is_gone(self):
         """管道不在时 ConnectAsync **不抛 FileNotFound，它会等到超时**。
@@ -817,6 +828,91 @@ class ShortcutFallbackTests(unittest.TestCase):
         body = source.split("private static void StartVoiceFromBridge")[1][:900]
         self.assertIn("ShortcutFallbackEnabled()", body)
         self.assertIn("NoteBridgeStart", body.split("if (!Shortcut")[1][:400])
+
+
+class SilenceContractTests(unittest.TestCase):
+    """推送过去的每一条都必须说清「该不该开口」。
+
+    ⚠ 2026-09-10 用户实录：焦点转移和起语音，对面**全都语音念了出来**。
+    板子自己的合同一直是「陈述句就是资料，祈使句才是要你做的事」（用户
+    2026-08-30 定的形状），登记表里也写着待办才是「该开口说的事」——
+    **但那份合同只存在于 reader-attention-registry.json，而没有任何东西要求
+    对面去读它**。推送是唯一到达对面的东西；写在别处等于没写。
+
+    所以这里钉住：每一条外发文本都自带纪律，一条都不许漏。
+    """
+
+    PUSH = (Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
+            / "ReaderCodexPush.cs")
+
+    #: 五条外发文本各自的锚点 → 该挂哪种纪律。
+    #: ⚠ 这张表就是「一共有几条」的答案。新增一条外发文本必须同时加进来，
+    #: 否则它会安静地成为第六条没有纪律的消息。
+    OUTBOUND = {
+        '"提示板已接上主动推送': "BoardSilenceLine",
+        '"提示板更新（"': "BoardSilenceLine",
+        '"用户预先设定的自动关闭规则触发了："': "OperationSilenceLine",
+        '"状态查询（requestId: "': "OperationSilenceLine",
+        '"指定操作（requestId: "': "OperationSilenceLine",
+    }
+
+    def test_every_outbound_message_carries_the_rule(self):
+        source = self.PUSH.read_text(encoding="utf-8")
+        for anchor, constant in self.OUTBOUND.items():
+            where = source.find(anchor)
+            self.assertNotEqual(where, -1, "找不到外发文本：%s" % anchor)
+            # 纪律必须在这段文本**之前**的 200 字内拼进去。
+            head = source[max(0, where - 200):where]
+            self.assertIn(
+                constant, head,
+                "这条外发文本没挂纪律：%s" % anchor)
+
+    def test_the_outbound_table_is_complete(self):
+        """⚠ 一张漏了一行的表跟没有表一样，而且看起来是绿的。
+
+        用外发口 SendAsync(binding, prompt, …) 的出现次数反查：五条正文
+        + 一条私有实现，多出来的就是没登记进上面那张表的新消息。
+        """
+        source = self.PUSH.read_text(encoding="utf-8")
+        self.assertEqual(
+            source.count("await SendAsync("), len(self.OUTBOUND),
+            "外发口的数量与登记表对不上 —— 新增了消息就要同时登记纪律")
+
+    @staticmethod
+    def _literals(text: str) -> list[str]:
+        """只取字符串字面量。
+
+        ⚠ 整文件扫会连**注释**一起扫到 —— 而解释"以前写错了什么"的注释里
+        必然含有那句错话。第一版就是这么误报的：它抓住的是我自己写的说明；
+        第二版只排掉了跨行，仍把注释里的引号当字面量。所以先按行砍注释。
+        """
+        code = "\n".join(
+            line for line in text.splitlines()
+            if not line.lstrip().startswith("//"))
+        return re.findall(r'"([^"\n]*)"', code)
+
+    def test_no_outbound_message_asks_it_to_report_out_loud(self):
+        """「回报」在通话里就是"说出来"，等于我们自己点的那句噪音。"""
+        offenders = [
+            piece for piece in self._literals(
+                self.PUSH.read_text(encoding="utf-8"))
+            if "回报" in piece
+        ]
+        self.assertEqual(offenders, [], "外发文本里还留着「回报」")
+
+    def test_csharp_and_python_state_the_same_rule(self):
+        """同一条纪律的两份实现（C# 推送 / Python app-server 兜底）。
+
+        ⚠ 措辞不一致比"没有纪律"更难发现：两边都"有"，但对面在两条路上
+        收到的要求不同，而没有任何一处会报错。
+        """
+        source = self.PUSH.read_text(encoding="utf-8")
+        start = source.index("OperationSilenceLine =")
+        csharp = source[start:source.index(";", start)]
+        # C# 里是拼接的字面量；取出引号内容接起来，并把 \n 还原成真换行。
+        joined = "".join(re.findall(r'"([^"]*)"', csharp))
+        joined = joined.replace(chr(92) + "n", chr(10))
+        self.assertEqual(joined, NOTIFY.OPERATION_SILENCE_LINE)
 
 
 class ChannelChoiceTests(unittest.TestCase):

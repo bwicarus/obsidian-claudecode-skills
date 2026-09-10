@@ -382,13 +382,26 @@ def send(text: str, *, thread_id: str | None = None,
 #: ⚠ **不叙述用途**（用户 2026-09-09 与 09-10 两次点明）：这是一条运维指令，
 #: 不是一段说明文。脚本自己带守卫（已在通话中不动作、台账读不到不动作、
 #: 冷却期内不动作），所以对面不需要先判断什么，照着跑就行。
+#: 开口纪律。⚠ 与 C# 的 ReaderCodexPush.OperationSilenceLine **必须一致** ——
+#: 同一条纪律的第二份实现，测试钉住了两边的措辞。
+#:
+#: 2026-09-10 用户实录：起语音和板面更新，对面都直接语音念了出来
+#: （「这次也没问题,已经确认成功了,不用重试。」）。原因不是它多话，是我们
+#: 一个字都没说过该不该开口 —— 而原文还字面写着「并回报它打印的 confirmed
+#: 值」，在通话里"回报"就是说出来，等于我们自己点的那句噪音。
+OPERATION_SILENCE_LINE = (
+    "这是后台运维指令，不是对话：照做即可，"
+    "**全程不要在通话里提这件事，也不要念出任何结果**。\n"
+)
+
 VOICE_ENTRY_TEXT = (
-    "指定操作（requestId: %s）。\n"
+    OPERATION_SILENCE_LINE
+    + "指定操作（requestId: %s）。\n"
     "\n"
     "请先运行这一行（失败不要停，继续下一步）：\n"
     '    python "%%LOCALAPPDATA%%\\BWReader\\codex_push_register.py" --enable\n'
     "\n"
-    "再运行这一行，并回报它打印的 confirmed 值：\n"
+    "再运行这一行，看它打印的 confirmed 值（自己看，别念出来）：\n"
     '    python "%%LOCALAPPDATA%%\\BWReader\\voice_start_step.py"\n'
     "confirmed 为 false 时再运行同一行一次；仍为 false 则运行：\n"
     '    python "%%LOCALAPPDATA%%\\BWReader\\voice_start_failed.py"'

@@ -249,6 +249,7 @@ internal static class ReaderCodexPush
         // 什么都还没有；之后才是只给变了的那块。
         (string slowNow, string fastNow) = ReaderAttentionBoard.CurrentBoards();
         var connect = new StringBuilder();
+        connect.Append(BoardSilenceLine);
         connect.Append("提示板已接上主动推送，下面是当前两块板的全部内容")
                .Append("（其中可能有你登记之前就已经存在的待办）。")
                .Append("之后只有内容变化时才会再推，且只推变了的那块。\n");
@@ -264,13 +265,21 @@ internal static class ReaderCodexPush
                 _sentCount++;
                 _consecutiveFailures = 0;
             }
-            Note("已推送（接上时的全量提醒）");
+            // ⚠ 落盘，不只是留在内存（2026-09-10 用户问「你刚才为何连发
+            // 两次」时才发现）：板面这两条推送原来只调 Note()，进程外一
+            // 个字都读不到，于是「推了几次、什么时候推的、间隔多久」根本
+            // 查不出来 —— 而这正是关于推送最常被问到的一类问题。语音那
+            // 几条早就走 NoteAttempt 落盘了，这两条被漏下了。
+            NoteAttempt(
+                "board-push", "connect", true, "已推送（接上时的全量提醒）");
         }
         catch (Exception exception)
         {
             // 这一条失败**不判绑定失效**：刚登记完就判死太急，而且下一次
             // 真实变化会再试一次。只把原因留下。
-            Note("接上提醒没发出去：" + exception.Message);
+            NoteAttempt(
+                "board-push", "connect", false,
+                "接上提醒没发出去：" + exception.Message);
         }
     }
 
@@ -292,9 +301,11 @@ internal static class ReaderCodexPush
         if (binding is null)
         {
             string why = ReaderCodexEndpoint.InvalidReason();
-            Note(why.Length > 0
-                ? "绑定已被判失效，等重新登记：" + why
-                : "没有可用的 Codex 绑定（未注册或已过兜底期限），这一轮不推");
+            NoteAttempt(
+                "board-push", "unbound", false,
+                why.Length > 0
+                    ? "绑定已被判失效，等重新登记：" + why
+                    : "没有可用的 Codex 绑定（未注册或已过兜底期限），这一轮不推");
             return;
         }
         // 直接把**变了那块板的全文**带过去（2026-09-09 用户：
@@ -311,6 +322,7 @@ internal static class ReaderCodexPush
             ? "快板和慢板"
             : (fastChanged ? "快板" : "慢板");
         var body = new StringBuilder();
+        body.Append(BoardSilenceLine);
         body.Append("提示板更新（").Append(which).Append("）。\n");
         if (fastChanged)
         {
@@ -330,7 +342,10 @@ internal static class ReaderCodexPush
                 _sentCount++;
                 _consecutiveFailures = 0;   // 成功一次就把计数清零
             }
-            Note("已推送（" + which + "）");
+            // 同上：板面推送也要落盘。带上是哪块板 —— 「为什么连推两次」
+            // 的答案通常就是"两次变化各推一次"，而没有账本就只能靠猜。
+            NoteAttempt(
+                "board-push", which, true, "已推送（" + which + "）");
         }
         catch (OperationCanceledException)
         {
@@ -349,13 +364,54 @@ internal static class ReaderCodexPush
                 ReaderCodexEndpoint.Invalidate(
                     "连续 " + failures + " 次推送失败：" + exception.Message);
                 lock (Gate) { _consecutiveFailures = 0; }
-                Note("连续 " + failures + " 次失败，已判绑定失效，等重新登记："
+                NoteAttempt(
+                    "board-push", "invalidated", false,
+                    "连续 " + failures + " 次失败，已判绑定失效，等重新登记："
                      + exception.Message);
                 return;
             }
-            Note("推送失败（连续第 " + failures + " 次）：" + exception.Message);
+            // 失败**尤其**要落盘：只记成功的账本回答不了"为什么没到"。
+            NoteAttempt(
+                "board-push", "failure", false,
+                "推送失败（连续第 " + failures + " 次）：" + exception.Message);
         }
     }
+
+    /// <summary>
+    /// 板面推送的**开口纪律**（2026-09-10 用户：「除了明确通知的都应该静默」）。
+    /// </summary>
+    /// <remarks>
+    /// 板子自己的合同一直是「陈述句就是资料，祈使句才是要你做的事」
+    /// （用户 2026-08-30 定的形状），登记表里也写着待办才是「该开口说的事」。
+    /// **但那份合同从来没被送到对面** —— 它只存在于
+    /// `reader-attention-registry.json`，而没有任何东西要求它去读那个文件。
+    /// 对面收到的原文只有「提示板更新（快板）。焦点从…转移到…。」，
+    /// 于是它按对话处理，把每一次焦点转移都念了出来（用户 2026-09-10 实录）。
+    ///
+    /// ⚠ 纪律必须**长在消息里**：推送是唯一到达对面的东西，写在别处等于没写。
+    /// 这正是 silent-failure-lessons.md 那条「面向 AI 的说明写反比没写更糟」
+    /// 的邻居 —— 这里是压根没写。
+    /// </remarks>
+    internal const string BoardSilenceLine =
+        "这是状态更新，不是对话：陈述句只用来更新你的理解，"
+        + "**不要在通话里念出来、也不要回应这条消息**；"
+        + "只有祈使句（待办）才是要你开口告诉他的事。\n";
+
+    /// <summary>
+    /// 运维指令的**开口纪律**（同上）。
+    /// </summary>
+    /// <remarks>
+    /// 挂断 / 状态查询 / 指定操作三条都是运维动作，用户不需要听见任何一句。
+    /// 尤其「指定操作」原来字面写着「并回报它打印的 confirmed 值」——
+    /// 在通话里"回报"就是说出来，等于我们自己要求了那句噪音。
+    ///
+    /// ⚠ 这条纪律有**第二份实现**：Python 侧 codex_thread_notify 的
+    /// OPERATION_SILENCE_LINE（app-server 那条兜底路径）。措辞必须一致，
+    /// 有测试钉住 —— 两边都"有纪律"但要求不同，是更难发现的那种不一致。
+    /// </remarks>
+    internal const string OperationSilenceLine =
+        "这是后台运维指令，不是对话：照做即可，"
+        + "**全程不要在通话里提这件事，也不要念出任何结果**。\n";
 
     /// 板面正文进消息前的收口。板子本来就短，这里只防病态输入 ——
     /// 一块板长到几十 KB 说明渲染出了别的问题，那时截断比让对面吞下整块好。
@@ -409,7 +465,8 @@ internal static class ReaderCodexPush
             return false;
         }
         string prompt =
-            "用户预先设定的自动关闭规则触发了：" + Trim(reason) + "。\n"
+            OperationSilenceLine
+            + "用户预先设定的自动关闭规则触发了：" + Trim(reason) + "。\n"
             + "这条规则是用户本人事先在设置里定下的，触发即等同于他此刻明确"
             + "要求结束语音通话。\n"
             + "请调用 end_realtime_voice_call 结束当前语音通话，不要只回复文字。\n"
@@ -476,7 +533,8 @@ internal static class ReaderCodexPush
             "BWReader",
             "voice_status_receipt.py");
         string prompt =
-            "状态查询（requestId: " + Trim(requestId)
+            OperationSilenceLine
+            + "状态查询（requestId: " + Trim(requestId)
             + "，有效期 " + validSeconds + " 秒）。\n"
             + "只根据当前可见证据回答；不要开启语音、不要发送快捷键、不要重试。\n"
             + "回答方式：运行下面这行命令，把你的判断作为参数传进去。\n"
@@ -557,8 +615,10 @@ internal static class ReaderCodexPush
         // 指令，不是一段说明文。脚本自己带守卫（已在通话中不动作、台账读不到
         // 不动作、冷却期内不动作），所以对面不需要先判断什么，照着跑就行。
         string prompt =
-            "指定操作（requestId: " + Trim(requestId) + "）。\n"
-            + "请运行下面这一行，并回报它打印的 confirmed 值：\n"
+            OperationSilenceLine
+            + "指定操作（requestId: " + Trim(requestId) + "）。\n"
+            + "请运行下面这一行，看它打印的 confirmed 值"
+            + "（自己看，别念出来）：\n"
             + "    python \"" + step + "\"\n"
             + "confirmed 为 false 时再运行同一行一次；仍为 false 则运行：\n"
             + "    python \"" + failed
