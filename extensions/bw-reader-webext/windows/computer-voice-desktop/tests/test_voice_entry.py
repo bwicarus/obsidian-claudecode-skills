@@ -1025,14 +1025,39 @@ class BoardFollowsTheCallTests(unittest.TestCase):
         self.assertEqual(
             push.count("await SendAsync(binding, prompt, cancellationToken)"),
             0, "还有外发没带 threadIdOverride —— 它会发给绑定那条")
-        # 五条外发正文里，**四条**要能跟着通话走：接上时的全量板、板面更新、
-        # 挂断、状态查询。第五条「指定操作」是例外且必须是例外 —— 它是在
-        # 语音**还没起来**时发的（那时根本没有通话线程），而且它要发给会去跑
-        # 脚本的那条，也就是绑定那条。
+        # ⚠ **五条全部**都要能指定目标线程（2026-09-11 改）。
+        #
+        # 我上一版把「指定操作」列为例外，理由是"发它时还没有通话"。前半句对、
+        # 后半句错：没有**正在进行**的通话，但**最近那条**一直在，而那正是
+        # F24 会续上的那条。发错了对象的后果就是用户报的"每次都新开一条对话"。
+        #
+        # 两侧的目标**故意不同**：
+        #   · 板子 / 挂断 / 状态 → 活着的通话（没有就退回绑定）
+        #   · 指定操作           → 最近那条语音对话（lastGood，不加在通话守卫）
         self.assertEqual(
-            push.count("threadIdOverride:"), 4,
-            "带目标线程的外发不是四条了 —— 先数清楚再改（第五条是语音入口，"
-            "它必须发给绑定那条）")
+            push.count("threadIdOverride:"), 5,
+            "带目标线程的外发不是五条了 —— 先数清楚再改")
+
+    def test_the_entry_goes_to_the_latest_voice_chat_not_the_binding(self):
+        """入口要发给**最近那条语音对话** —— F24 续的就是它。
+
+        ⚠ 实录对照（2026-09-10/11）：
+          16:52/16:56/19:38 绑定=01a08a2f（当时在用的那条）→ 三通复用同一条；
+          09-11 那五次      绑定=01a088fd（昨天的旧对话，因为新建的 voice_chat
+                            都没标题，mode:title 只能落在旧的上）→ 每次新开。
+        """
+        push = (self.BRIDGE / "ReaderCodexPush.cs").read_text(
+            encoding="utf-8")
+        # ⚠ 窗口取到方法结束，别用 NoteAttempt 当边界 —— 方法体前面就有一条
+        #（"没有可用绑定"那句），截在那儿等于根本没看到发送段。
+        body = push.split(
+            "internal static async Task<bool> RequestVoiceEntryAsync")[1]
+        body = body[:body.index("internal static")]
+        self.assertIn("InCallThreadId()", body,
+                      "入口还在发给绑定那条")
+        # ⚠ 必须是**不带在通话守卫**的那个：要的是"最后一条好的"，
+        # 散场之后仍然是它；用带守卫的那个会在没通话时退回绑定 —— 回到老毛病。
+        self.assertNotIn("InCallThreadIdIfActive", body)
 
     def test_it_only_follows_while_a_call_is_really_live(self):
         """lastGood 是"最后一条好的"，通话结束后还留着。

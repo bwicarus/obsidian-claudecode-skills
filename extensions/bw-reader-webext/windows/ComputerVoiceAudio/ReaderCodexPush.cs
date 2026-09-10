@@ -725,13 +725,44 @@ internal static class ReaderCodexPush
             + "同一编号再次出现表示上一次没有生效。";
         try
         {
+            // ⚠ **发给最近那条语音对话，不是绑定那条**（2026-09-11 实测）。
+            //
+            // 用户：「之前测试时是可以打开指定对话的语音的，而且本身软件的
+            // 设计也是语音快捷键按下时默认打开最近的语音对话，为何现在变成
+            // 打开新的对话了，是你的脚本问题吧」——是。
+            //
+            // 「指定操作」这条推送是**送进某条对话**的，Codex 在那条里跑脚本、
+            // 触发 F24。送进**最近那条语音对话** → 它续上；送进一条别的
+            // （比如按标题绑到的昨天那条）→ 它新开一条。
+            //
+            // 实录对照：
+            //   16:52 / 16:56 / 19:38  绑定 = 01a08a2f（当时正在用的那条）
+            //                          → 三通全部复用同一条对话
+            //   09-11 那五次           绑定 = 01a088fd（昨天 10:45 的旧对话，
+            //                          因为新建的 voice_chat 都没有标题，
+            //                          mode:title 只能落在旧的上）
+            //                          → 每一次都新开
+            //
+            // 我之前把这条写成"必须发给绑定那条"，理由是"发它时还没有通话"。
+            // 前半句对、后半句错：没有**正在进行**的通话，但**最近那条**一直在，
+            // 而那正是 F24 会续上的那条。
+            //
+            // ⚠ 这里用不加通话守卫的 InCallThreadId()（lastGood）——要的就是
+            // "最后一条好的"，散场之后仍然是它。这跟提示板那边**故意相反**：
+            // 板子要发给活着的通话，入口要发给将要被续上的那条。
+            string entryTarget = DirectCodexVoiceControl.InCallThreadId();
             await SendAsync(
                 binding,
                 prompt,
                 cancellationToken,
+                threadIdOverride: entryTarget.Length > 0 ? entryTarget : null,
                 purpose: "reader-voice-entry").ConfigureAwait(false);
             NoteAttempt("reader-voice-entry", requestId, true,
-                "已请求开语音（" + Trim(requestId) + "）");
+                "已请求开语音（" + Trim(requestId) + "）→ "
+                + (entryTarget.Length > 0
+                    ? entryTarget[..Math.Min(13, entryTarget.Length)]
+                      + "（最近那条语音对话）"
+                    : "绑定那条（还没有过语音对话）"));
             return true;
         }
         catch (OperationCanceledException)
