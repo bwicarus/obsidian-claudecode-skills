@@ -604,6 +604,24 @@ internal static class ReaderCodexPush
         {
             await pipe.ConnectAsync(connect.Token).ConfigureAwait(false);
         }
+        catch (OperationCanceledException)
+            when (!cancellationToken.IsCancellationRequested)
+        {
+            // ⚠ **连接超时才是"管道不在"的真信号**（2026-09-10 实测）。
+            //
+            // 我原本以为管道不存在会抛 FileNotFoundException，于是把判失效挂在
+            // 那上面 —— 而 NamedPipeClientStream.ConnectAsync **不会立刻抛**，
+            // 它会一直等到有实例可用或超时。所以那条判失效永远不触发，
+            // 账本里看到的是八次"被取消"，每次干等满 4 秒。
+            //
+            // 这里用 `when (!cancellationToken.IsCancellationRequested)` 把
+            // **我们的连接超时**与**调用方取消**分开：前者是确证（那个会话没了），
+            // 后者是我们自己在收摊，两者处置完全不同。
+            ReaderCodexEndpoint.Invalidate(
+                "推送管道连不上（" + ConnectTimeoutMs + " 毫秒内没有可用实例）");
+            throw new IOException(
+                "推送管道连不上：" + binding.PipeName);
+        }
         catch (FileNotFoundException exception)
         {
             // ⚠ **管道不存在 = 那个会话没了，立刻判失效**（2026-09-10）。

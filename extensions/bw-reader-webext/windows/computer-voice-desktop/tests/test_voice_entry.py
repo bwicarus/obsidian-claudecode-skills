@@ -623,6 +623,30 @@ class WiredUpTests(unittest.TestCase):
                 "%s 里还有只写内存的 Note()：%d 处" % (name, len(bare)))
             self.assertIn("NoteAttempt(", body, name + " 完全没记账")
 
+    def test_connect_timeout_is_what_proves_the_pipe_is_gone(self):
+        """管道不在时 ConnectAsync **不抛 FileNotFound，它会等到超时**。
+
+        2026-09-10 实测：判失效挂在 FileNotFoundException 上，于是永远不触发；
+        账本里是八次"被取消"，每次干等满 4 秒，白花 90 秒才轮到兜底。
+        连接超时才是那个确证。
+
+        ⚠ 必须跟**调用方取消**分开：前者说明那个会话没了，后者是我们自己在收摊。
+        """
+        push = (self.BRIDGE / "ReaderCodexPush.cs").read_text(encoding="utf-8")
+        block = push.split("await pipe.ConnectAsync")[1].split(
+            "// 先问一次工具表")[0]
+        self.assertIn("catch (OperationCanceledException)", block)
+        self.assertIn("!cancellationToken.IsCancellationRequested", block)
+        self.assertIn("ReaderCodexEndpoint.Invalidate", block)
+
+    def test_dead_binding_stops_the_retry_loop_at_once(self):
+        """判死之后别再等 —— 重试救不回一条不存在的管道。"""
+        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
+            encoding="utf-8")
+        hook = source.split("private void RequestVoiceEntryIfNobodyElseWill")[1]
+        hook = hook.split("private static void StartVoiceFromBridge")[0]
+        self.assertIn("ReaderCodexEndpoint.Current() is null", hook)
+
     def test_cancelled_request_still_leaves_a_trace(self):
         """取消也要留痕 —— 静默返回让账本看起来像"一次都没试过"。"""
         # ⚠ 只管**一次请求**里的取消。板面推送循环的收摊分支不在此列：

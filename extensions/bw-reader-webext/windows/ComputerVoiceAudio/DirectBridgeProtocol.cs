@@ -3378,6 +3378,14 @@ internal sealed class DirectBridgeProtocolSession
                     // RequestVoiceEntryAsync 自己已经记过原因。
                 }
                 if (sent) return;
+                // 绑定已判死就别再等了 —— 重试救不回一条不存在的管道，
+                // 而每一轮都要干等满一个连接超时。用户看到的是按钮白闪 90 秒，
+                // 然后才轮到兜底（2026-09-10 实测：八次×14 秒）。
+                if (ReaderCodexEndpoint.Current() is null)
+                {
+                    StartVoiceFromBridge(control, requestId);
+                    return;
+                }
                 if (DateTime.UtcNow >= deadline)
                 {
                     // 推送这条路走不通时，**桥自己把语音开起来**。
