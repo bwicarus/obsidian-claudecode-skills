@@ -3740,19 +3740,40 @@ internal sealed class DirectBridgeProtocolSession
                         && DateTime.UtcNow - lastSentAt >= VoiceEntrySentGrace);
                 if (maySend)
                 {
+                    // 发送前手上有没有绑定 —— 决定失败之后要不要立刻重建。
+                    bool hadBinding = ReaderCodexEndpoint.Current() is not null;
+                    bool sentNow = false;
                     try
                     {
-                        if (await ReaderCodexPush.RequestVoiceEntryAsync(
+                        sentNow = await ReaderCodexPush
+                            .RequestVoiceEntryAsync(
                                 requestId,
-                                lifetime.Token).ConfigureAwait(false))
-                        {
-                            sentCount++;
-                            lastSentAt = DateTime.UtcNow;
-                        }
+                                lifetime.Token).ConfigureAwait(false);
                     }
                     catch (Exception)
                     {
                         // RequestVoiceEntryAsync 自己已经记过原因。
+                    }
+                    if (sentNow)
+                    {
+                        sentCount++;
+                        lastSentAt = DateTime.UtcNow;
+                    }
+                    else if (hadBinding)
+                    {
+                        // ⚠ **发送失败本身就是"这条绑定不通"的实测证据**，
+                        // 比等下一轮再问时钟强 —— 那正是本文件顶部那条教条
+                        // （判目标还活着用推送本身，不用时钟）。
+                        //
+                        // 实录 2026-09-11 00:18:24：绑定指着 d1db7cb6，而 Codex
+                        // 重启后管道名早就变了（管道名每次重启都变）。当时要等
+                        // 满一轮 10 秒才轮到重建，00:18:35 才好 —— 那 11 秒是
+                        // 白等的，因为失败的那一刻我们就已经知道它坏了。
+                        //
+                        // ⚠ 只在**本来有绑定**时才补这一次：绑定为 null 的情况
+                        // 循环顶部已经 ensure 过了，再来一次纯属重复。
+                        await TryEnsureChannelAsync(requestId, lifetime.Token)
+                            .ConfigureAwait(false);
                     }
                 }
                 // ⚠ 这里**没有** `if (sent) return;`（2026-09-10 删掉的）。

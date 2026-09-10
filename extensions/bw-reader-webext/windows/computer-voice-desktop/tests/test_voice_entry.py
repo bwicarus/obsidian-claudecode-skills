@@ -963,6 +963,45 @@ class VoiceEntryStormTests(unittest.TestCase):
         self.assertIn("lastDelivered", decide)
 
 
+class ChannelRebuildTests(unittest.TestCase):
+    """通道坏了要**当场**发现，不要等下一轮。"""
+
+    BRIDGE = Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
+
+    def _entry_task(self):
+        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
+            encoding="utf-8")
+        body = source.split("RequestVoiceEntryIfNobodyElseWill")[-1]
+        return body[:body.index("private static void NoteBridgeGaveUp")]
+
+    def test_no_binding_means_build_one_before_sending(self):
+        """用户 2026-09-10 定的顺序：冷启动后先把通道建起来再谈发送。"""
+        body = self._entry_task()
+        build = body.index("TryEnsureChannelAsync")
+        send = body.index("RequestVoiceEntryAsync")
+        self.assertLess(build, send, "建通道必须排在发送之前")
+
+    def test_a_failed_send_rebuilds_immediately(self):
+        """发送失败**就是**"这条绑定不通"的实测证据，比等时钟强。
+
+        ⚠ 实录 2026-09-11 00:18:24：绑定指着 d1db7cb6，而 Codex 重启后管道名
+        早变了。当时要等满一轮 10 秒才轮到重建 —— 那 11 秒是白等的，因为失败
+        的那一刻我们就已经知道它坏了。
+        """
+        body = self._entry_task()
+        self.assertIn("hadBinding", body)
+        # 失败分支里必须再建一次
+        # ⚠ 窗口要够宽：那段注释本身就有三百多字，取 400 会只截到注释。
+        tail = body[body.index("else if (hadBinding)"):][:1200]
+        self.assertIn("TryEnsureChannelAsync", tail)
+
+    def test_it_does_not_rebuild_twice_in_one_round(self):
+        """绑定为 null 时循环顶部已经建过了，失败分支不该再来一次。"""
+        body = self._entry_task()
+        self.assertIn("else if (hadBinding)", body,
+                      "失败就重建必须以「本来有绑定」为条件")
+
+
 class ChannelChoiceTests(unittest.TestCase):
     """通道连哪条对话：一份设置，两个入口。"""
 
