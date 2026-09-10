@@ -27,6 +27,7 @@ internal static class ReaderCodexPushSelfTest
             CheckDisabledByDefault(checks);
             CheckNoChangeIsSilent(checks);
         CheckFastQuietWindow(checks);
+        CheckLedgerSurvivesConcurrency(checks);
             CheckPipeNameNormalisation(checks);
         }
         finally
@@ -57,6 +58,62 @@ internal static class ReaderCodexPushSelfTest
     /// ⚠ 这里最要紧的一条是**紧急标记不许被压**：快板里「他主动挂断了电话」
     /// 的语义是"看到就停止向通话说话"，压它 90 秒等于让 AI 对着已经挂断的
     /// 电话继续说一分半。一个只测"会不会限流"的测试会把这条漏掉。
+    /// 账本在**并发**下还写不写得进去（2026-09-10 实测事故）。
+    ///
+    /// ⚠ 这条守的是一个特别刁钻的形态：`RecordAttempt` 里那三个文件操作原来
+    /// 没有锁，单线程时一切正常，一旦并发起来就几乎每次都撞成 IOException，
+    /// 然后被那个"记账失败不影响推送"的静默 catch 吞掉。
+    /// 结果是**发出去 432 条、账本一条都没有** —— 而并发失控本身正是账本
+    /// 唯一能记录的证据，并发又正是让它写不进去的原因。
+    ///
+    /// 所以判据必须是"N 个并发写，最后账本里就有 N 条"，而不是"写一条能读到"。
+    private static void CheckLedgerSurvivesConcurrency(
+        ICollection<string> checks)
+    {
+        string runtime = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(),
+            "bw-ledger-selftest-" + Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(runtime);
+        string? previous = ReaderAttentionBoard.RuntimeDirectory;
+        try
+        {
+            ReaderAttentionBoard.Configure(runtime);
+            const int writers = 60;
+            Parallel.For(0, writers, index =>
+                ReaderCodexPush.NoteBridgeStart(
+                    "concurrency-" + index.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture),
+                    true,
+                    "并发写测试"));
+            string path = System.IO.Path.Combine(
+                runtime, ReaderCodexPush.AttemptsFileName);
+            int rows = System.IO.File.Exists(path)
+                ? System.IO.File.ReadAllLines(path)
+                    .Count(line => line.Trim().Length > 0)
+                : 0;
+            if (rows != writers)
+            {
+                throw new InvalidOperationException(
+                    "并发写了 " + writers + " 条，账本里只有 " + rows + " 条");
+            }
+            checks.Add("codex-push: 账本在并发下不丢条（60 并发 = 60 条）");
+        }
+        finally
+        {
+            if (previous is not null)
+            {
+                ReaderAttentionBoard.Configure(previous);
+            }
+            try
+            {
+                System.IO.Directory.Delete(runtime, recursive: true);
+            }
+            catch (Exception)
+            {
+            }
+        }
+    }
+
     private static void CheckFastQuietWindow(ICollection<string> checks)
     {
         DateTimeOffset t0 = new(2026, 9, 10, 12, 0, 0, TimeSpan.Zero);

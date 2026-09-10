@@ -3531,6 +3531,24 @@ internal sealed class DirectBridgeProtocolSession
     private static long _lastVoiceEntryRequestTicksUtc;
     private static string _lastVoiceEntrySessionId = string.Empty;
 
+    /// <summary>
+    /// 同一时刻只允许**一个**入口任务在跑（2026-09-10 实测事故）。
+    /// </summary>
+    /// <remarks>
+    /// 上面那个冷却是**按 sessionId 算**的（2026-09-10 早些时候改的，因为
+    /// 全局时间戳会把用户真正的第二次点击当成幂等重复挡掉）。那个改动是对的，
+    /// 但它顺手把唯一的全局刹车也拆了：**换个 sessionId 就绕过一切**。
+    ///
+    /// 实录：19:47–20:23 的 35 分钟里，对面收到 **432 条**「指定操作」，
+    /// 来自 **191 个不同的 requestId** —— 平均每 11 秒诞生一个新任务。
+    /// 每个 START 都带一个新 sessionId，而 App 那阵在反复重连。
+    ///
+    /// 这个闸不看时间也不看会话，只问一句"上一个还在跑吗"：在跑就不再开第二个。
+    /// 正在跑的那个每一轮都读台账，语音一起来它自己收手 —— 多开一个不会更快，
+    /// 只会让对面多跑一轮。
+    /// </remarks>
+    private static int _voiceEntryInFlight;
+
     /// 请求发出后还要盯多久。**Codex 往前几秒才刚被我们拉起来**
     /// （同一次 START 里 EnsureRunningAsync 干的），它的推送绑定要等自己的会话
     /// 钩子跑完才登记 —— 在那之前管道对面没人。只发一次正好落在最差的时刻：
@@ -3636,8 +3654,18 @@ internal sealed class DirectBridgeProtocolSession
             + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
                 .ToString(System.Globalization.CultureInfo.InvariantCulture);
         IDirectCodexVoiceControl control = _codexVoiceControl;
+        // 已经有一个在跑就不再开 —— 见 _voiceEntryInFlight 的说明。
+        if (Interlocked.Exchange(ref _voiceEntryInFlight, 1) == 1)
+        {
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                requestId, true,
+                "已有一个入口任务在跑，这一次不另开（防重连风暴）");
+            return;
+        }
         _ = Task.Run(async () =>
         {
+          try
+          {
             using CancellationTokenSource lifetime = new(
                 VoiceEntryRetryWindow + VoiceEntryRetryInterval);
             DateTime deadline = DateTime.UtcNow + VoiceEntryRetryWindow;
@@ -3739,6 +3767,13 @@ internal sealed class DirectBridgeProtocolSession
                     return;
                 }
             }
+          }
+          finally
+          {
+              // ⚠ 无论怎么退出都要放闸 —— 漏放一次就是
+              // 「从此再也起不了语音」，而那种失效没有任何提示。
+              Interlocked.Exchange(ref _voiceEntryInFlight, 0);
+          }
         });
     }
 

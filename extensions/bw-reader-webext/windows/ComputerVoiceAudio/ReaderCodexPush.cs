@@ -113,6 +113,30 @@ internal static class ReaderCodexPush
     {
         string? runtime = ReaderAttentionBoard.RuntimeDirectory;
         if (string.IsNullOrEmpty(runtime)) return;
+        // ⚠ **必须串行**（2026-09-10 实测事故）。
+        //
+        // 这里原来没有锁：AppendAllText / ReadAllLines / WriteAllLines 三个
+        // 无同步的文件操作。单线程时没事，可这条链一旦并发起来（那天有 191 个
+        // 入口任务同时在跑），几乎每一次写都撞成 IOException —— 然后被下面那个
+        // 静默的 catch 吞掉。表现是：**发出去 432 条，账本一条都没有**。
+        //
+        // 也就是说，账本恰好在最需要它的那一刻是哑的：并发失控本身就是它
+        // 唯一能记录的证据，而并发正是让它写不进去的原因。
+        lock (LedgerGate)
+        {
+            RecordAttemptWithinLock(runtime, purpose, requestId, ok, detail);
+        }
+    }
+
+    private static readonly object LedgerGate = new();
+
+    private static void RecordAttemptWithinLock(
+        string runtime,
+        string purpose,
+        string requestId,
+        bool ok,
+        string detail)
+    {
         try
         {
             JsonObject entry = new()
@@ -270,6 +294,10 @@ internal static class ReaderCodexPush
             // 个字都读不到，于是「推了几次、什么时候推的、间隔多久」根本
             // 查不出来 —— 而这正是关于推送最常被问到的一类问题。语音那
             // 几条早就走 NoteAttempt 落盘了，这两条被漏下了。
+            // ⚠ 这一条**就代表了两块板**：告诉板子它们已送达，紧随其后的
+            // 板面推送因此不会把同样的内容再送一遍（用户点名的"复数通知"，
+            // 最常见的就是这一对）。
+            ReaderAttentionBoard.NoteFastBoardDelivered(fastNow);
             NoteAttempt(
                 "board-push", "connect", true, "已推送（接上时的全量提醒）");
         }
@@ -344,6 +372,11 @@ internal static class ReaderCodexPush
             }
             // 同上：板面推送也要落盘。带上是哪块板 —— 「为什么连推两次」
             // 的答案通常就是"两次变化各推一次"，而没有账本就只能靠猜。
+            // 送达才算数：**判去重要用"真送到的"而不是"我们试过的"**。
+            // 通道断着的时候每一次尝试都会失败，若那时就记成已推，
+            // 通道恢复后这份内容就再也不会被送出去了。
+            if (fastChanged) ReaderAttentionBoard
+                .NoteFastBoardDelivered(fastText);
             NoteAttempt(
                 "board-push", which, true, "已推送（" + which + "）");
         }
@@ -652,12 +685,66 @@ internal static class ReaderCodexPush
         }
     }
 
+    /// <summary>
+    /// 出站闸：**同一时刻只发一条，且两条之间留出间隔**
+    /// （2026-09-10 用户：「重试后不希望通知积压在通道连通后输出复数通知」）。
+    /// </summary>
+    /// <remarks>
+    /// 对面每收到一条消息就跑一整轮（实测 ≈11 秒 + 额度）。通道断开期间
+    /// 各条链各自在等：入口重试每 10 秒试一次、板面变化各自等窗口、接上时
+    /// 还要补一条全量板 —— 通道一恢复，它们会在同一秒里全部成功，于是对面
+    /// 连着跑好几轮，而每一轮都是刚才那些消息的**过期版本**。
+    ///
+    /// ⚠ 闸只保证**间隔**，不保证顺序公平，也不排队积压：等在闸上的调用
+    /// 拿到的是各自当时的正文，谁先进谁先发。真正防积压的是各条链自己的
+    /// 去重（板面比"上一次真送到的内容"、入口比台账），闸只负责别让它们
+    /// 挤在同一秒。
+    /// </remarks>
+    internal static readonly TimeSpan OutboundMinimumGap =
+        TimeSpan.FromSeconds(6);
+
+    private static readonly SemaphoreSlim OutboundGate = new(1, 1);
+    private static DateTime _lastOutboundAtUtc = DateTime.MinValue;
+
     private static async Task SendAsync(
         ReaderCodexEndpoint.Binding binding,
         string prompt,
         CancellationToken cancellationToken,
         string? threadIdOverride = null,
         string purpose = "reader-board-push")
+    {
+        await OutboundGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            TimeSpan since = DateTime.UtcNow - _lastOutboundAtUtc;
+            if (since < OutboundMinimumGap)
+            {
+                await Task.Delay(
+                    OutboundMinimumGap - since,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            await SendWithinGateAsync(
+                binding,
+                prompt,
+                cancellationToken,
+                threadIdOverride,
+                purpose).ConfigureAwait(false);
+        }
+        finally
+        {
+            // ⚠ 成败都记：一次失败的发送同样占用了对面的管道与我们的时间，
+            // 紧接着再发一条并不会更成功，只会更挤。
+            _lastOutboundAtUtc = DateTime.UtcNow;
+            OutboundGate.Release();
+        }
+    }
+
+    private static async Task SendWithinGateAsync(
+        ReaderCodexEndpoint.Binding binding,
+        string prompt,
+        CancellationToken cancellationToken,
+        string? threadIdOverride,
+        string purpose)
     {
         // 管道名来自绑定（那是传输），但**目标线程可以另指**：挂断请求要发给
         // 正在通话的那条线程，而提示板推送的目标线程通常不是同一条。

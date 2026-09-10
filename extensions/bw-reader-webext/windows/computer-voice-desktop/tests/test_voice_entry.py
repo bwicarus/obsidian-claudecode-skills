@@ -915,6 +915,54 @@ class SilenceContractTests(unittest.TestCase):
         self.assertEqual(joined, NOTIFY.OPERATION_SILENCE_LINE)
 
 
+class VoiceEntryStormTests(unittest.TestCase):
+    """入口请求必须有一个**不看会话**的总闸。
+
+    ⚠ 2026-09-10 实录：35 分钟里对面收到 432 条「指定操作」，来自 191 个不同
+    requestId —— 平均每 11 秒一个新任务。原因是那个 45 秒冷却按 sessionId 算
+    （改成按会话本身是对的：全局时间戳会把用户真正的第二次点击当成幂等重复
+    挡掉），可它同时把唯一的全局刹车拆了：**换个 sessionId 就绕过一切**，
+    而 App 每重连一次就换一个。
+    """
+
+    BRIDGE = Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
+
+    def test_only_one_entry_task_may_be_in_flight(self):
+        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
+            encoding="utf-8")
+        body = source.split("RequestVoiceEntryIfNobodyElseWill")[-1]
+        head = body[:body.index("_ = Task.Run(")]
+        self.assertIn("_voiceEntryInFlight", head,
+                      "起任务之前没有总闸")
+        self.assertIn("Interlocked.Exchange(ref _voiceEntryInFlight, 1)", head)
+
+    def test_the_gate_is_always_released(self):
+        """漏放一次 = 从此再也起不了语音，而那种失效没有任何提示。"""
+        source = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
+            encoding="utf-8")
+        body = source.split("RequestVoiceEntryIfNobodyElseWill")[-1]
+        self.assertIn("finally", body[:body.index("PythonExecutable")])
+        self.assertIn("Interlocked.Exchange(ref _voiceEntryInFlight, 0)",
+                      body[:body.index("PythonExecutable")])
+
+    def test_outbound_has_a_minimum_gap(self):
+        """出站要留间隔，否则通道一恢复就把攒着的几条挤在同一秒送出去。"""
+        source = (self.BRIDGE / "ReaderCodexPush.cs").read_text(
+            encoding="utf-8")
+        self.assertIn("OutboundMinimumGap", source)
+        gate = source.split("private static async Task SendAsync")[1][:900]
+        self.assertIn("OutboundGate.WaitAsync", gate)
+        self.assertIn("OutboundMinimumGap", gate)
+
+    def test_delivery_is_what_marks_a_board_as_sent(self):
+        """通道断着时每一轮都会失败；那时记成"已推"会让这份内容再也不发。"""
+        board = (self.BRIDGE / "ReaderAttentionBoard.cs").read_text(
+            encoding="utf-8")
+        self.assertIn("NoteFastBoardDelivered", board)
+        decide = board.split("internal static bool ShouldPushFast")[1][:600]
+        self.assertIn("lastDelivered", decide)
+
+
 class ChannelChoiceTests(unittest.TestCase):
     """通道连哪条对话：一份设置，两个入口。"""
 

@@ -881,11 +881,12 @@ internal static class ReaderAttentionBoard
         lock (Gate)
         {
             pushFast = ShouldPushFast(
-                fast, _lastPushedFastText, pushNow, _lastFastPushAt);
+                fast, _lastDeliveredFastText, pushNow, _lastFastPushAt);
             if (pushFast)
             {
+                // 只记"这一轮试过了"。真送到没有由推送侧回执
+                // （NoteFastBoardDelivered）说了算。
                 _lastFastPushAt = pushNow;
-                _lastPushedFastText = fast;
             }
         }
         if (slowChanged || pushFast)
@@ -914,11 +915,11 @@ internal static class ReaderAttentionBoard
     /// </remarks>
     internal static bool ShouldPushFast(
         string fast,
-        string lastPushed,
+        string lastDelivered,
         DateTimeOffset now,
         DateTimeOffset lastPushAt)
     {
-        if (string.Equals(fast, lastPushed, StringComparison.Ordinal))
+        if (string.Equals(fast, lastDelivered, StringComparison.Ordinal))
         {
             return false;
         }
@@ -942,11 +943,33 @@ internal static class ReaderAttentionBoard
     /// "看到就停止向通话说话"，晚 90 秒等于让 AI 对着空气说完一分半。
     internal const string HangUpMarker = "他主动挂断了电话";
 
+    /// 上一次**尝试**推送的时刻。安静窗口用它 —— 限的是打扰频率，
+    /// 而一次失败的尝试同样占用了时间。
     private static DateTimeOffset _lastFastPushAt = DateTimeOffset.MinValue;
 
-    /// 上一次**真的推出去**的快板正文。判"该不该补推"用它，而不是用
-    /// "有没有压过一次" —— 后者答不出"压下之后又变回原样"该怎么办。
-    private static string _lastPushedFastText = string.Empty;
+    /// 上一次**确认送到**的快板正文。判"该不该再送"用它。
+    ///
+    /// ⚠ 与上面那个时刻分开，是因为两件事的判据不同（2026-09-10）：
+    /// 通道断着的时候每一轮都会尝试并失败，若那时就记成"已推"，通道恢复后
+    /// 这份内容**再也不会被送出去**了 —— 而这正是"通知丢失"最难查的形态：
+    /// 板面文件是对的、推送也没报错，只是对面永远不知道。
+    private static string _lastDeliveredFastText = string.Empty;
+
+    /// <summary>
+    /// 记下"这份快板正文已经确认送到对面了"。由推送侧在成功之后调。
+    /// </summary>
+    /// <remarks>
+    /// 接上通道时那一条**全量提醒**也算送达 —— 它整块带着两块板的正文。
+    /// 不记的话，紧接着的板面推送会把同样的内容再送一遍，于是通道一恢复
+    /// 对面就连收两条（用户 2026-09-10 点名的"复数通知"）。
+    /// </remarks>
+    internal static void NoteFastBoardDelivered(string fast)
+    {
+        lock (Gate)
+        {
+            _lastDeliveredFastText = fast ?? string.Empty;
+        }
+    }
 
     private static string _lastFlushFailure = string.Empty;
     private static string _lastSlowText = string.Empty;
