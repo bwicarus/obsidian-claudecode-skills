@@ -497,7 +497,11 @@ def bind_to(thread_id: str) -> dict[str, Any]:
         raise ChannelError("没给要锁定的对话 id")
     name, _namespace = usable_pipe()
     result = register(name, wanted)
-    write_last_used(wanted)
+    # ⚠ 标题留空，**不再为它多跑一次 list_threads**：这条跑在起语音的关键路径
+    # 上，而标题只是"上次连的那条"记录里给人看的字段。
+    # （第一版漏传了这个参数，运行时 TypeError；被"锁定通道失败：…"如实报了
+    #  出来 —— 那句留痕是 2026-09-10 补的，这次它自己派上了用场。）
+    write_last_used(wanted, "")
     return {"pipeName": name, "threadId": wanted,
             "why": "锁定到正在通话的那条", "register": result}
 

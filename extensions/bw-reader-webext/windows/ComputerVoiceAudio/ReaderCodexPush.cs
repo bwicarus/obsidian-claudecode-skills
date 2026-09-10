@@ -271,6 +271,30 @@ internal static class ReaderCodexPush
         CancellationToken cancellationToken)
     {
         if (!Enabled) return;
+        // ⚠ **起语音途中的那次临时绑定不发板子**（2026-09-11 实测重复）。
+        //
+        // 一次按键现在要登记两回：先 ensure 绑一条能投递的（冷启动时只能是
+        // 某条旧对话），语音起来后再 lock 到真正那条。每次登记都触发这条
+        // 「接上时的全量提醒」，于是对面**同一次按键收到两遍**：
+        //   02:17:30 → 01a088fd（临时那条）
+        //   02:17:41 → 01a08c51（通话那条）
+        // 用户截图里那两条一模一样的运维/状态消息就是这么来的。
+        //
+        // 那条临时绑定是**投递指令用的中转**，不是"有新 AI 接上了"。
+        // 判据：起语音正在进行中、而且绑的还不是通话那条 —— 那就等它锁定。
+        if (DirectBridgeProtocolSession.VoiceEntryInFlight)
+        {
+            string live = DirectCodexVoiceControl.InCallThreadIdIfActive();
+            if (live.Length == 0
+                || !string.Equals(binding.ThreadId, live,
+                                  StringComparison.Ordinal))
+            {
+                NoteAttempt(
+                    "board-push", "connect", true,
+                    "起语音途中的临时绑定，接上提醒先不发（等锁定到通话那条）");
+                return;
+            }
+        }
         // 接上这一条同样**直接带正文**（用户 2026-09-09：「不是说了直接推送
         // 快慢板内容么怎么现在还是这种提醒」）。变化推送已经改了，这一条
         // 当时漏了 —— 两条走同一条运输却一条给内容一条给指路，说不通。
@@ -809,6 +833,26 @@ internal static class ReaderCodexPush
         string? threadIdOverride = null,
         string purpose = "reader-board-push")
     {
+        // ⚠ **时间敏感的那几条连队都不排**（2026-09-11 第二轮修）。
+        //
+        // 上一版只免了"间隔"，没免"排队"：板面推送握着这把闸做完整趟管道
+        // I/O（连接 4s + 请求最多 12s），起语音只能等在后面。实测 02:15 那次
+        //   02:15:15 通道重建 → 02:15:21 全量板（占闸）→ 02:15:26 才轮到起语音
+        // 29 秒总时长里，光排队就吃掉 11 秒。
+        //
+        // 闸的本意是"别让几条挤在同一秒送到对面"，那说的是板面。起语音/挂断/
+        // 状态查询各自开自己的管道连接，彼此不冲突，也没有"挤成一堆"的问题 ——
+        // 有人在等结果的动作不该给不急的让路。
+        bool paced = purpose.StartsWith(
+            "reader-board", StringComparison.Ordinal);
+        if (!paced)
+        {
+            await SendWithinGateAsync(
+                binding, prompt, cancellationToken,
+                threadIdOverride, purpose).ConfigureAwait(false);
+            _lastOutboundAtUtc = DateTime.UtcNow;
+            return;
+        }
         await OutboundGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -823,10 +867,8 @@ internal static class ReaderCodexPush
             //
             // 起语音、挂断、状态查询都是**有人在等结果**的动作；板面推送不是。
             // 所以只有板面排队。
-            bool paced = purpose.StartsWith("reader-board", StringComparison.Ordinal)
-                || purpose == "reader-board-push";
             TimeSpan since = DateTime.UtcNow - _lastOutboundAtUtc;
-            if (paced && since < OutboundMinimumGap)
+            if (since < OutboundMinimumGap)
             {
                 await Task.Delay(
                     OutboundMinimumGap - since,

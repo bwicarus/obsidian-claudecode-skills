@@ -1189,14 +1189,18 @@ class PacingOnlyDelaysTheBoardTests(unittest.TestCase):
     def test_only_board_pushes_are_paced(self):
         source = (self.BRIDGE / "ReaderCodexPush.cs").read_text(
             encoding="utf-8")
-        gate = source.split("await OutboundGate.WaitAsync")[1][:1600]
-        self.assertIn("paced", gate, "间隔仍然一视同仁")
-        self.assertIn("reader-board", gate)
-        # 起语音 / 挂断 / 状态查询这三个 purpose 不该出现在放行条件里
-        for purpose in ("reader-voice-entry", "reader-voice-hangup",
-                        "reader-voice-status"):
-            self.assertNotIn(purpose, gate,
-                             purpose + " 被排进了间隔队列")
+        # 2026-09-11 第二轮：光免"间隔"不够，还得免"排队" —— 板面推送握着
+        # 那把闸做完整趟管道 I/O（连接 4s + 请求最多 12s），起语音只能等在
+        # 后面。实测 02:15 那次 29 秒里光排队就吃掉 11 秒。
+        body = source.split("private static async Task SendAsync")[1]
+        body = body[:body.index(
+            "private static async Task SendWithinGateAsync")]
+        self.assertIn("bool paced", body, "间隔仍然一视同仁")
+        # 非板面的那条要**在拿闸之前**就走掉
+        early = body.index("if (!paced)")
+        gate = body.index("OutboundGate.WaitAsync")
+        self.assertLess(early, gate, "时间敏感的推送仍然排在闸后面")
+        self.assertIn("reader-board", body)
 
 
 class ChannelChoiceTests(unittest.TestCase):

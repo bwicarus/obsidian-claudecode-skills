@@ -3669,6 +3669,10 @@ internal sealed class DirectBridgeProtocolSession
     /// </remarks>
     private static int _voiceEntryInFlight;
 
+    /// 起语音是不是正在进行中。推送侧据此判断「这次登记是不是中转」。
+    internal static bool VoiceEntryInFlight =>
+        Volatile.Read(ref _voiceEntryInFlight) == 1;
+
     /// 请求发出后还要盯多久。**Codex 往前几秒才刚被我们拉起来**
     /// （同一次 START 里 EnsureRunningAsync 干的），它的推送绑定要等自己的会话
     /// 钩子跑完才登记 —— 在那之前管道对面没人。只发一次正好落在最差的时刻：
@@ -3855,7 +3859,8 @@ internal sealed class DirectBridgeProtocolSession
                 // 所以"重试到成功"天然等价于"等 Codex 真的加载完"。
                 // ⚠ 它比窗口句柄可靠：句柄出现得比 app-tools 管道早得多，
                 // 而我们要的是后者。
-                if (ReaderCodexEndpoint.Current() is null)
+                if (ReaderCodexEndpoint.Current() is not { } live
+                    || !PipeStillExists(live.PipeName))
                 {
                     await TryEnsureChannelAsync(requestId, lifetime.Token)
                         .ConfigureAwait(false);
@@ -4227,6 +4232,39 @@ internal sealed class DirectBridgeProtocolSession
         {
             ReaderCodexPush.NoteVoiceEntryOutcome(
                 "lock", false, "锁定脚本跑不起来：" + exception.GetType().Name);
+        }
+    }
+
+    /// <summary>绑定里那条管道现在还在不在。**本地一眼就能看**。</summary>
+    /// <remarks>
+    /// ⚠ 不这么看的代价实测过：Codex 一重启管道名就变（references 第 2 条坑），
+    /// 而旧绑定要靠"连一次、等满 4 秒超时"才发现自己已经死了 —— 每一次冷启动
+    /// 都白花那 4 秒，而且它落在用户盯着按钮等的那段时间里。
+    ///
+    /// 命名管道在 Win32 里就是 `\.\pipe\` 下的一个条目，枚举它不碰 Codex、
+    /// 不发请求、几毫秒就回来。
+    /// </remarks>
+    private static bool PipeStillExists(string pipeName)
+    {
+        if (string.IsNullOrEmpty(pipeName)) return false;
+        try
+        {
+            foreach (string entry in Directory.GetFiles(@"\\.\pipe\"))
+            {
+                if (string.Equals(
+                        Path.GetFileName(entry),
+                        pipeName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        catch (Exception)
+        {
+            // 枚举不了就别据此下结论 —— 当它还在，走原来那条"失败即重建"。
+            return true;
         }
     }
 
