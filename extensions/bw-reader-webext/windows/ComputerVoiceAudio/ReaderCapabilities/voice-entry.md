@@ -8,12 +8,18 @@
 1. 跑通知里给的第一行命令。它打印一行 JSON。
 2. 看 `confirmed`：
    - `true` —— **到此为止**，不要再跑。
-   - `false` —— 把同一行**再跑一次**。
+   - `false` 且 `reason` 是 `no-desktop` —— **也到此为止，不要再跑**（见下）。
+   - `false` 其余情形 —— 把同一行**再跑一次**。
 3. 第二次仍为 `false`，跑通知里给的报错命令，然后停下。
 
 `reason` 的取值（回报时带上）：`already-active`（等同成功）、`started`、
-`cooldown`（刚跑过，稍等再看，不算失败）、`not-confirmed`、`unknown`、
-`voice-off`、`unreachable`。
+`cooldown`（刚跑过，稍等再看，不算失败）、`no-desktop`、`not-confirmed`、
+`unknown`、`voice-off`、`unreachable`。
+
+⚠ **`no-desktop` 是"根本没得试"，不是"试了没成"**（2026-09-11 加）：
+电脑锁屏或会话断开时，语音快捷键注入进去没有任何前台窗口能接住它，
+按第二次同样落空、还要再等 22 秒。这一条直接跑报错命令并停下，
+把原因说清楚（要人去解锁电脑），别把重试预算烧在等不到的东西上。
 
 ## 纪律
 

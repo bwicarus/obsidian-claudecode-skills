@@ -5917,6 +5917,34 @@ internal static class DirectBridgeSelfTest
             "direct-status-reports-codex-voice-without-side-effects",
             checks);
 
+        // 没在通话时，打字内容**不发** —— 它没有归宿。
+        //
+        // ⚠ 这条守的是"颜色和去向同源"（用户 2026-09-11 提这个功能时定的）：
+        // 前端据同一个条件决定输入框变不变绿。绿着却发去别处、或不绿却照发，
+        // 都是最坏的形态 —— 界面在暗示一件事，发送在做另一件事。
+        // 而那**正是这个输入框今天的样子**：框上写着"电脑客户端通话中…"，
+        // 打进去的字却发给阅读器助手。
+        JsonElement typedIdle = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "codex-type",
+                    requestId = "codex-type-idle",
+                    text = "这句不该被送出去",
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "codex-type");
+        Require(
+            !typedIdle.GetProperty("ok").GetBoolean()
+            && typedIdle.GetProperty("reason").GetString() == "not-in-call"
+            && transitionCount == 0
+            && app.EnsureRunningCount == 0,
+            "codex-type-refuses-to-send-when-no-call-is-live",
+            checks);
+
         JsonElement idempotent = RequireSuccess(
             await SendAsync(
                 session,
@@ -6139,6 +6167,85 @@ internal static class DirectBridgeSelfTest
             Require(
                 cooldownTransitions == 1 && !second.ShortcutSent,
                 "direct-codex-voice-shortcut-has-a-cooldown-between-presses",
+                checks);
+        }
+
+        // 桌面锁着时**不按**（2026-09-11）。F24 走 keybd_event 全局盲发，
+        // 会话锁屏/断开时没有前台窗口，按键凭空消失；而这条链会等满确认窗口
+        // 才报 not-confirmed，于是调用方一次 22 秒地重试一件等也不会成的事。
+        // 实测：连按 10 轮跨 9.5 分钟全部 not-confirmed，而应用主窗口一直在。
+        int lockedStartTransitions = 0;
+        await using (DirectCodexVoiceControl lockedControl = new(
+            () => CodexVoiceActivitySnapshot.Available(700, 800),   // 没在通话
+            (active, before, cancellationToken) =>
+            {
+                lockedStartTransitions++;
+                return Task.FromResult(before);
+            },
+            shortcutCooldown: TimeSpan.Zero,
+            inputDesktopUsable: () => false))
+        {
+            DirectCodexVoiceSetResult withheld = await lockedControl
+                .SetActiveAsync(active: true, CancellationToken.None)
+                .ConfigureAwait(false);
+            Require(
+                lockedStartTransitions == 0
+                && !withheld.ShortcutSent
+                && withheld.Withheld
+                    == DirectCodexVoiceControl.NoDesktopWithheld,
+                "direct-codex-voice-does-not-press-into-a-locked-desktop",
+                checks);
+        }
+        // 变异检验（已兑）：把上面那段守卫整条删掉，自检不是"这条红"，而是
+        // 直接抛 BW_COMPUTER_VOICE_DIRECT_VOICE_START_NOT_CONFIRMED ——
+        // 因为它真去按了、然后确认不了。那正是生产里看到的症状，
+        // 所以这段守卫挡掉的就是那个。
+
+        // 判据的三个 P/Invoke **真的通**。
+        //
+        // ⚠ 这条不是形式主义：WindowsInputDesktop.Usable() 把任何异常都当
+        // "可用"（判据坏掉不该让语音开不了），于是一个签名写错的 P/Invoke
+        // 会让整个闸门**永远不触发且毫无痕迹** —— 抛异常、被吞、返回 true、
+        // 照样按键，表现与"没装这个闸门"一模一样。所以走不吞异常的那一份，
+        // 让签名错误变成一条红检查，而不是一个安静的空操作。
+        // 不断言取值：锁屏与否取决于跑自检时这台机器的状态，
+        // 断言取值只会让它在另一种状态下假红。断言的是"调得通"。
+        bool probeCallable;
+        try
+        {
+            _ = WindowsInputDesktop.ProbeRaw();
+            probeCallable = true;
+        }
+        catch (Exception)
+        {
+            probeCallable = false;
+        }
+        Require(
+            probeCallable,
+            "windows-input-desktop-probe-actually-calls-through",
+            checks);
+
+        // ⚠ **但挂断不能被拦**。挂断走通知通道（HangUpAsync 通道优先），
+        // 那条路根本不需要桌面 —— 锁屏期间挂不掉正在计费的电话，比开不起来
+        // 严重得多。变异检验：把守卫的 `active &&` 去掉，这条必须红。
+        int lockedHangUps = 0;
+        await using (DirectCodexVoiceControl lockedHangUpControl = new(
+            () => CodexVoiceActivitySnapshot.Available(900, 0),     // 正在通话
+            (active, before, cancellationToken) =>
+            {
+                lockedHangUps++;
+                return Task.FromResult(
+                    CodexVoiceActivitySnapshot.Available(900, 1000));
+            },
+            shortcutCooldown: TimeSpan.Zero,
+            inputDesktopUsable: () => false))
+        {
+            _ = await lockedHangUpControl
+                .SetActiveAsync(active: false, CancellationToken.None)
+                .ConfigureAwait(false);
+            Require(
+                lockedHangUps == 1,
+                "direct-codex-voice-still-hangs-up-while-desktop-is-locked",
                 checks);
         }
 
@@ -15010,6 +15117,142 @@ internal static class DirectBridgeSelfTest
             "start-voice-once-distinguishes-cooldown-from-failure",
             checks);
 
+        // ⚠ 这里原来有两条断言 ThreadCreatedAtUtc 的检查。那个判据挪进了
+        // codex_channel.py（landed_voice_thread / _thread_created_ms），
+        // 覆盖也跟着挪到 tests/test_voice_entry.py —— 留在这里会变成
+        // 断言一段没人调用的代码，那比没有测试更误导人。
+
+        // 租约写不进去**不能**把桥弄死。
+        //
+        // ⚠ 2026-09-11 实测事故：AtomicWriteAsync 的 File.Move 抛
+        // UnauthorizedAccessException，一路冒到 DirectBridgeServer.RunAsync，
+        // 整个语音服务退出、被守护拉起；拉起之后队列里那条入口指令又被执行
+        // 一次 —— 于是"挂断几秒后语音自己又回来了"。日志里 heartbeat 失败
+        // 刷了几百行，服务反复 start。
+        //
+        // Windows 上 File.Move(overwrite) 要先删掉目标，任何一个没带
+        // FILE_SHARE_DELETE 打开它的读者都会让这步失败 —— 包括随手 cat 一下
+        // 这个文件的人。所以这里就用一个普通读句柄复现那个局面。
+        string leaseRoot = Path.Combine(
+            Path.GetTempPath(),
+            "bw-lease-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(leaseRoot);
+        try
+        {
+            string leasePath = Path.Combine(
+                leaseRoot, "computer-voice-direct.service.json");
+            await File.WriteAllTextAsync(leasePath, "{}")
+                .ConfigureAwait(false);
+            DirectServiceLease lease = new(
+                leasePath,
+                4242,
+                Environment.ProcessPath ?? Path.Combine(leaseRoot, "x.exe"),
+                Path.Combine(leaseRoot, "config.json"),
+                DateTimeOffset.UtcNow);
+            bool survived;
+            using (FileStream hold = new(
+                leasePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                try
+                {
+                    await lease.WriteAsync(CancellationToken.None)
+                        .ConfigureAwait(false);
+                    survived = true;
+                }
+                catch (Exception)
+                {
+                    survived = false;
+                }
+            }
+            Require(
+                survived,
+                "lease-write-does-not-kill-the-bridge-when-file-is-held",
+                checks);
+        }
+        finally
+        {
+            try { Directory.Delete(leaseRoot, recursive: true); }
+            catch (Exception) { }
+        }
+
+        // 起来了就必须把通道锁到通话那条 —— **而且只在起来时锁**。
+        //
+        // ⚠ 2026-09-11 15:19 实测的洞：这条一次性入口按完就返回，锁定只长在
+        // 入口重试循环里，于是经由它起来的通话，通道留在**上一条**对话上 ——
+        // 通话在 01a08c64-e9a1、绑定还是 01a08eb9-a174，板面推送一条都没落进
+        // 通话那条（8 → 8），而账本里连一行 lock 都没有，所以这件事以前
+        // 从账本上完全看不出来。用户早报过这个症状：
+        // 「打开语音后也没有在这个语音的对话里建立通道」。
+        Action<string, DateTime> originalRelock =
+            ReaderCodexEndpoint.RelockAfterStart;
+        try
+        {
+            int relocks = 0;
+            ReaderCodexEndpoint.RelockAfterStart = (_, _) => relocks++;
+
+            ReaderCodexEndpoint.ConfigureVoiceControl(
+                new RecordingCodexVoiceControl(
+                    active: true, shortcutSent: true));
+            _ = await InvokeStartVoiceOnceAsync().ConfigureAwait(false);
+            int afterStarted = relocks;
+
+            // 本来就在通话：通道同样该指向它（否则板面推给一条没在讲话的）。
+            ReaderCodexEndpoint.ConfigureVoiceControl(
+                new RecordingCodexVoiceControl(
+                    active: true, shortcutSent: false));
+            _ = await InvokeStartVoiceOnceAsync().ConfigureAwait(false);
+            int afterAlready = relocks;
+
+            // 没起来的三种：都**不该**去锁 —— 没有通话可锁，锁了就是把板面
+            // 推给一条没在讲话的对话。
+            foreach (string withheld in new[]
+                     {
+                         DirectCodexVoiceControl.CooldownWithheld,
+                         DirectCodexVoiceControl.NoDesktopWithheld,
+                     })
+            {
+                ReaderCodexEndpoint.ConfigureVoiceControl(
+                    new RecordingCodexVoiceControl(
+                        active: false, shortcutSent: false,
+                        withheld: withheld));
+                _ = await InvokeStartVoiceOnceAsync().ConfigureAwait(false);
+            }
+            Require(
+                afterStarted == 1
+                && afterAlready == 2
+                && relocks == 2,
+                "start-voice-once-relocks-channel-only-when-a-call-is-live",
+                checks);
+        }
+        finally
+        {
+            ReaderCodexEndpoint.RelockAfterStart = originalRelock;
+        }
+
+        // 桌面锁着挡下：同样"没按也没开"，但它跟冷却**必须报得不一样** ——
+        // 冷却是"稍等再看"，锁屏是"等也没用，去解锁"。
+        //
+        // ⚠ 这条防的是回归到"推断原因"：端点原来写着「没按且没开 = 冷却」，
+        // 于是锁屏会被静默报成 cooldown，调用方照着稍等再试，永远等不到。
+        // 变异检验：把端点的 `result.Withheld ?? cooldown` 改回常量 "cooldown"，
+        // 这条必须红。
+        ReaderCodexEndpoint.ConfigureVoiceControl(
+            new RecordingCodexVoiceControl(
+                active: false,
+                shortcutSent: false,
+                withheld: DirectCodexVoiceControl.NoDesktopWithheld));
+        JsonObject locked = await InvokeStartVoiceOnceAsync()
+            .ConfigureAwait(false);
+        Require(
+            locked["reason"]?.GetValue<string>()
+                == DirectCodexVoiceControl.NoDesktopWithheld
+            && locked["pressed"]?.GetValue<bool>() == false
+            && locked["confirmed"]?.GetValue<bool>() == false
+            // 说得出该做什么才算说清楚 —— 不然它跟 cooldown 在界面上一样。
+            && (locked["detail"]?.GetValue<string>() ?? "").Contains("解锁"),
+            "start-voice-once-reports-locked-desktop-not-cooldown",
+            checks);
+
         // 台账读不到 = 不知道，不是没在通话。分开报，调用方才知道该不该再试。
         ReaderCodexEndpoint.ConfigureVoiceControl(
             new RecordingCodexVoiceControl(
@@ -15065,15 +15308,18 @@ internal static class DirectBridgeSelfTest
         private readonly bool _active;
         private readonly bool _shortcutSent;
         private readonly Exception? _failure;
+        private readonly string? _withheld;
 
         internal RecordingCodexVoiceControl(
             bool active,
             bool shortcutSent,
-            Exception? failure = null)
+            Exception? failure = null,
+            string? withheld = null)
         {
             _active = active;
             _shortcutSent = shortcutSent;
             _failure = failure;
+            _withheld = withheld;
         }
 
         internal List<bool> SetActiveCalls { get; } = new();
@@ -15096,7 +15342,8 @@ internal static class DirectBridgeSelfTest
             }
             return Task.FromResult(new DirectCodexVoiceSetResult(
                 ReadState(),
-                _shortcutSent));
+                _shortcutSent,
+                _withheld));
         }
 
         public Task<DirectCodexVoiceSetResult> SetKeepActiveAsync(

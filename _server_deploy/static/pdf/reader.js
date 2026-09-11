@@ -11305,7 +11305,7 @@ async function _connProbe() {
     '#asst-fab{position:fixed;right:14px;bottom:90px;z-index:115;width:50px;height:50px;border-radius:50%;border:none;' +
     'background:#2563eb;color:#fff;font-size:24px;box-shadow:0 6px 18px rgba(0,0,0,.4);cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent}' +
     '#asst-fab:active{transform:scale(.92)}' +
-    '#side-pane-asst.active{display:flex;flex-direction:column;overflow:hidden;height:100%}' +
+    '#side-pane-asst.active{display:flex;flex-direction:column;overflow:hidden;height:100%;padding-bottom:var(--rc-kb,0px);box-sizing:border-box;transition:padding-bottom .18s}' +
     '#asst-thread{flex:1 1 auto;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px;-webkit-overflow-scrolling:touch;min-width:0;min-height:0;max-width:100%;box-sizing:border-box;overscroll-behavior:contain;touch-action:pan-y}' +   // contain+pan-y:滚到头不把滚动链漏给底下 PDF(否则阅读器在浮层下偷偷滚→IO 渲页=卡)
     // Flex 子项默认 min-width:auto，会按连续代码串的 min-content 宽度撑破气泡；清零后再用
     // overflow-wrap:anywhere 处理无空格 ID/日文/卡片标记。pre 保留格式并以自身横滚作最后兜底。
@@ -12618,6 +12618,35 @@ async function _connProbe() {
   function autorow() { ta.style.height = 'auto'; ta.style.height = Math.min(120, ta.scrollHeight) + 'px'; }
   ta.addEventListener('input', autorow);
   ta.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (streaming) return; micStop(); var v = ta.value; ta.value = ''; autorow(); send(v); } });
+  // ── iOS 键盘避让（与 rc-assistant.js 同一份做法，见那边的长注释）──
+  // ⚠ **这是第二份活的助手面板**（PDF 阅读器自己那套）。同一个症状要在两处
+  //    都修：只修一处的表现是"某些书里黑边没了、另一些还在"，
+  //    而那种局部好转最难被认成"还没修完"。
+  (function _keyboardGuard() {
+    var vv = window.visualViewport;
+    if (!vv) return;
+    var focused = false;
+    function apply() {
+      var root = document.documentElement;
+      if (!focused) { root.style.removeProperty('--rc-kb'); return; }
+      var hidden = window.innerHeight - vv.height - vv.offsetTop;
+      hidden = Math.max(0, Math.round(hidden));
+      root.style.setProperty('--rc-kb', hidden + 'px');
+      if (vv.offsetTop > 0) { try { window.scrollTo(0, 0); } catch (e) {} }
+      try {
+        var se = document.scrollingElement;
+        if (se && se.scrollTop > 0) se.scrollTop = 0;
+      } catch (e) {}
+    }
+    ta.addEventListener('focus', function () {
+      focused = true;
+      setTimeout(apply, 60); setTimeout(apply, 220); setTimeout(apply, 500);
+    });
+    ta.addEventListener('blur', function () { focused = false; apply(); });
+    vv.addEventListener('resize', apply);
+    vv.addEventListener('scroll', apply);
+  })();
+
   sendBtn.addEventListener('click', function () {
     if (streaming) { try { _abort && _abort.abort(); } catch (_) {} return; }   // 流式中点 ■ → 中止本轮
     micStop(); var v = ta.value; ta.value = ''; autorow(); send(v);

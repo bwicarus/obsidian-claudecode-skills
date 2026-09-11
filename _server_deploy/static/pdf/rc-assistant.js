@@ -889,7 +889,7 @@
     'background:#2563eb;color:#fff;font-size:24px;box-shadow:0 6px 18px rgba(0,0,0,.4);cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent}' +
     '#asst-fab:active{transform:scale(.92)}' +
     '#side-pane-asst{position:relative}' +
-    '#side-pane-asst.active{display:flex;flex-direction:column;overflow:hidden;height:100%}' +
+    '#side-pane-asst.active{display:flex;flex-direction:column;overflow:hidden;height:100%;padding-bottom:var(--rc-kb,0px);box-sizing:border-box;transition:padding-bottom .18s}' +
     '#asst-thread{flex:1 1 0;overflow-y:auto;padding:12px 12px 12px 30px;display:flex;flex-direction:column;gap:10px;-webkit-overflow-scrolling:touch;min-width:0;min-height:0;max-width:100%;box-sizing:border-box;overscroll-behavior:contain;touch-action:pan-y;scrollbar-width:none}' +   // 0 basis:历史消息再长也只在自己的滚动区内计算，不反向挤压复习区滑块
     '#asst-thread::-webkit-scrollbar,#asst-ta::-webkit-scrollbar,.ams-mask *::-webkit-scrollbar{width:0;height:0;display:none}' +
     '#asst-ta,.ams-mask *{scrollbar-width:none}' +
@@ -3174,6 +3174,47 @@
   function autorow() { ta.style.height = 'auto'; ta.style.height = Math.min(120, ta.scrollHeight) + 'px'; }
   ta.addEventListener('input', autorow);
   ta.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (streaming || _clearing) return; micStop(); var v = ta.value; ta.value = ''; autorow(); send(v); } });
+  // ── iOS 键盘避让：别让整页被顶上去、底下露出黑带（用户 2026-09-11 截图）──
+  //
+  // 症状：点输入框 → 整个画面向上抬起，底部留下一条黑边。
+  // 成因是 iOS 的做法：软键盘弹出时**不缩小 layout viewport**，而是把整页
+  // 往上推（visualViewport.offsetTop > 0）。页面自己没有可滚区域时，
+  // 被推走那块下面露出来的就是 body 底色 —— 那条黑边。
+  //
+  // 两件事一起做，缺一条都还会露：
+  //   ① 把页面按回原位（scrollTo + scrollingElement.scrollTop 都要，iOS 上
+  //      两者不总是同一个东西）；
+  //   ② 用 visualViewport 量出键盘挡住多高，垫在面板底部 —— 输入框靠
+  //      **面板让位**浮到键盘之上，而不是靠"把整页推上去"。
+  //
+  // ⚠ 只在输入框真的有焦点时生效，失焦立刻撤掉：键盘高度是个临时状态，
+  //    留着会让面板永远短一截。没有 visualViewport 的浏览器一概不动。
+  (function _keyboardGuard() {
+    var vv = window.visualViewport;
+    if (!vv) return;
+    var focused = false;
+    function apply() {
+      var root = document.documentElement;
+      if (!focused) { root.style.removeProperty('--rc-kb'); return; }
+      var hidden = window.innerHeight - vv.height - vv.offsetTop;
+      hidden = Math.max(0, Math.round(hidden));
+      root.style.setProperty('--rc-kb', hidden + 'px');
+      if (vv.offsetTop > 0) { try { window.scrollTo(0, 0); } catch (e) {} }
+      try {
+        var se = document.scrollingElement;
+        if (se && se.scrollTop > 0) se.scrollTop = 0;
+      } catch (e) {}
+    }
+    ta.addEventListener('focus', function () {
+      focused = true;
+      // 键盘是动画弹出的：量一次不够，量到它停下来为止。
+      setTimeout(apply, 60); setTimeout(apply, 220); setTimeout(apply, 500);
+    });
+    ta.addEventListener('blur', function () { focused = false; apply(); });
+    vv.addEventListener('resize', apply);
+    vv.addEventListener('scroll', apply);
+  })();
+
   sendBtn.addEventListener('click', function () {
     if (_clearing) return;
     if (streaming) { try { _abort && _abort.abort(); } catch (_) {} return; }   // 流式中点 ■ → 中止本轮

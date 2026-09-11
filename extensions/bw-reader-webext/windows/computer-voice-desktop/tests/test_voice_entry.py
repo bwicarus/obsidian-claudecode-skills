@@ -278,6 +278,68 @@ class StartStepTests(unittest.TestCase):
                                sleeper=lambda _s: None)
             self.assertEqual(result["reason"], reason)
 
+    def test_thread_id_carries_its_own_creation_time(self):
+        """线程 id 是 UUIDv7：前 48 位就是创建毫秒。
+
+        纠正链的那条例外全靠它 —— 只有"本次请求之后新建的语音对话"才算落错，
+        用户手动在旧对话里开的语音不产生新会话文件，于是结构上不会被搬走。
+
+        期望值不是算出来的，是对着落盘 session_meta 核过的（2026-09-11）：
+          01a08e6a-b913… → meta 写的是 2026-09-11T03:02:34.003Z
+          01a08c6f-b82e… → meta 写的是 2026-09-10T17:48:47.022Z
+        """
+        self.assertEqual(
+            CHANNEL._thread_created_ms(
+                "01a08e6a-b913-75e0-adcc-8dfae6e82da0"),
+            1789095754003)
+        self.assertEqual(
+            CHANNEL._thread_created_ms(
+                "01a08c6f-b82e-7953-b2aa-2deb02265dba"),
+            1789062527022)
+        # 判不出来要说"不知道"（0），不能瞎给一个时刻 ——
+        # 拿猜的时刻去决定搬不搬，比不搬危险得多。
+        for bad in ("", "短", "zzzzzzzzzzzz-0000", "ffffffffffff-ffff"):
+            self.assertEqual(CHANNEL._thread_created_ms(bad), 0, bad)
+
+    def test_landed_thread_only_counts_new_voice_chats(self):
+        """只认**本次之后新建**且 thread_source 是 voice_chat 的那条。
+
+        ⚠ 那个时间窗里也会冒出别的会话（实测 12:02:21 有一条 automation），
+        认错了会把通话搬去一条根本不是语音的对话。
+        """
+        self.assertEqual(CHANNEL.landed_voice_thread(0), "")
+        self.assertEqual(CHANNEL.landed_voice_thread(-1), "")
+        # 未来时刻：不可能有"之后新建"的，必须空
+        future = 4_000_000_000_000
+        self.assertEqual(CHANNEL.landed_voice_thread(future), "")
+
+    def test_locked_desktop_is_told_apart_from_try_again(self):
+        """`no-desktop` 是"根本没得试"，退出码要跟"这次没成"分开。
+
+        2026-09-11 实测：电脑锁屏时语音快捷键注入进去没有前台窗口能接住，
+        冷启动后每 30 秒按一次、连按 10 轮跨 9.5 分钟全部 not-confirmed，
+        而 Codex 主窗口一直在。这类局面里"再按一次"确定无效、每次还要烧
+        22 秒确认窗口，最后把"两次不成就放弃"的预算用光 —— 于是真正该说的
+        那句话（去解锁电脑）永远说不出来。
+
+        ⚠ 这条同时守那张**四副本**的 reason 词汇表：漏掉脚本这一份，
+        桥新报的 `no-desktop` 会被当成"没说清"记成 unexpected-reply，
+        真实原因就此丢掉，而账本看上去还在正常记录。
+        """
+        self.assertIn("no-desktop", STEP.BRIDGE_REASONS)
+        self.assertIn("no-desktop", STEP.NO_POINT_RETRYING)
+        # 词汇表里其余的都不该被当成"别再试"——尤其 cooldown 是"稍等再看"。
+        self.assertNotIn("cooldown", STEP.NO_POINT_RETRYING)
+        self.assertNotIn("not-confirmed", STEP.NO_POINT_RETRYING)
+        result = self._run(
+            {"ok": False, "confirmed": False, "reason": "no-desktop",
+             "detail": "电脑锁屏，解锁后再试"},
+            sleeper=lambda _s: None)
+        self.assertEqual(result["reason"], "no-desktop")
+        self.assertFalse(result["confirmed"])
+        # 只问了一次：不该在这上面反复重试。
+        self.assertEqual(len(self.sent), 1)
+
     def test_bridge_being_down_does_not_burn_the_attempt(self):
         """桥暂时不在，不该把「两次机会」用掉。
 
@@ -856,6 +918,11 @@ class SilenceContractTests(unittest.TestCase):
         '"用户预先设定的自动关闭规则触发了："': "OperationSilenceLine",
         '"状态查询（requestId: "': "OperationSilenceLine",
         '"指定操作（requestId: "': "OperationSilenceLine",
+        # ⚠ 唯一**故意不挂纪律**的一条（2026-09-11 用户提的"输入框直达通话"）：
+        #   其余五条是状态同步或运维指令，所以要求对面"不要在通话里念出来"；
+        #   而这一条**是他在说话**，要的就是对面像他开口一样正常回答。
+        #   给它挂上纪律的后果是最难查的那种：送到了，对面却按纪律故意不吭声。
+        '"来自用户："': None,
     }
 
     def test_every_outbound_message_carries_the_rule(self):
@@ -865,6 +932,14 @@ class SilenceContractTests(unittest.TestCase):
             self.assertNotEqual(where, -1, "找不到外发文本：%s" % anchor)
             # 纪律必须在这段文本**之前**的 200 字内拼进去。
             head = source[max(0, where - 200):where]
+            if constant is None:
+                # 故意没有纪律的那条要**反过来钉住**：哪天有人顺手给它补上
+                # 静默纪律，这条会红 —— 而不是悄悄变成"送到了却没人吭声"。
+                for silence in ("BoardSilenceLine", "OperationSilenceLine"):
+                    self.assertNotIn(
+                        silence, head,
+                        "这条本该没有静默纪律：%s" % anchor)
+                continue
             self.assertIn(
                 constant, head,
                 "这条外发文本没挂纪律：%s" % anchor)
@@ -1041,9 +1116,10 @@ class BoardFollowsTheCallTests(unittest.TestCase):
         # 两侧的目标**故意不同**：
         #   · 板子 / 挂断 / 状态 → 活着的通话（没有就退回绑定）
         #   · 指定操作           → 最近那条语音对话（lastGood，不加在通话守卫）
+        #   · 用户打字             → 正在通话的那条（读不到才退回绑定）
         self.assertEqual(
-            push.count("threadIdOverride:"), 5,
-            "带目标线程的外发不是五条了 —— 先数清楚再改")
+            push.count("threadIdOverride:"), 6,
+            "带目标线程的外发不是六条了 —— 先数清楚再改")
 
     def test_the_entry_goes_to_the_latest_voice_chat_not_the_binding(self):
         """入口要发给**最近那条语音对话** —— F24 续的就是它。

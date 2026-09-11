@@ -853,6 +853,9 @@ if (window.__bwPwaProviderOnly) return;
       // 内嵌形态:活在侧栏输入框上方(不再 fixed 右下角)
       '#rc-vc.vc-inline{display:none !important}' +   // 66 用户裁定:输入框上方的通话条残留版面撤除(状态看按钮/字幕;对话在侧栏流)
       '#asst-input.vc-live{box-shadow:0 0 0 1.5px rgba(94,92,230,.6),0 0 16px rgba(94,92,230,.22);border-radius:14px;transition:box-shadow .3s}' +
+      // 绿光 = 打字直达**电脑那通**（用户 2026-09-11 定的颜色）。
+      // 跟上面的紫光是同一族状态：颜色说的是「这个框现在通向谁」。
+      '#asst-input.vc-pc{box-shadow:0 0 0 1.5px rgba(52,199,89,.65),0 0 16px rgba(52,199,89,.24);border-radius:14px;transition:box-shadow .3s}' +
       // 侧栏 composer 里的通话入口按钮(样式镜像 #asst-mic;通话中绿色呼吸)
        '#asst-call,#asst-computer{background:#16203a;border:1px solid #2a3a63;color:#9fb4e0;width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
        '#asst-call:active,#asst-computer:active{transform:scale(.9)}' +
@@ -956,7 +959,17 @@ if (window.__bwPwaProviderOnly) return;
   }
   function taPlaceholder(v) {
     var ta = taEl(); if (!ta) return;
-    if (v == null) { if (_origPh !== null) ta.placeholder = _origPh; return; }
+    if (v == null) {
+      // ⚠ 恢复原 placeholder = 这个框不再通向通话，绿光必须同时灭。
+      // 灭灯放在这一处、而不是逐个调用点补一句：taPlaceholder(null) 有十处，
+      // 漏掉任何一处都会留下"绿着却发给助手"——正是要消灭的那种形态。
+      try {
+        var _ai3 = document.getElementById('asst-input');
+        if (_ai3) _ai3.classList.remove('vc-pc');
+      } catch (e) {}
+      if (_origPh !== null) ta.placeholder = _origPh;
+      return;
+    }
     if (_origPh === null) _origPh = ta.placeholder || '';
     ta.placeholder = v;
   }
@@ -4984,8 +4997,39 @@ if (window.__bwPwaProviderOnly) return;
     return id;
   }
   function _recFinish() { return _rec.oab ? _recId() : _recFinishLegacy(); }
+  // 电脑那通：打字直达**正在通话的那条 Codex 对话**（用户 2026-09-11）。
+  //
+  // ⚠ 这里必须**同步返回 true**（消费掉），而真正的送达是异步的 ——
+  // 所以成没成一律回显到侧栏。通道这条链本来就没有界面，
+  // 发了什么、到没到，不写出来就等于没发生过。
+  //
+  // ⚠ 回显用 note 而不是聊天气泡：对面的回答在 Codex 里，侧栏看不到。
+  // 摆成气泡会暗示"等回答"，而那个回答永远不会出现在这里。
+  function _pcTypedSend(text) {
+    var api = window.RC && RC.computerVoice;
+    if (!api || typeof api.sendTyped !== 'function') return false;
+    if (typeof api.isActive === 'function' && !api.isActive()) return false;
+    if (!_audioRouteConnected) return false;
+    var shown = String(text || '');
+    if (shown.length > 60) shown = shown.slice(0, 60) + '…';
+    try { threadMsg('asst-note', '→ 已发进通话：' + shown); } catch (e) {}
+    try {
+      api.sendTyped(text).then(function (r) {
+        if (r && r.ok) return;
+        var why = (r && (r.detail || r.reason)) || '没送到';
+        try { threadMsg('asst-note', '⚠ 这句没发进通话：' + why); } catch (e) {}
+      }).catch(function (error) {
+        try {
+          threadMsg('asst-note', '⚠ 这句没发进通话：'
+            + String((error && error.message) || error || '?').slice(0, 80));
+        } catch (e) {}
+      });
+    } catch (e) { return false; }
+    return true;
+  }
+
   window.__vcSendText = function (text) {   // 66:侧栏输入框在 2.1(WebRTC)通话中打字直达实时模型(rc-assistant send 拦截调用)
-    if (!(_rtc.on && ws && mode === 's2s')) return false;
+    if (!(_rtc.on && ws && mode === 's2s')) return _pcTypedSend(text);
     try {
       try { window.__asstVoiceMsg && window.__asstVoiceMsg('u', text); } catch (e) {}
       try { capUser(text); } catch (e) {}
@@ -9666,11 +9710,20 @@ if (window.__bwPwaProviderOnly) return;
       computerBtnConnecting(false);
       computerBtnOn(true);
       taPlaceholder('电脑客户端通话中…');
+      // 绿光与"打字去哪"同源：两者都看 isActive() + 音频通道通没通。
+      try {
+        var _ai2 = document.getElementById('asst-input');
+        if (_ai2) _ai2.classList.add('vc-pc');
+      } catch (e) {}
       return;
     }
     // 通道通了但通话没起来：继续黄闪并说清差哪一步（梯子那侧会写文案）。
     computerBtnOn(false);
     computerBtnConnecting(true);
+    try {
+      var _ai4 = document.getElementById('asst-input');
+      if (_ai4) _ai4.classList.remove('vc-pc');
+    } catch (e) {}
     taPlaceholder('音频通道已通，等语音接通…');
   }
 

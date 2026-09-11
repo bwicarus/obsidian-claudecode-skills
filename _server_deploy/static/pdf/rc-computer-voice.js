@@ -12325,6 +12325,29 @@
     });
   }
 
+  // 把用户在侧栏输入框里打的字，送进**正在进行的那通电脑语音**。
+  //
+  // 用户 2026-09-11：「电脑语音模式时的输入框其实一直都没有设计和利用起来过，
+  // 现在既然已经有了稳定的注入内容的途径，就可以把这个输入框利用起来了」。
+  // 而它现在比"闲置"更糟：框上写着"电脑客户端通话中…"，打进去的字却照常
+  // 发给阅读器助手（另一个 AI）—— 界面在暗示一件事，发送在做另一件事。
+  //
+  // ⚠ 只在**通话真的活着**时受理。桥那侧同样要求在通话中（codex-type 会回
+  // not-in-call），两边同源：输入框变不变绿、字发不发得出去，是同一个条件。
+  function sendTypedToCall(text) {
+    var body = String(text == null ? "" : text).trim();
+    if (!body) return Promise.resolve({ ok: false, reason: "empty" });
+    var state = active;
+    if (!state || state.stopped || !directChannelLive(state.channel)) {
+      return Promise.resolve({ ok: false, reason: "not-linked" });
+    }
+    return state.channel.request(
+      "codex-type",
+      { text: body.slice(0, 4000) },
+      15000
+    );
+  }
+
   function stop(reason) {
     var state = active;
     active = null;
@@ -13132,6 +13155,7 @@
     registerComputerButton: registerComputerButton,
     registerPhoneButton: registerPhoneButton,
     startFromUserGesture: startFromUserGesture,
+    sendTyped: sendTypedToCall,
     stop: stop,
     isActive: function () { return !!active; },
     onStatus: function (listener) {

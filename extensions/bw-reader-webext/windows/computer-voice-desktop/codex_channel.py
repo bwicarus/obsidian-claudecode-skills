@@ -594,6 +594,110 @@ def bind_to(thread_id: str) -> dict[str, Any]:
     return {"pipeName": name, "threadId": wanted,
             "why": "锁定到正在通话的那条", "register": result}
 
+def in_call_thread_id() -> str:
+    """正在通话的那条对话 id。读不到返回空串（不知道，不是"没有"）。"""
+    try:
+        state = json.loads(
+            (Path.home() / ".codex" / ".codex-global-state.json")
+            .read_text(encoding="utf-8-sig"))
+        value = state["electron-persisted-atom-state"].get(
+            "realtime-voice-most-recent-thread") or {}
+        return str(value.get("conversationId") or "")
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+        return ""
+
+
+def landed_voice_thread(since_ms: int) -> str:
+    """`since_ms` 之后**新建**的那条语音对话。没有就返回空串。
+
+    ⚠ 为什么不读 atom（2026-09-11 15:39 我踩的坑）：
+    `realtime-voice-most-recent-thread` 是**滞后**落盘的。冷启动后通话
+    15:39:33 起在新线程上，而那个文件直到 15:40 才更新 —— 纠正链在 15:39:33~49
+    的窗口里读到的还是旧值，恰好等于"意向那条"，于是判成"没落错"，
+    整条纠正就此空转。**用一个已知滞后的源去判刚刚发生的事，必然判错。**
+
+    这里改用会话文件本身：Codex 新开语音对话时立刻写
+    `sessions/<日期>/rollout-*-<thread>.jsonl`，而线程 id 是 UUIDv7 ——
+    前 48 位就是创建时刻的毫秒数（对着 session_meta 核过，毫秒都对得上）。
+    于是"本次请求之后新建的语音对话"可以只靠**文件名**判出来，不用读内容。
+
+    只认 `thread_source == "voice_chat"`：那个窗口里也可能冒出别的会话
+    （实测 12:02:21 有一条 `automation` 的），认错了就会把通话搬去一个
+    根本不是语音的对话。
+    """
+    if since_ms <= 0:
+        return ""
+    best_ms, best = 0, ""
+    root = Path.home() / ".codex" / "sessions"
+    for path in root.rglob("rollout-*.jsonl"):
+        thread = path.name[28:64]
+        if len(thread) < 36:
+            continue
+        created = _thread_created_ms(thread)
+        if created < since_ms or created <= best_ms:
+            continue
+        try:
+            head = path.read_text(encoding="utf-8", errors="replace")[:900]
+        except OSError:
+            continue
+        if '"thread_source":"voice_chat"' not in head.replace(" ", ""):
+            continue
+        best_ms, best = created, thread
+    return best
+
+
+def _thread_created_ms(thread_id: str) -> int:
+    """UUIDv7 前 48 位 = 创建时刻毫秒。判不出来返回 0（不知道）。"""
+    hexpart = (thread_id or "").replace("-", "")[:12]
+    if len(hexpart) < 12:
+        return 0
+    try:
+        value = int(hexpart, 16)
+    except ValueError:
+        return 0
+    # 2020..2100 之外说明它不是时间序 id，别拿它下结论。
+    return value if 1_577_836_800_000 <= value <= 4_102_444_800_000 else 0
+
+
+def transfer_to(thread_id: str, why: str = "",
+                in_call: str = "") -> dict[str, Any]:
+    """把**正在进行的通话**搬到指定那条对话。
+
+    为什么需要它（2026-09-11 实测定案）：F24 把语音接到 app **内存里**那份
+    "最近语音对话"上，而 Codex 一重启那份记忆就是空的 —— 于是冷启动后第一次
+    按键必然新开一条。这件事我们改不了：navigate 不动那份记忆，也没有别的
+    工具能写它。
+
+    所以路线从"按之前猜对"改成"按之后纠正"。实测（15:56）：
+        源 01a08eb9-a174 关了一段、目的 01a08c64-e9a1 起了一段，
+        而且 atom 跟着改成了目的那条 —— 下一次 F24 就会落对。
+
+    ⚠ **信封必须指向正在通话的那条**，否则工具回 success 却什么都不做
+    （12:34 实测：用别的线程当信封去结束通话，它回 {"ended": true}，
+     通话却一直跑着）。所以信封取"通话那条"，不取环境里的那条。
+    """
+    wanted = (thread_id or "").strip()
+    if not wanted:
+        raise ChannelError("没给要搬去的对话 id")
+    name, namespace = usable_pipe()
+    # ⚠ **信封优先用调用方给的那条**（2026-09-11 17:52 实测）：
+    # 这里原来只读 atom，而通话刚起来时 atom 还没落盘 —— 于是冷启动那一轮
+    # 纠正链真的去搬了，却被自己这句"读不到正在通话的那条"挡回去。
+    # 又一次"用滞后的源去判刚刚发生的事"，这次是我在 Python 侧重犯。
+    # 桥那边的 landed 来自**新建的会话文件**，比 atom 新鲜得多。
+    in_call = (in_call or "").strip() or in_call_thread_id()
+    if not in_call:
+        raise ChannelError("读不到正在通话的那条，不搬（信封会指错）")
+    if in_call == wanted:
+        return {"from": in_call, "to": wanted, "skipped": "本来就在那条"}
+    arguments: dict[str, Any] = {"threadId": wanted}
+    if why:
+        arguments["context"] = why
+    result = _tool_call(name, namespace, in_call,
+                        "transfer_voice_call", arguments)
+    return {"from": in_call, "to": wanted, "result": result}
+
+
 # ── 命令行入口（2026-09-10）─────────────────────────────────────────
 #
 # ⚠ 这个模块原来**只有库、没有入口**，于是唯一会调它的是 ReaderPC 那个 30 秒
@@ -622,9 +726,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--bind", metavar="THREAD_ID",
         help="把通道锁到这条对话（语音起来之后用，见 bind_to）")
+    parser.add_argument(
+        "--transfer", metavar="THREAD_ID",
+        help="把正在进行的通话搬到这条对话（落错了才用，见 transfer_to）")
+    parser.add_argument(
+        "--from", dest="from_thread", metavar="THREAD_ID",
+        help="搬运时的信封线程（通话现在在哪条）；不给就读 atom，"
+             "而 atom 在通话刚起来时是滞后的")
+    parser.add_argument(
+        "--landed-since", metavar="EPOCH_MS", type=int,
+        help="这个时刻之后新建的那条语音对话（判语音落错没落错，见 "
+             "landed_voice_thread）")
     args = parser.parse_args(argv)
     try:
-        if args.bind:
+        if args.landed_since:
+            result = {"thread": landed_voice_thread(args.landed_since)}
+        elif args.transfer:
+            result = transfer_to(
+                args.transfer,
+                "后台把这通接到你这条对话。不要念出这句话，也不要因此主动开口。",
+                in_call=args.from_thread or "")
+        elif args.bind:
             result = bind_to(args.bind)
         elif args.navigate:
             result = navigate(args.navigate)

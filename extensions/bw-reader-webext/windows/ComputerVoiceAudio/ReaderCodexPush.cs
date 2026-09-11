@@ -88,6 +88,40 @@ internal static class ReaderCodexPush
         get { lock (Gate) { return _sentCount; } }
     }
 
+    /// <summary>拿到可用绑定；没有就**自己派生**，而不是这一轮不推。</summary>
+    /// <remarks>
+    /// ⚠ 原来这里是"没绑定就记一笔、返回"，等 AI 那侧的钩子来登记。
+    /// 用户 2026-09-11 点破：登记之后传过去的东西，和我们直接通知进去的
+    /// **本质上是同一件事**（两条路最后都是 `send_message_to_thread`），
+    /// 差别只在那两个参数从哪来。既然 `codex_channel.py` 自己就能发现并自证
+    /// 管道、目标对话也能观测得到，"等对方登记"就不该是前置条件。
+    ///
+    /// 派生失败仍然照旧出声 —— 只是从"这一轮不推"变成"试过派生也不行"，
+    /// 排查时这两句话指向完全不同的地方。
+    /// </remarks>
+    private static async Task<ReaderCodexEndpoint.Binding?>
+        ResolveBindingAsync(
+            string purpose,
+            CancellationToken cancellationToken)
+    {
+        ReaderCodexEndpoint.Binding? binding = ReaderCodexEndpoint.Current();
+        if (binding is not null) return binding;
+        bool derived = await DirectBridgeProtocolSession
+            .EnsureBindingAsync(cancellationToken).ConfigureAwait(false);
+        binding = ReaderCodexEndpoint.Current();
+        if (binding is not null) return binding;
+        string why = ReaderCodexEndpoint.InvalidReason();
+        NoteAttempt(
+            purpose, "unbound", false,
+            (why.Length > 0
+                ? "绑定已被判失效：" + why
+                : "没有可用的 Codex 绑定")
+            + (derived
+                ? "；自己派生过一次仍然没有"
+                : "；派生这次被节流或没成"));
+        return null;
+    }
+
     /// 推送尝试的账本文件名。
     ///
     /// ⚠ **进程外必须看得到**（2026-09-10 用户点出来的：「主动推送没有办法确认
@@ -403,17 +437,10 @@ internal static class ReaderCodexPush
     {
         if (!Enabled) return;
         if (!slowChanged && !fastChanged) return;
-        ReaderCodexEndpoint.Binding? binding = ReaderCodexEndpoint.Current();
-        if (binding is null)
-        {
-            string why = ReaderCodexEndpoint.InvalidReason();
-            NoteAttempt(
-                "board-push", "unbound", false,
-                why.Length > 0
-                    ? "绑定已被判失效，等重新登记：" + why
-                    : "没有可用的 Codex 绑定（未注册或已过兜底期限），这一轮不推");
-            return;
-        }
+        ReaderCodexEndpoint.Binding? binding =
+            await ResolveBindingAsync("board-push", cancellationToken)
+                .ConfigureAwait(false);
+        if (binding is null) return;
         // 直接把**变了那块板的全文**带过去（2026-09-09 用户：
         // 「直接把快慢板内容发过去就好，只是快板有变化就发快板的全部内容，
         //   慢板同理」）。
@@ -619,13 +646,10 @@ internal static class ReaderCodexPush
                 "挂断请求没有目标线程，未发送");
             return false;
         }
-        ReaderCodexEndpoint.Binding? binding = ReaderCodexEndpoint.Current();
-        if (binding is null)
-        {
-            NoteAttempt("reader-voice-hangup", requestId, false,
-                "没有可用绑定（拿不到管道），挂断请求未发送");
-            return false;
-        }
+        ReaderCodexEndpoint.Binding? binding =
+            await ResolveBindingAsync("reader-voice-hangup", cancellationToken)
+                .ConfigureAwait(false);
+        if (binding is null) return false;
         string prompt =
             OperationSilenceLine
             + "用户预先设定的自动关闭规则触发了：" + Trim(reason) + "。\n"
@@ -684,13 +708,10 @@ internal static class ReaderCodexPush
                 "状态查询没有目标线程，未发送");
             return false;
         }
-        ReaderCodexEndpoint.Binding? binding = ReaderCodexEndpoint.Current();
-        if (binding is null)
-        {
-            NoteAttempt("reader-voice-status", requestId, false,
-                "没有可用绑定（拿不到管道），状态查询未发送");
-            return false;
-        }
+        ReaderCodexEndpoint.Binding? binding =
+            await ResolveBindingAsync("reader-voice-status", cancellationToken)
+                .ConfigureAwait(false);
+        if (binding is null) return false;
         string script = Path.Combine(
             Environment.GetFolderPath(
                 Environment.SpecialFolder.LocalApplicationData),
@@ -756,13 +777,13 @@ internal static class ReaderCodexPush
         string requestId,
         CancellationToken cancellationToken)
     {
-        ReaderCodexEndpoint.Binding? binding = ReaderCodexEndpoint.Current();
-        if (binding is null)
-        {
-            NoteAttempt("reader-voice-entry", requestId, false,
-                "没有可用绑定（拿不到管道），语音入口请求未发送");
-            return false;
-        }
+        // ⚠ 这一条最要紧：入口指令原来"没绑定就不发"，于是冷启动时
+        // 整条链卡在等 AI 登记（账本里那句「通道没能建立（Codex 可能还没
+        // 加载完）」）。现在没绑定就自己派生一个再发。
+        ReaderCodexEndpoint.Binding? binding =
+            await ResolveBindingAsync("reader-voice-entry", cancellationToken)
+                .ConfigureAwait(false);
+        if (binding is null) return false;
         string step = Path.Combine(
             Environment.GetFolderPath(
                 Environment.SpecialFolder.LocalApplicationData),
@@ -902,6 +923,64 @@ internal static class ReaderCodexPush
     private sealed class CauseScope(string? previous) : IDisposable
     {
         public void Dispose() => _cause.Value = previous;
+    }
+
+    /// <summary>把用户**打字说的话**送进正在通话的那条对话。</summary>
+    /// <remarks>
+    /// 用户 2026-09-11：「电脑语音模式时的输入框其实一直都没有设计和利用起来过，
+    /// 现在既然已经有了稳定的注入内容的途径，就可以把这个输入框利用起来了」。
+    ///
+    /// ⚠ **这条不带静默纪律**，跟这个文件里其它五条外发正好相反。
+    /// 板面和运维指令都要求"不要在通话里念出来、不要回应"，因为那是状态同步；
+    /// 而这一条**是他在说话**，要的就是对面像他开口一样正常回答。
+    /// 复用错前缀的后果是最难查的那种：送到了，对面却按纪律故意不吭声。
+    ///
+    /// 前缀用最短的「来自用户：」（他定的）：不写指令、不解释、不加条件 ——
+    /// 多一句话就多一分被当成"运维指令"对待的可能。
+    ///
+    /// ⚠ 目标是**正在通话的那条**，不是绑定那条：绑定可能还停在上一条
+    /// （今天实测过这种偏差）。读不到在通话哪条时才退回绑定。
+    /// </remarks>
+    internal static async Task<bool> SendTypedAsync(
+        string text,
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        string body = (text ?? string.Empty).Trim();
+        if (body.Length == 0)
+        {
+            NoteAttempt("reader-user-typed", requestId, false, "空文本，不发");
+            return false;
+        }
+        ReaderCodexEndpoint.Binding? binding =
+            await ResolveBindingAsync("reader-user-typed", cancellationToken)
+                .ConfigureAwait(false);
+        if (binding is null) return false;
+        string target = DirectCodexVoiceControl.InCallThreadIdIfActive();
+        using IDisposable _why = Because("用户在输入框里打字");
+        try
+        {
+            await SendAsync(
+                binding,
+                "来自用户：" + body,
+                cancellationToken,
+                threadIdOverride: target.Length > 0 ? target : null,
+                purpose: "reader-user-typed").ConfigureAwait(false);
+            NoteAttempt(
+                "reader-user-typed", requestId, true,
+                "已把打字内容送进通话（" + body.Length + " 字）→ "
+                + (target.Length > 0
+                    ? BoardTargetNote(target, binding)
+                    : "绑定那条（读不到通话在哪条）"));
+            return true;
+        }
+        catch (Exception error)
+        {
+            NoteAttempt(
+                "reader-user-typed", requestId, false,
+                "打字内容没送出去：" + error.Message);
+            return false;
+        }
     }
 
     private static async Task SendAsync(

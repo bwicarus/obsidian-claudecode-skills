@@ -29,7 +29,8 @@ unknown / voice-off 来自桥，unreachable 由这里产生（连不上桥）。
 等短了会把本来会成功的那次判成失败，然后去按第二下 —— 而那一下可能正好
 把刚起来的通话关掉。
 
-退出码：0 = 已进入语音（或本来就在）；1 = 这次没成（可以再试一次）。
+退出码：0 = 已进入语音（或本来就在）；1 = 这次没成（可以再试一次）；
+2 = **别再试了**（原因在 NO_POINT_RETRYING 里，比如电脑锁屏，等也不会成）。
 """
 from __future__ import annotations
 
@@ -117,9 +118,19 @@ def _transport_blip(result: dict[str, object]) -> bool:
 
 #: 桥会给出的 reason（封闭词汇表）。不在表里的一律当"没说清"。
 BRIDGE_REASONS = frozenset({
-    "already-active", "started", "cooldown", "not-confirmed",
+    "already-active", "started", "cooldown", "no-desktop", "not-confirmed",
     "unknown", "voice-off",
 })
+
+#: 这些原因**不是"试了没成"，而是"根本没得试"** —— 不该花掉重试预算。
+#:
+#: ``no-desktop`` = 桌面锁着 / 会话断开，注入的按键没有前台窗口可落。
+#: 2026-09-11 实测：冷启动后每 30 秒按一次、连按 10 轮跨 9.5 分钟全部
+#: ``not-confirmed``，而 Codex 主窗口一直在；同一时刻 OpenInputDesktop 打不开、
+#: GetForegroundWindow() == 0。这类局面里"再试一次"是确定无效的，
+#: 而每一次要烧掉 22 秒确认窗口，还会把"两次不成就放弃"的预算用光 ——
+#: 于是真正该说的那句话（去解锁电脑）永远说不出来。
+NO_POINT_RETRYING = frozenset({"no-desktop"})
 
 
 def _post_once(url: str, timeout: float) -> dict[str, object]:
@@ -250,7 +261,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     result = start_once(args.endpoint, args.timeout, args.runtime)
     print(json.dumps(result, ensure_ascii=False))
-    return 0 if result.get("confirmed") is True else 1
+    if result.get("confirmed") is True:
+        return 0
+    # 2 = **别再试了**（不是"这次没成"）。分开报是因为调用方对这两种要做的事
+    # 完全相反：1 该再按一次，2 该停下来把原因说给人听。
+    if result.get("reason") in NO_POINT_RETRYING:
+        return 2
+    return 1
 
 
 if __name__ == "__main__":

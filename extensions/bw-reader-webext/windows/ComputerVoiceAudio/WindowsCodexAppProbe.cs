@@ -965,3 +965,176 @@ internal static class WindowsCodexAppProbe
         nuint extraInfo);
 
 }
+
+/// <summary>
+/// 此刻有没有一个**能接住注入按键**的桌面。
+/// </summary>
+/// <remarks>
+/// 2026-09-11 定案：F24 走 keybd_event 全局盲发，会话锁屏/断开时没有任何
+/// 前台窗口，按键就凭空消失。当时的表现是连按 10 轮（跨 9.5 分钟）全部
+/// `not-confirmed`，而 Codex 主窗口一直在 —— 于是这件事被一路记成
+/// "按了但 Codex 没接住"，账本里成片的 not-confirmed 从来没人看出是锁屏。
+///
+/// 放在这个文件是因为按键本身就在这里发（SendInput / keybd_event）——
+/// **守卫跟动作同处一侧**，才不会出现"某条路绕过了判据"。
+/// </remarks>
+internal static class WindowsInputDesktop
+{
+    private const uint DesktopSwitchDesktop = 0x0100;
+    private const int UoiName = 2;
+
+    /// <summary>能接住按键就返回真。</summary>
+    /// <remarks>
+    /// ⚠ **两个信号都说不行才算不行**。`OpenInputDesktop` 单独失败还可能是
+    /// 权限之类的原因，只凭它就拦下按键，等于给"打不开语音"新增一个失败源；
+    /// 而锁屏时两个信号必然同时成立（实测 OpenInputDesktop 打不开 +
+    /// GetForegroundWindow() == 0）。宁可偶尔白按一次，也不要误拦。
+    ///
+    /// ⚠ 任何异常都当"可用"：判据的价值是省一次注定落空的按键，不是变成新的门。
+    /// </remarks>
+    internal static bool Usable()
+    {
+        try
+        {
+            return ProbeRaw();
+        }
+        catch (Exception)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>同一判据，但**不吞异常**。给自检用。</summary>
+    /// <remarks>
+    /// ⚠ 为什么要有这一份：<see cref="Usable"/> 把任何异常都当"可用"（那是对的，
+    /// 判据坏掉不该让语音开不了）—— 可这也意味着**一个签名写错的 P/Invoke
+    /// 会让整个闸门永远不触发，而且一点痕迹都不留**：调用抛
+    /// EntryPointNotFoundException、被吞、返回 true、按键照发，
+    /// 表现跟"没装这个闸门"完全一样。
+    /// 项目里那份"静默失败十处清单"讲的就是这种：出了状况就悄悄什么都不做。
+    /// 所以留一条不设防的入口，让自检能真的验到这几个 P/Invoke 是通的。
+    /// </remarks>
+    internal static bool ProbeRaw()
+    {
+        // ⚠ **决定性的信号是"有没有窗口拿着焦点"，不是桌面名**
+        //（2026-09-11 第三版，前两版都被桥自己的观测推翻了）。
+        //
+        // 第一版："OpenInputDesktop 打得开就算可用"。我自己的进程在那个状态下
+        // 确实打不开，判据在实验里成立 —— 可装进桥之后**一次都没触发**。
+        // 第二版：改认输入桌面的名字（锁屏应是 Winlogon）。桥记下来的是
+        //   `input=Default fg=0`
+        // 也就是说桥打得开、名字还是 Default，所以这两版都判"可用"，照样按键、
+        // 照样 not-confirmed。
+        //
+        // 真实状态是 `query session` 说的那个：会话 1 = **Disc（已断开）**，
+        // 控制台在会话 2。断开的会话桌面还在、名字还是 Default，但**没有任何
+        // 窗口拿着焦点** —— 于是注入的按键没有收件人。
+        //
+        // 教训写在这儿：前两版都是"我这个进程观察到的现象"直接当成判据，
+        // 而执行按键的是**另一个进程**。判据必须由执行方自己量，
+        // 这也是为什么这条链上每次判断都要落盘。
+        nint desktop = OpenInputDesktop(0, false, DesktopSwitchDesktop);
+        if (desktop != 0)
+        {
+            try
+            {
+                string name = NameOf(desktop);
+                if (name.Length > 0
+                    && !string.Equals(
+                        name, "Default", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;       // Winlogon 等安全桌面：确定接不住
+                }
+            }
+            finally
+            {
+                CloseDesktop(desktop);
+            }
+        }
+        if (GetForegroundWindow() != 0)
+        {
+            return true;
+        }
+        // ⚠ 前台为 0 也可能只是窗口切换中的一瞬。再看一次才下"接不住"的结论 ——
+        // 误拦的代价是语音开不了，比白按一次贵得多。
+        System.Threading.Thread.Sleep(150);
+        return GetForegroundWindow() != 0;
+    }
+
+    /// <summary>把此刻看到的信号原样说出来，给账本用。</summary>
+    /// <remarks>
+    /// ⚠ 这条存在的理由：`voice-start-attempts.jsonl` 攒了 155 条样本，
+    /// **一条都回答不了"为什么没成"** —— 因为当时的世界状态一个字都没记。
+    /// 折成一个布尔之前先把原始值留下，是那份"静默失败"清单里的第二条规矩。
+    /// </remarks>
+    internal static string Describe()
+    {
+        try
+        {
+            nint desktop = OpenInputDesktop(0, false, DesktopSwitchDesktop);
+            string name;
+            if (desktop == 0)
+            {
+                name = "open-failed";
+            }
+            else
+            {
+                try
+                {
+                    name = NameOf(desktop);
+                    if (name.Length == 0)
+                    {
+                        name = "no-name";
+                    }
+                }
+                finally
+                {
+                    CloseDesktop(desktop);
+                }
+            }
+            // 两次前台取样都留下 —— 判据就是靠"连着两次都是 0"下的结论，
+            // 只记一次事后就分不清"真的没人拿焦点"和"刚好撞上切换那一瞬"。
+            string first = GetForegroundWindow() != 0 ? "1" : "0";
+            System.Threading.Thread.Sleep(150);
+            string second = GetForegroundWindow() != 0 ? "1" : "0";
+            return "input=" + name + " fg=" + first + second;
+        }
+        catch (Exception exception)
+        {
+            return "probe-threw=" + exception.GetType().Name;
+        }
+    }
+
+    private static string NameOf(nint desktop)
+    {
+        System.Text.StringBuilder buffer = new(256);
+        if (!GetUserObjectInformationW(
+                desktop, UoiName, buffer, buffer.Capacity * 2, out _))
+        {
+            return string.Empty;
+        }
+        return buffer.ToString();
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern nint OpenInputDesktop(
+        uint flags,
+        [MarshalAs(UnmanagedType.Bool)] bool inherit,
+        uint desiredAccess);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseDesktop(nint desktop);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetUserObjectInformationW(
+        nint handle,
+        int index,
+        System.Text.StringBuilder buffer,
+        int length,
+        out int lengthNeeded);
+}

@@ -22,7 +22,22 @@ internal sealed record DirectCodexVoiceState(
 
 internal sealed record DirectCodexVoiceSetResult(
     DirectCodexVoiceState State,
-    bool ShortcutSent);
+    bool ShortcutSent,
+    /// <summary>没发按键时**为什么**没发（发了则为 null）。</summary>
+    /// <remarks>
+    /// ⚠ 以前这个原因是调用方**推断**出来的：ReaderCodexEndpoint 写着
+    /// 「没按且没开 = 冷却期挡下了（到这一步只剩这一种可能）」。那句话在当时是
+    /// 对的，但它把"我知道原因"和"我排除到只剩一个"混成了一件事 —— 一旦这条链
+    /// 上多出第二个"选择不按"的理由，推断就会**静默地**把新情况报成旧原因。
+    ///
+    /// 2026-09-11 就多出来了：桌面锁着时按键注入没有前台窗口可落，必然落空
+    /// （实测冷启动后连按 10 轮、跨 9.5 分钟全部 not-confirmed，而应用窗口一直在）。
+    /// 那跟冷却完全是两件事：冷却是"稍等再看"，锁屏是"等也没用，先解锁"。
+    ///
+    /// 所以原因由**做决定的那一侧**写下来，而不是由读结果的那一侧猜。
+    /// 取值与对外 reason 词汇表一致：cooldown / no-desktop。
+    /// </remarks>
+    string? Withheld = null);
 
 internal interface IDirectCodexVoiceControl
 {
@@ -163,6 +178,8 @@ internal sealed class DirectCodexVoiceControl :
     private long _lastShortcutSentTicksUtc;
     private readonly TimeSpan _shortcutCooldown;
     private int _disposeStarted;
+    /// 此刻有没有一个**能接住按键**的桌面。默认恒为真 = 保持既有行为。
+    private readonly Func<bool> _inputDesktopUsable;
 
     internal DirectCodexVoiceControl(
         Func<CodexVoiceActivitySnapshot> readSnapshot,
@@ -184,7 +201,11 @@ internal sealed class DirectCodexVoiceControl :
         Action? automaticRecoverySucceeded = null,
         TimeSpan? shortcutCooldown = null,
         Func<TimeSpan, CancellationToken, Task>?
-            automaticRecoveryDelayAsync = null)
+            automaticRecoveryDelayAsync = null,
+        // ⚠ **默认放行**（恒为真）：一个缺失或坏掉的判据不该让语音开不了 ——
+        // 跟 ShortcutFallbackEnabled 读不到时当"开"是同一条规矩。
+        // 真正的实现由 CreateProduction 装进来；自检自己给两种情形。
+        Func<bool>? inputDesktopUsable = null)
     {
         _readSnapshot = readSnapshot
             ?? throw new ArgumentNullException(nameof(readSnapshot));
@@ -202,6 +223,7 @@ internal sealed class DirectCodexVoiceControl :
         _automaticRecoveryFailed = automaticRecoveryFailed;
         _automaticRecoverySucceeded = automaticRecoverySucceeded;
         _shortcutCooldown = shortcutCooldown ?? ShortcutCooldown;
+        _inputDesktopUsable = inputDesktopUsable ?? (static () => true);
         _automaticRecoveryDelayAsync = automaticRecoveryDelayAsync
             ?? ((delay, cancellationToken) =>
                 Task.Delay(delay, cancellationToken));
@@ -380,6 +402,30 @@ internal sealed class DirectCodexVoiceControl :
                 ShortcutSent: false);
         }
 
+        // 桌面锁着就不按（2026-09-11 实测定案）。
+        //
+        // F24 是 keybd_event **全局盲发**的，落到哪里取决于当时有没有前台窗口。
+        // 会话锁屏/断开时一个都没有，于是按键凭空消失 —— 而这条链会等满确认
+        // 窗口再报 `not-confirmed`，看起来像"Codex 没接住"，于是调用方照着
+        // 重试，一次 22 秒，重试预算全烧在一件等也不会成的事上。
+        //
+        // 实测：冷启动后每隔 30 秒按一次、连按 10 轮跨 9.5 分钟，全部
+        // not-confirmed；而应用主窗口一直在（MainWindowHandle=721520）。
+        // 同一时刻 OpenInputDesktop 打不开、GetForegroundWindow() == 0。
+        // 账本里那些**成片**的 not-confirmed（11:00–11:24 连续 17 条）
+        // 是同一件事 —— 它们一直被记成"按了没确认"，所以从来没人看出是锁屏。
+        //
+        // ⚠ **只拦起语音**。挂断走的是通知通道（HangUpAsync 通道优先），
+        // 那条路根本不需要桌面；把它一起拦掉等于锁屏期间再也挂不掉电话，
+        // 那是比"开不起来"严重得多的倒退。
+        if (active && !InputDesktopUsable())
+        {
+            return new DirectCodexVoiceSetResult(
+                ToState(before),
+                ShortcutSent: false,
+                Withheld: NoDesktopWithheld);
+        }
+
         // 冷却期内一律不按（见 ShortcutCooldown）：上一次按键可能还在初始化，
         // 这时再按就是把它撤销。返回当前状态、标明没发按键，让调用方稍后再看 ——
         // 而不是把"我们选择不按"伪装成一次失败。
@@ -387,7 +433,8 @@ internal sealed class DirectCodexVoiceControl :
         {
             return new DirectCodexVoiceSetResult(
                 ToState(before),
-                ShortcutSent: false);
+                ShortcutSent: false,
+                Withheld: CooldownWithheld);
         }
 
         CodexVoiceActivitySnapshot confirmed;
@@ -423,6 +470,29 @@ internal sealed class DirectCodexVoiceControl :
         return new DirectCodexVoiceSetResult(
             ToState(confirmed),
             ShortcutSent: true);
+    }
+
+    /// <summary>没按的原因词汇表（与对外 reason 同名，避免两处各起一套）。</summary>
+    internal const string CooldownWithheld = "cooldown";
+
+    /// <inheritdoc cref="CooldownWithheld"/>
+    internal const string NoDesktopWithheld = "no-desktop";
+
+    /// <summary>此刻有没有一个能接住按键的桌面。</summary>
+    /// <remarks>
+    /// ⚠ **判据本身坏掉时放行**：它的作用是省下一次注定落空的按键，
+    /// 而不是给"打不开语音"再添一个失败源。所以抛异常一律当"可用"。
+    /// </remarks>
+    private bool InputDesktopUsable()
+    {
+        try
+        {
+            return _inputDesktopUsable();
+        }
+        catch (Exception)
+        {
+            return true;
+        }
     }
 
     private bool WithinShortcutCooldown()
@@ -641,7 +711,23 @@ internal sealed class DirectCodexVoiceControl :
             keepActiveChanged: keepActiveChanged,
             automaticRecoveryFailed: automaticRecoveryFailed,
             automaticRecoverySucceeded: automaticRecoverySucceeded,
-            shortcutCooldown: shortcutCooldown);
+            shortcutCooldown: shortcutCooldown,
+            // ⚠ **每次判完都落盘，成不成都记**（2026-09-11）。
+            // 第一版只装判据、不记观测，于是它在桥里一次都没触发，而我手上除了
+            // "又一条 not-confirmed"什么证据都没有 —— 只能猜是权限、是会话、
+            // 还是 P/Invoke。`voice-start-attempts.jsonl` 攒了 155 条样本却一条都
+            // 回答不了"为什么"，是同一个病：折成布尔之前没把原始值留下。
+            // 一次判断只发生在一次起语音尝试里，不会刷屏。
+            inputDesktopUsable: () =>
+            {
+                bool usable = WindowsInputDesktop.Usable();
+                ReaderCodexPush.NoteVoiceEntryOutcome(
+                    "desktop",
+                    usable,
+                    (usable ? "桌面能接住按键：" : "桌面接不住按键，不按：")
+                        + WindowsInputDesktop.Describe());
+                return usable;
+            });
     }
 
     /// <summary>
@@ -1920,6 +2006,11 @@ internal sealed class DirectBridgeProtocolSession
                         message,
                         cancellationToken).ConfigureAwait(false);
                     break;
+                case "codex-type":
+                    payload = await HandleCodexTypeAsync(
+                        message,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
                 case "codex-voice-keepalive-set":
                     payload = await HandleCodexVoiceKeepAliveSetAsync(
                         message,
@@ -2858,6 +2949,58 @@ internal sealed class DirectBridgeProtocolSession
             codexVoice = CodexVoicePayload(
                 _codexVoiceControl.ReadState(),
                 shortcutSent: false),
+        };
+    }
+
+    /// <summary>把用户在输入框里打的字，送进正在通话的那条对话。</summary>
+    /// <remarks>
+    /// 用户 2026-09-11 提的：电脑语音模式下那个输入框一直没被利用 ——
+    /// 而它现在**更糟**，不是闲置：框上写着"电脑客户端通话中…"，
+    /// 打进去的字却照常发给阅读器助手（另一个 AI）。界面在暗示一件事，
+    /// 发送在做另一件事。
+    ///
+    /// ⚠ 要求"必须在通话中"：不在通话时这条没有归宿，而悄悄发给绑定那条
+    /// 等于把话说给一个没在听的对话。前端也据此决定输入框变不变绿 ——
+    /// **颜色和去向必须同源**，否则绿着却发去别处是最坏的形态。
+    /// </remarks>
+    private async Task<object> HandleCodexTypeAsync(
+        JsonElement message,
+        CancellationToken cancellationToken)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "text");
+        RequireAuthenticated();
+        RequireVoiceAllowed();
+        string requestId = RequireString(message, "requestId", 128);
+        string text = RequireString(message, "text", 4000);
+        bool inCall = false;
+        try
+        {
+            inCall = _codexVoiceControl.ReadState().Active == true;
+        }
+        catch (Exception)
+        {
+            inCall = false;
+        }
+        if (!inCall)
+        {
+            return new
+            {
+                ok = false,
+                reason = "not-in-call",
+                detail = "现在没有正在进行的通话，打字内容没有归宿",
+            };
+        }
+        bool sent = await ReaderCodexPush.SendTypedAsync(
+            text, requestId, cancellationToken).ConfigureAwait(false);
+        return new
+        {
+            ok = sent,
+            reason = sent ? "sent" : "not-sent",
         };
     }
 
@@ -4276,6 +4419,340 @@ internal sealed class DirectBridgeProtocolSession
             await LockChannelToLiveCallAsync(lifetime.Token)
                 .ConfigureAwait(false);
         });
+    }
+
+    /// <summary>
+    /// 刚按出一通语音之后，把通道锁到它 —— **等得到"是哪条"再锁**。
+    /// </summary>
+    /// <remarks>
+    /// ⚠ 不能直接 `RequestChannelRelock(InCallThreadIdIfActive())`：确认是靠
+    /// 麦克风台账翻转判的，而"通话在哪条对话"要等 App 把
+    /// `realtime-voice-most-recent-thread` 落盘，两者不同步。读不到时
+    /// RequestChannelRelock 会直接返回 —— 于是整件事变成一次**静默空操作**，
+    /// 表现跟没接线一模一样。
+    ///
+    /// 所以这里自己轮询几次，并且**读不到就记账**。这条链没有界面，
+    /// 一个不出声的失败等于不可诊断。
+    /// </remarks>
+    internal static void RelockAfterConfirmedStart() =>
+        SteerAndRelockAfterConfirmedStart(string.Empty, DateTime.UtcNow);
+
+    // ⚠ 这里原来有一个 ThreadCreatedAtUtc（按 UUIDv7 前 48 位算创建时刻），
+    // 用来判"落地那条是不是本次新建的"。判据本身是对的（对着 session_meta
+    // 核过、毫秒都吻合），但它**已经挪进 codex_channel.py**：
+    // 那边的 landed_voice_thread 只返回"本次请求之后新建且是 voice_chat"的
+    // 那条，于是"是不是这次弄出来的"这件事在源头就答完了，这边不必再算一遍。
+    // 删掉而不是留着：一份没人调用、却有测试在断言它的判据，会让后来人以为
+    // 纠正链是靠它工作的。
+
+    /// <summary>
+    /// 通话确认起来之后：落错了就搬回意向那条，然后把通道锁到通话那条。
+    /// </summary>
+    /// <remarks>
+    /// ⚠ 先等"通话在哪条"可读再动手。确认是靠麦克风台账翻转判的，而"在哪条"
+    /// 要等 App 把 `realtime-voice-most-recent-thread` 落盘，两者不同步；
+    /// 读不到就直接返回会让整件事变成一次**静默空操作**，跟没接线一样。
+    /// 所以这里轮询，并且**读不到就记账**（这条链没有界面，不出声等于不可诊断）。
+    ///
+    /// ⚠ **例外：不搬用户自己开的那通**（2026-09-11 用户拍板"加例外"）。
+    /// 判据 = 落地那条是**本次请求之后**才创建的（线程 id 是 UUIDv7，
+    /// 见 ThreadCreatedAtUtc）。判不出创建时刻就不搬。
+    /// 他在 Codex 界面里手动开一条旧对话的语音时，那条的创建时刻远早于本次请求，
+    /// 于是不会被我们抽走。
+    /// </remarks>
+    internal static void SteerAndRelockAfterConfirmedStart(
+        string intended,
+        DateTime requestedAtUtc)
+    {
+        _ = Task.Run(async () =>
+        {
+            long sinceMs = new DateTimeOffset(
+                requestedAtUtc, TimeSpan.Zero).ToUnixTimeMilliseconds();
+            // ⚠ **不读 atom 来判"落在哪条"**（2026-09-11 15:39 踩到）。
+            // realtime-voice-most-recent-thread 是滞后落盘的：通话 15:39:33
+            // 起在新线程上，那个文件到 15:40 才更新。纠正链在中间的窗口里读到
+            // 的还是旧值，恰好等于意向那条，于是判成"没落错"整条空转 ——
+            // 用一个已知滞后的源去判刚刚发生的事，必然判错。
+            //
+            // 改用新建的会话文件：Codex 新开语音对话时立刻写 rollout 文件，
+            // 而线程 id 是 UUIDv7（前 48 位是创建毫秒），所以"本次请求之后
+            // 新建的语音对话"只看文件名就判得出来。
+            string moved = string.Empty;
+            string landed = string.Empty;
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                landed = await LandedVoiceThreadAsync(sinceMs)
+                    .ConfigureAwait(false);
+                if (landed.Length > 0) break;
+                await Task.Delay(TimeSpan.FromSeconds(2))
+                    .ConfigureAwait(false);
+            }
+            if (landed.Length == 0)
+            {
+                // 没有新建的语音对话 = 它续上了旧的那条，本来就对。
+                // 用户手动在某条旧对话里开的语音也落在这一支 —— 那条不会产生
+                // 新会话文件，于是**结构上**不可能被我们搬走，
+                // 这就是他要的那条例外。
+                ReaderCodexPush.NoteVoiceEntryOutcome(
+                    "steer", true, "没有新建的语音对话（续上了旧的），不用搬");
+            }
+            else if (intended.Length > 0
+                && !string.Equals(landed, intended, StringComparison.Ordinal))
+            {
+                if (await TransferCallAsync(intended, landed)
+                        .ConfigureAwait(false))
+                {
+                    moved = intended;
+                }
+            }
+            else
+            {
+                ReaderCodexPush.NoteVoiceEntryOutcome(
+                    "steer", true,
+                    "新建的就是意向那条 " + Short(landed) + "，不用搬");
+            }
+            // 绑定跟着**真实落点**走。
+            //
+            // ⚠ 搬完**不能立刻读**（2026-09-11 07:57:20 实测）：那一轮
+            // transfer 明明成功了（rollout 里 -18 关一段、-17 起一段，相隔 1 秒），
+            // 紧接着这里读 atom 却是空的，于是记了一句"读不到它在哪条对话，
+            // 通道没锁"。atom 在搬运之后同样有滞后期 —— 又一次"用滞后的源去判
+            // 刚刚发生的事"。
+            //
+            // 两件事一起改：多试几次；仍读不到就**用我们刚刚搬去的那条** ——
+            // 搬到哪里是我们自己决定的，没有理由因为读不回来就当不知道。
+            string live = string.Empty;
+            if (moved.Length > 0)
+            {
+                // ⚠ **搬过之后不再去问 atom**（2026-09-11 17:57 实测）：
+                // 那一轮搬运成功（意向那条的 realtime 段数 1 → 2），可紧接着
+                // 读回来的仍是**搬之前**那条，于是通道锁到了旧的、板面也推给了
+                // 旧的。上一版只兜住了"读不到"，没兜住"读到旧值"——
+                // 而旧值比空值更坏：它看起来是个答案。
+                //
+                // 搬到哪是我们自己决定的，没有任何理由再去问一个滞后的源。
+                live = moved;
+            }
+            else
+            {
+                for (int attempt = 0; attempt < 6; attempt++)
+                {
+                    live = DirectCodexVoiceControl.InCallThreadIdIfActive();
+                    if (live.Length > 0) break;
+                    await Task.Delay(TimeSpan.FromSeconds(2))
+                        .ConfigureAwait(false);
+                }
+            }
+            if (live.Length > 0)
+            {
+                RequestChannelRelock(live);
+            }
+            else
+            {
+                ReaderCodexPush.NoteVoiceEntryOutcome(
+                    "lock", false,
+                    "通话确认起来了，但 12 秒内读不到它在哪条对话，通道没锁");
+            }
+        });
+    }
+
+    /// 上一次自己派生绑定是什么时候（节流用）。
+    private static long _lastEnsureBindingTicks;
+
+    /// <summary>没有绑定时**自己派生一个**，而不是干等 AI 来登记。</summary>
+    /// <remarks>
+    /// ⚠ 用户 2026-09-11 点破的那件事：「建立通道后传输的内容和你直接通知进去
+    /// 的信息其实表示方式是相同的，是否本质上就是一样的」—— 是的，两条路最后
+    /// 都落到同一个 `send_message_to_thread`，差别只在那两个参数从哪来：
+    /// 登记是 AI 报自己的 `CODEX_APP_TOOLS_PIPE_PATH` / `CODEX_THREAD_ID`，
+    /// 而 `codex_channel.py` 自己枚举管道并自证、目标对话从观测得到。
+    ///
+    /// 端点注释里"独立启动的 ReaderPC 拿不到这两样"的前提**已经不成立**：
+    /// 那个脚本在普通 shell 里就能发现并自证管道，而 `send_message_to_thread`
+    /// 吃的是显式 threadId，所以管道不需要"属于"目标对话。
+    ///
+    /// 更实际的理由：登记这一步今天产生过**错误绑定** —— 06:45:05 把通道绑到
+    /// 一条 ChatGPT 会话（6aa353b6-9ccc）上，板面推送直接失败。发现制不会有
+    /// 这种形态。所以"等 AI 登记"不再是前置条件，只是一条更快的捷径。
+    ///
+    /// ⚠ 节流：板面每变一次就推，不限频会为每一次推送起一个 Python 进程。
+    /// </remarks>
+    internal static async Task<bool> EnsureBindingAsync(
+        CancellationToken cancellationToken)
+    {
+        if (ReaderCodexEndpoint.Current() is not null) return true;
+        long now = DateTime.UtcNow.Ticks;
+        long last = Interlocked.Read(ref _lastEnsureBindingTicks);
+        if (last != 0
+            && now - last < TimeSpan.FromSeconds(30).Ticks)
+        {
+            return false;
+        }
+        Interlocked.Exchange(ref _lastEnsureBindingTicks, now);
+        string script = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "BWReader",
+            "codex_channel.py");
+        if (!File.Exists(script)) return false;
+        try
+        {
+            ProcessStartInfo info = new()
+            {
+                FileName = DirectBridgeProtocolSession.PythonExecutable(),
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            info.ArgumentList.Add(script);
+            info.ArgumentList.Add("--ensure");
+            using Process? child = Process.Start(info);
+            if (child is null) return false;
+            using CancellationTokenSource budget =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+            budget.CancelAfter(TimeSpan.FromSeconds(30));
+            string output = await child.StandardOutput
+                .ReadToEndAsync(budget.Token).ConfigureAwait(false);
+            await child.WaitForExitAsync(budget.Token).ConfigureAwait(false);
+            bool ok = ReaderCodexEndpoint.Current() is not null;
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                "bind",
+                ok,
+                (ok ? "没有绑定，自己派生了一个：" : "自己派生绑定没成：")
+                + (output.Length > 110 ? output[..110] : output).Trim());
+            return ok;
+        }
+        catch (Exception exception)
+        {
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                "bind", false,
+                "派生绑定时出错：" + exception.GetType().Name);
+            return false;
+        }
+    }
+
+    /// <summary>本次请求之后新建的那条语音对话（没有则空串）。</summary>
+    /// <remarks>
+    /// 走 codex_channel.py --landed-since：扫会话文件那套逻辑已经在那个模块里
+    /// （含"只认 voice_chat"——那个窗口里也可能冒出 automation 会话，
+    /// 认错了会把通话搬去一条根本不是语音的对话）。
+    /// </remarks>
+    private static async Task<string> LandedVoiceThreadAsync(long sinceMs)
+    {
+        string script = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "BWReader",
+            "codex_channel.py");
+        if (!File.Exists(script)) return string.Empty;
+        try
+        {
+            ProcessStartInfo info = new()
+            {
+                FileName = DirectBridgeProtocolSession.PythonExecutable(),
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            info.ArgumentList.Add(script);
+            info.ArgumentList.Add("--landed-since");
+            info.ArgumentList.Add(
+                sinceMs.ToString(System.Globalization.CultureInfo
+                    .InvariantCulture));
+            using Process? child = Process.Start(info);
+            if (child is null) return string.Empty;
+            using CancellationTokenSource budget = new(TimeSpan.FromSeconds(20));
+            string output = await child.StandardOutput
+                .ReadToEndAsync(budget.Token).ConfigureAwait(false);
+            await child.WaitForExitAsync(budget.Token).ConfigureAwait(false);
+            if (child.ExitCode != 0) return string.Empty;
+            if (System.Text.Json.Nodes.JsonNode.Parse(output)
+                    is not System.Text.Json.Nodes.JsonObject value)
+            {
+                return string.Empty;
+            }
+            return (string?)value["result"]?["thread"] ?? string.Empty;
+        }
+        catch (Exception)
+        {
+            // 判不出来就当"没有新建的" —— 保守的一侧是不搬。
+            return string.Empty;
+        }
+    }
+
+    private static string Short(string thread) =>
+        thread.Length > 13 ? thread[..13] : thread;
+
+    /// <summary>把正在进行的通话搬到 <paramref name="destination"/>。</summary>
+    private static async Task<bool> TransferCallAsync(
+        string destination,
+        string landed)
+    {
+        string script = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "BWReader",
+            "codex_channel.py");
+        if (!File.Exists(script))
+        {
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                "steer", false, "要搬通话但找不到 codex_channel.py");
+            return false;
+        }
+        try
+        {
+            ProcessStartInfo info = new()
+            {
+                FileName = DirectBridgeProtocolSession.PythonExecutable(),
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            // ⚠ 脚本的输出**按 UTF-8 读**，不然中文失败原因变成乱码。
+            // 17:52 那一轮真实失败记成了「璇讳笉鍒版鍦ㄩ€氳瘽鐨勯偅鏉…」——
+            // 记了一句没人看得懂的话，跟没记只差一点点。
+            info.StandardOutputEncoding = new UTF8Encoding(false);
+            info.StandardErrorEncoding = new UTF8Encoding(false);
+            info.Environment["PYTHONIOENCODING"] = "utf-8";
+            info.ArgumentList.Add(script);
+            info.ArgumentList.Add("--transfer");
+            info.ArgumentList.Add(destination);
+            // ⚠ **信封用我们刚观测到的 landed**，别让脚本自己去读 atom：
+            // 通话刚起来时 atom 还没落盘，脚本会以"读不到正在通话的那条"
+            // 拒绝搬运 —— 17:52 实测就是这么被挡回去的。
+            info.ArgumentList.Add("--from");
+            info.ArgumentList.Add(landed);
+            using Process? child = Process.Start(info);
+            if (child is null)
+            {
+                ReaderCodexPush.NoteVoiceEntryOutcome(
+                    "steer", false, "搬通话的脚本起不来");
+                return false;
+            }
+            using CancellationTokenSource budget = new(TimeSpan.FromSeconds(25));
+            string output = await child.StandardOutput
+                .ReadToEndAsync(budget.Token).ConfigureAwait(false);
+            await child.WaitForExitAsync(budget.Token).ConfigureAwait(false);
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                "steer",
+                child.ExitCode == 0,
+                (child.ExitCode == 0
+                    ? "通话落在 " + Short(landed) + "（本次新建），已搬到 "
+                        + Short(destination) + "："
+                    : "搬通话失败：")
+                + (output.Length > 110 ? output[..110] : output).Trim());
+            return child.ExitCode == 0;
+        }
+        catch (Exception exception)
+        {
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                "steer", false, "搬通话时出错：" + exception.GetType().Name);
+            return false;
+        }
     }
 
     /// <summary>把通道锁到正在通话的那条对话。</summary>

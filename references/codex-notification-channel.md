@@ -219,6 +219,63 @@ app 中开启语音后服务器如果没有连接语音则需要积极的去开�
 ⚠ 顺带记下另外两个可能有用的工具：`transfer_voice_call`（把进行中的通话转到
 另一条对话）、`fork_thread`。
 
+### 那一步不够 —— 导航自称成功，照样新开（2026-09-11 12:02 实测）
+
+「先导航过去再按」补上之后仍然新开，而这次时间线是完整的：
+
+    12:02:14  Codex 进程诞生                    ← 桥自己拉起来的（Get-Process StartTime）
+    12:02:20  桥收到 START
+    12:02:23  入口指令 → -14                    ← 目标正确
+    12:02:32  navigate → {"navigated": true}    ← 导航自称成功
+    12:02:34  新线程 -15 诞生
+    12:02:36  realtime_session_started 落在 -15
+
+**`{"navigated": true}` 不等于那条对话已经加载好。** 按键时 Codex 才跑了 18 秒。
+
+#### 判"续上还是新开"要看这个事件，别看有没有新文件
+
+目标线程的 rollout 里有一等公民事件：
+
+    realtime_session_started { realtime_session_id }
+    realtime_session_closed  { realtime_session_id }
+
+⚠ **不要拿"有没有新增 rollout 文件"当判据**：一通没说话的短通话可能不落新内容，
+于是"没新文件"既可能是续上也可能是别的 —— 而那正是要分辨的东西。
+按这个事件复核之后，热着的 App 上续用是**稳定行为**：
+`realtime-voice-chat-13` 有 5 段、`-15` 有 11 段，全部落在原线程。
+
+另外每条语音对话都有自己的临时目录 `Documents\Codex\<日期>
+另外每条语音对话都有自己的临时目录 `Documents\Codex\<日期>\realtime-voice-chat-N`，
+`N` 逐次递增 —— 看 `session_meta.cwd` 就知道这条是第几次新开的。
+
+#### 可以量的就绪判据（这才是缺的那一步）
+
+    read_thread { threadId }  →  thread.status.type
+
+取值 `notLoaded` / `idle` / `active`。实测一条 `notLoaded` 的老语音线程
+在 `navigate_to_codex_page` 之后 **2 秒内**变 `idle`。
+所以冷启动后该等的不是一个拍脑袋的沉降时长（`NavigateSettleDelay = 1500ms`
+它自己的注释就写着"估的，没量过"），而是**等这条线程自己说它不再是 notLoaded**。
+
+#### 同时被否掉的两个假设（都做了受控试验）
+
+| 假设 | 怎么测的 | 结果 |
+|---|---|---|
+| 指定对话后做通知，改写了"最近语音对话" | navigate 前后盯 atom 内容与文件 mtime，10 秒 | **不改**，mtime 全程不动 |
+| 目标线程正在跑一轮（忙）→ 开不了语音 | 走生产路径 `voice_start_step.py`；先投一条 sleep 60 让它 `active`，量到忙才按 | **照样续上**（12:37:02 落在 -13） |
+
+第二条尤其值得记：忙/闲两种条件下生产路径都续上，**热着的 App 上这条链是好的** ——
+病全部集中在"桥刚把 Codex 拉起来"那一次。
+
+#### 顺带：`end_realtime_voice_call` 是**按信封**结束的
+
+信封的 `threadId` 不是通话那条时，它回 `{"ended": true}` / `success: true`，
+**通话却一直跑着**（12:34 实测：等 40 秒判"已关闭=False"，又盯 60 秒才确认真没停；
+换成通话那条之后 5 秒内就停）。
+生产链不受影响 —— 桥是给通话那条线程**发消息**让它自己调，信封天然是对的
+（`RequestVoiceHangUpAsync` 的 `threadIdOverride: inCallThreadId`）。
+但任何**直接**调这个工具的地方（实验台、手工排查）都必须显式把信封指到通话那条。
+
 ### 为什么入口这条**故意**不加在通话守卫（2026-09-11）
 
 用户报「每次都新开一条对话」，而且提醒得对：「本身软件的设计也是语音快捷键按下时
@@ -333,6 +390,130 @@ app 那边是**已保存的线程**，磁盘这边是**此刻活着的语音会�
 **在这条链上加任何一步之前，先问"我怎么知道它成了"，并且让答案落盘。**
 今晚三次"查不出来"（媒体为什么停 / 推送发没发 / 谁在反复 START）都不是因为
 判断错，而是因为**压根没记**。留痕比修复优先。
+
+## 桌面锁着时，语音快捷键落不到任何地方（2026-09-11 实测定案）
+
+F24 走 keybd_event **全局盲发**，落到哪里取决于当时有没有前台窗口。
+会话锁屏/断开时一个都没有，于是按键凭空消失。
+
+实测：Codex 冷启动后每 30 秒按一次、**连按 10 轮跨 9.5 分钟全部
+`not-confirmed`**，而 Codex 主窗口一直在（MainWindowHandle=721520）。
+同一时刻：
+
+    query session          →  bwicarus 1 Disc   （会话已断开）
+                              console  2 Conn   （控制台在锁屏会话上）
+    OpenInputDesktop       →  打不开
+    GetForegroundWindow()  →  0
+    LogonUI 进程           →  2 个
+
+⚠ **账本里那些成片的 `not-confirmed` 就是这个**（11:00–11:24 连续 17 条、
+07:25–07:29、05:01）。它们一直被记成"按了但 Codex 没接住"，于是从来没人
+看出是锁屏 —— 一个原因被归错类，155 条样本就一条都回答不了"为什么"。
+
+### 现在的做法
+
+`DirectCodexVoiceControl.SetActiveWithinGateAsync` 在冷却守卫**之前**多一道：
+桌面接不住按键就不按，并把原因写进结果（`Withheld = "no-desktop"`），
+端点照实报 `reason: no-desktop` 外加一句"解锁后再试"。
+
+判据 = `WindowsInputDesktop.Usable()`：`OpenInputDesktop` 打不开**且**
+`GetForegroundWindow() == 0` 才算不行（只凭一个会误拦）。判据本身抛异常
+一律当"可用" —— 它的作用是省下一次注定落空的按键，不是给"打不开语音"
+新增一个失败源。
+
+⚠ 原因由**做决定的那一侧**写下来。端点原先写的是「没按且没开 = 一定是冷却
+（到这一步只剩这一种可能）」—— 那句推断在当时成立，却经不起这条链长出
+第二个"选择不按"的理由；锁屏就是那第二个，于是它会被静默报成 cooldown，
+调用方照着"稍等再看"去等一件永远等不到的事。
+
+⚠ **只拦起语音，不拦挂断**：挂断走通知通道，那条路不需要桌面；一起拦掉
+等于锁屏期间挂不掉正在计费的电话。自检有一条专门守这个
+（变异检验已兑：去掉 `active &&` 那条就红）。
+
+⚠ **`no-desktop` 不进重试**（`voice_start_step.py` 的 `NO_POINT_RETRYING`，
+退出码 2）："再按一次"确定无效，每次还要烧 22 秒确认窗口，最后把
+"两次不成就放弃"的预算用光 —— 于是真正该说的那句话永远说不出来。
+
+⚠ reason 词汇表有**四份副本**（`grep -rl already-active` 数的）：
+`ReaderCodexEndpoint.cs`、`voice_start_step.py` 的 `BRIDGE_REASONS`、
+`ReaderCapabilities/voice-entry.md`、`DirectBridgeSelfTest.cs`。
+漏掉脚本那份最隐蔽：新词会被当成"没说清"记成 unexpected-reply，
+真实原因就此丢掉，而账本看上去还在正常记录。
+
+### ⚠ 自检会真的起语音
+
+`--self-test` 里有检查调 `PrepareInitialStartAsync`，那条路**真的导航
+Codex、真的按 F24**。2026-09-11 连着几次自检各起了一通语音
+（13:28:45、13:35:23），都得手工挂掉。排查时别把它当纯净单元测试跑，
+跑完看一眼麦克风台账。
+
+### 顺带纠正两个我自己搞错的判据
+
+- **Codex 桌面应用的进程名是 `ChatGPT`**，不是 `codex`（`codex.exe` 是后端
+  CLI 二进制）。按 `codex` 去关应用，关掉的是后端、应用一直开着 ——
+  一轮"冷启动复现"因此什么都没复现到。桥那侧是对的
+  （`WindowsCodexAppProbe` 用 `profile.ProcessName`）。
+- **判"续上还是新开"不能看有没有新增 rollout 文件**：没说话的短通话可能
+  不落新内容。看目标线程 rollout 里的 `realtime_session_started`。
+
+## 两条"自己制造出来的"故障（2026-09-11 定案）
+
+### 1. 租约写失败把整条桥杀掉，于是语音自己回来
+
+现象：挂断几秒后语音又起来、每次部署多一通计费通话、"连上之后又跑一次开语音
+流程"（用户当天截图：先推"提示板已接上"，紧接着又来一条开语音指令）。
+
+账本与日志对起来才看得出：
+
+    [heartbeat] 失败: UnauthorizedAccessException: Access to the path is denied.   ← 刷了几百行
+    SELF_TEST_FAILED: UnauthorizedAccessException
+      at DirectServiceLease.AtomicWriteAsync → File.Move
+      at DirectBridgeServer.RunAsync
+    service-start 06:26:13 / 06:37:28 / 06:47:27   ← 反复重启
+
+Windows 上 `File.Move(overwrite)` 要先删掉目标，**任何一个没带
+FILE_SHARE_DELETE 打开它的读者**都会让这一步失败 —— 包括随手 `cat` 一下这个
+文件的人。而它抛出的异常一路冒到 `DirectBridgeServer.RunAsync`，整个语音服务
+退出、被守护拉起；拉起之后队列里那条入口指令又被执行一次。
+
+⚠ **租约是记账，不是状态权威。** 丢一次的代价是"现在谁在服务"暂时没答案；
+为它杀掉一条正在服务的语音链，代价是用户正在打的电话。两者不成比例。
+现在 `MoveWithRetries` 重试 5 次（60/120/180/240 ms），仍不行就写一行日志
+**继续跑**。自检 `lease-write-does-not-kill-the-bridge-when-file-is-held`
+用一个普通读句柄复现那个局面；变异检验已兑（换回裸 `File.Move` 那条就红）。
+
+⚠ 顺带纠正一个我当场下错的判断：看到三个 `bw-computer-voice-audio.exe` 就说
+"三个桥在抢租约"。**同一个 exe 还跑 MCP 等角色**，而且 `--direct-serve` 早就有
+单实例互斥（`DirectServeMutexName`，抢不到就 `return 0`）。清理后稳定在
+1 个 direct-serve 实例，日志 90 秒零新增。
+
+### 2. "建立通道"与"直接通知"本来就是同一件事
+
+用户 2026-09-11 点破：「建立通道后传输的内容和你直接通知进去的信息其实表示
+方式是相同的，是否本质上就是一样的」。**是的** —— 两条路最后都落到同一个
+`send_message_to_thread`，差别只在那两个参数从哪来：
+
+| | 管道地址 | 目标对话 id |
+|---|---|---|
+| 登记（AI 报） | `CODEX_APP_TOOLS_PIPE_PATH` | `CODEX_THREAD_ID` |
+| 直接通知 | 自己枚举 `codex-browser-use-*` 并逐条自证 | 从 atom / 观测得到 |
+
+`ReaderCodexEndpoint` 注释里"这两样只有 Codex 亲自启动的进程才有"的前提
+**已不成立**：`codex_channel.usable_pipe()` 在普通 shell 里就能发现并自证，
+而 `send_message_to_thread` 吃显式 `threadId`，所以管道**不必"属于"目标对话**
+（当天用同一条通用管道分别投到四条不同对话，全部送达）。
+
+而且登记这一步当天产生过**错误绑定**：06:45:05 把通道绑到一条 ChatGPT 会话
+（`6aa353b6-9ccc`）上，板面推送直接失败。发现制不会有这种形态。
+
+所以"等 AI 登记"不再是前置条件，只是一条更快的捷径：
+`ReaderCodexPush.ResolveBindingAsync` 在没有绑定时调
+`DirectBridgeProtocolSession.EnsureBindingAsync`（跑 `codex_channel.py
+--ensure`）自己派生一个，四个推送点（board / hangup / status / entry）统一走它。
+派生失败照旧出声，只是话从"这一轮不推"变成"试过派生也不行" ——
+排查时这两句指向完全不同的地方。
+
+⚠ 节流 30 秒：板面每变一次就推，不限频会为每次推送起一个 Python 进程。
 
 ## 排查时先看这四本账
 

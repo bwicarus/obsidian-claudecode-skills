@@ -64,6 +64,19 @@ internal static class ReaderCodexEndpoint
         IDirectCodexVoiceControl control) =>
         Volatile.Write(ref _voiceControl, control);
 
+    /// <summary>确认有通话之后，把通道锁到它。</summary>
+    /// <remarks>
+    /// ⚠ 做成可替换的，有两个理由，都不是为了"方便测试"：
+    /// ① 自检要能断言**什么时候锁、什么时候不锁**（started / already-active 要锁，
+    ///    cooldown / no-desktop / voice-off 不该锁）；
+    /// ② 不替换的话自检会去**真的锁一次**这台机器的通道 —— 自检已经会真按 F24
+    ///    起通话了，不该再多一个真实副作用。
+    /// </remarks>
+    /// 参数 = （意向对话，本次请求时刻）。意向用来判"落错了要不要搬回去"，
+    /// 请求时刻用来判"落地那条是不是本次新建的"（用户拍板的那条例外）。
+    internal static Action<string, DateTime> RelockAfterStart { get; set; } =
+        DirectBridgeProtocolSession.SteerAndRelockAfterConfirmedStart;
+
     internal static void Configure()
     {
         lock (Gate)
@@ -602,7 +615,13 @@ internal static class ReaderCodexEndpoint
     /// 冷却期内不按。以后往那条链上加守卫，这边不会再落下。
     ///
     /// 回报的 reason 是封闭词汇表，跟 voice_start_step.py / voice-entry.md 对齐：
-    /// already-active / started / cooldown / not-confirmed / unknown / voice-off。
+    /// already-active / started / cooldown / no-desktop / not-confirmed /
+    /// unknown / voice-off。
+    /// ⚠ 这张表有**四份副本**（`grep -rl already-active` 数出来的，不是估的）：
+    /// 这里、`voice_start_step.py` 的 `BRIDGE_REASONS`、
+    /// `ReaderCapabilities/voice-entry.md`、`DirectBridgeSelfTest.cs`。
+    /// 加词要四处一起加 —— 少改脚本那处的表现最隐蔽：它把新词当"没说清"，
+    /// 记一条 unexpected-reply，**真实原因就此丢掉**，而账本看起来还在正常记录。
     private static async Task StartVoiceOnceAsync(
         HttpContext context,
         CancellationToken cancellationToken)
@@ -620,19 +639,40 @@ internal static class ReaderCodexEndpoint
             }, cancellationToken).ConfigureAwait(false);
             return;
         }
+        // ⚠ **意向对话要在按键之前读**（2026-09-11 设计定案）。
+        //
+        // 磁盘上的 `realtime-voice-most-recent-thread` 跨 Codex 重启保留，
+        // 是"上次真的在讲话的那条"—— 而 App **内存**里那份重启后是空的，
+        // 于是冷启动后第一次按 F24 必然新开一条。这份磁盘值正是 App 丢掉的
+        // 那份信息，所以它就是"本来该接到哪条"的答案。
+        //
+        // 按完再读就没用了：那时它已经被新起来的通话改写。
+        string intended = DirectCodexVoiceControl.InCallThreadId();
+        DateTime requestedAtUtc = DateTime.UtcNow;
         try
         {
             DirectCodexVoiceSetResult result = await control
                 .SetActiveAsync(active: true, cancellationToken)
                 .ConfigureAwait(false);
             bool active = result.State.Active == true;
-            // 没按且已开 = 本来就在通话；没按且没开 = 冷却期挡下了
-            // （见 SetActiveWithinGateAsync：到这一步只剩这一种可能）。
+            // 没按且已开 = 本来就在通话。没按且没开 = **由决定方说是为什么**
+            // （result.Withheld）。
+            //
+            // ⚠ 这里原来写的是"到这一步只剩冷却这一种可能"，然后直接报 cooldown。
+            // 那句推断在当时成立，但它经不起这条链长出第二个"选择不按"的理由 ——
+            // 2026-09-11 长出来了（桌面锁着），于是锁屏被静默报成 cooldown，
+            // 调用方照着"稍等再看"重试，而那是永远等不到的东西。
+            // 所以原因跟着结果一起从下面传上来，这边不再猜；`?? cooldown`
+            // 只是给没填原因的老路径留一条与从前完全一致的退路。
+            //
             // 把"我们选择不按"报成失败会让调用方去按第二下 —— 而那一下
             // 可能正好落在刚起来的通话上，把它关掉。
             string reason = active
                 ? (result.ShortcutSent ? "started" : "already-active")
-                : (result.ShortcutSent ? "not-confirmed" : "cooldown");
+                : (result.ShortcutSent
+                    ? "not-confirmed"
+                    : (result.Withheld
+                        ?? DirectCodexVoiceControl.CooldownWithheld));
             JsonObject answer = new()
             {
                 ["ok"] = active,
@@ -640,6 +680,38 @@ internal static class ReaderCodexEndpoint
                 ["confirmed"] = active,
                 ["reason"] = reason,
             };
+            if (active)
+            {
+                // ⚠ **起来了就得把通道锁到通话那条**（2026-09-11 实测补上）。
+                //
+                // 这条路原来按完就返回，锁定只长在入口重试循环里（那边看到
+                // Active == true 才去锁）。于是经由这个端点起来的通话，
+                // 通道会**留在上一条对话上**：15:19 实测 —— 通话在
+                // 01a08c64-e9a1，绑定还停在 01a08eb9-a174，板面推送一条都没
+                // 落进通话那条（8 → 8）。账本里只有导航和桌面判据两行，
+                // 连 lock 行都没有，所以这件事以前从账本上完全看不出来。
+                //
+                // 用户早就报过这个症状：「打开语音后也没有在这个语音的对话里
+                // 建立通道」。
+                //
+                // ⚠ 不在这里等、不在这里判成不成：这是 fire-and-forget，
+                // 一次性入口的职责是"按一次并如实回报"，不该因为锁通道慢而把
+                // 回答拖住。等"通话在哪条"可读、以及读不到时记账，
+                // 都在 RelockAfterConfirmedStart 里面做。
+                RelockAfterStart(intended, requestedAtUtc);
+            }
+            if (reason == DirectCodexVoiceControl.NoDesktopWithheld)
+            {
+                // 说得出**该做什么**才算说清楚：这一条不是"再试一次"，
+                // 是"去把电脑解锁"。
+                // ⚠ 话要跟实测对得上：这台机器上量到的不是 Winlogon 安全桌面，
+                // 而是**桌面还在（input=Default）但没有任何窗口拿着焦点
+                // （fg=00）** —— 会话被断开时就是这个样子。写成"锁屏"会把人
+                // 引到"我明明解锁了"那条死路上。
+                answer["detail"] =
+                    "没有任何窗口拿着焦点（电脑锁屏或会话已断开），"
+                    + "语音快捷键落不到任何地方；解锁并回到桌面后再试";
+            }
             if (reason == "cooldown")
             {
                 // 等多久才值得再问一次 —— **由这里给**，不让调用方猜。
