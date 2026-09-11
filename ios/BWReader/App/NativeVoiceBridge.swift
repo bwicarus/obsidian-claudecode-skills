@@ -403,6 +403,20 @@ final class NativeVoiceBridge: ObservableObject {
         }
     }
 
+    /// 把用户打字的内容送进正在进行的那通语音。没有连接就当没发出去。
+    ///
+    /// ⚠ 不抛：这条是"顺手补一句话"，失败不该把阅读器的输入流程弄断。
+    /// 成没成由返回值说，调用方据此决定要不要退回文字助手。
+    func sendTyped(_ text: String) async -> Bool {
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty, let socket else { return false }
+        do {
+            return try await socket.codexType(text: body)
+        } catch {
+            return false
+        }
+    }
+
     func stop() async {
         guard state.phase != .idle else {
             return

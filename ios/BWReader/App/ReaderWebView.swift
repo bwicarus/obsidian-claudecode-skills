@@ -2886,6 +2886,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         )
     }
 
+    /// 把网页输入框里打的字交给原生桥，送进正在进行的那通语音。
+    private func sendNativeComputerVoiceTyped(_ text: String) {
+        guard let bridge = nativeVoiceBridge else { return }
+        Task { @MainActor [weak bridge] in
+            guard let bridge else { return }
+            _ = await bridge.sendTyped(text)
+        }
+    }
+
     private func toggleNativeComputerVoice(
         appKind: DirectVoiceTargetApp
     ) {
@@ -3946,6 +3955,28 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                     ? "<local-runtime-unavailable>"
                     : "native-local://<capability-redacted>",
             ]
+            // 打字直达通话（用户 2026-09-11）：与 toggle 同一条消息通道，
+            // 但**字段集各自精确**——沿用这里原有的"数清字段个数"风格，
+            // 多一个少一个都不受理。
+            //
+            // ⚠ App 上这条必须走原生：网页那套 DirectSocket 在 App 里没有
+            // session（状态是原生推进去的），JS 直接发会静静失败，表现是
+            // "输入框绿了、回答却来自文字助手"。
+            if
+                message.frameInfo.isMainFrame,
+                message.webView === webView,
+                isTrustedReaderURL(webView.url),
+                isTrustedReaderURL(message.frameInfo.request.url),
+                let typedBody = message.body as? [String: Any],
+                typedBody["action"] as? String == "type",
+                typedBody.count == 2,
+                let typedText = typedBody["text"] as? String,
+                !typedText.isEmpty,
+                typedText.count <= 4000
+            {
+                sendNativeComputerVoiceTyped(typedText)
+                return
+            }
             guard
                 message.frameInfo.isMainFrame,
                 message.webView === webView,

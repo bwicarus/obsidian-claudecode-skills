@@ -5006,11 +5006,38 @@ if (window.__bwPwaProviderOnly) return;
   // ⚠ 回显用 note 而不是聊天气泡：对面的回答在 Codex 里，侧栏看不到。
   // 摆成气泡会暗示"等回答"，而那个回答永远不会出现在这里。
   function _pcTypedSend(text) {
+    if (!_audioRouteConnected) return false;   // 通道没通 = 这个框本来就不该是绿的
+    // ⚠ **App 上必须走原生**（2026-09-11 用户实测定位）。
+    //
+    // App 的电脑语音状态是原生推进来的（__BW_NATIVE_COMPUTER_VOICE__ +
+    // _applyNativeComputerVoiceState），网页侧 RC.computerVoice **根本没有
+    // session** —— 绿光来自 _audioRouteConnected（原生设的），而发送要的
+    // channel 不存在。第一版没分这两条路，于是出现最坏的形态：
+    // 「虽然变成了绿色，但回答我的还是 api 的 ai」。
+    //
+    // ⚠ 原生这条是 fire-and-forget（postMessage 没有回值），所以回显只能
+    // 说"已发出"，不能说"已送达"。桥不在通话时会回 not-in-call，那条在
+    // 桥的账本里看得到（reader-user-typed）。
+    try {
+      if (window.__BW_NATIVE_COMPUTER_VOICE__ === true &&
+          window.webkit && window.webkit.messageHandlers &&
+          window.webkit.messageHandlers.bwNativeComputerVoice &&
+          typeof window.webkit.messageHandlers.bwNativeComputerVoice
+            .postMessage === 'function') {
+        var shownN = String(text || '');
+        if (shownN.length > 60) shownN = shownN.slice(0, 60) + '…';
+        window.webkit.messageHandlers.bwNativeComputerVoice.postMessage({
+          action: 'type',
+          text: String(text || '').slice(0, 4000)
+        });
+        try { threadMsg('asst-note', '→ 已发进通话：' + shownN); } catch (e) {}
+        return true;
+      }
+    } catch (e) {}
     var api = window.RC && RC.computerVoice;
     var why = '';
     if (!api || typeof api.sendTyped !== 'function') why = '这个页面没装电脑语音层';
     else if (typeof api.isActive === 'function' && !api.isActive()) why = '电脑那通已经不在了';
-    else if (!_audioRouteConnected) why = '音频通道没通';
     if (why) {
       // ⚠ **绿着却发不出去 = 颜色在骗人**，而且会悄悄掉回文字助手。
       //   2026-09-11 用户就是这么撞上的：输入框绿着、打的字却被阅读器助手

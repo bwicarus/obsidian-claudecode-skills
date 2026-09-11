@@ -1078,12 +1078,14 @@
     text = (text || '').trim();
     // 通话中打字**直达通话**，不走文字助手管线（与 rc-assistant.js 同一个钩子）。
     //
-    // ⚠ **这是第二份活的助手面板，而且正是 App 打包的那一份**
-    //   （reader.src/* → reader.js → ReaderBundle）。
-    //   2026-09-11 第一版只给 rc-assistant.js 接了这个钩子，于是 App 上
-    //   出现最坏的形态：输入框**绿着**（绿光来自共享层 rc-voicecall，装了），
-    //   打的字却照常发给阅读器助手 —— 用户当场发现"根本就没有传过去"。
-    //   颜色和去向必须同源，而同源要求**每一份会送出去的实现都接上**。
+    // ⚠ **这份只在 legacy 模式下活着**（本文件第 7 行 `if (window.__uiShared)
+    //   return;`）—— 默认 shared 模式下侧栏由 rc-assistant.js 接管。
+    //
+    //   我 2026-09-11 一度以为"App 打包的是这份"，据此把它当成 App 上
+    //   "输入框绿了却发给文字助手"的原因 —— **判断错了**。App 上真正的
+    //   原因是：电脑语音状态由原生推进网页，RC.computerVoice 那套
+    //   DirectSocket 在 App 里没有 session，所以发送要走 bwNativeComputerVoice。
+    //   这里接上钩子本身没错（legacy 模式同样该能打字直达），但它不是那个修复。
     if (text && window.__vcSendText) {
       try {
         if (window.__vcSendText(text)) {
