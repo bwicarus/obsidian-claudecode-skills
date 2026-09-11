@@ -355,6 +355,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var waitsForInitialBookDecision = true
     private var deferredBookUserStateMessage: (text: String, isError: Bool)?
     private weak var nativeVoiceBridge: NativeVoiceBridge?
+    /// 键盘通知的观察者句柄（重建 webView 时要先撤掉旧的）。
+    private var keyboardInsetObservers: [NSObjectProtocol] = []
     private let nativeAgentVoice = NativeAgentVoiceSession()
     private var nativeAgentVoiceCommandTail: Task<Void, Never>?
     private var nativeAgentVoiceWasReady = false
@@ -1024,7 +1026,58 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
         webView.scrollView.contentInsetAdjustmentBehavior = .never
+        // ── 键盘弹出时别把整页顶上去（用户 2026-09-11 两次实测都还在）──
+        //
+        // 症状：点侧栏输入框 → **连左边那本书一起**整体上抬，底下露出黑带。
+        // 网页那侧修不动它：那不是页面布局，是 WKWebView 自己的 scrollView
+        // 被塞了底部 contentInset 并跟着滚了一段。
+        // `contentInsetAdjustmentBehavior = .never` 只关掉**安全区**避让，
+        // 不关键盘避让 —— 这两件事是分开的，我一度以为设了它就够了。
+        //
+        // 这个壳的页面是 height:100% 的固定版式，外层 scrollView 本来就不该
+        // 滚动；所以键盘出现时把 inset 和偏移都按回零。输入框会不会被键盘
+        // 挡住由网页那侧管（按遮挡量垫面板底部），两边各管一件事。
+        keyboardInsetObservers.forEach {
+            NotificationCenter.default.removeObserver($0)
+        }
+        keyboardInsetObservers = [
+            UIResponder.keyboardWillShowNotification,
+            UIResponder.keyboardDidShowNotification,
+            UIResponder.keyboardWillChangeFrameNotification,
+            UIResponder.keyboardDidChangeFrameNotification,
+            UIResponder.keyboardDidHideNotification,
+        ].map { name in
+            NotificationCenter.default.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak webView] _ in
+                guard let scroll = webView?.scrollView else { return }
+                // 立刻按一次，再在下一拍按一次：键盘是动画出现的，
+                // WebKit 会在动画过程中再塞一次 inset。
+                Self.flattenKeyboardInset(scroll)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    Self.flattenKeyboardInset(scroll)
+                }
+            }
+        }
         nativeAgentVoice.delegate = self
+    }
+
+    /// 把外层 scrollView 的键盘 inset 与偏移按回零。
+    ///
+    /// ⚠ 只在**真的不为零**时写，别每次通知都无条件赋值 —— 无条件写会跟
+    /// WebKit 自己的动画打架，表现是抬一下又落回去的抖动。
+    private static func flattenKeyboardInset(_ scroll: UIScrollView) {
+        if scroll.contentInset.bottom != 0 {
+            scroll.contentInset.bottom = 0
+        }
+        if scroll.verticalScrollIndicatorInsets.bottom != 0 {
+            scroll.verticalScrollIndicatorInsets.bottom = 0
+        }
+        if scroll.contentOffset.y != 0 {
+            scroll.contentOffset.y = 0
+        }
     }
 
     /// Binds the App-owned Pi catalog to the local reading shell. The gateway

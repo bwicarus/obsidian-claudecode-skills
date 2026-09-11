@@ -5021,13 +5021,14 @@
           window.webkit.messageHandlers.bwNativeComputerVoice &&
           typeof window.webkit.messageHandlers.bwNativeComputerVoice
             .postMessage === 'function') {
-        var shownN = String(text || '');
-        if (shownN.length > 60) shownN = shownN.slice(0, 60) + '…';
         window.webkit.messageHandlers.bwNativeComputerVoice.postMessage({
           action: 'type',
           text: String(text || '').slice(0, 4000)
         });
-        try { threadMsg('asst-note', '→ 已发进通话：' + shownN); } catch (e) {}
+        // ⚠ 不回显成功（用户 2026-09-11：「那个已发进对话的提示可以取消掉」）。
+        //   通了之后这句每打一行就重复一次，成了噪音。
+        //   **失败那条保留** —— 去掉它就回到静默失败，而这个功能之所以能
+        //   拖着不被发现，正是因为它当初一点痕迹都不留。
         return true;
       }
     } catch (e) {}
@@ -5052,9 +5053,6 @@
       }
       return false;
     }
-    var shown = String(text || '');
-    if (shown.length > 60) shown = shown.slice(0, 60) + '…';
-    try { threadMsg('asst-note', '→ 已发进通话：' + shown); } catch (e) {}
     try {
       api.sendTyped(text).then(function (r) {
         if (r && r.ok) return;
