@@ -126,6 +126,18 @@ def _load_located_dwell(root: Path) -> list[dict[str, Any]]:
                 "lon": float(loc["lon"]),
                 "name": str(loc.get("name") or ""),
                 "secs": secs,
+                # 设备当时**有没有在后台盯着移动**（显著位置变化）。
+                #
+                # ⚠ 这一位存在的理由：没有它，"很久没更新"就只能被读成
+                # 「不知道他在哪」。可如果设备正盯着移动，久未更新恰恰是
+                # 「**他一直没挪窝**」—— 那是个很强的肯定信号，却被判成了
+                # 无知。用户 2026-09-11 报的"经常出现位置记录过旧"，一半
+                # 是这么来的：在家坐一下午，位置一点没变，却被标成过旧。
+                #
+                # 设备没报就是 False（不知道 → 按老规矩看时间），
+                # 绝不默认为真：把"没在盯"当成"在盯"，会让一条真正过期的
+                # 位置冒充当前，那比标错旧严重得多。
+                "watching": bool(loc.get("watching") is True),
             })
     return rows
 
@@ -314,6 +326,87 @@ def name_latest(root: Path, name: str) -> dict | None:
     return latest
 
 
+#: 桥那侧写的后台定位收件箱（C# DeviceLocationInboxFileName 同名）。
+DEVICE_LOCATION_INBOX = "device-location-inbox.jsonl"
+#: 后台定位落进活动账本时用的"书"目录名。
+#:
+#: ⚠ 借用 replication-data 的目录结构是**故意**的：`_load_located_dwell`
+#: 扫的就是它下面每个子目录的 activity jsonl，所以后台定位一落进来，
+#: 常在位置聚类、当前位置导出、到达自动关闭全都自动认它 —— 不用在三处
+#: 各加一条"还要看后台定位"的分支，而那种分支迟早漏一处。
+DEVICE_LOCATION_BOOK_DIR = "_device-location"
+
+
+def drain_device_location_inbox(runtime: Path, root: Path) -> int:
+    """把桥收到的后台定位，变成活动账本里的一行。返回搬了几条。
+
+    为什么要有这条（2026-09-12 用户："不能在我没有使用 app 时向服务器更新
+    位置信息么，现在这样经常会出现位置记录过旧"）：
+    前台那条链是搭在**翻页停留**上走的（reader 把 loc 挂进 dwell 命令），
+    所以不开 app 就没有位置。后台没有 WebView 也没有翻页，只能由设备原生
+    直报到桥；桥只负责记原始值，格式与目录规矩留在这里。
+
+    ⚠ **排空要在追加成功之后**。先清再写的话，一次写失败就把那批定位
+    永久丢了 —— 而定位是采不回来的（evidence-quality 的第一条）。
+    """
+    inbox = runtime / DEVICE_LOCATION_INBOX
+    try:
+        raw = inbox.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        return 0
+    rows: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(item, dict):
+            continue
+        lat, lon = item.get("lat"), item.get("lon")
+        if not (isinstance(lat, (int, float))
+                and isinstance(lon, (int, float))):
+            continue
+        loc: dict[str, Any] = {"lat": float(lat), "lon": float(lon)}
+        if isinstance(item.get("acc"), (int, float)):
+            loc["acc"] = float(item["acc"])
+        if isinstance(item.get("name"), str) and item["name"]:
+            loc["name"] = item["name"][:80]
+        # ⚠ 只有设备明说在盯着，才算在盯。默认 False，见判新旧那一侧。
+        loc["watching"] = item.get("watching") is True
+        at_ms = item.get("receivedAtUtcMs")
+        rows.append({
+            "receivedAtUtcMs": int(at_ms) if isinstance(at_ms, int) else 0,
+            "mutationId": "device-location-%s" % (item.get("at") or at_ms),
+            "deviceId": "device-location",
+            "body": {
+                "kind": "dwell",
+                "file": DEVICE_LOCATION_BOOK_DIR,
+                "entries": [],
+                "loc": loc,
+                "at": int(item.get("at") or 0),
+            },
+        })
+    if not rows:
+        return 0
+    book_dir = root / "replication-data" / DEVICE_LOCATION_BOOK_DIR
+    book_dir.mkdir(parents=True, exist_ok=True)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import replication_activity
+    path = book_dir / replication_activity.ACTIVITY_FILE_NAME
+    with path.open("a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + chr(10))
+    # 追加成功了才清。
+    try:
+        inbox.unlink()
+    except OSError:
+        pass
+    return len(rows)
+
+
 def export_current_place(root: Path, export_path: Path) -> dict | None:
     """最后一次已知位置 → 别名优先 → 导出给桥的快照 join。
 
@@ -371,6 +464,9 @@ def export_current_place(root: Path, export_path: Path) -> dict | None:
         # 各认各的迟早认岔（改了别名却只改了一处）。
         "state": place_state(alias),
         "observedAtUtcMs": latest["atUtcMs"],
+        # 透传"设备当时在不在盯着移动" —— 判新旧的那一侧据此分辨
+        # 「没挪窝」和「不知道」（见 judgment_basis.render）。
+        "watching": bool(latest.get("watching")),
     }
     temporary = export_path.with_suffix(".tmp")
     export_path.parent.mkdir(parents=True, exist_ok=True)

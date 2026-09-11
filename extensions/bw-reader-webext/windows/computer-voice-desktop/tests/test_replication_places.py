@@ -114,6 +114,87 @@ class PlacesTests(unittest.TestCase):
             "一条定位都没有时必须删掉文件 —— 缺席才是「不知道在哪」")
 
 
+
+class DeviceLocationInboxTests(unittest.TestCase):
+    """后台定位：桥写收件箱 → 这边变成活动账本里的一行。
+
+    ⚠ 为什么借 replication-data 的目录：`_load_located_dwell` 扫的就是它下面
+    每个子目录的 activity jsonl，所以后台定位一落进来，常在位置聚类、当前
+    位置导出、到达自动关闭全都自动认它 —— 不用在三处各加一条"还要看后台
+    定位"的分支，而那种分支迟早漏一处。
+    """
+
+    def setUp(self) -> None:
+        base = Path(tempfile.mkdtemp(prefix="dev-loc-"))
+        self.root = base / "root"
+        self.runtime = base / "runtime"
+        self.root.mkdir()
+        self.runtime.mkdir()
+
+    def _inbox(self, *rows: dict) -> None:
+        path = self.runtime / replication_places.DEVICE_LOCATION_INBOX
+        path.write_text(
+            "".join(json.dumps(r, ensure_ascii=False) + chr(10)
+                    for r in rows),
+            encoding="utf-8")
+
+    def test_background_fix_becomes_the_current_place(self) -> None:
+        self._inbox({
+            "lat": 35.681, "lon": 139.767, "name": "東京駅",
+            "receivedAtUtcMs": 1_700_000_000_000, "watching": True,
+        })
+        moved = replication_places.drain_device_location_inbox(
+            self.runtime, self.root)
+        self.assertEqual(moved, 1)
+        export = self.runtime / "current-place.json"
+        value = replication_places.export_current_place(self.root, export)
+        self.assertIsNotNone(value)
+        self.assertAlmostEqual(value["lat"], 35.681, places=3)
+        self.assertTrue(
+            value["watching"],
+            "设备说了在盯着移动，这一位必须透传到判新旧那一侧")
+
+    def test_watching_defaults_to_false(self) -> None:
+        """⚠ 没说在盯就是没在盯。
+
+        把"没在盯"当成"在盯"，会让一条早就过期的位置冒充当前 ——
+        那比标错旧严重得多，所以这一位只认设备明说的 true。
+        """
+        self._inbox({"lat": 1.0, "lon": 2.0,
+                     "receivedAtUtcMs": 1_700_000_000_000})
+        replication_places.drain_device_location_inbox(
+            self.runtime, self.root)
+        value = replication_places.export_current_place(
+            self.root, self.runtime / "current-place.json")
+        self.assertFalse(value["watching"])
+
+    def test_inbox_is_cleared_only_after_the_ledger_took_it(self) -> None:
+        """排空必须在追加成功之后 —— 定位是采不回来的。"""
+        self._inbox({"lat": 1.0, "lon": 2.0,
+                     "receivedAtUtcMs": 1_700_000_000_000})
+        replication_places.drain_device_location_inbox(
+            self.runtime, self.root)
+        self.assertFalse(
+            (self.runtime / replication_places.DEVICE_LOCATION_INBOX).exists(),
+            "搬完要清空，否则下一轮会重复计入")
+        ledger = (self.root / "replication-data"
+                  / replication_places.DEVICE_LOCATION_BOOK_DIR)
+        self.assertTrue(any(ledger.iterdir()), "账本里要真的有那一行")
+
+    def test_garbage_lines_do_not_stop_the_good_ones(self) -> None:
+        path = self.runtime / replication_places.DEVICE_LOCATION_INBOX
+        path.write_text(
+            "not json" + chr(10)
+            + json.dumps({"lat": "x", "lon": 2}) + chr(10)
+            + json.dumps({"lat": 3.0, "lon": 4.0,
+                          "receivedAtUtcMs": 1_700_000_000_000}) + chr(10),
+            encoding="utf-8")
+        self.assertEqual(
+            replication_places.drain_device_location_inbox(
+                self.runtime, self.root),
+            1, "坏行跳过，好行照搬")
+
+
 if __name__ == "__main__":
     unittest.main()
 

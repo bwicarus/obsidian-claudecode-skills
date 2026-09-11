@@ -740,6 +740,20 @@ if (window.__bwPwaProviderOnly) return;
         : (!d.authorized ? '已开启，但系统定位权限未授予（去 设置 App 里允许）'
           : (d.hasFix ? '已开启，定位正常' : '已开启，等待首次定位…'));
       st.style.color = (d.enabled && !d.authorized) ? '#ffcf8a' : '#8fa5c8';
+      // 后台档：**它只在前台档开着时才有意义**，所以前台关着就整行灰掉。
+      var bg = $('rcset-nat-loc-bg'), bgst = $('rcset-nat-loc-bgst');
+      if (bg && bgst) {
+        bg.checked = d.background === true;
+        bg.disabled = d.enabled !== true;
+        bgst.textContent = !d.enabled ? ''
+          : (!d.background
+              ? '关着时，只有你打开 App 才会更新地点'
+              : (d.alwaysAuthorized
+                  ? '开着：明显移动（约 500 米）时会被唤醒并记一次'
+                  : '已开启，但系统只给了「使用期间」—— 去 设置 App 里改成「始终」'));
+        bgst.style.color = (d.background && !d.alwaysAuthorized)
+          ? '#ffcf8a' : '#8fa5c8';
+      }
     }).catch(function () {
       var row = on.closest('label');
       if (row) row.style.display = 'none';
@@ -751,6 +765,25 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
   function _wireLocRow() {
+    var bg = $('rcset-nat-loc-bg');
+    if (bg && !bg.__wired) {
+      bg.__wired = true;
+      bg.addEventListener('change', function () {
+        var want = !!bg.checked;
+        bg.disabled = true;
+        // @interaction settings.device-location.pref
+        fetch('/pdf/api/device-location-pref', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ background: want })
+        }).then(function (r) { return r.json(); }).then(function () {
+          bg.disabled = false;
+          _fillLocRow();
+        }).catch(function () {
+          bg.disabled = false; bg.checked = !want;
+          try { RC.toast && RC.toast('后台地点开关保存失败'); } catch (e) {}
+        });
+      });
+    }
     var on = $('rcset-nat-loc-on');
     if (!on || on.__wired) return;
     on.__wired = true;
@@ -1263,6 +1296,10 @@ if (window.__bwPwaProviderOnly) return;
           '<input type="checkbox" id="rcset-nat-loc-on" style="width:16px;height:16px"> 记录学习地点' +
         '</label>' +
         '<div id="rcset-nat-loc-st" style="font-size:12px;color:#8fa5c8;margin:-2px 0 8px">读取中…</div>' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;cursor:pointer;margin:0 0 6px 22px">' +
+          '<input type="checkbox" id="rcset-nat-loc-bg" style="width:16px;height:16px"> 不开 App 时也更新地点' +
+        '</label>' +
+        '<div id="rcset-nat-loc-bgst" style="font-size:12px;color:#8fa5c8;margin:-2px 0 8px 22px"></div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">开着时，读页停留记录会带上当时的位置（坐标与地名，建筑物级），用于以后回答"我在哪学的"。首次打开会请求系统定位权限（使用期间）。位置只随学习记录存到你自己的服务器，不发给任何第三方。</div>' +
         HR +
         '<label style="' + LBL + '">🔑 凭据</label>' +

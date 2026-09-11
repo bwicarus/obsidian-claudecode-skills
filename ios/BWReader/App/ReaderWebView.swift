@@ -2768,6 +2768,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         // 首次接线顺带取一次定位:开关已开而本会话还没定位过的场景
         // (刚打开 App 直接读书)不该等到下一次后台往返。
         ReaderLocationProvider.shared.refresh()
+        // 攒在设备上的后台定位借这次机会补送 —— 它们多半是电脑
+        // 睡着时留下的，而那是最常见的状况。
+        ReaderLocationProvider.shared.flushPendingFixes()
     }
 
     private func pushDeviceLocationToPage(_ snapshot: [String: Any]) {
@@ -2796,6 +2799,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         if foreground, !wasForeground {
             // 地点维度:进前台取一次定位(开关关着时 refresh 是空操作)。
             ReaderLocationProvider.shared.refresh()
+        // 攒在设备上的后台定位借这次机会补送 —— 它们多半是电脑
+        // 睡着时留下的，而那是最常见的状况。
+        ReaderLocationProvider.shared.flushPendingFixes()
         }
         if foreground, !wasForeground, isLocalRuntimeURL(webView.url) {
             if restartLocalRuntime, let localRuntimeServer {

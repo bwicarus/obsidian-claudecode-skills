@@ -648,6 +648,19 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/map/tile",
             new[] { "GET" },
             context => HandleMapTileAsync(context, serviceToken));
+        // 后台定位收件口（2026-09-12 用户："我的手机和 ipad app 不能在我没有
+        // 使用 app 时向服务器更新位置信息么，现在这样经常会出现位置记录过旧"）。
+        //
+        // 前台那条链是搭在「翻页停留」上走的（reader 把 loc 挂进 dwell 命令），
+        // 后台没有 WebView 也没有翻页，所以只能由原生直报。
+        //
+        // ⚠ 这里**只记原始定位**，不碰 replication-data 的目录与记录格式 ——
+        // 那套规矩归 Python 那侧（replication_apply 的 tick 会排空收件箱）。
+        // 在 C# 里再造一份，迟早两边不一致，而不一致的表现是位置悄悄不更新。
+        app.MapMethods(
+            "/device/location",
+            new[] { "POST", "OPTIONS" },
+            context => HandleDeviceLocationAsync(context, serviceToken));
         app.MapMethods(
             "/reader-output/pending",
             new[] { "POST", "OPTIONS" },
@@ -2715,6 +2728,119 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             .WriteAckAsync(context, serviceCancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <summary>后台定位：只把一条原始记录写进收件箱。</summary>
+    /// <remarks>
+    /// ⚠ **`watching` 是设备说的，不是我们猜的**。它表示"这台设备正在后台
+    /// 盯着移动"，判新旧那一侧据此把「久没更新」读成「久没挪窝」而不是
+    /// 「不知道在哪」。所以它必须由真正开着监听的那一方声明；
+    /// 服务器这边默认 false —— 把"没在盯"当成"在盯"，会让一条早就过期的
+    /// 位置冒充当前，那比标错旧严重得多。
+    /// </remarks>
+    private async Task HandleDeviceLocationAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!PrepareOutputCors(context, "POST, OPTIONS"))
+        {
+            return;
+        }
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode =
+                StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+        JsonDocument body;
+        try
+        {
+            body = await JsonDocument.ParseAsync(
+                context.Request.Body,
+                cancellationToken: serviceCancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (JsonException)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return;
+        }
+        using (body)
+        {
+            JsonElement root = body.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("lat", out JsonElement latValue)
+                || !root.TryGetProperty("lon", out JsonElement lonValue)
+                || !latValue.TryGetDouble(out double lat)
+                || !lonValue.TryGetDouble(out double lon)
+                || double.IsNaN(lat) || double.IsNaN(lon)
+                || lat < -90 || lat > 90 || lon < -180 || lon > 180)
+            {
+                context.Response.StatusCode =
+                    StatusCodes.Status400BadRequest;
+                return;
+            }
+            string? runtime = ReaderAttentionBoard.RuntimeDirectory;
+            if (string.IsNullOrEmpty(runtime))
+            {
+                context.Response.StatusCode =
+                    StatusCodes.Status503ServiceUnavailable;
+                return;
+            }
+            JsonObject entry = new()
+            {
+                ["contract"] = "reader-device-location/1",
+                ["lat"] = Math.Round(lat, 6),
+                ["lon"] = Math.Round(lon, 6),
+                ["receivedAtUtcMs"] =
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            };
+            if (root.TryGetProperty("at", out JsonElement atValue)
+                && atValue.TryGetInt64(out long at) && at > 0)
+            {
+                entry["at"] = at;
+            }
+            if (root.TryGetProperty("acc", out JsonElement accValue)
+                && accValue.TryGetDouble(out double acc) && acc >= 0)
+            {
+                entry["acc"] = Math.Round(acc, 1);
+            }
+            if (root.TryGetProperty("name", out JsonElement nameValue)
+                && nameValue.ValueKind == JsonValueKind.String)
+            {
+                string name = nameValue.GetString() ?? string.Empty;
+                if (name.Length > 0)
+                {
+                    entry["name"] = name.Length > 80 ? name[..80] : name;
+                }
+            }
+            entry["watching"] =
+                root.TryGetProperty("watching", out JsonElement watchValue)
+                && watchValue.ValueKind == JsonValueKind.True;
+            try
+            {
+                Directory.CreateDirectory(runtime);
+                await File.AppendAllTextAsync(
+                    Path.Combine(runtime, DeviceLocationInboxFileName),
+                    entry.ToJsonString() + Environment.NewLine,
+                    serviceCancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                context.Response.StatusCode =
+                    StatusCodes.Status500InternalServerError;
+                return;
+            }
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            context.Response.ContentType = "application/json; charset=utf-8";
+            await context.Response.WriteAsync(
+                "{\"ok\":true}", serviceCancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    /// 后台定位的收件箱文件名。Python 那侧按同名读取并排空。
+    internal const string DeviceLocationInboxFileName =
+        "device-location-inbox.jsonl";
 
     private async Task HandleOutputReceiptAsync(
         HttpContext context,

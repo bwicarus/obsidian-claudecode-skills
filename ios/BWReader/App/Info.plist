@@ -41,6 +41,8 @@
     <true/>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>仅在你打开「记录学习地点」开关时，用于在学习记录中标注阅读发生的地点（如图书馆、自习室）。位置数据只保存在你自己的服务器，不发给任何第三方。</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>仅在你另外打开「后台更新地点」开关时，App 会在你**明显移动**（约 500 米或基站切换）时被唤醒一次，把当前位置记到你自己的服务器上，用于判断提醒该不该现在响（例如你已经到家了就别再提醒坐车回家）。不做连续轨迹记录，不在你静止时唤醒，位置数据不发给任何第三方。</string>
     <key>NSAlarmKitUsageDescription</key>
     <string>用于把到点必须知道的提醒（如赶车、出门时间）排成系统闹钟，确保在静音或专注模式下也能叫住你。只为你自己创建的提醒排闹钟。</string>
     <key>NSRemindersFullAccessUsageDescription</key>
@@ -78,6 +80,12 @@
              立刻报一通来电，否则 App 会被系统杀掉、后续 push 被封。
              所以这条通道只能真的响铃，不能拿来做普通通知。 -->
         <string>voip</string>
+        <!-- 后台定位（2026-09-12）：只用显著位置变化
+             （startMonitoringSignificantLocationChanges），移动约 500m
+             或基站切换才唤醒，走基站与 WiFi、不开 GPS。
+             ⚠ **不做连续轨迹**：那与「不连续追踪」那条纪律相抵触，
+             也过不了审。静止时不唤醒，所以"很久没更新"恰恰说明没挪窝。 -->
+        <string>location</string>
     </array>
     <key>UILaunchScreen</key>
     <dict/>

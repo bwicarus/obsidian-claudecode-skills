@@ -84,6 +84,8 @@ def collect(root: Path, runtime: Path) -> dict[str, Any]:
             "state": place.get("state"),
             "alias": place.get("alias"),
             "ageMinutes": _age_min(place.get("observedAtUtcMs"), now_ms),
+            # 设备有没有在后台盯着移动。盯着的话，"久没更新"= "久没挪窝"。
+            "watching": bool(place.get("watching")),
         }
 
     # ── ReaderPC 状态文件（阅读焦点 + 语音链路，一个文件两份依据）
@@ -168,6 +170,41 @@ def collect(root: Path, runtime: Path) -> dict[str, Any]:
     return basis
 
 
+#: 后台盯着移动时，多久没动才值得怀疑"是不是不盯了"。
+#:
+#: ⚠ 不是"多旧算旧" —— 盯着的时候旧不代表不准，代表没挪窝。这个数只用来
+#: 防另一种失败：权限被撤、app 被卸、盯的那条链悄悄断了，而我们还把
+#: 半天前的位置当现状。12 小时 ≈ 一觉醒来都没动过，那更像链断了。
+WATCHING_DOUBT_MINUTES = 12 * 60
+
+
+def _place_freshness(place: dict[str, Any], age: int | None) -> str:
+    """位置这条要不要加一句"别当现状"。
+
+    ⚠ **「没挪窝」和「不知道」是两件事**（2026-09-11 用户点出来：
+    「现在这样经常会出现位置记录过旧的情况」）。原来只按时间判：超过 30
+    分钟就标"旧记录"。可位置本来就变化慢 —— 在家坐一下午，位置一点没变，
+    照样被标成过旧，于是 AI 每次都得把一条完全有效的信息当可疑的。
+
+    分开之后：
+      · 设备在后台盯着移动 → 久没更新 = **久没挪窝**，那是肯定信号，不标旧；
+        只有久到离谱（见 WATCHING_DOUBT_MINUTES）才怀疑盯的链断了。
+      · 没在盯（或不知道在不在盯）→ 照旧按时间判，因为"没消息"确实
+        既可能是没动、也可能是没人报。
+    """
+    if age is None:
+        return ""
+    if place.get("watching"):
+        if age <= 30:
+            return ""
+        if age >= WATCHING_DOUBT_MINUTES:
+            return (f"（{age} 分钟没更新了，后台定位可能已经停掉 —— "
+                    "别当现状）")
+        return f"（{age} 分钟没挪窝）"
+    return ("" if age <= 30
+            else f"（{age} 分钟前的旧记录，不是刚测的）")
+
+
 def render(basis: dict[str, Any]) -> str:
     """给人/AI 读的紧凑版。规矩：一行一个依据，「不知道」直说。"""
     lines: list[str] = []
@@ -180,9 +217,7 @@ def render(basis: dict[str, Any]) -> str:
             "home": "家", "work": "工作地点"}.get(
             place.get("state") or "", "别处（没命名过）")
         age = place.get("ageMinutes")
-        stale = ("" if age is None or age <= 30
-                 else f"（{age} 分钟前的旧记录，不是刚测的）")
-        lines.append(f"地点：{name}{stale}")
+        lines.append(f"地点：{name}{_place_freshness(place, age)}")
 
     heartbeat = basis.get("readerpcHeartbeatAgeMinutes")
     if heartbeat is None:

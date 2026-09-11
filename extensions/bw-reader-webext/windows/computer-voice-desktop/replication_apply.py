@@ -851,6 +851,15 @@ def run_once(
                     notify_store, local_root
                 )
                 import replication_places
+                # ⚠ **先排空后台定位的收件箱，再导出当前位置** —— 顺序反了
+                # 的话这一轮拿到的仍是上一轮的旧位置，而"位置记录过旧"正是
+                # 这条链要修的毛病。
+                try:
+                    replication_places.drain_device_location_inbox(
+                        digests_path.parent, local_root)
+                except Exception:
+                    # 后台定位是增量信息，搬不动不该拖垮整轮复制。
+                    pass
                 replication_places.export_current_place(
                     local_root,
                     digests_path.parent

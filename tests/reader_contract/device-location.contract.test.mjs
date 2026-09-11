@@ -25,11 +25,25 @@ const RECEIVER = read("_server_deploy/pdf_reader.py");
 const SETTINGS = read("_server_deploy/static/pdf/rc-settings.js");
 const MANIFEST = read("ios/BWReader/native_reader_interface_manifest.json");
 
+// ⚠ 「不许出现 X」这类断言必须先砍注释再扫。
+//   整文件扫会把**解释"为什么不用 X"的注释**也算成一次出现 ——
+//   2026-09-12 就这么红过：文件头写着"不用 startUpdatingLocation()：那是
+//   连续轨迹"，而这句话正是在承诺不用它。仓库在 Python 侧早栽过同一跤
+//   （test_voice_entry.py 的 _literals），这里补上同一条纪律。
+function codeOnly(text) {
+  return text
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("//"))
+    .filter((line) => !line.trimStart().startsWith("///"))
+    .join("\n");
+}
+const PROVIDER_CODE = codeOnly(PROVIDER);
+
 test("Swift 提供者：开关先行 + 不连续追踪 + 反解节流", () => {
   assert.match(PROVIDER, /guard isEnabled else \{ return \}/,
     "开关关着 refresh 是空操作");
   assert.match(PROVIDER, /requestLocation\(\)/, "一次性定位");
-  assert.ok(!PROVIDER.includes("startUpdatingLocation"),
+  assert.ok(!PROVIDER_CODE.includes("startUpdatingLocation"),
     "绝不开连续追踪 —— 记录目标是建筑物，不是轨迹");
   assert.match(PROVIDER, /distance\(from: previous\) <= 50/,
     "移动 <=50m 复用缓存地名，不重复反解");
@@ -37,17 +51,40 @@ test("Swift 提供者：开关先行 + 不连续追踪 + 反解节流", () => {
   assert.match(PROVIDER, /mark\.name,/, "地名优先取 POI/建筑名");
 });
 
-test("桥：三个无参 location action 且错误响应 switch 覆盖", () => {
+test("桥：五个无参 location action 且错误响应 switch 覆盖", () => {
+  // ⚠ 2026-09-12 从三个变五个：后台档（不开 App 也更新地点）另开了一对开关
+  //   动作。它们**必须出现在每一处 switch** —— 漏一处编译照样过，运行时那
+  //   一支静默走空；上次 book-identity 就是这么把 CI 挂了的。
   for (const action of [
     "device-location-status", "device-location-enable", "device-location-disable",
+    "device-location-bg-enable", "device-location-bg-disable",
   ]) {
     assert.ok(BRIDGE.includes(`"${action}"`), action);
   }
   assert.match(BRIDGE,
-    /case \.status, \.bookIdentity, \.locationStatus, \.locationEnable, \.locationDisable:/,
+    /case \.status, \.bookIdentity, \.locationStatus, \.locationEnable, \.locationDisable,[\s\S]{0,120}?\.locationBackgroundDisable:/,
     "parse 无参组");
-  assert.match(BRIDGE, /case \.locationStatus, \.locationEnable, \.locationDisable:\s*\n\s*payload\["enabled"\] = false/,
+  assert.match(BRIDGE,
+    /case \.locationStatus, \.locationEnable, \.locationDisable,[\s\S]{0,120}?\.locationBackgroundDisable:\s*\n\s*payload\["enabled"\] = false/,
     "错误响应 switch 覆盖（上次 book-identity 漏这里 CI 挂过）");
+});
+
+test("后台档：只用显著位置变化，watching 由设备声明，且有离线队列", () => {
+  // ⚠ **不许 startUpdatingLocation** —— 那是连续轨迹，与本文件开头那条
+  //   "不连续追踪"的纪律直接抵触，也过不了审。
+  assert.match(PROVIDER, /startMonitoringSignificantLocationChanges\(\)/,
+    "后台只用显著位置变化");
+  assert.ok(!/startUpdatingLocation\(\)/.test(PROVIDER_CODE),
+    "不许连续追踪");
+  assert.match(PROVIDER, /"watching": true/,
+    "报给服务器时声明「我在盯着」—— 判新旧那侧据此分辨「没挪窝」与「不知道」");
+  assert.match(PROVIDER, /pendingFixes/,
+    "离线补送队列：电脑睡着是常态，而后台唤醒只有一次机会");
+});
+
+test("Info.plist：始终权限说明与 location 后台模式都在场", () => {
+  assert.match(PLIST, /NSLocationAlwaysAndWhenInUseUsageDescription/);
+  assert.match(PLIST, /<string>location<\/string>/, "后台模式");
 });
 
 test("WebView：位置经全局变量推进页面，前台刷新一次", () => {

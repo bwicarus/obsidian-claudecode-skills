@@ -8529,7 +8529,13 @@
       return Promise.resolve().then(function () {
         if (method === 'GET') return { enable: null };
         return bodyJSON(input, init).then(function (body) {
-          if (!exactKeys(body, ['enable']) || typeof body.enable !== 'boolean') {
+          // ⚠ 后台档是**第二个**开关（2026-09-12）：字段白名单在这里，
+          //   漏了它的表现是面板点了没反应、三处都不报错。
+          var onlyEnable = exactKeys(body, ['enable'])
+            && typeof body.enable === 'boolean';
+          var onlyBackground = exactKeys(body, ['background'])
+            && typeof body.background === 'boolean';
+          if (!onlyEnable && !onlyBackground) {
             throw new RuntimeError(
               '地点开关请求字段无效', 'BW_LOCAL_DEVICE_LOCATION_BODY'
             );
@@ -8537,8 +8543,16 @@
           return body;
         });
       }).then(function (body) {
-        var action = locAction ||
-          (body.enable ? 'device-location-enable' : 'device-location-disable');
+        var action = locAction;
+        if (!action) {
+          action = (typeof body.background === 'boolean')
+            ? (body.background
+                ? 'device-location-bg-enable'
+                : 'device-location-bg-disable')
+            : (body.enable
+                ? 'device-location-enable'
+                : 'device-location-disable');
+        }
         return nativePageTextRequest(action, {});
       }).then(function (reply) {
         if (!reply) {
@@ -8551,7 +8565,9 @@
           ok: true,
           enabled: reply.enabled === true,
           authorized: reply.authorized === true,
-          hasFix: reply.hasFix === true
+          hasFix: reply.hasFix === true,
+          background: reply.background === true,
+          alwaysAuthorized: reply.alwaysAuthorized === true
         });
       }).catch(function (error) {
         return jsonResponse({

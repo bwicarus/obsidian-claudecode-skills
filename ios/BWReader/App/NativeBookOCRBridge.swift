@@ -191,12 +191,20 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                         request: request,
                         contentSHA256: expectedContentSHA256
                     )
-                case .locationStatus, .locationEnable, .locationDisable:
+                case .locationStatus, .locationEnable, .locationDisable,
+                     .locationBackgroundEnable,
+                     .locationBackgroundDisable:
                     let provider = ReaderLocationProvider.shared
                     if request.action == .locationEnable {
                         provider.setEnabled(true)
                     } else if request.action == .locationDisable {
                         provider.setEnabled(false)
+                    } else if request.action
+                        == .locationBackgroundEnable {
+                        provider.setBackgroundEnabled(true)
+                    } else if request.action
+                        == .locationBackgroundDisable {
+                        provider.setBackgroundEnabled(false)
                     }
                     payload = [
                         "contract": Self.responseContract,
@@ -210,6 +218,10 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                         "enabled": provider.isEnabled,
                         "authorized": provider.isAuthorized,
                         "hasFix": provider.latest != nil,
+                        "background": provider.isBackgroundEnabled,
+                        // 「始终」到手了没 —— 没到手时后台档开着也不会
+                        // 真的盯，面板要能说清楚是卡在权限还是卡在开关。
+                        "alwaysAuthorized": provider.hasAlwaysAuthorization,
                     ]
                 case .watchCard:
                     let raw = request.card ?? [:]
@@ -423,6 +435,9 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         case locationStatus = "device-location-status"
         case locationEnable = "device-location-enable"
         case locationDisable = "device-location-disable"
+        // 后台档（2026-09-12）：与前台档分开，另要一次「始终」权限。
+        case locationBackgroundEnable = "device-location-bg-enable"
+        case locationBackgroundDisable = "device-location-bg-disable"
         // iOS 系统投影（2026-08-27）：提醒事项显示副本/本地通知/小组件。
         case systemProjection = "system-projection"
         case search
@@ -506,7 +521,9 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                     bbox: nil,
                     phrases: list
                 )
-            case .status, .bookIdentity, .locationStatus, .locationEnable, .locationDisable:
+            case .status, .bookIdentity, .locationStatus, .locationEnable, .locationDisable,
+             .locationBackgroundEnable,
+             .locationBackgroundDisable:
                 guard Set(value.keys) == common else {
                     throw BridgeError.invalidRequest
                 }
@@ -1048,7 +1065,9 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
             payload["contentSha256"] = NSNull()
         case .phrasesSet:
             payload["count"] = 0
-        case .locationStatus, .locationEnable, .locationDisable:
+        case .locationStatus, .locationEnable, .locationDisable,
+             .locationBackgroundEnable,
+             .locationBackgroundDisable:
             payload["enabled"] = false
             payload["authorized"] = false
             payload["hasFix"] = false

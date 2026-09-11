@@ -96,6 +96,53 @@ class JudgmentBasisTests(unittest.TestCase):
         self.assertIn("地点：家", text, "旧记录也要给出来")
         self.assertIn("旧记录", text, "但必须注明旧")
 
+    def _place(self, *, age_minutes: int, watching: bool) -> str:
+        now_ms = int(time.time() * 1000)
+        (self.runtime / "current-place.json").write_text(json.dumps({
+            "alias": "家", "state": "home", "watching": watching,
+            "observedAtUtcMs": now_ms - age_minutes * 60_000,
+        }), encoding="utf-8")
+        return judgment_basis.render(self._basis())
+
+    def test_watching_turns_old_into_has_not_moved(self) -> None:
+        """⚠ 「没挪窝」和「不知道」是两件事。
+
+        用户 2026-09-11：「现在这样经常会出现位置记录过旧的情况」。
+        位置本来就变化慢 —— 在家坐一下午，位置一点没变，却被按时间判成
+        "旧记录"，于是一条完全有效的信息每次都得当可疑的看。
+
+        设备在后台盯着移动时，久没更新恰恰是**肯定信号**：他没挪窝。
+        """
+        text = self._place(age_minutes=120, watching=True)
+        self.assertIn("地点：家", text)
+        self.assertIn("没挪窝", text, "盯着的时候，久没更新说明没动过")
+        self.assertNotIn("旧记录", text, "这不是旧记录，是没动过")
+
+    def test_not_watching_still_judged_by_time(self) -> None:
+        """没在盯就照旧按时间判 —— 那时"没消息"确实两可。"""
+        text = self._place(age_minutes=120, watching=False)
+        self.assertIn("旧记录", text)
+        self.assertNotIn("没挪窝", text)
+
+    def test_watching_but_absurdly_old_is_doubted(self) -> None:
+        """⚠ 盯着也有盯丢的时候：权限被撤、app 被卸、链悄悄断了。
+
+        久到离谱时要**怀疑盯的那条链**，而不是继续宣称"他一直没动" ——
+        那会让半天前的位置冒充现状，比标错旧严重得多。
+        """
+        text = self._place(
+            age_minutes=judgment_basis.WATCHING_DOUBT_MINUTES + 10,
+            watching=True)
+        self.assertIn("可能已经停掉", text)
+        self.assertIn("别当现状", text)
+
+    def test_watching_and_fresh_says_nothing_extra(self) -> None:
+        """新鲜就别加注释 —— 每多一句都是要 AI 分辨的噪音。"""
+        text = self._place(age_minutes=5, watching=True)
+        self.assertIn("地点：家", text)
+        self.assertNotIn("没挪窝", text)
+        self.assertNotIn("旧记录", text)
+
 
 if __name__ == "__main__":
     unittest.main()
