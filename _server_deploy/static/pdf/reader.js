@@ -12334,6 +12334,25 @@ async function _connProbe() {
   async function send(text, opts) {
     if (streaming) return;
     text = (text || '').trim();
+    // 通话中打字**直达通话**，不走文字助手管线（与 rc-assistant.js 同一个钩子）。
+    //
+    // ⚠ **这是第二份活的助手面板，而且正是 App 打包的那一份**
+    //   （reader.src/* → reader.js → ReaderBundle）。
+    //   2026-09-11 第一版只给 rc-assistant.js 接了这个钩子，于是 App 上
+    //   出现最坏的形态：输入框**绿着**（绿光来自共享层 rc-voicecall，装了），
+    //   打的字却照常发给阅读器助手 —— 用户当场发现"根本就没有传过去"。
+    //   颜色和去向必须同源，而同源要求**每一份会送出去的实现都接上**。
+    if (text && window.__vcSendText) {
+      try {
+        if (window.__vcSendText(text)) {
+          try {
+            var _ta0 = document.getElementById('asst-ta');
+            if (_ta0) { _ta0.value = ''; _ta0.style.height = 'auto'; }
+          } catch (e) {}
+          return;
+        }
+      } catch (e) {}
+    }
     var sentCtx = ctx();                                // 发送时定格上下文(图/选中/页),气泡卡片与后端保存的元数据一致
     // 隐式选中(无 chip 的持久兜底)也要"所见即所得":升格为可见焦点 chip(带 ✕)→ 之后每条都看得见、随时可取消
     // (用户反馈:选中悄悄跟着每条消息发,但上方没有那个带 x 的框,无法取消)

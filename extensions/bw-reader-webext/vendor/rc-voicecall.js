@@ -5007,9 +5007,27 @@ if (window.__bwPwaProviderOnly) return;
   // 摆成气泡会暗示"等回答"，而那个回答永远不会出现在这里。
   function _pcTypedSend(text) {
     var api = window.RC && RC.computerVoice;
-    if (!api || typeof api.sendTyped !== 'function') return false;
-    if (typeof api.isActive === 'function' && !api.isActive()) return false;
-    if (!_audioRouteConnected) return false;
+    var why = '';
+    if (!api || typeof api.sendTyped !== 'function') why = '这个页面没装电脑语音层';
+    else if (typeof api.isActive === 'function' && !api.isActive()) why = '电脑那通已经不在了';
+    else if (!_audioRouteConnected) why = '音频通道没通';
+    if (why) {
+      // ⚠ **绿着却发不出去 = 颜色在骗人**，而且会悄悄掉回文字助手。
+      //   2026-09-11 用户就是这么撞上的：输入框绿着、打的字却被阅读器助手
+      //   回答了（"根本就没有传过去"）。当时这条路**一点痕迹都不留**，
+      //   所以它能一路躲到人眼前。现在绿着而发不出去就必须说一句。
+      var glowing = false;
+      try {
+        var _ai5 = document.getElementById('asst-input');
+        glowing = !!(_ai5 && _ai5.classList.contains('vc-pc'));
+      } catch (e) {}
+      if (glowing) {
+        try {
+          threadMsg('asst-note', '⚠ 没发进通话（' + why + '），这句走了文字助手');
+        } catch (e) {}
+      }
+      return false;
+    }
     var shown = String(text || '');
     if (shown.length > 60) shown = shown.slice(0, 60) + '…';
     try { threadMsg('asst-note', '→ 已发进通话：' + shown); } catch (e) {}
