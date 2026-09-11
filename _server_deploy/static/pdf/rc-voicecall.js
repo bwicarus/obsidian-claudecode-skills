@@ -9967,9 +9967,15 @@
         _paintComputerVoiceConnected();
         if (!_greenLightAllowed()) _startLadderProgress(generation);
       } else if (state === 'failed' || state === 'stopped') {
-        _stopLadderProgress();
-        _computerVoiceStarting = false;
+        // ⚠ 同上：**起语音过程中**的 failed 不该灭灯（2026-09-11）。
+        // 音频通道这一侧失败了，而桥的入口链还在推进；灭掉等于把"还在试"
+        // 说成"不会成了"。起语音已经结束之后再收到 failed 才是真结束。
         _audioRouteConnected = false;
+        if (_computerVoiceStarting) {
+          computerBtnConnecting(true);
+          return;
+        }
+        _stopLadderProgress();
         computerBtnConnecting(false);
         computerBtnOn(false);
         taPlaceholder(null);
@@ -9986,18 +9992,44 @@
         RC.computerVoice.stop('stale-reader-start').catch(function () {});
       }
     }).catch(function (error) {
-      _stopLadderProgress();
       _computerVoiceStarting = false;
       _connecting = false;
       _setComputerVoiceDialPending(false);
       if (generation !== _gen) return;
-      _userHung = true;
-      computerBtnConnecting(false);
-      computerBtnOn(false);
       var startMessage = (error && error.code ===
         'BW_COMPUTER_VOICE_GESTURE_REQUIRED')
         ? '电脑客户端刚载入，请再点一次电脑按钮'
         : ((error && error.message) || '电脑客户端启动失败');
+
+      // ⚠ **一次 START 失败不是"打不开语音"**（用户 2026-09-11）：
+      //
+      //   「codex 未启动时确实立刻启动了 codex 程序，但这个状态下无论发生
+      //     什么都应该保持黄色闪烁而不是立刻灭掉一次」
+      //
+      // 他说的就是这个分支。Codex 冷启动时 START 常常撞上 APP_AMBIGUOUS
+      // （启动期短暂多进程树），而那一刻**桥其实已经把 Codex 拉起来了、
+      // 入口链还在跑**。这里却一把灭掉，于是用户看到"闪一下就没了"，
+      // 只好再按一次 —— 而第二次能成，正是因为第一次已经把 Codex 拉起来了。
+      //
+      // 按下之后只该有三种结局：绿（通了）／说明原因后灭（明确失败）／
+      // 一直黄闪。**可重试的失败属于第三种。**
+      //
+      // 明确失败只有两类：这一代已经作废（上面 generation 那句管了），
+      // 以及对面说"这条路不通、再试也没用"（retryable === false）。
+      // 其余一律继续闪，由梯子决定结局 —— 它拿得到 startGaveUp，
+      // 那才是真正的"不会再成了"。
+      var definite = error && error.retryable === false
+        && error.code !== 'BW_COMPUTER_VOICE_DIRECT_APP_AMBIGUOUS';
+      if (!definite) {
+        setSt('正在打开语音 · ' + startMessage);
+        computerBtnConnecting(true);
+        _startLadderProgress(generation);
+        return;
+      }
+      _stopLadderProgress();
+      _userHung = true;
+      computerBtnConnecting(false);
+      computerBtnOn(false);
       setSt(startMessage);
       taPlaceholder(null);
       try {

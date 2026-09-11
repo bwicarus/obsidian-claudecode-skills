@@ -317,6 +317,7 @@ internal static class ReaderCodexPush
         connect.Append("\n【快板】\n").Append(Trim(fastNow));
         connect.Append("\n【慢板】\n").Append(Trim(slowNow));
         string prompt = connect.ToString();
+        using IDisposable _whyConnect = Because("通道刚登记，补一次全量板");
         // ⚠ **提示板要发给正在通话的那条对话**（2026-09-11 用户点出来的）：
         //
         //   「建立通道后再让 ai 运行快捷键开启语音，可能会造成开启语音的
@@ -438,6 +439,8 @@ internal static class ReaderCodexPush
             body.Append("\n【慢板】\n").Append(Trim(slowText));
         }
         string prompt = body.ToString();
+        // ⚠ 原因只说"为什么发"；"发给谁"由出站咽喉自己记（它那时才知道）。
+        using IDisposable _why = Because("板面变了（" + which + "）");
         // ⚠ **提示板要发给正在通话的那条对话**（2026-09-11 用户点出来的）：
         //
         //   「建立通道后再让 ai 运行快捷键开启语音，可能会造成开启语音的
@@ -631,6 +634,8 @@ internal static class ReaderCodexPush
             + "请调用 end_realtime_voice_call 结束当前语音通话，不要只回复文字。\n"
             + "请求编号：" + Trim(requestId)
             + "（同一编号再次出现表示上一次没有生效）。";
+        using IDisposable _whyHangUp = Because(
+            "自动关闭触发：" + Trim(reason));
         try
         {
             await SendAsync(
@@ -867,12 +872,84 @@ internal static class ReaderCodexPush
     private static readonly SemaphoreSlim OutboundGate = new(1, 1);
     private static DateTime _lastOutboundAtUtc = DateTime.MinValue;
 
+    /// <summary>
+    /// 这一条是**为什么**发出去的。由调用方在发之前设，出站咽喉照抄进账本。
+    /// </summary>
+    /// <remarks>
+    /// ⚠ 用户 2026-09-11：「每个动作都该带上触发的原因和记录，我们不记录
+    /// 无法分析多次发送指令的原因」。
+    ///
+    /// 那一夜最难堪的一次就是这个：02:19–02:28 对面收到 6 条入口指令，而账本
+    /// 里**一行都没有** —— 我只能说"不知道是谁发的"。原因是记账挂在各个
+    /// 包装函数上，绕过包装的路子就不留痕。
+    ///
+    /// 现在挪到唯一的出站咽喉：**任何消息出去都留一行，带上 purpose、目标
+    /// 线程、和这个 cause**。谁发的、为什么发、发给谁，一次全在。
+    ///
+    /// ⚠ AsyncLocal 而不是参数：cause 要跨越"入口循环 → 请求函数 → 发送"
+    /// 好几层，一路当参数传会让每个中间层都有机会忘掉它 ——
+    /// 而忘掉的那条正是将来要查的那条。
+    /// </remarks>
+    private static readonly System.Threading.AsyncLocal<string?> _cause = new();
+
+    internal static IDisposable Because(string cause)
+    {
+        string? previous = _cause.Value;
+        _cause.Value = cause;
+        return new CauseScope(previous);
+    }
+
+    private sealed class CauseScope(string? previous) : IDisposable
+    {
+        public void Dispose() => _cause.Value = previous;
+    }
+
     private static async Task SendAsync(
         ReaderCodexEndpoint.Binding binding,
         string prompt,
         CancellationToken cancellationToken,
         string? threadIdOverride = null,
         string purpose = "reader-board-push")
+    {
+        string target = string.IsNullOrEmpty(threadIdOverride)
+            ? binding.ThreadId
+            : threadIdOverride!;
+        string why = _cause.Value ?? "（调用方没说为什么 —— 这本身是个 bug）";
+        try
+        {
+            await SendTracedAsync(
+                binding, prompt, cancellationToken,
+                threadIdOverride, purpose).ConfigureAwait(false);
+            NoteOutbound(purpose, target, why, true, "");
+        }
+        catch (Exception exception)
+        {
+            NoteOutbound(purpose, target, why, false,
+                         exception.GetType().Name + "：" + exception.Message);
+            throw;
+        }
+    }
+
+    /// 出站流水：**每一条消息一行**，与各个包装函数的"结果账"分开。
+    /// 前者回答"谁发了什么、为什么"，后者回答"这次动作成没成"。
+    private static void NoteOutbound(
+        string purpose, string target, string why, bool ok, string detail)
+    {
+        string head = target.Length > 13 ? target[..13] : target;
+        NoteAttempt(
+            "outbound/" + purpose,
+            head,
+            ok,
+            "因为「" + why + "」→ " + head
+            + (detail.Length > 0 ? "；" + detail : ""));
+    }
+
+    private static async Task SendTracedAsync(
+        ReaderCodexEndpoint.Binding binding,
+        string prompt,
+        CancellationToken cancellationToken,
+        string? threadIdOverride,
+        string purpose)
     {
         // ⚠ **时间敏感的那几条连队都不排**（2026-09-11 第二轮修）。
         //

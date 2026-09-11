@@ -574,6 +574,26 @@ test("绿灯：梯子说得准时就别去问台账", () => {
   assert.equal(evidence(fresher), true, "现读的结论没有压过陈旧的梯子");
 });
 
+test("按下之后不许闪一下就灭", () => {
+  // 用户 2026-09-11：「codex 未启动时确实立刻启动了 codex 程序，但这个状态下
+  // 无论发生什么都应该保持黄色闪烁而不是立刻灭掉一次」。
+  //
+  // Codex 冷启动时 START 常常撞上 APP_AMBIGUOUS（启动期短暂多进程树），而
+  // 那一刻桥其实已经把 Codex 拉起来了、入口链还在跑。原来这里一把灭掉，
+  // 于是要按第二次 —— 而第二次能成，正因为第一次已经把 Codex 拉起来了。
+  const voice = read("_server_deploy/static/pdf/rc-voicecall.js");
+  const from = voice.indexOf("RC.computerVoice.startFromUserGesture(opts");
+  assert.ok(from > 0);
+  const body = voice.slice(from, from + 2600);
+  // 只有"明确失败"才灭灯；可重试的继续闪
+  assert.match(body, /var definite = error && error\.retryable === false/);
+  const keep = body.indexOf("computerBtnConnecting(true)");
+  const kill = body.indexOf("computerBtnOn(false)");
+  assert.ok(keep > 0 && kill > keep, "灭灯必须排在「继续闪」之后（在 else 支）");
+  // APP_AMBIGUOUS 是启动期瞬时态，绝不算明确失败
+  assert.match(body, /APP_AMBIGUOUS/);
+});
+
 test("绿灯只有一条上漆路径，且它自己带闸", () => {
   // 我 2026-09-10 给 _greenLightAllowed 加宽限时**先数过**这一条：
   // 只要有第二处直接 computerBtnOn(true)，闸就形同不存在。

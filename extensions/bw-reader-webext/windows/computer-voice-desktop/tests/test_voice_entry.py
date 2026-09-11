@@ -1239,6 +1239,55 @@ class AuthoritativeSourceTests(unittest.TestCase):
         self.assertIn("realtime-voice-most-recent-thread", text)
 
 
+class EveryOutboundSaysWhyTests(unittest.TestCase):
+    """每一条外发都要留一行，并说清**为什么发**。
+
+    ⚠ 用户 2026-09-11：「每个动作都该带上触发的原因和记录，我们不记录无法
+    分析多次发送指令的原因」。那一夜 02:19–02:28 对面收到 6 条入口指令，而
+    账本里**一行都没有** —— 我只能答"不知道是谁发的"。病根是记账挂在各个
+    包装函数上，绕过包装的路子就不留痕。
+    """
+
+    BRIDGE = Path(__file__).resolve().parents[2] / "ComputerVoiceAudio"
+
+    def _push(self):
+        return (self.BRIDGE / "ReaderCodexPush.cs").read_text(encoding="utf-8")
+
+    def test_the_choke_point_records_every_message(self):
+        """记账必须在**唯一的出站咽喉**，不在各个包装函数里。"""
+        push = self._push()
+        body = push.split("private static async Task SendAsync")[1]
+        body = body[:body.index("private static async Task SendTracedAsync")]
+        self.assertIn("NoteOutbound(", body, "咽喉没有留痕")
+        # 成功和失败**都要**记 —— 只记成功答不了"为什么没到"
+        self.assertGreaterEqual(body.count("NoteOutbound("), 2)
+        self.assertIn("catch (Exception exception)", body)
+
+    def test_a_missing_cause_is_loud_not_silent(self):
+        """调用方忘了说原因时，账本要写出来，而不是留空。"""
+        push = self._push()
+        self.assertIn("调用方没说为什么", push)
+
+    def test_every_sender_declares_a_cause(self):
+        """五条外发正文各自都要 Because(...)。"""
+        push = self._push()
+        # Because 的调用次数 = 五条外发 + 定义本身
+        self.assertGreaterEqual(
+            push.count("Because("), 4,
+            "有外发没声明原因 —— 它出问题时无法归因")
+
+    def test_the_entry_cause_carries_the_trigger_and_round(self):
+        """入口那条最要紧：要说清是哪次 START、第几轮、为什么这一轮要发。"""
+        protocol = (self.BRIDGE / "DirectBridgeProtocol.cs").read_text(
+            encoding="utf-8")
+        body = protocol.split("RequestVoiceEntryIfNobodyElseWill")[-1]
+        self.assertIn("ReaderCodexPush.Because(", body)
+        cause = body[body.index("string why ="):][:600]
+        self.assertIn("sessionId", cause, "没说是哪次 START")
+        self.assertIn("round", cause, "没说第几轮")
+        self.assertIn("补发", cause, "没说这一轮为什么发")
+
+
 class ChannelChoiceTests(unittest.TestCase):
     """通道连哪条对话：一份设置，两个入口。"""
 

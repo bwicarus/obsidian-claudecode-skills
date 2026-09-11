@@ -3862,6 +3862,7 @@ internal sealed class DirectBridgeProtocolSession
             DateTime deadline = DateTime.UtcNow + VoiceEntryRetryWindow;
             // 送出去几次、上一次是什么时候 —— 用来决定这一轮该不该再送。
             int sentCount = 0;
+            int round = -1;
             DateTime lastSentAt = DateTime.MinValue;
             // 连着几次整条链都没起来，先重启一次 Codex 再谈（见
             // RestartCodexIfWedgedAsync；它自己判在不在通话、自己清零）。
@@ -3869,6 +3870,7 @@ internal sealed class DirectBridgeProtocolSession
                 .ConfigureAwait(false);
             while (true)
             {
+                round++;
                 try
                 {
                     // 中途语音自己起来了(或别人起了)就收手 —— 再催一遍会让对面
@@ -3926,6 +3928,20 @@ internal sealed class DirectBridgeProtocolSession
                     // 发送前手上有没有绑定 —— 决定失败之后要不要立刻重建。
                     bool hadBinding = ReaderCodexEndpoint.Current() is not null;
                     bool sentNow = false;
+                    // ⚠ **这一轮为什么发**，一路带到账本（用户 2026-09-11：
+                    // 「每个动作都该带上触发的原因和记录，我们不记录无法分析
+                    // 多次发送指令的原因」）。那一夜 02:19–02:28 对面收到 6 条
+                    // 入口指令而账本一行都没有，我只能说"不知道是谁发的"。
+                    string why =
+                        "START " + sessionId
+                        + "（" + appKind + "）第 " + (round + 1) + " 轮："
+                        + (sentCount == 0
+                            ? "还没送成过"
+                            : "上一条送出已满 "
+                              + VoiceEntrySentGrace.TotalSeconds.ToString(
+                                  "0", CultureInfo.InvariantCulture)
+                              + " 秒仍未起来，补发");
+                    using (ReaderCodexPush.Because(why))
                     try
                     {
                         sentNow = await ReaderCodexPush
