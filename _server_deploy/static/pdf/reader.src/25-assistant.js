@@ -1390,9 +1390,35 @@
     function apply() {
       var root = document.documentElement;
       if (!focused) { root.style.removeProperty('--rc-kb'); return; }
-      var hidden = window.innerHeight - vv.height - vv.offsetTop;
-      hidden = Math.max(0, Math.round(hidden));
-      root.style.setProperty('--rc-kb', hidden + 'px');
+      // ⚠ **按"输入框被挡住多少"算，不按"视口少了多少"算**（2026-09-11 二版）。
+      //
+      // 一版用 innerHeight - vv.height - vv.offsetTop，那是"整个视口少了多少"。
+      // iPad 上输入法可以是**浮动**的（屏幕上那个 拼/⌃/⌄/🎤 药丸）——
+      // 它压根不遮挡输入框，这个差值却不为 0，于是我反而把输入框自己抬了起来，
+      // 下面空出一块面板底色。用户实测："现在点击输入框时输入框还是会被抬高"。
+      //
+      // 真正要问的是「键盘挡住输入框了吗、挡了多少」。视觉视口的底边在布局
+      // 坐标里是 vv.offsetTop + vv.height；输入框底边超出它多少，就垫多少。
+      // 浮动键盘不覆盖输入框 → 差值 ≤ 0 → 一点都不垫，行为回到改动之前。
+      // 量到的是「**还差多少**」：垫子已经生效时，输入框已经被抬上去了，
+      // 所以此刻的遮挡量是剩余量，要加在现有垫子上 —— 这是个收敛控制器。
+      // ⚠ 别先把遮挡量夹到 0 再加历史值：那样"已经垫好"（遮挡=0）会被判成
+      //   "不用垫"，撤掉垫子 → 下一帧又遮住 → 再垫，来回抖。
+      var overlap = 0;
+      try {
+        var box = document.getElementById('asst-input');
+        if (box) {
+          var rect = box.getBoundingClientRect();
+          overlap = Math.round(rect.bottom - (vv.offsetTop + vv.height));
+        }
+      } catch (e) { overlap = 0; }
+      var had = parseInt(root.style.getPropertyValue('--rc-kb'), 10);
+      if (!(had > 0)) had = 0;
+      var pad = had + overlap;
+      if (!(pad > 0)) pad = 0;
+      if (pad > Math.round(vv.height * 0.6)) pad = Math.round(vv.height * 0.6);
+      if (pad > 0) root.style.setProperty('--rc-kb', pad + 'px');
+      else root.style.removeProperty('--rc-kb');
       if (vv.offsetTop > 0) { try { window.scrollTo(0, 0); } catch (e) {} }
       try {
         var se = document.scrollingElement;
