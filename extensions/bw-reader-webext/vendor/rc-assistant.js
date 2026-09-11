@@ -3252,56 +3252,14 @@ if (window.__bwPwaProviderOnly) return;
         if (se && se.scrollTop > 0) se.scrollTop = 0;
       } catch (e) {}
     }
-    // ── 临时诊断（2026-09-11）：抬起问题我改了三版都没中，不再猜第四次。
-    //    把网页侧和原生侧的实测值直接摆在屏幕上，看数字定位是谁在动。
-    //    ⚠ 这块是临时的，定位完就删。
-    var _diag = null;
-    var _NL = String.fromCharCode(10);
-    function _diagPaint() {
-      if (!focused) { if (_diag) _diag.style.display = 'none'; return; }
-      if (!_diag) {
-        _diag = document.createElement('div');
-        _diag.id = 'bw-kb-diag';
-        _diag.style.cssText =
-          'position:fixed;left:6px;top:6px;z-index:99999;' +
-          'background:rgba(0,0,0,.82);color:#7CFC9A;' +
-          'font:11px/1.45 ui-monospace,Menlo,monospace;padding:6px 8px;' +
-          'border-radius:8px;pointer-events:none;white-space:pre;' +
-          'max-width:72vw';
-        document.body.appendChild(_diag);
-      }
-      _diag.style.display = 'block';
-      var box = document.getElementById('asst-input');
-      var rect = box ? box.getBoundingClientRect() : null;
-      var nat = window.__BW_KB_DIAG__ || {};
-      var se = document.scrollingElement;
-      _diag.textContent = [
-        'innerH=' + window.innerHeight
-          + '  vvH=' + Math.round(vv.height)
-          + '  vvTop=' + Math.round(vv.offsetTop),
-        'inputBottom=' + (rect ? Math.round(rect.bottom) : '?')
-          + '  vvBottom=' + Math.round(vv.offsetTop + vv.height),
-        'rc-kb=' + (document.documentElement.style
-          .getPropertyValue('--rc-kb') || '0')
-          + '  docScroll=' + (se ? Math.round(se.scrollTop) : '?'),
-        'native inset=' + (nat.inset == null ? '?' : nat.inset)
-          + '  offsetY=' + (nat.offsetY == null ? '?' : nat.offsetY)
-          + '  @' + (nat.at || '-')
-      ].join(_NL);
-    }
-
     ta.addEventListener('focus', function () {
       focused = true;
       // 键盘是动画弹出的：量一次不够，量到它停下来为止。
       setTimeout(apply, 60); setTimeout(apply, 220); setTimeout(apply, 500);
-      setTimeout(_diagPaint, 80); setTimeout(_diagPaint, 260);
-      setTimeout(_diagPaint, 600); setTimeout(_diagPaint, 1200);
     });
-    ta.addEventListener('blur', function () {
-      focused = false; apply(); _diagPaint();
-    });
-    vv.addEventListener('resize', function () { apply(); _diagPaint(); });
-    vv.addEventListener('scroll', function () { apply(); _diagPaint(); });
+    ta.addEventListener('blur', function () { focused = false; apply(); });
+    vv.addEventListener('resize', apply);
+    vv.addEventListener('scroll', apply);
   })();
 
   sendBtn.addEventListener('click', function () {

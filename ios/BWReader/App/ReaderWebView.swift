@@ -1052,15 +1052,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak webView] _ in
-                guard let view = webView, let scroll = webView?.scrollView
-                else { return }
+                guard let scroll = webView?.scrollView else { return }
                 // 立刻按一次，再在下一拍按一次：键盘是动画出现的，
                 // WebKit 会在动画过程中再塞一次 inset。
                 Self.flattenKeyboardInset(scroll)
-                Self.reportKeyboardDiag(view, scroll, "now")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                     Self.flattenKeyboardInset(scroll)
-                    Self.reportKeyboardDiag(view, scroll, "settled")
                 }
             }
         }
@@ -1071,20 +1068,6 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     ///
     /// ⚠ 只在**真的不为零**时写，别每次通知都无条件赋值 —— 无条件写会跟
     /// WebKit 自己的动画打架，表现是抬一下又落回去的抖动。
-    /// 临时诊断（2026-09-11）：把原生量到的值推进页面，供屏幕上那块读出。
-    /// ⚠ 定位完就删 —— 它只为回答"到底是谁把页面抬起来的"。
-    private static func reportKeyboardDiag(
-        _ view: WKWebView,
-        _ scroll: UIScrollView,
-        _ at: String
-    ) {
-        let inset = Int(scroll.contentInset.bottom.rounded())
-        let offset = Int(scroll.contentOffset.y.rounded())
-        let script = "window.__BW_KB_DIAG__={inset:\(inset),"
-            + "offsetY:\(offset),at:'\(at)'};"
-        view.evaluateJavaScript(script, completionHandler: nil)
-    }
-
     private static func flattenKeyboardInset(_ scroll: UIScrollView) {
         if scroll.contentInset.bottom != 0 {
             scroll.contentInset.bottom = 0
