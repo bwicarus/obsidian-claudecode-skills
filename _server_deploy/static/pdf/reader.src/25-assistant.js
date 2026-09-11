@@ -1402,6 +1402,15 @@
       // 真正要问的是「键盘挡住输入框了吗、挡了多少」。视觉视口的底边在布局
       // 坐标里是 vv.offsetTop + vv.height；输入框底边超出它多少，就垫多少。
       // 浮动键盘不覆盖输入框 → 差值 ≤ 0 → 一点都不垫，行为回到改动之前。
+      // ⚠ 先分清"真键盘"和"输入法候选条"（2026-09-12 实测，见 rc-assistant.js
+      //   里那段长注释）：iPad 上真键盘 300~400px，最小化的候选条只有几十，
+      //   而 iOS 同样会为它缩视口 —— 照着缩量去垫，就是"点一下就被抬高"。
+      var shrink = window.innerHeight - vv.height - vv.offsetTop;
+      if (shrink < 150) {
+        root.style.removeProperty('--rc-kb');
+        if (vv.offsetTop > 0) { try { window.scrollTo(0, 0); } catch (e) {} }
+        return;
+      }
       // 量到的是「**还差多少**」：垫子已经生效时，输入框已经被抬上去了，
       // 所以此刻的遮挡量是剩余量，要加在现有垫子上 —— 这是个收敛控制器。
       // ⚠ 别先把遮挡量夹到 0 再加历史值：那样"已经垫好"（遮挡=0）会被判成
