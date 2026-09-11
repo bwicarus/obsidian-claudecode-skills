@@ -754,14 +754,41 @@ if (window.__bwPwaProviderOnly) return;
         bgst.style.color = (d.background && !d.alwaysAuthorized)
           ? '#ffcf8a' : '#8fa5c8';
       }
-    }).catch(function () {
+    }).catch(function (error) {
+      var bg = $('rcset-nat-loc-bg'), bgst = $('rcset-nat-loc-bgst');
+      // ⚠ **在 App 里就别整节蒸发**（2026-09-12 用户："没有你说的学习地点
+      //   记录选项"）。原来只要取状态失败，就把标题、开关、状态、说明一起
+      //   隐藏，一个字都不说 —— 设计意图是"网页/扩展没有这座桥就别显示"，
+      //   可它同时把"在 App 里但坏了"也藏了，于是**坏掉的样子和这个功能
+      //   不存在一模一样**，排查只能靠猜。
+      //
+      //   判据用「有没有原生偏好通道」—— 那正是「本机」这个 tab 显不显示的
+      //   同一个条件，所以 tab 在、这节就在，两者不会再各说各话。
+      if (_nativePrefsApi()) {
+        on.disabled = true;
+        if (bg) bg.disabled = true;
+        st.textContent = '定位通道没接上：'
+          + ((error && error.message) || '未知原因')
+          + '（这条通道挂在本机书上，先打开一本本机书再来）';
+        st.style.color = '#ffcf8a';
+        if (bgst) bgst.textContent = '';
+        return;
+      }
+      // 网页 / 扩展：这里本来就没有定位能力，整节隐藏是对的。
+      // ⚠ 按 id 显式隐藏，别再靠 nextElementSibling 猜 —— 中间插进新行之后
+      //   那种相对定位会藏错元素（2026-09-12 加后台档时就差点藏错）。
       var row = on.closest('label');
       if (row) row.style.display = 'none';
       st.style.display = 'none';
       var prev = row && row.previousElementSibling;
       if (prev) prev.style.display = 'none';
-      var next = st.nextElementSibling;
-      if (next) next.style.display = 'none';
+      if (bg) {
+        var bgRow = bg.closest('label');
+        if (bgRow) bgRow.style.display = 'none';
+      }
+      if (bgst) bgst.style.display = 'none';
+      var tail = bgst && bgst.nextElementSibling;
+      if (tail) tail.style.display = 'none';
     });
   }
   function _wireLocRow() {

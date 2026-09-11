@@ -3957,9 +3957,21 @@
     'phrases-set': new Set(['count']),
     'clear-reocr-page': new Set(['page', 'cleared', 'cv', 'textAuthority']),
     'book-identity': new Set(['contentSha256']),
-    'device-location-status': new Set(['enabled', 'authorized', 'hasFix']),
-    'device-location-enable': new Set(['enabled', 'authorized', 'hasFix']),
-    'device-location-disable': new Set(['enabled', 'authorized', 'hasFix']),
+    // ⚠ 这是 loc/开关那条链上的**第 9 处**白名单（2026-09-12 踩到）：
+    //   Swift 回包多了 background / alwaysAuthorized 两个字段，这里不认就
+    //   判整个响应无效 → 抛错 → 面板把「学习地点记录」整节藏掉。
+    //   用户看到的是"没有这个选项"，而不是"这个选项坏了" —— 两者长得一样，
+    //   这正是那条"响应字段也要一起数"的教训。
+    'device-location-status': new Set([
+      'enabled', 'authorized', 'hasFix', 'background', 'alwaysAuthorized']),
+    'device-location-enable': new Set([
+      'enabled', 'authorized', 'hasFix', 'background', 'alwaysAuthorized']),
+    'device-location-disable': new Set([
+      'enabled', 'authorized', 'hasFix', 'background', 'alwaysAuthorized']),
+    'device-location-bg-enable': new Set([
+      'enabled', 'authorized', 'hasFix', 'background', 'alwaysAuthorized']),
+    'device-location-bg-disable': new Set([
+      'enabled', 'authorized', 'hasFix', 'background', 'alwaysAuthorized']),
     // iOS 系统投影（2026-08-27）：提醒事项显示副本/本地通知/小组件数据。
     // resolvedIds = 用户在苹果提醒里勾完成的通知 id（调用方走 resolve 回流）。
     'system-projection': new Set(['resolvedIds']),

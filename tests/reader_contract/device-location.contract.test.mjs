@@ -125,6 +125,40 @@ test("Pi 接收端：loc 显式校验+搬运（重建式处理器纪律）", () 
   assert.match(RECEIVER, /rec\["loc"\] = _loc/, "真的搬进每条记录");
 });
 
+test("runtime 响应字段白名单：五个 location action 都放行后台档那两个字段", () => {
+  // ⚠ 这处白名单**卡的是响应**，不是请求 —— 和 exactKeys 那处是两回事。
+  //   2026-09-12 的实际事故：Swift 回包多了 background / alwaysAuthorized，
+  //   这里不认 → 判整个响应无效 → 抛错 → 面板把「学习地点记录」整节藏掉。
+  //   用户看到的是"没有这个选项"，而不是"这个选项坏了"。
+  for (const action of [
+    "device-location-status", "device-location-enable", "device-location-disable",
+    "device-location-bg-enable", "device-location-bg-disable",
+  ]) {
+    const at = RUNTIME.indexOf(`'${action}': new Set(`);
+    assert.notStrictEqual(at, -1, `${action} 没进响应白名单`);
+    // 窗口切到**这一条自己的 `])` 为止** —— 固定字数会溢进下一个条目，
+    // 于是在邻居那里找到字段、测试假绿（2026-09-12 变异检验当场抓到）。
+    const close = RUNTIME.indexOf("])", at);
+    assert.notStrictEqual(close, -1, `${action} 的白名单没有结尾`);
+    const window = RUNTIME.slice(at, close);
+    for (const key of ["enabled", "authorized", "hasFix",
+                       "background", "alwaysAuthorized"]) {
+      assert.ok(window.includes(`'${key}'`),
+        `${action} 的响应白名单少了 ${key}`);
+    }
+  }
+});
+
+test("面板：在 App 里失败要出声，不许整节蒸发", () => {
+  // ⚠ 原来只要取状态失败就把标题/开关/说明一起隐藏，一个字都不说，
+  //   于是"坏了"和"这个功能不存在"长得一模一样（用户 2026-09-12 报的
+  //   「没有你说的学习地点记录选项」就是这么来的）。
+  assert.match(SETTINGS, /定位通道没接上/,
+    "App 内失败要显示原因，而不是让整节消失");
+  assert.match(SETTINGS, /if \(_nativePrefsApi\(\)\) \{/,
+    "判据用「有没有原生偏好通道」—— 与「本机」tab 显不显示同一个条件");
+});
+
 test("设置面板：开关走本地路由，无桥环境整段隐藏", () => {
   assert.match(SETTINGS, /rcset-nat-loc-on/);
   assert.match(SETTINGS, /fetch\('\/pdf\/api\/device-location-pref'\)/);
