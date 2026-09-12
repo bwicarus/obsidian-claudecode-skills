@@ -109,7 +109,9 @@ test("形状没有进 schema——这是已知的，别当它已经修好", () =
   //   一个开放对象，唯一能机器强制形状的地方是空的。真要根治，应当由校验器
   //   生成 schema 的 oneOf，让三份变成一份。在那之前，上面两条是仅有的护栏。
   const at = MCP.indexOf('["name"] = CardToolName,');
-  const schema = MCP.slice(MCP.indexOf('["inputSchema"]', at), at + 4000);
+  // 窗口从 inputSchema 自己起算：描述一变长，按 name 起算的固定窗口就会滑空。
+  const schemaAt = MCP.indexOf('["inputSchema"]', at);
+  const schema = MCP.slice(schemaAt, schemaAt + 400);
   assert.match(schema, /BuildTypedCardArgumentsSchema\(\)/,
     "schema 由这个函数生成；换了就要重看这条备忘");
   const builderAt = MCP.indexOf("JsonObject BuildTypedCardArgumentsSchema(");

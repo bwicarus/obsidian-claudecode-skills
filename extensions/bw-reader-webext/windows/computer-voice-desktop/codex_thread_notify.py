@@ -404,8 +404,9 @@ VOICE_ENTRY_TEXT = (
     "再运行这一行**一次**，它自己会重试并在放弃时上报，你不用再做别的：\n"
     '    python "%%LOCALAPPDATA%%\\BWReader\\voice_start_step.py"'
     " --attempts 2 --report-failure\n"
-    "它最多要跑一分钟：exec_command 的 yield_time_ms 给 120000，"
-    "等它自己结束；**不要**用 write_stdin 反复查看，也不要再运行第二次。\n"
+    "用 exec_command 起它，yield_time_ms 给 1500，返回后**就当做完了**：\n"
+    "不要 wait、不要 write_stdin 查看、不要再运行第二次 —— 继续跟用户说话。\n"
+    "它自己会重试，放弃时会自己上报，你不需要它的结果。\n"
     "同一编号再次出现表示上一次没有生效。"
 )
 

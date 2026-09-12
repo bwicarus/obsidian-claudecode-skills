@@ -566,7 +566,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = ToolName,
                 ["description"] =
-                    "Call this first whenever the request depends on the "
+                    "Use when the user says 这个/那个/这里, asks what page or book they are on, what they selected, or the 读音/意思 of a selected word (then pass brief:true). "
+                    + "Call this first whenever the request depends on the "
                     + "live Reader state, including implicit references to "
                     + "this/here, the visible page or paragraph, a selection, "
                     + "highlight, drawing, or circle. It reads the newest "
@@ -639,7 +640,7 @@ internal sealed class ReaderContextMcpServer
                     + "selectedItems (what is selected or tapped right now) "
                     + "and recentActions (the last few things the user did) "
                     + "before asking the user to repeat; each carries its own "
-                    + "Hint field next to it saying exactly how to read it.",
+                    + "Hint field next to it saying exactly how to read it. In Codex all Reader tools run inside one exec script: read the snapshot and call the follow-up tool (highlight, card, page text) from the same script instead of spending a second turn.",
                 ["inputSchema"] = new JsonObject
                 {
                     ["type"] = "object",
@@ -668,7 +669,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = CapabilityGuideToolName,
                 ["description"] =
-                    "Read one allowlisted Reader workflow guide by topic. "
+                    "Use only for a complex multi-step Reader workflow (research task, check report, saved task) that needs its guide; ordinary page, card and highlight requests never need it. "
+                    + "Read one allowlisted Reader workflow guide by topic. "
                     + "Use this only for complex Reader tasks or when the "
                     + "Reader orchestration Skill is unavailable; ordinary "
                     + "snapshot, image, navigation, or highlight requests "
@@ -701,7 +703,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = VisualToolName,
                 ["description"] =
-                    "Request a fresh JPEG composite from the exact Reader "
+                    "Use when the user says 看一下图/我画的/我圈的地方, or asks you to look at what is on screen. "
+                    + "Request a fresh JPEG composite from the exact Reader "
                     + "document instance named by the current snapshot. "
                     + "Choose the current viewport, nearby drawing activity, "
                     + "or a custom selection region. For selection-near, use "
@@ -746,7 +749,8 @@ internal sealed class ReaderContextMcpServer
         {
             ["name"] = CameraToolName,
             ["description"] =
-                "Take a photo right now with a physical camera in the user's "
+                "Use when the user says 看看家里/摄像头/拍一张 — a live photo of the real room, not the page. "
+                    + "Take a photo right now with a physical camera in the user's "
                 + "home and return it inline. Cameras are general-purpose: "
                 + "the frame shows whatever the camera happens to point at, "
                 + "so look at the image rather than assuming a subject. "
@@ -782,7 +786,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = BrowserControlToolName,
                 ["description"] =
-                    "Control only the exact focused Reader or browser source "
+                    "Use when the user says 往下翻/滚动/跳到那段/找那个标题 in the focused Reader or browser page. "
+                    + "Control only the exact focused Reader or browser source "
                     + "named by the current snapshot. Supported actions are "
                     + "bounded viewport scrolling and locating visible text, "
                     + "a heading, or a Reader selection. For "
@@ -847,7 +852,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = HighlightRangeToolName,
                 ["description"] =
-                    "Persist one highlight from the App-owned marker range "
+                    "Use when the user says 划线/高亮/标一下这段 for a passage in the open book. "
+                    + "Persist one highlight from the App-owned marker range "
                     + "published in currentPage.highlightSource. Call "
                     + "reader_context_snapshot first, copy the exact source "
                     + "identity fields, and choose startMarker/endMarker "
@@ -864,7 +870,7 @@ internal sealed class ReaderContextMcpServer
                     + "search an entire source quote. The Reader rejects "
                     + "invented, reversed, expired, stale-book, stale-page "
                     + "or stale-revision ranges and never falls back to text "
-                    + "search. Do not retry an unknown mutation outcome.",
+                    + "search. Do not retry an unknown mutation outcome. Chain it: snapshot → build rangeRef → this tool, all in one exec script.",
                 ["inputSchema"] = BuildHighlightRangeArgumentsSchema(),
                 ["annotations"] = new JsonObject
                 {
@@ -1120,7 +1126,8 @@ internal sealed class ReaderContextMcpServer
                     // ⚠ 2026-09-13 收窄（Codex 用后反馈：「改页面上的卡和改学习卡本体
                     //   是两套工具，前者不会自动改已导出的 Anki，后者默认会同步，所以
                     //   我才会纠结选哪一个」）。学习卡现在只有一条改法：本体。
-                    "Replace the rendered content of a NON-learning card placement "
+                    "Use when the user wants to change a weather/news/image/fact card placed on the page (改一下那张卡的内容) — rendered cards only, never learning cards. "
+                    + "Replace the rendered content of a NON-learning card placement "
                     + "on the current page (weather/news/images/fact/general cards, "
                     + "including an unbound manually dragged card). Learning cards "
                     + "(basic/cloze) are NOT edited here: edit the entity with "
@@ -1159,7 +1166,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = PageCardDeleteToolName,
                 ["description"] =
-                    "Delete only one bound or unbound card placement from the "
+                    "Use when the user says 删掉页面上第 N 张卡/这张卡. "
+                    + "Delete only one bound or unbound card placement from the "
                     + "current page. A currentPage CARD marker already provides "
                     + "the stable id and revision required as id and "
                     + "expectedRevision, so delete directly without first "
@@ -1190,7 +1198,8 @@ internal sealed class ReaderContextMcpServer
                 {
                     ["name"] = LearningCardEditToolName,
                     ["description"] =
-                        "Replace the semantic content and/or canonical source "
+                        "Use when the user says 改一下这张学习卡/Anki 卡的正面反面/答案 — this edits the card entity and the page follows. "
+                    + "Replace the semantic content and/or canonical source "
                         + "of one Reader learning-card entity selected by "
                         + "card_* id and cardIndex, guarded by the exact current "
                         + "entityRevision. Pass card, source, or both. source is "
@@ -1206,7 +1215,7 @@ internal sealed class ReaderContextMcpServer
                         + "exists. The placement of this card on the page the user is "
                         + "looking at is refreshed in the same call; other pages "
                         + "reconcile when opened. This is the ONLY way to edit a "
-                        + "learning card. Do not retry an unknown result; read the card.",
+                        + "learning card. Do not retry an unknown result; read the card. Chain it: take learning.id from the page (or reader_learning_cards) → this tool in one exec script.",
                     ["inputSchema"] = BuildLearningCardEditArgumentsSchema(),
                     ["annotations"] = new JsonObject
                     {
@@ -1220,7 +1229,8 @@ internal sealed class ReaderContextMcpServer
                 {
                     ["name"] = LearningCardDeleteToolName,
                     ["description"] =
-                        "Remove exactly one canonical Reader learning card "
+                        "Use when the user says 删掉这张学习卡/不要这张卡了. "
+                    + "Remove exactly one canonical Reader learning card "
                         + "selected by card_* id and cardIndex, guarded by the "
                         + "current stateRevision. Other cards in the same batch "
                         + "remain intact. With externalPolicy=sync-if-projected, "
@@ -1278,7 +1288,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = PaperStartToolName,
                 ["description"] =
-                    "Create an interactive exercise sheet as a new insert "
+                    "Use when the user says 出几道题/做一张练习/听写/测验一下. "
+                    + "Create an interactive exercise sheet as a new insert "
                     + "page in the currently open PDF book, in ONE call. "
                     + "Design the questions yourself from the user's words "
                     + "and the current page, then pass every element in "
@@ -1500,7 +1511,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = AnkiDraftToolName,
                 ["description"] =
-                    "Deliver editable Anki card drafts. nodeIds is REQUIRED: "
+                    "Use when the user says 做卡片/做成 Anki 卡/帮我记这个. "
+                    + "Deliver editable Anki card drafts. nodeIds is REQUIRED: "
                     + "every card must be bound to 1-8 KJ knowledge nodes "
                     + "(kj:XXXXXXXXXX). Reuse the node the card already belongs "
                     + "to; otherwise find it with kj_search; only when none "
@@ -1529,7 +1541,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = CardToolName,
                 ["description"] =
-                    "Mirror one structured weather/news/images/videos/fact/"
+                    "Use when the user asks to show 天气/新闻/图片/视频/地图/一个事实 as a card in the Reader. "
+                    + "Mirror one structured weather/news/images/videos/fact/"
                     + "general result to the exact App or extension named by "
                     + "the current Reader snapshot. Call this in the same "
                     + "Windows Codex voice turn that produced the native tool "
@@ -1579,7 +1592,7 @@ internal sealed class ReaderContextMcpServer
                     + "is visible. It is durably queued only while that source "
                     + "is offline/backgrounded; status=queued means accepted "
                     + "for later application, so do not create it again. Floating cards "
-                    + "and other live-only actions are never queued.",
+                    + "and other live-only actions are never queued. Chain it: reader_page_text (segments) → this tool with bind, in one exec script.",
                 ["inputSchema"] = BuildTypedCardArgumentsSchema(),
                 ["annotations"] = new JsonObject
                 {
@@ -1597,7 +1610,8 @@ internal sealed class ReaderContextMcpServer
                     //   卡片，主入口不够清楚」。schema 里的 typed-card 回退被打包器钉着
                     //   （给 allowlist 过滤掉 reader_card 的客户端用），所以只改说明：
                     //   卡片的主入口是 reader_card，这里只在它不在清单里时才接卡。
-                    "For cards use reader_card. This tool sends the OTHER bounded "
+                    "Use for BWREADER/1 navigate and tool-status commands only (cards go to reader_card). "
+                    + "For cards use reader_card. This tool sends the OTHER bounded "
                     + "structured outputs to the exact App or extension named by the "
                     + "current Reader snapshot: BWREADER/1 navigate and tool-status "
                     + "commands in the exact schema already known for the action; "
@@ -1709,7 +1723,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = PageCardsToolName,
                 ["description"] =
-                    "Read a bounded index of every card on the current PDF page "
+                    "Use when the user asks 这页有哪些卡片/第几张是什么. "
+                    + "Read a bounded index of every card on the current PDF page "
                     + "in the same "
                     + "automatic number order shown beside the page text. The "
                     + "result includes each card's anchor-word label, stable id "
@@ -1745,7 +1760,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = PageCardReadToolName,
                 ["description"] =
-                    "Read one card from the current PDF by exactly one selector: "
+                    "Use when the user asks to read one placed card in full (读一下第 N 张卡). "
+                    + "Read one card from the current PDF by exactly one selector: "
                     + "its stable id or its current visible number. Prefer id; "
                     + "unbound manually dragged cards have number null and can "
                     + "only be read by id. The complete source is stable JSON in "
@@ -1756,7 +1772,7 @@ internal sealed class ReaderContextMcpServer
                     + "while truncated is true, and copy the first chunk's "
                     + "revision into expectedRevision on every continuation. "
                     + "If the revision changes, restart from offset 0 instead "
-                    + "of joining mixed card versions. Safe to retry.",
+                    + "of joining mixed card versions. Safe to retry. Chain it: this read → reader_page_card_edit in one exec script when a partial edit is needed.",
                 ["inputSchema"] = BuildPageCardReadArgumentsSchema(),
                 ["annotations"] = ReadOnlyAnnotations(),
             });
@@ -1764,7 +1780,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = LearningCardsToolName,
                 ["description"] =
-                    "List canonical Reader learning cards across the local card "
+                    "Use when the user asks 我有哪些卡/找那张关于 X 的卡 across the whole store. "
+                    + "List canonical Reader learning cards across the local card "
                     + "repository — the study entities themselves, not what is "
                     + "placed on one page; for the cards sitting on the page the "
                     + "user is looking at use reader_page_cards. "
@@ -1782,7 +1799,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = LearningCardReadToolName,
                 ["description"] =
-                    "Read one canonical Reader learning card by its stable "
+                    "Use when the user asks for one learning card's full content and review state. "
+                    + "Read one canonical Reader learning card by its stable "
                     + "card_* id and stable zero-based cardIndex. Returns the "
                     + "complete content, complete source, state, external Anki "
                     + "note/card IDs and current revisions in one call. Use "
@@ -1795,7 +1813,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = ReviewCurrentCardToolName,
                 ["description"] =
-                    "Read the complete card currently shown in Reader review "
+                    "Use when the user is in review mode and says 念卡片/现在这张卡是什么/考我. "
+                    + "Read the complete card currently shown in Reader review "
                     + "mode, including canonical Reader identity/content/source "
                     + "and whether the answer is revealed. Returns active=false "
                     + "when review mode has no current card. Safe to retry.",
@@ -1962,7 +1981,8 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = PageTextToolName,
                 ["description"] =
-                    "Read the text of one page (PDF) or section (EPUB) of the "
+                    "Use when the user asks 读第 N 页/这一节写了什么/找这一页里的一段话, or when a card must be bound to a passage (segments). "
+                    + "Read the text of one page (PDF) or section (EPUB) of the "
                     + "open book, from the Reader's own extraction. Also works "
                     + "on a plain web page the user is browsing: pass page 1 "
                     + "there - the web page gets the same numbered-block "
