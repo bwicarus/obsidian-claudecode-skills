@@ -10,6 +10,13 @@ internal static class ContractSelfTest
     {
         List<string> checks = [];
 
+        // ⚠ **第一件事**：把出站口封死。自检里有不止一条路径会走到语音
+        //    入口逻辑，而那条逻辑发的是真消息 —— 2026-09-12 连跑五轮变异
+        //    测试，用户对话里就多了四条「开语音」指令。
+        //    放在最前面是有意的：任何 check 之前，外发就已经不可能了。
+        ReaderCodexPush.SealOutboundForSelfTest();
+        checks.Add("self-test: 出站口已封死，本轮不会发真消息");
+
         CheckActivationContract(checks);
         CheckExplicitMicrophoneContract(checks);
         CheckInteropLayout(checks);

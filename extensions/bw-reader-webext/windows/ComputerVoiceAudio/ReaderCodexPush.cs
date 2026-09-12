@@ -1000,6 +1000,36 @@ internal static class ReaderCodexPush
         }
     }
 
+    /// 出站口封死了没有。**只在 --self-test 进程里为真。**
+    private static volatile bool _outboundSealed;
+
+    /// <summary>把这个进程的出站口封死。只给自检用。</summary>
+    /// <remarks>
+    /// ⚠ 2026-09-12 的事故：跑了 5 轮 `--self-test`，用户对话里就多了四条
+    /// 「开语音」的运维指令 —— 他直接来问「你现在在测试什么东西么」。
+    ///
+    /// 病根是**测试和生产共用一个出站口**：`ReaderCodexPush` 是静态的，
+    /// 绑定读的是 `LocalAppData\BWReader` 里那份真的，于是自检里任何一条
+    /// 走到语音入口逻辑的路径，发的都是真消息。
+    ///
+    /// 所以封的是**口**，不是某几条 check。逐条绕开的话，将来新写的 check
+    /// 默认仍然是会外发的 —— 而这次出事的恰恰是一条我没意识到会走到那里的
+    /// 路径。默认必须是"不发"，要发得先解释自己不是自检。
+    /// </remarks>
+    internal static void SealOutboundForSelfTest()
+    {
+        _outboundSealed = true;
+    }
+
+    /// <summary>自检进程里出站被封死时抛的东西。</summary>
+    internal sealed class OutboundSealedException : InvalidOperationException
+    {
+        internal OutboundSealedException()
+            : base("自检进程：出站口已封死，这条没有发出去")
+        {
+        }
+    }
+
     private static async Task SendAsync(
         ReaderCodexEndpoint.Binding binding,
         string prompt,
@@ -1011,6 +1041,14 @@ internal static class ReaderCodexPush
             ? binding.ThreadId
             : threadIdOverride!;
         string why = _cause.Value ?? "（调用方没说为什么 —— 这本身是个 bug）";
+        if (_outboundSealed)
+        {
+            // **抛，而不是悄悄返回**：静默成功会在账本里写下"已推送"，
+            // 那是一句假话；而调用方的 catch 本来就会把失败如实记下来。
+            OutboundSealedException sealed_ = new();
+            NoteOutbound(purpose, target, why, false, sealed_.Message);
+            throw sealed_;
+        }
         try
         {
             await SendTracedAsync(
