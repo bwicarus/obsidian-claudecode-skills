@@ -40,11 +40,10 @@ internal sealed class ReaderCapabilityCatalog
             "收到外部推来的「状态查询」时怎么答：只回答、不改变任何状态；"
             + "没有足够新鲜的证据就答 unknown"),
         new("command-format", "统一命令格式", "命令外壳、回执、去重和失败规则"),
-        new("task-routing", "Codex 原生任务路由", "按延迟和副作用选择直接工具或原生子代理"),
-        new("research-task", "多步研究任务", "替代旧 CLI worker prompt 的原生研究合同"),
+        // 2026-09-13 起这里只放**接口规格**。流程类（怎么做研究、怎么路由、
+        // 检查报告/已保存任务 —— 后两者连对应工具都不存在）已删：方法论归
+        // Codex skill（orchestrate-reader-tasks）由它自己维护，接口事实归这里。
         new("interactive-paper", "交互练习纸", "原生编排出题、纸面元素和检查按钮"),
-        new("check-report", "检查报告核实", "直接回答报告或按需查书核实"),
-        new("saved-task", "已保存任务", "重生成型任务与机械回放的不同语义"),
         new("capability-matrix", "工具能力矩阵", "本机 MCP、服务 MCP、Skill 与子代理的职责"),
     ];
 

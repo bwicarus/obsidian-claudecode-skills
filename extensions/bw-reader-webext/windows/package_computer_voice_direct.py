@@ -103,6 +103,46 @@ DOTNET_DEFAULT = Path(
 PYINSTALLER_DEFAULT = Path(
     r"C:\Users\bwica\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe"
 )
+# 工具面：顺序与内容都锁死（自检照抄 tools/list）。安装时还拿它给
+# ~/.codex/skills 里自编的 skill 做门禁：引用了不在这上面的工具名就列出来。
+MCP_TOOL_SURFACE = (
+        "reader_context_snapshot",
+        "reader_capability_guide",
+        "reader_visual_image",
+        "reader_camera_snap",
+        "reader_browser_control",
+        "reader_highlight_range",
+        "reader_web_note",
+        "reader_web_highlight",
+        "reader_mark_vocab",
+        "reader_make_note",
+        "reader_note_edit",
+        "reader_page_card_edit",
+        "reader_page_card_delete",
+        "reader_learning_card_edit",
+        "reader_learning_card_delete",
+        "reader_note_create",
+        "reader_paper_start",
+        "reader_undo_last",
+        "reader_anki_draft",
+        "reader_card",
+        "reader_command",
+        "reader_word_cards",
+        "reader_page_cards",
+        "reader_page_card_read",
+        "reader_learning_cards",
+        "reader_learning_card_read",
+        "reader_review_current_card",
+        "reader_review_answer",
+        "reader_notes",
+        "reader_toc",
+        "reader_lookup_word",
+        "reader_page_text",
+        "reader_search",
+        "reader_highlights",
+        "kj_page_submit",   # KJ 页级分析提交（随 Reader 查询能力一起暴露，列表最后）
+)
+
 CODEX_READER_PAGE_CARD_TOOLS = (
     "reader_page_cards",
     "reader_page_card_read",
@@ -1856,43 +1896,7 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
     # 顺序与内容都锁死：工具面是给模型看的契约，少一个或多一个都会改变它的
     # 行为，而这种改变在运行时表现为"模型忽然不会用某个功能"，极难追。
     # 更新方法是实测 tools/list 后照抄，别手写 —— 手写过一次就会漂。
-    expected_tools = (
-        "reader_context_snapshot",
-        "reader_capability_guide",
-        "reader_visual_image",
-        "reader_camera_snap",
-        "reader_browser_control",
-        "reader_highlight_range",
-        "reader_web_note",
-        "reader_web_highlight",
-        "reader_mark_vocab",
-        "reader_make_note",
-        "reader_note_edit",
-        "reader_page_card_edit",
-        "reader_page_card_delete",
-        "reader_learning_card_edit",
-        "reader_learning_card_delete",
-        "reader_note_create",
-        "reader_paper_start",
-        "reader_undo_last",
-        "reader_anki_draft",
-        "reader_card",
-        "reader_command",
-        "reader_word_cards",
-        "reader_page_cards",
-        "reader_page_card_read",
-        "reader_learning_cards",
-        "reader_learning_card_read",
-        "reader_review_current_card",
-        "reader_review_answer",
-        "reader_notes",
-        "reader_toc",
-        "reader_lookup_word",
-        "reader_page_text",
-        "reader_search",
-        "reader_highlights",
-        "kj_page_submit",   # KJ 页级分析提交（随 Reader 查询能力一起暴露，列表最后）
-    )
+    expected_tools = MCP_TOOL_SURFACE
     if (
         not isinstance(tools, list)
         or tuple(
@@ -2164,6 +2168,49 @@ def _run_installed_self_tests(
             _fail(f"安装后 Python runtime 语法无效: {relative}: {exc}")
 
 
+# 只认两种写法：反引号里整个就是 reader_ 名字，或 exec 脚本里的 mcp__reader_snapshot__ 前缀。
+# kj_* 不看：那是另一个 MCP（_server_deploy/mcp_server.py）的工具，不在这个桥的工具面上。
+# 松一点就会把 reader_attention_guard_<token>（互斥锁名）这类抓进来。
+_SKILL_TOOL_TOKEN = re.compile(
+    r"`(reader_[a-z][a-z0-9_]*)`|mcp__reader_snapshot__([a-z][a-z0-9_]*)"
+)
+# 长得像工具名但不是 MCP 工具的：都有真实归属，别报。
+_SKILL_LINT_IGNORE = frozenset({
+    "reader_attention_guard",   # 值守看门子进程的旧互斥锁名
+})
+
+
+def lint_codex_skill_tool_names(codex_home: Path) -> dict[str, list[str]]:
+    """扫 AGENTS.md 与 skills/**/*.md 里长得像本桥工具名的记号，回报不在工具面上的。
+
+    自编 skill 的病根就一种：把某次会话里的误解冻结下来，以后每次都错得一样
+    （2026-08-27 它发明了 ::codex-inline-vis）。这里不判对错，只判"名字存在不存在"——
+    那是安装时唯一能机械核实的事。`.system` 是 Codex 自带的，跳过。
+    """
+    surface = set(MCP_TOOL_SURFACE)
+    unknown: dict[str, list[str]] = {}
+    candidates = [codex_home / "AGENTS.md"]
+    skills_root = codex_home / "skills"
+    if skills_root.is_dir():
+        candidates.extend(
+            path for path in sorted(skills_root.rglob("*.md"))
+            if ".system" not in path.parts
+        )
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        missing = sorted({
+            name for pair in _SKILL_TOOL_TOKEN.findall(text)
+            for name in pair
+            if name and name not in surface and name not in _SKILL_LINT_IGNORE
+        })
+        if missing:
+            unknown[str(path.relative_to(codex_home)).replace("\\", "/")] = missing
+    return unknown
+
+
 def _install_verified_payload(
     manifest: dict[str, Any],
     payload: dict[str, bytes],
@@ -2241,6 +2288,7 @@ def _install_verified_payload(
             # 下次失败时这一行是第一个要看的东西。
             "maintenanceHold": maintenance_held,
             "mcpProcessesStopped": mcp_processes_stopped,
+            "skillToolLint": lint_codex_skill_tool_names(codex_config_path.parent),
             "codexConfigMigration": {
                 "changed": codex_migration.changed,
                 "reason": codex_migration.reason,
@@ -2418,6 +2466,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     " **Codex 需要重启一次**才会重新拉起它们，"
                     "否则通话里的 AI 会说看不到页面。"
                     % outcome["mcpProcessesStopped"],
+                    file=sys.stderr,
+                )
+            # 自编 skill 引用了工具面上没有的名字：装完就说，别等语音里才发现。
+            for rel, names in (outcome.get("skillToolLint") or {}).items():
+                print(
+                    "⚠ %s 引用了工具面上没有的名字：%s" % (rel, ", ".join(names)),
                     file=sys.stderr,
                 )
         elif args.rollback:

@@ -11657,7 +11657,7 @@ internal static class DirectBridgeSelfTest
                     name = ReaderContextMcpServer.CapabilityGuideToolName,
                     arguments = new
                     {
-                        topic = "research-task",
+                        topic = "cards",
                     },
                 },
             }),
@@ -12158,11 +12158,13 @@ internal static class DirectBridgeSelfTest
                     .Contains(
                         "Do not infer a card from final assistant text",
                         StringComparison.Ordinal)
-                // 17 = 能力主题数（2026-08-27 加 camera；2026-09-09 加
-                // status-report 与 voice-entry）。这个数被钉住是有道理的：主题列表就是
+                // 13 = 能力主题数（2026-08-27 加 camera；2026-09-09 加
+                // status-report 与 voice-entry；2026-09-13 删 task-routing /
+                // research-task / check-report / saved-task —— 指南只留接口规格）。
+                // 这个数被钉住是有道理的：主题列表就是
                 // **发现层**,助手扫不到关键词就直接答"没有这个能力",
                 // 漏登记等于功能不存在 —— 加 status-report 时这条当场拦住了我。
-                && resources.GetArrayLength() == 17
+                && resources.GetArrayLength() == 13
                 && resources[0].GetProperty("uri").GetString()
                     == ReaderCapabilityCatalog.IndexUri
                 && contents.GetArrayLength() == 1
@@ -12275,7 +12277,7 @@ internal static class DirectBridgeSelfTest
                 && !commandCardSchema.GetProperty("additionalProperties")
                     .GetBoolean()
                 && guideText.Contains(
-                    "旧 `do_task` CLI worker",
+                    "钉住内容",
                     StringComparison.Ordinal)
                 && weatherResult.RootElement.GetProperty("ok")
                     .GetBoolean()

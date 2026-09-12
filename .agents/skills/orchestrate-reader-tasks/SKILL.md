@@ -1,6 +1,6 @@
 ---
 name: orchestrate-reader-tasks
-description: Orchestrate complex Reader work in Windows Codex voice through native Codex Skills, MCP tools, web tools, and subagents with minimum latency. Use for multi-step or cross-source Reader research, interactive practice papers, check-report verification, saved generative tasks, or compound structured output to the Reader App or extension. Ordinary current-page, image, scroll, highlight, and card requests should call their direct Reader tool without loading this skill. Preserve the existing Realtime and legacy CLI paths without using a nested CLI worker for the Windows-native route.
+description: Orchestrate complex Reader work in Windows Codex voice through native Codex Skills, MCP tools, web tools, and subagents with minimum latency. Use for multi-step or cross-source Reader research, interactive practice papers, or compound structured output to the Reader App or extension. Ordinary current-page, image, scroll, highlight, and card requests should call their direct Reader tool without loading this skill.
 ---
 
 # Orchestrate Reader Tasks
@@ -13,21 +13,50 @@ new `codex exec`, Claude CLI, or other nested CLI worker from this Windows-nativ
 1. Answer directly when no live Reader fact or action is needed.
 2. For a current page, selection, image, scroll, card, navigation, highlight, or tool status,
    call the one matching Reader MCP tool. Do not read a guide first.
-3. For a complex Reader task, call `reader_capability_guide` once with the exact topic below.
-   Use `topic=index` only when the topic is genuinely unknown.
-   For a compound request, choose the topic that owns the requested artifact and carry secondary
-   requirements inside that workflow; do not load several guides merely because several labels match.
+3. For a multi-step task follow「多步研究任务」below. Call `reader_capability_guide` only when
+   you need an interface detail (card shapes/bind: `cards`, command shell: `command-format`,
+   practice paper: `interactive-paper`, tool ownership: `capability-matrix`). It holds
+   interface facts only; there is no workflow topic to read.
 4. Keep sequential work in the main agent. Spawn native subagents only when at least two
    independent evidence streams can run in parallel or a long synthesis benefits from isolation.
+5. All Reader tools run inside one `exec` script (`tools.mcp__reader_snapshot__…`): chain the
+   steps in one script instead of spending a turn per tool.
 
-## Route complex tasks
+## Write your own skill for a recurring compound flow
 
-- General multi-step or cross-source research: `topic=research-task`
-- Interactive handwritten practice paper: `topic=interactive-paper`
-- Practice-paper check report or source verification: `topic=check-report`
-- Rerun a saved generative task: `topic=saved-task`
-- Tool availability, ownership, or fallback decision: `topic=capability-matrix`
-- Latency, mutation, retry, and subagent rules: `topic=task-routing`
+When the same compound flow comes up again (a research routine, a review routine, a report),
+write it as a skill with the system `skill-creator` and save it under `~/.codex/skills/`.
+Rules for a self-written skill:
+
+- It may only call tools that appear in the current `tools/list` and scripts that exist under
+  `%LOCALAPPDATA%\BWReader`. Never invent a syntax, a tool name, or a card channel
+  (2026-08-27: a made-up `::codex-inline-vis` syntax rendered nothing on the user's screen).
+- Keep the guard sentences from the tool descriptions inside it (a card exists only if a card
+  tool delivered it; a learning card has exactly one edit path; an unknown write result is
+  never retried).
+- The bridge installer lints every skill under `~/.codex/skills` against the real tool surface
+  and prints the tool names it cannot find. A skill that names a missing tool is broken, not
+  "probably fine".
+
+## 多步研究任务（原 `research-task` 指南，2026-09-13 逐字搬入）
+
+本文件承接旧 `do_task` CLI worker 的任务合同，但执行者改为当前 Codex 会话及其原生子代理。
+
+## 输入包
+
+保留用户原始要求，不要把它改写成更窄的任务。只有与问题有关时才加入：当前书名和文件、
+页码、当前选区、最近对话中的必要约束。不要传整段聊天记录或整本书。
+
+## 执行
+
+1. 先列出完成目标所需的事实与动作；一个工具能完成就退出复杂路径。
+2. Reader 当前事实走本机 MCP，开放网络研究走 Codex 原生搜索/浏览工具；已配置的服务能力
+   走对应 MCP。不要用 shell 读取快照，也不要猜服务工具名或参数。
+3. 顺序依赖的步骤留在主 agent。只有独立证据流才并行派发子代理，并让它们默认只读。
+4. 汇总时区分已证实、推论和无法取得的事实。不要把工具开始执行当成成功。
+5. 用户要求向 Reader 写入时，由主 agent 在核对当前来源后执行；模糊写入结果不重试。
+
+语音收尾应先说结论，再用一两句说明已完成的动作或确切缺口；不要朗读工具过程。
 
 ## Keep context small and current
 

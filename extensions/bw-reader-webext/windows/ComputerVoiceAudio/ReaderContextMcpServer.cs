@@ -669,13 +669,13 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = CapabilityGuideToolName,
                 ["description"] =
-                    "Use only for a complex multi-step Reader workflow (research task, check report, saved task) that needs its guide; ordinary page, card and highlight requests never need it. "
-                    + "Read one allowlisted Reader workflow guide by topic. "
-                    + "Use this only for complex Reader tasks or when the "
-                    + "Reader orchestration Skill is unavailable; ordinary "
-                    + "snapshot, image, navigation, or highlight requests "
-                    + "should call their direct tool without this extra "
-                    + "round trip. Request the exact task topic when known, "
+                    "Use when you need the exact interface detail of one Reader "
+                    + "capability: card field shapes and bind, command format, "
+                    + "the boards protocol, the status-report protocol, voice entry. "
+                    + "It is a reference, not a workflow guide — how to organise a "
+                    + "multi-step task lives in the orchestrate-reader-tasks Skill. "
+                    + "Ordinary snapshot, image, navigation, card or highlight "
+                    + "requests never need it. Request the exact topic when known, "
                     + "and use index only to discover an unknown topic.",
                 ["inputSchema"] = new JsonObject
                 {

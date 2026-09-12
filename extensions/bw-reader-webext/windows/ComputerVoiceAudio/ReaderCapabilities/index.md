@@ -18,11 +18,10 @@
 - **在 iOS 小组件上留一块分区展示板**（反复看状态的任务：每日新闻/发布盯梢/长任务进展）：
   `boards.md`。⚠ 只有用户在任务里明确说了要用才用，不要自行判断是否开启
 - 统一命令外壳、回执和失败规则：`command-format.md`
-- 判断直接调用、原生子代理和兼容回退：`task-routing.md`
-- 多步研究、跨书或联网核实：`research-task.md`
 - 生成可手写作答的交互练习纸：`interactive-paper.md`
-- 读取练习纸检查报告或查书核实：`check-report.md`
-- 重新运行已保存的生成型任务：`saved-task.md`
+
+这里只有接口规格。**怎么组织一个多步任务**（研究、跨书核实、什么时候派子代理）
+不在这里，在 Codex skill `orchestrate-reader-tasks` 里；复合流程可以自己写成 skill。
 - 确认本机 MCP、服务 MCP、Skill、插件和 CLI 的职责：`capability-matrix.md`
 
 Windows Codex 语音主路由由当前 Codex 会话直接使用 Skill 与 MCP，不再为复杂任务启动
