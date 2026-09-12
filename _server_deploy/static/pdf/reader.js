@@ -7882,6 +7882,20 @@ function _readerSourceMarkerBundle(text) {
   return { markers, offsets };
 }
 
+/// 送出去的标记表用**字典形**：`{"m_0":"どれ","m_1":"も",…}`。
+///
+/// 数组形每条要写 `{"marker":"m_0","text":"どれ"}` —— 33 个字符里只有 `"どれ"`
+/// 是信息，其余全是包装。这张表在快照里占 46%（10505 / 23435 字），换个写法
+/// 就砍掉一半多。编号仍然显式写出，**不改成"第 i 个就是 m_i"**：这里用的是
+/// 36 进制（第 10 个是 `m_a`），让模型自己数位置再转进制必错，而算错的后果
+/// 是划错地方，不是报错。
+/// 键的顺序就是正文顺序，最后一个是空串的结束边界 —— 桥按这个顺序校验。
+function _readerSourceMarkerMap(markers) {
+  const map = {};
+  for (const item of markers) map[item.marker] = item.text;
+  return map;
+}
+
 function _readerSourceRemember(cache, snapshot) {
   const now = Date.now();
   for (const [id, value] of cache) {
@@ -8049,7 +8063,7 @@ window.__bwReaderHighlightSource = async function (request) {
       sourceDigest: existing.sourceDigest,
       revision: existing.revision,
       expiresAt: existing.expiresAt,
-      markers: existing.markers.map((item) => ({ marker: item.marker, text: item.text }))
+      markers: Object.assign({}, existing.markers)
     };
   }
   const snapshotId = _readerSourceSnapshotId();
@@ -8064,7 +8078,7 @@ window.__bwReaderHighlightSource = async function (request) {
     expiresAt,
     text: projected.text,
     offsets: bundle.offsets,
-    markers: bundle.markers.map((item) => ({ marker: item.marker, text: item.text }))
+    markers: _readerSourceMarkerMap(bundle.markers)
   });
   return {
     contract: _READER_HIGHLIGHT_SOURCE_CONTRACT,
@@ -8074,7 +8088,7 @@ window.__bwReaderHighlightSource = async function (request) {
     sourceDigest,
     revision,
     expiresAt,
-    markers: bundle.markers.map((item) => ({ marker: item.marker, text: item.text }))
+    markers: _readerSourceMarkerMap(bundle.markers)
   };
 };
 

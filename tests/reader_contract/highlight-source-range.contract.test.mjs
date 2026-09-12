@@ -8,10 +8,19 @@ const read = (path) => fs.readFileSync(new URL(path, ROOT), "utf8");
 const PDF = read("_server_deploy/static/pdf/reader.src/17-highlight.js");
 const EPUB = read("_server_deploy/static/pdf/epub-html.js");
 
+/// 标记表两种形状都摊平成 [{marker,text}]：字典形（现在发的）和对象数组形
+/// （旧构建发的，桥仍然收）。顺序就是正文顺序 —— 字典的键序在 JS 里对
+/// 非数字键是插入序，产出端按正文顺序写入，所以直接遍历即可。
+function markerPairs(source) {
+  const raw = source.markers;
+  if (Array.isArray(raw)) return raw;
+  return Object.keys(raw).map((marker) => ({ marker, text: raw[marker] }));
+}
+
 function rangeRef(source, start, end) {
   let offset = 0;
   const byOffset = new Map();
-  for (const item of source.markers) {
+  for (const item of markerPairs(source)) {
     byOffset.set(offset, item.marker);
     offset += item.text.length;
   }
@@ -38,13 +47,20 @@ function assertSourceShape(source, expectedText) {
   assert.ok(Number.isInteger(source.expiresAt));
   assert.ok(source.expiresAt > Date.now());
   assert.ok(source.expiresAt <= Date.now() + 300_000);
-  assert.ok(source.markers.length >= 2 && source.markers.length <= 2048);
-  assert.equal(source.markers.at(-1).text, "");
-  assert.equal(source.markers.map((item) => item.text).join(""), expectedText);
-  const ids = source.markers.map((item) => item.marker);
+  // ⚠ 现在发的必须是**字典形** `{"m_0":"どれ",…}`。数组形每条要写
+  //   `{"marker":"m_0","text":"どれ"}`，33 个字符里只有内容那几个字是信息，
+  //   而这张表占整份快照 46%。桥仍然收数组形（旧 App 构建还在发），
+  //   但产出端不许退回去 —— 所以这条断言钉在产出端这一侧。
+  assert.ok(
+    !Array.isArray(source.markers) && typeof source.markers === "object",
+    "标记表要发字典形，别退回对象数组");
+  const pairs = markerPairs(source);
+  assert.ok(pairs.length >= 2 && pairs.length <= 2048);
+  assert.equal(pairs.at(-1).text, "");
+  assert.equal(pairs.map((item) => item.text).join(""), expectedText);
+  const ids = pairs.map((item) => item.marker);
   assert.equal(new Set(ids).size, ids.length);
-  for (const item of source.markers) {
-    assert.deepEqual(Object.keys(item).sort(), ["marker", "text"]);
+  for (const item of pairs) {
     assert.match(item.marker, /^m_[0-9a-z]{1,4}$/);
     assert.ok(item.text.length <= 512);
   }
@@ -200,7 +216,7 @@ test("PDF source snapshots are reused, revision-bound, and fail closed", async (
   assert.equal(again.snapshotId, source.snapshotId);
   assert.equal(again.expiresAt, source.expiresAt);
 
-  const ref = rangeRef(source, 0, source.markers[0].text.length);
+  const ref = rangeRef(source, 0, markerPairs(source)[0].text.length);
   await assert.rejects(
     context.window.__bwReaderHighlightRange({
       rangeRef: { ...ref, startMarker: "m_nope" }, color: "blue",
@@ -245,7 +261,7 @@ test("PDF source snapshots are reused, revision-bound, and fail closed", async (
     "same text may still require a new snapshot when the native revision changes");
   assertSourceShape(revised, raw);
 
-  const revisedRef = rangeRef(revised, 0, revised.markers[0].text.length);
+  const revisedRef = rangeRef(revised, 0, markerPairs(revised)[0].text.length);
   vm.runInContext(
     `_pdfReaderSourceSnapshots.get(${JSON.stringify(revised.snapshotId)}).expiresAt = 0`,
     context,
@@ -471,7 +487,7 @@ test("EPUB long chapters expose a viewport window and map its markers to absolut
   const source = await context.window.__bwReaderHighlightSource({
     file: "book.epub", target: { kind: "epub", section: 0 },
   });
-  const projected = source.markers.map((item) => item.text).join("");
+  const projected = markerPairs(source).map((item) => item.text).join("");
   assertSourceShape(source, projected);
   assert.ok(text.length > 16_384);
   assert.ok(projected.length <= 16_384);
@@ -510,7 +526,7 @@ test("EPUB long-chapter snapshots stale when the viewport or off-window body cha
   });
   const input = { file: "book.epub", target: { kind: "epub", section: 0 } };
   const source = await context.window.__bwReaderHighlightSource(input);
-  const projected = source.markers.map((item) => item.text).join("");
+  const projected = markerPairs(source).map((item) => item.text).join("");
   const relativeStart = projected.indexOf(wanted);
   const ref = rangeRef(source, relativeStart, relativeStart + wanted.length);
 
@@ -525,7 +541,7 @@ test("EPUB long-chapter snapshots stale when the viewport or off-window body cha
 
   setViewportOffset(lateStart + 4);
   const restoredView = await context.window.__bwReaderHighlightSource(input);
-  const restoredText = restoredView.markers.map((item) => item.text).join("");
+  const restoredText = markerPairs(restoredView).map((item) => item.text).join("");
   const restoredStart = restoredText.indexOf(wanted);
   const restoredRef = rangeRef(restoredView, restoredStart, restoredStart + wanted.length);
   section.nodes[0].nodeValue = "z" + text.slice(1);
@@ -540,7 +556,7 @@ test("EPUB changed content or revision invalidates the opaque marker snapshot", 
   const { context, section, canonical, saves } = epubHarness();
   const input = { file: "book.epub", target: { kind: "epub", section: 0 } };
   const source = await context.window.__bwReaderHighlightSource(input);
-  const ref = rangeRef(source, 0, source.markers[0].text.length);
+  const ref = rangeRef(source, 0, markerPairs(source)[0].text.length);
   await assert.rejects(
     context.window.__bwReaderHighlightRange({
       rangeRef: { ...ref, target: { ...ref.target, page: 1 } },
@@ -564,7 +580,7 @@ test("EPUB changed content or revision invalidates the opaque marker snapshot", 
   );
   const renewed = await context.window.__bwReaderHighlightSource(input);
   assert.notEqual(renewed.snapshotId, source.snapshotId);
-  const renewedRef = rangeRef(renewed, 0, renewed.markers[0].text.length);
+  const renewedRef = rangeRef(renewed, 0, markerPairs(renewed)[0].text.length);
 
   context._secGen = 12;
   const revised = await context.window.__bwReaderHighlightSource(input);

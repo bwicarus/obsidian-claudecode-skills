@@ -7762,11 +7762,29 @@ if (window.__bwPwaProviderOnly) return;
         false
       );
     }
-    if (
-      !Array.isArray(value.markers) ||
-      value.markers.length < 2 ||
-      value.markers.length > 2048
-    ) {
+    // 标记表两种形状都收：字典形 `{"m_0":"どれ"}`（现在产出端发的）和
+    // 对象数组形（旧构建发的）。桥那边同样两种都收 —— 装桥是立刻生效的，
+    // 而 App 里那份产出端要等下一个 TestFlight 构建，中间这段时间发的是旧形状。
+    var rawMarkers = value.markers;
+    var pairs;
+    if (rawMarkers && !Array.isArray(rawMarkers) && typeof rawMarkers === "object") {
+      pairs = Object.keys(rawMarkers).map(function (key) {
+        return { marker: key, text: rawMarkers[key] };
+      });
+    } else if (Array.isArray(rawMarkers)) {
+      pairs = rawMarkers.map(function (item, index) {
+        exactObject(
+          item,
+          ["marker", "text"],
+          [],
+          "Reader 高亮 marker[" + index + "]"
+        );
+        return item;
+      });
+    } else {
+      pairs = null;
+    }
+    if (!pairs || pairs.length < 2 || pairs.length > 2048) {
       throw directError(
         "Reader 高亮 marker 数量无效",
         "BW_READER_HIGHLIGHT_SOURCE_SCHEMA",
@@ -7775,13 +7793,7 @@ if (window.__bwPwaProviderOnly) return;
     }
     var seen = Object.create(null);
     var totalText = 0;
-    var markers = value.markers.map(function (item, index) {
-      exactObject(
-        item,
-        ["marker", "text"],
-        [],
-        "Reader 高亮 marker[" + index + "]"
-      );
+    var markers = pairs.map(function (item, index) {
       var marker = safeId(
         item.marker,
         "Reader 高亮 marker[" + index + "].marker"
@@ -7792,7 +7804,7 @@ if (window.__bwPwaProviderOnly) return;
         512,
         true
       );
-      var finalMarker = index === value.markers.length - 1;
+      var finalMarker = index === pairs.length - 1;
       if (
         !/^m_[0-9a-z]{1,4}$/.test(marker) ||
         seen[marker] ||

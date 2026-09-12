@@ -754,6 +754,7 @@ internal static class DirectBridgeSelfTest
         await CheckRecentFocusAsync(
             root,
             checks).ConfigureAwait(false);
+        CheckHighlightMarkerShapes(checks);
         CheckReaderPageCardQueryContract(checks);
         CheckReaderPageCardMutationContract(checks);
         CheckReaderLearningCardMutationContract(checks);
@@ -10105,6 +10106,101 @@ internal static class DirectBridgeSelfTest
             checks);
     }
 
+    /// <summary>标记表：字典形与对象数组形都要收得下。</summary>
+    /// <remarks>
+    /// ⚠ 守的是一次**静默断线**。桥装完立刻生效，App 里那份产出端要等下一个
+    /// TestFlight 构建 —— 中间那段时间旧 App 发的是数组形。桥不认的话，整条
+    /// activeReading 校验不过，连高亮之外的东西（页码、选区、正文）一起没了，
+    /// 而且用户只会看到 AI 忽然什么都不知道，没有任何报错指向这里。
+    ///
+    /// 所以两种形状各断言一次，外加一条反例：只有形状变宽，规矩没变松。
+    /// </remarks>
+    private static void CheckHighlightMarkerShapes(
+        ICollection<string> checks)
+    {
+        const long observedAt = 1_750_000_000_000L;
+        JsonElement Build(object markers) =>
+            JsonSerializer.SerializeToElement(new
+            {
+                kind = "pdf",
+                file = "marker-shapes.pdf",
+                title = "Marker Shapes",
+                page = 7,
+                selectionState = "unknown",
+                selection = (string?)null,
+                observedAtEpochMs = observedAt,
+                highlightSource = new
+                {
+                    contract = "reader-highlight-source/1",
+                    snapshotId = "hrs_222222222222222222222222",
+                    documentId = "marker-shapes.pdf",
+                    target = new { kind = "pdf", page = 7 },
+                    sourceDigest = "rsd1_22222222_2222222222222222",
+                    revision = "pdfrev_2222222222222222",
+                    expiresAt = observedAt + 120_000,
+                    markers,
+                },
+            });
+
+        bool Accepts(object markers)
+        {
+            try
+            {
+                _ = FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                    Build(markers));
+                return true;
+            }
+            catch (DirectProtocolException)
+            {
+                return false;
+            }
+        }
+
+        // 字典形：现在产出端发的。键序就是正文顺序，最后一条是空串的结束边界。
+        Require(
+            Accepts(new Dictionary<string, string>
+            {
+                ["m_0"] = "選ばれた",
+                ["m_1"] = "言葉",
+                ["m_2"] = "",
+            }),
+            "highlight-markers-accept-map-shape",
+            checks);
+
+        // 对象数组形：旧 App 构建仍在发。
+        Require(
+            Accepts(new[]
+            {
+                new { marker = "m_0", text = "選ばれた" },
+                new { marker = "m_1", text = "言葉" },
+                new { marker = "m_2", text = "" },
+            }),
+            "highlight-markers-still-accept-array-shape",
+            checks);
+
+        // 形状变宽 ≠ 规矩变松：结束边界必须是空串，中间不许空。
+        Require(
+            !Accepts(new Dictionary<string, string>
+            {
+                ["m_0"] = "選ばれた",
+                ["m_1"] = "",
+                ["m_2"] = "言葉",
+            }),
+            "highlight-markers-map-still-requires-empty-terminal",
+            checks);
+
+        // 编号仍要合法 —— 字典的键就是编号，别因为换了容器就不查。
+        Require(
+            !Accepts(new Dictionary<string, string>
+            {
+                ["m_0"] = "選ばれた",
+                ["nope"] = "言葉",
+                ["m_2"] = "",
+            }),
+            "highlight-markers-map-keys-are-still-marker-ids",
+            checks);
+    }
+
     /// <summary>最近焦点：让「这个 / 那个」落到具体那一段上。</summary>
     /// <remarks>
     /// 用户 2026-09-12 的实测：指代用得非常多，而模型不知道去看哪儿 ——
@@ -10292,6 +10388,62 @@ internal static class DirectBridgeSelfTest
             transcript.Contains("recentActionsHint", StringComparison.Ordinal),
             "recent-focus-hint-reaches-the-model",
             checks);
+
+        // ── 模型那份只留 selectedItems ──────────────────────────────
+        // 用户 2026-09-12：「当前选取和选中集合是不是也功能重叠了」。是三份。
+        JsonObject? modelPayload = null;
+        foreach (string line in transcript.Split(
+            new[] { "\r\n", "\n" },
+            StringSplitOptions.RemoveEmptyEntries))
+        {
+            using JsonDocument message = JsonDocument.Parse(line);
+            if (
+                !message.RootElement.TryGetProperty("id", out JsonElement id)
+                || id.ValueKind != JsonValueKind.Number
+                || id.GetInt32() != 3
+                || !message.RootElement.TryGetProperty(
+                    "result",
+                    out JsonElement result)
+                || !result.TryGetProperty("content", out JsonElement content)
+                || content.ValueKind != JsonValueKind.Array
+                || content.GetArrayLength() == 0
+            )
+            {
+                continue;
+            }
+            string? text = content[0].TryGetProperty(
+                "text",
+                out JsonElement textValue)
+                ? textValue.GetString()
+                : null;
+            if (text is null) continue;
+            modelPayload = JsonNode.Parse(text) as JsonObject;
+        }
+        Require(
+            modelPayload is not null
+            && !modelPayload.ContainsKey("selection")
+            && !modelPayload.ContainsKey("focus")
+            && modelPayload.ContainsKey("selectedItems"),
+            "selection-folds-into-selected-items-for-the-model",
+            checks);
+        // selectedItems 空着时说不出**为什么**空。「还没收到快照」和
+        // 「用户取消了选中」对模型是两回事，所以留一个标量。
+        Require(
+            modelPayload?["selectionState"] is JsonValue,
+            "selection-state-survives-the-fold",
+            checks);
+        // ⚠ 反面：文件里那份**必须还在**。桥重启后 `_selection` 正是从
+        //   `root["selection"]` 读回来的；连文件一起删掉的话，每次重启都
+        //   丢当前选区，而且不会报错。
+        using (JsonDocument onDisk = JsonDocument.Parse(
+            File.ReadAllText(snapshotPath, Encoding.UTF8)))
+        {
+            Require(
+                onDisk.RootElement.TryGetProperty("selection", out _)
+                && onDisk.RootElement.TryGetProperty("focus", out _),
+                "selection-and-focus-stay-on-disk-for-restart",
+                checks);
+        }
     }
 
     private static async Task CheckReaderContextMcpProtocolAsync(

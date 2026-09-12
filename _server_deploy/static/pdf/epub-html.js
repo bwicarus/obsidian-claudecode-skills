@@ -1956,6 +1956,14 @@
     }
   }
 
+  /// 字典形标记表 —— 与 PDF 侧 `_readerSourceMarkerMap` 同一套理由：
+  /// 数组形每条 33 字符里只有内容那几个字是信息，而这张表占快照 46%。
+  function _epubSourceMarkerMap(markers) {
+    var map = {};
+    for (var i = 0; i < markers.length; i++) map[markers[i].marker] = markers[i].text;
+    return map;
+  }
+
   function _readerSourcePieces(text) {
     text = String(text || '');
     if (!text) throw new Error('BW_READER_SOURCE_EMPTY');
@@ -2336,7 +2344,7 @@
           sourceDigest: existing.sourceDigest,
           revision: existing.revision,
           expiresAt: existing.expiresAt,
-          markers: existing.markers.map(function (item) { return { marker: item.marker, text: item.text }; })
+          markers: Object.assign({}, existing.markers)
         };
       }
       var snapshotId = _readerSourceSnapshotId();
@@ -2355,7 +2363,7 @@
         viewportKey: state.viewportKey,
         sectionGeneration: state.sectionGeneration,
         offsets: bundle.offsets,
-        markers: bundle.markers.map(function (item) { return { marker: item.marker, text: item.text }; })
+        markers: _epubSourceMarkerMap(bundle.markers)
       });
       return {
         contract: _READER_HIGHLIGHT_SOURCE_CONTRACT,
@@ -2365,7 +2373,7 @@
         sourceDigest: state.sourceDigest,
         revision: state.revision,
         expiresAt: expiresAt,
-        markers: bundle.markers.map(function (item) { return { marker: item.marker, text: item.text }; })
+        markers: _epubSourceMarkerMap(bundle.markers)
       };
     });
   };

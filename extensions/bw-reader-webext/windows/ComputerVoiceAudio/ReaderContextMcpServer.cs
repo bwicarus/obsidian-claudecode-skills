@@ -829,7 +829,12 @@ internal sealed class ReaderContextMcpServer
                     + "published in currentPage.highlightSource. Call "
                     + "reader_context_snapshot first, copy the exact source "
                     + "identity fields, and choose startMarker/endMarker "
-                    + "from that source in document order. Every marker is "
+                    + "from that source in document order. markers is an "
+                    + "object whose keys are the marker ids and whose "
+                    + "values are that segment's text, listed in "
+                    + "document order (older App builds send the same "
+                    + "pairs as an array of {marker, text}). "
+                    + "Every marker is "
                     + "the boundary before its text: startMarker is the first "
                     + "included segment, while endMarker is the first excluded "
                     + "segment (exclusive). To include through source end, "
@@ -7377,6 +7382,57 @@ internal sealed class ReaderContextMcpServer
     /// 会把两分钟前的页标成 stale，模型就不敢用了。`live` 只报钉住之后变了什么。
     /// 超过 PinnedWindow 的钉视为过期：那句话早已处理完，退回实时版并注明。
     private JsonObject BuildToolPayload(bool forModel = false)
+    {
+        JsonObject payload = BuildToolPayloadCore(forModel);
+        if (forModel)
+        {
+            // **必须排在最后**：BuildToolPayloadCore 里的 DescribeLiveDelta
+            // 要靠 selection.text 判断"钉住之后选区变了没有"，先摘掉的话
+            // 它会永远说没变 —— 而且不会报错。
+            FoldSelectionForModel(payload);
+        }
+        return payload;
+    }
+
+    /// <summary>模型那份只留 selectedItems，不再重复 selection 和 focus。</summary>
+    /// <remarks>
+    /// 用户 2026-09-12 看着面板问「当前选取和选中集合是不是也功能重叠了」——
+    /// 是，而且是三份：同一次选中同时出现在 `selection`、`selectedItems`、
+    /// `focus` 里。`selectedItems` 本来就是为合并前两者引入的
+    /// （BuildSelectionItems 的注释：「kind=='text' 的 focus 只是 _selection
+    /// 的影子」），只是那两个一直没删。三份并存的代价不只是字节：它们可以
+    /// 不一致，而模型没有理由知道该信哪一份。
+    ///
+    /// ⚠ 只摘**给模型的那一份**，快照文件照写 —— `_selection` / `_focus` 是
+    /// 桥重启后 `RestoreSelection(root["selection"])` 读回来的内部状态，
+    /// 从文件里删掉等于每次重启都丢当前选区。
+    ///
+    /// 留下一个标量：`selectedItems` 空着的时候，它说不出**为什么**空。
+    /// 「还没收到快照」和「用户取消了选中」对模型是两回事。
+    /// </remarks>
+    private static void FoldSelectionForModel(JsonObject snapshot)
+    {
+        if (snapshot["selection"] is JsonObject selection)
+        {
+            string? state = selection["state"] is JsonValue stateValue
+                && stateValue.TryGetValue(out string? stateText)
+                    ? stateText
+                    : null;
+            snapshot["selectionState"] = state ?? "unknown";
+            if (
+                selection["reason"] is JsonValue reasonValue
+                && reasonValue.TryGetValue(out string? reason)
+                && !string.IsNullOrEmpty(reason)
+            )
+            {
+                snapshot["selectionReason"] = reason;
+            }
+        }
+        snapshot.Remove("selection");
+        snapshot.Remove("focus");
+    }
+
+    private JsonObject BuildToolPayloadCore(bool forModel)
     {
         JsonObject live = BuildLivePayload(forModel);
         DateTimeOffset now = _utcNow();

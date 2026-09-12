@@ -1077,52 +1077,97 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             throw ActiveReadingInvalid();
         }
-        JsonElement markers = value.GetProperty("markers");
-        if (markers.ValueKind != JsonValueKind.Array)
+        ValidateHighlightMarkers(value.GetProperty("markers"));
+        return value.Clone();
+    }
+
+    /// <summary>标记表：字典形（新）或对象数组形（旧），规则完全一样。</summary>
+    /// <remarks>
+    /// ⚠ **两种形状都收，不是过渡期的将就。** 桥是装完就生效，而 App 里那份
+    /// 产出端要等下一个 TestFlight 构建 —— 中间这段时间旧 App 发的就是数组。
+    /// 只收新形状等于在用户毫不知情的时候把高亮能力打断（而且是静默的：
+    /// activeReading 整条校验不过，连高亮之外的东西一起没了）。
+    ///
+    /// 字典形省下的是纯包装：`{"marker":"m_0","text":"どれ"}` 33 字符里只有
+    /// `"どれ"` 是信息，写成 `"m_0":"どれ"` 是 14 字符。这张表占整份快照 46%，
+    /// 换个写法就砍掉一半多。
+    ///
+    /// 编号仍然写在明面上，**没有改成"第 i 个就是 m_i"**：产出端用 36 进制
+    /// （第 10 个是 `m_a`），让模型自己数位置再转进制必错，而这里算错的后果是
+    /// 划错地方、不是报错。
+    /// </remarks>
+    private static void ValidateHighlightMarkers(JsonElement markers)
+    {
+        List<(string? Id, JsonElement Text)> entries = new();
+        if (markers.ValueKind == JsonValueKind.Object)
         {
-            throw ActiveReadingInvalid();
-        }
-        int count = markers.GetArrayLength();
-        if (count is < 2 or > 2048)
-        {
-            throw ActiveReadingInvalid();
-        }
-        HashSet<string> ids = new(StringComparer.Ordinal);
-        int totalText = 0;
-        for (int index = 0; index < count; index += 1)
-        {
-            JsonElement marker = markers[index];
-            if (marker.ValueKind != JsonValueKind.Object)
-            {
-                throw ActiveReadingInvalid();
-            }
             try
             {
-                DirectJsonValidation.RequireNoDuplicateKeys(marker);
+                DirectJsonValidation.RequireNoDuplicateKeys(markers);
             }
             catch (DirectProtocolException exception)
             {
                 throw ActiveReadingInvalid(exception);
             }
-            HashSet<string> markerFields = marker.EnumerateObject()
-                .Select(property => property.Name)
-                .ToHashSet(StringComparer.Ordinal);
-            string? id = marker.TryGetProperty(
-                "marker",
-                out JsonElement markerValue)
-                && markerValue.ValueKind == JsonValueKind.String
-                    ? markerValue.GetString()
-                    : null;
-            string? text = marker.TryGetProperty(
-                "text",
-                out JsonElement textValue)
-                && textValue.ValueKind == JsonValueKind.String
-                    ? textValue.GetString()
-                    : null;
-            bool final = index == count - 1;
+            foreach (JsonProperty property in markers.EnumerateObject())
+            {
+                entries.Add((property.Name, property.Value));
+            }
+        }
+        else if (markers.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement marker in markers.EnumerateArray())
+            {
+                if (marker.ValueKind != JsonValueKind.Object)
+                {
+                    throw ActiveReadingInvalid();
+                }
+                try
+                {
+                    DirectJsonValidation.RequireNoDuplicateKeys(marker);
+                }
+                catch (DirectProtocolException exception)
+                {
+                    throw ActiveReadingInvalid(exception);
+                }
+                if (
+                    !marker.EnumerateObject()
+                        .Select(property => property.Name)
+                        .ToHashSet(StringComparer.Ordinal)
+                        .SetEquals(new[] { "marker", "text" })
+                )
+                {
+                    throw ActiveReadingInvalid();
+                }
+                string? id = marker.GetProperty("marker") is
+                    { ValueKind: JsonValueKind.String } idValue
+                        ? idValue.GetString()
+                        : null;
+                entries.Add((id, marker.GetProperty("text")));
+            }
+        }
+        else
+        {
+            throw ActiveReadingInvalid();
+        }
+
+        if (entries.Count is < 2 or > 2048)
+        {
+            throw ActiveReadingInvalid();
+        }
+        HashSet<string> ids = new(StringComparer.Ordinal);
+        int totalText = 0;
+        for (int index = 0; index < entries.Count; index += 1)
+        {
+            (string? id, JsonElement textValue) = entries[index];
+            string? text = textValue.ValueKind == JsonValueKind.String
+                ? textValue.GetString()
+                : null;
+            // 最后一条是**结束边界**：它的 text 必须是空串，前面每一条都不能空。
+            // 少了它就没法表达"划到最后一个 token 的末尾"。
+            bool final = index == entries.Count - 1;
             if (
-                !markerFields.SetEquals(new[] { "marker", "text" })
-                || id is null
+                id is null
                 || !ReaderRealtimeOutputProtocol
                     .IsHighlightSourceMarker(id)
                 || !ids.Add(id)
@@ -1142,7 +1187,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             throw ActiveReadingInvalid();
         }
-        return value.Clone();
     }
 
     private static bool HighlightTargetMatches(
