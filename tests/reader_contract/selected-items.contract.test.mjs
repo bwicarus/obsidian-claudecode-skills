@@ -85,10 +85,21 @@ test("待接收兜底与陈旧标记都带这个字段,不能因为是补丁路�
   assert.match(MCP.slice(staleAt, staleAt + 400), /snapshot\["selectedItems"\] = new JsonArray\(\);/);
 });
 
-test("工具描述说明 kind 词汇与 ⟦⟧ 标记不是同一套,且卡片 ref 是批次号", () => {
-  assert.match(MCP, /selectedItems merges what the user has selected/);
-  assert.match(MCP, /not the same one/);
-  assert.match(MCP, /a card's ref is its\s*\n?\s*\/\/?\s*batch id|batch id/);
+test("kind 词汇与 ⟦⟧ 标记不是同一套——说明跟着数据走，只在非空时附", () => {
+  // 2026-09-12 搬家：这段 527 字原来常驻在工具描述里，而**空列表是常态** ——
+  // 绝大多数请求都在为一段用不上的说明付钱。现在按需附在 selectedItemsHint 上。
+  //
+  // 里面最值钱的一句是「kind 这套词表跟正文 ⟦…⟧ 标记那套不是同一套」：
+  // 两套词表长得像，混起来会让模型把 card 条目当成正文标记去引用。
+  const at = MCP.indexOf("private static void AttachSelectedItemsHint");
+  assert.notStrictEqual(at, -1, "找不到按需附说明的那段");
+  const body = MCP.slice(at, at + 2000);
+  assert.match(body, /items\.Count == 0/, "空列表不许附说明");
+  assert.match(body, /different vocabulary from the/);
+  assert.match(body, /do not mix the two/);
+  assert.match(body, /batch id/);
+  assert.doesNotMatch(MCP.slice(0, at), /selectedItems merges what the user has selected/,
+    "读法不该再留在常驻描述里");
 });
 
 // ── Pi 侧选区曾被整段丢弃 ────────────────────────────────────────────

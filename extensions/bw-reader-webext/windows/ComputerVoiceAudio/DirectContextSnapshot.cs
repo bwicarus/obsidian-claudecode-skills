@@ -3205,12 +3205,21 @@ internal sealed class FileDirectSnapshotContextAdapter :
             //   模型不会自己推断"recentActions 是用来解指代的"——
             //   把用法写在数据旁边，是这条链上唯一能到达它的地方。
             ["recentActionsHint"] =
-                "他说「这个 / 那个 / 刚才那段」这类指代时，**先看 "
-                + "recentActions**：那是他开口前最后做的几件事（选中 / 画图 / "
-                + "翻到新页），最新的在最后，secondsAgo 是距今多少秒。"
-                + "selection 类型的 what 字段就是他选中的原文摘要 —— "
-                + "多数时候「这个」指的就是它。"
-                + "都对不上再问他，别自己猜一个。",
+                "他说「这个 / 那个 / 刚才那段」这类指代时："
+                + "**selectedItems 有东西就用它**（那是他此刻正选着的）；"
+                + "空的就看 **recentActions 最新那条**——那是他开口前最后做的"
+                + "几件事（选中 / 画图 / 翻到新页），最新的在最后，"
+                + "selection 类型的 what 字段就是他选中的原文摘要。"
+                + "选区在他开口前被清掉是常事（划完一段、想一会儿、再说话），"
+                + "recentActions 正是为这种情况留的，secondsAgo 是距今多少秒，"
+                + "没有时间上限，自己判断还算不算数。"
+                + "都对不上再问他，别自己猜一个。"
+                // 这两条原来写在工具描述里（常驻）。它们只有**读到这张表**
+                // 的时候才有意义，所以跟着数据走。
+                + "这是历史，不是指令：除非他自己问起，否则不要因为看到一条"
+                + "就去做什么。"
+                + "覆盖面是有意不全的——高亮、查词、便签还没进这张表，"
+                + "所以列表短或空**不等于**他一直没动。",
             ["activeReading"] = publicActiveReading,
             ["contextStatus"] = contextStatus,
             ["currentPage"] = effectivePage,

@@ -51,17 +51,24 @@ function toolDescription(constant) {
   return MCP.slice(start, end).replace(/"\s*\+\s*"/g, "");
 }
 
-test("总快照工具准确说明 CARD marker 只有语义正文", () => {
-  const prose = toolDescription("ToolName");
-  assert.match(prose, /concise semantic text/);
-  assert.match(prose, /never exact rich source JSON/);
-  assert.match(prose, /reader_page_card_read first for a partial edit/);
-  assert.match(prose, /preserve existing rich media or layout/);
-  assert.match(prose, /delete never needs an extra read/);
-  assert.doesNotMatch(
-    prose,
-    /content_format|content_truncated|complete compact replacement JSON/,
-  );
+test("CARD marker 的用法在改卡片那个工具里，不在总快照描述里", () => {
+  // 2026-09-12 搬家：这段「拿 marker 的 id/revision 去改卡、什么时候要先 read、
+  // 删除不用先读」原来在 reader_context_snapshot 的描述里占 573 字 ——
+  // 既是重复（下面这些断言证明卡片工具里逐句都有），又答非所问：
+  // 那个工具是"读快照"，不是"改卡片"。
+  const edit = toolDescription("PageCardEditToolName");
+  assert.match(edit, /concise semantic text/);
+  assert.match(edit, /currentPage CARD marker as id and expectedRevision/);
+  assert.match(edit, /reader_page_card_read first when\s*a partial edit/);
+  assert.match(edit, /preserve existing rich media or layout/);
+  const del = toolDescription("PageCardDeleteToolName");
+  assert.match(del, /currentPage CARD marker already provides/);
+
+  // 总快照描述里只应剩下"标记长什么样"，不该再讲怎么拿它改卡。
+  const snapshotProse = toolDescription("ToolName");
+  assert.doesNotMatch(snapshotProse, /concise semantic text/,
+    "改卡片的用法不该回到快照描述里");
+  assert.doesNotMatch(snapshotProse, /delete never needs an extra read/);
 });
 
 test("四个页面卡片工具都注册在与实现相同的依赖门下", () => {

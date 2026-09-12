@@ -159,17 +159,29 @@ test("待接收状态的兜底对象也带这个字段,不是缺省省略", () =
   assert.match(around, /\["recentActions"\] = new JsonArray\(\),/);
 });
 
-test("工具描述说明这是历史记录而非待办指令,且如实说明覆盖不全", () => {
-  // ⚠ 措辞 2026-09-12 换过：旧版把它描述成"翻页/落笔"的流水账，只字不提
-  //   selection。模型读完只会当它是操作日志，不会为了解「这个」去看它 ——
-  //   而那正是它现在的主要用途。**面向 AI 的说明写偏，比没写更糟。**
-  assert.match(MCP, /recentActions is how you resolve this and that/);
-  assert.match(MCP, /newest selection/,
-    "必须点明最新那条 selection 的 what 通常就是他说的「这个」");
-  assert.match(MCP, /no time cutoff/,
-    "必须说清没有时间窗,否则模型会自己假设旧条目已失效");
-  assert.match(MCP, /never act on an entry unless the user's own/);
-  assert.match(MCP, /Coverage is intentionally/);
-  assert.match(MCP, /highlighting, word lookups, and sticky notes/,
-    "必须明说高亮/查词/便签还没被覆盖,否则空列表会被读成'用户什么都没做'");
+test("说明跟着数据走：路由留在工具描述，读法留在载荷", () => {
+  // ⚠ 2026-09-12 搬过一次家，两边各留各的那一半：
+  //
+  //   · **工具描述**（每次请求都注入）只回答「什么时候该来调这个工具」——
+  //     解指代先看 selectedItems / recentActions。这句必须留在描述里：
+  //     搬走了模型压根不知道该来调，那是另一种失败。
+  //   · **载荷里的 hint**（只有取快照那次才付）回答「拿到之后怎么读」。
+  //     放在数据旁边还有一个描述给不了的好处：它不会跟数据脱节 ——
+  //     同一天就有个 skill 还在教模型读已经被摘掉的字段。
+  assert.match(MCP, /To resolve this \/ that \/ here \/ the bit just now/,
+    "路由句必须留在工具描述里");
+  assert.match(MCP, /each carries its own "?\s*\+?\s*"?Hint field/,
+    "描述要指明说明就在数据旁边");
+  assert.doesNotMatch(MCP, /Coverage is intentionally/,
+    "读法不该再留在常驻描述里");
+
+  const hint = SNAPSHOT.slice(
+    SNAPSHOT.indexOf('["recentActionsHint"]'),
+    SNAPSHOT.indexOf('["activeReading"] = publicActiveReading'));
+  assert.match(hint, /这是历史，不是指令/,
+    "安全规则要跟着数据：看到一条不等于要去做");
+  assert.match(hint, /覆盖面是有意不全的/,
+    "必须明说高亮/查词/便签还没进这张表，否则空列表会被读成'他一直没动'");
+  assert.match(hint, /selectedItems/,
+    "先看现在选着的，再退到 recentActions");
 });

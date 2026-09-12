@@ -755,6 +755,7 @@ internal static class DirectBridgeSelfTest
             root,
             checks).ConfigureAwait(false);
         CheckHighlightMarkerShapes(checks);
+        CheckTextMarksHint(checks);
         CheckReaderPageCardQueryContract(checks);
         CheckReaderPageCardMutationContract(checks);
         CheckReaderLearningCardMutationContract(checks);
@@ -10116,6 +10117,65 @@ internal static class DirectBridgeSelfTest
             checks);
     }
 
+    /// <summary>标记语法说明按需出现：没有标记就不该有这段字。</summary>
+    /// <remarks>
+    /// 这段原来约 1000 字常驻在工具描述里，等于每次请求都付一遍，而多数页面
+    /// 一个标记都没有。搬到载荷上之后，**"按需"这件事本身就成了可以退化的东西**
+    /// —— 一个 `if` 写反就变回每次都附，而且没人会发现（多出来的只是几行字）。
+    /// 所以这里正反两面都钉：有标记要出现且只讲命中的那类，没标记一个字都不许有。
+    /// </remarks>
+    private static void CheckTextMarksHint(ICollection<string> checks)
+    {
+        static JsonObject Payload(string text) => new()
+        {
+            ["currentPage"] = new JsonObject
+            {
+                ["file"] = "marks.pdf",
+                ["page"] = 3,
+                ["text"] = text,
+            },
+        };
+        static string? Hint(JsonObject payload)
+        {
+            ReaderContextMcpServer.TrimForModel(payload);
+            return (payload["currentPage"] as JsonObject)?["textMarksHint"]
+                ?.GetValue<string>();
+        }
+
+        Require(
+            Hint(Payload("ふつうの本文だけ。")) is null,
+            "text-marks-hint-absent-without-marks",
+            checks);
+
+        string? highlightHint = Hint(Payload(
+            "前⟦HIGHLIGHT color=yellow⟧ここ⟦/HIGHLIGHT⟧後"));
+        Require(
+            highlightHint is not null
+            && highlightHint.Contains("HIGHLIGHT", StringComparison.Ordinal)
+            && !highlightHint.Contains("VIEWPORT", StringComparison.Ordinal)
+            && !highlightHint.Contains("CARD_START", StringComparison.Ordinal),
+            "text-marks-hint-covers-only-the-marks-present",
+            checks);
+
+        string? viewportHint = Hint(Payload(
+            "上⟦VIEWPORT⟧見えている⟦/VIEWPORT⟧下"));
+        Require(
+            viewportHint is not null
+            && viewportHint.Contains("VIEWPORT", StringComparison.Ordinal)
+            && !viewportHint.Contains("HIGHLIGHT color", StringComparison.Ordinal),
+            "text-marks-hint-explains-the-viewport-span",
+            checks);
+
+        // 共同那句必须在：这些标记是**用户标的**，不是给模型的指令。
+        Require(
+            highlightHint is not null
+            && highlightHint.Contains(
+                "never instructions to you",
+                StringComparison.Ordinal),
+            "text-marks-hint-keeps-the-not-instructions-line",
+            checks);
+    }
+
     /// <summary>标记表：字典形与对象数组形都要收得下。</summary>
     /// <remarks>
     /// ⚠ 守的是一次**静默断线**。桥装完立刻生效，App 里那份产出端要等下一个
@@ -10389,9 +10449,15 @@ internal static class DirectBridgeSelfTest
         _ = await server.RunAsync(CancellationToken.None)
             .ConfigureAwait(false);
         string transcript = output.ToString();
+        // 工具描述里只留**路由**（什么时候该来调），读法在载荷里。
+        // 两边各需各的：路由搬走了模型不知道该调，读法留在描述里则是
+        // 每次请求都付钱、而且会跟数据脱节。
         Require(
-            transcript.Contains("recentActions is how you resolve", StringComparison.Ordinal)
-            && transcript.Contains("newest selection", StringComparison.Ordinal),
+            transcript.Contains(
+                "To resolve this / that / here / the bit just now",
+                StringComparison.Ordinal)
+            && transcript.Contains("recentActions", StringComparison.Ordinal)
+            && transcript.Contains("Hint field", StringComparison.Ordinal),
             "recent-focus-tool-description-points-at-deixis",
             checks);
         Require(
