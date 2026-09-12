@@ -70,6 +70,23 @@ internal static class ReaderCodexPush
         lock (Gate) { _enabled = value; }
     }
 
+    /// <summary>进程启动时，从盘上的绑定把「推不推」接回来。</summary>
+    /// <remarks>
+    /// ⚠ 不这么做的表现是**静默停摆**：绑定还在、通话还在、板面照常更新，
+    /// 就是没人推 —— 而账本一行都不会有（`if (!Enabled) return;` 在最前面）。
+    /// 用户 2026-09-12 报的正是这个。
+    ///
+    /// 只在盘上明确写着 true 时才打开：读不到、没这个字段、或写着 false，
+    /// 一律保持默认的关 —— 那个默认值是有意选的，不该被「恢复」顺手改掉。
+    /// </remarks>
+    internal static void RestoreEnabledFromBinding()
+    {
+        if (ReaderCodexEndpoint.EnabledOnDisk())
+        {
+            SetEnabled(true);
+        }
+    }
+
     /// 换了推送目标、或从失效里恢复时清零。不清的话上一个死绑定攒下的
     /// 失败次数会记在新目标头上，新目标可能一上来就被判死。
     internal static void ResetFailures()

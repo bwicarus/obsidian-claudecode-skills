@@ -158,6 +158,30 @@ internal static class ReaderCodexEndpoint
         }
     }
 
+    /// <summary>盘上那份绑定说「推不推」。读不到一律当**不推**。</summary>
+    internal static bool EnabledOnDisk()
+    {
+        try
+        {
+            if (Current() is null) return false;
+            return EnabledFromRecord(ReadRecord());
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>一条绑定记录说「推不推」。纯函数，给自检用。</summary>
+    /// <remarks>
+    /// ⚠ **只认字面的 true**：读不到、没这个字段、写的是别的类型，一律当不推。
+    /// 这条链的默认值是有意选的（消费端曾经同时在轮询，两条都开就是双发），
+    /// 恢复不该顺手把它改宽。
+    /// </remarks>
+    internal static bool EnabledFromRecord(JsonObject? record) =>
+        record?["enabled"] is JsonValue flag
+        && flag.TryGetValue(out bool value) && value;
+
     /// 绑定为什么失效了。没失效返回空串 —— 给状态查询用。
     internal static string InvalidReason()
     {
@@ -464,6 +488,15 @@ internal static class ReaderCodexEndpoint
             ["invalidAtMs"] = null,
             ["invalidReason"] = null,
             ["expiresAtMs"] = now + (long)Lifetime.TotalMilliseconds,
+            // ⚠ **推不推也要落盘**（2026-09-12 用户：「为何快慢板变化没有被
+            //   注入到打开的语音对话」）。
+            //   `ReaderCodexPush.Enabled` 原来只活在内存里，而绑定活在盘上 ——
+            //   桥一重启，绑定还在、开关却回到默认的**关**，于是板面推送
+            //   静悄悄地停了：`PushBoardAsync` 的第一行 `if (!Enabled) return;`
+            //   不写任何痕迹，账本里连一行失败都没有。
+            //   而重新打开它的唯一途径是 AI 再登记一次 —— 通话已经在跑时
+            //   那件事不会发生。
+            ["enabled"] = wantEnabled ?? ReaderCodexPush.Enabled,
         };
         // ── 读旧状态 → 写新绑定 → 决定要不要发接通提醒。**整段互斥。**
         //

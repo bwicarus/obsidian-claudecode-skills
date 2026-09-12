@@ -15229,6 +15229,30 @@ internal static class DirectBridgeSelfTest
             ReaderCodexEndpoint.RelockAfterStart = originalRelock;
         }
 
+        // 板面推送的开关要跟着绑定活下来。
+        //
+        // ⚠ 2026-09-12 用户报的：「为何快慢板变化没有被注入到打开的语音对话」。
+        // `ReaderCodexPush.Enabled` 原来只活在内存里，而绑定活在盘上 ——
+        // 桥一重启，绑定还在、开关回到默认的关，板面推送**静悄悄地停了**：
+        // PushBoardAsync 第一行就是 `if (!Enabled) return;`，账本里连失败都没有。
+        //
+        // ⚠ 只认字面的 true：默认关是有意选的（消费端曾同时在轮询，两条都开
+        // 就是双发），恢复不该顺手把它改宽。
+        Require(
+            ReaderCodexEndpoint.EnabledFromRecord(
+                new JsonObject { ["enabled"] = true }),
+            "push-enabled-survives-a-restart-when-the-binding-says-so",
+            checks);
+        Require(
+            !ReaderCodexEndpoint.EnabledFromRecord(null)
+            && !ReaderCodexEndpoint.EnabledFromRecord(new JsonObject())
+            && !ReaderCodexEndpoint.EnabledFromRecord(
+                new JsonObject { ["enabled"] = false })
+            && !ReaderCodexEndpoint.EnabledFromRecord(
+                new JsonObject { ["enabled"] = "true" }),
+            "push-enabled-restore-only-trusts-a-literal-true",
+            checks);
+
         // 桌面锁着挡下：同样"没按也没开"，但它跟冷却**必须报得不一样** ——
         // 冷却是"稍等再看"，锁屏是"等也没用，去解锁"。
         //

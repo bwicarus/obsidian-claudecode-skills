@@ -493,6 +493,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         // ⚠ 语音关着时接的是 DirectDisabledCodexVoiceControl：它会明确抛
         // VOICE_DISABLED，端点据此回 voice-off，而不是假装按过。
         ReaderCodexEndpoint.ConfigureVoiceControl(_codexVoiceControl);
+        // 桥重启后把「推不推」从盘上接回来 —— 否则绑定还在、通话还在，
+        // 板面却再也不推，而且不留痕迹（见 RestoreEnabledFromBinding）。
+        ReaderCodexPush.RestoreEnabledFromBinding();
         _documentCorpus = new ReaderDocumentCorpusStore(
             Path.Combine(
                 runtimeDirectory,

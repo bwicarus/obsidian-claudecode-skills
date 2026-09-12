@@ -2395,11 +2395,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.verify:
             print(json.dumps(verify_archive(args.verify), ensure_ascii=False, sort_keys=True))
         elif args.install:
-            print(json.dumps(install_archive(
+            outcome = install_archive(
                 args.install,
                 install_root=args.install_root,
                 backup_root=args.backup_root,
-            ), ensure_ascii=False, sort_keys=True))
+            )
+            print(json.dumps(outcome, ensure_ascii=False, sort_keys=True))
+            # ⚠ **停了别人的工具就要说出来**（2026-09-12 用户实测撞到）：
+            #   为了替换 exe，这里会停掉 Codex 拉起的 MCP 子进程
+            #   （reader_snapshot = 语音里"读页面"那个工具）。而 Codex 只在
+            #   **启动时**拉 MCP，中途不会重拉 —— 装完之后它就一直缺着，
+            #   表现是通话里的 AI 说"ページを読み取る接続が切れてる"，
+            #   而装机的人这边只看到一个 mcpProcessesStopped 数字。
+            #   一个只在 JSON 里的数字等于没说。
+            if outcome.get("mcpProcessesStopped"):
+                print(
+                    "⚠ 已停掉 %d 个 Codex MCP 子进程（读页面等工具）——"
+                    " **Codex 需要重启一次**才会重新拉起它们，"
+                    "否则通话里的 AI 会说看不到页面。"
+                    % outcome["mcpProcessesStopped"],
+                    file=sys.stderr,
+                )
         elif args.rollback:
             print(json.dumps(rollback_install(
                 args.rollback,
