@@ -9445,12 +9445,22 @@ internal static class DirectBridgeSelfTest
             ,
             "direct-dense-cjk-snapshot-crosses-128k-within-512k",
             checks);
+        // 「只有一份」这条 2026-09-12 之后由更强的事实保证：模型那份
+        // 根本没有 activeReading 了（它整个并进了 currentPage）。
+        //
+        // markers 桥是**原样透传**的：这个夹具送的是旧的对象数组形，所以这里
+        // 收到的就是数组 —— 顺带证明了旧 App 构建那条路仍然通到底。
+        JsonElement denseMcpMarkers = denseMcpSnapshot.RootElement
+            .GetProperty("currentPage")
+            .GetProperty("highlightSource")
+            .GetProperty("markers");
+        int denseMarkerCount =
+            denseMcpMarkers.ValueKind == JsonValueKind.Object
+                ? denseMcpMarkers.EnumerateObject().Count()
+                : denseMcpMarkers.GetArrayLength();
         Require(
-            !denseMcpSnapshot.RootElement.GetProperty("activeReading")
-                .TryGetProperty("highlightSource", out _)
-            && denseMcpSnapshot.RootElement.GetProperty("currentPage")
-                .GetProperty("highlightSource")
-                .GetProperty("markers").GetArrayLength() == 2_048
+            !denseMcpSnapshot.RootElement.TryGetProperty("activeReading", out _)
+            && denseMarkerCount == 2_048
             && denseMcpSnapshot.RootElement.GetProperty("currentPage")
                 .GetProperty("text").GetString()
                 == densePageText,
@@ -10426,6 +10436,22 @@ internal static class DirectBridgeSelfTest
             && modelPayload.ContainsKey("selectedItems"),
             "selection-folds-into-selected-items-for-the-model",
             checks);
+        // latestEvent 是内部记账（readerpc.disabled / UUID / seq），模型
+        // 拿它做不了任何事，还会把 "disabled" 误读成故障。
+        Require(
+            modelPayload is not null
+            && !modelPayload.ContainsKey("latestEvent"),
+            "latest-event-stays-internal",
+            checks);
+        // activeReading 与 currentPage 原来各存一份 kind/file/title/page。
+        Require(
+            modelPayload is not null
+            && !modelPayload.ContainsKey("activeReading")
+            && modelPayload["currentPage"] is JsonObject foldedPage
+            && foldedPage.ContainsKey("file")
+            && foldedPage.ContainsKey("page"),
+            "active-reading-folds-into-current-page",
+            checks);
         // selectedItems 空着时说不出**为什么**空。「还没收到快照」和
         // 「用户取消了选中」对模型是两回事，所以留一个标量。
         Require(
@@ -10440,8 +10466,10 @@ internal static class DirectBridgeSelfTest
         {
             Require(
                 onDisk.RootElement.TryGetProperty("selection", out _)
-                && onDisk.RootElement.TryGetProperty("focus", out _),
-                "selection-and-focus-stay-on-disk-for-restart",
+                && onDisk.RootElement.TryGetProperty("focus", out _)
+                && onDisk.RootElement.TryGetProperty("latestEvent", out _)
+                && onDisk.RootElement.TryGetProperty("activeReading", out _),
+                "folded-fields-stay-on-disk-for-restart",
                 checks);
         }
     }

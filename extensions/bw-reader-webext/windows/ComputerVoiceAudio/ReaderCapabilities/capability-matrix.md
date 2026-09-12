@@ -7,7 +7,8 @@
 | 当前页、选区、首次全文/后续窗口 | 本机 `reader_context_snapshot` | 只认 ready 的新鲜快照 |
 | App/扩展合成图 | 本机 `reader_visual_image` | 图像按需取，不进文字快照 |
 | 当前页面滚动与定位 | 本机 `reader_browser_control` | 只控制快照精确指向的来源 |
-| 卡片、导航、高亮、工具状态 | 本机 `reader_command` | 严格 `BWREADER/1` 合同与回执 |
+| 卡片、导航、工具状态 | 本机 `reader_command` | 严格 `BWREADER/1` 合同与回执 |
+| 高亮 | `reader_highlight_range` / `_text` / `reader_web_highlight` | 带来源指纹，页面变了会被拒绝；`BWREADER/1 highlight` 已废弃 |
 | 把卡片钉在正文某段（页面锚定/固定） | 本机 `reader_card` 的可选 `bind` | **书里和普通网页都支持**。序号取自 `reader_page_text` 的 `segments`；见 `cards.md` |
 | 开放网络研究 | Codex 原生搜索/浏览工具 | 不经过 Reader 或旧 CLI |
 | 查书、纸张、报告、已保存任务 | 已配置的服务 MCP | 先发现实时 schema；当前未暴露就明确失败 |

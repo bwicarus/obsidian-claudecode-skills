@@ -6,7 +6,9 @@
 BWREADER/1 <kind> <单个 JSON 对象>
 ```
 
-允许的 `<kind>` 只有：`card`、`navigate`、`highlight`、`tool-status`。
+允许的 `<kind>` 只有：`card`、`navigate`、`tool-status`。
+（`highlight` 运行时仍然收，但**别用** —— 它不带来源指纹，页面变了会安静地
+划错地方。高亮走 `reader_highlight_range` / `_text` / `reader_web_highlight`。）
 字段必须与对应能力文件完全一致；多字段、未知动作、任意函数名、URL 或脚本都会被拒绝。
 
 命令只投递给最新快照中同一个 `sourceInstanceId` 的在线 Reader，回执为：

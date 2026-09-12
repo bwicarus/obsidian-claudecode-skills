@@ -9,7 +9,7 @@
   的「钉住内容（`bind`）」一节；字符序号从 `get.md` 的 `reader_page_text` → `segments` 取
 - 用实体摄像头看一眼现实世界（当场拍，不在快照里）：`camera.md`
 - 翻动视口、定位文字/标题/选区、跳页/章节：`navigation.md`
-- 把当前选区保存为高亮：`highlight.md`
+- 把当前选区保存为高亮：`highlight.md`（用工具，命令串那条已废弃）
 - 展示工具进行中、完成、失败或中止状态：`tool-status.md`
 - **收到「语音入口」通知时怎么开语音**（跑脚本、最多两次、失败要报错）：
   `voice-entry.md`

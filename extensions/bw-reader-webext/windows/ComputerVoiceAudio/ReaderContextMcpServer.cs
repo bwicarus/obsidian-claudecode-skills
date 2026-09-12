@@ -553,6 +553,8 @@ internal sealed class ReaderContextMcpServer
                     + "should make you prefer the live state. basis=live "
                     + "means no recent pin exists and this is the state as "
                     + "of this call. "
+                    + "currentPage also carries how old the report is "
+                    + "(fresh, ageSec) and, in review mode, review. "
                     + "Check contextStatus before using currentPage; "
                     + "never reuse text when it is pending or stale. Read "
                     + "visualAccess to discover whether the exact App "
@@ -623,8 +625,8 @@ internal sealed class ReaderContextMcpServer
                     + "the page but could not be located in this text, so a "
                     + "missing mark is not evidence the user never "
                     + "highlighted that passage. "
-                    // recentActions 装的是「用户刚做了什么」,跟 latestEvent
-                    // (内部记账,readerpc.recovering 那类)是两回事,别混用。
+                    // 2026-09-12：`latestEvent`（内部记账）已不再发给模型，
+                    // 所以这里也不用再写一句"别跟它混用"了。
                     + "recentActions is how you resolve this and that: "
                     + "the last few things the user did on the current "
                     + "book, at most three, oldest first and newest last, "
@@ -3905,6 +3907,8 @@ internal sealed class ReaderContextMcpServer
         //   原来这里 await 一个到 Flask 的 HTTP，而 Flask 由 ReaderPC 托管 ——
         //   ReaderPC 一关，每次带书页的快照就白等 2 秒（拒连在 Windows 上的代价）。
         KjPageClient.AttachToSnapshot(payload);
+        // **最后一道**：到这里为止没有任何代码还要读这个对象，可以安全瘦身。
+        TrimForModel(payload);
         await WriteResultAsync(
             id,
             new JsonObject
@@ -7383,18 +7387,21 @@ internal sealed class ReaderContextMcpServer
     /// 超过 PinnedWindow 的钉视为过期：那句话早已处理完，退回实时版并注明。
     private JsonObject BuildToolPayload(bool forModel = false)
     {
-        JsonObject payload = BuildToolPayloadCore(forModel);
-        if (forModel)
-        {
-            // **必须排在最后**：BuildToolPayloadCore 里的 DescribeLiveDelta
-            // 要靠 selection.text 判断"钉住之后选区变了没有"，先摘掉的话
-            // 它会永远说没变 —— 而且不会报错。
-            FoldSelectionForModel(payload);
-        }
-        return payload;
+        // ⚠ 折叠**不在这里**做。这个函数的返回值还要经过
+        //   `AttachOutputAccessAsync` / `AttachDocumentContextAsync` /
+        //   `KjPageClient.AttachToSnapshot` —— 它们要读 activeReading 取
+        //   来源身份。在这里删等于把它们的地基抽走（实测：outputAccess
+        //   的 sourceInstanceId 变 null、available 变 false）。
+        //   折叠在 `payload.ToJsonString()` 前一句，见 TrimForModel。
+        return BuildToolPayloadCore(forModel);
     }
 
-    /// <summary>模型那份只留 selectedItems，不再重复 selection 和 focus。</summary>
+    /// <summary>序列化给模型之前的最后一道：只留一份，摘掉重复通道。</summary>
+    /// <remarks>
+    /// **调用时机是关键**：必须在所有 Attach* 之后、`ToJsonString` 之前。
+    /// 那些函数消费的是**载荷对象**，模型消费的是**那份 JSON 文本**，
+    /// 只有后者需要瘦身。放早一步就会静默掐掉 outputAccess（2026-09-12 实测）。
+    /// </remarks>
     /// <remarks>
     /// 用户 2026-09-12 看着面板问「当前选取和选中集合是不是也功能重叠了」——
     /// 是，而且是三份：同一次选中同时出现在 `selection`、`selectedItems`、
@@ -7410,7 +7417,7 @@ internal sealed class ReaderContextMcpServer
     /// 留下一个标量：`selectedItems` 空着的时候，它说不出**为什么**空。
     /// 「还没收到快照」和「用户取消了选中」对模型是两回事。
     /// </remarks>
-    private static void FoldSelectionForModel(JsonObject snapshot)
+    internal static void TrimForModel(JsonObject snapshot)
     {
         if (snapshot["selection"] is JsonObject selection)
         {
@@ -7430,6 +7437,64 @@ internal sealed class ReaderContextMcpServer
         }
         snapshot.Remove("selection");
         snapshot.Remove("focus");
+        // ⚠ `latestEvent` 是**内部记账**，不是给模型看的。实测线上那一刻是
+        //   {"type":"readerpc.disabled","id":"readerpc-disabled-f49cf41a…",
+        //    "seq":null} —— UUID、序号、服务开关状态，模型拿它做不了任何事，
+        //   而 "disabled" 这种词放在快照里只会让它以为出了故障。
+        //   工具描述里原本要专门写一句「跟 recentActions 是两回事，别混用」
+        //   来防混淆 —— **需要一句话去防止误读的字段，本身就是多余的**。
+        //   同样只摘给模型那份：文件里要留着，重启后 `_latestEvent` 从
+        //   `root["latestEvent"]` 读回来。
+        snapshot.Remove("latestEvent");
+        FoldActiveReadingIntoCurrentPage(snapshot);
+    }
+
+    /// <summary>把 activeReading 并进 currentPage，只留一份页面身份。</summary>
+    /// <remarks>
+    /// 两个字段各存一份 `kind` / `file` / `title` / `page`（用户 2026-09-12
+    /// 盘点时点出来的）。两份可以不一致，而模型没有理由知道该信哪一份。
+    ///
+    /// 这套代码里**已经有先例**：`highlightSource` 原来也是两边各一份，
+    /// 后来定成「the range source belongs to currentPage，不要在 activeReading
+    /// 下面再序列化一遍」。这次只是把同一条纪律用到剩下的字段上。
+    ///
+    /// ⚠ **先搬后删**。`MarkStale` 把陈旧度写在 `active["fresh"]` /
+    /// `active["ageSec"]` 上，`currentPage` 没有这两个字段 —— 直接删会让模型
+    /// 丢掉"这页信息多旧"。`contextStatus: "stale"` 只说"旧了"，不说旧多少，
+    /// 而"旧 12 秒"和"旧 20 分钟"对要不要照着回答是两个决定。
+    ///
+    /// ⚠ `currentPage` 还没有的时候**不删**：那时 activeReading 是唯一还知道
+    /// "他在看哪本书"的地方，删了就等于什么都不知道。
+    /// </remarks>
+    private static void FoldActiveReadingIntoCurrentPage(JsonObject snapshot)
+    {
+        if (
+            snapshot["activeReading"] is not JsonObject active
+            || snapshot["currentPage"] is not JsonObject page
+        )
+        {
+            return;
+        }
+        // activeReading 独有、currentPage 没有的那些 —— 搬过去。
+        // 其余（kind/file/title/page）本来就是同一份，丢掉即可。
+        foreach (string key in new[]
+        {
+            "fresh",
+            "ageSec",
+            "observedAtEpochMs",
+            "receivedAtEpochMs",
+            "selectionState",
+            "review",
+            "viewFile",
+            "viewPage",
+        })
+        {
+            if (!page.ContainsKey(key) && active[key] is JsonNode value)
+            {
+                page[key] = value.DeepClone();
+            }
+        }
+        snapshot.Remove("activeReading");
     }
 
     private JsonObject BuildToolPayloadCore(bool forModel)
