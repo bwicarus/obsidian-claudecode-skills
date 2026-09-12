@@ -8080,6 +8080,52 @@
     } catch (e) { return Promise.resolve(fallback); }
   }
 
+  // ── 上下页各留半页 ───────────────────────────────────────────────
+  // 用户 2026-09-12：「把上下页的全部内容放进去好像有点太多了，保留一半就好了吧，
+  // 如果是有表格的话那为了表格元素完整性超过一半页无妨」。
+  var _NB_MIN = 200, _NB_MAX = 700;
+
+  // 像表格行么：一行里有两处以上"被两个以上空白隔开"的内容，或者带竖线。
+  // 判得宽一点没关系 —— 判错的代价只是多留几行，判漏的代价是半张表。
+  function _nbTabular(line) {
+    if (!line) return false;
+    if (/[|｜┃│]/.test(line)) return true;
+    var cols = line.trim().split(/\s{2,}|\t/).filter(function (s) { return s; });
+    return cols.length >= 3 && line.trim().length <= 80;
+  }
+
+  /// 从一页文字里取靠近当前页的那一头，切在行边界上，表格行不切断。
+  /// fromEnd=true 取尾部（上一页的结尾），false 取开头（下一页的开头）。
+  function _nbSlice(text, currentLength, fromEnd) {
+    text = String(text || '');
+    if (!text) return '';
+    var want = Math.round((Number(currentLength) || 0) / 2);
+    if (want < _NB_MIN) want = _NB_MIN;
+    if (want > _NB_MAX) want = _NB_MAX;
+    if (text.length <= want) return text;
+    var lines = text.split('\n');
+    var picked = [], used = 0;
+    var order = fromEnd ? lines.slice().reverse() : lines;
+    for (var i = 0; i < order.length; i++) {
+      var line = order[i];
+      var next = used + line.length + 1;
+      if (used > 0 && next > want) {
+        // 已经够了。除非正卡在表格中间 —— 那就把这段表格行带完，
+        // 上限仍是 _NB_MAX，别让一张大表把整个预算吃光。
+        if (!(_nbTabular(line) && _nbTabular(order[i - 1]) && next <= _NB_MAX)) {
+          break;
+        }
+      }
+      picked.push(line);
+      used = next;
+    }
+    if (fromEnd) picked.reverse();
+    var out = picked.join('\n');
+    return out.length < text.length
+      ? (fromEnd ? '…' + out : out + '…')
+      : out;
+  }
+
   async function _nativeRealtimePageContext(page, snapshot) {
     snapshot = snapshot || _nativeRealtimeContextSnapshot(page);
     page = Number(page) || Number(snapshot.page) || 0;
@@ -8102,17 +8148,18 @@
       page: page,
       total: total,
       before_page: previousPage || null,
-      before: beforeText.length > 700 ? ('…' + beforeText.slice(-700)) : beforeText,
+      before: _nbSlice(beforeText, currentText.length, true),
       visible_text: String(snapshot.visible_text || currentText).slice(0, 2400),
       current_page_text: currentText.slice(0, 3200),
       after_page: nextPage || null,
-      after: afterText.slice(0, 700),
+      after: _nbSlice(afterText, currentText.length, false),
       selection: snapshot.selection || '',
       selection_context: snapshot.selection_context || '',
       source: current.source || 'none',
       revision: current.revision || '',
       state: current.state || 'idle',
-      truncated: beforeText.length > 700 || currentText.length > 3200 || afterText.length > 700
+      truncated: beforeText.length > _NB_MAX || currentText.length > 3200
+        || afterText.length > _NB_MAX
     };
   }
 

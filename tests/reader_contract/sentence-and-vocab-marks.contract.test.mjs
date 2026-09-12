@@ -105,6 +105,51 @@ test("句末标点仍然断句，块内的巨大空隙也断", () => {
   assert.equal(text2, "下のかたまり", "块内的巨大空隙仍然断");
 });
 
+test("列表项自成一句：①②③ 前面要断开", () => {
+  // 用户 2026-09-12 截图：一个 Check! 方框整框被认成一句 ——
+  // 标题 +「①大気汚染 ②水質汚濁 ③土壌の汚染 ④騒音 / ⑤振動 ⑥地盤沈下 ⑦悪臭」。
+  // 列表两样旧边界都不占：项目之间不写句号，排版又是同一块里的连续几行。
+  const expand = loadSentenceExpander(SOURCE);
+  const chars = makeChars([
+    { bk: 4, text: "環境基本法による7つの公害の要因" },
+    { bk: 4, text: "①大気汚染②水質汚濁③土壌の汚染④騒音" },
+    { bk: 4, text: "⑤振動⑥地盤沈下⑦悪臭" },
+  ]);
+  const text = (at) => {
+    const range = expand(chars, at, at);
+    return chars.slice(range.start, range.end + 1).map((c) => c.c).join("");
+  };
+
+  // 点「騒音」的「騒」：应当只拿到「④騒音」这一项。
+  const at騒 = "環境基本法による7つの公害の要因".length
+    + "①大気汚染②水質汚濁③土壌の汚染④".length;
+  assert.equal(text(at騒), "④騒音",
+    "点列表项只该拿到这一项，实际：" + text(at騒));
+
+  // 点标题：不该把下面整串项目吃进来。
+  const at標題 = 3;
+  assert.equal(text(at標題), "環境基本法による7つの公害の要因",
+    "标题不该并进列表，实际：" + text(at標題));
+
+  // 跨行也要断：点「地盤沈下」拿到的就是它自己。
+  const at地 = "環境基本法による7つの公害の要因".length
+    + "①大気汚染②水質汚濁③土壌の汚染④騒音".length
+    + "⑤振動⑥".length + 1;
+  assert.equal(text(at地), "⑥地盤沈下",
+    "跨行的项目同样自成一句，实际：" + text(at地));
+});
+
+test("项目符号这条边界也进了构建产物", () => {
+  const built = loadSentenceExpander(BUILT);
+  const chars = makeChars([
+    { bk: 4, text: "見出しの行" },
+    { bk: 4, text: "①あ②い③う" },
+  ]);
+  const range = built(chars, "見出しの行".length + 1, "見出しの行".length + 1);
+  const text = chars.slice(range.start, range.end + 1).map((c) => c.c).join("");
+  assert.equal(text, "①あ", "reader.js 里还是旧规则：" + text);
+});
+
 test("构建产物跟着更新了（只改源不重建，线上跑的还是旧的）", () => {
   const built = loadSentenceExpander(BUILT);
   const chars = makeChars([

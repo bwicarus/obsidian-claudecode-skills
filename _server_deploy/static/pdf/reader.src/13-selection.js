@@ -612,15 +612,26 @@ function _expandSentenceFromRange(chars, sIdx, eIdx) {
   const _stop = (a, b) => _sameBk(a, b)
     ? _hugeGap(a, b)
     : ((_bk(a, b) && _lineChanged(a, b)) || _paraGap(a, b));
+  // ⚠ 第三类边界：**项目符号**（2026-09-12 用户实锤）。
+  //   「環境基本法による7つの公害の要因 / ①大気汚染 ②水質汚濁 … ⑦悪臭」
+  //   整框被认成一句 —— 因为列表两样边界都不占：项目之间不写句号，
+  //   排版上又是同一个块里的连续几行，_hugeGap 远不成立。
+  //   带圈数字/字母出现在正文里几乎只有一个意思：新一项开始了。
+  const _itemMark = (c) => /[\u2460-\u2473\u24EA\u24B6-\u24E9\u3251-\u325F\u32B1-\u32BF\u24F5-\u24FE]/.test(c);
   let s = sIdx;
   while (s > 0) {
     if (isSentEnd(chars[s - 1].c)) break;
+    // 自己就是符号：这一项从这里起，别再往前吃。
+    if (_itemMark(chars[s].c)) break;
+    // 前一个是符号：把它收进来（「④騒音」才是完整一项），然后停。
+    if (_itemMark(chars[s - 1].c)) { s--; break; }
     if (_stop(chars[s - 1], chars[s])) break;
     s--;
   }
   let e = eIdx;
   while (e < chars.length - 1) {
     if (isSentEnd(chars[e].c)) break;
+    if (_itemMark(chars[e + 1].c)) break;
     if (_stop(chars[e], chars[e + 1])) break;
     e++;
   }
