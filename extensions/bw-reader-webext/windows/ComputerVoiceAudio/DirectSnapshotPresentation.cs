@@ -76,40 +76,6 @@ internal static class DirectSnapshotMarkdown
         AppendField(output, "修订", Text(snapshot["revision"]));
         AppendField(output, "更新时间", Text(snapshot["updatedAtUtc"]));
 
-        JsonArray? notifications =
-            snapshot["notifications"] as JsonArray;
-        output.AppendLine();
-        output.AppendLine("## 待办通知");
-        output.AppendLine();
-        if (notifications is null || notifications.Count == 0)
-        {
-            output.AppendLine("_当前没有待办通知。_");
-        }
-        else
-        {
-            foreach (JsonNode? node in notifications)
-            {
-                if (node is not JsonObject item)
-                {
-                    continue;
-                }
-                string marker =
-                    Text(item["state"]) == "pending" ? "[新]" : "[已获取]";
-                output.AppendLine(
-                    $"- {marker} `{Text(item["id"])}` "
-                    + $"{Text(item["title"])}（{Text(item["kind"])}）");
-                string? body = Text(item["body"]);
-                if (!string.IsNullOrEmpty(body))
-                {
-                    output.AppendLine($"  {body}");
-                }
-            }
-            output.AppendLine();
-            output.AppendLine(
-                "_读到 [新] 通知先 `replication_activity` 同目录的通知 CLI"
-                + " `ack <id>`；判断目标完成后 `resolve <id>`。_");
-        }
-
         JsonObject? place = snapshot["currentPlace"] as JsonObject;
         output.AppendLine();
         output.AppendLine("## 当前位置");
@@ -640,30 +606,6 @@ internal static class DirectSnapshotTerminal
             + (DirectSnapshotMarkdown.Text(snapshot["revision"]) ?? "0")
             + "  |  "
             + (DirectSnapshotMarkdown.Text(snapshot["updatedAtUtc"]) ?? "—"));
-
-        Section(output, "待办通知");
-        JsonArray? terminalNotifications =
-            snapshot["notifications"] as JsonArray;
-        if (terminalNotifications is null
-            || terminalNotifications.Count == 0)
-        {
-            output.AppendLine("当前没有待办通知。");
-        }
-        else
-        {
-            foreach (JsonNode? node in terminalNotifications)
-            {
-                if (node is not JsonObject item)
-                {
-                    continue;
-                }
-                string marker = DirectSnapshotMarkdown.Text(item["state"])
-                    == "pending" ? "[新]" : "[已获取]";
-                output.AppendLine(
-                    $"{marker} {DirectSnapshotMarkdown.Text(item["id"])} "
-                    + $"{DirectSnapshotMarkdown.Text(item["title"])}");
-            }
-        }
 
         Section(output, "当前阅读位置");
         JsonObject? active = snapshot["activeReading"] as JsonObject;
@@ -2088,10 +2030,6 @@ internal sealed class DirectSnapshotViewer : IDisposable
               </main>
               <main id="view-snapshot">
                 <section>
-                  <h2>待办通知</h2>
-                  <pre id="notifications" class="muted">当前没有待办通知。</pre>
-                </section>
-                <section>
                   <h2>当前位置</h2>
                   <pre id="currentPlace" class="muted">未知</pre>
                 </section>
@@ -3237,15 +3175,6 @@ internal sealed class DirectSnapshotViewer : IDisposable
                           `坐标与命名在本地 replication_places.py）`)
                     : "未知 —— 最近 30 分钟没有定位记录（需开启「记录学习地点」）。";
 
-                  const ntf = document.getElementById("notifications");
-                  const ntfItems = snapshot.notifications || [];
-                  ntf.textContent = ntfItems.length
-                    ? ntfItems.map((n) =>
-                        `${n.state === "pending" ? "[新]" : "[已获取]"} ` +
-                        `${n.id} ${n.title}（${n.kind}）` +
-                        (n.body ? `\n    ${n.body}` : "")).join("\n")
-                    : "当前没有待办通知。";
-
                   const reading = snapshot.activeReading;
                   const readingLines = reading
                     ? [
@@ -3935,12 +3864,6 @@ internal sealed class DirectSnapshotViewer : IDisposable
             ReaderContextMcpServer.ApplyFreshness(
                 snapshot,
                 DateTimeOffset.UtcNow);
-            ReaderNotificationsProjection.Apply(
-                snapshot,
-                System.IO.Path.GetDirectoryName(_snapshotPath)!);
-            ReaderRecentActivityProjection.Apply(
-                snapshot,
-                System.IO.Path.GetDirectoryName(_snapshotPath)!);
             ReaderCurrentPlaceProjection.Apply(
                 snapshot,
                 System.IO.Path.GetDirectoryName(_snapshotPath)!);

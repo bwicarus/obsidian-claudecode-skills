@@ -751,6 +751,9 @@ internal static class DirectBridgeSelfTest
         await CheckReaderContextMcpProtocolAsync(
             root,
             checks).ConfigureAwait(false);
+        await CheckRecentFocusAsync(
+            root,
+            checks).ConfigureAwait(false);
         CheckReaderPageCardQueryContract(checks);
         CheckReaderPageCardMutationContract(checks);
         CheckReaderLearningCardMutationContract(checks);
@@ -10099,6 +10102,195 @@ internal static class DirectBridgeSelfTest
             && store.Load().ContextDeliveryMode
                 == DirectContextDeliveryMode.LegacyInject,
             "direct-context-mode-set-validates-and-persists-across-connections",
+            checks);
+    }
+
+    /// <summary>最近焦点：让「这个 / 那个」落到具体那一段上。</summary>
+    /// <remarks>
+    /// 用户 2026-09-12 的实测：指代用得非常多，而模型不知道去看哪儿 ——
+    /// 现场拿到的 recentActions 还是空的（旧的 30 秒窗剪掉了）。
+    ///
+    /// 这里钉住四件互相独立、任何一件塌了都会让功能变回"看不见"的事：
+    ///   ① **只按条数剪，不按时间剪** —— 时钟停在最后一次动作之后十分钟，
+    ///      表里仍要有东西。这是最容易被"顺手加个窗"改回去的一条。
+    ///   ② **selection 带得出原文** —— 只有 kind/page 的话，模型只知道
+    ///      "他选过东西"，不知道选的是哪一段，等于没解指代。
+    ///   ③ **两份给 AI 的说明都在**：数据旁边那份（recentActionsHint）
+    ///      和工具描述那份。少任何一份，模型都可能在读到数据之前就
+    ///      决定不看它。
+    ///   ④ **hint 真的走得到模型** —— 经真的 MCP 服务器跑一遍 tools/call，
+    ///      而不是只断言写进了文件（快照链上"写进去了但没送出去"翻过车）。
+    /// </remarks>
+    private static async Task CheckRecentFocusAsync(
+        string root,
+        ICollection<string> checks)
+    {
+        string snapshotPath = System.IO.Path.Combine(
+            root,
+            "recent-focus",
+            FileDirectSnapshotContextAdapter.SnapshotFileName);
+        // 最后一次动作发生在 1_750_000_000_000，时钟停在它之后 11 分钟。
+        const long lastActionMs = 1_750_000_000_000;
+        FileDirectSnapshotContextAdapter adapter = new(
+            snapshotPath,
+            () => DateTimeOffset.FromUnixTimeMilliseconds(
+                lastActionMs + 660_000));
+        string session = "session-" + DirectBase64Url.Encode(
+            Enumerable.Range(112, 16)
+                .Select(value => (byte)value)
+                .ToArray());
+        // 60 字上限 + 1，用来看截断是不是真的发生了。
+        string longSelection = new('選', 61);
+
+        async Task ForwardAsync(
+            int page,
+            string? selection,
+            string requestId)
+        {
+            JsonElement value = JsonSerializer.SerializeToElement(new
+            {
+                kind = "pdf",
+                file = "focus-book.pdf",
+                title = "Focus Book",
+                page,
+                selectionState = selection is null ? "cleared" : "active",
+                selection,
+                observedAtEpochMs = lastActionMs,
+            });
+            _ = await adapter.ForwardActiveReadingAsync(
+                requestId,
+                session,
+                FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                    value),
+                CancellationToken.None).ConfigureAwait(false);
+        }
+
+        // 第一条只是落座（没有"上一页"就没有翻页动作），后面三次翻页、
+        // 最后在同一页上选中 —— 一共四个动作，上限三条。
+        await ForwardAsync(1, null, "request-focus-1").ConfigureAwait(false);
+        await ForwardAsync(2, null, "request-focus-2").ConfigureAwait(false);
+        await ForwardAsync(3, null, "request-focus-3").ConfigureAwait(false);
+        await ForwardAsync(4, null, "request-focus-4").ConfigureAwait(false);
+        await ForwardAsync(4, longSelection, "request-focus-5")
+            .ConfigureAwait(false);
+        // 同一个选中再报一次：前端滚动/重渲染天天这么干。它不该占新名额，
+        // 否则"最近三件事"会退化成"同一件事的最近三次上报"（装上线第一眼
+        // 看到的就是三条一模一样的「选中 粉じん」）。
+        await ForwardAsync(4, longSelection, "request-focus-6")
+            .ConfigureAwait(false);
+
+        using (JsonDocument snapshot = JsonDocument.Parse(
+            File.ReadAllText(snapshotPath, Encoding.UTF8)))
+        {
+            JsonElement actions = snapshot.RootElement
+                .GetProperty("recentActions");
+            JsonElement[] entries = actions.EnumerateArray().ToArray();
+            Require(
+                entries.Length == 3,
+                "recent-focus-keeps-latest-three",
+                checks);
+            Require(
+                entries.Length == 3
+                && entries[0].GetProperty("secondsAgo").GetInt32() == 660,
+                "recent-focus-has-no-time-window",
+                checks);
+            Require(
+                entries.Length == 3
+                && entries.Count(entry =>
+                    entry.GetProperty("kind").GetString() == "selection") == 1,
+                "recent-focus-same-thing-twice-takes-one-slot",
+                checks);
+            Require(
+                entries.Length == 3
+                && entries[^1].GetProperty("kind").GetString()
+                    == "selection",
+                "recent-focus-orders-newest-last",
+                checks);
+            Require(
+                entries.Length == 3
+                && entries[^1].TryGetProperty("what", out JsonElement what)
+                && what.ValueKind == JsonValueKind.String
+                && what.GetString() == new string('選', 60) + "…",
+                "recent-focus-selection-carries-its-text",
+                checks);
+            Require(
+                entries.Length == 3
+                && entries[0].GetProperty("kind").GetString() == "page-turn"
+                && entries[0].TryGetProperty("what", out JsonElement blank)
+                && blank.ValueKind == JsonValueKind.Null,
+                "recent-focus-page-turn-invents-no-text",
+                checks);
+            string hint = snapshot.RootElement.TryGetProperty(
+                "recentActionsHint",
+                out JsonElement hintValue)
+                ? hintValue.GetString() ?? ""
+                : "";
+            Require(
+                hint.Contains("这个", StringComparison.Ordinal)
+                && hint.Contains("recentActions", StringComparison.Ordinal)
+                && hint.Contains("what", StringComparison.Ordinal),
+                "recent-focus-hint-tells-the-model-how-to-use-it",
+                checks);
+        }
+
+        // ④ 经真的 MCP 服务器走一遍：说明在工具描述里，hint 在返回值里。
+        string input = string.Join(
+            "\n",
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 1,
+                method = "initialize",
+                @params = new
+                {
+                    protocolVersion = "2024-11-05",
+                    capabilities = new { },
+                    clientInfo = new { name = "self-test", version = "1" },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                method = "notifications/initialized",
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 2,
+                method = "tools/list",
+                @params = new { },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 3,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.ToolName,
+                    arguments = new { },
+                },
+            }),
+            "");
+        StringWriter output = new();
+        ReaderContextMcpServer server = new(
+            snapshotPath,
+            new StringReader(input),
+            output,
+            utcNow: () => DateTimeOffset.FromUnixTimeMilliseconds(
+                lastActionMs + 660_000),
+            instanceId: "recent-focus-instance");
+        _ = await server.RunAsync(CancellationToken.None)
+            .ConfigureAwait(false);
+        string transcript = output.ToString();
+        Require(
+            transcript.Contains("recentActions is how you resolve", StringComparison.Ordinal)
+            && transcript.Contains("newest selection", StringComparison.Ordinal),
+            "recent-focus-tool-description-points-at-deixis",
+            checks);
+        Require(
+            transcript.Contains("recentActionsHint", StringComparison.Ordinal),
+            "recent-focus-hint-reaches-the-model",
             checks);
     }
 

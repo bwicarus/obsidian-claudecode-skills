@@ -163,9 +163,11 @@ internal sealed class FileDirectSnapshotContextAdapter :
     // 第 16 条。跟 _latestEvent 一样不落盘:重启后没有"最近"可言,清空是对的。
     private readonly List<JsonObject> _recentActions = new();
     private string? _recentActionsFile;
-    private const int MaximumRecentActions = 5;
-    private static readonly TimeSpan RecentActionsWindow =
-        TimeSpan.FromSeconds(30);
+    /// 最近焦点保留几条（用户 2026-09-12 定：三条）。
+    internal const int MaximumRecentActions = 3;
+    /// 一条最近动作里带多长的原文。够认出"这个"指的是哪一段就行 ——
+    /// 全文在 currentPage 里，这里只是**指路**。
+    private const int RecentActionDetailChars = 60;
 
     private sealed record AdapterState(
         long Revision,
@@ -339,7 +341,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     RecordAction(
                         "selection",
                         next,
-                        activeReading.ObservedAtEpochMilliseconds);
+                        activeReading.ObservedAtEpochMilliseconds,
+                        activeReading.Selection);
                 }
                 else if (activeReading.SelectionState == "cleared")
                 {
@@ -1556,7 +1559,11 @@ internal sealed class FileDirectSnapshotContextAdapter :
     // 记一条"用户刚做了什么"。只在明确知道是真实用户动作的地方调用——
     // 翻页(真的换了页,不是重复上报同一页)、画完一笔(从未稳定到稳定的那一刻)。
     // 不追求覆盖面:宁可少几种动作类型,也不要把系统内部状态转换错认成用户动作。
-    private void RecordAction(string kind, JsonObject pageIdentity, long atMs)
+    private void RecordAction(
+        string kind,
+        JsonObject pageIdentity,
+        long atMs,
+        string? detail = null)
     {
         string? file = StringValue(pageIdentity["file"]);
         if (string.IsNullOrEmpty(file))
@@ -1569,26 +1576,60 @@ internal sealed class FileDirectSnapshotContextAdapter :
             _recentActions.Clear();
             _recentActionsFile = file;
         }
+        string? what = detail?.Replace('\n', ' ').Trim();
+        if (what is { Length: > RecentActionDetailChars })
+        {
+            what = what[..RecentActionDetailChars] + "…";
+        }
+        JsonNode? page = pageIdentity["page"]?.DeepClone();
+        string? text = string.IsNullOrEmpty(what) ? null : what;
+        // ⚠ 同一件事连报几次是常态（滚动、重渲染、心跳都会把当前选中再带一遍）。
+        //   无条件 Add 的话，"最近三件事"就退化成"同一件事的最近三次上报" ——
+        //   装上线第一眼看到的就是三条一模一样的「选中 粉じん」，真正的上下文
+        //   （上一次翻到哪页、刚画了什么）全被挤出去了。
+        //   只跟**最后一条**比：「选中 A → 翻页 → 又选中 A」是真的发生了两次，
+        //   那两条都该留下。
+        if (
+            _recentActions.Count > 0
+            && _recentActions[^1] is JsonObject last
+            && string.Equals(
+                last["kind"]?.GetValue<string>(), kind, StringComparison.Ordinal)
+            && string.Equals(
+                last["page"]?.ToJsonString(),
+                page?.ToJsonString(),
+                StringComparison.Ordinal)
+            && string.Equals(
+                last["what"]?.GetValue<string>(), text, StringComparison.Ordinal)
+        )
+        {
+            // 同一件事又报了一次：只把时间推新，不占新名额。
+            last["atMs"] = atMs;
+            return;
+        }
         _recentActions.Add(new JsonObject
         {
             ["kind"] = kind,
-            ["page"] = pageIdentity["page"]?.DeepClone(),
+            ["page"] = page,
             ["atMs"] = atMs,
+            // 选中带上原文摘要 —— **"这个"要能落地就靠它**。
+            // 只有 kind/page 的话，模型仍然只知道"他选过东西"，
+            // 不知道选的是哪一段，等于没解决指代。
+            ["what"] = text,
         });
         PruneRecentActions();
     }
 
+    /// 只按条数剪，**不按时间剪**（2026-09-12 用户拍板）。
+    ///
+    /// ⚠ 原来还有一个 30 秒窗。它的用意是"别让很旧的动作冒充现在"，但这条
+    /// 清单的**用途变了**：它现在要回答的是「他刚说的『这个』指什么」，而人
+    /// 常常是划完一段、想了半分钟、再开口 —— 一到 30 秒就剪空，恰好在最需要
+    /// 它的时候什么都没有（用户实测拿到的就是 `recentActions: []`）。
+    ///
+    /// 旧的顾虑由 `secondsAgo` 承担：每条都带"多少秒前"，模型自己能判断
+    /// 三分钟前那一笔还算不算数。**说清楚年龄**比**直接删掉**诚实。
     private void PruneRecentActions()
     {
-        long cutoffMs = _utcNow().ToUnixTimeMilliseconds()
-            - (long)RecentActionsWindow.TotalMilliseconds;
-        while (
-            _recentActions.Count > 0
-            && (_recentActions[0]["atMs"]?.GetValue<long?>() ?? 0) < cutoffMs
-        )
-        {
-            _recentActions.RemoveAt(0);
-        }
         while (_recentActions.Count > MaximumRecentActions)
         {
             _recentActions.RemoveAt(0);
@@ -1610,6 +1651,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             {
                 ["kind"] = entry["kind"]?.DeepClone(),
                 ["page"] = entry["page"]?.DeepClone(),
+                ["what"] = entry["what"]?.DeepClone(),
                 ["secondsAgo"] = (int)Math.Max(
                     0,
                     (nowMs - atMs) / 1000),
@@ -3113,6 +3155,18 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 .ToString("O"),
             ["latestEvent"] = _latestEvent?.DeepClone(),
             ["recentActions"] = BuildRecentActions(),
+            // ⚠ **不说清楚怎么用，这张表就等于不存在**（用户 2026-09-12：
+            //   「用这个那个指代的时候非常多，但是现在 ai 并不知道具体要去看
+            //   哪个……需要在说明中进行说明」）。
+            //   模型不会自己推断"recentActions 是用来解指代的"——
+            //   把用法写在数据旁边，是这条链上唯一能到达它的地方。
+            ["recentActionsHint"] =
+                "他说「这个 / 那个 / 刚才那段」这类指代时，**先看 "
+                + "recentActions**：那是他开口前最后做的几件事（选中 / 画图 / "
+                + "翻到新页），最新的在最后，secondsAgo 是距今多少秒。"
+                + "selection 类型的 what 字段就是他选中的原文摘要 —— "
+                + "多数时候「这个」指的就是它。"
+                + "都对不上再问他，别自己猜一个。",
             ["activeReading"] = publicActiveReading,
             ["contextStatus"] = contextStatus,
             ["currentPage"] = effectivePage,
@@ -3963,182 +4017,16 @@ internal sealed class FileDirectSnapshotContextAdapter :
 // 目录,这里在快照**读取投影**时合并 —— 快照真值文件本身不含通知,
 // 两个真值各归各家,读的人看到合体。白名单重建;任何失败折成"无通知",
 // 通知是增强,坏了不拦快照本体。
-internal static class ReaderNotificationsProjection
-{
-    internal const string FileName = "notifications-open.json";
-    private const int MaximumBytes = 256 * 1024;
 
-    internal static void Apply(JsonObject snapshot, string directory)
-    {
-        try
-        {
-            snapshot.Remove("notifications");
-            string path = System.IO.Path.Combine(directory, FileName);
-            FileInfo info = new(path);
-            if (!info.Exists || info.Length is <= 0 or > MaximumBytes)
-            {
-                return;
-            }
-            JsonObject? parsed = JsonNode.Parse(
-                File.ReadAllText(path)) as JsonObject;
-            if (
-                parsed?["contract"]?.GetValue<string>()
-                    != "reader-notifications/1"
-                || parsed["items"] is not JsonArray items
-            )
-            {
-                return;
-            }
-            JsonArray projected = new();
-            foreach (JsonNode? node in items)
-            {
-                if (node is not JsonObject item)
-                {
-                    continue;
-                }
-                string? id = item["id"]?.GetValue<string>();
-                string? title = item["title"]?.GetValue<string>();
-                string? state = item["state"]?.GetValue<string>();
-                if (
-                    id is null || title is null
-                    || state is not ("pending" or "acknowledged")
-                )
-                {
-                    continue;
-                }
-                projected.Add(new JsonObject
-                {
-                    ["id"] = id,
-                    ["kind"] = item["kind"]?.GetValue<string>() ?? "",
-                    ["title"] = title,
-                    ["body"] = item["body"]?.GetValue<string>() ?? "",
-                    ["state"] = state,
-                    ["createdAtUtcMs"] =
-                        item["createdAtUtcMs"]?.GetValue<long>() ?? 0,
-                    // 到点时刻:AI 要看得见自己排的提醒几点响。此前这处
-                    // 白名单重建漏搬了它 —— 字段在文件里、在用户方向的
-                    // 视图里都有,唯独 AI 方向没有(放行不等于搬过来)。
-                    ["dueAtUtcMs"] = item["dueAtUtcMs"] is JsonNode dueNode
-                        ? dueNode.GetValue<long>() : null,
-                });
-                if (projected.Count >= 20)
-                {
-                    break;
-                }
-            }
-            if (projected.Count > 0)
-            {
-                snapshot["notifications"] = projected;
-            }
-        }
-        catch
-        {
-        }
-    }
-}
-
-
-// 「最近操作」的账本化替代(2026-08-25 用户拍板:用记录功能的信息代替
-// 快照里的 recentActions)。旧实现是内存态 ≤5 条/30s 窗,重启即空、
-// 覆盖面窄;账本派生的最近条目落盘可靠、带条目号可追。留一个兜底:
-// 近 30 分钟账本无条目时保留桥内原值(翻页/画笔那几类不进账本)。
-internal static class ReaderRecentActivityProjection
-{
-    private const int WindowMinutes = 30;
-    private const int MaximumItems = 8;
-    private static readonly (string Method, string Url, string Label)[]
-        Labels =
-    {
-        ("POST", "/pdf/api/highlights", "新建高亮"),
-        ("PATCH", "/pdf/api/highlights", "修改高亮"),
-        ("DELETE", "/pdf/api/highlights", "删除高亮"),
-        ("POST", "/pdf/api/epub-highlights", "新建高亮"),
-        ("PATCH", "/pdf/api/epub-highlights", "修改高亮"),
-        ("DELETE", "/pdf/api/epub-highlights", "删除高亮"),
-        ("POST", "/pdf/api/notes", "新建便签/卡片"),
-        ("PATCH", "/pdf/api/notes", "修改便签/卡片"),
-        ("DELETE", "/pdf/api/notes", "删除便签/卡片"),
-        ("POST", "/pdf/api/userpages", "新建用户页"),
-        ("PATCH", "/pdf/api/userpages", "修改用户页"),
-        ("DELETE", "/pdf/api/userpages", "删除用户页"),
-        ("POST", "/pdf/api/ink", "手写墨迹"),
-        ("POST", "/pdf/api/epub-ink", "手写墨迹"),
-        ("POST", "/replication/activity", "阅读/复习活动"),
-    };
-
-    internal static void Apply(JsonObject snapshot, string directory)
-    {
-        try
-        {
-            string path = System.IO.Path.Combine(
-                directory, "activity-report.json");
-            FileInfo info = new(path);
-            if (!info.Exists || info.Length is <= 0 or > 2 * 1024 * 1024)
-            {
-                return;
-            }
-            JsonObject? report = JsonNode.Parse(
-                File.ReadAllText(path)) as JsonObject;
-            if (report?["raw"]?["commands"] is not JsonArray commands)
-            {
-                return;
-            }
-            long cutoff = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-                - WindowMinutes * 60_000L;
-            JsonArray projected = new();
-            foreach (JsonNode? node in commands)
-            {
-                if (node is not JsonObject command)
-                {
-                    continue;
-                }
-                long at = command["atUtcMs"]?.GetValue<long>() ?? 0;
-                if (at < cutoff)
-                {
-                    continue;
-                }
-                string method = command["method"]?.GetValue<string>() ?? "";
-                string url = command["url"]?.GetValue<string>() ?? "";
-                string? label = null;
-                foreach ((string m, string u, string l) in Labels)
-                {
-                    if (m == method && u == url)
-                    {
-                        label = l;
-                        break;
-                    }
-                }
-                if (label is null)
-                {
-                    continue;
-                }
-                projected.Add(new JsonObject
-                {
-                    ["kind"] = label,
-                    ["atMs"] = at,
-                    ["source"] = "ledger",
-                });
-                if (projected.Count >= MaximumItems)
-                {
-                    break;
-                }
-            }
-            if (projected.Count > 0)
-            {
-                snapshot["recentActions"] = projected;
-            }
-        }
-        catch
-        {
-        }
-    }
-}
-
-
-// 「当前位置」投影(2026-08-25 用户:位置信息现在就该进快照 —— AI 据此
-// 判断通知该不该提醒:在公司就别提倒垃圾)。真值由 ReaderPC 从最近的
-// 带坐标 dwell(≤30 分钟)派生,别名(place-aliases)优先于反解地名。
-// 缺席 = 不知道在哪 —— 旧位置冒充当前比不知道更糟。
+// ⚠ 这里曾经有一个「最近操作」的账本版投影（2026-08-25 加的：当时桥内
+// 那份是内存态 ≤5 条 / 30 秒窗，重启即空、覆盖面窄，所以改用账本派生）。
+// **2026-09-12 整个删掉**，两条理由缺一不可：
+//   · 它 `snapshot["recentActions"] = projected` 是**整个替换**，把桥内那份
+//     （selection 带 `what` 原文摘要、带页码，专门用来解「这个/那个」）盖没了；
+//   · 它的条目只有 kind + atMs，用户实测截图里是八条一模一样的
+//     「阅读/复习活动」—— 对解指代毫无帮助。
+// 当年选它的两个理由也都不成立了：桥内那份现在不按时间剪（旧动作不会凭空
+// 消失），换书才清空。要覆盖高亮/便签得带上页码与内容，那是另一件事。
 internal static class ReaderCurrentPlaceProjection
 {
     internal const string FileName = "current-place.json";

@@ -38,9 +38,42 @@ function buildRecentActionsBody() {
   return SNAPSHOT.slice(start, start + 1200);
 }
 
-test("上限五条,窗口三十秒", () => {
-  assert.match(SNAPSHOT, /MaximumRecentActions = 5/);
-  assert.match(SNAPSHOT, /RecentActionsWindow =\s*TimeSpan\.FromSeconds\(30\)/);
+test("只留最新三条,而且**不按时间剪**", () => {
+  // 2026-09-12 用户改的设计：从"≤5 条 + 30 秒窗"改成"最新 3 条、无时间窗"。
+  //
+  // 时间窗为什么必须去掉：这张表的用途变了 —— 它现在要回答的是
+  // 「他刚说的『这个』指什么」。而人是划完一段、想一会儿、再开口，
+  // 一到 30 秒就剪空，恰好在最需要它的时候什么都没有（用户实测拿到的
+  // 就是 recentActions: []）。旧的顾虑改由 secondsAgo 承担：每条都带
+  // "多少秒前"，模型自己判断还算不算数。**说清楚年龄**比**直接删掉**诚实。
+  assert.match(SNAPSHOT, /MaximumRecentActions = 3/);
+  assert.doesNotMatch(SNAPSHOT, /RecentActionsWindow/,
+    "时间窗必须整个消失，留着常量迟早有人接回去");
+  const prune = SNAPSHOT.slice(
+    SNAPSHOT.indexOf("private void PruneRecentActions"),
+    SNAPSHOT.indexOf("private JsonArray BuildRecentActions"));
+  assert.doesNotMatch(prune, /cutoff/i, "剪枝里不该再有时间下界");
+});
+
+test("selection 要把原文摘要带出来——「这个」能落地全靠它", () => {
+  // 只有 kind/page 的话，模型仍然只知道"他选过东西"，不知道选的是哪一段。
+  const body = recordActionBody();
+  assert.match(body, /\["what"\]/, "条目要有 what 字段");
+  assert.match(body, /RecentActionDetailChars/, "要截断,别把整段塞进来");
+  const at = SNAPSHOT.indexOf('RecordAction(\n                        "selection"');
+  assert.ok(at > 0, "找不到选中那处记录调用");
+  assert.match(SNAPSHOT.slice(at, at + 260), /activeReading\.Selection\);/,
+    "选中那处必须把原文传进去,否则 what 永远是空");
+});
+
+test("台账版「最近操作」已经删干净——它会整个盖掉桥内那份", () => {
+  // 2026-08-25 加的账本投影，2026-09-12 删。它那行是
+  //   snapshot["recentActions"] = projected;
+  // **整个替换** —— 于是带 what、带页码的那份在送到模型前被换成了
+  // 八条只有时间戳的「阅读/复习活动」。用户截图实锤。
+  assert.doesNotMatch(SNAPSHOT, /ReaderRecentActivityProjection/,
+    "投影类不能留,留着就还有人会调");
+  assert.doesNotMatch(MCP, /ReaderRecentActivityProjection/);
 });
 
 test("换书清空——上一本书翻到第几页跟这本书无关", () => {
@@ -86,8 +119,9 @@ test("绘图动作用真正折叠后的稳定态判断,不是传入值", () => {
 });
 
 test("lastEditedAt 按秒解释,不当毫秒读", () => {
-  // 单位搞反会让每一次画图动作在 RecordAction 里立刻被 30 秒窗剪掉,
-  // 画图这个动作类型就永远不会出现在 recentActions 里,而且不会报错。
+  // 单位搞反会让画图动作带着一个荒唐的时间戳进表：secondsAgo 算出来是
+  // 几十年，模型只会把它当噪声跳过。（2026-09-12 之前还更糟 —— 那时有
+  // 30 秒窗，单位一反就直接被剪掉，画图永远不出现，而且不报错。）
   const start = SNAPSHOT.indexOf('else if (contextEvent.Type == "drawing")');
   const body = SNAPSHOT.slice(start, start + 2000);
   assert.match(body, /seconds \* 1000/, "秒转毫秒的换算必须存在");
@@ -126,7 +160,14 @@ test("待接收状态的兜底对象也带这个字段,不是缺省省略", () =
 });
 
 test("工具描述说明这是历史记录而非待办指令,且如实说明覆盖不全", () => {
-  assert.match(MCP, /recentActions lists things the user just did/);
+  // ⚠ 措辞 2026-09-12 换过：旧版把它描述成"翻页/落笔"的流水账，只字不提
+  //   selection。模型读完只会当它是操作日志，不会为了解「这个」去看它 ——
+  //   而那正是它现在的主要用途。**面向 AI 的说明写偏，比没写更糟。**
+  assert.match(MCP, /recentActions is how you resolve this and that/);
+  assert.match(MCP, /newest selection/,
+    "必须点明最新那条 selection 的 what 通常就是他说的「这个」");
+  assert.match(MCP, /no time cutoff/,
+    "必须说清没有时间窗,否则模型会自己假设旧条目已失效");
   assert.match(MCP, /never act on an entry unless the user's own/);
   assert.match(MCP, /Coverage is intentionally/);
   assert.match(MCP, /highlighting, word lookups, and sticky notes/,
