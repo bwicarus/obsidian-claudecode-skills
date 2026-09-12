@@ -1593,6 +1593,14 @@ internal sealed class ReaderContextMcpServer
                     + "a fresh currentPage snapshot is not already available, "
                     + "because the remaining numbers are recomputed. This is a "
                     + "fallback semantic index for cards absent from the snapshot. "
+                    // ⚠ 两族卡片原来互不点名（2026-09-13 盘点）：名字都叫 cards、
+                    //   动作都是"列出来"，而一个是**页面上的摆放**、另一个是
+                    //   **仓库里的学习实体**。模型问"列一下卡片"时，没有任何一句
+                    //   话能帮它选 —— 其余重叠组（web_note→note_create 等）都点了
+                    //   兄弟工具的名，唯独这两族没有。
+                    + "These are the placements on the page the user is looking "
+                    + "at; for the study cards themselves across the whole store "
+                    + "(review state, Anki projection) use reader_learning_cards. "
                     + "It never returns renderer HTML or control markup. Call "
                     + "reader_page_card_read only when exact rich source is needed, including "
                     + "cards that were manually dragged onto the page and have "
@@ -1629,7 +1637,10 @@ internal sealed class ReaderContextMcpServer
                 ["name"] = LearningCardsToolName,
                 ["description"] =
                     "List canonical Reader learning cards across the local card "
-                    + "repository. Every item carries stable card_* id plus "
+                    + "repository — the study entities themselves, not what is "
+                    + "placed on one page; for the cards sitting on the page the "
+                    + "user is looking at use reader_page_cards. "
+                    + "Every item carries stable card_* id plus "
                     + "cardIndex, full semantic card content, source, review "
                     + "state, projection receipts, entityRevision and "
                     + "stateRevision. Use id/contains to narrow large stores. "
