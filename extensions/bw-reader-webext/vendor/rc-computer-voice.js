@@ -8446,6 +8446,14 @@ if (window.__bwPwaProviderOnly) return;
             contentTruncated: card.contentTruncated,
             sourceIndex: sourceIndex
           };
+          var learning = card.learning;
+          if (learning && typeof learning === "object" && !Array.isArray(learning) &&
+              typeof learning.id === "string" &&
+              /^card_[a-f0-9]{4,64}$/.test(learning.id) &&
+              Number.isSafeInteger(learning.cards) &&
+              learning.cards >= 1 && learning.cards <= 12) {
+            normalized.learning = { id: learning.id, cards: learning.cards };
+          }
           if (unbound) {
             normalized.bind = null;
             normalized.number = null;
@@ -8657,7 +8665,7 @@ if (window.__bwPwaProviderOnly) return;
     var numberedIndexes = Object.create(null);
     var publicCards = projected.map(function (item) {
       numberedIndexes[item.card.sourceIndex] = true;
-      return {
+      var entry = {
         number: item.number,
         id: item.card.id,
         kind: item.card.kind,
@@ -8675,6 +8683,8 @@ if (window.__bwPwaProviderOnly) return;
         revision: revision,
         unbound: false
       };
+      if (item.card.learning) entry.learning = item.card.learning;
+      return entry;
     });
     var unboundCards = [];
     var unresolvedCards = [];
@@ -8700,6 +8710,7 @@ if (window.__bwPwaProviderOnly) return;
         revision: revision,
         unbound: true
       };
+      if (card.learning) fallback.learning = card.learning;
       publicCards.push(fallback);
       unboundCards.push({ card: card, number: null });
     });
@@ -10012,6 +10023,12 @@ if (window.__bwPwaProviderOnly) return;
         });
       }
       return Promise.resolve(local).then(function (applied) {
+        // 先让页面跟上，再回结果；失败已在函数内吞掉，不改结果合同。
+        return Promise.resolve(operation === "edit"
+          ? refreshLearningCardPlacements(applied) : 0)
+          .catch(function () { return 0; })
+          .then(function () { return applied; });
+      }).then(function (applied) {
         // Canonical Reader storage is authoritative.  Refresh the owning App
         // immediately after that write, before AnkiConnect/media/sync work can
         // delay the visible Review card.  The Review surface itself checks the
@@ -10058,6 +10075,61 @@ if (window.__bwPwaProviderOnly) return;
         });
       });
     });
+  }
+
+  /// 改完本体，把当前页上属于这一批的放置换成新内容（2026-09-13）。
+  ///
+  /// 用户拍板：「anki 卡应该直接改动本体，页面上的内容在本体被改动后自然会跟着
+  /// 改动，这样就只需要一套」。走的是已有的 pageCardMutate 事务（放置列表 CAS +
+  /// 本体 entityRev CAS）—— 不另造一条写路径。只管当前页：别的页在下次打开时按
+  /// 原有的对账机制跟上。失败只记日志，不让本体编辑本身跟着失败。
+  function refreshLearningCardPlacements(applied) {
+    try {
+      var current = localActiveReadingSnapshot();
+      var runtime = localNativePageRuntime();
+      if (!applied || !Array.isArray(applied.cards) || !current ||
+          current.kind !== "pdf" || !runtime ||
+          typeof runtime.pageContextCards !== "function" ||
+          typeof runtime.pageCardMutate !== "function") {
+        return Promise.resolve(0);
+      }
+      var page = Number(current.page);
+      if (!Number.isSafeInteger(page) || page < 1) return Promise.resolve(0);
+      var done = 0;
+      function step() {
+        return localPageCardRecords(runtime, page).then(function (set) {
+          var target = set.cards.find(function (card) {
+            return card && card.kind === "anki" && card.learning &&
+              card.learning.id === applied.id &&
+              card.sourceIndex >= done;   // 每次重读，按顺序推进
+          });
+          if (!target) return done;
+          var hex = "";
+          while (hex.length < 24) hex += Math.random().toString(16).slice(2);
+          return runtime.pageCardMutate({
+            operationId: "pcard_" + hex.slice(0, 24),
+            operation: "edit",
+            expectedId: target.id,
+            expectedRevision: set.revision,
+            replacement: { cards: applied.cards }
+          }).then(function () {
+            done = target.sourceIndex + 1;
+            return step();
+          }, function (error) {
+            try {
+              window.dlog && window.dlog("学习卡本体已改，但第 " + page +
+                " 页的放置 " + target.id + " 没跟上：" +
+                (error && error.message || error), "#e0a040");
+            } catch (_) {}
+            done = target.sourceIndex + 1;
+            return step();
+          });
+        });
+      }
+      return step();
+    } catch (_) {
+      return Promise.resolve(0);
+    }
   }
 
   function requestLearningCardViewRefresh(record, cardIndex) {
@@ -10234,6 +10306,8 @@ if (window.__bwPwaProviderOnly) return;
       '" revision="' + String(item.revision) +
       '" type="' + localContextMarkerAttribute(card.kind, 32) +
       '" label="' + localContextMarkerAttribute(card.label, 120) +
+      (card.learning && card.learning.id
+        ? '" learning="' + localContextMarkerAttribute(card.learning.id, 80) : '') +
       // anchor=被锚定的词(2026-09-04 用户:「没有开始的标记」)。卡插在锚词**之后**,只靠位置看不出钉在哪个词上;
       // 带上词面,人读快照与模型改绑/删卡都有据可指。未锚定卡没有 anchor。
       (unbound ? '" unbound="true'

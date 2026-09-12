@@ -318,8 +318,11 @@ internal static class ReaderQueryProtocol
 
     private static void ValidatePageCardIdentity(JsonElement card, long page)
     {
-        RequireExactFields(
+        // learning（2026-09-13）：学习卡放置带上本体的 card_* 批次号，模型从
+        // 页面一跳到 reader_learning_card_edit。可选 —— 渲染卡没有。
+        RequireExactFieldsWithOptional(
             card,
+            new[] { "learning" },
             "id",
             "number",
             "kind",
@@ -328,6 +331,23 @@ internal static class ReaderQueryProtocol
             "bind",
             "unbound",
             "content_format");
+        if (card.TryGetProperty("learning", out JsonElement learning))
+        {
+            if (
+                learning.ValueKind != JsonValueKind.Object
+                || !learning.TryGetProperty("id", out JsonElement learningId)
+                || learningId.ValueKind != JsonValueKind.String
+                || !System.Text.RegularExpressions.Regex.IsMatch(
+                    learningId.GetString() ?? "", "^card_[a-f0-9]{4,64}$")
+                || !learning.TryGetProperty("cards", out JsonElement learningCount)
+                || learningCount.ValueKind != JsonValueKind.Number
+                || !learningCount.TryGetInt32(out int learningCards)
+                || learningCards is < 1 or > 12
+            )
+            {
+                throw Invalid("Reader 单卡查询 learning 字段无效");
+            }
+        }
         string id = RequiredString(card, "id", 96);
         if (id.Length < 2 || !id.All(character => character is
                 >= 'A' and <= 'Z'
@@ -564,6 +584,31 @@ internal static class ReaderQueryProtocol
             {
                 throw Invalid("Reader 卡片 bind 缺少字段");
             }
+        }
+    }
+
+    private static void RequireExactFieldsWithOptional(
+        JsonElement value,
+        string[] optional,
+        params string[] required)
+    {
+        HashSet<string> names = value.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (string name in required)
+        {
+            if (!names.Remove(name))
+            {
+                throw Invalid("Reader 查询缺少字段 " + name);
+            }
+        }
+        foreach (string name in optional)
+        {
+            names.Remove(name);
+        }
+        if (names.Count > 0)
+        {
+            throw Invalid("Reader 查询出现未知字段 " + string.Join(",", names));
         }
     }
 

@@ -756,6 +756,7 @@ internal static class DirectBridgeSelfTest
             checks).ConfigureAwait(false);
         CheckHighlightMarkerShapes(checks);
         CheckTextMarksHint(checks);
+        CheckBriefAndSingleEditPath(checks);
         CheckReaderPageCardQueryContract(checks);
         CheckReaderPageCardMutationContract(checks);
         CheckReaderLearningCardMutationContract(checks);
@@ -10114,6 +10115,68 @@ internal static class DirectBridgeSelfTest
             && store.Load().ContextDeliveryMode
                 == DirectContextDeliveryMode.LegacyInject,
             "direct-context-mode-set-validates-and-persists-across-connections",
+            checks);
+    }
+
+    /// <summary>快照 brief：正文不发、说明要在；页面编辑拒收学习卡形式。</summary>
+    private static void CheckBriefAndSingleEditPath(ICollection<string> checks)
+    {
+        JsonObject payload = new()
+        {
+            ["currentPage"] = new JsonObject
+            {
+                ["file"] = "brief.pdf",
+                ["page"] = 9,
+                ["text"] = "very long page body",
+                ["highlightSource"] = new JsonObject { ["markers"] = new JsonObject() },
+                ["embeds"] = new JsonObject(),
+            },
+            ["selectedItems"] = new JsonArray(),
+        };
+        ReaderContextMcpServer.TrimForModel(payload, brief: true);
+        JsonObject page = (JsonObject)payload["currentPage"]!;
+        Require(
+            !page.ContainsKey("text")
+            && !page.ContainsKey("highlightSource")
+            && !page.ContainsKey("embeds")
+            && page.ContainsKey("file")
+            && page["brief"]?.GetValue<bool>() == true
+            && page["briefHint"] is JsonValue,
+            "snapshot-brief-drops-page-body-but-explains",
+            checks);
+
+        JsonObject full = new()
+        {
+            ["currentPage"] = new JsonObject { ["file"] = "brief.pdf", ["text"] = "body" },
+        };
+        ReaderContextMcpServer.TrimForModel(full);
+        Require(
+            ((JsonObject)full["currentPage"]!).ContainsKey("text"),
+            "snapshot-default-keeps-page-body",
+            checks);
+
+        // 页面编辑的解析器不再认 cards（学习卡）形式。
+        JsonElement cardsForm = JsonSerializer.SerializeToElement(new
+        {
+            id = "placement_1",
+            expectedRevision = 3,
+            cards = new[] { new { type = "basic", front = "q", back = "a" } },
+        });
+        Require(
+            !ReaderContextMcpServer.TryReadPageCardMutation(
+                cardsForm, "edit", out _),
+            "page-card-edit-no-longer-accepts-learning-cards",
+            checks);
+        JsonElement contentForm = JsonSerializer.SerializeToElement(new
+        {
+            id = "placement_1",
+            expectedRevision = 3,
+            content = "<p>rendered</p>",
+        });
+        Require(
+            ReaderContextMcpServer.TryReadPageCardMutation(
+                contentForm, "edit", out _),
+            "page-card-edit-still-accepts-rendered-content",
             checks);
     }
 

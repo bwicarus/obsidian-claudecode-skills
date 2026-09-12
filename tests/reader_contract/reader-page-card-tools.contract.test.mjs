@@ -159,15 +159,17 @@ test("写工具 schema 强制 id + expectedRevision，number 只是锚定卡可�
   }
   assert.match(
     editSchema,
-    /\["required"\] = new JsonArray\(\s*"id",\s*"expectedRevision"\)/,
+    /\["required"\] = new JsonArray\(\s*"id",\s*"expectedRevision",\s*"content"\)/,
+    "2026-09-13 起 content 必填、没有 oneOf：页面编辑只剩渲染卡这一种形式",
   );
   assert.doesNotMatch(
     editSchema,
     /\["required"\] = new JsonArray\(\s*"number"/,
   );
-  assert.match(editSchema, /\["oneOf"\] = new JsonArray/);
-  assert.match(editSchema, /new JsonArray\("content"\)/);
-  assert.match(editSchema, /new JsonArray\("cards"\)/);
+  assert.doesNotMatch(editSchema, /\["oneOf"\]/);
+  // 2026-09-13：学习卡只有一条改法（本体），页面编辑不再收 cards。
+  assert.doesNotMatch(editSchema, /"cards"/, "cards 形式不该回到页面编辑里");
+  assert.match(editSchema, /"content"\)/, "content 成为必填");
   assert.match(
     editSchema,
     /ReaderRealtimeOutputProtocol\.MaximumPageCardContentCharacters/,
@@ -186,57 +188,20 @@ test("写工具 schema 强制 id + expectedRevision，number 只是锚定卡可�
   );
 });
 
-test("学习卡 replacement 只接受严格 basic/cloze 结构", () => {
-  const schema = method(MCP, "private static JsonObject BuildPageCardCardsSchema()");
-  assert.match(schema, /\["minItems"\] = 1/);
-  assert.match(schema, /\["maxItems"\] = 12/);
-  assert.match(schema, /new JsonArray\("type", "front", "back"\)/);
-  assert.match(schema, /new JsonArray\("type", "cloze"\)/);
-  assert.match(
-    schema,
-    /\["back"\] = PageCardFaceSchema\(\)/,
-    "basic back is required and non-empty, not the draft-only empty-back shape",
-  );
-  assert.match(schema, /\["cloze"\] = PageCardClozeFaceSchema\(\)/);
-  assert.doesNotMatch(schema, /"page"/, "replacement cards never accept a page field");
-  assert.ok(
-    (schema.match(/\["additionalProperties"\] = false/g) || []).length >= 2,
-    "both card variants must reject unknown fields",
-  );
-
-  const validator = method(MCP, "private static bool ValidatePageCardReplacementCards(");
-  assert.match(validator, /fields\.SetEquals\(new\[\] \{ "type", "front", "back" \}\)/);
-  assert.match(validator, /fields\.SetEquals\(new\[\] \{ "type", "cloze" \}\)/);
-  assert.match(validator, /type == "basic"/);
-  assert.match(validator, /type == "cloze"/);
-  assert.match(validator, /TryReadPageCardFace\(card, "back", allowEmpty: false\)/);
-  assert.match(validator, /ContainsPageCardClozeDeletion/);
-  assert.match(validator, /else[\s\S]*return false/);
-
-  const clozeSchema = method(MCP, "private static JsonObject PageCardClozeFaceSchema()");
-  assert.match(
-    clozeSchema,
-    /ReaderRealtimeOutputProtocol\.MaximumPageCardContentCharacters/,
-  );
-  const faceSchema = method(MCP, "private static JsonObject PageCardFaceSchema()");
-  assert.match(
-    faceSchema,
-    /ReaderRealtimeOutputProtocol\.MaximumPageCardContentCharacters/,
-  );
-  assert.ok(
-    clozeSchema.includes('["pattern"] = "\\\\{\\\\{c[1-9][0-9]*::[\\\\s\\\\S]+?\\\\}\\\\}"'),
-    "schema tells the caller that canonical cloze markup is mandatory",
-  );
-  const clozeCheck = method(MCP, "private static bool ContainsPageCardClozeDeletion(");
-  assert.match(clozeCheck, /value\[cursor\] is < '1' or > '9'/);
-  assert.match(clozeCheck, /value\.IndexOf\("}}", contentStart/);
-  assert.match(clozeCheck, /close > contentStart/);
+test("页面编辑收到学习卡形式时，错误里直接指向本体工具", () => {
+  // Codex 反馈：「改页面上的卡和改学习卡本体是两套工具……所以我才会纠结选哪一个」。
+  // 现在只有一条：本体。页面编辑收到 cards 不再默默"改页面但不同步 Anki"，
+  // 而是把该去哪说清楚 —— 一句笼统的 Invalid 只会让模型换个写法再试。
+  assert.match(MCP, /Learning cards have exactly one[\s\S]*?reader_learning_card_edit/);
+  assert.doesNotMatch(MCP, /BuildPageCardCardsSchema/,
+    "页面编辑的 cards schema 应当整个删掉，留着迟早被人接回去");
 });
 
 test("工具处理器严格校验形状后才生成 pcard 操作并发送 client-action", () => {
   const parser = method(MCP, "internal static bool TryReadPageCardMutation(");
   assert.match(parser, /DirectJsonValidation\.RequireNoDuplicateKeys\(arguments\)/);
-  assert.match(parser, /hasContent == hasCards/);
+  // cards（学习卡）形式不再走这里：学习卡改本体。
+  assert.match(parser, /if \(hasCards\)\s*\{\s*return false;/);
   assert.match(parser, /actual\.SetEquals\(expected\)/);
   assert.match(parser, /\["id", "expectedRevision"\]/);
   assert.match(
@@ -363,7 +328,7 @@ test("页面 normalizer 保留 ID-only 自由卡写入且不伪造 number", () =
 test("工具描述说明自动重排、placement-only 删除与 Anki 边界", () => {
   const edit = toolSpec("PageCardEditToolName").replace(/"\s*\+\s*"/g, "");
   const remove = toolSpec("PageCardDeleteToolName").replace(/"\s*\+\s*"/g, "");
-  assert.match(edit, /any card placement/);
+  assert.match(edit, /NON-learning card placement/);
   assert.match(edit, /unbound manually dragged card/);
   assert.match(edit, /stable id and revision already present in a currentPage CARD marker/);
   assert.match(edit, /id and expectedRevision/);
@@ -373,7 +338,8 @@ test("工具描述说明自动重排、placement-only 删除与 Anki 边界", ()
   assert.match(edit, /reader_page_card_read first/);
   assert.match(edit, /optional shortcut/);
   assert.match(edit, /Omit number for an unbound card/);
-  assert.match(edit, /does not silently rewrite an already exported Anki note/);
+  assert.match(edit, /reader_learning_card_edit instead/,
+    "学习卡的改法只有一条，页面编辑要把人指过去");
   assert.match(remove, /Delete only one bound or unbound card placement/);
   assert.match(remove, /number is an optional visible shortcut/);
   assert.match(remove, /deletion by number alone is always refused/);

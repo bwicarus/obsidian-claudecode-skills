@@ -14134,6 +14134,19 @@
           replacement: contextContent.replacement,
           contentTruncated: contextContent.contentTruncated
         };
+        // learning（2026-09-13）：学习卡放置带上本体的 card_* 批次号。此前模型从
+        // 页面上只拿得到放置 id，要改本体得先猜、再查；Codex 的反馈就是「改页面
+        // 上的卡和改学习卡本体是两套工具……所以我才会纠结选哪一个」。
+        if (kind === 'anki') {
+          var learningId = String(data.gid || '').toLowerCase();
+          if (/^card_[a-f0-9]{4,64}$/.test(learningId)) {
+            var cardCount = Array.isArray(data.cards) ? data.cards.length : 0;
+            projected.learning = {
+              id: learningId,
+              cards: Math.min(12, Math.max(1, cardCount))
+            };
+          }
+        }
         if (bound) {
           projected.bind = {
             kind: 'page-chars', page: page, from: from, to: to,

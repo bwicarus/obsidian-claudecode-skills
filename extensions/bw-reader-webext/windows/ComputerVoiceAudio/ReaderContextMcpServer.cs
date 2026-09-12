@@ -621,6 +621,10 @@ internal sealed class ReaderContextMcpServer
                     //   现在按需附在 currentPage.textMarksHint 上（见 AttachTextMarksHint）。
                     //   这里只留一句指路：不留就得赌模型会注意到一个没见过的字段，
                     //   赌输的表现是它把 ⟦HIGHLIGHT⟧ 原样念给用户听。
+                    + "Pass {\"brief\":true} for a question that only needs "
+                    + "the current selection or last action (a reading, a "
+                    + "meaning): the page body is left out and the call is "
+                    + "much lighter. "
                     + "When currentPage.text contains ⟦…⟧ marks, "
                     + "currentPage.textMarksHint explains exactly those marks; "
                     + "read it before quoting the text. "
@@ -640,7 +644,23 @@ internal sealed class ReaderContextMcpServer
                 {
                     ["type"] = "object",
                     ["additionalProperties"] = false,
-                    ["properties"] = new JsonObject(),
+                    ["properties"] = new JsonObject
+                    {
+                        // Codex 反馈：「快照经常返回整页，问个读音也很重」。
+                        ["brief"] = new JsonObject
+                        {
+                            ["type"] = "boolean",
+                            ["default"] = false,
+                            ["description"] =
+                                "true drops the page body (currentPage.text, "
+                                + "highlightSource, embeds, selectionRegions) and "
+                                + "keeps identity, selectedItems, recentActions, "
+                                + "freshness and basis. Use it for a question about "
+                                + "the current selection or the user's last action "
+                                + "(a reading, a meaning, 'what is this word'); call "
+                                + "again without brief when you need the page text.",
+                        },
+                    },
                 },
                 ["annotations"] = ReadOnlyAnnotations(),
             },
@@ -666,6 +686,9 @@ internal sealed class ReaderContextMcpServer
                         {
                             ["type"] = "string",
                             ["enum"] = ReaderCapabilityCatalog.TopicEnum(),
+                            ["description"] =
+                                "Which workflow guide to read; pick from the enum "
+                                + "(index lists them).",
                         },
                     },
                 },
@@ -700,11 +723,19 @@ internal sealed class ReaderContextMcpServer
                                 "viewport-context",
                                 "drawing-nearby",
                                 "selection-near"),
+                            ["description"] =
+                                "viewport-context = what is on screen; "
+                                + "drawing-nearby = around the current stable "
+                                + "drawing; selection-near = around one closed "
+                                + "region (needs selectionId).",
                         },
                         ["selectionId"] = new JsonObject
                         {
                             ["type"] = "string",
                             ["pattern"] = "^[A-Za-z0-9._:-]{1,160}$",
+                            ["description"] =
+                                "An id listed in currentPage.selectionRegions.items; "
+                                + "only with scope selection-near.",
                         },
                     },
                 },
@@ -737,6 +768,9 @@ internal sealed class ReaderContextMcpServer
                     {
                         ["type"] = "string",
                         ["pattern"] = "^[a-z0-9][a-z0-9-]{0,31}$",
+                        ["description"] =
+                            "Registered camera id from the roster the tool "
+                            + "returns; omit for the default camera.",
                     },
                 },
             },
@@ -772,6 +806,10 @@ internal sealed class ReaderContextMcpServer
                                 "scroll-to-text",
                                 "scroll-to-heading",
                                 "scroll-to-selection"),
+                            ["description"] =
+                                "next/previous-viewport scroll one screen; "
+                                + "scroll-to-text and scroll-to-heading need "
+                                + "target; scroll-to-selection needs selectionId.",
                         },
                         ["target"] = new JsonObject
                         {
@@ -780,11 +818,17 @@ internal sealed class ReaderContextMcpServer
                             ["maxLength"] =
                                 ReaderBrowserControlProtocol
                                     .MaximumTargetCharacters,
+                            ["description"] =
+                                "Visible text or heading to scroll to, copied "
+                                + "verbatim from currentPage.text.",
                         },
                         ["selectionId"] = new JsonObject
                         {
                             ["type"] = "string",
                             ["pattern"] = "^[A-Za-z0-9._:-]{1,160}$",
+                            ["description"] =
+                                "An id listed in currentPage.selectionRegions.items; "
+                                + "never invented.",
                         },
                     },
                 },
@@ -1073,8 +1117,15 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = PageCardEditToolName,
                 ["description"] =
-                    "Replace the saved contents of any card placement on the "
-                    + "current page, including an unbound manually dragged card. "
+                    // ⚠ 2026-09-13 收窄（Codex 用后反馈：「改页面上的卡和改学习卡本体
+                    //   是两套工具，前者不会自动改已导出的 Anki，后者默认会同步，所以
+                    //   我才会纠结选哪一个」）。学习卡现在只有一条改法：本体。
+                    "Replace the rendered content of a NON-learning card placement "
+                    + "on the current page (weather/news/images/fact/general cards, "
+                    + "including an unbound manually dragged card). Learning cards "
+                    + "(basic/cloze) are NOT edited here: edit the entity with "
+                    + "reader_learning_card_edit and the placement on the page "
+                    + "follows. "
                     + "Use the stable id and revision already present in a "
                     + "currentPage CARD marker as id and expectedRevision. The "
                     + "marker body is concise semantic text: it intentionally "
@@ -1089,14 +1140,11 @@ internal sealed class ReaderContextMcpServer
                     + "checks that number, id and revision still identify the "
                     + "same card. Omit number for an unbound card whose number is "
                     + "null. The stable id and revision prevent an old edit "
-                    + "instruction from changing the wrong card. Pass "
-                    + "exactly one replacement form: content for a rendered "
-                    + "page card, or strictly typed basic/cloze cards for a "
-                    + "learning card. Basic front and back must both be "
-                    + "non-empty; cloze text must be non-empty and contain at "
-                    + "least one {{c1::...}} deletion. This updates the "
-                    + "Reader's saved card; it "
-                    + "does not silently rewrite an already exported Anki note. "
+                    + "instruction from changing the wrong card. Pass content "
+                    + "as the complete replacement. A learning-card placement "
+                    + "shows learning=\"card_…\" in its CARD marker (and "
+                    + "learning.id in reader_page_cards): take that id to "
+                    + "reader_learning_card_edit instead. "
                     + "Do not retry an unknown outcome; read the cards again.",
                 ["inputSchema"] = BuildPageCardEditArgumentsSchema(),
                 ["annotations"] = new JsonObject
@@ -1155,7 +1203,10 @@ internal sealed class ReaderContextMcpServer
                         + "notes unchanged. The result reports Reader, local "
                         + "Anki and AnkiWeb sync separately. AnkiMobile edits "
                         + "fail closed when no reliable external note-ID channel "
-                        + "exists. Do not retry an unknown result; read the card.",
+                        + "exists. The placement of this card on the page the user is "
+                        + "looking at is refreshed in the same call; other pages "
+                        + "reconcile when opened. This is the ONLY way to edit a "
+                        + "learning card. Do not retry an unknown result; read the card.",
                     ["inputSchema"] = BuildLearningCardEditArgumentsSchema(),
                     ["annotations"] = new JsonObject
                     {
@@ -1281,6 +1332,8 @@ internal sealed class ReaderContextMcpServer
                             ["type"] = "array",
                             ["minItems"] = 1,
                             ["maxItems"] = 48,
+                            ["description"] =
+                                "Every element of the sheet in reading order.",
                             ["items"] = new JsonObject
                             {
                                 ["type"] = "object",
@@ -1298,16 +1351,30 @@ internal sealed class ReaderContextMcpServer
                                             "checkbox",
                                             "button",
                                             "hr"),
+                                        ["description"] =
+                                            "text = heading/instruction/stem (uses "
+                                            + "text, optional style); blank = "
+                                            + "handwriting answer area (label, optional "
+                                            + "answer); choice = multiple choice (text "
+                                            + "stem, options, optional answer letter); "
+                                            + "checkbox (label); button (label + event); "
+                                            + "hr = separator.",
                                     },
                                     ["text"] = new JsonObject
                                     {
                                         ["type"] = "string",
                                         ["maxLength"] = 2000,
+                                        ["description"] =
+                                            "Content of a text block or the stem of a "
+                                            + "choice.",
                                     },
                                     ["label"] = new JsonObject
                                     {
                                         ["type"] = "string",
                                         ["maxLength"] = 2000,
+                                        ["description"] =
+                                            "Question or number next to a blank, "
+                                            + "checkbox or button.",
                                     },
                                     ["options"] = new JsonObject
                                     {
@@ -1318,26 +1385,40 @@ internal sealed class ReaderContextMcpServer
                                             ["type"] = "string",
                                             ["maxLength"] = 200,
                                         },
+                                        ["description"] =
+                                            "Choice options in order (A, B, C…).",
                                     },
                                     ["answer"] = new JsonObject
                                     {
                                         ["type"] = "string",
                                         ["maxLength"] = 400,
+                                        ["description"] =
+                                            "Expected answer: the letter for a choice, "
+                                            + "or the text for a blank; enables grading.",
                                     },
                                     ["style"] = new JsonObject
                                     {
                                         ["type"] = "string",
                                         ["maxLength"] = 16,
+                                        ["description"] =
+                                            "For text blocks: h1 for a title; omit for "
+                                            + "body text.",
                                     },
                                     ["event"] = new JsonObject
                                     {
                                         ["type"] = "string",
                                         ["maxLength"] = 80,
+                                        ["description"] =
+                                            "For button blocks: the in-paper event the "
+                                            + "button fires (e.g. reveal, hide).",
                                     },
                                     ["id"] = new JsonObject
                                     {
                                         ["type"] = "string",
                                         ["maxLength"] = 32,
+                                        ["description"] =
+                                            "Optional stable block id so a button "
+                                            + "event can reference it.",
                                     },
                                     ["at"] = new JsonObject
                                     {
@@ -1348,10 +1429,16 @@ internal sealed class ReaderContextMcpServer
                                         {
                                             ["type"] = "integer",
                                         },
+                                        ["description"] =
+                                            "Optional grid position [row, col]; omit "
+                                            + "to flow in reading order.",
                                     },
                                     ["cols"] = new JsonObject
                                     {
                                         ["type"] = "integer",
+                                        ["description"] =
+                                            "Optional number of grid columns for this "
+                                            + "block's row.",
                                     },
                                     ["span"] = new JsonObject
                                     {
@@ -1362,10 +1449,14 @@ internal sealed class ReaderContextMcpServer
                                         {
                                             ["type"] = "integer",
                                         },
+                                        ["description"] =
+                                            "Optional [rows, cols] the block spans.",
                                     },
                                     ["enabled"] = new JsonObject
                                     {
                                         ["type"] = "boolean",
+                                        ["description"] =
+                                            "false renders the block disabled.",
                                     },
                                 },
                             },
@@ -1502,18 +1593,22 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = CommandToolName,
                 ["description"] =
-                    "Send one bounded structured output to the exact App or "
-                    + "extension instance named by the current Reader snapshot. "
-                    + "Use the exact BWREADER/1 command schema already known "
-                    + "for the requested action; only complex or unknown "
-                    + "workflows should read one capability guide. This is an "
-                    + "additive Reader output path; it does not replace or "
-                    + "change existing Realtime or CLI invocation flows. For "
-                    + "weather/news/images/videos/fact/general results, pass "
-                    + "the same typed {card:{kind,title,data}} envelope here "
-                    + "when the dedicated reader_card tool is filtered by a "
-                    + "client allowlist; text history never carries cards. "
-                    + "The BWREADER/1 card form remains compatible.",
+                    // ⚠ Codex 用后反馈：「Reader 的专用送卡工具和通用命令都能送同一种
+                    //   卡片，主入口不够清楚」。schema 里的 typed-card 回退被打包器钉着
+                    //   （给 allowlist 过滤掉 reader_card 的客户端用），所以只改说明：
+                    //   卡片的主入口是 reader_card，这里只在它不在清单里时才接卡。
+                    "For cards use reader_card. This tool sends the OTHER bounded "
+                    + "structured outputs to the exact App or extension named by the "
+                    + "current Reader snapshot: BWREADER/1 navigate and tool-status "
+                    + "commands in the exact schema already known for the action; "
+                    + "only complex or unknown workflows should read one capability "
+                    + "guide. It is an additive output path and never replaces the "
+                    + "Realtime or CLI flows. The typed {card:{kind,title,data}} "
+                    + "envelope is accepted here ONLY as a fallback for clients whose "
+                    + "allowlist hides reader_card; when reader_card is in your tool "
+                    + "list, do not send cards through this tool. Either way a card "
+                    + "exists only if it was delivered through a card tool; text "
+                    + "history never carries cards.",
                 ["inputSchema"] = new JsonObject
                 {
                     ["oneOf"] = new JsonArray
@@ -1632,6 +1727,8 @@ internal sealed class ReaderContextMcpServer
                     + "These are the placements on the page the user is looking "
                     + "at; for the study cards themselves across the whole store "
                     + "(review state, Anki projection) use reader_learning_cards. "
+                    + "A learning-card entry carries learning.id, the card_* batch "
+                    + "you pass to reader_learning_card_edit. "
                     + "It never returns renderer HTML or control markup. Call "
                     + "reader_page_card_read only when exact rich source is needed, including "
                     + "cards that were manually dragged onto the page and have "
@@ -2096,6 +2193,9 @@ internal sealed class ReaderContextMcpServer
                 ["type"] = "string",
                 ["minLength"] = 1,
                 ["maxLength"] = 256,
+                ["description"] =
+                    "Case-insensitive substring matched against card faces and "
+                    + "source quote; narrows a large store.",
             },
             ["limit"] = new JsonObject
             {
@@ -2103,11 +2203,14 @@ internal sealed class ReaderContextMcpServer
                 ["minimum"] = 1,
                 ["maximum"] = 200,
                 ["default"] = 50,
+                ["description"] = "Maximum batches returned (default 50).",
             },
             ["includeRemoved"] = new JsonObject
             {
                 ["type"] = "boolean",
                 ["default"] = false,
+                ["description"] =
+                    "Also return cards whose state is removed (soft-deleted).",
             },
         },
     };
@@ -2142,7 +2245,11 @@ internal sealed class ReaderContextMcpServer
             ["expectedEntityRevision"] = LearningCardRevisionSchema(
                 "entityRevision returned by the latest read or list."),
             ["externalPolicy"] = LearningCardExternalPolicySchema(),
-            ["card"] = BuildLearningCardContentSchema(),
+            ["card"] = WithDescription(
+                BuildLearningCardContentSchema(),
+                "Complete replacement for this one card (cardIndex) inside the "
+                + "batch: type basic with front/back, or type cloze with cloze "
+                + "text containing {{c1::…}}. Optional deck, tags, reason."),
             ["source"] = BuildLearningCardSourceSchema(),
         },
     };
@@ -2206,11 +2313,15 @@ internal sealed class ReaderContextMcpServer
             {
                 ["type"] = "string",
                 ["maxLength"] = 512,
+                ["description"] = "Anki deck name; omit to keep the current one.",
             },
             ["reason"] = new JsonObject
             {
                 ["type"] = "string",
                 ["maxLength"] = 4096,
+                ["description"] =
+                    "Why this card exists / why it changed — shown to the user, "
+                    + "not to Anki.",
             },
             ["tags"] = new JsonObject
             {
@@ -2224,18 +2335,23 @@ internal sealed class ReaderContextMcpServer
                     ["maxLength"] = 128,
                     ["pattern"] = "^\\S+$",
                 },
+                ["description"] = "Anki tags without spaces (kj::<id> is added "
+                    + "automatically from the node binding).",
             },
         };
         JsonObject basicProperties = new()
         {
             ["type"] = new JsonObject { ["const"] = "basic" },
-            ["front"] = PageCardFaceSchema(),
-            ["back"] = PageCardFaceSchema(),
+            ["front"] = WithDescription(PageCardFaceSchema(),
+                "Question side. Plain text or minimal HTML; non-empty."),
+            ["back"] = WithDescription(PageCardFaceSchema(),
+                "Answer side; non-empty."),
         };
         JsonObject clozeProperties = new()
         {
             ["type"] = new JsonObject { ["const"] = "cloze" },
-            ["cloze"] = PageCardClozeFaceSchema(),
+            ["cloze"] = WithDescription(PageCardClozeFaceSchema(),
+                "Cloze text with at least one {{c1::…}} deletion."),
         };
         foreach ((string key, JsonNode? value) in extras)
         {
@@ -2268,22 +2384,44 @@ internal sealed class ReaderContextMcpServer
     {
         JsonObject properties = new()
         {
-            ["kind"] = LearningCardSourceTextSchema(80, required: true),
-            ["sourceId"] = LearningCardSourceTextSchema(4096),
-            ["documentId"] = LearningCardSourceTextSchema(4096),
-            ["bookId"] = LearningCardSourceTextSchema(4096),
-            ["url"] = LearningCardSourceTextSchema(8192),
-            ["title"] = LearningCardSourceTextSchema(1024),
-            ["quote"] = LearningCardSourceTextSchema(32768),
-            ["context"] = LearningCardSourceTextSchema(65536),
-            ["tool"] = LearningCardSourceTextSchema(160),
-            ["draftId"] = LearningCardSourceTextSchema(512),
-            ["sourceInstanceId"] = LearningCardSourceTextSchema(512),
-            ["requirement"] = LearningCardSourceTextSchema(32768),
-            ["location"] = new JsonObject { ["type"] = "object" },
-            ["anchor"] = new JsonObject { ["type"] = "object" },
-            ["selection"] = new JsonObject { ["type"] = "object" },
-            ["legacy"] = new JsonObject { ["type"] = "object" },
+            ["kind"] = LearningCardSourceTextSchema(80, required: true,
+                "Where the card came from: pdf, epub, web, draft, manual…"),
+            ["sourceId"] = LearningCardSourceTextSchema(4096,
+                description: "Stable id of the source record when one exists."),
+            ["documentId"] = LearningCardSourceTextSchema(4096,
+                description: "The book/file (currentPage.file) the card quotes."),
+            ["bookId"] = LearningCardSourceTextSchema(4096,
+                description: "Library book id when the document belongs to a book."),
+            ["url"] = LearningCardSourceTextSchema(8192,
+                description: "Web page URL for a card made from a web page."),
+            ["title"] = LearningCardSourceTextSchema(1024,
+                description: "Human title of the source document or page."),
+            ["quote"] = LearningCardSourceTextSchema(32768,
+                description: "Verbatim passage the card is about."),
+            ["context"] = LearningCardSourceTextSchema(65536,
+                description: "Surrounding text around the quote."),
+            ["tool"] = LearningCardSourceTextSchema(160,
+                description: "Tool that created the card (e.g. reader_anki_draft)."),
+            ["draftId"] = LearningCardSourceTextSchema(512,
+                description: "Draft id returned by reader_anki_draft, if any."),
+            ["sourceInstanceId"] = LearningCardSourceTextSchema(512,
+                description: "Reader instance that produced the source snapshot."),
+            ["requirement"] = LearningCardSourceTextSchema(32768,
+                description: "What the user asked the card to cover, in their words."),
+            ["location"] = WithDescription(
+                new JsonObject { ["type"] = "object" },
+                "Page or section, e.g. {\"kind\":\"pdf\",\"page\":12}."),
+            ["anchor"] = WithDescription(
+                new JsonObject { ["type"] = "object" },
+                "Reader anchor object copied from a snapshot; never invented."),
+            ["selection"] = WithDescription(
+                new JsonObject { ["type"] = "object" },
+                "Selection descriptor copied from a snapshot, if the card came "
+                + "from a selection."),
+            ["legacy"] = WithDescription(
+                new JsonObject { ["type"] = "object" },
+                "Opaque older provenance kept for migrated cards; pass through "
+                + "unchanged."),
             // 归属（2026-09-09 起可经这条路修补）。二选一：单词/语法卡给
             // kjTrack，学科概念卡给 kjNodes。⚠ 为什么必须能改：归属是 2026-09-06
             // 才成为硬要求的，之前做的卡一条都没有，而没有归属就进不了 Anki、
@@ -2350,13 +2488,28 @@ internal sealed class ReaderContextMcpServer
 
     private static JsonObject LearningCardSourceTextSchema(
         int maximum,
-        bool required = false) =>
-        new()
+        bool required = false,
+        string? description = null)
+    {
+        JsonObject schema = new()
         {
             ["type"] = "string",
             ["minLength"] = required ? 1 : 0,
             ["maxLength"] = maximum,
         };
+        if (description is not null)
+        {
+            schema["description"] = description;
+        }
+        return schema;
+    }
+
+    /// 给一个已经造好的 schema 补一句说明（oneOf 这类没有顶层 properties 的也能用）。
+    private static JsonObject WithDescription(JsonObject schema, string description)
+    {
+        schema["description"] = description;
+        return schema;
+    }
 
     private static JsonObject BuildPageCardEditArgumentsSchema()
     {
@@ -2370,26 +2523,18 @@ internal sealed class ReaderContextMcpServer
             ["description"] =
                 "Complete replacement content for a rendered page card.",
         };
-        properties["cards"] = BuildPageCardCardsSchema();
+        // ⚠ 2026-09-13：不再接受 cards（学习卡）形式。学习卡只有一条改法 ——
+        //   本体（reader_learning_card_edit），页面上的放置跟着本体走。
+        //   这里再留一条"改页面但不同步 Anki"的路，模型每次都要在两者之间猜。
         return new JsonObject
         {
             ["type"] = "object",
             ["additionalProperties"] = false,
             ["required"] = new JsonArray(
                 "id",
-                "expectedRevision"),
+                "expectedRevision",
+                "content"),
             ["properties"] = properties,
-            ["oneOf"] = new JsonArray
-            {
-                new JsonObject
-                {
-                    ["required"] = new JsonArray("content"),
-                },
-                new JsonObject
-                {
-                    ["required"] = new JsonArray("cards"),
-                },
-            },
         };
     }
 
@@ -2518,42 +2663,6 @@ internal sealed class ReaderContextMcpServer
         },
     };
 
-    private static JsonObject BuildPageCardCardsSchema() => new()
-    {
-        ["type"] = "array",
-        ["minItems"] = 1,
-        ["maxItems"] = 12,
-        ["items"] = new JsonObject
-        {
-            ["oneOf"] = new JsonArray
-            {
-                new JsonObject
-                {
-                    ["type"] = "object",
-                    ["additionalProperties"] = false,
-                    ["required"] = new JsonArray("type", "front", "back"),
-                    ["properties"] = new JsonObject
-                    {
-                        ["type"] = new JsonObject { ["const"] = "basic" },
-                        ["front"] = PageCardFaceSchema(),
-                        ["back"] = PageCardFaceSchema(),
-                    },
-                },
-                new JsonObject
-                {
-                    ["type"] = "object",
-                    ["additionalProperties"] = false,
-                    ["required"] = new JsonArray("type", "cloze"),
-                    ["properties"] = new JsonObject
-                    {
-                        ["type"] = new JsonObject { ["const"] = "cloze" },
-                        ["cloze"] = PageCardClozeFaceSchema(),
-                    },
-                },
-            },
-        },
-    };
-
     private static JsonObject PageCardClozeFaceSchema() => new()
     {
         ["type"] = "string",
@@ -2586,6 +2695,10 @@ internal sealed class ReaderContextMcpServer
                     "kind",
                     "title",
                     "data"),
+                ["description"] =
+                    "One structured card: kind picks the data shape, title is "
+                    + "the header (null for none), data is the exact kind-specific "
+                    + "object, bind optionally pins it to a passage.",
                 ["properties"] = new JsonObject
                 {
                     ["kind"] = new JsonObject
@@ -2598,6 +2711,9 @@ internal sealed class ReaderContextMcpServer
                             "videos",
                             "fact",
                             "general"),
+                        ["description"] =
+                            "Card type; decides which fields data must contain "
+                            + "(see the tool description for each shape).",
                     },
                     ["title"] = new JsonObject
                     {
@@ -2613,6 +2729,8 @@ internal sealed class ReaderContextMcpServer
                                 ["type"] = "null",
                             },
                         },
+                        ["description"] =
+                            "Header shown above the card; null shows no header.",
                     },
                     ["data"] = new JsonObject
                     {
@@ -2629,6 +2747,13 @@ internal sealed class ReaderContextMcpServer
                     // 也传不进。用户实测反馈就是"AI 说没看到这个参数"。
                     ["bind"] = new JsonObject
                     {
+                        ["description"] =
+                            "Optional. Pin the card to one element instead of "
+                            + "letting it float: upage-block for a block on an "
+                            + "insert page, page-chars for a passage of the page "
+                            + "text (preferred: pass page + text, and block when "
+                            + "the page shows [NN] numbers). null or omitted = "
+                            + "floating card.",
                         ["anyOf"] = new JsonArray
                         {
                             new JsonObject
@@ -2641,16 +2766,19 @@ internal sealed class ReaderContextMcpServer
                                     ["kind"] = new JsonObject
                                     {
                                         ["const"] = "upage-block",
+                                        ["description"] = "Pin to an insert-page block.",
                                     },
                                     ["upage"] = new JsonObject
                                     {
                                         ["type"] = "string",
                                         ["maxLength"] = 200,
+                                        ["description"] = "Insert page id from the snapshot.",
                                     },
                                     ["bid"] = new JsonObject
                                     {
                                         ["type"] = "string",
                                         ["maxLength"] = 200,
+                                        ["description"] = "Block id inside that insert page.",
                                     },
                                 },
                             },
@@ -2666,31 +2794,47 @@ internal sealed class ReaderContextMcpServer
                                     ["kind"] = new JsonObject
                                     {
                                         ["const"] = "page-chars",
+                                        ["description"] = "Pin to a passage of the page text.",
                                     },
                                     ["page"] = new JsonObject
                                     {
                                         ["type"] = "integer",
                                         ["minimum"] = 1,
+                                        ["description"] = "PDF page (1 on a web page).",
                                     },
                                     ["from"] = new JsonObject
                                     {
                                         ["type"] = "integer",
                                         ["minimum"] = 0,
+                                        ["description"] =
+                                            "Character offset where the passage starts, "
+                                            + "from reader_page_text segments; omit when "
+                                            + "passing text.",
                                     },
                                     ["to"] = new JsonObject
                                     {
                                         ["type"] = "integer",
                                         ["minimum"] = 0,
+                                        ["description"] =
+                                            "Character offset where the passage ends "
+                                            + "(exclusive); omit when passing text.",
                                     },
                                     ["text"] = new JsonObject
                                     {
                                         ["type"] = "string",
                                         ["maxLength"] = 200,
+                                        ["description"] =
+                                            "The passage itself, copied verbatim from "
+                                            + "the page; the Reader locates it (first "
+                                            + "occurrence unless block is given).",
                                     },
                                     ["rev"] = new JsonObject
                                     {
                                         ["type"] = "string",
                                         ["maxLength"] = 200,
+                                        ["description"] =
+                                            "Page text revision from reader_page_text, "
+                                            + "so a stale offset is rejected.",
                                     },
                                     ["block"] = new JsonObject
                                     {
@@ -2734,9 +2878,15 @@ internal sealed class ReaderContextMcpServer
                 ["type"] = "string",
                 ["minLength"] = 1,
                 ["maxLength"] = 4_096,
+                ["description"] =
+                    "currentPage.file from the snapshot — the book the text "
+                    + "was quoted from.",
             },
             ["target"] = new JsonObject
             {
+                ["description"] =
+                    "Where in that book: {kind:'pdf',page} or "
+                    + "{kind:'epub',section}, copied from the snapshot.",
                 ["oneOf"] = new JsonArray
                 {
                     new JsonObject
@@ -2754,6 +2904,7 @@ internal sealed class ReaderContextMcpServer
                             {
                                 ["type"] = "integer",
                                 ["minimum"] = 1,
+                                ["description"] = "1-based PDF page the text was quoted from.",
                             },
                         },
                     },
@@ -2774,6 +2925,7 @@ internal sealed class ReaderContextMcpServer
                             {
                                 ["type"] = "integer",
                                 ["minimum"] = 0,
+                                ["description"] = "0-based EPUB section the text was quoted from.",
                             },
                         },
                     },
@@ -2785,13 +2937,21 @@ internal sealed class ReaderContextMcpServer
             : new JsonArray("file", "target");
         if (includeCards)
         {
-            properties["sourceText"] = SourceTextSchema();
+            properties["sourceText"] = WithDescription(SourceTextSchema(),
+                "Verbatim passage from currentPage.text that the cards quote; "
+                + "must occur exactly once on that page. Required together with "
+                + "file and target; omit all three for a card that does not "
+                + "quote the book.");
             properties["nodeIds"] = KjNodeIdsSchema();
             properties["cards"] = new JsonObject
             {
                 ["type"] = "array",
                 ["minItems"] = 1,
                 ["maxItems"] = 12,
+                ["description"] =
+                    "1–12 draft cards: {type:'basic',front,back} or "
+                    + "{type:'cloze',cloze} with {{c1::…}}; back may be empty "
+                    + "for a basic card.",
                 ["items"] = new JsonObject
                 {
                     ["oneOf"] = new JsonArray
@@ -2810,8 +2970,11 @@ internal sealed class ReaderContextMcpServer
                                 {
                                     ["const"] = "basic",
                                 },
-                                ["front"] = CardFaceSchema(),
-                                ["back"] = CardFaceSchema(true),
+                                ["front"] = CardFaceSchema(
+                                    description: "Question side; non-empty."),
+                                ["back"] = CardFaceSchema(true,
+                                    "Answer side; may be empty when the front "
+                                    + "already carries the whole prompt."),
                             },
                         },
                         new JsonObject
@@ -2827,7 +2990,9 @@ internal sealed class ReaderContextMcpServer
                                 {
                                     ["const"] = "cloze",
                                 },
-                                ["cloze"] = CardFaceSchema(),
+                                ["cloze"] = CardFaceSchema(
+                                    description: "Cloze text with at least one "
+                                    + "{{c1::…}} deletion."),
                             },
                         },
                     },
@@ -2839,7 +3004,9 @@ internal sealed class ReaderContextMcpServer
             required.Add("text");
             required.Add("color");
             required.Add("note");
-            properties["text"] = SourceTextSchema();
+            properties["text"] = WithDescription(SourceTextSchema(),
+                "Verbatim text to highlight, copied from the page; must occur "
+                + "exactly once.");
             properties["color"] = new JsonObject
             {
                 ["type"] = "string",
@@ -2848,9 +3015,11 @@ internal sealed class ReaderContextMcpServer
                     "green",
                     "blue",
                     "pink"),
+                ["description"] = "Highlight colour.",
             };
             properties["note"] = new JsonObject
             {
+                ["description"] = "Optional note attached to the highlight; null for none.",
                 ["anyOf"] = new JsonArray
                 {
                     new JsonObject
@@ -2912,30 +3081,42 @@ internal sealed class ReaderContextMcpServer
                     ["contract"] = new JsonObject
                     {
                         ["const"] = "reader-source-range/1",
+                        ["description"] = "Always the literal reader-source-range/1.",
                     },
                     ["snapshotId"] = new JsonObject
                     {
                         ["type"] = "string",
                         ["pattern"] = "^hrs_[0-9a-f]{24}$",
+                        ["description"] =
+                            "Copy currentPage.highlightSource.snapshotId verbatim.",
                     },
                     ["documentId"] = new JsonObject
                     {
                         ["type"] = "string",
                         ["minLength"] = 1,
                         ["maxLength"] = 4_096,
+                        ["description"] =
+                            "Copy currentPage.highlightSource.documentId verbatim.",
                     },
-                    ["target"] = BuildDocumentTargetSchema(),
+                    ["target"] = WithDescription(BuildDocumentTargetSchema(),
+                        "Copy currentPage.highlightSource.target verbatim "
+                        + "({kind:'pdf',page} or {kind:'epub',section})."),
                     ["sourceDigest"] = new JsonObject
                     {
                         ["type"] = "string",
                         ["pattern"] =
                             "^rsd1_[0-9a-f]{8}_[0-9a-f]{16}$",
+                        ["description"] =
+                            "Copy currentPage.highlightSource.sourceDigest verbatim; "
+                            + "a changed page makes the Reader reject the range.",
                     },
                     ["revision"] = new JsonObject
                     {
                         ["type"] = "string",
                         ["minLength"] = 1,
                         ["maxLength"] = 160,
+                        ["description"] =
+                            "Copy currentPage.highlightSource.revision verbatim.",
                     },
                     ["startMarker"] = new JsonObject
                     {
@@ -2961,9 +3142,11 @@ internal sealed class ReaderContextMcpServer
                     "green",
                     "blue",
                     "pink"),
+                ["description"] = "Highlight colour.",
             },
             ["note"] = new JsonObject
             {
+                ["description"] = "Optional note attached to the highlight; null for none.",
                 ["anyOf"] = new JsonArray
                 {
                     new JsonObject
@@ -2994,6 +3177,7 @@ internal sealed class ReaderContextMcpServer
                         ["type"] = "integer",
                         ["minimum"] = 1,
                         ["maximum"] = 10_000_000,
+                        ["description"] = "1-based PDF page number.",
                     },
                 },
             },
@@ -3010,6 +3194,7 @@ internal sealed class ReaderContextMcpServer
                         ["type"] = "integer",
                         ["minimum"] = 0,
                         ["maximum"] = 10_000_000,
+                        ["description"] = "0-based EPUB section index.",
                     },
                 },
             },
@@ -3040,12 +3225,21 @@ internal sealed class ReaderContextMcpServer
         },
     };
 
-    private static JsonObject CardFaceSchema(bool allowEmpty = false) => new()
+    private static JsonObject CardFaceSchema(
+        bool allowEmpty = false, string? description = null)
     {
-        ["type"] = "string",
-        ["minLength"] = allowEmpty ? 0 : 1,
-        ["maxLength"] = 8_000,
-    };
+        JsonObject schema = new()
+        {
+            ["type"] = "string",
+            ["minLength"] = allowEmpty ? 0 : 1,
+            ["maxLength"] = 8_000,
+        };
+        if (description is not null)
+        {
+            schema["description"] = description;
+        }
+        return schema;
+    }
 
     private static JsonObject ReadOnlyAnnotations() => new()
     {
@@ -3664,6 +3858,26 @@ internal sealed class ReaderContextMcpServer
             string operation = toolName == PageCardEditToolName
                 ? "edit"
                 : "delete";
+            // ⚠ 说清楚为什么不收，而不是一句 Invalid：模型拿到笼统错误只会换个
+            //   写法再试一次（Codex 反馈里"我还得另外查字段，容易填错"就是这形态）。
+            if (
+                operation == "edit"
+                && arguments.ValueKind == JsonValueKind.Object
+                && arguments.TryGetProperty("cards", out _)
+            )
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "This is a learning card. Learning cards have exactly one "
+                    + "edit path: reader_learning_card_edit (the entity). Take "
+                    + "the learning id from the CARD marker's learning=\"card_…\" "
+                    + "attribute (or learning.id in reader_page_cards) and its "
+                    + "position in the batch as cardIndex; the placement on this "
+                    + "page follows the entity.",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
             if (!TryReadPageCardMutation(
                     arguments,
                     operation,
@@ -3869,7 +4083,7 @@ internal sealed class ReaderContextMcpServer
         }
         if (
             toolName != ToolName
-            || !HasNoArguments(arguments)
+            || !TryReadSnapshotArguments(arguments, out bool brief)
         )
         {
             await WriteErrorAsync(
@@ -3895,7 +4109,7 @@ internal sealed class ReaderContextMcpServer
         //   ReaderPC 一关，每次带书页的快照就白等 2 秒（拒连在 Windows 上的代价）。
         KjPageClient.AttachToSnapshot(payload);
         // **最后一道**：到这里为止没有任何代码还要读这个对象，可以安全瘦身。
-        TrimForModel(payload);
+        TrimForModel(payload, brief);
         await WriteResultAsync(
             id,
             new JsonObject
@@ -5826,15 +6040,20 @@ internal sealed class ReaderContextMcpServer
             }
             bool hasContent = actual.Contains("content");
             bool hasCards = actual.Contains("cards");
+            // cards（学习卡）形式 2026-09-13 起不走这里：学习卡改本体。
+            if (hasCards)
+            {
+                return false;
+            }
             if (operation == "edit")
             {
-                if (hasContent == hasCards)
+                if (!hasContent)
                 {
                     return false;
                 }
-                expected.Add(hasContent ? "content" : "cards");
+                expected.Add("content");
             }
-            else if (hasContent || hasCards)
+            else if (hasContent)
             {
                 return false;
             }
@@ -5888,33 +6107,19 @@ internal sealed class ReaderContextMcpServer
             if (operation == "edit")
             {
                 JsonObject replacement = new();
-                if (hasContent)
+                JsonElement contentValue = arguments.GetProperty("content");
+                if (
+                    contentValue.ValueKind != JsonValueKind.String
+                    || contentValue.GetString() is not string content
+                    || string.IsNullOrWhiteSpace(content)
+                    || content.Length
+                        > ReaderRealtimeOutputProtocol
+                            .MaximumPageCardContentCharacters
+                )
                 {
-                    JsonElement contentValue = arguments.GetProperty("content");
-                    if (
-                        contentValue.ValueKind != JsonValueKind.String
-                        || contentValue.GetString() is not string content
-                        || string.IsNullOrWhiteSpace(content)
-                        || content.Length
-                            > ReaderRealtimeOutputProtocol
-                                .MaximumPageCardContentCharacters
-                    )
-                    {
-                        return false;
-                    }
-                    replacement["content"] = content;
+                    return false;
                 }
-                else
-                {
-                    JsonElement cards = arguments.GetProperty("cards");
-                    if (!ValidatePageCardReplacementCards(cards))
-                    {
-                        return false;
-                    }
-                    replacement["cards"] = JsonNode.Parse(cards.GetRawText())
-                        ?? throw new JsonException(
-                            "Reader page-card replacement is empty");
-                }
+                replacement["content"] = content;
                 mutation["replacement"] = replacement;
             }
             JsonObject candidate = new()
@@ -5946,64 +6151,6 @@ internal sealed class ReaderContextMcpServer
             or >= 'a' and <= 'z'
             or >= '0' and <= '9'
             or '_' or '-');
-
-    private static bool ValidatePageCardReplacementCards(JsonElement cards)
-    {
-        if (
-            cards.ValueKind != JsonValueKind.Array
-            || cards.GetArrayLength() is < 1 or > 12
-        )
-        {
-            return false;
-        }
-        foreach (JsonElement card in cards.EnumerateArray())
-        {
-            if (card.ValueKind != JsonValueKind.Object)
-            {
-                return false;
-            }
-            DirectJsonValidation.RequireNoDuplicateKeys(card);
-            if (
-                !card.TryGetProperty("type", out JsonElement typeValue)
-                || typeValue.ValueKind != JsonValueKind.String
-                || typeValue.GetString() is not string type
-            )
-            {
-                return false;
-            }
-            HashSet<string> fields = card.EnumerateObject()
-                .Select(property => property.Name)
-                .ToHashSet(StringComparer.Ordinal);
-            if (type == "basic")
-            {
-                if (
-                    !fields.SetEquals(new[] { "type", "front", "back" })
-                    || !TryReadPageCardFace(card, "front", allowEmpty: false)
-                    || !TryReadPageCardFace(card, "back", allowEmpty: false)
-                )
-                {
-                    return false;
-                }
-            }
-            else if (type == "cloze")
-            {
-                if (
-                    !fields.SetEquals(new[] { "type", "cloze" })
-                    || !TryReadPageCardFace(card, "cloze", allowEmpty: false)
-                    || !ContainsPageCardClozeDeletion(
-                        card.GetProperty("cloze").GetString() ?? string.Empty)
-                )
-                {
-                    return false;
-                }
-            }
-            else
-            {
-                return false;
-            }
-        }
-        return true;
-    }
 
     private static bool TryReadPageCardFace(
         JsonElement card,
@@ -7166,6 +7313,22 @@ internal sealed class ReaderContextMcpServer
             cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>快照工具只认一个可选参数：brief。</summary>
+    private static bool TryReadSnapshotArguments(
+        JsonElement arguments, out bool brief)
+    {
+        brief = false;
+        if (HasNoArguments(arguments)) return true;
+        if (arguments.ValueKind != JsonValueKind.Object) return false;
+        foreach (JsonProperty property in arguments.EnumerateObject())
+        {
+            if (property.Name != "brief") return false;
+            if (property.Value.ValueKind == JsonValueKind.True) brief = true;
+            else if (property.Value.ValueKind != JsonValueKind.False) return false;
+        }
+        return true;
+    }
+
     private static bool HasNoArguments(JsonElement arguments) =>
         arguments.ValueKind == JsonValueKind.Undefined
         || (
@@ -7410,8 +7573,26 @@ internal sealed class ReaderContextMcpServer
     /// 留下一个标量：`selectedItems` 空着的时候，它说不出**为什么**空。
     /// 「还没收到快照」和「用户取消了选中」对模型是两回事。
     /// </remarks>
-    internal static void TrimForModel(JsonObject snapshot)
+    internal static void TrimForModel(JsonObject snapshot, bool brief = false)
     {
+        if (brief && snapshot["currentPage"] is JsonObject briefPage)
+        {
+            // Codex 反馈：「快照经常返回整页，问个读音也很重」。brief 只留身份、
+            // 选区、最近动作与新鲜度；正文与标记表整段不发。留一句说明为什么没有，
+            // 免得模型把"没有正文"读成"这页是空的"。
+            foreach (string key in new[]
+            {
+                "text", "highlightSource", "embeds", "selectionRegions",
+                "textSource", "truncated", "textAvailable",
+            })
+            {
+                briefPage.Remove(key);
+            }
+            briefPage["brief"] = true;
+            briefPage["briefHint"] =
+                "Page body omitted because brief=true was requested; call "
+                + "reader_context_snapshot again without brief for the text.";
+        }
         if (snapshot["selection"] is JsonObject selection)
         {
             string? state = selection["state"] is JsonValue stateValue
@@ -7509,7 +7690,10 @@ internal sealed class ReaderContextMcpServer
                 "\u27e6CARD_START n=… id=… revision=… type=… label=…\u27e7"
                 + "…\u27e6CARD_END\u27e7 carries a bound card; an unbound "
                 + "manually dragged card also has unbound=true and an empty n. "
-                + "To edit or delete it, see reader_page_card_edit / "
+                + "A learning card also carries learning=\"card_…\": edit it "
+                + "with reader_learning_card_edit using that id (the page "
+                + "follows). Rendered cards without learning are edited with "
+                + "reader_page_card_edit; either kind is deleted with "
                 + "reader_page_card_delete.");
         }
         if (text.Contains("\u27e6VIEWPORT\u27e7", StringComparison.Ordinal))
