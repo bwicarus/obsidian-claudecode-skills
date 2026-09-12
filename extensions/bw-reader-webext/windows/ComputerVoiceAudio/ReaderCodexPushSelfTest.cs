@@ -87,9 +87,16 @@ internal static class ReaderCodexPushSelfTest
                     "并发写测试"));
             string path = System.IO.Path.Combine(
                 runtime, ReaderCodexPush.AttemptsFileName);
+            // ⚠ 只数**自己写的那些**。`ReaderAttentionBoard.Configure` 是进程级
+            //   重定向，这段窗口里别的代码路径（比如被封住的出站尝试）也会往
+            //   同一个文件里落行 —— 数总行数就变成了随机红：2026-09-12 实测
+            //   60 / 61 / 62 三种结果都出现过，而这条断言想说的从来只是
+            //   「我这 60 条一条都没丢」。
             int rows = System.IO.File.Exists(path)
                 ? System.IO.File.ReadAllLines(path)
-                    .Count(line => line.Trim().Length > 0)
+                    .Count(line => line.Contains(
+                        "concurrency-",
+                        StringComparison.Ordinal))
                 : 0;
             if (rows != writers)
             {
