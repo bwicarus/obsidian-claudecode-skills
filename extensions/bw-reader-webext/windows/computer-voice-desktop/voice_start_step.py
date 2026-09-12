@@ -251,15 +251,78 @@ def start_once(
     return result
 
 
+#: 一次调用里最多按几次。原来这个数写在给 AI 的指令里（"false 就再跑一次，
+#: 不要运行第三次"），于是每多一次就多一个模型回合。收进脚本后 AI 只跑一行。
+DEFAULT_ATTEMPTS = 2
+
+
+def run(
+    endpoint: str | None = None,
+    timeout: float = ATTEMPT_TIMEOUT_SECONDS,
+    runtime: Path | None = None,
+    *,
+    attempts: int = DEFAULT_ATTEMPTS,
+    report_failure: bool = False,
+    clock=None,
+    sleeper=None,
+    reporter=None,
+) -> dict[str, object]:
+    """按最多 ``attempts`` 次，直到确认；都没成且要求上报时替 AI 报失败。
+
+    ⚠ 这是**一个进程里跑完整套**，而不是让 AI 跑一次、看一眼、再跑一次。
+    9 月 5–12 日的会话记录：voice_start_step 117 次中位 7.2 s，而 AI 为了等它
+    结束又空写了 170 次 stdin、中位 5 s —— 每次等都是一整个模型回合。
+    重试次数、放弃上报都收进来之后，指令只剩一行，AI 只用一个回合。
+
+    ``NO_POINT_RETRYING`` 仍然生效：桌面锁着时第二次必然一样，不按。
+    """
+    attempts = max(1, int(attempts))
+    result: dict[str, object] = {}
+    for index in range(attempts):
+        result = start_once(endpoint, timeout, runtime,
+                            clock=clock, sleeper=sleeper)
+        result["attempt"] = index + 1
+        if result.get("confirmed") is True:
+            return result
+        if result.get("reason") in NO_POINT_RETRYING:
+            break
+    result["attemptsUsed"] = result.get("attempt", attempts)
+    if report_failure:
+        # 放弃必须留下痕迹（voice_start_failed 模块头写着为什么）。
+        # 原来这一步是让 AI 另跑一个脚本 —— 又一个回合。这里直接进程内做掉。
+        report = reporter or _report_failure
+        try:
+            result["failureReport"] = report(
+                attempts=int(result["attemptsUsed"]),
+                detail=str(result.get("reason") or ""),
+                runtime=runtime,
+            )
+        except Exception as exc:  # 上报失败不该把主结果一起吞掉
+            result["failureReport"] = {"ok": False, "error": str(exc)[:200]}
+    return result
+
+
+def _report_failure(*, attempts: int, detail: str, runtime: Path | None):
+    import voice_start_failed
+    return voice_start_failed.report(
+        attempts=attempts, detail=detail, runtime=runtime)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="语音入口的一次尝试（已在通话中则不做任何动作）")
+        description="语音入口：按到确认为止（已在通话中则不做任何动作）")
     parser.add_argument("--endpoint", default=None)
     parser.add_argument("--timeout", type=float,
                         default=ATTEMPT_TIMEOUT_SECONDS)
     parser.add_argument("--runtime", type=Path, default=None)
+    parser.add_argument("--attempts", type=int, default=1,
+                        help="最多按几次（默认 1，保持旧行为）")
+    parser.add_argument("--report-failure", action="store_true",
+                        help="都没成时替调用方写失败回执（等价于跑 "
+                             "voice_start_failed.py）")
     args = parser.parse_args(argv)
-    result = start_once(args.endpoint, args.timeout, args.runtime)
+    result = run(args.endpoint, args.timeout, args.runtime,
+                 attempts=args.attempts, report_failure=args.report_failure)
     print(json.dumps(result, ensure_ascii=False))
     if result.get("confirmed") is True:
         return 0

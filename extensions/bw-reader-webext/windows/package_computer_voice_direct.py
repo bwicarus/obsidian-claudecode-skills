@@ -113,6 +113,9 @@ CODEX_READER_PAGE_CARD_TOOLS = (
     "reader_learning_card_edit",
     "reader_learning_card_delete",
     "reader_review_current_card",
+    # 2026-09-13：reader_card 的自动绑定要 reader_page_text 的 segments，
+    # 而 config 里一直没启用它 —— 已启用的工具在指挥模型调一个看不见的工具。
+    "reader_page_text",
 )
 CODEX_CONFIG_BACKUP_REL = "codex-config.toml.before-reader-page-card-tools"
 

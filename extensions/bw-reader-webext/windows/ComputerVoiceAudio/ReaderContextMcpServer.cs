@@ -111,6 +111,13 @@ internal sealed class ReaderContextMcpServer
     private long _loadSequence;
     private long _loadErrors;
     private long _callSequence;
+    // 耗时账本（2026-09-13）。此前桥对自己的工具调用一行都不记，"慢了"只能
+    // 事后翻 Codex 的 rollout 反推。这里记 {at, seq, name, ms, ok, deliveredMs}。
+    private bool _lastToolResponseWasError;
+    private long? _lastDeliveryMs;
+    internal const string ToolCallLedgerFileName = "mcp-tool-calls.jsonl";
+    private const long ToolCallLedgerMaxBytes = 1024 * 1024;
+    private const int ToolCallLedgerKeepLines = 2000;
     private bool _initialized;
 
     internal ReaderContextMcpServer(
@@ -315,10 +322,34 @@ internal sealed class ReaderContextMcpServer
                             cancellationToken).ConfigureAwait(false);
                         return;
                     }
-                    await HandleToolCallAsync(
-                        requestId,
-                        parameters,
-                        cancellationToken).ConfigureAwait(false);
+                    {
+                        string calledName =
+                            parameters.ValueKind == JsonValueKind.Object
+                            && parameters.TryGetProperty(
+                                "name", out JsonElement calledNameValue)
+                            && calledNameValue.ValueKind == JsonValueKind.String
+                                ? calledNameValue.GetString() ?? "?"
+                                : "?";
+                        _lastToolResponseWasError = false;
+                        _lastDeliveryMs = null;
+                        Stopwatch toolClock = Stopwatch.StartNew();
+                        try
+                        {
+                            await HandleToolCallAsync(
+                                requestId,
+                                parameters,
+                                cancellationToken).ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            toolClock.Stop();
+                            RecordToolCall(
+                                calledName,
+                                toolClock.ElapsedMilliseconds,
+                                !_lastToolResponseWasError,
+                                _lastDeliveryMs);
+                        }
+                    }
                     return;
                 case "resources/list":
                     if (!RequireInitialized())
@@ -4677,6 +4708,7 @@ internal sealed class ReaderContextMcpServer
         }
 
         ReaderRealtimeOutputAck ack;
+        Stopwatch deliveryClock = Stopwatch.StartNew();
         try
         {
             ack = await _sendOutputAsync!(request, cancellationToken)
@@ -4690,6 +4722,11 @@ internal sealed class ReaderContextMcpServer
                 exception.Message,
                 cancellationToken).ConfigureAwait(false);
             return null;
+        }
+        finally
+        {
+            // 桥收下 ≠ App 应用完。这一段才是"用户等了多久"，失败也记。
+            _lastDeliveryMs = deliveryClock.ElapsedMilliseconds;
         }
 
         if (!writeResult)
@@ -8153,6 +8190,13 @@ internal sealed class ReaderContextMcpServer
         JsonNode result,
         CancellationToken cancellationToken)
     {
+        // MCP 允许 result 本身带 isError=true（工具层面的失败）——那也算失败。
+        if (result is JsonObject resultObject
+            && resultObject["isError"] is JsonValue flag
+            && flag.TryGetValue(out bool isError) && isError)
+        {
+            _lastToolResponseWasError = true;
+        }
         await WriteMessageAsync(
             new JsonObject
             {
@@ -8169,6 +8213,7 @@ internal sealed class ReaderContextMcpServer
         string message,
         CancellationToken cancellationToken)
     {
+        _lastToolResponseWasError = true;
         await WriteMessageAsync(
             new JsonObject
             {
@@ -8181,6 +8226,53 @@ internal sealed class ReaderContextMcpServer
                 },
             },
             cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>每次 tools/call 一行：谁、多久、成没成、App 那段多久。</summary>
+    /// <remarks>
+    /// 只追加、失败静默（记账不能拖垮主路径）。超过 1 MB 时只留最后 2000 行——
+    /// 这是给调参用的样本，不是历史档案。
+    /// </remarks>
+    private void RecordToolCall(
+        string name, long ms, bool ok, long? deliveredMs)
+    {
+        try
+        {
+            string directory = Path.GetDirectoryName(_statePath)!;
+            string path = Path.Combine(directory, ToolCallLedgerFileName);
+            JsonObject row = new()
+            {
+                ["at"] = _utcNow().ToString("O"),
+                ["seq"] = _callSequence,
+                ["name"] = name,
+                ["ms"] = ms,
+                ["ok"] = ok,
+            };
+            if (deliveredMs is long delivered)
+            {
+                row["deliveredMs"] = delivered;
+            }
+            File.AppendAllText(
+                path,
+                row.ToJsonString() + "\n",
+                Utf8WithoutBom);
+            FileInfo info = new(path);
+            if (info.Length > ToolCallLedgerMaxBytes)
+            {
+                string[] lines = File.ReadAllLines(path, Utf8WithoutBom);
+                if (lines.Length > ToolCallLedgerKeepLines)
+                {
+                    File.WriteAllLines(
+                        path,
+                        lines[^ToolCallLedgerKeepLines..],
+                        Utf8WithoutBom);
+                }
+            }
+        }
+        catch
+        {
+            // 账本写不进去不能让工具调用本身失败。
+        }
     }
 
     private async Task WriteMessageAsync(

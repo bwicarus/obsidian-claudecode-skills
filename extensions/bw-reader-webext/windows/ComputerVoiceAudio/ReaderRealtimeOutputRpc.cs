@@ -358,10 +358,12 @@ internal sealed class NamedPipeReaderRealtimeOutputRpcClient
     // while the broker is still validly working and reports a false timeout
     // even when the Reader applies the highlight moments later.
     private static readonly TimeSpan ExchangeTimeout = TimeSpan.FromSeconds(24);
+    // 每次快照都要做一次这个探测。2026-09-13 从会话记录量到：快照中位 0.12 s、
+    // p90 1.9 s —— 尾巴全是这里吃满超时。本地命名管道不该有 3 秒的预算。
     private static readonly TimeSpan StatusConnectTimeout =
-        TimeSpan.FromSeconds(1);
+        TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan StatusExchangeTimeout =
-        TimeSpan.FromSeconds(2);
+        TimeSpan.FromSeconds(1);
     private readonly SemaphoreSlim _exchangeGate = new(1, 1);
     private readonly SemaphoreSlim _statusGate = new(1, 1);
 

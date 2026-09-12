@@ -10538,6 +10538,36 @@ internal static class DirectBridgeSelfTest
                 "folded-fields-stay-on-disk-for-restart",
                 checks);
         }
+
+        // ── 耗时账本（2026-09-13）：此前桥对自己的工具调用一行都不记 ──
+        string ledgerPath = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(snapshotPath)!,
+            ReaderContextMcpServer.ToolCallLedgerFileName);
+        string[] ledgerRows = File.Exists(ledgerPath)
+            ? File.ReadAllLines(ledgerPath, Encoding.UTF8)
+                .Where(line => line.Trim().Length > 0).ToArray()
+            : Array.Empty<string>();
+        bool ledgerHasSnapshotRow = false;
+        foreach (string row in ledgerRows)
+        {
+            using JsonDocument parsed = JsonDocument.Parse(row);
+            JsonElement ledgerRow = parsed.RootElement;
+            if (
+                ledgerRow.TryGetProperty("name", out JsonElement rowName)
+                && rowName.GetString() == ReaderContextMcpServer.ToolName
+                && ledgerRow.TryGetProperty("ms", out JsonElement rowMs)
+                && rowMs.ValueKind == JsonValueKind.Number
+                && ledgerRow.TryGetProperty("ok", out JsonElement rowOk)
+                && rowOk.ValueKind == JsonValueKind.True
+            )
+            {
+                ledgerHasSnapshotRow = true;
+            }
+        }
+        Require(
+            ledgerHasSnapshotRow,
+            "mcp-tool-call-ledger-records-name-ms-ok",
+            checks);
     }
 
     private static async Task CheckReaderContextMcpProtocolAsync(

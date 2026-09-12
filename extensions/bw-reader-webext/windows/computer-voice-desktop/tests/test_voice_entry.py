@@ -13,6 +13,7 @@ import re
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 RUNTIME = Path(__file__).resolve().parents[1]
@@ -1511,3 +1512,86 @@ class GiveUpTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunFoldsRetryIntoTheScript(unittest.TestCase):
+    """重试和放弃上报收进脚本，AI 只跑一行（2026-09-13）。
+
+    会话记录：voice_start_step 117 次中位 7.2 s，AI 为等它结束又空写 170 次
+    stdin（中位 5 s）。每次等都是一整个模型回合。
+    """
+
+    def _run(self, replies, **kw):
+        calls = []
+
+        def fake_start_once(endpoint=None, timeout=0, runtime=None,
+                            clock=None, sleeper=None):
+            calls.append(1)
+            return dict(replies[min(len(calls) - 1, len(replies) - 1)])
+
+        reports = []
+
+        def fake_report(*, attempts, detail, runtime):
+            reports.append((attempts, detail))
+            return {"ok": True}
+
+        with unittest.mock.patch.object(STEP, "start_once", fake_start_once):
+            result = STEP.run("http://x", 1.0, None, reporter=fake_report, **kw)
+        return result, len(calls), reports
+
+    def test_confirmed_on_first_try_stops_there(self):
+        result, calls, reports = self._run(
+            [{"confirmed": True, "reason": "started"}], attempts=2,
+            report_failure=True)
+        self.assertTrue(result["confirmed"])
+        self.assertEqual(calls, 1)
+        self.assertEqual(reports, [], "成功了不许上报失败")
+
+    def test_second_attempt_can_rescue(self):
+        result, calls, _ = self._run(
+            [{"confirmed": False, "reason": "not-confirmed"},
+             {"confirmed": True, "reason": "started"}], attempts=2)
+        self.assertTrue(result["confirmed"])
+        self.assertEqual(calls, 2)
+        self.assertEqual(result["attempt"], 2)
+
+    def test_locked_desktop_is_not_retried(self):
+        # no-desktop 时第二次必然一样，还要烧掉整个确认窗口。
+        result, calls, reports = self._run(
+            [{"confirmed": False, "reason": "no-desktop"}], attempts=2,
+            report_failure=True)
+        self.assertEqual(calls, 1)
+        self.assertEqual(reports, [(1, "no-desktop")])
+
+    def test_giving_up_reports_exactly_once(self):
+        result, calls, reports = self._run(
+            [{"confirmed": False, "reason": "not-confirmed"}], attempts=2,
+            report_failure=True)
+        self.assertEqual(calls, 2)
+        self.assertEqual(reports, [(2, "not-confirmed")])
+        self.assertEqual(result["failureReport"], {"ok": True})
+
+    def test_without_report_flag_nothing_is_reported(self):
+        _, _, reports = self._run(
+            [{"confirmed": False, "reason": "not-confirmed"}], attempts=2)
+        self.assertEqual(reports, [])
+
+    def test_reporter_crash_does_not_eat_the_result(self):
+        def boom(**kw):
+            raise RuntimeError("回执盘满了")
+        with unittest.mock.patch.object(
+                STEP, "start_once",
+                lambda *a, **k: {"confirmed": False, "reason": "not-confirmed"}):
+            result = STEP.run("http://x", 1.0, None, attempts=1,
+                              report_failure=True, reporter=boom)
+        self.assertEqual(result["reason"], "not-confirmed")
+        self.assertFalse(result["failureReport"]["ok"])
+
+    def test_cli_default_is_still_one_attempt(self):
+        # 旧调用方（没传 --attempts）行为不变。
+        with unittest.mock.patch.object(
+                STEP, "start_once",
+                lambda *a, **k: {"confirmed": False, "reason": "not-confirmed"}), \
+             unittest.mock.patch("builtins.print"):
+            code = STEP.main(["--endpoint", "http://x"])
+        self.assertEqual(code, 1)

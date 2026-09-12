@@ -401,12 +401,11 @@ VOICE_ENTRY_TEXT = (
     "请先运行这一行（失败不要停，继续下一步）：\n"
     '    python "%%LOCALAPPDATA%%\\BWReader\\codex_push_register.py" --enable\n'
     "\n"
-    "再运行这一行，看它打印的 confirmed 值（自己看，别念出来）：\n"
-    '    python "%%LOCALAPPDATA%%\\BWReader\\voice_start_step.py"\n'
-    "confirmed 为 false 时再运行同一行一次；仍为 false 则运行：\n"
-    '    python "%%LOCALAPPDATA%%\\BWReader\\voice_start_failed.py"'
-    " --attempts 2 --detail <最后一次的 reason>\n"
-    "不要运行第三次。\n"
+    "再运行这一行**一次**，它自己会重试并在放弃时上报，你不用再做别的：\n"
+    '    python "%%LOCALAPPDATA%%\\BWReader\\voice_start_step.py"'
+    " --attempts 2 --report-failure\n"
+    "它最多要跑一分钟：exec_command 的 yield_time_ms 给 120000，"
+    "等它自己结束；**不要**用 write_stdin 反复查看，也不要再运行第二次。\n"
     "同一编号再次出现表示上一次没有生效。"
 )
 

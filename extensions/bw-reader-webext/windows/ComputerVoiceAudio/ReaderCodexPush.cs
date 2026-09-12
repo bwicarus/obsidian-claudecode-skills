@@ -806,11 +806,8 @@ internal static class ReaderCodexPush
                 Environment.SpecialFolder.LocalApplicationData),
             "BWReader",
             "voice_start_step.py");
-        string failed = Path.Combine(
-            Environment.GetFolderPath(
-                Environment.SpecialFolder.LocalApplicationData),
-            "BWReader",
-            "voice_start_failed.py");
+        // voice_start_failed.py 仍然随包分发，但现在由 voice_start_step.py
+        // --report-failure 在进程内调用，不再让 AI 另起一次运行。
         // 指定操作：只说要跑什么、怎么判、跑几次。
         //
         // ⚠ **不叙述用途**（用户 2026-09-09 与 09-10 两次点明）：这是一条运维
@@ -819,13 +816,16 @@ internal static class ReaderCodexPush
         string prompt =
             OperationSilenceLine
             + "指定操作（requestId: " + Trim(requestId) + "）。\n"
-            + "请运行下面这一行，看它打印的 confirmed 值"
-            + "（自己看，别念出来）：\n"
-            + "    python \"" + step + "\"\n"
-            + "confirmed 为 false 时再运行同一行一次；仍为 false 则运行：\n"
-            + "    python \"" + failed
-            + "\" --attempts 2 --detail <最后一次的 reason>\n"
-            + "不要运行第三次。\n"
+            // ⚠ 只给**一行**，而且要说清"等它自己结束"（2026-09-13）。
+            //   会话记录里这条链原来要 3–6 个模型回合：跑一次 → exec 到点先
+            //   回来 → AI 每 5 秒空写 stdin 看结束没（170 次、中位 5 s）→
+            //   false 再跑 → 还不行跑第三个脚本。重试与上报现在都在脚本里。
+            + "请运行下面这一行**一次**，它自己会重试并在放弃时上报，"
+            + "你不用再做别的：\n"
+            + "    python \"" + step + "\" --attempts 2 --report-failure\n"
+            + "它最多要跑一分钟：exec_command 的 yield_time_ms 给 120000，"
+            + "等它自己结束；**不要**用 write_stdin 反复查看，"
+            + "也不要再运行第二次。\n"
             + "同一编号再次出现表示上一次没有生效。";
         try
         {
