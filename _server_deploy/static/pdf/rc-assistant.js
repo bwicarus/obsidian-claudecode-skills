@@ -3586,7 +3586,7 @@
       // ★ 141(轮次容器)回放仍走唯一 renderPart；target 只把整批先画进 staging，成功后一次换入。
       var _rtid = _historyTurnId(m, mode, scope);
       if (!RC.turnCard.renderTurn(
-        _rtid, m.parts, target, { historyReplay: true }
+        _rtid, m.parts, target, { historyReplay: true, meta: { via: m.via || '', threadId: m.thread_id || '', turnId: m.turn_id || '' } }
       )) throw new Error('turn replay failed');
       return;
     }

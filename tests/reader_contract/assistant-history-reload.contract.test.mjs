@@ -420,7 +420,8 @@ test("normal, review and EPUB reloads retain their existing authoritative scopes
   assert.match(ASSISTANT, /'\|scope:' \+ String/);
   assert.doesNotMatch(ASSISTANT, /function _historyTurnId\(message, index/);
   assert.doesNotMatch(ASSISTANT, /'\|record:' \+ String/);
-  assert.match(ASSISTANT, /renderTurn\(\s*_rtid, m\.parts, target, \{ historyReplay: true \}/);
+  assert.match(ASSISTANT, /renderTurn\(\s*_rtid, m\.parts, target, \{ historyReplay: true, meta: \{ via: m\.via/,
+    "2026-09-13:回放带上来源元数据,语音轮次的「保存为工具」靠它送通知");
   assert.doesNotMatch(ASSISTANT, /'h' \+ token \+ '_' \+ index/);
   assert.match(TURNS, /historyReplay: options\.historyReplay === true/);
   assert.match(TURNS, /p\.draft && RC\.flashcard\.presentDraft && !t\.historyReplay/);

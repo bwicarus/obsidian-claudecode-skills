@@ -627,6 +627,14 @@
           + '直连 Google v2(用户 2026-09-02 拍板 A);失败回退 Pi。'
       }
     ),
+    remoteRequired(
+      'assistant.voiceturn.organize',
+      ['/api/assistant/voice-turn-organize'],
+      ['POST'],
+      '侧栏「保存为工具」按在 Windows 语音轮次上：只把整理请求送进 Codex 线程,'
+        + '本地什么都不存;成没成由 Codex 在对话里回一句。用户主动触发,无离线语义。',
+      { transport: { extensionBridge: false, serviceWorker: 'none' } }
+    ),
     networkRead(
       'cardasset.ensure.request',
       ['/pdf/api/card-asset-ensure'],

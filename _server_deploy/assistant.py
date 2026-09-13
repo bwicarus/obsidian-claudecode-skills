@@ -12945,6 +12945,49 @@ def assistant_clip_attach():
     return jsonify({"ok": True})
 
 
+@bp.route("/voice-turn-organize", methods=["POST"])
+def assistant_voice_turn_organize():
+    """侧栏「保存为工具」按在 Windows 语音轮次上（2026-09-13）：不在这里存任何东西，
+    把"整理请求"经通知通道送进那条 Codex 线程，由 Codex 按 organize-into-skill 取轨迹、
+    编 flow.json、校验+干跑、存 skill。用户口头说「把刚才那个存成工具」走的是同一个 skill。
+    body {turn_id, thread_id, name?}。回执只说"已送达/没送到"，不等它做完。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    b = request.get_json(silent=True) or {}
+    turn_id = re.sub(r"[^A-Za-z0-9_.:-]", "", str(b.get("turn_id") or ""))[:64]
+    thread_id = re.sub(r"[^0-9a-f-]", "", str(b.get("thread_id") or ""))[:36]
+    name = re.sub(r"[^\w\u4e00-\u9fff-]", "", str(b.get("name") or ""))[:40]
+    if not turn_id or not thread_id:
+        return jsonify({"ok": False, "error": "缺 turn_id / thread_id"}), 400
+    notifier = Path(os.environ.get("LOCALAPPDATA") or "") / "BWReader" / "codex_thread_notify.py"
+    if not notifier.is_file():
+        return jsonify({"ok": False, "error": "通知脚本不在（%s）" % notifier}), 503
+    text = (
+        "整理请求（用户按了侧栏的「保存为工具」）：turn=%s thread=%s name=%s。\n"
+        "请加载 skill `organize-into-skill` 并照它做：先用 voice_turn_trace.py --turn %s 取这一轮的真实轨迹，"
+        "写 flow.json，用 bw_skill_build.py 校验+生成+干跑后存成 skill。"
+        "默认静默完成，只有拿不准的地方才问；做完只回一句 skill 名和触发词。"
+        % (turn_id, thread_id, name or "（空，由你起）", turn_id)
+    )
+    import subprocess
+    import threading
+    request_id = "organize-" + re.sub(r"[^A-Za-z0-9]", "", turn_id)[-16:]
+
+    def _send():
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(notifier), "--request-id", request_id, "--thread-id", thread_id,
+                 "--text", text, "--turn-timeout", "600"],
+                capture_output=True, text=True, encoding="utf-8", timeout=660,
+            )
+            sys.stderr.write("[voice-turn-organize] %s exit=%s %s\n" % (turn_id, proc.returncode, (proc.stdout or proc.stderr)[-300:]))
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write("[voice-turn-organize] %s failed: %s\n" % (turn_id, exc))
+
+    threading.Thread(target=_send, name="voice-turn-organize", daemon=True).start()
+    return jsonify({"ok": True, "queued": True, "request_id": request_id, "thread_id": thread_id})
+
+
 @bp.route("/clear", methods=["POST"])
 def assistant_clear():
     if not _logged_in():

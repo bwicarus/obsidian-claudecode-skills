@@ -22,24 +22,14 @@ new `codex exec`, Claude CLI, or other nested CLI worker from this Windows-nativ
 5. All Reader tools run inside one `exec` script (`tools.mcp__reader_snapshot__…`): chain the
    steps in one script instead of spending a turn per tool.
 
-## Write your own skill for a recurring compound flow
+## Saving a flow as a skill is the user's call
 
-When the same compound flow comes up again (a research routine, a review routine, a report),
-write it as a skill with the system `skill-creator` and save it under `~/.codex/skills/`.
-Write whatever glue code you need — Python, JS, your own helper scripts — and keep it wherever
-you choose (the skill folder, `%LOCALAPPDATA%\BWReader\skills\…`, anywhere stable); reuse it
-freely. There is exactly one boundary:
-
-- **Anything that must reach the user's screen or data goes through a real channel**: an MCP
-  tool in the current `tools/list`, or a documented bridge endpoint (e.g. `/reader-board/v1`).
-  The device only renders what those channels deliver. A made-up syntax or channel shows
-  nothing there (2026-08-27: `::codex-inline-vis` rendered nothing on the user's screen).
-- The guard sentences in the tool descriptions are about **result semantics**, not about how
-  you write code: a card exists only if a card tool delivered it; a learning card has exactly
-  one edit path; an unknown write result is never retried. Carry them into your skill.
-- The bridge installer lints every skill under `~/.codex/skills` against the real tool surface
-  and prints the tool names it cannot find, so a skill that names a tool which no longer exists
-  is caught at install time, not in the middle of a call.
+Never decide, suggest, or judge whether something is "worth saving". When the user presses
+「保存为工具」 in the sidebar (the notification carries `turn=<id>`) or says 把刚才那个存成工具,
+load `$organize-into-skill` and follow it: real trace → `flow.json` → `bw_skill_build.py`
+(lint + generated `run.js` + dry-run against the trace) → save. Silent by default; ask only
+when a step is genuinely ambiguous. You write `flow.json`, never the runner. To run a saved
+skill later, paste its `run.js` block into one `exec` call verbatim.
 
 ## 多步研究任务（原 `research-task` 指南，2026-09-13 逐字搬入）
 

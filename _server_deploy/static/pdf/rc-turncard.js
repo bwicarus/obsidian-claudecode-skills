@@ -58,6 +58,7 @@
     th.appendChild(el);
     var t = _turns[tid] = { tid: tid, el: el, hd: null, bd: bd, flow: flow,
       parts: [], draft: null, orchTaskId: null,
+      meta: (options.meta && typeof options.meta === 'object') ? options.meta : null,   // 历史来源(via/threadId/turnId):语音轮次的「保存为工具」要靠它送通知
       historyReplay: options.historyReplay === true };   // tid 也用于存量卡稳定补号
     if (!target) { _cur = tid; _scroll(); }
     return t;
@@ -331,7 +332,8 @@
     if (isCli && !t._sel) { t._sel = {}; for (var _i = 0; _i < steps.length; _i++) t._sel[_i] = 1; }
 
     var cliSteps = tools.reduce(function (a, p) { return a + ((p.steps && p.steps.length) || 0); }, 0);
-    var canSave = tools.length >= 2 || (taskId && cliSteps >= 2);
+    var isVoice = !!(t.meta && t.meta.via === 'codex-voice' && t.meta.threadId && t.meta.turnId);   // Windows 语音轮次:保存=让 Codex 整理成 skill
+    var canSave = tools.length >= 2 || (taskId && cliSteps >= 2) || (isVoice && tools.length >= 1);
     if (canSave) {
       var sv = document.createElement('div'); sv.className = 'rc-flow-save';
       var sb = document.createElement('span');
@@ -341,6 +343,17 @@
       if (isCli) { var _hint = document.createElement('div'); _hint.className = 'rc-flow-selhint'; _hint.textContent = '↓ 点工具前的圆点取消选中,只把选中的打包成工具'; sv.appendChild(_hint); }
       sb.addEventListener('click', function (ev) {
         ev.stopPropagation();
+        if (isVoice) {
+          // 2026-09-13 用户拍板:存不存只由用户决定,AI 不判断;名字可以留空让它起。
+          //   这里不存任何东西 —— 把整理请求经通知通道送进那条 Codex 线程,由它按 organize-into-skill
+          //   取真实轨迹、编 flow.json、校验+干跑、存 skill。口头说「存成工具」走同一个 skill。
+          var vnm = prompt('给这个工具起个名字(留空让 AI 起):', '') || '';
+          // @interaction assistant.voiceturn.organize
+          try { RC.reqJson('POST', '/api/assistant/voice-turn-organize', { turn_id: t.meta.turnId, thread_id: t.meta.threadId, name: vnm }).then(function (r) {
+            alert(r && r.ok ? '已交给电脑端整理,做完它会在对话里回一句' : '没送到:' + ((r && r.error) || '?'));
+          }).catch(function () { alert('没送到(网络)'); }); } catch (e) {}
+          return;
+        }
         var nm = prompt('给这个工具起个名字(下次说名字就能直接用):');
         if (!nm) return;
         var body = { name: nm };

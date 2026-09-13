@@ -114,6 +114,32 @@ RUNTIME_SOURCES = {
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "voice_start_failed.py"
     ),
+    # 语音轨迹 + 整理套件(2026-09-13):voice_turn_trace 从 app-server 导一轮的真实轨迹,
+    # skill-kit 把 flow.json 编成 run.js 并用轨迹干跑。trace 依赖两个同步模块,一起走稳定路径。
+    "readerpc-runtime/voice_turn_trace.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "voice_turn_trace.py"
+    ),
+    "readerpc-runtime/voice_history_sidebar_sync.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "voice_history_sidebar_sync.py"
+    ),
+    "readerpc-runtime/voice_conversation_sync.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "voice_conversation_sync.py"
+    ),
+    "readerpc-runtime/skill-kit/bw_skill_build.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "skill_kit" / "bw_skill_build.py"
+    ),
+    "readerpc-runtime/skill-kit/bw_flow_runtime.js": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "skill_kit" / "bw_flow_runtime.js"
+    ),
+    "readerpc-runtime/skill-kit/SKILL.template.md": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "skill_kit" / "SKILL.template.md"
+    ),
     # 不经钩子的送达路径(2026-09-10)。钩子只在 SessionStart/UserPromptSubmit
     # 时登记,而"想开语音"常常正发生在没跟 Codex 说过话的时候 —— 那时没有绑定。
     # 这条走 codex app-server 的 thread/list + turn/start,不需要绑定。
@@ -562,9 +588,19 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             "voice_autoclose.py", "voice_keepalive.py", "voice_ladder.py",
             "voice_start_step.py", "voice_start_failed.py",
             "codex_thread_notify.py", "codex_channel.py",
+            # 语音轨迹导出(organize-into-skill 用),依赖两个同步模块
+            "voice_turn_trace.py", "voice_history_sidebar_sync.py",
+            "voice_conversation_sync.py",
         ):
             (root.parent / stable_name).write_bytes(
                 (release / "readerpc-runtime" / stable_name).read_bytes()
+            )
+        # 整理套件走 %LOCALAPPDATA%\BWReader\skill-kit\(AGENTS/skill 引用这个路径)。
+        kit_dir = root.parent / "skill-kit"
+        kit_dir.mkdir(parents=True, exist_ok=True)
+        for kit_name in ("bw_skill_build.py", "bw_flow_runtime.js", "SKILL.template.md"):
+            (kit_dir / kit_name).write_bytes(
+                (release / "readerpc-runtime" / "skill-kit" / kit_name).read_bytes()
             )
         # 配额闸 CLI 也要稳定路径(AGENTS 引用) —— 它在 scripts/ 子目录打包,
         # 复制口径与上面不同,单列。

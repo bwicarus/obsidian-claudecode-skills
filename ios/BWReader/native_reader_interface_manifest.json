@@ -560,6 +560,21 @@
       "description": "Execute voice tools from supplied native-local context, rewriting a verified Pi book identity when available."
     },
     {
+      "path": "/api/assistant/voice-turn-organize",
+      "match": "exact",
+      "owner": "pi",
+      "methods": [
+        "POST"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": null,
+      "description": "Ask the Windows Codex thread to organize one voice turn into a reusable skill (user-initiated only)."
+    },
+    {
       "path": "/pdf/api/active-reading",
       "match": "exact",
       "owner": "pi",

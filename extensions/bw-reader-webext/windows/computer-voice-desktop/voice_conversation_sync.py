@@ -301,6 +301,12 @@ def project_turns(result: Any, thread_id: str) -> list[dict[str, Any]]:
             if current is None:
                 continue
             tool = _legacy._project_tool(item)
+            if tool is None and item_type == "fileChange":
+                # 旧投影不认改文件；侧栏对照"模型到底做了什么"时不该少这一项（2026-09-13 核对时发现）。
+                changes = item.get("changes") if isinstance(item.get("changes"), list) else []
+                status = _legacy._tool_status(item.get("status"))
+                tool = {"status": status, "tool": "local.file", "label": "修改文件",
+                        "detail": ("完成" if status == "done" else "执行中") + " · %d 个文件" % len(changes)}
             if tool is not None:
                 ms = item.get("durationMs")
                 tool["ms"] = int(ms) if isinstance(ms, (int, float)) and not isinstance(ms, bool) and 0 <= ms <= 86_400_000 else None
