@@ -26,17 +26,20 @@ new `codex exec`, Claude CLI, or other nested CLI worker from this Windows-nativ
 
 When the same compound flow comes up again (a research routine, a review routine, a report),
 write it as a skill with the system `skill-creator` and save it under `~/.codex/skills/`.
-Rules for a self-written skill:
+Write whatever glue code you need — Python, JS, your own helper scripts — and keep it wherever
+you choose (the skill folder, `%LOCALAPPDATA%\BWReader\skills\…`, anywhere stable); reuse it
+freely. There is exactly one boundary:
 
-- It may only call tools that appear in the current `tools/list` and scripts that exist under
-  `%LOCALAPPDATA%\BWReader`. Never invent a syntax, a tool name, or a card channel
-  (2026-08-27: a made-up `::codex-inline-vis` syntax rendered nothing on the user's screen).
-- Keep the guard sentences from the tool descriptions inside it (a card exists only if a card
-  tool delivered it; a learning card has exactly one edit path; an unknown write result is
-  never retried).
+- **Anything that must reach the user's screen or data goes through a real channel**: an MCP
+  tool in the current `tools/list`, or a documented bridge endpoint (e.g. `/reader-board/v1`).
+  The device only renders what those channels deliver. A made-up syntax or channel shows
+  nothing there (2026-08-27: `::codex-inline-vis` rendered nothing on the user's screen).
+- The guard sentences in the tool descriptions are about **result semantics**, not about how
+  you write code: a card exists only if a card tool delivered it; a learning card has exactly
+  one edit path; an unknown write result is never retried. Carry them into your skill.
 - The bridge installer lints every skill under `~/.codex/skills` against the real tool surface
-  and prints the tool names it cannot find. A skill that names a missing tool is broken, not
-  "probably fine".
+  and prints the tool names it cannot find, so a skill that names a tool which no longer exists
+  is caught at install time, not in the middle of a call.
 
 ## 多步研究任务（原 `research-task` 指南，2026-09-13 逐字搬入）
 
