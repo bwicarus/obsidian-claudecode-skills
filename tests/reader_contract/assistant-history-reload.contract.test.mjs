@@ -397,7 +397,12 @@ test("assistant-history arriving during a full reload is serialized and never du
 test("normal, review and EPUB reloads retain their existing authoritative scopes", () => {
   assert.match(ASSISTANT, /return _modeNorm\(mode \|\| _assistantMode\) === 'review'[\s\S]*'\/api\/assistant\/history\?assistant_mode=review'[\s\S]*_NORMAL_HISTURL/);
   assert.match(PDF_ADAPTER, /historyUrl: \(\) => '\/api\/assistant\/history'/);
-  assert.match(EPUB, /historyUrl: function \(\) \{ return '\/pdf\/api\/epub-convo\?file=' \+ encodeURIComponent\(FREL\); \}/);
+  // 2026-09-13 用户拍板：整个软件只有一条助手历史。EPUB 不再覆盖 history/clear/voiceLog，
+  // 侧栏在 EPUB 里也走 /api/assistant/history；本书 epub-convo 路由从 manifest 退役。
+  assert.doesNotMatch(EPUB, /historyUrl: function/);
+  assert.doesNotMatch(EPUB, /clearUrl: function/);
+  assert.doesNotMatch(EPUB, /voiceLog: function/);
+  assert.doesNotMatch(EPUB, /'\/pdf\/api\/epub-convo/, "只允许注释里提到它，不允许再调它");
   assert.match(ASSISTANT, /RC\.assistant\.reloadHistory = function/);
   assert.match(ASSISTANT, /RC\.assistant\.onDrawerTabChanged = function/);
   assert.match(ASSISTANT, /RC\.assistant\.onNativePiSyncFinished = function/);

@@ -68,13 +68,16 @@ from readerpc_services import (
 )
 from voice_history_sidebar_sync import (
     CodexAppServerHistoryClient,
-    CaptureBoundHistorySynchronizer,
     history_worker_lease,
     monitor_capture_history,
 )
+# 2026-09-13：语音历史改走"按证据找线程 → 写 Flask 单历史"。旧的租约同步器
+# （CaptureBoundHistorySynchronizer）信 Codex 的线程指针、按书绑定、激活基线——三条
+# 线程一整天 0 发布，被整体换掉；模块留着只为 app-server 客户端和投影函数。
+from voice_conversation_sync import VoiceConversationSync
 
 
-APP_VERSION = "0.1.188"
+APP_VERSION = "0.1.189"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status
@@ -1353,9 +1356,9 @@ class ReaderPCWindow:
         self.voice_maintenance_notice: str | None = None
         self.last_status_publish = 0.0
         self.history_stop_event = threading.Event()
-        self.history_synchronizer = CaptureBoundHistorySynchronizer(
+        self.history_synchronizer = VoiceConversationSync(
             root=self.bridge_paths.root,
-            structured_history_client=CodexAppServerHistoryClient(),
+            history_client=CodexAppServerHistoryClient(),
         )
         self.history_thread: threading.Thread | None = None
         preferences = load_preferences(self.readerpc_paths.preferences_file)
@@ -2014,6 +2017,19 @@ class ReaderPCWindow:
             )
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _voice_history_status(self) -> dict[str, Any] | None:
+        """语音历史同步的自述（绑到哪、凭什么、写了多少、最后一个错）。
+        2026-09-13 之前这些只在 last_result 里，状态文件一个字都没有 —— 侧栏没历史
+        查了一天才在日志里看到 lease changed。"""
+        synchronizer = getattr(self, "history_synchronizer", None)
+        status = getattr(synchronizer, "status", None)
+        if not callable(status):
+            return None
+        try:
+            return status()
+        except Exception:
+            return None
 
     def _history_status(self) -> ReaderPCHistoryStatus:
         voice = self._voice_status()
@@ -2801,6 +2817,7 @@ class ReaderPCWindow:
                 write_readerpc_status(
                     self.readerpc_paths.status_file,
                     services=[c.status() for c in getattr(self, "server_services", [])],
+                    history=self._voice_history_status(),
                     voice={
                         "online": voice.service_online,
                         "configured": voice.configuration_enabled,

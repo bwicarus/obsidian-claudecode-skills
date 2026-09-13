@@ -1206,7 +1206,42 @@ def _assistant_mode_from_ctx(ctx) -> str:
 
 
 def _convo_dir(mode="normal"):
-    return _REVIEW_CONVO_DIR if _assistant_mode(mode) == "review" else _CONVO_DIR
+    # 2026-09-13 用户拍板：**整个软件只有一条助手历史**——不分书、不分 normal/review、
+    # 不分文字/语音。mode 仍然决定提示词和执行 gate，但持久化只有一个目录。
+    # 旧 review 目录里的记录由 _merge_review_history_once 并进来一次，然后改名封存。
+    _assistant_mode(mode)
+    return _CONVO_DIR
+
+
+def _merge_review_history_once(uid) -> None:
+    """把 review 目录里这位用户的旧记录并进唯一历史（按 ts 排序），原文件改名封存。"""
+    review_path = _REVIEW_CONVO_DIR / f"{uid}.json"
+    if not review_path.exists():
+        return
+    try:
+        review_rows = json.loads(review_path.read_text("utf-8"))
+    except Exception:
+        review_rows = []
+    try:
+        normal_path = _CONVO_DIR / f"{uid}.json"
+        rows = []
+        if normal_path.exists():
+            try:
+                rows = json.loads(normal_path.read_text("utf-8"))
+            except Exception:
+                rows = []
+        for m in review_rows if isinstance(review_rows, list) else []:
+            if isinstance(m, dict):
+                m.setdefault("assistant_mode", "review")
+                rows.append(m)
+        rows.sort(key=lambda m: (m.get("ts") if isinstance(m, dict) and isinstance(m.get("ts"), (int, float)) else 0))
+        _CONVO_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = normal_path.with_name(normal_path.name + ".tmp")
+        tmp.write_text(json.dumps(rows[-200:], ensure_ascii=False), "utf-8")
+        os.replace(tmp, normal_path)
+        review_path.rename(review_path.with_name(f"{uid}.json.merged-{int(time.time())}"))
+    except Exception:
+        pass
 
 
 def _convo_path(uid, mode="normal"):
@@ -1259,6 +1294,7 @@ def _ensure_history_ids(messages) -> bool:
 def _convo_load_for_history(uid, mode="normal"):
     """Load one scope and atomically persist ids before exposing any window."""
     with _convo_lock:
+        _merge_review_history_once(uid)
         messages = _convo_load(uid, mode)
         if not _ensure_history_ids(messages):
             return messages
@@ -1342,11 +1378,8 @@ def _convo_archive(uid, msgs, mode="normal"):
                          if m.get(k) is not None})
         if not keep:
             return
-        archive_dir = (
-            _REVIEW_CONVO_ARCHIVE_DIR
-            if _assistant_mode(mode) == "review"
-            else _CONVO_ARCHIVE_DIR
-        )
+        _assistant_mode(mode)
+        archive_dir = _CONVO_ARCHIVE_DIR   # 单历史（2026-09-13），归档也只有一处
         archive_dir.mkdir(parents=True, exist_ok=True)
         with open(archive_dir / f"{uid}.jsonl", "a", encoding="utf-8") as f:
             for m in keep:
@@ -1407,7 +1440,7 @@ def _convo_append(uid, role, content, meta=None, mode="normal"):
         }
         if meta:   # 记每轮所在位置(书/页/选中句/用过的图)+ 助手回答的调用轨迹 trace + 搜到的视频,让历史回看也能显示上下文卡片 / 感叹号步骤 / 视频卡
             # ⚠ 白名单:没列进来的 meta 字段会被**静默丢掉**。141 的 parts 忘了加就等于没落库。
-            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos", "undo_cards", "via", "clip", "card", "parts", "turn_id"):   # clip=语音录音;card=87 结构化卡;parts/turn_id=141 轮次容器
+            for k in ("page", "pages", "book", "file_rel", "selection", "figures", "trace", "videos", "undo_cards", "via", "clip", "thread_id", "took_ms", "card", "parts", "turn_id"):   # clip=语音录音;card=87 结构化卡;parts/turn_id=141 轮次容器
                 v = meta.get(k)
                 if v:
                     rec[k] = v
@@ -12356,7 +12389,11 @@ def assistant_log_external():
         )
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
-    meta = {"via": b.get("via") if b.get("via") in ("mcp", "voice") else "mcp"}   # ㉛:通话轮次落库标 voice
+    meta = {"via": b.get("via") if b.get("via") in ("mcp", "voice", "codex-voice") else "mcp"}   # ㉛:通话轮次落库标 voice;codex-voice=Windows 语音同步(2026-09-13)
+    if b.get("thread_id"):   # Codex 语音线程:历史按线程可追溯,侧栏不按它分组
+        meta["thread_id"] = re.sub(r"[^A-Za-z0-9_-]", "", str(b["thread_id"]))[:64]
+    if isinstance(b.get("took_ms"), (int, float)) and not isinstance(b.get("took_ms"), bool) and 0 <= b["took_ms"] <= 86_400_000:
+        meta["took_ms"] = int(b["took_ms"])   # 整轮耗时(用户 2026-09-13:流程看不到耗时不利于调试)
     if b.get("file"):
         meta["file_rel"] = b["file"]   # _convo_append 白名单字段名是 file_rel
     if b.get("page"):

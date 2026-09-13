@@ -5634,20 +5634,10 @@
         hlUrl: function () { return '/pdf/api/epub-highlights'; },
         notesUrl: function () { return '/pdf/api/notes'; },
         noteCompositeUrl: function () { return '/pdf/api/note-composite'; },
-        // ③-4b:chat/history/clear → EPUB 后端(epub_assistant.py);后端按原形取 file,故 history/clear 带 ?file=
+        // ③-4b:chat → EPUB 后端(epub_assistant.py);history/clear/voiceLog **不再覆盖**——
+        // 2026-09-13 用户拍板:整个软件只有一条助手历史,EPUB 也用 /api/assistant/history 那条,
+        // 本书 epub-convo 不再写入(旧数据留着不动)。
         chatUrl: function () { return '/pdf/api/epub-assistant'; },
-        historyUrl: function () { return '/pdf/api/epub-convo?file=' + encodeURIComponent(FREL); },
-        clearUrl: function () { return '/pdf/api/epub-convo/clear?file=' + encodeURIComponent(FREL); },
-        // ㉟ 语音通话轮次落库:进本书 epub-convo(与侧栏历史/清空同源同清;复用现成 append 端点,一轮两条)
-        voiceLog: function (q, a, page) {
-          [['user', q], ['assistant', a]].forEach(function (p) {
-            if (!p[1]) return;
-            try {
-              fetch('/pdf/api/epub-convo/append', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
-                body: JSON.stringify({ file: FREL, role: p[0], content: String(p[1]).slice(0, 4000), section: (page || 1) - 1 }) }).catch(function () {});
-            } catch (e) {}
-          });
-        },
         mountPanel: function () { return document.getElementById('ep-side'); },
         mountTabs: function () { return document.getElementById('ep-side-tabs') || document.getElementById('ep-side'); }
       }

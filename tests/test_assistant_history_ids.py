@@ -24,7 +24,9 @@ def _write(path: Path, rows) -> None:
 
 
 class AssistantHistoryIdTest(unittest.TestCase):
-    def test_pdf_legacy_ids_are_persisted_unique_and_mode_isolated(self):
+    def test_pdf_legacy_ids_are_persisted_unique_and_review_merges_into_single_history(self):
+        """2026-09-13 用户拍板：整个软件只有一条助手历史。review 目录里的旧记录第一次加载时
+        并进来（按 ts 排序、标 assistant_mode=review），原文件改名封存；两种模式读到同一份。"""
         with tempfile.TemporaryDirectory(prefix="assistant-history-id-") as td:
             root = Path(td)
             normal_dir = root / "normal"
@@ -40,7 +42,7 @@ class AssistantHistoryIdTest(unittest.TestCase):
             _write(normal_path, normal_rows)
             _write(review_path, review_rows)
 
-            generated = iter(("shared", "normal-new", "normal-third"))
+            generated = iter(("shared", "normal-new", "normal-third", "review-merged"))
             with mock.patch.object(assistant, "_CONVO_DIR", normal_dir), \
                     mock.patch.object(assistant, "_REVIEW_CONVO_DIR", review_dir), \
                     mock.patch.object(
@@ -48,16 +50,16 @@ class AssistantHistoryIdTest(unittest.TestCase):
                     ):
                 migrated = assistant._convo_load_for_history("alice", "normal")
 
+            # review 的那一条并进了唯一历史（都没有 ts → 稳定排序，追加在后），四条各有唯一 id。
+            self.assertEqual(len(migrated), 4)
             self.assertEqual(
-                [row["history_id"] for row in migrated],
-                ["shared", "normal-new", "normal-third"],
+                [row["content"] for row in migrated],
+                ["normal-1", "normal-2", "normal-3", "review"],
             )
+            self.assertEqual(migrated[3]["assistant_mode"], "review")
             self.assertEqual(json.loads(normal_path.read_text("utf-8")), migrated)
-            self.assertNotIn(
-                "history_id",
-                json.loads(review_path.read_text("utf-8"))[0],
-                "normal migration must not write the review namespace",
-            )
+            self.assertFalse(review_path.exists(), "并入后 review 文件改名封存")
+            self.assertTrue(any(p.name.startswith("alice.json.merged-") for p in review_dir.iterdir()))
 
             with mock.patch.object(assistant, "_CONVO_DIR", normal_dir), \
                     mock.patch.object(assistant, "_REVIEW_CONVO_DIR", review_dir), \
@@ -67,7 +69,7 @@ class AssistantHistoryIdTest(unittest.TestCase):
                 review = assistant._convo_load_for_history("alice", "review")
                 stable_again = assistant._convo_load_for_history("alice", "normal")
 
-            self.assertEqual(review[0]["history_id"], "review-new")
+            self.assertEqual(review, migrated, "review 与 normal 读到同一份历史")
             self.assertEqual(stable_again, migrated)
             self.assertEqual(
                 len({row["history_id"] for row in migrated}),

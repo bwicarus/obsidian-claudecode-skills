@@ -495,6 +495,7 @@ def write_readerpc_status(
     context: ReaderContextStatus,
     pc_ocr: "PcOcrStatus",
     services: Sequence["ManagedServiceStatus"] | None = None,
+    history: Mapping[str, Any] | None = None,
 ) -> None:
     """Publish one credential-free local status entry for App/extension tools."""
 
@@ -524,6 +525,8 @@ def write_readerpc_status(
             },
             # 三守护合一(2026-09-03):Flask 与 sidecar 的可达/托管状态;影子模式下 owned 全 False
             "services": [item.to_public() for item in (services or [])],
+            # 语音历史同步(2026-09-13):绑到哪条线程、凭证据还是指针、写了几轮、最后一个错。
+            "voiceHistory": dict(history) if history else None,
         },
     )
 

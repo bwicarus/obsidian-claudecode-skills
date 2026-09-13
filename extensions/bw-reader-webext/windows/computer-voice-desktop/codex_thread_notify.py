@@ -25,6 +25,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
+import re
 import os
 import shutil
 import subprocess
@@ -301,10 +303,43 @@ def recent_threads(home: Path | None = None,
         if thread_id:
             rows.append((when, str(thread_id), str(meta.get("thread_source"))))
     rows.sort(reverse=True)
+    # 2026-09-13（用户拍板）：所有绑定都在"语音真的开了 + 找到语音所在对话"之后。
+    # 同步器按证据找到的线程写在绑定文件里，送指令先送它；找不到才按磁盘时间猜。
+    bound = bound_voice_thread(base.parent)
+    if bound:
+        rows = [(time.time(), bound, "binding")] + [r for r in rows if r[1] != bound]
     if not rows:
         raise NotifyError("找不到可送达的对话（没有 %s 这几类会话记录）"
                           % "/".join(sorted(ALLOWED_SOURCES)))
     return [(tid, src, when) for when, tid, src in rows[:limit]]
+
+
+#: 同步器写的绑定文件（voice_conversation_sync.write_binding）。这里不 import 那个模块：
+#: 本脚本被单独拷到 %LOCALAPPDATA%\BWReader 下独立运行，多一个 import 就多一处会断的依赖。
+BINDING_CONTRACT = "reader-voice-thread-binding/1"
+BINDING_MAX_AGE_SECONDS = 24 * 3600
+
+
+def bound_voice_thread(codex_home: Path) -> str | None:
+    """读绑定文件里的线程；contract 不对、不像 uuid、超过一天 → None。"""
+    path = codex_home / "voice-thread-binding.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(value, dict) or value.get("contract") != BINDING_CONTRACT:
+        return None
+    thread_id = value.get("threadId")
+    if not isinstance(thread_id, str) or not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", thread_id):
+        return None
+    try:
+        bound_at = datetime.fromisoformat(str(value.get("boundAtUtc"))).timestamp()
+    except (TypeError, ValueError):
+        return None
+    if time.time() - bound_at > BINDING_MAX_AGE_SECONDS:
+        return None
+    return thread_id
 
 
 #: `thread/resume` 说"这条正被别人写"时的原话片段。

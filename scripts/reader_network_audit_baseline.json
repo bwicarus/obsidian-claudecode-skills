@@ -6,7 +6,7 @@
     "cache-first-unannotated": 3,
     "dynamic-unannotated": 124,
     "local-immediate-unannotated": 6,
-    "unclassified-literal": 78
+    "unclassified-literal": 77
   },
   "allowances": {
     "cache-first-unannotated|_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js|fetch|fetch('/pdf/api/phrase-mark')|phrase.state.read must prove cached/local read before network": 1,
@@ -136,7 +136,6 @@
     "unclassified-literal|_server_deploy/static/pdf/epub-html.js|RC.reqJson|RC.reqJson('POST', '/pdf/api/epub-img-describe', { sha: m[1], path: decodeURIComponent(m[2]), caption: ctx.caption, context: ctx.context })|POST /pdf/api/epub-img-describe": 1,
     "unclassified-literal|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/api/assistant/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', keepalive: true })|POST /api/assistant/prewarm": 1,
     "unclassified-literal|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/api/assistant/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(off ? { off: 1 } : {}), keepalive: true })|POST /api/assistant/prewarm": 1,
-    "unclassified-literal|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/pdf/api/epub-convo/append', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true, body: JSON.stringify({ file: FREL, role: p[0], content: String(p[1]).slice(0, 4000), section: (page || 1) - 1 }) })|POST /pdf/api/epub-convo/append": 1,
     "unclassified-literal|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/pdf/api/epub-dbg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ msg: '[html] ' + m }), keepalive: true })|POST /pdf/api/epub-dbg": 1,
     "unclassified-literal|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/pdf/api/note-composite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: FREL, id: entry.id }) })|POST /pdf/api/note-composite": 1,
     "unclassified-literal|_server_deploy/static/pdf/epub-html.js|fetch|fetch('/pdf/api/vocab-anki', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ word: lemma }) })|POST /pdf/api/vocab-anki": 1,

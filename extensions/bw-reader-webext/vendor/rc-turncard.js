@@ -325,7 +325,9 @@ if (window.__bwPwaProviderOnly) return;
         var a = ''; try { a = (p.args && Object.keys(p.args).length) ? JSON.stringify(p.args) : ''; } catch (e) {}
         var det = a;
         if (p.result) det = (a ? a + '\n\n' : '') + String(p.result).slice(0, 6000);   // 放宽:感叹号 detail 全量语义并入流程
-        return { label: p.label || p.tool || '工具', detail: det, sec: p.took_s, model: p.model, tool: p.tool || '' };
+        // 耗时:本机路径带 took_s;外部写入(Windows 语音同步)按契约只带 ms —— 两个都认(用户 2026-09-13:看不到耗时不利于调试)
+        var _sec = (p.took_s != null) ? p.took_s : ((p.ms != null && isFinite(p.ms)) ? p.ms / 1000 : undefined);
+        return { label: p.label || p.tool || '工具', detail: det, sec: _sec, model: p.model, tool: p.tool || '' };
       });
     }
     // ★#44 框选保存:CLI 轨迹默认全选;取消选中的工具不打包进新工具。t._sel=选中的 step 下标集合。

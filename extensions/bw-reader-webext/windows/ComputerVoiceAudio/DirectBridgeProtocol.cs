@@ -937,9 +937,57 @@ internal sealed class DirectCodexVoiceControl :
         }
     }
 
+    /// <summary>
+    /// 同步器按**证据**找到的语音线程（2026-09-13）：哪条线程在收转写/委托，
+    /// 就是哪条。App 的指针记的是"最近创建/切到前台的线程"，一次语音会话里在
+    /// chat/chat-2/chat-3 之间跳（实测指针指着刚建的 chat-3，转写全进了老线程）。
+    /// 用户拍板：所有绑定都在"语音真的开了 + 找到语音所在对话"之后 —— 这就是那份绑定。
+    /// 文件由 voice_conversation_sync.write_binding 写；一天没更新就不认。
+    /// </summary>
+    internal static string EvidenceBoundVoiceThread()
+    {
+        try
+        {
+            string path = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".codex",
+                "voice-thread-binding.json");
+            if (!File.Exists(path)) return string.Empty;
+            if (JsonNode.Parse(File.ReadAllText(path)) is not JsonObject root)
+            {
+                return string.Empty;
+            }
+            if ((string?)root["contract"] != "reader-voice-thread-binding/1")
+            {
+                return string.Empty;
+            }
+            string? id = (string?)root["threadId"];
+            if (string.IsNullOrWhiteSpace(id) || !DirectBridgeContract.IsSafeId(id))
+            {
+                return string.Empty;
+            }
+            if (!DateTimeOffset.TryParse(
+                    (string?)root["boundAtUtc"],
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal,
+                    out DateTimeOffset boundAt)
+                || DateTimeOffset.UtcNow - boundAt > TimeSpan.FromHours(24))
+            {
+                return string.Empty;
+            }
+            return id;
+        }
+        catch (Exception)
+        {
+            return string.Empty;
+        }
+    }
+
     internal static string InCallThreadId()
     {
-        // 先问 App 自己（权威且不滞后），拿不到才退回侧栏同步。
+        // 2026-09-13：先看同步器按证据找到的线程；没有才问 App 的指针；再没有才退回侧栏同步的 lastGood。
+        string bound = EvidenceBoundVoiceThread();
+        if (bound.Length > 0) return bound;
         string authoritative = AppMostRecentVoiceThread();
         if (authoritative.Length > 0) return authoritative;
         try
