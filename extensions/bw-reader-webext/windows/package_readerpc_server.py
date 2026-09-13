@@ -136,6 +136,10 @@ RUNTIME_SOURCES = {
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "skill_kit" / "bw_flow_runtime.js"
     ),
+    "readerpc-runtime/codex_restart.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "codex_restart.py"
+    ),
     "readerpc-runtime/skill-kit/SKILL.template.md": (
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "skill_kit" / "SKILL.template.md"
@@ -591,6 +595,8 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             # 语音轨迹导出(organize-into-skill 用),依赖两个同步模块
             "voice_turn_trace.py", "voice_history_sidebar_sync.py",
             "voice_conversation_sync.py",
+            # 重启 Codex 的标准做法（在通话就拒绝、等真热起来）
+            "codex_restart.py",
         ):
             (root.parent / stable_name).write_bytes(
                 (release / "readerpc-runtime" / stable_name).read_bytes()

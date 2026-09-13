@@ -4037,19 +4037,50 @@ internal sealed class DirectBridgeProtocolSession
                 .ToString(System.Globalization.CultureInfo.InvariantCulture);
         IDirectCodexVoiceControl control = _codexVoiceControl;
         // 已经有一个在跑就不再开 —— 见 _voiceEntryInFlight 的说明。
+        // ⚠ 例外（2026-09-13 15:53 实录）：正在跑的那个 30 秒里一条都没送成
+        //   （Codex 刚重启、推送连连超时），新的 START 再被挡就是让用户
+        //   白等它把 90 秒窗口耗完。这种"卡住的任务"直接接管：取消它、
+        //   自己上。判据只看"送成过没有"，不看时钟以外的任何猜测。
         if (Interlocked.Exchange(ref _voiceEntryInFlight, 1) == 1)
         {
+            long startedTicks = Interlocked.Read(ref _voiceEntryRunningStartedTicks);
+            bool stuck =
+                Volatile.Read(ref _voiceEntryRunningSent) == 0
+                && startedTicks != 0
+                && DateTime.UtcNow.Ticks - startedTicks >= VoiceEntryTakeoverAfter.Ticks;
+            if (!stuck)
+            {
+                ReaderCodexPush.NoteVoiceEntryOutcome(
+                    requestId, true,
+                    "已有一个入口任务在跑，这一次不另开（防重连风暴）");
+                return;
+            }
+            try
+            {
+                _voiceEntryCts?.Cancel();
+            }
+            catch (Exception)
+            {
+                // 旧任务可能刚好自己结束了；取消失败不影响接管。
+            }
             ReaderCodexPush.NoteVoiceEntryOutcome(
                 requestId, true,
-                "已有一个入口任务在跑，这一次不另开（防重连风暴）");
-            return;
+                "上一个入口任务 "
+                + ((int)TimeSpan.FromTicks(DateTime.UtcNow.Ticks - startedTicks).TotalSeconds)
+                    .ToString(CultureInfo.InvariantCulture)
+                + " 秒一条都没送成，这一次接管");
         }
+        int myGeneration = Interlocked.Increment(ref _voiceEntryGeneration);
+        Interlocked.Exchange(ref _voiceEntryRunningStartedTicks, DateTime.UtcNow.Ticks);
+        Volatile.Write(ref _voiceEntryRunningSent, 0);
+        CancellationTokenSource entryLifetime = new(
+            VoiceEntryRetryWindow + VoiceEntryRetryInterval);
+        _voiceEntryCts = entryLifetime;
         _ = Task.Run(async () =>
         {
           try
           {
-            using CancellationTokenSource lifetime = new(
-                VoiceEntryRetryWindow + VoiceEntryRetryInterval);
+            using CancellationTokenSource lifetime = entryLifetime;
             DateTime deadline = DateTime.UtcNow + VoiceEntryRetryWindow;
             // 送出去几次、上一次是什么时候 —— 用来决定这一轮该不该再送。
             int sentCount = 0;
@@ -4126,6 +4157,7 @@ internal sealed class DirectBridgeProtocolSession
                     string why =
                         "START " + sessionId
                         + "（" + appKind + "）第 " + (round + 1) + " 轮："
+                        + ReaderCodexPush.ColdCodexNote()
                         + (sentCount == 0
                             ? "还没送成过"
                             : "上一条送出已满 "
@@ -4148,6 +4180,7 @@ internal sealed class DirectBridgeProtocolSession
                     {
                         sentCount++;
                         lastSentAt = DateTime.UtcNow;
+                        Volatile.Write(ref _voiceEntryRunningSent, sentCount);
                     }
                     else if (hadBinding)
                     {
@@ -4236,10 +4269,21 @@ internal sealed class DirectBridgeProtocolSession
           {
               // ⚠ 无论怎么退出都要放闸 —— 漏放一次就是
               // 「从此再也起不了语音」，而那种失效没有任何提示。
-              Interlocked.Exchange(ref _voiceEntryInFlight, 0);
+              // 被接管的旧任务例外：闸已经归新任务持有，它不能替新任务放。
+              if (Volatile.Read(ref _voiceEntryGeneration) == myGeneration)
+              {
+                  Interlocked.Exchange(ref _voiceEntryInFlight, 0);
+              }
           }
         });
     }
+
+    /// <summary>入口任务一条都没送成、跑了这么久之后，新的 START 可以接管它。</summary>
+    private static readonly TimeSpan VoiceEntryTakeoverAfter = TimeSpan.FromSeconds(30);
+    private static int _voiceEntryGeneration;
+    private static long _voiceEntryRunningStartedTicks;
+    private static int _voiceEntryRunningSent;
+    private static CancellationTokenSource? _voiceEntryCts;
 
     /// <summary>连着几次整条入口都没把语音开起来，就重启一次 Codex。</summary>
     /// <remarks>

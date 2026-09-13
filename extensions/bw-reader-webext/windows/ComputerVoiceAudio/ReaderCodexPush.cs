@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.IO.Pipes;
 using System.Text;
+using System.Diagnostics;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -42,6 +44,76 @@ internal static class ReaderCodexPush
     private const int MaxFrameBytes = 16 * 1024 * 1024;
     private const int ConnectTimeoutMs = 4000;
     private const int RequestTimeoutMs = 12000;
+    /// <summary>
+    /// Codex 桌面刚起来时（进程不到 <see cref="ColdCodexWindow"/>），一条推送要等它把
+    /// 十万级的上下文重发一遍、MCP 子进程陆续拉起 —— 12 秒不够。2026-09-13 15:52 实录：
+    /// 重启后 5 轮推送全被 12 秒超时取消，语音入口白等 5 分半，而第 6 轮就成了。
+    /// 冷着就给 30 秒；热了照旧 12 秒，别让热路径也变慢。
+    /// </summary>
+    private const int ColdRequestTimeoutMs = 30000;
+    internal static readonly TimeSpan ColdCodexWindow = TimeSpan.FromMinutes(4);
+
+    /// <summary>Codex 桌面主进程（ChatGPT.exe，OpenAI.Codex 包）起来了多久；没在跑就 null。</summary>
+    internal static TimeSpan? CodexDesktopUptime()
+    {
+        DateTime? earliest = null;
+        try
+        {
+            foreach (Process process in Process.GetProcessesByName("ChatGPT"))
+            {
+                try
+                {
+                    string? path = process.MainModule?.FileName;
+                    if (path is null
+                        || !path.Contains("OpenAI.Codex", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    DateTime started = process.StartTime.ToUniversalTime();
+                    if (earliest is null || started < earliest)
+                    {
+                        earliest = started;
+                    }
+                }
+                catch (Exception)
+                {
+                    // 拿不到路径/启动时间（权限、进程刚退）就跳过这一个。
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+        return earliest is null ? null : DateTime.UtcNow - earliest.Value;
+    }
+
+    /// <summary>冷启动窗口内返回一句说明（进账本），否则空串。</summary>
+    internal static string ColdCodexNote()
+    {
+        TimeSpan? uptime = CodexDesktopUptime();
+        if (uptime is { } up && up < ColdCodexWindow)
+        {
+            return "（Codex 刚起 "
+                + ((int)up.TotalSeconds).ToString(CultureInfo.InvariantCulture)
+                + " 秒，推送超时放宽到 "
+                + (ColdRequestTimeoutMs / 1000).ToString(CultureInfo.InvariantCulture)
+                + " 秒）";
+        }
+        return string.Empty;
+    }
+
+    private static int CurrentRequestTimeoutMs()
+    {
+        TimeSpan? uptime = CodexDesktopUptime();
+        return uptime is { } up && up < ColdCodexWindow
+            ? ColdRequestTimeoutMs
+            : RequestTimeoutMs;
+    }
     /// 这条通道要传的工具名。找不到就放弃 —— 不猜别的名字。
     private const string ToolName = "send_message_to_thread";
 
@@ -1273,7 +1345,7 @@ internal static class ReaderCodexPush
         body.CopyTo(frame, 4);
         using CancellationTokenSource deadline = CancellationTokenSource
             .CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(RequestTimeoutMs);
+        deadline.CancelAfter(CurrentRequestTimeoutMs());
         await pipe.WriteAsync(frame, deadline.Token).ConfigureAwait(false);
         await pipe.FlushAsync(deadline.Token).ConfigureAwait(false);
 
