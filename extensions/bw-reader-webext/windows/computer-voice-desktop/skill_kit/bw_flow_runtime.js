@@ -58,6 +58,14 @@ function resolve(arg, outputs) {
   return arg;
 }
 
+// 进度上报：桥的 reader_flow_progress（在就用，不在就静默）。它只画侧栏的点线，不动页面，
+// 也不回模型；失败一律吞掉——进度是锦上添花，不能让流程停下。
+const _progressTool = tools["mcp__" + (FLOW.server || "reader_snapshot") + "__reader_flow_progress"];
+async function progress(i, n, tool, status) {
+  if (typeof _progressTool !== "function") return;
+  try { await _progressTool({ skill: FLOW.name, step: i, total: n, tool: String(tool || ""), status }); } catch (_) {}
+}
+
 const saved = load(STORE_KEY) || { step: 0, outputs: {} };
 const outputs = saved.outputs || {};
 const aiResult = load(STORE_KEY + ":ai");
@@ -72,18 +80,22 @@ for (; i < n; i++) {
   if (step.needs_ai) {
     if (outputs.__ai && step.id in outputs.__ai) {
       outputs[step.id] = { value: outputs.__ai[step.id], raw: outputs.__ai[step.id] };
+      await progress(i + 1, n, "ai:" + step.id, "done");
       text("[bw-flow] " + FLOW.name + " " + (i + 1) + "/" + n + " ai:" + step.id + " ok");
       continue;
     }
     store(STORE_KEY, { step: i, outputs });
+    await progress(i + 1, n, "ai:" + step.id, "running");
     const input = step.input ? resolve(step.input, outputs) : null;
     text("[bw-flow] " + FLOW.name + " " + (i + 1) + "/" + n + " ai:" + step.id + " handoff");
     text(JSON.stringify({ bwFlowHandoff: { skill: FLOW.name, step: step.id, prompt: step.prompt || "", input,
       resume: "store(" + JSON.stringify(STORE_KEY + ":ai") + ", {" + JSON.stringify(step.id) + ": <你的结果>}) 然后原样重跑 run.js" } }));
     exit();
   }
+  await progress(i + 1, n, step.tool, "running");
   const fn = tools["mcp__" + (step.server || FLOW.server || "reader_snapshot") + "__" + step.tool];
   if (typeof fn !== "function") {
+    await progress(i + 1, n, step.tool, "error");
     text("[bw-flow] " + FLOW.name + " " + (i + 1) + "/" + n + " " + step.tool + " fail: tool missing");
     store(STORE_KEY, undefined);
     exit();
@@ -99,6 +111,7 @@ for (; i < n; i++) {
   const value = textOf(raw);
   outputs[step.id] = { value, raw };
   const failed = raw && raw.isError === true || (value && typeof value === "object" && value.ok === false);
+  await progress(i + 1, n, step.tool, failed ? "error" : "done");
   text("[bw-flow] " + FLOW.name + " " + (i + 1) + "/" + n + " " + step.tool + (failed ? " fail" : " ok"));
   if (failed) {
     text(JSON.stringify({ bwFlowFailed: { skill: FLOW.name, step: step.id, result: value } }).slice(0, 4000));

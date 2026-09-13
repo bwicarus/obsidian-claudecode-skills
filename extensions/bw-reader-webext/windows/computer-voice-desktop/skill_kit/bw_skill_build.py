@@ -330,7 +330,7 @@ def assess_dryrun(flow: dict[str, Any], out: dict[str, Any]) -> list[str]:
     if out.get("exitCode") not in (0, None):
         problems.append("run.js 抛了异常: " + "; ".join(l for l in out.get("log", []) if l.startswith("[harness]")))
     expected = [s["tool"] for s in flow["steps"] if not s.get("needs_ai")]
-    called = [c["tool"] for c in out.get("calls", [])]
+    called = [c["tool"] for c in out.get("calls", []) if c["tool"] != "reader_flow_progress"]
     first_ai = next((i for i, s in enumerate(flow["steps"]) if s.get("needs_ai")), None)
     if first_ai is None:
         if called != expected:
@@ -407,7 +407,8 @@ def build(skill_dir: Path, *, trace: Path | None, refresh_tools: bool, do_dryrun
                 raise BuildError("trace 不是合法 JSON: %s" % exc) from exc
         out = dryrun(run_js, trace_steps)
         problems = assess_dryrun(flow, out)
-        result["dryrun"] = {"log": out.get("log", [])[-12:], "calls": [c["tool"] for c in out.get("calls", [])]}
+        result["dryrun"] = {"log": out.get("log", [])[-12:],
+                            "calls": [c["tool"] for c in out.get("calls", []) if c["tool"] != "reader_flow_progress"]}
         if problems:
             return {**result, "ok": False, "stage": "dryrun", "errors": problems}
         result["stage"] = "dryrun-passed"

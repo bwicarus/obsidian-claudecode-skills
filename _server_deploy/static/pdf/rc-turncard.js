@@ -636,8 +636,69 @@
     })();
   }
 
+  // ── 进度点线（2026-09-13）：一串圆点用线连起来，颜色=状态。
+  //   已知 total（skill 运行器）= 固定 total 个点，按 step 上色；未知（临场调用）= running 加点。
+  //   只是显示，不落库：刷新后流程面板里有完整列表，点线不需要回放。
+  function _progressCss() {
+    if (document.getElementById('rc-flow-dots-css')) return;
+    var s = document.createElement('style'); s.id = 'rc-flow-dots-css';
+    s.textContent = '.rc-flow-dots{display:inline-flex;align-items:center;gap:0;margin:2px 8px 0 0;vertical-align:middle}' +
+      '.rc-flow-dots i{width:10px;height:10px;border-radius:50%;background:#3a4256;border:1.5px solid #4c5670;box-sizing:border-box;flex:none}' +
+      '.rc-flow-dots i.run{background:#3b6fd4;border-color:#6fa1ff;animation:rcFlowPulse 1s ease-in-out infinite}' +
+      '.rc-flow-dots i.done{background:#7ee787;border-color:#7ee787}' +
+      '.rc-flow-dots i.err{background:#f85149;border-color:#f85149}' +
+      '.rc-flow-dots b{width:14px;height:2px;background:#4c5670;flex:none}' +
+      '.rc-flow-dots b.done{background:#7ee787}' +
+      '.rc-flow-dots em{font-style:normal;font-size:11px;color:#9aa4b8;margin-left:6px;white-space:nowrap}' +
+      '@keyframes rcFlowPulse{0%,100%{opacity:1}50%{opacity:.45}}';
+    (document.head || document.documentElement).appendChild(s);
+  }
+  function progress(tid, evt) {
+    var t = _turns[tid]; if (!t || !evt) return null;
+    _progressCss();
+    var pr = t.prog || (t.prog = { total: null, states: [], skill: '', label: '' });
+    if (evt.skill) pr.skill = evt.skill;
+    if (evt.label) pr.label = evt.label;
+    if (evt.total) {   // skill 运行器：定长
+      if (pr.total !== evt.total) { pr.total = evt.total; pr.states = new Array(evt.total); }
+      var i = Math.max(0, Math.min(evt.total, evt.step || 1) - 1);
+      pr.states[i] = evt.status === 'done' ? 'done' : (evt.status === 'error' ? 'err' : 'run');
+      for (var k = 0; k < i; k++) if (!pr.states[k]) pr.states[k] = 'done';   // 报到第 i 步 = 前面都过了
+    } else if (evt.status === 'running') {
+      pr.states.push('run');
+    } else if (pr.states.length) {
+      var last = pr.states.length - 1;
+      pr.states[last] = evt.status === 'error' ? 'err' : 'done';
+    } else {
+      pr.states.push(evt.status === 'error' ? 'err' : 'done');
+    }
+    _paintProgress(t);
+    return pr;
+  }
+  function progressHtml(tid) {
+    var t = _turns[tid]; if (!t || !t.prog || !t.prog.states.length) return '';
+    var pr = t.prog, n = pr.total || pr.states.length, out = '<span class="rc-flow-dots">';
+    for (var i = 0; i < n; i++) {
+      var st = pr.states[i] || '';
+      if (i) out += '<b class="' + (st ? 'done' : '') + '"></b>';
+      out += '<i class="' + st + '"></i>';
+    }
+    var done = 0; for (var j = 0; j < pr.states.length; j++) if (pr.states[j] === 'done') done++;
+    out += '<em>' + (pr.total ? (done + '/' + pr.total) : String(pr.states.length)) + (pr.label ? ' · ' + pr.label.replace(/[<>&]/g, '') : '') + '</em></span>';
+    return out;
+  }
+  function _paintProgress(t) {
+    try {
+      _ensureHead(t, t.prog && t.prog.skill ? t.prog.skill : undefined);
+      var host = t.hd; if (!host) return;
+      var el = host.querySelector(':scope > .rc-flow-dots-host');
+      if (!el) { el = document.createElement('span'); el.className = 'rc-flow-dots-host'; host.insertBefore(el, host.querySelector('button')); }
+      el.innerHTML = progressHtml(t.tid);
+    } catch (e) {}
+  }
+
   RC.turnCard = {
-    open: open, addPart: addPart, draftText: draftText, freezeDraft: freezeDraft, busy: busy, idle: idle,
+    open: open, addPart: addPart, progress: progress, progressHtml: progressHtml, draftText: draftText, freezeDraft: freezeDraft, busy: busy, idle: idle,
     renderTurn: renderTurn, partsOf: partsOf, reset: reset, prune: prune, setTaskId: setTaskId, setOrchTaskId: setOrchTaskId, title: title, status: status, cliPart: cliPart,
     current: function () { return _cur; },
     trackCli: trackCli,

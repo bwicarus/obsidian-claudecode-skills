@@ -1373,9 +1373,30 @@
   }
   function _chipTrackTask(c, tid, onFinal) { RC.toolChip.track(c, tid, onFinal); }   // 轮询后台任务;onFinal 让调用方拿最终结果(卡片预览)
 
+  // 流程进度点线（2026-09-13 用户设计）：skill 运行器每步报 {skill, step, total, status}，
+  //   轮次卡头画 total 个点、按状态上色；侧栏收着时同一串点画在字幕浮层的状态行里。
+  //   不是 skill 的临场调用也画：total 未知就"越来越长"（见 onToolStatus 里的挂钩）。
+  function onFlowProgress(p) {
+    p = p || {};
+    try {
+      if (!(window.RC && RC.turnCard && RC.turnCard.progress && window.__asstVoiceTid)) return;
+      var tid = window.__asstVoiceTid();
+      RC.turnCard.progress(tid, { skill: p.skill, step: p.step, total: p.total, status: p.status, label: p.tool || '' });
+      var html = RC.turnCard.progressHtml(tid);
+      if (!html) return;
+      var finished = p.status !== 'running' && p.step >= p.total;
+      capStatus({ html: html, cls: p.status === 'error' ? 'err' : (finished ? 'ok' : 'run'), hold: (finished || p.status === 'error') ? 2500 : 0 });
+    } catch (e) {}
+  }
   function onToolStatus(p) {
     p = p || {};
     try { if (p.status === 'running') _chipStart(p); else if (p.status !== 'aborted') _chipEnd(p); } catch (e) {}
+    // 临场调用的进度点：total 未知，running 加一个点、done/error 给最后一个点上色。
+    try {
+      if (window.RC && RC.turnCard && RC.turnCard.progress && window.__asstVoiceTid && p.status !== 'aborted') {
+        RC.turnCard.progress(window.__asstVoiceTid(), { status: p.status, label: p.label || p.tool || '' });
+      }
+    } catch (e) {}
     // chip 系统在 = 工具状态由 chip 的长条负责(用户设计:这套是"进行中"指示的高级替代)
     //   → 字幕框只留说话内容,不再挤工具状态行(超出的那部分内容归到标记里去)。
     var _hasChip = !!(window.RC && RC.toolChip);
@@ -1863,6 +1884,9 @@
           label: p.label,
           result_brief: p.detail || ''
         });
+        work = true;
+      } else if (delivery.kind === 'flow-progress') {
+        onFlowProgress(p);
         work = true;
       } else if (delivery.kind === 'card') {
         // 带 bind 的卡：回执必须说清**钉上了没有**。

@@ -12173,9 +12173,10 @@ internal static class DirectBridgeSelfTest
                         "Windows Codex 语音主路由",
                         StringComparison.Ordinal)
                 // 这个 server 只注入了 sendOutput，没注入查询客户端：因此
-                // 只该看到两个无条件工具和 14 个 output 工具。查询工具一个
-                // 都不该出现 —— 列出一个调不动的工具，比不列更坏。
-                && tools.GetArrayLength() == 17
+                // 只该看到两个无条件工具和 15 个 output 工具（2026-09-13 +
+                // reader_flow_progress）。查询工具一个都不该出现 —— 列出一个
+                // 调不动的工具，比不列更坏。
+                && tools.GetArrayLength() == 18
                 && tools.EnumerateArray().Any(tool =>
                     tool.GetProperty("name").GetString()
                         == ReaderContextMcpServer.WebHighlightToolName)

@@ -1205,6 +1205,24 @@ if (window.__bwPwaProviderOnly) return;
         label: safeText(p.label, "Reader 工具 label", 320, false),
         detail: p.detail === null ? null : safeText(p.detail, "Reader 工具 detail", 6000, true),
       };
+    } else if (kind === "flow-progress") {
+      // skill 运行器的进度（2026-09-13）：只画点线，不动页面。第四份白名单，与 C# 校验同形。
+      exactObject(p, ["skill", "step", "total", "tool", "status"], [], "Reader 流程进度");
+      var flowStatus = safeText(p.status, "Reader 流程 status", 16, false);
+      if (["running", "done", "error"].indexOf(flowStatus) < 0) {
+        throw directError("Reader 流程进度状态无效", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+      }
+      var flowStep = p.step, flowTotal = p.total;
+      if (!Number.isInteger(flowStep) || !Number.isInteger(flowTotal) || flowStep < 1 || flowTotal < 1 || flowStep > 999 || flowTotal > 999) {
+        throw directError("Reader 流程进度步数无效", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+      }
+      payload = {
+        skill: safeText(p.skill, "Reader 流程 skill", 64, false),
+        step: flowStep,
+        total: flowTotal,
+        tool: p.tool === null ? "" : safeText(p.tool, "Reader 流程 tool", 160, true),
+        status: flowStatus,
+      };
     } else if (kind === "card") {
       exactObject(p, ["card"], [], "Reader 卡片输出");
       var rawCard = p.card;

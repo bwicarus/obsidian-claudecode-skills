@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Encodings.Web;
+using System.Globalization;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -20,6 +22,8 @@ internal sealed class ReaderContextMcpServer
     internal const string AnkiDraftToolName = "reader_anki_draft";
     internal const string CardToolName = "reader_card";
     internal const string CommandToolName = "reader_command";
+    // 2026-09-13：生成的 skill 运行器每步报进度用（bw_flow_runtime.js）；模型不该手调。
+    internal const string FlowProgressToolName = "reader_flow_progress";
     internal const string UndoLastToolName = "reader_undo_last";
     internal const string WordCardsToolName = "reader_word_cards";
     internal const string NoteCreateToolName = "reader_note_create";
@@ -97,6 +101,7 @@ internal sealed class ReaderContextMcpServer
         ReaderRealtimeOutputRequest,
         CancellationToken,
         Task<ReaderRealtimeOutputAck>>? _sendOutputAsync;
+    private readonly bool _emitToolStatus;
     private readonly Func<
         ReaderQueryRequest,
         CancellationToken,
@@ -147,8 +152,13 @@ internal sealed class ReaderContextMcpServer
         Func<
             ReaderQueryRequest,
             CancellationToken,
-            Task<ReaderQueryResponse>>? queryReaderAsync = null)
+            Task<ReaderQueryResponse>>? queryReaderAsync = null,
+        bool emitToolStatus = false)
     {
+        // 2026-09-13（用户：工具卡要在调用开始就出现）：每个 tools/call 开始/结束各推一条
+        // tool-status 到在线 Reader。默认关：自检用 sent[] 的下标钉了几十处顺序，
+        // 只有生产入口（Program.cs --reader-context-mcp）打开。
+        _emitToolStatus = emitToolStatus;
         if (!Path.IsPathFullyQualified(statePath))
         {
             throw new ArgumentException(
@@ -1654,6 +1664,56 @@ internal sealed class ReaderContextMcpServer
                     ["readOnlyHint"] = false,
                     ["destructiveHint"] = false,
                     ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = FlowProgressToolName,
+                ["description"] =
+                    "Internal: called by generated skill runners (bw_flow_runtime.js) "
+                    + "before/after each step so the Reader sidebar can draw progress "
+                    + "dots. Never call it by hand; it changes nothing on the page.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["required"] = new JsonArray("skill", "step", "total", "status"),
+                    ["properties"] = new JsonObject
+                    {
+                        ["skill"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["pattern"] = "^[a-z0-9][a-z0-9-]{1,63}$",
+                            ["description"] = "flow.json 里的 name",
+                        },
+                        ["step"] = new JsonObject
+                        {
+                            ["type"] = "integer", ["minimum"] = 1, ["maximum"] = 999,
+                            ["description"] = "当前是第几步（从 1 数）",
+                        },
+                        ["total"] = new JsonObject
+                        {
+                            ["type"] = "integer", ["minimum"] = 1, ["maximum"] = 999,
+                            ["description"] = "总步数",
+                        },
+                        ["tool"] = new JsonObject
+                        {
+                            ["type"] = "string", ["maxLength"] = 160,
+                            ["description"] = "这一步调的工具名，或 ai:<stepId>",
+                        },
+                        ["status"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["enum"] = new JsonArray("running", "done", "error"),
+                        },
+                    },
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
                     ["openWorldHint"] = false,
                 },
             });
@@ -3269,7 +3329,217 @@ internal sealed class ReaderContextMcpServer
         ["openWorldHint"] = false,
     };
 
+    /// <summary>
+    /// 工具卡"开始就出现"（用户 2026-09-13）：每个 tools/call 先推 running、做完推 done/error，
+    /// 走的是与卡片相同的 Reader 输出管道，所以只有在线 Reader 看得到；推不出去就算了，
+    /// **绝不影响工具本身的结果**（所有失败都吞在 TryEmitToolStatusAsync 里）。
+    /// 能力指南（纯读文档）和进度工具自己不宣告。
+    /// </summary>
     private async Task HandleToolCallAsync(
+        JsonNode id,
+        JsonElement parameters,
+        CancellationToken cancellationToken)
+    {
+        string? announced = null;
+        if (
+            _emitToolStatus
+            && _sendOutputAsync is not null
+            && parameters.ValueKind == JsonValueKind.Object
+            && parameters.TryGetProperty("name", out JsonElement announceName)
+            && announceName.ValueKind == JsonValueKind.String
+        )
+        {
+            string candidate = announceName.GetString()!;
+            if (candidate is not (CapabilityGuideToolName or FlowProgressToolName))
+            {
+                announced = candidate;
+            }
+        }
+        if (announced is null)
+        {
+            await HandleToolCallCoreAsync(id, parameters, cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+        Stopwatch watch = Stopwatch.StartNew();
+        await TryEmitToolStatusAsync(announced, "running", null, cancellationToken)
+            .ConfigureAwait(false);
+        _lastToolResponseWasError = false;
+        try
+        {
+            await HandleToolCallCoreAsync(id, parameters, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            await TryEmitToolStatusAsync(
+                announced,
+                _lastToolResponseWasError ? "error" : "done",
+                watch.ElapsedMilliseconds,
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    internal static string ToolStatusLabel(string tool) => tool switch
+    {
+        ToolName => "读取页面",
+        VisualToolName => "看页面图",
+        CameraToolName => "拍一张",
+        BrowserControlToolName => "操作阅读页面",
+        HighlightRangeToolName => "高亮",
+        WebHighlightToolName => "高亮网页文字",
+        WebNoteToolName => "创建网页便签",
+        MarkVocabToolName => "加生词本",
+        MakeNoteToolName => "整理笔记",
+        NoteCreateToolName => "新建便签",
+        NoteEditToolName => "编辑便签",
+        PageCardEditToolName => "修改卡片",
+        PageCardDeleteToolName => "删除卡片",
+        LearningCardEditToolName => "修改学习卡",
+        LearningCardDeleteToolName => "删除学习卡",
+        PaperStartToolName => "出练习纸",
+        UndoLastToolName => "撤销",
+        AnkiDraftToolName => "制卡",
+        CardToolName => "显示 Reader 卡片",
+        CommandToolName => "执行 Reader 命令",
+        WordCardsToolName => "整理词卡",
+        PageCardsToolName => "查看页面卡片",
+        PageCardReadToolName => "读取卡片内容",
+        LearningCardsToolName => "查学习卡",
+        LearningCardReadToolName => "读学习卡",
+        ReviewCurrentCardToolName => "读当前复习卡",
+        ReviewAnswerToolName => "复习评分",
+        NotesToolName => "看便签",
+        TocToolName => "查目录",
+        LookupToolName => "查词典",
+        PageTextToolName => "读取页面文字",
+        SearchToolName => "搜索全书",
+        HighlightsToolName => "看高亮",
+        KjPageSubmitToolName => "提交页级分析",
+        _ => tool,
+    };
+
+    private async Task TryEmitToolStatusAsync(
+        string tool,
+        string status,
+        long? elapsedMs,
+        CancellationToken cancellationToken)
+    {
+        if (_sendOutputAsync is null)
+        {
+            return;
+        }
+        try
+        {
+            await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
+            JsonObject current = BuildToolPayload();
+            string detail = status switch
+            {
+                "running" => "执行中",
+                "error" => "执行失败",
+                _ => "完成",
+            };
+            if (elapsedMs is long ms)
+            {
+                detail += " · " + ms.ToString(CultureInfo.InvariantCulture) + " ms";
+            }
+            JsonObject payload = new()
+            {
+                ["status"] = status,
+                ["tool"] = tool,
+                ["label"] = ToolStatusLabel(tool),
+                ["detail"] = detail,
+            };
+            ReaderRealtimeOutputRequest? request = BuildRealtimeOutputRequest(
+                current,
+                "tool-status",
+                payload);
+            if (request is null)
+            {
+                return;
+            }
+            await _sendOutputAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // 进度是锦上添花：Reader 不在线、快照没来源、管道断了，都不能影响工具本身。
+        }
+    }
+
+    private async Task HandleFlowProgressToolCallAsync(
+        JsonNode id,
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        if (
+            arguments.ValueKind != JsonValueKind.Object
+            || !arguments.TryGetProperty("skill", out JsonElement skill)
+            || skill.ValueKind != JsonValueKind.String
+            || !Regex.IsMatch(skill.GetString()!, "^[a-z0-9][a-z0-9-]{1,63}$")
+            || !arguments.TryGetProperty("step", out JsonElement step)
+            || !step.TryGetInt32(out int stepValue) || stepValue < 1 || stepValue > 999
+            || !arguments.TryGetProperty("total", out JsonElement total)
+            || !total.TryGetInt32(out int totalValue) || totalValue < 1 || totalValue > 999
+            || !arguments.TryGetProperty("status", out JsonElement status)
+            || status.ValueKind != JsonValueKind.String
+            || status.GetString() is not ("running" or "done" or "error")
+        )
+        {
+            await WriteErrorAsync(
+                id,
+                -32602,
+                "reader_flow_progress expects {skill, step, total, status, tool?}",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        string toolLabel = arguments.TryGetProperty("tool", out JsonElement toolValue)
+            && toolValue.ValueKind == JsonValueKind.String
+            ? toolValue.GetString()! : "";
+        if (toolLabel.Length > 160)
+        {
+            toolLabel = toolLabel[..160];
+        }
+        bool delivered = false;
+        try
+        {
+            await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
+            JsonObject current = BuildToolPayload();
+            ReaderRealtimeOutputRequest? request = BuildRealtimeOutputRequest(
+                current,
+                "flow-progress",
+                new JsonObject
+                {
+                    ["skill"] = skill.GetString(),
+                    ["step"] = stepValue,
+                    ["total"] = totalValue,
+                    ["tool"] = toolLabel,
+                    ["status"] = status.GetString(),
+                });
+            if (request is not null && _sendOutputAsync is not null)
+            {
+                await _sendOutputAsync(request, cancellationToken).ConfigureAwait(false);
+                delivered = true;
+            }
+        }
+        catch (Exception)
+        {
+            delivered = false;
+        }
+        // 进度没送到不算工具失败：运行器不该因为 Reader 不在线而停下。
+        await WriteResultAsync(
+            id,
+            new JsonObject
+            {
+                ["content"] = new JsonArray(new JsonObject
+                {
+                    ["type"] = "text",
+                    ["text"] = delivered ? "{\"ok\":true}" : "{\"ok\":true,\"delivered\":false}",
+                }),
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleToolCallCoreAsync(
         JsonNode id,
         JsonElement parameters,
         CancellationToken cancellationToken)
@@ -4077,6 +4347,17 @@ internal sealed class ReaderContextMcpServer
         )
         {
             await HandleReaderCardToolCallAsync(
+                id,
+                arguments,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == FlowProgressToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            await HandleFlowProgressToolCallAsync(
                 id,
                 arguments,
                 cancellationToken).ConfigureAwait(false);

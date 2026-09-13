@@ -174,7 +174,8 @@ internal static class Program
                     controlBrowserAsync: browserControlClient.RequestAsync,
                     sendOutputAsync: outputClient.SendAsync,
                     probeOutputSourceAsync: outputClient.ProbeSourceAsync,
-                    queryReaderAsync: queryClient.RequestAsync);
+                    queryReaderAsync: queryClient.RequestAsync,
+                    emitToolStatus: true);
                 return await server.RunAsync(CancellationToken.None)
                     .ConfigureAwait(false);
             }

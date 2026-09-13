@@ -62,7 +62,8 @@ internal static class ReaderRealtimeOutputProtocol
         or "highlight-text"
         or "highlight-range"
         or "anki-draft"
-        or "client-action";
+        or "client-action"
+        or "flow-progress";
 
     // Only mutations with a stable replay identity and a document-independent
     // receiver may enter the durable outbox. A bound result card uses
@@ -308,6 +309,23 @@ internal static class ReaderRealtimeOutputProtocol
             case "client-action":
                 Exact(root, "fn", "args");
                 ValidateClientAction(root);
+                break;
+            case "flow-progress":
+                // skill 运行器的进度（2026-09-13）：只画点线，不动页面。
+                Exact(root, "skill", "step", "total", "tool", "status");
+                Text(root, "skill", 64);
+                NullableText(root, "tool", 160);
+                string flowStatus = Text(root, "status", 16);
+                if (flowStatus is not ("running" or "done" or "error"))
+                {
+                    throw Invalid("Reader 流程进度状态无效");
+                }
+                if (!root.GetProperty("step").TryGetInt32(out int flowStep)
+                    || !root.GetProperty("total").TryGetInt32(out int flowTotal)
+                    || flowStep < 1 || flowTotal < 1 || flowStep > 999 || flowTotal > 999)
+                {
+                    throw Invalid("Reader 流程进度步数无效");
+                }
                 break;
             default:
                 throw Invalid("Reader 输出类型无效");

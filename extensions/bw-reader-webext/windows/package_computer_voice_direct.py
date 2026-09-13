@@ -127,6 +127,7 @@ MCP_TOOL_SURFACE = (
         "reader_anki_draft",
         "reader_card",
         "reader_command",
+        "reader_flow_progress",
         "reader_word_cards",
         "reader_page_cards",
         "reader_page_card_read",
@@ -157,6 +158,8 @@ CODEX_READER_PAGE_CARD_TOOLS = (
     # 而 config 里一直没启用它 —— 已启用的工具在指挥模型调一个看不见的工具。
     "reader_page_text",
     "reader_review_answer",
+    # skill 运行器的进度上报（2026-09-13）；不启用运行器就调不到它。
+    "reader_flow_progress",
 )
 CODEX_CONFIG_BACKUP_REL = "codex-config.toml.before-reader-page-card-tools"
 
