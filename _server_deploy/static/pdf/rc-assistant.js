@@ -3634,12 +3634,17 @@
   }
 
   function _historyCommit(stage, deferredActions) {
+    // 2026-09-14：走 Windows 桥的高亮/便签写入，其「跳转 + 撤销/重做」卡只活在本页（撤销栈是本机的，
+    // 历史里没有对应记录）。权威重载整体换入时不能把它们丢掉 —— 用户实测「整个流程结束后就消失了」。
+    // 这里把活着的 .asst-edit-card 摘出来，换入之后按原顺序补回末尾；历史回放自己画的撤销卡是 .asst-undo 按钮，不重复。
+    var liveEditCards = Array.prototype.slice.call(thread.querySelectorAll('.asst-edit-card'));
     var previous = document.createDocumentFragment();
     while (thread.firstChild) previous.appendChild(thread.firstChild);
     try {
       var next = document.createDocumentFragment();
       while (stage.firstChild) next.appendChild(stage.firstChild);
       thread.appendChild(next);
+      liveEditCards.forEach(function (card) { try { thread.appendChild(card); } catch (_) {} });
     } catch (error) {
       while (thread.firstChild) thread.removeChild(thread.firstChild);
       thread.appendChild(previous);
