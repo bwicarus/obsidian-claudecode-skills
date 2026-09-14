@@ -13065,6 +13065,16 @@ def assistant_clear():
                 _clear_mode_clip_files(uid, assistant_mode)
             except Exception:
                 pass
+    # 2026-09-15 用户：同一个对话用到手动清空为止 —— 清空侧栏时顺带让 Windows 语音核心新开后台线程（不可达就算了）
+    if assistant_mode == "normal":
+        def _renew_voice_core_thread():
+            try:
+                import urllib.request as _ur
+                _ur.urlopen(_ur.Request("http://127.0.0.1:43131/thread/new", data=b"{}", method="POST",
+                                        headers={"Content-Type": "application/json"}), timeout=20).read()
+            except Exception:
+                pass
+        threading.Thread(target=_renew_voice_core_thread, name="voice-core-thread-new", daemon=True).start()
     return jsonify({"ok": True})
 
 

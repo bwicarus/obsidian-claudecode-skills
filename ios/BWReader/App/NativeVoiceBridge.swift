@@ -924,6 +924,18 @@ final class NativeVoiceBridge: ObservableObject {
                 message: "Windows \(runtime.state)"
                     + (runtime.reason.map { ": \($0)" } ?? "")
             )
+            // 2026-09-15：语音核心那头结束了通话（AI 调 voice_session_stop、用户口头挂断）。
+            // 桥先发这条 status 再关连接；这是**正常结束**，不是掉线 —— 走用户挂断同一条路，
+            // 绝不进入续接（此前只当运行时状态记一笔，随后把关连接当掉线，2 秒后自动重拨）。
+            if runtime.state == "error",
+               runtime.reason == "BW_COMPUTER_VOICE_DIRECT_VOICE_ENDED_BY_CORE" {
+                recordDiagnostic(
+                    category: "control",
+                    message: "对方挂断（语音核心结束通话）"
+                )
+                await stop()
+                break
+            }
             if state.isBusy {
                 state = NativeVoiceBridgeState(
                     phase: state.phase,
