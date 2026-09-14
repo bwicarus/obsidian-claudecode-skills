@@ -864,6 +864,49 @@ if (window.__bwPwaProviderOnly) return;
   tabBtn.onclick = function () { HOST.switchTab && HOST.switchTab('asst'); setTimeout(function () { ta && ta.focus(); }, 200); };
   tabsEl.insertBefore(tabBtn, tabsEl.firstChild);
 
+  // ── 「操作」tab(用户 2026-09-15):最近 30 条操作条,倒序;跳转 + 撤销⇄重做,与轮内那张同步 ──
+  var opsTabBtn = document.createElement('button');
+  opsTabBtn.className = 'side-tab'; opsTabBtn.dataset.pane = 'ops'; opsTabBtn.textContent = '↩ 操作'; opsTabBtn.title = '最近操作（撤销 / 重做）';
+  opsTabBtn.onclick = function () { HOST.switchTab && HOST.switchTab('ops'); setTimeout(_renderOps, 0); };
+  tabsEl.insertBefore(opsTabBtn, tabBtn.nextSibling);
+  var opsPane = document.createElement('div');
+  opsPane.className = 'side-pane'; opsPane.dataset.pane = 'ops'; opsPane.id = 'side-pane-ops';
+  opsPane.innerHTML = '<div class="side-h2">最近操作 · 最多 30 条</div><div id="asst-ops-list"></div>';
+  function _renderOps() {
+    var list = opsPane.querySelector('#asst-ops-list'); if (!list) return;
+    var entries = [];
+    try { entries = (RC.turnCard && RC.turnCard.opItems) ? RC.turnCard.opItems(30) : []; } catch (_) { entries = []; }
+    list.innerHTML = '';
+    if (!entries.length) { var e0 = document.createElement('div'); e0.className = 'asst-ops-empty'; e0.textContent = '还没有可撤销的操作。高亮、卡片、便签、自建页的改动会出现在这里。'; list.appendChild(e0); return; }
+    entries.slice().reverse().forEach(function (en) {
+      var it = en.item;
+      var row = document.createElement('div'); row.className = 'asst-ops-row' + (it.undone ? ' undone' : '');
+      var tt = document.createElement('span'); tt.className = 'tt';
+      var label;
+      if (!it.op) label = '✏️ 高亮：' + (it.text || '(无文字)');
+      else if (it.op === 'page-card') label = (it.act === 'delete' ? '🗑 已删除' : '✏️ 已修改') + (it.number ? ('第 ' + it.number + ' 个') : '自由') + '卡片';
+      else if (it.op === 'note') label = '🗒 ' + (it.act === 'edit' ? '已修改便签' : '已创建便签');
+      else if (it.op === 'userpage') label = (it.act === 'delete' ? '🗑 已删除自建页' : '✏️ 已改写自建页') + (it.title ? ('「' + it.title + '」') : '');
+      else label = '✏️ ' + (it.label || it.op);
+      tt.textContent = (it.undone ? '↩ 已撤销：' : '') + label; tt.title = tt.textContent;
+      row.appendChild(tt);
+      var pdfPage = it.pdf_page != null ? it.pdf_page : it.page, dispPage = it.disp_page != null ? it.disp_page : pdfPage;
+      if (pdfPage) {
+        var jb = document.createElement('button'); jb.className = 'asst-edit-undo'; jb.textContent = '↗ 第' + dispPage + '页';
+        jb.addEventListener('click', function () { HOST.goTo(pdfPage); });
+        row.appendChild(jb);
+      }
+      var ub = document.createElement('button'); ub.className = 'asst-edit-undo'; ub.textContent = it.undone ? '↪ 重做' : '↩ 撤销';
+      ub.addEventListener('click', function () {
+        if (ub.disabled) return; ub.disabled = true; ub.textContent = it.undone ? '重做中…' : '撤销中…';
+        RC.turnCard.opAction(en).then(function (ok) { if (!ok) { ub.disabled = false; ub.textContent = it.undone ? '↪ 重做' : '↩ 撤销'; } _renderOps(); });
+      });
+      row.appendChild(ub);
+      list.appendChild(row);
+    });
+  }
+  try { if (window.RC && RC.turnCard && RC.turnCard.onOpsChange) RC.turnCard.onOpsChange(function () { if (opsPane.classList.contains('active')) _renderOps(); }); } catch (_) {}
+
   // ── pane 注入 ──
   var pane = document.createElement('div');
   pane.className = 'side-pane'; pane.dataset.pane = 'asst'; pane.id = 'side-pane-asst';
@@ -880,6 +923,7 @@ if (window.__bwPwaProviderOnly) return;
       '<textarea id="asst-ta" rows="1" placeholder="问这本书 / 让我帮你…"></textarea>' +
       '<button id="asst-send" title="发送">➤</button></div>';
   panelEl.appendChild(pane);
+  panelEl.appendChild(opsPane);
   try {
     var _qb = document.getElementById('asst-quick');
     if (window.rcBuildQuickBar) window.rcBuildQuickBar(_qb, {});
@@ -934,6 +978,11 @@ if (window.__bwPwaProviderOnly) return;
     '.asst-hl-del{flex:0 0 auto;background:#3a1d1d;border:1px solid #6b3535;color:#ffd0d0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer}' +
     '.asst-hl-del:active{background:#522828}.asst-hl-del:disabled{opacity:.5}' +
     '.asst-hl-redo{flex:0 0 auto;background:#1d3a2a;border:1px solid #2f6347;color:#bfead0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer}.asst-hl-redo:active{background:#244a35}.asst-hl-redo:disabled{opacity:.5}' +   // M9:删完转「↪ 重做」
+    '#side-pane-ops{padding:12px}#side-pane-ops.active{display:block}' +
+    '.asst-ops-row{display:flex;align-items:center;gap:7px;padding:7px 0;border-bottom:1px solid #1f2b44;font-size:12.5px;color:#bfe0c8}' +
+    '.asst-ops-row .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.asst-ops-row.undone .tt{text-decoration:line-through;opacity:.55}' +
+    '.asst-ops-row .asst-edit-undo{flex:0 0 auto;align-self:center;padding:2px 9px;font-size:12px}' +
+    '.asst-ops-empty{font-size:12.5px;color:#8a9bb4;line-height:1.6}' +
     '.asst-edit-card{align-self:flex-start;max-width:92%;background:#13203a;border:1px solid #294060;border-radius:11px;padding:8px 11px;display:flex;flex-direction:column;gap:7px}' +
     '.asst-edit-h{font-size:12.5px;color:#bfe0c8}' +
     '.asst-edit-chips{display:flex;flex-wrap:wrap;gap:6px}' +
@@ -2103,6 +2152,15 @@ if (window.__bwPwaProviderOnly) return;
       return req('PATCH', patch);
     }
 
+    // 操作条进轮次容器(用户 2026-09-15):有语音轮就作为 hlcard part 挂进去,随对话滚动、落库后仍可撤销
+    if (_opPartAvailable()) {
+      return apply().then(function (r) {
+        if (!r || r.ok !== true) { try { window._toast && window._toast('自建页操作失败：' + (d.label || '') + '（内容未变）'); } catch (_) {} return; }
+        reload();
+        _opPart(d.file || '', [{ op: 'userpage', act: d.op === 'delete' ? 'delete' : 'edit', id: (r && r.id) || d.id, file: d.file || '',
+                                  before: d.before || null, after: d.after || null, title: d.title || '', label: d.label || '', undone: false }]);
+      });
+    }
     var card = document.createElement('div');
     card.className = 'asst-edit-card';
     var head = document.createElement('div');
@@ -2146,6 +2204,82 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
 
+  // 操作条 part(kind:'hlcard',items 带 op):挂进当前语音轮;Windows 桥流程下登记为待认领(见 _adoptLiveParts)
+  function _opPartAvailable() { return !!(window.RC && RC.turnCard && window.__asstVoiceTid); }
+  function _opPart(file, items) {
+    if (!_opPartAvailable() || !items || !items.length) return false;
+    var part = { kind: 'hlcard', file: file || '', items: items.slice() };
+    try { RC.turnCard.addPart(window.__asstVoiceTid(), part); } catch (_) { return false; }
+    try {
+      var pl = (window.__bwPendingLiveParts = window.__bwPendingLiveParts || []);
+      pl.push({ ts: Date.now(), part: part });
+      while (pl.length > 8) pl.shift();
+    } catch (_) {}
+    try { scrollDown(); } catch (_) {}
+    return true;
+  }
+  // 顶部「操作」tab 与轮内操作条共用的执行器:it 是 hlcard 条目(带 op),成功 resolve(true) 并已改 it.undone
+  var _RCa = (window.RC ? (RC.assistant = RC.assistant || {}) : {});   // legacy 模式没有 RC:登记到临时对象,不影响挂载
+  _RCa.opAction = function (it, file, action) {
+    var undo = action === 'undo';
+    if (it.op === 'page-card') {
+      var target = window._nativeReaderPageCardAction;
+      if (typeof target !== 'function') { try { window._toast && window._toast('当前阅读器尚未准备好卡片撤销'); } catch (_) {} return Promise.resolve(false); }
+      return Promise.resolve(target({ operationId: it.operationId, action: action })).then(function (result) {
+        if (!result || result.ok !== true) throw new Error('page-card-action-failed');
+        it.undone = undo;
+        try { window.notesReload && window.notesReload(); } catch (_) {}
+        // 右下角小提示条(若还在)的按钮文字跟着换
+        try { Array.prototype.forEach.call(document.querySelectorAll('[data-pcard-operation="' + it.operationId + '"]'), function (b) { b.disabled = false; b.textContent = undo ? '↪ 重做' : '↩ 撤销'; }); } catch (_) {}
+        for (var k in _assistEdits) { if (Object.prototype.hasOwnProperty.call(_assistEdits, k) && _assistEdits[k] && _assistEdits[k].operationId === it.operationId) _assistEdits[k].undone = undo; }
+        return true;
+      }).catch(function () { try { window._toast && window._toast(undo ? '撤销失败，卡片可能已发生变化' : '重做失败，卡片可能已发生变化'); } catch (_) {} return false; });
+    }
+    if (it.op === 'note') {
+      var API = _NOTESURL, hdr = { 'Content-Type': 'application/json' };
+      var p;
+      if (it.act === 'edit') {
+        var v = (undo ? it.old : it['new']) || {};
+        p = fetch(API, { method: 'PATCH', headers: hdr, body: JSON.stringify({ file: file, id: it.id, text: v.text, color: v.color }) }).then(function (r) { return r.ok; });
+      } else if (undo) {
+        p = fetch(API + '?file=' + encodeURIComponent(file) + '&id=' + encodeURIComponent(it.id), { method: 'DELETE' }).then(function (r) { return r.ok; });
+      } else {
+        var n = it.note || {};
+        p = fetch(API, { method: 'POST', headers: hdr, body: JSON.stringify({ file: file, anchor: n.anchor, text: n.text, color: n.color, w: n.w, h: n.h, collapsed: n.collapsed, strokes: n.strokes }) })
+          .then(function (r) { return r.json(); }).then(function (dd) { if (dd && dd.ok) { it.id = dd.id; it.note = dd.note || n; return true; } return false; });
+      }
+      return p.then(function (ok) { if (ok) { it.undone = undo; HOST.notesReload(); } else { try { window._toast && window._toast(undo ? '撤销失败' : '重做失败'); } catch (_) {} } return !!ok; })
+        .catch(function () { try { window._toast && window._toast('网络错误'); } catch (_) {} return false; });
+    }
+    if (it.op === 'userpage') {
+      var EP = '/pdf/api/userpages?file=' + encodeURIComponent(it.file || file || '');
+      var fetchFn = (window.__bwReaderFetch || window.fetch).bind(window);
+      function req(method, body) {
+        return fetchFn(EP, { method: method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+          .then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
+      }
+      var q;
+      if (it.act === 'delete') {
+        // 撤销删除 = 原样重建(新 id 由服务端发);重做删除 = 删当前 id
+        q = undo ? req('POST', { after: (it.before || {}).after || 0, title: (it.before || {}).title || '', md: (it.before || {}).md || '' })
+                 : req('DELETE', { id: it.id });
+      } else {
+        var patch = { id: it.id }, src = (undo ? it.before : it.after) || {};
+        Object.keys(src).forEach(function (k) { patch[k] = src[k]; });
+        q = req('PATCH', patch);
+      }
+      return q.then(function (r) {
+        if (!r || r.ok !== true) { try { window._toast && window._toast(undo ? '撤销失败，内容未变' : '重做失败，内容未变'); } catch (_) {} return false; }
+        if (r.id) it.id = r.id;
+        it.undone = undo;
+        try { window.__upRerender && window.__upRerender(it.id); } catch (_) {}
+        try { window.notesReload && window.notesReload(); } catch (_) {}
+        return true;
+      });
+    }
+    return Promise.resolve(false);
+  };
+
   window._assistEdit = function (d) {
     try {
       if (d && d.type === 'page-card') return _assistPageCard(d);
@@ -2158,7 +2292,15 @@ if (window.__bwPwaProviderOnly) return;
       //   走唯一渲染器 + parts 落库(旧独立卡刷新即丢;这个刷新回放仍可操作)。RC 不可用才落到下面 legacy 卡。
       try {
         if (window.RC && RC.turnCard && window.__asstVoiceTid) {
-          RC.turnCard.addPart(window.__asstVoiceTid(), { kind: 'hlcard', file: d.file || '', items: d.items.slice() });
+          var _hlPart = { kind: 'hlcard', file: d.file || '', items: d.items.slice() };
+          RC.turnCard.addPart(window.__asstVoiceTid(), _hlPart);
+          // Windows 桥流程：活着的语音轮容器在历史里没有记录，onChange 的 upsert 会落空。
+          // 登记为待认领 —— 运行器写进这一轮历史、侧栏重载时认到那条记录上（见 _adoptLiveParts）。
+          try {
+            var _pl = (window.__bwPendingLiveParts = window.__bwPendingLiveParts || []);
+            _pl.push({ ts: Date.now(), part: _hlPart });
+            while (_pl.length > 8) _pl.shift();
+          } catch (_) {}
           return;
         }
       } catch (_) {}
@@ -2217,6 +2359,10 @@ if (window.__bwPwaProviderOnly) return;
         ntype: 'page-card', op: op, operationId: operationId,
         page: page, number: number, item: item, undone: false
       };
+      if (_opPart(d.file || '', [{ op: 'page-card', act: op, operationId: operationId, page: page, number: number, undone: false }])) {
+        try { _showPageCardSnack(eid, _assistEdits[eid]); } catch (_) {}
+        return;
+      }
       var card = document.createElement('div'); card.className = 'asst-edit-card';
       var head = document.createElement('div'); head.className = 'asst-edit-h';
       var ordinal = number ? ('第 ' + number + ' 个') : '自由';
@@ -2301,6 +2447,7 @@ if (window.__bwPwaProviderOnly) return;
         _syncPageCardButtons(st, false, st.undone ? '↪ 重做' : '↩ 撤销');
         button.disabled = false; button.textContent = st.undone ? '↪ 重做' : '↩ 撤销';
         try { window.notesReload && window.notesReload(); } catch (_) {}
+        try { RC.turnCard && RC.turnCard.markOp && RC.turnCard.markOp(function (it) { return it.op === 'page-card' && it.operationId === st.operationId; }, st.undone); } catch (_) {}
       }).catch(function () {
         _syncPageCardButtons(st, false, st.undone ? '↪ 重做' : '↩ 撤销');
         button.disabled = false; button.textContent = st.undone ? '↪ 重做' : '↩ 撤销';
@@ -2313,6 +2460,10 @@ if (window.__bwPwaProviderOnly) return;
   function _assistNoteCard(d) {
     try {
       HOST.notesReload();   // 先把刚建/改的便签渲出来
+      if (_opPart(d.file || '', d.items.map(function (it) {
+        return { op: 'note', act: d.op === 'edit' ? 'edit' : 'create', id: it.id, pdf_page: it.pdf_page, disp_page: it.disp_page,
+                 old: it.old || null, 'new': it['new'] || null, note: it.note || null, undone: false };
+      }))) return;
       var eid = 'ae' + (++_aeCtr);
       _assistEdits[eid] = { ntype: 'note', op: d.op || 'create', file: d.file || '', items: d.items.slice(), undone: false };
       var it0 = d.items[0] || {};
@@ -3515,7 +3666,18 @@ if (window.__bwPwaProviderOnly) return;
     try {
       if (!ev || !thread) return;
       var tid = String((ev && ev.turn_id) || '');
-      if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(tid) || _liveSeen[tid] || _historyPendingTurns[tid]) return;
+      if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(tid)) return;
+      // 外部流式草稿（2026-09-14，Windows 语音核心 /api/assistant/stream）：不落库、不重载，
+      // 借轮次容器的 draftText 就地渲染 —— 和本地助手逐字渲染同一条路。最终内容由 /log 的
+      // 事件触发权威重载，草稿卡随原子换入消失。用户句用 <id>.u 单独落库，所以这里的 tid
+      // 在最终回复到达前不会被标成"已见过"。
+      if (ev.stream === 'delta') {
+        if (_liveSeen[tid] || !(window.RC && RC.turnCard)) return;
+        try { RC.turnCard.draftText('live_' + tid, String(ev.content || '')); } catch (e0) {}
+        return;
+      }
+      if (_liveSeen[tid] || _historyPendingTurns[tid]) return;
+      try { if (window.RC && RC.turnCard && RC.turnCard.has('live_' + tid)) RC.turnCard.freezeDraft('live_' + tid); } catch (e1) {}
       if (Object.keys(_historyPendingTurns).length >= 64) return;
       _historyPendingTurns[tid] = 1;
       _requestHistoryReload({ reason: 'assistant-history', publicTrigger: true, ackTurnIds: [tid] });
@@ -3577,6 +3739,27 @@ if (window.__bwPwaProviderOnly) return;
     return 'hist_' + _modeNorm(mode) + '_' + hex;
   }
 
+  // Windows 桥流程的写操作卡认领（2026-09-14）：高亮的 hlcard（逐条撤销/跳转）生成时只在活着的语音轮容器里，
+  // 历史里没有对应记录；运行器把后台这一轮（含 reader_highlight_range 工具 part）写进历史后，重载到这条记录时
+  // 把 3 分钟内待认领的 hlcard 认过来：当场渲进容器，并 upsert 把 parts 追加落库 —— 刷新回放仍可撤销。
+  function _adoptLiveParts(m, rtid, mode) {
+    try {
+      var pending = window.__bwPendingLiveParts;
+      if (!pending || !pending.length || !m || m.role !== 'assistant' || !m.turn_id || m.via !== 'codex-voice') return;
+      var parts0 = Array.isArray(m.parts) ? m.parts : [];
+      if (parts0.some(function (p) { return p && p.kind === 'hlcard'; })) return;
+      if (!parts0.some(function (p) { return p && p.kind === 'tool'; })) return;   // 高亮/卡片改删/便签/自建页都是工具轮
+      var now = Date.now();
+      var take = pending.filter(function (x) { return x && x.part && now - x.ts < 180000; });
+      window.__bwPendingLiveParts = [];
+      if (!take.length) return;
+      take.forEach(function (x) { try { RC.turnCard.addPart(rtid, x.part); } catch (_) {} });
+      var parts = parts0.concat(take.map(function (x) { return x.part; }));
+      fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+        body: JSON.stringify({ assistant: m.content || '', parts: parts, turn_id: m.turn_id, via: m.via, upsert_only: 1, assistant_mode: mode }) }).catch(function () {});
+    } catch (_) {}
+  }
+
   function _historyReplayOne(m, mode, state, target, scope, deferredActions) {
     if (!m || (m.role !== 'user' && m.role !== 'assistant')) throw new Error('invalid history record');
     if (m.role === 'user') {
@@ -3591,6 +3774,7 @@ if (window.__bwPwaProviderOnly) return;
       if (!RC.turnCard.renderTurn(
         _rtid, m.parts, target, { historyReplay: true, meta: { via: m.via || '', threadId: m.thread_id || '', turnId: m.turn_id || '' } }
       )) throw new Error('turn replay failed');
+      _adoptLiveParts(m, _rtid, mode);
       return;
     }
     if (m.card && window.__vcInfoCardEl) {   // 87:旧数据(没有 parts)→ 回落到结构化卡回放,保持向后兼容
@@ -3626,6 +3810,9 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function _historyCommit(stage, deferredActions) {
+    // 2026-09-14：走 Windows 桥的高亮/便签写入，其「跳转 + 撤销/重做」卡只活在本页（撤销栈是本机的，
+    // 历史里没有对应记录）。权威重载整体换入时不能把它们丢掉 —— 用户实测「整个流程结束后就消失了」。
+    // 2026-09-15 起操作条是轮内 part(落库后随历史回放),不再把旧独立卡搬到底部(用户:「在下面越积越多」)。
     var previous = document.createDocumentFragment();
     while (thread.firstChild) previous.appendChild(thread.firstChild);
     try {
@@ -3644,6 +3831,7 @@ if (window.__bwPwaProviderOnly) return;
       } catch (_) { try { item.marker.remove(); } catch (_) {} }
     });
     try { RC.turnCard && RC.turnCard.prune && RC.turnCard.prune(); } catch (_) {}
+    try { RC.turnCard && RC.turnCard.opsChanged && RC.turnCard.opsChanged(); } catch (_) {}
   }
 
   function loadHistory(mode, options) {   // Pi 权威端在线重载；异步回包不得跨模式落进 DOM

@@ -220,13 +220,97 @@
       '.rc-hlcard .rc-hl-tx{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       '.rc-hlcard .rc-hl-row.undone .rc-hl-tx{text-decoration:line-through;opacity:.55}' +
       '.rc-hl-b{flex:0 0 auto;-webkit-appearance:none;appearance:none;background:transparent;border:1px solid rgba(120,150,210,.45);color:#a8c4f0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer;touch-action:manipulation}' +
-      '.rc-hl-b:disabled{opacity:.5}';
+      '.rc-hl-b:disabled{opacity:.5}' +
+      // 操作条(带 op 的条目):一行一条,不折叠
+      '.rc-opcard{padding:4px 10px}.rc-opbar{display:flex;align-items:center;gap:7px;padding:4px 0}' +
+      '.rc-opbar .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#bfe0c8}' +
+      '.rc-opbar.undone .tt{text-decoration:line-through;opacity:.55}' +
+      '.rc-opbar .pg{flex:0 0 auto;font-size:11px;opacity:.75;white-space:nowrap}';
     document.head.appendChild(s);
+  }
+  // 高亮单条撤销⇄重做(行内按钮与顶部「操作」tab 共用)。成功 resolve(true),失败 resolve(false) 且已 toast。
+  function _hlToggle(file, it) {
+    if (!it.undone) {   // 撤销 = 删这条高亮
+      return RC.reqJson('DELETE', '/pdf/api/highlights?file=' + encodeURIComponent(file) + '&id=' + encodeURIComponent(it.id || ''), null)
+        .then(function (d) {
+          if (!(d && d.ok)) { try { RC.toast('撤销失败:' + ((d && d.error) || '?')); } catch (e) {} return false; }
+          it.undone = true; return true;
+        }).catch(function () { try { RC.toast('网络错误'); } catch (e) {} return false; });
+    }
+    if (!(it.rects && it.rects.length)) { try { RC.toast('这条没有几何信息,无法重建'); } catch (e) {} return Promise.resolve(false); }
+    return RC.reqJson('POST', '/pdf/api/highlights', { file: file, page: it.pdf_page, rects: it.rects, color: it.color, text: it.text || '' })
+      .then(function (d) {
+        if (!(d && d.ok)) { try { RC.toast('重做失败:' + ((d && d.error) || '?')); } catch (e) {} return false; }
+        if (d.id) it.id = d.id;
+        it.undone = false; return true;
+      }).catch(function () { try { RC.toast('网络错误'); } catch (e) {} return false; });
+  }
+  // 任一操作条目的撤销⇄重做:高亮在本文件做;卡片改删/便签/自建页交给 rc-assistant 登记的 opAction(它有各自的 API 与撤销语义)
+  function _opToggle(file, it) {
+    if (!it.op) return _hlToggle(file, it);
+    var fn = RC.assistant && RC.assistant.opAction;
+    if (typeof fn !== 'function') { try { RC.toast('当前阅读器尚未准备好撤销'); } catch (e) {} return Promise.resolve(false); }
+    var action = it.undone ? 'redo' : 'undo';
+    return Promise.resolve(fn(it, file, action)).then(function (ok) { return !!ok; }).catch(function () { return false; });
+  }
+  function _opLabel(it) {
+    if (!it.op) return '✏️ 高亮：' + (it.text || '(无文字)');
+    if (it.op === 'page-card') return (it.act === 'delete' ? '🗑 已删除' : '✏️ 已修改') + (it.number ? ('第 ' + it.number + ' 个') : '自由') + '卡片';
+    if (it.op === 'note') return '🗒 ' + (it.act === 'edit' ? '已修改便签' : '已创建便签');
+    if (it.op === 'userpage') return (it.act === 'delete' ? '🗑 已删除自建页' : '✏️ 已改写自建页') + (it.title ? ('「' + it.title + '」') : '');
+    return '✏️ ' + (it.label || it.op);
+  }
+  function _opPage(it) {   // 跳转用 pdf 页;显示用 disp 页
+    var pdf = it.pdf_page != null ? it.pdf_page : it.page;
+    var disp = it.disp_page != null ? it.disp_page : pdf;
+    return { pdf: pdf, disp: disp };
+  }
+  var _opsListeners = [];
+  function _opsChanged() { _opsListeners.forEach(function (fn) { try { fn(); } catch (e) {} }); }
+  // 就地重画一个 part(操作态变了:标题/按钮文字/删除线一起换新,折叠态保留)
+  function _rerenderPart(t, p) {
+    try {
+      if (!(p._el && p._el.isConnected)) return;
+      var open0 = !!p._el.querySelector('.rc-hlcard.open');
+      var nd = document.createElement('div'); nd.className = p._el.className;
+      nd.appendChild(_hlCardEl(t, p));
+      if (open0) { var c0 = nd.querySelector('.rc-hlcard'); if (c0) c0.classList.add('open'); }
+      p._el.replaceWith(nd); p._el = nd;
+    } catch (e) {}
+  }
+  function _opBarEl(t, p, it) {
+    var row = document.createElement('div'); row.className = 'rc-opbar' + (it.undone ? ' undone' : '');
+    var tt = document.createElement('span'); tt.className = 'tt'; tt.textContent = (it.undone ? '↩ 已撤销：' : '') + _opLabel(it); tt.title = tt.textContent;
+    row.appendChild(tt);
+    var pg = _opPage(it);
+    if (pg.pdf) {
+      var jb = document.createElement('button'); jb.type = 'button'; jb.className = 'rc-hl-b'; jb.textContent = '↗ 第' + pg.disp + '页';
+      jb.addEventListener('click', function (ev) { ev.stopPropagation(); try { if (window.jumpWithBack) window.jumpWithBack(pg.pdf); } catch (e) {} });
+      row.appendChild(jb);
+    }
+    var ub = document.createElement('button'); ub.type = 'button'; ub.className = 'rc-hl-b'; ub.textContent = it.undone ? '↪ 重做' : '↩ 撤销';
+    ub.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      if (ub.disabled) return; ub.disabled = true; ub.textContent = it.undone ? '重做中…' : '撤销中…';
+      _opToggle(p.file || '', it).then(function (ok) {
+        ub.disabled = false;
+        if (!ok) { ub.textContent = it.undone ? '↪ 重做' : '↩ 撤销'; return; }
+        try { var tid = t.el.getAttribute('data-turn'); if (tid && RC.turnCard.onChange) RC.turnCard.onChange(tid); } catch (e) {}
+        _rerenderPart(t, p); _opsChanged();
+      });
+    });
+    row.appendChild(ub);
+    return row;
   }
   function _hlCardEl(t, p) {
     _hlCss();
     var items = p.items || [], file = p.file || '';
     var box = document.createElement('div'); box.className = 'rc-hlcard';
+    if (items.length && items.every(function (x) { return x && x.op; })) {   // 操作条(卡片改删/便签/自建页):扁平,不折叠
+      box.classList.add('rc-opcard');
+      items.forEach(function (it) { box.appendChild(_opBarEl(t, p, it)); });
+      return box;
+    }
     var pages = [], seen = {};
     items.forEach(function (it) { var dp = (it.disp_page != null) ? it.disp_page : it.pdf_page; if (dp != null && !seen[dp]) { seen[dp] = 1; pages.push(dp); } });
     var hd = document.createElement('div'); hd.className = 'rc-hlcard-h';
@@ -241,12 +325,14 @@
       box.classList.toggle('open');
       ar.textContent = box.classList.contains('open') ? '▾ 收起' : '▸ 点开逐条管理';
     });
-    function sync() {   // 状态改动:标题刷新 + part 落库(刷新回放仍是最新态) + 页面高亮重渲
+    function sync() {   // 状态改动:标题刷新 + part 落库(刷新回放仍是最新态) + 页面高亮重渲 + 「操作」tab 刷新
       title();
       try { var tid = t.el.getAttribute('data-turn'); if (tid && RC.turnCard.onChange) RC.turnCard.onChange(tid); } catch (e) {}
       try { if (window._reloadHighlights) window._reloadHighlights(); } catch (e) {}
+      _opsChanged();
     }
     items.forEach(function (it) {
+      if (it.op) { bd.appendChild(_opBarEl(t, p, it)); return; }   // 混合卡(旧数据兜底):带 op 的画成操作条
       var row = document.createElement('div'); row.className = 'rc-hl-row' + (it.undone ? ' undone' : '');
       var sw = document.createElement('span'); sw.className = 'rc-hl-sw'; sw.style.background = it.color || '#fff59d';
       var tx = document.createElement('span'); tx.className = 'rc-hl-tx'; tx.textContent = it.text || '(无文字)'; tx.title = it.text || '';
@@ -257,28 +343,49 @@
       ub.addEventListener('click', function (ev) {
         ev.stopPropagation();
         if (ub.disabled) return; ub.disabled = true;
-        if (!it.undone) {   // 撤销 = 删这条高亮
-          RC.reqJson('DELETE', '/pdf/api/highlights?file=' + encodeURIComponent(file) + '&id=' + encodeURIComponent(it.id || ''), null)
-            .then(function (d) {
-              ub.disabled = false;
-              if (!(d && d.ok)) { try { RC.toast('撤销失败:' + ((d && d.error) || '?')); } catch (e) {} return; }
-              it.undone = true; row.classList.add('undone'); ub.textContent = '↪ 重做'; sync();
-            }).catch(function () { ub.disabled = false; try { RC.toast('网络错误'); } catch (e) {} });
-        } else {            // 重做 = 用存的锚重建(拿新 id 接管后续撤销)
-          if (!(it.rects && it.rects.length)) { ub.disabled = false; try { RC.toast('这条没有几何信息,无法重建'); } catch (e) {} return; }
-          RC.reqJson('POST', '/pdf/api/highlights', { file: file, page: it.pdf_page, rects: it.rects, color: it.color, text: it.text || '' })
-            .then(function (d) {
-              ub.disabled = false;
-              if (!(d && d.ok)) { try { RC.toast('重做失败:' + ((d && d.error) || '?')); } catch (e) {} return; }
-              if (d.id) it.id = d.id;
-              it.undone = false; row.classList.remove('undone'); ub.textContent = '↩ 撤销'; sync();
-            }).catch(function () { ub.disabled = false; try { RC.toast('网络错误'); } catch (e) {} });
-        }
+        _hlToggle(file, it).then(function (ok) {
+          ub.disabled = false;
+          if (!ok) return;
+          row.classList.toggle('undone', !!it.undone); ub.textContent = it.undone ? '↪ 重做' : '↩ 撤销'; sync();
+        });
       });
       row.appendChild(sw); row.appendChild(tx); row.appendChild(jb); row.appendChild(ub);
       bd.appendChild(row);
     });
     return box;
+  }
+  // ── 顶部「操作」tab 的数据源:所有轮次里的 hlcard 条目,按 DOM 顺序(旧→新),取最近 limit 条 ──
+  function opItems(limit) {
+    var turns = Object.keys(_turns).map(function (k) { return _turns[k]; }).filter(function (t) { return t && t.el && t.el.isConnected; });
+    turns.sort(function (x, y) { return (x.el.compareDocumentPosition(y.el) & 4) ? -1 : 1; });   // 4 = DOCUMENT_POSITION_FOLLOWING
+    var out = [];
+    turns.forEach(function (t) {
+      t.parts.forEach(function (p) {
+        if (p.kind !== 'hlcard') return;
+        (p.items || []).forEach(function (it) { out.push({ tid: t.tid, file: p.file || '', item: it, part: p, turn: t }); });
+      });
+    });
+    var n = limit > 0 ? limit : 30;
+    return out.length > n ? out.slice(out.length - n) : out;
+  }
+  function opAction(entry) {   // 顶部 tab 的按钮:执行 → 落库 → 轮内那张卡就地重画 → 通知
+    if (!entry || !entry.item) return Promise.resolve(false);
+    return _opToggle(entry.file, entry.item).then(function (ok) {
+      if (!ok) return false;
+      try { if (RC.turnCard.onChange) RC.turnCard.onChange(entry.tid); } catch (e) {}
+      try { if (!entry.item.op && window._reloadHighlights) window._reloadHighlights(); } catch (e) {}
+      if (entry.turn && entry.part) _rerenderPart(entry.turn, entry.part);
+      _opsChanged();
+      return true;
+    });
+  }
+  function markOp(pred, undone) {   // 别处(如卡片操作的小提示条)改了状态 → 同步条目并重画
+    var hit = false;
+    opItems(0).forEach(function (e) {
+      try { if (pred(e.item)) { e.item.undone = !!undone; hit = true; _rerenderPart(e.turn, e.part); try { if (RC.turnCard.onChange) RC.turnCard.onChange(e.tid); } catch (x) {} } } catch (x) {}
+    });
+    if (hit) _opsChanged();
+    return hit;
   }
 
   // 流程面板:把本轮所有 tool part(+meta)画成 AI 请求 → 工具 → 结果 的线性流程
@@ -444,6 +551,7 @@
     t.parts.push(part);
     var el = renderPart(t, part);
     if (el) part._el = el;   // 供 hlcard 合并就地重建(partsOf 复制时显式跳过 _el,不泄漏进落库)
+    if (part.kind === 'hlcard') _opsChanged();
     if (part.kind === 'tool' && !t.flow.hidden) _paintFlow(t);   // 面板开着 → 实时补画
     // ★ 容器一有新内容就通知落库。**不能只在 response.done 落库**:展示型工具(天气/搜索/配图)
     //   跑完后 relay 设了 no_create —— **不会再有下一个 response**,于是 tool/card 这两个 part
@@ -514,7 +622,8 @@
     if (!t) return null;
     (parts || []).forEach(function (p) {
       t.parts.push(p);
-      renderPart(t, p);
+      var el = renderPart(t, p);
+      if (el) p._el = el;   // 回放的操作卡也要能就地重画(顶部「操作」tab 撤销后轮内那张同步换新)
     });
     return t.el;
   }
@@ -706,5 +815,9 @@
     current: function () { return _cur; },
     trackCli: trackCli,
     has: function (tid) { return !!_turns[tid]; },
+    // 操作条(高亮/卡片改删/便签/自建页)的统一出口:顶部「操作」tab 用
+    opItems: opItems, opAction: opAction, markOp: markOp,
+    onOpsChange: function (fn) { if (typeof fn === 'function') _opsListeners.push(fn); },
+    opsChanged: _opsChanged,
   };
 })();

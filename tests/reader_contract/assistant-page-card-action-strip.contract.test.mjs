@@ -77,7 +77,9 @@ function harness(actionResult = { ok: true }) {
   };
   context.globalThis = context;
   vm.runInNewContext(
-    `${balancedFunction("_assistPageCard")}
+    `${balancedFunction("_opPartAvailable")}
+     ${balancedFunction("_opPart")}
+     ${balancedFunction("_assistPageCard")}
      ${balancedFunction("_syncPageCardButtons")}
      ${balancedFunction("_pageCardEditToggle")}
      ${assignedFunction("window._assistEdit = ")}

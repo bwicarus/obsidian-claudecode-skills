@@ -148,8 +148,16 @@ test("卡片条撤销后用落库反馈里的真实 rects 重做", async () => {
   context.globalThis = context;
   const start = TURNCARD.indexOf("function _hlCardEl(");
   assert.notEqual(start, -1, "找不到高亮卡片渲染器");
+  // 2026-09-15 起渲染器依赖同层的撤销/重做与操作条辅助函数(_hlToggle/_opToggle/_opBarEl…),一并抽进来
+  const helpers = ["_hlToggle", "_opToggle", "_opLabel", "_opPage", "_rerenderPart", "_opBarEl"].map((name) => {
+    const at = TURNCARD.indexOf(`function ${name}(`);
+    assert.notEqual(at, -1, `找不到 ${name}`);
+    return balanced(TURNCARD, at);
+  }).join("\n");
   vm.runInNewContext(
     `function _hlCss() {}
+     var _opsListeners = []; function _opsChanged() {}
+     ${helpers}
      ${balanced(TURNCARD, start)}
      make = _hlCardEl;`,
     context,
