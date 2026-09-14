@@ -35,7 +35,10 @@
     } catch (e) {}
     el.textContent = text;
   }
-  function _scroll() { try { var t = _thread(); if (t) t.scrollTop = t.scrollHeight; } catch (e) {} }
+  // 粘底滚动（2026-09-14）：只有用户本来就贴着底部（阈值内）才自动滚到底；
+  // 一旦向上滚开去读，流式增量就不再把视图往下拽——否则每条 delta 都 scrollTop=scrollHeight，界面不断抽搐。
+  var STICKY = 120;
+  function _scroll() { try { var t = _thread(); if (!t) return; if (t.scrollHeight - t.scrollTop - t.clientHeight <= STICKY) t.scrollTop = t.scrollHeight; } catch (e) {} }
 
   // ── 容器 ─────────────────────────────────────────────────────────────────
   function open(tid, target, options) {

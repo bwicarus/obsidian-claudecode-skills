@@ -3512,7 +3512,18 @@
     try {
       if (!ev || !thread) return;
       var tid = String((ev && ev.turn_id) || '');
-      if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(tid) || _liveSeen[tid] || _historyPendingTurns[tid]) return;
+      if (!/^[A-Za-z0-9_.:-]{1,160}$/.test(tid)) return;
+      // 外部流式草稿（2026-09-14，Windows 语音核心 /api/assistant/stream）：不落库、不重载，
+      // 借轮次容器的 draftText 就地渲染 —— 和本地助手逐字渲染同一条路。最终内容由 /log 的
+      // 事件触发权威重载，草稿卡随原子换入消失。用户句用 <id>.u 单独落库，所以这里的 tid
+      // 在最终回复到达前不会被标成"已见过"。
+      if (ev.stream === 'delta') {
+        if (_liveSeen[tid] || !(window.RC && RC.turnCard)) return;
+        try { RC.turnCard.draftText('live_' + tid, String(ev.content || '')); } catch (e0) {}
+        return;
+      }
+      if (_liveSeen[tid] || _historyPendingTurns[tid]) return;
+      try { if (window.RC && RC.turnCard && RC.turnCard.has('live_' + tid)) RC.turnCard.freezeDraft('live_' + tid); } catch (e1) {}
       if (Object.keys(_historyPendingTurns).length >= 64) return;
       _historyPendingTurns[tid] = 1;
       _requestHistoryReload({ reason: 'assistant-history', publicTrigger: true, ackTurnIds: [tid] });
