@@ -866,7 +866,8 @@ if (window.__bwPwaProviderOnly) return;
 
   // ── 「操作」tab(用户 2026-09-15):最近 30 条操作条,倒序;跳转 + 撤销⇄重做,与轮内那张同步 ──
   var opsTabBtn = document.createElement('button');
-  opsTabBtn.className = 'side-tab'; opsTabBtn.dataset.pane = 'ops'; opsTabBtn.textContent = '↩ 操作'; opsTabBtn.title = '最近操作（撤销 / 重做）';
+  opsTabBtn.className = 'side-tab'; opsTabBtn.dataset.pane = 'ops'; opsTabBtn.title = '最近操作（撤销 / 重做）';
+  opsTabBtn.innerHTML = '↩ <span class="ep-side-tab-lb">操作</span>';   // 窄屏共享抽屉只留图标(.ep-side-tab-lb 会被隐藏),与其它 tab 一致
   opsTabBtn.onclick = function () { HOST.switchTab && HOST.switchTab('ops'); setTimeout(_renderOps, 0); };
   tabsEl.insertBefore(opsTabBtn, tabBtn.nextSibling);
   var opsPane = document.createElement('div');

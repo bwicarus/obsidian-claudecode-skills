@@ -22,9 +22,11 @@
   if (!panel) return;
   window.__pdfSharedDrawer = true;
 
-  // ── ① 接管前先保住 rc-assistant 注入的 asst tab(27 已跑,tab 在旧 #side-tabs 里)──
-  const asstTabBtn = document.querySelector('#side-tabs .side-tab[data-pane="asst"]');
-  if (asstTabBtn) asstTabBtn.remove();
+  // ── ① 接管前先保住 rc-assistant 注入的 tab(27 已跑,tab 在旧 #side-tabs 里):asst + 「操作」等共享 tab 全部保住,
+  //      下面 ② 会把 #side-tabs 整个摘掉,漏了的就消失(2026-09-15 用户:「操作 tab 我没看到」)──
+  const sharedTabBtns = Array.from(document.querySelectorAll('#side-tabs .side-tab[data-pane]'));
+  sharedTabBtns.forEach(b => b.remove());
+  const asstTabBtn = sharedTabBtns.find(b => b.dataset.pane === 'asst') || null;
 
   // ── ② 摘静态 chrome + 抽屉根改共享 id(清掉早期兜底可能留下的打开态)──
   ['side-handle', 'side-tabs', 'side-settings'].forEach(id => { const el = document.getElementById(id); if (el) el.remove(); });
@@ -166,13 +168,16 @@
     },
   });
 
-  // ── ⑤ asst tab 归位:搬进新 tab 栏第一位(类名换共享;active 态与 init 同步过的 pane 对齐)──
-  if (asstTabBtn) {
-    asstTabBtn.classList.remove('side-tab'); asstTabBtn.classList.add('ep-side-tab');
+  // ── ⑤ 共享 tab 归位:按原顺序搬进新 tab 栏最前面(类名换共享;active 态与 init 同步过的 pane 对齐)──
+  {
     const bar = document.getElementById('ep-side-tabs');
-    if (bar) bar.insertBefore(asstTabBtn, bar.firstChild);
     const act = panel.querySelector('.ep-side-pane.active');
-    asstTabBtn.classList.toggle('active', !!(act && act.dataset.pane === 'asst'));
+    let anchor = bar ? bar.firstChild : null;
+    sharedTabBtns.forEach(b => {
+      b.classList.remove('side-tab'); b.classList.add('ep-side-tab');
+      if (bar) bar.insertBefore(b, anchor);
+      b.classList.toggle('active', !!(act && act.dataset.pane === b.dataset.pane));
+    });
   }
 
   // ── ⑥ 旧入口全部改道(同名覆盖;调用方 26-figures/rc-assistant HOST/模板兜底零改)──

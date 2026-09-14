@@ -10885,6 +10885,30 @@ def assistant_compact_history():
     return jsonify({"ok": True, "packed": len(pack), "summary_chars": len(out), "summary": out[:2000]})
 
 
+@bp.route("/stream", methods=["POST"])
+def assistant_stream_external():
+    """外部流式草稿（2026-09-14，Windows 语音核心）：后台文字模型 / 语音模型的回复边生成边推，
+    **不落库**，只经既有 reader-events 总线发一条 assistant-history {stream:"delta"} 让侧栏就地渲染草稿；
+    最终内容仍由 /log 落库，侧栏收到那条事件后按权威历史重载、草稿被替换。
+    body: {turn_id, content, file?}。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    b = request.get_json(silent=True) or {}
+    tid = re.sub(r"[^A-Za-z0-9_.:-]", "", str(b.get("turn_id") or ""))[:40]
+    if not tid:
+        return jsonify({"ok": False, "error": "turn_id"}), 400
+    content = str(b.get("content") or "")[:8000]
+    delivered = 0
+    try:
+        import reader_events
+        delivered = reader_events.publish(
+            "assistant-history", b.get("file") or "", session["user_id"],
+            {"turn_id": tid, "stream": "delta", "content": content}) or 0
+    except Exception:
+        pass
+    return jsonify({"ok": True, "delivered": delivered})
+
+
 @bp.route("/history")
 def assistant_history():
     if not _logged_in():
@@ -12434,6 +12458,11 @@ def assistant_log_external():
                                  and len(json.dumps(b.get("card"), ensure_ascii=False)) < 8000) else None
         if not txt and card:   # 87:卡片可独立成一条(content=概要,结构在 meta.card)
             txt = str(card.get("brief") or card.get("title") or "[卡片]")[:300]
+        # 2026-09-15:字幕模式下语音在线时,后台轮只落工具/卡片 parts、不落正文(正文由语音念出来,字幕里已有)。
+        #   没有文字也必须成一条记录,否则工具卡整轮消失、活着的撤销条无处认领(用户实测「撤销按钮出现一瞬间就消失」)。
+        if not txt and role == "assistant" and isinstance(b.get("parts"), list) and b.get("parts"):
+            _tools = [str(p.get("label") or p.get("tool") or "") for p in b["parts"] if isinstance(p, dict) and p.get("kind") == "tool"]
+            txt = ("（操作：" + "、".join([t for t in _tools if t][:4]) + "）") if any(_tools) else "（操作记录）"
         if txt:
             m2 = dict(meta)
             if role == "assistant" and b.get("clip"):   # 66:通话录下的该轮语音,历史回放用

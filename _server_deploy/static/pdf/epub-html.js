@@ -5841,10 +5841,9 @@
       var _ot = document.querySelector('#ep-side-tabs .ep-side-tab[data-pane="asst"]');     // 内联 asst tab(RC.sidedrawer 建)
       if (_ot && _ot.parentNode) _ot.parentNode.removeChild(_ot);
       RC.assistant.mountPdfSidebar();
-      var _nt = document.querySelector('#ep-side-tabs .side-tab[data-pane="asst"]');         // 共享 tab:PDF class → EPUB class
-      if (_nt) { _nt.classList.remove('side-tab'); _nt.classList.add('ep-side-tab'); }
-      var _np = document.getElementById('side-pane-asst');                                   // 共享 pane:补 EPUB class(setTab 靠它 + data-pane 找)
-      if (_np) _np.classList.add('ep-side-pane');
+      // 共享 tab/pane:PDF class → EPUB class(asst、「操作」等 rc-assistant 注入的全部;setTab 靠 class + data-pane 找)
+      document.querySelectorAll('#ep-side-tabs .side-tab[data-pane]').forEach(function (_nt) { _nt.classList.remove('side-tab'); _nt.classList.add('ep-side-tab'); });
+      document.querySelectorAll('#ep-side .side-pane[data-pane]').forEach(function (_np) { _np.classList.add('ep-side-pane'); });
       try { _favNotebookEntries(); } catch (e) {}   // 收藏夹 NotebookLM 三入口:内联 quick 区已随 pane 被摘 → 重注入共享 #asst-quick
     }
   } catch (e) {}
