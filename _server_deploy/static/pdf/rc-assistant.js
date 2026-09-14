@@ -2155,7 +2155,15 @@
       //   走唯一渲染器 + parts 落库(旧独立卡刷新即丢;这个刷新回放仍可操作)。RC 不可用才落到下面 legacy 卡。
       try {
         if (window.RC && RC.turnCard && window.__asstVoiceTid) {
-          RC.turnCard.addPart(window.__asstVoiceTid(), { kind: 'hlcard', file: d.file || '', items: d.items.slice() });
+          var _hlPart = { kind: 'hlcard', file: d.file || '', items: d.items.slice() };
+          RC.turnCard.addPart(window.__asstVoiceTid(), _hlPart);
+          // Windows 桥流程：活着的语音轮容器在历史里没有记录，onChange 的 upsert 会落空。
+          // 登记为待认领 —— 运行器写进这一轮历史、侧栏重载时认到那条记录上（见 _adoptLiveParts）。
+          try {
+            var _pl = (window.__bwPendingLiveParts = window.__bwPendingLiveParts || []);
+            _pl.push({ ts: Date.now(), part: _hlPart });
+            while (_pl.length > 8) _pl.shift();
+          } catch (_) {}
           return;
         }
       } catch (_) {}
@@ -3585,6 +3593,27 @@
     return 'hist_' + _modeNorm(mode) + '_' + hex;
   }
 
+  // Windows 桥流程的写操作卡认领（2026-09-14）：高亮的 hlcard（逐条撤销/跳转）生成时只在活着的语音轮容器里，
+  // 历史里没有对应记录；运行器把后台这一轮（含 reader_highlight_range 工具 part）写进历史后，重载到这条记录时
+  // 把 3 分钟内待认领的 hlcard 认过来：当场渲进容器，并 upsert 把 parts 追加落库 —— 刷新回放仍可撤销。
+  function _adoptLiveParts(m, rtid, mode) {
+    try {
+      var pending = window.__bwPendingLiveParts;
+      if (!pending || !pending.length || !m || m.role !== 'assistant' || !m.turn_id || m.via !== 'codex-voice') return;
+      var parts0 = Array.isArray(m.parts) ? m.parts : [];
+      if (parts0.some(function (p) { return p && p.kind === 'hlcard'; })) return;
+      if (!parts0.some(function (p) { return p && p.kind === 'tool' && /highlight/i.test(String(p.tool || p.label || '')); })) return;
+      var now = Date.now();
+      var take = pending.filter(function (x) { return x && x.part && now - x.ts < 180000; });
+      window.__bwPendingLiveParts = [];
+      if (!take.length) return;
+      take.forEach(function (x) { try { RC.turnCard.addPart(rtid, x.part); } catch (_) {} });
+      var parts = parts0.concat(take.map(function (x) { return x.part; }));
+      fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+        body: JSON.stringify({ assistant: m.content || '', parts: parts, turn_id: m.turn_id, via: m.via, upsert_only: 1, assistant_mode: mode }) }).catch(function () {});
+    } catch (_) {}
+  }
+
   function _historyReplayOne(m, mode, state, target, scope, deferredActions) {
     if (!m || (m.role !== 'user' && m.role !== 'assistant')) throw new Error('invalid history record');
     if (m.role === 'user') {
@@ -3599,6 +3628,7 @@
       if (!RC.turnCard.renderTurn(
         _rtid, m.parts, target, { historyReplay: true, meta: { via: m.via || '', threadId: m.thread_id || '', turnId: m.turn_id || '' } }
       )) throw new Error('turn replay failed');
+      _adoptLiveParts(m, _rtid, mode);
       return;
     }
     if (m.card && window.__vcInfoCardEl) {   // 87:旧数据(没有 parts)→ 回落到结构化卡回放,保持向后兼容
