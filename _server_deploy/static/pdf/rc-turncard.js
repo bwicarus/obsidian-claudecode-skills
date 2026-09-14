@@ -233,7 +233,16 @@
     if (!it.undone) {   // 撤销 = 删这条高亮
       return RC.reqJson('DELETE', '/pdf/api/highlights?file=' + encodeURIComponent(file) + '&id=' + encodeURIComponent(it.id || ''), null)
         .then(function (d) {
-          if (!(d && d.ok)) { try { RC.toast('撤销失败:' + ((d && d.error) || '?')); } catch (e) {} return false; }
+          if (!(d && d.ok)) {
+            var msg = String((d && (d.error || d.message)) || '');
+            if (/未找到|not found|不存在/i.test(msg)) {   // 用户已手动删掉:这条撤销条没意义了,摘掉(2026-09-15)
+              it.gone = true; it.undone = true;
+              try { RC.toast('这条高亮已经不在了，已从记录里移除'); } catch (e) {}
+              return 'gone';
+            }
+            try { RC.toast('撤销失败:' + (msg || '?')); } catch (e) {}
+            return false;
+          }
           it.undone = true; return true;
         }).catch(function () { try { RC.toast('网络错误'); } catch (e) {} return false; });
     }
@@ -267,6 +276,17 @@
   }
   var _opsListeners = [];
   function _opsChanged() { _opsListeners.forEach(function (fn) { try { fn(); } catch (e) {} }); }
+  // 目标已不存在(用户手动删了):把条目从卡里摘掉;卡空了就把整个 part 连同 DOM 移除;落库 + 「操作」tab 同步
+  //   ⚠ 条目只标 gone 不真删:items 空了契约校验会拒收、_syncParts 也跳过空 parts → 刷新后又回来。渲染时过滤 gone。
+  function _dropItem(t, p, it) {
+    try {
+      it.gone = true;
+      _rerenderPart(t, p);
+      try { var tid = t.el.getAttribute('data-turn'); if (tid && RC.turnCard.onChange) RC.turnCard.onChange(tid); } catch (e) {}
+      try { if (window._reloadHighlights) window._reloadHighlights(); } catch (e) {}
+    } catch (e) {}
+    _opsChanged();
+  }
   // 就地重画一个 part(操作态变了:标题/按钮文字/删除线一起换新,折叠态保留)
   function _rerenderPart(t, p) {
     try {
@@ -294,6 +314,7 @@
       if (ub.disabled) return; ub.disabled = true; ub.textContent = it.undone ? '重做中…' : '撤销中…';
       _opToggle(p.file || '', it).then(function (ok) {
         ub.disabled = false;
+        if (ok === 'gone') { _dropItem(t, p, it); return; }
         if (!ok) { ub.textContent = it.undone ? '↪ 重做' : '↩ 撤销'; return; }
         try { var tid = t.el.getAttribute('data-turn'); if (tid && RC.turnCard.onChange) RC.turnCard.onChange(tid); } catch (e) {}
         _rerenderPart(t, p); _opsChanged();
@@ -304,8 +325,9 @@
   }
   function _hlCardEl(t, p) {
     _hlCss();
-    var items = p.items || [], file = p.file || '';
+    var items = (p.items || []).filter(function (x) { return x && !x.gone; }), file = p.file || '';
     var box = document.createElement('div'); box.className = 'rc-hlcard';
+    if (!items.length) { box.hidden = true; box.style.display = 'none'; return box; }   // 条目全被用户手动删掉了:这张卡没内容可管
     if (items.length && items.every(function (x) { return x && x.op; })) {   // 操作条(卡片改删/便签/自建页):扁平,不折叠
       box.classList.add('rc-opcard');
       items.forEach(function (it) { box.appendChild(_opBarEl(t, p, it)); });
@@ -345,6 +367,7 @@
         if (ub.disabled) return; ub.disabled = true;
         _hlToggle(file, it).then(function (ok) {
           ub.disabled = false;
+          if (ok === 'gone') { _dropItem(t, p, it); return; }
           if (!ok) return;
           row.classList.toggle('undone', !!it.undone); ub.textContent = it.undone ? '↪ 重做' : '↩ 撤销'; sync();
         });
@@ -362,7 +385,7 @@
     turns.forEach(function (t) {
       t.parts.forEach(function (p) {
         if (p.kind !== 'hlcard') return;
-        (p.items || []).forEach(function (it) { out.push({ tid: t.tid, file: p.file || '', item: it, part: p, turn: t }); });
+        (p.items || []).forEach(function (it) { if (it && !it.gone) out.push({ tid: t.tid, file: p.file || '', item: it, part: p, turn: t }); });
       });
     });
     var n = limit > 0 ? limit : 30;
@@ -371,6 +394,7 @@
   function opAction(entry) {   // 顶部 tab 的按钮:执行 → 落库 → 轮内那张卡就地重画 → 通知
     if (!entry || !entry.item) return Promise.resolve(false);
     return _opToggle(entry.file, entry.item).then(function (ok) {
+      if (ok === 'gone') { if (entry.turn && entry.part) _dropItem(entry.turn, entry.part, entry.item); else _opsChanged(); return true; }
       if (!ok) return false;
       try { if (RC.turnCard.onChange) RC.turnCard.onChange(entry.tid); } catch (e) {}
       try { if (!entry.item.op && window._reloadHighlights) window._reloadHighlights(); } catch (e) {}

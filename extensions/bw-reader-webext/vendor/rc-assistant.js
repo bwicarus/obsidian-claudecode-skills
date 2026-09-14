@@ -3792,10 +3792,12 @@ if (window.__bwPwaProviderOnly) return;
     }
     var el = addMsg('asst-a', ''); var _pf = _splitFollowups(m.content || '');
     renderMd(el, (RC.assistant && RC.assistant.stripMoodTag) ? RC.assistant.stripMoodTag(_pf.text).text : _pf.text);
-    try { _attachClipBtn(el, m, mode); } catch (_) {}   // 66:语音回放按钮(有录音=紫;无=灰,点了 TTS 念+保存)
+    // 字幕模式(via=voice,Windows 语音核心逐轮落库):这句话本来就是念出来的,▶(TTS 再念)与「!」(编排质量回报)都没意义,不挂(用户 2026-09-15)
+    var _isSubtitle = m.via === 'voice';
+    if (!_isSubtitle) { try { _attachClipBtn(el, m, mode); } catch (_) {} }   // 66:语音回放按钮(有录音=紫;无=灰,点了 TTS 念+保存)
     try { if (m.via === 'voice' && (m.content || '').length > 120) _bubDecor(el, 'AI 回答', (function (t0) { return function () { return t0; }; })(m.content || '')); } catch (_) {}   // 87:历史语音长文=同样可拖可长按
     try { _renderFollowups(el, _pf.followups); } catch (_) {}
-    try { _attachFeedback(el, state.lastQ, m.trace || null, m.ts || null); } catch (_) {}   // 历史也带 trace(步骤/模型/耗时)+ 时刻;质量回报用 lastQ 重答
+    if (!_isSubtitle) { try { _attachFeedback(el, state.lastQ, m.trace || null, m.ts || null); } catch (_) {} }   // 历史也带 trace(步骤/模型/耗时)+ 时刻;质量回报用 lastQ 重答
     if (Array.isArray(m.videos) && m.videos.length && window.renderVideos) {
       try { window.renderVideos(m.videos, { host: el, dedupe: false }); } catch (_) {}
     }   // 历史视频绑定 staging 内这条气泡；每次原子重载都必须重新生成
