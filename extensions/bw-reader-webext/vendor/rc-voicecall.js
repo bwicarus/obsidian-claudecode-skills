@@ -3262,7 +3262,14 @@ if (window.__bwPwaProviderOnly) return;
     // "取消的那个不能再被当成现状",不是"还有东西钉着也一起清空"。
     // 只在忘掉的是最后一张时才真的取消。
     if (Object.keys(_pins.map).length === 0) {
-      try { if (window.RC && RC.outgoing) RC.outgoing.cancel(); } catch (e) {}
+      // 只取消长按选中这几类：槽是共享的，这会儿住着文字选区的话不该被我们清掉
+      // （反向的误伤，和 2026-09-15 那个"长按卡片被选区漏斗抹掉"是同一个病）。
+      try {
+        if (window.RC && RC.outgoing) {
+          if (RC.outgoing.cancelKind) RC.outgoing.cancelKind(['card', 'image', 'drawing', 'region']);
+          else RC.outgoing.cancel();
+        }
+      } catch (e) {}
     }
     return id;
   }

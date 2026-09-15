@@ -442,6 +442,21 @@ if (window.__bwPwaProviderOnly) return;
       return true;
     },
 
+    /** 只取消**自己这一类**的焦点。焦点是一个共享的槽：文字选区、卡片、图、圈画
+     *  轮流住在里面，所以"我这儿没有选中了"绝不等于"该把槽清空"——2026-09-15 实测：
+     *  长按卡片会先收掉文字选区，选区漏斗随即 cancel()，把刚设好的卡片焦点一并抹掉，
+     *  表现是 AI 说"没有选中的文字或卡片"。圈画那条一直是对的写法，这里把它一般化。 */
+    cancelKind: function (kind) {
+      if (!_ctxOn() || !kind) return false;
+      if (_og.focus === null) return false;
+      var kinds = Array.isArray(kind) ? kind : [kind];
+      var sig = String(_og.focus);
+      for (var i = 0; i < kinds.length; i++) {
+        if (sig.indexOf(kinds[i] + '|') === 0) return _outgoing.cancel();
+      }
+      return false;   // 槽里住的是别人 → 不动
+    },
+
     /** 显式取消。取消后**不允许旧焦点复活**:签名清空,下次同一对象要重新走一次 set。 */
     cancel: function () {
       if (!_ctxOn()) return false;

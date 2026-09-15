@@ -473,6 +473,8 @@
         // 这条选区事件整条丢掉,而不是"页码留空"这么温和——用同一个
         // _curTopIdx(上面 ctxSync 也拿它当 sel_page)。
         if (txt) RC.outgoing.focus('text', { file: FREL, text: String(txt).slice(0, 200), page: _curTopIdx });
+        // 只取消文字那一类：槽里住着长按选中的卡片时，"这儿没有文字选区了"不该把它清掉。
+        else if (RC.outgoing.cancelKind) RC.outgoing.cancelKind('text');
         else RC.outgoing.cancel();
       }
     } catch (e) {}
