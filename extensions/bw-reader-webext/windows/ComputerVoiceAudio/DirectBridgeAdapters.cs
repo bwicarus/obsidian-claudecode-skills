@@ -8,6 +8,37 @@ internal sealed record DirectAppTarget(
     string AppKind,
     string AppUserModelId);
 
+
+/// <summary>语音核心运行器当作"目标进程"（2026-09-14）。runner.pid 由 voice_cli_runner.py 写。</summary>
+internal static class VoiceCoreTarget
+{
+    internal static DirectAppTarget Resolve(string appKind, string appUserModelId)
+    {
+        string pidPath = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "BWReader", "voice-cli", "runner.pid");
+        try
+        {
+            int pid = int.Parse(System.IO.File.ReadAllText(pidPath).Trim(), System.Globalization.CultureInfo.InvariantCulture);
+            using var process = System.Diagnostics.Process.GetProcessById(pid);
+            if (process.HasExited)
+            {
+                throw new InvalidOperationException("runner.pid 指向的进程已退出");
+            }
+            long started = process.StartTime.ToUniversalTime().ToFileTimeUtc();
+            return new DirectAppTarget((uint)pid, started, appKind, appUserModelId);
+        }
+        catch (Exception exception) when (exception is not DirectProtocolException)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_VOICE_CORE_NOT_RUNNING",
+                "语音核心没在跑（ReaderPC 未启动或未托管语音核心）",
+                retryable: true,
+                innerException: exception);
+        }
+    }
+}
+
 internal interface IDirectAppLauncher
 {
     bool IsWired { get; }
@@ -106,6 +137,10 @@ internal interface IDirectMediaAdapter : IAsyncDisposable
         CancellationToken cancellationToken);
 
     Task StopAsync(CancellationToken cancellationToken);
+
+    /// <summary>语音核心那头已经结束（2026-09-14）：把正在跑的这通按"对端本地关闭"收掉，
+    /// 让 App 连接随 Completion 关闭、按钮灭灯。没有在跑的通话回 false。默认实现给假适配器用。</summary>
+    bool EndFromVoiceCore(string reason) => false;
 }
 
 internal sealed class UnwiredDirectMediaAdapter : IDirectMediaAdapter
@@ -211,6 +246,13 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
     }
 
     internal bool CaptureActive => _mediaAdapter.CaptureActive;
+
+    /// <summary>语音核心通知"我这边挂了"：收掉媒体，连接监视循环会把失败送给 App。</summary>
+    internal bool EndFromVoiceCore(string reason)
+    {
+        _lastMediaStopReason = "voice-core-ended:" + reason;
+        return _mediaAdapter.EndFromVoiceCore(reason);
+    }
 
     internal bool CleanupPending => _mediaAdapter.CleanupPending;
 
@@ -553,6 +595,16 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                 "starting-app",
                 "BW_COMPUTER_VOICE_DIRECT_STARTING_APP")
                 .ConfigureAwait(false);
+            DirectAppTarget target;
+            if (DirectBridgeProtocolSession.ExternalVoiceBackendEnabled())
+            {
+                // 2026-09-14 用户：「链路通了但还是把 codex 打开了」。桌面 Codex 这条线弃用：
+                // 通话另一头是语音核心运行器（它把声音放到虚拟线缆上）。目标进程换成运行器本身 ——
+                // 进程回环采它的输出、固定总线模式采端点，两种模式都不需要 Codex 在场。
+                target = VoiceCoreTarget.Resolve(appKind, appProfile.AppUserModelId);
+            }
+            else
+            {
             _ = await _appLauncher.EnsureRunningAsync(
                 appKind,
                 appProfile.AppUserModelId,
@@ -562,7 +614,6 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                 "waiting-app-ready",
                 "BW_COMPUTER_VOICE_DIRECT_WAITING_APP_READY")
                 .ConfigureAwait(false);
-            DirectAppTarget target;
             try
             {
                 target = await _appLauncher.WaitForUniqueReadyAsync(
@@ -591,6 +642,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                 throw new DirectProtocolException(
                     "BW_COMPUTER_VOICE_DIRECT_APP_TARGET_INVALID",
                     "Codex 目标进程校验失败");
+            }
             }
 
             await reportStatusAsync(

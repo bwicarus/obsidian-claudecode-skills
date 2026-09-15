@@ -7577,6 +7577,25 @@
       selection: selection,
       sourceInstanceId: currentReaderSourceInstanceId(),
     };
+    // 输入框上方那一条条东西（用户 2026-09-15：注入的就该是这些）。
+    // 逐字段重建而不是整包透传：这一层是入站闸，放行什么必须写明白。
+    if (Array.isArray(source.attachments)) {
+      var attachments = [];
+      source.attachments.slice(0, 9).forEach(function (item) {
+        if (!item || typeof item !== "object") return;
+        var text = typeof item.text === "string" ? item.text.trim().slice(0, 2000) : "";
+        if (!text || /[ --]/.test(text)) return;
+        var entry = { kind: String(item.kind || "card").slice(0, 40), text: text };
+        if (typeof item.label === "string" && item.label.trim()) {
+          entry.label = item.label.trim().slice(0, 80);
+        }
+        if (typeof item.ref === "string" && item.ref.trim()) {
+          entry.ref = item.ref.trim().slice(0, 120);
+        }
+        attachments.push(entry);
+      });
+      activeReading.attachments = attachments;
+    }
     if (selectionContext) {
       activeReading.selectionContext = selectionContext;
       if (selectionContextSource) {

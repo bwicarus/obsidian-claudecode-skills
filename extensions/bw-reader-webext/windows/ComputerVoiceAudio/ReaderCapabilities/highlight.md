@@ -4,7 +4,7 @@
 
 | 情况 | 用哪个 |
 |---|---|
-| 书里（PDF/EPUB），快照给了 `currentPage.highlightSource` | `reader_highlight_range` |
+| 书里（PDF/EPUB），快照给了 `currentPage.highlightSource` | `reader_highlight_range`，传 `at={block,text?}`（可加 `to`），块号是 `currentPage.text` 里的 `[NN]`；分词表在桥内折算，模型不用抄 marker |
 | 网页 | `reader_web_highlight`（给逐字原文；同一句出现多次时补 prefix/suffix） |
 
 颜色只允许 `yellow`、`green`、`blue`、`pink`。没有当前选区或当前宿主不支持高亮时

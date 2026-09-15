@@ -26,7 +26,11 @@ internal sealed record DirectActiveReading(
     string? SelectionContextSource = null,
     // 复习模式投影。可选:缺席 = 未进入复习模式,旧版前端不发这个字段,
     // 缺席就是今天的行为。在场时形状由 ValidateReviewState 把守。
-    JsonElement? Review = null);
+    JsonElement? Review = null,
+    // 输入框上方此刻显示的那一条条东西（用户 2026-09-15：注入的就该是这些）。
+    // 可选:缺席 = 旧版前端,退回"文字选区 + 单槽 focus"的老行为。
+    // 在场时形状由 ValidateAttachments 把守；空数组是有意义的，表示"现在什么都没钉"。
+    JsonElement? Attachments = null);
 
 internal sealed record DirectViewportContext(
     string SourceInstanceId,
@@ -152,9 +156,16 @@ internal sealed class FileDirectSnapshotContextAdapter :
     private JsonObject? _activeReading;
     private JsonObject _selection = UnknownSelection(
         "snapshot-not-received");
+    /// <summary>**长按选中的卡片/图/圈画**的寿命：5 分钟。它们是要攒着一起用的，
+    /// 跟看一眼就用掉的文字选区不是一回事（用户 2026-09-15 澄清原始设计）。
+    /// 前端 context-selection-registry.js 的 expireMs 同一个数。</summary>
+    private const long FocusTtlMs = 300_000;
+    private long _focusAtMs;
     private JsonObject _focus = UnknownFocus(
         "snapshot-not-received");
     private JsonObject? _latestEvent;
+    /// 输入框上方那一条条东西。null = 前端没报过（旧版），空数组 = 报了"现在什么都没钉"。
+    private JsonArray? _attachments;
 
     // 「用户刚做了什么」——不同于 _latestEvent(内部记账,装的是折叠出来的系统
     // 事件类型,readerpc.recovering 那种)。这里只在几处明确知道是**真实用户
@@ -267,6 +278,11 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 )
                 {
                     throw ActiveReadingInvalid();
+                }
+                if (activeReading.Attachments is JsonElement attachmentList)
+                {
+                    _attachments = JsonNode.Parse(
+                        attachmentList.GetRawText()) as JsonArray;
                 }
                 JsonObject next = new()
                 {
@@ -658,6 +674,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             .Append("selectionContext")
             .Append("selectionContextSource")
             .Append("review")
+            .Append("attachments")
             .ToHashSet(StringComparer.Ordinal);
         if (
             requiredKeys.Any(key => !keys.Contains(key))
@@ -830,6 +847,11 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             review = ValidateReviewState(value.GetProperty("review"));
         }
+        JsonElement? attachments = null;
+        if (keys.Contains("attachments"))
+        {
+            attachments = ValidateAttachments(value.GetProperty("attachments"));
+        }
         return new DirectActiveReading(
             kind,
             file,
@@ -845,7 +867,55 @@ internal sealed class FileDirectSnapshotContextAdapter :
             highlightSource,
             selectionContext,
             selectionContextSource,
-            review);
+            review,
+            attachments);
+    }
+
+    /// <summary>输入框上方那一条条东西。形状不合规就整条 active-reading 拒绝 ——
+    /// 与 review / selectionRegions 同一条纪律：宁可少一条上报，也不让半个结构进快照。</summary>
+    private static JsonElement ValidateAttachments(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Array || value.GetArrayLength() > 9)
+        {
+            throw ActiveReadingInvalid();
+        }
+        foreach (JsonElement item in value.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                throw ActiveReadingInvalid();
+            }
+            DirectJsonValidation.RequireNoDuplicateKeys(item);
+            HashSet<string> itemKeys = item
+                .EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal);
+            if (
+                !itemKeys.Contains("kind")
+                || !itemKeys.Contains("text")
+                || itemKeys.Any(key =>
+                    key is not ("kind" or "text" or "label" or "ref"))
+            )
+            {
+                throw ActiveReadingInvalid();
+            }
+            foreach (JsonProperty property in item.EnumerateObject())
+            {
+                if (
+                    property.Value.ValueKind != JsonValueKind.String
+                    || property.Value.GetString() is not string text
+                    || text.Length == 0
+                    || text.Length > 2000
+                    || text.Any(ch =>
+                        char.IsControl(ch)
+                        && ch is not ('\n' or '\r' or '\t'))
+                )
+                {
+                    throw ActiveReadingInvalid();
+                }
+            }
+        }
+        return value.Clone();
     }
 
     // 复习模式投影:在场必须整形合规,否则整条 active-reading 拒绝 ——
@@ -1713,11 +1783,60 @@ internal sealed class FileDirectSnapshotContextAdapter :
     // 不做的事:真正的"同时选中好几个东西"(比如同时选两条高亮)需要全新的
     // 前端交互设计,现在完全没有;items 里最多两条(文字 + 聚焦对象),
     // 不是一个开放式的多选列表。
+    /// <summary>给选中打时间戳：**只有换了一个选中才重新计时**。
+    /// App 会把同一个选中每几秒重报一次，按"上次收到"计时会被一次次清零 ——
+    /// 实测 90 秒后模型还看得见早该作废的选区。</summary>
+    private JsonObject StampFocus(JsonObject next)
+    {
+        if (!SameIdentity(_focus, next, "kind"))
+        {
+            _focusAtMs = _utcNow().ToUnixTimeMilliseconds();
+        }
+        return next;
+    }
+
+    /// <summary>两次上报说的是不是同一件事（状态 + 主字段 + 引用都一样）。</summary>
+    private static bool SameIdentity(
+        JsonObject? previous,
+        JsonObject? next,
+        string keyField)
+    {
+        if (previous is null || next is null)
+        {
+            return false;
+        }
+        return StringValue(previous["state"]) == StringValue(next["state"])
+            && StringValue(previous[keyField]) == StringValue(next[keyField])
+            && (previous["ref"]?.ToJsonString() ?? "-")
+                == (next["ref"]?.ToJsonString() ?? "-");
+    }
+
+    /// <summary>选中过期了没。没有时间戳 = 不知道什么时候选的 = 不当作过期。</summary>
+    private bool Expired(long atMs, long ttlMs) =>
+        atMs > 0
+        && _utcNow().ToUnixTimeMilliseconds() - atMs > ttlMs;
+
     private JsonArray BuildSelectionItems()
     {
+        // 前端报过 attachments 就以它为准：那是输入框上方此刻显示的东西，
+        // 也正是用户认为"我选中了"的那些（用户 2026-09-15）。单槽 focus 只在
+        // 旧版前端（没报过 attachments）时兜底 —— 它一次只装得下一个，
+        // 谁写谁覆盖、谁清谁误伤，正是这一带所有毛病的来源。
+        if (_attachments is not null)
+        {
+            JsonArray fromChips = [];
+            foreach (JsonNode? node in _attachments)
+            {
+                if (node is JsonObject entry)
+                {
+                    fromChips.Add(entry.DeepClone());
+                }
+            }
+            return fromChips;
+        }
         JsonArray items = [];
         if (
-            StringValue(_selection["state"]) == "active"
+StringValue(_selection["state"]) == "active"
             && StringValue(_selection["text"]) is string selectedText
         )
         {
@@ -1742,7 +1861,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
         // kind=="text" 的 focus 只是 _selection 的影子(同一次选中在两处
         // 各存一份),在这里再放一条会让模型以为用户选中了两样东西。
         if (
-            StringValue(_focus["state"]) == "active"
+            !Expired(_focusAtMs, FocusTtlMs)
+            && StringValue(_focus["state"]) == "active"
             && StringValue(_focus["kind"]) is string focusKind
             && focusKind != "text"
             && _focus["ref"] is JsonObject focusRef
@@ -1870,7 +1990,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 value,
                 _stablePage,
                 _activeReading);
-            _focus = folded.Focus;
+            _focus = StampFocus(folded.Focus);
             if (folded.Selection is not null)
             {
                 _selection = folded.Selection;

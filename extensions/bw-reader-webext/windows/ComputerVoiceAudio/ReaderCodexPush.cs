@@ -526,6 +526,18 @@ internal static class ReaderCodexPush
     {
         if (!Enabled) return;
         if (!slowChanged && !fastChanged) return;
+        if (DirectBridgeProtocolSession.ExternalVoiceBackendEnabled())
+        {
+            // 2026-09-14 用户：「提示板的推送现在开始推到新的语音的文字后台里，塞进去而不是触发一轮」。
+            // 语音核心 /board：进后台历史（inject_items，零成本、不出声）+ 用户开口时才进语音上下文。
+            // 需要提醒的那类不走这里 —— 那是 codex_thread_notify → /turn（起一轮）。
+            var boardBody = new StringBuilder();
+            if (fastChanged) boardBody.Append("【快板】\n").Append(Trim(fastText)).Append('\n');
+            if (slowChanged) boardBody.Append("【慢板】\n").Append(Trim(slowText)).Append('\n');
+            string boardJson = JsonSerializer.Serialize(new { text = boardBody.ToString().TrimEnd() });
+            _ = DirectBridgeProtocolSession.VoiceCoreRequestAsync("/board", boardJson, "voice-core-board");
+            return;
+        }
         ReaderCodexEndpoint.Binding? binding =
             await ResolveBindingAsync("board-push", cancellationToken)
                 .ConfigureAwait(false);
@@ -1096,6 +1108,9 @@ internal static class ReaderCodexPush
     {
         _outboundSealed = true;
     }
+
+    /// <summary>自检进程里为真：任何会打到语音核心/桌面 Codex 的出站路径都该看它。</summary>
+    internal static bool OutboundSealed => _outboundSealed;
 
     /// <summary>自检进程里出站被封死时抛的东西。</summary>
     internal sealed class OutboundSealedException : InvalidOperationException

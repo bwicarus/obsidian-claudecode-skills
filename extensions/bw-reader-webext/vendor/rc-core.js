@@ -208,12 +208,38 @@ if (window.__bwPwaProviderOnly) return;
       return body;
     }).catch(function () { return null; });
   }
+  /** 输入框上方此刻显示着什么 —— 这就是"用户选中了什么"的权威答案（用户 2026-09-15）。
+   *  文字 chip（__focusSel）+ 长按钉住的卡片/图/圈画（__vcPins）。在**发送的那一刻**现取，
+   *  不进 pend：pend 会被合并/延迟，而这份东西必须是此刻屏幕上的样子。 */
+  function _ctxAttachments() {
+    var out = [];
+    try {
+      var fs = window.__focusSel;
+      if (fs && fs.text) {
+        out.push({ kind: fs.kind === 'formula' ? 'formula' : 'text',
+                   label: '选中的内容', text: String(fs.text).slice(0, 2000) });
+      }
+    } catch (e) {}
+    try {
+      var pins = (typeof window.__vcPins === 'function') ? (window.__vcPins() || []) : [];
+      pins.slice(0, 8).forEach(function (p) {
+        if (!p || !p.text) return;
+        out.push({ kind: String(p.kind || 'card').slice(0, 40),
+                   label: String(p.label || '').slice(0, 80),
+                   text: String(p.text).slice(0, 2000),
+                   ref: String(p.id || '').slice(0, 120) });
+      });
+    } catch (e) {}
+    return out.slice(0, 9);
+  }
+
   function _ctxSend() {
     _ctxS.timer = null;
     if (!_ctxOn() || !_ctxS.pend) return;
     if (_ctxS.inflight) { _ctxS.dirty = true; return; }   // 单次在途:回来之后再补发最新的那份
     _ctxS.inflight = true;
     var sent = Object.assign({}, _ctxS.pend);
+    sent.attachments = _ctxAttachments();   // 输入框上方有什么就报什么（空数组也报：它表示"现在什么都没钉"）
     // @interaction context.active.report
     fetch(_ctxU('/pdf/api/active-reading'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -571,6 +597,9 @@ if (window.__bwPwaProviderOnly) return;
       // 换书、选区建立/清空、标题或其它字段变化 = 即时。调用方也可用 opts.immediate 强制。
       // 首次上报(还没有基线)也算导航:否则开关刚打开时的第一次翻页会把**中间页**立刻推出去
       //(真机实测:连翻 6 页 → 途中 1 次)。带 immediate 的调用不受影响。
+      // 输入框上方那一条条东西要跟着这份状态一起走：桥那条路读的是 pend，
+      // 只塞进发送体的话语音那头永远收不到（2026-09-15 差点栽在这）。
+      next.attachments = _ctxAttachments();
       var first = !_ctxS.pend;
       var navOnly = !(opts && opts.immediate) && (patch.pos !== undefined) &&
         (first || (same && patch.pos !== cur.pos && _ctxOnlyPosChanged(cur, next)));

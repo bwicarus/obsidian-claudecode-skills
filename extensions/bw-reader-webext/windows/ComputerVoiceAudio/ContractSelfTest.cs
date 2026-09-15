@@ -182,6 +182,57 @@ internal static class ContractSelfTest
             "pcm-framer-stereo-to-fixed-mono-s16",
             checks);
 
+        // 直连管道（2026-09-15）：帧格式是桥与语音核心之间唯一的约定，
+        // 两边各写一份常量，所以这里把它钉死 —— 改了任意一侧而没改另一侧，
+        // 现象是"通话建起来了但一句话都听不到"，最难查的那种。
+        byte[] datagram = new byte[
+            DirectAudioPipe.HeaderBytes + DirectAudioPipe.FrameBytes];
+        DirectAudioPipe.WriteHeader(datagram, 0x01020304);
+        datagram[DirectAudioPipe.HeaderBytes] = 0x7F;
+        bool payloadRead = DirectAudioPipe.TryReadPayload(
+            datagram,
+            out ReadOnlySpan<byte> pipePayload);
+        Require(
+            datagram.Length == 1928
+            && datagram[0] == (byte)'B'
+            && datagram[1] == (byte)'W'
+            && datagram[2] == (byte)'A'
+            && datagram[3] == (byte)'1'
+            && BitConverter.ToUInt32(datagram, 4) == 0x01020304
+            && payloadRead
+            && pipePayload.Length == 1920
+            && pipePayload[0] == 0x7F,
+            "direct-audio-pipe-frame-is-bwa1-u32-plus-1920",
+            checks);
+        Require(
+            !DirectAudioPipe.TryReadPayload(
+                datagram.AsSpan(0, datagram.Length - 1),
+                out _)
+            && !DirectAudioPipe.TryReadPayload(
+                new byte[datagram.Length],
+                out _),
+            "direct-audio-pipe-rejects-short-and-wrong-magic",
+            checks);
+        PcmAudioFormat pipeFormat = DirectAudioPipe.Format;
+        bool pipeFormatFramable;
+        try
+        {
+            _ = new Pcm48kMonoFramer(pipeFormat);
+            pipeFormatFramable = true;
+        }
+        catch (InvalidOperationException)
+        {
+            pipeFormatFramable = false;
+        }
+        Require(
+            pipeFormatFramable
+            && pipeFormat.Channels == 1
+            && pipeFormat.SamplesPerSecond == 48_000
+            && pipeFormat.BitsPerSample == 16
+            && pipeFormat.Encoding == PcmSampleEncoding.IntegerPcm,
+            "direct-audio-pipe-format-is-what-the-framer-accepts",
+            checks);
+
         bool unsupportedRateRejected = false;
         try
         {

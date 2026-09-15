@@ -156,8 +156,12 @@ test("record 新增成员,ForwardActiveReading 真的把它传下去", () => {
   // 这一处最容易漏:record 上加了成员,但折叠时的手抄块不补就无声消失。
   assert.match(SNAPSHOT, /activeReading\.SelectionContext,\s*\n\s*activeReading\.SelectionContextSource\);/);
   // review 同一条纪律:record 成员 + 校验放行 + 折叠手抄块,三处齐才算传下去。
-  assert.match(SNAPSHOT, /JsonElement\? Review = null\);/);
+  assert.match(SNAPSHOT, /JsonElement\? Review = null,/);
   assert.match(SNAPSHOT, /activeReading\.Review is JsonElement reviewState/);
+  // attachments(输入框上方那一条条东西,2026-09-15 用户拍板"注入的就该是这些")同理:
+  // 少了折叠那一步,前端报得再勤,快照里也什么都不会多出来。
+  assert.match(SNAPSHOT, /JsonElement\? Attachments = null\);/);
+  assert.match(SNAPSHOT, /activeReading\.Attachments is JsonElement attachmentList/);
 });
 
 test("上下文进快照的 selection 节,缺席时不放 null 占位", () => {

@@ -811,6 +811,13 @@ internal sealed class VirtualMicrophoneRenderSession :
         VirtualMicrophoneRenderRequest request) =>
         new(request, new NativeVirtualMicrophoneRenderRuntimeFactory());
 
+    /// <summary>用指定的渲染运行时起会话。直连管道（DirectAudioPipe）走这里：
+    /// 整条上行链路不变，只把最后"写进声卡"那一下换成"发给运行器"。</summary>
+    internal static VirtualMicrophoneRenderSession PrepareWithRuntime(
+        VirtualMicrophoneRenderRequest request,
+        IVirtualMicrophoneRenderRuntimeFactory runtimeFactory) =>
+        new(request, runtimeFactory);
+
     internal static VirtualMicrophoneRenderSession PrepareForTest(
         VirtualMicrophoneRenderRequest request,
         IVirtualMicrophoneRenderRuntimeFactory runtimeFactory) =>

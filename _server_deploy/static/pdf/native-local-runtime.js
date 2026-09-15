@@ -2954,8 +2954,7 @@
 
   var ACTIVE_READING_ALLOWED_KEYS = [
     'kind', 'file', 'pos', 'title', 'total', 'selection',
-    'sel_page', 'sel_anchor', 'reason', 'viewport'
-  ];
+    'sel_page', 'sel_anchor', 'reason', 'viewport', 'attachments'];
   function normalizeActiveReadingBody(body) {
     var code = 'BW_LOCAL_ACTIVE_READING_BODY';
     assertObjectFields(body, ACTIVE_READING_ALLOWED_KEYS, ['kind', 'file'], code);
@@ -2991,6 +2990,31 @@
       }
       record.selection = body.selection.trim();
       record.has_selection = !!record.selection;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'attachments')) {
+      // 输入框上方那一条条东西（用户 2026-09-15：注入的就该是这些）。
+      // 逐条重建：这一层是入站闸，放行什么必须写明白；整包透传会让上游
+      // 随便塞进来的字段一路漂到桥上。
+      if (!Array.isArray(body.attachments) || body.attachments.length > 9) {
+        throw outgoingRequestError('attachments 无效或过多', code, 400);
+      }
+      record.attachments = body.attachments.map(function (item) {
+        if (!item || typeof item !== 'object') {
+          throw outgoingRequestError('attachments 条目无效', code, 400);
+        }
+        var text = typeof item.text === 'string' ? item.text.trim() : '';
+        if (!text || text.length > 2000) {
+          throw outgoingRequestError('attachments 文本无效或过长', code, 400);
+        }
+        var entry = { kind: String(item.kind || 'card').slice(0, 40), text: text };
+        if (typeof item.label === 'string' && item.label.trim()) {
+          entry.label = item.label.trim().slice(0, 80);
+        }
+        if (typeof item.ref === 'string' && item.ref.trim()) {
+          entry.ref = item.ref.trim().slice(0, 120);
+        }
+        return entry;
+      });
     }
     if (Object.prototype.hasOwnProperty.call(body, 'sel_page')) {
       if (!Object.prototype.hasOwnProperty.call(body, 'selection')) {

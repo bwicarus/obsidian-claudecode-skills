@@ -32,6 +32,24 @@ internal sealed class DirectOutputCaptureSession : IAsyncDisposable
     internal PcmAudioFormat? Format =>
         _endpoint?.Format ?? _process!.Format;
 
+    /// <summary>直连管道：下行不再从 B 线缆采集，改为直接收语音核心发来的 PCM 帧。
+    /// 复用进程回环那条会话骨架（线程、状态机、完成语义都一样），只换运行时。</summary>
+    internal static DirectOutputCaptureSession PrepareDirectPipe(
+        DirectMediaStartRequest request,
+        IBoundedPcmSink sink,
+        DirectAudioPipeConfig pipe)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(sink);
+        ArgumentNullException.ThrowIfNull(pipe);
+        return new DirectOutputCaptureSession(
+            process: ProcessLoopbackCaptureSession.PrepareWithRuntime(
+                request.RootProcessId,
+                sink,
+                new UdpDownlinkCaptureRuntimeFactory(pipe)),
+            endpoint: null);
+    }
+
     internal static DirectOutputCaptureSession Prepare(
         DirectMediaStartRequest request,
         IBoundedPcmSink sink)

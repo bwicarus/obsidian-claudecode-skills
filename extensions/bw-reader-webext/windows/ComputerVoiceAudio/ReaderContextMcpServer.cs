@@ -486,10 +486,10 @@ internal sealed class ReaderContextMcpServer
                     + "stop after promising to research it. Respect "
                     + "contextStatus; pending or stale means the current "
                     + "page text is unavailable. page_image being null does "
-                    + "not mean the App image is unavailable: when "
-                    + "visualAccess.available is true, call the named "
+                    + "not mean the App image is unavailable: call the named "
                     + "reader_visual_image tool to receive a fresh inline "
-                    + "composite image. For a complex Reader task, use "
+                    + "composite image (the plain-language `system` line "
+                    + "says when the App is offline). For a complex Reader task, use "
                     + CapabilityGuideToolName
                     + " to read exactly one task guide; read topic=index "
                     + "only when the correct topic is unknown. In Windows "
@@ -499,9 +499,9 @@ internal sealed class ReaderContextMcpServer
                     + "{card:{kind,title,data}} input. "
                     + "For a source highlight, call "
                     + "reader_context_snapshot first. When "
-                    + "currentPage.highlightSource is present, copy its "
-                    + "exact identity and choose two published markers for "
-                    + "reader_highlight_range; never echo or search a long "
+                    + "currentPage.highlightSource is present, call "
+                    + "reader_highlight_range with at={block,text?} (and to for a range) - "
+                    + "the [NN] block numbers in currentPage.text are the address; never echo or search a long "
                     + "quote. reader_highlight_text remains only for an old "
                     + "client that has no marker source. For a "
                     + "book-referencing Anki draft, copy the exact current "
@@ -598,14 +598,13 @@ internal sealed class ReaderContextMcpServer
                     + "currentPage also carries how old the report is "
                     + "(fresh, ageSec) and, in review mode, review. "
                     + "Check contextStatus before using currentPage; "
-                    + "never reuse text when it is pending or stale. Read "
-                    + "visualAccess to discover whether the exact App "
-                    + "surface can be requested on demand; page_image=null "
-                    + "alone does not mean that no image is available. Read "
-                    + "outputAccess only to phrase what you tell the "
-                    + "user - not as a precondition for writing: a readable "
-                    + "cached page can remain ready after its live App or "
-                    + "extension source has disconnected. Never gate a "
+                    + "never reuse text when it is pending or stale. The "
+                    + "`system` line is a one-sentence plain-language health "
+                    + "summary: '系统连接正常' or what is wrong (App offline, "
+                    + "page image unavailable). Use it only to phrase what "
+                    + "you tell the user - not as a precondition for writing: "
+                    + "a readable cached page can remain ready after its live "
+                    + "App or extension source has disconnected. Never gate a "
                     + "mutation on it; issue the write and let the write "
                     + "path report delivered / queued / failed. "
                     // ⚠ 归因说明。2026-08-23：用户看到本工具失败时，模型回答
@@ -863,21 +862,17 @@ internal sealed class ReaderContextMcpServer
                 ["name"] = HighlightRangeToolName,
                 ["description"] =
                     "Use when the user says 划线/高亮/标一下这段 for a passage in the open book. "
-                    + "Persist one highlight from the App-owned marker range "
-                    + "published in currentPage.highlightSource. Call "
-                    + "reader_context_snapshot first, copy the exact source "
-                    + "identity fields, and choose startMarker/endMarker "
-                    + "from that source in document order. markers is an "
-                    + "object whose keys are the marker ids and whose "
-                    + "values are that segment's text, listed in "
-                    + "document order (older App builds send the same "
-                    + "pairs as an array of {marker, text}). "
-                    + "Every marker is "
-                    + "the boundary before its text: startMarker is the first "
-                    + "included segment, while endMarker is the first excluded "
-                    + "segment (exclusive). To include through source end, "
-                    + "use the final marker whose text is empty. Never return or "
-                    + "search an entire source quote. The Reader rejects "
+                    + "Give the position, not the coordinates: `at` = {block, text?} where block is the "
+                    + "[NN] number shown in currentPage.text and text is an optional short phrase inside "
+                    + "that block (omit text to take the whole block = element selection). Add `to` = "
+                    + "{block, text?} for a range that ends elsewhere (may cross blocks). The bridge "
+                    + "resolves at/to against the page's token table itself (at={selection:true} = the user's current selection); you never copy marker ids "
+                    + "or source identity. Only blocks of the current page (not the 【当前页之前/之后】 "
+                    + "context) can be highlighted; an unknown block or a phrase not found in it is an "
+                    + "error, not a guess. (rangeRef with explicit markers is still accepted for old "
+                    + "callers; internally startMarker is the first included segment and "
+                    + "endMarker is the first excluded segment - you never need those.) "
+                    + "Never return or search an entire source quote. The Reader rejects "
                     + "invented, reversed, expired, stale-book, stale-page "
                     + "or stale-revision ranges and never falls back to text "
                     + "search. Do not retry an unknown mutation outcome. Chain it: snapshot → build rangeRef → this tool, all in one exec script.",
@@ -1594,15 +1589,18 @@ internal sealed class ReaderContextMcpServer
                     + "position, collapses to a dot when idle instead of "
                     + "disappearing, and falls back to a floating card when the "
                     + "target is not on screen. Binding is meant to be "
-                    + "**automatic**: call reader_page_text, choose the passage "
-                    + "from its `segments`, and bind - do not ask the user to "
+                    + "**automatic** and cheap: when the passage is already known - the user's "
+                    + "current selection or a phrase quoted in the injected 【当前阅读状态】 / "
+                    + "currentPage.text - bind directly with {kind:'page-chars',page,text} and let "
+                    + "the reader resolve the offsets; call reader_page_text only when you do not "
+                    + "know which words to pin - do not ask the user to "
                     + "select text first."
                     + " A page-chars bound card applies directly when the "
                     + "matching App document is online, even if another page "
                     + "is visible. It is durably queued only while that source "
                     + "is offline/backgrounded; status=queued means accepted "
                     + "for later application, so do not create it again. Floating cards "
-                    + "and other live-only actions are never queued. Chain it: reader_page_text (segments) → this tool with bind, in one exec script.",
+                    + "and other live-only actions are never queued. Known passage → this tool with bind {page,text} in one call; unknown passage → reader_page_text (segments) → this tool.",
                 ["inputSchema"] = BuildTypedCardArgumentsSchema(),
                 ["annotations"] = new JsonObject
                 {
@@ -3137,9 +3135,15 @@ internal sealed class ReaderContextMcpServer
     {
         ["type"] = "object",
         ["additionalProperties"] = false,
-        ["required"] = new JsonArray("rangeRef", "color", "note"),
+        ["required"] = new JsonArray("color", "note"),
         ["properties"] = new JsonObject
         {
+            ["at"] = BuildLocatorSchema(
+                "Where the highlight starts: the [NN] block from currentPage.text, plus an optional "
+                + "short phrase inside that block. Without `to`, the whole block (or just the phrase) is highlighted."),
+            ["to"] = BuildLocatorSchema(
+                "Optional. Where the highlight ends (inclusive of the phrase / block given here). "
+                + "May be a later block than `at`."),
             ["rangeRef"] = new JsonObject
             {
                 ["type"] = "object",
@@ -3297,7 +3301,7 @@ internal sealed class ReaderContextMcpServer
         ["uniqueItems"] = true,
         ["description"] =
             "KJ knowledge node ids (kj:XXXXXXXXXX) this card belongs to. "
-            + "Reuse an already bound node; else kj_search; else kj_register type=node.",
+            + "Reuse an already bound node; otherwise call kj_node_ensure(name) once - it finds the node by name/alias or creates it and returns nodeId.",
         ["items"] = new JsonObject
         {
             ["type"] = "string",
@@ -4411,6 +4415,7 @@ internal sealed class ReaderContextMcpServer
         KjPageClient.AttachToSnapshot(payload);
         // **最后一道**：到这里为止没有任何代码还要读这个对象，可以安全瘦身。
         TrimForModel(payload, brief);
+        ReaderLocator.TrimMarkersForModel(payload);
         await WriteResultAsync(
             id,
             new JsonObject
@@ -4756,6 +4761,32 @@ internal sealed class ReaderContextMcpServer
         JsonElement arguments,
         CancellationToken cancellationToken)
     {
+        // 定位信号（2026-09-14）：at/to = {block, text?} → 桥自己按分词表折成 marker 起止。
+        if (arguments.ValueKind == JsonValueKind.Object
+            && arguments.TryGetProperty("at", out JsonElement atElement)
+            && !arguments.TryGetProperty("rangeRef", out _))
+        {
+            await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
+            JsonObject current = BuildToolPayload();
+            JsonElement? toElement = arguments.TryGetProperty("to", out JsonElement toValue) ? toValue : null;
+            if (!ReaderLocator.TryResolveRange(current, atElement, toElement, out JsonObject resolved, out string why))
+            {
+                await WriteReaderOutputToolErrorAsync(
+                    id,
+                    "BW_READER_LOCATOR_UNRESOLVED",
+                    why,
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            JsonObject rewritten = new()
+            {
+                ["rangeRef"] = resolved,
+                ["color"] = arguments.TryGetProperty("color", out JsonElement color) ? JsonNode.Parse(color.GetRawText()) : null,
+                ["note"] = arguments.TryGetProperty("note", out JsonElement note) ? JsonNode.Parse(note.GetRawText()) : null,
+            };
+            using JsonDocument document = JsonDocument.Parse(rewritten.ToJsonString());
+            arguments = document.RootElement.Clone();
+        }
         if (!TryReadHighlightRangeOutput(
             arguments,
             out JsonNode payload,
@@ -5144,13 +5175,25 @@ internal sealed class ReaderContextMcpServer
                 cancellationToken).ConfigureAwait(false);
             return null;
         }
-        ReaderRealtimeOutputRequest? request;
+        ReaderRealtimeOutputRequest? request = null;
         try
         {
-            request = BuildRealtimeOutputRequest(
-                current,
-                kind,
-                payload);
+            // 2026-09-15：App 的上下文链路重连的那一两秒里，快照暂时没有在线来源（实录 12:38 翻页 0.006 秒就报"来源未就绪"）。
+            // 等它回来，最多 4 秒；期间每 500 ms 重读一次快照。
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                request = BuildRealtimeOutputRequest(
+                    current,
+                    kind,
+                    payload);
+                if (request is not null)
+                {
+                    break;
+                }
+                await Task.Delay(500, cancellationToken).ConfigureAwait(false);
+                await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
+                current = BuildToolPayload();
+            }
         }
         catch (ReaderRealtimeOutputException exception)
         {
@@ -7793,6 +7836,35 @@ internal sealed class ReaderContextMcpServer
     // 只收敛**给模型的这一份**：payload 是 DeepClone 出来的，存储的快照、
     // 四处产生方、以及 CopyDrawing 那张一致性矩阵都不动。取图的准入条件
     // （drawingRevision）也因此原样保留在传输层。
+    private static JsonObject BuildLocatorSchema(string description) => new()
+    {
+        ["type"] = "object",
+        ["description"] = description,
+        ["additionalProperties"] = false,
+        ["properties"] = new JsonObject
+        {
+            ["selection"] = new JsonObject
+            {
+                ["type"] = "boolean",
+                ["description"] = "true = the user's current text selection (selectedItems kind=text / the 「他此刻明确选中了…」 line in the injected reading state). "
+                    + "Use this whenever the user says 这段/选中的/这个; no block or text needed.",
+            },
+            ["block"] = new JsonObject
+            {
+                ["type"] = "integer",
+                ["minimum"] = 1,
+                ["description"] = "The [NN] block number shown in the 【当前页结构化文字】 section of currentPage.text (numbers in the 之前/之后 sections do not count).",
+            },
+            ["text"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["minLength"] = 1,
+                ["maxLength"] = 200,
+                ["description"] = "Optional short phrase inside that block. Omit for the whole block.",
+            },
+        },
+    };
+
     private static void TrimDrawingForModel(JsonObject snapshot)
     {
         if (
@@ -7924,6 +7996,77 @@ internal sealed class ReaderContextMcpServer
         FoldActiveReadingIntoCurrentPage(snapshot);
         AttachTextMarksHint(snapshot);
         AttachSelectedItemsHint(snapshot);
+        SummarizeSystemStatusForModel(snapshot);
+    }
+
+    /// <summary>给模型的快照：连接/服务状态折成一行自然语言 `system`（用户 2026-09-15：正常就一句"系统连接正常"，
+    /// 出问题说故障类型），并去掉 mcp / visualAccess / outputAccess / live / basis / pinned / selectionState 这些结构化状态块
+    /// 与 currentPage 里的内部字段。⚠ 只在序列化前调用；工具的判定逻辑读的是未瘦身的快照。</summary>
+    internal static void SummarizeSystemStatusForModel(JsonObject snapshot)
+    {
+        var problems = new List<string>();
+        string? contextStatus = StringValue(snapshot["contextStatus"]);
+        if (contextStatus is not null && contextStatus != "ready")
+        {
+            problems.Add("阅读上下文未就绪（" + contextStatus + "），当前页文字不可用");
+        }
+        bool appOnline = true;
+        if (snapshot["outputAccess"] is JsonObject output)
+        {
+            appOnline = output["available"]?.GetValue<bool?>() == true;
+            if (!appOnline)
+            {
+                problems.Add("阅读器 App 此刻不在线（" + (StringValue(output["reason"]) ?? "原因未知")
+                    + "），翻页、划线、做卡这类操作会失败或排队等它回来");
+            }
+        }
+        if (
+            appOnline
+            && snapshot["visualAccess"] is JsonObject visual
+            && visual["available"]?.GetValue<bool?>() != true
+        )
+        {
+            problems.Add("暂时取不到页面图（" + (StringValue(visual["reason"]) ?? "原因未知") + "）");
+        }
+        if (snapshot["mcp"] is JsonObject mcp)
+        {
+            long loadErrors = 0;
+            if (mcp["loadErrors"] is JsonValue le && le.TryGetValue(out long leValue))
+            {
+                loadErrors = leValue;
+            }
+            if (loadErrors > 0)
+            {
+                problems.Add("快照文件读取出过 " + loadErrors + " 次错");
+            }
+        }
+        if (snapshot["kjPage"] is JsonObject kj && StringValue(kj["status"]) == "pending")
+        {
+            kj.Remove("note");
+            kj["hint"] = "本页知识点分析还在后台取，下一次快照会带上";
+        }
+        snapshot["system"] = problems.Count == 0
+            ? "系统连接正常。"
+            : "系统状态：" + string.Join("；", problems) + "。";
+        foreach (string key in new[]
+            {
+                "mcp", "visualAccess", "outputAccess", "live", "basis", "pinned",
+                "selectionReason", "producerInstanceId",   // selectionState 留着：一个标量，区分"还没快照"与"用户取消了选中"
+            })
+        {
+            snapshot.Remove(key);
+        }
+        if (snapshot["currentPage"] is JsonObject page)
+        {
+            foreach (string key in new[]
+                {
+                    "reason", "textSource", "fallbackReason", "observedAtEpochMs",
+                    "receivedAtEpochMs", "fresh", "ageSec",
+                })
+            {
+                page.Remove(key);
+            }
+        }
     }
 
     /// <summary>选中集合非空时，才解释它怎么读。</summary>
@@ -8791,5 +8934,355 @@ internal sealed class ReaderContextMcpServer
             return null;
         }
         return JsonNode.Parse(id.GetRawText());
+    }
+}
+
+/// <summary>
+/// 定位函数（2026-09-14）：位置信号 {block, text?} → 当前页分词表里的 marker 起止。
+/// 块号来自 currentPage.text 的 [NN] 行（一块一行，空白已折成单个空格）；分词表是
+/// currentPage.highlightSource.markers（对象 id→文字，或旧 App 的 [{marker,text}] 数组），按文档顺序。
+/// 匹配一律去掉空白再比：两边的空白处理本来就不保证一致。找不到就报错，不猜。
+/// </summary>
+internal static class ReaderLocator
+{
+    private sealed record Token(string Id, string Text);
+
+    internal static bool TryResolveRange(
+        JsonObject snapshot,
+        JsonElement at,
+        JsonElement? to,
+        out JsonObject rangeRef,
+        out string why)
+    {
+        rangeRef = new JsonObject();
+        why = "";
+        if (snapshot["currentPage"] is not JsonObject page)
+        {
+            why = "当前没有书页快照。";
+            return false;
+        }
+        if (page["highlightSource"] is not JsonObject source)
+        {
+            why = "当前页没有可划线的来源（不是书页，或 App 还没发布分词表）。";
+            return false;
+        }
+        List<Token> tokens = ReadTokens(source["markers"]);
+        if (tokens.Count == 0)
+        {
+            why = "当前页的分词表是空的。";
+            return false;
+        }
+        Dictionary<int, string> blocks = ParseBlocks(page["text"]?.GetValue<string>() ?? "");
+        bool atIsSelection = at.ValueKind == JsonValueKind.Object
+            && at.TryGetProperty("selection", out JsonElement selectionFlag)
+            && selectionFlag.ValueKind == JsonValueKind.True;
+        int atBlock = 0;
+        string atNeedle = "";
+        if (!atIsSelection && !TryReadLocator(at, blocks, out atBlock, out atNeedle, out why))
+        {
+            return false;
+        }
+        // 去空白后的分词拼接串 + 每个字符属于哪个 token
+        var haystack = new StringBuilder();
+        var owner = new List<int>();
+        for (int index = 0; index < tokens.Count; index += 1)
+        {
+            foreach (char character in tokens[index].Text)
+            {
+                if (char.IsWhiteSpace(character)) continue;
+                haystack.Append(character);
+                owner.Add(index);
+            }
+        }
+        string hay = haystack.ToString();
+        int startChar;
+        int endCharExclusive;
+        int atStart;
+        if (atIsSelection)
+        {
+            // 选区：用户此刻选中的原文（selectedItems kind=text / selection.text）在分词表里找起止。
+            string selected = Squash(CurrentSelectionText(snapshot));
+            if (selected.Length == 0)
+            {
+                why = "当前没有文字选区（selectedItems 里没有 kind=text 的项）。";
+                return false;
+            }
+            atStart = hay.IndexOf(selected, StringComparison.Ordinal);
+            int matchedLength = selected.Length;
+            if (atStart < 0)
+            {
+                // 选区跨了换行/空白差异时只认开头一截，再按选区长度截取
+                string head = selected.Length > 24 ? selected[..24] : selected;
+                atStart = hay.IndexOf(head, StringComparison.Ordinal);
+                if (atStart < 0)
+                {
+                    why = "选中的文字在当前页分词表里找不到（选区可能已不在这一页）。";
+                    return false;
+                }
+                matchedLength = Math.Min(selected.Length, hay.Length - atStart);
+            }
+            startChar = atStart;
+            endCharExclusive = atStart + matchedLength;
+        }
+        else
+        {
+            atStart = FindBlock(hay, blocks[atBlock], atBlock, out why);
+            if (atStart < 0) return false;
+            startChar = atStart;
+            endCharExclusive = atStart + Squash(blocks[atBlock]).Length;
+        }
+        if (!atIsSelection && atNeedle.Length > 0)
+        {
+            int inner = hay.IndexOf(atNeedle, atStart, Math.Min(hay.Length - atStart, Squash(blocks[atBlock]).Length), StringComparison.Ordinal);
+            if (inner < 0)
+            {
+                why = "第 " + atBlock + " 块里找不到「" + atNeedle + "」。";
+                return false;
+            }
+            startChar = inner;
+            endCharExclusive = inner + atNeedle.Length;
+        }
+        if (to is JsonElement toElement && toElement.ValueKind == JsonValueKind.Object)
+        {
+            if (!TryReadLocator(toElement, blocks, out int toBlock, out string toNeedle, out why))
+            {
+                return false;
+            }
+            int toStart = FindBlock(hay, blocks[toBlock], toBlock, out why);
+            if (toStart < 0) return false;
+            int toEndExclusive = toStart + Squash(blocks[toBlock]).Length;
+            if (toNeedle.Length > 0)
+            {
+                int inner = hay.IndexOf(toNeedle, toStart, Math.Min(hay.Length - toStart, Squash(blocks[toBlock]).Length), StringComparison.Ordinal);
+                if (inner < 0)
+                {
+                    why = "第 " + toBlock + " 块里找不到「" + toNeedle + "」。";
+                    return false;
+                }
+                toEndExclusive = inner + toNeedle.Length;
+            }
+            if (toEndExclusive <= startChar)
+            {
+                why = "to 在 at 之前，范围是空的。";
+                return false;
+            }
+            endCharExclusive = toEndExclusive;
+        }
+        int startToken = owner[startChar];
+        int lastToken = owner[endCharExclusive - 1];
+        string startMarker = tokens[startToken].Id;
+        string endMarker;
+        if (lastToken + 1 < tokens.Count)
+        {
+            endMarker = tokens[lastToken + 1].Id;
+        }
+        else
+        {
+            why = "范围一直到页尾，但分词表没有结尾哨兵标记，无法表示。";
+            return false;
+        }
+        rangeRef = new JsonObject
+        {
+            ["contract"] = "reader-source-range/1",
+            ["snapshotId"] = source["snapshotId"]?.DeepClone(),
+            ["documentId"] = source["documentId"]?.DeepClone(),
+            ["target"] = source["target"]?.DeepClone(),
+            ["sourceDigest"] = source["sourceDigest"]?.DeepClone(),
+            ["revision"] = source["revision"]?.DeepClone(),
+            ["startMarker"] = startMarker,
+            ["endMarker"] = endMarker,
+        };
+        return true;
+    }
+
+    private static bool TryReadLocator(
+        JsonElement locator,
+        Dictionary<int, string> blocks,
+        out int block,
+        out string needle,
+        out string why)
+    {
+        block = 0;
+        needle = "";
+        why = "";
+        if (locator.ValueKind != JsonValueKind.Object
+            || !locator.TryGetProperty("block", out JsonElement blockElement)
+            || !blockElement.TryGetInt32(out block)
+            || block < 1)
+        {
+            why = "位置信号要有 block（【当前页结构化文字】里的 [NN] 块号），或者 selection:true 表示当前选区。";
+            return false;
+        }
+        if (!blocks.ContainsKey(block))
+        {
+            why = "当前页文字里没有第 " + block + " 块（块号只看【当前页结构化文字】那一段里的 [NN]，上一页/下一页那两段的编号不算）。";
+            return false;
+        }
+        if (locator.TryGetProperty("text", out JsonElement textElement) && textElement.ValueKind == JsonValueKind.String)
+        {
+            needle = Squash(textElement.GetString() ?? "");
+        }
+        return true;
+    }
+
+    private static int FindBlock(string hay, string blockText, int block, out string why)
+    {
+        why = "";
+        string needle = Squash(blockText);
+        if (needle.Length == 0)
+        {
+            why = "第 " + block + " 块是空的。";
+            return -1;
+        }
+        int index = hay.IndexOf(needle, StringComparison.Ordinal);
+        if (index < 0)
+        {
+            // 块比分词表长（被截断）或块不在当前页：用前 24 个字符再试一次定位
+            string head = needle.Length > 24 ? needle[..24] : needle;
+            index = hay.IndexOf(head, StringComparison.Ordinal);
+            if (index < 0)
+            {
+                why = "第 " + block + " 块不在当前页的分词表里（上一页/下一页的上下文块不能划线）。";
+                return -1;
+            }
+        }
+        return index;
+    }
+
+    /// <summary>从 currentPage.text 里解析**当前页**的 [NN] 块。
+    /// App 给的正文分三段：【当前页之前】/【当前页结构化文字…】（Markdown 表格）/【当前页之后】，
+    /// 三段的 [NN] 各自从 01 起编号，当前页的 [NN] 嵌在表格单元格里（不在行首，一行可有多个）。
+    /// 所以：① 只取"当前页"那一段（有分段头时）；② 同一行里逐个 [NN] 切出正文；③ 单元格分隔 | 与 &lt;br&gt; 当空白。
+    /// 2026-09-14 前的版本只认行首 [NN]，解析到的全是上一页的块 —— 用户划线 6 次全败。</summary>
+    /// <summary>当前文字选区的原文：selectedItems 里 kind=text 那项；退回 snapshot.selection.text（state=active）。</summary>
+    internal static string CurrentSelectionText(JsonObject snapshot)
+    {
+        if (snapshot["selectedItems"] is JsonArray items)
+        {
+            foreach (JsonNode? node in items)
+            {
+                if (node is JsonObject item
+                    && item["kind"]?.GetValue<string>() == "text"
+                    && item["text"]?.GetValue<string>() is string text
+                    && text.Length > 0)
+                {
+                    return text;
+                }
+            }
+        }
+        if (snapshot["selection"] is JsonObject selection
+            && selection["state"]?.GetValue<string>() == "active"
+            && selection["text"]?.GetValue<string>() is string selectedText)
+        {
+            return selectedText;
+        }
+        return "";
+    }
+
+    internal static Dictionary<int, string> ParseBlocks(string text)
+    {
+        var blocks = new Dictionary<int, string>();
+        string scope = CurrentPageSection(text ?? "");
+        var tagPattern = new System.Text.RegularExpressions.Regex(@"\[(\d{1,3})\]");
+        foreach (string rawLine in scope.Split('\n'))
+        {
+            string line = rawLine.TrimEnd('\r')
+                .Replace("<br>", " ", StringComparison.OrdinalIgnoreCase)
+                .Replace("<br/>", " ", StringComparison.OrdinalIgnoreCase)
+                .Replace('|', ' ');
+            System.Text.RegularExpressions.MatchCollection tags = tagPattern.Matches(line);
+            for (int i = 0; i < tags.Count; i += 1)
+            {
+                if (!int.TryParse(tags[i].Groups[1].Value, out int number)) continue;
+                int bodyStart = tags[i].Index + tags[i].Length;
+                int bodyEnd = i + 1 < tags.Count ? tags[i + 1].Index : line.Length;
+                string body = line[bodyStart..bodyEnd].Trim();
+                if (body.Length == 0) continue;
+                if (blocks.TryGetValue(number, out string? existing))
+                {
+                    blocks[number] = existing + " " + body;   // 同一块被表格拆到两格（[13] 調理に従事する調 / [14] …）按出现顺序拼回
+                }
+                else
+                {
+                    blocks[number] = body;
+                }
+            }
+        }
+        return blocks;
+    }
+
+    /// <summary>有分段头就只要"当前页"那段（头里含"当前页"且不含"之前/之后"）；没有分段头就整段都算。</summary>
+    internal static string CurrentPageSection(string text)
+    {
+        string[] lines = text.Split('\n');
+        bool sawHeader = false;
+        bool inCurrent = false;
+        var builder = new StringBuilder();
+        foreach (string rawLine in lines)
+        {
+            string line = rawLine.TrimEnd('\r');
+            if (line.StartsWith("【", StringComparison.Ordinal))
+            {
+                sawHeader = true;
+                inCurrent = line.Contains("当前页", StringComparison.Ordinal)
+                    && !line.Contains("之前", StringComparison.Ordinal)
+                    && !line.Contains("之后", StringComparison.Ordinal)
+                    && !line.Contains("锚点", StringComparison.Ordinal);
+                continue;
+            }
+            if (inCurrent)
+            {
+                builder.Append(line).Append('\n');
+            }
+        }
+        return sawHeader ? builder.ToString() : text;
+    }
+
+    private static List<Token> ReadTokens(JsonNode? markers)
+    {
+        var tokens = new List<Token>();
+        if (markers is JsonObject map)
+        {
+            foreach (KeyValuePair<string, JsonNode?> pair in map)
+            {
+                tokens.Add(new Token(pair.Key, pair.Value?.GetValue<string>() ?? ""));
+            }
+        }
+        else if (markers is JsonArray list)
+        {
+            foreach (JsonNode? item in list)
+            {
+                if (item is JsonObject entry && entry["marker"]?.GetValue<string>() is string id)
+                {
+                    tokens.Add(new Token(id, entry["text"]?.GetValue<string>() ?? ""));
+                }
+            }
+        }
+        return tokens;
+    }
+
+    private static string Squash(string value)
+    {
+        var builder = new StringBuilder(value.Length);
+        foreach (char character in value)
+        {
+            if (!char.IsWhiteSpace(character)) builder.Append(character);
+        }
+        return builder.ToString();
+    }
+
+    /// <summary>给模型的快照不带分词表：只留数量。⚠ 只在序列化前调用；范围校验用的是未瘦身的快照。</summary>
+    internal static void TrimMarkersForModel(JsonObject snapshot)
+    {
+        if (snapshot["currentPage"] is not JsonObject page
+            || page["highlightSource"] is not JsonObject source
+            || source["markers"] is not JsonNode markers)
+        {
+            return;
+        }
+        int count = markers is JsonArray array ? array.Count : (markers is JsonObject map ? map.Count : 0);
+        source.Remove("markers");
+        source["markerCount"] = count;
+        source["locator"] = "reader_highlight_range at/to = {block, text?}";
     }
 }

@@ -1347,39 +1347,73 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 request.AppKind,
                 request.AppUserModelId);
             ConfigureVoiceTarget(request.AppKind);
+            // 2026-09-14：外部语音后端（runtime/voice-backend-external.json）= 通话另一头是
+            // 自建的语音核心运行器，不是桌面 Codex。目标进程就是运行器（协调器已按 runner.pid
+            // 解析），所以这里**不能**再去探 Codex 进程树、校验它的全局快捷键、等它的麦克风
+            // 台账 —— Codex 根本不在，RequireReady 抛 InvalidOperationException，被包成
+            // MEDIA_START_FAILED，App 一点就断（实录 01:18:38 / 01:19:44 两次，
+            // 语音核心连 /session/start 都没收到，因为失败发生在调它之前）。
+            bool externalBackend =
+                DirectBridgeProtocolSession.ExternalVoiceBackendEnabled();
+            // 按应用路由是给 Codex 切设备用的；运行器自己选设备，而且它空闲时没有
+            // 音频会话，策略存储会回 E_INVALIDARG。
+            bool automateRoute =
+                request.AutomatePerAppAudioRoute && !externalBackend;
             _ = DirectPcmFrameCodec.ParseSessionId(request.SessionId);
             VirtualMicrophoneRenderRequest virtualMicrophone =
                 VirtualMicrophoneRenderRequest.Create(
                     request.VirtualMicrophoneRenderEndpointId);
-            if (
-                string.Equals(
-                    request.VirtualMicrophoneRenderEndpointId,
-                    request.VirtualSpeakerRenderEndpointId,
-                    StringComparison.Ordinal)
-            )
+            // 2026-09-15：直连管道（runtime/voice-audio-pipe.json）= 这次通话的 PCM
+            // 直接和语音核心对流，一根虚拟声卡都不碰。下面那三处端点校验是给线缆
+            // 那条路把关的，直连模式下不但多余，还会让"没装 VB-Cable 的机器"起不来。
+            // ⚠ 标记文件在但读不了，**不降级**：悄悄退回线缆那条路会变成"声音莫名
+            // 绕了一大圈还多了 80 ms"，而没有任何地方说得出为什么。
+            DirectAudioPipeConfig? audioPipe =
+                DirectAudioPipe.Read(out string? audioPipeFault);
+            if (audioPipeFault is not null)
             {
                 throw new DirectProtocolException(
-                    "BW_COMPUTER_VOICE_DIRECT_RENDER_ENDPOINTS_NOT_DISTINCT",
-                    "虚拟麦克风与虚拟扬声器必须使用不同播放端点");
+                    "BW_COMPUTER_VOICE_DIRECT_AUDIO_PIPE_INVALID",
+                    audioPipeFault);
             }
-            // This verifies only that the separately selected Codex-output
-            // endpoint exists as an active eRender endpoint.  It does not
-            // claim or alter the Windows per-app route.
-            VirtualRenderEndpointProbe.ValidateExactActiveRender(
-                request.VirtualSpeakerRenderEndpointId,
-                "virtual-speaker");
-            if (request.AutomatePerAppAudioRoute)
+            if (audioPipe is null)
             {
-                VirtualCaptureEndpointProbe.ValidateExactActiveCapture(
-                    request.VirtualMicrophoneCaptureEndpointId);
+                if (
+                    string.Equals(
+                        request.VirtualMicrophoneRenderEndpointId,
+                        request.VirtualSpeakerRenderEndpointId,
+                        StringComparison.Ordinal)
+                )
+                {
+                    throw new DirectProtocolException(
+                        "BW_COMPUTER_VOICE_DIRECT_RENDER_ENDPOINTS_NOT_DISTINCT",
+                        "虚拟麦克风与虚拟扬声器必须使用不同播放端点");
+                }
+                // This verifies only that the separately selected Codex-output
+                // endpoint exists as an active eRender endpoint.  It does not
+                // claim or alter the Windows per-app route.
+                VirtualRenderEndpointProbe.ValidateExactActiveRender(
+                    request.VirtualSpeakerRenderEndpointId,
+                    "virtual-speaker");
+                if (automateRoute)
+                {
+                    VirtualCaptureEndpointProbe.ValidateExactActiveCapture(
+                        request.VirtualMicrophoneCaptureEndpointId);
+                }
+                if (request.FixedVirtualAudioBus)
+                {
+                    VirtualCaptureEndpointProbe.ValidateExactActiveCapture(
+                        request.VirtualSpeakerCaptureEndpointId);
+                }
             }
-            if (request.FixedVirtualAudioBus)
-            {
-                VirtualCaptureEndpointProbe.ValidateExactActiveCapture(
-                    request.VirtualSpeakerCaptureEndpointId);
-            }
-            CodexAppTarget target =
-                WindowsCodexAppProbe.RequireReady(request.AppKind);
+            CodexAppTarget target = externalBackend
+                ? new CodexAppTarget(
+                    request.RootProcessId,
+                    request.RootProcessStartFileTimeUtc,
+                    new HashSet<uint> { request.RootProcessId },
+                    0,
+                    request.AppKind)
+                : WindowsCodexAppProbe.RequireReady(request.AppKind);
             if (
                 target.RootProcessId != request.RootProcessId
                 || target.AppKind != request.AppKind
@@ -1401,7 +1435,7 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
             // The installed Codex command is an OS-global hotkey. Validate
             // the single-user local binding before typist or either audio
             // session starts, then revalidate again at the shortcut boundary.
-            if (appProfile.UsesCodexGlobalShortcut)
+            if (appProfile.UsesCodexGlobalShortcut && !externalBackend)
             {
                 WindowsCodexAppProbe
                     .RequireExpectedGlobalVoiceShortcut();
@@ -1415,7 +1449,7 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
             // 效果等价,且路由仍在发送启动指令(下方 shortcut 边界)之前完成,
             // 音频服务起来时已经落在虚拟线上。Codex 分支行为保持不变。
             if (
-                request.AutomatePerAppAudioRoute
+                automateRoute
                 && appProfile.UsesCodexGlobalShortcut
             )
             {
@@ -1430,30 +1464,42 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 audioPolicyProcessId = audioPolicyTarget.ProcessId;
             }
             if (
-                request.AutomatePerAppAudioRoute
+                automateRoute
                 && appProfile.AppKind == DirectAppTargets.ChatGptClassic
             )
             {
                 PrimeClassicAudioSession(audioPolicyProcessId, target);
             }
-            _ = await VoiceActivity.WaitForAvailableAsync(
-                VoiceReadyTimeout,
-                CodexVoiceActivityController.MonitorInterval,
-                cancellationToken).ConfigureAwait(false);
-            initialVoiceBaseline =
-                VoiceActivity.CaptureStartBaseline();
+            if (!externalBackend)
+            {
+                _ = await VoiceActivity.WaitForAvailableAsync(
+                    VoiceReadyTimeout,
+                    CodexVoiceActivityController.MonitorInterval,
+                    cancellationToken).ConfigureAwait(false);
+                initialVoiceBaseline =
+                    VoiceActivity.CaptureStartBaseline();
+            }
             // 下行（AI 声音）满了丢最旧的包，不拆媒体（2026-09-06 审计 C04）。
             BoundedPcmPacketQueue outputQueue = new(
                 32,
                 2 * 1024 * 1024,
                 dropOldestWhenFull: true);
             DirectOutputCaptureSession outputSession =
-                DirectOutputCaptureSession.Prepare(
-                    request,
-                    outputQueue);
+                audioPipe is null
+                    ? DirectOutputCaptureSession.Prepare(
+                        request,
+                        outputQueue)
+                    : DirectOutputCaptureSession.PrepareDirectPipe(
+                        request,
+                        outputQueue,
+                        audioPipe);
             VirtualMicrophoneRenderSession renderSession =
-                VirtualMicrophoneRenderSession.Prepare(
-                    virtualMicrophone);
+                audioPipe is null
+                    ? VirtualMicrophoneRenderSession.Prepare(
+                        virtualMicrophone)
+                    : VirtualMicrophoneRenderSession.PrepareWithRuntime(
+                        virtualMicrophone,
+                        new UdpUplinkRenderRuntimeFactory(audioPipe));
             CancellationTokenSource lifetime =
                 CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken);
@@ -1464,7 +1510,7 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                     target);
             try
             {
-                if (request.AutomatePerAppAudioRoute)
+                if (automateRoute)
                 {
                     pendingAudioPolicyBackend =
                         _audioPolicyBackendFactory();
@@ -1568,7 +1614,7 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                         VirtualRenderEndpointProbe.ValidateExactActiveRender(
                             request.VirtualSpeakerRenderEndpointId,
                             "virtual-speaker");
-                        if (request.AutomatePerAppAudioRoute)
+                        if (automateRoute)
                         {
                             VirtualCaptureEndpointProbe
                                 .ValidateExactActiveCapture(
@@ -1592,16 +1638,18 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                             outputSession.Completion.IsCompleted,
                             renderSession.State,
                             renderSession.Completion.IsCompleted);
-                        boundaryVoiceBaseline =
-                            VoiceActivity.CaptureStartBaseline();
+                        boundaryVoiceBaseline = externalBackend
+                            ? null
+                            : VoiceActivity.CaptureStartBaseline();
                     },
                     () =>
                     {
-                        CodexVoiceStartBaseline baseline =
-                            boundaryVoiceBaseline
-                            ?? throw new DirectProtocolException(
+                        if (!externalBackend && boundaryVoiceBaseline is null)
+                        {
+                            throw new DirectProtocolException(
                                 "BW_COMPUTER_VOICE_DIRECT_VOICE_BASELINE_MISSING",
                                 "Codex 语音状态基线不存在");
+                        }
                         // Codex's own voice is no longer opened from here.
                         //
                         // Starting it was the source of every start-time
@@ -2747,6 +2795,32 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         {
             _voiceStartBaseline = null;
         }
+    }
+
+    /// <summary>语音核心那头结束了（后台模型调 voice_session_stop、用户口头挂断、运行器退出）。
+    /// 走 MonitorVoiceAsync 里"Codex 本地关闭"同一条收口：置终态失败、完成 Completion、
+    /// 取消这一代的 lifetime、排清理。App 连接监视到 Completion 就会关连接 —— 这就是按钮灭灯的信号。</summary>
+    public bool EndFromVoiceCore(string reason)
+    {
+        CancellationTokenSource? lifetime = Volatile.Read(ref _captureLifetime);
+        TaskCompletionSource<DirectProtocolException?>? completion = _completionSource;
+        if (lifetime is null || completion is null || !_captureActive)
+        {
+            return false;
+        }
+        DirectProtocolException failure = new(
+            "BW_COMPUTER_VOICE_DIRECT_VOICE_ENDED_BY_CORE",
+            "语音核心已结束通话（" + reason + "）",
+            retryable: false);
+        _ = Interlocked.CompareExchange(
+            ref _terminalMediaFailure,
+            failure,
+            null);
+        completion.TrySetResult(failure);
+        _captureActive = false;
+        lifetime.Cancel();
+        ScheduleOwnedFailureCleanup(lifetime);
+        return true;
     }
 
     private async Task MonitorVoiceAsync(

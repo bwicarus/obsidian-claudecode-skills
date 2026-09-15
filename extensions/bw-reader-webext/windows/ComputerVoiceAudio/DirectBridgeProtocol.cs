@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -265,6 +266,15 @@ internal sealed class DirectCodexVoiceControl :
         bool active,
         CancellationToken cancellationToken)
     {
+        // 2026-09-15：外部语音后端（runtime/voice-backend-external.json）在时，桌面 Codex 这条线已弃用 ——
+        // 绝不拉起它、也不去按它的快捷键。实录 03:10:46：语音核心重启的十几秒里，voice-entry 走到这里把桌面 Codex 拉了起来。
+        if (DirectBridgeProtocolSession.ExternalVoiceBackendEnabled())
+        {
+            return new DirectCodexVoiceSetResult(
+                ReadState(),
+                ShortcutSent: false,
+                Withheld: "external-backend");
+        }
         return await SetActiveSerializedAsync(
             active,
             cancellationToken).ConfigureAwait(false);
@@ -3025,6 +3035,49 @@ internal sealed class DirectBridgeProtocolSession
         RequireVoiceAllowed();
         string requestId = RequireString(message, "requestId", 128);
         string text = RequireString(message, "text", 4000);
+        if (ExternalVoiceBackendEnabled() && !ReaderCodexPush.OutboundSealed)
+        {
+            // 2026-09-14：通话另一头是语音核心，不是桌面 Codex —— 台账里永远查不到"在通话"，
+            // 旧闸会把每一句都以 not-in-call 退回。打字内容交给语音核心：语音会话在线就追加
+            // 进语音会话（v3 空闲时自动起一轮、语音模型开口答），不在线就让后台文字线程起一轮。
+            string? body = await VoiceCoreRequestBodyAsync(
+                "/typed",
+                JsonSerializer.Serialize(new { text }),
+                "voice-core-typed:" + requestId).ConfigureAwait(false);
+            bool accepted = false;
+            string via = string.Empty;
+            if (body is not null)
+            {
+                try
+                {
+                    using JsonDocument document = JsonDocument.Parse(body);
+                    JsonElement root = document.RootElement;
+                    accepted = root.TryGetProperty("ok", out JsonElement okElement)
+                        && okElement.ValueKind == JsonValueKind.True;
+                    if (root.TryGetProperty("via", out JsonElement viaElement)
+                        && viaElement.ValueKind == JsonValueKind.String)
+                    {
+                        via = viaElement.GetString() ?? string.Empty;
+                    }
+                }
+                catch (JsonException)
+                {
+                }
+            }
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                "reader-user-typed", accepted,
+                accepted
+                    ? "打字内容已交给语音核心（" + (via == "voice" ? "追加进语音会话" : "后台文字线程起一轮") + "，" + text.Length + " 字）"
+                    : "语音核心没接住打字内容");
+            return new
+            {
+                ok = accepted,
+                reason = accepted ? "sent" : "not-sent",
+                detail = accepted
+                    ? (via == "voice" ? "已追加进语音会话" : "已交给后台文字线程")
+                    : "语音核心没接住这句（它在跑吗？）",
+            };
+        }
         bool inCall = false;
         try
         {
@@ -3967,6 +4020,72 @@ internal sealed class DirectBridgeProtocolSession
     /// 整段是 fire-and-forget：推送慢或管道不通绝不能拖住/弄失败一次已经成功的
     /// START。发没发成写在 ReaderCodexPush 的 lastNote 里。
     /// </remarks>
+    internal const string ExternalVoiceBackendFileName = "voice-backend-external.json";
+    internal const string VoiceCoreBaseUrl = "http://127.0.0.1:43131";
+    private static readonly HttpClient VoiceCoreHttp = new() { Timeout = TimeSpan.FromSeconds(150) };
+
+    /// <summary>叫语音核心做一件事（开/停会话）。结果只记账本，不阻塞协议线程。</summary>
+    internal static async Task VoiceCoreRequestAsync(string path, string json, string tag)
+    {
+        try
+        {
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            using HttpResponseMessage response = await VoiceCoreHttp
+                .PostAsync(VoiceCoreBaseUrl + path, content)
+                .ConfigureAwait(false);
+            string body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                tag,
+                response.IsSuccessStatusCode,
+                "语音核心 " + path + " → HTTP " + ((int)response.StatusCode).ToString(CultureInfo.InvariantCulture)
+                + " " + (body.Length > 160 ? body[..160] : body));
+        }
+        catch (Exception ex)
+        {
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                tag,
+                false,
+                "语音核心 " + path + " 没打通：" + ex.GetType().Name + " " + ex.Message);
+        }
+    }
+
+    /// <summary>同 VoiceCoreRequestAsync，但把响应体带回来（打字这类要知道它到底收没收）。失败回 null。</summary>
+    internal static async Task<string?> VoiceCoreRequestBodyAsync(string path, string json, string tag)
+    {
+        try
+        {
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            using HttpResponseMessage response = await VoiceCoreHttp
+                .PostAsync(VoiceCoreBaseUrl + path, content)
+                .ConfigureAwait(false);
+            string body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                ReaderCodexPush.NoteVoiceEntryOutcome(
+                    tag, false,
+                    "语音核心 " + path + " → HTTP " + ((int)response.StatusCode).ToString(CultureInfo.InvariantCulture)
+                    + " " + (body.Length > 160 ? body[..160] : body));
+                return null;
+            }
+            return body;
+        }
+        catch (Exception ex)
+        {
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                tag, false,
+                "语音核心 " + path + " 没打通：" + ex.GetType().Name + " " + ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>runtime 目录里放了 voice-backend-external.json = 通话另一头是我们自己的 CLI 语音会话。</summary>
+    internal static bool ExternalVoiceBackendEnabled()
+    {
+        string? runtime = ReaderAttentionBoard.RuntimeDirectory;
+        return !string.IsNullOrEmpty(runtime)
+            && File.Exists(Path.Combine(runtime, ExternalVoiceBackendFileName));
+    }
+
     private void RequestVoiceEntryIfNobodyElseWill(
         string appKind,
         string sessionId)
@@ -3994,6 +4113,23 @@ internal sealed class DirectBridgeProtocolSession
                 DirectAppTargets.CodexDesktop,
                 StringComparison.Ordinal))
         {
+            return;
+        }
+        // 外部语音后端（2026-09-13 用户：「临时更改本地的线路，两条虚拟线缆不连旧的
+        // Codex App 而是连到我们自己的 CLI 语音上」）：runtime/voice-backend-external.json
+        // 在，就不去拉桌面 Codex 的语音 —— App 的音频照常走两条线缆，另一头由自建的
+        // app-server 语音会话接住。桌面 Codex 留着不动。
+        if (ExternalVoiceBackendEnabled())
+        {
+            // 2026-09-14：桌面 Codex 这条线已弃用。App 的 START 直接叫语音核心开一场"App 档位"的会话
+            // （音频走两条虚拟线缆），STOP 时再叫它停。语音核心不在 = 用户没开 ReaderPC，那就什么都不做。
+            ReaderCodexPush.NoteVoiceEntryOutcome(
+                "external-backend", true,
+                "语音核心在（voice-backend-external.json）：叫它开 App 档位会话，不拉桌面 Codex");
+            _ = VoiceCoreRequestAsync(
+                "/session/start",
+                "{\"profile\":\"app\",\"reason\":\"app-start:" + (sessionId.Length > 12 ? sessionId[..12] : sessionId) + "\"}",
+                "voice-core-start");
             return;
         }
         if (_codexVoiceControl.KeepActive)
@@ -5105,6 +5241,14 @@ internal sealed class DirectBridgeProtocolSession
             _connectionId,
             sessionId,
             cancellationToken).ConfigureAwait(false);
+        if (ExternalVoiceBackendEnabled())
+        {
+            // App 挂断 → 语音核心也停（等它把嘴里的话说完）
+            _ = VoiceCoreRequestAsync(
+                "/session/stop",
+                "{\"afterSpeech\":true,\"graceSeconds\":4,\"reason\":\"app-stop\"}",
+                "voice-core-stop");
+        }
         _phase = DirectProtocolPhase.AwaitingStart;
         _activeVoiceSessionId = null;
         _activeVoiceAppKind = null;

@@ -108,6 +108,19 @@ internal sealed class ProcessLoopbackCaptureSession :
             options ?? CaptureSessionOptions.Default,
             new NativeProcessLoopbackCaptureRuntimeFactory());
 
+    /// <summary>用指定的采集运行时起会话。直连管道（DirectAudioPipe）走这里：
+    /// 帧器与下行队列不变，只把"从声卡读"换成"从运行器收"。</summary>
+    internal static ProcessLoopbackCaptureSession PrepareWithRuntime(
+        uint targetProcessId,
+        IBoundedPcmSink sink,
+        IProcessLoopbackCaptureRuntimeFactory runtimeFactory,
+        CaptureSessionOptions? options = null) =>
+        new(
+            targetProcessId,
+            sink,
+            options ?? CaptureSessionOptions.Default,
+            runtimeFactory);
+
     internal static ProcessLoopbackCaptureSession PrepareForTest(
         uint targetProcessId,
         IBoundedPcmSink sink,

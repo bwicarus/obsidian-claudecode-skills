@@ -672,6 +672,18 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/reader-output/receipt",
             new[] { "POST", "OPTIONS" },
             context => HandleOutputReceiptAsync(context, serviceToken));
+        // 语音核心（本机运行器）说"这通我这边结束了"（2026-09-14）：后台模型调
+        // voice_session_stop 挂断后，App 那头的按钮还绿着 —— 桥从没被告知。只收本机进程。
+        app.MapMethods(
+            "/voice-core/session-ended",
+            new[] { "POST" },
+            context => HandleVoiceCoreSessionEndedAsync(context, serviceToken));
+        // 语音核心要一张当前页/圈画附近的合成图（2026-09-15 用户：开口时有新笔迹就把图随状态注入后台）。
+        // 复用 reader_visual_image 工具同一套请求构造与取图代理；只收本机进程。
+        app.MapMethods(
+            "/voice-core/visual-image",
+            new[] { "POST" },
+            context => HandleVoiceCoreVisualImageAsync(context, serviceToken));
         // GET（2026-09-05）= 双工诊断只读口；POST 才是快照与钉住。方法表不放行 GET 的
         // 表现是 404，而处理函数里的 GET 分支看起来完全正常 —— 0.1.288 就这么丢过一次。
         app.MapMethods(
@@ -2904,6 +2916,143 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             serviceCancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>只有本机进程能叫：回环地址，且没有 tailscale serve 注入的身份头
+    /// （经 serve 进来的设备请求也落在回环上，但一定带 Tailscale-User-Login）。</summary>
+    private static bool IsLocalProcessCaller(HttpContext context)
+    {
+        IPAddress? remote = context.Connection.RemoteIpAddress;
+        return remote is not null
+            && IPAddress.IsLoopback(remote)
+            && string.IsNullOrEmpty(context.Request.Headers["Tailscale-User-Login"])
+            && string.IsNullOrEmpty(context.Request.Headers["X-Forwarded-For"]);
+    }
+
+    private async Task HandleVoiceCoreVisualImageAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!IsLocalProcessCaller(context))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+        string scope = "drawing-nearby";
+        try
+        {
+            using JsonDocument body = await JsonDocument.ParseAsync(
+                context.Request.Body,
+                cancellationToken: serviceCancellationToken).ConfigureAwait(false);
+            if (body.RootElement.ValueKind == JsonValueKind.Object
+                && body.RootElement.TryGetProperty("scope", out JsonElement scopeElement)
+                && scopeElement.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(scopeElement.GetString()))
+            {
+                scope = scopeElement.GetString()!;
+            }
+        }
+        catch (JsonException)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return;
+        }
+        context.Response.ContentType = "application/json; charset=utf-8";
+        JsonObject? payload = null;
+        try
+        {
+            string statePath = Path.Combine(_runtimeDirectory, "reader-context-snapshot.json");
+            if (File.Exists(statePath))
+            {
+                payload = JsonNode.Parse(await File.ReadAllTextAsync(statePath, serviceCancellationToken)
+                    .ConfigureAwait(false)) as JsonObject;
+            }
+        }
+        catch (Exception exception) when (exception is IOException or JsonException)
+        {
+            payload = null;
+        }
+        ReaderVisualDeliveryRequest? request = payload is null
+            ? null
+            : ReaderContextMcpServer.BuildVisualRequest(payload, scope, null);
+        if (request is null)
+        {
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, reason = "visual-source-not-ready", scope },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        try
+        {
+            ReaderVisualCapture? capture = await _readerVisualBroker.RequestAsync(
+                request,
+                serviceCancellationToken).ConfigureAwait(false);
+            if (capture is null || capture.Data.Length == 0)
+            {
+                await context.Response.WriteAsJsonAsync(
+                    new { ok = false, reason = "visual-unavailable", scope },
+                    serviceCancellationToken).ConfigureAwait(false);
+                return;
+            }
+            await context.Response.WriteAsJsonAsync(
+                new
+                {
+                    ok = true,
+                    scope,
+                    mimeType = capture.MimeType,
+                    bytes = capture.Data.Length,
+                    base64 = Convert.ToBase64String(capture.Data),
+                    drawingRevision = request.DrawingRevision,
+                    snapshotRevision = request.SnapshotRevision,
+                    file = request.File,
+                },
+                serviceCancellationToken).ConfigureAwait(false);
+        }
+        catch (ReaderVisualDeliveryException exception)
+        {
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, reason = exception.Code, message = exception.Message, scope },
+                serviceCancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleVoiceCoreSessionEndedAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!IsLocalProcessCaller(context))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+        string reason = "voice-core";
+        try
+        {
+            using JsonDocument body = await JsonDocument.ParseAsync(
+                context.Request.Body,
+                cancellationToken: serviceCancellationToken).ConfigureAwait(false);
+            if (body.RootElement.ValueKind == JsonValueKind.Object
+                && body.RootElement.TryGetProperty("reason", out JsonElement reasonElement)
+                && reasonElement.ValueKind == JsonValueKind.String)
+            {
+                string? value = reasonElement.GetString();
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    reason = value.Length > 80 ? value[..80] : value;
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return;
+        }
+        bool ended = _coordinator.EndFromVoiceCore(reason);
+        AppendOutputPickupLog("voice-core-ended	" + reason + "	ended=" + (ended ? "1" : "0"));
+        context.Response.ContentType = "application/json; charset=utf-8";
+        await context.Response.WriteAsJsonAsync(
+            new { ok = true, ended },
+            serviceCancellationToken).ConfigureAwait(false);
+    }
+
     private async Task HandleSnapshotPostAsync(
         HttpContext context,
         CancellationToken serviceCancellationToken)
@@ -4249,6 +4398,12 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     WebSocketCloseStatus.InternalServerError,
                     failure.Code,
                     notificationDeadline.Token).ConfigureAwait(false);
+                if (failure.Code == "BW_COMPUTER_VOICE_DIRECT_VOICE_ENDED_BY_CORE")
+                {
+                    // 2026-09-15：主动挂断要让 App 读到 status 帧与 close reason 再断，
+                    // 否则 App 先看到上行失败、当掉线自动重拨。
+                    await Task.Delay(400, notificationDeadline.Token).ConfigureAwait(false);
+                }
             }
         }
         catch (

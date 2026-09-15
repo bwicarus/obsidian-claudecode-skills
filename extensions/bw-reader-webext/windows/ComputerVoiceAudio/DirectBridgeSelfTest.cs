@@ -9450,18 +9450,15 @@ internal static class DirectBridgeSelfTest
         // 「只有一份」这条 2026-09-12 之后由更强的事实保证：模型那份
         // 根本没有 activeReading 了（它整个并进了 currentPage）。
         //
-        // markers 桥是**原样透传**的：这个夹具送的是旧的对象数组形，所以这里
-        // 收到的就是数组 —— 顺带证明了旧 App 构建那条路仍然通到底。
-        JsonElement denseMcpMarkers = denseMcpSnapshot.RootElement
+        // 2026-09-14：分词表不再发给模型（不是每页都要划线），模型那份只带 markerCount；
+        // 表本身留在桥内，reader_highlight_range 的 at/to 定位在桥里按它折算。
+        JsonElement denseMcpSource = denseMcpSnapshot.RootElement
             .GetProperty("currentPage")
-            .GetProperty("highlightSource")
-            .GetProperty("markers");
-        int denseMarkerCount =
-            denseMcpMarkers.ValueKind == JsonValueKind.Object
-                ? denseMcpMarkers.EnumerateObject().Count()
-                : denseMcpMarkers.GetArrayLength();
+            .GetProperty("highlightSource");
+        int denseMarkerCount = denseMcpSource.GetProperty("markerCount").GetInt32();
         Require(
             !denseMcpSnapshot.RootElement.TryGetProperty("activeReading", out _)
+            && !denseMcpSource.TryGetProperty("markers", out _)
             && denseMarkerCount == 2_048
             && denseMcpSnapshot.RootElement.GetProperty("currentPage")
                 .GetProperty("text").GetString()
@@ -10811,16 +10808,14 @@ internal static class DirectBridgeSelfTest
                     == FileDirectSnapshotContextAdapter.SnapshotContract
                 && first.RootElement.GetProperty("contextStatus")
                     .GetString() == "pending"
-                && first.RootElement.GetProperty("mcp")
-                    .GetProperty("instanceId").GetString()
-                    == "mcp-self-test-instance"
-                && second.RootElement.GetProperty("mcp")
-                    .GetProperty("instanceId").GetString()
-                    == "mcp-self-test-instance"
-                && first.RootElement.GetProperty("mcp")
-                    .GetProperty("callSequence").GetInt64() == 1
-                && second.RootElement.GetProperty("mcp")
-                    .GetProperty("callSequence").GetInt64() == 2,
+                // 2026-09-15：模型快照不再带 mcp 结构块（折成一行自然语言 system）；两次调用都必须带这一行
+                && first.RootElement.TryGetProperty("system", out JsonElement firstSystem)
+                && firstSystem.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(firstSystem.GetString())
+                && second.RootElement.TryGetProperty("system", out JsonElement secondSystem)
+                && secondSystem.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(secondSystem.GetString())
+                && !first.RootElement.TryGetProperty("mcp", out _),
                 "direct-reader-context-mcp-is-persistent-with-read-only-guide",
                 checks);
         }
@@ -12304,11 +12299,11 @@ internal static class DirectBridgeSelfTest
                     .GetString() == "draft_delivered"
                 && !ankiDraftResult.RootElement.GetProperty("anki_written")
                     .GetBoolean()
-                && snapshotResult.RootElement.GetProperty("outputAccess")
-                    .GetProperty("available").GetBoolean()
-                && snapshotResult.RootElement.GetProperty("outputAccess")
-                    .GetProperty("verified").GetBoolean()
-                && snapshotResult.RootElement.GetProperty("outputAccess")
+                // 2026-09-15：outputAccess 已折进一行 system；来源身份仍在 currentPage.sourceInstanceId
+                && (snapshotResult.RootElement.GetProperty("system").GetString() ?? string.Empty).Length > 0
+                && !(snapshotResult.RootElement.GetProperty("system").GetString() ?? string.Empty)
+                    .Contains("不在线", StringComparison.Ordinal)
+                && snapshotResult.RootElement.GetProperty("currentPage")
                     .GetProperty("sourceInstanceId").GetString()
                     == "source-output"
                 && undoResult.RootElement.GetProperty("status")
@@ -13405,9 +13400,9 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("text").GetString()!;
             using JsonDocument snapshotResponse = JsonDocument.Parse(
                 snapshotText);
-            JsonElement visualAccess = snapshotResponse.RootElement
-                .GetProperty("visualAccess");
-            JsonElement visualScopes = visualAccess.GetProperty("scopes");
+            // 2026-09-15：模型快照不再带 visualAccess 结构块，连接健康折成一行自然语言 system
+            string visualSystemLine = snapshotResponse.RootElement
+                .GetProperty("system").GetString() ?? string.Empty;
             bool duplicateRejectedAndRecovered =
                 visualResponses[3].RootElement.GetProperty("error")
                     .GetProperty("code").GetInt32() == -32602
@@ -13430,19 +13425,8 @@ internal static class DirectBridgeSelfTest
                 && content[1].GetProperty("_meta")
                     .GetProperty("codex/imageDetail").GetString()
                     == "original"
-                && visualAccess.GetProperty("available").GetBoolean()
-                && visualAccess.GetProperty("mode").GetString()
-                    == "on-demand-mcp"
-                && visualAccess.GetProperty("tool").GetString()
-                    == ReaderContextMcpServer.VisualToolName
-                && visualAccess.GetProperty("returns").GetString()
-                    == "inline-image"
-                && visualScopes.EnumerateArray().Any(scope =>
-                    scope.GetString() == "viewport-context")
-                && visualScopes.EnumerateArray().Any(scope =>
-                    scope.GetString() == "selection-near")
-                && !visualScopes.EnumerateArray().Any(scope =>
-                    scope.GetString() == "drawing-nearby")
+                && visualSystemLine.Length > 0
+                && !visualSystemLine.Contains("取不到页面图", StringComparison.Ordinal)
                 && duplicateRejectedAndRecovered,
                 "direct-reader-visual-mcp-advertises-and-returns-inline-image",
                 checks);
