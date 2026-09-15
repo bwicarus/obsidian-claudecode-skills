@@ -527,6 +527,34 @@
     _state: function () { return _og; }
   };
 
+  // 选中的寿命（2026-09-15 用户拍板）：40 秒没被用掉就自动取消。
+  // 三处必须是同一个数：这里、context-selection-registry.js 的 expireMs、
+  // 桥的 DirectContextSnapshot.SelectionTtlMs。
+  var SEL_TTL_MS = 40000;
+  var _selTtl = { key: '', timer: null };
+
+  function _selTtlWatch(next) {
+    var text = typeof next.selection === 'string' ? next.selection.trim() : '';
+    // key 用「选中文字 + 位置」：换一段文字或翻页都算新的选中，重新开始计时；
+    // 宿主把**同一个**选中反复上报（每几秒一次）时 key 不变，不重排 —— 这正是
+    // 之前 40 秒永不到点的原因（实测 90 秒后模型还看得见）。
+    var key = text ? (text + ' ' + String(next.pos == null ? '' : next.pos)) : '';
+    if (key === _selTtl.key) return;
+    _selTtl.key = key;
+    if (_selTtl.timer) { clearTimeout(_selTtl.timer); _selTtl.timer = null; }
+    if (!key) return;
+    _selTtl.timer = setTimeout(function () {
+      _selTtl.timer = null;
+      _selTtl.key = '';
+      try {
+        var sel = window.getSelection && window.getSelection();
+        // 清 DOM 选区：宿主的 selectionchange 会跟着收掉选中条并上报"已清"，
+        // 于是屏幕上看到的和送给模型的同时作废，不会一半一半。
+        if (sel && sel.removeAllRanges) sel.removeAllRanges();
+      } catch (e) {}
+    }, SEL_TTL_MS);
+  }
+
   var _ctxSync = {
     LS_KEY: _CTX_LS,
     navDebounceMs: _CTX_NAV_MS,
@@ -553,6 +581,7 @@
       // 换书、选区建立/清空、标题或其它字段变化 = 即时。调用方也可用 opts.immediate 强制。
       // 首次上报(还没有基线)也算导航:否则开关刚打开时的第一次翻页会把**中间页**立刻推出去
       //(真机实测:连翻 6 页 → 途中 1 次)。带 immediate 的调用不受影响。
+      _selTtlWatch(next);
       var first = !_ctxS.pend;
       var navOnly = !(opts && opts.immediate) && (patch.pos !== undefined) &&
         (first || (same && patch.pos !== cur.pos && _ctxOnlyPosChanged(cur, next)));
