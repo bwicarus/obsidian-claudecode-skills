@@ -3173,7 +3173,7 @@
   }
   // 77 pin 状态中心:选中集合为唯一真相(卡片紫框只是视图)。注入改**覆盖式快照**(防抖 1.2s+指纹):
   // 反复选中/取消若最终状态没变=零注入;变了=一条"当前带入清单(以本条为准,旧声明作废)"——历史不膨胀、语义无歧义
-  var _pins = { map: {}, fp: null, t: null, els: {}, cids: {}, ids: {} };   // 95:cids={卡片稳定编号:label}；ids={label:语义上下文编号}
+  var _pins = { map: {}, fp: null, t: null, els: {}, cids: {}, ids: {}, kinds: {}, cidOf: {} };   // 95:cids={卡片稳定编号:label}；ids={label:语义上下文编号}
   var _cidSeq = 0;
   function _mkCid() { return 'c' + Date.now().toString(36) + '-' + (++_cidSeq); }   // 95:卡片出生编号,跟随卡片所有形态流转
   function _ctxSelectionRegistry() {
@@ -3218,6 +3218,8 @@
     _pins.map[label] = String(text || '').slice(0, 2500);
     _pins.els[label] = el;
     _pins.ids[label] = id;
+    _pins.kinds[label] = _outgoingKindOf(spec, el);   // 过期/取消后要拿它重投剩下那个焦点
+    _pins.cidOf[label] = String(cid || '');
     if (cid) _pins.cids[cid] = label;
     try {
       var registry = _ctxSelectionRegistry();
@@ -3242,6 +3244,7 @@
     var id = _pins.ids[label] || (el && el.dataset && el.dataset.vcContextId) || '';
     try { var registry = _ctxSelectionRegistry(); if (registry && id) registry.deselect(id); } catch (e) {}
     delete _pins.map[label]; delete _pins.els[label]; delete _pins.ids[label];
+    delete _pins.kinds[label]; delete _pins.cidOf[label];
     if (cid && _pins.cids[cid] === label) delete _pins.cids[cid];
     Object.keys(_pins.cids).forEach(function (key) {
       if (_pins.cids[key] === label) delete _pins.cids[key];
@@ -3285,10 +3288,59 @@
       try { RC.voiceCtx && RC.voiceCtx.state('pins', { labels: effective.labels, map: effective.map, serialized: effective.serialized }); } catch (e) {}
     }, 1200);
   }
+  function _pinReproject() {
+    // 还剩东西钉着 → 把剩下的第一个重新投成出向焦点。
+    // 上游焦点是单槽，过期/取消掉的那个如果不补一次，剩下的卡片就成了"chip 上有、
+    // 快照里没有"的幽灵（A5 规则要的是"取消的不能再被当成现状"，不是"顺手把别的也弄丢"）。
+    var labels = Object.keys(_pins.map).sort();
+    if (!labels.length) return;
+    var label = labels[0];
+    try {
+      if (window.RC && RC.outgoing) {
+        RC.outgoing.focus(_pins.kinds[label] || 'card', {
+          id: String(_pins.ids[label] || label).slice(0, 120),
+          cid: String(_pins.cidOf[label] || '').slice(0, 80),
+          label: String(label).slice(0, 80),
+          brief: String(_pins.map[label] || '').slice(0, 160)
+        });
+      }
+    } catch (e) {}
+  }
+  var _pinReconciling = false;
+  function _pinReconcile() {
+    // 登记器是权威：40 秒过期、别处取消、覆盖式改选，都只改它。
+    // 本地镜像（紫框、chip 文案、出向焦点）必须跟着它走，否则就是两套状态各说各话。
+    var registry = _ctxSelectionRegistry();
+    if (!registry || !registry.snapshot || _pinReconciling) return;
+    _pinReconciling = true;
+    try { _pinReconcileInner(registry); } finally { _pinReconciling = false; }
+  }
+  function _pinReconcileInner(registry) {
+    var live = Object.create(null);
+    try {
+      (registry.snapshot({ maxText: 1 }).items || []).forEach(function (it) { live[it.id] = true; });
+    } catch (e) { return; }
+    var dropped = 0;
+    Object.keys(_pins.map).forEach(function (label) {
+      var id = _pins.ids[label];
+      if (id && live[id]) return;
+      var el = _pins.els[label];
+      var cid = _pins.cidOf[label] || (el && el.dataset && el.dataset.vcCid) || '';
+      if (el && el.classList) {
+        el.classList.remove('vc-picked');
+        try { delete el.dataset.pinLabel; } catch (e) {}
+      }
+      _pinForget(label, cid, el);
+      if (cid) _pinPaint(cid, false);
+      dropped += 1;
+    });
+    if (dropped) _pinReproject();
+  }
   try {
     var _contextRegistry0 = _ctxSelectionRegistry();
     if (_contextRegistry0 && _contextRegistry0.subscribe) {
       _contextRegistry0.subscribe(function () {
+        try { _pinReconcile(); } catch (e) {}
         _pinSync();
         try { _chipRender(); } catch (e) {}
       });

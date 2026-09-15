@@ -139,6 +139,12 @@
   function createRegistry(options) {
     options = options || {};
     var defaultMaxText = finiteLimit(options.maxText, 2500);
+    // 选中的寿命（2026-09-15 用户拍板）：40 秒没被用掉就自动取消。0 = 不过期。
+    // 放在登记器里，是为了让 chip、侧栏请求体、出向焦点三处同时到期 ——
+    // 三处各写一个计时器的结局一定是它们互相不同意。
+    var expireMs = (typeof options.expireMs === 'number'
+      && isFinite(options.expireMs) && options.expireMs >= 0) ? options.expireMs : 40000;
+    var timers = Object.create(null);
     var nodes = Object.create(null);
     var selected = Object.create(null);
     var listeners = [];
@@ -173,17 +179,39 @@
       if (!nodes[id] && !selected[id]) return false;
       delete nodes[id];
       delete selected[id];
+      clearTimer(id);
       emit('remove', id);
       return true;
+    }
+
+    function clearTimer(id) {
+      if (!timers[id]) return;
+      try { clearTimeout(timers[id]); } catch (_) {}
+      delete timers[id];
+    }
+
+    function armTimer(id) {
+      clearTimer(id);
+      if (!(expireMs > 0) || typeof setTimeout !== 'function') return;
+      var handle = setTimeout(function () {
+        delete timers[id];
+        setSelected(id, false);
+      }, expireMs);
+      // 测试进程别被这个计时器吊着不退出（node 有 unref，浏览器没有）。
+      try { if (handle && typeof handle.unref === 'function') handle.unref(); } catch (_) {}
+      timers[id] = handle;
     }
 
     function setSelected(id, on) {
       id = cleanId(id, 'id');
       if (!nodes[id]) return false;
       on = !!on;
-      if (!!selected[id] === on) return false;
-      if (on) selected[id] = true;
-      else delete selected[id];
+      if (!!selected[id] === on) {
+        if (on) armTimer(id);   // 重复选中同一个 = 重新开始计时
+        return false;
+      }
+      if (on) { selected[id] = true; armTimer(id); }
+      else { delete selected[id]; clearTimer(id); }
       emit(on ? 'select' : 'deselect', id);
       return true;
     }
@@ -299,6 +327,7 @@
 
     function clear() {
       if (!Object.keys(selected).length) return false;
+      Object.keys(timers).forEach(clearTimer);
       selected = Object.create(null);
       emit('clear', '');
       return true;
@@ -334,6 +363,7 @@
       serialize: serialize,
       toLegacy: toLegacy,
       subscribe: subscribe,
+      expireMs: function () { return expireMs; },
       version: function () { return version; }
     };
   }
