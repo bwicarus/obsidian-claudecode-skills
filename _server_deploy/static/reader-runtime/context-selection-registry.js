@@ -207,7 +207,9 @@
       if (!nodes[id]) return false;
       on = !!on;
       if (!!selected[id] === on) {
-        if (on) armTimer(id);   // 重复选中同一个 = 重新开始计时
+        // ⚠ 这里**不能**重排计时（2026-09-15 实测改回来的）：宿主会在选区还在时
+        // 反复 select() 同一条来同步文字，每次重排等于 40 秒永远到不了点 ——
+        // 和"桥按上次收到计时、被重报清零"是同一个病。计时只在"没选→选上"起表。
         return false;
       }
       if (on) { selected[id] = true; armTimer(id); }
