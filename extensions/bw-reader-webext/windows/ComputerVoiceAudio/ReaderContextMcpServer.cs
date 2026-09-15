@@ -77,6 +77,15 @@ internal sealed class ReaderContextMcpServer
             Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         };
 
+    /// <summary>给模型的 JSON：**不转义非 ASCII**。默认编码器会把每个日文字符写成
+    /// \uXXXX（6 个字符），实测一次快照返回 18,004 字里有 15,102 是这种转义 ——
+    /// 对一本日文书来说，等于把每次工具返回都撑大六倍。</summary>
+    private static readonly JsonSerializerOptions ModelJsonOptions =
+        new(DirectBridgeContract.JsonOptions)
+        {
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        };
+
     private readonly string _statePath;
     private readonly TextReader _input;
     private readonly TextWriter _output;
@@ -4425,8 +4434,7 @@ internal sealed class ReaderContextMcpServer
                     new JsonObject
                     {
                         ["type"] = "text",
-                        ["text"] = payload.ToJsonString(
-                            DirectBridgeContract.JsonOptions),
+                        ["text"] = payload.ToJsonString(ModelJsonOptions),
                     },
                 },
             },
@@ -5036,8 +5044,7 @@ internal sealed class ReaderContextMcpServer
                     new JsonObject
                     {
                         ["type"] = "text",
-                        ["text"] = result.ToJsonString(
-                            DirectBridgeContract.JsonOptions),
+                        ["text"] = result.ToJsonString(ModelJsonOptions),
                     },
                 },
             },
@@ -5142,8 +5149,7 @@ internal sealed class ReaderContextMcpServer
                     new JsonObject
                     {
                         ["type"] = "text",
-                        ["text"] = result.ToJsonString(
-                            DirectBridgeContract.JsonOptions),
+                        ["text"] = result.ToJsonString(ModelJsonOptions),
                     },
                 },
             },
@@ -5333,8 +5339,7 @@ internal sealed class ReaderContextMcpServer
                             ["anki_written"] = request.Kind == "anki-draft"
                                 ? false
                                 : null,
-                        }.ToJsonString(
-                            DirectBridgeContract.JsonOptions),
+                        }.ToJsonString(ModelJsonOptions),
                     },
                 },
             },
@@ -6656,8 +6661,7 @@ internal sealed class ReaderContextMcpServer
                             ["ok"] = false,
                             ["code"] = code,
                             ["message"] = message,
-                        }.ToJsonString(
-                            DirectBridgeContract.JsonOptions),
+                        }.ToJsonString(ModelJsonOptions),
                     },
                 },
                 ["isError"] = true,
@@ -6796,8 +6800,7 @@ internal sealed class ReaderContextMcpServer
                             ["scrollY"] = response.ScrollY,
                             ["url"] = response.Url,
                             ["title"] = response.Title,
-                        }.ToJsonString(
-                            DirectBridgeContract.JsonOptions),
+                        }.ToJsonString(ModelJsonOptions),
                     },
                 },
             },
@@ -7028,8 +7031,7 @@ internal sealed class ReaderContextMcpServer
                             ["ok"] = false,
                             ["code"] = code,
                             ["message"] = message,
-                        }.ToJsonString(
-                            DirectBridgeContract.JsonOptions),
+                        }.ToJsonString(ModelJsonOptions),
                     },
                 },
                 ["isError"] = true,
@@ -7135,8 +7137,7 @@ internal sealed class ReaderContextMcpServer
                     new JsonObject
                     {
                         ["type"] = "text",
-                        ["text"] = metadata.ToJsonString(
-                            DirectBridgeContract.JsonOptions),
+                        ["text"] = metadata.ToJsonString(ModelJsonOptions),
                     },
                     new JsonObject
                     {
@@ -7356,8 +7357,7 @@ internal sealed class ReaderContextMcpServer
                     new JsonObject
                     {
                         ["type"] = "text",
-                        ["text"] = metadata.ToJsonString(
-                            DirectBridgeContract.JsonOptions),
+                        ["text"] = metadata.ToJsonString(ModelJsonOptions),
                     },
                     new JsonObject
                     {
@@ -7396,7 +7396,7 @@ internal sealed class ReaderContextMcpServer
                             ["ok"] = false,
                             ["code"] = code,
                             ["message"] = message,
-                        }.ToJsonString(DirectBridgeContract.JsonOptions),
+                        }.ToJsonString(ModelJsonOptions),
                     },
                 },
                 ["isError"] = true,
@@ -7576,8 +7576,7 @@ internal sealed class ReaderContextMcpServer
                             ["ok"] = false,
                             ["code"] = code,
                             ["message"] = message,
-                        }.ToJsonString(
-                            DirectBridgeContract.JsonOptions),
+                        }.ToJsonString(ModelJsonOptions),
                     },
                 },
                 ["isError"] = true,
@@ -7650,7 +7649,7 @@ internal sealed class ReaderContextMcpServer
                     new JsonObject
                     {
                         ["type"] = "text",
-                        ["text"] = result.ToJsonString(DirectBridgeContract.JsonOptions),
+                        ["text"] = result.ToJsonString(ModelJsonOptions),
                     },
                 },
             },
@@ -8982,7 +8981,7 @@ internal sealed class ReaderContextMcpServer
     {
         cancellationToken.ThrowIfCancellationRequested();
         await _output.WriteLineAsync(
-            message.ToJsonString(DirectBridgeContract.JsonOptions))
+            message.ToJsonString(ModelJsonOptions))
             .ConfigureAwait(false);
         await _output.FlushAsync(cancellationToken)
             .ConfigureAwait(false);

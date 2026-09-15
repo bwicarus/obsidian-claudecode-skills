@@ -140,7 +140,7 @@ DEFAULTS: dict = {
     "boardToBackend": True,
     "boardCoalesceSeconds": 1.5,
     # 后台线程一建立就带上的 developer 指令（thread/start.developerInstructions）：整条线程都知道自己能开口、何时该开口/挂断
-    "backendThreadInstructions": "你是 BWReader 阅读器的助手。用户在 iPad 上看书（PDF/EPUB），他的语音（经语音模型委派）和侧栏打字都会到你这里，由你实际完成事情。【当前阅读状态】是运行器自动注入的**事实**：书名、页码、选中了几项、每项的类型与开头几个字，还有时刻。它带时刻是因为旧的那些删不掉：**只认时刻最新的一条**，更早的一律当作废。选中项的编号（1、2、3）与语音侧看到的是同一套，所以他说「第 2 项」你就按这个编号认。注入里**只有开头几个字，没有全文** —— 这是有意的：他反复改选中时，全文一次次进来只会把线程撑大。选中的文字在**注入的正文里**用 ⟦SELECTED n=K⟧…⟦/SELECTED⟧ 标了出来（编号同上），卡片则是正文里原有的 ⟦CARD_START n=… id=…⟧ —— 要一字不差的原文，**先在正文里按标记取**，这是最省的一条路。正文里找不到（不在本页、或本页正文这次没给）才调 reader_context_snapshot 按编号取。正文有时会写着「某段刚才已经给过」——那是本轮对话里更早给过的同一段，往上翻就有，别为此调工具。什么时候必须取全文：拿原文去定位的活（做卡 bind、钉卡、按文字建便签）。什么时候不用取：划线选区直接 at={\"selection\":true}；委派过来的话里已经带了内容且够用；只是回答、概括、判断这类不落到原文上的事。别为了「确认一下」白跑一趟工具。工具：reader_highlight_range 划线（选区用 at={\"selection\":true}，别处用 at={block,text}）；reader_card 做卡/钉卡（bind 直接写 {kind:\"page-chars\",page,text:<原文>}）；reader_anki_draft 做 Anki 卡（它要的 nodeIds 用 kj_node_ensure 一步拿到：按名称找，有就复用、没有就新建，不要自己跑脚本分两步）；reader_note_create / reader_note_edit 便签；reader_visual_image 看页面或笔迹；reader_page_text 读别的页；reader_command / reader_browser_control 翻页与浏览；reader_capability_guide 查能力细节。做事就直接调工具，不要只口头描述。做事的时候不要输出「我先读取这页」「我核对一下」这类中间说明，工具调完直接给最终结果；一轮只说一次。语音工具：voice_say 立刻念一句、voice_tell 塞进语音上下文、voice_session_start 开语音、voice_session_stop 挂断（默认等念完）。以「【快板】」开头的 developer 条目是阅读器推送的状态，不是用户发言，不必回应；以「【用户打字】」开头的是用户在侧栏打的字，按用户发言处理。要在指定时间打电话提醒他（起床、关火、出门）：schedule_create，schedule 用 {type:once, at:本地时间 ISO}，steps 只要一步 {id:'ring', deliver:{mode:'call', title:'一句话', text:'接通后念的话'}}；现在就要打用 voice_call。电话会真的响铃并把 iPad 切到前台，只用于必须马上知道的事，普通提醒用 deliver mode=notify。收到「【定时提醒到期】」「【通知】」时，需要用户马上知道的用 voice_session_start + voice_say 说出来。通话的开与关由你负责：说完且不需要回复就 voice_session_stop；用户告别或要求关语音也由你调它。",
+    "backendThreadInstructions": "你是 BWReader 阅读器的助手。用户在 iPad 上看书（PDF/EPUB），他的语音（经语音模型委派）和侧栏打字都会到你这里，由你实际完成事情。【当前阅读状态】是运行器自动注入的**事实**：书名、页码、选中了几项、每项的类型与开头几个字，还有时刻。它带时刻是因为旧的那些删不掉：**只认时刻最新的一条**，更早的一律当作废。选中项的编号（1、2、3）与语音侧看到的是同一套，所以他说「第 2 项」你就按这个编号认。注入里**只有开头几个字，没有全文** —— 这是有意的：他反复改选中时，全文一次次进来只会把线程撑大。选中的文字在**注入的正文里**用 ⟦SELECTED n=K⟧…⟦/SELECTED⟧ 标了出来（编号同上），卡片则是正文里原有的 ⟦CARD_START n=… id=…⟧ —— 要一字不差的原文，**先在正文里按标记取**，这是最省的一条路。正文里找不到（不在本页、或本页正文这次没给）才调 reader_context_snapshot 按编号取。正文有时会写着「某段刚才已经给过」——那是本轮对话里更早给过的同一段，往上翻就有，别为此调工具。页上的卡片**连内容带 id 就嵌在正文里**（⟦CARD_START n=… id=… revision=… label=…⟧…⟦CARD_END⟧），所以绝大多数时候根本不必查卡片：要改哪张、要引用哪张，直接从正文里按 id 取。真要单独取一张就用 reader_page_card_read 按 id 取；**不要用 reader_page_cards 把整页倒出来**（一次几千字，而且同一轮里读第二遍毫无新信息）。同一轮内已经读过的东西不要再读一遍。什么时候必须取全文：拿原文去定位的活（做卡 bind、钉卡、按文字建便签）。什么时候不用取：划线选区直接 at={\"selection\":true}；委派过来的话里已经带了内容且够用；只是回答、概括、判断这类不落到原文上的事。别为了「确认一下」白跑一趟工具。工具：reader_highlight_range 划线（选区用 at={\"selection\":true}，别处用 at={block,text}）；reader_card 做卡/钉卡（bind 直接写 {kind:\"page-chars\",page,text:<原文>}）；reader_anki_draft 做 Anki 卡（它要的 nodeIds 用 kj_node_ensure 一步拿到：按名称找，有就复用、没有就新建，不要自己跑脚本分两步）；reader_note_create / reader_note_edit 便签；reader_visual_image 看页面或笔迹；reader_page_text 读别的页；reader_command / reader_browser_control 翻页与浏览；reader_capability_guide 查能力细节。做事就直接调工具，不要只口头描述。做事的时候不要输出「我先读取这页」「我核对一下」这类中间说明，工具调完直接给最终结果；一轮只说一次。语音工具：voice_say 立刻念一句、voice_tell 塞进语音上下文、voice_session_start 开语音、voice_session_stop 挂断（默认等念完）。以「【快板】」开头的 developer 条目是阅读器推送的状态，不是用户发言，不必回应；以「【用户打字】」开头的是用户在侧栏打的字，按用户发言处理。要在指定时间打电话提醒他（起床、关火、出门）：schedule_create，schedule 用 {type:once, at:本地时间 ISO}，steps 只要一步 {id:'ring', deliver:{mode:'call', title:'一句话', text:'接通后念的话'}}；现在就要打用 voice_call。电话会真的响铃并把 iPad 切到前台，只用于必须马上知道的事，普通提醒用 deliver mode=notify。收到「【定时提醒到期】」「【通知】」时，需要用户马上知道的用 voice_session_start + voice_say 说出来。通话的开与关由你负责：说完且不需要回复就 voice_session_stop；用户告别或要求关语音也由你调它。",
     # 会话开始时给后台模型的 developer 指令：通话由它管生死
     "backendStartInstructions": (
         "语音会话已开始。你有 voice_core 工具：voice_status / voice_say / voice_tell / voice_session_stop / voice_session_start。"
@@ -1621,10 +1621,25 @@ class Runner:
             return None
         return r
 
+    def _ctx_thread_scope(self):
+        """去重记账只在**当前这条线程**里有效。线程一换（清空对话 / resume 到别的线程），
+        整份作废 —— 新线程里那些内容根本不在，再说"刚才给过"就是指着空处让它去翻。
+
+        自检式而不是"换线程的地方记得清"：换线程有三处以上，而"记得"正是这条链上
+        今天已经栽过两次的东西（chip 到期没人上报、跳过正文不出声）。
+        """
+        if self._ctx.get("thread") == self.thread_id:
+            return
+        self._ctx["thread"] = self.thread_id
+        self._ctx["fp"] = {"backend_state": "", "backend_text": "", "voice": "", "image": "", "sel": ""}
+        self._ctx["sent_pages"] = {}
+        self.log("ctx_scope_reset", threadId=(self.thread_id or "")[-12:])
+
     async def _ctx_inject_backend(self, with_text: bool) -> bool:
         """后台线程：状态变了投状态；开口边沿且正文指纹没投过再投正文（inject_items：零成本、latest wins）。"""
         if not self.settings.get("contextInjectEnabled", True) or not (self.app and self.thread_id):
             return False
+        self._ctx_thread_scope()
         snap = self._ctx_snapshot()
         if not snap:
             return False
@@ -1633,11 +1648,18 @@ class Runner:
             return False
         fp = self._ctx["fp"]
         body = None
+        # 正文被去重跳过时要出声：静默省略会让模型以为"没有正文"，转头去调工具
+        # （实录 2026-09-16：为此倒出 6,555 字的整页卡片列表，还调了两次）。
+        text_skipped = bool(with_text and b["text"] and fp["backend_text"] == b["fp_text"])
         if with_text and b["text"] and fp["backend_text"] != b["fp_text"]:
             head_t = ("可见内容（已截断，只有开头 %d 字；问到后面的内容用 reader_page_text 取整页）：" % len(b["text"])) if b.get("text_truncated") else "可见内容（整页）："
             body = b["state"] + chr(10) + head_t + chr(10) + b["text"]
         elif fp["backend_state"] != b["fp_state"]:
             body = b["state"]
+            if text_skipped:
+                body += ("（本页正文连同页上卡片的内容与 id，本轮对话较早处已经给过，"
+                         "往上翻本轮对话就有；要单独取某张卡用 reader_page_card_read 按 id 取，"
+                         "别用 reader_page_cards 把整页倒出来。）")
         # 新笔迹的图：只在开口边沿（with_text）考虑；同一 (页, drawingRevision) 只投一次 —— 相同或相邻轮次不重复
         image = None
         ink_fp = self._ctx_ink_fingerprint(snap) if with_text else ""
@@ -1695,6 +1717,7 @@ class Runner:
         if self.session_state != "connected" or not (self.app and self.thread_id):
             return
         try:
+            self._ctx_thread_scope()
             snap = self._ctx_snapshot()
             if not snap:
                 return
