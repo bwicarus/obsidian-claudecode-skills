@@ -97,7 +97,11 @@ DEFAULTS: dict = {
     "contextVoiceChars": 700,      # 语音侧整条上限（含正文摘要）
     "contextVoiceMode": "off",     # 语音侧注入。off=不注入（默认）。edge=开口边沿注入：实录 8/8 让语音模型只说"我看一下"而不委派。idle=空闲时注入：实录一进上下文语音模型就自己起一轮念页面（23:19 无人问总结 23 秒）。两档都只留作对照
     "contextVoiceText": False,
-    "contextVoiceSelection": True,   # 开口时给语音侧投一条极短的「选中清单」（不含正文，见 _ctx_voice_selection_line）     # 语音侧是否塞正文。False（2026-09-14 实录）：塞了正文语音模型会以为自己能"看"，答"我看一下"却不委派
+    "contextVoiceSelection": True,   # 开口时把「选中清单」投给语音侧（见 _ctx_inject_voice_selection）
+    "contextVoiceSelectionChars": 900,  # 每一项给语音侧多少字。0 = 只给开头 24 字的摘要
+    "contextTextResendMinutes": 15,   # 同一页的正文多久之内不再重复注入（连续翻页时上一页末尾早给过了）
+    "contextBackendSelectionChars": 24,  # 每一项给后台多少字。只要够认出是哪一项 ——
+                                         # 全文按需用快照取（按使用次数付钱，不按变化次数）     # 语音侧是否塞正文。False（2026-09-14 实录）：塞了正文语音模型会以为自己能"看"，答"我看一下"却不委派
     "contextDwellMinSeconds": 8,   # 翻到页后停留 ≥8 s 才带正文（在读）
     "contextDwellMaxSeconds": 720, # ≤12 min（话题还新鲜）；窗外只给页码，模型要内容自己调工具
     "idleStopMinutes": 20,         # 闲置这么久自动结束通话（0=不自动关）。实测连着不说话也按墙钟 1:1 计费
@@ -136,7 +140,7 @@ DEFAULTS: dict = {
     "boardToBackend": True,
     "boardCoalesceSeconds": 1.5,
     # 后台线程一建立就带上的 developer 指令（thread/start.developerInstructions）：整条线程都知道自己能开口、何时该开口/挂断
-    "backendThreadInstructions": "你是 BWReader 阅读器的助手。用户在 iPad 上看书（PDF/EPUB），他的语音（经语音模型委派）和侧栏打字都会到你这里，由你实际完成事情。上下文里的【当前阅读状态】是运行器在他开口时自动注入的：书名、页码、选区原文、最近动作、可见正文——回答和操作直接据此进行；只有状态缺失、过旧或没覆盖到时才调 reader_context_snapshot。工具：reader_highlight_range 划线（选区用 at={\"selection\":true}，别处用 at={block,text}）；reader_card 做卡/钉卡（bind 直接写 {kind:\"page-chars\",page,text:<原文>}）；reader_anki_draft 做 Anki 卡（它要的 nodeIds 用 kj_node_ensure 一步拿到：按名称找，有就复用、没有就新建，不要自己跑脚本分两步）；reader_note_create / reader_note_edit 便签；reader_visual_image 看页面或笔迹；reader_page_text 读别的页；reader_command / reader_browser_control 翻页与浏览；reader_capability_guide 查能力细节。做事就直接调工具，不要只口头描述。做事的时候不要输出「我先读取这页」「我核对一下」这类中间说明，工具调完直接给最终结果；一轮只说一次。语音工具：voice_say 立刻念一句、voice_tell 塞进语音上下文、voice_session_start 开语音、voice_session_stop 挂断（默认等念完）。以「【快板】」开头的 developer 条目是阅读器推送的状态，不是用户发言，不必回应；以「【用户打字】」开头的是用户在侧栏打的字，按用户发言处理。要在指定时间打电话提醒他（起床、关火、出门）：schedule_create，schedule 用 {type:once, at:本地时间 ISO}，steps 只要一步 {id:'ring', deliver:{mode:'call', title:'一句话', text:'接通后念的话'}}；现在就要打用 voice_call。电话会真的响铃并把 iPad 切到前台，只用于必须马上知道的事，普通提醒用 deliver mode=notify。收到「【定时提醒到期】」「【通知】」时，需要用户马上知道的用 voice_session_start + voice_say 说出来。通话的开与关由你负责：说完且不需要回复就 voice_session_stop；用户告别或要求关语音也由你调它。",
+    "backendThreadInstructions": "你是 BWReader 阅读器的助手。用户在 iPad 上看书（PDF/EPUB），他的语音（经语音模型委派）和侧栏打字都会到你这里，由你实际完成事情。【当前阅读状态】是运行器自动注入的**事实**：书名、页码、选中了几项、每项的类型与开头几个字，还有时刻。它带时刻是因为旧的那些删不掉：**只认时刻最新的一条**，更早的一律当作废。选中项的编号（1、2、3）与语音侧看到的是同一套，所以他说「第 2 项」你就按这个编号认。注入里**只有开头几个字，没有全文** —— 这是有意的：他反复改选中时，全文一次次进来只会把线程撑大。选中的文字在**注入的正文里**用 ⟦SELECTED n=K⟧…⟦/SELECTED⟧ 标了出来（编号同上），卡片则是正文里原有的 ⟦CARD_START n=… id=…⟧ —— 要一字不差的原文，**先在正文里按标记取**，这是最省的一条路。正文里找不到（不在本页、或本页正文这次没给）才调 reader_context_snapshot 按编号取。正文有时会写着「某段刚才已经给过」——那是本轮对话里更早给过的同一段，往上翻就有，别为此调工具。什么时候必须取全文：拿原文去定位的活（做卡 bind、钉卡、按文字建便签）。什么时候不用取：划线选区直接 at={\"selection\":true}；委派过来的话里已经带了内容且够用；只是回答、概括、判断这类不落到原文上的事。别为了「确认一下」白跑一趟工具。工具：reader_highlight_range 划线（选区用 at={\"selection\":true}，别处用 at={block,text}）；reader_card 做卡/钉卡（bind 直接写 {kind:\"page-chars\",page,text:<原文>}）；reader_anki_draft 做 Anki 卡（它要的 nodeIds 用 kj_node_ensure 一步拿到：按名称找，有就复用、没有就新建，不要自己跑脚本分两步）；reader_note_create / reader_note_edit 便签；reader_visual_image 看页面或笔迹；reader_page_text 读别的页；reader_command / reader_browser_control 翻页与浏览；reader_capability_guide 查能力细节。做事就直接调工具，不要只口头描述。做事的时候不要输出「我先读取这页」「我核对一下」这类中间说明，工具调完直接给最终结果；一轮只说一次。语音工具：voice_say 立刻念一句、voice_tell 塞进语音上下文、voice_session_start 开语音、voice_session_stop 挂断（默认等念完）。以「【快板】」开头的 developer 条目是阅读器推送的状态，不是用户发言，不必回应；以「【用户打字】」开头的是用户在侧栏打的字，按用户发言处理。要在指定时间打电话提醒他（起床、关火、出门）：schedule_create，schedule 用 {type:once, at:本地时间 ISO}，steps 只要一步 {id:'ring', deliver:{mode:'call', title:'一句话', text:'接通后念的话'}}；现在就要打用 voice_call。电话会真的响铃并把 iPad 切到前台，只用于必须马上知道的事，普通提醒用 deliver mode=notify。收到「【定时提醒到期】」「【通知】」时，需要用户马上知道的用 voice_session_start + voice_say 说出来。通话的开与关由你负责：说完且不需要回复就 voice_session_stop；用户告别或要求关语音也由你调它。",
     # 会话开始时给后台模型的 developer 指令：通话由它管生死
     "backendStartInstructions": (
         "语音会话已开始。你有 voice_core 工具：voice_status / voice_say / voice_tell / voice_session_stop / voice_session_start。"
@@ -616,7 +620,9 @@ class Runner:
         self._backend_done_at = 0.0
         # 上下文注入器状态：快照修订/页面停留起点/各 sink 已投指纹
         self._ctx = {"mtime": 0.0, "rev": None, "page_key": "", "page_since": 0.0, "snap": None,
-                     "fp": {"backend_state": "", "backend_text": "", "voice": "", "image": ""}, "debounce": None}
+                     "fp": {"backend_state": "", "backend_text": "", "voice": "", "image": ""}, "debounce": None,
+                     # 正文记账：{(file, 页号): (\"full\"|\"part\", 时刻)} —— 见 _ctx_text_ledger
+                     "sent_pages": {}}
         self._history_q: queue.Queue = queue.Queue()
         self._stream_latest: dict[str, str] = {}
         self._stream_queued: set[str] = set()
@@ -1360,27 +1366,26 @@ class Runner:
                 sel_items.append(("text", str(sel["text"])))
         sel_text = next((t for k, t in sel_items if k == "text"), "")
         sel_is_text = bool(sel_text)
+        # 给后台的每项只给这么多字：够认出是哪一项就行，全文按需用快照取。
+        sel_chars = int(s.get("contextBackendSelectionChars") or 24)
         if not sel_text and sel_items:
             # 只钉了卡片、没有文字选区时，「这个」指的就是那张卡；
             # 但**不能**沿用文字选区那套定位指令（见下面 sel_is_text 的分支）。
             sel_text = sel_items[0][1]
         # 除了已经当成「这个」报出去的那一条之外，还钉着的东西逐条报（不合并：模型要能分清哪句话属于哪张卡）。
         # ⚠ 别把当主角的那条再报一遍 —— 同一张卡出现两次，模型会以为钉了两张。
-        _rest = [(k, t) for k, t in sel_items if k != "text"] if sel_is_text else sel_items[1:]
-        # 清单就该长得像清单：先说一共几项，再逐项编号。
-        # 实录 2026-09-15：用户问"总共有几项"，模型从几句零散的话里数错了，还跟他争。
+        # 逐项编号，与语音侧同一套：语音说"第 N 项"，后台照 N 在本条列出的原文里认。
+        # ⚠ 两边编号必须一致 —— 之前后台把第一项写成"他此刻明确选中了…"、其余从（2）起，
+        # 语音说"第 1 项"时后台根本找不到叫（1）的东西，而这种缝是静默的。
         sel_others = ""
-        if _rest:
-            sel_others = "。他此刻在输入框上方一共放着 %d 项，除上面那条外还有：%s" % (
+        sel_others = ""
+        # 只报事实：选了什么、第几项。怎么做、什么时候取全文 —— 都在线程指令里说过一次了。
+        sel_hint = ""
+        if sel_items:
+            sel_hint = "。选中 %d 项：%s" % (
                 len(sel_items),
-                "".join("（%d）%s「%s」" % (i + 2, _SEL_KIND_LABEL.get(k, "选中的内容"), t[:400])
-                        for i, (k, t) in enumerate(_rest)))
-        sel_hint = (("。他此刻明确选中了「%s」——说『这个/这段/这里』时优先指它。划线：reader_highlight_range 直接传 at={\"selection\":true}；"
-                     "做卡/钉卡：reader_card 的 bind 直接写 {\"kind\":\"page-chars\",\"page\":%s,\"text\":<这段选中原文>}，阅读器自己定位。"
-                     "两者都不要先调 reader_page_text 或 reader_context_snapshot 找位置——位置就在本条里") % (sel_text[:1000], page if page else 1)) if sel_is_text else (
-            ("。他此刻钉着的是「%s」——说『这个/这张/这里』时指它。要对它做事就直接交给后台，"
-             "后台知道是哪一个，不必再调 reader_context_snapshot 去找") % sel_text[:1000] if sel_text else "")
-        sel_hint += sel_others
+                "".join("（%d）%s「%s…」" % (i + 1, _SEL_KIND_LABEL.get(k, "内容"), t[:sel_chars])
+                        for i, (k, t) in enumerate(sel_items)))
         # ⚠ 语音模型没有工具：给它看"直接调 reader_card"这类指令，它会嘴上答应、却不发起委托（2026-09-14 实录两次）。
         #   语音侧只说选中了什么 + 这类事要立刻委派后台。
         sel_hint_voice = (("。他此刻明确选中了「%s」——说『这个/这段/这里』时指它；要划线/做卡/钉卡/翻译这段，"
@@ -1416,8 +1421,13 @@ class Runner:
             limit = int(s.get("contextTextChars") or 1500)
             sections = self._split_page_sections(full)
             text = self._compose_ctx_text(sections, limit)   # 当前页永远全文；limit 只管前后页给多少
-        state = ("【当前阅读状态】以本条为准，旧的作废；这是状态记录不是提问，不要回应本条。" + where + sel_hint + act_hint + ink_hint
-                 + "。本条已给出的选区/可见内容可直接据此回答，不必再调 reader_context_snapshot；只有它没覆盖到的信息才去调工具。")
+            text, skipped = self._ctx_text_ledger(text, sections, cp)
+            if skipped:
+                text += chr(10) + "（" + skipped + "刚才已经给过，这里不再重复；要看就直接往上翻本轮对话。）"
+            text = self._ctx_mark_selection(text, sel_items)
+        # 带时刻：旧的删不掉（inject_items 只能追加），所以让它认得出哪条最新。
+        state = ("【当前阅读状态 " + time.strftime("%H:%M:%S") + "】只认时刻最新的一条，更早的全部作废；"
+                 "这是状态记录不是提问，不要回应本条。" + where + sel_hint + act_hint + ink_hint + "。")
         last_act = str((acts[-1].get("what") or acts[-1].get("kind") or "") if acts else "")[:40]
         fp_state = "%s|%s|%s|%s|%s" % (self._ctx["page_key"], sel_text[:60],
                                        "".join(k + t[:20] for k, t in sel_items), last_act, bool(vis.get("has_ink")))
@@ -1434,15 +1444,95 @@ class Runner:
         voice = head + body_v + tail
         # 给语音侧的极短清单：几项、什么类型、开头几个字。不含正文 —— 它只用来回答
         # "我选中了什么/几项"，不该让语音模型觉得自己已经掌握了页面内容。
+        per = int(s.get("contextVoiceSelectionChars") or 0)
         if sel_items:
-            sel_list = "【选中清单】此刻共 %d 项：%s。（这是最新的，旧的作废；用户问选中了什么就照这条答，不必委派）" % (
-                len(sel_items),
-                "、".join("%s「%s」" % (_SEL_KIND_LABEL.get(k, "选中的内容"), t[:24]) for k, t in sel_items))
+            if per > 0:
+                # 逐项编号 + 完整内容：用户问"这几项分别是什么"时它能直接念，不必委派。
+                body_items = "".join(
+                    "%s（%d）%s：「%s」" % (chr(10), i + 1, _SEL_KIND_LABEL.get(k, "选中的内容"), t[:per])
+                    for i, (k, t) in enumerate(sel_items))
+            else:
+                body_items = "：" + "、".join(
+                    "%s「%s」" % (_SEL_KIND_LABEL.get(k, "选中的内容"), t[:24]) for k, t in sel_items)
+            sel_list = ("【选中清单】此刻共 %d 项%s%s这是最新的一份，之前的清单作废。"
+                        "问选中了什么、几项、内容是什么，照这条直接答，不必委派；"
+                        "但**要动手的事照旧委派后台**（划线、做卡、写便签、翻页、搜索）——"
+                        "手里有内容不等于这些事你自己做。"
+                        "委派时：说清楚是对**第几项**做什么（「对第 2 项做张卡」），"
+                        "需要理解的内容可以连原文一起带过去；"
+                        "但**不要自己重打一遍原文当定位依据** —— 这些编号后台看到的是同一套，"
+                        "它按编号取得到一字不差的原文，你转述时漏一个字就锚不上。") % (len(sel_items), body_items, chr(10))
         else:
-            sel_list = "【选中清单】此刻没有任何选中项（旧的作废）。"
+            sel_list = "【选中清单】此刻没有任何选中项（之前的清单作废）。"
         return {"state": state, "text": text, "text_truncated": text_truncated, "voice": voice,
                 "sel_list": sel_list, "fp_sel": "|".join(k + t[:20] for k, t in sel_items), "fp_state": fp_state, "fp_text": fp_text,
                 "fp_voice": fp_state + "|" + fp_text[:20]}
+
+    def _ctx_text_ledger(self, text: str, sections: dict, cp: dict):
+        """按页记账，去掉刚给过的那部分正文。返回 (裁剪后的正文, 被省掉了什么的说明)。
+
+        ⚠ 只按页判断，不按字符串比对：翻页后"上一页末尾"是那一页正文的**子串**，
+        哈希对不上，而人眼看来就是同一段。按页记账才抓得住这种重复。
+        """
+        try:
+            window = float(self.settings.get("contextTextResendMinutes") or 0) * 60
+            if window <= 0:
+                return text, ""
+            ledger = self._ctx.setdefault("sent_pages", {})
+            now = time.time()
+            for key in [k for k, v in ledger.items() if now - v[1] > window]:
+                ledger.pop(key, None)
+            page = cp.get("page")
+            file_key = str(cp.get("file") or "")
+            if not isinstance(page, int):
+                return text, ""
+            skipped = []
+            # 当前页：整页给过才跳（只给过片段不算数）
+            if ledger.get((file_key, page), ("", 0))[0] == "full" and sections.get("cur"):
+                if sections["cur"] in text:
+                    text = text.replace(sections["cur"], "（本页正文刚才已经给过）", 1)
+                    skipped.append("本页正文")
+            else:
+                ledger[(file_key, page)] = ("full", now)
+            for delta, name, key in ((-1, "上一页末尾", "prev"), (1, "下一页开头", "next")):
+                part = sections.get(key) or ""
+                if not part:
+                    continue
+                seen = ledger.get((file_key, page + delta))
+                if seen and part[:40] in text:
+                    # 连标题一起去掉：只删正文会留下一个空壳标题，读起来像"这里本该有东西但没了"
+                    head = "【上一页末尾（衔接用，不可在此划线）】" if delta < 0 else "【下一页开头（衔接用，不可在此划线）】"
+                    text = text.replace(part, "", 1).replace(head + chr(10) + chr(10), "").replace(head + chr(10), "")
+                    skipped.append(name)
+                elif not seen:
+                    ledger[(file_key, page + delta)] = ("part", now)
+            return text.strip(), "、".join(skipped)
+        except Exception as e:   # noqa: BLE001
+            self.log("ctx_ledger_error", message=clean(e))
+            return text, ""
+
+    @staticmethod
+    def _ctx_mark_selection(text: str, sel_items: list) -> str:
+        """把选中的文字在正文里标出来：⟦SELECTED n=K⟧…⟦/SELECTED⟧。
+
+        正文里本来就有 ⟦HIGHLIGHT⟧ / ⟦CARD_START n=… id=…⟧ 这套标记，模型也有 textMarksHint
+        教它怎么读。选中项照同一套标进去，后台就能从正文里**原地**取到一字不差的原文 ——
+        不必调工具，也不必谁转述（转述日文少一个假名就锚不上）。
+        找不到就不标：它仍然在编号清单里，只是这一项要动手时得调一次快照。
+        """
+        if not text:
+            return text
+        for i, (kind, item_text) in enumerate(sel_items):
+            if kind != "text":
+                continue   # 卡片/图/圈画在正文里已经有自己的标记（CARD_START 等）
+            needle = (item_text or "").strip()
+            if len(needle) < 4 or needle not in text:
+                continue
+            text = text.replace(
+                needle,
+                "\u27e6SELECTED n=%d\u27e7%s\u27e6/SELECTED\u27e7" % (i + 1, needle),
+                1)
+        return text
 
     @staticmethod
     def _split_page_sections(full: str) -> dict:
@@ -1648,7 +1738,12 @@ class Runner:
             self._ctx["fp"][k] = ""
 
     async def _ctx_loop(self):
-        """每 1 秒看快照 mtime；状态指纹变了就（1.5 s 防抖后）给后台投一条位置状态（不带正文，便宜）。"""
+        """每 1 秒看快照；状态变了**只记最新状态，不写线程**（2026-09-16 用户拍板）。
+
+        以前是"变了就投"：静默翻五页、改三次选中，线程里多八条，其中七条没人用到，
+        却要被之后每一轮重读（inject_items 只能追加）。现在写入只发生在有人要用的时候 ——
+        开口、打字、后台起轮 —— 那时投的一定是当下最新的，一轮只有一条。
+        """
         last_fp = ""
         while not self.shutting_down:
             await asyncio.sleep(1)
@@ -1666,8 +1761,9 @@ class Runner:
                     self._ctx["debounce"].cancel()
 
                 async def _later():
-                    await asyncio.sleep(3.0)   # 翻页连按时别每页一条：7 秒 4 条（2026-09-14 实录）
-                    await self._ctx_inject_backend(with_text=False)
+                    await asyncio.sleep(3.0)   # 翻页连按时别抖：7 秒 4 条（2026-09-14 实录）
+                    # ⚠ 这里**不再** _ctx_inject_backend：没人要的状态不进线程。
+                    # 指纹已经在上面更新，下一次真要用时（开口/打字/起轮）投的就是最新的。
                     if str(self.settings.get("contextVoiceMode") or "off") == "idle":
                         await self._ctx_inject_voice_idle()
                 self._ctx["debounce"] = asyncio.create_task(_later())

@@ -3199,7 +3199,32 @@
     return 'card';
   }
 
+  //  卡片正文有时是内部结构的 JSON（词卡/工具卡的 {category, content, …}）。
+  //  它会一路流到 chip、语音清单和后台注入里 —— 模型看到源码就会把字段名当内容念。
+  //  这里把人能读的那几个字段抽出来；解析不了就原样留着（宁可难看，别把内容弄丢）。
+  var _PIN_TEXT_KEYS = ['title', 'label', 'heading', 'reading', 'meaning',
+                        'content', 'text', 'body', 'summary', 'note', 'detail'];
+  function _pinCleanText(raw) {
+    var str = String(raw == null ? '' : raw).trim();
+    if (str.charAt(0) !== '{' && str.charAt(0) !== '[') return str;
+    var parsed;
+    try { parsed = JSON.parse(str); } catch (e) { return str; }
+    var out = [];
+    (function walk(node, depth) {
+      if (node == null || depth > 3 || out.length > 40) return;
+      if (typeof node === 'string') { if (node.trim()) out.push(node.trim()); return; }
+      if (Array.isArray(node)) { node.forEach(function (x) { walk(x, depth + 1); }); return; }
+      if (typeof node !== 'object') return;
+      _PIN_TEXT_KEYS.forEach(function (k) {
+        if (typeof node[k] === 'string') { if (node[k].trim()) out.push(node[k].trim()); }
+        else if (node[k] && typeof node[k] === 'object') walk(node[k], depth + 1);
+      });
+    })(parsed, 0);
+    var joined = out.join('；').trim();
+    return joined || str;
+  }
   function _pinRemember(el, label, text, cid, spec) {
+    text = _pinCleanText(text);
     spec = spec || {};
     var id = _pinContextId(el, cid, spec);
     // ── 出向焦点(A5):选中/替换当前对象。**统一挂在这里** —— 卡片、图片、视频封面、
