@@ -230,6 +230,26 @@
     return out.slice(0, 9);
   }
 
+  // 输入框上方一变就补报一次：谁改的都算（钉卡、✕、40 秒到期、选中替换）。
+  // 2 秒一次、签名没变就什么都不做 —— 比让每个改 chip 的地方各自记得通知要可靠得多。
+  var _ctxAttachSig = null;
+  function _ctxAttachWatch() {
+    try {
+      if (!_ctxOn() || !_ctxS.pend) return;
+      var sig = JSON.stringify(_ctxAttachments());
+      if (sig === _ctxAttachSig) return;
+      var first = _ctxAttachSig === null;
+      _ctxAttachSig = sig;
+      if (!first) _ctxSchedule(0);   // 第一次只记基线，别为"刚进页面"多发一条
+    } catch (e) {}
+  }
+  if (typeof setInterval === 'function') {
+    try {
+      var _ctxAttachTimer = setInterval(_ctxAttachWatch, 2000);
+      if (_ctxAttachTimer && typeof _ctxAttachTimer.unref === 'function') _ctxAttachTimer.unref();
+    } catch (e) {}
+  }
+
   function _ctxSend() {
     _ctxS.timer = null;
     if (!_ctxOn() || !_ctxS.pend) return;
