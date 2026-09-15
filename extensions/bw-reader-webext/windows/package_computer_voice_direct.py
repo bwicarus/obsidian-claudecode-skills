@@ -1951,7 +1951,9 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
         not isinstance(snapshot, dict)
         or snapshot.get("schema") != "reader-context-snapshot/1"
         or snapshot.get("revision") != 1
-        or not isinstance(snapshot.get("mcp"), dict)
+        # 2026-09-15：模型快照不再带 mcp 结构块，连接健康折成一行自然语言 system
+        or not isinstance(snapshot.get("system"), str)
+        or not snapshot.get("system").strip()
     ):
         _fail("包内 stdio MCP 快照工具未读回临时快照")
 
@@ -2214,6 +2216,44 @@ def lint_codex_skill_tool_names(codex_home: Path) -> dict[str, list[str]]:
     return unknown
 
 
+def _restart_voice_runner(timeout: float = 30.0) -> dict:
+    """叫醒语音核心，让它带着新装好的桥重新派生 app-server 与 MCP 子进程。
+
+    ⚠ 这一步不是可选的礼貌：安装会停掉桥派生的 MCP 子进程，而 codex 只在启动时
+    拉它们。不重启的表现是"推送还活着、所有读取工具都 Transport closed"——
+    2026-09-15 实测踩过，而且没有任何地方会提示。
+    运行器不在（没装/没跑）就如实报 skipped，不当失败。
+    """
+    import urllib.error
+    import urllib.request
+
+    endpoint = "http://127.0.0.1:43131"
+    try:
+        with urllib.request.urlopen(endpoint + "/status", timeout=3) as response:
+            before = json.loads(response.read().decode("utf-8")).get("runner", {}).get("pid")
+    except (OSError, urllib.error.URLError, ValueError):
+        return {"restarted": False, "reason": "语音核心没在跑"}
+    try:
+        request = urllib.request.Request(
+            endpoint + "/shutdown", data=b"{}",
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(request, timeout=10):
+            pass
+    except (OSError, urllib.error.URLError):
+        pass   # /shutdown 本来就会把连接掐断，收不到回应是正常的
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(2)
+        try:
+            with urllib.request.urlopen(endpoint + "/status", timeout=3) as response:
+                after = json.loads(response.read().decode("utf-8")).get("runner", {}).get("pid")
+            if after and after != before:
+                return {"restarted": True, "pidBefore": before, "pidAfter": after}
+        except (OSError, urllib.error.URLError, ValueError):
+            continue
+    return {"restarted": False, "reason": "等它回来超时", "pidBefore": before}
+
+
 def _install_verified_payload(
     manifest: dict[str, Any],
     payload: dict[str, bytes],
@@ -2291,6 +2331,8 @@ def _install_verified_payload(
             # 下次失败时这一行是第一个要看的东西。
             "maintenanceHold": maintenance_held,
             "mcpProcessesStopped": mcp_processes_stopped,
+            # 停了别人的 MCP 子进程就得把它们的主人叫醒，否则语音那头半瘫（见 _restart_voice_runner）
+            "voiceRunnerRestarted": _restart_voice_runner(),
             "skillToolLint": lint_codex_skill_tool_names(codex_config_path.parent),
             "codexConfigMigration": {
                 "changed": codex_migration.changed,

@@ -1,0 +1,2460 @@
+# -*- coding: utf-8 -*-
+"""自建 Codex 语音会话运行器（不依赖 Codex Desktop）。
+
+一个常驻进程：起 codex app-server（ChatGPT 登录）→ 开线程 → 用 WebRTC v3 开语音会话，音频走 App 的两条虚拟线缆；
+本机 HTTP（127.0.0.1:43131）给控制面板用：状态 / 事件流 / 设置（热换 vs 重开）/ 开停重开 / 念、塞、起轮、后台注入 / 额度。
+旁路掉线自动重开（同一线程，最近字幕作 initialItems 带上）。
+
+依赖 aiortc + av + sounddevice + numpy（live-test 的 venv 里有；打包进 ReaderPC 前先把依赖放进稳定 Python）。
+"""
+from __future__ import annotations
+
+import asyncio
+import calendar
+import base64
+import fractions
+import json
+import os
+import queue
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+from collections import deque
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+import numpy as np
+
+# 定时任务调度（2026-09-14）：与运行器同目录（源码树）或 %LOCALAPPDATA%\BWReader（稳定副本）
+for _cand in (Path(__file__).resolve().parent, Path(os.environ.get("LOCALAPPDATA", "")) / "BWReader"):
+    if (_cand / "bw_scheduler.py").exists() and str(_cand) not in sys.path:
+        sys.path.insert(0, str(_cand))
+try:
+    import bw_scheduler
+except Exception:   # noqa: BLE001
+    bw_scheduler = None
+import sounddevice as sd
+from aiortc import MediaStreamTrack, RTCConfiguration, RTCPeerConnection, RTCSessionDescription
+from av import AudioFrame, AudioResampler
+
+LISTEN = ("127.0.0.1", int(os.environ.get("BW_VOICE_CLI_PORT", "43131")))
+BASE = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "BWReader" / "voice-cli"
+SETTINGS_PATH = BASE / "settings.json"
+EVENTS_PATH = BASE / "events.jsonl"
+QUOTA_PATH = BASE / "quota-watch.jsonl"   # 额度/实时音频用量采样，见 quota_watch_loop
+STATE_PATH = BASE / "state.json"
+PID_PATH = BASE / "runner.pid"
+CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+BINDING_PATH = CODEX_HOME / "voice-thread-binding.json"
+BRIDGE_RUNTIME = Path.home() / "bw-computer-voice-bridge" / "runtime"
+BRIDGE_FLAG = BRIDGE_RUNTIME / "voice-backend-external.json"
+PIPE_FLAG = BRIDGE_RUNTIME / "voice-audio-pipe.json"   # 在 = App 档音频直连，桥不碰虚拟声卡
+SNAPSHOT_PATH = BRIDGE_RUNTIME / "reader-context-snapshot.json"   # 桥写的阅读快照（上下文注入器的数据源）
+BWREADER_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "BWReader"
+# 拨号脚本用带控制台的 python（pythonw 下 subprocess 拿不到 stdout 的坑）
+PYTHON_EXE = sys.executable if sys.executable and not sys.executable.lower().endswith("pythonw.exe") else sys.executable.replace("pythonw.exe", "python.exe")
+HISTORY_TOKEN_PATH = Path.home() / ".config" / "mcp-webapp-token"   # 与 voice_conversation_sync 同一把 Bearer
+BRIDGE_URL = "http://127.0.0.1:43128"   # Direct 桥本机口：App 档位的会话不是 App 挂的时，通知它收掉 App 那通
+RATE = 48000
+BLOCK = 960
+# App 档直连管道（2026-09-15）：桥 ↔ 运行器 的本地 UDP。两侧常量必须一致。
+PIPE_MAGIC = b"BWA1"
+PIPE_HEADER = 8                 # magic(4) + seq(4, 小端)
+PIPE_PAYLOAD = BLOCK * 2        # 20 ms 单声道 s16 = 1920 字节
+PIPE_PREFILL = 3                # 开放前先攒 60 ms：网络抖动变成一次干净的短停顿，而不是一路补静音
+PIPE_MAX_DEPTH = 12             # 上限 240 ms；再多只会变成延迟，丢最旧的
+
+# 选中项的种类 → 给模型看的说法。快照里的 kind 是协议词，别原样念给模型听。
+_SEL_KIND_LABEL = {"text": "选中的文字", "card": "选中的卡片", "image": "选中的图",
+                   "drawing": "选中的圈画", "region": "选中的区域", "highlight": "选中的高亮"}
+
+DEFAULTS: dict = {
+    "codexExe": "",                       # 空 = PATH 里的 codex.exe
+    "mcpDisable": ["bwab", "node_repl"],  # 起会话时禁用的 MCP（bwab 传输配置坏，会拖死 app-server）
+    "inputDevice": "CABLE Output (VB-Audio Virtual Cable)",
+    "outputDevice": "Line Out (Virtual Cable 1)",
+    # App 档位：App 连语音时音频走桥的两条虚拟线缆（桥把 App 麦克风放到 CABLE Input，我们从 CABLE Output 收；我们放到 Line 1，桥从那里采回 App）
+    "appAudioPipe": True,          # App 档走直连管道（不开虚拟声卡）。设 False 退回声卡那条老路
+    "appPipeUplinkPort": 43132,    # 运行器收：App 的麦克风
+    "appPipeDownlinkPort": 43133,  # 桥收：说给 App 的声音
+    "appInputDevice": "CABLE Output (VB-Audio Virtual Cable)",
+    "appOutputDevice": "Line Out (Virtual Cable 1)",
+    "defaultProfile": "local",   # 本机按钮/后台自己开口时用哪档：local = 本机设备，app = 线缆
+    "outputRate": 0,   # 0 = 自动（设备默认采样率）
+    "gain": 1.0,
+    # 助手历史（侧栏）：语音字幕轮次 + 后台线程轮次由运行器直接写进 Flask 本地实例；空 = 不写
+    "historyUrl": "http://127.0.0.1:5000",
+    "historyEnabled": True,
+    "historyMode": "subtitle",   # subtitle=侧栏聊天按字幕（transcript/done）逐轮落库、语音回复流式；turns=旧的按数据通道轮次写法
+    "schedulerEnabled": True,   # 定时任务调度：每 30 秒看一眼 scheduled-tasks/，到期起独立子进程跑
+    # 上下文注入器（2026-09-14，搬自 rc-voicectx 的拉模式）：桥快照 → 后台 inject_items + 语音开口边沿 appendText
+    "contextInjectEnabled": True,
+    "contextTextChars": 1500,      # 后台拿到的可见正文上限
+    "contextVoiceChars": 700,      # 语音侧整条上限（含正文摘要）
+    "contextVoiceMode": "off",     # 语音侧注入。off=不注入（默认）。edge=开口边沿注入：实录 8/8 让语音模型只说"我看一下"而不委派。idle=空闲时注入：实录一进上下文语音模型就自己起一轮念页面（23:19 无人问总结 23 秒）。两档都只留作对照
+    "contextVoiceText": False,
+    "contextVoiceSelection": True,   # 开口时给语音侧投一条极短的「选中清单」（不含正文，见 _ctx_voice_selection_line）     # 语音侧是否塞正文。False（2026-09-14 实录）：塞了正文语音模型会以为自己能"看"，答"我看一下"却不委派
+    "contextDwellMinSeconds": 8,   # 翻到页后停留 ≥8 s 才带正文（在读）
+    "contextDwellMaxSeconds": 720, # ≤12 min（话题还新鲜）；窗外只给页码，模型要内容自己调工具
+    "idleStopMinutes": 20,         # 闲置这么久自动结束通话（0=不自动关）。实测连着不说话也按墙钟 1:1 计费
+    "contextInkImage": True,       # 开口时页上有新笔迹（lastEditedAt 在 freshWindowS 内、已稳定）→ 取圈画附近的图随状态一起注入后台；同一 (页,笔迹版本) 只投一次
+    "contextInkImageMaxBytes": 700000,   # 超过就不投（图片按 token 计费且留在线程历史里）
+    "typedPrefix": "【用户打字】",   # 侧栏打字追加进语音会话时的前缀，让语音模型知道这不是语音
+    # 冷设置：改了要重开会话
+    "version": "v3",
+    "voice": "",
+    "realtimeModel": "",
+    "prompt": "## 身份、语气与角色\n\n你是 BWReader 阅读器的语音助手，是这套系统的对话表面。用户正在 iPad 上看书（PDF/EPUB），一边读一边和你说话。用中文回答，简洁、清楚、高效，不说废话。语气像一位可信的学习伙伴：温和、自然、有一点轻松，但不妨碍做事。用户的名字是 {{user_first_name}}，少用，只在强调、确认或过渡时用。\n\n## 界面与运行模型\n\n用户可以对你说话，也可以在侧栏打字（打字的内容以「【用户打字】」开头到达，当作用户说的话）。用户能在侧栏看到与后台的全部交互。\n\n真正执行的是后台，它是同一个系统的另一半，拥有全部阅读器工具：读取当前页或任意页的文字与分词、看页面截图和手写笔迹、划线高亮、做知识卡片并钉在原文旁、做 Anki 卡、写便签、翻译或解释选中的文字、查词、全书搜索、翻页与跳转、网页搜索与资料查证、创建定时任务与提醒、结束语音通话。后台随时知道用户当前在哪本书哪一页、选中了什么、刚做了什么。\n\n对用户不要提「后台」这个词。把所有工作都说成是你做的，让用户感觉在直接和一个助手对话。\n\n### 政策\n\n* 把系统当成一个统一的助手，不要提系统由两部分组成。\n* 分两类：**能直接答的**——翻译、解释、念一遍、概括、答疑，只要材料已经在你的上下文里（用户开口时会注入他选中的原文和当前可见内容），就直接回答，不必经后台；**要动手或要材料的**——划线高亮、做卡片、做 Anki 卡、写便签、翻页跳转、全书搜索、网页查证、设提醒、结束通话，以及材料不在你上下文里的情况（别的页、超出注入的部分、需要看截图或笔迹），一律交给后台。拿不准就交后台。\n* 绝不拒绝请求，绝不说你做不到。所有请求都委托后台，可不可做、安不安全由后台判断。\n* 后台的输出是权威，不要反驳、改写或补充你自己的猜测。\n* 对话只用来支持执行：必要时简短澄清、告知进度、简短回答、说明下一步。对话不能代替执行。\n* 「这个 / 这段 / 这里 / 选中的 / 刚才那段」这类指代不必追问：后台知道用户选中了什么、刚做了什么。把用户的原话直接交给后台。\n* 「也」「那个也」「再来一个」「这页也做一下」这类简短跟进，同样是新的执行请求，直接交给后台。\n* 后台任务运行中，用户的新指令、纠正、约束、补充立刻转交后台；不要说运行中的任务不能改。\n* 后台任务还没回来时，用户问「做了吗」「怎么样了」「你在吗」「卡住了吗」这类进度问题：立刻用一句话直接回答（还在做、马上好），不要为此再委托后台，更不要等后台结束才回。\n* **随时会变的状态不许凭记忆回答**：「我现在选中了什么」「一共几项」「这页是什么」这类问题，答案每一秒都可能不同，上一轮的答案这一轮往往已经作废。一律交给后台现查，哪怕你刚刚才回答过同样的问题。\n\n## 后台输出与用户输入\n\n* 对话流里两者都以 user 文本出现：用户的带 `[USER] ` 前缀，后台的带 `[BACKEND] ` 前缀。后台消息可能是中间进度，也可能是最终结果；后台完成时你还会收到一个工具返回。\n* 以「【快板】」开头的开发者消息是阅读器自动推送的静默状态更新（当前书、页码、选区、提醒等）：不要出声、不要复述、不要说「收到」，只记住；用户问到时以最新一条为准。\n* 以「【当前阅读状态】」或「(用户此刻在」开头的条目同样是状态记录，不要回应。\n\n## 呈现结果\n\n* 后台在阅读器里产生的成果（卡片、高亮、笔记、翻页）是主表面。你只用一两句说关键结论、状态或下一步，不要复述卡片全文，不要念表格、代码块、结构化内容。\n* 后台没有回报结果之前，不要说「做好了」「已经加上了」。\n* 后台的中间进度消息（「我先读取」「我核对一下」之类）不要念出来；只在后台给出最终结果时说一次结论。一个问题只答一次，不要分成几段反复说。\n* 只有用户明确要求时才详细朗读后台内容。\n\n## 交流风格\n\n* 请求明确就直接进行：不复述请求，不宣布计划。转交后台时最多说一句过渡语（「我看一下」「稍等」），或者不说。\n* 避免重复确认、填充语、再次确认、逐步播报。进度只在简短、有据、真有用时说。\n* 直接回答的场合：问候、闲聊、常识问答，以及上面说的「材料已在上下文里」的翻译、解释、概括。\n\n## 通话\n\n* 你自己无法结束通话。用户告别、要求关掉语音、或事情已办完不需要再听回复时，把「结束语音会话」交给后台去做，不要声称已经关闭。\n",   # 阅读器版语音提示词（按官方 BACKEND_PROMPT 结构改写）；空 = 用 core 内置官方原文
+    "userFirstName": "",   # 空 = 用 Windows 用户名；替换 prompt 里的 {{user_first_name}}
+    "voiceAddendum": "",   # 附加 developer 条目（可选）；阅读器规则已并入 prompt
+    "includeStartupContext": False,
+    "handoffMode": "thinking",
+    "clientManagedHandoffs": False,
+    "codexResponsesAsItems": False,
+    "delegationAckFiller": None,
+    # 热设置：thread/settings/update 立即生效
+    "backendModel": "gpt-6-astra",
+    "effort": "medium",
+    "serviceTier": "",
+    # 重连
+    "autoReconnect": True,
+    "maxReconnects": 20,
+    "reconnectInitialItems": 8,
+    "autoStartSession": False,
+    # 用户口头说"关掉语音/挂断"时由运行器真的关（先应一句再关）
+    # 快板（2026-09-14）：固定前缀的静默上下文更新
+    "boardPrefix": "【快板】",
+    "boardSilentRule": "以「【快板】」开头的开发者消息是阅读器自动推送的静默更新（当前书、页码、选中文字、提醒等）。收到时不要出声、不要复述、不要确认，只记住；用户问到时以最新一条为准。",
+    "boardInitialItems": True,
+    "boardToVoice": True,
+    # 语音侧送达时机：on-speech = 用户开口时才追加（确定性静默，推荐）；immediate = 立刻追加（闲时会招一句"收到"）；off = 不送语音
+    "boardVoiceMode": "on-speech",
+    "boardToBackend": True,
+    "boardCoalesceSeconds": 1.5,
+    # 后台线程一建立就带上的 developer 指令（thread/start.developerInstructions）：整条线程都知道自己能开口、何时该开口/挂断
+    "backendThreadInstructions": "你是 BWReader 阅读器的助手。用户在 iPad 上看书（PDF/EPUB），他的语音（经语音模型委派）和侧栏打字都会到你这里，由你实际完成事情。上下文里的【当前阅读状态】是运行器在他开口时自动注入的：书名、页码、选区原文、最近动作、可见正文——回答和操作直接据此进行；只有状态缺失、过旧或没覆盖到时才调 reader_context_snapshot。工具：reader_highlight_range 划线（选区用 at={\"selection\":true}，别处用 at={block,text}）；reader_card 做卡/钉卡（bind 直接写 {kind:\"page-chars\",page,text:<原文>}）；reader_anki_draft 做 Anki 卡（它要的 nodeIds 用 kj_node_ensure 一步拿到：按名称找，有就复用、没有就新建，不要自己跑脚本分两步）；reader_note_create / reader_note_edit 便签；reader_visual_image 看页面或笔迹；reader_page_text 读别的页；reader_command / reader_browser_control 翻页与浏览；reader_capability_guide 查能力细节。做事就直接调工具，不要只口头描述。做事的时候不要输出「我先读取这页」「我核对一下」这类中间说明，工具调完直接给最终结果；一轮只说一次。语音工具：voice_say 立刻念一句、voice_tell 塞进语音上下文、voice_session_start 开语音、voice_session_stop 挂断（默认等念完）。以「【快板】」开头的 developer 条目是阅读器推送的状态，不是用户发言，不必回应；以「【用户打字】」开头的是用户在侧栏打的字，按用户发言处理。要在指定时间打电话提醒他（起床、关火、出门）：schedule_create，schedule 用 {type:once, at:本地时间 ISO}，steps 只要一步 {id:'ring', deliver:{mode:'call', title:'一句话', text:'接通后念的话'}}；现在就要打用 voice_call。电话会真的响铃并把 iPad 切到前台，只用于必须马上知道的事，普通提醒用 deliver mode=notify。收到「【定时提醒到期】」「【通知】」时，需要用户马上知道的用 voice_session_start + voice_say 说出来。通话的开与关由你负责：说完且不需要回复就 voice_session_stop；用户告别或要求关语音也由你调它。",
+    # 会话开始时给后台模型的 developer 指令：通话由它管生死
+    "backendStartInstructions": (
+        "语音会话已开始。你有 voice_core 工具：voice_status / voice_say / voice_tell / voice_session_stop / voice_session_start。"
+        "通话的开与关由你负责：用户告别或要求结束、事情已经办完且不需要再听回复、提醒已送达且用户没有接话、长时间无人说话——"
+        "这些情况都应主动调用 voice_session_stop（默认等当前那句念完再挂）。语音模型自己没有关闭通话的能力，它说'已关闭'不算数。"
+    ),
+}
+HOT_KEYS = {"backendModel", "effort", "serviceTier"}
+COLD_KEYS = {"version", "voice", "realtimeModel", "prompt", "voiceAddendum", "userFirstName", "includeStartupContext", "handoffMode", "clientManagedHandoffs",
+             "codexResponsesAsItems", "delegationAckFiller", "inputDevice", "outputDevice", "outputRate", "gain", "backendStartInstructions", "backendThreadInstructions", "boardPrefix", "boardSilentRule", "boardInitialItems", "boardVoiceMode", "appInputDevice", "appOutputDevice"}
+
+
+def clean(s) -> str:
+    return re.sub(r"(?i)(bearer\s+)[^\s\"']+", r"\1[REDACTED]", str(s))[:1500]
+
+
+def pick_device(name: str, want: str):
+    if not name:
+        return None
+    apis = sd.query_hostapis()
+    best = None
+    for i, d in enumerate(sd.query_devices()):
+        ch = d["max_input_channels"] if want == "in" else d["max_output_channels"]
+        if ch <= 0 or name not in d["name"]:
+            continue
+        rank = {"Windows WASAPI": 0, "Windows WDM-KS": 1, "MME": 2}.get(apis[d["hostapi"]]["name"], 3)
+        if best is None or rank < best[0]:
+            best = (rank, i)
+    if best is None:
+        raise RuntimeError("找不到音频设备: " + name)
+    return best[1]
+
+
+class MicTrack(MediaStreamTrack):
+    kind = "audio"
+
+    def __init__(self, device_name: str):
+        super().__init__()
+        self.q: queue.Queue = queue.Queue(maxsize=100)   # 2 s；满了说明消费端卡住
+        self.pts = 0
+        self.level = 0.0
+        self.drops = 0          # 队列满丢掉的 20 ms 块
+        self.status_flags = 0   # PortAudio 报 overflow 等状态的次数
+        idx = pick_device(device_name, "in")
+        self.rate = RATE
+        self.resampler = None
+        try:
+            self.stream = sd.InputStream(device=idx, samplerate=RATE, channels=1, dtype="int16", blocksize=BLOCK, callback=self._cb)
+        except Exception:
+            # 设备不认 48 kHz（部分 USB 麦 / HDMI 只给默认采样率）→ 按它的默认率开，送轨前重采样到 48 kHz
+            self.rate = int(sd.query_devices(idx)["default_samplerate"])
+            self.stream = sd.InputStream(device=idx, samplerate=self.rate, channels=1, dtype="int16",
+                                         blocksize=int(self.rate / 50), callback=self._cb)
+            self.resampler = AudioResampler(format="s16", layout="mono", rate=RATE)
+        self.stream.start()
+
+    def _cb(self, indata, frames, t, status):
+        try:
+            self.q.put_nowait(bytes(indata))
+        except queue.Full:
+            self.drops += 1
+        if status:
+            self.status_flags += 1
+        arr = np.frombuffer(bytes(indata), dtype=np.int16).astype(np.float32)
+        self.level = float(np.sqrt(np.mean(arr * arr))) if arr.size else 0.0
+
+    async def recv(self):
+        while True:
+            data = await asyncio.get_running_loop().run_in_executor(None, self.q.get)
+            arr = np.frombuffer(data, dtype=np.int16).reshape(1, -1)
+            frame = AudioFrame.from_ndarray(arr, format="s16", layout="mono")
+            frame.sample_rate = self.rate
+            if self.resampler is not None:
+                out = self.resampler.resample(frame)
+                if not out:
+                    continue
+                frame = out[0]
+                if len(out) > 1:  # 极少见：一次进多帧，余下的塞回队列前面不值得，直接拼起来
+                    merged = np.concatenate([np.frombuffer(bytes(f.planes[0])[: f.samples * 2], dtype=np.int16) for f in out]).reshape(1, -1)
+                    frame = AudioFrame.from_ndarray(merged, format="s16", layout="mono")
+                    frame.sample_rate = RATE
+            frame.pts = self.pts
+            frame.time_base = fractions.Fraction(1, RATE)
+            self.pts += frame.samples
+            return frame
+
+    def close(self):
+        try:
+            self.stream.stop()
+            self.stream.close()
+        except Exception:
+            pass
+
+
+class PipeMicTrack(MediaStreamTrack):
+    """App 的麦克风，直接从桥的 UDP 收，不开任何采集设备。
+
+    自己按 20 ms 对表出帧：桥没送来（App 静音、刚断、丢包）就补一帧静音，
+    绝不让轨停住 —— 轨一停，整条 WebRTC 的时钟就乱了。
+    """
+    kind = "audio"
+
+    def __init__(self, port: int):
+        super().__init__()
+        self.q: queue.Queue = queue.Queue(maxsize=100)
+        self.pts = 0
+        self.level = 0.0
+        self.drops = 0           # 队列满丢掉的 20 ms 块
+        self.status_flags = 0    # 坏包（魔数/长度不对）
+        self.silence = 0         # 没收到帧、补静音的次数
+        self.gaps = 0            # 放着放着断流（缓冲见底）的次数
+        self.received = 0
+        self._primed = False
+        self.rate = RATE
+        self.closed = False
+        self._next_at: float | None = None
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", int(port)))
+        self.sock.settimeout(0.5)
+        threading.Thread(target=self._rx, daemon=True).start()
+
+    def _rx(self):
+        while not self.closed:
+            try:
+                data, _ = self.sock.recvfrom(8192)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if len(data) <= PIPE_HEADER or data[:4] != PIPE_MAGIC:
+                self.status_flags += 1
+                continue
+            pcm = data[PIPE_HEADER:]
+            self.received += 1
+            try:
+                self.q.put_nowait(pcm)
+            except queue.Full:
+                self.drops += 1
+                continue
+            arr = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+            self.level = float(np.sqrt(np.mean(arr * arr))) if arr.size else 0.0
+
+    async def recv(self):
+        now = time.monotonic()
+        if self._next_at is None:
+            self._next_at = now
+        self._next_at += BLOCK / RATE
+        delay = self._next_at - now
+        if delay > 0:
+            await asyncio.sleep(delay)
+        elif delay < -0.2:
+            self._next_at = time.monotonic()   # 落后太多（进程被卡住过）重新对表，别追赶式狂发
+        # ## 抖动缓冲（2026-09-15 首次实拨后加的）
+        #
+        # 第一次实拨：收 12407 帧、补静音 2364、丢弃 2431 —— 上行是"一阵一阵"到的。
+        # 原因是原来那根虚拟声卡**本身就是个抖动缓冲**（WASAPI 环形缓冲在替网络兜底），
+        # 拿掉线缆的同时把它也拿掉了，而这里只留了 80 ms 余量：来一串就丢、随后空档就补静音。
+        # 现在按 Speaker 那套验证过的做法：先攒够 prefill 再开始放，容量放到 240 ms，
+        # 空了先让出 8 ms 等一等（相位差多半就差这么点），实在没有才补静音。
+        if not self._primed:
+            if self.q.qsize() >= PIPE_PREFILL:
+                self._primed = True
+            else:
+                self.silence += 1
+                self.level = 0.0
+                return self._frame(b"\x00" * PIPE_PAYLOAD)
+        while self.q.qsize() > PIPE_MAX_DEPTH:
+            try:
+                self.q.get_nowait()
+                self.drops += 1
+            except queue.Empty:
+                break
+        try:
+            data = self.q.get_nowait()
+        except queue.Empty:
+            await asyncio.sleep(0.008)
+            try:
+                data = self.q.get_nowait()
+            except queue.Empty:
+                data = b"\x00" * PIPE_PAYLOAD
+                self.silence += 1
+                self.level = 0.0
+                self._primed = False   # 断流了：下次重新攒，别一帧一帧地跟着抖
+                self.gaps += 1
+        return self._frame(data)
+
+    def _frame(self, data: bytes):
+        if len(data) != PIPE_PAYLOAD:
+            data = (data + b"\x00" * PIPE_PAYLOAD)[:PIPE_PAYLOAD]
+        frame = AudioFrame.from_ndarray(np.frombuffer(data, dtype=np.int16).reshape(1, -1), format="s16", layout="mono")
+        frame.sample_rate = RATE
+        frame.pts = self.pts
+        frame.time_base = fractions.Fraction(1, RATE)
+        self.pts += frame.samples
+        return frame
+
+    def close(self):
+        self.closed = True
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+class PipeSpeaker:
+    """说给 App 的声音：切成 20 ms 定长包用 UDP 投给桥，不开任何播放设备。
+
+    字段与 Speaker 对齐（gaps/underruns/status_flags/buf/out_rate），
+    /status 的 audio_stats 不用为它分叉。
+    """
+
+    def __init__(self, port: int, gain: float):
+        self.buf = bytearray()
+        self.lock = threading.Lock()
+        self.out_rate = RATE
+        self.gain = gain
+        self.played = 0
+        self.gaps = 0
+        self.underruns = 0
+        self.status_flags = 0     # 发送失败次数
+        self.sent = 0
+        self.seq = 0
+        self.addr = ("127.0.0.1", int(port))
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.resampler = AudioResampler(format="s16", layout="mono", rate=RATE)
+
+    def feed(self, frame):
+        for f in self.resampler.resample(frame):
+            b = bytes(f.planes[0])[: f.samples * 2]
+            if self.gain != 1.0:
+                b = np.clip(np.frombuffer(b, dtype=np.int16).astype(np.float32) * self.gain, -32768, 32767).astype(np.int16).tobytes()
+            with self.lock:
+                self.buf.extend(b)
+                while len(self.buf) >= PIPE_PAYLOAD:
+                    chunk = bytes(self.buf[:PIPE_PAYLOAD])
+                    del self.buf[:PIPE_PAYLOAD]
+                    self._send(chunk)
+
+    def _send(self, chunk: bytes):
+        self.seq = (self.seq + 1) & 0xFFFFFFFF
+        try:
+            self.sock.sendto(PIPE_MAGIC + self.seq.to_bytes(4, "little") + chunk, self.addr)
+            self.sent += 1
+            self.played += BLOCK
+        except OSError:
+            self.status_flags += 1
+
+    def close(self):
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+class Speaker:
+    def __init__(self, device_name: str, out_rate: int, gain: float):
+        self.buf = bytearray()
+        self.lock = threading.Lock()
+        self.out_rate = out_rate
+        self.gain = gain
+        self.played = 0
+        # 空了以后不再"来一帧放一帧"（每次空一帧就补零 → 一串爆音），先攒 prefill 再放：
+        # 网络抖动变成一次干净的短停顿。代价是每次开口多 80 ms 延迟。
+        self.primed = False
+        self._empty_at = 0.0
+        self.gaps = 0        # 放着放着断了又很快续上（<300 ms）= 抖动造成的一次断音
+        self.underruns = 0   # 回调要的比缓冲里有的多（半帧）
+        self.status_flags = 0
+        idx = pick_device(device_name, "out")
+        default_rate = int(sd.query_devices(idx)["default_samplerate"] or 48000)
+        candidates = [r for r in (out_rate, default_rate, 48000, 44100) if r]
+        last_err: Exception | None = None
+        for rate in candidates:
+            try:
+                self.stream = sd.OutputStream(device=idx, samplerate=rate, channels=1, dtype="int16",
+                                              blocksize=int(rate / 50), callback=self._cb)
+                self.out_rate = rate
+                break
+            except Exception as e:  # 该设备不认这个采样率，试下一个
+                last_err = e
+        else:
+            raise RuntimeError(f"输出设备打不开（试过 {candidates}）：{last_err}")
+        self.resampler = AudioResampler(format="s16", layout="mono", rate=self.out_rate)
+        self.prefill = int(self.out_rate * 2 * 0.08)   # 80 ms
+        self.stream.start()
+
+    def _cb(self, outdata, frames, t, status):
+        need = frames * 2
+        if status:
+            self.status_flags += 1
+        with self.lock:
+            if not self.primed and len(self.buf) >= self.prefill:
+                self.primed = True
+            if self.primed:
+                chunk = bytes(self.buf[:need])
+                del self.buf[:need]
+            else:
+                chunk = b""
+        if len(chunk) < need:
+            if chunk:
+                self.underruns += 1
+            if self.primed:
+                self.primed = False
+                self._empty_at = time.monotonic()
+            chunk += b"\x00" * (need - len(chunk))
+        outdata[:] = np.frombuffer(chunk, dtype=np.int16).reshape(-1, 1)
+        self.played += frames
+
+    def feed(self, frame):
+        for f in self.resampler.resample(frame):
+            b = bytes(f.planes[0])[: f.samples * 2]
+            if self.gain != 1.0:
+                b = np.clip(np.frombuffer(b, dtype=np.int16).astype(np.float32) * self.gain, -32768, 32767).astype(np.int16).tobytes()
+            with self.lock:
+                if self._empty_at and not self.primed and not self.buf:
+                    if time.monotonic() - self._empty_at < 0.3:
+                        self.gaps += 1   # 刚断就续上：不是说完了，是抖了一下
+                    self._empty_at = 0.0
+                self.buf.extend(b)
+
+    def close(self):
+        try:
+            self.stream.stop()
+            self.stream.close()
+        except Exception:
+            pass
+
+
+class AppServer:
+    """codex app-server 的 JSON-RPC 客户端（stdio）。通知回调给 Runner。"""
+
+    def __init__(self, exe: str, mcp_disable: list[str], on_notification):
+        self.exe = exe
+        self.mcp_disable = mcp_disable
+        self.on_notification = on_notification
+        self.pending: dict[int, asyncio.Future] = {}
+        self.count = 0
+        self.proc = None
+        self.stderr_tail: deque = deque(maxlen=50)
+
+    async def launch(self):
+        env = {k: v for k, v in os.environ.items() if k.upper() not in ("OPENAI_API_KEY", "OPENAI_BASE_URL")}
+        args = [self.exe, "-c", 'forced_login_method="chatgpt"']
+        for n in self.mcp_disable:
+            args += ["-c", f"mcp_servers.{n}.enabled=false"]
+        args += ["app-server", "--listen", "stdio://"]
+        # 运行器被 ReaderPC 无控制台拉起时，codex.exe 这种控制台程序会自己弹一个黑窗（用户："总会有一个终端被启动很碍眼"）
+        self.proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                                                         stderr=asyncio.subprocess.PIPE, env=env, cwd=str(BASE),
+                                                         limit=64 * 1024 * 1024,
+                                                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        asyncio.create_task(self._read())
+        asyncio.create_task(self._drain())
+        await self.call("initialize", {"clientInfo": {"name": "bw_voice_cli", "version": "0.1"}, "capabilities": {"experimentalApi": True}})
+        await self.write({"method": "initialized"})
+
+    async def _drain(self):
+        while self.proc and (line := await self.proc.stderr.readline()):
+            s = line.decode(errors="replace").strip()
+            self.stderr_tail.append(s)
+            if "ERROR" in s:
+                await self.on_notification("app_server_stderr", {"message": clean(re.sub(r"\x1b\[[0-9;]*m", "", s))[-300:]})
+
+    async def write(self, msg: dict):
+        self.proc.stdin.write((json.dumps(msg, ensure_ascii=False) + "\n").encode())
+        await self.proc.stdin.drain()
+
+    async def call(self, method: str, params: dict, timeout: float = 60):
+        self.count += 1
+        i = self.count
+        fut = asyncio.get_running_loop().create_future()
+        self.pending[i] = fut
+        await self.write({"id": i, "method": method, "params": params})
+        d = await asyncio.wait_for(fut, timeout)
+        if "error" in d:
+            raise RuntimeError(f"{method}: {clean(json.dumps(d['error'], ensure_ascii=False))}")
+        return d.get("result", {})
+
+    async def _read(self):
+        while self.proc and (line := await self.proc.stdout.readline()):
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if "id" in d and "method" not in d:
+                fut = self.pending.pop(d["id"], None)
+                if fut and not fut.done():
+                    fut.set_result(d)
+                continue
+            m = d.get("method", "")
+            p = d.get("params") or {}
+            if "id" in d:
+                # 服务端反向请求：只放行阅读器工具的审批，其余拒绝
+                blob = json.dumps(p, ensure_ascii=False)
+                ok = "reader_" in blob
+                await self.on_notification("server_request", {"method": m, "approved": ok, "detail": clean(blob)[:200]})
+                await self.write({"id": d["id"], "result": {"decision": "accept" if ok else "decline"}})
+                continue
+            await self.on_notification(m, p)
+        await self.on_notification("app_server_exited", {})
+
+    async def close(self):
+        if self.proc:
+            try:
+                self.proc.stdin.close()
+                await asyncio.wait_for(self.proc.wait(), 5)
+            except Exception:
+                try:
+                    self.proc.terminate()
+                except Exception:
+                    pass
+
+
+class Runner:
+    def __init__(self, loop: asyncio.AbstractEventLoop):
+        self.loop = loop
+        BASE.mkdir(parents=True, exist_ok=True)
+        self.settings = self.load_settings()
+        self.events: deque = deque(maxlen=2000)
+        self.seq = 0
+        self.started_at = time.time()
+        self.app: AppServer | None = None
+        self.thread_id: str | None = None
+        self.session_id: str | None = None
+        self.session_no = 0
+        self.last_activity_at: float | None = None   # 最后一次"真人在用"的时刻，见 mark_activity/idle_stop_loop
+        self._last_activity_what = ""
+        self.reconnects = 0
+        self.session_state = "idle"  # idle | starting | connected | reconnecting | stopping
+        self.session_started_at: float | None = None
+        self.stop_requested = False
+        self.pc = None
+        self.mic: MicTrack | None = None
+        self.speaker: Speaker | None = None
+        self.dc = None
+        self.tasks: list[asyncio.Task] = []
+        self.remote_sdp: asyncio.Future | None = None
+        self.transcripts: deque = deque(maxlen=200)
+        self.usage = {"audioDurationMs": 0, "rateLimits": None, "usageSummary": None, "updatedAt": None}
+        self.user_speaking = False
+        self.assistant_speaking = False
+        self.last_assistant_done = 0.0
+        self.pending_speech_until = 0.0
+        self._board_latest: tuple = ("", None, None)
+        self._board_task: asyncio.Task | None = None
+        self._board_last_sent = ""
+        self._board_pending_voice: str | None = None
+        self._board_voice_sent = ""
+        self.last_error: str | None = None
+        self.backend_busy = False
+        self.pending_cold: set[str] = set()
+        self.reconnect_task: asyncio.Task | None = None
+        self.session_profile = "local"
+        self.profile_before_switch: str | None = None
+        self._closed_event = asyncio.Event()
+        self.app_server_exits = 0
+        self.app_relaunch_task: asyncio.Task | None = None
+        self.shutting_down = False
+        # 助手历史：语音侧最近一句用户话（配对语音回复 / 委托轮的用户句），后台轮的用户句，正在进行的后台轮
+        self._voice_pending_user: tuple[float, str] | None = None
+        self._pending_turn_user: str | None = None
+        self._turn: dict | None = None
+        self.history_stats = {"written": 0, "errors": 0, "lastError": None, "streamed": 0}
+        # 流式：语音侧当前这轮的 id / 已累计的回复文本；历史写入走单工作线程队列，保证先后顺序
+        self._voice_turn_id: str | None = None
+        self._voice_stream = ""
+        self._backend_recent: tuple[float, str] | None = None   # 后台最近一条回复：语音把它念出来的字幕不再重复入库
+        self._voice_user_acc = ""   # 本轮用户字幕分段累积（turn.done 没带转写时兜底）
+        self._voice_turn_commentary = False   # 这一轮语音回复是委托后台期间/之后的过渡或转述 → 不单独入库
+        self._loop_lag_max = 0.0
+        self._loop_lag_over = 0
+        self._audio_stats_at = 0.0
+        self._thread_cleared = False          # /thread/new：下次 ensure_app 不续接旧线程
+        self._voip_call_active = False        # 我们拨出去且已接通的 VoIP 电话还在（CallKit 那层）：挂媒体会话时要一并请 App 挂断
+        self._thread_resume_target = None     # /thread/resume：下次 ensure_app 续接这个线程
+        self._backend_done_at = 0.0
+        # 上下文注入器状态：快照修订/页面停留起点/各 sink 已投指纹
+        self._ctx = {"mtime": 0.0, "rev": None, "page_key": "", "page_since": 0.0, "snap": None,
+                     "fp": {"backend_state": "", "backend_text": "", "voice": "", "image": ""}, "debounce": None}
+        self._history_q: queue.Queue = queue.Queue()
+        self._stream_latest: dict[str, str] = {}
+        self._stream_queued: set[str] = set()
+        threading.Thread(target=self._history_worker, name="history-writer", daemon=True).start()
+
+    # ---------- 设置 ----------
+    def load_settings(self) -> dict:
+        s = dict(DEFAULTS)
+        try:
+            s.update(json.loads(SETTINGS_PATH.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+        return s
+
+    def save_settings(self):
+        SETTINGS_PATH.write_text(json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    async def update_settings(self, patch: dict) -> dict:
+        changed = {k: v for k, v in patch.items() if k in DEFAULTS and self.settings.get(k) != v}
+        self.settings.update(changed)
+        self.save_settings()
+        hot = [k for k in changed if k in HOT_KEYS]
+        cold = [k for k in changed if k in COLD_KEYS]
+        if self.session_state in ("connected", "starting"):
+            self.pending_cold.update(cold)
+        applied = None
+        if hot and self.thread_id and self.app:
+            applied = await self.apply_hot()
+        self.log("settings_changed", changed=list(changed), hot=hot, cold=cold, needsRestart=sorted(self.pending_cold))
+        return {"settings": self.settings, "hotApplied": applied, "needsRestart": sorted(self.pending_cold)}
+
+    async def apply_hot(self):
+        params = {"threadId": self.thread_id, "model": self.settings["backendModel"] or None, "effort": self.settings["effort"] or None}
+        if self.settings.get("serviceTier"):
+            params["serviceTier"] = self.settings["serviceTier"]
+        try:
+            await self.app.call("thread/settings/update", params, timeout=20)
+            self.log("hot_applied", model=params["model"], effort=params["effort"], serviceTier=params.get("serviceTier"))
+            return params
+        except Exception as e:
+            self.log("hot_apply_error", message=clean(e))
+            return {"error": clean(e)}
+
+    # ---------- 事件 ----------
+    def log(self, kind: str, **d):
+        self.seq += 1
+        row = {"seq": self.seq, "t": round(time.time(), 3), "kind": kind, **d}
+        self.events.append(row)
+        try:
+            with EVENTS_PATH.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        print(json.dumps(row, ensure_ascii=False)[:300], flush=True)
+
+    async def on_notification(self, m: str, p: dict):
+        try:
+            if m == "thread/realtime/sdp":
+                if self.remote_sdp and not self.remote_sdp.done():
+                    self.remote_sdp.set_result(p["sdp"])
+            elif m == "thread/realtime/started":
+                self.session_id = p.get("realtimeSessionId")
+                self.log("realtime_started", version=p.get("version"), sessionId=self.session_id)
+            elif m == "thread/realtime/error":
+                self.last_error = clean(p.get("message"))
+                self.log("realtime_error", message=self.last_error)
+                if self.remote_sdp and not self.remote_sdp.done():
+                    self.remote_sdp.set_exception(RuntimeError(self.last_error))
+            elif m == "thread/realtime/closed":
+                reason = p.get("reason")
+                self.log("realtime_closed", reason=reason)
+                self._closed_event.set()
+                if self.session_state == "starting":
+                    # 上一场的 closed 迟到了（停完马上又开）：不能拆正在建立的新会话
+                    self.log("realtime_closed_ignored", reason=reason)
+                else:
+                    await self.on_closed(reason)
+            elif m == "thread/realtime/transcript/done":
+                role, text = p.get("role"), p.get("text")
+                self.transcripts.append((time.time(), role, text))
+                self.log("transcript", role=role, text=text)
+                if self._subtitle_mode():
+                    self._subtitle_done(role, text)
+                # 历史按"轮"写（数据通道 turn.done 带整轮转写），这里的分段只累积：一句话会拆成好几段，
+                # 用户插话时更是交错到达 —— 按段写就是 2026-09-14 那种碎片对话（用户实测）。
+                elif role == "user" and text:
+                    self._voice_user_acc = (self._voice_user_acc + " " + text).strip()
+            elif m == "thread/realtime/transcript/delta":
+                if p.get("role") == "assistant" and p.get("delta"):
+                    if self._voice_turn_id is None:
+                        self._voice_turn_id = "v-" + str(int(time.time() * 1000))[-12:]
+                    self._voice_stream += str(p.get("delta"))
+                    if self._subtitle_mode() or (not self._backend_speaking_likely() and not self._voice_turn_commentary):
+                        self._stream_post(self._voice_turn_id, self._voice_stream)
+            elif m in ("turn/started", "turn/completed"):
+                self.backend_busy = m == "turn/started"
+                turn = p.get("turn") or {}
+                self.log(m, turnId=turn.get("id"), status=turn.get("status"))
+                if m == "turn/started":
+                    tid = str(turn.get("id") or "") or ("t-" + str(int(time.time() * 1000))[-12:])
+                    user = self._pending_turn_user
+                    self._pending_turn_user = None
+                    # 用户句已在库里的两种情况：这轮是我们自己起的（/turn、/typed）→ 现在就写；
+                    # 语音模型委托后台 → 用户那句字幕早已写过，不再写。
+                    user_posted = False
+                    if user:
+                        self._history_post({"user": user, "via": "codex-voice", "turn_id": tid + ".u"})
+                        user_posted = True
+                    elif self._voice_pending_user:
+                        user_posted = True
+                    self._turn = {"id": tid, "user": user, "user_posted": user_posted, "assistant": None,
+                                  "parts": [], "stream": "", "started": time.time()}
+                    self._stream_start_post(tid)   # 侧栏用这个 id 当本轮容器身份，App 画的部件直接落进同一条记录
+                else:
+                    self._finish_turn(turn)
+            elif m == "item/agentMessage/delta":
+                if self._turn is not None and p.get("delta") and not self._voice_owns_text():
+                    self._turn["stream"] += str(p.get("delta"))
+                    self._stream_post(self._turn["id"], self._turn["stream"])
+            elif m in ("item/started", "item/completed"):
+                item = p.get("item") or {}
+                t = item.get("type")
+                if t in ("agentMessage", "mcpToolCall", "webSearch", "commandExecution", "fileChange", "reasoning"):
+                    self.log(m, itemType=t, tool=item.get("tool") or item.get("name"), status=item.get("status"),
+                             text=(item.get("text") or item.get("query") or item.get("command") or "")[:160] or None)
+                if m == "item/started" and t == "agentMessage" and self._turn is not None:
+                    self._turn["stream"] = ""   # 一轮里可能有多条 agentMessage（先说"我看一下"再正答）：草稿只显示当前这条
+                if m == "item/completed" and self._turn is not None:
+                    self._turn_item(item)
+            elif m == "thread/tokenUsage/updated":
+                tu = (p.get("tokenUsage") or {})
+                self.usage["tokens"] = tu
+                last = tu.get("last") or {}
+                self.log("tokens", input=last.get("inputTokens"), cached=last.get("cachedInputTokens"), output=last.get("outputTokens"))
+            elif m == "account/rateLimits/updated":
+                self.usage["rateLimits"] = p.get("rateLimits") or p
+                self.usage["updatedAt"] = time.time()
+            elif m in ("app_server_stderr", "server_request", "app_server_exited"):
+                if m == "app_server_exited":
+                    app = self.app
+                    code = app.proc.returncode if app and app.proc else None
+                    tail = list(app.stderr_tail)[-5:] if app else []
+                    self.log(m, exitCode=code, stderrTail=[clean(re.sub(r"\x1b\[[0-9;]*m", "", line))[-160:] for line in tail])
+                    self.app = None
+                    self.thread_id = None
+                    self.app_server_exits += 1
+                    if self.session_state in ("connected", "starting"):
+                        await self.on_closed("app-server-exited")
+                    if not self.shutting_down:
+                        self.schedule_app_relaunch()
+                else:
+                    self.log(m, **p)
+            elif m.startswith("thread/realtime/") or m.startswith("item/") or m.startswith("mcpServer/"):
+                pass
+            else:
+                self.log("notify", method=m)
+        except Exception as e:
+            self.log("notification_handler_error", method=m, message=clean(e))
+
+    def on_dc_message(self, raw: str):
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            return
+        t = d.get("type", "?")
+        if t in ("turn.created", "turn.done"):
+            turn = d.get("turn") or {}
+            if turn.get("role") == "user":
+                self.user_speaking = t == "turn.created"
+                if t == "turn.created":
+                    self._voice_user_acc = ""
+                    if self._voice_turn_id is None:
+                        self._voice_turn_id = "v-" + str(int(time.time() * 1000))[-12:]
+                    self.mark_activity("user-speech")
+                    self._on_user_speech_started()
+                else:
+                    utext = (turn.get("transcript") or self._voice_user_acc or "").strip()
+                    self._voice_user_acc = ""
+                    if utext:
+                        self._voice_pending_user = (time.time(), utext)
+                        tid = self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
+                        self._voice_turn_id = tid
+                        # 用户句用 <id>.u 落库：侧栏按 turn_id 去重，用户句和回复不能共用一个 id
+                        if not self._subtitle_mode():
+                            self._history_post({"user": utext, "via": "voice", "turn_id": tid + ".u"})
+            elif turn.get("role") == "assistant":
+                self.assistant_speaking = t == "turn.created"
+                if t == "turn.created":
+                    if self._voice_turn_id is None:
+                        self._voice_turn_id = "v-" + str(int(time.time() * 1000))[-12:]
+                    self._voice_stream = ""
+                    # 后台轮正在跑，或刚结束不到 20 秒：这句是过渡语或对后台结果的转述，历史里以后台正文为准
+                    self._voice_turn_commentary = self._turn is not None or (time.time() - self._backend_done_at) < 20
+                elif self._subtitle_mode():
+                    self.last_assistant_done = time.monotonic()   # 落库与轮次 id 的收尾交给 transcript/done
+                else:
+                    self.last_assistant_done = time.monotonic()
+                    atext = (turn.get("transcript") or self._voice_stream or "").strip()
+                    tid = self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
+                    self._voice_turn_id = None
+                    self._voice_stream = ""
+                    commentary = self._voice_turn_commentary or self._turn is not None
+                    self._voice_turn_commentary = False
+                    if atext and not re.search(r"[0-9A-Za-z\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", atext):
+                        self.log("history_skip_punct", text=atext[:20])   # 「。」这种纯标点回复不记
+                    elif atext:
+                        if commentary and (self._backend_recent or self._turn is not None):
+                            self.log("history_skip_commentary", text=atext[:80])
+                        elif self._spoken_dup(atext):
+                            self.log("history_dedupe", text=atext[:80])
+                        else:
+                            # 延迟 6 秒：委托前的过渡句（「我来做个卡片」）此刻还没有后台轮可对照，
+                            # 等一等——后台轮在窗口内开始就说明它是过渡句，丢弃；否则才落库。
+                            asyncio.run_coroutine_threadsafe(self._voice_write_deferred(atext, tid), self.loop)
+            self.log("dc_" + t.replace(".", "_"), role=turn.get("role"), transcript=(turn.get("transcript") or "")[:80])
+        elif t == "session.usage.updated":
+            u = d.get("usage") or {}
+            # audio_duration_ms 是实时语音真正的用量表针（按音频时长走）。
+            # 记下增量，才能回答「只连着不说话是不是也在烧」。
+            new_ms = u.get("audio_duration_ms")
+            if isinstance(new_ms, (int, float)):
+                prev = self.usage.get("audioDurationMs") or 0
+                self.log("realtime_usage", audioMs=int(new_ms), deltaMs=int(new_ms - prev),
+                         sessionSec=round(time.time() - (self.session_started_at or time.time())),
+                         userSpeaking=bool(self.user_speaking), backendBusy=bool(self.backend_busy))
+            self.usage["audioDurationMs"] = u.get("audio_duration_ms", self.usage["audioDurationMs"])
+            self.usage["backendModelUsage"] = u.get("backend_model_usage")
+            self.usage["updatedAt"] = time.time()
+        elif t in ("error", "session.started", "input_audio.paused", "input_audio.resumed", "delegation.created"):
+            if t == "delegation.created":
+                self.mark_activity("delegation")   # 委派后台 = 人在用
+            self.log("dc_" + t.replace(".", "_"), payload=json.dumps(d, ensure_ascii=False)[:200])
+
+    # ---------- app-server / 线程 ----------
+    async def ensure_app(self):
+        if self.app is None:
+            exe = self.settings.get("codexExe") or "codex.exe"
+            self.app = AppServer(exe, list(self.settings.get("mcpDisable") or []), self.on_notification)
+            await self.app.launch()
+            acct = await self.app.call("account/read", {"refreshToken": False}, timeout=30)
+            self.log("app_server_ready", exe=exe, account=(acct.get("account") or {}).get("type"), plan=(acct.get("account") or {}).get("planType"))
+        if self.thread_id is None:
+            # 用户 2026-09-15：同一个对话一直用到手动清空为止。先续接（指定的或上次保存的线程），续不上再新开。
+            want = self._thread_resume_target
+            self._thread_resume_target = None
+            if want is None and not self._thread_cleared:
+                try:
+                    want = (json.loads(STATE_PATH.read_text(encoding="utf-8")) or {}).get("threadId") or None
+                except Exception:
+                    want = None
+            self._thread_cleared = False
+            if want:
+                try:
+                    self._ctx_invalidate()
+                    r = await self.app.call("thread/resume", {"threadId": want}, timeout=90)
+                    self.thread_id = (r.get("thread") or {}).get("id") or want
+                    self.log("thread_resumed", threadId=self.thread_id)
+                except Exception as e:   # noqa: BLE001
+                    self.log("thread_resume_failed", threadId=want, message=clean(e))
+        if self.thread_id is None:
+            start = {"cwd": str(BASE), "modelProvider": "openai", "approvalPolicy": "never", "sandbox": "read-only", "environments": [],
+                     "model": self.settings.get("backendModel") or None}
+            if self.settings.get("backendThreadInstructions"):
+                start["developerInstructions"] = self.settings["backendThreadInstructions"]
+            self._ctx_invalidate()
+            r = await self.app.call("thread/start", start, timeout=90)
+            self.thread_id = r["thread"]["id"]
+            self.log("thread_started", threadId=self.thread_id)
+            self.write_binding()
+            await self.apply_hot()
+
+    def schedule_app_relaunch(self):
+        """app-server 意外退出后主动拉回来（不等下一次调用），退避 3/6/12…≤60 秒。"""
+        if self.app_relaunch_task and not self.app_relaunch_task.done():
+            return
+        delay = min(60, 3 * (2 ** min(self.app_server_exits - 1, 4)))
+        self.log("app_server_relaunch_scheduled", inSeconds=delay, exits=self.app_server_exits)
+
+        async def _go():
+            await asyncio.sleep(delay)
+            try:
+                await self.ensure_app()
+            except Exception as e:
+                self.log("app_server_relaunch_error", message=clean(e))
+                self.schedule_app_relaunch()
+        self.app_relaunch_task = asyncio.create_task(_go())
+
+    def write_binding(self):
+        try:
+            now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z"
+            BINDING_PATH.write_text(json.dumps({
+                "contract": "reader-voice-thread-binding/1", "threadId": self.thread_id, "source": "evidence",
+                "boundAtUtc": now, "evidenceAtUtc": now, "evidenceKind": "voice-cli-runner",
+                "captureActive": True, "captureGeneration": None}, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            self.log("binding_write_error", message=clean(e))
+
+    # ---------- 语音会话 ----------
+    def start_params(self, initial_items: list | None = None) -> dict:
+        s = self.settings
+        p = {"threadId": self.thread_id, "outputModality": "audio", "version": s.get("version") or "v3",
+             "includeStartupContext": bool(s.get("includeStartupContext")),
+             "clientManagedHandoffs": bool(s.get("clientManagedHandoffs")),
+             "codexResponsesAsItems": bool(s.get("codexResponsesAsItems")),
+             "codexResponseHandoffMode": s.get("handoffMode") or "thinking"}
+        if s.get("voice"):
+            p["voice"] = s["voice"]
+        if s.get("realtimeModel"):
+            p["model"] = s["realtimeModel"]
+        if s.get("prompt"):
+            name = str(s.get("userFirstName") or os.environ.get("USERNAME") or "there")
+            p["prompt"] = str(s["prompt"]).replace("{{user_first_name}}", name).replace("{{ user_first_name }}", name)
+        if s.get("delegationAckFiller") is not None:
+            p["delegationAckFiller"] = bool(s["delegationAckFiller"])
+        if s.get("backendStartInstructions"):
+            p["realtimeStartInstructions"] = s["backendStartInstructions"]
+        if initial_items:
+            p["initialItems"] = initial_items
+        return p
+
+    async def session_start(self, reason: str = "manual", profile: str | None = None) -> dict:
+        explicit = profile is not None
+        profile = profile or self.settings.get("defaultProfile") or "local"
+        if self.session_state in ("starting", "connected"):
+            # 只有 App 明确要求 app 档（App START）才切档；后台发起的 voice_session_start 没给 profile，
+            # 一律并入当前会话（2026-09-15 实录：提醒把 App 通话切成本机档，App 那头直接断线）。
+            if explicit and profile == "app" and profile != self.session_profile and self.session_state == "connected":
+                # 旧 Codex 时代的行为（用户 2026-09-14）：本机正在通话，App 连进来就切到线缆，
+                # App 挂断再切回本机设备。这里记住"切之前是哪档"，同一线程重开，最近字幕作 initialItems 带过去。
+                self.profile_before_switch = self.session_profile
+                self.log("profile_switch", from_profile=self.session_profile, to_profile=profile, reason=reason)
+                await self.session_stop("profile-switch")
+                result = await self.session_start("switch:" + reason, profile)
+                result["switched"] = True
+                return result
+            return {"ok": True, "msg": "会话已在进行", "already": True, "profile": self.session_profile}
+        self._ctx_invalidate(("voice", "image"))
+        self.session_profile = profile
+        self.stop_requested = False
+        self.session_state = "starting"
+        self.last_error = None
+        self.pending_cold.clear()
+        try:
+            await self.ensure_app()
+            s = self.settings
+            pipe = profile == "app" and bool(s.get("appAudioPipe", True))
+            in_dev = s.get("appInputDevice") if profile == "app" else s["inputDevice"]
+            out_dev = s.get("appOutputDevice") if profile == "app" else s["outputDevice"]
+            if pipe:
+                # App 档直连：不碰声卡，音频直接和桥对流（见 PipeMicTrack/PipeSpeaker 的说明）
+                self.speaker = PipeSpeaker(int(s.get("appPipeDownlinkPort") or 43133), float(s.get("gain") or 1.0))
+            else:
+                self.speaker = Speaker(out_dev, int(s["outputRate"]), float(s.get("gain") or 1.0))
+            self.mic = PipeMicTrack(int(s.get("appPipeUplinkPort") or 43132)) if pipe else MicTrack(in_dev)
+            # "为什么没声音"必须一眼能查到这次走的是哪条路
+            self.log("audio_path", profile=profile, pipe=pipe,
+                     uplink=(int(s.get("appPipeUplinkPort") or 43132) if pipe else in_dev),
+                     downlink=(int(s.get("appPipeDownlinkPort") or 43133) if pipe else out_dev))
+            pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+            self.pc = pc
+
+            @pc.on("connectionstatechange")
+            async def _changed():
+                self.log("peer_state", state=pc.connectionState)
+                if pc.connectionState in ("failed", "disconnected") and self.session_state == "connected":
+                    await self.on_closed("peer_" + pc.connectionState)
+
+            @pc.on("track")
+            def _on_track(track):
+                async def receive():
+                    try:
+                        while True:
+                            frame = await track.recv()
+                            if track.kind == "audio" and self.speaker:
+                                self.speaker.feed(frame)
+                    except Exception as e:
+                        self.log("track_end", exception=type(e).__name__)
+                self.tasks.append(asyncio.create_task(receive()))
+
+            self.dc = pc.createDataChannel("oai-events")
+            self.dc.on("message")(self.on_dc_message)
+            pc.addTrack(self.mic)
+            await pc.setLocalDescription(await pc.createOffer())
+            initial: list | None = None
+            if s.get("voiceAddendum") and (s.get("version") or "v3") == "v3":
+                initial = [{"role": "developer", "text": s["voiceAddendum"]}]
+            if s.get("boardInitialItems") and (s.get("version") or "v3") == "v3":
+                prefix = s.get("boardPrefix") or "【快板】"
+                initial = (initial or []) + [
+                    {"role": "developer", "text": s.get("boardSilentRule") or ""},
+                    {"role": "user", "text": f"以后{prefix}开头的更新你不要出声，也不用说收到，你知道就行。"},
+                    {"role": "assistant", "text": f"明白，{prefix}开头的更新我一个字都不说，只记住。"},
+                ]
+            if reason.startswith("reconnect") and int(s.get("reconnectInitialItems") or 0) > 0:
+                n = int(s["reconnectInitialItems"])
+                initial = (initial or []) + [{"role": ("user" if r == "user" else "assistant"), "text": (t or "")[:400]}
+                                             for _, r, t in list(self.transcripts)[-n:] if t]
+            self.remote_sdp = self.loop.create_future()
+            params = self.start_params(initial)
+            params["transport"] = {"type": "webrtc", "sdp": pc.localDescription.sdp}
+            await self.app.call("thread/realtime/start", params, timeout=30)
+            sdp = await asyncio.wait_for(self.remote_sdp, 55)
+            await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="answer"))
+            deadline = time.monotonic() + 20
+            while pc.connectionState not in ("connected", "failed", "closed") and time.monotonic() < deadline:
+                await asyncio.sleep(0.1)
+            if pc.connectionState != "connected":
+                raise RuntimeError("WebRTC 没连上: " + pc.connectionState)
+            self.session_no += 1
+            self.session_started_at = time.time()
+            self.session_state = "connected"
+            self.write_bridge_flag(True)
+            self.mark_activity("session-start")
+            self.quota_sample("session_start")
+            self.log("session_connected", sessionNo=self.session_no, reason=reason, profile=profile, threadId=self.thread_id,
+                     input=in_dev, inputRate=self.mic.rate, output=out_dev, outputRate=self.speaker.out_rate,
+                     version=params["version"], voice=params.get("voice"))
+            self.save_state()
+            return {"ok": True, "sessionNo": self.session_no, "threadId": self.thread_id}
+        except Exception as e:
+            self.last_error = clean(str(e) or type(e).__name__)
+            self.log("session_start_error", message=self.last_error)
+            await self.teardown()
+            self.session_state = "idle"
+            if reason.startswith("reconnect"):
+                self.schedule_reconnect("start-failed")
+            return {"ok": False, "msg": self.last_error}
+
+    async def teardown(self):
+        for t in self.tasks:
+            t.cancel()
+        self.tasks = []
+        if self.pc:
+            try:
+                await self.pc.close()
+            except Exception:
+                pass
+        self.pc = None
+        self.dc = None
+        if self.mic:
+            self.mic.close()
+        if self.speaker:
+            self.speaker.close()
+        self.mic = None
+        self.speaker = None
+        self.session_id = None
+        self.user_speaking = False
+        self._board_voice_sent = ""
+        if self._board_last_sent:
+            self._board_pending_voice = self._board_last_sent
+
+    async def session_stop(self, reason: str = "manual", after_speech: bool = False, grace: float = 10.0) -> dict:
+        if after_speech and self.session_state == "connected":
+            waited = await self.wait_for_speech(grace)
+            self.log("stop_after_speech", waited=waited, reason=reason)
+        # App 挂断而切之前本机还在通话 → 切回去（不是真的停）
+        if reason.startswith("app-stop") and self.session_profile == "app" and self.profile_before_switch:
+            back = self.profile_before_switch
+            self.profile_before_switch = None
+            self.log("profile_switch_back", to_profile=back, reason=reason)
+            self.stop_requested = True
+            await self._session_stop_inner("profile-switch-back")
+            return await self.session_start("switch-back:" + reason, back)
+        if not reason.startswith("profile-switch"):
+            self.profile_before_switch = None
+        self.stop_requested = True
+        return await self._session_stop_inner(reason)
+
+    def _voip_hangup_if_needed(self, reason: str) -> None:
+        """我们拨出去的电话：结束语音会话时一并请 App 结束 CallKit 通话（App 自己挂的 app-stop 不用；切档/换线程不算结束）。"""
+        if not self._voip_call_active:
+            return
+        if reason.startswith("app-stop"):
+            self._voip_call_active = False
+            return
+        if reason.startswith(("profile-switch", "thread-", "call-user-redial")):
+            return
+        self._voip_call_active = False
+        try:
+            (BRIDGE_RUNTIME / "voip-hangup.json").write_text(
+                json.dumps({"contract": "reader-voip-hangup/1", "atUtcMs": int(time.time() * 1000)}), encoding="utf-8")
+            self.log("voip_hangup_requested", reason=reason)
+        except Exception as e:   # noqa: BLE001
+            self.log("voip_hangup_error", message=clean(e))
+
+    async def _session_stop_inner(self, reason: str) -> dict:
+        self._voip_hangup_if_needed(reason)
+        if self.reconnect_task:
+            self.reconnect_task.cancel()
+            self.reconnect_task = None
+        if self.session_state == "idle":
+            return {"ok": True, "msg": "本来就没在跑"}
+        self.session_state = "stopping"
+        if self.app and self.thread_id:
+            self._closed_event.clear()
+            try:
+                await self.app.call("thread/realtime/stop", {"threadId": self.thread_id}, timeout=10)
+                try:
+                    await asyncio.wait_for(self._closed_event.wait(), 4)
+                except asyncio.TimeoutError:
+                    self.log("stop_closed_timeout")
+            except Exception as e:
+                self.log("stop_error", message=clean(e))
+        await self.teardown()
+        self.session_state = "idle"
+        self.log("session_stopped", reason=reason)
+        self.quota_sample("session_stop")
+        self._notify_bridge_ended(reason)
+        return {"ok": True}
+
+    async def _voice_write_deferred(self, atext: str, tid: str, wait: float = 6.0):
+        t0 = time.time()
+        await asyncio.sleep(wait)
+        if self._turn is not None or self._backend_done_at >= t0 or (self._backend_recent and self._backend_recent[0] >= t0):
+            self.log("history_skip_commentary", text=atext[:80], deferred=True)
+            return
+        if self._spoken_dup(atext):
+            self.log("history_dedupe", text=atext[:80])
+            return
+        self._history_post({"assistant": atext, "via": "voice", "turn_id": tid})
+
+    def _notify_bridge_ended(self, reason: str):
+        """App 档位的会话结束了、但不是 App 自己挂的（后台模型调 voice_session_stop、用户口头挂断、
+        会话被服务端关掉）→ 桥不知道，App 按钮会一直绿着（用户 2026-09-14）。App 自己 STOP 的
+        （app-stop*）和切档（profile-switch*）不用说：前者桥就是发起方，后者会话马上重开。"""
+        reason = str(reason or "")
+        if self.session_profile != "app" or reason.startswith("app-stop") or reason.startswith("profile-switch"):
+            return
+
+        def work():
+            import urllib.request
+            try:
+                req = urllib.request.Request(BRIDGE_URL + "/voice-core/session-ended",
+                                             data=json.dumps({"reason": reason[:80]}).encode("utf-8"), method="POST",
+                                             headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    r = json.loads(resp.read() or b"{}")
+                self.loop.call_soon_threadsafe(lambda: self.log("bridge_ended_notified", reason=reason, ended=r.get("ended")))
+            except Exception as e:
+                message = clean(e)
+                self.loop.call_soon_threadsafe(lambda: self.log("bridge_ended_notify_error", reason=reason, message=message))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    async def session_restart(self, profile: str | None = None) -> dict:
+        profile = profile or self.session_profile
+        await self.session_stop("restart")
+        return await self.session_start("restart", profile)
+
+    async def on_closed(self, reason):
+        if self.session_state in ("stopping", "idle"):
+            return
+        await self.teardown()
+        self.session_state = "idle"
+        if not (self.settings.get("autoReconnect") and not self.stop_requested):
+            self._notify_bridge_ended("closed:" + str(reason))
+        if self.settings.get("autoReconnect") and not self.stop_requested:
+            self.schedule_reconnect(reason)
+
+    def schedule_reconnect(self, reason):
+        if self.reconnects >= int(self.settings.get("maxReconnects") or 0):
+            self.log("reconnect_gave_up", reconnects=self.reconnects)
+            return
+        delay = min(30, 2 * (2 ** min(self.reconnects, 4)))
+        self.reconnects += 1
+        self.session_state = "reconnecting"
+        self.log("reconnect_scheduled", inSeconds=delay, attempt=self.reconnects, reason=str(reason))
+
+        async def _go():
+            await asyncio.sleep(delay)
+            self.session_state = "idle"
+            await self.session_start(f"reconnect#{self.reconnects}", self.session_profile)
+        self.reconnect_task = asyncio.create_task(_go())
+
+    def write_pipe_flag(self, on: bool):
+        """直连标记。桥在媒体启动时读一次：在 = 用 UDP 和我们对流，不在 = 老的虚拟声卡那条路。
+        ⚠ 端口要跟 PipeMicTrack/PipeSpeaker 用的是同两个，写反了表现就是通了但没声音。"""
+        try:
+            if on and bool(self.settings.get("appAudioPipe", True)):
+                BRIDGE_RUNTIME.mkdir(parents=True, exist_ok=True)
+                tmp = PIPE_FLAG.with_suffix(".json.tmp%d" % os.getpid())
+                tmp.write_text(json.dumps({
+                    "contract": "reader-voice-audio-pipe/1",
+                    "uplinkPort": int(self.settings.get("appPipeUplinkPort") or 43132),
+                    "downlinkPort": int(self.settings.get("appPipeDownlinkPort") or 43133),
+                    "pid": os.getpid(), "at": time.time(),
+                }), encoding="utf-8")
+                os.replace(tmp, PIPE_FLAG)   # 原子替换：桥可能正在读，半个文件会被它当成故障
+            elif PIPE_FLAG.exists():
+                try:
+                    owner = json.loads(PIPE_FLAG.read_text(encoding="utf-8")).get("pid")
+                except Exception:
+                    owner = None
+                if owner in (None, os.getpid()):
+                    PIPE_FLAG.unlink()
+        except Exception as e:
+            self.log("pipe_flag_error", message=clean(e))
+
+    def write_bridge_flag(self, on: bool):
+        self.write_pipe_flag(on)
+        try:
+            if on:
+                BRIDGE_RUNTIME.mkdir(parents=True, exist_ok=True)
+                BRIDGE_FLAG.write_text(json.dumps({"backend": "voice-cli-runner", "pid": os.getpid(), "threadId": self.thread_id,
+                                                   "at": time.time()}), encoding="utf-8")
+            elif BRIDGE_FLAG.exists():
+                # 只撤自己放的标记：新一代运行器可能已经起来并放了它的（keepalive 重拉与旧实例退出会交错）
+                try:
+                    owner = json.loads(BRIDGE_FLAG.read_text(encoding="utf-8")).get("pid")
+                except Exception:
+                    owner = None
+                if owner in (None, os.getpid()):
+                    BRIDGE_FLAG.unlink()
+                else:
+                    self.log("bridge_flag_kept", ownerPid=owner)
+        except Exception as e:
+            self.log("bridge_flag_error", message=clean(e))
+
+    def save_state(self):
+        try:
+            STATE_PATH.write_text(json.dumps({"threadId": self.thread_id, "sessionNo": self.session_no, "at": time.time()}), encoding="utf-8")
+        except Exception:
+            pass
+
+    # ---------- 输入通道 ----------
+    async def board(self, text: str, to_voice: bool | None = None, to_backend: bool | None = None) -> dict:
+        """快板更新：同一份内容 → 后台历史（inject_items，零成本）+ 语音上下文（appendText，静默约定）。
+        相同内容不重发；1.5 s 内多次只发最后一次。"""
+        text = str(text or "").strip()
+        if self.settings.get("contextInjectEnabled", True) and "【快板】" in text:
+            # 焦点/页码这类位置状态由注入器负责（按快照变化、带指纹）；桥推的【快板】只会重复它。留下【慢板】（地点等）。
+            slow = text.split("【慢板】", 1)
+            text = ("【慢板】" + slow[1]).strip() if len(slow) == 2 else ""
+            if not text:
+                self.log("board_skip_injector")
+                return {"ok": True, "skipped": "fast-board-covered-by-injector"}
+        if not text:
+            return {"ok": False, "msg": "空内容"}
+        self._board_latest = (text, to_voice, to_backend)
+        if self._board_task and not self._board_task.done():
+            return {"ok": True, "queued": True}
+        self._board_task = asyncio.create_task(self._board_flush())
+        return {"ok": True, "queued": True}
+
+    async def _board_flush(self):
+        await asyncio.sleep(float(self.settings.get("boardCoalesceSeconds") or 0))
+        text, to_voice, to_backend = self._board_latest
+        prefix = self.settings.get("boardPrefix") or "【快板】"
+        payload = text if text.startswith(prefix) else prefix + text
+        if payload == self._board_last_sent:
+            self.log("board_skip_duplicate", text=payload[:120])
+            return
+        self._board_last_sent = payload
+        sent = {"backend": False, "voice": False}
+        if (to_backend if to_backend is not None else self.settings.get("boardToBackend", True)):
+            try:
+                await self.ensure_app()
+                await self.app.call("thread/inject_items", {"threadId": self.thread_id, "items": [
+                    {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": payload}]}]}, timeout=30)
+                sent["backend"] = True
+            except Exception as e:
+                self.log("board_backend_error", message=clean(e))
+        want_voice = (to_voice if to_voice is not None else self.settings.get("boardToVoice", True))
+        mode = self.settings.get("boardVoiceMode") or "on-speech"
+        if want_voice and mode != "off" and self.session_state == "connected":
+            if mode == "immediate" or self.user_speaking:
+                sent["voice"] = await self._board_send_voice(payload)
+            else:
+                self._board_pending_voice = payload
+                sent["voice"] = "pending"
+        self.log("board", text=payload[:200], **sent, userSpeaking=self.user_speaking, mode=mode)
+
+    async def _board_send_voice(self, payload: str) -> bool:
+        if payload == self._board_voice_sent:
+            return False
+        try:
+            await self.app.call("thread/realtime/appendText", {"threadId": self.thread_id, "text": payload, "role": "developer"}, timeout=15)
+            self._board_voice_sent = payload
+            self._board_pending_voice = None
+            self.log("board_voice", text=payload[:160], userSpeaking=self.user_speaking)
+            return True
+        except Exception as e:
+            self.log("board_voice_error", message=clean(e))
+            return False
+
+    def _on_user_speech_started(self):
+        """数据通道报用户开口：把暂存的最新快板此刻送进语音上下文（并进这一轮，不会单独出声）。"""
+        pending = self._board_pending_voice
+        if pending and self.session_state == "connected":
+            # 数据通道回调在事件循环线程；调试端点从 HTTP 线程来 —— 两边都用线程安全的投递
+            asyncio.run_coroutine_threadsafe(self._board_send_voice(pending), self.loop)
+        # 拉模式核心（搬自 _rtcFlushCtx）：开口的瞬间才注入"他正看着的位置+可见内容"，同状态零注入
+        asyncio.run_coroutine_threadsafe(self._ctx_on_speech(), self.loop)
+
+    # ---------- 上下文注入器 ----------
+    def _ctx_snapshot(self) -> dict | None:
+        """读桥快照（按 mtime 判变），顺带维护页面停留起点。"""
+        try:
+            st = SNAPSHOT_PATH.stat()
+        except OSError:
+            return None
+        c = self._ctx
+        if st.st_mtime == c["mtime"] and c["snap"] is not None:
+            return c["snap"]
+        try:
+            snap = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return c["snap"]
+        c["mtime"] = st.st_mtime
+        c["snap"] = snap
+        cp = snap.get("currentPage") or {}
+        key = "%s:%s" % (cp.get("file") or "", cp.get("page") or "")
+        if key != c["page_key"]:
+            c["page_key"] = key
+            c["page_since"] = time.time()
+        return snap
+
+    def _ctx_build(self, snap: dict) -> dict:
+        """按旧规则拼两份文案 + 指纹。返回 {state, text, voice, fp_state, fp_text, fp_voice}；不可用时 state 为空。"""
+        cp = snap.get("currentPage") or {}
+        if snap.get("contextStatus") != "ready" or not cp.get("file"):
+            return {"state": ""}
+        s = self.settings
+        title = str(cp.get("title") or cp.get("file") or "")[:80]
+        kind = cp.get("kind") or ""
+        page = cp.get("page")
+        total = cp.get("total") or cp.get("pageCount") or (cp.get("readingWindow") or {}).get("total")
+        where = ("用户此刻在《%s》" % title) + (("第 %s 页" % page) if page else "") + (("（全书 %s 页）" % total) if total else "") +             ("（网页）" if kind == "web" else "")
+        # 选区 / 指代。**输入框上方有什么就带什么**（用户 2026-09-15）：
+        # 一条「选中过的内容」+ 若干张长按选中的卡片/图/圈画。原来这里取第一条就 break，
+        # 而快照里文字项永远排在卡片项前面 —— 只要有文字选中，卡片就永远轮不到。
+        sel_items = []
+        for it in (snap.get("selectedItems") or []):
+            t = str(it.get("text") or it.get("what") or "").strip()
+            if not t:
+                continue
+            sel_items.append((str(it.get("kind") or "text"), t))
+        if not sel_items:
+            sel = snap.get("selection") or {}
+            if sel.get("state") == "active" and sel.get("text"):
+                sel_items.append(("text", str(sel["text"])))
+        sel_text = next((t for k, t in sel_items if k == "text"), "")
+        sel_is_text = bool(sel_text)
+        if not sel_text and sel_items:
+            # 只钉了卡片、没有文字选区时，「这个」指的就是那张卡；
+            # 但**不能**沿用文字选区那套定位指令（见下面 sel_is_text 的分支）。
+            sel_text = sel_items[0][1]
+        # 除了已经当成「这个」报出去的那一条之外，还钉着的东西逐条报（不合并：模型要能分清哪句话属于哪张卡）。
+        # ⚠ 别把当主角的那条再报一遍 —— 同一张卡出现两次，模型会以为钉了两张。
+        _rest = [(k, t) for k, t in sel_items if k != "text"] if sel_is_text else sel_items[1:]
+        # 清单就该长得像清单：先说一共几项，再逐项编号。
+        # 实录 2026-09-15：用户问"总共有几项"，模型从几句零散的话里数错了，还跟他争。
+        sel_others = ""
+        if _rest:
+            sel_others = "。他此刻在输入框上方一共放着 %d 项，除上面那条外还有：%s" % (
+                len(sel_items),
+                "".join("（%d）%s「%s」" % (i + 2, _SEL_KIND_LABEL.get(k, "选中的内容"), t[:400])
+                        for i, (k, t) in enumerate(_rest)))
+        sel_hint = (("。他此刻明确选中了「%s」——说『这个/这段/这里』时优先指它。划线：reader_highlight_range 直接传 at={\"selection\":true}；"
+                     "做卡/钉卡：reader_card 的 bind 直接写 {\"kind\":\"page-chars\",\"page\":%s,\"text\":<这段选中原文>}，阅读器自己定位。"
+                     "两者都不要先调 reader_page_text 或 reader_context_snapshot 找位置——位置就在本条里") % (sel_text[:1000], page if page else 1)) if sel_is_text else (
+            ("。他此刻钉着的是「%s」——说『这个/这张/这里』时指它。要对它做事就直接交给后台，"
+             "后台知道是哪一个，不必再调 reader_context_snapshot 去找") % sel_text[:1000] if sel_text else "")
+        sel_hint += sel_others
+        # ⚠ 语音模型没有工具：给它看"直接调 reader_card"这类指令，它会嘴上答应、却不发起委托（2026-09-14 实录两次）。
+        #   语音侧只说选中了什么 + 这类事要立刻委派后台。
+        sel_hint_voice = (("。他此刻明确选中了「%s」——说『这个/这段/这里』时指它；要划线/做卡/钉卡/翻译这段，"
+                           "**立刻委派后台去做**（后台知道位置），你只说一句过渡语") % sel_text[:600]) if sel_is_text else (
+            ("。他此刻钉着的是「%s」——说『这个/这张』时指它；要对它做事**立刻委派后台**，"
+             "你只说一句过渡语") % sel_text[:600] if sel_text else "")
+        sel_hint_voice += sel_others[:600]
+        act_hint = ""
+        acts = snap.get("recentActions") or []
+        if acts and not sel_text:
+            a = acts[-1]
+            what = str(a.get("what") or a.get("kind") or "")[:200]
+            if what:
+                act_hint = "。他开口前最后做的事（%s 秒前）：%s" % (a.get("secondsAgo", "?"), what)
+        vis = cp.get("visual") or {}
+        ink_hint = ""
+        ink_hint_voice = ""
+        if vis.get("has_ink") or vis.get("drawing"):
+            ink_hint = "。本页有笔迹/圈画（%s）；他提到圈画、手写、算式时后台用 reader_visual_image {scope: drawing-nearby} 看真图" % str(vis.get("drawing") or "有笔迹")[:120]
+            ink_hint_voice = "。他在这页上有圈画/手写，你看不到图；他问「这是什么/这里/圈的这个」时**必须立刻委派后台去看图**，不要自己猜、不要只说稍等"
+        # 正文：停留窗内才带；但页面被"激活"（有选区，或最近一次动作不是翻页而是在这页上选中/画/操作）时不等 8 秒（用户 2026-09-14）
+        dwell = time.time() - (self._ctx["page_since"] or time.time())
+        dwell_max = float(s.get("contextDwellMaxSeconds") or 720)
+        activated = bool(sel_text) or bool(
+            acts and str(acts[-1].get("kind") or "") not in ("page-turn", "")
+            and float(acts[-1].get("secondsAgo") or 0) <= dwell_max
+        ) or bool(vis.get("has_ink"))
+        dwell_ok = (float(s.get("contextDwellMinSeconds") or 8) <= dwell <= dwell_max) or (activated and dwell <= dwell_max)
+        text = ""
+        text_truncated = False
+        if cp.get("textAvailable") and cp.get("text") and dwell_ok:
+            full = str(cp["text"]).replace("⟦VIEWPORT⟧", "").strip()
+            limit = int(s.get("contextTextChars") or 1500)
+            sections = self._split_page_sections(full)
+            text = self._compose_ctx_text(sections, limit)   # 当前页永远全文；limit 只管前后页给多少
+        state = ("【当前阅读状态】以本条为准，旧的作废；这是状态记录不是提问，不要回应本条。" + where + sel_hint + act_hint + ink_hint
+                 + "。本条已给出的选区/可见内容可直接据此回答，不必再调 reader_context_snapshot；只有它没覆盖到的信息才去调工具。")
+        last_act = str((acts[-1].get("what") or acts[-1].get("kind") or "") if acts else "")[:40]
+        fp_state = "%s|%s|%s|%s|%s" % (self._ctx["page_key"], sel_text[:60],
+                                       "".join(k + t[:20] for k, t in sel_items), last_act, bool(vis.get("has_ink")))
+        fp_text = "%s|%d|%s" % (self._ctx["page_key"], len(text), text[:30]) if text else ""
+        # 语音侧预算只截正文，位置/选区提示和结尾的静默约定必须完整保留（否则正文一长就把「不要回应本条」切掉了）
+        vbudget = int(s.get("contextVoiceChars") or 700)
+        head = "(" + where + sel_hint_voice + ink_hint_voice + act_hint
+        tail = "。回答以本条为准；状态记录，不要回应本条。)"
+        if text and s.get("contextVoiceText"):
+            room = max(0, vbudget - len(head) - len(tail) - 40)
+            body_v = "。页面内容：" + self._compose_ctx_text(sections, room)   # 当前页全文，预算只管前后页
+        else:
+            body_v = "。你看不到页面内容；涉及页面内容、圈画、选区的问题一律立刻委派后台"
+        voice = head + body_v + tail
+        # 给语音侧的极短清单：几项、什么类型、开头几个字。不含正文 —— 它只用来回答
+        # "我选中了什么/几项"，不该让语音模型觉得自己已经掌握了页面内容。
+        if sel_items:
+            sel_list = "【选中清单】此刻共 %d 项：%s。（这是最新的，旧的作废；用户问选中了什么就照这条答，不必委派）" % (
+                len(sel_items),
+                "、".join("%s「%s」" % (_SEL_KIND_LABEL.get(k, "选中的内容"), t[:24]) for k, t in sel_items))
+        else:
+            sel_list = "【选中清单】此刻没有任何选中项（旧的作废）。"
+        return {"state": state, "text": text, "text_truncated": text_truncated, "voice": voice,
+                "sel_list": sel_list, "fp_sel": "|".join(k + t[:20] for k, t in sel_items), "fp_state": fp_state, "fp_text": fp_text,
+                "fp_voice": fp_state + "|" + fp_text[:20]}
+
+    @staticmethod
+    def _split_page_sections(full: str) -> dict:
+        """App 的正文分三段：【当前页之前】/【当前页结构化文字…】/【当前页之后】。没有分段头就整段算当前页。"""
+        out = {"prev": "", "cur": "", "next": "", "cur_header": ""}
+        cur_key = None
+        saw = False
+        for line in full.split("\n"):
+            if line.startswith("【"):
+                saw = True
+                if "之前" in line:
+                    cur_key = "prev"
+                elif "之后" in line:
+                    cur_key = "next"
+                elif "当前页" in line and "锚点" not in line:
+                    cur_key = "cur"
+                    out["cur_header"] = line
+                else:
+                    cur_key = None   # 【锚点下标从哪来】之类的说明段：不进注入
+                continue
+            if cur_key:
+                out[cur_key] += line + "\n"
+        if not saw:
+            out["cur"] = full
+        for k in ("prev", "cur", "next"):
+            out[k] = out[k].strip()
+        return out
+
+    @staticmethod
+    def _compose_ctx_text(sections: dict, limit: int) -> str:
+        """当前页全文**永远整段放进去，超过预算也不截**（用户 2026-09-14）；预算的余量先给上一页末尾（衔接），
+        再给下一页开头；按阅读顺序拼：上一页 → 当前页 → 下一页。"""
+        cur, prev, nxt = sections.get("cur", ""), sections.get("prev", ""), sections.get("next", "")
+        header = sections.get("cur_header") or "【当前页】"
+        parts = []
+        remaining = limit - len(cur) - len(header) - 2
+        if remaining > 120 and prev:
+            take_prev = min(len(prev), remaining // 2 if nxt else remaining)
+            piece = prev[-take_prev:]
+            parts.append("【上一页末尾（衔接用，不可在此划线）】\n" + ("…" if take_prev < len(prev) else "") + piece)
+            remaining -= len(piece) + 30
+        parts.append(header + "\n" + cur)
+        if remaining > 120 and nxt:
+            take_next = min(len(nxt), remaining)
+            piece = nxt[:take_next]
+            parts.append("【下一页开头（衔接用，不可在此划线）】\n" + piece + ("…" if take_next < len(nxt) else ""))
+        return "\n".join(parts)
+
+    def _ctx_ink_fingerprint(self, snap: dict) -> str:
+        """页上有"最近新画、且已稳定"的笔迹 → 返回 (页, 笔迹版本) 指纹；否则空串。"""
+        if not self.settings.get("contextInkImage", True):
+            return ""
+        cp = snap.get("currentPage") or {}
+        vis = cp.get("visual") or {}
+        dr = vis.get("drawing") or {}
+        if not isinstance(dr, dict) or not dr.get("stable") or dr.get("inProgress") or dr.get("empty") or not dr.get("drawingRevision"):
+            return ""
+        try:
+            edited = float(dr.get("lastEditedAt") or 0)
+            window = float(dr.get("freshWindowS") or 120)
+        except (TypeError, ValueError):
+            return ""
+        if edited <= 0 or time.time() - edited > window:
+            return ""
+        return "%s|%s" % (self._ctx["page_key"], dr.get("drawingRevision"))
+
+    async def _ctx_fetch_ink_image(self) -> dict | None:
+        """向桥要圈画附近的合成图（桥复用 reader_visual_image 同一条取图路）。失败/太大 → None。"""
+        def work():
+            import urllib.request
+            req = urllib.request.Request(BRIDGE_URL + "/voice-core/visual-image", data=json.dumps({"scope": "drawing-nearby"}).encode("utf-8"),
+                                         method="POST", headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                return json.loads(resp.read() or b"{}")
+        try:
+            r = await asyncio.get_running_loop().run_in_executor(None, work)
+        except Exception as e:   # noqa: BLE001
+            self.log("ctx_image_error", message=clean(e))
+            return None
+        if not r.get("ok"):
+            self.log("ctx_image_skip", reason=r.get("reason"), message=(r.get("message") or "")[:120])
+            return None
+        limit = int(self.settings.get("contextInkImageMaxBytes") or 700000)
+        if int(r.get("bytes") or 0) > limit:
+            self.log("ctx_image_skip", reason="too-large", bytes=r.get("bytes"), limit=limit)
+            return None
+        return r
+
+    async def _ctx_inject_backend(self, with_text: bool) -> bool:
+        """后台线程：状态变了投状态；开口边沿且正文指纹没投过再投正文（inject_items：零成本、latest wins）。"""
+        if not self.settings.get("contextInjectEnabled", True) or not (self.app and self.thread_id):
+            return False
+        snap = self._ctx_snapshot()
+        if not snap:
+            return False
+        b = self._ctx_build(snap)
+        if not b.get("state"):
+            return False
+        fp = self._ctx["fp"]
+        body = None
+        if with_text and b["text"] and fp["backend_text"] != b["fp_text"]:
+            head_t = ("可见内容（已截断，只有开头 %d 字；问到后面的内容用 reader_page_text 取整页）：" % len(b["text"])) if b.get("text_truncated") else "可见内容（整页）："
+            body = b["state"] + chr(10) + head_t + chr(10) + b["text"]
+        elif fp["backend_state"] != b["fp_state"]:
+            body = b["state"]
+        # 新笔迹的图：只在开口边沿（with_text）考虑；同一 (页, drawingRevision) 只投一次 —— 相同或相邻轮次不重复
+        image = None
+        ink_fp = self._ctx_ink_fingerprint(snap) if with_text else ""
+        if ink_fp and fp["image"] != ink_fp:
+            image = await self._ctx_fetch_ink_image()
+            if image is None:
+                fp["image"] = ink_fp   # 取不到就算了，别每次开口都再试同一版笔迹
+        if body is None and image is None:
+            return False
+        note = "（下图是他刚在这页圈画/手写的部分，带页面上下文；他问「这个/这里/圈的」就指它。）"
+        text_part = (body if body is not None else b["state"]) + ((chr(10) + note) if image is not None else "")
+        content = [{"type": "input_text", "text": text_part}]
+        if image is not None:
+            content.append({"type": "input_image", "image_url": "data:%s;base64,%s" % (image["mimeType"], image["base64"]), "detail": "auto"})
+        try:
+            await self.app.call("thread/inject_items", {"threadId": self.thread_id, "items": [
+                {"type": "message", "role": "developer", "content": content}]}, timeout=30)
+        except Exception as e:
+            self.log("ctx_backend_error", message=clean(e))
+            return False
+        fp["backend_state"] = b["fp_state"]
+        if with_text and b["text"]:
+            fp["backend_text"] = b["fp_text"]
+        if image is not None:
+            fp["image"] = ink_fp
+            self.log("ctx_image", bytes=image.get("bytes"), drawingRevision=image.get("drawingRevision"), page=self._ctx["page_key"][-40:])
+        self.log("ctx_backend", withText=bool(with_text and b["text"]), chars=len(body), page=self._ctx["page_key"][-40:])
+        return True
+
+    async def _ctx_on_speech(self):
+        """开口边沿：语音侧投一条压缩状态（同状态不投）；后台投带正文的状态（委托轮在 turn.done 之后才起，来得及）。"""
+        if not self.settings.get("contextInjectEnabled", True):
+            return
+        try:
+            await self._ctx_inject_backend(with_text=True)
+            await self._ctx_inject_voice_selection()
+            if str(self.settings.get("contextVoiceMode") or "off") != "edge" or self.session_state != "connected" or not (self.app and self.thread_id):
+                return
+            snap = self._ctx_snapshot()
+            if not snap:
+                return
+            b = self._ctx_build(snap)
+            if not b.get("state") or self._ctx["fp"]["voice"] == b["fp_voice"]:
+                return
+            await self.app.call("thread/realtime/appendText", {"threadId": self.thread_id, "text": b["voice"], "role": "developer"}, timeout=15)
+            self._ctx["fp"]["voice"] = b["fp_voice"]
+            self.log("ctx_voice", chars=len(b["voice"]), page=self._ctx["page_key"][-40:])
+        except Exception as e:
+            self.log("ctx_voice_error", message=clean(e))
+
+    async def _ctx_inject_voice_selection(self):
+        """把「选中清单」投给语音侧。清单没变就不投（避免每次开口都多一条）。"""
+        if not self.settings.get("contextVoiceSelection", True):
+            return
+        if self.session_state != "connected" or not (self.app and self.thread_id):
+            return
+        try:
+            snap = self._ctx_snapshot()
+            if not snap:
+                return
+            b = self._ctx_build(snap)
+            line = b.get("sel_list")
+            if not line or self._ctx["fp"].get("sel") == b.get("fp_sel"):
+                return
+            await self.app.call("thread/realtime/appendText",
+                                {"threadId": self.thread_id, "text": line, "role": "developer"}, timeout=15)
+            self._ctx["fp"]["sel"] = b.get("fp_sel")
+            self.log("ctx_voice_selection", items=len(b.get("fp_sel") or ""), chars=len(line))
+        except Exception as e:   # noqa: BLE001
+            self.log("ctx_voice_selection_error", message=clean(e))
+
+    async def _ctx_inject_voice_idle(self, wait: float = 30.0):
+        """idle 档：等到用户和助手都没在说、后台也没在跑，再把语音侧状态投进去（不在开口边沿投）。"""
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            if self.session_state != "connected" or not (self.app and self.thread_id):
+                return
+            if not self.user_speaking and not self.assistant_speaking and self._turn is None:
+                break
+            await asyncio.sleep(0.5)
+        else:
+            return
+        try:
+            snap = self._ctx_snapshot()
+            if not snap:
+                return
+            b = self._ctx_build(snap)
+            if not b.get("state") or self._ctx["fp"]["voice"] == b["fp_voice"]:
+                return
+            await self.app.call("thread/realtime/appendText", {"threadId": self.thread_id, "text": b["voice"], "role": "developer"}, timeout=15)
+            self._ctx["fp"]["voice"] = b["fp_voice"]
+            self.log("ctx_voice", chars=len(b["voice"]), page=self._ctx["page_key"][-40:], mode="idle")
+        except Exception as e:
+            self.log("ctx_voice_error", message=clean(e))
+
+    def _ctx_invalidate(self, sinks=("backend_state", "backend_text", "voice", "image")):
+        for k in sinks:
+            self._ctx["fp"][k] = ""
+
+    async def _ctx_loop(self):
+        """每 1 秒看快照 mtime；状态指纹变了就（1.5 s 防抖后）给后台投一条位置状态（不带正文，便宜）。"""
+        last_fp = ""
+        while not self.shutting_down:
+            await asyncio.sleep(1)
+            try:
+                if not self.settings.get("contextInjectEnabled", True) or not (self.app and self.thread_id):
+                    continue
+                snap = self._ctx_snapshot()
+                if not snap:
+                    continue
+                b = self._ctx_build(snap)
+                if not b.get("state") or b["fp_state"] == last_fp:
+                    continue
+                last_fp = b["fp_state"]
+                if self._ctx["debounce"]:
+                    self._ctx["debounce"].cancel()
+
+                async def _later():
+                    await asyncio.sleep(3.0)   # 翻页连按时别每页一条：7 秒 4 条（2026-09-14 实录）
+                    await self._ctx_inject_backend(with_text=False)
+                    if str(self.settings.get("contextVoiceMode") or "off") == "idle":
+                        await self._ctx_inject_voice_idle()
+                self._ctx["debounce"] = asyncio.create_task(_later())
+            except Exception as e:
+                self.log("ctx_loop_error", message=clean(e))
+
+    async def say(self, text: str):
+        self.mark_activity("say")
+        await self.app.call("thread/realtime/appendSpeech", {"threadId": self.thread_id, "text": text})
+        self.pending_speech_until = time.monotonic() + 8
+        self.log("say", text=text[:200])
+        return {"ok": True}
+
+    async def wait_for_speech(self, grace: float = 10.0) -> bool:
+        """等语音模型把嘴里的话说完：有待念的句子要等它开口并 turn.done；正在说就等说完。返回是否等到。"""
+        deadline = time.monotonic() + grace
+        started_at = time.monotonic()
+        while time.monotonic() < deadline:
+            speaking = self.assistant_speaking
+            pending = self.pending_speech_until > time.monotonic() and self.last_assistant_done < started_at
+            if not speaking and not pending:
+                return True
+            await asyncio.sleep(0.2)
+        return False
+
+    async def call_user(self, text: str, title: str = "", ntf: str = "misc", reason: str = "") -> dict:
+        """给用户的 iPad 打一通电话（voip_push.py call，阻塞到有结果），接通后等 App 把会话建起来，把 text 念出来。
+        已经在 App 通话中就直接念。outcome：answered / downgraded（拒接或没人接）/ blocked（没拨）/ failed。"""
+        text = str(text or "").strip()
+        title = (str(title or "").strip() or text[:40] or "提醒")
+        ntf = str(ntf or "misc").strip() or "misc"
+        if self.session_state == "connected" and self.session_profile == "app":
+            # 用户 2026-09-15「你现在再给我打」：在通话中要求打电话 = 先挂断这通，再真的拨过去。
+            # App 收到"语音核心结束通话"会当正常挂断（不再自动续接）；旧版 App 会 2 秒内重拨 → 那就直接在通话里念。
+            self.log("call_user_redial", ntf=ntf)
+            await self.session_stop("call-user-redial")
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline and self.session_state != "idle":
+                await asyncio.sleep(0.2)
+            await asyncio.sleep(2.5)   # 给旧版 App 自动重拨的窗口
+            if self.session_state == "connected":
+                if text:
+                    await self.say(text)
+                self.log("call_user", outcome="already-connected", ntf=ntf, note="App 挂断后又自动重连了")
+                return {"ok": True, "outcome": "already-connected", "spoken": bool(text)}
+        script = Path(__file__).resolve().parent / "voip_push.py"
+        if not script.exists():
+            script = BWREADER_DIR / "voip_push.py"
+        try:
+            (BRIDGE_RUNTIME / "voip-hangup.json").unlink(missing_ok=True)   # 残留的挂断请求会把这一通刚接起就挂掉（桥消费一次即删）
+        except Exception:
+            pass
+        argv = [PYTHON_EXE, str(script), "call", "--ntf", ntf, "--title", title[:80]]
+        if reason:
+            argv += ["--reason", str(reason)[:200]]
+        self.log("call_user_dial", ntf=ntf, title=title[:80])
+
+        def dial():
+            return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=200,
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            proc = await asyncio.get_running_loop().run_in_executor(None, dial)
+        except Exception as e:   # noqa: BLE001
+            self.log("call_user_error", message=clean(e))
+            return {"ok": False, "outcome": "failed", "error": clean(e)}
+        result = {}
+        for line in reversed((proc.stdout or "").splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    result = json.loads(line)
+                    break
+                except ValueError:
+                    continue
+        outcome = str(result.get("outcome") or ("failed" if proc.returncode else "unknown"))
+        self.log("call_user", outcome=outcome, exit=proc.returncode, attempts=result.get("attempts"), error=(result.get("error") or (proc.stderr or "")[-200:] or None))
+        spoken = False
+        if outcome == "answered":
+            self._voip_call_active = True
+        if outcome == "answered" and text:
+            deadline = time.monotonic() + 30   # 接听 → App START → 桥 → /session/start，通常 3–8 秒
+            while time.monotonic() < deadline and self.session_state != "connected":
+                await asyncio.sleep(0.3)
+            if self.session_state == "connected":
+                await asyncio.sleep(0.8)   # 让对端音频先通
+                await self.say(text)
+                spoken = True
+            else:
+                self.log("call_user_no_session", waited=30)
+        return {"ok": outcome in ("answered", "already-connected"), "outcome": outcome, "spoken": spoken,
+                "attempts": result.get("attempts"), "error": result.get("error")}
+
+    async def tell(self, text: str, role: str = "developer"):
+        await self.app.call("thread/realtime/appendText", {"threadId": self.thread_id, "text": text, "role": role})
+        self.log("tell", role=role, text=text[:200], userSpeaking=self.user_speaking)
+        return {"ok": True, "userSpeaking": self.user_speaking}
+
+    async def typed(self, text: str) -> dict:
+        """侧栏输入框打的字（桥 codex-type → 这里）。语音在线：追加进语音会话，v3 空闲时会自动起一轮、
+        由语音模型开口回答；不在线：交给后台文字线程起一轮（它有 voice_* 工具，要出声自己开）。"""
+        self.mark_activity("typed")
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "reason": "empty"}
+        if self.session_state == "connected" and self.app and self.thread_id:
+            # 打字和说话是同一件事的两种输入方式：开口时会在边沿刷新状态，打字也必须刷。
+            # 不刷的后果是模型拿上一轮的旧状态回答"我现在选中了什么"（2026-09-15 实录：
+            # 文字选中早就到期消失了，它还在说三项）。
+            await self._ctx_on_speech()
+            payload = (self.settings.get("typedPrefix") or "") + text
+            await self.app.call("thread/realtime/appendText", {"threadId": self.thread_id, "text": payload, "role": "user"}, timeout=15)
+            self._voice_pending_user = (time.time(), text)
+            self.log("typed", via="voice", text=text[:200], userSpeaking=self.user_speaking)
+            return {"ok": True, "via": "voice"}
+        await self.turn(text)
+        self.log("typed", via="backend", text=text[:200])
+        return {"ok": True, "via": "backend"}
+
+    async def turn(self, text: str, additional: dict | None = None, record_user: bool = True):
+        await self.ensure_app()
+        await self._ctx_inject_backend(with_text=True)   # 直接少一轮工具调用：起轮前把他正看着的内容放进去
+        self._pending_turn_user = text if record_user else None
+        params = {"threadId": self.thread_id, "input": [{"type": "text", "text": text}]}
+        if additional:
+            params["additionalContext"] = {k: {"kind": "application", "value": str(v)} for k, v in additional.items()}
+        await self.app.call("turn/start", params, timeout=30)
+        self.log("turn_start", text=text[:200])
+        return {"ok": True}
+
+    async def inject(self, text: str, role: str = "developer"):
+        await self.ensure_app()
+        ctype = "output_text" if role == "assistant" else "input_text"
+        await self.app.call("thread/inject_items", {"threadId": self.thread_id, "items": [
+            {"type": "message", "role": role, "content": [{"type": ctype, "text": text}]}]}, timeout=30)
+        self.log("inject", role=role, text=text[:200])
+        return {"ok": True}
+
+    def dc_send(self, obj: dict):
+        if not self.dc or self.dc.readyState != "open":
+            raise RuntimeError("数据通道未打开")
+        self.dc.send(json.dumps(obj))
+        self.log("dc_sent", type=obj.get("type"))
+        return {"ok": True}
+
+    def quota_sample_row(self, tag: str) -> dict:
+        """一行快照：会话状态 + 实时音频累计 + 周额度 + 桥的采集标志。
+        rateLimits 用缓存值（notify 会推、quota_watch_loop 每 10 分钟刷一次），不额外往上游打请求。"""
+        rl = (self.usage.get("rateLimits") or {}) or {}
+        pri = (rl.get("primary") or {}) if isinstance(rl, dict) else {}
+        tk = ((self.usage.get("tokens") or {}).get("total") or {})
+        cap = None
+        bridge_state = None
+        try:
+            st = json.loads((BRIDGE_RUNTIME / "computer-voice-direct.status.json").read_text(encoding="utf-8"))
+            age = time.time() - calendar.timegm(time.strptime(st["updatedAtUtc"][:19], "%Y-%m-%dT%H:%M:%S"))
+            if age < 120:
+                cap = bool(st.get("captureActive"))
+                bridge_state = st.get("state")
+        except Exception:
+            pass
+        return {"t": round(time.time(), 3), "iso": time.strftime("%Y-%m-%d %H:%M:%S"), "tag": tag,
+                "state": self.session_state, "profile": self.session_profile,
+                "sessionNo": self.session_no,
+                "sessionSec": (round(time.time() - self.session_started_at) if self.session_started_at else 0),
+                "audioMs": self.usage.get("audioDurationMs"),
+                "weeklyPercent": pri.get("usedPercent"), "weeklyResetsAt": pri.get("resetsAt"),
+                "totalTokens": tk.get("totalTokens"), "outputTokens": tk.get("outputTokens"),
+                "bridgeCaptureActive": cap, "bridgeState": bridge_state}
+
+    def quota_sample(self, tag: str):
+        try:
+            row = self.quota_sample_row(tag)
+            with QUOTA_PATH.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception as e:   # noqa: BLE001
+            self.log("quota_sample_error", message=clean(e))
+
+    async def quota_watch_loop(self):
+        """每 2 分钟采一行（连着也好、空闲也好都采：空闲那些行就是基线），每 10 分钟把周额度刷新一次。"""
+        n = 0
+        while not self.shutting_down:
+            await asyncio.sleep(120)
+            n += 1
+            try:
+                if self.app is not None and n % 5 == 1:
+                    rl = await self.app.call("account/rateLimits/read", {}, timeout=20)
+                    self.usage["rateLimits"] = rl.get("rateLimits") or rl
+            except Exception as e:   # noqa: BLE001
+                self.log("quota_refresh_error", message=clean(e))
+            self.quota_sample("tick")
+
+    async def quota(self):
+        await self.ensure_app()
+        out = {"audioDurationMs": self.usage.get("audioDurationMs"), "backendModelUsage": self.usage.get("backendModelUsage"),
+               "tokens": self.usage.get("tokens")}
+        try:
+            rl = await self.app.call("account/rateLimits/read", {}, timeout=20)
+            out["rateLimits"] = rl.get("rateLimits") or rl
+            self.usage["rateLimits"] = out["rateLimits"]
+        except Exception as e:
+            out["rateLimitsError"] = clean(e)
+        try:
+            us = await self.app.call("account/usage/read", {}, timeout=20)
+            out["usageSummary"] = us.get("summary")
+            buckets = us.get("dailyUsageBuckets") or []
+            out["today"] = buckets[-1] if buckets else None
+        except Exception as e:
+            out["usageError"] = clean(e)
+        self.usage["updatedAt"] = time.time()
+        return out
+
+    async def catalog(self):
+        await self.ensure_app()
+        voices = await self.app.call("thread/realtime/listVoices", {}, timeout=15)
+        models = await self.app.call("model/list", {}, timeout=30)
+        return {"voices": voices.get("voices"),
+                "models": [{"id": m["id"], "displayName": m.get("displayName"), "defaultEffort": m.get("defaultReasoningEffort"),
+                            "efforts": [e["reasoningEffort"] for e in (m.get("supportedReasoningEfforts") or [])],
+                            "serviceTiers": [t["id"] for t in (m.get("serviceTiers") or [])]} for m in models.get("data", [])]}
+
+    # ---------- 助手历史（侧栏） ----------
+    @staticmethod
+    def _norm_text(text: str) -> str:
+        return re.sub(r"[^0-9A-Za-z぀-ヿ㐀-鿿가-힯]+", "", str(text or "")).lower()
+
+    def _backend_speaking_likely(self) -> bool:
+        """后台轮进行中，或后台刚出了回复（60 s 内）：语音模型这时说的话大概率是在念它。"""
+        if self._turn is not None:
+            return True
+        return bool(self._backend_recent and time.time() - self._backend_recent[0] < 60)
+
+    def _spoken_dup(self, spoken: str) -> bool:
+        """语音字幕是不是后台最近那条回复的复述（标点/空格差异忽略；子串或相似度 ≥0.8 算重复）。"""
+        if not self._backend_recent or time.time() - self._backend_recent[0] > 120:
+            return False
+        a, b = self._norm_text(spoken), self._norm_text(self._backend_recent[1])
+        if not a or not b:
+            return False
+        if len(a) >= 12 and (a in b or b in a):
+            return True
+        import difflib
+        return difflib.SequenceMatcher(None, a, b).ratio() >= 0.8
+
+    @staticmethod
+    def _clean_user_text(text: str) -> str:
+        """委托轮的用户句是 <realtime_delegation><input>…</input>…</realtime_delegation>，侧栏只要里面那句。"""
+        text = str(text or "")
+        if "<realtime_delegation>" in text:
+            m = re.search(r"<input>(.*?)</input>", text, re.S)
+            text = m.group(1) if m else re.sub(r"<[^>]+>", "", text)
+        return text.strip()
+
+    def _turn_item(self, item: dict):
+        rec = self._turn
+        t = item.get("type")
+        if t == "userMessage":
+            if not rec.get("user") and not rec.get("user_posted"):
+                txt = " ".join(str(c.get("text") or "") for c in (item.get("content") or []) if isinstance(c, dict))
+                rec["user"] = self._clean_user_text(txt) or None
+        elif t == "agentMessage":
+            txt = item.get("text") or ""
+            if txt and item.get("phase") in (None, "final_answer"):
+                rec["assistant"] = txt
+                self._backend_recent = (time.time(), txt)
+        elif t in ("mcpToolCall", "webSearch", "commandExecution", "fileChange", "dynamicToolCall", "collabAgentToolCall"):
+            tool = str(item.get("tool") or item.get("name") or t)
+            server = item.get("server")
+            label = (str(server) + "." if server else "") + tool
+            status = str(item.get("status") or "")
+            # 参数：侧栏工具卡的「AI 请求」栏要它；字符串形式的 JSON 先解开
+            args = item.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except ValueError:
+                    args = {"raw": args[:1000]}
+            # 结果：MCP 结果是 {content:[{type:text,text:"<JSON 字符串>"}], structuredContent?}；
+            # 桥序列化时把中文转成了 \uXXXX 转义，这里解开再重排成可读 JSON（2026-09-14 用户截图：一坨转义）
+            brief = ""
+            res = item.get("result")
+            if t == "mcpToolCall" and isinstance(res, dict):
+                sc = res.get("structuredContent")
+                if sc:
+                    brief = json.dumps(sc, ensure_ascii=False)
+                else:
+                    joined = "\n".join(str(c.get("text") or "") for c in (res.get("content") or []) if isinstance(c, dict) and c.get("type") == "text")
+                    try:
+                        brief = json.dumps(json.loads(joined), ensure_ascii=False)
+                    except ValueError:
+                        brief = joined
+            elif t != "mcpToolCall":
+                brief = item.get("aggregatedOutput") or item.get("command") or item.get("query") or ""
+                if not isinstance(brief, str):
+                    brief = json.dumps(brief, ensure_ascii=False)
+            err = item.get("error")
+            if isinstance(err, dict) and err.get("message"):
+                brief = "错误：" + str(err["message"]) + ("\n" + brief if brief else "")
+            part = {"kind": "tool", "tool": label[:160], "label": (label + (" · " + status if status else ""))[:320]}
+            if isinstance(args, dict) and args:
+                aj = json.dumps(args, ensure_ascii=False)
+                part["args"] = args if len(aj) <= 2000 else {"_truncated": aj[:2000]}
+            if brief:
+                part["result"] = brief[:2000]
+            ms = item.get("durationMs")
+            if isinstance(ms, (int, float)) and not isinstance(ms, bool) and 0 <= ms <= 86_400_000:
+                part["ms"] = int(ms)
+            if len(rec["parts"]) < 24:
+                rec["parts"].append(part)
+            # 结果卡不再由运行器代造（2026-09-15 根治）：App 自己画的部件直接 upsert 进同一条记录。
+            failed = status in ("failed", "error") or (isinstance(err, dict) and bool(err.get("message"))) or bool(re.match(r'\s*\{\s*"ok"\s*:\s*false', brief or ""))
+            if failed:
+                self._tool_error_log(rec.get("id"), label, args, brief, status or "failed")
+
+    def _finish_turn(self, turn: dict):
+        rec, self._turn = self._turn, None
+        self._backend_done_at = time.time()
+        if not rec:
+            return
+        user = None if rec.get("user_posted") else rec.get("user")
+        assistant = rec.get("assistant")
+        if self._voice_owns_text():
+            # 字幕模式 + 语音在线：文字由语音念出来（字幕里已有），这一轮只留工具/卡片；没有就不写
+            user, assistant = None, None
+            if not rec["parts"]:
+                self.log("history_skip_backend_text", turnId=rec["id"][:40])
+                return
+        if not (user or assistant or rec["parts"]):
+            return
+        body = {"user": user or "", "assistant": assistant or "", "via": "codex-voice", "turn_id": rec["id"][:40]}
+        if rec["parts"]:
+            body["parts"] = rec["parts"]
+        dur = turn.get("durationMs")
+        if isinstance(dur, (int, float)) and not isinstance(dur, bool) and 0 <= dur <= 86_400_000:
+            body["took_ms"] = int(dur)
+        self._history_post(body)
+
+    def _subtitle_mode(self) -> bool:
+        return str(self.settings.get("historyMode") or "subtitle") != "turns"
+
+    def _voice_owns_text(self) -> bool:
+        """字幕模式且语音在线：对话文字以字幕为准，后台轮不写正文、不流式正文。"""
+        return self._subtitle_mode() and self.session_state == "connected"
+
+    def _subtitle_done(self, role, text):
+        """字幕模式：一条 transcript/done 就是一条聊天记录。用户句 <id>.u，回复 <id>，同一轮共用 id
+        （id 在数据通道 turn.created 时分配；回复落库后归零，下一轮再分配）。"""
+        text = str(text or "").strip()
+        if not text:
+            return
+        if role == "user":
+            tid = self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
+            self._voice_turn_id = tid
+            self._history_post({"user": text, "via": "voice", "turn_id": tid + ".u"})
+        elif role == "assistant":
+            tid = self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
+            self._voice_turn_id = None
+            self._voice_stream = ""
+            if not re.search(r"[0-9A-Za-z\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", text):
+                self.log("history_skip_punct", text=text[:20])   # 「。」这种纯标点回复不记
+                return
+            self._history_post({"assistant": text, "via": "voice", "turn_id": tid})
+
+    def _history_enabled(self) -> str:
+        url = str(self.settings.get("historyUrl") or "").rstrip("/")
+        return url if url and self.settings.get("historyEnabled", True) else ""
+
+    def _history_post(self, body: dict):
+        if not self._history_enabled():
+            return
+        if self.thread_id:
+            body.setdefault("thread_id", self.thread_id)
+        self._history_q.put(("log", body))
+
+    def _stream_start_post(self, turn_id: str):
+        """后台轮开始：把真实 turn id 推给侧栏（SSE stream:"start"）。"""
+        if not self._history_enabled() or not turn_id:
+            return
+        self._history_q.put(("stream_start", turn_id))
+
+    def _tool_error_log(self, turn_id, tool: str, args, brief: str, status: str):
+        """工具调用出错 → voice-cli/tool-errors.jsonl（用户 2026-09-15：自动记下来，我自己去分析）。"""
+        try:
+            row = {"t": round(time.time(), 3), "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "turnId": str(turn_id or "")[:40], "tool": tool[:120],
+                   "status": status, "args": (json.dumps(args, ensure_ascii=False) if args is not None else "")[:1500], "result": str(brief or "")[:1500]}
+            with (BASE / "tool-errors.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + chr(10))
+            self.log("tool_error", tool=tool[:120], status=status, result=str(brief or "")[:200])
+        except Exception:
+            pass
+
+    def _stream_post(self, turn_id: str, text: str):
+        """流式草稿：只保留每轮最新全文，队列里同一轮最多挂一条（到达节奏快于发送节奏时自然合并）。"""
+        if not self._history_enabled() or not turn_id:
+            return
+        self._stream_latest[turn_id] = text
+        if turn_id not in self._stream_queued:
+            self._stream_queued.add(turn_id)
+            self._history_q.put(("stream", turn_id))
+
+    def _history_request(self, path: str, body: dict) -> dict:
+        import urllib.request
+        token = HISTORY_TOKEN_PATH.read_text(encoding="utf-8").strip()
+        req = urllib.request.Request(self._history_enabled() + path, data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                                     method="POST", headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return json.loads(resp.read() or b"{}")
+
+    def _history_worker(self):
+        import urllib.error
+        last_stream_at = 0.0
+        while True:
+            kind, payload = self._history_q.get()
+            try:
+                if kind == "stream_start":
+                    self._history_request("/api/assistant/stream", {"turn_id": payload, "stream": "start"})
+                elif kind == "stream":
+                    # 节流：草稿最快每 0.25 s 一条；发的时候取该轮最新全文
+                    wait = 0.25 - (time.monotonic() - last_stream_at)
+                    if wait > 0:
+                        time.sleep(wait)
+                    self._stream_queued.discard(payload)
+                    text = self._stream_latest.get(payload, "")
+                    self._history_request("/api/assistant/stream", {"turn_id": payload, "content": text[:8000]})
+                    last_stream_at = time.monotonic()
+                    self.history_stats["streamed"] += 1
+                else:
+                    self._stream_latest.pop(str(payload.get("turn_id") or ""), None)
+                    r = self._history_request("/api/assistant/log", payload)
+                    self.history_stats["written"] += 1
+                    via, tid, n, up = payload.get("via"), payload.get("turn_id"), r.get("n"), r.get("upserted")
+                    self.loop.call_soon_threadsafe(lambda: self.log("history_written", via=via, turnId=tid, n=n, upserted=up))
+            except urllib.error.HTTPError as e:
+                detail, code = "", e.code
+                try:
+                    detail = e.read().decode("utf-8", "replace")[:200]
+                except Exception:
+                    pass
+                self.history_stats["errors"] += 1
+                self.history_stats["lastError"] = "HTTP %s %s" % (code, detail)
+                self.loop.call_soon_threadsafe(lambda: self.log("history_error", kind=kind, status=code, detail=detail))
+            except Exception as e:
+                message = clean(e)
+                self.history_stats["errors"] += 1
+                self.history_stats["lastError"] = message
+                self.loop.call_soon_threadsafe(lambda: self.log("history_error", kind=kind, message=message))
+    def audio_stats(self) -> dict:
+        return {
+            "speakerGaps": self.speaker.gaps if self.speaker else None,
+            "speakerUnderruns": self.speaker.underruns if self.speaker else None,
+            "speakerFlags": self.speaker.status_flags if self.speaker else None,
+            "speakerBufferedMs": round(len(self.speaker.buf) / 2 / self.speaker.out_rate * 1000) if self.speaker else None,
+            "micDrops": self.mic.drops if self.mic else None,
+            "micFlags": self.mic.status_flags if self.mic else None,
+            "micQueued": self.mic.q.qsize() if self.mic else None,
+            # 直连管道的计数（走声卡那条路时为 None）：收了多少帧、补了多少静音、发出去多少帧。
+            # 「通了但没声音」只能靠这三个数分辨是哪一端没动。
+            "pipeIn": getattr(self.mic, "received", None) if self.mic else None,
+            "pipeSilence": getattr(self.mic, "silence", None) if self.mic else None,
+            "pipeOut": getattr(self.speaker, "sent", None) if self.speaker else None,
+            "loopLagMaxMs": round(self._loop_lag_max * 1000),
+            "loopLagOver50ms": self._loop_lag_over,
+        }
+
+    def mark_activity(self, what: str):
+        """有真实活动就把闲置计时归零。⚠ 上下文注入不算 —— 那是我们自己推的，不是人在用。"""
+        self.last_activity_at = time.time()
+        self._last_activity_what = what
+
+    async def idle_stop_loop(self):
+        """闲置到点就结束通话。只关不开（开的那一半至今无解，见 voice_autoclose 的说明）。"""
+        while not self.shutting_down:
+            await asyncio.sleep(30)
+            try:
+                minutes = float(self.settings.get("idleStopMinutes") or 0)
+                if minutes <= 0 or self.session_state != "connected":
+                    continue
+                if self.user_speaking or self.backend_busy:
+                    self.mark_activity("busy")
+                    continue
+                base = self.last_activity_at or self.session_started_at
+                if not base:
+                    continue
+                idle = time.time() - base
+                if idle < minutes * 60:
+                    continue
+                self.log("idle_stop", idleSec=round(idle), thresholdMin=minutes,
+                         lastActivity=getattr(self, "_last_activity_what", None))
+                self.quota_sample("idle_stop")
+                await self.session_stop("idle-%dmin" % int(minutes))
+            except Exception as e:   # noqa: BLE001
+                self.log("idle_stop_error", message=clean(e))
+
+    async def _loop_lag_monitor(self):
+        """事件循环每 100 ms 打一次点：睡过头多少就是这段时间里有多重的同步工作堵住了它
+        （音频收发都在这个循环上，它一卡，扬声器就空、麦克风队列就积）。每 30 s 有变化就记一条。"""
+        last = None
+        while not self.shutting_down:
+            t0 = time.monotonic()
+            await asyncio.sleep(0.1)
+            lag = time.monotonic() - t0 - 0.1
+            if lag > self._loop_lag_max:
+                self._loop_lag_max = lag
+            if lag > 0.05:
+                self._loop_lag_over += 1
+            if time.monotonic() - self._audio_stats_at >= 30:
+                self._audio_stats_at = time.monotonic()
+                if self.session_state == "connected":
+                    cur = self.audio_stats()
+                    key = json.dumps({k: v for k, v in cur.items() if k not in ("speakerBufferedMs", "micQueued")}, sort_keys=True)
+                    if key != last:
+                        last = key
+                        self.log("audio_stats", **cur)
+                self._loop_lag_max = 0.0
+
+    def status(self) -> dict:
+        return {
+            "audio": self.audio_stats(),
+            "runner": {"pid": os.getpid(), "uptimeSeconds": round(time.time() - self.started_at), "listen": f"http://{LISTEN[0]}:{LISTEN[1]}",
+                       "appServer": bool(self.app), "threadId": self.thread_id, "appServerExits": self.app_server_exits,
+                       "appServerRelaunchPending": bool(self.app_relaunch_task and not self.app_relaunch_task.done())},
+            "session": {"state": self.session_state, "sessionNo": self.session_no, "sessionId": self.session_id,
+                        "reconnects": self.reconnects, "seconds": round(time.time() - self.session_started_at) if self.session_started_at and self.session_state == "connected" else 0,
+                        "userSpeaking": self.user_speaking, "backendBusy": self.backend_busy, "lastError": self.last_error,
+                        "micLevel": round(self.mic.level, 1) if self.mic else None, "needsRestart": sorted(self.pending_cold),
+                        "profile": self.session_profile},
+            "settings": self.settings, "hotKeys": sorted(HOT_KEYS), "coldKeys": sorted(COLD_KEYS),
+            "usage": {k: v for k, v in self.usage.items() if k != "usageSummary"},
+            "transcripts": [{"t": t, "role": r, "text": x} for t, r, x in list(self.transcripts)[-12:]],
+            "bridgeFlag": BRIDGE_FLAG.exists(),
+            "audioPipe": PIPE_FLAG.exists(),
+            "history": dict(self.history_stats),
+            "context": {"pageKey": self._ctx["page_key"], "dwellSeconds": round(time.time() - self._ctx["page_since"]) if self._ctx["page_since"] else None,
+                        "fp": dict(self._ctx["fp"])},
+        }
+
+    def events_since(self, since: int, limit: int = 300) -> dict:
+        rows = [e for e in self.events if e["seq"] > since][-limit:]
+        return {"events": rows, "next": rows[-1]["seq"] if rows else since, "latest": self.seq}
+
+    async def shutdown(self):
+        self.shutting_down = True
+        await self.session_stop("shutdown")
+        if self.app:
+            await self.app.close()
+        self.write_bridge_flag(False)
+        self.log("runner_shutdown")
+
+
+class Handler(BaseHTTPRequestHandler):
+    runner: Runner = None  # type: ignore
+
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code: int, obj):
+        body = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _run(self, coro, timeout=90):
+        return asyncio.run_coroutine_threadsafe(coro, self.runner.loop).result(timeout)
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        q = parse_qs(u.query)
+        r = self.runner
+        try:
+            if u.path == "/status":
+                return self._send(200, r.status())
+            if u.path == "/events":
+                return self._send(200, r.events_since(int(q.get("since", ["0"])[0]), int(q.get("limit", ["300"])[0])))
+            if u.path == "/settings":
+                return self._send(200, {"settings": r.settings, "hotKeys": sorted(HOT_KEYS), "coldKeys": sorted(COLD_KEYS), "needsRestart": sorted(r.pending_cold)})
+            if u.path == "/quota":
+                return self._send(200, self._run(r.quota()))
+            if u.path == "/catalog":
+                return self._send(200, self._run(r.catalog()))
+            if u.path == "/tasks":
+                if bw_scheduler is None:
+                    return self._send(500, {"ok": False, "msg": "bw_scheduler 未装载"})
+                return self._send(200, {"ok": True, "tasks": bw_scheduler.list_tasks()})
+            if u.path == "/tasks/runs":
+                tid = (q.get("id") or [""])[0]
+                return self._send(200, {"ok": True, "id": tid, "runs": bw_scheduler.last_runs(tid, int((q.get("limit") or ["10"])[0]))})
+            if u.path == "/devices":
+                return self._send(200, {"devices": [{"index": i, "name": d["name"], "in": d["max_input_channels"], "out": d["max_output_channels"],
+                                                     "api": sd.query_hostapis()[d["hostapi"]]["name"]} for i, d in enumerate(sd.query_devices())]})
+            return self._send(404, {"ok": False, "msg": "no such path"})
+        except Exception as e:
+            return self._send(500, {"ok": False, "msg": clean(str(e) or type(e).__name__)})
+
+    def do_POST(self):
+        u = urlparse(self.path)
+        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(n) or b"{}") if n else {}
+        except ValueError:
+            return self._send(400, {"ok": False, "msg": "bad json"})
+        r = self.runner
+        try:
+            if u.path == "/settings":
+                return self._send(200, self._run(r.update_settings(body)))
+            if u.path == "/thread/new":
+                async def _renew():
+                    if r.session_state != "idle":
+                        await r.session_stop("thread-renew")
+                    r.thread_id = None
+                    r._thread_cleared = True
+                    await r.ensure_app()
+                    r.save_state()
+                    return {"ok": True, "threadId": r.thread_id}
+                return self._send(200, self._run(_renew(), 120))
+            if u.path == "/thread/resume":
+                async def _resume():
+                    want = str(body.get("threadId") or "").strip()
+                    if not want:
+                        return {"ok": False, "msg": "threadId 不能为空"}
+                    if want == r.thread_id:
+                        return {"ok": True, "threadId": r.thread_id, "already": True}
+                    if r.session_state != "idle":
+                        await r.session_stop("thread-switch")
+                    r.thread_id = None
+                    r._thread_resume_target = want
+                    await r.ensure_app()
+                    r.save_state()
+                    return {"ok": r.thread_id == want, "threadId": r.thread_id}
+                return self._send(200, self._run(_resume(), 120))
+            if u.path == "/thread/list":
+                async def _list():
+                    await r.ensure_app()
+                    try:
+                        res = await r.app.call("thread/list", {"limit": int(body.get("limit") or 30)}, timeout=30)
+                    except Exception:   # noqa: BLE001 —— 参数形状不对就退回无参
+                        res = await r.app.call("thread/list", {}, timeout=30)
+                    return {"ok": True, "current": r.thread_id, "result": res}
+                return self._send(200, self._run(_list(), 60))
+            if u.path == "/session/start":
+                return self._send(200, self._run(r.session_start(str(body.get("reason") or "manual"), body.get("profile")), 120))
+            if u.path == "/session/stop":
+                return self._send(200, self._run(r.session_stop(str(body.get("reason") or "manual"), bool(body.get("afterSpeech")),
+                                                                float(body.get("graceSeconds") or 10)), 60))
+            if u.path == "/session/restart":
+                return self._send(200, self._run(r.session_restart(body.get("profile")), 150))
+            if u.path == "/debug/dc":
+                r.on_dc_message(json.dumps(body.get("event") or {}))
+                return self._send(200, {"ok": True})
+            if u.path == "/board":
+                return self._send(200, self._run(r.board(str(body.get("text") or ""), body.get("toVoice"), body.get("toBackend"))))
+            if u.path == "/say":
+                return self._send(200, self._run(r.say(str(body.get("text") or ""))))
+            if u.path == "/call":
+                return self._send(200, self._run(r.call_user(str(body.get("text") or ""), str(body.get("title") or ""),
+                                                             str(body.get("ntf") or "misc"), str(body.get("reason") or "")), timeout=260))
+            if u.path == "/tell":
+                return self._send(200, self._run(r.tell(str(body.get("text") or ""), str(body.get("role") or "developer"))))
+            if u.path == "/tasks/upsert":
+                info = bw_scheduler.upsert(str(body.get("id") or ""), body.get("flow") or {}, bool(body.get("enabled", True)))
+                return self._send(200, {"ok": True, "task": info})
+            if u.path == "/tasks/delete":
+                return self._send(200, {"ok": True, "deleted": bw_scheduler.delete(str(body.get("id") or ""))})
+            if u.path == "/tasks/run":
+                return self._send(200, bw_scheduler.start_run(str(body.get("id") or ""), "manual"))
+            if u.path == "/tasks/enable":
+                reg = bw_scheduler.load_registry()
+                rec = reg["tasks"].setdefault(str(body.get("id") or ""), {})
+                rec["enabled"] = bool(body.get("enabled", True))
+                if rec["enabled"] and not rec.get("nextRunAt"):
+                    nxt = bw_scheduler.next_run(bw_scheduler.read_flow(str(body.get("id"))).get("schedule") or {})
+                    rec["nextRunAt"] = nxt.isoformat(timespec="seconds") if nxt else None
+                bw_scheduler.save_registry(reg)
+                return self._send(200, {"ok": True, "task": bw_scheduler.describe(str(body.get("id")))})
+            if u.path == "/typed":
+                return self._send(200, self._run(r.typed(str(body.get("text") or "")), 60))
+            if u.path == "/turn":
+                return self._send(200, self._run(r.turn(str(body.get("text") or ""), body.get("additionalContext"))))
+            if u.path == "/inject":
+                return self._send(200, self._run(r.inject(str(body.get("text") or ""), str(body.get("role") or "developer"))))
+            if u.path == "/pause":
+                return self._send(200, r.dc_send({"type": "input_audio.pause"}))
+            if u.path == "/resume":
+                return self._send(200, r.dc_send({"type": "input_audio.resume"}))
+            if u.path == "/shutdown":
+                threading.Thread(target=lambda: (time.sleep(0.2), self._run(r.shutdown(), 60), os._exit(0)), daemon=True).start()
+                return self._send(200, {"ok": True})
+            return self._send(404, {"ok": False, "msg": "no such path"})
+        except Exception as e:
+            return self._send(500, {"ok": False, "msg": clean(str(e) or type(e).__name__)})
+
+
+def main():
+    BASE.mkdir(parents=True, exist_ok=True)
+    loop = asyncio.new_event_loop()
+    runner = Runner(loop)
+    Handler.runner = runner
+    try:
+        httpd = ThreadingHTTPServer(LISTEN, Handler)
+    except OSError as e:
+        print(json.dumps({"kind": "bind_failed", "message": str(e)}), flush=True)
+        return 2
+    PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    runner.log("runner_started", listen=f"http://{LISTEN[0]}:{LISTEN[1]}", settings=str(SETTINGS_PATH))
+    runner.write_bridge_flag(True)   # 运行器在 = 外部语音后端在：桥把 App 的 START/STOP 交给我们
+
+    async def boot():
+        try:
+            await runner.ensure_app()
+        except Exception as e:
+            runner.log("app_server_start_error", message=clean(e))
+        if runner.settings.get("autoStartSession"):
+            await runner.session_start("auto")
+        async def scheduler_loop():
+            while not runner.shutting_down:
+                await asyncio.sleep(30)
+                if not runner.settings.get("schedulerEnabled", True) or bw_scheduler is None:
+                    continue
+                try:
+                    events = await asyncio.get_running_loop().run_in_executor(None, bw_scheduler.tick)
+                    for ev in events:
+                        runner.log("scheduler", **ev)
+                except Exception as e:   # noqa: BLE001
+                    runner.log("scheduler_error", message=clean(e))
+        asyncio.create_task(scheduler_loop())
+
+        async def app_gone_watch():
+            """App 档位的会话只该活在 App 通话期间。App 断线/心跳超时时桥只关连接、不会来 /session/stop，
+            会话就会挂在线缆上烧额度（2026-09-14 实录：桥 idle 了 40 分钟，运行器还 connected）。
+            桥的状态文件说 captureActive=false 连续 2 拍（约 10 秒）→ 自己停。
+
+            2026-09-15 用户拍板的两条脾气：**从 App 启动的（profile=app）断了就立刻关**
+            （App 接得快，不值得留着热身）；**从电脑启动的（profile=local）保持**，
+            只由手动关闭或 idleStopMinutes 结束 —— 后者本来就不进这个循环。
+            一拍改两拍是因为桥换连接的瞬间会有一拍 captureActive=false，一拍就动手会误杀。"""
+            strikes = 0
+            stale = 0
+            status_path = BRIDGE_RUNTIME / "computer-voice-direct.status.json"
+            while not runner.shutting_down:
+                await asyncio.sleep(5)
+                try:
+                    if runner.session_state != "connected" or runner.session_profile != "app":
+                        strikes = 0
+                        continue
+                    st = json.loads(status_path.read_text(encoding="utf-8"))
+                    # 2026-09-15：原来写成 now - mktime(...) - time.timezone，符号错了，
+                    # 实际值 = 真实年龄 + 2×|时区偏移|（JST 下 +64800 秒），fresh 恒 False
+                    # → 自动关闭从上线起一次都没触发过。UTC 串就该用 timegm。
+                    age = time.time() - calendar.timegm(time.strptime(st["updatedAtUtc"][:19], "%Y-%m-%dT%H:%M:%S"))
+                    fresh = age < 120
+                    if fresh and not st.get("captureActive"):
+                        strikes += 1
+                    else:
+                        if not fresh:
+                            stale += 1
+                            if stale % 60 == 1:   # 每 5 分钟出一次声：状态文件陈旧 = 看门狗此刻是瞎的
+                                runner.log("app_gone_watch_stale", ageSec=round(age, 1), path=str(status_path))
+                        strikes = 0
+                    if strikes >= 2:
+                        runner.log("app_gone", strikes=strikes, bridgeState=st.get("state"))
+                        strikes = 0
+                        await runner.session_stop("app-gone")
+                except Exception as e:   # noqa: BLE001
+                    runner.log("app_gone_watch_error", message=clean(e))
+        runner.app_gone_strikes = 0
+        asyncio.create_task(app_gone_watch())
+        asyncio.create_task(runner._ctx_loop())
+        asyncio.create_task(runner._loop_lag_monitor())
+        asyncio.create_task(runner.quota_watch_loop())
+        asyncio.create_task(runner.idle_stop_loop())
+        while True:
+            # 标记文件被别的实例/安装器清掉过（2026-09-14 实测），每 20 秒补一次：运行器活着标记就得在
+            await asyncio.sleep(20)
+            try:
+                if not runner.shutting_down and not BRIDGE_FLAG.exists():
+                    runner.write_bridge_flag(True)
+                    runner.log("bridge_flag_healed")
+            except Exception as e:
+                runner.log("bridge_flag_error", message=clean(e))
+
+    try:
+        loop.run_until_complete(boot())
+    except KeyboardInterrupt:
+        loop.run_until_complete(runner.shutdown())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

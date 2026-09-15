@@ -7997,6 +7997,79 @@ internal sealed class ReaderContextMcpServer
         AttachTextMarksHint(snapshot);
         AttachSelectedItemsHint(snapshot);
         SummarizeSystemStatusForModel(snapshot);
+        DropSelectionEchoes(snapshot);
+    }
+
+    /// <summary>"选中了什么"只许有一种说法（用户 2026-09-15 实录）。
+    ///
+    /// 模型原来会同时看到三句话：selectedItems 的清单、单独的 selection 块、
+    /// 以及 recentActions 里"几秒前选过某段文字"。三句话措辞不同、时态不同，
+    /// 它只能自己编一套理由调和，然后跟用户争论那段文字到底算不算选中。
+    /// 清单是唯一权威（它已经把活着的选区并进去了），另外两处在给模型的那份里去掉。</summary>
+    internal static void DropSelectionEchoes(JsonObject snapshot)
+    {
+        if (snapshot["selectedItems"] is not JsonArray items)
+        {
+            return;
+        }
+        snapshot.Remove("selection");
+        if (snapshot["recentActions"] is not JsonArray actions)
+        {
+            return;
+        }
+        List<JsonNode?> keep = [];
+        foreach (JsonNode? node in actions)
+        {
+            if (
+                node is JsonObject action
+                && StringValue(action["kind"]) == "selection"
+                && StringValue(action["what"]) is string what
+                && MentionedInItems(items, what)
+            )
+            {
+                continue;   // 这条历史说的就是清单里那一项，留着只会变成第二种说法
+            }
+            keep.Add(node?.DeepClone());
+        }
+        JsonArray trimmed = [];
+        foreach (JsonNode? node in keep)
+        {
+            trimmed.Add(node);
+        }
+        snapshot["recentActions"] = trimmed;
+        if (trimmed.Count == 0)
+        {
+            snapshot.Remove("recentActions");
+            snapshot.Remove("recentActionsHint");
+        }
+    }
+
+    private static bool MentionedInItems(JsonArray items, string text)
+    {
+        string trimmed = text.Trim();
+        if (trimmed.Length == 0)
+        {
+            return false;
+        }
+        foreach (JsonNode? node in items)
+        {
+            if (
+                node is JsonObject entry
+                && StringValue(entry["text"]) is string itemText
+            )
+            {
+                string other = itemText.Trim();
+                if (
+                    other.Length > 0
+                    && (other.StartsWith(trimmed, StringComparison.Ordinal)
+                        || trimmed.StartsWith(other, StringComparison.Ordinal))
+                )
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /// <summary>给模型的快照：连接/服务状态折成一行自然语言 `system`（用户 2026-09-15：正常就一句"系统连接正常"，

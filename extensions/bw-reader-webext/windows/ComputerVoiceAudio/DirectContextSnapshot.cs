@@ -1816,6 +1816,36 @@ internal sealed class FileDirectSnapshotContextAdapter :
         atMs > 0
         && _utcNow().ToUnixTimeMilliseconds() - atMs > ttlMs;
 
+    /// <summary>chip 条里是不是已经在说同一段文字了（前后缀相互包含即算，
+    /// 因为 chip 上的文字常被截断）。</summary>
+    private static bool ChipsAlreadyMention(JsonArray chips, string text)
+    {
+        string trimmed = text.Trim();
+        if (trimmed.Length == 0)
+        {
+            return true;
+        }
+        foreach (JsonNode? node in chips)
+        {
+            if (
+                node is JsonObject entry
+                && StringValue(entry["text"]) is string chipText
+            )
+            {
+                string other = chipText.Trim();
+                if (
+                    other.Length > 0
+                    && (other.StartsWith(trimmed, StringComparison.Ordinal)
+                        || trimmed.StartsWith(other, StringComparison.Ordinal))
+                )
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private JsonArray BuildSelectionItems()
     {
         // 前端报过 attachments 就以它为准：那是输入框上方此刻显示的东西，
@@ -1831,6 +1861,27 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 {
                     fromChips.Add(entry.DeepClone());
                 }
+            }
+            // 活着的文字选区也算一项：用户手指还按在那段字上，而它未必进了 chip 条。
+            // 不补的话快照会同时说"选中项里没有文字"和"选区是 active"，
+            // 模型只能自己编理由调和（2026-09-15 实录：它因此跟用户争论起来）。
+            if (
+                StringValue(_selection["state"]) == "active"
+                && StringValue(_selection["text"]) is string liveText
+                && !ChipsAlreadyMention(fromChips, liveText)
+            )
+            {
+                JsonObject liveItem = new()
+                {
+                    ["kind"] = "text",
+                    ["text"] = liveText,
+                    ["live"] = true,
+                };
+                if (StringValue(_selection["context"]) is string liveContext)
+                {
+                    liveItem["context"] = liveContext;
+                }
+                fromChips.Insert(0, liveItem);
             }
             return fromChips;
         }

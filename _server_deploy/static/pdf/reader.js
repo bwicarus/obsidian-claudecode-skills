@@ -13224,14 +13224,26 @@ async function _connProbe() {
   var _fsTimer = null;
   var _fsReleasedAt = 0;
 
+  function _fsSame(a, b) {
+    // 两边常有首尾差异（去空白、截断），用前缀相互包含判"还是同一段"，别用严格相等。
+    return !!a && !!b && (a === b || a.indexOf(b) === 0 || b.indexOf(a) === 0);
+  }
   function _fsSelectionStillHeld(text) {
+    // ⚠ 信源必须与"上报给桥的那个选区"是同一个（2026-09-15 实测）：
+    // 这类书的选区是阅读器自己画的字符层，DOM 里的 window.getSelection() 可能一直
+    // 留着旧值 —— 拿它判就永远是"还按着"，40 秒永不触发，而快照那边早说没选了。
+    // 一边说还选着、一边说没选，模型就只能自己编理由。
     try {
+      var state = (window.RC && RC.ctxSync && typeof RC.ctxSync._state === 'function')
+        ? RC.ctxSync._state() : null;
+      var pend = state && state.pend;
+      if (pend && typeof pend.selection === 'string') {
+        return _fsSame(String(pend.selection).trim(), text);
+      }
+    } catch (_) {}
+    try {   // 兜底：没有上下文同步的表面（普通网页）才退回问 DOM
       var sel = window.getSelection && window.getSelection();
-      var cur = sel ? String(sel).trim() : '';
-      if (!cur) return false;
-      // 按住不放时浏览器给的选区可能与 chip 文字有首尾差异（去空白、截断），
-      // 所以用前缀相互包含判"还是同一段"，别用严格相等。
-      return cur === text || text.indexOf(cur) === 0 || cur.indexOf(text) === 0;
+      return _fsSame(sel ? String(sel).trim() : '', text);
     } catch (_) { return false; }
   }
 
