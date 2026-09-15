@@ -55,6 +55,7 @@
     var el = document.createElement('div');
     el.className = 'asst-msg asst-a rc-turn';   // 复用既有气泡外观;有工具时再补 .vc-if 卡头(见 _ensureHead)
     el.setAttribute('data-turn', tid);
+    try { var _mt = options.meta && options.meta.turnId; if (_mt) el.setAttribute('data-turn-id', String(_mt)); } catch (e) {}   // 历史回放的容器记住真实 turn id：重载前后按它对上（展开态/滚动）
     var bd = document.createElement('div'); bd.className = 'rc-turn-bd';
     var flow = document.createElement('div'); flow.className = 'rc-turn-flow'; flow.hidden = true;
     el.appendChild(bd); el.appendChild(flow);
@@ -89,6 +90,7 @@
       if (!t.flow.hidden) _paintFlow(t);
       return !t.flow.hidden;
     });
+    t._flowBtn = b;
     hd.appendChild(b);
     t.el.insertBefore(hd, t.bd);
     t.hd = hd;
@@ -682,6 +684,39 @@
     });
   }
   function reset() { _turns = {}; _cur = null; }
+  // 容器改名（2026-09-15 根治）：运行器推来真实 turn id 时，把本地临时容器连同已画的部件搬到真实 id 下
+  function rename(oldTid, newTid) {
+    if (!oldTid || !newTid || oldTid === newTid) return false;
+    var t = _turns[oldTid];
+    if (!t) return false;
+    if (_turns[newTid]) {   // 真实 id 下已有容器（极少）：把部件并过去
+      var dst = _turns[newTid];
+      t.parts.forEach(function (p) { p.seq = dst.parts.length; dst.parts.push(p); if (p._el && p._el.isConnected) dst.bd.appendChild(p._el); });
+      try { if (t.el && t.el.parentNode) t.el.parentNode.removeChild(t.el); } catch (e) {}
+      delete _turns[oldTid];
+      if (_cur === oldTid) _cur = newTid;
+      return true;
+    }
+    delete _turns[oldTid];
+    t.tid = newTid;
+    _turns[newTid] = t;
+    try { t.el.setAttribute('data-turn', newTid); t.el.setAttribute('data-turn-id', newTid); } catch (e) {}
+    if (_cur === oldTid) _cur = newTid;
+    return true;
+  }
+  function flowOpen(tid) { var t = _turns[tid]; return !!(t && t.flow && !t.flow.hidden); }
+  function openFlow(tid) {
+    var t = _turns[tid]; if (!t || !t.flow) return false;
+    t.flow.hidden = false; _paintFlow(t);
+    try { if (t._flowBtn) t._flowBtn.classList.add('on'); } catch (e) {}
+    return true;
+  }
+  // 按真实 turn id（data-turn-id）找容器 id：回放容器的 id 是 hist_…，对外身份是 turn id
+  function tidByTurnId(turnId) {
+    var hit = null;
+    Object.keys(_turns).forEach(function (k) { var t = _turns[k]; if (!hit && t && t.el && t.el.getAttribute('data-turn-id') === String(turnId)) hit = k; });
+    return hit;
+  }
   function prune() {
     Object.keys(_turns).forEach(function (tid) {
       var t = _turns[tid];
@@ -841,6 +876,7 @@
     has: function (tid) { return !!_turns[tid]; },
     // 操作条(高亮/卡片改删/便签/自建页)的统一出口:顶部「操作」tab 用
     opItems: opItems, opAction: opAction, markOp: markOp,
+    rename: rename, openFlow: openFlow, flowOpen: flowOpen, tidByTurnId: tidByTurnId,
     onOpsChange: function (fn) { if (typeof fn === 'function') _opsListeners.push(fn); },
     opsChanged: _opsChanged,
   };

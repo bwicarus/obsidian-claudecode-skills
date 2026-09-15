@@ -1025,8 +1025,21 @@ actor DirectVoiceSocket {
 
     private func failConnection(_ error: DirectVoiceFailure) async {
         guard state != .failed || webSocket != nil else { return }
+        // 2026-09-15：桥主动结束通话时会在 close reason 里带上原因码（语音核心结束了这通）。
+        // 上行发送往往比 status 帧先失败，这里统一把"带这个原因的断开"改写成不可续接的挂断，
+        // 否则会被当成掉线、1 秒内自动重拨（实录 10:19 两次）。
+        var resolved = error
+        if let reasonData = webSocket?.closeReason,
+           let reasonText = String(data: reasonData, encoding: .utf8),
+           reasonText.contains("VOICE_ENDED_BY_CORE") {
+            resolved = DirectVoiceFailure(
+                code: "BW_COMPUTER_VOICE_DIRECT_VOICE_ENDED_BY_CORE",
+                message: "语音核心已结束通话",
+                retryable: false
+            )
+        }
         setState(.failed)
-        eventHandler(.error(error))
+        eventHandler(.error(resolved))
         await closeTransport(finalState: nil, closeCode: .protocolError)
     }
 

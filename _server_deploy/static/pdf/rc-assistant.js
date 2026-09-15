@@ -2202,17 +2202,12 @@
     });
   }
 
-  // 操作条 part(kind:'hlcard',items 带 op):挂进当前语音轮;Windows 桥流程下登记为待认领(见 _adoptLiveParts)
+  // 操作条 part(kind:'hlcard',items 带 op):挂进当前语音轮（容器身份=运行器推来的真实 turn id，部件随 onChange 直接落进同一条记录）
   function _opPartAvailable() { return !!(window.RC && RC.turnCard && window.__asstVoiceTid); }
   function _opPart(file, items) {
     if (!_opPartAvailable() || !items || !items.length) return false;
     var part = { kind: 'hlcard', file: file || '', items: items.slice() };
     try { RC.turnCard.addPart(window.__asstVoiceTid(), part); } catch (_) { return false; }
-    try {
-      var pl = (window.__bwPendingLiveParts = window.__bwPendingLiveParts || []);
-      pl.push({ ts: Date.now(), part: part });
-      while (pl.length > 8) pl.shift();
-    } catch (_) {}
     try { scrollDown(); } catch (_) {}
     return true;
   }
@@ -2291,14 +2286,7 @@
       try {
         if (window.RC && RC.turnCard && window.__asstVoiceTid) {
           var _hlPart = { kind: 'hlcard', file: d.file || '', items: d.items.slice() };
-          RC.turnCard.addPart(window.__asstVoiceTid(), _hlPart);
-          // Windows 桥流程：活着的语音轮容器在历史里没有记录，onChange 的 upsert 会落空。
-          // 登记为待认领 —— 运行器写进这一轮历史、侧栏重载时认到那条记录上（见 _adoptLiveParts）。
-          try {
-            var _pl = (window.__bwPendingLiveParts = window.__bwPendingLiveParts || []);
-            _pl.push({ ts: Date.now(), part: _hlPart });
-            while (_pl.length > 8) _pl.shift();
-          } catch (_) {}
+          RC.turnCard.addPart(window.__asstVoiceTid(), _hlPart);   // 容器身份=运行器推来的真实 turn id，onChange 的 upsert 直接落进同一条记录
           return;
         }
       } catch (_) {}
@@ -2901,8 +2889,9 @@
         try { ctx = (RC.adapter && RC.adapter().getContext && RC.adapter().getContext()) || {}; } catch (e) {}
         // upsert_only:记录还不存在就**什么都不做**(见后端注释:抢在 response.done 前面建记录
         //   会把用户的提问挤掉)。没落上就 2.5s 后再试一次 —— 那时 response.done 的记录必已就位。
+        ps = ps.map(function (p) { var o = {}; for (var k in p) o[k] = p[k]; if (!o.origin) o.origin = 'app'; return o; });   // App 画的部件：来源=app，服务端按来源合并
         fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
-          body: JSON.stringify({ assistant: txt, parts: ps, turn_id: tid, via: 'voice', upsert_only: 1,
+          body: JSON.stringify({ assistant: txt, parts: ps, turn_id: tid, via: 'voice', upsert_only: 1, create_if_missing: 1,
             assistant_mode: _turnModes[tid] || _assistantMode,
             file: ctx.file_rel || ctx.file || '', page: ctx.page || 0 }) })
           .then(function (r) { return r.json(); })
@@ -2915,7 +2904,11 @@
   try { if (window.RC && RC.turnCard) RC.turnCard.onChange = _syncParts; } catch (e) {}
 
   // 141:当前轮容器 id 的**唯一出口**(rc-voicecall 的工具/结果卡靠它把 part 注进同一个容器)
+  // 2026-09-15 根治：运行器在后台轮开始时推来真实 turn id（stream:"start"），本轮容器就用它当身份，
+  //   App 画的部件直接 upsert 进同一条历史记录；没有推来（Pi 直连助手等）才用本地临时 id。
+  window.__bwLiveTurnId = null;
   window.__asstVoiceTid = function () {
+    if (window.__bwLiveTurnId) return window.__bwLiveTurnId;
     if (!_vTid) _vTid = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     return _vTid;
   };
@@ -3669,11 +3662,19 @@
       // 借轮次容器的 draftText 就地渲染 —— 和本地助手逐字渲染同一条路。最终内容由 /log 的
       // 事件触发权威重载，草稿卡随原子换入消失。用户句用 <id>.u 单独落库，所以这里的 tid
       // 在最终回复到达前不会被标成"已见过"。
+      if (ev.stream === 'start') {
+        // 后台轮开始：这个 id 就是本轮容器身份。本地临时容器若已画了部件（工具结果先到）就整体改名搬过去。
+        window.__bwLiveTurnId = tid;
+        _turnModes[tid] = _assistantMode;
+        try { if (_vTid && window.RC && RC.turnCard && RC.turnCard.has(_vTid) && _vTid !== tid) { RC.turnCard.rename(_vTid, tid); _vTid = null; } } catch (e0) {}
+        return;
+      }
       if (ev.stream === 'delta') {
         if (_liveSeen[tid] || !(window.RC && RC.turnCard)) return;
         try { RC.turnCard.draftText('live_' + tid, String(ev.content || '')); } catch (e0) {}
         return;
       }
+      if (window.__bwLiveTurnId === tid) window.__bwLiveTurnId = null;   // 这一轮已落库：之后的部件归下一轮
       if (_liveSeen[tid] || _historyPendingTurns[tid]) return;
       try { if (window.RC && RC.turnCard && RC.turnCard.has('live_' + tid)) RC.turnCard.freezeDraft('live_' + tid); } catch (e1) {}
       if (Object.keys(_historyPendingTurns).length >= 64) return;
@@ -3740,24 +3741,6 @@
   // Windows 桥流程的写操作卡认领（2026-09-14）：高亮的 hlcard（逐条撤销/跳转）生成时只在活着的语音轮容器里，
   // 历史里没有对应记录；运行器把后台这一轮（含 reader_highlight_range 工具 part）写进历史后，重载到这条记录时
   // 把 3 分钟内待认领的 hlcard 认过来：当场渲进容器，并 upsert 把 parts 追加落库 —— 刷新回放仍可撤销。
-  function _adoptLiveParts(m, rtid, mode) {
-    try {
-      var pending = window.__bwPendingLiveParts;
-      if (!pending || !pending.length || !m || m.role !== 'assistant' || !m.turn_id || m.via !== 'codex-voice') return;
-      var parts0 = Array.isArray(m.parts) ? m.parts : [];
-      if (parts0.some(function (p) { return p && p.kind === 'hlcard'; })) return;
-      if (!parts0.some(function (p) { return p && p.kind === 'tool'; })) return;   // 高亮/卡片改删/便签/自建页都是工具轮
-      var now = Date.now();
-      var take = pending.filter(function (x) { return x && x.part && now - x.ts < 180000; });
-      window.__bwPendingLiveParts = [];
-      if (!take.length) return;
-      take.forEach(function (x) { try { RC.turnCard.addPart(rtid, x.part); } catch (_) {} });
-      var parts = parts0.concat(take.map(function (x) { return x.part; }));
-      fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
-        body: JSON.stringify({ assistant: m.content || '', parts: parts, turn_id: m.turn_id, via: m.via, upsert_only: 1, assistant_mode: mode }) }).catch(function () {});
-    } catch (_) {}
-  }
-
   function _historyReplayOne(m, mode, state, target, scope, deferredActions) {
     if (!m || (m.role !== 'user' && m.role !== 'assistant')) throw new Error('invalid history record');
     if (m.role === 'user') {
@@ -3772,7 +3755,6 @@
       if (!RC.turnCard.renderTurn(
         _rtid, m.parts, target, { historyReplay: true, meta: { via: m.via || '', threadId: m.thread_id || '', turnId: m.turn_id || '' } }
       )) throw new Error('turn replay failed');
-      _adoptLiveParts(m, _rtid, mode);
       return;
     }
     if (m.card && window.__vcInfoCardEl) {   // 87:旧数据(没有 parts)→ 回落到结构化卡回放,保持向后兼容
@@ -3813,6 +3795,19 @@
     // 2026-09-14：走 Windows 桥的高亮/便签写入，其「跳转 + 撤销/重做」卡只活在本页（撤销栈是本机的，
     // 历史里没有对应记录）。权威重载整体换入时不能把它们丢掉 —— 用户实测「整个流程结束后就消失了」。
     // 2026-09-15 起操作条是轮内 part(落库后随历史回放),不再把旧独立卡搬到底部(用户:「在下面越积越多」)。
+    // 重载前记下：哪些轮的【流程】面板开着、哪些高亮卡展开着、用户是否正停在中间看（不在底部）——
+    // 换入后原样恢复（用户 2026-09-15：正看着工具调用时新消息一来就被刷掉）。
+    var keepFlows = {}, keepHl = {};
+    try {
+      Array.prototype.forEach.call(thread.querySelectorAll('.rc-turn'), function (el) {
+        var key = el.getAttribute('data-turn-id') || el.getAttribute('data-turn');
+        var fl = el.querySelector(':scope > .rc-turn-flow');
+        if (key && fl && !fl.hidden) keepFlows[key] = 1;
+        if (key && el.querySelector('.rc-hlcard.open')) keepHl[key] = 1;
+      });
+    } catch (_) {}
+    var _distToBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight;
+    var _keepScrollTop = (_distToBottom > 120) ? thread.scrollTop : -1;
     var previous = document.createDocumentFragment();
     while (thread.firstChild) previous.appendChild(thread.firstChild);
     try {
@@ -3832,7 +3827,19 @@
     });
     try { RC.turnCard && RC.turnCard.prune && RC.turnCard.prune(); } catch (_) {}
     try { RC.turnCard && RC.turnCard.opsChanged && RC.turnCard.opsChanged(); } catch (_) {}
+    try {
+      Array.prototype.forEach.call(thread.querySelectorAll('.rc-turn'), function (el) {
+        var key = el.getAttribute('data-turn-id') || el.getAttribute('data-turn');
+        if (!key) return;
+        var tid = el.getAttribute('data-turn');
+        if (keepFlows[key] && RC.turnCard && RC.turnCard.openFlow) RC.turnCard.openFlow(tid);
+        if (keepHl[key]) { var c = el.querySelector('.rc-hlcard'); if (c) c.classList.add('open'); }
+      });
+    } catch (_) {}
+    _historyKeepScrollTop = _keepScrollTop;
+    if (_keepScrollTop >= 0) { try { thread.scrollTop = _keepScrollTop; } catch (_) {} }
   }
+  var _historyKeepScrollTop = -1;   // >=0：这次重载前用户停在中间看，换入后别拽到底
 
   function loadHistory(mode, options) {   // Pi 权威端在线重载；异步回包不得跨模式落进 DOM
     mode = _modeNorm(mode || _assistantMode);
@@ -3882,8 +3889,13 @@
         }
         _historyCommit(stage, deferredActions);
         stage.remove();
-        requestAnimationFrame(scrollDown);
-        setTimeout(scrollDown, 250);   // 图/MathJax 异步撑高后再校一次
+        if (_historyKeepScrollTop < 0) {
+          requestAnimationFrame(scrollDown);
+          setTimeout(scrollDown, 250);   // 图/MathJax 异步撑高后再校一次
+        } else {
+          var _kst = _historyKeepScrollTop;
+          setTimeout(function () { try { thread.scrollTop = _kst; } catch (_) {} }, 250);   // 图/MathJax 撑高后再校一次位置
+        }
         return { ok: true, count: d.messages.length, skipped: skipped, turnIds: seenTurnIds };
       } catch (renderError) {
         _historyRenderTarget = null;

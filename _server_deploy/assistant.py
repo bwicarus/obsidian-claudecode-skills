@@ -1344,10 +1344,21 @@ def _convo_upsert_turn(
         if content:
             rec["content"] = content
         rec["ts"] = int(time.time())
-        for k in ("parts", "card", "clip", "trace", "videos", "undo_cards"):
+        for k in ("card", "clip", "trace", "videos", "undo_cards"):
             v = (meta or {}).get(k)
             if v:
                 rec[k] = v
+        # 部件按来源合并（2026-09-15 根治）：来的这批只替换同来源的旧部件，另一来源的保留。
+        # 运行器的（工具/正文）排前，App 的（高亮条/卡片草稿/撤销条）排后 —— 显示上"结果在工具之后"。
+        new_parts = (meta or {}).get("parts")
+        if isinstance(new_parts, list) and new_parts:
+            origin = str((meta or {}).get("origin") or "runner")
+            tagged = [dict(p, origin=(p.get("origin") or origin)) for p in new_parts if isinstance(p, dict)]
+            old = [p for p in (rec.get("parts") or []) if isinstance(p, dict)]
+            keep = [p for p in old if (p.get("origin") or "runner") != origin]
+            runner_side = [p for p in (tagged if origin == "runner" else keep) if (p.get("origin") or "runner") == "runner"]
+            app_side = [p for p in (keep if origin == "runner" else tagged) if (p.get("origin") or "runner") != "runner"]
+            rec["parts"] = runner_side + app_side
         try:
             _convo_dir(mode).mkdir(parents=True, exist_ok=True)
             p = _convo_path(uid, mode)
@@ -10898,12 +10909,15 @@ def assistant_stream_external():
     if not tid:
         return jsonify({"ok": False, "error": "turn_id"}), 400
     content = str(b.get("content") or "")[:8000]
+    stream = str(b.get("stream") or "delta")
+    if stream not in ("delta", "start"):
+        return jsonify({"ok": False, "error": "stream"}), 400
     delivered = 0
     try:
         import reader_events
         delivered = reader_events.publish(
             "assistant-history", b.get("file") or "", session["user_id"],
-            {"turn_id": tid, "stream": "delta", "content": content}) or 0
+            {"turn_id": tid, "stream": stream, "content": content}) or 0
     except Exception:
         pass
     return jsonify({"ok": True, "delivered": delivered})
@@ -12425,11 +12439,14 @@ def assistant_log_external():
     # 141(轮次容器):同一 turn_id 再次上报 = 这一轮又产生了新内容(多 response / 工具结果 / 结果卡)
     #   → **覆盖**那条助手消息,而不是再追加一条。不这么做就会:同一轮渲两遍 + 早期快照缺卡片。
     _tid = str(b.get("turn_id") or "")[:40]
+    # 2026-09-15 根治：同一轮记录有两个写入者 —— 运行器（via=codex-voice）与 App（其它）。部件按来源打标并按来源合并。
+    _origin = "runner" if str(b.get("via") or "") == "codex-voice" else "app"
     if _tid and _convo_upsert_turn(
         uid,
         _tid,
         (b.get("assistant") or "").strip(),
         {
+            "origin": _origin,
             "parts": (
                 b.get("parts")
                 if isinstance(b.get("parts"), list)
@@ -12447,7 +12464,7 @@ def assistant_log_external():
     # ⚠ upsert_only:容器的"内容变了就同步"走这条 —— **记录不存在就什么都不做**。
     #   否则它可能先于 response.done 到达 → 先建出一条没有用户提问的助手消息 →
     #   随后 response.done 的落库走 upsert 提前返回 → **用户的提问从历史里彻底消失**。
-    if b.get("upsert_only"):
+    if b.get("upsert_only") and not (b.get("create_if_missing") and isinstance(b.get("parts"), list) and b.get("parts")):
         return jsonify({"ok": True, "n": 0, "upserted": False})
     if _tid:
         meta["turn_id"] = _tid
@@ -12482,7 +12499,7 @@ def assistant_log_external():
                     return jsonify({"ok": False, "error": str(_ce), "where": "parts",
                                     "contract": "reader_card_contract(唯一来源=前端统一渲染器)"}), 400
                 if _sp:
-                    m2["parts"] = _sp
+                    m2["parts"] = [dict(p, origin=(p.get("origin") or _origin)) for p in _sp]
             if card:
                 m2["card"] = card
             _convo_append(

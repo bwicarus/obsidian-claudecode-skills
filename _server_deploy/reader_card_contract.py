@@ -228,12 +228,12 @@ def _norm_bind(value, kind: str) -> dict:
     return out
 
 PART_FIELD_SPECS: dict[str, dict] = {
-    "text":   {"req": ("text",), "opt": ()},
-    "card":   {"req": ("card",), "opt": ("seq",)},
-    "cards":  {"req": ("cards",), "opt": ("draft", "gid", "seq")},
-    "hlcard": {"req": ("file", "items"), "opt": ("seq",)},
-    "tool":   {"req": (), "opt": ("tool", "label", "args", "result", "ms", "seq")},
-    "meta":   {"req": (), "opt": ("meta", "seq")},
+    "text":   {"req": ("text",), "opt": ("origin",)},
+    "card":   {"req": ("card",), "opt": ("seq", "origin")},
+    "cards":  {"req": ("cards",), "opt": ("draft", "gid", "seq", "origin", "entityRegistered", "repositorySource")},
+    "hlcard": {"req": ("file", "items"), "opt": ("seq", "origin")},
+    "tool":   {"req": (), "opt": ("tool", "label", "args", "result", "ms", "seq", "origin")},
+    "meta":   {"req": (), "opt": ("meta", "seq", "origin")},
 }
 
 

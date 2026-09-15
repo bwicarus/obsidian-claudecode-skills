@@ -1134,6 +1134,16 @@ final class NativeVoiceBridge: ObservableObject {
         guard generation == operationGeneration else {
             return
         }
+        // 对方（语音核心）结束通话：这是正常挂断，不是故障 —— 走用户挂断同一条路，绝不续接。
+        if let failure = error as? DirectVoiceFailure,
+           failure.code == "BW_COMPUTER_VOICE_DIRECT_VOICE_ENDED_BY_CORE" {
+            recordDiagnostic(
+                category: "control",
+                message: "对方挂断（语音核心结束通话）"
+            )
+            await stop()
+            return
+        }
         let recoverableCodes: Set<String> = [
             "BW_COMPUTER_VOICE_DIRECT_OFFLINE",
             "BW_COMPUTER_VOICE_DIRECT_DISCONNECTED",
