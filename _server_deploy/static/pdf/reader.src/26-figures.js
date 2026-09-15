@@ -378,6 +378,45 @@
   // ── 焦点选区:把当前选中的公式/段落显示在右侧助手栏(表示「现在焦点在这部分」)──
   // 与图附件并列。公式 kind='formula'(MathJax 渲染),文字 kind='text'(片段)。
   window.__focusSel = null;   // {text, kind}
+  // 「选中过的内容」的寿命（用户 2026-09-15 定的规格）：
+  //   还实际按着选中 → 不计时；松开之后 → 40 秒，到点 chip 自己消失。
+  // 之所以按"松开"而不是按"设置时刻"算：用户按着选区读了一分钟再提问是常事，
+  // 那时候把它判过期，等于把最该带上的东西弄丢了。
+  var FOCUS_SEL_TTL_MS = 40000;
+  var _fsTimer = null;
+  var _fsReleasedAt = 0;
+
+  function _fsSelectionStillHeld(text) {
+    try {
+      var sel = window.getSelection && window.getSelection();
+      var cur = sel ? String(sel).trim() : '';
+      if (!cur) return false;
+      // 按住不放时浏览器给的选区可能与 chip 文字有首尾差异（去空白、截断），
+      // 所以用前缀相互包含判"还是同一段"，别用严格相等。
+      return cur === text || text.indexOf(cur) === 0 || cur.indexOf(text) === 0;
+    } catch (_) { return false; }
+  }
+
+  function _fsStopWatch() {
+    if (_fsTimer) { clearInterval(_fsTimer); _fsTimer = null; }
+    _fsReleasedAt = 0;
+  }
+
+  function _fsWatch() {
+    _fsStopWatch();
+    var fs = window.__focusSel;
+    if (!fs || !fs.text) return;
+    _fsTimer = setInterval(function () {
+      var cur = window.__focusSel;
+      if (!cur || !cur.text) { _fsStopWatch(); return; }
+      if (_fsSelectionStillHeld(cur.text)) { _fsReleasedAt = 0; return; }   // 还按着：表不走
+      if (!_fsReleasedAt) { _fsReleasedAt = Date.now(); return; }           // 刚松开：起表
+      if (Date.now() - _fsReleasedAt >= FOCUS_SEL_TTL_MS) {
+        _fsStopWatch();
+        try { window.__clearFocusSel(); } catch (_) {}
+      }
+    }, 2000);
+  }
   function _renderFocusSel() {
     try {
       var pane = document.getElementById('side-pane-asst');
@@ -420,8 +459,10 @@
     if (!text) { window.__clearFocusSel(); return; }
     window.__focusSel = { text: text, kind: kind || 'text' };
     _renderFocusSel();
+    _fsWatch();   // 换了新的内容 = 重新开始（这一条只有一个槽，新的直接替换旧的）
   };
   window.__clearFocusSel = function () {
+    _fsStopWatch();
     window.__focusSel = null; _renderFocusSel();
     // ✕ = "这个上下文别再带":连隐式选中兜底(lastSelText,10min 新鲜期)一起清,否则下条消息又悄悄带上(用户反馈)
     try { lastSelText = ''; window.__lastSelSentence = ''; window.__lastSelMeta = null; } catch (_) {}

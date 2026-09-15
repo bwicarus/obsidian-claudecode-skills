@@ -10,11 +10,6 @@ if (window.__bwPwaProviderOnly) return;
  * 只读取其运行状态，不发送独立启停或持续运行目标。
  */
 (function () {
-// 选中的寿命（2026-09-15 用户拍板）：40 秒没被用掉就当没选。
-// 与登记器 context-selection-registry.js 的 expireMs 是同一个数，改一处要改两处。
-var SELECTION_TTL_MS = 40000;
-var _selSeen = { key: "", at: 0 };
-
   "use strict";
 
   var RC = window.RC = window.RC || {};
@@ -7536,22 +7531,12 @@ var _selSeen = { key: "", at: 0 };
         );
       }
       if (selectedText && anchoredToCurrentPage) {
-        // 40 秒过期（用户 2026-09-15 拍板）：宿主会把同一个选中反复上报，
-        // 所以计时必须按"这个选中第一次出现"算，而不是按"上次收到"算 ——
-        // 后者被重报一次次清零，实测 90 秒后模型还看得见早就不作数的选区。
-        var selKey = selectedText + " " + String(page);
-        if (_selSeen.key !== selKey) {
-          _selSeen.key = selKey;
-          _selSeen.at = Date.now();
-        }
-        if (Date.now() - _selSeen.at > SELECTION_TTL_MS) {
-          selectionState = "cleared";
-        } else {
-          selectionState = "active";
-          selection = selectedText;
-        }
+        // 用户还**实际保持着**选中时一律照报：这条不设寿命（2026-09-15 澄清）。
+        // 40 秒那条规则管的是"松开之后只剩输入框上方那条记录"的情况，
+        // 而那件事宿主自己知道、桥不知道，所以不放在这里。
+        selectionState = "active";
+        selection = selectedText;
       } else {
-        _selSeen.key = "";
         selectionState = "cleared";
       }
     }
