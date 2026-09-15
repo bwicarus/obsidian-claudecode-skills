@@ -139,11 +139,14 @@
   function createRegistry(options) {
     options = options || {};
     var defaultMaxText = finiteLimit(options.maxText, 2500);
-    // 选中的寿命（2026-09-15 用户拍板）：40 秒没被用掉就自动取消。0 = 不过期。
-    // 放在登记器里，是为了让 chip、侧栏请求体、出向焦点三处同时到期 ——
-    // 三处各写一个计时器的结局一定是它们互相不同意。
+    // 选中的寿命。0 = 不过期。放在登记器里，是为了让 chip、侧栏请求体、出向焦点
+    // 三处同时到期 —— 三处各写一个计时器的结局一定是它们互相不同意。
+    //
+    // ⚠ 这里管的是**长按选中的卡片/图/圈画**那一类（2026-09-15 用户澄清）：
+    // 它们是要攒着一起用的，所以给 5 分钟；**文字选中的 40 秒不在这里**，
+    // 在 rc-core 的选区漏斗里（那一类才是"看一眼就用掉"的）。
     var expireMs = (typeof options.expireMs === 'number'
-      && isFinite(options.expireMs) && options.expireMs >= 0) ? options.expireMs : 40000;
+      && isFinite(options.expireMs) && options.expireMs >= 0) ? options.expireMs : 300000;
     var timers = Object.create(null);
     var nodes = Object.create(null);
     var selected = Object.create(null);

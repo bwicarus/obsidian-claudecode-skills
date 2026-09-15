@@ -3227,6 +3227,10 @@ if (window.__bwPwaProviderOnly) return;
     try {
       var registry = _ctxSelectionRegistry();
       if (registry) {
+        // ⚠ 登记器写入期间不许对账：本地镜像已经写好、登记器还没选上，
+        // 这一瞬间对账会把这条当成"已经没了"，顺手 cancel 掉刚设好的上游焦点 ——
+        // 表现是"chip 在、问 AI 它看不到这张卡"（2026-09-15 实测）。
+        _pinSelecting = true;
         var record = {
           id: id,
           kind: spec.kind || (cid ? 'card' : 'context'),
@@ -3237,9 +3241,9 @@ if (window.__bwPwaProviderOnly) return;
         };
         if (Object.prototype.hasOwnProperty.call(spec, 'parentId')) record.parentId = spec.parentId || '';
         if (Object.prototype.hasOwnProperty.call(spec, 'covers')) record.covers = spec.covers || [];
-        registry.select(record);
+        try { registry.select(record); } finally { _pinSelecting = false; }
       }
-    } catch (e) {}
+    } catch (e) { _pinSelecting = false; }
     return id;
   }
   function _pinForget(label, cid, el) {
@@ -3310,11 +3314,12 @@ if (window.__bwPwaProviderOnly) return;
     } catch (e) {}
   }
   var _pinReconciling = false;
+  var _pinSelecting = false;
   function _pinReconcile() {
     // 登记器是权威：40 秒过期、别处取消、覆盖式改选，都只改它。
     // 本地镜像（紫框、chip 文案、出向焦点）必须跟着它走，否则就是两套状态各说各话。
     var registry = _ctxSelectionRegistry();
-    if (!registry || !registry.snapshot || _pinReconciling) return;
+    if (!registry || !registry.snapshot || _pinReconciling || _pinSelecting) return;
     _pinReconciling = true;
     try { _pinReconcileInner(registry); } finally { _pinReconciling = false; }
   }
