@@ -314,3 +314,17 @@ codex exec --skip-git-repo-check --color never -s read-only \
 app-server 的 serde 报错会把缺的字段名说出来，比翻文档快：
 传个空 params 过去，`Invalid request: missing field \`expectedTurnId\`` 就是答案。
 方法名写错时它会把**全部 160 个合法方法名**列在 `unknown variant` 错误里 —— 这份清单就是这么来的。
+
+### `skills/list` 是目录查询，不是「模型看到什么」
+
+链路页加 skill 那一块时差点算错一笔账：经运行器查 `skills/list` 列出 95 个 skill、
+名字加描述近 2 万字，看起来像是每轮都在烧的隐形成本。
+
+实测不是：同一台机器起两个 app-server，一个裸起、一个带 `plugins."x".enabled=false`
+封存 8 个官方插件，`skills/list` **都是同样的条数**（36/36，封掉 0 个）。
+它反映的是安装了哪些，不是本次会话启用了哪些。
+
+所以：**别拿 `skills/list` 的条数推算上下文成本**。要知道模型实际看到什么，
+去量线程里那条 developer 消息 —— SLIM_PLUGINS 省下的 25.6K/轮就是那么量出来的，
+那个数仍然作数。链路页那一块的标题写的是「skill 目录（≠ 本次会话实际启用）」，
+就是为了不让下一个人照着它算账。

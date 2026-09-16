@@ -698,6 +698,11 @@ class Runner:
     def log(self, kind: str, **d):
         self.seq += 1
         row = {"seq": self.seq, "t": round(time.time(), 3), "kind": kind, **d}
+        # 每条都盖上当前线程 —— 链路页要按「选中的那条对话」看语音侧发生了什么，
+        # 没有这个字段就只能按时间窗近似，换条对话就容易串（2026-09-16）。
+        # d 里已经带了 threadId 的（比如线程管理那几条）不覆盖：那是它要说的那条。
+        if self.thread_id and "threadId" not in row:
+            row["threadId"] = self.thread_id
         self.events.append(row)
         try:
             with EVENTS_PATH.open("a", encoding="utf-8") as f:
@@ -2466,6 +2471,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, r.events_since(int(q.get("since", ["0"])[0]), int(q.get("limit", ["300"])[0])))
             if u.path == "/settings":
                 return self._send(200, {"settings": r.settings, "hotKeys": sorted(HOT_KEYS), "coldKeys": sorted(COLD_KEYS), "needsRestart": sorted(r.pending_cold)})
+            if u.path == "/skills":
+                # 模型看得见的 skill 那一层。工具表原来只画了 MCP 的常驻/折叠两个池，
+                # skill 是第三层，页面上此前完全看不见（2026-09-16）
+                async def _skills():
+                    await r.ensure_app()
+                    res = await r.app.call("skills/list", {}, timeout=30)
+                    out = []
+                    for group in ((res or {}).get("data") or []):
+                        for sk in ((group or {}).get("skills") or []):
+                            out.append({"name": sk.get("name"),
+                                        "description": (sk.get("description") or "")[:200],
+                                        "cwd": group.get("cwd")})
+                    return {"ok": True, "skills": out}
+                return self._send(200, self._run(_skills(), 60))
             if u.path == "/quota":
                 return self._send(200, self._run(r.quota()))
             if u.path == "/catalog":

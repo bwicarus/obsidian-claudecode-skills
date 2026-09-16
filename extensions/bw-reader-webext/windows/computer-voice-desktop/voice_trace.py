@@ -82,15 +82,23 @@ def _clip(text: Any, limit: int = 4000) -> str:
     return s if len(s) <= limit else s[:limit] + "…（已截断，共 %d 字）" % len(s)
 
 
-def _voice_lane(limit: int, since: float = 0.0) -> list[dict]:
+def _voice_lane(limit: int, since: float = 0.0, thread: str | None = None) -> list[dict]:
     """语音侧：注入进去的、说出来的、会话起止。
 
-    ⚠ events.jsonl 不带 threadId，所以看"某条对话"时只能按**时间窗**裁：
-    since 取那条线程的第一条记录时刻。这比混在一起看清楚得多（用户 2026-09-16）。
+    按对话过滤分两种精度：
+      · 事件自带 threadId（运行器 2026-09-16 起每条都盖）→ **精确匹配**；
+      · 那之前的老事件没有这个字段 → 退回按时间窗裁（since = 该线程第一条记录的时刻）。
+    所以老记录仍看得见，新记录不会再串到别的对话上。
     """
     rows = []
     for d in _tail_jsonl(VOICE_CLI / "events.jsonl", limit * 6):
-        if since and float(d.get("t") or 0) < since:
+        if thread:
+            own = d.get("threadId")
+            if own and own != thread:
+                continue          # 明说了是别条对话的，直接跳
+            if not own and since and float(d.get("t") or 0) < since:
+                continue          # 没盖章的老事件：只能按时间窗判
+        elif since and float(d.get("t") or 0) < since:
             continue
         kind = d.get("kind") or ""
         at = float(d.get("t") or 0)
@@ -297,6 +305,27 @@ def cold_tool_names(max_age: float = 300.0) -> list[str]:
     return names
 
 
+def _skill_list() -> list[dict]:
+    """skill 目录（走运行器的 /skills → app-server skills/list）。
+
+    工具表原来只有 MCP 的常驻池和折叠池，skill 是第三层，页面上完全看不见。
+
+    ⚠ 这是**目录查询，不反映本次会话封存了哪些插件**：2026-09-16 实测，
+    裸起和带 plugins.*.enabled=false 起，skills/list 都是同样的条数。
+    所以别拿这个数去推算上下文成本 —— 要知道模型实际看到什么，
+    得去量线程里那条 developer 消息（SLIM_PLUGINS 那 25.6K 就是那么量出来的）。
+    运行器没起来就返回空，不是错误。
+    """
+    try:
+        import urllib.request   # noqa: WPS433
+        with urllib.request.urlopen(VOICE_CORE_URL + "/skills", timeout=6) as fh:
+            d = json.loads(fh.read().decode("utf-8", "replace"))
+    except Exception:   # noqa: BLE001
+        return []
+    rows = (d or {}).get("skills")
+    return rows if isinstance(rows, list) else []
+
+
 def build(limit: int = 120, days: float = 7.0, cold: list[str] | None = None,
           thread: str | None = None) -> dict:
     """给界面的一份时间轴。两条泳道合在一个数组里，前端按 lane 分列。
@@ -306,7 +335,7 @@ def build(limit: int = 120, days: float = 7.0, cold: list[str] | None = None,
     thread_id = thread or _current_thread_id()
     text_rows = _text_lane(thread_id, limit)
     since = min((r.get("at") or 0) for r in text_rows) if text_rows else 0.0
-    rows = _voice_lane(limit, since) + text_rows
+    rows = _voice_lane(limit, since, thread_id) + text_rows
     errors = _tail_jsonl(VOICE_CLI / "tool-errors.jsonl", 40)
     for e in errors:
         rows.append({"lane": "text", "kind": "error", "at": float(e.get("t") or 0),
@@ -321,8 +350,9 @@ def build(limit: int = 120, days: float = 7.0, cold: list[str] | None = None,
         previous = row.get("at") or previous
         style = KIND_STYLE.get(row["kind"], ("其他", "dim"))
         row["label"], row["color"] = style
-    return {"contract": "voice-trace/1", "threadId": thread_id, "rows": rows,
-            "tools": _tool_stats(days, set(cold if cold is not None else cold_tool_names()))}
+    stats = _tool_stats(days, set(cold if cold is not None else cold_tool_names()))
+    stats["skills"] = _skill_list()
+    return {"contract": "voice-trace/1", "threadId": thread_id, "rows": rows, "tools": stats}
 
 
 if __name__ == "__main__":   # 手工查看：python voice_trace.py

@@ -257,6 +257,10 @@ input[type=checkbox] { width:15px; height:15px; accent-color:var(--indigo); }
             <div class="meta" style="margin-bottom:4px">折叠（只留一行，参数按需取）</div>
             <table id="trace-cold" style="width:100%;font-size:12.5px;border-collapse:collapse"></table>
           </div>
+          <div style="flex:1;min-width:260px">
+            <div class="meta" style="margin-bottom:4px" title="这是 skills/list 的目录查询结果。实测它不反映本次会话封存了哪些插件，所以别拿它推算上下文成本">skill 目录（≠ 本次会话实际启用）</div>
+            <table id="trace-skills" style="width:100%;font-size:12.5px;border-collapse:collapse"></table>
+          </div>
         </div>
       </div>
       <div class="card">
@@ -717,8 +721,30 @@ function renderTrace(t) {
   var stats = t.tools || {};
   $('trace-hot').innerHTML = toolTable(stats.hot);
   $('trace-cold').innerHTML = toolTable(stats.cold);
+  // skill 是第三层：不进工具表，模型按名字取。这里只列它看得见哪些
+  var skills = (stats.skills || []).map(function (s) {
+    // app-<64位十六进制>:名字 —— 哈希对人没有信息量，只留名字，来源另标一列
+    var m = /^app-[0-9a-f]{8,}:(.+)$/.exec(s.name || '');
+    var pkg = /^([a-z0-9-]+):(.+)$/.exec(s.name || '');
+    return {
+      show: m ? m[1] : (pkg ? pkg[2] : s.name),
+      from: m ? '第三方' : (pkg ? pkg[1] : '本机'),
+      own: !m && !pkg,             // 不带前缀的就是我们自己放的
+      desc: s.description || ''
+    };
+  });
+  // 自己的排最前 —— 看这一块通常是想确认「我做的那几个还在不在」
+  skills.sort(function (a, b) { return (b.own - a.own) || a.show.localeCompare(b.show); });
+  $('trace-skills').innerHTML = skills.length
+    ? skills.map(function (s) {
+        return '<tr title="' + esc(s.desc) + '"><td style="padding:2px 0;' +
+          (s.own ? 'color:#6ee7b7' : '') + '">' + esc(s.show) +
+          '</td><td class="meta" style="font-size:11px;text-align:right">' + esc(s.from) + '</td></tr>';
+      }).join('')
+    : '<tr><td class="meta">（读不到 —— 语音核心没起来）</td></tr>';
   $('trace-tools-meta').textContent = '近 ' + (stats.days || 7) + ' 天 · 常驻 ' +
-    ((stats.hot || []).length) + ' 个 / 折叠 ' + ((stats.cold || []).length) + ' 个';
+    ((stats.hot || []).length) + ' 个 / 折叠 ' + ((stats.cold || []).length) + ' 个 / skill ' +
+    skills.length + ' 个';
 }
 async function loadTrace() {
   const t = await api('GET', '/api/trace?limit=120&days=7' + (traceThread ? '&thread=' + encodeURIComponent(traceThread) : ''));
