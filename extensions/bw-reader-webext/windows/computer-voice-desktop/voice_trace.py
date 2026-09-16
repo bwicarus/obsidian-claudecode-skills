@@ -128,6 +128,16 @@ def _voice_lane(limit: int, since: float = 0.0, thread: str | None = None) -> li
                          # 运行器 2026-09-16 起把注入正文一并记下 —— 之前这里恒为空，
                          # 点开什么都看不到，而这个页面的意义就是看清实际注入了什么
                          "body": _clip(d.get("body") or "", 8000)})
+        elif kind == "ctx_steer":
+            # 2026-09-17 起的主路径：后台真的开工之后，把状态插进**正在跑的那一轮**
+            rows.append({"lane": "text", "kind": "inject", "at": at,
+                         "title": "插进运行中的轮",
+                         "meta": "%s 字 · 第 %s 页" % (d.get("chars"), str(d.get("page") or "?")[-6:]),
+                         "body": _clip(d.get("body") or "", 8000)})
+        elif kind == "ctx_steer_fallback":
+            rows.append({"lane": "text", "kind": "error", "at": at,
+                         "title": "插播没赶上，退回追加",
+                         "meta": _clip(d.get("reason") or "", 60), "body": ""})
         elif kind in ("ctx_backend", "ctx_backend_deferred"):
             rows.append({"lane": "text", "kind": "inject", "at": at,
                          "title": "注入阅读状态" + ("（带正文）" if d.get("withText") else "") +

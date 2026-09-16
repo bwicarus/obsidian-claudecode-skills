@@ -128,12 +128,15 @@ DEFAULTS: dict = {
     "flushTranscriptTailOnSessionEnd": True,  # 结束时把没落库的转写刷出来。
                                               # 我们有 idleStopMinutes 自动关闭，不刷就会丢最后一段历史
     "codexResponseItemPrefix": None,        # 后台回答条目的前缀。None = 不传
-    "contextInjectOn": "speechEnd",   # 后台那份状态什么时候投。
-                                      # speechEnd（默认）= 用户刚说完那一刻。实测到「语音召唤后台」
-                                      #   还有中位 14.5 秒余量，而注入要 80 ms → 99% 赶得上；
-                                      #   且只翻页不说话时零注入（用户 2026-09-16 报的毛病）。
-                                      # delegation = 召唤后台那一刻投。听着更理想，实测只剩 38 ms，
-                                      #   **只有 8% 赶得上**，别用，留作对照。
+    "steerWaitSeconds": 3.0,          # 委托之后等这一轮起来的上限（实测 22~60 ms 就起）
+    "contextInjectOn": "delegationSteer",  # 后台那份状态什么时候投。
+                                      # delegationSteer（默认，2026-09-17）= 后台真的开工之后，
+                                      #   用 turn/steer 插进**正在跑的那一轮**。不跟轮的启动赛跑，
+                                      #   所以不会像 inject_items 那样只有 8% 赶得上；
+                                      #   而且只在真委托时才投 —— 45% 的纯聊天零注入。
+                                      # speechEnd = 用户刚说完就投。99% 赶得上，但纯聊天也会投。
+                                      # delegation = 召唤那一刻用 inject_items 投，只有 8% 赶得上，
+                                      #   别用，留作对照。
                                       # speech = 最老的行为，开口边沿就投
     "threadAutoCompact": False,    # ⚠ 默认关。thread/compact/start 会**就地重写落盘的 rollout 文件**，
                                    # 把完整记录换成摘要，无警告无报错（openai/codex#44363，仍未修：
@@ -141,6 +144,10 @@ DEFAULTS: dict = {
                                    # 那份文件正是链路页和历史的来源，所以绝不能自动跑。
                                    # 真要压缩就手动按按钮 —— thread_compact 会先把 rollout 备份一份
     "threadCompactItems": 220,     # 开了自动压缩时的条数阈值
+    # ⚠ 改这里的默认值对**已经跑过**的机器无效 —— 运行器加载 settings.json，
+    # 持久化的旧值会盖过默认（2026-09-17 踩到：改了默认却仍是 False，
+    # 于是每次委托都走「插播已关闭」的退路，新链路静默不生效）。
+    # 要让现役机器跟上，得 POST /settings 或直接改那个文件。
     "turnSteerEnabled": True,      # 后台正在跑时，把最新状态插进那一轮（turn/steer）。
                                    # 2026-09-17 受控实验（4 个时机 × 4 次 = 16 轮）：
                                    # **一次都没打哑**，0.5/2/5 秒三档原题全部答完且插播全部被采纳；
@@ -871,7 +878,7 @@ class Runner:
                     #     而 inject_items 本身要 80 ms，**99% 赶得上**；
                     #   · 相比之下在召唤那一刻注入只剩中位 38 ms，只有 8% 赶得上 —— 基本必然迟到；
                     #   · 又因为是「说完」才投，只翻页不说话时零注入，正是用户报的那个毛病。
-                    if str(self.settings.get("contextInjectOn") or "speechEnd") == "speechEnd":
+                    if str(self.settings.get("contextInjectOn") or "delegationSteer") == "speechEnd":
                         asyncio.run_coroutine_threadsafe(self._ctx_on_delegation(), self.loop)
                     utext = (turn.get("transcript") or self._voice_user_acc or "").strip()
                     self._voice_user_acc = ""
@@ -937,7 +944,7 @@ class Runner:
                 # on_dc_message 是**同步**回调，不能 create_task —— 和隔壁开口那条一样走线程安全投递
                 # 默认不在这里投：留给注入的时间中位只有 38 ms，而注入要 80 ms，
                 # 实测只有 8% 赶得上。想对照时把 contextInjectOn 设成 delegation
-                if str(self.settings.get("contextInjectOn") or "speechEnd") == "delegation":
+                if str(self.settings.get("contextInjectOn") or "delegationSteer") in ("delegation", "delegationSteer"):
                     asyncio.run_coroutine_threadsafe(self._ctx_on_delegation(), self.loop)
             # 委托这条留全：它是**两个模型之间的完整交接报文**（语音模型转给后台的原话、
             # handoff_id、target），也是链路上「何时召唤后台、交了什么过去」的唯一来源。
@@ -1939,18 +1946,50 @@ class Runner:
         return {"ok": True, "turnId": turn["id"], "chars": len(text)}
 
     async def _ctx_on_delegation(self):
-        """语音模型正在召唤后台的那一刻 —— 把最新状态投给后台。
+        """后台真的开工了 —— 这一刻才把状态送进去，而且是送进**正在跑的那一轮**。
 
-        为什么放在这里而不是开口边沿（2026-09-16 用户提出，日志印证）：
-          · 开口 963 次只委托了 316 次，其余是语音模型自己答的，那些不该打扰后台；
-          · 开口到委托之间隔 3.7~18 秒，期间翻的页、改的选中，这里才拿得到最新的；
-          · 实测 delegation.created 之后 22~60 ms 才 turn/started，赶得上被那一轮读到。
+        这是 2026-09-17 用户提的形态：有了中途插入，就不必「一有变化就注入」，
+        只在真正需要时插一次。
 
-        ⚠ 万一没赶上，内容仍留在线程里、被下一轮读到 —— 迟到而不是丢失。
+        为什么现在才做得到：早先试过在 delegation.created 那一刻 inject_items，
+        只有 8% 赶得上 —— 因为那是在**跟轮的启动赛跑**（inject 要 80 ms，
+        而 delegation → turn/started 中位只有 38 ms）。turn/steer 不参加这场赛跑：
+        它挂的是已经在跑的轮，等轮起来之后再插也来得及。
+        受控实验 16 轮：0.5/2/5 秒三档插入全部被采纳，一次没打哑。
+
+        好处是「只在后台干活时注入」：477 句开口里只有 262 句真的委托，
+        剩下 45% 的纯聊天现在零注入；而且内容是这一刻现算的，永远最新。
+
+        赶不上（轮已经结束 / 还没起来）就退回 inject_items —— 迟到而不是丢失。
         """
         if not self.settings.get("contextInjectEnabled", True):
             return
         try:
+            if str(self.settings.get("contextInjectOn") or "delegationSteer") != "delegationSteer":
+                await self._ctx_inject_backend(with_text=True)
+                return
+            # 等这一轮真的起来：delegation 之后 22~60 ms 才 turn/started，给它一点时间
+            deadline = time.monotonic() + float(self.settings.get("steerWaitSeconds") or 3.0)
+            while time.monotonic() < deadline:
+                if self.backend_busy and self._turn and self._turn.get("id"):
+                    break
+                await asyncio.sleep(0.05)
+            snap = self._ctx_snapshot()
+            body = self._ctx_build(snap) if snap else None
+            state = (body or {}).get("state") or ""
+            if not state:
+                return
+            res = await self.steer_running_turn(
+                "【当前阅读状态·状态记录，不是提问】" + state +
+                chr(10) + "继续完成手上的事；用到「选中/当前页」时以这条为准。", tag="delegation")
+            if res.get("ok"):
+                # 指纹跟着走，免得同一状态在下一次委托里再送一遍
+                self._ctx["fp"]["backend_state"] = body.get("fp_state")
+                self.log("ctx_steer", chars=len(state), page=self._ctx["page_key"][-40:],
+                         body=self._log_body(state))
+                return
+            # 轮没起来或已经结束 —— 退回追加，被下一轮读到
+            self.log("ctx_steer_fallback", reason=str(res.get("error"))[:80])
             await self._ctx_inject_backend(with_text=True)
         except Exception as e:   # noqa: BLE001
             self.log("ctx_delegation_error", message=clean(e))
