@@ -244,16 +244,14 @@ input[type=checkbox] { width:15px; height:15px; accent-color:var(--indigo); }
       <div class="card">
         <h3>链路 <span class="meta" id="trace-meta"></span>
           <button class="btn" id="trace-reload" style="float:right">刷新</button></h3>
-        <div style="display:flex;gap:10px;align-items:flex-start">
-          <div style="flex:1;min-width:0">
-            <div class="meta" style="margin-bottom:6px">语音模型</div>
-            <div id="trace-voice"></div>
-          </div>
-          <div style="flex:1;min-width:0">
-            <div class="meta" style="margin-bottom:6px">文字模型（后台）</div>
-            <div id="trace-text"></div>
-          </div>
+        <!-- 一条时间轴，左右偏移、上下交错：两个模型的事件按真实先后穿插排列，
+             这样「语音说了什么 → 什么时候召唤后台 → 后台读到了什么」是连着读下来的
+             （2026-09-16 用户要求；此前是两栏各排各的，看不出先后关系） -->
+        <div style="display:flex;gap:10px;margin-bottom:6px">
+          <div class="meta" style="flex:1;text-align:left">← 语音模型</div>
+          <div class="meta" style="flex:1;text-align:right">文字模型（后台）→</div>
         </div>
+        <div id="trace-timeline" style="position:relative"></div>
       </div>
       <div class="card">
         <h3>工具使用 <span class="meta" id="trace-tools-meta"></span>
@@ -721,11 +719,27 @@ async function showToolDetail(name) {
   box.innerHTML = html;
 }
 function renderTrace(t) {
-  var voice = $('trace-voice'), text = $('trace-text');
-  voice.innerHTML = ''; text.innerHTML = '';
+  // 一条时间轴：行已经按时间排好序，这里只负责把语音的靠左、后台的靠右，
+  // 上下仍严格按时间交错 —— 这样能连着读出「说了什么 → 何时召唤后台 → 后台读到什么」
+  var line = $('trace-timeline');
+  line.innerHTML = '';
+  var lastLane = null;
   (t.rows || []).forEach(function (row) {
-    (row.lane === 'voice' ? voice : text).appendChild(traceCard(row));
+    var isVoice = row.lane === 'voice';
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;justify-content:' + (isVoice ? 'flex-start' : 'flex-end');
+    // 换边的地方留一点呼吸，视觉上能看出「交接」发生在这一步
+    if (lastLane !== null && lastLane !== row.lane) wrap.style.marginTop = '10px';
+    lastLane = row.lane;
+    var slot = document.createElement('div');
+    slot.style.cssText = 'width:62%;min-width:0';   // 留出偏移量，两边不会挤成一栏
+    slot.appendChild(traceCard(row));
+    wrap.appendChild(slot);
+    line.appendChild(wrap);
   });
+  if (!(t.rows || []).length) {
+    line.innerHTML = '<div class="meta">这条对话还没有记录。</div>';
+  }
   $('trace-meta').textContent = (t.rows || []).length + ' 条 · 当前对话 ' +
     String(t.threadId || '').slice(-12) + (t.error ? ' · 出错：' + t.error : '');
   var stats = t.tools || {};

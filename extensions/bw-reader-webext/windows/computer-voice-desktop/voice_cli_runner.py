@@ -118,6 +118,12 @@ DEFAULTS: dict = {
                                          # 全文按需用快照取（按使用次数付钱，不按变化次数）     # 语音侧是否塞正文。False（2026-09-14 实录）：塞了正文语音模型会以为自己能"看"，答"我看一下"却不委派
     "contextDwellMinSeconds": 8,   # 翻到页后停留 ≥8 s 才带正文（在读）
     "contextDwellMaxSeconds": 720, # ≤12 min（话题还新鲜）；窗外只给页码，模型要内容自己调工具
+    "contextInjectOn": "delegation",  # 后台那份状态什么时候投。
+                                      # delegation（默认）= 语音模型召唤后台的那一刻（dc delegation.created），
+                                      #   实测其后 22~60 ms 才 turn/started，赶得上；
+                                      #   好处是「只翻页不说话」「说了但语音模型自己答了」都零注入
+                                      #   （963 次开口只有 316 次委托）。
+                                      # speech = 老行为，开口边沿就投，留作对照
     "threadAutoCompact": False,    # ⚠ 默认关。thread/compact/start 会**就地重写落盘的 rollout 文件**，
                                    # 把完整记录换成摘要，无警告无报错（openai/codex#44363，仍未修：
                                    # 851MB／122877 条被压成 7.1MB／762 条，3777 条助手消息全丢）。
@@ -699,6 +705,13 @@ class Runner:
             return {"error": clean(e)}
 
     # ---------- 事件 ----------
+    @staticmethod
+    def _log_body(text: str, limit: int = 8000) -> str:
+        """给链路页看的注入正文。截到 limit 并标注 —— 链路页要能看清实际注入了什么，
+        但 events.jsonl 不能被单条几万字撑爆（2026-09-16）。"""
+        t = str(text or "")
+        return t if len(t) <= limit else t[:limit] + ("…（已截断，共 %d 字）" % len(t))
+
     def log(self, kind: str, **d):
         self.seq += 1
         row = {"seq": self.seq, "t": round(time.time(), 3), "kind": kind, **d}
@@ -893,7 +906,20 @@ class Runner:
         elif t in ("error", "session.started", "input_audio.paused", "input_audio.resumed", "delegation.created"):
             if t == "delegation.created":
                 self.mark_activity("delegation")   # 委派后台 = 人在用
-            self.log("dc_" + t.replace(".", "_"), payload=json.dumps(d, ensure_ascii=False)[:200])
+                # ⭐ 这是「语音模型此刻正在召唤后台」的那个标记 —— 实测它后面 22~60 ms
+                # 就跟着 turn/started，所以在这里注入，后台起的那一轮正好读得到。
+                # 比开口边沿注入好在两点（2026-09-16 用户提出，日志印证）：
+                #   · 三分之二的说话语音模型自己就答了（963 次开口只有 316 次委托），
+                #     那些根本不需要给后台任何东西；
+                #   · 开口到委托之间还隔着 3.7~18 秒，期间翻的页、改的选中都能带上最新的。
+                # on_dc_message 是**同步**回调，不能 create_task —— 和隔壁开口那条一样走线程安全投递
+                if str(self.settings.get("contextInjectOn") or "delegation") == "delegation":
+                    asyncio.run_coroutine_threadsafe(self._ctx_on_delegation(), self.loop)
+            # 委托这条留全：它是**两个模型之间的完整交接报文**（语音模型转给后台的原话、
+            # handoff_id、target），也是链路上「何时召唤后台、交了什么过去」的唯一来源。
+            # 其余事件仍截 200 字，免得把 events.jsonl 撑大。
+            cap = 4000 if t == "delegation.created" else 200
+            self.log("dc_" + t.replace(".", "_"), payload=json.dumps(d, ensure_ascii=False)[:cap])
 
     # ---------- app-server / 线程 ----------
     async def ensure_app(self):
@@ -1742,7 +1768,8 @@ class Runner:
         if image is not None:
             fp["image"] = ink_fp
             self.log("ctx_image", bytes=image.get("bytes"), drawingRevision=image.get("drawingRevision"), page=self._ctx["page_key"][-40:])
-        self.log("ctx_backend", withText=bool(with_text and b["text"]), chars=len(body), page=self._ctx["page_key"][-40:])
+        self.log("ctx_backend", withText=bool(with_text and b["text"]), chars=len(body),
+                 page=self._ctx["page_key"][-40:], body=self._log_body(text_part))
         return True
 
     async def _ctx_flush_pending(self):
@@ -1768,7 +1795,9 @@ class Runner:
         if pend.get("ink"):
             fp["image"] = pend["ink"]
         self.log("ctx_backend", withText=bool(pend.get("fp_text")), chars=pend["chars"],
-                 deferredSec=round(time.time() - pend["at"], 1), page=self._ctx["page_key"][-40:])
+                 deferredSec=round(time.time() - pend["at"], 1), page=self._ctx["page_key"][-40:],
+                 body=self._log_body("".join(c.get("text") or "" for c in pend["content"]
+                                             if isinstance(c, dict))))
 
     def _rollout_backup(self, thread_id: str) -> str | None:
         """压缩前把落盘记录复制一份。
@@ -1860,12 +1889,34 @@ class Runner:
         self.log("turn_steer", tag=tag, chars=len(text), turnId=str(turn["id"])[-12:])
         return {"ok": True, "turnId": turn["id"], "chars": len(text)}
 
-    async def _ctx_on_speech(self):
-        """开口边沿：语音侧投一条压缩状态（同状态不投）；后台投带正文的状态（委托轮在 turn.done 之后才起，来得及）。"""
+    async def _ctx_on_delegation(self):
+        """语音模型正在召唤后台的那一刻 —— 把最新状态投给后台。
+
+        为什么放在这里而不是开口边沿（2026-09-16 用户提出，日志印证）：
+          · 开口 963 次只委托了 316 次，其余是语音模型自己答的，那些不该打扰后台；
+          · 开口到委托之间隔 3.7~18 秒，期间翻的页、改的选中，这里才拿得到最新的；
+          · 实测 delegation.created 之后 22~60 ms 才 turn/started，赶得上被那一轮读到。
+
+        ⚠ 万一没赶上，内容仍留在线程里、被下一轮读到 —— 迟到而不是丢失。
+        """
         if not self.settings.get("contextInjectEnabled", True):
             return
         try:
             await self._ctx_inject_backend(with_text=True)
+        except Exception as e:   # noqa: BLE001
+            self.log("ctx_delegation_error", message=clean(e))
+
+    async def _ctx_on_speech(self):
+        """开口边沿：只管语音侧。
+
+        后台那一份 2026-09-16 起改到 delegation.created 触发（见 _ctx_on_delegation）；
+        contextInjectOn=speech 时退回老行为，留作对照。
+        """
+        if not self.settings.get("contextInjectEnabled", True):
+            return
+        try:
+            if str(self.settings.get("contextInjectOn") or "delegation") == "speech":
+                await self._ctx_inject_backend(with_text=True)
             await self._ctx_inject_voice_selection()
             if str(self.settings.get("contextVoiceMode") or "off") != "edge" or self.session_state != "connected" or not (self.app and self.thread_id):
                 return
@@ -1877,7 +1928,8 @@ class Runner:
                 return
             await self.app.call("thread/realtime/appendText", {"threadId": self.thread_id, "text": b["voice"], "role": "developer"}, timeout=15)
             self._ctx["fp"]["voice"] = b["fp_voice"]
-            self.log("ctx_voice", chars=len(b["voice"]), page=self._ctx["page_key"][-40:])
+            self.log("ctx_voice", chars=len(b["voice"]), page=self._ctx["page_key"][-40:],
+                     body=self._log_body(b["voice"]))
         except Exception as e:
             self.log("ctx_voice_error", message=clean(e))
 
@@ -1899,7 +1951,8 @@ class Runner:
             await self.app.call("thread/realtime/appendText",
                                 {"threadId": self.thread_id, "text": line, "role": "developer"}, timeout=15)
             self._ctx["fp"]["sel"] = b.get("fp_sel")
-            self.log("ctx_voice_selection", items=len(b.get("fp_sel") or ""), chars=len(line))
+            self.log("ctx_voice_selection", items=len(b.get("fp_sel") or ""), chars=len(line),
+                     body=self._log_body(line))
         except Exception as e:   # noqa: BLE001
             self.log("ctx_voice_selection_error", message=clean(e))
 
@@ -1923,7 +1976,8 @@ class Runner:
                 return
             await self.app.call("thread/realtime/appendText", {"threadId": self.thread_id, "text": b["voice"], "role": "developer"}, timeout=15)
             self._ctx["fp"]["voice"] = b["fp_voice"]
-            self.log("ctx_voice", chars=len(b["voice"]), page=self._ctx["page_key"][-40:], mode="idle")
+            self.log("ctx_voice", chars=len(b["voice"]), page=self._ctx["page_key"][-40:], mode="idle",
+                     body=self._log_body(b["voice"]))
         except Exception as e:
             self.log("ctx_voice_error", message=clean(e))
 

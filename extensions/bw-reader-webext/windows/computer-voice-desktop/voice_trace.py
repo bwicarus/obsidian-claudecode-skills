@@ -39,6 +39,7 @@ KIND_STYLE = {
     "tool": ("工具", "amber"),
     "error": ("报错", "rose"),
     "session": ("会话", "violet"),
+    "handoff": ("交接", "amber"),   # 语音模型把活交给后台的那一刻
 }
 
 
@@ -119,14 +120,44 @@ def _voice_lane(limit: int, since: float = 0.0, thread: str | None = None) -> li
             continue
         kind = d.get("kind") or ""
         at = float(d.get("t") or 0)
-        if kind == "ctx_voice_selection":
+        if kind in ("ctx_voice_selection", "ctx_voice"):
             rows.append({"lane": "voice", "kind": "inject", "at": at,
-                         "title": "注入选中清单", "meta": "%s 字" % d.get("chars"), "body": ""})
-        elif kind == "ctx_backend":
+                         "title": "注入选中清单" if kind == "ctx_voice_selection" else "注入阅读状态",
+                         "meta": "%s 字" % d.get("chars"),
+                         # 运行器 2026-09-16 起把注入正文一并记下 —— 之前这里恒为空，
+                         # 点开什么都看不到，而这个页面的意义就是看清实际注入了什么
+                         "body": _clip(d.get("body") or "", 8000)})
+        elif kind in ("ctx_backend", "ctx_backend_deferred"):
             rows.append({"lane": "text", "kind": "inject", "at": at,
-                         "title": "注入阅读状态" + ("（带正文）" if d.get("withText") else ""),
+                         "title": "注入阅读状态" + ("（带正文）" if d.get("withText") else "") +
+                                  ("（延后补投）" if kind == "ctx_backend_deferred" else ""),
                          "meta": "%s 字 · 第 %s 页" % (d.get("chars"), str(d.get("page") or "?")[-6:]),
-                         "body": ""})
+                         "body": _clip(d.get("body") or "", 8000)})
+        elif kind == "dc_delegation_created":
+            # 两个模型的交接点 —— 时间轴上最该看见的一步：语音模型在这一刻把活交给后台，
+            # 报文里就是它转过去的原话（2026-09-16）
+            raw = d.get("payload") or ""
+            handed = ""
+            try:
+                item = (json.loads(raw) or {}).get("item") or {}
+                handed = " ".join(c.get("text") or "" for c in (item.get("content") or [])
+                                  if isinstance(c, dict))
+            except ValueError:
+                # 2026-09-16 之前这条报文被截在 200 字，JSON 解不开 —— 但转过去的原话
+                # 就在截断点之前，正则捞得出来。不这么做旧记录的交接摘要全是空的
+                import re   # noqa: WPS433
+                m = re.search(r'"text":\s*"((?:[^"\\]|\\.)*)"', raw)
+                if m:
+                    # ⚠ 别用 unicode_escape：报文是 ensure_ascii=False 写的，
+                    # 正文本来就是 UTF-8，再解一遍会变成乱码（第一次就踩了）。
+                    # 按 JSON 字符串解才对，两种转义形式都能正确还原。
+                    try:
+                        handed = json.loads('"' + m.group(1) + '"')
+                    except ValueError:
+                        handed = m.group(1)
+            rows.append({"lane": "voice", "kind": "handoff", "at": at,
+                         "title": "交给后台", "meta": _clip(handed, 60),
+                         "body": _clip(d.get("payload") or "", 4000)})
         elif kind == "transcript":
             who = "用户" if d.get("role") == "user" else "助手"
             rows.append({"lane": "voice", "kind": "speech", "at": at,
