@@ -128,6 +128,13 @@ DEFAULTS: dict = {
     "flushTranscriptTailOnSessionEnd": True,  # 结束时把没落库的转写刷出来。
                                               # 我们有 idleStopMinutes 自动关闭，不刷就会丢最后一段历史
     "codexResponseItemPrefix": None,        # 后台回答条目的前缀。None = 不传
+    "promiseWatchEnabled": False,     # ⚠ 默认关。语音模型答应要做事却没委派时替它补派 ——
+                                      # 但这是靠匹配中文措辞的机械补丁，用户不喜欢（2026-09-17），
+                                      # 而且根因已经找到并从正路修了：官方内置提示词里
+                                      # 「Communication style」那一节（不要宣布计划、不要用应答代替动作）
+                                      # 被我们那份中文改写整段漏掉了，补回去才是对的。
+                                      # 留着当兜底，观察一段时间若仍复发再考虑打开
+    "promiseWatchSeconds": 6.0,       # 等这么久还没委派才补
     "steerWaitSeconds": 3.0,          # 委托之后等这一轮起来的上限（实测 22~60 ms 就起）
     "contextInjectOn": "delegationSteer",  # 后台那份状态什么时候投。
                                       # delegationSteer（默认，2026-09-17）= 后台真的开工之后，
@@ -667,6 +674,8 @@ class Runner:
         self._voice_turn_id: str | None = None
         self._last_compact_at: float = 0.0
         self._ctx_pending: dict | None = None   # 后台忙时压着的状态，只留最新一份
+        self._last_user_ask: tuple | None = None
+        self._promise_pending: tuple | None = None
         self._voice_stream = ""
         self._backend_recent: tuple[float, str] | None = None   # 后台最近一条回复：语音把它念出来的字幕不再重复入库
         self._voice_user_acc = ""   # 本轮用户字幕分段累积（turn.done 没带转写时兜底）
@@ -776,6 +785,7 @@ class Runner:
                 role, text = p.get("role"), p.get("text")
                 self.transcripts.append((time.time(), role, text))
                 self.log("transcript", role=role, text=text)
+                self._promise_watch(role, text)
                 if self._subtitle_mode():
                     self._subtitle_done(role, text)
                 # 历史按"轮"写（数据通道 turn.done 带整轮转写），这里的分段只累积：一句话会拆成好几段，
@@ -935,6 +945,7 @@ class Runner:
         elif t in ("error", "session.started", "input_audio.paused", "input_audio.resumed", "delegation.created"):
             if t == "delegation.created":
                 self.mark_activity("delegation")   # 委派后台 = 人在用
+                self._promise_pending = None       # 真派活了，看门狗不必补
                 # ⭐ 这是「语音模型此刻正在召唤后台」的那个标记 —— 实测它后面 22~60 ms
                 # 就跟着 turn/started，所以在这里注入，后台起的那一轮正好读得到。
                 # 比开口边沿注入好在两点（2026-09-16 用户提出，日志印证）：
@@ -1463,11 +1474,20 @@ class Runner:
         # 2026-09-17 用户指出：清单只给了文字，没带定位信息，于是模型拿到内容却没法直接调工具，
         # 还得再查一次。卡片类的 ref 就是它的稳定 id（reader_page_card_read 直接能用），
         # 前端一直在报，是这里构造时丢掉了。
+        raw_items = [it for it in (snap.get("selectedItems") or [])
+                     if str(it.get("text") or it.get("what") or "").strip()]
+        # 新选中覆盖旧的：手指正按着一段文字时，别的**临时**文字项一律让位。
+        # 2026-09-17 用户误触选了一个词、再选想要的那个，结果清单里同时留着两条文字 ——
+        # 快照那边剔除过期文字项的条件是「选区不活跃」，而他当时正按着，所以旧的根本不会被剔。
+        # ⚠ 只让位没有 ref 的：长按钉住的卡片/图/词组带 ref，那是用户明确要留的，不能误删。
+        if any(it.get("live") and str(it.get("kind") or "text") == "text" for it in raw_items):
+            raw_items = [it for it in raw_items
+                         if it.get("live")
+                         or str(it.get("kind") or "text") != "text"
+                         or str(it.get("ref") or "").strip()]
         sel_items = []
-        for it in (snap.get("selectedItems") or []):
+        for it in raw_items:
             t = str(it.get("text") or it.get("what") or "").strip()
-            if not t:
-                continue
             sel_items.append((str(it.get("kind") or "text"), t,
                               str(it.get("ref") or "").strip(),
                               str(it.get("label") or "").strip()))
@@ -1950,6 +1970,54 @@ class Runner:
             return {"ok": False, "error": clean(e)}
         self.log("turn_steer", tag=tag, chars=len(text), turnId=str(turn["id"])[-12:])
         return {"ok": True, "turnId": turn["id"], "chars": len(text)}
+
+    #: 语音模型嘴上答应要做事的说法。它**自己没有任何工具**，所以说了这些就必然要委派后台；
+    #: 说了却没委派 = 这件事根本没发生（2026-09-17 用户实录：「好的，我这就处理」之后 75 秒无事发生，
+    #: 直到他追问「你有做吗」才真派活）。同类毛病 2026-09-14 也记过两次。
+    _PROMISE_MARKS = ("我这就", "我来做", "这就帮你", "马上做", "这就做", "稍等", "我处理",
+                      "这就处理", "帮你做", "我去做", "我来处理", "正在做")
+
+    def _promise_watch(self, role: str, text: str):
+        """助手答应了就盯着：一段时间内没委派，我们替它把活派下去。"""
+        if not self.settings.get("promiseWatchEnabled", True):
+            return
+        t = (text or "").strip()
+        if role == "user":
+            if t:
+                self._last_user_ask = (time.time(), t)
+            return
+        if role != "assistant" or not t:
+            return
+        if not any(m in t for m in self._PROMISE_MARKS):
+            return
+        ask = getattr(self, "_last_user_ask", None)
+        if not ask or time.time() - ask[0] > 60:
+            return          # 找不到对应的请求就别乱补
+        self._promise_pending = (time.time(), ask[1], t)
+        asyncio.run_coroutine_threadsafe(self._promise_rescue(), self.loop)
+
+    async def _promise_rescue(self):
+        """等一会儿；还是没委派就自己起一轮，把用户那句话交给后台。"""
+        pend = self._promise_pending
+        if not pend:
+            return
+        wait = float(self.settings.get("promiseWatchSeconds") or 6.0)
+        await asyncio.sleep(wait)
+        if self._promise_pending is not pend:
+            return          # 期间已经委派过（或又有新承诺），不补
+        if self.backend_busy or not (self.app and self.thread_id):
+            self._promise_pending = None
+            return
+        self._promise_pending = None
+        said, ask = pend[2], pend[1]
+        self.log("promise_rescue", said=said[:60], ask=ask[:80], waited=wait)
+        try:
+            # 用用户原话起一轮 —— 后台有工具，它能真把事做了。
+            # 说明这是补救，免得后台以为用户又问了一遍。
+            await self.turn("【语音侧已经答应用户「%s」但没有把活派下来，现在补上】%s" % (said[:40], ask),
+                            record_user=False)
+        except Exception as e:   # noqa: BLE001
+            self.log("promise_rescue_error", message=clean(e))
 
     async def _ctx_on_delegation(self):
         """后台真的开工了 —— 这一刻才把状态送进去，而且是送进**正在跑的那一轮**。

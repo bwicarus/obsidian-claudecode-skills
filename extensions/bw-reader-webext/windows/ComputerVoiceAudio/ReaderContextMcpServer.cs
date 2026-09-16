@@ -625,16 +625,19 @@ internal sealed class ReaderContextMcpServer
                 continue;
             }
             string name = StringValue(tool["name"]) ?? "";
+            // ⚠ 每个工具都留一份原件（不只折叠池的）：常驻工具也要能按名字查参数表。
+            // 2026-09-17 之前这里对非折叠工具直接 continue，于是问 reader_card 无从回答，
+            // 模型只能猜字段名，连着七次失败（用户实录）。留一份很便宜，救的是死循环。
+            if (tool["inputSchema"] is JsonObject anySchema && !ColdToolSchemas.ContainsKey(name))
+            {
+                ColdToolSchemas[name] = (JsonObject)anySchema.DeepClone();
+            }
+            ColdToolDescriptions.TryAdd(name, StringValue(tool["description"]) ?? "");
             if (!ColdToolNames.Contains(name))
             {
-                continue;
+                continue;   // 常驻工具到此为止：留了原件，但不折叠它的工具面
             }
-            if (tool["inputSchema"] is JsonObject schema && !ColdToolSchemas.ContainsKey(name))
-            {
-                ColdToolSchemas[name] = (JsonObject)schema.DeepClone();
-            }
-            string full = StringValue(tool["description"]) ?? "";
-            ColdToolDescriptions.TryAdd(name, full);
+            string full = ColdToolDescriptions[name];
             int stop = full.IndexOf(". ", StringComparison.Ordinal);
             string first = stop > 0 && stop < 200 ? full[..(stop + 1)] : Shorten(full, 160);
             tool["description"] = first
@@ -5445,6 +5448,31 @@ internal sealed class ReaderContextMcpServer
 
     /// <summary>指南被问到某个**冷工具**的参数时，把折叠前的说明与 schema 原样交出去。
     /// 没有这条路，折叠就等于把那 22 个工具废掉。</summary>
+    private static bool TryReadAnyToolName(JsonElement arguments, out string name)
+    {
+        // 与 TryReadColdToolName 同形，但不限折叠池 —— 只要是这台桥暴露的工具就认。
+        // 折叠池的那条路在前面已经返回了，走到这里的都是常驻工具。
+        name = "";
+        if (
+            arguments.ValueKind != JsonValueKind.Object
+            || !arguments.TryGetProperty("tool", out JsonElement value)
+            || value.ValueKind != JsonValueKind.String
+        )
+        {
+            return false;
+        }
+        name = value.GetString() ?? "";
+        if (name.Length == 0)
+        {
+            return false;
+        }
+        if (ColdToolSchemas.Count == 0)
+        {
+            _ = BuildToolList();   // 还没 list 过就先填一次原件
+        }
+        return ColdToolSchemas.ContainsKey(name) || ColdToolDescriptions.ContainsKey(name);
+    }
+
     private static bool TryReadColdToolName(JsonElement arguments, out string name)
     {
         name = "";
@@ -5499,12 +5527,55 @@ internal sealed class ReaderContextMcpServer
                 cancellationToken).ConfigureAwait(false);
             return;
         }
+        // 常驻工具也能按名字查（2026-09-17 用户实录）：此前只认折叠池，
+        // 问 reader_card 直接回「Invalid Reader capability topic」，模型拿不到字段名
+        // 就一遍遍猜（frontText/backText、front/back 全错），连着七次失败。
+        // 常驻工具的 schema 本来就内联在工具面里，这里再给一份不费什么，
+        // 而模型走到这一步说明它已经被卡住了 —— 挡回去只会让它继续猜。
+        if (TryReadAnyToolName(arguments, out string knownTool))
+        {
+            if (ColdToolSchemas.Count == 0)
+            {
+                _ = BuildToolList();
+            }
+            JsonObject hotPayload = new()
+            {
+                ["tool"] = knownTool,
+                ["pool"] = ColdToolNames.Contains(knownTool) ? "folded" : "resident",
+                ["description"] = ColdToolDescriptions.TryGetValue(knownTool, out string? hotDesc)
+                    ? hotDesc
+                    : null,
+                ["inputSchema"] = ColdToolSchemas.TryGetValue(knownTool, out JsonObject? hotSchema)
+                    ? hotSchema.DeepClone()
+                    : null,
+                ["note"] =
+                    "This tool is already inlined in the tool list; its schema is above. "
+                    + "If a field is described as kind-specific (for example reader_card's data), "
+                    + "read the matching topic instead: call this tool with { topic: \"cards\" }.",
+            };
+            await WriteResultAsync(
+                id,
+                new JsonObject
+                {
+                    ["content"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["type"] = "text",
+                            ["text"] = hotPayload.ToJsonString(ModelJsonOptions),
+                        },
+                    },
+                },
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
         if (!TryReadCapabilityTopic(arguments, out string topic))
         {
             await WriteErrorAsync(
                 id,
                 -32602,
-                "Invalid Reader capability topic",
+                "Invalid Reader capability topic. Pass { topic: <name> } for a guide, "
+                + "or { tool: <tool name> } for one tool's parameters.",
                 cancellationToken).ConfigureAwait(false);
             return;
         }

@@ -1922,6 +1922,25 @@ internal sealed class FileDirectSnapshotContextAdapter :
                         // 活着的文字选区也算一项：用户手指还按在那段字上，而它未必进了 chip 条。
             // 不补的话快照会同时说"选中项里没有文字"和"选区是 active"，
             // 模型只能自己编理由调和（2026-09-15 实录：它因此跟用户争论起来）。
+            // 新选中覆盖旧的：手指正按着一段文字时，别的**临时**文字项一律让位。
+            // 2026-09-17 用户误触选了一个词、再选想要的那个，结果清单里同时留着两条文字 ——
+            // 上面那段剔除只在「选区不活跃」时跑，而他当时正按着，旧的根本轮不到被剔。
+            // ⚠ 只让位没有 ref 的：长按钉住的卡片/图/词组带 ref，那是用户明确要留的。
+            if (StringValue(_selection["state"]) == "active")
+            {
+                for (int index = fromChips.Count - 1; index >= 0; index--)
+                {
+                    if (
+                        fromChips[index] is JsonObject chip
+                        && StringValue(chip["kind"]) == "text"
+                        && chip["live"] is null
+                        && string.IsNullOrEmpty(StringValue(chip["ref"]))
+                    )
+                    {
+                        fromChips.RemoveAt(index);
+                    }
+                }
+            }
             if (
                 StringValue(_selection["state"]) == "active"
                 && StringValue(_selection["text"]) is string liveText
