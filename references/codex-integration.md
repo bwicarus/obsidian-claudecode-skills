@@ -352,9 +352,14 @@ Realtime 文档，后台那半查 Responses 文档。
 - **`conversation.item.delete`**（Realtime）「Removes any item from the conversation history」——
   这正是「注入只增不减」缺的那一半。162 个方法里**没有**任何 `thread/realtime/delete*`。
 - **`session.update` 改 `session.delegation.responses.instructions`**（GPT-Live，Responses delegation）
-  ——不重开会话就换掉后台指令，是个**可替换的槽**。Codex 这边 `thread/settings/update`
-  **对任何字段都返回 `{}` 然后什么都不做**（连瞎编的字段名都「成功」，模型始终答旧暗号）；
-  `turn/settings/update` 则严格拒未知字段，白名单里只有 model/effort/summary 这些，没有指令。
+  ——不重开会话就换掉后台指令，是个**可替换的槽**。Codex 这边没有对应的东西：
+  `thread/settings/update` 对**指令类**字段一律静默忽略（返回 `{}`，模型始终答旧暗号，
+  连瞎编的字段名都「成功」）；`turn/settings/update` 严格拒未知字段，白名单里只有
+  model/effort/summary 这些，没有指令。
+  ⚠ 更正（2026-09-16 晚）：早先我写成「`thread/settings/update` 对任何字段都什么都不做」——
+  **过头了**。它对 `model` / `effort` 是**真生效**的（实测把 gpt-5.6-luna/medium
+  当场改成了 gpt-6-astra/high，`thread/read` 立刻反映）。不生效的只是指令类字段。
+  所以运行器的 `apply_hot()` 换后台模型这条路是好的，没坏。
 - **`session.instructions.append` / `thinking.append` / `commentary.append`**（GPT-Live，
   client delegation，都带 `delegation_id`）—— 在**委托发生那一刻**挂上下文，
   正是「在文字 AI 开工的一瞬间注入最新内容」。app-server 没有对应方法。
@@ -488,3 +493,40 @@ existing Codex usage budget at **$0.05 per minute**」，按 credit 计费的工
 烧掉的 —— 那些轮跑在独立的 app-server 进程里，**既不计入 audioMs 也不计入运行器的
 totalTokens**，只体现在账号百分比上（拟合时表现为「两项都没动却涨点」的 7 个区间）。
 以后做这类探测要预先说明代价。
+
+
+## 后台模型降档（2026-09-16 实测）
+
+起因是用户问：常用那些任务是不是不用 Astra 更省、效果也不差。
+
+**单价（credits per M token，官方 rate card）**
+
+| 模型 | 输入 | 缓存输入 | 输出 | 相对 Astra |
+|---|---|---|---|---|
+| GPT-6 Astra | 250 | 25 | 1250 | 1× |
+| GPT-5.6 Sol | 100 | 10 | 500 | 便宜 2.5× |
+| GPT-5.6 Terra | 50 | 5 | 300 | **便宜 5×** |
+| GPT-5.6 Luna | 5 | 0.5 | 30 | 便宜 50× |
+
+我们的负载**纯输入密集**（每轮 23,463 输入、5 输出），所以省的正好是最贵那一项。
+后台约占总消耗 60%（见上一节），换 Terra 后台降到 12%，**总消耗约减半**。
+再往下换 Luna 收益有限（语音那 40% 是地板），而且下面会说它根本不能用。
+
+**效果实测**（三个真实任务构成里最常见的只读任务，各跑一轮）
+
+| | A 读状态 | B 取正文 | C 取折叠工具的参数表 |
+|---|---|---|---|
+| Astra | 调快照 ✓ | 调快照 ✓ | **没调工具**，凭记忆答，24.9s |
+| Terra | 调快照 ✓ | 调快照 ✓ | **调 reader_capability_guide ✓**，16.0s |
+| Luna | 没调，空答 | 没调，空答 | 没调，空答 |
+
+C 题是折叠工具方案成立的前提（模型得会去取参数表）。**Terra 做对了，Astra 没有** ——
+它直接凭训练记忆回答（这次碰巧对）。与本仓库早就记过的「高 reasoning effort 爱画蛇添足」
+一致。**Luna 完全不可用**，三题全空。
+
+⚠ 样本只有各一轮，且当时阅读器不在线，A/B 两题区分度不足，真正有判别力的只有 C。
+阅读器在线时应当再验一次。
+
+**怎么换**：ReaderPC 设置页的「后台模型」，或 `/settings` 改 `backendModel`。
+运行器的 `apply_hot()` 走 `thread/settings/update`，实测对 model/effort 立即生效，
+不必重开对话（`thread/start` 也能指定，但那里的 effort 会被忽略）。
