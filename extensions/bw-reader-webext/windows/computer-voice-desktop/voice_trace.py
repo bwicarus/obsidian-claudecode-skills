@@ -134,6 +134,14 @@ def _voice_lane(limit: int, since: float = 0.0, thread: str | None = None) -> li
                          "title": "插进运行中的轮",
                          "meta": "%s 字 · 第 %s 页" % (d.get("chars"), str(d.get("page") or "?")[-6:]),
                          "body": _clip(d.get("body") or "", 8000)})
+        elif kind.startswith("ctx_") and kind.endswith("_error"):
+            # ⚠ 这些异常原来只写一行日志、界面上看不见 —— 2026-09-17 语音侧的选中清单
+            # 因为一处解包写错，每次都抛异常并被吞掉，整整一段时间一条都没投出去，
+            # 直到用户说「AI 完全不知道我在说什么」才发现。注入失败必须在链路上看得见。
+            rows.append({"lane": "voice" if "voice" in kind else "text",
+                         "kind": "error", "at": at,
+                         "title": "注入失败 " + kind[4:-6],
+                         "meta": _clip(d.get("message") or "", 80), "body": ""})
         elif kind == "ctx_steer_fallback":
             rows.append({"lane": "text", "kind": "error", "at": at,
                          "title": "插播没赶上，退回追加",

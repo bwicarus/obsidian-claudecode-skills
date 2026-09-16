@@ -1643,7 +1643,13 @@ class Runner:
         """
         if not text:
             return text
-        for i, (kind, item_text) in enumerate(sel_items):
+        # ⚠ sel_items 是 (kind, text, ref, label) 四元组。2026-09-17 这里漏改成了两元组解包，
+        # 每次都抛 "too many values to unpack"，而调用方 _ctx_inject_voice_selection 把异常
+        # 吞进日志 —— 结果是**语音侧的选中清单整整一段时间一条都没投出去**，
+        # 用户指着选中内容问，语音 AI 完全不知道在说什么。用索引取，不再靠解包位数。
+        for i, item in enumerate(sel_items):
+            kind = item[0] if len(item) > 0 else ""
+            item_text = item[1] if len(item) > 1 else ""
             if kind != "text":
                 continue   # 卡片/图/圈画在正文里已经有自己的标记（CARD_START 等）
             needle = (item_text or "").strip()
