@@ -118,6 +118,16 @@ DEFAULTS: dict = {
                                          # 全文按需用快照取（按使用次数付钱，不按变化次数）     # 语音侧是否塞正文。False（2026-09-14 实录）：塞了正文语音模型会以为自己能"看"，答"我看一下"却不委派
     "contextDwellMinSeconds": 8,   # 翻到页后停留 ≥8 s 才带正文（在读）
     "contextDwellMaxSeconds": 720, # ≤12 min（话题还新鲜）；窗外只给页码，模型要内容自己调工具
+    # 2026-09-16 实测确认存在的 realtime/start 参数（判据：故意传错类型看它报不报 invalid type；
+    # 这个方法不拒未知字段，「传了不报错」什么都证明不了）。都是 COLD，改了要重开会话。
+    "realtimeEndInstructions": (
+        "通话就要结束了。用一句话自然收尾（例如「那我先不打扰了」），不要提问、不要开启新话题、"
+        "不要说「已关闭」之类你做不到的事。"
+    ),
+    "realtimeStartInstructions": None,      # 开场指令。None = 不传，沿用现有的 prompt/voiceAddendum
+    "flushTranscriptTailOnSessionEnd": True,  # 结束时把没落库的转写刷出来。
+                                              # 我们有 idleStopMinutes 自动关闭，不刷就会丢最后一段历史
+    "codexResponseItemPrefix": None,        # 后台回答条目的前缀。None = 不传
     "contextInjectOn": "speechEnd",   # 后台那份状态什么时候投。
                                       # speechEnd（默认）= 用户刚说完那一刻。实测到「语音召唤后台」
                                       #   还有中位 14.5 秒余量，而注入要 80 ms → 99% 赶得上；
@@ -180,6 +190,7 @@ DEFAULTS: dict = {
 }
 HOT_KEYS = {"backendModel", "effort", "serviceTier"}
 COLD_KEYS = {"version", "voice", "realtimeModel", "prompt", "voiceAddendum", "userFirstName", "includeStartupContext", "handoffMode", "clientManagedHandoffs",
+             "realtimeEndInstructions", "realtimeStartInstructions", "flushTranscriptTailOnSessionEnd", "codexResponseItemPrefix",
              "codexResponsesAsItems", "delegationAckFiller", "inputDevice", "outputDevice", "outputRate", "gain", "backendStartInstructions", "backendThreadInstructions", "boardPrefix", "boardSilentRule", "boardInitialItems", "boardVoiceMode", "appInputDevice", "appOutputDevice"}
 
 
@@ -1003,6 +1014,15 @@ class Runner:
              "clientManagedHandoffs": bool(s.get("clientManagedHandoffs")),
              "codexResponsesAsItems": bool(s.get("codexResponsesAsItems")),
              "codexResponseHandoffMode": s.get("handoffMode") or "thinking"}
+        # 下面几个 2026-09-16 起启用：只在设了值时才传，免得把 None 塞进协议
+        if s.get("realtimeEndInstructions"):
+            p["realtimeEndInstructions"] = str(s["realtimeEndInstructions"])
+        if s.get("realtimeStartInstructions"):
+            p["realtimeStartInstructions"] = str(s["realtimeStartInstructions"])
+        if s.get("flushTranscriptTailOnSessionEnd") is not None:
+            p["flushTranscriptTailOnSessionEnd"] = bool(s["flushTranscriptTailOnSessionEnd"])
+        if s.get("codexResponseItemPrefix"):
+            p["codexResponseItemPrefix"] = str(s["codexResponseItemPrefix"])
         if s.get("voice"):
             p["voice"] = s["voice"]
         if s.get("realtimeModel"):
