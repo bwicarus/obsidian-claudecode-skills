@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import calendar
 import glob
 import json
 import os
@@ -223,6 +224,37 @@ def _lane_from_items(rows: list[dict]) -> list[dict]:
     return out
 
 
+#: role=user 的消息不一定是「用户说的话」—— Codex 和运行器都会以 user 身份塞东西进来。
+#: 2026-09-16 用户问「为何 11178 字那条标成语音」，就是 <recommended_plugins> 被当成了用户说话。
+_SYSTEM_USER_MARKS = (
+    ("<realtime_delegation>", "语音转交后台"),
+    ("<recommended_plugins>", "Codex 插件清单"),
+    ("<multi_agent_mode>", "Codex 多智能体说明"),
+    ("<realtime_conversation>", "实时会话指令"),
+    ("<user_instructions>", "用户指令"),
+    ("【", "阅读状态注入"),
+    ("⟦", "阅读器标记"),
+)
+
+
+def _classify_message(role: str, text: str) -> dict:
+    """一条消息到底算「注入」还是「用户说的话」。
+
+    只按 role 分是不够的：Codex 的插件清单、多智能体说明、运行器的委托包装，
+    统统以 role=user 塞进来，全按语音显示会让人以为用户说了一万一千字。
+    """
+    head = text.lstrip()
+    if role == "developer":
+        for mark, label in _SYSTEM_USER_MARKS:
+            if head.startswith(mark):
+                return {"kind": "inject", "title": label}
+        return {"kind": "inject", "title": "developer 注入"}
+    for mark, label in _SYSTEM_USER_MARKS:
+        if head.startswith(mark):
+            return {"kind": "inject", "title": label}
+    return {"kind": "speech", "title": role or "用户"}
+
+
 def _text_lane(thread_id: str | None, limit: int) -> list[dict]:
     """文字侧：模型真正读到与做出的东西。
 
@@ -242,7 +274,11 @@ def _text_lane(thread_id: str | None, limit: int) -> list[dict]:
         pay = d.get("payload") if isinstance(d.get("payload"), dict) else d
         kind = pay.get("type") or ""
         try:
-            at = time.mktime(time.strptime((d.get("timestamp") or "")[:19], "%Y-%m-%dT%H:%M:%S"))
+            # ⚠ 落盘文件里的时间戳是 **UTC**，`time.mktime` 会当成本地时间解 ——
+            # 在 JST 下整整差 9 小时，时间轴的左右交错全排错、注入去重也匹配不上
+            # （2026-09-16 用户问「为何第 40 页注入了两次」时顺带查出来的）。
+            # 跟当初 app_gone_watch 那个自动关闭失灵是同一类错，一样用 calendar.timegm。
+            at = calendar.timegm(time.strptime((d.get("timestamp") or "")[:19], "%Y-%m-%dT%H:%M:%S"))
         except Exception:   # noqa: BLE001
             at = 0.0
         if kind == "message":
@@ -250,10 +286,8 @@ def _text_lane(thread_id: str | None, limit: int) -> list[dict]:
             text = "".join(c.get("text") or "" for c in (pay.get("content") or []) if isinstance(c, dict))
             if not text.strip():
                 continue
-            rows.append({"lane": "text",
-                         "kind": "inject" if role == "developer" else "speech",
-                         "at": at, "title": "developer 注入" if role == "developer" else role,
-                         "meta": "%d 字" % len(text), "body": _clip(text)})
+            rows.append(dict(_classify_message(role, text), lane="text", at=at,
+                             meta="%d 字" % len(text), body=_clip(text)))
         elif kind == "agentMessage":
             rows.append({"lane": "text", "kind": "generate", "at": at, "title": "回答",
                          "meta": "%d 字" % len(pay.get("text") or ""), "body": _clip(pay.get("text"))})
@@ -284,7 +318,10 @@ def _tool_stats(days: float, cold: set[str] | None = None) -> dict:
     counts: dict[str, list[int]] = {}
     for r in rows:
         try:
-            at = time.mktime(time.strptime((r.get("at") or "")[:19], "%Y-%m-%dT%H:%M:%S"))
+            # mcp-tool-calls.jsonl 的 at 明确写着 +00:00（UTC），不能按本地解 ——
+            # 否则「近 N 天」的截止线整体偏 9 小时（JST）。
+            # 注意隔壁 tool-errors.jsonl 的 at 是**本地时间**，两者不一样，别一起改
+            at = calendar.timegm(time.strptime((r.get("at") or "")[:19], "%Y-%m-%dT%H:%M:%S"))
         except Exception:   # noqa: BLE001
             at = time.time()
         if at < cutoff:
@@ -511,6 +548,46 @@ def _skill_list() -> list[dict]:
     return rows if isinstance(rows, list) else []
 
 
+def _dedupe_injections(rows: list[dict]) -> list[dict]:
+    """同一次注入会从两个来源各来一遍，去掉重复的那条。
+
+    我们自己记的 `ctx_backend`（events.jsonl）和 Codex 落盘里那条 developer 消息
+    说的是同一件事 —— 2026-09-16 用户问「为何第 40 页注入了两次」，就是这个。
+    去重机制本身没坏，是**画了两遍**。
+
+    判同一条的依据：都在文字泳道、都是注入、字数一致、时间相差 5 秒内。
+    保留我们自己那条（它带页码和「是否带正文」，信息更全）。
+    """
+    def size_of(row):
+        meta = str(row.get("meta") or "")
+        digits = ""
+        for ch in meta:
+            if ch.isdigit():
+                digits += ch
+            elif digits:
+                break
+        return int(digits) if digits else -1
+
+    keep, seen = [], []
+    for row in rows:
+        if row.get("lane") != "text" or row.get("kind") != "inject":
+            keep.append(row)
+            continue
+        size, at = size_of(row), row.get("at") or 0
+        dup = next((i for i, (s2, a2) in enumerate(seen)
+                    if s2 == size and size > 0 and abs(a2 - at) <= 5), None)
+        if dup is None:
+            seen.append((size, at))
+            keep.append(row)
+            continue
+        # 已经有一条了：谁带页码信息就留谁
+        prev = next(r for r in keep if r.get("kind") == "inject"
+                    and size_of(r) == size and abs((r.get("at") or 0) - at) <= 5)
+        if "页" in str(row.get("meta") or "") and "页" not in str(prev.get("meta") or ""):
+            keep[keep.index(prev)] = row
+    return keep
+
+
 def build(limit: int = 120, days: float = 7.0, cold: list[str] | None = None,
           thread: str | None = None) -> dict:
     """给界面的一份时间轴。两条泳道合在一个数组里，前端按 lane 分列。
@@ -538,6 +615,7 @@ def build(limit: int = 120, days: float = 7.0, cold: list[str] | None = None,
                      "title": "工具报错 " + str(e.get("tool") or ""),
                      "meta": str(e.get("status") or ""), "body": _clip(e.get("result"), 1200)})
     rows.sort(key=lambda r: r.get("at") or 0)
+    rows = _dedupe_injections(rows)
     rows = rows[-limit * 2:]
     # 每条补一个「距上一条多久」，界面直接显示步骤耗时
     previous = None
