@@ -114,8 +114,11 @@ DEFAULTS: dict = {
     "contextVoiceSelection": True,   # 开口时把「选中清单」投给语音侧（见 _ctx_inject_voice_selection）
     "contextVoiceSelectionChars": 900,  # 每一项给语音侧多少字。0 = 只给开头 24 字的摘要
     "contextTextResendMinutes": 15,   # 同一页的正文多久之内不再重复注入（连续翻页时上一页末尾早给过了）
-    "contextBackendSelectionChars": 24,  # 每一项给后台多少字。只要够认出是哪一项 ——
-                                         # 全文按需用快照取（按使用次数付钱，不按变化次数）     # 语音侧是否塞正文。False（2026-09-14 实录）：塞了正文语音模型会以为自己能"看"，答"我看一下"却不委派
+    "contextBackendSelectionChars": 600,  # 每一项给后台多少字。
+                                          # ⚠ 原来是 24（只够认出是哪一项），那是「每次开口都注入」
+                                          # 时代为省 token 定的。2026-09-17 起改成只在真委托时注入一次，
+                                          # 省下的额度正好用来把原文发全 —— 截成省略号的后果是后台
+                                          # 每次都得自己再调一次快照取原文和块地址才能绑卡（用户实录）     # 语音侧是否塞正文。False（2026-09-14 实录）：塞了正文语音模型会以为自己能"看"，答"我看一下"却不委派
     "contextDwellMinSeconds": 8,   # 翻到页后停留 ≥8 s 才带正文（在读）
     "contextDwellMaxSeconds": 720, # ≤12 min（话题还新鲜）；窗外只给页码，模型要内容自己调工具
     # 2026-09-16 实测确认存在的 realtime/start 参数（判据：故意传错类型看它报不报 invalid type；
@@ -1515,10 +1518,14 @@ class Runner:
         if sel_items:
             sel_hint = "。选中 %d 项：%s" % (
                 len(sel_items),
-                "".join("（%d）%s%s「%s…」%s" % (
+                "".join("（%d）%s%s「%s%s」%s" % (
                             i + 1, _SEL_KIND_LABEL.get(k, "内容"),
                             ("〔%s〕" % lb) if lb else "",
                             t[:sel_chars],
+                            # ⚠ 省略号只在真截断时才加。原来是硬编码的，没截断也带「…」，
+                            # 后台因此以为原文不全、每次都再调一次快照去取
+                            # （2026-09-17 后台 AI 原话：「选中文字还是省略号」）
+                            "…" if len(t) > sel_chars else "",
                             # 有 id 的直接给出来：模型据此调 reader_page_card_read 等工具，
                             # 不必先用原文去反查（原文转述漏一个字就锚不上）
                             ("（id=%s）" % rf) if rf else "")
@@ -1782,8 +1789,15 @@ class Runner:
         self._ctx["sent_pages"] = {}
         self.log("ctx_scope_reset", threadId=(self.thread_id or "")[-12:])
 
-    async def _ctx_inject_backend(self, with_text: bool) -> bool:
-        """后台线程：状态变了投状态；开口边沿且正文指纹没投过再投正文（inject_items：零成本、latest wins）。"""
+    async def _ctx_inject_backend(self, with_text: bool, via_steer: bool = False) -> bool:
+        """后台线程：状态变了投状态；正文指纹没投过再投正文。
+
+        via_steer=True 时改用 turn/steer 送进**正在跑的那一轮** ——
+        送的内容与 inject 完全一样（状态 + 带 [NN] 分区编号的正文 + ⟦SELECTED⟧ 标记）。
+        ⚠ 2026-09-17 我第一版只送了状态那一行、把正文丢了，后台因此每次都得自己调快照取正文
+        和块地址才能绑卡；用户指出后由后台 AI 自己确认：「自动推送里…那是精简版，
+        选中文字还是省略号，没有完整正文和精确块地址，所以我才取了同一页的阅读快照」。
+        """
         if not self.settings.get("contextInjectEnabled", True) or not (self.app and self.thread_id):
             return False
         self._ctx_thread_scope()
@@ -1826,7 +1840,9 @@ class Runner:
         # 所以忙碌时**先不注入**，把最新一份压在这里，等那轮结束再送 —— 见 _ctx_flush_pending。
         # 这样用户在 AI 干活期间连改三次选中，历史里也只落最新的一条，
         # 而不是三条（其中两条一生下来就是过期的）。
-        if self.backend_busy:
+        if self.backend_busy and not via_steer:
+            # ⚠ via_steer 就是专门为「后台正在跑」准备的完整投递，别让这条老的延后分支截胡 ——
+            # 它只发状态那一行，2026-09-17 我就是这样把正文弄丢的。
             self._ctx_pending = {"content": content, "fp_state": b["fp_state"],
                                  "fp_text": b["fp_text"] if (with_text and b["text"]) else None,
                                  "ink": ink_fp if image is not None else None,
@@ -1838,6 +1854,23 @@ class Runner:
                     chr(10) + "继续完成你手上的事；后面用到「选中/当前页」时以这条为准。", tag="ctx")
             self.log("ctx_backend_deferred", chars=len(body or ""), page=self._ctx["page_key"][-40:])
             return True
+        if via_steer:
+            # 图片没法走 steer（它只收文本）—— 有图时退回 inject，别把图丢了
+            only_text = all(c.get("type") == "input_text" for c in content)
+            if only_text:
+                whole = "".join(c.get("text") or "" for c in content)
+                res = await self.steer_running_turn(
+                    "【当前阅读状态·状态记录，不是提问】" + whole +
+                    chr(10) + "继续完成手上的事；用到「选中/当前页」时以这条为准。", tag="delegation")
+                if res.get("ok"):
+                    fp["backend_state"] = b["fp_state"]
+                    if with_text and b["text"]:
+                        fp["backend_text"] = b["fp_text"]
+                    self.log("ctx_steer", chars=len(whole), page=self._ctx["page_key"][-40:],
+                             withText=bool(with_text and b["text"]), body=self._log_body(whole))
+                    return True
+                self.log("ctx_steer_fallback", reason=str(res.get("error"))[:80])
+                # 没赶上就照常追加，被下一轮读到
         try:
             await self.app.call("thread/inject_items", {"threadId": self.thread_id, "items": [
                 {"type": "message", "role": "developer", "content": content}]}, timeout=30)
@@ -2020,21 +2053,11 @@ class Runner:
             self.log("promise_rescue_error", message=clean(e))
 
     async def _ctx_on_delegation(self):
-        """后台真的开工了 —— 这一刻才把状态送进去，而且是送进**正在跑的那一轮**。
+        """后台真的开工了 —— 把**完整**状态（含带编号的正文）送进正在跑的那一轮。
 
-        这是 2026-09-17 用户提的形态：有了中途插入，就不必「一有变化就注入」，
-        只在真正需要时插一次。
-
-        为什么现在才做得到：早先试过在 delegation.created 那一刻 inject_items，
-        只有 8% 赶得上 —— 因为那是在**跟轮的启动赛跑**（inject 要 80 ms，
-        而 delegation → turn/started 中位只有 38 ms）。turn/steer 不参加这场赛跑：
-        它挂的是已经在跑的轮，等轮起来之后再插也来得及。
-        受控实验 16 轮：0.5/2/5 秒三档插入全部被采纳，一次没打哑。
-
-        好处是「只在后台干活时注入」：477 句开口里只有 262 句真的委托，
-        剩下 45% 的纯聊天现在零注入；而且内容是这一刻现算的，永远最新。
-
-        赶不上（轮已经结束 / 还没起来）就退回 inject_items —— 迟到而不是丢失。
+        为什么能在这一刻送完整的：turn/steer 不跟轮的启动赛跑，等轮起来再插也来得及
+        （实验 16 轮全部被采纳、一次没打哑）。而且只在真委托时才投 ——
+        477 句开口只有 262 句委托，省下来的额度正好用来把正文发全。
         """
         if not self.settings.get("contextInjectEnabled", True):
             return
@@ -2042,29 +2065,13 @@ class Runner:
             if str(self.settings.get("contextInjectOn") or "delegationSteer") != "delegationSteer":
                 await self._ctx_inject_backend(with_text=True)
                 return
-            # 等这一轮真的起来：delegation 之后 22~60 ms 才 turn/started，给它一点时间
+            # 等这一轮真的起来：delegation 之后 22~60 ms 才 turn/started
             deadline = time.monotonic() + float(self.settings.get("steerWaitSeconds") or 3.0)
             while time.monotonic() < deadline:
                 if self.backend_busy and self._turn and self._turn.get("id"):
                     break
                 await asyncio.sleep(0.05)
-            snap = self._ctx_snapshot()
-            body = self._ctx_build(snap) if snap else None
-            state = (body or {}).get("state") or ""
-            if not state:
-                return
-            res = await self.steer_running_turn(
-                "【当前阅读状态·状态记录，不是提问】" + state +
-                chr(10) + "继续完成手上的事；用到「选中/当前页」时以这条为准。", tag="delegation")
-            if res.get("ok"):
-                # 指纹跟着走，免得同一状态在下一次委托里再送一遍
-                self._ctx["fp"]["backend_state"] = body.get("fp_state")
-                self.log("ctx_steer", chars=len(state), page=self._ctx["page_key"][-40:],
-                         body=self._log_body(state))
-                return
-            # 轮没起来或已经结束 —— 退回追加，被下一轮读到
-            self.log("ctx_steer_fallback", reason=str(res.get("error"))[:80])
-            await self._ctx_inject_backend(with_text=True)
+            await self._ctx_inject_backend(with_text=True, via_steer=True)
         except Exception as e:   # noqa: BLE001
             self.log("ctx_delegation_error", message=clean(e))
 
