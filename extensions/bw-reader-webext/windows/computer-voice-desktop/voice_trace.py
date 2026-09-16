@@ -178,14 +178,17 @@ def _lane_from_items(rows: list[dict]) -> list[dict]:
 def _text_lane(thread_id: str | None, limit: int) -> list[dict]:
     """文字侧：模型真正读到与做出的东西。
 
-    先走 thread/items/list（按 threadId 精确、带 turnId）；运行器没起来时退回落盘文件。
+    **落盘文件优先**，thread/items/list 只作兜底。理由是实测出来的，不是偏好：
+      · `thread/inject_items` 注入的内容**根本不出现在 items/list 里**（模型看得到、
+        接口列不出来）。而「文字模型被注入了什么」正是这个页面最先要看的东西，
+        走 items 会让那一栏整个空掉（2026-09-16 我自己踩的）；
+      · 落盘文件带时间戳、带执行的代码、带每轮 token 用量，items 都没有；
+      · 「按线程精确」也不是 items 独有的 —— rollout 文件名里就带 threadId。
+    items/list 的价值在它带 turnId 且不依赖磁盘，所以留作找不到落盘文件时的退路。
     """
-    rows = _items_via_api(thread_id, limit)
-    if rows:
-        return _lane_from_items(rows)
     path = _newest_rollout(thread_id)
     if path is None:
-        return []
+        return _lane_from_items(_items_via_api(thread_id, limit) or [])
     rows = []
     for d in _tail_jsonl(path, limit * 8):
         pay = d.get("payload") if isinstance(d.get("payload"), dict) else d
@@ -253,56 +256,190 @@ def _tool_stats(days: float, cold: set[str] | None = None) -> dict:
             "tools": hot + folded}   # tools 保留：老界面还在用
 
 
-_COLD_CACHE: dict[str, Any] = {"at": 0.0, "names": []}
+_MCP_CACHE: dict[str, Any] = {"at": 0.0, "tools": []}
+BRIDGE_EXE = Path.home() / "bw-computer-voice-bridge" / "native-host" / "bw-computer-voice-audio.exe"
+SKILL_ROOTS = (Path.home() / ".codex" / "skills",)
+#: 折叠过的工具，描述里都有这句自描述 —— 名单只有一处真相（C# 的 ColdToolNames），
+#: 界面不另写一份，问一次就知道。
+_FOLDED_MARK = "Parameters are not inlined"
+
+
+def _mcp_call(requests: list[dict], budget: float = 10.0) -> dict[int, dict]:
+    """起一次桥的 MCP 子进程，发几条请求，按 id 收结果。
+
+    起停约 200 ms。调用方自己缓存 —— 界面每次刷新都起一个进程是不行的。
+    """
+    if not BRIDGE_EXE.exists():
+        return {}
+    import subprocess
+    out: dict[int, dict] = {}
+    try:
+        proc = subprocess.Popen(
+            [str(BRIDGE_EXE), "--reader-context-mcp", "--state",
+             str(BRIDGE_RUNTIME / "reader-context-snapshot.json")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+        def send(obj):
+            proc.stdin.write(json.dumps(obj, ensure_ascii=False) + chr(10))
+            proc.stdin.flush()
+
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                         "clientInfo": {"name": "readerpc-ui", "version": "0"}}})
+        proc.stdout.readline()
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        want = set()
+        for r in requests:
+            send(r)
+            want.add(r["id"])
+        deadline = time.time() + budget
+        while want and time.time() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if msg.get("id") in want:
+                out[msg["id"]] = msg
+                want.discard(msg["id"])
+        proc.kill()
+    except Exception:   # noqa: BLE001
+        return out
+    return out
+
+
+def _mcp_tools(max_age: float = 300.0) -> list[dict]:
+    """桥暴露的全部工具：名字 + 简介 + 参数表 + 在哪个池。缓存 5 分钟。"""
+    if time.time() - _MCP_CACHE["at"] < max_age and _MCP_CACHE["tools"]:
+        return list(_MCP_CACHE["tools"])
+    got = _mcp_call([{"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}])
+    tools = []
+    for t in (((got.get(2) or {}).get("result") or {}).get("tools") or []):
+        desc = t.get("description") or ""
+        tools.append({"name": str(t.get("name")), "description": desc,
+                      "inputSchema": t.get("inputSchema"),
+                      "pool": "cold" if _FOLDED_MARK in desc else "hot"})
+    if tools:
+        _MCP_CACHE.update({"at": time.time(), "tools": tools})
+    return tools
 
 
 def cold_tool_names(max_age: float = 300.0) -> list[str]:
-    """折叠池名单：直接问桥的 MCP 进程，按"描述里带取参提示"识别。
+    """折叠池名单。从 _mcp_tools 派生 —— 不在这里再写一份名单。"""
+    return [t["name"] for t in _mcp_tools(max_age) if t["pool"] == "cold"]
 
-    ⚠ 不在界面里另写一份名单 —— 名单只有一处真相（C# 的 ColdToolNames），
-    而折叠过的工具描述本身就是自描述的，问一次就知道。约 200 ms，缓存 5 分钟。
+
+def _read_text(path: Path, limit: int = 60000) -> str:
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return raw if len(raw) <= limit else raw[:limit] + "\n…（已截断，共 %d 字）" % len(raw)
+
+
+def _skill_dir(name: str) -> Path | None:
+    """skill 名字 → 磁盘目录。带包前缀的（pkg:name）取冒号后那段。"""
+    leaf = name.split(":")[-1]
+    for root in SKILL_ROOTS:
+        d = root / leaf
+        if d.is_dir():
+            return d
+    return None
+
+
+def _find_flow(directory: Path) -> Path | None:
+    """目录里的流程文件。
+
+    认两种：叫 flow.json / *.flow.json 的，以及任何**内容长得像流程**的 json
+    （bw-reader-skill-flow/1 的标志是顶层有 steps 数组）—— 后者是为了不漏掉
+    起了别的名字的那些。流程文件才是「这个功能实际怎么跑」的那一份，要优先展示。
     """
-    if time.time() - _COLD_CACHE["at"] < max_age:
-        return list(_COLD_CACHE["names"])
-    exe = Path.home() / "bw-computer-voice-bridge" / "native-host" / "bw-computer-voice-audio.exe"
-    state = BRIDGE_RUNTIME / "reader-context-snapshot.json"
-    names: list[str] = []
-    if exe.exists():
-        import subprocess
+    named = [f for f in directory.rglob("*.json")
+             if f.name == "flow.json" or f.name.endswith(".flow.json")]
+    if named:
+        return named[0]
+    for f in directory.rglob("*.json"):
         try:
-            proc = subprocess.Popen(
-                [str(exe), "--reader-context-mcp", "--state", str(state)],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, encoding="utf-8", errors="replace",
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            def send(obj):
-                proc.stdin.write(json.dumps(obj, ensure_ascii=False) + chr(10))
-                proc.stdin.flush()
-            send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                  "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                             "clientInfo": {"name": "readerpc-ui", "version": "0"}}})
-            proc.stdout.readline()
-            send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-            send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
-            deadline = time.time() + 8
-            while time.time() < deadline:
-                line = proc.stdout.readline()
-                if not line:
-                    break
-                try:
-                    msg = json.loads(line)
-                except ValueError:
-                    continue
-                if msg.get("id") == 2:
-                    for tool in ((msg.get("result") or {}).get("tools") or []):
-                        if "Parameters are not inlined" in (tool.get("description") or ""):
-                            names.append(str(tool.get("name")))
-                    break
-            proc.kill()
-        except Exception:   # noqa: BLE001
-            names = []
-    _COLD_CACHE.update({"at": time.time(), "names": names})
-    return names
+            if f.stat().st_size > 400000:
+                continue
+            doc = json.loads(f.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(doc, dict) and isinstance(doc.get("steps"), list):
+            return f
+    return None
+
+
+def _task_dir(name: str) -> Path | None:
+    """定时任务目录。固化下来的流程都放在这儿，一个任务一份 flow.json。"""
+    leaf = name.split(":")[-1]
+    d = LOCAL / "scheduled-tasks" / leaf
+    return d if d.is_dir() else None
+
+
+def tool_detail(name: str) -> dict:
+    """一个工具/skill/定时任务的全部可展示信息（用户 2026-09-16：要能点开看）。"""
+    name = (name or "").strip()
+    if not name:
+        return {"ok": False, "error": "缺 name"}
+
+    for t in _mcp_tools():
+        if t["name"] != name:
+            continue
+        out = {"ok": True, "kind": "mcp", "name": name, "pool": t["pool"],
+               "description": t["description"], "inputSchema": t["inputSchema"]}
+        if t["pool"] == "cold":
+            # 折叠后工具面上只剩一行；完整参数表要向能力指南要（C# 那边的 TryReadColdToolName 分支）
+            got = _mcp_call([{"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                              "params": {"name": "reader_capability_guide",
+                                         "arguments": {"tool": name}}}])
+            body = (((got.get(3) or {}).get("result") or {}).get("content") or [])
+            text = "".join(c.get("text") or "" for c in body if isinstance(c, dict))
+            try:
+                guide = json.loads(text)
+                out["description"] = guide.get("description") or out["description"]
+                out["inputSchema"] = guide.get("inputSchema") or out["inputSchema"]
+                out["howToCall"] = guide.get("howToCall")
+            except ValueError:
+                out["guideRaw"] = _clip(text, 2000)
+        return out
+
+    directory = _skill_dir(name)
+    if directory is not None:
+        files = []
+        for f in sorted(directory.rglob("*")):
+            if f.is_file() and f.suffix.lower() in (".md", ".json", ".py", ".txt"):
+                files.append({"path": str(f.relative_to(directory)).replace(chr(92), "/"),
+                              "bytes": f.stat().st_size})
+        flow = _find_flow(directory)
+        return {"ok": True, "kind": "skill", "name": name, "dir": str(directory),
+                "doc": _read_text(directory / "SKILL.md"),
+                "flowPath": str(flow.relative_to(directory)).replace(chr(92), "/") if flow else None,
+                "flow": _read_text(flow) if flow else "",
+                "files": files[:60]}
+
+    task = _task_dir(name)
+    if task is not None:
+        flow = _find_flow(task)
+        return {"ok": True, "kind": "task", "name": name, "dir": str(task),
+                "description": "定时任务。下面的流程文件就是它每次实际跑的步骤。",
+                "flowPath": flow.name if flow else None,
+                "flow": _read_text(flow) if flow else "",
+                "doc": _read_text(task / "memory.md", 8000),
+                "files": [{"path": f.name, "bytes": f.stat().st_size}
+                          for f in sorted(task.iterdir()) if f.is_file()][:40]}
+
+    for sk in _skill_list():
+        if sk.get("name") == name:
+            return {"ok": True, "kind": "skill", "name": name,
+                    "description": sk.get("description") or "",
+                    "doc": "", "files": [],
+                    "note": "这个 skill 不在本机 skills 目录里（多半随插件安装），只能给到简介。"}
+    return {"ok": False, "error": "没找到叫 %s 的工具或 skill" % name}
 
 
 def _skill_list() -> list[dict]:

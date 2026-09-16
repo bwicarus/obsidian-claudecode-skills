@@ -79,7 +79,7 @@ from voice_cli_tab import VoiceCliTab, launch_runner as launch_voice_core, read_
 from readerpc_api import ReaderPCApi, open_ui_window
 
 
-APP_VERSION = "0.1.206"
+APP_VERSION = "0.1.208"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status

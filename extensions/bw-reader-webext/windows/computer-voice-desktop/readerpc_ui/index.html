@@ -242,29 +242,8 @@ input[type=checkbox] { width:15px; height:15px; accent-color:var(--indigo); }
     <!-- 链路：两个模型各自被注入/生成/查看/执行了什么（2026-09-16） -->
     <section class="page" id="page-trace">
       <div class="card">
-        <h3>对话 <span class="meta" id="trace-thread-meta"></span>
+        <h3>链路 <span class="meta" id="trace-meta"></span>
           <button class="btn" id="trace-reload" style="float:right">刷新</button></h3>
-        <div id="trace-threads"></div>
-      </div>
-      <div class="card">
-        <h3>工具使用 <span class="meta" id="trace-tools-meta"></span></h3>
-        <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
-          <div style="flex:1;min-width:260px">
-            <div class="meta" style="margin-bottom:4px">常驻预载（开场就带完整参数）</div>
-            <table id="trace-hot" style="width:100%;font-size:12.5px;border-collapse:collapse"></table>
-          </div>
-          <div style="flex:1;min-width:260px">
-            <div class="meta" style="margin-bottom:4px">折叠（只留一行，参数按需取）</div>
-            <table id="trace-cold" style="width:100%;font-size:12.5px;border-collapse:collapse"></table>
-          </div>
-          <div style="flex:1;min-width:260px">
-            <div class="meta" style="margin-bottom:4px" title="这是 skills/list 的目录查询结果。实测它不反映本次会话封存了哪些插件，所以别拿它推算上下文成本">skill 目录（≠ 本次会话实际启用）</div>
-            <table id="trace-skills" style="width:100%;font-size:12.5px;border-collapse:collapse"></table>
-          </div>
-        </div>
-      </div>
-      <div class="card">
-        <h3>链路 <span class="meta" id="trace-meta"></span></h3>
         <div style="display:flex;gap:10px;align-items:flex-start">
           <div style="flex:1;min-width:0">
             <div class="meta" style="margin-bottom:6px">语音模型</div>
@@ -276,6 +255,34 @@ input[type=checkbox] { width:15px; height:15px; accent-color:var(--indigo); }
           </div>
         </div>
       </div>
+      <div class="card">
+        <h3>工具使用 <span class="meta" id="trace-tools-meta"></span>
+          <span class="meta" style="float:right;font-weight:400">点名字看详情</span></h3>
+        <!-- 三列各自限高单独滚：skill 有 95 条，不限高会把卡片撑到两千多像素高，
+             而旁边两列十几行就到底了，中间只剩一大片空白（2026-09-16 实测） -->
+        <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
+          <div style="flex:1;min-width:250px">
+            <div class="meta" style="margin-bottom:4px">常驻预载（开场就带完整参数）</div>
+            <div style="max-height:420px;overflow:auto">
+              <table id="trace-hot" style="width:100%;font-size:12.5px;border-collapse:collapse"></table>
+            </div>
+          </div>
+          <div style="flex:1;min-width:250px">
+            <div class="meta" style="margin-bottom:4px">折叠（只留一行，参数按需取）</div>
+            <div style="max-height:420px;overflow:auto">
+              <table id="trace-cold" style="width:100%;font-size:12.5px;border-collapse:collapse"></table>
+            </div>
+          </div>
+          <div style="flex:1;min-width:250px">
+            <div class="meta" style="margin-bottom:4px" title="这是 skills/list 的目录查询结果。实测它不反映本次会话封存了哪些插件，所以别拿它推算上下文成本">skill 目录（≠ 本次会话实际启用）</div>
+            <div style="max-height:420px;overflow:auto">
+              <table id="trace-skills" style="width:100%;font-size:12.5px;border-collapse:collapse"></table>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- 工具详情：点了工具名才出现 -->
+      <div class="card" id="tool-detail" style="display:none"></div>
     </section>
     <section class="page" id="page-notify">
       <div class="card">
@@ -307,7 +314,7 @@ document.querySelectorAll('#nav button').forEach(b => b.addEventListener('click'
   document.querySelectorAll('#nav button').forEach(x => x.classList.remove('active')); b.classList.add('active');
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   page = b.dataset.page; $('page-' + page).classList.add('active'); onPage(page);
-  if (page === 'trace') { renderThreads(); loadTrace(); }   // 只在打开时拉一次，别后台轮询
+  if (page === 'trace') loadTrace();   // 只在打开时拉一次，别后台轮询
 }));
 function onPage(p) {
   if (p === 'snapshot') loadSnapshot();
@@ -646,69 +653,45 @@ function toolTable(rows) {
   if (!rows || !rows.length) return '<tr><td class="meta">（无）</td></tr>';
   return ['<tr style="color:#94a3b8;text-align:left"><th>工具</th><th>次数</th><th>中位耗时</th></tr>']
     .concat(rows.map(function (x) {
-      return '<tr><td style="padding:2px 0">' + esc(x.name) + '</td><td>' + x.calls + '</td><td>' +
+      return '<tr><td style="padding:2px 0"><a href="#" class="tool-link" data-tool="' + esc(x.name) +
+        '">' + esc(x.name) + '</a></td><td>' + x.calls + '</td><td>' +
         (x.calls ? x.medianMs + ' ms' : '—') + '</td></tr>';
     })).join('');
 }
-async function renderThreads() {
-  const d = await api('POST', '/voice/thread/list', { limit: 20 });
-  const rows = ((d && d.result && d.result.data) || []);
-  const box = $('trace-threads');
-  box.innerHTML = '';
-  rows.forEach(function (x) {
-    const id = String(x.id || '');
-    const line = document.createElement('div');
-    const on = traceThread ? (id === traceThread) : !!x.current;
-    line.style.cssText = 'display:flex;gap:8px;align-items:center;padding:4px 6px;border-radius:6px;cursor:pointer;' +
-      (on ? 'background:rgba(125,211,252,.12)' : '');
-    line.innerHTML = '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
-      (x.current ? '<b style="color:#7dd3fc">● </b>' : '') + esc(x.name || x.preview || id.slice(-12)) + '</span>' +
-      '<span class="meta" style="font-size:11px">' + id.slice(-8) + '</span>';
-    line.addEventListener('click', function () { traceThread = id; loadTrace(); });
-    const ren = document.createElement('button'); ren.className = 'btn'; ren.textContent = '改名';
-    ren.addEventListener('click', async function (ev) {
-      ev.stopPropagation();
-      const name = prompt('新名字：', x.name || '');
-      if (!name) return;
-      toastOf(await api('POST', '/voice/thread/rename', { threadId: id, name: name }));
-      renderThreads();
-    });
-    const del = document.createElement('button'); del.className = 'btn'; del.textContent = '删除';
-    del.addEventListener('click', async function (ev) {
-      ev.stopPropagation();
-      // 删除不可逆，问一次；删当前那条会顺带停会话并换新线程（运行器里做的）
-      if (!confirm('删除这条对话？不可恢复。' + (x.current ? '\n（这是当前对话，会结束通话并新开一条）' : ''))) return;
-      toastOf(await api('POST', '/voice/thread/delete', { threadId: id }));
-      if (traceThread === id) traceThread = '';
-      renderThreads(); loadTrace();
-    });
-    // 压缩：线程只增不减的解药。就地把历史折成摘要，对话身份保留
-    //（不像"开新对话"那样把上下文整个丢掉）
-    const cmp = document.createElement('button'); cmp.className = 'btn'; cmp.textContent = '压缩';
-    cmp.title = '把这条对话的历史折成摘要，省 token，对话身份保留';
-    cmp.addEventListener('click', async function (ev) {
-      ev.stopPropagation();
-      if (!confirm('压缩这条对话的历史？折成摘要后细节不可恢复。')) return;
-      cmp.disabled = true; cmp.textContent = '压缩中…';
-      const r = await api('POST', '/voice/thread/compact', { threadId: id });
-      cmp.disabled = false; cmp.textContent = '压缩';
-      toast(r && r.ok ? ('已压缩：' + r.before + ' → ' + r.after + ' 条')
-                      : ('压缩失败：' + ((r && r.error) || '未知')));
-      loadTrace();
-    });
-    line.appendChild(cmp); line.appendChild(ren); line.appendChild(del);
-    box.appendChild(line);
-  });
-  $('trace-thread-meta').textContent = rows.length + ' 条' + (traceThread ? ' · 正在看 ' + traceThread.slice(-8) : ' · 正在看当前对话');
-  // 线程自己的模型与推理档位 —— 这两项决定了你在链路里看到的东西有多贵
-  try {
-    const info = await api('POST', '/voice/thread/info', { threadId: traceThread || '' });
-    const th = (info && info.result && info.result.thread) || {};
-    if (th.model) {
-      $('trace-thread-meta').textContent += ' · ' + th.model +
-        (th.reasoningEffort ? '/' + th.reasoningEffort : '');
-    }
-  } catch (e) { /* 运行器没起来就不显示，这不是错误 */ }
+function detailBlock(title, body, mono) {
+  if (!body) return '';
+  return '<div style="margin-top:10px"><div class="meta" style="margin-bottom:3px">' + esc(title) +
+    '</div><pre style="margin:0;padding:8px;border-radius:6px;background:rgba(0,0,0,.25);' +
+    'max-height:340px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px' +
+    (mono ? '' : ';font-family:inherit') + '">' + esc(body) + '</pre></div>';
+}
+async function showToolDetail(name) {
+  const box = $('tool-detail');
+  box.style.display = '';
+  box.innerHTML = '<h3>' + esc(name) + '</h3><div class="meta">读取中…</div>';
+  box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  const d = await api('GET', '/api/tool?name=' + encodeURIComponent(name));
+  if (!d || !d.ok) {
+    box.innerHTML = '<h3>' + esc(name) + '</h3><div class="meta">读不到：' +
+      esc((d && d.error) || '未知') + '</div>';
+    return;
+  }
+  const poolLabel = d.kind === 'skill' ? 'skill'
+    : (d.pool === 'cold' ? '折叠池（参数按需取）' : '常驻池（开场就带完整参数）');
+  let html = '<h3>' + esc(d.name) + ' <span class="meta">' + esc(poolLabel) + '</span>' +
+    '<button class="btn" id="tool-detail-close" style="float:right">关闭</button></h3>';
+  html += detailBlock('简介', d.description || d.note || '', false);
+  if (d.howToCall) html += detailBlock('怎么调', d.howToCall, false);
+  if (d.inputSchema) html += detailBlock('参数表', JSON.stringify(d.inputSchema, null, 1), true);
+  if (d.flow) html += detailBlock('流程文件 ' + (d.flowPath || ''), d.flow, true);
+  if (d.doc) html += detailBlock('SKILL.md', d.doc, false);
+  if (d.files && d.files.length) {
+    html += detailBlock('目录内文件', d.files.map(function (f) {
+      return f.path + '  (' + f.bytes + ' 字节)';
+    }).join('\n'), true);
+  }
+  if (d.dir) html += '<div class="meta" style="margin-top:8px">' + esc(d.dir) + '</div>';
+  box.innerHTML = html;
 }
 function renderTrace(t) {
   var voice = $('trace-voice'), text = $('trace-text');
@@ -716,8 +699,8 @@ function renderTrace(t) {
   (t.rows || []).forEach(function (row) {
     (row.lane === 'voice' ? voice : text).appendChild(traceCard(row));
   });
-  $('trace-meta').textContent = (t.rows || []).length + ' 条 · 线程 ' + String(t.threadId || '').slice(-12) +
-    (t.error ? ' · 出错：' + t.error : '');
+  $('trace-meta').textContent = (t.rows || []).length + ' 条 · 当前对话 ' +
+    String(t.threadId || '').slice(-12) + (t.error ? ' · 出错：' + t.error : '');
   var stats = t.tools || {};
   $('trace-hot').innerHTML = toolTable(stats.hot);
   $('trace-cold').innerHTML = toolTable(stats.cold);
@@ -727,6 +710,7 @@ function renderTrace(t) {
     var m = /^app-[0-9a-f]{8,}:(.+)$/.exec(s.name || '');
     var pkg = /^([a-z0-9-]+):(.+)$/.exec(s.name || '');
     return {
+      raw: s.name,                 // 查详情要用原名，显示用的是去前缀的
       show: m ? m[1] : (pkg ? pkg[2] : s.name),
       from: m ? '第三方' : (pkg ? pkg[1] : '本机'),
       own: !m && !pkg,             // 不带前缀的就是我们自己放的
@@ -737,9 +721,9 @@ function renderTrace(t) {
   skills.sort(function (a, b) { return (b.own - a.own) || a.show.localeCompare(b.show); });
   $('trace-skills').innerHTML = skills.length
     ? skills.map(function (s) {
-        return '<tr title="' + esc(s.desc) + '"><td style="padding:2px 0;' +
-          (s.own ? 'color:#6ee7b7' : '') + '">' + esc(s.show) +
-          '</td><td class="meta" style="font-size:11px;text-align:right">' + esc(s.from) + '</td></tr>';
+        return '<tr title="' + esc(s.desc) + '"><td style="padding:2px 0"><a href="#" class="tool-link" ' +
+          'data-tool="' + esc(s.raw) + '" style="' + (s.own ? 'color:#6ee7b7' : '') + '">' + esc(s.show) +
+          '</a></td><td class="meta" style="font-size:11px;text-align:right">' + esc(s.from) + '</td></tr>';
       }).join('')
     : '<tr><td class="meta">（读不到 —— 语音核心没起来）</td></tr>';
   $('trace-tools-meta').textContent = '近 ' + (stats.days || 7) + ' 天 · 常驻 ' +
@@ -752,7 +736,14 @@ async function loadTrace() {
   renderTrace(t || {});
 }
 document.addEventListener('click', function (ev) {
-  if (ev.target && ev.target.id === 'trace-reload') { renderThreads(); loadTrace(); }
+  if (ev.target && ev.target.id === 'trace-reload') loadTrace();
+  if (ev.target && ev.target.classList && ev.target.classList.contains('tool-link')) {
+    ev.preventDefault();
+    showToolDetail(ev.target.getAttribute('data-tool'));
+  }
+  if (ev.target && ev.target.id === 'tool-detail-close') {
+    $('tool-detail').style.display = 'none';
+  }
 });
 
 </script>

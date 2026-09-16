@@ -113,6 +113,10 @@ class ReaderPCApi:
                         limit=int(q.get("limit", ["120"])[0]),
                         days=float(q.get("days", ["7"])[0]),
                         thread=(q.get("thread", [""])[0] or None)))
+                if u.path == "/api/tool":
+                    # 点开一个工具/skill 看详情：简介、参数表、流程文件（用户 2026-09-16）
+                    return self.send_json(h, self.tool_detail(
+                        parse_qs(u.query).get("name", [""])[0]))
                 return self.send_json(h, {"ok": False, "msg": "no such path"}, 404)
             body = self.read_body(h)
             data = json.loads(body or b"{}") if body else {}
@@ -137,6 +141,14 @@ class ReaderPCApi:
             return {"contract": "voice-trace/1", "rows": [], "tools": [],
                     "error": "%s: %s" % (type(e).__name__, e)}
 
+
+    def tool_detail(self, name: str) -> dict[str, Any]:
+        """一个工具/skill 的详情。出错也返回完整结构 —— 面板不能白屏。"""
+        try:
+            import voice_trace  # noqa: WPS433
+            return voice_trace.tool_detail(name)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "name": name, "error": "%s: %s" % (type(e).__name__, e)}
 
     def status(self) -> dict[str, Any]:
         return {"version": self.version, "uptimeSeconds": round(time.time() - self.started_at), "pid": os.getpid(),

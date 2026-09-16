@@ -635,6 +635,7 @@ class Runner:
         # 流式：语音侧当前这轮的 id / 已累计的回复文本；历史写入走单工作线程队列，保证先后顺序
         self._voice_turn_id: str | None = None
         self._last_compact_at: float = 0.0
+        self._ctx_pending: dict | None = None   # 后台忙时压着的状态，只留最新一份
         self._voice_stream = ""
         self._backend_recent: tuple[float, str] | None = None   # 后台最近一条回复：语音把它念出来的字幕不再重复入库
         self._voice_user_acc = ""   # 本轮用户字幕分段累积（turn.done 没带转写时兜底）
@@ -771,6 +772,8 @@ class Runner:
                     self._stream_start_post(tid)   # 侧栏用这个 id 当本轮容器身份，App 画的部件直接落进同一条记录
                 else:
                     self._finish_turn(turn)
+                    # 这一轮跑完、下一轮还没起 —— 把忙碌期间压着的最新状态送进去
+                    await self._ctx_flush_pending()
             elif m == "item/agentMessage/delta":
                 if self._turn is not None and p.get("delta") and not self._voice_owns_text():
                     self._turn["stream"] += str(p.get("delta"))
@@ -1707,18 +1710,29 @@ class Runner:
         content = [{"type": "input_text", "text": text_part}]
         if image is not None:
             content.append({"type": "input_image", "image_url": "data:%s;base64,%s" % (image["mimeType"], image["base64"]), "detail": "auto"})
+
+        # 后台正在跑的那一轮读不到我们现在追加的东西（它的上下文早就组好了）。
+        # 所以忙碌时**先不注入**，把最新一份压在这里，等那轮结束再送 —— 见 _ctx_flush_pending。
+        # 这样用户在 AI 干活期间连改三次选中，历史里也只落最新的一条，
+        # 而不是三条（其中两条一生下来就是过期的）。
+        if self.backend_busy:
+            self._ctx_pending = {"content": content, "fp_state": b["fp_state"],
+                                 "fp_text": b["fp_text"] if (with_text and b["text"]) else None,
+                                 "ink": ink_fp if image is not None else None,
+                                 "chars": len(body or ""), "at": time.time()}
+            # 想让在跑的那一轮也看见，只有 turn/steer 一条路；默认关着，原因见 steer_running_turn
+            if self._turn:
+                await self.steer_running_turn(
+                    "【状态更新·不是新任务】" + b["state"] +
+                    chr(10) + "继续完成你手上的事；后面用到「选中/当前页」时以这条为准。", tag="ctx")
+            self.log("ctx_backend_deferred", chars=len(body or ""), page=self._ctx["page_key"][-40:])
+            return True
         try:
             await self.app.call("thread/inject_items", {"threadId": self.thread_id, "items": [
                 {"type": "message", "role": "developer", "content": content}]}, timeout=30)
         except Exception as e:
             self.log("ctx_backend_error", message=clean(e))
             return False
-        # 后台已经在跑的那一轮读不到刚才 append 上去的东西（它的上下文早就组好了）。
-        # 只有这种时候才 steer：把同一份状态挂进在跑的轮，用被动措辞，不抢它手上的活。
-        if self.backend_busy and self._turn:
-            await self.steer_running_turn(
-                "【状态更新·不是新任务】" + b["state"] +
-                chr(10) + "继续完成你手上的事；后面用到「选中/当前页」时以这条为准。", tag="ctx")
         fp["backend_state"] = b["fp_state"]
         if with_text and b["text"]:
             fp["backend_text"] = b["fp_text"]
@@ -1727,6 +1741,31 @@ class Runner:
             self.log("ctx_image", bytes=image.get("bytes"), drawingRevision=image.get("drawingRevision"), page=self._ctx["page_key"][-40:])
         self.log("ctx_backend", withText=bool(with_text and b["text"]), chars=len(body), page=self._ctx["page_key"][-40:])
         return True
+
+    async def _ctx_flush_pending(self):
+        """把忙碌期间压着的那份状态送出去。只送最新一份 —— 中间那些一出生就过期了。
+
+        叫在 turn/completed 的处理里：那一刻上一轮刚结束、下一轮（多半是语音委托的那轮）
+        还没起，注入正好赶得上被它读到。
+        """
+        pend = getattr(self, "_ctx_pending", None)
+        if not pend or not (self.app and self.thread_id):
+            return
+        self._ctx_pending = None
+        try:
+            await self.app.call("thread/inject_items", {"threadId": self.thread_id, "items": [
+                {"type": "message", "role": "developer", "content": pend["content"]}]}, timeout=30)
+        except Exception as e:   # noqa: BLE001
+            self.log("ctx_backend_error", message=clean(e))
+            return
+        fp = self._ctx["fp"]
+        fp["backend_state"] = pend["fp_state"]
+        if pend.get("fp_text"):
+            fp["backend_text"] = pend["fp_text"]
+        if pend.get("ink"):
+            fp["image"] = pend["ink"]
+        self.log("ctx_backend", withText=bool(pend.get("fp_text")), chars=pend["chars"],
+                 deferredSec=round(time.time() - pend["at"], 1), page=self._ctx["page_key"][-40:])
 
     async def thread_compact(self, thread_id: str, reason: str = "manual") -> dict:
         """压缩线程 —— 线程只增不减的解药。
