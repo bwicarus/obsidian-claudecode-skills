@@ -608,3 +608,41 @@ controlled by explicit client append APIs」，测试名 `webrtc_v1_client_manag
   万一没赶上也只是被下一轮读到，**迟到而不是丢失**。
 - 要连去程也完全掌握，只能不走 `thread/realtime/*`、自己直连 GPT-Live ——
   那就从订阅额度变成按 token 付费。
+
+### 注入时机：实测把「委托那一刻」否掉了（2026-09-16）
+
+一开始按「语音模型召唤后台的那一刻」注入（`delegation.created`），听着最理想。
+量完之后**不成立**：
+
+| 时机 | 留给注入的时间（中位） | 注入耗时 | 赶得上的比例 |
+|---|---|---|---|
+| 委托那一刻 | **38 ms**（P10 23 ms） | 80 ms | **8%**（按 P90 耗时 146 ms 算是 0%） |
+| 用户刚说完 | **14.5 秒**（P10 2.9 秒） | 80 ms | **99%** |
+
+`thread/inject_items` 的往返实测：中位 33~80 ms、P90 约 146 ms，
+而且**跟内容大小几乎无关**（1.7K 和 13K 都是 80.6 ms），是固定开销不是传输量。
+
+所以默认改成 `contextInjectOn: "speechEnd"` —— 用户最初说的就是「开口**并结束**时」，
+是我自作主张挪到委托点反而基本必然迟到。speechEnd 同时保住了那个好处：
+只翻页不说话时零注入（用户报的毛病就是这个）。
+`delegation` 与 `speech` 两档留着做对照。
+
+⚠ 教训：**先量再定时机**。22~60 ms 的窗口看着够用，但那是「窗口宽度」，
+而真正能用的是「窗口中位」38 ms，再减去注入本身的 80 ms 就是负数。
+
+### thread/realtime/start 里还没用上的参数（2026-09-16 实测确认存在）
+
+判据不能用「传了不报错」—— 这个方法**不拒绝未知字段**（瞎编的 `__bogus__` 也通过）。
+要故意传**错类型**：真字段会报 `invalid type` 并说出期望类型，假字段被直接忽略。
+对照组 `__definitely_not_a_field__` 确实被忽略，判据有效。
+
+| 参数 | 类型 | 可能的用处 |
+|---|---|---|
+| `realtimeStartInstructions` | string | 会话开场给语音模型的指令（可带当前书页，补 `includeStartupContext`） |
+| `realtimeEndInstructions` | string | 会话收尾指令 —— **对自动关闭有用**：让它好好道别而不是被掐断 |
+| `flushTranscriptTailOnSessionEnd` | boolean | 结束时把剩余转写刷出来，自动关闭时不丢最后一段历史 |
+| `codexResponseItemPrefix` | string | 后台回答条目的前缀，帮语音模型分清「这是后台给的」 |
+| `codexResponseHandoffChannelPrefixes` | map（值是数组） | 按通道分别加前缀，配合 `codexResponseHandoffMode` 的 thinking/commentary/bemTags |
+| `delegationAckFiller` | boolean | 已有设置位，当前是 None |
+
+这些都是 COLD 参数，改了要重开会话。

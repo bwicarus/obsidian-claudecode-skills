@@ -118,12 +118,13 @@ DEFAULTS: dict = {
                                          # 全文按需用快照取（按使用次数付钱，不按变化次数）     # 语音侧是否塞正文。False（2026-09-14 实录）：塞了正文语音模型会以为自己能"看"，答"我看一下"却不委派
     "contextDwellMinSeconds": 8,   # 翻到页后停留 ≥8 s 才带正文（在读）
     "contextDwellMaxSeconds": 720, # ≤12 min（话题还新鲜）；窗外只给页码，模型要内容自己调工具
-    "contextInjectOn": "delegation",  # 后台那份状态什么时候投。
-                                      # delegation（默认）= 语音模型召唤后台的那一刻（dc delegation.created），
-                                      #   实测其后 22~60 ms 才 turn/started，赶得上；
-                                      #   好处是「只翻页不说话」「说了但语音模型自己答了」都零注入
-                                      #   （963 次开口只有 316 次委托）。
-                                      # speech = 老行为，开口边沿就投，留作对照
+    "contextInjectOn": "speechEnd",   # 后台那份状态什么时候投。
+                                      # speechEnd（默认）= 用户刚说完那一刻。实测到「语音召唤后台」
+                                      #   还有中位 14.5 秒余量，而注入要 80 ms → 99% 赶得上；
+                                      #   且只翻页不说话时零注入（用户 2026-09-16 报的毛病）。
+                                      # delegation = 召唤后台那一刻投。听着更理想，实测只剩 38 ms，
+                                      #   **只有 8% 赶得上**，别用，留作对照。
+                                      # speech = 最老的行为，开口边沿就投
     "threadAutoCompact": False,    # ⚠ 默认关。thread/compact/start 会**就地重写落盘的 rollout 文件**，
                                    # 把完整记录换成摘要，无警告无报错（openai/codex#44363，仍未修：
                                    # 851MB／122877 条被压成 7.1MB／762 条，3777 条助手消息全丢）。
@@ -851,6 +852,13 @@ class Runner:
                     self.mark_activity("user-speech")
                     self._on_user_speech_started()
                 else:
+                    # ⭐ 用户刚说完 —— 这是注入后台状态最合适的时刻（2026-09-16 实测定的）：
+                    #   · 到「语音召唤后台」还有中位 14.5 秒、P10 也有 2.9 秒的余量，
+                    #     而 inject_items 本身要 80 ms，**99% 赶得上**；
+                    #   · 相比之下在召唤那一刻注入只剩中位 38 ms，只有 8% 赶得上 —— 基本必然迟到；
+                    #   · 又因为是「说完」才投，只翻页不说话时零注入，正是用户报的那个毛病。
+                    if str(self.settings.get("contextInjectOn") or "speechEnd") == "speechEnd":
+                        asyncio.run_coroutine_threadsafe(self._ctx_on_delegation(), self.loop)
                     utext = (turn.get("transcript") or self._voice_user_acc or "").strip()
                     self._voice_user_acc = ""
                     if utext:
@@ -913,7 +921,9 @@ class Runner:
                 #     那些根本不需要给后台任何东西；
                 #   · 开口到委托之间还隔着 3.7~18 秒，期间翻的页、改的选中都能带上最新的。
                 # on_dc_message 是**同步**回调，不能 create_task —— 和隔壁开口那条一样走线程安全投递
-                if str(self.settings.get("contextInjectOn") or "delegation") == "delegation":
+                # 默认不在这里投：留给注入的时间中位只有 38 ms，而注入要 80 ms，
+                # 实测只有 8% 赶得上。想对照时把 contextInjectOn 设成 delegation
+                if str(self.settings.get("contextInjectOn") or "speechEnd") == "delegation":
                     asyncio.run_coroutine_threadsafe(self._ctx_on_delegation(), self.loop)
             # 委托这条留全：它是**两个模型之间的完整交接报文**（语音模型转给后台的原话、
             # handoff_id、target），也是链路上「何时召唤后台、交了什么过去」的唯一来源。
