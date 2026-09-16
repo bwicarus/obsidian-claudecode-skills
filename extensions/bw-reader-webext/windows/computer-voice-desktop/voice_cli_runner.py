@@ -118,6 +118,12 @@ DEFAULTS: dict = {
                                          # 全文按需用快照取（按使用次数付钱，不按变化次数）     # 语音侧是否塞正文。False（2026-09-14 实录）：塞了正文语音模型会以为自己能"看"，答"我看一下"却不委派
     "contextDwellMinSeconds": 8,   # 翻到页后停留 ≥8 s 才带正文（在读）
     "contextDwellMaxSeconds": 720, # ≤12 min（话题还新鲜）；窗外只给页码，模型要内容自己调工具
+    "threadAutoCompact": True,     # 线程长到 threadCompactItems 条就自动压一次（thread/compact/start）。
+                                   # 在这之前只能「开新对话」，代价是上下文整个丢掉；压缩保住对话身份
+    "threadCompactItems": 220,     # 触发自动压缩的条数阈值
+    "turnSteerEnabled": False,     # 后台正在跑时，把最新状态插进那一轮（turn/steer）。
+                                   # ⚠ 默认关：实测有一定概率让那一轮一条回答都不产出，
+                                   # 在语音里就是「AI 不理我」，比不插还糟。证据够了再开
     "idleStopMinutes": 20,         # 闲置这么久自动结束通话（0=不自动关）。实测连着不说话也按墙钟 1:1 计费
     "contextInkImage": True,       # 开口时页上有新笔迹（lastEditedAt 在 freshWindowS 内、已稳定）→ 取圈画附近的图随状态一起注入后台；同一 (页,笔迹版本) 只投一次
     "contextInkImageMaxBytes": 700000,   # 超过就不投（图片按 token 计费且留在线程历史里）
@@ -628,6 +634,7 @@ class Runner:
         self.history_stats = {"written": 0, "errors": 0, "lastError": None, "streamed": 0}
         # 流式：语音侧当前这轮的 id / 已累计的回复文本；历史写入走单工作线程队列，保证先后顺序
         self._voice_turn_id: str | None = None
+        self._last_compact_at: float = 0.0
         self._voice_stream = ""
         self._backend_recent: tuple[float, str] | None = None   # 后台最近一条回复：语音把它念出来的字幕不再重复入库
         self._voice_user_acc = ""   # 本轮用户字幕分段累积（turn.done 没带转写时兜底）
@@ -1701,6 +1708,12 @@ class Runner:
         except Exception as e:
             self.log("ctx_backend_error", message=clean(e))
             return False
+        # 后台已经在跑的那一轮读不到刚才 append 上去的东西（它的上下文早就组好了）。
+        # 只有这种时候才 steer：把同一份状态挂进在跑的轮，用被动措辞，不抢它手上的活。
+        if self.backend_busy and self._turn:
+            await self.steer_running_turn(
+                "【状态更新·不是新任务】" + b["state"] +
+                chr(10) + "继续完成你手上的事；后面用到「选中/当前页」时以这条为准。", tag="ctx")
         fp["backend_state"] = b["fp_state"]
         if with_text and b["text"]:
             fp["backend_text"] = b["fp_text"]
@@ -1709,6 +1722,72 @@ class Runner:
             self.log("ctx_image", bytes=image.get("bytes"), drawingRevision=image.get("drawingRevision"), page=self._ctx["page_key"][-40:])
         self.log("ctx_backend", withText=bool(with_text and b["text"]), chars=len(body), page=self._ctx["page_key"][-40:])
         return True
+
+    async def thread_compact(self, thread_id: str, reason: str = "manual") -> dict:
+        """压缩线程 —— 线程只增不减的解药。
+
+        在这之前只能「到一定长度就开新对话」，代价是把上下文整个丢掉。
+        thread/compact/start 是就地把历史折成摘要，对话身份不变（2026-09-16 实测有效）。
+        """
+        await self.ensure_app()
+        before = await self.thread_item_count(thread_id)
+        t0 = time.time()
+        await self.app.call("thread/compact/start", {"threadId": thread_id}, timeout=210)
+        after = await self.thread_item_count(thread_id)
+        self.log("thread_compacted", threadId=thread_id[-12:], reason=reason,
+                 before=before, after=after, seconds=round(time.time() - t0, 1))
+        return {"ok": True, "before": before, "after": after, "reason": reason}
+
+    async def thread_item_count(self, thread_id: str) -> int:
+        """线程里现有多少条记录。压缩前后各数一次，好知道到底省了多少。"""
+        try:
+            res = await self.app.call("thread/items/list", {"threadId": thread_id, "limit": 400}, timeout=30)
+            return len((res or {}).get("data") or [])
+        except Exception:   # noqa: BLE001
+            return -1
+
+    async def maybe_autocompact(self) -> None:
+        """线程长到阈值就自动压一次。只在后台空闲时做 —— 压缩本身要跑一轮模型。"""
+        if not self.settings.get("threadAutoCompact", True):
+            return
+        if self.backend_busy or not (self.app and self.thread_id):
+            return
+        limit = int(self.settings.get("threadCompactItems") or 220)
+        if time.time() - float(self._last_compact_at or 0) < 600:
+            return   # 刚压过就别又压：压缩自己也要花一轮
+        n = await self.thread_item_count(self.thread_id)
+        if n < limit:
+            return
+        self._last_compact_at = time.time()
+        try:
+            await self.thread_compact(self.thread_id, reason="auto/%d" % n)
+        except Exception as e:   # noqa: BLE001
+            self.log("thread_compact_error", message=clean(e))
+
+    async def steer_running_turn(self, text: str, tag: str = "state") -> dict:
+        """把内容插进**正在跑的那一轮**。
+
+        为什么需要它：inject_items 是往线程上追加，已经开跑的轮不会回头去读 ——
+        所以「后台正在干活时用户改了选中」这件事，今天只能等它跑完再补。
+        turn/steer 能挂进在跑的轮（2026-09-16 实测：内容以 userMessage 落在该轮里）。
+
+        ⚠ 措辞必须是被动的状态通报。实测用祈使句（「立刻停止，改为…」）会把那一轮
+        打哑 —— 一条回答都不产出，在语音里就是「AI 不理我」，比不插还糟。
+        """
+        if not self.settings.get("turnSteerEnabled", False):
+            return {"ok": False, "error": "已关闭（turnSteerEnabled）"}
+        turn = self._turn
+        if not (self.backend_busy and turn and turn.get("id") and self.thread_id):
+            return {"ok": False, "error": "当前没有正在跑的轮"}
+        try:
+            await self.app.call("turn/steer", {"threadId": self.thread_id,
+                                               "expectedTurnId": turn["id"],
+                                               "input": [{"type": "text", "text": text}]}, timeout=20)
+        except Exception as e:   # noqa: BLE001
+            self.log("turn_steer_error", message=clean(e), tag=tag)
+            return {"ok": False, "error": clean(e)}
+        self.log("turn_steer", tag=tag, chars=len(text), turnId=str(turn["id"])[-12:])
+        return {"ok": True, "turnId": turn["id"], "chars": len(text)}
 
     async def _ctx_on_speech(self):
         """开口边沿：语音侧投一条压缩状态（同状态不投）；后台投带正文的状态（委托轮在 turn.done 之后才起，来得及）。"""
@@ -2281,6 +2360,9 @@ class Runner:
         while not self.shutting_down:
             await asyncio.sleep(30)
             try:
+                # 顺路做线程压缩：它要跑一轮模型，所以只在后台空闲时做。
+                # 放在 connected 判断之前 —— 没在通话时线程照样会被文字侧撑长。
+                await self.maybe_autocompact()
                 minutes = float(self.settings.get("idleStopMinutes") or 0)
                 if minutes <= 0 or self.session_state != "connected":
                     continue
@@ -2445,8 +2527,89 @@ class Handler(BaseHTTPRequestHandler):
                         res = await r.app.call("thread/list", {"limit": int(body.get("limit") or 30)}, timeout=30)
                     except Exception:   # noqa: BLE001 —— 参数形状不对就退回无参
                         res = await r.app.call("thread/list", {}, timeout=30)
+                    # 刚建、还没说过话的线程不在 thread/list 里（它只列已落盘的），
+                    # 于是用户报的"新开对话后列表里看不到"。补在最前面并标出当前这条。
+                    try:
+                        rows = (res or {}).get("data")
+                        if isinstance(rows, list):
+                            if r.thread_id and not any(
+                                    isinstance(x, dict) and x.get("id") == r.thread_id for x in rows):
+                                rows.insert(0, {"id": r.thread_id, "preview": "（当前对话，尚无记录）"})
+                            for x in rows:
+                                if isinstance(x, dict):
+                                    x["current"] = x.get("id") == r.thread_id
+                    except Exception as e:   # noqa: BLE001
+                        r.log("thread_list_merge_error", message=clean(e))
                     return {"ok": True, "current": r.thread_id, "result": res}
                 return self._send(200, self._run(_list(), 60))
+            if u.path == "/thread/items":
+                async def _items():
+                    tid = str(body.get("threadId") or "") or (r.thread_id or "")
+                    if not tid:
+                        return {"ok": False, "error": "缺 threadId"}
+                    await r.ensure_app()
+                    params = {"threadId": tid, "limit": int(body.get("limit") or 80)}
+                    if body.get("cursor"):
+                        params["cursor"] = str(body["cursor"])
+                    res = await r.app.call("thread/items/list", params, timeout=30)
+                    return {"ok": True, "threadId": tid, "result": res}
+                return self._send(200, self._run(_items(), 60))
+            if u.path == "/thread/info":
+                async def _info():
+                    tid = str(body.get("threadId") or "") or (r.thread_id or "")
+                    if not tid:
+                        return {"ok": False, "error": "缺 threadId"}
+                    await r.ensure_app()
+                    res = await r.app.call("thread/read", {"threadId": tid}, timeout=30)
+                    return {"ok": True, "threadId": tid, "result": res}
+                return self._send(200, self._run(_info(), 60))
+            if u.path == "/thread/compact":
+                async def _compact():
+                    tid = str(body.get("threadId") or "") or (r.thread_id or "")
+                    if not tid:
+                        return {"ok": False, "error": "缺 threadId"}
+                    return await r.thread_compact(tid, reason=str(body.get("reason") or "manual"))
+                return self._send(200, self._run(_compact(), 240))
+            if u.path == "/thread/steer":
+                async def _steer():
+                    text = str(body.get("text") or "").strip()
+                    if not text:
+                        return {"ok": False, "error": "缺 text"}
+                    return await r.steer_running_turn(text, tag=str(body.get("tag") or "manual"))
+                return self._send(200, self._run(_steer(), 60))
+            if u.path == "/thread/delete":
+                async def _delete():
+                    tid = str(body.get("threadId") or "")
+                    if not tid:
+                        return {"ok": False, "error": "缺 threadId"}
+                    await r.ensure_app()
+                    renewed = False
+                    if tid == r.thread_id:
+                        # 删的是当前这条：先停会话再换新的，否则语音那头挂在一条已经不存在的线程上
+                        if r.session_state != "idle":
+                            await r.session_stop("thread-delete")
+                        r.thread_id = None
+                        r._thread_cleared = True
+                        renewed = True
+                    await r.app.call("thread/delete", {"threadId": tid}, timeout=30)
+                    if renewed:
+                        await r.ensure_app()
+                        r.save_state()
+                    r.log("thread_deleted", threadId=tid[-12:], renewed=renewed)
+                    return {"ok": True, "threadId": r.thread_id}
+                return self._send(200, self._run(_delete(), 120))
+            if u.path == "/thread/rename":
+                async def _rename():
+                    tid = str(body.get("threadId") or "") or (r.thread_id or "")
+                    name = str(body.get("name") or "").strip()[:80]
+                    if not tid or not name:
+                        return {"ok": False, "error": "缺 threadId 或 name"}
+                    await r.ensure_app()
+                    # ⚠ 方法名是 thread/name/set —— rename / setTitle / update 都不存在（2026-09-16 实探）
+                    await r.app.call("thread/name/set", {"threadId": tid, "name": name}, timeout=30)
+                    r.log("thread_renamed", threadId=tid[-12:], name=name[:40])
+                    return {"ok": True, "name": name}
+                return self._send(200, self._run(_rename(), 60))
             if u.path == "/session/start":
                 return self._send(200, self._run(r.session_start(str(body.get("reason") or "manual"), body.get("profile")), 120))
             if u.path == "/session/stop":

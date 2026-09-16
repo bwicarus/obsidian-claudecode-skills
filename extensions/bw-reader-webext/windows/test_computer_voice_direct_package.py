@@ -22,6 +22,30 @@ sys.modules[SPEC.name] = package
 SPEC.loader.exec_module(package)
 
 
+
+def _fake_tools_list() -> list[dict]:
+    """假 MCP 的 tools/list —— **从 MCP_TOOL_SURFACE 生成，不要手抄**。
+
+    校验代码锁死了顺序和内容，而这份清单原来是手写的第二副本，
+    于是工具一加它就漂（2026-09-16 一次红了 6 个用例，全是同一句合同错）。
+    reader_command 保留完整 schema：下游断言要按名字取它检查 oneOf 分支。
+    """
+    command_schema = {
+        "oneOf": [
+            {"required": ["command"]},
+            {"required": ["card"],
+             "properties": {"card": {"required": ["kind", "title", "data"]}}},
+        ]
+    }
+    out: list[dict] = []
+    for name in package.MCP_TOOL_SURFACE:
+        if name == "reader_command":
+            out.append({"name": name, "inputSchema": command_schema})
+        else:
+            out.append({"name": name})
+    return out
+
+
 class FakeRunner:
     def __init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
@@ -75,60 +99,7 @@ class FakeStdioRunner:
                 "jsonrpc": "2.0",
                 "id": 2,
                 "result": {
-                    "tools": [
-                        {"name": "reader_context_snapshot"},
-                        {"name": "reader_capability_guide"},
-                        {"name": "reader_visual_image"},
-                        {"name": "reader_camera_snap"},
-                        {"name": "reader_browser_control"},
-                        {"name": "reader_highlight_range"},
-                        {"name": "reader_web_note"},
-                        {"name": "reader_web_highlight"},
-                        {"name": "reader_mark_vocab"},
-                        {"name": "reader_make_note"},
-                        {"name": "reader_note_edit"},
-                        {"name": "reader_page_card_edit"},
-                        {"name": "reader_page_card_delete"},
-                        {"name": "reader_learning_card_edit"},
-                        {"name": "reader_learning_card_delete"},
-                        {"name": "reader_note_create"},
-                        {"name": "reader_paper_start"},
-                        {"name": "reader_undo_last"},
-                        {"name": "reader_anki_draft"},
-                        {"name": "reader_card"},
-                        {
-                            "name": "reader_command",
-                            "inputSchema": {
-                                "oneOf": [
-                                    {"required": ["command"]},
-                                    {
-                                        "required": ["card"],
-                                        "properties": {
-                                            "card": {
-                                                "required": [
-                                                    "kind",
-                                                    "title",
-                                                    "data",
-                                                ]
-                                            }
-                                        },
-                                    },
-                                ]
-                            },
-                        },
-                        {"name": "reader_word_cards"},
-                        {"name": "reader_page_cards"},
-                        {"name": "reader_page_card_read"},
-                        {"name": "reader_learning_cards"},
-                        {"name": "reader_learning_card_read"},
-                        {"name": "reader_review_current_card"},
-                        {"name": "reader_notes"},
-                        {"name": "reader_toc"},
-                        {"name": "reader_lookup_word"},
-                        {"name": "reader_page_text"},
-                        {"name": "reader_search"},
-                        {"name": "reader_highlights"},
-                    ],
+                    "tools": _fake_tools_list(),
                 },
             },
             {
@@ -138,10 +109,13 @@ class FakeStdioRunner:
                     "content": [
                         {
                             "type": "text",
+                            # 照真服务器 2026-09-15 之后的形状回：模型快照**不再带 mcp 结构块**，
+                            # 连接健康折成一行自然语言 system。夹具当时没跟上，
+                            # 一直被「工具合同」那句先失败挡着，看不见这处已经漂了
                             "text": json.dumps(
                                 {
                                     **snapshot,
-                                    "mcp": {"instanceId": "fake"},
+                                    "system": "阅读器已连接；当前没有选中内容。",
                                 },
                                 separators=(",", ":"),
                             ),
@@ -228,6 +202,9 @@ class DirectPackageTests(unittest.TestCase):
                 {
                     "schema": "reader-context-snapshot/1",
                     "revision": 1,
+                    # 2026-09-15 起模型快照把连接健康折成一行自然语言 system，
+                    # 校验要求它非空。夹具当时没跟上，一直被「工具合同」那句错误挡着看不见
+                    "system": "阅读器已连接；当前没有选中内容。",
                 }
             ),
             encoding="utf-8",
@@ -1131,7 +1108,7 @@ class DirectPackageTests(unittest.TestCase):
             ]
             with self.assertRaisesRegex(
                 package.PackageError,
-            "精确 33 工具合同",
+            f"精确 {len(package.MCP_TOOL_SURFACE)} 工具合同",
             ):
                 package._validate_mcp_smoke_output(
                     self._stdio_result(responses)
@@ -1146,7 +1123,7 @@ class DirectPackageTests(unittest.TestCase):
                     item["name"] = "reader_highlight_text"
             with self.assertRaisesRegex(
                 package.PackageError,
-            "精确 33 工具合同",
+            f"精确 {len(package.MCP_TOOL_SURFACE)} 工具合同",
             ):
                 package._validate_mcp_smoke_output(
                     self._stdio_result(responses)

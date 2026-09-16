@@ -377,6 +377,34 @@ def approve(message: dict) -> dict | None:
     return {"decision": yes_no[0] if allowed else yes_no[1]}
 
 
+VOICE_CORE_URL = "http://127.0.0.1:43131"
+
+
+def voice_core_turn(text: str, *, timeout: float = 20.0) -> dict | None:
+    """语音核心（自建语音会话的后台线程）在跑就把通知交给它起一轮：它有 voice_* 工具，
+    需要提醒的自己会开口、说完自己挂。不可达返回 None，调用方走旧路。
+    2026-09-14 用户：「提示板的推送塞进去而不是触发一轮，当然需要提醒的那些就需要直接开始一轮」——
+    这里就是"需要提醒的那些"。"""
+    import urllib.request
+    import urllib.error
+    try:
+        status = json.loads(urllib.request.urlopen(VOICE_CORE_URL + "/status", timeout=3).read())
+    except Exception:
+        return None
+    req = urllib.request.Request(VOICE_CORE_URL + "/turn",
+                                 data=json.dumps({"text": text}, ensure_ascii=False).encode("utf-8"),
+                                 method="POST", headers={"Content-Type": "application/json"})
+    try:
+        result = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+    except urllib.error.HTTPError as error:
+        return {"ok": False, "via": "voice-core", "detail": "HTTP %s" % error.code, "completed": False}
+    except Exception as error:
+        return {"ok": False, "via": "voice-core", "detail": str(error), "completed": False}
+    return {"ok": bool(result.get("ok")), "via": "voice-core",
+            "threadId": (status.get("runner") or {}).get("threadId"),
+            "completed": bool(result.get("ok")), "commands": [], "skipped": []}
+
+
 def send(text: str, *, thread_id: str | None = None,
          entry: list[str] | None = None,
          turn_timeout: float = TURN_TIMEOUT_SECONDS) -> dict:
@@ -387,6 +415,21 @@ def send(text: str, *, thread_id: str | None = None,
     关了"是同一个毛病。所以这里等 `turn/completed`，并把途中看到的命令执行
     记下来 —— 那才是"它到底做了没有"的证据。
     """
+    # 2026-09-14 用户拍板：桌面 Codex 语音入口这条通路删除。语音核心在跑时它就是后台，
+    # 自己会用 voice_session_start 开语音——那条"让桌面 Codex 打开语音"的运维指令彻底作废，
+    # 直接丢弃（返回 no-op），绝不再拉起桌面 Codex、也不再按 F24。其余通知一律交给语音核心。
+    import urllib.request as _u
+    core_up = False
+    try:
+        _u.urlopen(VOICE_CORE_URL + "/status", timeout=3).read(); core_up = True
+    except Exception:
+        core_up = False
+    if core_up:
+        if text.startswith(OPERATION_SILENCE_LINE):
+            return {"ok": True, "via": "voice-core", "dropped": "voice-entry-obsolete", "completed": True, "commands": [], "skipped": []}
+        via_core = voice_core_turn(text)
+        if via_core is not None:
+            return via_core
     with AppServer(entry) as server:
         server.request("initialize", {
             "clientInfo": {"name": "bw-reader-voice-entry", "version": "1"},

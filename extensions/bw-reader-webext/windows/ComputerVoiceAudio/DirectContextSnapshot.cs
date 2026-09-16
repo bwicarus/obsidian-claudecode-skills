@@ -156,6 +156,16 @@ internal sealed class FileDirectSnapshotContextAdapter :
     private JsonObject? _activeReading;
     private JsonObject _selection = UnknownSelection(
         "snapshot-not-received");
+    /// <summary>chip 条上"选过的文字"的寿命：松开之后 40 秒（用户 2026-09-15 定的规格）。
+    /// 前端 reader.src/26-figures.js 的 FOCUS_SEL_TTL_MS 同一个数；这里再算一遍，是因为
+    /// 对面的计时器坏过一次（判"还按着"问错了信源），而桥手里有算这件事需要的全部事实。</summary>
+    private const long TextChipTtlMs = 40_000;
+
+    /// 当前那条"选过的文字"是什么、什么时候第一次出现的。文字没变就不重新计时 ——
+    /// 宿主每隔几秒会把同一份 chip 再报一次。
+    private string? _textChipText;
+    private long _textChipSince;
+
     /// <summary>**长按选中的卡片/图/圈画**的寿命：5 分钟。它们是要攒着一起用的，
     /// 跟看一眼就用掉的文字选区不是一回事（用户 2026-09-15 澄清原始设计）。
     /// 前端 context-selection-registry.js 的 expireMs 同一个数。</summary>
@@ -284,6 +294,33 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     _attachments = JsonNode.Parse(
                         attachmentList.GetRawText()) as JsonArray;
                 }
+                    // 记住这条"选过的文字"是什么时候第一次出现的（同一段文字反复上报不重新计时）。
+                    string? chipText = null;
+                    if (_attachments is not null)
+                    {
+                        foreach (JsonNode? node in _attachments)
+                        {
+                            if (
+                                node is JsonObject entry
+                                && StringValue(entry["kind"]) == "text"
+                                && StringValue(entry["text"]) is string entryText
+                            )
+                            {
+                                chipText = entryText;
+                                break;
+                            }
+                        }
+                    }
+                    if (chipText is null)
+                    {
+                        _textChipText = null;
+                        _textChipSince = 0;
+                    }
+                    else if (!string.Equals(chipText, _textChipText, StringComparison.Ordinal))
+                    {
+                        _textChipText = chipText;
+                        _textChipSince = _utcNow().ToUnixTimeMilliseconds();
+                    }
                 JsonObject next = new()
                 {
                     ["kind"] = activeReading.Kind,
@@ -1862,7 +1899,27 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     fromChips.Add(entry.DeepClone());
                 }
             }
-            // 活着的文字选区也算一项：用户手指还按在那段字上，而它未必进了 chip 条。
+// 宿主说没有活的文字选区时，chip 上那条"选过的文字"按 40 秒到期 ——
+            // 规则与前端一致；对面的计时器坏了也不至于让模型一直攥着过期清单。
+            if (
+                StringValue(_selection["state"]) != "active"
+                && _textChipSince > 0
+                && _utcNow().ToUnixTimeMilliseconds() - _textChipSince > TextChipTtlMs
+            )
+            {
+                for (int index = fromChips.Count - 1; index >= 0; index--)
+                {
+                    if (
+                        fromChips[index] is JsonObject chip
+                        && StringValue(chip["kind"]) == "text"
+                        && chip["live"] is null
+                    )
+                    {
+                        fromChips.RemoveAt(index);
+                    }
+                }
+            }
+                        // 活着的文字选区也算一项：用户手指还按在那段字上，而它未必进了 chip 条。
             // 不补的话快照会同时说"选中项里没有文字"和"选区是 active"，
             // 模型只能自己编理由调和（2026-09-15 实录：它因此跟用户争论起来）。
             if (

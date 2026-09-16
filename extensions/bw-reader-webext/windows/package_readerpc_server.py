@@ -136,6 +136,24 @@ RUNTIME_SOURCES = {
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "skill_kit" / "bw_flow_runtime.js"
     ),
+    # 自建 Codex 语音会话运行器（2026-09-13）：ReaderPC「语音 CLI」分页按 runner.json 拉起它；走稳定路径。
+    "readerpc-runtime/voice_core_mcp.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "voice_core_mcp.py"
+    ),
+    "readerpc-runtime/voice_cli_runner.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "voice_cli_runner.py"
+    ),
+    # 自建定时任务（2026-09-14）：flow 执行器 + 调度；语音核心按稳定路径 import bw_scheduler
+    "readerpc-runtime/bw_flow_runner.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "bw_flow_runner.py"
+    ),
+    "readerpc-runtime/bw_scheduler.py": (
+        PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
+        / "computer-voice-desktop" / "bw_scheduler.py"
+    ),
     "readerpc-runtime/codex_restart.py": (
         PROJECT_ROOT / "extensions" / "bw-reader-webext" / "windows"
         / "computer-voice-desktop" / "codex_restart.py"
@@ -385,6 +403,15 @@ def build_candidate(version: str) -> Path:
             "pystray._win32",
             "--collect-submodules",
             "pystray",
+            # 网页界面（2026-09-13）：静态页随 exe 走 _MEIPASS/readerpc_ui；WebView2 窗口靠 pywebview（pythonnet + WebView2 DLL）
+            "--add-data",
+            f"{DESKTOP_SOURCE / 'readerpc_ui'}{os.pathsep}readerpc_ui",
+            "--collect-all",
+            "webview",
+            "--collect-all",
+            "clr_loader",
+            "--collect-all",
+            "pythonnet",
             str(LAUNCHER_SOURCE),
         ]
         result = subprocess.run(
@@ -597,6 +624,12 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             "voice_conversation_sync.py",
             # 重启 Codex 的标准做法（在通话就拒绝、等真热起来）
             "codex_restart.py",
+            # 自建语音会话运行器
+            "voice_cli_runner.py",
+            # 语音核心的 MCP 服务器（后台模型自己开口用）
+            "voice_core_mcp.py",
+            # 自建定时任务：执行器 + 调度
+            "bw_flow_runner.py", "bw_scheduler.py",
         ):
             (root.parent / stable_name).write_bytes(
                 (release / "readerpc-runtime" / stable_name).read_bytes()

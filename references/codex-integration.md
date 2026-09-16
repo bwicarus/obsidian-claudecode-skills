@@ -265,3 +265,52 @@ codex exec --skip-git-repo-check --color never -s read-only \
 
 ### ⚠ 操作坑
 `codex mcp get` 等**交互子命令**在无 TTY 环境会卡在 `Reading additional input from stdin...`,Ctrl+C 后会**污染整个工具执行层**(后续所有 Bash/Read/Glob 返回空,只能重开 session)。**调 codex 一律 `< /dev/null` + `timeout` 双保险**;`codex exec` 传了 prompt arg 则不读 stdin,安全。
+
+## app-server 方法实探（2026-09-16，160 个方法逐条试出来的）
+
+问的是「有没有比 `thread/inject_items` 更好用的注入通道」。结论：**没有**。
+下面每一条都在真机上跑过，不是看名字猜的 —— 名字最像的那几个恰恰都不能用。
+
+### 能用，已经接进来
+
+| 方法 | 用途 | 接在哪 |
+|---|---|---|
+| `thread/items/list` | 按 threadId 精确取内容，**带 turnId** | `voice_trace._text_lane` 优先走它，取不到才退回啃 `rollout-*.jsonl` |
+| `thread/read` | 线程的 model / reasoningEffort / preview | 链路页对话行的副标题 |
+| `thread/compact/start` | **就地把历史折成摘要**，对话身份不变 | `/thread/compact` 端点 + 闲时自动压（`threadAutoCompact`，阈值 `threadCompactItems`） |
+| `thread/name/set` | 重命名（`rename` / `setTitle` / `update` 都不存在） | `/thread/rename` |
+| `thread/delete` | 删除 | `/thread/delete`，删当前那条会先停会话再换新线程 |
+| `turn/steer` | 把内容挂进**正在跑的那一轮** | `/thread/steer` + `_ctx_inject_backend`，默认关，见下 |
+
+`thread/compact/start` 是「线程只增不减」的正解。在它之前只能「长到一定程度就开新对话」，
+代价是上下文整个丢掉；压缩保住对话身份，实测能把 items 压到个位数。
+
+### 试过不能用（省得下次再试一遍）
+
+- **`thread/goal/set` / `goal/get` / `goal/clear`** —— 名字最像「可替换的状态槽」，实际建不出来：
+  set 报 `cannot update goal for thread …: no goal exists`，`thread/start` 里带 `goal` 被静默忽略
+  （`thread/start` 不拒绝未知字段），`goal/get` 恒为 `null`，模型也从来看不见。
+- **`thread/metadata/update`** —— `name` / `tags` / `title` / `custom` / `extra` / `archived` / `goal`
+  全部被拒为 `must include at least one field`；且元数据本来也不进模型上下文。
+- **`thread/queue/add`** —— 内容**确实到得了模型**，但语义跟我们要的正好相反：
+  ① 一轮只消费队首**一条**（连排三条状态，后两条直接蒸发）；
+  ② 空闲时排队会**自己起一轮**（白烧一轮）；
+  ③ `thread/queue/delete` 返回 `deleted:false`，撤不回来。
+  传「最新选中」要的是后盖前，它是先进先出，比现有的 `inject_items` 退步。
+  它唯一合适的位置是「让文字模型自己跑一件事」（通知/提醒），那种场合本来就该独立成一轮。
+
+### `turn/steer`：唯一的真空，但默认关着
+
+`inject_items` 是往线程上追加，**已经开跑的那一轮不会回头读** —— 所以「后台正在干活时
+用户改了选中」今天只能等它跑完再补。`turn/steer` 能把内容挂进在跑的轮
+（实测以 `userMessage` 落在该轮里，下一轮也记得）。
+
+⚠ 但它有概率把那一轮**打哑**：一条回答都不产出。在语音里就是「AI 不理我」，比不插还糟。
+试过换措辞（被动状态通报 vs 祈使句）—— **不是措辞的问题**，两种都出现过哑和不哑。
+所以 `turnSteerEnabled` 默认 `False`，端点留着可手动验证。要开之前先把打哑的条件找出来。
+
+### 参数表怎么白嫖
+
+app-server 的 serde 报错会把缺的字段名说出来，比翻文档快：
+传个空 params 过去，`Invalid request: missing field \`expectedTurnId\`` 就是答案。
+方法名写错时它会把**全部 160 个合法方法名**列在 `unknown variant` 错误里 —— 这份清单就是这么来的。

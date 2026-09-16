@@ -75,9 +75,11 @@ from voice_history_sidebar_sync import (
 # （CaptureBoundHistorySynchronizer）信 Codex 的线程指针、按书绑定、激活基线——三条
 # 线程一整天 0 发布，被整体换掉；模块留着只为 app-server 客户端和投影函数。
 from voice_conversation_sync import VoiceConversationSync
+from voice_cli_tab import VoiceCliTab, launch_runner as launch_voice_core, read_runner_config as read_voice_core_config
+from readerpc_api import ReaderPCApi, open_ui_window
 
 
-APP_VERSION = "0.1.192"
+APP_VERSION = "0.1.203"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 # 服务意图走独立文件(C# 启动时读取;keepalive/config/runtime-status
@@ -1250,6 +1252,7 @@ class ReaderPCWindow:
         self._save_current_preferences()
 
     def _restart_voice_with_intent(self, busy: str, done: str) -> None:
+        _boot_log("按意图重启 Direct 服务：" + busy)
         """模式类开关共用:停旧代际 → 按当前意图重启(C# 只在启动时读意图文件)。"""
         if self.busy or self.closing:
             return
@@ -1514,6 +1517,8 @@ class ReaderPCWindow:
         tabs.add(tab_channel, text="通知通道")
         tabs.add(tab_service, text="服务")
         tabs.add(tab_display, text="显示与启动")
+        # 自建 Codex 语音会话（不经桌面 Codex）的控制台：运行器/设置/终端/额度。2026-09-13。
+        self.voice_cli_tab = VoiceCliTab(tabs, outer.winfo_toplevel())
 
         server_row = ttk.Frame(tab_service)
         server_row.pack(fill="x", pady=(0, 2))
@@ -1686,7 +1691,8 @@ class ReaderPCWindow:
             _tray_image(),
             PRODUCT_NAME,
             menu=pystray.Menu(
-                pystray.MenuItem("显示主窗口", self._tray_show, default=True),
+                pystray.MenuItem("显示主窗口", self._tray_open_ui, default=True),
+                pystray.MenuItem("旧版窗口", self._tray_show),
                 pystray.MenuItem("启动 PC 预处理", self._tray_start_pc),
                 pystray.MenuItem("停止 PC 预处理", self._tray_stop_pc),
                 pystray.Menu.SEPARATOR,
@@ -1702,6 +1708,30 @@ class ReaderPCWindow:
         root.after(1500, self._ensure_board_cards)
         root.after(9_000, self._voice_auto_close_tick)
         root.after(800, self._ensure_voice_online)
+        # ── 网页界面（2026-09-13 用户：「现在这个真的太丑了」）──
+        # 主界面改成 WebView2 里的网页：本进程起 127.0.0.1:43132 的界面服务器（静态页 + /api + 语音核心代理），
+        # 托盘"显示主窗口"= 开一个 `--ui` 子进程。tk 根只当调度器与回退窗口，启动即隐藏。
+        self.ui_labels: dict[str, Any] = {}
+        self.ui_process: subprocess.Popen | None = None
+        self.voice_core_last_ensure = 0.0
+        try:
+            self.ui_api = ReaderPCApi(
+                window=self, local_root=self.readerpc_paths.local_root,
+                bridge_runtime=self.bridge_paths.root / "runtime",
+                status_file=self.readerpc_paths.status_file,
+                preferences_file=self.readerpc_paths.preferences_file,
+                log_file=self.readerpc_paths.local_root / "readerpc-server.log",
+                version=APP_VERSION, get_labels=lambda: dict(self.ui_labels),
+                get_prefs=self._ui_prefs, set_prefs=self._ui_set_prefs, run_action=self._ui_action,
+            )
+            self.ui_url = self.ui_api.start()
+        except Exception as exc:
+            self.ui_api = None
+            self.ui_url = ""
+            _boot_log(f"[warn] 界面服务器没起来: {exc}")
+        # 启动不自动弹窗（用户可能在全屏玩游戏）：窗口只在托盘点「显示主窗口」时开。
+        root.after(300, self.hide_window)
+        root.after(1200, self._ensure_voice_core_online)
 
     def _service_row(
         self,
@@ -1724,6 +1754,139 @@ class ReaderPCWindow:
         detail = ttk.Label(frame, text=subtitle, foreground="#6b7280", wraplength=520)
         detail.pack(anchor="w", pady=(5, 0))
         return status, detail, button
+
+    # ── 网页界面 ─────────────────────────────────────────
+    def _tray_open_ui(self, _icon=None, _item=None) -> None:
+        self.root.after(0, self.open_ui)
+
+    def open_ui(self) -> None:
+        """开（或前置）网页界面窗口：`<本程序> --ui <url>` 子进程。"""
+        if not getattr(self, "ui_url", ""):
+            self.show_window()
+            return
+        proc = self.ui_process
+        if proc is not None and proc.poll() is None:
+            return  # 已开着一个窗口
+        if getattr(sys, "frozen", False):
+            command = [sys.executable, "--ui", self.ui_url]
+        else:
+            command = [sys.executable, str(Path(__file__).resolve()), "--ui", self.ui_url]
+        flags = 0
+        if os.name == "nt":
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            self.ui_process = subprocess.Popen(command, creationflags=flags)
+        except Exception as exc:
+            _boot_log(f"[warn] 开界面窗口失败，退回旧版窗口: {exc}")
+            self.show_window()
+
+    def _ui_prefs(self) -> dict[str, Any]:
+        prefs = dict(load_preferences(self.readerpc_paths.preferences_file))
+        prefs["voiceCoreManaged"] = self._voice_core_managed()
+        return prefs
+
+    def _voice_core_managed(self) -> bool:
+        try:
+            return json.loads((self.readerpc_paths.local_root / "readerpc-voice-core.json").read_text("utf-8")).get("managed") is True
+        except Exception:
+            return False
+
+    def _set_voice_core_managed(self, on: bool) -> None:
+        _atomic_json(self.readerpc_paths.local_root / "readerpc-voice-core.json", {"contract": "readerpc-voice-core/1", "managed": bool(on)})
+
+    def _ui_set_prefs(self, patch: dict[str, Any]) -> dict[str, Any]:
+        """从界面线程来的设置改动：投递到 tk 线程套用现有的 on_* 处理器，等它做完再回。"""
+        done = threading.Event()
+        result: dict[str, Any] = {"ok": True, "applied": []}
+        handlers: dict[str, tuple[Any, Any]] = {
+            "keepPcPreprocessingOnline": (self.keep_pc_online, self.on_keep_pc_changed),
+            "voiceEnabled": (self.voice_enabled, self.on_voice_enabled_changed),
+            "snapshotViewerHidden": (self.snapshot_hidden, self.on_snapshot_hidden_changed),
+            "hideVoiceOrb": (self.hide_voice_orb, self.on_hide_orb_changed),
+            "autoStartOnBoot": (self.auto_start, self.on_auto_start_changed),
+            "manageServerServices": (self.manage_server_services, self.on_manage_server_changed),
+        }
+
+        def apply() -> None:
+            try:
+                for key, value in patch.items():
+                    if key == "voiceCoreManaged":
+                        self._set_voice_core_managed(bool(value))
+                        result["applied"].append(key)
+                        continue
+                    pair = handlers.get(key)
+                    if pair is None:
+                        continue
+                    var, handler = pair
+                    var.set(bool(value))
+                    handler()
+                    result["applied"].append(key)
+                result["msg"] = "已保存：" + ", ".join(result["applied"]) if result["applied"] else "没有可应用的项"
+            except Exception as exc:
+                result.update(ok=False, msg=f"{type(exc).__name__}: {exc}")
+            finally:
+                done.set()
+        self.root.after(0, apply)
+        done.wait(8)
+        return result
+
+    def _ui_action(self, name: str) -> dict[str, Any]:
+        if name == "voice_core_start":
+            ok, msg = launch_voice_core(read_voice_core_config())
+            return {"ok": ok, "msg": msg}
+        done = threading.Event()
+        result: dict[str, Any] = {"ok": True, "msg": "完成"}
+
+        def run() -> None:
+            try:
+                if name == "toggle_pc":
+                    self.toggle_pc()
+                elif name == "toggle_voice":
+                    self.toggle_voice()
+                elif name == "open_legacy_window":
+                    self.show_window()
+                elif name == "open_legacy_settings":
+                    self.open_legacy_voice_settings()
+                elif name == "exit":
+                    self.root.after(200, self.request_exit)
+                    result["msg"] = "正在退出并停止全部服务"
+                elif name.startswith("restart_service:"):
+                    target = name.split(":", 1)[1]
+                    for controller in self.server_services:
+                        if controller.spec.name == target:
+                            controller.stop()
+                            status = controller.start()
+                            result["msg"] = f"{controller.spec.label} 已重启（可达 {status.reachable}）"
+                            break
+                    else:
+                        result.update(ok=False, msg=f"没有叫 {target} 的受管服务")
+                else:
+                    result.update(ok=False, msg=f"未知动作 {name}")
+            except Exception as exc:
+                result.update(ok=False, msg=f"{type(exc).__name__}: {exc}")
+            finally:
+                done.set()
+        self.root.after(0, run)
+        done.wait(30)
+        return result
+
+    def _ensure_voice_core_online(self) -> None:
+        """托管语音核心：偏好打开时，43131 不可达就按 runner.json 拉起。每 5 秒看一次。"""
+        if self.closed:
+            return
+        try:
+            if self._voice_core_managed() and time.monotonic() - self.voice_core_last_ensure > 20:
+                import socket
+                with socket.socket() as probe:
+                    probe.settimeout(0.5)
+                    reachable = probe.connect_ex(("127.0.0.1", 43131)) == 0
+                if not reachable:
+                    self.voice_core_last_ensure = time.monotonic()
+                    threading.Thread(target=lambda: launch_voice_core(read_voice_core_config()), name="voice-core-launch", daemon=True).start()
+        except Exception as exc:
+            _boot_log(f"[warn] 语音核心保活出错: {exc}")
+        finally:
+            self.root.after(5_000, self._ensure_voice_core_online)
 
     def _run_tray(self) -> None:
         try:
@@ -1860,6 +2023,14 @@ class ReaderPCWindow:
         history_thread = getattr(self, "history_thread", None)
         if history_thread is not None and history_thread.is_alive():
             history_thread.join(timeout=3)
+        try:
+            if getattr(self, "ui_api", None) is not None:
+                self.ui_api.stop()
+            proc = getattr(self, "ui_process", None)
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+        except Exception:
+            pass
         try:
             self.tray.stop()
         finally:
@@ -2096,6 +2267,13 @@ class ReaderPCWindow:
     def _start_voice_task(self) -> None:
         if self.busy or self.closing:
             return
+        try:
+            _status = self._voice_status()
+            _boot_log("重拉 Direct 服务：service_online=%s reason=%s pid=%s streak=%s" % (
+                getattr(_status, "service_online", "?"), getattr(_status, "reason", "?"),
+                getattr(_status, "pid", "?"), self.voice_fail_streak))
+        except Exception as exc:  # 只是日志
+            _boot_log("重拉 Direct 服务（状态读取失败: %s）" % exc)
         self.last_voice_start_attempt = time.monotonic()
         self.voice_recovery_in_progress = True
         self.voice_start_in_progress = True
@@ -2467,6 +2645,13 @@ class ReaderPCWindow:
         判据只看绑定本身：`invalidAtMs` 有值（推送连不上时置的）或文件不在。
         通道好着的时候一次管道 I/O 都不做。
         """
+        # 2026-09-14 用户拍板：桌面 Codex 通知通道这条通路删除。语音核心在跑（voice-backend-external.json 在）
+        # 时，后台就是语音核心，不存在"桌面 Codex 的通知通道"要修——别再枚举/重建它的命名管道。
+        try:
+            if (self.bridge_paths.runtime_status.parent / "voice-backend-external.json").exists():
+                return
+        except Exception:
+            pass
         if getattr(self, "_channel_heal_busy", False):
             return
         now = time.monotonic()
@@ -2797,6 +2982,12 @@ class ReaderPCWindow:
                 )
             self.pc_detail.configure(text=details)
             self.pc_button.configure(text="停止" if pc.running else "启动")
+            self.ui_labels = {
+                "voice": voice_label, "voiceColor": {"#167347": "green", "#b26a00": "amber"}.get(voice_color, "grey"),
+                "voiceDetail": self.voice_detail.cget("text"),
+                "context": context_label, "contextFresh": bool(context.fresh), "contextDetail": context_detail,
+                "pc": pc.state_label, "pcDetail": details, "pcRunning": bool(pc.running),
+            }
 
             # 带外退出请求：没有顶层窗口时这是唯一能被叫停的通道。
             # 先删文件再退出 —— 否则下一代会把同一条请求再消费一次。
@@ -3295,6 +3486,10 @@ def main(argv: list[str] | None = None) -> int:
         if sys.stdout is not None:
             print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["ok"] else 1
+    if arguments[:1] == ["--ui"]:
+        # 网页界面窗口（WebView2）。单独一个进程，主进程不碰 webview 的事件循环。
+        url = arguments[1] if len(arguments) > 1 else "http://127.0.0.1:43132/"
+        return open_ui_window(url, PRODUCT_NAME)
     if arguments:
         return 2
     # 单实例：**接管**而不是退让。先清掉同角色旧进程，再拿互斥体。

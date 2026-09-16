@@ -2333,7 +2333,14 @@ def _install_verified_payload(
             "mcpProcessesStopped": mcp_processes_stopped,
             # 停了别人的 MCP 子进程就得把它们的主人叫醒，否则语音那头半瘫（见 _restart_voice_runner）
             "voiceRunnerRestarted": _restart_voice_runner(),
-            "skillToolLint": lint_codex_skill_tool_names(codex_config_path.parent),
+            # 没给 codex 配置路径时不体检 skill 工具名 —— 之前直接取 .parent，
+            # 于是整个安装抛 'NoneType' has no attribute 'parent' 然后回滚，
+            # 报错里完全看不出跟 codex 配置有关
+            "skillToolLint": (
+                lint_codex_skill_tool_names(codex_config_path.parent)
+                if codex_config_path is not None
+                else {"skipped": "没有 codex 配置路径"}
+            ),
             "codexConfigMigration": {
                 "changed": codex_migration.changed,
                 "reason": codex_migration.reason,

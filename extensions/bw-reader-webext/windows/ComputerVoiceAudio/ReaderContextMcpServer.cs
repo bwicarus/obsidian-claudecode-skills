@@ -577,7 +577,92 @@ internal sealed class ReaderContextMcpServer
         return true;
     }
 
-    private JsonObject BuildToolList()
+    /// <summary>冷工具：4 天 154 次调用里一次都没被调过（runtime/mcp-tool-calls.jsonl）。
+    /// 它们仍然挂着、随时可直接调，只是不再常驻完整 schema —— 工具表每一轮都随请求发，
+    /// 而冷的那批偏偏 schema 最大（reader_learning_card_edit 一个就 6,268 字）。
+    /// 调用时把真实参数放进 args，服务端拆开再走原路；真 schema 由 reader_capability_guide 返回。</summary>
+    /// ⚠ reader_undo_last / reader_make_note / reader_paper_start **不在**这里：自检
+    /// direct-reader-output-typed-card-command-and-disclosure-are-exact 钉着它们折叠前的样子
+    /// （2026-09-16 二分定位）。要折叠它们得先改那条断言 —— 断言本身是对的，
+    /// 它守的是"输出型指令与披露必须逐字一致"，不该为了省字放松。
+    private static readonly HashSet<string> ColdToolNames = new(StringComparer.Ordinal)
+    {
+        "reader_learning_card_edit",
+        "reader_learning_card_read",
+        "reader_learning_card_delete",
+        "reader_web_highlight",
+        "reader_web_note",
+        "reader_browser_control",
+        "reader_highlights",
+        "reader_notes",
+        "reader_note_create",
+        "reader_note_edit",
+        "reader_search",
+        "reader_camera_snap",
+        "reader_review_answer",
+        "reader_review_current_card",
+        "reader_word_cards",
+        "reader_mark_vocab",
+        "reader_lookup_word",
+        "reader_toc",
+        "kj_page_submit",
+    };
+
+    /// <summary>折叠后被收起来的真 schema，按工具名留着给能力指南用。</summary>
+    private static readonly Dictionary<string, JsonObject> ColdToolSchemas = new(StringComparer.Ordinal);
+
+    /// <summary>折叠前的完整说明，按工具名留着 —— 指南要把它和 schema 一起交出去。</summary>
+    private static readonly Dictionary<string, string> ColdToolDescriptions = new(StringComparer.Ordinal);
+
+    /// <summary>把冷工具折成"名字 + 一行 + args"。只在 tools/list 的出口做一次，
+    /// 不去改那 36 个手写字面量 —— 改动集中在一处，出错也只在一处。</summary>
+    private static void FoldColdTools(JsonArray tools)
+    {
+        foreach (JsonNode? node in tools)
+        {
+            if (node is not JsonObject tool)
+            {
+                continue;
+            }
+            string name = StringValue(tool["name"]) ?? "";
+            if (!ColdToolNames.Contains(name))
+            {
+                continue;
+            }
+            if (tool["inputSchema"] is JsonObject schema && !ColdToolSchemas.ContainsKey(name))
+            {
+                ColdToolSchemas[name] = (JsonObject)schema.DeepClone();
+            }
+            string full = StringValue(tool["description"]) ?? "";
+            ColdToolDescriptions.TryAdd(name, full);
+            int stop = full.IndexOf(". ", StringComparison.Ordinal);
+            string first = stop > 0 && stop < 200 ? full[..(stop + 1)] : Shorten(full, 160);
+            tool["description"] = first
+                + " Parameters are not inlined: call reader_capability_guide with tool=\""
+                + name + "\" to get the real schema, then pass that object as args.";
+            tool["inputSchema"] = new JsonObject
+            {
+                ["type"] = "object",
+                ["additionalProperties"] = false,
+                ["required"] = new JsonArray("args"),
+                ["properties"] = new JsonObject
+                {
+                    ["args"] = new JsonObject
+                    {
+                        ["type"] = "object",
+                        ["description"] =
+                            "The real argument object for this tool, exactly as "
+                            + "reader_capability_guide(tool=…) describes it.",
+                    },
+                },
+            };
+        }
+    }
+
+    private static string Shorten(string text, int limit) =>
+        text.Length <= limit ? text : text[..limit] + "…";
+
+        private JsonObject BuildToolList()
     {
         JsonArray tools =
         [
@@ -2262,6 +2347,7 @@ internal sealed class ReaderContextMcpServer
             },
         });
         }
+        FoldColdTools(tools);   // 冷工具折成"名字 + 一行 + args"（见 ColdToolNames）
         return new JsonObject
         {
             ["tools"] = tools,
@@ -3580,6 +3666,16 @@ internal sealed class ReaderContextMcpServer
             ? argumentValue
             : default;
         _callSequence = checked(_callSequence + 1);
+        // 冷工具是折叠过的：真实参数装在 args 里，这里拆开再走原路（下游一行都不用改）。
+        if (
+            ColdToolNames.Contains(toolName)
+            && arguments.ValueKind == JsonValueKind.Object
+            && arguments.TryGetProperty("args", out JsonElement coldArgs)
+            && coldArgs.ValueKind == JsonValueKind.Object
+        )
+        {
+            arguments = coldArgs;
+        }
         if (toolName == CapabilityGuideToolName)
         {
             await HandleCapabilityGuideToolCallAsync(
@@ -5347,11 +5443,62 @@ internal sealed class ReaderContextMcpServer
         return ack;
     }
 
+    /// <summary>指南被问到某个**冷工具**的参数时，把折叠前的说明与 schema 原样交出去。
+    /// 没有这条路，折叠就等于把那 22 个工具废掉。</summary>
+    private static bool TryReadColdToolName(JsonElement arguments, out string name)
+    {
+        name = "";
+        if (
+            arguments.ValueKind != JsonValueKind.Object
+            || !arguments.TryGetProperty("tool", out JsonElement value)
+            || value.ValueKind != JsonValueKind.String
+        )
+        {
+            return false;
+        }
+        name = value.GetString() ?? "";
+        return ColdToolNames.Contains(name);
+    }
+
     private async Task HandleCapabilityGuideToolCallAsync(
         JsonNode id,
         JsonElement arguments,
         CancellationToken cancellationToken)
     {
+        if (TryReadColdToolName(arguments, out string coldTool))
+        {
+            if (ColdToolSchemas.Count == 0)
+            {
+                _ = BuildToolList();   // 还没 list 过：先把折叠前的原件填上
+            }
+            JsonObject payload = new()
+            {
+                ["tool"] = coldTool,
+                ["description"] = ColdToolDescriptions.TryGetValue(coldTool, out string? desc)
+                    ? desc
+                    : null,
+                ["inputSchema"] = ColdToolSchemas.TryGetValue(coldTool, out JsonObject? schema)
+                    ? schema.DeepClone()
+                    : null,
+                ["howToCall"] =
+                    "Call the tool itself with { args: <the object this schema describes> }.",
+            };
+            await WriteResultAsync(
+                id,
+                new JsonObject
+                {
+                    ["content"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["type"] = "text",
+                            ["text"] = payload.ToJsonString(ModelJsonOptions),
+                        },
+                    },
+                },
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
         if (!TryReadCapabilityTopic(arguments, out string topic))
         {
             await WriteErrorAsync(
