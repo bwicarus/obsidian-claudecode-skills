@@ -662,9 +662,14 @@ function traceCard(row) {
     ' ' + when + ' <span style="color:#64748b">' + gap + '</span></span>';
   d.appendChild(head);
   if (row.body) {
+    // 对话内容直接显示，不用点开 —— 说了什么是这条时间轴最该一眼看到的东西
+    // （2026-09-17 用户要求）。其余（代码、注入、用量）仍然折叠，否则页面会被淹没。
+    var inline = row.kind === 'speech';
     var body = document.createElement('pre');
-    body.style.cssText = 'display:none;white-space:pre-wrap;word-break:break-word;margin:6px 0 0;' +
-      'font-size:11.5px;max-height:320px;overflow:auto;color:#cbd5e1';
+    body.style.cssText = 'display:' + (inline ? 'block' : 'none') +
+      ';white-space:pre-wrap;word-break:break-word;margin:4px 0 0;' +
+      'font-size:' + (inline ? '12.5px' : '11.5px') + ';max-height:' + (inline ? '160px' : '320px') +
+      ';overflow:auto;color:' + (inline ? '#e2e8f0' : '#cbd5e1');
     body.textContent = row.body;
     d.appendChild(body);
     head.addEventListener('click', function () {

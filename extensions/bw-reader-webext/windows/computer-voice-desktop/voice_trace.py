@@ -301,11 +301,16 @@ def _reasoning_row(pay: dict) -> dict:
 
 
 def _usage_row(pay: dict) -> dict:
-    """把用量那条渲染成人话。
+    """用量那一条。
 
-    2026-09-17 用户说「本轮用量里的信息全是代码我看不懂」—— 原来是直接把原始 JSON 倒出来。
-    这里挑出真正要看的三个数，**并突出「新增」**：输入里命中缓存的部分按 1/10 计价，
-    每轮真正花钱的是没命中的那部分（实测开局全价付一次、之后基本全缓存）。
+    ⚠ 这里的一条**不是一轮对话**，是**一次模型请求**（2026-09-17 用户问出来的）：
+    模型每调一次工具，拿到结果后就要再请求一次模型，把到目前为止的整个上下文重发一遍。
+    实测一个线程里 turn_context 只有 2 条，token_count 却有 22 条 ——
+    也就是 2 轮对话用掉了 22 次模型请求。我原先把它标成「本轮用量」是错的。
+
+    「输入」包含的是这次请求**重发的全部东西**：开场指令 + 工具面 + 这一轮之前的全部
+    对话与工具返回 + 刚注入的状态。其中命中缓存的部分按 1/10 计价，
+    真正按全价付的只有「新增」那一项。
     """
     def pick(*path):
         cur = pay
@@ -319,26 +324,30 @@ def _usage_row(pay: dict) -> dict:
     total = pick("info", "total_token_usage") or pick("total_token_usage") or {}
     src = last if isinstance(last, dict) and last else (total if isinstance(total, dict) else {})
     if not src:
-        return {"title": "本轮用量", "meta": "形状未识别",
+        return {"title": "模型请求用量", "meta": "形状未识别",
                 "body": _clip(json.dumps(pay, ensure_ascii=False), 800)}
 
     inp = int(src.get("input_tokens") or 0)
     cached = int(src.get("cached_input_tokens") or 0)
     out = int(src.get("output_tokens") or 0)
     fresh = max(0, inp - cached)
-    meta = "新增输入 %s · 输出 %s" % (f"{fresh:,}", f"{out:,}")
     lines = [
-        "输入 %s（其中命中缓存 %s，按 1/10 计价）" % (f"{inp:,}", f"{cached:,}"),
-        "**真正新增（全价）%s**" % f"{fresh:,}",
-        "输出 %s" % f"{out:,}",
+        "这是**一次模型请求**的账，不是一轮对话 —— 每调一次工具就要再请求一次模型，",
+        "把到此为止的整个上下文重发一遍。",
+        "",
+        "输入 %s ＝ 开场指令 + 工具面 + 本轮之前的全部对话与工具返回 + 刚注入的状态" % f"{inp:,}",
+        "  其中命中缓存 %s（按 1/10 计价）" % f"{cached:,}",
+        "  **真正按全价付的新增 %s**" % f"{fresh:,}",
+        "输出 %s ＝ 模型这一次生成的内容（含它写的代码与要调的工具参数）" % f"{out:,}",
     ]
     if isinstance(total, dict) and total.get("input_tokens"):
-        lines.append("——")
-        lines.append("这条对话累计：输入 %s / 输出 %s" % (
-            f"{int(total.get('input_tokens') or 0):,}",
-            f"{int(total.get('output_tokens') or 0):,}"))
-    return {"title": "本轮用量", "meta": meta, "body": chr(10).join(lines)}
-
+        lines += ["", "——",
+                  "这条对话累计：输入 %s / 输出 %s" % (
+                      f"{int(total.get('input_tokens') or 0):,}",
+                      f"{int(total.get('output_tokens') or 0):,}")]
+    return {"title": "模型请求用量",
+            "meta": "新增 %s · 输出 %s · 缓存 %s" % (f"{fresh:,}", f"{out:,}", f"{cached:,}"),
+            "body": chr(10).join(lines)}
 
 def _text_lane(thread_id: str | None, limit: int) -> list[dict]:
     """文字侧：模型真正读到与做出的东西。
@@ -379,18 +388,69 @@ def _text_lane(thread_id: str | None, limit: int) -> list[dict]:
         elif kind == "reasoning":
             rows.append(dict(_reasoning_row(pay), lane="text", kind="think", at=at))
         elif kind == "custom_tool_call":
+            # ⚠ 一次工具调用在落盘里是**三条**：调用、返回、这次请求的用量。
+            # 分开列会把时间轴撑成三倍、还看不出哪条返回属于哪次调用
+            # （2026-09-17 用户要求「把同一个工具调用相关内容关联起来」）。
+            # 这里先记下调用，等返回与用量到了再合成一条。
             script = pay.get("input") or pay.get("arguments") or ""
-            rows.append({"lane": "text", "kind": "code", "at": at,
-                         "title": "执行 " + str(pay.get("name") or "?"),
-                         "meta": "%d 字" % len(str(script)), "body": _clip(script)})
+            pending = {"lane": "text", "kind": "code", "at": at,
+                       "title": "调用 " + str(pay.get("name") or "?"),
+                       "meta": "", "body": "",
+                       "_script": str(script), "_out": None, "_usage": None}
+            rows.append(pending)
         elif kind == "custom_tool_call_output":
             out = pay.get("output")
             text = "".join(c.get("text") or "" for c in out if isinstance(c, dict)) if isinstance(out, list) else str(out)
-            rows.append({"lane": "text", "kind": "tool", "at": at, "title": "工具返回",
-                         "meta": "%d 字" % len(text), "body": _clip(text)})
+            host = next((r for r in reversed(rows) if r.get("_out") is None and "_script" in r), None)
+            if host is None:
+                rows.append({"lane": "text", "kind": "tool", "at": at, "title": "工具返回（找不到对应调用）",
+                             "meta": "%d 字" % len(text), "body": _clip(text)})
+            else:
+                host["_out"] = text
         elif kind in ("token_count", "token_usage_record"):
-            rows.append(dict(_usage_row(pay), lane="text", kind="session", at=at))
-    return rows
+            row = dict(_usage_row(pay), lane="text", kind="session", at=at)
+            host = next((r for r in reversed(rows) if r.get("_usage") is None and r.get("_out") is not None), None)
+            if host is None:
+                rows.append(row)          # 不属于任何工具调用（比如开场那次请求）
+            else:
+                host["_usage"] = row
+    return [_fold_tool_row(r) for r in rows]
+
+
+def _fold_tool_row(row: dict) -> dict:
+    """把「调用 + 返回 + 这次请求的用量」折成一条可展开的记录。"""
+    if "_script" not in row:
+        return row
+    script, out, usage = row.pop("_script", ""), row.pop("_out", None), row.pop("_usage", None)
+    parts = ["【模型写的代码】", script or "（空）"]
+    if out is not None:
+        parts += ["", "【工具返回】", out]
+    else:
+        parts += ["", "（还没有返回 —— 这次调用可能还在跑，或那一轮被中断了）"]
+    bits = ["代码 %d 字" % len(script or "")]
+    if out is not None:
+        bits.append("返回 %d 字" % len(out))
+        # 返回特别大的直接标出来：它是不走缓存的新增输入，最花钱的一项
+        if len(out) > 8000:
+            bits.append("⚠ 返回过大")
+    if usage:
+        parts += ["", "【这次模型请求的用量】", usage.get("body") or ""]
+        bits.append(usage.get("meta") or "")
+    # 代码模式下每条都叫 exec，标题看不出在干什么 —— 把脚本里第一个像样的片段带上。
+    # 优先找它调的工具名（mcp__x__y 或 reader_xxx），没有就取首行。
+    import re   # noqa: WPS433
+    hint = ""
+    m = re.search(r"(?:mcp__[a-z_]+__)?(reader_[a-z_]+|kj_[a-z_]+|voice_[a-z_]+)", script or "")
+    if m:
+        hint = m.group(1)
+    else:
+        first = next((ln.strip() for ln in (script or "").splitlines() if ln.strip()), "")
+        hint = first[:38]
+    if hint:
+        row["title"] = row["title"] + " → " + hint
+    row["meta"] = " · ".join(b for b in bits if b)
+    row["body"] = _clip(chr(10).join(parts), 12000)
+    return row
 
 
 def _tool_stats(days: float, cold: set[str] | None = None) -> dict:
