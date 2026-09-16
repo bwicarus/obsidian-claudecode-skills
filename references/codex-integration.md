@@ -328,3 +328,50 @@ app-server 的 serde 报错会把缺的字段名说出来，比翻文档快：
 去量线程里那条 developer 消息 —— SLIM_PLUGINS 省下的 25.6K/轮就是那么量出来的，
 那个数仍然作数。链路页那一块的标题写的是「skill 目录（≠ 本次会话实际启用）」，
 就是为了不让下一个人照着它算账。
+
+## 跟官方 API 的对应关系（2026-09-16 查证）
+
+用户问得对：app-server 的**数据形状**基本就是官方 API 的，查官方文档确实能少猜很多。
+但**方法面**是 Codex 自己的，官方文档解释不了 —— 分清这两层能省很多冤枉路。
+
+### 相通的部分（查官方文档有用）
+
+| 我们看到的 | 官方对应 |
+|---|---|
+| `thread/inject_items` 的 `{type:"message", role, content:[{type:"input_text"}]}` | Responses API 的 input item 格式 |
+| 条目类型 `agentMessage` / `reasoning` / `mcpToolCall` / `webSearch` / `commandExecution` | Responses API 的 output item 类型 |
+| `turn/started` → `item/completed` → `turn/completed` 事件序列 | Responses 的 `response.*` 流式事件 |
+| `thread/realtime/appendAudio` / `appendText` / `listVoices` | Realtime API 的 `input_audio_buffer.append` / `conversation.item.create` 等 |
+
+**当前用的模型**：语音侧 v3 = **GPT-Live**（全双工，能边听边说，边干活边继续对话）；
+后台 = **gpt-6-astra**（`thread/read` 报的就是这个）。所以语音那半查 GPT-Live 与
+Realtime 文档，后台那半查 Responses 文档。
+
+### 官方有、Codex 没往外接的（这才是我们缺的那两样）
+
+- **`conversation.item.delete`**（Realtime）「Removes any item from the conversation history」——
+  这正是「注入只增不减」缺的那一半。162 个方法里**没有**任何 `thread/realtime/delete*`。
+- **`session.update` 改 `session.delegation.responses.instructions`**（GPT-Live，Responses delegation）
+  ——不重开会话就换掉后台指令，是个**可替换的槽**。Codex 这边 `thread/settings/update`
+  **对任何字段都返回 `{}` 然后什么都不做**（连瞎编的字段名都「成功」，模型始终答旧暗号）；
+  `turn/settings/update` 则严格拒未知字段，白名单里只有 model/effort/summary 这些，没有指令。
+- **`session.instructions.append` / `thinking.append` / `commentary.append`**（GPT-Live，
+  client delegation，都带 `delegation_id`）—— 在**委托发生那一刻**挂上下文，
+  正是「在文字 AI 开工的一瞬间注入最新内容」。app-server 没有对应方法。
+
+结论：要用上这三样只能绕开 Codex 直连 GPT-Live，那就从订阅额度变成按 token 付费 ——
+正是当初套 CLI 的经济学理由。所以现阶段只能在 app-server 给的面里凑合：
+忙碌时压在本地只留最新（见 voice_cli_runner 的 `_ctx_flush_pending`）+ 定期 compact。
+
+### thread/queue 到底能不能当「可替换的状态槽」
+
+能，但只有一格：**后台正在跑一轮**时，排队项会老实待着，`queue/update` 可以就地改写，
+实测连改两次后只有最新那条进了历史，两条过期的从未出现。
+**空闲时不行** —— 一进队就立刻被消费并自己起一轮，`update`/`delete` 全返回
+`queued submission not found` / `deleted:false`。
+即便在能用的那一格也没采用：那条排队项**会单独起一轮**，多花一轮 token 只为说句「已收到」；
+压在本地效果相同且零成本。
+
+另外两个「按轮撤」的方法记在这：`thread/rollback` 要 `numTurns`，
+`thread/revert` 要 `beforeTurnId` —— 都是整轮粒度，而 inject_items 的条目不属于任何轮
+（它们连 `thread/items/list` 都不出现），所以撤不掉。
