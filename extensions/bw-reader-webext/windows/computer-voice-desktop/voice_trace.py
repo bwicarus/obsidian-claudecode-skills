@@ -270,7 +270,13 @@ def _classify_message(role: str, text: str) -> dict:
     for mark, label in _SYSTEM_USER_MARKS:
         if head.startswith(mark):
             return {"kind": "inject", "title": label}
-    return {"kind": "speech", "title": role or "用户"}
+    if role == "assistant":
+        # ⚠ 文字线程里的 assistant 是**后台模型的回答**，不是语音模型说的话。
+        # 2026-09-17 用户指着它问「这个语音是指什么，怎么和实际的还不一样」——
+        # 就是因为我把角色名直接当标题、又映射成 speech 显示成「语音」。
+        # 它跟左边语音那条措辞不同是正常的：语音模型拿到后台答案后会用自己的话复述。
+        return {"kind": "generate", "title": "后台回答"}
+    return {"kind": "speech", "title": "用户" if role == "user" else (role or "用户")}
 
 
 def _reasoning_row(pay: dict) -> dict:
@@ -386,7 +392,10 @@ def _text_lane(thread_id: str | None, limit: int) -> list[dict]:
             rows.append({"lane": "text", "kind": "generate", "at": at, "title": "回答",
                          "meta": "%d 字" % len(pay.get("text") or ""), "body": _clip(pay.get("text"))})
         elif kind == "reasoning":
-            rows.append(dict(_reasoning_row(pay), lane="text", kind="think", at=at))
+            # 推理紧接着就是它引出的那次工具调用 —— 先记着，等调用来了并进去，
+            # 别单独占一行（2026-09-17 用户：还能再简化）。一直没等到调用就自己成一条。
+            pending_think = dict(_reasoning_row(pay), lane="text", kind="think", at=at)
+            rows.append(pending_think)
         elif kind == "custom_tool_call":
             # ⚠ 一次工具调用在落盘里是**三条**：调用、返回、这次请求的用量。
             # 分开列会把时间轴撑成三倍、还看不出哪条返回属于哪次调用
@@ -396,7 +405,10 @@ def _text_lane(thread_id: str | None, limit: int) -> list[dict]:
             pending = {"lane": "text", "kind": "code", "at": at,
                        "title": "调用 " + str(pay.get("name") or "?"),
                        "meta": "", "body": "",
-                       "_script": str(script), "_out": None, "_usage": None}
+                       "_script": str(script), "_out": None, "_usage": None, "_think": None}
+            # 紧挨着的那条推理并进来（它就是为这次调用做的盘算）
+            if rows and rows[-1].get("kind") == "think":
+                pending["_think"] = rows.pop()
             rows.append(pending)
         elif kind == "custom_tool_call_output":
             out = pay.get("output")
@@ -410,19 +422,36 @@ def _text_lane(thread_id: str | None, limit: int) -> list[dict]:
         elif kind in ("token_count", "token_usage_record"):
             row = dict(_usage_row(pay), lane="text", kind="session", at=at)
             host = next((r for r in reversed(rows) if r.get("_usage") is None and r.get("_out") is not None), None)
-            if host is None:
-                rows.append(row)          # 不属于任何工具调用（比如开场那次请求）
-            else:
+            if host is not None:
                 host["_usage"] = row
+                continue
+            # 不跟着工具调用的那次请求（模型直接作答）—— 挂到刚才那条回答上，
+            # 别单独占一行（2026-09-17 用户：「模型请求用量又是独立显示」）
+            answer = next((r for r in reversed(rows)
+                           if r.get("kind") == "generate" and "_usage_meta" not in r), None)
+            if answer is not None:
+                answer["_usage_meta"] = row.get("meta") or ""
+                answer["_usage_body"] = row.get("body") or ""
+            else:
+                rows.append(row)          # 实在找不到归属（比如开场那次）才单列
     return [_fold_tool_row(r) for r in rows]
 
 
 def _fold_tool_row(row: dict) -> dict:
     """把「调用 + 返回 + 这次请求的用量」折成一条可展开的记录。"""
+    if "_usage_meta" in row:          # 后台回答那一条：用量并进它的摘要与正文
+        meta, body = row.pop("_usage_meta", ""), row.pop("_usage_body", "")
+        row["meta"] = " · ".join(x for x in (row.get("meta") or "", meta) if x)
+        if body:
+            row["body"] = (row.get("body") or "") + chr(10) * 2 + "——" + chr(10) + body
     if "_script" not in row:
         return row
     script, out, usage = row.pop("_script", ""), row.pop("_out", None), row.pop("_usage", None)
-    parts = ["【模型写的代码】", script or "（空）"]
+    think = row.pop("_think", None)
+    parts = []
+    if think and think.get("body"):
+        parts += ["【调用前的盘算】", think["body"], ""]
+    parts += ["【模型写的代码】", script or "（空）"]
     if out is not None:
         parts += ["", "【工具返回】", out]
     else:

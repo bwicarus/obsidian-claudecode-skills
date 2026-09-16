@@ -312,7 +312,7 @@ document.querySelectorAll('#nav button').forEach(b => b.addEventListener('click'
   document.querySelectorAll('#nav button').forEach(x => x.classList.remove('active')); b.classList.add('active');
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   page = b.dataset.page; $('page-' + page).classList.add('active'); onPage(page);
-  if (page === 'trace') loadTrace();   // 只在打开时拉一次，别后台轮询
+  if (page === 'trace') loadTrace();   // 打开时立刻拉一次，之后由 tick 自动跟进
 }));
 function onPage(p) {
   if (p === 'snapshot') loadSnapshot();
@@ -430,6 +430,10 @@ async function tick() {
     renderVoice(st);
     if (page === 'terminal') await pollTerm();
     if (page === 'snapshot' && $('snap-auto').checked) loadSnapshot(true);
+    // 链路自动跟进（2026-09-17 用户：要跟 App 侧栏一个逻辑，别手动点刷新）。
+    // 链路要读几个文件、还要问一次 MCP，比别的页面重 —— 所以放慢到 6 秒一次，
+    // 而且上一次还没回来就不叠加。
+    if (page === 'trace' && !traceBusy && Date.now() - traceAt > 6000) loadTrace();
   } finally { setTimeout(tick, 2000); }
 }
 function renderReaderPC(rp) {
@@ -723,7 +727,22 @@ async function showToolDetail(name) {
   if (d.dir) html += '<div class="meta" style="margin-top:8px">' + esc(d.dir) + '</div>';
   box.innerHTML = html;
 }
+var traceSig = null;
 function renderTrace(t) {
+  // 自动刷新每 6 秒来一次，整条重绘会打断滚动、把展开的条目收回去。
+  // 内容没变就什么都不做；变了也把滚动位置还回去（2026-09-17 用户要「跟 App 侧栏一个逻辑」）。
+  var sig = JSON.stringify((t.rows || []).map(function (r) {
+    return [r.at, r.kind, r.title, r.meta];
+  })) + '|' + JSON.stringify(t.tools && t.tools.hot ? t.tools.hot.length : 0);
+  if (sig === traceSig) return;
+  traceSig = sig;
+  var scroller = document.querySelector('main') || document.scrollingElement;
+  var keepTop = scroller ? scroller.scrollTop : 0;
+  try { renderTraceInner(t); } finally {
+    if (scroller) scroller.scrollTop = keepTop;
+  }
+}
+function renderTraceInner(t) {
   // 一条时间轴：行已经按时间排好序，这里只负责把语音的靠左、后台的靠右，
   // 上下仍严格按时间交错 —— 这样能连着读出「说了什么 → 何时召唤后台 → 后台读到什么」
   var line = $('trace-timeline');
@@ -776,7 +795,14 @@ function renderTrace(t) {
     ((stats.hot || []).length) + ' 个 / 折叠 ' + ((stats.cold || []).length) + ' 个 / skill ' +
     skills.length + ' 个';
 }
+var traceBusy = false, traceAt = 0;
 async function loadTrace() {
+  if (traceBusy) return;
+  traceBusy = true;
+  traceAt = Date.now();
+  try { return await loadTraceInner(); } finally { traceBusy = false; traceAt = Date.now(); }
+}
+async function loadTraceInner() {
   const t = await api('GET', '/api/trace?limit=120&days=7' + (traceThread ? '&thread=' + encodeURIComponent(traceThread) : ''));
   if (t && t.ok === false) { $('trace-meta').textContent = '读取失败：' + (t.msg || '?'); return; }
   renderTrace(t || {});
