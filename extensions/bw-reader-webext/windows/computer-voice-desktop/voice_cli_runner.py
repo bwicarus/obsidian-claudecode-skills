@@ -118,9 +118,12 @@ DEFAULTS: dict = {
                                          # 全文按需用快照取（按使用次数付钱，不按变化次数）     # 语音侧是否塞正文。False（2026-09-14 实录）：塞了正文语音模型会以为自己能"看"，答"我看一下"却不委派
     "contextDwellMinSeconds": 8,   # 翻到页后停留 ≥8 s 才带正文（在读）
     "contextDwellMaxSeconds": 720, # ≤12 min（话题还新鲜）；窗外只给页码，模型要内容自己调工具
-    "threadAutoCompact": True,     # 线程长到 threadCompactItems 条就自动压一次（thread/compact/start）。
-                                   # 在这之前只能「开新对话」，代价是上下文整个丢掉；压缩保住对话身份
-    "threadCompactItems": 220,     # 触发自动压缩的条数阈值
+    "threadAutoCompact": False,    # ⚠ 默认关。thread/compact/start 会**就地重写落盘的 rollout 文件**，
+                                   # 把完整记录换成摘要，无警告无报错（openai/codex#44363，仍未修：
+                                   # 851MB／122877 条被压成 7.1MB／762 条，3777 条助手消息全丢）。
+                                   # 那份文件正是链路页和历史的来源，所以绝不能自动跑。
+                                   # 真要压缩就手动按按钮 —— thread_compact 会先把 rollout 备份一份
+    "threadCompactItems": 220,     # 开了自动压缩时的条数阈值
     "turnSteerEnabled": False,     # 后台正在跑时，把最新状态插进那一轮（turn/steer）。
                                    # ⚠ 默认关：实测有一定概率让那一轮一条回答都不产出，
                                    # 在语音里就是「AI 不理我」，比不插还糟。证据够了再开
@@ -1767,20 +1770,44 @@ class Runner:
         self.log("ctx_backend", withText=bool(pend.get("fp_text")), chars=pend["chars"],
                  deferredSec=round(time.time() - pend["at"], 1), page=self._ctx["page_key"][-40:])
 
-    async def thread_compact(self, thread_id: str, reason: str = "manual") -> dict:
-        """压缩线程 —— 线程只增不减的解药。
+    def _rollout_backup(self, thread_id: str) -> str | None:
+        """压缩前把落盘记录复制一份。
 
-        在这之前只能「到一定长度就开新对话」，代价是把上下文整个丢掉。
-        thread/compact/start 是就地把历史折成摘要，对话身份不变（2026-09-16 实测有效）。
+        ⚠ thread/compact/start 会**就地重写** `~/.codex/sessions/**/rollout-*.jsonl`，
+        把完整记录换成摘要，无警告无报错（openai/codex#44363，仍开着）。
+        那份文件是链路页与历史的唯一来源，所以动它之前先留底。
+        """
+        try:
+            import glob as _glob
+            import shutil
+            hits = _glob.glob(str(Path.home() / ".codex" / "sessions" / "**" / ("*%s*.jsonl" % thread_id)),
+                              recursive=True)
+            if not hits:
+                return None
+            src = Path(max(hits, key=os.path.getmtime))
+            dst = src.with_name(src.stem + ".pre-compact-%s.jsonl" % time.strftime("%Y%m%d-%H%M%S"))
+            shutil.copy2(src, dst)
+            return str(dst)
+        except Exception as e:   # noqa: BLE001
+            self.log("rollout_backup_error", message=clean(e))
+            return None
+
+    async def thread_compact(self, thread_id: str, reason: str = "manual") -> dict:
+        """压缩线程。
+
+        能把上下文压短，对话身份也保住（比「开新对话」强，那是把上下文整个丢掉）。
+        但它**同时会销毁落盘的完整记录**，所以先备份、且默认不自动跑。
         """
         await self.ensure_app()
         before = await self.thread_item_count(thread_id)
+        backup = self._rollout_backup(thread_id)
         t0 = time.time()
         await self.app.call("thread/compact/start", {"threadId": thread_id}, timeout=210)
         after = await self.thread_item_count(thread_id)
         self.log("thread_compacted", threadId=thread_id[-12:], reason=reason,
-                 before=before, after=after, seconds=round(time.time() - t0, 1))
-        return {"ok": True, "before": before, "after": after, "reason": reason}
+                 before=before, after=after, seconds=round(time.time() - t0, 1),
+                 backup=(backup or "")[-60:])
+        return {"ok": True, "before": before, "after": after, "reason": reason, "backup": backup}
 
     async def thread_item_count(self, thread_id: str) -> int:
         """线程里现有多少条记录。压缩前后各数一次，好知道到底省了多少。"""

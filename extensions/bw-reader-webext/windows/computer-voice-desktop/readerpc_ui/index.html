@@ -355,10 +355,37 @@ async function loadThreads() {
       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(t.id)}">${esc(t.name || t.id)}</span>
       <span class="muted" style="flex:0 0 auto">${esc(String(t.at).slice(0, 16))}</span>
       ${t.id === cur ? '' : `<button class="btn" onclick="threadResume('${esc(t.id)}')">切换</button>`}
+      <!-- 名字里常带引号和「」（对话名就是第一句话），JSON 直接塞进属性会把属性提前截断，
+           按钮文字都会错位 —— 必须再 esc 一层，让 HTML 解析器还原成合法 JSON -->
+      <button class="btn" onclick="threadRename('${esc(t.id)}', ${esc(JSON.stringify(t.name || ''))})">改名</button>
+      <button class="btn" onclick="threadCompact('${esc(t.id)}')" title="把历史折成摘要省 token。⚠ 会重写磁盘上的完整记录">压缩</button>
+      <button class="btn" onclick="threadDelete('${esc(t.id)}', ${t.id === cur})">删除</button>
     </div>`).join('');
 }
 async function threadNew() { await voicePost('/thread/new', {}, '新开对话'); loadThreads(); }
 async function threadResume(id) { await voicePost('/thread/resume', { threadId: id }, '切换对话'); loadThreads(); }
+async function threadRename(id, name) {
+  const next = prompt('新名字：', name || '');
+  if (!next) return;
+  await voicePost('/thread/rename', { threadId: id, name: next }, '重命名');
+  loadThreads();
+}
+async function threadDelete(id, isCurrent) {
+  // 删除不可逆；删当前那条会顺带停会话并换新线程（运行器里做的）
+  if (!confirm('删除这条对话？不可恢复。' + (isCurrent ? '\n（这是当前对话，会结束通话并新开一条）' : ''))) return;
+  await voicePost('/thread/delete', { threadId: id }, '删除对话');
+  loadThreads();
+}
+async function threadCompact(id) {
+  // ⚠ thread/compact/start 会**就地重写**磁盘上的 rollout 文件（openai/codex#44363，仍开着），
+  // 链路页和历史都来自那份文件。运行器会先备份一份 .pre-compact，但用户必须知道这不只是「省上下文」。
+  if (!confirm('压缩这条对话？\n\n它会把历史折成摘要，同时**重写磁盘上的完整记录** —— ' +
+               '链路页里这条对话的过往内容也会随之消失。\n压缩前会自动备份一份 .pre-compact 文件。\n\n确定继续？')) return;
+  const r = await api('POST', '/voice/thread/compact', { threadId: id });
+  toast(r && r.ok ? ('已压缩：' + r.before + ' → ' + r.after + ' 条' + (r.backup ? '，已备份' : ''))
+                  : ('压缩失败：' + ((r && r.msg) || (r && r.error) || '未知')));
+  loadThreads();
+}
 async function loadTasks() {
   const d = await voiceGet('/tasks');
   if (!d || d.ok === false) { $('tasks').innerHTML = '<p class="meta">' + esc((d && d.msg) || '语音核心不可达') + '</p>'; return; }

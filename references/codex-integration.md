@@ -375,3 +375,73 @@ Realtime 文档，后台那半查 Responses 文档。
 另外两个「按轮撤」的方法记在这：`thread/rollback` 要 `numTurns`，
 `thread/revert` 要 `beforeTurnId` —— 都是整轮粒度，而 inject_items 的条目不属于任何轮
 （它们连 `thread/items/list` 都不出现），所以撤不掉。
+
+## 上网查过之后的结论（2026-09-16）
+
+用户让去查「这些紧缺能力有没有人讨论过怎么在 CLI 里用」。查到了官方文档、
+官方仓库的 issue/PR，以及别人踩同一个坑的记录。三件有用的、一件危险的。
+
+### ⚠ 危险：`thread/compact/start` 会**销毁落盘记录**
+
+[openai/codex#44363](https://github.com/openai/codex/issues/44363)（开着，无维护者回应）：
+压缩会**就地重写** `rollout-*.jsonl`，把完整记录换成摘要。报告里 851MB／122877 条
+被压成 7.1MB／762 条，3777 条助手消息全丢，而且「Loss is silent. No warning before,
+no error after.」
+
+对我们尤其要命，因为那份文件正是链路页与历史的唯一来源。所以：
+`threadAutoCompact` **默认关**，手动压缩前 `_rollout_backup()` 先复制一份
+`.pre-compact-<时间>.jsonl`，界面的确认框明说「会重写磁盘上的完整记录」。
+
+### 官方文档确认的（不用再探了）
+
+- `thread/inject_items` —— 「persisted to the rollout and included in subsequent
+  model requests」，且**没有**删除或替换机制。跟实测一致。
+- `turn/steer` —— 往在跑的轮追加 user input，必须带 `expectedTurnId`，
+  不接受轮级覆盖（model/cwd/sandboxPolicy/outputSchema）。
+- `thread/settings/update` —— **只认 `disabledPluginIds`**。这解释了为什么它对我试的
+  七个字段全部返回 `{}` 却什么都不做。⭐ 反过来说这条是能用的：插件面可以按线程热切换，
+  不必像现在这样只能在 app-server 启动时用 `-c` 封存；`turn/start` 也收这个参数，
+  意味着还能**按轮**切。
+- `thread/rollback` 在上游**已从 API 移除**（改用 `thread/revert`）——
+  我们这个 Windows 构建还留着，别指望它长期存在。
+
+### Codex hooks：正是这个用途，但在 app-server 下不跑
+
+Codex CLI 有正式的 hooks 框架，11 个事件，`UserPromptSubmit` 的处理器返回
+`{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"…"}}`，
+文档说它「added as extra developer context」——**正是「开工那一刻注入现算的最新状态」**。
+
+配置形状（照本机 `~/.codex/hooks.json` 的真实写法，**双层 hooks**）：
+
+```json
+{"hooks": {"UserPromptSubmit": [{"hooks": [
+  {"type": "command", "command": "<解释器> <脚本>", "timeout": 30}]}]}}
+```
+
+⭐ 而且可以用 `-c` 传，**只对我们这条 app-server 生效**，不碰用户全局配置：
+
+```
+codex -c 'hooks.UserPromptSubmit=[{hooks=[{type="command",command="…",timeout=30}]}]' app-server
+```
+
+这样挂上去 `hooks/list` 会显示 `enabled=true`（仓库级 `.codex/hooks.json` 则要走信任流程，
+config.toml 里 `[hooks.state.'<key>']` 存 `trusted_hash`/`enabled`，默认不生效）。
+
+**但它对 app-server 驱动的轮完全不触发。** 2026-09-16 实测：一次挂上
+UserPromptSubmit / PreToolUse / PostToolUse / SessionStart / Stop 五个事件，
+`hooks/list` 全部 `enabled=true`，跑一轮真的执行了命令（条目里有 `commandExecution`），
+**处理器一次都没被调用**。hooks 是交互式 CLI 的特性。
+（旁证：本机 `~/.codex/hooks.json` 里那两条 reader-registration-hook 也是 `enabled=false`。）
+
+### 别人踩的同一个坑
+
+- [agentscope-ai/QwenPaw#7211](https://github.com/agentscope-ai/QwenPaw/pull/7211)
+  的问题描述跟我们几乎一字不差：注入的请求级上下文被当成用户消息持久化，
+  「Each turn adds another stale context block… potentially mixing old page state into
+  later requests」。他们的修法是给注入消息打标记，在内存与落盘两处按标记剔除 ——
+  **必须改 agent runtime**，我们用官方二进制，做不了。
+- [openai/codex#23218](https://github.com/openai/codex/issues/23218) 任务之间清上下文、
+  [#19829](https://github.com/openai/codex/issues/19829) 会话内清上下文 —— 都还是开着的需求。
+
+结论没变：在 app-server 这个面里，注入只能追加、不能撤。现阶段的做法是
+「忙碌时压在本地只留最新」（`_ctx_flush_pending`）+ 需要时手动压缩（先备份）。
