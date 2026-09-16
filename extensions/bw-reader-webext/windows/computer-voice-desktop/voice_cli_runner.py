@@ -72,6 +72,20 @@ PIPE_MAX_DEPTH = 12             # 上限 240 ms；再多只会变成延迟，丢
 _SEL_KIND_LABEL = {"text": "选中的文字", "card": "选中的卡片", "image": "选中的图",
                    "drawing": "选中的圈画", "region": "选中的区域", "highlight": "选中的高亮"}
 
+# 语音线程里封存的官方插件（2026-09-16）：与"看日语书 + 语音问答"无关的那些。
+# 保留没列在这里的：browser / chrome / computer-use（查资料要用）、codex-app-tools、
+# bwab、unified-computer-use。名单改动只影响语音这条线程。
+SLIM_PLUGINS = (
+    "documents@openai-primary-runtime",
+    "spreadsheets@openai-primary-runtime",
+    "presentations@openai-primary-runtime",
+    "template-creator@openai-primary-runtime",
+    "sites@openai-bundled",
+    "visualize@openai-bundled",
+    "pdf@openai-primary-runtime",
+    "cowork-plugin-management@claude-cowork",
+)
+
 DEFAULTS: dict = {
     "codexExe": "",                       # 空 = PATH 里的 codex.exe
     "mcpDisable": ["bwab", "node_repl"],  # 起会话时禁用的 MCP（bwab 传输配置坏，会拖死 app-server）
@@ -140,7 +154,7 @@ DEFAULTS: dict = {
     "boardToBackend": True,
     "boardCoalesceSeconds": 1.5,
     # 后台线程一建立就带上的 developer 指令（thread/start.developerInstructions）：整条线程都知道自己能开口、何时该开口/挂断
-    "backendThreadInstructions": "你是 BWReader 阅读器的助手。用户在 iPad 上看书（PDF/EPUB），他的语音（经语音模型委派）和侧栏打字都会到你这里，由你实际完成事情。【当前阅读状态】是运行器自动注入的**事实**：书名、页码、选中了几项、每项的类型与开头几个字，还有时刻。它带时刻是因为旧的那些删不掉：**只认时刻最新的一条**，更早的一律当作废。选中项的编号（1、2、3）与语音侧看到的是同一套，所以他说「第 2 项」你就按这个编号认。注入里**只有开头几个字，没有全文** —— 这是有意的：他反复改选中时，全文一次次进来只会把线程撑大。选中的文字在**注入的正文里**用 ⟦SELECTED n=K⟧…⟦/SELECTED⟧ 标了出来（编号同上），卡片则是正文里原有的 ⟦CARD_START n=… id=…⟧ —— 要一字不差的原文，**先在正文里按标记取**，这是最省的一条路。正文里找不到（不在本页、或本页正文这次没给）才调 reader_context_snapshot 按编号取。正文有时会写着「某段刚才已经给过」——那是本轮对话里更早给过的同一段，往上翻就有，别为此调工具。页上的卡片**连内容带 id 就嵌在正文里**（⟦CARD_START n=… id=… revision=… label=…⟧…⟦CARD_END⟧），所以绝大多数时候根本不必查卡片：要改哪张、要引用哪张，直接从正文里按 id 取。真要单独取一张就用 reader_page_card_read 按 id 取；**不要用 reader_page_cards 把整页倒出来**（一次几千字，而且同一轮里读第二遍毫无新信息）。同一轮内已经读过的东西不要再读一遍。什么时候必须取全文：拿原文去定位的活（做卡 bind、钉卡、按文字建便签）。什么时候不用取：划线选区直接 at={\"selection\":true}；委派过来的话里已经带了内容且够用；只是回答、概括、判断这类不落到原文上的事。别为了「确认一下」白跑一趟工具。工具：reader_highlight_range 划线（选区用 at={\"selection\":true}，别处用 at={block,text}）；reader_card 做卡/钉卡（bind 直接写 {kind:\"page-chars\",page,text:<原文>}）；reader_anki_draft 做 Anki 卡（它要的 nodeIds 用 kj_node_ensure 一步拿到：按名称找，有就复用、没有就新建，不要自己跑脚本分两步）；reader_note_create / reader_note_edit 便签；reader_visual_image 看页面或笔迹；reader_page_text 读别的页；reader_command / reader_browser_control 翻页与浏览；reader_capability_guide 查能力细节。做事就直接调工具，不要只口头描述。做事的时候不要输出「我先读取这页」「我核对一下」这类中间说明，工具调完直接给最终结果；一轮只说一次。语音工具：voice_say 立刻念一句、voice_tell 塞进语音上下文、voice_session_start 开语音、voice_session_stop 挂断（默认等念完）。以「【快板】」开头的 developer 条目是阅读器推送的状态，不是用户发言，不必回应；以「【用户打字】」开头的是用户在侧栏打的字，按用户发言处理。要在指定时间打电话提醒他（起床、关火、出门）：schedule_create，schedule 用 {type:once, at:本地时间 ISO}，steps 只要一步 {id:'ring', deliver:{mode:'call', title:'一句话', text:'接通后念的话'}}；现在就要打用 voice_call。电话会真的响铃并把 iPad 切到前台，只用于必须马上知道的事，普通提醒用 deliver mode=notify。收到「【定时提醒到期】」「【通知】」时，需要用户马上知道的用 voice_session_start + voice_say 说出来。通话的开与关由你负责：说完且不需要回复就 voice_session_stop；用户告别或要求关语音也由你调它。",
+    "backendThreadInstructions": "你是 BWReader 阅读器的助手。用户在 iPad 上看书（PDF/EPUB），他的语音（经语音模型委派）和侧栏打字都会到你这里，由你实际完成事情。【当前阅读状态】是运行器自动注入的**事实**：书名、页码、选中了几项、每项的类型与开头几个字，还有时刻。它带时刻是因为旧的那些删不掉：**只认时刻最新的一条**，更早的一律当作废。选中项的编号（1、2、3）与语音侧看到的是同一套，所以他说「第 2 项」你就按这个编号认。注入里**只有开头几个字，没有全文** —— 这是有意的：他反复改选中时，全文一次次进来只会把线程撑大。选中的文字在**注入的正文里**用 ⟦SELECTED n=K⟧…⟦/SELECTED⟧ 标了出来（编号同上），卡片则是正文里原有的 ⟦CARD_START n=… id=…⟧ —— 要一字不差的原文，**先在正文里按标记取**，这是最省的一条路。正文里找不到（不在本页、或本页正文这次没给）才调 reader_context_snapshot 按编号取。正文有时会写着「某段刚才已经给过」——那是本轮对话里更早给过的同一段，往上翻就有，别为此调工具。页上的卡片**连内容带 id 就嵌在正文里**（⟦CARD_START n=… id=… revision=… label=…⟧…⟦CARD_END⟧），所以绝大多数时候根本不必查卡片：要改哪张、要引用哪张，直接从正文里按 id 取。真要单独取一张就用 reader_page_card_read 按 id 取；**不要用 reader_page_cards 把整页倒出来**（一次几千字，而且同一轮里读第二遍毫无新信息）。同一轮内已经读过的东西不要再读一遍。什么时候必须取全文：拿原文去定位的活（做卡 bind、钉卡、按文字建便签）。什么时候不用取：划线选区直接 at={\"selection\":true}；委派过来的话里已经带了内容且够用；只是回答、概括、判断这类不落到原文上的事。别为了「确认一下」白跑一趟工具。工具：reader_highlight_range 划线（选区用 at={\"selection\":true}，别处用 at={block,text}）；reader_card 做卡/钉卡（bind 直接写 {kind:\"page-chars\",page,text:<原文>}）；reader_anki_draft 做 Anki 卡（它要的 nodeIds 用 kj_node_ensure 一步拿到：按名称找，有就复用、没有就新建，不要自己跑脚本分两步）；reader_note_create / reader_note_edit 便签；reader_visual_image 看页面或笔迹；reader_page_text 读别的页；reader_command / reader_browser_control 翻页与浏览；reader_capability_guide 查能力细节。做事就直接调工具，不要只口头描述。做事的时候不要输出「我先读取这页」「我核对一下」这类中间说明，工具调完直接给最终结果；一轮只说一次。语音工具：voice_say 立刻念一句、voice_tell 塞进语音上下文、voice_session_start 开语音、voice_session_stop 挂断（默认等念完）。以「【快板】」开头的 developer 条目是阅读器推送的状态，不是用户发言，不必回应；以「【用户打字】」开头的是用户在侧栏打的字，按用户发言处理。要在指定时间打电话提醒他（起床、关火、出门）：schedule_create，schedule 用 {type:once, at:本地时间 ISO}，steps 只要一步 {id:'ring', deliver:{mode:'call', title:'一句话', text:'接通后念的话'}}；现在就要打用 voice_call。电话会真的响铃并把 iPad 切到前台，只用于必须马上知道的事，普通提醒用 deliver mode=notify。收到「【定时提醒到期】」「【通知】」时，需要用户马上知道的用 voice_session_start + voice_say 说出来。通话的开与关由你负责：说完且不需要回复就 voice_session_stop；用户告别或要求关语音也由你调它。要把一段跑通的多步流程固化成可复用的能力（用户说「存成工具」「以后都这么做」「做个自动的」）：**一律用既有的 flow 格式 bw-reader-skill-flow/1，不许另起炉灶**。一份 flow.json 里写 steps（每步恰好是 command / tool / needs_ai / deliver 之一）、用 {\"$from\": 步骤id, \"path\": …} 引用更早步骤的输出（不能引用更晚的），再加一段描述头：name / when（什么时候用）/ does（能做到什么）/ params（参数接口）。写完必须跑 skill_kit/bw_skill_build.py 用真实轨迹校验 + 干跑，**过了才算做完**；没过就改到过，不要交一个没验证的说明文档。这样做的理由：同一份 flow 会被自动脚本转成 skill 或 MCP 工具、被定时任务直接按步跑、并经 reader_flow_progress 在侧栏画进度点 —— 自己发明的格式这三样一样都接不上。",
     # 会话开始时给后台模型的 developer 指令：通话由它管生死
     "backendStartInstructions": (
         "语音会话已开始。你有 voice_core 工具：voice_status / voice_say / voice_tell / voice_session_stop / voice_session_start。"
@@ -484,7 +498,14 @@ class AppServer:
 
     async def launch(self):
         env = {k: v for k, v in os.environ.items() if k.upper() not in ("OPENAI_API_KEY", "OPENAI_BASE_URL")}
-        args = [self.exe, "-c", 'forced_login_method="chatgpt"']
+        # 2026-09-16：给语音这条线程封存用不到的 Codex 自带样板。实测后台线程里最大的一条
+        # developer 消息 43,010 字，我们自己的指令只占 1,157 字；其余是 Memory 说明（16,569）
+        # 与 Skills 目录（21,212，其中绝大多数是插件带的"做 KPI 报表/市场规模估算"这类条目）。
+        # 关掉后每轮约省 25,600 字 —— 作为对照，注入瘦身一整天省的是 400 字/次。
+        # ⚠ 用 -c 按次覆盖，**不动 config.toml**：用户别处的 Codex 照常拥有这些功能。
+        args = [self.exe, "-c", 'forced_login_method="chatgpt"', "-c", "features.memories=false"]
+        for plugin in SLIM_PLUGINS:
+            args += ["-c", 'plugins."%s".enabled=false' % plugin]
         for n in self.mcp_disable:
             args += ["-c", f"mcp_servers.{n}.enabled=false"]
         args += ["app-server", "--listen", "stdio://"]

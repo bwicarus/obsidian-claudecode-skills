@@ -86,3 +86,21 @@ MCP 工具表本来就只在会话开始时加载。
 ⚠ 前两步会碰到自检里钉着的断言（`ContractSelfTest` / `DirectBridgeSelfTest` / `tests/reader_contract/*.mjs`）——
 2026-09-16 当天已因此失败两次（record 成员顺序、调用点原样写法）。改一步跑一次
 `python extensions/bw-reader-webext/handoff_check.py`。
+
+## 六、验收标准（新建能力时必须满足）
+
+用户 2026-09-16 明确要求：**AI 新建功能必须按这套设计做，不许另起炉灶做一个用不了的东西，
+而且要能被自动脚本转成 skill 或 MCP。**
+
+所以"做完"的定义是这三条，缺一不算：
+
+1. **格式**：一份 `flow.json`（`bw-reader-skill-flow/1`）+ 描述头 `name / when / does / params`；
+   步骤只能是 `command` / `tool` / `needs_ai` / `deliver` 之一；引用只能指向更早的步骤。
+2. **验证**：跑 `skill_kit/bw_skill_build.py`，schema 校验 + 用真实轨迹干跑，**过了才算做完**。
+   没过就改到过 —— 不要交一个没验证过的说明文档（本地 17 个 skill 全是这种，30 天 0 次被读）。
+3. **可转换**：因为格式统一，同一份 flow 能被脚本转成 MCP 工具（热）或 skill 索引条目（冷），
+   能被 `bw_flow_runner.py` 当定时任务直接按步跑，并经 `reader_flow_progress` 在侧栏画进度点。
+   自己发明的格式这三样一样都接不上。
+
+这条规矩已写进后台常驻指令（`voice_cli_runner.py` 的 `backendThreadInstructions`，2026-09-16），
+所以负责干活的那个模型每轮都看得到；这里再写一遍是给**后来接手的人**看的。
