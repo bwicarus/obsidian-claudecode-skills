@@ -255,6 +255,46 @@ def _classify_message(role: str, text: str) -> dict:
     return {"kind": "speech", "title": role or "用户"}
 
 
+def _usage_row(pay: dict) -> dict:
+    """把用量那条渲染成人话。
+
+    2026-09-17 用户说「本轮用量里的信息全是代码我看不懂」—— 原来是直接把原始 JSON 倒出来。
+    这里挑出真正要看的三个数，**并突出「新增」**：输入里命中缓存的部分按 1/10 计价，
+    每轮真正花钱的是没命中的那部分（实测开局全价付一次、之后基本全缓存）。
+    """
+    def pick(*path):
+        cur = pay
+        for key in path:
+            if not isinstance(cur, dict) or key not in cur:
+                return None
+            cur = cur[key]
+        return cur
+
+    last = pick("info", "last_token_usage") or pick("last_token_usage") or {}
+    total = pick("info", "total_token_usage") or pick("total_token_usage") or {}
+    src = last if isinstance(last, dict) and last else (total if isinstance(total, dict) else {})
+    if not src:
+        return {"title": "本轮用量", "meta": "形状未识别",
+                "body": _clip(json.dumps(pay, ensure_ascii=False), 800)}
+
+    inp = int(src.get("input_tokens") or 0)
+    cached = int(src.get("cached_input_tokens") or 0)
+    out = int(src.get("output_tokens") or 0)
+    fresh = max(0, inp - cached)
+    meta = "新增输入 %s · 输出 %s" % (f"{fresh:,}", f"{out:,}")
+    lines = [
+        "输入 %s（其中命中缓存 %s，按 1/10 计价）" % (f"{inp:,}", f"{cached:,}"),
+        "**真正新增（全价）%s**" % f"{fresh:,}",
+        "输出 %s" % f"{out:,}",
+    ]
+    if isinstance(total, dict) and total.get("input_tokens"):
+        lines.append("——")
+        lines.append("这条对话累计：输入 %s / 输出 %s" % (
+            f"{int(total.get('input_tokens') or 0):,}",
+            f"{int(total.get('output_tokens') or 0):,}"))
+    return {"title": "本轮用量", "meta": meta, "body": chr(10).join(lines)}
+
+
 def _text_lane(thread_id: str | None, limit: int) -> list[dict]:
     """文字侧：模型真正读到与做出的东西。
 
@@ -305,9 +345,7 @@ def _text_lane(thread_id: str | None, limit: int) -> list[dict]:
             rows.append({"lane": "text", "kind": "tool", "at": at, "title": "工具返回",
                          "meta": "%d 字" % len(text), "body": _clip(text)})
         elif kind in ("token_count", "token_usage_record"):
-            info = json.dumps(pay, ensure_ascii=False)
-            rows.append({"lane": "text", "kind": "session", "at": at, "title": "本轮用量",
-                         "meta": "", "body": _clip(info, 800)})
+            rows.append(dict(_usage_row(pay), lane="text", kind="session", at=at))
     return rows
 
 

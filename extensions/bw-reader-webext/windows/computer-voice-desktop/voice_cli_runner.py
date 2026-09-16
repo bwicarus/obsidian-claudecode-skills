@@ -1449,17 +1449,23 @@ class Runner:
         # 选区 / 指代。**输入框上方有什么就带什么**（用户 2026-09-15）：
         # 一条「选中过的内容」+ 若干张长按选中的卡片/图/圈画。原来这里取第一条就 break，
         # 而快照里文字项永远排在卡片项前面 —— 只要有文字选中，卡片就永远轮不到。
+        # ⚠ 每一项除了「是什么、什么内容」，还要带上**它的身份**（ref/label）。
+        # 2026-09-17 用户指出：清单只给了文字，没带定位信息，于是模型拿到内容却没法直接调工具，
+        # 还得再查一次。卡片类的 ref 就是它的稳定 id（reader_page_card_read 直接能用），
+        # 前端一直在报，是这里构造时丢掉了。
         sel_items = []
         for it in (snap.get("selectedItems") or []):
             t = str(it.get("text") or it.get("what") or "").strip()
             if not t:
                 continue
-            sel_items.append((str(it.get("kind") or "text"), t))
+            sel_items.append((str(it.get("kind") or "text"), t,
+                              str(it.get("ref") or "").strip(),
+                              str(it.get("label") or "").strip()))
         if not sel_items:
             sel = snap.get("selection") or {}
             if sel.get("state") == "active" and sel.get("text"):
-                sel_items.append(("text", str(sel["text"])))
-        sel_text = next((t for k, t in sel_items if k == "text"), "")
+                sel_items.append(("text", str(sel["text"]), "", ""))
+        sel_text = next((t for k, t, _r, _l in sel_items if k == "text"), "")
         sel_is_text = bool(sel_text)
         # 给后台的每项只给这么多字：够认出是哪一项就行，全文按需用快照取。
         sel_chars = int(s.get("contextBackendSelectionChars") or 24)
@@ -1479,8 +1485,14 @@ class Runner:
         if sel_items:
             sel_hint = "。选中 %d 项：%s" % (
                 len(sel_items),
-                "".join("（%d）%s「%s…」" % (i + 1, _SEL_KIND_LABEL.get(k, "内容"), t[:sel_chars])
-                        for i, (k, t) in enumerate(sel_items)))
+                "".join("（%d）%s%s「%s…」%s" % (
+                            i + 1, _SEL_KIND_LABEL.get(k, "内容"),
+                            ("〔%s〕" % lb) if lb else "",
+                            t[:sel_chars],
+                            # 有 id 的直接给出来：模型据此调 reader_page_card_read 等工具，
+                            # 不必先用原文去反查（原文转述漏一个字就锚不上）
+                            ("（id=%s）" % rf) if rf else "")
+                        for i, (k, t, rf, lb) in enumerate(sel_items)))
         # ⚠ 语音模型没有工具：给它看"直接调 reader_card"这类指令，它会嘴上答应、却不发起委托（2026-09-14 实录两次）。
         #   语音侧只说选中了什么 + 这类事要立刻委派后台。
         sel_hint_voice = (("。他此刻明确选中了「%s」——说『这个/这段/这里』时指它；要划线/做卡/钉卡/翻译这段，"
@@ -1525,7 +1537,7 @@ class Runner:
                  "这是状态记录不是提问，不要回应本条。" + where + sel_hint + act_hint + ink_hint + "。")
         last_act = str((acts[-1].get("what") or acts[-1].get("kind") or "") if acts else "")[:40]
         fp_state = "%s|%s|%s|%s|%s" % (self._ctx["page_key"], sel_text[:60],
-                                       "".join(k + t[:20] for k, t in sel_items), last_act, bool(vis.get("has_ink")))
+                                       "".join(k + t[:20] for k, t, _r, _l in sel_items), last_act, bool(vis.get("has_ink")))
         fp_text = "%s|%d|%s" % (self._ctx["page_key"], len(text), text[:30]) if text else ""
         # 语音侧预算只截正文，位置/选区提示和结尾的静默约定必须完整保留（否则正文一长就把「不要回应本条」切掉了）
         vbudget = int(s.get("contextVoiceChars") or 700)
@@ -1543,12 +1555,16 @@ class Runner:
         if sel_items:
             if per > 0:
                 # 逐项编号 + 完整内容：用户问"这几项分别是什么"时它能直接念，不必委派。
+                # 语音侧给标签但**不给 id**：语音模型没有工具，给它 id 只是噪音；
+                # 它按编号说「对第 2 项做卡」，后台那份清单里同一个编号带着 id
                 body_items = "".join(
-                    "%s（%d）%s：「%s」" % (chr(10), i + 1, _SEL_KIND_LABEL.get(k, "选中的内容"), t[:per])
-                    for i, (k, t) in enumerate(sel_items))
+                    "%s（%d）%s%s：「%s」" % (chr(10), i + 1, _SEL_KIND_LABEL.get(k, "选中的内容"),
+                                          ("〔%s〕" % lb) if lb else "", t[:per])
+                    for i, (k, t, rf, lb) in enumerate(sel_items))
             else:
                 body_items = "：" + "、".join(
-                    "%s「%s」" % (_SEL_KIND_LABEL.get(k, "选中的内容"), t[:24]) for k, t in sel_items)
+                    "%s「%s」" % (_SEL_KIND_LABEL.get(k, "选中的内容"), t[:24])
+                    for k, t, rf, lb in sel_items)
             sel_list = ("【选中清单】此刻共 %d 项%s%s这是最新的一份，之前的清单作废。"
                         "问选中了什么、几项、内容是什么，照这条直接答，不必委派；"
                         "但**要动手的事照旧委派后台**（划线、做卡、写便签、翻页、搜索）——"
@@ -1560,7 +1576,7 @@ class Runner:
         else:
             sel_list = "【选中清单】此刻没有任何选中项（之前的清单作废）。"
         return {"state": state, "text": text, "text_truncated": text_truncated, "voice": voice,
-                "sel_list": sel_list, "fp_sel": "|".join(k + t[:20] for k, t in sel_items), "fp_state": fp_state, "fp_text": fp_text,
+                "sel_list": sel_list, "fp_sel": "|".join(k + rf + t[:20] for k, t, rf, lb in sel_items), "fp_state": fp_state, "fp_text": fp_text,
                 "fp_voice": fp_state + "|" + fp_text[:20]}
 
     def _ctx_text_ledger(self, text: str, sections: dict, cp: dict):
