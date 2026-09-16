@@ -5448,7 +5448,7 @@ internal sealed class ReaderContextMcpServer
 
     /// <summary>指南被问到某个**冷工具**的参数时，把折叠前的说明与 schema 原样交出去。
     /// 没有这条路，折叠就等于把那 22 个工具废掉。</summary>
-    private static bool TryReadAnyToolName(JsonElement arguments, out string name)
+    private bool TryReadAnyToolName(JsonElement arguments, out string name)
     {
         // 与 TryReadColdToolName 同形，但不限折叠池 —— 只要是这台桥暴露的工具就认。
         // 折叠池的那条路在前面已经返回了，走到这里的都是常驻工具。
