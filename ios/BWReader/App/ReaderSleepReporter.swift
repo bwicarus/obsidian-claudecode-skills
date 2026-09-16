@@ -23,7 +23,7 @@ final class ReaderSleepReporter {
 
     private let store = HKHealthStore()
     private static let endpoint = URL(
-        string: "https://\(ReaderNativePiGateway.piHost)/reader-sleep/v1")
+        string: "https://\(ReaderNativeServerGateway.serverHost)/reader-sleep/v1")
 
     /// 观察查询挂过没有。挂两次会收到两份唤醒，也就会重复上报。
     private var observing = false

@@ -6,7 +6,7 @@ import Foundation
 /// gateway to the local HTTP server. The browser sees only the opaque ticket;
 /// the upstream URL, request body, cookies and account credentials stay in
 /// native memory.
-final class ReaderNativePiProxyBroker: @unchecked Sendable {
+final class ReaderNativeServerProxyBroker: @unchecked Sendable {
     static let routeComponent = "pi-proxy"
 
     private struct Ticket {
@@ -18,15 +18,15 @@ final class ReaderNativePiProxyBroker: @unchecked Sendable {
     private let lock = NSLock()
     private var scopeEpoch: UInt64 = 0
     private var tickets: [String: Ticket] = [:]
-    private var active: [String: ReaderNativePiUpstreamTransport] = [:]
+    private var active: [String: ReaderNativeServerUpstreamTransport] = [:]
     private var resourceRequestPreparer: (@Sendable (
-        ReaderNativePiResourceProxyRequest
-    ) async throws -> ReaderNativePiPreparedProxyRequest)?
+        ReaderNativeServerResourceProxyRequest
+    ) async throws -> ReaderNativeServerPreparedProxyRequest)?
 
     func installResourceRequestPreparer(
         _ preparer: @escaping @Sendable (
-            ReaderNativePiResourceProxyRequest
-        ) async throws -> ReaderNativePiPreparedProxyRequest
+            ReaderNativeServerResourceProxyRequest
+        ) async throws -> ReaderNativeServerPreparedProxyRequest
     ) {
         lock.lock()
         resourceRequestPreparer = preparer
@@ -37,7 +37,7 @@ final class ReaderNativePiProxyBroker: @unchecked Sendable {
     /// authorized for one book can therefore never survive a book/binding
     /// transition and be replayed in the next reading context.
     func rotateScope(to newEpoch: UInt64) {
-        let transports: [ReaderNativePiUpstreamTransport]
+        let transports: [ReaderNativeServerUpstreamTransport]
         lock.lock()
         scopeEpoch = newEpoch
         tickets.removeAll(keepingCapacity: false)
@@ -48,7 +48,7 @@ final class ReaderNativePiProxyBroker: @unchecked Sendable {
     }
 
     func cancelAll() {
-        let transports: [ReaderNativePiUpstreamTransport]
+        let transports: [ReaderNativeServerUpstreamTransport]
         lock.lock()
         tickets.removeAll(keepingCapacity: false)
         resourceRequestPreparer = nil
@@ -58,25 +58,25 @@ final class ReaderNativePiProxyBroker: @unchecked Sendable {
         transports.forEach { $0.cancel() }
     }
 
-    /// The sole caller is ReaderNativePiGateway after manifest authorization,
+    /// The sole caller is ReaderNativeServerGateway after manifest authorization,
     /// remote-book identity validation/rewrite and native cookie attachment.
     func issueAuthorizedRequest(
-        _ prepared: ReaderNativePiPreparedProxyRequest
+        _ prepared: ReaderNativeServerPreparedProxyRequest
     ) throws -> String {
         let request = prepared.request
         guard let target = request.url,
               target.scheme?.lowercased() == "https",
-              target.host?.lowercased() == ReaderNativePiGateway.piHost,
+              target.host?.lowercased() == ReaderNativeServerGateway.serverHost,
               target.port == nil,
               target.path.hasPrefix("/") else {
-            throw ReaderNativePiProxyError.invalidUpstream
+            throw ReaderNativeServerProxyError.invalidUpstream
         }
 
         let now = Date()
         lock.lock()
         defer { lock.unlock() }
         guard prepared.scopeEpoch == scopeEpoch else {
-            throw ReaderNativePiProxyError.staleScope
+            throw ReaderNativeServerProxyError.staleScope
         }
         tickets = tickets.filter { $0.value.expiresAt > now }
         var token = Self.makeTicketToken()
@@ -93,7 +93,7 @@ final class ReaderNativePiProxyBroker: @unchecked Sendable {
 
     func response(for ticketToken: String) async throws -> HTTPResponse {
         guard Self.isTicketToken(ticketToken) else {
-            throw ReaderNativePiProxyError.invalidTicket
+            throw ReaderNativeServerProxyError.invalidTicket
         }
 
         let ticket: Ticket
@@ -105,7 +105,7 @@ final class ReaderNativePiProxyBroker: @unchecked Sendable {
             lock.unlock()
         } else {
             lock.unlock()
-            throw ReaderNativePiProxyError.expiredTicket
+            throw ReaderNativeServerProxyError.expiredTicket
         }
 
         return try await streamedResponse(
@@ -116,15 +116,15 @@ final class ReaderNativePiProxyBroker: @unchecked Sendable {
     }
 
     func responseForResource(
-        _ input: ReaderNativePiResourceProxyRequest
+        _ input: ReaderNativeServerResourceProxyRequest
     ) async throws -> HTTPResponse {
         let preparer: @Sendable (
-            ReaderNativePiResourceProxyRequest
-        ) async throws -> ReaderNativePiPreparedProxyRequest
+            ReaderNativeServerResourceProxyRequest
+        ) async throws -> ReaderNativeServerPreparedProxyRequest
         lock.lock()
         guard let installed = resourceRequestPreparer else {
             lock.unlock()
-            throw ReaderNativePiProxyError.unavailable
+            throw ReaderNativeServerProxyError.unavailable
         }
         preparer = installed
         lock.unlock()
@@ -142,13 +142,13 @@ final class ReaderNativePiProxyBroker: @unchecked Sendable {
         scopeEpoch expectedEpoch: UInt64,
         activeKey: String
     ) async throws -> HTTPResponse {
-        let transport = ReaderNativePiUpstreamTransport { [weak self] in
+        let transport = ReaderNativeServerUpstreamTransport { [weak self] in
             self?.finish(ticketToken: activeKey)
         }
         lock.lock()
         guard expectedEpoch == scopeEpoch else {
             lock.unlock()
-            throw ReaderNativePiProxyError.staleScope
+            throw ReaderNativeServerProxyError.staleScope
         }
         active[activeKey] = transport
         lock.unlock()
@@ -182,7 +182,7 @@ final class ReaderNativePiProxyBroker: @unchecked Sendable {
                 upstream.response.statusCode,
                 phrase: phrase
             )
-            let bytes = ReaderNativePiDataByteSequence(stream: upstream.body)
+            let bytes = ReaderNativeServerDataByteSequence(stream: upstream.body)
             return HTTPResponse(
                 statusCode: status,
                 headers: headers,
@@ -195,7 +195,7 @@ final class ReaderNativePiProxyBroker: @unchecked Sendable {
             finish(ticketToken: activeKey)
             transport.cancel()
             if error is CancellationError {
-                throw ReaderNativePiProxyError.cancelled
+                throw ReaderNativeServerProxyError.cancelled
             }
             throw error
         }
@@ -218,19 +218,19 @@ final class ReaderNativePiProxyBroker: @unchecked Sendable {
     }
 }
 
-struct ReaderNativePiPreparedProxyRequest: @unchecked Sendable {
+struct ReaderNativeServerPreparedProxyRequest: @unchecked Sendable {
     let request: URLRequest
     let scopeEpoch: UInt64
 }
 
-struct ReaderNativePiResourceProxyRequest: Sendable {
+struct ReaderNativeServerResourceProxyRequest: Sendable {
     let requestTarget: String
     let surface: ReaderNativeInterfaceSurface
     let accept: String
     let range: String?
 }
 
-private struct ReaderNativePiUpstream: Sendable {
+private struct ReaderNativeServerUpstream: Sendable {
     let response: HTTPURLResponse
     let body: AsyncThrowingStream<Data, Error>
 }
@@ -239,7 +239,7 @@ private struct ReaderNativePiUpstream: Sendable {
 /// collecting the whole response in `data(for:)`. Completing or abandoning the
 /// local HTTP body cancels the native task, so SSE and ordinary binary/JSON
 /// responses share the same Fetch-compatible transport.
-private final class ReaderNativePiUpstreamTransport:
+private final class ReaderNativeServerUpstreamTransport:
     NSObject,
     URLSessionDataDelegate,
     URLSessionTaskDelegate,
@@ -278,7 +278,7 @@ private final class ReaderNativePiUpstreamTransport:
         }
     }
 
-    func start(_ request: URLRequest) async throws -> ReaderNativePiUpstream {
+    func start(_ request: URLRequest) async throws -> ReaderNativeServerUpstream {
         let response = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation {
                 (continuation: CheckedContinuation<HTTPURLResponse, Error>) in
@@ -287,7 +287,7 @@ private final class ReaderNativePiUpstreamTransport:
                 guard !finished, task == nil else {
                     lock.unlock()
                     continuation.resume(
-                        throwing: ReaderNativePiProxyError.cancelled
+                        throwing: ReaderNativeServerProxyError.cancelled
                     )
                     return
                 }
@@ -300,7 +300,7 @@ private final class ReaderNativePiUpstreamTransport:
         } onCancel: {
             self.cancel()
         }
-        return ReaderNativePiUpstream(
+        return ReaderNativeServerUpstream(
             response: response,
             body: bodyStream
         )
@@ -313,7 +313,7 @@ private final class ReaderNativePiUpstreamTransport:
         lock.unlock()
         dataTask?.cancel()
         if dataTask == nil {
-            finish(with: ReaderNativePiProxyError.cancelled)
+            finish(with: ReaderNativeServerProxyError.cancelled)
         }
     }
 
@@ -325,7 +325,7 @@ private final class ReaderNativePiUpstreamTransport:
     ) {
         guard let response = response as? HTTPURLResponse else {
             completionHandler(.cancel)
-            finish(with: ReaderNativePiProxyError.missingHTTPResponse)
+            finish(with: ReaderNativeServerProxyError.missingHTTPResponse)
             return
         }
         let continuation: CheckedContinuation<HTTPURLResponse, Error>?
@@ -388,7 +388,7 @@ private final class ReaderNativePiUpstreamTransport:
             continuation?.resume(throwing: error)
             bodyContinuation.finish(throwing: error)
         } else if let continuation {
-            let missing = ReaderNativePiProxyError.missingHTTPResponse
+            let missing = ReaderNativeServerProxyError.missingHTTPResponse
             continuation.resume(throwing: missing)
             bodyContinuation.finish(throwing: missing)
         } else {
@@ -399,7 +399,7 @@ private final class ReaderNativePiUpstreamTransport:
     }
 }
 
-private struct ReaderNativePiDataByteSequence:
+private struct ReaderNativeServerDataByteSequence:
     AsyncBufferedSequence,
     Sendable
 {
@@ -440,7 +440,7 @@ private struct ReaderNativePiDataByteSequence:
     }
 }
 
-enum ReaderNativePiProxyError: LocalizedError {
+enum ReaderNativeServerProxyError: LocalizedError {
     case invalidUpstream
     case staleScope
     case invalidTicket

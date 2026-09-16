@@ -47,10 +47,10 @@ import WebKit
 /// 这不是参数问题，是**传输类型不对**。
 @MainActor
 enum ReaderWatchVoiceTurn {
-    /// Pi 的基址。与 ReaderNativePiGateway.piHost 同源，改一处要改两处 ——
+    /// Pi 的基址。与 ReaderNativeServerGateway.serverHost 同源，改一处要改两处 ——
     /// 但故意不去引用它：那个类是 WebView 的消息处理器，为了一个常量把
     /// 生命周期绑上去不划算。
-    static let piOrigin = "https://bwicarus-2.taile44d0c.ts.net"
+    static let serverOrigin = "https://bwicarus-2.taile44d0c.ts.net"
 
     struct Outcome {
         let transcript: String
@@ -121,7 +121,7 @@ enum ReaderWatchVoiceTurn {
         body.append(clip)
         body.append(("\r\n--" + boundary + "--\r\n").data(using: .utf8)!)
 
-        var request = URLRequest(url: URL(string: piOrigin + "/api/voice/transcribe")!)
+        var request = URLRequest(url: URL(string: serverOrigin + "/api/voice/transcribe")!)
         request.httpMethod = "POST"
         request.setValue(
             "multipart/form-data; boundary=" + boundary,
@@ -146,7 +146,7 @@ enum ReaderWatchVoiceTurn {
     private static func ask(
         transcript: String, cookies: [HTTPCookie]
     ) async throws -> String {
-        var request = URLRequest(url: URL(string: piOrigin + "/api/voice/agent")!)
+        var request = URLRequest(url: URL(string: serverOrigin + "/api/voice/agent")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         apply(cookies, to: &request)

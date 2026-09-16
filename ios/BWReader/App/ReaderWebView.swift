@@ -322,10 +322,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeLocalNotesMessageProxy: WeakScriptMessageHandlerWithReply?
     private var nativeAnkiMobileMessageProxy:
         WeakScriptMessageHandlerWithReply?
-    private var nativePiGateway: ReaderNativePiGateway?
+    private var nativeServerGateway: ReaderNativeServerGateway?
     private weak var remoteLibraryCoordinator: ReaderRemoteLibraryCoordinator?
-    private var nativePiRemoteLibraryCancellable: AnyCancellable?
-    private var nativePiSyncBridge: ReaderNativePiSyncBridge?
+    private var nativeServerRemoteLibraryCancellable: AnyCancellable?
+    private var nativeServerSyncBridge: ReaderNativeServerSyncBridge?
     private var nativeRealtimeBridge: ReaderNativeRealtimeBridge?
     private var nativeBookOCRBridge: NativeBookOCRBridge?
     private var nativePDFMutationBridge: ReaderNativePDFMutationBridge?
@@ -459,26 +459,26 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             name: nativeAnkiMobileMessageName
         )
         if let localRuntimeServer {
-            let nativePiGateway = ReaderNativePiGateway(
+            let nativeServerGateway = ReaderNativeServerGateway(
                 webView: webView,
                 trustedBaseURL: localRuntimeServer.baseURL,
-                piProxyBroker: localRuntimeServer.piProxyBroker
+                serverProxyBroker: localRuntimeServer.serverProxyBroker
             )
-            self.nativePiGateway = nativePiGateway
+            self.nativeServerGateway = nativeServerGateway
             contentController.addScriptMessageHandler(
-                nativePiGateway,
+                nativeServerGateway,
                 contentWorld: .page,
-                name: ReaderNativePiGateway.messageName
+                name: ReaderNativeServerGateway.messageName
             )
-            let nativePiSyncBridge = ReaderNativePiSyncBridge(
+            let nativeServerSyncBridge = ReaderNativeServerSyncBridge(
                 webView: webView,
                 trustedBaseURL: localRuntimeServer.baseURL
             )
-            self.nativePiSyncBridge = nativePiSyncBridge
+            self.nativeServerSyncBridge = nativeServerSyncBridge
             contentController.addScriptMessageHandler(
-                nativePiSyncBridge,
+                nativeServerSyncBridge,
                 contentWorld: .page,
-                name: ReaderNativePiSyncBridge.messageName
+                name: ReaderNativeServerSyncBridge.messageName
             )
             let nativeRealtimeBridge = ReaderNativeRealtimeBridge(
                 webView: webView,
@@ -1087,7 +1087,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     func bind(remoteLibrary: ReaderRemoteLibraryCoordinator) {
         guard remoteLibraryCoordinator !== remoteLibrary else { return }
         remoteLibraryCoordinator = remoteLibrary
-        nativePiRemoteLibraryCancellable = Publishers.CombineLatest3(
+        nativeServerRemoteLibraryCancellable = Publishers.CombineLatest3(
             remoteLibrary.$books,
             remoteLibrary.$remoteToLocalID,
             remoteLibrary.$localDigests
@@ -1103,7 +1103,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         guard let currentLocalBook,
               let currentLocalLibrary,
               let remoteLibraryCoordinator else {
-            nativePiGateway?.updateTrustedRemoteBookBindings(
+            nativeServerGateway?.updateTrustedRemoteBookBindings(
                 current: nil,
                 catalog: []
             )
@@ -1120,7 +1120,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 localContentSHA256: book.contentSha256
             )
         }
-        nativePiGateway?.updateTrustedRemoteBookBindings(
+        nativeServerGateway?.updateTrustedRemoteBookBindings(
             current: currentBinding,
             catalog: catalogBindings
         )
@@ -2569,7 +2569,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             // The outgoing page loses its Pi identity only after its native PDF
             // transaction has settled. A failed rollback leaves this binding and
             // page in place because the catch below aborts the switch.
-            nativePiGateway?.updateTrustedRemoteBookBinding(nil)
+            nativeServerGateway?.updateTrustedRemoteBookBinding(nil)
             didClearOutgoingRemoteBinding = true
 
             var openingBook = library.books.first(where: {
@@ -2664,7 +2664,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             return true
         } catch {
             if didClearOutgoingRemoteBinding {
-                nativePiGateway?.updateTrustedRemoteBookBinding(nil)
+                nativeServerGateway?.updateTrustedRemoteBookBinding(nil)
             }
             // 启动自动恢复失败时这是唯一的真因记录 —— 恢复发生在书库 sheet
             // 弹出之前，横幅只能靠它转述（2026-08-25 实锤：没有它，用户只能

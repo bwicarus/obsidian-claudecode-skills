@@ -21,7 +21,7 @@ final class ReaderDisplayBoardManager: ObservableObject {
 
         var imageURL: URL? {
             // App 里的缩略条一律取方卡；宽卡是小组件少卡时用的。
-            URL(string: "https://\(ReaderNativePiGateway.piHost)"
+            URL(string: "https://\(ReaderNativeServerGateway.serverHost)"
                 + "/reader-board/card.png?sha=\(sha)&shape=square")
         }
     }
@@ -45,7 +45,7 @@ final class ReaderDisplayBoardManager: ObservableObject {
     @Published private(set) var failure: String?
 
     private static let endpoint = URL(
-        string: "https://\(ReaderNativePiGateway.piHost)/reader-board/v1"
+        string: "https://\(ReaderNativeServerGateway.serverHost)/reader-board/v1"
     )!
 
     func refresh() async {

@@ -18,9 +18,9 @@ import WebKit
 /// 如果这里含糊，看代码的人会以为语音也有同样的毛病。
 @MainActor
 enum ReaderWatchTokenProvisioning {
-    /// 与 `ReaderWatchVoiceTurn.piOrigin` 同源。刻意各写一份而不互相引用：
+    /// 与 `ReaderWatchVoiceTurn.serverOrigin` 同源。刻意各写一份而不互相引用：
     /// 那个类型是 WebView 的消息处理器，为了一个常量把生命周期绑上去不划算。
-    static let piOrigin = "https://bwicarus-2.taile44d0c.ts.net"
+    static let serverOrigin = "https://bwicarus-2.taile44d0c.ts.net"
 
     enum Failure: LocalizedError {
         case notSignedIn
@@ -45,7 +45,7 @@ enum ReaderWatchTokenProvisioning {
             .filter { $0.domain.contains("bwicarus") }
         guard !cookies.isEmpty else { throw Failure.notSignedIn }
 
-        var request = URLRequest(url: URL(string: piOrigin + "/api/voice/watch-token")!)
+        var request = URLRequest(url: URL(string: serverOrigin + "/api/voice/watch-token")!)
         for (key, value) in HTTPCookie.requestHeaderFields(with: cookies) {
             request.setValue(value, forHTTPHeaderField: key)
         }

@@ -6,7 +6,7 @@ const ROOT = new URL("../../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, ROOT), "utf8");
 const manifest = JSON.parse(read("ios/BWReader/native_reader_interface_manifest.json"));
 const runtime = read("_server_deploy/static/pdf/native-local-runtime.js");
-const gateway = read("ios/BWReader/App/ReaderNativePiGateway.swift");
+const gateway = read("ios/BWReader/App/ReaderNativeServerGateway.swift");
 
 function route(path) {
   const found = manifest.routes.find((candidate) => candidate.path === path);
@@ -207,14 +207,14 @@ test("native sync-batch splits only the old bounded outbox surface by declared o
   assert.match(runtime, /function nativeSyncBatchTarget\(op\)/);
   assert.match(runtime, /\^\\\/pdf\\\/api\\\/entity\\\//);
   assert.match(runtime, /declaredNativeInterface\(target\.url\.pathname, target\.method\)/);
-  assert.match(runtime, /route\.owner === 'local'\s*\? localFetch\(target\.url\.href, nestedInit, true, writerLease\)\s*:\s*nativePiFetch/);
+  assert.match(runtime, /route\.owner === 'local'\s*\? localFetch\(target\.url\.href, nestedInit, true, writerLease\)\s*:\s*nativeServerFetch/);
   assert.match(runtime, /results\[index\] = result/);
   assert.match(runtime, /ownerNamespace:\s*lease\.namespace/);
   assert.match(runtime, /generation:\s*lease\.generation/);
   assert.match(runtime, /X-BW-Mutation-Id/);
   assert.doesNotMatch(
     runtime.slice(dispatch, dispatch + 180),
-    /nativePiFetch\(input, init, route\)/,
+    /nativeServerFetch\(input, init, route\)/,
     "the opaque outer batch must not be sent to Pi",
   );
 });

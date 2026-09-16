@@ -50,7 +50,7 @@ struct ReaderNativeRemoteBookPolicy: Decodable, Sendable {
     let continuation: ReaderNativeRemoteBookContinuation?
 }
 
-struct ReaderNativePiRoutePolicy: Sendable {
+struct ReaderNativeServerRoutePolicy: Sendable {
     let path: String
     let methods: [String]
     let remoteBook: ReaderNativeRemoteBookPolicy?
@@ -126,7 +126,7 @@ struct ReaderNativeInterfaceManifest: Decodable {
         path: String,
         method: String,
         surface: ReaderNativeInterfaceSurface
-    ) -> ReaderNativePiRoutePolicy? {
+    ) -> ReaderNativeServerRoutePolicy? {
         guard let route = matchingRoute(path: path),
               route.owner == .pi,
               route.status == .supported,
@@ -134,7 +134,7 @@ struct ReaderNativeInterfaceManifest: Decodable {
               route.surfaces.contains(surface) else {
             return nil
         }
-        return ReaderNativePiRoutePolicy(
+        return ReaderNativeServerRoutePolicy(
             path: route.path,
             methods: route.methods,
             remoteBook: route.remoteBook

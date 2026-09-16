@@ -550,7 +550,7 @@ async function harness(options = {}) {
     },
     webkit: {
       messageHandlers: {
-        bwNativePiGateway: {
+        bwNativeServerGateway: {
           postMessage(message) {
             gatewayMessages.push(clone(message));
             if (options.gatewayReply) {
@@ -1325,7 +1325,7 @@ test("EPUB local search matches sanitized visible text with bounded legacy excer
   assert.equal(capped.length, 80);
   const suppliedContext = SOURCE.slice(
     SOURCE.indexOf("function nativeEPUBAssistantContext"),
-    SOURCE.indexOf("function nativePiJSON"),
+    SOURCE.indexOf("function nativeServerJSON"),
   );
   assert.match(suppliedContext, /epubSectionVisibleText\(epub, index\)/);
   assert.match(suppliedContext, /context\.visible_text/);

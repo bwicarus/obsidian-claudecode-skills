@@ -11,7 +11,7 @@ const NATIVE_TOOLS = read("ios/BWReader/App/NativeReaderToolsView.swift");
 const APP_ROOT = read("ios/BWReader/App/BWReaderNativeApp.swift");
 const LOCAL_SERVER = read("ios/BWReader/App/ReaderLocalRuntimeServer.swift");
 const LOCAL_PACKAGER = read("ios/BWReader/package_local_reader.py");
-const NATIVE_PI_GATEWAY = read("ios/BWReader/App/ReaderNativePiGateway.swift");
+const NATIVE_PI_GATEWAY = read("ios/BWReader/App/ReaderNativeServerGateway.swift");
 const NATIVE_INTERFACE_MANIFEST = read(
   "ios/BWReader/App/ReaderNativeInterfaceManifest.swift",
 );
@@ -342,9 +342,9 @@ test("native WebView reloads only after server rebuild or content-process termin
 });
 
 test("local WebView owns both bounded Pi gateway handlers on the main page world", () => {
-  assert.match(WEB_VIEW, /ReaderNativePiGateway\(\s*webView: webView,\s*trustedBaseURL: localRuntimeServer\.baseURL/s);
-  assert.match(WEB_VIEW, /ReaderNativePiSyncBridge\(\s*webView: webView,\s*trustedBaseURL: localRuntimeServer\.baseURL/s);
-  assert.match(WEB_VIEW, /contentWorld: \.page,\s*name: ReaderNativePiSyncBridge\.messageName/s);
+  assert.match(WEB_VIEW, /ReaderNativeServerGateway\(\s*webView: webView,\s*trustedBaseURL: localRuntimeServer\.baseURL/s);
+  assert.match(WEB_VIEW, /ReaderNativeServerSyncBridge\(\s*webView: webView,\s*trustedBaseURL: localRuntimeServer\.baseURL/s);
+  assert.match(WEB_VIEW, /contentWorld: \.page,\s*name: ReaderNativeServerSyncBridge\.messageName/s);
 });
 
 test("native Pi gateway canonicalizes first and authorizes through the packaged interface manifest", () => {
@@ -386,7 +386,7 @@ test("native Pi gateway canonicalizes first and authorizes through the packaged 
 test("native Pi gateway applies structured current/catalog book policies before network", () => {
   assert.match(
     NATIVE_INTERFACE_MANIFEST,
-    /func piRoutePolicy\([\s\S]*\) -> ReaderNativePiRoutePolicy\?/,
+    /func piRoutePolicy\([\s\S]*\) -> ReaderNativeServerRoutePolicy\?/,
   );
   assert.match(
     NATIVE_INTERFACE_MANIFEST,

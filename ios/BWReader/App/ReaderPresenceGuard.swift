@@ -36,7 +36,7 @@ final class ReaderPresenceGuard {
 
     private static let zonesKey = "readerVoiceZonesCache"
     private static let endpoint = URL(
-        string: "https://\(ReaderNativePiGateway.piHost)/reader-presence/v1")
+        string: "https://\(ReaderNativeServerGateway.serverHost)/reader-presence/v1")
 
     private var routeObserver: NSObjectProtocol?
     private var reporting = false

@@ -230,7 +230,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
     let allowedStaticFiles: Set<String>
     let staticRevision: String
     let state: ReaderLocalRuntimeState
-    let piProxyBroker: ReaderNativePiProxyBroker
+    let serverProxyBroker: ReaderNativeServerProxyBroker
     let imageProxyBroker: ReaderNativeImageProxyBroker
     let pageRenderer: ReaderNativePDFPageRenderer
     let visualCaptureBroker: ReaderNativeVisualCaptureBroker
@@ -386,8 +386,8 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 return response(status: .forbidden, text: "invalid referer")
             }
             do {
-                var result = try await piProxyBroker.responseForResource(
-                    ReaderNativePiResourceProxyRequest(
+                var result = try await serverProxyBroker.responseForResource(
+                    ReaderNativeServerResourceProxyRequest(
                         requestTarget: request.target.rawValue,
                         surface: surface,
                         accept: request.headers[HTTPHeader("Accept")] ?? "*/*",
@@ -450,7 +450,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
 
         let segments = relative.split(separator: "/", omittingEmptySubsequences: false)
         if segments.count == 2,
-           segments[0] == Substring(ReaderNativePiProxyBroker.routeComponent) {
+           segments[0] == Substring(ReaderNativeServerProxyBroker.routeComponent) {
             guard request.method == .GET else {
                 return response(
                     status: .methodNotAllowed,
@@ -459,7 +459,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 )
             }
             do {
-                var result = try await piProxyBroker.response(
+                var result = try await serverProxyBroker.response(
                     for: String(segments[1])
                 )
                 Self.secure(&result)
@@ -1854,7 +1854,7 @@ final class ReaderLocalRuntimeServer {
     private let capabilityToken: String
     private let cspNonce: String
     private let state: ReaderLocalRuntimeState
-    let piProxyBroker: ReaderNativePiProxyBroker
+    let serverProxyBroker: ReaderNativeServerProxyBroker
     let visualCaptureBroker: ReaderNativeVisualCaptureBroker
     private let server: HTTPServer
     private let bundleVerificationTask: Task<Void, Error>
@@ -1933,7 +1933,7 @@ final class ReaderLocalRuntimeServer {
         capabilityToken = try Self.makeRandomHex(byteCount: 32)
         cspNonce = try Self.makeRandomHex(byteCount: 32)
         state = ReaderLocalRuntimeState()
-        piProxyBroker = ReaderNativePiProxyBroker()
+        serverProxyBroker = ReaderNativeServerProxyBroker()
         let imageProxyBroker = ReaderNativeImageProxyBroker()
         visualCaptureBroker = ReaderNativeVisualCaptureBroker()
         let address = try sockaddr_in.inet(ip4: Self.host, port: Self.port)
@@ -1944,7 +1944,7 @@ final class ReaderLocalRuntimeServer {
             allowedStaticFiles: staticFiles,
             staticRevision: String(manifestDigest.prefix(24)),
             state: state,
-            piProxyBroker: piProxyBroker,
+            serverProxyBroker: serverProxyBroker,
             imageProxyBroker: imageProxyBroker,
             pageRenderer: ReaderNativePDFPageRenderer(),
             visualCaptureBroker: visualCaptureBroker
@@ -1958,7 +1958,7 @@ final class ReaderLocalRuntimeServer {
     }
 
     deinit {
-        piProxyBroker.cancelAll()
+        serverProxyBroker.cancelAll()
         bundleVerificationTask.cancel()
         lifecycleTask?.cancel()
         runTask?.cancel()

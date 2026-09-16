@@ -17,27 +17,40 @@ struct ReaderNativeRemoteBookBinding: Equatable, Sendable {
 }
 
 /// A narrow native gateway for network-only Reader actions. The local shell
-/// never receives Pi cookies or account tokens. Swift authorizes and rewrites
+/// never receives server cookies or account tokens.
+///
+/// Note: the file is still named `ReaderNativePiGateway.swift` because renaming
+/// it means touching the Xcode project; the types and the host it talks to are
+/// named after what they actually are (the Windows server), not the Pi. Swift authorizes and rewrites
 /// the request, then returns a one-use loopback URL whose body is streamed by
 /// ReaderLocalRuntimeServer as a normal Fetch Response/ReadableStream.
 @MainActor
-final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
-    static let messageName = "bwNativePiGateway"
-    static let piHost = "bwicarus-2.taile44d0c.ts.net"
+final class ReaderNativeServerGateway: NSObject, WKScriptMessageHandlerWithReply {
+    static let messageName = "bwNativeServerGateway"
+    /// The single upstream host every network-only Reader action goes to.
+    ///
+    /// ⚠ This is the **Windows** machine (`bwicarus-2`), not the Raspberry Pi.
+    /// It used to be called `piHost`, and that name cost real debugging time on
+    /// 2026-09-17: a dictionary regression was chased all the way to the Pi —
+    /// SSH'd in, found its webapp stopped, copied 950 MB of dictionary data over —
+    /// before noticing the requests had been coming here all along. The actual
+    /// fault was two stale files on this Windows box. Keep the name neutral so
+    /// nobody re-runs that hunt.
+    static let serverHost = "bwicarus-2.taile44d0c.ts.net"
 
     private static let requestContract = "reader-native-pi-request/2"
     private static let responseContract = "reader-native-pi-response/2"
     private static let maximumRequestBytes = 8 * 1_024 * 1_024
     private static let maximumBase64RequestCharacters =
         ((maximumRequestBytes + 2) / 3) * 4
-    private static let piOrigin = URL(
-        string: "https://\(piHost)"
+    private static let serverOrigin = URL(
+        string: "https://\(serverHost)"
     )!
 
     private weak var webView: WKWebView?
     private let trustedBasePath: String
     private let trustedBaseURL: URL
-    private let piProxyBroker: ReaderNativePiProxyBroker
+    private let serverProxyBroker: ReaderNativeServerProxyBroker
     private let interfaceManifest: ReaderNativeInterfaceManifest?
     private let interfaceManifestError: String?
     private var currentRemoteBookBinding: ReaderNativeRemoteBookBinding?
@@ -48,11 +61,11 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
     init(
         webView: WKWebView,
         trustedBaseURL: URL,
-        piProxyBroker: ReaderNativePiProxyBroker
+        serverProxyBroker: ReaderNativeServerProxyBroker
     ) {
         self.webView = webView
         self.trustedBaseURL = trustedBaseURL
-        self.piProxyBroker = piProxyBroker
+        self.serverProxyBroker = serverProxyBroker
         trustedBasePath = trustedBaseURL.path
         do {
             interfaceManifest = try ReaderNativeInterfaceManifest()
@@ -62,7 +75,7 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
             interfaceManifestError = "原生 Reader 接口清单不可用"
         }
         super.init()
-        piProxyBroker.installResourceRequestPreparer { [weak self] request in
+        serverProxyBroker.installResourceRequestPreparer { [weak self] request in
             guard let self else {
                 throw GatewayError("BW_PI_GATEWAY_UNAVAILABLE：服务器网关不可用")
             }
@@ -103,11 +116,11 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
         catalogRemoteBookBindings = sanitizedCatalog
         scopeEpoch &+= 1
         continuations.removeAll(keepingCapacity: false)
-        piProxyBroker.rotateScope(to: scopeEpoch)
+        serverProxyBroker.rotateScope(to: scopeEpoch)
     }
 
     deinit {
-        piProxyBroker.cancelAll()
+        serverProxyBroker.cancelAll()
     }
 
     func userContentController(
@@ -177,11 +190,11 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
                     authorization.request,
                     authorizedEpoch: authorizedEpoch
                 )
-                let ticket = try self.piProxyBroker.issueAuthorizedRequest(
+                let ticket = try self.serverProxyBroker.issueAuthorizedRequest(
                     prepared
                 )
                 guard authorizedEpoch == self.scopeEpoch else {
-                    self.piProxyBroker.rotateScope(to: self.scopeEpoch)
+                    self.serverProxyBroker.rotateScope(to: self.scopeEpoch)
                     throw GatewayError(
                         "BW_PI_GATEWAY_REMOTE_BOOK：阅读书籍已经切换，请重试"
                     )
@@ -195,7 +208,7 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
                 }
                 let streamURL = self.trustedBaseURL
                     .appendingPathComponent(
-                        ReaderNativePiProxyBroker.routeComponent,
+                        ReaderNativeServerProxyBroker.routeComponent,
                         isDirectory: true
                     )
                     .appendingPathComponent(ticket, isDirectory: false)
@@ -230,12 +243,12 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
         _ input: NativeRequest,
         authorizedEpoch: UInt64,
         range: String? = nil
-    ) async throws -> ReaderNativePiPreparedProxyRequest {
+    ) async throws -> ReaderNativeServerPreparedProxyRequest {
         guard authorizedEpoch == scopeEpoch,
-              let target = URL(string: input.path, relativeTo: Self.piOrigin),
-              target.scheme == Self.piOrigin.scheme,
-              target.host == Self.piOrigin.host,
-              target.port == Self.piOrigin.port,
+              let target = URL(string: input.path, relativeTo: Self.serverOrigin),
+              target.scheme == Self.serverOrigin.scheme,
+              target.host == Self.serverOrigin.host,
+              target.port == Self.serverOrigin.port,
               target.path.hasPrefix("/") else {
             throw GatewayError("BW_PI_GATEWAY_ROUTE：服务器 API 地址无效")
         }
@@ -266,15 +279,15 @@ final class ReaderNativePiGateway: NSObject, WKScriptMessageHandlerWithReply {
         }
         let cookieHeader = HTTPCookie.requestHeaderFields(with: matchingCookies)
         cookieHeader.forEach { request.setValue($1, forHTTPHeaderField: $0) }
-        return ReaderNativePiPreparedProxyRequest(
+        return ReaderNativeServerPreparedProxyRequest(
             request: request,
             scopeEpoch: authorizedEpoch
         )
     }
 
     private func prepareAuthorizedResource(
-        _ resource: ReaderNativePiResourceProxyRequest
-    ) async throws -> ReaderNativePiPreparedProxyRequest {
+        _ resource: ReaderNativeServerResourceProxyRequest
+    ) async throws -> ReaderNativeServerPreparedProxyRequest {
         guard Self.isSafeHeaderValue(resource.accept, maximumBytes: 256),
               let canonical = Self.canonicalRequestPath(resource.requestTarget),
               let routePolicy = interfaceManifest?.piRoutePolicy(

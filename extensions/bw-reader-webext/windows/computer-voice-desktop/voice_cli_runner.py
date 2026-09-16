@@ -141,9 +141,12 @@ DEFAULTS: dict = {
                                    # 那份文件正是链路页和历史的来源，所以绝不能自动跑。
                                    # 真要压缩就手动按按钮 —— thread_compact 会先把 rollout 备份一份
     "threadCompactItems": 220,     # 开了自动压缩时的条数阈值
-    "turnSteerEnabled": False,     # 后台正在跑时，把最新状态插进那一轮（turn/steer）。
-                                   # ⚠ 默认关：实测有一定概率让那一轮一条回答都不产出，
-                                   # 在语音里就是「AI 不理我」，比不插还糟。证据够了再开
+    "turnSteerEnabled": True,      # 后台正在跑时，把最新状态插进那一轮（turn/steer）。
+                                   # 2026-09-17 受控实验（4 个时机 × 4 次 = 16 轮）：
+                                   # **一次都没打哑**，0.5/2/5 秒三档原题全部答完且插播全部被采纳；
+                                   # 10 秒那档是轮早已结束、steer 调用本身报错，原题照样完成。
+                                   # ⚠ 早先记的「六分之一会打哑」是**探针写坏造成的假象** ——
+                                   # 那版用阻塞 readline 收尾，漏掉了迟到的回答，把「没读到」当成「没产出」。
     "idleStopMinutes": 20,         # 闲置这么久自动结束通话（0=不自动关）。实测连着不说话也按墙钟 1:1 计费
     "contextInkImage": True,       # 开口时页上有新笔迹（lastEditedAt 在 freshWindowS 内、已稳定）→ 取圈画附近的图随状态一起注入后台；同一 (页,笔迹版本) 只投一次
     "contextInkImageMaxBytes": 700000,   # 超过就不投（图片按 token 计费且留在线程历史里）
@@ -1920,7 +1923,7 @@ class Runner:
         ⚠ 措辞必须是被动的状态通报。实测用祈使句（「立刻停止，改为…」）会把那一轮
         打哑 —— 一条回答都不产出，在语音里就是「AI 不理我」，比不插还糟。
         """
-        if not self.settings.get("turnSteerEnabled", False):
+        if not self.settings.get("turnSteerEnabled", True):
             return {"ok": False, "error": "已关闭（turnSteerEnabled）"}
         turn = self._turn
         if not (self.backend_busy and turn and turn.get("id") and self.thread_id):

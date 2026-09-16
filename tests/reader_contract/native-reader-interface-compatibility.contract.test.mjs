@@ -408,7 +408,7 @@ test("formula recognition is a real Pi interface and its Swift consumer is packa
 
   const swift = read("ios/BWReader/App/NativeFormulaRecognition.swift");
   const toolsView = read("ios/BWReader/App/NativeReaderToolsView.swift");
-  const gateway = read("ios/BWReader/App/ReaderNativePiGateway.swift");
+  const gateway = read("ios/BWReader/App/ReaderNativeServerGateway.swift");
   assert.match(swift, /fetch\('\/pdf\/api\/formula-ocr'/);
   assert.match(swift, /new URL\('\/pdf\/api\/formula-ocr-status'/);
   assert.match(swift, /ReaderLocalLibraryManager\.shared\.books\.contains/);

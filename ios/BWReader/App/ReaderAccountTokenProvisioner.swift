@@ -10,14 +10,14 @@ import os
 /// - 幂等：Keychain 里已有同一服务器的令牌就不再铸。服务端 api_tokens 表里的令牌不随
 ///   会话过期，一枚够用很久；每次启动都铸只会在服务器上堆一排令牌。
 /// - 凭据来源是 App 的网站数据存储里的服务器会话 cookie（登录页写进去的那份），
-///   跟 ReaderNativePiGateway 给同步请求带 cookie 是同一个来源；没有 cookie 就是没登录，
+///   跟 ReaderNativeServerGateway 给同步请求带 cookie 是同一个来源；没有 cookie 就是没登录，
 ///   安静返回，不弹窗 —— 这不是用户发起的动作，弹出来只会让人以为登录失败。
 /// - 令牌只进 Keychain。扩展经 native messaging 取走后走它自己的校验与保存路径。
 @MainActor
 final class ReaderAccountTokenProvisioner {
     static let shared = ReaderAccountTokenProvisioner()
 
-    /// 与 ReaderNativePiSyncBridge.loginURL 同一台服务器（Windows 桥）。
+    /// 与 ReaderNativeServerSyncBridge.loginURL 同一台服务器（Windows 桥）。
     static let origin = URL(string: "https://bwicarus-2.taile44d0c.ts.net")!
 
     private let log = Logger(

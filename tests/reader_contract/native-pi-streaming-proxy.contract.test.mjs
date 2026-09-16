@@ -4,8 +4,8 @@ import { readFileSync } from "node:fs";
 
 const ROOT = new URL("../../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, ROOT), "utf8");
-const GATEWAY = read("ios/BWReader/App/ReaderNativePiGateway.swift");
-const PROXY = read("ios/BWReader/App/ReaderNativePiProxy.swift");
+const GATEWAY = read("ios/BWReader/App/ReaderNativeServerGateway.swift");
+const PROXY = read("ios/BWReader/App/ReaderNativeServerProxy.swift");
 const SERVER = read("ios/BWReader/App/ReaderLocalRuntimeServer.swift");
 const WEB_VIEW = read("ios/BWReader/App/ReaderWebView.swift");
 const MANIFEST = JSON.parse(read("ios/BWReader/native_reader_interface_manifest.json"));
@@ -39,7 +39,7 @@ test("binary request schema decodes canonical base64 with the Pi 8 MiB raw limit
 test("book or catalog changes revoke unused tickets, continuations and active streams", () => {
   assert.match(GATEWAY, /scopeEpoch &\+= 1/);
   assert.match(GATEWAY, /continuations\.removeAll/);
-  assert.match(GATEWAY, /piProxyBroker\.rotateScope\(to: scopeEpoch\)/);
+  assert.match(GATEWAY, /serverProxyBroker\.rotateScope\(to: scopeEpoch\)/);
   assert.match(PROXY, /tickets\.removeAll/);
   assert.match(PROXY, /transports\.forEach \{ \$0\.cancel\(\) \}/);
   assert.match(WEB_VIEW, /currentLocalLibrary\.books\.compactMap/);

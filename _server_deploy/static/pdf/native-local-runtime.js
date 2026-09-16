@@ -3130,7 +3130,7 @@
   }
 
   function piCompatibilityFailure(error, fallbackCode) {
-    var failure = nativePiFailure(error);
+    var failure = nativeServerFailure(error);
     return {
       state: 'unconfirmed',
       confirmed: false,
@@ -3144,7 +3144,7 @@
     ACTIVE_READING_ALLOWED_KEYS.forEach(function (key) {
       if (Object.prototype.hasOwnProperty.call(record, key)) body[key] = record[key];
     });
-    return nativePiFetch(url.href, {
+    return nativeServerFetch(url.href, {
       method: 'POST',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -3255,7 +3255,7 @@
           error, 'BW_LOCAL_CONTEXT_SYNC_PREFERENCE', 500
         ));
       }
-      return nativePiFetch(url.href, {
+      return nativeServerFetch(url.href, {
         method: 'GET',
         headers: { 'Accept': 'application/json' },
         signal: requestSignal(input, init)
@@ -3322,7 +3322,7 @@
         deliveryMode: deliveryMode,
         ts: nowSeconds()
       });
-      return nativePiFetch(url.href, {
+      return nativeServerFetch(url.href, {
         method: 'POST',
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: saved.enabled, deliveryMode: saved.deliveryMode }),
@@ -5307,7 +5307,7 @@
             '页面翻译服务未由服务器提供', code + '_ROUTE', 503
           );
         }
-        return nativePiJSON(translationURL, {
+        return nativeServerJSON(translationURL, {
           texts: sentences.map(function (sentence) { return sentence.text; })
         }, translationRoute, requestSignal(input, init)).then(function (translated) {
           if (!translated || !Array.isArray(translated.translations) ||
@@ -9918,7 +9918,7 @@
     if (typeof Request !== 'undefined' && input instanceof Request) return input.signal;
     return undefined;
   }
-  function nativePiFetch(input, init, declaredRoute) {
+  function nativeServerFetch(input, init, declaredRoute) {
     var url = urlOf(input);
     var method = methodOf(input, init);
     var route;
@@ -9936,7 +9936,7 @@
     } catch (error) {
       return Promise.reject(error);
     }
-    var handler = root.webkit && root.webkit.messageHandlers && root.webkit.messageHandlers.bwNativePiGateway;
+    var handler = root.webkit && root.webkit.messageHandlers && root.webkit.messageHandlers.bwNativeServerGateway;
     if (!handler || typeof handler.postMessage !== 'function') {
       return Promise.reject(new RuntimeError('服务器网关不可用', 'BW_PI_GATEWAY_UNAVAILABLE'));
     }
@@ -9963,7 +9963,7 @@
     });
   }
 
-  function nativePiFailure(error) {
+  function nativeServerFailure(error) {
     var message = String(error && error.message || error || '服务器网关请求失败');
     var embeddedCode = message.match(/\b(BW_PI_GATEWAY_[A-Z0-9_]+)\b/);
     var code = error && typeof error.code === 'string' && error.code
@@ -12074,7 +12074,7 @@
     }).then(function () {
       return nativePDFRequestBody(input, init, 'context', writerLease);
     }).then(function (request) {
-      return nativePiFetch(url.href, {
+      return nativeServerFetch(url.href, {
         method: 'POST',
         headers: {
           'Accept': requestHeader(input, init, 'Accept') || 'text/event-stream',
@@ -12096,7 +12096,7 @@
   function nativePDFVoiceToolFetch(input, init, url, route) {
     return withNativePDFWriter('assistant-voice', function (writerLease) {
       return nativePDFRequestBody(input, init, 'ctx', writerLease).then(function (request) {
-      return nativePiFetch(url.href, {
+      return nativeServerFetch(url.href, {
         method: 'POST',
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
         body: JSON.stringify(request.body),
@@ -12198,8 +12198,8 @@
     }).catch(function () { return context; });
   }
 
-  function nativePiJSON(url, body, route, signal) {
-    return nativePiFetch(url.href, {
+  function nativeServerJSON(url, body, route, signal) {
+    return nativeServerFetch(url.href, {
       method: 'POST',
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -12238,7 +12238,7 @@
               native_local_state: values[1]
             })
           });
-          return nativePiFetch(url.href, {
+          return nativeServerFetch(url.href, {
             method: 'POST',
             headers: {
               'Accept': requestHeader(input, init, 'Accept') || 'text/event-stream',
@@ -12444,7 +12444,7 @@
 
   function nativeEPUBGenericChatFetch(input, init, url, route) {
     return nativeEPUBGenericRequestBody(input, init, 'context').then(function (request) {
-      return nativePiFetch(url.href, {
+      return nativeServerFetch(url.href, {
         method: 'POST',
         headers: {
           'Accept': requestHeader(input, init, 'Accept') || 'text/event-stream',
@@ -12460,7 +12460,7 @@
 
   function nativeEPUBGenericVoiceToolFetch(input, init, url, route) {
     return nativeEPUBGenericRequestBody(input, init, 'ctx').then(function (request) {
-      return nativePiFetch(url.href, {
+      return nativeServerFetch(url.href, {
         method: 'POST',
         headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
         body: JSON.stringify(request.body),
@@ -13027,7 +13027,7 @@
           throw new RuntimeError('本机 EPUB action 合同无效', 'BW_NATIVE_EPUB_ACTION_BODY');
         }
         return nativeEPUBActionTransaction(body.action, 'redo', function (nextAction) {
-          return nativePiJSON(url, {
+          return nativeServerJSON(url, {
             op: 'attach', file: body.file, actions: [nextAction],
             native_contract: NATIVE_EPUB_ACTION_CONTRACT
           }, route, signal);
@@ -13053,7 +13053,7 @@
         var remoteBody = Object.assign({}, body, {
           native_contract: NATIVE_EPUB_ACTION_CONTRACT
         });
-        return nativePiJSON(url, remoteBody, route, signal).then(function (payload) {
+        return nativeServerJSON(url, remoteBody, route, signal).then(function (payload) {
           if (payload.stored !== true) {
             throw new RuntimeError('Pi 没有保存 action 元数据', 'BW_NATIVE_EPUB_ACTION_METADATA');
           }
@@ -13077,14 +13077,14 @@
         var action = body.action;
         if (!nativeEPUBActionOperation(action, op)) {
           // Anki/Obsidian and other external effects remain Pi-owned.
-          return nativePiFetch(input, init, route);
+          return nativeServerFetch(input, init, route);
         }
         if (body.file !== localFileRef()) {
           throw new RuntimeError('本机 EPUB action 书籍不匹配', 'BW_NATIVE_EPUB_ACTION_BODY');
         }
         var previous = clone(action);
         return nativeEPUBActionTransaction(action, op, function (nextAction) {
-          return nativePiJSON(url, {
+          return nativeServerJSON(url, {
             op: 'native_commit', requested_op: op, file: body.file,
             previous_action: previous, action: nextAction,
             native_contract: NATIVE_EPUB_ACTION_CONTRACT
@@ -13098,7 +13098,7 @@
           });
         });
       }
-      return nativePiFetch(input, init, route);
+      return nativeServerFetch(input, init, route);
     }).catch(nativeEPUBActionError);
   }
 
@@ -13258,7 +13258,7 @@
       if (!response || !response.ok) return '';
       return response.clone().json().then(nativePageOverlayLocalRevision);
     }).catch(function () { return ''; });
-    var remote = nativePiFetch(input, init, route).then(function (response) {
+    var remote = nativeServerFetch(input, init, route).then(function (response) {
       if (!response || !response.ok) return null;
       return response.clone().json().catch(function () { return null; });
     }).catch(function () { return null; });
@@ -13373,13 +13373,13 @@
       assertNativePDFWriterLease(writerLease);
       return route.owner === 'local'
         ? localFetch(target.url.href, nestedInit, true, writerLease)
-        : nativePiFetch(target.url.href, nestedInit, route);
+        : nativeServerFetch(target.url.href, nestedInit, route);
     }).then(function (response) {
       assertNativePDFWriterLease(writerLease);
       return { status: Number(response && response.status) || 500 };
     }).catch(function (error) {
       if (route.owner === 'pi') {
-        var failure = nativePiFailure(error);
+        var failure = nativeServerFailure(error);
         return {
           status: failure.status,
           code: failure.code,
@@ -13615,15 +13615,15 @@
       }
       if (nativeInterfaceSurface === 'epub' && url.pathname === '/pdf/api/epub-assistant') {
         return nativeEPUBAssistantFetch(input, init, url, route).catch(function (error) {
-          var failure = nativePiFailure(error);
+          var failure = nativeServerFailure(error);
           return jsonResponse({ ok: false, code: failure.code, error: failure.message }, failure.status);
         });
       }
       if (nativeInterfaceSurface === 'epub' && url.pathname === '/pdf/api/epub-action') {
         return nativeEPUBActionFetch(input, init, url, route);
       }
-      return nativePiFetch(input, init, route).catch(function (error) {
-        var failure = nativePiFailure(error);
+      return nativeServerFetch(input, init, route).catch(function (error) {
+        var failure = nativeServerFailure(error);
         return jsonResponse({
           ok: false,
           code: failure.code,
@@ -14672,7 +14672,7 @@
   function nativeDictQuickFetch(input, init, url, route) {
     var key = dictCacheKey(url);
     var remote = function () {
-      return nativePiFetch(input, init, route).then(function (response) {
+      return nativeServerFetch(input, init, route).then(function (response) {
         if (!key || !response || !response.ok) return response;
         var copy;
         try { copy = response.clone(); } catch (_) { return response; }
@@ -14755,7 +14755,7 @@
           return jsonResponse({ ok: true, phrases: state.phrases, source: 'device' }, 200);
         }
         // 未播种:从 Pi 取一次历史(取不到就用桥的镜像;都没有就空表并标记已播种)
-        return nativePiFetch(input, init, route).then(function (r) { return r && r.ok ? r.json() : null; }, function () { return null; })
+        return nativeServerFetch(input, init, route).then(function (r) { return r && r.ok ? r.json() : null; }, function () { return null; })
           .then(function (d) {
             if (d && d.ok && Array.isArray(d.phrases)) return d.phrases;
             return bridgeMirror('/reader-phrases', 'GET').then(function (m) {
@@ -14771,7 +14771,7 @@
           });
       }).catch(function () { return jsonResponse({ ok: true, phrases: [], source: 'device-error' }, 200); });
     }
-    if (method !== 'POST' && method !== 'DELETE') return nativePiFetch(input, init, route);
+    if (method !== 'POST' && method !== 'DELETE') return nativeServerFetch(input, init, route);
     var body = null;
     try { body = JSON.parse((init && init.body) || '{}'); } catch (_) { body = null; }
     var text = normalizePhrase(body && body.text);
@@ -14796,8 +14796,8 @@
 
   function nativeTranslateSentenceFetch(input, init, url, route) {
     var fallback = function () {
-      return nativePiFetch(input, init, route).catch(function (error) {
-        var failure = nativePiFailure(error);
+      return nativeServerFetch(input, init, route).catch(function (error) {
+        var failure = nativeServerFailure(error);
         return jsonResponse({
           ok: false, code: failure.code, error: failure.message
         }, failure.status);
@@ -15109,14 +15109,14 @@
       return root.RC && root.RC.documentHost && root.RC.documentHost.current
         ? root.RC.documentHost.current() : null;
     },
-    piFetch: nativePiFetch,
+    piFetch: nativeServerFetch,
     syncBootstrapContext: function () {
       return {
         contract: BOOTSTRAP_CONTRACT,
         deviceId: deviceId,
         deviceFamilyId: deviceId,
         ready: false, reason: 'BW_NATIVE_SYNC_BOOTSTRAP_UNAVAILABLE',
-        piFetch: nativePiFetch
+        piFetch: nativeServerFetch
       };
     },
     bindSyncControl: function (control) {

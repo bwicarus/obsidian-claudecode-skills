@@ -43,7 +43,7 @@ const NATIVE_LOCAL_RUNTIME = read(
   "_server_deploy/static/pdf/native-local-runtime.js",
 );
 const NATIVE_SYNC_BRIDGE = read(
-  "ios/BWReader/App/ReaderNativePiSyncBridge.swift",
+  "ios/BWReader/App/ReaderNativeServerSyncBridge.swift",
 );
 const PI_LOGIN = read("ios/BWReader/App/ReaderPiLoginView.swift");
 
@@ -1121,7 +1121,7 @@ test("Swift sync bridge keeps namespace and capabilities private and exposes log
   assert.match(NATIVE_SYNC_BRIDGE, /secureMatches/);
   assert.match(NATIVE_SYNC_BRIDGE, /current\.path\.count >= cookie\.path\.count/);
   assert.doesNotMatch(NATIVE_SYNC_BRIDGE, /print\(|NSLog\(|os_log/);
-  assert.match(PI_LOGIN, /ReaderNativePiSyncBridge\.loginURL/);
+  assert.match(PI_LOGIN, /ReaderNativeServerSyncBridge\.loginURL/);
   assert.match(PI_LOGIN, /websiteDataStore = dataStore/);
   // 2026-09-02 Pi 整体退出:登录面固定指向 Windows 上的 Flask(bwicarus-2)。
   assert.match(PI_LOGIN, /bwicarus-2\.taile44d0c\.ts\.net/);

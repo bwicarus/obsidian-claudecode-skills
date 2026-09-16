@@ -290,7 +290,7 @@ test("native PDF actor isolates books and navigation distinguishes outgoing roll
   );
   const outgoing = openBook.indexOf("outgoingRollback: true");
   const clearBinding = openBook.indexOf(
-    "nativePiGateway?.updateTrustedRemoteBookBinding(nil)",
+    "nativeServerGateway?.updateTrustedRemoteBookBinding(nil)",
   );
   const incomingComment = openBook.indexOf("Incoming crash recovery runs");
   const serverOpen = openBook.indexOf("localRuntimeServer.open(");

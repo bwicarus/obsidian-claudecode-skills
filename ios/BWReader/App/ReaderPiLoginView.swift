@@ -80,7 +80,7 @@ private struct ReaderPiLoginWebView: UIViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.load(URLRequest(
-            url: ReaderNativePiSyncBridge.loginURL,
+            url: ReaderNativeServerSyncBridge.loginURL,
             cachePolicy: .reloadIgnoringLocalCacheData
         ))
         return webView

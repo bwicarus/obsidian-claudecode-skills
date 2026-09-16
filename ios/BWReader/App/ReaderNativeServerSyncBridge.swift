@@ -20,7 +20,7 @@ private final class ReaderNativeNoRedirectDelegate: NSObject,
 /// stay in Swift memory; the local Reader page can only submit sync-v3 payloads
 /// and receive the relay's business response.
 @MainActor
-final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply {
+final class ReaderNativeServerSyncBridge: NSObject, WKScriptMessageHandlerWithReply {
     static let messageName = "bwNativePiSync"
     static let loginURL = URL(
         string: "https://bwicarus-2.taile44d0c.ts.net/login"
@@ -35,7 +35,7 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
     private static let registryDigest = "sync-v3:record-parent-state/1|card-entities:explicit:0:1|card-states:explicit:0:1|user-settings:explicit:0:1|vocabulary-state:explicit:0:1"
     private static let maximumRequestBytes = 2 * 1_024 * 1_024
     private static let maximumResponseBytes = 4 * 1_024 * 1_024
-    private static let piOrigin = URL(
+    private static let serverOrigin = URL(
         string: "https://bwicarus-2.taile44d0c.ts.net"
     )!
     private static let familyDefaultsKey = "BWReaderNativeSyncDeviceFamilyV1"
@@ -448,10 +448,10 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
     ) async throws -> [String: Any] {
         guard let data = try? JSONSerialization.data(withJSONObject: body),
               data.count <= Self.maximumRequestBytes,
-              let target = URL(string: path, relativeTo: Self.piOrigin),
-              target.scheme == Self.piOrigin.scheme,
-              target.host == Self.piOrigin.host,
-              target.port == Self.piOrigin.port else {
+              let target = URL(string: path, relativeTo: Self.serverOrigin),
+              target.scheme == Self.serverOrigin.scheme,
+              target.host == Self.serverOrigin.host,
+              target.port == Self.serverOrigin.port else {
             throw BridgeError(
                 "BW_NATIVE_SYNC_LIMIT", "同步请求无效或过大", false
             )
@@ -577,7 +577,7 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
 
         var leaseBody: [String: Any] {
             let value: [String: Any] = [
-                "contract": ReaderNativePiSyncBridge.leaseContract,
+                "contract": ReaderNativeServerSyncBridge.leaseContract,
                 "ownerNamespace": namespace,
                 "deviceId": deviceID,
                 "deviceFamilyId": deviceFamilyID,
@@ -585,8 +585,8 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
                 "ownerInstanceId": ownerInstanceID,
                 "ownerGeneration": generation,
                 "ownerToken": token,
-                "syncContract": ReaderNativePiSyncBridge.syncContract,
-                "syncChangeContract": ReaderNativePiSyncBridge.changeContract,
+                "syncContract": ReaderNativeServerSyncBridge.syncContract,
+                "syncChangeContract": ReaderNativeServerSyncBridge.changeContract,
                 "registryDigest": registryDigest,
             ]
             return value
