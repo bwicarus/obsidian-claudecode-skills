@@ -77,6 +77,23 @@ def _current_thread_id() -> str | None:
         return None
 
 
+def _thread_started_at(thread_id: str | None) -> float:
+    """线程的创建时刻（秒）。
+
+    app-server 的 threadId 是 UUIDv7，**前 48 位就是毫秒时间戳** —— 直接解出来，
+    不用碰磁盘。这是判断「哪些事件属于这条对话」最可靠的下界：
+    2026-09-16 用户问「为何每个新对话都有这些报错」，就是因为新对话还没有历史行、
+    时间下界取到了 0，于是昨天的工具报错被贴进了每一条新对话的链路。
+    """
+    try:
+        ms = int(str(thread_id).replace("-", "")[:12], 16)
+    except (TypeError, ValueError):
+        return 0.0
+    sec = ms / 1000.0
+    # 合理性闸：2020-01-01 ~ 2100-01-01。不是 UUIDv7 就当没有下界，别误杀
+    return sec if 1577836800 < sec < 4102444800 else 0.0
+
+
 def _clip(text: Any, limit: int = 4000) -> str:
     s = "" if text is None else str(text)
     return s if len(s) <= limit else s[:limit] + "…（已截断，共 %d 字）" % len(s)
@@ -471,10 +488,21 @@ def build(limit: int = 120, days: float = 7.0, cold: list[str] | None = None,
     """
     thread_id = thread or _current_thread_id()
     text_rows = _text_lane(thread_id, limit)
-    since = min((r.get("at") or 0) for r in text_rows) if text_rows else 0.0
+    # 下界优先用线程自己的创建时刻（threadId 是 UUIDv7，前 48 位就是时间戳）：
+    # 新对话还没有历史行时，按历史行取下界会得到 0，于是什么都过滤不掉
+    since = _thread_started_at(thread_id)
+    if text_rows:
+        seen = [r.get("at") or 0 for r in text_rows if (r.get("at") or 0) > 0]
+        if seen:
+            since = max(since, min(seen)) if since else min(seen)
     rows = _voice_lane(limit, since, thread_id) + text_rows
+    # ⚠ 报错要按**这条对话**筛，不能无脑贴最后 40 条。
+    # 2026-09-16 用户报「为何每个新对话都有这些报错」—— 那 4 条其实是 9-15 18:13 的陈年旧账，
+    # 因为这里不分线程也不分时间，于是它们出现在每一条新对话的链路里，看着像天天在坏。
     errors = _tail_jsonl(VOICE_CLI / "tool-errors.jsonl", 40)
     for e in errors:
+        if since and float(e.get("t") or 0) < since:
+            continue
         rows.append({"lane": "text", "kind": "error", "at": float(e.get("t") or 0),
                      "title": "工具报错 " + str(e.get("tool") or ""),
                      "meta": str(e.get("status") or ""), "body": _clip(e.get("result"), 1200)})
