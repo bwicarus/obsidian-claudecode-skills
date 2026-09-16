@@ -273,6 +273,33 @@ def _classify_message(role: str, text: str) -> dict:
     return {"kind": "speech", "title": role or "用户"}
 
 
+def _reasoning_row(pay: dict) -> dict:
+    """推理那一条里真正可读的东西只有 summary。
+
+    2026-09-17 用户问「推理步骤里面写的是什么」—— 原来是把整个 payload 倒成 JSON，
+    而里面最长的是 `encrypted_content`：OpenAI 加密的推理正文，**谁都解不开，包括我们**。
+    于是屏幕上几千字符全是密文，真正有意义的那行标题反而被挤没了。
+    这里只取 summary[].text，并如实说明正文不可读，别让人以为是自己看不懂。
+    """
+    parts = []
+    for item in (pay.get("summary") or []):
+        if isinstance(item, dict) and item.get("text"):
+            parts.append(str(item["text"]).strip())
+    enc = pay.get("encrypted_content")
+    if not parts:
+        return {"title": "推理",
+                "meta": "模型没给摘要",
+                "body": ("这一步的推理正文由 OpenAI 加密（encrypted_content，%d 字符），"
+                         "本地无法解密；模型这次也没有给出摘要。" % len(str(enc or ""))) if enc else ""}
+    head = parts[0].strip("*").strip()
+    body = (chr(10) + chr(10)).join(parts)
+    if enc:
+        body += (chr(10) + chr(10) + "——" + chr(10) +
+                 "（推理正文由 OpenAI 加密，共 %d 字符，本地无法解密；"
+                 "上面这段是模型自己给的摘要。）" % len(str(enc)))
+    return {"title": "推理：" + head[:40], "meta": "%d 段摘要" % len(parts), "body": body}
+
+
 def _usage_row(pay: dict) -> dict:
     """把用量那条渲染成人话。
 
@@ -350,8 +377,7 @@ def _text_lane(thread_id: str | None, limit: int) -> list[dict]:
             rows.append({"lane": "text", "kind": "generate", "at": at, "title": "回答",
                          "meta": "%d 字" % len(pay.get("text") or ""), "body": _clip(pay.get("text"))})
         elif kind == "reasoning":
-            rows.append({"lane": "text", "kind": "think", "at": at, "title": "推理",
-                         "meta": "", "body": _clip(json.dumps(pay, ensure_ascii=False), 1500)})
+            rows.append(dict(_reasoning_row(pay), lane="text", kind="think", at=at))
         elif kind == "custom_tool_call":
             script = pay.get("input") or pay.get("arguments") or ""
             rows.append({"lane": "text", "kind": "code", "at": at,
