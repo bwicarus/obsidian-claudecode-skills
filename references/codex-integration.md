@@ -558,3 +558,53 @@ C 题是折叠工具方案成立的前提（模型得会去取参数表）。**T
 
 结论：这套负载上 **terra/medium 可以替代 astra/medium**，总额度消耗约减半，
 而且普遍更快。样本仍是每题一轮，正文加载后值得再验一次「取正文/目录」那两类。
+
+## 语音模型 ↔ 后台模型的通道：我们能控制到哪一步（2026-09-16 实测 + 源码/二进制核对）
+
+用户问：这条通道我们能控制多少、能不能监视或截获后转交，从而稳定插入内容。
+结论分三段，**去程和回程的控制力完全不同**。
+
+### 现在的归属
+
+| 环节 | 归谁 | 我们能做什么 |
+|---|---|---|
+| 音频进出 + 数据通道 | **我们**（运行器就是 WebRTC peer，app-server 只把 SDP 以 `thread/realtime/sdp` 通知我们） | **全量监视**：`delegation.created` 的完整报文（转过去的原话、`handoff_id`、`target`）、全部转写、item 事件 |
+| 语音 → 后台「起轮」 | **app-server 自动** | 只能观察。运行器并不调用 `turn/start`，实测 `delegation.created` 之后 22~60 ms 它自己就起轮了 |
+| 后台 → 语音「回投」 | app-server 自动 | **可以关掉**，见下 |
+
+### `clientManagedHandoffs`（现在是 false）
+
+`thread/realtime/start` 的完整参数表（从 codex.exe 里取出的 `ConversationStartParams`）：
+
+```
+client_managed_handoffs   delegation_ack_filler   flush_transcript_tail_on_session_end
+codex_responses_as_items  codex_response_item_prefix
+codex_response_handoff_mode   codex_response_handoff_channel_prefixes
+output_modality  include_startup_context  initial_items
+realtime_start_instructions   realtime_end_instructions
+```
+
+[openai/codex#27986](https://github.com/openai/codex/pull/27986)：设成 true 会
+「suppresses automatic response handoffs and completion output so delivery is
+controlled by explicit client append APIs」，测试名 `webrtc_v1_client_managed_handoffs_disable_automatic_output`。
+也就是说 **回程的自动投递被关掉，改由我们用 `thread/realtime/appendText` / `appendSpeech`
+显式决定投什么、什么时候投**。PR 没有说它会阻止后台起轮 —— 去程仍是自动的。
+
+⚠ 打开它就必须同时实现投递，否则后台答完了语音那头永远听不到，助手直接变哑。
+
+### `codexResponseHandoffMode`（现在是 thinking）
+
+取值 `"thinking" | "commentary" | "bemTags"`（生成的 TS 定义里写死的）。
+这三个正好对上 GPT-Live 官方 client delegation 的三条 append 通道
+（`session.thinking.append` 不出声 / `session.commentary.append` 念出来 / 带标签的呈现）——
+**印证了 Codex 的实时层就是 GPT-Live client delegation 的封装**。
+
+### 所以「截获后转交、利用时间差插入」能做到什么
+
+- **回程可以真正截获**：关掉自动投递后，我们本来就是那个投递者，
+  想改写、想附加、想延后、想换通道（出声 / 不出声）都可以 —— 这不是抢时间差，是名正言顺。
+- **去程拦不住**：后台那一轮由 app-server 自己起。能做的是在 `delegation.created`
+  那 22~60 ms 里把内容 `inject_items` 进去（2026-09-16 已落地，见 `_ctx_on_delegation`），
+  万一没赶上也只是被下一轮读到，**迟到而不是丢失**。
+- 要连去程也完全掌握，只能不走 `thread/realtime/*`、自己直连 GPT-Live ——
+  那就从订阅额度变成按 token 付费。
