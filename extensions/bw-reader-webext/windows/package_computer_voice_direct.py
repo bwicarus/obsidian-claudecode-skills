@@ -2216,6 +2216,34 @@ def lint_codex_skill_tool_names(codex_home: Path) -> dict[str, list[str]]:
     return unknown
 
 
+def _redial_app_call(endpoint: str, timeout: float = 60.0) -> dict:
+    """把被安装掐断的那通 App 语音拨回来。
+
+    只在"装之前确实有 App 通话"时调。不拨的代价是用户对着一个假装连着的 App 说话，
+    而每一层都沉默：App 以为在通话、桥说 idle、运行器按 app-gone 静静收摊。
+    """
+    import urllib.error
+    import urllib.request
+
+    body = json.dumps({
+        "title": "语音已更新",
+        "text": "刚装好新版，这通是重新接的。",
+        "ntf": "misc",
+        "reason": "direct-install-redial",
+    }, ensure_ascii=False).encode("utf-8")
+    try:
+        request = urllib.request.Request(
+            endpoint + "/call", data=body,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            answer = json.loads(response.read().decode("utf-8", "replace"))
+        return {"ok": bool(answer.get("ok")), "outcome": answer.get("outcome")}
+    except (OSError, urllib.error.URLError, ValueError) as error:
+        # 拨不回来不该让安装失败，但必须留下声音：这正是用户会来问"怎么没声音"的那一刻。
+        return {"ok": False, "error": str(error)[:120]}
+
+
 def _restart_voice_runner(timeout: float = 30.0) -> dict:
     """叫醒语音核心，让它带着新装好的桥重新派生 app-server 与 MCP 子进程。
 
@@ -2230,7 +2258,18 @@ def _restart_voice_runner(timeout: float = 30.0) -> dict:
     endpoint = "http://127.0.0.1:43131"
     try:
         with urllib.request.urlopen(endpoint + "/status", timeout=3) as response:
-            before = json.loads(response.read().decode("utf-8")).get("runner", {}).get("pid")
+            status = json.loads(response.read().decode("utf-8"))
+        before = status.get("runner", {}).get("pid")
+        session = status.get("session") or {}
+        # ⚠ 2026-09-17 实测的坑：换代桥会把 App 那通语音掐死，而 **App 自己不知道** ——
+        #   它抱着一个已经不存在的通话，桥那头 state=idle / captureActive=false，
+        #   于是运行器每开一次会话都在 10 秒后按 app-gone 判死，用户说话没有任何通道。
+        #   表现是"App 显示连上了，但说话传不过去"，而且没有一处会提示。
+        #   所以这里记下装之前有没有 App 通话，装完负责把它拨回来。
+        app_call_before = (
+            str(session.get("profile") or "") == "app"
+            and str(session.get("state") or "") in ("connected", "starting")
+        )
     except (OSError, urllib.error.URLError, ValueError):
         return {"restarted": False, "reason": "语音核心没在跑"}
     try:
@@ -2248,7 +2287,16 @@ def _restart_voice_runner(timeout: float = 30.0) -> dict:
             with urllib.request.urlopen(endpoint + "/status", timeout=3) as response:
                 after = json.loads(response.read().decode("utf-8")).get("runner", {}).get("pid")
             if after and after != before:
-                return {"restarted": True, "pidBefore": before, "pidAfter": after}
+                result = {"restarted": True, "pidBefore": before, "pidAfter": after}
+                if app_call_before:
+                    result["appCallBefore"] = True
+                    print(
+                        "⚠ 装之前 App 正在通话 —— 换代桥已经把那通掐断，而 App 那头不会知道"
+                        "（它会显示还连着，但说的话传不过去）。正在重新拨回来…",
+                        flush=True,
+                    )
+                    result["appCallRedial"] = _redial_app_call(endpoint)
+                return result
         except (OSError, urllib.error.URLError, ValueError):
             continue
     return {"restarted": False, "reason": "等它回来超时", "pidBefore": before}
