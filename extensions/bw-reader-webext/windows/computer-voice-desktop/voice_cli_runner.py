@@ -165,6 +165,7 @@ DEFAULTS: dict = {
                                    # ⚠ 早先记的「六分之一会打哑」是**探针写坏造成的假象** ——
                                    # 那版用阻塞 readline 收尾，漏掉了迟到的回答，把「没读到」当成「没产出」。
     "idleStopMinutes": 20,         # 闲置这么久自动结束通话（0=不自动关）。实测连着不说话也按墙钟 1:1 计费
+    "contextInkFreshSeconds": 900,  # 退路判据：本页最近一次动作是画、且在这么多秒内 → 当作有新笔迹（App 没带 visual 时用）
     "contextInkImage": True,       # 开口时页上有新笔迹（lastEditedAt 在 freshWindowS 内、已稳定）→ 取圈画附近的图随状态一起注入后台；同一 (页,笔迹版本) 只投一次
     "contextInkImageMaxBytes": 700000,   # 超过就不投（图片按 token 计费且留在线程历史里）
     "typedPrefix": "【用户打字】",   # 侧栏打字追加进语音会话时的前缀，让语音模型知道这不是语音
@@ -1745,22 +1746,51 @@ class Runner:
         return "\n".join(parts)
 
     def _ctx_ink_fingerprint(self, snap: dict) -> str:
-        """页上有"最近新画、且已稳定"的笔迹 → 返回 (页, 笔迹版本) 指纹；否则空串。"""
+        """页上有"最近新画"的笔迹 → 返回 (页, 版本) 指纹；否则空串。
+
+        ⚠ 2026-09-17：原来只认 currentPage.visual.drawing，而**快照里常常根本没有
+        visual 这个键**（它是 App 随快照上报的，不带就没有）—— 于是这个功能从上线起
+        一次都没触发过：用户圈画后问「这是什么」，ctx_steer 记的是 image=null，
+        连 skip/error 都没有，因为压根没走到取图。
+        同一份快照的 recentActions 里却一直记着 {"kind":"drawing","page":41,...}。
+        所以 visual 缺席时用它兜底。取图走桥的 /voice-core/visual-image，本来就不
+        依赖 visual，兜底完全可用。
+        """
         if not self.settings.get("contextInkImage", True):
             return ""
         cp = snap.get("currentPage") or {}
         vis = cp.get("visual") or {}
         dr = vis.get("drawing") or {}
-        if not isinstance(dr, dict) or not dr.get("stable") or dr.get("inProgress") or dr.get("empty") or not dr.get("drawingRevision"):
+        if isinstance(dr, dict) and dr.get("drawingRevision") and dr.get("stable") \
+                and not dr.get("inProgress") and not dr.get("empty"):
+            try:
+                edited = float(dr.get("lastEditedAt") or 0)
+                window = float(dr.get("freshWindowS") or 120)
+            except (TypeError, ValueError):
+                return ""
+            if edited > 0 and time.time() - edited <= window:
+                return "%s|%s" % (self._ctx["page_key"], dr.get("drawingRevision"))
+            return ""
+        # 退路：App 没带 visual。看本页最近一次动作是不是画 ——
+        # 「刚画完就开口」正是要给图的那一刻，而「画完很久又在聊别的」不该反复投。
+        acts = [a for a in (snap.get("recentActions") or []) if isinstance(a, dict)]
+        if not acts:
+            return ""
+        last = acts[-1]
+        if str(last.get("kind") or "") != "drawing":
+            return ""
+        if last.get("page") is not None and cp.get("page") is not None \
+                and last.get("page") != cp.get("page"):
             return ""
         try:
-            edited = float(dr.get("lastEditedAt") or 0)
-            window = float(dr.get("freshWindowS") or 120)
+            secs = float(last.get("secondsAgo"))
         except (TypeError, ValueError):
             return ""
-        if edited <= 0 or time.time() - edited > window:
+        if secs < 0 or secs > float(self.settings.get("contextInkFreshSeconds") or 900):
             return ""
-        return "%s|%s" % (self._ctx["page_key"], dr.get("drawingRevision"))
+        # 指纹取"这一笔画完的绝对时刻"（秒），同一次圈画只投一次；
+        # 再画一笔 secondsAgo 会重新变小，指纹随之改变。
+        return "%s|act%d" % (self._ctx["page_key"], int(time.time() - secs))
 
     async def _ctx_fetch_ink_image(self) -> dict | None:
         """向桥要圈画附近的合成图（桥复用 reader_visual_image 同一条取图路）。失败/太大 → None。"""
