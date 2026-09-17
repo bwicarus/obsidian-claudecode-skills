@@ -165,6 +165,7 @@ DEFAULTS: dict = {
                                    # ⚠ 早先记的「六分之一会打哑」是**探针写坏造成的假象** ——
                                    # 那版用阻塞 readline 收尾，漏掉了迟到的回答，把「没读到」当成「没产出」。
     "idleStopMinutes": 20,         # 闲置这么久自动结束通话（0=不自动关）。实测连着不说话也按墙钟 1:1 计费
+    "contextInkStandbyMaxAgeSeconds": 900,   # 待命图的保质期：这一笔画完超过这么久还没被送出去就作废（旧设计里的新鲜窗，2026-09-17 补回）
     "contextInkImage": True,       # 桥在每次笔迹稳定时抓好图放进 runtime/ink-standby 待命；开口交给后台的那一刻把本页没送过的**全部**随 steer 插进那一轮（localImage 路径，不进 base64）
     "contextInkImageMaxBytes": 700000,   # 超过就不投（图片按 token 计费且留在线程历史里）
     "typedPrefix": "【用户打字】",   # 侧栏打字追加进语音会话时的前缀，让语音模型知道这不是语音
@@ -1763,12 +1764,21 @@ class Runner:
             return []
         cp = snap.get("currentPage") or {}
         cur_file, cur_page = str(cp.get("file") or ""), cp.get("page")
-        out = []
+        max_age = float(self.settings.get("contextInkStandbyMaxAgeSeconds") or 900)
+        out, stale = [], 0
         for e in (idx.get("images") or []):
             if not isinstance(e, dict):
                 continue
             name = str(e.get("name") or "")
             if not name or name in self._ink_sent:
+                continue
+            # 保质期（旧设计里的新鲜窗）：很久以前画的那一笔，此刻多半不是他说的「这个」，
+            # 插进去只是噪音加 token。过期就作废，并且记一笔 —— 不声不响地丢，
+            # 就是上一版「功能没生效却查不出为什么」的老毛病。
+            age = self._ink_age_seconds(e)
+            if age is not None and age > max_age:
+                self._ink_sent.add(name)
+                stale += 1
                 continue
             if cur_file and str(e.get("file") or "") and str(e.get("file")) != cur_file:
                 continue
@@ -1778,7 +1788,22 @@ class Runner:
             if not p.is_file():
                 continue
             out.append({"name": name, "path": str(p), "bytes": e.get("bytes")})
+        if stale:
+            self.log("ctx_ink_stale", dropped=stale, maxAgeSeconds=max_age)
         return out
+
+    @staticmethod
+    def _ink_age_seconds(entry: dict) -> float | None:
+        """这一笔画完到现在多少秒。桥写的是 ISO-8601 UTC（DateTimeOffset "O" 格式）。"""
+        raw = str(entry.get("capturedAtUtc") or "")
+        if not raw:
+            return None
+        try:
+            # "O" 带 7 位小数秒与 +00:00 —— 截到秒再按 UTC 解，跨平台都稳。
+            return time.time() - calendar.timegm(
+                time.strptime(raw[:19], "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, TypeError):
+            return None
 
     def _ctx_thread_scope(self):
         """去重记账只在**当前这条线程**里有效。线程一换（清空对话 / resume 到别的线程），

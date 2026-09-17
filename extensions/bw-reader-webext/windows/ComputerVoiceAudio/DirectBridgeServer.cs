@@ -2938,6 +2938,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     /// 要图那条路依赖已发布快照里的 visual，而它在页面更新后就没了。
     internal const int InkStandbyKeep = 6;
 
+    /// 待命图的保质期（2026-09-17 用户：「超过一段时间无变化就去掉」）。
+    /// 张数上限管不住时间：一天只画一次的话，那张昨天的图会一直躺在待命位上。
+    /// 语音核心那边也有同样语义的窗，两处都要有——它只是不挑，文件还得真的清掉。
+    internal static readonly TimeSpan InkStandbyMaxAge = TimeSpan.FromHours(2);
+
     private int _inkStandbyBusy;
 
     private async Task CaptureInkStandbyAsync(JsonObject payload)
@@ -3007,6 +3012,34 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 ["mimeType"] = capture.MimeType,
                 ["capturedAtUtc"] = DateTimeOffset.UtcNow.ToString("O"),
             });
+            // 先按时间清：过期的连文件带条目一起去掉。
+            DateTimeOffset cutoff = DateTimeOffset.UtcNow - InkStandbyMaxAge;
+            for (int index = entries.Count - 1; index >= 0; index--)
+            {
+                if (entries[index] is not JsonObject entry
+                    || entry["capturedAtUtc"]?.GetValue<string>() is not string capturedAt
+                    || !DateTimeOffset.TryParse(
+                        capturedAt,
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind,
+                        out DateTimeOffset when)
+                    || when >= cutoff)
+                {
+                    continue;
+                }
+                if (entry["name"]?.GetValue<string>() is string expiredName)
+                {
+                    try
+                    {
+                        File.Delete(Path.Combine(directory, expiredName));
+                    }
+                    catch (IOException)
+                    {
+                        // 删不掉不影响正确性：条目已经去掉，不会再被挑中。
+                    }
+                }
+                entries.RemoveAt(index);
+            }
             while (entries.Count > InkStandbyKeep)
             {
                 if (entries[0] is JsonObject dropped
