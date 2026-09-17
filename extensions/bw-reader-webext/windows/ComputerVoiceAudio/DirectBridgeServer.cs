@@ -691,6 +691,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/voice-core/visual-image",
             new[] { "POST" },
             context => HandleVoiceCoreVisualImageAsync(context, serviceToken));
+        // 按话题取能力指南正文（2026-09-18）：语音核心建线程时，把**最近常取**的几个话题
+        // 直接内联进 developerInstructions，省掉每轮那一趟工具调用。
+        // 决定内联谁在运行器那侧（它读 mcp-tool-calls.jsonl 的 arg 列），这里只负责给正文。
+        app.MapMethods(
+            "/voice-core/capability-guide",
+            new[] { "GET" },
+            context => HandleVoiceCoreCapabilityGuideAsync(context, serviceToken));
         // GET（2026-09-05）= 双工诊断只读口；POST 才是快照与钉住。方法表不放行 GET 的
         // 表现是 404，而处理函数里的 GET 分支看起来完全正常 —— 0.1.288 就这么丢过一次。
         app.MapMethods(
@@ -3145,6 +3152,46 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         finally
         {
             Interlocked.Exchange(ref _inkStandbyBusy, 0);
+        }
+    }
+
+    private async Task HandleVoiceCoreCapabilityGuideAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!IsLocalProcessCaller(context))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+        string topic = context.Request.Query["topic"].ToString() ?? "";
+        context.Response.ContentType = "application/json; charset=utf-8";
+        if (topic.Length is 0 or > 80)
+        {
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, reason = "bad-topic" },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        try
+        {
+            // ⚠ 无参构造 = 读嵌进 EXE 的资源。传目录会让它去磁盘上找 ReaderCapabilities/，
+            //   而装好的桥里没有那个目录 —— 第一版就这么写，端点直接 FileNotFoundException。
+            ReaderCapabilityCatalog catalog = new();
+            (string uri, string text) guide = await catalog
+                .ReadTopicTextAsync(topic, serviceCancellationToken)
+                .ConfigureAwait(false);
+            await context.Response.WriteAsJsonAsync(
+                new { ok = true, topic, chars = guide.text.Length, text = guide.text },
+                serviceCancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (
+            exception is KeyNotFoundException or IOException
+            or JsonException or InvalidDataException)
+        {
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, topic, reason = exception.GetType().Name },
+                serviceCancellationToken).ConfigureAwait(false);
         }
     }
 

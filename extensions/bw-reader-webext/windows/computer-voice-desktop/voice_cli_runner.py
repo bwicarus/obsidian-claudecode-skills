@@ -86,6 +86,54 @@ SLIM_CODEX_HOME = Path.home() / "AppData" / "Local" / "BWReader" / "codex-home"
 SLIM_HOME_EXCLUDE = {"plugins"}   # 目录/文件名；AGENTS.md* 另按前缀排除
 
 
+def hot_guide_topics(days: float, min_calls: int) -> list[tuple[str, int]]:
+    """最近这些天里被取得最多的能力指南话题。
+
+    数据来自桥的 runtime/mcp-tool-calls.jsonl —— 它每次 tools/call 记一行，
+    0.1.415 起连 arg（话题名）一起记；在那之前的行没有 arg，自然不计入。
+    ⚠ at 是 UTC（+00:00 明写在行里），必须用 timegm 解；隔壁 tool-errors.jsonl 是本地时间，
+    两者不一样，别一起改（这个坑 2026-09-17 踩过）。
+    """
+    path = BRIDGE_RUNTIME / "mcp-tool-calls.jsonl"
+    cutoff = time.time() - days * 86400
+    counts: dict[str, int] = {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-4000:]
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if str(r.get("name") or "") != "reader_capability_guide":
+            continue
+        topic = str(r.get("arg") or "").strip()
+        if not topic or topic == "index":
+            continue
+        try:
+            at = calendar.timegm(time.strptime(str(r.get("at") or "")[:19], "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, TypeError):
+            continue
+        if at >= cutoff:
+            counts[topic] = counts.get(topic, 0) + 1
+    return sorted(((t, n) for t, n in counts.items() if n >= min_calls),
+                  key=lambda kv: -kv[1])
+
+
+def fetch_guide(topic: str) -> str:
+    """向桥要一份指南正文（0.1.415 起的只读端点）。取不到就算了，维持按需取。"""
+    import urllib.parse
+    import urllib.request
+    try:
+        url = BRIDGE_URL + "/voice-core/capability-guide?topic=" + urllib.parse.quote(topic)
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            d = json.loads(resp.read() or b"{}")
+        return str(d.get("text") or "") if d.get("ok") else ""
+    except Exception:   # noqa: BLE001
+        return ""
+
+
 def sync_slim_codex_home() -> dict:
     """把主 home 镜像到专用 home，**只排除想丢的两样**（2026-09-17 第二版）。
 
@@ -227,6 +275,17 @@ DEFAULTS: dict = {
                                    # ⚠ 早先记的「六分之一会打哑」是**探针写坏造成的假象** ——
                                    # 那版用阻塞 readline 收尾，漏掉了迟到的回答，把「没读到」当成「没产出」。
     "idleStopMinutes": 20,         # 闲置这么久自动结束通话（0=不自动关）。实测连着不说话也按墙钟 1:1 计费
+    # 能力指南按频度自动内联（2026-09-18）：最近 guideInlineDays 天里被取过
+    # ≥ guideInlineMinCalls 次的话题，建线程时直接内联，省掉每轮那一趟工具调用；
+    # 其余维持按需取。总量以 guideInlineMaxChars 封顶 —— 省往返不能反过来把开局撑大。
+    "guideInlineEnabled": True,
+    "guideInlineDays": 7.0,
+    "guideInlineMinCalls": 3,
+    # 12000 不是拍脑袋：内联的内容落在**缓存前缀**里（首轮之后按 1/10 计价），
+    # 而中途调工具取回来的是**全价新增输入** —— 所以只要一条线程里会用到一次，
+    # 内联就不比按需取贵，还省一趟往返。6000 那版把唯一达标的 boards(8106 字) 挡在外面，
+    # 等于闭环空转（2026-09-18 实测 guide_inline skipped=["boards(超预算)"]）。
+    "guideInlineMaxChars": 12000,
     "contextInkStandbyMaxAgeSeconds": 900,   # 待命图的保质期：这一笔画完超过这么久还没被送出去就作废（旧设计里的新鲜窗，2026-09-17 补回）
     "contextInkImage": True,       # 桥在每次笔迹稳定时抓好图放进 runtime/ink-standby 待命；开口交给后台的那一刻把本页没送过的**全部**随 steer 插进那一轮（localImage 路径，不进 base64）
     "contextInkImageMaxBytes": 700000,   # 超过就不投（图片按 token 计费且留在线程历史里）
@@ -255,7 +314,7 @@ DEFAULTS: dict = {
     # 用户口头说"关掉语音/挂断"时由运行器真的关（先应一句再关）
     # 快板（2026-09-14）：固定前缀的静默上下文更新
     "boardPrefix": "【快板】",
-    "boardSilentRule": "以「【快板】」开头的开发者消息是阅读器自动推送的静默更新（当前书、页码、选中文字、提醒等）。收到时不要出声、不要复述、不要确认，只记住；用户问到时以最新一条为准。",
+    "boardSilentRule": "以「【快板】」开头的开发者消息是阅读器自动推送的静默更新（当前书、页码、选中文字、提醒等）。收到这类消息时保持完全静默：不要出声，不要说「收到」「知道了」「明白」「更新」之类任何话，不要复述内容。只在心里记住，用户问到时以最新一条为准。",
     "boardInitialItems": True,
     "boardToVoice": True,
     # 语音侧送达时机：on-speech = 用户开口时才追加（确定性静默，推荐）；immediate = 立刻追加（闲时会招一句"收到"）；off = 不送语音
@@ -760,6 +819,7 @@ class Runner:
         self._loop_lag_over = 0
         self._audio_stats_at = 0.0
         self._thread_cleared = False          # /thread/new：下次 ensure_app 不续接旧线程
+        self._ensure_lock = asyncio.Lock()    # ensure_app 串行化，见那边的注释
         self._voip_call_active = False        # 我们拨出去且已接通的 VoIP 电话还在（CallKit 那层）：挂媒体会话时要一并请 App 挂断
         self._thread_resume_target = None     # /thread/resume：下次 ensure_app 续接这个线程
         self._backend_done_at = 0.0
@@ -1050,6 +1110,18 @@ class Runner:
 
     # ---------- app-server / 线程 ----------
     async def ensure_app(self):
+        """保证 app-server 在跑、线程已建。**必须串行**，见下面的锁。
+
+        2026-09-18：这里原来没有锁。运行器自身的启动任务与任一 HTTP 请求
+        （/thread/new、上下文推送、steer）同时进来时，两边都看见 app is None /
+        thread_id is None，于是各起一次 app-server、各开一条线程 —— 后开的覆盖
+        先开的，先开的连同它的开局说明成了孤儿；竞态里失败的一侧还会向调用方回 500。
+        实录 01:53:15：guide_inline 连打两次、POST /thread/new 回 500，而线程确实建起来了。
+        """
+        async with self._ensure_lock:
+            await self._ensure_app_locked()
+
+    async def _ensure_app_locked(self):
         if self.app is None:
             exe = self.settings.get("codexExe") or "codex.exe"
             self.app = AppServer(exe, list(self.settings.get("mcpDisable") or []), self.on_notification)
@@ -1079,6 +1151,7 @@ class Runner:
                      "model": self.settings.get("backendModel") or None}
             if self.settings.get("backendThreadInstructions"):
                 start["developerInstructions"] = self.settings["backendThreadInstructions"]
+                start["developerInstructions"] += self._inline_hot_guides()
             self._ctx_invalidate()
             r = await self.app.call("thread/start", start, timeout=90)
             self.thread_id = r["thread"]["id"]
@@ -1122,6 +1195,50 @@ class Runner:
         if drift:
             self.log("settings_drift", keys=drift,
                      hint="线上用的是持久化的旧文本；要用源码版就 POST /settings 下发后开新线程")
+
+    def _inline_hot_guides(self) -> str:
+        """把最近常取的能力指南直接内联进开局（2026-09-18 用户：按频度自动调）。
+
+        为什么不是一刀切：这些规则刚从 AGENTS.md 搬进指南（省了每轮 6.2K 字），
+        但天天要用的那几个如果每轮都得现取，就把省下的字换成了多跑一趟。
+        所以按真实使用频度分两头 —— 常用的内联，少用的按需。
+        取不到、没数据、超预算都**安静退回按需取**，但会记一条日志说明为什么。
+        """
+        s = self.settings
+        if not s.get("guideInlineEnabled", True):
+            return ""
+        try:
+            hot = hot_guide_topics(float(s.get("guideInlineDays") or 7.0),
+                                   int(s.get("guideInlineMinCalls") or 3))
+        except Exception as e:   # noqa: BLE001
+            self.log("guide_inline_error", message=clean(e))
+            return ""
+        if not hot:
+            self.log("guide_inline", inlined=[], reason="最近没有话题达到阈值")
+            return ""
+        budget = int(s.get("guideInlineMaxChars") or 6000)
+        picked, used, skipped = [], 0, []
+        for topic, calls in hot:
+            text = fetch_guide(topic)
+            if not text:
+                skipped.append("%s(取不到)" % topic)
+                continue
+            if used + len(text) > budget:
+                skipped.append("%s(超预算)" % topic)
+                continue
+            picked.append((topic, calls, text))
+            used += len(text)
+        if not picked:
+            self.log("guide_inline", inlined=[], skipped=skipped, reason="都没能内联")
+            return ""
+        out = [chr(10) + chr(10) + "——以下几节是按你最近的使用频度自动内联进来的"
+               "（这些话题你常用，就不必再调 reader_capability_guide 去取了；"
+               "没列出来的话题仍然按需取）——"]
+        for topic, calls, text in picked:
+            out.append(chr(10) + chr(10) + "【" + topic + "】" + chr(10) + text.strip())
+        self.log("guide_inline", inlined=[t for t, _c, _x in picked],
+                 calls=[c for _t, c, _x in picked], chars=used, skipped=skipped)
+        return "".join(out)
 
     def write_binding(self):
         try:

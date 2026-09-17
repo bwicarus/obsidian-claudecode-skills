@@ -349,6 +349,26 @@ internal sealed class ReaderContextMcpServer
                             && calledNameValue.ValueKind == JsonValueKind.String
                                 ? calledNameValue.GetString() ?? "?"
                                 : "?";
+                        // 取参数里的 topic / tool 一起记账：原来只记 name，
+                        // 于是 reader_capability_guide 的 154 次调用分不出取的是哪个话题，
+                        // 「按频度自动调」就没有可用的数据（2026-09-18）。
+                        string calledArg = "";
+                        if (parameters.ValueKind == JsonValueKind.Object
+                            && parameters.TryGetProperty("arguments", out JsonElement argv)
+                            && argv.ValueKind == JsonValueKind.Object)
+                        {
+                            foreach (string key in new[] { "topic", "tool" })
+                            {
+                                if (argv.TryGetProperty(key, out JsonElement v)
+                                    && v.ValueKind == JsonValueKind.String
+                                    && v.GetString() is string sv
+                                    && sv.Length is > 0 and <= 80)
+                                {
+                                    calledArg = sv;
+                                    break;
+                                }
+                            }
+                        }
                         _lastToolResponseWasError = false;
                         _lastDeliveryMs = null;
                         Stopwatch toolClock = Stopwatch.StartNew();
@@ -366,7 +386,8 @@ internal sealed class ReaderContextMcpServer
                                 calledName,
                                 toolClock.ElapsedMilliseconds,
                                 !_lastToolResponseWasError,
-                                _lastDeliveryMs);
+                                _lastDeliveryMs,
+                                calledArg);
                         }
                     }
                     return;
@@ -9253,7 +9274,7 @@ internal sealed class ReaderContextMcpServer
     /// 这是给调参用的样本，不是历史档案。
     /// </remarks>
     private void RecordToolCall(
-        string name, long ms, bool ok, long? deliveredMs)
+        string name, long ms, bool ok, long? deliveredMs, string arg = "")
     {
         try
         {
@@ -9270,6 +9291,10 @@ internal sealed class ReaderContextMcpServer
             if (deliveredMs is long delivered)
             {
                 row["deliveredMs"] = delivered;
+            }
+            if (!string.IsNullOrEmpty(arg))
+            {
+                row["arg"] = arg;   // 话题名/工具名：按频度决定内联谁，靠的就是这一列
             }
             File.AppendAllText(
                 path,
