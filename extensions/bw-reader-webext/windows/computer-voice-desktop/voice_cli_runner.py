@@ -1787,10 +1787,32 @@ class Runner:
             p = d / name
             if not p.is_file():
                 continue
-            out.append({"name": name, "path": str(p), "bytes": e.get("bytes")})
+            out.append({"name": name, "path": str(p), "bytes": e.get("bytes"),
+                        "kind": str(e.get("kind") or "ink"),
+                        "ordinal": e.get("ordinal"),
+                        "age": age})
         if stale:
             self.log("ctx_ink_stale", dropped=stale, maxAgeSeconds=max_age)
+        out.sort(key=lambda x: (0 if x["kind"] == "ink" else 1,
+                                x["ordinal"] if isinstance(x.get("ordinal"), int) else 0,
+                                x["age"] if x.get("age") is not None else 0))
         return out
+
+    @staticmethod
+    def _ink_age_words(age: float | None) -> str:
+        """离画完多久 → 这张图跟他这句话有多大关系（用户 2026-09-17 定的三档）。
+
+        分档而不是一刀切，是因为「过期」和「相关性低」是两回事：
+        画完两分钟再问，图还值得给，只是不该说得像刚画完那样笃定。
+        """
+        if age is None:
+            return "时间不详"
+        if age <= 30:
+            return "%d 秒前刚画完，他说的「这个」几乎可以肯定就是图里这处" % int(age)
+        if age <= 90:
+            return "%d 秒前画的，很可能就是他指的东西" % int(age)
+        # 这一档起点就是 90 秒，用整除会把 91 秒说成「1 分钟前」——四舍五入才不至于说小。
+        return "%d 分钟前画过，未必是这句话说的，作参考" % max(2, round(age / 60))
 
     @staticmethod
     def _ink_age_seconds(entry: dict) -> float | None:
@@ -1863,7 +1885,16 @@ class Runner:
         #   完全没有回应，而语音那头还在说「我确认一下」。
         #   所以图不再进历史：只用一行文字说明有笔迹，要看就调 reader_visual_image
         #   （工具返回走的是另一条通道，不受这个限制）。指纹照旧，保证同一版笔迹只提一次。
-        note = "（附图是他刚在这页圈画/手写的地方；他说「这个/这里/圈的」多半指图里那处。）"
+        note = ""
+        if pending:
+            lines = []
+            for i, x in enumerate(pending, 1):
+                who = ("整页笔迹（这页所有普通笔迹合在一张里）" if x["kind"] == "ink"
+                       else "选区 %s" % (x["ordinal"] if x.get("ordinal") is not None else "?"))
+                lines.append("附图 %d = %s：%s" % (i, who, self._ink_age_words(x.get("age"))))
+            note = ("（下面按顺序附了 %d 张图，逐张对应：" % len(pending)
+                    + "；".join(lines)
+                    + "。他说「选区 1/选区 2」时按这里的编号认。）")
         text_part = (body if body is not None else b["state"]) + ((chr(10) + note) if pending else "")
         content = [{"type": "input_text", "text": text_part}]
 

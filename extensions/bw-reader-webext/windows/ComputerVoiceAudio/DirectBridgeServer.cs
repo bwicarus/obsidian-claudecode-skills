@@ -2936,7 +2936,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
     /// 笔迹待命目录：图本体 + 一份索引。语音核心只读这两样，不再向桥要图 ——
     /// 要图那条路依赖已发布快照里的 visual，而它在页面更新后就没了。
-    internal const int InkStandbyKeep = 6;
+    internal const int InkStandbyKeep = 12;
 
     /// 待命图的保质期（2026-09-17 用户：「超过一段时间无变化就去掉」）。
     /// 张数上限管不住时间：一天只画一次的话，那张昨天的图会一直躺在待命位上。
@@ -2954,38 +2954,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         }
         try
         {
-            ReaderVisualDeliveryRequest? request =
-                ReaderContextMcpServer.BuildVisualRequest(
-                    payload,
-                    "drawing-nearby",
-                    null);
-            if (request is null)
-            {
-                return;
-            }
-            using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(20));
-            ReaderVisualCapture? capture = await _readerVisualBroker
-                .RequestAsync(request, timeout.Token)
-                .ConfigureAwait(false);
-            if (capture is null || capture.Data.Length == 0)
-            {
-                return;
-            }
             string directory = Path.Combine(_runtimeDirectory, "ink-standby");
-            Directory.CreateDirectory(directory);
-            string revision = request.DrawingRevision ?? "";
-            string stamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-                .ToString(CultureInfo.InvariantCulture);
-            string extension = capture.MimeType.Contains("png", StringComparison.Ordinal)
-                ? "png"
-                : "jpg";
-            string name = "ink-" + stamp + "." + extension;
-            await File.WriteAllBytesAsync(
-                Path.Combine(directory, name),
-                capture.Data).ConfigureAwait(false);
-
-            JsonArray entries = new();
             string indexPath = Path.Combine(directory, "index.json");
+            JsonArray entries = new();
             if (File.Exists(indexPath))
             {
                 try
@@ -3002,16 +2973,106 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     entries = new JsonArray();
                 }
             }
-            entries.Add(new JsonObject
+
+            // 已经抓过的不再抓：普通笔按 drawingRevision，选区按 selectionId+创建时刻。
+            // 不去重的话每来一次 drawing 事件就把所有选区重抓一遍 —— 每张都是一次真实设备往返。
+            bool AlreadyHave(string key) => entries.Any(node =>
+                node is JsonObject item
+                && item["dedupeKey"]?.GetValue<string>() == key);
+
+            List<(string Scope, string? SelectionId, string Key, JsonObject Extra)> wanted = new();
+            string revision = payload["currentPage"]?["visual"]?["drawing"]?["drawingRevision"]
+                ?.GetValue<string>() ?? "";
+            // ① 普通画笔：整页所有笔迹合成一张。用户 2026-09-17：「一张大图上有多个
+            //    普通颜色笔迹时就把包括所有笔迹的整体发过去」—— 背景信息比切得准更重要。
+            if (!AlreadyHave("ink:" + revision))
             {
-                ["name"] = name,
-                ["file"] = request.File,
-                ["page"] = payload["currentPage"]?["page"]?.DeepClone(),
-                ["drawingRevision"] = revision,
-                ["bytes"] = capture.Data.Length,
-                ["mimeType"] = capture.MimeType,
-                ["capturedAtUtc"] = DateTimeOffset.UtcNow.ToString("O"),
-            });
+                wanted.Add(("drawing-nearby", null, "ink:" + revision, new JsonObject
+                {
+                    ["kind"] = "ink",
+                    ["label"] = "整页笔迹",
+                }));
+            }
+            // ② 选区笔：一个选区一张，带上它的编号 —— 用户说「选区 1 / 选区 2」时要对得上。
+            if (payload["currentPage"]?["selectionRegions"]?["items"] is JsonArray regions)
+            {
+                foreach (JsonNode? node in regions)
+                {
+                    if (node is not JsonObject region
+                        || region["selectionId"]?.GetValue<string>() is not string selectionId
+                        || string.IsNullOrEmpty(selectionId))
+                    {
+                        continue;
+                    }
+                    long createdAt = region["createdAtEpochMs"]?.GetValue<long?>() ?? 0;
+                    string key = "sel:" + selectionId + ":"
+                        + createdAt.ToString(CultureInfo.InvariantCulture);
+                    if (AlreadyHave(key))
+                    {
+                        continue;
+                    }
+                    wanted.Add(("selection-near", selectionId, key, new JsonObject
+                    {
+                        ["kind"] = "selection",
+                        ["ordinal"] = region["ordinal"]?.DeepClone(),
+                        ["label"] = region["label"]?.DeepClone(),
+                        ["selectionId"] = selectionId,
+                        ["createdAtEpochMs"] = createdAt,
+                    }));
+                }
+            }
+            if (wanted.Count == 0)
+            {
+                return;
+            }
+            Directory.CreateDirectory(directory);
+            using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(30));
+            foreach ((string scope, string? selectionId, string key, JsonObject extra) in wanted)
+            {
+                ReaderVisualDeliveryRequest? request =
+                    ReaderContextMcpServer.BuildVisualRequest(
+                        payload,
+                        scope,
+                        selectionId);
+                if (request is null)
+                {
+                    continue;
+                }
+                ReaderVisualCapture? capture = await _readerVisualBroker
+                    .RequestAsync(request, timeout.Token)
+                    .ConfigureAwait(false);
+                if (capture is null || capture.Data.Length == 0)
+                {
+                    continue;
+                }
+                string stamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                    .ToString(CultureInfo.InvariantCulture);
+                string extension = capture.MimeType.Contains("png", StringComparison.Ordinal)
+                    ? "png"
+                    : "jpg";
+                string name = "ink-" + stamp + "-"
+                    + (selectionId is null ? "all" : "s" + extra["ordinal"]?.ToJsonString())
+                    + "." + extension;
+                await File.WriteAllBytesAsync(
+                    Path.Combine(directory, name),
+                    capture.Data).ConfigureAwait(false);
+                JsonObject entry = new()
+                {
+                    ["name"] = name,
+                    ["dedupeKey"] = key,
+                    ["file"] = request.File,
+                    ["page"] = payload["currentPage"]?["page"]?.DeepClone(),
+                    ["drawingRevision"] = revision,
+                    ["bytes"] = capture.Data.Length,
+                    ["mimeType"] = capture.MimeType,
+                    ["capturedAtUtc"] = DateTimeOffset.UtcNow.ToString("O"),
+                };
+                foreach (KeyValuePair<string, JsonNode?> pair in extra)
+                {
+                    entry[pair.Key] = pair.Value?.DeepClone();
+                }
+                entries.Add(entry);
+            }
             // 先按时间清：过期的连文件带条目一起去掉。
             DateTimeOffset cutoff = DateTimeOffset.UtcNow - InkStandbyMaxAge;
             for (int index = entries.Count - 1; index >= 0; index--)
