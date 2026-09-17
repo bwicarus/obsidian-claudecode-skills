@@ -150,6 +150,19 @@ def _voice_lane(limit: int, since: float = 0.0, thread: str | None = None) -> li
                          "kind": "error", "at": at,
                          "title": "注入失败 " + kind[4:-6],
                          "meta": _clip(d.get("message") or "", 80), "body": ""})
+        elif kind == "ctx_ink_late":
+            # 图比提问晚到、补插进同一轮（2026-09-17）。图现在**主要走这条**，
+            # 链路页原来没有这种行，于是用户说「链路里图像根本无法点击和显示」。
+            rows.append({"lane": "text", "kind": "inject", "at": at,
+                         "title": "补插笔迹图（同一轮）",
+                         "meta": "%d 张" % len(d.get("images") or []),
+                         "images": list(d.get("images") or []),
+                         "body": ""})
+        elif kind == "ctx_ink_stale":
+            rows.append({"lane": "text", "kind": "error", "at": at,
+                         "title": "笔迹图过期作废",
+                         "meta": "丢弃 %s 张 · 保质期 %s 秒" % (d.get("dropped"), d.get("maxAgeSeconds")),
+                         "body": ""})
         elif kind == "ctx_steer_fallback":
             rows.append({"lane": "text", "kind": "error", "at": at,
                          "title": "插播没赶上，退回追加",

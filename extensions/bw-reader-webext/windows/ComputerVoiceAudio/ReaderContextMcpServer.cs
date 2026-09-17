@@ -5073,7 +5073,10 @@ internal sealed class ReaderContextMcpServer
                     : "BW_READER_QUERY_UNAVAILABLE",
                 response.Status == "unsupported"
                     ? "当前阅读界面不支持该查询。"
-                    : "Reader 暂时无法回答该查询。",
+                    // ⚠ 2026-09-17：原来只说「暂时无法回答」，把设备返回的原始状态丢了。
+                    //   桥侧安全日志那一刻什么都没有，所以这句话是唯一的线索 —— 必须带上它。
+                    : "Reader 暂时无法回答该查询（设备返回 status="
+                        + response.Status + "）。",
                 cancellationToken).ConfigureAwait(false);
             return;
         }

@@ -1563,11 +1563,15 @@ class Runner:
         # 正文：停留窗内才带；但页面被"激活"（有选区，或最近一次动作不是翻页而是在这页上选中/画/操作）时不等 8 秒（用户 2026-09-14）
         dwell = time.time() - (self._ctx["page_since"] or time.time())
         dwell_max = float(s.get("contextDwellMaxSeconds") or 720)
+        # 有待命的笔迹图 = 他正指着这一页问东西。这时正文必须给，**连停留上限也不该拦** ——
+        # 2026-09-17 实录第三轮：在第 41 页待了近 50 分钟（超过 720 秒上限），
+        # 于是 withText=false，模型没有正文只好去调 reader_page_text，那一调还失败了。
+        ink_active = bool(self._ink_standby_pending(snap, quiet=True))
         activated = bool(sel_text) or bool(
             acts and str(acts[-1].get("kind") or "") not in ("page-turn", "")
             and float(acts[-1].get("secondsAgo") or 0) <= dwell_max
-        ) or bool(vis.get("has_ink"))
-        dwell_ok = (float(s.get("contextDwellMinSeconds") or 8) <= dwell <= dwell_max) or (activated and dwell <= dwell_max)
+        ) or bool(vis.get("has_ink")) or ink_active
+        dwell_ok = (float(s.get("contextDwellMinSeconds") or 8) <= dwell <= dwell_max)             or (activated and dwell <= dwell_max) or ink_active
         text = ""
         text_truncated = False
         if cp.get("textAvailable") and cp.get("text") and dwell_ok:
@@ -1747,7 +1751,7 @@ class Runner:
 
     _ink_sent: set = set()   # 已插进线程的待命图（按文件名）。进程内即可：重启后至多重送一张。
 
-    def _ink_standby_pending(self, snap: dict) -> list[dict]:
+    def _ink_standby_pending(self, snap: dict, quiet: bool = False) -> list[dict]:
         """桥待命着、本页还没送过的笔迹图（2026-09-17 用户定的做法）。
 
         桥在「这一笔刚稳定」时就抓好图放进 runtime/ink-standby/ 并登记 index.json。
@@ -1791,7 +1795,7 @@ class Runner:
                         "kind": str(e.get("kind") or "ink"),
                         "ordinal": e.get("ordinal"),
                         "age": age})
-        if stale:
+        if stale and not quiet:
             self.log("ctx_ink_stale", dropped=stale, maxAgeSeconds=max_age)
         out.sort(key=lambda x: (0 if x["kind"] == "ink" else 1,
                                 x["ordinal"] if isinstance(x.get("ordinal"), int) else 0,

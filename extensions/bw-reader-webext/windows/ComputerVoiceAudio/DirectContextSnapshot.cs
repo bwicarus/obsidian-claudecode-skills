@@ -2159,18 +2159,22 @@ StringValue(_selection["state"]) == "active"
                     lastEditedAtSeconds is double seconds
                         ? (long)(seconds * 1000)
                         : 0);
-                // 趁 visual 还在，把这一刻的完整载荷交出去（见 DrawingStableCaptured）。
-                // 回调自己丢后台，异常绝不能冒回快照写入路径。
-                if (DrawingStableCaptured is Action<JsonObject> hook)
+            }
+            // ⚠ 2026-09-17：抓图原来跟 RecordAction 一样只挂在「不稳定→稳定」的**跳变**上。
+            //   实录第三次圈画就没抓到 —— 连着两条 stable 的绘图事件之间没有不稳定那一拍，
+            //   wasStable 一直为真，跳变不发生。用户于是只能听到它自己去调工具看页面。
+            //   这里改成「只要现在是稳定的就试一次」，重复由服务端的 dedupeKey
+            //   （ink:<drawingRevision>）挡住 —— 那才是判重该待的地方。
+            if (nowStable && folded is not null
+                && DrawingStableCaptured is Action<JsonObject> hook)
+            {
+                try
                 {
-                    try
-                    {
-                        hook(BuildSnapshot());
-                    }
-                    catch (Exception)
-                    {
-                        // 抓图是锦上添花，坏了也不能影响快照本身。
-                    }
+                    hook(BuildSnapshot());
+                }
+                catch (Exception)
+                {
+                    // 抓图是锦上添花，坏了也不能影响快照本身。
                 }
             }
             // ⚠ 提示板那条**不看 stable**：板子给的是状态不是事件，
