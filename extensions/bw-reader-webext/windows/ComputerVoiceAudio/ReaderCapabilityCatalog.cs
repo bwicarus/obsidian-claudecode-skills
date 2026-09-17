@@ -50,6 +50,14 @@ internal sealed class ReaderCapabilityCatalog
         new("boards", "分区展示板",
             "在 iOS 小组件上留一块分区展示板给反复要看状态的任务"
             + "（每日新闻、发布盯梢、长任务进展）；只有用户明确要求才开"),
+        // 2026-09-18：这两条随 AGENTS.md 搬家新增。发现层没登记 = 模型看不见 = 等于没搬
+        // （今天 boards 就是这么漏掉的，topic 报 Invalid 而文件一直躺在那儿）。
+        new("todo", "待办通知",
+            "快照里「待办通知」节的纪律：[新] 通知先 ack、完成后 resolve，"
+            + "以及它与你自己定时任务的分工"),
+        new("activity", "学习活动记录",
+            "「我今天/最近学了什么、改了什么、某张卡是什么」——本机账本怎么查，"
+            + "默认参数与追问某条的用法"),
         new("capability-matrix", "工具能力矩阵", "本机 MCP、服务 MCP、Skill 与子代理的职责"),
     ];
 
