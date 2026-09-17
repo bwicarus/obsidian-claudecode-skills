@@ -83,37 +83,46 @@ _SEL_KIND_LABEL = {"text": "选中的文字", "card": "选中的卡片", "image"
 # 实测：开局 37754 → 29003 字，省约 12.4K 字 ≈ 4.3K token/新线程。
 # ⚠ 省不掉的两块（服务端下发，本地管不着）：远端 skills 约 14~17K、插件推荐 3.1K。
 SLIM_CODEX_HOME = Path.home() / "AppData" / "Local" / "BWReader" / "codex-home"
+SLIM_HOME_EXCLUDE = {"plugins"}   # 目录/文件名；AGENTS.md* 另按前缀排除
 
 
 def sync_slim_codex_home() -> dict:
-    """把主 home 里**要的那几样**同步到专用 home：config.toml（MCP 与模型设置）、
-    skills/（用户自己的）、auth.json（登录态）。不复制 plugins/ 与 AGENTS.md。
+    """把主 home 镜像到专用 home，**只排除想丢的两样**（2026-09-17 第二版）。
 
-    只在源文件更新时才覆盖 —— auth.json 尤其重要：用户在桌面 Codex 重新登录后，
-    这里要跟上，否则语音这条线哪天就悄悄掉登录。
+    ⚠ 第一版用白名单只搬 config.toml / skills / auth.json，主 home 里其余四十多项被
+    静默丢掉 —— hooks.json（推送绑定钩子，每次开口都跑）、rules/、
+    realtime-voice-continuity.json 全没了，用户当场发现异常并指出是我删错了东西。
+    教训：**要丢什么必须点名**，不能靠"只搬我想到的"。
+
+    目录一律用 junction（mklink /J，不需要管理员），所以 sessions / memories / sqlite
+    是**同一份**：换 home 不丢对话记忆，也不会出现两份状态互相打架。
+    文件按 mtime 复制 —— auth.json 尤其要跟着主 home 更新，否则哪天悄悄掉登录。
+
+    ⚠ 实测更正（2026-09-17 18:04）：排除 plugins/ **不成立** —— Codex 会在新 home 里
+    自己重建 plugins/ 并把远端插件重新装回来（换 home 后 3 分钟内就有了 64 个 SKILL.md）。
+    那些插件是账号级的，给它哪个 home 就往哪个 home 装。所以这套做法真正省下的
+    只有 AGENTS.md 那约 8K 字，不是原先估的 12.4K。保留它的理由变成「把语音助手看到的
+    环境和开发环境分开」本身，而不是省 token。
     """
     import shutil
-    out = {"home": str(SLIM_CODEX_HOME)}
+    out = {"home": str(SLIM_CODEX_HOME), "junction": 0, "copied": 0, "skipped": 0}
     try:
         SLIM_CODEX_HOME.mkdir(parents=True, exist_ok=True)
-        main = CODEX_HOME
-        for name in ("config.toml", "auth.json"):
-            src, dst = main / name, SLIM_CODEX_HOME / name
-            if src.is_file() and (not dst.is_file() or src.stat().st_mtime > dst.stat().st_mtime):
-                shutil.copy2(src, dst)
-                out[name] = "copied"
-        src_skills = main / "skills"
-        dst_skills = SLIM_CODEX_HOME / "skills"
-        if src_skills.is_dir():
-            newest = max((f.stat().st_mtime for f in src_skills.rglob("*") if f.is_file()),
-                         default=0)
-            mine = max((f.stat().st_mtime for f in dst_skills.rglob("*") if f.is_file()),
-                       default=0) if dst_skills.is_dir() else 0
-            if newest > mine:
-                if dst_skills.exists():
-                    shutil.rmtree(dst_skills)
-                shutil.copytree(src_skills, dst_skills)
-                out["skills"] = "copied"
+        for item in sorted(CODEX_HOME.iterdir()):
+            if item.name in SLIM_HOME_EXCLUDE or item.name.startswith("AGENTS.md"):
+                out["skipped"] += 1
+                continue
+            dst = SLIM_CODEX_HOME / item.name
+            if item.is_dir():
+                if not (dst.exists() or dst.is_symlink()):
+                    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(dst), str(item)],
+                                       capture_output=True, text=True, errors="replace")
+                    if r.returncode == 0:
+                        out["junction"] += 1
+            elif item.is_file():
+                if not dst.exists() or item.stat().st_mtime > dst.stat().st_mtime:
+                    shutil.copy2(item, dst)
+                    out["copied"] += 1
     except Exception as e:   # noqa: BLE001
         out["error"] = str(e)[:160]
     return out
@@ -599,15 +608,10 @@ class AppServer:
 
     async def launch(self):
         env = {k: v for k, v in os.environ.items() if k.upper() not in ("OPENAI_API_KEY", "OPENAI_BASE_URL")}
-        # ⚠ 2026-09-17 回退：专用 CODEX_HOME 已撤。我用**白名单**只搬了三样
-        #   （config.toml / skills / auth.json），主 home 里其余四十多项被静默丢掉，
-        #   其中 hooks.json 定义了 SessionStart / UserPromptSubmit 两个钩子
-        #   （每次用户开口都跑 reader-registration-hook.py --auto-enable）——
-        #   实录对比：旧 home 一轮里 hook 事件 6 次，新 home **0 次**。
-        #   另外还丢了 rules/default.rules 与 realtime-voice-continuity.json（语音连续性）。
-        #   用户随即发现「让他做什么都说自己做好了」，并直指是我删错了东西 —— 他判断对。
-        #   要再做这件事，只能用**排除法**（除 plugins/ 与 AGENTS.md 外全镜像），
-        #   不能再用白名单：省 12.4K 字换不来这种整片功能静默消失。
+        # 专用 home 只给**这个子进程**：运行器自己的 CODEX_HOME（线程绑定文件等）不动。
+        # 第二版用排除法镜像（见 sync_slim_codex_home），hooks/rules/sessions 都在。
+        self.home_sync = sync_slim_codex_home()
+        env["CODEX_HOME"] = str(SLIM_CODEX_HOME)
         # 给语音这条线程封存用不到的 Codex 自带样板。用 -c 按次覆盖，不动 config.toml。
         # ⚠ 2026-09-17 A/B 实测更正：`plugins."X".enabled=false` 与 `project_doc_max_bytes=0`
         #   **都不生效** —— 加与不加，开局一字不差（37754/37754）。二进制里有一块
