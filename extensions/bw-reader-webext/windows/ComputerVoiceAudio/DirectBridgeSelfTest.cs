@@ -15759,6 +15759,34 @@ internal static class DirectBridgeSelfTest
         //
         // ⚠ 只认字面的 true：默认关是有意选的（消费端曾同时在轮询，两条都开
         // 就是双发），恢复不该顺手把它改宽。
+        // 板面推送的**内容**同样要钉住（2026-09-18）。
+        // 只有快板变化时不再发：语音核心收到也是整条丢弃（board_skip_injector 7629 次），
+        // 而快板真正的消费者是文件，文件照写不受影响。
+        // 变异检验：把 BuildVoiceCoreBoardBody 里的 `if (!slowChanged) return null;` 删掉，
+        // 第一条必须红；把 "【慢板】" 换成拼上快板的老写法，第二、三条必须红。
+        Require(
+            ReaderCodexPush.BuildVoiceCoreBoardBody(
+                false, true, "现在地点：家", "焦点从「A」转移到「B」") is null,
+            "board-push-skips-fast-only-changes",
+            checks);
+        Require(
+            ReaderCodexPush.BuildVoiceCoreBoardBody(
+                true, true, "现在地点：家", "焦点从「A」转移到「B」")
+                is string bothBody
+            && bothBody.Contains("现在地点：家", StringComparison.Ordinal)
+            && !bothBody.Contains("焦点从", StringComparison.Ordinal)
+            && !bothBody.Contains("【快板】", StringComparison.Ordinal),
+            "board-push-carries-only-the-slow-board",
+            checks);
+        Require(
+            ReaderCodexPush.BuildVoiceCoreBoardBody(
+                true, false, "待办 ntf-1「倒垃圾」还没跟他说过，现在用语音说。", "")
+                is string slowOnly
+            && slowOnly.StartsWith("【慢板】", StringComparison.Ordinal)
+            && slowOnly.Contains("现在用语音说", StringComparison.Ordinal),
+            "board-push-keeps-the-slow-board-verbatim",
+            checks);
+
         Require(
             ReaderCodexEndpoint.EnabledFromRecord(
                 new JsonObject { ["enabled"] = true }),

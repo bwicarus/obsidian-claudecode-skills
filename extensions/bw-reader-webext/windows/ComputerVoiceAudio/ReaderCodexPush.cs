@@ -517,6 +517,37 @@ internal static class ReaderCodexPush
     ///
     /// ⚠ 消息里只放"去看哪块板"，不放板面正文：正文里有书页标题和内容，
     /// 那是资料不是指令，塞进一条送给模型的提示里等于把资料升级成命令。
+    /// <summary>语音核心 /board 这一条该不该发、发什么。null = 不发。
+
+    /// 2026-09-18：**只有快板变化时不发**。语音核心收到后本来就整条丢弃 ——
+    /// 焦点/页码/绘图改由它自己的上下文注入器按快照指纹负责，桥推的快板只会重复它
+    /// （实测 board_skip_injector 7629 次，约 90 秒一次；而真正送达的只有 35 次，
+    /// 全是慢板内容）。快板真正的消费者是**文件**（值守子智能体盯
+    /// reader-attention-fast.md），那条路不受影响：文件照写，这里只是不再多打
+    /// 一次没人要的 HTTP。
+    ///
+    /// ⚠ 唯一的代价：语音核心 contextInjectEnabled=false 时它不再剥离快板，
+    /// 那时这条推送本来是有用的。所以运行器在那个档位上启动时会记
+    /// board_fast_suppressed 出声，不让这个取舍变成一处静默的能力缺失。
+    ///
+    /// 抽成纯函数是为了钉得住：决策原来埋在一段带网络 I/O 的方法里，
+    /// 改对改错都没有地方能验（我第一次"验证"拿的是昨天就已经停了的心跳，
+    /// 等于什么都没验）。</summary>
+    internal static string? BuildVoiceCoreBoardBody(
+        bool slowChanged,
+        bool fastChanged,
+        string slowText,
+        string fastText)
+    {
+        _ = fastChanged;
+        _ = fastText;
+        if (!slowChanged)
+        {
+            return null;
+        }
+        return ("【慢板】\n" + Trim(slowText)).TrimEnd();
+    }
+
     internal static async Task NotifyBoardChangedAsync(
         bool slowChanged,
         bool fastChanged,
@@ -531,10 +562,21 @@ internal static class ReaderCodexPush
             // 2026-09-14 用户：「提示板的推送现在开始推到新的语音的文字后台里，塞进去而不是触发一轮」。
             // 语音核心 /board：进后台历史（inject_items，零成本、不出声）+ 用户开口时才进语音上下文。
             // 需要提醒的那类不走这里 —— 那是 codex_thread_notify → /turn（起一轮）。
-            var boardBody = new StringBuilder();
-            if (fastChanged) boardBody.Append("【快板】\n").Append(Trim(fastText)).Append('\n');
-            if (slowChanged) boardBody.Append("【慢板】\n").Append(Trim(slowText)).Append('\n');
-            string boardJson = JsonSerializer.Serialize(new { text = boardBody.ToString().TrimEnd() });
+            // 2026-09-18：只有快板变化时**不再推**。语音核心收到后本来就整条丢弃 ——
+            // 焦点/页码/绘图改由它自己的上下文注入器按快照指纹负责，桥推的快板只会重复它
+            // （实测 board_skip_injector 7629 次，而真正送达的只有 35 次、全是慢板内容）。
+            // 快板真正的消费者是**文件**（值守子智能体盯 reader-attention-fast.md），
+            // 那条路不受影响：文件照写，这里只是不再多打一次没人要的 HTTP。
+            // ⚠ 唯一的代价：语音核心 contextInjectEnabled=false 时它不剥离快板，
+            //   那时这条推送本来是有用的。所以运行器在那个档位上启动时会出声
+            //   （board_fast_suppressed），不让这个取舍变成一处静默的能力缺失。
+            string? boardBody = BuildVoiceCoreBoardBody(
+                slowChanged, fastChanged, slowText, fastText);
+            if (boardBody is null)
+            {
+                return;
+            }
+            string boardJson = JsonSerializer.Serialize(new { text = boardBody });
             _ = DirectBridgeProtocolSession.VoiceCoreRequestAsync("/board", boardJson, "voice-core-board");
             return;
         }

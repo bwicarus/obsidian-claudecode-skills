@@ -1203,6 +1203,14 @@ class Runner:
         if drift:
             self.log("settings_drift", keys=drift,
                      hint="线上用的是持久化的旧文本；要用源码版就 POST /settings 下发后开新线程")
+        # 桥 0.1.418 起「只有快板变化」时不再推 /board（推来也是整条丢弃）。
+        # 但那个丢弃的前提是 contextInjectEnabled —— 关掉它，快板本该重新变得有用，
+        # 而桥已经不发了。这是个能力缺口，不能让它悄悄发生。
+        if not self.settings.get("contextInjectEnabled", True):
+            self.log("board_fast_suppressed",
+                     hint="contextInjectEnabled=false：上下文注入器已关，而桥自 0.1.418 起"
+                          "不再推送只有快板变化的板面 —— 焦点/绘图/挂断这些信号现在两边都收不到。"
+                          "要么把注入器开回来，要么改桥那条 if (!slowChanged) return。")
 
     def _inline_hot_guides(self) -> str:
         """把最近常取的能力指南直接内联进开局（2026-09-18 用户：按频度自动调）。
