@@ -165,8 +165,7 @@ DEFAULTS: dict = {
                                    # ⚠ 早先记的「六分之一会打哑」是**探针写坏造成的假象** ——
                                    # 那版用阻塞 readline 收尾，漏掉了迟到的回答，把「没读到」当成「没产出」。
     "idleStopMinutes": 20,         # 闲置这么久自动结束通话（0=不自动关）。实测连着不说话也按墙钟 1:1 计费
-    "contextInkFreshSeconds": 900,  # 退路判据：本页最近一次动作是画、且在这么多秒内 → 当作有新笔迹（App 没带 visual 时用）
-    "contextInkImage": True,       # 开口时页上有新笔迹（lastEditedAt 在 freshWindowS 内、已稳定）→ 取圈画附近的图随状态一起注入后台；同一 (页,笔迹版本) 只投一次
+    "contextInkImage": True,       # 桥在每次笔迹稳定时抓好图放进 runtime/ink-standby 待命；开口交给后台的那一刻把本页没送过的**全部**随 steer 插进那一轮（localImage 路径，不进 base64）
     "contextInkImageMaxBytes": 700000,   # 超过就不投（图片按 token 计费且留在线程历史里）
     "typedPrefix": "【用户打字】",   # 侧栏打字追加进语音会话时的前缀，让语音模型知道这不是语音
     # 冷设置：改了要重开会话
@@ -1745,74 +1744,41 @@ class Runner:
             parts.append("【下一页开头（衔接用，不可在此划线）】\n" + piece + ("…" if take_next < len(nxt) else ""))
         return "\n".join(parts)
 
-    def _ctx_ink_fingerprint(self, snap: dict) -> str:
-        """页上有"最近新画"的笔迹 → 返回 (页, 版本) 指纹；否则空串。
+    _ink_sent: set = set()   # 已插进线程的待命图（按文件名）。进程内即可：重启后至多重送一张。
 
-        ⚠ 2026-09-17：原来只认 currentPage.visual.drawing，而**快照里常常根本没有
-        visual 这个键**（它是 App 随快照上报的，不带就没有）—— 于是这个功能从上线起
-        一次都没触发过：用户圈画后问「这是什么」，ctx_steer 记的是 image=null，
-        连 skip/error 都没有，因为压根没走到取图。
-        同一份快照的 recentActions 里却一直记着 {"kind":"drawing","page":41,...}。
-        所以 visual 缺席时用它兜底。取图走桥的 /voice-core/visual-image，本来就不
-        依赖 visual，兜底完全可用。
+    def _ink_standby_pending(self, snap: dict) -> list[dict]:
+        """桥待命着、本页还没送过的笔迹图（2026-09-17 用户定的做法）。
+
+        桥在「这一笔刚稳定」时就抓好图放进 runtime/ink-standby/ 并登记 index.json。
+        这里只做两件事：按当前书/页筛，按已送清单去重。**不再自己判断有没有新笔迹** ——
+        原来那套判据读 currentPage.visual.drawing，而已发布的快照里没有这个字段
+        （笔迹折进去后会被下一份页面更新冲掉），所以从上线起一次都没成立过。
         """
         if not self.settings.get("contextInkImage", True):
-            return ""
+            return []
+        d = BRIDGE_RUNTIME / "ink-standby"
+        try:
+            idx = json.loads((d / "index.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
         cp = snap.get("currentPage") or {}
-        vis = cp.get("visual") or {}
-        dr = vis.get("drawing") or {}
-        if isinstance(dr, dict) and dr.get("drawingRevision") and dr.get("stable") \
-                and not dr.get("inProgress") and not dr.get("empty"):
-            try:
-                edited = float(dr.get("lastEditedAt") or 0)
-                window = float(dr.get("freshWindowS") or 120)
-            except (TypeError, ValueError):
-                return ""
-            if edited > 0 and time.time() - edited <= window:
-                return "%s|%s" % (self._ctx["page_key"], dr.get("drawingRevision"))
-            return ""
-        # 退路：App 没带 visual。看本页最近一次动作是不是画 ——
-        # 「刚画完就开口」正是要给图的那一刻，而「画完很久又在聊别的」不该反复投。
-        acts = [a for a in (snap.get("recentActions") or []) if isinstance(a, dict)]
-        if not acts:
-            return ""
-        last = acts[-1]
-        if str(last.get("kind") or "") != "drawing":
-            return ""
-        if last.get("page") is not None and cp.get("page") is not None \
-                and last.get("page") != cp.get("page"):
-            return ""
-        try:
-            secs = float(last.get("secondsAgo"))
-        except (TypeError, ValueError):
-            return ""
-        if secs < 0 or secs > float(self.settings.get("contextInkFreshSeconds") or 900):
-            return ""
-        # 指纹取"这一笔画完的绝对时刻"（秒），同一次圈画只投一次；
-        # 再画一笔 secondsAgo 会重新变小，指纹随之改变。
-        return "%s|act%d" % (self._ctx["page_key"], int(time.time() - secs))
-
-    async def _ctx_fetch_ink_image(self) -> dict | None:
-        """向桥要圈画附近的合成图（桥复用 reader_visual_image 同一条取图路）。失败/太大 → None。"""
-        def work():
-            import urllib.request
-            req = urllib.request.Request(BRIDGE_URL + "/voice-core/visual-image", data=json.dumps({"scope": "drawing-nearby"}).encode("utf-8"),
-                                         method="POST", headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                return json.loads(resp.read() or b"{}")
-        try:
-            r = await asyncio.get_running_loop().run_in_executor(None, work)
-        except Exception as e:   # noqa: BLE001
-            self.log("ctx_image_error", message=clean(e))
-            return None
-        if not r.get("ok"):
-            self.log("ctx_image_skip", reason=r.get("reason"), message=(r.get("message") or "")[:120])
-            return None
-        limit = int(self.settings.get("contextInkImageMaxBytes") or 700000)
-        if int(r.get("bytes") or 0) > limit:
-            self.log("ctx_image_skip", reason="too-large", bytes=r.get("bytes"), limit=limit)
-            return None
-        return r
+        cur_file, cur_page = str(cp.get("file") or ""), cp.get("page")
+        out = []
+        for e in (idx.get("images") or []):
+            if not isinstance(e, dict):
+                continue
+            name = str(e.get("name") or "")
+            if not name or name in self._ink_sent:
+                continue
+            if cur_file and str(e.get("file") or "") and str(e.get("file")) != cur_file:
+                continue
+            if cur_page is not None and e.get("page") is not None and e.get("page") != cur_page:
+                continue
+            p = d / name
+            if not p.is_file():
+                continue
+            out.append({"name": name, "path": str(p), "bytes": e.get("bytes")})
+        return out
 
     def _ctx_thread_scope(self):
         """去重记账只在**当前这条线程**里有效。线程一换（清空对话 / resume 到别的线程），
@@ -1860,14 +1826,10 @@ class Runner:
                 body += ("（本页正文连同页上卡片的内容与 id，本轮对话较早处已经给过，"
                          "往上翻本轮对话就有；要单独取某张卡用 reader_page_card_read 按 id 取，"
                          "别用 reader_page_cards 把整页倒出来。）")
-        # 新笔迹的图：只在开口边沿（with_text）考虑；同一 (页, drawingRevision) 只投一次 —— 相同或相邻轮次不重复
-        image = None
-        ink_fp = self._ctx_ink_fingerprint(snap) if with_text else ""
-        if ink_fp and fp["image"] != ink_fp:
-            image = await self._ctx_fetch_ink_image()
-            if image is None:
-                fp["image"] = ink_fp   # 取不到就算了，别每次开口都再试同一版笔迹
-        if body is None and image is None:
+        # 笔迹图：桥已经在每次笔迹稳定时抓好放着了，这里只挑本页没送过的。
+        # 只在开口边沿（with_text）考虑 —— 快板那种状态刷新不带图。
+        pending = self._ink_standby_pending(snap) if with_text else []
+        if body is None and not pending:
             return False
         # ⚠ 2026-09-17：这里原来把笔迹图当 input_image 直接塞进注入的 developer 消息。
         #   语音委托起的那些轮会把线程历史转给另一个端点，而**那个端点只收 input_text**：
@@ -1876,8 +1838,8 @@ class Runner:
         #   完全没有回应，而语音那头还在说「我确认一下」。
         #   所以图不再进历史：只用一行文字说明有笔迹，要看就调 reader_visual_image
         #   （工具返回走的是另一条通道，不受这个限制）。指纹照旧，保证同一版笔迹只提一次。
-        note = "（他刚在这页圈画/手写过；他说「这个/这里/圈的」多半指那儿。要看就调 reader_visual_image 取页面图，别猜。）"
-        text_part = (body if body is not None else b["state"]) + ((chr(10) + note) if image is not None else "")
+        note = "（附图是他刚在这页圈画/手写的地方；他说「这个/这里/圈的」多半指图里那处。）"
+        text_part = (body if body is not None else b["state"]) + ((chr(10) + note) if pending else "")
         content = [{"type": "input_text", "text": text_part}]
 
         # 后台正在跑的那一轮读不到我们现在追加的东西（它的上下文早就组好了）。
@@ -1903,20 +1865,19 @@ class Runner:
             only_text = all(c.get("type") == "input_text" for c in content)
             if only_text:
                 whole = "".join(c.get("text") or "" for c in content)
-                img_path = self._ink_image_file(image) if image is not None else None
                 res = await self.steer_running_turn(
                     "【当前阅读状态·状态记录，不是提问】" + whole +
                     chr(10) + "继续完成手上的事；用到「选中/当前页」时以这条为准。",
-                    tag="delegation", image_path=img_path)
+                    tag="delegation", image_paths=[x["path"] for x in pending])
                 if res.get("ok"):
                     fp["backend_state"] = b["fp_state"]
                     if with_text and b["text"]:
                         fp["backend_text"] = b["fp_text"]
-                    if img_path:
-                        fp["image"] = ink_fp
+                    for x in pending:
+                        self._ink_sent.add(x["name"])
                     self.log("ctx_steer", chars=len(whole), page=self._ctx["page_key"][-40:],
                              withText=bool(with_text and b["text"]), body=self._log_body(whole),
-                             image=(Path(img_path).name if img_path else None))
+                             image=",".join(x["name"] for x in pending) or None)
                     return True
                 self.log("ctx_steer_fallback", reason=str(res.get("error"))[:80])
                 # 没赶上就照常追加，被下一轮读到
@@ -2028,36 +1989,8 @@ class Runner:
         except Exception as e:   # noqa: BLE001
             self.log("thread_compact_error", message=clean(e))
 
-    def _ink_image_file(self, image: dict) -> str | None:
-        """把笔迹图落成一个文件，供 turn/steer 的 localImage 引用。
-
-        为什么不直接把字节塞进去：inject/steer 的**历史**里只会留一条路径引用，
-        而不是 211KB base64 —— 后者 2026-09-17 把整条线程毒死过（见 _ctx_inject_backend）。
-        同一版笔迹只写一次，文件名带 revision，旧的顺手清掉别堆积。
-        """
-        import base64
-        try:
-            data = base64.b64decode(image.get("base64") or "")
-            if not data:
-                return None
-            ext = "png" if "png" in str(image.get("mimeType") or "") else "jpg"
-            d = BRIDGE_RUNTIME / "ink-images"
-            d.mkdir(parents=True, exist_ok=True)
-            for old_file in sorted(d.glob("ink-*"))[:-4]:
-                try:
-                    old_file.unlink()
-                except OSError:
-                    pass
-            p = d / ("ink-%s.%s" % (str(image.get("drawingRevision") or int(time.time())), ext))
-            if not p.exists():
-                p.write_bytes(data)
-            return str(p)
-        except Exception as e:   # noqa: BLE001
-            self.log("ctx_image_file_error", message=clean(e))
-            return None
-
     async def steer_running_turn(self, text: str, tag: str = "state",
-                                 image_path: str | None = None) -> dict:
+                                 image_paths: list[str] | None = None) -> dict:
         """把内容插进**正在跑的那一轮**。
 
         为什么需要它：inject_items 是往线程上追加，已经开跑的轮不会回头去读 ——
@@ -2077,8 +2010,8 @@ class Runner:
             # text / image{url} / localImage{path} / audio / localAudio / skill / mention）。
             # 给路径而不是 base64：历史里只留引用，不会再出现那条毒 item。
             steer_input = [{"type": "text", "text": text}]
-            if image_path:
-                steer_input.append({"type": "localImage", "path": image_path})
+            for path in (image_paths or []):
+                steer_input.append({"type": "localImage", "path": path})
             await self.app.call("turn/steer", {"threadId": self.thread_id,
                                                "expectedTurnId": turn["id"],
                                                "input": steer_input}, timeout=20)
@@ -2086,7 +2019,7 @@ class Runner:
             self.log("turn_steer_error", message=clean(e), tag=tag)
             return {"ok": False, "error": clean(e)}
         self.log("turn_steer", tag=tag, chars=len(text), turnId=str(turn["id"])[-12:],
-                 image=(Path(image_path).name if image_path else None))
+                 images=len(image_paths or []))
         return {"ok": True, "turnId": turn["id"], "chars": len(text)}
 
     #: 语音模型嘴上答应要做事的说法。它**自己没有任何工具**，所以说了这些就必然要委派后台；

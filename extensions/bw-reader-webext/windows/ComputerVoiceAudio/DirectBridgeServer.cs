@@ -421,6 +421,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     {
         _configStore = configStore;
         _snapshotContextAdapter = snapshotContextAdapter;
+        if (snapshotContextAdapter is FileDirectSnapshotContextAdapter inkAdapter)
+        {
+            // 笔迹图待命（用户 2026-09-17）：有笔迹变化就抓一张存着，
+            // 等后台真开工时由语音核心一次性插进那一轮。
+            inkAdapter.DrawingStableCaptured =
+                payload => _ = CaptureInkStandbyAsync(payload);
+        }
         DirectBridgeConfig config = configStore.Load();
         string runtimeDirectory = Path.GetDirectoryName(
             config.RuntimeStatusPath)
@@ -2925,6 +2932,117 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             && IPAddress.IsLoopback(remote)
             && string.IsNullOrEmpty(context.Request.Headers["Tailscale-User-Login"])
             && string.IsNullOrEmpty(context.Request.Headers["X-Forwarded-For"]);
+    }
+
+    /// 笔迹待命目录：图本体 + 一份索引。语音核心只读这两样，不再向桥要图 ——
+    /// 要图那条路依赖已发布快照里的 visual，而它在页面更新后就没了。
+    internal const int InkStandbyKeep = 6;
+
+    private int _inkStandbyBusy;
+
+    private async Task CaptureInkStandbyAsync(JsonObject payload)
+    {
+        // 同一时刻只抓一张：连笔时事件很密，抓图是一次真实的设备往返。
+        if (Interlocked.Exchange(ref _inkStandbyBusy, 1) == 1)
+        {
+            return;
+        }
+        try
+        {
+            ReaderVisualDeliveryRequest? request =
+                ReaderContextMcpServer.BuildVisualRequest(
+                    payload,
+                    "drawing-nearby",
+                    null);
+            if (request is null)
+            {
+                return;
+            }
+            using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(20));
+            ReaderVisualCapture? capture = await _readerVisualBroker
+                .RequestAsync(request, timeout.Token)
+                .ConfigureAwait(false);
+            if (capture is null || capture.Data.Length == 0)
+            {
+                return;
+            }
+            string directory = Path.Combine(_runtimeDirectory, "ink-standby");
+            Directory.CreateDirectory(directory);
+            string revision = request.DrawingRevision ?? "";
+            string stamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                .ToString(CultureInfo.InvariantCulture);
+            string extension = capture.MimeType.Contains("png", StringComparison.Ordinal)
+                ? "png"
+                : "jpg";
+            string name = "ink-" + stamp + "." + extension;
+            await File.WriteAllBytesAsync(
+                Path.Combine(directory, name),
+                capture.Data).ConfigureAwait(false);
+
+            JsonArray entries = new();
+            string indexPath = Path.Combine(directory, "index.json");
+            if (File.Exists(indexPath))
+            {
+                try
+                {
+                    if (JsonNode.Parse(await File.ReadAllTextAsync(indexPath)
+                            .ConfigureAwait(false)) is JsonObject existing
+                        && existing["images"] is JsonArray old)
+                    {
+                        entries = old.DeepClone() as JsonArray ?? new JsonArray();
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or JsonException)
+                {
+                    entries = new JsonArray();
+                }
+            }
+            entries.Add(new JsonObject
+            {
+                ["name"] = name,
+                ["file"] = request.File,
+                ["page"] = payload["currentPage"]?["page"]?.DeepClone(),
+                ["drawingRevision"] = revision,
+                ["bytes"] = capture.Data.Length,
+                ["mimeType"] = capture.MimeType,
+                ["capturedAtUtc"] = DateTimeOffset.UtcNow.ToString("O"),
+            });
+            while (entries.Count > InkStandbyKeep)
+            {
+                if (entries[0] is JsonObject dropped
+                    && dropped["name"]?.GetValue<string>() is string dropName)
+                {
+                    try
+                    {
+                        File.Delete(Path.Combine(directory, dropName));
+                    }
+                    catch (IOException)
+                    {
+                        // 删不掉不影响索引正确性，下次再说。
+                    }
+                }
+                entries.RemoveAt(0);
+            }
+            await File.WriteAllTextAsync(
+                indexPath,
+                new JsonObject
+                {
+                    ["contract"] = "reader-ink-standby/1",
+                    ["images"] = entries,
+                }.ToJsonString()).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (
+            exception is IOException
+            or JsonException
+            or OperationCanceledException
+            or ReaderVisualDeliveryException)
+        {
+            // 待命抓图失败不该影响任何别的东西；语音核心那头拿不到就照旧不带图。
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _inkStandbyBusy, 0);
+        }
     }
 
     private async Task HandleVoiceCoreVisualImageAsync(

@@ -138,6 +138,13 @@ internal sealed class FileDirectSnapshotContextAdapter :
     internal const string PinnedFileName =
         "reader-context-pinned.json";
 
+    /// 「这一笔画完了」的回调（2026-09-17）。桥用它在**笔迹还在 _stablePage 里**的
+    /// 那一刻去抓图存起来待命 —— 稍后一份不带 visual 的页面更新就会把它冲掉，
+    /// 事后再读已发布的快照是读不到的（这正是笔迹图功能一直没生效的原因）。
+    /// 约定：处理方必须立刻返回、自己起后台任务，别在这里做网络往返 ——
+    /// 这个回调是在快照写入的关键路径上调的。
+    internal Action<JsonObject>? DrawingStableCaptured { get; set; }
+
     internal const int MaximumSnapshotBytes = 512 * 1024;
     private const int RecentEventLimit = 256;
     private static readonly UTF8Encoding Utf8WithoutBom = new(
@@ -2152,6 +2159,19 @@ StringValue(_selection["state"]) == "active"
                     lastEditedAtSeconds is double seconds
                         ? (long)(seconds * 1000)
                         : 0);
+                // 趁 visual 还在，把这一刻的完整载荷交出去（见 DrawingStableCaptured）。
+                // 回调自己丢后台，异常绝不能冒回快照写入路径。
+                if (DrawingStableCaptured is Action<JsonObject> hook)
+                {
+                    try
+                    {
+                        hook(BuildSnapshot());
+                    }
+                    catch (Exception)
+                    {
+                        // 抓图是锦上添花，坏了也不能影响快照本身。
+                    }
+                }
             }
             // ⚠ 提示板那条**不看 stable**：板子给的是状态不是事件，
             // 有动作就立刻算"有绘图"（用户 2026-08-29 改的）。
