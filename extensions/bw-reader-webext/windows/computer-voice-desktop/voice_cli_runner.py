@@ -1079,6 +1079,7 @@ class Runner:
             r = await self.app.call("thread/start", start, timeout=90)
             self.thread_id = r["thread"]["id"]
             self.log("thread_started", threadId=self.thread_id)
+            self._warn_settings_drift()
             self.write_binding()
             await self.apply_hot()
 
@@ -1097,6 +1098,26 @@ class Runner:
                 self.log("app_server_relaunch_error", message=clean(e))
                 self.schedule_app_relaunch()
         self.app_relaunch_task = asyncio.create_task(_go())
+
+    def _warn_settings_drift(self) -> None:
+        """线上持久化设置与源码默认值不一致时出声（2026-09-17）。
+
+        ⚠ 这个坑今天踩到第五次：改了 DEFAULTS 里的说明、装了新版、重启了运行器，
+        **线上仍在用旧的那份** —— 因为持久化设置一旦存在就盖过默认值，而整个过程
+        一声不吭。最近一次的代价：reader_card 的信封说明（{card:{...}} 与 title 必填）
+        改完没下发，模型连着两次照旧犯同样的错。
+        只报**指令类**长文本键：设备名、模型、档位这些本来就该由用户决定，不算漂移。
+        """
+        watch = ("backendThreadInstructions", "backendStartInstructions", "prompt",
+                 "realtimeEndInstructions", "boardSilentRule")
+        drift = []
+        for key in watch:
+            want, have = DEFAULTS.get(key), self.settings.get(key)
+            if isinstance(want, str) and isinstance(have, str) and want and want != have:
+                drift.append("%s(线上%d字/源码%d字)" % (key, len(have), len(want)))
+        if drift:
+            self.log("settings_drift", keys=drift,
+                     hint="线上用的是持久化的旧文本；要用源码版就 POST /settings 下发后开新线程")
 
     def write_binding(self):
         try:

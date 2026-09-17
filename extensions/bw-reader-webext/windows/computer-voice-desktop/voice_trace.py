@@ -158,6 +158,12 @@ def _voice_lane(limit: int, since: float = 0.0, thread: str | None = None) -> li
                          "meta": "%d 张" % len(d.get("images") or []),
                          "images": list(d.get("images") or []),
                          "body": ""})
+        elif kind == "settings_drift":
+            # 线上跑的说明跟源码不一致 —— 这个坑踩过五次，只写日志等于没写。
+            rows.append({"lane": "text", "kind": "error", "at": at,
+                         "title": "设置漂移：线上用的是旧文本",
+                         "meta": "、".join(d.get("keys") or [])[:90],
+                         "body": str(d.get("hint") or "")})
         elif kind == "ctx_ink_stale":
             rows.append({"lane": "text", "kind": "error", "at": at,
                          "title": "笔迹图过期作废",
