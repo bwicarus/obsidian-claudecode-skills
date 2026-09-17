@@ -110,6 +110,17 @@ def _voice_lane(limit: int, since: float = 0.0, thread: str | None = None) -> li
     所以老记录仍看得见，新记录不会再串到别的对话上。
     """
     rows = []
+    # ⚠ 2026-09-17 用户：「交给后台居然发生在我说话前」。
+    #   语音行原来取的是 transcript（**转写完成**）的时刻，而委派是在你刚开口那一两秒就发出的，
+    #   于是时间轴上委派排到了说话前面 —— 顺序看着是反的，其实是我给错了时刻。
+    #   dc_turn_created 才是「开口」那一刻（它带的是刚听到的头几个字）。
+    #   这里先按角色排好队，下面出语音行时用队首那个起始时刻。
+    starts: dict[str, list[float]] = {}
+    for d in _tail_jsonl(VOICE_CLI / "events.jsonl", limit * 6):
+        if str(d.get("kind") or "") == "dc_turn_created":
+            starts.setdefault(str(d.get("role") or "user"), []).append(float(d.get("t") or 0))
+    for who in starts:
+        starts[who].sort()
     for d in _tail_jsonl(VOICE_CLI / "events.jsonl", limit * 6):
         if thread:
             own = d.get("threadId")
@@ -205,9 +216,20 @@ def _voice_lane(limit: int, since: float = 0.0, thread: str | None = None) -> li
                          "title": "交给后台", "meta": _clip(handed, 60),
                          "body": _clip(d.get("payload") or "", 4000)})
         elif kind == "transcript":
-            who = "用户" if d.get("role") == "user" else "助手"
-            rows.append({"lane": "voice", "kind": "speech", "at": at,
-                         "title": who, "meta": "", "body": _clip(d.get("text"))})
+            role = str(d.get("role") or "user")
+            who = "用户" if role == "user" else "助手"
+            # 用这一句的**开口**时刻：取同角色队列里最后一个不晚于转写完成的起始点。
+            # 取不到就退回转写时刻（老记录没有 dc_turn_created）。
+            said_at = at
+            queue = starts.get(role) or []
+            cand = [t0 for t0 in queue if 0 < t0 <= at]
+            if cand:
+                said_at = cand[-1]
+                queue.remove(said_at)      # 一句只认一次，免得后面几句都挂到同一个起点
+            rows.append({"lane": "voice", "kind": "speech", "at": said_at,
+                         "title": who,
+                         "meta": ("说完 +%.0fs" % (at - said_at)) if at - said_at >= 1 else "",
+                         "body": _clip(d.get("text"))})
         elif kind in ("session_connected", "session_stopped"):
             rows.append({"lane": "voice", "kind": "session", "at": at,
                          "title": "会话开始" if kind == "session_connected" else "会话结束",
