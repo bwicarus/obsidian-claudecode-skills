@@ -2216,34 +2216,6 @@ def lint_codex_skill_tool_names(codex_home: Path) -> dict[str, list[str]]:
     return unknown
 
 
-def _redial_app_call(endpoint: str, timeout: float = 60.0) -> dict:
-    """把被安装掐断的那通 App 语音拨回来。
-
-    只在"装之前确实有 App 通话"时调。不拨的代价是用户对着一个假装连着的 App 说话，
-    而每一层都沉默：App 以为在通话、桥说 idle、运行器按 app-gone 静静收摊。
-    """
-    import urllib.error
-    import urllib.request
-
-    body = json.dumps({
-        "title": "语音已更新",
-        "text": "刚装好新版，这通是重新接的。",
-        "ntf": "misc",
-        "reason": "direct-install-redial",
-    }, ensure_ascii=False).encode("utf-8")
-    try:
-        request = urllib.request.Request(
-            endpoint + "/call", data=body,
-            headers={"Content-Type": "application/json; charset=utf-8"},
-            method="POST")
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            answer = json.loads(response.read().decode("utf-8", "replace"))
-        return {"ok": bool(answer.get("ok")), "outcome": answer.get("outcome")}
-    except (OSError, urllib.error.URLError, ValueError) as error:
-        # 拨不回来不该让安装失败，但必须留下声音：这正是用户会来问"怎么没声音"的那一刻。
-        return {"ok": False, "error": str(error)[:120]}
-
-
 def _restart_voice_runner(timeout: float = 30.0) -> dict:
     """叫醒语音核心，让它带着新装好的桥重新派生 app-server 与 MCP 子进程。
 
@@ -2290,12 +2262,15 @@ def _restart_voice_runner(timeout: float = 30.0) -> dict:
                 result = {"restarted": True, "pidBefore": before, "pidAfter": after}
                 if app_call_before:
                     result["appCallBefore"] = True
+                    # ⚠ 2026-09-17 用户：「不需要这样重播」。这里原来会自动拨回去 ——
+                    #   一天装两次桥就响两次铃，用户问「为何连续给我打了两个语音电话」。
+                    #   出声提醒那一半是有用的（App 会显示还连着但说话传不过去，
+                    #   不说就只能靠他自己发现）；替他做决定的那一半去掉。
                     print(
                         "⚠ 装之前 App 正在通话 —— 换代桥已经把那通掐断，而 App 那头不会知道"
-                        "（它会显示还连着，但说的话传不过去）。正在重新拨回来…",
+                        "（它会显示还连着，但说的话传不过去）。需要时在 App 里重新接一次。",
                         flush=True,
                     )
-                    result["appCallRedial"] = _redial_app_call(endpoint)
                 return result
         except (OSError, urllib.error.URLError, ValueError):
             continue
