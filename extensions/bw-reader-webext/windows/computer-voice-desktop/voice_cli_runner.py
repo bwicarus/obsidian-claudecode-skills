@@ -1830,11 +1830,16 @@ class Runner:
                 fp["image"] = ink_fp   # 取不到就算了，别每次开口都再试同一版笔迹
         if body is None and image is None:
             return False
-        note = "（下图是他刚在这页圈画/手写的部分，带页面上下文；他问「这个/这里/圈的」就指它。）"
+        # ⚠ 2026-09-17：这里原来把笔迹图当 input_image 直接塞进注入的 developer 消息。
+        #   语音委托起的那些轮会把线程历史转给另一个端点，而**那个端点只收 input_text**：
+        #   400 invalid_enum_value "Invalid value: 'input_image'"。更糟的是这条毒 item 留在
+        #   历史里，之后**每一轮都失败** —— 实录 12:01/12:02/12:03 连三轮 failed，用户让它制卡
+        #   完全没有回应，而语音那头还在说「我确认一下」。
+        #   所以图不再进历史：只用一行文字说明有笔迹，要看就调 reader_visual_image
+        #   （工具返回走的是另一条通道，不受这个限制）。指纹照旧，保证同一版笔迹只提一次。
+        note = "（他刚在这页圈画/手写过；他说「这个/这里/圈的」多半指那儿。要看就调 reader_visual_image 取页面图，别猜。）"
         text_part = (body if body is not None else b["state"]) + ((chr(10) + note) if image is not None else "")
         content = [{"type": "input_text", "text": text_part}]
-        if image is not None:
-            content.append({"type": "input_image", "image_url": "data:%s;base64,%s" % (image["mimeType"], image["base64"]), "detail": "auto"})
 
         # 后台正在跑的那一轮读不到我们现在追加的东西（它的上下文早就组好了）。
         # 所以忙碌时**先不注入**，把最新一份压在这里，等那轮结束再送 —— 见 _ctx_flush_pending。
@@ -1855,7 +1860,8 @@ class Runner:
             self.log("ctx_backend_deferred", chars=len(body or ""), page=self._ctx["page_key"][-40:])
             return True
         if via_steer:
-            # 图片没法走 steer（它只收文本）—— 有图时退回 inject，别把图丢了
+            # 2026-09-17 起注入内容恒为纯文本（笔迹图不再进历史），这一判定因此恒真；
+            # 留着是因为它本来就是正确的前提检查，不是为了兼容某种图。
             only_text = all(c.get("type") == "input_text" for c in content)
             if only_text:
                 whole = "".join(c.get("text") or "" for c in content)
