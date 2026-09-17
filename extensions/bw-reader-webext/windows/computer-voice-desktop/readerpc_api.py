@@ -119,8 +119,11 @@ class ReaderPCApi:
                     # 免得这个口变成任意读文件。
                     name = parse_qs(u.query).get("name", [""])[0]
                     safe = "".join(c for c in name if c.isalnum() or c in "-_.")
+                    # ⚠ 2026-09-17：桥改成「笔迹变化即抓、落 ink-standby 待命」之后，
+                    #   这里还在读旧的 ink-images —— 链路页的缩略图于是全是 404。
+                    #   同一个目录名在本仓库只该有一处写、一处读。
                     f = (Path.home() / "bw-computer-voice-bridge" / "runtime"
-                         / "ink-images" / safe)
+                         / "ink-standby" / safe)
                     if not safe or safe != name or not f.is_file():
                         return self.send_json(h, {"ok": False, "msg": "no such image"}, 404)
                     data = f.read_bytes()

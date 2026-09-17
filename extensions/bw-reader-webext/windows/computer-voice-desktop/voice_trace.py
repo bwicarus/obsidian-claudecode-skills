@@ -130,13 +130,17 @@ def _voice_lane(limit: int, since: float = 0.0, thread: str | None = None) -> li
                          "body": _clip(d.get("body") or "", 8000)})
         elif kind == "ctx_steer":
             # 2026-09-17 起的主路径：后台真的开工之后，把状态插进**正在跑的那一轮**
-            img = d.get("image") or ""
+            # 一轮可能带好几张（整页笔迹 + 每个选区各一张），所以是列表。
+            # 旧记录里是单个 image 字符串，一并兼容。
+            imgs = d.get("images")
+            if not isinstance(imgs, list):
+                imgs = [x for x in str(d.get("image") or "").split(",") if x]
             rows.append({"lane": "text", "kind": "inject", "at": at,
-                         "title": "插进运行中的轮" + ("（带笔迹图）" if img else ""),
+                         "title": "插进运行中的轮" + ("（带 %d 张笔迹图）" % len(imgs) if imgs else ""),
                          "meta": "%s 字 · 第 %s 页" % (d.get("chars"), str(d.get("page") or "?")[-6:]),
                          # 图不再以 base64 进历史（那会毒死线程），只留文件名；
                          # 界面按这个名字向 /ink-image 取，点一下展开。
-                         "image": img,
+                         "images": imgs,
                          "body": _clip(d.get("body") or "", 8000)})
         elif kind.startswith("ctx_") and kind.endswith("_error"):
             # ⚠ 这些异常原来只写一行日志、界面上看不见 —— 2026-09-17 语音侧的选中清单

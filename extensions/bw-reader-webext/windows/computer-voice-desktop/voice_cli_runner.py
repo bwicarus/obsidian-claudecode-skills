@@ -1933,7 +1933,7 @@ class Runner:
                         self._ink_sent.add(x["name"])
                     self.log("ctx_steer", chars=len(whole), page=self._ctx["page_key"][-40:],
                              withText=bool(with_text and b["text"]), body=self._log_body(whole),
-                             image=",".join(x["name"] for x in pending) or None)
+                             images=[x["name"] for x in pending])
                     return True
                 self.log("ctx_steer_fallback", reason=str(res.get("error"))[:80])
                 # 没赶上就照常追加，被下一轮读到
@@ -2227,6 +2227,42 @@ class Runner:
     def _ctx_invalidate(self, sinks=("backend_state", "backend_text", "voice", "image")):
         for k in sinks:
             self._ctx["fp"][k] = ""
+
+    async def _ink_late_loop(self):
+        """图比问题晚到时，补插进**正在跑的那一轮**（2026-09-17 实录）。
+
+        用户圈完「新型」立刻问「这是什么」：提问在 13:46:11，而那张图的落盘时刻是
+        13:46:12 —— 晚了一秒，那一轮就只拿到页码和整页文字，答得很泛；他再问一次
+        才看到图。笔迹要先稳定、再做一次设备往返，本来就比说话慢。
+        与其让用户等，不如图一到就补插：那一轮还在跑，steer 正是为此存在的。
+        """
+        while not self.shutting_down:
+            await asyncio.sleep(0.5)
+            try:
+                if not (self.backend_busy and self._turn and self._turn.get("id")):
+                    continue
+                snap = self._ctx_snapshot()
+                if not snap:
+                    continue
+                pending = self._ink_standby_pending(snap)
+                if not pending:
+                    continue
+                lines = []
+                for i, x in enumerate(pending, 1):
+                    who = ("整页笔迹" if x["kind"] == "ink"
+                           else "选区 %s" % (x.get("ordinal") if x.get("ordinal") is not None else "?"))
+                    lines.append("附图 %d = %s：%s" % (i, who, self._ink_age_words(x.get("age"))))
+                res = await self.steer_running_turn(
+                    "【当前阅读状态·补充】他刚画的图这会儿才取到，随这条补上（"
+                    + "；".join(lines) + "）。如果你手上的活跟「这个/这里/圈的」有关，以图为准。",
+                    tag="ink-late", image_paths=[x["path"] for x in pending])
+                if res.get("ok"):
+                    for x in pending:
+                        self._ink_sent.add(x["name"])
+                    self.log("ctx_ink_late", images=[x["name"] for x in pending],
+                             turnId=str((self._turn or {}).get("id") or "")[-12:])
+            except Exception as e:   # noqa: BLE001
+                self.log("ctx_ink_late_error", message=clean(e))
 
     async def _ctx_loop(self):
         """每 1 秒看快照；状态变了**只记最新状态，不写线程**（2026-09-16 用户拍板）。
@@ -3121,6 +3157,7 @@ def main():
         runner.app_gone_strikes = 0
         asyncio.create_task(app_gone_watch())
         asyncio.create_task(runner._ctx_loop())
+        asyncio.create_task(runner._ink_late_loop())
         asyncio.create_task(runner._loop_lag_monitor())
         asyncio.create_task(runner.quota_watch_loop())
         asyncio.create_task(runner.idle_stop_loop())

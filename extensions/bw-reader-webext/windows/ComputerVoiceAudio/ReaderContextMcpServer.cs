@@ -7285,6 +7285,35 @@ internal sealed class ReaderContextMcpServer
             selectionId);
         if (request is null)
         {
+            // 笔迹这一路可以回落：桥在「这一笔刚稳定」时就抓好放在 ink-standby 了，
+            // 而这里失败恰恰是因为快照里的 visual 已被后续页面更新冲掉。
+            // 给一张几十秒前的真图，好过告诉模型「没有可用合成图」让它去猜。
+            if (scope == "drawing-nearby"
+                && TryReadInkStandby(out byte[]? standby, out string standbyMime, out string standbyAge)
+                && standby is not null)
+            {
+                await WriteResultAsync(
+                    id,
+                    new JsonObject
+                    {
+                        ["content"] = new JsonArray
+                        {
+                            new JsonObject
+                            {
+                                ["type"] = "text",
+                                ["text"] = "实时取图不可用，这是待命的那张（" + standbyAge + "）。",
+                            },
+                            new JsonObject
+                            {
+                                ["type"] = "image",
+                                ["data"] = Convert.ToBase64String(standby),
+                                ["mimeType"] = standbyMime,
+                            },
+                        },
+                    },
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
             await WriteVisualToolErrorAsync(
                 id,
                 "visual-source-not-ready",
@@ -7681,6 +7710,75 @@ internal sealed class ReaderContextMcpServer
         }
         scope = requestedScope;
         return true;
+    }
+
+    /// 待命笔迹图里最新的一张（整页那张优先——它含全部笔迹，背景最全）。
+    /// 与桥写入端共用 ink-standby 这一个目录名；别在第三处再写一遍。
+    private bool TryReadInkStandby(
+        out byte[]? data,
+        out string mimeType,
+        out string age)
+    {
+        data = null;
+        mimeType = "image/jpeg";
+        age = "时间不详";
+        try
+        {
+            string directory = Path.Combine(
+                Path.GetDirectoryName(_statePath) ?? "",
+                "ink-standby");
+            string indexPath = Path.Combine(directory, "index.json");
+            if (!File.Exists(indexPath))
+            {
+                return false;
+            }
+            if (JsonNode.Parse(File.ReadAllText(indexPath)) is not JsonObject index
+                || index["images"] is not JsonArray images
+                || images.Count == 0)
+            {
+                return false;
+            }
+            JsonObject? best = null;
+            foreach (JsonNode? node in images)
+            {
+                if (node is not JsonObject entry)
+                {
+                    continue;
+                }
+                if (best is null
+                    || entry["kind"]?.GetValue<string>() == "ink")
+                {
+                    best = entry;
+                }
+            }
+            if (best?["name"]?.GetValue<string>() is not string name)
+            {
+                return false;
+            }
+            string file = Path.Combine(directory, name);
+            if (!File.Exists(file))
+            {
+                return false;
+            }
+            data = File.ReadAllBytes(file);
+            mimeType = best["mimeType"]?.GetValue<string>() ?? "image/jpeg";
+            if (best["capturedAtUtc"]?.GetValue<string>() is string captured
+                && DateTimeOffset.TryParse(
+                    captured,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind,
+                    out DateTimeOffset when))
+            {
+                age = ((int)(DateTimeOffset.UtcNow - when).TotalSeconds)
+                    .ToString(CultureInfo.InvariantCulture) + " 秒前抓的";
+            }
+            return data.Length > 0;
+        }
+        catch (Exception exception) when (
+            exception is IOException or JsonException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     internal static ReaderVisualDeliveryRequest? BuildVisualRequest(

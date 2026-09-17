@@ -665,12 +665,13 @@ function traceCard(row) {
     '<span class="meta" style="margin-left:auto;font-size:11px">' + esc(row.meta || '') +
     ' ' + when + ' <span style="color:#64748b">' + gap + '</span></span>';
   d.appendChild(head);
-  if (row.image) {
+  (row.images || (row.image ? [row.image] : [])).forEach(function (imgName) {
     // 插进那一轮的笔迹图（2026-09-17 用户：「插入图后我希望可以点击展开图像」）。
     // 默认只给一条小缩略图，点一下放大 —— 时间轴上一屏几十条，默认铺大图会淹没其它步骤。
     var thumb = document.createElement('img');
-    thumb.src = '/api/ink-image?name=' + encodeURIComponent(row.image);
-    thumb.alt = '插入的笔迹图';
+    thumb.src = '/api/ink-image?name=' + encodeURIComponent(imgName);
+    thumb.alt = '插入的笔迹图 ' + imgName;
+    thumb.title = imgName;
     thumb.style.cssText = 'display:block;margin:6px 0 0;max-height:70px;border-radius:5px;' +
       'border:1px solid rgba(255,255,255,.14);cursor:zoom-in';
     var big = false;
@@ -680,8 +681,17 @@ function traceCard(row) {
       thumb.style.maxHeight = big ? '70vh' : '70px';
       thumb.style.cursor = big ? 'zoom-out' : 'zoom-in';
     });
+    // 取不到就说出来 —— 空白的破图位比一行字更难查（路径改过一次就踩了）
+    thumb.addEventListener('error', function () {
+      var miss = document.createElement('div');
+      miss.className = 'meta';
+      miss.style.cssText = 'font-size:11px;margin-top:4px';
+      miss.textContent = '（笔迹图取不到：' + imgName + '）';
+      d.appendChild(miss);
+      thumb.remove();
+    });
     d.appendChild(thumb);
-  }
+  });
   if (row.body) {
     // 对话内容直接显示，不用点开 —— 说了什么是这条时间轴最该一眼看到的东西
     // （2026-09-17 用户要求）。其余（代码、注入、用量）仍然折叠，否则页面会被淹没。
