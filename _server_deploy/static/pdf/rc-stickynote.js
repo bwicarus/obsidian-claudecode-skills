@@ -316,8 +316,8 @@
       '.rc-note-dict .rnd-ex-ja{color:#dff1ff}',
       '.rc-note-dict .rnd-ex-zh{color:#8fa3c8;font-size:12px}',
       // 音调线（移植 wordpop 同款视觉）
-      '.rc-note-dict .wp-pitch{display:inline-flex;align-items:flex-end;gap:0;font-size:14px;color:#cfe6ff}',
-      '.rc-note-dict .wp-pitch .pm{position:relative;padding:3px 1px 0;line-height:1.1;border-top:2px solid transparent}',
+      '.rc-note-dict .wp-pitch{display:inline-flex;align-items:flex-end;gap:0;font-size:14px;color:#cfe6ff;flex-wrap:wrap;max-width:100%;row-gap:6px}',
+      '.rc-note-dict .wp-pitch .pm{position:relative;padding:3px 1px 0;line-height:1.1;border-top:2px solid transparent;flex:0 0 auto;white-space:nowrap}',
       '.rc-note-dict .wp-pitch .pm.hi{border-top:2px solid #6fd3ff;color:#dff1ff}',
       '.rc-note-dict .wp-pitch .pm.drop::after{content:"";position:absolute;right:-1px;top:0;height:9px;border-right:2px solid #ff8a8a}',
       '.rc-note-dict .wp-pitch .pm-type{margin-left:6px;font-size:10px;color:#5a6680;border:1px solid #2a3450;border-radius:4px;padding:0 4px;align-self:center}',
