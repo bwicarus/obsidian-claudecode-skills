@@ -2707,7 +2707,13 @@ class Runner:
             ms = item.get("durationMs")
             if isinstance(ms, (int, float)) and not isinstance(ms, bool) and 0 <= ms <= 86_400_000:
                 part["ms"] = int(ms)
-            if len(rec["parts"]) < 24:
+            # ⚠ 2026-09-17 用户：「app 侧边栏把文字模型让语音模型说话也算做了工具调用显示出来」。
+            #   voice_say / voice_tell 不是"干活"，就是后台在说话 —— 那句话本身已经作为
+            #   助手发言显示在侧栏里了，再挂一条「voice_core.voice_say · completed」是重复。
+            #   但**失败时必须留着**：上次 voice_say 因为输出设备打不开而失败，
+            #   要是顺手一起藏掉，就成了又一处静默失败。
+            speech_only = tool in ("voice_say", "voice_tell") and status in ("completed", "", "ok")
+            if len(rec["parts"]) < 24 and not speech_only:
                 rec["parts"].append(part)
             # 结果卡不再由运行器代造（2026-09-15 根治）：App 自己画的部件直接 upsert 进同一条记录。
             failed = status in ("failed", "error") or (isinstance(err, dict) and bool(err.get("message"))) or bool(re.match(r'\s*\{\s*"ok"\s*:\s*false', brief or ""))
