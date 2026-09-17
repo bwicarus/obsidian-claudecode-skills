@@ -608,10 +608,14 @@ class AppServer:
 
     async def launch(self):
         env = {k: v for k, v in os.environ.items() if k.upper() not in ("OPENAI_API_KEY", "OPENAI_BASE_URL")}
-        # 专用 home 只给**这个子进程**：运行器自己的 CODEX_HOME（线程绑定文件等）不动。
-        # 第二版用排除法镜像（见 sync_slim_codex_home），hooks/rules/sessions 都在。
-        self.home_sync = sync_slim_codex_home()
-        env["CODEX_HOME"] = str(SLIM_CODEX_HOME)
+        # ⚠ 2026-09-18 撤销专用 CODEX_HOME（用户拍板）。两个理由：
+        #   ① 它唯一还能省的只有 AGENTS.md 约 8K —— 真正的大头（插件 skill）已在**账号级**
+        #      解决（codex plugin remove 掉 data-analytics / app-6a3293e… / openai-developers，
+        #      实测开局 37754 → 27704 字），主 home 同样受益，不需要分叉；
+        #   ② 我说的「sessions 共享所以不丢记忆」**是错的**：第一版白名单时 Codex 已在专用 home
+        #      建了真的 sessions 目录，第二版重建时 make_junction 见"已存在"就跳过 ——
+        #      于是 sessions / sqlite / skills 各存一份。之前那次 thread_resume_failed 正是这样来的。
+        #   省 8K 换一整套分叉状态，不划算。sync_slim_codex_home 保留但不再调用。
         # 给语音这条线程封存用不到的 Codex 自带样板。用 -c 按次覆盖，不动 config.toml。
         # ⚠ 2026-09-17 A/B 实测更正：`plugins."X".enabled=false` 与 `project_doc_max_bytes=0`
         #   **都不生效** —— 加与不加，开局一字不差（37754/37754）。二进制里有一块
