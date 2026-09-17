@@ -3021,6 +3021,15 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     }));
                 }
             }
+            // ⚠ 2026-09-17 用户：「选区笔画出的内容怎么发了两次」。
+            //   选区笔那一笔既进了整页合成图、又单独成图 —— 同一个 drawingRevision 下
+            //   两张都抓（实录 05:58:12 的 -all 与 -s1）。规则是普通笔才要整页那张；
+            //   这一轮既然有新选区，说明 revision 是被选区笔顶上去的，整页那张就多余。
+            //   （真有普通笔迹同时落下，下一次稳定会用新的 revision 再抓。）
+            if (wanted.Any(item => item.Scope == "selection-near"))
+            {
+                wanted.RemoveAll(item => item.Scope == "drawing-nearby");
+            }
             if (wanted.Count == 0)
             {
                 return;

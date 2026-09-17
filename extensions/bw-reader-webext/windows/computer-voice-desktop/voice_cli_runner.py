@@ -1555,9 +1555,21 @@ class Runner:
             if what:
                 act_hint = "。他开口前最后做的事（%s 秒前）：%s" % (a.get("secondsAgo", "?"), what)
         vis = cp.get("visual") or {}
+        # 待命图才是「这页有没有新圈画」的事实来源：vis.has_ink 依赖 currentPage.visual，
+        # 而它在已发布快照里几乎总是缺席（见 _ink_standby_pending 的注释）。
+        ink_pending = self._ink_standby_pending(snap, quiet=True)
         ink_hint = ""
         ink_hint_voice = ""
-        if vis.get("has_ink") or vis.get("drawing"):
+        if ink_pending:
+            n_sel = sum(1 for x in ink_pending if x.get("kind") == "selection")
+            ink_hint = ("。本页有新的圈画/手写（%d 张图已随本条送到后台%s）；"
+                        "他说「这个/这里/圈的」多半指图里那处" % (
+                            len(ink_pending),
+                            ("，其中 %d 张是按选区编号分开的" % n_sel) if n_sel else ""))
+            ink_hint_voice = ("。他刚在这页圈画/手写过（你看不到图，后台看得到）；"
+                              "他问「这是什么/这里/圈的这个」时**必须立刻委派后台**，"
+                              "不要自己猜、也不要只说稍等")
+        elif vis.get("has_ink") or vis.get("drawing"):
             ink_hint = "。本页有笔迹/圈画（%s）；他提到圈画、手写、算式时后台用 reader_visual_image {scope: drawing-nearby} 看真图" % str(vis.get("drawing") or "有笔迹")[:120]
             ink_hint_voice = "。他在这页上有圈画/手写，你看不到图；他问「这是什么/这里/圈的这个」时**必须立刻委派后台去看图**，不要自己猜、不要只说稍等"
         # 正文：停留窗内才带；但页面被"激活"（有选区，或最近一次动作不是翻页而是在这页上选中/画/操作）时不等 8 秒（用户 2026-09-14）
@@ -1566,7 +1578,7 @@ class Runner:
         # 有待命的笔迹图 = 他正指着这一页问东西。这时正文必须给，**连停留上限也不该拦** ——
         # 2026-09-17 实录第三轮：在第 41 页待了近 50 分钟（超过 720 秒上限），
         # 于是 withText=false，模型没有正文只好去调 reader_page_text，那一调还失败了。
-        ink_active = bool(self._ink_standby_pending(snap, quiet=True))
+        ink_active = bool(ink_pending)
         activated = bool(sel_text) or bool(
             acts and str(acts[-1].get("kind") or "") not in ("page-turn", "")
             and float(acts[-1].get("secondsAgo") or 0) <= dwell_max
@@ -1587,8 +1599,13 @@ class Runner:
         state = ("【当前阅读状态 " + time.strftime("%H:%M:%S") + "】只认时刻最新的一条，更早的全部作废；"
                  "这是状态记录不是提问，不要回应本条。" + where + sel_hint + act_hint + ink_hint + "。")
         last_act = str((acts[-1].get("what") or acts[-1].get("kind") or "") if acts else "")[:40]
+        # ⚠ 2026-09-17：这里原来把绘图折成 bool(vis.get("has_ink"))，而 vis 几乎总是空 ——
+        #   于是绘图恒为 False，画多少笔语音侧指纹都不变、一次都不重注入。
+        #   用户指出应当「把绘图的提示和那几个选中放在一个逻辑里共同算作改变内容」：
+        #   现在绘图这一项取待命图的实际名单（每张图名唯一），与选中项并列进同一个指纹。
+        fp_ink = ",".join(x["name"] for x in ink_pending)
         fp_state = "%s|%s|%s|%s|%s" % (self._ctx["page_key"], sel_text[:60],
-                                       "".join(k + t[:20] for k, t, _r, _l in sel_items), last_act, bool(vis.get("has_ink")))
+                                       "".join(k + t[:20] for k, t, _r, _l in sel_items), last_act, fp_ink)
         fp_text = "%s|%d|%s" % (self._ctx["page_key"], len(text), text[:30]) if text else ""
         # 语音侧预算只截正文，位置/选区提示和结尾的静默约定必须完整保留（否则正文一长就把「不要回应本条」切掉了）
         vbudget = int(s.get("contextVoiceChars") or 700)
