@@ -628,6 +628,101 @@ internal sealed class ReaderContextMcpServer
         "kj_page_submit",
     };
 
+    /// <summary>被频度回调放回常驻的工具（见 RefreshHotUnfolded）。</summary>
+    private static readonly HashSet<string> HotUnfolded = new(StringComparer.Ordinal);
+
+    private static DateTimeOffset _hotUnfoldCheckedAt = DateTimeOffset.MinValue;
+
+    /// <summary>最近这些天里被调过 ≥ HotUnfoldMinCalls 次的冷工具，自动放回常驻。</summary>
+    private const double HotUnfoldDays = 7.0;
+
+    private const int HotUnfoldMinCalls = 3;
+
+    /// <summary>这个工具**此刻**是不是折叠态。别直接用 ColdToolNames 判断 ——
+    /// 那张表是种子，真正生效的是它减去频度放回的那几个。</summary>
+    private static bool IsFoldedTool(string name) =>
+        ColdToolNames.Contains(name) && !HotUnfolded.Contains(name);
+
+    /// <summary>按真实使用频度把冷工具放回常驻（2026-09-18 用户：
+    /// 「这几样不应该是固定为多次调用啥的，我们不是有设计根据使用频度来自动调节么」）。
+    ///
+    /// 上面那张冷池表是 2026-09-16 的一次快照（4 天 154 次调用里一次没被调过），
+    /// 快照一旦写死就再也不跟着实际用法走了。折叠省的是工具表的字，但代价是每次用它
+    /// 都得先跑一趟 reader_capability_guide 取 schema —— 对真正常用的工具，这笔账是反的。
+    ///
+    /// ⚠ 只放回、不新折。常驻那批里有三个被自检逐字钉着（reader_undo_last /
+    /// reader_make_note / reader_paper_start，见冷池表上方那条注释），自动折叠会红；
+    /// 而且折错的代价（模型猜字段、连着七次失败，2026-09-17 实录）远大于多几百字。
+    /// 放回则是纯还原：把原本就有的完整 schema 放回去，没有任何断言风险。</summary>
+    private void RefreshHotUnfolded()
+    {
+        if (_utcNow() - _hotUnfoldCheckedAt < TimeSpan.FromMinutes(10))
+        {
+            return;   // 工具表每轮都建，台账没必要每轮读一遍
+        }
+        _hotUnfoldCheckedAt = _utcNow();
+        try
+        {
+            string path = Path.Combine(
+                Path.GetDirectoryName(_statePath)!, ToolCallLedgerFileName);
+            if (!File.Exists(path))
+            {
+                return;
+            }
+            DateTimeOffset cutoff = _utcNow() - TimeSpan.FromDays(HotUnfoldDays);
+            Dictionary<string, int> counts = new(StringComparer.Ordinal);
+            foreach (string line in File.ReadLines(path, Utf8WithoutBom))
+            {
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+                string toolName;
+                DateTimeOffset at;
+                try
+                {
+                    JsonNode? row = JsonNode.Parse(line);
+                    toolName = StringValue(row?["name"]) ?? "";
+                    if (!ColdToolNames.Contains(toolName)
+                        || !DateTimeOffset.TryParse(
+                            StringValue(row?["at"]),
+                            CultureInfo.InvariantCulture,
+                            DateTimeStyles.RoundtripKind,
+                            out at))
+                    {
+                        continue;
+                    }
+                }
+                catch (JsonException)
+                {
+                    continue;
+                }
+                if (at >= cutoff)
+                {
+                    counts[toolName] = counts.GetValueOrDefault(toolName) + 1;
+                }
+            }
+            HashSet<string> next = new(StringComparer.Ordinal);
+            foreach ((string toolName, int calls) in counts)
+            {
+                if (calls >= HotUnfoldMinCalls)
+                {
+                    next.Add(toolName);
+                }
+            }
+            if (!next.SetEquals(HotUnfolded))
+            {
+                HotUnfolded.Clear();
+                HotUnfolded.UnionWith(next);
+            }
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            // 读不到台账就维持现状：折叠是保守方向，不因为读不到日志就放开。
+        }
+    }
+
     /// <summary>折叠后被收起来的真 schema，按工具名留着给能力指南用。</summary>
     private static readonly Dictionary<string, JsonObject> ColdToolSchemas = new(StringComparer.Ordinal);
 
@@ -653,7 +748,7 @@ internal sealed class ReaderContextMcpServer
                 ColdToolSchemas[name] = (JsonObject)anySchema.DeepClone();
             }
             ColdToolDescriptions.TryAdd(name, StringValue(tool["description"]) ?? "");
-            if (!ColdToolNames.Contains(name))
+            if (!IsFoldedTool(name))
             {
                 continue;   // 常驻工具到此为止：留了原件，但不折叠它的工具面
             }
@@ -2371,7 +2466,8 @@ internal sealed class ReaderContextMcpServer
             },
         });
         }
-        FoldColdTools(tools);   // 冷工具折成"名字 + 一行 + args"（见 ColdToolNames）
+        RefreshHotUnfolded();   // 先按台账把"其实很常用"的那几个放回常驻
+        FoldColdTools(tools);   // 其余折成"名字 + 一行 + args"（见 ColdToolNames）
         return new JsonObject
         {
             ["tools"] = tools,
@@ -3691,6 +3787,9 @@ internal sealed class ReaderContextMcpServer
             : default;
         _callSequence = checked(_callSequence + 1);
         // 冷工具是折叠过的：真实参数装在 args 里，这里拆开再走原路（下游一行都不用改）。
+        // ⚠ 这里**故意**用种子表而不是 IsFoldedTool：模型读工具表和真正发起调用之间，
+        // 频度可能刚好把这个工具放回常驻；那一刻它手上仍是折叠形态的 {args:{…}}，
+        // 换成 IsFoldedTool 就拆不开了。按种子表拆是安全的 —— 只有真带 args 对象时才动。
         if (
             ColdToolNames.Contains(toolName)
             && arguments.ValueKind == JsonValueKind.Object
@@ -5509,7 +5608,9 @@ internal sealed class ReaderContextMcpServer
             return false;
         }
         name = value.GetString() ?? "";
-        return ColdToolNames.Contains(name);
+        // 已被频度放回常驻的，走下面"它已经内联在工具表里"那条回答，
+        // 而不是这条"这是折叠工具，给你真 schema" —— 否则模型会以为还得先取一趟。
+        return IsFoldedTool(name);
     }
 
     private async Task HandleCapabilityGuideToolCallAsync(
@@ -5565,7 +5666,7 @@ internal sealed class ReaderContextMcpServer
             JsonObject hotPayload = new()
             {
                 ["tool"] = knownTool,
-                ["pool"] = ColdToolNames.Contains(knownTool) ? "folded" : "resident",
+                ["pool"] = IsFoldedTool(knownTool) ? "folded" : "resident",
                 ["description"] = ColdToolDescriptions.TryGetValue(knownTool, out string? hotDesc)
                     ? hotDesc
                     : null,
