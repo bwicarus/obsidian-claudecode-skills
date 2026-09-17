@@ -75,6 +75,50 @@ _SEL_KIND_LABEL = {"text": "选中的文字", "card": "选中的卡片", "image"
 # 语音线程里封存的官方插件（2026-09-16）：与"看日语书 + 语音问答"无关的那些。
 # 保留没列在这里的：browser / chrome / computer-use（查资料要用）、codex-app-tools、
 # bwab、unified-computer-use。名单改动只影响语音这条线程。
+# 语音线程专用的 CODEX_HOME（2026-09-17 用户拍板 A）。
+# 为什么要另起一个 home：插件带的 76 个 skill（做无脸视频/批量广告/KPI 报表…）和
+# AGENTS.md（开发工作流说明：部署、测试、git 树、分工）对语音阅读助手一条都用不上，
+# 而它们来自 $CODEX_HOME/plugins 与 $CODEX_HOME/AGENTS.md —— 换个不含这两样的 home，
+# 它们从源头就不存在。（-c 那条路实测无效，见 AppServer.start 的注释。）
+# 实测：开局 37754 → 29003 字，省约 12.4K 字 ≈ 4.3K token/新线程。
+# ⚠ 省不掉的两块（服务端下发，本地管不着）：远端 skills 约 14~17K、插件推荐 3.1K。
+SLIM_CODEX_HOME = Path.home() / "AppData" / "Local" / "BWReader" / "codex-home"
+
+
+def sync_slim_codex_home() -> dict:
+    """把主 home 里**要的那几样**同步到专用 home：config.toml（MCP 与模型设置）、
+    skills/（用户自己的）、auth.json（登录态）。不复制 plugins/ 与 AGENTS.md。
+
+    只在源文件更新时才覆盖 —— auth.json 尤其重要：用户在桌面 Codex 重新登录后，
+    这里要跟上，否则语音这条线哪天就悄悄掉登录。
+    """
+    import shutil
+    out = {"home": str(SLIM_CODEX_HOME)}
+    try:
+        SLIM_CODEX_HOME.mkdir(parents=True, exist_ok=True)
+        main = CODEX_HOME
+        for name in ("config.toml", "auth.json"):
+            src, dst = main / name, SLIM_CODEX_HOME / name
+            if src.is_file() and (not dst.is_file() or src.stat().st_mtime > dst.stat().st_mtime):
+                shutil.copy2(src, dst)
+                out[name] = "copied"
+        src_skills = main / "skills"
+        dst_skills = SLIM_CODEX_HOME / "skills"
+        if src_skills.is_dir():
+            newest = max((f.stat().st_mtime for f in src_skills.rglob("*") if f.is_file()),
+                         default=0)
+            mine = max((f.stat().st_mtime for f in dst_skills.rglob("*") if f.is_file()),
+                       default=0) if dst_skills.is_dir() else 0
+            if newest > mine:
+                if dst_skills.exists():
+                    shutil.rmtree(dst_skills)
+                shutil.copytree(src_skills, dst_skills)
+                out["skills"] = "copied"
+    except Exception as e:   # noqa: BLE001
+        out["error"] = str(e)[:160]
+    return out
+
+
 SLIM_PLUGINS = (
     "documents@openai-primary-runtime",
     "spreadsheets@openai-primary-runtime",
@@ -84,6 +128,15 @@ SLIM_PLUGINS = (
     "visualize@openai-bundled",
     "pdf@openai-primary-runtime",
     "cowork-plugin-management@claude-cowork",
+    # 2026-09-17 实测：openai-curated-remote 一家就带 64 个 skill，全是做无脸视频、
+    # 批量广告、KPI 报表、建站模板这类东西 —— 跟阅读器毫无关系，却占掉 skills 清单的八成。
+    # （github / gmail / browser / chrome / computer-use 带 0~1 个 skill，且「网页查证」
+    #   这条能力要用到，所以不封。）
+    "app-6a3293e129088191abf0875820e839da@openai-curated-remote",
+    "data-analytics@openai-curated-remote",
+    "openai-templates@openai-curated-remote",
+    "openai-developers@openai-curated-remote",
+    "plugin-management@openai-curated-remote",
 )
 
 DEFAULTS: dict = {
@@ -546,11 +599,16 @@ class AppServer:
 
     async def launch(self):
         env = {k: v for k, v in os.environ.items() if k.upper() not in ("OPENAI_API_KEY", "OPENAI_BASE_URL")}
-        # 2026-09-16：给语音这条线程封存用不到的 Codex 自带样板。实测后台线程里最大的一条
-        # developer 消息 43,010 字，我们自己的指令只占 1,157 字；其余是 Memory 说明（16,569）
-        # 与 Skills 目录（21,212，其中绝大多数是插件带的"做 KPI 报表/市场规模估算"这类条目）。
-        # 关掉后每轮约省 25,600 字 —— 作为对照，注入瘦身一整天省的是 400 字/次。
-        # ⚠ 用 -c 按次覆盖，**不动 config.toml**：用户别处的 Codex 照常拥有这些功能。
+        # 专用 home 只给**这个子进程**：运行器自己的 CODEX_HOME（线程绑定文件等）不动。
+        self.home_sync = sync_slim_codex_home()
+        env["CODEX_HOME"] = str(SLIM_CODEX_HOME)
+        # 给语音这条线程封存用不到的 Codex 自带样板。用 -c 按次覆盖，不动 config.toml。
+        # ⚠ 2026-09-17 A/B 实测更正：`plugins."X".enabled=false` 与 `project_doc_max_bytes=0`
+        #   **都不生效** —— 加与不加，开局一字不差（37754/37754）。二进制里有一块
+        #   「Fixed defaults for packaged Codex clients」把 project_doc_max_bytes 等键写死，
+        #   用户的 -c 盖不过去。所以 2026-09-16 注释里「每轮省 25,600 字」是过度声称，
+        #   这条路从来没省下过。真正能砍掉插件 skill 与 AGENTS.md 的只有换 CODEX_HOME
+        #   （见 SLIM_CODEX_HOME）。features.memories=false 保留 —— 它是另一个键，未经此次证伪。
         args = [self.exe, "-c", 'forced_login_method="chatgpt"', "-c", "features.memories=false"]
         for plugin in SLIM_PLUGINS:
             args += ["-c", 'plugins."%s".enabled=false' % plugin]
