@@ -806,6 +806,12 @@ class Runner:
                 self.backend_busy = m == "turn/started"
                 turn = p.get("turn") or {}
                 self.log(m, turnId=turn.get("id"), status=turn.get("status"))
+                # ⚠ 2026-09-17：一轮 failed 时这里只记了 status，错误正文丢在 notify("error") 里
+                #   没人看 —— 用户连着三轮收不到任何回应（后台每次都 400），而唯一的线索是
+                #   事件流里一个光秃秃的 method=error。失败必须带原因，否则等于没记。
+                if m == "turn/completed" and str(turn.get("status") or "") != "completed":
+                    self.log("turn_failed", turnId=turn.get("id"), status=turn.get("status"),
+                             detail=json.dumps(p, ensure_ascii=False)[:600])
                 if m == "turn/started":
                     tid = str(turn.get("id") or "") or ("t-" + str(int(time.time() * 1000))[-12:])
                     user = self._pending_turn_user
@@ -864,6 +870,9 @@ class Runner:
                     self.log(m, **p)
             elif m.startswith("thread/realtime/") or m.startswith("item/") or m.startswith("mcpServer/"):
                 pass
+            elif m == "error":
+                # 同上：app-server 的 error 通知带着 400 的正文，原来被折成一行 method=error。
+                self.log("app_error", detail=json.dumps(p, ensure_ascii=False)[:600])
             else:
                 self.log("notify", method=m)
         except Exception as e:
@@ -1860,20 +1869,24 @@ class Runner:
             self.log("ctx_backend_deferred", chars=len(body or ""), page=self._ctx["page_key"][-40:])
             return True
         if via_steer:
-            # 2026-09-17 起注入内容恒为纯文本（笔迹图不再进历史），这一判定因此恒真；
-            # 留着是因为它本来就是正确的前提检查，不是为了兼容某种图。
+            # content 恒为纯文本（图不再以 input_image 进历史）；图另走 localImage 路径参数。
             only_text = all(c.get("type") == "input_text" for c in content)
             if only_text:
                 whole = "".join(c.get("text") or "" for c in content)
+                img_path = self._ink_image_file(image) if image is not None else None
                 res = await self.steer_running_turn(
                     "【当前阅读状态·状态记录，不是提问】" + whole +
-                    chr(10) + "继续完成手上的事；用到「选中/当前页」时以这条为准。", tag="delegation")
+                    chr(10) + "继续完成手上的事；用到「选中/当前页」时以这条为准。",
+                    tag="delegation", image_path=img_path)
                 if res.get("ok"):
                     fp["backend_state"] = b["fp_state"]
                     if with_text and b["text"]:
                         fp["backend_text"] = b["fp_text"]
+                    if img_path:
+                        fp["image"] = ink_fp
                     self.log("ctx_steer", chars=len(whole), page=self._ctx["page_key"][-40:],
-                             withText=bool(with_text and b["text"]), body=self._log_body(whole))
+                             withText=bool(with_text and b["text"]), body=self._log_body(whole),
+                             image=(Path(img_path).name if img_path else None))
                     return True
                 self.log("ctx_steer_fallback", reason=str(res.get("error"))[:80])
                 # 没赶上就照常追加，被下一轮读到
@@ -1985,7 +1998,36 @@ class Runner:
         except Exception as e:   # noqa: BLE001
             self.log("thread_compact_error", message=clean(e))
 
-    async def steer_running_turn(self, text: str, tag: str = "state") -> dict:
+    def _ink_image_file(self, image: dict) -> str | None:
+        """把笔迹图落成一个文件，供 turn/steer 的 localImage 引用。
+
+        为什么不直接把字节塞进去：inject/steer 的**历史**里只会留一条路径引用，
+        而不是 211KB base64 —— 后者 2026-09-17 把整条线程毒死过（见 _ctx_inject_backend）。
+        同一版笔迹只写一次，文件名带 revision，旧的顺手清掉别堆积。
+        """
+        import base64
+        try:
+            data = base64.b64decode(image.get("base64") or "")
+            if not data:
+                return None
+            ext = "png" if "png" in str(image.get("mimeType") or "") else "jpg"
+            d = BRIDGE_RUNTIME / "ink-images"
+            d.mkdir(parents=True, exist_ok=True)
+            for old_file in sorted(d.glob("ink-*"))[:-4]:
+                try:
+                    old_file.unlink()
+                except OSError:
+                    pass
+            p = d / ("ink-%s.%s" % (str(image.get("drawingRevision") or int(time.time())), ext))
+            if not p.exists():
+                p.write_bytes(data)
+            return str(p)
+        except Exception as e:   # noqa: BLE001
+            self.log("ctx_image_file_error", message=clean(e))
+            return None
+
+    async def steer_running_turn(self, text: str, tag: str = "state",
+                                 image_path: str | None = None) -> dict:
         """把内容插进**正在跑的那一轮**。
 
         为什么需要它：inject_items 是往线程上追加，已经开跑的轮不会回头去读 ——
@@ -2001,13 +2043,20 @@ class Runner:
         if not (self.backend_busy and turn and turn.get("id") and self.thread_id):
             return {"ok": False, "error": "当前没有正在跑的轮"}
         try:
+            # localImage 是 app-server 认的正门（实测 turn/start 与 turn/steer 同一套变体：
+            # text / image{url} / localImage{path} / audio / localAudio / skill / mention）。
+            # 给路径而不是 base64：历史里只留引用，不会再出现那条毒 item。
+            steer_input = [{"type": "text", "text": text}]
+            if image_path:
+                steer_input.append({"type": "localImage", "path": image_path})
             await self.app.call("turn/steer", {"threadId": self.thread_id,
                                                "expectedTurnId": turn["id"],
-                                               "input": [{"type": "text", "text": text}]}, timeout=20)
+                                               "input": steer_input}, timeout=20)
         except Exception as e:   # noqa: BLE001
             self.log("turn_steer_error", message=clean(e), tag=tag)
             return {"ok": False, "error": clean(e)}
-        self.log("turn_steer", tag=tag, chars=len(text), turnId=str(turn["id"])[-12:])
+        self.log("turn_steer", tag=tag, chars=len(text), turnId=str(turn["id"])[-12:],
+                 image=(Path(image_path).name if image_path else None))
         return {"ok": True, "turnId": turn["id"], "chars": len(text)}
 
     #: 语音模型嘴上答应要做事的说法。它**自己没有任何工具**，所以说了这些就必然要委派后台；

@@ -113,6 +113,25 @@ class ReaderPCApi:
                         limit=int(q.get("limit", ["120"])[0]),
                         days=float(q.get("days", ["7"])[0]),
                         thread=(q.get("thread", [""])[0] or None)))
+                if u.path == "/api/ink-image":
+                    # 链路页点开「插进那一轮的笔迹图」（用户 2026-09-17）。
+                    # 只读、只发 ink-images 目录里的文件；文件名白名单化，
+                    # 免得这个口变成任意读文件。
+                    name = parse_qs(u.query).get("name", [""])[0]
+                    safe = "".join(c for c in name if c.isalnum() or c in "-_.")
+                    f = (Path.home() / "bw-computer-voice-bridge" / "runtime"
+                         / "ink-images" / safe)
+                    if not safe or safe != name or not f.is_file():
+                        return self.send_json(h, {"ok": False, "msg": "no such image"}, 404)
+                    data = f.read_bytes()
+                    h.send_response(200)
+                    h.send_header("Content-Type",
+                                  "image/png" if safe.endswith(".png") else "image/jpeg")
+                    h.send_header("Content-Length", str(len(data)))
+                    h.send_header("Cache-Control", "max-age=86400")
+                    h.end_headers()
+                    h.wfile.write(data)
+                    return None
                 if u.path == "/api/tool":
                     # 点开一个工具/skill 看详情：简介、参数表、流程文件（用户 2026-09-16）
                     return self.send_json(h, self.tool_detail(

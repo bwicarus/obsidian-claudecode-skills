@@ -130,9 +130,13 @@ def _voice_lane(limit: int, since: float = 0.0, thread: str | None = None) -> li
                          "body": _clip(d.get("body") or "", 8000)})
         elif kind == "ctx_steer":
             # 2026-09-17 起的主路径：后台真的开工之后，把状态插进**正在跑的那一轮**
+            img = d.get("image") or ""
             rows.append({"lane": "text", "kind": "inject", "at": at,
-                         "title": "插进运行中的轮",
+                         "title": "插进运行中的轮" + ("（带笔迹图）" if img else ""),
                          "meta": "%s 字 · 第 %s 页" % (d.get("chars"), str(d.get("page") or "?")[-6:]),
+                         # 图不再以 base64 进历史（那会毒死线程），只留文件名；
+                         # 界面按这个名字向 /ink-image 取，点一下展开。
+                         "image": img,
                          "body": _clip(d.get("body") or "", 8000)})
         elif kind.startswith("ctx_") and kind.endswith("_error"):
             # ⚠ 这些异常原来只写一行日志、界面上看不见 —— 2026-09-17 语音侧的选中清单
@@ -262,6 +266,13 @@ def _classify_message(role: str, text: str) -> dict:
     统统以 role=user 塞进来，全按语音显示会让人以为用户说了一万一千字。
     """
     head = text.lstrip()
+    # ⚠ 2026-09-17 用户：「AI 语音转交后台的内容在这里被重复显示了很多次」。
+    #   同一句话本来就有三条记录：realtime 的 delegation.created（「交给后台」）、
+    #   语音字幕（「语音 用户」），以及 Codex 自己在线程里留的 <realtime_delegation> 包装。
+    #   前两条一个是时刻标记、一个是可读原话，都该留；第三条纯属同一件事的第三份抄写。
+    #   这里判成 skip，由行构造处丢掉。
+    if head.startswith("<realtime_delegation>"):
+        return {"kind": "skip", "title": "语音转交后台"}
     if role == "developer":
         for mark, label in _SYSTEM_USER_MARKS:
             if head.startswith(mark):
@@ -386,8 +397,10 @@ def _text_lane(thread_id: str | None, limit: int) -> list[dict]:
             text = "".join(c.get("text") or "" for c in (pay.get("content") or []) if isinstance(c, dict))
             if not text.strip():
                 continue
-            rows.append(dict(_classify_message(role, text), lane="text", at=at,
-                             meta="%d 字" % len(text), body=_clip(text)))
+            _cls = _classify_message(role, text)
+            if _cls.get("kind") != "skip":
+                rows.append(dict(_cls, lane="text", at=at,
+                                 meta="%d 字" % len(text), body=_clip(text)))
         elif kind == "agentMessage":
             rows.append({"lane": "text", "kind": "generate", "at": at, "title": "回答",
                          "meta": "%d 字" % len(pay.get("text") or ""), "body": _clip(pay.get("text"))})
