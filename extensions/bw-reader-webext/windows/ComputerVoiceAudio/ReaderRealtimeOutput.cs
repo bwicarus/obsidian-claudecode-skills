@@ -1648,11 +1648,16 @@ internal static class ReaderRealtimeOutputProtocol
         HashSet<string> actual = value.EnumerateObject()
             .Select(property => property.Name)
             .ToHashSet(StringComparer.Ordinal);
+        // ⚠ 2026-09-17：这里知道差的是哪个字段，却只回一句「字段不匹配」。
+        //   实录 15:11:35 模型漏了 title，看到这句话无从下手，那张卡就没做成。
+        //   报错必须点名 —— 否则跟不报一样，只是多烧一轮。
+        string Shape() => "必填 " + string.Join("/", required)
+            + (optional.Length > 0 ? ("；可选 " + string.Join("/", optional)) : "");
         foreach (string field in required)
         {
             if (!actual.Remove(field))
             {
-                throw Invalid("Reader 输出字段不匹配");
+                throw Invalid("Reader 输出缺少必填字段 " + field + "（" + Shape() + "）");
             }
         }
         foreach (string field in optional)
@@ -1661,7 +1666,9 @@ internal static class ReaderRealtimeOutputProtocol
         }
         if (actual.Count > 0)
         {
-            throw Invalid("Reader 输出字段不匹配");
+            throw Invalid("Reader 输出有多余字段 "
+                + string.Join("/", actual.OrderBy(name => name, StringComparer.Ordinal))
+                + "（" + Shape() + "）");
         }
     }
 
