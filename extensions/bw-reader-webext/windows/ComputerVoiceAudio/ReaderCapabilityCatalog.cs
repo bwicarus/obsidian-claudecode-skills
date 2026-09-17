@@ -44,6 +44,12 @@ internal sealed class ReaderCapabilityCatalog
         // 检查报告/已保存任务 —— 后两者连对应工具都不存在）已删：方法论归
         // Codex skill（orchestrate-reader-tasks）由它自己维护，接口事实归这里。
         new("interactive-paper", "交互练习纸", "原生编排出题、纸面元素和检查按钮"),
+        // 2026-09-17：boards.md 一直在，index.md 也一直列着它，唯独这份清单漏了 ——
+        // 于是 topic:"boards" 报 Invalid topic，模型照 index 走进死路。
+        // 跟上面 cards 那条注释是同一个病：schema / 指南 / 发现层三层，漏一层等于前两层白做。
+        new("boards", "分区展示板",
+            "在 iOS 小组件上留一块分区展示板给反复要看状态的任务"
+            + "（每日新闻、发布盯梢、长任务进展）；只有用户明确要求才开"),
         new("capability-matrix", "工具能力矩阵", "本机 MCP、服务 MCP、Skill 与子代理的职责"),
     ];
 
@@ -107,9 +113,16 @@ internal sealed class ReaderCapabilityCatalog
         string topic,
         CancellationToken cancellationToken)
     {
+        // index.md 把话题写成 `cards.md`（它列的是文件名），而 Slug 是 `cards`。
+        // 模型照抄索引里的写法本来会被拒 —— 2026-09-17 实测 get.md / cards.md 全报
+        // Invalid topic。索引是我们自己给它看的，不能让它照着走进死路：这里收下带
+        // .md 的写法，两种拼法都指向同一份指南。
+        string slug = topic.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
+            ? topic[..^3]
+            : topic;
         Entry entry = Entries.SingleOrDefault(candidate => string.Equals(
             candidate.Slug,
-            topic,
+            slug,
             StringComparison.Ordinal))
             ?? throw new KeyNotFoundException(
                 "Unknown Reader capability topic");

@@ -2,27 +2,27 @@
 
 只读取当前任务需要的文件，不要一次加载全部说明。
 
-- 读取当前页、当前显示区域、选区、全文或合成图：`get.md`
-- 把普通对话同步进 App/扩展现有对话记录：`conversation.md`
-- 展示天气、事实、新闻、图片或视频卡：`cards.md`
-- **把卡片钉在正文某一段上（页面锚定 / 固定 / 绑定元素，不随轮次消失）**：`cards.md`
-  的「钉住内容（`bind`）」一节；字符序号从 `get.md` 的 `reader_page_text` → `segments` 取
-- 用实体摄像头看一眼现实世界（当场拍，不在快照里）：`camera.md`
-- 翻动视口、定位文字/标题/选区、跳页/章节：`navigation.md`
-- 把当前选区保存为高亮：`highlight.md`（用工具，命令串那条已废弃）
-- 展示工具进行中、完成、失败或中止状态：`tool-status.md`
+- 读取当前页、当前显示区域、选区、全文或合成图：`get`
+- 把普通对话同步进 App/扩展现有对话记录：`conversation`
+- 展示天气、事实、新闻、图片或视频卡：`cards`
+- **把卡片钉在正文某一段上（页面锚定 / 固定 / 绑定元素，不随轮次消失）**：`cards`
+  的「钉住内容（`bind`）」一节；字符序号从 `get` 的 `reader_page_text` → `segments` 取
+- 用实体摄像头看一眼现实世界（当场拍，不在快照里）：`camera`
+- 翻动视口、定位文字/标题/选区、跳页/章节：`navigation`
+- 把当前选区保存为高亮：`highlight`（用工具，命令串那条已废弃）
+- 展示工具进行中、完成、失败或中止状态：`tool-status`
 - **收到「语音入口」通知时怎么开语音**（跑脚本、最多两次、失败要报错）：
-  `voice-entry.md`
+  `voice-entry`
 - **收到「状态查询」时怎么答**（外部程序推来的，只要回答、不改变任何状态）：
-  `status-report.md`
+  `status-report`
 - **在 iOS 小组件上留一块分区展示板**（反复看状态的任务：每日新闻/发布盯梢/长任务进展）：
-  `boards.md`。⚠ 只有用户在任务里明确说了要用才用，不要自行判断是否开启
-- 统一命令外壳、回执和失败规则：`command-format.md`
-- 生成可手写作答的交互练习纸：`interactive-paper.md`
+  `boards`。⚠ 只有用户在任务里明确说了要用才用，不要自行判断是否开启
+- 统一命令外壳、回执和失败规则：`command-format`
+- 生成可手写作答的交互练习纸：`interactive-paper`
 
 这里只有接口规格。**怎么组织一个多步任务**（研究、跨书核实、什么时候派子代理）
 不在这里，在 Codex skill `orchestrate-reader-tasks` 里；复合流程可以自己写成 skill。
-- 确认本机 MCP、服务 MCP、Skill、插件和 CLI 的职责：`capability-matrix.md`
+- 确认本机 MCP、服务 MCP、Skill、插件和 CLI 的职责：`capability-matrix`
 
 Windows Codex 语音主路由由当前 Codex 会话直接使用 Skill 与 MCP，不再为复杂任务启动
 另一个 CLI 进程。现有 Realtime 调用方式和旧 CLI 实现保持不变，只作为兼容路径；

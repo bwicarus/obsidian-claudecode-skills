@@ -12153,13 +12153,15 @@ internal static class DirectBridgeSelfTest
                     .Contains(
                         "Do not infer a card from final assistant text",
                         StringComparison.Ordinal)
-                // 13 = 能力主题数（2026-08-27 加 camera；2026-09-09 加
+                // 14 = 能力主题数（2026-08-27 加 camera；2026-09-09 加
                 // status-report 与 voice-entry；2026-09-13 删 task-routing /
-                // research-task / check-report / saved-task —— 指南只留接口规格）。
+                // research-task / check-report / saved-task —— 指南只留接口规格；
+                // 2026-09-17 补 boards —— boards.md 与 index.md 一直都有它，
+                // 只有这份发现层清单漏了，于是 topic:"boards" 报 Invalid topic）。
                 // 这个数被钉住是有道理的：主题列表就是
                 // **发现层**,助手扫不到关键词就直接答"没有这个能力",
                 // 漏登记等于功能不存在 —— 加 status-report 时这条当场拦住了我。
-                && resources.GetArrayLength() == 13
+                && resources.GetArrayLength() == 14
                 && resources[0].GetProperty("uri").GetString()
                     == ReaderCapabilityCatalog.IndexUri
                 && contents.GetArrayLength() == 1
