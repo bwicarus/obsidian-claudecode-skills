@@ -599,9 +599,15 @@ class AppServer:
 
     async def launch(self):
         env = {k: v for k, v in os.environ.items() if k.upper() not in ("OPENAI_API_KEY", "OPENAI_BASE_URL")}
-        # 专用 home 只给**这个子进程**：运行器自己的 CODEX_HOME（线程绑定文件等）不动。
-        self.home_sync = sync_slim_codex_home()
-        env["CODEX_HOME"] = str(SLIM_CODEX_HOME)
+        # ⚠ 2026-09-17 回退：专用 CODEX_HOME 已撤。我用**白名单**只搬了三样
+        #   （config.toml / skills / auth.json），主 home 里其余四十多项被静默丢掉，
+        #   其中 hooks.json 定义了 SessionStart / UserPromptSubmit 两个钩子
+        #   （每次用户开口都跑 reader-registration-hook.py --auto-enable）——
+        #   实录对比：旧 home 一轮里 hook 事件 6 次，新 home **0 次**。
+        #   另外还丢了 rules/default.rules 与 realtime-voice-continuity.json（语音连续性）。
+        #   用户随即发现「让他做什么都说自己做好了」，并直指是我删错了东西 —— 他判断对。
+        #   要再做这件事，只能用**排除法**（除 plugins/ 与 AGENTS.md 外全镜像），
+        #   不能再用白名单：省 12.4K 字换不来这种整片功能静默消失。
         # 给语音这条线程封存用不到的 Codex 自带样板。用 -c 按次覆盖，不动 config.toml。
         # ⚠ 2026-09-17 A/B 实测更正：`plugins."X".enabled=false` 与 `project_doc_max_bytes=0`
         #   **都不生效** —— 加与不加，开局一字不差（37754/37754）。二进制里有一块
