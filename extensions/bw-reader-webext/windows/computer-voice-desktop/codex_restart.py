@@ -107,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="重启 Codex Desktop（拒绝在通话中重启；等它真正热起来）")
     parser.add_argument("--force", action="store_true", help="通话中也重启")
     parser.add_argument("--no-warm", action="store_true", help="起来就返回，不等通道与推送")
+    parser.add_argument("--start", action="store_true",
+                        help="Codex 本来没在跑也照样拉起（默认不拉：重启 ≠ 启动）")
     args = parser.parse_args(argv)
     report: dict = {"contract": "codex-restart/1"}
     active = voice_active()
@@ -121,7 +123,20 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report, ensure_ascii=False))
         return 2
     report["stop"] = stop(codex_processes())
+    # ⚠ 2026-09-17：这里原来无条件 launch —— 于是 Codex 本来关着的时候，
+    #   一次"重启"把它**启动**了起来，用户回头问「我电脑的 codex 怎么又自启动了」。
+    #   重启的语义是"把正在跑的换一代"，不包括替用户决定要不要开着它。
+    #   真要从关着的状态拉起，用 --start 明说。
+    if report["stop"] == "not-running" and not args.start:
+        report.update({
+            "ok": True,
+            "launched": False,
+            "detail": "Codex 本来没在跑 —— 不替你拉起（要拉起加 --start）",
+        })
+        print(json.dumps(report, ensure_ascii=False))
+        return 0
     launch(app_id)
+    report["launched"] = True
     time.sleep(20)
     report["processes"] = len(codex_processes())
     if args.no_warm:
