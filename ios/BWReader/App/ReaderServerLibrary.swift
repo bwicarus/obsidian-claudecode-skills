@@ -365,6 +365,13 @@ enum ReaderServerLibrary {
         }
     }
 
+    /// user-state 自己的回执形状 —— 只有这三个字段。
+    private struct UserStatePublishResponse: Decodable {
+        let ok: Bool
+        let code: String?
+        let message: String?
+    }
+
     private struct UserStateAbsent: Decodable {
         let ok: Bool
         let code: String
@@ -389,9 +396,15 @@ enum ReaderServerLibrary {
         }
         let data = try await post(
             url, body: body, contentType: "application/json", timeout: 120)
+        // ⚠ **不要复用 UploadResponse**：它是传书用的，带一个非可选的 `duplicate`，
+        //   而 user-state 的回执只有 {ok, code, message}。照搬的结果是解码必失败 ——
+        //   于是一次**成功的保存**被判成失败，App 不停重试，桥侧日志里一串
+        //   BW_USER_STATE_SAVED，用户界面上却是红条「服务器没有接受这份状态包」。
+        //   2026-09-19 实录：04:41–04:47 七分钟里重复保存了 8 次。
         guard let result = try? JSONDecoder().decode(
-            UploadResponse.self, from: data), result.ok else {
-            let detail = (try? JSONDecoder().decode(UploadResponse.self, from: data))
+            UserStatePublishResponse.self, from: data), result.ok else {
+            let detail = (try? JSONDecoder().decode(
+                UserStatePublishResponse.self, from: data))
             throw Failure.rejected(
                 code: detail?.code ?? "BW_USER_STATE_PUBLISH",
                 message: detail?.message ?? "服务器没有接受这份状态包")
