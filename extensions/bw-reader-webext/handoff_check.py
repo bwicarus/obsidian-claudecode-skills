@@ -52,6 +52,7 @@ RUNTIME_TEST_GLOB = "tests/reader_contract/*.test.mjs"
 READER_NETWORK_AUDIT = ROOT / "scripts" / "audit_reader_network.py"
 REQUIRED_RUNTIME_TESTS = {
     "account-context.contract.test.mjs",
+    "turn-container-dedupe.contract.test.mjs",
     "book-extension-handoff.contract.test.mjs",
     "data-store.contract.test.mjs",
     "document-note-repository.contract.test.mjs",

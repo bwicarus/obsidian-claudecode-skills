@@ -568,6 +568,10 @@ if (window.__bwPwaProviderOnly) return;
     for (var j = t.parts.length - 1; j >= 0; j--) {
       var pt = t.parts[j];
       if (pt.kind !== 'tool' || String(pt.tool || pt.label) !== key) continue;
+      // ⚠ 只吞"光有标签"的那条。同一轮里同一个工具**真被调用两次**是正常的
+      //   （连做两张卡），两条都带 args/result 时按两次算，否则就是把用户的第二次
+      //   操作从流程里抹掉 —— 去重反而变成丢信息。
+      if (rich(pt) !== 0 && rich(part) !== 0) continue;
       if (rich(part) > rich(pt)) {
         for (var k in part) { if (k !== 'seq' && k !== '_el') pt[k] = part[k]; }
         try { _ensureHead(t, pt.label || pt.tool || '工具'); } catch (e) {}
