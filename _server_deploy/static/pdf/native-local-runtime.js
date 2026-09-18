@@ -5664,6 +5664,17 @@
     return Promise.resolve().then(task).then(function (value) {
       return value instanceof Response ? value : jsonResponse(value);
     }).catch(function (error) {
+      // 统一错误日志（用户 2026-09-19）。这里是**所有本机路由失败的唯一出口**，
+      // 挂在这一处就全覆盖 —— 包括去边（/pdf/api/book-crop）这种此前完全没人记的。
+      // ⚠ 记日志绝不能改变失败本身：失败照常返回，日志是旁路（送不到就算了）。
+      try {
+        bridgeMirror('/reader-error-log', 'POST', {
+          source: 'page',
+          code: String((error && error.code) || fallbackCode || ''),
+          message: String((error && error.message) || error || ''),
+          detail: 'book=' + String(bookId || '')
+        });
+      } catch (_) {}
       return outgoingFailureResponse(error, fallbackCode, 500);
     });
   }

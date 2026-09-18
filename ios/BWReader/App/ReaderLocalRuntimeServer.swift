@@ -607,6 +607,11 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
     private static let bridgeMirrorAllowed: [String: Set<String>] = [
         "/reader-phrases": ["GET", "POST"],
         "/reader-dict-cache": ["GET", "POST"],
+        // 统一错误日志（用户 2026-09-19：「所有报错都有记录价值，最好是统一记录在一起」）。
+        // ⚠ 页面内的本机请求失败此前**一处都没记** —— 去边失败就是这么变成哑谜的：
+        //   它不是 AI 的工具调用，不进 tool-errors.jsonl，页面自己也不落盘，
+        //   于是只能回头问用户"报错原文是什么"。
+        "/reader-error-log": ["POST"],
     ]
 
     private func serveNativeBridgeMirror(

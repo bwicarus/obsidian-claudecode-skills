@@ -837,6 +837,27 @@ class AppServer:
                     pass
 
 
+# 统一错误日志：%LOCALAPPDATA%\BWReader\error-log.jsonl。
+# 桥、运行器、阅读器页面都往这一个文件里写 —— **只有一个**，分散等于没有。
+# ⚠ BASE 是 …\BWReaderoice-cli，而桥写的是 …\BWReader\error-log.jsonl。
+#   用 BASE 会造出第二个文件，"统一日志"当场变成两份 —— 取 BASE.parent 才是同一个。
+ERROR_LOG_PATH = BASE.parent / "error-log.jsonl"
+
+
+def error_log(source: str, code: str, message: str, detail: str = ""):
+    """记一条错误。写日志本身失败绝不向上抛：它是旁路。"""
+    try:
+        row = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "source": str(source)[:40],
+               "code": str(code)[:200], "message": str(message)[:600]}
+        if detail:
+            row["detail"] = str(detail)[:2000]
+        ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with ERROR_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + chr(10))
+    except Exception:   # noqa: BLE001
+        pass
+
+
 def stream_owner(backend_turn_id, voice_turn_id, prev):
     """这段话的流该投进哪个容器；返回 (owner, 要清空草稿的旧容器或 None)。
 
@@ -3561,6 +3582,14 @@ class Runner:
                    "status": status, "args": (json.dumps(args, ensure_ascii=False) if args is not None else "")[:1500], "result": str(brief or "")[:1500]}
             with (BASE / "tool-errors.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + chr(10))
+            # 统一错误日志（用户 2026-09-19：「所有报错都有记录价值，最好是统一记录在一起
+            # 方便你每次查看」）。分散在各处的日志等于没有日志 —— 今晚我就因为只看了
+            # 运行器的内存事件，漏掉了盘上这份工具报错，反过来去问用户要报错原文。
+            # ⚠ 两处都写：tool-errors.jsonl 是既有消费方（保持兼容），统一日志是给人翻的那份。
+            error_log(
+                "tool", tool[:120],
+                str(brief or "")[:600],
+                "status=" + str(status) + " turn=" + str(turn_id or "")[:40])
             self.log("tool_error", tool=tool[:120], status=status, result=str(brief or "")[:200])
         except Exception:
             pass

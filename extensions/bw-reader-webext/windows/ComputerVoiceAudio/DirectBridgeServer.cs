@@ -751,6 +751,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             context => HandleTranslateCacheAsync(context, serviceToken));
         // 用户数据镜像(2026-09-02,Pi 退出用户数据线路):收藏词组整表 + 词典登记。
         // App 经 Swift /pdf/api/bridge-mirror 转发到这里;PC 预处理 worker 读 phrases.json。
+        // 统一错误日志（用户 2026-09-19：「所有报错都有记录价值，最好是统一记录在一起」）。
+        // ⚠ 它存在的理由是**排查成本**：今晚反复出现"要么问用户要报错原文、要么满仓库猜"，
+        //   而阅读器页面内的本机请求失败此前**一处都没记**（去边失败就是这么变成哑谜的）。
+        app.MapMethods(
+            "/reader-error-log",
+            new[] { "POST", "OPTIONS" },
+            context => HandleReaderErrorLogAsync(context, serviceToken));
         app.MapMethods(
             "/reader-phrases",
             new[] { "GET", "POST", "OPTIONS" },
@@ -1715,6 +1722,97 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private static bool IsValidTranslateSha(string value) =>
         value.Length == 16 && value.All(
             static ch => ch is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    /// 统一错误日志的路径。**只有这一个** —— 分散在各处的日志等于没有日志。
+    internal static string ReaderErrorLogPath =>
+        System.IO.Path.Combine(ReaderUserDataDirectory, "error-log.jsonl");
+
+    private static readonly object ReaderErrorLogGate = new();
+
+    /// 任何一层都可以往这里写。写日志本身失败绝不向上抛：它是旁路，
+    /// 不能因为记不上而把真正在做的事弄坏。
+    internal static void AppendReaderErrorLog(
+        string source, string code, string message, string? detail = null)
+    {
+        try
+        {
+            JsonObject line = new()
+            {
+                ["at"] = DateTimeOffset.Now.ToString("o"),
+                ["source"] = (source ?? "").Trim(),
+                ["code"] = (code ?? "").Trim(),
+                ["message"] = Clip(message, 600),
+            };
+            if (!string.IsNullOrWhiteSpace(detail))
+            {
+                line["detail"] = Clip(detail, 2000);
+            }
+            System.IO.Directory.CreateDirectory(ReaderUserDataDirectory);
+            lock (ReaderErrorLogGate)
+            {
+                // 上限内截断而不是无限长：这份日志是给人/AI 翻的，不是审计留痕。
+                FileInfo info = new(ReaderErrorLogPath);
+                if (info.Exists && info.Length > 4L * 1024 * 1024)
+                {
+                    string[] kept = File.ReadAllLines(ReaderErrorLogPath);
+                    File.WriteAllLines(
+                        ReaderErrorLogPath,
+                        kept.Skip(Math.Max(0, kept.Length - 2000)));
+                }
+                File.AppendAllText(
+                    ReaderErrorLogPath,
+                    line.ToJsonString() + Environment.NewLine,
+                    StrictUtf8);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private static string Clip(string? value, int maximum)
+    {
+        string text = (value ?? "").Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return text.Length <= maximum ? text : text[..maximum] + "…";
+    }
+
+    private async Task HandleReaderErrorLogAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "reader-error-log")) return;
+        JsonObject? body = null;
+        try
+        {
+            using var reader = new StreamReader(context.Request.Body);
+            string raw = await reader.ReadToEndAsync(
+                serviceCancellationToken).ConfigureAwait(false);
+            if (raw.Length <= 16 * 1024)
+            {
+                body = JsonNode.Parse(raw) as JsonObject;
+            }
+        }
+        catch (JsonException)
+        {
+        }
+        if (body is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, code = "BW_ERROR_LOG_BODY" },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        AppendReaderErrorLog(
+            body["source"]?.GetValue<string>() ?? "page",
+            body["code"]?.GetValue<string>() ?? "",
+            body["message"]?.GetValue<string>() ?? "",
+            body["detail"]?.GetValue<string>());
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        await context.Response.WriteAsJsonAsync(
+            new { ok = true },
+            serviceCancellationToken).ConfigureAwait(false);
+    }
 
     private static string ReaderUserDataDirectory =>
         System.IO.Path.Combine(
