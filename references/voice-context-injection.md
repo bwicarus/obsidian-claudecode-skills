@@ -281,22 +281,31 @@ RC.voiceCtx = {
 「谁写谁覆盖、谁清谁误伤」的单槽 focus 那套的一部分（`DirectContextSnapshot.BuildSelectionItems`
 的注释已经把这条毛病写死在那里）。
 
-### 现状：这条链在 App 上从来没接过
+### 现状：**能用，但会间歇性失败**（2026-09-19 订正）
 
-- `_captureInkRegion` 的两个输入都是**网页那层的笔画**：`_visualSurface().strokes`
-  与 `el.__inkStrokes`。App 的页面墨迹是**原生 PencilKit**（`NativePencilLiveOverlay.swift` /
-  `NativePencilAnnotation.swift`），这两处恒为空 → 直接 `return null`。
-- 本机接口自己也写着：`compositeAvailable: false`，
-  note「本机接口只提供墨迹内容版本；未生成或伪装合成图地址」。
-- 于是 App 里每一次取图都是 `BW_READER_VISUAL_UNAVAILABLE` 或
-  `visual-source-not-ready`（2026-09-19 实录多次）。
+⚠ 本节初稿我写成了「这条链在 App 上从来没接过」，**那是错的**，当天就被用户指出并推翻。
+留着一条写反的说明比没有更糟，所以原文整段作废，只保留这份订正。
 
-⚠ 本文上面那条「合成图由 App 原生桥用同一短期 call 身份注入，原生桥不可用时明确失败」
-是**设计**，不是现状 —— 现状是原生那端根本没出口。照着上面那句推断"App 应该有合成图"
-会一路走错，今晚就这么走错过好几轮。
+事实（`bw-computer-voice-bridge/runtime/mcp-tool-calls.jsonl`，含成功记录）：
 
-### 要补的那一段
+    2026-09-14 ×4        reader_visual_image  ok=True
+    2026-09-17 05:34/58/06:09  ok=True     （04:48 一次 False）
+    2026-09-18T16:09:48Z ×2   ok=False     ← 本地 01:09
+    2026-09-18T16:16:24/49Z   ok=True      ← 本地 01:16，**就在那两次失败 7 分钟后**
+    2026-09-18T18:05:54/59Z   ×2 ok=False  ← 本地 03:05
 
-原生墨迹层把**这一笔的外接范围**（或直接把那块裁好的图）交出来 → 之后完全复用既有的
-`_captureInkRegion` → 视觉投递链路。缺的只有原生那一端的出口，下游一行都不用改。
+所以它是**状态问题，不是能力缺失**。两个错误码含义不同，别混：
 
+- `visual-source-not-ready`「当前快照没有可精确定位的在线页面来源」= 那一刻**没有在线的页面来源**
+  （03:05 那次正逢书打不开，整段没有活页面 —— 同一时刻 `reader_card` 也报
+  `..._SOURCE_NOT_READY`）。
+- `BW_READER_VISUAL_UNAVAILABLE`「当前页面没有返回可用的合成图」= 来源在，但这一次**没交出图**。
+
+另：笔迹本来就是**中途注入**的 —— `DirectContextSnapshot.DrawingStableCaptured`
+→ `CaptureInkStandbyAsync`（2026-09-17 用户：「有笔迹变化就抓一张存着，等后台真开工时
+由语音核心一次性插进那一轮」）。所以「圈一块给 AI 看」不需要新机制，要查的是它**什么时候
+不灵**。
+
+⚠ 我推断错的那步记下来免得重蹈：我从「App 的页面墨迹是原生 PencilKit」推出
+「网页层的 `_visualSurface().strokes` / `el.__inkStrokes` 恒为空 → 这条路不可能通」。
+前提为真、结论为假 —— 成功记录就摆在日志里。**有全量调用日志时先查日志，别从架构推断功能有没有。**
