@@ -133,14 +133,22 @@ def fetch_ambient(cache_seconds: float = 60.0) -> dict | None:
     """
     import urllib.request
     now = time.time()
-    if _AMBIENT_CACHE["value"] is not None and now - _AMBIENT_CACHE["at"] < cache_seconds:
+    # ⚠ 生成物状态变更（2026-09-19）也走这个端点，而它要的是**及时**：用户刚点完保存
+    #   就问「存了吗」，60 秒的缓存会把这条变更藏起来，表现成"又不知道"。
+    #   地点那部分本来就变化极慢，缩短 TTL 只是多打几次本机 HTTP，代价可以忽略。
+    ttl = min(float(cache_seconds), 10.0)
+    if _AMBIENT_CACHE["value"] is not None and now - _AMBIENT_CACHE["at"] < ttl:
         return _AMBIENT_CACHE["value"]
     try:
         with urllib.request.urlopen(BRIDGE_URL + "/voice-core/ambient", timeout=5) as resp:
             d = json.loads(resp.read() or b"{}")
         if not d.get("ok"):
             return None
-        value = {"place": str(d.get("place") or ""), "reviewDue": int(d.get("reviewDue") or 0)}
+        changes = d.get("artifactChanges")
+        value = {"place": str(d.get("place") or ""),
+                 "reviewDue": int(d.get("reviewDue") or 0),
+                 "artifactChanges": [str(x)[:120] for x in changes[:8]]
+                 if isinstance(changes, list) else []}
     except Exception:   # noqa: BLE001
         return None
     _AMBIENT_CACHE.update(at=now, value=value)
@@ -2710,6 +2718,11 @@ class Runner:
             bits.append("他现在在" + amb["place"])
         if amb["reviewDue"] > 0:
             bits.append("到期待复习卡共 %d 张（陈述，看到不用动）" % amb["reviewDue"])
+        # 生成物状态变更（用户 2026-09-19：「每个需要确定的生成物在一定时间内被更改
+        # 状态都推送到文字 AI 那边进行通知」）。它回答的是「我刚才保存了吗」这类问题 ——
+        # 此前只能靠模型自己想起来去查卡库，实测不可靠。
+        for line in (amb.get("artifactChanges") or [])[:4]:
+            bits.append("刚刚：" + line + "（事实，据此回答「存了吗」，不必再查）")
         return bits
 
     async def _ctx_inject_voice_ambient(self):

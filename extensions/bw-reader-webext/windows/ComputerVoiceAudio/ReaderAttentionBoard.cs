@@ -1447,6 +1447,98 @@ internal static class ReaderAttentionBoard
     /// 超 30 分钟标「旧记录」、「不知道」和「别处」绝不能混）只能有一份实现。
     /// 抄第二份迟早两份说法不一样，而那种不一样没有任何迹象 —— 只会让 AI
     /// 在咖啡店按在家处理。到期卡数的「4 张一档」同理：档位本身就是抖动阈值。</summary>
+    // ── 生成物状态变更（用户 2026-09-19 拍板）────────────────────────────────
+    //
+    // 「不应该是调用工具，而是每个需要确定的生成物在一定时间内被更改状态都推送到
+    //   文字 AI 那边进行通知」。
+    //
+    // 起因：用户点了「保存到 Reader 卡库」，回头问助手存了没有，助手说不知道。
+    // 上一版的修法是在工具说明里叫它去查 reader_learning_cards —— 那是「指望它
+    // 自己想起来查」，实测不可靠。状态变更本来就有明确的发生时刻，该由我们推给它。
+    //
+    // ⚠ 覆盖范围要说清楚，别让读的人以为它记全了：这里挂在**卡片推送到电脑 Anki**
+    //   这条路上（确认保存后自动触发，见 rc-flashcard 的 finishRepositoryConfirmation）。
+    //   没有触发那次推送的保存（比如 iPad 侧的手动路径）到不了桥，也就记不到。
+    //   记不到的宁可不记，也不要编一条「已保存」出来。
+    private static readonly List<(DateTimeOffset At, string Kind, string Label)>
+        _artifactChanges = new();
+
+    /// 多久之内的变更才算「刚刚」。太长会让 AI 拿着半小时前的事当现在。
+    private static readonly TimeSpan ArtifactChangeWindow = TimeSpan.FromMinutes(10);
+
+    private const int MaximumArtifactChanges = 8;
+
+    /// <summary>生成物状态变了（保存/删除…）。label 用用户认得出的那面文字。</summary>
+    internal static void NoteArtifactChanged(
+        string kind, string label, DateTimeOffset? now = null)
+    {
+        string k = (kind ?? "").Trim();
+        string text = (label ?? "").Replace('\n', ' ').Trim();
+        if (k.Length == 0 || text.Length == 0)
+        {
+            return;
+        }
+        if (text.Length > 40)
+        {
+            text = text[..40] + "…";
+        }
+        DateTimeOffset at = now ?? DateTimeOffset.Now;
+        lock (Gate)
+        {
+            PruneArtifactChanges(at);
+            // 同一张卡连报两次（重试、幂等回放）只留最后一次，别让同一件事占满窗口。
+            _artifactChanges.RemoveAll(
+                entry => string.Equals(entry.Kind, k, StringComparison.Ordinal)
+                    && string.Equals(entry.Label, text, StringComparison.Ordinal));
+            _artifactChanges.Add((at, k, text));
+            while (_artifactChanges.Count > MaximumArtifactChanges)
+            {
+                _artifactChanges.RemoveAt(0);
+            }
+        }
+    }
+
+    /// 调用方须持有 Gate。
+    private static void PruneArtifactChanges(DateTimeOffset now)
+    {
+        _artifactChanges.RemoveAll(entry => now - entry.At > ArtifactChangeWindow);
+    }
+
+    /// <summary>窗口内的生成物状态变更，给语音核心的上下文注入器。</summary>
+    internal static IReadOnlyList<string> ArtifactChangesForVoiceCore(
+        DateTimeOffset? now = null)
+    {
+        DateTimeOffset at = now ?? DateTimeOffset.Now;
+        lock (Gate)
+        {
+            PruneArtifactChanges(at);
+            return _artifactChanges
+                .Select(entry => string.Concat(
+                    entry.At.ToString("HH:mm"),
+                    " ",
+                    DescribeArtifactKind(entry.Kind),
+                    "：",
+                    entry.Label))
+                .ToArray();
+        }
+    }
+
+    private static string DescribeArtifactKind(string kind) => kind switch
+    {
+        "card-saved" => "已保存卡片并推送到电脑 Anki",
+        "card-deleted" => "删掉了卡片草稿",
+        _ => kind,
+    };
+
+    /// 只给自检用：清空，免得用例之间互相串。
+    internal static void ResetArtifactChangesForSelfTest()
+    {
+        lock (Gate)
+        {
+            _artifactChanges.Clear();
+        }
+    }
+
     internal static (string Place, int ReviewDue) AmbientForVoiceCore()
     {
         lock (Gate)

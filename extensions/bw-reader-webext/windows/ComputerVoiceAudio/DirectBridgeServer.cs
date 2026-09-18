@@ -3172,9 +3172,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             return;
         }
         (string place, int reviewDue) = ReaderAttentionBoard.AmbientForVoiceCore();
+        // 生成物状态变更（用户 2026-09-19）：状态一变就让语音核心推给文字 AI，
+        // 而不是等它自己想起来去查 —— 实测「叫它去查」不可靠。
+        IReadOnlyList<string> artifactChanges =
+            ReaderAttentionBoard.ArtifactChangesForVoiceCore();
         context.Response.ContentType = "application/json; charset=utf-8";
         await context.Response.WriteAsJsonAsync(
-            new { ok = true, place, reviewDue },
+            new { ok = true, place, reviewDue, artifactChanges },
             serviceCancellationToken).ConfigureAwait(false);
     }
 

@@ -3373,6 +3373,20 @@ internal sealed class DirectBridgeProtocolSession
                     nodeIds,
                     track,
                     cancellationToken).ConfigureAwait(false);
+            // 用户确认了这张卡（侧栏「保存到 Reader 卡库」→ 自动推送电脑 Anki，
+            // 就是这条路）。记一条状态变更，语音核心随上下文推给文字 AI ——
+            // 用户 2026-09-19：「每个需要确定的生成物在一定时间内被更改状态都
+            // 推送到文字 AI 那边进行通知」。
+            // ⚠ 只在**真的写成功**之后记；dedup 命中也算成功（同一张卡重放）。
+            try
+            {
+                ReaderAttentionBoard.NoteArtifactChanged(
+                    "card-saved", DescribeCardFace(card));
+            }
+            catch
+            {
+                // 记不上不该影响写卡本身 —— 这是旁路。
+            }
             return outcome.Result.ToPayload(outcome.Dedup);
         }
         catch (ReaderLocalAnkiException exception)
@@ -3383,6 +3397,21 @@ internal sealed class DirectBridgeProtocolSession
                 exception.Retryable,
                 exception);
         }
+    }
+
+    /// 用户认得出的那面文字：basic 取正面，cloze 取挖空原句。
+    /// 取不到就返回空串 —— 宁可不记一条，也不要记一条「已保存：」。
+    private static string DescribeCardFace(JsonObject card)
+    {
+        foreach (string key in new[] { "front", "cloze", "text" })
+        {
+            if (card[key]?.GetValue<string>() is string value
+                && value.Trim().Length > 0)
+            {
+                return value.Trim();
+            }
+        }
+        return "";
     }
 
     private async Task<object> HandleLocalAnkiOperationAsync(
