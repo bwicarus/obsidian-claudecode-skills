@@ -3270,7 +3270,18 @@ internal sealed class ReaderContextMcpServer
                 ["description"] =
                     "1–12 draft cards: {type:'basic',front,back} or "
                     + "{type:'cloze',cloze} with {{c1::…}}; back may be empty "
-                    + "for a basic card.",
+                    + "for a basic card. "
+                    // ⚠ 2026-09-19 用户实测：他一次圈了两个词，模型调了**两次**工具、
+                    //   每次一张，侧栏于是出现两个各自独立的单张草稿。轮播那套
+                    //   （左右滑、存一张自动跳下一张，见 rc-flashcard 的 updateSlide /
+                    //   _advanceToNextDraft）是按「一次投递 = 一组卡」做的，拆开调就没了。
+                    //   参数本来就收 12 张，说明里却从没说"同一批要放一起"。
+                    + "Put every card of the SAME request in ONE call: one "
+                    + "delivery becomes one swipeable draft group in the sidebar "
+                    + "(save one and it advances to the next). Calling this tool "
+                    + "once per card produces separate standalone drafts and the "
+                    + "user loses that flow — two circled words = one call with "
+                    + "two cards, not two calls.",
                 ["items"] = new JsonObject
                 {
                     ["oneOf"] = new JsonArray
