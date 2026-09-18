@@ -13142,99 +13142,18 @@ if (window.__bwPwaProviderOnly) return;
     );
   }
 
-  // Push the current web page to Windows over the live call.
+  // 网页正文怎么到 Windows：**不经这里**。
   //
-  // Page text has no other way in. active-reading carries position and
-  // selection only, and page.context is assembled by Windows from the Pi --
-  // which has never seen the page a browser extension is looking at. This
-  // action closes that gap: Windows writes the payload straight into its
-  // snapshot with textSource=extension-page.
+  // 这里原来有个 sendWebPageContext，跑在通话通道上（没通话就拒绝），并且
+  // 假设阅读器正文是经 Pi 汇总的 —— 那是快慢板时期的写法。2026-08-06 换掉之后
+  // 它一个调用方都没有了，留着只会让人把它当成现役链路（它的注释还在讲 Pi）。
   //
-  // Only meaningful from an extension page. A Reader page's text already
-  // reaches Windows through the Pi, and calling this there would merely
-  // describe the same document twice.
-  // Sequence must be a positive integer and rise; the bridge treats a repeat or
-  // a gap as a journal fault and stops forwarding context.
-  var webContextSeq = 0;
-  function nextWebContextSeq() {
-    webContextSeq += 1;
-    return webContextSeq;
-  }
+  // 现役：content.js 采集 → 同页 postMessage 给扩展 origin 的内嵌框 → 那个框
+  // 一次 POST /reader-context/snapshot，桥覆盖快照。不需要通话，也没有序号日志。
+  // 前台激活（visibilitychange / pageshow / focus / resume）都会重报，所以切到
+  // 网页这个前端跟翻页一样立刻更新状态。详见
+  // references/web-context-snapshot-handoff.md。
 
-  // Exactly 16 lowercase hex. The fixture writes "<12hex>" as a placeholder,
-  // which is what misled the first attempt; 0.1.71's ValidateEvent wants 16 and
-  // rejects anything else.
-  function webContextEventId() {
-    var hex = "0123456789abcdef";
-    var out = "";
-    for (var i = 0; i < 16; i += 1) {
-      out += hex[Math.floor(Math.random() * 16)];
-    }
-    return out;
-  }
-
-  function sendWebPageContext(page) {
-    if (!active || !active.channel) {
-      return Promise.reject(directError(
-        "电脑客户端通话未建立,无法发送网页上下文",
-        "BW_COMPUTER_VOICE_WEB_CONTEXT_INACTIVE",
-        true
-      ));
-    }
-    page = page || {};
-    var url = typeof page.url === "string" ? page.url : "";
-    if (!/^https?:\/\//i.test(url)) {
-      return Promise.reject(directError(
-        "网页上下文 URL 必须是 http/https",
-        "BW_COMPUTER_VOICE_WEB_CONTEXT_URL",
-        false
-      ));
-    }
-    var text = typeof page.text === "string" ? page.text : "";
-    // Truncation is reported rather than hidden, so the assistant knows it is
-    // holding part of a page instead of mistaking it for the whole.
-    var truncated = text.length > 12000 || page.truncated === true;
-    text = text.slice(0, 12000);
-
-    // Sent on the existing context action rather than a dedicated one. The
-    // bridge runs 0.1.71, which has no web-page-context; carrying the page as a
-    // page.context event needs nothing new on the Windows side and keeps that
-    // known-good voice baseline intact.
-    //
-    // page must be 0, matching the pos the active-reading snapshot reports.
-    // Windows pairs the two by (file, page); a mismatch leaves the context
-    // pending forever, which is exactly how this looked before -- snapshot
-    // showing active-reading only, page null, text unavailable.
-    return active.channel.request("context", {
-      sessionId: active.sessionId,
-      contextContract: OUTGOING_CONTEXT_CONTRACT,
-      event: {
-        v: 1,
-        seq: nextWebContextSeq(),
-        type: "page.context",
-        event: "page.context",
-        ts: Math.floor(Date.now() / 1000),
-        id: webContextEventId(),
-        stable: true,
-        book_id: url,
-        file: url,
-        page: 0,
-        title: typeof page.title === "string" ? page.title : "",
-        kind: "web",
-        text_available: !!text,
-        page_context: {
-          text: text,
-          text_available: !!text,
-          text_source: "extension-page",
-          fallback_reason: text ? null : "扩展未取得正文",
-          truncated: truncated,
-          reason: "call",
-          visual: null,
-          embeds: { highlights: 0, blocks: 0, unanchored: [] },
-        },
-      },
-    });
-  }
 
   function setReaderPCServiceMode(mode) {
     // App 设置面板遥控 ReaderPC 模式:C# 写意图文件,ReaderPC 的收敛循环(≤5s)
@@ -13335,7 +13254,6 @@ if (window.__bwPwaProviderOnly) return;
       return bridgePendingVoiceEnabled;
     },
     setVoiceEnabled: setReaderPCVoiceEnabled,
-    sendWebPageContext: sendWebPageContext,
     pageCards: pageCards,
     directContract: DIRECT_CONTRACT,
     availability: availability,
