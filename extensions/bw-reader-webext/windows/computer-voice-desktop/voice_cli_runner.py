@@ -3446,6 +3446,14 @@ class Runner:
         # （见 assistant.py 的 _LIVE_TURN —— 没有这条就只能靠超时，那期间
         #  App 任何一次画部件都会被错并到已经结束的轮次里）。
         body["turn_end"] = 1
+        # 这一轮**一个工具都没调过** → 侧栏那边没有任何 App 自己画出来的东西，
+        # 只有正文；而正文的写入走 upsert，服务端按规矩不发事件（发了会在工具执行
+        # 途中打断投递，见 assistant.py）。于是这一轮的内容要等下一次非 upsert 的
+        # 写入（通常是用户的下一句）才被顺带刷出来 —— 用户 2026-09-19 实测：
+        # 「在没有调用工具时，下一轮开始后才会显示上一轮内容」。
+        # 所以只为这种轮次点名要一次重载：它没有在途的工具投递可打断。
+        if not rec.get("tool_opened"):
+            body["notify_sidebar"] = 1
         dur = turn.get("durationMs")
         if isinstance(dur, (int, float)) and not isinstance(dur, bool) and 0 <= dur <= 86_400_000:
             body["took_ms"] = int(dur)

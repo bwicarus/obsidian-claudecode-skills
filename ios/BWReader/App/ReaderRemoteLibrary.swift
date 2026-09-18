@@ -700,9 +700,13 @@ final class ReaderRemoteLibraryCoordinator: ObservableObject {
         }
 
         do {
-            guard let payload = try await client.userStatePackage(
-                book: remoteBook,
-                cookies: cookies
+            // 2026-09-19 换源：从 Pi 改到 Windows 桥。
+            // ⚠ 用户 2026-08-30 已把 Pi 移出架构（实测 /login 502），而这条是 App 里
+            //   唯一的状态包入口 —— 它指着一台不再服役的机器，于是「多端同步」整条静默失效。
+            //   同一份包的**复核**（提交前那次）也必须跟着换源，否则一处拉桥、一处拉 Pi，
+            //   两边的作用域摘要永远对不上，导入会稳定失败。
+            guard let payload = try await ReaderServerLibrary.userStatePayload(
+                contentSha256: remoteBook.contentSha256
             ) else {
                 let message = "服务器上这本书暂无用户附属数据；原书和识别附件不受影响"
                 try? await pendingUserStateStore.markFetchFailure(

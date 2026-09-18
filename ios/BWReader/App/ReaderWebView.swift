@@ -368,6 +368,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     let nativePencilInk = NativePencilInkController()
     private var readerForeground = true
     private var readerWasBackgrounded = false
+    /// 上一次发布出去的各域摘要串。内容没变就不重发 —— 导出要在页面里跑 JS
+    /// 并算八个域的摘要，白发一次不便宜。换书时不必清：指纹里带着域摘要，
+    /// 换了书自然对不上。
+    private var lastPublishedUserStateFingerprint: String?
     /// .inactive 宽限期的定时任务；回到 .active 时取消（见 setReaderScenePhase）
     private var readerInactiveGraceTask: Task<Void, Never>?
     private var webContentProcessNeedsReload = false
@@ -1443,7 +1447,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         let fetchIntent = try await pendingBookUserStateStore.loadFetchIntent(
             localBookId: localBook.id
         )
-        guard pending != nil || fetchIntent != nil else { return }
+        // ⚠ 这里原来是「没有待导入、也没有重试意图 → 直接返回」。于是**本机已有的书
+        //   永远不会去服务器看一眼** —— 只有"刚从远程书库下载"那条路会 staging。
+        //   用户 2026-09-19：手机上打开同一本书，钉的卡片都没有。换台设备打开同一本书
+        //   正是同步最该起作用的时刻，而它恰恰被这道 guard 挡在门外。
         try await waitForBookUserStateAPI(
             localBookId: localBook.id,
             generation: generation
@@ -1453,18 +1460,43 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             generation: generation
         )
 
+        if pending == nil, fetchIntent == nil {
+            // 机会性拉取：服务器上可能有别的设备推过的一份。
+            // ⚠ 这一步**故意不出声**：绝大多数书在服务器上本来就没有状态包，
+            //   每次开书都提示一句"没有"纯属噪音。真拉到了才说话（见下面的 notice）。
+            //   ——「静默」在这里是有边界的：失败不改变任何本机数据，也不影响开书。
+            if let payload = try? await ReaderServerLibrary.userStatePayload(
+                contentSha256: digest
+            ), let package = try? JSONDecoder().decode(
+                ReaderBookUserStatePackage.self, from: payload.packageData
+            ) {
+                try? await pendingBookUserStateStore.stage(
+                    payload: payload,
+                    localBookId: localBook.id,
+                    remoteBookId: package.bookId,
+                    contentSha256: digest
+                )
+                pending = try await pendingBookUserStateStore.load(
+                    localBookId: localBook.id
+                )
+                if pending != nil {
+                    showBookUserStateMessage(
+                        "服务器上有这本书的最新数据，正在合并", isError: false)
+                }
+            }
+        }
+        guard pending != nil || fetchIntent != nil else { return }
+
         if pending == nil, let fetch = fetchIntent {
             guard fetch.contentSha256 == digest else {
                 throw ReaderBookUserStatePendingImportError
                     .contentVersionMismatch
             }
             do {
-                let payload = try await ReaderRemoteLibraryClient.shared
-                    .userStatePackage(
-                        bookId: fetch.remoteBookId,
-                        contentSha256: fetch.contentSha256,
-                        cookies: await remoteLibraryCookies()
-                    )
+                // 2026-09-19 换源 → Windows 桥（三处取包必须同源，见 staging 与提交前复核）。
+                let payload = try await ReaderServerLibrary.userStatePayload(
+                    contentSha256: fetch.contentSha256
+                )
                 guard let payload else {
                     try await pendingBookUserStateStore
                         .removeFetchIntent(fetch)
@@ -1578,27 +1610,23 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
               currentLocalBook?.id == pending.localBookId else {
             throw CancellationError()
         }
-        let cookies = await remoteLibraryCookies()
-        guard !cookies.isEmpty else {
-            throw ReaderBookUserStatePendingImportError
-                .authenticationUnavailable
-        }
+        // 2026-09-19 换源：与 staging 同源（Windows 桥）。
+        // ⚠ 这一步的意义是"提交前再确认一次这份数据属于谁"，所以它**必须和取包那次同源** ——
+        //   一处拉桥、一处拉 Pi，作用域摘要永远对不上，导入会稳定失败。桥是本机服务，
+        //   没有 cookie 概念，所以原来那道"没登录就不让导"的闸在这条路上不适用。
         let current: ReaderBookUserStateRemotePayload
         do {
-            guard let payload = try await ReaderRemoteLibraryClient.shared
-                .userStatePackage(
-                    bookId: pending.remoteBookId,
-                    contentSha256: pending.contentSha256,
-                    cookies: cookies
-                ) else {
+            guard let payload = try await ReaderServerLibrary.userStatePayload(
+                contentSha256: pending.contentSha256
+            ) else {
                 throw ReaderBookUserStatePendingImportError
                     .accountScopeUnavailable
             }
             current = payload
-        } catch ReaderRemoteLibraryError.server(let status, _)
-            where status == 401 || status == 403 {
+        } catch ReaderServerLibrary.Failure.capabilityMissing {
+            // 桥在，但还没有这个端点（旧版）。这跟"没鉴权"是两件事，别混。
             throw ReaderBookUserStatePendingImportError
-                .authenticationUnavailable
+                .accountScopeUnavailable
         }
         guard generation == bookUserStateContextGeneration,
               currentLocalBook?.id == pending.localBookId else {
@@ -2717,11 +2745,58 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// 而且那才是"用户确实离开了"的可靠信号。
     private static let readerInactiveGrace: TimeInterval = 12
 
+    /// 把当前这本书的状态包发布到 Windows 桥，供别的设备拉取（2026-09-19）。
+    ///
+    /// ⚠ 在此之前**这条链路只有入口没有出口**：App 能拉能导入，却没有任何一处把本机
+    ///   状态发布出去 —— 所以「多端同步」实际是单向的，换台设备打开同一本书什么都没有。
+    /// ⚠ 只在内容真的变过时才发：导出要在页面里跑 JS 并算各域摘要，白发一次不便宜；
+    ///   摘要串没变就直接跳过。
+    /// ⚠ 失败**不打断任何东西**：它是旁路。但也不静默 —— 记一条给排查用。
+    func publishBookUserStateSnapshot() {
+        guard let localBook = currentLocalBook,
+              let contentSha = currentLocalBookContentSHA256,
+              let adapter = bookUserStateWebAdapter else { return }
+        let generation = bookUserStateContextGeneration
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let domains = try await adapter.exportPackage(
+                    localBookId: localBook.id
+                )
+                guard generation == self.bookUserStateContextGeneration else { return }
+                let fingerprint = domains
+                    .sorted { $0.name.rawValue < $1.name.rawValue }
+                    .map { $0.name.rawValue + ":" + $0.digest }
+                    .joined(separator: "|")
+                guard fingerprint != self.lastPublishedUserStateFingerprint else { return }
+                let package = ReaderBookUserStatePackage(
+                    contract: ReaderBookUserStatePackage.currentContract,
+                    bookId: localBook.id,
+                    contentSha256: contentSha,
+                    revision: Int64(Date().timeIntervalSince1970 * 1000),
+                    updatedAt: ISO8601DateFormatter().string(from: Date()),
+                    domains: domains
+                )
+                try await ReaderServerLibrary.publishUserState(package)
+                self.lastPublishedUserStateFingerprint = fingerprint
+            } catch {
+                self.showBookUserStateMessage(
+                    "本机数据没能同步到服务器：\(error.localizedDescription)",
+                    isError: true
+                )
+            }
+        }
+    }
+
     func setReaderScenePhase(_ phase: ScenePhase) {
         switch phase {
         case .background:
             readerWasBackgrounded = true
             cancelReaderInactiveGrace()
+            // 出口（2026-09-19）：离开前把这本书的状态发布出去，别的设备才拉得到。
+            // ⚠ 放在 setReaderForeground 之前 —— 那一步会停掉本机 runtime，
+            //   而导出要在页面里执行 JS，runtime 停了就取不到了。
+            publishBookUserStateSnapshot()
             setReaderForeground(false, restartLocalRuntime: false)
         case .inactive:
             // 先不动连接，给一个宽限期；期间回到 .active 就当什么都没发生。

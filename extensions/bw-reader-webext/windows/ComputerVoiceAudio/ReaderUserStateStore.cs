@@ -33,6 +33,20 @@ internal static class ReaderUserStateStore
         return root;
     }
 
+    /// 账号作用域摘要。导入端要求**服务器**给出它（客户端不许自己编 ——
+    /// 它是"这份数据属于谁"的唯一凭据，自编等于取消了作用域）。
+    ///
+    /// 桥是本机单用户，没有账号体系，所以取一个**稳定的本机身份**：安装根目录。
+    /// 同一台机器恒定、换机即不同，正好是我们要的作用域粒度；它不含任何身份信息。
+    internal static string AccountScopeDigest(string installationRoot)
+    {
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(
+            "bw-reader-bridge-account-scope/1" + "\0"
+            + (installationRoot ?? "").Trim().ToLowerInvariant());
+        return Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+    }
+
     internal static bool IsValidContentSha(string value) =>
         value.Length == 64
         && value.All(static ch => ch is >= '0' and <= '9' or >= 'a' and <= 'f');

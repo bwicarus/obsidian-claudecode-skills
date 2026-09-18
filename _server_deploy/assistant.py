@@ -12554,8 +12554,23 @@ def assistant_log_external():
         #   即存储与从头渲染都对，错的就是这一次重载。
         #   中途不发的理由另见上文：重载会打断工具投递（BW_READER_REALTIME_OUTPUT_STALE）。
         #   新开/重开侧栏时按存储从头渲染，那条路一直是对的。
+        # ⚠ 唯一例外（2026-09-19 补）：运行器点名 notify_sidebar —— 那是**一个工具都没调过**
+        #   的轮次。有工具时 App 会自己把卡画在侧栏，不发事件也看得见；没工具时侧栏只有正文，
+        #   而正文走的正是这条 upsert，不发就得等下一次非 upsert 的写入（通常是用户的下一句）
+        #   才被顺带刷出来 —— 用户实测：「在没有调用工具时，下一轮开始后才会显示上一轮内容」。
+        #   这种轮次没有在途的工具投递可打断，放行它不会重演那次 STALE。
+        _sent = False
+        if b.get("notify_sidebar"):
+            try:
+                import reader_events
+                reader_events.publish(
+                    "assistant-history", b.get("file") or "", uid,
+                    {"turn_id": _tid, "n": 0})
+                _sent = True
+            except Exception:
+                pass
         return jsonify({"ok": True, "n": 0, "upserted": True, "absorbed": _absorbed,
-                        "event_sent": False})
+                        "event_sent": _sent})
     # ⚠ upsert_only:容器的"内容变了就同步"走这条 —— **记录不存在就什么都不做**。
     #   否则它可能先于 response.done 到达 → 先建出一条没有用户提问的助手消息 →
     #   随后 response.done 的落库走 upsert 提前返回 → **用户的提问从历史里彻底消失**。
@@ -12611,8 +12626,9 @@ def assistant_log_external():
     #   本轮第一次写入、走的是建记录这条路，照样发事件、照样让侧栏在工具执行中途做
     #   权威重载，卡片投递随即被判 BW_READER_REALTIME_OUTPUT_STALE（实录：落库后 51ms
     #   工具就失败了）。收尾那次由 turn_end 放行。
-    # 轮次容器的写入（upsert_only）一律不发事件 —— 收尾也不发，理由见上面那段。
-    _mid_turn = bool(b.get("upsert_only"))
+    # 轮次容器的写入（upsert_only）默认不发事件 —— 收尾也不发，理由见上面那段。
+    # 例外同上：无工具轮次由运行器点名 notify_sidebar，它没有在途投递可打断。
+    _mid_turn = bool(b.get("upsert_only")) and not b.get("notify_sidebar")
     if not _mid_turn:
         try:
             import reader_events

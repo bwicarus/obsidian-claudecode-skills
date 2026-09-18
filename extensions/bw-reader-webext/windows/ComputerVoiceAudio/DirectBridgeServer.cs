@@ -2110,10 +2110,19 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     serviceCancellationToken).ConfigureAwait(false);
                 return;
             }
+            // 回包按**导入端的契约**来（与 Pi 那条同形）：正文就是那份状态包本身，
+            // 账号作用域由**服务器**给，客户端不许自己编（见 ReaderRemoteLibrary:311）。
+            // POST 进来的是个信封（deviceId/contentSha256/at/package 四件套 —— 因为桥
+            // 是把整个 body 当一份存），这里只把 package 掏出来；旧格式（没有信封）原样回。
+            JsonNode? packed = latest["package"];
             context.Response.StatusCode = StatusCodes.Status200OK;
             context.Response.ContentType = "application/json; charset=utf-8";
+            context.Response.Headers["X-Reader-User-State-Contract"] =
+                "reader-book-user-state/1";
+            context.Response.Headers["X-Reader-Account-Scope-Digest"] =
+                ReaderUserStateStore.AccountScopeDigest(_configStore.InstallationRoot);
             await context.Response.WriteAsync(
-                latest.ToJsonString(),
+                (packed ?? latest).ToJsonString(),
                 serviceCancellationToken).ConfigureAwait(false);
             return;
         }

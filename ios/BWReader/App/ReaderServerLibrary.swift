@@ -293,9 +293,14 @@ enum ReaderServerLibrary {
 
     /// 服务器上这本书最新的一份状态包（按内容 sha 找）。**没有任何设备推过 → nil**，
     /// 那不是错误：第一次用的时候本来就没有。
-    static func userStatePackage(
+    ///
+    /// ⚠ 交出的是**原始字节 + 服务器给的账号作用域摘要**，不是解析好的对象：
+    ///   导入端要按原字节验摘要（"Its exact UTF-8 bytes are verified before the
+    ///   renderer is allowed to parse or import it"），先解析再序列化回去就等于
+    ///   把那道校验换成了对我自己的信任。
+    static func userStatePayload(
         contentSha256: String
-    ) async throws -> ReaderBookUserStatePackage? {
+    ) async throws -> ReaderBookUserStateRemotePayload? {
         guard contentSha256.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil,
               var components = URLComponents(
                 string: ReaderServer.url("/reader-library/user-state")?.absoluteString ?? ""
@@ -332,13 +337,27 @@ enum ReaderServerLibrary {
                     code: "HTTP_\(http.statusCode)",
                     message: "服务器拒绝了这次请求")
             }
-            guard let envelope = try? JSONDecoder().decode(
-                UserStateEnvelope.self, from: data
-            ), envelope.contract == userStateEnvelopeContract,
-                  envelope.contentSha256 == contentSha256 else {
+            // 契约与作用域都由服务器在响应头里给 —— 与 Pi 那条同形（ReaderRemoteLibrary:311）。
+            guard http.value(forHTTPHeaderField: "X-Reader-User-State-Contract")
+                    == ReaderBookUserStatePackage.currentContract,
+                  let scope = http.value(
+                    forHTTPHeaderField: "X-Reader-Account-Scope-Digest"
+                  )?.lowercased(),
+                  scope.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil,
+                  data.count <= ReaderBookUserStatePackageCodec.maximumPackageBytes else {
                 throw Failure.malformed
             }
-            return envelope.package
+            // 正文必须真是这本书的包 —— 只看头不看正文，等于没校验。
+            guard let package = try? JSONDecoder().decode(
+                ReaderBookUserStatePackage.self, from: data
+            ), package.contract == ReaderBookUserStatePackage.currentContract,
+                  package.contentSha256 == contentSha256 else {
+                throw Failure.malformed
+            }
+            return ReaderBookUserStateRemotePayload(
+                packageData: data,
+                accountScopeDigest: scope
+            )
         } catch let failure as Failure {
             throw failure
         } catch {
