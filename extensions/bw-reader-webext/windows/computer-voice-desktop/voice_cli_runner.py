@@ -225,6 +225,16 @@ SLIM_PLUGINS = (
 DEFAULTS: dict = {
     "codexExe": "",                       # 空 = PATH 里的 codex.exe
     "mcpDisable": ["bwab", "node_repl"],  # 起会话时禁用的 MCP（bwab 传输配置坏，会拖死 app-server）
+    # 2026-09-18：关掉**所有官方插件**（含它们带的 skill 与工具）。
+    # 实测 codex debug prompt-input：开局 4840 → 3409 token（-30%），
+    # 其中 <recommended_plugins> 整段消失 —— 那段列的是**没装**的插件（airtable/alpaca…），
+    # 来自二进制内置的 curated-remote 目录，config 里根本没有这个 marketplace。
+    # 上游对此有两条 issue：#38881 说 features.recommended_plugins=false 不生效、
+    # 只有 features.plugins=false 能去掉；#18498 量到全套插件/skill 会把新线程从
+    # 约 6.9k 撑到 24k。我们这边实测 plugins."X".enabled=false 走 -c 无效、改 config.toml 有效。
+    # ⚠ 代价：browser / chrome / computer-use / codex-app-tools 这些官方工具也一起没了。
+    #   我们自己的 MCP（reader_snapshot / voice_core）是 mcp_servers 不是 plugins，不受影响 —— 这条要实测。
+    "disableOfficialPlugins": False,
     "inputDevice": "CABLE Output (VB-Audio Virtual Cable)",
     "outputDevice": "Line Out (Virtual Cable 1)",
     # App 档位：App 连语音时音频走桥的两条虚拟线缆（桥把 App 麦克风放到 CABLE Input，我们从 CABLE Output 收；我们放到 Line 1，桥从那里采回 App）
@@ -712,9 +722,10 @@ class Speaker:
 class AppServer:
     """codex app-server 的 JSON-RPC 客户端（stdio）。通知回调给 Runner。"""
 
-    def __init__(self, exe: str, mcp_disable: list[str], on_notification):
+    def __init__(self, exe: str, mcp_disable: list[str], on_notification, disable_official_plugins: bool = False):
         self.exe = exe
         self.mcp_disable = mcp_disable
+        self.disable_official_plugins = disable_official_plugins
         self.on_notification = on_notification
         self.pending: dict[int, asyncio.Future] = {}
         self.count = 0
@@ -739,6 +750,8 @@ class AppServer:
         #   这条路从来没省下过。真正能砍掉插件 skill 与 AGENTS.md 的只有换 CODEX_HOME
         #   （见 SLIM_CODEX_HOME）。features.memories=false 保留 —— 它是另一个键，未经此次证伪。
         args = [self.exe, "-c", 'forced_login_method="chatgpt"', "-c", "features.memories=false"]
+        if self.disable_official_plugins:
+            args += ["-c", "features.plugins=false"]
         for plugin in SLIM_PLUGINS:
             args += ["-c", 'plugins."%s".enabled=false' % plugin]
         for n in self.mcp_disable:
@@ -1191,7 +1204,8 @@ class Runner:
     async def _ensure_app_locked(self):
         if self.app is None:
             exe = self.settings.get("codexExe") or "codex.exe"
-            self.app = AppServer(exe, list(self.settings.get("mcpDisable") or []), self.on_notification)
+            self.app = AppServer(exe, list(self.settings.get("mcpDisable") or []), self.on_notification,
+                                 bool(self.settings.get("disableOfficialPlugins")))
             await self.app.launch()
             acct = await self.app.call("account/read", {"refreshToken": False}, timeout=30)
             self.log("app_server_ready", exe=exe, account=(acct.get("account") or {}).get("type"), plan=(acct.get("account") or {}).get("planType"))
