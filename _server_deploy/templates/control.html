@@ -316,6 +316,80 @@
     </div>
   </div>
 
+
+  <!-- ⑤ 语音（自建 Codex 实时语音会话：运行器 + 设置 + 终端 + 额度）-->
+  <div class="panel" data-panel="voice">
+    <div class="panel-tab">
+      <div class="tab-dot" style="color:#f472b6; background:#f472b6"></div>
+      <span class="tab-title">语音</span>
+      <span class="tab-meta" id="voice-tab-meta">未连接运行器</span>
+    </div>
+    <div class="panel-body" style="display:flex; flex-direction:column; gap:14px;">
+      <div class="config-section">
+        <h3 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">会话
+          <span id="voice-session-badge" class="badge">…</span>
+          <span class="meta" id="voice-session-meta" style="font-size:11px"></span>
+        </h3>
+        <div id="voice-status-rows"></div>
+        <div class="action-row">
+          <button class="btn" onclick="voiceRunner('start', event)">启动运行器</button>
+          <button class="btn" onclick="voiceRunner('stop', event)">停运行器</button>
+          <button class="btn primary" onclick="voiceSession('start', event)">开始会话</button>
+          <button class="btn" onclick="voiceSession('stop', event)">停止</button>
+          <button class="btn" onclick="voiceSession('restart', event)">重开</button>
+          <button class="btn" onclick="voicePost('pause', {}, event)">静音麦</button>
+          <button class="btn" onclick="voicePost('resume', {}, event)">恢复麦</button>
+          <span class="action-desc">音频走 App 的两条虚拟线缆；旁路掉线自动重开</span>
+        </div>
+        <div id="voice-transcripts" class="log" style="max-height:140px;font-size:12px;margin-top:8px">（字幕）</div>
+      </div>
+
+      <div class="config-section">
+        <h3 style="display:flex;align-items:center;gap:10px">设置
+          <span class="badge ok" style="font-size:10px">绿=改完即生效</span>
+          <span class="badge running" style="font-size:10px">橙=要重开会话</span>
+          <span id="voice-needs-restart" class="badge" style="display:none"></span>
+        </h3>
+        <div id="voice-settings-form" class="meta">运行器未连接，无法读取设置</div>
+        <p style="margin-top:10px">
+          <button class="btn primary" onclick="voiceSaveSettings(event)">保存设置</button>
+          <button class="btn" onclick="voiceLoadSettings(true)">刷新模型/声音列表</button>
+        </p>
+      </div>
+
+      <div class="config-section">
+        <h3>测试输入</h3>
+        <textarea id="voice-input" rows="2" style="width:100%;padding:8px 12px;background:rgba(0,0,0,0.25);border:1px solid var(--glass-border);color:var(--text);border-radius:7px;font-size:13px;font-family:inherit" placeholder="【状态】用户正在读《测试书》第 42 页。"></textarea>
+        <div class="action-row">
+          <label class="meta" style="font-size:12px">角色
+            <select id="voice-input-role" style="margin-left:6px;padding:4px 8px;background:rgba(0,0,0,0.25);color:var(--text);border:1px solid var(--glass-border);border-radius:6px">
+              <option value="developer">developer</option><option value="user">user</option><option value="assistant">assistant</option>
+            </select>
+          </label>
+          <button class="btn" onclick="voiceSend('say', event)">念出（appendSpeech）</button>
+          <button class="btn" onclick="voiceSend('tell', event)">塞给语音（appendText）</button>
+          <button class="btn" onclick="voiceSend('turn', event)">给后台起一轮（turn/start）</button>
+          <button class="btn" onclick="voiceSend('inject', event)">塞后台历史（inject_items）</button>
+        </div>
+      </div>
+
+      <div class="config-section">
+        <h3 style="display:flex;align-items:center;gap:10px">额度
+          <span id="voice-quota-inline" class="meta" style="font-size:11px"></span>
+          <button class="btn" onclick="voiceQuota(event)" style="font-size:11px;padding:4px 10px;margin-left:auto">刷新额度</button>
+        </h3>
+        <div id="voice-quota" class="meta" style="font-size:12px;line-height:1.7">（点刷新）</div>
+      </div>
+
+      <div class="config-section" style="flex:1;min-height:0;display:flex;flex-direction:column;padding-bottom:0">
+        <h3>终端 <span class="meta" style="margin-left:8px;font-size:10px;letter-spacing:0">运行器事件流 · 字幕 / 委派 / 工具 / 数据通道 / app-server 报错</span>
+          <label class="meta" style="font-size:11px;margin-left:auto"><input type="checkbox" id="voice-log-verbose"> 显示全部</label>
+        </h3>
+        <div id="voice-log" class="log" style="flex:1;min-height:220px">（等待运行器）</div>
+      </div>
+    </div>
+  </div>
+
 <!-- 新建书本 modal 已移到技能树管理页 /skilltree/ -->
 
 </div>
@@ -794,12 +868,215 @@ async function loadQuotaLog(){
   }
 }
 
+
+// ── 语音 tab（自建 Codex 语音会话）──────────────────────
+const VOICE = { since: 0, runnerUp: false, catalog: null, settings: null, hot: [], cold: [], formBuilt: false };
+const VOICE_FIELDS = [
+  ['version', '协议版本', 'select', ['v3', 'v1']],
+  ['voice', '声音', 'voice'],
+  ['realtimeModel', '语音模型（空=默认）', 'text'],
+  ['prompt', '语音模型指令', 'textarea'],
+  ['includeStartupContext', '带 Codex 启动上下文', 'bool'],
+  ['handoffMode', '交回模式', 'select', ['thinking', 'commentary', 'bemTags']],
+  ['clientManagedHandoffs', '关闭自动交回（全 DIY）', 'bool'],
+  ['codexResponsesAsItems', '后台回答作为对话项', 'bool'],
+  ['delegationAckFiller', '委派填充语', 'select3'],
+  ['backendModel', '后台模型', 'model'],
+  ['effort', '推理强度', 'effort'],
+  ['serviceTier', '加速档', 'select', ['', 'priority']],
+  ['inputDevice', '输入设备（含子串）', 'text'],
+  ['outputDevice', '输出设备（含子串）', 'text'],
+  ['outputRate', '输出采样率', 'number'],
+  ['gain', '输出增益', 'number'],
+  ['autoReconnect', '掉线自动重开', 'bool'],
+  ['reconnectInitialItems', '重开时带最近几句字幕', 'number'],
+  ['autoStartSession', '运行器启动即开会话', 'bool'],
+];
+function voiceEsc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+async function voiceGet(sub) { const r = await fetch('/control/api/voice/' + sub); return await r.json(); }
+async function voicePost(sub, body, e) {
+  if (e) e.stopPropagation();
+  try {
+    const r = await fetch('/control/api/voice/' + sub, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {}) });
+    const d = await r.json();
+    if (d.msg) showToast(d.msg, d.ok === false ? 'error' : 'success'); else if (d.ok === false) showToast('失败', 'error');
+    _fastPollUntil = Date.now() + 15000;
+    return d;
+  } catch (err) { showToast('请求失败: ' + err, 'error'); return null; }
+}
+async function voiceRunner(action, e) {
+  if (e) e.stopPropagation();
+  const d = await voicePost('runner/' + action, {}, null);
+  if (d && action === 'start' && d.ok) { VOICE.formBuilt = false; setTimeout(() => voiceLoadSettings(true), 800); }
+}
+async function voiceSession(action, e) {
+  if (e) e.stopPropagation();
+  showToast(action === 'stop' ? '停止中…' : '正在建立语音会话（约 3 秒）…', '');
+  await voicePost('session/' + action, {}, null);
+}
+async function voiceSend(kind, e) {
+  if (e) e.stopPropagation();
+  const text = document.getElementById('voice-input').value.trim();
+  if (!text) { showToast('先写点内容', 'error'); return; }
+  const role = document.getElementById('voice-input-role').value;
+  await voicePost(kind, { text, role }, null);
+}
+async function voiceQuota(e) {
+  if (e) e.stopPropagation();
+  const el = document.getElementById('voice-quota');
+  el.textContent = '查询中…';
+  try {
+    const d = await voiceGet('quota');
+    const rl = d.rateLimits || {};
+    const pr = rl.primary || {};
+    const reset = pr.resetsAt ? new Date(pr.resetsAt * 1000).toLocaleString() : '?';
+    const tok = d.tokens && d.tokens.total ? d.tokens.total : null;
+    el.innerHTML =
+      `<div>套餐 <b>${voiceEsc(rl.planType || '?')}</b> · 主窗口已用 <b>${pr.usedPercent ?? '?'}%</b>（窗口 ${pr.windowDurationMins ? pr.windowDurationMins/60 : '?'} 小时，重置 ${reset}）</div>` +
+      `<div>本会话语音模型音频时长 <b>${((d.audioDurationMs||0)/1000).toFixed(0)} s</b>（数据通道 session.usage.updated）</div>` +
+      (tok ? `<div>后台模型本线程累计：输入 ${tok.inputTokens}（缓存命中 ${tok.cachedInputTokens}）· 输出 ${tok.outputTokens}</div>` : '') +
+      (d.today ? `<div>今日 token（账号）${d.today.tokens} · 起自 ${d.today.startDate}</div>` : '') +
+      (d.rateLimitsError ? `<div style="color:var(--rose)">${voiceEsc(d.rateLimitsError)}</div>` : '');
+  } catch (err) { el.textContent = '查询失败: ' + err; }
+}
+function voiceFieldHtml(key, label, type, opts) {
+  const v = VOICE.settings[key];
+  const hot = VOICE.hot.includes(key), cold = VOICE.cold.includes(key);
+  const mark = hot ? '<span class="dot ok" style="width:7px;height:7px"></span>' : cold ? '<span class="dot" style="width:7px;height:7px;background:var(--amber);color:var(--amber)"></span>' : '<span style="width:7px;display:inline-block"></span>';
+  const id = 'vf-' + key;
+  const inp = 'style="padding:5px 10px;background:rgba(0,0,0,0.25);border:1px solid var(--glass-border);color:var(--text);border-radius:7px;font-size:13px;font-family:inherit"';
+  let ctl = '';
+  if (type === 'bool') ctl = `<input type="checkbox" id="${id}" ${v ? 'checked' : ''} style="width:15px;height:15px;accent-color:var(--indigo)">`;
+  else if (type === 'textarea') ctl = `<textarea id="${id}" rows="3" ${inp.replace('style="', 'style="width:100%;')}>${voiceEsc(v)}</textarea>`;
+  else if (type === 'number') ctl = `<input type="number" id="${id}" value="${voiceEsc(v)}" step="any" ${inp} style="width:8em">`;
+  else if (type === 'select') ctl = `<select id="${id}" ${inp}>` + opts.map(o => `<option value="${o}" ${String(v ?? '') === o ? 'selected' : ''}>${o === '' ? '（无）' : o}</option>`).join('') + '</select>';
+  else if (type === 'select3') ctl = `<select id="${id}" ${inp}><option value="null" ${v == null ? 'selected' : ''}>默认</option><option value="true" ${v === true ? 'selected' : ''}>开</option><option value="false" ${v === false ? 'selected' : ''}>关</option></select>`;
+  else if (type === 'voice') {
+    const ver = VOICE.settings.version || 'v3';
+    const list = VOICE.catalog && VOICE.catalog.voices ? (ver === 'v2' ? VOICE.catalog.voices.v2 : VOICE.catalog.voices.v1) : [];
+    ctl = `<select id="${id}" ${inp}><option value="" ${!v ? 'selected' : ''}>（默认）</option>` + (list || []).map(o => `<option value="${o}" ${v === o ? 'selected' : ''}>${o}</option>`).join('') + '</select>';
+    if (!list || !list.length) ctl = `<input type="text" id="${id}" value="${voiceEsc(v)}" ${inp}>`;
+  } else if (type === 'model') {
+    const list = VOICE.catalog && VOICE.catalog.models ? VOICE.catalog.models : [];
+    ctl = list.length ? `<select id="${id}" ${inp}>` + list.map(m => `<option value="${m.id}" ${v === m.id ? 'selected' : ''}>${m.displayName || m.id}</option>`).join('') + '</select>'
+                      : `<input type="text" id="${id}" value="${voiceEsc(v)}" ${inp}>`;
+  } else if (type === 'effort') {
+    const m = VOICE.catalog && VOICE.catalog.models ? VOICE.catalog.models.find(x => x.id === VOICE.settings.backendModel) : null;
+    const list = m ? m.efforts : ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+    ctl = `<select id="${id}" ${inp}>` + list.map(o => `<option value="${o}" ${v === o ? 'selected' : ''}>${o}</option>`).join('') + '</select>';
+  } else ctl = `<input type="text" id="${id}" value="${voiceEsc(v)}" ${inp} style="width:22em">`;
+  return `<div class="action-row" style="padding:6px 0">${mark}<span style="min-width:14em;font-size:13px">${label}</span>${ctl}</div>`;
+}
+async function voiceLoadSettings(withCatalog) {
+  try {
+    const d = await voiceGet('settings');
+    if (d.runnerDown) { VOICE.runnerUp = false; return; }
+    VOICE.settings = d.settings; VOICE.hot = d.hotKeys || []; VOICE.cold = d.coldKeys || [];
+    if (withCatalog || !VOICE.catalog) { try { VOICE.catalog = await voiceGet('catalog'); } catch (e) {} }
+    document.getElementById('voice-settings-form').innerHTML = VOICE_FIELDS.map(f => voiceFieldHtml(...f)).join('');
+    VOICE.formBuilt = true;
+    voiceShowNeedsRestart(d.needsRestart || []);
+  } catch (e) {}
+}
+function voiceShowNeedsRestart(keys) {
+  const b = document.getElementById('voice-needs-restart');
+  if (keys && keys.length) { b.style.display = ''; b.className = 'badge running'; b.textContent = '需要重开会话：' + keys.join(', '); }
+  else b.style.display = 'none';
+}
+async function voiceSaveSettings(e) {
+  if (e) e.stopPropagation();
+  if (!VOICE.formBuilt) { showToast('设置表单还没加载', 'error'); return; }
+  const patch = {};
+  for (const [key, label, type] of VOICE_FIELDS) {
+    const el = document.getElementById('vf-' + key); if (!el) continue;
+    let v;
+    if (type === 'bool') v = el.checked;
+    else if (type === 'number') v = el.value === '' ? VOICE.settings[key] : Number(el.value);
+    else if (type === 'select3') v = el.value === 'null' ? null : el.value === 'true';
+    else v = el.value;
+    if (JSON.stringify(v) !== JSON.stringify(VOICE.settings[key])) patch[key] = v;
+  }
+  if (!Object.keys(patch).length) { showToast('没有改动', ''); return; }
+  const d = await voicePost('settings', patch, null);
+  if (d && d.settings) {
+    VOICE.settings = d.settings;
+    voiceShowNeedsRestart(d.needsRestart || []);
+    showToast('已保存' + (d.hotApplied && !d.hotApplied.error ? '，热设置已生效' : '') + (d.needsRestart && d.needsRestart.length ? '；冷设置要重开会话' : ''), 'success');
+    if ('backendModel' in patch || 'version' in patch) voiceLoadSettings(false);
+  }
+}
+function voiceFmtEvent(ev) {
+  const t = new Date(ev.t * 1000).toLocaleTimeString('zh-CN', {hour12:false});
+  const k = ev.kind;
+  let body = '';
+  if (k === 'transcript') body = (ev.role === 'user' ? '👤 ' : '🔊 ') + ev.text;
+  else if (k === 'say' || k === 'tell' || k === 'inject' || k === 'turn_start') body = `➡ ${k}${ev.role ? '(' + ev.role + ')' : ''}: ${ev.text}` + (ev.userSpeaking ? ' [用户说话中]' : '');
+  else if (k === 'item/started' || k === 'item/completed') body = `${k === 'item/started' ? '⚙ 开始' : '✓ 完成'} ${ev.itemType}${ev.tool ? ' ' + ev.tool : ''}${ev.text ? ' — ' + ev.text : ''}`;
+  else if (k === 'tokens') body = `tokens 输入 ${ev.input}（缓存 ${ev.cached}）输出 ${ev.output}`;
+  else if (k.startsWith('dc_turn')) body = `dc ${k.slice(3)} ${ev.role}${ev.transcript ? ' "' + ev.transcript + '"' : ''}`;
+  else if (k === 'app_server_stderr') body = `⚠ app-server: ${ev.message}`;
+  else { const rest = Object.assign({}, ev); delete rest.seq; delete rest.t; delete rest.kind; body = k + ' ' + JSON.stringify(rest); }
+  return `[${t}] ${body}`;
+}
+const VOICE_QUIET = new Set(['tokens', 'dc_turn_created', 'dc_turn_done', 'peer_state', 'notify', 'server_request']);
+async function voiceTick() {
+  try {
+    const st = await voiceGet('status');
+    if (st.runnerDown) {
+      VOICE.runnerUp = false;
+      document.getElementById('voice-tab-meta').textContent = '运行器未启动';
+      document.getElementById('voice-tab-meta').style.color = 'var(--muted)';
+      document.getElementById('voice-session-badge').textContent = '运行器未启动';
+      document.getElementById('voice-session-badge').className = 'badge';
+      document.getElementById('voice-status-rows').innerHTML = '<p class="meta">点「启动运行器」。运行器用哪个 Python/脚本见 %LOCALAPPDATA%\\BWReader\\voice-cli\\runner.json</p>';
+      return;
+    }
+    if (!VOICE.runnerUp) { VOICE.runnerUp = true; if (!VOICE.formBuilt) voiceLoadSettings(true); }
+    const s = st.session || {};
+    const badge = document.getElementById('voice-session-badge');
+    badge.textContent = {idle:'空闲', starting:'建立中', connected:'通话中', reconnecting:'重连中', stopping:'停止中'}[s.state] || s.state;
+    badge.className = 'badge ' + (s.state === 'connected' ? 'ok' : (s.state === 'idle' ? '' : 'running'));
+    document.getElementById('voice-session-meta').textContent = s.state === 'connected' ? `会话 #${s.sessionNo} · ${s.seconds}s · 重连 ${s.reconnects} 次${s.userSpeaking ? ' · 用户说话中' : ''}${s.backendBusy ? ' · 后台工作中' : ''}` : (s.lastError ? '上次错误：' + s.lastError : '');
+    const tm = document.getElementById('voice-tab-meta');
+    tm.textContent = s.state === 'connected' ? '通话中' : (s.state === 'idle' ? '运行器就绪' : s.state);
+    tm.style.color = s.state === 'connected' ? 'var(--emerald)' : 'var(--muted)';
+    const row = (name, val, ok) => `<div class="status-row"><span class="dot ${ok === true ? 'ok' : ok === false ? 'bad' : 'na'}"></span><span class="status-name">${name}</span><span class="status-value">${voiceEsc(val)}</span></div>`;
+    document.getElementById('voice-status-rows').innerHTML =
+      row('运行器', `pid ${st.runner.pid} · ${st.runner.uptimeSeconds}s · ${st.runner.listen}`, true) +
+      row('app-server', st.runner.appServer ? '已连（ChatGPT 登录）' : '未起', !!st.runner.appServer) +
+      row('线程', st.runner.threadId || '（未建）', !!st.runner.threadId) +
+      row('语音会话', s.sessionId ? `${s.sessionId} · ${(st.settings||{}).version}${(st.settings||{}).voice ? ' · ' + st.settings.voice : ''}` : '（无）', s.state === 'connected') +
+      row('麦克风电平', s.micLevel == null ? '—' : s.micLevel, s.micLevel == null ? null : s.micLevel > 50) +
+      row('桥外部后端标记', st.bridgeFlag ? '已放（App 语音走本运行器）' : '未放（App 语音走桌面 Codex）', st.bridgeFlag);
+    voiceShowNeedsRestart(s.needsRestart || []);
+    const tr = (st.transcripts || []).map(x => (x.role === 'user' ? '👤 ' : '🔊 ') + x.text).join('\n');
+    const trEl = document.getElementById('voice-transcripts'); trEl.textContent = tr || '（还没有字幕）'; trEl.scrollTop = trEl.scrollHeight;
+    const u = st.usage || {};
+    document.getElementById('voice-quota-inline').textContent = `语音音频 ${((u.audioDurationMs||0)/1000).toFixed(0)} s` + (u.rateLimits && u.rateLimits.primary ? ` · 主窗口 ${u.rateLimits.primary.usedPercent}%` : '');
+    if (s.state === 'connected' || s.state === 'starting' || s.state === 'reconnecting') _fastPollUntil = Date.now() + 5000;
+    const ev = await voiceGet('events?since=' + VOICE.since + '&limit=300');
+    if (ev.events && ev.events.length) {
+      const verbose = document.getElementById('voice-log-verbose').checked;
+      const el = document.getElementById('voice-log');
+      if (el.textContent.startsWith('（')) el.textContent = '';
+      const wasAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+      const lines = ev.events.filter(e => verbose || !VOICE_QUIET.has(e.kind)).map(voiceFmtEvent);
+      if (lines.length) el.textContent += (el.textContent ? '\n' : '') + lines.join('\n');
+      VOICE.since = ev.next;
+      const all = el.textContent.split('\n'); if (all.length > 600) el.textContent = all.slice(-600).join('\n');
+      if (wasAtBottom) el.scrollTop = el.scrollHeight;
+    }
+  } catch (e) {}
+}
+document.querySelector('[data-panel="voice"]').addEventListener('click', () => { setTimeout(() => { voiceTick(); }, 200); }, {once: true});
+
 async function tick() {
   try {
     if (!document.hidden) {   // 后台标签页跳过本轮,省请求
       await refreshStatus();   // await 防慢请求时轮询堆叠(同一时刻 in-flight ≤1)
       // "操作"panel active 时同步刷日志
       if (document.querySelector('[data-panel="trigger"]').classList.contains('active')) await refreshTriggerLog();
+      if (document.querySelector('[data-panel="voice"]').classList.contains('active')) await voiceTick();
     }
   } finally {
     // setTimeout 必须在 finally:否则 fetch 异常会断掉轮询链

@@ -2885,7 +2885,10 @@
   function _syncPartsNow(tid, absorb) {
     try {
       var ps = RC.turnCard.partsOf(tid);
-      if (!ps || !ps.length) return;
+      // ⚠ 带 absorb 时即使没有部件也得发：这一次的正事是**删掉存储里那条临时记录**，
+      //   在这里提前返回就等于改了名却没搬走，重载时它照样冒出来（就是要修的那个多余方块）。
+      if ((!ps || !ps.length) && !(absorb && absorb.length)) return;
+      ps = ps || [];
       var txt = ps.filter(function (p) { return p.kind === 'text'; })
                   .map(function (p) { return p.text; }).join('\n\n');
       var ctx = {};

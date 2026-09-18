@@ -590,3 +590,104 @@ def register_control(app):
         except Exception as e:
             log = f"读 log 失败: {e}"
         return jsonify({"ok": True, "status": job["status"], "log": log})
+
+
+# ═══════════════════ 语音 CLI（自建 Codex 实时语音会话）═══════════════════
+# 运行器 voice_cli_runner.py 常驻 127.0.0.1:43131；这里只做代理 + 拉起/停掉运行器。
+# 运行器用哪个 Python / 哪个脚本，读 %LOCALAPPDATA%\BWReader\voice-cli\runner.json：{"python": "...", "script": "..."}
+VOICE_CLI_BASE = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "BWReader" / "voice-cli"
+VOICE_CLI_URL = "http://127.0.0.1:43131"
+
+
+def _voice_runner_config() -> dict:
+    try:
+        return json.loads((VOICE_CLI_BASE / "runner.json").read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _voice_runner_pid() -> int | None:
+    try:
+        pid = int((VOICE_CLI_BASE / "runner.pid").read_text(encoding="utf-8").strip())
+    except Exception:
+        return None
+    try:
+        if sys.platform == "win32":
+            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True, timeout=5).stdout
+            return pid if str(pid) in out else None
+        os.kill(pid, 0)
+        return pid
+    except Exception:
+        return None
+
+
+def _voice_proxy(sub: str):
+    url = VOICE_CLI_URL + "/" + sub
+    if request.query_string:
+        url += "?" + request.query_string.decode()
+    data = request.get_data() if request.method == "POST" else None
+    req = urllib.request.Request(url, data=data, method=request.method, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=150) as resp:
+            return resp.read(), resp.status
+    except urllib.error.HTTPError as e:
+        return e.read(), e.code
+    except Exception as e:
+        return json.dumps({"ok": False, "msg": f"运行器不可达: {e}", "runnerDown": True}, ensure_ascii=False).encode(), 503
+
+
+def register_voice_cli(app):
+    @app.route("/control/api/voice/runner")
+    def control_voice_runner():
+        cfg = _voice_runner_config()
+        pid = _voice_runner_pid()
+        return jsonify({"running": pid is not None, "pid": pid, "config": cfg,
+                        "configPath": str(VOICE_CLI_BASE / "runner.json"), "url": VOICE_CLI_URL})
+
+    @app.route("/control/api/voice/runner/start", methods=["POST"])
+    def control_voice_runner_start():
+        if _voice_runner_pid():
+            return jsonify({"ok": True, "msg": "运行器已在跑"})
+        cfg = _voice_runner_config()
+        py, script = cfg.get("python"), cfg.get("script")
+        if not (py and script and Path(py).exists() and Path(script).exists()):
+            return jsonify({"ok": False, "msg": f"runner.json 里的 python/script 不存在：{cfg}"}), 400
+        VOICE_CLI_BASE.mkdir(parents=True, exist_ok=True)
+        log_f = open(VOICE_CLI_BASE / "runner.out", "ab")
+        flags = 0
+        if sys.platform == "win32":
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "CREATE_NO_WINDOW", 0) | subprocess.DETACHED_PROCESS
+        p = subprocess.Popen([py, script], stdout=log_f, stderr=subprocess.STDOUT, cwd=str(Path(script).parent), creationflags=flags)
+        # 等它把 HTTP 端口开起来
+        for _ in range(40):
+            time.sleep(0.25)
+            try:
+                urllib.request.urlopen(VOICE_CLI_URL + "/status", timeout=1).read()
+                return jsonify({"ok": True, "msg": f"运行器已启动 pid {p.pid}", "pid": p.pid})
+            except Exception:
+                if p.poll() is not None:
+                    break
+        return jsonify({"ok": False, "msg": f"运行器没起来（退出码 {p.poll()}），看 {VOICE_CLI_BASE / 'runner.out'}"}), 500
+
+    @app.route("/control/api/voice/runner/stop", methods=["POST"])
+    def control_voice_runner_stop():
+        body, code = _voice_proxy("shutdown")
+        pid = _voice_runner_pid()
+        if pid and code != 200 and sys.platform == "win32":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+        return jsonify({"ok": True, "msg": "已请求运行器退出"})
+
+    @app.route("/control/api/voice/<path:sub>", methods=["GET", "POST"])
+    def control_voice_proxy(sub):
+        body, code = _voice_proxy(sub)
+        return app.response_class(body, status=code, mimetype="application/json")
+
+
+import urllib.error  # noqa: E402
+
+_orig_register_control = register_control
+
+
+def register_control(app):  # noqa: F811
+    _orig_register_control(app)
+    register_voice_cli(app)
