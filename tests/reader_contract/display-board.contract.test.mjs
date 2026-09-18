@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync as readFileSyncRaw } from "node:fs";
+// ⚠ 统一换行：下面的断言比对的是**源码文本**，而检出可能是 CRLF（本仓库的
+//   worktree 就是这样）。正则 / indexOf 里写死的 \n 在 \r\n 上必然失配，
+//   于是测试红得跟被测代码毫无关系。换行是检出产物，不是契约。
+const readFileSync = (p, e) => readFileSyncRaw(p, e).replace(/\r\n/g, "\n");
 
 const ROOT = new URL("../../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, ROOT), "utf8");
@@ -187,7 +191,10 @@ test("AI 说明：只有用户明确说了才用、enable 是用户的开关、�
   assert.match(GUIDE, /外链一律无效/);
   assert.match(GUIDE, /不要放时间戳/);
   assert.match(GUIDE, /每张卡都写/, "alt 是无图时的兜底，说明里要求每张卡都写");
-  assert.match(INDEX, /boards\.md/, "能力索引里要挂上，否则 AI 找不到这份说明");
+  // 索引的写法后来从文件名（`boards.md`）改成了裸话题名（`boards`），而
+  // ReaderCapabilityCatalog 两种拼法都收（它显式剥 .md 后缀）。守的是「索引里挂上了」，
+  // 不是「索引用哪种拼法」—— 只认带后缀的那一版，会在改了排版惯例后误报。
+  assert.match(INDEX, /`boards(\.md)?`/, "能力索引里要挂上，否则 AI 找不到这份说明");
   assert.match(BOARD, /用户的开关/, "代码侧也要写明 enable 归谁");
 });
 

@@ -9,7 +9,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
-import { readFileSync } from "node:fs";
+import { readFileSync as readFileSyncRaw } from "node:fs";
+// ⚠ 统一换行：下面的断言比对的是**源码文本**，而检出可能是 CRLF（本仓库的
+//   worktree 就是这样）。正则 / indexOf 里写死的 \n 在 \r\n 上必然失配，
+//   于是测试红得跟被测代码毫无关系。换行是检出产物，不是契约。
+const readFileSync = (p, e) => readFileSyncRaw(p, e).replace(/\r\n/g, "\n");
 
 const ROOT = new URL("../../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, ROOT), "utf8");
