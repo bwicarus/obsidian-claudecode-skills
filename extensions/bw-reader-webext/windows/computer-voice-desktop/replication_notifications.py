@@ -762,6 +762,56 @@ def review_counts(root: Path) -> dict[str, int]:
             "newGradable": new - blocked, "newBlocked": blocked}
 
 
+#: 自动拉起 Anki 的留痕文件（冷却 + 宽限期都读它）。
+ANKI_AUTOSTART_FILE = "anki-autostart.json"
+
+#: 拉起失败后多久才再试一次。失败多半是环境问题（没装、被杀、端口被占），
+#: 每 6 秒重试一遍只会刷屏，不会变好。
+ANKI_AUTOSTART_COOLDOWN_SECONDS = 3600
+
+#: 刚把 Anki 拉起来之后，先压住通知这么久。
+#: ⚠ 为什么要压：newBlocked 数的是卡上**过去那次**导出失败留下的标记，
+#: 只有阅读器重新尝试导出才会清 —— 服务端没有重试导出的路（查过了）。
+#: 所以 Anki 刚起来的那一刻重算必然还是堵着。给阅读器一个自然清掉的窗口，
+#: 过了还堵才值得打扰他。
+ANKI_AUTOSTART_GRACE_SECONDS = 1800
+
+
+def _try_fix_blocked_new(root: Path) -> dict[str, Any]:
+    """新卡评不了分时，先自己修能修的那一半：把 Anki 拉起来。
+
+    2026-09-18 用户：「anki 直接自己修」。在这之前这条通知只是把两步都念给他听
+    （「先确认 Anki 开着，再重新打开这些卡片让导出重试」）—— 而第一步我们自己做得了：
+    situation_actions 里早就有 anki.start（起进程 + 轮询 8765，端口真开才算成功）。
+
+    ⚠ 只修第一步，**不谎报修完**：第二步要阅读器重新导出，服务端够不着。
+    所以这里返回发生了什么，由调用方决定通知怎么写、要不要先压一会儿。
+    """
+    marker = root / ANKI_AUTOSTART_FILE
+    now = time.time()
+    try:
+        last = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        last = {}
+    try:
+        import situation_actions
+    except ImportError as error:
+        return {"action": "unavailable", "detail": str(error)}
+    if situation_actions._anki_port_open():
+        return {"action": "already-running"}
+    if now - float(last.get("atEpochSeconds") or 0) < ANKI_AUTOSTART_COOLDOWN_SECONDS:
+        return {"action": "cooldown", "detail": last.get("result") or "",
+                "atEpochSeconds": last.get("atEpochSeconds")}
+    try:
+        result = situation_actions.ACTIONS["anki.start"]["run"](root)
+        out = {"action": "started", "detail": json.dumps(result, ensure_ascii=False)}
+    except Exception as error:   # noqa: BLE001
+        out = {"action": "failed", "detail": str(error)[:200]}
+    _atomic_write_json(marker, {"atEpochSeconds": now, "result": out})
+    out["atEpochSeconds"] = now
+    return out
+
+
 #: 评分不可用的原因里，哪些表示「这张卡根本不在外部 Anki 里」。
 #:
 #: 2026-09-09 实查出来的事：Reader **没有本地排期能力** —— `rate()` 拿到的
@@ -1354,17 +1404,43 @@ def ensure_review_due(store: "NotificationStore", root: Path) -> dict:
     # 与 review-new 分开而不是改措辞，因为消除条件不同 ——
     # review-new 靠"他学了"回落，这条靠"导出通了"回落。
     if blocked_new > 0:
-        store.create(
-            kind="review-blocked",
-            title="%d 张新卡评不了分：还没进 Anki" % blocked_new,
-            body=("Reader 自己不排期，第一次评分必须有真实 Anki 卡号。"
-                  "先确认这台电脑上 Anki 开着（AnkiConnect 8765），"
-                  "再重新打开这些卡片让导出重试。"),
-            source="review-scheduler",
-            audience="user",
-            dedupe_key="review-blocked:" + day,
-            end="expires:%d" % (_now_ms() + 36 * 3600 * 1000),
-        )
+        # 先自己修能修的那一半再打扰他（2026-09-18 用户：「anki 直接自己修」）。
+        fix = _try_fix_blocked_new(root)
+        # ⚠ 压住时只能跳过**这一条**，不能 return —— 这个函数后面还要建
+        #   「去学吧」那条（gradable_new）。第一版我写的 return，会把它一起吞掉。
+        hold = fix.get("action") == "started"
+        if fix.get("action") == "cooldown":
+            # 刚把 Anki 拉起来的那一刻重算必然还是堵着（那些标记记的是**过去**那次
+            # 导出失败），所以给阅读器一个自然清掉的窗口；过了还堵才值得打扰他。
+            hold = (time.time() - float(fix.get("atEpochSeconds") or 0)
+                    < ANKI_AUTOSTART_GRACE_SECONDS)
+        if fix.get("action") == "already-running":
+            tail = ("Anki 现在是开着的（8765 通），所以卡的不是它 —— "
+                    "重新打开这些卡片让导出重试就行。")
+        elif fix.get("action") == "failed":
+            tail = ("我试着自动把 Anki 拉起来，没成功：%s。"
+                    "先手动打开 Anki，再重新打开这些卡片让导出重试。"
+                    % str(fix.get("detail") or "")[:120])
+        elif fix.get("action") == "cooldown":
+            tail = ("Anki 没在跑；上一次自动拉起是 %.0f 分钟前，这次先不重试了。"
+                    "手动打开 Anki 之后重新打开这些卡片让导出重试。"
+                    % ((time.time() - float(fix.get("atEpochSeconds") or 0)) / 60))
+        else:
+            tail = ("先确认这台电脑上 Anki 开着（AnkiConnect 8765），"
+                    "再重新打开这些卡片让导出重试。")
+        # hold = Anki 刚（或刚刚才）被拉起来，等阅读器自己把标记清掉。
+        # ⚠ 压住的是"新建"，不是"宣布好了" —— 已有的那条不动，它自己会在
+        #   blocked 归零那一轮被 else 分支 resolve 掉。
+        if not hold:
+            store.create(
+                kind="review-blocked",
+                title="%d 张新卡评不了分：还没进 Anki" % blocked_new,
+                body="Reader 自己不排期，第一次评分必须有真实 Anki 卡号。" + tail,
+                source="review-scheduler",
+                audience="user",
+                dedupe_key="review-blocked:" + day,
+                end="expires:%d" % (_now_ms() + 36 * 3600 * 1000),
+            )
     else:
         for item in list(store.open_items()):
             if item.get("kind") == "review-blocked":
