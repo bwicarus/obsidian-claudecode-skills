@@ -5209,9 +5209,15 @@ if (window.__bwPwaProviderOnly) return;
         correlation: correlation.correlation,
         sourceInstanceId: correlation.sourceInstanceId,
         outcome: "rejected",
-        error: String(
-          (error && error.code) || (error && error.message) || error
-        ).slice(0, 500),
+        error: (function () {
+          // ⚠ 原来是 code || message ——**优先取 code、把 message 丢了**，于是模型只
+          //   收到「BW_COMPUTER_VOICE_DIRECT_SCHEMA」这一句：某个对象没过校验，
+          //   但不知道是哪个字段、哪一处。2026-09-18 用户实测：它据此反复重试、
+          //   "半天搞不清楚状况"。两个都带上，排查才有落点。
+          var c = (error && error.code) || '';
+          var m = (error && error.message) || '';
+          return String(c && m && c !== m ? c + ': ' + m : (c || m || error)).slice(0, 500);
+        })(),
       };
     });
   }

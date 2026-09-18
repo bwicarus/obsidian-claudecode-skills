@@ -1742,9 +1742,14 @@
     return !!(card && card.bind && card.bind.kind === 'page-chars');
   }
   function _readerOutputReject(error) {
+    // ⚠ 同 rc-computer-voice：原来是 code || message，**优先 code、丢掉 message**，
+    //   模型只收到一个错误码，不知道是哪个字段出的问题（2026-09-18 实测：它据此
+    //   反复重试、"半天搞不清楚状况"）。两个都带。
+    var c = (error && error.code) || '';
+    var m = (error && error.message) || '';
     return {
       outcome: 'rejected',
-      error: String((error && (error.code || error.message)) || error ||
+      error: String((c && m && c !== m ? c + ': ' + m : (c || m || error)) ||
         'BW_READER_REALTIME_OUTPUT_FAILED').slice(0, 500)
     };
   }
