@@ -62,6 +62,16 @@ TOOLS = [
     {"name": "schedule_run_now", "description": "立刻跑一次某条定时任务（独立子进程，结果之后用 schedule_runs 看）。", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"], "additionalProperties": False}},
     {"name": "schedule_enable", "description": "启用/停用一条定时任务。", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "enabled": {"type": "boolean"}}, "required": ["id", "enabled"], "additionalProperties": False}},
     {"name": "schedule_runs", "description": "看某条定时任务最近几次运行：状态、耗时、每步结果摘要、错误。", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["id"], "additionalProperties": False}},
+    {"name": "voice_transcript", "description": (
+        "看最近几句**语音对话**（用户和语音模型各说了什么），每条带时刻与"
+        "「多少秒前」。用在：你让语音模型念了一句之后，核对它到底念没念、"
+        "用户回应了什么、这件事算不算办完 —— 据此决定下一步（再说一遍、"
+        "改打电话、还是收尾挂断）。别靠猜：voice_say 返回成功只代表投递成功，"
+        "不代表他听见了、更不代表他同意了。"),
+     "inputSchema": {"type": "object", "properties": {
+         "limit": {"type": "integer", "description": "最多看几条，默认 12，上限 50"},
+         "sinceSeconds": {"type": "number", "description": "只看最近这么多秒内的（0 = 不限）"}},
+         "additionalProperties": False}},
     {"name": "voice_tell", "description": "往语音模型的对话上下文追加一句（不保证不出声：闲时它会接一句）。", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"], "additionalProperties": False}},
 ]
 
@@ -156,6 +166,9 @@ def call_tool(name: str, args: dict) -> dict:
                 "backendBusy": s.get("backendBusy"), "lastError": s.get("lastError"), "input": (st.get("settings") or {}).get("inputDevice"),
                 "output": (st.get("settings") or {}).get("outputDevice"), "bridgeFlag": st.get("bridgeFlag"),
                 "recentTranscripts": [f"{x.get('role')}: {x.get('text')}" for x in (st.get("transcripts") or [])[-4:]]}
+    if name == "voice_transcript":
+        return http("GET", "/transcript?limit=%d&sinceSeconds=%s" % (
+            int(args.get("limit") or 12), float(args.get("sinceSeconds") or 0)), timeout=10)
     if name == "voice_session_start":
         return http("POST", "/session/start", {"reason": args.get("reason") or "backend"})
     if name == "kj_node_ensure":
