@@ -322,6 +322,18 @@ DEFAULTS: dict = {
     "contextAmbientEnabled": True,
     "contextAmbientCacheSeconds": 60.0,
     "contextAmbientToVoice": True,   # 地点/卡数也单独投一行给语音侧（见 _ctx_inject_voice_ambient）
+    # 通知主动投递（2026-09-18 用户拍板）：路由层判出 speak 的待办，以前只是写到慢板上
+    # 等用户开口才被动送过去 —— 于是「4 张新卡评不了分」从 09-15 挂到 09-18 没被说过一次。
+    # 现在按用户设想分两层：语音在线就直接让前端语音模型念（**零后台轮**，纯转述不必后台参与）；
+    # 不在线就起一轮交后台，它手上有 voice_session_start / voice_call，自己决定说还是打电话。
+    # ⚠ 判断不重做：说不说、几点说，路由层已经按地点/设备/语音在线判完了（结论在 routes 里）。
+    "notifyPushEnabled": True,
+    "notifyPushIntervalSeconds": 20.0,
+    "notifyPushRoutingMaxAgeSeconds": 300.0,   # 路由文件超这么久没更新就不主动说（宁可不说，不可乱说）
+    # 同一条投过就压住这么久，**不管 ack 成没成**（2026-09-18 隔离测试抓到的：
+    # 只靠外部 ack 收尾时，ack 失败或落盘晚一步，这条就会被一轮一轮重复念出来）。
+    # 到点仍在 pending 才再说一次 —— 那是"忘了 ack 的自愈重试"，与板面那边同一个脾气。
+    "notifyPushRepeatMinutes": 30.0,
     "contextInkStandbyMaxAgeSeconds": 900,   # 待命图的保质期：这一笔画完超过这么久还没被送出去就作废（旧设计里的新鲜窗，2026-09-17 补回）
     "contextInkImage": True,       # 桥在每次笔迹稳定时抓好图放进 runtime/ink-standby 待命；开口交给后台的那一刻把本页没送过的**全部**随 steer 插进那一轮（localImage 路径，不进 base64）
     "contextInkImageMaxBytes": 700000,   # 超过就不投（图片按 token 计费且留在线程历史里）
@@ -855,6 +867,7 @@ class Runner:
         self._ctx_pending: dict | None = None   # 后台忙时压着的状态，只留最新一份
         self._last_user_ask: tuple | None = None
         self._promise_pending: tuple | None = None
+        self._notify_sent: dict[str, float] = {}   # 通知主动投递的冷却台账
         self._voice_stream = ""
         self._backend_recent: tuple[float, str] | None = None   # 后台最近一条回复：语音把它念出来的字幕不再重复入库
         self._voice_user_acc = ""   # 本轮用户字幕分段累积（turn.done 没带转写时兜底）
@@ -1049,7 +1062,12 @@ class Runner:
                 pass
             elif m == "error":
                 # 同上：app-server 的 error 通知带着 400 的正文，原来被折成一行 method=error。
-                self.log("app_error", detail=json.dumps(p, ensure_ascii=False)[:600])
+                detail = json.dumps(p, ensure_ascii=False)[:600]
+                # 留一份供投递侧关联：appendSpeech 这类是 fire-and-forget，
+                # 失败不从响应回来，而是以这条 error 通知异步到达 —— 不记下来就没人能把
+                # 「我刚才让它念的那句」和「conversation is not running」对上（见 say）。
+                self._last_app_error = (time.time(), detail)
+                self.log("app_error", detail=detail)
             else:
                 self.log("notify", method=m)
         except Exception as e:
@@ -2474,7 +2492,10 @@ class Runner:
     def _recent_dialogue(self, keep: int = 6, within: float = 180.0) -> str:
         """最近几条转写，补投时连上下文一起交给后台。"""
         now = time.time()
-        rows = [(r, x) for at, r, x in self.transcripts[-40:]
+        # ⚠ transcripts 是 deque —— **不支持切片**。别处都写 list(...)[-n:]，这里漏了，
+        # 于是补投第一次真触发就死在 "sequence index must be integer, not 'slice'"
+        # （2026-09-18 14:00 实录；能看见它是因为今天给补投加了出声外壳）。
+        rows = [(r, x) for at, r, x in list(self.transcripts)[-40:]
                 if x and now - at <= within][-keep:]
         return chr(10).join(
             "%s：%s" % ("用户" if r == "user" else "语音助手", str(x).strip()[:300])
@@ -2629,6 +2650,125 @@ class Runner:
         for k in sinks:
             self._ctx["fp"][k] = ""
 
+    def _notify_actionable(self) -> list[dict]:
+        """路由判出 speak 的 pending 待办。判断不重做，只读结论。
+
+        两份文件都在 LOCALAPPDATA 下的 BWReader 目录：notifications.json 是真值库，
+        notification-routing.json 是路由层每轮对账写的结论。
+        ⚠ 路由文件陈旧就返回空 —— 板面那边陈旧时是**放行**（宁可多念不可漏掉），
+        但这里是**主动开口**，方向相反：宁可不说，不可拿过期结论去打扰他。
+        """
+        try:
+            store = json.loads((BWREADER_DIR / "notifications.json").read_text(encoding="utf-8"))
+            routing = json.loads((BWREADER_DIR / "notification-routing.json").read_text(encoding="utf-8"))
+        except Exception:   # noqa: BLE001
+            return []
+        max_age = float(self.settings.get("notifyPushRoutingMaxAgeSeconds") or 300.0)
+        if time.time() * 1000 - float(routing.get("atUtcMs") or 0) > max_age * 1000:
+            return []
+        routes = routing.get("routes") or {}
+        out = []
+        for item in (store.get("items") or []):
+            if item.get("audience") != "user" or item.get("state") != "pending":
+                continue
+            route = routes.get(str(item.get("id")))
+            # speak = 现在可以说；call = 这条必须马上知道（建的时候就定了 deliver=call）。
+            # hold / judge **不在这里动**：hold 是路由判了现在别打扰；judge 是它判不了 ——
+            # 那种要先跑 judgment_basis 拿全依据再定，是后台的活，不该由这个循环替它拍板。
+            if not route or route.get("action") not in ("speak", "call"):
+                continue
+            item = dict(item)
+            item["_action"] = route.get("action")
+            out.append(item)
+        return out
+
+    def _notify_ack(self, ntf_id: str) -> bool:
+        """说过了就 ack —— 不 ack 的话下一轮它还在 pending，会被再说一遍。"""
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(BWREADER_DIR / "replication_notifications.py"), "ack", ntf_id],
+                capture_output=True, timeout=30,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return proc.returncode == 0
+        except Exception as e:   # noqa: BLE001
+            self.log("notify_ack_error", ntf=ntf_id, message=clean(e))
+            return False
+
+    async def _notify_push_loop(self):
+        """把路由判出 speak 的待办**主动**送出去（2026-09-18 用户拍板）。
+
+        用户原话：「很多定时任务完全可以在到时间的时候把我们的服务拉起，首先去跟文字版本的
+        AI 后台聊天，如果需要通知的时候根据我的情况看是打电话给我还是直接说话…还有一些
+        非常简单的通知根本不需要后台 AI 参与，只是传达转述，条件判断完以后可以直接交给
+        前端的语音 AI」。
+
+        所以分两层：
+          语音在线 → 直接 /say 念出来，**零后台轮**（判断路由层早做完了，转述不必花一轮）
+          不在线   → 起一轮交后台，它自己决定开语音说、打电话、还是先不打扰
+        两层都以 ack 收尾 —— 不 ack 下一轮还在 pending，会被再说一遍。
+
+        ⚠ 不在用户说话/助手说话/后台在跑的时候插话：用户 2026-09-15 明确抱怨过
+        「一分钟到了记得喝水」把他的提问打断。等一个空档再说，等不到就下一轮再看。
+        """
+        while not self.shutting_down:
+            await asyncio.sleep(float(self.settings.get("notifyPushIntervalSeconds") or 20.0))
+            try:
+                if not self.settings.get("notifyPushEnabled", True):
+                    continue
+                if not (self.app and self.thread_id):
+                    continue
+                items = self._notify_actionable()
+                # 冷却：投过的压住，不管 ack 成没成 —— 见 notifyPushRepeatMinutes
+                cool = float(self.settings.get("notifyPushRepeatMinutes") or 30.0) * 60.0
+                sent = self._notify_sent
+                now = time.time()
+                items = [x for x in items
+                         if now - sent.get(str(x.get("id") or ""), 0.0) >= cool]
+                if not items:
+                    continue
+                online = self.session_state == "connected"
+                if online and (self.user_speaking or self.assistant_speaking or self.backend_busy):
+                    continue      # 别插话，下一轮再看
+                if not online and self.backend_busy:
+                    continue
+                item = items[0]   # 一轮只投一条：说完 ack，下一轮自然轮到下一条
+                ntf = str(item.get("id") or "")
+                said = str(item.get("title") or "").strip()
+                if item.get("body"):
+                    said += "。" + str(item["body"]).strip()
+                self._notify_sent[ntf] = now   # 先记再投：投递中途出错也不该立刻重来
+                if str(item.get("_action") or "speak") == "call":
+                    # 打电话这一档**永远交后台**，不自己拨：拨号是阻塞的、还要处理拒接降级，
+                    # 而且"要不要真的响铃"该由手上有全部工具和上下文的那一侧拍板。
+                    await self.turn(
+                        "【有一条要打电话通知他的事】" + said + chr(10)
+                        + "路由层判定这条是 deliver=call（建的时候就定了必须马上知道）。"
+                          "用 voice_call 打给他，接通后把上面这句说清楚；拒接或没接通时按"
+                          "通知系统的降级规则处理，不要反复重拨。"
+                          "送到之后跑 replication_notifications.py ack " + ntf + " 登记掉。",
+                        record_user=False)
+                    self.log("notify_push", ntf=ntf, via="call-turn", text=said[:120])
+                    continue
+                if online:
+                    res = await self.say(said)
+                    if not res.get("spoken"):
+                        self.log("notify_push_failed", ntf=ntf, reason=res.get("reason"))
+                        continue
+                    acked = self._notify_ack(ntf)
+                    self.log("notify_push", ntf=ntf, via="say", acked=acked, text=said[:120])
+                else:
+                    await self.turn(
+                        "【有一条该跟他说的事，语音会话不在线】" + said + chr(10)
+                        + "路由层已经判定现在可以说（按他的位置、设备活跃、语音状态）。"
+                          "你来决定怎么送到：开语音说（voice_session_start + voice_say）、"
+                          "打电话（voice_call，只用于必须马上知道的事），还是先不打扰。"
+                          "送到之后跑 replication_notifications.py ack " + ntf
+                        + " 把它登记掉，否则它会一直挂着。",
+                        record_user=False)
+                    self.log("notify_push", ntf=ntf, via="turn", text=said[:120])
+            except Exception as e:   # noqa: BLE001
+                self.log("notify_push_error", message=clean(e))
+
     async def _ink_late_loop(self):
         """图比问题晚到时，补插进**正在跑的那一轮**（2026-09-17 实录）。
 
@@ -2698,12 +2838,45 @@ class Runner:
             except Exception as e:
                 self.log("ctx_loop_error", message=clean(e))
 
-    async def say(self, text: str):
+    async def say(self, text: str, fallback: str = "none"):
+        """让语音模型立刻念一句。
+
+        ⚠ 2026-09-18 修的静默失败：这里原来不看会话状态，直接 appendSpeech 就回
+        {"ok": true}。而 appendSpeech 是 fire-and-forget —— 语音会话不在线时
+        app-server 回的是一条**异步** error 通知（`conversation is not running`），
+        响应本身照旧成功。实测（会话 state=idle）：/say 回 ok:true、日志记了 say，
+        而一个字都没有被念出来。定时任务的 deliver mode=say 因此会记下
+        delivered:true，投递报告全绿而用户什么也没听见。
+
+        现在：不在线就**不假装成功**。fallback="turn" 时改为起一轮，把这句话交给后台
+        —— 它手上有 voice_session_start / voice_say / voice_call，能决定是开语音说、
+        打电话，还是等他下次上线。
+        """
+        if self.session_state != "connected":
+            if fallback == "turn":
+                self.log("say_fallback_turn", text=text[:120], reason="voice-offline")
+                await self.turn(
+                    "【这句话本来要直接念给他，但语音会话不在线】" + text + chr(10)
+                    + "你来决定怎么送到：现在开语音说（voice_session_start + voice_say）、"
+                      "打电话（voice_call，只用于必须马上知道的事），还是先不打扰、"
+                      "等他下次上线。别只回复文字就算完。",
+                    record_user=False)
+                return {"ok": True, "spoken": False, "via": "turn-fallback"}
+            self.log("say_skipped", text=text[:120], reason="voice-offline",
+                     sessionState=self.session_state)
+            return {"ok": False, "spoken": False, "reason": "voice-offline"}
         self.mark_activity("say")
+        before = getattr(self, "_last_app_error", (0.0, ""))
         await self.app.call("thread/realtime/appendSpeech", {"threadId": self.thread_id, "text": text})
+        # 等一下那条异步 error：会话刚在这一瞬断掉时，响应仍是成功的（见上面的说明）。
+        await asyncio.sleep(0.2)
+        after = getattr(self, "_last_app_error", (0.0, ""))
+        if after[0] > before[0] and ("not running" in after[1] or "realtime" in after[1]):
+            self.log("say_failed", text=text[:120], detail=after[1][:200])
+            return {"ok": False, "spoken": False, "reason": "realtime-error"}
         self.pending_speech_until = time.monotonic() + 8
         self.log("say", text=text[:200])
-        return {"ok": True}
+        return {"ok": True, "spoken": True}
 
     async def wait_for_speech(self, grace: float = 10.0) -> bool:
         """等语音模型把嘴里的话说完：有待念的句子要等它开口并 turn.done；正在说就等说完。返回是否等到。"""
@@ -3448,7 +3621,9 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/board":
                 return self._send(200, self._run(r.board(str(body.get("text") or ""), body.get("toVoice"), body.get("toBackend"))))
             if u.path == "/say":
-                return self._send(200, self._run(r.say(str(body.get("text") or ""))))
+                # fallback="turn"：语音不在线时交后台决定（说/打电话/等），别静默丢掉
+                return self._send(200, self._run(r.say(str(body.get("text") or ""),
+                                                      str(body.get("fallback") or "none"))))
             if u.path == "/call":
                 return self._send(200, self._run(r.call_user(str(body.get("text") or ""), str(body.get("title") or ""),
                                                              str(body.get("ntf") or "misc"), str(body.get("reason") or "")), timeout=260))
@@ -3565,6 +3740,7 @@ def main():
         asyncio.create_task(app_gone_watch())
         asyncio.create_task(runner._ctx_loop())
         asyncio.create_task(runner._ink_late_loop())
+        asyncio.create_task(runner._notify_push_loop())
         asyncio.create_task(runner._loop_lag_monitor())
         asyncio.create_task(runner.quota_watch_loop())
         asyncio.create_task(runner.idle_stop_loop())

@@ -303,8 +303,11 @@ def run_deliver(ctx: Ctx, step: dict, flow: dict) -> Any:
         r = _post(VOICE_CORE_URL + "/turn", {"text": "【定时任务·%s】%s" % (flow.get("name"), text)})
         return {"delivered": bool(r.get("ok")), "mode": "voice"}
     if mode == "say":
-        r = _post(VOICE_CORE_URL + "/say", {"text": text})
-        return {"delivered": bool(r.get("ok")), "mode": "say"}
+        # fallback=turn：语音不在线时不静默丢掉，交后台决定说/打电话/等
+        # （2026-09-18：此前语音离线时 /say 照回 ok:true，delivered 记成 true 而没人听见）。
+        r = _post(VOICE_CORE_URL + "/say", {"text": text, "fallback": "turn"})
+        return {"delivered": bool(r.get("ok")), "mode": "say",
+                "spoken": bool(r.get("spoken")), "via": r.get("via")}
     if mode == "call":
         # 先建一条 deliver=call 的待办（留档、去重、拒接后自动降级都靠它），再让运行器拨号并在接通后念 text
         argv = [PYTHON, str(BWREADER / "replication_notifications.py"), "create", "--kind", step.get("kind", "reminder"),
