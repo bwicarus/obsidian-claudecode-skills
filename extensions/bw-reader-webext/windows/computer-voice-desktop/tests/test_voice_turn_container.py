@@ -247,5 +247,47 @@ class PreTurnVoiceTest(unittest.TestCase):
                       [(b.get("via"), b.get("absorb")) for b in r.posted])
 
 
+class VoiceDraftTest(unittest.TestCase):
+    """流式草稿 = 本轮已说完的几句 + 正在说的这句。
+
+    容器只有一个草稿槽。只投"正在说的这句"，上一句就会被下一句的第一个字顶掉 ——
+    用户 2026-09-19：「开头显示正常，中途文字突然消失，说完后又出现了」。
+    """
+
+    def _runner(self):
+        r = object.__new__(vcr.Runner)
+        r._voice_parts = {}
+        r._voice_stream = ""
+        r.posted = []
+        r._history_post = lambda body: r.posted.append(body)
+        r.log = lambda kind, **kv: None
+        return r
+
+    def test_说完一句再说下一句时上一句仍在(self):
+        r = self._runner()
+        r._voice_post(BACKEND, "在看。")                 # 第一句说完落库
+        r._voice_stream = "我再试"                        # 第二句正在说
+        self.assertEqual(r._voice_draft(BACKEND), "在看。" + "\n\n" + "我再试")
+
+    def test_本轮第一句_只有正在说的那句(self):
+        r = self._runner()
+        r._voice_stream = "在看"
+        self.assertEqual(r._voice_draft(BACKEND), "在看")
+
+    def test_一句刚说完还没开口_不留空行(self):
+        r = self._runner()
+        r._voice_post(BACKEND, "在看。")
+        r._voice_stream = ""
+        self.assertEqual(r._voice_draft(BACKEND), "在看。")
+
+    def test_草稿内容与最终落库的几句一致(self):
+        # 草稿和收尾重载后的正文必须是同一串，否则收尾那一下会"跳一下"。
+        r = self._runner()
+        r._voice_post(BACKEND, "甲")
+        r._voice_post(BACKEND, "乙")
+        parts = [p["text"] for p in r.posted[-1]["parts"]]
+        self.assertEqual(r._voice_draft(BACKEND), "\n\n".join(parts))
+
+
 if __name__ == "__main__":
     unittest.main()

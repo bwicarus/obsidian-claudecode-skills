@@ -1971,6 +1971,18 @@ if (window.__bwPwaProviderOnly) return;
               if (!rendered) throw new Error('BW_READER_ANKI_DRAFT_RENDER_FAILED');
               // 本地仓已落稳，再把同一 gid 暴露到对话流。
               var sidebar = _mirrorDraftIntoTurnFlow(p.cards, gid, draftSource, draftLocal);
+              // 圆点的含义 = **结果真的显示出来了**，不是"工具返回了"（用户 2026-09-19：
+              // 「从工具调用开始到最终显示都用那个绿色圆点表示」）。工具 done 时点已置绿，
+              // 但那时草稿还没进侧栏；这里按真实结果补一次：没显示出来就翻红，
+              // 免得点是绿的、侧栏却空着 —— 那正是这半天反复出现的那种"看着成功其实没到"。
+              try {
+                if (RC.turnCard && RC.turnCard.progress && window.__asstVoiceTid) {
+                  RC.turnCard.progress(window.__asstVoiceTid(), {
+                    status: sidebar === 'shown' ? 'done' : 'error',
+                    label: '制卡'
+                  });
+                }
+              } catch (eDot) {}
               return {
                 status: 'draft_delivered',
                 anki_written: false,

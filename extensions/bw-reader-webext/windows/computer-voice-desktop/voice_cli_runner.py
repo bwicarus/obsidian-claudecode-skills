@@ -1059,7 +1059,7 @@ class Runner:
                             self.log("voice_stream_retarget",
                                      frm=_clear, to=_own, chars=len(self._voice_stream))
                         self._voice_stream_owner = _own
-                        self._stream_post(_own, self._voice_stream)
+                        self._stream_post(_own, self._voice_draft(_own))
             elif m in ("turn/started", "turn/completed"):
                 self.backend_busy = m == "turn/started"
                 turn = p.get("turn") or {}
@@ -3482,6 +3482,19 @@ class Runner:
                 # 调用时把这条收进那个容器 —— 否则它就永远是工具卡外面的一个孤框。
                 self._pre_turn_voice = (tid, text, time.time())
                 self._history_post({"assistant": text, "via": "voice", "turn_id": tid})
+
+    def _voice_draft(self, owner: str) -> str:
+        """流式草稿的正文 = 本轮**已说完的几句** + 正在说的这句。
+
+        ⚠ 容器只有一个草稿槽。只投"正在说的这句"的话，上一句会被下一句的第一个字顶掉 ——
+          用户 2026-09-19：「开头显示正常，中途文字突然消失，说完后又出现了」。
+          "又出现"是轮次收尾那次重载把落库的几句一起渲出来（中途事件是故意不发的，
+          发了会打断工具投递，见 assistant.py 那段）。
+          把已完成的几句一起带上，草稿内容就跟最终形态一致，中途不再有空档。
+        """
+        done = self._voice_parts.get(owner) or []
+        cur = self._voice_stream
+        return "\n\n".join(list(done) + ([cur] if cur else []))
 
     def _voice_post(self, owner: str, text: str, absorb: str | None = None):
         """把一句语音正文并进某个后台轮容器。
