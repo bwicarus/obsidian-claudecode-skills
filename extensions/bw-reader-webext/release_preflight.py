@@ -237,6 +237,7 @@ WINDOWS_SOURCE_FILES = (
     "computer-voice-desktop/tests/test_voice_entry.py",
     "computer-voice-desktop/tests/test_situation_signals.py",
     "computer-voice-desktop/tests/test_situation_triggers.py",
+    "computer-voice-desktop/tests/test_voice_turn_container.py",
     "computer-voice-desktop/tests/test_replication_activity.py",
     "computer-voice-desktop/tests/test_replication_apply.py",
     "computer-voice-desktop/tests/test_replication_book_links.py",

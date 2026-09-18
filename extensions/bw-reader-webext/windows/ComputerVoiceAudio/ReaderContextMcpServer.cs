@@ -3283,14 +3283,16 @@ internal sealed class ReaderContextMcpServer
                     //   说明在要求它做 schema 不允许的事 —— 正是 CLAUDE.md 那条
                     //   「面向 AI 的说明写反比没写更糟」。要让多词批量也能走轮播，
                     //   得把绑定改成按卡给（cards[i].nodeIds），那是结构改动，不是措辞。
-                    + "Cards that share the SAME nodeIds/track belong in ONE call: "
-                    + "one delivery becomes one swipeable draft group in the sidebar "
-                    + "(save one and it advances to the next), while one call per "
-                    + "card gives separate standalone drafts. "
-                    + "But nodeIds is per CALL, not per card — when the cards need "
-                    + "different knowledge nodes, separate calls are correct and you "
-                    + "must NOT merge them just to get the swipe flow. "
-                    + "Binding correctness outranks the sidebar layout.",
+                    + "Put every card of the SAME request in ONE call: one delivery "
+                    + "becomes one swipeable draft group in the sidebar (save one and "
+                    + "it advances to the next), while one call per card gives separate "
+                    + "standalone drafts. "
+                    + "Cards with DIFFERENT knowledge nodes still belong in one call — "
+                    + "give each of them its own cards[i].nodeIds. The call-level "
+                    + "nodeIds stays the default for cards that omit it. "
+                    + "(Before 2026-09-19 nodeIds could only be given per call, so "
+                    + "splitting was the only way to bind two words correctly; that is "
+                    + "no longer true.)",
                 ["items"] = new JsonObject
                 {
                     ["oneOf"] = new JsonArray
@@ -3314,6 +3316,13 @@ internal sealed class ReaderContextMcpServer
                                 ["back"] = CardFaceSchema(true,
                                     "Answer side; may be empty when the front "
                                     + "already carries the whole prompt."),
+                                ["nodeIds"] = WithDescription(
+                                    KjNodeIdsSchema(),
+                                    "Optional: this ONE card's knowledge nodes. "
+                                    + "Give it when the cards in this call belong "
+                                    + "to DIFFERENT nodes - then they still ship as "
+                                    + "one swipeable draft group. Omit it to inherit "
+                                    + "the call-level nodeIds."),
                             },
                         },
                         new JsonObject
@@ -3332,6 +3341,10 @@ internal sealed class ReaderContextMcpServer
                                 ["cloze"] = CardFaceSchema(
                                     description: "Cloze text with at least one "
                                     + "{{c1::…}} deletion."),
+                                ["nodeIds"] = WithDescription(
+                                    KjNodeIdsSchema(),
+                                    "Optional: this ONE card's knowledge nodes; "
+                                    + "omit it to inherit the call-level nodeIds."),
                             },
                         },
                     },

@@ -724,6 +724,34 @@ if (window.__bwPwaProviderOnly) return;
 
   var RC = window.RC = {
     clientRole: _clientRole,
+    /** 把一次本机失败记进统一错误日志（2026-09-19 用户：「所有报错都有记录价值，
+     *  最好是统一记录在一起方便你每次查看」）。
+     *
+     *  ⚠ 它存在的理由是**排查成本**：阅读器里大量 `catch (_) {}` 把失败咽掉，
+     *    出事时只能回头问用户"报错原文是什么"。去边设置"每次都要重设"就是这么
+     *    变成哑谜的 —— 设置其实还在，只是那一次没读到，而没有任何人被告知。
+     *  ⚠ 记日志绝不改变失败本身：送不到就算了，调用方该怎么走还怎么走。
+     *  ⚠ 页面 CSP 不许直连桥，所以走 /pdf/api/bridge-mirror 转发（那边有白名单）。
+     */
+    reportLocalFailure: function (what, error, detail) {
+      try {
+        fetch('/pdf/api/bridge-mirror', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            path: '/reader-error-log',
+            method: 'POST',
+            body: {
+              source: 'reader',
+              code: String(what || 'reader-failure'),
+              message: String((error && error.message) || error || ''),
+              detail: String(detail == null ? '' : detail)
+            },
+            query: {}
+          })
+        }).catch(function () {});
+      } catch (_) {}
+    },
     _adapter: null,
     // 各 reader 在自己脚本末尾 RC.use(adapter) 注册整套适配器方法
     use: function (adapter) {

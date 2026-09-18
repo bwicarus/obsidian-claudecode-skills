@@ -716,10 +716,35 @@
       exactObject(
         card,
         ["type"],
-        ["front", "back", "cloze", "text"],
+        // nodeIds：这张卡自己的知识点归属（2026-09-19）。一次投递里各卡可以
+        // 各绑各的，于是"两个词"也能是一组轮播而不是两张独立草稿。
+        ["front", "back", "cloze", "text", "nodeIds"],
         "Reader 结果 cards[" + index + "]"
       );
       var normalized = { type: card.type };
+      // ⚠ 这里是**重建**，不是透传：只在上面放行、不在这里搬，表现是
+      //   「校验全过就是不生效」—— CLAUDE.md 记过这个形态，别再踩。
+      if (Object.prototype.hasOwnProperty.call(card, "nodeIds")) {
+        var rawNodeIds = card.nodeIds;
+        if (!Array.isArray(rawNodeIds) || rawNodeIds.length < 1 ||
+            rawNodeIds.length > 8) {
+          throw directError(
+            "Reader 结果 cards[" + index + "].nodeIds 无效",
+            "BW_READER_REALTIME_OUTPUT_RECEIVER_INVALID",
+            false
+          );
+        }
+        normalized.nodeIds = rawNodeIds.map(function (one) {
+          if (typeof one !== "string" || !/^kj:[0-9A-HJKMNP-TV-Z]{10}$/.test(one)) {
+            throw directError(
+              "Reader 结果 cards[" + index + "].nodeIds 无效",
+              "BW_READER_REALTIME_OUTPUT_RECEIVER_INVALID",
+              false
+            );
+          }
+          return one;
+        });
+      }
       ["front", "back", "cloze", "text"].forEach(function (field) {
         if (Object.prototype.hasOwnProperty.call(card, field)) {
           normalized[field] = resultText(

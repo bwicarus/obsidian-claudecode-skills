@@ -7883,6 +7883,66 @@
     }
   }
   // 用户点子:前端截图但**灵活截局部**——按笔迹外接框(+留白上下文)只截那一小块,而非整屏。所见即所得 + 聚焦。
+  // ── 笔迹图主动推送（2026-09-19 用户拍板）────────────────────────────────
+  //
+  // 「笔迹图设计为主动上传到服务器会更快更稳定不是么」—— 是。原来是**拉**：
+  // 笔迹一稳定，桥反过来向 App 要图。那条路要同时满足四件事（有稳定页面、有在线
+  // 来源、上下文推送泵活着、一次往返成功），2026-09-19 实录里泵在 01:25 停掉之后
+  // 整夜一张图都没抓到 —— 而笔迹跟正文本来毫无关系。
+  //
+  // 推上去就没有这些前置：这边自己有笔画、自己裁图、传不上自己重试。
+  // ⚠ 去重交给桥（按 dedupeKey，与"拉"那条同一个判据），这里不自己记一套。
+  // ⚠ 失败只记日志，绝不影响画画本身。
+  var _inkPushBusy = false;
+  var _inkPushedKeys = Object.create(null);
+  async function _pushInkStandby(detail) {
+    if (_inkPushBusy) return;
+    var revision = String((detail && detail.drawingRevision) || '');
+    if (!revision) return;
+    var key = 'ink:' + revision;
+    if (_inkPushedKeys[key]) return;
+    _inkPushBusy = true;
+    try {
+      // ⚠ 返回的是 {media_type, b64}，不是 dataUrl —— 第一版我照着习惯写了 dataUrl，
+      //   那样永远 return，等于这条推送从来不发而且不报错。
+      var shot = await _captureInkRegion(null);
+      if (!shot || !shot.b64) return;
+      await fetch('/pdf/api/bridge-mirror', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          path: '/reader-ink-standby',
+          method: 'POST',
+          body: {
+            dedupeKey: key,
+            file: String((detail && detail.file) || ''),
+            page: (detail && detail.page) != null ? detail.page : null,
+            drawingRevision: revision,
+            kind: 'ink',
+            label: '整页笔迹',
+            mimeType: shot.media_type || 'image/jpeg',
+            imageBase64: shot.b64
+          },
+          query: {}
+        })
+      });
+      _inkPushedKeys[key] = 1;
+    } catch (e) {
+      try {
+        window.RC && RC.reportLocalFailure &&
+          RC.reportLocalFailure('ink-standby-push', e, 'rev=' + revision);
+      } catch (_) {}
+    } finally {
+      _inkPushBusy = false;
+    }
+  }
+  try {
+    document.addEventListener('bw-reader-drawing-state', function (ev) {
+      var d = ev && ev.detail;
+      if (d && d.state === 'stable') _pushInkStandby(d);
+    });
+  } catch (_) {}
+
   async function _captureInkRegion(target) {
     try {
       var scope = _visualCaptureScope(target);

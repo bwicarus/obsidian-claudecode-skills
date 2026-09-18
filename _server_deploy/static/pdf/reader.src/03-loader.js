@@ -266,11 +266,24 @@ async function loadBookCrop() {
   _cropOn = localStorage.getItem(_cropKey()) === '1';
   _updateCropBtn();
   try {
-    const d = await (await fetch('/pdf/api/book-crop?file=' + encodeURIComponent(FILE_REL))).json();
+    const r = await fetch('/pdf/api/book-crop?file=' + encodeURIComponent(FILE_REL));
+    const d = await r.json();
     if (d && d.ok && d.crop) {
       _crop = {l: +d.crop.l || 0, r: +d.crop.r || 0, t: +d.crop.t || 0, b: +d.crop.b || 0};
+    } else {
+      // 读到了但内容不对 —— 这也是"设置不见了"的一种，别咽掉。
+      throw new Error((d && (d.error || d.message)) || ('HTTP ' + r.status));
     }
-  } catch (_) {}
+  } catch (e) {
+    // ⚠ 这里原来是 `catch (_) {}` —— 读不回来就悄悄用零值，表现正是用户
+    //   2026-09-19 说的「去边设置每次都要再次手动设置」：设置其实还在，
+    //   只是这一次没读到，而没有任何人被告知。
+    //   现在记进统一错误日志（%LOCALAPPDATA%\BWReader\error-log.jsonl），
+    //   下次再出现就能直接查是"读失败"还是"书的 id 变了导致读的是另一本"。
+    try {
+      window.RC?.reportLocalFailure?.('book-crop-load', e, FILE_REL);
+    } catch (_) {}
+  }
   _updateCropBtn();
   return before !== JSON.stringify(_crop || {});
 }

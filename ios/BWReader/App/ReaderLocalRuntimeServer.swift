@@ -612,6 +612,10 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
         //   它不是 AI 的工具调用，不进 tool-errors.jsonl，页面自己也不落盘，
         //   于是只能回头问用户"报错原文是什么"。
         "/reader-error-log": ["POST"],
+        // 笔迹图**主动推**（用户 2026-09-19：「主动上传到服务器会更快更稳定」）。
+        // 原来是桥反过来向 App 要图，那条路要同时满足"有稳定页面/有在线来源/
+        // 推送泵活着/一次往返成功"，任一不成立就没有图 —— 而笔迹跟正文本无关系。
+        "/reader-ink-standby": ["POST"],
     ]
 
     private func serveNativeBridgeMirror(

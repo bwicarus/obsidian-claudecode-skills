@@ -755,6 +755,10 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         // ⚠ 它存在的理由是**排查成本**：今晚反复出现"要么问用户要报错原文、要么满仓库猜"，
         //   而阅读器页面内的本机请求失败此前**一处都没记**（去边失败就是这么变成哑谜的）。
         app.MapMethods(
+            "/reader-ink-standby",
+            new[] { "POST", "OPTIONS" },
+            context => HandleReaderInkStandbyAsync(context, serviceToken));
+        app.MapMethods(
             "/reader-error-log",
             new[] { "POST", "OPTIONS" },
             context => HandleReaderErrorLogAsync(context, serviceToken));
@@ -3203,57 +3207,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 }
                 entries.Add(entry);
             }
-            // 先按时间清：过期的连文件带条目一起去掉。
-            DateTimeOffset cutoff = DateTimeOffset.UtcNow - InkStandbyMaxAge;
-            for (int index = entries.Count - 1; index >= 0; index--)
-            {
-                if (entries[index] is not JsonObject entry
-                    || entry["capturedAtUtc"]?.GetValue<string>() is not string capturedAt
-                    || !DateTimeOffset.TryParse(
-                        capturedAt,
-                        CultureInfo.InvariantCulture,
-                        DateTimeStyles.RoundtripKind,
-                        out DateTimeOffset when)
-                    || when >= cutoff)
-                {
-                    continue;
-                }
-                if (entry["name"]?.GetValue<string>() is string expiredName)
-                {
-                    try
-                    {
-                        File.Delete(Path.Combine(directory, expiredName));
-                    }
-                    catch (IOException)
-                    {
-                        // 删不掉不影响正确性：条目已经去掉，不会再被挑中。
-                    }
-                }
-                entries.RemoveAt(index);
-            }
-            while (entries.Count > InkStandbyKeep)
-            {
-                if (entries[0] is JsonObject dropped
-                    && dropped["name"]?.GetValue<string>() is string dropName)
-                {
-                    try
-                    {
-                        File.Delete(Path.Combine(directory, dropName));
-                    }
-                    catch (IOException)
-                    {
-                        // 删不掉不影响索引正确性，下次再说。
-                    }
-                }
-                entries.RemoveAt(0);
-            }
-            await File.WriteAllTextAsync(
-                indexPath,
-                new JsonObject
-                {
-                    ["contract"] = "reader-ink-standby/1",
-                    ["images"] = entries,
-                }.ToJsonString()).ConfigureAwait(false);
+            await PruneAndWriteInkStandbyAsync(entries, directory, indexPath)
+                .ConfigureAwait(false);
         }
         catch (Exception exception) when (
             exception is IOException
@@ -3267,6 +3222,170 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         {
             Interlocked.Exchange(ref _inkStandbyBusy, 0);
         }
+    }
+
+    /// 清理 + 写索引。**两条路共用这一份**（桥主动抓的、App 推上来的）——
+    /// 保留策略各写一遍迟早对不上，而对不上的表现是「图明明传了却找不到」。
+    private static async Task PruneAndWriteInkStandbyAsync(
+        JsonArray entries, string directory, string indexPath)
+    {
+        // 先按时间清：过期的连文件带条目一起去掉。
+        DateTimeOffset cutoff = DateTimeOffset.UtcNow - InkStandbyMaxAge;
+        for (int index = entries.Count - 1; index >= 0; index--)
+        {
+            if (entries[index] is not JsonObject entry
+                || entry["capturedAtUtc"]?.GetValue<string>() is not string capturedAt
+                || !DateTimeOffset.TryParse(
+                    capturedAt,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind,
+                    out DateTimeOffset when)
+                || when >= cutoff)
+            {
+                continue;
+            }
+            if (entry["name"]?.GetValue<string>() is string expiredName)
+            {
+                try { File.Delete(Path.Combine(directory, expiredName)); }
+                catch (IOException)
+                {
+                    // 删不掉不影响正确性：条目已经去掉，不会再被挑中。
+                }
+            }
+            entries.RemoveAt(index);
+        }
+        while (entries.Count > InkStandbyKeep)
+        {
+            if (entries[0] is JsonObject dropped
+                && dropped["name"]?.GetValue<string>() is string dropName)
+            {
+                try { File.Delete(Path.Combine(directory, dropName)); }
+                catch (IOException)
+                {
+                    // 删不掉不影响索引正确性，下次再说。
+                }
+            }
+            entries.RemoveAt(0);
+        }
+        await File.WriteAllTextAsync(
+            indexPath,
+            new JsonObject
+            {
+                ["contract"] = "reader-ink-standby/1",
+                ["images"] = entries,
+            }.ToJsonString()).ConfigureAwait(false);
+    }
+
+    /// App **主动推上来**的笔迹图（用户 2026-09-19：「笔迹图设计为主动上传到服务器会更快更稳定」）。
+    ///
+    /// ⚠ 为什么要有这条：原来只有「拉」—— 笔迹一稳定，桥反过来向 App 要图。那条路要同时
+    ///   满足四件事：有稳定页面、有在线来源、上下文推送泵活着、一次往返成功。
+    ///   2026-09-19 实录：推送泵在 01:25 因一次不可重试错误停掉（反复装桥换进程所致），
+    ///   此后正文再没送达 → 「没有可精确定位的页面」→ 桥不敢要图 → 笔迹图整夜为零。
+    ///   而笔迹跟正文本来毫无关系。推上来就没有这些前置：App 自己有笔画、自己裁图、
+    ///   传不上自己重试。
+    private async Task HandleReaderInkStandbyAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!AllowTailscaleClient(context, "reader-ink-standby")) return;
+        JsonObject? body = null;
+        try
+        {
+            using var reader = new StreamReader(context.Request.Body);
+            string raw = await reader.ReadToEndAsync(
+                serviceCancellationToken).ConfigureAwait(false);
+            if (raw.Length <= 8 * 1024 * 1024)
+            {
+                body = JsonNode.Parse(raw) as JsonObject;
+            }
+        }
+        catch (JsonException)
+        {
+        }
+        string dedupeKey = (body?["dedupeKey"]?.GetValue<string>() ?? "").Trim();
+        string mimeType = (body?["mimeType"]?.GetValue<string>() ?? "").Trim();
+        string base64 = body?["imageBase64"]?.GetValue<string>() ?? "";
+        byte[] data = Array.Empty<byte>();
+        try { data = Convert.FromBase64String(base64); }
+        catch (FormatException) { }
+        if (body is null
+            || dedupeKey.Length is 0 or > 200
+            || (mimeType != "image/jpeg" && mimeType != "image/png")
+            || data.Length is 0 or > 6 * 1024 * 1024)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(
+                new { ok = false, code = "BW_INK_STANDBY_BODY" },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        string directory = Path.Combine(_runtimeDirectory, "ink-standby");
+        string indexPath = Path.Combine(directory, "index.json");
+        JsonArray entries = new();
+        if (File.Exists(indexPath))
+        {
+            try
+            {
+                if (JsonNode.Parse(await File.ReadAllTextAsync(indexPath)
+                        .ConfigureAwait(false)) is JsonObject existing
+                    && existing["images"] is JsonArray old)
+                {
+                    entries = old.DeepClone() as JsonArray ?? new JsonArray();
+                }
+            }
+            catch (Exception error) when (error is IOException or JsonException)
+            {
+                entries = new JsonArray();
+            }
+        }
+        // 同一笔只留一张 —— 与「拉」那条同一个判据（dedupeKey）。
+        if (entries.Any(node => node is JsonObject item
+            && item["dedupeKey"]?.GetValue<string>() == dedupeKey))
+        {
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            await context.Response.WriteAsJsonAsync(
+                new { ok = true, code = "BW_INK_STANDBY_DUPLICATE" },
+                serviceCancellationToken).ConfigureAwait(false);
+            return;
+        }
+        Directory.CreateDirectory(directory);
+        string stamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            .ToString(CultureInfo.InvariantCulture);
+        string extension = mimeType.Contains("png", StringComparison.Ordinal) ? "png" : "jpg";
+        string name = "ink-" + stamp + "-push." + extension;
+        await File.WriteAllBytesAsync(
+            Path.Combine(directory, name), data, serviceCancellationToken)
+            .ConfigureAwait(false);
+        JsonObject entry = new()
+        {
+            ["name"] = name,
+            ["dedupeKey"] = dedupeKey,
+            ["file"] = body["file"]?.GetValue<string>() ?? "",
+            ["page"] = body["page"]?.DeepClone(),
+            ["drawingRevision"] = body["drawingRevision"]?.GetValue<string>() ?? "",
+            ["bytes"] = data.Length,
+            ["mimeType"] = mimeType,
+            ["capturedAtUtc"] = DateTimeOffset.UtcNow.ToString("O"),
+            // 来路写明：排查时「这张是谁传的」直接决定往哪边看。
+            ["via"] = "push",
+            ["kind"] = body["kind"]?.GetValue<string>() ?? "ink",
+            ["label"] = body["label"]?.GetValue<string>() ?? "整页笔迹",
+        };
+        if (body["ordinal"] is JsonNode ordinal) entry["ordinal"] = ordinal.DeepClone();
+        if (body["selectionId"] is JsonNode selectionId)
+        {
+            entry["selectionId"] = selectionId.DeepClone();
+        }
+        entries.Add(entry);
+        await PruneAndWriteInkStandbyAsync(entries, directory, indexPath)
+            .ConfigureAwait(false);
+        AppendOutputPickupLog(
+            "reader-ink-standby" + "	" + dedupeKey + "	" + data.Length.ToString(CultureInfo.InvariantCulture));
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        await context.Response.WriteAsJsonAsync(
+            new { ok = true, name },
+            serviceCancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleVoiceCoreAmbientAsync(

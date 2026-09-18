@@ -106,11 +106,17 @@
   //: 字段整条拒。repositoryCard() 会带上 deck/tags/reason(仓库要那些)，
   //: 所以送桥之前必须再剥一层。⚠ 直接把 repositoryCard 的结果送过去，
   //: 表现是"有 deck 的卡永远导不出去"，而错误码停在 SCHEMA 上看不出是哪个字段。
+  //: ⚠ 这是**重建**，不是透传。2026-09-19 加了按卡 nodeIds 之后，不在这里搬
+  //:   就等于没加：桥按 cardIndex 一张张写入，拿不到这张卡的归属就会用整组的。
   function bridgeCard(card) {
     var one = repositoryCard(card);
-    return one.type === 'cloze'
+    var shaped = one.type === 'cloze'
       ? { type: 'cloze', cloze: one.cloze }
       : { type: 'basic', front: one.front, back: one.back };
+    if (Array.isArray(card && card.nodeIds) && card.nodeIds.length) {
+      shaped.nodeIds = card.nodeIds.slice();
+    }
+    return shaped;
   }
   function bridgeCards(cards) {
     return (cards || []).map(bridgeCard);
@@ -1219,8 +1225,14 @@
   //: 回执三态如果各写一遍，迟早只改一边。
   function runComputerExport(ctx) {
     var c = ctx.card;
-    var kjNodes = String((ctx.source && ctx.source.kjNodes) || '')
-      .split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    // 归属优先取**这张卡自己的**（2026-09-19：一次投递里各卡可以各绑各的），
+    // 取不到才回落到整组的 source.kjNodes。
+    // ⚠ 顺序不能反：反了的话「两个词一组轮播」里第二张会被按第一张的节点入库 ——
+    //   静默绑错，比分成两张草稿糟得多。
+    var cardNodeIds = Array.isArray(c && c.nodeIds) ? c.nodeIds.filter(Boolean) : [];
+    var kjNodes = cardNodeIds.length ? cardNodeIds.slice()
+      : String((ctx.source && ctx.source.kjNodes) || '')
+        .split(',').map(function (s) { return s.trim(); }).filter(Boolean);
     var kjTrack = String((ctx.source && ctx.source.kjTrack) || '').trim();
     if (kjTrack) kjNodes = [];   // 轨道承担归属时不带节点,桥那边也要求为空
     // 2026-09-06 用户拍板：卡必须有归属才能入库；2026-09-08 起归属**二选一** ——

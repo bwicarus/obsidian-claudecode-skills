@@ -1531,17 +1531,52 @@ internal static class ReaderRealtimeOutputProtocol
             string type = Text(card, "type", 16);
             switch (type)
             {
+                // ⚠ 2026-09-19：nodeIds 现在**也可以按卡给**（用户要一次投递多张各绑各的，
+                //   见 contract_sites.py anki-draft-card-fields）。Exact 是 SetEquals，
+                //   多一个键整张卡被拒，所以可选字段必须走 ExactWithOptional。
                 case "basic":
-                    Exact(card, "type", "front", "back");
+                    ExactWithOptional(
+                        card,
+                        ["type", "front", "back"],
+                        ["nodeIds"]);
                     Text(card, "front", 8_000);
                     Text(card, "back", 8_000, allowEmpty: true);
+                    ValidateOptionalCardNodeIds(card);
                     break;
                 case "cloze":
-                    Exact(card, "type", "cloze");
+                    ExactWithOptional(card, ["type", "cloze"], ["nodeIds"]);
                     Text(card, "cloze", 8_000);
+                    ValidateOptionalCardNodeIds(card);
                     break;
                 default:
                     throw Invalid("Reader Anki 草稿卡片类型无效");
+            }
+        }
+    }
+
+    /// 按卡给的知识点归属。**给了就必须合法**——空数组或坏 id 比不给更糟：
+    /// 不给还能回落整组，给一个坏的会让这张卡绑到不存在的节点上。
+    private static void ValidateOptionalCardNodeIds(JsonElement card)
+    {
+        if (!card.TryGetProperty("nodeIds", out JsonElement nodeIds))
+        {
+            return;
+        }
+        if (nodeIds.ValueKind != JsonValueKind.Array
+            || nodeIds.GetArrayLength() is < 1
+                or > ReaderRealtimeOutputProtocol.KjNodeIdRules.Maximum)
+        {
+            throw Invalid("Reader Anki 草稿卡片的 nodeIds 数量无效");
+        }
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        foreach (JsonElement node in nodeIds.EnumerateArray())
+        {
+            if (node.ValueKind != JsonValueKind.String
+                || node.GetString() is not string id
+                || !ReaderRealtimeOutputProtocol.KjNodeIdRules.IsValid(id)
+                || !seen.Add(id))
+            {
+                throw Invalid("Reader Anki 草稿卡片的 nodeIds 无效");
             }
         }
     }

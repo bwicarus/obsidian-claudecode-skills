@@ -163,6 +163,16 @@ if (window.__bwPwaProviderOnly) return;
   // It is never presented as an ACK and is not persisted to page storage.
   var lastContextResumeCursor = null;
   var contextPumpGeneration = 0;
+  // 因**错误**停过泵 → 下次起泵必须重做引导扫描（2026-09-19 实录根因）。
+  //
+  // ⚠ 这条不是优化，是修一次整夜的静默故障：泵遇到不可重试错误会永久停止，
+  //   重连后新泵看见 lastContextResumeCursor 非空就**跳过引导**、按旧游标续传；
+  //   而桥若换过进程（装新版就会），它根本不认识那个游标，也不会重发当前页正文。
+  //   于是「当前页正文」永远为空 → 快照 contextStatus 停在 pending →
+  //   取图/钉卡被拒「没有可精确定位的在线页面来源」→ 笔迹图、选中、视觉全哑。
+  //   换书、翻页、重开书都救不回来（泵是页面级的），**只有重启 App**。
+  //   2026-09-19 01:25 起就是这个状态，用户重启 App 后恢复，坐实了这条链。
+  var contextBootstrapNeeded = false;
   var contextDeliveryMode = null;
   var bridgeServiceMode = "full";   // "full" | "bridge-only":ReaderPC 桥接模式旗标(context-mode 自愿升级字段带回)
   // Independent optional layer.  Missing means an older ReaderPC service;
@@ -709,10 +719,35 @@ if (window.__bwPwaProviderOnly) return;
       exactObject(
         card,
         ["type"],
-        ["front", "back", "cloze", "text"],
+        // nodeIds：这张卡自己的知识点归属（2026-09-19）。一次投递里各卡可以
+        // 各绑各的，于是"两个词"也能是一组轮播而不是两张独立草稿。
+        ["front", "back", "cloze", "text", "nodeIds"],
         "Reader 结果 cards[" + index + "]"
       );
       var normalized = { type: card.type };
+      // ⚠ 这里是**重建**，不是透传：只在上面放行、不在这里搬，表现是
+      //   「校验全过就是不生效」—— CLAUDE.md 记过这个形态，别再踩。
+      if (Object.prototype.hasOwnProperty.call(card, "nodeIds")) {
+        var rawNodeIds = card.nodeIds;
+        if (!Array.isArray(rawNodeIds) || rawNodeIds.length < 1 ||
+            rawNodeIds.length > 8) {
+          throw directError(
+            "Reader 结果 cards[" + index + "].nodeIds 无效",
+            "BW_READER_REALTIME_OUTPUT_RECEIVER_INVALID",
+            false
+          );
+        }
+        normalized.nodeIds = rawNodeIds.map(function (one) {
+          if (typeof one !== "string" || !/^kj:[0-9A-HJKMNP-TV-Z]{10}$/.test(one)) {
+            throw directError(
+              "Reader 结果 cards[" + index + "].nodeIds 无效",
+              "BW_READER_REALTIME_OUTPUT_RECEIVER_INVALID",
+              false
+            );
+          }
+          return one;
+        });
+      }
       ["front", "back", "cloze", "text"].forEach(function (field) {
         if (Object.prototype.hasOwnProperty.call(card, field)) {
           normalized[field] = resultText(
@@ -7180,6 +7215,27 @@ if (window.__bwPwaProviderOnly) return;
   function warnAndStopContextPump(state, pump, error) {
     if (!contextPumpAlive(state, pump)) return;
     stopContextPump(state);
+    // 下次起泵重做引导（见 contextBootstrapNeeded 的说明）。
+    contextBootstrapNeeded = true;
+    // ⚠ 它停掉的是**整条上下文正文链路**，而原来只 emitStatus 一下 ——
+    //   在没有控制台的设备上等于没发生。写进统一错误日志（2026-09-19 用户要求）。
+    try {
+      fetch('/pdf/api/bridge-mirror', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          path: '/reader-error-log',
+          method: 'POST',
+          body: {
+            source: 'context-pump',
+            code: 'BW_CONTEXT_PUMP_STOPPED',
+            message: String((error && error.message) || error || '未知原因'),
+            detail: '停泵后正文不再上报；下次起泵会重做引导'
+          },
+          query: {}
+        })
+      }).catch(function () {});
+    } catch (_) {}
     if (state.contextOnly === true) {
       if (snapshotLink === state) snapshotLink = null;
       state.stopped = true;
@@ -7437,6 +7493,13 @@ if (window.__bwPwaProviderOnly) return;
   function startContextPump(state) {
     stopContextPump(state);
     contextPumpGeneration += 1;
+    if (contextBootstrapNeeded) {
+      // 上一次是**因错误**停的：不能再按旧游标续传 —— 对面很可能已经是新进程。
+      // 重做引导会重新送出当前页正文，快照才能回到 ready。
+      contextBootstrapNeeded = false;
+      lastContextResumeCursor = null;
+      lastContextAckCursor = null;
+    }
     var pump = {
       generation: contextPumpGeneration,
       stopped: false,
