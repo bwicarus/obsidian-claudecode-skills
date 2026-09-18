@@ -2186,9 +2186,19 @@ class Runner:
                 who = ("整页笔迹（这页所有普通笔迹合在一张里）" if x["kind"] == "ink"
                        else "选区 %s" % (x["ordinal"] if x.get("ordinal") is not None else "?"))
                 lines.append("附图 %d = %s：%s" % (i, who, self._ink_age_words(x.get("age"))))
-            note = ("（下面按顺序附了 %d 张图，逐张对应：" % len(pending)
-                    + "；".join(lines)
-                    + "。他说「选区 1/选区 2」时按这里的编号认。）")
+            # ⚠ 措辞要分路：图只在 steer 那条路上真的随 localImage 送出去；
+            # inject_items 这条路**一张图都不带**（2026-09-17 起图不再进历史）。
+            # 说成"下面附了图"而实际没附，模型会去找一张不存在的图 —— 又一处
+            # "说明指向不存在的东西"。
+            if via_steer:
+                note = ("（下面按顺序附了 %d 张图，逐张对应：" % len(pending)
+                        + "；".join(lines)
+                        + "。他说「选区 1/选区 2」时按这里的编号认。）")
+            else:
+                note = ("（他在这页有 %d 处笔迹，这里不附图：" % len(pending)
+                        + "；".join(lines)
+                        + "。要看图调 reader_visual_image；"
+                        + "他说「选区 1/选区 2」时按这里的编号认。）")
         text_part = (body if body is not None else b["state"]) + ((chr(10) + note) if pending else "")
         content = [{"type": "input_text", "text": text_part}]
 
@@ -2201,7 +2211,7 @@ class Runner:
             # 它只发状态那一行，2026-09-17 我就是这样把正文弄丢的。
             self._ctx_pending = {"content": content, "fp_state": b["fp_state"],
                                  "fp_text": b["fp_text"] if (with_text and b["text"]) else None,
-                                 "ink": ink_fp if image is not None else None,
+                                 "inkNames": [x["name"] for x in pending],
                                  "chars": len(body or ""), "at": time.time()}
             # 想让在跑的那一轮也看见，只有 turn/steer 一条路；默认关着，原因见 steer_running_turn
             if self._turn:
@@ -2240,10 +2250,17 @@ class Runner:
         fp["backend_state"] = b["fp_state"]
         if with_text and b["text"]:
             fp["backend_text"] = b["fp_text"]
-        if image is not None:
-            fp["image"] = ink_fp
-            self.log("ctx_image", bytes=image.get("bytes"), drawingRevision=image.get("drawingRevision"), page=self._ctx["page_key"][-40:])
-        self.log("ctx_backend", withText=bool(with_text and b["text"]), chars=len(body),
+        # ⚠ 2026-09-18：这里原来还有一段 `if image is not None: fp["image"] = ink_fp` ——
+        #   `image`/`ink_fp` 是 base64 图那条路的变量，那条路 2026-09-17 删掉时这三处引用
+        #   漏删了，于是**每次走到这儿都 NameError**：inject_items 已经成功、指纹已经更新，
+        #   然后异常抛出去 —— ctx_backend 一次都没记上（实录：末次 09-17 12:00:57，之后
+        #   只剩 ctx_steer），而 turn() 是**不带 try** 调这个函数的，所以快照就绪且状态有变时
+        #   整轮根本起不来。表现就是"让他做事却一直没有回应"。
+        #   笔迹的去重现在靠 _ink_sent（按图名），不需要 fp["image"]。
+        for x in pending:
+            self._ink_sent.add(x["name"])
+        self.log("ctx_backend", withText=bool(with_text and b["text"]), chars=len(body or ""),
+                 images=[x["name"] for x in pending],
                  page=self._ctx["page_key"][-40:], body=self._log_body(text_part))
         return True
 
@@ -2267,8 +2284,8 @@ class Runner:
         fp["backend_state"] = pend["fp_state"]
         if pend.get("fp_text"):
             fp["backend_text"] = pend["fp_text"]
-        if pend.get("ink"):
-            fp["image"] = pend["ink"]
+        for name in pend.get("inkNames") or []:
+            self._ink_sent.add(name)
         self.log("ctx_backend", withText=bool(pend.get("fp_text")), chars=pend["chars"],
                  deferredSec=round(time.time() - pend["at"], 1), page=self._ctx["page_key"][-40:],
                  body=self._log_body("".join(c.get("text") or "" for c in pend["content"]
