@@ -1745,7 +1745,14 @@ internal sealed class ReaderContextMcpServer
                     + "match before showing its confirmation UI. This tool never writes "
                     + "Anki: success means only draft_delivered. The user "
                     + "must click the existing Add to Anki button; the confirmed "
-                    + "card keeps the node binding (tags kj::<id> + KJ ledger).",
+                    + "card keeps the node binding (tags kj::<id> + KJ ledger). "
+                    + "CHECK THE sidebar FIELD IN THE RESULT before telling the "
+                    + "user anything: sidebar=\"shown\" means the draft is really "
+                    + "visible in the sidebar, so it is fine to say 点一下 Add to "
+                    + "Anki. Anything else (unavailable / error:...) means the card "
+                    + "exists only in the local repository and the user CANNOT see "
+                    + "it - say so plainly (卡片做好了，但侧栏没显示出来) instead of "
+                    + "pointing at a button that is not there.",
                 ["inputSchema"] = BuildExactSourceArgumentsSchema(true),
                 ["annotations"] = new JsonObject
                 {
@@ -5556,6 +5563,10 @@ internal sealed class ReaderContextMcpServer
                             //   bound=钉上了 / floating=没钉上退回浮层（reason 说明为什么）
                             //   none=这张卡本来就没带 bind / unknown=超时或过期，没执行过
                             // 只有带 bind 的卡才有意义，其余为 null。
+                            // 草稿在侧栏露没露脸。shown = 用户真看得见；
+                            // unavailable / error:… = 卡在本地仓里但侧栏是空的 ——
+                            // 这时**绝不能**跟他说「点一下 Add to Anki」，那个按钮不存在。
+                            ["sidebar"] = ack.Sidebar,
                             ["bind_outcome"] = ack.BindOutcome,
                             ["bind_reason"] = ack.BindReason,
                             ["anki_written"] = request.Kind == "anki-draft"

@@ -1965,12 +1965,15 @@ if (window.__bwPwaProviderOnly) return;
             )).then(function (rendered) {
               if (!rendered) throw new Error('BW_READER_ANKI_DRAFT_RENDER_FAILED');
               // 本地仓已落稳，再把同一 gid 暴露到对话流。
-              _mirrorDraftIntoTurnFlow(p.cards, gid, draftSource, draftLocal);
+              var sidebar = _mirrorDraftIntoTurnFlow(p.cards, gid, draftSource, draftLocal);
               return {
                 status: 'draft_delivered',
                 anki_written: false,
                 gid: gid,
-                repository: 'local'
+                repository: 'local',
+                // shown = 侧栏真的出现了；unavailable / error:… = 卡片在本地仓里，
+                // 但**用户看不到**，那句「点一下 Add to Anki」这时是假的。
+                sidebar: sidebar
               };
             });
           });
@@ -2364,6 +2367,8 @@ if (window.__bwPwaProviderOnly) return;
         if (value && typeof value === 'object') {
           if (value.bindOutcome) receipt.bindOutcome = value.bindOutcome;
           if (value.bindReason) receipt.bindReason = value.bindReason;
+          // ⚠ 下游 exactObject 是全等白名单，桥那边必须先开槽才能搬这个键。
+          if (value.sidebar) receipt.sidebar = value.sidebar;
         }
         if (_readerOutputNeedsBound(delivery) && receipt.bindOutcome !== 'bound') {
           _readerOutputAwaitingBind[delivery.correlation] = 1;
@@ -2391,6 +2396,7 @@ if (window.__bwPwaProviderOnly) return;
       // 崩溃。重放必须继续证明它已 bound，不能退化成无结果的 replay。
       if (seen.bindOutcome) replay.bindOutcome = seen.bindOutcome;
       if (seen.bindReason) replay.bindReason = seen.bindReason;
+      if (seen.sidebar) replay.sidebar = seen.sidebar;
       return Promise.resolve(replay);
     }
     // 同一 correlation 在第一次落库尚未完成时可能被桥接层重送。共享同一 Promise，
@@ -2425,9 +2431,16 @@ if (window.__bwPwaProviderOnly) return;
   // **不表示本地 card-repository 已 registerDraft**。相同 gid/cards/source 的
   // 第二次 registerDraft 本身幂等，不会产生第二个实体；把它写成 true 反而会
   // 让流内那张被当成"已在 Pi 注册过"，那是另一回事。
+  // 返回**发生了什么**，不再只是 true/false（2026-09-18 用户报「侧边栏又是没有显示生成物」）。
+  //
+  // ⚠ 这个函数原来把每一条失败路径都咽了：turnCard 不在 → return false；addPart 抛错 →
+  //   catch 里 return false。而唯一的调用方**根本不看返回值**，照旧回 draft_delivered。
+  //   于是侧栏空着，工具报成功，助手还让用户「点一下 Add to Anki」—— 那个按钮不存在。
+  //   这跟本文件 2362 行那条注释记着的 2026-08-19 事故是同一个形态：结构化结果被丢在半路。
+  //   现在把结果一路带回桥（receipt.sidebar），让「没显示出来」变成能被看见的事实。
   function _mirrorDraftIntoTurnFlow(cards, gid, repositorySource, localDraft) {
     try {
-      if (!(RC.turnCard && typeof RC.turnCard.addPart === 'function')) return false;
+      if (!(RC.turnCard && typeof RC.turnCard.addPart === 'function')) return 'unavailable';
       // 始终用以 gid 命名的确定性轮次，既不读 current() 也不绑 __asstVoiceTid。
       //
       // 这条协议不带 threadId：__asstVoiceTid 可能是个陈旧的语音轮次，而
@@ -2448,8 +2461,10 @@ if (window.__bwPwaProviderOnly) return;
         repositorySource: repositorySource,
         localDraft: localDraft || null
       });
-      return true;
-    } catch (e) { return false; }
+      return 'shown';
+    } catch (e) {
+      return 'error:' + String((e && e.message) || e || 'unknown').slice(0, 80);
+    }
   }
 
   RC.voicecall = RC.voicecall || {};

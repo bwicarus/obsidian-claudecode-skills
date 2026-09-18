@@ -246,7 +246,14 @@ internal sealed class ReaderHttpPickupService
             "bindReason", out JsonElement br)
             && br.ValueKind == JsonValueKind.String
             ? br.GetString() : null;
-        if (error is { Length: > 500 } || bindReason is { Length: > 120 })
+        // 侧栏露没露脸（2026-09-18）。两条取件路都要搬 —— 只搬一条的话，
+        // 走另一条时它会静悄悄变回 null，而 null 跟"没报"长得一模一样。
+        string? sidebar = body.TryGetProperty(
+            "sidebar", out JsonElement sb)
+            && sb.ValueKind == JsonValueKind.String
+            ? sb.GetString() : null;
+        if (error is { Length: > 500 } || bindReason is { Length: > 120 }
+            || sidebar is { Length: > 96 })
         {
             throw new ReaderRealtimeOutputException(
                 "BW_READER_REALTIME_OUTPUT_RECEIVER_INVALID",
@@ -260,6 +267,7 @@ internal sealed class ReaderHttpPickupService
             outcome,
             error,
             bindOutcome,
-            bindReason);
+            bindReason,
+            sidebar);
     }
 }

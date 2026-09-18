@@ -11220,6 +11220,7 @@ internal static class DirectBridgeSelfTest
                 "applied",
                 null,
                 "bound",
+                null,
                 null));
         ReaderRealtimeOutputAck routedAck = await routed.ConfigureAwait(false);
         ReaderRealtimeOutputSourceStatus onlineStatus =
@@ -11320,7 +11321,8 @@ internal static class DirectBridgeSelfTest
                 "applied",
                 null,
                 "floating",
-                "create-failed"));
+                "create-failed",
+                null));
         await Task.Delay(100).ConfigureAwait(false);
         int queuedAfterFloating = await replayBroker.GetOutboxCountAsync(
             CancellationToken.None).ConfigureAwait(false);
@@ -11347,6 +11349,7 @@ internal static class DirectBridgeSelfTest
                 "applied",
                 null,
                 "bound",
+                null,
                 null));
         DateTimeOffset outboxDeadline = DateTimeOffset.UtcNow
             .AddSeconds(2);
@@ -11408,7 +11411,8 @@ internal static class DirectBridgeSelfTest
                                 "rejected",
                                 "BW_READER_CARD_RENDER_FAILED",
                                 "unknown",
-                                "render-failed"));
+                                "render-failed",
+                null));
                     });
                 }
                 return Task.CompletedTask;
@@ -11424,7 +11428,8 @@ internal static class DirectBridgeSelfTest
                 "rejected",
                 "BW_READER_CARD_RENDER_FAILED",
                 "unknown",
-                "render-failed"));
+                "render-failed",
+                null));
         DateTimeOffset rejectedFailureDeadline = DateTimeOffset.UtcNow
             .AddSeconds(2);
         bool rejectedFailureStayedVisible = false;
@@ -11462,6 +11467,7 @@ internal static class DirectBridgeSelfTest
                 "applied",
                 null,
                 "bound",
+                null,
                 null));
         DateTimeOffset rejectedRecoveryDeadline = DateTimeOffset.UtcNow
             .AddSeconds(2);
@@ -12011,7 +12017,8 @@ internal static class DirectBridgeSelfTest
                     "applied",
                     null,
                     "none",
-                    null));
+                    null,
+                null));
             });
         _ = await server.RunAsync(CancellationToken.None)
             .ConfigureAwait(false);
@@ -15759,6 +15766,36 @@ internal static class DirectBridgeSelfTest
         //
         // ⚠ 只认字面的 true：默认关是有意选的（消费端曾同时在轮询，两条都开
         // 就是双发），恢复不该顺手把它改宽。
+        // 草稿"在侧栏露没露脸"这条必须能从回执里走到工具返回值（2026-09-18）。
+        //
+        // ⚠ 这条防的是本次修的那个形态：App 端把草稿塞进侧栏那一步**吞掉所有失败**，
+        //   调用方还不看返回值，于是侧栏空着、工具报 draft_delivered、助手让用户去点
+        //   一个不存在的 Add to Anki 按钮。字段一路（App 回执 → 闸 → record → 工具结果）
+        //   有任何一层没开槽，它就会静悄悄变回 null —— 而 null 跟"没报"长得一模一样。
+        //
+        // 变异检验：把 ParseAck 白名单里的 "sidebar" 删掉，第一条必须红；
+        //   把显式搬运那两行删掉（只放行不搬），第二条必须红。
+        Require(
+            ReaderRealtimeOutputProtocol.ValidateAck(JsonDocument.Parse(
+                "{\"contract\":\"" + DirectBridgeContract.Contract
+                + "\",\"type\":\"reader-realtime-output-ack\",\"requestId\":\"r1\""
+                + ",\"sessionId\":\"" + "session-AAAAAAAAAAAAAAAAAAAAAA" + "\",\"correlation\":\"c1\""
+                + ",\"sourceInstanceId\":\"source-abc\",\"outcome\":\"applied\""
+                + ",\"error\":null,\"sidebar\":\"unavailable\"}").RootElement) is { } sidebarAck
+            && sidebarAck.Sidebar == "unavailable",
+            "reader-output-ack-carries-sidebar",
+            checks);
+        Require(
+            ReaderRealtimeOutputProtocol.ValidateAck(JsonDocument.Parse(
+                "{\"contract\":\"" + DirectBridgeContract.Contract
+                + "\",\"type\":\"reader-realtime-output-ack\",\"requestId\":\"r1\""
+                + ",\"sessionId\":\"" + "session-AAAAAAAAAAAAAAAAAAAAAA" + "\",\"correlation\":\"c1\""
+                + ",\"sourceInstanceId\":\"source-abc\",\"outcome\":\"applied\""
+                + ",\"error\":null}").RootElement) is { } plainAck
+            && plainAck.Sidebar is null,
+            "reader-output-ack-sidebar-absent-is-null",
+            checks);
+
         // 板面推送的**内容**同样要钉住（2026-09-18）。
         // 只有快板变化时不再发：语音核心收到也是整条丢弃（board_skip_injector 7629 次），
         // 而快板真正的消费者是文件，文件照写不受影响。

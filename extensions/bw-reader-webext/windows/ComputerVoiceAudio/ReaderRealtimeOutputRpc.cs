@@ -168,6 +168,7 @@ internal static class ReaderRealtimeOutputRpcProtocol
         ["outcome"] = ack.Outcome,
         // 卡片钉在正文上没有 —— 沿途每一处都是重建，不显式搬就在这里断掉
         ["bindOutcome"] = ack.BindOutcome,
+        ["sidebar"] = ack.Sidebar,
         ["bindReason"] = ack.BindReason,
         ["code"] = null,
         ["message"] = null,
@@ -192,6 +193,7 @@ internal static class ReaderRealtimeOutputRpcProtocol
         ["message"] = exception.Message,
         ["bindOutcome"] = null,
         ["bindReason"] = null,
+        ["sidebar"] = null,
         ["retryable"] = exception.Retryable,
     };
 
@@ -216,6 +218,9 @@ internal static class ReaderRealtimeOutputRpcProtocol
             //   这另一种错，真正的原因被盖掉。
             "bindOutcome",
             "bindReason",
+            // 侧栏露没露脸（2026-09-18）。同上：**失败包也必须带**（填 null），
+            // 否则一出错就变成「回包字段不匹配」，真正的原因被盖掉。
+            "sidebar",
             "code",
             "message",
             "retryable");
@@ -268,6 +273,18 @@ internal static class ReaderRealtimeOutputRpcProtocol
         }
         string? bindReason = root.GetProperty("bindReason").ValueKind == JsonValueKind.Null
             ? null : RequiredString(root, "bindReason", 120);
+        // 侧栏露没露脸。旧版 App 不带这个键，所以**缺省不算错**（null = 没报），
+        // 但带了就必须是认识的值 —— 不然又会出现"看起来有值其实是垃圾"。
+        string? sidebar = root.TryGetProperty("sidebar", out JsonElement sbEl)
+            && sbEl.ValueKind == JsonValueKind.String
+            ? RequiredString(root, "sidebar", 96) : null;
+        if (sidebar is not null
+            && sidebar != "shown"
+            && sidebar != "unavailable"
+            && !sidebar.StartsWith("error:", StringComparison.Ordinal))
+        {
+            throw Invalid("Reader 输出 RPC sidebar 无效");
+        }
         return new ReaderRealtimeOutputAck(
             string.Empty,
             expected.Correlation,
@@ -275,7 +292,8 @@ internal static class ReaderRealtimeOutputRpcProtocol
             outcome,
             null,
             bindOutcome,
-            bindReason);
+            bindReason,
+            sidebar);
     }
 
     private static void RequireEcho(

@@ -25,7 +25,12 @@ internal sealed record ReaderRealtimeOutputAck(
     //   时存在，而「退回浮层」是 applied —— 卡确实送到了，只是没钉上。
     //   这个 record 是**容器闸**：不给它开槽，前后两处 new 就无处可搬。
     string? BindOutcome,
-    string? BindReason);
+    string? BindReason,
+    // 草稿在**侧栏**露没露脸（2026-09-18 用户：「侧边栏又是没有显示生成物」）。
+    // shown = 真的出现了；unavailable / error:… = 卡片在 App 本地仓里，但用户看不到。
+    // ⚠ 不能并进 BindOutcome：那个说的是"卡有没有钉在正文上"，跟"侧栏有没有显示"
+    //   是两件事，混在一起下次就分不清到底哪一头没成。
+    string? Sidebar);
 
 internal sealed class ReaderRealtimeOutputException : Exception
 {
@@ -968,7 +973,7 @@ internal static class ReaderRealtimeOutputProtocol
                 "outcome",
                 "error",
             },
-            new[] { "bindOutcome", "bindReason" });
+            new[] { "bindOutcome", "bindReason", "sidebar" });
         if (
             Text(message, "contract", 128) != DirectBridgeContract.Contract
             || Text(message, "type", 64) != AckType
@@ -1002,6 +1007,17 @@ internal static class ReaderRealtimeOutputProtocol
         string? bindReason = message.TryGetProperty("bindReason", out _)
             ? NullableText(message, "bindReason", 120)
             : null;
+        // 同上：放行不等于搬运，这一处必须显式取。
+        string? sidebar = message.TryGetProperty("sidebar", out _)
+            ? NullableText(message, "sidebar", 96)
+            : null;
+        if (sidebar is not null
+            && sidebar != "shown"
+            && sidebar != "unavailable"
+            && !sidebar.StartsWith("error:", StringComparison.Ordinal))
+        {
+            throw Invalid("Reader 输出回执 sidebar 无效");
+        }
         return new ReaderRealtimeOutputAck(
             sessionId,
             correlation,
@@ -1009,7 +1025,8 @@ internal static class ReaderRealtimeOutputProtocol
             outcome,
             error,
             bindOutcome,
-            bindReason);
+            bindReason,
+            sidebar);
     }
 
     private static void ValidateCard(JsonElement card)
@@ -2005,7 +2022,9 @@ internal sealed class ReaderRealtimeOutputBroker
                     "queued",
                     null,
                     "unknown",
-                    "source-offline-queued");
+                    "source-offline-queued",
+                    // 排队中：还没到 App，侧栏自然无从谈起
+                    null);
             }
             throw Failure(
                 "BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE",
