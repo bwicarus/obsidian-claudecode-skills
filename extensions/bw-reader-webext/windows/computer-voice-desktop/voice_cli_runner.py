@@ -321,6 +321,7 @@ DEFAULTS: dict = {
     # （别名优先、超 30 分钟标旧、「不知道」≠「别处」）只能有一份实现。
     "contextAmbientEnabled": True,
     "contextAmbientCacheSeconds": 60.0,
+    "contextAmbientToVoice": True,   # 地点/卡数也单独投一行给语音侧（见 _ctx_inject_voice_ambient）
     "contextInkStandbyMaxAgeSeconds": 900,   # 待命图的保质期：这一笔画完超过这么久还没被送出去就作废（旧设计里的新鲜窗，2026-09-17 补回）
     "contextInkImage": True,       # 桥在每次笔迹稳定时抓好图放进 runtime/ink-standby 待命；开口交给后台的那一刻把本页没送过的**全部**随 steer 插进那一轮（localImage 路径，不进 base64）
     "contextInkImageMaxBytes": 700000,   # 超过就不投（图片按 token 计费且留在线程历史里）
@@ -868,7 +869,7 @@ class Runner:
         self._backend_done_at = 0.0
         # 上下文注入器状态：快照修订/页面停留起点/各 sink 已投指纹
         self._ctx = {"mtime": 0.0, "rev": None, "page_key": "", "page_since": 0.0, "snap": None,
-                     "fp": {"backend_state": "", "backend_text": "", "voice": "", "image": ""}, "debounce": None,
+                     "fp": {"backend_state": "", "backend_text": "", "voice": "", "amb": "", "image": ""}, "debounce": None,
                      # 正文记账：{(file, 页号): (\"full\"|\"part\", 时刻)} —— 见 _ctx_text_ledger
                      "sent_pages": {}}
         self._history_q: queue.Queue = queue.Queue()
@@ -1424,6 +1425,11 @@ class Runner:
             self.session_no += 1
             self.session_started_at = time.time()
             self.session_state = "connected"
+            # 新会话的语音上下文是空的 —— 之前 appendText 投进去的东西一条都不在了。
+            # 不清这三个指纹，重连后第一次开口会因为"内容没变"而什么都不投，
+            # 于是模型手上既没有选中清单也没有地点（2026-09-18 补 ambient 时一并处理）。
+            for _k in ("voice", "sel", "amb"):
+                self._ctx["fp"][_k] = ""
             self.write_bridge_flag(True)
             self.mark_activity("session-start")
             self.quota_sample("session_start")
@@ -1860,17 +1866,8 @@ class Runner:
         # 它决定"该不该现在提"，而这正是当初把它放在板上的理由。
         # ⚠ 值由桥渲好，这里只拼句子：地点那套规则（别名优先、超 30 分钟标旧、
         # 「不知道」≠「别处」）只能有一份实现，抄第二份迟早两份说法不一样。
-        amb_hint = ""
-        if s.get("contextAmbientEnabled", True):
-            amb = fetch_ambient(float(s.get("contextAmbientCacheSeconds") or 60.0))
-            if amb:
-                bits = []
-                if amb["place"] and amb["place"] != "不知道":
-                    bits.append("他现在在" + amb["place"])
-                if amb["reviewDue"] > 0:
-                    bits.append("到期待复习卡共 %d 张（陈述，看到不用动）" % amb["reviewDue"])
-                if bits:
-                    amb_hint = "。" + "；".join(bits)
+        bits = self._ambient_bits()
+        amb_hint = ("。" + "；".join(bits)) if bits else ""
         # 带时刻：旧的删不掉（inject_items 只能追加），所以让它认得出哪条最新。
         state = ("【当前阅读状态 " + time.strftime("%H:%M:%S") + "】只认时刻最新的一条，更早的全部作废；"
                  "这是状态记录不是提问，不要回应本条。" + where + sel_hint + act_hint + ink_hint + amb_hint + "。")
@@ -2134,7 +2131,7 @@ class Runner:
         if self._ctx.get("thread") == self.thread_id:
             return
         self._ctx["thread"] = self.thread_id
-        self._ctx["fp"] = {"backend_state": "", "backend_text": "", "voice": "", "image": "", "sel": ""}
+        self._ctx["fp"] = {"backend_state": "", "backend_text": "", "voice": "", "amb": "", "image": "", "sel": ""}
         self._ctx["sent_pages"] = {}
         self.log("ctx_scope_reset", threadId=(self.thread_id or "")[-12:])
 
@@ -2518,6 +2515,7 @@ class Runner:
             if str(self.settings.get("contextInjectOn") or "delegation") == "speech":
                 await self._ctx_inject_backend(with_text=True)
             await self._ctx_inject_voice_selection()
+            await self._ctx_inject_voice_ambient()
             if str(self.settings.get("contextVoiceMode") or "off") != "edge" or self.session_state != "connected" or not (self.app and self.thread_id):
                 return
             snap = self._ctx_snapshot()
@@ -2532,6 +2530,52 @@ class Runner:
                      body=self._log_body(b["voice"]))
         except Exception as e:
             self.log("ctx_voice_error", message=clean(e))
+
+    def _ambient_bits(self) -> list[str]:
+        """地点 + 到期卡数，拼成句子的零件。**一份实现服务两处** ——
+        后台的状态行和语音侧那一行都用它，否则两处措辞迟早不一样。
+        值由桥渲好（/voice-core/ambient），这里只挑要不要说。
+        """
+        if not self.settings.get("contextAmbientEnabled", True):
+            return []
+        amb = fetch_ambient(float(self.settings.get("contextAmbientCacheSeconds") or 60.0))
+        if not amb:
+            return []
+        bits = []
+        if amb["place"] and amb["place"] != "不知道":
+            bits.append("他现在在" + amb["place"])
+        if amb["reviewDue"] > 0:
+            bits.append("到期待复习卡共 %d 张（陈述，看到不用动）" % amb["reviewDue"])
+        return bits
+
+    async def _ctx_inject_voice_ambient(self):
+        """把「他现在在哪 + 到期卡数」单独投给语音侧（2026-09-18 补）。
+
+        为什么要单独一条：地点原来随慢板到语音侧，2026-09-18 把它搬进注入器时，
+        我只加进了 b["voice"] —— 而 contextVoiceMode 线上是 off，那份根本不发，
+        于是语音模型**丢了地点**。功能上不缺（待办该不该说已由程序按地点判完，
+        结论写在待办行上），缺的是它自己掂量时手上没有这个事实。
+        ⚠ 不用打开整个 contextVoiceMode 来补：那会连整页正文一起塞进 700 字预算。
+        这一行只有十几个字、变化极慢（地点跨 30 分钟才换一档说法），另有独立指纹。
+        """
+        if not self.settings.get("contextAmbientToVoice", True):
+            return
+        if self.session_state != "connected" or not (self.app and self.thread_id):
+            return
+        bits = self._ambient_bits()
+        if not bits:
+            return
+        line = "（" + "；".join(bits) + "。状态记录，不要回应本条。）"
+        if self._ctx["fp"].get("amb") == line:
+            return
+        try:
+            await self.app.call("thread/realtime/appendText",
+                                {"threadId": self.thread_id, "text": line, "role": "developer"},
+                                timeout=15)
+            self._ctx["fp"]["amb"] = line
+            self.log("ctx_voice_ambient", chars=len(line), body=line)
+        except Exception as e:   # noqa: BLE001
+            self.log("ctx_voice_ambient_error", message=clean(e))
 
     async def _ctx_inject_voice_selection(self):
         """把「选中清单」投给语音侧。清单没变就不投（避免每次开口都多一条）。"""
