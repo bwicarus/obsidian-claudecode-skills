@@ -2476,7 +2476,7 @@ class Runner:
             if not t:
                 return
             now = time.time()
-            self._last_user_ask = (now, t)
+            self._last_user_ask = (now, t, self._delegation_seq)
             # ⚠ 不看措辞的那条判据（2026-09-18）：词表只抓写下来的说法，
             #   而它每次换个说法就漏 —— 实录里「嗯，我看一下。」「还在做，马上好。」
             #   两句都不在表里，于是 50 秒空转、用户追问两次一条补投都没发。
@@ -2503,7 +2503,12 @@ class Runner:
         ask = getattr(self, "_last_user_ask", None)
         if not ask or time.time() - ask[0] > 60:
             return          # 找不到对应的请求就别乱补
-        self._promise_pending = (time.time(), ask[1], t, claimed)
+        # ⚠ 把**提问那一刻的委派序号**一起带上。2026-09-18 实录：后台 20:37:27–41
+        #   明明做完了（reader_anki_draft 成功），语音模型随后说了句「已经帮你做了」，
+        #   于是这里又立了标记、6 秒后补投照发 —— 理由还写着「一次后台调用都没有发生」，
+        #   那句是假的，白起一轮后台、侧栏多出一个框。
+        #   判据改成：**从他提问到现在，委派序号有没有变过**。变过 = 真派过活，不补。
+        self._promise_pending = (time.time(), ask[1], t, claimed, ask[2])
         asyncio.run_coroutine_threadsafe(self._promise_rescue(), self.loop)
 
     async def _promise_rescue(self):
@@ -2528,6 +2533,12 @@ class Runner:
         if self._promise_pending is not pend:
             return          # 期间已经委派过（或又有新承诺），不补
         if self.backend_busy or not (self.app and self.thread_id):
+            self._promise_pending = None
+            return
+        if len(pend) > 4 and pend[4] != self._delegation_seq:
+            # 这中间真的派过活 —— 不管它嘴上怎么说，都不该补（更不该说"零调用"）。
+            self.log("promise_rescue_skipped", why="delegated-since-ask",
+                     said=str(pend[2])[:60])
             self._promise_pending = None
             return
         self._promise_pending = None
