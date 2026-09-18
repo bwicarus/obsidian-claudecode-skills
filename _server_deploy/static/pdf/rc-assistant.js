@@ -2882,7 +2882,7 @@
   //   被冲掉：用户看到的就是「中途渲出来了，完成后消失」。改成按 tid 各自计时。
   var _psT = {};
   // 真正落库那一下，抽出来以便「立刻落」也能复用同一份 —— 两处各写一遍迟早不一样。
-  function _syncPartsNow(tid) {
+  function _syncPartsNow(tid, absorb) {
     try {
       var ps = RC.turnCard.partsOf(tid);
       if (!ps || !ps.length) return;
@@ -2895,6 +2895,7 @@
       ps = ps.map(function (p) { var o = {}; for (var k in p) o[k] = p[k]; if (!o.origin) o.origin = 'app'; return o; });   // App 画的部件：来源=app，服务端按来源合并
       fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
         body: JSON.stringify({ assistant: txt, parts: ps, turn_id: tid, via: 'voice', upsert_only: 1, create_if_missing: 1,
+          absorb: (absorb && absorb.length) ? absorb : undefined,
           assistant_mode: _turnModes[tid] || _assistantMode,
           file: ctx.file_rel || ctx.file || '', page: ctx.page || 0 }) })
         .then(function (r) { return r.json(); })
@@ -3686,7 +3687,23 @@
         // 后台轮开始：这个 id 就是本轮容器身份。本地临时容器若已画了部件（工具结果先到）就整体改名搬过去。
         window.__bwLiveTurnId = tid;
         _turnModes[tid] = _assistantMode;
-        try { if (_vTid && window.RC && RC.turnCard && RC.turnCard.has(_vTid) && _vTid !== tid) { RC.turnCard.rename(_vTid, tid); _vTid = null; } } catch (e0) {}
+        try {
+          if (_vTid && window.RC && RC.turnCard && RC.turnCard.has(_vTid) && _vTid !== tid) {
+            var _old = _vTid;
+            // ⚠ rename 只搬**内存里的 DOM 容器**。部件在这之前很可能已经以临时 id 落了库
+            //   （_syncParts 防抖 900ms，工具卡往往先到）—— 内存改了名、存储没改，
+            //   下一次权威重载就把那条临时记录又拉回来：用户看到的「一次任务分成四个框」
+            //   里，就有它一个。所以改名必须是两边一起改：
+            //   1) 掐掉还压在防抖里的旧 id 同步，免得它落库后又多一条；
+            //   2) 落库时带 absorb:[旧 id] —— 部件已随 rename 进了新容器，服务端删旧那条。
+            try { clearTimeout(_psT[_old]); } catch (eT) {}
+            delete _psT[_old];
+            RC.turnCard.rename(_old, tid);
+            _vTid = null;
+            _turnModes[tid] = _turnModes[tid] || _turnModes[_old] || _assistantMode;
+            try { _syncPartsNow(tid, [_old]); } catch (eS) {}
+          }
+        } catch (e0) {}
         return;
       }
       if (ev.stream === 'delta') {

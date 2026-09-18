@@ -554,6 +554,28 @@
   function addPart(tid, part) {
     var t = _turns[tid] || open(tid);
     if (!t) return null;
+    // 同一次工具调用**只留一条**。同一个调用会被两边各画一次：运行器从 app-server 的
+    // 条目里记一条（带 args/result/耗时），App 自己执行时也画一条芯片（只有标签）。
+    // 两条并存 = 用户 2026-09-18 说的「有重复」。这里按工具名归一：留信息多的那条，
+    // 后到的若更全就**就地升级**，不新增方块（合并同 ADR 的不变式②：part 只追加不重写，
+    // 例外要显式——这是第二个显式例外，和 draft 并列）。
+    if (part.kind === 'tool' && (part.tool || part.label)) {
+      var _key = String(part.tool || part.label);
+      var _rich = function (p) { return (p.result ? 2 : 0) + (p.args ? 1 : 0); };
+      for (var _j = t.parts.length - 1; _j >= 0; _j--) {
+        var _pt = t.parts[_j];
+        if (_pt.kind !== 'tool' || String(_pt.tool || _pt.label) !== _key) continue;
+        if (_rich(part) > _rich(_pt)) {
+          // 工具部件在正文里不占块（renderPart 对 tool 返回 null，细节收在【流程】里），
+          // 所以升级只需改字段 + 重画流程面板与卡头，没有 DOM 块要换。
+          for (var _k in part) { if (_k !== 'seq' && _k !== '_el') _pt[_k] = part[_k]; }
+          try { _ensureHead(t, _pt.label || _pt.tool || '工具'); } catch (e) {}
+          if (!t.flow.hidden) _paintFlow(t);
+          try { if (RC.turnCard.onChange) RC.turnCard.onChange(tid); } catch (e) {}
+        }
+        return null;
+      }
+    }
     if (part.kind === 'hlcard') {   // 同轮同书的高亮**合并进一张卡**(AI 调两次 highlight ≠ 两张卡,用户实测)
       for (var _i = t.parts.length - 1; _i >= 0; _i--) {
         var _p0 = t.parts[_i];

@@ -289,6 +289,9 @@ DEFAULTS: dict = {
     "promiseWatchSeconds": 6.0,       # 等这么久还没委派才补
     # 不看措辞的那条：窗口内用户连说两次而中间零委派 → 补投（见 _promise_watch）。
     "promiseRepeatWindowSeconds": 90.0,
+    # 后台在这么多秒内跑过 → 不补投。判据从"委派序号"改成"后台动没动"，前者会被
+    # 委派早于转写定稿的时序绕过（2026-09-18 实录）。
+    "promiseRecentBackendSeconds": 30.0,
     "steerWaitSeconds": 3.0,          # 委托之后等这一轮起来的上限（实测 22~60 ms 就起）
     "contextInjectOn": "delegationSteer",  # 后台那份状态什么时候投。
                                       # delegationSteer（默认，2026-09-17）= 后台真的开工之后，
@@ -887,6 +890,10 @@ class Runner:
         self._last_backend_turn_id = None     # 上一条后台轮 id：轮外那句收尾语音认领用
         self._user_asks: list = []            # 最近几次用户发言 (时刻, 原话, 当时的委派序号)
         self._voice_stream = ""
+        # 这段话的流正在往哪个容器投。⚠ 必须记住 —— 委派常发生在语音**还在说**的中途，
+        #   每个 delta 各自重算目标的话，前半句进 v- 容器、后半句进后台轮容器，
+        #   于是侧栏出现"两个相同内容上下放置、一起更新"（用户 2026-09-18 实录）。
+        self._voice_stream_owner: str | None = None
         self._backend_recent: tuple[float, str] | None = None   # 后台最近一条回复：语音把它念出来的字幕不再重复入库
         self._voice_user_acc = ""   # 本轮用户字幕分段累积（turn.done 没带转写时兜底）
         self._voice_turn_commentary = False   # 这一轮语音回复是委托后台期间/之后的过渡或转述 → 不单独入库
@@ -1017,9 +1024,16 @@ class Runner:
                         #   于是它和工具、绿点红点、生成物在同一张卡里逐字出现；
                         #   没有后台轮（纯聊天）才用自己的 v- 轮次。
                         #   归属依据是后台的实际调用，与措辞无关 —— 同「收拢」那套一个口径。
-                        self._stream_post(
-                            self._turn["id"] if self._turn is not None else self._voice_turn_id,
-                            self._voice_stream)
+                        _own = self._turn["id"] if self._turn is not None else self._voice_turn_id
+                        if self._voice_stream_owner and self._voice_stream_owner != _own:
+                            # 说到一半后台轮起来了 → 这句话改投后台那张卡。**先把旧容器的草稿清空**，
+                            # 否则它会顶着同一段文字留在上面（草稿不落库，清空即消失）。
+                            self._stream_post(self._voice_stream_owner, "")
+                            self.log("voice_stream_retarget",
+                                     frm=self._voice_stream_owner, to=_own,
+                                     chars=len(self._voice_stream))
+                        self._voice_stream_owner = _own
+                        self._stream_post(_own, self._voice_stream)
             elif m in ("turn/started", "turn/completed"):
                 self.backend_busy = m == "turn/started"
                 turn = p.get("turn") or {}
@@ -1143,6 +1157,7 @@ class Runner:
                     if self._voice_turn_id is None:
                         self._voice_turn_id = "v-" + str(int(time.time() * 1000))[-12:]
                     self._voice_stream = ""
+                    self._voice_stream_owner = None
                     # 后台轮正在跑，或刚结束不到 20 秒：这句是过渡语或对后台结果的转述，历史里以后台正文为准
                     self._voice_turn_commentary = self._turn is not None or (time.time() - self._backend_done_at) < 20
                 elif self._subtitle_mode():
@@ -1153,6 +1168,7 @@ class Runner:
                     tid = self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
                     self._voice_turn_id = None
                     self._voice_stream = ""
+                    self._voice_stream_owner = None
                     commentary = self._voice_turn_commentary or self._turn is not None
                     self._voice_turn_commentary = False
                     if atext and not re.search(r"[0-9A-Za-z\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", atext):
@@ -2544,6 +2560,19 @@ class Runner:
         if self.backend_busy or not (self.app and self.thread_id):
             self._promise_pending = None
             return
+        # ⚠ 最硬的那条判据放最前：**后台刚刚跑过就别补**。
+        #   2026-09-18 第三次误触发的实录：委派 21:54:57 发生，而用户那句转写 21:54:58 才定稿
+        #   —— 我把"当时的委派序号"记在转写定稿那一刻，于是"从提问到现在没有新委派"成立，
+        #   补投照发，正文还写着「一次后台调用都没有发生」，而后台 21:54:58–55:08 刚把卡做好。
+        #   序号比较是在绕圈子：真正要回答的是"后台到底动没动"，那就直接问它。
+        #   宁可漏补（顶多它真没做、你再说一次），也不要白起一轮 + 在侧栏多一个框 + 说一句假话。
+        recent = float(self.settings.get("promiseRecentBackendSeconds") or 30.0)
+        if self._turn is not None or (time.time() - self._backend_done_at) < recent:
+            self.log("promise_rescue_skipped", why="backend-ran-recently",
+                     sinceSec=round(time.time() - self._backend_done_at, 1),
+                     said=str(pend[2])[:60])
+            self._promise_pending = None
+            return
         if len(pend) > 4 and pend[4] != self._delegation_seq:
             # 这中间真的派过活 —— 不管它嘴上怎么说，都不该补（更不该说"零调用"）。
             self.log("promise_rescue_skipped", why="delegated-since-ask",
@@ -3349,6 +3378,7 @@ class Runner:
             tid = self._voice_turn_id or ("v-" + str(int(time.time() * 1000))[-12:])
             self._voice_turn_id = None
             self._voice_stream = ""
+            self._voice_stream_owner = None
             if not re.search(r"[0-9A-Za-z\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", text):
                 self.log("history_skip_punct", text=text[:20])   # 「。」这种纯标点回复不记
                 return
