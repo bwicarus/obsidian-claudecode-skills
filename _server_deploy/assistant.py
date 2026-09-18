@@ -985,6 +985,26 @@ def _pdf():
 # normal 保持旧目录、旧文件名和旧调用语义；review 是硬隔离的第二个 scope。
 # scope 只影响动态上下文、执行 gate 与本段持久化，绝不能参与静态工具目录/cache key。
 _ASSISTANT_MODES = frozenset({"normal", "review"})
+# uid -> (正在跑的后台轮 id, 起始时刻)。由 /stream 的 stream:"start" 写，轮次收尾时清。
+_LIVE_TURN: dict = {}
+_LIVE_TURN_TTL = 300.0
+# App 侧 __asstVoiceTid() 没拿到真轮次 id 时自己造的临时容器 id：'t' + base36。
+# 真 id 都不长这样（后台轮是带连字符的 uuid7、语音是 v-…、生成物是 reader-draft:…）。
+_TEMP_TID_RE = re.compile(r"^t[0-9a-z]{8,24}$")
+
+
+def _live_turn_for(uid):
+    """这个用户此刻有没有在跑的后台轮（超时即作废）。"""
+    ent = _LIVE_TURN.get(str(uid))
+    if not ent:
+        return ""
+    tid, at = ent
+    if (time.time() - at) > _LIVE_TURN_TTL:
+        _LIVE_TURN.pop(str(uid), None)
+        return ""
+    return tid
+
+
 _CONVO_DIR = CLAUDE_DIR / "state" / "assistant-convo"
 _REVIEW_CONVO_DIR = CLAUDE_DIR / "state" / "assistant-review-convo"
 _convo_lock = threading.Lock()
@@ -10945,6 +10965,11 @@ def assistant_stream_external():
     stream = str(b.get("stream") or "delta")
     if stream not in ("delta", "start"):
         return jsonify({"ok": False, "error": "stream"}), 400
+    if stream == "start":
+        # 记住这个用户当前正在跑的后台轮。App 画部件时如果还没收到这条 SSE，会用自己
+        # 生成的临时 id 落库 —— 那条记录就是侧栏里那个空的「制卡」孤框。下面 /log 里
+        # 按这个值把临时 id 改写回真轮次，**不依赖 App 有没有收到推送**。
+        _LIVE_TURN[str(session["user_id"])] = (tid, time.time())
     delivered = 0
     try:
         import reader_events
@@ -12472,6 +12497,18 @@ def assistant_log_external():
     # 141(轮次容器):同一 turn_id 再次上报 = 这一轮又产生了新内容(多 response / 工具结果 / 结果卡)
     #   → **覆盖**那条助手消息,而不是再追加一条。不这么做就会:同一轮渲两遍 + 早期快照缺卡片。
     _tid = str(b.get("turn_id") or "")[:40]
+    # App 在后台轮跑着的时候画了部件，却还没收到 stream:"start" 那条 SSE —— 它就用
+    # 自己造的临时 id 落库，于是侧栏里多出一个空的「制卡」孤框（用户 2026-09-18 截图
+    # 最下面那个）。这里按服务端记着的「当前正在跑的后台轮」把它改写回去。
+    # ⚠ 修在服务端而不是等 App：推送有没有到达、App 是不是新版本，都不该决定这条记录
+    #   归谁。App 侧的改名+吞并仍然保留，那是同一件事的第二道保险。
+    if _tid and _TEMP_TID_RE.match(_tid):
+        _live = _live_turn_for(uid)
+        if _live:
+            _tid = _live
+    # 轮次收尾：运行器带 turn_end=1，之后再来的临时 id 就不再并进这一轮了。
+    if b.get("turn_end") and _live_turn_for(uid) == _tid:
+        _LIVE_TURN.pop(str(uid), None)
     # 2026-09-15 根治：同一轮记录有两个写入者 —— 运行器（via=codex-voice）与 App（其它）。部件按来源打标并按来源合并。
     _origin = "runner" if str(b.get("via") or "") == "codex-voice" else "app"
     # 收拢（2026-09-18）：这一轮期间那几条零散的语音记录，正文已并进本轮 parts，删掉它们。
@@ -12500,6 +12537,19 @@ def assistant_log_external():
         },
         mode=assistant_mode,
     ):
+        # ⚠ 这条早返回之前**必须发事件**。原来这里直接 return，而发布点在函数末尾 ——
+        #   于是轮次进行中的每一次合并（语音正文、工具部件）侧栏全都不知道，要等下一次
+        #   走完整路径的写入才顺带刷出来。用户 2026-09-18：「好像直到下一句对话开始
+        #   才自动进行了合并」。
+        #   partial=1 表示"这一轮还没结束"：侧栏据此重载显示，但**不清掉本轮的容器身份**，
+        #   否则后面 App 再画的部件又会掉进临时容器 —— 那正是上面刚修的那个孤框。
+        try:
+            import reader_events
+            reader_events.publish(
+                "assistant-history", b.get("file") or "", uid,
+                {"turn_id": _tid, "n": 0, "partial": 1})
+        except Exception:
+            pass
         return jsonify({"ok": True, "n": 0, "upserted": True, "absorbed": _absorbed})
     # ⚠ upsert_only:容器的"内容变了就同步"走这条 —— **记录不存在就什么都不做**。
     #   否则它可能先于 response.done 到达 → 先建出一条没有用户提问的助手消息 →

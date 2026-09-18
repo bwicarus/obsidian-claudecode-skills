@@ -3718,6 +3718,15 @@
         try { RC.turnCard.draftText(tid, String(ev.content || '')); } catch (e0) {}
         return;
       }
+      if (ev.partial) {
+        // 轮次**还在进行中**的一次合并（语音正文并进本轮、工具部件落库）。
+        // 要重载出来给用户看 —— 否则就是用户说的「直到下一句对话开始才自动合并」；
+        // 但绝不能走下面那条收尾逻辑：清掉 __bwLiveTurnId 之后，App 接着画的部件
+        // 会掉进临时容器，侧栏又多一个空孤框。
+        try { _flushPendingParts(); } catch (ep) {}
+        _requestHistoryReload({ reason: 'assistant-history-partial', publicTrigger: true });
+        return;
+      }
       // ⚠ 重载是**权威**的：存储里没有的部件，这一刻全被冲掉（本函数上面那条注释
       //   「草稿卡随原子换入消失」说的就是它）。所以在请求重载之前，先把还压在
       //   防抖里的 App 部件（卡片草稿、撤销条、高亮条）落下去 —— 否则就是

@@ -3312,7 +3312,7 @@ class Runner:
         # 把它搬进本轮容器并删掉原记录，侧栏才是用户要的「一个任务一个框」。
         pre = self._pre_turn_voice
         self._pre_turn_voice = None
-        if pre and (time.time() - pre[2]) < 30:
+        if pre and (time.time() - pre[2]) < 30 and pre[2] >= self._last_user_at():
             self._voice_post(rec["id"], pre[1], absorb=pre[0])
             self.log("pre_turn_voice_absorbed", turnId=rec.get("id"), frm=pre[0])
         self._history_post({
@@ -3321,6 +3321,19 @@ class Runner:
             "via": "codex-voice", "turn_id": rec["id"],
             "upsert_only": 1, "create_if_missing": 1,
         })
+
+    def _last_user_at(self) -> float:
+        """用户最后一次说话的时刻。
+
+        ⚠ 收编开场白只看"30 秒内"是不够的：上一轮对话的回答（「嗯，听得到。」）也在
+          30 秒内，收进来就成了把别人的话塞进这次任务。开场白的定义是**说在用户这次
+          请求之后**的那句 —— 用户一开口，之前的话就都不再属于接下来这次任务。
+        """
+        try:
+            return max((at for at, role, _ in self.transcripts if role == "user"),
+                       default=0.0)
+        except Exception:
+            return 0.0
 
     def _turn_item(self, item: dict):
         rec = self._turn
@@ -3416,6 +3429,10 @@ class Runner:
         # 侧栏重载后就是一个完整容器（见 _subtitle_done 里那段说明）。
         if rec.get("absorb"):
             body["absorb"] = rec["absorb"][:24]
+        # 告诉服务端这一轮收尾了：它据此停止把 App 的临时 id 并进本轮
+        # （见 assistant.py 的 _LIVE_TURN —— 没有这条就只能靠超时，那期间
+        #  App 任何一次画部件都会被错并到已经结束的轮次里）。
+        body["turn_end"] = 1
         dur = turn.get("durationMs")
         if isinstance(dur, (int, float)) and not isinstance(dur, bool) and 0 <= dur <= 86_400_000:
             body["took_ms"] = int(dur)

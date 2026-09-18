@@ -203,11 +203,12 @@ class VoicePartsTest(unittest.TestCase):
 class PreTurnVoiceTest(unittest.TestCase):
     """委派前那句「好的，我看一下」要被收进本轮容器，否则它永远是工具卡外的孤框。"""
 
-    def _runner(self, pre):
+    def _runner(self, pre, last_user_at=0.0):
         r = object.__new__(vcr.Runner)
         r._turn = {"id": BACKEND}
         r._voice_parts = {}
         r._pre_turn_voice = pre
+        r.transcripts = [(last_user_at, "user", "帮我制卡")]
         r.posted = []
         r.logs = []
         r._history_post = lambda body: r.posted.append(body)
@@ -227,6 +228,23 @@ class PreTurnVoiceTest(unittest.TestCase):
         r = self._runner(("v-123", "很久以前说的", time.time() - 300))
         r._tool_opened({"type": "mcpToolCall", "tool": "reader_anki_draft"})
         self.assertTrue(all(b.get("via") != "voice" for b in r.posted))
+
+    def test_上一轮对话的回答不收(self):
+        # 「嗯，听得到。」也在 30 秒内，但它答的是**上一次**提问。用户一开口，
+        # 之前的话就都不再属于接下来这次任务 —— 否则等于把别人的话塞进本轮容器。
+        import time
+        now = time.time()
+        r = self._runner(("v-old", "嗯，听得到。", now - 12), last_user_at=now - 3)
+        r._tool_opened({"type": "mcpToolCall", "tool": "reader_anki_draft"})
+        self.assertTrue(all(b.get("via") != "voice" for b in r.posted))
+
+    def test_用户开口之后说的那句才收(self):
+        import time
+        now = time.time()
+        r = self._runner(("v-123", "好的，我看一下。", now - 1), last_user_at=now - 3)
+        r._tool_opened({"type": "mcpToolCall", "tool": "reader_anki_draft"})
+        self.assertIn(("voice", ["v-123"]),
+                      [(b.get("via"), b.get("absorb")) for b in r.posted])
 
 
 if __name__ == "__main__":
