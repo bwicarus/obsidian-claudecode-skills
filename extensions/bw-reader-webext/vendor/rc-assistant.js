@@ -3694,7 +3694,11 @@ if (window.__bwPwaProviderOnly) return;
       }
       if (ev.stream === 'delta') {
         if (_liveSeen[tid] || !(window.RC && RC.turnCard)) return;
-        try { RC.turnCard.draftText('live_' + tid, String(ev.content || '')); } catch (e0) {}
+        // ⭐ 2026-09-18：渲进**同一个容器**，不再用 'live_' 前缀另开一个影子容器。
+        //   影子容器是"一次任务散成好几个框"的一环：草稿在 live_<tid>、工具与卡片在 <tid>、
+        //   语音正文又在 v-<ts> —— 三个框。同一个 tid 之后，工具链、绿点红点、逐字出现的
+        //   回答和最终生成物都落在一张卡里（用户要的形状），权威重载也替换的是同一个容器。
+        try { RC.turnCard.draftText(tid, String(ev.content || '')); } catch (e0) {}
         return;
       }
       // ⚠ 重载是**权威**的：存储里没有的部件，这一刻全被冲掉（本函数上面那条注释
@@ -3704,7 +3708,7 @@ if (window.__bwPwaProviderOnly) return;
       try { _flushPendingParts(); } catch (eFlush) {}
       if (window.__bwLiveTurnId === tid) window.__bwLiveTurnId = null;   // 这一轮已落库：之后的部件归下一轮
       if (_liveSeen[tid] || _historyPendingTurns[tid]) return;
-      try { if (window.RC && RC.turnCard && RC.turnCard.has('live_' + tid)) RC.turnCard.freezeDraft('live_' + tid); } catch (e1) {}
+      try { if (window.RC && RC.turnCard && RC.turnCard.has(tid)) RC.turnCard.freezeDraft(tid); } catch (e1) {}
       if (Object.keys(_historyPendingTurns).length >= 64) return;
       _historyPendingTurns[tid] = 1;
       _requestHistoryReload({ reason: 'assistant-history', publicTrigger: true, ackTurnIds: [tid] });

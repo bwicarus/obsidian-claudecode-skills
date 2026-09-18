@@ -1010,7 +1010,15 @@ class Runner:
                         self._voice_turn_id = "v-" + str(int(time.time() * 1000))[-12:]
                     self._voice_stream += str(p.get("delta"))
                     if self._subtitle_mode() or (not self._backend_speaking_likely() and not self._voice_turn_commentary):
-                        self._stream_post(self._voice_turn_id, self._voice_stream)
+                        # ⭐ 用户 2026-09-18：「从第一个工具调用开始生成那个工具调用的对话卡片…
+                        #   如果 ai 有在说话就在卡片内直接流式传输」。
+                        #   后台轮在跑 = 这句话是这次任务的一部分 → 流进**后台那条轮次**，
+                        #   于是它和工具、绿点红点、生成物在同一张卡里逐字出现；
+                        #   没有后台轮（纯聊天）才用自己的 v- 轮次。
+                        #   归属依据是后台的实际调用，与措辞无关 —— 同「收拢」那套一个口径。
+                        self._stream_post(
+                            self._turn["id"] if self._turn is not None else self._voice_turn_id,
+                            self._voice_stream)
             elif m in ("turn/started", "turn/completed"):
                 self.backend_busy = m == "turn/started"
                 turn = p.get("turn") or {}
