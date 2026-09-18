@@ -829,6 +829,25 @@ class AppServer:
                     pass
 
 
+def stream_owner(backend_turn_id, voice_turn_id, prev):
+    """这段话的流该投进哪个容器；返回 (owner, 要清空草稿的旧容器或 None)。
+
+    规则是**单向**的：v- → 后台轮可以改投，后台轮 → v- 绝对不行。
+
+    ⚠ 2026-09-18 实录 seq83 就是反向那一下：这句话本来正投在后台轮里，turn/completed
+      一到 backend_turn_id 变 None，下一个 delta 就把它甩进 v- 独立框 —— 用户看到的
+      「AI 说的话跑到工具卡外面」。落库那条路是对的（并进了后台轮），所以刷新后又回去，
+      于是表现成"中途在外面、刷新才进去"，更难查。
+    ⚠ 判据不是"那轮结束没有"：一句话一旦属于某次后台任务，它就一直属于那次。
+    """
+    own = backend_turn_id or voice_turn_id
+    if prev and prev != own:
+        if not str(prev).startswith("v-"):
+            return prev, None          # 已经在后台轮里 —— 不许往外搬
+        return own, prev               # v- → 后台轮：改投，并清掉旧草稿
+    return own, None
+
+
 class Runner:
     def __init__(self, loop: asyncio.AbstractEventLoop):
         self.loop = loop
@@ -894,6 +913,12 @@ class Runner:
         #   每个 delta 各自重算目标的话，前半句进 v- 容器、后半句进后台轮容器，
         #   于是侧栏出现"两个相同内容上下放置、一起更新"（用户 2026-09-18 实录）。
         self._voice_stream_owner: str | None = None
+        # 每个后台轮容器里累计的语音正文。**必须整份重发**：服务端按 origin 整组替换，
+        # 只发最新那句 = 把同一轮里之前说过的话顶掉（2026-09-18 实录：一轮里两句语音
+        # 都并进了 01a0b4e0，存储里却只剩一条 text:voice）。
+        self._voice_parts: dict[str, list[str]] = {}
+        # 委派之前说的那句（「好的，我看一下」）落成了独立记录；第一个工具调用时把它收进来。
+        self._pre_turn_voice: tuple | None = None
         self._backend_recent: tuple[float, str] | None = None   # 后台最近一条回复：语音把它念出来的字幕不再重复入库
         self._voice_user_acc = ""   # 本轮用户字幕分段累积（turn.done 没带转写时兜底）
         self._voice_turn_commentary = False   # 这一轮语音回复是委托后台期间/之后的过渡或转述 → 不单独入库
@@ -1024,14 +1049,15 @@ class Runner:
                         #   于是它和工具、绿点红点、生成物在同一张卡里逐字出现；
                         #   没有后台轮（纯聊天）才用自己的 v- 轮次。
                         #   归属依据是后台的实际调用，与措辞无关 —— 同「收拢」那套一个口径。
-                        _own = self._turn["id"] if self._turn is not None else self._voice_turn_id
-                        if self._voice_stream_owner and self._voice_stream_owner != _own:
-                            # 说到一半后台轮起来了 → 这句话改投后台那张卡。**先把旧容器的草稿清空**，
-                            # 否则它会顶着同一段文字留在上面（草稿不落库，清空即消失）。
-                            self._stream_post(self._voice_stream_owner, "")
+                        _own, _clear = stream_owner(
+                            self._turn["id"] if self._turn is not None else None,
+                            self._voice_turn_id, self._voice_stream_owner)
+                        if _clear:
+                            # v- → 后台轮：先把旧容器草稿清空，否则同一段文字会顶在上面
+                            # （草稿不落库，清空即消失）。
+                            self._stream_post(_clear, "")
                             self.log("voice_stream_retarget",
-                                     frm=self._voice_stream_owner, to=_own,
-                                     chars=len(self._voice_stream))
+                                     frm=_clear, to=_own, chars=len(self._voice_stream))
                         self._voice_stream_owner = _own
                         self._stream_post(_own, self._voice_stream)
             elif m in ("turn/started", "turn/completed"):
@@ -1073,6 +1099,10 @@ class Runner:
                 if t in ("agentMessage", "mcpToolCall", "webSearch", "commandExecution", "fileChange", "reasoning"):
                     self.log(m, itemType=t, tool=item.get("tool") or item.get("name"), status=item.get("status"),
                              text=(item.get("text") or item.get("query") or item.get("command") or "")[:160] or None)
+                if (m == "item/started" and self._turn is not None
+                        and t in ("mcpToolCall", "webSearch", "commandExecution",
+                                  "fileChange", "dynamicToolCall", "collabAgentToolCall")):
+                    self._tool_opened(item)
                 if m == "item/started" and t == "agentMessage" and self._turn is not None:
                     self._turn["stream"] = ""   # 一轮里可能有多条 agentMessage（先说"我看一下"再正答）：草稿只显示当前这条
                 if m == "item/completed" and self._turn is not None:
@@ -3258,6 +3288,40 @@ class Runner:
             text = m.group(1) if m else re.sub(r"<[^>]+>", "", text)
         return text.strip()
 
+    def _tool_opened(self, item: dict):
+        """第一个工具一开始调用，就把本轮的容器建出来（用户 2026-09-18：
+        「从第一个工具调用开始生成那个工具调用的对话卡片」）。
+
+        ⚠ 这不只是"早点显示"，更是**次序**：记录在历史里的位置由它被创建的那一刻决定。
+          工具部件原来要等轮次收尾才落库，而 App 在工具执行**途中**就登记了生成物
+          （reader-draft:…）—— 于是生成物反而排在工具卡前面，正是用户截图里的样子。
+        ⚠ 只发一条**光有标签**的裸部件。收尾时那条带 args/result/耗时的会整组覆盖它
+          （服务端按 origin 整组替换），前端也会按同名工具就地升级（rc-turncard 的
+          _absorbTool），所以不会变成两个方块。
+        """
+        rec = self._turn
+        if rec is None or rec.get("tool_opened"):
+            return
+        t = item.get("type")
+        tool = str(item.get("tool") or item.get("name") or t)
+        server = item.get("server")
+        label = (str(server) + "." if server else "") + tool
+        rec["tool_opened"] = True
+        self.log("turn_card_opened", tool=label[:160], turnId=rec.get("id"))
+        # 委派前那句「好的，我看一下」已经落成独立记录。它就是这次任务的开场白，
+        # 把它搬进本轮容器并删掉原记录，侧栏才是用户要的「一个任务一个框」。
+        pre = self._pre_turn_voice
+        self._pre_turn_voice = None
+        if pre and (time.time() - pre[2]) < 30:
+            self._voice_post(rec["id"], pre[1], absorb=pre[0])
+            self.log("pre_turn_voice_absorbed", turnId=rec.get("id"), frm=pre[0])
+        self._history_post({
+            "parts": [{"kind": "tool", "tool": label[:160], "label": label[:320],
+                       "origin": "runner"}],
+            "via": "codex-voice", "turn_id": rec["id"],
+            "upsert_only": 1, "create_if_missing": 1,
+        })
+
     def _turn_item(self, item: dict):
         rec = self._turn
         t = item.get("type")
@@ -3393,14 +3457,34 @@ class Runner:
                 self._last_backend_turn_id
                 if (time.time() - self._backend_done_at) < 20 else None)
             if owner:
-                self._history_post({"parts": [{"kind": "text", "text": text[:4000],
-                                              "origin": "voice"}],
-                                    "via": "voice", "turn_id": owner,
-                                    "upsert_only": 1, "create_if_missing": 1})
+                self._voice_post(owner, text)
                 # ⚠ 不再往 rec["parts"] 里也塞一份：上面那次投递已经落库了，
                 #   再塞就要靠"按 origin 合并"去重，多一条看不见的暗线。一处写入，一处真相。
             else:
+                # 委派可能紧随其后（「好的，我看一下」→ 起后台轮）。记下来，等第一个工具
+                # 调用时把这条收进那个容器 —— 否则它就永远是工具卡外面的一个孤框。
+                self._pre_turn_voice = (tid, text, time.time())
                 self._history_post({"assistant": text, "via": "voice", "turn_id": tid})
+
+    def _voice_post(self, owner: str, text: str, absorb: str | None = None):
+        """把一句语音正文并进某个后台轮容器。
+
+        ⚠ 每次都重发**这一轮累计的全部语音正文**。服务端按 origin 整组替换（见
+          _convo_upsert_turn），只发最新那句就等于把同轮里之前说过的话删掉 ——
+          2026-09-18 实录里一轮两句都路由对了，存储里却只剩后一句。
+        """
+        acc = self._voice_parts.setdefault(owner, [])
+        if text and (not acc or acc[-1] != text):
+            acc.append(text[:4000])
+        del acc[:-12]
+        while len(self._voice_parts) > 8:            # 只留最近几个容器，别无限长
+            self._voice_parts.pop(next(iter(self._voice_parts)))
+        body = {"parts": [{"kind": "text", "text": t, "origin": "voice"} for t in acc],
+                "via": "voice", "turn_id": owner,
+                "upsert_only": 1, "create_if_missing": 1}
+        if absorb:
+            body["absorb"] = [absorb]
+        self._history_post(body)
 
     def _history_enabled(self) -> str:
         url = str(self.settings.get("historyUrl") or "").rstrip("/")
