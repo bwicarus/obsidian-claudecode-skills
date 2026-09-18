@@ -101,31 +101,20 @@ internal static class ReaderAttentionBoard
         new("slow", "待办", "待办 ",
             "还没跟用户说过的待办（pending）—— 该开口说的事。每条自带 id "
             + "和该做什么；要打电话的那条把命令写在同一行"),
-        new("slow", "地理位置", "现在地点：",
-            "在家 / 在公司 / 在别处。据此判断该不该现在提 —— 人在公司时"
-            + "倒垃圾的待办看到了也不必说。超过 30 分钟没有新定位时，给的"
-            + "是**最后一次已知位置**并注明「旧记录」（位置变化慢，"
-            + "扔掉它不如给出来 + 标明）。只有从来没有过定位记录才写"
-            + "「不知道」——**「不知道」和「在别处」是两回事**，别混"),
-
-        // 「已确认待办」登记项已随记账行一起裁掉（用户 2026-08-31）：
-        // 板是唤醒过滤器不是记账本 —— 不该重复说的东西根本不在板上，
-        // 一条计数行只在给读的一方添阅读量。完成与否由真值库追踪。
-        new("slow", "复习到期", "现在到期待复习卡共",
-            "到期 Anki 卡的数量，4 张一档取整（陈述句，看到不用动）。"
-            + "积到 32 会由生产者另建一条真待办变成祈使句 —— 那条走 ack "
-            + "状态机，说过一次就不再催。数字回落 = 他在复习"),
-        new("fast", "焦点转移", "焦点",
-            "他在看什么、从哪儿转过来的（转移语句本身就蕴含旧快照已对不上，"
-            + "问到内容要重取）。判定：停留满 45 秒，**或在新页面上操作了**"
-            + "（划选/笔迹）即刻确认。「」里是页面自己写的标题"),
-        new("fast", "通话挂断", "他主动挂断了电话",
-            "用户在通话中主动挂断（AI 自己 hangup 的不算）。看到就停止向"
-            + "通话说话。满 2 分钟后搭快板下一次真实变化退场；新的一通"
-            + "有结局时立刻清掉"),
-        new("fast", "绘图", "他正在画或刚画过",
-            "这是状态不是事件：有动作即刻立旗，持续画不刷新；停笔满 2 分钟"
-            + "后**搭快板下一次真实变化的车**一起退场，不自己到点就走"),
+        // 2026-09-18 重排（用户：「之前之所以会设计慢板和快板两个记录，是因为
+        // 我们之前没有推送的通道；但现在我们已经有通道了」）：
+        //
+        //   地理位置 / 复习到期 → 语音核心的上下文注入器（AmbientForVoiceCore）
+        //       纯上下文，不是祈使句。留在板上只好靠攒批压抖，而注入器按指纹去重。
+        //   焦点转移 / 绘图     → 注入器早就在做同一件事
+        //       位置按快照指纹报、笔迹连图一起送。板上这两项是重复的，
+        //       而重复的那份恰好是没人要的那份：只含快板的推送被整条丢弃 7629 次。
+        //   通话挂断           → 事件推送（见 NoteCallEnded）
+        //       它「压不得」，放在一块允许抖的板上反而得为它专门开特例。
+        //       它本来就是 /reader-voip/outcome 上的一个事件，有明确到达时刻。
+        //
+        // 于是快板不再有任何登记项，板面本身留一块墓碑（见 RenderFast）;
+        // 慢板只剩祈使句，「文件动了 = 有活干」不再需要任何补偿就是精确的。
     };
 
     /// 停留多久才算「真的到了这一页」。没有门槛的话翻页就让板子抖，
@@ -168,7 +157,6 @@ internal static class ReaderAttentionBoard
     private static readonly TimeSpan DrawingIdleWindow =
         TimeSpan.FromMinutes(2);
 
-    private static bool _hasDrawing;
     private static DateTimeOffset _drawingLastAt;
 
     /// 上一轮快板渲出来的内容（退场判定用）。可退场的信号（笔迹、挂断）
@@ -179,8 +167,6 @@ internal static class ReaderAttentionBoard
     /// phase=ended 上报）。AI 多半正在对着通话说话，这是它唯一能知道
     /// "对面已经没人了"的途径。状态语义：满 2 分钟后搭车退场；
     /// 新的一通有结局时立刻清掉（旧的那次挂断已无意义）。
-    private static bool _callEnded;
-    private static DateTimeOffset _callEndedAt;
 
     private static string? _currentKey;
     private static string? _currentLabel;
@@ -230,6 +216,8 @@ internal static class ReaderAttentionBoard
     /// ⚠ 这是安全的，因为板子是**唤醒过滤器**不是语境源：AI 开口前读的
     /// 语境在快照里（用户："我们的快照有完整的语境支撑"），上下文行迟
     /// 几拍不影响任何判断。HTTP 端点仍渲实时值 —— 按需读到的是新的。
+    /// ⚠ 2026-09-18 起板上已没有「纯上下文」了（地点/卡数搬去注入器）——这里攒的是**退场**：
+    /// ack 之后少一件事，不值得为它单独唤醒对面一次。机制与阈值一字未改。
     private const int ContextBatchSize = 4;
     private static bool _slowFlushedOnce;
     private static int _contextChangesSinceFlush;
@@ -355,37 +343,41 @@ internal static class ReaderAttentionBoard
             // （确定转移机制的第二条，用户 2026-08-30）。能在上面画，
             // 注意力必然已经在那儿，不用再等 45 秒。
             PromotePendingFocus();
-            if (_hasDrawing)
-            {
-                return;   // 已经立着了 —— 一个字都不改
-            }
-            _hasDrawing = true;
+            // 笔迹本身不再上板（2026-09-18 快板退役，绘图归注入器：它连图
+            // 一起送，比板上一句「他正在画」有用得多）。这里保留这个入口，
+            // 因为它还担着另一件事：**能在上面画，注意力必然已经在那儿**。
             _sequence++;
         }
     }
 
     /// 用户在通话中主动挂断了（App 上报 phase=ended 时由桥调用）。
     ///
-    /// ⚠ 这是快板上第一条**必须立刻推到对面**的信号：AI 那一刻多半正在
-    /// 对着通话说话，晚一秒它就多对着空气说一秒。立旗即时；已立着就只
-    /// 刷新时刻，不再改字节（同 NoteDrawing 的纪律）。
+    /// 2026-09-18 起这条**不再上板，改成一次事件推送**。它本来就是
+    /// /reader-voip/outcome 上的一个事件，有明确的到达时刻；而板是个
+    /// "状态面"，为了让这条时间敏感的信号不被压住，代码里不得不为它开
+    /// 「紧急标记直通」的特例 —— 特例本身就是"放错地方了"的证据。
+    ///
+    /// ⚠ 推的是 inject（进后台历史、零成本、不起一轮），不是 /turn：
+    /// 通话已经结束了，这时起一轮等于对着空气说话 —— 正是要避免的那件事。
+    /// 后台下一次真要说话前就会看到这条。
     internal static void NoteCallEnded(DateTimeOffset now)
     {
         lock (Gate)
         {
-            _callEndedAt = now;
-            _callEnded = true;
+            _ = now;
         }
-    }
-
-    /// 新的一通电话有了结局 —— 上一次挂断的旗子已无意义，立刻清掉。
-    /// 不清的话，新通话进行中板上还挂着「他挂断了」，AI 会收错尾。
-    internal static void NoteCallSuperseded()
-    {
-        lock (Gate)
+        if (!DirectBridgeProtocolSession.ExternalVoiceBackendEnabled())
         {
-            _callEnded = false;
+            return;
         }
+        string json = JsonSerializer.Serialize(new
+        {
+            text = "【通话已结束】用户主动挂断了这通电话。别再往通话里说话；"
+                + "有话等下一通，或者改用静默渠道。",
+            role = "developer",
+        });
+        _ = DirectBridgeProtocolSession.VoiceCoreRequestAsync(
+            "/inject", json, "voice-core-hangup");
     }
 
     /// 它读一次板子。**读取本身就是我们要的观测**：有没有人在盯、
@@ -715,7 +707,7 @@ internal static class ReaderAttentionBoard
     /// 调用方须持有 Gate。
     private static string RenderRegistry(DateTimeOffset now)
     {
-        // ⚠ 顺序同 FlushFilesAsync：先快后慢（FastOnlyLines 会让到点的
+        // 顺序同 FlushFilesAsync（快板已是恒定墓碑，渲它没有副作用；旧注释提到的
         // 绘图退场，两块要看到同一轮的结果）。
         string fast = RenderFast(now);
         string slow = RenderSlow(now);
@@ -814,13 +806,15 @@ internal static class ReaderAttentionBoard
         {
             directory = _runtimeDirectory;
             DateTimeOffset now = DateTimeOffset.UtcNow;
-            // ⚠ 顺序要紧：先快后慢。FastOnlyLines 会让到点的绘图退场，
-            // 而合并视图要看到同一轮的结果。
+            // 快板是恒定墓碑（2026-09-18 退役），渲它不再有副作用；
+            // 顺序保留原样，省得别处的注释跟着漂。
             fast = Stamp(RenderFast(now), slow: false);
             string slow = Stamp(RenderSlow(now), slow: true);
-            // 慢板两级写盘（见 ContextBatchSize 那段）：祈使句变了立刻落，
-            // 纯上下文攒批。没到落盘条件时，文件里留着上一次落的内容 ——
-            // 那正是"对面看到的"，登记表也要从它算。
+            // 慢板两级写盘（见 ContextBatchSize 那段）：**新增**祈使句立刻落，
+            // 退场攒批。地点/卡数 2026-09-18 搬去注入器后，这里攒的不再是
+            // "纯上下文"而是"退场"——但机制一字未改，因为它守的那条用户决策没变：
+            // ack 之后少一件事不值得单独唤醒对面一次。没到落盘条件时文件里留着
+            // 上一次落的内容 —— 那正是"对面看到的"，登记表也要从它算。
             slowToWrite = DecideSlowFlush(slow, _renderedSlowImperative)
                 ? slow
                 : _lastFlushedSlowFull;
@@ -873,7 +867,7 @@ internal static class ReaderAttentionBoard
         // 来回变化在窗口结束时自动归于无事可推 —— 那正是无变化静默的延伸。
         //
         // ⚠ 慢板**不进窗口**：待办是祈使句，压它就是压该开口的事。
-        // 慢板已经有自己的攒批（DecideSlowFlush 的纯上下文攒 N 次）。
+        // 慢板已经有自己的攒批（DecideSlowFlush：退场攒 N 次）。
         bool pushFast;
         // 上面那个 now 的作用域早结束了（它在渲染那把锁里）。这里重新取一次：
         // 这是个**节流判据**不是时间戳，差几毫秒毫无影响。
@@ -1022,6 +1016,16 @@ internal static class ReaderAttentionBoard
             text.Append(_currentLabel is null
                 ? "当前焦点：无"
                 : "当前焦点：" + _currentLabel);
+            // 从哪儿转来的、有没有换设备：快板 2026-09-18 退役后，这两样
+            // 原来只服务于板上那句「焦点从 A 转移到 B」。它们本身是**真实
+            // 且排查时用得上**的状态，所以移到诊断面继续活着，而不是连同
+            // 板面一起删掉 —— 删掉的话下次查"它认成换地方了吗"又只能靠猜。
+            if (_previousLabel is not null)
+            {
+                text.Append("（从「").Append(_previousLabel).Append("」转来")
+                    .Append(_sourceChanged ? "，换了设备" : string.Empty)
+                    .Append("）");
+            }
             if (_pendingKey is not null)
             {
                 double waited =
@@ -1166,8 +1170,8 @@ internal static class ReaderAttentionBoard
         // ⚠ 标题**只在这里加**。两个文件各自不带标题（文件名已经说明是
         // 哪块），而拼在一起时没有标题就分不清哪行属于哪块了。
         //
-        // ⚠ 顺序：先渲快板。FastOnlyLines 会让到点的绘图退场，两块要看到
-        // 同一轮的结果。
+        // ⚠ 快板 2026-09-18 起是一块恒定的墓碑，这里照旧带上它 ——
+        // 过渡期的消费方读到墓碑就知道该去哪儿，而不是以为自己漏了什么。
         string fast = RenderFast(now);
         string slow = RenderSlow(now);
         return "# 慢提示板\n" + slow + "\n# 快速提示板\n\n" + fast;
@@ -1187,114 +1191,30 @@ internal static class ReaderAttentionBoard
     /// 调用方须持有 Gate。
     private static string RenderFast(DateTimeOffset now)
     {
-        // ⚠ 快板**不带地点也不带焦点**（用户 2026-08-30：「位置应该只保留
-        // 在慢的上面」）。这推翻了拆板时那条"基础内容两边都有" ——
-        // 那两条都是慢信号，放进快板只会让它们跟着绘图一起抖，
-        // 而抖动正是拆板要消灭的东西。要上下文就去读慢板，它就在旁边。
-        // ⚠ **不写标题**（用户 2026-08-30：「快慢提示板里面的 # 标题好像
-        // 没有必要吧」——对）。文件名 reader-attention-fast.md 已经说明了
-        // 这是哪块板，再写一行「# 快速提示板」是同一件事说两遍，而对面的
-        // 任何判断都用不上它。合并视图那个旧端点要区分两块，标题由它自己加。
-        // ⚠ 没有事的时候写一个「无」，**不要留空文件**。空文件跟"渲染挂了、
-        // 写了个空的出去"长得一模一样，而这两件事要做的处置完全不同。
-        // 一个字的代价，换掉一整类分不清的故障。
-        string lines = FastOnlyLines(now);
-        return lines.Length == 0 ? "无\n" : lines;
+        _ = now;
+        return FastRetiredBody;
     }
 
-    /// 快板独有的那几行（合并视图直接复用，免得两处各写一遍会漂）。
-    /// 调用方须持有 Gate。
-    private static string FastOnlyLines(DateTimeOffset now)
-    {
-        // ⚠⚠ **笔迹退场要搭车，不许自己到点就走。**
-        //
-        // 用户 2026-08-29 定的：「一段时间没有绘图且其他方面的信息进行了
-        // 更新后伴随着消失」。2026-08-30 拆板时我把它改成了"到点直接退场"，
-        // 理由写的是"快板要及时" —— **那是我擅自推翻的，而且理由站不住**，
-        // 用户当天就纠正了：「笔迹只是状态更新，而且消失时是伴随着其他的
-        // 更新进行更新」。
-        //
-        // 有了主动推送之后这条比原来更要紧：纯时钟驱动的消失 = 停笔两分钟
-        // 主动唤醒对面一次，只为告诉它"他不画了"。那一次唤醒什么也做不了。
-        //
-        // 「其他方面的信息」= **快板自己的其它行**。慢板变了不算 ——
-        // 那时被读的是慢板，快板在那一刻退场没有任何人看得到。
-        //
-        // ⚠ 立旗仍然是即时的、且持续画画时一个字都不改（见 NoteDrawing）。
-        //
-        // ## 搭车的统一写法（2026-08-30 加入第二个可退场信号后收拢）
-        //
-        // 先按当前旗子渲一遍；跟上一轮渲出来的比 —— **只有真的变了**，
-        // 才让到点的退场者搭这趟车走，然后按新旗子重渲。这样任何真实变化
-        // （包括另一个可退场信号的出现或离开）都是合法的车，而"只有时间
-        // 在走"的那些轮次一个字都不动。
-        string Build()
-        {
-            var text = new StringBuilder();
-            // 焦点只在快板、只有这一句（用户 2026-08-30：「焦点不应该被
-            // 分开到两个板子上…内容变化时就蕴含了焦点换过的含义」）——
-            // 转移语句本身就说明了旧快照对不上，不再另立一行。
-            //
-            // ⚠ 不加"是资料不用理"之类的静默说明（用户：他也可能根据
-            // 语境在等我打开什么内容）。「」里是页面自己写的标题这条
-            // 恒定规则搬去了 AGENTS.md —— 不变的规则不上板。
-            if (_currentLabel is not null)
-            {
-                if (_previousLabel is not null)
-                {
-                    text.Append("焦点从「").Append(_previousLabel)
-                        .Append("」转移到「").Append(_currentLabel)
-                        .Append("」")
-                        .Append(_sourceChanged ? "，换了设备" : string.Empty)
-                        .Append("。\n");
-                }
-                else
-                {
-                    text.Append("焦点落在「").Append(_currentLabel)
-                        .Append("」上。\n");
-                }
-            }
-            if (_callEnded)
-            {
-                // ⚠ 只在**用户**挂断时立旗（AI 自己调 hangup 结束的那种，
-                // App 侧不上报 —— 见 ReaderVoipCall 的 phase=ended 逻辑）。
-                text.Append("他主动挂断了电话；这通已结束，")
-                    .Append("别再往通话里说话，收尾即可。\n");
-            }
-            if (_hasDrawing)
-            {
-                // ⚠ 这是**状态**不是事件（用户 2026-08-30：「笔迹只是状态
-                // 更新」）：说的是"他问起时先看绘图"，不是"现在打断他"。
-                text.Append("他正在画或刚画过；")
-                    .Append("问到相关内容时先看当前的绘图。\n");
-            }
-            return text.ToString();
-        }
+    /// <summary>快板已退役（2026-09-18）。这里只剩一块墓碑。
 
-        string keep = Build();
-        if (!string.Equals(keep, _lastFastKeep, StringComparison.Ordinal))
-        {
-            // 这一轮有真实变化 —— 到点的退场者搭车。
-            if (_hasDrawing && now - _drawingLastAt > DrawingIdleWindow)
-            {
-                _hasDrawing = false;
-            }
-            if (_callEnded && now - _callEndedAt > DrawingIdleWindow)
-            {
-                _callEnded = false;
-            }
-            keep = Build();
-        }
-        _lastFastKeep = keep;
-        return keep;
-    }
+    /// 三项各自去了更合适的地方（见 Registry 那段的说明）：焦点与绘图归语音核心的
+    /// 上下文注入器（它本来就在做同一件事，板上那份是重复的），挂断改成事件推送。
+    ///
+    /// ⚠ 为什么留文件而不是删掉路由：文件内容从此恒定，**写一次之后永不再变**，
+    /// 所以对"文件变了就读"的消费方等于彻底安静下来 —— 这正是要的效果。
+    /// 而留一块写明原委的墓碑，比让 /reader-attention-fast.md 突然 404 好：
+    /// 404 会让盯着它的一方以为桥坏了，墓碑则告诉它发生了什么、去哪儿找。
+    ///
+    /// ⚠ 随之退场的还有那套「到点的退场者搭下一次真实变化的车」的机制。
+    /// 它当初是对的（用户 2026-08-29：纯时钟驱动的消失 = 停笔两分钟主动唤醒
+    /// 对面一次，只为告诉它"他不画了"，那一次唤醒什么也做不了），但它守的是
+    /// **板面**这个表面；笔迹现在走注入器，那边的保质期由 contextInkStandbyMaxAgeSeconds
+    /// 管，不再需要搭车。</summary>
+    internal const string FastRetiredBody =
+        "（快板已退役 2026-09-18：焦点与绘图改由语音核心的上下文注入器随位置状态"
+        + "一起送，通话挂断改成事件推送。这个文件不会再变，不必再盯。"
+        + "待办与该不该开口看 reader-attention-slow.md。）\n";
 
-    /// ⚠ 状态的纯函数：同样的状态必须产出同样的字节。
-    /// seq 由调用方填 —— 它是"第几次有情报的变化"，不属于状态本身。
-    /// 到期待复习的卡数。读的是对账循环每轮都在写的
-    /// `replication-apply.status.json`（数数归 Python，桥只端 —— 桥不算账），
-    /// **4 张一档向下取整**（用户 2026-08-30 定）：档位就是这行的抖动阈值，
-    /// 复习中每清 4 张板子才动一次。读不到 / 少于 4 张 → 0 = 不上板。
     private static int ReadReviewDueQuantized()
     {
         if (string.IsNullOrEmpty(_storeDirectory))
@@ -1436,18 +1356,16 @@ internal static class ReaderAttentionBoard
         var imperatives = new StringBuilder();
         // ⚠ 地理位置在**注意力焦点之前** —— 它决定"该不该现在开口"，
         // 是先要问的那个问题；焦点决定"说的时候带什么上下文"。
-        text.Append("现在地点：").Append(ReadPlace()).Append(NL);
+        // ⚠ 地点与到期卡数 2026-09-18 起**不在板上** —— 它们是纯上下文，
+        // 改由语音核心的上下文注入器随位置状态一起带（见 AmbientForVoiceCore）。
+        // 留在这里的代价是：为了不让它们把待办带着抖，写盘层得维持一套
+        // 「攒满 4 个变化才落」的补偿；搬走之后这块板上只剩祈使句，
+        // 「文件动了 = 有活干」不再需要任何补偿就是精确的。
         // ⚠ 焦点**不在慢板**（用户 2026-08-30：「焦点不应该被分开到两个
         // 板子上」）—— 它整个搬去了快板的转移语句。慢板从此没有外来文本，
         // 原来跟着焦点行的防注入框定也一并退场。
         // 复习计数：陈述句，看到不用动。积到 32 由 Python 生产者另建
         // 真待办 → 自然进下面的祈使句 —— 这行永远只是数字。
-        int dueQuantized = ReadReviewDueQuantized();
-        if (dueQuantized > 0)
-        {
-            text.Append("现在到期待复习卡共 ")
-                .Append(dueQuantized).Append(" 张。").Append(NL);
-        }
         // ⚠ 「焦点换过（旧快照对不上了）」**不在这里** —— 它归快板。
         // 那是一条要求及时的信号：晚一步就会拿着过期快照回答问题。
         // 路由层的结论决定谁上板（用户 2026-08-30 定稿的第②问归程序）。
@@ -1515,6 +1433,26 @@ internal static class ReaderAttentionBoard
         // 写盘层据此判断"这轮有没有值得立刻唤醒对面的变化"。
         _renderedSlowImperative = imperatives.ToString();
         return text.ToString();
+    }
+
+    /// <summary>地点 + 到期卡数：给语音核心的上下文注入器用。
+
+    /// 2026-09-18 用户重排板面：「之前之所以会设计慢板和快板两个记录，是因为
+    /// 我们之前没有推送的通道；但现在我们已经有通道了」。这两样原来在慢板上，
+    /// 可它们是**纯上下文**、不是"该不该开口"的祈使句 —— 放在板上只好靠
+    /// 「攒满 4 个变化才落盘」去压抖，而注入器本来就按指纹去重，天生适合它们。
+    /// 搬走之后慢板只剩祈使句，「文件动了 = 有活干」从近似变成精确。
+    ///
+    /// ⚠ **由桥来渲、语音核心只消费字符串**：地点那套规则（别名优先于 state、
+    /// 超 30 分钟标「旧记录」、「不知道」和「别处」绝不能混）只能有一份实现。
+    /// 抄第二份迟早两份说法不一样，而那种不一样没有任何迹象 —— 只会让 AI
+    /// 在咖啡店按在家处理。到期卡数的「4 张一档」同理：档位本身就是抖动阈值。</summary>
+    internal static (string Place, int ReviewDue) AmbientForVoiceCore()
+    {
+        lock (Gate)
+        {
+            return (ReadPlace(), ReadReviewDueQuantized());
+        }
     }
 
     internal static (DateTimeOffset LastRead, long Reads, long Sequence) Health()
@@ -1593,6 +1531,12 @@ internal static class ReaderAttentionBoard
             {
                 continue;
             }
+            // 墓碑不是信号：它是一段说明"这块板没有信号了"的文字，
+            // 跟「开口：无」同一性质，不该被当成一个没登记的标识去报红。
+            if (trimmed.StartsWith("（快板已退役", StringComparison.Ordinal))
+            {
+                continue;
+            }
             string? hit = known.FirstOrDefault(
                 marker => trimmed.StartsWith(marker, StringComparison.Ordinal));
             // ⚠ 认不出的行也要留痕 —— 用整行当标识。这样它一定对不上任何
@@ -1634,9 +1578,6 @@ internal static class ReaderAttentionBoard
             _fastSeq = 0;
             _lastSlowBody = string.Empty;
             _lastFastBody = string.Empty;
-            _lastFastKeep = string.Empty;
-            _callEnded = false;
-            _callEndedAt = default;
             _currentSource = null;
             _previousLabel = null;
             _sourceChanged = false;
@@ -1648,7 +1589,6 @@ internal static class ReaderAttentionBoard
             _lastFlushedSlowImperative = string.Empty;
             _renderedSlowImperative = string.Empty;
             LastWritten.Clear();
-            _hasDrawing = false;
             _drawingLastAt = default;
         }
     }

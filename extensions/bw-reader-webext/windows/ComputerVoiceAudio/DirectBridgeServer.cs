@@ -698,6 +698,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             "/voice-core/capability-guide",
             new[] { "GET" },
             context => HandleVoiceCoreCapabilityGuideAsync(context, serviceToken));
+        // 地点 + 到期卡数（2026-09-18 板面重排）：它们原来在慢板上，现在归
+        // 语音核心的上下文注入器。**由桥来渲、它只消费字符串** —— 地点那套
+        // 规则（别名优先、超 30 分钟标旧、「不知道」≠「别处」）只能有一份实现。
+        app.MapMethods(
+            "/voice-core/ambient",
+            new[] { "GET" },
+            context => HandleVoiceCoreAmbientAsync(context, serviceToken));
         // GET（2026-09-05）= 双工诊断只读口；POST 才是快照与钉住。方法表不放行 GET 的
         // 表现是 404，而处理函数里的 GET 分支看起来完全正常 —— 0.1.288 就这么丢过一次。
         app.MapMethods(
@@ -2655,9 +2662,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             return;
         }
         AppendOutputPickupLog("voip-outcome\t" + ntfId + "\t" + outcome);
-        // 新的一通有了结局 —— 上一次「他挂断了」的旗子已无意义，立刻清掉，
-        // 否则新通话进行中板上还挂着旧的挂断，AI 会收错尾。
-        ReaderAttentionBoard.NoteCallSuperseded();
+        // 2026-09-18：这里原来要清掉板上「他挂断了」那面旗 —— 快板退役后
+        // 挂断改成一次事件推送（见 NoteCallEnded），没有旗子可清了。
+        // 推送天生没有这个问题：它是一次性的，不会滞留到下一通。
         string path = Path.Combine(_runtimeDirectory, "voip-calls.json");
         // 读-改-写。并发只可能来自"同一台设备连着两通电话"，实际不存在；
         // 真撞上时最坏是丢一条结局，而那条会被下一轮当成 unanswered 处理 ——
@@ -3153,6 +3160,22 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         {
             Interlocked.Exchange(ref _inkStandbyBusy, 0);
         }
+    }
+
+    private async Task HandleVoiceCoreAmbientAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (!IsLocalProcessCaller(context))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+        (string place, int reviewDue) = ReaderAttentionBoard.AmbientForVoiceCore();
+        context.Response.ContentType = "application/json; charset=utf-8";
+        await context.Response.WriteAsJsonAsync(
+            new { ok = true, place, reviewDue },
+            serviceCancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleVoiceCoreCapabilityGuideAsync(

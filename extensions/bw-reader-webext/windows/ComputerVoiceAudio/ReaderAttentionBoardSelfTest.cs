@@ -160,16 +160,20 @@ internal static class ReaderAttentionBoardSelfTest
             "doc-b", "书 B", t0 + TimeSpan.FromSeconds(2));
         ReaderAttentionBoard.NoteLocation(
             "doc-b", "书 B", t0 + TimeSpan.FromSeconds(5));
-        if (ReaderAttentionBoard.RenderForSelfTest()
-            .Contains("书 B", StringComparison.Ordinal))
+        // ⚠ 2026-09-18 起焦点**不在板上**（快板退役，位置改由语音核心的注入器
+        // 按快照指纹报）。但停留门槛这条规则一点没变，只是换了露出的表面 ——
+        // 所以断言跟着搬到 FocusDiagnosis，而不是删掉。删掉的话"翻页会让板子
+        // 一直抖"这个教训就没有任何东西守着了。
+        if (ReaderAttentionBoard.FocusDiagnosis()
+            .Contains("当前焦点：书 B", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                "只待了几秒就算成注意力转移 —— 翻页会让板子一直抖");
+                "只待了几秒就算成注意力转移 —— 翻页会让下游一直抖");
         }
         ReaderAttentionBoard.NoteLocation(
             "doc-b", "书 B", t0 + TimeSpan.FromMinutes(3));
-        if (!ReaderAttentionBoard.RenderForSelfTest()
-            .Contains("书 B", StringComparison.Ordinal))
+        if (!ReaderAttentionBoard.FocusDiagnosis()
+            .Contains("当前焦点：书 B", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
                 "待够了却没算成转移 —— 门槛把真信号也挡掉了");
@@ -180,11 +184,19 @@ internal static class ReaderAttentionBoardSelfTest
         //    一个来源出问题不该让整块板子变哑。
         File.WriteAllText(
             Path.Combine(dir, "notifications.json"), "{ 这不是 json");
+        // 板上现在只有待办，所以"一个来源坏了不拖垮别的"这条改在新的分界上验：
+        // 待办文件坏掉时，① 板面渲染不许抛（坏一个来源不等于整块哑）；
+        // ② 给注入器的 ambient 照旧能回答地点 —— 两条来源本来就该互不相干。
         string degraded = ReaderAttentionBoard.RenderForSelfTest();
-        if (!degraded.Contains("书 B", StringComparison.Ordinal))
+        if (degraded.Length == 0)
         {
             throw new InvalidOperationException(
-                "待办文件坏了就连位置也不端了 —— 一个来源不该拖垮整块板子");
+                "待办文件坏了板面就整个空了 —— 空文件跟渲染挂掉分不出来");
+        }
+        if (ReaderAttentionBoard.AmbientForVoiceCore().Place.Length == 0)
+        {
+            throw new InvalidOperationException(
+                "待办文件坏了连地点也答不出 —— 一个来源不该拖垮另一个");
         }
         checks.Add("attention-board-survives-broken-source");
 
@@ -205,37 +217,39 @@ internal static class ReaderAttentionBoardSelfTest
         }
         checks.Add("attention-board-skips-ai-audience");
 
-        // ⑧ 笔画：有动作就立旗（不等稳定）；**持续画 → 一个字都不改**。
+        // ⑧ 笔迹**不再上任何板**（2026-09-18 快板退役）。
+        //
+        // 这一条是**负对照**：防止有人把它加回来。笔迹现在走语音核心的注入器 ——
+        // 那边连图本身一起送，比板上一句「他正在画」有用得多。
+        //
+        // ⚠ 随之退场的三条保证，去处写在这里，免得以为它们凭空消失了：
+        //   · 「持续画不刷新」→ 注入器按待命图名去重（每张图名唯一）
+        //   · 「停笔后搭下一次真实变化退场」→ 注入器的 contextInkStandbyMaxAgeSeconds
+        //   · 「慢板不因绘图而变」→ 板上已经没有绘图，命题自然成立
+        // 其中前两条现在由运行器（Python 侧）负责，**那边没有等价的自动检查** ——
+        // 这是这次重排明确的覆盖缺口，不假装它不存在。
         ReaderAttentionBoard.ResetForSelfTest(dir);
         WriteTodos(dir);
+        long beforeInk = ReaderAttentionBoard.Health().Sequence;
         ReaderAttentionBoard.NoteDrawing(t0);
-        // ⚠ 渲染要传**同一条时间轴**上的时刻。不传的话默认用真实时钟，
-        // 而夹具的 t0 是 1970 —— 一渲染就被判成"停笔十几万小时"，
-        // 笔画那行当场退场。第一版就栽在这里，报的却是"没上板子"。
-        if (!ReaderAttentionBoard.RenderForSelfTest(t0)
+        if (ReaderAttentionBoard.RenderForSelfTest(t0)
             .Contains("正在画或刚画过", StringComparison.Ordinal))
         {
-            throw new InvalidOperationException("笔画稳定了却没上板子");
+            throw new InvalidOperationException(
+                "笔迹又上板了 —— 它已归注入器，板上这份是重复的那份");
         }
-        long afterInk = ReaderAttentionBoard.Health().Sequence;
-        // ⚠ 关键那条：用户 2026-08-29「即使我持续在绘图，这个信息也不需要
-        // 被更新」。对面是"变了就读"，多一次变化就是白花它一次读取。
-        for (int i = 1; i <= 5; i++)
-        {
-            ReaderAttentionBoard.NoteDrawing(
-                t0 + TimeSpan.FromSeconds(10 * i));
-        }
-        if (ReaderAttentionBoard.Health().Sequence != afterInk)
+        if (ReaderAttentionBoard.Health().Sequence == beforeInk)
         {
             throw new InvalidOperationException(
-                "持续绘图把板子刷新了 —— 每一次都白花对面一次读取");
+                "NoteDrawing 什么也没做 —— 它还担着「能在上面画说明注意力已经"
+                + "在那儿」这件事，不该跟着板面一起被删空");
         }
-        checks.Add("attention-board-ink-does-not-churn");
+        checks.Add("attention-board-ink-no-longer-on-any-board");
 
-        // ⑨ 拆板（用户 2026-08-30）：慢板要稳，快板要及时。
+        // ⑨ 重排后的分界（2026-09-18）：板上**只有祈使句**。
         //
-        // 这一组的核心是**负控制**那条 —— 「慢板不因绘图而变」。没有它，
-        // 拆板等于没拆：两块板照样一起抖，而表面上看一切正常。
+        // 核心仍是负控制 —— 待办不该被任何别的信号带着抖。现在这条比拆板时更强：
+        // 会抖的那些东西根本不在板上了，所以不需要"两块板"来隔开它们。
         ReaderAttentionBoard.ResetForSelfTest(dir);
         WriteTodos(dir, "垃圾投放提醒");
         ReaderAttentionBoard.NoteLocation("bk", "食文化の本 p.26", t0);
@@ -243,85 +257,60 @@ internal static class ReaderAttentionBoardSelfTest
         ReaderAttentionBoard.NoteLocation("bk", "食文化の本 p.26", t1);
         string slowBefore = ReaderAttentionBoard.RenderSlowForSelfTest(t1);
         ReaderAttentionBoard.NoteDrawing(t1);
+        ReaderAttentionBoard.NoteCallEnded(t1);
         string slowAfter = ReaderAttentionBoard.RenderSlowForSelfTest(t1);
         if (!string.Equals(slowBefore, slowAfter, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                "开始绘图把慢板也改了 —— 拆板就是为了让待办不跟着抖");
-        }
-        checks.Add("attention-board-slow-ignores-ink");
-
-        string fastNow = ReaderAttentionBoard.RenderFastForSelfTest(t1);
-        if (!fastNow.Contains("正在画或刚画过", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("快板上没有笔画");
-        }
-        if (slowAfter.Contains("正在画或刚画过", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("笔画漏进了慢板");
+                "绘图或挂断把慢板改了 —— 板上只该有祈使句");
         }
         if (!slowAfter.Contains("垃圾投放提醒", StringComparison.Ordinal))
         {
             throw new InvalidOperationException("待办没在慢板上");
         }
-        if (fastNow.Contains("垃圾投放提醒", StringComparison.Ordinal))
+        foreach (string leaked in new[]
         {
-            throw new InvalidOperationException("待办漏进了快板");
-        }
-        // ⚠ 2026-08-30 二改：焦点**整个归快板**（「焦点不应该被分开到
-        // 两个板子上」），慢板只剩地点/待办/计数 —— 从此没有外来文本。
-        if (slowAfter.Contains("食文化の本", StringComparison.Ordinal))
+            "现在地点：", "食文化の本", "正在画或刚画过", "他主动挂断了电话",
+            "现在到期待复习卡共",
+        })
         {
-            throw new InvalidOperationException(
-                "焦点漏回了慢板 —— 它已整个搬去快板的转移语句");
+            if (slowAfter.Contains(leaked, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "「" + leaked + "」漏回了板面 —— 它 2026-09-18 已经搬走。板面：\n"
+                    + slowAfter);
+            }
         }
-        if (!fastNow.Contains("焦点落在「食文化の本 p.26」上",
+        // 快板是一块恒定的墓碑：内容不随任何输入变化，所以写一次之后永不再变，
+        // 对"文件变了就读"的消费方等于彻底安静。
+        string fastNow = ReaderAttentionBoard.RenderFastForSelfTest(t1);
+        if (!fastNow.Contains("快板已退役", StringComparison.Ordinal)
+            || !string.Equals(
+                fastNow,
+                ReaderAttentionBoard.RenderFastForSelfTest(
+                    t1 + TimeSpan.FromHours(9)),
                 StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                "首个焦点没在快板上落座。快板：\n" + fastNow);
+                "快板不是一块恒定的墓碑 —— 它一变就又会去唤醒盯着它的那一方。"
+                + "快板：\n" + fastNow);
         }
-        if (fastNow.Contains("现在地点：", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                "地点漏进了快板 —— 慢信号放快板会跟着绘图一起抖");
-        }
-        checks.Add("attention-board-split-routes-each-signal");
+        checks.Add("attention-board-slow-holds-only-imperatives");
 
-        // ⚠ 笔迹退场**必须搭车**（用户 2026-08-29 定、2026-08-30 重申：
-        // 「消失时是伴随着其他的更新进行更新」。拆板当天我改成过"到点直接
-        // 退场"，是擅自推翻 —— 有主动推送后那等于停笔两分钟就唤醒对面一次，
-        // 只为说"他不画了"）。
-        //
-        // 所以分两步断言：
-        //   ① 光是时间到了、别的没变 → 笔迹**还在**
-        //   ② 时间到了且快板别的行变了 → 跟着那次变化一起走
+        // 确定转移机制（带操作立刻确认，不等 45 秒）仍要守 —— 表面换成诊断面。
         DateTimeOffset t2 = t1 + TimeSpan.FromMinutes(3);
-        if (!ReaderAttentionBoard.RenderFastForSelfTest(t2)
-            .Contains("正在画或刚画过", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                "只是时间到了笔迹就自己走了 —— 纯时钟驱动的消失会白唤醒对面一次");
-        }
-        // 制造一次"别的行变了"：焦点转移（带 interacted 立刻确认）——
-        // 转移语句一变，快板就有了真实变化，笔迹搭这趟车走。
-        // 这同时顺手验证了**确定转移机制**：没等 45 秒。
         ReaderAttentionBoard.NoteLocation(
             "doc-ride", "换过去的页面", t2, interacted: true);
-        string afterRide = ReaderAttentionBoard.RenderFastForSelfTest(t2);
-        if (!afterRide.Contains("焦点从「食文化の本 p.26」转移到「换过去的页面」",
-                StringComparison.Ordinal))
+        if (!ReaderAttentionBoard.FocusDiagnosis()
+                .Contains("当前焦点：换过去的页面", StringComparison.Ordinal)
+            || !ReaderAttentionBoard.FocusDiagnosis()
+                .Contains("从「食文化の本 p.26」转来", StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                "带操作的转移没有立刻确认 —— 确定转移机制失效。快板：\n"
-                + afterRide);
+                "带操作的转移没有立刻确认 —— 确定转移机制失效。诊断：\n"
+                + ReaderAttentionBoard.FocusDiagnosis());
         }
-        if (afterRide.Contains("正在画或刚画过", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                "别的行都变了笔迹还挂着 —— 搭车的车来了它没上");
-        }
-        checks.Add("attention-board-ink-retires-with-the-next-change");
+        checks.Add("attention-board-interacted-focus-confirms-at-once");
 
         // ⑩ 登记表**双向**跟渲染对齐（用户 2026-08-30 要的那个清单）。
         //
@@ -341,18 +330,25 @@ internal static class ReaderAttentionBoardSelfTest
             "bb", "第二处", t3 + TimeSpan.FromMinutes(2));
         DateTimeOffset t4 = t3 + TimeSpan.FromMinutes(2);
         ReaderAttentionBoard.NoteDrawing(t4);
-        // 通话挂断也要立起来 —— 它是快板登记表的一项，缺了正向检查会红。
         ReaderAttentionBoard.NoteCallEnded(t4);
-        // 复习计数同理（慢板登记项）。37 张 → 4 张一档 → 板上该写 36。
+        // 复习计数 2026-09-18 起**不在板上**，归给注入器的 ambient。
+        // 「4 张一档」这条规则一点没变（档位就是这行的抖动阈值：不取整的话
+        // 每复习一张就变一次，而每一次变化都要花下游一次读取），所以断言
+        // 跟着搬到新表面 —— 规则搬家时把守它的测试一起搬，别让它落在原地失效。
         File.WriteAllText(
             Path.Combine(dir, "replication-apply.status.json"),
             "{\"notifications\":{\"reviewDue\":{\"due\":37,\"new\":2}}}");
-        string slowFull = ReaderAttentionBoard.RenderSlowForSelfTest(t4);
-        if (!slowFull.Contains("现在到期待复习卡共 36 张", StringComparison.Ordinal))
+        int quantized = ReaderAttentionBoard.AmbientForVoiceCore().ReviewDue;
+        if (quantized != 36)
         {
             throw new InvalidOperationException(
-                "37 张到期卡该按 4 张一档写成 36 —— 档位就是这行的抖动阈值。"
-                + "板面：\n" + slowFull);
+                "37 张到期卡该按 4 张一档报成 36，实际 " + quantized);
+        }
+        string slowFull = ReaderAttentionBoard.RenderSlowForSelfTest(t4);
+        if (slowFull.Contains("现在到期待复习卡共", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "到期卡数漏回了板面 —— 它是陈述句，板上只放祈使句");
         }
         string fastFull = ReaderAttentionBoard.RenderFastForSelfTest(t4);
         foreach ((string board, string body) in new[]

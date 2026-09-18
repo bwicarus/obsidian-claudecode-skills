@@ -121,6 +121,32 @@ def hot_guide_topics(days: float, min_calls: int) -> list[tuple[str, int]]:
                   key=lambda kv: -kv[1])
 
 
+_AMBIENT_CACHE: dict = {"at": 0.0, "value": None}
+
+
+def fetch_ambient(cache_seconds: float = 60.0) -> dict | None:
+    """向桥要「地点 + 到期卡数」（0.1.420 起的只读端点）。取不到返回 None。
+
+    缓存是必需的而不是优化：这两样每次注入都要用，而注入在开口边沿很密；
+    地点本身变化极慢（桥那边超过 30 分钟才换一档说法），每轮都打一次 HTTP
+    纯属白费。取不到就当没有 —— 宁可少一行上下文，不可拿一个错的地点去说话。
+    """
+    import urllib.request
+    now = time.time()
+    if _AMBIENT_CACHE["value"] is not None and now - _AMBIENT_CACHE["at"] < cache_seconds:
+        return _AMBIENT_CACHE["value"]
+    try:
+        with urllib.request.urlopen(BRIDGE_URL + "/voice-core/ambient", timeout=5) as resp:
+            d = json.loads(resp.read() or b"{}")
+        if not d.get("ok"):
+            return None
+        value = {"place": str(d.get("place") or ""), "reviewDue": int(d.get("reviewDue") or 0)}
+    except Exception:   # noqa: BLE001
+        return None
+    _AMBIENT_CACHE.update(at=now, value=value)
+    return value
+
+
 def fetch_guide(topic: str) -> str:
     """向桥要一份指南正文（0.1.415 起的只读端点）。取不到就算了，维持按需取。"""
     import urllib.parse
@@ -286,6 +312,12 @@ DEFAULTS: dict = {
     # 内联就不比按需取贵，还省一趟往返。6000 那版把唯一达标的 boards(8106 字) 挡在外面，
     # 等于闭环空转（2026-09-18 实测 guide_inline skipped=["boards(超预算)"]）。
     "guideInlineMaxChars": 12000,
+    # 地点 + 到期卡数（2026-09-18 板面重排）：它们原来在慢板上，但那是纯上下文，
+    # 不是"该不该开口"的祈使句 —— 留在板上得靠攒批压抖，而这里本来就按指纹去重。
+    # ⚠ 值由桥渲好（/voice-core/ambient），我们只消费字符串：地点那套规则
+    # （别名优先、超 30 分钟标旧、「不知道」≠「别处」）只能有一份实现。
+    "contextAmbientEnabled": True,
+    "contextAmbientCacheSeconds": 60.0,
     "contextInkStandbyMaxAgeSeconds": 900,   # 待命图的保质期：这一笔画完超过这么久还没被送出去就作废（旧设计里的新鲜窗，2026-09-17 补回）
     "contextInkImage": True,       # 桥在每次笔迹稳定时抓好图放进 runtime/ink-standby 待命；开口交给后台的那一刻把本页没送过的**全部**随 steer 插进那一轮（localImage 路径，不进 base64）
     "contextInkImageMaxBytes": 700000,   # 超过就不投（图片按 token 计费且留在线程历史里）
@@ -1821,21 +1853,36 @@ class Runner:
             if skipped:
                 text += chr(10) + "（" + skipped + "刚才已经给过，这里不再重复；要看就直接往上翻本轮对话。）"
             text = self._ctx_mark_selection(text, sel_items)
+        # 地点 + 到期卡数（2026-09-18 从慢板搬来）。**进指纹**：地点换了要重注入 ——
+        # 它决定"该不该现在提"，而这正是当初把它放在板上的理由。
+        # ⚠ 值由桥渲好，这里只拼句子：地点那套规则（别名优先、超 30 分钟标旧、
+        # 「不知道」≠「别处」）只能有一份实现，抄第二份迟早两份说法不一样。
+        amb_hint = ""
+        if s.get("contextAmbientEnabled", True):
+            amb = fetch_ambient(float(s.get("contextAmbientCacheSeconds") or 60.0))
+            if amb:
+                bits = []
+                if amb["place"] and amb["place"] != "不知道":
+                    bits.append("他现在在" + amb["place"])
+                if amb["reviewDue"] > 0:
+                    bits.append("到期待复习卡共 %d 张（陈述，看到不用动）" % amb["reviewDue"])
+                if bits:
+                    amb_hint = "。" + "；".join(bits)
         # 带时刻：旧的删不掉（inject_items 只能追加），所以让它认得出哪条最新。
         state = ("【当前阅读状态 " + time.strftime("%H:%M:%S") + "】只认时刻最新的一条，更早的全部作废；"
-                 "这是状态记录不是提问，不要回应本条。" + where + sel_hint + act_hint + ink_hint + "。")
+                 "这是状态记录不是提问，不要回应本条。" + where + sel_hint + act_hint + ink_hint + amb_hint + "。")
         last_act = str((acts[-1].get("what") or acts[-1].get("kind") or "") if acts else "")[:40]
         # ⚠ 2026-09-17：这里原来把绘图折成 bool(vis.get("has_ink"))，而 vis 几乎总是空 ——
         #   于是绘图恒为 False，画多少笔语音侧指纹都不变、一次都不重注入。
         #   用户指出应当「把绘图的提示和那几个选中放在一个逻辑里共同算作改变内容」：
         #   现在绘图这一项取待命图的实际名单（每张图名唯一），与选中项并列进同一个指纹。
         fp_ink = ",".join(x["name"] for x in ink_pending)
-        fp_state = "%s|%s|%s|%s|%s" % (self._ctx["page_key"], sel_text[:60],
-                                       "".join(k + t[:20] for k, t, _r, _l in sel_items), last_act, fp_ink)
+        fp_state = "%s|%s|%s|%s|%s|%s" % (self._ctx["page_key"], sel_text[:60],
+                                       "".join(k + t[:20] for k, t, _r, _l in sel_items), last_act, fp_ink, amb_hint)
         fp_text = "%s|%d|%s" % (self._ctx["page_key"], len(text), text[:30]) if text else ""
         # 语音侧预算只截正文，位置/选区提示和结尾的静默约定必须完整保留（否则正文一长就把「不要回应本条」切掉了）
         vbudget = int(s.get("contextVoiceChars") or 700)
-        head = "(" + where + sel_hint_voice + ink_hint_voice + act_hint
+        head = "(" + where + sel_hint_voice + ink_hint_voice + act_hint + amb_hint
         tail = "。回答以本条为准；状态记录，不要回应本条。)"
         if text and s.get("contextVoiceText"):
             room = max(0, vbudget - len(head) - len(tail) - 40)
