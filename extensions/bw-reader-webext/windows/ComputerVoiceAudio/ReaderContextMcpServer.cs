@@ -3276,12 +3276,21 @@ internal sealed class ReaderContextMcpServer
                     //   （左右滑、存一张自动跳下一张，见 rc-flashcard 的 updateSlide /
                     //   _advanceToNextDraft）是按「一次投递 = 一组卡」做的，拆开调就没了。
                     //   参数本来就收 12 张，说明里却从没说"同一批要放一起"。
-                    + "Put every card of the SAME request in ONE call: one "
-                    + "delivery becomes one swipeable draft group in the sidebar "
-                    + "(save one and it advances to the next). Calling this tool "
-                    + "once per card produces separate standalone drafts and the "
-                    + "user loses that flow — two circled words = one call with "
-                    + "two cards, not two calls.",
+                    // ⚠⚠ 同日订正：上一版这里写成了「同一批一律放一次调用」，**那是错的** ——
+                    //   nodeIds 是**按调用**给的一组绑定（见 KjNodeIdsSchema，描述里
+                    //   甚至写着 "this card"），整批共用。两个不同知识点的词根本没法
+                    //   放进一次调用还各自绑对。模型当时拆成两次是**对的**，是我的
+                    //   说明在要求它做 schema 不允许的事 —— 正是 CLAUDE.md 那条
+                    //   「面向 AI 的说明写反比没写更糟」。要让多词批量也能走轮播，
+                    //   得把绑定改成按卡给（cards[i].nodeIds），那是结构改动，不是措辞。
+                    + "Cards that share the SAME nodeIds/track belong in ONE call: "
+                    + "one delivery becomes one swipeable draft group in the sidebar "
+                    + "(save one and it advances to the next), while one call per "
+                    + "card gives separate standalone drafts. "
+                    + "But nodeIds is per CALL, not per card — when the cards need "
+                    + "different knowledge nodes, separate calls are correct and you "
+                    + "must NOT merge them just to get the swipe flow. "
+                    + "Binding correctness outranks the sidebar layout.",
                 ["items"] = new JsonObject
                 {
                     ["oneOf"] = new JsonArray
