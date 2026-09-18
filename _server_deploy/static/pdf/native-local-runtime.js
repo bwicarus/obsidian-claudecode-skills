@@ -2444,6 +2444,38 @@
     });
   }
 
+  // 导出完整包（2026-09-19 用户：「全做，不需要用 pi」）。
+  //
+  // ⚠ 此前只有 snapshot-headers（各域的摘要）和 apply-atomically（导入），**没有导出**：
+  //   全仓库找不到任何一处把本机状态发布出去，所以「多端同步」实际是单向的 ——
+  //   iPad 上做的卡从来没被发布到任何地方，手机去拉自然是空的。这里补上出口那一半。
+  // ⚠ 每一项的字段必须与 Swift 的 ReaderBookUserStateDomainPayload 一一对应
+  //   （name/revision/digest/byteCount/empty/payloadJson），导入端按同一份契约解析；
+  //   digest 是 payloadJson 那串**规范化 JSON 的 UTF-8 字节**的 sha256，不是对象哈希。
+  function exportUserStatePackage(request) {
+    return bootPromise.then(function () {
+      validateUserStateRequest(request, 'export-package');
+      return userStateSnapshotRecords();
+    }).then(function (records) {
+      var domains = userStateDomainsFromRecords(records);
+      return Promise.all(USER_STATE_DOMAINS.map(function (name) {
+        var canonical = canonicalJSONString(domains[name]);
+        return sha256Hex(canonical).then(function (digest) {
+          return {
+            name: name,
+            revision: userStateDomainRevision(name, records),
+            digest: digest,
+            byteCount: utf8(canonical).length,
+            empty: userStateDomainEmpty(name, domains[name]),
+            payloadJson: canonical
+          };
+        });
+      }));
+    }).then(function (domains) {
+      return userStateResponse('export-package', request.requestId, { domains: domains });
+    });
+  }
+
   function parseUserStateTransaction(request) {
     validateUserStateRequest(request, 'apply-atomically', ['transaction']);
     var transaction = request.transaction;
@@ -2631,6 +2663,7 @@
   var bookUserStateAPI = Object.freeze({
     contract: 'reader-book-user-state-web/1',
     snapshotHeaders: snapshotUserStateHeaders,
+    exportPackage: exportUserStatePackage,
     applyAtomically: applyUserStateAtomically
   });
 

@@ -257,6 +257,128 @@ enum ReaderServerLibrary {
         return payload.name ?? name
     }
 
+    // MARK: - 跨设备书籍状态（2026-09-19）
+    //
+    // ⚠ 在此之前这条链路**只有入口没有出口**：App 能从 Pi 拉一份状态包并原子导入，
+    //   却没有任何一处把本机状态发布出去 —— 所以「多端同步」实际是单向的，
+    //   iPad 上做的卡从来没被发布到任何地方，换台设备打开同一本书自然什么都没有。
+    //   而那条仅有的入口还指着 Pi（用户 2026-08-30 已把 Pi 从架构里去掉，实测 502）。
+    //   这里把出入两半都接到 Windows 桥上。
+
+    /// 信封契约：桥把 POST 的**整个 body 当作一份包存下**，GET 原样返回。
+    /// 所以 deviceId / contentSha256 / at 必须在顶层（桥要读它们），真正的包放 package。
+    private static let userStateEnvelopeContract = "reader-book-user-state-envelope/1"
+
+    private struct UserStateEnvelope: Codable {
+        let contract: String
+        let deviceId: String
+        let contentSha256: String
+        let at: Int64
+        let package: ReaderBookUserStatePackage
+    }
+
+    /// 这台设备的稳定标识。桥按 (contentSha, deviceId) 分设备存包，靠它区分是谁推的。
+    /// 随安装生成一次并持久化；重装当作换一台设备 —— 对这个用途足够，也不牵扯任何身份信息。
+    static var deviceId: String {
+        let key = "bw.reader.userstate.deviceId"
+        if let existing = UserDefaults.standard.string(forKey: key),
+           existing.count >= 8, existing.count <= 80,
+           existing.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }) {
+            return existing
+        }
+        let fresh = "ios-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+        UserDefaults.standard.set(fresh, forKey: key)
+        return fresh
+    }
+
+    /// 服务器上这本书最新的一份状态包（按内容 sha 找）。**没有任何设备推过 → nil**，
+    /// 那不是错误：第一次用的时候本来就没有。
+    static func userStatePackage(
+        contentSha256: String
+    ) async throws -> ReaderBookUserStatePackage? {
+        guard contentSha256.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil,
+              var components = URLComponents(
+                string: ReaderServer.url("/reader-library/user-state")?.absoluteString ?? ""
+              ) else {
+            throw Failure.malformed
+        }
+        components.queryItems = [
+            URLQueryItem(name: "contentSha256", value: contentSha256),
+        ]
+        guard let url = components.url else { throw Failure.malformed }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        // ⚠ 桥的第一道闸就是 Origin，少了它是 403 而不是"没鉴权"。
+        request.setValue(ReaderServer.origin, forHTTPHeaderField: "Origin")
+        request.timeoutInterval = 60
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { throw Failure.malformed }
+            if http.statusCode == 404 {
+                // 端点不存在和"这本书还没人推过"都是 404。用响应体区分：
+                // 后者带 code=BW_USER_STATE_NONE，那是正常的空，不该当成服务器旧版。
+                if let body = try? JSONDecoder().decode(
+                    UserStateAbsent.self, from: data
+                ), body.code == "BW_USER_STATE_NONE" {
+                    return nil
+                }
+                throw Failure.capabilityMissing
+            }
+            if http.statusCode == 405 { throw Failure.capabilityMissing }
+            guard http.statusCode == 200 else {
+                throw Failure.rejected(
+                    code: "HTTP_\(http.statusCode)",
+                    message: "服务器拒绝了这次请求")
+            }
+            guard let envelope = try? JSONDecoder().decode(
+                UserStateEnvelope.self, from: data
+            ), envelope.contract == userStateEnvelopeContract,
+                  envelope.contentSha256 == contentSha256 else {
+                throw Failure.malformed
+            }
+            return envelope.package
+        } catch let failure as Failure {
+            throw failure
+        } catch {
+            throw Failure.serverUnreachable(error.localizedDescription)
+        }
+    }
+
+    private struct UserStateAbsent: Decodable {
+        let ok: Bool
+        let code: String
+    }
+
+    /// 把本机这本书的状态包发布到服务器，供别的设备拉取。
+    static func publishUserState(
+        _ package: ReaderBookUserStatePackage
+    ) async throws {
+        guard let url = ReaderServer.url("/reader-library/user-state") else {
+            throw Failure.malformed
+        }
+        let envelope = UserStateEnvelope(
+            contract: userStateEnvelopeContract,
+            deviceId: deviceId,
+            contentSha256: package.contentSha256,
+            at: Int64(Date().timeIntervalSince1970 * 1000),
+            package: package
+        )
+        guard let body = try? JSONEncoder().encode(envelope) else {
+            throw Failure.malformed
+        }
+        let data = try await post(
+            url, body: body, contentType: "application/json", timeout: 120)
+        guard let result = try? JSONDecoder().decode(
+            UploadResponse.self, from: data), result.ok else {
+            let detail = (try? JSONDecoder().decode(UploadResponse.self, from: data))
+            throw Failure.rejected(
+                code: detail?.code ?? "BW_USER_STATE_PUBLISH",
+                message: detail?.message ?? "服务器没有接受这份状态包")
+        }
+    }
+
     private static func post(
         _ url: URL, body: Data, contentType: String,
         timeout: TimeInterval = 600

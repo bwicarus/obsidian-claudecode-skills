@@ -111,6 +111,32 @@ final class ReaderBookUserStateWebAdapter: ReaderBookUserStateAtomicApplying {
         )
     }
 
+    /// 导出本机这本书的完整状态包（2026-09-19 用户：「全做，不需要用 pi」）。
+    ///
+    /// ⚠ 在此之前**只有入口没有出口**：snapshotHeaders 只给各域摘要、applyAtomically 只管导入，
+    ///   全仓库没有任何一处把本机状态发布出去。所以「多端同步」实际是单向的 ——
+    ///   iPad 上做的卡从来没被发布到任何地方，换台设备打开同一本书自然什么都没有。
+    func exportPackage(
+        localBookId: String
+    ) async throws -> [ReaderBookUserStateDomainPayload] {
+        guard localBookId == self.localBookId else {
+            throw ReaderBookUserStateWebAdapterError.contextChanged
+        }
+        let requestId = Self.requestId()
+        let request: [String: Any] = [
+            "contract": Self.requestContract,
+            "action": "export-package",
+            "requestId": requestId,
+            "localBookId": localBookId,
+        ]
+        let raw = try await call(method: "exportPackage", request: request)
+        return try Self.parseExportResponse(
+            raw,
+            requestId: requestId,
+            localBookId: localBookId
+        )
+    }
+
     func applyAtomically(
         _ transaction: ReaderBookUserStateImportTransaction
     ) async throws -> ReaderBookUserStateImportReceipt {
@@ -139,7 +165,8 @@ final class ReaderBookUserStateWebAdapter: ReaderBookUserStateAtomicApplying {
         method: String,
         request: [String: Any]
     ) async throws -> Any {
-        guard method == "snapshotHeaders" || method == "applyAtomically",
+        guard method == "snapshotHeaders" || method == "exportPackage"
+                || method == "applyAtomically",
               let webView else {
             throw ReaderBookUserStateWebAdapterError.unavailable
         }
@@ -248,6 +275,70 @@ final class ReaderBookUserStateWebAdapter: ReaderBookUserStateAtomicApplying {
             )
         }
         guard Set(result.keys) == Set(ReaderBookUserStateDomainName.allCases) else {
+            throw ReaderBookUserStateWebAdapterError.invalidResponse
+        }
+        return result
+    }
+
+    private static func parseExportResponse(
+        _ value: Any,
+        requestId: String,
+        localBookId: String
+    ) throws -> [ReaderBookUserStateDomainPayload] {
+        guard let response = value as? [String: Any],
+              Set(response.keys) == Set([
+                "contract", "action", "requestId", "ok", "localBookId",
+                "domains",
+              ]),
+              response["contract"] as? String == responseContract,
+              response["action"] as? String == "export-package",
+              response["requestId"] as? String == requestId,
+              response["localBookId"] as? String == localBookId,
+              response["ok"] as? Bool == true,
+              let values = response["domains"] as? [[String: Any]],
+              values.count == ReaderBookUserStateDomainName.allCases.count else {
+            throw ReaderBookUserStateWebAdapterError.invalidResponse
+        }
+        var seen: Set<ReaderBookUserStateDomainName> = []
+        var result: [ReaderBookUserStateDomainPayload] = []
+        for value in values {
+            guard Set(value.keys) == Set([
+                "name", "revision", "digest", "byteCount", "empty", "payloadJson",
+            ]),
+                  let nameRaw = value["name"] as? String,
+                  let name = ReaderBookUserStateDomainName(rawValue: nameRaw),
+                  !seen.contains(name),
+                  let digest = value["digest"] as? String,
+                  Self.isSHA256(digest),
+                  let revision = Self.strictInteger(value["revision"]),
+                  (0...ReaderBookUserStatePackageCodec.maximumRevision)
+                    .contains(revision),
+                  let byteCount = Self.strictInteger(value["byteCount"]),
+                  byteCount >= 0,
+                  let empty = value["empty"] as? Bool,
+                  let payloadJson = value["payloadJson"] as? String else {
+                throw ReaderBookUserStateWebAdapterError.invalidResponse
+            }
+            // ⚠ 摘要与字节必须当场对上。渲染层是**不受信**的一侧：它报的 digest 和
+            //   byteCount 只有经过这一步才配当事实 —— 同一条纪律在导入端已经有了
+            //   （"Its exact UTF-8 bytes are verified before the renderer is allowed
+            //   to parse or import it"），出口这侧不能松。
+            let bytes = Data(payloadJson.utf8)
+            guard bytes.count == Int(byteCount),
+                  ReaderBookUserStatePackageCodec.sha256(bytes) == digest else {
+                throw ReaderBookUserStateWebAdapterError.invalidResponse
+            }
+            seen.insert(name)
+            result.append(ReaderBookUserStateDomainPayload(
+                name: name,
+                revision: revision,
+                digest: digest,
+                byteCount: Int(byteCount),
+                empty: empty,
+                payloadJson: payloadJson
+            ))
+        }
+        guard seen == Set(ReaderBookUserStateDomainName.allCases) else {
             throw ReaderBookUserStateWebAdapterError.invalidResponse
         }
         return result
