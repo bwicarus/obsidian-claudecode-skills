@@ -1742,13 +1742,30 @@ internal sealed class ReaderContextMcpServer
                     + "does quote the book, also pass file, target and verbatim "
                     + "sourceText after reader_context_snapshot; all three are "
                     + "required together and the Reader requires exactly one "
-                    + "match before showing its confirmation UI. This tool never writes "
-                    + "Anki: success means only draft_delivered. The user "
-                    + "must click the existing Add to Anki button; the confirmed "
-                    + "card keeps the node binding (tags kj::<id> + KJ ledger). "
+                    + "match before showing its confirmation UI. This tool only "
+                    + "delivers a draft: success means draft_delivered, nothing is "
+                    + "stored yet. "
+                    // ⚠ 2026-09-19：这里原来写「叫用户点 Add to Anki」。侧栏那个按钮
+                    //   **不叫这个名字**，也不是那个语义 —— 它是「✓ 保存到 Reader 卡库」，
+                    //   确认后卡片存进 Reader 本地卡库，并**自动后台推送到电脑 Anki**
+                    //   （2026-08-18 用户定的「保存成功即自动推送」，只有 iPad 那条仍手动）。
+                    //   模型照着旧说明回答过：「你还没点 Add to Anki，点了才会真正加入」——
+                    //   用户界面上根本没有那个按钮。面向 AI 的说明写反比没写更糟。
+                    + "The user confirms with the sidebar button 保存到 Reader 卡库 "
+                    + "(there is no button named Add to Anki). Confirming stores the "
+                    + "card in the Reader local card repository and auto-pushes it to "
+                    + "the desktop Anki in the background; only iPad Anki still needs a "
+                    + "manual step. The confirmed card keeps the node binding "
+                    + "(tags kj::<id> + KJ ledger). "
+                    // 用户 2026-09-19：「他好像无法确认我是否保存，或许这种信息也该一起
+                    //   进入文字 AI 那边」。别再凭流程猜 —— 卡库是可查的。
+                    + "To answer 我刚才保存了吗, do NOT guess from the draft flow: call "
+                    + "reader_learning_cards (optionally contains=<the front text>) and "
+                    + "say what you actually found. Present in the repository = the user "
+                    + "already confirmed it; absent = still an unconfirmed draft. "
                     + "The sidebar field has THREE states, do not collapse them: "
-                    + "sidebar=\"shown\" = the draft is really visible, fine to say "
-                    + "点一下 Add to Anki. sidebar=\"unavailable\" or \"error:...\" = "
+                    + "sidebar=\"shown\" = the draft is really visible, fine to ask "
+                    + "the user to confirm it in the sidebar. sidebar=\"unavailable\" or \"error:...\" = "
                     + "the card exists only in the local repository and the user "
                     + "CANNOT see it - say so plainly (卡片做好了，但侧栏没显示出来) "
                     + "instead of pointing at a button that is not there. "
