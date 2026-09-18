@@ -3159,7 +3159,12 @@ if (window.__bwPwaProviderOnly) return;
       //   只要这里没放行，上游一带新字段，这个 exactObject 就抛，被下面的
       //   catch 整个换成 rejected —— 表现是「一次成功的绑定被回成失败」，
       //   而链路上没有任何一处出声。
-      exactObject(receipt, ["outcome"], ["error", "bindOutcome", "bindReason"],
+      exactObject(receipt, ["outcome"],
+        // sidebar：草稿在侧栏露没露脸（2026-09-18）。**放行表必须跟 rc-voicecall.js
+        // 同一次提交** —— 上面那条注释警告过，我上一版恰恰只改了那边没改这里，
+        // 于是新构建一带这个键，这里就抛、被 catch 换成 rejected：
+        // 卡片明明渲出来了，工具却报「阅读器拒绝了」（用户实测 18:57 起连续三次）。
+        ["error", "bindOutcome", "bindReason", "sidebar"],
         "Reader 输出回执");
       if (["applied", "replay", "rejected"].indexOf(receipt.outcome) < 0) {
         throw directError(
@@ -3204,6 +3209,8 @@ if (window.__bwPwaProviderOnly) return;
         error: receipt.outcome === "rejected" ? receipt.error : null,
         bindOutcome: receipt.bindOutcome || null,
         bindReason: receipt.bindReason || null,
+        // 同上：这里是重建不是透传，不显式搬就到不了桥（2026-09-18）。
+        sidebar: receipt.sidebar || null,
       }, REQUEST_TIMEOUT_MS);
     }).catch(function () {
       // The Windows broker owns retry/reporting. Never render or execute twice.
@@ -5178,7 +5185,9 @@ if (window.__bwPwaProviderOnly) return;
       }
       return Promise.resolve(receiver(delivery)).then(function (receipt) {
         exactObject(
-          receipt, ["outcome"], ["error", "bindOutcome", "bindReason"],
+          receipt, ["outcome"],
+          // 同上：两处闸必须一起开，漏一处就是"成功被回成失败"且全链零报错。
+          ["error", "bindOutcome", "bindReason", "sidebar"],
           "Reader 输出回执"
         );
         return {
@@ -5188,6 +5197,9 @@ if (window.__bwPwaProviderOnly) return;
           error: receipt.error,
           bindOutcome: receipt.bindOutcome,
           bindReason: receipt.bindReason,
+          // 放行 ≠ 搬运：上面的 exactObject 只是允许这个键存在，不搬的话
+          // 它到不了桥，桥那头永远看到 null（而 null 跟"没报"分不清）。
+          sidebar: receipt.sidebar,
         };
       });
     }).catch(function (error) {
