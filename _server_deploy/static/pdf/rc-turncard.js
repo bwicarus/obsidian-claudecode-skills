@@ -678,7 +678,11 @@
   function partsOf(tid) {
     var t = _turns[tid];
     if (!t) return [];
-    return t.parts.map(function (p) {
+    // ⚠ 2026-09-18：**还在流的那一条草稿不落库**。它每来一个 delta 就变一次，
+    //   而 onChange → _syncParts 会把 partsOf 整个发出去 —— 于是半截话被当成正式内容
+    //   写进记录（实录：content=「明白了:正面放中文,背面」，而完整那句在另一条记录里，
+    //   侧栏因此同时显示半截和全文两份）。定稿由 freezeDraft 之后的那次同步负责。
+    return t.parts.filter(function (p) { return p !== t.draft; }).map(function (p) {
       var o = {}; for (var k in p) { if (k !== '_el') o[k] = p[k]; }
       return o;
     });

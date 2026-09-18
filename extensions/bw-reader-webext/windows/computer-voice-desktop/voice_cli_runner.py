@@ -884,6 +884,7 @@ class Runner:
         self._promise_pending: tuple | None = None
         self._notify_sent: dict[str, float] = {}   # 通知主动投递的冷却台账
         self._delegation_seq = 0              # 累计委派次数（只增）
+        self._last_backend_turn_id = None     # 上一条后台轮 id：轮外那句收尾语音认领用
         self._user_asks: list = []            # 最近几次用户发言 (时刻, 原话, 当时的委派序号)
         self._voice_stream = ""
         self._backend_recent: tuple[float, str] | None = None   # 后台最近一条回复：语音把它念出来的字幕不再重复入库
@@ -3298,6 +3299,9 @@ class Runner:
     def _finish_turn(self, turn: dict):
         rec, self._turn = self._turn, None
         self._backend_done_at = time.time()
+        if rec:
+            # 收尾那句语音几乎总是落在轮外，要能认领回去（见 _subtitle_done 的 owner 判定）
+            self._last_backend_turn_id = rec["id"]
         if not rec:
             return
         user = None if rec.get("user_posted") else rec.get("user")
@@ -3348,20 +3352,25 @@ class Runner:
             if not re.search(r"[0-9A-Za-z\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", text):
                 self.log("history_skip_punct", text=text[:20])   # 「。」这种纯标点回复不记
                 return
-            self._history_post({"assistant": text, "via": "voice", "turn_id": tid})
-            # ⭐ 用户 2026-09-18：「保留流式传输，只是完成后发送信号然后自动整理为之前的样子」。
-            #   字幕档下每句转写各写一条记录（流式要的就是这个），于是一次任务在侧栏散成好几个框
-            #   —— 而按 ADR，一个轮次该是**一个容器**，归属依据是**后台的实际调用**
-            #   （用户原话：从一次委托后后台开始工作到后台结束所有任务）。
-            #   所以：这句若发生在后台轮进行中，就同时并进那一轮的 parts，并把这条零散记录
-            #   登记进待合并名单；后台轮收尾时一起发给服务端，由它删掉零散的那几条。
-            #   流式期间照旧分开（看得见逐句），完成那一刻自动收拢。
+            # ⭐ 归属依据 = 后台的实际调用（用户 2026-09-18）。这句若属于某次后台任务，
+            #   就**直接作为 part 并进那条轮次记录**，根本不另建 v- 记录 ——
+            #   上一版是"先建再收拢"，结果半截草稿、完整句、零散记录三份并存（实录里三样都在）。
+            #   不建就没得收，这比事后删干净。
+            #   ⚠ 窗口取到后台轮刚结束 20 秒内：收尾那句「好了，已经放到侧栏」几乎总是
+            #     落在轮外，按时刻切会把它漏成孤条。与 commentary 判据同一个口径。
             rec = self._turn
-            if rec is not None and len(rec.get("parts") or []) < 24:
-                rec.setdefault("absorb", [])
-                if tid not in rec["absorb"]:
-                    rec["absorb"].append(tid)
-                rec["parts"].append({"kind": "text", "text": text[:4000], "origin": "voice"})
+            owner = rec["id"] if rec is not None else (
+                self._last_backend_turn_id
+                if (time.time() - self._backend_done_at) < 20 else None)
+            if owner:
+                self._history_post({"parts": [{"kind": "text", "text": text[:4000],
+                                              "origin": "voice"}],
+                                    "via": "voice", "turn_id": owner,
+                                    "upsert_only": 1, "create_if_missing": 1})
+                # ⚠ 不再往 rec["parts"] 里也塞一份：上面那次投递已经落库了，
+                #   再塞就要靠"按 origin 合并"去重，多一条看不见的暗线。一处写入，一处真相。
+            else:
+                self._history_post({"assistant": text, "via": "voice", "turn_id": tid})
 
     def _history_enabled(self) -> str:
         url = str(self.settings.get("historyUrl") or "").rstrip("/")
