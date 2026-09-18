@@ -876,6 +876,8 @@ class Runner:
         self._loop_lag_over = 0
         self._audio_stats_at = 0.0
         self._thread_cleared = False          # /thread/new：下次 ensure_app 不续接旧线程
+        self._was_cleared = False             # 上一次开新线程是不是因为被显式清空
+        self._resume_tried = False            # 上一次开新线程前试过续接没有
         self._ensure_lock = asyncio.Lock()    # ensure_app 串行化，见那边的注释
         self._voip_call_active = False        # 我们拨出去且已接通的 VoIP 电话还在（CallKit 那层）：挂媒体会话时要一并请 App 挂断
         self._thread_resume_target = None     # /thread/resume：下次 ensure_app 续接这个线程
@@ -1050,6 +1052,9 @@ class Runner:
                     tail = list(app.stderr_tail)[-5:] if app else []
                     self.log(m, exitCode=code, stderrTail=[clean(re.sub(r"\x1b\[[0-9;]*m", "", line))[-160:] for line in tail])
                     self.app = None
+                    if self.thread_id:
+                        # 出声：app-server 一死线程 id 就丢，下一次必然是全新开局。
+                        self.log("thread_dropped", threadId=self.thread_id, why="app_server_exited")
                     self.thread_id = None
                     self.app_server_exits += 1
                     if self.session_state in ("connected", "starting"):
@@ -1199,10 +1204,12 @@ class Runner:
                     want = (json.loads(STATE_PATH.read_text(encoding="utf-8")) or {}).get("threadId") or None
                 except Exception:
                     want = None
+            self._was_cleared = self._thread_cleared
             self._thread_cleared = False
             if want:
                 try:
                     self._ctx_invalidate()
+                    self._resume_tried = True
                     r = await self.app.call("thread/resume", {"threadId": want}, timeout=90)
                     self.thread_id = (r.get("thread") or {}).get("id") or want
                     self.log("thread_resumed", threadId=self.thread_id)
@@ -1217,7 +1224,15 @@ class Runner:
             self._ctx_invalidate()
             r = await self.app.call("thread/start", start, timeout=90)
             self.thread_id = r["thread"]["id"]
-            self.log("thread_started", threadId=self.thread_id)
+            # ⚠ 一条新线程 = 一次完整开局（实测 8420 token，其中只有 1781 是我们的指令，
+            #   其余是官方的 skills_instructions / recommended_plugins 等样板）。
+            #   所以"为什么没续接"必须说清楚 —— 2026-09-18 有一次换线程，日志里
+            #   既没有 runner_started 也没有 resume 尝试，事后完全查不出是谁换的。
+            self.log("thread_started", threadId=self.thread_id,
+                     whyNew=("显式清空（/thread/new 或 /thread/delete）" if self._was_cleared
+                             else ("续接失败" if self._resume_tried else "没有可续接的线程 id")))
+            self._was_cleared = False
+            self._resume_tried = False
             self._warn_settings_drift()
             self.write_binding()
             await self.apply_hot()
@@ -3528,6 +3543,7 @@ class Handler(BaseHTTPRequestHandler):
                 async def _renew():
                     if r.session_state != "idle":
                         await r.session_stop("thread-renew")
+                    r.log("thread_dropped", threadId=r.thread_id, why="POST /thread/new")
                     r.thread_id = None
                     r._thread_cleared = True
                     await r.ensure_app()
