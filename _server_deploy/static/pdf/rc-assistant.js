@@ -2875,30 +2875,50 @@
   };
   // 141:容器内容一变就同步落库(防抖)。见 rc-turncard 的注释:展示型工具之后不再有 response,
   //   只靠 response.done 落库会把 tool/card 永远漏在服务器之外。
-  var _psT = null;
+  // ⚠ 2026-09-18：这个防抖定时器原来是**全局单例**（var _psT = null + clearTimeout(_psT)），
+  //   而 tid 是闭包里捕获的。一次制卡会往两个容器加部件（工具条进实时轮、草稿进
+  //   reader-draft:<gid>），于是后一次 _syncParts 把前一次**整个取消掉** —— 先来的那批
+  //   永远不落库。再撞上轮次完成时的权威重载（见 stream 结束那一支），没落库的部件当场
+  //   被冲掉：用户看到的就是「中途渲出来了，完成后消失」。改成按 tid 各自计时。
+  var _psT = {};
+  // 真正落库那一下，抽出来以便「立刻落」也能复用同一份 —— 两处各写一遍迟早不一样。
+  function _syncPartsNow(tid) {
+    try {
+      var ps = RC.turnCard.partsOf(tid);
+      if (!ps || !ps.length) return;
+      var txt = ps.filter(function (p) { return p.kind === 'text'; })
+                  .map(function (p) { return p.text; }).join('\n\n');
+      var ctx = {};
+      try { ctx = (RC.adapter && RC.adapter().getContext && RC.adapter().getContext()) || {}; } catch (e) {}
+      // upsert_only:记录还不存在就**什么都不做**(见后端注释:抢在 response.done 前面建记录
+      //   会把用户的提问挤掉)。没落上就 2.5s 后再试一次 —— 那时 response.done 的记录必已就位。
+      ps = ps.map(function (p) { var o = {}; for (var k in p) o[k] = p[k]; if (!o.origin) o.origin = 'app'; return o; });   // App 画的部件：来源=app，服务端按来源合并
+      fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+        body: JSON.stringify({ assistant: txt, parts: ps, turn_id: tid, via: 'voice', upsert_only: 1, create_if_missing: 1,
+          assistant_mode: _turnModes[tid] || _assistantMode,
+          file: ctx.file_rel || ctx.file || '', page: ctx.page || 0 }) })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { if (d && d.upserted === false && !_psRetry[tid]) { _psRetry[tid] = 1; setTimeout(function () { _syncParts(tid); }, 2500); } })
+        .catch(function () {});
+    } catch (e) {}
+  }
   function _syncParts(tid) {
     if (!tid) return;
-    clearTimeout(_psT);
-    _psT = setTimeout(function () {
-      try {
-        var ps = RC.turnCard.partsOf(tid);
-        if (!ps || !ps.length) return;
-        var txt = ps.filter(function (p) { return p.kind === 'text'; })
-                    .map(function (p) { return p.text; }).join('\n\n');
-        var ctx = {};
-        try { ctx = (RC.adapter && RC.adapter().getContext && RC.adapter().getContext()) || {}; } catch (e) {}
-        // upsert_only:记录还不存在就**什么都不做**(见后端注释:抢在 response.done 前面建记录
-        //   会把用户的提问挤掉)。没落上就 2.5s 后再试一次 —— 那时 response.done 的记录必已就位。
-        ps = ps.map(function (p) { var o = {}; for (var k in p) o[k] = p[k]; if (!o.origin) o.origin = 'app'; return o; });   // App 画的部件：来源=app，服务端按来源合并
-        fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
-          body: JSON.stringify({ assistant: txt, parts: ps, turn_id: tid, via: 'voice', upsert_only: 1, create_if_missing: 1,
-            assistant_mode: _turnModes[tid] || _assistantMode,
-            file: ctx.file_rel || ctx.file || '', page: ctx.page || 0 }) })
-          .then(function (r) { return r.json(); })
-          .then(function (d) { if (d && d.upserted === false && !_psRetry[tid]) { _psRetry[tid] = 1; setTimeout(function () { _syncParts(tid); }, 2500); } })
-          .catch(function () {});
-      } catch (e) {}
+    clearTimeout(_psT[tid]);
+    _psT[tid] = setTimeout(function () {
+      delete _psT[tid];
+      _syncPartsNow(tid);
     }, 900);
+  }
+  // 还没落库的那些，立刻落 —— 给权威重载让路（见 _flushPendingParts 的调用点）。
+  function _flushPendingParts() {
+    var ids = Object.keys(_psT);
+    for (var i = 0; i < ids.length; i++) {
+      var id = ids[i];
+      try { clearTimeout(_psT[id]); } catch (e) {}
+      delete _psT[id];
+      try { _syncPartsNow(id); } catch (e) {}
+    }
   }
   var _psRetry = {};
   try { if (window.RC && RC.turnCard) RC.turnCard.onChange = _syncParts; } catch (e) {}
@@ -3674,6 +3694,11 @@
         try { RC.turnCard.draftText('live_' + tid, String(ev.content || '')); } catch (e0) {}
         return;
       }
+      // ⚠ 重载是**权威**的：存储里没有的部件，这一刻全被冲掉（本函数上面那条注释
+      //   「草稿卡随原子换入消失」说的就是它）。所以在请求重载之前，先把还压在
+      //   防抖里的 App 部件（卡片草稿、撤销条、高亮条）落下去 —— 否则就是
+      //   用户反复看到的「中途渲出来了，完成后消失」。
+      try { _flushPendingParts(); } catch (eFlush) {}
       if (window.__bwLiveTurnId === tid) window.__bwLiveTurnId = null;   // 这一轮已落库：之后的部件归下一轮
       if (_liveSeen[tid] || _historyPendingTurns[tid]) return;
       try { if (window.RC && RC.turnCard && RC.turnCard.has('live_' + tid)) RC.turnCard.freezeDraft('live_' + tid); } catch (e1) {}

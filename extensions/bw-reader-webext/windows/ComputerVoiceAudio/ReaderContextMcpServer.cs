@@ -1746,13 +1746,15 @@ internal sealed class ReaderContextMcpServer
                     + "Anki: success means only draft_delivered. The user "
                     + "must click the existing Add to Anki button; the confirmed "
                     + "card keeps the node binding (tags kj::<id> + KJ ledger). "
-                    + "CHECK THE sidebar FIELD IN THE RESULT before telling the "
-                    + "user anything: sidebar=\"shown\" means the draft is really "
-                    + "visible in the sidebar, so it is fine to say 点一下 Add to "
-                    + "Anki. Anything else (unavailable / error:...) means the card "
-                    + "exists only in the local repository and the user CANNOT see "
-                    + "it - say so plainly (卡片做好了，但侧栏没显示出来) instead of "
-                    + "pointing at a button that is not there.",
+                    + "The sidebar field has THREE states, do not collapse them: "
+                    + "sidebar=\"shown\" = the draft is really visible, fine to say "
+                    + "点一下 Add to Anki. sidebar=\"unavailable\" or \"error:...\" = "
+                    + "the card exists only in the local repository and the user "
+                    + "CANNOT see it - say so plainly (卡片做好了，但侧栏没显示出来) "
+                    + "instead of pointing at a button that is not there. "
+                    + "sidebar MISSING or null = this Reader build simply does not "
+                    + "report it yet; that is NOT a failure - report the delivery "
+                    + "the way you always did and do not claim it failed.",
                 ["inputSchema"] = BuildExactSourceArgumentsSchema(true),
                 ["annotations"] = new JsonObject
                 {
