@@ -5667,14 +5667,9 @@
       // 统一错误日志（用户 2026-09-19）。这里是**所有本机路由失败的唯一出口**，
       // 挂在这一处就全覆盖 —— 包括去边（/pdf/api/book-crop）这种此前完全没人记的。
       // ⚠ 记日志绝不能改变失败本身：失败照常返回，日志是旁路（送不到就算了）。
-      try {
-        bridgeMirror('/reader-error-log', 'POST', {
-          source: 'page',
-          code: String((error && error.code) || fallbackCode || ''),
-          message: String((error && error.message) || error || ''),
-          detail: 'book=' + String(bookId || '')
-        });
-      } catch (_) {}
+      errorLogPush(String((error && error.code) || fallbackCode || ''),
+                   String((error && error.message) || error || ''),
+                   'book=' + String(bookId || ''));
       return outgoingFailureResponse(error, fallbackCode, 500);
     });
   }
@@ -14711,6 +14706,49 @@
       body: JSON.stringify({ path: path, method: method || 'POST', body: body || {}, query: query || {} })
     }).then(function (r) { return r.ok ? r.json() : null; }, function () { return null; })
       .then(function (d) { return d && typeof d === 'object' ? d : null; });
+  }
+
+  // 统一错误日志的**攒批**出口（2026-09-19）。
+  //
+  // 第一版是失败一次就立刻 bridgeMirror 一次，两个问题：
+  //  ① 撞了「被拒的本机请求不得外发」这条不变量 —— 一个 409 参数错误本来一个
+  //     网络请求都不该有，却因为记日志多出一个（契约测试当场抓住）；
+  //  ② 一页里连着几十个失败就是几十个请求，日志本身成了噪声源。
+  // 攒批之后：失败即刻入队（不丢），4 秒一批送出，连续送不动就停 —— 与同文件
+  // 里 client-log 那个上报器同一套节律，不另发明一套。
+  var ERROR_LOG_FLUSH_MS = 4000;
+  var errorLogBuffer = [];
+  var errorLogTimer = null;
+  var errorLogFailures = 0;
+  function errorLogPush(code, message, detail) {
+    try {
+      if (errorLogFailures >= 6) return;   // 送不动就别再吊着事件循环
+      if (!code && !message) return;
+      errorLogBuffer.push({
+        source: 'page',
+        code: String(code || '').slice(0, 120),
+        message: String(message || '').slice(0, 1000),
+        detail: String(detail == null ? '' : detail).slice(0, 500)
+      });
+      if (errorLogBuffer.length > 200) errorLogBuffer.splice(0, errorLogBuffer.length - 200);
+      if (errorLogTimer) return;
+      errorLogTimer = setTimeout(errorLogFlush, ERROR_LOG_FLUSH_MS);
+    } catch (_) {}
+  }
+  function errorLogFlush() {
+    errorLogTimer = null;
+    var batch = errorLogBuffer.splice(0, 50);
+    if (!batch.length) return;
+    batch.forEach(function (row) {
+      try {
+        bridgeMirror('/reader-error-log', 'POST', row).then(function (d) {
+          errorLogFailures = d ? 0 : errorLogFailures + 1;
+        });
+      } catch (_) { errorLogFailures += 1; }
+    });
+    if (errorLogBuffer.length && !errorLogTimer) {
+      errorLogTimer = setTimeout(errorLogFlush, ERROR_LOG_FLUSH_MS);
+    }
   }
 
   function nativeDictQuickFetch(input, init, url, route) {

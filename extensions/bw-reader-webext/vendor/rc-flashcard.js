@@ -1004,11 +1004,24 @@ if (window.__bwPwaProviderOnly) return;
     _advanceToNextDraft(container, i);
     return record;
   }
+  // 卡库这条线上的失败原来只弹一句 toast —— 用户看到「失败」，而**具体是哪个
+  // code 谁也不知道**：2026-09-19 用户报「草稿删除也报失败」时，我只能靠读代码
+  // 猜是 NOT_FOUND 还是 CARD_INDEX 还是 TRANSITION。这正是用户当天要求
+  // 「所有报错都有记录价值，最好是统一记录在一起」的那一类。
+  // ⚠ 只记录，不改变行为：记不上也不影响该弹的 toast 和该回滚的状态。
+  function _logCardFailure(code, error, detail) {
+    try {
+      window.RC && RC.reportLocalFailure &&
+        RC.reportLocalFailure(code, error, detail);
+    } catch (_) {}
+  }
   function failRepositoryConfirmation(container, st, c, i, previous, error) {
     Object.keys(previous).forEach(function (field) { c[field] = previous[field]; });
     updateSlide(container, i);
     broadcast(st.gid, i, container);
     notifyGroup(st.gid, 'card-repository-reverted', i);
+    _logCardFailure('card-repository-confirm', error,
+      'gid=' + (st && st.gid) + ' i=' + i);
     RC.toast && RC.toast(
       '本地卡库保存失败：' +
       String(error && (error.code || error.message) || error || '?').slice(0, 180)
@@ -1155,12 +1168,16 @@ if (window.__bwPwaProviderOnly) return;
     }
     if (!repo || typeof repo.removeDraftCard !== 'function' ||
         !/^card_[a-f0-9]{4,64}$/.test(st.gid || '')) {
+      _logCardFailure('card-draft-delete',
+        new Error(repo ? 'BW_CARD_GID_INVALID' : 'BW_CARD_REPOSITORY_UNAVAILABLE'),
+        'gid=' + (st && st.gid));
       RC.toast && RC.toast('Reader 本地卡库不可用，未删除');
       return;
     }
     var mutationId;
     try { mutationId = repositoryMutation('remove-draft', st.gid, i); }
     catch (error) {
+      _logCardFailure('card-draft-delete', error, 'gid=' + (st && st.gid) + ' i=' + i);
       RC.toast && RC.toast('Reader 本地卡库无法生成删除编号');
       return;
     }
@@ -1175,6 +1192,8 @@ if (window.__bwPwaProviderOnly) return;
       RC.toast && RC.toast('草稿已删除');
     }).catch(function (error) {
       card._removePending = false;
+      _logCardFailure('card-draft-delete', error,
+        'gid=' + (st && st.gid) + ' i=' + i + ' phase=' + (card && card._st));
       RC.toast && RC.toast(
         '草稿删除失败：' +
         String(error && (error.code || error.message) || error || '?').slice(0, 180)

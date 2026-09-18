@@ -127,10 +127,21 @@ test("missing authentication fails closed while the same account may continue", 
     WEB.indexOf("private func verifyCurrentBookUserStateAccountScope"),
     WEB.indexOf("private func waitForBookUserStateAPI")
   );
-  assert.match(verify, /let cookies = await remoteLibraryCookies\(\)/);
-  assert.match(verify, /guard !cookies\.isEmpty else/);
-  assert.match(verify, /status == 401 \|\| status == 403/);
-  assert.match(verify, /authenticationUnavailable/);
+  // 2026-09-19 换源：这一步跟"取包"那次必须**同源**（都走 Windows 桥）。
+  // 一处拉桥、一处拉 Pi，作用域摘要永远对不上，导入会稳定失败 —— 这正是它
+  // 从 Pi 换过来的原因。桥是本机服务，没有 cookie，所以原来那道 cookie 闸
+  // 在这条路上不再适用；**但"没鉴权就不许落地"这条不变量一步都不能松**。
+  assert.match(verify, /ReaderServerLibrary\.userStatePayload\(/,
+    "校验必须与 staging 同源（桥），不能回去问 Pi");
+  assert.doesNotMatch(verify, /ReaderRemoteLibrary\./,
+    "混用两个来源 = 摘要永远对不上");
+  // 失败闭合的三条出口，一条都不能变成"当作通过"：
+  assert.match(verify, /else \{[\s\S]{0,200}accountScopeUnavailable/,
+    "服务器没有这份包 → 不许落地");
+  assert.match(verify, /catch ReaderServerLibrary\.Failure\.capabilityMissing/,
+    "旧版桥没这个端点，跟'没鉴权'是两件事，但同样不许落地");
+  assert.doesNotMatch(verify, /catch\s*\{|try\?/,
+    "不许有兜底 catch/try? —— 401/403 必须继续往外抛");
   assert.match(verify, /current = payload/);
   assert.match(
     verify,
