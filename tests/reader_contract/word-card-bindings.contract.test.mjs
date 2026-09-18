@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const ROOT = new URL("../../", import.meta.url);
-const read = (path) => readFileSync(new URL(path, ROOT), "utf8");
+// ⚠ 统一换行：这些断言比对的是**源码文本**，而检出可能是 CRLF（本仓库的 worktree
+//   就是）。正则里写死的 \n 会在 \r\n 上失配，于是测试红得跟被测代码毫无关系。
+//   换行是检出产物，不是契约。
+const read = (path) => readFileSync(new URL(path, ROOT), "utf8").replace(/\r\n/g, "\n");
 const RUNTIME = read("_server_deploy/static/pdf/native-local-runtime.js");
 const WORDPOP = read("_server_deploy/static/pdf/rc-wordpop.js");
 const VOICECALL = read("_server_deploy/static/pdf/rc-voicecall.js");
@@ -113,7 +116,7 @@ test("绑定变化事件带契约与键集合，电脑端快照仍由既有便�
 // 2026-09-04 618 App 日志实锤:appendWordDictLine 一进门 ReferenceError(bindWordTextOf 未定义)被空 catch 吞掉,
 // 卡内词典从上一版起一次都没跑过。名字被引用就必须有定义,而且取的是词锚的 text。
 test("bindWordTextOf 有定义且取词锚 text", () => {
-  const NOTE = readFileSync(new URL("../../_server_deploy/static/pdf/rc-stickynote.js", import.meta.url), "utf8");
+  const NOTE = read("_server_deploy/static/pdf/rc-stickynote.js");
   assert.match(NOTE, /function bindWordTextOf\(bind\) \{\n\s*return String\(\(bind && bind\.text\) \|\| ''\)\.trim\(\);/);
   // 用到它的三处都在同一个 IIFE 作用域里
   assert.ok(NOTE.indexOf("function bindWordTextOf(bind)") < NOTE.indexOf("var text = bindWordTextOf(bind);"));
@@ -122,7 +125,7 @@ test("bindWordTextOf 有定义且取词锚 text", () => {
 // 2026-09-04 第三次踩坑(bindWordTextOf → _dictLineCache):卡内词典链路里被调用的名字必须在 rc-stickynote.js 里有定义。
 // 全部包在 try/catch 里,ReferenceError 只会让功能静默死亡;这条契约在本地就把"用到却没定义"抓出来。
 test("卡内词典链路用到的每个标识符都有定义", () => {
-  const NOTE = readFileSync(new URL("../../_server_deploy/static/pdf/rc-stickynote.js", import.meta.url), "utf8");
+  const NOTE = read("_server_deploy/static/pdf/rc-stickynote.js");
   const bodyOfNote = (name) => {
     const start = NOTE.indexOf(`function ${name}(`);
     assert.ok(start >= 0, `缺 function ${name}`);
@@ -161,7 +164,7 @@ test("卡内词典链路用到的每个标识符都有定义", () => {
 // 有下划线(=查过)的词再点仍闪烁重查(结果只在内存缓存)。两条都要走同一条链并落设备缓存。
 test("卡内词典与查词框共用 RC.wordpop.lookupData,查词结果落设备持久缓存", () => {
   const POP = readFileSync(new URL("../../_server_deploy/static/pdf/rc-wordpop.js", import.meta.url), "utf8");
-  const NOTE = readFileSync(new URL("../../_server_deploy/static/pdf/rc-stickynote.js", import.meta.url), "utf8");
+  const NOTE = read("_server_deploy/static/pdf/rc-stickynote.js");
   assert.match(POP, /lookupData: lookupData, peekCache: peekCache, meaningText: _jpMeaningText \};/);
   // 键带版本:词条字段变化时必须换版,否则 App 端永远命中旧缓存(2026-09-04 加 source_* 三字段时的实锤)
   assert.match(POP, /var _PERSIST_KEY = 'rc-wordpop-dict-cache-v\d+';/);
