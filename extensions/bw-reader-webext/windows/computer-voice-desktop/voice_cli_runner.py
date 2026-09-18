@@ -3431,7 +3431,11 @@ class Runner:
                     r = self._history_request("/api/assistant/log", payload)
                     self.history_stats["written"] += 1
                     via, tid, n, up = payload.get("via"), payload.get("turn_id"), r.get("n"), r.get("upserted")
-                    self.loop.call_soon_threadsafe(lambda: self.log("history_written", via=via, turnId=tid, n=n, upserted=up))
+                    # absorbed：这次收走了几条零散语音记录。不记的话"收拢到底跑没跑"只能去翻库
+                    # （2026-09-18 就是这么查出来收拢代码压根执行不到的）。
+                    ab = r.get("absorbed")
+                    self.loop.call_soon_threadsafe(
+                        lambda: self.log("history_written", via=via, turnId=tid, n=n, upserted=up, absorbed=ab))
             except urllib.error.HTTPError as e:
                 detail, code = "", e.code
                 try:

@@ -12474,6 +12474,13 @@ def assistant_log_external():
     _tid = str(b.get("turn_id") or "")[:40]
     # 2026-09-15 根治：同一轮记录有两个写入者 —— 运行器（via=codex-voice）与 App（其它）。部件按来源打标并按来源合并。
     _origin = "runner" if str(b.get("via") or "") == "codex-voice" else "app"
+    # 收拢（2026-09-18）：这一轮期间那几条零散的语音记录，正文已并进本轮 parts，删掉它们。
+    # ⚠⚠ 必须在下面那个 upsert 的**早返回之前**做。第一版我放在函数末尾，而记录已存在时
+    #    upsert 成功就直接 return 了（实录：n=0 upserted=true）—— 于是收拢代码**永远执行不到**，
+    #    三条零散记录原封不动留在库里，侧栏照旧是一堆框。而"正常情况"恰恰就是记录已存在。
+    _absorbed = 0
+    if isinstance(b.get("absorb"), list) and b["absorb"]:
+        _absorbed = _convo_absorb_turns(uid, b["absorb"][:24], mode=assistant_mode)
     if _tid and _convo_upsert_turn(
         uid,
         _tid,
@@ -12493,7 +12500,7 @@ def assistant_log_external():
         },
         mode=assistant_mode,
     ):
-        return jsonify({"ok": True, "n": 0, "upserted": True})
+        return jsonify({"ok": True, "n": 0, "upserted": True, "absorbed": _absorbed})
     # ⚠ upsert_only:容器的"内容变了就同步"走这条 —— **记录不存在就什么都不做**。
     #   否则它可能先于 response.done 到达 → 先建出一条没有用户提问的助手消息 →
     #   随后 response.done 的落库走 upsert 提前返回 → **用户的提问从历史里彻底消失**。
@@ -12543,12 +12550,6 @@ def assistant_log_external():
                 mode=assistant_mode,
             )
             n += 1
-    # 收拢（2026-09-18）：这一轮期间那几条零散的语音记录，正文已经并进本轮 parts 了，删掉它们。
-    # ⚠ 放在写入之后、SSE 通知之前 —— 反过来的话侧栏会先收到"有新内容"再看到旧记录还在，
-    #   刷出来仍是散的，然后没有第二次通知来纠正。
-    _absorbed = 0
-    if isinstance(b.get("absorb"), list) and b["absorb"]:
-        _absorbed = _convo_absorb_turns(uid, b["absorb"][:24], mode=assistant_mode)
     _delivered = 0
     try:
         import reader_events
