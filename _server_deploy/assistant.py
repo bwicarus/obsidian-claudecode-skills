@@ -1439,6 +1439,39 @@ def _convo_drop_media(uid, msgs, mode=None):
         pass
 
 
+def _convo_absorb_turns(uid, turn_ids, mode="normal"):
+    """把几条零散的语音记录**收走**（它们的正文已经并进另一条轮次的 parts）。
+
+    2026-09-18 用户：「保留流式传输，只是完成后发送信号然后自动整理为之前的样子」。
+    字幕档下语音每说一句就落一条记录（流式要的就是这个），于是一次任务在侧栏散成好几个框；
+    而按 ADR 一个轮次该是一个容器，归属依据是**后台的实际调用**（从委派到后台做完）。
+    运行器在后台轮收尾时把这一轮期间那几条的 turn_id 传过来，这里删掉它们。
+
+    ⚠ 只删**助手**那几条：用户说的话（<tid>.u）是他自己的输入，照旧独立成条 ——
+      合并的是"AI 为这次请求产出的东西"，不是把用户的话也吞掉。
+    ⚠ 只在正文已经搬走的前提下调用。这里不做搬运，搬运在运行器那侧（parts）——
+      两边都搬会重复，两边都不搬就丢内容。
+    """
+    ids = {str(x)[:40] for x in (turn_ids or []) if str(x or "").strip()}
+    if not ids:
+        return 0
+    msgs = _convo_load(uid, mode)
+    keep = [m for m in msgs
+            if not (m.get("role") == "assistant" and str(m.get("turn_id") or "") in ids)]
+    removed = len(msgs) - len(keep)
+    if not removed:
+        return 0
+    try:
+        _convo_dir(mode).mkdir(parents=True, exist_ok=True)
+        p = _convo_path(uid, mode)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(keep, ensure_ascii=False), "utf-8")
+        tmp.replace(p)
+    except Exception:
+        return 0
+    return removed
+
+
 def _convo_append(uid, role, content, meta=None, mode="normal"):
     with _convo_lock:
         msgs = _convo_load(uid, mode)
@@ -12510,6 +12543,12 @@ def assistant_log_external():
                 mode=assistant_mode,
             )
             n += 1
+    # 收拢（2026-09-18）：这一轮期间那几条零散的语音记录，正文已经并进本轮 parts 了，删掉它们。
+    # ⚠ 放在写入之后、SSE 通知之前 —— 反过来的话侧栏会先收到"有新内容"再看到旧记录还在，
+    #   刷出来仍是散的，然后没有第二次通知来纠正。
+    _absorbed = 0
+    if isinstance(b.get("absorb"), list) and b["absorb"]:
+        _absorbed = _convo_absorb_turns(uid, b["absorb"][:24], mode=assistant_mode)
     _delivered = 0
     try:
         import reader_events
@@ -12522,6 +12561,7 @@ def assistant_log_external():
     # 分层回执:appended=已写库;delivered=SSE 推到了几个在线侧栏(0=没人开着,不是失败);
     # 「前端是否真渲染出来」由前端 /pdf/api/turn-ack 回执补齐,不在这里假定。
     return jsonify({"ok": True, "appended": n, "delivered": _delivered,
+                    "absorbed": _absorbed,
                     "turn_id": meta.get("turn_id") or ""})
 
 

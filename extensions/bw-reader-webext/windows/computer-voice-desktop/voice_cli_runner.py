@@ -3296,8 +3296,10 @@ class Runner:
         assistant = rec.get("assistant")
         if self._voice_owns_text():
             # 字幕模式 + 语音在线：文字由语音念出来（字幕里已有），这一轮只留工具/卡片；没有就不写
+            # ⚠ 语音行现在会被并进 parts（见 _subtitle_done），所以"没有 parts"这条早退
+            #   只在真的什么都没有时才成立；有 absorb 就必须发出去，否则零散记录没人来收。
             user, assistant = None, None
-            if not rec["parts"]:
+            if not rec["parts"] and not rec.get("absorb"):
                 self.log("history_skip_backend_text", turnId=rec["id"][:40])
                 return
         if not (user or assistant or rec["parts"]):
@@ -3305,6 +3307,10 @@ class Runner:
         body = {"user": user or "", "assistant": assistant or "", "via": "codex-voice", "turn_id": rec["id"][:40]}
         if rec["parts"]:
             body["parts"] = rec["parts"]
+        # 这一轮期间那几条零散的语音记录：正文已并进上面的 parts，这里告诉服务端把它们删掉，
+        # 侧栏重载后就是一个完整容器（见 _subtitle_done 里那段说明）。
+        if rec.get("absorb"):
+            body["absorb"] = rec["absorb"][:24]
         dur = turn.get("durationMs")
         if isinstance(dur, (int, float)) and not isinstance(dur, bool) and 0 <= dur <= 86_400_000:
             body["took_ms"] = int(dur)
@@ -3335,6 +3341,19 @@ class Runner:
                 self.log("history_skip_punct", text=text[:20])   # 「。」这种纯标点回复不记
                 return
             self._history_post({"assistant": text, "via": "voice", "turn_id": tid})
+            # ⭐ 用户 2026-09-18：「保留流式传输，只是完成后发送信号然后自动整理为之前的样子」。
+            #   字幕档下每句转写各写一条记录（流式要的就是这个），于是一次任务在侧栏散成好几个框
+            #   —— 而按 ADR，一个轮次该是**一个容器**，归属依据是**后台的实际调用**
+            #   （用户原话：从一次委托后后台开始工作到后台结束所有任务）。
+            #   所以：这句若发生在后台轮进行中，就同时并进那一轮的 parts，并把这条零散记录
+            #   登记进待合并名单；后台轮收尾时一起发给服务端，由它删掉零散的那几条。
+            #   流式期间照旧分开（看得见逐句），完成那一刻自动收拢。
+            rec = self._turn
+            if rec is not None and len(rec.get("parts") or []) < 24:
+                rec.setdefault("absorb", [])
+                if tid not in rec["absorb"]:
+                    rec["absorb"].append(tid)
+                rec["parts"].append({"kind": "text", "text": text[:4000], "origin": "voice"})
 
     def _history_enabled(self) -> str:
         url = str(self.settings.get("historyUrl") or "").rstrip("/")
