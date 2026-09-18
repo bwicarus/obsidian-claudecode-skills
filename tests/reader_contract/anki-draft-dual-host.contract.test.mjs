@@ -86,7 +86,10 @@ function runToolSource(gid, payload = {}, tool = "make_anki") {
 
 test("草稿镜像进对话流时带着与浮层完全相同的身份", () => {
   const { ok, parts } = runMirror();
-  assert.equal(ok, true);
+  // 2026-09-18 起返回值不再是布尔，而是三态：'shown' / 'unavailable' / 'error:…'。
+  // 这个区分是必须的 —— 语音回执要靠它说清「草稿到底有没有进侧栏」，
+  // 折成布尔的那一版让 AI 对着一张已经画好的卡说自己失败了。
+  assert.equal(ok, "shown");
   assert.equal(parts.length, 1, "只应产生一个额外宿主，不能更多");
   const { part } = parts[0];
   assert.equal(part.gid, "card_abc123", "gid 必须与浮层一致");

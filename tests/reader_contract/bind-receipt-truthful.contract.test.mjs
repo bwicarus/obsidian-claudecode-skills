@@ -180,7 +180,9 @@ test("阅读器入站闸放行这两个字段", () => {
   for (const src of [INBOUND, VENDOR_IN]) {
     assert.match(
       src,
-      /exactObject\(receipt, \["outcome"\], \["error", "bindOutcome", "bindReason"\]/,
+      // 放行表跟调用之间会夹注释（每加一个键都留了一段「为什么必须同批改」的说明），
+      // 所以这里允许中间有空白与注释，但**键集本身仍要全等** —— 放宽的是排版，不是契约。
+      /exactObject\(receipt, \["outcome"\],[\s\S]{0,600}?\["error", "bindOutcome", "bindReason", "sidebar"\]/,
       "vendor 副本靠 build.py 生成，忘了重跑它就还是旧闸",
     );
   }
@@ -205,9 +207,12 @@ test("不能复用 error 字段", () => {
 
 test("跨机信封开了槽并显式取值", () => {
   // record 是容器闸：不开槽，前后两处 new 就无处可搬
-  assert.match(ENVELOPE, /string\? BindOutcome,\s*\n\s*string\? BindReason\)/);
+  assert.match(ENVELOPE, /string\? BindOutcome,\s*\n\s*string\? BindReason,/);
+  // sidebar 是 2026-09-18 开的第三个槽（草稿有没有进侧栏）。它必须是**最后一个**参数，
+  // 也就是带着收尾的右括号 —— 漏了它，前后两处 new 照样无处可搬。
+  assert.match(ENVELOPE, /string\? Sidebar\);/);
   // Exact 是 SetEquals，可选字段必须走 ExactWithOptional
-  assert.match(ENVELOPE, /new\[\] \{ "bindOutcome", "bindReason" \}/);
+  assert.match(ENVELOPE, /new\[\] \{ "bindOutcome", "bindReason", "sidebar" \}/);
   // 过闸之后 JsonElement 的其它字段就不存在了，必须显式取
   assert.match(ENVELOPE, /message\.TryGetProperty\("bindOutcome", out _\)/);
   // 枚举收窄，别让任意字符串混进来
