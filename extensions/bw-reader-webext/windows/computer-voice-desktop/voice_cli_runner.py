@@ -267,7 +267,10 @@ DEFAULTS: dict = {
     "flushTranscriptTailOnSessionEnd": True,  # 结束时把没落库的转写刷出来。
                                               # 我们有 idleStopMinutes 自动关闭，不刷就会丢最后一段历史
     "codexResponseItemPrefix": None,        # 后台回答条目的前缀。None = 不传
-    "promiseWatchEnabled": False,     # ⚠ 默认关。语音模型答应要做事却没委派时替它补派 ——
+    # 2026-09-18 打开：用户这一轮明确要了「声称做完却零后台调用就把最近几条对话补投」。
+    # 此前默认关着是因为更早那版是纯计时看门狗（用户否掉过）；现在的判据是
+    # 「它自己说完成了」+「本轮零后台调用」，不是到点就叫。
+    "promiseWatchEnabled": True,
                                       # 但这是靠匹配中文措辞的机械补丁，用户不喜欢（2026-09-17），
                                       # 而且根因已经找到并从正路修了：官方内置提示词里
                                       # 「Communication style」那一节（不要宣布计划、不要用应答代替动作）
