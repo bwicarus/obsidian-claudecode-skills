@@ -12537,20 +12537,29 @@ def assistant_log_external():
         },
         mode=assistant_mode,
     ):
-        # ⚠ 这条早返回之前**必须发事件**。原来这里直接 return，而发布点在函数末尾 ——
-        #   于是轮次进行中的每一次合并（语音正文、工具部件）侧栏全都不知道，要等下一次
-        #   走完整路径的写入才顺带刷出来。用户 2026-09-18：「好像直到下一句对话开始
-        #   才自动进行了合并」。
-        #   partial=1 表示"这一轮还没结束"：侧栏据此重载显示，但**不清掉本轮的容器身份**，
-        #   否则后面 App 再画的部件又会掉进临时容器 —— 那正是上面刚修的那个孤框。
-        try:
-            import reader_events
-            reader_events.publish(
-                "assistant-history", b.get("file") or "", uid,
-                {"turn_id": _tid, "n": 0, "partial": 1})
-        except Exception:
-            pass
-        return jsonify({"ok": True, "n": 0, "upserted": True, "absorbed": _absorbed})
+        # 这条早返回原来直接 return，而发布点在函数末尾 —— 于是**连轮次收尾那次写入**
+        # 都发不出事件（收尾也走 upsert），侧栏只能等下一次走完整路径的写入顺带刷出来。
+        # 用户 2026-09-18：「好像直到下一句对话开始才自动进行了合并」。
+        #
+        # ⚠⚠ 只在**收尾**发，中途一次都不发。第一版我在每次 upsert 都发，结果侧栏在
+        #    工具正在执行的当口做了一次权威重载，绑定的快照版本随之变化，卡片投递被判
+        #    BW_READER_REALTIME_OUTPUT_STALE 直接拒收 —— 实录里 _tool_opened 落库之后
+        #    **51 毫秒**工具就失败了，用户那次制卡整个没到侧栏。
+        #    合并可见是体验，投递成功是功能；轮次没结束时，宁可晚一点显示。
+        _sent = False
+        if b.get("turn_end"):
+            try:
+                import reader_events
+                reader_events.publish(
+                    "assistant-history", b.get("file") or "", uid,
+                    {"turn_id": _tid, "n": 0})
+                _sent = True
+            except Exception:
+                pass
+        # event_sent 是给排查用的：delivered 分不清"没发"和"发了但没人听"，而这两者
+        # 差别恰恰是上面那个 STALE 事故的关键。
+        return jsonify({"ok": True, "n": 0, "upserted": True, "absorbed": _absorbed,
+                        "event_sent": _sent})
     # ⚠ upsert_only:容器的"内容变了就同步"走这条 —— **记录不存在就什么都不做**。
     #   否则它可能先于 response.done 到达 → 先建出一条没有用户提问的助手消息 →
     #   随后 response.done 的落库走 upsert 提前返回 → **用户的提问从历史里彻底消失**。
@@ -12601,18 +12610,25 @@ def assistant_log_external():
             )
             n += 1
     _delivered = 0
-    try:
-        import reader_events
-        # 带 turn_id:侧栏收到后能只追加这一轮,不必整段重拉;顺带拿到真实投递数。
-        _delivered = reader_events.publish(
-            "assistant-history", b.get("file") or "", uid,
-            {"turn_id": meta.get("turn_id") or "", "n": n}) or 0
-    except Exception:
-        pass
+    # ⚠ 轮次**中途**的写入一律不发事件。判据是"这是不是轮次容器的写入"（upsert_only），
+    #   不是"走了哪条分支" —— 第一版我只在 upsert 分支上把关，而 _tool_opened 往往是
+    #   本轮第一次写入、走的是建记录这条路，照样发事件、照样让侧栏在工具执行中途做
+    #   权威重载，卡片投递随即被判 BW_READER_REALTIME_OUTPUT_STALE（实录：落库后 51ms
+    #   工具就失败了）。收尾那次由 turn_end 放行。
+    _mid_turn = bool(b.get("upsert_only")) and not b.get("turn_end")
+    if not _mid_turn:
+        try:
+            import reader_events
+            # 带 turn_id:侧栏收到后能只追加这一轮,不必整段重拉;顺带拿到真实投递数。
+            _delivered = reader_events.publish(
+                "assistant-history", b.get("file") or "", uid,
+                {"turn_id": meta.get("turn_id") or "", "n": n}) or 0
+        except Exception:
+            pass
     # 分层回执:appended=已写库;delivered=SSE 推到了几个在线侧栏(0=没人开着,不是失败);
     # 「前端是否真渲染出来」由前端 /pdf/api/turn-ack 回执补齐,不在这里假定。
     return jsonify({"ok": True, "appended": n, "delivered": _delivered,
-                    "absorbed": _absorbed,
+                    "absorbed": _absorbed, "event_sent": not _mid_turn,
                     "turn_id": meta.get("turn_id") or ""})
 
 
