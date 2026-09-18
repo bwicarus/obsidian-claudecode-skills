@@ -265,3 +265,38 @@ RC.voiceCtx = {
 - **ink(实时墨迹 strokes + EPUB 视口合成图 shot)** @ 发送 rc-voicecall.js:3950-3971 syncInk;relay 收:voice_realtime_relay.py:3330-3341(rtc-ctl)/2064-2097(openai)/2001-2008(grok)/3567-3580(豆包) · 传输:{type:'ink', page, strokes.slice(0,60), shot?:{media_type,b64}}。shot 仅 EPUB/HTML(reflow)且有笔画时经 RC.captureView 截视口合成图(后端拿 · 去重:发送侧 _inkFp=page:笔画数:JSON长度;首次空态只记指纹不发;换页 _inkFp='' 作废(setPage:3900)。relay 各路再各有一层指纹 · ⚠ ⚠ ink 消息没有 sel 字段,relay 严禁碰 book['sel'](2064 注释,曾出过bug);133 大坑:WebRTC 路曾想经 dc 直发 system 注入省 Pi 往返,实测**从没落地**(_dcSend 在 dc 未 open 时静默丢弃),注入职责已全部收归 relay,shim 本地(
 - **text(通话中打字提问直达实时模型)** @ 发送 rc-voicecall.js:1876-1884 window.__vcSendText(rc-assistant.js:1840 send 拦截调用);shim 本地处理 1937-1943;relay 收:voice_realtime_relay.py:3318-3326(rtc-ctl)/2098-2107(openai)/3529-3533(豆包) · 传输:{type:'text', content}。**WebRTC 路是双投递语义**:真正投递走 shim 本地 _rtcHandleUp→先 _rtcInterrupt()(response.cancel+output_audio_buff · 去重:无(用户显式动作) · ⚠ 统一端口复用时注意:WebRTC 路 text 的模型投递在浏览器 dc,relay 只收镜像做卫生——若统一后 relay 也代发就会双份
 - **辅助上行:cancel/tool_abort/cfg/shot/rtcstats/played_ms** @ rc-voicecall.js:1944-1946(cancel/tool_abort→_rtcInterrupt),4246 pushCfg;relay:voice_realtime_relay.py:2015-2028(openai played_ms 精确truncate+cancel),3581-3595(豆包 cfg→_push_sp 热更/tool_abort→掐 book['tool_task']+external_rag 502+tool_status 事件),3315-3317(rtc-ctl rtcstats→_vlog 学习时间线),3342-3346(rtc-ctl shot:前端回 {type:'shot',shot_id,b64,media_type} resolve shot_fut,无 id 兼容旧前端取唯一 pending) · 传输:各自 JSON 小消息;shot 是 relay 主动要截图(see_page 等工具)后前端的应答上行 · 去重:cfg 由 relay 侧指纹(含 tts)真变了才发 UpdateConfig · ⚠ rtc-ctl 分支没有 cfg 处理(WebRTC 路音色在会话配置里);统一端口要收编 cfg 得补分支
+
+---
+
+## 笔迹要的是「那块区域的图」，不是「圈出的元素」（2026-09-19 用户拍板）
+
+> 「圈画不是为了锁定某个词，而是笔迹范围的区域都拿去图给 AI 看才对」
+> 「反而圈出元素这种功能完全不需要，很容易出错」
+
+**要的**：用户圈一块 → 取**笔迹外接范围**那块区域的图 → 交给 AI 看。下游早就有了
+（`rc-voicecall.js::_captureInkRegion` / `_surfaceInkCrop` / `_captureSurfaceCompositeCrop`）。
+
+**不要的**：把圈出来的东西当成一个「被选中的元素」。`rc-core.js::bindDrawingFocus`
+（长按绘图区 → `focus('drawing', ref)`）就是这一路，用户明确不要 —— 而且它正是
+「谁写谁覆盖、谁清谁误伤」的单槽 focus 那套的一部分（`DirectContextSnapshot.BuildSelectionItems`
+的注释已经把这条毛病写死在那里）。
+
+### 现状：这条链在 App 上从来没接过
+
+- `_captureInkRegion` 的两个输入都是**网页那层的笔画**：`_visualSurface().strokes`
+  与 `el.__inkStrokes`。App 的页面墨迹是**原生 PencilKit**（`NativePencilLiveOverlay.swift` /
+  `NativePencilAnnotation.swift`），这两处恒为空 → 直接 `return null`。
+- 本机接口自己也写着：`compositeAvailable: false`，
+  note「本机接口只提供墨迹内容版本；未生成或伪装合成图地址」。
+- 于是 App 里每一次取图都是 `BW_READER_VISUAL_UNAVAILABLE` 或
+  `visual-source-not-ready`（2026-09-19 实录多次）。
+
+⚠ 本文上面那条「合成图由 App 原生桥用同一短期 call 身份注入，原生桥不可用时明确失败」
+是**设计**，不是现状 —— 现状是原生那端根本没出口。照着上面那句推断"App 应该有合成图"
+会一路走错，今晚就这么走错过好几轮。
+
+### 要补的那一段
+
+原生墨迹层把**这一笔的外接范围**（或直接把那块裁好的图）交出来 → 之后完全复用既有的
+`_captureInkRegion` → 视觉投递链路。缺的只有原生那一端的出口，下游一行都不用改。
+
