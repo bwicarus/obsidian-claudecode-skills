@@ -287,6 +287,8 @@ DEFAULTS: dict = {
                                       # 被我们那份中文改写整段漏掉了，补回去才是对的。
                                       # 留着当兜底，观察一段时间若仍复发再考虑打开
     "promiseWatchSeconds": 6.0,       # 等这么久还没委派才补
+    # 不看措辞的那条：窗口内用户连说两次而中间零委派 → 补投（见 _promise_watch）。
+    "promiseRepeatWindowSeconds": 90.0,
     "steerWaitSeconds": 3.0,          # 委托之后等这一轮起来的上限（实测 22~60 ms 就起）
     "contextInjectOn": "delegationSteer",  # 后台那份状态什么时候投。
                                       # delegationSteer（默认，2026-09-17）= 后台真的开工之后，
@@ -881,6 +883,8 @@ class Runner:
         self._last_user_ask: tuple | None = None
         self._promise_pending: tuple | None = None
         self._notify_sent: dict[str, float] = {}   # 通知主动投递的冷却台账
+        self._delegation_seq = 0              # 累计委派次数（只增）
+        self._user_asks: list = []            # 最近几次用户发言 (时刻, 原话, 当时的委派序号)
         self._voice_stream = ""
         self._backend_recent: tuple[float, str] | None = None   # 后台最近一条回复：语音把它念出来的字幕不再重复入库
         self._voice_user_acc = ""   # 本轮用户字幕分段累积（turn.done 没带转写时兜底）
@@ -1171,6 +1175,7 @@ class Runner:
             if t == "delegation.created":
                 self.mark_activity("delegation")   # 委派后台 = 人在用
                 self._promise_pending = None       # 真派活了，看门狗不必补
+                self._delegation_seq += 1          # 供"这中间零委派"判据用（见 _promise_watch）
                 # ⭐ 这是「语音模型此刻正在召唤后台」的那个标记 —— 实测它后面 22~60 ms
                 # 就跟着 turn/started，所以在这里注入，后台起的那一轮正好读得到。
                 # 比开口边沿注入好在两点（2026-09-16 用户提出，日志印证）：
@@ -2451,19 +2456,49 @@ class Runner:
                    "做好了", "加好了", "记下了", "建好了", "存好了", "写好了", "设好了",
                    "创建好了", "保存好了", "添加好了", "处理好了", "都弄好了", "搞定了")
 
+    #: 第三类：声称**正在做**。2026-09-18 实录抓到的漏网之鱼 ——
+    #: 用户「再帮我做一次」→ 它答「嗯，我看一下。」（零委派）→ 50 秒后用户追问
+    #: 「你好像没在做呀」→ 它答「还在做，马上好。」——**断言工作正在进行，而这一刻
+    #: 后台调用是零**。这比承诺和完成断言都更该抓：承诺还可能是刚要动，
+    #: 「还在做」则是明确报告一个不存在的进行态。
+    #: ⚠ 老表里有「马上做」没有「马上好」、有「我处理」没有「我看一下」，
+    #:   于是整整 50 秒一条补投都没发。词表这条路的毛病就在这儿：它只抓写下来的说法。
+    _PROGRESS_MARKS = ("还在做", "马上好", "就好了", "快好了", "我看一下", "我看下",
+                       "我确认一下", "我再确认", "正在处理", "正在查", "这就看",
+                       "让我看看", "我查一下", "我试一下")
+
     def _promise_watch(self, role: str, text: str):
         """助手答应了就盯着：一段时间内没委派，我们替它把活派下去。"""
         if not self.settings.get("promiseWatchEnabled", True):
             return
         t = (text or "").strip()
         if role == "user":
-            if t:
-                self._last_user_ask = (time.time(), t)
+            if not t:
+                return
+            now = time.time()
+            self._last_user_ask = (now, t)
+            # ⚠ 不看措辞的那条判据（2026-09-18）：词表只抓写下来的说法，
+            #   而它每次换个说法就漏 —— 实录里「嗯，我看一下。」「还在做，马上好。」
+            #   两句都不在表里，于是 50 秒空转、用户追问两次一条补投都没发。
+            #   这里改判**结构**：你在窗口内连说两次，而这中间一次委派都没有 ——
+            #   那不管它嘴上说了什么，都该把活补下去。
+            window = float(self.settings.get("promiseRepeatWindowSeconds") or 90.0)
+            self._user_asks = [x for x in self._user_asks if now - x[0] <= window]
+            self._user_asks.append((now, t, self._delegation_seq))
+            if (len(self._user_asks) >= 2
+                    and self._user_asks[0][2] == self._delegation_seq
+                    and self.settings.get("promiseWatchEnabled", True)):
+                first = self._user_asks[0]
+                self._user_asks = []          # 补一次就清账，别连着补
+                self._promise_pending = (now, first[1], t, False)
+                asyncio.run_coroutine_threadsafe(self._promise_rescue(), self.loop)
             return
         if role != "assistant" or not t:
             return
         claimed = any(m in t for m in self._DONE_MARKS)
-        if not claimed and not any(m in t for m in self._PROMISE_MARKS):
+        if (not claimed
+                and not any(m in t for m in self._PROMISE_MARKS)
+                and not any(m in t for m in self._PROGRESS_MARKS)):
             return
         ask = getattr(self, "_last_user_ask", None)
         if not ask or time.time() - ask[0] > 60:
