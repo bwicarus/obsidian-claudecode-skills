@@ -2208,6 +2208,11 @@ test("snapshot-mcp 将结构化输出交给现有 Realtime 渲染入口并回精
       // 卡片钉在正文上没有 —— 这两个键沿途要过 11 道闸/重建点，
       // 少搬一处就断在那儿，而症状是「AI 照常说已送达」。
       "bindOutcome", "bindReason",
+      // sidebar：草稿到底有没有进侧栏（shown / unavailable / error:…）。
+      // 2026-09-18 加的第三个键，同样得走全那 11 道闸 —— 漏搬一处的症状是
+      // 「送达成功却回报 rejected」（rc-computer-voice 的两处 exactObject 白名单
+      // 当初就漏了它，AI 于是对着一张已经画好的卡说自己失败了）。
+      "sidebar",
     ].sort(),
   );
   assert.equal(ack.type, "reader-realtime-output-ack");
