@@ -49,7 +49,8 @@ Voice requests use the CLI's native delegation. Both backend result paths share
 one `appendSpeech` output; automatic result handoff is disabled to avoid duplicate
 speech. Each result carries request/turn/tool receipts. A submitted speech request
 is not evidence that the user heard it; the verification probe also checks actual
-non-silent audio and the matching final transcript.
+non-silent audio and matching stock, price and date in the final transcript.
+The speech layer may paraphrase wording; it is not a verbatim TTS guarantee.
 
 ## Operations
 
