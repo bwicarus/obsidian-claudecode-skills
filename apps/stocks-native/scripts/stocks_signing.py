@@ -184,9 +184,11 @@ def build_status(api: AppleAPI, build_number: str, marketing_version: str):
     review = related_attributes("betaAppReviewSubmission")
     group_fields = "isInternalGroup,hasAccessToAllBuilds"
     groups = api.listing(f"/v1/apps/{app_id}/betaGroups", **{"fields[betaGroups]": group_fields, "limit": 200})
-    linked = api.listing("/v1/betaGroups", **{"filter[app]": app_id, "filter[builds]": build["id"],
-                         "fields[betaGroups]": group_fields, "limit": 200})
-    linked_ids = {group["id"] for group in linked}
+    linked_ids = set()
+    for group in groups:
+        linked_builds = api.listing(f"/v1/betaGroups/{group['id']}/relationships/builds", limit=200)
+        if any(item["id"] == build["id"] for item in linked_builds):
+            linked_ids.add(group["id"])
     summary.update({key: attributes.get(key) for key in (
         "processingState", "uploadedDate", "expirationDate", "expired",
         "buildAudienceType", "usesNonExemptEncryption")})
