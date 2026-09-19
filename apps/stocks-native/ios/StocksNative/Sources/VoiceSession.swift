@@ -35,6 +35,11 @@ final class VoiceSession: ObservableObject {
     private var pendingPlayback: [Data] = []
     private var generation = UUID()
     private var lastContextPayload: String?
+    private var pendingContextPayload: String?
+    private var pendingContextObject: [String: Any]?
+    private var contextFlushTask: Task<Void, Never>?
+    private var contextFlushID = UUID()
+    private var contextSendInFlight = false
 
     func start(client: APIClient, deviceID: String, stockCode: String?) async {
         guard !isStarted else { return }
@@ -114,18 +119,56 @@ final class VoiceSession: ObservableObject {
     }
 
     func updateContext(_ context: VoiceUIContext) async {
-        guard isConnected, let socket else { return }
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             let data = try encoder.encode(context)
             guard data.count <= 8_000, let value = String(data: data, encoding: .utf8),
-                  value != lastContextPayload,
-                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-            try await send(["type": "ui.context", "context": object], through: socket)
-            lastContextPayload = value
+                  value != lastContextPayload else { return }
+            if value != pendingContextPayload {
+                guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+                pendingContextPayload = value
+                pendingContextObject = object
+            }
+            scheduleContextFlush()
         } catch {
             // Context is an optimization. A failed update must not end a working voice call.
+        }
+    }
+
+    private func scheduleContextFlush(delayNanoseconds: UInt64 = 350_000_000) {
+        guard isConnected, socket != nil, pendingContextPayload != nil, !contextSendInFlight else { return }
+        contextFlushTask?.cancel()
+        let current = generation
+        let flushID = UUID()
+        contextFlushID = flushID
+        contextFlushTask = Task { @MainActor [weak self] in
+            if delayNanoseconds > 0 { try? await Task.sleep(nanoseconds: delayNanoseconds) }
+            guard !Task.isCancelled, let self, self.contextFlushID == flushID else { return }
+            self.contextFlushTask = nil
+            self.contextSendInFlight = true
+            await self.flushPendingContext(generation: current)
+        }
+    }
+
+    private func flushPendingContext(generation current: UUID) async {
+        guard current == generation, isConnected, let socket,
+              let payload = pendingContextPayload, let object = pendingContextObject else { return }
+        do {
+            try await send(["type": "ui.context", "context": object], through: socket)
+            guard current == generation else { return }
+            lastContextPayload = payload
+            if pendingContextPayload == payload {
+                pendingContextPayload = nil
+                pendingContextObject = nil
+            }
+        } catch {
+            // Keep the latest unsent snapshot so a later UI change or reconnect can retry it.
+            guard current == generation else { return }
+        }
+        contextSendInFlight = false
+        if pendingContextPayload != nil, pendingContextPayload != lastContextPayload {
+            if lastContextPayload == payload { scheduleContextFlush() }
         }
     }
 
@@ -183,6 +226,7 @@ final class VoiceSession: ObservableObject {
                 connectionTimeout?.cancel()
                 pendingPlayback.forEach { audio.play($0) }
                 pendingPlayback.removeAll()
+                scheduleContextFlush(delayNanoseconds: 0)
             case "closed":
                 generation = UUID()
                 cleanup()
@@ -261,6 +305,12 @@ final class VoiceSession: ObservableObject {
         audioQueue.removeAll()
         pendingPlayback.removeAll()
         lastContextPayload = nil
+        pendingContextPayload = nil
+        pendingContextObject = nil
+        contextFlushTask?.cancel()
+        contextFlushTask = nil
+        contextFlushID = UUID()
+        contextSendInFlight = false
         if closeSocket { socket?.cancel(with: .goingAway, reason: nil) }
         socket = nil
     }

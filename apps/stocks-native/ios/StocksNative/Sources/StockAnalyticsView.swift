@@ -3,23 +3,23 @@ import SwiftUI
 
 struct QuoteMetricGrid: View {
     let stock: Stock
-    private let columns = [GridItem(.adaptive(minimum: 112), spacing: 10)]
 
     var body: some View {
-        LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
-            metric("今开", AppStyle.price(stock.open))
-            metric("最高", AppStyle.price(stock.high), color: AppStyle.up)
-            metric("最低", AppStyle.price(stock.low), color: AppStyle.down)
-            metric("昨收", AppStyle.price(stock.prevClose))
-            metric("成交量", AppStyle.compact(stock.volume))
-            metric("成交额", AppStyle.compact(stock.turnover))
-            metric("换手率", AppStyle.percent(stock.turnoverRate))
-            metric("量比", stock.volumeRatio.map { String(format: "%.2f", $0) } ?? "—")
-            metric("振幅", AppStyle.percent(stock.amplitude))
-            metric("市盈率", stock.peDynamic.map { String(format: "%.2f", $0) } ?? "—")
-            metric("市净率", stock.pb.map { String(format: "%.2f", $0) } ?? "—")
-            metric("总市值", AppStyle.compact(stock.marketCap))
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 0) {
+                metric("今开", AppStyle.price(stock.open))
+                metric("最高", AppStyle.price(stock.high), color: quoteColor(stock.high))
+                metric("最低", AppStyle.price(stock.low), color: quoteColor(stock.low))
+                metric("昨收", AppStyle.price(stock.prevClose))
+                metric("成交量", AppStyle.compact(stock.volume))
+                metric("成交额", AppStyle.compact(stock.turnover))
+                metric("换手", AppStyle.percent(stock.turnoverRate))
+                metric("量比", stock.volumeRatio.map { String(format: "%.2f", $0) } ?? "—")
+                metric("振幅", AppStyle.percent(stock.amplitude))
+            }
+            .padding(.horizontal, 14)
         }
+        .background(.white)
     }
 
     private func metric(_ title: String, _ value: String, color: Color = AppStyle.ink) -> some View {
@@ -28,46 +28,224 @@ struct QuoteMetricGrid: View {
             Text(value).font(.system(.subheadline, design: .rounded, weight: .medium))
                 .monospacedDigit().foregroundStyle(color)
         }
-        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white, in: RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 10).padding(.vertical, 10)
+        .frame(minWidth: 82, alignment: .leading)
+        .overlay(alignment: .trailing) {
+            Rectangle().fill(Color.secondary.opacity(0.14)).frame(width: 0.5, height: 28)
+        }
+    }
+
+    private func quoteColor(_ value: Double?) -> Color {
+        guard let value, let previous = stock.prevClose else { return AppStyle.ink }
+        return AppStyle.movement(value - previous)
     }
 }
 
-struct OrderBookCard: View {
-    let stock: Stock
+enum WorkspaceInspectorMode: String, CaseIterable, Identifiable, Hashable {
+    case orderBook, analysis, assistant
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .orderBook: return "盘口"
+        case .analysis: return "分析"
+        case .assistant: return "AI"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .orderBook: return "list.number"
+        case .analysis: return "waveform.path.ecg"
+        case .assistant: return "waveform"
+        }
+    }
+}
+
+struct StockWorkspaceInspector: View {
+    @ObservedObject var model: AppModel
+    @Binding var mode: WorkspaceInspectorMode
+    let onClose: () -> Void
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("五档盘口").font(.headline)
-                Spacer()
-                if let inner = stock.innerVolume, let outer = stock.outerVolume {
-                    Text("内 \(AppStyle.compact(inner)) · 外 \(AppStyle.compact(outer))")
-                        .font(.caption).foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Picker("检查器", selection: $mode) {
+                    ForEach(WorkspaceInspectorMode.allCases) { item in
+                        Text(item.title).tag(item)
+                    }
                 }
+                .pickerStyle(.segmented)
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("关闭检查器")
             }
-            HStack(alignment: .top, spacing: 26) {
-                levels(title: "卖盘", rows: Array((stock.asks ?? []).reversed()), tint: AppStyle.down)
-                Divider()
-                levels(title: "买盘", rows: stock.bids ?? [], tint: AppStyle.up)
+            .padding(14)
+            .background(.white)
+            Divider()
+
+            switch mode {
+            case .orderBook:
+                if let stock = model.displayedStock {
+                    OrderBookInspector(stock: stock)
+                } else {
+                    inspectorEmpty("先选择一只股票", symbol: "list.number")
+                }
+            case .analysis:
+                if let detail = model.displayedDetail {
+                    StockAnalysisInspector(detail: detail)
+                } else {
+                    inspectorEmpty("暂无分析数据", symbol: "waveform.path.ecg")
+                }
+            case .assistant:
+                VoiceSidebar(voice: model.voice, model: model)
             }
         }
-        .padding(20).background(.white, in: RoundedRectangle(cornerRadius: 20))
+        .background(.white)
     }
 
-    private func levels(title: String, rows: [OrderLevel], tint: Color) -> some View {
-        VStack(spacing: 7) {
-            Text(title).font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-            ForEach(Array(rows.prefix(5).enumerated()), id: \.offset) { index, row in
-                HStack {
-                    Text("\(index + 1)").foregroundStyle(.tertiary)
-                    Text(AppStyle.price(row.price)).foregroundStyle(tint)
+    private func inspectorEmpty(_ title: String, symbol: String) -> some View {
+        ContentUnavailableView(title, systemImage: symbol)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct OrderBookInspector: View {
+    let stock: Stock
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(stock.name).font(.headline).foregroundStyle(AppStyle.ink)
+                        Text(stock.code).font(.caption2).monospaced().foregroundStyle(.secondary)
+                    }
                     Spacer()
-                    Text(AppStyle.compact(row.volume)).foregroundStyle(.secondary)
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text(AppStyle.price(stock.price)).font(.title3.weight(.semibold)).monospacedDigit()
+                        Text(AppStyle.change(stock.changePct))
+                            .font(.caption).monospacedDigit()
+                            .foregroundStyle(AppStyle.movement(stock.changePct))
+                    }
+                }
+                .padding(.bottom, 18)
+
+                bookSection("卖盘", rows: Array((stock.asks ?? []).reversed()), tint: AppStyle.down)
+                Divider().padding(.vertical, 12)
+                bookSection("买盘", rows: stock.bids ?? [], tint: AppStyle.up)
+
+                if let inner = stock.innerVolume, let outer = stock.outerVolume {
+                    Divider().padding(.vertical, 14)
+                    HStack {
+                        smallValue("内盘", AppStyle.compact(inner))
+                        Spacer()
+                        smallValue("外盘", AppStyle.compact(outer))
+                    }
+                }
+            }
+            .padding(18)
+        }
+        .overlay {
+            if (stock.asks ?? []).isEmpty && (stock.bids ?? []).isEmpty {
+                ContentUnavailableView("暂无五档数据", systemImage: "list.number")
+            }
+        }
+    }
+
+    private func bookSection(_ title: String, rows: [OrderLevel], tint: Color) -> some View {
+        VStack(spacing: 9) {
+            HStack {
+                Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                Text("价格").font(.caption2).foregroundStyle(.tertiary)
+                Text("委托量").font(.caption2).foregroundStyle(.tertiary).frame(width: 68, alignment: .trailing)
+            }
+            ForEach(Array(rows.prefix(5).enumerated()), id: \.offset) { index, row in
+                HStack(spacing: 10) {
+                    Text("\(index + 1)").foregroundStyle(.tertiary).frame(width: 18, alignment: .leading)
+                    Spacer()
+                    Text(AppStyle.price(row.price)).foregroundStyle(tint)
+                    Text(AppStyle.compact(row.volume)).foregroundStyle(.secondary).frame(width: 68, alignment: .trailing)
                 }
                 .font(.caption.monospacedDigit())
             }
         }
-        .frame(maxWidth: .infinity)
+    }
+
+    private func smallValue(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.caption.monospacedDigit()).foregroundStyle(AppStyle.ink)
+        }
+    }
+}
+
+private struct StockAnalysisInspector: View {
+    let detail: StockResponse
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                inspectorSection("行情估值") {
+                    inspectorRow("市盈率", number(detail.stock.peDynamic))
+                    inspectorRow("市净率", number(detail.stock.pb))
+                    inspectorRow("总市值", AppStyle.compact(detail.stock.marketCap))
+                    inspectorRow("60 日涨跌", AppStyle.change(detail.stock.change60d))
+                    inspectorRow("年内涨跌", AppStyle.change(detail.stock.changeYtd))
+                }
+                if let technical = detail.technical {
+                    inspectorSection("技术") {
+                        inspectorRow("MA5 / MA20", "\(number(technical.metrics.ma5)) / \(number(technical.metrics.ma20))")
+                        inspectorRow("MACD", number(technical.metrics.macdHist), tint: AppStyle.movement(technical.metrics.macdHist))
+                        inspectorRow("K / D", "\(number(technical.metrics.kdjK)) / \(number(technical.metrics.kdjD))")
+                        inspectorRow("获利盘", percentRatio(technical.metrics.profitRatio))
+                    }
+                }
+                if let fund = detail.fund {
+                    inspectorSection("资金") {
+                        inspectorRow("今日主力", AppStyle.compact(fund.metrics.latestMainInflow), tint: AppStyle.movement(fund.metrics.latestMainInflow))
+                        inspectorRow("五日主力", AppStyle.compact(fund.metrics.mainInflow5d), tint: AppStyle.movement(fund.metrics.mainInflow5d))
+                        inspectorRow("主力占比", AppStyle.percent(fund.metrics.latestMainRatio))
+                    }
+                }
+                if let chips = detail.chips {
+                    inspectorSection("筹码") {
+                        inspectorRow("平均成本", AppStyle.price(chips.average))
+                        inspectorRow("50% 成本", AppStyle.price(chips.cost50))
+                        inspectorRow("获利比例", percentRatio(chips.winnerRate))
+                    }
+                }
+                if let concepts = detail.concepts, !concepts.isEmpty {
+                    inspectorSection("行业与概念") { FlowTags(items: concepts) }
+                }
+            }
+            .padding(18)
+        }
+    }
+
+    private func inspectorSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func inspectorRow(_ title: String, _ value: String, tint: Color = AppStyle.ink) -> some View {
+        HStack {
+            Text(title).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).monospacedDigit().foregroundStyle(tint)
+        }
+        .font(.caption)
+    }
+
+    private func number(_ value: Double?) -> String { value.map { String(format: "%.2f", $0) } ?? "—" }
+    private func percentRatio(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return AppStyle.percent(abs(value) <= 1 ? value * 100 : value)
     }
 }
 
@@ -93,7 +271,7 @@ struct MarketChartSection: View {
                     .font(.caption).foregroundStyle(.red)
             }
             if model.chartPeriod == .intraday {
-                if let intraday = model.intraday, !intraday.rows.isEmpty {
+                if let intraday = model.displayedIntraday, !intraday.rows.isEmpty {
                     IntradayChart(data: intraday, stockCode: stockCode, annotations: model.annotations)
                 } else if model.isLoadingChart {
                     chartLoading
@@ -221,8 +399,26 @@ struct StockAnalyticsSections: View {
             if let chips = detail.chips { ChipCard(panel: chips) }
             if let peers = detail.peers, !peers.isEmpty { PeersCard(peers: peers, model: model) }
             if let concepts = detail.concepts, !concepts.isEmpty { ConceptsCard(concepts: concepts) }
+        }
+    }
+}
+
+struct StockAnnouncementsSection: View {
+    let detail: StockResponse
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("公司公告").font(.title3.weight(.semibold)).foregroundStyle(AppStyle.ink)
+                Spacer()
+                Text(detail.stock.code).font(.caption).monospaced().foregroundStyle(.secondary)
+            }
             if let announcements = detail.announcements, !announcements.isEmpty {
                 AnnouncementsCard(items: announcements)
+            } else {
+                ContentUnavailableView("暂无公告", systemImage: "doc.text.magnifyingglass",
+                                       description: Text("服务器尚未返回这只股票的近期披露。"))
+                    .frame(maxWidth: .infinity, minHeight: 280)
             }
         }
     }
@@ -299,8 +495,8 @@ private struct ChipCard: View {
                 }
             }
             .frame(height: 150)
-            valueLine("平均成本", panel.average)
-            valueLine("获利比例", panel.winnerRate.map { $0 * 100 }, suffix: "%")
+            valueLine("平均成本", panel.average, color: AppStyle.ink)
+            valueLine("获利比例", panel.winnerRate.map { $0 * 100 }, suffix: "%", color: AppStyle.ink)
         }
     }
 }
@@ -408,12 +604,13 @@ private func metricLine(_ leftTitle: String, _ left: Double?, _ rightTitle: Stri
     .font(.caption)
 }
 
-private func valueLine(_ title: String, _ value: Double?, compact: Bool = false, suffix: String = "") -> some View {
+private func valueLine(_ title: String, _ value: Double?, compact: Bool = false,
+                       suffix: String = "", color: Color? = nil) -> some View {
     HStack {
         Text(title).foregroundStyle(.secondary)
         Spacer()
         Text(compact ? AppStyle.compact(value) : (value.map { String(format: "%.2f", $0) } ?? "—") + suffix)
-            .monospacedDigit().foregroundStyle(AppStyle.movement(value))
+            .monospacedDigit().foregroundStyle(color ?? AppStyle.movement(value))
     }
     .font(.caption)
 }

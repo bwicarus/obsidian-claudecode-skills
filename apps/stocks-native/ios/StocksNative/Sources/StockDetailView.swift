@@ -3,90 +3,178 @@ import SwiftUI
 
 struct StockDetailView: View {
     @ObservedObject var model: AppModel
+    @State private var selectedTab: StockWorkspaceTab = .chart
 
     var body: some View {
-        ScrollView {
-            if let detail = model.detail {
+        Group {
+            if let detail = model.displayedDetail {
                 let currentStock = model.displayedStock ?? detail.stock
-                VStack(alignment: .leading, spacing: 26) {
-                    header(currentStock)
+                VStack(spacing: 0) {
+                    quoteHeader(currentStock, sector: currentStock.sector ?? detail.stock.sector, asOf: detail.asOf)
                     if let error = model.detailError {
                         Label(error, systemImage: "exclamationmark.circle")
                             .font(.footnote).foregroundStyle(.red)
+                            .padding(.horizontal, 22).padding(.bottom, 8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     QuoteMetricGrid(stock: currentStock)
-                    if !(currentStock.bids ?? []).isEmpty || !(currentStock.asks ?? []).isEmpty {
-                        OrderBookCard(stock: currentStock)
-                    }
-                    MarketChartSection(model: model, stockCode: detail.stock.code)
-                    StockAnalyticsSections(model: model, detail: detail)
-                    HStack(alignment: .top) {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("数据时间").font(.caption).foregroundStyle(.secondary)
-                            Text(detail.asOf ?? "服务器未提供时间")
-                                .font(.caption).monospacedDigit().textSelection(.enabled)
-                        }
-                        Spacer()
-                        Text("来源 · VPS 股票数据库")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
+                    Divider()
+                    workspaceContent(detail: detail)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    workspaceDock
                 }
-                .padding(28)
             } else if model.isLoadingDetail {
-                ProgressView("读取股票信息…").padding(60)
+                ProgressView("读取股票信息…").frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let error = model.detailError {
                 ContentUnavailableView {
                     Label("暂时无法读取", systemImage: "wifi.exclamationmark")
                 } description: { Text(error) } actions: {
                     Button("重试") { Task { await model.loadDetail() } }.buttonStyle(.bordered)
                 }
-                .padding(.top, 80)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ContentUnavailableView("选择一只股票", systemImage: "chart.xyaxis.line", description: Text("查看行情、原生 K 线和语音助手。"))
-                    .padding(.top, 80)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        }
-        .refreshable {
-            await model.loadDetail()
-            await model.loadRealtime()
-            await model.loadChart()
         }
         .background(AppStyle.canvas)
+        .onChange(of: model.selectedCode) { _, _ in selectedTab = .chart }
     }
 
-    private func header(_ stock: Stock) -> some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(stock.code).font(.caption).monospaced().tracking(2).foregroundStyle(.secondary)
-                    Text(stock.name).font(.system(size: 30, weight: .semibold, design: .rounded)).foregroundStyle(AppStyle.ink)
+    @ViewBuilder
+    private func workspaceContent(detail: StockResponse) -> some View {
+        switch selectedTab {
+        case .chart:
+            ScrollView {
+                MarketChartSection(model: model, stockCode: detail.stock.code)
+                    .padding(.horizontal, 22).padding(.vertical, 18)
+            }
+            .refreshable { await refreshDetail() }
+        case .research:
+            ScrollView {
+                StockAnalyticsSections(model: model, detail: detail)
+                    .padding(22)
+            }
+            .refreshable { await refreshDetail() }
+        case .announcements:
+            ScrollView {
+                StockAnnouncementsSection(detail: detail)
+                    .padding(22)
+            }
+            .refreshable { await refreshDetail() }
+        }
+    }
+
+    private func quoteHeader(_ stock: Stock, sector: String?, asOf: String?) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 18) {
+                stockIdentity(stock, sector: sector, asOf: asOf)
+                Spacer(minLength: 12)
+                priceBlock(stock)
+                refreshButton
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top) {
+                    stockIdentity(stock, sector: sector, asOf: asOf)
+                    Spacer()
+                    refreshButton
                 }
-                Spacer()
-                if model.isLoadingDetail { ProgressView().controlSize(.small) }
-                Button { Task { await model.loadDetail() } } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.borderless).disabled(model.isLoadingDetail)
-                    .accessibilityLabel("刷新个股")
+                priceBlock(stock)
             }
-            HStack(alignment: .firstTextBaseline, spacing: 16) {
-                Text(AppStyle.price(stock.price)).font(.system(size: 42, weight: .medium, design: .rounded)).monospacedDigit()
-                Text(AppStyle.change(stock.changePct))
-                    .font(.system(.title3, design: .rounded, weight: .medium))
-                    .foregroundStyle(AppStyle.movement(stock.changePct)).monospacedDigit()
+        }
+        .padding(.horizontal, 22).padding(.vertical, 15)
+        .background(.white)
+    }
+
+    private func stockIdentity(_ stock: Stock, sector: String?, asOf: String?) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Text(stock.name)
+                    .font(.system(.title2, design: .rounded, weight: .semibold))
+                    .foregroundStyle(AppStyle.ink).lineLimit(1)
+                if let sector, !sector.isEmpty {
+                    Text(sector)
+                        .font(.caption2.weight(.medium)).lineLimit(1)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(AppStyle.canvas, in: Capsule())
+                }
             }
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 24) { metrics(stock) }
-                VStack(alignment: .leading, spacing: 10) { metrics(stock) }
+            HStack(spacing: 8) {
+                Text(stock.code).monospaced().tracking(1.2)
+                Text(asOf.map { "资料 \($0)" } ?? "等待资料时间").lineLimit(1)
             }
+            .font(.caption2).foregroundStyle(.secondary)
         }
     }
 
-    @ViewBuilder private func metrics(_ stock: Stock) -> some View {
-        if let sector = stock.sector, !sector.isEmpty {
-            Label(sector, systemImage: "square.grid.2x2").font(.subheadline).foregroundStyle(.secondary)
+    private func priceBlock(_ stock: Stock) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(AppStyle.price(stock.price))
+                .font(.system(size: 36, weight: .medium, design: .rounded))
+                .monospacedDigit()
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(AppStyle.change(stock.changePct))
+                Text(stock.changeAmount.map { String(format: "%+.2f", $0) } ?? "—")
+            }
+            .font(.subheadline.weight(.medium)).monospacedDigit()
+            .foregroundStyle(AppStyle.movement(stock.changePct))
         }
-        if let turnover = stock.turnover {
-            Text("成交额  \(turnover.formatted(.number.notation(.compactName).precision(.fractionLength(0...2))))")
-                .font(.subheadline).foregroundStyle(.secondary)
+    }
+
+    private var refreshButton: some View {
+        HStack(spacing: 8) {
+            if model.isLoadingDetail { ProgressView().controlSize(.small) }
+            Button { Task { await refreshDetail() } } label: { Image(systemName: "arrow.clockwise") }
+                .buttonStyle(.borderless).disabled(model.isLoadingDetail)
+                .accessibilityLabel("刷新个股")
+        }
+    }
+
+    private var workspaceDock: some View {
+        HStack(spacing: 6) {
+            ForEach(StockWorkspaceTab.allCases) { tab in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) { selectedTab = tab }
+                } label: {
+                    Label(tab.title, systemImage: tab.symbol)
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity).padding(.vertical, 7)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(selectedTab == tab ? AppStyle.accent : .secondary)
+                .background(selectedTab == tab ? AppStyle.accent.opacity(0.10) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 10))
+                .accessibilityAddTraits(selectedTab == tab ? .isSelected : [])
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(.white)
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    private func refreshDetail() async {
+        await model.loadDetail()
+        await model.loadRealtime()
+        await model.loadChart()
+    }
+}
+
+private enum StockWorkspaceTab: String, CaseIterable, Identifiable, Hashable {
+    case chart, research, announcements
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .chart: return "走势"
+        case .research: return "研究"
+        case .announcements: return "公告"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .chart: return "chart.xyaxis.line"
+        case .research: return "waveform.path.ecg"
+        case .announcements: return "doc.text"
         }
     }
 }
@@ -209,7 +297,7 @@ struct CandleChart: View {
                         .allowsHitTesting(annotationMode)
                 }
                 .frame(height: 290)
-                .accessibilityLabel("原生蜡烛图，\(visible.count) 根日 K 线。拖动查看开盘、最高、最低、收盘。")
+                .accessibilityLabel("原生蜡烛图，\(visible.count) 根 K 线。拖动查看开盘、最高、最低、收盘。")
                 HStack {
                     Text("成交量").font(.caption).foregroundStyle(.secondary)
                     if let volume = inspected?.candle.volume {
@@ -237,7 +325,7 @@ struct CandleChart: View {
                     }
                 }
                 .frame(height: 85)
-                Text(annotationMode ? "标注模式：使用手指或 Apple Pencil 绘制。标注按股票保存在本机。" : "触碰并拖动图表查看当日数据。红色上涨，绿色下跌。")
+                Text(annotationMode ? "标注模式：使用手指或 Apple Pencil 绘制。标注按股票保存在本机。" : "触碰并拖动图表查看当前 K 线数据。红色上涨，绿色下跌。")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }
@@ -318,10 +406,10 @@ struct CandleChart: View {
     }
 
     private var periodPicker: some View {
-        Picker("显示交易日", selection: $visibleCount) {
-            Text("30 日").tag(30)
-            Text("60 日").tag(60)
-            Text("120 日").tag(120)
+        Picker("显示区间", selection: $visibleCount) {
+            Text("30 根").tag(30)
+            Text("60 根").tag(60)
+            Text("120 根").tag(120)
         }.pickerStyle(.segmented)
     }
 
@@ -344,5 +432,12 @@ struct CandleChart: View {
         Text("收 \(AppStyle.price(candle.close))")
     }
 
-    private func shortDate(_ time: String) -> String { String(time.prefix(10)) }
+    private func shortDate(_ time: String) -> String {
+        let normalized = time.replacingOccurrences(of: "T", with: " ")
+        let parts = normalized.split(separator: " ")
+        if parts.count >= 2, parts[1].contains(":") {
+            return "\(parts[0].suffix(5)) \(parts[1].prefix(5))"
+        }
+        return String(normalized.prefix(10))
+    }
 }

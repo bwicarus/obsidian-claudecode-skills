@@ -30,7 +30,7 @@ final class AppModel: ObservableObject {
     private var detailGeneration = UUID()
     private var chartGeneration = UUID()
     private let cache = MarketCache.shared
-    private var recentVoiceActions: [String] = []
+    private var recentVoiceActions: [VoiceUIAction] = []
 
     init() {
         let initialBase = UserDefaults.standard.string(forKey: "stocksNative.baseURL") ?? "https://bwicarus.space/stocks-native"
@@ -57,12 +57,28 @@ final class AppModel: ObservableObject {
 
     var displayedStock: Stock? {
         if liveStock?.code == selectedCode { return liveStock }
-        return detail?.stock
+        return displayedDetail?.stock
+    }
+
+    var displayedDetail: StockResponse? {
+        guard detail?.stock.code == selectedCode else { return nil }
+        return detail
+    }
+
+    var displayedIntraday: IntradayResponse? {
+        guard chartPeriod == .intraday, intraday?.code == selectedCode else { return nil }
+        return intraday
+    }
+
+    var displayedKLine: KLineResponse? {
+        guard let selectedCode, let kline,
+              kline.code == selectedCode, kline.period == chartPeriod.rawValue else { return nil }
+        return kline
     }
 
     var displayedCandles: [Candle] {
-        if let rows = kline?.rows, !rows.isEmpty { return rows }
-        return chartPeriod == .day ? (detail?.candles ?? []) : []
+        if let rows = displayedKLine?.rows, !rows.isEmpty { return rows }
+        return chartPeriod == .day ? (displayedDetail?.candles ?? []) : []
     }
 
     func pair(base: String, code: String) async throws {
@@ -289,10 +305,24 @@ final class AppModel: ObservableObject {
 
     func publishVoiceContext(action: String? = nil) async {
         if let action, !action.isEmpty {
-            recentVoiceActions.append(action)
-            recentVoiceActions = Array(recentVoiceActions.suffix(6))
+            let next = VoiceUIAction(id: UUID().uuidString,
+                                     kind: voiceActionKind(action),
+                                     label: String(action.prefix(120)),
+                                     occurredAtUtc: Date().ISO8601Format(),
+                                     stockCode: selectedCode,
+                                     chartPeriod: chartPeriod.rawValue)
+            if let last = recentVoiceActions.last,
+               last.kind == next.kind, last.label == next.label,
+               last.stockCode == next.stockCode, last.chartPeriod == next.chartPeriod {
+                recentVoiceActions[recentVoiceActions.count - 1] = next
+            } else {
+                recentVoiceActions.append(next)
+            }
+            recentVoiceActions = Array(recentVoiceActions.suffix(3))
         }
         let stock = displayedStock
+        let activeDetail = displayedDetail
+        let activeIntraday = displayedIntraday
         var metrics: [String: String] = [:]
         if let value = stock?.price { metrics["price"] = String(format: "%.3f", value) }
         if let value = stock?.changePct { metrics["changePct"] = String(format: "%+.3f%%", value) }
@@ -301,21 +331,31 @@ final class AppModel: ObservableObject {
         if let value = stock?.low { metrics["low"] = String(format: "%.3f", value) }
         if let value = stock?.turnover { metrics["turnover"] = String(format: "%.0f", value) }
         if let value = stock?.turnoverRate { metrics["turnoverRate"] = String(format: "%.3f%%", value) }
-        if let value = detail?.technical?.metrics.macdHist { metrics["macdHist"] = String(format: "%.4f", value) }
-        if let value = detail?.fund?.metrics.latestMainInflow { metrics["mainInflow"] = String(format: "%.0f", value) }
+        if let value = activeDetail?.technical?.metrics.macdHist { metrics["macdHist"] = String(format: "%.4f", value) }
+        if let value = activeDetail?.fund?.metrics.latestMainInflow { metrics["mainInflow"] = String(format: "%.0f", value) }
         var panels = [chartPeriod.title, "行情指标"]
-        if detail?.technical != nil { panels.append("技术指标") }
-        if detail?.fund != nil { panels.append("资金动向") }
-        if detail?.chips != nil { panels.append("筹码分布") }
-        if !(detail?.peers ?? []).isEmpty { panels.append("同业对比") }
-        if !(detail?.announcements ?? []).isEmpty { panels.append("公司公告") }
-        let latestTime = chartPeriod == .intraday ? intraday?.rows.last?.time : displayedCandles.last?.time
+        if activeDetail?.technical != nil { panels.append("技术指标") }
+        if activeDetail?.fund != nil { panels.append("资金动向") }
+        if activeDetail?.chips != nil { panels.append("筹码分布") }
+        if !(activeDetail?.peers ?? []).isEmpty { panels.append("同业对比") }
+        if !(activeDetail?.announcements ?? []).isEmpty { panels.append("公司公告") }
+        let latestTime = chartPeriod == .intraday ? activeIntraday?.rows.last?.time : displayedCandles.last?.time
+        let scopedActions = recentVoiceActions.filter { $0.stockCode == selectedCode }
         let context = VoiceUIContext(screen: selectedCode == nil ? "market_overview" : "stock_detail",
                                      selectedCode: selectedCode, selectedName: stock?.name,
-                                     quoteAsOf: intraday?.tradeDate.isEmpty == false ? intraday?.tradeDate : detail?.asOf,
+                                     quoteAsOf: activeIntraday?.tradeDate.isEmpty == false ? activeIntraday?.tradeDate : activeDetail?.asOf,
+                                     observedAtUtc: Date().ISO8601Format(),
                                      chartPeriod: chartPeriod.title, latestPointTime: latestTime,
                                      metrics: metrics, visiblePanels: panels,
-                                     recentActions: recentVoiceActions)
+                                     recentActions: scopedActions)
         await voice.updateContext(context)
+    }
+
+    private func voiceActionKind(_ action: String) -> String {
+        if action.hasPrefix("搜索股票") { return "search" }
+        if action.hasPrefix("图表标注") { return "annotation" }
+        if action.contains("周期") || action.contains("K线") { return "chart_period" }
+        if action.contains("面板") || action.contains("侧栏") { return "panel" }
+        return "interaction"
     }
 }

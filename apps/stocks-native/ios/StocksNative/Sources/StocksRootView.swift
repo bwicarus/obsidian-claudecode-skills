@@ -27,14 +27,15 @@ struct StocksRootView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingSettings = false
-    @State private var showingCompactVoice = false
-    @State private var showingSidebar = true
+    @State private var showingCompactInspector = false
+    @State private var inspectorMode: WorkspaceInspectorMode = .orderBook
+    @State private var showingWideInspector = true
     @State private var detailWidth: CGFloat = 0
 
     var body: some View {
         NavigationSplitView {
             stockList
-                .navigationTitle("股票")
+                .navigationTitle("自选")
                 .navigationSplitViewColumnWidth(min: 240, ideal: 290, max: 340)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
@@ -49,38 +50,43 @@ struct StocksRootView: View {
                 }
         } detail: {
             GeometryReader { geometry in
+                let showsInspector = sizeClass == .regular && geometry.size.width >= 900 && showingWideInspector
                 HStack(spacing: 0) {
                     StockDetailView(model: model)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    if sizeClass == .regular && geometry.size.width >= 760 && showingSidebar {
+                    if showsInspector {
                         Divider()
-                        VoiceSidebar(voice: model.voice, model: model)
-                            .frame(width: 310)
+                        StockWorkspaceInspector(
+                            model: model,
+                            mode: $inspectorMode,
+                            onClose: { withAnimation(.easeInOut(duration: 0.2)) { showingWideInspector = false } }
+                        )
+                        .frame(width: min(max(geometry.size.width * 0.29, 310), 360))
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
                 .onAppear { detailWidth = geometry.size.width }
                 .onChange(of: geometry.size.width) { _, width in detailWidth = width }
             }
             .background(AppStyle.canvas)
-            .navigationTitle(model.displayedStock?.name ?? "市场概览")
+            .navigationTitle("行情工作台")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        if sizeClass == .compact || detailWidth < 760 { showingCompactVoice = true }
-                        else { withAnimation(.easeInOut(duration: 0.2)) { showingSidebar.toggle() } }
-                    } label: { Image(systemName: "waveform") }
-                        .accessibilityLabel("语音助手侧栏")
+                    inspectorMenu
                 }
             }
         }
         .tint(AppStyle.accent)
         .sheet(isPresented: $showingSettings) { PairingView(model: model) }
-        .sheet(isPresented: $showingCompactVoice) {
-            NavigationStack {
-                VoiceSidebar(voice: model.voice, model: model)
-                    .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("完成") { showingCompactVoice = false } } }
-            }
+        .sheet(isPresented: $showingCompactInspector) {
+            StockWorkspaceInspector(
+                model: model,
+                mode: $inspectorMode,
+                onClose: { showingCompactInspector = false }
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
         }
         .task {
             await model.maintainCache()
@@ -95,9 +101,11 @@ struct StocksRootView: View {
             await model.loadStocks()
         }
         .task(id: model.selectedCode) {
-            if let code = model.selectedCode { await model.voice.selectStock(code) }
+            if let code = model.selectedCode {
+                await model.voice.selectStock(code)
+                await model.publishVoiceContext(action: "打开股票：\(code)")
+            }
             await model.loadDetail()
-            if let code = model.selectedCode { await model.publishVoiceContext(action: "打开股票：\(code)") }
         }
         .task(id: "\(model.selectedCode ?? ""):\(model.chartPeriod.rawValue)") {
             await model.loadChart()
@@ -113,6 +121,39 @@ struct StocksRootView: View {
         .onChange(of: scenePhase) { _, phase in
             // MVP does not promise background audio; explicitly release its session when backgrounded.
             if phase == .background, model.voice.isStarted { Task { await model.voice.stop() } }
+        }
+    }
+
+    private var inspectorMenu: some View {
+        Menu {
+            ForEach(WorkspaceInspectorMode.allCases) { mode in
+                Button {
+                    openInspector(mode)
+                } label: {
+                    Label(mode.title, systemImage: mode.symbol)
+                }
+            }
+            if showingWideInspector && sizeClass == .regular && detailWidth >= 900 {
+                Divider()
+                Button("隐藏检查器", systemImage: "sidebar.trailing") {
+                    withAnimation(.easeInOut(duration: 0.2)) { showingWideInspector = false }
+                }
+            }
+        } label: {
+            Image(systemName: showingWideInspector ? inspectorMode.symbol : "sidebar.trailing")
+        }
+        .accessibilityLabel("打开行情检查器")
+    }
+
+    private func openInspector(_ mode: WorkspaceInspectorMode) {
+        if sizeClass == .regular && detailWidth >= 900 {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                inspectorMode = mode
+                showingWideInspector = true
+            }
+        } else {
+            inspectorMode = mode
+            showingCompactInspector = true
         }
     }
 
@@ -192,7 +233,7 @@ private struct MarketPulseStrip: View {
                 pulse("平", overview.flat, .secondary)
                 Spacer(minLength: 4)
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text("成交额").font(.caption2).foregroundStyle(.secondary)
+                    Text("全市场成交").font(.caption2).foregroundStyle(.secondary)
                     Text(AppStyle.compact(overview.turnover)).font(.caption.monospacedDigit())
                 }
             }

@@ -267,16 +267,26 @@ enum ChartPeriod: String, CaseIterable, Identifiable {
     }
 }
 
+struct VoiceUIAction: Codable, Hashable, Identifiable {
+    let id: String
+    let kind: String
+    let label: String
+    let occurredAtUtc: String
+    let stockCode: String?
+    let chartPeriod: String?
+}
+
 struct VoiceUIContext: Codable {
     let screen: String
     let selectedCode: String?
     let selectedName: String?
     let quoteAsOf: String?
+    let observedAtUtc: String
     let chartPeriod: String
     let latestPointTime: String?
     let metrics: [String: String]
     let visiblePanels: [String]
-    let recentActions: [String]
+    let recentActions: [VoiceUIAction]
 }
 
 struct PairResponse: Decodable {
