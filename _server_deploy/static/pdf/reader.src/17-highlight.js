@@ -76,7 +76,7 @@ async function loadAllHighlights() {
       if (n) renderHighlightsOnPage(pw, n);
     });
     window.dlog?.('高亮已加载：' + _allHighlights.length + ' 条');
-  } catch (e) { window.dlog?.('hl load fail: ' + e.message, '#ff6b6b'); }
+  } catch (e) { window.dlog?.('hl load fail: ' + e.message, '#ff453a'); }
 }
 
 // 高亮底色用**半透明** rgba(不是实色):字一定透得出来(不被实色块盖死);配合 .hl-saved 的 mix-blend-mode:multiply,

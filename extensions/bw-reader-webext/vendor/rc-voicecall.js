@@ -401,14 +401,14 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-flow-meta{color:var(--rc-text-dim);margin-bottom:6px}' +
       '.rc-flow-node{padding:6px 0;border-bottom:0.5px solid rgba(255,255,255,.07)}' +
       '.rc-flow-node:last-child{border-bottom:none}' +
-      '.rc-flow-h{color:#b9a8ff;font-weight:600;margin-bottom:4px}' +
+      '.rc-flow-h{color:#bf5af2;font-weight:600;margin-bottom:4px}' +
       '.rc-flow-args{color:var(--rc-text-dim);word-break:break-all;font-size:11px}' +
       '.rc-flow-step{color:#8fa0c0;font-size:11px}' +
       '.rc-flow-r{margin-top:4px}' +
       '.rc-flow-img{max-width:min(100%,220px);max-height:180px;border-radius:8px;cursor:zoom-in;' +
         'border:1px solid rgba(255,255,255,.12);background:#0e1422;display:block;margin-bottom:2px}' +
       '.rc-flow-cap{font-size:11px;color:var(--rc-text-dim);margin-bottom:4px}' +
-      '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#b9a8ff;margin-bottom:6px;flex:none}' +
+      '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#bf5af2;margin-bottom:6px;flex:none}' +
       '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
       '.vc-map-credit{position:absolute;right:5px;bottom:4px;z-index:2;font:10px/1.4 system-ui,sans-serif;color:#e8e8ee;background:rgba(16,23,38,.55);border-radius:4px;padding:0 4px;pointer-events:none;opacity:0;transition:opacity .18s}' +
       '.vc-ig-cell.vc-map-ready .vc-map-credit{opacity:1}' +
@@ -436,7 +436,7 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-card-p{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(123,108,255,.16);border:none;color:#9d8cff;' +
       'font-size:9px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0 0 0 1px;flex:none;transition:transform .12s}' +
       '.vc-card-p:active{transform:scale(.82)}' +
-      '.vc-card-p.playing{background:#7b6cff;color:#fff;animation:vcClipBreath2 1.8s ease-in-out infinite}' +
+      '.vc-card-p.playing{background:#5e5ce6;color:#fff;animation:vcClipBreath2 1.8s ease-in-out infinite}' +
       '@keyframes vcClipBreath2{0%,100%{box-shadow:0 0 0 0 rgba(123,108,255,.45)}50%{box-shadow:0 0 0 6px rgba(123,108,255,0)}}' +
       '.vc-card-hd .vc-card-x{margin-left:6px}' +
       '.vc-card-bd{overflow-y:auto;white-space:pre-wrap;word-break:break-word;-webkit-overflow-scrolling:touch;min-height:0}' +
@@ -487,7 +487,7 @@ if (window.__bwPwaProviderOnly) return;
       // 标记 = 圆角方形(用户改:套长条的外观,别用正圆),坐落在卡片**左上角**,永远是形态控制按钮
       '.vc-card-dot{position:absolute;left:0;top:0;width:40px;height:40px;border-radius:13px;padding:0;border:0.5px solid var(--vc-tl,rgba(255,255,255,.16));' +
         'background:var(--vc-tf,rgba(28,28,30,.72));-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);' +
-        'color:var(--vc-tc,#b9a8ff);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2;' +
+        'color:var(--vc-tc,#bf5af2);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2;' +
         'transition:transform .16s var(--rc-ease-spring),background .3s,border-color .3s,box-shadow .3s}' +
       '.vc-card-dot svg{width:17px;height:17px}' +
       '.vc-card.vc-hasdot .vc-card-hd{padding-left:48px;min-height:40px}' +   // 标记坐在左上角 → 标题让位
@@ -586,7 +586,7 @@ if (window.__bwPwaProviderOnly) return;
       '.asst-a .vc-flow svg,.asst-a .vc-fn svg,.asst-a .vc-fn-i svg,.asst-a .vc-dtl svg,.asst-a .rc-flow-node svg{background:none;padding:0;margin:0;border-radius:0;max-width:none;display:block;height:auto}' +
       '.asst-a .vc-fn-i svg{width:13px;height:13px}' +
       '.vc-flowb:active{transform:scale(.86)}' +
-      '.vc-flowb.on{background:#7b6cff;color:#fff}' +
+      '.vc-flowb.on{background:#5e5ce6;color:#fff}' +
       '.vc-flowbox{margin-top:8px;padding-top:8px;border-top:0.5px solid rgba(255,255,255,.12)}' +
       // 139(用户):工具调用**详情窗**(长按流程里的小长条打开)——复用旧「!」面板的格式:
       //   每条流程可点名字看细节,后面跟模型 / 耗时。
@@ -630,7 +630,7 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-fl-seg{display:flex;gap:0;border-radius:10px;overflow:hidden;border:0.5px solid rgba(255,255,255,.14)}' +
       '.vc-fl-seg button{flex:1;padding:7px 4px;font-size:12px;font-weight:600;cursor:pointer;border:none;\n        background:rgba(255,255,255,.05);color:#9db0d4;-webkit-appearance:none;appearance:none;\n        border-right:0.5px solid rgba(255,255,255,.12)}' +
       '.vc-fl-seg button:last-child{border-right:none}' +
-      '.vc-fl-seg button.on{background:#7b6cff;color:#fff}' +
+      '.vc-fl-seg button.on{background:#5e5ce6;color:#fff}' +
       '.vc-fl-st{font-size:10.5px;color:var(--rc-text-dim);margin-top:5px}' +
       '.vc-tp{margin-top:12px;padding-top:10px;border-top:0.5px solid rgba(255,255,255,.1)}' +
       '.vc-tp-t{font-size:11.5px;color:#9db0d4;font-weight:600;margin-bottom:2px}' +
@@ -640,12 +640,12 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-tp-f textarea{width:100%;box-sizing:border-box;min-height:74px;resize:vertical;border-radius:10px;padding:8px 10px;' +
         'background:rgba(0,0,0,.28);border:0.5px solid rgba(255,255,255,.14);color:#e6ecf8;' +
         'font-size:12.5px;line-height:1.55;font-family:-apple-system,system-ui,sans-serif;-webkit-appearance:none}' +
-      '.vc-tp-f textarea:focus{outline:none;border-color:#7b6cff;box-shadow:0 0 0 2px rgba(123,108,255,.25)}' +
+      '.vc-tp-f textarea:focus{outline:none;border-color:#5e5ce6;box-shadow:0 0 0 2px rgba(123,108,255,.25)}' +
       '.vc-tp-f .st{font-size:10.5px;color:var(--rc-text-dim);margin-top:3px}' +
       '.vc-tp-btns{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px}' +
       '.vc-tp-btns button{flex:1;min-width:78px;border-radius:10px;padding:8px 6px;font-size:12px;font-weight:600;cursor:pointer;' +
         'border:0.5px solid rgba(255,255,255,.16);background:rgba(255,255,255,.08);color:#dbe4f5;-webkit-appearance:none}' +
-      '.vc-tp-btns button.pri{background:#7b6cff;border-color:#7b6cff;color:#fff}' +
+      '.vc-tp-btns button.pri{background:#5e5ce6;border-color:#5e5ce6;color:#fff}' +
       '.vc-tp-btns button:active{transform:scale(.96)}' +
       // 侧栏结果卡折叠成一行长条(点头部切换;侧栏没有标记)
       '.vc-if.vc-if-min > *:not(.vc-if-hd){display:none}' +
@@ -679,7 +679,7 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-fc-t{font-size:9.5px;letter-spacing:.1em;color:#7c8bab;font-weight:700;margin-bottom:3px}' +
       // 删掉「正面/背面」标题后，靠底色深一档区分背面（.vc-fc 本身已有边框和间距）。
       '.vc-fc-back{background:rgba(0,0,0,.36)}' +
-      '.vc-cz{background:rgba(123,108,255,.22);border-bottom:1.5px solid #7b6cff;border-radius:3px;padding:0 5px;color:#cdc6ff;font-weight:600}' +
+      '.vc-cz{background:rgba(123,108,255,.22);border-bottom:1.5px solid #5e5ce6;border-radius:3px;padding:0 5px;color:#cdc6ff;font-weight:600}' +
       '.vc-fc-n{display:flex;align-items:center;gap:7px;margin-top:7px}' +
       '.vc-fc-n button{background:transparent;border:0.5px solid rgba(255,255,255,.16);border-radius:7px;color:#93a4c6;width:26px;height:24px;cursor:pointer;font-size:13px;padding:0}' +
       '.vc-fc-n button:disabled{opacity:.3}' +
@@ -701,8 +701,8 @@ if (window.__bwPwaProviderOnly) return;
       '@media (prefers-reduced-motion:reduce){.vc-drag-charging{animation:none;outline-color:rgba(125,211,252,.62);outline-offset:3px}}' +
       '#vc-dock-btn{position:fixed;right:14px;bottom:calc(96px + env(safe-area-inset-bottom,0px));z-index:2147481420;width:40px;height:40px;border-radius:50%;' +
       'border:0.5px solid rgba(255,255,255,.16);background:rgba(40,36,64,.72);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);' +
-      'color:#b9a8ff;display:none;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 8px 26px rgba(0,0,0,.4);padding:0}' +
-      '#vc-dock-btn .vc-dk-n{position:absolute;top:-4px;right:-4px;min-width:16px;height:16px;border-radius:8px;background:#7b6cff;color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;padding:0 4px}' +
+      'color:#bf5af2;display:none;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 8px 26px rgba(0,0,0,.4);padding:0}' +
+      '#vc-dock-btn .vc-dk-n{position:absolute;top:-4px;right:-4px;min-width:16px;height:16px;border-radius:8px;background:#5e5ce6;color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;padding:0 4px}' +
       '#vc-dock-hint{position:fixed;left:0;right:0;bottom:0;height:150px;pointer-events:none;z-index:2147481410;opacity:0;transition:opacity .25s;' +
       'background:linear-gradient(to top,rgba(123,108,255,.38),rgba(123,108,255,.1) 55%,transparent)}' +
       '#vc-dock-hint.on{opacity:1}' +
@@ -739,7 +739,7 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-dkp-cell[data-lvl="2"] .vc-dkp-txt{-webkit-line-clamp:1}' +
       '.vc-dkp-cell[data-lvl="2"] .vc-dk-m{display:none}' +
       '.vc-dkp-day{flex:none;display:flex;align-items:center;height:18px;margin-top:0;padding:0 10px 0 2px;position:relative}' +
-      '.vc-dkp-day span{font-size:11px;color:#b9a8ff;font-weight:600;white-space:nowrap;padding:0 8px;border-bottom:1px solid rgba(123,108,255,.5);line-height:17px}' +
+      '.vc-dkp-day span{font-size:11px;color:#bf5af2;font-weight:600;white-space:nowrap;padding:0 8px;border-bottom:1px solid rgba(123,108,255,.5);line-height:17px}' +
       '.vc-dkp-cell{flex:none;display:flex;flex-direction:column;align-items:center;width:158px}' +
       '.vc-dkp-tick{font-size:10px;color:#7f8aa6;line-height:1;padding-bottom:2px;position:relative}' +
       '.vc-dkp-tick::after{content:"";display:block;width:1px;height:8px;background:rgba(123,108,255,.45);margin:3px auto 4px}' +
@@ -765,7 +765,7 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-pc-x{margin-left:auto;flex:none;width:18px;height:18px;border-radius:50%;border:none;background:rgba(255,255,255,.12);color:#cfd6ea;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}' +
       // 70 结构化信息卡(天气/新闻/事实)+双击选中态(带入 2.1 上下文)
       // 结果卡头部 = 直接套用我们方块的头部(小字主题色 + 整条当把手);⠿ 那个多余的拖动按钮已删
-      '.vc-if-hd{font-size:12px;color:#b9a8ff;font-weight:600;margin:-4px -6px 6px;padding:5px 8px;display:flex;align-items:center;gap:6px;cursor:grab;' +
+      '.vc-if-hd{font-size:12px;color:#bf5af2;font-weight:600;margin:-4px -6px 6px;padding:5px 8px;display:flex;align-items:center;gap:6px;cursor:grab;' +
       'background:rgba(255,255,255,.06);border-radius:9px;font-weight:600}' +
       '.vc-if-hd span:first-child{flex:1}' +
       // 进度状态行(标题的下面一行,用户设计 #49/#52):进行中状态显示在标题区内、不在 body 上方。
@@ -775,7 +775,7 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-turn-status .vc-spin-s{width:10px;height:10px;flex:none}' +
       // #44 框选保存:工具长条前的选中圆点(实心=选中/空心=排除)+ 排除态整条变淡
       '.rc-sel-dot{flex:none;width:13px;height:13px;border-radius:50%;border:1.5px solid #7b8cae;margin-right:7px;cursor:pointer;box-sizing:border-box}' +
-      '.rc-sel-dot.on{background:#7b6cff;border-color:#7b6cff}' +
+      '.rc-sel-dot.on{background:#5e5ce6;border-color:#5e5ce6}' +
       '.vc-fn.rc-fn-off{opacity:.4}' +
       '.vc-fn.rc-fn-off .vc-fn-t{text-decoration:line-through}' +
       '.rc-flow-selhint{font-size:11px;color:#8a97b5;margin:4px 2px 2px}' +
@@ -898,7 +898,7 @@ if (window.__bwPwaProviderOnly) return;
       // 工具调用状态按钮 + 详情弹层(v3-⑤)
       '#vc-tool-btn{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:none;align-items:center;justify-content:center;font-size:18px;-webkit-tap-highlight-color:transparent}' +
       '#vc-tool-btn.ok{color:var(--rc-success);border-color:#1f6b4a}' +
-      '#vc-tool-btn.err{color:#f87171;border-color:#7f2a2a}' +
+      '#vc-tool-btn.err{color:#ff453a;border-color:#7f2a2a}' +
       '.vc-spin{width:15px;height:15px;border:2px solid #3a4a73;border-top-color:#9fcbff;border-radius:50%;display:inline-block;animation:vcSpin .8s linear infinite;vertical-align:-2px}' +
       '@keyframes vcSpin{to{transform:rotate(360deg)}}' +
       // 侧栏对话流里的工具调用详情卡(v3-⑯,感叹号式)
@@ -1226,7 +1226,7 @@ if (window.__bwPwaProviderOnly) return;
           try { if (window.dlog) window.dlog(
             '卡片草稿本地登记失败 ' +
             String(error && (error.code || error.message) || error).slice(0, 160),
-            '#ff6b6b'
+            '#ff453a'
           ); } catch (_) {}
           try {
             if (_stid && RC.turnCard) RC.turnCard.addPart(_stid, {
@@ -1257,7 +1257,7 @@ if (window.__bwPwaProviderOnly) return;
           gid: _gid,
           label: '🎴 制卡',
           tool: 'make_anki',
-          type: '#b9a8ff',
+          type: '#bf5af2',
           icon: '🎴',
           form: 'full',
           selectionLabel: '卡片'
@@ -1314,7 +1314,7 @@ if (window.__bwPwaProviderOnly) return;
                 try { if (window.dlog) window.dlog(
                   '后台卡片草稿本地登记失败 ' +
                   String(error && (error.code || error.message) || error).slice(0, 160),
-                  '#ff6b6b'
+                  '#ff453a'
                 ); } catch (_) {}
                 try {
                   if (_turnTid && RC.turnCard) RC.turnCard.addPart(_turnTid, {
@@ -1342,7 +1342,7 @@ if (window.__bwPwaProviderOnly) return;
                 gid: _gid2,
                 label: '🎴 制卡',
                 tool: 'make_anki',
-                type: '#b9a8ff',
+                type: '#bf5af2',
                 icon: '🎴',
                 form: 'full',
                 selectionLabel: '卡片'
@@ -4232,8 +4232,8 @@ if (window.__bwPwaProviderOnly) return;
     if (kind === 'fact' || kind === 'qa' ||
         /考点|出题|问答|问题|练习|测试|题目/.test(label)) return '#7dd3fc';
     if (kind === 'weather' || kind === 'numeric' || kind === 'number' ||
-        /数值|数据|统计|温度|百分比/.test(label)) return '#fbbf24';
-    return '#b9a8ff';
+        /数值|数据|统计|温度|百分比/.test(label)) return '#ff9f0a';
+    return '#bf5af2';
   }
 
   async function renderInfo(card, options) {
@@ -5574,7 +5574,7 @@ if (window.__bwPwaProviderOnly) return;
         cards: cards,
         gid: gid,
         label: rec.label || '🎴 学习卡片',
-        type: '#b9a8ff',
+        type: '#bf5af2',
         icon: '🎴',
         form: 'full',
         selectionLabel: rec.label || '学习卡片',
@@ -6953,7 +6953,7 @@ if (window.__bwPwaProviderOnly) return;
     var sent = _rtcRespCreate(pending.src, pending.longTool, pending.options);
     if (!sent) {
       _rtc.pendingToolResponse = pending;
-      try { if (window.dlog) window.dlog('tool← 正式回答创建失败:data channel 未就绪', '#ff6b6b'); } catch (e) {}
+      try { if (window.dlog) window.dlog('tool← 正式回答创建失败:data channel 未就绪', '#ff453a'); } catch (e) {}
     } else {
       try { if (window.dlog) window.dlog('tool← 工具结果已回填，开始生成正式回答', '#7be096'); } catch (e) {}
     }
@@ -8853,7 +8853,7 @@ if (window.__bwPwaProviderOnly) return;
     try {
       if (window.dlog) {
         window.dlog('tool← ' + name + ' ' + (ok ? 'ok' : 'FAIL ') +
-          (ok ? '' : String(out || '').slice(0, 160)), ok ? '#7be096' : '#ff6b6b');
+          (ok ? '' : String(out || '').slice(0, 160)), ok ? '#7be096' : '#ff453a');
       }
     } catch (_) {}
     if (toolEpochAtStart !== (_rtc.turnEpoch || 0) && /^bwi_[a-f0-9]{28}$/.test(visualItemID)) {
@@ -8878,7 +8878,7 @@ if (window.__bwPwaProviderOnly) return;
         output_sent: completion.outputSent,
         response_sent: completion.responseSent
       });
-      try { if (window.dlog) window.dlog('tool← ' + name + ' FAIL data-channel delivery', '#ff6b6b'); } catch (_) {}
+      try { if (window.dlog) window.dlog('tool← ' + name + ' FAIL data-channel delivery', '#ff453a'); } catch (_) {}
     }
     _rtcTool._silent = false;
     onToolStatus({ status: ok ? 'done' : 'error', tool: name, label: label, took_s: took, args: argsUsed, rag: out.slice(0, 1600), result: (typeof res === 'object' ? res : undefined), vision: vision || undefined });   // result=完整体(UI 渲卡用;rag 是喂回模型的精简版)
@@ -9075,7 +9075,7 @@ if (window.__bwPwaProviderOnly) return;
         }, function (error) {
           // _rtcTool should close its own failures. This guard prevents an
           // unexpected rejection from leaving the visible tool card spinning.
-          try { if (window.dlog) window.dlog('tool← ' + e.name + ' 未捕获异常 ' + String(error || '').slice(0, 120), '#ff6b6b'); } catch (_) {}
+          try { if (window.dlog) window.dlog('tool← ' + e.name + ' 未捕获异常 ' + String(error || '').slice(0, 120), '#ff453a'); } catch (_) {}
           _rtcFinishToolCall(toolCallId);
         });
       }

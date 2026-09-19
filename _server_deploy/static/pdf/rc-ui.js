@@ -76,6 +76,36 @@
 .rc-ui-input{box-sizing:border-box;font-family:var(--rc-font-ui);background:var(--rc-bg-control);border:0;border-radius:var(--rc-radius-md);color:var(--rc-text)}
 .rc-ui-input:focus{outline:2px solid var(--rc-border-accent);outline-offset:-2px}
 /* 需要材质的地方直接挂这个类。 */
+/* 下拉框。iOS 上 <select> 点开本来就是原生选择器（弹出的那张表是系统画的），
+   所以只需要把**收起态**做成 iOS 的样子：填充底、无描边、自绘 chevron。
+   ⚠ 箭头用 background-image 画，所以右内边距必须留出位置，否则长选项会压在箭头上。 */
+.rc-ui-select{appearance:none;-webkit-appearance:none;font-family:var(--rc-font-ui);
+  background-color:var(--rc-bg-control);border:0;border-radius:var(--rc-radius-md);
+  color:var(--rc-text);padding:8px 30px 8px 12px;cursor:pointer;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M3 4.6l3 3 3-3' fill='none' stroke='rgba(235,235,245,.6)' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat:no-repeat;background-position:right 10px center;
+  touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+@media (pointer:coarse){.rc-ui-select{min-height:var(--rc-hit)}}
+/* iOS 拨动开关。设置里的 checkbox 在 iOS 上就是这个样子，不是方形勾选框。
+   尺寸按苹果的 51×31 缩了一档（44×26）—— 原尺寸会把这套本来紧凑的设置行撑开。
+   拨到「开」是 systemGreen，这是 iOS 的约定，不是蓝。 */
+.rc-ui-switch{appearance:none;-webkit-appearance:none;flex:none;position:relative;
+  width:44px;height:26px;margin:0;border-radius:26px;border:0;cursor:pointer;
+  background:rgba(120,120,128,.32);touch-action:manipulation;-webkit-tap-highlight-color:transparent;
+  transition:background var(--rc-motion-fast) var(--rc-ease)}
+.rc-ui-switch::after{content:'';position:absolute;top:2px;left:2px;width:22px;height:22px;
+  border-radius:50%;background:#fff;
+  box-shadow:0 3px 8px rgba(0,0,0,.28),0 1px 1px rgba(0,0,0,.16);
+  transition:transform var(--rc-motion-normal) var(--rc-ease)}
+.rc-ui-switch:checked{background:var(--rc-success)}
+.rc-ui-switch:checked::after{transform:translateX(18px)}
+/* iOS 的设置行是「文字在左、开关在右」。这些行本来是 label+flex、勾选框在前，
+   用 :has() 一条规则翻过来即可，不必逐行改结构（Safari 15.4+ 支持）。
+   ⚠ 行内 style 里只写了 display/align-items/gap，没写 flex-direction 与
+     justify-content，所以这里不需要 !important 就能生效。 */
+label:has(> .rc-ui-switch){flex-direction:row-reverse;justify-content:space-between;gap:12px}
+/* 原生控件一次性染成系统蓝：勾选框、单选、滑块、进度条都吃这个。 */
+:root,#bw-root,#bw-pin-root{accent-color:var(--rc-accent)}
 .rc-ui-material{background:var(--rc-material-regular);backdrop-filter:var(--rc-blur);-webkit-backdrop-filter:var(--rc-blur)}
 .rc-ui-material-thin{background:var(--rc-material-thin);backdrop-filter:var(--rc-blur);-webkit-backdrop-filter:var(--rc-blur)}
 .rc-ui-dragging{will-change:transform;transition:none!important;filter:drop-shadow(0 16px 25px rgba(0,0,0,.42))}
@@ -232,7 +262,7 @@ body.fs-mode .rc-topbar-pill{display:none!important}
     try {
       if (RC.voiceCard && RC.voiceCard.renderInflow) {
         var cid = opts.cid || (RC.voiceCard.mkCid && RC.voiceCard.mkCid()) || ('c' + Date.now().toString(36));
-        var r = RC.voiceCard.renderInflow(host, { label: opts.label || '工具结果', type: opts.type || '#b9a8ff', icon: opts.icon || '工具', form: opts.form || 'full', cid: cid, mount: function (bd) { bd.innerHTML = opts.loadingHtml || '<span class="ep-spin"></span>'; } });
+        var r = RC.voiceCard.renderInflow(host, { label: opts.label || '工具结果', type: opts.type || '#bf5af2', icon: opts.icon || '工具', form: opts.form || 'full', cid: cid, mount: function (bd) { bd.innerHTML = opts.loadingHtml || '<span class="ep-spin"></span>'; } });
         if (r && r.el) {
           r.el.classList.add('rc-ui-tool-result');
           try {

@@ -110,14 +110,14 @@ if (!_imgMode) {   // 仅经典(PDF.js canvas)模式才下载 2.8MB 库;图片�
     pdfjsLib = await import('/static/pdfjs/pdf.mjs?v=' + PDFJS_V);
     window.dlog('✓ pdf.mjs imported, version=' + (pdfjsLib.version || '?'));
   } catch (e) {
-    window.dlog('❌ import pdf.mjs FAILED: ' + e.message, '#ff6b6b');
+    window.dlog('❌ import pdf.mjs FAILED: ' + e.message, '#ff453a');
     throw e;
   }
   try {
     pdfjsLib.GlobalWorkerOptions.workerSrc = '/static/pdfjs/pdf.worker.mjs?v=' + PDFJS_V;
     window.dlog('✓ workerSrc set');
   } catch (e) {
-    window.dlog('❌ workerSrc failed: ' + e.message, '#ff6b6b');
+    window.dlog('❌ workerSrc failed: ' + e.message, '#ff453a');
   }
 } else {
   window.dlog('图片模式:跳过 PDF.js 库(省 2.8MB 下载 + import 等待)');
@@ -650,7 +650,7 @@ async function loadPdf() {
       });
     }
   } catch (e) {
-    window.dlog('❌ getDocument FAILED: ' + e.message, '#ff6b6b');
+    window.dlog('❌ getDocument FAILED: ' + e.message, '#ff453a');
     pdfLoadHide();
     document.getElementById('page-container').innerHTML =
       '<div style="color:#c00;padding:20px">加载 PDF 失败：' + e.message + '</div>';
@@ -1112,7 +1112,7 @@ async function _renderPageInto(num, wrap) {
   textLayerDiv.style.pointerEvents = 'none';
 
   // 加载 PyMuPDF 提取的 char-level 精确 bbox + 创建 char-layer 接管选中
-  loadCharsAndBindLayer(num, wrap, viewport).catch(e => window.dlog?.('chars load fail: ' + e.message, '#ff6b6b'));
+  loadCharsAndBindLayer(num, wrap, viewport).catch(e => window.dlog?.('chars load fail: ' + e.message, '#ff453a'));
   // 加载该页已存墨迹并重绘
   wrap.__inkStrokes = (window._ink && window._ink.byPage[num] && !(window._upClaimed && window._upClaimed[num])) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];   // #4:插入页占用的页号,陈旧真页不贴其墨迹
   if (window._inkRedraw) window._inkRedraw(wrap);
@@ -1540,7 +1540,7 @@ window.loadVocabList = async (scope) => {
     listEl.innerHTML = '';
     for (const it of items) listEl.appendChild(_renderVocabItem(it));
   } catch (e) {
-    listEl.innerHTML = '<div style="color:#ef4444;font-size:12px;padding:10px">加载失败：' + e.message + '</div>';
+    listEl.innerHTML = '<div style="color:#ff453a;font-size:12px;padding:10px">加载失败：' + e.message + '</div>';
   }
 };
 window._refreshVocabIfPage = function() {
@@ -1551,7 +1551,7 @@ function _masteryColor(m) {
   if (m >= 0.8) return '#22c55e';
   if (m >= 0.5) return '#eab308';
   if (m >= 0.2) return '#f97316';
-  return '#ef4444';
+  return '#ff453a';
 }
 function _speakWord(lemma, audio) {
   if (audio) {
@@ -2742,7 +2742,7 @@ if (!window.__bwPageTextRefreshBound) {
       const viewport = wrap.__pageTextViewport;
       if (!viewport || !wrap.isConnected) return;
       loadCharsAndBindLayer(page, wrap, viewport, 0).catch((error) =>
-        window.dlog?.('chars refresh fail: ' + (error && error.message), '#ff6b6b'));
+        window.dlog?.('chars refresh fail: ' + (error && error.message), '#ff453a'));
     });
   });
 }
@@ -2935,10 +2935,10 @@ function _applyPageVocabOverlay(wrap, overlay) {
   wrap.__vocabSentences = (overlay && overlay.vocab_sentences) || [];
   wrap.__masteredFuri = new Set((overlay && overlay.mastered_furi) || []);
   try { renderVocabUnderlines(wrap, wrap.__vocabMarks); }
-  catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff6b6b'); }
+  catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff453a'); }
   try { renderRubyLayer(wrap); } catch (_) {}
   try { renderVocabSentences(wrap, wrap.__vocabSentences); }
-  catch(e) { window.dlog?.('vocab sentence fail: '+e.message,'#ff6b6b'); }
+  catch(e) { window.dlog?.('vocab sentence fail: '+e.message,'#ff453a'); }
   return true;
 }
 
@@ -3010,7 +3010,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
       await new Promise(res => setTimeout(res, 500 + _retry * 600));
       return loadCharsAndBindLayer(num, wrap, viewport, _retry + 1);
     }
-    window.dlog?.('chars api fail: ' + ((d && d.error) || 'fetch') + ' (retry ' + _retry + ')', '#ff6b6b');
+    window.dlog?.('chars api fail: ' + ((d && d.error) || 'fetch') + ' (retry ' + _retry + ')', '#ff453a');
     return;
   }
   const charBoxes = _mapCharBoxes(
@@ -3062,11 +3062,11 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   const cl = ensurePageLayer(wrap, 'char-layer');
   wrap.__charLayer = cl;
   _bindCharLayer(cl, wrap);
-  try { renderHighlightsOnPage(wrap, num); } catch(e) { window.dlog?.('hl render fail: '+e.message,'#ff6b6b'); }
+  try { renderHighlightsOnPage(wrap, num); } catch(e) { window.dlog?.('hl render fail: '+e.message,'#ff453a'); }
   // 振假名/音标（chars 那条带的 furigana）
   wrap.__furigana = d.furigana || [];
   wrap.__furiVerified = false;
-  try { renderRubyLayer(wrap); } catch(e) { window.dlog?.('ruby fail: '+e.message,'#ff6b6b'); }
+  try { renderRubyLayer(wrap); } catch(e) { window.dlog?.('ruby fail: '+e.message,'#ff453a'); }
   if (_rubyEnabled()) _verifyFurigana(wrap);
   try { renderPhraseHl(wrap); } catch(_) {}
   try { renderExplainHl(wrap); } catch(_) {}
@@ -3441,7 +3441,7 @@ async function _pageTranslatePage(pw) {
     if (!_pageTrOn) return;             // 请求途中被关掉
     if (d.ok && d.sentences) _drawPageTranslate(pw, d.sentences);
   } catch (e) {
-    window.dlog?.('page-tr p.' + num + ' fail: ' + e.message, '#ff6b6b');
+    window.dlog?.('page-tr p.' + num + ' fail: ' + e.message, '#ff453a');
     pw.__pageTrSeq = null;             // 失败允许重试
   }
 }
@@ -3661,7 +3661,7 @@ async function refreshVocabUnderlinesForAllPages() {
             renderVocabUnderlines(pw, pw.__vocabMarks);
             renderVocabSentences(pw, pw.__vocabSentences);
             try { renderRubyLayer(pw); } catch (_) {}   // 重画 ruby:标掌握的词当下就不再显示假名注音
-          } catch (e) { window.dlog?.('vocab refresh p.' + pn + ' fail: ' + e.message, '#ff6b6b'); }
+          } catch (e) { window.dlog?.('vocab refresh p.' + pn + ' fail: ' + e.message, '#ff453a'); }
         }
       };
       await Promise.all([worker(), worker(), worker()]);
@@ -7544,7 +7544,7 @@ async function loadAllHighlights() {
       if (n) renderHighlightsOnPage(pw, n);
     });
     window.dlog?.('高亮已加载：' + _allHighlights.length + ' 条');
-  } catch (e) { window.dlog?.('hl load fail: ' + e.message, '#ff6b6b'); }
+  } catch (e) { window.dlog?.('hl load fail: ' + e.message, '#ff453a'); }
 }
 
 // 高亮底色用**半透明** rgba(不是实色):字一定透得出来(不被实色块盖死);配合 .hl-saved 的 mix-blend-mode:multiply,
@@ -8650,7 +8650,7 @@ window.clearGrammarBlocks = () => {
 
 // ── POS 配色 + 中文短标签（displaCy 风格）──
 const POS_COLORS = {
-  noun:'#3b82f6', verb:'#ef4444', adj:'#22c55e', adv:'#a855f7',
+  noun:'#3b82f6', verb:'#ff453a', adj:'#22c55e', adv:'#a855f7',
   pron:'#ec4899', prep:'#06b6d4', det:'#64748b', conj:'#eab308',
   aux:'#f97316', num:'#14b8a6', part:'#8b5cf6', intj:'#f43f5e', punct:'#475569',
 };
@@ -8706,7 +8706,7 @@ function _addLoadingBlock(id, sentence, text) {
 function _fillBlockError(block, msg) {
   if (!block) return;
   const content = block.querySelector('.gb-content') || block;
-  content.innerHTML = `<div class="gb-loading" style="color:#ef4444">分析失败：${_esc(msg)}</div>`;
+  content.innerHTML = `<div class="gb-loading" style="color:#ff453a">分析失败：${_esc(msg)}</div>`;
 }
 // 语法卡片「🎴」：整句 + 译文 + 分析 + 追问 → 一张 Anki 卡（复用后台制卡，带原文出处链接）
 window._grammarAnki = async (blockId) => {
@@ -8985,7 +8985,7 @@ function _renderTree(comps) {
 
 // ── 句子成分分块：主谓宾定状从句彩色块（无弧线、可换行，长句清晰）──
 function _compColor(label) {
-  if (label.includes('谓语')) return '#ef4444';
+  if (label.includes('谓语')) return '#ff453a';
   if (label.includes('主语')) return '#3b82f6';
   if (label.includes('宾语')) return '#22c55e';
   if (label.includes('定语')) return '#06b6d4';
@@ -10170,7 +10170,7 @@ function _finishBgJob(id, text, openUrl) {
 }
 function _failBgJob(id, text, restore) {
   const el = document.getElementById(id); if (!el) return;
-  el.style.borderColor = '#f87171'; el.style.color = '#f87171'; el.style.cursor = 'pointer';
+  el.style.borderColor = '#ff453a'; el.style.color = '#ff453a'; el.style.cursor = 'pointer';
   el.textContent = '✗ ' + text + ' · 点关闭';
   el.onclick = () => el.remove();
   // 失败 → 把段落放回草稿，方便重试
@@ -10408,7 +10408,7 @@ window._applyCropSettings = async () => {
     closeSettings();
     _toast?.('去边已应用');
   } catch (error) {
-    window.dlog?.('去边保存失败: ' + (error && error.message), '#ff6b6b');
+    window.dlog?.('去边保存失败: ' + (error && error.message), '#ff453a');
     _toast?.('去边保存失败，请重试');
   }
 };
@@ -10505,7 +10505,7 @@ window.saveSettings = async () => {
         window.dlog?.('translate-config POST: ' + (d.ok ? 'OK' : 'FAIL ' + (d.error||'?')));
         if (!d.ok) _toast?.('句子翻译设置保存失败：' + (d.error||'?'));
       } catch (e) {
-        window.dlog?.('translate-config POST exception: ' + e.message, '#ff6b6b');
+        window.dlog?.('translate-config POST exception: ' + e.message, '#ff453a');
         _toast?.('句子翻译设置保存失败：' + e.message);
       }
     }
@@ -10514,7 +10514,7 @@ window.saveSettings = async () => {
     if (pdfDoc) renderPage(currentPage);
     window.dlog?.('saveSettings 完成');
   } catch (ex) {
-    window.dlog?.('saveSettings ERROR: ' + ex.message, '#ff6b6b');
+    window.dlog?.('saveSettings ERROR: ' + ex.message, '#ff453a');
     _toast?.('设置保存出错：' + ex.message);
   }
 };
@@ -14150,7 +14150,7 @@ window.__upReconcileDelete = function (newMeta) {
     try { if (window.RC && RC.userpages && RC.userpages.load) RC.userpages.load(); } catch (e) {}
     try { if (window.RC && RC.stickynote && RC.stickynote.loadAll) RC.stickynote.loadAll(); } catch (e) {}
     return true;
-  } catch (e) { try{localStorage.setItem('_recon_dbg',((localStorage.getItem('_recon_dbg')||'')+'|reconcile-throw:'+e.message).slice(-1500));}catch(_){} try { window.dlog && window.dlog('reconcile fail: ' + e.message, '#ff6b6b'); } catch (_) {} return false; }
+  } catch (e) { try{localStorage.setItem('_recon_dbg',((localStorage.getItem('_recon_dbg')||'')+'|reconcile-throw:'+e.message).slice(-1500));}catch(_){} try { window.dlog && window.dlog('reconcile fail: ' + e.message, '#ff453a'); } catch (_) {} return false; }
 };
 // 30-dwell.js — 读页停留追踪(注意力画像的「读过这页」原始数据;设计 references/attention-kb-design.md)。
 //   用户要求的严谨判定,三重排除全在采集端:
@@ -14843,7 +14843,7 @@ window._lbClick = _lbClick;
   var _RAIL_W = 150, _DOT_MIN = 17, _DOT_MAX = 30, _RAIL_EDGE = 18;
   var _railRaf = 0, _railSleep = 0, _fallbackCard = null;
   var _BIND_TONES = {
-    text: '#b9a8ff', qa: '#7dd3fc', image: '#34d399', number: '#fbbf24'
+    text: '#bf5af2', qa: '#7dd3fc', image: '#34d399', number: '#ff9f0a'
   };
 
   function _stripWs(s) { return String(s || '').replace(/\s+/g, ''); }
@@ -15023,7 +15023,7 @@ window._lbClick = _lbClick;
         if (typeof dlog === 'function') {
           var _rn = (boxes.__layout && (boxes.__layout.regions || []).length) || 0;
           dlog('[bind] 第 ' + wantBlock + ' 块两套编号都没命中（版面区域 ' + _rn +
-               ' 个 / bk 连号 ' + blockSeq + ' 块）→ 退回全页按文本找', '#ff6b6b');
+               ' 个 / bk 连号 ' + blockSeq + ' 块）→ 退回全页按文本找', '#ff453a');
         }
       } catch (e0) {}
     }
@@ -15038,7 +15038,7 @@ window._lbClick = _lbClick;
       try {
         if (typeof dlog === 'function') {
           dlog('[bind] 第 ' + wantBlock + ' 块对不上,而「' + text.slice(0, 12) +
-               '」页内有 ' + anywhere.count + ' 处 → 不钉,交回助手重定位', '#ff6b6b');
+               '」页内有 ' + anywhere.count + ' 处 → 不钉,交回助手重定位', '#ff453a');
         }
       } catch (e1) {}
       return null;
@@ -15128,7 +15128,7 @@ window._lbClick = _lbClick;
     var old = String(payload.tone || '').toLowerCase();
     if (old === '#c77dff' || old === '#34d399' || old === '#ff7a59') return 'image';
     if (old === '#39d98a' || old === '#7dd3fc') return 'qa';
-    if (old === '#2dd4bf' || old === '#fbbf24') return 'number';
+    if (old === '#2dd4bf' || old === '#ff9f0a') return 'number';
     return 'text';
   }
 

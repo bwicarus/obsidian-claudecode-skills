@@ -29,7 +29,7 @@
   // ── 类型 → 主色 + 图标(SF 线条,currentColor)──
   var TYPE_C = {
     anki: '#39d98a', text: '#7b9cff', image: '#c77dff', video: '#ff7a59',
-    weather: '#2dd4bf', news: '#fbbf24', action: '#8194b8'
+    weather: '#2dd4bf', news: '#ff9f0a', action: '#8194b8'
   };
   var SVG = {
     anki: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><rect x="2.4" y="3.6" width="8.6" height="9" rx="1.6"/><path d="M5 3.6V2.8a1 1 0 0 1 1-1h6.6a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-.8"/><path d="M4.8 6.6h3.8M4.8 9h2.4"/></svg>',

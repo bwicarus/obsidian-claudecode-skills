@@ -150,7 +150,7 @@ window._applyCropSettings = async () => {
     closeSettings();
     _toast?.('去边已应用');
   } catch (error) {
-    window.dlog?.('去边保存失败: ' + (error && error.message), '#ff6b6b');
+    window.dlog?.('去边保存失败: ' + (error && error.message), '#ff453a');
     _toast?.('去边保存失败，请重试');
   }
 };
@@ -247,7 +247,7 @@ window.saveSettings = async () => {
         window.dlog?.('translate-config POST: ' + (d.ok ? 'OK' : 'FAIL ' + (d.error||'?')));
         if (!d.ok) _toast?.('句子翻译设置保存失败：' + (d.error||'?'));
       } catch (e) {
-        window.dlog?.('translate-config POST exception: ' + e.message, '#ff6b6b');
+        window.dlog?.('translate-config POST exception: ' + e.message, '#ff453a');
         _toast?.('句子翻译设置保存失败：' + e.message);
       }
     }
@@ -256,7 +256,7 @@ window.saveSettings = async () => {
     if (pdfDoc) renderPage(currentPage);
     window.dlog?.('saveSettings 完成');
   } catch (ex) {
-    window.dlog?.('saveSettings ERROR: ' + ex.message, '#ff6b6b');
+    window.dlog?.('saveSettings ERROR: ' + ex.message, '#ff453a');
     _toast?.('设置保存出错：' + ex.message);
   }
 };

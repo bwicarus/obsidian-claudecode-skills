@@ -386,7 +386,7 @@ async function _renderPageInto(num, wrap) {
   textLayerDiv.style.pointerEvents = 'none';
 
   // 加载 PyMuPDF 提取的 char-level 精确 bbox + 创建 char-layer 接管选中
-  loadCharsAndBindLayer(num, wrap, viewport).catch(e => window.dlog?.('chars load fail: ' + e.message, '#ff6b6b'));
+  loadCharsAndBindLayer(num, wrap, viewport).catch(e => window.dlog?.('chars load fail: ' + e.message, '#ff453a'));
   // 加载该页已存墨迹并重绘
   wrap.__inkStrokes = (window._ink && window._ink.byPage[num] && !(window._upClaimed && window._upClaimed[num])) ? JSON.parse(JSON.stringify(window._ink.byPage[num])) : [];   // #4:插入页占用的页号,陈旧真页不贴其墨迹
   if (window._inkRedraw) window._inkRedraw(wrap);

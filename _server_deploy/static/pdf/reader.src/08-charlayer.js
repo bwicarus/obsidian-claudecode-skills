@@ -102,7 +102,7 @@ if (!window.__bwPageTextRefreshBound) {
       const viewport = wrap.__pageTextViewport;
       if (!viewport || !wrap.isConnected) return;
       loadCharsAndBindLayer(page, wrap, viewport, 0).catch((error) =>
-        window.dlog?.('chars refresh fail: ' + (error && error.message), '#ff6b6b'));
+        window.dlog?.('chars refresh fail: ' + (error && error.message), '#ff453a'));
     });
   });
 }
@@ -295,10 +295,10 @@ function _applyPageVocabOverlay(wrap, overlay) {
   wrap.__vocabSentences = (overlay && overlay.vocab_sentences) || [];
   wrap.__masteredFuri = new Set((overlay && overlay.mastered_furi) || []);
   try { renderVocabUnderlines(wrap, wrap.__vocabMarks); }
-  catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff6b6b'); }
+  catch(e) { window.dlog?.('vocab underline fail: '+e.message,'#ff453a'); }
   try { renderRubyLayer(wrap); } catch (_) {}
   try { renderVocabSentences(wrap, wrap.__vocabSentences); }
-  catch(e) { window.dlog?.('vocab sentence fail: '+e.message,'#ff6b6b'); }
+  catch(e) { window.dlog?.('vocab sentence fail: '+e.message,'#ff453a'); }
   return true;
 }
 
@@ -370,7 +370,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
       await new Promise(res => setTimeout(res, 500 + _retry * 600));
       return loadCharsAndBindLayer(num, wrap, viewport, _retry + 1);
     }
-    window.dlog?.('chars api fail: ' + ((d && d.error) || 'fetch') + ' (retry ' + _retry + ')', '#ff6b6b');
+    window.dlog?.('chars api fail: ' + ((d && d.error) || 'fetch') + ' (retry ' + _retry + ')', '#ff453a');
     return;
   }
   const charBoxes = _mapCharBoxes(
@@ -422,11 +422,11 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   const cl = ensurePageLayer(wrap, 'char-layer');
   wrap.__charLayer = cl;
   _bindCharLayer(cl, wrap);
-  try { renderHighlightsOnPage(wrap, num); } catch(e) { window.dlog?.('hl render fail: '+e.message,'#ff6b6b'); }
+  try { renderHighlightsOnPage(wrap, num); } catch(e) { window.dlog?.('hl render fail: '+e.message,'#ff453a'); }
   // 振假名/音标（chars 那条带的 furigana）
   wrap.__furigana = d.furigana || [];
   wrap.__furiVerified = false;
-  try { renderRubyLayer(wrap); } catch(e) { window.dlog?.('ruby fail: '+e.message,'#ff6b6b'); }
+  try { renderRubyLayer(wrap); } catch(e) { window.dlog?.('ruby fail: '+e.message,'#ff453a'); }
   if (_rubyEnabled()) _verifyFurigana(wrap);
   try { renderPhraseHl(wrap); } catch(_) {}
   try { renderExplainHl(wrap); } catch(_) {}

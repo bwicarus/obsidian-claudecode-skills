@@ -507,7 +507,7 @@
   }
   function _failBgJob(id, text, restore) {
     var el = document.getElementById(id); if (!el) return;
-    el.style.borderColor = '#f87171'; el.style.color = '#f87171'; el.style.cursor = 'pointer';
+    el.style.borderColor = '#ff453a'; el.style.color = '#ff453a'; el.style.cursor = 'pointer';
     el.textContent = '✗ ' + text + ' · 点关闭';
     el.onclick = function () { el.remove(); };
     // 失败 → 把段落放回草稿,方便重试

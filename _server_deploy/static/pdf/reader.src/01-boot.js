@@ -65,14 +65,14 @@ if (!_imgMode) {   // 仅经典(PDF.js canvas)模式才下载 2.8MB 库;图片�
     pdfjsLib = await import('/static/pdfjs/pdf.mjs?v=' + PDFJS_V);
     window.dlog('✓ pdf.mjs imported, version=' + (pdfjsLib.version || '?'));
   } catch (e) {
-    window.dlog('❌ import pdf.mjs FAILED: ' + e.message, '#ff6b6b');
+    window.dlog('❌ import pdf.mjs FAILED: ' + e.message, '#ff453a');
     throw e;
   }
   try {
     pdfjsLib.GlobalWorkerOptions.workerSrc = '/static/pdfjs/pdf.worker.mjs?v=' + PDFJS_V;
     window.dlog('✓ workerSrc set');
   } catch (e) {
-    window.dlog('❌ workerSrc failed: ' + e.message, '#ff6b6b');
+    window.dlog('❌ workerSrc failed: ' + e.message, '#ff453a');
   }
 } else {
   window.dlog('图片模式:跳过 PDF.js 库(省 2.8MB 下载 + import 等待)');

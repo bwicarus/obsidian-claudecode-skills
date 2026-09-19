@@ -39,7 +39,7 @@
   var _RAIL_W = 150, _DOT_MIN = 17, _DOT_MAX = 30, _RAIL_EDGE = 18;
   var _railRaf = 0, _railSleep = 0, _fallbackCard = null;
   var _BIND_TONES = {
-    text: '#b9a8ff', qa: '#7dd3fc', image: '#34d399', number: '#fbbf24'
+    text: '#bf5af2', qa: '#7dd3fc', image: '#34d399', number: '#ff9f0a'
   };
 
   function _stripWs(s) { return String(s || '').replace(/\s+/g, ''); }
@@ -219,7 +219,7 @@
         if (typeof dlog === 'function') {
           var _rn = (boxes.__layout && (boxes.__layout.regions || []).length) || 0;
           dlog('[bind] 第 ' + wantBlock + ' 块两套编号都没命中（版面区域 ' + _rn +
-               ' 个 / bk 连号 ' + blockSeq + ' 块）→ 退回全页按文本找', '#ff6b6b');
+               ' 个 / bk 连号 ' + blockSeq + ' 块）→ 退回全页按文本找', '#ff453a');
         }
       } catch (e0) {}
     }
@@ -234,7 +234,7 @@
       try {
         if (typeof dlog === 'function') {
           dlog('[bind] 第 ' + wantBlock + ' 块对不上,而「' + text.slice(0, 12) +
-               '」页内有 ' + anywhere.count + ' 处 → 不钉,交回助手重定位', '#ff6b6b');
+               '」页内有 ' + anywhere.count + ' 处 → 不钉,交回助手重定位', '#ff453a');
         }
       } catch (e1) {}
       return null;
@@ -324,7 +324,7 @@
     var old = String(payload.tone || '').toLowerCase();
     if (old === '#c77dff' || old === '#34d399' || old === '#ff7a59') return 'image';
     if (old === '#39d98a' || old === '#7dd3fc') return 'qa';
-    if (old === '#2dd4bf' || old === '#fbbf24') return 'number';
+    if (old === '#2dd4bf' || old === '#ff9f0a') return 'number';
     return 'text';
   }
 

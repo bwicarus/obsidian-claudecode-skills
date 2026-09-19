@@ -339,7 +339,7 @@ window.clearGrammarBlocks = () => {
 
 // ── POS 配色 + 中文短标签（displaCy 风格）──
 const POS_COLORS = {
-  noun:'#3b82f6', verb:'#ef4444', adj:'#22c55e', adv:'#a855f7',
+  noun:'#3b82f6', verb:'#ff453a', adj:'#22c55e', adv:'#a855f7',
   pron:'#ec4899', prep:'#06b6d4', det:'#64748b', conj:'#eab308',
   aux:'#f97316', num:'#14b8a6', part:'#8b5cf6', intj:'#f43f5e', punct:'#475569',
 };
@@ -395,7 +395,7 @@ function _addLoadingBlock(id, sentence, text) {
 function _fillBlockError(block, msg) {
   if (!block) return;
   const content = block.querySelector('.gb-content') || block;
-  content.innerHTML = `<div class="gb-loading" style="color:#ef4444">分析失败：${_esc(msg)}</div>`;
+  content.innerHTML = `<div class="gb-loading" style="color:#ff453a">分析失败：${_esc(msg)}</div>`;
 }
 // 语法卡片「🎴」：整句 + 译文 + 分析 + 追问 → 一张 Anki 卡（复用后台制卡，带原文出处链接）
 window._grammarAnki = async (blockId) => {
@@ -674,7 +674,7 @@ function _renderTree(comps) {
 
 // ── 句子成分分块：主谓宾定状从句彩色块（无弧线、可换行，长句清晰）──
 function _compColor(label) {
-  if (label.includes('谓语')) return '#ef4444';
+  if (label.includes('谓语')) return '#ff453a';
   if (label.includes('主语')) return '#3b82f6';
   if (label.includes('宾语')) return '#22c55e';
   if (label.includes('定语')) return '#06b6d4';

@@ -945,7 +945,7 @@ if (window.__bwPwaProviderOnly) return;
       try {
         if (window.dlog) window.dlog(
           '卡仓恢复失败 ' + String(error && (error.code || error.message) || error).slice(0, 160),
-          '#ff6b6b'
+          '#ff453a'
         );
       } catch (_) {}
     });
@@ -1625,7 +1625,7 @@ if (window.__bwPwaProviderOnly) return;
         if (window.dlog) window.dlog(
           '卡仓状态保存失败 ' +
           String(error && (error.code || error.message) || error).slice(0, 160),
-          '#ff6b6b'
+          '#ff453a'
         );
       } catch (_) {}
       return false;
@@ -1710,7 +1710,7 @@ if (window.__bwPwaProviderOnly) return;
     } catch (evtErr) {
       try {
         window.dlog && window.dlog(
-          '复习事件未记录：' + String(evtErr && evtErr.message || evtErr), '#ff6b6b'
+          '复习事件未记录：' + String(evtErr && evtErr.message || evtErr), '#ff453a'
         );
       } catch (_) {}
     }
@@ -1873,7 +1873,7 @@ if (window.__bwPwaProviderOnly) return;
         gid,
         {
           tool: spec.tool || 'make_anki',
-          type: spec.type || '#b9a8ff',
+          type: spec.type || '#bf5af2',
           icon: spec.icon || '🎴',
           dot: true,
           form: spec.form || 'full',
@@ -1895,7 +1895,7 @@ if (window.__bwPwaProviderOnly) return;
         typeof RC.voiceCard.renderInflow === 'function') {
       result = RC.voiceCard.renderInflow(host, {
         label: spec.label || '学习卡片',
-        type: spec.type || '#b9a8ff',
+        type: spec.type || '#bf5af2',
         icon: spec.icon || '🎴',
         form: spec.form || 'full',
         cid: gid,

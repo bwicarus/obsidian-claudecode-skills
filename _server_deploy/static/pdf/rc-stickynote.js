@@ -1061,7 +1061,7 @@
     }).join('\n\n');
   }
   var WORD_CARD_TONES = {
-    text: '#b9a8ff', qa: '#7dd3fc', image: '#34d399', number: '#fbbf24'
+    text: '#bf5af2', qa: '#7dd3fc', image: '#34d399', number: '#ff9f0a'
   };
   function wordCardCategory(value, label, oldTone, fallback) {
     var raw = String(value || '').toLowerCase();
@@ -1073,7 +1073,7 @@
     var old = String(oldTone || '').toLowerCase();
     if (old === '#c77dff' || old === '#34d399' || old === '#ff7a59') return 'image';
     if (old === '#39d98a' || old === '#7dd3fc') return 'qa';
-    if (old === '#2dd4bf' || old === '#fbbf24') return 'number';
+    if (old === '#2dd4bf' || old === '#ff9f0a') return 'number';
     return fallback || 'text';
   }
   function wordCardPresentation(note) {
@@ -1542,10 +1542,10 @@
           try { window.dlog && window.dlog('卡内词典:「' + text + '」已写入卡片内容,长度 ' + h2.length); } catch (eL) {}
         })
         .catch(function (eF) {
-          try { window.dlog && window.dlog('卡内词典:「' + text + '」查询/写入失败: ' + String(eF && eF.message || eF), '#ff6b6b'); } catch (eL4) {}
+          try { window.dlog && window.dlog('卡内词典:「' + text + '」查询/写入失败: ' + String(eF && eF.message || eF), '#ff453a'); } catch (eL4) {}
         });
     } catch (e) {
-      try { window.dlog && window.dlog('卡内词典:异常 ' + String(e && e.message || e), '#ff6b6b'); } catch (eL5) {}
+      try { window.dlog && window.dlog('卡内词典:异常 ' + String(e && e.message || e), '#ff453a'); } catch (eL5) {}
     }
   }
 
@@ -1607,7 +1607,7 @@
     };
     try {
       if (window.RC && RC.voiceCard && RC.voiceCard.renderInto)
-        cardEl = RC.voiceCard.renderInto(box, { text: null, label: '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''), isHtml: false, type: card.bind ? wordCardPresentation(ctl.note).tone : (card.type || '#b9a8ff'), icon: '🎴', form: card.form, cid: card.cid || card.gid,
+        cardEl = RC.voiceCard.renderInto(box, { text: null, label: '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''), isHtml: false, type: card.bind ? wordCardPresentation(ctl.note).tone : (card.type || '#bf5af2'), icon: '🎴', form: card.form, cid: card.cid || card.gid,
           onSize: function (size) {
             ctl._cardPresentationSize = size || null;
             try { ctl.body.style.width = _formW(ctl, card.form); } catch (_) {}
@@ -2754,7 +2754,7 @@
     // 改锁/解绑 → 卡内词典段立刻跟随当前锁定词(用户 2026-09-03:锁到「試験」却显示旧词)
     if (_rb && ctl.html && ctl.note.html) {
       try { appendDictWhenVisible(ctl, ctl.html, ctl.note.html); }
-      catch (eD) { try { window.dlog && window.dlog('改绑:卡内词典刷新异常 ' + String(eD && eD.message || eD), '#ff6b6b'); } catch (eL) {} }
+      catch (eD) { try { window.dlog && window.dlog('改绑:卡内词典刷新异常 ' + String(eD && eD.message || eD), '#ff453a'); } catch (eL) {} }
     } else if (_rb) {
       try { window.dlog && window.dlog('改绑:不是 HTML 卡(html 盒=' + !!ctl.html + ' note.html=' + !!ctl.note.html + '),无卡内词典可刷'); } catch (eL2) {}
     }

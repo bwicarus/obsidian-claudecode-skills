@@ -10,14 +10,19 @@ const NOTE = read("_server_deploy/static/pdf/rc-stickynote.js");
 const CSS = read("_server_deploy/static/pdf/pdf-styles.css");
 
 test("词锚四类颜色由正文框、序号、浮标和展开卡共用", () => {
-  for (const [category, tone] of Object.entries({
-    text: "#b9a8ff",
-    qa: "#7dd3fc",
-    image: "#34d399",
-    number: "#fbbf24",
-  })) {
-    assert.match(BIND, new RegExp(`${category}: '${tone}'`));
-    assert.match(NOTE, new RegExp(`${category}: '${tone}'`));
+  // 守的是「四处用同一套色」，不是「必须是这四个 hex」。
+  // 原来把色值写死，于是 2026-09-20 把强调色对齐 iOS 系统色时，一个纯外观决定
+  // 就把这条守一致性的测试撞红了 —— 跟 '正面/背面'、'bottom:10px' 同一类毛病。
+  // 现在从 BIND 里取实际色，再要求 NOTE 一字不差地相同。
+  const TONE = /(text|qa|image|number): '(#[0-9a-fA-F]{6})'/g;
+  const tones = Object.fromEntries(
+    [...BIND.matchAll(TONE)].map((m) => [m[1], m[2]]));
+  assert.deepEqual(Object.keys(tones).sort(),
+    ["image", "number", "qa", "text"],
+    "四个分类都要有自己的色");
+  for (const [category, tone] of Object.entries(tones)) {
+    assert.match(NOTE, new RegExp(`${category}: '${tone}'`),
+      `${category} 在便签那边必须是同一个色`);
   }
   assert.match(BIND, /var tone = _bindTone\(payload\)/);
   assert.match(BIND, /dot\.style\.cssText = tone/);

@@ -68,7 +68,7 @@ async function refreshVocabUnderlinesForAllPages() {
             renderVocabUnderlines(pw, pw.__vocabMarks);
             renderVocabSentences(pw, pw.__vocabSentences);
             try { renderRubyLayer(pw); } catch (_) {}   // 重画 ruby:标掌握的词当下就不再显示假名注音
-          } catch (e) { window.dlog?.('vocab refresh p.' + pn + ' fail: ' + e.message, '#ff6b6b'); }
+          } catch (e) { window.dlog?.('vocab refresh p.' + pn + ' fail: ' + e.message, '#ff453a'); }
         }
       };
       await Promise.all([worker(), worker(), worker()]);

@@ -103,13 +103,13 @@ if (window.__bwPwaProviderOnly) return;
     var st = document.createElement('style'); st.id = 'rc-grammar-css';
     st.textContent =
       '.rc-grammar .grammar-block{position:relative;margin-bottom:12px;border:1px solid var(--rc-border);border-radius:8px;background:var(--rc-bg-canvas);overflow:hidden}' +
-      '.rc-grammar .grammar-block.focus{border-color:#fbbf24;box-shadow:0 0 0 1px rgba(251,191,36,.3)}' +
+      '.rc-grammar .grammar-block.focus{border-color:#ff9f0a;box-shadow:0 0 0 1px rgba(251,191,36,.3)}' +
       '.rc-grammar .grammar-block .gb-header{display:flex;align-items:center;gap:7px;padding:10px 11px;cursor:pointer;user-select:none}' +
       '.rc-grammar .grammar-block .gb-header:hover{background:#141d33}' +
       '.rc-grammar .grammar-block .gb-header .gb-title{flex:1;min-width:0;font-size:12px;color:var(--rc-text-strong);line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
       '.rc-grammar .grammar-block .gb-header .gb-badge{flex:0 0 auto;font-size:9px;color:var(--rc-accent-cyan);background:#16243f;border-radius:8px;padding:1px 7px}' +
       '.rc-grammar .grammar-block .gb-header .gb-del{flex:0 0 auto;color:var(--rc-text-dim);font-size:12px;cursor:pointer;padding:0 3px;opacity:.7}' +
-      '.rc-grammar .grammar-block .gb-header .gb-del:hover{color:#ef4444;opacity:1}' +
+      '.rc-grammar .grammar-block .gb-header .gb-del:hover{color:#ff453a;opacity:1}' +
       '.rc-grammar .grammar-block .gb-header .gb-caret{flex:0 0 auto;color:var(--rc-text-dim);font-size:11px;transition:transform .15s}' +
       '.rc-grammar .grammar-block.open .gb-header .gb-caret{transform:rotate(90deg)}' +
       '.rc-grammar .grammar-block .gb-content{display:none}' +
@@ -168,7 +168,7 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-grammar .gb-ana{padding:9px 12px;border-bottom:1px solid #141c30;cursor:pointer}' +
       '.rc-grammar .gb-ana:last-child{border-bottom:none}' +
       '.rc-grammar .gb-ana .a-head{font-size:12px;font-weight:600;color:var(--rc-text-strong)}' +
-      '.rc-grammar .gb-ana .a-phrase{font-size:10px;color:#facc15;font-family:monospace;margin-top:3px}' +
+      '.rc-grammar .gb-ana .a-phrase{font-size:10px;color:#ffd60a;font-family:monospace;margin-top:3px}' +
       '.rc-grammar .gb-ana .a-body{display:none;font-size:11px;color:var(--rc-text-strong);line-height:1.55;margin-top:6px}' +
       '.rc-grammar .gb-ana.open .a-body{display:block}' +
       '.rc-grammar .gb-ana .a-ex{margin:5px 0 0 16px;padding:0;font-size:10px;color:var(--rc-text-dim);line-height:1.5}' +
@@ -189,7 +189,7 @@ if (window.__bwPwaProviderOnly) return;
   // POS 配色 + 中文短标签(displaCy 风格)—— 逐字照搬 18-grammar.js
   // ════════════════════════════════════════════════════════════════════
   var POS_COLORS = {
-    noun: '#3b82f6', verb: '#ef4444', adj: '#22c55e', adv: '#a855f7',
+    noun: '#3b82f6', verb: '#ff453a', adj: '#22c55e', adv: '#a855f7',
     pron: '#ec4899', prep: '#06b6d4', det: '#64748b', conj: '#eab308',
     aux: '#f97316', num: '#14b8a6', part: '#8b5cf6', intj: '#f43f5e', punct: '#475569'
   };
@@ -200,7 +200,7 @@ if (window.__bwPwaProviderOnly) return;
   function posColor(p) { return POS_COLORS[(p || '').toLowerCase()] || '#64748b'; }
   function compColor(label) {
     label = label || '';
-    if (label.indexOf('谓语') >= 0) return '#ef4444';
+    if (label.indexOf('谓语') >= 0) return '#ff453a';
     if (label.indexOf('主语') >= 0) return '#3b82f6';
     if (label.indexOf('宾语') >= 0) return '#22c55e';
     if (label.indexOf('定语') >= 0) return '#06b6d4';
@@ -532,7 +532,7 @@ if (window.__bwPwaProviderOnly) return;
   }
   function failBgJob(id, text) {
     var el = document.getElementById(id); if (!el) return;
-    el.style.borderColor = '#f87171'; el.style.color = '#f87171'; el.style.cursor = 'pointer';
+    el.style.borderColor = '#ff453a'; el.style.color = '#ff453a'; el.style.cursor = 'pointer';
     el.textContent = '✗ ' + text + ' · 点关闭';
     el.onclick = function () { el.remove(); };
   }
@@ -686,7 +686,7 @@ if (window.__bwPwaProviderOnly) return;
   function fillBlockError(block, msg) {
     if (!block) return;
     var content = block.querySelector('.gb-content') || block;
-    content.innerHTML = '<div class="gb-loading" style="color:#ef4444">分析失败：' + esc(msg) + '</div>';
+    content.innerHTML = '<div class="gb-loading" style="color:#ff453a">分析失败：' + esc(msg) + '</div>';
   }
   function setBlockTrans(block, zh) {
     block.__zh = zh;

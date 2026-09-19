@@ -623,7 +623,7 @@
   if (typeof window.dlog !== 'function') {
     window.dlog = function (msg, color) {
       try {   // App 端报错自动落盘(2026-09-03)
-        var lvl = (color === '#ff6b6b' || color === '#c00') ? 'error' : 'log';
+        var lvl = (color === '#ff453a' || color === '#c00') ? 'error' : 'log';
         if (typeof window.__bwClientLog === 'function') window.__bwClientLog(lvl, msg);
         else { (window.__bwEarlyDlog = window.__bwEarlyDlog || []).push([lvl, String(msg)]); if (window.__bwEarlyDlog.length > 200) window.__bwEarlyDlog.shift(); }
       } catch (_) {}
@@ -948,7 +948,8 @@
   function ensureDom() {
     if (_built) return;
     injectCss();
-    var SEL = 'width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px';   // 原生 select 内联样式
+    // 只留布局相关的（宽度/下边距/字号）；外观交给 .rc-ui-select，这样改一处三个表面同时变。
+    var SEL = 'width:100%;font-size:13px;margin-bottom:14px';   // 外观见 rc-ui.js 的 .rc-ui-select
     var LBL = 'display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:4px';   // 原生 label 内联样式
     var HR = '<hr style="border:none;border-top:1px solid var(--rc-border);margin:14px 0">';   // 原生分隔线
 
@@ -962,7 +963,7 @@
           '<div id="rcset-ai-inline"></div>' +
         '</div>' +
         '<label style="' + LBL + '">🌐 句子翻译源</label>' +
-        '<select id="set-sent-backend" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px">' +
+        '<select class="rc-ui-select" id="set-sent-backend" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px">' +
           '<option value="auto">auto（DeepL 有 key → MyMemory）</option>' +
           '<option value="mymemory">MyMemory（5K/天匿名，50K/天 email 认证）</option>' +
           '<option value="deepl">DeepL（需 dict.deepl_key）</option>' +
@@ -970,7 +971,7 @@
         '</select>' +
         '<div id="set-sent-ai-row" style="display:none;margin-bottom:14px">' +
           '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin:8px 0 4px">AI 模型</label>' +
-          '<select id="set-sent-model" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:6px">' +
+          '<select class="rc-ui-select" id="set-sent-model" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:6px">' +
             '<option value="haiku">haiku（最快最便宜，句子翻译够用）</option>' +
             '<option value="sonnet">sonnet（平衡）</option>' +
             '<option value="opus">opus（最强）</option>' +
@@ -983,7 +984,7 @@
             '<option value="gpt-5.4-mini">gpt-5.4-mini（快、省）</option>' +
           '</select>' +
           '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin:4px 0">思考深度</label>' +
-          '<select id="set-sent-effort" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px">' +
+          '<select class="rc-ui-select" id="set-sent-effort" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px">' +
             '<option value="low">low（翻译用 low 足够）</option>' +
             '<option value="medium">medium</option>' +
             '<option value="high">high</option>' +
@@ -995,7 +996,7 @@
         '<div style="background:#11203a;border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
           '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px">🗣 语音·调用前垫话</div>' +
           '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-bottom:10px">AI 调工具前要不要先说一句「我去查一下」。<b>自动</b> = 按这个工具在账本里的<b>真实中位耗时</b>判：慢过阈值才垫话，秒回的静默直接调（免得啰嗦）。单个工具想固定，长按它的工具卡 → 详情窗里单独设。</div>' +
-          '<select id="set-filler-mode" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px">' +
+          '<select class="rc-ui-select" id="set-filler-mode" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px">' +
             '<option value="auto">自动（按实测耗时判，推荐）</option>' +
             '<option value="always">总是说（每个工具都先垫一句）</option>' +
             '<option value="never">全部静默（工具调用不吭声）</option>' +
@@ -1011,7 +1012,7 @@
           '<ul id="rcset-sync-conflicts" style="display:none;margin:8px 0 0;padding-left:18px;color:#8fa0ba;font-size:11px;line-height:1.5"></ul>' +
         '</div>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;cursor:pointer">' +
-          '<input type="checkbox" id="set-debug" style="width:16px;height:16px"> 显示调试日志（左下角浮窗）' +
+          '<input type="checkbox" id="set-debug" class="rc-ui-switch"> 显示调试日志（左下角浮窗）' +
         '</label>' +
       '</div>';
 
@@ -1023,14 +1024,14 @@
           '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-bottom:10px">电脑图标按钮是唯一启动入口；普通电话按钮只负责豆包、GPT 或 Grok。查看状态不会启动应用、采音或发送快捷键。</div>' +
           '<div id="rcset-computer-inline"></div>' +
           '<label id="set-bridge-voice-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);font-weight:600;cursor:pointer;margin-top:10px">' +
-            '<input type="checkbox" id="set-bridge-voice" style="width:16px;height:16px"> 🔊 把语音也桥接进来' +
+            '<input type="checkbox" id="set-bridge-voice" class="rc-ui-switch"> 🔊 把语音也桥接进来' +
           '</label>' +
           '<div id="set-bridge-voice-help" style="display:none;font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:5px">' +
             '关闭 = 仅桥接：语音留在电脑（用电脑音频设备），通话不接到 App；上下文/快照/出卷照常。切换在数秒内由 ReaderPC 重启服务生效。' +
           '</div>' +
           '<div id="set-bridge-voice-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
           '<label id="set-readerpc-no-voice-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);font-weight:600;cursor:pointer;margin-top:10px">' +
-            '<input type="checkbox" id="set-readerpc-no-voice" style="width:16px;height:16px"> 🔇 无语音功能（其它 Reader 功能保持在线）' +
+            '<input type="checkbox" id="set-readerpc-no-voice" class="rc-ui-switch"> 🔇 无语音功能（其它 Reader 功能保持在线）' +
           '</label>' +
           '<div id="set-readerpc-no-voice-help" style="display:none;font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:5px">' +
             '开启后不自动拉起 Codex Voice，不启用 F24 保活与音频路由；实时快照、视觉读取、浏览器控制、卡片、Anki、词典、OCR 与历史工具继续在线。' +
@@ -1039,10 +1040,10 @@
         '</div>' +
         '<div id="set-ctx-sync-card" style="background:#11203a;border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
           '<label id="set-ctx-sync-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);font-weight:600;cursor:pointer">' +
-            '<input type="checkbox" id="set-ctx-sync" style="width:16px;height:16px"> 🔁 旧版文字注入同步' +
+            '<input type="checkbox" id="set-ctx-sync" class="rc-ui-switch"> 🔁 旧版文字注入同步' +
           '</label>' +
           '<label id="set-ctx-legacy-row" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--rc-text-strong);cursor:pointer;margin-top:10px">' +
-            '<input type="checkbox" id="set-ctx-legacy" style="width:16px;height:16px"> 测试旧版文字注入' +
+            '<input type="checkbox" id="set-ctx-legacy" class="rc-ui-switch"> 测试旧版文字注入' +
           '</label>' +
           '<div id="set-ctx-mode-help" style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:5px">' +
             '实时快照 MCP 跟随 ReaderPC 非语音服务，不受语音功能或旧版同步开关影响。只有测试旧版文字注入时才显示其同步开关。' +
@@ -1084,13 +1085,13 @@
         // [PDF] 本书插图描述(逐字照搬,onchange=原生 saveFigToggle)
         '<div data-sec="pdf-figures">' +
           '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;cursor:pointer">' +
-            '<input type="checkbox" id="set-figures" onchange="saveFigToggle(this.checked)" style="width:16px;height:16px"> 📷 本书插图描述（图区放徽标，点开看 AI 说明）' +
+            '<input type="checkbox" id="set-figures" onchange="saveFigToggle(this.checked)" class="rc-ui-switch"> 📷 本书插图描述（图区放徽标，点开看 AI 说明）' +
           '</label>' +
           '<div style="font-size:11px;color:var(--rc-text-dim);margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后翻到的页会<b>逐页让 AI 识别插图并描述</b>（首次每页几秒、消耗 AI 配额），描述结果存服务器跨端共用。不需要插图说明的书保持关闭即可。<b>每本书独立</b>。</div>' +
           // [PDF] 概念网按书开火(用户定:读哪本书时决定哪本;默认隐藏,PDF 的 _fillSettings 揭示+回填)
           '<div data-sec="pdf-conceptnet" style="display:none">' +
             '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;cursor:pointer">' +
-              '<input type="checkbox" id="set-conceptnet" onchange="window.saveConceptNetToggle&&saveConceptNetToggle(this.checked)" style="width:16px;height:16px"> 🌱 本书自动生长概念笔记（概念网）' +
+              '<input type="checkbox" id="set-conceptnet" onchange="window.saveConceptNetToggle&&saveConceptNetToggle(this.checked)" class="rc-ui-switch"> 🌱 本书自动生长概念笔记（概念网）' +
             '</label>' +
             '<div style="font-size:11px;color:var(--rc-text-dim);margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后夜间流水线对你在本书反复关注的<b>学科概念</b>自动生成概念笔记（引原文定义+自动连边,单词仍归词汇本）。<b>每本书独立</b>,即改即存。</div>' +
           '</div>' +
@@ -1114,10 +1115,10 @@
         // host:'web' 时这两项挪到「网页翻译」tab(web-* id 一站式);EPUB/HTML 仍留此。共有键 eph-*(同键同源)
         '<div data-sec="read-vocab">' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:14px;cursor:pointer">' +
-          '<input type="checkbox" id="set-vocab-underline" style="width:16px;height:16px"> 生词下划线（按掌握度着色：橙=新 / 黄=见过 / 淡绿=熟）' +
+          '<input type="checkbox" id="set-vocab-underline" class="rc-ui-switch"> 生词下划线（按掌握度着色：橙=新 / 黄=见过 / 淡绿=熟）' +
         '</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:14px;cursor:pointer">' +
-          '<input type="checkbox" id="set-click-translate" style="width:16px;height:16px"> 点击未掌握单词直接显示翻译（不弹工具栏）' +
+          '<input type="checkbox" id="set-click-translate" class="rc-ui-switch"> 点击未掌握单词直接显示翻译（不弹工具栏）' +
         '</label>' +
         '</div>' +
         // [EPUB] 插图徽标显隐(纯 UI,即改即生效,window.toggleFigBadge)
@@ -1127,7 +1128,7 @@
         // [PDF] 旋转屏幕自动切换排版(逐字照搬;保存时由原生 saveSettings 读)
         '<div data-sec="pdf-orient">' +
           '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;cursor:pointer">' +
-            '<input type="checkbox" id="set-auto-orient" style="width:16px;height:16px"> 旋转屏幕自动切换排版（每本书记住横/竖屏各自的「排版+去边」）' +
+            '<input type="checkbox" id="set-auto-orient" class="rc-ui-switch"> 旋转屏幕自动切换排版（每本书记住横/竖屏各自的「排版+去边」）' +
           '</label>' +
           '<div style="font-size:11px;color:var(--rc-text-dim);margin-bottom:14px;line-height:1.5">开启后：在某方向改了排版(连续/双页)或去边开关，会记进该方向；旋转回来自动套用那个方向上次的设置。</div>' +
         '</div>' +
@@ -1148,7 +1149,7 @@
           HR +
           '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:6px">🔧 文字层校准（扫描/OCR 书的文字层跟画面没对齐时用；<b>每页独立</b>）</label>' +
           '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:8px">' +
-            '<input type="checkbox" id="set-charbox" onchange="_charboxToggle(this)" style="width:16px;height:16px"> 可视化文字框（红框叠在页面上，直观看哪里偏）' +
+            '<input type="checkbox" id="set-charbox" onchange="_charboxToggle(this)" class="rc-ui-switch"> 可视化文字框（红框叠在页面上，直观看哪里偏）' +
           '</label>' +
           '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap">' +
             '<span style="font-size:12px;color:var(--rc-text-muted)">微调当前页：</span>' +
@@ -1190,7 +1191,7 @@
     var paneGrammar =
       '<div class="set-pane" data-pane="grammar" data-sec="grammar-tab" style="display:none">' +
         '<label style="' + LBL + '">📐 长句结构显示</label>' +
-        '<select id="set-grammar-view" style="' + SEL + '">' +
+        '<select class="rc-ui-select" id="set-grammar-view" style="' + SEL + '">' +
           '<option value="tree">成分树（成分名+颜色+层次缩进+折叠，融合）</option>' +
           '<option value="components">成分分块（主谓宾定状从句彩色块）</option>' +
           '<option value="skeleton">主干+修饰折叠（骨架先行，修饰点开）</option>' +
@@ -1273,10 +1274,10 @@
         '<div style="font-size:12px;color:var(--rc-text-muted);margin-bottom:12px">这些开关属于 iPad 上的 App 本体，改完即时生效。凭据、Vault 目录、书库仍在 App 的原生设置里（系统 UI 才能安全地管它们）。</div>' +
         '<label style="' + LBL + '">📝 文字识别（设备端）</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:8px">' +
-          '<input type="checkbox" id="rcset-nat-ocr" style="width:16px;height:16px"> 启用设备端文字识别' +
+          '<input type="checkbox" id="rcset-nat-ocr" class="rc-ui-switch"> 启用设备端文字识别' +
         '</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:14px">' +
-          '<input type="checkbox" id="rcset-nat-ocr-auto" style="width:16px;height:16px"> 打开书就自动识别（不必手动触发）' +
+          '<input type="checkbox" id="rcset-nat-ocr-auto" class="rc-ui-switch"> 打开书就自动识别（不必手动触发）' +
         '</label>' +
         HR +
         '<label style="' + LBL + '">✏️ Apple Pencil 手势</label>' +
@@ -1306,7 +1307,7 @@
         HR +
         '<label style="' + LBL + '">📁 本机 Obsidian Vault</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:6px">' +
-          '<input type="checkbox" id="rcset-nat-vault-on" style="width:16px;height:16px"> 写入 iPad 本地 Vault' +
+          '<input type="checkbox" id="rcset-nat-vault-on" class="rc-ui-switch"> 写入 iPad 本地 Vault' +
         '</label>' +
         '<div id="rcset-nat-vault-st" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px">读取中…</div>' +
         '<div style="display:flex;gap:8px">' +
@@ -1317,11 +1318,11 @@
         HR +
         '<label style="' + LBL + '">📍 学习地点记录</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:6px">' +
-          '<input type="checkbox" id="rcset-nat-loc-on" style="width:16px;height:16px"> 记录学习地点' +
+          '<input type="checkbox" id="rcset-nat-loc-on" class="rc-ui-switch"> 记录学习地点' +
         '</label>' +
         '<div id="rcset-nat-loc-st" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px">读取中…</div>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin:0 0 6px 22px">' +
-          '<input type="checkbox" id="rcset-nat-loc-bg" style="width:16px;height:16px"> 不开 App 时也更新地点' +
+          '<input type="checkbox" id="rcset-nat-loc-bg" class="rc-ui-switch"> 不开 App 时也更新地点' +
         '</label>' +
         '<div id="rcset-nat-loc-bgst" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px 22px"></div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">开着时，读页停留记录会带上当时的位置（坐标与地名，建筑物级），用于以后回答"我在哪学的"。首次打开会请求系统定位权限（使用期间）。位置只随学习记录存到你自己的服务器，不发给任何第三方。</div>' +
@@ -1343,8 +1344,8 @@
         '<label style="' + LBL + '">🌐 网页翻译（浏览器扩展 / 网页阅读专用）</label>' +
         '<div style="font-size:12px;color:var(--rc-text-muted);margin:-4px 0 10px">我在学的语言：只对这些语言的网页做翻译和生词标注，纯中文母语页自动跳过（全不勾＝任何语言都翻）。</div>' +
         '<div id="web-lang-checks" style="display:flex;gap:18px;margin-bottom:14px">' +
-          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--rc-text-strong);cursor:pointer"><input type="checkbox" value="en" style="width:16px;height:16px"> 英语</label>' +
-          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--rc-text-strong);cursor:pointer"><input type="checkbox" value="ja" style="width:16px;height:16px"> 日语</label>' +
+          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--rc-text-strong);cursor:pointer"><input type="checkbox" value="en" class="rc-ui-switch"> 英语</label>' +
+          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--rc-text-strong);cursor:pointer"><input type="checkbox" value="ja" class="rc-ui-switch"> 日语</label>' +
         '</div>' +
         '<hr class="ep-set-hr">' +
         '<label style="display:block;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px">翻译引擎</label>' +
@@ -1375,13 +1376,13 @@
         '</select>' +
         '<hr class="ep-set-hr">' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:14px;cursor:pointer">' +
-          '<input type="checkbox" id="web-vocab-underline" style="width:16px;height:16px"> 生词下划线（按掌握度着色：橙=新 / 黄=见过 / 淡绿=熟）' +
+          '<input type="checkbox" id="web-vocab-underline" class="rc-ui-switch"> 生词下划线（按掌握度着色：橙=新 / 黄=见过 / 淡绿=熟）' +
         '</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:14px;cursor:pointer">' +
-          '<input type="checkbox" id="web-click-translate" style="width:16px;height:16px"> 点击未掌握单词直接显示翻译（不弹工具栏）' +
+          '<input type="checkbox" id="web-click-translate" class="rc-ui-switch"> 点击未掌握单词直接显示翻译（不弹工具栏）' +
         '</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:14px;cursor:pointer">' +
-          '<input type="checkbox" id="web-pretr" style="width:16px;height:16px"> 未掌握句自动预翻译（含多个未掌握词的句子后台预热译文，点「译 N」立即显示）' +
+          '<input type="checkbox" id="web-pretr" class="rc-ui-switch"> 未掌握句自动预翻译（含多个未掌握词的句子后台预热译文，点「译 N」立即显示）' +
         '</label>' +
         // 语法分析(web host 时独立「语法」tab 隐藏,内容并到这里;逻辑复用 rc-grammar，容器实例 web-* id)
         '<hr class="ep-set-hr">' +

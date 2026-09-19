@@ -58,5 +58,5 @@ window.__upReconcileDelete = function (newMeta) {
     try { if (window.RC && RC.userpages && RC.userpages.load) RC.userpages.load(); } catch (e) {}
     try { if (window.RC && RC.stickynote && RC.stickynote.loadAll) RC.stickynote.loadAll(); } catch (e) {}
     return true;
-  } catch (e) { try{localStorage.setItem('_recon_dbg',((localStorage.getItem('_recon_dbg')||'')+'|reconcile-throw:'+e.message).slice(-1500));}catch(_){} try { window.dlog && window.dlog('reconcile fail: ' + e.message, '#ff6b6b'); } catch (_) {} return false; }
+  } catch (e) { try{localStorage.setItem('_recon_dbg',((localStorage.getItem('_recon_dbg')||'')+'|reconcile-throw:'+e.message).slice(-1500));}catch(_){} try { window.dlog && window.dlog('reconcile fail: ' + e.message, '#ff453a'); } catch (_) {} return false; }
 };

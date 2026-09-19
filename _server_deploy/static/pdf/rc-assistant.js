@@ -90,7 +90,7 @@
       '.ams-tname{font-size:13px;color:#cdd9f2;font-weight:600;margin-bottom:2px}' +
       '.ams-tdef{font-size:11px;color:var(--rc-text-dim);margin-bottom:7px}' +
       '.ams-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}' +
-      '.ams-sel{background:var(--rc-bg-canvas);border:1px solid var(--rc-border-control);color:var(--rc-text-strong);border-radius:7px;padding:5px 6px;font-size:12px;flex:1 1 28%;min-width:0}' +
+      '.ams-sel{flex:1 1 28%;min-width:0;font-size:12px;padding:6px 26px 6px 10px}' +
       '.ams-sel:disabled{opacity:.45}' +
       '.ams-fast{background:#141d31;border:1px solid var(--rc-border-control);color:#8998b8;border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
       '.ams-fast.on{background:#173a2b;border-color:#2f9c6a;color:#9af0c7}.ams-fast:disabled{opacity:.4;cursor:not-allowed}' +
@@ -380,17 +380,17 @@
       function esc2(x) { var e = document.createElement('div'); e.textContent = String(x == null ? '' : x); return e.innerHTML; }
       // ㉖b:按通话引擎分组渲染——选 GPT 就藏豆包 S2S 专属项、显示 GPT 专属项;朗读/ASR 与引擎无关恒显。
       var isOA = (voiceEngine === 'openai_rtc');
-      var H = '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_engine" style="flex:1 1 100%">' +
+      var H = '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel rc-ui-select" data-k="rt_engine" style="flex:1 1 100%">' +
           '<option value=""' + (!voiceEngine ? ' selected' : '') + '>通话引擎:豆包 S2S(默认)</option>' +
           '<option value="openai_rtc"' + (voiceEngine === 'openai_rtc' ? ' selected' : '') + '>通话引擎:GPT Realtime(WebRTC·App/扩展直连)</option>' +
           '<option value="grok"' + (voiceEngine === 'grok' ? ' selected' : '') + '>通话引擎:Grok Voice(WebSocket·耳机推荐)</option>' +
         '</select></div>';
       if (voiceEngine === 'grok') {   // ── 94 Grok 专属:音色 + 能力边界说明 ──
         var _GKV = ['eve', 'ara', 'rex', 'sal', 'leo'];
-        H += '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_grok_voice" style="flex:1 1 100%">' +
+        H += '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel rc-ui-select" data-k="rt_grok_voice" style="flex:1 1 100%">' +
           _GKV.map(function (v) { return '<option value="' + v + '"' + ((c.rt_grok_voice || 'eve') === v ? ' selected' : '') + '>Grok 音色:' + v + (v === 'eve' ? '(默认)' : '') + '</option>'; }).join('') +
           '</select></div>' +
-          '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_grok_vad" style="flex:1 1 100%">' +
+          '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel rc-ui-select" data-k="rt_grok_vad" style="flex:1 1 100%">' +
             '<option value=""' + (!c.rt_grok_vad ? ' selected' : '') + '>轮次判定:本地 VAD(省钱:静默零上传;应答≈0.9s)</option>' +
             '<option value="server"' + (c.rt_grok_vad === 'server' ? ' selected' : '') + '>轮次判定:服务端 VAD(实验:官方打断手感;全程计费 $3/小时)</option>' +
           '</select></div>' +
@@ -402,41 +402,41 @@
         var _RTL = [['', '语言:自动(跟随你说话的语言)'], ['zh', '语言:中文'], ['ja', '语言:日本語'], ['en', '语言:English']];
         var _RTE = [['low', '思考强度:low(推荐,低延迟)'], ['minimal', '思考强度:minimal(最快)'], ['medium', '思考强度:medium'], ['high', '思考强度:high(慢且贵)']];
         var _RTG = [['auto', '接话灵敏度:自动(推荐)'], ['low', '接话灵敏度:慢热(多等你想完)'], ['medium', '接话灵敏度:中等'], ['high', '接话灵敏度:急性子(尽快接话)']];
-        H += '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_model" style="flex:1 1 100%">' +
+        H += '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel rc-ui-select" data-k="rt_model" style="flex:1 1 100%">' +
             _RTM.map(function (o) { return '<option value="' + o[0] + '"' + ((c.rt_model || 'gpt-realtime-2.1-mini') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
           '</select></div>' +
-          '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_voice" style="flex:1 1 100%">' +
+          '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel rc-ui-select" data-k="rt_voice" style="flex:1 1 100%">' +
             _RTV.map(function (v) { return '<option value="' + v + '"' + ((c.rt_voice || 'marin') === v ? ' selected' : '') + '>GPT 音色:' + v + (v === 'marin' || v === 'cedar' ? '(官方推荐)' : '') + '</option>'; }).join('') +
           '</select></div>' +
           '<label class="ams-cur">通话语速(下次通话生效)<span class="vcv-rts" style="float:right">' + (c.rt_speed || 1) + '×</span></label>' +
           '<input type="range" min="0.5" max="1.5" step="0.05" value="' + (c.rt_speed || 1) + '" data-k="rt_speed" style="width:100%">' +
-          '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_lang" style="flex:1 1 100%">' +
+          '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel rc-ui-select" data-k="rt_lang" style="flex:1 1 100%">' +
             _RTL.map(function (o) { return '<option value="' + o[0] + '"' + ((c.rt_lang || '') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
           '</select></div>' +
-          '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_noise" style="flex:1 1 100%">' +
+          '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel rc-ui-select" data-k="rt_noise" style="flex:1 1 100%">' +
             [['', '噪音抑制:近场(耳机 / 手持,默认)'], ['far', '噪音抑制:远场(iPad 放桌上外放——环境音 / 操作声抑制更强)']].map(function (o) {
               return '<option value="' + o[0] + '"' + ((c.rt_noise || '') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
             }).join('') +
           '</select></div>' +
-          '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_eagerness" style="flex:1 1 100%">' +
+          '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel rc-ui-select" data-k="rt_eagerness" style="flex:1 1 100%">' +
             _RTG.map(function (o) { return '<option value="' + o[0] + '"' + ((c.rt_eagerness || 'auto') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
           '</select></div>' +
-          '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_effort" style="flex:1 1 100%">' +
+          '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel rc-ui-select" data-k="rt_effort" style="flex:1 1 100%">' +
             _RTE.map(function (o) { return '<option value="' + o[0] + '"' + ((c.rt_effort || 'low') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
           '</select></div>' +
           '<textarea class="ams-sel" data-k="rt_instructions" rows="2" placeholder="人设 / 附加指令(留空=默认学习伙伴;语言规则和工具纪律会自动拼在它后面)" style="width:100%;resize:vertical">' + esc2(c.rt_instructions || '') + '</textarea>' +
           '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:4px 0 2px;cursor:pointer">' +
-          '<input type="checkbox" data-k="rt_full_duplex"' + (c.rt_full_duplex ? ' checked' : '') + '>全双工打断(⚠仅戴耳机时勾:AI 说话期间也收音,可随时插话;外放勾了会回声自问自答。默认=半双工:它说话时不收音,防外放回声)</label>' +
+          '<input type="checkbox" class="rc-ui-switch" data-k="rt_full_duplex"' + (c.rt_full_duplex ? ' checked' : '') + '>全双工打断(⚠仅戴耳机时勾:AI 说话期间也收音,可随时插话;外放勾了会回声自问自答。默认=半双工:它说话时不收音,防外放回声)</label>' +
           '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:4px 0 2px;cursor:pointer">' +
-          '<input type="checkbox" data-k="rt_image"' + (c.rt_image ? ' checked' : '') + '>图像输入(看图类工具的渲染图直接给 GPT 自己看,不经文字转述;实验性,报错就关掉)</label>' +
+          '<input type="checkbox" class="rc-ui-switch" data-k="rt_image"' + (c.rt_image ? ' checked' : '') + '>图像输入(看图类工具的渲染图直接给 GPT 自己看,不经文字转述;实验性,报错就关掉)</label>' +
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:4px 0 2px;cursor:pointer">' +
-        '<input type="checkbox" data-k="rt_tool_reply"' + (c.rt_tool_reply ? ' checked' : '') + '>工具完成后口头回报(搜索/配图等展示型工具:关=静默入库只显示卡片[推荐];开=AI 拿到结果后自由回答)</label>' +
+        '<input type="checkbox" class="rc-ui-switch" data-k="rt_tool_reply"' + (c.rt_tool_reply ? ' checked' : '') + '>工具完成后口头回报(搜索/配图等展示型工具:关=静默入库只显示卡片[推荐];开=AI 拿到结果后自由回答)</label>' +
           '<div class="ams-tdef" style="margin:2px 0 6px">语言选「自动」它跟着你切换;读日语书建议选「日本語」或「自动」(原文按原生发音念)。以上都是下次开话生效;接话灵敏度=semantic VAD 的 eagerness(按语义判断你说完没)。</div>';
       } else {      // ── 豆包 S2S 专属 ──
-        H += '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="speaker" style="flex:1 1 100%">' +
+        H += '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel rc-ui-select" data-k="speaker" style="flex:1 1 100%">' +
           _VC_SPK.map(function (o) { return '<option value="' + o[0] + '"' + ((c.speaker || _VC_SPK[0][0]) === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
         '</select></div>' +
-        '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="explicit_dialect" style="flex:1 1 100%">' +
+        '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel rc-ui-select" data-k="explicit_dialect" style="flex:1 1 100%">' +
           _VC_DIA.map(function (o) { return '<option value="' + o[0] + '"' + ((c.explicit_dialect || '') === o[0] ? ' selected' : '') + '>方言:' + o[1] + '</option>'; }).join('') +
         '</select></div>' +
         '<div class="ams-cur" style="margin:0 0 2px">通话语速(S2S) <b class="vcv-sr">' + (c.speech_rate || 0) + '</b>(-50 慢 ~ 100 快)</div>' +
@@ -447,11 +447,11 @@
         '<input class="ams-sel" data-k="speaking_style" placeholder="说话风格(如:口吻拽拽的)" value="' + esc2(c.speaking_style || '') + '" style="flex:1 1 50%"></div>' +
         '<textarea class="ams-sel" data-k="system_role" rows="2" placeholder="人设(背景设定,留空=默认学习伙伴;伴读工具协议会自动拼在它后面)" style="width:100%;resize:vertical">' + esc2(c.system_role || '') + '</textarea>' +
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer">' +
-        '<input type="checkbox" data-k="enable_music"' + (c.enable_music ? ' checked' : '') + '>唱歌能力(检索版权曲库,让它真能唱)</label>';
+        '<input type="checkbox" class="rc-ui-switch" data-k="enable_music"' + (c.enable_music ? ' checked' : '') + '>唱歌能力(检索版权曲库,让它真能唱)</label>';
       }
       // ── 与通话引擎无关(朗读=独立 TTS 链路 / ASR=mic 长按豆包识别):恒显 ──
       H += '<div class="ams-sub" style="margin:10px 0 4px;color:#8fa8d8">— 朗读 / 语音输入(与通话引擎无关)—</div>' +
-        '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="tts_speaker" style="flex:1 1 100%">' +
+        '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel rc-ui-select" data-k="tts_speaker" style="flex:1 1 100%">' +
           _VC_TTS_SPK.map(function (o) { return '<option value="' + o[0] + '"' + ((c.tts_speaker || _VC_TTS_SPK[0][0]) === o[0] ? ' selected' : '') + '>朗读音色:' + o[1] + '</option>'; }).join('') +
         '</select></div>' +
         '<div class="ams-cur" style="margin:4px 0 2px">朗读语速 <b class="vcv-tsr">' + (c.tts_speech_rate || 0) + '</b>(-50 慢 ~ 100 快)</div>' +
@@ -459,7 +459,7 @@
         '<div class="ams-row" style="margin:7px 0 0"><input class="ams-sel" data-k="tts_instruction" placeholder="默认朗读语气(AI 会按内容自动调整情绪;这里是它没给时的兜底,仅2.0音色)" value="' + esc2(c.tts_instruction || '') + '" style="flex:1 1 100%"></div>' +
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:6px 0 2px;cursor:pointer">' +
         '<input type="checkbox" id="vcv-cap-tg">朗读字幕(侧栏关闭时屏幕下方显示当前句+上一句,跟声音同步,不挡触控;本设备)</label>' +
-        '<div class="ams-row" style="margin:7px 0"><select class="ams-sel" id="vcv-bridge" style="flex:1 1 100%">' +
+        '<div class="ams-row" style="margin:7px 0"><select class="ams-sel rc-ui-select" id="vcv-bridge" style="flex:1 1 100%">' +
           '<option value="auto">回声桥:自动(外放走 Pi 桥消回声,戴耳机自动直连;豆包/GPT-WS/Grok 引擎)</option>' +
           '<option value="1">回声桥:总是</option>' +
           '<option value="0">回声桥:关闭</option>' +
@@ -471,9 +471,9 @@
         '<span style="color:#7a8497">— 开了「工具完成后口头回报」时**自动禁用**,免得跟 AI 的真实回答同时出声</span></label>' +
         '<div class="ams-row" id="vcv-card-row" style="display:flex;align-items:center;gap:8px;margin:2px 0 6px;padding-left:22px">' +
         '<span style="font-size:12px;color:var(--rc-text-muted);flex:none">停留 <b id="vcv-card-v">20</b> 秒</span>' +
-        '<input type="range" id="vcv-card-sec" min="5" max="60" step="5" style="flex:1;accent-color:#7b6cff"></div>' +
+        '<input type="range" id="vcv-card-sec" min="5" max="60" step="5" style="flex:1;accent-color:#5e5ce6"></div>' +
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer">' +
-        '<input type="checkbox" data-k="asr_v2"' + (c.asr_v2 ? ' checked' : '') + '>ASR 2.0(长按麦克风的豆包识别换新模型,关键词召回+20%;⚠需先在火山控制台开通「流式语音识别2.0」商品,没开通会连不上)</label>' +
+        '<input type="checkbox" class="rc-ui-switch" data-k="asr_v2"' + (c.asr_v2 ? ' checked' : '') + '>ASR 2.0(长按麦克风的豆包识别换新模型,关键词召回+20%;⚠需先在火山控制台开通「流式语音识别2.0」商品,没开通会连不上)</label>' +
         (isOA ? '' :
         '<div class="ams-tdef" style="margin-top:6px">改完即存;通话中改音色/语速立即生效;朗读音色/语气下一句生效(2.0 音色支持自然语言语气指令;停顿由 AI 的标点/省略号控制)。人设/风格下次开话生效。角色扮演在这里写人设+挑音色(SC2.0 克隆音色线不支持工具协议,不接)</div>');
       card.innerHTML = H;
@@ -1016,7 +1016,7 @@
     '-webkit-tap-highlight-color:transparent;vertical-align:middle;transition:transform .12s ease,background .2s;-webkit-user-select:none;user-select:none}' +
     '.asst-clip:active{transform:scale(.82)}' +                                            // 80:按压特效
     '.asst-clip.dim{background:rgba(255,255,255,.08);color:#5a6478}' +                     // 无录音=灰
-    '.asst-clip.playing{background:#7b6cff;color:#fff;animation:vcClipBreath 1.8s ease-in-out infinite}' +   // 播放=呼吸闪光
+    '.asst-clip.playing{background:#5e5ce6;color:#fff;animation:vcClipBreath 1.8s ease-in-out infinite}' +   // 播放=呼吸闪光
     '.asst-clip.busy{background:rgba(255,190,90,.22);color:#f0b451;animation:vcClipBreath 1.1s ease-in-out infinite;pointer-events:none}' +   // 生成录音中=琥珀
     '@keyframes vcClipBreath{0%,100%{box-shadow:0 0 0 0 rgba(123,108,255,.45);opacity:1}50%{box-shadow:0 0 0 6px rgba(123,108,255,0);opacity:.75}}' +   // 流式中:发送→停止(红)
     // 回答底部操作行:▶ / 追问chips / tok+! 排一行(用户:别占多行;chips 多则行内横滚)
@@ -1084,7 +1084,7 @@
     '.ams-tname{font-size:13px;color:#cdd9f2;font-weight:600;margin-bottom:2px}' +
     '.ams-tdef{font-size:11px;color:var(--rc-text-dim);margin-bottom:7px}' +
     '.ams-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}' +
-    '.ams-sel{background:var(--rc-bg-canvas);border:1px solid var(--rc-border-control);color:var(--rc-text-strong);border-radius:7px;padding:5px 6px;font-size:12px;flex:1 1 28%;min-width:0}' +
+    '.ams-sel{flex:1 1 28%;min-width:0;font-size:12px;padding:6px 26px 6px 10px}' +
     '.ams-sel:disabled{opacity:.45}' +
     '.ams-fast{background:#141d31;border:1px solid var(--rc-border-control);color:#8998b8;border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
     '.ams-fast.on{background:#173a2b;border-color:#2f9c6a;color:#9af0c7}.ams-fast:disabled{opacity:.4;cursor:not-allowed}' +

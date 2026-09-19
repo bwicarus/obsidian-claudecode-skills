@@ -70,7 +70,7 @@ async function _pageTranslatePage(pw) {
     if (!_pageTrOn) return;             // 请求途中被关掉
     if (d.ok && d.sentences) _drawPageTranslate(pw, d.sentences);
   } catch (e) {
-    window.dlog?.('page-tr p.' + num + ' fail: ' + e.message, '#ff6b6b');
+    window.dlog?.('page-tr p.' + num + ' fail: ' + e.message, '#ff453a');
     pw.__pageTrSeq = null;             // 失败允许重试
   }
 }

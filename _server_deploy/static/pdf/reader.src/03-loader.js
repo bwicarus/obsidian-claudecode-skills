@@ -253,7 +253,7 @@ async function loadPdf() {
       });
     }
   } catch (e) {
-    window.dlog('❌ getDocument FAILED: ' + e.message, '#ff6b6b');
+    window.dlog('❌ getDocument FAILED: ' + e.message, '#ff453a');
     pdfLoadHide();
     document.getElementById('page-container').innerHTML =
       '<div style="color:#c00;padding:20px">加载 PDF 失败：' + e.message + '</div>';

@@ -400,7 +400,7 @@ window.loadVocabList = async (scope) => {
     listEl.innerHTML = '';
     for (const it of items) listEl.appendChild(_renderVocabItem(it));
   } catch (e) {
-    listEl.innerHTML = '<div style="color:#ef4444;font-size:12px;padding:10px">加载失败：' + e.message + '</div>';
+    listEl.innerHTML = '<div style="color:#ff453a;font-size:12px;padding:10px">加载失败：' + e.message + '</div>';
   }
 };
 window._refreshVocabIfPage = function() {
@@ -411,7 +411,7 @@ function _masteryColor(m) {
   if (m >= 0.8) return '#22c55e';
   if (m >= 0.5) return '#eab308';
   if (m >= 0.2) return '#f97316';
-  return '#ef4444';
+  return '#ff453a';
 }
 function _speakWord(lemma, audio) {
   if (audio) {
