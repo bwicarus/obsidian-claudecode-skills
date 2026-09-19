@@ -345,7 +345,7 @@ html.rc-side-inset-top #ep-side{padding-top:calc(env(safe-area-inset-top,0px) + 
   /* backdrop-filter:blur(var(--gp-blur,20px)) saturate(150%) brightness(1.05);-webkit-backdrop-filter:blur(var(--gp-blur,20px)) saturate(150%) brightness(1.05); */
   border-left:1px solid rgba(255,255,255,0.20);
   box-shadow:-14px 0 48px rgba(0,0,0,0.45),inset 1px 0 0 rgba(255,255,255,0.16);
-  transform:translateX(102%);transition:transform 0.4s cubic-bezier(.4,0,.2,1);touch-action:pan-y;padding-top:env(safe-area-inset-top)}
+  transform:translateX(102%);transition:transform 0.4s var(--rc-ease);touch-action:pan-y;padding-top:env(safe-area-inset-top)}
 #ep-side.rc-side-settings-open{z-index:2147483400}
 /* 调宽期间去掉高成本玻璃/颗粒与追赶式过渡；松手后立即恢复完整视觉。 */
 html.rc-side-width-preview #ep-side{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
@@ -375,7 +375,7 @@ html.rc-side-width-preview body.ep-side-open:not(.ep-side-floating) #html-conten
   border:1px solid rgba(255,255,255,0.22);border-right:none;border-radius:14px 0 0 14px;
   color:rgba(255,255,255,0.85);padding:16px 7px;font-size:11px;letter-spacing:2px;cursor:pointer;
   box-shadow:inset 1px 0 0 rgba(255,255,255,0.16),-2px 0 12px rgba(0,0,0,.35);user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;touch-action:none;
-  transition:right 0.4s cubic-bezier(.4,0,.2,1),background .15s,color .15s}
+  transition:right 0.4s var(--rc-ease),background .15s,color .15s}
 #ep-side-handle:hover{color:#fff;background:linear-gradient(135deg,rgba(255,255,255,0.15),rgba(255,255,255,0.06)),rgba(99,102,241,0.28)}
 #ep-side-handle.resizing{cursor:ew-resize;color:#fff;background:rgba(59,109,181,.48);transition:none}
 body.ep-side-open #ep-side-handle{right:var(--ep-side-width,min(38vw,560px))}
@@ -383,7 +383,7 @@ body.ep-side-open #ep-side-handle{right:var(--ep-side-width,min(38vw,560px))}
 /* 照搬 PDF body.grammar-open #main,#header padding-right:开抽屉时把顶栏+正文挤到抽屉左侧,按钮全可点 */
 body.ep-side-open #ep-content,body.ep-side-open #ep-top{padding-right:calc(var(--ep-side-width,min(38vw,560px)) + 12px)}
 /* epub.js 正文 #ep-viewer / HTML 正文 #html-content:非悬浮时也挤窄(用 margin-right,配合派发 resize 让 epub.js 重排)*/
-body.ep-side-open:not(.ep-side-floating) #ep-viewer,body.ep-side-open:not(.ep-side-floating) #html-content{margin-right:var(--ep-side-width,min(38vw,560px));transition:margin-right .4s cubic-bezier(.4,0,.2,1)}
+body.ep-side-open:not(.ep-side-floating) #ep-viewer,body.ep-side-open:not(.ep-side-floating) #html-content{margin-right:var(--ep-side-width,min(38vw,560px));transition:margin-right .4s var(--rc-ease)}
 /* 悬浮显示(eph-gp-floating → body.ep-side-floating):抽屉开时**不挤压**,纯磨砂盖在正文/顶栏上 */
 /* 照搬 PDF body.grammar-open.grammar-floating #main,#header{padding-right:0}。手搓版正文=#ep-content;epub.js 版=#ep-viewer 本就不被挤(只挤 #ep-top),悬浮再去掉顶栏挤压 */
 body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floating #ep-top{padding-right:0}

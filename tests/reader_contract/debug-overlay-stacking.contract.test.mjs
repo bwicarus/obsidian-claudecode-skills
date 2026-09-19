@@ -40,7 +40,10 @@ function zIndex(source, pattern, label) {
 test("debug overlays stay below settings so their controls remain tappable", () => {
   const epubDebug = zIndex(
     SETTINGS,
-    /el\.style\.cssText = 'position:fixed;left:10px;bottom:10px;[^']*z-index:(\d+)'/,
+    // 2026-09-20：bottom 从 10px 变成 calc(10px + env(safe-area-inset-bottom,0px))，
+    // 原来的正则把这个**位置值**写死了，于是让开安全区就把这条守层序的测试撞红。
+    // 它要守的是 z-index，定位到这条规则即可，不该顺带锁住 bottom 怎么写。
+    /el\.style\.cssText = 'position:fixed;left:10px;bottom:[^']*z-index:(\d+)'/,
     "EPUB debug overlay",
   );
   const sharedSettings = zIndex(

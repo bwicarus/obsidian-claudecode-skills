@@ -44,7 +44,7 @@
 
   var css = document.createElement('style');
   css.textContent =
-    '#asst-fab{position:fixed;right:14px;bottom:90px;z-index:115;width:50px;height:50px;border-radius:50%;border:none;' +
+    '#asst-fab{position:fixed;right:14px;bottom:calc(90px + env(safe-area-inset-bottom,0px));z-index:115;width:50px;height:50px;border-radius:50%;border:none;' +
     'background:#2563eb;color:#fff;font-size:24px;box-shadow:0 6px 18px rgba(0,0,0,.4);cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent}' +
     '#asst-fab:active{transform:scale(.92)}' +
     '#side-pane-asst.active{display:flex;flex-direction:column;overflow:hidden;height:100%;padding-bottom:var(--rc-kb,0px);box-sizing:border-box;transition:padding-bottom .18s}' +

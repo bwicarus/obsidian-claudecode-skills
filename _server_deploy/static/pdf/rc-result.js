@@ -92,7 +92,7 @@
       '#result-content .hsec-picked{border-top-left-radius:4px;border-top-right-radius:4px;padding-top:2px}' +
       '#result-content .picked-all{box-shadow:0 0 0 2px #0078d4 inset;background:rgba(96,165,250,.06);border-radius:6px;padding:4px}' +
       /* 右下角草稿 badge */
-      '#draft-badge{position:fixed;right:18px;bottom:18px;width:54px;height:54px;border-radius:50%;background:var(--rc-bg-active);border:2px solid var(--rc-border-accent);color:#fff;font-size:18px;font-weight:700;cursor:pointer;z-index:300;box-shadow:0 4px 16px rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;user-select:none}' +
+      '#draft-badge{position:fixed;right:18px;bottom:calc(18px + env(safe-area-inset-bottom,0px));width:54px;height:54px;border-radius:50%;background:var(--rc-bg-active);border:2px solid var(--rc-border-accent);color:#fff;font-size:18px;font-weight:700;cursor:pointer;z-index:300;box-shadow:0 4px 16px rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;user-select:none}' +
       '#draft-badge.show{display:flex}' +
       '#draft-badge:hover{background:#2c5188;border-color:var(--rc-accent)}' +
       '#draft-badge .count{font-size:13px;font-weight:600;line-height:1}' +
@@ -485,7 +485,7 @@
     var c = document.getElementById('bg-jobs');
     if (!c) {
       c = document.createElement('div'); c.id = 'bg-jobs';
-      c.style.cssText = 'position:fixed;right:18px;bottom:80px;display:flex;flex-direction:column;gap:6px;z-index:520;align-items:flex-end';
+      c.style.cssText = 'position:fixed;right:18px;bottom:calc(80px + env(safe-area-inset-bottom,0px));display:flex;flex-direction:column;gap:6px;z-index:520;align-items:flex-end';
       document.body.appendChild(c);
     }
     return c;

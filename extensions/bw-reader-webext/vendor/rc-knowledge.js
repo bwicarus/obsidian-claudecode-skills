@@ -33,7 +33,7 @@ if (window.__bwPwaProviderOnly) return;
   backdrop-filter:blur(var(--gp-blur,20px)) saturate(150%) brightness(1.05);-webkit-backdrop-filter:blur(var(--gp-blur,20px)) saturate(150%) brightness(1.05);
   border-left:1px solid rgba(255,255,255,0.20);
   box-shadow:-14px 0 48px rgba(0,0,0,0.45),inset 1px 0 0 rgba(255,255,255,0.16);
-  transform:translateX(102%);transition:transform 0.4s cubic-bezier(.4,0,.2,1);touch-action:pan-y;padding-top:env(safe-area-inset-top)}
+  transform:translateX(102%);transition:transform 0.4s var(--rc-ease);touch-action:pan-y;padding-top:env(safe-area-inset-top)}
 /* 磨砂颗粒(同仪表盘 / PDF 抽屉) */
 #ep-kg-panel::before{content:'';position:absolute;inset:0;pointer-events:none;opacity:0.28;mix-blend-mode:overlay;border-radius:inherit;
   background-image:url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.5 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
@@ -51,7 +51,7 @@ if (window.__bwPwaProviderOnly) return;
   border:1px solid rgba(255,255,255,0.22);border-right:none;border-radius:14px 0 0 14px;
   color:rgba(255,255,255,0.85);padding:16px 7px;font-size:11px;letter-spacing:2px;cursor:pointer;
   box-shadow:inset 1px 0 0 rgba(255,255,255,0.16),-2px 0 12px rgba(0,0,0,.35);user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;
-  transition:right 0.4s cubic-bezier(.4,0,.2,1),background .15s,color .15s}
+  transition:right 0.4s var(--rc-ease),background .15s,color .15s}
 #ep-side-handle:hover{color:#fff;background:linear-gradient(135deg,rgba(255,255,255,0.15),rgba(255,255,255,0.06)),rgba(99,102,241,0.28)}
 body.ep-kg-open #ep-side-handle{right:min(38vw,560px)}
 /* 抽屉展开时把 EPUB 正文(+顶栏)让出右侧空间(挤压,左侧仍可读,把手始终可见可关) */

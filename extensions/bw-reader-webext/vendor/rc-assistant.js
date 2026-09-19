@@ -933,7 +933,7 @@ if (window.__bwPwaProviderOnly) return;
 
   var css = document.createElement('style');
   css.textContent =
-    '#asst-fab{position:fixed;right:14px;bottom:90px;z-index:115;width:50px;height:50px;border-radius:50%;border:none;' +
+    '#asst-fab{position:fixed;right:14px;bottom:calc(90px + env(safe-area-inset-bottom,0px));z-index:115;width:50px;height:50px;border-radius:50%;border:none;' +
     'background:#2563eb;color:#fff;font-size:24px;box-shadow:0 6px 18px rgba(0,0,0,.4);cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent}' +
     '#asst-fab:active{transform:scale(.92)}' +
     '#side-pane-asst{position:relative}' +
@@ -944,7 +944,7 @@ if (window.__bwPwaProviderOnly) return;
     /* Codex 式轮次导航：一问一答一短条；当前视口里的轮次提亮，悬停/触摸按曲线向外展开。 */
     '#asst-turnrail{position:absolute;left:4px;top:0;width:58px;z-index:18;pointer-events:none;overflow:visible}' +
     '.asst-turnrail-list{height:100%;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;pointer-events:none}' +
-    '.asst-turnmark{display:block;flex:none;width:12px;height:4px;min-width:0;padding:0;border:0;border-radius:5px;background:rgba(185,194,210,.28);box-shadow:none;pointer-events:auto;cursor:pointer;touch-action:manipulation;transform-origin:left center;transition:width .24s cubic-bezier(.2,.8,.2,1),background .18s,opacity .18s}' +
+    '.asst-turnmark{display:block;flex:none;width:12px;height:4px;min-width:0;padding:0;border:0;border-radius:5px;background:rgba(185,194,210,.28);box-shadow:none;pointer-events:auto;cursor:pointer;touch-action:manipulation;transform-origin:left center;transition:width .24s var(--rc-ease-out),background .18s,opacity .18s}' +
     '.asst-turnmark.active{background:rgba(244,247,255,.9)}' +
     '.asst-turnmark:hover,.asst-turnmark.peek{width:52px;background:#f4f7ff}' +
     '.asst-turnmark:has(+.asst-turnmark:hover),.asst-turnmark:has(+.asst-turnmark.peek),.asst-turnmark:hover + .asst-turnmark,.asst-turnmark.peek + .asst-turnmark{width:35px;background:rgba(220,227,240,.68)}' +

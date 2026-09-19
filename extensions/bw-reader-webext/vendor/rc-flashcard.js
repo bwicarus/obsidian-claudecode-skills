@@ -303,7 +303,7 @@ if (window.__bwPwaProviderOnly) return;
       // 按钮**保留**(只收窄):手势在不同设备上的可靠性没法在这里验证,
       // 留着按钮意味着即使手势失灵也不会让卡片没法操作。
       '.fc-slide.fc-swiping{transition:none}' +
-      '.fc-slide.fc-swipe-settle{transition:transform .22s cubic-bezier(.32,.72,.36,1)}' +
+      '.fc-slide.fc-swipe-settle{transition:transform .22s var(--rc-ease)}' +
       '.fc-swipe-tip{position:absolute;left:0;right:0;display:flex;align-items:center;justify-content:center;'
         + 'font-size:12.5px;font-weight:650;letter-spacing:.03em;pointer-events:none;opacity:0;transition:opacity .14s;z-index:4}' +
       '.fc-swipe-tip.up{top:6px;color:#fca5a5}' +

@@ -334,14 +334,14 @@
         '-webkit-backdrop-filter:blur(30px) saturate(1.8);backdrop-filter:blur(30px) saturate(1.8);' +
         'border:0.5px solid rgba(255,255,255,.14);' +
         'box-shadow:0 14px 48px -12px rgba(0,0,0,.5),inset 0 0.5px 0 rgba(255,255,255,.09);' +
-        'opacity:0;transition:opacity .34s cubic-bezier(.32,.72,.36,1),transform .34s cubic-bezier(.32,.72,.36,1);' +
+        'opacity:0;transition:opacity .34s var(--rc-ease),transform .34s var(--rc-ease);' +
         'font-family:-apple-system,system-ui,sans-serif}' +
       '#vc-cap.on{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}' +
       // 每一行 = 纯文字(玻璃在外层容器上,行内不再各自套底色)
       '#vc-cap .vc-cap-line{background:none;box-shadow:none;border-radius:0;padding:3px 0 3px 11px;' +
         'color:rgba(255,255,255,.97);font-size:16px;font-weight:450;line-height:1.55;letter-spacing:.012em;' +
         'text-align:left;max-width:100%;word-break:break-word;position:relative;' +
-        'animation:vcCapIn .34s cubic-bezier(.2,.85,.3,1);transition:opacity .3s}' +
+        'animation:vcCapIn .34s var(--rc-ease-out);transition:opacity .3s}' +
       '@keyframes vcCapIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}' +
       '#vc-cap .vc-cap-prev{opacity:.42;font-size:13.5px;font-weight:400;padding-bottom:1px}' +   // 上一句:淡一档、小一档
       // 你说的话:左侧一条蓝细条(不整块变蓝);AI 无条
@@ -377,7 +377,7 @@
       '-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;' +
       'border:0.5px solid rgba(255,255,255,.14);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.4);color:#f2f2f7;font-size:14px;line-height:1.55;' +
       'padding:10px 13px 12px;pointer-events:auto;display:flex;flex-direction:column;max-height:36vh;' +
-      'transition:transform .38s cubic-bezier(.32,.72,.36,1),opacity .32s ease;font-family:-apple-system,system-ui,sans-serif}' +
+      'transition:transform .38s var(--rc-ease),opacity .32s ease;font-family:-apple-system,system-ui,sans-serif}' +
       // 底面(磨砂 + 底色)统一由这一层画。各状态只改 --vc-cardbg/--vc-cardblur 两个变量,
       // 不再各自写 background —— 否则一旦有人漏改,那个状态就退回到"卡片自己画背景",
       // 尺寸过渡时的裁剪滞后立刻回来。
@@ -472,7 +472,7 @@
       '.vc-card.vc-page-placement:not(.vc-dot):not(.vc-min)>.vc-card-bd.fc-bare>.fc-wrap>.fc-dots{grid-row:2}' +
       '.vc-card-rs{position:absolute;right:5px;bottom:5px;width:25px;height:25px;display:none;z-index:24;cursor:nwse-resize;touch-action:none;padding:0;border-radius:9px;border:1px solid rgba(157,140,255,.66);background:rgba(24,28,42,.92);box-shadow:0 5px 16px rgba(0,0,0,.34);color:#d8d1ff;-webkit-tap-highlight-color:transparent}' +
       '.vc-card-rs::after{content:"";position:absolute;right:6px;bottom:6px;width:8px;height:8px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;border-radius:1px}' +
-      '.vc-card.vc-resize-armed:not(.vc-dot):not(.vc-min)>.vc-card-rs{display:block;animation:vcRsIn .18s cubic-bezier(.2,.85,.3,1)}' +
+      '.vc-card.vc-resize-armed:not(.vc-dot):not(.vc-min)>.vc-card-rs{display:block;animation:vcRsIn .18s var(--rc-ease-out)}' +
       '.vc-card.vc-resizing{transition:none!important;will-change:width,height;box-shadow:0 18px 46px rgba(0,0,0,.52),0 0 0 1px rgba(157,140,255,.68)!important}' +
       '@keyframes vcRsIn{from{opacity:0;transform:scale(.65)}to{opacity:1;transform:none}}' +
       '.vc-card.vc-lift{box-shadow:0 22px 60px rgba(0,0,0,.55),0 0 0 0.5px rgba(255,255,255,.2);cursor:grabbing}' +
@@ -485,7 +485,7 @@
       '.vc-card-dot{position:absolute;left:0;top:0;width:40px;height:40px;border-radius:13px;padding:0;border:0.5px solid var(--vc-tl,rgba(255,255,255,.16));' +
         'background:var(--vc-tf,rgba(28,28,30,.72));-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);' +
         'color:var(--vc-tc,#b9a8ff);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2;' +
-        'transition:transform .16s cubic-bezier(.34,1.5,.64,1),background .3s,border-color .3s,box-shadow .3s}' +
+        'transition:transform .16s var(--rc-ease-spring),background .3s,border-color .3s,box-shadow .3s}' +
       '.vc-card-dot svg{width:17px;height:17px}' +
       '.vc-card.vc-hasdot .vc-card-hd{padding-left:48px;min-height:40px}' +   // 标记坐在左上角 → 标题让位
       '.vc-card-dot:active{transform:scale(.9)}' +
@@ -522,9 +522,9 @@
       // 停下来时没有回弹的"抖"。原来尺寸和 transform 用了两条不同曲线(其中一条 1.35 会过冲),
       // 两条曲线同时跑,边框和内容看着像各走各的。
       '.vc-card.vc-hasdot{right:auto;bottom:auto;transform-origin:0 0;' +
-        'transition:width .42s cubic-bezier(.32,.72,.36,1),height .42s cubic-bezier(.32,.72,.36,1),' +
-        'border-radius .34s cubic-bezier(.32,.72,.36,1),box-shadow .34s ease,border-color .25s,' +
-        'transform .34s cubic-bezier(.32,.72,.36,1),opacity .26s ease}' +
+        'transition:width .42s var(--rc-ease),height .42s var(--rc-ease),' +
+        'border-radius .34s var(--rc-ease),box-shadow .34s ease,border-color .25s,' +
+        'transform .34s var(--rc-ease),opacity .26s ease}' +
       // 内容**错峰**:容器先长开,正文晚 .14s 再淡入;收起时正文先走(.14s),容器随后收。
       // 这是这类展开动画看着"稳"的关键 —— 否则正文会跟着容器一起被拉伸/压扁。
       '.vc-card.vc-hasdot.vc-min .vc-card-bd{display:block;opacity:0;pointer-events:none;transition:opacity .14s ease}' +
@@ -593,7 +593,7 @@
       '.vc-dtl-w{width:min(92vw,520px);max-height:78vh;display:flex;flex-direction:column;border-radius:20px;' +
         'background:linear-gradient(180deg,rgba(30,30,36,.96),rgba(20,20,26,.98));border:0.5px solid rgba(255,255,255,.14);' +
         'box-shadow:0 28px 70px -18px rgba(0,0,0,.75);color:#e9eefb;font-family:-apple-system,system-ui,sans-serif;' +
-        'transform:scale(.94);transition:transform .26s cubic-bezier(.34,1.4,.64,1)}' +
+        'transform:scale(.94);transition:transform .26s var(--rc-ease-spring)}' +
       '#vc-dtl.on .vc-dtl-w{transform:scale(1)}' +
       '.vc-dtl-h{display:flex;align-items:center;gap:8px;padding:13px 15px;border-bottom:0.5px solid rgba(255,255,255,.1);flex:none}' +
       '.vc-dtl-h b{flex:1;font-size:14.5px;font-weight:650}' +
@@ -711,13 +711,13 @@
         '-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);' +
         'box-shadow:0 10px 34px -10px rgba(255,69,58,.6);' +
         'opacity:0;transform:translate(-14px,-14px) scale(.9);' +
-        'transition:opacity .22s ease,transform .28s cubic-bezier(.34,1.4,.64,1),box-shadow .2s}' +
+        'transition:opacity .22s ease,transform .28s var(--rc-ease-spring),box-shadow .2s}' +
       '#vc-trash.on{opacity:.97;transform:translate(0,0) scale(1)}' +
       '#vc-trash.hot{background:linear-gradient(135deg,#ff453a,rgba(255,69,58,.8));' +
         'box-shadow:0 14px 44px -8px rgba(255,69,58,.85),0 0 0 2px rgba(255,255,255,.35) inset;transform:scale(1.06)}' +
       '#vc-trash svg{width:22px;height:22px;transition:transform .2s}' +
       '#vc-trash.hot svg{transform:scale(1.16) rotate(-8deg)}' +
-      '#vc-dock-panel{position:fixed;left:0;right:0;bottom:0;z-index:2147481430;max-height:46vh;display:flex;flex-direction:column;' +
+      '#vc-dock-panel{position:fixed;left:0;right:0;bottom:0;z-index:2147481430;max-height:46vh;display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom,0px);' +
       'background:rgba(24,24,30,.82);-webkit-backdrop-filter:blur(26px) saturate(1.5);backdrop-filter:blur(26px) saturate(1.5);' +
       'border-top:0.5px solid rgba(255,255,255,.14);box-shadow:0 -14px 44px rgba(0,0,0,.45);padding-bottom:env(safe-area-inset-bottom,0px)}' +
       '.vc-dkp-hd{display:flex;align-items:center;gap:8px;padding:9px 14px 4px;flex:none}' +
@@ -5520,7 +5520,7 @@
       var f = document.createElement('div');
       f.style.cssText = 'position:fixed;left:' + (x - 30) + 'px;top:' + (y - 20) + 'px;width:60px;height:40px;border-radius:10px;' +
         'background:rgba(123,108,255,.55);border:1px solid rgba(255,255,255,.35);z-index:2147481470;pointer-events:none;' +
-        'transition:transform .55s cubic-bezier(.4,0,.6,1),opacity .55s';
+        'transition:transform .55s var(--rc-ease),opacity .55s';
       document.body.appendChild(f);
       requestAnimationFrame(function () {
         var tx = (window.innerWidth - 80) - x, ty = (window.innerHeight - 210) - y;
@@ -6734,7 +6734,7 @@
             if (pinCardToPage(c, _pr.left + 1, _pr.top + 1)) return;   // 落正文=钉住(偏移 +1 与拖动视觉对齐);非正文=落定卡保持显示
           }
           // 落定:带一点弹性回落(overshoot 曲线),像重新"粘"回桌面
-          el.style.transition = 'transform .38s cubic-bezier(.34,1.56,.64,1),box-shadow .3s,opacity .32s';
+          el.style.transition = 'transform .38s var(--rc-ease-spring),box-shadow .3s,opacity .32s';
           el.classList.remove('vc-lift');
           el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px)';
         },

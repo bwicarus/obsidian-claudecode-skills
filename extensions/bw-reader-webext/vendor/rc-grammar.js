@@ -510,7 +510,7 @@ if (window.__bwPwaProviderOnly) return;
     var c = document.getElementById('bg-jobs');
     if (!c) {
       c = document.createElement('div'); c.id = 'bg-jobs';
-      c.style.cssText = 'position:fixed;right:18px;bottom:80px;display:flex;flex-direction:column;gap:6px;z-index:520;align-items:flex-end';
+      c.style.cssText = 'position:fixed;right:18px;bottom:calc(80px + env(safe-area-inset-bottom,0px));display:flex;flex-direction:column;gap:6px;z-index:520;align-items:flex-end';
       document.body.appendChild(c);
     }
     return c;

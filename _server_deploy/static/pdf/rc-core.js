@@ -821,7 +821,7 @@
       var el = document.getElementById('rc-toast');
       if (!el) {
         el = document.createElement('div'); el.id = 'rc-toast';
-        el.style.cssText = 'position:fixed;left:50%;bottom:44px;transform:translateX(-50%);background:var(--rc-bg-surface);border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);padding:8px 16px;border-radius:8px;font-size:13px;z-index:9000;box-shadow:0 6px 16px rgba(0,0,0,.6);transition:opacity .2s;pointer-events:none';
+        el.style.cssText = 'position:fixed;left:50%;bottom:calc(44px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--rc-bg-surface);border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);padding:8px 16px;border-radius:8px;font-size:13px;z-index:9000;box-shadow:0 6px 16px rgba(0,0,0,.6);transition:opacity .2s;pointer-events:none';
         document.body.appendChild(el);
       }
       el.textContent = msg; el.style.opacity = '1';

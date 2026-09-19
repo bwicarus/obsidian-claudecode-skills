@@ -54,7 +54,7 @@ function _toast(msg) {
   if (!t) {
     t = document.createElement('div');
     t.id = 'hl-toast';
-    t.style.cssText = 'position:fixed;left:50%;bottom:30px;transform:translateX(-50%);background:var(--rc-bg-surface);border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);padding:9px 18px;border-radius:8px;font-size:13px;z-index:500;box-shadow:0 6px 16px rgba(0,0,0,.6);pointer-events:none';
+    t.style.cssText = 'position:fixed;left:50%;bottom:calc(30px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--rc-bg-surface);border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);padding:9px 18px;border-radius:8px;font-size:13px;z-index:500;box-shadow:0 6px 16px rgba(0,0,0,.6);pointer-events:none';
     document.body.appendChild(t);
   }
   t.textContent = msg;

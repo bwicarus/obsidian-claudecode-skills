@@ -58,7 +58,7 @@ if (window.__bwPwaProviderOnly) return;
   --rc-shadow-float:0 4px 14px rgba(0,0,0,.36);--rc-shadow-pop:0 12px 34px rgba(0,0,0,.46);--rc-shadow-panel:0 10px 28px rgba(0,0,0,.42);
   /* 动效：UIKit 那条平滑曲线（弹出/收起都用它，出场再快一点） */
   --rc-motion-fast:.2s;--rc-motion-normal:.35s;
-  --rc-ease:cubic-bezier(.32,.72,0,1);--rc-ease-out:cubic-bezier(.16,1,.3,1);
+  --rc-ease:cubic-bezier(.32,.72,0,1);--rc-ease-out:cubic-bezier(.16,1,.3,1);--rc-ease-spring:cubic-bezier(.34,1.46,.64,1);
   /* HIG 的 44pt 最小命中区 */
   --rc-hit:44px;
 }
