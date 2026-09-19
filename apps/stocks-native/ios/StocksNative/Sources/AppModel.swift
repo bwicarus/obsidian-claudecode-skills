@@ -279,13 +279,15 @@ final class AppModel: ObservableObject {
         if detail?.stock.code != code {
             detail = nil
             liveStock = nil
-            intraday = nil
-            kline = nil
+            if intraday?.code != code { intraday = nil }
+            if kline?.code != code { kline = nil }
             if let cached = await cache.value(StockResponse.self, for: "detail-\(code)", maxAge: 7 * 24 * 3600) {
+                guard current == detailGeneration, selectedCode == code, !Task.isCancelled else { return }
                 detail = cached
                 liveStock = cached.stock
             }
         }
+        guard current == detailGeneration, selectedCode == code, !Task.isCancelled else { return }
         isLoadingDetail = true
         detailError = nil
         do {
