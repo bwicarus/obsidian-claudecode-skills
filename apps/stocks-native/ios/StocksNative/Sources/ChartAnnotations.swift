@@ -78,6 +78,7 @@ struct CapabilityResult {
 @MainActor
 final class AnnotationStore: ObservableObject {
     @Published private var storage: [String: [ChartAnnotation]] = [:]
+    var onChange: ((String, String) -> Void)?
     private let fileURL: URL?
     private let maximumPerStock = 240
 
@@ -104,12 +105,28 @@ final class AnnotationStore: ObservableObject {
         storage[stockCode] ?? []
     }
 
+    func voiceContext(stockCode: String, editing: Bool, tool: AnnotationTool) -> VoiceAnnotationContext {
+        let values = annotations(for: stockCode)
+        let structured = values.filter { $0.kind != .pen }
+        let items = structured.suffix(3).map {
+            VoiceAnnotationItem(id: $0.id.uuidString, kind: $0.kind.rawValue,
+                                text: $0.text.map { String($0.prefix(80)) }, color: $0.color,
+                                start: $0.points.first, end: $0.kind == .note ? nil : $0.points.last)
+        }
+        return VoiceAnnotationContext(stockCode: stockCode, surfaceID: "chart-overlay",
+                                      editing: editing, tool: tool.rawValue,
+                                      structuredCount: structured.count,
+                                      freehandStrokeCount: values.count - structured.count,
+                                      selectionSupported: false, items: items)
+    }
+
     func add(_ annotation: ChartAnnotation, to stockCode: String) {
         var values = storage[stockCode] ?? []
         values.append(annotation)
         if values.count > maximumPerStock { values.removeFirst(values.count - maximumPerStock) }
         storage[stockCode] = values
         save()
+        onChange?(stockCode, "添加\(annotation.kind == .pen ? "笔迹" : "标注")")
     }
 
     @discardableResult
@@ -118,6 +135,7 @@ final class AnnotationStore: ObservableObject {
         values.removeLast()
         storage[stockCode] = values
         save()
+        onChange?(stockCode, "撤销标注")
         return true
     }
 
@@ -126,6 +144,7 @@ final class AnnotationStore: ObservableObject {
         guard !(storage[stockCode] ?? []).isEmpty else { return false }
         storage[stockCode] = []
         save()
+        onChange?(stockCode, "清除标注")
         return true
     }
 
@@ -148,6 +167,7 @@ final class AnnotationStore: ObservableObject {
         values.remove(at: bestIndex)
         storage[stockCode] = values
         save()
+        onChange?(stockCode, "擦除标注")
         return true
     }
 

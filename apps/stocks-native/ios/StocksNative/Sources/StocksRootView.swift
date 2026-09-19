@@ -28,8 +28,7 @@ struct StocksRootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var showingSettings = false
     @State private var showingCompactInspector = false
-    @State private var inspectorMode: WorkspaceInspectorMode = .orderBook
-    @State private var showingWideInspector = true
+    @State private var showingWideInspector = false
     @State private var detailWidth: CGFloat = 0
 
     var body: some View {
@@ -56,9 +55,8 @@ struct StocksRootView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if showsInspector {
                         Divider()
-                        StockWorkspaceInspector(
+                        StockAssistantInspector(
                             model: model,
-                            mode: $inspectorMode,
                             onClose: { withAnimation(.easeInOut(duration: 0.2)) { showingWideInspector = false } }
                         )
                         .frame(width: min(max(geometry.size.width * 0.29, 310), 360))
@@ -73,20 +71,25 @@ struct StocksRootView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    inspectorMenu
+                    assistantToggle
                 }
             }
         }
         .tint(AppStyle.accent)
         .sheet(isPresented: $showingSettings) { PairingView(model: model) }
         .sheet(isPresented: $showingCompactInspector) {
-            StockWorkspaceInspector(
+            StockAssistantInspector(
                 model: model,
-                mode: $inspectorMode,
                 onClose: { showingCompactInspector = false }
             )
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
+        }
+        .task(id: inspectorContextID) {
+            await model.updateInspectorContext(visible: contextInspectorIsVisible,
+                                               mode: "assistant",
+                                               presentation: showingCompactInspector ? "sheet" : "sidebar",
+                                               settingsPresented: showingSettings)
         }
         .task {
             await model.maintainCache()
@@ -108,8 +111,8 @@ struct StocksRootView: View {
             await model.loadDetail()
         }
         .task(id: "\(model.selectedCode ?? ""):\(model.chartPeriod.rawValue)") {
-            await model.loadChart()
             await model.publishVoiceContext(action: "切换图表：\(model.chartPeriod.title)")
+            await model.loadChart()
         }
         .task(id: scenePhase) {
             guard scenePhase == .active, model.isPaired else { return }
@@ -124,36 +127,34 @@ struct StocksRootView: View {
         }
     }
 
-    private var inspectorMenu: some View {
-        Menu {
-            ForEach(WorkspaceInspectorMode.allCases) { mode in
-                Button {
-                    openInspector(mode)
-                } label: {
-                    Label(mode.title, systemImage: mode.symbol)
-                }
-            }
-            if showingWideInspector && sizeClass == .regular && detailWidth >= 900 {
-                Divider()
-                Button("隐藏检查器", systemImage: "sidebar.trailing") {
-                    withAnimation(.easeInOut(duration: 0.2)) { showingWideInspector = false }
-                }
-            }
-        } label: {
-            Image(systemName: showingWideInspector ? inspectorMode.symbol : "sidebar.trailing")
-        }
-        .accessibilityLabel("打开行情检查器")
+    private var contextInspectorIsVisible: Bool {
+        !showingSettings && (showingCompactInspector
+            || (sizeClass == .regular && detailWidth >= 900 && showingWideInspector))
     }
 
-    private func openInspector(_ mode: WorkspaceInspectorMode) {
-        if sizeClass == .regular && detailWidth >= 900 {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                inspectorMode = mode
+    private var inspectorContextID: String {
+        "\(contextInspectorIsVisible):\(showingCompactInspector):\(showingSettings)"
+    }
+
+    private var assistantToggle: some View {
+        Button(action: toggleAssistant) {
+            Label("AI", systemImage: contextInspectorIsVisible ? "bubble.left.and.bubble.right.fill" : "bubble.left.and.bubble.right")
+        }
+        .accessibilityLabel(contextInspectorIsVisible ? "关闭 AI 侧栏" : "打开 AI 侧栏")
+    }
+
+    private func toggleAssistant() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            if contextInspectorIsVisible {
+                showingWideInspector = false
+                showingCompactInspector = false
+            } else if sizeClass == .regular && detailWidth >= 900 {
+                showingCompactInspector = false
                 showingWideInspector = true
+            } else {
+                showingWideInspector = false
+                showingCompactInspector = true
             }
-        } else {
-            inspectorMode = mode
-            showingCompactInspector = true
         }
     }
 

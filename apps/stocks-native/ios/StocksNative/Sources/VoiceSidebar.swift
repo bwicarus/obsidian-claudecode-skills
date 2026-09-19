@@ -3,6 +3,7 @@ import SwiftUI
 struct VoiceSidebar: View {
     @ObservedObject var voice: VoiceSession
     @ObservedObject var model: AppModel
+    var onClose: (() -> Void)? = nil
     @State private var draft = ""
     @State private var sendingText = false
 
@@ -13,6 +14,13 @@ struct VoiceSidebar: View {
                     Image(systemName: "waveform").font(.title3).foregroundStyle(AppStyle.accent)
                     Text("股票助手").font(.headline)
                     Spacer()
+                    if let onClose {
+                        Button(action: onClose) {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("关闭 AI 侧栏")
+                    }
                 }
                 HStack(spacing: 7) {
                     Circle().fill(voice.isConnected ? AppStyle.accent : Color.secondary.opacity(0.5)).frame(width: 6, height: 6)

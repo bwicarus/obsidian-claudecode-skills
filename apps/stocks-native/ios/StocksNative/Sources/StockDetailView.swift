@@ -39,17 +39,20 @@ struct StockDetailView: View {
         }
         .background(AppStyle.canvas)
         .onChange(of: model.selectedCode) { _, _ in selectedTab = .chart }
+        .onAppear { model.selectDetailTab(selectedTab.rawValue) }
     }
 
     @ViewBuilder
     private func workspaceContent(detail: StockResponse) -> some View {
         switch selectedTab {
         case .chart:
-            ScrollView {
-                MarketChartSection(model: model, stockCode: detail.stock.code)
-                    .padding(.horizontal, 22).padding(.vertical, 18)
+            GeometryReader { geometry in
+                ScrollView {
+                    StockMarketWorkspace(model: model, detail: detail, availableWidth: geometry.size.width - 36)
+                        .padding(18)
+                }
+                .refreshable { await refreshDetail() }
             }
-            .refreshable { await refreshDetail() }
         case .research:
             ScrollView {
                 StockAnalyticsSections(model: model, detail: detail)
@@ -135,6 +138,7 @@ struct StockDetailView: View {
         HStack(spacing: 6) {
             ForEach(StockWorkspaceTab.allCases) { tab in
                 Button {
+                    model.selectDetailTab(tab.rawValue)
                     withAnimation(.easeInOut(duration: 0.16)) { selectedTab = tab }
                 } label: {
                     Label(tab.title, systemImage: tab.symbol)
@@ -186,9 +190,7 @@ private struct IndexedCandle: Identifiable {
     var left: Double { x - 0.31 }
     var right: Double { x + 0.31 }
     var bodyBottom: Double { min(candle.open, candle.close) }
-    var bodyTop: Double {
-        max(candle.open, candle.close) + (candle.open == candle.close ? 0.005 : 0)
-    }
+    var bodyTop: Double { max(candle.open, candle.close) }
     var color: Color { AppStyle.movement(candle.close - candle.open) }
 }
 
@@ -200,20 +202,30 @@ private struct CandlePriceMarks: ChartContent {
                  yEnd: .value("最高", item.candle.high))
             .foregroundStyle(item.color)
             .lineStyle(StrokeStyle(lineWidth: 1))
-        RectangleMark(xStart: .value("开始", item.left),
-                      xEnd: .value("结束", item.right),
-                      yStart: .value("开盘", item.bodyBottom),
-                      yEnd: .value("收盘", item.bodyTop))
-            .foregroundStyle(item.color)
+        if item.candle.open == item.candle.close {
+            RuleMark(xStart: .value("开始", item.left), xEnd: .value("结束", item.right),
+                     y: .value("开收盘", item.candle.close))
+                .foregroundStyle(item.color)
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+        } else {
+            RectangleMark(xStart: .value("开始", item.left),
+                          xEnd: .value("结束", item.right),
+                          yStart: .value("开盘", item.bodyBottom),
+                          yEnd: .value("收盘", item.bodyTop))
+                .foregroundStyle(item.color)
+        }
     }
 }
 
 struct CandleChart: View {
     let candles: [Candle]
     let stockCode: String
+    let period: ChartPeriod
     @ObservedObject var annotations: AnnotationStore
+    let onContextChange: (VoiceChartSnapshot) async -> Void
+    let onRangeChange: (Int) async -> Void
     @State private var visibleCount = 60
-    @State private var selectedX: Double?
+    @State private var selectedTime: String?
     @State private var annotationMode = false
     @State private var annotationTool: AnnotationTool = .pen
     @State private var annotationColor = "accent"
@@ -229,13 +241,40 @@ struct CandleChart: View {
         return (minimum - padding)...(maximum + padding)
     }
     private var inspected: IndexedCandle? {
-        guard !visible.isEmpty else { return nil }
-        let index = selectedX.map { min(max(Int($0.rounded()), 0), visible.count - 1) } ?? visible.count - 1
-        return visible[index]
+        selectedCandle ?? visible.last
+    }
+    private var selectedCandle: IndexedCandle? {
+        guard let selectedTime else { return nil }
+        return visible.first { $0.candle.time == selectedTime }
+    }
+    private var selection: Binding<Double?> {
+        Binding(get: { selectedCandle?.x }, set: { value in
+            guard let value, value.isFinite, !visible.isEmpty else { selectedTime = nil; return }
+            let index = Int(min(max(value.rounded(), 0), Double(visible.count - 1)))
+            selectedTime = visible[index].candle.time
+        })
+    }
+    private var xDomain: ClosedRange<Double> {
+        -0.6...max(0.6, Double(visible.count) - 0.4)
     }
     private var tickPositions: [Double] {
         guard visible.count > 1 else { return [0] }
         return [0, Double((visible.count - 1) / 2), Double(visible.count - 1)]
+    }
+
+    private var voiceContextSnapshot: VoiceChartSnapshot {
+        let point = inspected.map {
+            VoiceChartPoint(time: $0.candle.time, open: $0.candle.open, high: $0.candle.high,
+                            low: $0.candle.low, close: $0.candle.close, volume: $0.candle.volume)
+        }
+        let chart = VoiceChartContext(stockCode: stockCode, period: period.rawValue, kind: "candles",
+                                      firstVisibleTime: visible.first?.candle.time,
+                                      lastVisibleTime: visible.last?.candle.time,
+                                      visiblePointCount: visible.count, selectedPoint: point,
+                                      selectionSource: selectedCandle == nil ? "latest" : "cursor")
+        return VoiceChartSnapshot(chart: chart,
+                                  annotations: annotations.voiceContext(stockCode: stockCode,
+                                                                        editing: annotationMode, tool: annotationTool))
     }
 
     var body: some View {
@@ -267,19 +306,24 @@ struct CandleChart: View {
                         ForEach(visible) { item in
                             CandlePriceMarks(item: item)
                         }
-                        if let selectedX {
-                            RuleMark(x: .value("选中", selectedX.rounded()))
+                        if let selectedCandle {
+                            RuleMark(x: .value("选中", selectedCandle.x))
                                 .foregroundStyle(AppStyle.ink.opacity(0.25))
                                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 4]))
                         }
                     }
-                    .chartXScale(domain: -1...Double(visible.count))
+                    .chartXScale(domain: xDomain, range: .plotDimension(padding: 0))
                     .chartYScale(domain: priceDomain)
-                    .chartXSelection(value: $selectedX)
+                    .chartXSelection(value: selection)
                     .chartYAxis {
-                        AxisMarks(position: .trailing, values: .automatic(desiredCount: 5)) {
+                        AxisMarks(position: .trailing, values: .automatic(desiredCount: 5)) { value in
                             AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(Color.gray.opacity(0.13))
-                            AxisValueLabel().foregroundStyle(.secondary)
+                            AxisValueLabel {
+                                if let number = value.as(Double.self) {
+                                    Text(AppStyle.price(number)).font(.caption2).monospacedDigit()
+                                        .frame(width: 52, alignment: .trailing)
+                                }
+                            }
                         }
                     }
                     .chartXAxis {
@@ -313,13 +357,15 @@ struct CandleChart: View {
                             .foregroundStyle(AppStyle.movement(item.candle.close - item.candle.open).opacity(0.55))
                     }
                 }
-                .chartXScale(domain: -1...Double(visible.count))
+                .chartXScale(domain: xDomain, range: .plotDimension(padding: 0))
                 .chartXAxis(.hidden)
                 .chartYAxis {
                     AxisMarks(position: .trailing, values: .automatic(desiredCount: 2)) { axisValue in
                         AxisValueLabel {
                             if let value = axisValue.as(Double.self) {
                                 Text(value.formatted(.number.notation(.compactName)))
+                                    .font(.caption2).monospacedDigit()
+                                    .frame(width: 52, alignment: .trailing)
                             }
                         }
                     }
@@ -331,9 +377,15 @@ struct CandleChart: View {
         }
         .padding(22)
         .background(.white, in: RoundedRectangle(cornerRadius: 22))
-        .onChange(of: visibleCount) { _, _ in selectedX = nil }
-        .onChange(of: candles.first?.time) { _, _ in selectedX = nil }
-        .onChange(of: stockCode) { _, _ in annotationMode = false; selectedX = nil }
+        .task(id: voiceContextSnapshot) { await onContextChange(voiceContextSnapshot) }
+        .onChange(of: visibleCount) { _, count in
+            selectedTime = nil
+            Task { await onRangeChange(count) }
+        }
+        .onChange(of: visible.map(\.candle.time)) { _, times in
+            if let selectedTime, !times.contains(selectedTime) { self.selectedTime = nil }
+        }
+        .onChange(of: stockCode) { _, _ in annotationMode = false; selectedTime = nil }
         .confirmationDialog("清除此股票的全部标注？", isPresented: $confirmingClear, titleVisibility: .visible) {
             Button("清除全部", role: .destructive) { _ = annotations.clear(stockCode: stockCode) }
             Button("取消", role: .cancel) { }

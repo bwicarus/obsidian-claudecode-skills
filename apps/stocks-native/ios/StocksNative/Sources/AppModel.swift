@@ -8,14 +8,23 @@ final class AppModel: ObservableObject {
     @Published private(set) var isPaired: Bool
     @Published private(set) var isAIEnabled: Bool
     @Published var query = ""
-    @Published var selectedCode: String?
+    @Published var selectedCode: String? {
+        didSet {
+            if selectedCode != oldValue {
+                voiceViewState.detailTab = "chart"
+                latestChartSnapshot = nil
+            }
+        }
+    }
     @Published private(set) var stocks: [Stock] = []
     @Published private(set) var detail: StockResponse?
     @Published private(set) var liveStock: Stock?
     @Published private(set) var overview: MarketOverview?
     @Published private(set) var intraday: IntradayResponse?
     @Published private(set) var kline: KLineResponse?
-    @Published var chartPeriod: ChartPeriod = .intraday
+    @Published var chartPeriod: ChartPeriod = .intraday {
+        didSet { if chartPeriod != oldValue { latestChartSnapshot = nil } }
+    }
     @Published private(set) var listAsOf: String?
     @Published private(set) var isLoadingList = false
     @Published private(set) var isLoadingDetail = false
@@ -31,6 +40,9 @@ final class AppModel: ObservableObject {
     private var chartGeneration = UUID()
     private let cache = MarketCache.shared
     private var recentVoiceActions: [VoiceUIAction] = []
+    private var voiceActionExpiryTask: Task<Void, Never>?
+    private var voiceViewState = VoiceViewState()
+    private var latestChartSnapshot: VoiceChartSnapshot?
 
     init() {
         let initialBase = UserDefaults.standard.string(forKey: "stocksNative.baseURL") ?? "https://bwicarus.space/stocks-native"
@@ -44,9 +56,14 @@ final class AppModel: ObservableObject {
         voice.onStockSelected = { [weak self] code in self?.selectedCode = code }
         voice.onCapabilityAction = { [weak self] action in
             guard let self else { return CapabilityResult(success: false, message: "App 状态不可用。") }
-            let result = self.annotations.perform(action, selectedStockCode: self.selectedCode)
-            Task { await self.publishVoiceContext(action: "图表标注：\(action.operation)") }
-            return result
+            return self.annotations.perform(action, selectedStockCode: self.selectedCode)
+        }
+        annotations.onChange = { [weak self] code, operation in
+            guard let self, code == self.selectedCode else { return }
+            Task {
+                guard code == self.selectedCode else { return }
+                await self.publishVoiceContext(action: "图表标注：\(operation)", kind: "annotation")
+            }
         }
     }
 
@@ -303,10 +320,55 @@ final class AppModel: ObservableObject {
         await cache.clean()
     }
 
-    func publishVoiceContext(action: String? = nil) async {
+    func selectDetailTab(_ tab: String) {
+        guard voiceViewState.detailTab != tab else { return }
+        voiceViewState.detailTab = tab
+        latestChartSnapshot = nil
+        let title = ["chart": "走势", "research": "研究", "announcements": "公告"][tab] ?? tab
+        Task { await publishVoiceContext(action: "切换面板：\(title)", kind: "panel") }
+    }
+
+    func updateInspectorContext(visible: Bool, mode: String, presentation: String, settingsPresented: Bool) async {
+        var next = voiceViewState
+        next.inspectorVisible = visible
+        next.inspectorMode = visible ? mode : nil
+        next.inspectorPresentation = visible ? presentation : "hidden"
+        next.settingsPresented = settingsPresented
+        guard next != voiceViewState else { return }
+        let inspectorChanged = next.inspectorVisible != voiceViewState.inspectorVisible
+            || next.inspectorMode != voiceViewState.inspectorMode
+        voiceViewState = next
+        let title = ["orderBook": "盘口", "analysis": "分析", "assistant": "AI"][mode] ?? mode
+        let action = inspectorChanged ? (visible ? "打开侧栏：\(title)" : "关闭侧栏") : nil
+        await publishVoiceContext(action: action, kind: "panel")
+    }
+
+    func updateChartContext(_ snapshot: VoiceChartSnapshot) async {
+        guard voiceViewState.detailTab == "chart", snapshot.chart.stockCode == selectedCode,
+              snapshot.chart.period == chartPeriod.rawValue, snapshot != latestChartSnapshot else { return }
+        let previous = latestChartSnapshot
+        latestChartSnapshot = snapshot
+        if snapshot.chart.selectionSource == "cursor",
+           (snapshot.chart.selectedPoint?.time != previous?.chart.selectedPoint?.time
+            || previous?.chart.selectionSource != "cursor"),
+           let point = snapshot.chart.selectedPoint {
+            await publishVoiceContext(action: "查看图表：\(point.time)", kind: "chart_selection")
+        } else {
+            await publishVoiceContext()
+        }
+    }
+
+    func publishVoiceContext(action: String? = nil, kind: String? = nil) async {
+        let now = Date()
+        let formatter = ISO8601DateFormatter()
+        recentVoiceActions.removeAll {
+            guard let occurred = formatter.date(from: $0.occurredAtUtc) else { return true }
+            return now.timeIntervalSince(occurred) >= 30 || $0.stockCode != selectedCode
+                || (isChartAction($0.kind) && $0.chartPeriod != chartPeriod.rawValue)
+        }
         if let action, !action.isEmpty {
             let next = VoiceUIAction(id: UUID().uuidString,
-                                     kind: voiceActionKind(action),
+                                     kind: kind ?? voiceActionKind(action),
                                      label: String(action.prefix(120)),
                                      occurredAtUtc: Date().ISO8601Format(),
                                      stockCode: selectedCode,
@@ -320,6 +382,7 @@ final class AppModel: ObservableObject {
             }
             recentVoiceActions = Array(recentVoiceActions.suffix(3))
         }
+        scheduleVoiceActionExpiry(now: now, formatter: formatter)
         let stock = displayedStock
         let activeDetail = displayedDetail
         let activeIntraday = displayedIntraday
@@ -333,28 +396,71 @@ final class AppModel: ObservableObject {
         if let value = stock?.turnoverRate { metrics["turnoverRate"] = String(format: "%.3f%%", value) }
         if let value = activeDetail?.technical?.metrics.macdHist { metrics["macdHist"] = String(format: "%.4f", value) }
         if let value = activeDetail?.fund?.metrics.latestMainInflow { metrics["mainInflow"] = String(format: "%.0f", value) }
-        var panels = [chartPeriod.title, "行情指标"]
-        if activeDetail?.technical != nil { panels.append("技术指标") }
-        if activeDetail?.fund != nil { panels.append("资金动向") }
-        if activeDetail?.chips != nil { panels.append("筹码分布") }
-        if !(activeDetail?.peers ?? []).isEmpty { panels.append("同业对比") }
-        if !(activeDetail?.announcements ?? []).isEmpty { panels.append("公司公告") }
-        let latestTime = chartPeriod == .intraday ? activeIntraday?.rows.last?.time : displayedCandles.last?.time
-        let scopedActions = recentVoiceActions.filter { $0.stockCode == selectedCode }
-        let context = VoiceUIContext(screen: selectedCode == nil ? "market_overview" : "stock_detail",
+        var panels: [String] = []
+        if voiceViewState.settingsPresented {
+            panels = ["连接设置"]
+        } else {
+            if activeDetail != nil {
+                panels = ["行情指标"]
+                panels.append(["chart": "走势", "research": "研究", "announcements": "公司公告"][voiceViewState.detailTab] ?? voiceViewState.detailTab)
+                if voiceViewState.detailTab == "chart" {
+                    panels.append("盘口")
+                    if activeDetail?.technical != nil { panels.append("技术指标") }
+                    if activeDetail?.fund != nil { panels.append("资金动向") }
+                }
+            }
+            if voiceViewState.inspectorVisible, let mode = voiceViewState.inspectorMode {
+                panels.append(["orderBook": "盘口", "analysis": "分析摘要", "assistant": "AI 对话"][mode] ?? mode)
+            }
+        }
+        let snapshot = voiceViewState.detailTab == "chart" && !voiceViewState.settingsPresented
+            && latestChartSnapshot?.chart.stockCode == selectedCode
+            && latestChartSnapshot?.chart.period == chartPeriod.rawValue ? latestChartSnapshot : nil
+        let latestTime = snapshot?.chart.lastVisibleTime
+            ?? (chartPeriod == .intraday ? nil : displayedCandles.last?.time)
+        let annotationContext = snapshot.map {
+            annotations.voiceContext(stockCode: $0.chart.stockCode, editing: $0.annotations.editing,
+                                     tool: AnnotationTool(rawValue: $0.annotations.tool) ?? .pen)
+        }
+        let orderBook = voiceViewState.detailTab == "chart" && activeDetail != nil
+            && !voiceViewState.settingsPresented && stock != nil
+            ? VoiceOrderBookContext(bids: Array((stock?.bids ?? []).prefix(5)), asks: Array((stock?.asks ?? []).prefix(5))) : nil
+        let quoteDate = stock?.quoteTime.map { String($0.prefix(10)) }
+            ?? (activeIntraday?.tradeDate.isEmpty == false ? activeIntraday?.tradeDate : activeDetail?.asOf)
+        let context = VoiceUIContext(screen: voiceViewState.settingsPresented ? "settings" : (selectedCode == nil ? "market_overview" : "stock_detail"),
                                      selectedCode: selectedCode, selectedName: stock?.name,
-                                     quoteAsOf: activeIntraday?.tradeDate.isEmpty == false ? activeIntraday?.tradeDate : activeDetail?.asOf,
+                                     quoteAsOf: quoteDate, quoteTime: stock?.quoteTime, quoteSource: stock?.quoteSource,
                                      observedAtUtc: Date().ISO8601Format(),
                                      chartPeriod: chartPeriod.title, latestPointTime: latestTime,
                                      metrics: metrics, visiblePanels: panels,
-                                     recentActions: scopedActions)
+                                     recentActions: recentVoiceActions,
+                                     chartPeriodID: chartPeriod.rawValue,
+                                     viewState: voiceViewState, chart: snapshot?.chart,
+                                     annotations: annotationContext, orderBook: orderBook)
         await voice.updateContext(context)
+    }
+
+    private func scheduleVoiceActionExpiry(now: Date, formatter: ISO8601DateFormatter) {
+        voiceActionExpiryTask?.cancel()
+        voiceActionExpiryTask = nil
+        guard let first = recentVoiceActions.first,
+              let occurred = formatter.date(from: first.occurredAtUtc) else { return }
+        let remaining = max(0.1, 30 - now.timeIntervalSince(occurred))
+        voiceActionExpiryTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
+            guard let self else { return }
+            await self.publishVoiceContext()
+        }
+    }
+
+    private func isChartAction(_ kind: String) -> Bool {
+        ["chart_period", "chart_selection", "chart_range", "annotation"].contains(kind)
     }
 
     private func voiceActionKind(_ action: String) -> String {
         if action.hasPrefix("搜索股票") { return "search" }
         if action.hasPrefix("图表标注") { return "annotation" }
-        if action.contains("周期") || action.contains("K线") { return "chart_period" }
+        if action.contains("周期") || action.contains("K线") || action.hasPrefix("切换图表") { return "chart_period" }
         if action.contains("面板") || action.contains("侧栏") { return "panel" }
         return "interaction"
     }

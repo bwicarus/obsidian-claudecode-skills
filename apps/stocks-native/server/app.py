@@ -152,7 +152,7 @@ async def kline(request):
 
 
 async def health(request):
-    return web.json_response({'status': 'ok', 'version': '0.2.2'})
+    return web.json_response({'status': 'ok', 'version': '0.2.0', 'contextProtocol': 2})
 
 
 async def voice(request):
@@ -211,7 +211,8 @@ async def voice(request):
                 await emit_json({'type': 'state', 'state': 'closed', 'reason': 'idle'})
     try:
         await ws.prepare(request)
-        session = VoiceSession(device_id, request.app['state'], request.app['data'], emit_json, emit_audio)
+        session = VoiceSession(device_id, request.app['state'], request.app['data'], emit_json, emit_audio,
+                               live_source=request.app['live'])
         active[device_id] = (ws, session)
         watch_task = asyncio.create_task(watch())
         async for msg in ws:

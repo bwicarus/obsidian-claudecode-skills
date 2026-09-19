@@ -49,15 +49,40 @@ Full finalized transcripts and tool receipts are persisted per device, and the
 Codex thread ID is resumed. Realtime startup currently loads only eight recent
 transcripts, with bounded text. This is durable storage, not a guarantee that
 every historical detail is automatically present in the model context.
-Ten minutes without conversational activity closes an idle voice session.
+The deployed service's `STOCKS_VOICE_IDLE_SECONDS` setting bounds idle calls
+(currently 20 minutes); closing the App socket tears down its voice process.
 
-The current 0.2.0 build track advertises `chart.annotation.v1` and `ui.context.v1` when opening
-voice. The client sends bounded, deduplicated context when the visible stock,
-quote, chart period, latest chart point, metrics, panels or key user actions
-change. The server appends the latest context as a developer message so current
-screen questions do not require a tool round trip. UI actions still use a
-request/receipt pair, so the assistant cannot claim a mark was added before the
-App applies it.
+The current 0.2.0 build track advertises `chart.annotation.v1` and `ui.context.v1`.
+App updates are merged for 350 ms and only replace the VPS's cached snapshot.
+They do not independently trigger model input. User speech pins the current UI
+target; delegation uses that same target. Context is split into independently
+acknowledged sections: voice receives the stock, actual tab/sidebar, quote,
+selected chart point and last key action; backend receives bounded visible-panel
+metrics, chart range, book and structured annotations. Actions expire after 30
+seconds and are scoped to the current stock/period. `visibilityScope=active_tab`
+does not imply per-card scroll visibility. Freehand stroke counts do not provide
+visual understanding of the drawing.
+
+Only changed sections are sent. Within the same stock/day/source, quote changes
+below 0.05 percent in price and 0.05 percentage points in changePct are held against
+the last successfully injected quote for at most 60 seconds (only evaluated when
+the user speaks). Crossing zero, changing stocks or an explicit live-data question
+bypasses the relevant filter. `STOCKS_CONTEXT_PRICE_PERCENT` and
+`STOCKS_CONTEXT_CHANGE_POINTS` configure these thresholds. Explicit live questions
+refresh only the requested quote/book/metric fragment through the shared 5-second
+quote cache; provider market time is preserved and unavailable refreshes are
+marked. This is not a guarantee of exchange-tick latency or realtime voice timing.
+
+Full technical/fund/chip history, announcements, peers and historical charts are
+tool-only. New threads expose `stocks_context` with selected sections; resumed
+threads keep their original tools/history and their current/detail queries use
+the same targeted reader when the question identifies a component. No extra model
+classifies each UI event. UI actions retain request/receipt verification before
+the assistant can claim a mark was applied.
+
+The native workspace has one quote strip, a main chart and adjacent five-level
+book, with compact MACD/KDJ/fund panels below. The upper-right toggle exclusively
+opens or closes the AI sidebar. Research and announcements stay in the main area.
 
 The App displays cached overview, list, detail and chart data immediately, then
 refreshes from the VPS. Intraday cache lives for 12 hours, overview/list for 24

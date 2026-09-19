@@ -1,5 +1,8 @@
 import tempfile
 import unittest
+import asyncio
+import json
+from unittest.mock import AsyncMock
 
 from voice import VoiceSession
 
@@ -135,6 +138,67 @@ class ContextInjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(pinned)
         self.assertEqual(self.calls, [])
         self.assertFalse(self.session.turn_state('turn-new-stock')['contextInjected'])
+
+    async def test_explicit_quote_query_bypasses_jitter_with_only_quote_patch(self):
+        await self.session.update_context(context(price='100.00'))
+        await self.session.inject_voice_context()
+        await self.session.update_context(context(price='100.01'))
+        pinned = self.session.pin_voice_turn_context()
+        await self.session.inject_voice_context(pinned)
+        self.assertEqual(len(self.calls), 1)
+
+        self.session.live_source = type('Live', (), {'quotes': AsyncMock(return_value={'000001': {
+            'code': '000001', 'price': 100.02, 'changePct': 1.20,
+            'quoteTime': '2026-09-19T15:00:00+08:00', 'quoteSource': 'tencent',
+        }})})()
+        await self.session.refresh_voice_question('现在多少钱', pinned)
+        text = self.calls[-1][1]['text']
+        payload = json.loads(text[text.index('{'):])
+        self.assertEqual(set(payload['sections']), {'quote', 'requested'})
+        self.assertEqual(payload['sections']['quote']['metrics']['price'], '100.02')
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(pinned[0]['chartPeriod'], '分时')
+
+    async def test_invalid_quote_never_supplies_another_stocks_book(self):
+        await self.session.update_context(context())
+        pinned = self.session.pin_voice_turn_context()
+        self.session.live_source = type('Live', (), {'quotes': AsyncMock(return_value={'000001': {
+            'code': '600000', 'price': 999, 'bids': [{'price': 999, 'volume': 5}],
+            'quoteTime': '2026-09-19T15:00:00+08:00',
+        }})})()
+        await self.session.update_context({**context(), 'selectedCode': '600000',
+                                           'orderBook': {'bids': [{'price': 888}]}})
+        refreshed = await self.session.refresh_question_context('现在买一多少', pinned)
+        result = refreshed[0]['requestedData']
+        self.assertEqual(result['refreshStatus'], 'unavailable')
+        self.assertEqual(result['orderBook'], {})
+        self.assertNotIn('999', json.dumps(refreshed[0]))
+        self.assertNotIn('888', json.dumps(refreshed[0]))
+
+    async def test_failed_voice_injection_preserves_acknowledged_baseline_and_retries(self):
+        await self.session.update_context(context(price='100.00'))
+        await self.session.inject_voice_context()
+        old = self.session.context_ledgers['voice']['quote']['value']
+        await self.session.update_context(context(price='101.00'))
+        self.session.call = AsyncMock(side_effect=RuntimeError('failed'))
+        await self.session.inject_voice_context()
+        self.assertEqual(self.session.context_ledgers['voice']['quote']['value'], old)
+        self.session.call = AsyncMock(return_value={})
+        await self.session.inject_voice_context()
+        self.session.call.assert_awaited_once()
+        self.assertEqual(self.session.context_ledgers['voice']['quote']['value']['metrics']['price'], '101.00')
+
+    async def test_no_snapshot_does_not_inject_later_unrelated_context(self):
+        pinned = self.session.pin_voice_turn_context()
+        await self.session.update_context(context())
+        await self.session.inject_voice_context(pinned)
+        self.assertEqual(self.calls, [])
+
+    async def test_duplicate_voice_injections_are_serialized(self):
+        await self.session.update_context(context())
+        pinned = self.session.pin_voice_turn_context()
+        await asyncio.gather(self.session.inject_voice_context(pinned), self.session.inject_voice_context(pinned))
+        self.assertEqual(len(self.calls), 1)
 
 
 if __name__ == '__main__':

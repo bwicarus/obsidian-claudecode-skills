@@ -8,6 +8,7 @@ source of truth for durable daily data.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone, timedelta
 import math
 import time
 from typing import Any
@@ -39,6 +40,11 @@ def parse_quote_payload(payload: bytes) -> dict[str, dict[str, Any]]:
         if len(parts) < 50 or len(parts[2]) != 6:
             continue
         code = parts[2]
+        try:
+            quote_time = datetime.strptime(parts[30], '%Y%m%d%H%M%S').replace(
+                tzinfo=timezone(timedelta(hours=8))).isoformat()
+        except ValueError:
+            quote_time = None
         amount = _number(parts[37])
         float_cap = _number(parts[44])
         market_cap = _number(parts[45])
@@ -48,6 +54,7 @@ def parse_quote_payload(payload: bytes) -> dict[str, dict[str, Any]]:
                 for index in range(5)]
         output[code] = {
             "code": code, "name": parts[1], "price": _number(parts[3]),
+            "quoteTime": quote_time, "quoteSource": "tencent",
             "prevClose": _number(parts[4]), "open": _number(parts[5]),
             "volume": _number(parts[6]), "outerVolume": _number(parts[7]),
             "innerVolume": _number(parts[8]), "changeAmount": _number(parts[31]),

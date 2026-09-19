@@ -35,6 +35,8 @@ struct Stock: Codable, Identifiable, Hashable {
     let bids: [OrderLevel]?
     let asks: [OrderLevel]?
     let sector: String?
+    let quoteTime: String?
+    let quoteSource: String?
     var id: String { code }
 }
 
@@ -281,12 +283,80 @@ struct VoiceUIContext: Codable {
     let selectedCode: String?
     let selectedName: String?
     let quoteAsOf: String?
+    let quoteTime: String?
+    let quoteSource: String?
     let observedAtUtc: String
     let chartPeriod: String
     let latestPointTime: String?
     let metrics: [String: String]
     let visiblePanels: [String]
     let recentActions: [VoiceUIAction]
+    let chartPeriodID: String?
+    let viewState: VoiceViewState?
+    let chart: VoiceChartContext?
+    let annotations: VoiceAnnotationContext?
+    let orderBook: VoiceOrderBookContext?
+}
+
+struct VoiceViewState: Codable, Hashable {
+    var detailTab = "chart"
+    var inspectorVisible = false
+    var inspectorMode: String?
+    var inspectorPresentation = "hidden"
+    var settingsPresented = false
+    // This describes the active tab, not individual cards hidden below its scroll viewport.
+    var visibilityScope = "active_tab"
+}
+
+struct VoiceChartPoint: Codable, Hashable {
+    let time: String
+    var open: Double? = nil
+    var high: Double? = nil
+    var low: Double? = nil
+    var close: Double? = nil
+    var price: Double? = nil
+    var volume: Double? = nil
+}
+
+struct VoiceChartContext: Codable, Hashable {
+    let stockCode: String
+    let period: String
+    let kind: String
+    let firstVisibleTime: String?
+    let lastVisibleTime: String?
+    let visiblePointCount: Int
+    let selectedPoint: VoiceChartPoint?
+    let selectionSource: String
+}
+
+struct VoiceAnnotationItem: Codable, Hashable {
+    let id: String
+    let kind: String
+    let text: String?
+    let color: String
+    let start: AnnotationPoint?
+    let end: AnnotationPoint?
+}
+
+struct VoiceAnnotationContext: Codable, Hashable {
+    let stockCode: String
+    let surfaceID: String
+    let editing: Bool
+    let tool: String
+    let structuredCount: Int
+    let freehandStrokeCount: Int
+    let selectionSupported: Bool
+    let items: [VoiceAnnotationItem]
+}
+
+struct VoiceChartSnapshot: Hashable {
+    let chart: VoiceChartContext
+    let annotations: VoiceAnnotationContext
+}
+
+struct VoiceOrderBookContext: Codable {
+    let bids: [OrderLevel]
+    let asks: [OrderLevel]
 }
 
 struct PairResponse: Decodable {
