@@ -447,6 +447,8 @@ final class AppModel: ObservableObject {
     func maintainCache() async { await cache.clean() }
 
     func selectWorkspacePage(_ id: String) {
+        guard workspace.layout.selectedPage?.id != id,
+              workspace.layout.pages.contains(where: { $0.id == id }) else { return }
         do {
             try workspace.selectPage(id)
             latestChartSnapshot = nil
@@ -555,7 +557,8 @@ final class AppModel: ObservableObject {
         if let value = stock?.turnover { metrics["turnover"] = String(format: "%.0f", value) }
         if let value = stock?.turnoverRate { metrics["turnoverRate"] = String(format: "%.3f%%", value) }
         if kinds.contains(.macd) {
-            let points = NativeChartIndicators.series(candles: displayedKlineCandles, panel: activeDetail?.technical)
+            let points = NativeChartIndicators.series(candles: displayedKlineCandles,
+                panel: klinePeriod == .day ? activeDetail?.technical : nil)
             let visible = NativeChartIndicators.visible(points, context: chartSnapshotForKline)
             if let value = NativeChartIndicators.inspected(visible, context: chartSnapshotForKline)?.histogram {
                 metrics["macdHist"] = String(format: "%.4f", value)
