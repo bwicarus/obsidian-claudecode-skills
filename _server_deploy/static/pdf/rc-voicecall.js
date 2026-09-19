@@ -717,9 +717,11 @@
         'box-shadow:0 14px 44px -8px rgba(255,69,58,.85),0 0 0 2px rgba(255,255,255,.35) inset;transform:scale(1.06)}' +
       '#vc-trash svg{width:22px;height:22px;transition:transform .2s}' +
       '#vc-trash.hot svg{transform:scale(1.16) rotate(-8deg)}' +
-      '#vc-dock-panel{position:fixed;left:0;right:0;bottom:0;z-index:2147481430;max-height:46vh;display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom,0px);' +
+      '#vc-dock-panel{position:fixed;left:0;right:0;bottom:0;z-index:2147481430;max-height:46vh;display:flex;flex-direction:column;' +
       'background:rgba(24,24,30,.82);-webkit-backdrop-filter:blur(26px) saturate(1.5);backdrop-filter:blur(26px) saturate(1.5);' +
-      'border-top:0.5px solid rgba(255,255,255,.14);box-shadow:0 -14px 44px rgba(0,0,0,.45);padding-bottom:env(safe-area-inset-bottom,0px)}' +
+      'border-top:0.5px solid rgba(255,255,255,.14);border-radius:14px 14px 0 0;box-shadow:0 -14px 44px rgba(0,0,0,.45);padding-bottom:env(safe-area-inset-bottom,0px)}' +
+      // iOS sheet 顶上那条抓手（grabber）。面板是 flex 列，伪元素自然排成第一行。
+      '#vc-dock-panel::before{content:"";flex:none;width:36px;height:5px;border-radius:3px;background:rgba(235,235,245,.30);margin:6px auto 2px}' +
       '.vc-dkp-hd{display:flex;align-items:center;gap:8px;padding:9px 14px 4px;flex:none}' +
       '.vc-dkp-t{font-size:12px;color:#9fb0cf;flex:1}' +
       '.vc-dkp-b{border:1px solid #35446b;background:rgba(255,255,255,.05);color:var(--rc-text-muted);border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}' +

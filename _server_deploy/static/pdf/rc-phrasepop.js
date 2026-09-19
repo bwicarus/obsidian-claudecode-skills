@@ -286,7 +286,9 @@
     if (document.getElementById('rc-wordpop-css') || document.getElementById('rc-phrasepop-css')) { _cssInjected = true; if (document.getElementById('rc-phrasepop-css')) return; }
     var css = document.createElement('style'); css.id = 'rc-phrasepop-css';
     css.textContent = [
-      '#word-pop{position:fixed;display:none;background:var(--rc-bg-surface);border:1px solid var(--rc-border-accent);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.6);z-index:200;width:min(340px,86vw);font-size:13px;color:var(--rc-text-strong);max-height:80vh;overflow-y:auto;overflow-x:hidden}',
+      // 查词浮窗：改成 iOS 材质（半透明 + 背景模糊 + 0.5px 细描边）。这是查词时天天看的那个层，
+      // 以前是实心底 + 1px 亮蓝描边 —— 那个描边在苹果的语言里不存在，层级靠材质表达。
+      '#word-pop{position:fixed;display:none;background:var(--rc-material-thick,rgba(30,30,32,.92));-webkit-backdrop-filter:var(--rc-blur,saturate(180%) blur(20px));backdrop-filter:var(--rc-blur,saturate(180%) blur(20px));border:.5px solid var(--rc-border-popover,rgba(255,255,255,.14));border-radius:var(--rc-radius-popover,13px);box-shadow:var(--rc-shadow-pop,0 12px 34px rgba(0,0,0,.46));z-index:200;width:min(340px,86vw);font-size:13px;color:var(--rc-text);max-height:80vh;overflow-y:auto;overflow-x:hidden}',
       '#word-pop .wp-head{display:flex;align-items:center;gap:8px;padding:11px 14px 7px;flex-wrap:wrap}',
       '#word-pop .wp-word{font-size:17px;font-weight:600;color:#fff}',
       '#word-pop .wp-phon{color:var(--rc-text-strong);font-style:italic;font-size:12px}',
