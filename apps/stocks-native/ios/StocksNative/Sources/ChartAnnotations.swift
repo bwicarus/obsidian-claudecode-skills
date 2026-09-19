@@ -133,10 +133,19 @@ final class AnnotationStore: ObservableObject {
     func erase(near point: AnnotationPoint, stockCode: String) -> Bool {
         guard var values = storage[stockCode], !values.isEmpty else { return false }
         let threshold = 0.075
-        guard let match = values.enumerated().map({ index, annotation in
-            (index, annotation.points.map { hypot($0.x - point.x, $0.y - point.y) }.min() ?? 2)
-        }).filter({ $0.1 <= threshold }).min(by: { $0.1 < $1.1 }) else { return false }
-        values.remove(at: match.0)
+        var bestIndex: Int?
+        var bestDistance = threshold
+        for (index, annotation) in values.enumerated() {
+            for candidate in annotation.points {
+                let distance = hypot(candidate.x - point.x, candidate.y - point.y)
+                if distance <= bestDistance {
+                    bestDistance = distance
+                    bestIndex = index
+                }
+            }
+        }
+        guard let bestIndex else { return false }
+        values.remove(at: bestIndex)
         storage[stockCode] = values
         save()
         return true
