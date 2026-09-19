@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh a read-only market snapshot for StocksNative
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/stocks-native/scripts/refresh_market.py --source /root/webapp/data/stocks --destination /var/lib/stocks-native/market --owner stocks-native
+TimeoutStartSec=120
+UMask=0077

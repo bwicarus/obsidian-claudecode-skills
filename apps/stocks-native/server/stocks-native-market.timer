@@ -1,0 +1,10 @@
+[Unit]
+Description=Keep StocksNative market snapshot current
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,32 @@
+[Unit]
+Description=StocksNative private iPad data and voice gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=stocks-native
+Group=stocks-native
+WorkingDirectory=/opt/stocks-native/server
+Environment=PYTHONUNBUFFERED=1
+Environment=CODEX_HOME=/var/lib/stocks-native/codex
+Environment=STOCKS_CODEX=/usr/local/bin/codex
+Environment=STOCKS_MVP_STATE_DIR=/var/lib/stocks-native/state
+Environment=STOCKS_DATA_ROOT=/var/lib/stocks-native/market
+ExecStart=/opt/stocks-native/venv/bin/python /opt/stocks-native/server/app.py
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/stocks-native
+CapabilityBoundingSet=
+LockPersonality=true
+TasksMax=160
+MemoryMax=1500M
+
+[Install]
+WantedBy=multi-user.target
