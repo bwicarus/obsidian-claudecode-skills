@@ -67,11 +67,11 @@ async function _renderGrammarTrackListNative() {
   for (const b of books) {
     const checked = enabledSet.has(b.book) ? 'checked' : '';
     const hot = (b.tracked_count > 0) ? `<span style="color:#34d399;margin-left:4px">${b.tracked_count} 已跟踪</span>` : `<span style="color:#7a8497;margin-left:4px">无跟踪（去技能树点节点开）</span>`;
-    html += `<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;cursor:pointer;color:#cfe6ff;border-radius:3px;border-bottom:1px solid #1f2740" title="共 ${b.total_l2} 个 level-2 语法点">
+    html += `<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;cursor:pointer;color:var(--rc-text-strong);border-radius:3px;border-bottom:1px solid var(--rc-border)" title="共 ${b.total_l2} 个 level-2 语法点">
       <input type="checkbox" value="${b.book}" ${checked} onchange="_onGrammarBookToggle()" style="margin:0">
       <div style="flex:1;min-width:0">
         <div style="font-size:12px">${b.title.replace(/</g,'&lt;')}</div>
-        <div style="font-size:10px;color:#7a8497">${b.total_l2} 个语法点 · ${hot}</div>
+        <div style="font-size:10px;color:var(--rc-text-dim)">${b.total_l2} 个语法点 · ${hot}</div>
       </div>
       <a href="/skilltree/${encodeURIComponent(b.book)}/" target="_blank" onclick="event.stopPropagation()" style="color:#60a5fa;font-size:11px;text-decoration:none">技能树 →</a>
     </label>`;

@@ -398,16 +398,16 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-turn.vc-if .rc-turn-bd{padding-top:2px}' +
       '.rc-part-cardin{padding:0!important;background:transparent!important;border:none!important;box-shadow:none!important}' +
       '.rc-turn-flow{margin-top:8px;padding-top:8px;border-top:0.5px solid rgba(255,255,255,.12);font-size:12px;color:#9fb0cf}' +
-      '.rc-flow-meta{color:#7f92b8;margin-bottom:6px}' +
+      '.rc-flow-meta{color:var(--rc-text-dim);margin-bottom:6px}' +
       '.rc-flow-node{padding:6px 0;border-bottom:0.5px solid rgba(255,255,255,.07)}' +
       '.rc-flow-node:last-child{border-bottom:none}' +
       '.rc-flow-h{color:#b9a8ff;font-weight:600;margin-bottom:4px}' +
-      '.rc-flow-args{color:#7f92b8;word-break:break-all;font-size:11px}' +
+      '.rc-flow-args{color:var(--rc-text-dim);word-break:break-all;font-size:11px}' +
       '.rc-flow-step{color:#8fa0c0;font-size:11px}' +
       '.rc-flow-r{margin-top:4px}' +
       '.rc-flow-img{max-width:min(100%,220px);max-height:180px;border-radius:8px;cursor:zoom-in;' +
         'border:1px solid rgba(255,255,255,.12);background:#0e1422;display:block;margin-bottom:2px}' +
-      '.rc-flow-cap{font-size:11px;color:#7f92b8;margin-bottom:4px}' +
+      '.rc-flow-cap{font-size:11px;color:var(--rc-text-dim);margin-bottom:4px}' +
       '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#b9a8ff;margin-bottom:6px;flex:none}' +
       '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
       '.vc-map-credit{position:absolute;right:5px;bottom:4px;z-index:2;font:10px/1.4 system-ui,sans-serif;color:#e8e8ee;background:rgba(16,23,38,.55);border-radius:4px;padding:0 4px;pointer-events:none;opacity:0;transition:opacity .18s}' +
@@ -420,8 +420,8 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-mapov{position:fixed;inset:0;z-index:2147483200;background:#101726;display:flex;flex-direction:column}' +
       '.vc-map-hd{display:flex;align-items:center;gap:8px;padding:10px 14px;color:#dbe4f8;font-size:14px;background:#0b111f}' +
       '.vc-map-hd span:first-child{font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-      '.vc-map-attr{color:#5a6680;font-size:11px;flex:none}' +
-      '.vc-map-z,.vc-map-x{width:34px;height:34px;border-radius:8px;border:1px solid #2a3550;background:#1a2540;color:#dbe4f8;font-size:16px;cursor:pointer;flex:none;padding:0}' +
+      '.vc-map-attr{color:var(--rc-text-dim);font-size:11px;flex:none}' +
+      '.vc-map-z,.vc-map-x{width:34px;height:34px;border-radius:8px;border:1px solid var(--rc-border);background:var(--rc-bg-raised);color:#dbe4f8;font-size:16px;cursor:pointer;flex:none;padding:0}' +
       '.vc-map-vp{flex:1;position:relative;overflow:hidden;touch-action:none;cursor:grab}' +
       '.vc-map-world{position:absolute;inset:0}' +
       '.vc-map-tile{position:absolute;width:256px!important;height:256px!important;max-width:none!important;min-width:0;border-radius:0!important;margin:0!important;pointer-events:none;user-select:none;display:block}' +
@@ -618,30 +618,30 @@ if (window.__bwPwaProviderOnly) return;
       // 148:工具卡面板的「模型」段(跟 .vc-fl 同一套配色/间距,视觉上是同族)
       '.vc-md{margin-bottom:12px;padding-bottom:11px;border-bottom:0.5px solid rgba(255,255,255,.1)}' +
       '.vc-md-t{font-size:11.5px;color:#9db0d4;font-weight:600;margin-bottom:7px}' +
-      '.vc-md-t em{font-style:normal;color:#7f92b8;font-weight:400}' +
+      '.vc-md-t em{font-style:normal;color:var(--rc-text-dim);font-weight:400}' +
       '.vc-md-r{display:flex;gap:6px}' +
       '.vc-md-r select{flex:1;min-width:0;padding:7px 8px;font-size:12px;font-weight:600;cursor:pointer;\n        border-radius:10px;border:0.5px solid rgba(255,255,255,.14);background:rgba(255,255,255,.05);\n        color:#c6d2e8;-webkit-appearance:none;appearance:none;text-overflow:ellipsis}' +
       '.vc-md-fast{flex:none;border-radius:10px;border:.5px solid rgba(255,255,255,.14);background:rgba(255,255,255,.05);color:#8fa1c4;padding:7px 9px;font-size:11px;font-weight:650;cursor:pointer}' +
       '.vc-md-fast.on{background:rgba(39,165,104,.20);border-color:rgba(70,220,143,.55);color:#9af0c7}.vc-md-fast:disabled{opacity:.38;cursor:not-allowed}' +
-      '.vc-md-st{font-size:10.5px;color:#7f92b8;margin-top:5px}' +
+      '.vc-md-st{font-size:10.5px;color:var(--rc-text-dim);margin-top:5px}' +
       '.vc-fl{margin-bottom:12px;padding-bottom:11px;border-bottom:0.5px solid rgba(255,255,255,.1)}' +
       '.vc-fl-t{font-size:11.5px;color:#9db0d4;font-weight:600;margin-bottom:7px}' +
-      '.vc-fl-t em{font-style:normal;color:#7f92b8;font-weight:400}' +
+      '.vc-fl-t em{font-style:normal;color:var(--rc-text-dim);font-weight:400}' +
       '.vc-fl-seg{display:flex;gap:0;border-radius:10px;overflow:hidden;border:0.5px solid rgba(255,255,255,.14)}' +
       '.vc-fl-seg button{flex:1;padding:7px 4px;font-size:12px;font-weight:600;cursor:pointer;border:none;\n        background:rgba(255,255,255,.05);color:#9db0d4;-webkit-appearance:none;appearance:none;\n        border-right:0.5px solid rgba(255,255,255,.12)}' +
       '.vc-fl-seg button:last-child{border-right:none}' +
       '.vc-fl-seg button.on{background:#7b6cff;color:#fff}' +
-      '.vc-fl-st{font-size:10.5px;color:#7f92b8;margin-top:5px}' +
+      '.vc-fl-st{font-size:10.5px;color:var(--rc-text-dim);margin-top:5px}' +
       '.vc-tp{margin-top:12px;padding-top:10px;border-top:0.5px solid rgba(255,255,255,.1)}' +
       '.vc-tp-t{font-size:11.5px;color:#9db0d4;font-weight:600;margin-bottom:2px}' +
-      '.vc-tp-t em{font-style:normal;color:#7f92b8;font-weight:400}' +
+      '.vc-tp-t em{font-style:normal;color:var(--rc-text-dim);font-weight:400}' +
       '.vc-tp-f{margin-top:9px}' +
       '.vc-tp-f label{display:block;font-size:11.5px;color:#c6d2e8;margin-bottom:4px}' +
       '.vc-tp-f textarea{width:100%;box-sizing:border-box;min-height:74px;resize:vertical;border-radius:10px;padding:8px 10px;' +
         'background:rgba(0,0,0,.28);border:0.5px solid rgba(255,255,255,.14);color:#e6ecf8;' +
         'font-size:12.5px;line-height:1.55;font-family:-apple-system,system-ui,sans-serif;-webkit-appearance:none}' +
       '.vc-tp-f textarea:focus{outline:none;border-color:#7b6cff;box-shadow:0 0 0 2px rgba(123,108,255,.25)}' +
-      '.vc-tp-f .st{font-size:10.5px;color:#7f92b8;margin-top:3px}' +
+      '.vc-tp-f .st{font-size:10.5px;color:var(--rc-text-dim);margin-top:3px}' +
       '.vc-tp-btns{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px}' +
       '.vc-tp-btns button{flex:1;min-width:78px;border-radius:10px;padding:8px 6px;font-size:12px;font-weight:600;cursor:pointer;' +
         'border:0.5px solid rgba(255,255,255,.16);background:rgba(255,255,255,.08);color:#dbe4f5;-webkit-appearance:none}' +
@@ -657,8 +657,8 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-fp-tts:active{transform:scale(.85)}' +
       '.vc-fp-tts svg{width:11px;height:11px}' +
       '.vc-fn-t{flex:1;font-size:12.5px;color:#e2e9f7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-      '.vc-fn-m{flex:none;font-size:10.5px;color:#7f92b8;font-variant-numeric:tabular-nums}' +
-      '.vc-fn-x{flex:none;font-size:10px;color:#7f92b8;transition:transform .2s}' +
+      '.vc-fn-m{flex:none;font-size:10.5px;color:var(--rc-text-dim);font-variant-numeric:tabular-nums}' +
+      '.vc-fn-x{flex:none;font-size:10px;color:var(--rc-text-dim);transition:transform .2s}' +
       '.vc-fn.on .vc-fn-x{transform:rotate(90deg)}' +
       // 连接线:表示数据从上一个方块流到下一个
       '.vc-fw{height:16px;margin-left:19px;border-left:1.5px solid color-mix(in srgb,var(--vc-tc) 45%,transparent);position:relative}' +
@@ -725,8 +725,8 @@ if (window.__bwPwaProviderOnly) return;
       'border-top:0.5px solid rgba(255,255,255,.14);box-shadow:0 -14px 44px rgba(0,0,0,.45);padding-bottom:env(safe-area-inset-bottom,0px)}' +
       '.vc-dkp-hd{display:flex;align-items:center;gap:8px;padding:9px 14px 4px;flex:none}' +
       '.vc-dkp-t{font-size:12px;color:#9fb0cf;flex:1}' +
-      '.vc-dkp-b{border:1px solid #35446b;background:rgba(255,255,255,.05);color:#9fb4e0;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}' +
-      '.vc-dkp-b.on{background:#2b3a5f;color:#cfe0ff}.vc-dkp-b.danger{border-color:#7f2a2a;color:#ff8a80}' +
+      '.vc-dkp-b{border:1px solid #35446b;background:rgba(255,255,255,.05);color:var(--rc-text-muted);border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}' +
+      '.vc-dkp-b.on{background:#2b3a5f;color:var(--rc-text-strong)}.vc-dkp-b.danger{border-color:#7f2a2a;color:#ff8a80}' +
       // 时间线:天节点=轴上单线条+日期;每张卡上方竖线+具体时刻(用户设计元素,布局取横向时间轴成熟形态)
       '.vc-dkp-sc{flex:1;display:flex;align-items:flex-start;gap:14px;overflow-x:auto;overflow-y:hidden;padding:14px 16px 10px;-webkit-overflow-scrolling:touch;' +
       'scroll-snap-type:x proximity;scroll-padding:0 50%}' +
@@ -783,7 +783,7 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-bub-hd{display:flex;align-items:center;justify-content:flex-end;margin:-3px -4px 4px 0;cursor:grab;touch-action:none}' +
       '.vc-if-wt{font-size:26px;font-weight:600;letter-spacing:-.5px}' +
       '.vc-if-wc{font-size:14px;color:#cdd9f2;margin-top:1px}' +
-      '.vc-if-ws{font-size:12px;color:#8a9bb4;margin-top:2px}' +
+      '.vc-if-ws{font-size:12px;color:var(--rc-text-muted);margin-top:2px}' +
       '.vc-if-tip{font-size:12px;color:#b8c6e2;margin-top:6px;padding-top:6px;border-top:0.5px solid rgba(255,255,255,.1)}' +
       '.vc-if-ni{padding:5px 0;border-bottom:0.5px solid rgba(255,255,255,.08)}.vc-if-ni:last-child{border-bottom:none}' +
       '.vc-if-nt{font-size:13px;font-weight:600;color:#e8eefb}' +
@@ -857,7 +857,7 @@ if (window.__bwPwaProviderOnly) return;
       // 跟上面的紫光是同一族状态：颜色说的是「这个框现在通向谁」。
       '#asst-input.vc-pc{box-shadow:0 0 0 1.5px rgba(52,199,89,.65),0 0 16px rgba(52,199,89,.24);border-radius:14px;transition:box-shadow .3s}' +
       // 侧栏 composer 里的通话入口按钮(样式镜像 #asst-mic;通话中绿色呼吸)
-       '#asst-call,#asst-computer{background:#16203a;border:1px solid #2a3a63;color:#9fb4e0;width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
+       '#asst-call,#asst-computer{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
        '#asst-call:active,#asst-computer:active{transform:scale(.9)}' +
        '#asst-call.on{background:#1a7f4b;border-color:#1a7f4b;color:#fff;animation:vcCallPulse 1.6s ease-in-out infinite}' +
       // 播报中:蓝色快脉冲(盖过 .on 绿;user 开口打断后自动回绿)
@@ -876,8 +876,8 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-speak-tg.speaking{animation:vcCallPulse 1.2s ease-in-out infinite}' +
       // 记忆起点选择行(v3-⑰c)
       '.vc-recall-pane{display:flex;gap:6px;align-items:center;margin:6px 10px;padding:6px 8px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);border-radius:10px;flex-wrap:wrap}' +
-      '.vc-recall-pane input{background:#0d1426;border:1px solid #2a3a63;color:#dbe7ff;border-radius:7px;padding:4px 6px;font-size:12px;flex:1 1 150px;min-width:0}' +
-      '.vc-recall-pane button{background:#1a2233;border:1px solid #2a3a63;color:#9fb4e0;border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;flex:none}' +
+      '.vc-recall-pane input{background:var(--rc-bg-canvas);border:1px solid var(--rc-border-control);color:var(--rc-text-strong);border-radius:7px;padding:4px 6px;font-size:12px;flex:1 1 150px;min-width:0}' +
+      '.vc-recall-pane button{background:#1a2233;border:1px solid var(--rc-border-control);color:var(--rc-text-muted);border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;flex:none}' +
       '@keyframes vcCallPulse{0%,100%{box-shadow:0 0 0 0 rgba(26,127,75,.5)}50%{box-shadow:0 0 0 7px rgba(26,127,75,0)}}' +
       // 长按到点确认(㉒):弹一下+变紫,到点瞬间就知道"够了可以松手"
       '@keyframes vcLpPop{0%{transform:scale(1)}45%{transform:scale(1.28)}70%{transform:scale(.92)}100%{transform:scale(1)}}' +
@@ -896,8 +896,8 @@ if (window.__bwPwaProviderOnly) return;
        '#asst-call,#asst-computer,#asst-mic,#vc-tool-btn,.vc-speak-tg,#asst-input button,#asst-quick button,#rc-vc .vc-grab,#rc-vc .vc-head button{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}' +
       '#rc-vc .vc-grab{touch-action:none}' +   // 抓手保持 none(要拖拽调高)
       // 工具调用状态按钮 + 详情弹层(v3-⑤)
-      '#vc-tool-btn{background:#16203a;border:1px solid #2a3a63;color:#9fb4e0;width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:none;align-items:center;justify-content:center;font-size:18px;-webkit-tap-highlight-color:transparent}' +
-      '#vc-tool-btn.ok{color:#34d399;border-color:#1f6b4a}' +
+      '#vc-tool-btn{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:none;align-items:center;justify-content:center;font-size:18px;-webkit-tap-highlight-color:transparent}' +
+      '#vc-tool-btn.ok{color:var(--rc-success);border-color:#1f6b4a}' +
       '#vc-tool-btn.err{color:#f87171;border-color:#7f2a2a}' +
       '.vc-spin{width:15px;height:15px;border:2px solid #3a4a73;border-top-color:#9fcbff;border-radius:50%;display:inline-block;animation:vcSpin .8s linear infinite;vertical-align:-2px}' +
       '@keyframes vcSpin{to{transform:rotate(360deg)}}' +
@@ -909,10 +909,10 @@ if (window.__bwPwaProviderOnly) return;
       '.vc-tc-st{flex:none}.vc-tcard .vc-tc-st{color:#30d158}.vc-tcard.err .vc-tc-st{color:#ff6961}' +
       '.vc-tc-l{flex:1;color:#cdd9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       '.vc-tc-i{flex:none;display:inline-flex;color:#8fa4cc}.vc-tc-i svg{width:13px;height:13px}' +
-      '.vc-tc-t{flex:none;color:#8a9bb4;font-size:11px}' +
-      '.vc-tc-x{flex:none;color:#8a9bb4}' +
+      '.vc-tc-t{flex:none;color:var(--rc-text-muted);font-size:11px}' +
+      '.vc-tc-x{flex:none;color:var(--rc-text-muted)}' +
       '.vc-tc-b{padding:2px 10px 8px;border-top:1px solid rgba(255,255,255,.07)}' +
-      '.vc-tc-k{color:#7c93c4;font-size:11px;margin:6px 0 2px;font-weight:600}' +
+      '.vc-tc-k{color:var(--rc-text-muted);font-size:11px;margin:6px 0 2px;font-weight:600}' +
       '.vc-tc-v{color:#b9c6e0;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;word-break:break-all;white-space:pre-wrap;max-height:180px;overflow-y:auto}';
     document.head.appendChild(s);
   }

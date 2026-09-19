@@ -207,12 +207,12 @@ if (window.__bwPwaProviderOnly) return;
     if (document.getElementById('rc-vplayer-css')) return;
     var s = document.createElement('style'); s.id = 'rc-vplayer-css';
     s.textContent =
-      '#rc-vplayer{position:fixed;z-index:2147483000;pointer-events:auto;background:rgba(12,16,26,.86);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid #2a3a63;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.6);display:flex;flex-direction:column;overflow:hidden;user-select:none;-webkit-user-select:none}' +
+      '#rc-vplayer{position:fixed;z-index:2147483000;pointer-events:auto;background:rgba(12,16,26,.86);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--rc-border-control);border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.6);display:flex;flex-direction:column;overflow:hidden;user-select:none;-webkit-user-select:none}' +
       '.rcvp-bar{flex:0 0 auto;display:flex;align-items:center;gap:6px;padding:6px 8px;background:rgba(0,0,0,.3);cursor:grab;touch-action:none;-webkit-touch-callout:none}' +
       '.rcvp-bar.drag{cursor:grabbing}' +
-      '.rcvp-grip{color:#6b7da0;font-size:14px;flex:none}' +
+      '.rcvp-grip{color:var(--rc-text-dim);font-size:14px;flex:none}' +
       '.rcvp-title{flex:1 1 auto;min-width:0;color:#cdd8f5;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
-      '.rcvp-x{flex:none;background:transparent;border:none;color:#9fb4e0;font-size:16px;cursor:pointer;padding:2px 6px;line-height:1;-webkit-tap-highlight-color:transparent}' +
+      '.rcvp-x{flex:none;background:transparent;border:none;color:var(--rc-text-muted);font-size:16px;cursor:pointer;padding:2px 6px;line-height:1;-webkit-tap-highlight-color:transparent}' +
       '.rcvp-x:active{color:#fff}' +
       '.rcvp-stage{position:relative;width:100%;background:#000;flex:1 1 auto;min-height:0}' +   // 占左列剩余高度;视频比例由 YouTube iframe 内部 letterbox 处理(浮层可自由改宽高)
       '.rcvp-if{width:100%;height:100%;border:0;display:block}' +
@@ -237,35 +237,35 @@ if (window.__bwPwaProviderOnly) return;
       /* B 站:隐掉依赖 YouTube postMessage 的控件(起止钉/倍速/循环/字幕轨/字幕列表)→ 用 B 站原生控制条。整条控制栏空了就不占位。 */
       '.rcvp-bili .rcvp-grp,.rcvp-bili .rcvp-ck,.rcvp-bili .rcvp-cc,.rcvp-bili .rcvp-hq,.rcvp-bili .rcvp-en-tg,.rcvp-bili .rcvp-pos-tg,.rcvp-bili .rcvp-list{display:none!important}' +
       '.rcvp-bili .rcvp-ctrls:empty,.rcvp-bili .rcvp-ctrls{padding:0}' +
-      '.rcvp-grp{display:inline-flex;align-items:center;gap:2px;color:#8a9bb4;font-size:12px}' +
+      '.rcvp-grp{display:inline-flex;align-items:center;gap:2px;color:var(--rc-text-muted);font-size:12px}' +
       '.rcvp-t{width:26px;background:rgba(255,255,255,.06);border:none;color:#e6eeff;border-radius:5px;padding:3px 2px;font-size:12px;text-align:center;outline:none}' +
-      '.rcvp-cn{color:#5a6680}' +
-      '.rcvp-now,.rcvp-btn{background:transparent;border:none;color:#9fb4e0;border-radius:7px;padding:4px 9px;font-size:12.5px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:background .12s,color .12s}' +
+      '.rcvp-cn{color:var(--rc-text-dim)}' +
+      '.rcvp-now,.rcvp-btn{background:transparent;border:none;color:var(--rc-text-muted);border-radius:7px;padding:4px 9px;font-size:12.5px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:background .12s,color .12s}' +
       '.rcvp-now:hover,.rcvp-btn:hover{background:rgba(255,255,255,.09)}' +
       '.rcvp-now:active,.rcvp-btn:active{transform:scale(.93)}' +
       '.rcvp-btn.on{background:rgba(10,132,255,.2);color:#5aa9ff}' +
-      '.rcvp-sel{background:rgba(255,255,255,.06);border:none;color:#dbe7ff;border-radius:6px;padding:3px 5px;font-size:12px;outline:none}' +
-      '.rcvp-ck{display:inline-flex;align-items:center;gap:4px;color:#9fb4e0;font-size:12.5px;cursor:pointer}' +
+      '.rcvp-sel{background:rgba(255,255,255,.06);border:none;color:var(--rc-text-strong);border-radius:6px;padding:3px 5px;font-size:12px;outline:none}' +
+      '.rcvp-ck{display:inline-flex;align-items:center;gap:4px;color:var(--rc-text-muted);font-size:12.5px;cursor:pointer}' +
       '.rcvp-rm{color:#ff6b81}' +
       '.rcvp-rm:hover{background:rgba(255,80,100,.14)}' +
       '.rcvp-rs{position:absolute;right:0;bottom:0;width:22px;height:22px;cursor:nwse-resize;touch-action:none;z-index:5}' +
-      '.rcvp-rs::before{content:"";position:absolute;right:4px;bottom:4px;width:9px;height:9px;border-right:2px solid #6b7da0;border-bottom:2px solid #6b7da0;border-bottom-right-radius:2px}' +
+      '.rcvp-rs::before{content:"";position:absolute;right:4px;bottom:4px;width:9px;height:9px;border-right:2px solid var(--rc-text-dim);border-bottom:2px solid var(--rc-text-dim);border-bottom-right-radius:2px}' +
       // 主体两列:左=视频+控制,右=字幕列表边栏(可展开)
       '.rcvp-body{flex:1 1 auto;min-height:0;display:flex;flex-direction:row}' +   // 撑满 box 除顶栏外的高度 → 给 stage/字幕栏一个确定高度(字幕栏才能溢出滚动)
       '.rcvp-left{flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column}' +
-      '.rcvp-list{flex:none;background:transparent;border:none;color:#9fb4e0;font-size:14px;cursor:pointer;padding:2px 6px;-webkit-tap-highlight-color:transparent}' +
+      '.rcvp-list{flex:none;background:transparent;border:none;color:var(--rc-text-muted);font-size:14px;cursor:pointer;padding:2px 6px;-webkit-tap-highlight-color:transparent}' +
       '.rcvp-list.on{color:#5aa9ff}' +
-      '.rcvp-trans{flex:none;width:240px;max-width:46vw;border-left:1px solid #2a3a63;background:rgba(0,0,0,.32);position:relative;min-height:0;overflow:hidden}' +
+      '.rcvp-trans{flex:none;width:240px;max-width:46vw;border-left:1px solid var(--rc-border-control);background:rgba(0,0,0,.32);position:relative;min-height:0;overflow:hidden}' +
       // tlist 绝对铺满字幕栏(字幕栏高度=body 高度,由 box 明确高度决定)→ 根治 flex 高度歧义,内容超出就滚动
       '.rcvp-tlist{position:absolute;inset:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;touch-action:pan-y;padding:4px 0}' +
-      '.rcvp-tempty{color:#7c93c4;font-size:12px;padding:14px 12px;line-height:1.5;text-align:center}' +
+      '.rcvp-tempty{color:var(--rc-text-muted);font-size:12px;padding:14px 12px;line-height:1.5;text-align:center}' +
       '.rcvp-tline{display:flex;gap:7px;padding:5px 9px;cursor:pointer;border-left:2px solid transparent}' +
       '.rcvp-tline:hover{background:rgba(255,255,255,.05)}' +
-      '.rcvp-tline.cur{background:rgba(59,109,181,.22);border-left-color:#7dd3fc}' +
-      '.rcvp-tt{flex:none;color:#6b7da0;font-size:10.5px;font-variant-numeric:tabular-nums;padding-top:2px;min-width:30px}' +
+      '.rcvp-tline.cur{background:rgba(59,109,181,.22);border-left-color:var(--rc-accent-cyan)}' +
+      '.rcvp-tt{flex:none;color:var(--rc-text-dim);font-size:10.5px;font-variant-numeric:tabular-nums;padding-top:2px;min-width:30px}' +
       '.rcvp-tx{flex:1 1 auto;min-width:0}' +
       '.rcvp-tzh{display:block;color:#e6eeff;font-size:12.5px;line-height:1.35;word-break:break-word}' +
-      '.rcvp-ten{display:block;color:#8a9bb4;font-size:11px;line-height:1.3;word-break:break-word;margin-top:1px}';
+      '.rcvp-ten{display:block;color:var(--rc-text-muted);font-size:11px;line-height:1.3;word-break:break-word;margin-top:1px}';
     document.head.appendChild(s);
   }
 

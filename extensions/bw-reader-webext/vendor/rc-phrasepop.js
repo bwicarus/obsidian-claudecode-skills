@@ -289,22 +289,22 @@ if (window.__bwPwaProviderOnly) return;
     if (document.getElementById('rc-wordpop-css') || document.getElementById('rc-phrasepop-css')) { _cssInjected = true; if (document.getElementById('rc-phrasepop-css')) return; }
     var css = document.createElement('style'); css.id = 'rc-phrasepop-css';
     css.textContent = [
-      '#word-pop{position:fixed;display:none;background:#10162a;border:1px solid #3b6db5;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.6);z-index:200;width:min(340px,86vw);font-size:13px;color:#cfe6ff;max-height:80vh;overflow-y:auto;overflow-x:hidden}',
+      '#word-pop{position:fixed;display:none;background:var(--rc-bg-surface);border:1px solid var(--rc-border-accent);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.6);z-index:200;width:min(340px,86vw);font-size:13px;color:var(--rc-text-strong);max-height:80vh;overflow-y:auto;overflow-x:hidden}',
       '#word-pop .wp-head{display:flex;align-items:center;gap:8px;padding:11px 14px 7px;flex-wrap:wrap}',
       '#word-pop .wp-word{font-size:17px;font-weight:600;color:#fff}',
-      '#word-pop .wp-phon{color:#a8cdff;font-style:italic;font-size:12px}',
-      '#word-pop .wp-pitch{display:inline-flex;align-items:flex-end;gap:0;font-size:15px;color:#cfe6ff;padding-top:4px;flex-wrap:wrap;max-width:100%;row-gap:6px}',
+      '#word-pop .wp-phon{color:var(--rc-text-strong);font-style:italic;font-size:12px}',
+      '#word-pop .wp-pitch{display:inline-flex;align-items:flex-end;gap:0;font-size:15px;color:var(--rc-text-strong);padding-top:4px;flex-wrap:wrap;max-width:100%;row-gap:6px}',
       '#word-pop .wp-pitch .pm{position:relative;padding:3px 1px 0;line-height:1.1;border-top:2px solid transparent;flex:0 0 auto;white-space:nowrap}',
       '#word-pop .wp-pitch .pm.hi{border-top:2px solid #6fd3ff;color:#dff1ff}',
       '#word-pop .wp-pitch .pm.drop::after{content:"";position:absolute;right:-1px;top:0;height:9px;border-right:2px solid #ff8a8a}',
-      '#word-pop .wp-pitch .pm-type{margin-left:6px;font-size:10px;color:#5a6680;font-style:normal;align-self:center;border:1px solid #2a3450;border-radius:4px;padding:0 4px}',
-      '#word-pop .wp-speak{background:transparent;border:1px solid #3b6db5;color:#a8cdff;border-radius:50%;width:26px;height:26px;cursor:pointer;font-size:12px;padding:0;flex-shrink:0}',
-      '#word-pop .wp-speak:hover{background:#244470;color:#fff}',
-      '#word-pop .wp-def{padding:7px 14px 11px;line-height:1.6;color:#cfe6ff;border-top:1px solid #1f2740}',
-      '#word-pop .wp-actions{display:flex;gap:8px;padding:9px 14px;border-top:1px solid #1f2740;background:#0d1322;flex-wrap:wrap}',
-      '#word-pop .wp-actions button{flex:1;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:8px;cursor:pointer;font-size:12px}',
-      '#word-pop .wp-actions button:hover{border-color:#3b6db5}',
-      '#word-pop .wp-anki{background:#13351f !important;border-color:#34d399 !important;color:#7ee2b8 !important}'
+      '#word-pop .wp-pitch .pm-type{margin-left:6px;font-size:10px;color:var(--rc-text-dim);font-style:normal;align-self:center;border:1px solid #2a3450;border-radius:4px;padding:0 4px}',
+      '#word-pop .wp-speak{background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:50%;width:26px;height:26px;cursor:pointer;font-size:12px;padding:0;flex-shrink:0}',
+      '#word-pop .wp-speak:hover{background:var(--rc-bg-active);color:#fff}',
+      '#word-pop .wp-def{padding:7px 14px 11px;line-height:1.6;color:var(--rc-text-strong);border-top:1px solid var(--rc-border)}',
+      '#word-pop .wp-actions{display:flex;gap:8px;padding:9px 14px;border-top:1px solid var(--rc-border);background:var(--rc-bg-canvas);flex-wrap:wrap}',
+      '#word-pop .wp-actions button{flex:1;background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:8px;cursor:pointer;font-size:12px}',
+      '#word-pop .wp-actions button:hover{border-color:var(--rc-border-accent)}',
+      '#word-pop .wp-anki{background:#13351f !important;border-color:var(--rc-success) !important;color:#7ee2b8 !important}'
     ].join('\n');
     document.head.appendChild(css);
   }
@@ -626,7 +626,7 @@ if (window.__bwPwaProviderOnly) return;
       };   // 掌握按钮按语言分流;词组掌握统一走 phrase-mark
       pop.style.display = 'block';
       window._wordPopOpenAt = Date.now();
-      pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 处理词组…</div>';
+      pop.innerHTML = '<div style="padding:14px;color:var(--rc-text-muted)">⏳ 处理词组…</div>';
       _position(pop, opts.rect);
     }
     var render = function (result) {

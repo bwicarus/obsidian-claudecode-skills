@@ -91,44 +91,44 @@
     if (_cssInjected) return; _cssInjected = true;
     var css = document.createElement('style'); css.id = 'rc-wordpop-css';
     css.textContent = [
-      '#word-pop .wp-speak{background:transparent;border:1px solid #3b6db5;color:#a8cdff;border-radius:50%;width:26px;height:26px;cursor:pointer;font-size:12px;padding:0;flex-shrink:0}',
-      '#word-pop .wp-speak:hover{background:#244470;color:#fff}',
+      '#word-pop .wp-speak{background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:50%;width:26px;height:26px;cursor:pointer;font-size:12px;padding:0;flex-shrink:0}',
+      '#word-pop .wp-speak:hover{background:var(--rc-bg-active);color:#fff}',
       // 单词小框(PDF 用 absolute-in-#main;EPUB reflow 用 fixed-in-viewport,配 opts.rect 定位)
-      '#word-pop{position:fixed;display:none;background:#10162a;border:1px solid #3b6db5;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.6);z-index:200;width:min(340px,86vw);font-size:13px;color:#cfe6ff;max-height:80vh;overflow-y:auto;overflow-x:hidden}',
+      '#word-pop{position:fixed;display:none;background:var(--rc-bg-surface);border:1px solid var(--rc-border-accent);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.6);z-index:200;width:min(340px,86vw);font-size:13px;color:var(--rc-text-strong);max-height:80vh;overflow-y:auto;overflow-x:hidden}',
       '#word-pop .wp-head{display:flex;align-items:center;gap:8px;padding:11px 14px 7px;flex-wrap:wrap}',
       '#word-pop .wp-word{font-size:17px;font-weight:600;color:#fff}',
-      '#word-pop .wp-phon{color:#a8cdff;font-style:italic;font-size:12px}',
-      '#word-pop .wp-pitch{display:inline-flex;align-items:flex-end;gap:0;font-size:15px;color:#cfe6ff;padding-top:4px;flex-wrap:wrap;max-width:100%;row-gap:6px}',
+      '#word-pop .wp-phon{color:var(--rc-text-strong);font-style:italic;font-size:12px}',
+      '#word-pop .wp-pitch{display:inline-flex;align-items:flex-end;gap:0;font-size:15px;color:var(--rc-text-strong);padding-top:4px;flex-wrap:wrap;max-width:100%;row-gap:6px}',
       '#word-pop .wp-pitch .pm{position:relative;padding:3px 1px 0;line-height:1.1;border-top:2px solid transparent;flex:0 0 auto;white-space:nowrap}',
       '#word-pop .wp-pitch .pm.hi{border-top:2px solid #6fd3ff;color:#dff1ff}',
       '#word-pop .wp-pitch .pm.drop::after{content:"";position:absolute;right:-1px;top:0;height:9px;border-right:2px solid #ff8a8a}',
-      '#word-pop .wp-pitch .pm-type{margin-left:6px;font-size:10px;color:#5a6680;font-style:normal;align-self:center;border:1px solid #2a3450;border-radius:4px;padding:0 4px}',
+      '#word-pop .wp-pitch .pm-type{margin-left:6px;font-size:10px;color:var(--rc-text-dim);font-style:normal;align-self:center;border:1px solid #2a3450;border-radius:4px;padding:0 4px}',
       '#word-pop .wp-ex{margin-top:8px;padding-top:7px;border-top:1px dashed #243049}',
       '#word-pop .wp-ex .wp-ex-ja{color:#dfe9ff;font-size:13px;line-height:1.5;margin-top:5px}',
       '#word-pop .wp-ex .wp-ex-zh{color:#8fb0d8;font-size:12px;line-height:1.45;margin-bottom:3px}',
       // 日语完整字典大页面(渲进 RC.result.openResult 的 #result-content)
       '#result-content .jp-head{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;padding-bottom:4px}',
       '#result-content .jp-zh{margin-top:8px;color:#dff1ff;font-size:15px;line-height:1.6}',
-      '#result-content .jp-sec-label{margin-top:14px;color:#7a8497;font-size:11px;border-top:1px solid #2a3550;padding-top:8px}',
+      '#result-content .jp-sec-label{margin-top:14px;color:var(--rc-text-dim);font-size:11px;border-top:1px solid var(--rc-border);padding-top:8px}',
       '#result-content .jp-kanji-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}',
       '#result-content .jp-kanji-chip{font-size:26px;line-height:1;padding:8px 12px;background:#162045;border:1px solid #2e3f63;border-radius:10px;color:#dff1ff;cursor:pointer;transition:all .12s}',
-      '#result-content .jp-kanji-chip.active{background:#244470;border-color:#6fd3ff;box-shadow:0 0 0 1px #6fd3ff}',
-      '#result-content .jp-kanji-detail{margin-top:8px;display:flex;gap:12px;align-items:flex-start;background:#10162a;border:1px solid #243049;border-radius:8px;padding:10px}',
+      '#result-content .jp-kanji-chip.active{background:var(--rc-bg-active);border-color:#6fd3ff;box-shadow:0 0 0 1px #6fd3ff}',
+      '#result-content .jp-kanji-detail{margin-top:8px;display:flex;gap:12px;align-items:flex-start;background:var(--rc-bg-surface);border:1px solid #243049;border-radius:8px;padding:10px}',
       '#result-content .jp-kanji-detail:empty{display:none}',
       '#result-content .jk-lit{font-size:40px;line-height:1;color:#fff;flex-shrink:0}',
-      '#result-content .jk-body{font-size:13px;color:#cfe6ff;line-height:1.8}',
+      '#result-content .jk-body{font-size:13px;color:var(--rc-text-strong);line-height:1.8}',
       '#result-content .jk-tag{display:inline-block;width:18px;text-align:center;border-radius:3px;font-size:11px;margin-right:6px;color:#0b1020;font-style:normal}',
       '#result-content .jk-tag.jk-on{background:#6fd3ff}',
       '#result-content .jk-tag.jk-kun{background:#9fe0b8}',
       '#result-content .jk-mean{color:#8fb0d8;font-size:12px;margin-top:3px}',
       '#result-content .jp-ex-ja{color:#dfe9ff;font-size:14px;line-height:1.6;margin-top:7px}',
       '#result-content .jp-ex-zh{color:#8fb0d8;font-size:12.5px;line-height:1.45}',
-      '#result-content .jp-ai-btn{margin-top:14px;width:100%;background:#1a2748;border:1px solid #3b6db5;color:#a8cdff;border-radius:8px;padding:9px;cursor:pointer;font-size:13px}',
+      '#result-content .jp-ai-btn{margin-top:14px;width:100%;background:#1a2748;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:8px;padding:9px;cursor:pointer;font-size:13px}',
       '#result-content .jp-ai-btn:disabled{opacity:.6}',
-      '#result-content .jp-ai-out{margin-top:10px;color:#cfe6ff;line-height:1.7}',
-      '#word-pop .wp-freq{color:#5a6680;font-size:11px;margin-left:auto}',
-      '#word-pop .wp-def{padding:7px 14px 11px;line-height:1.6;color:#cfe6ff;cursor:pointer;border-top:1px solid #1f2740}',
-      '#word-pop .wp-pos-tag{display:inline-block;font-size:10.5px;color:#7a8497;background:#1a2540;border:1px solid #2a3550;border-radius:4px;padding:0 5px;margin-right:7px;vertical-align:1px;font-weight:500}',
+      '#result-content .jp-ai-out{margin-top:10px;color:var(--rc-text-strong);line-height:1.7}',
+      '#word-pop .wp-freq{color:var(--rc-text-dim);font-size:11px;margin-left:auto}',
+      '#word-pop .wp-def{padding:7px 14px 11px;line-height:1.6;color:var(--rc-text-strong);cursor:pointer;border-top:1px solid var(--rc-border)}',
+      '#word-pop .wp-pos-tag{display:inline-block;font-size:10.5px;color:var(--rc-text-dim);background:var(--rc-bg-raised);border:1px solid var(--rc-border);border-radius:4px;padding:0 5px;margin-right:7px;vertical-align:1px;font-weight:500}',
       // 日语变形分析行(原形 + 语法标签);word-pop 小框 + 完整字典(result-content)共用
       '#word-pop .jp-inflect,#result-content .jp-inflect{font-size:12px;color:#9fb4cf;padding:6px 14px 0;line-height:1.5}',
       '#result-content .jp-inflect{padding:6px 0 0}',
@@ -137,12 +137,12 @@
       '.jp-inflect.jp-source b{color:#ffe0b2;letter-spacing:.2px}',
       '.jp-inflect .jp-inflect-mark.jp-wasei{background:#3a2a12;border-color:#8a5a1e;color:#ffcf8f}',
       '#word-pop .wp-def:hover{background:#162045}',
-      '#word-pop .wp-more{color:#60a5fa;font-size:11px;margin-top:7px}',
+      '#word-pop .wp-more{color:var(--rc-accent);font-size:11px;margin-top:7px}',
       // flex-wrap 为 EPUB 多一两个按钮(🎴Anki/🖌标记)留行,避免横向溢出;其余照搬
-      '#word-pop .wp-actions{display:flex;gap:8px;padding:9px 14px;border-top:1px solid #1f2740;background:#0d1322;flex-wrap:wrap}',
-      '#word-pop .wp-actions button{flex:1;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:8px;cursor:pointer;font-size:12px}',
-      '#word-pop .wp-actions button:hover{border-color:#3b6db5}',
-      '#word-pop .wp-anki{background:#13351f !important;border-color:#34d399 !important;color:#7ee2b8 !important}',
+      '#word-pop .wp-actions{display:flex;gap:8px;padding:9px 14px;border-top:1px solid var(--rc-border);background:var(--rc-bg-canvas);flex-wrap:wrap}',
+      '#word-pop .wp-actions button{flex:1;background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:8px;cursor:pointer;font-size:12px}',
+      '#word-pop .wp-actions button:hover{border-color:var(--rc-border-accent)}',
+      '#word-pop .wp-anki{background:#13351f !important;border-color:var(--rc-success) !important;color:#7ee2b8 !important}',
       // 待查词呼吸高亮(逐字对照 PDF pdf_reader.html .word-hl-layer .hl + sel-breathe):
       //   背景 rgba(56,178,172,.30) 青/teal、虚框 rgba(120,231,210,.92)、border-radius 3px、呼吸 opacity .45↔.9。
       // pointer-events:auto(非 none)——照搬 PDF 原生 _wordHlClick:呼吸高亮本身可点,未就绪点了主动开"查询中"
@@ -597,7 +597,7 @@
       var pop = _ensurePop();
       var r2 = _hlRect(hl);
       pop.style.display = 'block'; window._wordPopOpenAt = Date.now();
-      pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 查词中…</div>';
+      pop.innerHTML = '<div style="padding:14px;color:var(--rc-text-muted)">⏳ 查词中…</div>';
       _positionPop(pop, r2);
       _hlRemoveVisual(hl);   // 原生:boxOpen=true → renderWordHl 过滤掉它,不再画呼吸高亮(hl 记录留着等结果)
     }
@@ -1446,14 +1446,14 @@
       var _oid = _wordPopOwnerId = ++_wordHlSeq;
       _popPosHook = _ctx.positionPop;
       pop.style.display = 'block'; window._wordPopOpenAt = Date.now();
-      pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 查询中…</div>';
+      pop.innerHTML = '<div style="padding:14px;color:var(--rc-text-muted)">⏳ 查询中…</div>';
       _positionPop(pop, _ctx.rect);
       _lookupFetch(word).then(function (d) {
         _cacheDictResult(word, d);
         if (_wordPopOwnerId !== _oid) return;   // 期间点了别的词 → 不覆盖
         if ((d && d.ok) || _isJaWord(word)) { _popPosHook = _ctx.positionPop; _renderWordPop(word, _ctx.ctx, d, _ctx.rect); }
         else if (_ctx.onFallback) { try { pop.style.display = 'none'; _ctx.onFallback(word); } catch (_) {} }
-        else pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">未查到</div>';
+        else pop.innerHTML = '<div style="padding:14px;color:var(--rc-text-muted)">未查到</div>';
       }).catch(function () { if (_wordPopOwnerId === _oid) pop.innerHTML = '<div style="padding:14px;color:#c88">查询失败</div>'; });
       return;
     }
@@ -1478,7 +1478,7 @@
         _placeholderShown = true;
         _popPosHook = hl.posHook;
         pop.style.display = 'block'; window._wordPopOpenAt = Date.now();
-        pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 查询中…</div>';
+        pop.innerHTML = '<div style="padding:14px;color:var(--rc-text-muted)">⏳ 查询中…</div>';
         _positionPop(pop, hl.rect);
       }
     }, 400);
@@ -1546,19 +1546,19 @@
       if (s.phon_us) head.push('<span style="font-style:italic">US ' + esc(s.phon_us) + '</span>');
       if (s.phon_uk) head.push('<span style="font-style:italic">UK ' + esc(s.phon_uk) + '</span>');
       if (s.freq_bnc) head.push('<span style="color:#5a6680;font-size:11px">BNC #' + s.freq_bnc + '</span>');
-      if (s.audio_us) head.push('<button data-wp-act="audio" data-wp-audio="' + escAttr(s.audio_us) + '" style="background:transparent;border:1px solid #3b6db5;color:#a8cdff;border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0">🔊</button>');
-      html += '<div style="display:flex;gap:8px;align-items:center;color:#a8cdff;font-size:13px">' + head.join(' · ') + '</div>';
+      if (s.audio_us) head.push('<button data-wp-act="audio" data-wp-audio="' + escAttr(s.audio_us) + '" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0">🔊</button>');
+      html += '<div style="display:flex;gap:8px;align-items:center;color:var(--rc-text-strong);font-size:13px">' + head.join(' · ') + '</div>';
       if (s.lemma && s.lemma !== word) {
-        html += '<div style="margin-top:4px;color:#7a8497;font-size:11px">原型：<code>' + esc(s.lemma) + '</code>' + (s.forms && s.forms.length ? '（' + s.forms.map(esc).join('/') + '）' : '') + '</div>';
+        html += '<div style="margin-top:4px;color:var(--rc-text-dim);font-size:11px">原型：<code>' + esc(s.lemma) + '</code>' + (s.forms && s.forms.length ? '（' + s.forms.map(esc).join('/') + '）' : '') + '</div>';
       }
-      if (s.translation) html += '<div style="margin-top:10px;color:#cfe6ff;white-space:pre-wrap;line-height:1.6">' + esc(s.translation) + '</div>';
+      if (s.translation) html += '<div style="margin-top:10px;color:var(--rc-text-strong);white-space:pre-wrap;line-height:1.6">' + esc(s.translation) + '</div>';
       // MW + Free Dict 例句(合并)
       var allDefs = [];
       if (s.mw_defs.length) allDefs.push({ label: '📚 MW', defs: s.mw_defs });
       if (s.fd_defs.length) allDefs.push({ label: '🌐 Wiktionary', defs: s.fd_defs });
       for (var gi = 0; gi < allDefs.length; gi++) {
         var grp = allDefs[gi];
-        html += '<div style="margin-top:12px;padding-top:8px;border-top:1px solid #2a3550;color:#8a9bb4;font-size:12px"><b style="color:#7a8497">' + esc(grp.label) + '</b>';
+        html += '<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--rc-border);color:var(--rc-text-muted);font-size:12px"><b style="color:var(--rc-text-dim)">' + esc(grp.label) + '</b>';
         html += '<ul style="margin:6px 0 0 18px;padding:0;line-height:1.6">';
         var defs = grp.defs.slice(0, 6);
         for (var di = 0; di < defs.length; di++) {
@@ -1579,7 +1579,7 @@
         var meta = [];
         if (s.synonyms.length) meta.push('同 ' + s.synonyms.slice(0, 5).map(esc).join(', '));
         if (s.antonyms.length) meta.push('反 ' + s.antonyms.slice(0, 5).map(esc).join(', '));
-        html += '<div style="margin-top:8px;color:#7a8497;font-size:11px">' + meta.join(' · ') + '</div>';
+        html += '<div style="margin-top:8px;color:var(--rc-text-dim);font-size:11px">' + meta.join(' · ') + '</div>';
       }
       contentEl.innerHTML = html;
       // 底部 actions:搬到 #vocab-actions(脱离内容滚动区,始终可见)
@@ -1587,11 +1587,11 @@
       if (va) {
         va.className = 'show';
         va.innerHTML =
-          '<button data-wp-act="vocabAnki" data-wp-arg="' + escAttr(s.lemma || word) + '" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>' +
+          '<button data-wp-act="vocabAnki" data-wp-arg="' + escAttr(s.lemma || word) + '" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>' +
           '<button data-wp-act="vocabKnown" data-wp-arg="' + escAttr(s.lemma || word) + '" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px" title="掌握度直接设为 100%，此后不再算作生词">✓ 已掌握</button>' +
           (s.sources_hit.length
-            ? '<span style="color:#5a6680;font-size:10px;margin-left:auto">源：' + s.sources_hit.join(' + ') + (s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file=' + encodeURIComponent(s.vocab_note) + '" style="color:#60a5fa">在 Obsidian 打开词条 →</a>' : '') + '</span>'
-            : '<span style="color:#5a6680;font-size:10px;margin-left:auto">⏳ 加载更多源…</span>');
+            ? '<span style="color:var(--rc-text-dim);font-size:10px;margin-left:auto">源：' + s.sources_hit.join(' + ') + (s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file=' + encodeURIComponent(s.vocab_note) + '" style="color:var(--rc-accent)">在 Obsidian 打开词条 →</a>' : '') + '</span>'
+            : '<span style="color:var(--rc-text-dim);font-size:10px;margin-left:auto">⏳ 加载更多源…</span>');
       }
     };
 
@@ -1794,7 +1794,7 @@
       if (_isJaWord(word)) {
         // App 1.1.35 的旧交互：用户已通过小框释义区主动展开；完整词典仍
         // 未命中时直接开始深度解释，不再要求再点一次“手动使用 Pi”。
-        contentEl.innerHTML = '<div style="padding:6px 2px 10px;color:#8a9bb4">「' + esc(word) +
+        contentEl.innerHTML = '<div style="padding:6px 2px 10px;color:var(--rc-text-muted)">「' + esc(word) +
           '」暂无词典释义（可能是人名/专有名词），已请 AI 讲解：</div>' +
           '<button id="jp-ai-btn" style="display:none"></button><div id="jp-ai-out" class="jp-ai-out"></div>';
         try { jpAiDeep(word); } catch (_) {}
@@ -1867,8 +1867,8 @@
       va.className = 'show';
       var bs = 'border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px';
       va.innerHTML =
-        '<button data-wp-act="tts" data-wp-arg="' + rq + '" data-wp-lang="ja-JP" style="background:transparent;border:1px solid #3b6db5;color:#a8cdff;' + bs + '">🔊 朗读</button>' +
-        '<button data-wp-act="vocabAnki" data-wp-arg="' + wq + '" style="background:#244470;border:1px solid #3b6db5;color:#fff;' + bs + '">🎴 加入 Anki</button>' +
+        '<button data-wp-act="tts" data-wp-arg="' + rq + '" data-wp-lang="ja-JP" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);' + bs + '">🔊 朗读</button>' +
+        '<button data-wp-act="vocabAnki" data-wp-arg="' + wq + '" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;' + bs + '">🎴 加入 Anki</button>' +
         '<button data-wp-act="vocabKnown" data-wp-arg="' + wq + '" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;' + bs + '" title="掌握度设为100%">✓ 已掌握</button>';
     }
     return true;

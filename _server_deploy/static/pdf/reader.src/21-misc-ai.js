@@ -699,13 +699,13 @@ window.onChat = () => {
 // 对话面板打开(原 onChat 尾段逐字搬入;参数名沿用 lastSelText/context 保持函数体不变)
 function _openChat(lastSelText, context) {
   let html = '<div style="font-size:12.5px;line-height:1.65">'
-    + '<div style="color:#a8cdff;font-weight:600;margin-bottom:3px">📌 原文</div>'
-    + '<div style="color:#cfe6ff;white-space:pre-wrap">' + _esc(lastSelText) + '</div>';
+    + '<div style="color:var(--rc-text-strong);font-weight:600;margin-bottom:3px">📌 原文</div>'
+    + '<div style="color:var(--rc-text-strong);white-space:pre-wrap">' + _esc(lastSelText) + '</div>';
   if (context && context.trim() !== lastSelText.trim()) {
     html += '<div style="color:#a8cdff;font-weight:600;margin:10px 0 3px">📖 上下文</div>'
-      + '<div style="color:#8a9bb4;white-space:pre-wrap">' + _esc(context) + '</div>';
+      + '<div style="color:var(--rc-text-muted);white-space:pre-wrap">' + _esc(context) + '</div>';
   }
-  html += '<div style="margin-top:12px;color:#5a6680">↓ 在下方输入问题，AI 会结合原文和上下文回答</div></div>';
+  html += '<div style="margin-top:12px;color:var(--rc-text-dim)">↓ 在下方输入问题，AI 会结合原文和上下文回答</div></div>';
   openResult('💬 AI 对话', lastSelText, html);
   setTimeout(() => {
     const i = document.getElementById('result-followup-input');
@@ -745,7 +745,7 @@ window.onToNote = async () => {
       const safeUrl = (d.obsidian_url || '').replace(/'/g,"\\'");
       document.getElementById('result-content').innerHTML =
         '<div>✓ 笔记已创建：<code>' + d.note_path + '</code>（含 PDF 来源引用）</div>' +
-        '<div style="margin-top:10px"><button onclick="location.href=\'' + safeUrl + '\'" style="background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:6px 14px;cursor:pointer">📂 在 Obsidian 中打开</button></div>';
+        '<div style="margin-top:10px"><button onclick="location.href=\'' + safeUrl + '\'" style="background:#1a2540;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:6px;padding:6px 14px;cursor:pointer">📂 在 Obsidian 中打开</button></div>';
     } else {
       document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + (d.error || '失败') + '</div>';
     }

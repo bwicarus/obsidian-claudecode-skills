@@ -356,7 +356,7 @@ function _ensureBgJobsEl() {
 function _startBgJob(text) {
   const id = 'bgj' + (++_bgJobSeq);
   const el = document.createElement('div'); el.id = id;
-  el.style.cssText = 'background:#10162a;border:1px solid #3b6db5;color:#cfe6ff;padding:7px 12px;border-radius:8px;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,.5);max-width:280px';
+  el.style.cssText = 'background:#10162a;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);padding:7px 12px;border-radius:8px;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,.5);max-width:280px';
   el.textContent = '⏳ ' + text;
   _ensureBgJobsEl().appendChild(el);
   return id;

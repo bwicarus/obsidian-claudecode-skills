@@ -259,7 +259,7 @@ if (window.__bwPwaProviderOnly) return;
     s.textContent =
       '.rc-vids{display:grid;grid-template-columns:1fr;gap:8px;margin:8px 0 4px;align-self:stretch}' +
       '@media(min-width:440px){.rc-vids{grid-template-columns:1fr 1fr}}' +
-      '.rc-vid{background:#0d1322;border:1px solid #263255;border-radius:10px;overflow:hidden}' +
+      '.rc-vid{background:var(--rc-bg-canvas);border:1px solid #263255;border-radius:10px;overflow:hidden}' +
       '.rc-vid-thumb{position:relative;aspect-ratio:16/9;background:#000;cursor:pointer;-webkit-touch-callout:none}' +
       '.rc-vid-thumb img{width:100%;height:100%;object-fit:cover;display:block;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;pointer-events:none}' +
       '.rc-vid-thumb-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#7d8db0;font-size:11px;background:#10182b}' +
@@ -274,17 +274,17 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-vid-src.is-yt{background:rgba(220,40,40,.92)}' +       /* YouTube 红 */
       '.rc-vid-dur{position:absolute;right:6px;bottom:6px;z-index:3;font-size:10px;line-height:1;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:#fff;pointer-events:none}' +
       '.rc-vid-meta{padding:7px 9px}' +
-      '.rc-vid-title{font-size:12.5px;color:#dbe7ff;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
-      '.rc-vid-ch{font-size:11px;color:#7c93c4;margin-top:3px}' +
+      '.rc-vid-title{font-size:12.5px;color:var(--rc-text-strong);line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
+      '.rc-vid-ch{font-size:11px;color:var(--rc-text-muted);margin-top:3px}' +
       /* 中文字幕:🇨🇳字幕 / 🎯精翻 两档按钮 + 下方字幕条(跟播放进度高亮) */
       /* 偏好 toggle:混进 quick 栏(同「模型」一行),尺寸/圆角对齐 quick button,用透明描边+选中蓝区分是开关不是即时动作 */
-      '#ep-asst-quick button.rc-media-tg,#asst-quick button.rc-media-tg{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:#8a9bb4;background:transparent;border:1px solid #2a3550;border-radius:8px;padding:6px 10px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:color .15s,border-color .15s,background .15s}' +
+      '#ep-asst-quick button.rc-media-tg,#asst-quick button.rc-media-tg{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--rc-text-muted);background:transparent;border:1px solid var(--rc-border);border-radius:8px;padding:6px 10px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:color .15s,border-color .15s,background .15s}' +
       '.rc-media-tg svg{opacity:.85}' +
       '.rc-media-tg:active{transform:scale(.96)}' +
-      '#ep-asst-quick button.rc-media-tg.on,#asst-quick button.rc-media-tg.on{color:#7dd3fc;border-color:#3b6db5;background:rgba(59,109,181,.14)}' +
+      '#ep-asst-quick button.rc-media-tg.on,#asst-quick button.rc-media-tg.on{color:var(--rc-accent-cyan);border-color:var(--rc-border-accent);background:rgba(59,109,181,.14)}' +
       '.rc-media-tg.on svg{opacity:1}' +
       '.rc-img-broken{font-size:12px;color:#caa;display:inline-block;padding:3px 9px;border:1px dashed rgba(200,140,140,.5);border-radius:6px;margin:2px 0}' +
-      '.rc-vid-ghost{position:fixed;z-index:99999;pointer-events:none;background:#1a2540;color:#cfe6ff;border:1px solid #3b6db5;border-radius:8px;padding:6px 12px;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.5)}' +
+      '.rc-vid-ghost{position:fixed;z-index:99999;pointer-events:none;background:var(--rc-bg-raised);color:var(--rc-text-strong);border:1px solid var(--rc-border-accent);border-radius:8px;padding:6px 12px;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.5)}' +
       '.rc-vid-fav{position:absolute;top:6px;right:6px;z-index:3;width:26px;height:26px;border-radius:50%;border:none;background:rgba(0,0,0,.55);color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}' +
       '.rc-vid-fav.on{background:rgba(240,180,40,.92);color:#3a2a00}' +
       '.fav-video{max-width:640px;margin:10px auto}' +

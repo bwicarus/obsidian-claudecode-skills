@@ -275,7 +275,7 @@ if (window.__bwPwaProviderOnly) return;
     var st = document.createElement('style'); st.id = 'rc-flashcard-css';
     st.textContent =
       '.fc-wrap{margin-top:8px;position:relative}' +
-      '.fc-pin{position:absolute;top:-1px;right:2px;z-index:2;background:none;border:none;color:#8a9bb4;cursor:pointer;opacity:.7;padding:3px 5px;-webkit-tap-highlight-color:transparent}' +
+      '.fc-pin{position:absolute;top:-1px;right:2px;z-index:2;background:none;border:none;color:var(--rc-text-muted);cursor:pointer;opacity:.7;padding:3px 5px;-webkit-tap-highlight-color:transparent}' +
       '.fc-pin svg{width:13px;height:13px;display:block}' +
       '.fc-pin:hover{opacity:1;transform:scale(1.1)}' +
       '.fc-track{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;scrollbar-width:none;overscroll-behavior-x:contain}' +
@@ -283,10 +283,10 @@ if (window.__bwPwaProviderOnly) return;
       '.fc-slide{flex:0 0 100%;scroll-snap-align:center;box-sizing:border-box;min-width:0}' +
       '.fc-dots{display:flex;justify-content:center;flex-wrap:wrap;gap:7px;margin-top:10px;padding:2px 4px}' +
       '.fc-dot{width:8px;height:8px;border-radius:50%;background:#3a4560;cursor:pointer;flex:none;transition:background .15s,transform .15s}' +
-      '.fc-dot.on{background:#7dd3fc;transform:scale(1.25)}' +
+      '.fc-dot.on{background:var(--rc-accent-cyan);transform:scale(1.25)}' +
       '.fc-bare .fc-card{background:transparent;border:none;padding:4px 0;box-shadow:none}.fc-bare .fc-wrap{margin-top:0}' +
-      '.fc-slbl{font-size:12px;color:var(--rc-text-muted,#8a9bb4);margin-bottom:6px}' +
-      '.fc-card{background:linear-gradient(145deg,rgba(22,32,58,.82),rgba(13,19,34,.88));border:1px solid rgba(125,211,252,.16);border-radius:var(--rc-radius-xl,12px);padding:14px;font-size:15px;line-height:1.65;color:var(--rc-text,#e6e6f0);max-height:min(46vh,300px);overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;box-shadow:inset 0 1px 0 rgba(255,255,255,.035)}' +
+      '.fc-slbl{font-size:12px;color:var(--rc-text-muted,rgba(235,235,245,.62));margin-bottom:6px}' +
+      '.fc-card{background:linear-gradient(145deg,rgba(22,32,58,.82),rgba(13,19,34,.88));border:1px solid rgba(125,211,252,.16);border-radius:var(--rc-radius-xl,12px);padding:14px;font-size:15px;line-height:1.65;color:var(--rc-text,#fff);max-height:min(46vh,300px);overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;box-shadow:inset 0 1px 0 rgba(255,255,255,.035)}' +
       // 卡面图片:此前这套样式里**一条 img 规则都没有**,AI 生成的带图卡要么撑爆卡片、
       // 要么被挤出可视区(后端那条 markdown 图片被当链接吃掉的 bug 修好后才显出来)。
       '.fc-card img{max-width:100%;height:auto;display:block;margin:.45em auto;border-radius:6px}' +
@@ -295,10 +295,10 @@ if (window.__bwPwaProviderOnly) return;
       // 两条渲染链都具备的真实标记。只隐藏轨道，继续保留原生滚动。
       '.fc-card,.fc-track,.vc-card>.vc-card-bd.fc-bare{scrollbar-width:none}' +
       '.fc-card::-webkit-scrollbar,.fc-track::-webkit-scrollbar,.vc-card>.vc-card-bd.fc-bare::-webkit-scrollbar{width:0;height:0;display:none}' +
-      '.fc-lbl{font-size:12px;color:var(--rc-text-dim,#7a8497);margin-bottom:5px;font-weight:650;letter-spacing:.02em}' +
-      '.fc-ed{width:100%;box-sizing:border-box;background:#10182c;border:1px solid #2a3550;border-radius:8px;color:#e6e6f0;font:inherit;font-size:14px;line-height:1.6;padding:10px 12px;min-height:72px;resize:vertical;margin-bottom:8px}' +
+      '.fc-lbl{font-size:12px;color:var(--rc-text-dim,rgba(235,235,245,.38));margin-bottom:5px;font-weight:650;letter-spacing:.02em}' +
+      '.fc-ed{width:100%;box-sizing:border-box;background:#10182c;border:1px solid var(--rc-border);border-radius:8px;color:var(--rc-text);font:inherit;font-size:14px;line-height:1.6;padding:10px 12px;min-height:72px;resize:vertical;margin-bottom:8px}' +
       '.fc-btns{display:flex;gap:7px;margin-top:10px}' +
-      '.fc-btns button{flex:1;border-radius:9px;padding:7px 0;font-size:12.5px;cursor:pointer;border:1px solid #2a3550;background:#1a2540;color:#cfe6ff;-webkit-tap-highlight-color:transparent}' +
+      '.fc-btns button{flex:1;border-radius:9px;padding:7px 0;font-size:12.5px;cursor:pointer;border:1px solid var(--rc-border);background:var(--rc-bg-raised);color:var(--rc-text-strong);-webkit-tap-highlight-color:transparent}' +
       // 上下滑手势的视觉反馈:卡片跟手位移 + 到阈值后辉光与提示。
       // 按钮**保留**(只收窄):手势在不同设备上的可靠性没法在这里验证,
       // 留着按钮意味着即使手势失灵也不会让卡片没法操作。
@@ -328,7 +328,7 @@ if (window.__bwPwaProviderOnly) return;
       '.fc-card.fc-draftcard{display:flex;flex-direction:column;overflow:hidden;padding-bottom:0}' +
       '.fc-draft-body{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}' +
       '.fc-card.fc-draftcard .fc-btns{flex:0 0 auto;margin-top:0;padding:10px 0 12px;border-top:1px solid rgba(125,211,252,.14)}' +
-      '.fc-face{cursor:pointer;min-height:44px}.fc-face .fc-hint{font-size:12px;color:var(--rc-text-muted,#8a9bb4);margin-top:10px}' +
+      '.fc-face{cursor:pointer;min-height:44px}.fc-face .fc-hint{font-size:12px;color:var(--rc-text-muted,rgba(235,235,245,.62));margin-top:10px}' +
       '.fc-back{border-top:1px solid rgba(255,255,255,.10);margin-top:12px;padding-top:12px}' +
       '.fc-eases{display:flex;gap:6px;margin-top:12px}' +
       // 所有学习态 Anki 投影都把卡面正文和不可逆评分操作分成两个结构层。
@@ -340,13 +340,13 @@ if (window.__bwPwaProviderOnly) return;
       '.fc-review-footer .fc-eases,.fc-review-footer .fc-unavailable{margin-top:0}' +
       '.fc-reveal{width:100%;border-radius:9px;padding:10px 12px;font-size:13px;font-weight:650;cursor:pointer;border:1px solid rgba(125,211,252,.42);background:rgba(30,58,138,.28);color:#bae6fd;-webkit-tap-highlight-color:transparent}' +
       '.fc-unavailable{margin-top:12px;padding:9px 10px;border-radius:9px;border:1px solid rgba(245,158,11,.35);background:rgba(120,53,15,.18);color:#fcd34d;font-size:12px}' +
-      '.fc-e{flex:1;border-radius:9px;padding:9px 0;font-size:13px;cursor:pointer;border:1px solid #2a3550;background:#1a2540;color:#cfe6ff;-webkit-tap-highlight-color:transparent}' +
+      '.fc-e{flex:1;border-radius:9px;padding:9px 0;font-size:13px;cursor:pointer;border:1px solid var(--rc-border);background:var(--rc-bg-raised);color:var(--rc-text-strong);-webkit-tap-highlight-color:transparent}' +
       '.fc-e.e1{border-color:#7f1d1d;color:#fca5a5}.fc-e.e2{border-color:#78350f;color:#fcd34d}' +
       '.fc-e.e3{border-color:#14532d;color:#86efac}.fc-e.e4{border-color:#1e3a8a;color:#93c5fd}' +
       '.fc-pending{margin-top:12px;padding:10px 11px;border-radius:9px;border:1px solid rgba(125,211,252,.28);background:rgba(30,58,138,.16);color:#bae6fd;font-size:12px}' +
-      '.fc-collapsed{display:flex;align-items:center;gap:10px;background:#0d1322;border:1px solid #1f2740;border-radius:10px;padding:12px 14px;cursor:pointer;font-size:13px;color:#8a9bb4}' +
+      '.fc-collapsed{display:flex;align-items:center;gap:10px;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);border-radius:10px;padding:12px 14px;cursor:pointer;font-size:13px;color:var(--rc-text-muted)}' +
       '.fc-collapsed b{color:#86efac}' +
-      '.fc-donehd{display:flex;align-items:center;gap:8px;font-size:12px;color:#86efac;padding-bottom:9px;margin-bottom:10px;border-bottom:1px dashed #2a3550}' +
+      '.fc-donehd{display:flex;align-items:center;gap:8px;font-size:12px;color:#86efac;padding-bottom:9px;margin-bottom:10px;border-bottom:1px dashed var(--rc-border)}' +
       '.fc-donehd b{color:#bbf7d0}';
     document.head.appendChild(st);
   }

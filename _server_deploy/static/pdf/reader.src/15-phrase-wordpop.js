@@ -258,7 +258,7 @@ async function _showPhrasePopoverNative(text, opts) {
                    mastered: _phraseMarkSet.has(_phraseNorm(text))};
   pop.style.display = 'block';
   window._wordPopOpenAt = Date.now();
-  pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 处理词组…</div>';
+  pop.innerHTML = '<div style="padding:14px;color:var(--rc-text-muted)">⏳ 处理词组…</div>';
   _positionWordPop(pop);
   // **点了词组按钮**才把当前选区变持久呼吸高亮（查询中呼吸→出结果常亮保持，点高亮才消失）。
   // 点高亮重新弹框时 opts.noHighlight=true → 只弹框、不再建新高亮。
@@ -735,7 +735,7 @@ function _wordHlClick(hl) {
     _wordPopState = {word: hl.word, ctx: hl.ctx, lemma: hl.word};
     const pop = document.getElementById('word-pop');
     pop.style.display = 'block'; window._wordPopOpenAt = Date.now();
-    pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 查词中…</div>';
+    pop.innerHTML = '<div style="padding:14px;color:var(--rc-text-muted)">⏳ 查词中…</div>';
     _positionWordPop(pop, hl.charSel);
     _renderWordHlsFor(hl.pw);   // boxOpen=true → renderWordHl 过滤掉它,不再画呼吸高亮
   }

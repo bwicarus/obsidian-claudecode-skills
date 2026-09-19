@@ -54,7 +54,7 @@ function _toast(msg) {
   if (!t) {
     t = document.createElement('div');
     t.id = 'hl-toast';
-    t.style.cssText = 'position:fixed;left:50%;bottom:30px;transform:translateX(-50%);background:#10162a;border:1px solid #3b6db5;color:#cfe6ff;padding:9px 18px;border-radius:8px;font-size:13px;z-index:500;box-shadow:0 6px 16px rgba(0,0,0,.6);pointer-events:none';
+    t.style.cssText = 'position:fixed;left:50%;bottom:30px;transform:translateX(-50%);background:var(--rc-bg-surface);border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);padding:9px 18px;border-radius:8px;font-size:13px;z-index:500;box-shadow:0 6px 16px rgba(0,0,0,.6);pointer-events:none';
     document.body.appendChild(t);
   }
   t.textContent = msg;
@@ -812,11 +812,11 @@ window._followupAsk = async () => {
   const contentEl = document.getElementById('result-content');
   const history = (contentEl.textContent || '').slice(0, 4000);
   const qDiv = document.createElement('div');
-  qDiv.style.cssText = 'margin-top:12px;padding-top:10px;border-top:1px solid #2a3550;color:#a8cdff;font-size:12px;font-weight:600';
+  qDiv.style.cssText = 'margin-top:12px;padding-top:10px;border-top:1px solid var(--rc-border);color:var(--rc-text-strong);font-size:12px;font-weight:600';
   qDiv.textContent = '问：' + q;
   contentEl.appendChild(qDiv);
   const aDiv = document.createElement('div');
-  aDiv.style.cssText = 'margin-top:6px;color:#e6e6f0';
+  aDiv.style.cssText = 'margin-top:6px;color:var(--rc-text)';
   aDiv.innerHTML = '<span class="loading">⏳</span>';
   contentEl.appendChild(aDiv);
   contentEl.scrollTop = contentEl.scrollHeight;

@@ -32,18 +32,18 @@ async function dictStream(word, ctx) {
     if (s.phon_us) head.push(`<span style="font-style:italic">US ${esc(s.phon_us)}</span>`);
     if (s.phon_uk) head.push(`<span style="font-style:italic">UK ${esc(s.phon_uk)}</span>`);
     if (s.freq_bnc) head.push(`<span style="color:#5a6680;font-size:11px">BNC #${s.freq_bnc}</span>`);
-    if (s.audio_us) head.push(`<button onclick="new Audio('${esc(s.audio_us)}').play()" style="background:transparent;border:1px solid #3b6db5;color:#a8cdff;border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0">🔊</button>`);
-    html += `<div style="display:flex;gap:8px;align-items:center;color:#a8cdff;font-size:13px">${head.join(' · ')}</div>`;
+    if (s.audio_us) head.push(`<button onclick="new Audio('${esc(s.audio_us)}').play()" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0">🔊</button>`);
+    html += `<div style="display:flex;gap:8px;align-items:center;color:var(--rc-text-strong);font-size:13px">${head.join(' · ')}</div>`;
     if (s.lemma && s.lemma !== word) {
-      html += `<div style="margin-top:4px;color:#7a8497;font-size:11px">原型：<code>${esc(s.lemma)}</code>${s.forms?.length?'（'+s.forms.map(esc).join('/')+'）':''}</div>`;
+      html += `<div style="margin-top:4px;color:var(--rc-text-dim);font-size:11px">原型：<code>${esc(s.lemma)}</code>${s.forms?.length?'（'+s.forms.map(esc).join('/')+'）':''}</div>`;
     }
-    if (s.translation) html += `<div style="margin-top:10px;color:#cfe6ff;white-space:pre-wrap;line-height:1.6">${esc(s.translation)}</div>`;
+    if (s.translation) html += `<div style="margin-top:10px;color:var(--rc-text-strong);white-space:pre-wrap;line-height:1.6">${esc(s.translation)}</div>`;
     // MW + Free Dict 例句（合并）
     const allDefs = [];
     if (s.mw_defs.length) allDefs.push({label: '📚 MW', defs: s.mw_defs});
     if (s.fd_defs.length) allDefs.push({label: '🌐 Wiktionary', defs: s.fd_defs});
     for (const grp of allDefs) {
-      html += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid #2a3550;color:#8a9bb4;font-size:12px"><b style="color:#7a8497">${esc(grp.label)}</b>`;
+      html += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--rc-border);color:var(--rc-text-muted);font-size:12px"><b style="color:var(--rc-text-dim)">${esc(grp.label)}</b>`;
       html += `<ul style="margin:6px 0 0 18px;padding:0;line-height:1.6">`;
       for (const d of grp.defs.slice(0, 6)) {
         html += `<li>${d.pos ? '<b>'+esc(d.pos)+'</b> ' : ''}${esc(d.en)}`;
@@ -60,7 +60,7 @@ async function dictStream(word, ctx) {
       const meta = [];
       if (s.synonyms.length) meta.push('同 ' + s.synonyms.slice(0,5).map(esc).join(', '));
       if (s.antonyms.length) meta.push('反 ' + s.antonyms.slice(0,5).map(esc).join(', '));
-      html += `<div style="margin-top:8px;color:#7a8497;font-size:11px">${meta.join(' · ')}</div>`;
+      html += `<div style="margin-top:8px;color:var(--rc-text-dim);font-size:11px">${meta.join(' · ')}</div>`;
     }
     contentEl.innerHTML = html;
     // 底部 actions：搬到 #vocab-actions（脱离内容滚动区，始终可见）
@@ -68,10 +68,10 @@ async function dictStream(word, ctx) {
     if (va) {
       va.className = 'show';
       va.innerHTML =
-        `<button onclick="addVocabAnki('${esc(s.lemma||word)}')" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>` +
+        `<button onclick="addVocabAnki('${esc(s.lemma||word)}')" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>` +
         `<button onclick="markVocabKnown('${esc(s.lemma||word)}', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px" title="掌握度直接设为 100%，此后不再算作生词">✓ 已掌握</button>` +
         (s.sources_hit.length
-          ? `<span style="color:#5a6680;font-size:10px;margin-left:auto">源：${s.sources_hit.join(' + ')}${s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file='+encodeURIComponent(s.vocab_note)+'" style="color:#60a5fa">在 Obsidian 打开词条 →</a>' : ''}</span>`
+          ? `<span style="color:var(--rc-text-dim);font-size:10px;margin-left:auto">源：${s.sources_hit.join(' + ')}${s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file='+encodeURIComponent(s.vocab_note)+'" style="color:#60a5fa">在 Obsidian 打开词条 →</a>' : ''}</span>`
           : `<span style="color:#5a6680;font-size:10px;margin-left:auto">⏳ 加载更多源…</span>`);
     }
   };
@@ -595,8 +595,8 @@ async function dictStreamJP(word, ctx) {
     va.className = 'show';
     const bs = 'border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px';
     va.innerHTML =
-      '<button onclick="_ttsWord(\'' + rq + '\', \'ja-JP\')" style="background:transparent;border:1px solid #3b6db5;color:#a8cdff;' + bs + '">🔊 朗读</button>' +
-      '<button onclick="addVocabAnki(\'' + wq + '\')" style="background:#244470;border:1px solid #3b6db5;color:#fff;' + bs + '">🎴 加入 Anki</button>' +
+      '<button onclick="_ttsWord(\'' + rq + '\', \'ja-JP\')" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);' + bs + '">🔊 朗读</button>' +
+      '<button onclick="addVocabAnki(\'' + wq + '\')" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;' + bs + '">🎴 加入 Anki</button>' +
       '<button onclick="markVocabKnown(\'' + wq + '\', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;' + bs + '" title="掌握度设为100%">✓ 已掌握</button>';
   }
   return true;

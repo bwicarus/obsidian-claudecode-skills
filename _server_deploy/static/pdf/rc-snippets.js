@@ -15,7 +15,7 @@
     if (injected) return; injected = true;
     var css = document.createElement('style'); css.id = 'rc-snip-css';
     css.textContent =
-      '.rc-snip-spin{display:inline-block;width:13px;height:13px;border:2px solid #2b3f6e;border-top-color:#7dd3fc;border-radius:50%;animation:rcSnipSpin .8s linear infinite;vertical-align:-2px}' +
+      '.rc-snip-spin{display:inline-block;width:13px;height:13px;border:2px solid #2b3f6e;border-top-color:var(--rc-accent-cyan);border-radius:50%;animation:rcSnipSpin .8s linear infinite;vertical-align:-2px}' +
       '@keyframes rcSnipSpin{to{transform:rotate(360deg)}}';
     document.head.appendChild(css);
   }

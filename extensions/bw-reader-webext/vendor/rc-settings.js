@@ -282,7 +282,7 @@ if (window.__bwPwaProviderOnly) return;
   function _renderAiInline() {
     var el = $('rcset-ai-inline'); if (!el) return;
     if (window.RC && RC.assistant && RC.assistant.renderModelSettings) { RC.assistant.renderModelSettings(el); return; }
-    el.innerHTML = '<div style="font-size:12px;color:#8a9bb4">助手模块(rc-assistant.js)未加载，无法显示模型设置，刷新重试。</div>';
+    el.innerHTML = '<div style="font-size:12px;color:var(--rc-text-muted)">助手模块(rc-assistant.js)未加载，无法显示模型设置，刷新重试。</div>';
   }
 
   // ── 便签 tab(共享设备级键;回填在 open() host 无关跑,保存挂「保存」按钮顶部 host 无关跑)──
@@ -459,13 +459,13 @@ if (window.__bwPwaProviderOnly) return;
       var row = document.createElement('button');
       row.type = 'button';
       row.className = 'rcset-native-note-row';
-      row.style.cssText = 'display:block;width:100%;text-align:left;background:#0d1322;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:8px 10px;margin:6px 0;cursor:pointer';
+      row.style.cssText = 'display:block;width:100%;text-align:left;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:8px 10px;margin:6px 0;cursor:pointer';
       var head = document.createElement('b');
       head.style.cssText = 'display:block;font-size:12px;overflow-wrap:anywhere';
       head.textContent = String(note.title || note.fileName || '未命名笔记') +
         (note.pendingExport ? '（等待写入）' : '');
       var meta = document.createElement('small');
-      meta.style.cssText = 'display:block;color:#8fa5c8;font-size:10px;margin-top:3px;overflow-wrap:anywhere';
+      meta.style.cssText = 'display:block;color:var(--rc-text-muted);font-size:10px;margin-top:3px;overflow-wrap:anywhere';
       meta.textContent = [String(note.fileName || ''), _nativeNoteDate(note.createdAt)].filter(Boolean).join(' · ');
       var preview = document.createElement('span');
       preview.style.cssText = 'display:block;color:#aebbd0;font-size:11px;line-height:1.45;margin-top:4px;white-space:pre-wrap;overflow-wrap:anywhere';
@@ -650,38 +650,38 @@ if (window.__bwPwaProviderOnly) return;
       // 设置是阅读器内最高的可交互 Web 层：正文标记、卡片、视频与语音浮层都必须退到它下面。
       // 删除确认使用浏览器/原生确认面，天然仍在 Web 内容之上。
       '.rc-set-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:2147483400}' +
-      '.rc-set-mask .ep-set-modal{background:#10162a;border:1px solid #2a3550;border-radius:10px;padding:16px 20px;width:420px;max-width:92vw;max-height:88vh;display:flex;flex-direction:column}' +
-      '.rc-set-mask .ep-set-h3{margin:0 0 10px;font-size:15px;color:#cfe6ff}' +
-      '.rc-set-mask .set-tabs{display:flex;gap:2px;border-bottom:1px solid #2a3550;flex-wrap:wrap}' +
-      '.rc-set-mask .set-tab{background:transparent;border:none;border-bottom:2px solid transparent;color:#8a9bb4;font-size:13px;padding:7px 13px;cursor:pointer;margin-bottom:-1px}' +
-      '.rc-set-mask .set-tab.active{color:#cfe6ff;border-bottom-color:#3b6db5;font-weight:600}' +
+      '.rc-set-mask .ep-set-modal{background:var(--rc-bg-surface);border:1px solid var(--rc-border);border-radius:10px;padding:16px 20px;width:420px;max-width:92vw;max-height:88vh;display:flex;flex-direction:column}' +
+      '.rc-set-mask .ep-set-h3{margin:0 0 10px;font-size:15px;color:var(--rc-text-strong)}' +
+      '.rc-set-mask .set-tabs{display:flex;gap:2px;border-bottom:1px solid var(--rc-border);flex-wrap:wrap}' +
+      '.rc-set-mask .set-tab{background:transparent;border:none;border-bottom:2px solid transparent;color:var(--rc-text-muted);font-size:13px;padding:7px 13px;cursor:pointer;margin-bottom:-1px}' +
+      '.rc-set-mask .set-tab.active{color:var(--rc-text-strong);border-bottom-color:var(--rc-border-accent);font-weight:600}' +
       '.rc-set-mask .ep-set-body{overflow-y:auto;flex:1;min-height:0;padding:12px 4px 2px}' +
-      '.rc-set-mask .set-lbl{display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px}' +
-      '.rc-set-mask .ep-set-sel{width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px}' +
+      '.rc-set-mask .set-lbl{display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:4px}' +
+      '.rc-set-mask .ep-set-sel{width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px}' +
       '.rc-set-mask .ep-set-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:9px 0}' +
-      '.rc-set-mask .ep-set-row>label{font-size:13px;color:#cfe6ff}' +
+      '.rc-set-mask .ep-set-row>label{font-size:13px;color:var(--rc-text-strong)}' +
       '.rc-set-mask .stepper{display:flex;align-items:center;gap:6px}' +
-      '.rc-set-mask .stepper button{width:30px;height:30px;border-radius:7px;background:#16203a;border:1px solid #2a3a63;color:#cfe0ff;font-size:16px;cursor:pointer}' +
-      '.rc-set-mask .stepper .v{font-size:13px;color:#cfe0ff;min-width:46px;text-align:center}' +
-      '.rc-set-mask .seg{display:flex;border:1px solid #2a3a63;border-radius:8px;overflow:hidden}' +
-      '.rc-set-mask .seg button{background:#0d1426;border:0;color:#9fb0d6;padding:6px 12px;font-size:12px;cursor:pointer}' +
+      '.rc-set-mask .stepper button{width:30px;height:30px;border-radius:7px;background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text-strong);font-size:16px;cursor:pointer}' +
+      '.rc-set-mask .stepper .v{font-size:13px;color:var(--rc-text-strong);min-width:46px;text-align:center}' +
+      '.rc-set-mask .seg{display:flex;border:1px solid var(--rc-border-control);border-radius:8px;overflow:hidden}' +
+      '.rc-set-mask .seg button{background:var(--rc-bg-canvas);border:0;color:#9fb0d6;padding:6px 12px;font-size:12px;cursor:pointer}' +
       '.rc-set-mask .seg button.on{background:#2563eb;color:#fff}' +
-      '.rc-set-mask .ep-set-chk{display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer}' +
+      '.rc-set-mask .ep-set-chk{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;cursor:pointer}' +
       '.rc-set-mask .ep-set-chk input{width:16px;height:16px}' +
-      '.rc-set-mask .ep-set-note{font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5}' +
-      '.rc-set-mask .ep-set-hr{border:none;border-top:1px solid #2a3550;margin:14px 0}' +
-      '.rc-set-mask .ep-full-btn{width:100%;background:#16203a;border:1px solid #2a3a63;color:#cfe0ff;border-radius:8px;padding:9px;font-size:13px;cursor:pointer}' +
+      '.rc-set-mask .ep-set-note{font-size:11px;color:var(--rc-text-dim);margin-bottom:14px;line-height:1.5}' +
+      '.rc-set-mask .ep-set-hr{border:none;border-top:1px solid var(--rc-border);margin:14px 0}' +
+      '.rc-set-mask .ep-full-btn{width:100%;background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text-strong);border-radius:8px;padding:9px;font-size:13px;cursor:pointer}' +
       // 颜色管理(照搬 PDF .set-hl-row)
       '.rc-set-mask .set-hl-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px}' +
       '.rc-set-mask .set-hl-row .swatch-w{position:relative;display:inline-block}' +
-      '.rc-set-mask .set-hl-row .swatch{width:28px;height:28px;border-radius:50%;border:2px solid #2a3550;cursor:default;display:block}' +
+      '.rc-set-mask .set-hl-row .swatch{width:28px;height:28px;border-radius:50%;border:2px solid var(--rc-border);cursor:default;display:block}' +
       '.rc-set-mask .set-hl-row .del{position:absolute;right:-5px;top:-5px;width:16px;height:16px;border-radius:50%;background:#7a2828;border:1px solid #4a1a1a;color:#ffb4b4;font-size:10px;line-height:13px;cursor:pointer;padding:0;text-align:center}' +
       '.rc-set-mask .set-hl-row .del:hover{background:#9a3232}' +
       // 侧栏外观:模糊度 slider 行(照搬 PDF #side-settings .ss-row.ss-col + input[type=range])
       '.rc-set-mask .ep-set-slrow{display:flex;flex-direction:column;align-items:stretch;gap:7px;margin:9px 0}' +
-      '.rc-set-mask .ep-set-slrow>span{font-size:13px;color:#cfe6ff}' +
-      '.rc-set-mask .ep-set-slrow small{color:#7a8497}' +
-      '.rc-set-mask .ep-set-slrow input[type=range]{width:100%;accent-color:#3b6db5}';
+      '.rc-set-mask .ep-set-slrow>span{font-size:13px;color:var(--rc-text-strong)}' +
+      '.rc-set-mask .ep-set-slrow small{color:var(--rc-text-dim)}' +
+      '.rc-set-mask .ep-set-slrow input[type=range]{width:100%;accent-color:var(--rc-border-accent)}';
     var st = document.createElement('style');
     st.id = 'rc-settings-css';
     st.textContent = css;
@@ -951,29 +951,29 @@ if (window.__bwPwaProviderOnly) return;
   function ensureDom() {
     if (_built) return;
     injectCss();
-    var SEL = 'width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px';   // 原生 select 内联样式
-    var LBL = 'display:block;font-size:12px;color:#8a9bb4;margin-bottom:4px';   // 原生 label 内联样式
-    var HR = '<hr style="border:none;border-top:1px solid #2a3550;margin:14px 0">';   // 原生分隔线
+    var SEL = 'width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:14px';   // 原生 select 内联样式
+    var LBL = 'display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:4px';   // 原生 label 内联样式
+    var HR = '<hr style="border:none;border-top:1px solid var(--rc-border);margin:14px 0">';   // 原生分隔线
 
     // ════ pane: AI·翻译(2026-07 收口:旧 model/effort 逐次覆盖下拉已删——唯一真源 = 服务端按功能
     //      action 预设;配置表由 RC.assistant.renderModelSettings **内嵌**渲染,跟助手 ⚙ 浮层同一实现)════
     var paneAi =
       '<div class="set-pane" data-pane="ai">' +
-        '<div style="background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin-bottom:16px">' +
-          '<div style="font-size:13px;color:#cfe0ff;font-weight:600;margin-bottom:4px">🤖 AI 模型（按功能配 后端 / 型号 / 深度）</div>' +
-          '<div style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-bottom:10px">解释 / 问 AI / 翻译・例句 / 字典 AI / 语法分析 / 助手 等所有 AI 调用，都走同一套脱壳 Claude + Gemini 双后端（一边失败自动切另一边）。下面按功能分别选：改完即时生效、服务端保存全设备共用；Gemini 免费档优先、过载自动落付费，「💰仅付费」型号（如 3.1-pro）每次调用按量计费。</div>' +
+        '<div style="background:#11203a;border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin-bottom:16px">' +
+          '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px">🤖 AI 模型（按功能配 后端 / 型号 / 深度）</div>' +
+          '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-bottom:10px">解释 / 问 AI / 翻译・例句 / 字典 AI / 语法分析 / 助手 等所有 AI 调用，都走同一套脱壳 Claude + Gemini 双后端（一边失败自动切另一边）。下面按功能分别选：改完即时生效、服务端保存全设备共用；Gemini 免费档优先、过载自动落付费，「💰仅付费」型号（如 3.1-pro）每次调用按量计费。</div>' +
           '<div id="rcset-ai-inline"></div>' +
         '</div>' +
         '<label style="' + LBL + '">🌐 句子翻译源</label>' +
-        '<select id="set-sent-backend" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px">' +
+        '<select id="set-sent-backend" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px">' +
           '<option value="auto">auto（DeepL 有 key → MyMemory）</option>' +
           '<option value="mymemory">MyMemory（5K/天匿名，50K/天 email 认证）</option>' +
           '<option value="deepl">DeepL（需 dict.deepl_key）</option>' +
           '<option value="ai">AI（用主 AI 后端，按下面 model/effort）</option>' +
         '</select>' +
         '<div id="set-sent-ai-row" style="display:none;margin-bottom:14px">' +
-          '<label style="display:block;font-size:12px;color:#8a9bb4;margin:8px 0 4px">AI 模型</label>' +
-          '<select id="set-sent-model" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:6px">' +
+          '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin:8px 0 4px">AI 模型</label>' +
+          '<select id="set-sent-model" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:6px">' +
             '<option value="haiku">haiku（最快最便宜，句子翻译够用）</option>' +
             '<option value="sonnet">sonnet（平衡）</option>' +
             '<option value="opus">opus（最强）</option>' +
@@ -985,8 +985,8 @@ if (window.__bwPwaProviderOnly) return;
             '<option value="gpt-5.5">gpt-5.5</option>' +
             '<option value="gpt-5.4-mini">gpt-5.4-mini（快、省）</option>' +
           '</select>' +
-          '<label style="display:block;font-size:12px;color:#8a9bb4;margin:4px 0">思考深度</label>' +
-          '<select id="set-sent-effort" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">' +
+          '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin:4px 0">思考深度</label>' +
+          '<select id="set-sent-effort" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px">' +
             '<option value="low">low（翻译用 low 足够）</option>' +
             '<option value="medium">medium</option>' +
             '<option value="high">high</option>' +
@@ -995,25 +995,25 @@ if (window.__bwPwaProviderOnly) return;
         '</div>' +
         // 143(用户设计):语音工具的**调用前垫话**总策略。单个工具可在「长按工具卡 → 详情窗」里单独覆盖。
         //   实测垫话和 function_call 同属一个 response ⇒ 这是体验旋钮不是省钱旋钮(见 REALTIME_2_1_API_GUIDE)。
-        '<div style="background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin:16px 0">' +
-          '<div style="font-size:13px;color:#cfe0ff;font-weight:600;margin-bottom:4px">🗣 语音·调用前垫话</div>' +
-          '<div style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-bottom:10px">AI 调工具前要不要先说一句「我去查一下」。<b>自动</b> = 按这个工具在账本里的<b>真实中位耗时</b>判：慢过阈值才垫话，秒回的静默直接调（免得啰嗦）。单个工具想固定，长按它的工具卡 → 详情窗里单独设。</div>' +
-          '<select id="set-filler-mode" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px">' +
+        '<div style="background:#11203a;border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
+          '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px">🗣 语音·调用前垫话</div>' +
+          '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-bottom:10px">AI 调工具前要不要先说一句「我去查一下」。<b>自动</b> = 按这个工具在账本里的<b>真实中位耗时</b>判：慢过阈值才垫话，秒回的静默直接调（免得啰嗦）。单个工具想固定，长按它的工具卡 → 详情窗里单独设。</div>' +
+          '<select id="set-filler-mode" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px;margin-bottom:8px">' +
             '<option value="auto">自动（按实测耗时判，推荐）</option>' +
             '<option value="always">总是说（每个工具都先垫一句）</option>' +
             '<option value="never">全部静默（工具调用不吭声）</option>' +
           '</select>' +
           '<div id="set-filler-th-row">' +
-            '<label style="display:block;font-size:12px;color:#8a9bb4;margin:4px 0">自动的耗时阈值（秒）：慢于它才垫话</label>' +
-            '<input id="set-filler-th" type="number" step="0.5" min="0.5" max="30" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">' +
+            '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin:4px 0">自动的耗时阈值（秒）：慢于它才垫话</label>' +
+            '<input id="set-filler-th" type="number" step="0.5" min="0.5" max="30" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px">' +
           '</div>' +
         '</div>' +
-        '<div id="rcset-sync-section" data-sec="pwa-sync" style="display:none;background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin:16px 0">' +
-          '<div style="font-size:13px;color:#cfe0ff;font-weight:600;margin-bottom:4px">🔄 跨设备同步</div>' +
+        '<div id="rcset-sync-section" data-sec="pwa-sync" style="display:none;background:#11203a;border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
+          '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px">🔄 跨设备同步</div>' +
           '<div id="rcset-sync-status" style="font-size:12px;color:#aebbd0;line-height:1.55;white-space:pre-wrap">正在读取同步状态……</div>' +
           '<ul id="rcset-sync-conflicts" style="display:none;margin:8px 0 0;padding-left:18px;color:#8fa0ba;font-size:11px;line-height:1.5"></ul>' +
         '</div>' +
-        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;cursor:pointer">' +
           '<input type="checkbox" id="set-debug" style="width:16px;height:16px"> 显示调试日志（左下角浮窗）' +
         '</label>' +
       '</div>';
@@ -1021,33 +1021,33 @@ if (window.__bwPwaProviderOnly) return;
     // ════ pane: 电脑客户端（Windows 桥接、上下文同步和回退模式集中在这里）════
     var paneComputer =
       '<div class="set-pane" data-pane="computer" style="display:none">' +
-        '<div style="background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin-bottom:16px">' +
-          '<div style="font-size:13px;color:#cfe0ff;font-weight:600;margin-bottom:4px">电脑客户端桥接</div>' +
-          '<div style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-bottom:10px">电脑图标按钮是唯一启动入口；普通电话按钮只负责豆包、GPT 或 Grok。查看状态不会启动应用、采音或发送快捷键。</div>' +
+        '<div style="background:#11203a;border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin-bottom:16px">' +
+          '<div style="font-size:13px;color:var(--rc-text-strong);font-weight:600;margin-bottom:4px">电脑客户端桥接</div>' +
+          '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-bottom:10px">电脑图标按钮是唯一启动入口；普通电话按钮只负责豆包、GPT 或 Grok。查看状态不会启动应用、采音或发送快捷键。</div>' +
           '<div id="rcset-computer-inline"></div>' +
-          '<label id="set-bridge-voice-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:#cfe0ff;font-weight:600;cursor:pointer;margin-top:10px">' +
+          '<label id="set-bridge-voice-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);font-weight:600;cursor:pointer;margin-top:10px">' +
             '<input type="checkbox" id="set-bridge-voice" style="width:16px;height:16px"> 🔊 把语音也桥接进来' +
           '</label>' +
-          '<div id="set-bridge-voice-help" style="display:none;font-size:11px;color:#8a9bb4;line-height:1.6;margin-top:5px">' +
+          '<div id="set-bridge-voice-help" style="display:none;font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:5px">' +
             '关闭 = 仅桥接：语音留在电脑（用电脑音频设备），通话不接到 App；上下文/快照/出卷照常。切换在数秒内由 ReaderPC 重启服务生效。' +
           '</div>' +
           '<div id="set-bridge-voice-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
-          '<label id="set-readerpc-no-voice-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:#cfe0ff;font-weight:600;cursor:pointer;margin-top:10px">' +
+          '<label id="set-readerpc-no-voice-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);font-weight:600;cursor:pointer;margin-top:10px">' +
             '<input type="checkbox" id="set-readerpc-no-voice" style="width:16px;height:16px"> 🔇 无语音功能（其它 Reader 功能保持在线）' +
           '</label>' +
-          '<div id="set-readerpc-no-voice-help" style="display:none;font-size:11px;color:#8a9bb4;line-height:1.6;margin-top:5px">' +
+          '<div id="set-readerpc-no-voice-help" style="display:none;font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:5px">' +
             '开启后不自动拉起 Codex Voice，不启用 F24 保活与音频路由；实时快照、视觉读取、浏览器控制、卡片、Anki、词典、OCR 与历史工具继续在线。' +
           '</div>' +
           '<div id="set-readerpc-no-voice-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
         '</div>' +
-        '<div id="set-ctx-sync-card" style="background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin:16px 0">' +
-          '<label id="set-ctx-sync-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:#cfe0ff;font-weight:600;cursor:pointer">' +
+        '<div id="set-ctx-sync-card" style="background:#11203a;border:1px solid var(--rc-border);border-radius:8px;padding:12px;margin:16px 0">' +
+          '<label id="set-ctx-sync-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);font-weight:600;cursor:pointer">' +
             '<input type="checkbox" id="set-ctx-sync" style="width:16px;height:16px"> 🔁 旧版文字注入同步' +
           '</label>' +
-          '<label id="set-ctx-legacy-row" style="display:flex;align-items:center;gap:8px;font-size:12px;color:#cfe0ff;cursor:pointer;margin-top:10px">' +
+          '<label id="set-ctx-legacy-row" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--rc-text-strong);cursor:pointer;margin-top:10px">' +
             '<input type="checkbox" id="set-ctx-legacy" style="width:16px;height:16px"> 测试旧版文字注入' +
           '</label>' +
-          '<div id="set-ctx-mode-help" style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-top:5px">' +
+          '<div id="set-ctx-mode-help" style="font-size:11px;color:var(--rc-text-muted);line-height:1.6;margin-top:5px">' +
             '实时快照 MCP 跟随 ReaderPC 非语音服务，不受语音功能或旧版同步开关影响。只有测试旧版文字注入时才显示其同步开关。' +
           '</div>' +
           '<div id="set-ctx-sync-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
@@ -1074,52 +1074,52 @@ if (window.__bwPwaProviderOnly) return;
         '</div>' +
         // [PDF] 页码对齐(逐字照搬,内联 onclick=原生 window.applyPageOffset)
         '<div data-sec="pdf-pageoffset">' +
-          '<div style="font-size:13px;color:#cfe6ff;margin-bottom:4px">📖 页码对齐</div>' +
-          '<div style="font-size:11px;color:#7a8497;margin-bottom:8px;line-height:1.5">让阅读器显示的页码＝书上印的页码（PDF 前几页常是封面/目录）。翻到当前这页，把它在书上印的页码填进去点「对齐」即可。<b>每本书独立、自动跨设备同步</b>。</div>' +
-          '<div style="display:flex;align-items:center;gap:6px;font-size:13px;color:#cfe6ff;margin-bottom:6px;flex-wrap:wrap">' +
+          '<div style="font-size:13px;color:var(--rc-text-strong);margin-bottom:4px">📖 页码对齐</div>' +
+          '<div style="font-size:11px;color:var(--rc-text-dim);margin-bottom:8px;line-height:1.5">让阅读器显示的页码＝书上印的页码（PDF 前几页常是封面/目录）。翻到当前这页，把它在书上印的页码填进去点「对齐」即可。<b>每本书独立、自动跨设备同步</b>。</div>' +
+          '<div style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;flex-wrap:wrap">' +
             '当前 PDF 第 <b id="set-pg-pdf">–</b> 页 ＝ 书上第' +
-            '<input type="number" id="set-pg-printed" style="width:64px;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:5px 8px;font-size:13px"> 页' +
+            '<input type="number" id="set-pg-printed" style="width:64px;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:5px 8px;font-size:13px"> 页' +
             '<button type="button" onclick="applyPageOffset()" style="background:#1f6feb;border:none;color:#fff;border-radius:6px;padding:6px 12px;font-size:13px;cursor:pointer">对齐</button>' +
           '</div>' +
-          '<div style="font-size:11px;color:#7a8497;margin-bottom:14px"><span id="set-pg-cur-off">当前偏移：0</span> · <a href="javascript:void 0" onclick="applyPageOffset(0)" style="color:#7dd3fc">重置</a></div>' +
+          '<div style="font-size:11px;color:var(--rc-text-dim);margin-bottom:14px"><span id="set-pg-cur-off">当前偏移：0</span> · <a href="javascript:void 0" onclick="applyPageOffset(0)" style="color:var(--rc-accent-cyan)">重置</a></div>' +
           HR +
         '</div>' +
         // [PDF] 本书插图描述(逐字照搬,onchange=原生 saveFigToggle)
         '<div data-sec="pdf-figures">' +
-          '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">' +
+          '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;cursor:pointer">' +
             '<input type="checkbox" id="set-figures" onchange="saveFigToggle(this.checked)" style="width:16px;height:16px"> 📷 本书插图描述（图区放徽标，点开看 AI 说明）' +
           '</label>' +
-          '<div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后翻到的页会<b>逐页让 AI 识别插图并描述</b>（首次每页几秒、消耗 AI 配额），描述结果存服务器跨端共用。不需要插图说明的书保持关闭即可。<b>每本书独立</b>。</div>' +
+          '<div style="font-size:11px;color:var(--rc-text-dim);margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后翻到的页会<b>逐页让 AI 识别插图并描述</b>（首次每页几秒、消耗 AI 配额），描述结果存服务器跨端共用。不需要插图说明的书保持关闭即可。<b>每本书独立</b>。</div>' +
           // [PDF] 概念网按书开火(用户定:读哪本书时决定哪本;默认隐藏,PDF 的 _fillSettings 揭示+回填)
           '<div data-sec="pdf-conceptnet" style="display:none">' +
-            '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">' +
+            '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;cursor:pointer">' +
               '<input type="checkbox" id="set-conceptnet" onchange="window.saveConceptNetToggle&&saveConceptNetToggle(this.checked)" style="width:16px;height:16px"> 🌱 本书自动生长概念笔记（概念网）' +
             '</label>' +
-            '<div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后夜间流水线对你在本书反复关注的<b>学科概念</b>自动生成概念笔记（引原文定义+自动连边,单词仍归词汇本）。<b>每本书独立</b>,即改即存。</div>' +
+            '<div style="font-size:11px;color:var(--rc-text-dim);margin-bottom:14px;line-height:1.5">默认<b>关闭</b>。开启后夜间流水线对你在本书反复关注的<b>学科概念</b>自动生成概念笔记（引原文定义+自动连边,单词仍归词汇本）。<b>每本书独立</b>,即改即存。</div>' +
           '</div>' +
           HR +
         '</div>' +
         // [PDF] 书籍目录(逐字照搬,onclick=原生 buildToc/showTocBuild;状态区由原生 loadTocStatus 填)
         '<div data-sec="pdf-toc">' +
-          '<label style="display:block;font-size:13px;color:#cfe6ff;margin-bottom:6px">📖 书籍目录（章节 provenance，供图描述/助手定位「书的哪一章节」）</label>' +
-          '<div id="set-toc-status" style="font-size:11px;color:#7a8497;margin-bottom:8px;line-height:1.5">检查中…</div>' +
+          '<label style="display:block;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px">📖 书籍目录（章节 provenance，供图描述/助手定位「书的哪一章节」）</label>' +
+          '<div id="set-toc-status" style="font-size:11px;color:var(--rc-text-dim);margin-bottom:8px;line-height:1.5">检查中…</div>' +
           '<div id="set-toc-build" style="display:none">' +
-            '<div style="font-size:11px;color:#8a9bb4;margin-bottom:6px;line-height:1.5">填目录所在的 PDF 页范围（不是书上印的页码，是阅读器顶部显示的 PDF 第几页），AI 整页识图抽出目录（覆盖原生目录）。</div>' +
+            '<div style="font-size:11px;color:var(--rc-text-muted);margin-bottom:6px;line-height:1.5">填目录所在的 PDF 页范围（不是书上印的页码，是阅读器顶部显示的 PDF 第几页），AI 整页识图抽出目录（覆盖原生目录）。</div>' +
             '<div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">' +
-              '<label style="flex:1;font-size:11px;color:#8a9bb4">起始 PDF 页<input type="number" id="set-toc-start" min="1" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
-              '<label style="flex:1;font-size:11px;color:#8a9bb4">结束 PDF 页<input type="number" id="set-toc-end" min="1" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
+              '<label style="flex:1;font-size:11px;color:var(--rc-text-muted)">起始 PDF 页<input type="number" id="set-toc-start" min="1" step="1" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
+              '<label style="flex:1;font-size:11px;color:var(--rc-text-muted)">结束 PDF 页<input type="number" id="set-toc-end" min="1" step="1" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
             '</div>' +
-            '<button id="set-toc-btn" onclick="buildToc()" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer">建立目录</button>' +
+            '<button id="set-toc-btn" onclick="buildToc()" style="width:100%;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer">建立目录</button>' +
           '</div>' +
           HR +
         '</div>' +
         // [共有] 生词下划线 / 点词翻译(逐字照搬 PDF;保存时落盘)
         // host:'web' 时这两项挪到「网页翻译」tab(web-* id 一站式);EPUB/HTML 仍留此。共有键 eph-*(同键同源)
         '<div data-sec="read-vocab">' +
-        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:14px;cursor:pointer">' +
           '<input type="checkbox" id="set-vocab-underline" style="width:16px;height:16px"> 生词下划线（按掌握度着色：橙=新 / 黄=见过 / 淡绿=熟）' +
         '</label>' +
-        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:14px;cursor:pointer">' +
           '<input type="checkbox" id="set-click-translate" style="width:16px;height:16px"> 点击未掌握单词直接显示翻译（不弹工具栏）' +
         '</label>' +
         '</div>' +
@@ -1129,56 +1129,56 @@ if (window.__bwPwaProviderOnly) return;
         '</div>' +
         // [PDF] 旋转屏幕自动切换排版(逐字照搬;保存时由原生 saveSettings 读)
         '<div data-sec="pdf-orient">' +
-          '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">' +
+          '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px;cursor:pointer">' +
             '<input type="checkbox" id="set-auto-orient" style="width:16px;height:16px"> 旋转屏幕自动切换排版（每本书记住横/竖屏各自的「排版+去边」）' +
           '</label>' +
-          '<div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">开启后：在某方向改了排版(连续/双页)或去边开关，会记进该方向；旋转回来自动套用那个方向上次的设置。</div>' +
+          '<div style="font-size:11px;color:var(--rc-text-dim);margin-bottom:14px;line-height:1.5">开启后：在某方向改了排版(连续/双页)或去边开关，会记进该方向；旋转回来自动套用那个方向上次的设置。</div>' +
         '</div>' +
         // [PDF] 去边(逐字照搬,onclick=原生 _applyCropSettings)
         '<div data-sec="pdf-crop">' +
           HR +
-          '<label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">✂️ 去边阅读（本书每页隐藏的边距 %，工具栏「去边」开关切换）</label>' +
+          '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:6px">✂️ 去边阅读（本书每页隐藏的边距 %，工具栏「去边」开关切换）</label>' +
           '<div style="display:flex;gap:8px;margin-bottom:8px">' +
-            '<label style="flex:1;font-size:11px;color:#8a9bb4">左<input type="number" id="set-crop-l" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
-            '<label style="flex:1;font-size:11px;color:#8a9bb4">右<input type="number" id="set-crop-r" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
-            '<label style="flex:1;font-size:11px;color:#8a9bb4">上<input type="number" id="set-crop-t" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
-            '<label style="flex:1;font-size:11px;color:#8a9bb4">下<input type="number" id="set-crop-b" min="0" max="45" step="1" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
+            '<label style="flex:1;font-size:11px;color:var(--rc-text-muted)">左<input type="number" id="set-crop-l" min="0" max="45" step="1" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
+            '<label style="flex:1;font-size:11px;color:var(--rc-text-muted)">右<input type="number" id="set-crop-r" min="0" max="45" step="1" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
+            '<label style="flex:1;font-size:11px;color:var(--rc-text-muted)">上<input type="number" id="set-crop-t" min="0" max="45" step="1" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
+            '<label style="flex:1;font-size:11px;color:var(--rc-text-muted)">下<input type="number" id="set-crop-b" min="0" max="45" step="1" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:6px 8px;font-size:13px;margin-top:2px"></label>' +
           '</div>' +
-          '<button onclick="_applyCropSettings()" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer;margin-bottom:14px">应用去边并开启</button>' +
+          '<button onclick="_applyCropSettings()" style="width:100%;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer;margin-bottom:14px">应用去边并开启</button>' +
         '</div>' +
         // [PDF] 文字层校准(逐字照搬,onclick/onchange=原生 _charboxToggle/_nudgeChars/_resetCharOffset/_reocrPage/_clearReocr)
         '<div data-sec="pdf-charofs">' +
           HR +
-          '<label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🔧 文字层校准（扫描/OCR 书的文字层跟画面没对齐时用；<b>每页独立</b>）</label>' +
-          '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;cursor:pointer;margin-bottom:8px">' +
+          '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:6px">🔧 文字层校准（扫描/OCR 书的文字层跟画面没对齐时用；<b>每页独立</b>）</label>' +
+          '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:8px">' +
             '<input type="checkbox" id="set-charbox" onchange="_charboxToggle(this)" style="width:16px;height:16px"> 可视化文字框（红框叠在页面上，直观看哪里偏）' +
           '</label>' +
           '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap">' +
-            '<span style="font-size:12px;color:#8a9bb4">微调当前页：</span>' +
-            '<button onclick="_nudgeChars(-1,0)" title="文字层左移" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;width:34px;padding:6px 0;font-size:14px;cursor:pointer">←</button>' +
-            '<button onclick="_nudgeChars(0,-1)" title="文字层上移" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;width:34px;padding:6px 0;font-size:14px;cursor:pointer">↑</button>' +
-            '<button onclick="_nudgeChars(0,1)" title="文字层下移" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;width:34px;padding:6px 0;font-size:14px;cursor:pointer">↓</button>' +
-            '<button onclick="_nudgeChars(1,0)" title="文字层右移" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;width:34px;padding:6px 0;font-size:14px;cursor:pointer">→</button>' +
-            '<label style="font-size:11px;color:#8a9bb4">步长<input type="number" id="charofs-step" value="2" min="0.5" step="0.5" style="width:50px;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:5px 6px;font-size:13px;margin-left:3px">pt</label>' +
+            '<span style="font-size:12px;color:var(--rc-text-muted)">微调当前页：</span>' +
+            '<button onclick="_nudgeChars(-1,0)" title="文字层左移" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;width:34px;padding:6px 0;font-size:14px;cursor:pointer">←</button>' +
+            '<button onclick="_nudgeChars(0,-1)" title="文字层上移" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;width:34px;padding:6px 0;font-size:14px;cursor:pointer">↑</button>' +
+            '<button onclick="_nudgeChars(0,1)" title="文字层下移" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;width:34px;padding:6px 0;font-size:14px;cursor:pointer">↓</button>' +
+            '<button onclick="_nudgeChars(1,0)" title="文字层右移" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;width:34px;padding:6px 0;font-size:14px;cursor:pointer">→</button>' +
+            '<label style="font-size:11px;color:var(--rc-text-muted)">步长<input type="number" id="charofs-step" value="2" min="0.5" step="0.5" style="width:50px;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:5px 6px;font-size:13px;margin-left:3px">pt</label>' +
             '<button onclick="_resetCharOffset()" style="background:#2a1a1a;border:1px solid #5a3030;color:#e6b0b0;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">重置本页</button>' +
           '</div>' +
-          '<div id="charofs-cur" style="font-size:11px;color:#7a8497;margin-bottom:8px">第 — 页　dx 0.0 · dy 0.0</div>' +
+          '<div id="charofs-cur" style="font-size:11px;color:var(--rc-text-dim);margin-bottom:8px">第 — 页　dx 0.0 · dy 0.0</div>' +
           '<div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;align-items:center">' +
-            '<button onclick="_reocrPage()" id="reocr-btn" style="background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">🔁 单页重扫(Google Vision)</button>' +
+            '<button onclick="_reocrPage()" id="reocr-btn" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:#9fcbff;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">🔁 单页重扫(Google Vision)</button>' +
             '<button onclick="_clearReocr()" style="background:#2a1a1a;border:1px solid #5a3030;color:#e6b0b0;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer">撤销重扫</button>' +
-            '<span id="reocr-status" style="font-size:11px;color:#7a8497"></span>' +
+            '<span id="reocr-status" style="font-size:11px;color:var(--rc-text-dim)"></span>' +
           '</div>' +
-          '<div style="font-size:11px;color:#7a8497;margin-bottom:14px;line-height:1.5">没对齐：先「可视化文字框」看差多少 → 方向键微调推齐。识别错/漏/整页歪：「单页重扫」用 Google Vision 对当前页重新 OCR（~几秒，重扫后文字层即时更新）。</div>' +
+          '<div style="font-size:11px;color:var(--rc-text-dim);margin-bottom:14px;line-height:1.5">没对齐：先「可视化文字框」看差多少 → 方向键微调推齐。识别错/漏/整页歪：「单页重扫」用 Google Vision 对当前页重新 OCR（~几秒，重扫后文字层即时更新）。</div>' +
         '</div>' +
         // [共有] 需要翻译的语言(文案逐字照搬 PDF;容器 id 按 host:PDF=lang-checks(原生 saveLangPicker 读),EPUB=eph-lang-checks)
         '<div data-sec="langs">' +
           HR +
-          '<label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🌐 需要翻译的语言（勾选你想被<b>翻译/查词辅助</b>的语言：日语→中日词典+振假名，英语→英汉词典+语法）<br><b>没勾的语言（如中文母语）视为你已掌握 → 免于翻译查词</b>。每本书独立。</label>' +
-          '<div id="' + _ids.langChecks + '" style="display:flex;gap:16px;font-size:13px;color:#cfe6ff;margin-bottom:8px">' +
+          '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:6px">🌐 需要翻译的语言（勾选你想被<b>翻译/查词辅助</b>的语言：日语→中日词典+振假名，英语→英汉词典+语法）<br><b>没勾的语言（如中文母语）视为你已掌握 → 免于翻译查词</b>。每本书独立。</label>' +
+          '<div id="' + _ids.langChecks + '" style="display:flex;gap:16px;font-size:13px;color:var(--rc-text-strong);margin-bottom:8px">' +
             '<label style="cursor:pointer"><input type="checkbox" value="en" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">英语</label>' +
             '<label style="cursor:pointer"><input type="checkbox" value="ja" style="width:15px;height:15px;vertical-align:middle;margin-right:4px">日语</label>' +
           '</div>' +
-          '<button type="button" id="rcset-lang-save" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer">保存</button>' +
+          '<button type="button" id="rcset-lang-save" style="width:100%;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:#9fcbff;border-radius:6px;padding:8px;font-size:13px;cursor:pointer">保存</button>' +
         '</div>' +
         // [EPUB] 转 PDF
         '<div data-sec="epub-convert">' +
@@ -1201,25 +1201,25 @@ if (window.__bwPwaProviderOnly) return;
         '</select>' +
         HR +
         '<label style="' + LBL + '">📊 启用语法分析（per-书）</label>' +
-        '<div style="font-size:10px;color:#7a8497;margin-bottom:6px;line-height:1.5">' +
+        '<div style="font-size:10px;color:var(--rc-text-dim);margin-bottom:6px;line-height:1.5">' +
           '勾选本书用哪些语法 KG。具体跟踪哪些语法点请去' +
-          '<a href="/skilltree/grammar-demo/" target="_blank" style="color:#60a5fa">技能树页面</a>' +
+          '<a href="/skilltree/grammar-demo/" target="_blank" style="color:var(--rc-accent)">技能树页面</a>' +
           '点节点详情里的「👁 跟踪」按钮设置。' +
         '</div>' +
-        '<div id="set-grammar-list" style="max-height:240px;overflow-y:auto;background:#0d1322;border:1px solid #2a3550;border-radius:6px;padding:8px;font-size:12px">' +
-          '<div style="color:#7a8497">加载中…</div>' +
+        '<div id="set-grammar-list" style="max-height:240px;overflow-y:auto;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);border-radius:6px;padding:8px;font-size:12px">' +
+          '<div style="color:var(--rc-text-dim)">加载中…</div>' +
         '</div>' +
       '</div>';
 
     // ════ pane: 高亮(逐字照搬 PDF)════
     var paneHl =
       '<div class="set-pane" data-pane="hl" style="display:none">' +
-        '<label style="display:block;font-size:12px;color:#8a9bb4;margin-bottom:6px">🖌 高亮颜色（点击 ✕ 删除）</label>' +
+        '<label style="display:block;font-size:12px;color:var(--rc-text-muted);margin-bottom:6px">🖌 高亮颜色（点击 ✕ 删除）</label>' +
         '<div id="set-hl-colors" class="set-hl-row"></div>' +
         '<div style="display:flex;gap:6px;margin-bottom:14px;align-items:center">' +
           '<input type="color" id="set-hl-new" value="#ffd166" style="width:42px;height:30px;border:none;background:transparent;cursor:pointer;padding:0">' +
-          '<button id="rcset-hl-add" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:4px;padding:5px 12px;cursor:pointer;font-size:12px">＋ 添加</button>' +
-          '<button id="rcset-hl-reset" style="background:transparent;border:1px solid #2a3550;color:#7a8497;border-radius:4px;padding:5px 12px;cursor:pointer;font-size:12px">恢复默认</button>' +
+          '<button id="rcset-hl-add" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:4px;padding:5px 12px;cursor:pointer;font-size:12px">＋ 添加</button>' +
+          '<button id="rcset-hl-reset" style="background:transparent;border:1px solid var(--rc-border);color:var(--rc-text-dim);border-radius:4px;padding:5px 12px;cursor:pointer;font-size:12px">恢复默认</button>' +
         '</div>' +
       '</div>';
 
@@ -1252,11 +1252,11 @@ if (window.__bwPwaProviderOnly) return;
           '<label style="' + LBL + '">📚 App / 扩展共享 Markdown 笔记</label>' +
           '<div class="ep-set-note" style="margin:-2px 0 8px">开启本机线路后，网页扩展与 App 都能创建、查看和读取笔记；扩展创建的内容先进入共享队列，再由 App 自动写入 Obsidian。关闭时保留原有服务器线路。</div>' +
           '<div id="rcset-native-notes-status" role="status" aria-live="polite" style="font-size:11px;color:#aebbd0;line-height:1.55;white-space:pre-wrap;margin-bottom:8px">尚未读取</div>' +
-          '<button id="rcset-native-notes-refresh" type="button" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:12px;cursor:pointer">查看 / 刷新</button>' +
+          '<button id="rcset-native-notes-refresh" type="button" style="width:100%;background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:#9fcbff;border-radius:6px;padding:8px;font-size:12px;cursor:pointer">查看 / 刷新</button>' +
           '<div id="rcset-native-notes-list" style="margin-top:8px"></div>' +
-          '<div id="rcset-native-notes-detail" style="display:none;background:#0d1322;border:1px solid #2a3550;border-radius:7px;padding:10px;margin-top:10px">' +
-            '<div id="rcset-native-notes-title" style="font-size:13px;color:#cfe6ff;font-weight:600;overflow-wrap:anywhere"></div>' +
-            '<div id="rcset-native-notes-meta" style="font-size:10px;color:#8fa5c8;line-height:1.45;margin:4px 0 8px;overflow-wrap:anywhere"></div>' +
+          '<div id="rcset-native-notes-detail" style="display:none;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);border-radius:7px;padding:10px;margin-top:10px">' +
+            '<div id="rcset-native-notes-title" style="font-size:13px;color:var(--rc-text-strong);font-weight:600;overflow-wrap:anywhere"></div>' +
+            '<div id="rcset-native-notes-meta" style="font-size:10px;color:var(--rc-text-muted);line-height:1.45;margin:4px 0 8px;overflow-wrap:anywhere"></div>' +
             '<pre id="rcset-native-notes-body" style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;-webkit-user-select:text;color:#dbe7f7;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace"></pre>' +
           '</div>' +
         '</div>' +
@@ -1273,24 +1273,24 @@ if (window.__bwPwaProviderOnly) return;
     //   这一 tab 只在 App 内出现（通道不存在时整块隐藏），扩展/浏览器看不到。
     var paneNative =
       '<div class="set-pane" data-pane="native" style="display:none">' +
-        '<div style="font-size:12px;color:#8fa5c8;margin-bottom:12px">这些开关属于 iPad 上的 App 本体，改完即时生效。凭据、Vault 目录、书库仍在 App 的原生设置里（系统 UI 才能安全地管它们）。</div>' +
+        '<div style="font-size:12px;color:var(--rc-text-muted);margin-bottom:12px">这些开关属于 iPad 上的 App 本体，改完即时生效。凭据、Vault 目录、书库仍在 App 的原生设置里（系统 UI 才能安全地管它们）。</div>' +
         '<label style="' + LBL + '">📝 文字识别（设备端）</label>' +
-        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;cursor:pointer;margin-bottom:8px">' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:8px">' +
           '<input type="checkbox" id="rcset-nat-ocr" style="width:16px;height:16px"> 启用设备端文字识别' +
         '</label>' +
-        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;cursor:pointer;margin-bottom:14px">' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:14px">' +
           '<input type="checkbox" id="rcset-nat-ocr-auto" style="width:16px;height:16px"> 打开书就自动识别（不必手动触发）' +
         '</label>' +
         HR +
         '<label style="' + LBL + '">✏️ Apple Pencil 手势</label>' +
         '<div style="display:flex;gap:10px;margin-bottom:10px">' +
-          '<div style="flex:1"><div style="font-size:12px;color:#8fa5c8;margin-bottom:4px">笔身双击</div>' +
-            '<select id="rcset-nat-pen-dtap" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">' +
+          '<div style="flex:1"><div style="font-size:12px;color:var(--rc-text-muted);margin-bottom:4px">笔身双击</div>' +
+            '<select id="rcset-nat-pen-dtap" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px">' +
               '<option value="none">不做任何事</option><option value="toggleEraser">切换橡皮</option>' +
               '<option value="showPalette">打开绘图面板</option><option value="toggleSelection">切换选区笔</option>' +
             '</select></div>' +
-          '<div style="flex:1"><div style="font-size:12px;color:#8fa5c8;margin-bottom:4px">笔身挤压（Pencil Pro）</div>' +
-            '<select id="rcset-nat-pen-sq" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">' +
+          '<div style="flex:1"><div style="font-size:12px;color:var(--rc-text-muted);margin-bottom:4px">笔身挤压（Pencil Pro）</div>' +
+            '<select id="rcset-nat-pen-sq" style="width:100%;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;padding:7px 10px;font-size:13px">' +
               '<option value="none">不做任何事</option><option value="toggleEraser">切换橡皮</option>' +
               '<option value="showPalette">打开绘图面板</option><option value="toggleSelection">切换选区笔</option>' +
             '</select></div>' +
@@ -1298,66 +1298,66 @@ if (window.__bwPwaProviderOnly) return;
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6">画面上那枚笔按钮只在 Pencil 悬停或落笔后出现；纯手指操作时它不会占地方。用挤压/双击也能直接唤出绘图面板。</div>' +
         HR +
         '<label style="' + LBL + '">📖 离线日语词典</label>' +
-        '<div id="rcset-nat-dict-st" style="font-size:12px;color:#8fa5c8;margin:-2px 0 8px">读取中…</div>' +
-        '<div id="rcset-nat-dict-bar" style="height:4px;background:#1a2540;border-radius:2px;overflow:hidden;margin-bottom:8px;display:none">' +
+        '<div id="rcset-nat-dict-st" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px">读取中…</div>' +
+        '<div id="rcset-nat-dict-bar" style="height:4px;background:var(--rc-bg-raised);border-radius:2px;overflow:hidden;margin-bottom:8px;display:none">' +
           '<div id="rcset-nat-dict-fill" style="height:100%;width:0%;background:#4a9eff;transition:width .3s"></div></div>' +
         '<div style="display:flex;gap:8px;margin-bottom:6px">' +
-          '<button type="button" id="rcset-nat-dict-dl" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">下载离线日语词典</button>' +
-          '<button type="button" id="rcset-nat-dict-rm" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">删除</button>' +
+          '<button type="button" id="rcset-nat-dict-dl" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">下载离线日语词典</button>' +
+          '<button type="button" id="rcset-nat-dict-rm" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">删除</button>' +
         '</div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">词典只存在这台 iPad 上，由本 App 与它自己的 Safari 扩展共享（同一个 App 组，供扩展离线查词）；不进入书籍附件、服务器或设置同步。数据来自 JMdict / EDICT 项目（CC BY-SA）。</div>' +
         HR +
         '<label style="' + LBL + '">📁 本机 Obsidian Vault</label>' +
-        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;cursor:pointer;margin-bottom:6px">' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:6px">' +
           '<input type="checkbox" id="rcset-nat-vault-on" style="width:16px;height:16px"> 写入 iPad 本地 Vault' +
         '</label>' +
-        '<div id="rcset-nat-vault-st" style="font-size:12px;color:#8fa5c8;margin:-2px 0 8px">读取中…</div>' +
+        '<div id="rcset-nat-vault-st" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px">读取中…</div>' +
         '<div style="display:flex;gap:8px">' +
-          '<button type="button" id="rcset-nat-vault-pick" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">选择 / 更换文件夹</button>' +
-          '<button type="button" id="rcset-nat-vault-clr" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">移除授权</button>' +
+          '<button type="button" id="rcset-nat-vault-pick" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">选择 / 更换文件夹</button>' +
+          '<button type="button" id="rcset-nat-vault-clr" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">移除授权</button>' +
         '</div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">选文件夹必须走 App 的系统选择器 —— 只有它给出的授权能长期保存，网页拿不到也不该拿到你的文件路径。</div>' +
         HR +
         '<label style="' + LBL + '">📍 学习地点记录</label>' +
-        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;cursor:pointer;margin-bottom:6px">' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin-bottom:6px">' +
           '<input type="checkbox" id="rcset-nat-loc-on" style="width:16px;height:16px"> 记录学习地点' +
         '</label>' +
-        '<div id="rcset-nat-loc-st" style="font-size:12px;color:#8fa5c8;margin:-2px 0 8px">读取中…</div>' +
-        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;cursor:pointer;margin:0 0 6px 22px">' +
+        '<div id="rcset-nat-loc-st" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px">读取中…</div>' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);cursor:pointer;margin:0 0 6px 22px">' +
           '<input type="checkbox" id="rcset-nat-loc-bg" style="width:16px;height:16px"> 不开 App 时也更新地点' +
         '</label>' +
-        '<div id="rcset-nat-loc-bgst" style="font-size:12px;color:#8fa5c8;margin:-2px 0 8px 22px"></div>' +
+        '<div id="rcset-nat-loc-bgst" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px 22px"></div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">开着时，读页停留记录会带上当时的位置（坐标与地名，建筑物级），用于以后回答"我在哪学的"。首次打开会请求系统定位权限（使用期间）。位置只随学习记录存到你自己的服务器，不发给任何第三方。</div>' +
         HR +
         '<label style="' + LBL + '">🔑 凭据</label>' +
-        '<div id="rcset-nat-key-st" style="font-size:12px;color:#8fa5c8;margin:-2px 0 8px">读取中…</div>' +
+        '<div id="rcset-nat-key-st" style="font-size:12px;color:var(--rc-text-muted);margin:-2px 0 8px">读取中…</div>' +
         '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-          '<button type="button" id="rcset-nat-key-set" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">输入 / 替换 OpenAI Key</button>' +
-          '<button type="button" id="rcset-nat-key-clr" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">清除本机 Key</button>' +
-          '<button type="button" id="rcset-nat-pi-login" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">登录或重新登录 Pi</button>' +
+          '<button type="button" id="rcset-nat-key-set" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">输入 / 替换 OpenAI Key</button>' +
+          '<button type="button" id="rcset-nat-key-clr" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">清除本机 Key</button>' +
+          '<button type="button" id="rcset-nat-pi-login" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">登录或重新登录 Pi</button>' +
         '</div>' +
         '<div style="font-size:11.5px;color:#7c8bab;line-height:1.6;margin-top:6px">Key 由 App 保存在 Apple Keychain，输入框是 App 的原生控件 —— 密钥不经过这个网页。App 保存、启动通话与转写都直连 OpenAI，都不连接服务器。</div>' +
         HR +
-        '<button type="button" id="rcset-nat-open" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">打开 App 原生设置（其它诊断项）</button>' +
+        '<button type="button" id="rcset-nat-open" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 12px;cursor:pointer;font-size:12.5px">打开 App 原生设置（其它诊断项）</button>' +
       '</div>';
 
     var paneWeb =
       '<div class="set-pane" data-pane="web" data-sec="web-tab" style="display:none">' +
         '<label style="' + LBL + '">🌐 网页翻译（浏览器扩展 / 网页阅读专用）</label>' +
-        '<div style="font-size:12px;color:#8fa5c8;margin:-4px 0 10px">我在学的语言：只对这些语言的网页做翻译和生词标注，纯中文母语页自动跳过（全不勾＝任何语言都翻）。</div>' +
+        '<div style="font-size:12px;color:var(--rc-text-muted);margin:-4px 0 10px">我在学的语言：只对这些语言的网页做翻译和生词标注，纯中文母语页自动跳过（全不勾＝任何语言都翻）。</div>' +
         '<div id="web-lang-checks" style="display:flex;gap:18px;margin-bottom:14px">' +
-          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#cfe6ff;cursor:pointer"><input type="checkbox" value="en" style="width:16px;height:16px"> 英语</label>' +
-          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#cfe6ff;cursor:pointer"><input type="checkbox" value="ja" style="width:16px;height:16px"> 日语</label>' +
+          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--rc-text-strong);cursor:pointer"><input type="checkbox" value="en" style="width:16px;height:16px"> 英语</label>' +
+          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--rc-text-strong);cursor:pointer"><input type="checkbox" value="ja" style="width:16px;height:16px"> 日语</label>' +
         '</div>' +
         '<hr class="ep-set-hr">' +
-        '<label style="display:block;font-size:13px;color:#cfe6ff;margin-bottom:6px">翻译引擎</label>' +
-        '<select id="web-tr-backend" style="width:100%;margin-bottom:7px;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 10px;font-size:13px">' +
+        '<label style="display:block;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px">翻译引擎</label>' +
+        '<select id="web-tr-backend" style="width:100%;margin-bottom:7px;background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 10px;font-size:13px">' +
           '<option value="google">Google（默认，快速稳定）</option>' +
           '<option value="ai">AI（可自动选择调用方式）</option>' +
         '</select>' +
         '<div id="web-tr-mode-row" style="margin:8px 0 7px">' +
-          '<label style="display:block;font-size:13px;color:#cfe6ff;margin-bottom:6px">AI 调用方式</label>' +
-          '<select id="web-tr-mode" style="width:100%;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 10px;font-size:13px">' +
+          '<label style="display:block;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px">AI 调用方式</label>' +
+          '<select id="web-tr-mode" style="width:100%;background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 10px;font-size:13px">' +
             '<option value="auto">自动（短网页无状态，内容较多时使用短时会话）</option>' +
             '<option value="stateless">无状态批翻（简单、省配额）</option>' +
             '<option value="session">页面短时会话（上下文最完整）</option>' +
@@ -1365,39 +1365,39 @@ if (window.__bwPwaProviderOnly) return;
         '</div>' +
         '<div id="web-tr-threshold-row" style="display:flex;align-items:center;gap:8px;margin:8px 0 7px">' +
           '<label for="web-tr-threshold" style="font-size:12px;color:#a9bddb;white-space:nowrap">自动阈值</label>' +
-          '<input id="web-tr-threshold" type="number" min="10" max="500" step="1" value="50" style="width:82px;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:6px 8px;font-size:13px">' +
-          '<span style="font-size:11px;color:#8fa5c8">预计阅读句数（总句数 × 70%）&gt; 此值时使用会话</span>' +
+          '<input id="web-tr-threshold" type="number" min="10" max="500" step="1" value="50" style="width:82px;background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:6px 8px;font-size:13px">' +
+          '<span style="font-size:11px;color:var(--rc-text-muted)">预计阅读句数（总句数 × 70%）&gt; 此值时使用会话</span>' +
         '</div>' +
-        '<div style="font-size:11px;color:#8fa5c8;line-height:1.55;margin:0 0 14px">AI 的后端、型号和深度统一在「AI·翻译」页的“网页整页翻译（无工具）”中设置。短时会话只在支持无工具、无磁盘持久化的模型上启用；否则会明确退回无状态批翻。后台生词预翻译始终走 Google，避免静默消耗 AI 配额。</div>' +
+        '<div style="font-size:11px;color:var(--rc-text-muted);line-height:1.55;margin:0 0 14px">AI 的后端、型号和深度统一在「AI·翻译」页的“网页整页翻译（无工具）”中设置。短时会话只在支持无工具、无磁盘持久化的模型上启用；否则会明确退回无状态批翻。后台生词预翻译始终走 Google，避免静默消耗 AI 配额。</div>' +
         '<hr class="ep-set-hr">' +
-        '<label style="display:block;font-size:13px;color:#cfe6ff;margin-bottom:6px">沉浸式翻译 · 显示方式</label>' +
-        '<select id="web-tr-style" style="width:100%;margin-bottom:14px;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 10px;font-size:13px">' +
+        '<label style="display:block;font-size:13px;color:var(--rc-text-strong);margin-bottom:6px">沉浸式翻译 · 显示方式</label>' +
+        '<select id="web-tr-style" style="width:100%;margin-bottom:14px;background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 10px;font-size:13px">' +
           '<option value="para">独立段落（译文另起一行，字号同原文）</option>' +
           '<option value="small">下方小字（紧随原文，小一号淡一点）</option>' +
           '<option value="replace">替换原文（只显示译文，点一下临时看回原文）</option>' +
         '</select>' +
         '<hr class="ep-set-hr">' +
-        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:14px;cursor:pointer">' +
           '<input type="checkbox" id="web-vocab-underline" style="width:16px;height:16px"> 生词下划线（按掌握度着色：橙=新 / 黄=见过 / 淡绿=熟）' +
         '</label>' +
-        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:14px;cursor:pointer">' +
           '<input type="checkbox" id="web-click-translate" style="width:16px;height:16px"> 点击未掌握单词直接显示翻译（不弹工具栏）' +
         '</label>' +
-        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--rc-text-strong);margin-bottom:14px;cursor:pointer">' +
           '<input type="checkbox" id="web-pretr" style="width:16px;height:16px"> 未掌握句自动预翻译（含多个未掌握词的句子后台预热译文，点「译 N」立即显示）' +
         '</label>' +
         // 语法分析(web host 时独立「语法」tab 隐藏,内容并到这里;逻辑复用 rc-grammar，容器实例 web-* id)
         '<hr class="ep-set-hr">' +
         '<label style="' + LBL + '">📐 语法分析</label>' +
-        '<label style="display:block;font-size:13px;color:#cfe6ff;margin:4px 0 4px">长句结构显示方式</label>' +
+        '<label style="display:block;font-size:13px;color:var(--rc-text-strong);margin:4px 0 4px">长句结构显示方式</label>' +
         '<select id="web-grammar-view" style="' + SEL + '">' +
           '<option value="tree">成分树</option>' +
           '<option value="components">成分分块</option>' +
           '<option value="skeleton">主干＋修饰折叠</option>' +
           '<option value="deps">依存关系图</option>' +
         '</select>' +
-        '<div style="font-size:12px;color:#8a9bb4;margin:8px 0 6px">启用语法 KG（勾选后，网页里选中长句可分析这些语法点；这是跨站的「我在学哪些语法」集合，不分网站）</div>' +
-        '<div id="web-grammar-list" style="max-height:240px;overflow-y:auto;background:#0d1322;border:1px solid #2a3550;border-radius:6px;padding:8px;font-size:12px">加载中…</div>' +
+        '<div style="font-size:12px;color:var(--rc-text-muted);margin:8px 0 6px">启用语法 KG（勾选后，网页里选中长句可分析这些语法点；这是跨站的「我在学哪些语法」集合，不分网站）</div>' +
+        '<div id="web-grammar-list" style="max-height:240px;overflow-y:auto;background:var(--rc-bg-canvas);border:1px solid var(--rc-border);border-radius:6px;padding:8px;font-size:12px">加载中…</div>' +
       '</div>';
 
     mask = document.createElement('div');
@@ -1418,9 +1418,9 @@ if (window.__bwPwaProviderOnly) return;
           '<button type="button" class="set-tab" data-pane="native" id="rcset-tab-native" style="display:none">本机</button>' +
         '</div>' +
         '<div class="ep-set-body">' + paneAi + paneComputer + paneRead + paneGrammar + paneHl + paneNote + paneWeb + paneNative + '</div>' +
-        '<div style="display:flex;gap:8px;justify-content:flex-end;padding-top:12px;border-top:1px solid #2a3550;margin-top:2px">' +
-          '<button id="rcset-cancel" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">取消</button>' +
-          '<button id="rcset-save" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">保存</button>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end;padding-top:12px;border-top:1px solid var(--rc-border);margin-top:2px">' +
+          '<button id="rcset-cancel" style="background:var(--rc-bg-raised);border:1px solid var(--rc-border);color:var(--rc-text-strong);border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">取消</button>' +
+          '<button id="rcset-save" style="background:var(--rc-bg-active);border:1px solid var(--rc-border-accent);color:#fff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">保存</button>' +
         '</div>' +
       '</div>';
     document.body.appendChild(mask);

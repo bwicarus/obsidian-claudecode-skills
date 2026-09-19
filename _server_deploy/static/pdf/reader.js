@@ -1262,7 +1262,7 @@ window._grpNavPrev = function () {
 function _grpToast(txt) {
   try {
     var t = document.createElement('div'); t.textContent = txt;
-    t.style.cssText = 'position:fixed;left:50%;bottom:34px;transform:translateX(-50%);z-index:99;background:#1a2540ee;color:#cfe6ff;border:1px solid #3b6db5;padding:6px 16px;border-radius:16px;font-size:13px;box-shadow:0 4px 14px #0007';
+    t.style.cssText = 'position:fixed;left:50%;bottom:34px;transform:translateX(-50%);z-index:99;background:#1a2540ee;color:var(--rc-text-strong);border:1px solid var(--rc-border-accent);padding:6px 16px;border-radius:16px;font-size:13px;box-shadow:0 4px 14px #0007';
     document.body.appendChild(t);
   } catch (_) {}
 }
@@ -1359,10 +1359,10 @@ function _showPageBackBar(p) {
       const st = document.createElement('style'); st.id = 'page-back-bar-css';
       st.textContent =
         '#page-back-bar{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:140;display:none;' +
-        'background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;padding:9px 18px;border-radius:20px;font-size:14px;' +
+        'background:#1a2540;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);padding:9px 18px;border-radius:20px;font-size:14px;' +
         'cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.5);-webkit-tap-highlight-color:transparent;white-space:nowrap}' +
         '#page-back-bar:active{transform:translateX(-50%) scale(.95)}' +
-        '.asst-pagelink{color:#7dd3fc;cursor:pointer;border-bottom:1px dashed rgba(125,211,252,.6);padding:0 1px}' +
+        '.asst-pagelink{color:var(--rc-accent-cyan);cursor:pointer;border-bottom:1px dashed rgba(125,211,252,.6);padding:0 1px}' +
         '.asst-pagelink:active{color:#bae6fd}';
       document.head.appendChild(st);
     }
@@ -5357,13 +5357,13 @@ function _ensureFmlPopCss() {
   if (document.getElementById('fml-pop-css')) return;
   const st = document.createElement('style'); st.id = 'fml-pop-css';
   st.textContent =
-    '#fml-pop{position:absolute;z-index:150;background:#0f1830;border:1px solid #2f4a7d;border-radius:12px;' +
+    '#fml-pop{position:absolute;z-index:150;background:var(--rc-bg-popover);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border:1px solid var(--rc-border-popover);border-radius:12px;' +
     'box-shadow:0 10px 30px rgba(0,0,0,.55);padding:10px 12px;max-width:min(92vw,560px);color:#e6eeff}' +
     '#fml-pop .fp-render{overflow-x:auto;overflow-y:hidden;text-align:center;padding:4px 2px 8px;color:#eaf2ff;font-size:18px}' +
-    '#fml-pop .fp-tex{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:#9fb4e0;background:#0a1120;' +
+    '#fml-pop .fp-tex{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--rc-text-muted);background:#0a1120;' +
     'border:1px solid #22325a;border-radius:7px;padding:5px 7px;white-space:pre-wrap;word-break:break-all;max-height:78px;overflow:auto;margin-bottom:8px}' +
     '#fml-pop .fp-btns{display:flex;gap:7px;flex-wrap:wrap}' +
-    '#fml-pop .fp-btns button{flex:1 1 auto;min-width:66px;background:#16213e;border:1px solid #2f4a7d;color:#cfe0ff;' +
+    '#fml-pop .fp-btns button{flex:1 1 auto;min-width:66px;background:#16213e;border:1px solid var(--rc-border-popover);color:var(--rc-text-strong);' +
     'border-radius:8px;padding:7px 6px;font-size:13px;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
     '#fml-pop .fp-btns button:active{background:#22325a}';
   document.head.appendChild(st);
@@ -6368,7 +6368,7 @@ async function _showPhrasePopoverNative(text, opts) {
                    mastered: _phraseMarkSet.has(_phraseNorm(text))};
   pop.style.display = 'block';
   window._wordPopOpenAt = Date.now();
-  pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 处理词组…</div>';
+  pop.innerHTML = '<div style="padding:14px;color:var(--rc-text-muted)">⏳ 处理词组…</div>';
   _positionWordPop(pop);
   // **点了词组按钮**才把当前选区变持久呼吸高亮（查询中呼吸→出结果常亮保持，点高亮才消失）。
   // 点高亮重新弹框时 opts.noHighlight=true → 只弹框、不再建新高亮。
@@ -6845,7 +6845,7 @@ function _wordHlClick(hl) {
     _wordPopState = {word: hl.word, ctx: hl.ctx, lemma: hl.word};
     const pop = document.getElementById('word-pop');
     pop.style.display = 'block'; window._wordPopOpenAt = Date.now();
-    pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 查词中…</div>';
+    pop.innerHTML = '<div style="padding:14px;color:var(--rc-text-muted)">⏳ 查词中…</div>';
     _positionWordPop(pop, hl.charSel);
     _renderWordHlsFor(hl.pw);   // boxOpen=true → renderWordHl 过滤掉它,不再画呼吸高亮
   }
@@ -7522,7 +7522,7 @@ function _toast(msg) {
   if (!t) {
     t = document.createElement('div');
     t.id = 'hl-toast';
-    t.style.cssText = 'position:fixed;left:50%;bottom:30px;transform:translateX(-50%);background:#10162a;border:1px solid #3b6db5;color:#cfe6ff;padding:9px 18px;border-radius:8px;font-size:13px;z-index:500;box-shadow:0 6px 16px rgba(0,0,0,.6);pointer-events:none';
+    t.style.cssText = 'position:fixed;left:50%;bottom:30px;transform:translateX(-50%);background:var(--rc-bg-surface);border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);padding:9px 18px;border-radius:8px;font-size:13px;z-index:500;box-shadow:0 6px 16px rgba(0,0,0,.6);pointer-events:none';
     document.body.appendChild(t);
   }
   t.textContent = msg;
@@ -8280,11 +8280,11 @@ window._followupAsk = async () => {
   const contentEl = document.getElementById('result-content');
   const history = (contentEl.textContent || '').slice(0, 4000);
   const qDiv = document.createElement('div');
-  qDiv.style.cssText = 'margin-top:12px;padding-top:10px;border-top:1px solid #2a3550;color:#a8cdff;font-size:12px;font-weight:600';
+  qDiv.style.cssText = 'margin-top:12px;padding-top:10px;border-top:1px solid var(--rc-border);color:var(--rc-text-strong);font-size:12px;font-weight:600';
   qDiv.textContent = '问：' + q;
   contentEl.appendChild(qDiv);
   const aDiv = document.createElement('div');
-  aDiv.style.cssText = 'margin-top:6px;color:#e6e6f0';
+  aDiv.style.cssText = 'margin-top:6px;color:var(--rc-text)';
   aDiv.innerHTML = '<span class="loading">⏳</span>';
   contentEl.appendChild(aDiv);
   contentEl.scrollTop = contentEl.scrollHeight;
@@ -8378,11 +8378,11 @@ async function _renderGrammarTrackListNative() {
   for (const b of books) {
     const checked = enabledSet.has(b.book) ? 'checked' : '';
     const hot = (b.tracked_count > 0) ? `<span style="color:#34d399;margin-left:4px">${b.tracked_count} 已跟踪</span>` : `<span style="color:#7a8497;margin-left:4px">无跟踪（去技能树点节点开）</span>`;
-    html += `<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;cursor:pointer;color:#cfe6ff;border-radius:3px;border-bottom:1px solid #1f2740" title="共 ${b.total_l2} 个 level-2 语法点">
+    html += `<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;cursor:pointer;color:var(--rc-text-strong);border-radius:3px;border-bottom:1px solid var(--rc-border)" title="共 ${b.total_l2} 个 level-2 语法点">
       <input type="checkbox" value="${b.book}" ${checked} onchange="_onGrammarBookToggle()" style="margin:0">
       <div style="flex:1;min-width:0">
         <div style="font-size:12px">${b.title.replace(/</g,'&lt;')}</div>
-        <div style="font-size:10px;color:#7a8497">${b.total_l2} 个语法点 · ${hot}</div>
+        <div style="font-size:10px;color:var(--rc-text-dim)">${b.total_l2} 个语法点 · ${hot}</div>
       </div>
       <a href="/skilltree/${encodeURIComponent(b.book)}/" target="_blank" onclick="event.stopPropagation()" style="color:#60a5fa;font-size:11px;text-decoration:none">技能树 →</a>
     </label>`;
@@ -9182,18 +9182,18 @@ async function dictStream(word, ctx) {
     if (s.phon_us) head.push(`<span style="font-style:italic">US ${esc(s.phon_us)}</span>`);
     if (s.phon_uk) head.push(`<span style="font-style:italic">UK ${esc(s.phon_uk)}</span>`);
     if (s.freq_bnc) head.push(`<span style="color:#5a6680;font-size:11px">BNC #${s.freq_bnc}</span>`);
-    if (s.audio_us) head.push(`<button onclick="new Audio('${esc(s.audio_us)}').play()" style="background:transparent;border:1px solid #3b6db5;color:#a8cdff;border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0">🔊</button>`);
-    html += `<div style="display:flex;gap:8px;align-items:center;color:#a8cdff;font-size:13px">${head.join(' · ')}</div>`;
+    if (s.audio_us) head.push(`<button onclick="new Audio('${esc(s.audio_us)}').play()" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:11px;padding:0">🔊</button>`);
+    html += `<div style="display:flex;gap:8px;align-items:center;color:var(--rc-text-strong);font-size:13px">${head.join(' · ')}</div>`;
     if (s.lemma && s.lemma !== word) {
-      html += `<div style="margin-top:4px;color:#7a8497;font-size:11px">原型：<code>${esc(s.lemma)}</code>${s.forms?.length?'（'+s.forms.map(esc).join('/')+'）':''}</div>`;
+      html += `<div style="margin-top:4px;color:var(--rc-text-dim);font-size:11px">原型：<code>${esc(s.lemma)}</code>${s.forms?.length?'（'+s.forms.map(esc).join('/')+'）':''}</div>`;
     }
-    if (s.translation) html += `<div style="margin-top:10px;color:#cfe6ff;white-space:pre-wrap;line-height:1.6">${esc(s.translation)}</div>`;
+    if (s.translation) html += `<div style="margin-top:10px;color:var(--rc-text-strong);white-space:pre-wrap;line-height:1.6">${esc(s.translation)}</div>`;
     // MW + Free Dict 例句（合并）
     const allDefs = [];
     if (s.mw_defs.length) allDefs.push({label: '📚 MW', defs: s.mw_defs});
     if (s.fd_defs.length) allDefs.push({label: '🌐 Wiktionary', defs: s.fd_defs});
     for (const grp of allDefs) {
-      html += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid #2a3550;color:#8a9bb4;font-size:12px"><b style="color:#7a8497">${esc(grp.label)}</b>`;
+      html += `<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--rc-border);color:var(--rc-text-muted);font-size:12px"><b style="color:var(--rc-text-dim)">${esc(grp.label)}</b>`;
       html += `<ul style="margin:6px 0 0 18px;padding:0;line-height:1.6">`;
       for (const d of grp.defs.slice(0, 6)) {
         html += `<li>${d.pos ? '<b>'+esc(d.pos)+'</b> ' : ''}${esc(d.en)}`;
@@ -9210,7 +9210,7 @@ async function dictStream(word, ctx) {
       const meta = [];
       if (s.synonyms.length) meta.push('同 ' + s.synonyms.slice(0,5).map(esc).join(', '));
       if (s.antonyms.length) meta.push('反 ' + s.antonyms.slice(0,5).map(esc).join(', '));
-      html += `<div style="margin-top:8px;color:#7a8497;font-size:11px">${meta.join(' · ')}</div>`;
+      html += `<div style="margin-top:8px;color:var(--rc-text-dim);font-size:11px">${meta.join(' · ')}</div>`;
     }
     contentEl.innerHTML = html;
     // 底部 actions：搬到 #vocab-actions（脱离内容滚动区，始终可见）
@@ -9218,10 +9218,10 @@ async function dictStream(word, ctx) {
     if (va) {
       va.className = 'show';
       va.innerHTML =
-        `<button onclick="addVocabAnki('${esc(s.lemma||word)}')" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>` +
+        `<button onclick="addVocabAnki('${esc(s.lemma||word)}')" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">🎴 加入 Anki</button>` +
         `<button onclick="markVocabKnown('${esc(s.lemma||word)}', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px" title="掌握度直接设为 100%，此后不再算作生词">✓ 已掌握</button>` +
         (s.sources_hit.length
-          ? `<span style="color:#5a6680;font-size:10px;margin-left:auto">源：${s.sources_hit.join(' + ')}${s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file='+encodeURIComponent(s.vocab_note)+'" style="color:#60a5fa">在 Obsidian 打开词条 →</a>' : ''}</span>`
+          ? `<span style="color:var(--rc-text-dim);font-size:10px;margin-left:auto">源：${s.sources_hit.join(' + ')}${s.vocab_note ? ' · <a href="obsidian://open?vault=obsidian&file='+encodeURIComponent(s.vocab_note)+'" style="color:#60a5fa">在 Obsidian 打开词条 →</a>' : ''}</span>`
           : `<span style="color:#5a6680;font-size:10px;margin-left:auto">⏳ 加载更多源…</span>`);
     }
   };
@@ -9745,8 +9745,8 @@ async function dictStreamJP(word, ctx) {
     va.className = 'show';
     const bs = 'border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px';
     va.innerHTML =
-      '<button onclick="_ttsWord(\'' + rq + '\', \'ja-JP\')" style="background:transparent;border:1px solid #3b6db5;color:#a8cdff;' + bs + '">🔊 朗读</button>' +
-      '<button onclick="addVocabAnki(\'' + wq + '\')" style="background:#244470;border:1px solid #3b6db5;color:#fff;' + bs + '">🎴 加入 Anki</button>' +
+      '<button onclick="_ttsWord(\'' + rq + '\', \'ja-JP\')" style="background:transparent;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);' + bs + '">🔊 朗读</button>' +
+      '<button onclick="addVocabAnki(\'' + wq + '\')" style="background:#244470;border:1px solid var(--rc-border-accent);color:#fff;' + bs + '">🎴 加入 Anki</button>' +
       '<button onclick="markVocabKnown(\'' + wq + '\', this)" style="background:#1d3a28;border:1px solid #2e7d4f;color:#9fe0b8;' + bs + '" title="掌握度设为100%">✓ 已掌握</button>';
   }
   return true;
@@ -10156,7 +10156,7 @@ function _ensureBgJobsEl() {
 function _startBgJob(text) {
   const id = 'bgj' + (++_bgJobSeq);
   const el = document.createElement('div'); el.id = id;
-  el.style.cssText = 'background:#10162a;border:1px solid #3b6db5;color:#cfe6ff;padding:7px 12px;border-radius:8px;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,.5);max-width:280px';
+  el.style.cssText = 'background:#10162a;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);padding:7px 12px;border-radius:8px;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,.5);max-width:280px';
   el.textContent = '⏳ ' + text;
   _ensureBgJobsEl().appendChild(el);
   return id;
@@ -10957,13 +10957,13 @@ window.onChat = () => {
 // 对话面板打开(原 onChat 尾段逐字搬入;参数名沿用 lastSelText/context 保持函数体不变)
 function _openChat(lastSelText, context) {
   let html = '<div style="font-size:12.5px;line-height:1.65">'
-    + '<div style="color:#a8cdff;font-weight:600;margin-bottom:3px">📌 原文</div>'
-    + '<div style="color:#cfe6ff;white-space:pre-wrap">' + _esc(lastSelText) + '</div>';
+    + '<div style="color:var(--rc-text-strong);font-weight:600;margin-bottom:3px">📌 原文</div>'
+    + '<div style="color:var(--rc-text-strong);white-space:pre-wrap">' + _esc(lastSelText) + '</div>';
   if (context && context.trim() !== lastSelText.trim()) {
     html += '<div style="color:#a8cdff;font-weight:600;margin:10px 0 3px">📖 上下文</div>'
-      + '<div style="color:#8a9bb4;white-space:pre-wrap">' + _esc(context) + '</div>';
+      + '<div style="color:var(--rc-text-muted);white-space:pre-wrap">' + _esc(context) + '</div>';
   }
-  html += '<div style="margin-top:12px;color:#5a6680">↓ 在下方输入问题，AI 会结合原文和上下文回答</div></div>';
+  html += '<div style="margin-top:12px;color:var(--rc-text-dim)">↓ 在下方输入问题，AI 会结合原文和上下文回答</div></div>';
   openResult('💬 AI 对话', lastSelText, html);
   setTimeout(() => {
     const i = document.getElementById('result-followup-input');
@@ -11003,7 +11003,7 @@ window.onToNote = async () => {
       const safeUrl = (d.obsidian_url || '').replace(/'/g,"\\'");
       document.getElementById('result-content').innerHTML =
         '<div>✓ 笔记已创建：<code>' + d.note_path + '</code>（含 PDF 来源引用）</div>' +
-        '<div style="margin-top:10px"><button onclick="location.href=\'' + safeUrl + '\'" style="background:#1a2540;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:6px 14px;cursor:pointer">📂 在 Obsidian 中打开</button></div>';
+        '<div style="margin-top:10px"><button onclick="location.href=\'' + safeUrl + '\'" style="background:#1a2540;border:1px solid var(--rc-border-accent);color:var(--rc-text-strong);border-radius:6px;padding:6px 14px;cursor:pointer">📂 在 Obsidian 中打开</button></div>';
     } else {
       document.getElementById('result-content').innerHTML = '<div style="color:#c00">✗ ' + (d.error || '失败') + '</div>';
     }
@@ -11358,7 +11358,7 @@ async function _connProbe() {
     /* 内容图给浅色画布 matte:助手气泡恒深底(#161d31),透明底 SVG/图的黑轴黑字看不清 → 白底救场(同 rc-result;MathJax=chtml 无 svg 不误伤) */
     '.asst-a img,.asst-a svg{max-width:100%;height:auto;border-radius:8px;display:block;margin:.4em auto;background:#fff;padding:10px;box-sizing:border-box}' +
     '.asst-a img{cursor:zoom-in}' +
-    '.asst-tool{align-self:flex-start;color:#7c93c4;font-size:12px;padding:2px 6px;font-style:italic}' +
+    '.asst-tool{align-self:flex-start;color:var(--rc-text-muted);font-size:12px;padding:2px 6px;font-style:italic}' +
     '.asst-note{align-self:center;background:#2a2410;border:1px solid #5a4a18;color:#e7d28a;font-size:12px;padding:4px 10px;border-radius:9px;max-width:96%}' +
     '.asst-undo{background:#3a1d2a;border:1px solid #6b3550;color:#ffd0e0;border-radius:7px;padding:2px 8px;font-size:12px;cursor:pointer;margin-left:6px}' +
     '.asst-undo:active{background:#52283a}.asst-undo:disabled{opacity:.5}' +
@@ -11373,48 +11373,48 @@ async function _connProbe() {
     '.asst-edit-card{align-self:flex-start;max-width:92%;background:#13203a;border:1px solid #294060;border-radius:11px;padding:8px 11px;display:flex;flex-direction:column;gap:7px}' +
     '.asst-edit-h{font-size:12.5px;color:#bfe0c8}' +
     '.asst-edit-chips{display:flex;flex-wrap:wrap;gap:6px}' +
-    '.asst-edit-undo{align-self:flex-start;background:#26344f;border:1px solid #3a5273;color:#dbe7ff;border-radius:8px;padding:3px 12px;font-size:12.5px;cursor:pointer}' +
+    '.asst-edit-undo{align-self:flex-start;background:#26344f;border:1px solid #3a5273;color:var(--rc-text-strong);border-radius:8px;padding:3px 12px;font-size:12.5px;cursor:pointer}' +
     '.asst-edit-undo:active{background:#2f4061}.asst-edit-undo:disabled{opacity:.55}' +
     '#asst-quick{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px;border-top:1px solid #233156}' +
-    '#asst-quick button{background:#16203a;border:1px solid #2a3a63;color:#bcd0ff;border-radius:8px;padding:6px 10px;font-size:13px;cursor:pointer}' +
+    '#asst-quick button{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:#bcd0ff;border-radius:8px;padding:6px 10px;font-size:13px;cursor:pointer}' +
     '#asst-quick button:active{background:#22305a}' +
     '#asst-quick button.asst-learn{background:#16293a;border-color:#2a4a63;color:#bce0ff}' +   // 学习类按钮:跟导航类区分
     '#asst-send.stop{background:#b23b3b}' +   // 流式中:发送→停止(红)
     // AI 答完的「追问建议」chip
     '.asst-followups{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}' +
-    '.asst-fu{background:#13233f;border:1px solid #2a3a63;color:#bcd0ff;border-radius:13px;padding:5px 11px;font-size:13px;cursor:pointer;text-align:left}' +
+    '.asst-fu{background:#13233f;border:1px solid var(--rc-border-control);color:#bcd0ff;border-radius:13px;padding:5px 11px;font-size:13px;cursor:pointer;text-align:left}' +
     '.asst-fu:active{background:#1d3358}' +
     // 每条回答右下角的「!」反馈按钮 + 弹出:显示这条回答经过了哪些 AI 调用(各步模型),再给两个回报动作
     '.asst-fb-bar{position:relative;margin-top:7px;display:flex;justify-content:flex-end;align-items:center}' +
     '.asst-tok{margin-right:auto;font-size:11px;color:#6f7fa3;background:#121a2e;border:1px solid #233156;border-radius:8px;padding:1px 7px}' +
-    '.asst-fb-btn{width:22px;height:22px;line-height:20px;text-align:center;border-radius:50%;border:1px solid #2a3a63;background:#0e1525;color:#7c93c4;font-size:13px;font-weight:700;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent}' +
-    '.asst-fb-btn:active{background:#1a2540}' +
-    '.asst-fb-pop{position:absolute;right:0;bottom:28px;z-index:20;width:320px;max-width:88vw;background:#0d1426;border:1px solid #2a3a63;border-radius:11px;padding:9px;box-shadow:0 8px 22px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:5px}' +
+    '.asst-fb-btn{width:22px;height:22px;line-height:20px;text-align:center;border-radius:50%;border:1px solid var(--rc-border-control);background:var(--rc-bg-field);color:var(--rc-text-muted);font-size:13px;font-weight:700;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent}' +
+    '.asst-fb-btn:active{background:var(--rc-bg-raised)}' +
+    '.asst-fb-pop{position:absolute;right:0;bottom:28px;z-index:20;width:320px;max-width:88vw;background:var(--rc-bg-canvas);border:1px solid var(--rc-border-control);border-radius:11px;padding:9px;box-shadow:0 8px 22px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:5px}' +
     '.afp-l-btn{cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px;-webkit-tap-highlight-color:transparent}' +
     '.afp-l-btn:active{opacity:.7}' +
     '.afp-detail{white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;background:#0a1020;border:1px solid #233156;border-radius:8px;padding:8px 10px;margin:2px 0 4px;font-size:11.5px;color:#bcd0ee;line-height:1.55;-webkit-overflow-scrolling:touch}' +
-    '.afp-h{font-size:11px;color:#7c93c4;margin-bottom:2px}' +
+    '.afp-h{font-size:11px;color:var(--rc-text-muted);margin-bottom:2px}' +
     '.afp-step{display:flex;align-items:center;gap:7px;font-size:12px;line-height:1.5}' +
     '.afp-l{color:#cdd9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0}' +
-    '.afp-m{color:#7c93c4;flex:none;font-variant-numeric:tabular-nums}' +
-    '.afp-gear-btn{flex:none;background:none;border:none;color:#6b7da0;font-size:13px;cursor:pointer;padding:0 1px;-webkit-tap-highlight-color:transparent}' +
+    '.afp-m{color:var(--rc-text-muted);flex:none;font-variant-numeric:tabular-nums}' +
+    '.afp-gear-btn{flex:none;background:none;border:none;color:var(--rc-text-dim);font-size:13px;cursor:pointer;padding:0 1px;-webkit-tap-highlight-color:transparent}' +
     '.afp-gear-btn:active{color:#bcd0ff}' +
     '.afp-gear{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin:1px 0 5px;padding:7px;background:#0a1322;border:1px solid #243152;border-radius:8px}' +
-    '.afp-glab{font-size:11px;color:#7c93c4;width:100%}' +
-    '.afp-sel{background:#0d1426;border:1px solid #2a3a63;color:#dbe7ff;border-radius:6px;padding:3px 5px;font-size:12px;flex:1 1 42%;min-width:0}' +
+    '.afp-glab{font-size:11px;color:var(--rc-text-muted);width:100%}' +
+    '.afp-sel{background:var(--rc-bg-canvas);border:1px solid var(--rc-border-control);color:var(--rc-text-strong);border-radius:6px;padding:3px 5px;font-size:12px;flex:1 1 42%;min-width:0}' +
     '.afp-gset{background:#16293a;border:1px solid #2a4a63;color:#bce0ff;border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;flex:1 1 auto}' +
-    '.afp-gdef{background:#1a2233;border:1px solid #2a3a63;color:#9fb4e0;border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;flex:none}' +
-    '.afp-foot{font-size:11px;color:#6b7da0;margin-top:5px;text-align:right;font-variant-numeric:tabular-nums}' +
+    '.afp-gdef{background:#1a2233;border:1px solid var(--rc-border-control);color:var(--rc-text-muted);border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;flex:none}' +
+    '.afp-foot{font-size:11px;color:var(--rc-text-dim);margin-top:5px;text-align:right;font-variant-numeric:tabular-nums}' +
     '.afp-acts{display:flex;flex-direction:column;gap:5px;margin-top:4px;border-top:1px solid #1d2742;padding-top:7px}' +
-    '.afp-act{text-align:left;border:1px solid #2a3a63;border-radius:8px;padding:6px 9px;font-size:12px;cursor:pointer;color:#dbe7ff}' +
+    '.afp-act{text-align:left;border:1px solid var(--rc-border-control);border-radius:8px;padding:6px 9px;font-size:12px;cursor:pointer;color:var(--rc-text-strong)}' +
     '.afp-q{background:#16293a;border-color:#2a4a63}.afp-q:active{background:#1d3a52}' +
     '.afp-s{background:#1a2233}.afp-s:active{background:#222d44}' +
     '#asst-input{flex:0 0 auto;display:flex;gap:8px;padding:10px;border-top:1px solid #233156;align-items:flex-end}' +
-    '#asst-ta{flex:1;background:#0b1220;border:1px solid #2a3a63;color:#e6eeff;border-radius:12px;padding:9px 11px;font-size:15px;resize:none;max-height:120px;line-height:1.4;font-family:inherit}' +
+    '#asst-ta{flex:1;background:#0b1220;border:1px solid var(--rc-border-control);color:#e6eeff;border-radius:12px;padding:9px 11px;font-size:15px;resize:none;max-height:120px;line-height:1.4;font-family:inherit}' +
     '#asst-send{background:#2563eb;border:none;color:#fff;width:42px;height:42px;border-radius:12px;font-size:18px;cursor:pointer;flex:none}' +
     '#asst-send:disabled{opacity:.5}' +
     // 苹果风格语音按钮:静默时素净,听写时 iOS 蓝 + 呼吸光环
-    '#asst-mic{background:#16203a;border:1px solid #2a3a63;color:#9fb4e0;width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
+    '#asst-mic{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
     '#asst-mic:active{transform:scale(.9)}' +
     '#asst-mic.on{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:asstMicPulse 1.5s ease-in-out infinite}' +
     '@keyframes asstMicPulse{0%,100%{box-shadow:0 0 0 0 rgba(10,132,255,.5)}50%{box-shadow:0 0 0 9px rgba(10,132,255,0)}}' +
@@ -11423,26 +11423,26 @@ async function _connProbe() {
     '.actx-thumbs{display:flex;flex-wrap:wrap;gap:5px}' +
     '.actx-thumb{width:42px;height:42px;object-fit:cover;border-radius:6px;border:1px solid rgba(255,255,255,.45);background:#fff;cursor:pointer;flex:none}' +
     '.actx-thumb:active{transform:scale(.94)}' +
-    '.actx-sel{font-size:12px;color:#dbe7ff;background:rgba(255,255,255,.13);border-left:2px solid rgba(255,255,255,.5);border-radius:4px;padding:3px 7px;cursor:pointer;line-height:1.4}' +
+    '.actx-sel{font-size:12px;color:var(--rc-text-strong);background:rgba(255,255,255,.13);border-left:2px solid rgba(255,255,255,.5);border-radius:4px;padding:3px 7px;cursor:pointer;line-height:1.4}' +
     '.actx-sel:active{background:rgba(255,255,255,.22)}' +
     '.actx-sel.actx-fml{text-align:center;white-space:normal;overflow-x:auto;color:#eaf2ff}' +
     '.actx-page{align-self:flex-start;font-size:11px;color:#eaf2ff;background:rgba(255,255,255,.16);border-radius:9px;padding:2px 9px;cursor:pointer}' +
     '.actx-page:active{background:rgba(255,255,255,.28)}' +
     // ⚙ 模型设置面板(每任务 后端/型号/深度)
     '.ams-mask{position:fixed;inset:0;z-index:2147483400;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}' +
-    '.ams-box{background:#0d1426;border:1px solid #2a3a63;border-radius:14px;max-width:440px;width:100%;max-height:86vh;overflow-y:auto;padding:14px 14px 16px;box-shadow:0 12px 40px rgba(0,0,0,.6)}' +
-    '.ams-h{font-size:15px;color:#dbe7ff;font-weight:600;display:flex;align-items:center;justify-content:space-between;margin-bottom:3px}' +
-    '.ams-x{background:none;border:none;color:#7c93c4;font-size:20px;cursor:pointer;padding:0 4px;line-height:1}' +
-    '.ams-sub{font-size:11px;color:#6b7da0;margin-bottom:10px;line-height:1.5}' +
+    '.ams-box{background:var(--rc-bg-canvas);border:1px solid var(--rc-border-control);border-radius:14px;max-width:440px;width:100%;max-height:86vh;overflow-y:auto;padding:14px 14px 16px;box-shadow:0 12px 40px rgba(0,0,0,.6)}' +
+    '.ams-h{font-size:15px;color:var(--rc-text-strong);font-weight:600;display:flex;align-items:center;justify-content:space-between;margin-bottom:3px}' +
+    '.ams-x{background:none;border:none;color:var(--rc-text-muted);font-size:20px;cursor:pointer;padding:0 4px;line-height:1}' +
+    '.ams-sub{font-size:11px;color:var(--rc-text-dim);margin-bottom:10px;line-height:1.5}' +
     '.ams-task{background:#0a1322;border:1px solid #243152;border-radius:10px;padding:10px;margin-bottom:9px}' +
     '.ams-tname{font-size:13px;color:#cdd9f2;font-weight:600;margin-bottom:2px}' +
-    '.ams-tdef{font-size:11px;color:#6b7da0;margin-bottom:7px}' +
+    '.ams-tdef{font-size:11px;color:var(--rc-text-dim);margin-bottom:7px}' +
     '.ams-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}' +
-    '.ams-sel{background:#0d1426;border:1px solid #2a3a63;color:#dbe7ff;border-radius:7px;padding:5px 6px;font-size:12px;flex:1 1 28%;min-width:0}' +
+    '.ams-sel{background:var(--rc-bg-canvas);border:1px solid var(--rc-border-control);color:var(--rc-text-strong);border-radius:7px;padding:5px 6px;font-size:12px;flex:1 1 28%;min-width:0}' +
     '.ams-sel:disabled{opacity:.45}' +
-    '.ams-rst{background:#1a2233;border:1px solid #2a3a63;color:#9fb4e0;border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
+    '.ams-rst{background:#1a2233;border:1px solid var(--rc-border-control);color:var(--rc-text-muted);border-radius:7px;padding:5px 9px;font-size:12px;cursor:pointer;flex:none}' +
     '.ams-rst:active{background:#222d44}' +
-    '.ams-cur{font-size:11px;color:#7c93c4;margin-top:6px}' +
+    '.ams-cur{font-size:11px;color:var(--rc-text-muted);margin-top:6px}' +
     '.ams-note{font-size:11px;color:#bfae72;background:#221d10;border:1px solid #463a18;border-radius:7px;padding:6px 9px;margin-top:4px;line-height:1.5}';
   document.head.appendChild(css);
 
@@ -12868,7 +12868,7 @@ async function _connProbe() {
     '.fig-badge:active{transform:scale(.88)}.fig-badge:hover{opacity:.95}' +
     '.fig-badge svg{width:15px;height:15px;display:block}' +
     '.fig-pop{position:fixed;z-index:130;max-width:min(86vw,440px);background:#11192c;color:#e8eeff;' +
-    'border:1px solid #2a3a63;border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.5);' +
+    'border:1px solid var(--rc-border-control);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.5);' +
     'padding:14px 16px;font-size:14px;line-height:1.6;max-height:60vh;overflow-y:auto;-webkit-overflow-scrolling:touch}' +
     '.fig-pop h4{margin:0 0 6px;font-size:14px;color:#7fb0ff;font-weight:600}' +
     '.fig-pop .fig-x{position:absolute;top:8px;right:10px;color:#8aa;cursor:pointer;font-size:16px;line-height:1}' +
@@ -12894,17 +12894,17 @@ async function _connProbe() {
     'font-size:64px;font-weight:300;color:rgba(10,132,255,.6);pointer-events:none;text-shadow:0 2px 8px rgba(0,0,0,.4)}' +
     // 助手对话里「已带入的图」附件条列表(可多张,横向 wrap;每张 缩略图 + 图注 + ✕)
     '#asst-fig-chips{display:flex;flex-wrap:wrap;gap:6px;padding:6px 10px 0}' +
-    '.asst-fig-chip{display:flex;align-items:center;gap:6px;padding:4px 6px;background:#16203a;' +
-    'border:1px solid #2a3a63;border-radius:9px;max-width:100%}' +
-    '.asst-fig-chip .afc-thumb{width:38px;height:38px;object-fit:cover;border-radius:5px;border:1px solid #3b6db5;background:#fff;flex:none}' +
-    '.asst-fig-chip .afc-cap{font-size:11px;color:#cfe6ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px}' +
+    '.asst-fig-chip{display:flex;align-items:center;gap:6px;padding:4px 6px;background:var(--rc-bg-control);' +
+    'border:1px solid var(--rc-border-control);border-radius:9px;max-width:100%}' +
+    '.asst-fig-chip .afc-thumb{width:38px;height:38px;object-fit:cover;border-radius:5px;border:1px solid var(--rc-border-accent);background:#fff;flex:none}' +
+    '.asst-fig-chip .afc-cap{font-size:11px;color:var(--rc-text-strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px}' +
     '.asst-fig-chip .afc-x{background:transparent;border:none;color:#9ab;font-size:13px;cursor:pointer;flex:none;padding:0 2px}' +
     // 焦点选区 chip(公式/段落)
     '#asst-sel-chip{padding:6px 10px 0}' +
-    '.asst-sel-chip-in{display:flex;align-items:center;gap:7px;padding:5px 8px;background:#101a30;border:1px solid #2f4a7d;border-radius:9px;max-width:100%}' +
-    '.asst-sel-chip-in.is-fml{border-color:#3b6db5}' +
+    '.asst-sel-chip-in{display:flex;align-items:center;gap:7px;padding:5px 8px;background:#101a30;border:1px solid var(--rc-border-popover);border-radius:9px;max-width:100%}' +
+    '.asst-sel-chip-in.is-fml{border-color:var(--rc-border-accent)}' +
     '.asst-sel-chip-in .asc-icon{flex:none;font-size:14px}' +
-    '.asst-sel-chip-in .asc-body{flex:1 1 auto;min-width:0;font-size:12px;color:#dbe7ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+    '.asst-sel-chip-in .asc-body{flex:1 1 auto;min-width:0;font-size:12px;color:var(--rc-text-strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
     '.asst-sel-chip-in.is-fml .asc-body{color:#eaf2ff;white-space:normal;max-height:46px;overflow:auto}' +
     '.asst-sel-chip-in .asc-x{flex:none;background:transparent;border:none;color:#9ab;font-size:13px;cursor:pointer;padding:0 2px}' +
     // 点缩略图看大图(合成图)

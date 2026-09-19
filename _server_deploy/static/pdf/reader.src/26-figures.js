@@ -17,7 +17,7 @@
     '.fig-badge:active{transform:scale(.88)}.fig-badge:hover{opacity:.95}' +
     '.fig-badge svg{width:15px;height:15px;display:block}' +
     '.fig-pop{position:fixed;z-index:130;max-width:min(86vw,440px);background:#11192c;color:#e8eeff;' +
-    'border:1px solid #2a3a63;border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.5);' +
+    'border:1px solid var(--rc-border-control);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.5);' +
     'padding:14px 16px;font-size:14px;line-height:1.6;max-height:60vh;overflow-y:auto;-webkit-overflow-scrolling:touch}' +
     '.fig-pop h4{margin:0 0 6px;font-size:14px;color:#7fb0ff;font-weight:600}' +
     '.fig-pop .fig-x{position:absolute;top:8px;right:10px;color:#8aa;cursor:pointer;font-size:16px;line-height:1}' +
@@ -43,17 +43,17 @@
     'font-size:64px;font-weight:300;color:rgba(10,132,255,.6);pointer-events:none;text-shadow:0 2px 8px rgba(0,0,0,.4)}' +
     // 助手对话里「已带入的图」附件条列表(可多张,横向 wrap;每张 缩略图 + 图注 + ✕)
     '#asst-fig-chips{display:flex;flex-wrap:wrap;gap:6px;padding:6px 10px 0}' +
-    '.asst-fig-chip{display:flex;align-items:center;gap:6px;padding:4px 6px;background:#16203a;' +
-    'border:1px solid #2a3a63;border-radius:9px;max-width:100%}' +
-    '.asst-fig-chip .afc-thumb{width:38px;height:38px;object-fit:cover;border-radius:5px;border:1px solid #3b6db5;background:#fff;flex:none}' +
-    '.asst-fig-chip .afc-cap{font-size:11px;color:#cfe6ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px}' +
+    '.asst-fig-chip{display:flex;align-items:center;gap:6px;padding:4px 6px;background:var(--rc-bg-control);' +
+    'border:1px solid var(--rc-border-control);border-radius:9px;max-width:100%}' +
+    '.asst-fig-chip .afc-thumb{width:38px;height:38px;object-fit:cover;border-radius:5px;border:1px solid var(--rc-border-accent);background:#fff;flex:none}' +
+    '.asst-fig-chip .afc-cap{font-size:11px;color:var(--rc-text-strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px}' +
     '.asst-fig-chip .afc-x{background:transparent;border:none;color:#9ab;font-size:13px;cursor:pointer;flex:none;padding:0 2px}' +
     // 焦点选区 chip(公式/段落)
     '#asst-sel-chip{padding:6px 10px 0}' +
-    '.asst-sel-chip-in{display:flex;align-items:center;gap:7px;padding:5px 8px;background:#101a30;border:1px solid #2f4a7d;border-radius:9px;max-width:100%}' +
-    '.asst-sel-chip-in.is-fml{border-color:#3b6db5}' +
+    '.asst-sel-chip-in{display:flex;align-items:center;gap:7px;padding:5px 8px;background:#101a30;border:1px solid var(--rc-border-popover);border-radius:9px;max-width:100%}' +
+    '.asst-sel-chip-in.is-fml{border-color:var(--rc-border-accent)}' +
     '.asst-sel-chip-in .asc-icon{flex:none;font-size:14px}' +
-    '.asst-sel-chip-in .asc-body{flex:1 1 auto;min-width:0;font-size:12px;color:#dbe7ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+    '.asst-sel-chip-in .asc-body{flex:1 1 auto;min-width:0;font-size:12px;color:var(--rc-text-strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
     '.asst-sel-chip-in.is-fml .asc-body{color:#eaf2ff;white-space:normal;max-height:46px;overflow:auto}' +
     '.asst-sel-chip-in .asc-x{flex:none;background:transparent;border:none;color:#9ab;font-size:13px;cursor:pointer;padding:0 2px}' +
     // 点缩略图看大图(合成图)

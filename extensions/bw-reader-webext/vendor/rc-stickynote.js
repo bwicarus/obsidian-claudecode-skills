@@ -191,7 +191,7 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-note.rc-note-lift .rc-note-handle{cursor:grabbing;box-shadow:0 10px 26px rgba(0,0,0,.5)}',
       '.rc-note.rc-note-lift .rc-note-body{box-shadow:0 12px 30px rgba(0,0,0,.45)}',
       '.rc-note.rc-card-drag-charging .rc-note-handle{box-shadow:inset 0 -2px 0 rgba(125,211,252,.38)!important}',
-      '.rc-note.rc-card-drag-charging .rc-note-handle::before{content:"";position:absolute;left:0;bottom:0;height:2px;width:100%;border-radius:2px;background:#7dd3fc;transform-origin:left;animation:rc-card-drag-charge .42s linear both}',
+      '.rc-note.rc-card-drag-charging .rc-note-handle::before{content:"";position:absolute;left:0;bottom:0;height:2px;width:100%;border-radius:2px;background:var(--rc-accent-cyan);transform-origin:left;animation:rc-card-drag-charge .42s linear both}',
       '.rc-note.rc-card-drag-ready .rc-note-handle{box-shadow:inset 0 -2px 0 rgba(125,211,252,.9)!important}',
       '@keyframes rc-card-drag-charge{from{transform:scaleX(0);opacity:.35}to{transform:scaleX(1);opacity:1}}',
       /* 删除键:Apple 简约风——右上角小圆角标,毛玻璃深底 + 白色细线 ✕(不再红底红边飘右侧;确认弹窗才是危险动作) */
@@ -277,7 +277,7 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-anchor-fx.rc-afx-line::before{content:"";position:absolute;left:-4px;top:-5px;width:8px;height:8px;border-radius:50%;background:#0a84ff}',
       '.rc-anchor-fx.rc-afx-line::after{content:"";position:absolute;right:-4px;top:-5px;width:8px;height:8px;border-radius:50%;background:#0a84ff}',
       '.rc-note-html{display:none}',
-      '.rc-note.rc-note-hashtml .rc-note-html{display:block;padding:3px 5px 5px;font-size:14px;line-height:1.6;color:#e6e6f0;max-height:min(50vh,340px);overflow-y:auto;-webkit-overflow-scrolling:touch}',
+      '.rc-note.rc-note-hashtml .rc-note-html{display:block;padding:3px 5px 5px;font-size:14px;line-height:1.6;color:var(--rc-text);max-height:min(50vh,340px);overflow-y:auto;-webkit-overflow-scrolling:touch}',
       // ★ 壳里装的是整张 .vc-card 时,**尺寸与滚动全部交给卡片**。
       //   上面那条给普通 HTML 便签用的 padding + 限高 + 独立滚动,套在卡片外面会出三件事:
       //   ① padding 把卡片顶向右下(左 5px/上 3px),超出的右边被壳裁掉 —— 就是"右边变直角";
@@ -310,7 +310,7 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-note.rc-note-hashtml.rc-note-collapsed .rc-note-html{display:none}',
       '.bw-hide-bindrail .pgbind-rail-dot,.bw-hide-bindrail .pgbind-rail{display:none !important}',
       // ── 卡内完整词条区（用户 2026-08-31：把词典小框那套放进卡里）──
-      '.rc-note-dict{margin-top:6px;padding:8px 10px;border-top:1px dashed rgba(160,160,180,.35);font-size:13px;line-height:1.55;color:#cfe6ff}',
+      '.rc-note-dict{margin-top:6px;padding:8px 10px;border-top:1px dashed rgba(160,160,180,.35);font-size:13px;line-height:1.55;color:var(--rc-text-strong)}',
       '.rc-note-dict .rnd-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px}',
       '.rc-note-dict .rnd-word{font-size:16px;font-weight:600;color:#fff}',
       '.rc-note-dict .rnd-speak{background:none;border:1px solid #2a3450;border-radius:50%;width:26px;height:26px;color:#9fb6ff;cursor:pointer;font-size:13px;line-height:1}',
@@ -319,11 +319,11 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-note-dict .rnd-ex-ja{color:#dff1ff}',
       '.rc-note-dict .rnd-ex-zh{color:#8fa3c8;font-size:12px}',
       // 音调线（移植 wordpop 同款视觉）
-      '.rc-note-dict .wp-pitch{display:inline-flex;align-items:flex-end;gap:0;font-size:14px;color:#cfe6ff;flex-wrap:wrap;max-width:100%;row-gap:6px}',
+      '.rc-note-dict .wp-pitch{display:inline-flex;align-items:flex-end;gap:0;font-size:14px;color:var(--rc-text-strong);flex-wrap:wrap;max-width:100%;row-gap:6px}',
       '.rc-note-dict .wp-pitch .pm{position:relative;padding:3px 1px 0;line-height:1.1;border-top:2px solid transparent;flex:0 0 auto;white-space:nowrap}',
       '.rc-note-dict .wp-pitch .pm.hi{border-top:2px solid #6fd3ff;color:#dff1ff}',
       '.rc-note-dict .wp-pitch .pm.drop::after{content:"";position:absolute;right:-1px;top:0;height:9px;border-right:2px solid #ff8a8a}',
-      '.rc-note-dict .wp-pitch .pm-type{margin-left:6px;font-size:10px;color:#5a6680;border:1px solid #2a3450;border-radius:4px;padding:0 4px;align-self:center}',
+      '.rc-note-dict .wp-pitch .pm-type{margin-left:6px;font-size:10px;color:var(--rc-text-dim);border:1px solid #2a3450;border-radius:4px;padding:0 4px;align-self:center}',
       '.rc-note.rc-note-hasvideo .rc-vid-embed{border-radius:9px 9px 0 0;overflow:hidden}',
       '.rc-vc-rm{margin-left:auto;border:1px solid rgba(0,0,0,.2);background:rgba(255,255,255,.6);border-radius:5px;width:22px;height:20px;line-height:1;font-size:12px;cursor:pointer;color:#a33;padding:0}',
       // 暗底自动对比色(applyColor 按便签本色亮度 toggle .rc-note-darkbg):文字/placeholder/光标 →
@@ -1241,7 +1241,7 @@ if (window.__bwPwaProviderOnly) return;
       var line = document.createElement('div');
       line.className = 'rc-note-dict-note';
       line.style.cssText =
-        'margin:2px 0;font-size:10px;opacity:.55;color:#cfe6ff';
+        'margin:2px 0;font-size:10px;opacity:.55;color:var(--rc-text-strong)';
       line.textContent = '📖 ' + reason;
       // 插卡顶部:尾部会被展开卡的固定高度裁掉,只露半行(实锤截图)。
       box.insertBefore(line, box.firstChild || null);
@@ -1383,7 +1383,7 @@ if (window.__bwPwaProviderOnly) return;
         waitLine.className = 'rc-note-dict-wait';
         waitLine.setAttribute('data-dict-word', text);
         waitLine.style.cssText =
-          'margin-top:4px;font-size:11px;opacity:.5;color:#cfe6ff';
+          'margin-top:4px;font-size:11px;opacity:.5;color:var(--rc-text-strong)';
         waitLine.textContent = '📖 词典查询中…';
         box.appendChild(waitLine);
       }
@@ -1454,7 +1454,7 @@ if (window.__bwPwaProviderOnly) return;
                 var errLine = document.createElement('div');
                 errLine.className = 'rc-note-dict-err';
                 errLine.style.cssText = 'margin-top:4px;font-size:11px;'
-                  + 'opacity:.5;color:#cfe6ff';
+                  + 'opacity:.5;color:var(--rc-text-strong)';
                 errLine.textContent = '📖 词典暂不可用：'
                   + String(err && err.message || 'network').slice(0, 60);
                 box.appendChild(errLine);

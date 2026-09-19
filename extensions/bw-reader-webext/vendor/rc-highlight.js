@@ -21,23 +21,23 @@ if (window.__bwPwaProviderOnly) return;
     if (injected) return; injected = true;
     var css = document.createElement('style'); css.id = 'rc-hl-css';
     css.textContent =
-      '.rc-hl-pop{position:fixed;z-index:140;min-width:min(280px,92vw);max-width:min(380px,92vw);box-sizing:border-box;background:var(--rc-bg-popover,#0f1830);border:1px solid var(--rc-border-popover,#2f4a7d);border-radius:var(--rc-radius-popover,11px);box-shadow:var(--rc-shadow-pop,0 10px 30px rgba(0,0,0,.6));padding:10px;color:#e6edf3;-webkit-tap-highlight-color:transparent}' +
-      '.rc-hl-pop .rc-hl-prev{font-size:12.5px;line-height:1.5;color:#cfe0ff;background:rgba(0,0,0,.25);border-left:2px solid #60a5fa;border-radius:4px;padding:6px 9px;margin-bottom:8px;word-break:break-word}' +
+      '.rc-hl-pop{position:fixed;z-index:140;min-width:min(280px,92vw);max-width:min(380px,92vw);box-sizing:border-box;background:var(--rc-bg-popover,rgba(30,30,32,.78));backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border:1px solid var(--rc-border-popover,rgba(255,255,255,.14));border-radius:var(--rc-radius-popover,11px);box-shadow:var(--rc-shadow-pop,0 10px 30px rgba(0,0,0,.6));padding:10px;color:#e6edf3;-webkit-tap-highlight-color:transparent}' +
+      '.rc-hl-pop .rc-hl-prev{font-size:12.5px;line-height:1.5;color:var(--rc-text-strong);background:rgba(0,0,0,.25);border-left:2px solid var(--rc-accent);border-radius:4px;padding:6px 9px;margin-bottom:8px;word-break:break-word}' +
       '.rc-hl-pop .rc-hl-sent{font-size:11.5px;line-height:1.5;color:#9fb0d6;margin-bottom:8px;word-break:break-word}' +
       // AI 译文/解释正文行(照搬 PDF #hl-popover .hl-snip-row.body:带 kind 标签 译文/解释/备注)
-      '.rc-hl-pop .rc-hl-body{font-size:12px;line-height:1.5;color:#cfe0ff;margin-bottom:8px;word-break:break-word}' +
+      '.rc-hl-pop .rc-hl-body{font-size:12px;line-height:1.5;color:var(--rc-text-strong);margin-bottom:8px;word-break:break-word}' +
       // 预览块单行省略 + 点击展开(照搬 PDF #hl-popover .hl-snip-content / .expanded)
       '.rc-hl-pop .rc-hl-prevbox{cursor:pointer}' +
       '.rc-hl-pop .rc-hl-prevbox .rc-hl-prev,.rc-hl-pop .rc-hl-prevbox .rc-hl-sent,.rc-hl-pop .rc-hl-prevbox .rc-hl-body{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
       '.rc-hl-pop .rc-hl-prevbox.expanded .rc-hl-prev,.rc-hl-pop .rc-hl-prevbox.expanded .rc-hl-sent,.rc-hl-pop .rc-hl-prevbox.expanded .rc-hl-body{white-space:normal;overflow:visible;text-overflow:clip}' +
       // 色板行:照搬 PDF #hl-popover .row(align-items:center)+ .row-lbl(11px/#7a8497/margin-right 2px)
       '.rc-hl-pop .rc-hl-sw{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;row-gap:8px;width:auto;height:auto;min-height:0}' +
-      '.rc-hl-pop .rc-hl-sw-lbl{font-size:11px;color:#7a8497;margin-right:2px}' +
+      '.rc-hl-pop .rc-hl-sw-lbl{font-size:11px;color:var(--rc-text-dim);margin-right:2px}' +
       '.rc-hl-pop .rc-hl-sw-i{flex:0 0 auto;box-sizing:border-box;width:28px;height:28px;min-width:28px;min-height:28px;aspect-ratio:1/1;border-radius:50%;cursor:pointer;border:2px solid transparent;display:inline-block;touch-action:manipulation}' +
       '.rc-hl-pop .rc-hl-sw-i.on{border-color:#fff}' +
-      '.rc-hl-pop .rc-hl-note{width:100%;min-height:48px;background:var(--rc-bg-field,#0e1525);border:1px solid var(--rc-border-control,#2a3a63);color:#e6edf3;border-radius:var(--rc-radius-md,8px);padding:7px 9px;font-size:13px;resize:vertical;font-family:inherit;display:block;box-sizing:border-box}' +
+      '.rc-hl-pop .rc-hl-note{width:100%;min-height:48px;background:var(--rc-bg-field,#1c1c1e);border:1px solid var(--rc-border-control,rgba(84,84,88,.46));color:#e6edf3;border-radius:var(--rc-radius-md,8px);padding:7px 9px;font-size:13px;resize:vertical;font-family:inherit;display:block;box-sizing:border-box}' +
       '.rc-hl-pop .rc-hl-row{display:flex;gap:8px;margin-top:8px;justify-content:flex-end}' +
-      '.rc-hl-pop .rc-hl-row button{background:var(--rc-bg-control,#16203a);border:1px solid var(--rc-border-control,#2a3a63);color:#cfe0ff;border-radius:7px;padding:5px 11px;font-size:13px;cursor:pointer}' +
+      '.rc-hl-pop .rc-hl-row button{background:var(--rc-bg-control,rgba(120,120,128,.20));border:1px solid var(--rc-border-control,rgba(84,84,88,.46));color:var(--rc-text-strong);border-radius:7px;padding:5px 11px;font-size:13px;cursor:pointer}' +
       '.rc-hl-pop .rc-hl-row button.rc-hl-del{background:var(--rc-danger,#7a2828);border-color:#9a3a3a;color:var(--rc-danger-text,#ffdede)}' +
       // iOS Mail 式左滑删除(照搬 PDF reader.src/19-dict.js _attachSnipBehavior 的三个 CSS 点:
       //   ① 滑动内容 .rc-hl-slide(transform + transition);② 背后绝对定位删除条 .rc-hl-swipe-del(visibility:hidden);
@@ -48,13 +48,13 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-hl-item .rc-hl-swipe-del{position:absolute;right:0;top:0;bottom:0;width:64px;background:#7a2828;color:#ffdede;border:none;font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:1;visibility:hidden}' +
       '.rc-hl-item.swiped .rc-hl-swipe-del{visibility:visible}' +
       '.rc-hl-item .rc-hl-dot{flex:0 0 auto;width:14px;height:14px;border-radius:4px;margin-top:2px;cursor:pointer}' +
-      '.rc-hl-item .rc-hl-tx{flex:1;min-width:0;font-size:13px;color:#dbe7ff;line-height:1.5;word-break:break-word}' +
+      '.rc-hl-item .rc-hl-tx{flex:1;min-width:0;font-size:13px;color:var(--rc-text-strong);line-height:1.5;word-break:break-word}' +
       '.rc-hl-item .rc-hl-tx .rc-hl-nt{display:block;color:#9fb0d6;font-size:12px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}' +
       '.rc-hl-item .rc-hl-tx .rc-hl-nt.expanded{white-space:normal;overflow:visible;text-overflow:clip}' +
       '.rc-hl-item .rc-hl-ops{flex:0 0 auto;display:flex;flex-direction:column;gap:5px}' +
-      '.rc-hl-item .rc-hl-ops button{background:#16203a;border:1px solid #2a3a63;color:#cfe0ff;border-radius:6px;padding:3px 8px;font-size:12px;cursor:pointer}' +
+      '.rc-hl-item .rc-hl-ops button{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text-strong);border-radius:6px;padding:3px 8px;font-size:12px;cursor:pointer}' +
       '.rc-hl-item .rc-hl-ops button.rc-hl-del{background:#7a2828;border-color:#9a3a3a;color:#ffdede}' +
-      '.rc-hl-empty{color:#7c93c4;font-size:13px;text-align:center;padding:20px;line-height:1.6}';
+      '.rc-hl-empty{color:var(--rc-text-muted);font-size:13px;text-align:center;padding:20px;line-height:1.6}';
     document.head.appendChild(css);
   }
 

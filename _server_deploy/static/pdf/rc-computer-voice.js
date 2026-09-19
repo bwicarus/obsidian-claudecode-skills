@@ -5334,13 +5334,13 @@
               esc(item.body) + '</div>'
             : '') +
           '<div style="display:flex;gap:8px;align-items:center;margin-top:7px">' +
-          '<span style="color:#5a6680;font-size:11px;flex:1">' + esc(stamp) +
+          '<span style="color:var(--rc-text-dim);font-size:11px;flex:1">' + esc(stamp) +
           '　' + esc(item.kind) + '</span>' +
-          '<button type="button" data-ntf-act="resolve" style="background:#1a2540;' +
-          'border:1px solid #2a3550;color:#9fe6b8;border-radius:6px;' +
+          '<button type="button" data-ntf-act="resolve" style="background:var(--rc-bg-raised);' +
+          'border:1px solid var(--rc-border);color:#9fe6b8;border-radius:6px;' +
           'padding:4px 10px;cursor:pointer;font-size:12px">✔ 完成</button>' +
-          '<button type="button" data-ntf-act="cancel" style="background:#1a2540;' +
-          'border:1px solid #2a3550;color:#8fa5c8;border-radius:6px;' +
+          '<button type="button" data-ntf-act="cancel" style="background:var(--rc-bg-raised);' +
+          'border:1px solid var(--rc-border);color:var(--rc-text-muted);border-radius:6px;' +
           'padding:4px 10px;cursor:pointer;font-size:12px">✕ 不再需要</button>' +
           '</div></div>';
       }).join('');
@@ -12951,8 +12951,8 @@
     root.innerHTML =
       '<label class="ams-tdef" for="rc-computer-target">语音与文字接力目标</label>' +
       '<select id="rc-computer-target" data-role="target" ' +
-      'style="width:100%;margin:6px 0 7px;background:#0d1322;' +
-      'border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;' +
+      'style="width:100%;margin:6px 0 7px;background:var(--rc-bg-canvas);' +
+      'border:1px solid var(--rc-border);color:var(--rc-text);border-radius:6px;' +
       'padding:8px 10px;font-size:13px">' +
       '<option value="codex-desktop">Codex</option>' +
       '<option value="chatgpt-classic">GPT Classic</option>' +

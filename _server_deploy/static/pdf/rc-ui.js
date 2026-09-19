@@ -6,12 +6,26 @@
   if (window.RC.ui) return;
   var RC = window.RC;
 
+  // 视觉语言：iOS（用户 2026-09-20 拍板「改成苹果的视觉效果」）。
+  //
+  // 取的是 Apple 深色模式的系统值，不是我调出来的近似色：
+  //   背景三档 = systemBackground / secondary / tertiary（#000 / #1C1C1E / #2C2C2E）
+  //   文字三档 = label / secondaryLabel / tertiaryLabel（白 / 62% / 38%）
+  //   分隔线   = separator（半透明，叠在什么上跟着变，不是一个固定灰）
+  //   强调色   = 深色版 systemBlue / systemCyan / systemGreen / systemRed
+  // ⚠ 半透明是**有意的**：苹果的层级靠透明度和材质表达，不靠不同的固定灰。
+  //   把它们换回不透明色会让毛玻璃层级整个塌掉。
   var TOKENS = {
-    bgCanvas: '#0d1322', bgSurface: '#10162a', bgRaised: '#1a2540', bgActive: '#244470', bgHover: '#2c3e6a',
-    bgPopover: '#0f1830', bgField: '#0e1525', bgControl: '#16203a',
-    border: '#2a3550', borderAccent: '#3b6db5', borderPopover: '#2f4a7d', borderControl: '#2a3a63',
-    text: '#e6e6f0', textStrong: '#cfe6ff', textMuted: '#8a9bb4', textDim: '#7a8497',
-    accent: '#60a5fa', accentCyan: '#7dd3fc', success: '#34d399', danger: '#7a2828', dangerText: '#ffdede'
+    bgCanvas: '#000000', bgSurface: '#1c1c1e', bgRaised: '#2c2c2e',
+    bgActive: 'rgba(10,132,255,.26)', bgHover: 'rgba(120,120,128,.24)',
+    bgPopover: 'rgba(30,30,32,.78)', bgField: '#1c1c1e', bgControl: 'rgba(120,120,128,.20)',
+    border: 'rgba(84,84,88,.62)', borderAccent: 'rgba(10,132,255,.58)',
+    borderPopover: 'rgba(255,255,255,.14)', borderControl: 'rgba(84,84,88,.46)',
+    text: '#ffffff', textStrong: '#ffffff',
+    textMuted: 'rgba(235,235,245,.62)', textDim: 'rgba(235,235,245,.38)',
+    accent: '#0a84ff', accentCyan: '#64d2ff', success: '#30d158',
+    danger: 'rgba(255,69,58,.20)', dangerText: '#ff453a',
+    warn: '#ff9f0a', purple: '#bf5af2'
   };
   var injected = false;
   function inject() {
@@ -19,34 +33,62 @@
     var s = document.createElement('style'); s.id = 'rc-ui-kit';
     s.textContent = `
 :host,:root,#bw-root,#bw-pin-root{
-  --rc-font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",system-ui,sans-serif;
-  --rc-bg-canvas:#0d1322;--rc-bg-surface:#10162a;--rc-bg-raised:#1a2540;--rc-bg-active:#244470;--rc-bg-hover:#2c3e6a;
-  --rc-bg-popover:#0f1830;--rc-bg-field:#0e1525;--rc-bg-control:#16203a;
-  --rc-border:#2a3550;--rc-border-accent:#3b6db5;--rc-border-popover:#2f4a7d;--rc-border-control:#2a3a63;
-  --rc-text:#e6e6f0;--rc-text-strong:#cfe6ff;--rc-text-muted:#8a9bb4;--rc-text-dim:#7a8497;
-  --rc-accent:#60a5fa;--rc-accent-cyan:#7dd3fc;--rc-success:#34d399;--rc-danger:#7a2828;--rc-danger-text:#ffdede;
-  --rc-radius-xs:4px;--rc-radius-sm:6px;--rc-radius-md:8px;--rc-radius-lg:10px;--rc-radius-popover:11px;--rc-radius-xl:12px;--rc-radius-card:16px;
-  --rc-shadow-float:0 6px 16px rgba(0,0,0,.6);--rc-shadow-pop:0 10px 30px rgba(0,0,0,.6);--rc-shadow-panel:0 8px 24px rgba(0,0,0,.6);
-  --rc-motion-fast:.15s;--rc-motion-normal:.3s;--rc-ease:cubic-bezier(.4,0,.2,1);
+  color-scheme:dark;
+  --rc-font-ui:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",system-ui,sans-serif;
+  --rc-bg-canvas:#000000;--rc-bg-surface:#1c1c1e;--rc-bg-raised:#2c2c2e;
+  --rc-bg-active:rgba(10,132,255,.26);--rc-bg-hover:rgba(120,120,128,.24);
+  --rc-bg-popover:rgba(30,30,32,.78);--rc-bg-field:#1c1c1e;--rc-bg-control:rgba(120,120,128,.20);
+  --rc-border:rgba(84,84,88,.62);--rc-border-accent:rgba(10,132,255,.58);
+  --rc-border-popover:rgba(255,255,255,.14);--rc-border-control:rgba(84,84,88,.46);
+  --rc-text:#ffffff;--rc-text-strong:#ffffff;
+  --rc-text-muted:rgba(235,235,245,.62);--rc-text-dim:rgba(235,235,245,.38);
+  --rc-accent:#0a84ff;--rc-accent-cyan:#64d2ff;--rc-success:#30d158;
+  --rc-danger:rgba(255,69,58,.20);--rc-danger-text:#ff453a;
+  --rc-warn:#ff9f0a;--rc-purple:#bf5af2;
+  /* 材质：iOS 的四档毛玻璃。用 backdrop-filter 实现，所以底色必须是半透明的。 */
+  --rc-material-ultrathin:rgba(30,30,32,.55);--rc-material-thin:rgba(30,30,32,.68);
+  --rc-material-regular:rgba(30,30,32,.80);--rc-material-thick:rgba(30,30,32,.92);
+  --rc-blur:saturate(180%) blur(20px);
+  /* 圆角：贴 iOS 的档位（按钮 ~9、弹窗 13、卡片 18） */
+  --rc-radius-xs:5px;--rc-radius-sm:7px;--rc-radius-md:9px;--rc-radius-lg:12px;--rc-radius-popover:13px;--rc-radius-xl:14px;--rc-radius-card:18px;
+  /* 阴影：软而宽。苹果靠层级和材质表达深度，不靠硬描边。 */
+  --rc-shadow-float:0 4px 14px rgba(0,0,0,.36);--rc-shadow-pop:0 12px 34px rgba(0,0,0,.46);--rc-shadow-panel:0 10px 28px rgba(0,0,0,.42);
+  /* 动效：UIKit 那条平滑曲线（弹出/收起都用它，出场再快一点） */
+  --rc-motion-fast:.2s;--rc-motion-normal:.35s;
+  --rc-ease:cubic-bezier(.32,.72,0,1);--rc-ease-out:cubic-bezier(.16,1,.3,1);
+  /* HIG 的 44pt 最小命中区 */
+  --rc-hit:44px;
 }
+/* 系统级观感：抗锯齿、禁止 iOS 自动放大字号、点击不闪灰块。 */
+:root,#bw-root{-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%}
 .rc-ui-surface{background:var(--rc-bg-surface);border:1px solid var(--rc-border);color:var(--rc-text)}
-.rc-ui-card{background:var(--rc-bg-surface);border:1px solid var(--rc-border);border-radius:var(--rc-radius-card);color:var(--rc-text)}
-.rc-ui-popover{background:var(--rc-bg-surface);border:1px solid var(--rc-border-accent);border-radius:var(--rc-radius-lg);box-shadow:var(--rc-shadow-pop);color:var(--rc-text)}
-.rc-ui-button{font-family:var(--rc-font-ui);background:var(--rc-bg-raised);border:1px solid var(--rc-border);border-radius:var(--rc-radius-sm);color:var(--rc-text-strong);cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-.rc-ui-button:hover{background:var(--rc-bg-hover);border-color:var(--rc-border-accent)}
-.rc-ui-button.active{background:var(--rc-bg-active);border-color:var(--rc-accent)}
-.rc-ui-input{box-sizing:border-box;font-family:var(--rc-font-ui);background:var(--rc-bg-canvas);border:1px solid var(--rc-border);border-radius:var(--rc-radius-md);color:var(--rc-text)}
-.rc-ui-input:focus{outline:none;border-color:var(--rc-border-accent)}
+/* 卡片与弹窗改用材质：半透明 + 背景模糊，底下的内容会透上来一点。
+   这是 iOS 观感里最容易辨认的一件事 —— 层级来自材质，而不是更亮的一块灰。 */
+.rc-ui-card{background:var(--rc-material-regular);backdrop-filter:var(--rc-blur);-webkit-backdrop-filter:var(--rc-blur);border:.5px solid var(--rc-border-popover);border-radius:var(--rc-radius-card);box-shadow:var(--rc-shadow-panel);color:var(--rc-text)}
+.rc-ui-popover{background:var(--rc-material-thick);backdrop-filter:var(--rc-blur);-webkit-backdrop-filter:var(--rc-blur);border:.5px solid var(--rc-border-popover);border-radius:var(--rc-radius-popover);box-shadow:var(--rc-shadow-pop);color:var(--rc-text)}
+/* 按钮：iOS 的次级按钮是**填充无描边**（tertiarySystemFill），按下去缩一点。 */
+.rc-ui-button{font-family:var(--rc-font-ui);background:var(--rc-bg-control);border:0;border-radius:var(--rc-radius-md);color:var(--rc-accent);cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent;transition:background var(--rc-motion-fast) var(--rc-ease),transform var(--rc-motion-fast) var(--rc-ease)}
+.rc-ui-button:hover{background:var(--rc-bg-hover)}
+.rc-ui-button:active{transform:scale(.96)}
+.rc-ui-button.active{background:var(--rc-bg-active);color:#fff}
+/* 触摸设备上给足 44pt —— HIG 的最小命中区。鼠标设备不强加，免得工具条变胖。 */
+@media (pointer:coarse){.rc-ui-button{min-height:var(--rc-hit);min-width:var(--rc-hit)}}
+.rc-ui-input{box-sizing:border-box;font-family:var(--rc-font-ui);background:var(--rc-bg-control);border:0;border-radius:var(--rc-radius-md);color:var(--rc-text)}
+.rc-ui-input:focus{outline:2px solid var(--rc-border-accent);outline-offset:-2px}
+/* 需要材质的地方直接挂这个类。 */
+.rc-ui-material{background:var(--rc-material-regular);backdrop-filter:var(--rc-blur);-webkit-backdrop-filter:var(--rc-blur)}
+.rc-ui-material-thin{background:var(--rc-material-thin);backdrop-filter:var(--rc-blur);-webkit-backdrop-filter:var(--rc-blur)}
 .rc-ui-dragging{will-change:transform;transition:none!important;filter:drop-shadow(0 16px 25px rgba(0,0,0,.42))}
 /* 4B：PDF / EPUB / HTML / 扩展共用同一套可收起顶栏。宿主只提供 bar 和挂载点。 */
 .rc-topbar-collapsible{transform-origin:top center;transition:height var(--rc-motion-normal) var(--rc-ease),transform var(--rc-motion-normal) var(--rc-ease),opacity var(--rc-motion-fast) ease!important}
 .rc-topbar-collapsible.rc-topbar-collapsed{flex-basis:0!important;height:0!important;min-height:0!important;padding-top:0!important;padding-bottom:0!important;border-bottom-width:0!important;transform:translateY(-105%)!important;opacity:0!important;overflow:hidden!important;pointer-events:none!important}
-.rc-topbar-pill{position:fixed;left:50%;top:calc(48px + env(safe-area-inset-top,0px));transform:translate(-50%,-6px);z-index:139;min-width:68px;height:24px;padding:0 13px;border:1px solid rgba(255,255,255,.20);border-top:0;border-radius:0 0 12px 12px;background:linear-gradient(135deg,rgba(255,255,255,.11),rgba(255,255,255,.04)),rgba(52,62,110,.62);color:rgba(235,242,255,.88);font:11px/1 var(--rc-font-ui);letter-spacing:.08em;cursor:pointer;box-shadow:0 5px 18px rgba(0,0,0,.32);backdrop-filter:blur(12px) saturate(145%);-webkit-backdrop-filter:blur(12px) saturate(145%);touch-action:manipulation;-webkit-tap-highlight-color:transparent;transition:top var(--rc-motion-normal) var(--rc-ease),transform var(--rc-motion-normal) var(--rc-ease),background var(--rc-motion-fast),color var(--rc-motion-fast)}
+.rc-topbar-pill{position:fixed;left:50%;top:calc(48px + env(safe-area-inset-top,0px));transform:translate(-50%,-6px);z-index:139;min-width:68px;height:24px;padding:0 13px;border:.5px solid var(--rc-border-popover);border-top:0;border-radius:0 0 12px 12px;background:var(--rc-material-regular);color:rgba(235,242,255,.88);font:11px/1 var(--rc-font-ui);letter-spacing:.08em;cursor:pointer;box-shadow:0 5px 18px rgba(0,0,0,.32);backdrop-filter:blur(12px) saturate(145%);-webkit-backdrop-filter:blur(12px) saturate(145%);touch-action:manipulation;-webkit-tap-highlight-color:transparent;transition:top var(--rc-motion-normal) var(--rc-ease),transform var(--rc-motion-normal) var(--rc-ease),background var(--rc-motion-fast),color var(--rc-motion-fast)}
 .rc-topbar-pill:hover{color:#fff;background:linear-gradient(135deg,rgba(255,255,255,.16),rgba(255,255,255,.07)),rgba(83,72,156,.72)}
 .rc-topbar-pill[data-collapsed="1"]{top:0;transform:translate(-50%,0);min-width:86px}
 body.fs-mode .rc-topbar-pill{display:none!important}
 /* 2A：共享选区浮条只规定外观；PDF 内容坐标 / EPUB offset / 网页 DOM rect 仍由宿主适配。 */
-.rc-selection-toolbar{background:var(--rc-bg-raised)!important;border:1px solid var(--rc-border-accent)!important;border-radius:var(--rc-radius-md)!important;box-shadow:var(--rc-shadow-float)!important;color:var(--rc-text-strong)!important}
+/* 选区浮条：对标 iOS 的编辑菜单 —— 材质底、细描边、更圆。 */
+.rc-selection-toolbar{background:var(--rc-material-thick)!important;backdrop-filter:var(--rc-blur);-webkit-backdrop-filter:var(--rc-blur);border:.5px solid var(--rc-border-popover)!important;border-radius:var(--rc-radius-popover)!important;box-shadow:var(--rc-shadow-pop)!important;color:var(--rc-text)!important}
 `;
     document.head.appendChild(s);
   }

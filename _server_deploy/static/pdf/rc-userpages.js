@@ -40,7 +40,7 @@
       '.rc-upage .rc-up-ti{width:100%;box-sizing:border-box;padding:8px 10px;border-radius:8px;border:1px solid rgba(110,135,195,.5);background:rgba(255,255,255,.8);color:#16233c;-webkit-text-fill-color:#16233c;caret-color:#16233c;font-size:14px;font-weight:600;outline:none;-webkit-user-select:text;user-select:text;-webkit-appearance:none;appearance:none}' +
       '.rc-upage .rc-up-ta{width:100%;box-sizing:border-box;min-height:220px;resize:vertical;font:14px/1.6 ui-monospace,Menlo,Consolas,monospace;padding:10px;border-radius:8px;border:1px solid rgba(110,135,195,.5);background:rgba(255,255,255,.8);color:#16233c;-webkit-text-fill-color:#16233c;caret-color:#16233c;outline:none;-webkit-user-select:text;user-select:text;-webkit-appearance:none;appearance:none}' +
       '.rc-upage .rc-up-ebar{display:flex;gap:10px;justify-content:flex-end}' +
-      '.rc-upage .rc-up-ebar button{background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer;touch-action:manipulation}' +
+      '.rc-upage .rc-up-ebar button{background:var(--rc-bg-raised);border:1px solid var(--rc-border-accent);color:#9fcbff;border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer;touch-action:manipulation}' +
       '.rc-upage .rc-up-ebar .rc-up-cancel{background:transparent;border-color:rgba(110,135,195,.4);color:inherit}' +
       /* 容器视觉:EPUB 用主题变量(在 #ep-col 内继承排版);PDF 白纸样式对齐 .page-wrap */
       /* ── EPUB 插入页(instant 模式):整页空白纸(≈一屏高,视觉=书里多出的一页)+ 所见即所得覆盖层 + 左上角 Aa 即时编辑。
