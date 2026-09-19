@@ -28,7 +28,7 @@ if (window.__bwPwaProviderOnly) return;
     textMuted: 'rgba(235,235,245,.62)', textDim: 'rgba(235,235,245,.38)',
     accent: '#0a84ff', accentCyan: '#64d2ff', success: '#30d158',
     danger: 'rgba(255,69,58,.20)', dangerText: '#ff453a',
-    warn: '#ff9f0a', purple: '#bf5af2'
+    warn: '#ff9f0a', purple: '#bf5af2', indigo: '#5e5ce6', yellow: '#ffd60a'
   };
   var injected = false;
   function inject() {
@@ -47,7 +47,7 @@ if (window.__bwPwaProviderOnly) return;
   --rc-text-muted:rgba(235,235,245,.62);--rc-text-dim:rgba(235,235,245,.38);
   --rc-accent:#0a84ff;--rc-accent-cyan:#64d2ff;--rc-success:#30d158;
   --rc-danger:rgba(255,69,58,.20);--rc-danger-text:#ff453a;
-  --rc-warn:#ff9f0a;--rc-purple:#bf5af2;
+  --rc-warn:#ff9f0a;--rc-purple:#bf5af2;--rc-indigo:#5e5ce6;--rc-yellow:#ffd60a;
   /* 材质：iOS 的四档毛玻璃。用 backdrop-filter 实现，所以底色必须是半透明的。 */
   --rc-material-ultrathin:rgba(30,30,32,.55);--rc-material-thin:rgba(30,30,32,.68);
   --rc-material-regular:rgba(30,30,32,.80);--rc-material-thick:rgba(30,30,32,.92);

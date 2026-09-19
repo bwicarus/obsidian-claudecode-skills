@@ -471,7 +471,7 @@
         '<span style="color:#7a8497">— 开了「工具完成后口头回报」时**自动禁用**,免得跟 AI 的真实回答同时出声</span></label>' +
         '<div class="ams-row" id="vcv-card-row" style="display:flex;align-items:center;gap:8px;margin:2px 0 6px;padding-left:22px">' +
         '<span style="font-size:12px;color:var(--rc-text-muted);flex:none">停留 <b id="vcv-card-v">20</b> 秒</span>' +
-        '<input type="range" id="vcv-card-sec" min="5" max="60" step="5" style="flex:1;accent-color:#5e5ce6"></div>' +
+        '<input type="range" id="vcv-card-sec" min="5" max="60" step="5" style="flex:1;accent-color:var(--rc-indigo)"></div>' +
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer">' +
         '<input type="checkbox" class="rc-ui-switch" data-k="asr_v2"' + (c.asr_v2 ? ' checked' : '') + '>ASR 2.0(长按麦克风的豆包识别换新模型,关键词召回+20%;⚠需先在火山控制台开通「流式语音识别2.0」商品,没开通会连不上)</label>' +
         (isOA ? '' :
@@ -1016,7 +1016,7 @@
     '-webkit-tap-highlight-color:transparent;vertical-align:middle;transition:transform .12s ease,background .2s;-webkit-user-select:none;user-select:none}' +
     '.asst-clip:active{transform:scale(.82)}' +                                            // 80:按压特效
     '.asst-clip.dim{background:rgba(255,255,255,.08);color:#5a6478}' +                     // 无录音=灰
-    '.asst-clip.playing{background:#5e5ce6;color:#fff;animation:vcClipBreath 1.8s ease-in-out infinite}' +   // 播放=呼吸闪光
+    '.asst-clip.playing{background:var(--rc-indigo);color:#fff;animation:vcClipBreath 1.8s ease-in-out infinite}' +   // 播放=呼吸闪光
     '.asst-clip.busy{background:rgba(255,190,90,.22);color:#f0b451;animation:vcClipBreath 1.1s ease-in-out infinite;pointer-events:none}' +   // 生成录音中=琥珀
     '@keyframes vcClipBreath{0%,100%{box-shadow:0 0 0 0 rgba(123,108,255,.45);opacity:1}50%{box-shadow:0 0 0 6px rgba(123,108,255,0);opacity:.75}}' +   // 流式中:发送→停止(红)
     // 回答底部操作行:▶ / 追问chips / tok+! 排一行(用户:别占多行;chips 多则行内横滚)
@@ -1062,7 +1062,7 @@
     // 苹果风格语音按钮:静默时素净,听写时 iOS 蓝 + 呼吸光环
     '#asst-mic{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
     '#asst-mic:active{transform:scale(.9)}' +
-    '#asst-mic.on{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:asstMicPulse 1.5s ease-in-out infinite}' +
+    '#asst-mic.on{background:var(--rc-accent);border-color:var(--rc-accent);color:#fff;animation:asstMicPulse 1.5s ease-in-out infinite}' +
     '@keyframes asstMicPulse{0%,100%{box-shadow:0 0 0 0 rgba(10,132,255,.5)}50%{box-shadow:0 0 0 9px rgba(10,132,255,0)}}' +
     // 用户气泡里的「上下文卡片」:用过的图缩略图 / 选中的字段 / 涉及的页码,均可点击跳转
     '.asst-ctx-card{margin-top:7px;display:flex;flex-direction:column;gap:5px}' +

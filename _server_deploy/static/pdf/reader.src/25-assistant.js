@@ -120,7 +120,7 @@
     // 苹果风格语音按钮:静默时素净,听写时 iOS 蓝 + 呼吸光环
     '#asst-mic{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
     '#asst-mic:active{transform:scale(.9)}' +
-    '#asst-mic.on{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:asstMicPulse 1.5s ease-in-out infinite}' +
+    '#asst-mic.on{background:var(--rc-accent);border-color:var(--rc-accent);color:#fff;animation:asstMicPulse 1.5s ease-in-out infinite}' +
     '@keyframes asstMicPulse{0%,100%{box-shadow:0 0 0 0 rgba(10,132,255,.5)}50%{box-shadow:0 0 0 9px rgba(10,132,255,0)}}' +
     // 用户气泡里的「上下文卡片」:用过的图缩略图 / 选中的字段 / 涉及的页码,均可点击跳转
     '.asst-ctx-card{margin-top:7px;display:flex;flex-direction:column;gap:5px}' +

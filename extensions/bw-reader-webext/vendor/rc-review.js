@@ -3677,7 +3677,7 @@ if (window.__bwPwaProviderOnly) return;
       '.rv-dim,.rv-done{color:var(--rc-text-muted);font-size:12px;padding:14px;text-align:center}' +
       '.rv-draft{border:0;border-top:1px solid rgba(185,168,255,.20);padding:10px 0 0;background:transparent;display:flex;flex-direction:column;gap:8px}' +
       '.rv-draft-head{font-size:13px;color:#ded6ff;font-weight:700}' +
-      '.rv-draft-title{font-size:12px;color:#bf5af2;font-weight:700;margin-top:2px}' +
+      '.rv-draft-title{font-size:12px;color:var(--rc-purple);font-weight:700;margin-top:2px}' +
       '.rv-draft-cards{min-width:0}.rv-draft-learning-card.vc-inflow{margin:0!important;width:100%!important}' +
       '.rv-note-preview,.rv-trace pre{margin:0;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word;border:1px solid #2d3654;border-radius:7px;padding:7px;background:#0a1020;color:#cbd7ee;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}' +
       '.rv-trace{font-size:10px;color:#8090ae}.rv-trace summary{cursor:pointer}' +

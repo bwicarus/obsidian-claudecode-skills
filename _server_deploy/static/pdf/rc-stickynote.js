@@ -270,9 +270,9 @@
       //   光带=命中内容(锚到这段);横线=空白/clamp(内容插入位置,排到上方内容之后)。iOS 蓝,美观优先。
       '.rc-anchor-fx{position:absolute;pointer-events:none;z-index:60;transition:top .06s linear,left .06s linear,width .06s linear}',
       '.rc-anchor-fx.rc-afx-word{border-radius:4px;background:rgba(10,132,255,.16);box-shadow:inset 0 0 0 1.5px rgba(10,132,255,.55)}',
-      '.rc-anchor-fx.rc-afx-line{height:0;border-top:2px solid #0a84ff;border-radius:0;background:none;box-shadow:0 0 6px rgba(10,132,255,.5)}',
-      '.rc-anchor-fx.rc-afx-line::before{content:"";position:absolute;left:-4px;top:-5px;width:8px;height:8px;border-radius:50%;background:#0a84ff}',
-      '.rc-anchor-fx.rc-afx-line::after{content:"";position:absolute;right:-4px;top:-5px;width:8px;height:8px;border-radius:50%;background:#0a84ff}',
+      '.rc-anchor-fx.rc-afx-line{height:0;border-top:2px solid var(--rc-accent);border-radius:0;background:none;box-shadow:0 0 6px rgba(10,132,255,.5)}',
+      '.rc-anchor-fx.rc-afx-line::before{content:"";position:absolute;left:-4px;top:-5px;width:8px;height:8px;border-radius:50%;background:var(--rc-accent)}',
+      '.rc-anchor-fx.rc-afx-line::after{content:"";position:absolute;right:-4px;top:-5px;width:8px;height:8px;border-radius:50%;background:var(--rc-accent)}',
       '.rc-note-html{display:none}',
       '.rc-note.rc-note-hashtml .rc-note-html{display:block;padding:3px 5px 5px;font-size:14px;line-height:1.6;color:var(--rc-text);max-height:min(50vh,340px);overflow-y:auto;-webkit-overflow-scrolling:touch}',
       // ★ 壳里装的是整张 .vc-card 时,**尺寸与滚动全部交给卡片**。

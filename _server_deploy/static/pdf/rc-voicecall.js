@@ -345,7 +345,7 @@
       '@keyframes vcCapIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}' +
       '#vc-cap .vc-cap-prev{opacity:.42;font-size:13.5px;font-weight:400;padding-bottom:1px}' +   // 上一句:淡一档、小一档
       // 你说的话:左侧一条蓝细条(不整块变蓝);AI 无条
-      '#vc-cap .vc-cap-u::before{content:"";position:absolute;left:0;top:7px;bottom:7px;width:2.5px;border-radius:2px;background:#0a84ff}' +
+      '#vc-cap .vc-cap-u::before{content:"";position:absolute;left:0;top:7px;bottom:7px;width:2.5px;border-radius:2px;background:var(--rc-accent)}' +
       '#vc-cap .vc-cap-u{color:rgba(255,255,255,.92)}' +
       // 状态行 / "正在听":做成小 chip,不跟字幕同宽
       '#vc-cap .vc-cap-st,#vc-cap .vc-cap-wait{align-self:flex-start;display:flex;align-items:center;gap:7px;' +
@@ -354,7 +354,7 @@
       '#vc-cap .vc-cap-st svg,#vc-cap .vc-cap-wait svg{width:13px;height:13px;flex:none;opacity:.85}' +
       '#vc-cap .vc-cap-st.vc-st-ok{background:rgba(48,209,88,.16);color:#a8ebbb}' +
       '#vc-cap .vc-cap-st.vc-st-err{background:rgba(255,105,97,.16);color:#ffc4bf}' +
-      '#vc-cap .vc-cap-st .vc-tks.ok{color:#30d158;font-weight:600}' +
+      '#vc-cap .vc-cap-st .vc-tks.ok{color:var(--rc-success);font-weight:600}' +
       '#vc-cap .vc-cap-st .vc-tks.err{color:#ff6961}' +
       '.vc-spin-s{width:11px;height:11px;border-width:1.6px;flex:none}' +
       '#vc-cap .vc-cap-wait i{width:4px;height:4px;border-radius:50%;background:#fff;opacity:.3;animation:vcCapDot 1.4s ease-in-out infinite}' +
@@ -398,14 +398,14 @@
       '.rc-flow-meta{color:var(--rc-text-dim);margin-bottom:6px}' +
       '.rc-flow-node{padding:6px 0;border-bottom:0.5px solid rgba(255,255,255,.07)}' +
       '.rc-flow-node:last-child{border-bottom:none}' +
-      '.rc-flow-h{color:#bf5af2;font-weight:600;margin-bottom:4px}' +
+      '.rc-flow-h{color:var(--rc-purple);font-weight:600;margin-bottom:4px}' +
       '.rc-flow-args{color:var(--rc-text-dim);word-break:break-all;font-size:11px}' +
       '.rc-flow-step{color:#8fa0c0;font-size:11px}' +
       '.rc-flow-r{margin-top:4px}' +
       '.rc-flow-img{max-width:min(100%,220px);max-height:180px;border-radius:8px;cursor:zoom-in;' +
         'border:1px solid rgba(255,255,255,.12);background:#0e1422;display:block;margin-bottom:2px}' +
       '.rc-flow-cap{font-size:11px;color:var(--rc-text-dim);margin-bottom:4px}' +
-      '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#bf5af2;margin-bottom:6px;flex:none}' +
+      '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--rc-purple);margin-bottom:6px;flex:none}' +
       '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
       '.vc-map-credit{position:absolute;right:5px;bottom:4px;z-index:2;font:10px/1.4 system-ui,sans-serif;color:#e8e8ee;background:rgba(16,23,38,.55);border-radius:4px;padding:0 4px;pointer-events:none;opacity:0;transition:opacity .18s}' +
       '.vc-ig-cell.vc-map-ready .vc-map-credit{opacity:1}' +
@@ -433,7 +433,7 @@
       '.vc-card-p{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(123,108,255,.16);border:none;color:#9d8cff;' +
       'font-size:9px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0 0 0 1px;flex:none;transition:transform .12s}' +
       '.vc-card-p:active{transform:scale(.82)}' +
-      '.vc-card-p.playing{background:#5e5ce6;color:#fff;animation:vcClipBreath2 1.8s ease-in-out infinite}' +
+      '.vc-card-p.playing{background:var(--rc-indigo);color:#fff;animation:vcClipBreath2 1.8s ease-in-out infinite}' +
       '@keyframes vcClipBreath2{0%,100%{box-shadow:0 0 0 0 rgba(123,108,255,.45)}50%{box-shadow:0 0 0 6px rgba(123,108,255,0)}}' +
       '.vc-card-hd .vc-card-x{margin-left:6px}' +
       '.vc-card-bd{overflow-y:auto;white-space:pre-wrap;word-break:break-word;-webkit-overflow-scrolling:touch;min-height:0}' +
@@ -583,7 +583,7 @@
       '.asst-a .vc-flow svg,.asst-a .vc-fn svg,.asst-a .vc-fn-i svg,.asst-a .vc-dtl svg,.asst-a .rc-flow-node svg{background:none;padding:0;margin:0;border-radius:0;max-width:none;display:block;height:auto}' +
       '.asst-a .vc-fn-i svg{width:13px;height:13px}' +
       '.vc-flowb:active{transform:scale(.86)}' +
-      '.vc-flowb.on{background:#5e5ce6;color:#fff}' +
+      '.vc-flowb.on{background:var(--rc-indigo);color:#fff}' +
       '.vc-flowbox{margin-top:8px;padding-top:8px;border-top:0.5px solid rgba(255,255,255,.12)}' +
       // 139(用户):工具调用**详情窗**(长按流程里的小长条打开)——复用旧「!」面板的格式:
       //   每条流程可点名字看细节,后面跟模型 / 耗时。
@@ -627,7 +627,7 @@
       '.vc-fl-seg{display:flex;gap:0;border-radius:10px;overflow:hidden;border:0.5px solid rgba(255,255,255,.14)}' +
       '.vc-fl-seg button{flex:1;padding:7px 4px;font-size:12px;font-weight:600;cursor:pointer;border:none;\n        background:rgba(255,255,255,.05);color:#9db0d4;-webkit-appearance:none;appearance:none;\n        border-right:0.5px solid rgba(255,255,255,.12)}' +
       '.vc-fl-seg button:last-child{border-right:none}' +
-      '.vc-fl-seg button.on{background:#5e5ce6;color:#fff}' +
+      '.vc-fl-seg button.on{background:var(--rc-indigo);color:#fff}' +
       '.vc-fl-st{font-size:10.5px;color:var(--rc-text-dim);margin-top:5px}' +
       '.vc-tp{margin-top:12px;padding-top:10px;border-top:0.5px solid rgba(255,255,255,.1)}' +
       '.vc-tp-t{font-size:11.5px;color:#9db0d4;font-weight:600;margin-bottom:2px}' +
@@ -637,12 +637,12 @@
       '.vc-tp-f textarea{width:100%;box-sizing:border-box;min-height:74px;resize:vertical;border-radius:10px;padding:8px 10px;' +
         'background:rgba(0,0,0,.28);border:0.5px solid rgba(255,255,255,.14);color:#e6ecf8;' +
         'font-size:12.5px;line-height:1.55;font-family:-apple-system,system-ui,sans-serif;-webkit-appearance:none}' +
-      '.vc-tp-f textarea:focus{outline:none;border-color:#5e5ce6;box-shadow:0 0 0 2px rgba(123,108,255,.25)}' +
+      '.vc-tp-f textarea:focus{outline:none;border-color:var(--rc-indigo);box-shadow:0 0 0 2px rgba(123,108,255,.25)}' +
       '.vc-tp-f .st{font-size:10.5px;color:var(--rc-text-dim);margin-top:3px}' +
       '.vc-tp-btns{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px}' +
       '.vc-tp-btns button{flex:1;min-width:78px;border-radius:10px;padding:8px 6px;font-size:12px;font-weight:600;cursor:pointer;' +
         'border:0.5px solid rgba(255,255,255,.16);background:rgba(255,255,255,.08);color:#dbe4f5;-webkit-appearance:none}' +
-      '.vc-tp-btns button.pri{background:#5e5ce6;border-color:#5e5ce6;color:#fff}' +
+      '.vc-tp-btns button.pri{background:var(--rc-indigo);border-color:var(--rc-indigo);color:#fff}' +
       '.vc-tp-btns button:active{transform:scale(.96)}' +
       // 侧栏结果卡折叠成一行长条(点头部切换;侧栏没有标记)
       '.vc-if.vc-if-min > *:not(.vc-if-hd){display:none}' +
@@ -676,7 +676,7 @@
       '.vc-fc-t{font-size:9.5px;letter-spacing:.1em;color:#7c8bab;font-weight:700;margin-bottom:3px}' +
       // 删掉「正面/背面」标题后，靠底色深一档区分背面（.vc-fc 本身已有边框和间距）。
       '.vc-fc-back{background:rgba(0,0,0,.36)}' +
-      '.vc-cz{background:rgba(123,108,255,.22);border-bottom:1.5px solid #5e5ce6;border-radius:3px;padding:0 5px;color:#cdc6ff;font-weight:600}' +
+      '.vc-cz{background:rgba(123,108,255,.22);border-bottom:1.5px solid var(--rc-indigo);border-radius:3px;padding:0 5px;color:#cdc6ff;font-weight:600}' +
       '.vc-fc-n{display:flex;align-items:center;gap:7px;margin-top:7px}' +
       '.vc-fc-n button{background:transparent;border:0.5px solid rgba(255,255,255,.16);border-radius:7px;color:#93a4c6;width:26px;height:24px;cursor:pointer;font-size:13px;padding:0}' +
       '.vc-fc-n button:disabled{opacity:.3}' +
@@ -699,7 +699,7 @@
       '#vc-dock-btn{position:fixed;right:14px;bottom:calc(96px + env(safe-area-inset-bottom,0px));z-index:2147481420;width:40px;height:40px;border-radius:50%;' +
       'border:0.5px solid rgba(255,255,255,.16);background:rgba(40,36,64,.72);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);' +
       'color:#bf5af2;display:none;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 8px 26px rgba(0,0,0,.4);padding:0}' +
-      '#vc-dock-btn .vc-dk-n{position:absolute;top:-4px;right:-4px;min-width:16px;height:16px;border-radius:8px;background:#5e5ce6;color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;padding:0 4px}' +
+      '#vc-dock-btn .vc-dk-n{position:absolute;top:-4px;right:-4px;min-width:16px;height:16px;border-radius:8px;background:var(--rc-indigo);color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;padding:0 4px}' +
       '#vc-dock-hint{position:fixed;left:0;right:0;bottom:0;height:150px;pointer-events:none;z-index:2147481410;opacity:0;transition:opacity .25s;' +
       'background:linear-gradient(to top,rgba(123,108,255,.38),rgba(123,108,255,.1) 55%,transparent)}' +
       '#vc-dock-hint.on{opacity:1}' +
@@ -713,7 +713,7 @@
         'opacity:0;transform:translate(-14px,-14px) scale(.9);' +
         'transition:opacity .22s ease,transform .28s var(--rc-ease-spring),box-shadow .2s}' +
       '#vc-trash.on{opacity:.97;transform:translate(0,0) scale(1)}' +
-      '#vc-trash.hot{background:linear-gradient(135deg,#ff453a,rgba(255,69,58,.8));' +
+      '#vc-trash.hot{background:linear-gradient(135deg,var(--rc-danger-text),rgba(255,69,58,.8));' +
         'box-shadow:0 14px 44px -8px rgba(255,69,58,.85),0 0 0 2px rgba(255,255,255,.35) inset;transform:scale(1.06)}' +
       '#vc-trash svg{width:22px;height:22px;transition:transform .2s}' +
       '#vc-trash.hot svg{transform:scale(1.16) rotate(-8deg)}' +
@@ -738,7 +738,7 @@
       '.vc-dkp-cell[data-lvl="2"] .vc-dkp-txt{-webkit-line-clamp:1}' +
       '.vc-dkp-cell[data-lvl="2"] .vc-dk-m{display:none}' +
       '.vc-dkp-day{flex:none;display:flex;align-items:center;height:18px;margin-top:0;padding:0 10px 0 2px;position:relative}' +
-      '.vc-dkp-day span{font-size:11px;color:#bf5af2;font-weight:600;white-space:nowrap;padding:0 8px;border-bottom:1px solid rgba(123,108,255,.5);line-height:17px}' +
+      '.vc-dkp-day span{font-size:11px;color:var(--rc-purple);font-weight:600;white-space:nowrap;padding:0 8px;border-bottom:1px solid rgba(123,108,255,.5);line-height:17px}' +
       '.vc-dkp-cell{flex:none;display:flex;flex-direction:column;align-items:center;width:158px}' +
       '.vc-dkp-tick{font-size:10px;color:#7f8aa6;line-height:1;padding-bottom:2px;position:relative}' +
       '.vc-dkp-tick::after{content:"";display:block;width:1px;height:8px;background:rgba(123,108,255,.45);margin:3px auto 4px}' +
@@ -764,7 +764,7 @@
       '.vc-pc-x{margin-left:auto;flex:none;width:18px;height:18px;border-radius:50%;border:none;background:rgba(255,255,255,.12);color:#cfd6ea;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}' +
       // 70 结构化信息卡(天气/新闻/事实)+双击选中态(带入 2.1 上下文)
       // 结果卡头部 = 直接套用我们方块的头部(小字主题色 + 整条当把手);⠿ 那个多余的拖动按钮已删
-      '.vc-if-hd{font-size:12px;color:#bf5af2;font-weight:600;margin:-4px -6px 6px;padding:5px 8px;display:flex;align-items:center;gap:6px;cursor:grab;' +
+      '.vc-if-hd{font-size:12px;color:var(--rc-purple);font-weight:600;margin:-4px -6px 6px;padding:5px 8px;display:flex;align-items:center;gap:6px;cursor:grab;' +
       'background:rgba(255,255,255,.06);border-radius:9px;font-weight:600}' +
       '.vc-if-hd span:first-child{flex:1}' +
       // 进度状态行(标题的下面一行,用户设计 #49/#52):进行中状态显示在标题区内、不在 body 上方。
@@ -774,7 +774,7 @@
       '.rc-turn-status .vc-spin-s{width:10px;height:10px;flex:none}' +
       // #44 框选保存:工具长条前的选中圆点(实心=选中/空心=排除)+ 排除态整条变淡
       '.rc-sel-dot{flex:none;width:13px;height:13px;border-radius:50%;border:1.5px solid #7b8cae;margin-right:7px;cursor:pointer;box-sizing:border-box}' +
-      '.rc-sel-dot.on{background:#5e5ce6;border-color:#5e5ce6}' +
+      '.rc-sel-dot.on{background:var(--rc-indigo);border-color:var(--rc-indigo)}' +
       '.vc-fn.rc-fn-off{opacity:.4}' +
       '.vc-fn.rc-fn-off .vc-fn-t{text-decoration:line-through}' +
       '.rc-flow-selhint{font-size:11px;color:#8a97b5;margin:4px 2px 2px}' +
@@ -798,7 +798,7 @@
       '.vc-card.vc-user-sized:not(.vc-dot):not(.vc-min) .vc-ig{height:100%}' +
       '.vc-card.vc-user-sized:not(.vc-dot):not(.vc-min) .vc-ig-cell:only-child{height:100%;display:flex;flex-direction:column}' +
       '.vc-card.vc-user-sized:not(.vc-dot):not(.vc-min) .vc-ig-cell:only-child .vc-ig-img{flex:1 1 auto;min-height:0;height:auto;object-fit:contain;background:rgba(0,0,0,.18)}' +
-      '.vc-card.vc-drop-hot,.vc-if.vc-drop-hot{box-shadow:0 0 0 2.5px #0a84ff,0 12px 40px rgba(0,0,0,.4)!important;transition:box-shadow .12s}' +
+      '.vc-card.vc-drop-hot,.vc-if.vc-drop-hot{box-shadow:0 0 0 2.5px var(--rc-accent),0 12px 40px rgba(0,0,0,.4)!important;transition:box-shadow .12s}' +
       '.vc-imgdrop{margin-top:8px}' +
       '.vc-imgdrop img{max-width:100%;border-radius:8px;display:block}' +
       '.vc-imgdrop-t{font-size:11px;color:#9aa4b8;margin-top:3px}' +
@@ -832,8 +832,8 @@
       '#rc-vc .vc-grab{padding:7px 0 3px;display:flex;justify-content:center;cursor:ns-resize;touch-action:none}' +
       '#rc-vc .vc-grab::before{content:"";width:36px;height:5px;border-radius:3px;background:rgba(255,255,255,.28)}' +
       '#rc-vc .vc-head{display:flex;align-items:center;gap:8px;padding:2px 12px 8px}' +
-      '#rc-vc .vc-dot{width:8px;height:8px;border-radius:50%;background:#ff9f0a;flex:none;animation:vcDot 1.1s ease-in-out infinite}' +
-      '#rc-vc.on .vc-dot{background:#30d158;animation:vcDot 2.2s ease-in-out infinite}' +
+      '#rc-vc .vc-dot{width:8px;height:8px;border-radius:50%;background:var(--rc-warn);flex:none;animation:vcDot 1.1s ease-in-out infinite}' +
+      '#rc-vc.on .vc-dot{background:var(--rc-success);animation:vcDot 2.2s ease-in-out infinite}' +
       '@keyframes vcDot{0%,100%{opacity:1}50%{opacity:.35}}' +
       '#rc-vc .vc-st{flex:1;color:rgba(235,240,250,.55);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       '#rc-vc .vc-new,#rc-vc .vc-x{background:rgba(255,255,255,.08);border:none;color:rgba(235,240,250,.75);width:28px;height:28px;' +
@@ -843,7 +843,7 @@
       // 对话区:累积消息流(iMessage 风),高度由抓手拖出来、持久化
       '#rc-vc .vc-sub{padding:2px 12px 8px;height:132px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;overscroll-behavior:contain}' +
       '#rc-vc .vc-m{max-width:86%;padding:6px 11px;border-radius:16px;line-height:1.45;word-break:break-word;white-space:pre-wrap}' +
-      '#rc-vc .vc-mu{align-self:flex-end;background:#0a84ff;color:#fff;border-bottom-right-radius:5px}' +
+      '#rc-vc .vc-mu{align-self:flex-end;background:var(--rc-accent);color:#fff;border-bottom-right-radius:5px}' +
       '#rc-vc .vc-ma{align-self:flex-start;background:rgba(255,255,255,.12);color:#eaf0fa;border-bottom-left-radius:5px}' +
       '#rc-vc .vc-vids{display:flex;gap:6px;overflow-x:auto;padding:0 12px 10px}' +
       '#rc-vc .vc-vid{flex:0 0 128px;cursor:pointer;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.09);border-radius:10px;overflow:hidden}' +
@@ -860,17 +860,17 @@
        '#asst-call:active,#asst-computer:active{transform:scale(.9)}' +
        '#asst-call.on{background:#1a7f4b;border-color:#1a7f4b;color:#fff;animation:vcCallPulse 1.6s ease-in-out infinite}' +
       // 播报中:蓝色快脉冲(盖过 .on 绿;user 开口打断后自动回绿)
-       '#asst-call.speaking{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:vcCallPulse 1s ease-in-out infinite}' +
-       '#asst-call.connecting{background:#8a5a00;border-color:#ff9f0a;color:#ffd60a;animation:vcCallPulse .7s ease-in-out infinite}' +
+       '#asst-call.speaking{background:var(--rc-accent);border-color:var(--rc-accent);color:#fff;animation:vcCallPulse 1s ease-in-out infinite}' +
+       '#asst-call.connecting{background:#8a5a00;border-color:var(--rc-warn);color:var(--rc-yellow);animation:vcCallPulse .7s ease-in-out infinite}' +
        '#asst-computer.on{background:#1a7f4b;border-color:#1a7f4b;color:#fff;animation:vcCallPulse 1.6s ease-in-out infinite}' +
-       '#asst-computer.speaking{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:vcCallPulse 1s ease-in-out infinite}' +
-       '#asst-computer.connecting{background:#8a5a00;border-color:#ff9f0a;color:#ffd60a;animation:vcCallPulse .7s ease-in-out infinite}' +
+       '#asst-computer.speaking{background:var(--rc-accent);border-color:var(--rc-accent);color:#fff;animation:vcCallPulse 1s ease-in-out infinite}' +
+       '#asst-computer.connecting{background:#8a5a00;border-color:var(--rc-warn);color:var(--rc-yellow);animation:vcCallPulse .7s ease-in-out infinite}' +
        '#asst-computer.native-app-required,#vc-top-computer.native-app-required{opacity:.38;cursor:not-allowed;animation:none!important}' +
       // 桥接模式(ReaderPC 仅桥接,语音未接管):蓝色描边、不脉冲——一眼区别于绿(通话)与灰(不可用)
        '#asst-computer.bridge-only,#vc-top-computer.bridge-only{background:#12233d;border-color:#4da3ff;color:#4da3ff;animation:none!important}' +
        '#asst-call.vc-review-disabled,#vc-top-call.vc-review-disabled,#asst-computer.vc-review-disabled,#vc-top-computer.vc-review-disabled{opacity:.48;cursor:not-allowed;animation:none!important}' +
       // ASR 连续听(mic 长按开):紫色呼吸,与系统听写的蓝 .on 区分
-      '#asst-mic.asr{background:#bf5af2 !important;border-color:#bf5af2 !important;color:#fff !important;animation:vcCallPulse 1.6s ease-in-out infinite}' +
+      '#asst-mic.asr{background:var(--rc-purple) !important;border-color:var(--rc-purple) !important;color:#fff !important;animation:vcCallPulse 1.6s ease-in-out infinite}' +
       // 朗读开关播报中:淡蓝呼吸
       '.vc-speak-tg.speaking{animation:vcCallPulse 1.2s ease-in-out infinite}' +
       // 记忆起点选择行(v3-⑰c)
@@ -880,16 +880,16 @@
       '@keyframes vcCallPulse{0%,100%{box-shadow:0 0 0 0 rgba(26,127,75,.5)}50%{box-shadow:0 0 0 7px rgba(26,127,75,0)}}' +
       // 长按到点确认(㉒):弹一下+变紫,到点瞬间就知道"够了可以松手"
       '@keyframes vcLpPop{0%{transform:scale(1)}45%{transform:scale(1.28)}70%{transform:scale(.92)}100%{transform:scale(1)}}' +
-      '.vc-lp-pop{animation:vcLpPop .4s ease !important;color:#bf5af2 !important;border-color:#bf5af2 !important}' +
+      '.vc-lp-pop{animation:vcLpPop .4s ease !important;color:var(--rc-purple) !important;border-color:var(--rc-purple) !important}' +
       // 顶栏语音按钮(侧栏收起时显示;样式蹭顶栏原生 button,状态只动颜色+呼吸)
-      '#vc-top-mic.on{color:#0a84ff !important;border-color:#0a84ff !important}' +
-      '#vc-top-mic.asr{color:#bf5af2 !important;border-color:#bf5af2 !important;animation:vcCallPulse 1.6s ease-in-out infinite}' +
-       '#vc-top-call.on{color:#30d158 !important;border-color:#30d158 !important;animation:vcCallPulse 2.2s ease-in-out infinite}' +
-       '#vc-top-call.speaking{color:#0a84ff !important;border-color:#0a84ff !important;animation:vcCallPulse 1s ease-in-out infinite}' +
-       '#vc-top-call.connecting{color:#ff9f0a !important;border-color:#ff9f0a !important;animation:vcCallPulse .7s ease-in-out infinite}' +
-       '#vc-top-computer.on{color:#30d158 !important;border-color:#30d158 !important;animation:vcCallPulse 2.2s ease-in-out infinite}' +
-       '#vc-top-computer.speaking{color:#0a84ff !important;border-color:#0a84ff !important;animation:vcCallPulse 1s ease-in-out infinite}' +
-       '#vc-top-computer.connecting{color:#ff9f0a !important;border-color:#ff9f0a !important;animation:vcCallPulse .7s ease-in-out infinite}' +
+      '#vc-top-mic.on{color:var(--rc-accent) !important;border-color:var(--rc-accent) !important}' +
+      '#vc-top-mic.asr{color:var(--rc-purple) !important;border-color:var(--rc-purple) !important;animation:vcCallPulse 1.6s ease-in-out infinite}' +
+       '#vc-top-call.on{color:var(--rc-success) !important;border-color:var(--rc-success) !important;animation:vcCallPulse 2.2s ease-in-out infinite}' +
+       '#vc-top-call.speaking{color:var(--rc-accent) !important;border-color:var(--rc-accent) !important;animation:vcCallPulse 1s ease-in-out infinite}' +
+       '#vc-top-call.connecting{color:var(--rc-warn) !important;border-color:var(--rc-warn) !important;animation:vcCallPulse .7s ease-in-out infinite}' +
+       '#vc-top-computer.on{color:var(--rc-success) !important;border-color:var(--rc-success) !important;animation:vcCallPulse 2.2s ease-in-out infinite}' +
+       '#vc-top-computer.speaking{color:var(--rc-accent) !important;border-color:var(--rc-accent) !important;animation:vcCallPulse 1s ease-in-out infinite}' +
+       '#vc-top-computer.connecting{color:var(--rc-warn) !important;border-color:var(--rc-warn) !important;animation:vcCallPulse .7s ease-in-out infinite}' +
        '#vc-top-mic,#vc-top-call,#vc-top-computer{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}' +
       // 长按/连点这些控件时禁掉 iOS 文本选中高亮与放大镜(长按手势专用控件,选中毫无意义)
        '#asst-call,#asst-computer,#asst-mic,#vc-tool-btn,.vc-speak-tg,#asst-input button,#asst-quick button,#rc-vc .vc-grab,#rc-vc .vc-head button{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}' +
@@ -897,7 +897,7 @@
       // 工具调用状态按钮 + 详情弹层(v3-⑤)
       '#vc-tool-btn{background:var(--rc-bg-control);border:1px solid var(--rc-border-control);color:var(--rc-text-muted);width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:none;align-items:center;justify-content:center;font-size:18px;-webkit-tap-highlight-color:transparent}' +
       '#vc-tool-btn.ok{color:var(--rc-success);border-color:#1f6b4a}' +
-      '#vc-tool-btn.err{color:#ff453a;border-color:#7f2a2a}' +
+      '#vc-tool-btn.err{color:var(--rc-danger-text);border-color:#7f2a2a}' +
       '.vc-spin{width:15px;height:15px;border:2px solid #3a4a73;border-top-color:#9fcbff;border-radius:50%;display:inline-block;animation:vcSpin .8s linear infinite;vertical-align:-2px}' +
       '@keyframes vcSpin{to{transform:rotate(360deg)}}' +
       // 侧栏对话流里的工具调用详情卡(v3-⑯,感叹号式)
@@ -905,7 +905,7 @@
       '.vc-tcard.err{border-color:rgba(255,105,97,.35)}' +
       '.vc-tc-h{display:flex;align-items:center;gap:7px;padding:6px 10px;cursor:pointer;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}' +
       '.vc-tc-h:active{background:rgba(255,255,255,.06)}' +
-      '.vc-tc-st{flex:none}.vc-tcard .vc-tc-st{color:#30d158}.vc-tcard.err .vc-tc-st{color:#ff6961}' +
+      '.vc-tc-st{flex:none}.vc-tcard .vc-tc-st{color:var(--rc-success)}.vc-tcard.err .vc-tc-st{color:#ff6961}' +
       '.vc-tc-l{flex:1;color:#cdd9f2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       '.vc-tc-i{flex:none;display:inline-flex;color:#8fa4cc}.vc-tc-i svg{width:13px;height:13px}' +
       '.vc-tc-t{flex:none;color:var(--rc-text-muted);font-size:11px}' +
