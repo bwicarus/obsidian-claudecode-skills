@@ -10,12 +10,12 @@ struct NativeWorkspaceCanvas: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> NativeWorkspaceCanvasController {
         let controller = NativeWorkspaceCanvasController()
-        controller.update(page: page, isEditing: isEditing, content: content, onCommit: onCommit)
+        controller.update(page: page, layoutEditing: isEditing, content: content, onCommit: onCommit)
         return controller
     }
 
     func updateUIViewController(_ controller: NativeWorkspaceCanvasController, context: Context) {
-        controller.update(page: page, isEditing: isEditing, content: content, onCommit: onCommit)
+        controller.update(page: page, layoutEditing: isEditing, content: content, onCommit: onCommit)
     }
 }
 
@@ -30,7 +30,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
     private var splitters: [UIView] = []
     private var page: WorkspacePage?
     private var cards: [WorkspaceCard] = []
-    private var isEditing = true
+    private var layoutEditing = true
     private var content: ((WorkspaceCard) -> AnyView)?
     private var onCommit: (([WorkspaceCard]) -> Void)?
     private var interaction: WorkspaceCanvasInteraction?
@@ -95,12 +95,12 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
 
     deinit { displayLink?.invalidate() }
 
-    func update(page: WorkspacePage, isEditing: Bool, content: @escaping (WorkspaceCard) -> AnyView,
+    func update(page: WorkspacePage, layoutEditing: Bool, content: @escaping (WorkspaceCard) -> AnyView,
                 onCommit: @escaping ([WorkspaceCard]) -> Void) {
         let changedPage = self.page?.id != page.id
-        if interaction != nil, changedPage || !isEditing { finishInteraction(commit: false) }
+        if interaction != nil, changedPage || !layoutEditing { finishInteraction(commit: false) }
         self.page = page
-        self.isEditing = isEditing
+        self.layoutEditing = layoutEditing
         self.content = content
         self.onCommit = onCommit
         if interaction != nil {
@@ -130,7 +130,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
             let key = "\(page.id):\(card.id)"
             if let host = hosts[key] {
                 host.controller.rootView = content(card)
-                host.setEditing(isEditing)
+                host.setEditing(layoutEditing)
             } else {
                 let controller = UIHostingController(rootView: content(card))
                 addChild(controller)
@@ -142,7 +142,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
                 host.grip.addGestureRecognizer(move)
                 let resize = makePan(.resize(card.id))
                 host.resizeGrip.addGestureRecognizer(resize)
-                host.setEditing(isEditing)
+                host.setEditing(layoutEditing)
                 hosts[key] = host
             }
         }
@@ -189,7 +189,7 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
     private func rebuildSplitters() {
         splitters.forEach { $0.removeFromSuperview() }
         splitters.removeAll()
-        guard isEditing, interaction == nil else { return }
+        guard layoutEditing, interaction == nil else { return }
         for edge in WorkspaceGridEngine.sharedEdges(cards) {
             let splitter = WorkspaceSplitterView(vertical: edge.axis == .vertical)
             if edge.axis == .vertical {
@@ -219,11 +219,11 @@ final class NativeWorkspaceCanvasController: UIViewController, UIGestureRecogniz
     }
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        isEditing && interaction == nil
+        layoutEditing && interaction == nil
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        isEditing && touch.type != .pencil
+        layoutEditing && touch.type != .pencil
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
