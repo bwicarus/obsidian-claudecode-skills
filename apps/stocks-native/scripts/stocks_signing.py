@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect or provision only StocksNative; never change Reader or certificates."""
+"""Inspect or provision only StocksNative, including its Apple sign-in capability."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import os
 import plistlib
 import re
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -32,8 +33,8 @@ class AppleAPI:
     def request(self, method: str, path: str, payload=None):
         if method not in {"GET", "POST"}:
             raise ValueError("This tool does not modify or delete existing resources")
-        if method == "POST" and path not in {"/v1/bundleIds", "/v1/profiles"}:
-            raise ValueError("Only a new StocksNative bundle/profile may be created")
+        if method == "POST" and path not in {"/v1/bundleIds", "/v1/profiles", "/v1/bundleIdCapabilities"}:
+            raise ValueError("Only the StocksNative bundle, Apple sign-in capability, or profile may be created")
         now = int(time.time())
         token = jwt.encode(
             {"iss": self.issuer_id, "iat": now - 30, "exp": now + 600,
@@ -98,6 +99,8 @@ def install_profile(profile, destination: Path, team: str, fingerprints: set[str
         raise RuntimeError("Profile team does not match APPLE_TEAM_ID")
     if data.get("Entitlements", {}).get("application-identifier") != f"{team}.{BUNDLE_ID}":
         raise RuntimeError("Profile does not belong to StocksNative")
+    if data.get("Entitlements", {}).get("com.apple.developer.applesignin") != ["Default"]:
+        raise RuntimeError("Profile does not include Sign in with Apple")
     if data.get("Entitlements", {}).get("get-task-allow"):
         raise RuntimeError("Development profile cannot be used for distribution")
     if data.get("ProvisionedDevices") or data.get("ProvisionsAllDevices"):
@@ -111,6 +114,18 @@ def install_profile(profile, destination: Path, team: str, fingerprints: set[str
     installed.chmod(0o600)
     github_output(profile_uuid=data["UUID"], profile_name=data["Name"], profile_path=installed)
     return {"uuid": data["UUID"], "name": data["Name"], "bundle": BUNDLE_ID}
+
+
+def profile_supports_apple(profile) -> bool:
+    raw = base64.b64decode(profile["attributes"]["profileContent"], validate=True)
+    with tempfile.NamedTemporaryFile(suffix=".mobileprovision") as temporary:
+        temporary.write(raw)
+        temporary.flush()
+        decoded = subprocess.run(
+            ["security", "cms", "-D", "-i", temporary.name],
+            check=True, capture_output=True,
+        ).stdout
+    return plistlib.loads(decoded).get("Entitlements", {}).get("com.apple.developer.applesignin") == ["Default"]
 
 
 def main():
@@ -162,6 +177,14 @@ def main():
             },
         }})["data"]
         print("Registered only the StocksNative bundle identifier")
+    capabilities = api.listing(f"/v1/bundleIds/{bundle['id']}/bundleIdCapabilities", limit=200)
+    if not any(item.get("attributes", {}).get("capabilityType") == "APPLE_ID_AUTH" for item in capabilities):
+        api.request("POST", "/v1/bundleIdCapabilities", {"data": {
+            "type": "bundleIdCapabilities",
+            "attributes": {"capabilityType": "APPLE_ID_AUTH"},
+            "relationships": {"bundleId": {"data": {"type": "bundleIds", "id": bundle["id"]}}},
+        }})
+        print("Enabled Sign in with Apple only for StocksNative")
     profiles = api.listing(f"/v1/bundleIds/{bundle['id']}/profiles", limit=200)
     selected = None
     for profile in profiles:
@@ -170,8 +193,10 @@ def main():
             continue
         linked = api.listing(f"/v1/profiles/{profile['id']}/certificates", limit=200)
         if any(cert["id"] == certificate_id for cert in linked):
-            selected = api.request("GET", f"/v1/profiles/{profile['id']}")["data"]
-            break
+            candidate = api.request("GET", f"/v1/profiles/{profile['id']}")["data"]
+            if profile_supports_apple(candidate):
+                selected = candidate
+                break
     if selected is None:
         selected = api.request("POST", "/v1/profiles", {"data": {
             "type": "profiles", "attributes": {
